@@ -1,6 +1,6 @@
 {
   "name": "project-progress",
-  "version": "0.5.2",
+  "version": "0.6.0",
   "description": "Side pane of every project's work, kept in step with Claude's Task list and carried across compaction",
   "author": { "name": "Wenyu Chiou" },
   "homepage": "https://github.com/WenyuChiou/claude-progress-pane",

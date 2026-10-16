@@ -57,8 +57,10 @@ export const renderAutoBlock = (mirror: ProgressMirror): string[] => {
     markerOf(mirror),
     `### ${oneLine(mirror.title) || '（未命名）'}`,
     `> ${meta}`,
+    ...(mirror.context ? [`> 背景：${oneLine(mirror.context)}`] : []),
     ...mirror.tasks.map(task => {
-      const reason = task.blocked !== null && task.blocked !== '' ? ` — ${oneLine(task.blocked)}` : ''
+      const note = task.blocked !== null && task.blocked !== '' ? task.blocked : task.status === 'completed' ? '' : (task.why ?? '')
+      const reason = note === '' ? '' : ` — ${oneLine(note)}`
 
       return `- [${markOf(task)}] ${oneLine(task.subject)}${reason}`
     }),

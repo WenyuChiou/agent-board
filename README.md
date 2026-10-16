@@ -19,9 +19,17 @@ up to date without anyone editing a file by hand. 中文說明：[README.zh-TW.m
 - **Brings its own rule.** How Claude should keep the Task list rides the
   system prompt of each session that has the Task tools. Nothing is written to
   `CLAUDE.md`, so uninstalling leaves nothing behind.
-- **Plain pane.** This session's task in a card with a progress bar, then
-  what waits on you, what is due soon, other open work, and what finished
-  lately. Long lists fold the finished steps into one line.
+- **Read at a glance.** Four counts on top: waiting on you, open, due soon,
+  finished today. Then this session's task as a numbered timeline (the step in
+  progress marked 「← 現在」), what waits on you (with the task it belongs to
+  and why), what is due, and other work grouped by project, each row with a
+  short bar. Long lists fold the finished steps into one line; 說明 lists
+  every mark.
+- **Background.** Every task carries one line of why it exists, written by the
+  model when it names the task and kept in the file, so any session can show
+  it. A step that needs you says what it needs (`metadata.why`).
+- **和色.** Traditional Japanese colours, a set for dark terminals and one for
+  light, following the `/config` theme.
 - **Interactive.** Each task row opens to its steps and its actions:
   完成這步 ticks a hand-kept step in the file, 交給 Claude sends the task to
   this session as a prompt, 接手做完 picks up work an ended session in this

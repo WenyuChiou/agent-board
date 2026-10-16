@@ -1,5 +1,30 @@
 # Changelog
 
+## 0.6.0 — 2026-10-16
+
+- **和色.** The pane is drawn in traditional Japanese colours: 浅葱 / 藍 for work in
+  progress, 若竹 / 常磐 done, 山吹 / 琥珀 waiting on you, 藤紫 running, 柿 due soon,
+  紅緋 / 茜 stuck, 利休鼠 for frames. A dark and a light set, picked from the
+  `/config` theme and repainted when it changes (`hooks/palette.ts`).
+  Tests: `two 和色 sets: the light one under a light theme, the dark one
+  otherwise`; `the pane takes the light 和色 set under a light theme, and 說明
+  lists every mark`.
+- **At a glance.** Four counts on top: waiting on you, open, due soon, finished
+  today. This session's steps are numbered, the one in progress marked
+  「← 現在」, with a percentage on the bar. Other work is grouped by project,
+  this one first, each row with a short bar. 說明 lists every mark.
+  Test: `other work is grouped by project, this one first, with numbered steps,
+  notes and background`.
+- **Background.** When the model names the task it also writes one line of
+  background (why the work exists, what it should end as); it is written into
+  the block as `> 背景：…`, so every session's pane shows it, and the take-over
+  and hand-over prompts carry it. A hand-kept task's own `>` notes are its
+  background. A step that needs you carries `metadata.why`, shown under it and
+  in 等你處理 with the task it belongs to; the rule asks Claude to write it.
+  Tests: `the task gets a line of background with its name, and a step that
+  needs you says why`; `the model answer becomes a title and a line of
+  background`.
+
 ## 0.5.2 — 2026-10-16
 
 - **`CLAUDE_CODE_ENABLE_TODO_TOOLS` moves to the shell profile.** In

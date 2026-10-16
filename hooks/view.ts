@@ -2,19 +2,32 @@ import type { ProgressAuto, ProgressMirror, ProgressProject, ProgressStepStatus,
 import { shortId } from './blocks'
 import { ciWords, prWords } from './github'
 import { doingTask, fallbackTitle } from './mirror'
+import type { Tone } from './palette'
 import { countSteps, currentStepIndex, isHereProject, isTaskComplete } from './parse'
 
 // What the pane shows, worked out from the file and this session's own list, so the
 // drawing code only lays it out.
 
-export type Tone = 'accent' | 'warn' | 'alert' | 'quiet'
+export type { Tone }
 
-export type ViewStep = { text: string; status: ProgressStepStatus; depth: number; isCurrent: boolean }
+// `number` is the step's place in its list (1-based), null on a folded summary line; `note`
+// is what follows ` — ` in the step: what it waits on, why it is stuck.
+export type ViewStep = {
+  text: string
+  note: string
+  status: ProgressStepStatus
+  depth: number
+  isCurrent: boolean
+  number: number | null
+}
 
 export type CurrentView = {
   state: ProgressMirror['state']
   project: string
+  branch: string
   title: string
+  // One line of background, '' when there is none.
+  context: string
   status: string
   tone: Tone
   done: number
@@ -28,7 +41,11 @@ export type StepRef = { project: string; title: string; step: string; line: numb
 export type WaitingItem = {
   key: string
   project: string
+  // The task it belongs to, its background, and what it needs from the person.
+  task: string
+  context: string
   text: string
+  note: string
   when: string
   // A hand-kept step can be ticked from the pane; another session's cannot.
   step: StepRef | null
@@ -38,6 +55,7 @@ export type TaskRow = {
   key: string
   project: string
   title: string
+  context: string
   done: number
   total: number
   status: string
@@ -61,12 +79,21 @@ export type PrView = { text: string; url: string; tone: Tone }
 
 export type DoneItem = { project: string; title: string; when: string }
 
+// Other work, one group per project, this session's project first.
+export type RowGroup = { project: string; isHere: boolean; rows: TaskRow[] }
+
+// The line of counts at the top: what waits on you (here and elsewhere), what is open,
+// what is due within two weeks (the 快到期 list), and the steps finished today.
+export type Overview = { waiting: number; active: number; due: number; today: number }
+
 export type View = {
   current: CurrentView | null
   pr: PrView | null
+  overview: Overview
   waiting: WaitingItem[]
   due: TaskRow[]
   active: TaskRow[]
+  groups: RowGroup[]
   recent: DoneItem[]
 }
 
@@ -105,16 +132,36 @@ const dueLabel = (days: number): { left: string; tone: Tone } => {
   if (days === 0) return { left: '今天截止', tone: 'alert' }
   if (days <= 3) return { left: `還有 ${days} 天`, tone: 'alert' }
 
-  return { left: `還有 ${days} 天`, tone: days <= 7 ? 'warn' : 'quiet' }
+  return { left: `還有 ${days} 天`, tone: days <= 7 ? 'soon' : 'quiet' }
+}
+
+// `推薦信 — 等教授回覆` is the step 推薦信 with the note 等教授回覆.
+export const splitNote = (text: string): { text: string; note: string } => {
+  const at = text.indexOf(' — ')
+  return at < 0 ? { text, note: '' } : { text: text.slice(0, at).trim(), note: text.slice(at + 3).trim() }
+}
+
+const DUE_WORDS = /(?:截止|due)[:：\s]*(?:\d{4}-)?\d{1,2}[-/]\d{1,2}/gi
+
+// A task's background: its `> 背景：` line; for a hand-kept task, its other notes.
+export const contextOf = (task: ProgressTask): string => {
+  const marked = task.notes.find(note => /^背景[:：]/.test(note))
+  if (marked !== undefined) return marked.replace(/^背景[:：]\s*/, '')
+  if (task.auto !== null) return ''
+
+  return task.notes
+    .map(note => note.replace(DUE_WORDS, '').replace(/^[\s·・,，]+|[\s·・,，]+$/g, ''))
+    .filter(note => note !== '')
+    .join(' · ')
 }
 
 const stepPhrase = (task: ProgressTask): { status: string; tone: Tone } => {
   const blocked = task.steps.find(step => step.status === 'blocked')
-  if (blocked !== undefined) return { status: `卡住：${blocked.text}`, tone: 'alert' }
+  if (blocked !== undefined) return { status: `卡住：${splitNote(blocked.text).text}`, tone: 'alert' }
   const waiting = task.steps.find(step => step.status === 'waiting')
-  if (waiting !== undefined) return { status: `等你：${waiting.text}`, tone: 'warn' }
+  if (waiting !== undefined) return { status: `等你：${splitNote(waiting.text).text}`, tone: 'warn' }
   const running = task.steps.find(step => step.status === 'running')
-  if (running !== undefined) return { status: `在跑：${running.text}`, tone: 'accent' }
+  if (running !== undefined) return { status: `在跑：${splitNote(running.text).text}`, tone: 'running' }
   const current = task.steps[currentStepIndex(task)]
   if (current === undefined) return { status: '還沒列步驟', tone: 'quiet' }
 
@@ -122,14 +169,14 @@ const stepPhrase = (task: ProgressTask): { status: string; tone: Tone } => {
 }
 
 // Every status a glyph carries is also said in words.
-const SUFFIX: Record<ProgressStepStatus, (reason: string) => string> = {
-  done: () => '',
-  doing: () => '',
-  todo: () => '',
-  cancelled: () => '（取消）',
-  waiting: () => '（等你）',
-  running: () => '（在跑）',
-  blocked: reason => (reason === '' ? '（卡住）' : `（卡住：${reason}）`),
+const SUFFIX: Record<ProgressStepStatus, string> = {
+  done: '',
+  doing: '',
+  todo: '',
+  cancelled: '（取消）',
+  waiting: '（等你）',
+  running: '（在跑）',
+  blocked: '（卡住）',
 }
 
 // Long lists keep the open steps in view: finished ones fold into one line, and past
@@ -142,9 +189,11 @@ export const foldSteps = (steps: readonly ViewStep[], room = 6): ViewStep[] => {
   const rest = open.length - shown.length
 
   return [
-    ...(done.length === 0 ? [] : [{ text: `已完成 ${done.length} 步`, status: 'done' as const, depth: 0, isCurrent: false }]),
+    ...(done.length === 0
+      ? []
+      : [{ text: `已完成 ${done.length} 步`, note: '', status: 'done' as const, depth: 0, isCurrent: false, number: null }]),
     ...shown,
-    ...(rest === 0 ? [] : [{ text: `還有 ${rest} 步`, status: 'todo' as const, depth: 0, isCurrent: false }]),
+    ...(rest === 0 ? [] : [{ text: `還有 ${rest} 步`, note: '', status: 'todo' as const, depth: 0, isCurrent: false, number: null }]),
   ]
 }
 
@@ -168,7 +217,7 @@ const currentOf = (mirror: ProgressMirror): CurrentView | null => {
     status = doing === undefined ? 'Claude 正在做' : `正在做：${doing.activeForm || doing.subject}`
     tone = 'accent'
   }
-  const steps = mirror.tasks.map(task => {
+  const steps = mirror.tasks.map((task, index) => {
     let stepStatus: ProgressStepStatus = task.status === 'completed' ? 'done' : 'todo'
     if (task.status !== 'completed') {
       if (task.blocked !== null) stepStatus = 'blocked'
@@ -176,13 +225,23 @@ const currentOf = (mirror: ProgressMirror): CurrentView | null => {
       else if (task.waiting === 'run') stepStatus = 'running'
       else if (task.status === 'in_progress') stepStatus = 'doing'
     }
-    return { text: `${task.subject}${SUFFIX[stepStatus](task.blocked ?? '')}`, status: stepStatus, depth: 0, isCurrent: task === doing }
+    const note = stepStatus === 'blocked' ? (task.blocked ?? '') : stepStatus === 'done' ? '' : (task.why ?? '')
+    return {
+      text: `${task.subject}${SUFFIX[stepStatus]}`,
+      note,
+      status: stepStatus,
+      depth: 0,
+      isCurrent: task === doing,
+      number: index + 1,
+    }
   })
 
   return {
     state: mirror.state,
     project: mirror.project,
+    branch: mirror.branch,
     title: mirror.title || fallbackTitle(mirror),
+    context: contextFor(mirror),
     status,
     tone,
     done,
@@ -223,11 +282,33 @@ const prView = (mine: ProgressMirror | null): PrView | null => {
   return { text: prWords(pr), url: pr.url, tone }
 }
 
+// Until the model writes a background, the request itself stands in, cut to one line.
+const firstLine = (text: string): string => {
+  const line = text.split(/\r?\n/).find(one => one.trim() !== '')?.trim() ?? ''
+  const chars = [...line]
+  return chars.length > 60 ? `${chars.slice(0, 59).join('')}…` : line
+}
+
+// The model's background, else the request itself, unless that is what the title says.
+const contextFor = (mirror: ProgressMirror): string => {
+  if (mirror.context) return mirror.context
+  const request = firstLine(mirror.firstPrompt)
+  const title = mirror.title || fallbackTitle(mirror)
+
+  return request === title || request.startsWith(title.replace(/…$/, '')) ? '' : request
+}
+
 const rowSteps = (task: ProgressTask): ViewStep[] => {
   const current = currentStepIndex(task)
 
   return foldSteps(
-    task.steps.map((step, index) => ({ text: step.text, status: step.status, depth: step.depth, isCurrent: index === current })),
+    task.steps.map((step, index) => ({
+      ...splitNote(step.text),
+      status: step.status,
+      depth: step.depth,
+      isCurrent: index === current,
+      number: index + 1,
+    })),
     5,
   )
 }
@@ -237,6 +318,7 @@ export const buildView = (
   here: readonly string[],
   mine: ProgressMirror | null,
   now: number,
+  today = 0,
 ): View => {
   const ownId = mine === null ? '' : shortId(mine.sessionId)
   const waiting: WaitingItem[] = []
@@ -262,13 +344,16 @@ export const buildView = (
       const when = relativeTime(updated, now)
       const isComplete = isTaskComplete(task) || task.auto?.state === 'done'
       const isManual = task.auto === null
+      const context = contextOf(task)
 
       task.steps.forEach((step, index) => {
         if (step.status !== 'waiting') return
         waiting.push({
           key: `${key}::${index}`,
           project: name,
-          text: step.text,
+          task: title,
+          context,
+          ...splitNote(step.text),
           when,
           step: isManual ? { project: name, title, step: step.text, line: step.line, raw: step.raw } : null,
         })
@@ -282,7 +367,7 @@ export const buildView = (
       const auto = task.auto === null || task.auto.state === 'done' ? null : task.auto.state
       if (auto === 'waiting') {
         if (!task.steps.some(step => step.status === 'waiting')) {
-          waiting.push({ key, project: name, text: `${title} · 等你回覆`, when, step: null })
+          waiting.push({ key, project: name, task: title, context, text: '等你回覆', note: '', when, step: null })
         }
         continue
       }
@@ -299,6 +384,7 @@ export const buildView = (
         key,
         project: name,
         title,
+        context,
         done,
         total,
         ...phrase,
@@ -330,12 +416,23 @@ export const buildView = (
   active.sort((a, b) => a.rank - b.rank || a.order - b.order)
   recent.sort((a, b) => b.at - a.at)
 
+  const rows = active.map(({ rank: _rank, order: _order, ...row }) => row)
+  const groups: RowGroup[] = []
+  for (const row of rows) {
+    const group = groups.find(one => one.project === row.project)
+    if (group === undefined) groups.push({ project: row.project, isHere: row.isHere, rows: [row] })
+    else group.rows.push(row)
+  }
+  const ownWaiting = mine?.tasks.filter(task => task.status !== 'completed' && task.waiting === 'you').length ?? 0
+
   return {
     current: mine === null ? null : currentOf(mine),
     pr: prView(mine),
+    overview: { waiting: waiting.length + ownWaiting, active: rows.length + due.length, due: due.length, today },
     waiting,
     due: due.map(({ days: _days, ...row }) => row),
-    active: active.map(({ rank: _rank, order: _order, ...row }) => row),
+    active: rows,
+    groups,
     recent: recent.slice(0, 3).map(({ at: _at, ...item }) => item),
   }
 }
@@ -346,15 +443,15 @@ const clip = (text: string, room: number): string => {
 }
 
 // One line under the prompt for when the pane is not on screen: this session's task, what
-// waits on you, what is due within three days, and the pull request.
+// waits on you, what is due soon, and the pull request.
 export const statusLine = (view: View): string | undefined => {
   const current = view.current
-  const urgent = view.due.filter(row => row.due !== null && row.due.tone === 'alert').length
+  const urgent = view.overview.due
   const parts = [
     current === null || current.state === 'done'
       ? ''
       : `${clip(current.title, 14)} ${current.done}/${current.total} · ${clip(current.status, 18)}`,
-    view.waiting.length > 0 ? `${view.waiting.length} 件等你` : '',
+    view.overview.waiting > 0 ? `${view.overview.waiting} 件等你` : '',
     urgent > 0 ? `${urgent} 件快到期` : '',
     view.pr === null ? '' : view.pr.text,
   ].filter(part => part !== '')

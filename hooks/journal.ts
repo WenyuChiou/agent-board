@@ -40,6 +40,12 @@ export const appendJournal = (text: string, lines: readonly string[]): string =>
 
 const LINE = /^- (\d{4}-\d{2}-\d{2}) \d{2}:\d{2} · (.+?) · (.+?) · (.+)$/
 
+// Steps finished on the day `now` falls on, for the count at the top of the pane.
+export const countDay = (text: string, now: number): number => {
+  const day = localDay(now)
+  return parseJournal(text).filter(entry => entry.at === day).length
+}
+
 export const parseJournal = (text: string): JournalEntry[] =>
   text.split(/\r?\n/).flatMap(line => {
     const match = LINE.exec(line)

@@ -29,6 +29,8 @@ type World = {
   store?: Record<string, unknown>
   // Every command the mod ran, when set.
   ran?: string[][]
+  // What the model answers when asked to name the task.
+  named?: string
   // Answers `gh`; other commands (git) answer the branch.
   gh?: () => { exitCode: number; stdout: string; stderr: string }
 }
@@ -70,7 +72,7 @@ const engineBeneath = (on: On, world: World): MockClock => {
   on('model.complete', () => ({
     value: {
       isAnswered: true as const,
-      text: '「重做進度面板」',
+      text: world.named ?? '「重做進度面板」',
       usage: { input_tokens: 1, output_tokens: 1, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 },
     },
   }))
@@ -138,11 +140,23 @@ test('Claude’s task calls fill the file and the pane by themselves', async ($,
 
   for (const surface of ['terminal', 'desktop'] as const) {
     const ui = await $.ui.mount({ ...PANE, surface, props: PROPS })
-    expect(await ui.find({ type: 'Text', text: '1 件等你' })).toBeDefined()
+    // The counts at the top, a zero kept.
+    expect(await ui.find({ type: 'Text', text: '● 1' })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: '▸ 1' })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: '⚑ 0' })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: '✓ 1' })).toBeDefined()
     expect(await ui.find({ type: 'Text', text: '正在做：寫 Mod 中' })).toBeDefined()
     expect(await ui.find({ type: 'Text', text: /^1\/3$/ })).toBeDefined()
+    // Steps are numbered, and the one being done says so.
     expect((await ui.find({ type: 'Text', text: /^寫 Mod$/ }))?.props).toMatchObject({ bold: true })
-    expect(await ui.find({ type: 'Text', text: '求職 · 推薦信 — 等教授回覆' })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^2 $/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^ ← 現在$/ })).toBeDefined()
+    // No background yet, and the request is the title: nothing said twice.
+    expect(await ui.find({ type: 'Text', text: /^背景：/ })).toBeUndefined()
+    // A step that waits on you says which task it belongs to, and why.
+    expect(await ui.find({ type: 'Text', text: '推薦信' })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: '求職 › Google 暑期實習' })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: '等教授回覆' })).toBeDefined()
     await ui.unmount()
   }
 })
@@ -583,5 +597,53 @@ test('an ended session elsewhere offers its resume command, copied for the termi
   await ui.press({ key: 'FLOODABM::跑實驗::resume' })
   expect(seen.copied).toEqual(["cd '/work/FLOODABM' && claude --resume dddddddd-2222-3333"])
   expect(await ui.find({ type: 'Text', text: '已複製到剪貼簿' })).toBeDefined()
+  await ui.unmount()
+})
+
+test('the task gets a line of background with its name, and a step that needs you says why', async ($, on) => {
+  const world: World = {
+    files: new Map(),
+    mtime: 1,
+    hasTasks: true,
+    named: '重做進度面板\n背景：想在右側一眼看到各專案做到哪，壓縮後也接得上',
+  }
+  const clock = engineBeneath(on, world)
+  await start($, '幫我做一個進度面板 Mod')
+  await $.tool.call({ tool: 'TaskCreate', subject: '讀 API', description: '' })
+  await $.tool.call({ tool: 'TaskCreate', subject: '選版號', description: '' })
+  await clock.advance(10)
+  await $.tool.call({ tool: 'TaskUpdate', taskId: '2', metadata: { waiting: 'you', why: '要決定用 0.6 還是 1.0' } })
+
+  const text = world.files.get(FILE) ?? ''
+  expect(text).toContain('### 重做進度面板\n> Claude 正在做\n> 背景：想在右側一眼看到各專案做到哪，壓縮後也接得上\n')
+  expect(text).toContain('- [?] 選版號 — 要決定用 0.6 還是 1.0\n')
+
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
+  expect(await ui.find({ type: 'Text', text: '背景：想在右側一眼看到各專案做到哪，壓縮後也接得上' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: '要決定用 0.6 還是 1.0' })).toBeDefined()
+  await ui.unmount()
+
+  // Clearing the wait clears its reason.
+  await $.tool.call({ tool: 'TaskUpdate', taskId: '2', metadata: { waiting: null } })
+  expect(world.files.get(FILE)).toContain('- [ ] 選版號\n')
+})
+
+test('the pane takes the light 和色 set under a light theme, and 說明 lists every mark', async ($, on) => {
+  const world: World = { files: new Map(), mtime: 1, hasTasks: true }
+  engineBeneath(on, world)
+  on('config.list', () => ({
+    value: [{ key: 'theme', label: 'Theme', kind: 'enum' as const, value: 'light-daltonized', provider: { kind: 'core' } } as never],
+  }))
+  await start($, '幫我重做進度面板')
+  await $.tool.call({ tool: 'TaskCreate', subject: '讀 API', description: '' })
+  await $.tool.call({ tool: 'TaskUpdate', taskId: '1', status: 'in_progress' })
+
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal', props: PROPS })
+  // 藍 for the step in progress, not the dark set's 浅葱.
+  expect((await ui.find({ type: 'Text', text: /^▸ $/ }))?.props).toMatchObject({ color: '#165E83' })
+  expect(await ui.find({ type: 'Text', text: /^ 卡住$/ })).toBeUndefined()
+  await ui.press({ key: 'legend' })
+  expect(await ui.find({ type: 'Text', text: /^ 卡住$/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: '⚑ 兩週內截止' })).toBeDefined()
   await ui.unmount()
 })

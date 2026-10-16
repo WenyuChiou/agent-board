@@ -14,12 +14,22 @@ import {
   upsertAutoBlock,
 } from './blocks'
 import { ciFinished, GH_FIELDS, prFromGh } from './github'
-import { appendJournal, journalLine, journalPath, parseJournal, previousMonth, progressReport } from './journal'
+import {
+  appendJournal,
+  countDay,
+  journalLine,
+  journalPath,
+  localDay,
+  parseJournal,
+  previousMonth,
+  progressReport,
+} from './journal'
 import type { JournalEntry } from './journal'
 import {
   applyTaskCreate,
   applyTaskUpdate,
   applyTodoWrite,
+  cleanContext,
   cleanTitle,
   completedSince,
   emptyMirror,
@@ -32,6 +42,7 @@ import {
 } from './mirror'
 import type { ListedTask } from './mirror'
 import { baseName, countSteps, isHereProject, isTaskComplete, parseProgress } from './parse'
+import { paletteFor } from './palette'
 import { drawPane } from './pane'
 import type { PaneActions, PaneModel, PaneUi } from './pane'
 import { isQuickAdd, parseQuickAdd, quickAddWords } from './quick'
@@ -58,6 +69,11 @@ const hasTaskTools = atom({ plugin: 'project-progress', key: 'hasTaskTools' } as
 const expanded = atom({ plugin: 'project-progress', key: 'expanded' } as const, '')
 const answer = atom({ plugin: 'project-progress', key: 'answer' } as const, null as ProgressAnswer | null)
 const isNotifyOn = atom({ plugin: 'project-progress', key: 'isNotifyOn' } as const, true)
+// The person's /config theme, which picks the dark or light 和色 set.
+const theme = atom({ plugin: 'project-progress', key: 'theme' } as const, 'dark')
+// Steps finished today, from the journal.
+const today = atom({ plugin: 'project-progress', key: 'today' } as const, 0)
+const isLegendOpen = atom({ plugin: 'project-progress', key: 'isLegendOpen' } as const, false)
 
 const messageOf = (error: unknown): string => (error instanceof Error ? error.message : String(error))
 
@@ -71,6 +87,7 @@ let lastStatus: string | undefined
 let isCheckingPr = false
 // gh is tried until it fails to start (not installed) or says it is signed out.
 let hasGh = true
+let countedDay = ''
 
 // CLAUDE_PROGRESS_FILE wins; otherwise ~/.claude/progress.md. USERPROFILE comes first
 // because that is where Claude Code keeps ~/.claude on Windows even when HOME is set
@@ -127,7 +144,9 @@ const poll = async ($: EngineInterface): Promise<void> => {
 const refreshStatus = async ($: EngineInterface): Promise<void> => {
   const text = isPaneOpen
     ? undefined
-    : statusLine(buildView((await read($, snapshot)).projects, await read($, here), await read($, mine), await $.clock.now()))
+    : statusLine(
+        buildView((await read($, snapshot)).projects, await read($, here), await read($, mine), await $.clock.now(), await read($, today)),
+      )
   if (text === lastStatus) return
   lastStatus = text
   $.ui.status(text)
@@ -183,14 +202,32 @@ const notify = async ($: EngineInterface, text: string, project: string): Promis
   await $.ui.notify(text, { title: `進度 · ${project}` }).catch(() => undefined)
 }
 
+// Recounts today's finished steps from this month's journal.
+const countToday = async ($: EngineInterface): Promise<void> => {
+  const at = await $.clock.now()
+  const text = await readText($, journalPath(await progressPath($), at)).catch(() => '')
+  countedDay = localDay(at)
+  await update($, today, () => countDay(text, at))
+}
+
 // Finished steps, a line each in this month's journal.
 const journal = ($: EngineInterface, entries: ReadonlyArray<Omit<JournalEntry, 'at'>>): Promise<void> =>
   enqueue(async () => {
     const at = await $.clock.now()
     const path = journalPath(await progressPath($), at)
     const before = await readText($, path)
-    await $.fs.write(path, appendJournal(before, entries.map(entry => journalLine(entry, at))))
+    const after = appendJournal(before, entries.map(entry => journalLine(entry, at)))
+    await $.fs.write(path, after)
+    countedDay = localDay(at)
+    await update($, today, () => countDay(after, at))
   }).catch(() => undefined)
+
+// The theme as /config shows it; the palette follows it.
+const readTheme = async ($: EngineInterface): Promise<void> => {
+  const rows = await $.config.list().catch(() => [])
+  const value = rows.find(row => row.key === 'theme')?.value
+  await update($, theme, () => (typeof value === 'string' ? value : 'dark'))
+}
 
 // Saves the mirror for this session (the pane redraws) and across restarts ($.store). What
 // changed is journaled and, when it needs the person, notified; `quiet` skips both, for a
@@ -310,17 +347,20 @@ const nameTask = async ($: EngineInterface): Promise<void> => {
   const asked = await $.model
     .complete({
       model: 'haiku',
-      maxTokens: 40,
+      maxTokens: 120,
       effort: 'low',
       prompt:
-        `使用者的需求：\n${mirror.firstPrompt.slice(0, 600)}\n\n步驟：\n${steps}\n\n` +
-        '替這件工作取一個 4 到 14 個字的名稱，像待辦清單的標題：白話、具體、說出要做成什麼。' +
-        '用使用者的語言（中文就用繁體中文）。不要標點、不要引號，只回名稱。',
+        `使用者的需求：\n${mirror.firstPrompt.slice(0, 1200)}\n\n步驟：\n${steps}\n\n` +
+        '回兩行，用使用者的語言（中文就用繁體中文），不要引號：\n' +
+        '第一行：這件工作的名稱，4 到 14 個字，像待辦清單的標題：白話、具體、說出要做成什麼，不要標點。\n' +
+        '第二行：一句 40 字以內的背景，給一個沒看過這段對話的人看：為什麼要做、做完會怎樣。',
     })
     .catch(() => undefined)
-  const title = asked?.isAnswered === true ? cleanTitle(asked.text) : ''
-  if (title === '') return
-  await saveMine($, one => ({ ...one, title }))
+  const lines = asked?.isAnswered === true ? asked.text.split(/\r?\n/).filter(line => line.trim() !== '') : []
+  const title = cleanTitle(lines[0] ?? '')
+  const context = cleanContext(lines[1] ?? '')
+  if (title === '' && context === '') return
+  await saveMine($, one => ({ ...one, title: title || one.title, context: context || one.context }))
   await queueWrite($)
 }
 
@@ -385,6 +425,7 @@ const takeOverPrompt = (row: TaskRow): string => {
 
   return [
     `接手「${row.title}」（${row.project}，之前的對話沒做完，完成 ${row.done}/${row.total}）。`,
+    row.context === '' ? '' : `背景：${row.context}`,
     left.length === 0 ? '' : `剩下：${left.join('；')}`,
     '先用 TaskCreate 重建剩下的步驟，再從第一個沒做完的開始。',
   ]
@@ -395,6 +436,7 @@ const takeOverPrompt = (row: TaskRow): string => {
 const handOverPrompt = (row: TaskRow): string =>
   [
     `幫我處理「${row.title}」（${row.project}）。`,
+    row.context === '' ? '' : `背景：${row.context}。`,
     row.next === null ? '' : `下一步是「${row.next.step}」。`,
     `progress.md 裡這個任務的段落是目前的狀態，做完一步就在那裡打勾。`,
   ]
@@ -495,6 +537,8 @@ export const register: Register = on => {
     await loadMine($, e.cwd)
     await update($, isNotifyOn, () => true)
     if ((await $.store.get('notifyOff')) === true) await update($, isNotifyOn, () => false)
+    await readTheme($)
+    await countToday($)
     const tools = await $.tool.list().catch(() => [])
     const hasTools = tools.length === 0 || tools.some(tool => tool.name === 'TaskCreate' || tool.name === 'TodoWrite')
     await update($, hasTaskTools, () => hasTools)
@@ -510,8 +554,12 @@ export const register: Register = on => {
     $.clock.every(TICK_MS, () => {
       $.clock
         .now()
-        .then(at => update($, now, () => at))
-        .then(() => refreshStatus($))
+        .then(async at => {
+          await update($, now, () => at)
+          // A new day starts the count over.
+          if (localDay(at) !== countedDay) await countToday($)
+          await refreshStatus($)
+        })
         .catch(() => undefined)
     })
     // Checks still running are looked at again until they finish.
@@ -716,6 +764,14 @@ export const register: Register = on => {
     return { sections: [...composed.sections, { id: RULE_ID, text: RULE, scope: 'session' as const }] }
   })
 
+  // A theme change in /config repaints the pane in the matching set.
+  on('config.set', { key: 'theme' }, async ($, e, next) => {
+    const set = await next(e)
+    await readTheme($)
+
+    return set
+  })
+
   // The person closing the pane is remembered: it stops opening by itself until /progress.
   on('ui.close', async ($, e, next) => {
     if (e.id === PANE && e.origin.kind === 'person') await $.store.set('closedByPerson', true)
@@ -732,7 +788,7 @@ export const register: Register = on => {
     const table = $.ui.resolve(e)
     const snap = await read($, snapshot)
     const at = (await read($, now)) || (await $.clock.now())
-    const view = buildView(snap.projects, await read($, here), await read($, mine), at)
+    const view = buildView(snap.projects, await read($, here), await read($, mine), at, await read($, today))
     const ui: PaneUi = {
       Box: table.Box,
       Text: table.Text,
@@ -761,6 +817,8 @@ export const register: Register = on => {
       width: Math.max(8, Math.min(28, e.props.bodyColumns - 4)),
       hasTaskTools: await read($, hasTaskTools),
       isNotifyOn: await read($, isNotifyOn),
+      isLegendOpen: await read($, isLegendOpen),
+      palette: paletteFor(await read($, theme)),
     }
     const actions: PaneActions = {
       toggle: key => {
@@ -803,6 +861,9 @@ export const register: Register = on => {
         buildReport($, 7)
           .then(text => showCopied($, '週報', text, surface))
           .catch(() => undefined)
+      },
+      toggleLegend: () => {
+        update($, isLegendOpen, open => !open).catch(() => undefined)
       },
       toggleNotify: () => {
         read($, isNotifyOn)

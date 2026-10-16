@@ -63,6 +63,8 @@ export type ProgressMirrorTask = {
   status: 'pending' | 'in_progress' | 'completed'
   activeForm: string
   waiting: 'you' | 'run' | null
+  // What Claude needs from the person, or what it waits on, in one line (`metadata.why`).
+  why: string | null
   blocked: string | null
   blockedBy: string[]
 }
@@ -75,6 +77,8 @@ export type ProgressMirror = {
   branch: string
   pr: ProgressPr | null
   title: string
+  // One line of background: why this work exists and what it should end up as.
+  context: string
   isTitleFinal: boolean
   firstPrompt: string
   state: ProgressSessionState
@@ -97,6 +101,9 @@ declare module 'claude-code' {
       expanded: string
       answer: ProgressAnswer | null
       isNotifyOn: boolean
+      theme: string
+      today: number
+      isLegendOpen: boolean
     }
   }
 }

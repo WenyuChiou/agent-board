@@ -25,6 +25,7 @@ export const emptyMirror = (sessionId: string, project: string, now: number, cwd
   branch: '',
   pr: null,
   title: '',
+  context: '',
   isTitleFinal: false,
   firstPrompt: '',
   state: 'working',
@@ -49,12 +50,28 @@ const blockedOf = (value: unknown, current: string | null): string | null => {
   return value === true ? '' : String(value)
 }
 
-// `metadata: { waiting: "you" | "run", blocked: "why" }`; a key set to null clears it.
+// The one line that says what a waiting step needs: `why`, or the words Claude reaches for.
+const WHY_KEYS = ['why', 'reason', 'question', 'ask', 'note'] as const
+
+const whyOf = (meta: Record<string, unknown>, waiting: ProgressMirrorTask['waiting'], current: string | null): string | null => {
+  if (waiting === null) return null
+  for (const key of WHY_KEYS) {
+    const value = meta[key]
+    if (value === null || value === '') return null
+    if (typeof value === 'string') return value.replace(/\s+/g, ' ').trim()
+  }
+
+  return current
+}
+
+// `metadata: { waiting: "you" | "run", why: "what it needs", blocked: "why" }`; a key set to
+// null clears it, and clearing `waiting` clears its `why`.
 const withMetadata = (task: ProgressMirrorTask, metadata: object | undefined): ProgressMirrorTask => {
   if (metadata === undefined) return task
   const meta = metadata as Record<string, unknown>
+  const waiting = waitingOf(meta.waiting, task.waiting)
 
-  return { ...task, waiting: waitingOf(meta.waiting, task.waiting), blocked: blockedOf(meta.blocked, task.blocked) }
+  return { ...task, waiting, why: whyOf(meta, waiting, task.why ?? null), blocked: blockedOf(meta.blocked, task.blocked) }
 }
 
 export const applyTaskCreate = (
@@ -70,6 +87,7 @@ export const applyTaskCreate = (
       status: 'pending',
       activeForm: input.activeForm ?? '',
       waiting: null,
+      why: null,
       blocked: null,
       blockedBy: [],
     },
@@ -95,7 +113,7 @@ export const applyTaskUpdate = (mirror: ProgressMirror, input: TaskUpdateInput, 
       blockedBy: [...new Set([...task.blockedBy, ...(input.addBlockedBy ?? [])])],
     }
     // Finishing a step clears what it was waiting on.
-    const done = next.status === 'completed' ? { ...next, waiting: null, blocked: null } : next
+    const done = next.status === 'completed' ? { ...next, waiting: null, why: null, blocked: null } : next
 
     return withMetadata(done, next.status === 'completed' ? undefined : input.metadata)
   })
@@ -111,6 +129,7 @@ export const applyTodoWrite = (mirror: ProgressMirror, todos: readonly TodoInput
     status: todo.status,
     activeForm: todo.activeForm,
     waiting: null,
+    why: null,
     blocked: null,
     blockedBy: [],
   })),
@@ -131,6 +150,7 @@ export const fromTaskList = (mirror: ProgressMirror, listed: readonly ListedTask
       status: item.status,
       activeForm: known?.activeForm ?? '',
       waiting: item.status === 'completed' ? null : (known?.waiting ?? null),
+      why: item.status === 'completed' ? null : (known?.why ?? null),
       blocked: item.status === 'completed' ? null : (known?.blocked ?? null),
       blockedBy: [...item.blockedBy],
     }
@@ -193,6 +213,17 @@ export const cleanTitle = (answer: string): string => {
   return chars.length > 24 ? chars.slice(0, 24).join('') : bare
 }
 
+// The model's second line, made into one line of background.
+export const cleanContext = (answer: string): string => {
+  const line = answer
+    .replace(/^["'「『\s]+|["'」』\s]+$/g, '')
+    .replace(/^(背景|Background)[:：]\s*/i, '')
+    .replace(/\s+/g, ' ')
+  const chars = [...line.trim()]
+
+  return chars.length > 60 ? `${chars.slice(0, 59).join('')}…` : chars.join('')
+}
+
 // The note the conversation gets after a compaction: where this session's task stands.
 export const resumeNote = (mirror: ProgressMirror): string | null => {
   const open = mirror.tasks.filter(task => task.status !== 'completed')
@@ -205,6 +236,7 @@ export const resumeNote = (mirror: ProgressMirror): string | null => {
   return [
     '[進度面板] 對話剛壓縮過。壓縮前的進度（同步自 Task 清單）：',
     `目標：${mirror.title || fallbackTitle(mirror)}（${mirror.project}）`,
+    mirror.context === '' || mirror.context === undefined ? '' : `背景：${mirror.context}`,
     `完成 ${done}/${mirror.tasks.length}`,
     doing === undefined ? '' : `正在做：${doing.subject}`,
     next.length === 0 ? '' : `接下來：${next.map(task => task.subject).join('；')}`,

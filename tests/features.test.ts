@@ -3,8 +3,9 @@ import { expect, test } from 'claude-code/testing'
 import type { ProgressMirror, ProgressPr } from '../types'
 import { addManualTask, upsertAutoBlock } from '../hooks/blocks'
 import { ciFinished, prFromGh, prWords } from '../hooks/github'
-import { appendJournal, journalLine, parseJournal, progressReport } from '../hooks/journal'
-import { applyTaskCreate, applyTaskUpdate, completedSince, emptyMirror, noticesOf } from '../hooks/mirror'
+import { appendJournal, countDay, journalLine, parseJournal, progressReport } from '../hooks/journal'
+import { applyTaskCreate, applyTaskUpdate, cleanContext, completedSince, emptyMirror, noticesOf } from '../hooks/mirror'
+import { DARK, LIGHT, paletteFor } from '../hooks/palette'
 import { parseProgress } from '../hooks/parse'
 import { JOB_STEPS, parseQuickAdd } from '../hooks/quick'
 import { buildView, resumeCommand, statusLine } from '../hooks/view'
@@ -166,4 +167,55 @@ test('the status line says where things stand, and nothing when nothing does', (
   const line = statusLine(buildView(projects, [], { ...working(), pr: PR }, NOW))
   expect(line).toBe('進度 · 重做進度面板 1/2 · Claude 正在做 · 1 件等你 · 1 件快到期 · PR #12 · CI 失敗 2 · 要求修改')
   expect(statusLine(buildView([], [], null, NOW))).toBe(undefined)
+})
+
+test('two 和色 sets: the light one under a light theme, the dark one otherwise', () => {
+  expect(paletteFor('light')).toBe(LIGHT)
+  expect(paletteFor('light-ansi')).toBe(LIGHT)
+  expect(paletteFor('dark')).toBe(DARK)
+  expect(paletteFor('auto')).toBe(DARK)
+  for (const set of [DARK, LIGHT]) {
+    for (const hex of Object.values(set)) expect(hex).toMatch(/^#[0-9A-F]{6}$/)
+  }
+})
+
+test('other work is grouped by project, this one first, with numbered steps, notes and background', () => {
+  const file = `## 求職
+### Google 暑期實習
+> 寫推薦信的是王教授 · 截止 12-20
+- [x] 改履歷
+- [?] 推薦信 — 等教授回覆
+
+## persona_framework
+<!-- auto session=cccccccc state=ended updated=2026-10-16T11:00:00.000Z -->
+### 修 CI
+> 對話已結束，可接手
+> 背景：PR #12 的 e2e 測試在 Windows 上會逾時
+- [x] 看 log
+- [ ] 修
+<!-- /auto session=cccccccc -->
+`
+  const view = buildView(parseProgress(file), ['persona_framework'], null, NOW, 4)
+  expect(view.groups.map(group => [group.project, group.isHere, group.rows.map(row => row.title)])).toEqual([
+    ['persona_framework', true, ['修 CI']],
+    ['求職', false, ['Google 暑期實習']],
+  ])
+  const [ci] = view.groups[0]?.rows ?? []
+  expect(ci?.context).toBe('PR #12 的 e2e 測試在 Windows 上會逾時')
+  expect(ci?.steps.map(step => [step.number, step.text])).toEqual([
+    [1, '看 log'],
+    [2, '修'],
+  ])
+  const google = view.groups[1]?.rows[0]
+  expect(google?.context).toBe('寫推薦信的是王教授')
+  expect(google?.steps[1]).toMatchObject({ number: 2, text: '推薦信', note: '等教授回覆' })
+  expect(view.overview).toEqual({ waiting: 1, active: 2, due: 0, today: 4 })
+})
+
+test('the model answer becomes a title and a line of background', () => {
+  expect(cleanContext('背景：想在右側一眼看到各專案做到哪')).toBe('想在右側一眼看到各專案做到哪')
+  expect(cleanContext('「Background: 為了週會」')).toBe('為了週會')
+  expect([...cleanContext('長'.repeat(80))]).toHaveLength(60)
+  const day = journalLine({ project: 'a', task: 'b', step: 'c' }, NOW)
+  expect(countDay(`${day}\n${day}\n- 2020-01-01 10:00 · a · b · old\n`, NOW)).toBe(2)
 })
