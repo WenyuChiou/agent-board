@@ -54,11 +54,11 @@ jobs:
       - name: Pane and hook tests
         run: claude plugin test .
 
-      # The installer checks exist from 0.5.2 on; skipped while a branch lacks them.
+      # A missing check script fails the step, so it cannot be skipped by deleting it.
       - name: Installer checks (setup.sh)
-        if: runner.os != 'Windows' && hashFiles('tests/setup.check.sh') != ''
+        if: runner.os != 'Windows'
         run: bash tests/setup.check.sh
 
       - name: Installer checks (setup.ps1)
-        if: runner.os == 'Windows' && hashFiles('tests/setup.check.ps1') != ''
+        if: runner.os == 'Windows'
         run: powershell -NoProfile -ExecutionPolicy Bypass -File tests/setup.check.ps1
