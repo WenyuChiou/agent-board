@@ -1,6 +1,6 @@
 {
   "name": "project-progress",
-  "version": "0.6.0",
+  "version": "0.7.0",
   "description": "A progress dashboard for coding agents: every project's work in one pane, what needs you first, kept in step with the Task list",
   "author": {
     "name": "Wenyu Chiou"
@@ -10,8 +10,12 @@
   "keywords": [
     "progress",
     "tasks",
+    "dashboard",
     "pane",
-    "compaction"
+    "agents",
+    "compaction",
+    "codex",
+    "gemini"
   ],
   "types": "./types/index.d.ts",
   "userConfig": {

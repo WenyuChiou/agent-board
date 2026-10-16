@@ -1,12 +1,12 @@
 {
   "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
   "name": "claude-progress-pane",
-  "description": "A side pane of every project's work, kept in step with Claude's Task list",
+  "description": "A progress dashboard for coding agents",
   "owner": { "name": "Wenyu Chiou" },
   "plugins": [
     {
       "name": "project-progress",
-      "description": "Side pane of every project's work, kept in step with Claude's Task list and carried across compaction",
+      "description": "A progress dashboard for coding agents: every project's work in one pane, what needs you first, kept in step with the Task list",
       "source": "./",
       "category": "productivity",
       "strict": true

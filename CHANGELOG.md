@@ -1,5 +1,91 @@
 # Changelog
 
+## 0.7.0 — 2026-10-16
+
+Includes 0.6.0, which was not released on its own.
+
+- **Questions by kind.** A step that waits on you is a confirm, a choice, an
+  input, something to do, something to review, or a wait for someone else,
+  from `metadata.ask` / `options` / `command` / `link` or from its words
+  (Chinese and English). Each kind gets its own controls in the pane (Yes / No,
+  one button per option, Copy command / Did it, Open it / Looks good, Ready, a
+  reply box), and a press goes back to this session as the answer. Another
+  session's question says where to answer it. `A，還是 B？` and `A, or B?`
+  read as a choice too.
+  Tests: `what a waiting step asks decides its buttons: confirm, choose, do,
+  review, input, wait`; `a question this session asks is answered from the
+  pane, with the buttons its kind calls for`; `English questions: a yes or no
+  is a confirm, "or" inside a word is no choice, waiting reads the step too`;
+  `a choice with a comma before 還是 / or still reads both options`.
+- **Needs you first.** The pane opens on the one thing that needs you most (an
+  answer here, then elsewhere, then a deadline today, then something stuck),
+  and folds waiting, due soon, other work and done to one line each; a press
+  opens a section and it stays open in the next session. This session's card
+  shows the step in progress and the next; every step is one press away.
+  Tests: `the focus is the most pressing thing: an answer here, then
+  elsewhere, then today, then stuck, then waiting on others`; `folded sections
+  open on a press and stay open in the next session`; `on the phone (no input
+  box) the pane still draws, focus first, with its buttons`.
+- **It does not pile up.** A session silent for 12 hours shows as stopped and
+  its questions leave 等你處理. Done blocks leave for the monthly archive after
+  12 hours, others after 3 days, a hand-kept task a day after it was first seen
+  done; the sweep runs every hour. A block with no readable time is never
+  archived, and a section someone left empty stays.
+  Tests: `a session silent for half a day counts as stopped: its questions stay
+  in its row, not in 等你處理`; `blocks leave after half a day when done and
+  after three days otherwise`; `finished hand-kept tasks leave a day after they
+  were first seen done, whole, and nothing else moves`; `a hand-kept task done
+  for a day leaves for the archive by itself, and the next hour clears a done
+  block`; `archiving never ages out a block with no time, and keeps a section
+  someone left empty`.
+- **Readable on light terminals.** Secondary text uses a muted colour from
+  each 和色 set instead of the terminal's dim, which turned faint grey on white.
+  Every text colour is at least 4.5:1 on its ground: light 琥珀 became 鶯茶
+  `#715C1F`, dark 紅緋 became 薔薇 `#E9546B`.
+  Test: `on a light terminal no text falls back to the terminal dim`.
+- **English, 繁體中文, 简体中文.** The pane, the words written into the file
+  and the rule follow the plugin's `language` option (`/config`), then
+  `/progress lang`, then Claude Code's `language` setting, then the system
+  locale. The parser reads `Context:` and `Background:` as well as `背景：`,
+  and `due MM-DD` as well as `截止 MM-DD`.
+  Tests: `languages: the setting, the stored choice and the system pick the
+  language, in that order`; `with the language option set to English, the
+  pane, the file and the rule speak English`; `/progress lang switches the
+  language and remembers it; auto goes back to the system`; `a file written in
+  English reads back: Context, due, and an English quick add`.
+- **A window of its own.** Every session writes `progress.html` beside
+  `progress.md` (at most once a minute, only when it changed): the whole file's
+  view as a page that reloads every 30 seconds, keeps the sections you opened,
+  follows the system's light or dark mode and fits a phone. `/progress open`
+  opens it in the default browser.
+  Tests: `progress.html shows the whole file: counts, the focus, folded
+  sections, steps, and escapes what it shows`; `progress.html is written beside
+  progress.md, and /progress open opens it in the browser`.
+- **Other agents.** Blocks carry `agent=`; a block from Codex, Gemini or another
+  agent is labelled and says where to answer it. `docs/FORMAT.md` specifies the
+  file; `AGENTS.md` ends with a section to paste into another project's
+  `AGENTS.md` / `GEMINI.md` / `.cursorrules`; `CONTRIBUTING.md` has the checks
+  and the release steps. `CLAUDE_CONFIG_DIR` moves the default file with it.
+- **How the file is read (still format version 1).** `due` must start a word
+  (`overdue 3-4` is no longer a date); `2026/10/31` is read; a month or day
+  that does not exist is no date. `Context:` and `Background:` count as the
+  background line, so a hand-kept task with such a note shows that note alone.
+  A block with no readable `updated` is never archived (it used to leave at the
+  first sweep). Archive headings use the local date and the pane language;
+  journal lines write the pane language's word for an empty field. `可以`,
+  `要不要` and `能不能` opening a question make it a confirm.
+  Test: `可以 / 能不能 opening a question make a confirm; a date that does not
+  exist is no due date; the journal speaks the pane language`.
+- **Auto-update.** `setup.ps1` and `setup.sh` set `"autoUpdate": true` on the
+  marketplace's entry in `~/.claude/settings.json`, after
+  `claude plugin marketplace add` (which writes the entry anew without it). An
+  `"autoUpdate": false` you set stays.
+  Checks: `auto-update: …` in `tests/setup.check.sh` and
+  `tests/setup.check.ps1`.
+- **README** in English, 繁體中文 and 简体中文: features first, then a
+  step-by-step start, with screenshots in `docs/images/` drawn by the pane's
+  own code.
+
 ## 0.6.0 — 2026-10-16
 
 - **和色.** The pane is drawn in traditional Japanese colours: 浅葱 / 藍 for work in
