@@ -1,5 +1,41 @@
 # Changelog
 
+## 0.5.2 — 2026-10-16
+
+- **`CLAUDE_CODE_ENABLE_TODO_TOOLS` moves to the shell profile.** In
+  `~/.claude/settings.json` the key also reached Claude desktop-app sessions,
+  which keep their own task list: they got the Task tools and reminders to use
+  them, against the app's own list. `setup.ps1` now adds
+  `$env:CLAUDE_CODE_ENABLE_TODO_TOOLS = "1"` to `$PROFILE.CurrentUserCurrentHost`
+  (or `-ProfilePath`), once, in the profile's own encoding. `setup.sh` adds
+  `export CLAUDE_CODE_ENABLE_TODO_TOOLS=1` to `~/.zshrc`, `~/.bashrc`
+  (`~/.bash_profile` on macOS) or `~/.profile`; fish gets a line to add by hand.
+  When pwsh is installed, `setup.ps1` prints the command that writes its
+  profile too.
+- **settings.json is edited in place.** Both scripts take out the key 0.5.0 and
+  0.5.1 wrote (value `"1"` only) and the old zip dir in
+  `CLAUDE_CODE_PLUGIN_DIRS` by changing just those lines, so the file keeps its
+  indent, key order, line endings and UTF-8 BOM; before, `setup.ps1` re-wrote
+  the whole file through `ConvertTo-Json` (4-space indent, a diff on every
+  line). Each edit is checked against the parsed file; when it cannot be exact,
+  or the file is not UTF-8 JSON, the file is left alone and the script says so.
+  Neither script creates `settings.json` any more.
+- **The key stays in settings.json until the shell can set it**: while
+  PowerShell's execution policy (Restricted, AllSigned, unset on Windows
+  PowerShell, or unreadable) may keep the profile from running, and under fish. The script
+  says what to change. Otherwise terminal sessions would lose the Task tools
+  too.
+- **The pane's hint** for a session without Task tools points to the shell
+  profile, and says desktop-app and git-bash sessions keep `progress.md` by
+  hand. Test: `without Task tools the pane points to the shell profile, not
+  settings.json`.
+- **Installer checks.** `tests/setup.check.ps1` and `tests/setup.check.sh` run
+  the scripts against temp folders: settings.json edits (middle, last and only
+  key, CRLF, a BOM, a value of `"0"`, a `CLAUDE_CODE_PLUGIN_DIRS` entry with
+  `$` and a quote, an edit that cannot be exact, bytes that are not UTF-8), the
+  profile line added once, a UTF-16 profile, a blocked or unreadable execution
+  policy (faked), zsh and fish. `claude plugin test` does not run them.
+
 ## 0.5.1 — 2026-10-16
 
 - **A step ticked in the pane is journaled too.** 完成 / 完成這步 on a hand-kept

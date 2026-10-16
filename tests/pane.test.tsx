@@ -202,12 +202,14 @@ test('with nothing tracked the pane says so, and where the file is', async ($, o
   await ui.unmount()
 })
 
-test('without Task tools the pane says how to turn them on', async ($, on) => {
+test('without Task tools the pane points to the shell profile, not settings.json', async ($, on) => {
   const world: World = { files: new Map(), mtime: 1, hasTasks: false }
   engineBeneath(on, world)
   await $.session.start({ cwd: '/work/x', surface: 'terminal', isInteractive: true })
   const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
-  expect(await ui.find({ type: 'Text', text: /CLAUDE_CODE_ENABLE_TODO_TOOLS=1/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /CLAUDE_CODE_ENABLE_TODO_TOOLS=1 加進 shell 的 profile/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /在 settings\.json 的 env 加上/ })).toBeUndefined()
+  expect(await ui.find({ type: 'Text', text: /git-bash.*手動記在 progress\.md/ })).toBeDefined()
   await ui.unmount()
 })
 

@@ -19,7 +19,11 @@ Claude Code 的 Mod：在對話右邊開一個面板，用白話列出每個專�
 
     claude plugin marketplace add WenyuChiou/claude-progress-pane
 
-再從 marketplace 抓下來的位置跑設定腳本：它會安裝外掛（裝過就跳過）、在 `settings.json` 打開 `CLAUDE_CODE_ENABLE_TODO_TOOLS=1`（新模型預設沒有 Task 工具，沒有它面板就沒東西可同步），並把舊的 zip 版換掉。可以重跑。
+再從 marketplace 抓下來的位置跑設定腳本：它會安裝外掛（裝過就跳過）、打開 `CLAUDE_CODE_ENABLE_TODO_TOOLS=1`（新模型預設沒有 Task 工具，沒有它面板就沒東西可同步），並把舊的 zip 版換掉。可以重跑。
+
+這個設定寫在 shell 的 profile，不寫進 `~/.claude/settings.json`：那裡的 env 也會進 Claude 桌面 app 的對話，桌面 app 有自己的待辦清單，多了 Task 工具會兩套打架。`setup.ps1` 在 `$PROFILE` 加一行 `$env:CLAUDE_CODE_ENABLE_TODO_TOOLS = "1"`（要寫別的檔用 `-ProfilePath`）；`setup.sh` 在 `~/.zshrc`、`~/.bashrc`（macOS 是 `~/.bash_profile`）或 `~/.profile` 加 `export CLAUDE_CODE_ENABLE_TODO_TOOLS=1`。0.5.0、0.5.1 寫進 `settings.json` 的那行會被拿掉，只動那一行（和旁邊的逗號），縮排、key 的順序和編碼都不變；沒辦法精準改的話就不動檔案，改提示你自己改哪裡。PowerShell 要允許執行腳本才會跑 profile：允許之前（`Set-ExecutionPolicy -Scope CurrentUser RemoteSigned`，再重跑腳本）那行會留在 `settings.json`，腳本會告訴你。PowerShell 7（`pwsh`）有自己的 profile：如果你從 `pwsh` 開 `claude`，下面的 Windows 指令也用 `pwsh` 取代 `powershell` 再跑一次。
+
+沒有這個設定的對話（桌面 app、Windows 上的 git-bash）沒有 Task 工具：面板會提示，工作照常手動記在 `progress.md`（寫法見下面「使用」）。
 
 Windows：
 
@@ -29,7 +33,7 @@ macOS / Linux：
 
     bash ~/.claude/plugins/marketplaces/claude-progress-pane/scripts/setup.sh
 
-重開 Claude Code。面板會自己開；`/progress` 重新打開。
+開一個新的終端機視窗再啟動 `claude`。面板會自己開；`/progress` 重新打開。
 
 repo 改成公開的話，兩步可以變一行：
 
@@ -81,4 +85,4 @@ repo 改成公開的話，兩步可以變一行：
     claude plugin uninstall project-progress@claude-progress-pane
     claude plugin marketplace remove claude-progress-pane
 
-`progress.md`、封存檔、日誌和 `CLAUDE_CODE_ENABLE_TODO_TOOLS` 會留著。
+`progress.md`、封存檔、日誌和 shell profile 裡的 `CLAUDE_CODE_ENABLE_TODO_TOOLS` 那行會留著。

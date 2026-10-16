@@ -60,11 +60,30 @@ Needs Claude Code 2.1.287 or newer (function-hook mods); built and tested on
     claude plugin marketplace add WenyuChiou/claude-progress-pane
 
 Then run the setup script from the marketplace's copy. It installs the plugin
-(a no-op once done), sets `CLAUDE_CODE_ENABLE_TODO_TOOLS=1` in
-`~/.claude/settings.json` (Claude Code leaves the Task tools out on models
-newer than Opus 4.7 / Sonnet 4.6 / Haiku 4.5 unless it is on, and without them
-there is nothing to mirror), and moves an old zip install over (below). It is
-safe to re-run.
+(a no-op once done), turns on `CLAUDE_CODE_ENABLE_TODO_TOOLS=1` (Claude Code
+leaves the Task tools out on models newer than Opus 4.7 / Sonnet 4.6 / Haiku
+4.5 unless it is on, and without them there is nothing to mirror), and moves an
+old zip install over (below). It is safe to re-run.
+
+The key goes in your shell's profile, not in `~/.claude/settings.json`:
+the env there also reaches Claude desktop-app sessions, which keep their own
+task list, and the Task tools would clash with it. `setup.ps1` adds
+`$env:CLAUDE_CODE_ENABLE_TODO_TOOLS = "1"` to `$PROFILE` (`-ProfilePath`
+picks another file); `setup.sh` adds `export CLAUDE_CODE_ENABLE_TODO_TOOLS=1`
+to `~/.zshrc`, `~/.bashrc` (`~/.bash_profile` on macOS) or `~/.profile`. If
+0.5.0 or 0.5.1 put the key in `settings.json`, the script takes it out again,
+changing only its line (and the comma beside it) and keeping the file's
+indent, key order and encoding; if it cannot do that exactly, it leaves the
+file alone and says what to change. PowerShell runs a profile only when the
+execution policy allows scripts: until it does
+(`Set-ExecutionPolicy -Scope CurrentUser RemoteSigned`, then run the script
+again), the key stays in `settings.json` and the script says so. PowerShell 7
+(`pwsh`) has a profile of its own: if you start `claude` there, run the
+Windows command below with `pwsh` in place of `powershell` as well.
+
+Sessions without the key (the desktop app, a git-bash terminal on Windows)
+have no Task tools: the pane says so, and their work goes in `progress.md` by
+hand (below).
 
 Windows:
 
@@ -74,7 +93,8 @@ macOS / Linux:
 
     bash ~/.claude/plugins/marketplaces/claude-progress-pane/scripts/setup.sh
 
-Restart Claude Code. The pane opens by itself; `/progress` reopens it.
+Start `claude` again from a new terminal window. The pane opens by itself;
+`/progress` reopens it.
 
 If the repository is public, the two steps are one line:
 
@@ -151,8 +171,8 @@ draw no pane; under Remote Control it shows only in the local terminal.
     claude plugin uninstall project-progress@claude-progress-pane
     claude plugin marketplace remove claude-progress-pane
 
-`progress.md`, its archives and journals, and `CLAUDE_CODE_ENABLE_TODO_TOOLS`
-stay.
+`progress.md`, its archives and journals, and the `CLAUDE_CODE_ENABLE_TODO_TOOLS`
+line in your shell profile stay.
 
 ## Develop
 
@@ -162,6 +182,11 @@ stay.
     claude plugin validate .
     claude plugin test .
     tsc -p .
+    powershell -NoProfile -ExecutionPolicy Bypass -File tests/setup.check.ps1
+    bash tests/setup.check.sh
+
+The last two run the setup scripts against temp folders (never your own
+`~/.claude` or profile); `claude plugin test` does not run them.
 
 - `hooks/parse.ts` reads the file; `hooks/blocks.ts` writes a session's block,
   a quick-added task, and archives old ones; `hooks/mirror.ts` mirrors the

@@ -4,6 +4,10 @@
 #   curl -fsSL https://raw.githubusercontent.com/WenyuChiou/claude-progress-pane/main/scripts/setup.sh | bash
 #   bash setup.sh [--keep-rule] [--no-install]
 # What each step does, and why: see the comment at the top of setup.ps1. Needs python3.
+# Step 2 here writes `export CLAUDE_CODE_ENABLE_TODO_TOOLS=1` to your shell's startup file
+# instead of a PowerShell profile: ~/.zshrc for zsh, ~/.bashrc for bash (~/.bash_profile on
+# macOS), ~/.profile otherwise; fish gets a line to add by hand, and settings.json keeps the
+# key until a line sets it.
 set -euo pipefail
 
 marketplace='WenyuChiou/claude-progress-pane'
@@ -37,45 +41,125 @@ fi
 rule_file="$here/claude-md-rule.md"
 [ -f "$rule_file" ] || rule_file="$claude/plugins/marketplaces/claude-progress-pane/scripts/claude-md-rule.md"
 
-python3 - "$claude" "$rule_file" "$keep_rule" <<'PY'
+python3 - "$claude" "$rule_file" "$keep_rule" "$HOME" "${SHELL:-}" "${ZDOTDIR:-}" <<'PY'
 import json, os, re, shutil, sys
 
 claude, rule_file, keep_rule = sys.argv[1], sys.argv[2], sys.argv[3] == '1'
+home, shell, zdotdir = sys.argv[4], os.path.basename(sys.argv[5]), sys.argv[6]
 done = []
 
 def save(path, text):
     if os.path.exists(path):
         shutil.copyfile(path, path + '.bak')
     os.makedirs(os.path.dirname(path), exist_ok=True)
-    with open(path, 'w', encoding='utf-8') as f:
-        f.write(text)
+    if isinstance(text, bytes):
+        with open(path, 'wb') as f:
+            f.write(text)
+    else:
+        with open(path, 'w', encoding='utf-8') as f:
+            f.write(text)
+
+# Shell startup file. settings.json gives up its copy of the key only when rc_ready.
+line = 'export CLAUDE_CODE_ENABLE_TODO_TOOLS=1'
+rc_ready = False
+if shell == 'zsh':
+    rc = os.path.join(zdotdir or home, '.zshrc')
+elif shell == 'bash':
+    rc = os.path.join(home, '.bash_profile' if sys.platform == 'darwin' else '.bashrc')
+elif shell == 'fish':
+    rc = None
+    done.append('fish: add `set -gx CLAUDE_CODE_ENABLE_TODO_TOOLS 1` to ~/.config/fish/config.fish')
+else:
+    rc = os.path.join(home, '.profile')
+if rc:
+    old = b''
+    if os.path.exists(rc):
+        with open(rc, 'rb') as f:
+            old = f.read()
+    if not re.search(rb'(?m)^[ \t]*(?:export[ \t]+)?CLAUDE_CODE_ENABLE_TODO_TOOLS=', old):
+        add = ('# claude-progress-pane: Task tools for claude started from this shell. Not in\n'
+               '# ~/.claude/settings.json, whose env also reaches desktop-app sessions.\n' + line + '\n')
+        if old:
+            shutil.copyfile(rc, rc + '.bak')
+            add = '\n' + add
+        with open(rc, 'ab') as f:  # appended as bytes: the rest of the file is not decoded
+            f.write(add.encode('ascii'))
+        done.append('added %s to %s' % (line, rc))
+    rc_ready = True
+
+# settings.json: edits the text of the pairs below and nothing else, so the file keeps its
+# indent and key order. Each edit is checked against the parsed file.
+VALUE = r'(?:"(?:[^"\\]|\\.)*"|-?[0-9][0-9.eE+-]*)'
+
+def edit_pair(text, key, value):
+    """Changes one "key": value pair, or removes it when value is None. None when the key
+    is not there exactly once."""
+    if text is None:
+        return None
+    pair = '"' + re.escape(key) + r'"\s*:\s*' + VALUE
+    if len(re.findall(pair, text)) != 1:
+        return None
+    if value is not None:
+        return re.sub('("' + re.escape(key) + r'"\s*:\s*)' + VALUE,
+                      lambda m: m.group(1) + json.dumps(value, ensure_ascii=False), text)
+    # A pair before a comma takes its comma and its own line along; the last pair takes the
+    # comma before it; the only pair leaves {}.
+    for form, to in ((r'(?:(?<=\n)[ \t]*)?' + pair + r'[ \t]*,[ \t]*(?:\r?\n)?', ''),
+                     (r',\s*' + pair, ''),
+                     (r'\{\s*' + pair + r'\s*\}', '{}')):
+        if len(re.findall(form, text)) == 1:
+            return re.sub(form, to, text)
+    return None
 
 settings_path = os.path.join(claude, 'settings.json')
-settings = {}
+text, bom, settings = '', False, None
 if os.path.exists(settings_path):
-    with open(settings_path, encoding='utf-8') as f:
-        text = f.read()
-    if text.strip():
-        settings = json.loads(text)
-env = settings.setdefault('env', {})
-changed = False
-if 'CLAUDE_CODE_ENABLE_TODO_TOOLS' not in env:
-    env['CLAUDE_CODE_ENABLE_TODO_TOOLS'] = '1'
-    changed = True
-    done.append('set CLAUDE_CODE_ENABLE_TODO_TOOLS=1')
-old_mod = re.compile(r'[\\/]mods[\\/]project-progress[\\/]?$')
-if 'CLAUDE_CODE_PLUGIN_DIRS' in env:
-    dirs = [d for d in env['CLAUDE_CODE_PLUGIN_DIRS'].split(os.pathsep) if d]
-    keep = [d for d in dirs if not old_mod.search(d)]
-    if len(keep) != len(dirs):
-        if keep:
-            env['CLAUDE_CODE_PLUGIN_DIRS'] = os.pathsep.join(keep)
+    # Strict UTF-8, BOM noted: a file this cannot read back byte for byte is left alone.
+    with open(settings_path, 'rb') as f:
+        raw = f.read()
+    bom = raw.startswith(b'\xef\xbb\xbf')
+    try:
+        text = raw[3 if bom else 0:].decode('utf-8')
+        if text.strip():
+            settings = json.loads(text)
+    except ValueError:  # UnicodeDecodeError and JSONDecodeError both are
+        print('settings.json is not UTF-8 JSON this script can read; left as it is.', file=sys.stderr)
+if settings is not None:
+    nxt = text
+    edits = []
+    env = settings.get('env') if isinstance(settings, dict) else None
+    if isinstance(env, dict):
+        if str(env.get('CLAUDE_CODE_ENABLE_TODO_TOOLS')) == '1':
+            if rc_ready:
+                del env['CLAUDE_CODE_ENABLE_TODO_TOOLS']
+                nxt = edit_pair(nxt, 'CLAUDE_CODE_ENABLE_TODO_TOOLS', None)
+                edits.append('removed CLAUDE_CODE_ENABLE_TODO_TOOLS from settings.json env (%s sets it now)'
+                             % os.path.basename(rc))
+            else:
+                done.append('kept CLAUDE_CODE_ENABLE_TODO_TOOLS in settings.json until your shell sets it')
+        old_mod = re.compile(r'[\\/]mods[\\/]project-progress[\\/]?$')
+        if isinstance(env.get('CLAUDE_CODE_PLUGIN_DIRS'), str):
+            dirs = [d for d in env['CLAUDE_CODE_PLUGIN_DIRS'].split(os.pathsep) if d]
+            keep = [d for d in dirs if not old_mod.search(d)]
+            if len(keep) != len(dirs):
+                if keep:
+                    env['CLAUDE_CODE_PLUGIN_DIRS'] = os.pathsep.join(keep)
+                    nxt = edit_pair(nxt, 'CLAUDE_CODE_PLUGIN_DIRS', os.pathsep.join(keep))
+                else:
+                    del env['CLAUDE_CODE_PLUGIN_DIRS']
+                    nxt = edit_pair(nxt, 'CLAUDE_CODE_PLUGIN_DIRS', None)
+                edits += ['removed %s from CLAUDE_CODE_PLUGIN_DIRS' % d for d in dirs if old_mod.search(d)]
+    if edits:
+        try:
+            same = nxt is not None and json.loads(nxt) == settings
+        except ValueError:
+            same = False
+        if same:
+            save(settings_path, (b'\xef\xbb\xbf' if bom else b'') + nxt.encode('utf-8'))
+            done += edits
         else:
-            del env['CLAUDE_CODE_PLUGIN_DIRS']
-        changed = True
-        done += ['removed %s from CLAUDE_CODE_PLUGIN_DIRS' % d for d in dirs if old_mod.search(d)]
-if changed:
-    save(settings_path, json.dumps(settings, indent=2, ensure_ascii=False) + '\n')
+            print('settings.json was left as it is; make these changes in its env by hand: '
+                  + '; '.join(edits), file=sys.stderr)
 
 md_path = os.path.join(claude, 'CLAUDE.md')
 md = ''
@@ -105,5 +189,6 @@ print('\n'.join('- ' + one for one in done) if done else 'Settings: nothing to c
 old_dir = os.path.join(claude, 'mods', 'project-progress')
 if os.path.isdir(old_dir):
     print('The old install is still at %s; delete it once the plugin works.' % old_dir)
-print('Restart Claude Code. The pane opens by itself; /progress reopens it.')
+print('Start claude again from a new terminal. The pane opens by itself; /progress reopens it.')
+print('Desktop-app sessions keep their own task list; note their work in progress.md by hand.')
 PY

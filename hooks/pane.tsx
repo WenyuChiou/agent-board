@@ -229,8 +229,9 @@ export const drawPane = (ui: PaneUi, model: PaneModel, actions: PaneActions): Re
         <Box flexDirection="column" marginTop={1}>
           <Text color="yellow">這個對話沒有 Task 工具，進度不會自動同步。</Text>
           <Text dimColor wrap="wrap">
-            在 settings.json 的 env 加上 CLAUDE_CODE_ENABLE_TODO_TOOLS=1，重開就會同步。
+            從終端機開的 claude：把 CLAUDE_CODE_ENABLE_TODO_TOOLS=1 加進 shell 的 profile（PowerShell 是 $PROFILE，重跑 setup 腳本就會加），開新視窗再啟動就會同步。別放 settings.json，那裡的 env 也會進桌面 app。
           </Text>
+          <Text dimColor wrap="wrap">桌面 app、git-bash 這類沒有它的對話，照常手動記在 progress.md。</Text>
         </Box>
       )}
 
