@@ -243,3 +243,7 @@ claude plugin marketplace remove claude-progress-pane
 ## Contributing
 
 Bug reports and pull requests are welcome. [CONTRIBUTING.md](CONTRIBUTING.md) has the checks and the release steps, [AGENTS.md](AGENTS.md) the code layout and conventions, and [docs/FORMAT.md](docs/FORMAT.md) the file format, which is a public interface. The [CHANGELOG](CHANGELOG.md) lists every change with the tests that cover it.
+
+## License
+
+[MIT](LICENSE)

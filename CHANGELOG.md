@@ -85,6 +85,7 @@ Includes 0.6.0, which was not released on its own.
 - **README** in English, 繁體中文 and 简体中文: features first, then a
   step-by-step start, with screenshots in `docs/images/` drawn by the pane's
   own code.
+- **MIT license** (`LICENSE`, `license` in `plugin.json`).
 
 ## 0.6.0 — 2026-10-16
 

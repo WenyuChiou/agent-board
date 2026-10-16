@@ -243,3 +243,7 @@ claude plugin marketplace remove claude-progress-pane
 ## 参与贡献
 
 欢迎报告问题和提交 pull request。[CONTRIBUTING.md](CONTRIBUTING.md)（英文）有检查项和发布步骤，[AGENTS.md](AGENTS.md)（英文）有代码结构和约定，[docs/FORMAT.md](docs/FORMAT.md)（英文）是文件格式，它是公开接口。[CHANGELOG](CHANGELOG.md)（英文）列出每项变更和覆盖它的测试。
+
+## 许可证
+
+[MIT](LICENSE)
