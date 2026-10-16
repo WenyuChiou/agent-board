@@ -1,216 +1,245 @@
 # claude-progress-pane
 
-A Claude Code mod: a side pane of every project's work, in plain words, kept
-up to date without anyone editing a file by hand. 中文說明：[README.zh-TW.md](README.zh-TW.md).
+**A progress dashboard for coding agents.** One side pane shows every project's work and every step, and puts what needs you at the top. It stays in step with Claude Code's Task list without anyone editing a file, and Codex, Gemini, Cursor or a shell script can put their own work on it too.
 
-- **Automatic.** The mod mirrors Claude's own Task list (TaskCreate,
-  TaskUpdate, TodoWrite) into one block per session of `~/.claude/progress.md`.
-  A block appears when a session starts a list, its steps tick off as Claude
-  updates them, and finished blocks move to that month's
-  `progress-archive-YYYY-MM.md` after half a day. A session that never makes a
-  list writes nothing.
-- **Survives compaction.** When Claude Code compacts a conversation, the
-  summarizer is told to keep the list, and the conversation it leaves gets a
-  short note: the goal, `done/total`, the step in progress and the next ones.
-- **Knows about other sessions.** Each block records whether its session is
-  working, waiting on you, done, or ended with steps left. A new session's
-  first turn hears about unfinished work in the same project, and about work
-  another session already holds.
-- **Brings its own rule.** How Claude should keep the Task list rides the
-  system prompt of each session that has the Task tools. Nothing is written to
-  `CLAUDE.md`, so uninstalling leaves nothing behind.
-- **Read at a glance.** Four counts on top: waiting on you, open, due soon,
-  finished today. Then this session's task as a numbered timeline (the step in
-  progress marked 「← 現在」), what waits on you (with the task it belongs to
-  and why), what is due, and other work grouped by project, each row with a
-  short bar. Long lists fold the finished steps into one line; 說明 lists
-  every mark.
-- **Background.** Every task carries one line of why it exists, written by the
-  model when it names the task and kept in the file, so any session can show
-  it. A step that needs you says what it needs (`metadata.why`).
-- **和色.** Traditional Japanese colours, a set for dark terminals and one for
-  light, following the `/config` theme.
-- **Interactive.** Each task row opens to its steps and its actions:
-  完成這步 ticks a hand-kept step in the file, 交給 Claude sends the task to
-  this session as a prompt, 接手做完 picks up work an ended session in this
-  project left, 複製續接指令 copies the command that reopens that session
-  where it ran. 完成 ticks a step that waits on you, 繼續 resumes this
-  session, 封存 archives finished work, and the box at the bottom asks a side
-  question that is answered in the pane without a turn of its own. Closing the
-  pane by hand keeps it closed in later sessions until `/progress`.
-- **Quick add.** A line starting with `+` in that box becomes a hand-kept task:
-  `+ 求職：Meta 實習 截止 11-20；改履歷；投遞`. No project before the colon:
-  this session's repo. A job-hunting task given no steps gets the usual ones.
-- **Pull request and CI.** With [gh](https://cli.github.com) signed in, the
-  card shows this branch's PR as a link (`PR #12 · CI 失敗 2 · 等審查`), looks
-  again every two minutes while checks run, and other sessions' rows show it
-  too.
-- **Notifications.** A desktop notification when a step needs you, when the
-  whole list is done, and when this branch's CI finishes. 通知：開/關 at the
-  bottom of the pane, or `/progress 通知 關`.
-- **Status line.** With the pane closed, or a terminal too narrow for it, one
-  line under the prompt says where things stand.
-- **Journal and weekly report.** Every finished step gets a line in that
-  month's `progress-journal-YYYY-MM.md`. 週報 (or `/progress 週報`, `/progress 今天`)
-  turns the last seven days into plain text — finished, open, waiting on you —
-  and copies it, ready for a standup or a message to an advisor.
+English · [繁體中文](README.zh-TW.md) · [简体中文](README.zh-CN.md)
 
-Text the mod did not write (a hand-kept `## 求職` section, notes) is left byte
-for byte; each session rewrites only the lines between its own markers. Every
-write a session makes goes through one queue, and a file that cannot be read
-is never written over.
+![The pane in a dark and a light terminal. On the left, folded: the question that needs you now with one button per option, then this session's card. On the right, the "Waiting on you" list opened, each question labelled by kind.](docs/images/pane-en.png)
 
-## Install
+## Features
 
-Needs Claude Code 2.1.287 or newer (function-hook mods); built and tested on
-2.1.289 through 2.1.301.
+- **Needs you first.** The pane opens on one thing: the question or deadline that needs you most. Everything else (waiting on you, due soon, other work, done) folds to one line with a count and opens when you click it.
+- **Buttons that fit the question.** Every step waiting on you is sorted into a kind, and each kind gets its own controls:
 
-    claude plugin marketplace add WenyuChiou/claude-progress-pane
+  | Kind | Example step | What you get |
+  |---|---|---|
+  | Confirm | `Deploy build 214 — Deploy it to staging, OK?` | Yes · No |
+  | Choose | `Key lifetime — 24 hours or 7 days?` | one button per option, and a reply box |
+  | Do | ``Seed the database — run `make seed` on your machine`` | Copy command · Did it |
+  | Review | `Check the preview — https://example.com/preview` | Open it · Looks good, and a box for what should change |
+  | Input | `Staging credentials — send me the staging API key` | a reply box |
+  | Waiting | `Recommendation letter — waiting for Prof. Lee to reply` | Ready (when it arrives) |
 
-Then run the setup script from the marketplace's copy. It installs the plugin
-(a no-op once done), turns on `CLAUDE_CODE_ENABLE_TODO_TOOLS=1` (Claude Code
-leaves the Task tools out on models newer than Opus 4.7 / Sonnet 4.6 / Haiku
-4.5 unless it is on, and without them there is nothing to mirror), and moves an
-old zip install over (below). It is safe to re-run.
+  A press goes straight back to that Claude session as your answer. A question from another session says where to answer it; a step you keep by hand gets one button that ticks it in the file.
+- **Background on every task.** Each task carries one line on why it exists (`Context: users asked for it in the last survey`), written when Claude names the task, so you never open a card and wonder what it was for.
+- **Every project, every agent.** One Markdown file, `~/.claude/progress.md`, holds one block per session. Blocks from other agents are labelled (`codex`, `gemini`) and say where to answer them. Things outside code, like a job search, go in by hand or with a one-line quick add.
+- **Cleans up after itself.** Finished work moves to a monthly archive after half a day, anything else after three days. A session silent for 12 hours shows as stopped instead of still asking you things. The file stays about what is open.
+- **Survives compaction.** When Claude Code compacts a conversation, the new context gets the goal, the count, the step in progress and the next ones, so work picks up where it was.
+- **A window of its own.** `/progress open` opens `progress.html` in your browser: the same view as a page that refreshes itself, follows your system's light or dark mode, and fits a phone screen.
+- **Pull requests and CI.** With [gh](https://cli.github.com) signed in, the card shows this branch's PR, its checks and its review state, and checks again while CI runs.
+- **Stays out of the way.** Desktop notifications when a step needs you, when a list is done and when CI finishes. With the pane closed or the terminal too narrow, one line under the prompt says where things stand.
+- **Journal and weekly report.** Every finished step is logged. `Weekly report` turns the last seven days into plain text (finished, open, waiting on you) and copies it, ready for a standup.
+- **Readable in any theme.** Traditional Japanese colours (和色), one set for dark terminals and one for light, every text colour at least 4.5:1 against its background. No faint grey text on white.
+- **English, 繁體中文, 简体中文.** Follows Claude Code's language setting, or pick one.
 
-The key goes in your shell's profile, not in `~/.claude/settings.json`:
-the env there also reaches Claude desktop-app sessions, which keep their own
-task list, and the Task tools would clash with it. `setup.ps1` adds
-`$env:CLAUDE_CODE_ENABLE_TODO_TOOLS = "1"` to `$PROFILE` (`-ProfilePath`
-picks another file); `setup.sh` adds `export CLAUDE_CODE_ENABLE_TODO_TOOLS=1`
-to `~/.zshrc`, `~/.bashrc` (`~/.bash_profile` on macOS) or `~/.profile`. If
-0.5.0 or 0.5.1 put the key in `settings.json`, the script takes it out again,
-changing only its line (and the comma beside it) and keeping the file's
-indent, key order and encoding; if it cannot do that exactly, it leaves the
-file alone and says what to change. PowerShell runs a profile only when the
-execution policy allows scripts: until it does
-(`Set-ExecutionPolicy -Scope CurrentUser RemoteSigned`, then run the script
-again), the key stays in `settings.json` and the script says so. PowerShell 7
-(`pwsh`) has a profile of its own: if you start `claude` there, run the
-Windows command below with `pwsh` in place of `powershell` as well.
+<table>
+<tr>
+<td width="68%"><img src="docs/images/dashboard-en.png" alt="progress.html in a browser: the four counts, the question that needs you now, then every waiting question with its project, agent and what to do."></td>
+<td width="32%"><img src="docs/images/dashboard-phone-en.png" alt="The same page on a phone in dark mode."></td>
+</tr>
+</table>
 
-Sessions without the key (the desktop app, a git-bash terminal on Windows)
-have no Task tools: the pane says so, and their work goes in `progress.md` by
-hand (below).
+## Get started
 
-Windows:
+Needs Claude Code 2.1.287 or newer. Tested on 2.1.301 and 2.1.302.
 
-    powershell -ExecutionPolicy Bypass -File "$env:USERPROFILE\.claude\plugins\marketplaces\claude-progress-pane\scripts\setup.ps1"
+### 1. Install the plugin
+
+At the prompt of a Claude Code terminal session:
+
+```
+/plugin install project-progress --marketplace WenyuChiou/claude-progress-pane
+```
+
+Answer `y` to add the marketplace and pick the user scope. Or from a shell:
+
+```
+claude plugin marketplace add WenyuChiou/claude-progress-pane
+claude plugin install project-progress@claude-progress-pane
+```
+
+### 2. Run the setup script
+
+It makes the two settings a plugin cannot make for itself, and is safe to re-run.
+
+Windows (PowerShell):
+
+```powershell
+powershell -ExecutionPolicy Bypass -File "$env:USERPROFILE\.claude\plugins\marketplaces\claude-progress-pane\scripts\setup.ps1"
+```
 
 macOS / Linux:
 
-    bash ~/.claude/plugins/marketplaces/claude-progress-pane/scripts/setup.sh
+```bash
+bash ~/.claude/plugins/marketplaces/claude-progress-pane/scripts/setup.sh
+```
 
-Start `claude` again from a new terminal window. The pane opens by itself;
-`/progress` reopens it.
+What it does:
 
-If the repository is public, the two steps are one line:
+- **Turns on the Task tools.** Recent models get Claude Code's Task tools only with `CLAUDE_CODE_ENABLE_TODO_TOOLS=1`, and the pane mirrors those tools. The script adds the variable to your shell profile (`$PROFILE` in PowerShell; `~/.zshrc`, `~/.bashrc`, `~/.bash_profile` on macOS, or `~/.profile`). Not to `settings.json`, whose env also reaches the Claude desktop app, which keeps a task list of its own.
+- **Turns on auto-update** for this marketplace, so new versions arrive by themselves. An auto-update you switched off stays off.
+- **Moves an old install over**, if you used the zip version.
 
-    irm https://raw.githubusercontent.com/WenyuChiou/claude-progress-pane/main/scripts/setup.ps1 | iex
-    curl -fsSL https://raw.githubusercontent.com/WenyuChiou/claude-progress-pane/main/scripts/setup.sh | bash
+Every file it changes is copied to `<file>.bak` first. Run it with `-NoInstall` (`--no-install`) to skip the install step.
 
-**Private repository.** Claude Code clones with your machine's own git
-credentials and never prompts. If the add fails, run `gh auth login` and
-`gh auth setup-git` once; on a machine without a GitHub SSH key, also set
-`CLAUDE_CODE_PLUGIN_PREFER_HTTPS=1`.
+### 3. Start Claude again
 
-### Moving from the zip install
+Open a **new** terminal window (so the profile is read) and run `claude`. The pane opens on the right by itself. `/progress` reopens it.
 
-The setup script does it, and is safe to re-run. It removes
-`~/.claude/mods/project-progress` from `CLAUDE_CODE_PLUGIN_DIRS`, so the mod
-does not load twice, and removes the `<!-- project-progress:start/end -->`
-block from `~/.claude/CLAUDE.md`, since the plugin adds the rule itself. Other
-blocks (such as `comm-style`) stay. Each file it changes is copied to
-`<file>.bak` first. It deletes no folder: once the plugin works, delete
-`~/.claude/mods/project-progress` yourself. `progress.md` and the archives are
-read as they are.
+### 4. Work as usual
 
-Where an organization manages Claude Code, plugins you install yourself do
-not get the compaction or system-prompt hooks. There, run the script with
-`-KeepRule` (`--keep-rule` in bash) to keep the rule in `CLAUDE.md`. The
-compaction note is not available there.
+Ask Claude for anything with two or more steps:
 
-## Update
+```
+> Add a dark mode to the settings page and open a PR
+```
 
-Third-party marketplaces do not update by themselves unless you turn it on:
+Claude makes a Task list and the pane follows it: the card shows the task, its background, a progress bar, the step in progress and the next one. When Claude needs a decision, the question moves to **Needs you now** with buttons for it.
 
-    claude plugin marketplace update claude-progress-pane
-    claude plugin update project-progress@claude-progress-pane
+### 5. Add things that are not code
 
-then restart, or run `/reload-plugins` in a session. To update in the
-background instead: `/plugin` → Marketplaces → claude-progress-pane →
-Enable auto-update.
+Type a line starting with `+` in the box at the bottom of the pane:
 
-## Use
+```
++ Job search: Fabrikam fellowship due 11-20; update the resume; submit
+```
 
-Work as usual. For anything with two or more steps Claude makes a Task list,
-and the pane follows it.
+The part before the colon is the project, `due MM-DD` sets the date (it moves under **Due soon** 14 days before), and each `;` starts a step. Or write it into `~/.claude/progress.md` yourself (see [The file](#the-file)).
 
-- `/progress` opens the pane; `/progress 整理` archives finished work now;
-  `/progress 同步` re-reads Claude's Task list and the PR;
-  `/progress 加 …` adds a task (same as `+` in the pane);
-  `/progress 週報` / `/progress 今天` copies a report;
-  `/progress 通知 開|關` turns notifications on or off.
-- A step that needs you: Claude sets `metadata: {"waiting": "you"}` on it and
-  it shows under 等你處理. `{"waiting": "run"}` is a step waiting on CI, a long
-  run or someone else; `{"blocked": "why"}` is stuck.
-- Work outside a repo goes in by hand, in the same file:
+### 6. Open the window
 
-      ## 求職
-      ### Google 暑期實習
-      > 截止 10-31
-      - [x] 改履歷
-      - [?] 推薦信 — 等教授回覆
-      - [ ] 投遞
+```
+/progress open
+```
 
-  `[x]` done · `[~]` doing · `[ ]` not started · `[?]` waiting on you ·
-  `[>]` running · `[!]` blocked · `[-]` cancelled. `截止 MM-DD` puts the
-  task under 快到期, red within three days.
-- `CLAUDE_PROGRESS_FILE` points the mod at another file; the archives and
-  journals sit beside it.
+opens `progress.html` in your default browser. Keep it on a second screen; it refreshes every 30 seconds.
 
-In the terminal's default fullscreen layout the pane docks on the right: on
-its own from 144 columns, through `/progress` from 110. Under tmux or
-`CLAUDE_CODE_NO_FLICKER=0` it sits above the prompt instead. Cloud sessions
-draw no pane; under Remote Control it shows only in the local terminal.
+### 7. Pick a language
 
-## Uninstall
+The pane follows Claude Code's `language` setting, then your system locale. To choose:
 
-    claude plugin uninstall project-progress@claude-progress-pane
-    claude plugin marketplace remove claude-progress-pane
+```
+/progress lang en        # or zh-TW, zh-CN, auto
+```
 
-`progress.md`, its archives and journals, and the `CLAUDE_CODE_ENABLE_TODO_TOOLS`
-line in your shell profile stay.
+or set **Pane language** for the plugin in `/config`.
 
-## Develop
+## Reading the pane
 
-    git clone https://github.com/WenyuChiou/claude-progress-pane
-    cd claude-progress-pane
-    claude --plugin-dir .      # runs this copy; also writes .claude-plugin/types/ for tsc and the editor
-    claude plugin validate .
-    claude plugin test .
-    tsc -p .
-    powershell -NoProfile -ExecutionPolicy Bypass -File tests/setup.check.ps1
-    bash tests/setup.check.sh
+From top to bottom:
 
-The last two run the setup scripts against temp folders (never your own
-`~/.claude` or profile); `claude plugin test` does not run them.
+1. **Counts.** `● waiting` · `▸ in progress` · `⚑ due soon` · `✓ done today`. Each one opens what it counts.
+2. **Needs you now.** The one question, deadline or stuck task that needs you most, with what it is about and what you can do. `N more waiting on you ▸` opens the rest.
+3. **This session's card.** Project and branch, the task, its background, the bar, where it stands, the step in progress and the next. `▸ All N steps` lists every step, numbered, the current one marked `← now`. The pull request, when there is one.
+4. **Folded sections.** Waiting on you, Due soon, Other open work (grouped by project), Done recently. Click a row to see its steps and its actions: **Take over and finish** for work a closed session in this project left, **Copy resume command** to reopen that session where it ran, **Mark step done** and **Hand to Claude** for tasks you keep by hand.
+5. **The box.** Ask a side question (answered in the pane without interrupting Claude), or start with `+` to add a task.
+6. **Bottom row.** Weekly report · Notifications on/off · Legend.
 
-- `hooks/parse.ts` reads the file; `hooks/blocks.ts` writes a session's block,
-  a quick-added task, and archives old ones; `hooks/mirror.ts` mirrors the
-  Task calls, words the compaction note and finds what to journal or notify;
-  `hooks/view.ts` decides what the pane and the status line show;
-  `hooks/github.ts` reads `gh pr view`; `hooks/quick.ts` reads a quick add;
-  `hooks/journal.ts` writes the journal and the report. All pure and
-  unit-tested.
-- `hooks/pane.tsx` draws the pane from the view and a set of actions; it never
-  touches the engine.
-- `hooks/rule.ts` is the rule the mod adds to the system prompt;
-  `scripts/claude-md-rule.md` is the same rule for `-KeepRule`. Change both.
-- `hooks/register.tsx` wires them to the engine: the Task-call hooks, turn
-  start and end, compaction, the system prompt, session end, the pane, the
-  command, the 2s poll and the PR check.
+Marks:
 
-To release: raise `version` in `.claude-plugin/plugin.json` (installed copies
-only update when it changes), add a `CHANGELOG.md` entry, check, push, then
-`claude plugin tag .` and `git push --tags`.
+| Mark | Means |
+|---|---|
+| `✓` | done |
+| `▸` | doing |
+| `○` | not started |
+| `●` | waiting on you |
+| `◐` | running: CI, a long job, someone else |
+| `!` | stuck |
+| `–` | cancelled |
+
+## Commands
+
+| Command | Does |
+|---|---|
+| `/progress` | Opens the pane |
+| `/progress open` | Opens `progress.html` in the browser |
+| `/progress add <line>` | Adds a task, same as `+` in the pane |
+| `/progress tidy` | Archives finished work now |
+| `/progress sync` | Re-reads Claude's Task list and the PR |
+| `/progress report` / `today` | Copies a report of the last 7 days / today |
+| `/progress notify on` / `off` | Turns notifications on or off |
+| `/progress lang en` / `zh-TW` / `zh-CN` / `auto` | Picks the pane's language |
+
+The Chinese words work too: `/progress 視窗`, `加`, `整理`, `同步`, `週報`, `今天`, `通知 開`.
+
+## The file
+
+Everything lives in `~/.claude/progress.md` (`%USERPROFILE%\.claude\progress.md` on Windows; set `CLAUDE_PROGRESS_FILE` to use another path). It is plain Markdown you can read and edit:
+
+```markdown
+# Project progress
+
+## acme-web
+
+<!-- auto session=2be48af2 agent=claude state=waiting updated=2026-10-16T01:40:00Z pr=128 ci=pending -->
+### Add a dark mode to the settings page
+> waiting on your reply · feat/dark-mode · PR #128 · CI running
+> Context: users asked for it in the last survey
+- [x] Add colour tokens for dark
+- [~] Fix contrast on charts
+- [?] Release plan — Behind a flag first, or everyone at once?
+- [ ] Open the pull request
+<!-- /auto session=2be48af2 -->
+
+## Job search
+
+### Contoso research residency
+> due 10-31
+- [x] Update the resume
+- [?] Recommendation letter — waiting for Prof. Lee to reply
+- [ ] Submit
+```
+
+- Each session rewrites only the lines between its own `<!-- auto -->` markers. Everything else (your hand-kept sections, notes) is left byte for byte.
+- Marks: `[x]` done, `[~]` doing, `[ ]` not started, `[?]` waiting on you, `[>]` running, `[!]` stuck, `[-]` cancelled. Text after ` — ` is the step's note: what it needs, or why it is stuck.
+- `due MM-DD` (or `截止 MM-DD`) on a task gives it a date: it moves under Due soon 14 days before, and turns red 3 days before.
+
+The full specification, for tools that read or write the file, is [docs/FORMAT.md](docs/FORMAT.md).
+
+## Other agents
+
+Any agent that can write a file can show its work on the pane. Copy the section **"Report your progress to the progress pane"** at the end of [AGENTS.md](AGENTS.md) into the `AGENTS.md`, `GEMINI.md` or `.cursorrules` of your project. The agent then keeps one block of its own, and the pane labels it with the agent's name. Questions from other agents are listed with the rest; you answer them in that agent's session.
+
+## How it keeps itself tidy
+
+| What | When |
+|---|---|
+| A finished block moves to `progress-archive-YYYY-MM.md` | 12 hours after its last update |
+| Any other block moves there | 3 days after its last update |
+| A hand-kept task with every step done moves there | 24 hours after the pane first saw it done |
+| A session that has not written for 12 hours | shows as stopped; its questions leave Needs you now |
+| A `##` section the archive emptied | is removed; one you left empty stays |
+
+The sweep runs when a session starts and every hour after. `/progress tidy` runs it now.
+
+## Update and uninstall
+
+With auto-update on (the setup script turns it on), new versions arrive by themselves. To update by hand:
+
+```
+claude plugin marketplace update claude-progress-pane
+claude plugin update project-progress@claude-progress-pane
+```
+
+then `/reload-plugins` in a running session, or start a new one.
+
+To uninstall:
+
+```
+claude plugin uninstall project-progress@claude-progress-pane
+claude plugin marketplace remove claude-progress-pane
+```
+
+`progress.md`, its archives and journals, and the line in your shell profile stay.
+
+## Troubleshooting
+
+- **The pane says this session has no Task tools.** Run the setup script, then start `claude` from a new terminal window. Sessions that never get the variable (the desktop app, git-bash on Windows) can still keep `progress.md` by hand.
+- **No pane on screen.** In the terminal's fullscreen layout the pane docks on the right on its own from 144 columns wide, and through `/progress` from 110. Under tmux or `CLAUDE_CODE_NO_FLICKER=0` it sits above the prompt. Cloud sessions draw no pane.
+- **PowerShell warns about the execution policy.** Your profile only runs where scripts may run: `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned`, then run the script again. Until then the variable stays in `settings.json`.
+- **Private fork.** Claude Code clones with your own git credentials. Run `gh auth login` and `gh auth setup-git` once; without a GitHub SSH key also set `CLAUDE_CODE_PLUGIN_PREFER_HTTPS=1`.
+- **Your organization manages Claude Code.** Plugins you install yourself do not get the system-prompt hook there. Run the setup script with `-KeepRule` (`--keep-rule`) to keep the rule in `~/.claude/CLAUDE.md` instead.
+
+## Contributing
+
+Bug reports and pull requests are welcome. [CONTRIBUTING.md](CONTRIBUTING.md) has the checks and the release steps, [AGENTS.md](AGENTS.md) the code layout and conventions, and [docs/FORMAT.md](docs/FORMAT.md) the file format, which is a public interface. The [CHANGELOG](CHANGELOG.md) lists every change with the tests that cover it.

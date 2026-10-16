@@ -18,7 +18,8 @@ concurrency:
 
 env:
   # The Claude Code release the tests are checked against; bump on purpose and
-  # keep README.md:57-58 ("tested on ... through ...") in step.
+  # keep the "Tested on" line under "Get started" in README.md, README.zh-TW.md and
+  # README.zh-CN.md in step.
   CLAUDE_CODE_VERSION: 2.1.301
   DISABLE_AUTOUPDATER: "1"
   CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1"
