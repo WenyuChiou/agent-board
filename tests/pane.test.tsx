@@ -42,7 +42,8 @@ const posix = (path: string): string => path.replace(/^[A-Za-z]:\\/, '/').replac
 // Everything a session's engine answers beneath the plugin, with files kept in memory.
 const engineBeneath = (on: On, world: World): MockClock => {
   const clock = mock.clock(on, { now: Date.parse('2026-10-16T12:00:00.000Z') })
-  mock.env(on, world.env ?? { HOME: '/home/me' })
+  // The system says Traditional Chinese, so the pane speaks it unless a test says otherwise.
+  mock.env(on, world.env ?? { HOME: '/home/me', LANG: 'zh_TW.UTF-8' })
   mock.store(on, world.store)
   on('session.start', ($, e) => ({ cwd: e.cwd }))
   on('session.end', ($, e) => ({ sessionId: e.sessionId }))
@@ -135,7 +136,7 @@ test('Claude’s task calls fill the file and the pane by themselves', async ($,
   const written = world.files.get(FILE) ?? ''
   expect(written).toContain('## 求職\n### Google 暑期實習')
   expect(written).toContain('## persona_framework')
-  expect(written).toContain('<!-- auto session=2be48af2 state=working')
+  expect(written).toContain('<!-- auto session=2be48af2 agent=claude state=working')
   expect(written).toContain('- [x] 讀 API\n- [~] 寫 Mod\n- [ ] 推分支')
 
   for (const surface of ['terminal', 'desktop'] as const) {
@@ -145,18 +146,26 @@ test('Claude’s task calls fill the file and the pane by themselves', async ($,
     expect(await ui.find({ type: 'Text', text: '▸ 1' })).toBeDefined()
     expect(await ui.find({ type: 'Text', text: '⚑ 0' })).toBeDefined()
     expect(await ui.find({ type: 'Text', text: '✓ 1' })).toBeDefined()
+    // The one thing that needs the person: here a step that waits on someone else, with
+    // the task it belongs to and why.
+    expect(await ui.find({ type: 'Text', text: '現在最需要你' })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: '〔等別人〕' })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^推薦信$/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: '求職 › Google 暑期實習' })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: '等教授回覆' })).toBeDefined()
+    // The card is short: where it stands and what comes next, not every step.
     expect(await ui.find({ type: 'Text', text: '正在做：寫 Mod 中' })).toBeDefined()
     expect(await ui.find({ type: 'Text', text: /^1\/3$/ })).toBeDefined()
-    // Steps are numbered, and the one being done says so.
+    expect(await ui.find({ type: 'Text', text: '○ 下一步：推分支' })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^ ← 現在$/ })).toBeUndefined()
+    // 全部 3 步 opens the numbered list, the step being done marked.
+    await ui.press({ key: 'section::steps' })
     expect((await ui.find({ type: 'Text', text: /^寫 Mod$/ }))?.props).toMatchObject({ bold: true })
     expect(await ui.find({ type: 'Text', text: /^2 $/ })).toBeDefined()
     expect(await ui.find({ type: 'Text', text: /^ ← 現在$/ })).toBeDefined()
     // No background yet, and the request is the title: nothing said twice.
     expect(await ui.find({ type: 'Text', text: /^背景：/ })).toBeUndefined()
-    // A step that waits on you says which task it belongs to, and why.
-    expect(await ui.find({ type: 'Text', text: '推薦信' })).toBeDefined()
-    expect(await ui.find({ type: 'Text', text: '求職 › Google 暑期實習' })).toBeDefined()
-    expect(await ui.find({ type: 'Text', text: '等教授回覆' })).toBeDefined()
+    await ui.press({ key: 'section::steps' })
     await ui.unmount()
   }
 })
@@ -288,7 +297,10 @@ test('the pane acts: tick a step, hand a task to Claude, take over, ask aside', 
   expect(world.files.get(FILE)).toContain('- [x] 推薦信 — 等教授回覆')
   expect(world.files.get('/home/me/.claude/progress-journal-2026-10.md')).toMatch(/ · 求職 · Google 暑期實習 · 推薦信 — 等教授回覆\n$/)
 
-  // Opening a row shows its steps and actions; 交給 Claude sends a prompt.
+  // Other work is folded to one line until opened; a row then opens to its steps and
+  // actions, and 交給 Claude sends a prompt.
+  expect(await ui.find({ type: 'Button', key: '求職::Google 暑期實習' })).toBeUndefined()
+  await ui.press({ key: 'section::others' })
   await ui.press({ key: '求職::Google 暑期實習' })
   expect(await ui.find({ type: 'Text', text: '投遞' })).toBeDefined()
   await ui.press({ key: '求職::Google 暑期實習::hand' })
@@ -360,7 +372,7 @@ test("a progress.md holding only whitespace still gets this session's block", as
   engineBeneath(on, world)
   await start($, '幫我重做進度面板')
   await $.tool.call({ tool: 'TaskCreate', subject: '讀 API', description: '' })
-  expect(world.files.get(FILE)).toContain('<!-- auto session=2be48af2 state=working')
+  expect(world.files.get(FILE)).toContain('<!-- auto session=2be48af2 agent=claude state=working')
 })
 
 const ARCHIVE = '/home/me/.claude/progress-archive-2026-10.md'
@@ -486,7 +498,7 @@ test('finished steps reach the journal, and 週報 copies a report of them', asy
   const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
   await ui.press({ key: 'report' })
   expect(seen.copied.at(-1)).toContain('- persona_framework · 重做進度面板：讀 API')
-  expect(seen.copied.at(-1)).toContain('進行中\n- persona_framework · 重做進度面板：下一步 寫 Mod（1/2）')
+  expect(seen.copied.at(-1)).toContain('進行中\n- persona_framework · 重做進度面板：下一步 寫 Mod (1/2)')
   expect(await ui.find({ type: 'Text', text: '已複製到剪貼簿' })).toBeDefined()
   await ui.unmount()
 
@@ -592,6 +604,7 @@ test('an ended session elsewhere offers its resume command, copied for the termi
   const seen = outside(on)
   await $.session.start({ cwd: '/work/persona_framework', surface: 'desktop', isInteractive: true })
   const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
+  await ui.press({ key: 'section::others' })
   await ui.press({ key: 'FLOODABM::跑實驗' })
   expect(await ui.find({ type: 'Button', key: 'FLOODABM::跑實驗::take' })).toBeUndefined()
   await ui.press({ key: 'FLOODABM::跑實驗::resume' })
@@ -639,11 +652,200 @@ test('the pane takes the light 和色 set under a light theme, and 說明 lists 
   await $.tool.call({ tool: 'TaskUpdate', taskId: '1', status: 'in_progress' })
 
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal', props: PROPS })
-  // 藍 for the step in progress, not the dark set's 浅葱.
+  // Every step shows once opened; 藍 for the step in progress, not the dark set's 浅葱.
+  await ui.press({ key: 'section::steps' })
   expect((await ui.find({ type: 'Text', text: /^▸ $/ }))?.props).toMatchObject({ color: '#165E83' })
   expect(await ui.find({ type: 'Text', text: /^ 卡住$/ })).toBeUndefined()
   await ui.press({ key: 'legend' })
   expect(await ui.find({ type: 'Text', text: /^ 卡住$/ })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: '⚑ 兩週內截止' })).toBeDefined()
+  await ui.unmount()
+})
+
+test('a question this session asks is answered from the pane, with the buttons its kind calls for', async ($, on) => {
+  const world: World = { files: new Map(), mtime: 1, hasTasks: true }
+  engineBeneath(on, world)
+  const seen = outside(on)
+  const submitted: string[] = []
+  on('prompt.submit', ($, e) => {
+    submitted.push(e.text)
+    return { text: e.text }
+  })
+  await start($, '幫我發版')
+  await $.tool.call({ tool: 'TaskCreate', subject: '推上 main', description: '' })
+  await $.tool.call({ tool: 'TaskCreate', subject: '選版號', description: '' })
+  await $.tool.call({ tool: 'TaskCreate', subject: '跑安裝', description: '' })
+  await $.tool.call({ tool: 'TaskUpdate', taskId: '1', metadata: { waiting: 'you', why: '可以直接推到 main 嗎？' } })
+
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
+  // 確認: 好 / 不要, and a press answers Claude in this session.
+  expect(await ui.find({ type: 'Text', text: '〔確認〕' })).toBeDefined()
+  await ui.press({ key: 'mine::1::好' })
+  expect(submitted.at(-1)).toBe('關於「推上 main」：好，照做')
+  expect(await ui.find({ type: 'Text', text: '已回覆 Claude：好，照做' })).toBeDefined()
+
+  // 選一個: a button per option Claude gave.
+  await $.tool.call({ tool: 'TaskUpdate', taskId: '1', metadata: { waiting: null } })
+  await $.tool.call({ tool: 'TaskUpdate', taskId: '2', metadata: { waiting: 'you', ask: 'choose', options: ['0.7.0', '1.0.0'], why: '這版叫什麼？' } })
+  await ui.press({ key: 'mine::2::1.0.0' })
+  expect(submitted.at(-1)).toBe('關於「選版號」：1.0.0')
+
+  // 動手: the command to copy, then 做好了.
+  await $.tool.call({ tool: 'TaskUpdate', taskId: '2', metadata: { waiting: null } })
+  await $.tool.call({ tool: 'TaskUpdate', taskId: '3', metadata: { waiting: 'you', ask: 'do', command: 'pwsh ./scripts/setup.ps1', why: '在你的電腦上跑' } })
+  expect(await ui.find({ type: 'Text', text: '$ pwsh ./scripts/setup.ps1' })).toBeDefined()
+  await ui.press({ key: 'mine::3::copy' })
+  expect(seen.copied.at(-1)).toBe('pwsh ./scripts/setup.ps1')
+  await ui.press({ key: 'mine::3::did' })
+  expect(submitted.at(-1)).toBe('關於「跑安裝」：做好了')
+  await ui.unmount()
+})
+
+test('folded sections open on a press and stay open in the next session', async ($, on) => {
+  const world: World = { files: new Map([[FILE, JOBS]]), mtime: 1, hasTasks: true, store: { opened: ['recent'] } }
+  engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/persona_framework', surface: 'desktop', isInteractive: true })
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
+  expect(await ui.find({ type: 'Button', key: 'section::others', text: '▸ 其他進行中' })).toBeUndefined()
+  expect(await ui.find({ type: 'Button', key: 'section::others', text: '▸ 進行中' })).toBeDefined()
+  await ui.press({ key: 'section::others' })
+  expect(await ui.find({ type: 'Button', key: 'section::others', text: '▾ 進行中' })).toBeDefined()
+  // The counts open what they count, too.
+  await ui.press({ key: 'count::others' })
+  expect(await ui.find({ type: 'Button', key: 'section::others', text: '▸ 進行中' })).toBeDefined()
+  await ui.press({ key: 'count::others' })
+  await ui.unmount()
+
+  const again = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
+  expect(await again.find({ type: 'Button', key: 'section::others', text: '▾ 進行中' })).toBeDefined()
+  await again.unmount()
+})
+
+test('a hand-kept task done for a day leaves for the archive by itself, and the next hour clears a done block', async ($, on) => {
+  const day = 24 * 60 * 60 * 1000
+  const now = Date.parse('2026-10-16T12:00:00.000Z')
+  const file = `# 專案進度
+
+## 求職
+### Google 暑期實習
+- [x] 改履歷
+- [x] 投遞
+
+### Meta 實習
+- [ ] 投遞
+
+## ai-research-skills
+<!-- auto session=c55e2f10 agent=claude state=done updated=${new Date(now - 11.5 * 60 * 60 * 1000).toISOString()} -->
+### 發佈 1.7.4
+- [x] 打 tag
+<!-- /auto session=c55e2f10 -->
+`
+  const world: World = { files: new Map([[FILE, file]]), mtime: 1, hasTasks: true, store: { 'done:求職::Google 暑期實習': now - 2 * day } }
+  const clock = engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/persona_framework', surface: 'terminal', isInteractive: true })
+  await clock.advance(1)
+
+  expect(world.files.get(ARCHIVE)).toContain('## 求職 · 2026-10-14\n### Google 暑期實習\n- [x] 改履歷\n- [x] 投遞')
+  expect(world.files.get(FILE)).toContain('## 求職\n### Meta 實習\n- [ ] 投遞')
+  expect(world.files.get(FILE)).not.toContain('Google 暑期實習')
+  // Not yet half a day old: the done block stays until the hourly pass after it is.
+  expect(world.files.get(FILE)).toContain('session=c55e2f10')
+  await clock.advance(60 * 60 * 1000)
+  expect(world.files.get(FILE)).not.toContain('session=c55e2f10')
+  expect(world.files.get(ARCHIVE)).toContain('### 發佈 1.7.4')
+})
+
+test('on a light terminal no text falls back to the terminal dim', async ($, on) => {
+  const world: World = { files: new Map([[FILE, JOBS]]), mtime: 1, hasTasks: true, store: { opened: ['others', 'waiting', 'recent', 'steps'] } }
+  engineBeneath(on, world)
+  on('config.list', () => ({
+    value: [{ key: 'theme', label: 'Theme', kind: 'enum' as const, value: 'light', provider: { kind: 'core' } } as never],
+  }))
+  await start($, '幫我重做進度面板')
+  await $.tool.call({ tool: 'TaskCreate', subject: '讀 API', description: '' })
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal', props: PROPS })
+  await ui.press({ key: 'legend' })
+  const dimmed = (node: unknown): number => {
+    if (typeof node !== 'object' || node === null) return 0
+    const element = node as { type?: string; props?: { dimColor?: boolean }; children?: unknown[] }
+    const own = element.type === 'Text' && element.props?.dimColor === true ? 1 : 0
+    return own + (element.children ?? []).reduce<number>((sum, child) => sum + dimmed(child), 0)
+  }
+  const texts = (node: unknown): number => {
+    if (typeof node !== 'object' || node === null) return 0
+    const element = node as { type?: string; children?: unknown[] }
+    return (element.type === 'Text' ? 1 : 0) + (element.children ?? []).reduce<number>((sum, child) => sum + texts(child), 0)
+  }
+  const tree = await ui.drawn()
+  expect(texts(tree)).toBeGreaterThan(10)
+  expect(dimmed(tree)).toBe(0)
+  await ui.unmount()
+})
+
+test('with the language option set to English, the pane, the file and the rule speak English', { options: { language: 'en' } }, async ($, on) => {
+  const world: World = { files: new Map(), mtime: 1, hasTasks: true }
+  engineBeneath(on, world)
+  on('prompt.compose', () => ({ sections: [{ id: 'intro', text: 'You are Claude.', scope: 'shared' as const }] }))
+  await start($, 'Rebuild the progress pane')
+  await $.tool.call({ tool: 'TaskCreate', subject: 'Read the API', description: '' })
+  await $.tool.call({ tool: 'TaskCreate', subject: 'Pick a version', description: '' })
+  await $.tool.call({ tool: 'TaskUpdate', taskId: '2', metadata: { waiting: 'you', why: 'Push 0.7.0 to main?' } })
+
+  expect(world.files.get(FILE)).toContain('# Project progress')
+  expect(world.files.get(FILE)).toContain('> Claude is working')
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
+  expect(await ui.find({ type: 'Text', text: 'Needs you now' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: '[Confirm]' })).toBeDefined()
+  expect(await ui.find({ type: 'Button', text: 'Yes' })).toBeDefined()
+  expect(await ui.find({ type: 'Button', text: /^▸ All 2 steps$/ })).toBeDefined()
+  await ui.unmount()
+
+  const composed = await $.prompt.compose({ model: 'm', promptModel: 'm', surfaces: [], outputStyle: null, traits: [], tools: ['TaskCreate'] })
+  expect(composed.sections[1]?.text).toContain('# Progress pane (project-progress)')
+})
+
+test('/progress lang switches the language and remembers it; auto goes back to the system', async ($, on) => {
+  const world: World = { files: new Map(), mtime: 1, hasTasks: true }
+  engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/persona_framework', surface: 'desktop', isInteractive: true })
+  let ran = await $.command.run({ ...TIDY, args: 'lang zh-CN' })
+  expect(ran.text).toBe('面板改用简体中文。')
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
+  expect(await ui.find({ type: 'Text', text: '目前没有进行中的工作。' })).toBeDefined()
+  await ui.unmount()
+
+  ran = await $.command.run({ ...TIDY, args: 'lang en' })
+  expect(ran.text).toBe('The pane now speaks English.')
+  ran = await $.command.run({ ...TIDY, args: 'lang klingon' })
+  expect(ran.text).toBe('Supported languages: en, zh-TW, zh-CN, auto.')
+  ran = await $.command.run({ ...TIDY, args: 'lang auto' })
+  expect(ran.text).toBe('面板改用繁體中文。')
+})
+
+test('progress.html is written beside progress.md, and /progress open opens it in the browser', async ($, on) => {
+  const ran: string[][] = []
+  const world: World = { files: new Map([[FILE, JOBS]]), mtime: 1, hasTasks: true, ran }
+  engineBeneath(on, world)
+  await start($, '幫我重做進度面板')
+  await $.tool.call({ tool: 'TaskCreate', subject: '讀 API', description: '' })
+  const page = world.files.get('/home/me/.claude/progress.html') ?? ''
+  expect(page).toContain('<title>進度</title>')
+  expect(page).toContain('Google 暑期實習')
+
+  const result = await $.command.run({ ...TIDY, args: 'open' })
+  expect(ran.at(-1)).toEqual(['xdg-open', '/home/me/.claude/progress.html'])
+  expect(result.text).toBe('已在瀏覽器打開：/home/me/.claude/progress.html')
+})
+
+test('on the phone (no input box) the pane still draws, focus first, with its buttons', async ($, on) => {
+  const world: World = { files: new Map([[FILE, JOBS]]), mtime: 1, hasTasks: true }
+  engineBeneath(on, world)
+  await start($, '幫我重做進度面板')
+  await $.tool.call({ tool: 'TaskCreate', subject: '讀 API', description: '' })
+  const ui = await $.ui.mount({ ...PANE, surface: 'mobile', props: PROPS })
+  expect(await ui.find({ type: 'Text', text: '現在最需要你' })).toBeDefined()
+  expect(await ui.find({ type: 'Input' })).toBeUndefined()
+  await ui.press({ key: '求職::Google 暑期實習::1::done' })
+  expect(world.files.get(FILE)).toContain('- [x] 推薦信 — 等教授回覆')
   await ui.unmount()
 })

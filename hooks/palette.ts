@@ -1,24 +1,29 @@
 import type { ProgressStepStatus } from '../types'
+import type { AskKind } from './ask'
 
 // 和色: traditional Japanese colours, one set for a dark terminal and one for a light one.
-// The dark set is the softer, lighter shade of each hue; the light set the deeper one, so
-// each keeps its contrast on its own background. Names are the colours' own.
+// The dark set is the softer, lighter shade of each hue; the light set the deeper one. Every
+// colour used for text is at least 4.5:1 against its terminal's ground (#1e2022 / #fbfaf5);
+// `frame` draws only lines and the empty part of a bar. Names are the colours' own.
 
 export type Palette = {
   // In progress, the progress bar, links: 浅葱 / 藍
   accent: string
   // Finished: 若竹 / 常磐
   done: string
-  // Waits on you: 山吹 / 琥珀
+  // Waits on you: 山吹 / 鶯茶
   waiting: string
   // Running on its own (CI, a long job, someone else): 藤紫 / 江戸紫
   running: string
   // Due within a week: 柿 / 代赭
   soon: string
-  // Stuck, overdue, CI failed: 紅緋 / 茜
+  // Stuck, overdue, CI failed: 薔薇 / 茜
   alert: string
-  // Frames, rules, the empty part of a bar: 利休鼠
+  // Frames, rules, the empty part of a bar: 利休鼠 / 灰
   frame: string
+  // Secondary text (background, times, counts). Never the terminal's own dim, which turns
+  // faint grey on a light background: 銀鼠 / 墨
+  muted: string
   // Project names: 錆浅葱 / 鉄
   project: string
 }
@@ -29,19 +34,21 @@ export const DARK: Palette = {
   waiting: '#F8B500',
   running: '#A59ACA',
   soon: '#ED6D3D',
-  alert: '#E83929',
-  frame: '#888E7E',
+  alert: '#E9546B',
+  frame: '#6E7268',
+  muted: '#AFAFB0',
   project: '#5C9291',
 }
 
 export const LIGHT: Palette = {
   accent: '#165E83',
   done: '#007B43',
-  waiting: '#BF783A',
+  waiting: '#715C1F',
   running: '#745399',
   soon: '#BB5535',
   alert: '#B7282E',
-  frame: '#888E7E',
+  frame: '#9EA19A',
+  muted: '#595857',
   project: '#005243',
 }
 
@@ -51,23 +58,41 @@ export const paletteFor = (theme: string): Palette => (/light/i.test(theme) ? LI
 
 export type Tone = 'accent' | 'warn' | 'alert' | 'quiet' | 'done' | 'running' | 'soon'
 
-export const toneColor = (palette: Palette, tone: Tone): string | undefined => {
-  if (tone === 'accent') return palette.accent
-  if (tone === 'warn') return palette.waiting
-  if (tone === 'alert') return palette.alert
-  if (tone === 'done') return palette.done
-  if (tone === 'running') return palette.running
-  if (tone === 'soon') return palette.soon
+export type Role = keyof Palette
 
-  return undefined
+// Which role each meaning takes; the pane reads the colour, the HTML page the role's CSS
+// variable, so both stay in step.
+export const toneRole = (tone: Tone): Role => {
+  if (tone === 'accent') return 'accent'
+  if (tone === 'warn') return 'waiting'
+  if (tone === 'alert') return 'alert'
+  if (tone === 'done') return 'done'
+  if (tone === 'running') return 'running'
+  if (tone === 'soon') return 'soon'
+
+  return 'muted'
 }
 
-export const stepColor = (palette: Palette, status: ProgressStepStatus): string | undefined => {
-  if (status === 'done') return palette.done
-  if (status === 'doing') return palette.accent
-  if (status === 'waiting') return palette.waiting
-  if (status === 'running') return palette.running
-  if (status === 'blocked') return palette.alert
+// The chip in front of a step that waits on the person: what kind of thing it asks.
+export const askRole = (kind: AskKind): Role => {
+  if (kind === 'confirm' || kind === 'choose') return 'waiting'
+  if (kind === 'do') return 'soon'
+  if (kind === 'review') return 'running'
+  if (kind === 'wait') return 'muted'
 
-  return undefined
+  return 'accent'
 }
+
+export const stepRole = (status: ProgressStepStatus): Role => {
+  if (status === 'done') return 'done'
+  if (status === 'doing') return 'accent'
+  if (status === 'waiting') return 'waiting'
+  if (status === 'running') return 'running'
+  if (status === 'blocked') return 'alert'
+
+  return 'muted'
+}
+
+export const toneColor = (palette: Palette, tone: Tone): string => palette[toneRole(tone)]
+export const askColor = (palette: Palette, kind: AskKind): string => palette[askRole(kind)]
+export const stepColor = (palette: Palette, status: ProgressStepStatus): string => palette[stepRole(status)]

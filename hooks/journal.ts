@@ -1,4 +1,6 @@
 import type { ProgressMirror, ProgressProject } from '../types'
+import { ZH_TW } from './i18n'
+import type { Strings } from './i18n'
 import { countSteps, currentStepIndex, isTaskComplete } from './parse'
 
 // A line per finished step, one file a month beside progress.md, so "what did I do this
@@ -35,8 +37,8 @@ const field = (text: string): string => text.replace(/\s+/g, ' ').replace(/\s·\
 export const journalLine = (entry: Omit<JournalEntry, 'at'>, now: number): string =>
   `- ${localStamp(now)} · ${field(entry.project)} · ${field(entry.task)} · ${field(entry.step)}`
 
-export const appendJournal = (text: string, lines: readonly string[]): string =>
-  lines.length === 0 ? text : `${text.trim() === '' ? '# 工作日誌\n' : text.replace(/\s*$/, '\n')}${lines.join('\n')}\n`
+export const appendJournal = (text: string, lines: readonly string[], s: Strings = ZH_TW): string =>
+  lines.length === 0 ? text : `${text.trim() === '' ? `${s.journalTitle}\n` : text.replace(/\s*$/, '\n')}${lines.join('\n')}\n`
 
 const LINE = /^- (\d{4}-\d{2}-\d{2}) \d{2}:\d{2} · (.+?) · (.+?) · (.+)$/
 
@@ -62,10 +64,11 @@ export const progressReport = (
   mine: ProgressMirror | null,
   now: number,
   days: number,
+  s: Strings = ZH_TW,
 ): string => {
   const from = localDay(now - (days - 1) * 24 * 60 * 60 * 1000)
   const to = localDay(now)
-  const heading = days === 1 ? `今天的進度（${to.slice(5)}）` : `最近 ${days} 天的進度（${from.slice(5)} – ${to.slice(5)}）`
+  const heading = days === 1 ? s.reportToday(to.slice(5)) : s.reportDays(days, from.slice(5), to.slice(5))
 
   const done = new Map<string, string[]>()
   for (const entry of entries) {
@@ -81,7 +84,7 @@ export const progressReport = (
   if (mine !== null && mine.tasks.some(task => task.status !== 'completed')) {
     const left = mine.tasks.filter(task => task.status !== 'completed')
     const finished = mine.tasks.length - left.length
-    open.push(`- ${mine.project} · ${mine.title || left[0]?.subject || ''}：下一步 ${left[0]?.subject ?? ''}（${finished}/${mine.tasks.length}）`)
+    open.push(`- ${mine.project} · ${mine.title || left[0]?.subject || ''}${s.pairSep}${s.reportNext(left[0]?.subject ?? '')} (${finished}/${mine.tasks.length})`)
     for (const task of left) if (task.waiting === 'you') waiting.push(`- ${mine.project} · ${task.subject}`)
   }
   const ownId = mine === null ? '' : mine.sessionId.slice(0, 8)
@@ -90,19 +93,19 @@ export const progressReport = (
       if (task.auto?.session === ownId || task.auto?.state === 'done' || isTaskComplete(task)) continue
       const { done: finished, total } = countSteps(task)
       const next = task.steps[currentStepIndex(task)]?.text ?? ''
-      open.push(`- ${project.name} · ${task.title}${next === '' ? '' : `：下一步 ${next}`}（${finished}/${total}）`)
+      open.push(`- ${project.name} · ${task.title}${next === '' ? '' : `${s.pairSep}${s.reportNext(next)}`} (${finished}/${total})`)
       for (const step of task.steps) if (step.status === 'waiting') waiting.push(`- ${project.name} · ${step.text}`)
     }
   }
 
-  const finishedLines = [...done].map(([key, steps]) => `- ${key}：${steps.join('、')}`)
+  const finishedLines = [...done].map(([key, steps]) => `- ${key}${s.pairSep}${steps.join(s.listSep)}`)
   const sections = [
     heading,
     '',
-    '完成',
-    ...(finishedLines.length === 0 ? ['- （這段時間沒有完成的步驟紀錄）'] : finishedLines),
-    ...(open.length === 0 ? [] : ['', '進行中', ...open]),
-    ...(waiting.length === 0 ? [] : ['', '等我處理', ...waiting]),
+    s.reportDone,
+    ...(finishedLines.length === 0 ? [s.reportNone] : finishedLines),
+    ...(open.length === 0 ? [] : ['', s.reportOpen, ...open]),
+    ...(waiting.length === 0 ? [] : ['', s.reportWaiting, ...waiting]),
   ]
 
   return sections.join('\n')

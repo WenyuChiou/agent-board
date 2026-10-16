@@ -18,7 +18,7 @@ const STEP = /^([ \t]*)[-*+]\s+\[([ xX~?>!-])\]\s+(.*)$/
 const FENCE = /^\s*(```|~~~)/
 export const AUTO_START = /^<!--\s*auto\s+(.*?)\s*-->\s*$/
 export const AUTO_END = /^<!--\s*\/auto\b.*?-->\s*$/
-const DUE = /(?:截止|due)[:：\s]*((?:\d{4}-)?\d{1,2}[-/]\d{1,2})/i
+const DUE = /(?:截止|\bdue)[:：\s]*((?:\d{4}[-/])?\d{1,2}[-/]\d{1,2})/i
 
 const STATUS: Record<string, ProgressStepStatus> = {
   ' ': 'todo',
@@ -64,6 +64,7 @@ export const autoOf = (raw: string): ProgressAuto | null => {
 
   return {
     session,
+    agent: (attrs.agent ?? 'claude').toLowerCase(),
     state,
     updated: Number.isNaN(updated) ? 0 : updated,
     resume: attrs.resume ?? null,
@@ -108,7 +109,7 @@ export const parseProgress = (markdown: string): ProgressProject[] => {
 
   const ensureTask = (): ProgressTask => {
     if (task === undefined) {
-      task = { title: '', notes: [], steps: [], auto: pendingAuto, due: null }
+      task = { title: '', line: -1, notes: [], steps: [], auto: pendingAuto, due: null }
       pendingAuto = null
       ensureProject().tasks.push(task)
     }
@@ -170,7 +171,7 @@ export const parseProgress = (markdown: string): ProgressProject[] => {
 
     const taskMatch = TASK.exec(line)
     if (taskMatch?.[1] !== undefined) {
-      task = { title: taskMatch[1], notes: [], steps: [], auto: pendingAuto, due: null }
+      task = { title: taskMatch[1], line: lineIndex, notes: [], steps: [], auto: pendingAuto, due: null }
       pendingAuto = null
       ensureProject().tasks.push(task)
       return
@@ -225,6 +226,16 @@ export const currentStepIndex = (task: ProgressTask): number => {
 
   return task.steps.findIndex(step => step.status !== 'done' && step.status !== 'cancelled')
 }
+
+// A block whose session stopped writing to it (the terminal closed without the session
+// ending, a crash) still says working or waiting; after half a day it is treated as ended.
+export const STALE_MS = 12 * 60 * 60 * 1000
+
+export const isStale = (auto: ProgressAuto | null, now: number): boolean =>
+  auto !== null && (auto.state === 'working' || auto.state === 'waiting') && auto.updated > 0 && now - auto.updated > STALE_MS
+
+// The key a finished hand-kept task is remembered by, to archive it a day later.
+export const doneKey = (project: string, title: string): string => `done:${project}::${title}`
 
 export const baseName = (path: string): string => path.replace(/[\\/]+$/, '').split(/[\\/]/).pop() ?? ''
 

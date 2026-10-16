@@ -29,6 +29,8 @@ export type ProgressPr = {
 // say how its pull request stands.
 export type ProgressAuto = {
   session: string
+  // Which agent writes the block (`agent=`): claude when the marker names none.
+  agent: string
   state: ProgressSessionState
   updated: number
   resume: string | null
@@ -39,6 +41,8 @@ export type ProgressAuto = {
 
 export type ProgressTask = {
   title: string
+  // The `###` heading's line (0-based), -1 for steps written without one.
+  line: number
   notes: string[]
   steps: ProgressStep[]
   auto: ProgressAuto | null
@@ -65,6 +69,12 @@ export type ProgressMirrorTask = {
   waiting: 'you' | 'run' | null
   // What Claude needs from the person, or what it waits on, in one line (`metadata.why`).
   why: string | null
+  // What kind of answer (`metadata.ask`: confirm, choose, input, do, review, wait), the
+  // options to choose from, a command to run, a link to look at.
+  ask: string | null
+  options: string[]
+  command: string | null
+  link: string | null
   blocked: string | null
   blockedBy: string[]
 }
@@ -104,6 +114,9 @@ declare module 'claude-code' {
       theme: string
       today: number
       isLegendOpen: boolean
+      opened: string[]
+      doneSeen: Record<string, number>
+      lang: string
     }
   }
 }

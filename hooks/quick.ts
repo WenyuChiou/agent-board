@@ -3,19 +3,20 @@
 // The part before the colon is the project (else this session's), `截止 MM-DD` the due
 // date, and each `；` starts a step.
 
+import { ZH_TW } from './i18n'
+import type { Strings } from './i18n'
+
 export type QuickEntry = { project: string; title: string; due: string | null; steps: string[] }
 
-const DUE = /\s*(?:截止|due)[:：\s]*((?:\d{4}-)?\d{1,2}[-/]\d{1,2})\s*/i
+const DUE = /\s*(?:截止|\bdue)[:：\s]*((?:\d{4}[-/])?\d{1,2}[-/]\d{1,2})\s*/i
 // A colon right before `//` belongs to a URL, not to a project name.
 const HEAD = /^([^：:]{1,24})[：:](?!\/\/)\s*(.+)$/
-const JOB = /求職|實習|intern|job/i
-
-// A job-hunting task given no steps gets the usual ones.
-export const JOB_STEPS = ['改履歷', '寫求職信', '投遞', '追蹤回覆']
+// A job-hunting task given no steps gets the usual ones (the strings' jobSteps).
+const JOB = /求職|求职|實習|实习|intern|job|application/i
 
 export const isQuickAdd = (input: string): boolean => /^\s*[+＋]/.test(input)
 
-export const parseQuickAdd = (input: string, fallbackProject: string): QuickEntry | null => {
+export const parseQuickAdd = (input: string, fallbackProject: string, s: Strings = ZH_TW): QuickEntry | null => {
   let text = input.trim().replace(/^[+＋]\s*/, '')
   let due: string | null = null
   const dated = DUE.exec(text)
@@ -33,10 +34,10 @@ export const parseQuickAdd = (input: string, fallbackProject: string): QuickEntr
   const title = (named?.[2] ?? head).trim()
   if (title === '') return null
   const given = parts.slice(1)
-  const steps = given.length > 0 ? given : JOB.test(project) ? [...JOB_STEPS] : [title]
+  const steps = given.length > 0 ? given : JOB.test(project) ? [...s.jobSteps] : [title]
 
   return { project, title, due, steps }
 }
 
-export const quickAddWords = (entry: QuickEntry): string =>
-  `已加進「${entry.project}」：${entry.title}（${entry.steps.length} 步${entry.due === null ? '' : `，截止 ${entry.due}`}）`
+export const quickAddWords = (entry: QuickEntry, s: Strings = ZH_TW): string =>
+  s.quickAdded(entry.project, entry.title, entry.steps.length, entry.due)

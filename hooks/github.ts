@@ -1,4 +1,6 @@
 import type { ProgressCi, ProgressPr } from '../types'
+import { ZH_TW } from './i18n'
+import type { Strings } from './i18n'
 
 // The pull request of this session's branch, from `gh pr view --json`; a machine without
 // gh, or a branch without a PR, has none.
@@ -72,35 +74,32 @@ export const prFromGh = (stdout: string): ProgressPr | null => {
   }
 }
 
-export const ciWords = (ci: ProgressCi | null, failed = 0): string => {
-  if (ci === 'pass') return 'CI 通過'
-  if (ci === 'fail') return failed > 0 ? `CI 失敗 ${failed}` : 'CI 失敗'
-  if (ci === 'pending') return 'CI 跑中'
+export const ciWords = (ci: ProgressCi | null, failed = 0, s: Strings = ZH_TW): string => {
+  if (ci === 'pass') return s.ciPass
+  if (ci === 'fail') return s.ciFail(failed)
+  if (ci === 'pending') return s.ciPending
 
   return ''
 }
 
-const REVIEW_WORDS: Record<NonNullable<ProgressPr['review']>, string> = {
-  approved: '已核准',
-  changes: '要求修改',
-  required: '等審查',
-}
+const reviewWords = (review: NonNullable<ProgressPr['review']>, s: Strings): string =>
+  review === 'approved' ? s.reviewApproved : review === 'changes' ? s.reviewChanges : s.reviewRequired
 
 // `PR #12 · CI 失敗 2 · 要求修改`, in the words the pane uses.
-export const prWords = (pr: ProgressPr): string =>
+export const prWords = (pr: ProgressPr, s: Strings = ZH_TW): string =>
   [
     `PR #${pr.number}`,
-    pr.state === 'merged' ? '已合併' : pr.state === 'closed' ? '已關閉' : pr.isDraft ? '草稿' : '',
-    pr.state === 'open' ? ciWords(pr.ci, pr.failed) : '',
-    pr.state === 'open' && pr.review !== null ? REVIEW_WORDS[pr.review] : '',
+    pr.state === 'merged' ? s.prMerged : pr.state === 'closed' ? s.prClosed : pr.isDraft ? s.prDraft : '',
+    pr.state === 'open' ? ciWords(pr.ci, pr.failed, s) : '',
+    pr.state === 'open' && pr.review !== null ? reviewWords(pr.review, s) : '',
   ]
     .filter(part => part !== '')
     .join(' · ')
 
 // A CI run that just finished, for a notification; null when nothing changed that way.
-export const ciFinished = (before: ProgressPr | null, after: ProgressPr | null): string | null => {
+export const ciFinished = (before: ProgressPr | null, after: ProgressPr | null, s: Strings = ZH_TW): string | null => {
   if (before === null || after === null || before.number !== after.number) return null
   if (before.ci !== 'pending' || (after.ci !== 'pass' && after.ci !== 'fail')) return null
 
-  return `PR #${after.number} ${ciWords(after.ci, after.failed)}`
+  return s.noticeCi(after.number, ciWords(after.ci, after.failed, s))
 }

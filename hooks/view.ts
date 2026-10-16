@@ -1,9 +1,13 @@
 import type { ProgressAuto, ProgressMirror, ProgressProject, ProgressStepStatus, ProgressTask } from '../types'
+import { askOf, askRank } from './ask'
+import { ZH_TW } from './i18n'
+import type { Strings } from './i18n'
+import type { AskKind } from './ask'
 import { shortId } from './blocks'
 import { ciWords, prWords } from './github'
 import { doingTask, fallbackTitle } from './mirror'
 import type { Tone } from './palette'
-import { countSteps, currentStepIndex, isHereProject, isTaskComplete } from './parse'
+import { countSteps, currentStepIndex, doneKey, isHereProject, isStale, isTaskComplete } from './parse'
 
 // What the pane shows, worked out from the file and this session's own list, so the
 // drawing code only lays it out.
@@ -47,9 +51,27 @@ export type WaitingItem = {
   text: string
   note: string
   when: string
+  // What kind of answer it wants, and what the pane can offer for it (see ask.ts).
+  kind: AskKind
+  options: string[]
+  command: string | null
+  link: string | null
+  // here: this session's, answered from the pane · other: another live session's, answered
+  // there · manual: a hand-kept step, ticked from the pane
+  where: 'here' | 'other' | 'manual'
+  // The agent of another session's block when it is not Claude, else ''.
+  agent: string
   // A hand-kept step can be ticked from the pane; another session's cannot.
   step: StepRef | null
 }
+
+// The one thing the top of the pane puts in front of the person: the most pressing thing
+// they can act on, chosen in this order: something to answer or do now, work due today or
+// overdue, something stuck, then something that waits on someone else.
+export type Focus =
+  | { type: 'ask'; item: WaitingItem }
+  | { type: 'due'; row: TaskRow }
+  | { type: 'blocked'; row: TaskRow }
 
 export type TaskRow = {
   key: string
@@ -70,6 +92,8 @@ export type TaskRow = {
   due: { date: string; left: string; tone: Tone } | null
   // Another session's pull request, in words (`PR #12 · CI 失敗`), or ''.
   pr: string
+  // The agent whose block this is, when it is not Claude (`codex`), else ''.
+  agent: string
   // For an ended session: the command that reopens it, ready to paste.
   resume: string | null
 }
@@ -79,8 +103,9 @@ export type PrView = { text: string; url: string; tone: Tone }
 
 export type DoneItem = { project: string; title: string; when: string }
 
-// Other work, one group per project, this session's project first.
-export type RowGroup = { project: string; isHere: boolean; rows: TaskRow[] }
+// Other work, one group per project, this session's project first; `summary` says it in a
+// line (`3 件 · 1 等你 · 1 已停`) for while the list is folded.
+export type RowGroup = { project: string; isHere: boolean; rows: TaskRow[]; summary: string }
 
 // The line of counts at the top: what waits on you (here and elsewhere), what is open,
 // what is due within two weeks (the 快到期 list), and the steps finished today.
@@ -90,6 +115,7 @@ export type View = {
   current: CurrentView | null
   pr: PrView | null
   overview: Overview
+  focus: Focus | null
   waiting: WaitingItem[]
   due: TaskRow[]
   active: TaskRow[]
@@ -101,15 +127,15 @@ const MINUTE = 60 * 1000
 const HOUR = 60 * MINUTE
 const DAY = 24 * HOUR
 
-export const relativeTime = (then: number, now: number): string => {
+export const relativeTime = (then: number, now: number, s: Strings = ZH_TW): string => {
   if (then <= 0) return ''
   const gap = Math.max(0, now - then)
-  if (gap < MINUTE) return '剛剛'
-  if (gap < HOUR) return `${Math.floor(gap / MINUTE)} 分鐘前`
-  if (gap < DAY) return `${Math.floor(gap / HOUR)} 小時前`
-  if (gap < 2 * DAY) return '昨天'
+  if (gap < MINUTE) return s.justNow
+  if (gap < HOUR) return s.minutesAgo(Math.floor(gap / MINUTE))
+  if (gap < DAY) return s.hoursAgo(Math.floor(gap / HOUR))
+  if (gap < 2 * DAY) return s.yesterday
 
-  return `${Math.floor(gap / DAY)} 天前`
+  return s.daysAgo(Math.floor(gap / DAY))
 }
 
 // `10-31` or `2026-10-31`; a date with no year is the nearest one, at most two months back.
@@ -127,12 +153,12 @@ export const dueDays = (due: string, now: number): number | null => {
   return Math.round((target - midnight) / DAY)
 }
 
-const dueLabel = (days: number): { left: string; tone: Tone } => {
-  if (days < 0) return { left: `已過 ${-days} 天`, tone: 'alert' }
-  if (days === 0) return { left: '今天截止', tone: 'alert' }
-  if (days <= 3) return { left: `還有 ${days} 天`, tone: 'alert' }
+const dueLabel = (days: number, s: Strings): { left: string; tone: Tone } => {
+  if (days < 0) return { left: s.overdue(-days), tone: 'alert' }
+  if (days === 0) return { left: s.dueToday, tone: 'alert' }
+  if (days <= 3) return { left: s.daysLeft(days), tone: 'alert' }
 
-  return { left: `還有 ${days} 天`, tone: days <= 7 ? 'soon' : 'quiet' }
+  return { left: s.daysLeft(days), tone: days <= 7 ? 'soon' : 'quiet' }
 }
 
 // `推薦信 — 等教授回覆` is the step 推薦信 with the note 等教授回覆.
@@ -141,12 +167,14 @@ export const splitNote = (text: string): { text: string; note: string } => {
   return at < 0 ? { text, note: '' } : { text: text.slice(0, at).trim(), note: text.slice(at + 3).trim() }
 }
 
-const DUE_WORDS = /(?:截止|due)[:：\s]*(?:\d{4}-)?\d{1,2}[-/]\d{1,2}/gi
+const DUE_WORDS = /(?:截止|\bdue)[:：\s]*(?:\d{4}[-/])?\d{1,2}[-/]\d{1,2}/gi
+// A block's background note, in any language the pane writes: 背景： / Context: / Background:
+const CONTEXT = /^(?:背景|Context|Background)\s*[:：]\s*/i
 
 // A task's background: its `> 背景：` line; for a hand-kept task, its other notes.
 export const contextOf = (task: ProgressTask): string => {
-  const marked = task.notes.find(note => /^背景[:：]/.test(note))
-  if (marked !== undefined) return marked.replace(/^背景[:：]\s*/, '')
+  const marked = task.notes.find(note => CONTEXT.test(note))
+  if (marked !== undefined) return marked.replace(CONTEXT, '')
   if (task.auto !== null) return ''
 
   return task.notes
@@ -155,33 +183,32 @@ export const contextOf = (task: ProgressTask): string => {
     .join(' · ')
 }
 
-const stepPhrase = (task: ProgressTask): { status: string; tone: Tone } => {
+const stepPhrase = (task: ProgressTask, s: Strings): { status: string; tone: Tone } => {
   const blocked = task.steps.find(step => step.status === 'blocked')
-  if (blocked !== undefined) return { status: `卡住：${splitNote(blocked.text).text}`, tone: 'alert' }
+  if (blocked !== undefined) return { status: s.stuck(splitNote(blocked.text).text), tone: 'alert' }
   const waiting = task.steps.find(step => step.status === 'waiting')
-  if (waiting !== undefined) return { status: `等你：${splitNote(waiting.text).text}`, tone: 'warn' }
+  if (waiting !== undefined) return { status: s.waitsOnYou(splitNote(waiting.text).text), tone: 'warn' }
   const running = task.steps.find(step => step.status === 'running')
-  if (running !== undefined) return { status: `在跑：${splitNote(running.text).text}`, tone: 'running' }
+  if (running !== undefined) return { status: s.runningStep(splitNote(running.text).text), tone: 'running' }
   const current = task.steps[currentStepIndex(task)]
-  if (current === undefined) return { status: '還沒列步驟', tone: 'quiet' }
+  if (current === undefined) return { status: s.noSteps, tone: 'quiet' }
 
-  return { status: `${current.status === 'doing' ? '正在做' : '下一步'}：${current.text}`, tone: 'quiet' }
+  return { status: current.status === 'doing' ? s.doingStep(current.text) : s.nextStep(current.text), tone: 'quiet' }
 }
 
 // Every status a glyph carries is also said in words.
-const SUFFIX: Record<ProgressStepStatus, string> = {
-  done: '',
-  doing: '',
-  todo: '',
-  cancelled: '（取消）',
-  waiting: '（等你）',
-  running: '（在跑）',
-  blocked: '（卡住）',
+const suffixOf = (status: ProgressStepStatus, s: Strings): string => {
+  if (status === 'cancelled') return s.suffixCancelled
+  if (status === 'waiting') return s.suffixWaiting
+  if (status === 'running') return s.suffixRunning
+  if (status === 'blocked') return s.suffixBlocked
+
+  return ''
 }
 
 // Long lists keep the open steps in view: finished ones fold into one line, and past
 // `room` open steps the rest fold into a count.
-export const foldSteps = (steps: readonly ViewStep[], room = 6): ViewStep[] => {
+export const foldSteps = (steps: readonly ViewStep[], room = 6, s: Strings = ZH_TW): ViewStep[] => {
   if (steps.length <= room + 1) return [...steps]
   const done = steps.filter(step => step.status === 'done' || step.status === 'cancelled')
   const open = steps.filter(step => step.status !== 'done' && step.status !== 'cancelled')
@@ -191,30 +218,30 @@ export const foldSteps = (steps: readonly ViewStep[], room = 6): ViewStep[] => {
   return [
     ...(done.length === 0
       ? []
-      : [{ text: `已完成 ${done.length} 步`, note: '', status: 'done' as const, depth: 0, isCurrent: false, number: null }]),
+      : [{ text: s.foldedDone(done.length), note: '', status: 'done' as const, depth: 0, isCurrent: false, number: null }]),
     ...shown,
-    ...(rest === 0 ? [] : [{ text: `還有 ${rest} 步`, note: '', status: 'todo' as const, depth: 0, isCurrent: false, number: null }]),
+    ...(rest === 0 ? [] : [{ text: s.foldedRest(rest), note: '', status: 'todo' as const, depth: 0, isCurrent: false, number: null }]),
   ]
 }
 
-const currentOf = (mirror: ProgressMirror): CurrentView | null => {
+const currentOf = (mirror: ProgressMirror, s: Strings): CurrentView | null => {
   if (mirror.tasks.length === 0) return null
   const doing = doingTask(mirror)
   const waitingYou = mirror.tasks.find(task => task.status !== 'completed' && task.waiting === 'you')
   const blocked = mirror.tasks.find(task => task.status !== 'completed' && task.blocked !== null)
   const done = mirror.tasks.filter(task => task.status === 'completed').length
-  let status = '等你回覆'
+  let status = s.waitingReply
   let tone: Tone = 'warn'
   if (mirror.state === 'done') {
-    status = '全部完成'
+    status = s.allDone
     tone = 'quiet'
   } else if (waitingYou !== undefined) {
-    status = `等你：${waitingYou.subject}`
+    status = s.waitsOnYou(waitingYou.subject)
   } else if (blocked !== undefined) {
-    status = `卡住：${blocked.blocked || blocked.subject}`
+    status = s.stuck(blocked.blocked || blocked.subject)
     tone = 'alert'
   } else if (mirror.state === 'working') {
-    status = doing === undefined ? 'Claude 正在做' : `正在做：${doing.activeForm || doing.subject}`
+    status = doing === undefined ? s.claudeWorking : s.doingStep(doing.activeForm || doing.subject)
     tone = 'accent'
   }
   const steps = mirror.tasks.map((task, index) => {
@@ -227,7 +254,7 @@ const currentOf = (mirror: ProgressMirror): CurrentView | null => {
     }
     const note = stepStatus === 'blocked' ? (task.blocked ?? '') : stepStatus === 'done' ? '' : (task.why ?? '')
     return {
-      text: `${task.subject}${SUFFIX[stepStatus]}`,
+      text: `${task.subject}${suffixOf(stepStatus, s)}`,
       note,
       status: stepStatus,
       depth: 0,
@@ -246,7 +273,7 @@ const currentOf = (mirror: ProgressMirror): CurrentView | null => {
     tone,
     done,
     total: mirror.tasks.length,
-    steps: foldSteps(steps),
+    steps: foldSteps(steps, 6, s),
   }
 }
 
@@ -260,12 +287,12 @@ export const resumeCommand = (sessionId: string, dir: string | null): string => 
   return `cd '${dir.replace(/'/g, "'\\''")}' && ${resume}`
 }
 
-const autoPr = (auto: ProgressAuto | null): string => {
+const autoPr = (auto: ProgressAuto | null, s: Strings): string => {
   if (auto === null || auto.pr === null) return ''
-  return [`PR #${auto.pr}`, ciWords(auto.ci)].filter(part => part !== '').join(' · ')
+  return [`PR #${auto.pr}`, ciWords(auto.ci, 0, s)].filter(part => part !== '').join(' · ')
 }
 
-const prView = (mine: ProgressMirror | null): PrView | null => {
+const prView = (mine: ProgressMirror | null, s: Strings): PrView | null => {
   const pr = mine?.pr ?? null
   if (pr === null) return null
   const tone: Tone =
@@ -279,7 +306,7 @@ const prView = (mine: ProgressMirror | null): PrView | null => {
             ? 'accent'
             : 'quiet'
 
-  return { text: prWords(pr), url: pr.url, tone }
+  return { text: prWords(pr, s), url: pr.url, tone }
 }
 
 // Until the model writes a background, the request itself stands in, cut to one line.
@@ -294,11 +321,12 @@ const contextFor = (mirror: ProgressMirror): string => {
   if (mirror.context) return mirror.context
   const request = firstLine(mirror.firstPrompt)
   const title = mirror.title || fallbackTitle(mirror)
+  if (title === '') return request
 
   return request === title || request.startsWith(title.replace(/…$/, '')) ? '' : request
 }
 
-const rowSteps = (task: ProgressTask): ViewStep[] => {
+const rowSteps = (task: ProgressTask, s: Strings): ViewStep[] => {
   const current = currentStepIndex(task)
 
   return foldSteps(
@@ -310,8 +338,38 @@ const rowSteps = (task: ProgressTask): ViewStep[] => {
       number: index + 1,
     })),
     5,
+    s,
   )
 }
+
+// This session's own steps that wait on the person: answered right from the pane.
+const ownWaiting = (mine: ProgressMirror): WaitingItem[] => {
+  const title = mine.title || fallbackTitle(mine)
+  const context = contextFor(mine)
+
+  return mine.tasks
+    .filter(task => task.status !== 'completed' && task.waiting === 'you')
+    .map(task => ({
+      key: `mine::${task.id}`,
+      project: mine.project,
+      task: title,
+      context,
+      text: task.subject,
+      note: task.why ?? '',
+      when: '',
+      ...askOf(task.subject, task.why ?? '', {
+        ask: task.ask ?? undefined,
+        options: (task.options ?? []).length > 0 ? task.options : undefined,
+        command: task.command ?? undefined,
+        link: task.link ?? undefined,
+      }),
+      where: 'here' as const,
+      agent: '',
+      step: null,
+    }))
+}
+
+const whereRank = (item: WaitingItem): number => (item.where === 'here' ? 0 : 1)
 
 export const buildView = (
   projects: readonly ProgressProject[],
@@ -319,6 +377,10 @@ export const buildView = (
   mine: ProgressMirror | null,
   now: number,
   today = 0,
+  // When the pane first saw each hand-kept task done (by doneKey); one it has not seen counts
+  // as done just now.
+  doneSeen: Readonly<Record<string, number>> = {},
+  s: Strings = ZH_TW,
 ): View => {
   const ownId = mine === null ? '' : shortId(mine.sessionId)
   const waiting: WaitingItem[] = []
@@ -329,45 +391,69 @@ export const buildView = (
   const seen = new Map<string, number>()
 
   for (const project of projects) {
-    const name = project.name || '（未分類）'
+    const name = project.name || s.uncategorized
     const isHere = isHereProject(name, here)
     for (const task of project.tasks) {
       if (task.auto !== null && task.auto.session === ownId) continue
       order += 1
-      const title = task.title || '（未命名）'
+      const title = task.title || s.unnamed
       // A repeated title gets #2, #3, … so its row and buttons are its own.
       const base = `${name}::${title}`
       const repeat = (seen.get(base) ?? 0) + 1
       seen.set(base, repeat)
       const key = repeat === 1 ? base : `${base}#${repeat}`
       const updated = task.auto?.updated ?? 0
-      const when = relativeTime(updated, now)
+      const when = relativeTime(updated, now, s)
       const isComplete = isTaskComplete(task) || task.auto?.state === 'done'
       const isManual = task.auto === null
       const context = contextOf(task)
+      // A session that stopped writing is treated as ended: its questions wait in its row,
+      // not in 等你處理, where nobody could answer them.
+      const stale = isStale(task.auto, now)
+      const isLive = task.auto !== null && task.auto.state !== 'ended' && !stale
 
       task.steps.forEach((step, index) => {
-        if (step.status !== 'waiting') return
+        if (step.status !== 'waiting' || (!isManual && !isLive)) return
+        const parts = splitNote(step.text)
         waiting.push({
           key: `${key}::${index}`,
           project: name,
           task: title,
           context,
-          ...splitNote(step.text),
+          ...parts,
           when,
+          ...askOf(parts.text, parts.note),
+          where: isManual ? 'manual' : 'other',
+          agent: task.auto === null || task.auto.agent === 'claude' ? '' : task.auto.agent,
           step: isManual ? { project: name, title, step: step.text, line: step.line, raw: step.raw } : null,
         })
       })
 
       if (isComplete) {
-        if (isManual || now - updated < DAY) recent.push({ project: name, title, when, at: updated })
+        const seen = isManual ? (doneSeen[doneKey(name, title)] ?? now) : updated
+        if (now - seen < DAY) recent.push({ project: name, title, when: relativeTime(seen, now, s), at: seen })
         continue
       }
 
-      const auto = task.auto === null || task.auto.state === 'done' ? null : task.auto.state
+      const auto = task.auto === null || task.auto.state === 'done' ? null : stale ? 'ended' : task.auto.state
       if (auto === 'waiting') {
         if (!task.steps.some(step => step.status === 'waiting')) {
-          waiting.push({ key, project: name, task: title, context, text: '等你回覆', note: '', when, step: null })
+          waiting.push({
+            key,
+            project: name,
+            task: title,
+            context,
+            text: s.waitingReply,
+            note: '',
+            when,
+            kind: 'reply',
+            options: [],
+            command: null,
+            link: null,
+            where: 'other',
+            agent: task.auto?.agent === 'claude' ? '' : (task.auto?.agent ?? ''),
+            step: null,
+          })
         }
         continue
       }
@@ -375,10 +461,10 @@ export const buildView = (
       const { done, total } = countSteps(task)
       const phrase =
         auto === 'working'
-          ? { status: 'Claude 正在做', tone: 'accent' as const }
+          ? { status: task.auto?.agent === 'claude' ? s.claudeWorking : s.agentWorking(task.auto?.agent ?? ''), tone: 'accent' as const }
           : auto === 'ended'
-            ? { status: '對話已結束，可接手', tone: 'warn' as const }
-            : stepPhrase(task)
+            ? { status: stale ? s.sessionStopped(when) : s.sessionEnded, tone: 'warn' as const }
+            : stepPhrase(task, s)
       const open = task.steps[currentStepIndex(task)]
       const row: TaskRow = {
         key,
@@ -391,21 +477,26 @@ export const buildView = (
         when,
         isHere,
         auto,
-        steps: rowSteps(task),
+        steps: rowSteps(task, s),
         left: task.steps.filter(step => step.status !== 'done' && step.status !== 'cancelled').map(step => step.text),
         next:
           isManual && open !== undefined
             ? { project: name, title, step: open.text, line: open.line, raw: open.raw }
             : null,
         due: null,
-        pr: autoPr(task.auto),
-        resume: auto === 'ended' && task.auto?.resume ? resumeCommand(task.auto.resume, task.auto.dir) : null,
+        pr: autoPr(task.auto, s),
+        agent: task.auto === null || task.auto.agent === 'claude' ? '' : task.auto.agent,
+        // Only Claude's sessions reopen with `claude --resume`.
+        resume:
+          auto === 'ended' && task.auto?.agent === 'claude' && task.auto.resume
+            ? resumeCommand(task.auto.resume, task.auto.dir)
+            : null,
       }
 
       // Work with a date close by is listed once, under 快到期.
       const days = task.due === null ? null : dueDays(task.due, now)
       if (task.due !== null && days !== null && days <= 14) {
-        due.push({ ...row, due: { date: task.due, ...dueLabel(days) }, days })
+        due.push({ ...row, due: { date: task.due, ...dueLabel(days, s) }, days })
         continue
       }
       active.push({ ...row, rank: isHere ? 0 : 1, order })
@@ -420,17 +511,51 @@ export const buildView = (
   const groups: RowGroup[] = []
   for (const row of rows) {
     const group = groups.find(one => one.project === row.project)
-    if (group === undefined) groups.push({ project: row.project, isHere: row.isHere, rows: [row] })
+    if (group === undefined) groups.push({ project: row.project, isHere: row.isHere, rows: [row], summary: '' })
     else group.rows.push(row)
   }
-  const ownWaiting = mine?.tasks.filter(task => task.status !== 'completed' && task.waiting === 'you').length ?? 0
+  for (const group of groups) {
+    const count = (test: (row: TaskRow) => boolean, word: (n: number) => string): string => {
+      const n = group.rows.filter(test).length
+      return n === 0 ? '' : word(n)
+    }
+    group.summary = [
+      s.groupCount(group.rows.length),
+      count(row => row.tone === 'warn' && row.auto !== 'ended', s.groupWaiting),
+      count(row => row.tone === 'alert', s.groupStuck),
+      count(row => row.auto === 'ended', s.groupStopped),
+      count(row => row.auto === 'working', s.groupWorking),
+    ]
+      .filter(part => part !== '')
+      .join(' · ')
+  }
+
+  const asks = [...(mine === null ? [] : ownWaiting(mine)), ...waiting].sort(
+    (a, b) => whereRank(a) - whereRank(b) || askRank(a.kind) - askRank(b.kind),
+  )
+  const dueRows = due.map(({ days: _days, ...row }) => row)
+  const now1 = asks.find(item => askRank(item.kind) < 2)
+  const today1 = due.find(row => row.days <= 1)
+  const stuck = rows.find(row => row.tone === 'alert' && row.auto === null)
+  const later = asks[0]
+  const focus: Focus | null =
+    now1 !== undefined
+      ? { type: 'ask', item: now1 }
+      : today1 !== undefined
+        ? { type: 'due', row: dueRows[due.indexOf(today1)] ?? today1 }
+        : stuck !== undefined
+          ? { type: 'blocked', row: stuck }
+          : later !== undefined
+            ? { type: 'ask', item: later }
+            : null
 
   return {
-    current: mine === null ? null : currentOf(mine),
-    pr: prView(mine),
-    overview: { waiting: waiting.length + ownWaiting, active: rows.length + due.length, due: due.length, today },
-    waiting,
-    due: due.map(({ days: _days, ...row }) => row),
+    current: mine === null ? null : currentOf(mine, s),
+    pr: prView(mine, s),
+    overview: { waiting: asks.length, active: rows.length + due.length, due: due.length, today },
+    focus,
+    waiting: asks,
+    due: dueRows,
     active: rows,
     groups,
     recent: recent.slice(0, 3).map(({ at: _at, ...item }) => item),
@@ -444,19 +569,19 @@ const clip = (text: string, room: number): string => {
 
 // One line under the prompt for when the pane is not on screen: this session's task, what
 // waits on you, what is due soon, and the pull request.
-export const statusLine = (view: View): string | undefined => {
+export const statusLine = (view: View, s: Strings = ZH_TW): string | undefined => {
   const current = view.current
   const urgent = view.overview.due
   const parts = [
     current === null || current.state === 'done'
       ? ''
       : `${clip(current.title, 14)} ${current.done}/${current.total} · ${clip(current.status, 18)}`,
-    view.overview.waiting > 0 ? `${view.overview.waiting} 件等你` : '',
-    urgent > 0 ? `${urgent} 件快到期` : '',
+    view.overview.waiting > 0 ? s.statusWaiting(view.overview.waiting) : '',
+    urgent > 0 ? s.statusDue(urgent) : '',
     view.pr === null ? '' : view.pr.text,
   ].filter(part => part !== '')
 
-  return parts.length === 0 ? undefined : `進度 · ${parts.join(' · ')}`
+  return parts.length === 0 ? undefined : `${s.statusPrefix} · ${parts.join(' · ')}`
 }
 
 export const progressBar = (done: number, total: number, width: number): { filled: string; rest: string } => {

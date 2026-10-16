@@ -1,13 +1,17 @@
 import { expect, test } from 'claude-code/testing'
 
 import type { ProgressMirror, ProgressPr } from '../types'
-import { addManualTask, upsertAutoBlock } from '../hooks/blocks'
+import { askOf } from '../hooks/ask'
+import { addManualTask, isArchivable, takeArchivable, takeManualDone, upsertAutoBlock } from '../hooks/blocks'
+import { dashboardHtml } from '../hooks/dashboard'
 import { ciFinished, prFromGh, prWords } from '../hooks/github'
 import { appendJournal, countDay, journalLine, parseJournal, progressReport } from '../hooks/journal'
 import { applyTaskCreate, applyTaskUpdate, cleanContext, completedSince, emptyMirror, noticesOf } from '../hooks/mirror'
 import { DARK, LIGHT, paletteFor } from '../hooks/palette'
 import { parseProgress } from '../hooks/parse'
-import { JOB_STEPS, parseQuickAdd } from '../hooks/quick'
+import { LANGS, ZH_TW } from '../hooks/i18n'
+import { resolveLang, STRINGS } from '../hooks/strings'
+import { parseQuickAdd } from '../hooks/quick'
 import { buildView, resumeCommand, statusLine } from '../hooks/view'
 
 const NOW = Date.parse('2026-10-16T12:00:00.000Z')
@@ -73,7 +77,7 @@ test('a quick add reads the project, the due date and the steps', () => {
     steps: ['改履歷', '投遞'],
   })
   // Job hunting given no steps gets the usual ones.
-  expect(parseQuickAdd('+求職: Meta 實習', 'x')?.steps).toEqual(JOB_STEPS)
+  expect(parseQuickAdd('+求職: Meta 實習', 'x')?.steps).toEqual(ZH_TW.jobSteps)
   // No project: this session's; no steps: the task is its own step; a URL's colon is no project.
   expect(parseQuickAdd('＋ 讀 https://arxiv.org/abs/2410.1', 'persona_framework')).toEqual({
     project: 'persona_framework',
@@ -127,7 +131,7 @@ test('the report groups what finished by task, then lists open work and what wai
   expect(report).toContain('- persona_framework · 重做進度面板：讀 API、寫 Mod')
   expect(report).toContain('- 求職 · Google 暑期實習：改履歷')
   expect(report).not.toContain('不該出現')
-  expect(report).toContain('進行中\n- persona_framework · 重做進度面板：下一步 寫 Mod（1/2）\n- 求職 · Google 暑期實習：下一步 推薦信（1/3）')
+  expect(report).toContain('進行中\n- persona_framework · 重做進度面板：下一步 寫 Mod (1/2)\n- 求職 · Google 暑期實習：下一步 推薦信 (1/3)')
   expect(report).toContain('等我處理\n- 求職 · 推薦信')
 
   expect(progressReport([], [], null, NOW, 1)).toContain('（這段時間沒有完成的步驟紀錄）')
@@ -218,4 +222,233 @@ test('the model answer becomes a title and a line of background', () => {
   expect([...cleanContext('長'.repeat(80))]).toHaveLength(60)
   const day = journalLine({ project: 'a', task: 'b', step: 'c' }, NOW)
   expect(countDay(`${day}\n${day}\n- 2020-01-01 10:00 · a · b · old\n`, NOW)).toBe(2)
+})
+
+test('what a waiting step asks decides its buttons: confirm, choose, do, review, input, wait', () => {
+  expect(askOf('推上分支', '可以推到 main 嗎？')).toMatchObject({ kind: 'confirm' })
+  expect(askOf('確認 A/B 指標', '用 win rate 還是 Elo？之後的報表都照這個算')).toEqual({
+    kind: 'choose',
+    options: ['win rate', 'Elo'],
+    command: null,
+    link: null,
+  })
+  expect(askOf('安裝', '在本機跑 `setup.ps1`')).toMatchObject({ kind: 'do', command: 'setup.ps1' })
+  expect(askOf('預覽', '看一下 https://claude.ai/artifact/abc 的配色')).toMatchObject({
+    kind: 'review',
+    link: 'https://claude.ai/artifact/abc',
+  })
+  expect(askOf('金鑰', 'API key 放在哪個檔？')).toMatchObject({ kind: 'input' })
+  expect(askOf('推薦信', '等王教授回覆')).toMatchObject({ kind: 'wait' })
+  expect(askOf('其他', '')).toMatchObject({ kind: 'reply' })
+  // What Claude said wins over what the words imply.
+  expect(askOf('版號', '這版叫什麼', { ask: 'choose', options: ['0.7.0', '1.0.0'] })).toMatchObject({
+    kind: 'choose',
+    options: ['0.7.0', '1.0.0'],
+  })
+})
+
+test('the focus is the most pressing thing: an answer here, then elsewhere, then today, then stuck, then waiting on others', () => {
+  const day = 24 * 60 * 60 * 1000
+  const iso = (ms: number): string => new Date(ms).toISOString()
+  const file = (extra: string): string => `## 求職
+### Google 暑期實習
+> 截止 10-16
+- [ ] 投遞
+
+## awesome
+### 發佈
+- [!] 簡中鏡像 — 第 5 階段還沒翻
+
+## 研究
+### 推薦信
+- [?] 推薦信 — 等王教授回覆
+${extra}`
+  const other = `
+## AutoResearchAgent
+<!-- auto session=7f3c19ab agent=codex state=waiting updated=${iso(NOW - 60 * 1000)} -->
+### Stage 2
+- [?] 指標 — 用 win rate 還是 Elo？
+<!-- /auto session=7f3c19ab -->
+`
+  let mine = applyTaskUpdate(working(), { taskId: '2', metadata: { waiting: 'you', why: '可以推到 main 嗎？' } }, NOW)
+  let view = buildView(parseProgress(file(other)), [], mine, NOW)
+  expect(view.focus).toMatchObject({ type: 'ask', item: { where: 'here', kind: 'confirm', text: '寫 Mod' } })
+  expect(view.waiting.map(item => [item.where, item.kind, item.agent])).toEqual([
+    ['here', 'confirm', ''],
+    ['other', 'choose', 'codex'],
+    ['manual', 'wait', ''],
+  ])
+
+  mine = working()
+  view = buildView(parseProgress(file(other)), [], mine, NOW)
+  expect(view.focus).toMatchObject({ type: 'ask', item: { where: 'other', options: ['win rate', 'Elo'] } })
+
+  view = buildView(parseProgress(file('')), [], mine, NOW)
+  expect(view.focus).toMatchObject({ type: 'due', row: { title: 'Google 暑期實習' } })
+
+  view = buildView(parseProgress(file('').replace('截止 10-16', '截止 10-30')), [], mine, NOW)
+  expect(view.focus).toMatchObject({ type: 'blocked', row: { title: '發佈' } })
+
+  view = buildView(parseProgress('## 研究\n### 推薦信\n- [?] 推薦信 — 等王教授回覆\n'), [], mine, NOW)
+  expect(view.focus).toMatchObject({ type: 'ask', item: { kind: 'wait' } })
+  expect(buildView([], [], null, NOW + day).focus).toBe(null)
+})
+
+test('a session silent for half a day counts as stopped: its questions stay in its row, not in 等你處理', () => {
+  const iso = (ms: number): string => new Date(ms).toISOString()
+  const file = (updated: number): string => `## FLOODABM
+<!-- auto session=dddddddd agent=claude state=waiting updated=${iso(updated)} resume=dddddddd-1 dir=%2Fw -->
+### 跑實驗
+- [x] 準備資料
+- [?] 要不要重跑 — 可以重跑嗎？
+<!-- /auto session=dddddddd -->
+`
+  const live = buildView(parseProgress(file(NOW - 60 * 60 * 1000)), [], null, NOW)
+  expect(live.waiting).toHaveLength(1)
+
+  const stopped = buildView(parseProgress(file(NOW - 13 * 60 * 60 * 1000)), [], null, NOW)
+  expect(stopped.waiting).toHaveLength(0)
+  expect(stopped.overview.waiting).toBe(0)
+  expect(stopped.active[0]).toMatchObject({ auto: 'ended', status: '對話已停，13 小時前沒動靜', resume: "cd '/w' && claude --resume dddddddd-1" })
+  expect(stopped.groups[0]?.summary).toBe('1 件 · 1 已停')
+})
+
+test('finished hand-kept tasks leave a day after they were first seen done, whole, and nothing else moves', () => {
+  const day = 24 * 60 * 60 * 1000
+  const text = `# 專案進度
+
+## 求職
+### Google 暑期實習
+> 截止 10-31
+- [x] 改履歷
+- [x] 投遞
+
+### Meta 實習
+- [x] 改履歷
+- [ ] 投遞
+
+## 研究
+### 讀論文
+- [x] 讀完
+`
+  const seen: Record<string, number> = { 'done:求職::Google 暑期實習': NOW - 2 * day, 'done:研究::讀論文': NOW - day / 2 }
+  const out = takeManualDone(text, NOW, key => seen[key])
+  expect(out.keys).toEqual(['done:求職::Google 暑期實習'])
+  expect(out.entries).toEqual(['## 求職 · 2026-10-14\n### Google 暑期實習\n> 截止 10-31\n- [x] 改履歷\n- [x] 投遞'])
+  expect(out.text).toBe('# 專案進度\n\n## 求職\n### Meta 實習\n- [x] 改履歷\n- [ ] 投遞\n\n## 研究\n### 讀論文\n- [x] 讀完\n')
+  // Never seen done: stays until the pane has seen it.
+  expect(takeManualDone(text, NOW, () => undefined).entries).toEqual([])
+})
+
+test('blocks leave after half a day when done and after three days otherwise', () => {
+  const span = (state: 'done' | 'ended' | 'working', hours: number) => ({
+    session: 'x',
+    state,
+    updated: NOW - hours * 60 * 60 * 1000,
+    project: 'p',
+    start: 0,
+    end: 1,
+    isClosed: true,
+  })
+  expect(isArchivable(span('done', 13), NOW)).toBe(true)
+  expect(isArchivable(span('done', 11), NOW)).toBe(false)
+  expect(isArchivable(span('ended', 73), NOW)).toBe(true)
+  expect(isArchivable(span('ended', 47), NOW)).toBe(false)
+  expect(isArchivable(span('working', 73), NOW)).toBe(true)
+})
+
+test('languages: the setting, the stored choice and the system pick the language, in that order', () => {
+  expect(resolveLang('en', 'zh-CN', 'japanese', 'zh_TW.UTF-8')).toBe('en')
+  expect(resolveLang('auto', 'zh-CN', 'english', 'zh_TW.UTF-8')).toBe('zh-CN')
+  expect(resolveLang('auto', undefined, '繁體中文', undefined)).toBe('zh-TW')
+  expect(resolveLang('auto', undefined, 'Chinese', undefined)).toBe('zh-CN')
+  expect(resolveLang(undefined, undefined, undefined, 'zh_TW.UTF-8')).toBe('zh-TW')
+  expect(resolveLang(undefined, undefined, undefined, 'de_DE.UTF-8')).toBe('en')
+  // Every language has every word, functions included.
+  for (const lang of LANGS) {
+    const s = STRINGS[lang]
+    expect(Object.keys(s)).toEqual(Object.keys(ZH_TW))
+    expect(typeof s.daysLeft(3)).toBe('string')
+    expect(s.lang).toBe(lang)
+  }
+})
+
+test('a file written in English reads back: Context, due, and an English quick add', () => {
+  const file = '## Job search\n### Google internship\n> Context: the recruiter asked for a portfolio link\n> due 10-18\n- [x] Update résumé\n- [?] Reference — waiting for Prof. Wang\n'
+  const [task] = parseProgress(file)[0]?.tasks ?? []
+  expect(task?.due).toBe('10-18')
+  const [row] = buildView(parseProgress(file), [], null, NOW, 0, {}, STRINGS.en).due
+  expect(row).toMatchObject({ context: 'the recruiter asked for a portfolio link', due: { left: '2 days left' } })
+  // `overdue 3-4` is not a due date; a year may use /.
+  expect(parseProgress('### a\n> overdue 3-4\n- [ ] x\n')[0]?.tasks[0]?.due).toBe(null)
+  expect(parseProgress('### a\n> due 2026/10/31\n- [ ] x\n')[0]?.tasks[0]?.due).toBe('2026-10-31')
+
+  const entry = parseQuickAdd('+ Job search: Meta internship due 11-20', 'x', STRINGS.en)
+  expect(entry?.steps).toEqual(STRINGS.en.jobSteps)
+  expect(addManualTask('', entry as NonNullable<typeof entry>, STRINGS.en)).toBe(
+    '# Project progress\n\n## Job search\n\n### Meta internship\n> due 11-20\n- [ ] Update résumé\n- [ ] Write cover letter\n- [ ] Apply\n- [ ] Follow up\n',
+  )
+})
+
+test('English questions: a yes or no is a confirm, "or" inside a word is no choice, waiting reads the step too', () => {
+  expect(askOf('Push', 'Push 0.7.0 to main?')).toMatchObject({ kind: 'confirm' })
+  expect(askOf('Deploy', 'Should I deploy it to staging?')).toMatchObject({ kind: 'confirm' })
+  expect(askOf('Check', 'Is this OK for production?')).toMatchObject({ kind: 'confirm', options: [] })
+  expect(askOf('Metric', 'win rate or Elo?')).toMatchObject({ kind: 'choose', options: ['win rate', 'Elo'] })
+  expect(askOf('Waiting on CI', '')).toMatchObject({ kind: 'wait' })
+})
+
+test('archiving never ages out a block with no time, and keeps a section someone left empty', () => {
+  const text = `# P
+
+## Ideas
+
+## done-stuff
+<!-- auto session=aaaaaaaa agent=codex state=done updated=2026-10-10T00:00:00.000Z -->
+### Old
+- [x] one
+<!-- /auto session=aaaaaaaa -->
+
+## untimed
+<!-- auto session=bbbbbbbb agent=codex state=done -->
+### Whenever
+- [x] one
+<!-- /auto session=bbbbbbbb -->
+`
+  const out = takeArchivable(text, NOW)
+  expect(out.entries).toHaveLength(1)
+  expect(out.text).toContain('## Ideas\n')
+  expect(out.text).not.toContain('## done-stuff')
+  expect(out.text).toContain('session=bbbbbbbb')
+})
+
+test('progress.html shows the whole file: counts, the focus, folded sections, steps, and escapes what it shows', () => {
+  const file = `## 求職
+### Google <script>alert(1)</script>
+> 截止 10-18
+- [x] 改履歷
+- [?] 推薦信 — 等王教授回覆
+- [ ] 投遞
+
+## AutoResearchAgent
+<!-- auto session=7f3c19ab agent=codex state=waiting updated=2026-10-16T11:50:00.000Z -->
+### Stage 2
+- [?] 指標 — 用 win rate 還是 Elo？
+<!-- /auto session=7f3c19ab -->
+`
+  const view = buildView(parseProgress(file), [], null, NOW, 3, {}, STRINGS['zh-TW'])
+  const html = dashboardHtml(view, STRINGS['zh-TW'], '/home/me/.claude/progress.md', '更新於 2026-10-16 20:00')
+  expect(html.startsWith('<!doctype html>')).toBe(true)
+  expect(html).toContain('<html lang="zh-Hant">')
+  expect(html).toContain('@media (prefers-color-scheme:dark)')
+  expect(html).toContain('● 2</span> 等你')
+  expect(html).toContain('✓ 3</span> 今天完成')
+  expect(html).toContain('<div class="label">現在最需要你</div>')
+  expect(html).toContain('〔選一個〕')
+  expect(html).toContain('AutoResearchAgent › Stage 2 · codex')
+  expect(html).toContain('data-key="section:waiting" open')
+  expect(html).toContain('Google &lt;script&gt;alert(1)&lt;/script&gt;')
+  expect(html).not.toContain('<script>alert(1)')
+  expect(html).toContain('location.reload()')
+  expect(dashboardHtml(view, STRINGS.en, 'p', 'updated now')).toContain('<html lang="en">')
 })

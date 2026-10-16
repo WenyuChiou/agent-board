@@ -1,6 +1,8 @@
 import type { ProgressMirror, ProgressMirrorTask, ProgressSessionState } from '../types'
 import { prWords } from './github'
-import { AUTO_END, AUTO_START, autoOf, parseAttrs, projectHead } from './parse'
+import { ZH_TW } from './i18n'
+import type { Strings } from './i18n'
+import { AUTO_END, AUTO_START, autoOf, doneKey, isTaskComplete, parseAttrs, parseProgress, projectHead } from './parse'
 import type { QuickEntry } from './quick'
 import type { StepRef } from './view'
 
@@ -14,11 +16,12 @@ const DAY = 24 * 60 * 60 * 1000
 
 export const shortId = (sessionId: string): string => sessionId.slice(0, 8)
 
-export const STATE_WORDS: Record<ProgressSessionState, string> = {
-  working: 'Claude 正在做',
-  waiting: '等你回覆',
-  done: '完成',
-  ended: '對話已結束，可接手',
+export const stateWords = (state: ProgressSessionState, s: Strings = ZH_TW): string => {
+  if (state === 'working') return s.stateWorking
+  if (state === 'waiting') return s.stateWaiting
+  if (state === 'done') return s.stateDone
+
+  return s.stateEnded
 }
 
 const oneLine = (text: string): string => text.replace(/\s+/g, ' ').replace(/^#+\s*/, '').trim()
@@ -38,6 +41,7 @@ const markerOf = (mirror: ProgressMirror): string => {
   const pr = mirror.pr ?? null
   const attrs = [
     `session=${shortId(mirror.sessionId)}`,
+    'agent=claude',
     `state=${mirror.state}`,
     `updated=${new Date(mirror.updated).toISOString()}`,
     mirror.sessionId.length > 8 ? `resume=${mirror.sessionId}` : '',
@@ -48,16 +52,16 @@ const markerOf = (mirror: ProgressMirror): string => {
   return `<!-- auto ${attrs.filter(attr => attr !== '').join(' ')} -->`
 }
 
-export const renderAutoBlock = (mirror: ProgressMirror): string[] => {
+export const renderAutoBlock = (mirror: ProgressMirror, s: Strings = ZH_TW): string[] => {
   const id = shortId(mirror.sessionId)
   const pr = mirror.pr ?? null
-  const meta = [STATE_WORDS[mirror.state], mirror.branch, pr === null ? '' : prWords(pr)].filter(part => part !== '').join(' · ')
+  const meta = [stateWords(mirror.state, s), mirror.branch, pr === null ? '' : prWords(pr, s)].filter(part => part !== '').join(' · ')
 
   return [
     markerOf(mirror),
-    `### ${oneLine(mirror.title) || '（未命名）'}`,
+    `### ${oneLine(mirror.title) || s.unnamed}`,
     `> ${meta}`,
-    ...(mirror.context ? [`> 背景：${oneLine(mirror.context)}`] : []),
+    ...(mirror.context ? [s.contextNote(oneLine(mirror.context))] : []),
     ...mirror.tasks.map(task => {
       const note = task.blocked !== null && task.blocked !== '' ? task.blocked : task.status === 'completed' ? '' : (task.why ?? '')
       const reason = note === '' ? '' : ` — ${oneLine(note)}`
@@ -158,10 +162,10 @@ const sectionRange = (lines: readonly string[], project: string): { heading: num
   return { heading, end: next < 0 ? lines.length : next }
 }
 
-export const upsertAutoBlock = (text: string, mirror: ProgressMirror): string => {
+export const upsertAutoBlock = (text: string, mirror: ProgressMirror, s: Strings = ZH_TW): string => {
   const eol = eolOf(text)
   const lines = linesOf(text)
-  const block = renderAutoBlock(mirror)
+  const block = renderAutoBlock(mirror, s)
   const id = shortId(mirror.sessionId)
   const existing = scanBlocks(lines).find(span => span.session === id)
 
@@ -172,7 +176,7 @@ export const upsertAutoBlock = (text: string, mirror: ProgressMirror): string =>
   }
 
   if (lines.every(line => line.trim() === '')) {
-    return ['# 專案進度', '', `## ${mirror.project}`, '', ...block].join(eol) + eol
+    return [s.fileTitle, '', `## ${mirror.project}`, '', ...block].join(eol) + eol
   }
 
   const section = sectionRange(lines, mirror.project)
@@ -190,9 +194,12 @@ export const upsertAutoBlock = (text: string, mirror: ProgressMirror): string =>
   return lines.join(eol) + eol
 }
 
-const dropEmptySections = (lines: string[]): void => {
+// Drops `##` sections left with nothing in them, only among `touched` (the projects whose
+// blocks or tasks were just removed): an empty section someone keeps on purpose stays.
+const dropEmptySections = (lines: string[], touched: ReadonlySet<string>): void => {
   for (let index = lines.length - 1; index >= 0; index -= 1) {
-    if (!PROJECT.test(lines[index] ?? '')) continue
+    const heading = PROJECT.exec(lines[index] ?? '')
+    if (heading?.[1] === undefined || !touched.has(heading[1])) continue
     const next = lines.findIndex((line, at) => at > index && PROJECT.test(line))
     const end = next < 0 ? lines.length : next
     const body = lines.slice(index + 1, end)
@@ -207,7 +214,7 @@ const removeSpans = (text: string, spans: readonly BlockSpan[]): string => {
     lines.splice(span.start, span.end - span.start + 1)
     trimBlankEdges(lines, Math.min(span.start, lines.length))
   }
-  dropEmptySections(lines)
+  dropEmptySections(lines, new Set(spans.map(span => span.project)))
   while (lines.length > 0 && lines[lines.length - 1]?.trim() === '') lines.pop()
 
   return lines.length === 0 ? '' : lines.join(eol) + eol
@@ -227,20 +234,22 @@ export const extractAutoBlock = (text: string, sessionId: string): string | null
   return span === undefined ? null : lines.slice(span.start, span.end + 1).join('\n')
 }
 
-// Done blocks leave after half a day, interrupted ones after a week, anything after two.
+// Done blocks leave after half a day; anything else (ended, or a session that stopped
+// writing) after three days without a word, so the file never fills up with old work. A
+// block that gives no time (another tool's, written by hand) is never aged out.
 export const isArchivable = (span: BlockSpan, now: number): boolean => {
+  if (span.updated <= 0) return false
   const age = now - span.updated
   if (span.state === 'done') return age > DAY / 2
-  if (span.state === 'ended') return age > 7 * DAY
 
-  return age > 14 * DAY
+  return age > 3 * DAY
 }
 
 export type Archived = { text: string; entries: string[] }
 
 // Moves old blocks out; each entry is the block without its markers, under a dated heading,
 // ready to append to progress-archive.md.
-export const takeArchivable = (text: string, now: number, keep?: string): Archived => {
+export const takeArchivable = (text: string, now: number, keep?: string, s: Strings = ZH_TW): Archived => {
   const lines = linesOf(text)
   const spans = scanBlocks(lines).filter(span => span.isClosed && span.session !== keep && isArchivable(span, now))
   if (spans.length === 0) return { text, entries: [] }
@@ -248,24 +257,62 @@ export const takeArchivable = (text: string, now: number, keep?: string): Archiv
     const body = lines.slice(span.start + 1, span.end)
     const day = new Date(span.updated || now).toISOString().slice(0, 10)
 
-    return [`## ${span.project || '（未分類）'} · ${day}`, ...body].join('\n')
+    return [`## ${span.project || s.uncategorized} · ${day}`, ...body].join('\n')
   })
 
   return { text: removeSpans(text, spans), entries }
 }
 
+// Hand-kept tasks whose every step is done, a day after the pane first saw them done
+// (`seen`, by doneKey): moved out whole, heading to last step, like a session's block.
+export const takeManualDone = (
+  text: string,
+  now: number,
+  seen: (key: string) => number | undefined,
+  s: Strings = ZH_TW,
+): Archived & { keys: string[] } => {
+  const lines = linesOf(text)
+  const spans: BlockSpan[] = []
+  const entries: string[] = []
+  const keys: string[] = []
+  for (const project of parseProgress(text)) {
+    for (const task of project.tasks) {
+      if (task.auto !== null || task.line < 0 || !isTaskComplete(task)) continue
+      const key = doneKey(project.name, task.title)
+      const at = seen(key)
+      if (at === undefined || now - at < DAY) continue
+      let end = task.line
+      for (let index = task.line + 1; index < lines.length; index += 1) {
+        const line = lines[index] ?? ''
+        if (PROJECT.test(line) || TASK.test(line) || AUTO_START.test(line)) break
+        if (line.trim() !== '') end = index
+      }
+      const last = end
+      // The blank lines after it go too, so the next task moves up into its place.
+      while (end + 1 < lines.length && lines[end + 1]?.trim() === '') end += 1
+      spans.push({ session: '', state: 'done', updated: at, project: project.name, start: task.line, end, isClosed: true })
+      const day = new Date(at).toISOString().slice(0, 10)
+      entries.push([`## ${project.name || s.uncategorized} · ${day}`, ...lines.slice(task.line, last + 1)].join('\n'))
+      keys.push(key)
+    }
+  }
+  if (spans.length === 0) return { text, entries: [], keys: [] }
+
+  return { text: removeSpans(text, spans), entries, keys }
+}
+
 // A quick add from the pane: a hand-kept task at the end of its project's section (made
 // if missing), below whatever is there.
-export const addManualTask = (text: string, entry: QuickEntry): string => {
+export const addManualTask = (text: string, entry: QuickEntry, s: Strings = ZH_TW): string => {
   const eol = eolOf(text)
   const lines = linesOf(text)
   const task = [
     `### ${oneLine(entry.title)}`,
-    ...(entry.due === null ? [] : [`> 截止 ${entry.due}`]),
+    ...(entry.due === null ? [] : [s.dueNote(entry.due)]),
     ...entry.steps.map(step => `- [ ] ${oneLine(step)}`),
   ]
   if (lines.every(line => line.trim() === '')) {
-    return ['# 專案進度', '', `## ${entry.project}`, '', ...task].join(eol) + eol
+    return [s.fileTitle, '', `## ${entry.project}`, '', ...task].join(eol) + eol
   }
   const section = sectionRange(lines, entry.project)
   if (section === null) {

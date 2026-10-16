@@ -58,6 +58,7 @@ test('a block between auto markers carries its session, state and time', () => {
   expect(panel?.title).toBe('進度面板')
   expect(panel?.auto).toEqual({
     session: '2be48af2',
+    agent: 'claude',
     state: 'waiting',
     updated: Date.parse('2026-10-16T10:00:00.000Z'),
     resume: null,

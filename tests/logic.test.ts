@@ -71,7 +71,7 @@ test('the block lands under its project, is replaced in place, and comes out cle
   const manual = '# 專案進度\n\n## 求職\n### Google\n- [ ] 投遞\n\n## persona_framework\n### 手寫的\n- [ ] 一\n'
   const once = upsertAutoBlock(manual, sampleMirror())
   expect(once.startsWith(manual.replace(/\n$/, ''))).toBe(true)
-  expect(once).toContain('<!-- auto session=2be48af2 state=working')
+  expect(once).toContain('<!-- auto session=2be48af2 agent=claude state=working')
   expect(once).toContain('- [~] 寫 Mod')
 
   const twice = upsertAutoBlock(once, { ...sampleMirror(), state: 'waiting' })
@@ -290,7 +290,7 @@ test('an end marker closes only its own block, and an unclosed block stops befor
   const mirror = { ...sampleMirror(), sessionId: 'aaaaaaaa-1', project: 'alpha' }
   const out = upsertAutoBlock(lines.join('\n') + '\n', mirror)
   expect(out).toContain('### 手寫的\n- [ ] 別蓋掉我')
-  expect(out.match(/session=aaaaaaaa state=/g)).toHaveLength(1)
+  expect(out.match(/session=aaaaaaaa agent=claude state=/g)).toHaveLength(1)
 })
 
 test("the person's own store settings are never aged out", () => {

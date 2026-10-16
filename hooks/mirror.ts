@@ -1,4 +1,6 @@
 import type { ProgressMirror, ProgressMirrorTask, ProgressSessionState } from '../types'
+import { ZH_TW } from './i18n'
+import type { Strings } from './i18n'
 
 // Claude's own task list, mirrored from the calls it makes (TaskCreate, TaskUpdate,
 // TodoWrite). The list is the source of truth; the file is a view of it.
@@ -33,7 +35,7 @@ export const emptyMirror = (sessionId: string, project: string, now: number, cwd
   updated: now,
 })
 
-const WAITING_YOU = new Set(['you', 'user', 'me', 'human', '使用者', '我'])
+const WAITING_YOU = new Set(['you', 'user', 'me', 'human', 'person', '使用者', '用户', '我'])
 
 const waitingOf = (value: unknown, current: ProgressMirrorTask['waiting']): ProgressMirrorTask['waiting'] => {
   if (value === undefined) return current
@@ -51,7 +53,7 @@ const blockedOf = (value: unknown, current: string | null): string | null => {
 }
 
 // The one line that says what a waiting step needs: `why`, or the words Claude reaches for.
-const WHY_KEYS = ['why', 'reason', 'question', 'ask', 'note'] as const
+const WHY_KEYS = ['why', 'reason', 'question', 'note'] as const
 
 const whyOf = (meta: Record<string, unknown>, waiting: ProgressMirrorTask['waiting'], current: string | null): string | null => {
   if (waiting === null) return null
@@ -64,15 +66,50 @@ const whyOf = (meta: Record<string, unknown>, waiting: ProgressMirrorTask['waiti
   return current
 }
 
-// `metadata: { waiting: "you" | "run", why: "what it needs", blocked: "why" }`; a key set to
-// null clears it, and clearing `waiting` clears its `why`.
+const textOr = (value: unknown, current: string | null): string | null => {
+  if (value === undefined) return current
+  return typeof value === 'string' && value.trim() !== '' ? value.trim() : null
+}
+
+// What the person is asked for, kept while the step waits and dropped when it stops.
+const askFields = (
+  meta: Record<string, unknown>,
+  waiting: ProgressMirrorTask['waiting'],
+  task: ProgressMirrorTask,
+): Pick<ProgressMirrorTask, 'ask' | 'options' | 'command' | 'link'> => {
+  if (waiting === null) return { ask: null, options: [], command: null, link: null }
+  const options = Array.isArray(meta.options)
+    ? meta.options.filter((one): one is string => typeof one === 'string' && one.trim() !== '').map(one => one.trim())
+    : meta.options === null
+      ? []
+      : (task.options ?? [])
+
+  return {
+    ask: textOr(meta.ask, task.ask ?? null),
+    options,
+    command: textOr(meta.command, task.command ?? null),
+    link: textOr(meta.link, task.link ?? null),
+  }
+}
+
+// `metadata: { waiting: "you" | "run", why: "what it needs", ask: "confirm", options: [...],
+// command: "...", link: "...", blocked: "why" }`; a key set to null clears it, and clearing
+// `waiting` clears what it asked.
 const withMetadata = (task: ProgressMirrorTask, metadata: object | undefined): ProgressMirrorTask => {
   if (metadata === undefined) return task
   const meta = metadata as Record<string, unknown>
   const waiting = waitingOf(meta.waiting, task.waiting)
 
-  return { ...task, waiting, why: whyOf(meta, waiting, task.why ?? null), blocked: blockedOf(meta.blocked, task.blocked) }
+  return {
+    ...task,
+    waiting,
+    why: whyOf(meta, waiting, task.why ?? null),
+    ...askFields(meta, waiting, task),
+    blocked: blockedOf(meta.blocked, task.blocked),
+  }
 }
+
+const NO_ASK = { ask: null, options: [], command: null, link: null }
 
 export const applyTaskCreate = (
   mirror: ProgressMirror,
@@ -88,6 +125,7 @@ export const applyTaskCreate = (
       activeForm: input.activeForm ?? '',
       waiting: null,
       why: null,
+      ...NO_ASK,
       blocked: null,
       blockedBy: [],
     },
@@ -113,7 +151,7 @@ export const applyTaskUpdate = (mirror: ProgressMirror, input: TaskUpdateInput, 
       blockedBy: [...new Set([...task.blockedBy, ...(input.addBlockedBy ?? [])])],
     }
     // Finishing a step clears what it was waiting on.
-    const done = next.status === 'completed' ? { ...next, waiting: null, why: null, blocked: null } : next
+    const done = next.status === 'completed' ? { ...next, waiting: null, why: null, ...NO_ASK, blocked: null } : next
 
     return withMetadata(done, next.status === 'completed' ? undefined : input.metadata)
   })
@@ -130,6 +168,7 @@ export const applyTodoWrite = (mirror: ProgressMirror, todos: readonly TodoInput
     activeForm: todo.activeForm,
     waiting: null,
     why: null,
+    ...NO_ASK,
     blocked: null,
     blockedBy: [],
   })),
@@ -151,6 +190,10 @@ export const fromTaskList = (mirror: ProgressMirror, listed: readonly ListedTask
       activeForm: known?.activeForm ?? '',
       waiting: item.status === 'completed' ? null : (known?.waiting ?? null),
       why: item.status === 'completed' ? null : (known?.why ?? null),
+      ask: item.status === 'completed' ? null : (known?.ask ?? null),
+      options: item.status === 'completed' ? [] : (known?.options ?? []),
+      command: item.status === 'completed' ? null : (known?.command ?? null),
+      link: item.status === 'completed' ? null : (known?.link ?? null),
       blocked: item.status === 'completed' ? null : (known?.blocked ?? null),
       blockedBy: [...item.blockedBy],
     }
@@ -170,7 +213,7 @@ export const completedSince = (before: ProgressMirror, after: ProgressMirror): P
 
 // What deserves a desktop notification between two states of the mirror: a step that now
 // needs the person, and the whole list finishing.
-export const noticesOf = (before: ProgressMirror, after: ProgressMirror): string[] => {
+export const noticesOf = (before: ProgressMirror, after: ProgressMirror, s: Strings = ZH_TW): string[] => {
   const needs = after.tasks.filter(
     task =>
       task.status !== 'completed' &&
@@ -180,8 +223,8 @@ export const noticesOf = (before: ProgressMirror, after: ProgressMirror): string
   const title = after.title || fallbackTitle(after)
 
   return [
-    ...needs.map(task => `需要你：${task.subject}`),
-    ...(isAllDone(after) && !isAllDone(before) ? [`做完了：${title}（${after.tasks.length}/${after.tasks.length}）`] : []),
+    ...needs.map(task => s.noticeNeedsYou(task.subject)),
+    ...(isAllDone(after) && !isAllDone(before) ? [s.noticeDone(title, after.tasks.length)] : []),
   ]
 }
 
@@ -217,7 +260,7 @@ export const cleanTitle = (answer: string): string => {
 export const cleanContext = (answer: string): string => {
   const line = answer
     .replace(/^["'「『\s]+|["'」』\s]+$/g, '')
-    .replace(/^(背景|Background)[:：]\s*/i, '')
+    .replace(/^(背景|Background|Context)\s*[:：]\s*/i, '')
     .replace(/\s+/g, ' ')
   const chars = [...line.trim()]
 
@@ -225,7 +268,7 @@ export const cleanContext = (answer: string): string => {
 }
 
 // The note the conversation gets after a compaction: where this session's task stands.
-export const resumeNote = (mirror: ProgressMirror): string | null => {
+export const resumeNote = (mirror: ProgressMirror, s: Strings = ZH_TW): string | null => {
   const open = mirror.tasks.filter(task => task.status !== 'completed')
   if (open.length === 0) return null
   const done = mirror.tasks.length - open.length
@@ -234,16 +277,16 @@ export const resumeNote = (mirror: ProgressMirror): string | null => {
   const waiting = open.filter(task => task.waiting === 'you' || task.blocked !== null)
 
   return [
-    '[進度面板] 對話剛壓縮過。壓縮前的進度（同步自 Task 清單）：',
-    `目標：${mirror.title || fallbackTitle(mirror)}（${mirror.project}）`,
-    mirror.context === '' || mirror.context === undefined ? '' : `背景：${mirror.context}`,
-    `完成 ${done}/${mirror.tasks.length}`,
-    doing === undefined ? '' : `正在做：${doing.subject}`,
-    next.length === 0 ? '' : `接下來：${next.map(task => task.subject).join('；')}`,
+    s.resumeHead,
+    s.resumeGoal(mirror.title || fallbackTitle(mirror), mirror.project),
+    mirror.context === '' || mirror.context === undefined ? '' : s.resumeContext(mirror.context),
+    s.resumeDone(done, mirror.tasks.length),
+    doing === undefined ? '' : s.resumeDoing(doing.subject),
+    next.length === 0 ? '' : s.resumeNext(next.map(task => task.subject).join(s.stepSep)),
     waiting.length === 0
       ? ''
-      : `等使用者或卡住：${waiting.map(task => (task.blocked ? `${task.subject}（${task.blocked}）` : task.subject)).join('；')}`,
-    '先用 TaskList 確認最新狀態，再從「正在做」那步接著做；不要重建已經存在的任務。',
+      : s.resumeWaiting(waiting.map(task => (task.blocked ? `${task.subject} (${task.blocked})` : task.subject)).join(s.stepSep)),
+    s.resumeTail,
   ]
     .filter(line => line !== '')
     .join('\n')
@@ -252,7 +295,7 @@ export const resumeNote = (mirror: ProgressMirror): string | null => {
 // Only the mod's own per-session records age out of the store; a setting the person made
 // (closing the pane by hand) stays until they change it.
 export const isStaleStoreKey = (key: string, value: unknown, now: number, maxAge: number): boolean => {
-  if (!key.startsWith('mirror:') && !key.startsWith('hinted:')) return false
+  if (!key.startsWith('mirror:') && !key.startsWith('hinted:') && !key.startsWith('done:')) return false
   const stamp = typeof value === 'number' ? value : ((value as { updated?: number } | undefined)?.updated ?? 0)
 
   return now - stamp > maxAge
