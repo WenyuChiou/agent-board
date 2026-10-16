@@ -1,0 +1,64 @@
+# Checks every push to main and every pull request, so a PR reports real checks
+# (Wenyu's merge gate refuses a PR with zero checks).
+# Runs offline: `claude plugin validate` and `claude plugin test` need no login or API key.
+name: test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: test-${{ github.ref }}
+  # A newer push to a PR replaces its run; every commit on main keeps its own result.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  # The Claude Code release the tests are checked against; bump on purpose and
+  # keep README.md:57-58 ("tested on ... through ...") in step.
+  CLAUDE_CODE_VERSION: 2.1.301
+  DISABLE_AUTOUPDATER: "1"
+  CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1"
+
+jobs:
+  plugin:
+    name: plugin (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22
+
+      - name: Install Claude Code
+        run: npm install -g "@anthropic-ai/claude-code@${{ env.CLAUDE_CODE_VERSION }}"
+
+      # Its own step: fails early if `claude` does not resolve, and logs the version.
+      - name: Claude Code version
+        run: claude --version
+
+      - name: Validate the plugin and marketplace
+        run: claude plugin validate --strict .
+
+      - name: Pane and hook tests
+        run: claude plugin test .
+
+      # The installer checks exist from 0.5.2 on; skipped while a branch lacks them.
+      - name: Installer checks (setup.sh)
+        if: runner.os != 'Windows' && hashFiles('tests/setup.check.sh') != ''
+        run: bash tests/setup.check.sh
+
+      - name: Installer checks (setup.ps1)
+        if: runner.os == 'Windows' && hashFiles('tests/setup.check.ps1') != ''
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File tests/setup.check.ps1
