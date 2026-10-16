@@ -146,6 +146,7 @@ export const dueDays = (due: string, now: number): number | null => {
     parts.length === 3 ? parts : [today.getUTCFullYear(), parts[0] ?? Number.NaN, parts[1] ?? Number.NaN]
   if (year === undefined || month === undefined || day === undefined) return null
   if ([year, month, day].some(Number.isNaN)) return null
+  if (month < 1 || month > 12 || day < 1 || day > 31) return null
   const midnight = Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate())
   let target = Date.UTC(year, month - 1, day)
   if (parts.length === 2 && target < midnight - 60 * DAY) target = Date.UTC(year + 1, month - 1, day)

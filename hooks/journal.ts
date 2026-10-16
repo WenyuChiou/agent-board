@@ -32,10 +32,10 @@ export const previousMonth = (now: number): number => {
 }
 
 // ` · ` separates the fields, so a field never holds one.
-const field = (text: string): string => text.replace(/\s+/g, ' ').replace(/\s·\s/g, '・').trim() || '（未命名）'
+const field = (text: string, s: Strings): string => text.replace(/\s+/g, ' ').replace(/\s·\s/g, '・').trim() || s.unnamed
 
-export const journalLine = (entry: Omit<JournalEntry, 'at'>, now: number): string =>
-  `- ${localStamp(now)} · ${field(entry.project)} · ${field(entry.task)} · ${field(entry.step)}`
+export const journalLine = (entry: Omit<JournalEntry, 'at'>, now: number, s: Strings = ZH_TW): string =>
+  `- ${localStamp(now)} · ${field(entry.project, s)} · ${field(entry.task, s)} · ${field(entry.step, s)}`
 
 export const appendJournal = (text: string, lines: readonly string[], s: Strings = ZH_TW): string =>
   lines.length === 0 ? text : `${text.trim() === '' ? `${s.journalTitle}\n` : text.replace(/\s*$/, '\n')}${lines.join('\n')}\n`

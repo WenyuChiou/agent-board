@@ -69,7 +69,7 @@ export const EN: Strings = {
     wait: 'Waiting',
     reply: 'Reply',
   } as Record<AskKind, string>,
-  chip: (word: string): string => `[${word}]`,
+  chip: (word: string): string => `[${word}] `,
   answerText: (subject: string, answer: string): string => `About "${subject}": ${answer}`,
 
   // Desktop notifications
@@ -182,7 +182,7 @@ export const EN: Strings = {
   ready: 'Ready',
   readyAnswer: 'Ready, go on',
   replyPlaceholder: 'Reply to Claude…',
-  contextLine: (text: string): string => `context: ${text}`,
+  contextLine: (text: string): string => `Context: ${text}`,
   continueElsewhere: (project: string): string => `Continue in the ${project} session.`,
   heldElsewhere: 'Another session is working on it.',
   takeOver: 'Take over and finish',

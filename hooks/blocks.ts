@@ -2,6 +2,7 @@ import type { ProgressMirror, ProgressMirrorTask, ProgressSessionState } from '.
 import { prWords } from './github'
 import { ZH_TW } from './i18n'
 import type { Strings } from './i18n'
+import { localDay } from './journal'
 import { AUTO_END, AUTO_START, autoOf, doneKey, isTaskComplete, parseAttrs, parseProgress, projectHead } from './parse'
 import type { QuickEntry } from './quick'
 import type { StepRef } from './view'
@@ -255,7 +256,7 @@ export const takeArchivable = (text: string, now: number, keep?: string, s: Stri
   if (spans.length === 0) return { text, entries: [] }
   const entries = spans.map(span => {
     const body = lines.slice(span.start + 1, span.end)
-    const day = new Date(span.updated || now).toISOString().slice(0, 10)
+    const day = localDay(span.updated || now)
 
     return [`## ${span.project || s.uncategorized} · ${day}`, ...body].join('\n')
   })
@@ -291,7 +292,7 @@ export const takeManualDone = (
       // The blank lines after it go too, so the next task moves up into its place.
       while (end + 1 < lines.length && lines[end + 1]?.trim() === '') end += 1
       spans.push({ session: '', state: 'done', updated: at, project: project.name, start: task.line, end, isClosed: true })
-      const day = new Date(at).toISOString().slice(0, 10)
+      const day = localDay(at)
       entries.push([`## ${project.name || s.uncategorized} · ${day}`, ...lines.slice(task.line, last + 1)].join('\n'))
       keys.push(key)
     }

@@ -20,7 +20,7 @@ export type Ask = { kind: AskKind; options: string[]; command: string | null; li
 // The words are matched in Chinese (繁 and 简) and English alike, whichever the pane speaks.
 const CHOICE = /(.+?)\s*(?:還是|还是|或是|\bor\b)\s*(.+?)[？?]/i
 const CONFIRM =
-  /(嗎|吗|可以嗎|可以吗|好嗎|好吗|要不要|可不可以|是否|\bok\?|\bokay\?)\s*[？?]?\s*$|^(可以|要不要|能不能|shall i|should i|can i|may i|is it ok|ok to)\b/i
+  /(嗎|吗|可以嗎|可以吗|好嗎|好吗|要不要|可不可以|是否|\bok\?|\bokay\?)\s*[？?]?\s*$|^(可以|要不要|能不能)|^(shall i|should i|can i|may i|is it ok|ok to)\b/i
 const DO =
   /^(請|请|please)?\s*(在|到|去|幫我|帮我)?.{0,8}(跑|執行|执行|按|點|点|建立|建|登入|登录|安裝|安装|設定|设置|下載|下载|上傳|上传|貼|贴|開啟|开启|打開|打开|授權|授权|簽|签|寄|送出|push|run|install|click|log ?in|sign in|create|open|paste|set up)/i
 const REVIEW = /(看一下|看看|檢查|检查|確認一下|确认一下|過目|过目|review|預覽|预览|校對|校对|讀一下|读一下|take a look|look at|check)/i
@@ -32,11 +32,16 @@ const INPUT = /(提供|給我|给我|告訴我|告诉我|哪個|哪个|哪裡|�
 const URL = /https?:\/\/\S+/
 const CODE = /`([^`]+)`/
 
-// Splits `0.6.0 還是 1.0.0？` or a list Claude gave into options.
+// Splits `0.6.0 還是 1.0.0？` or a list Claude gave into options. The first option is the
+// clause right before 還是 / or, so `先開旗標，還是全部開？` and `A first, or B?` read too.
 const optionsOf = (text: string): string[] => {
   const match = CHOICE.exec(text)
   if (match === null) return []
-  const lead = (match[1] ?? '').split(/[，,：:；;。]/).pop()?.trim() ?? ''
+  const clauses = (match[1] ?? '')
+    .split(/[，,：:；;。]/)
+    .map(one => one.trim())
+    .filter(one => one !== '')
+  const lead = clauses[clauses.length - 1] ?? ''
   const rest = (match[2] ?? '').trim()
   return [lead.replace(/^(要|用|選|是)/, '').trim(), rest].filter(one => one !== '' && [...one].length <= 24)
 }

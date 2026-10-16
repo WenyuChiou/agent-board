@@ -398,6 +398,20 @@ test('English questions: a yes or no is a confirm, "or" inside a word is no choi
   expect(askOf('Waiting on CI', '')).toMatchObject({ kind: 'wait' })
 })
 
+test('a choice with a comma before 還是 / or still reads both options', () => {
+  expect(askOf('上線方式', '先用旗標給部分人，還是直接全部開？')).toMatchObject({
+    kind: 'choose',
+    options: ['先用旗標給部分人', '直接全部開'],
+  })
+  expect(askOf('Release plan', 'Behind a flag first, or everyone at once?')).toMatchObject({
+    kind: 'choose',
+    options: ['Behind a flag first', 'everyone at once'],
+  })
+  expect(askOf('確認 A/B 指標', '之後的報表都照這個算：win rate 還是 Elo？')).toMatchObject({
+    options: ['win rate', 'Elo'],
+  })
+})
+
 test('archiving never ages out a block with no time, and keeps a section someone left empty', () => {
   const text = `# P
 
@@ -451,4 +465,12 @@ test('progress.html shows the whole file: counts, the focus, folded sections, st
   expect(html).not.toContain('<script>alert(1)')
   expect(html).toContain('location.reload()')
   expect(dashboardHtml(view, STRINGS.en, 'p', 'updated now')).toContain('<html lang="en">')
+})
+
+test('可以 / 能不能 opening a question make a confirm; a date that does not exist is no due date; the journal speaks the pane language', () => {
+  expect(askOf('推上', '可以推到 main')).toMatchObject({ kind: 'confirm' })
+  expect(askOf('暫停', '能不能先停一下')).toMatchObject({ kind: 'confirm' })
+  const view = buildView(parseProgress('## P\n\n### Odd date\n> due 13-45\n- [ ] a\n'), [], null, NOW, 0, {}, STRINGS.en)
+  expect(view.due).toEqual([])
+  expect(journalLine({ project: '', task: 'Task', step: 'Step' }, NOW, STRINGS.en)).toContain(' · (unnamed) · Task · Step')
 })

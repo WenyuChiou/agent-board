@@ -301,10 +301,11 @@ const journal = ($: EngineInterface, entries: ReadonlyArray<Omit<JournalEntry, '
     const at = await $.clock.now()
     const path = journalPath(await progressPath($), at)
     const before = await readText($, path)
+    const s = await wordsOf($)
     const after = appendJournal(
       before,
-      entries.map(entry => journalLine(entry, at)),
-      await wordsOf($),
+      entries.map(entry => journalLine(entry, at, s)),
+      s,
     )
     await $.fs.write(path, after)
     countedDay = localDay(at)
@@ -458,14 +459,15 @@ const archiveOld = async ($: EngineInterface): Promise<number> => {
   const mirror = await read($, mine)
   const keep = mirror === null ? undefined : shortId(mirror.sessionId)
   const at = await $.clock.now()
-  const blocks = takeArchivable(text, at, keep)
+  const s = await wordsOf($)
+  const blocks = takeArchivable(text, at, keep, s)
   const seen = await read($, doneSeen)
-  const manual = takeManualDone(blocks.text, at, key => seen[key])
+  const manual = takeManualDone(blocks.text, at, key => seen[key], s)
   const entries = [...blocks.entries, ...manual.entries]
   if (entries.length === 0) return 0
   const archive = archivePath(path, at)
   const past = await readText($, archive)
-  const head = past.trim() === '' ? `${(await wordsOf($)).archiveTitle}\n\n` : past.replace(/\s*$/, '\n\n')
+  const head = past.trim() === '' ? `${s.archiveTitle}\n\n` : past.replace(/\s*$/, '\n\n')
   await $.fs.write(archive, head + entries.join('\n\n') + '\n')
   await $.fs.write(path, manual.text)
   if (manual.keys.length > 0) {
