@@ -8,6 +8,9 @@
 # instead of a PowerShell profile: ~/.zshrc for zsh, ~/.bashrc for bash (~/.bash_profile on
 # macOS), ~/.profile otherwise; fish gets a line to add by hand, and settings.json keeps the
 # key until a line sets it.
+# It also turns on auto-update for the marketplace (extraKnownMarketplaces.claude-progress-pane
+# .autoUpdate), unless you turned it off: Claude Code updates only the official marketplace on
+# its own.
 set -euo pipefail
 
 marketplace='WenyuChiou/claude-progress-pane'
@@ -23,6 +26,18 @@ for arg in "$@"; do
     *) echo "unknown option: $arg" >&2; exit 2 ;;
   esac
 done
+
+# Read before `marketplace add`, which writes its entry anew without autoUpdate: an
+# auto-update you turned off stays off.
+auto_off="$(python3 -c '
+import json, sys
+try:
+    with open(sys.argv[1], encoding="utf-8-sig") as f:
+        entry = json.load(f)["extraKnownMarketplaces"]["claude-progress-pane"]
+    print(1 if entry.get("autoUpdate") is False else 0)
+except Exception:
+    print(0)
+' "$claude/settings.json" 2>/dev/null || echo 0)"
 
 if [ "$install" = 1 ]; then
   if command -v claude >/dev/null 2>&1; then
@@ -41,11 +56,12 @@ fi
 rule_file="$here/claude-md-rule.md"
 [ -f "$rule_file" ] || rule_file="$claude/plugins/marketplaces/claude-progress-pane/scripts/claude-md-rule.md"
 
-python3 - "$claude" "$rule_file" "$keep_rule" "$HOME" "${SHELL:-}" "${ZDOTDIR:-}" <<'PY'
+python3 - "$claude" "$rule_file" "$keep_rule" "$HOME" "${SHELL:-}" "${ZDOTDIR:-}" "$auto_off" <<'PY'
 import json, os, re, shutil, sys
 
 claude, rule_file, keep_rule = sys.argv[1], sys.argv[2], sys.argv[3] == '1'
 home, shell, zdotdir = sys.argv[4], os.path.basename(sys.argv[5]), sys.argv[6]
+auto_off = sys.argv[7] == '1'
 done = []
 
 def save(path, text):
@@ -111,6 +127,25 @@ def edit_pair(text, key, value):
             return re.sub(form, to, text)
     return None
 
+def add_first(text, key, member):
+    """Puts member first in the object under "key", laid out like that object's other members.
+    None when the key is not there exactly once."""
+    if text is None:
+        return None
+    found = list(re.finditer('"' + re.escape(key) + r'"\s*:\s*\{', text))
+    if len(found) != 1:
+        return None
+    at = found[0].end()
+    rest = text[at:]
+    line = re.match(r'[ \t]*(\r?\n)([ \t]*)(?=\S)', rest)
+    if re.match(r'\s*\}', rest):
+        add = member
+    elif line:
+        add = line.group(1) + line.group(2) + member + ','
+    else:
+        add = member + ', '
+    return text[:at] + add + rest
+
 settings_path = os.path.join(claude, 'settings.json')
 text, bom, settings = '', False, None
 if os.path.exists(settings_path):
@@ -149,6 +184,12 @@ if settings is not None:
                     del env['CLAUDE_CODE_PLUGIN_DIRS']
                     nxt = edit_pair(nxt, 'CLAUDE_CODE_PLUGIN_DIRS', None)
                 edits += ['removed %s from CLAUDE_CODE_PLUGIN_DIRS' % d for d in dirs if old_mod.search(d)]
+    known = settings.get('extraKnownMarketplaces') if isinstance(settings, dict) else None
+    entry = known.get('claude-progress-pane') if isinstance(known, dict) else None
+    if isinstance(entry, dict) and 'autoUpdate' not in entry and not auto_off:
+        entry['autoUpdate'] = True
+        nxt = add_first(nxt, 'claude-progress-pane', '"autoUpdate": true')
+        edits.append('turned on auto-update for the claude-progress-pane marketplace')
     if edits:
         try:
             same = nxt is not None and json.loads(nxt) == settings
@@ -158,7 +199,7 @@ if settings is not None:
             save(settings_path, (b'\xef\xbb\xbf' if bom else b'') + nxt.encode('utf-8'))
             done += edits
         else:
-            print('settings.json was left as it is; make these changes in its env by hand: '
+            print('settings.json was left as it is; make these changes by hand: '
                   + '; '.join(edits), file=sys.stderr)
 
 md_path = os.path.join(claude, 'CLAUDE.md')

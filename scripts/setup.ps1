@@ -18,6 +18,9 @@
 # 4. CLAUDE.md: drops the <!-- project-progress:start/end --> block; the plugin now adds
 #    the rule itself. With -KeepRule it writes or refreshes that block instead: use it
 #    where an organization manages Claude Code, since the plugin's own rule does not run there.
+# 5. settings.json extraKnownMarketplaces.claude-progress-pane: adds "autoUpdate": true, so
+#    the plugin updates itself (Claude Code updates only the official marketplace on its own).
+#    An autoUpdate you set to false stays false.
 # Each file it changes is copied to <file>.bak first. It deletes nothing on disk.
 param([switch]$KeepRule, [switch]$NoInstall, [string]$ProfilePath)
 
@@ -31,6 +34,15 @@ function Install-ProgressPane {
   else { $claude = Join-Path ([Environment]::GetFolderPath('UserProfile')) '.claude' }
   $utf8 = New-Object System.Text.UTF8Encoding $false   # no BOM: Claude Code parses these files
   $done = @()
+
+  # Read before `marketplace add`, which writes its entry anew without autoUpdate: an
+  # auto-update you turned off stays off.
+  $autoOff = $false
+  try {
+    $prior = [IO.File]::ReadAllText((Join-Path $claude 'settings.json')) | ConvertFrom-Json
+    $autoOff = $prior.extraKnownMarketplaces.'claude-progress-pane'.autoUpdate -eq $false
+  }
+  catch { $autoOff = $false }
 
   # The plugin itself
   if (-not $NoInstall) {
@@ -129,6 +141,19 @@ function Install-ProgressPane {
     }
     return $null
   }
+  function Add-JsonFirst([string]$json, [string]$key, [string]$member) {
+    # Puts $member first in the object under "key", laid out like that object's other
+    # members. $null when the key is not there exactly once.
+    $found = [regex]::Matches($json, '"' + [regex]::Escape($key) + '"\s*:\s*\{')
+    if ($found.Count -ne 1) { return $null }
+    $at = $found[0].Index + $found[0].Length
+    $rest = $json.Substring($at)
+    $line = [regex]::Match($rest, '^[ \t]*(\r?\n)([ \t]*)(?=\S)')
+    if ([regex]::IsMatch($rest, '^\s*\}')) { $add = $member }
+    elseif ($line.Success) { $add = $line.Groups[1].Value + $line.Groups[2].Value + $member + ',' }
+    else { $add = $member + ', ' }
+    return $json.Substring(0, $at) + $add + $rest
+  }
   $settingsPath = Join-Path $claude 'settings.json'
   $text = ''
   $bom = $false
@@ -177,6 +202,19 @@ function Install-ProgressPane {
         }
       }
     }
+    $known = $null
+    if ($settings.PSObject.Properties['extraKnownMarketplaces']) { $known = $settings.extraKnownMarketplaces }
+    if ($known -is [Management.Automation.PSCustomObject] -and $known.PSObject.Properties['claude-progress-pane']) {
+      $entry = $known.'claude-progress-pane'
+      if ($entry -is [Management.Automation.PSCustomObject] -and -not $entry.PSObject.Properties['autoUpdate'] -and -not $autoOff) {
+        # First, as in the text, so the check below compares the same key order.
+        $fresh = [ordered]@{ autoUpdate = $true }
+        foreach ($one in $entry.PSObject.Properties) { $fresh[$one.Name] = $one.Value }
+        $known.'claude-progress-pane' = [PSCustomObject]$fresh
+        if ($null -ne $next) { $next = Add-JsonFirst $next 'claude-progress-pane' '"autoUpdate": true' }
+        $edits += 'turned on auto-update for the claude-progress-pane marketplace'
+      }
+    }
     if ($edits.Count -gt 0) {
       $same = $false
       if ($null -ne $next) {
@@ -192,7 +230,7 @@ function Install-ProgressPane {
         $done += $edits
       }
       else {
-        Write-Warning ("settings.json was left as it is; make these changes in its env by hand: " +
+        Write-Warning ("settings.json was left as it is; make these changes by hand: " +
           ($edits -join '; '))
       }
     }

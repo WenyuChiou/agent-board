@@ -162,6 +162,45 @@ try {
        $out -match 'Set-ExecutionPolicy' -and
        (Count-Line ([IO.File]::ReadAllText((Join-Path $dir 'profile.ps1')))) -eq 1)
   }
+
+  # 13. The marketplace entry gets autoUpdate first, in its own indent; nothing else moves.
+  $entry = @(
+    '{',
+    '  "extraKnownMarketplaces": {',
+    '    "claude-progress-pane": {',
+    '      "source": {',
+    '        "source": "github",',
+    '        "repo": "WenyuChiou/claude-progress-pane"',
+    '      }',
+    '    }',
+    '  },',
+    '  "enabledPlugins": {',
+    '    "project-progress@claude-progress-pane": true',
+    '  }',
+    '}',
+    '')
+  $dir = New-Case ($entry -join "`n")
+  Invoke-Setup $dir | Out-Null
+  $want = @($entry[0..2]) + @('      "autoUpdate": true,') + @($entry[3..($entry.Count - 1)])
+  Check 'auto-update: the marketplace entry gets "autoUpdate": true, the rest stays' ((Read-Settings $dir) -ceq ($want -join "`n"))
+
+  # 14. On one line it stays on one line.
+  $dir = New-Case '{"extraKnownMarketplaces": {"claude-progress-pane": {"source": {"source": "github", "repo": "WenyuChiou/claude-progress-pane"}}}}'
+  Invoke-Setup $dir | Out-Null
+  Check 'auto-update: an entry on one line stays on one line' `
+    ((Read-Settings $dir) -ceq '{"extraKnownMarketplaces": {"claude-progress-pane": {"autoUpdate": true, "source": {"source": "github", "repo": "WenyuChiou/claude-progress-pane"}}}}')
+
+  # 15. Turned off by hand: stays off, and the file is not touched.
+  $text = "{`n  `"extraKnownMarketplaces`": {`n    `"claude-progress-pane`": {`n      `"source`": {`"source`": `"github`", `"repo`": `"WenyuChiou/claude-progress-pane`"},`n      `"autoUpdate`": false`n    }`n  }`n}`n"
+  $dir = New-Case $text
+  Invoke-Setup $dir | Out-Null
+  Check 'auto-update: "autoUpdate": false is left alone' `
+    ((Read-Settings $dir) -ceq $text -and -not (Test-Path (Join-Path $dir '.claude\settings.json.bak')))
+
+  # 16. No marketplace entry (the plugin not installed yet): nothing is added.
+  $dir = New-Case '{"model": "opus"}'
+  Invoke-Setup $dir | Out-Null
+  Check 'auto-update: no marketplace entry, nothing added' ((Read-Settings $dir) -ceq '{"model": "opus"}')
 }
 finally {
   foreach ($one in $script:dirs) { if (Test-Path $one) { Remove-Item -LiteralPath $one -Recurse -Force } }

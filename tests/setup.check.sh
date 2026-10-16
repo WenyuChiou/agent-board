@@ -103,6 +103,31 @@ run /bin/bash
 check 'settings.json: bytes that are not UTF-8 are left alone, with a message' \
   bash -c 'cmp -s "$1/.claude/settings.json" "$1/before.json" && grep -q "left as it is" "$1/out"' _ "$dir"
 
+# 11. The marketplace entry gets autoUpdate first, in its own indent; nothing else moves.
+new_case $'{\n  "extraKnownMarketplaces": {\n    "claude-progress-pane": {\n      "source": {\n        "source": "github",\n        "repo": "WenyuChiou/claude-progress-pane"\n      }\n    }\n  },\n  "enabledPlugins": {\n    "project-progress@claude-progress-pane": true\n  }\n}\n'
+run /bin/bash
+check 'auto-update: the marketplace entry gets "autoUpdate": true, the rest stays' \
+  same "$dir/.claude/settings.json" $'{\n  "extraKnownMarketplaces": {\n    "claude-progress-pane": {\n      "autoUpdate": true,\n      "source": {\n        "source": "github",\n        "repo": "WenyuChiou/claude-progress-pane"\n      }\n    }\n  },\n  "enabledPlugins": {\n    "project-progress@claude-progress-pane": true\n  }\n}\n'
+
+# 12. On one line it stays on one line.
+new_case '{"extraKnownMarketplaces": {"claude-progress-pane": {"source": {"source": "github", "repo": "WenyuChiou/claude-progress-pane"}}}}'
+run /bin/bash
+check 'auto-update: an entry on one line stays on one line' \
+  same "$dir/.claude/settings.json" '{"extraKnownMarketplaces": {"claude-progress-pane": {"autoUpdate": true, "source": {"source": "github", "repo": "WenyuChiou/claude-progress-pane"}}}}'
+
+# 13. Turned off by hand: stays off, and the file is not touched.
+off=$'{\n  "extraKnownMarketplaces": {\n    "claude-progress-pane": {\n      "source": {\n        "source": "github",\n        "repo": "WenyuChiou/claude-progress-pane"\n      },\n      "autoUpdate": false\n    }\n  }\n}\n'
+new_case "$off"
+run /bin/bash
+check 'auto-update: "autoUpdate": false is left alone' \
+  bash -c '[ "$(cat "$1"; echo x)" = "$(printf "%s" "$2"; echo x)" ] && [ ! -e "$1.bak" ]' _ "$dir/.claude/settings.json" "$off"
+
+# 14. No marketplace entry (the plugin not installed yet): nothing is added.
+bare='{"model": "opus"}'
+new_case "$bare"
+run /bin/bash
+check 'auto-update: no marketplace entry, nothing added' same "$dir/.claude/settings.json" "$bare"
+
 echo
 if [ "$fails" -gt 0 ]; then echo "$fails fail"; exit 1; fi
 echo 'all pass'
