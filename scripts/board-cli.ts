@@ -4,10 +4,11 @@
 // (scripts/build-board.ts bundles it into hooks/board-script.ts), with the progress file
 // and language the Claude Code session uses set on its first line. It only reads.
 import { execFile } from 'node:child_process'
-import { readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs'
+import { closeSync, openSync, readdirSync, readFileSync, readSync, statSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { basename, dirname, join } from 'node:path'
 import { boardText, peekInbox } from '../hooks/board'
+import { LOG_TAIL } from '../hooks/inbox'
 import { dashboardHtml } from '../hooks/dashboard'
 import { parseProgress } from '../hooks/parse'
 import { langOf, STRINGS } from '../hooks/strings'
@@ -42,6 +43,30 @@ const read = (file: string): string => {
   }
 }
 
+// A session log's end only, kept while the file is unchanged: --watch looks again every
+// 2 seconds, and a Codex log can run to tens of megabytes.
+const logs = new Map<string, { at: number; text: string }>()
+const readLog = (file: string): string => {
+  try {
+    const { mtimeMs, size } = statSync(file)
+    const known = logs.get(file)
+    if (known !== undefined && known.at === mtimeMs) return known.text
+    const length = Math.min(size, LOG_TAIL)
+    const buffer = Buffer.alloc(length)
+    const fd = openSync(file, 'r')
+    try {
+      readSync(fd, buffer, 0, length, size - length)
+    } finally {
+      closeSync(fd)
+    }
+    const text = buffer.toString('utf8')
+    logs.set(file, { at: mtimeMs, text })
+    return text
+  } catch {
+    return ''
+  }
+}
+
 const pending = () => {
   const dir = join(dirname(path), 'progress-inbox')
   let names: string[] = []
@@ -59,7 +84,7 @@ const pending = () => {
     }
   })
 
-  return peekInbox(files, read)
+  return peekInbox(files, readLog)
 }
 
 const view = () => buildView(parseProgress(read(path)), [basename(process.cwd())], null, Date.now(), 0, {}, s)

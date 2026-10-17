@@ -186,7 +186,7 @@ It finds the agents installed on this machine and gives each one a hook that run
 | Muse Code | `~/.config/muse/settings.json` | `Stop` |
 | OpenClaw | `~/.openclaw/agent-board.mjs`, and `openclaw.json` beside it to load it (`$OPENCLAW_STATE_DIR`) | `agent_end`. Restart its gateway after connecting |
 
-The hook runs `~/.claude/progress-report.sh` (Windows: `progress-report.ps1`), which `/progress connect` writes. The script has no dependencies, always exits 0 and prints nothing, except `{}` for Cursor. Your own hooks in those files stay. A config file that is not plain JSON is left alone, and the command says which one. If setup `--agents` had put the AGENTS.md section into that agent's instructions, the section is removed, so the work does not show twice. `/progress connect remove` takes everything back out.
+The hook runs `~/.claude/progress-report.sh` (Windows: `progress-report.ps1`), which `/progress connect` writes. The script has no dependencies, always exits 0 and prints nothing, except `{}` for Cursor. Your own hooks in those files stay. A config file that is not plain JSON is left alone, and the command says which one; a JSON one is written back with two-space indents the first time. If setup `--agents` had put the AGENTS.md section into that agent's instructions, the section is removed, so the work does not show twice. `/progress connect remove` takes everything back out.
 
 Progress shows only while some Claude Code session is open. Turns that arrive while none is open wait in the inbox, and the reporter clears files older than two days.
 
@@ -198,7 +198,7 @@ Progress shows only while some Claude Code session is open. Turns that arrive wh
 
 ## The board in every agent
 
-`/progress connect` (and each session's start) also writes `agent-board.mjs` beside `progress.md`: a script that prints the board from `progress.md`, with no Claude Code needed. Every agent's board command runs it.
+`/progress connect` (and each session's start) also writes `agent-board.mjs` beside `progress.md`: a script that prints the board from `progress.md`, with no Claude Code needed. Every agent's board command runs it with Node.js 18 or newer: Codex and Gemini CLI come with Node; for OpenCode, Cursor, Grok Build, Hermes Agent, OpenClaw or Antigravity, install it if `node --version` finds none.
 
 | Agent | File | Type |
 |---|---|---|

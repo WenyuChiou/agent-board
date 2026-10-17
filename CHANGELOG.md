@@ -41,6 +41,32 @@
   "each agent gets a board command in the form it reads, and a missing
   reporter never makes a hook exit 2".
 
+- **From the whole-project review.**
+  - A Hermes Agent hook of ours that a YAML dumper had rewritten in block style
+    left its `timeout:` line behind when it was replaced, breaking
+    `config.yaml` at every session's start; the whole item now goes. Test: "a
+    Hermes hook of ours rewritten in block style comes out whole, so
+    connecting again leaves valid YAML".
+  - A session log is read from its last 256 KB, folded in one pass, and the
+    board script keeps it while the file is unchanged: a 20 MB Codex log took
+    seconds before. Test: "only the end of a long session log is read, so a
+    tens-of-megabytes Codex log stays quick".
+  - When two open Claude Code sessions take turns of the same agent session at
+    once, the second to finish folds its turns onto what the first wrote
+    instead of writing over it. Traced, not tested: the mock engine runs one
+    session.
+  - A turn counts as only showing the board when its request is the command
+    itself or the command's own words, so work on the board script is kept.
+    Test: "a turn that only showed the board is not work, in any language or
+    agent".
+  - A session log must be JSON lines or text (or an older Gemini CLI
+    `chats/*.json`), so a credentials file named in an inbox file is never
+    read. Test: "only a session log is opened, never a key, env or credentials
+    file, nor a path that climbs out of its folder".
+  - Removing takes the emptied skill folders out too, and the guides say the
+    board needs Node.js 18 and that a JSON config is rewritten with two-space
+    indents once.
+
 ## 0.15.0 — 2026-10-17
 
 - **OpenClaw reports too.** Connecting (by hand or at a session's start) writes

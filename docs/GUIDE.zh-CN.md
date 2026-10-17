@@ -193,7 +193,7 @@ hook 运行的是 `/progress connect` 写好的 `~/.claude/progress-report.sh`�
 
 其他规则：
 - 文件里你自己的 hook 会保留。
-- 不是纯 JSON 的配置文件不会动，命令会告诉你是哪一个。
+- 不是纯 JSON 的配置文件不会动，命令会告诉你是哪一个；JSON 的第一次会用两格缩进重写。
 - 之前用 setup `--agents` 写进那个 agent 说明里的 AGENTS.md 段落会被去掉，免得同一件事出现两次。
 - `/progress connect remove` 全部去掉。
 
@@ -207,7 +207,7 @@ hook 运行的是 `/progress connect` 写好的 `~/.claude/progress-report.sh`�
 
 ## 每个 agent 里都看得到看板
 
-`/progress connect`（以及每个对话开始时）也会在 `progress.md` 旁边写一个 `agent-board.mjs`：直接从 `progress.md` 打印看板的脚本，不用开 Claude Code。每个 agent 的看板命令都是运行它。
+`/progress connect`（以及每个对话开始时）也会在 `progress.md` 旁边写一个 `agent-board.mjs`：直接从 `progress.md` 打印看板的脚本，不用开 Claude Code。每个 agent 的看板命令都是用 Node.js 18 以上运行它：Codex 和 Gemini CLI 本来就带 Node；OpenCode、Cursor、Grok Build、Hermes Agent、OpenClaw、Antigravity 若 `node --version` 找不到，请装一下。
 
 | Agent | 文件 | 输入 |
 |---|---|---|

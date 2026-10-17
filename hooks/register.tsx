@@ -197,6 +197,11 @@ const removeFiles = async ($: EngineInterface, files: readonly string[], isWin: 
   await $.process.run(argv, { timeoutMs: 10000 }).catch(() => undefined)
 }
 
+const removeEmptyDir = async ($: EngineInterface, dir: string, isWin: boolean): Promise<void> => {
+  const argv = isWin ? ['powershell', '-NoProfile', '-Command', `[IO.Directory]::Delete(${psQuote(dir)})`] : ['rmdir', dir]
+  await $.process.run(argv, { timeoutMs: 10000 }).catch(() => undefined)
+}
+
 // A rename either happens or fails as a whole, so two sessions renaming one file cannot both
 // succeed: true for the one that did.
 const moveFile = async ($: EngineInterface, from: string, to: string, isWin: boolean): Promise<boolean> => {
@@ -630,11 +635,16 @@ const digestTurn = async ($: EngineInterface, prompt: string, answer: string): P
 // the store, so whichever open session reads the next turn carries on from it. Only the
 // last two turns of a burst are summed up by the model; the earlier ones just move on what
 // the mirror remembers of the conversation.
-const takeAgentTurns = async ($: EngineInterface, turns: readonly AgentTurn[]): Promise<void> => {
+// Another open session can take a later turn of the same agent session while this one
+// waits on the model; whichever wrote second would drop the other's step. So the mirror is
+// checked again just before writing, and when it moved, these turns are folded onto it once
+// more (the fold skips a reply it has already seen).
+const takeAgentTurns = async ($: EngineInterface, turns: readonly AgentTurn[], isRetry = false): Promise<void> => {
   const last = turns.at(-1)
   if (last === undefined) return
   const at = await $.clock.now()
   const stored = (await $.store.get(`agent:${last.id}`)) as Partial<ProgressMirror> | undefined
+  const seen = JSON.stringify(stored ?? null)
   const fresh = emptyMirror(last.id, last.project || (await wordsOf($)).uncategorized, at, last.cwd, last.agent)
   const firstPrompt = promptKey(stored?.firstPrompt || turns.find(one => one.prompt !== '')?.prompt || '')
   let mirror: ProgressMirror = { ...fresh, ...stored, firstPrompt, lastAnswer: answerKey(stored?.lastAnswer ?? '') }
@@ -662,10 +672,15 @@ const takeAgentTurns = async ($: EngineInterface, turns: readonly AgentTurn[]): 
   if (mirror.tasks.length === 0) return
   const state = isAllDone(mirror) ? 'done' : last.event === 'end' ? 'ended' : 'waiting'
   mirror = { ...mirror, state, updated: at }
-  await $.store.set(`agent:${last.id}`, mirror)
   const s = await wordsOf($)
   const written = mirror
+  let hasMoved = false
   await enqueue(async () => {
+    if (!isRetry && JSON.stringify((await $.store.get(`agent:${last.id}`)) ?? null) !== seen) {
+      hasMoved = true
+      return
+    }
+    await $.store.set(`agent:${last.id}`, written)
     await rewrite(
       $,
       await progressPath($),
@@ -674,6 +689,7 @@ const takeAgentTurns = async ($: EngineInterface, turns: readonly AgentTurn[]): 
     )
     await poll($)
   })
+  if (hasMoved) await takeAgentTurns($, turns, true)
 }
 
 // `/progress connect`: the reporter script beside progress.md, and a hook for it in every
@@ -730,6 +746,9 @@ const connectAgents = async ($: EngineInterface, mode: ConnectMode): Promise<{ t
     }
     if (after === DELETE) {
       await removeFile(hook.file)
+      // A skill is a folder of ours; an agent may complain of one left without its SKILL.md.
+      // Only an empty folder goes, so anything the person added stays.
+      if (/[\\/]SKILL\.md$/.test(hook.file)) await removeEmptyDir($, hook.file.replace(/[\\/][^\\/]*$/, ''), isWin)
     } else if (after !== before) {
       await $.fs.write(hook.file, after)
     }

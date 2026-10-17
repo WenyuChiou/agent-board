@@ -93,7 +93,7 @@ claude -p "/progress connect"
 <td><img alt="Gemini CLI 0.64.0：/board 把看板貼進提示" src="docs/images/live/gemini-zh-TW.png"></td>
 </tr></table>
 
-截圖是 Codex 0.163.0 和 Gemini CLI 0.64.0 實際執行的畫面（模型用的是測試用的假模型）；OpenCode 和終端機的截圖在[使用說明](docs/GUIDE.zh-TW.md#每個-agent-裡都看得到看板)。看板直接讀 `progress.md`，不用開 Claude Code。其他 agent 的回合要有 Claude Code 對話開著才會整理成步驟；在那之前，看板照原樣列出它們。
+截圖是 Codex 0.163.0 和 Gemini CLI 0.64.0 實際執行的畫面（模型用的是測試用的假模型）；OpenCode 和終端機的截圖在[使用說明](docs/GUIDE.zh-TW.md#每個-agent-裡都看得到看板)。看板直接讀 `progress.md`，不用開 Claude Code；它用 Node.js 18 以上執行，Codex 和 Gemini CLI 裝的時候就有（其他 agent 若 `node --version` 找不到，就裝一下 Node）。其他 agent 的回合要有 Claude Code 對話開著才會整理成步驟；在那之前，看板照原樣列出它們。
 
 ## 指令
 

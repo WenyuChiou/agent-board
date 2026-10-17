@@ -1600,6 +1600,7 @@ test('connecting writes the board script and each installed agent’s board comm
   for (const file of ['/home/me/.claude/agent-board.mjs', '/home/me/.gemini/commands/board.toml', '/home/me/.agents/skills/agent-board/SKILL.md']) {
     expect(world.ran.some(argv => argv.includes(file))).toBe(true)
   }
+  expect(world.ran).toContainEqual(['rmdir', '/home/me/.agents/skills/agent-board'])
 })
 
 test('an agent’s turn that only showed the board gets no block', async ($, on) => {

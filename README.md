@@ -93,7 +93,7 @@ Connecting also gives each agent a way to show the board, so whichever one you a
 <td><img alt="Gemini CLI 0.64.0: /board pastes the board into the prompt" src="docs/images/live/gemini-en.png"></td>
 </tr></table>
 
-Screenshots from real runs of Codex 0.163.0 and Gemini CLI 0.64.0 against a mock model; more, OpenCode's and the terminal's, are in the [guide](docs/GUIDE.md#the-board-in-every-agent). The board is read from `progress.md`, so it needs no Claude Code session. Other agents' turns are summed up into steps only while a Claude Code session is open; until then the board lists them as they came in.
+Screenshots from real runs of Codex 0.163.0 and Gemini CLI 0.64.0 against a mock model; more, OpenCode's and the terminal's, are in the [guide](docs/GUIDE.md#the-board-in-every-agent). The board is read from `progress.md`, so it needs no Claude Code session; it runs on Node.js 18 or newer, which Codex and Gemini CLI install with them (for the other agents, install Node if `node --version` finds none). Other agents' turns are summed up into steps only while a Claude Code session is open; until then the board lists them as they came in.
 
 ## Commands
 

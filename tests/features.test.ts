@@ -781,12 +781,14 @@ test('a Grok Build session log gives back the request and reply it streamed in c
   expect(transcriptTail(log)).toEqual({ prompt: 'Add rate limiting', answer: 'Done. 100 or 300?' })
 })
 
-test('only a session log is opened, never a key or env file, nor a path that climbs out of its folder', () => {
+test('only a session log is opened, never a key, env or credentials file, nor a path that climbs out of its folder', () => {
   expect(isTranscriptPath('/home/me/.codex/sessions/2026/10/17/rollout-1.jsonl')).toBe(true)
   expect(isTranscriptPath('C:\\Users\\me\\.gemini\\tmp\\app\\chats\\session-1.json')).toBe(true)
   expect(isTranscriptPath('/home/me/.cursor/projects/app/agent-transcripts/1.txt')).toBe(true)
   expect(isTranscriptPath('/home/me/.ssh/id_ed25519')).toBe(false)
   expect(isTranscriptPath('/home/me/app/.env')).toBe(false)
+  expect(isTranscriptPath('/home/me/.claude/.credentials.json')).toBe(false)
+  expect(isTranscriptPath('/home/me/.gemini/oauth_creds.json')).toBe(false)
   expect(isTranscriptPath('/home/me/.codex/../.aws/credentials.json')).toBe(false)
   expect(isTranscriptPath('')).toBe(false)
 })
@@ -986,11 +988,14 @@ test('a board line is cut to the terminal, counting a CJK character as two colum
 
 test('a turn that only showed the board is not work, in any language or agent', () => {
   const turn = (prompt: string) => readTurn('codex-turn-1-1.json', JSON.stringify({ session_id: 's', cwd: '/w/app', prompt, last_assistant_message: 'ok' }))
-  for (const prompt of ['$agent-board', '/agent-board', '/board', 'Run `node "/h/.claude/agent-board.mjs"` please', `${STRINGS.en.boardCommandPrompt}\n\nProgress`, `${ZH_TW.boardCommandPrompt}\n\n進度`]) {
+  const run = 'node "/h/.claude/agent-board.mjs"'
+  for (const prompt of ['$agent-board', '/agent-board', ' /board', STRINGS.en.boardSkillPrompt(run), ZH_TW.boardSkillPrompt(run), STRINGS['zh-CN'].boardSkillPrompt(run), '<skill>\n<name>agent-board</name>\n</skill>', `${STRINGS.en.boardCommandPrompt}\n\nProgress`, `${ZH_TW.boardCommandPrompt}\n\n進度`]) {
     expect(isBoardTurn(turn(prompt)!)).toBe(true)
   }
-  expect(isBoardTurn(turn('Fix the board layout on mobile')!)).toBe(false)
-  expect(isBoardTurn(turn('/boarding-pass')!)).toBe(false)
+  // Work on the board itself, or that only starts like a command, is work.
+  for (const prompt of ['Fix the board layout on mobile', '/boarding-pass', '/board the plane and pack', '$agent-board-v2 setup', 'Fix the bug in scripts/board-cli.ts so agent-board.mjs prints colours']) {
+    expect(isBoardTurn(turn(prompt)!)).toBe(false)
+  }
 })
 
 test('each agent gets a board command in the form it reads, and a missing reporter never makes a hook exit 2', () => {
@@ -1029,4 +1034,23 @@ test('a Codex turn that showed the board is known by its session log, since its 
     path => logs[path] ?? '',
   )
   expect(pending.map(turn => turn.at)).toEqual([2])
+})
+
+test('a Hermes hook of ours rewritten in block style comes out whole, so connecting again leaves valid YAML', () => {
+  const ours = "sh '/h/.claude/progress-report.sh' hermes turn || true"
+  const block = `hooks:\n  post_llm_call:\n    - command: ${ours}\n      timeout: 10\n    - command: ~/log.sh\n      timeout: 5\nagent:\n  max_turns: 5\n`
+  expect(withoutHermesHooks(block)).toBe('hooks:\n  post_llm_call:\n    - command: ~/log.sh\n      timeout: 5\nagent:\n  max_turns: 5\n')
+  const once = withHermesHooks(block, [['post_llm_call', ours]]) ?? ''
+  expect(once).not.toMatch(/\}\n\s+timeout: 10/)
+  expect(withHermesHooks(once, [['post_llm_call', ours]])).toBe(once)
+  // Its timeout written first is the same item.
+  expect(withoutHermesHooks(`hooks:\n  post_llm_call:\n    - timeout: 10\n      command: ${ours}\n`)).toBe('')
+})
+
+test('only the end of a long session log is read, so a tens-of-megabytes Codex log stays quick', () => {
+  const line = (role: string, text: string) => JSON.stringify({ type: 'response_item', payload: { type: 'message', role, content: [{ type: 'input_text', text }] } })
+  const filler = Array.from({ length: 50000 }, (_, index) => line(index % 2 === 0 ? 'user' : 'assistant', `step ${index} ${'x'.repeat(400)}`)).join('\n')
+  const log = `${filler}\n${line('user', 'Add rate limiting')}\n${line('assistant', 'Done. 100 or 300?')}\n`
+  expect(log.length).toBeGreaterThan(20_000_000)
+  expect(transcriptTail(log)).toEqual({ prompt: 'Add rate limiting', answer: 'Done. 100 or 300?' })
 })

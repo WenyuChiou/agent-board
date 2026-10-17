@@ -215,8 +215,18 @@ const hasChildren = (lines: string[], at: number): boolean => {
 
 export const withoutHermesHooks = (text: string): string => {
   const lines = text.split('\n')
-  // Only list items of ours; a comment or another line that names the script stays.
-  const kept = lines.filter(line => !(line.trimStart().startsWith('- ') && OURS.test(line)))
+  // Only list items of ours, with the lines that continue them: a YAML dumper (Hermes' own
+  // setup, or a person tidying the file) writes our flow-style item in block style, its
+  // timeout on a line of its own. A comment or another line that names the script stays.
+  const drop = new Set<number>()
+  lines.forEach((line, at) => {
+    if (!line.trimStart().startsWith('- ')) return
+    const indent = indentOf(line)
+    let end = at + 1
+    while (end < lines.length && isContent(lines[end] ?? '') && indentOf(lines[end] ?? '') > indent) end += 1
+    if (lines.slice(at, end).some(one => isContent(one) && OURS.test(one))) for (let index = at; index < end; index += 1) drop.add(index)
+  })
+  const kept = lines.filter((_, at) => !drop.has(at))
   if (kept.length === lines.length) return text
   const keys = kept.filter((line, at) => !(HERMES_KEY.test(line) && !hasChildren(kept, at)))
   const rest = keys.filter((line, at) => !(TOP_HOOKS.test(line) && !hasChildren(keys, at)))
