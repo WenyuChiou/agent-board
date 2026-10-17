@@ -12,6 +12,9 @@ Usage:
         -> rebuild the fragment from the title and the steps file
     python3 reporter.py show <chat-id>
         -> print the current fragment
+    python3 reporter.py retire <chat-id> ["reason"]
+        -> close the current session as ended and mint a fresh session id
+           (for a lost registry or a clean break; avoids orphan blocks)
 
 Environment:
     BOARD_AGENT_NAME        the agent= name, lower case (default: remote)
@@ -183,6 +186,26 @@ def cmd_show(chat_id):
         print(f.read(), end="")
 
 
+def cmd_retire(chat_id, reason="session retired"):
+    """Close the current session honestly and mint a fresh id.
+
+    For a lost registry or a clean break: the old block is closed with
+    state=ended instead of being orphaned, and the next update starts
+    under a new session id.
+    """
+    sess = session_for(chat_id)
+    lines = build_block(sess, "ended", "(retired session)",
+                        [f"> {check_text('reason', reason)}"], [])
+    errs = [e for e in validate_block(lines) if not e.startswith("warning:")]
+    if errs:
+        raise SystemExit(f"retire block invalid: {errs}")
+    write_atomic(fragment_path(sess), "\n".join(lines) + "\n")
+    reg = load_registry()
+    reg[chat_id] = secrets.token_hex(4)
+    write_atomic(registry_path(), json.dumps(reg, indent=2, sort_keys=True) + "\n")
+    print(f"retired session {sess}; new session {reg[chat_id]} for {chat_id!r}")
+
+
 def main():
     if len(sys.argv) < 3:
         print(__doc__)
@@ -197,6 +220,9 @@ def main():
         cmd_update(chat_id, sys.argv[3], sys.argv[4], sys.argv[5])
     elif cmd == "show":
         cmd_show(chat_id)
+    elif cmd == "retire":
+        reason = sys.argv[3] if len(sys.argv) > 3 else "session retired"
+        cmd_retire(chat_id, reason)
     else:
         print(f"unknown command {cmd}", file=sys.stderr)
         return 2

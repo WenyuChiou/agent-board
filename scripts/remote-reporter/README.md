@@ -27,6 +27,9 @@ python3 reporter.py init <chat-id>
 # rebuild the fragment from a steps file
 python3 reporter.py update <chat-id> <working|waiting|done|ended> "<title>" steps.txt
 
+# close the session honestly and start fresh (lost registry, clean break)
+python3 reporter.py retire <chat-id> ["reason"]
+
 # merge into the board file (transport-agnostic: git, chat relay, drive...)
 python3 merge.py /path/to/progress.md ~/.claude/remote-reporter/outbox/myagent-<session>.md
 # a fragment without a '## project' line needs: --under "## my-project"

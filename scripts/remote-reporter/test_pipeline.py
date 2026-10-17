@@ -167,6 +167,21 @@ def pipeline():
     check("7b board still has all blocks",
           all(s in r(board) for s in ["agent=muse", "agent=claude", "agent=codex"]))
 
+    # --- 8. retire: close the session honestly, mint a fresh id ---
+    rr = py("reporter.py", "retire", "chat-demo", "registry lost in test")
+    check("8a retire ok", rr.returncode == 0, rr.stderr)
+    reg = json.load(open(os.path.join(T, "remote", "sessions.json")))
+    check("8b new session minted", reg["chat-demo"] != session)
+    old_frag = os.path.join(outbox, f"muse-{session}.md")
+    check("8c old fragment kept", os.path.exists(old_frag))
+    check("8d state=ended", "state=ended" in r(old_frag))
+    check("8e retired block valid", py("validate.py", "--block", old_frag).returncode == 0)
+    mr = py("merge.py", board, old_frag)
+    after4 = r(board)
+    check("8f merge ok", mr.returncode == 0, mr.stderr)
+    check("8g single muse block (no dup)", after4.count("session=" + session) == 2)
+    check("8h board shows ended", "state=ended" in after4)
+
 
 def placement():
     frag = block("12345678", agent="muse")
