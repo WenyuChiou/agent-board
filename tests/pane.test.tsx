@@ -57,6 +57,9 @@ type World = {
   openclaw?: string
   // Paths a write to fails (a read-only file, a folder that is not there).
   unwritable?: Set<string>
+  failStore?: (operation: 'get' | 'set', key: string) => boolean
+  ignoreStore?: (key: string) => boolean
+  afterMove?: (from: string, to: string) => boolean
 }
 
 // On Windows the engine resolves /home/me/... to X:\home\me\... before fs.* reaches these
@@ -69,7 +72,16 @@ const engineBeneath = (on: On, world: World): MockClock => {
   // The system says Traditional Chinese, so the pane speaks it unless a test says otherwise.
   mock.env(on, world.env ?? { HOME: '/home/me', LANG: 'zh_TW.UTF-8' })
   // A store that has looked at the inbox before, unless a test says otherwise.
-  mock.store(on, world.store ?? { inboxDone: {} })
+  const store: Record<string, unknown> = world.store ?? { inboxDone: {} }
+  on('store.get', ($, e) => world.failStore?.('get', e.key) ? { deny: 'EIO' } : { value: store[e.key] })
+  on('store.set', ($, e) => {
+    if (world.failStore?.('set', e.key)) return { deny: 'EIO' }
+    if (world.ignoreStore?.(e.key)) return { value: undefined }
+    store[e.key] = e.value
+    return { value: undefined }
+  })
+  on('store.delete', ($, e) => { delete store[e.key]; return { value: undefined } })
+  on('store.keys', () => ({ value: Object.keys(store) }))
   on('session.start', ($, e) => ({ cwd: e.cwd }))
   on('session.end', ($, e) => ({ sessionId: e.sessionId }))
   on('session.id', () => ({ value: SESSION }))
@@ -93,12 +105,15 @@ const engineBeneath = (on: On, world: World): MockClock => {
       world.ran?.push([...e.argv])
       let exitCode = 0
       if (e.argv[0] === 'mv') {
-        const from = posix(e.argv[1] ?? '')
+        const rest = e.argv.slice(e.argv[1] === '-n' ? 2 : 1)
+        const from = posix(rest[0] ?? '')
+        const to = posix(rest[1] ?? '')
         const text = world.files.get(from)
-        if (text === undefined || world.isMoveRefused?.(from) === true) exitCode = 1
+        if (text === undefined || world.isMoveRefused?.(from) === true || e.argv[1] === '-n' && world.files.has(to)) exitCode = 1
         else {
           world.files.delete(from)
-          world.files.set(posix(e.argv[2] ?? ''), text)
+          world.files.set(to, text)
+          if (world.afterMove?.(from, to)) exitCode = 1
         }
       } else {
         for (const path of e.argv.slice(1)) if (path !== '-f' && world.isRemoveRefused?.(posix(path)) !== true) world.files.delete(posix(path))
@@ -192,6 +207,265 @@ const start = async ($: Engine, text: string): Promise<void> => {
   await $.session.start({ cwd: '/work/persona_framework', surface: 'terminal', isInteractive: true })
   await $.turn.start({ text, turnId: 't1' })
 }
+
+const PROBE_NAME = 'codex-turn-1792216380-10.json'
+const PROBE_BODY = JSON.stringify({ session_id: 'pr53-fixture', cwd: '/work/synthetic', prompt: 'Preserve the report', last_assistant_message: 'Implemented a fixture.' })
+const PROBE_REPLY = 'TITLE: fixture\nCONTEXT: synthetic\nDONE: Saved first result\nNEXT: Verify recovery\nASK: -'
+const probeWorld = (): World => ({ files: new Map([[FILE, '# Progress\n'], [`${INBOX}/${PROBE_NAME}`, PROBE_BODY]]), mtime: 1, hasTasks: true, asked: [], store: { inboxDone: {}, autoConnectOff: true }, reply: () => PROBE_REPLY })
+const probeStart = async ($: Engine): Promise<void> => { await $.session.start({ cwd: '/work/persona_framework', surface: 'desktop', isInteractive: true }) }
+
+test('receipt write failure retains the input despite a verified board output', async ($, on) => {
+  const world = probeWorld()
+  world.failStore = (operation, key) => operation === 'set' && key === 'inboxDone'
+  const clock = engineBeneath(on, world)
+  await probeStart($)
+  await clock.advance(5000)
+  expect(world.files.get(FILE)).toContain('### fixture')
+  expect((world.store!.inboxDone as Record<string, string>)[PROBE_NAME]).toBeUndefined()
+  expect([...world.files.keys()].some(path => path.endsWith('.taking'))).toBe(true)
+})
+
+test('failed-note write failure retains a settled input rather than silently deleting it', async ($, on) => {
+  const world = probeWorld()
+  world.store!.inboxFailed = { [PROBE_NAME]: '1:1792152000000:previous failure' }
+  world.failStore = (operation, key) => operation === 'set' && key === 'inboxFailed'
+  const clock = engineBeneath(on, world)
+  await probeStart($)
+  await clock.advance(5000)
+  expect(world.files.get(FILE)).toContain('### fixture')
+  expect((world.store!.inboxFailed as Record<string, string>)[PROBE_NAME]).toContain('previous failure')
+  expect([...world.files.keys()].some(path => path.endsWith('.taking'))).toBe(true)
+})
+
+test('malformed JSON remains available for diagnosis rather than being acknowledged and deleted', async ($, on) => {
+  const world = probeWorld()
+  world.files.set(`${INBOX}/${PROBE_NAME}`, '{interrupted JSON')
+  const clock = engineBeneath(on, world)
+  const seen = outside(on)
+  await probeStart($)
+  await clock.advance(5000)
+  expect(world.asked).toHaveLength(0)
+  expect(world.files.get(FILE)).toBe('# Progress\n')
+  expect([...world.files.values()].includes('{interrupted JSON')).toBe(true)
+  expect(world.files.get(`${INBOX}/${PROBE_NAME}.failed`)).toBe('{interrupted JSON')
+  expect((world.store!.inboxDone as Record<string, string>)[PROBE_NAME]).toBeUndefined()
+  expect((world.store!.inboxFailed as Record<string, string>)[PROBE_NAME]).toContain('INVALID_INPUT')
+  expect(seen.notified.some(text => text.includes(`${PROBE_NAME}.failed`) && text.includes('INVALID_INPUT'))).toBe(true)
+})
+
+test('a report missing its session remains available for diagnosis', async ($, on) => {
+  const world = probeWorld()
+  const body = JSON.stringify({ cwd: '/work/synthetic', last_assistant_message: 'Real task text with no session field.' })
+  world.files.set(`${INBOX}/${PROBE_NAME}`, body)
+  const clock = engineBeneath(on, world)
+  await probeStart($)
+  await clock.advance(5000)
+  expect(world.asked).toHaveLength(0)
+  expect(world.files.get(FILE)).toBe('# Progress\n')
+  expect([...world.files.values()].includes(body)).toBe(true)
+  expect(world.files.get(`${INBOX}/${PROBE_NAME}.failed`)).toBe(body)
+  expect((world.store!.inboxDone as Record<string, string>)[PROBE_NAME]).toBeUndefined()
+})
+
+test('later seconds timestamps can advance a session previously reported in milliseconds', async ($, on) => {
+  const world = probeWorld()
+  world.files.delete(`${INBOX}/${PROBE_NAME}`)
+  world.files.set(`${INBOX}/codex-turn-1792216380000-1.json`, PROBE_BODY)
+  world.files.set(`${INBOX}/codex-end-1792216390000-2.json`, JSON.stringify({ session_id: 'pr53-fixture', cwd: '/work/synthetic' }))
+  world.reply = prompt => prompt.includes('NEW_SECONDS') ? PROBE_REPLY.replace('fixture', 'Seconds fixture') : PROBE_REPLY
+  const clock = engineBeneath(on, world)
+  await probeStart($)
+  await clock.advance(5000)
+  expect(world.files.get(FILE)).toContain('agent=codex state=ended')
+  world.files.set(`${INBOX}/codex-turn-1792216400-3.json`, PROBE_BODY.replace('Implemented a fixture.', 'NEW_SECONDS implemented a later result.'))
+  world.mtime += 1
+  await clock.advance(5000)
+  expect(world.files.get(FILE)).toContain('### Seconds fixture')
+  expect(world.files.get(FILE)).toContain('agent=codex state=waiting')
+})
+
+test('a receipt read failure cannot replace other inputs processed records', async ($, on) => {
+  const world = probeWorld()
+  const other = 'gemini-turn-1792216380-99.json'
+  world.store!.inboxDone = { [other]: 'other:1792152000000' }
+  world.failStore = (operation, key) => operation === 'get' && key === 'inboxDone' && (world.asked?.length ?? 0) > 0
+  const clock = engineBeneath(on, world)
+  await probeStart($)
+  await clock.advance(5000)
+  expect(world.files.get(FILE)).toContain('### fixture')
+  expect((world.store!.inboxDone as Record<string, string>)[other]).toBe('other:1792152000000')
+})
+
+test('receipt persistence recovers through a retained expired claim without another digest', async ($, on) => {
+  const world = probeWorld()
+  let isDenied = true
+  world.failStore = (operation, key) => isDenied && operation === 'set' && key === 'inboxDone'
+  const clock = engineBeneath(on, world)
+  await probeStart($)
+  await clock.advance(5000)
+  const claim = [...world.files.keys()].find(path => path.endsWith('.taking'))!
+  expect(world.files.get(claim)).toBe(PROBE_BODY)
+  const calls = world.asked!.length
+  // Seed the same retained bytes under an expired claim, avoiding a long timer
+  // simulation. This represents recovery, not a real process interruption.
+  const expired = `${INBOX}/${PROBE_NAME}.deadbeef-${(Date.parse('2026-10-16T11:00:00Z')).toString(36)}-1.taking`
+  world.files.set(expired, world.files.get(claim)!)
+  world.files.delete(claim)
+  world.mtime += 1
+  isDenied = false
+  await clock.advance(5000)
+  expect(world.files.has(expired)).toBe(false)
+  expect([...world.files.keys()].some(path => path.endsWith('.taking'))).toBe(false)
+  expect((world.store!.inboxDone as Record<string, string>)[PROBE_NAME]).toBeDefined()
+  expect(world.asked!.length).toBe(calls)
+})
+
+test('a receipt write that returns success but does not persist cannot authorize deletion', async ($, on) => {
+  const world = probeWorld()
+  world.ignoreStore = key => key === 'inboxDone'
+  const clock = engineBeneath(on, world)
+  const seen = outside(on)
+  await probeStart($)
+  await clock.advance(5000)
+  expect([...world.files.keys()].some(path => path.endsWith('.taking'))).toBe(true)
+  expect((world.store!.inboxDone as Record<string, string>)[PROBE_NAME]).toBeUndefined()
+  expect(seen.notified.some(text => text.includes('INBOX_STORE_NOT_VERIFIED'))).toBe(true)
+})
+
+test('receipt read-back failure retains input until a later read verifies persistence', async ($, on) => {
+  const world = probeWorld()
+  let isDenied = true
+  world.failStore = (operation, key) => isDenied && operation === 'get' && key === 'inboxDone' && (world.store!.inboxDone as Record<string, string>)[PROBE_NAME] !== undefined
+  const clock = engineBeneath(on, world)
+  await probeStart($)
+  await clock.advance(5000)
+  expect([...world.files.keys()].some(path => path.endsWith('.taking'))).toBe(true)
+  const calls = world.asked!.length
+  isDenied = false
+  await clock.advance(60000)
+  expect([...world.files.keys()].some(path => path.endsWith('.taking'))).toBe(false)
+  expect(world.asked!.length).toBe(calls)
+})
+
+test('an unreadable failure-note map preserves both existing maps and the input', async ($, on) => {
+  const world = probeWorld()
+  world.store!.inboxFailed = { other: '1:1792152000000:prior diagnostic' }
+  const clock = engineBeneath(on, world)
+  await probeStart($)
+  world.failStore = (operation, key) => operation === 'get' && key === 'inboxFailed'
+  await clock.advance(5000)
+  expect(world.store!.inboxDone).toEqual({})
+  expect(world.store!.inboxFailed).toEqual({ other: '1:1792152000000:prior diagnostic' })
+  expect([...world.files.keys()].some(path => path.endsWith('.taking'))).toBe(true)
+})
+
+test('an invalid receipt map cannot authorize cleanup of a retained claim', async ($, on) => {
+  const world = probeWorld()
+  world.files.delete(`${INBOX}/${PROBE_NAME}`)
+  const claim = `${INBOX}/${PROBE_NAME}.deadbeef.taking`
+  world.files.set(claim, PROBE_BODY)
+  world.store!.inboxDone = { [PROBE_NAME]: 42 }
+  const clock = engineBeneath(on, world)
+  await probeStart($)
+  await clock.advance(5000)
+  expect(world.files.get(claim)).toBe(PROBE_BODY)
+  expect(world.asked).toHaveLength(0)
+})
+
+test('invalid input is retained in place if its quarantine diagnostic cannot persist', async ($, on) => {
+  const world = probeWorld()
+  world.files.set(`${INBOX}/${PROBE_NAME}`, '{broken')
+  world.failStore = (operation, key) => operation === 'set' && key === 'inboxFailed'
+  const clock = engineBeneath(on, world)
+  await probeStart($)
+  await clock.advance(5000)
+  const claim = [...world.files.keys()].find(path => path.endsWith('.taking'))!
+  expect(world.files.get(claim)).toBe('{broken')
+  expect(world.files.has(`${INBOX}/${PROBE_NAME}.failed`)).toBe(false)
+  expect((world.store!.inboxDone as Record<string, string>)[PROBE_NAME]).toBeUndefined()
+})
+
+test('quarantining invalid input preserves an earlier failed payload with the same name', async ($, on) => {
+  const world = probeWorld()
+  world.files.set(`${INBOX}/${PROBE_NAME}`, '{new broken input')
+  world.files.set(`${INBOX}/${PROBE_NAME}.failed`, 'older evidence')
+  const clock = engineBeneath(on, world)
+  await probeStart($)
+  await clock.advance(5000)
+  expect(world.files.get(`${INBOX}/${PROBE_NAME}.failed`)).toBe('older evidence')
+  expect([...world.files.entries()].some(([path, body]) => path.endsWith('.taking') && body === '{new broken input')).toBe(true)
+})
+
+test('an uncertain quarantine rename retains bytes and reports their resulting path', async ($, on) => {
+  const world = probeWorld()
+  world.files.set(`${INBOX}/${PROBE_NAME}`, '{broken')
+  world.afterMove = (_from, to) => to.endsWith('.failed')
+  const clock = engineBeneath(on, world)
+  const seen = outside(on)
+  await probeStart($)
+  await clock.advance(5000)
+  expect(world.files.get(`${INBOX}/${PROBE_NAME}.failed`)).toBe('{broken')
+  expect(seen.notified.some(text => text.includes(`${PROBE_NAME}.failed`) && text.includes('QUARANTINE_NOT_VERIFIED'))).toBe(true)
+  expect((world.store!.inboxDone as Record<string, string>)[PROBE_NAME]).toBeUndefined()
+})
+
+test('an invalid input does not prevent a later valid session from reaching the board', async ($, on) => {
+  const world = probeWorld()
+  const bad = 'gemini-turn-1792216379-9.json'
+  world.files.set(`${INBOX}/${bad}`, '{broken')
+  const clock = engineBeneath(on, world)
+  await probeStart($)
+  await clock.advance(5000)
+  expect(world.files.get(`${INBOX}/${bad}.failed`)).toBe('{broken')
+  expect(world.files.get(FILE)).toContain('### fixture')
+  expect((world.store!.inboxDone as Record<string, string>)[PROBE_NAME]).toBeDefined()
+})
+
+test('legacy seconds order in a stored mirror still rejects older turns after migration', async ($, on) => {
+  const world = probeWorld()
+  const clock = engineBeneath(on, world)
+  await probeStart($)
+  await clock.advance(5000)
+  const key = Object.keys(world.store!).find(name => name.startsWith('agent:'))!
+  const mirror = world.store![key] as Record<string, unknown>
+  world.store![key] = { ...mirror, turnOrder: 1792216380 * 2 }
+  const before = world.files.get(FILE)
+  world.files.set(`${INBOX}/codex-turn-1792216370-99.json`, PROBE_BODY.replace('Implemented a fixture.', 'OLDER work must not replay.'))
+  world.mtime += 1
+  await clock.advance(5000)
+  expect(world.asked).toHaveLength(1)
+  expect(world.files.get(FILE)).toBe(before)
+})
+
+test('an unreadable claimed input keeps its bytes and immediately names the failure', async ($, on) => {
+  const world = probeWorld()
+  const claim = `${INBOX}/${PROBE_NAME}.2be48af2-${(Date.parse('2026-10-16T12:00:00Z') + 5000).toString(36)}-1.taking`
+  world.unreadable = new Set([claim])
+  const clock = engineBeneath(on, world)
+  const seen = outside(on)
+  await probeStart($)
+  await clock.advance(5000)
+  expect(world.files.get(claim)).toBe(PROBE_BODY)
+  expect((world.store!.inboxFailed as Record<string, string>)[PROBE_NAME]).toContain('EFBIG')
+  expect(seen.notified.some(text => text.includes(claim) && text.includes('EFBIG'))).toBe(true)
+  expect((world.store!.inboxDone as Record<string, string>)[PROBE_NAME]).toBeUndefined()
+  expect(world.asked).toHaveLength(0)
+})
+
+test('a denied board write immediately names the retained claim and persistence failure', async ($, on) => {
+  const world = probeWorld()
+  world.unwritable = new Set([FILE])
+  const clock = engineBeneath(on, world)
+  const seen = outside(on)
+  await probeStart($)
+  await clock.advance(5000)
+  const claim = [...world.files.keys()].find(path => path.endsWith('.taking'))!
+  expect(world.files.get(claim)).toBe(PROBE_BODY)
+  expect((world.store!.inboxFailed as Record<string, string>)[PROBE_NAME]).toContain('EACCES')
+  expect(seen.notified.some(text => text.includes(claim) && text.includes('EACCES'))).toBe(true)
+  expect((world.store!.inboxDone as Record<string, string>)[PROBE_NAME]).toBeUndefined()
+  expect(world.files.get(FILE)).toBe('# Progress\n')
+})
 
 test('Claude’s task calls fill the file and the pane by themselves', async ($, on) => {
   const world: World = { files: new Map([[FILE, '# 專案進度\n\n## 求職\n### Google 暑期實習\n- [?] 推薦信 — 等教授回覆\n']]), mtime: 1, hasTasks: true }

@@ -44,6 +44,9 @@ Rules:
 export const ZH_TW = {
   lang: 'zh-TW' as Lang,
 
+  inboxTitle: '收件匣報告已保留',
+  inboxHeld: (file: string, reason: string): string => `報告保留在 ${file}（${reason}）。請檢查檔案內容與來源 agent 的回報 hook。`,
+
   // Time and dates
   justNow: '剛剛',
   minutesAgo: (n: number): string => `${n} 分鐘前`,

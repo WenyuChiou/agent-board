@@ -79,6 +79,7 @@ import {
   readTurn,
   takenName,
   turnOrder,
+  normalizeTurnOrder,
   isBoardTurn,
   transcriptTail,
   turnsToDigest,
@@ -160,6 +161,7 @@ let digests: Promise<unknown> = Promise.resolve()
 let hasInboxRecord = false
 let inboxSeen = -1
 let inboxListed = 0
+let lastInboxFailure = ''
 let dashboardAt = 0
 
 // CLAUDE_PROGRESS_FILE wins; then CLAUDE_CONFIG_DIR, where Claude Code keeps its own files
@@ -680,7 +682,7 @@ const takeAgentTurns = async ($: EngineInterface, turns: readonly AgentTurn[], i
   const fresh = emptyMirror(last.id, last.project || (await wordsOf($)).uncategorized, at, last.cwd, last.agent)
   const firstPrompt = promptKey(stored?.firstPrompt || turns.find(one => one.prompt !== '')?.prompt || '')
   let mirror: ProgressMirror = { ...fresh, ...stored, firstPrompt, lastAnswer: answerKey(stored?.lastAnswer ?? ''), resume: last.session }
-  const newest = typeof stored?.turnOrder === 'number' ? stored.turnOrder : -1
+  const newest = normalizeTurnOrder(stored?.turnOrder) ?? -1
   const isNewer = (turn: AgentTurn): boolean => (turnOrder(turn) ?? newest) >= newest
   const digested = turnsToDigest(turns)
   for (const [index, turn] of turns.entries()) {
@@ -900,7 +902,30 @@ const dropSection = async ($: EngineInterface, agent: string, home: string, code
 // why it failed is in the store's `inboxFailed`. The inbox is let go of before the model is
 // asked, so a slow answer never stops the next look. The reporter script clears files older
 // than two days that no session took.
-type Taken = { path: string; name: string; attempt: number; turn: AgentTurn | null | undefined }
+type Taken = { path: string; name: string; attempt: number; turn: AgentTurn | null | undefined; error?: string }
+
+const inboxFailure = (error: unknown): string => /\b(?:E[A-Z]{2,15}|[A-Z]{3,}_[A-Z_]+)\b/.exec(messageOf(error))?.[0] ?? 'INBOX_FAILED'
+const inboxNotice = async ($: EngineInterface, path: string, reason: string): Promise<void> => {
+  const s = await wordsOf($)
+  const text = s.inboxHeld(path, reason)
+  if (text === lastInboxFailure) return
+  lastInboxFailure = text
+  await update($, answer, () => ({ question: s.inboxTitle, text, isAsking: false }))
+  await notify($, text, s.inboxTitle)
+}
+
+// A broken payload is evidence for fixing the reporter, not an empty turn. Keep
+// it under .failed without replacing an earlier retained payload of that name.
+const quarantineInbox = async ($: EngineInterface, from: string, to: string, reason: string, isWin: boolean): Promise<void> => {
+  if (await $.fs.exists(to)) throw new Error('QUARANTINE_EXISTS')
+  const body = await $.fs.read(from)
+  const argv = isWin
+    ? ['powershell', '-NoProfile', '-Command', `Move-Item -LiteralPath ${psQuote(from)} -Destination ${psQuote(to)} -ErrorAction Stop`]
+    : ['mv', '-n', from, to]
+  const ran = await $.process.run(argv, { timeoutMs: 10000 })
+  if (ran.exitCode !== 0 || await $.fs.exists(from) || !(await $.fs.exists(to)) || await $.fs.read(to) !== body) throw new Error('QUARANTINE_NOT_VERIFIED')
+  await inboxNotice($, to, reason)
+}
 
 const drainInbox = async ($: EngineInterface): Promise<void> => {
   if (isDraining) return
@@ -914,6 +939,7 @@ const drainInbox = async ($: EngineInterface): Promise<void> => {
     isWin = await isWindows($, path)
     const sep = sepOf(dir)
     const stored = await $.store.get('inboxDone')
+    if (stored !== undefined && stored !== null && (typeof stored !== 'object' || Array.isArray(stored) || Object.values(stored).some(stamp => typeof stamp !== 'string'))) throw new Error('INVALID_INBOX_RECORD')
     const hasRecord = stored !== null && typeof stored === 'object'
     // A store with no record of the inbox (the first run, or the store of the plugin's
     // earlier name left behind) counts what is there now as read, so an upgrade does not
@@ -956,7 +982,15 @@ const drainInbox = async ($: EngineInterface): Promise<void> => {
         continue
       }
       const action = claimAction(claim, entry.mtimeMs, at)
-      if (action === 'setAside') await moveFile($, from, `${dir}${sep}${failedName(claim.name)}`, isWin)
+      if (action === 'setAside') {
+        try {
+          const notes = await readInboxRecord($, 'inboxFailed')
+          await recordInbox($, [], { [claim.name]: notes[claim.name] ?? `${claim.attempt}:${at}:MAX_TRIES` }, at)
+          await quarantineInbox($, from, `${dir}${sep}${failedName(claim.name)}`, 'MAX_TRIES', isWin)
+        } catch (error) {
+          await inboxNotice($, await $.fs.exists(from) ? from : `${dir}${sep}${failedName(claim.name)}`, inboxFailure(error))
+        }
+      }
       if (action !== 'retake') continue
       const to = `${dir}${sep}${takenName(claim.name, session, at, claim.attempt + 1)}`
       if (await moveFile($, from, to, isWin)) taken.push({ path: to, name: claim.name, attempt: claim.attempt + 1, turn: undefined })
@@ -972,10 +1006,14 @@ const drainInbox = async ($: EngineInterface): Promise<void> => {
       if (await moveFile($, `${dir}${sep}${name}`, to, isWin)) taken.push({ path: to, name, attempt: 1, turn: undefined })
     }
     // Read at once, before the model may keep the turn waiting. A file that cannot be read
-    // now stays taken for a later look; one that is not a turn (not JSON, no session in it)
-    // holds nothing to track, and one that cannot be parsed must not stop the loop.
+    // now stays taken for a later look; malformed JSON or a missing session is
+    // retained for inspection, and must not stop later valid inputs in the loop.
     for (const one of taken) {
-      const body = await $.fs.read(one.path).catch(() => undefined)
+      const body = await $.fs.read(one.path).catch(async error => {
+        one.error = inboxFailure(error)
+        await inboxNotice($, one.path, one.error)
+        return undefined
+      })
       if (typeof body !== 'string') continue
       try {
         one.turn = readTurn(one.name, body)
@@ -983,13 +1021,20 @@ const drainInbox = async ($: EngineInterface): Promise<void> => {
         one.turn = null
       }
     }
+  } catch (error) {
+    await inboxNotice($, inboxPath(await progressPath($)), inboxFailure(error))
+    throw error
   } finally {
     isDraining = false
   }
   if (taken.length === 0) return
   const job = digests.then(async () => {
-    const settled = taken.filter(one => one.turn === null || (one.turn !== undefined && isBoardTurn(one.turn)))
-    const failed: Record<string, string> = {}
+    const invalid = taken.filter(one => one.turn === null)
+    const settled = taken.filter(one => one.turn !== null && one.turn !== undefined && isBoardTurn(one.turn))
+    const failed: Record<string, string> = Object.fromEntries([
+      ...invalid.map(one => [one.name, `${one.attempt}:${at}:INVALID_INPUT`]),
+      ...taken.filter(one => one.error !== undefined).map(one => [one.name, `${one.attempt}:${at}:${one.error}`]),
+    ])
     const bySession = new Map<string, Taken[]>()
     for (const one of [...taken].sort((a, b) => inboxOrder(a.name, b.name))) {
       if (one.turn === null || one.turn === undefined || isBoardTurn(one.turn)) continue
@@ -1008,10 +1053,18 @@ const drainInbox = async ($: EngineInterface): Promise<void> => {
       } catch (error) {
         const why = (error instanceof Error ? error.message : String(error)).replace(/\s+/g, ' ').slice(0, 200)
         for (const one of group) failed[one.name] = `${one.attempt}:${at}:${why}`
+        await inboxNotice($, group[0]!.path, inboxFailure(error))
       }
     }
     await recordInbox($, settled.map(one => one.name), failed, at)
+    for (const one of invalid) {
+      const to = one.path.replace(/[^\\/]+$/, () => failedName(one.name))
+      await quarantineInbox($, one.path, to, 'INVALID_INPUT', isWin).catch(async error => inboxNotice($, await $.fs.exists(one.path) ? one.path : to, inboxFailure(error)))
+    }
     await removeFiles($, settled.map(one => one.path), isWin)
+  }).catch(async error => {
+    await inboxNotice($, taken[0]!.path, inboxFailure(error))
+    throw error
   })
   digests = job.catch(() => undefined)
   await job
@@ -1022,12 +1075,26 @@ const drainInbox = async ($: EngineInterface): Promise<void> => {
 const recordInbox = async ($: EngineInterface, settled: readonly string[], failed: Readonly<Record<string, string>>, at: number): Promise<void> => {
   if (settled.length === 0 && Object.keys(failed).length === 0) return
   const stamp = `${(await read($, mine))?.sessionId.slice(0, 8) ?? '-'}:${at}`
-  const done = await $.store.get('inboxDone').catch(() => null)
-  const before = done !== null && typeof done === 'object' ? (done as Record<string, string>) : {}
-  await $.store.set('inboxDone', keepInboxDone({ ...before, ...Object.fromEntries(settled.map(name => [name, stamp])) }, at)).catch(() => undefined)
-  const held = await $.store.get('inboxFailed').catch(() => null)
-  const notes = Object.entries(held !== null && typeof held === 'object' ? (held as Record<string, string>) : {}).filter(([name]) => !settled.includes(name))
-  await $.store.set('inboxFailed', keepInboxFailed({ ...Object.fromEntries(notes), ...failed })).catch(() => undefined)
+  // Read both maps before replacing either. A read error must not become an
+  // empty map, and cleanup must wait for the required records to read back.
+  const before = await readInboxRecord($, 'inboxDone')
+  const held = await readInboxRecord($, 'inboxFailed')
+  const notes = Object.entries(held).filter(([name]) => !settled.includes(name))
+  await writeInboxRecord($, 'inboxFailed', keepInboxFailed({ ...Object.fromEntries(notes), ...failed }))
+  await writeInboxRecord($, 'inboxDone', keepInboxDone({ ...before, ...Object.fromEntries(settled.map(name => [name, stamp])) }, at))
+}
+
+const readInboxRecord = async ($: EngineInterface, key: string): Promise<Record<string, string>> => {
+  const value = await $.store.get(key)
+  if (value === undefined || value === null) return {}
+  if (typeof value !== 'object' || Array.isArray(value) || Object.values(value).some(stamp => typeof stamp !== 'string')) throw new Error('INVALID_INBOX_RECORD')
+  return { ...value } as Record<string, string>
+}
+
+const writeInboxRecord = async ($: EngineInterface, key: string, value: Record<string, string>): Promise<void> => {
+  await $.store.set(key, value)
+  const check = await readInboxRecord($, key)
+  if (Object.keys(check).length !== Object.keys(value).length || Object.entries(value).some(([name, stamp]) => check[name] !== stamp)) throw new Error('INBOX_STORE_NOT_VERIFIED')
 }
 
 // A compaction's summary made into one line for whoever takes over, kept in the block.

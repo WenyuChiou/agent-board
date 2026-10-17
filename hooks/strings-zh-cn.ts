@@ -6,6 +6,9 @@ import type { Lang, Strings } from './i18n'
 export const ZH_CN: Strings = {
   lang: 'zh-CN' as Lang,
 
+  inboxTitle: '收件箱报告已保留',
+  inboxHeld: (file: string, reason: string): string => `报告保留在 ${file}（${reason}）。请检查文件内容与来源 agent 的回报 hook。`,
+
   // Time and dates
   justNow: '刚刚',
   minutesAgo: (n: number): string => `${n} 分钟前`,

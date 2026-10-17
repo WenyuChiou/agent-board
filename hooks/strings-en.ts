@@ -6,6 +6,9 @@ import type { Lang, Strings } from './i18n'
 export const EN: Strings = {
   lang: 'en' as Lang,
 
+  inboxTitle: 'Inbox report retained',
+  inboxHeld: (file: string, reason: string): string => `Report retained at ${file} (${reason}). Check its contents and the source agent's reporting hook.`,
+
   // Time and dates
   justNow: 'just now',
   minutesAgo: (n: number): string => `${n} min ago`,
