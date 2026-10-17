@@ -16,6 +16,7 @@ import { STRINGS } from '../../hooks/strings'
 import { buildView } from '../../hooks/view'
 import { NOW, SAMPLES, SESSION, MIN } from './samples'
 import { AGENT_ICONS, TESTED_ICONS } from './icons'
+import type { AgentIcon } from './icons'
 import { CELL, LINE, MONO, gridSvg, keyBox, layout, rowOf, toNode } from './terminal'
 import type { Theme } from './terminal'
 
@@ -50,7 +51,7 @@ const WORDS: Record<Lang, {
     flow: {
       heads: ['Who reports', 'One file', 'Where you see it'],
       sources: [
-        ['Claude Code', 'Reports every turn by itself'],
+        ['Claude Code', 'Every turn, by itself'],
         ['Other agents', 'Codex, Gemini, OpenCode…'],
         ['You', 'Add a task by hand'],
       ],
@@ -201,16 +202,26 @@ const brandMark = (x: number, y: number, size = 34, hasName = true): string => {
   return `<g transform="translate(${x} ${y}) scale(${k})"><rect width="34" height="34" rx="9" fill="${BRAND.accent}"/><rect x="8" y="9" width="18" height="3.5" rx="1.75" fill="#0c1116"/><rect x="8" y="15.5" width="12" height="3.5" rx="1.75" fill="#0c1116"/><circle cx="23" cy="22" r="3.6" fill="${DARK.waiting}"/></g>${hasName ? name : ''}`
 }
 
+// The logo takes about three fifths of its tile: at half, a logo with thin lines (OpenAI's)
+// blurs at the table's 24 px.
+const GLYPH = 0.62
+const num = (value: number): string => String(Math.round(value * 100) / 100)
+
+// An agent's white mark, centred in a tile `size` square at x, y: its logo, else its initial.
+const glyph = (icon: AgentIcon, x: number, y: number, size: number): string => {
+  if (icon.paths === undefined) {
+    return `<text x="${num(x + size / 2)}" y="${num(y + size * 0.66)}" text-anchor="middle" font-family="${SANS}" font-size="${Math.round(size * 0.46)}" font-weight="700" fill="#fff">${esc(icon.letter ?? '')}</text>`
+  }
+  const g = size * GLYPH
+  const rule = icon.isEvenOdd === true ? ' fill-rule="evenodd"' : ''
+  return `<g transform="translate(${num(x + (size - g) / 2)} ${num(y + (size - g) / 2)}) scale(${Math.round((g / 24) * 10000) / 10000})" fill="#fff"${rule}>${icon.paths.map(d => `<path d="${d}"/>`).join('')}</g>`
+}
+
 // An agent's tile, `size` square, from its name; nothing for a name without one.
 const iconTile = (name: string, x: number, y: number, size: number): string => {
   const icon = AGENT_ICONS.find(one => one.name === name)
   if (icon === undefined) return ''
-  const k = size / 48
-  const mark =
-    icon.path !== undefined
-      ? `<path transform="translate(${x + 12 * k} ${y + 12 * k}) scale(${k})" fill="#fff" d="${icon.path}"/>`
-      : `<text x="${x + size / 2}" y="${y + size * 0.66}" text-anchor="middle" font-family="${SANS}" font-size="${Math.round(size * 0.46)}" font-weight="700" fill="#fff">${esc(icon.letter ?? '')}</text>`
-  return `<rect x="${x + 0.5}" y="${y + 0.5}" width="${size - 1}" height="${size - 1}" rx="${size * 0.23}" fill="${icon.tile}" stroke="#fff" stroke-opacity="0.2"/>${mark}`
+  return `<rect x="${x + 0.5}" y="${y + 0.5}" width="${size - 1}" height="${size - 1}" rx="${size * 0.23}" fill="${icon.tile}" stroke="#fff" stroke-opacity="0.2"/>${glyph(icon, x, y, size)}`
 }
 
 // How it works: who writes progress.md, and what reads it. Three numbered columns, big
@@ -232,15 +243,20 @@ const flow = (lang: Lang): string => {
   const left = { x: 40, w: 316, h: 116, gap: 152 }
   const right = { x: 904, w: 336, h: 94, gap: 112 }
   const doc = { x: 508, y: top, w: 316, h: 430 }
-  // Claude Code wears its tile; the other agents are shown by theirs instead of a list of names.
+  // Every source card has a dot and a name, then one more line: Claude Code's tile and its
+  // words, the other agents' tiles in place of a list of names, or your words.
   const others = TESTED_ICONS.filter(icon => icon.name !== 'Claude Code')
   const sources = w.sources
     .map(([title, sub], i) => {
+      const x = left.x
       const y = top + i * left.gap
-      const base = card(left.x, y, left.w, left.h, title, i === 1 ? '' : sub, dots[i] ?? pal.accent, 28)
-      if (i === 0) return `${base}<rect x="${left.x + 14}" y="${y + left.h / 2 - 29}" width="28" height="28" fill="${page.card}"/>${iconTile('Claude Code', left.x + 14, y + left.h / 2 - 29, 28)}`
-      if (i === 1) return `${base}${others.map((icon, k) => iconTile(icon.name, left.x + 48 + k * 34, y + left.h / 2 + 8, 28)).join('')}`
-      return base
+      const head = `<rect x="${x}" y="${y}" width="${left.w}" height="${left.h}" rx="14" fill="${page.card}" stroke="${page.line}" stroke-width="1.4"/>
+<circle cx="${x + 28}" cy="${y + 37}" r="7" fill="${dots[i] ?? pal.accent}"/>
+<text x="${x + 48}" y="${y + 47}" font-size="28" font-weight="700" fill="${page.ink}">${esc(title)}</text>`
+      const words = (at: number): string => `<text x="${at}" y="${y + 86}" font-size="19" fill="${page.muted}">${esc(sub)}</text>`
+      if (i === 0) return `${head}${iconTile('Claude Code', x + 48, y + 62, 32)}${words(x + 92)}`
+      if (i === 1) return `${head}${others.map((icon, k) => iconTile(icon.name, x + 48 + k * 38, y + 62, 32)).join('')}`
+      return `${head}${words(x + 48)}`
     })
     .join('\n')
   const outputs = w.outputs.map(([title, sub], i) => card(right.x, top + i * right.gap, right.w, right.h, title, sub, outDots[i] ?? pal.accent, 24)).join('\n')
@@ -252,10 +268,17 @@ const flow = (lang: Lang): string => {
     const mid = (x1 + x2) / 2
     return `<path d="M${x1} ${y1} C${mid} ${y1} ${mid} ${y2} ${x2 - 8} ${y2}" fill="none" stroke="${pal.accent}" stroke-opacity="0.55" stroke-width="2.6" marker-end="url(#head)"/>`
   }
-  const ins = w.sources.map((_, i) => arrow(left.x + left.w, top + i * left.gap + left.h / 2, doc.x, doc.y + 110 + i * 110)).join('\n')
+  // Each source's arrow lands on the block it writes in the file (the first and last line of
+  // it in FILE_LINES), which a bar in the source's colour marks. No arrow climbs, so every
+  // label sits above its arrow.
+  const lineY = (i: number): number => doc.y + 84 + i * 25
+  const blocks: Array<[number, number]> = [[1, 5], [8, 9], [11, 12]]
+  const bars = blocks
+    .map(([a, b], i) => `<rect x="${doc.x + 11}" y="${lineY(a) - 16}" width="3" height="${lineY(b) - lineY(a) + 22}" rx="1.5" fill="${dots[i] ?? pal.accent}"/>`)
+    .join('\n')
+  const ins = blocks.map(([a, b], i) => arrow(left.x + left.w, top + i * left.gap + left.h / 2, doc.x, (lineY(a) + lineY(b)) / 2 - 5)).join('\n')
   const labels = w.into
-    // Above the arrow, except the last, whose arrow climbs through that spot.
-    .map((text, i) => `<text x="${left.x + left.w + 14}" y="${top + i * left.gap + left.h / 2 + (i === w.into.length - 1 ? 30 : -14)}" font-size="17" font-weight="600" fill="${page.muted}">${esc(text)}</text>`)
+    .map((text, i) => `<text x="${left.x + left.w + 14}" y="${top + i * left.gap + left.h / 2 - 14}" font-size="17" font-weight="600" fill="${page.muted}">${esc(text)}</text>`)
     .join('\n')
   const outs = w.outputs.map((_, i) => arrow(doc.x + doc.w, doc.y + 90 + i * 84, right.x, top + i * right.gap + right.h / 2)).join('\n')
   // The column heads, numbered in reading order, over the middle of each column.
@@ -280,6 +303,7 @@ ${ins}
 ${labels}
 <rect x="${doc.x}" y="${doc.y}" width="${doc.w}" height="${doc.h}" rx="16" fill="${page.card}" stroke="${pal.accent}" stroke-width="2.6"/>
 <text x="${doc.x + 24}" y="${doc.y + 44}" font-family="${MONO}" font-size="22" font-weight="700" fill="${page.ink}">progress.md</text>
+${bars}
 <g font-family="${MONO}" font-size="16">${fileText}</g>
 <text x="${doc.x + doc.w / 2}" y="${doc.y + doc.h + 40}" text-anchor="middle" font-size="19" fill="${page.muted}">${esc(w.file)}</text>
 ${outs}
@@ -734,7 +758,7 @@ ${icons}
 <g filter="url(#lift)">${terminal('dark', WORDS[lang].window, body, rows, wx, wy)}</g>
 <g filter="url(#lift)">
 <rect x="${nx}" y="${ny}" width="${windowWidth}" height="132" rx="14" fill="#23272b" stroke="${pal.waiting}" stroke-opacity="0.85" stroke-width="1.6"/>
-<rect x="${nx + 20}" y="${ny + 20}" width="34" height="34" rx="8" fill="#0B0B0F" stroke="#fff" stroke-opacity="0.2"/><text x="${nx + 37}" y="${ny + 43}" text-anchor="middle" font-size="17" font-weight="700" fill="#fff">C</text>
+${iconTile(w.note[0], nx + 20, ny + 20, 34)}
 <text x="${nx + 68}" y="${ny + 34}" font-size="17" font-weight="700" fill="#f2f1ec">${esc(w.note[0])}</text>
 <text x="${nx + 68}" y="${ny + 54}" font-size="14" fill="${pal.waiting}">● ${esc(w.note[1])}</text>
 <text x="${nx + 20}" y="${ny + 84}" font-size="17" fill="#e6e4dc">${esc(w.note[2])}</text>
@@ -748,18 +772,13 @@ ${icons}
 
 // One tile per supported agent, the same in a light and a dark README: a white mark on the
 // agent's own colour.
-const agentIcon = (icon: (typeof AGENT_ICONS)[number]): string => {
-  const mark =
-    icon.path !== undefined
-      ? `<path transform="translate(12 12)" fill="#fff" d="${icon.path}"/>`
-      : `<text x="24" y="31.5" text-anchor="middle" font-family="${SANS}" font-size="22" font-weight="700" fill="#fff">${esc(icon.letter ?? '')}</text>`
-  return `<svg xmlns="http://www.w3.org/2000/svg" width="48" height="48" viewBox="0 0 48 48" role="img" aria-label="${esc(icon.name)}">
+const agentIcon = (icon: AgentIcon): string =>
+  `<svg xmlns="http://www.w3.org/2000/svg" width="48" height="48" viewBox="0 0 48 48" role="img" aria-label="${esc(icon.name)}">
 <title>${esc(icon.name)}</title>
 <rect x="0.5" y="0.5" width="47" height="47" rx="10.5" fill="${icon.tile}" stroke="#fff" stroke-opacity="0.22"/>
-${mark}
+${glyph(icon, 0, 0, 48)}
 </svg>
 `
-}
 
 mkdirSync(join(OUT, 'agents'), { recursive: true })
 for (const icon of AGENT_ICONS) writeFileSync(join(OUT, 'agents', `${icon.file}.svg`), agentIcon(icon))

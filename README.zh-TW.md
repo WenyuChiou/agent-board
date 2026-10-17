@@ -26,6 +26,23 @@ Claude Code 外掛，也跟得上 Codex、Gemini CLI、OpenCode、Grok Build、H
 
 你在一個專案開 Claude Code，另一個開 Codex，第三個開 Gemini。二十分鐘後，其中一個停下來問你事情，你要等到剛好切回去才會發現。**Agent Board** 在它一開口就把問題放到你眼前，每個答案一個按鈕。
 
+## 功能
+
+- **需要你的事排最前面。** 任何 agent 的問題都放在最上面，每個答案一個按鈕。在 Claude Code 裡按一下就回答了；其他 agent 則給你要貼過去的那句話或指令。
+- **所有 agent 一處看。** 依專案分組，每個對話都有標題、一行背景和編號步驟，由每個回合的簡短摘要自動寫好。
+- **隨時接著做。** 對話壓縮、終端機關掉、隔天早上都沒關係：做完什麼、卡在哪、下一步是什麼，打開就看到。做到一半停掉的對話，按一下就能接手。
+- **你自己的待辦也放得進來。** 在面板的輸入框打 `+ 求職：Fabrikam 研究員 截止 11-20`。快到期會變黃，到期會變紅。
+- **不在終端機也看得到。** `/progress open` 在瀏覽器打開同一個畫面（手機也行）。面板關著時，狀態列和桌面通知會告訴你有事在等你。
+- **週報。** `/progress report` 和 `/progress today` 把做完的事複製成文字。
+- **自己收拾。** 做完的事移到每月封存檔，日誌留下每一步完成紀錄。
+- **就是一個 Markdown 檔。** 全部在 `~/.claude/progress.md`，你可以自己看、自己改。支援 English、繁體中文、简体中文；淺色深色都有。
+
+## 怎麼運作
+
+<img alt="Claude Code 對話、透過 hook 的其他 agent、和你，都寫進同一個 Markdown 檔 progress.md；面板、progress.html、封存與狀態列都讀它。" src="docs/images/flow-zh-TW.svg" width="100%">
+
+每個接上的 agent，hook 會把它最後的回覆存進 `~/.claude/progress-inbox/`。開著的 Claude Code 對話五秒內讀到，把那個回合整理好，寫進 `progress.md` 裡那個 agent 自己的一塊，然後刪掉那個檔案。格式寫在 [docs/FORMAT.md](docs/FORMAT.md)（英文）。
+
 ## 快速開始
 
 **1. 安裝**（需要 Claude Code 2.1.287 以上）：
@@ -54,17 +71,6 @@ claude -p "/progress connect"
 ```
 
 </details>
-
-## 功能
-
-- **需要你的事排最前面。** 任何 agent 的問題都放在最上面，每個答案一個按鈕。在 Claude Code 裡按一下就回答了；其他 agent 則給你要貼過去的那句話或指令。
-- **所有 agent 一處看。** 依專案分組，每個對話都有標題、一行背景和編號步驟，由每個回合的簡短摘要自動寫好。
-- **隨時接著做。** 對話壓縮、終端機關掉、隔天早上都沒關係：做完什麼、卡在哪、下一步是什麼，打開就看到。做到一半停掉的對話，按一下就能接手。
-- **你自己的待辦也放得進來。** 在面板的輸入框打 `+ 求職：Fabrikam 研究員 截止 11-20`。快到期會變黃，到期會變紅。
-- **不在終端機也看得到。** `/progress open` 在瀏覽器打開同一個畫面（手機也行）。面板關著時，狀態列和桌面通知會告訴你有事在等你。
-- **週報。** `/progress report` 和 `/progress today` 把做完的事複製成文字。
-- **自己收拾。** 做完的事移到每月封存檔，日誌留下每一步完成紀錄。
-- **就是一個 Markdown 檔。** 全部在 `~/.claude/progress.md`，你可以自己看、自己改。支援 English、繁體中文、简体中文；淺色深色都有。
 
 ## 支援的 agent
 
@@ -173,12 +179,6 @@ claude -p "/progress connect"
 
 按面板最下面的「說明」，面板裡也會列出這張表。
 
-## 怎麼運作
-
-<img alt="Claude Code 對話、透過 hook 的其他 agent、和你，都寫進同一個 Markdown 檔 progress.md；面板、progress.html、封存與狀態列都讀它。" src="docs/images/flow-zh-TW.svg" width="100%">
-
-每個接上的 agent，hook 會把它最後的回覆存進 `~/.claude/progress-inbox/`。開著的 Claude Code 對話五秒內讀到，把那個回合整理好，寫進 `progress.md` 裡那個 agent 自己的一塊，然後刪掉那個檔案。格式寫在 [docs/FORMAT.md](docs/FORMAT.md)（英文）。
-
 ## 常見問題
 
 <details>
@@ -251,4 +251,4 @@ claude plugin marketplace remove agent-board
 
 ## 授權
 
-[MIT](LICENSE)。agent 的圖示來自 [Simple Icons](https://simpleicons.org)（CC0），商標屬於各自的擁有者；沒有免費圖示的 agent 以名字的第一個字母表示。
+[MIT](LICENSE)。agent 的圖示來自 [Simple Icons](https://simpleicons.org)（CC0）和 [Lobe Icons](https://github.com/lobehub/lobe-icons)（MIT），商標屬於各自的擁有者；沒有圖示的 agent 以名字的第一個字母表示。

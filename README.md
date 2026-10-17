@@ -26,6 +26,23 @@ A Claude Code plugin that also follows Codex, Gemini CLI, OpenCode, Grok Build, 
 
 You have Claude Code on one project, Codex on another, Gemini on a third. Twenty minutes in, one of them stops to ask you something, and you only find out when you happen to switch back. **Agent Board** puts that question in front of you the moment it's asked, with a button for each answer.
 
+## What you get
+
+- **Whatever needs you comes first.** A question from any agent sits at the top with a button for each answer. In Claude Code, one click answers it; for other agents you get the exact words or command to paste.
+- **Every agent in one place.** Grouped by project, with a title, a line of background and numbered steps for each session, summed up for you after every turn.
+- **Pick up where you left off.** Compaction, a closed terminal, the next morning: you see what's done, what's stuck and what's next. A session that stopped halfway can be taken over in one click.
+- **Your own to-dos too.** Type `+ Job search: Fabrikam fellowship due 11-20` in the pane's box. Due dates turn the row amber, then red.
+- **Outside the terminal.** `/progress open` shows the same view in your browser (it works on a phone too). The status line and desktop notifications tell you when something needs you while the pane is closed.
+- **Reports.** `/progress report` and `/progress today` copy what got done, as text.
+- **Tidies itself.** Finished work moves to a monthly archive; a journal keeps every finished step.
+- **One plain Markdown file.** Everything is in `~/.claude/progress.md`, which you can read and edit. English, 繁體中文 and 简体中文; light and dark.
+
+## How it works
+
+<img alt="Claude Code sessions, other agents through their hooks, and you all write one Markdown file, progress.md; the pane, progress.html, the archive and the status line read it." src="docs/images/flow-en.svg" width="100%">
+
+Each connected agent's hook saves its last reply into `~/.claude/progress-inbox/`. An open Claude Code session picks it up within five seconds, sums the turn up, writes it into that agent's own block in `progress.md`, and deletes the file. The format is in [docs/FORMAT.md](docs/FORMAT.md).
+
 ## Quick start
 
 **1. Install** (needs Claude Code 2.1.287 or newer):
@@ -54,17 +71,6 @@ Then show me what the last command printed and tell me which agents to restart.
 ```
 
 </details>
-
-## What you get
-
-- **Whatever needs you comes first.** A question from any agent sits at the top with a button for each answer. In Claude Code, one click answers it; for other agents you get the exact words or command to paste.
-- **Every agent in one place.** Grouped by project, with a title, a line of background and numbered steps for each session, summed up for you after every turn.
-- **Pick up where you left off.** Compaction, a closed terminal, the next morning: you see what's done, what's stuck and what's next. A session that stopped halfway can be taken over in one click.
-- **Your own to-dos too.** Type `+ Job search: Fabrikam fellowship due 11-20` in the pane's box. Due dates turn the row amber, then red.
-- **Outside the terminal.** `/progress open` shows the same view in your browser (it works on a phone too). The status line and desktop notifications tell you when something needs you while the pane is closed.
-- **Reports.** `/progress report` and `/progress today` copy what got done, as text.
-- **Tidies itself.** Finished work moves to a monthly archive; a journal keeps every finished step.
-- **One plain Markdown file.** Everything is in `~/.claude/progress.md`, which you can read and edit. English, 繁體中文 and 简体中文; light and dark.
 
 ## Supported agents
 
@@ -173,12 +179,6 @@ The pane follows Claude Code's theme. Run `/config`, choose **Theme**: a light t
 
 Press **Legend** at the bottom of the pane to see this list there.
 
-## How it works
-
-<img alt="Claude Code sessions, other agents through their hooks, and you all write one Markdown file, progress.md; the pane, progress.html, the archive and the status line read it." src="docs/images/flow-en.svg" width="100%">
-
-Each connected agent's hook saves its last reply into `~/.claude/progress-inbox/`. An open Claude Code session picks it up within five seconds, sums the turn up, writes it into that agent's own block in `progress.md`, and deletes the file. The format is in [docs/FORMAT.md](docs/FORMAT.md).
-
 ## FAQ
 
 <details>
@@ -251,4 +251,4 @@ More answers are in the guide's [Troubleshooting](docs/GUIDE.md#troubleshooting)
 
 ## License
 
-[MIT](LICENSE). Agent logos are from [Simple Icons](https://simpleicons.org) (CC0) and belong to their owners; agents without a free logo are shown by their initial.
+[MIT](LICENSE). Agent logos are from [Simple Icons](https://simpleicons.org) (CC0) and [Lobe Icons](https://github.com/lobehub/lobe-icons) (MIT) and belong to their owners; an agent without a logo is shown by its initial.
