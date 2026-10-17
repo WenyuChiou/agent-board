@@ -106,7 +106,7 @@ Screenshots from real runs of Codex 0.163.0 and Gemini CLI 0.64.0 against a mock
 | `/progress report` / `/progress today` | Copy the last 7 days / today as text |
 | `/progress notify on` / `off` | Desktop notifications |
 | `/progress lang en` | `en`, `zh-TW`, `zh-CN` or `auto` |
-| `/progress tidy` | Archive finished work now |
+| `/progress tidy` | Archive old work now; the [guide](docs/GUIDE.md#how-it-keeps-itself-tidy) says when work is old enough |
 
 ## Colours and marks
 

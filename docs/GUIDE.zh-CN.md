@@ -123,7 +123,7 @@ Claude 会列出 Task 清单，面板跟着走：卡片显示任务、它的背�
 | `/progress open` | 在浏览器打开 `progress.html` |
 | `/progress connect` / `connect remove` | 把这台电脑上的其他 agent 接上面板／去掉 |
 | `/progress add <line>` | 添加一件事，和在面板里输入 `+` 一样 |
-| `/progress tidy` | 立刻归档做完的工作 |
+| `/progress tidy` | 立刻运行归档清理；什么时候算够旧，见[它怎么保持整齐](#它怎么保持整齐) |
 | `/progress sync` | 重新读取 Claude 的 Task 清单和 PR |
 | `/progress report` / `today` | 复制最近 7 天／今天的报告 |
 | `/progress notify on` / `off` | 打开或关闭通知 |
@@ -181,7 +181,7 @@ Claude Code 会自己接上它们：每个对话开始时，会把这台电脑�
 | Gemini CLI | `~/.gemini/settings.json` | `AfterAgent` |
 | Cursor | `~/.cursor/hooks.json` | `afterAgentResponse`、`stop` |
 | OpenCode | `~/.config/opencode/plugin/agent-board.js` | `session.idle` |
-| Grok Build | `~/.grok/hooks/agent-board.json`（`$GROK_HOME`） | `Stop` |
+| Grok Build | `~/.grok/hooks/agent-board.json`（`$GROK_HOME`） | `Stop`。要 Grok 自己在 `~/.grok` 写了 `config.toml` 或 `sessions` 才算装了；其他工具放在那个文件夹的 hook 不算 |
 | Hermes Agent | `~/.hermes/config.yaml`（`$HERMES_HOME`） | `post_llm_call`，Hermes 第一次运行新 hook 前会问一次，回答 `y` |
 | Muse Code | `~/.config/muse/settings.json` | `Stop` |
 | OpenClaw | `~/.openclaw/agent-board.mjs`，以及旁边加载它的 `openclaw.json`（`$OPENCLAW_STATE_DIR`） | `agent_end`，接上后重启它的 gateway |

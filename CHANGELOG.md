@@ -40,6 +40,30 @@
   the model nothing, while a plain-text log still gives its tail", "a working
   folder with a line break or a comment opening in its name becomes a
   one-line project name that hides nothing".
+- **Fixes from a live test with Muse, dot, Hermes and Cursor.**
+  - **Grok Build is no longer found where it is not installed.** Other tools
+    (Orca among them) put hooks in `~/.grok/hooks` before Grok Build is there,
+    and that folder was enough for connect to say "connected" to Grok Build
+    and write the shared skill. Grok Build now counts as installed once its
+    own `config.toml` or `sessions` folder is in `~/.grok`. `/progress connect
+    remove` takes out a hook file of ours wherever it finds one, so the hook
+    an earlier connect left in such a folder comes out too; run `/progress
+    connect` after it to turn connecting at session start back on.
+  - **`/progress tidy` says what it does.** The READMEs and guides called it
+    "archive finished work now"; it runs the archive sweep, which moves only
+    work past its age. When nothing is old enough, the reply now says when work
+    does move out instead of "Nothing to archive", and the count no longer
+    calls every archived task finished.
+  - **A prompt to paste for a chat relay.** [Remote
+    reporters](docs/REMOTE_REPORTERS.md#chat-relay-a-prompt-to-paste) gives the
+    block with its exact markers for a chat assistant to repeat, since one
+    left to guess invented markers the merge refuses.
+
+  Tests: "a ~/.grok folder with only another tool’s hooks in it is not taken
+  for Grok Build, and connect remove still takes out a hook left there", "old
+  done blocks go to the month's archive file, after what it already holds",
+  "/progress connect hooks the installed agents into the pane once, keeps
+  their own hooks, and takes ours back out".
 
 ## 0.16.0 — 2026-10-17
 

@@ -62,6 +62,58 @@ machine and merge it into `progress.md`.
 (re-merging the same fragments gives the same bytes), so any transport can
 call it as often as it likes.
 
+### Chat relay: a prompt to paste
+
+A chat assistant (Muse, dot, any web chat) usually cannot open FORMAT.md
+from its chat, and left to guess it invents markers of its own
+(`<!-- agent-board:start … -->` in one live test), which the merge refuses.
+Paste this into the chat once, at the start:
+
+```text
+Report your progress on this work as one Agent Board block. After each step, and
+whenever you stop to wait for me, end your reply with the whole block again, inside
+a code block, written exactly like this:
+
+## <project>
+<!-- auto session=<ID> agent=<name> state=<working|waiting|done|ended> updated=<UTC time, like 2026-10-17T08:10:52Z> -->
+### <the outcome, in plain words>
+> Context: <one line on why this work exists>
+- [x] <a finished step>
+- [~] <the step you are on>
+- [?] <a step that needs me> — <one line saying what you need>
+- [ ] <the next step>
+<!-- /auto session=<ID> -->
+
+Rules:
+- <ID> is 8 random lower-case hex characters (0-9, a-f). Pick it once and keep it
+  for the whole conversation.
+- <name> is your own name in lower case, for example muse or dot.
+- <project> is the project's name; keep it the same every time.
+- Write the two marker lines exactly as shown, starting at the beginning of the line.
+  No other marker names.
+- The line after the start marker is the ### title. No other # headings, code
+  fences or HTML comments inside the block.
+- Marks: [x] done, [~] doing, [ ] to do, [?] needs me, [>] waiting on someone else,
+  [!] blocked, [-] cancelled. End a yes/no question in a [?] step with "OK?".
+- state=waiting when you hand back to me with steps left, working when you start
+  again, done when every step is [x] or [-], ended if you stop for good with steps
+  left. updated= is the time of this update in UTC, ending in Z.
+```
+
+Save each block the assistant prints, from `## <project>` to the end marker,
+to a file, check it and merge it; a later block with the same id replaces
+the earlier one:
+
+```
+python3 scripts/remote-reporter/validate.py --block muse.md
+python3 scripts/remote-reporter/merge.py ~/.claude/progress.md muse.md
+```
+
+`validate.py --block` names what is wrong with a block it refuses, so the
+assistant can be asked to fix just that. A chat assistant often does not know
+the time: check `updated=` before merging, since a block with an old one shows
+as stopped and leaves at the next archive sweep.
+
 ## Risks and mitigations
 
 | Risk | Mitigation | Status |

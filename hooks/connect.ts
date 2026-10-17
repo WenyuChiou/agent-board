@@ -206,6 +206,10 @@ export const DELETE = Symbol('delete')
 
 const join = (ctx: ConnectContext, ...parts: string[]): string => [ctx.home, ...parts].join(ctx.sep)
 
+// Other tools (Orca among them) put hooks in ~/.grok/hooks for a Grok Build that may never
+// be installed, so the folder alone is no sign of it: Grok's own config or sessions are.
+const grokSigns = (ctx: ConnectContext): string[] => [[ctx.grokHome, 'config.toml'].join(ctx.sep), [ctx.grokHome, 'sessions'].join(ctx.sep)]
+
 const jsonEdit =
   (add: (config: Json) => Json) =>
   (text: string, remove: boolean): string | null => {
@@ -352,6 +356,7 @@ export const agentHooks = (ctx: ConnectContext): AgentHook[] => {
       agent: 'grok',
       label: 'Grok Build',
       dir: ctx.grokHome,
+      dirs: grokSigns(ctx),
       file: [ctx.grokHome, 'hooks', 'agent-board.json'].join(ctx.sep),
       old: [ctx.grokHome, 'hooks', 'progress-pane.json'].join(ctx.sep),
       edit: (text, remove) =>
@@ -648,7 +653,7 @@ export const boardCommands = (ctx: ConnectContext): AgentHook[] => {
       agent: 'skills',
       label: '',
       dir: ctx.codexHome,
-      dirs: [ctx.codexHome, join(ctx, '.cursor'), ctx.grokHome, ctx.openclawHome, join(ctx, '.gemini'), join(ctx, '.config', 'opencode')],
+      dirs: [ctx.codexHome, join(ctx, '.cursor'), ...grokSigns(ctx), ctx.openclawHome, join(ctx, '.gemini'), join(ctx, '.config', 'opencode')],
       file: join(ctx, '.agents', 'skills', SKILL, 'SKILL.md'),
       edit: file(skill),
     },

@@ -491,6 +491,17 @@ test("old done blocks go to the month's archive file, after what it already hold
     '# 進度封存\n\n## alpha · 2026-10-01\n### 舊的\n- [x] 一\n\n## ai-research-skills · 2026-10-15\n### 發佈 1.7.4\n> 完成\n- [x] 打 tag\n',
   )
   expect(world.files.get(FILE)).not.toContain('session=c55e2f10')
+
+  // One more old block written since: tidy moves it and counts it.
+  world.files.set(FILE, OLD_DONE.replace(/c55e2f10/g, 'd66f3021'))
+  world.mtime += 1
+  const moved = await $.command.run(TIDY)
+  expect(moved.text).toBe('封存了 1 個任務。')
+  expect(world.files.get(FILE)).not.toContain('session=d66f3021')
+
+  // Run again with nothing old enough left: it says when work does move out.
+  const again = await $.command.run(TIDY)
+  expect(again.text).toBe('還沒有到時間該封存的。做完的區塊在最後一次更新 12 小時後封存，其他區塊 3 天後，手記的任務在面板看到每一步都打勾 24 小時後；這個對話自己的區塊不會封存。')
 })
 
 test('the rule rides the system prompt only while the session has a Task list', async ($, on) => {
@@ -1209,6 +1220,7 @@ test('/progress connect hooks the installed agents into the pane once, keeps the
       ['/home/me/.codex/config.toml', 'model = "gpt-6"\n'],
       ['/home/me/.codex/AGENTS.md', `# Mine\n\nUse tabs.\n\n${section}`],
       [oldGrok, '{"hooks":{}}'],
+      ['/home/me/.grok/config.toml', 'model = "grok-build"\n'],
       ['/home/me/.cursor/hooks.json', JSON.stringify({ version: 1, hooks: { stop: [{ command: 'say done' }] } })],
       ['/home/me/.gemini/settings.json', '{ // my comment\n "theme": "dark" }'],
     ]),
@@ -1243,6 +1255,32 @@ test('/progress connect hooks the installed agents into the pane once, keeps the
   expect(removed.text).toContain('已拿掉：Codex、Cursor、Grok Build。')
   expect(JSON.parse(world.files.get('/home/me/.cursor/hooks.json') ?? '{}').hooks).toEqual({ stop: [{ command: 'say done' }] })
   expect(JSON.parse(world.files.get('/home/me/.codex/hooks.json') ?? '{}').hooks).toEqual({})
+})
+
+test('a ~/.grok folder with only another tool’s hooks in it is not taken for Grok Build, and connect remove still takes out a hook left there', async ($, on) => {
+  const orca = '/home/me/.grok/hooks/orca-status.json'
+  const ours = '/home/me/.grok/hooks/agent-board.json'
+  const world: World = { files: new Map([[orca, '{"hooks":{}}']]), mtime: 1, hasTasks: true, ran: [] }
+  engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/persona_framework', surface: 'terminal', isInteractive: true })
+
+  const first = await $.command.run({ ...TIDY, args: 'connect' })
+  expect(first.text).not.toContain('已接上')
+  expect(world.files.has(ours)).toBe(false)
+  expect(world.files.has('/home/me/.agents/skills/agent-board/SKILL.md')).toBe(false)
+
+  // An earlier version took the folder for Grok Build and wrote its hook there.
+  world.files.set(ours, '{"hooks":{}}')
+  const removed = await $.command.run({ ...TIDY, args: 'connect remove' })
+  expect(removed.text).toContain('已拿掉：Grok Build。')
+  expect(world.files.has(ours)).toBe(false)
+  expect(world.files.get(orca)).toBe('{"hooks":{}}')
+
+  // Grok Build itself writes its sessions here: now it is installed.
+  world.files.set('/home/me/.grok/sessions/%2Fwork/01a148a9/updates.jsonl', '')
+  const again = await $.command.run({ ...TIDY, args: 'connect' })
+  expect(again.text).toContain('已接上：Grok Build。')
+  expect(world.files.get(ours)).toContain("progress-report.sh' grok turn || true")
 })
 
 // What Codex 0.163.0 handed its Stop and SessionEnd hooks, and the lines of its session log the

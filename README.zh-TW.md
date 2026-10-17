@@ -106,7 +106,7 @@ claude -p "/progress connect"
 | `/progress report` / `/progress today` | 複製最近 7 天／今天的進度 |
 | `/progress notify on` / `off` | 桌面通知 |
 | `/progress lang zh-TW` | `en`、`zh-TW`、`zh-CN` 或 `auto` |
-| `/progress tidy` | 現在就封存做完的事 |
+| `/progress tidy` | 現在就封存舊的工作；多舊才算，見[使用說明](docs/GUIDE.zh-TW.md#它怎麼保持整齊) |
 
 ## 顏色與符號
 

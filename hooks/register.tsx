@@ -734,6 +734,9 @@ const connectAgents = async ($: EngineInterface, mode: ConnectMode): Promise<{ t
     if (failed.has(hook.agent)) continue
     let isInstalled = false
     for (const dir of hook.dirs ?? [hook.dir]) isInstalled = isInstalled || (await $.fs.exists(dir))
+    // Taking the hooks out goes by our own files, so one an earlier connect left where the
+    // agent is not (or is no longer) found comes out too.
+    if (remove) for (const file of [hook.file, ...(hook.old === undefined ? [] : [hook.old])]) isInstalled = isInstalled || (await $.fs.exists(file))
     if (!isInstalled) continue
     // One agent whose file cannot be written (a folder missing, a read-only file) is named and
     // passed over, so the agents after it are still hooked in.
