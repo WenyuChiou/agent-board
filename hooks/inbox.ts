@@ -36,11 +36,17 @@ export const inboxOrder = (a: string, b: string): number => {
   return timeA - timeB || endA - endB || a.localeCompare(b)
 }
 
-const text = (value: unknown): string => {
+// Words sit a few levels down in every agent's payload. Another program writes the file, and
+// one nested a hundred thousand deep would overflow the stack and leave the files taken with
+// it unread, so the search stops well short of that.
+const DEPTH_MAX = 32
+
+const text = (value: unknown, depth = 0): string => {
   if (typeof value === 'string') return value
+  if (depth >= DEPTH_MAX) return ''
   if (Array.isArray(value)) {
     for (let index = value.length - 1; index >= 0; index -= 1) {
-      const found = text(value[index])
+      const found = text(value[index], depth + 1)
       if (found.trim() !== '') return found
     }
     return ''
@@ -48,7 +54,7 @@ const text = (value: unknown): string => {
   if (value !== null && typeof value === 'object') {
     const record = value as Record<string, unknown>
     for (const key of ['text', 'content', 'message']) {
-      const found = text(record[key])
+      const found = text(record[key], depth + 1)
       if (found.trim() !== '') return found
     }
   }
@@ -254,31 +260,50 @@ const BOARD_PLAIN = new Set(Object.values(STRINGS).flatMap(s => [s.nothingForYou
 const isBoardLine = (line: string): boolean => /^(?:\s|[●▸⚑◐] |$)/.test(line) || BOARD_PLAIN.has(line.trim())
 const BOARD_LEAD = 40
 const BOARD_ASIDE = 160
-const BOARD_LINK = /https?:\/\/(?:127\.0\.0\.1|localhost):\d{1,5}\/\?t=[\w-]{1,64}/g
+const BOARD_LINK = /https?:\/\/(?:127\.0\.0\.1|localhost):\d{1,5}\/\?t=[\w-]{1,64}/
 // A CJK character says about as much as two Latin ones.
 const weight = (text: string): number => [...text.trim()].reduce((sum, char) => sum + (/[ᄀ-ᅟ⺀-꓏가-힣豈-﫿︰-﹏＀-｠￠-￦]/.test(char) ? 2 : 1), 0)
 
+// Before the board, only a short line that leads into it: words that point at the board, then
+// a colon ("Here is where things stand:", 「目前所有專案的進度：」). Anything else told there,
+// however short, is work: a look taken for work leaves a block the person sees and archives,
+// while work taken for a look is dropped without a word. 目前 and 現在 also open a report
+// told with no comma (「目前已修好 429 看板如下：」), so a lead holding a word for work done is
+// work.
+const LEAD_WORDS = /^(?:here\b|below\b|this is\b|where\b|current\b|progress\b|(?:the )?(?:agent )?board\b|以下|下面|目前|這是|这是|現在|现在|進度|进度|看板)/i
+const DONE_WORDS = /[已了]|完成|修好|加好|改好|做好/
+
+const isLeadIn = (text: string): boolean => {
+  const lead = text.replace(/[*_]/g, '').trim()
+
+  return lead === '' || (weight(lead) <= BOARD_LEAD && LEAD_WORDS.test(lead) && /^[^\n,，、;；.。!！?？—–]*[:：]$/.test(lead) && !/\s-\s/.test(lead) && !DONE_WORDS.test(lead))
+}
+
 export const isBoardAnswer = (answer: string): boolean => {
-  const lines = answer.replace(/\r\n/g, '\n').split('\n')
+  // The line with the board page's address (`--serve`) goes with the board, after it or inside
+  // the code block the board is shown in.
+  const lines = answer.replace(/\r\n/g, '\n').split('\n').filter(line => !BOARD_LINK.test(line))
   const at = lines.findIndex(line => line.length <= COUNTS_MAX && BOARD_COUNTS.test(line))
   if (at < 0) return false
   let end = at + 1
   while (end < lines.length && isBoardLine(lines[end] ?? '')) end += 1
   let from = at
-  // A fence goes with the board only when it holds the board and nothing else.
-  if (/^\s*```/.test(lines[at - 1] ?? '')) {
+  let open = at - 1
+  while (open >= 0 && (lines[open] ?? '').trim() === '') open -= 1
+  // A fence goes with the board only when it holds the board and nothing else; blank lines
+  // inside it are the board's.
+  if (/^\s*```/.test(lines[open] ?? '')) {
     if (!/^\s*```\s*$/.test(lines[end] ?? '')) return false
-    from = at - 1
+    from = open
     end += 1
   }
   const before = lines.slice(0, from).join('\n')
-  // The link to the board's page (`--serve`) goes with the board it was printed under.
-  const after = lines.slice(end).join('\n').replace(BOARD_LINK, '')
+  const after = lines.slice(end).join('\n')
   // A code block or a list beside the board (a test log, a diff, what was done) is work.
   // The indent stays on its line, so a run of blank lines is not crossed again from each one.
   const isAside = (text: string): boolean => !/```|^[ \t]*(?:[-*+]|\d+[.)])\s/m.test(text)
 
-  return weight(before) <= BOARD_LEAD && weight(after) <= BOARD_ASIDE && isAside(before) && isAside(after)
+  return isLeadIn(before) && weight(after) <= BOARD_ASIDE && isAside(before) && isAside(after)
 }
 
 export const isBoardTurn = (turn: AgentTurn): boolean =>

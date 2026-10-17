@@ -26,7 +26,11 @@ export const stateWords = (state: ProgressSessionState, s: Strings = ZH_TW): str
   return s.stateEnded
 }
 
-const oneLine = (text: string): string => text.replace(/\s+/g, ' ').replace(/^#+\s*/, '').trim()
+// Every line the mod writes into a block. A comment opening in a title or step (the model's
+// summing up, a first request) would hide every line up to the next `-->`, the next block's
+// markers with them, so it is left out; an arrow that would close one is written `->`.
+const oneLine = (text: string): string =>
+  text.replace(/<!--/g, ' ').replace(/--+>/g, '->').replace(/\s+/g, ' ').trim().replace(/^#+\s*/, '').trim()
 
 const markOf = (task: ProgressMirrorTask): string => {
   if (task.status === 'completed') return 'x'
@@ -63,8 +67,8 @@ export const renderAutoBlock = (mirror: ProgressMirror, s: Strings = ZH_TW): str
 
   return [
     markerOf(mirror),
-    `### ${oneLine(mirror.title) || fallbackTitle(mirror) || s.unnamed}`,
-    `> ${meta}`,
+    `### ${oneLine(mirror.title) || oneLine(fallbackTitle(mirror)) || s.unnamed}`,
+    `> ${oneLine(meta)}`,
     ...(mirror.context ? [s.contextNote(oneLine(mirror.context))] : []),
     ...(mirror.handoff ? [s.handoffNote(oneLine(mirror.handoff))] : []),
     ...mirror.tasks.map(task => {

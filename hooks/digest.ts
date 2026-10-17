@@ -45,9 +45,16 @@ export const parseDigest = (answer: string): Digest | null => {
   }
 }
 
-// A reply as the digest prompt quotes it: its end, with no tag that could close the
-// <reply> fence it sits in early.
-export const replyData = (answer: string): string => answer.slice(-3000).replace(/<\/?\s*reply\b[^>]*>/gi, '')
+// The fences the digest prompt quotes a turn in. No quoted text keeps a tag that could close
+// its own fence early or open another.
+const FENCE_TAG = /<\/?\s*(?:reply|request)\b[^>]*>/gi
+
+// A reply as the digest prompt quotes it: its end, between <reply> tags.
+export const replyData = (answer: string): string => answer.slice(-3000).replace(FENCE_TAG, '')
+
+// What the user asked, first or this turn, as the digest prompt quotes it: its start, between
+// <request> tags. Another agent's turn brings it, so it is data as much as the reply is.
+export const requestData = (text: string): string => text.slice(0, 1200).replace(FENCE_TAG, '')
 
 // The question a reply ends on, if its last paragraph asks one: the last sentence there
 // with a question mark, without code or markdown. A reply that ends on a statement asks
