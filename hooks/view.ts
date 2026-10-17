@@ -7,7 +7,7 @@ import { shortId } from './blocks'
 import { ciWords, prWords } from './github'
 import { doingTask, fallbackTitle } from './mirror'
 import type { Tone } from './palette'
-import { countSteps, currentStepIndex, doneKey, isHereProject, isStale, isTaskComplete } from './parse'
+import { countSteps, currentStepIndex, doneKey, isHereProject, isStale, isTaskComplete, RESUME } from './parse'
 
 // What the pane shows, worked out from the file and this session's own list, so the
 // drawing code only lays it out.
@@ -75,6 +75,13 @@ export type WaitingItem = {
   where: 'here' | 'other' | 'manual'
   // The agent of another session's block when it is not Claude, else ''.
   agent: string
+  // The block id of the session that asked, named in the reply hint: several sessions often
+  // share one folder, so the folder alone does not say where to answer. '' for a hand-kept step.
+  session: string
+  // A Claude Code session's full id (its `resume=`, else its block id), for the person to copy
+  // and find that session or reopen it with `claude --resume`; null for every other item. Anyone
+  // can write `session=`, so a block id that is not a plain id is never offered for the clipboard.
+  sessionId: string | null
   // A hand-kept step can be ticked from the pane; another session's cannot.
   step: StepRef | null
   // Another agent's session the question came from; null for Claude's and hand-kept ones.
@@ -395,6 +402,8 @@ const ownWaiting = (mine: ProgressMirror): WaitingItem[] => {
       }),
       where: 'here' as const,
       agent: '',
+      session: shortId(mine.sessionId),
+      sessionId: null,
       step: null,
       target: null,
     }))
@@ -456,6 +465,9 @@ export const buildView = (
           ...askOf(parts.text, parts.note),
           where: isManual ? 'manual' : 'other',
           agent: task.auto === null || task.auto.agent === 'claude' ? '' : task.auto.agent,
+          session: task.auto?.session ?? '',
+          sessionId:
+            task.auto?.agent === 'claude' ? (task.auto.resume ?? (RESUME.test(task.auto.session) ? task.auto.session : null)) : null,
           step: isManual ? { project: name, title, step: step.text, line: step.line, raw: step.raw } : null,
           target: targetOf(task.auto),
         })

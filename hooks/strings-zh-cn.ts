@@ -198,7 +198,10 @@ export const ZH_CN: Strings = {
   paneTitle: '进度',
   legendWords: ['完成', '正在做', '还没做', '等你', '在跑', '卡住', '取消'],
   now: ' ← 现在',
-  replyElsewhere: (project: string, agent: string): string => `到 ${project} 的对话${agent === '' ? '' : `（${agent}）`}回复，这里回不了。`,
+  replyElsewhere: (task: string, session: string, agent: string): string => {
+    const who = [session, agent].filter(part => part !== '').join('，')
+    return `到“${task}”那个对话${who === '' ? '' : `（${who}）`}回复，这里回不了。`
+  },
   arrivedDone: '到了，完成',
   done: '完成',
   reply: '回复',
@@ -222,6 +225,7 @@ export const ZH_CN: Strings = {
   heldElsewhere: '另一个对话正在做。',
   takeOver: '接手做完',
   copyResume: '复制续接指令',
+  copySessionId: '复制对话 ID',
   tickStep: '完成这步',
   handOver: '交给 Claude',
   nothingForYou: '✓ 现在没有要你做的事',
@@ -270,6 +274,8 @@ export const ZH_CN: Strings = {
   answered: (text: string): string => `已回复 Claude：${text}`,
   commandOf: (step: string): string => `“${step}”要跑的指令`,
   resumeOf: (title: string): string => `回到“${title}”的指令，贴到终端执行`,
+  sessionIdOf: (title: string, canResume: boolean): string =>
+    `“${title}”那个对话的 ID：拿去对照对话列表${canResume ? '，或用 claude --resume 接回' : ''}`,
   fileUnreadable: '读不到进度文件',
   dashStamp: (time: string): string => `更新于 ${time}`,
   windowOpened: (path: string): string => `已在浏览器打开：${path}`,
@@ -286,6 +292,7 @@ export const ZH_CN: Strings = {
   boardKeyTick: 'x 完成这步',
   boardKeyArchive: 'a 归档',
   boardKeyCopyCommand: 'c 复制命令',
+  boardKeyCopyId: 'c 复制对话 ID',
   boardKeyCopyResume: 'c 复制续接命令',
   boardKeyConfirm: 'y／n 复制回答',
   boardKeyOptions: (n: number): string => `1–${n} 复制答案`,
