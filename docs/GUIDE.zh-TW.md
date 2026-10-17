@@ -123,7 +123,7 @@ Claude 會列出 Task 清單，面板跟著走：卡片顯示任務、它的背�
 | `/progress open` | 在瀏覽器打開 `progress.html` |
 | `/progress connect` / `connect remove` | 把這台電腦上的其他 agent 接上面板／拿掉 |
 | `/progress add <line>` | 新增一件事，和在面板裡打 `+` 一樣 |
-| `/progress tidy` | 立刻執行封存清理；什麼時候算夠舊，見[它怎麼保持整齊](#它怎麼保持整齊) |
+| `/progress tidy` | 立刻封存做完的工作，以及停太久的工作（見[它怎麼保持整齊](#它怎麼保持整齊)） |
 | `/progress sync` | 重新讀 Claude 的 Task 清單和 PR |
 | `/progress report` / `today` | 複製最近 7 天／今天的報告 |
 | `/progress notify on` / `off` | 打開或關閉通知 |
@@ -237,7 +237,7 @@ Gemini CLI 和 OpenCode 會自己把看板貼進提示；用技能（skill）的
 | 你在已停的對話或手記的任務按**封存** | 馬上 |
 | 封存後變空的 `##` 區段 | 會被移除；你自己留空的會保留 |
 
-這個清理在對話開始時執行，之後每小時一次。`/progress tidy` 會立刻執行。
+這個清理在對話開始時執行，之後每小時一次。`/progress tidy` 和面板的封存按鈕會立刻執行，而且做完的工作不用等：剛做完的區塊、每步都勾完的手寫工作會馬上移走（別的對話做完的區塊也是；那個對話之後再寫，它的區塊會回來）。停掉的對話還是等三天。
 
 ## 更新與移除
 
@@ -281,4 +281,6 @@ claude -p "/progress connect"
 - **私人 fork。** Claude Code 用你自己的 git 認證 clone。執行一次 `gh auth login` 和 `gh auth setup-git`；沒有 GitHub SSH key 的話，再設 `CLAUDE_CODE_PLUGIN_PREFER_HTTPS=1`。
 - **你的組織統一管理 Claude Code。** 在那種環境裡，你自己裝的外掛收不到系統提示的 hook。執行設定腳本時加 `-KeepRule`（`--keep-rule`），改把規則留在 `~/.claude/CLAUDE.md`。
 - **某個 agent 沒出現。** 再跑一次 `/progress connect`：它會列出接上了哪些 agent，以及哪些設定檔改不了。重開那個 agent，並在它工作時開著一個 Claude Code 對話。開著的對話讀完 `~/.claude/progress-inbox/` 裡的檔案就會刪掉，所以要看 hook 存了什麼，先關掉所有對話：回合結束後那裡沒有新檔案，就是那個 agent 的 hook 沒有執行。
+- **Windows 上的 Cursor 停在「blocked」。** `cursor-agent` 一律用 bash 跑 hook，連寫給 PowerShell 的也是，所以 `~/.cursor/hooks.json` 裡其他工具的 PowerShell hook 會出現 `syntax error near unexpected token '&'`；`preToolUse` hook 失敗會擋住整個回合（Agent Board 的 hook 根本輪不到）。修好或拿掉那個工具的 hook。
+- **Hermes Agent 單次執行的問題顯示成已停，不是等你。** `hermes -q` 回合一結束就關掉對話，所以問你事情的那塊會顯示「對話已結束，可接手」。問題仍是最後一步；長時間開著的 Hermes（它的 gateway）就會維持等你。
 - **換了一台電腦。** `progress.md`、收件匣和 hook 都只在各自的電腦上。在新電腦安裝並執行 `/progress connect`；要帶上紀錄，就把 `progress.md` 和旁邊的 `progress-archive-*.md`、`progress-journal-*.md` 複製過去。要兩台共用一個面板，就在兩台都把 `CLAUDE_PROGRESS_FILE` 指向同步資料夾裡的同一個檔案，並且一次只用一台。

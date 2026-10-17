@@ -15,7 +15,7 @@ import { parseProgress } from '../../hooks/parse'
 import { STRINGS } from '../../hooks/strings'
 import { buildView } from '../../hooks/view'
 import { NOW, SAMPLES, SESSION, MIN } from './samples'
-import { AGENT_ICONS } from './icons'
+import { AGENT_ICONS, TESTED_ICONS } from './icons'
 import { CELL, LINE, MONO, gridSvg, keyBox, layout, rowOf, toNode } from './terminal'
 import type { Theme } from './terminal'
 
@@ -51,7 +51,7 @@ const WORDS: Record<Lang, {
       heads: ['Who reports', 'One file', 'Where you see it'],
       sources: [
         ['Claude Code', 'Reports every turn by itself'],
-        ['Other agents', 'Codex, Gemini, Cursor…'],
+        ['Other agents', 'Codex, Gemini, OpenCode…'],
         ['You', 'Add a task by hand'],
       ],
       into: ['on its own', 'through hooks', 'type it in'],
@@ -70,7 +70,7 @@ const WORDS: Record<Lang, {
       heads: ['誰在回報', '寫進同一個檔', '在哪裡看'],
       sources: [
         ['Claude Code', '每回合自動回報'],
-        ['其他 agent', 'Codex、Gemini、Cursor…'],
+        ['其他 agent', 'Codex、Gemini、OpenCode…'],
         ['你', '自己加一件事'],
       ],
       into: ['自動', '透過 hook', '自己打'],
@@ -89,7 +89,7 @@ const WORDS: Record<Lang, {
       heads: ['谁在汇报', '写进同一个文件', '在哪里看'],
       sources: [
         ['Claude Code', '每回合自动汇报'],
-        ['其他 agent', 'Codex、Gemini、Cursor…'],
+        ['其他 agent', 'Codex、Gemini、OpenCode…'],
         ['你', '自己加一件事'],
       ],
       into: ['自动', '通过 hook', '自己打'],
@@ -233,7 +233,7 @@ const flow = (lang: Lang): string => {
   const right = { x: 904, w: 336, h: 94, gap: 112 }
   const doc = { x: 508, y: top, w: 316, h: 430 }
   // Claude Code wears its tile; the other agents are shown by theirs instead of a list of names.
-  const others = AGENT_ICONS.filter(icon => icon.name !== 'Claude Code')
+  const others = TESTED_ICONS.filter(icon => icon.name !== 'Claude Code')
   const sources = w.sources
     .map(([title, sub], i) => {
       const y = top + i * left.gap
@@ -391,10 +391,10 @@ const AGENTS: Array<[string, string]> = [
   ['Claude Code', 'acme-web'],
   ['Codex', 'api-gateway'],
   ['Gemini CLI', 'data-pipeline'],
-  ['Cursor', 'docs-site'],
+  ['OpenCode', 'docs-site'],
   ['Grok Build', 'mobile-app'],
 ]
-const HOOKED = ['Claude Code', 'Codex', 'Gemini CLI', 'Cursor', 'OpenCode', 'Grok Build', 'Hermes Agent', 'Muse Code']
+const HOOKED = TESTED_ICONS.map(icon => icon.name)
 
 const ENDED_TITLE: Record<Lang, string> = { en: 'Upgrade to React 19', 'zh-TW': '升級到 React 19', 'zh-CN': '升级到 React 19' }
 
@@ -588,7 +588,7 @@ ${isWaiting ? `<g class="${timed(at.waiting[0] + 0.4, at.waiting[1], 'zoom')}"> 
 
   // the end card.
   const command = 'claude plugin install agent-board@agent-board'
-  const tiles = AGENT_ICONS.map((icon, i) => iconTile(icon.name, W / 2 - (AGENT_ICONS.length * 52 - 12) / 2 + i * 52, 452, 40)).join('')
+  const tiles = TESTED_ICONS.map((icon, i) => iconTile(icon.name, W / 2 - (TESTED_ICONS.length * 52 - 12) / 2 + i * 52, 452, 40)).join('')
   const endCard = `<g class="${timed(at.end[0], LOOP + 0.2, 'zoom')}">
 ${brandMark(W / 2 - 30, 128, 60, false)}
 <text x="${W / 2}" y="262" text-anchor="middle" font-size="64" font-weight="800" fill="${page.ink}">Agent Board</text>
@@ -714,7 +714,7 @@ const promo = (lang: Lang): string => {
     .map((line, i) => `<text x="72" y="${top + i * lineGap}" font-size="${size}" font-weight="800" fill="${i === w.headline.length - 1 ? pal.accent : '#f7f6f2'}">${esc(line)}</text>`)
     .join('\n')
   const subY = top + (w.headline.length - 1) * lineGap + 26
-  const icons = AGENT_ICONS.map((icon, i) => iconTile(icon.name, 72 + i * 58, 459, 44)).join('\n')
+  const icons = TESTED_ICONS.map((icon, i) => iconTile(icon.name, 72 + i * 58, 459, 44)).join('\n')
   // The pane, and under it the notification that has just come in; neither covers the other.
   const wx = 760
   const wy = 44

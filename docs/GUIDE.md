@@ -123,7 +123,7 @@ Marks:
 | `/progress open` | Opens `progress.html` in the browser |
 | `/progress connect` / `connect remove` | Hooks the other agents installed here into the pane / takes the hooks out |
 | `/progress add <line>` | Adds a task, same as `+` in the pane |
-| `/progress tidy` | Runs the archive sweep now; [How it keeps itself tidy](#how-it-keeps-itself-tidy) says what is old enough to go |
+| `/progress tidy` | Archives finished work now, and stopped work past its age ([How it keeps itself tidy](#how-it-keeps-itself-tidy)) |
 | `/progress sync` | Re-reads Claude's Task list and the PR |
 | `/progress report` / `today` | Copies a report of the last 7 days / today |
 | `/progress notify on` / `off` | Turns notifications on or off |
@@ -228,7 +228,7 @@ The board only reads. Turns other agents' hooks leave in the inbox are summed up
 | You press **Archive** on a stopped session or a hand-kept task | right away |
 | A `##` section the archive emptied | is removed; one you left empty stays |
 
-The sweep runs when a session starts and every hour after. `/progress tidy` runs it now.
+The sweep runs when a session starts and every hour after. `/progress tidy` and the pane's archive button run it now, and skip the waits for finished work: a block done a minute ago, or a hand-kept task with every step ticked, goes at once (another session's done block too; if that session writes again, its block comes back). A stopped session still gets its three days.
 
 ## Update and uninstall
 
@@ -272,4 +272,6 @@ The last line moves the hooks in your other agents to the new name. `progress.md
 - **Private fork.** Claude Code clones with your own git credentials. Run `gh auth login` and `gh auth setup-git` once; without a GitHub SSH key also set `CLAUDE_CODE_PLUGIN_PREFER_HTTPS=1`.
 - **Your organization manages Claude Code.** Plugins you install yourself do not get the system-prompt hook there. Run the setup script with `-KeepRule` (`--keep-rule`) to keep the rule in `~/.claude/CLAUDE.md` instead.
 - **An agent doesn't show up.** Run `/progress connect` again: it names every agent it connected and every config it could not edit. Restart the agent, and keep a Claude Code session open while it works. An open session reads each file in `~/.claude/progress-inbox/` and deletes it, so to see what the hook saves, close every session first: if no file appears there after a turn, the agent's hook did not run.
+- **Cursor on Windows stops at "blocked".** `cursor-agent` runs every hook through bash, even one written for PowerShell, so another tool's PowerShell hook in `~/.cursor/hooks.json` fails with `syntax error near unexpected token '&'`, and a failing `preToolUse` hook blocks the whole turn (Agent Board's hook never gets to run). Fix or remove that tool's hook.
+- **A one-off Hermes Agent question shows as stopped, not waiting.** `hermes -q` ends its session right after the turn, so a block that asks you something reads "session ended, can be taken over". Its question is still the last step; a long-running Hermes (its gateway) keeps it waiting.
 - **A new computer.** `progress.md`, the inbox and the hooks live on each computer. Install there and run `/progress connect`; copy `progress.md` and the `progress-archive-*.md` and `progress-journal-*.md` files beside it to bring your history. To share one board, point `CLAUDE_PROGRESS_FILE` on both computers at one file in a synced folder, and use one computer at a time.

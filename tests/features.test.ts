@@ -746,14 +746,14 @@ test('a Hermes config.yaml with the empty hooks: {} it ships with gets our hooks
   expect(once).toBe(`model:\n  default: x\nhooks:\n${ours}hooks_auto_accept: false\n`)
   expect(hermes?.edit(once, false)).toBe(once)
   expect(hermes?.edit(once, true)).toBe('model:\n  default: x\nhooks_auto_accept: false\n')
-  expect(hermes?.edit('hooks: {}  # none yet\n', false)).toBe(`hooks:\n${ours}`)
+  expect(hermes?.edit('hooks: {}  # none yet\n', false)).toBe(`hooks: # none yet\n${ours}`)
   const stockWindows = stock.replace(/\n/g, '\r\n')
   const windows = String(hermes?.edit(stockWindows, false))
   expect(windows).toBe(once.replace(/\n/g, '\r\n'))
   expect(hermes?.edit(windows, false)).toBe(windows)
   expect(hermes?.edit(windows, true)).toBe('model:\r\n  default: x\r\nhooks_auto_accept: false\r\n')
   const spaced = String(hermes?.edit('a: 1\r\nhooks: { } # none yet\r\nb: 2\r\n', false))
-  expect(spaced).toBe(`a: 1\r\nhooks:\r\n${ours.replace(/\n/g, '\r\n')}b: 2\r\n`)
+  expect(spaced).toBe(`a: 1\r\nhooks: # none yet\r\n${ours.replace(/\n/g, '\r\n')}b: 2\r\n`)
   expect(hermes?.edit('a: 1\r\n', false)).toBe(`a: 1\r\n\r\nhooks:\r\n${ours.replace(/\n/g, '\r\n')}`)
 })
 
@@ -1167,8 +1167,24 @@ test('a Hermes hook of ours rewritten in block style comes out whole, so connect
 
 test('only the end of a long session log is read, so a tens-of-megabytes Codex log stays quick', () => {
   const line = (role: string, text: string) => JSON.stringify({ type: 'response_item', payload: { type: 'message', role, content: [{ type: 'input_text', text }] } })
-  const filler = Array.from({ length: 50000 }, (_, index) => line(index % 2 === 0 ? 'user' : 'assistant', `step ${index} ${'x'.repeat(400)}`)).join('\n')
+  // One user and one reply line, repeated: building the log stays cheap, reading it would not.
+  const filler = `${line('user', `step ${'x'.repeat(400)}`)}\n${line('assistant', `done ${'x'.repeat(400)}`)}\n`.repeat(25000).trimEnd()
   const log = `${filler}\n${line('user', 'Add rate limiting')}\n${line('assistant', 'Done. 100 or 300?')}\n`
   expect(log.length).toBeGreaterThan(20_000_000)
   expect(transcriptTail(log)).toEqual({ prompt: 'Add rate limiting', answer: 'Done. 100 or 300?' })
+})
+
+test('Hermes hooks of ours that Hermes rewrote in block style are left as they are, so a session start says nothing', () => {
+  const turn = "sh '/h/.claude/progress-report.sh' hermes turn || true"
+  const end = "sh '/h/.claude/progress-report.sh' hermes end || true"
+  const block = `hooks:\n  post_llm_call:\n    - command: ${turn}\n      timeout: 10\n  on_session_finalize:\n    - command: "${end}"\n      timeout: 10\n`
+  expect(withHermesHooks(block, [['post_llm_call', turn], ['on_session_finalize', end]])).toBe(block)
+  // An old hook of ours without `|| true` is still brought up to date.
+  const old = block.replace(/ \|\| true/g, '')
+  expect(withHermesHooks(old, [['post_llm_call', turn], ['on_session_finalize', end]])).toContain(`{command: ${JSON.stringify(turn)}, timeout: 10}`)
+})
+
+test('a comment after an empty Hermes hooks: {} stays when ours go in under it', () => {
+  const turn = "sh '/h/.claude/progress-report.sh' hermes turn || true"
+  expect(withHermesHooks('hooks: {} # my note\n', [['post_llm_call', turn]])).toContain('hooks: # my note\n  post_llm_call:\n')
 })

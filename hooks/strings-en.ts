@@ -170,7 +170,7 @@ export const EN: Strings = {
   commandDescription: 'Agent Board: show the pane; open (the web page), connect (other agents), tidy, sync, add …, report, today, notify on|off, lang en|zh-TW|zh-CN',
   commandHint: '[open|connect|tidy|sync|add …|report|today|notify on|off|lang …]',
   tidyUnreadable: "Can't read the progress or archive file. No files were changed.",
-  tidyNothing: 'Nothing is old enough to archive yet. A finished block goes 12 hours after its last update, any other block after 3 days, and a hand-kept task 24 hours after the pane saw every step done. This session\'s own block stays.',
+  tidyNothing: 'Nothing to archive. Finished work goes at once; a stopped session goes after 3 days without a word; this session\'s own block stays.',
   tidyMoved: (n: number): string => `Archived ${n} ${n === 1 ? 'task' : 'tasks'}.`,
   synced: 'Re-synced from the Task list.',
   copiedSuffix: ' (copied to clipboard)',

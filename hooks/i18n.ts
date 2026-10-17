@@ -176,7 +176,7 @@ export const ZH_TW = {
   commandDescription: 'Agent Board 進度面板：開啟；open 開網頁版、connect 接上其他 agent、整理、同步、加 …、週報、今天、通知 開/關、lang en|zh-TW|zh-CN',
   commandHint: '[open|connect|整理|同步|加 …|週報|今天|通知 開/關|lang …]',
   tidyUnreadable: '讀不到進度檔或封存檔，沒有動任何檔案。',
-  tidyNothing: '還沒有到時間該封存的。做完的區塊在最後一次更新 12 小時後封存，其他區塊 3 天後，手記的任務在面板看到每一步都打勾 24 小時後；這個對話自己的區塊不會封存。',
+  tidyNothing: '沒有可以封存的。做完的工作會馬上封存；停掉的對話要 3 天沒動靜才會；這個對話自己的區塊不會封存。',
   tidyMoved: (n: number): string => `封存了 ${n} 個任務。`,
   synced: '已從 Task 清單重新同步。',
   copiedSuffix: '（已複製到剪貼簿）',

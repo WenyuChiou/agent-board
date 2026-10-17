@@ -726,7 +726,11 @@ const connectAgents = async ($: EngineInterface, mode: ConnectMode): Promise<{ t
   const skipped: string[] = []
   const removeFile = (file: string): Promise<void> => removeFiles($, [file], isWin)
   const savedBy = remove ? null : openclawSavedBy(await readText($, [openclawHome, 'openclaw.json'].join(sep)).catch(() => ''))
-  const openclawOld = savedBy === null || openclawTooOld(savedBy) === null ? null : await installedOpenclawOld($, isWin, savedBy)
+  // A config no OpenClaw has saved yet (installed, never run) says nothing of its version,
+  // so OpenClaw is asked, as it is when the config names one too old.
+  const hasOpenclaw = !remove && (await $.fs.exists(openclawHome))
+  const openclawOld =
+    !hasOpenclaw || (savedBy !== null && openclawTooOld(savedBy) === null) ? null : await installedOpenclawOld($, isWin, savedBy ?? '')
   // Agents with a hook file that could not be written. OpenClaw's config entry loads its
   // plugin file, so when the plugin file fails, the entry is not written either.
   const failed = new Set<string>()
@@ -781,7 +785,8 @@ const connectAgents = async ($: EngineInterface, mode: ConnectMode): Promise<{ t
       // announce the agent as newly connected.
       // Taking our hooks out also drops empty lists, so whether that changes the text says
       // nothing; the reporter's name in the file does.
-      if (isAuto && (hook.edit(before, true) === DELETE || hasOurHook(before))) continue
+      // Codex and Hermes ask the person to approve a changed hook again, so those still say so.
+      if (isAuto && hook.agent !== 'codex' && hook.agent !== 'hermes' && (hook.edit(before, true) === DELETE || hasOurHook(before))) continue
       // OpenClaw takes two files, a plugin and the config entry that loads it.
       if (hook.label === '' || done.includes(hook.label)) continue
       done.push(hook.label)
@@ -951,7 +956,8 @@ const writeHandoff = async ($: EngineInterface, summary: string): Promise<void> 
 // Old work moves to that month's archive file, so the file stays about what is open: done
 // blocks after half a day, stopped ones after three, hand-kept tasks a day after the pane saw
 // their last step ticked.
-const archiveOld = async ($: EngineInterface): Promise<number> => {
+// `isNow`: the person asked (`/progress tidy`, the archive button), so finished work goes now.
+const archiveOld = async ($: EngineInterface, isNow = false): Promise<number> => {
   const path = await progressPath($)
   const mirror = await read($, mine)
   const keep = mirror === null ? undefined : shortId(mirror.sessionId)
@@ -961,8 +967,9 @@ const archiveOld = async ($: EngineInterface): Promise<number> => {
   const archived = new Set<string>()
   const keys = new Set<string>()
   await rewrite($, path, async text => {
-    const blocks = takeArchivable(text, at, keep, s)
-    const manual = takeManualDone(blocks.text, at, key => seen[key], s)
+    const blocks = takeArchivable(text, at, keep, s, isNow)
+    // A hand-kept task the pane has not seen done yet counts as seen a day ago when asked.
+    const manual = takeManualDone(blocks.text, at, key => (isNow ? Math.min(seen[key] ?? at, at - DAY) : seen[key]), s)
     const entries = [...blocks.entries, ...manual.entries]
     if (entries.length === 0) return null
     // Made again after another session's write, the same blocks are not archived twice.
@@ -1298,7 +1305,7 @@ export const register: Register = (on, options) => {
     }
     const s = await wordsOf($)
     if (/^(整理|archive|tidy)$/i.test(arg)) {
-      const moved = await enqueue(() => archiveOld($)).catch(() => null)
+      const moved = await enqueue(() => archiveOld($, true)).catch(() => null)
       if (moved === null) return { text: s.tidyUnreadable }
 
       return { text: moved === 0 ? s.tidyNothing : s.tidyMoved(moved) }
@@ -1585,7 +1592,7 @@ export const register: Register = (on, options) => {
         $.prompt.submit({ text: s.continueText }).catch(() => undefined)
       },
       archive: () => {
-        enqueue(() => archiveOld($)).catch(() => undefined)
+        enqueue(() => archiveOld($, true)).catch(() => undefined)
       },
       archiveRow: row => {
         const ref = row.archive

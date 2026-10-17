@@ -169,7 +169,7 @@ export const ZH_CN: Strings = {
   commandDescription: 'Agent Board 进度面板：打开；open 打开网页版、connect 接上其他 agent、整理、同步、加 …、周报、今天、通知 开/关、lang en|zh-TW|zh-CN',
   commandHint: '[open|connect|整理|同步|加 …|周报|今天|通知 开/关|lang …]',
   tidyUnreadable: '读不到进度文件或归档文件，没有动任何文件。',
-  tidyNothing: '还没有到时间该归档的。做完的区块在最后一次更新 12 小时后归档，其他区块 3 天后，手记的任务在面板看到每一步都打勾 24 小时后；这个对话自己的区块不会归档。',
+  tidyNothing: '没有可以归档的。做完的工作会马上归档；停掉的对话要 3 天没动静才会；这个对话自己的区块不会归档。',
   tidyMoved: (n: number): string => `归档了 ${n} 个任务。`,
   synced: '已从 Task 清单重新同步。',
   copiedSuffix: '（已复制到剪贴板）',

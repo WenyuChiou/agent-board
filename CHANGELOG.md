@@ -1,6 +1,75 @@
 # Changelog
 
-## 0.16.1 — 2026-10-17
+## 0.17.1 — 2026-10-17
+
+- **Fixes from a live test with Grok Build 1.0.62.**
+  - **A look at the board asked in plain words gets no block.** Grok Build
+    picked the board skill on its own for 我想看一下目前所有專案的進度 ("I
+    want to see where all my projects stand"), so the request named no board
+    command, and the turn got a block of its own holding a copy of another
+    project's question. A reply that starts with the printed board (its count
+    line, alone in a fence or unfenced) and adds at most a sentence after it
+    now counts as a look at the board, whatever the request said. Work told
+    before the board, as a list, or at more length after it still gets its
+    block.
+  - **End hooks get 5 seconds.** Grok Build's and Muse Code's session-end
+    hook had 1 second; on Windows PowerShell alone took 0.6 of it in the live
+    test, so a slow start could lose the session's end.
+  - **An update to a hook already in place is made without a word.** A
+    session that rewrites its own hook in an agent's config (as this release
+    does for those timeouts) no longer announces the agent as newly
+    connected. Codex and Hermes still say so, since each asks the person to
+    approve a changed hook again.
+
+  Tests: "a reply that is the printed board and a sentence is a look at the
+  board, asked in plain words, while work that shows it too is not", "a Grok
+  Build turn that printed the board for a plain request gets no block, and
+  copies no other project’s question", "each agent’s config gets the hook in
+  the shape it reads, and nothing else of the person’s changes", "an agent
+  hooked in by an earlier version gets the new hook without a word", "a
+  changed hook of ours in Codex is still announced, since Codex asks to
+  approve it again", "a first connection to a config holding only an empty
+  hook list is still announced".
+
+## 0.17.0 — 2026-10-17
+
+Brings the fixes below to existing installs (`claude plugin update` only
+picks up a new version), and fixes what the live Muse, dot, Cursor and Hermes
+runs on Windows found.
+
+- **`/progress tidy` archives finished work now**, as the README says, and so
+  does the pane's archive button: a block marked done a minute ago goes at
+  once, a hand-kept task with every step ticked too. The half-day wait stays
+  for the automatic tidy, and a stopped session still gets its three days.
+  Test: "asked to tidy, a block done a minute ago goes now, while a stopped
+  one still gets its three days".
+- **The README's agents table says what works, agent by agent**: whether its
+  turns reach the board and whether the board works inside it, as tested live
+  (✅), working with a limit (⚠️, which one), written from docs and not run (❔)
+  or not working (❌), with the version tested. CONTRIBUTING says when a mark
+  may change.
+- **From a review of #22, #25, #26 and this release.**
+  - Hermes hooks of ours that Hermes had rewritten in block style are left as
+    they are, so a session start no longer rewrites `config.yaml` and says it
+    connected Hermes each time. Test: "Hermes hooks of ours that Hermes
+    rewrote in block style are left as they are, so a session start says
+    nothing".
+  - An OpenClaw that has not saved its config yet is asked its version, so an
+    old one is left out there too. Test: "an OpenClaw that has not saved its
+    config yet is asked its version, and an old one is left out".
+  - Grok Build also counts as installed by the `.metadata_version` or
+    `agent_id` it writes, besides its `config.toml` and `sessions`. Tests: "a
+    ~/.grok that only another tool put hooks in is not taken for Grok Build",
+    "taking the hooks out also takes out a Grok hook an earlier version left in
+    a ~/.grok without Grok".
+  - A comment after `hooks: {}` stays. Test: "a comment after an empty Hermes
+    hooks: {} stays when ours go in under it".
+  - The guides say tidy now skips the wait and also moves another session's
+    done block, and the READMEs point dot and Muse on the web to the chat-relay
+    prompt.
+- The guides say why Cursor on Windows can stop at "blocked" (another tool's
+  PowerShell hook run through bash) and why a one-off `hermes -q` question
+  shows as stopped.
 
 - **Hardening from a review of the whole plugin.**
   - **Home folders with Chinese names.** On Windows, agents' turns now reach
@@ -49,11 +118,10 @@
     remove` takes out a hook file of ours wherever it finds one, so the hook
     an earlier connect left in such a folder comes out too; run `/progress
     connect` after it to turn connecting at session start back on.
-  - **`/progress tidy` says what it does.** The READMEs and guides called it
-    "archive finished work now"; it runs the archive sweep, which moves only
-    work past its age. When nothing is old enough, the reply now says when work
-    does move out instead of "Nothing to archive", and the count no longer
-    calls every archived task finished.
+  - **`/progress tidy` says what it does**: when nothing is left to archive,
+    the reply says what goes when, and the count no longer calls every
+    archived task finished. (This release also makes it archive finished work
+    at once; see the first entry.)
   - **A prompt to paste for a chat relay.** [Remote
     reporters](docs/REMOTE_REPORTERS.md#chat-relay-a-prompt-to-paste) gives the
     block with its exact markers for a chat assistant to repeat, since one
@@ -64,32 +132,6 @@
   done blocks go to the month's archive file, after what it already holds",
   "/progress connect hooks the installed agents into the pane once, keeps
   their own hooks, and takes ours back out".
-- **Fixes from a live test with Grok Build 1.0.62.**
-  - **A look at the board asked in plain words gets no block.** Grok Build
-    picked the board skill on its own for 我想看一下目前所有專案的進度 ("I
-    want to see where all my projects stand"), so the request named no board
-    command, and the turn got a block of its own holding a copy of another
-    project's question. A reply that starts with the printed board (its count
-    line, alone in a fence or unfenced) and adds at most a sentence after it
-    now counts as a look at the board, whatever the request said. Work told
-    before the board, as a list, or at more length after it still gets its
-    block.
-  - **End hooks get 5 seconds.** Grok Build's and Muse Code's session-end
-    hook had 1 second; on Windows PowerShell alone took 0.6 of it in the live
-    test, so a slow start could lose the session's end.
-  - **An update to a hook already in place is made without a word.** A
-    session that rewrites its own hook in an agent's config (as this release
-    does for those timeouts) no longer announces the agent as newly
-    connected.
-
-  Tests: "a reply that is the printed board and a sentence is a look at the
-  board, asked in plain words, while work that shows it too is not", "a Grok
-  Build turn that printed the board for a plain request gets no block, and
-  copies no other project’s question", "each agent’s config gets the hook in
-  the shape it reads, and nothing else of the person’s changes", "an agent
-  hooked in by an earlier version gets the new hook without a word", "a
-  first connection to a config holding only an empty hook list is still
-  announced".
 
 ## 0.16.0 — 2026-10-17
 

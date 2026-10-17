@@ -211,7 +211,7 @@ const join = (ctx: ConnectContext, ...parts: string[]): string => [ctx.home, ...
 
 // Other tools (Orca among them) put hooks in ~/.grok/hooks for a Grok Build that may never
 // be installed, so the folder alone is no sign of it: Grok's own config or sessions are.
-const grokSigns = (ctx: ConnectContext): string[] => [[ctx.grokHome, 'config.toml'].join(ctx.sep), [ctx.grokHome, 'sessions'].join(ctx.sep)]
+const grokSigns = (ctx: ConnectContext): string[] => ['config.toml', 'sessions', '.metadata_version', 'agent_id'].map(name => [ctx.grokHome, name].join(ctx.sep))
 
 const jsonEdit =
   (add: (config: Json) => Json) =>
@@ -247,19 +247,26 @@ const hasChildren = (lines: string[], at: number): boolean => {
 
 // Adding ours again keeps a `hooks:` that only held ours, so they go back where they were
 // rather than to the end of the file.
-const stripHermesHooks = (text: string, isKeepingTop: boolean): string => {
-  const lines = text.split('\n')
-  // Only list items of ours, with the lines that continue them: a YAML dumper (Hermes' own
-  // setup, or a person tidying the file) writes our flow-style item in block style, its
-  // timeout on a line of its own. A comment or another line that names the script stays.
-  const drop = new Set<number>()
+// Our list items, each with the lines that continue it: a YAML dumper (Hermes' own setup,
+// or a person tidying the file) writes our flow-style item in block style, its timeout on a
+// line of its own. A comment or another line that names the script is no item of ours.
+const hermesItems = (lines: readonly string[]): Array<[number, number]> => {
+  const items: Array<[number, number]> = []
   lines.forEach((line, at) => {
     if (!line.trimStart().startsWith('- ')) return
     const indent = indentOf(line)
     let end = at + 1
     while (end < lines.length && isContent(lines[end] ?? '') && indentOf(lines[end] ?? '') > indent) end += 1
-    if (lines.slice(at, end).some(one => isContent(one) && OURS.test(one))) for (let index = at; index < end; index += 1) drop.add(index)
+    if (lines.slice(at, end).some(one => isContent(one) && OURS.test(one))) items.push([at, end])
   })
+
+  return items
+}
+
+const stripHermesHooks = (text: string, isKeepingTop: boolean): string => {
+  const lines = text.split('\n')
+  const drop = new Set<number>()
+  for (const [start, end] of hermesItems(lines)) for (let index = start; index < end; index += 1) drop.add(index)
   const kept = lines.filter((_, at) => !drop.has(at))
   if (kept.length === lines.length) return text
   const keys = kept.filter((line, at) => !(HERMES_KEY.test(line) && !hasChildren(kept, at)))
@@ -271,6 +278,12 @@ const stripHermesHooks = (text: string, isKeepingTop: boolean): string => {
 export const withoutHermesHooks = (text: string): string => stripHermesHooks(text, false)
 
 export const withHermesHooks = (text: string, events: Array<[string, string]>): string | null => {
+  // Ours all there already, in whatever style Hermes last wrote them: nothing to change, so
+  // a session start neither rewrites the file nor says it connected Hermes again.
+  const lines0 = text.split('\n')
+  const items = hermesItems(lines0).map(([start, end]) => lines0.slice(start, end).join('\n'))
+  const isItemOf = (item: string, command: string): boolean => item.includes(command) || item.includes(JSON.stringify(command)) || item.includes(`'${command.replace(/'/g, "''")}'`)
+  if (items.length === events.length && events.every(([, command]) => items.some(item => isItemOf(item, command)))) return text
   const base = stripHermesHooks(text, true)
   const item = (command: string): string => `- {command: ${JSON.stringify(command)}, timeout: 10}`
   // Lines of ours end the way the file's own lines do.
@@ -279,7 +292,7 @@ export const withHermesHooks = (text: string, events: Array<[string, string]>): 
   const lines = base
     .replace(/\n+$/, '')
     .split('\n')
-    .map(line => (EMPTY_HOOKS.test(line) ? `hooks:${line.endsWith('\r') ? '\r' : ''}` : line))
+    .map(line => (EMPTY_HOOKS.test(line) ? `${line.replace(/\{\s*\}\s*/, '').replace(/\s+(#|\r|$)/, ' $1').trimEnd()}${line.endsWith('\r') ? '\r' : ''}` : line))
   const at = lines.findIndex(line => /^hooks\s*:/.test(line))
   if (at === -1) {
     const added = ['hooks:', ...events.flatMap(([event, command]) => [`  ${event}:`, `    ${item(command)}`])].join(`${eol}\n`)

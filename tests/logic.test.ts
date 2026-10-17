@@ -109,6 +109,17 @@ test('done blocks leave after half a day, open ones stay', () => {
   expect(kept).not.toContain('session=aaaaaaaa')
 })
 
+test('asked to tidy, a block done a minute ago goes now, while a stopped one still gets its three days', () => {
+  const done = { ...sampleMirror(), sessionId: 'aaaaaaaa-new', state: 'done' as const, updated: NOW - 60 * 1000 }
+  const ended = { ...sampleMirror(), sessionId: 'cccccccc-end', state: 'ended' as const, updated: NOW - HOUR }
+  const text = upsertAutoBlock(upsertAutoBlock('', done), ended)
+  expect(takeArchivable(text, NOW).entries).toHaveLength(0)
+  const { text: kept, entries } = takeArchivable(text, NOW, undefined, undefined, true)
+  expect(entries).toHaveLength(1)
+  expect(kept).not.toContain('session=aaaaaaaa')
+  expect(kept).toContain('session=cccccccc')
+})
+
 test('after a compaction the note says where things stand', () => {
   const note = resumeNote(sampleMirror()) ?? ''
   expect(note).toContain('目標：進度面板（persona_framework）')
