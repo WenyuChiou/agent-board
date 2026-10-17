@@ -1,8 +1,10 @@
 // The board script `/progress connect` writes, run the way every other agent runs it: plain
 // Node, no Claude Code. Needs Node 22.18+ or 24 (it reads hooks/board-script.ts directly).
-import { execFileSync, spawn } from 'node:child_process'
+import { execFile, execFileSync, spawn } from 'node:child_process'
+import { createHash } from 'node:crypto'
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync, statSync, utimesSync } from 'node:fs'
-import { request } from 'node:http'
+import { createServer, request } from 'node:http'
+import { createServer as createNetServer } from 'node:net'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
@@ -143,10 +145,16 @@ syncBuiltinESMExports()
 // a finished Gemini block. AGENT_BOARD_GROK stands in for Grok Build.
 const GROK_ID = '01a14a94-0dee-7543-8208-991a4266a1da'
 
+// Where the board script keeps a running page's address: in the folder for running programs
+// (XDG_RUNTIME_DIR, here one of the test's own), named for the progress.md it serves.
+const servedAt = (run, path) => join(run, `agent-board-${createHash('sha256').update(path).digest('hex').slice(0, 16)}.json`)
+
 const page = async () => {
   const dir = mkdtempSync(join(tmpdir(), 'board-serve-'))
   const work = join(dir, 'api-gateway')
   mkdirSync(work)
+  const run = join(dir, 'run')
+  mkdirSync(run, { mode: 0o700 })
   const path = join(dir, 'progress.md')
   const recent = new Date(Date.now() - 10 * 60 * 1000).toISOString().replace(/\.\d{3}Z$/, 'Z')
   writeFileSync(path, `# Progress
@@ -178,7 +186,7 @@ setTimeout(() => process.stdout.write('Redis it is; wiring it up now.\\n'), 1000
   const script = join(dir, 'agent-board.mjs')
   writeFileSync(script, `globalThis.AGENT_BOARD = ${JSON.stringify({ path, lang: 'en' })}\n${BOARD_SCRIPT}`)
   const child = spawn(process.execPath, [script, '--serve-child'], {
-    env: { ...process.env, CLAUDE_PROGRESS_FILE: '', NO_COLOR: '1', AGENT_BOARD_GROK: stand, AGENT_BOARD_CODEX: stand },
+    env: { ...process.env, CLAUDE_PROGRESS_FILE: '', NO_COLOR: '1', AGENT_BOARD_GROK: stand, AGENT_BOARD_CODEX: stand, XDG_RUNTIME_DIR: run },
     stdio: ['ignore', 'pipe', 'pipe'],
   })
   const exited = new Promise(done => child.once('exit', code => done(code)))
@@ -225,7 +233,7 @@ setTimeout(() => process.stdout.write('Redis it is; wiring it up now.\\n'), 1000
     rmSync(dir, { recursive: true, force: true })
     return code
   }
-  return { dir, path, script, child, stand, url, port, token, call, rows, keyOf, close, exited }
+  return { dir, run, served: servedAt(run, path), path, script, child, stand, url, port, token, call, rows, keyOf, close, exited }
 }
 
 test('the page answers only with its token and its own host, and closing it stops the server', { timeout: 30_000 }, async () => {
@@ -246,10 +254,10 @@ test('the page answers only with its token and its own host, and closing it stop
     assert.equal((await call('POST', '/api/tidy', { body: {}, headers: { origin: 'https://evil.example' } })).status, 403)
     assert.equal((await call('POST', '/api/tidy', { body: {}, headers: { 'content-type': 'text/plain' } })).status, 415)
     assert.equal((await call('GET', '/api/board')).status, 200)
-    assert.ok(existsSync(join(board.dir, 'progress-serve.json')))
+    assert.ok(existsSync(board.served))
     assert.equal((await call('POST', '/api/close', { body: {} })).status, 200)
     assert.equal(await board.exited, 0)
-    assert.ok(!existsSync(join(board.dir, 'progress-serve.json')))
+    assert.ok(!existsSync(board.served))
   } finally {
     await board.close()
   }
@@ -296,13 +304,121 @@ test('a busy older server refuses upgrade without publishing another sender', { 
     delayedStand(board, gate)
     const row = (await board.rows()).find(row => row.title === 'Pick the cache')
     assert.equal((await board.call('POST', '/api/act', { body: { ...row, type: 'send', text: 'Synthetic delayed reply' } })).status, 202)
-    const previous = readFileSync(join(board.dir, 'progress-serve.json'), 'utf8')
+    const previous = readFileSync(board.served, 'utf8')
     const stamp = statSync(board.script)
     utimesSync(board.script, stamp.atime, new Date(stamp.mtimeMs + 5000))
-    assert.throws(() => execFileSync(process.execPath, [board.script, '--serve', '--no-open'], { env: { ...process.env, CLAUDE_PROGRESS_FILE: '', NO_COLOR: '1' }, encoding: 'utf8', timeout: 10_000, windowsHide: true }), error => error.status === 1 && error.stdout.includes('A message is still on its way'))
-    assert.equal(readFileSync(join(board.dir, 'progress-serve.json'), 'utf8'), previous)
+    assert.throws(() => execFileSync(process.execPath, [board.script, '--serve', '--no-open'], { env: { ...process.env, CLAUDE_PROGRESS_FILE: '', NO_COLOR: '1', XDG_RUNTIME_DIR: board.run }, encoding: 'utf8', timeout: 10_000, windowsHide: true }), error => error.status === 1 && error.stdout.includes('A message is still on its way'))
+    assert.equal(readFileSync(board.served, 'utf8'), previous)
     assert.equal((await board.call('GET', '/api/ping')).json().sending, 1)
   } finally { writeFileSync(gate, 'release'); await board.close() }
+})
+
+test('a busy legacy page keeps its address and blocks migration until the send finishes', { timeout: 30_000 }, async () => {
+  const board = await page()
+  const gate = join(board.dir, 'release')
+  const legacy = join(board.dir, 'progress-serve.json')
+  const previous = readFileSync(board.served, 'utf8')
+  try {
+    delayedStand(board, gate)
+    const row = (await board.rows()).find(row => row.title === 'Pick the cache')
+    assert.equal((await board.call('POST', '/api/act', { body: { ...row, type: 'send', text: 'Synthetic migration reply' } })).status, 202)
+    writeFileSync(legacy, previous)
+    rmSync(board.served)
+    assert.throws(() => execFileSync(process.execPath, [board.script, '--serve', '--no-open'], { env: { ...process.env, CLAUDE_PROGRESS_FILE: '', NO_COLOR: '1', XDG_RUNTIME_DIR: board.run }, encoding: 'utf8', timeout: 10_000, windowsHide: true }), error => error.status === 1 && error.stdout.includes('A message is still on its way'))
+    assert.equal(readFileSync(legacy, 'utf8'), previous)
+    assert.ok(!existsSync(board.served))
+    assert.equal((await board.call('GET', '/api/ping')).json().sending, 1)
+  } finally {
+    writeFileSync(board.served, previous)
+    rmSync(legacy, { force: true })
+    writeFileSync(gate, 'release')
+    await board.close()
+  }
+})
+
+test('malformed legacy metadata blocks migration without changing either address', { timeout: 30_000 }, async () => {
+  const board = await page()
+  const legacy = join(board.dir, 'progress-serve.json')
+  const previous = readFileSync(board.served, 'utf8')
+  try {
+    writeFileSync(legacy, '{not valid metadata')
+    rmSync(board.served)
+    assert.throws(() => execFileSync(process.execPath, [board.script, '--serve', '--no-open'], { env: { ...process.env, CLAUDE_PROGRESS_FILE: '', NO_COLOR: '1', XDG_RUNTIME_DIR: board.run }, encoding: 'utf8', timeout: 10_000, windowsHide: true }), error => error.status === 1 && error.stdout.includes("Couldn't open the board page"))
+    assert.equal(readFileSync(legacy, 'utf8'), '{not valid metadata')
+    assert.ok(!existsSync(board.served))
+    assert.equal((await board.call('GET', '/api/ping')).status, 200)
+    assert.ok(!existsSync(join(board.dir, 'grok-ran.json')))
+  } finally {
+    writeFileSync(board.served, previous)
+    await board.close()
+  }
+})
+
+test('legacy uncertain claims block public startup after a crash and cannot be replayed', { timeout: 30_000 }, async () => {
+  const board = await page()
+  const gate = join(board.dir, 'release')
+  const legacy = join(board.dir, 'progress-serve.json')
+  try {
+    delayedStand(board, gate)
+    const row = (await board.rows()).find(row => row.title === 'Pick the cache')
+    assert.equal((await board.call('POST', '/api/act', { body: { ...row, type: 'send', text: 'Synthetic legacy reply' } })).status, 202)
+    for (let i = 0; !existsSync(join(board.dir, 'calls.jsonl')) && i < 100; i++) await new Promise(done => setTimeout(done, 25))
+    assert.ok(existsSync(join(board.dir, 'calls.jsonl')))
+    const address = readFileSync(board.served, 'utf8')
+    const claims = readdirSync(board.served + '.sends')
+    assert.equal(claims.length, 1)
+    const claim = readFileSync(join(board.served + '.sends', claims[0]), 'utf8')
+    board.child.kill()
+    await board.exited
+    mkdirSync(legacy + '.sends')
+    writeFileSync(join(legacy + '.sends', claims[0]), claim)
+    rmSync(board.served + '.sends', { recursive: true })
+    writeFileSync(legacy, address)
+    rmSync(board.served)
+    const serve = () => execFileSync(process.execPath, [board.script, '--serve', '--no-open'], { env: { ...process.env, CLAUDE_PROGRESS_FILE: '', NO_COLOR: '1', AGENT_BOARD_CODEX: board.stand, AGENT_BOARD_GROK: board.stand, XDG_RUNTIME_DIR: board.run }, encoding: 'utf8', timeout: 10_000, windowsHide: true })
+    assert.throws(serve, error => error.status === 1 && error.stdout.includes('Previous send records remain in'))
+    assert.equal(readFileSync(legacy, 'utf8'), address)
+    // The claim still blocks startup even if the old address is absent.
+    rmSync(legacy)
+    assert.throws(serve, error => error.status === 1 && error.stdout.includes('Previous send records remain in'))
+    assert.equal(readFileSync(join(legacy + '.sends', claims[0]), 'utf8'), claim)
+    assert.ok(!existsSync(board.served))
+    assert.ok(!existsSync(board.served + '.sends'))
+    assert.equal(readFileSync(join(board.dir, 'calls.jsonl'), 'utf8').trim().split('\n').length, 1)
+  } finally {
+    writeFileSync(gate, 'release')
+    await new Promise(done => setTimeout(done, 100))
+    await board.close()
+  }
+})
+
+test('an uncertain claim created while a legacy page closes still blocks private startup', { timeout: 30_000 }, async () => {
+  const board = await page()
+  const legacy = join(board.dir, 'progress-serve.json')
+  const claim = join(legacy + '.sends', 'closing-send.json')
+  const old = createServer((req, res) => {
+    if (req.url === '/api/close') {
+      mkdirSync(legacy + '.sends')
+      writeFileSync(claim, '{"status":"uncertain"}')
+      res.end('{}')
+      old.close()
+    } else { res.writeHead(404); res.end('{}') }
+  })
+  try {
+    await board.call('POST', '/api/close', { body: {} })
+    await board.exited
+    await new Promise(done => old.listen(0, '127.0.0.1', done))
+    const port = old.address().port
+    writeFileSync(legacy, JSON.stringify({ pid: process.pid, port, url: `http://127.0.0.1:${port}/?t=synthetic`, path: board.path, built: 'legacy' }))
+    await assert.rejects(new Promise((done, fail) => execFile(process.execPath, [board.script, '--serve', '--no-open'], { env: { ...process.env, CLAUDE_PROGRESS_FILE: '', NO_COLOR: '1', XDG_RUNTIME_DIR: board.run }, encoding: 'utf8', timeout: 10_000, windowsHide: true }, (error, out) => error ? fail(Object.assign(error, { out })) : done(out))), error => error.code === 1 && error.out.includes('Previous send records remain in'))
+    assert.equal(readFileSync(claim, 'utf8'), '{"status":"uncertain"}')
+    assert.ok(!existsSync(board.served))
+    assert.ok(!existsSync(join(board.dir, 'grok-ran.json')))
+  } finally {
+    old.closeAllConnections()
+    if (old.listening) await new Promise(done => old.close(done))
+    await board.close()
+  }
 })
 
 test('an interrupted send remains uncertain after its server is restarted and cannot be replayed', { timeout: 30_000 }, async () => {
@@ -319,11 +435,12 @@ test('an interrupted send remains uncertain after its server is restarted and ca
     assert.ok(existsSync(join(board.dir, 'calls.jsonl')))
     board.child.kill()
     await board.exited
-    replacement = spawn(process.execPath, [board.script, '--serve-child'], { env: { ...process.env, CLAUDE_PROGRESS_FILE: '', AGENT_BOARD_CODEX: board.stand }, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true })
+    // Public startup recovers the crashed address before exclusive publication.
+    replacement = spawn(process.execPath, [board.script, '--serve', '--no-open'], { env: { ...process.env, CLAUDE_PROGRESS_FILE: '', AGENT_BOARD_CODEX: board.stand, AGENT_BOARD_GROK: board.stand, XDG_RUNTIME_DIR: board.run }, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true })
     replacementUrl = await new Promise((done, fail) => {
       let out = ''
       const timer = setTimeout(() => fail(new Error('replacement startup timed out')), 5000)
-      replacement.stdout.on('data', chunk => { out += chunk; if (out.includes('\n')) { clearTimeout(timer); done(new URL(out.split('\n')[0].trim())) } })
+      replacement.stdout.on('data', chunk => { out += chunk; const url = out.match(/http:\/\/127\.0\.0\.1:\d+\/\?t=[\w-]+/)?.[0]; if (url) { clearTimeout(timer); done(new URL(url)) } })
       replacement.once('exit', code => { clearTimeout(timer); fail(new Error(`replacement exited: ${code}`)) })
     })
     const headers = { 'x-board-token': replacementUrl.searchParams.get('t'), 'content-type': 'application/json' }
@@ -334,12 +451,13 @@ test('an interrupted send remains uncertain after its server is restarted and ca
     const response = await fetch(new URL('/api/act', replacementUrl), { method: 'POST', headers, body: JSON.stringify({ ...current, type: 'send', text: 'Never replay' }) })
     assert.equal(response.status, 409)
     assert.equal(readFileSync(join(board.dir, 'calls.jsonl'), 'utf8').trim().split('\n').length, 1)
-    assert.equal(readdirSync(join(board.dir, 'progress-serve.json.sends')).length, 1)
+    assert.equal(readdirSync(board.served + '.sends').length, 1)
   } finally {
     writeFileSync(gate, 'release')
     if (replacementUrl) await fetch(new URL('/api/close', replacementUrl), { method: 'POST', headers: { 'x-board-token': replacementUrl.searchParams.get('t'), 'content-type': 'application/json' }, body: '{}' }).catch(() => {})
     if (replacement && replacement.exitCode === null) await Promise.race([new Promise(done => replacement.once('exit', done)), new Promise(done => setTimeout(done, 3000))])
     if (replacement && replacement.exitCode === null) replacement.kill()
+    for (let i = 0; existsSync(board.served + '.owner') && i < 100; i++) await new Promise(done => setTimeout(done, 25))
     await new Promise(done => setTimeout(done, 100))
     await board.close()
   }
@@ -369,6 +487,10 @@ test('ticking and tidying from the page write progress.md the way the pane does,
     const archive = readdirSync(board.dir).find(name => name.includes('-archive-'))
     const kept = archive ? readFileSync(join(board.dir, archive), 'utf8') : ''
     assert.ok(kept.includes('### Fix the broken links') && kept.includes('### Fabrikam fellowship'), kept)
+    // Archived at the person's word, the task carries today's date, not the day before.
+    const now = new Date()
+    const today = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`
+    assert.ok(kept.includes(`## Job search · ${today}\n### Fabrikam fellowship`), kept)
     // What a chat prints, fence and all, is merged under its project.
     const block = '## launch\n<!-- auto session=c0ffee12 agent=muse state=waiting updated=2020-01-01T00:00:00Z -->\n### Draft the launch post\n- [x] Outline\n- [?] Ship it Friday, OK?\n<!-- /auto session=c0ffee12 -->'
     const pasted = await call('POST', '/api/paste', { body: { text: `Here it is:\n\`\`\`\n${block}\n\`\`\`\n` } })
@@ -428,8 +550,12 @@ test('--serve starts the page in the background once, and the next --serve bring
   writeFileSync(path, FILE)
   const script = join(dir, 'agent-board.mjs')
   writeFileSync(script, `globalThis.AGENT_BOARD = ${JSON.stringify({ path, lang: 'en' })}\n${BOARD_SCRIPT}`)
-  const serve = () => execFileSync(process.execPath, [script, '--serve', '--no-open'], { env: { ...process.env, CLAUDE_PROGRESS_FILE: '', NO_COLOR: '1' }, encoding: 'utf8', timeout: 20_000 })
-  const served = join(dir, 'progress-serve.json')
+  const run = join(dir, 'run')
+  mkdirSync(run, { mode: 0o700 })
+  const serve = () => execFileSync(process.execPath, [script, '--serve', '--no-open'], { env: { ...process.env, CLAUDE_PROGRESS_FILE: '', NO_COLOR: '1', XDG_RUNTIME_DIR: run }, encoding: 'utf8', timeout: 20_000 })
+  const served = servedAt(run, path)
+  // A successful old send leaves an empty directory; it must not block upgrade.
+  mkdirSync(join(dir, 'progress-serve.json.sends'))
   let url = null
   try {
     const first = serve()
@@ -459,27 +585,29 @@ test('simultaneous cold starters publish one server and reuse the winning page',
   const path = join(dir, 'progress.md')
   const script = join(dir, 'agent-board.mjs')
   const preload = join(dir, 'barrier.mjs')
-  const served = join(dir, 'progress-serve.json')
+  const run = join(dir, 'run')
+  mkdirSync(run, { mode: 0o700 })
+  const served = servedAt(run, path)
   writeFileSync(path, FILE)
   writeFileSync(script, `globalThis.AGENT_BOARD=${JSON.stringify({ path, lang: 'en' })}\n${BOARD_SCRIPT}`)
   // Both parent commands observe an absent address before either may spawn.
   writeFileSync(preload, `import fs from 'node:fs';import{syncBuiltinESMExports}from'node:module';
-const read=fs.readFileSync;let held=false;
-fs.readFileSync=function(file,...args){if(!held&&process.argv.includes('--serve')&&String(file)===${JSON.stringify(served)}&&!fs.existsSync(file)){held=true;fs.writeFileSync(${JSON.stringify(join(dir, 'ready-'))}+process.pid,'ready');const end=Date.now()+5000;while(fs.readdirSync(${JSON.stringify(dir)}).filter(x=>x.startsWith('ready-')).length<2&&Date.now()<end)Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,10)}return read.call(this,file,...args)};syncBuiltinESMExports();`)
+const stat=fs.lstatSync;let held=false;
+fs.lstatSync=function(file,...args){if(!held&&process.argv.includes('--serve')&&String(file)===${JSON.stringify(served)}&&!fs.existsSync(file)){held=true;fs.writeFileSync(${JSON.stringify(join(dir, 'ready-'))}+process.pid,'ready');const end=Date.now()+5000;while(fs.readdirSync(${JSON.stringify(dir)}).filter(x=>x.startsWith('ready-')).length<2&&Date.now()<end)Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,10)}return stat.call(this,file,...args)};syncBuiltinESMExports();`)
   const urls = new Set()
   try {
-    const run = () => new Promise((done, fail) => {
-      const child = spawn(process.execPath, [script, '--serve', '--no-open'], { env: { ...process.env, CLAUDE_PROGRESS_FILE: '', NO_COLOR: '1', NODE_OPTIONS: `--import=${pathToFileURL(preload).href}` }, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] })
+    const start = () => new Promise((done, fail) => {
+      const child = spawn(process.execPath, [script, '--serve', '--no-open'], { env: { ...process.env, CLAUDE_PROGRESS_FILE: '', NO_COLOR: '1', XDG_RUNTIME_DIR: run, NODE_OPTIONS: `--import=${pathToFileURL(preload).href}` }, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] })
       let out = ''
       child.stdout.on('data', chunk => { out += chunk })
       child.on('error', fail)
-      child.on('exit', code => {
+      child.on('close', code => {
         const url = out.match(/http:\/\/127\.0\.0\.1:\d+\/\?t=[\w-]+/)?.[0]
         if (url) urls.add(url)
         done({ code, out, url })
       })
     })
-    const result = await Promise.all([run(), run()])
+    const result = await Promise.all([start(), start()])
     assert.ok(result.every(one => one.code === 0 && one.url), JSON.stringify(result))
     assert.equal(urls.size, 1)
     assert.equal(JSON.parse(readFileSync(served, 'utf8')).url, [...urls][0])
@@ -490,6 +618,8 @@ fs.readFileSync=function(file,...args){if(!held&&process.argv.includes('--serve'
     }
     for (let i = 0; existsSync(served + '.owner') && i < 100; i++) await new Promise(done => setTimeout(done, 25))
     assert.ok(!existsSync(served + '.owner'))
+    // Windows may retain the server's cwd briefly after its exit callback released the lease.
+    await new Promise(done => setTimeout(done, 100))
     rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 })
   }
 })
@@ -638,4 +768,131 @@ test('a send acknowledged after its recipient changes removes only the accepted 
       assert.equal(input().value, later)
     }
   } finally { await board.close() }
+})
+
+// A synthetic board for --serve runs, with its own folder for running programs.
+const serveIn = () => {
+  const dir = mkdtempSync(join(tmpdir(), 'board-serve-'))
+  const run = join(dir, 'run')
+  mkdirSync(run, { mode: 0o700 })
+  const path = join(dir, 'progress.md')
+  writeFileSync(path, FILE)
+  const script = join(dir, 'agent-board.mjs')
+  writeFileSync(script, `globalThis.AGENT_BOARD = ${JSON.stringify({ path, lang: 'en' })}\n${BOARD_SCRIPT}`)
+  const env = { ...process.env, CLAUDE_PROGRESS_FILE: '', NO_COLOR: '1', XDG_RUNTIME_DIR: run }
+  const serve = () =>
+    new Promise((done, fail) => execFile(process.execPath, [script, '--serve', '--no-open'], { env, encoding: 'utf8', timeout: 20_000 }, (error, out) => (error ? fail(error) : done(out))))
+  const urlOf = out => out.match(/answer\): (http:\/\/127\.0\.0\.1:\d+\/\?t=[\w-]+)/)?.[1] ?? null
+  const served = servedAt(run, path)
+  // Closes every page it was given and waits for each to take its address file away.
+  const end = async urls => {
+    for (const url of new Set(urls.filter(Boolean))) {
+      const { port, searchParams } = new URL(url)
+      await new Promise(done => {
+        const req = request({ host: '127.0.0.1', port, method: 'POST', path: '/api/close', headers: { host: `127.0.0.1:${port}`, 'x-board-token': searchParams.get('t'), 'content-type': 'application/json' } }, res => res.resume().on('end', done))
+        req.on('error', done)
+        req.end('{}')
+      })
+    }
+    for (let tries = 0; existsSync(served) && tries < 50; tries++) await new Promise(done => setTimeout(done, 100))
+    rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })
+  }
+  return { dir, path, script, env, serve, urlOf, served, end }
+}
+
+// A port nothing listens on.
+const freePort = () =>
+  new Promise(done => {
+    const server = createNetServer().listen(0, '127.0.0.1', () => {
+      const { port } = server.address()
+      server.close(() => done(port))
+    })
+  })
+
+// The two runs may or may not meet halfway (one can find the other's page already written); the
+// server started by hand always meets a page that is there.
+test('two --serve run at the same moment open one page between them, and a server started while it runs stops at once', { timeout: 60_000 }, async () => {
+  const board = serveIn()
+  const urls = []
+  try {
+    const outs = await Promise.all([board.serve(), board.serve()])
+    urls.push(...outs.map(board.urlOf))
+    assert.ok(urls[0], outs[0])
+    assert.equal(urls[1], urls[0], outs[1])
+    // It finds the address file taken: it prints no address, leaves the file as it was and stops.
+    assert.throws(() => execFileSync(process.execPath, [board.script, '--serve-child'], { env: board.env, encoding: 'utf8', timeout: 10_000 }), error => error.status === 1 && error.stdout === '')
+    assert.equal(JSON.parse(readFileSync(board.served, 'utf8')).url, urls[0])
+  } finally {
+    await board.end(urls)
+  }
+})
+
+test("the page's address stays out of progress.md's folder, and a file left by a page that is gone does not keep the next one from starting", { timeout: 60_000 }, async () => {
+  const board = serveIn()
+  const port = await freePort()
+  const gone = { pid: 999999, port, url: `http://127.0.0.1:${port}/?t=gone`, path: board.path, built: '' }
+  // Where 0.19.0 kept the address, token and all, and where this copy keeps it.
+  const old = join(board.dir, 'progress-serve.json')
+  writeFileSync(old, JSON.stringify(gone))
+  writeFileSync(board.served, JSON.stringify(gone))
+  const urls = []
+  try {
+    const first = board.urlOf(await board.serve())
+    urls.push(first)
+    assert.ok(first)
+    assert.ok(!existsSync(old))
+    assert.equal(JSON.parse(readFileSync(board.served, 'utf8')).url, first)
+    const token = new URL(first).searchParams.get('t')
+    for (const entry of readdirSync(board.dir, { withFileTypes: true }).filter(one => one.isFile())) {
+      assert.ok(!readFileSync(join(board.dir, entry.name), 'utf8').includes(token), entry.name)
+    }
+    await board.end([first])
+  } catch (error) {
+    await board.end(urls)
+    throw error
+  }
+})
+
+test('an address file cut short by a crash is cleared once it is old, and the next --serve starts a page', { timeout: 60_000 }, async () => {
+  const board = serveIn()
+  writeFileSync(board.served, '{"pid": 12')
+  const past = new Date(Date.now() - 60_000)
+  utimesSync(board.served, past, past)
+  const urls = []
+  try {
+    urls.push(board.urlOf(await board.serve()))
+    assert.ok(urls[0])
+    assert.equal(JSON.parse(readFileSync(board.served, 'utf8')).url, urls[0])
+  } finally {
+    await board.end(urls)
+  }
+  // So is one whose address is not an address.
+  const second = serveIn()
+  writeFileSync(second.served, JSON.stringify({ pid: 1, port: 1, url: 'x' }))
+  utimesSync(second.served, past, past)
+  const more = []
+  try {
+    more.push(second.urlOf(await second.serve()))
+    assert.ok(more[0])
+  } finally {
+    await second.end(more)
+  }
+})
+
+test('the same progress.md named two ways brings back the same page', { timeout: 60_000 }, async () => {
+  const board = serveIn()
+  const urls = []
+  try {
+    urls.push(board.urlOf(await board.serve()))
+    assert.ok(urls[0])
+    // The board script was written for this file; the person names it again with / for \ and a detour.
+    const other = `${board.dir}/run/../progress.md`.replace(/\\/g, '/')
+    const again = await new Promise((done, fail) =>
+      execFile(process.execPath, [board.script, '--serve', '--no-open'], { env: { ...board.env, CLAUDE_PROGRESS_FILE: other }, encoding: 'utf8', timeout: 20_000 }, (error, out) => (error ? fail(error) : done(out))),
+    )
+    urls.push(board.urlOf(again))
+    assert.equal(urls[1], urls[0], again)
+  } finally {
+    await board.end(urls)
+  }
 })

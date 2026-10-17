@@ -346,6 +346,18 @@ test('finished hand-kept tasks leave a day after they were first seen done, whol
   expect(takeManualDone(text, NOW, () => undefined).entries).toEqual([])
 })
 
+test("archived at the person's word, a finished hand-kept task carries the day it was seen done, or today when it never was", () => {
+  const text = '# 專案進度\n\n## 研究\n### 讀論文\n- [x] 讀完\n\n### 寫摘要\n- [x] 寫完\n\n### 投稿\n- [ ] 送出\n'
+  const seen: Record<string, number> = { 'done:研究::讀論文': NOW }
+  // Not asked: neither has been done a day yet.
+  expect(takeManualDone(text, NOW, key => seen[key]).entries).toEqual([])
+  const out = takeManualDone(text, NOW, key => seen[key], ZH_TW, true)
+  expect(out.keys).toEqual(['done:研究::讀論文', 'done:研究::寫摘要'])
+  // The day it was done, not the day before it.
+  expect(out.entries).toEqual(['## 研究 · 2026-10-16\n### 讀論文\n- [x] 讀完', '## 研究 · 2026-10-16\n### 寫摘要\n- [x] 寫完'])
+  expect(out.text).toBe('# 專案進度\n\n## 研究\n### 投稿\n- [ ] 送出\n')
+})
+
 test('blocks leave after half a day when done and after three days otherwise', () => {
   const span = (state: 'done' | 'ended' | 'working', hours: number) => ({
     session: 'x',
@@ -737,7 +749,7 @@ test('Hermes Agent’s hooks go into its config.yaml beside the person’s own, 
 })
 
 test('a Hermes config.yaml with the empty hooks: {} it ships with gets our hooks in its place, Windows line ends and all', () => {
-  const ctx = { home: '/h', sep: '/', isWindows: false, script: '/h/.claude/progress-report.sh', inbox: '/h/.claude/progress-inbox', codexHome: '/h/.codex', grokHome: '/h/.grok', hermesHome: '/h/.hermes' }
+  const ctx = { home: '/h', sep: '/', isWindows: false, script: '/h/.claude/progress-report.sh', inbox: '/h/.claude/progress-inbox', codexHome: '/h/.codex', grokHome: '/h/.grok', hermesHome: '/h/.hermes', openclawHome: '/h/.openclaw' }
   const hermes = agentHooks(ctx).find(hook => hook.agent === 'hermes')
   const ours =
     `  post_llm_call:\n    - {command: "sh '/h/.claude/progress-report.sh' hermes turn || true", timeout: 10}\n` +
@@ -884,7 +896,8 @@ test('a config already holding our hooks keeps its own formatting, while one tha
   const ctx = { home: '/h', sep: '/', isWindows: false, script: '/h/.claude/progress-report.sh', inbox: '/h/.claude/progress-inbox', codexHome: '/h/.codex', grokHome: '/h/.grok', hermesHome: '/h/.hermes', openclawHome: '/h/.openclaw' }
   for (const agent of ['codex', 'gemini', 'openclaw']) {
     const hook = agentHooks(ctx).find(one => one.agent === agent && one.file.endsWith('.json'))
-    const written = hook?.edit('{"theme": "dark"}', false) ?? ''
+    const edited = hook?.edit('{"theme": "dark"}', false)
+    const written = typeof edited === 'string' ? edited : ''
     expect(JSON.parse(written).theme).toBe('dark')
     // The same contents, indented four spaces and with Windows line ends, as an editor saves them.
     const own = JSON.stringify(JSON.parse(written), null, 4).replace(/\n/g, '\r\n')
@@ -1560,6 +1573,72 @@ test('the board you work in marks the chosen line and lists only the keys that d
   expect(onJob).toContain('    ✓ 1 Draft the statement')
   expect(onJob).toContain('x done · a archive · ↑↓ select')
   expect(onJob.trimEnd().endsWith('Copied: 300')).toBe(true)
+})
+
+test('the terminal board, progress.html and the board page name the session that asked, and c copies a Claude Code session’s id', () => {
+  const file = `# Project progress
+
+## data-pipeline
+<!-- auto session=a1b2c3d4 state=waiting updated=2026-10-17T08:40:00Z resume=a1b2c3d4-1111-2222-3333 -->
+### Backfill the events
+- [?] Keep the old table, OK?
+<!-- /auto session=a1b2c3d4 -->
+
+<!-- auto session=c9d8e7f6 agent=codex state=waiting updated=2026-10-17T08:40:00Z -->
+### Rename the export job
+- [?] Ship the rename to staging, OK?
+<!-- /auto session=c9d8e7f6 -->
+`
+  const now = Date.parse('2026-10-17T08:45:00Z')
+  const view = buildView(parseProgress(file), [], null, now, 0, {}, STRINGS.en)
+  const items = boardItems(view, [])
+  const claude = items.findIndex(item => item.type === 'ask' && item.ask.task === 'Backfill the events')
+  const codex = items.findIndex(item => item.type === 'ask' && item.ask.task === 'Rename the export job')
+  expect(boardKey({ ...emptyBoardState, selected: claude }, 'c', items, STRINGS.en).action).toEqual({ type: 'copy', text: 'a1b2c3d4-1111-2222-3333' })
+  // Another agent's id finds no Claude Code session: there is nothing to copy.
+  expect(boardKey({ ...emptyBoardState, selected: codex }, 'c', items, STRINGS.en).action).toBeNull()
+  const screen = boardScreen(view, [], { ...emptyBoardState, selected: claude }, STRINGS.en, { width: 120, isColor: false })
+  expect(screen).toContain(`Reply in the "Backfill the events" session (a1b2c3d4). Can't reply from here.`)
+  expect(screen).toContain('c copy session ID')
+  const onCodex = boardScreen(view, [], { ...emptyBoardState, selected: codex }, STRINGS.en, { width: 120, isColor: false })
+  expect(onCodex).toContain(`Reply in the "Rename the export job" session (c9d8e7f6, codex). Can't reply from here.`)
+  expect(onCodex).not.toContain('c copy session ID')
+
+  const html = dashboardHtml(view, STRINGS['zh-TW'], 'p', 'updated now')
+  expect(html).toContain('到「Backfill the events」那個對話（a1b2c3d4）回覆，這裡回不了。')
+  expect(html).not.toContain('到 data-pipeline 的對話')
+  const page = serveModel(view, [], STRINGS['zh-CN']).asks.find(ask => ask.task === 'Backfill the events')
+  expect(page?.info).toBe('到“Backfill the events”那个对话（a1b2c3d4）回复，这里回不了。')
+})
+
+test('a Claude Code block with no resume id offers its block id to copy only when it is a plain id', () => {
+  const file = `# Project progress
+
+## data-pipeline
+<!-- auto session=a1b2c3d4 state=waiting updated=2026-10-17T08:40:00Z -->
+### Backfill the events
+- [?] Keep the old table, OK?
+<!-- /auto session=a1b2c3d4 -->
+
+<!-- auto session=$(id|sh) state=waiting updated=2026-10-17T08:40:00Z -->
+### Rename the export job
+- [?] Ship the rename to staging, OK?
+<!-- /auto session=$(id|sh) -->
+`
+  const now = Date.parse('2026-10-17T08:45:00Z')
+  const view = buildView(parseProgress(file), [], null, now, 0, {}, STRINGS.en)
+  expect(view.waiting.map(item => [item.task, item.sessionId])).toEqual([
+    ['Backfill the events', 'a1b2c3d4'],
+    ['Rename the export job', null],
+  ])
+  const items = boardItems(view, [])
+  const odd = items.findIndex(item => item.type === 'ask' && item.ask.task === 'Rename the export job')
+  // Anyone can write the file: text that is not a plain id never reaches the clipboard.
+  expect(boardKey({ ...emptyBoardState, selected: odd }, 'c', items, STRINGS.en).action).toBeNull()
+  expect(boardScreen(view, [], { ...emptyBoardState, selected: odd }, STRINGS.en, { width: 120, isColor: false })).not.toContain('c copy session ID')
+  // A block id alone does not reopen a session with claude --resume, so the note does not offer it.
+  expect(STRINGS.en.sessionIdOf('Backfill the events', false)).not.toContain('--resume')
+  expect(STRINGS.en.sessionIdOf('Backfill the events', true)).toContain('claude --resume')
 })
 
 test('the chosen line stays chosen when a line above it comes or goes', () => {

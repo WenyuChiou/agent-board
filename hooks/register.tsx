@@ -1062,8 +1062,7 @@ const archiveOld = async ($: EngineInterface, isNow = false): Promise<number> =>
   const keys = new Set<string>()
   await rewrite($, path, async text => {
     const blocks = takeArchivable(text, at, keep, s, isNow)
-    // A hand-kept task the pane has not seen done yet counts as seen a day ago when asked.
-    const manual = takeManualDone(blocks.text, at, key => (isNow ? Math.min(seen[key] ?? at, at - DAY) : seen[key]), s)
+    const manual = takeManualDone(blocks.text, at, key => seen[key], s, isNow)
     const entries = [...blocks.entries, ...manual.entries]
     if (entries.length === 0) return null
     // Made again after another session's write, the same blocks are not archived twice.
@@ -1479,8 +1478,10 @@ export const register: Register = (on, options) => {
       const note = await othersNote($)
       if (note !== null) {
         // The engine takes a plugin's row as a hidden (meta) user row; the file's words in it
-        // sit in a fence, marked as data.
-        await $.session.append({ message: { type: 'user', isMeta: true, content: [{ type: 'text', text: note }] } }).catch(() => undefined)
+        // sit in a fence, marked as data. The row has said `isMeta` since 0.12.0, which the
+        // engine's types do not name, so it is built apart from the call.
+        const message = { type: 'user' as const, isMeta: true, content: [{ type: 'text' as const, text: note }] }
+        await $.session.append({ message }).catch(() => undefined)
       }
     }
 
@@ -1752,6 +1753,10 @@ export const register: Register = (on, options) => {
       copyCommand: (item, surface) => {
         if (item.command === null) return
         showCopied($, s.commandOf(item.text), item.command, surface).catch(() => undefined)
+      },
+      copySessionId: (item, surface) => {
+        if (item.sessionId === null) return
+        showCopied($, s.sessionIdOf(item.task, item.sessionId !== item.session), item.sessionId, surface).catch(() => undefined)
       },
       toggleLegend: () => {
         update($, isLegendOpen, open => !open).catch(() => undefined)

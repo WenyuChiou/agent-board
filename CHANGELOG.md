@@ -12,13 +12,86 @@
   later edits; terminal keys validate the task last drawn. Tests:
   `a delayed send acknowledgement clears accepted text after redraw and preserves later edits`
   and `terminal watch validates the last drawn task before acting on a same-key replacement`.
-- Hold one server lease per board across concurrent startup and upgrades. A
+- Extend exclusive address publication with one lifetime server lease per board
+  in the private runtime folder, across concurrent startup and upgrades. A
   busy older server's refused close never launches a second sender. Reserve a
   durable per-session send claim before spawning; an interrupted or failed send
   stays uncertain across restart and is not replayed automatically. Tests:
   `a busy older server refuses upgrade without publishing another sender`,
   `simultaneous cold starters publish one server and reuse the winning page`,
   and `an interrupted send remains uncertain after its server is restarted and cannot be replayed`.
+  Legacy migration also respects a refused close. Test:
+  `a busy legacy page keeps its address and blocks migration until the send finishes`.
+  Malformed legacy addresses and legacy uncertain claims block migration without
+  being removed or replayed. Tests:
+  `malformed legacy metadata blocks migration without changing either address`
+  and `legacy uncertain claims block public startup after a crash and cannot be replayed`.
+  Claims are checked again after legacy shutdown. Test:
+  `an uncertain claim created while a legacy page closes still blocks private startup`.
+
+## 0.19.4 — 2026-10-17
+
+- **The page's address, key and all, is no longer kept beside
+  `progress.md`.** `--serve` kept it in `progress-serve.json` in the same
+  folder, and that folder is often a git repository that syncs itself. It
+  is now kept in a folder only your account can use: the folder for running
+  programs (`XDG_RUNTIME_DIR`) when it is yours alone, else
+  `~/.cache/agent-board` (the temp folder on Windows), in a file named for
+  the `progress.md` it serves, readable by you only. The file 0.19.0 left
+  beside `progress.md` is removed, and its page asked to close, the next
+  time `--serve` runs. Tests: in `tests/board.test.mjs`, "the page's address
+  stays out of progress.md's folder, and a file left by a page that is gone
+  does not keep the next one from starting".
+- **Two `--serve` at the same moment open one page, not two.** A new page
+  writes its address file only when there is none; when another page wrote
+  first, the new one stops and its `--serve` prints the other's address. A
+  file left by a page that is gone (it does not answer, also after five
+  more seconds when it still runs) is removed first, and so is one cut
+  short by a crash or holding no page address, once it is ten seconds old.
+  The same `progress.md` named two ways (`C:/x` and `C:\x`) has one page
+  too. Tests: in `tests/board.test.mjs`, "two --serve run at the same moment
+  open one page between them, and a server started while it runs stops at
+  once", "an address file cut short by a crash is cleared once it is old,
+  and the next --serve starts a page", "the same progress.md named two ways
+  brings back the same page".
+- **Archiving now dates a finished hand-kept task on the right day.** The
+  page's **Archive now** and `/progress tidy` put a task the pane had seen
+  done less than a day ago under the day before. It now goes under the day
+  it was seen done, or today when it never was. Tests: "archived at the
+  person's word, a finished hand-kept task carries the day it was seen
+  done, or today when it never was", "/progress tidy archives a finished
+  hand-kept task under the day it was done, not the day before", and in
+  `tests/board.test.mjs` "ticking and tidying from the page write
+  progress.md the way the pane does, and a pasted block is merged into it",
+  which now checks the day.
+- `tsc -p .` reports no errors again. Seven had built up in the tests and in
+  one engine call over earlier releases; the fixes change only types, not
+  what runs.
+
+## 0.19.3 — 2026-10-17
+
+The reply hint names the session that asked (#49).
+
+- **A question from another session says which session to answer in.** The hint under
+  it said "Reply in the <project> session", but several sessions often share one folder,
+  and the desktop app lists sessions by title, so the person could see the question and
+  not find where to answer it. It now names the task and the session's short ID, plus
+  the agent when it is not Claude: `Reply in the "Rate-limit the public endpoints"
+  session (7f3c19ab, codex). Can't reply from here.` The same words are in the pane, the
+  terminal board, `progress.html` and the board page, in all three languages.
+- **A Claude Code session's question offers its ID to copy.** The pane's item has a
+  **Copy session ID** button, and `c` on the terminal board copies it, so the person can
+  find that session in the session list or reopen it with `claude --resume`. The full ID
+  comes from the block's `resume=`; a block without one gives its short ID, and only when
+  that is a plain ID (6 to 64 letters, digits and dashes), since anyone can write the
+  file and the clipboard must not get a command dressed as an ID. Another agent's ID
+  finds no Claude Code session, so its question offers none. `docs/FORMAT.md` says so.
+- Tests: "an item from another session in the same folder names that session’s task
+  and id", "the terminal board, progress.html and the board page name the session that
+  asked, and c copies a Claude Code session’s id", "a Claude Code block with no resume id
+  offers its block id to copy only when it is a plain id", and "another agent’s question
+  is answered there, but its command can be copied and its link opened from here"
+  (changed).
 
 ## 0.19.2 — 2026-10-17
 

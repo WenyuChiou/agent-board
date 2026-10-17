@@ -99,7 +99,7 @@ From top to bottom:
 1. **Counts.** `● waiting` · `▸ in progress` · `⚑ due soon` · `✓ done today`. Each one opens what it counts.
 2. **Needs you now.** The one question, deadline or stuck task that needs you most, with what it is about and what you can do. `N more waiting on you ▸` opens the rest.
 3. **This session's card.** Project and branch, the task, its background, the bar, where it stands, the step in progress and the next. `▸ All N steps` lists every step, numbered, the current one marked `← now`. The pull request, when there is one.
-4. **Folded sections.** Waiting on you, Due soon, Other open work (grouped by project), Done recently. Click a row to see its steps and its actions: **Take over and finish** for work a closed session in this project left, **Copy resume command** to reopen that session where it ran, **Mark step done** and **Hand to Claude** for tasks you keep by hand, and **Archive** for either kind to move it out of the file now.
+4. **Folded sections.** Waiting on you, Due soon, Other open work (grouped by project), Done recently. Click a row to see its steps and its actions: **Take over and finish** for work a closed session in this project left, **Copy resume command** to reopen that session where it ran, **Mark step done** and **Hand to Claude** for tasks you keep by hand, and **Archive** for either kind to move it out of the file now. A question another session asked names that session's task and ID; when it is a Claude Code session, **Copy session ID** copies the ID, to find that session in your session list.
 5. **The box.** Ask a side question (answered in the pane without interrupting Claude), or start with `+` to add a task.
 6. **Bottom row.** Weekly report · Notifications on/off · Legend.
 
@@ -212,7 +212,7 @@ Gemini CLI and OpenCode paste the board into the prompt themselves; with a skill
 
 In a terminal, `node ~/.claude/agent-board.mjs` prints the board once, `--watch` keeps it on screen and redraws it every 2 seconds (put it in a split beside Codex), and `--html` writes `progress.html` and opens it in the browser. `--lang en` (or `zh-TW`, `zh-CN`) picks the language; by default it prints in the language you last picked with `/progress lang` (with `auto`, the language of that session); with none picked, in the language of the Claude Code session that wrote it first.
 
-On a terminal, `--watch` also takes keys, as the pane takes presses: ↑↓ and Enter to pick and open a line, `x` to tick the next step of a hand-kept task, `a` to archive a hand-kept task or a stopped session’s block (finished work is archived by itself), `1`–`9` or `y`/`n` to copy the answer to another agent's question, `c` to copy a command, `o` for the browser view, `q` to quit. Those are its only writes; otherwise the board only reads. Turns other agents' hooks leave in the inbox are summed up into steps by an open Claude Code session; until one takes them in, the board lists them as they came, a question first. A turn that only showed the board is not counted as work.
+On a terminal, `--watch` also takes keys, as the pane takes presses: ↑↓ and Enter to pick and open a line, `x` to tick the next step of a hand-kept task, `a` to archive a hand-kept task or a stopped session’s block (finished work is archived by itself), `1`–`9` or `y`/`n` to copy the answer to another agent's question, `c` to copy a command, or the ID of the Claude Code session that asked, `o` for the browser view, `q` to quit. Those are its only writes; otherwise the board only reads. Turns other agents' hooks leave in the inbox are summed up into steps by an open Claude Code session; until one takes them in, the board lists them as they came, a question first. A turn that only showed the board is not counted as work.
 
 `--serve` prints the board, then opens its page in the browser, where the same things take a click: tick a step, archive a task or everything finished, copy an answer or a command, answer a Grok Build or Codex session that has ended (in that session's own folder, one reply at a time), and paste a block a web chat wrote. Every board command above runs it, so the address is the last line the agent shows you. The page is served on 127.0.0.1 only, with a random key in its address, and closes after 30 minutes nobody looks at it; more in [the board's page](../README.md#the-boards-page). What an agent answers shows on the page when it comes, which can take a few minutes, and the page does not close while a reply is on its way. An agent that runs its commands in a sandbox may not be allowed to start the page: the board still prints, and its last line says the page could not open. Then run `node ~/.claude/agent-board.mjs --serve` in a terminal yourself.
 
@@ -276,11 +276,18 @@ The last line moves the hooks in your other agents to the new name. `progress.md
   so copy them before closing or reloading it.
 - **A board upgrade says a message is still on its way.** Keep the current page
   until the send finishes. The refused close does not start another server.
-  Concurrent new copies share one lifetime owner lease beside `progress-serve.json`.
+  Concurrent new copies share one lifetime owner lease beside the private runtime
+  address file (`agent-board-<hash>.json.owner`). A busy legacy page also keeps its
+  address until its send finishes; migration does not start a second sender.
+  Malformed legacy address metadata also blocks migration; inspect it before
+  attempting to reopen the board.
 - **A previous send has an uncertain outcome.** An interrupted or failed send
-  leaves a per-session record in `progress-serve.json.sends/` (named beside your
-  selected progress file). Restarting does not replay it. Reconcile the actual
-  receiving session first; only after confirming that outcome may you manually
+  leaves a per-session record in `agent-board-<hash>.json.sends/`, in that same
+  private runtime folder rather than beside your progress file. Restarting does
+  not replay it. Older copies kept these records in `progress-serve.json.sends/` beside the
+  progress file. Nonempty or unreadable legacy records block opening the new
+  board, even without an old address file; they are never silently discarded.
+  Reconcile the receiving session first; only after confirming that outcome may you manually
   remove its matching record. Do not delete all claims, resend under another
   board path, or treat an ordinary message as tool/merge approval. A crashed
   server's dead-PID lease may be recovered, but a corrupt lease or abandoned

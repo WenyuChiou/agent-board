@@ -8,7 +8,7 @@ A Claude Code plugin that also follows Codex, Gemini CLI, OpenCode, Grok Build, 
 </p>
 
 <p align="center">
-<a href="CHANGELOG.md"><img alt="Version 0.19.2" src="https://img.shields.io/badge/version-0.19.2-blue"></a>
+<a href="CHANGELOG.md"><img alt="Version 0.19.4" src="https://img.shields.io/badge/version-0.19.4-blue"></a>
 <a href="#quick-start"><img alt="Needs Claude Code 2.1.287 or newer" src="https://img.shields.io/badge/Claude%20Code-%E2%89%A5%202.1.287-d97757"></a>
 <a href="LICENSE"><img alt="MIT license" src="https://img.shields.io/badge/license-MIT-green"></a>
 <img alt="macOS, Linux, Windows" src="https://img.shields.io/badge/macOS%20%C2%B7%20Linux%20%C2%B7%20Windows-lightgrey">
@@ -138,7 +138,7 @@ Connecting also gives each agent a way to show the board, so whichever one you a
 | `x` | Tick the next step of your own task; it goes into the work log |
 | `a` | Archive one of your own tasks, or a stopped session's block |
 | `1`–`9`, `y` / `n` | Copy the answer to another agent's question, to paste in that agent |
-| `c` | Copy a command |
+| `c` | Copy a command, or the ID of the Claude Code session that asked |
 | `o`, `q` | Open the browser view; quit |
 
 Finished work leaves the board by itself. The board writes `progress.md` as carefully as the pane does, and leaves other sessions' blocks alone unless you archive one that has stopped.

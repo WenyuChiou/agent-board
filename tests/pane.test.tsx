@@ -837,6 +837,29 @@ test('a hand-kept task done for a day leaves for the archive by itself, and the 
   expect(world.files.get(ARCHIVE)).toContain('### 發佈 1.7.4')
 })
 
+test('/progress tidy archives a finished hand-kept task under the day it was done, not the day before', async ($, on) => {
+  const now = Date.parse('2026-10-16T12:00:00.000Z')
+  const file = `# 專案進度
+
+## 求職
+### Google 暑期實習
+- [x] 改履歷
+- [x] 投遞
+
+### Meta 實習
+- [x] 投遞
+`
+  // Seen done just now; the other one the pane has not seen done yet.
+  const world: World = { files: new Map([[FILE, file]]), mtime: 1, hasTasks: true, store: { 'done:求職::Google 暑期實習': now } }
+  engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/persona_framework', surface: 'terminal', isInteractive: true })
+  const ran = await $.command.run(TIDY)
+  expect(ran.text).toBe('封存了 2 個任務。')
+  expect(world.files.get(ARCHIVE)).toContain('## 求職 · 2026-10-16\n### Google 暑期實習\n- [x] 改履歷\n- [x] 投遞')
+  expect(world.files.get(ARCHIVE)).toContain('## 求職 · 2026-10-16\n### Meta 實習\n- [x] 投遞')
+  expect(world.files.get(ARCHIVE)).not.toContain('2026-10-15')
+})
+
 test('on a light terminal no text falls back to the terminal dim', async ($, on) => {
   const world: World = { files: new Map([[FILE, JOBS]]), mtime: 1, hasTasks: true, store: { opened: ['others', 'waiting', 'recent', 'steps'] } }
   engineBeneath(on, world)
@@ -958,13 +981,47 @@ test('another agent’s question is answered there, but its command can be copie
   const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
 
   expect(await ui.find({ type: 'Text', text: '$ gcloud auth login' })).toBeDefined()
-  expect(await ui.find({ type: 'Text', text: /到 data-pipeline 的對話（gemini）回覆/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /到「Backfill last year's events」那個對話（3db00eaf，gemini）回覆/ })).toBeDefined()
+  // Only a Claude Code session's id is offered to copy.
+  expect(await ui.find({ type: 'Button', key: "data-pipeline::Backfill last year's events::1::id" })).toBeUndefined()
   await ui.press({ key: "data-pipeline::Backfill last year's events::1::copy" })
   expect(seen.copied.at(-1)).toBe('gcloud auth login')
 
   await ui.press({ key: 'ask::docs-site::October release notes::0' })
   const links = (await ui.findAll({ type: 'Link' })).map(link => link.props.href)
   expect(links).toContain('https://docs.example.com/preview/2026-10')
+  await ui.unmount()
+})
+
+test('an item from another session in the same folder names that session’s task and id', async ($, on) => {
+  const board = `# Project progress
+
+## data-pipeline
+
+<!-- auto session=a1b2c3d4 state=waiting updated=2026-10-16T11:50:00Z resume=a1b2c3d4-1111-2222-3333 -->
+### Backfill last year's events
+- [?] Keep the old table, OK?
+<!-- /auto session=a1b2c3d4 -->
+
+<!-- auto session=e5f6a7b8 state=waiting updated=2026-10-16T11:55:00Z resume=e5f6a7b8-4444-5555-6666 -->
+### Rename the export job
+- [?] Ship the rename to staging, OK?
+<!-- /auto session=e5f6a7b8 -->
+`
+  const world: World = { files: new Map([[FILE, board]]), mtime: 1, hasTasks: true, store: { opened: ['waiting'] } }
+  engineBeneath(on, world)
+  const seen = outside(on)
+  await $.session.start({ cwd: '/work/persona_framework', surface: 'desktop', isInteractive: true })
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
+
+  // Two sessions in one folder: the folder alone would send the person to either.
+  expect(await ui.find({ type: 'Text', text: /到 data-pipeline 的對話/ })).toBeUndefined()
+  expect(await ui.find({ type: 'Text', text: /到「Backfill last year's events」那個對話（a1b2c3d4）回覆，這裡回不了/ })).toBeDefined()
+  await ui.press({ key: 'ask::data-pipeline::Rename the export job::0' })
+  expect(await ui.find({ type: 'Text', text: /到「Rename the export job」那個對話（e5f6a7b8）回覆，這裡回不了/ })).toBeDefined()
+  await ui.press({ key: 'data-pipeline::Rename the export job::0::id' })
+  expect(seen.copied.at(-1)).toBe('e5f6a7b8-4444-5555-6666')
+  expect(await ui.find({ type: 'Text', text: '已複製到剪貼簿' })).toBeDefined()
   await ui.unmount()
 })
 
@@ -1344,7 +1401,7 @@ const OPENCLAW_TURN = "{\"session_id\":\"174e82e2-caf4-4bf7-ab73-ae4a2c9c1b31\",
 const RATE_LIMIT = 'TITLE: Rate-limit the public endpoints\nCONTEXT: Keep the public API up under abuse\nDONE: Added the token bucket middleware\nNEXT: -\nASK: Per-key limit — 100 or 300 a minute?'
 
 // Runs a session over these inbox files and hands back the file and what the model was asked.
-const takeInbox = async ($: Parameters<Parameters<typeof test>[1]>[0], on: On, files: Array<[string, string]>) => {
+const takeInbox = async ($: Engine, on: On, files: Array<[string, string]>) => {
   const asked: string[] = []
   const world: World = {
     files: new Map([[FILE, '# Progress\n'], ...files]),
@@ -1888,7 +1945,7 @@ test('connecting writes the board script and each installed agent’s board comm
   expect(again.text).toContain('node "/home/me/.claude/agent-board.mjs" --watch')
   await $.command.run({ ...TIDY, args: 'connect remove' })
   for (const file of ['/home/me/.claude/agent-board.mjs', '/home/me/.gemini/commands/board.toml', '/home/me/.agents/skills/agent-board/SKILL.md']) {
-    expect(world.ran.some(argv => argv.includes(file))).toBe(true)
+    expect(world.ran?.some(argv => argv.includes(file))).toBe(true)
   }
   expect(world.ran).toContainEqual(['rmdir', '/home/me/.agents/skills/agent-board'])
 })
@@ -1979,7 +2036,7 @@ test('an OpenClaw older than 2026.4.24 is not hooked in, what an earlier connect
   const connected = await $.command.run({ ...TIDY, args: 'connect' })
   expect(connected.text).toContain('OpenClaw 2026.3.8 太舊，要 2026.4.24 以上才接得上，所以沒有接它。更新之後再跑 /progress connect。')
   // Two files, one note, and no "none found" above it.
-  expect(connected.text.split('OpenClaw 2026.3.8').length).toBe(2)
+  expect(connected.text?.split('OpenClaw 2026.3.8').length).toBe(2)
   expect(connected.text).not.toContain('OpenClaw 的設定檔讀不懂')
   expect(connected.text).not.toContain('沒找到可以接的 agent')
   expect(world.files.get('/home/me/.openclaw/openclaw.json')).toBe(healed)
