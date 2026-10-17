@@ -124,7 +124,8 @@ export const readTurn = (fileName: string, body: string): AgentTurn | null => {
     cwd,
     // OpenClaw's turns run in its own workspace folder, whose name says nothing. The name
     // becomes a `##` heading, so a folder name with a line break or a comment opening in it
-    // cannot start a line or hide the lines after it.
+    // cannot start a line or hide the lines after it. blocks.ts cleans a Claude session's
+    // folder the same way, so both join one heading.
     project: OPENCLAW_WORKSPACE.test(cwd) ? 'OpenClaw' : baseName(cwd).replace(/<!--|-->/g, ' ').replace(/\s+/g, ' ').trim(),
     prompt: first(record, ['prompt', 'user_prompt', 'user_message', 'input-messages', 'input_messages', 'last_user_message']),
     // Gemini CLI says this when the turn had no text.
@@ -335,9 +336,12 @@ const weight = (text: string): number => [...text.trim()].reduce((sum, char) => 
 // however short, is work: a look taken for work leaves a block the person sees and archives,
 // while work taken for a look is dropped without a word. 目前 and 現在 also open a report
 // told with no comma (「目前已修好 429 看板如下：」), so a lead holding a word for work done is
-// work.
-const LEAD_WORDS = /^(?:here\b|below\b|this is\b|where\b|current\b|progress\b|(?:the )?(?:agent )?board\b|以下|下面|目前|這是|这是|現在|现在|進度|进度|看板)/i
-const DONE_WORDS = /[已了]|完成|修好|加好|改好|做好/
+// work. 了 stays whole there: after any verb it says something was done (改了, 跑了), and
+// narrowing it to 好了 and 完成了 would drop that turn's work to spare a block. An English lead
+// can say so too (`Status: fixed 429:`); `updated` is left out, since it names a board
+// (`Here's the updated board:`) as often as it reports work.
+const LEAD_WORDS = /^(?:here\b|below\b|this is\b|where\b|current\b|progress\b|status\b|summary\b|(?:the )?(?:agent )?board\b|以下|下面|目前|這是|这是|現在|现在|進度|进度|看板)/i
+const DONE_WORDS = /[已了]|完成|修好|加好|改好|做好|\b(?:fixed|added|changed|merged|removed|wrote|ran)\b/i
 
 const isLeadIn = (text: string): boolean => {
   const lead = text.replace(/[*_]/g, '').trim()

@@ -11,10 +11,13 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { BOARD_SCRIPT } from '../hooks/board-script.ts'
 
+const UPDATED = new Date().toISOString()
+const UPDATED_AGAIN = new Date(Date.parse(UPDATED) + 60_000).toISOString()
+
 const FILE = `# Progress
 
 ## api-gateway
-<!-- auto session=a1b2c3d4 agent=codex state=waiting updated=2026-10-17T08:30:00Z -->
+<!-- auto session=a1b2c3d4 agent=codex state=waiting updated=${UPDATED} -->
 ### Rate-limit the public endpoints
 - [x] Added the token bucket middleware
 - [?] Per-key limit — 100 or 300 a minute?
@@ -110,7 +113,7 @@ fs.renameSync = (from, to) => {
   real(from, to)
   if (!done && String(to).endsWith('progress.md')) {
     done = true
-    fs.writeFileSync(to, fs.readFileSync(to, 'utf8').replace('updated=2026-10-17T08:30:00Z', 'updated=2026-10-17T08:31:00Z'))
+    fs.writeFileSync(to, fs.readFileSync(to, 'utf8').replace('updated=${UPDATED}', 'updated=${UPDATED_AGAIN}'))
   }
 }
 syncBuiltinESMExports()
@@ -122,7 +125,7 @@ syncBuiltinESMExports()
     const ticked = play('down x')
     assert.ok(ticked.includes('Done: “Ask two referees”.'), ticked)
     assert.ok(readFileSync(path, 'utf8').includes('- [x] Ask two referees'))
-    assert.ok(readFileSync(path, 'utf8').includes('updated=2026-10-17T08:31:00Z'))
+    assert.ok(readFileSync(path, 'utf8').includes('updated=' + UPDATED_AGAIN))
     const journal = readdirSync(dir).find(name => name.includes('-journal-'))
     assert.ok(journal && readFileSync(join(dir, journal), 'utf8').includes('Ask two referees'))
     writeFileSync(path, file)
@@ -405,9 +408,9 @@ test('--serve starts the page in the background once, and the next --serve bring
   let url = null
   try {
     const first = serve()
-    assert.ok(first.startsWith('Progress  ● 1 waiting'), first)
     url = first.match(/answer\): (http:\/\/127\.0\.0\.1:\d+\/\?t=[\w-]+)/)?.[1] ?? null
     assert.ok(url, first)
+    assert.ok(first.startsWith('Progress  ● 1 waiting'), first)
     assert.equal(JSON.parse(readFileSync(served, 'utf8')).url, url)
     const again = serve()
     assert.ok(again.includes(url), again)
@@ -422,7 +425,7 @@ test('--serve starts the page in the background once, and the next --serve bring
       for (let tries = 0; existsSync(served) && tries < 50; tries++) await new Promise(done => setTimeout(done, 100))
       assert.ok(!existsSync(served))
     }
-    rmSync(dir, { recursive: true, force: true })
+    rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })
   }
 })
 
