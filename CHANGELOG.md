@@ -8,6 +8,9 @@
   three. A task that changed since the pane drew it (its heading now has a
   twin, its block lost its end marker, its heading sits inside a session's
   block) is left where it is, and the pane says so.
+  Tests: `封存 on a row takes that task out of the file now and into this
+  month’s archive`, `封存 of a task someone changed meanwhile says so and leaves
+  the file alone`, and the two pure `封存 …` tests in `tests/features.test.ts`.
 - **Reminders.** A question another session or agent asks you notifies once,
   and work due today or late notifies once a day. What was already said is kept
   in the plugin's store, shared by every open session, so one question pings
@@ -15,6 +18,11 @@
   session starts count as said (the pane opening shows them), and the very
   first run says nothing about what is already there. The notifications toggle
   covers these too.
+  Tests: `a question another agent asks notifies once, not the ones already
+  there at the start`, `work due today notifies once that day`, `with
+  notifications off, reminders stay quiet`, `the first run ever says nothing
+  about what is already in the file`, `reminders: another session’s question
+  once, and work due today or late once a day`.
 - **The repository's front page.** The README opens with a banner and an
   animated demo of the pane (the question that needs you, everything waiting by
   kind, the pane after you answer), and has a "How it works" diagram, each in
