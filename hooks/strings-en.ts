@@ -206,6 +206,9 @@ export const EN: Strings = {
     const who = [session, agent].filter(part => part !== '').join(', ')
     return `Reply in the "${task}" session${who === '' ? '' : ` (${who})`}. Can't reply from here.`
   },
+  wayBack: (agent: string, id: string): string => `Session ID ${id}: find it in ${agent}'s session list.`,
+  reopenWhenClosed: 'Once that session is closed, this reopens it:',
+  noWayBack: 'It left no session ID, so there is no way back to it from here.',
   arrivedDone: 'It arrived, done',
   done: 'Done',
   reply: 'Reply',
@@ -282,8 +285,8 @@ export const EN: Strings = {
   answered: (text: string): string => `Replied to Claude: ${text}`,
   commandOf: (step: string): string => `Command to run for "${step}"`,
   resumeOf: (title: string): string => `Command to resume "${title}". Paste it into the terminal and run it.`,
-  sessionIdOf: (title: string, canResume: boolean): string =>
-    `ID of the "${title}" session. Find it in your session list${canResume ? ', or reopen it with claude --resume' : ''}.`,
+  sessionIdOf: (title: string, agent: string, via: string | null): string =>
+    `ID of the "${title}" session. Find it in ${agent}'s session list${via === null ? '' : `, or reopen it with ${via} once it is closed`}.`,
   fileUnreadable: "Can't read the progress file",
   dashStamp: (time: string): string => `updated ${time}`,
   windowOpened: (path: string): string => `Opened in your browser: ${path}`,

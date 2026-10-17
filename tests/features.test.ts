@@ -19,7 +19,7 @@ import { parseQuickAdd } from '../hooks/quick'
 import { keepRecent, remindersOf } from '../hooks/remind'
 import { lanAddress, localHosts, pagePolicy, pageWords, replyText, requestProblem, sendKey, sendMode, sendPlan, serveAction, serveModel, servePage } from '../hooks/serve'
 import { qrModules, qrText } from '../hooks/qr'
-import { buildView, contextOf, handoffOf, resumeCommand, statusLine } from '../hooks/view'
+import { agentName, buildView, contextOf, handoffOf, replyHint, resumeCommand, resumeVia, statusLine, wayBackText } from '../hooks/view'
 
 const NOW = Date.parse('2026-10-16T12:00:00.000Z')
 const SESSION = '2be48af2-6193-5040-aacc-e0546d6784f1'
@@ -160,6 +160,17 @@ test('an ended session offers the command that reopens it where it ran', () => {
   )
   expect(resumeCommand(SESSION, "/home/me/o'neil")).toBe(`cd '/home/me/o'\\''neil' && claude --resume ${SESSION}`)
   expect(resumeCommand(SESSION, null)).toBe(`claude --resume ${SESSION}`)
+  // PowerShell takes a curly single quote for a quote too: doubled, the folder stays one string.
+  expect(resumeCommand('0199a2b3-c4d5', 'C:\\x\u2019; calc #', 'codex')).toBe(
+    "Set-Location -LiteralPath 'C:\\x\u2019\u2019; calc #'; codex resume 0199a2b3-c4d5",
+  )
+  expect(resumeCommand('0199a2b3-c4d5', 'C:\\a\u2018b\u201ac\u201bd', 'codex')).toBe(
+    "Set-Location -LiteralPath 'C:\\a\u2018\u2018b\u201a\u201ac\u201b\u201bd'; codex resume 0199a2b3-c4d5",
+  )
+  // A folder that is not a whole path is left out, so cd never reads it as a flag.
+  for (const dir of ['-', '-P', 'relative/dir']) expect(resumeCommand(SESSION, dir)).toBe(`claude --resume ${SESSION}`)
+  // An agent with no known resume by id gets no command, not Claude Code's.
+  expect(resumeCommand(SESSION, '/w/api', 'cursor')).toBeNull()
 
   const file = `## FLOODABM
 <!-- auto session=dddddddd state=ended updated=2026-10-16T10:00:00.000Z resume=dddddddd-1111 dir=%2Fwork%2FFLOODABM pr=3 ci=pass -->
@@ -1848,11 +1859,11 @@ test('the board you work in marks the chosen line and lists only the keys that d
   expect(onJob.trimEnd().endsWith('Copied: 300')).toBe(true)
 })
 
-test('the terminal board, progress.html and the board page name the session that asked, and c copies a Claude Code session’s id', () => {
+test('the terminal board, progress.html and the board page name the session that asked, and c copies the whole command that reopens it', () => {
   const file = `# Project progress
 
 ## data-pipeline
-<!-- auto session=a1b2c3d4 state=waiting updated=2026-10-17T08:40:00Z resume=a1b2c3d4-1111-2222-3333 -->
+<!-- auto session=a1b2c3d4 state=waiting updated=2026-10-17T08:40:00Z resume=a1b2c3d4-1111-2222-3333 dir=%2Fhome%2Fsomeone%2Fprojects%2Fdata-pipeline-with-a-long-name%2Fservices%2Fevents -->
 ### Backfill the events
 - [?] Keep the old table, OK?
 <!-- /auto session=a1b2c3d4 -->
@@ -1867,15 +1878,21 @@ test('the terminal board, progress.html and the board page name the session that
   const items = boardItems(view, [])
   const claude = items.findIndex(item => item.type === 'ask' && item.ask.task === 'Backfill the events')
   const codex = items.findIndex(item => item.type === 'ask' && item.ask.task === 'Rename the export job')
-  expect(boardKey({ ...emptyBoardState, selected: claude }, 'c', items, STRINGS.en).action).toEqual({ type: 'copy', text: 'a1b2c3d4-1111-2222-3333' })
-  // Another agent's id finds no Claude Code session: there is nothing to copy.
+  // A command longer than the terminal is cut short on its line, so c copies it whole.
+  const whole = `cd '/home/someone/projects/data-pipeline-with-a-long-name/services/events' && claude --resume a1b2c3d4-1111-2222-3333`
+  expect(boardKey({ ...emptyBoardState, selected: claude }, 'c', items, STRINGS.en).action).toEqual({ type: 'copy', text: whole })
+  const narrow = boardScreen(view, [], { ...emptyBoardState, selected: claude }, STRINGS.en, { width: 80, isColor: false })
+  expect(narrow).not.toContain(whole)
+  expect(narrow).toContain('c copy resume command')
+  // A block written by hand under the AGENTS.md rule leaves no id: there is nothing to copy.
   expect(boardKey({ ...emptyBoardState, selected: codex }, 'c', items, STRINGS.en).action).toBeNull()
   const screen = boardScreen(view, [], { ...emptyBoardState, selected: claude }, STRINGS.en, { width: 120, isColor: false })
   expect(screen).toContain(`Reply in the "Backfill the events" session (a1b2c3d4). Can't reply from here.`)
-  expect(screen).toContain('c copy session ID')
+  expect(screen).toContain('c copy resume command')
   const onCodex = boardScreen(view, [], { ...emptyBoardState, selected: codex }, STRINGS.en, { width: 120, isColor: false })
   expect(onCodex).toContain(`Reply in the "Rename the export job" session (c9d8e7f6, codex). Can't reply from here.`)
   expect(onCodex).not.toContain('c copy session ID')
+  expect(onCodex).toContain(STRINGS.en.noWayBack)
 
   const html = dashboardHtml(view, STRINGS['zh-TW'], 'p', 'updated now')
   expect(html).toContain('到「Backfill the events」那個對話（a1b2c3d4）回覆，這裡回不了。')
@@ -1910,8 +1927,163 @@ test('a Claude Code block with no resume id offers its block id to copy only whe
   expect(boardKey({ ...emptyBoardState, selected: odd }, 'c', items, STRINGS.en).action).toBeNull()
   expect(boardScreen(view, [], { ...emptyBoardState, selected: odd }, STRINGS.en, { width: 120, isColor: false })).not.toContain('c copy session ID')
   // A block id alone does not reopen a session with claude --resume, so the note does not offer it.
-  expect(STRINGS.en.sessionIdOf('Backfill the events', false)).not.toContain('--resume')
-  expect(STRINGS.en.sessionIdOf('Backfill the events', true)).toContain('claude --resume')
+  expect(STRINGS.en.sessionIdOf('Backfill the events', 'Claude Code', null)).not.toContain('--resume')
+  expect(STRINGS.en.sessionIdOf('Backfill the events', 'Claude Code', 'claude --resume')).toContain('claude --resume')
+  expect(view.waiting.map(item => item.resumeVia)).toEqual([null, null])
+})
+
+test('every agent’s question says where to answer it and how to get back to that session, or plainly that there is none, on every surface', () => {
+  const at = '2026-10-17T08:40:00Z'
+  const block = (session: string, agent: string, resume: string, title: string): string =>
+    [
+      `<!-- auto session=${session} agent=${agent} state=waiting updated=${at}${resume === '' ? '' : ` resume=${resume}`} dir=%2Fw%2Fapi -->`,
+      `### ${title}`,
+      '- [?] Ship it, OK?',
+      `<!-- /auto session=${session} -->`,
+      '',
+    ].join('\n')
+  // Each agent, its own session id as its hook reports it, the name the hint gives that session,
+  // and how the agent reopens one by that id.
+  const ids: Array<[string, string, string, string | null]> = [
+    ['claude', '2be48af2-6193-5040-aacc-e0546d6784f1', 'a0000000', 'claude --resume'],
+    ['codex', '0199a2b3-c4d5-7e6f-8a9b-0c1d2e3f4a5b', '0199a2b3', 'codex resume'],
+    ['grok', '01a148a9-24e5-7ff2-8b96-237d7daf0923', '01a148a9', 'grok -r'],
+    ['gemini', '3dce1b6c-ca3d-4d69-b77a-d7f51d540bcc', '3dce1b6c', 'gemini --resume'],
+    // An id in parts is named by its last part: a Hermes id starts with the day.
+    ['hermes', '20261017_054125_d8cc2a', 'd8cc2a', 'hermes --resume'],
+    ['opencode', 'ses_6a1f0c2e8ffeQx3Lr9', '6a1f0c2e', 'opencode -s'],
+    ['cursor', '5d0e7c43-8f6a-4d3e-9b1a-2c4f6e8a0b1d', '5d0e7c43', null],
+    ['openclaw', '7c3e9a10-2b4d-4f6a-8c1e-3d5f7a9b0c2e', '7c3e9a10', null],
+  ]
+  // A web chat's pasted block (Muse) and a block written by hand under the AGENTS.md rule carry
+  // no id; a value that is not a plain id (a key with colons) is not kept either.
+  const none = ['muse', 'aider', 'dot']
+  const file = [
+    '# Progress',
+    '',
+    '## api',
+    ...ids.map(([agent, id], index) => block(`a${index}000000`, agent, id, `${agent} work`)),
+    block('b1000000', 'muse', '', 'muse work'),
+    block('b2000000', 'aider', '', 'aider work'),
+    block('b3000000', 'dot', 'agent:main:telegram', 'dot work'),
+  ].join('\n')
+  const now = Date.parse('2026-10-17T08:45:00Z')
+  const view = buildView(parseProgress(file), [], null, now, 0, {}, STRINGS.en)
+  expect(view.waiting.length).toBe(ids.length + none.length)
+  const items = boardItems(view, [])
+  const html = dashboardHtml(view, STRINGS['zh-TW'], 'p', 'now')
+  const page = serveModel(view, [], STRINGS.en)
+  const lan = serveModel(view, [], STRINGS.en, new Set(), true)
+  const on = (agent: string) => {
+    const at = items.findIndex(item => item.type === 'ask' && (item.ask.agent || 'claude') === agent)
+    const item = view.waiting.find(one => (one.agent || 'claude') === agent)
+    return {
+      item,
+      back: item === undefined ? '' : replyHint(item, STRINGS.en).back,
+      // The widest the terminal board draws, and a narrow terminal: the command keeps a line
+      // of its own.
+      screen: boardScreen(view, [], { ...emptyBoardState, selected: at }, STRINGS.en, { width: 120, isColor: false }),
+      narrow: boardScreen(view, [], { ...emptyBoardState, selected: at }, STRINGS['zh-TW'], { width: 80, isColor: false }),
+      copy: boardKey({ ...emptyBoardState, selected: at }, 'c', items, STRINGS.en).action,
+      ask: page.asks.find(ask => (ask.agent || 'claude') === agent),
+    }
+  }
+  for (const [agent, id, name, via] of ids) {
+    const seen = on(agent)
+    const back = STRINGS.en.wayBack(agentName(agent), id)
+    const reopen = via === null ? null : `cd '/w/api' && ${via} ${id}`
+    expect([agent, seen.item?.sessionId, seen.item?.resumeVia, seen.item?.reopen, seen.back]).toEqual([agent, id, via, reopen, back])
+    // The hint names the session as the agent's own list shows it.
+    expect([agent, seen.item?.session]).toEqual([agent, name])
+    expect(seen.screen).toContain(back)
+    // On a terminal 80 wide the sentence may lose its end, but never the id.
+    expect(seen.narrow).toContain(`對話 ID ${id}：`)
+    // The whole command, said to work once that session is closed.
+    const said = reopen === null ? back : `${back} ${STRINGS.en.reopenWhenClosed}`
+    expect(seen.item === undefined ? '' : wayBackText(replyHint(seen.item, STRINGS.en))).toBe(said)
+    for (const screen of [seen.screen, seen.narrow]) {
+      if (reopen === null) expect(screen).not.toContain('$ ')
+      else expect(screen).toContain(`$ ${reopen}`)
+    }
+    expect(seen.screen.includes(STRINGS.en.reopenWhenClosed)).toBe(reopen !== null)
+    // c copies the command where there is one, else the id.
+    expect(seen.copy).toEqual({ type: 'copy', text: reopen ?? id })
+    expect(seen.screen).toContain(reopen === null ? 'c copy session ID' : 'c copy resume command')
+    expect(html).toContain(STRINGS['zh-TW'].wayBack(agentName(agent), id))
+    if (reopen !== null) expect(html).toContain(`<code>${reopen.replaceAll('&', '&amp;')}</code>`)
+    expect([seen.ask?.back, seen.ask?.sessionId, seen.ask?.reopen]).toEqual([said, id, reopen])
+    // A phone on the local network gets the id, but neither the command nor its folder.
+    const far = lan.asks.find(ask => (ask.agent || 'claude') === agent)
+    expect([far?.back, far?.sessionId, far?.reopen]).toEqual([back, id, null])
+  }
+  for (const agent of none) {
+    const seen = on(agent)
+    expect([agent, seen.item?.sessionId, seen.back]).toEqual([agent, null, STRINGS.en.noWayBack])
+    expect(seen.screen).toContain(STRINGS.en.noWayBack)
+    expect(seen.copy).toBeNull()
+    expect([seen.ask?.back, seen.ask?.sessionId, seen.ask?.reopen]).toEqual([STRINGS.en.noWayBack, null, null])
+  }
+  expect(html).toContain(STRINGS['zh-TW'].noWayBack)
+  // The page's script and words carry the copy buttons.
+  expect(servePage(STRINGS.en, 'n')).toContain("copy(ask.sessionId)")
+  expect(servePage(STRINGS.en, 'n')).toContain("copy(ask.reopen)")
+  expect(pageWords(STRINGS.en).copySessionId).toBe('Copy session ID')
+
+  // Ended, a session whose agent reopens one by id offers that command, in its own folder.
+  const ended = buildView(parseProgress(file.replaceAll('state=waiting', 'state=ended')), [], null, now, 0, {}, STRINGS.en).active
+  for (const [agent, id, , via] of ids) {
+    expect([agent, ended.find(row => row.title === `${agent} work`)?.resume]).toEqual([agent, via === null ? null : `cd '/w/api' && ${via} ${id}`])
+  }
+  for (const agent of none) expect(ended.find(row => row.title === `${agent} work`)?.resume).toBeNull()
+
+  // Hermes Agent's and OpenCode's ids hold underscores and are kept, from its hook through the
+  // marker; a key with colons is not a plain id.
+  expect(autoOf('session=a81d0c42 resume=ses_6a1f0c2e8ffeQx3Lr9')?.resume).toBe('ses_6a1f0c2e8ffeQx3Lr9')
+  expect(autoOf('session=a81d0c42 resume=agent:main:telegram')?.resume).toBeNull()
+  expect(upsertAutoBlock('', { ...working(), agent: 'hermes', resume: '20261017_054125_d8cc2a' })).toContain('resume=20261017_054125_d8cc2a')
+  // An id that starts with a dash would be read as a flag by the command it goes into, so it is
+  // never kept, offered or put in a command, whoever wrote it.
+  const flag = '--dangerously-bypass-approvals-and-sandbox'
+  expect(autoOf(`session=a81d0c42 resume=${flag}`)?.resume).toBeNull()
+  expect(upsertAutoBlock('', { ...working(), agent: 'codex', resume: flag })).not.toContain(flag)
+  const posed = buildView(parseProgress(['# Progress', '', '## api', block('-a1b2c3d', 'claude', flag, 'posing work')].join('\n')), [], null, now, 0, {}, STRINGS.en)
+  expect(posed.waiting.map(item => [item.sessionId, item.reopen])).toEqual([[null, null]])
+  // An agent named like an object's own property gets no command.
+  expect(['constructor', '__proto__', 'toString'].map(resumeVia)).toEqual([null, null, null])
+})
+
+test('another agent’s question marked answered shows no way back anywhere, and one still asked offers both c and h', () => {
+  const id = '0199a2b3-c4d5-7e6f-8a9b-0c1d2e3f4a5b'
+  const file = [
+    '# Progress',
+    '',
+    '## api',
+    `<!-- auto session=a1000000 agent=codex state=waiting updated=2026-10-17T08:40:00Z resume=${id} dir=%2Fw%2Fapi -->`,
+    '### codex work',
+    '- [?] Ship it, OK?',
+    '<!-- /auto session=a1000000 -->',
+    '',
+  ].join('\n')
+  const now = Date.parse('2026-10-17T08:45:00Z')
+  const back = STRINGS.en.wayBack(agentName('codex'), id)
+  const reopen = `cd '/w/api' && codex resume ${id}`
+  const asked = buildView(parseProgress(file), [], null, now, 0, {}, STRINGS.en)
+  const [item] = asked.waiting
+  expect([item?.hideKey !== '', item?.reopen]).toEqual([true, reopen])
+  const items = boardItems(asked, [])
+  const at = items.findIndex(one => one.type === 'ask' && one.ask.task === 'codex work')
+  const screen = boardScreen(asked, [], { ...emptyBoardState, selected: at }, STRINGS.en, { width: 120, isColor: false })
+  expect([screen.includes('c copy resume command'), screen.includes('h already answered, hide'), screen.includes(back)]).toEqual([true, true, true])
+
+  // Marked answered, it leaves every surface, its way back and command with it.
+  const hidden = buildView(parseProgress(file), [], null, now, 0, {}, STRINGS.en, [item?.hideKey ?? ''])
+  expect(hidden.waiting).toEqual([])
+  const board = boardScreen(hidden, [], emptyBoardState, STRINGS.en, { width: 120, isColor: false })
+  const html = dashboardHtml(hidden, STRINGS.en, 'p', 'updated now')
+  const page = serveModel(hidden, [], STRINGS.en)
+  for (const shown of [board, html, JSON.stringify(page.asks)]) {
+    expect([shown.includes(back), shown.includes(reopen), shown.includes(STRINGS.en.reopenWhenClosed)]).toEqual([false, false, false])
+  }
 })
 
 test('the chosen line stays chosen when a line above it comes or goes', () => {

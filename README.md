@@ -8,7 +8,7 @@ A Claude Code plugin that also follows Codex, Gemini CLI, OpenCode, Grok Build, 
 </p>
 
 <p align="center">
-<a href="CHANGELOG.md"><img alt="Version 0.20.5" src="https://img.shields.io/badge/version-0.20.5-blue"></a>
+<a href="CHANGELOG.md"><img alt="Version 0.20.6" src="https://img.shields.io/badge/version-0.20.6-blue"></a>
 <a href="#quick-start"><img alt="Needs Claude Code 2.1.287 or newer" src="https://img.shields.io/badge/Claude%20Code-%E2%89%A5%202.1.287-d97757"></a>
 <a href="LICENSE"><img alt="MIT license" src="https://img.shields.io/badge/license-MIT-green"></a>
 <img alt="macOS, Linux, Windows" src="https://img.shields.io/badge/macOS%20%C2%B7%20Linux%20%C2%B7%20Windows-lightgrey">
@@ -138,7 +138,7 @@ Connecting also gives each agent a way to show the board, so whichever one you a
 | `x` | Tick the next step of your own task; it goes into the work log |
 | `a` | Archive one of your own tasks, or a stopped session's block |
 | `1`–`9`, `y` / `n` | Copy the answer to another agent's question, to paste in that agent |
-| `c` | Copy a command, or the ID of the Claude Code session that asked |
+| `c` | Copy a command, or the command that reopens the session that asked (its ID where there is none) |
 | `h`, `u` | Mark another agent's question already answered: hidden on this computer, nothing sent; show the hidden ones again |
 | `o`, `q` | Open the browser view; quit |
 
@@ -160,7 +160,7 @@ The board reads `progress.md` directly, so it needs no Claude Code session, only
 The board commands above print the board, then open its page in the browser and give its address on the last line; `node ~/.claude/agent-board.mjs --serve` does the same from any terminal (`--no-open` only prints the address). A second `--serve` brings back the page that is already open. On the page you can:
 
 - **Tick** the next step of your own task, **archive** a task, or press **Archive now** to put away everything finished.
-- **Copy** the answer to another agent's question, a session's resume command, or a command in a step.
+- **Copy** the answer to another agent's question, the ID of the session that asked it, a session's resume command, or a command in a step.
 - **Already answered, hide** a question you answered in its own session. It is hidden on this computer, on the page, the pane and the terminal board alike, and nothing is sent. It comes back when that session asks something new; **Show again** brings it back sooner.
 - **Answer** a Grok Build or Codex session that has ended. The reply runs `grok -r <id>` or `codex exec resume <id>` in that session's own folder, and the page shows what the agent says back once it answers, which can take a few minutes. One reply at a time per session. A session that is still open is answered in its own window, because two writers would mix one session up.
 - **Paste a block** from a web chat such as Muse or dot. Copy the chat prompt from the page into the chat once, then paste each block the chat prints. A block that is not in the format, or that would replace Claude's or another agent's block, is refused.

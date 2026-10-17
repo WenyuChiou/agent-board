@@ -885,9 +885,10 @@ const pageDom = async (html, first, action = async () => ({ ok: false, json: asy
   return { board: nodes.get('board'), requests, flush, redraw: async next => { model = next; scheduled(); await flush() } }
 }
 
-test('hiding a question retains its old draft instead of converting it into a general message', { timeout: 30_000 }, async () => {
+for (const duplicate of [false, true]) test(duplicate ? 'hiding one of two same-word questions retains its draft instead of moving it to the other question' : 'hiding a question retains its old draft instead of converting it into a general message', { timeout: 30_000 }, async () => {
   const board = await page()
   try {
+    if (duplicate) writeFileSync(board.path, readFileSync(board.path, 'utf8').replace('- [?] Redis or Memcached?', '- [?] Redis or Memcached?\n- [?] Redis or Memcached?'))
     const html = (await board.call('GET', `/?t=${board.token}`)).body
     const first = (await board.call('GET', '/api/board')).json().model
     const grok = first.groups.flatMap(group => group.rows).find(row => row.title === 'Pick the cache')
@@ -899,7 +900,7 @@ test('hiding a question retains its old draft instead of converting it into a ge
     writeFileSync(join(board.dir, 'progress-answered.json'), JSON.stringify({ answered: ['b2c3d4e5 2 Redis or Memcached?'] }))
     const after = (await board.call('GET', '/api/board')).json().model
     const changed = after.groups.flatMap(group => group.rows).find(row => row.title === grok.title)
-    assert.equal(changed.question, '')
+    assert.equal(changed.question, duplicate ? grok.question : '')
     assert.equal(changed.identity, grok.identity)
     assert.notEqual(changed.revision, grok.revision)
     await dom.redraw(after)

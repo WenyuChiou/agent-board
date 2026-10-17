@@ -19,6 +19,8 @@
   Hiding a question also changes its row revision, so an existing answer draft
   cannot become a general message. Test:
   `hiding a question retains its old draft instead of converting it into a general message`.
+  Two steps with the same question words keep separate draft revisions. Test:
+  `hiding one of two same-word questions retains its draft instead of moving it to the other question`.
 - Extend exclusive address publication with one lifetime server lease per board
   in the private runtime folder, across concurrent startup and upgrades. A
   busy older server's refused close never launches a second sender. Reserve a
@@ -35,6 +37,56 @@
   and `legacy uncertain claims block public startup after a crash and cannot be replayed`.
   Claims are checked again after legacy shutdown. Test:
   `an uncertain claim created while a legacy page closes still blocks private startup`.
+
+## 0.20.6 — 2026-10-17
+
+Another agent's question says how to get back to the session that asked it, for every
+agent (#49).
+
+- **A way back to every agent's session.** 0.19.3 named the session that asked a question,
+  but offered its ID only for a Claude Code session. Now, under another session's question,
+  the pane, the terminal board, the board's page and `progress.html` show that session's
+  whole ID, to find it in that agent's own session list. Where the agent reopens a session
+  by ID, a line of its own gives the command that does it once that session is closed, in
+  the session's folder: `claude --resume`, `codex resume`, `grok -r`, `gemini --resume`,
+  `hermes --resume` or `opencode -s`. Cursor and OpenClaw sessions get the ID only. A
+  session that left no ID says plainly that there is no way back to it from here: a block
+  written by hand under the AGENTS.md rule, or one pasted from a web chat such as Muse. A
+  phone on the local network gets the ID but not the command or its folder. The pane
+  (**Copy session ID**) and the board's page (that, and **Copy resume command** where there
+  is one) copy for any agent, and the note after copying names that agent's list and
+  command. On
+  the terminal board, `c` copies the whole command where there is one, since its line is
+  cut to the terminal's width, else the ID (unless the step has a command or link of its
+  own).
+- **Another agent's session is named by its own ID.** The hint named another agent's
+  session by its block id, which the agent never shows. It now uses the start of the
+  agent's own session ID, which its session list shows; for an ID in parts, such as
+  Hermes Agent's, which starts with the day, the start of its last part.
+- **An ended session reopens with its own agent's command.** A Codex, Grok Build, Gemini
+  CLI, Hermes Agent or OpenCode session that has ended shows
+  `cd '<folder>' && <its command> <id>`, as a Claude Code session already did.
+- **IDs with underscores are kept; IDs starting with a dash are not.** Hermes Agent's and
+  OpenCode's session IDs hold underscores (`ses_…`), and the block marker dropped them. An
+  ID must now start with a letter or a digit, so one that the commands above would read as
+  a flag (`--dangerously-bypass-approvals-and-sandbox`) is never offered, for any agent,
+  Claude Code included.
+- **The command keeps its folder one string.** PowerShell reads the curly single quotes
+  (‘ ’ ‚ ‛) as quotes, so a Windows folder holding one could end the folder early and run
+  what followed; they are now doubled like `'`. A folder that is not a whole path (`-`) is
+  left out, so `cd` never reads it as a flag.
+- Tests: in `tests/features.test.ts` "every agent’s question says where to answer it and
+  how to get back to that session, or plainly that there is none, on every surface" (the
+  terminal board at 120 and 80 columns), "the terminal board, progress.html and the board
+  page name the session that asked, and c copies the whole command that reopens it",
+  "an ended session offers the command that reopens it where it ran", "another agent’s
+  question marked answered shows no way back anywhere, and one still asked offers both c
+  and h" and "a Claude
+  Code block with no resume id offers its block id to copy only when it is a plain id"; in
+  `tests/pane.test.tsx` "another agent’s question is answered there, but its command can
+  be copied and its link opened from here", which now says there is no way back for a block
+  with no ID, and "an item from another session in the same folder names that session’s
+  task and id", which now copies a Codex session's ID and shows its command.
 
 ## 0.20.5 — 2026-10-17
 

@@ -56,7 +56,7 @@ export const parseAttrs = (raw: string): Record<string, string> => {
 
 // `resume=` ends up in a command the person pastes into a terminal, and anyone can write the
 // file: only a plain session id is kept.
-export const RESUME = /^[0-9a-zA-Z-]{6,64}$/
+export const RESUME = /^[0-9a-zA-Z][0-9a-zA-Z_-]{5,63}$/
 
 // A folder with a control character (a newline above all) would break the pasted command
 // into two; the quote is escaped where the command is built.

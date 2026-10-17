@@ -7,6 +7,7 @@ import type { Strings } from './i18n'
 import { DARK, LIGHT } from './palette'
 import type { Tone } from './palette'
 import { RESUME } from './parse'
+import { replyHint, wayBackText } from './view'
 import type { AgentTarget, StepRef, TaskRef, View } from './view'
 
 // The board's page: what `agent-board.mjs --serve` shows in a browser for agents other than
@@ -87,6 +88,13 @@ export type ServeAsk = {
   where: string
   // Why a reply cannot be sent from here, when it cannot.
   info: string
+  // How to get back to the session that asked: its own id and, where known, the command that
+  // reopens it; '' for a hand-kept question.
+  back: string
+  // That session's own id, to copy; null when it left none.
+  sessionId: string | null
+  // The command that reopens that session once it is closed, in its folder; never to a phone.
+  reopen: string | null
   isSending: boolean
 }
 
@@ -163,6 +171,8 @@ export const serveModel = (view: View, pending: readonly PendingTurn[], s: Strin
       const isManual = ask.where === 'manual'
       const mode = isManual ? 'none' : sendMode(ask.agent, ask.target)
       const send = onLan(mode)
+      // A phone on the local network gets the id, but neither the command nor its folder.
+      const hint = replyHint(ask, s, !isLan)
       asks.push({
         key: item.key,
         identity: ask.source?.identity ?? '',
@@ -185,6 +195,9 @@ export const serveModel = (view: View, pending: readonly PendingTurn[], s: Strin
         session: ask.target?.session ?? '',
         where: send === 'send' ? (ask.target?.dir ?? '') : '',
         info: ask.target !== null && uncertain.has(sendKey(ask.target)) ? s.serveSendUncertain(ask.agent) : isManual ? '' : (lanInfo(mode, ask.agent) ?? infoOf(send, ask.agent, ask.task, ask.session, s)),
+        back: wayBackText(hint),
+        sessionId: ask.where === 'other' ? ask.sessionId : null,
+        reopen: hint.reopen,
         isSending: isSending(ask.target),
       })
       continue
@@ -394,6 +407,7 @@ const PAGE_WORDS = [
   'serveCopy',
   'serveDraftRetained',
   'serveCopyResume',
+  'copySessionId',
   'serveCopyCommand',
   'serveOpenLink',
   'answeredHide',
@@ -660,6 +674,8 @@ const PAGE_SCRIPT = String.raw`
       actions.appendChild(node);
     });
     if (ask.command) actions.appendChild(button(w('serveCopyCommand'), function () { copy(ask.command); }));
+    if (ask.sessionId) actions.appendChild(button(w('copySessionId'), function () { copy(ask.sessionId); }));
+    if (ask.reopen) actions.appendChild(button(w('serveCopyResume'), function () { copy(ask.reopen); }));
     if (ask.canHide) actions.appendChild(button(w('answeredHide'), function () { act(ask, 'hide'); }));
     if (ask.link && /^https:\/\//i.test(ask.link)) {
       var link = el('a', 'btn', w('serveOpenLink'));
@@ -671,6 +687,8 @@ const PAGE_SCRIPT = String.raw`
     if (actions.childNodes.length) add(card, actions);
     if (!ask.canTick) add(card, replyBox(ask, w('serveReplyPlaceholder'), ask.send, ask.agent, ask.where, ask.isSending));
     if (ask.info) add(card, el('div', 'quiet small', ask.info));
+    if (ask.back) add(card, el('div', 'quiet small', ask.back));
+    if (ask.reopen) add(card, el('code', '', '$ ' + ask.reopen));
     return card;
   }
   function rowCard(row) {

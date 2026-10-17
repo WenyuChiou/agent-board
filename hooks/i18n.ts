@@ -244,6 +244,9 @@ export const ZH_TW = {
     const who = [session, agent].filter(part => part !== '').join('，')
     return `到「${task}」那個對話${who === '' ? '' : `（${who}）`}回覆，這裡回不了。`
   },
+  wayBack: (agent: string, id: string): string => `對話 ID ${id}：到 ${agent} 的對話列表找。`,
+  reopenWhenClosed: '那個對話關掉之後，可以用這行接回：',
+  noWayBack: '它沒留下對話 ID，這裡帶不了你回去。',
   arrivedDone: '到了，完成',
   done: '完成',
   reply: '回覆',
@@ -322,8 +325,8 @@ export const ZH_TW = {
   answered: (text: string): string => `已回覆 Claude：${text}`,
   commandOf: (step: string): string => `「${step}」要跑的指令`,
   resumeOf: (title: string): string => `回到「${title}」的指令，貼到終端機執行`,
-  sessionIdOf: (title: string, canResume: boolean): string =>
-    `「${title}」那個對話的 ID：拿去對照對話列表${canResume ? '，或用 claude --resume 接回' : ''}`,
+  sessionIdOf: (title: string, agent: string, via: string | null): string =>
+    `「${title}」那個對話的 ID：拿去對照 ${agent} 的對話列表${via === null ? '' : `，關掉之後也可以用 ${via} 接回`}`,
   fileUnreadable: '讀不到進度檔',
   dashStamp: (time: string): string => `更新於 ${time}`,
   windowOpened: (path: string): string => `已在瀏覽器打開：${path}`,

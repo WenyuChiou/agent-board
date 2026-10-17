@@ -2,6 +2,7 @@ import { ZH_TW } from './i18n'
 import type { Strings } from './i18n'
 import { lastQuestion } from './digest'
 import { isBoardTurn, isTranscriptPath, readTurn, transcriptTail } from './inbox'
+import { replyHint } from './view'
 import type { StepRef, TaskRef, TaskRow, View, ViewStep, WaitingItem } from './view'
 
 // The board as plain text, for agents other than Claude Code: the standalone script that
@@ -235,8 +236,11 @@ export const boardKey = (state: BoardState, key: string, items: readonly BoardIt
     if (key === 'x' && ask.step !== null) return { state, action: { type: 'tick', ref: ask.step, expected: expectedItem(item) } }
     if (key === 'h' && ask.hideKey !== '') return { state, action: { type: 'hide', key: ask.hideKey, text: ask.text } }
     if (key === 'c' && (ask.command ?? ask.link) !== null) return { state, action: { type: 'copy', text: plain((ask.command ?? ask.link) as string) } }
-    // A Claude Code session's question has nothing else to copy: its id finds the session.
-    if (key === 'c' && ask.sessionId !== null) return { state, action: { type: 'copy', text: plain(ask.sessionId) } }
+    // Another session's question has nothing else to copy: the command that reopens that
+    // session where there is one (its line is cut to the terminal's width), else its id, which
+    // finds the session in its agent's list.
+    const back = replyHint(ask, s).reopen ?? ask.sessionId
+    if (key === 'c' && back !== null) return { state, action: { type: 'copy', text: plain(back) } }
     const answers = answersOf(ask, s)
     const pick = ask.kind === 'confirm' ? ['y', 'n'].indexOf(key) : /^[1-9]$/.test(key) ? Number(key) - 1 : -1
     const answer = pick >= 0 ? answers[pick] : undefined
@@ -260,7 +264,13 @@ const keysFor = (item: BoardItem | undefined, s: Strings): string[] => {
     return [
       ...(ask.step !== null ? [s.boardKeyTick] : []),
       ...(ask.kind === 'confirm' ? [s.boardKeyConfirm] : answers.length > 0 ? [s.boardKeyOptions(answers.length)] : []),
-      ...((ask.command ?? ask.link) !== null ? [s.boardKeyCopyCommand] : ask.sessionId !== null ? [s.boardKeyCopyId] : []),
+      ...((ask.command ?? ask.link) !== null
+        ? [s.boardKeyCopyCommand]
+        : replyHint(ask, s).reopen !== null
+          ? [s.boardKeyCopyResume]
+          : ask.sessionId !== null
+            ? [s.boardKeyCopyId]
+            : []),
       ...(ask.hideKey !== '' ? [s.boardKeyHide] : []),
     ]
   }
@@ -305,7 +315,15 @@ export const boardScreen = (view: View, pending: readonly PendingTurn[], state: 
         if (ask.note) lines.push(`    ${fit(ask.note, o.width - 6)}`)
         answersOf(ask, s).forEach((answer, n) => lines.push(`    ${c('accent', ask.kind === 'confirm' ? (n === 0 ? 'y' : 'n') : String(n + 1))} ${fit(answer, o.width - 8)}`))
         if (ask.command !== null) lines.push(`    ${c('accent', fit(`$ ${ask.command}`, o.width - 6))}`)
-        if (ask.where === 'other') lines.push(`    ${c('quiet', fit(s.replyElsewhere(ask.task, ask.session, ask.agent), o.width - 6))}`)
+        if (ask.where === 'other') {
+          const hint = replyHint(ask, s)
+          lines.push(`    ${c('quiet', fit(hint.where, o.width - 6))}`)
+          lines.push(`    ${c('quiet', fit(hint.back, o.width - 6))}`)
+          if (hint.reopen !== null) {
+            lines.push(`    ${c('quiet', fit(hint.note, o.width - 6))}`)
+            lines.push(`    ${c('accent', fit(`$ ${hint.reopen}`, o.width - 6))}`)
+          }
+        }
       }
       return
     }
