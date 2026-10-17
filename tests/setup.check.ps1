@@ -25,17 +25,25 @@ function New-Case($settings) {
 
 # Runs setup.ps1 for the case, with Get-ExecutionPolicy answering $policy (PowerShell code:
 # a quoted name, or a throw); returns what it printed.
-function Invoke-Setup([string]$dir, [string]$policy = "'RemoteSigned'") {
-  $saved = $env:CLAUDE_CONFIG_DIR
+function Invoke-Setup([string]$dir, [string]$policy = "'RemoteSigned'", [string]$extra = '') {
+  $saved = @{ config = $env:CLAUDE_CONFIG_DIR; user = $env:USERPROFILE; codex = $env:CODEX_HOME; xdg = $env:XDG_CONFIG_HOME }
   $env:CLAUDE_CONFIG_DIR = Join-Path $dir '.claude'
+  $env:USERPROFILE = $dir   # where -Agents looks for ~\.codex, ~\.gemini, ~\.config
+  $env:CODEX_HOME = $null
+  $env:XDG_CONFIG_HOME = $null
   $ErrorActionPreference = 'Continue'   # a warning on stderr is output to check, not a stop
   try {
     $cmd = "function Get-ExecutionPolicy { param(`$Scope) $policy }; " +
-      "& '$setup' -NoInstall -ProfilePath '$(Join-Path $dir 'profile.ps1')'"
+      "& '$setup' -NoInstall -ProfilePath '$(Join-Path $dir 'profile.ps1')' $extra"
     $out = & powershell -NoProfile -ExecutionPolicy Bypass -Command $cmd 2>&1
     ($out | Out-String)
   }
-  finally { $env:CLAUDE_CONFIG_DIR = $saved }
+  finally {
+    $env:CLAUDE_CONFIG_DIR = $saved.config
+    $env:USERPROFILE = $saved.user
+    $env:CODEX_HOME = $saved.codex
+    $env:XDG_CONFIG_HOME = $saved.xdg
+  }
 }
 
 function Read-Settings([string]$dir) { [IO.File]::ReadAllText((Join-Path $dir '.claude\settings.json')) }
@@ -201,6 +209,41 @@ try {
   $dir = New-Case '{"model": "opus"}'
   Invoke-Setup $dir | Out-Null
   Check 'auto-update: no marketplace entry, nothing added' ((Read-Settings $dir) -ceq '{"model": "opus"}')
+
+  # 17. -Agents auto writes the section into the agents installed here, between markers.
+  $dir = New-Case $null
+  New-Item -ItemType Directory -Path (Join-Path $dir '.codex'), (Join-Path $dir '.gemini') | Out-Null
+  $codexPath = Join-Path $dir '.codex\AGENTS.md'
+  [IO.File]::WriteAllText($codexPath, "# My rules`n`nUse tabs.`n", $utf8)
+  Invoke-Setup $dir "'RemoteSigned'" '-Agents auto' | Out-Null
+  $codexText = [IO.File]::ReadAllText($codexPath)
+  Check 'agents: Codex keeps its own text and gets the section after it' `
+    ($codexText.StartsWith("# My rules`n`nUse tabs.`n") -and $codexText.Contains('## Report your progress to the progress pane') -and
+     $codexText.Contains('claude-progress-pane:end') -and (Test-Path "$codexPath.bak"))
+  Check 'agents: Gemini CLI gets GEMINI.md with the section' `
+    ([IO.File]::ReadAllText((Join-Path $dir '.gemini\GEMINI.md')).Contains('agent=NAME'))
+  Check 'agents: OpenCode, not installed here, gets nothing' (-not (Test-Path (Join-Path $dir '.config\opencode\AGENTS.md')))
+  Invoke-Setup $dir "'RemoteSigned'" '-Agents auto' | Out-Null
+  Check 'agents: a second run changes nothing' ([IO.File]::ReadAllText($codexPath) -ceq $codexText)
+  Invoke-Setup $dir "'RemoteSigned'" '-RemoveAgents' | Out-Null
+  Check 'agents: -RemoveAgents takes the section out and leaves the rest' `
+    ([IO.File]::ReadAllText($codexPath) -ceq "# My rules`n`nUse tabs.`n" -and
+     -not ([IO.File]::ReadAllText((Join-Path $dir '.gemini\GEMINI.md')).Contains('progress pane')))
+
+  # 18. Without -Agents it only says what it found; Codex's override file; an unknown name.
+  $dir = New-Case $null
+  New-Item -ItemType Directory -Path (Join-Path $dir '.codex') | Out-Null
+  [IO.File]::WriteAllText((Join-Path $dir '.codex\AGENTS.override.md'), "Override rules`n", $utf8)
+  $out = Invoke-Setup $dir
+  Check 'agents: without -Agents it only says which agents it found' ($out -match 'codex installed here too')
+  Invoke-Setup $dir "'RemoteSigned'" '-Agents codex,opencode' | Out-Null
+  Check 'agents: Codex reads AGENTS.override.md when it has text, so the section goes there' `
+    ([IO.File]::ReadAllText((Join-Path $dir '.codex\AGENTS.override.md')).Contains('claude-progress-pane:start') -and
+     -not (Test-Path (Join-Path $dir '.codex\AGENTS.md')))
+  Check 'agents: a named agent gets the section even before it has a folder' `
+    ([IO.File]::ReadAllText((Join-Path $dir '.config\opencode\AGENTS.md')).Contains('claude-progress-pane:start'))
+  $out = Invoke-Setup $dir "'RemoteSigned'" '-Agents copilot'
+  Check 'agents: an unknown name is refused' ($out -match 'unknown agent: copilot')
 }
 finally {
   foreach ($one in $script:dirs) { if (Test-Path $one) { Remove-Item -LiteralPath $one -Recurse -Force } }

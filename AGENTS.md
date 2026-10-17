@@ -5,7 +5,7 @@ This repository is `project-progress`, a Claude Code plugin (a "mod") that draws
 This file has two parts:
 
 1. [Working on this repository](#working-on-this-repository): for an agent that changes this code.
-2. [Report your progress to the progress pane](#report-your-progress-to-the-progress-pane): the last section of this file. Copy it, from its heading to the end of the file, into the `AGENTS.md`, `GEMINI.md` or `.cursorrules` of any project, and a non-Claude agent working there shows its work on the pane. An agent working on this repository may follow it too.
+2. [Report your progress to the progress pane](#report-your-progress-to-the-progress-pane): the last section of this file. Copy it, from its heading to the end of the file, into the `AGENTS.md`, `GEMINI.md` or `.cursorrules` of any project, and a non-Claude agent working there shows its work on the pane. `scripts/setup.sh --agents` (PowerShell: `setup.ps1 -Agents auto`) does that for Codex, Gemini CLI and OpenCode, in their global instructions. An agent working on this repository may follow it too.
 
 ## Working on this repository
 
@@ -55,7 +55,7 @@ If you cannot run `claude` in your environment, say so in your report. Do not cl
 | `hooks/dashboard.ts` | Builds `progress.html` from a view: a standalone page that reloads itself every 30 seconds. `register.tsx` writes it beside `progress.md` (same name, `.html`), after it reads a changed file and on its 30-second tick, at most once a minute and only when the page changed; `/progress open` writes it at once and opens it in the browser. |
 | `types/index.d.ts` | Shared types and the plugin's state. |
 | `tests/` | `parse.test.ts` (parser), `logic.test.ts` (blocks, mirror, view logic), `features.test.ts` (later features through the pure modules: ask kinds, journal, PR and CI, quick add, palette, languages, `progress.html`), `pane.test.tsx` (the mod and the pane against a mock engine). `setup.check.sh` and `setup.check.ps1` are the installer checks; `claude plugin test` does not run them. |
-| `scripts/` | `setup.sh`, `setup.ps1` and the rule text. |
+| `scripts/` | `setup.sh`, `setup.ps1` and the rule text. With `--agents` / `-Agents`, the setup scripts copy the last section of this file into the global instructions of Codex, Gemini CLI and OpenCode, between `<!-- claude-progress-pane:start -->` and `<!-- claude-progress-pane:end -->`; keep that section's heading as it is, since they find it by that heading. |
 | `.github/workflows/test.yml` | CI: `validate --strict`, `plugin test` and the installer check for the system, on Ubuntu and Windows. No `tsc -p .`. |
 | `docs/` | `FORMAT.md`, the format spec. `docs/images/` holds the README's screenshots, drawn by `drawPane` and `dashboardHtml` from sample data; do not edit them by hand. |
 
@@ -104,10 +104,10 @@ The user watches a progress pane fed by `~/.claude/progress.md` (Windows: `%USER
 <!-- /auto session=ID -->
 ```
 
-- Put the block under `## <repository name>` (add that heading at the end of the file if it is missing). `ID` is 8 random hex characters, chosen once per session. `NAME` is your own name in lower case (`codex`, `gemini`, `cursor`, `aider`). Keep the `Context:` label as written. Start the markers at the beginning of the line.
+- Put the block under `## <repository name>` (add that heading at the end of the file if it is missing). `ID` is 8 random hex characters, chosen once per session. `NAME` is your own name in lower case (`codex`, `gemini`, `cursor`, `aider`). The `###` title is yours to word: the outcome, in plain words. Keep the `Context:` label as written; other `>` lines are allowed, and the pane shows the `Context:` one. Start the markers at the beginning of the line.
 - After each step: read the file again, replace only your block, update the step's mark and `updated=` (UTC, ending in `Z`), write the file.
 - Marks: `[x]` done, `[~]` doing, `[ ]` todo, `[?]` needs the user, `[>]` running or waiting on someone else, `[!]` blocked, `[-]` cancelled.
-- When you need the user, mark the step `[?]` and add ` — ` and one line: what you need and why. Word it so the pane can tell what is asked: end a yes/no question with `OK?` (`Deploy it to staging, OK?`); write a choice as two short options and a question mark (`24 hours or 7 days?`); put a command in backticks; give a link as a full `https://` URL; start a wait with `waiting for` (`waiting for Prof. Lee to reply`).
+- When you need the user, mark the step `[?]` and add ` — ` and one line: what you need and why. Word it so the pane can tell what is asked: end a yes/no question with `OK?` (`Deploy it to staging, OK?`); write a choice as two short options and a question mark (`24 hours or 7 days?`); put a command, and only a command, in backticks; give a link as a full `https://` URL; start a wait with `waiting for` (`waiting for Prof. Lee to reply`).
 - Never edit, move or delete anything outside your own markers, above all another agent's block.
 - Before you end a reply with steps left, set `state=waiting`. Set `state=working` when you start again.
 - When every step is done, set `state=done`. If you stop for good with steps left, set `state=ended`.

@@ -22,8 +22,11 @@ new_case() {  # new_case [SETTINGS]: a fresh HOME with .claude/, settings.json w
   if [ $# -gt 0 ]; then printf '%s' "$1" > "$dir/.claude/settings.json"; fi
 }
 
-run() {  # run SHELL: setup.sh for the current case; stdout+stderr in $dir/out
-  HOME="$dir" SHELL="$1" ZDOTDIR="" CLAUDE_CONFIG_DIR="$dir/.claude" bash "$setup" --no-install > "$dir/out" 2>&1
+run() {  # run SHELL [ARGS...]: setup.sh for the current case; stdout+stderr in $dir/out
+  local sh="$1"
+  shift
+  HOME="$dir" SHELL="$sh" ZDOTDIR="" CODEX_HOME="" XDG_CONFIG_HOME="" CLAUDE_CONFIG_DIR="$dir/.claude" \
+    bash "$setup" --no-install "$@" > "$dir/out" 2>&1
 }
 
 same() { [ "$(cat "$1"; echo x)" = "$(printf '%s' "$2"; echo x)" ]; }
@@ -127,6 +130,36 @@ bare='{"model": "opus"}'
 new_case "$bare"
 run /bin/bash
 check 'auto-update: no marketplace entry, nothing added' same "$dir/.claude/settings.json" "$bare"
+
+# 15. --agents writes the section into the agents installed here, between markers, and only them.
+new_case
+mkdir -p "$dir/.codex" "$dir/.gemini"
+printf '# My rules\n\nUse tabs.\n' > "$dir/.codex/AGENTS.md"
+run /bin/bash --agents
+check 'agents: Codex keeps its own text and gets the section after it' \
+  bash -c 'head -1 "$1" | grep -qx "# My rules" && grep -qx "Use tabs." "$1" && grep -q "^## Report your progress to the progress pane" "$1" && grep -q "claude-progress-pane:end" "$1" && [ -f "$1.bak" ]' _ "$dir/.codex/AGENTS.md"
+check 'agents: Gemini CLI gets GEMINI.md with the section' grep -q "agent=NAME" "$dir/.gemini/GEMINI.md"
+check 'agents: OpenCode, not installed here, gets nothing' test ! -e "$dir/.config/opencode/AGENTS.md"
+cp "$dir/.codex/AGENTS.md" "$dir/codex-first"
+run /bin/bash --agents
+check 'agents: a second run changes nothing' cmp -s "$dir/.codex/AGENTS.md" "$dir/codex-first"
+run /bin/bash --remove-agents
+check 'agents: --remove-agents takes the section out and leaves the rest' \
+  bash -c '[ "$(cat "$1")" = "$(printf "# My rules\n\nUse tabs.")" ] && ! grep -q "progress pane" "$2"' _ "$dir/.codex/AGENTS.md" "$dir/.gemini/GEMINI.md"
+
+# 16. Named agents, Codex's override file, and the hint when --agents is not given.
+new_case
+mkdir -p "$dir/.codex"
+printf 'Override rules\n' > "$dir/.codex/AGENTS.override.md"
+run /bin/bash
+check 'agents: without --agents it only says which agents it found' \
+  bash -c 'grep -q "codex installed here too" "$1/out" && [ "$(cat "$1/.codex/AGENTS.override.md")" = "Override rules" ]' _ "$dir"
+run /bin/bash --agents=codex,opencode
+check 'agents: Codex reads AGENTS.override.md when it has text, so the section goes there' \
+  bash -c 'grep -q "claude-progress-pane:start" "$1/.codex/AGENTS.override.md" && [ ! -e "$1/.codex/AGENTS.md" ]' _ "$dir"
+check 'agents: a named agent gets the section even before it has a folder' grep -q "claude-progress-pane:start" "$dir/.config/opencode/AGENTS.md"
+run /bin/bash --agents=copilot
+check 'agents: an unknown name is refused' grep -q "unknown agent: copilot" "$dir/out"
 
 echo
 if [ "$fails" -gt 0 ]; then echo "$fails fail"; exit 1; fi

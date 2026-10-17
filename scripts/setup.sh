@@ -2,7 +2,7 @@
 # Installs the project-progress plugin and makes the settings it cannot make itself.
 # Safe to re-run; it is also how an old zip install moves over.
 #   curl -fsSL https://raw.githubusercontent.com/WenyuChiou/claude-progress-pane/main/scripts/setup.sh | bash
-#   bash setup.sh [--keep-rule] [--no-install]
+#   bash setup.sh [--keep-rule] [--no-install] [--agents[=codex,gemini,opencode]] [--remove-agents]
 # What each step does, and why: see the comment at the top of setup.ps1. Needs python3.
 # Step 2 here writes `export CLAUDE_CODE_ENABLE_TODO_TOOLS=1` to your shell's startup file
 # instead of a PowerShell profile: ~/.zshrc for zsh, ~/.bashrc for bash (~/.bash_profile on
@@ -11,6 +11,10 @@
 # It also turns on auto-update for the marketplace (extraKnownMarketplaces.claude-progress-pane
 # .autoUpdate), unless you turned it off: Claude Code updates only the official marketplace on
 # its own.
+# --agents puts the "Report your progress" section of AGENTS.md into the global instructions of
+# the other agents installed here (Codex: $CODEX_HOME/AGENTS.md, Gemini CLI: ~/.gemini/GEMINI.md,
+# OpenCode: ~/.config/opencode/AGENTS.md), between markers, so their work shows on the pane
+# too; --agents=codex,gemini names them; --remove-agents takes the section out again.
 set -euo pipefail
 
 marketplace='WenyuChiou/claude-progress-pane'
@@ -19,10 +23,15 @@ claude="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
 here="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" 2>/dev/null && pwd || pwd)"
 keep_rule=0
 install=1
+agents=''
+remove_agents=0
 for arg in "$@"; do
   case "$arg" in
     --keep-rule) keep_rule=1 ;;
     --no-install) install=0 ;;
+    --agents) agents=auto ;;
+    --agents=*) agents="${arg#--agents=}" ;;
+    --remove-agents) remove_agents=1 ;;
     *) echo "unknown option: $arg" >&2; exit 2 ;;
   esac
 done
@@ -47,6 +56,12 @@ if [ "$install" = 1 ]; then
       exit 1
     fi
     claude plugin install "$plugin"
+    # A fresh install leaves the language option unset and Claude Code says so; auto is what
+    # it means anyway. A language someone picked stays.
+    if claude plugin configure "$plugin" --json 2>/dev/null |
+      python3 -c 'import json, sys; sys.exit(0 if "language" in json.load(sys.stdin).get("unconfigured", []) else 1)' 2>/dev/null; then
+      printf '{"language":"auto"}' | claude plugin configure "$plugin" --values-stdin >/dev/null 2>&1 || true
+    fi
   else
     echo "claude is not on PATH: run 'claude plugin marketplace add $marketplace' and 'claude plugin install $plugin' yourself." >&2
   fi
@@ -55,13 +70,19 @@ fi
 # Beside this script, or in the marketplace's clone when the script came through a pipe.
 rule_file="$here/claude-md-rule.md"
 [ -f "$rule_file" ] || rule_file="$claude/plugins/marketplaces/claude-progress-pane/scripts/claude-md-rule.md"
+agents_file="$here/../AGENTS.md"
+[ -f "$agents_file" ] || agents_file="$claude/plugins/marketplaces/claude-progress-pane/AGENTS.md"
 
-python3 - "$claude" "$rule_file" "$keep_rule" "$HOME" "${SHELL:-}" "${ZDOTDIR:-}" "$auto_off" <<'PY'
+python3 - "$claude" "$rule_file" "$keep_rule" "$HOME" "${SHELL:-}" "${ZDOTDIR:-}" "$auto_off" \
+  "$agents" "$remove_agents" "$agents_file" "${CODEX_HOME:-}" "${XDG_CONFIG_HOME:-}" <<'PY'
 import json, os, re, shutil, sys
 
 claude, rule_file, keep_rule = sys.argv[1], sys.argv[2], sys.argv[3] == '1'
 home, shell, zdotdir = sys.argv[4], os.path.basename(sys.argv[5]), sys.argv[6]
 auto_off = sys.argv[7] == '1'
+agents, remove_agents, agents_file = sys.argv[8], sys.argv[9] == '1', sys.argv[10]
+codex_home = sys.argv[11] or os.path.join(home, '.codex')
+config_home = sys.argv[12] or os.path.join(home, '.config')
 done = []
 
 def save(path, text):
@@ -225,6 +246,88 @@ elif has_block:
 if nxt != md:
     save(md_path, nxt)
     done.append('CLAUDE.md: ' + what)
+
+# Other agents: the AGENTS.md section they follow, in their own global instructions.
+START, END = '<!-- claude-progress-pane:start -->', '<!-- claude-progress-pane:end -->'
+section_re = re.escape(START) + r'.*?' + re.escape(END)
+
+def codex_file():
+    # Codex reads AGENTS.override.md instead of AGENTS.md when the override has text.
+    override = os.path.join(codex_home, 'AGENTS.override.md')
+    try:
+        with open(override, encoding='utf-8') as f:
+            if f.read().strip():
+                return override
+    except (OSError, ValueError):
+        pass
+    return os.path.join(codex_home, 'AGENTS.md')
+
+AGENT_FILES = {
+    'codex': (codex_home, codex_file),
+    'gemini': (os.path.join(home, '.gemini'), lambda: os.path.join(home, '.gemini', 'GEMINI.md')),
+    'opencode': (os.path.join(config_home, 'opencode'), lambda: os.path.join(config_home, 'opencode', 'AGENTS.md')),
+}
+
+def read_text(path):
+    # None for a file that is not UTF-8, which is left alone.
+    if not os.path.exists(path):
+        return ''
+    try:
+        with open(path, encoding='utf-8', newline='') as f:
+            return f.read()
+    except ValueError:
+        return None
+
+found = [name for name, (base, _) in AGENT_FILES.items() if os.path.isdir(base)]
+if remove_agents:
+    targets = list(AGENT_FILES)
+elif agents == 'auto':
+    targets = found
+elif agents:
+    targets = [one.strip().lower() for one in agents.split(',') if one.strip()]
+    unknown = [one for one in targets if one not in AGENT_FILES]
+    if unknown:
+        sys.exit('unknown agent: %s (known: %s)' % (', '.join(unknown), ', '.join(AGENT_FILES)))
+else:
+    targets = []
+if targets and not remove_agents:
+    try:
+        with open(agents_file, encoding='utf-8') as f:
+            source = f.read()
+    except OSError:
+        sys.exit('AGENTS.md not found: ' + agents_file)
+    at = source.find('## Report your progress to the progress pane')
+    if at < 0:
+        sys.exit('AGENTS.md has no "Report your progress" section: ' + agents_file)
+    section = START + '\n' + source[at:].strip() + '\n' + END
+for name in targets:
+    path = AGENT_FILES[name][1]()
+    old = read_text(path)
+    if old is None:
+        print('%s is not UTF-8; left as it is.' % path, file=sys.stderr)
+        continue
+    has = re.search(section_re, old, re.S) is not None
+    nl = '\r\n' if '\r\n' in old else '\n'
+    if remove_agents:
+        if not has:
+            continue
+        nxt = re.sub(r'(\r?\n)*' + section_re + r'(\r?\n)*', nl + nl, old, flags=re.S).strip()
+        nxt = nxt + nl if nxt else ''
+        what = 'removed the progress-pane section from'
+    else:
+        block = section.replace('\n', nl)
+        nxt = re.sub(section_re, lambda _: block, old, flags=re.S) if has else (old.rstrip() + nl + nl + block).lstrip()
+        nxt = nxt.rstrip() + nl
+        what = 'wrote the progress-pane section to'
+    if nxt != old:
+        save(path, nxt.encode('utf-8'))
+        done.append('%s: %s %s' % (name, what, path))
+if not agents and not remove_agents:
+    texts = {name: read_text(AGENT_FILES[name][1]()) for name in found}
+    bare = [name for name in found if texts[name] is not None and START not in texts[name]]
+    if bare:
+        done.append('%s installed here too: run this again with --agents to show their work on the pane'
+                    % ' and '.join(bare))
 
 print('\n'.join('- ' + one for one in done) if done else 'Settings: nothing to change.')
 old_dir = os.path.join(claude, 'mods', 'project-progress')

@@ -2,6 +2,7 @@
 # Safe to re-run; it is also how an old zip install moves over.
 #   irm https://raw.githubusercontent.com/WenyuChiou/claude-progress-pane/main/scripts/setup.ps1 | iex
 #   powershell -ExecutionPolicy Bypass -File setup.ps1 [-KeepRule] [-NoInstall] [-ProfilePath <file>]
+#     [-Agents auto|codex,gemini,opencode] [-RemoveAgents]
 #
 # 1. With `claude` on PATH (and no -NoInstall): adds the claude-progress-pane marketplace
 #    and installs project-progress from it. Both steps are no-ops once done.
@@ -21,11 +22,17 @@
 # 5. settings.json extraKnownMarketplaces.claude-progress-pane: adds "autoUpdate": true, so
 #    the plugin updates itself (Claude Code updates only the official marketplace on its own).
 #    An autoUpdate you set to false stays false.
+# 6. With -Agents: puts the "Report your progress" section of AGENTS.md into the global
+#    instructions of other agents, between markers, so their work shows on the pane too:
+#    Codex ($env:CODEX_HOME or ~\.codex, AGENTS.md or a non-empty AGENTS.override.md), Gemini CLI
+#    (~\.gemini\GEMINI.md), OpenCode (~\.config\opencode\AGENTS.md). -Agents auto takes the ones
+#    installed here; -RemoveAgents takes the section out again.
 # Each file it changes is copied to <file>.bak first. It deletes nothing on disk.
-param([switch]$KeepRule, [switch]$NoInstall, [string]$ProfilePath)
+# -Agents codex,gemini arrives as an array; the function takes it joined.
+param([switch]$KeepRule, [switch]$NoInstall, [string]$ProfilePath, [string[]]$Agents, [switch]$RemoveAgents)
 
 function Install-ProgressPane {
-  param([bool]$KeepRule, [bool]$NoInstall, [string]$Here, [string]$ProfilePath)
+  param([bool]$KeepRule, [bool]$NoInstall, [string]$Here, [string]$ProfilePath, [string]$Agents, [bool]$RemoveAgents)
   $ErrorActionPreference = 'Stop'
   $marketplace = 'WenyuChiou/claude-progress-pane'
   $plugin = 'project-progress@claude-progress-pane'
@@ -55,6 +62,15 @@ function Install-ProgressPane {
       }
       & claude plugin install $plugin
       if ($LASTEXITCODE -ne 0) { Write-Warning "Could not install $plugin."; return }
+      # A fresh install leaves the language option unset and Claude Code says so; auto is what
+      # it means anyway. A language someone picked stays.
+      try {
+        $options = (& claude plugin configure $plugin --json | Out-String) | ConvertFrom-Json
+        if (@($options.unconfigured) -contains 'language') {
+          '{"language":"auto"}' | & claude plugin configure $plugin --values-stdin | Out-Null
+        }
+      }
+      catch { }
     }
     else {
       Write-Warning "claude is not on PATH: run 'claude plugin marketplace add $marketplace' and 'claude plugin install $plugin' yourself."
@@ -272,6 +288,100 @@ function Install-ProgressPane {
     $done += "CLAUDE.md: $what"
   }
 
+  # Other agents: the AGENTS.md section they follow, in their own global instructions.
+  $start = '<!-- claude-progress-pane:start -->'
+  $end = '<!-- claude-progress-pane:end -->'
+  $inner = [regex]::Escape($start) + '.*?' + [regex]::Escape($end)
+  $userHome = $env:USERPROFILE
+  if (-not $userHome) { $userHome = $HOME }
+  $codexHome = $env:CODEX_HOME
+  if (-not $codexHome) { $codexHome = Join-Path $userHome '.codex' }
+  $configHome = $env:XDG_CONFIG_HOME
+  if (-not $configHome) { $configHome = Join-Path $userHome '.config' }
+  # Codex reads AGENTS.override.md instead of AGENTS.md when the override has text.
+  $codexFile = Join-Path $codexHome 'AGENTS.md'
+  $override = Join-Path $codexHome 'AGENTS.override.md'
+  if ((Test-Path -LiteralPath $override) -and ([IO.File]::ReadAllText($override)).Trim()) { $codexFile = $override }
+  $geminiHome = Join-Path $userHome '.gemini'
+  $opencodeHome = Join-Path $configHome 'opencode'
+  $agentFiles = [ordered]@{
+    codex = @{ base = $codexHome; file = $codexFile }
+    gemini = @{ base = $geminiHome; file = (Join-Path $geminiHome 'GEMINI.md') }
+    opencode = @{ base = $opencodeHome; file = (Join-Path $opencodeHome 'AGENTS.md') }
+  }
+  $found = @($agentFiles.Keys | Where-Object { Test-Path -LiteralPath $agentFiles[$_].base })
+  $targets = @()
+  if ($RemoveAgents) { $targets = @($agentFiles.Keys) }
+  elseif ($Agents -eq 'auto') { $targets = $found }
+  elseif ($Agents) {
+    $targets = @($Agents -split ',' | ForEach-Object { $_.Trim().ToLower() } | Where-Object { $_ })
+    $unknown = @($targets | Where-Object { -not $agentFiles.Contains($_) })
+    if ($unknown.Count -gt 0) {
+      Write-Warning ('unknown agent: ' + ($unknown -join ', ') + ' (known: codex, gemini, opencode)')
+      return
+    }
+  }
+  $section = ''
+  if ($targets.Count -gt 0 -and -not $RemoveAgents) {
+    # Beside this script's folder, or in the marketplace's clone when the script came through iex.
+    $agentsFile = ''
+    if ($Here) { $agentsFile = Join-Path (Split-Path $Here) 'AGENTS.md' }
+    if (-not $agentsFile -or -not (Test-Path -LiteralPath $agentsFile)) {
+      $agentsFile = $claude
+      foreach ($part in 'plugins', 'marketplaces', 'claude-progress-pane', 'AGENTS.md') { $agentsFile = Join-Path $agentsFile $part }
+    }
+    if (-not (Test-Path -LiteralPath $agentsFile)) { Write-Warning "AGENTS.md not found: $agentsFile"; return }
+    $source = [IO.File]::ReadAllText($agentsFile, $utf8)
+    $at = $source.IndexOf('## Report your progress to the progress pane')
+    if ($at -lt 0) { Write-Warning "AGENTS.md has no 'Report your progress' section: $agentsFile"; return }
+    $section = $start + "`n" + $source.Substring($at).Trim() + "`n" + $end
+  }
+  foreach ($name in $targets) {
+    $path = $agentFiles[$name].file
+    $old = ''
+    $agentBom = $false
+    if (Test-Path -LiteralPath $path) {
+      # Strict UTF-8, BOM noted: a file this cannot read back is left alone.
+      $raw = [IO.File]::ReadAllBytes($path)
+      $agentBom = $raw.Length -ge 3 -and $raw[0] -eq 0xEF -and $raw[1] -eq 0xBB -and $raw[2] -eq 0xBF
+      $skip = 0
+      if ($agentBom) { $skip = 3 }
+      try { $old = (New-Object System.Text.UTF8Encoding($false, $true)).GetString($raw, $skip, $raw.Length - $skip) }
+      catch { Write-Warning "$path is not UTF-8; left as it is."; continue }
+    }
+    $has = [regex]::IsMatch($old, '(?s)' + $inner)
+    $nl = "`n"
+    if ($old.Contains("`r`n")) { $nl = "`r`n" }
+    if ($RemoveAgents) {
+      if (-not $has) { continue }
+      $next = [regex]::Replace($old, '(?s)(\r?\n)*' + $inner + '(\r?\n)*', $nl + $nl).Trim()
+      if ($next) { $next += $nl }
+      $what = 'removed the progress-pane section from'
+    }
+    else {
+      $block = $section.Replace("`n", $nl)
+      if ($has) { $next = [regex]::Replace($old, '(?s)' + $inner, [Text.RegularExpressions.MatchEvaluator] { param($m) $block }) }
+      else { $next = ($old.TrimEnd() + $nl + $nl + $block).TrimStart() }
+      $next = $next.TrimEnd() + $nl
+      $what = 'wrote the progress-pane section to'
+    }
+    if ($next -cne $old) {
+      if (Test-Path -LiteralPath $path) { Copy-Item -LiteralPath $path "$path.bak" -Force }
+      else { New-Item -ItemType Directory -Force -Path (Split-Path $path) | Out-Null }
+      [IO.File]::WriteAllText($path, $next, (New-Object System.Text.UTF8Encoding $agentBom))
+      $done += "${name}: $what $path"
+    }
+  }
+  if (-not $Agents -and -not $RemoveAgents) {
+    $bare = @($found | Where-Object {
+        $file = $agentFiles[$_].file
+        -not (Test-Path -LiteralPath $file) -or -not ([IO.File]::ReadAllText($file)).Contains($start)
+      })
+    if ($bare.Count -gt 0) {
+      $done += (($bare -join ' and ') + ' installed here too: run this again with -Agents auto to show their work on the pane')
+    }
+  }
+
   if ($done.Count -eq 0) { Write-Host 'Settings: nothing to change.' }
   else { $done | ForEach-Object { Write-Host "- $_" } }
   $oldDir = Join-Path (Join-Path $claude 'mods') 'project-progress'
@@ -280,4 +390,5 @@ function Install-ProgressPane {
   Write-Host 'Desktop-app sessions keep their own task list; note their work in progress.md by hand.'
 }
 
-Install-ProgressPane -KeepRule:$KeepRule -NoInstall:$NoInstall -Here $PSScriptRoot -ProfilePath $ProfilePath
+Install-ProgressPane -KeepRule:$KeepRule -NoInstall:$NoInstall -Here $PSScriptRoot -ProfilePath $ProfilePath `
+  -Agents ($Agents -join ',') -RemoveAgents:$RemoveAgents
