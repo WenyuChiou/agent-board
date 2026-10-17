@@ -1,5 +1,50 @@
 # Changelog
 
+## 0.13.0 — 2026-10-17
+
+One contract for agents that are not hooked in: each writes its block as a
+fragment (a `## project` line and a FORMAT.md block), and one merge step puts
+it into `progress.md`.
+
+- **Agents on another machine can report.** A cloud VM or a chat assistant has
+  no hook and no shared folder, so it builds a fragment, any transport carries
+  it (git, a chat relay, a synced drive), and
+  `scripts/remote-reporter/merge.py` merges it: it reads the file the way the
+  pane does (code fences, comments, CRLF, `<!--auto` spellings), replaces only
+  that block or places a new one under its own project (refusing one without a
+  project), keeps the file's mode and line endings, writes atomically and reads
+  back. The reporter keeps its session registry in `~/.claude/remote-reporter/`,
+  never in the plugin folder. docs/REMOTE_REPORTERS.md covers transports, what
+  has no inward channel, and the risks. Stdlib Python; CI runs it on Ubuntu and
+  Windows. Checks: "8e new block without a project is refused", "9a block
+  inside a fence is never replaced", "10a CRLF board: block replaced, not
+  duplicated", "10b CRLF board keeps CRLF everywhere", "12a board keeps its
+  mode", "13a registry under $CLAUDE_CONFIG_DIR/remote-reporter".
+- **An opt-in local exchange for Codex and dot** (Node 22.18+ or 24):
+  explicit progress reports, session bindings, message claims and immutable
+  terminal receipts, with no hooks, user configuration, conversations or
+  credentials collected. `report` writes the same fragment, which reaches the
+  board only through the merge script, and refuses a file that holds anything
+  but its own block; a lock left by a crash is named rather than failing on a
+  missing file. Tests: "dot reports only explicit minimal fields and emits a
+  backward-compatible progress block", "report refuses to overwrite a
+  fragment.md that holds anything but its own block", "a report reaches a real
+  board through the remote reporter merge script, beside the blocks already
+  there", "one consumer claims a message and a restart never replays uncertain
+  delivery", "a lock left without its file gives LOCK_HELD naming the folder,
+  and status lists it", "a decision written before a crash wins over a stale
+  uncertain receipt and repairs it", "the CLI performs a synthetic dot round
+  trip without any external runtime".
+- **A host-supplied, verified Codex owner adapter** steers an expected active
+  turn with `turn/steer`. The owner is checked before a command is claimed, so
+  a thread that loads later still gets it, and a failure before sending is a
+  final `rejected`. Mock-tested only; no live Codex session was reached. Tests:
+  "a verified owner can steer only its loaded thread and the expected active
+  turn", "a thread that loads after the first attempt can still receive the
+  command", "a failure after the claim but before the steer request is a
+  terminal rejection", "lost acknowledgements stay uncertain and are never sent
+  a second time".
+
 ## 0.12.0 — 2026-10-17
 
 Hardening, from a security and robustness review.
