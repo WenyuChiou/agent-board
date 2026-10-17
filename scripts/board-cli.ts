@@ -1,15 +1,18 @@
 // The Agent Board for any terminal and any agent, without Claude Code: `node agent-board.mjs`
 // prints the board once, `--watch` keeps it on screen and, on a terminal, lets you work in it
 // the way the pane does (arrows, Enter, x, a, c, digits), and `--html` writes progress.html
-// and opens it. `/progress connect` writes the bundled copy of this file beside progress.md
-// (scripts/build-board.ts bundles it into hooks/board-script.ts), with the progress file
-// and language the Claude Code session uses set on its first line. `--keys "down x"` plays
-// keys without a terminal and prints the board after them, for tests and checks.
-import { execFile, spawnSync } from 'node:child_process'
+// and opens it. `--serve` prints the board and opens the board's page in the browser, where it
+// can be clicked (board-serve.ts). `/progress connect` writes the bundled copy of this file
+// beside progress.md (scripts/build-board.ts bundles it into hooks/board-script.ts), with the
+// progress file and language the Claude Code session uses set on its first line. `--keys
+// "down x"` plays keys without a terminal and prints the board after them, for tests and checks.
+import { spawn, spawnSync } from 'node:child_process'
 import { closeSync, openSync, readdirSync, readFileSync, readSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { basename, dirname, join } from 'node:path'
-import { takeTask, setManualStep } from '../hooks/blocks'
+import { mergeBlock, takeArchivable, takeManualDone, takeTask, setManualStep } from '../hooks/blocks'
+import type { PasteProblem } from '../hooks/blocks'
+import { startServer } from './board-serve'
 import { boardKey, boardScreen, boardText, emptyBoardState, peekInbox, boardItems, pinned } from '../hooks/board'
 import type { BoardAction, BoardState } from '../hooks/board'
 import { LOG_TAIL } from '../hooks/inbox'
@@ -131,6 +134,10 @@ const rewrite = (file: string, change: (text: string) => string | null): string 
   return null
 }
 
+// Windows looks in the current folder first for a program started by name, and an agent's folder
+// can be a cloned repository: the system's own tools go by their full path, from the board's folder.
+const system32 = (name: string): string => join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', name)
+
 const copy = (text: string): boolean => {
   // OSC 52 asks the terminal itself to set the clipboard, which works over SSH too; the
   // system's own tool is tried as well, since not every terminal honours it.
@@ -138,10 +145,26 @@ const copy = (text: string): boolean => {
   const isOsc = process.stdout.isTTY === true
   if (isOsc) process.stdout.write(`\u001b]52;c;${Buffer.from(text).toString('base64')}\u0007`)
   const tools: Array<[string, string[]]> =
-    process.platform === 'darwin' ? [['pbcopy', []]] : process.platform === 'win32' ? [['clip', []]] : [['wl-copy', []], ['xclip', ['-selection', 'clipboard']], ['xsel', ['-b', '-i']]]
+    process.platform === 'darwin' ? [['pbcopy', []]] : process.platform === 'win32' ? [[system32('clip.exe'), []]] : [['wl-copy', []], ['xclip', ['-selection', 'clipboard']], ['xsel', ['-b', '-i']]]
   // A clipboard tool that hangs (X forwarded over a slow link) must not freeze the board.
-  const isNative = tools.some(([tool, rest]) => spawnSync(tool, rest, { input: text, stdio: ['pipe', 'ignore', 'ignore'], timeout: 2000 }).status === 0)
+  const isNative = tools.some(([tool, rest]) => spawnSync(tool, rest, { cwd: dirname(path), input: text, stdio: ['pipe', 'ignore', 'ignore'], timeout: 2000 }).status === 0)
   return isNative || isOsc
+}
+
+// A file or a page's address in the browser. The page's address holds only letters, digits,
+// `:/?=._-`, so cmd's `start` reads it as one word.
+const openInBrowser = (target: string, done: (isOpen: boolean) => void): void => {
+  const opener = process.platform === 'win32' ? [system32('cmd.exe'), ['/c', 'start', '', target]] : process.platform === 'darwin' ? ['open', [target]] : ['xdg-open', [target]]
+  // Not waited on: with no desktop, xdg-open can run a text browser that never returns, and the
+  // agent's command would wait with it.
+  try {
+    const child = spawn(opener[0] as string, opener[1] as string[], { cwd: dirname(path), detached: true, stdio: 'ignore', windowsHide: true })
+    child.once('error', () => done(false))
+    child.once('spawn', () => done(true))
+    child.unref()
+  } catch {
+    done(false)
+  }
 }
 
 const openHtml = (done: (note: string) => void): void => {
@@ -149,8 +172,30 @@ const openHtml = (done: (note: string) => void): void => {
   const stamp = s.dashStamp(`${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())} ${pad(now.getHours())}:${pad(now.getMinutes())}`)
   const html = path.replace(/\.md$/i, '') + '.html'
   writeFileSync(html, dashboardHtml(view(), s, path, stamp))
-  const opener = process.platform === 'win32' ? ['cmd', ['/c', 'start', '', html]] : process.platform === 'darwin' ? ['open', [html]] : ['xdg-open', [html]]
-  execFile(opener[0] as string, opener[1] as string[], error => done(error ? s.windowFailed(html) : s.windowOpened(html)))
+  openInBrowser(html, isOpen => done(isOpen ? s.windowOpened(html) : s.windowFailed(html)))
+}
+
+const DAY = 24 * 60 * 60 * 1000
+
+// Into the archive first, then out of the file, as the pane does: a crash between the two
+// leaves the work in both, never in neither. An entry already archived by an earlier try
+// (another session wrote meanwhile) is not archived twice. How many entries went, or null
+// when a file could not be written.
+const archiveOut = (take: (text: string) => { text: string; entries: string[] } | null, now: number): number | null => {
+  const archived = new Set<string>()
+  const wrote = rewrite(path, text => {
+    const taken = take(text)
+    if (taken === null) return text
+    const fresh = taken.entries.filter(entry => !archived.has(entry))
+    if (fresh.length > 0) {
+      const kept = rewrite(archivePath(path, now), past => `${past.trim() === '' ? `${s.archiveTitle}\n\n` : past.replace(/\s*$/, '\n\n')}${fresh.join('\n\n')}\n`)
+      if (kept === null) return null
+      for (const entry of fresh) archived.add(entry)
+    }
+    return taken.text
+  })
+
+  return wrote === null ? null : archived.size
 }
 
 // What a key's action does to the files, and the line the board shows after it.
@@ -174,27 +219,28 @@ const act = (action: BoardAction): string => {
     return s.boardTicked(action.ref.step)
   }
   if (action.type === 'archive') {
-    // Into the archive first, then out of the file, as the pane does: a crash between the two
-    // leaves the block in both, never in neither. An entry already archived by an earlier
-    // try (another session wrote meanwhile) is not archived twice.
-    const archived = new Set<string>()
-    const wrote = rewrite(path, text => {
-      const taken = takeTask(text, action.ref, now, s)
-      if (taken === null) return text
-      const fresh = taken.entries.filter(entry => !archived.has(entry))
-      if (fresh.length > 0) {
-        const kept = rewrite(archivePath(path, now), past => `${past.trim() === '' ? `${s.archiveTitle}\n\n` : past.replace(/\s*$/, '\n\n')}${fresh.join('\n\n')}\n`)
-        if (kept === null) return null
-        for (const entry of fresh) archived.add(entry)
-      }
-      return taken.text
-    })
-    if (wrote === null) return s.boardWriteFailed
-    if (archived.size === 0) return s.archiveGone
+    const count = archiveOut(text => takeTask(text, action.ref, now, s), now)
+    if (count === null) return s.boardWriteFailed
+    if (count === 0) return s.archiveGone
     return s.archivedOne(action.title)
   }
 
   return ''
+}
+
+// Every finished task out now, the way `/progress tidy` and the pane's 現在封存 do it: done
+// blocks and finished hand-kept tasks at once, a stopped session's block after its three days.
+const tidy = (): string => {
+  const now = Date.now()
+  const count = archiveOut(text => {
+    const blocks = takeArchivable(text, now, undefined, s, true)
+    // Asked for now, a finished hand-kept task counts as seen done a day ago.
+    const manual = takeManualDone(blocks.text, now, () => now - DAY, s)
+    const entries = [...blocks.entries, ...manual.entries]
+    return entries.length === 0 ? null : { text: manual.text, entries }
+  }, now)
+  if (count === null) return s.boardWriteFailed
+  return count === 0 ? s.tidyNothing : s.tidyMoved(count)
 }
 
 // Keys as the terminal sends them, named the way boardKey reads them. One read can hold more
@@ -220,7 +266,158 @@ const screen = (state: BoardState): string => boardScreen(view(), pending(), sta
 // What the screen shows is what the next key acts on.
 const pin = (state: BoardState): BoardState => pinned(state, boardItems(view(), pending()))
 
-if (args.includes('--html')) {
+// A block pasted into the page from a web chat, merged the way the remote reporter's merge
+// does: read, change only that block, write, read back.
+const paste = (text: string): { isAdded: boolean; note: string } => {
+  const found: { problem: PasteProblem | null; title: string } = { problem: null, title: '' }
+  const wrote = rewrite(path, before => {
+    const merged = mergeBlock(before, text, Date.now(), s)
+    if ('problem' in merged) {
+      found.problem = merged.problem
+      return null
+    }
+    found.problem = null
+    found.title = merged.title
+    return merged.text
+  })
+  if (found.problem !== null) {
+    const why = { noBlock: s.pasteNoBlock, mixed: s.pasteMixed, badBlock: s.pasteBadBlock, noProject: s.pasteNoProject, notYours: s.pasteNotYours }[found.problem]
+    return { isAdded: false, note: s.servePasteRefused(why) }
+  }
+  if (wrote === null) return { isAdded: false, note: s.boardWriteFailed }
+  return { isAdded: true, note: s.servePasted(found.title) }
+}
+
+// Where a running page leaves its address, beside progress.md, so the next `--serve` opens
+// that page instead of a second one. `built` is when this script was written: a page started
+// by an older copy (before an update) is closed and started again.
+const serveFile = `${path.replace(/\.md$/i, '')}-serve.json`
+const script = process.argv[1] ?? ''
+const built = (() => {
+  try {
+    return String(statSync(script).mtimeMs)
+  } catch {
+    return ''
+  }
+})()
+
+type Running = { pid: number; port: number; url: string; path: string; built: string }
+
+const readRunning = (): Running | null => {
+  try {
+    const found = JSON.parse(read(serveFile)) as Partial<Running>
+    return typeof found.pid === 'number' && typeof found.port === 'number' && typeof found.url === 'string'
+      ? { pid: found.pid, port: found.port, url: found.url, path: String(found.path ?? ''), built: String(found.built ?? '') }
+      : null
+  } catch {
+    return null
+  }
+}
+
+const tokenOf = (url: string): string => new URL(url).searchParams.get('t') ?? ''
+
+// The running page's own answer, or null when nothing answers at its address.
+const ping = async (running: Running): Promise<Record<string, unknown> | null> => {
+  try {
+    const res = await fetch(`http://127.0.0.1:${running.port}/api/ping`, { headers: { 'x-board-token': tokenOf(running.url) }, signal: AbortSignal.timeout(1500) })
+    return res.ok ? ((await res.json()) as Record<string, unknown>) : null
+  } catch {
+    return null
+  }
+}
+
+const serveChild = (): void => {
+  startServer({
+    s,
+    port: Number(flag('--port') ?? 0) || 0,
+    ping: { path, built },
+    view,
+    pending,
+    act,
+    tidy,
+    paste,
+    idleMs: 30 * 60 * 1000,
+    onReady: (url, port) => {
+      // Without its address file no later `--serve` finds this page, and each would start one
+      // more; so it does not start at all.
+      try {
+        writeFileSync(serveFile, JSON.stringify({ pid: process.pid, port, url, path, built }), { mode: 0o600 })
+      } catch {
+        return false
+      }
+      // The one line `--serve` waits for. Its pipe closes once it has read it.
+      process.stdout.on('error', () => undefined)
+      process.stdout.write(`${url}\n`)
+      return true
+    },
+    onStop: () => {
+      // The file goes only while it is still this server's: a newer one may have taken it over.
+      if (readRunning()?.pid === process.pid) {
+        try {
+          unlinkSync(serveFile)
+        } catch {}
+      }
+      process.exit(0)
+    },
+  })
+}
+
+// Prints the board, then the address of its page, started in the background if no page of this
+// copy is running yet (and opened in the browser then, unless --no-open). It returns at once, so
+// an agent's command tool is not left waiting on the server.
+const serveBoard = async (): Promise<void> => {
+  process.stdout.write(boardText(view(), pending(), s, options()))
+  const show = async (url: string): Promise<void> => {
+    process.stdout.write(`\n${s.serveAt(url)}\n`)
+    // The address can come from progress-serve.json and goes to a shell on Windows: only the
+    // shape this server writes is opened.
+    if (!args.includes('--no-open') && /^http:\/\/127\.0\.0\.1:\d+\/\?t=[\w-]+$/.test(url)) await new Promise<void>(done => openInBrowser(url, () => done()))
+  }
+  const running = readRunning()
+  const answer = running === null ? null : await ping(running)
+  if (running !== null && answer !== null && answer.path === path && answer.built === built) return show(running.url)
+  // A page from an older copy of this script is closed (it refuses while a reply is on its way,
+  // and then stops by itself once idle).
+  if (running !== null && answer !== null) {
+    await fetch(`http://127.0.0.1:${running.port}/api/close`, { method: 'POST', headers: { 'x-board-token': tokenOf(running.url), 'content-type': 'application/json' }, body: '{}', signal: AbortSignal.timeout(1500) }).catch(() => undefined)
+  }
+  const rest = ['--lang', '--port'].flatMap(name => {
+    const value = flag(name)
+    return value === undefined ? [] : [name, value]
+  })
+  // In the board's own folder, not the agent's, so the server holds no project folder open.
+  const child = spawn(process.execPath, [script, '--serve-child', ...rest], { cwd: dirname(path), detached: true, stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true })
+  // The child prints its address once it listens; it exits at once when it cannot.
+  const url = await new Promise<string | null>(done => {
+    let out = ''
+    const timer = setTimeout(() => done(null), 10_000)
+    const end = (value: string | null): void => {
+      clearTimeout(timer)
+      done(value)
+    }
+    child.stdout?.on('data', (chunk: Buffer) => {
+      out += chunk.toString('utf8')
+      if (out.includes('\n')) end(out.split('\n')[0]?.trim() || null)
+    })
+    child.once('exit', () => end(null))
+    child.once('error', () => end(null))
+  })
+  // One that has not answered in time would start late and hold a page nobody was told about.
+  if (url === null && child.exitCode === null) child.kill()
+  child.stdout?.destroy()
+  child.unref()
+  if (url === null) {
+    process.stdout.write(`\n${s.serveFailed(s.serveOffline)}\n`)
+    return
+  }
+  await show(url)
+}
+
+if (args.includes('--serve-child')) {
+  serveChild()
+} else if (args.includes('--serve')) {
+  await serveBoard()
+} else if (args.includes('--html')) {
   openHtml(note => process.stdout.write(`${note}\n`))
 } else if (flag('--keys') !== undefined) {
   let state = emptyBoardState

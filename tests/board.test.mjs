@@ -1,7 +1,8 @@
 // The board script `/progress connect` writes, run the way every other agent runs it: plain
 // Node, no Claude Code. Needs Node 22.18+ or 24 (it reads hooks/board-script.ts directly).
-import { execFileSync } from 'node:child_process'
-import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { execFileSync, spawn } from 'node:child_process'
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { request } from 'node:http'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
@@ -131,6 +132,221 @@ syncBuiltinESMExports()
     assert.equal(kept.split('### Fix the broken links').length - 1, 1, kept)
     assert.ok(!readdirSync(dir).some(name => name.endsWith('.board-tmp')))
   } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+// The page's server, started the way `--serve` starts it in the background, on a synthetic
+// progress.md: a closed Grok session with a question, a hand-kept task one step from done and
+// a finished Gemini block. AGENT_BOARD_GROK stands in for Grok Build.
+const GROK_ID = '01a14a94-0dee-7543-8208-991a4266a1da'
+
+const page = async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'board-serve-'))
+  const work = join(dir, 'api-gateway')
+  mkdirSync(work)
+  const path = join(dir, 'progress.md')
+  const recent = new Date(Date.now() - 10 * 60 * 1000).toISOString().replace(/\.\d{3}Z$/, 'Z')
+  writeFileSync(path, `# Progress
+
+## api-gateway
+<!-- auto session=b2c3d4e5 agent=grok state=ended updated=${recent} resume=${GROK_ID} dir=${encodeURIComponent(work)} -->
+### Pick the cache
+- [x] Measured both
+- [?] Redis or Memcached?
+<!-- /auto session=b2c3d4e5 -->
+
+## Job search
+### Fabrikam fellowship
+- [x] Draft the statement
+- [ ] Ask two referees
+
+## docs-site
+<!-- auto session=c3d4e5f6 agent=gemini state=done updated=${recent} -->
+### Fix the broken links
+- [x] Fix them
+<!-- /auto session=c3d4e5f6 -->
+`)
+  const stand = join(dir, 'grok-stand-in.mjs')
+  // Writes down how it was run, then answers after a second, so a second send meets the first.
+  writeFileSync(stand, `import { writeFileSync } from 'node:fs'
+writeFileSync(${JSON.stringify(join(dir, 'grok-ran.json'))}, JSON.stringify({ args: process.argv.slice(2), cwd: process.cwd() }))
+setTimeout(() => process.stdout.write('Redis it is; wiring it up now.\\n'), 1000)
+`)
+  const script = join(dir, 'agent-board.mjs')
+  writeFileSync(script, `globalThis.AGENT_BOARD = ${JSON.stringify({ path, lang: 'en' })}\n${BOARD_SCRIPT}`)
+  const child = spawn(process.execPath, [script, '--serve-child'], {
+    env: { ...process.env, CLAUDE_PROGRESS_FILE: '', NO_COLOR: '1', AGENT_BOARD_GROK: stand },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  })
+  const exited = new Promise(done => child.once('exit', code => done(code)))
+  const url = await new Promise((done, fail) => {
+    let out = ''
+    child.stdout.setEncoding('utf8')
+    child.stdout.on('data', chunk => {
+      out += chunk
+      if (out.includes('\n')) done(new URL(out.split('\n')[0].trim()))
+    })
+    exited.then(code => fail(new Error(`the server exited with ${code}`)))
+  })
+  const port = Number(url.port)
+  const token = url.searchParams.get('t')
+  const call = (method, target, { body, headers = {} } = {}) =>
+    new Promise((done, fail) => {
+      const sent = { host: `127.0.0.1:${port}`, 'x-board-token': token, ...(body === undefined ? {} : { 'content-type': 'application/json' }), ...headers }
+      const req = request({ host: '127.0.0.1', port, method, path: target, headers: sent }, res => {
+        let data = ''
+        res.setEncoding('utf8')
+        res.on('data', chunk => (data += chunk))
+        res.on('end', () => done({ status: res.statusCode, headers: res.headers, body: data, json: () => JSON.parse(data) }))
+      })
+      req.on('error', fail)
+      req.end(body === undefined ? undefined : JSON.stringify(body))
+    })
+  const rows = async () => (await call('GET', '/api/board')).json().model.groups.flatMap(group => group.rows)
+  const keyOf = async title => (await rows()).find(row => row.title === title)?.key
+  const close = async () => {
+    if (child.exitCode === null) await call('POST', '/api/close', { body: {} }).catch(() => undefined)
+    const code = await Promise.race([exited, new Promise(done => setTimeout(() => done('still running'), 5000))])
+    if (code === 'still running') child.kill()
+    rmSync(dir, { recursive: true, force: true })
+    return code
+  }
+  return { dir, path, url, port, token, call, rows, keyOf, close, exited }
+}
+
+test('the page answers only with its token and its own host, and closing it stops the server', { timeout: 30_000 }, async () => {
+  const board = await page()
+  try {
+    const { port, token, call } = board
+    const home = await call('GET', `/?t=${token}`, { headers: { 'x-board-token': '' } })
+    assert.equal(home.status, 200)
+    assert.match(String(home.headers['content-security-policy']), /script-src 'nonce-[^']+'/)
+    assert.equal(home.headers['referrer-policy'], 'no-referrer')
+    // The chat prompt it offers to copy is the one docs/REMOTE_REPORTERS.md gives, word for word.
+    const words = JSON.parse(home.body.match(/<script type="application\/json" id="words">([\s\S]*?)<\/script>/)[1])
+    const doc = readFileSync(new URL('../docs/REMOTE_REPORTERS.md', import.meta.url), 'utf8').replace(/\r\n/g, '\n')
+    assert.equal(words.relayPrompt, doc.split('### Chat relay: a prompt to paste')[1].split('```text\n')[1].split('\n```')[0])
+    assert.equal((await call('GET', '/?t=wrong', { headers: { 'x-board-token': '' } })).status, 403)
+    assert.equal((await call('GET', '/api/board', { headers: { 'x-board-token': 'wrong' } })).status, 403)
+    assert.equal((await call('GET', '/api/board', { headers: { host: `rebind.example:${port}` } })).status, 421)
+    assert.equal((await call('POST', '/api/tidy', { body: {}, headers: { origin: 'https://evil.example' } })).status, 403)
+    assert.equal((await call('POST', '/api/tidy', { body: {}, headers: { 'content-type': 'text/plain' } })).status, 415)
+    assert.equal((await call('GET', '/api/board')).status, 200)
+    assert.ok(existsSync(join(board.dir, 'progress-serve.json')))
+    assert.equal((await call('POST', '/api/close', { body: {} })).status, 200)
+    assert.equal(await board.exited, 0)
+    assert.ok(!existsSync(join(board.dir, 'progress-serve.json')))
+  } finally {
+    await board.close()
+  }
+})
+
+test('ticking and tidying from the page write progress.md the way the pane does, and a pasted block is merged into it', { timeout: 30_000 }, async () => {
+  const board = await page()
+  try {
+    const { path, call, keyOf } = board
+    // The page sends the step it showed; once that step is done, the next one is not ticked in its place.
+    const fabrikam = await keyOf('Fabrikam fellowship')
+    assert.equal((await call('POST', '/api/act', { body: { key: fabrikam, type: 'tick', text: 'Draft the statement' } })).status, 409)
+    const ticked = await call('POST', '/api/act', { body: { key: fabrikam, type: 'tick', text: 'Ask two referees' } })
+    assert.equal(ticked.status, 200, ticked.body)
+    assert.equal(ticked.json().note, 'Done: “Ask two referees”.')
+    assert.ok(readFileSync(path, 'utf8').includes('- [x] Ask two referees'))
+    const journal = readdirSync(board.dir).find(name => name.includes('-journal-'))
+    assert.ok(journal && readFileSync(join(board.dir, journal), 'utf8').includes('Job search · Fabrikam fellowship · Ask two referees'))
+    // A line that is gone since the page drew it is refused, not taken for another.
+    assert.equal((await call('POST', '/api/act', { body: { key: 'row:gone', type: 'tick' } })).status, 409)
+    const tidied = await call('POST', '/api/tidy', { body: {} })
+    assert.equal(tidied.status, 200, tidied.body)
+    const left = readFileSync(path, 'utf8')
+    assert.ok(!left.includes('c3d4e5f6') && !left.includes('Fabrikam fellowship'), left)
+    // The closed Grok session still has its three days.
+    assert.ok(left.includes('session=b2c3d4e5'))
+    const archive = readdirSync(board.dir).find(name => name.includes('-archive-'))
+    const kept = archive ? readFileSync(join(board.dir, archive), 'utf8') : ''
+    assert.ok(kept.includes('### Fix the broken links') && kept.includes('### Fabrikam fellowship'), kept)
+    // What a chat prints, fence and all, is merged under its project.
+    const block = '## launch\n<!-- auto session=c0ffee12 agent=muse state=waiting updated=2020-01-01T00:00:00Z -->\n### Draft the launch post\n- [x] Outline\n- [?] Ship it Friday, OK?\n<!-- /auto session=c0ffee12 -->'
+    const pasted = await call('POST', '/api/paste', { body: { text: `Here it is:\n\`\`\`\n${block}\n\`\`\`\n` } })
+    assert.equal(pasted.status, 200, pasted.body)
+    assert.ok(readFileSync(path, 'utf8').includes('## launch\n\n<!-- auto session=c0ffee12 agent=muse state=waiting updated='))
+    assert.ok(!readFileSync(path, 'utf8').includes('updated=2020-01-01'))
+    const refused = await call('POST', '/api/paste', { body: { text: block.replaceAll('c0ffee12', 'b2c3d4e5') } })
+    assert.equal(refused.status, 409)
+    assert.ok(readFileSync(path, 'utf8').includes(`resume=${GROK_ID}`))
+  } finally {
+    await board.close()
+  }
+})
+
+test('a reply goes into a closed Grok session once, in its own folder, and the page waits for its answer before it closes', { timeout: 30_000 }, async () => {
+  const board = await page()
+  try {
+    const { call, keyOf, rows } = board
+    const key = await keyOf('Pick the cache')
+    assert.equal((await rows()).find(row => row.key === key)?.send, 'send')
+    // A page drawn when another session held that line does not send into this one.
+    const stale = await call('POST', '/api/act', { body: { key, type: 'send', text: 'Redis', session: 'c0ffee12' } })
+    assert.equal(stale.status, 409)
+    assert.ok(!existsSync(join(board.dir, 'grok-ran.json')))
+    // The send is taken at once; the answer comes later, with the board.
+    const first = await call('POST', '/api/act', { body: { key, type: 'send', text: 'Redis', session: 'b2c3d4e5' } })
+    assert.equal(first.status, 202, first.body)
+    assert.equal(first.json().note, 'Sent to grok · Pick the cache; its reply shows here when it comes (it can take a few minutes).')
+    assert.equal((await rows()).find(row => row.key === key)?.isSending, true)
+    const second = await call('POST', '/api/act', { body: { key, type: 'send', text: 'Memcached', session: 'b2c3d4e5' } })
+    assert.equal(second.status, 409)
+    assert.equal(second.json().note, 'Another message is on its way to this grok session; send again once it replies.')
+    // Closing now would cut the agent off halfway.
+    const busy = await call('POST', '/api/close', { body: {} })
+    assert.equal(busy.status, 409)
+    assert.equal(busy.json().note, 'A message is still on its way to an agent; close the board once it replies.')
+    let replies = []
+    for (let tries = 0; replies.length === 0 && tries < 50; tries++) {
+      await new Promise(done => setTimeout(done, 200))
+      replies = (await call('GET', '/api/board')).json().replies
+    }
+    assert.equal(replies.length, 1, JSON.stringify(replies))
+    assert.equal(replies[0].ok, true)
+    assert.equal(replies[0].note, 'Sent to grok · Pick the cache. It replied: Redis it is; wiring it up now.')
+    assert.equal((await rows()).find(row => row.key === key)?.isSending, false)
+    const ran = JSON.parse(readFileSync(join(board.dir, 'grok-ran.json'), 'utf8'))
+    assert.deepEqual(ran.args, ['-r', GROK_ID, '--single=About "Redis or Memcached?": Redis'])
+    assert.equal(ran.cwd.toLowerCase(), join(board.dir, 'api-gateway').toLowerCase())
+  } finally {
+    await board.close()
+  }
+})
+
+test('--serve starts the page in the background once, and the next --serve brings back the same page', { timeout: 40_000 }, async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'board-serve-'))
+  const path = join(dir, 'progress.md')
+  writeFileSync(path, FILE)
+  const script = join(dir, 'agent-board.mjs')
+  writeFileSync(script, `globalThis.AGENT_BOARD = ${JSON.stringify({ path, lang: 'en' })}\n${BOARD_SCRIPT}`)
+  const serve = () => execFileSync(process.execPath, [script, '--serve', '--no-open'], { env: { ...process.env, CLAUDE_PROGRESS_FILE: '', NO_COLOR: '1' }, encoding: 'utf8', timeout: 20_000 })
+  const served = join(dir, 'progress-serve.json')
+  let url = null
+  try {
+    const first = serve()
+    assert.ok(first.startsWith('Progress  ● 1 waiting'), first)
+    url = first.match(/answer\): (http:\/\/127\.0\.0\.1:\d+\/\?t=[\w-]+)/)?.[1] ?? null
+    assert.ok(url, first)
+    assert.equal(JSON.parse(readFileSync(served, 'utf8')).url, url)
+    const again = serve()
+    assert.ok(again.includes(url), again)
+  } finally {
+    if (url !== null) {
+      const { port, searchParams } = new URL(url)
+      await new Promise(done => {
+        const req = request({ host: '127.0.0.1', port, method: 'POST', path: '/api/close', headers: { host: `127.0.0.1:${port}`, 'x-board-token': searchParams.get('t'), 'content-type': 'application/json' } }, res => res.resume().on('end', done))
+        req.on('error', done)
+        req.end('{}')
+      })
+      for (let tries = 0; existsSync(served) && tries < 50; tries++) await new Promise(done => setTimeout(done, 100))
+      assert.ok(!existsSync(served))
+    }
     rmSync(dir, { recursive: true, force: true })
   }
 })

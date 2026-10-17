@@ -1636,7 +1636,7 @@ test('connecting writes the board script and each installed agent’s board comm
   await $.session.start({ cwd: '/work/persona_framework', surface: 'terminal', isInteractive: true })
   const board = world.files.get('/home/me/.claude/agent-board.mjs') ?? ''
   expect(board.split('\n')[0]).toBe('globalThis.AGENT_BOARD = {"path":"/home/me/.claude/progress.md","lang":"zh-TW"}')
-  expect(world.files.get('/home/me/.gemini/commands/board.toml')).toContain('!{node "/home/me/.claude/agent-board.mjs"}')
+  expect(world.files.get('/home/me/.gemini/commands/board.toml')).toContain('!{node "/home/me/.claude/agent-board.mjs" --serve}')
   expect(world.files.get('/home/me/.agents/skills/agent-board/SKILL.md')).toContain('node "/home/me/.claude/agent-board.mjs"')
   expect(world.files.has('/home/me/.config/opencode/commands/board.md')).toBe(false)
 

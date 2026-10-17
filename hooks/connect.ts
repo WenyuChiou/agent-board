@@ -647,7 +647,7 @@ export const boardScript = (path: string, lang: string): string => `globalThis.A
 // one they are in. Gemini CLI and OpenCode paste a command's output into the prompt before
 // the model reads it; the others read skills, whose model runs the command. Most of them
 // read ~/.agents/skills, so one skill there reaches Codex, Cursor, Grok Build, OpenClaw,
-// Gemini CLI and OpenCode; Hermes Agent and Antigravity keep their own folder.
+// Gemini CLI, OpenCode and Muse Code; Hermes Agent and Antigravity keep their own folder.
 const SKILL = 'agent-board'
 
 export const boardCommands = (ctx: ConnectContext): AgentHook[] => {
@@ -661,15 +661,15 @@ export const boardCommands = (ctx: ConnectContext): AgentHook[] => {
   // JSON is YAML too, so a description with a colon in it stays one value.
   const description = JSON.stringify(s.boardCommandDescription)
   const skill = `---\nname: ${SKILL}\ndescription: ${description}\n---\n\n${s.boardSkillPrompt(run)}\n`
-  const gemini = `# Written by the Agent Board plugin (/progress connect).\ndescription = ${description}\nprompt = '''${s.boardCommandPrompt}\n\n!{${run}}\n'''\n`
-  const opencode = `---\ndescription: ${description}\n---\n\n${s.boardCommandPrompt}\n\n!\`${run}\`\n`
+  const gemini = `# Written by the Agent Board plugin (/progress connect).\ndescription = ${description}\nprompt = '''${s.boardCommandPrompt}\n\n!{${run} --serve}\n'''\n`
+  const opencode = `---\ndescription: ${description}\n---\n\n${s.boardCommandPrompt}\n\n!\`${run} --serve\`\n`
 
   return [
     {
       agent: 'skills',
       label: '',
       dir: ctx.codexHome,
-      dirs: [ctx.codexHome, join(ctx, '.cursor'), ...grokSigns(ctx), ctx.openclawHome, join(ctx, '.gemini'), join(ctx, '.config', 'opencode')],
+      dirs: [ctx.codexHome, join(ctx, '.cursor'), ...grokSigns(ctx), ctx.openclawHome, join(ctx, '.gemini'), join(ctx, '.config', 'opencode'), join(ctx, '.config', 'muse')],
       file: join(ctx, '.agents', 'skills', SKILL, 'SKILL.md'),
       edit: file(skill),
     },

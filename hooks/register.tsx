@@ -649,7 +649,7 @@ const takeAgentTurns = async ($: EngineInterface, turns: readonly AgentTurn[], i
   const seen = JSON.stringify(stored ?? null)
   const fresh = emptyMirror(last.id, last.project || (await wordsOf($)).uncategorized, at, last.cwd, last.agent)
   const firstPrompt = promptKey(stored?.firstPrompt || turns.find(one => one.prompt !== '')?.prompt || '')
-  let mirror: ProgressMirror = { ...fresh, ...stored, firstPrompt, lastAnswer: answerKey(stored?.lastAnswer ?? '') }
+  let mirror: ProgressMirror = { ...fresh, ...stored, firstPrompt, lastAnswer: answerKey(stored?.lastAnswer ?? ''), resume: last.session }
   const digested = turnsToDigest(turns)
   for (const [index, turn] of turns.entries()) {
     if (turn.event !== 'turn') continue

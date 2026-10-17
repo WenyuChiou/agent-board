@@ -25,12 +25,12 @@ const esc = (text: string): string =>
   text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;')
 
 // Each colour role as a CSS variable, light by default and dark under the system's choice.
-const vars = (palette: Palette): string =>
+export const vars = (palette: Palette): string =>
   Object.entries(palette)
     .map(([key, value]) => `--${key}:${value}`)
     .join(';')
 
-const htmlLang = (s: Strings): string => (s.lang === 'en' ? 'en' : s.lang === 'zh-CN' ? 'zh-Hans' : 'zh-Hant')
+export const htmlLang = (s: Strings): string => (s.lang === 'en' ? 'en' : s.lang === 'zh-CN' ? 'zh-Hans' : 'zh-Hant')
 
 const steps = (list: readonly ViewStep[]): string =>
   `<ol class="steps">${list

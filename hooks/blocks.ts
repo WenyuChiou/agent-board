@@ -4,7 +4,7 @@ import { ZH_TW } from './i18n'
 import type { Strings } from './i18n'
 import { localDay } from './journal'
 import { fallbackTitle } from './mirror'
-import { AUTO_END, AUTO_START, autoOf, doneKey, isTaskComplete, parseAttrs, parseProgress, projectHead, readable } from './parse'
+import { AUTO_END, AUTO_START, autoOf, doneKey, isTaskComplete, parseAttrs, parseProgress, projectHead, readable, RESUME } from './parse'
 import type { QuickEntry } from './quick'
 import type { StepRef, TaskRef } from './view'
 
@@ -46,7 +46,8 @@ const markerOf = (mirror: ProgressMirror): string => {
     `agent=${mirror.agent || 'claude'}`,
     `state=${mirror.state}`,
     `updated=${new Date(mirror.updated).toISOString()}`,
-    mirror.sessionId.length > 8 ? `resume=${mirror.sessionId}` : '',
+    // Another agent's block carries that agent's own session id, for a reply from the board's page.
+    mirror.resume !== undefined && RESUME.test(mirror.resume) ? `resume=${mirror.resume}` : mirror.sessionId.length > 8 ? `resume=${mirror.sessionId}` : '',
     mirror.cwd ? `dir=${encodeURIComponent(mirror.cwd)}` : '',
     pr === null ? '' : `pr=${pr.number} ci=${pr.ci}`,
     mirror.source === 'turns' ? 'source=turns' : '',
@@ -174,6 +175,28 @@ const sectionRange = (raws: readonly string[], project: string): { heading: numb
   return { heading, end: next < 0 ? lines.length : next }
 }
 
+// New lines (a block, a hand-kept task) at the end of their project's section, below whatever
+// is there; the section is made at the end of the file when missing.
+const placeUnder = (lines: string[], project: string, added: readonly string[], eol: string, s: Strings): string => {
+  if (lines.every(line => line.trim() === '')) {
+    return [s.fileTitle, '', `## ${project}`, '', ...added].join(eol) + eol
+  }
+
+  const section = sectionRange(lines, project)
+  if (section === null) {
+    while (lines.length > 0 && lines[lines.length - 1]?.trim() === '') lines.pop()
+
+    return [...lines, '', `## ${project}`, '', ...added].join(eol) + eol
+  }
+
+  let at = section.end
+  while (at > section.heading + 1 && lines[at - 1]?.trim() === '') at -= 1
+  const isLast = section.end >= lines.length
+  lines.splice(at, section.end - at, '', ...added, ...(isLast ? [] : ['']))
+
+  return lines.join(eol) + eol
+}
+
 export const upsertAutoBlock = (text: string, mirror: ProgressMirror, s: Strings = ZH_TW): string => {
   const eol = eolOf(text)
   const lines = linesOf(text)
@@ -187,23 +210,7 @@ export const upsertAutoBlock = (text: string, mirror: ProgressMirror, s: Strings
     return lines.join(eol) + eol
   }
 
-  if (lines.every(line => line.trim() === '')) {
-    return [s.fileTitle, '', `## ${mirror.project}`, '', ...block].join(eol) + eol
-  }
-
-  const section = sectionRange(lines, mirror.project)
-  if (section === null) {
-    while (lines.length > 0 && lines[lines.length - 1]?.trim() === '') lines.pop()
-
-    return [...lines, '', `## ${mirror.project}`, '', ...block].join(eol) + eol
-  }
-
-  let at = section.end
-  while (at > section.heading + 1 && lines[at - 1]?.trim() === '') at -= 1
-  const isLast = section.end >= lines.length
-  lines.splice(at, section.end - at, '', ...block, ...(isLast ? [] : ['']))
-
-  return lines.join(eol) + eol
+  return placeUnder(lines, mirror.project, block, eol, s)
 }
 
 // Drops `##` sections left with nothing in them, only among `touched` (the projects whose
@@ -362,21 +369,8 @@ export const addManualTask = (text: string, entry: QuickEntry, s: Strings = ZH_T
     ...(entry.due === null ? [] : [s.dueNote(entry.due)]),
     ...entry.steps.map(step => `- [ ] ${oneLine(step)}`),
   ]
-  if (lines.every(line => line.trim() === '')) {
-    return [s.fileTitle, '', `## ${entry.project}`, '', ...task].join(eol) + eol
-  }
-  const section = sectionRange(lines, entry.project)
-  if (section === null) {
-    while (lines.length > 0 && lines[lines.length - 1]?.trim() === '') lines.pop()
 
-    return [...lines, '', `## ${entry.project}`, '', ...task].join(eol) + eol
-  }
-  let at = section.end
-  while (at > section.heading + 1 && lines[at - 1]?.trim() === '') at -= 1
-  const isLast = section.end >= lines.length
-  lines.splice(at, section.end - at, '', ...task, ...(isLast ? [] : ['']))
-
-  return lines.join(eol) + eol
+  return placeUnder(lines, entry.project, task, eol, s)
 }
 
 // How many tasks in the file carry the heading a quick add of `entry` writes: one more than
@@ -405,4 +399,63 @@ export const setManualStep = (text: string, ref: StepRef, mark: string): string 
   lines[at] = line.replace(STEP, (_all, lead: string, _mark: string, close: string, rest: string) => `${lead}${mark}${close}${rest}`)
 
   return lines.join(eol) + eol
+}
+
+// A block pasted into the board's page from a web chat (Muse, dot): the chat-relay prompt's
+// block, checked the way scripts/remote-reporter/validate.py checks a fragment, then put in
+// place of the earlier block with its id, or under its `## project` when new. It never takes
+// the place of a Claude block, another agent's block or one whose end marker is missing. A
+// chat does not know the time, so `updated=` becomes the moment it was pasted.
+export type PasteProblem = 'noBlock' | 'mixed' | 'badBlock' | 'noProject' | 'notYours'
+
+const HEX8 = /^[0-9a-f]{8}$/
+const AGENT_NAME = /^[a-z0-9][a-z0-9_.-]{0,31}$/
+const FENCE = /^\s*(?:```|~~~)/
+
+// Each of these would end the block early, or hide its end marker from the parser.
+const isHiding = (line: string): boolean => FENCE.test(line) || line.includes('<!--') || line.includes('-->') || /^#{1,2}\s/.test(line)
+
+const startAttrs = (line: string | undefined): string => AUTO_START.exec(line ?? '')?.[1] ?? ''
+
+export const mergeBlock = (text: string, pasted: string, now: number, s: Strings = ZH_TW): { text: string; title: string } | { problem: PasteProblem } => {
+  const raw = pasted.split(/\r?\n/).map(line => line.trimEnd())
+  const start = raw.findIndex(line => AUTO_START.test(line))
+  const auto = start < 0 ? null : autoOf(startAttrs(raw[start]))
+  const end = raw.findIndex((line, index) => start >= 0 && index > start && AUTO_END.test(line))
+  if (auto === null || end < 0) return { problem: 'noBlock' }
+  if (parseAttrs(raw[end] ?? '').session !== auto.session) return { problem: 'mixed' }
+  const named = parseAttrs(startAttrs(raw[start])).agent
+  const body = raw.slice(start + 1, end)
+  const title = TASK.exec(body[0] ?? '')?.[1]
+  // The chat names itself in lower case; a block without an agent would read as Claude's.
+  if (title === undefined || !HEX8.test(auto.session) || named === undefined || named !== auto.agent || !AGENT_NAME.test(named) || auto.agent === 'claude' || body.some(isHiding)) {
+    return { problem: 'badBlock' }
+  }
+  // The marker is written again from what was checked, so a chat cannot choose which session or
+  // folder a reply from the page goes to (resume=, dir=), nor claim a pull request.
+  const marker = `<!-- auto session=${auto.session} agent=${auto.agent} state=${auto.state} updated=${new Date(now).toISOString().replace(/\.\d{3}Z$/, 'Z')} -->`
+  const block = [marker, ...body, `<!-- /auto session=${auto.session} -->`]
+
+  const eol = eolOf(text)
+  const lines = linesOf(text)
+  const existing = scanBlocks(lines).find(span => span.session === auto.session)
+  if (existing !== undefined) {
+    const owner = autoOf(startAttrs(seenOf(lines)[existing.start]))
+    if (!existing.isClosed || owner?.agent !== auto.agent) return { problem: 'notYours' }
+    lines.splice(existing.start, existing.end - existing.start + 1, ...block)
+
+    return { text: lines.join(eol) + eol, title }
+  }
+  // The `##` line nearest above the block names its project; it becomes a heading, so no
+  // comment opening goes with it.
+  const project = raw
+    .slice(0, start)
+    .flatMap(line => {
+      const name = PROJECT.exec(line)?.[1]
+      return name === undefined ? [] : [name.replace(/<!--|-->/g, ' ').replace(/\s+/g, ' ').trim()]
+    })
+    .at(-1)
+  if (project === undefined || project === '') return { problem: 'noProject' }
+
+  return { text: placeUnder(lines, project, block, eol, s), title }
 }

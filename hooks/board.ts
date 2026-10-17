@@ -184,7 +184,7 @@ export const boardItems = (view: View, pending: readonly PendingTurn[]): BoardIt
 }
 
 // What each key does on the selected line, so the footer lists only keys that do something.
-const answersOf = (ask: WaitingItem, s: Strings): string[] =>
+export const answersOf = (ask: WaitingItem, s: Strings): string[] =>
   ask.kind === 'confirm' ? [s.yesAnswer, s.noAnswer] : ask.kind === 'choose' ? ask.options.slice(0, 9) : []
 
 // The state with the chosen line's key set, so a key pressed later acts on the line that was

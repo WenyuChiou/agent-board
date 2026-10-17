@@ -204,7 +204,7 @@ Progress shows only while some Claude Code session is open. Turns that arrive wh
 |---|---|---|
 | Gemini CLI | `~/.gemini/commands/board.toml` | `/board`. Gemini asks once to allow the command to run |
 | OpenCode | `~/.config/opencode/commands/board.md` | `/board` |
-| Codex, Cursor, Grok Build, OpenClaw (and Gemini CLI, OpenCode) | `~/.agents/skills/agent-board/SKILL.md` | `$agent-board` in Codex, `/agent-board` in the others |
+| Codex, Cursor, Grok Build, OpenClaw, Muse Code (and Gemini CLI, OpenCode) | `~/.agents/skills/agent-board/SKILL.md` | `$agent-board` in Codex, `/agent-board` in the others |
 | Hermes Agent | `~/.hermes/skills/agent-board/SKILL.md` | `/agent-board` |
 | Antigravity | `~/.gemini/config/skills/agent-board/SKILL.md` | `/agent-board` |
 
@@ -213,6 +213,8 @@ Gemini CLI and OpenCode paste the board into the prompt themselves; with a skill
 In a terminal, `node ~/.claude/agent-board.mjs` prints the board once, `--watch` keeps it on screen and redraws it every 2 seconds (put it in a split beside Codex), and `--html` writes `progress.html` and opens it in the browser. `--lang en` (or `zh-TW`, `zh-CN`) picks the language; by default it uses the one your Claude Code session uses.
 
 On a terminal, `--watch` also takes keys, as the pane takes presses: ↑↓ and Enter to pick and open a line, `x` to tick the next step of a hand-kept task, `a` to archive a hand-kept task or a stopped session’s block (finished work is archived by itself), `1`–`9` or `y`/`n` to copy the answer to another agent's question, `c` to copy a command, `o` for the browser view, `q` to quit. Those are its only writes; otherwise the board only reads. Turns other agents' hooks leave in the inbox are summed up into steps by an open Claude Code session; until one takes them in, the board lists them as they came, a question first. A turn that only showed the board is not counted as work.
+
+`--serve` prints the board, then opens its page in the browser, where the same things take a click: tick a step, archive a task or everything finished, copy an answer or a command, answer a Grok Build or Codex session that has ended (in that session's own folder, one reply at a time), and paste a block a web chat wrote. Every board command above runs it, so the address is the last line the agent shows you. The page is served on 127.0.0.1 only, with a random key in its address, and closes after 30 minutes nobody looks at it; more in [the board's page](../README.md#the-boards-page). What an agent answers shows on the page when it comes, which can take a few minutes, and the page does not close while a reply is on its way. An agent that runs its commands in a sandbox may not be allowed to start the page: the board still prints, and its last line says the page could not open. Then run `node ~/.claude/agent-board.mjs --serve` in a terminal yourself.
 
 <img alt="The board in a terminal, redrawn every 2 seconds" src="images/live/terminal-en.png" width="560">
 <img alt="OpenCode 1.19.3: /board" src="images/live/opencode-en.png" width="560">

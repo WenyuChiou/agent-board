@@ -254,6 +254,7 @@ const BOARD_PLAIN = new Set(Object.values(STRINGS).flatMap(s => [s.nothingForYou
 const isBoardLine = (line: string): boolean => /^(?:\s|[●▸⚑◐] |$)/.test(line) || BOARD_PLAIN.has(line.trim())
 const BOARD_LEAD = 40
 const BOARD_ASIDE = 160
+const BOARD_LINK = /https?:\/\/(?:127\.0\.0\.1|localhost):\d{1,5}\/\?t=[\w-]{1,64}/g
 // A CJK character says about as much as two Latin ones.
 const weight = (text: string): number => [...text.trim()].reduce((sum, char) => sum + (/[ᄀ-ᅟ⺀-꓏가-힣豈-﫿︰-﹏＀-｠￠-￦]/.test(char) ? 2 : 1), 0)
 
@@ -271,7 +272,8 @@ export const isBoardAnswer = (answer: string): boolean => {
     end += 1
   }
   const before = lines.slice(0, from).join('\n')
-  const after = lines.slice(end).join('\n')
+  // The link to the board's page (`--serve`) goes with the board it was printed under.
+  const after = lines.slice(end).join('\n').replace(BOARD_LINK, '')
   // A code block or a list beside the board (a test log, a diff, what was done) is work.
   // The indent stays on its line, so a run of blank lines is not crossed again from each one.
   const isAside = (text: string): boolean => !/```|^[ \t]*(?:[-*+]|\d+[.)])\s/m.test(text)

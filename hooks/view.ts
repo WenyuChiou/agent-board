@@ -46,6 +46,16 @@ export type StepRef = { project: string; title: string; step: string; line: numb
 // heading line, checked against the title so a task that moved is still found once.
 export type TaskRef = { project: string; title: string; line: number; session: string | null }
 
+// Another agent's session, as its block names it: its block id, the session id its hook gave
+// (`resume=`), the folder it ran in (`dir=`), and whether it has closed (`state=ended`). The
+// board's page can send a reply into a closed Grok Build or Codex session; the pane does not.
+export type AgentTarget = { agent: string; session: string; resume: string | null; dir: string | null; isClosed: boolean }
+
+const targetOf = (auto: ProgressAuto | null): AgentTarget | null =>
+  auto === null || auto.agent === 'claude'
+    ? null
+    : { agent: auto.agent, session: auto.session, resume: auto.resume, dir: auto.dir, isClosed: auto.state === 'ended' }
+
 export type WaitingItem = {
   key: string
   project: string
@@ -67,6 +77,8 @@ export type WaitingItem = {
   agent: string
   // A hand-kept step can be ticked from the pane; another session's cannot.
   step: StepRef | null
+  // Another agent's session the question came from; null for Claude's and hand-kept ones.
+  target: AgentTarget | null
 }
 
 // The one thing the top of the pane puts in front of the person: the most pressing thing
@@ -105,6 +117,8 @@ export type TaskRow = {
   // Set when the person may take the row out now: a hand-kept task, or a block whose session
   // ended or stopped. A live session's block is that session's to change.
   archive: TaskRef | null
+  // Another agent's session the row is; null for Claude's and hand-kept ones.
+  target: AgentTarget | null
 }
 
 // This session's pull request, for the card.
@@ -382,6 +396,7 @@ const ownWaiting = (mine: ProgressMirror): WaitingItem[] => {
       where: 'here' as const,
       agent: '',
       step: null,
+      target: null,
     }))
 }
 
@@ -442,6 +457,7 @@ export const buildView = (
           where: isManual ? 'manual' : 'other',
           agent: task.auto === null || task.auto.agent === 'claude' ? '' : task.auto.agent,
           step: isManual ? { project: name, title, step: step.text, line: step.line, raw: step.raw } : null,
+          target: targetOf(task.auto),
         })
       })
 
@@ -469,6 +485,7 @@ export const buildView = (
             where: 'other',
             agent: task.auto?.agent === 'claude' ? '' : (task.auto?.agent ?? ''),
             step: null,
+            target: targetOf(task.auto),
           })
         }
         continue
@@ -514,6 +531,7 @@ export const buildView = (
             : auto === 'ended' && task.auto !== null
               ? { project: name, title: task.title, line: task.line, session: task.auto.session }
               : null,
+        target: targetOf(task.auto),
       }
 
       // Work with a date close by is listed once, under 快到期.

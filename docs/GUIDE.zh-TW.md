@@ -213,7 +213,7 @@ hook 執行的是 `/progress connect` 寫好的 `~/.claude/progress-report.sh`�
 |---|---|---|
 | Gemini CLI | `~/.gemini/commands/board.toml` | `/board`。Gemini 第一次會問要不要讓指令執行 |
 | OpenCode | `~/.config/opencode/commands/board.md` | `/board` |
-| Codex、Cursor、Grok Build、OpenClaw（還有 Gemini CLI、OpenCode） | `~/.agents/skills/agent-board/SKILL.md` | Codex 打 `$agent-board`，其他打 `/agent-board` |
+| Codex、Cursor、Grok Build、OpenClaw、Muse Code（還有 Gemini CLI、OpenCode） | `~/.agents/skills/agent-board/SKILL.md` | Codex 打 `$agent-board`，其他打 `/agent-board` |
 | Hermes Agent | `~/.hermes/skills/agent-board/SKILL.md` | `/agent-board` |
 | Antigravity | `~/.gemini/config/skills/agent-board/SKILL.md` | `/agent-board` |
 
@@ -222,6 +222,8 @@ Gemini CLI 和 OpenCode 會自己把看板貼進提示；用技能（skill）的
 在終端機：`node ~/.claude/agent-board.mjs` 印一次看板，`--watch` 一直開著、每 2 秒重畫（分割視窗放在 Codex 旁邊），`--html` 寫出 `progress.html` 並在瀏覽器打開。`--lang zh-TW`（或 `en`、`zh-CN`）選語言；預設跟你的 Claude Code 對話一樣。
 
 在終端機裡，`--watch` 也能用按鍵操作，就像面板能點：↑↓ 和 Enter 選一行並展開、`x` 勾掉手寫工作的下一步、`a` 封存手寫的工作或已停對話的區塊（做完的會自己封存）、`1`–`9` 或 `y`／`n` 複製另一個 agent 問題的答案、`c` 複製指令、`o` 打開網頁版、`q` 離開。除了這幾個，看板只讀不寫。其他 agent 的 hook 留在收件匣的回合，要有開著的 Claude Code 對話才會整理成步驟；在那之前，看板照原樣列出它們，問題排最前面。只是看看板的回合，不算工作。
+
+`--serve` 先印出看板，再在瀏覽器打開它的網頁，同樣的事在那裡按一下就好：勾步驟、封存一件工作或全部做完的、複製答案或指令、回覆已經結束的 Grok Build 或 Codex 對話（在那個對話自己的資料夾裡，一次一則），以及貼上網頁聊天寫的區塊。上面每個看板指令都會跑它，所以 agent 給你看的最後一行就是網址。網頁只在 127.0.0.1 上提供，網址裡帶一把隨機鑰匙，30 分鐘沒人看就會關；詳見[看板的網頁](../README.zh-TW.md#看板的網頁)。agent 回的話等它回來才會出現在網頁上，可能要幾分鐘；還有一則在路上時，網頁不會關。agent 若在沙箱裡跑指令，可能不准開網頁：看板照樣印出，最後一行會說網頁打不開。這時自己在終端機跑 `node ~/.claude/agent-board.mjs --serve`。
 
 <img alt="終端機裡的看板，每 2 秒重畫" src="images/live/terminal-zh-TW.png" width="560">
 <img alt="OpenCode 1.19.3：/board" src="images/live/opencode-zh-TW.png" width="560">

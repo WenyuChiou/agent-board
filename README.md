@@ -8,7 +8,7 @@ A Claude Code plugin that also follows Codex, Gemini CLI, OpenCode, Grok Build, 
 </p>
 
 <p align="center">
-<a href="CHANGELOG.md"><img alt="Version 0.18.0" src="https://img.shields.io/badge/version-0.18.0-blue"></a>
+<a href="CHANGELOG.md"><img alt="Version 0.19.0" src="https://img.shields.io/badge/version-0.19.0-blue"></a>
 <a href="#quick-start"><img alt="Needs Claude Code 2.1.287 or newer" src="https://img.shields.io/badge/Claude%20Code-%E2%89%A5%202.1.287-d97757"></a>
 <a href="LICENSE"><img alt="MIT license" src="https://img.shields.io/badge/license-MIT-green"></a>
 <img alt="macOS, Linux, Windows" src="https://img.shields.io/badge/macOS%20%C2%B7%20Linux%20%C2%B7%20Windows-lightgrey">
@@ -61,7 +61,7 @@ Then show me what the last command printed and tell me which agents to restart.
 - **Every agent in one place.** Grouped by project, with a title, a line of background and numbered steps for each session, summed up for you after every turn.
 - **Pick up where you left off.** Compaction, a closed terminal, the next morning: you see what's done, what's stuck and what's next. A session that stopped halfway can be taken over in one click.
 - **Your own to-dos too.** Type `+ Job search: Fabrikam fellowship due 11-20` in the pane's box. Due dates turn the row amber, then red.
-- **Outside the terminal.** `/progress open` shows the same view in your browser (it works on a phone too). The status line and desktop notifications tell you when something needs you while the pane is closed.
+- **Outside the terminal.** `/progress open` shows the same view in your browser (it works on a phone too), and other agents open [a page you can click](#the-boards-page) to tick, archive and answer. The status line and desktop notifications tell you when something needs you while the pane is closed.
 - **Reports.** `/progress report` and `/progress today` copy what got done, as text.
 - **Tidies itself.** Finished work moves to a monthly archive; a journal keeps every finished step.
 - **One plain Markdown file.** Everything is in `~/.claude/progress.md`, which you can read and edit. English, 繁體中文 and 简体中文; light and dark.
@@ -80,12 +80,12 @@ Install it in Claude Code, and every time Claude Code starts it connects the age
 - **Grok Build** 1.0.62: its turns reach the board; `/agent-board` inside it is not verified yet
 - **Hermes Agent** 0.19.0: both work; answer `y` once; a one-off `hermes -q` question shows as stopped, not waiting
 - **OpenClaw** 2026.10.4: both work; needs 2026.4.24 or newer, and warns that it can't verify where the plugin came from, then loads it
-- **dot** and **Muse** on the web: no hook, so paste [one prompt](docs/REMOTE_REPORTERS.md#chat-relay-a-prompt-to-paste) into the chat and merge the blocks it writes; no board inside them
+- **dot** and **Muse** on the web: no hook, so paste [one prompt](docs/REMOTE_REPORTERS.md#chat-relay-a-prompt-to-paste) into the chat and paste each block it writes into [the board's page](#the-boards-page); no board inside them
 - **Any other agent** (Aider, Copilot, Windsurf…): paste one section of [AGENTS.md](AGENTS.md) into its instructions and it writes its own block; no board inside it
 
 **Not supported yet**
 - **Cursor**: on Windows it runs every hook through bash, and another tool's PowerShell hook blocked its turns; macOS and Linux not verified yet
-- **Muse Code**: the hook follows its documentation and is not verified yet
+- **Muse Code**: the hook follows its documentation, and its `/agent-board` skill goes into `~/.agents/skills`, which Muse Code reads; neither is verified yet
 - **Antigravity**: it has no turn-end hook, so its turns can't reach the board
 
 ### By capability
@@ -102,12 +102,12 @@ Install it in Claude Code, and every time Claude Code starts it connects the age
 | <img src="docs/images/agents/hermes-agent.svg" width="24" alt=""> | **Hermes Agent** | ⚠️ | ✅ `/agent-board` | 0.19.0, 0.16.0 (Windows) |
 | <img src="docs/images/agents/openclaw.svg" width="24" alt=""> | **OpenClaw** | ⚠️ | ✅ `/agent-board` | 2026.10.4 |
 | <img src="docs/images/agents/cursor.svg" width="24" alt=""> | **Cursor** | ❌ | ❔ `/agent-board` | 2026.10.16 (Windows) |
-| <img src="docs/images/agents/muse-code.svg" width="24" alt=""> | **Muse Code** | ❔ | ❔ | |
+| <img src="docs/images/agents/muse-code.svg" width="24" alt=""> | **Muse Code** | ❔ | ❔ `/agent-board` | |
 | | **Antigravity** | ❌ | ❔ `/agent-board` | |
 | | **dot**, **Muse** (web) | ⚠️ | ❌ | |
 | | **Any other agent** | ⚠️ | ❌ | |
 
-Inside an agent, the board is printed text: it shows everything, but nothing in it can be clicked. To tick a step, archive a task or copy an answer, open the [board you work in](#the-board-in-every-agent) in a terminal beside it. A question is answered in the agent that asked it.
+Inside an agent, the board is printed text: it shows everything, but nothing in it can be clicked. So the board command also opens [the board's page](#the-boards-page) in your browser, where you tick a step, archive a task, copy an answer, or answer a Grok Build or Codex session that has ended. A session that is still open is answered in that agent.
 
 <img alt="The board listing a question from each of six agents: Codex, Gemini CLI, OpenClaw, OpenCode, Grok Build, Hermes Agent" src="docs/images/live/hooks-en.png" width="620">
 
@@ -122,6 +122,7 @@ Connecting also gives each agent a way to show the board, so whichever one you a
 | OpenClaw, Hermes Agent | `/agent-board` |
 | Grok Build, Cursor, Antigravity (not verified yet) | `/agent-board` |
 | Any terminal, next to any agent | `node ~/.claude/agent-board.mjs --watch` (`--html` opens it in the browser) |
+| A browser, from any agent | `node ~/.claude/agent-board.mjs --serve` |
 
 **Work in it, as in the pane.** Run `node ~/.claude/agent-board.mjs --watch` in a terminal beside the agent (a split pane):
 
@@ -146,6 +147,19 @@ Finished work leaves the board by itself. The board writes `progress.md` as care
 Above, Codex 0.163.0 and Gemini CLI 0.64.0; OpenCode and the terminal are in the [guide](docs/GUIDE.md#the-board-in-every-agent).
 
 The board reads `progress.md` directly, so it needs no Claude Code session, only Node.js 18 or newer: Codex and Gemini CLI bring it, and for other agents, install Node if `node --version` finds none. Other agents' turns are summed up into steps while a Claude Code session is open; until then the board lists them as they came in.
+
+### The board's page
+
+The board commands above print the board, then open its page in the browser and give its address on the last line; `node ~/.claude/agent-board.mjs --serve` does the same from any terminal (`--no-open` only prints the address). A second `--serve` brings back the page that is already open. On the page you can:
+
+- **Tick** the next step of your own task, **archive** a task, or press **Archive now** to put away everything finished.
+- **Copy** the answer to another agent's question, a session's resume command, or a command in a step.
+- **Answer** a Grok Build or Codex session that has ended. The reply runs `grok -r <id>` or `codex exec resume <id>` in that session's own folder, and the page shows what the agent says back once it answers, which can take a few minutes. One reply at a time per session. A session that is still open is answered in its own window, because two writers would mix one session up.
+- **Paste a block** from a web chat such as Muse or dot. Copy the chat prompt from the page into the chat once, then paste each block the chat prints. A block that is not in the format, or that would replace Claude's or another agent's block, is refused.
+
+The page listens on 127.0.0.1 only, and its address carries a random key, so neither other computers nor other web pages you have open can use it. It closes after 30 minutes without anyone looking at it, or with its **Close the board** button, but not while a reply is still on its way to an agent.
+
+**On a phone.** The page fits a phone's screen, but it is served on the computer only. From a phone, open a Claude Code session through Remote Control and ask it where things stand: it reads the same `progress.md`. Opening the page itself from a phone, over your own network, is not offered yet.
 
 ## Commands
 

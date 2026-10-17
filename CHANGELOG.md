@@ -1,5 +1,90 @@
 # Changelog
 
+## 0.19.0 — 2026-10-17
+
+- **A board page you can click, for the agents that are not Claude Code.**
+  `node ~/.claude/agent-board.mjs --serve` prints the board, then starts its
+  page on 127.0.0.1 in the background (or brings back the one already open)
+  and gives its address on the last line; `--no-open` only prints it.
+  `/board` in Gemini CLI and OpenCode and the `agent-board` skill (Codex, Grok
+  Build, OpenClaw, Hermes Agent and the rest) now run it, so asking for the
+  board opens the page. On it: tick the next step of a hand-kept task, archive
+  a task, **Archive now**, copy an answer, a resume command or a command. Its
+  writes are the terminal board's (a temp file, read back, made again when
+  another session wrote meanwhile), so the page changes `progress.md` the way
+  the pane does. A tick goes only to the step the page showed: if that step
+  was done elsewhere meanwhile, the press is refused. Run in a browser on a synthetic `progress.md`: a tick and
+  **Archive now**, seen in the file, the journal and the archive. Tests: "the
+  page offers a send only into a Grok or Codex session that has closed; an
+  open one, Claude and a hand-kept task each get their own way", "a press on
+  the page is worked out from the file as it is now: a line that is gone is
+  refused, and a reply goes with its question", and in `tests/board.test.mjs`
+  "ticking and tidying from the page write progress.md the way the pane does,
+  and a pasted block is merged into it", "--serve starts the page in the
+  background once, and the next --serve brings back the same page".
+- **Answer a Grok Build or Codex session from the page.** Only one that has
+  ended (`state=ended`), so the page is its only writer; a session still open
+  is answered in its own window. Only by the session's own id, a UUID, so a
+  reply never goes to the newest session of a folder or to one with a
+  similar name, and only in the session's own folder (`dir=`): Grok Build
+  runs `grok -r <id> --single=<reply>`, Codex runs `codex exec resume <id> -`
+  with the reply on stdin (on Windows its `.cmd` needs the shell, and only
+  constants and the checked id go through it). The program is looked for in the PATH folders
+  only, never in the session's folder. A reply is sent in the background, one
+  at a time per session: what the agent answered shows on the page when it
+  comes, named with the agent and the task, the page does not close while a
+  reply is on its way, and one that runs past 10 minutes is stopped with
+  everything it started. A page drawn
+  when another session held that line does not send into the new one.
+  Another agent's block now keeps that agent's own session id as `resume=`.
+  Tests: "a send runs the agent with constants and a checked id only, and
+  Codex on Windows takes the reply on stdin", "an agent's block keeps that
+  agent's own session id as resume=, so the page can answer into it", and in
+  `tests/board.test.mjs`, through a stand-in for Grok Build, "a reply goes
+  into a closed Grok session once, in its own folder, and the page waits for
+  its answer before it closes".
+- **Paste a web chat's block (Muse, dot) into the page.** The page offers the
+  chat prompt of `docs/REMOTE_REPORTERS.md` to copy, and takes the block the
+  chat prints, fence and all: checked the way `validate.py --block` checks
+  one, put under its `## project`, replacing only the same agent's closed
+  block, never Claude's or another agent's, with `updated=` set to the time of
+  the paste. Its marker is written again from the fields that were checked,
+  so a pasted block cannot name a session id or a folder for the page to
+  answer into; `merge.py` drops `resume=` and `dir=` from a remote fragment
+  for the same reason (check "8j a fragment never names a session id or
+  folder for the board page to answer into" in
+  `scripts/remote-reporter/test_pipeline.py`). A title that opens a
+  comment is refused too, as `validate.py` refuses it. Tests: "a block pasted from a web chat joins its project, then
+  replaces its own earlier copy, with the time it was pasted", "a pasted block
+  never takes the place of Claude’s, another agent’s or an unclosed block, and
+  one that would hide its own end is refused".
+- **Only the page can use the page.** It listens on 127.0.0.1 only, with a
+  random token in its address (the page sends it as a header). A request
+  naming another host is refused, so a name rebound to 127.0.0.1 cannot read
+  it; a write must be JSON, from the page itself, at most 64 KB. The page's
+  script runs by nonce under a content security policy, sets every word from
+  the file as text, opens only `https` links and never passes its address on.
+  On Windows the board starts the browser and the clipboard tool by their full
+  path, from its own folder, so a `cmd.exe` or `clip.exe` in a cloned
+  repository is never run in their place (checked by hand with a planted one).
+  It closes after 30 minutes nobody looks at it, or with its button. Tests:
+  "the page server answers only its own host, with its token, and takes
+  writes only as JSON from the page", "the page runs only its own script, and
+  the chat prompt in it cannot close the script it sits in", and in
+  `tests/board.test.mjs` "the page answers only with its token and its own
+  host, and closing it stops the server".
+- **On a phone.** The page fits a phone's width (16px text boxes, 44px buttons
+  on touch screens), but it is served on the computer only. From a phone,
+  reach a Claude Code session through Remote Control. Opening the page from a
+  phone over your own network is not offered yet.
+- **Muse Code gets the board skill.** Its config folder now counts as a reason
+  to write `~/.agents/skills/agent-board/SKILL.md`, which Muse Code reads; not
+  run on Muse Code itself. Test: "each agent gets a board command in the form
+  it reads, and a missing reporter never makes a hook exit 2".
+- **A turn that showed the board and the page's address is still only a look
+  at the board,** not work. Test: "a reply that ends with the board page’s
+  address is still only a look at the board".
+
 ## 0.18.0 — 2026-10-17
 
 - **Work in the board from any agent, as in the pane.** `node
