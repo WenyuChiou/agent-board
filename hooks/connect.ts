@@ -183,9 +183,12 @@ const jsonEdit =
 // Hermes Agent keeps its hooks in YAML: `hooks.<event>` is a list of `{ command, timeout }`.
 // With no YAML parser here, ours go in as one flow-style line each, found again by the
 // reporter script's name, and a `hooks:` written in a shape this cannot follow (flow style)
-// is left alone.
-const HERMES_KEY = /^\s+(?:post_llm_call|on_session_finalize)\s*:\s*(?:#.*)?$/
-const TOP_HOOKS = /^hooks\s*:\s*(?:#.*)?$/
+// is left alone. The empty map `hooks: {}` is the one flow-style value it can follow: Hermes
+// writes that into a new config.yaml, and it holds nothing to keep.
+// A comment runs to the line end, a Windows `\r` included.
+const HERMES_KEY = /^\s+(?:post_llm_call|on_session_finalize)\s*:\s*(?:#[^\n]*)?$/
+const TOP_HOOKS = /^hooks\s*:\s*(?:#[^\n]*)?$/
+const EMPTY_HOOKS = /^hooks\s*:\s*\{\s*\}\s*(?:#[^\n]*)?$/
 
 const indentOf = (line: string): number => line.length - line.trimStart().length
 
@@ -201,25 +204,35 @@ const hasChildren = (lines: string[], at: number): boolean => {
   return indentOf(next) > indent || (indentOf(next) === indent && next.trimStart().startsWith('- '))
 }
 
-export const withoutHermesHooks = (text: string): string => {
+// Adding ours again keeps a `hooks:` that only held ours, so they go back where they were
+// rather than to the end of the file.
+const stripHermesHooks = (text: string, isKeepingTop: boolean): string => {
   const lines = text.split('\n')
   // Only list items of ours; a comment or another line that names the script stays.
   const kept = lines.filter(line => !(line.trimStart().startsWith('- ') && OURS.test(line)))
   if (kept.length === lines.length) return text
   const keys = kept.filter((line, at) => !(HERMES_KEY.test(line) && !hasChildren(kept, at)))
-  const rest = keys.filter((line, at) => !(TOP_HOOKS.test(line) && !hasChildren(keys, at)))
+  const rest = isKeepingTop ? keys : keys.filter((line, at) => !(TOP_HOOKS.test(line) && !hasChildren(keys, at)))
 
   return `${rest.join('\n').replace(/\n{3,}/g, '\n\n').replace(/\n+$/, '')}\n`.replace(/^\n$/, '')
 }
 
+export const withoutHermesHooks = (text: string): string => stripHermesHooks(text, false)
+
 export const withHermesHooks = (text: string, events: Array<[string, string]>): string | null => {
-  const base = withoutHermesHooks(text)
+  const base = stripHermesHooks(text, true)
   const item = (command: string): string => `- {command: ${JSON.stringify(command)}, timeout: 10}`
-  const lines = base.replace(/\n+$/, '').split('\n')
+  // Lines of ours end the way the file's own lines do.
+  const eol = text.includes('\r\n') ? '\r' : ''
+  // An empty `hooks: {}` becomes a bare `hooks:` that ours go under.
+  const lines = base
+    .replace(/\n+$/, '')
+    .split('\n')
+    .map(line => (EMPTY_HOOKS.test(line) ? `hooks:${line.endsWith('\r') ? '\r' : ''}` : line))
   const at = lines.findIndex(line => /^hooks\s*:/.test(line))
   if (at === -1) {
-    const added = ['hooks:', ...events.flatMap(([event, command]) => [`  ${event}:`, `    ${item(command)}`])].join('\n')
-    return base.trim() === '' ? `${added}\n` : `${base.replace(/\n+$/, '')}\n\n${added}\n`
+    const added = ['hooks:', ...events.flatMap(([event, command]) => [`  ${event}:`, `    ${item(command)}`])].join(`${eol}\n`)
+    return base.trim() === '' ? `${added}${eol}\n` : `${base.replace(/(?:\r?\n)+$/, '')}${eol}\n${eol}\n${added}${eol}\n`
   }
   if (!TOP_HOOKS.test(lines[at] ?? '')) return null
   let end = lines.findIndex((line, index) => index > at && isContent(line) && indentOf(line) === 0)
@@ -231,7 +244,7 @@ export const withHermesHooks = (text: string, events: Array<[string, string]>): 
   for (const [event, command] of events) {
     const key = lines.findIndex((line, index) => index > at && index < end && indentOf(line) === indent && new RegExp(`^\\s*${event}\\s*:`).test(line))
     if (key === -1) {
-      lines.splice(insert, 0, `${' '.repeat(indent)}${event}:`, `${' '.repeat(indent + 2)}${item(command)}`)
+      lines.splice(insert, 0, `${' '.repeat(indent)}${event}:${eol}`, `${' '.repeat(indent + 2)}${item(command)}${eol}`)
       insert += 2
       end += 2
       continue
@@ -240,7 +253,7 @@ export const withHermesHooks = (text: string, events: Array<[string, string]>): 
     if (after !== '' && !after.startsWith('#')) return null
     const next = lines.slice(key + 1, end).find(isContent)
     const nested = next !== undefined && (indentOf(next) > indent || (indentOf(next) === indent && next.trimStart().startsWith('- ')))
-    lines.splice(key + 1, 0, `${' '.repeat(nested && next !== undefined ? indentOf(next) : indent + 2)}${item(command)}`)
+    lines.splice(key + 1, 0, `${' '.repeat(nested && next !== undefined ? indentOf(next) : indent + 2)}${item(command)}${eol}`)
     if (key < insert) insert += 1
     end += 1
   }

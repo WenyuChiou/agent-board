@@ -728,7 +728,29 @@ test('Hermes Agent’s hooks go into its config.yaml beside the person’s own, 
   expect(fresh).toContain('model:\n  default: x\n\nhooks:\n  post_llm_call:\n    - {command:')
   expect(hermes?.edit(fresh, true)).toBe('model:\n  default: x\n')
   // A hooks block in flow style is not one this can edit line by line.
-  expect(hermes?.edit('hooks: {}\n', false)).toBeNull()
+  expect(hermes?.edit('hooks: {post_llm_call: [{command: "~/log.sh"}]}\n', false)).toBeNull()
+})
+
+test('a Hermes config.yaml with the empty hooks: {} it ships with gets our hooks in its place, Windows line ends and all', () => {
+  const ctx = { home: '/h', sep: '/', isWindows: false, script: '/h/.claude/progress-report.sh', inbox: '/h/.claude/progress-inbox', codexHome: '/h/.codex', grokHome: '/h/.grok', hermesHome: '/h/.hermes' }
+  const hermes = agentHooks(ctx).find(hook => hook.agent === 'hermes')
+  const ours =
+    `  post_llm_call:\n    - {command: "sh '/h/.claude/progress-report.sh' hermes turn", timeout: 10}\n` +
+    `  on_session_finalize:\n    - {command: "sh '/h/.claude/progress-report.sh' hermes end", timeout: 10}\n`
+  const stock = 'model:\n  default: x\nhooks: {}\nhooks_auto_accept: false\n'
+  const once = String(hermes?.edit(stock, false))
+  expect(once).toBe(`model:\n  default: x\nhooks:\n${ours}hooks_auto_accept: false\n`)
+  expect(hermes?.edit(once, false)).toBe(once)
+  expect(hermes?.edit(once, true)).toBe('model:\n  default: x\nhooks_auto_accept: false\n')
+  expect(hermes?.edit('hooks: {}  # none yet\n', false)).toBe(`hooks:\n${ours}`)
+  const stockWindows = stock.replace(/\n/g, '\r\n')
+  const windows = String(hermes?.edit(stockWindows, false))
+  expect(windows).toBe(once.replace(/\n/g, '\r\n'))
+  expect(hermes?.edit(windows, false)).toBe(windows)
+  expect(hermes?.edit(windows, true)).toBe('model:\r\n  default: x\r\nhooks_auto_accept: false\r\n')
+  const spaced = String(hermes?.edit('a: 1\r\nhooks: { } # none yet\r\nb: 2\r\n', false))
+  expect(spaced).toBe(`a: 1\r\nhooks:\r\n${ours.replace(/\n/g, '\r\n')}b: 2\r\n`)
+  expect(hermes?.edit('a: 1\r\n', false)).toBe(`a: 1\r\n\r\nhooks:\r\n${ours.replace(/\n/g, '\r\n')}`)
 })
 
 test('Hermes Agent’s turn is read from under extra, and its session finalize is the end, not its per-turn session end', () => {

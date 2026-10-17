@@ -1,5 +1,20 @@
 # Changelog
 
+## Unreleased
+
+- **`/progress connect` wires a stock Hermes Agent.** Hermes writes
+  `hooks: {}` into a new `config.yaml`, and connect took that empty map for a
+  flow-style block it could not follow, so it left Hermes out and said it
+  could not read the file. The empty map now becomes a `hooks:` block with
+  ours under it, and our lines end the way the file's do (`\r\n` on
+  Windows); a flow-style block with anything in it is still left alone. A
+  `hooks:` key with a comment after it is followed in a Windows file too. Connecting again leaves the block where it is
+  instead of moving it to the end of the file. Found by a live run on
+  Windows. Tests: "a Hermes config.yaml with the empty hooks: {} it ships
+  with gets our hooks in its place, Windows line ends and all", "Hermes
+  Agent’s hooks go into its config.yaml beside the person’s own, once, and
+  come back out cleanly".
+
 ## 0.12.0 — 2026-10-17
 
 Hardening, from a security and robustness review.
