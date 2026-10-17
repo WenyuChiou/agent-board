@@ -88,7 +88,7 @@ import {
 } from './inbox'
 import type { AgentTurn } from './inbox'
 import { keepRecent, remindersOf } from './remind'
-import { answeredJson, answeredPath, buildView, keptAnswered, parseAnswered, statusLine, withAnswered } from './view'
+import { agentName, answeredJson, answeredPath, buildView, keptAnswered, parseAnswered, statusLine, withAnswered } from './view'
 import type { StepRef, TaskRef, TaskRow, WaitingItem } from './view'
 
 const PANE = 'agent-board'
@@ -1960,7 +1960,7 @@ export const register: Register = (on, options) => {
       },
       copySessionId: (item, surface) => {
         if (item.sessionId === null) return
-        showCopied($, s.sessionIdOf(item.task, item.sessionId !== item.session), item.sessionId, surface).catch(() => undefined)
+        showCopied($, s.sessionIdOf(item.task, agentName(item.agent), item.resumeVia), item.sessionId, surface).catch(() => undefined)
       },
       hide: item => {
         setAnswered($, item, true)

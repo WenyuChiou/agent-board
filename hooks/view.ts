@@ -78,10 +78,16 @@ export type WaitingItem = {
   // The block id of the session that asked, named in the reply hint: several sessions often
   // share one folder, so the folder alone does not say where to answer. '' for a hand-kept step.
   session: string
-  // A Claude Code session's full id (its `resume=`, else its block id), for the person to copy
-  // and find that session or reopen it with `claude --resume`; null for every other item. Anyone
-  // can write `session=`, so a block id that is not a plain id is never offered for the clipboard.
+  // The asking session's own id, for the person to copy and find that session in its agent: its
+  // `resume=`, else for Claude Code its block id; null when the block left none, and for this
+  // session's and hand-kept items. Anyone can write `session=`, so a block id that is not a plain
+  // id is never offered for the clipboard.
   sessionId: string | null
+  // How that agent reopens a session by this id (`codex resume`), when the id is the agent's own
+  // and its command is known; null otherwise.
+  resumeVia: string | null
+  // That command whole, in the session's folder, ready to paste; null when there is none.
+  reopen: string | null
   // What the person's Answered press keeps, to hide the question until the session asks
   // something else (`answeredKey`); '' for a hand-kept step, which is ticked instead.
   hideKey: string
@@ -324,12 +330,66 @@ const currentOf = (mirror: ProgressMirror, s: Strings): CurrentView | null => {
   }
 }
 
+// How each agent reopens one of its sessions by the id its hook reports: the words before the
+// id. Only where that id is the one the command takes; other agents' ids are offered to find the
+// session in their own list.
+// A Map, so an agent named like an object's own property (`constructor`) finds nothing.
+const RESUME_VIA: ReadonlyMap<string, string> = new Map([
+  ['claude', 'claude --resume'],
+  ['codex', 'codex resume'],
+  ['grok', 'grok -r'],
+  ['gemini', 'gemini --resume'],
+  ['hermes', 'hermes --resume'],
+  ['opencode', 'opencode -s'],
+])
+
+export const resumeVia = (agent: string): string | null => RESUME_VIA.get(agent === '' ? 'claude' : agent) ?? null
+
+// How another agent's session is named at a glance: the start of its own id, or for an id in
+// parts (Hermes Agent's date_time_code, OpenCode's ses_…) the start of its last part, since the
+// first part is the same for many sessions.
+const sessionName = (id: string): string => {
+  const last = id.slice(id.lastIndexOf('_') + 1)
+  return shortId(last === '' ? id : last)
+}
+
+// The agent as the person knows it, in the words that tell them where to look.
+export const agentName = (agent: string): string => (agent === '' || agent === 'claude' ? 'Claude Code' : agent)
+
+// Where to answer another session's question, then how to get back to that session: its own id,
+// said plainly when it left none, and, where the agent's resume by id is known, the command on a
+// line of its own (a terminal is too narrow for both on one). `withCommand` false leaves the
+// command out (a phone on the local network gets neither the command nor its folder).
+export type ReplyHint = { where: string; back: string; note: string; reopen: string | null }
+export const replyHint = (item: WaitingItem, s: Strings, withCommand = true): ReplyHint => {
+  if (item.where !== 'other') return { where: '', back: '', note: '', reopen: null }
+  const reopen = withCommand && item.sessionId !== null ? item.reopen : null
+
+  return {
+    where: s.replyElsewhere(item.task, item.session, item.agent),
+    back: item.sessionId === null ? s.noWayBack : s.wayBack(agentName(item.agent), item.sessionId),
+    note: reopen === null ? '' : s.reopenWhenClosed,
+    reopen,
+  }
+}
+
+// The way back as one run of words, for a surface that wraps them; a Chinese sentence runs on
+// after its full stop with no space.
+export const wayBackText = (hint: ReplyHint): string =>
+  hint.note === '' ? hint.back : `${hint.back}${hint.back.endsWith('。') ? '' : ' '}${hint.note}`
+
 // Reopens an ended session where it ran: PowerShell for a Windows folder, a POSIX shell
-// otherwise. Both quote the folder, so spaces and quotes in it survive.
-export const resumeCommand = (sessionId: string, dir: string | null): string => {
-  const resume = `claude --resume ${sessionId}`
+// otherwise. Both quote the folder, so spaces and quotes in it survive; PowerShell takes the
+// curly single quotes for quotes too, so those are doubled as well. A folder that is not a
+// whole path is left out, so `cd` never reads it as a flag (`-`). Null for an agent whose
+// resume by id is not known.
+export const resumeCommand = (sessionId: string, dir: string | null, agent = 'claude'): string | null => {
+  const via = resumeVia(agent)
+  if (via === null) return null
+  const resume = `${via} ${sessionId}`
   if (dir === null || dir === '') return resume
-  if (/^[A-Za-z]:[\\/]|\\/.test(dir)) return `Set-Location -LiteralPath '${dir.replace(/'/g, "''")}'; ${resume}`
+  if (/^[A-Za-z]:[\\/]|\\/.test(dir)) return `Set-Location -LiteralPath '${dir.replace(/['\u2018-\u201b]/g, '$&$&')}'; ${resume}`
+  if (!dir.startsWith('/')) return resume
 
   return `cd '${dir.replace(/'/g, "'\\''")}' && ${resume}`
 }
@@ -421,6 +481,8 @@ const ownWaiting = (mine: ProgressMirror): WaitingItem[] => {
       agent: '',
       session: shortId(mine.sessionId),
       sessionId: null,
+      resumeVia: null,
+      reopen: null,
       hideKey,
       step: null,
       target: null,
@@ -552,9 +614,15 @@ export const buildView = (
           ...askOf(parts.text, parts.note),
           where: isManual ? 'manual' : 'other',
           agent: task.auto === null || task.auto.agent === 'claude' ? '' : task.auto.agent,
-          session: task.auto?.session ?? '',
+          // Another agent's block id is a hash of its session; its own id is what its session
+          // list shows.
+          session: task.auto === null ? '' : task.auto.agent !== 'claude' && task.auto.resume !== null ? sessionName(task.auto.resume) : task.auto.session,
           sessionId:
-            task.auto?.agent === 'claude' ? (task.auto.resume ?? (RESUME.test(task.auto.session) ? task.auto.session : null)) : null,
+            task.auto === null
+              ? null
+              : (task.auto.resume ?? (task.auto.agent === 'claude' && RESUME.test(task.auto.session) ? task.auto.session : null)),
+          resumeVia: task.auto?.resume ? resumeVia(task.auto.agent) : null,
+          reopen: task.auto?.resume ? resumeCommand(task.auto.resume, task.auto.dir, task.auto.agent) : null,
           hideKey: keys[index] ?? '',
           step: isManual ? { project: name, title, step: step.text, line: step.line, raw: step.raw } : null,
           target: targetOf(task.auto),
@@ -605,11 +673,8 @@ export const buildView = (
         due: null,
         pr: autoPr(task.auto, s),
         agent: task.auto === null || task.auto.agent === 'claude' ? '' : task.auto.agent,
-        // Only Claude's sessions reopen with `claude --resume`.
-        resume:
-          auto === 'ended' && task.auto?.agent === 'claude' && task.auto.resume
-            ? resumeCommand(task.auto.resume, task.auto.dir)
-            : null,
+        // Only an agent whose resume by id is known gets a command.
+        resume: auto === 'ended' && task.auto?.resume ? resumeCommand(task.auto.resume, task.auto.dir, task.auto.agent) : null,
         handoff: handoffOf(task),
         archive:
           isManual && task.line >= 0
