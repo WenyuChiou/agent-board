@@ -47,6 +47,43 @@ conversation. Do not build UI that implies delivery.
   user's explicit consent for that specific change and its test results,
   whatever the board shows.
 
+## Tell a web chat agent how (paste this)
+
+A web chat agent (Muse, ChatGPT's dots, any assistant in a browser) cannot open
+FORMAT.md, and left to guess it writes its own markers (seen live:
+`<!-- block-start … -->`, `<!-- agent-board:start … -->`), which the merge
+refuses. Paste this once at the start of the chat, with `muse` replaced by
+the agent's name and `api-gateway` by the project:
+
+````text
+While you work on this with me, keep a progress block for my Agent Board.
+At the start, pick an id of 8 random hex characters and keep it for this whole chat.
+Each time the state of the work changes (a step done, a question for me, finished),
+end your reply with the whole block, exactly in this shape, in a code block:
+
+## api-gateway
+<!-- auto session=ID agent=muse state=working updated=YYYY-MM-DDTHH:MM:SSZ -->
+### The outcome, in plain words
+> Context: one line on why this work exists
+- [x] A finished step
+- [~] The step you are on
+- [?] A step that needs me — one line I can follow without reading the chat
+- [ ] The next step
+<!-- /auto session=ID -->
+
+Rules: the two marker lines exactly as shown, ID replaced by your id, `updated=` in UTC
+ending in Z. state= is working while you work, waiting when you end a reply asking me
+something, done when every step is done, ended if we stop with steps left.
+Marks: [x] done, [~] doing, [ ] todo, [?] needs me, [>] waiting on someone else,
+[!] blocked, [-] cancelled. A yes/no question ends in "OK?"; a choice is two short
+options and a question mark ("100 or 300?").
+````
+
+Save each block it gives you as a file and merge it: `python3
+scripts/remote-reporter/merge.py ~/.claude/progress.md fragment.md` (`validate.py
+fragment.md` first if you like). Merging the same session's block again replaces
+it.
+
 ## Transports (the user's choice)
 
 The reporter writes a fragment file; something must carry it to the board's

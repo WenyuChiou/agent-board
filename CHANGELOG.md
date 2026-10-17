@@ -1,6 +1,30 @@
 # Changelog
 
-## Unreleased
+## 0.17.0 — 2026-10-17
+
+Brings the fixes below to existing installs (`claude plugin update` only
+picks up a new version), and fixes what the live Muse, dot, Cursor and Hermes
+runs on Windows found.
+
+- **`/progress tidy` archives finished work now**, as the README says, and so
+  does the pane's archive button: a block marked done a minute ago goes at
+  once, a hand-kept task with every step ticked too. The half-day wait stays
+  for the automatic tidy, and a stopped session still gets its three days.
+  Test: "asked to tidy, a block done a minute ago goes now, while a stopped
+  one still gets its three days".
+- **A `~/.grok` folder is not taken for Grok Build** unless Grok itself wrote
+  in it (`.metadata_version`, `agent_id` or `sessions`): another tool's hooks
+  there made connect say "Connected: Grok Build" with no Grok installed. Test:
+  "a ~/.grok that only another tool put hooks in is not taken for Grok
+  Build".
+- **A web chat agent gets one prompt to paste.** Muse and dot, with no copy of
+  FORMAT.md, invented their own markers and the merge refused them;
+  `docs/REMOTE_REPORTERS.md` now has the prompt with the exact block, checked
+  with `validate.py` and `merge.py`, and the READMEs point dot and Muse on the
+  web to it.
+- The guides say why Cursor on Windows can stop at "blocked" (another tool's
+  PowerShell hook run through bash) and why a one-off `hermes -q` question
+  shows as stopped.
 
 - **Hardening from a review of the whole plugin.**
   - **Home folders with Chinese names.** On Windows, agents' turns now reach

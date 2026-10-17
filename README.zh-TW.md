@@ -9,7 +9,7 @@ Claude Code 外掛，也跟得上 Codex、Gemini CLI、Cursor、OpenCode、Grok 
 
 <p align="center">
 <a href="https://github.com/WenyuChiou/agent-board/actions/workflows/test.yml"><img alt="測試" src="https://github.com/WenyuChiou/agent-board/actions/workflows/test.yml/badge.svg"></a>
-<a href="CHANGELOG.md"><img alt="版本 0.16.0" src="https://img.shields.io/badge/version-0.16.0-blue"></a>
+<a href="CHANGELOG.md"><img alt="版本 0.17.0" src="https://img.shields.io/badge/version-0.17.0-blue"></a>
 <a href="LICENSE"><img alt="MIT 授權" src="https://img.shields.io/badge/license-MIT-green"></a>
 <img alt="macOS、Linux、Windows" src="https://img.shields.io/badge/macOS%20%C2%B7%20Linux%20%C2%B7%20Windows-lightgrey">
 </p>
@@ -32,7 +32,7 @@ Claude Code 外掛，也跟得上 Codex、Gemini CLI、Cursor、OpenCode、Grok 
 | <img src="docs/images/agents/cursor.svg" width="24" alt=""> | **Cursor** | `afterAgentResponse` hook | 不用做什麼 | 依 Cursor 文件實作 |
 | <img src="docs/images/agents/muse-code.svg" width="24" alt=""> | **Muse Code** | `Stop` hook | 不用做什麼 | 依 Muse 文件實作 |
 | | **Antigravity** | 還不會回報（沒有回合結束的 hook） | 不用做什麼：它會有 `/agent-board` 看看板 | 按它的文件實作 |
-| | **dot** | 本機交換（自行選用） | 見 [docs/LOCAL-EXCHANGE.md](docs/LOCAL-EXCHANGE.md) | 只測過檔案約定 |
+| | **dot**、網頁版 **Muse**、其他網頁聊天 | 在聊天裡寫出自己的區塊，你再合併進來 | 把[一段提示](docs/REMOTE_REPORTERS.md#tell-a-web-chat-agent-how-paste-this)貼進聊天 | ✅ dot、Muse（網頁） |
 | | **其他 agent**（Aider、Copilot、Windsurf…） | 自己寫一塊進度 | 把 [AGENTS.md](AGENTS.md) 的一段貼進它的說明檔 | |
 
 「實測過」是指：真的 CLI 跑了一個回合，它的 hook 有觸發，面板也從中畫出正確的一塊進度。那些真實資料都留在測試裡。

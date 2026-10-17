@@ -1209,6 +1209,7 @@ test('/progress connect hooks the installed agents into the pane once, keeps the
       ['/home/me/.codex/config.toml', 'model = "gpt-6"\n'],
       ['/home/me/.codex/AGENTS.md', `# Mine\n\nUse tabs.\n\n${section}`],
       [oldGrok, '{"hooks":{}}'],
+      ['/home/me/.grok/.metadata_version', '3'],
       ['/home/me/.cursor/hooks.json', JSON.stringify({ version: 1, hooks: { stop: [{ command: 'say done' }] } })],
       ['/home/me/.gemini/settings.json', '{ // my comment\n "theme": "dark" }'],
     ]),
@@ -1691,6 +1692,14 @@ test('an OpenClaw updated since it last saved its config is hooked in, since the
   expect(world.ran).toContainEqual(['openclaw', '--version'])
   expect(JSON.parse(world.files.get('/home/me/.openclaw/openclaw.json') ?? '{}').plugins.entries['agent-board']).toEqual({ enabled: true, hooks: { allowConversationAccess: true } })
   expect(seen.notified).toEqual(['已自動接上：OpenClaw。重開它們之後，每個回合都會出現在這裡。'])
+})
+
+test('a ~/.grok that only another tool put hooks in is not taken for Grok Build', async ($, on) => {
+  const world: World = { files: new Map([['/home/me/.grok/hooks/orca.json', '{"hooks":{}}']]), mtime: 1, hasTasks: true, ran: [] }
+  engineBeneath(on, world)
+  const connected = await $.command.run({ ...TIDY, args: 'connect' })
+  expect(connected.text).toContain('沒找到可以接的 agent')
+  expect(world.files.has('/home/me/.grok/hooks/agent-board.json')).toBe(false)
 })
 
 test('an agent already hooked in is left as it is, and nothing is said', async ($, on) => {

@@ -9,7 +9,7 @@ A Claude Code plugin that also follows Codex, Gemini CLI, Cursor, OpenCode, Grok
 
 <p align="center">
 <a href="https://github.com/WenyuChiou/agent-board/actions/workflows/test.yml"><img alt="Tests" src="https://github.com/WenyuChiou/agent-board/actions/workflows/test.yml/badge.svg"></a>
-<a href="CHANGELOG.md"><img alt="Version 0.16.0" src="https://img.shields.io/badge/version-0.16.0-blue"></a>
+<a href="CHANGELOG.md"><img alt="Version 0.17.0" src="https://img.shields.io/badge/version-0.17.0-blue"></a>
 <a href="LICENSE"><img alt="MIT license" src="https://img.shields.io/badge/license-MIT-green"></a>
 <img alt="macOS, Linux, Windows" src="https://img.shields.io/badge/macOS%20%C2%B7%20Linux%20%C2%B7%20Windows-lightgrey">
 </p>
@@ -32,7 +32,7 @@ You have Claude Code on one project, Codex on another, Gemini on a third. Twenty
 | <img src="docs/images/agents/cursor.svg" width="24" alt=""> | **Cursor** | `afterAgentResponse` hook | Nothing | Built from Cursor's docs |
 | <img src="docs/images/agents/muse-code.svg" width="24" alt=""> | **Muse Code** | `Stop` hook | Nothing | Built from Muse's docs |
 | | **Antigravity** | Does not report yet (no turn-end hook) | Nothing: it gets `/agent-board` to see the board | Built from its docs |
-| | **dot** | Local exchange (opt-in) | See [docs/LOCAL-EXCHANGE.md](docs/LOCAL-EXCHANGE.md) | File contract only |
+| | **dot**, **Muse** on the web, other web chats | Writes its block in the chat; you merge it | Paste [one prompt](docs/REMOTE_REPORTERS.md#tell-a-web-chat-agent-how-paste-this) into the chat | ✅ dot, Muse (web) |
 | | **Any other agent** (Aider, Copilot, Windsurf…) | Writes its own block | Paste one section of [AGENTS.md](AGENTS.md) into its instructions | |
 
 "Tested live" means the real CLI ran a turn, its hook fired, and the pane drew the right block from it. Those payloads are kept as tests.

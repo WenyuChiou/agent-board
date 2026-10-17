@@ -1144,7 +1144,8 @@ test('a Hermes hook of ours rewritten in block style comes out whole, so connect
 
 test('only the end of a long session log is read, so a tens-of-megabytes Codex log stays quick', () => {
   const line = (role: string, text: string) => JSON.stringify({ type: 'response_item', payload: { type: 'message', role, content: [{ type: 'input_text', text }] } })
-  const filler = Array.from({ length: 50000 }, (_, index) => line(index % 2 === 0 ? 'user' : 'assistant', `step ${index} ${'x'.repeat(400)}`)).join('\n')
+  // One user and one reply line, repeated: building the log stays cheap, reading it would not.
+  const filler = `${line('user', `step ${'x'.repeat(400)}`)}\n${line('assistant', `done ${'x'.repeat(400)}`)}\n`.repeat(25000).trimEnd()
   const log = `${filler}\n${line('user', 'Add rate limiting')}\n${line('assistant', 'Done. 100 or 300?')}\n`
   expect(log.length).toBeGreaterThan(20_000_000)
   expect(transcriptTail(log)).toEqual({ prompt: 'Add rate limiting', answer: 'Done. 100 or 300?' })

@@ -250,10 +250,12 @@ export const extractAutoBlock = (text: string, sessionId: string): string | null
 // Done blocks leave after half a day; anything else (ended, or a session that stopped
 // writing) after three days without a word, so the file never fills up with old work. A
 // block that gives no time (another tool's, written by hand) is never aged out.
-export const isArchivable = (span: BlockSpan, now: number): boolean => {
+// `isNow` is the person asking (`/progress tidy`, the pane's archive button): finished work
+// goes at once instead of after half a day; a stopped session still gets its three days.
+export const isArchivable = (span: BlockSpan, now: number, isNow = false): boolean => {
   if (span.updated <= 0) return false
   const age = now - span.updated
-  if (span.state === 'done') return age > DAY / 2
+  if (span.state === 'done') return isNow || age > DAY / 2
 
   return age > 3 * DAY
 }
@@ -262,9 +264,9 @@ export type Archived = { text: string; entries: string[] }
 
 // Moves old blocks out; each entry is the block without its markers, under a dated heading,
 // ready to append to progress-archive.md.
-export const takeArchivable = (text: string, now: number, keep?: string, s: Strings = ZH_TW): Archived => {
+export const takeArchivable = (text: string, now: number, keep?: string, s: Strings = ZH_TW, isNow = false): Archived => {
   const lines = linesOf(text)
-  const spans = scanBlocks(lines).filter(span => span.isClosed && span.session !== keep && isArchivable(span, now))
+  const spans = scanBlocks(lines).filter(span => span.isClosed && span.session !== keep && isArchivable(span, now, isNow))
   if (spans.length === 0) return { text, entries: [] }
   const entries = spans.map(span => {
     const body = lines.slice(span.start + 1, span.end)

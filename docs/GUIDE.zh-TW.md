@@ -281,4 +281,6 @@ claude -p "/progress connect"
 - **私人 fork。** Claude Code 用你自己的 git 認證 clone。執行一次 `gh auth login` 和 `gh auth setup-git`；沒有 GitHub SSH key 的話，再設 `CLAUDE_CODE_PLUGIN_PREFER_HTTPS=1`。
 - **你的組織統一管理 Claude Code。** 在那種環境裡，你自己裝的外掛收不到系統提示的 hook。執行設定腳本時加 `-KeepRule`（`--keep-rule`），改把規則留在 `~/.claude/CLAUDE.md`。
 - **某個 agent 沒出現。** 再跑一次 `/progress connect`：它會列出接上了哪些 agent，以及哪些設定檔改不了。重開那個 agent，並在它工作時開著一個 Claude Code 對話。開著的對話讀完 `~/.claude/progress-inbox/` 裡的檔案就會刪掉，所以要看 hook 存了什麼，先關掉所有對話：回合結束後那裡沒有新檔案，就是那個 agent 的 hook 沒有執行。
+- **Windows 上的 Cursor 停在「blocked」。** `cursor-agent` 一律用 bash 跑 hook，連寫給 PowerShell 的也是，所以 `~/.cursor/hooks.json` 裡其他工具的 PowerShell hook 會出現 `syntax error near unexpected token '&'`；`preToolUse` hook 失敗會擋住整個回合（Agent Board 的 hook 根本輪不到）。修好或拿掉那個工具的 hook。
+- **Hermes Agent 單次執行的問題顯示成已停，不是等你。** `hermes -q` 回合一結束就關掉對話，所以問你事情的那塊會顯示「對話已結束，可接手」。問題仍是最後一步；長時間開著的 Hermes（它的 gateway）就會維持等你。
 - **換了一台電腦。** `progress.md`、收件匣和 hook 都只在各自的電腦上。在新電腦安裝並執行 `/progress connect`；要帶上紀錄，就把 `progress.md` 和旁邊的 `progress-archive-*.md`、`progress-journal-*.md` 複製過去。要兩台共用一個面板，就在兩台都把 `CLAUDE_PROGRESS_FILE` 指向同步資料夾裡的同一個檔案，並且一次只用一台。

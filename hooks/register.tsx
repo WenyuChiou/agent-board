@@ -943,7 +943,8 @@ const writeHandoff = async ($: EngineInterface, summary: string): Promise<void> 
 // Old work moves to that month's archive file, so the file stays about what is open: done
 // blocks after half a day, stopped ones after three, hand-kept tasks a day after the pane saw
 // their last step ticked.
-const archiveOld = async ($: EngineInterface): Promise<number> => {
+// `isNow`: the person asked (`/progress tidy`, the archive button), so finished work goes now.
+const archiveOld = async ($: EngineInterface, isNow = false): Promise<number> => {
   const path = await progressPath($)
   const mirror = await read($, mine)
   const keep = mirror === null ? undefined : shortId(mirror.sessionId)
@@ -953,8 +954,9 @@ const archiveOld = async ($: EngineInterface): Promise<number> => {
   const archived = new Set<string>()
   const keys = new Set<string>()
   await rewrite($, path, async text => {
-    const blocks = takeArchivable(text, at, keep, s)
-    const manual = takeManualDone(blocks.text, at, key => seen[key], s)
+    const blocks = takeArchivable(text, at, keep, s, isNow)
+    // A hand-kept task the pane has not seen done yet counts as seen a day ago when asked.
+    const manual = takeManualDone(blocks.text, at, key => (isNow ? Math.min(seen[key] ?? at, at - DAY) : seen[key]), s)
     const entries = [...blocks.entries, ...manual.entries]
     if (entries.length === 0) return null
     // Made again after another session's write, the same blocks are not archived twice.
@@ -1290,7 +1292,7 @@ export const register: Register = (on, options) => {
     }
     const s = await wordsOf($)
     if (/^(整理|archive|tidy)$/i.test(arg)) {
-      const moved = await enqueue(() => archiveOld($)).catch(() => null)
+      const moved = await enqueue(() => archiveOld($, true)).catch(() => null)
       if (moved === null) return { text: s.tidyUnreadable }
 
       return { text: moved === 0 ? s.tidyNothing : s.tidyMoved(moved) }
@@ -1577,7 +1579,7 @@ export const register: Register = (on, options) => {
         $.prompt.submit({ text: s.continueText }).catch(() => undefined)
       },
       archive: () => {
-        enqueue(() => archiveOld($)).catch(() => undefined)
+        enqueue(() => archiveOld($, true)).catch(() => undefined)
       },
       archiveRow: row => {
         const ref = row.archive
