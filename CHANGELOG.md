@@ -1,5 +1,20 @@
 # Changelog
 
+## Unreleased
+
+- **Terminal history survives read and write failures.** Only `ENOENT` is treated
+  as a missing file. Unreadable progress/archive/journal files abort the action;
+  failed writes report the path and error with a nonzero `--keys` exit instead of
+  claiming success. History is saved before the board changes, so a later failure
+  can leave an extra history entry; retrying an archive does not duplicate that
+  entry. Replacements retain POSIX permission bits and clean up owned temp files.
+  Tests: "an EACCES reading the archive aborts the action and preserves every
+  existing file", "a failed journal temp write preserves old bytes and reports
+  incomplete persistence", "an archive saved before a failed board replacement
+  survives retry without a duplicate entry", "an archive entry with a longer last
+  step does not suppress a distinct shorter task", and "replacing board and history
+  retains their POSIX permission bits despite a restrictive umask".
+
 ## 0.18.1 — 2026-10-17
 
 What the scan after the 0.17.1 merge left open, most harmful first.

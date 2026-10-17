@@ -297,4 +297,5 @@ export const EN: Strings = {
   boardCopied: (text: string): string => `Copied: ${text}`,
   boardCopyFailed: (text: string): string => `Couldn't reach the clipboard; copy it yourself: ${text}`,
   boardWriteFailed: "Couldn't write the progress file; nothing changed.",
+  boardStorageFailed: (file: string, code: string): string => `Could not safely read or update ${file} (${code}). Some files may already have changed. Check the board and history, fix the file access or disk problem, then retry.`,
 }
