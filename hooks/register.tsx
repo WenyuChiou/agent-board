@@ -21,6 +21,7 @@ import {
   appendJournal,
   countDay,
   journalLine,
+  archivePath,
   journalPath,
   localDay,
   parseJournal,
@@ -175,7 +176,6 @@ const findProgressPath = async ($: EngineInterface): Promise<string> => {
 
 // One archive file per month (progress-archive-2026-10.md), so none grows past what one
 // read can hold.
-const archivePath = (path: string, now: number): string => `${path.replace(/\.md$/i, '')}-archive-${localDay(now).slice(0, 7)}.md`
 
 // Where other agents' hooks leave their turns: a folder beside progress.md.
 const inboxPath = (path: string): string => {

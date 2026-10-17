@@ -22,6 +22,9 @@ const localStamp = (now: number): string => {
   return `${localDay(now)} ${pad(date.getHours())}:${pad(date.getMinutes())}`
 }
 
+// This month's archive beside progress.md, where finished work moves.
+export const archivePath = (progressPath: string, now: number): string => `${progressPath.replace(/\.md$/i, '')}-archive-${localDay(now).slice(0, 7)}.md`
+
 export const journalPath = (progressPath: string, now: number): string =>
   `${progressPath.replace(/\.md$/i, '')}-journal-${localDay(now).slice(0, 7)}.md`
 

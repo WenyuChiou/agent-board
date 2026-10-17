@@ -2,7 +2,7 @@ import { expect, test } from 'claude-code/testing'
 
 import type { ProgressMirror, ProgressPr } from '../types'
 import { askOf } from '../hooks/ask'
-import { boardText, fit, peekInbox } from '../hooks/board'
+import { boardItems, boardKey, boardScreen, boardText, emptyBoardState, fit, peekInbox } from '../hooks/board'
 import { addManualTask, isArchivable, manualTaskCount, renderAutoBlock, setManualStep, takeArchivable, takeManualDone, takeTask, upsertAutoBlock } from '../hooks/blocks'
 import { agentHooks, boardCommands, boardScript, DELETE, isWindowsHost, openclawPlugin, openclawPrinted, openclawSavedBy, openclawTooOld, readConfig, reportCommand, reporterPs1, withFlatHook, withGroupedHook, withHermesHooks, withoutHermesHooks, withoutOurHooks, withoutSection } from '../hooks/connect'
 import { dashboardHtml } from '../hooks/dashboard'
@@ -1164,4 +1164,60 @@ test('Hermes hooks of ours that Hermes rewrote in block style are left as they a
 test('a comment after an empty Hermes hooks: {} stays when ours go in under it', () => {
   const turn = "sh '/h/.claude/progress-report.sh' hermes turn || true"
   expect(withHermesHooks('hooks: {} # my note\n', [['post_llm_call', turn]])).toContain('hooks: # my note\n  post_llm_call:\n')
+})
+
+const WORK_FILE = `${BOARD_FILE}
+## Job search
+### Fabrikam fellowship
+- [x] Draft the statement
+- [ ] Ask two referees
+
+## docs-site
+<!-- auto session=b2c3d4e5 agent=gemini state=ended updated=2026-10-16T10:00:00Z -->
+### Fix the broken links
+- [ ] Fix them
+<!-- /auto session=b2c3d4e5 -->
+`
+
+test('on the board you work in, each line offers what the pane offers: answers to copy, a step to tick, a block to archive', () => {
+  const now = Date.parse('2026-10-17T08:45:00Z')
+  const view = buildView(parseProgress(WORK_FILE), [], null, now, 0, {}, STRINGS.en)
+  const items = boardItems(view, [])
+  const kinds = items.map(item => (item.type === 'row' ? `row:${item.row.title}` : item.type))
+  expect(kinds[0]).toBe('ask')
+  const job = kinds.indexOf('row:Fabrikam fellowship')
+  const docs = kinds.indexOf('row:Fix the broken links')
+  // Another agent's question: its answers are copied, to paste into that agent.
+  expect(boardKey(emptyBoardState, '2', items, STRINGS.en).action).toEqual({ type: 'copy', text: '300 a minute' })
+  expect(boardKey(emptyBoardState, 'x', items, STRINGS.en).action).toBeNull()
+  // A hand-kept task: x ticks its next step, the exact line it showed.
+  const onJob = { ...emptyBoardState, selected: job }
+  expect(boardKey(onJob, 'x', items, STRINGS.en).action).toMatchObject({ type: 'tick', ref: { project: 'Job search', title: 'Fabrikam fellowship', step: 'Ask two referees' } })
+  // A stopped session's block can be archived; a live one cannot.
+  expect(boardKey({ ...emptyBoardState, selected: docs }, 'a', items, STRINGS.en).action).toMatchObject({ type: 'archive', title: 'Fix the broken links' })
+  const live = kinds.indexOf('row:Dark mode for the settings page')
+  expect(boardKey({ ...emptyBoardState, selected: live }, 'a', items, STRINGS.en).action).toBeNull()
+  // Arrows move and stop at the ends; Enter opens and closes the line.
+  expect(boardKey(emptyBoardState, 'up', items, STRINGS.en).state.selected).toBe(0)
+  expect(boardKey({ ...emptyBoardState, selected: items.length - 1 }, 'down', items, STRINGS.en).state.selected).toBe(items.length - 1)
+  const opened = boardKey(onJob, 'enter', items, STRINGS.en).state
+  expect(opened.open).toBe(items[job]?.key)
+  expect(boardKey(opened, 'enter', items, STRINGS.en).state.open).toBeNull()
+  expect(boardKey(onJob, 'q', items, STRINGS.en).action).toEqual({ type: 'quit' })
+})
+
+test('the board you work in marks the chosen line and lists only the keys that do something on it', () => {
+  const now = Date.parse('2026-10-17T08:45:00Z')
+  const view = buildView(parseProgress(WORK_FILE), [], null, now, 0, {}, STRINGS.en)
+  const items = boardItems(view, [])
+  const job = items.findIndex(item => item.type === 'row' && item.row.title === 'Fabrikam fellowship')
+  const onAsk = boardScreen(view, [], emptyBoardState, STRINGS.en, { width: 100, isColor: false })
+  expect(onAsk).toContain('› [Choose] Per-key limit')
+  expect(onAsk).toContain('    2 300 a minute')
+  expect(onAsk).toContain('1–2 copy answer · ↑↓ select')
+  const onJob = boardScreen(view, [], { selected: job, open: items[job]?.key ?? null, note: 'Copied: 300' }, STRINGS.en, { width: 100, isColor: false })
+  expect(onJob).toContain('› Fabrikam fellowship')
+  expect(onJob).toContain('    ✓ 1 Draft the statement')
+  expect(onJob).toContain('x done · a archive · ↑↓ select')
+  expect(onJob.trimEnd().endsWith('Copied: 300')).toBe(true)
 })

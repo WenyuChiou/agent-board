@@ -288,6 +288,18 @@ export const ZH_TW = {
   boardCommandPrompt: '把下面的 Agent Board 原樣放在程式碼區塊裡給我看，再用一句話說現在最需要我處理的是什麼。不要改任何檔案。',
   boardSkillPrompt: (command: string): string => `執行 \`${command}\`，把它印出的 Agent Board 原樣放在程式碼區塊裡給我看，再用一句話說現在最需要我處理的是什麼。不要改任何檔案。`,
   boardEverywhere: (path: string): string => `在其他 agent 裡看這個看板：Gemini CLI、OpenCode 打 /board，Codex 打 $agent-board，其他打 /agent-board；任何終端機：node "${path}" --watch`,
+  boardKeysMove: '↑↓ 選 · Enter 展開 · o 網頁 · q 離開',
+  boardKeyTick: 'x 完成這步',
+  boardKeyArchive: 'a 封存',
+  boardKeyCopyCommand: 'c 複製指令',
+  boardKeyCopyResume: 'c 複製續接指令',
+  boardKeyConfirm: 'y／n 複製回答',
+  boardKeyOptions: (n: number): string => `1–${n} 複製答案`,
+  boardTicked: (step: string): string => `已完成「${step}」。`,
+  boardTickGone: '找不到那一步，可能已經改過了。',
+  boardCopied: (text: string): string => `已複製：${text}`,
+  boardCopyFailed: (text: string): string => `沒辦法放進剪貼簿，請自己複製：${text}`,
+  boardWriteFailed: '寫不進進度檔，沒有改任何東西。',
 }
 
 export type Strings = typeof ZH_TW
