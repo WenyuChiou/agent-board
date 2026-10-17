@@ -161,7 +161,7 @@
 <text x="139.6" y="370" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#e6e4dc">▸</text></g>
 <rect class="sc fade" style="animation-name:k2" x="16" y="135" width="398.40000000000003" height="202" rx="6" fill="none" stroke="#00A3AF" stroke-width="2.4"/>
 <rect class="sc fade" style="animation-name:k3" x="16" y="235" width="112.80000000000001" height="22" rx="6" fill="none" stroke="#00A3AF" stroke-width="2.4"/>
-<g class="sc swap" style="animation-name:k4"><rect x="0" y="34" width="430.40000000000003" height="344" fill="#1e2022"/><path d="M26.2 356V350q0 -4 4 -4H30.4M30.4 346h369.6M400 346H400.2q4 0 4 4V356M26.2 356v20M404.2 356v20" fill="none" stroke="#6E7268" stroke-width="1.2" stroke-linecap="butt"/>
+<g class="sc swap" style="animation-name:k4"><rect x="0" y="34" width="430.40000000000003" height="344" fill="#1e2022"/><path d="M26.2 376V370q0 -4 4 -4H30.4M30.4 366h369.6M400 366H400.2q4 0 4 4V376" fill="none" stroke="#6E7268" stroke-width="1.2" stroke-linecap="butt"/>
 <text x="22.0" y="70" textLength="33.6" lengthAdjust="spacingAndGlyphs" fill="#e6e4dc" font-weight="700">进度</text>
 <text x="22.0" y="110" textLength="25.2" lengthAdjust="spacingAndGlyphs" fill="#F8B500">● 4</text>
 <text x="55.6" y="110" textLength="33.6" lengthAdjust="spacingAndGlyphs" fill="#e6e4dc">等你</text>
@@ -187,16 +187,21 @@
 <text x="22.0" y="230" textLength="16.8" lengthAdjust="spacingAndGlyphs" fill="#AFAFB0">25</text>
 <text x="47.2" y="230" textLength="50.4" lengthAdjust="spacingAndGlyphs" fill="#AFAFB0">分钟前</text>
 <text x="22.0" y="250" textLength="16.8" lengthAdjust="spacingAndGlyphs" fill="#AFAFB0">到</text>
-<text x="47.2" y="250" textLength="92.4" lengthAdjust="spacingAndGlyphs" fill="#AFAFB0">api-gateway</text>
-<text x="22.0" y="270" textLength="67.2" lengthAdjust="spacingAndGlyphs" fill="#AFAFB0">的对话（</text>
-<text x="89.2" y="270" textLength="42.0" lengthAdjust="spacingAndGlyphs" fill="#AFAFB0">codex</text>
-<text x="131.2" y="270" textLength="168.0" lengthAdjust="spacingAndGlyphs" fill="#AFAFB0">）回复，这里回不了。</text>
-<text x="22.0" y="310" textLength="33.6" lengthAdjust="spacingAndGlyphs" fill="#e6e4dc">还有</text>
-<text x="64.0" y="310" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#e6e4dc">3</text>
-<text x="80.8" y="310" textLength="50.4" lengthAdjust="spacingAndGlyphs" fill="#e6e4dc">件等你</text>
-<text x="139.6" y="310" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#e6e4dc">▸</text>
-<text x="38.8" y="370" textLength="210.0" lengthAdjust="spacingAndGlyphs" fill="#5C9291">acme-web · feat/dark-mode</text>
-<text x="366.4" y="370" textLength="25.2" lengthAdjust="spacingAndGlyphs" fill="#AFAFB0">4/5</text></g>
+<text x="38.8" y="250" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#AFAFB0">“</text>
+<text x="47.2" y="250" textLength="33.6" lengthAdjust="spacingAndGlyphs" fill="#AFAFB0">公开</text>
+<text x="89.2" y="250" textLength="25.2" lengthAdjust="spacingAndGlyphs" fill="#AFAFB0">API</text>
+<text x="22.0" y="270" textLength="50.4" lengthAdjust="spacingAndGlyphs" fill="#AFAFB0">加限流</text>
+<text x="72.4" y="270" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#AFAFB0">”</text>
+<text x="80.8" y="270" textLength="84.0" lengthAdjust="spacingAndGlyphs" fill="#AFAFB0">那个对话（</text>
+<text x="164.8" y="270" textLength="67.2" lengthAdjust="spacingAndGlyphs" fill="#AFAFB0">7f3c19ab</text>
+<text x="232.0" y="270" textLength="16.8" lengthAdjust="spacingAndGlyphs" fill="#AFAFB0">，</text>
+<text x="248.8" y="270" textLength="42.0" lengthAdjust="spacingAndGlyphs" fill="#AFAFB0">codex</text>
+<text x="290.8" y="270" textLength="117.6" lengthAdjust="spacingAndGlyphs" fill="#AFAFB0">）回复，这里回</text>
+<text x="22.0" y="290" textLength="50.4" lengthAdjust="spacingAndGlyphs" fill="#AFAFB0">不了。</text>
+<text x="22.0" y="330" textLength="33.6" lengthAdjust="spacingAndGlyphs" fill="#e6e4dc">还有</text>
+<text x="64.0" y="330" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#e6e4dc">3</text>
+<text x="80.8" y="330" textLength="50.4" lengthAdjust="spacingAndGlyphs" fill="#e6e4dc">件等你</text>
+<text x="139.6" y="330" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#e6e4dc">▸</text></g>
 <g class="sc fade" style="animation-name:k0"><rect x="0.5" y="312" width="429.40000000000003" height="65.5" fill="#1e2022"/><line x1="0.5" y1="312" x2="429.90000000000003" y2="312" stroke="#68BE8D" stroke-width="1.6"/><text x="22" y="342" font-weight="700" fill="#68BE8D">✓ 已回复 Claude：先开开关</text></g>
 <g class="sc swap" style="animation-name:k5"><rect x="0" y="34" width="430.40000000000003" height="344" fill="#1e2022"/><text x="22.0" y="90" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#e6e4dc">▾</text>
 <text x="38.8" y="90" textLength="67.2" lengthAdjust="spacingAndGlyphs" fill="#e6e4dc">等你处理</text>

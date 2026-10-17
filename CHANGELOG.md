@@ -24,6 +24,32 @@
   failed payload with the same name".
 
 
+
+## 0.19.3 — 2026-10-17
+
+The reply hint names the session that asked (#49).
+
+- **A question from another session says which session to answer in.** The hint under
+  it said "Reply in the <project> session", but several sessions often share one folder,
+  and the desktop app lists sessions by title, so the person could see the question and
+  not find where to answer it. It now names the task and the session's short ID, plus
+  the agent when it is not Claude: `Reply in the "Rate-limit the public endpoints"
+  session (7f3c19ab, codex). Can't reply from here.` The same words are in the pane, the
+  terminal board, `progress.html` and the board page, in all three languages.
+- **A Claude Code session's question offers its ID to copy.** The pane's item has a
+  **Copy session ID** button, and `c` on the terminal board copies it, so the person can
+  find that session in the session list or reopen it with `claude --resume`. The full ID
+  comes from the block's `resume=`; a block without one gives its short ID, and only when
+  that is a plain ID (6 to 64 letters, digits and dashes), since anyone can write the
+  file and the clipboard must not get a command dressed as an ID. Another agent's ID
+  finds no Claude Code session, so its question offers none. `docs/FORMAT.md` says so.
+- Tests: "an item from another session in the same folder names that session’s task
+  and id", "the terminal board, progress.html and the board page name the session that
+  asked, and c copies a Claude Code session’s id", "a Claude Code block with no resume id
+  offers its block id to copy only when it is a plain id", and "another agent’s question
+  is answered there, but its command can be copied and its link opened from here"
+  (changed).
+
 ## 0.19.2 — 2026-10-17
 
 Waiting on you lists only questions (#48).

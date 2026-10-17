@@ -122,9 +122,10 @@ export type ServeModel = {
   recent: Array<{ project: string; title: string; when: string }>
 }
 
-const infoOf = (mode: SendMode, agent: string, project: string, s: Strings): string => {
+// `task` and `session` name the Claude Code session to answer in, the way the pane does.
+const infoOf = (mode: SendMode, agent: string, task: string, session: string, s: Strings): string => {
   if (mode === 'open') return s.serveSendOpen(agent)
-  if (mode === 'claude') return s.replyElsewhere(project, '')
+  if (mode === 'claude') return s.replyElsewhere(task, session, '')
   if (mode === 'none') return s.serveSendNone(agent)
 
   return ''
@@ -159,7 +160,7 @@ export const serveModel = (view: View, pending: readonly PendingTurn[], s: Strin
         send,
         session: ask.target?.session ?? '',
         where: send === 'send' ? (ask.target?.dir ?? '') : '',
-        info: isManual ? '' : infoOf(send, ask.agent, ask.project, s),
+        info: isManual ? '' : infoOf(send, ask.agent, ask.task, ask.session, s),
         isSending: isSending(ask.target),
       })
       continue
@@ -191,7 +192,7 @@ export const serveModel = (view: View, pending: readonly PendingTurn[], s: Strin
         session: row.target?.session ?? '',
         where: send === 'send' ? (row.target?.dir ?? '') : '',
         // A row says why only when a reply could otherwise be expected here.
-        info: send === 'open' ? infoOf(send, row.agent, row.project, s) : '',
+        info: send === 'open' ? infoOf(send, row.agent, row.title, '', s) : '',
         isSending: isSending(row.target),
       })
       continue
@@ -204,7 +205,7 @@ export const serveModel = (view: View, pending: readonly PendingTurn[], s: Strin
       text: turn.text,
       isQuestion: turn.isQuestion,
       // A turn still in the inbox is from a session that has not closed (its end drops it).
-      info: turn.isQuestion ? infoOf(SENDERS.has(turn.agent) ? 'open' : 'none', turn.agent, turn.project, s) : '',
+      info: turn.isQuestion ? infoOf(SENDERS.has(turn.agent) ? 'open' : 'none', turn.agent, '', '', s) : '',
     })
   }
 
@@ -252,12 +253,13 @@ export const serveAction = (items: readonly BoardItem[], request: ServeRequest, 
   }
   if (request.type !== 'send') return { type: 'refuse', note: '' }
   const text = replyText(request.text)
-  if (item.type === 'turn') return { type: 'refuse', note: infoOf(SENDERS.has(item.turn.agent) ? 'open' : 'none', item.turn.agent, item.turn.project, s) }
-  const { agent, project, target } = item.type === 'ask' ? item.ask : item.row
+  if (item.type === 'turn') return { type: 'refuse', note: infoOf(SENDERS.has(item.turn.agent) ? 'open' : 'none', item.turn.agent, '', '', s) }
+  const { agent, target } = item.type === 'ask' ? item.ask : item.row
   // A hand-kept question is answered by ticking it: there is no one to send to.
   if (item.type === 'ask' && item.ask.where === 'manual') return { type: 'refuse', note: '' }
   const mode = target === null ? (agent === '' ? 'claude' : 'none') : sendMode(agent, target)
-  if (mode !== 'send' || target === null) return { type: 'refuse', note: infoOf(mode, agent, project, s) }
+  const title = item.type === 'ask' ? item.ask.task : item.row.title
+  if (mode !== 'send' || target === null) return { type: 'refuse', note: infoOf(mode, agent, title, item.type === 'ask' ? item.ask.session : '', s) }
   // Keys are a project and a title, which another session's block can take over between the
   // page's redraw and the press.
   if (request.session !== target.session) return { type: 'refuse', note: s.boardLineChanged }
@@ -265,7 +267,7 @@ export const serveAction = (items: readonly BoardItem[], request: ServeRequest, 
   // An answer goes with the question it answers, the way the pane words one for Claude.
   const question = item.type === 'ask' ? item.ask.text : item.row.steps.find(step => step.status === 'waiting')?.text
 
-  return { type: 'send', target, text: question === undefined ? text : s.answerText(question, text), title: item.type === 'ask' ? item.ask.task : item.row.title }
+  return { type: 'send', target, text: question === undefined ? text : s.answerText(question, text), title }
 }
 
 export type PageRequest = { method: string; host: string; origin: string; contentType: string; token: string }
