@@ -28,6 +28,90 @@
   each one can leave the board; and a reporter closes its session (`done` or
   `ended`) when the conversation ends. Docs only.
 
+## 0.20.2 — 2026-10-17
+
+What the reviews of 0.18.1 left open, most harmful first.
+
+- **A project named with a comment opening no longer hides the blocks after it.** A
+  folder name (Linux allows `<!--` in one) or a project typed into a quick add went into
+  its `##` heading as it was, and the reader then skipped every line up to the next
+  `-->`. The heading now writes `<!--` and `-->` as a space, as the heading for another
+  agent's turn in that folder already was, and keeps a leading `#` (`## #work` reads back
+  as `#work`). The section is found by the cleaned name, else by the name as an earlier
+  version wrote it, so a second session in that folder, Claude's or another agent's,
+  joins the same heading; a name with nothing left goes under the uncategorized
+  heading. A project whose name starts with a bracket (`（未分類）`, `(PFC)
+  notes`) is now matched by its whole name: it has no first word, so before, every such
+  heading was taken for one project, and a session with no folder joined `## (PFC)
+  notes`. Tests: "a project folder or quick-add project named with a comment opening
+  hides no block after its heading, and keeps one heading", "a folder with a comment mark
+  in its name gets one heading, whether a Claude session or another agent writes there
+  first", "a project heading an earlier
+  version wrote, with a leading # or an arrow in it, is still joined, and a project of
+  only marks goes under the uncategorized one", "a project whose name starts with a
+  bracket is matched whole, so the uncategorized heading never joins another one".
+- **What the user asked reaches the model fenced when a task is named and named
+  again.** 0.18.1 fenced the request in the prompt that sums up a turn; the prompts that
+  name a task, and look at its name again three steps later, still sent it bare. They
+  now put it between `<request>` tags too, in all three languages, with no tag inside
+  that could close the fence early. Tests: "what the user asked reaches the model fenced
+  as data when the task is named and named again, in every language", "the request a
+  task is named and named again from stays inside its fence, whatever tags it holds".
+- **A connect run by hand takes the language picked in another session.** Whether the
+  person had picked a language was read once, when the session started, so a session
+  started before another session's `/progress lang auto` wrote the board script and
+  skills in its own language at a `/progress connect`. The plugin's `language` option
+  and the stored `/progress lang` are now read at the connect itself. Test: "a connect
+  run by hand takes the language another session picked after this one started, auto
+  included".
+- **`Status:` and `Summary:` lead into a printed board, like `Here is where things
+  stand:`.** A reply that opens with one of them before the board is a look, not work.
+  A lead saying something was done is still work, in English now too (`Status: fixed
+  429:`, `Progress after I added the tests:`); `updated` is not counted, since `Here's
+  the updated board:` is a look. `了` still makes a lead work: after any verb it says
+  something was done (`目前改了 429 看板如下：`), and narrowing it to `好了` and `完成了`
+  would drop that turn's work to spare a block. The captured Grok Build replies have no
+  lead line, so they still count as looks. Test: "a status or summary line that leads
+  into the board is a look, while a lead saying something was changed is still work".
+- **The guide names the plugin's Pane language for the board script.** The sentence on
+  `--lang` named only `/progress lang`; the **Pane language** option in `/config` comes
+  before it, and the three guides now say so. The order was already right in the code;
+  a test now pins it: "the plugin’s language option gives the board script and skill
+  their language ahead of the one /progress lang last picked".
+- **A remote reporter's merge cannot open a comment in a heading either.** `merge.py`
+  wrote a new block's `## <project>` heading from the fragment's first line or from
+  `--under` as it was, so a heading holding `<!--` hid the blocks after it, the way the
+  first entry above describes. It now refuses a heading holding `<!--` or `-->`, as
+  `reporter.py` already refused one in `BOARD_PROJECT`. Test: "8k a new heading with a
+  comment opening or close is refused", for both marks, through `--under` and through
+  the fragment's own heading.
+
+## 0.20.1 — 2026-10-17
+
+- **Terminal history survives read and write failures.** Only `ENOENT` is treated
+  as a missing file. Unreadable progress/archive/journal files abort the action;
+  failed writes report the path and error with a nonzero `--keys` exit instead of
+  claiming success. History is saved before the board changes, so a later failure
+  can leave an extra history entry; retrying an archive does not duplicate that
+  entry. Replacements retain POSIX permission bits and clean up owned temp files.
+  Tests: "an EACCES reading the archive aborts the action and preserves every
+  existing file", "a failed journal temp write preserves old bytes and reports
+  incomplete persistence", "an archive saved before a failed board replacement
+  survives retry without a duplicate entry", "an archive entry with a longer last
+  step does not suppress a distinct shorter task", and "replacing board and history
+  retains their POSIX permission bits despite a restrictive umask".
+- **The board's page says the same.** A tick, archive, tidy or pasted block on
+  the page that meets a file it cannot read or write is answered with that file
+  and its error, shown as a failure, instead of a bare server error; a board it
+  cannot read is named the same way instead of being shown as offline. A phone
+  opened with `--lan` is told the file's name only, not its folder. Its archive
+  and tidy, like the terminal board's archive, skip an entry the archive already
+  holds. `--html` names `progress.html` when it cannot write it. Tests: "a press
+  on the page that cannot write its history is answered with that file and its
+  error, and progress.md is left as it was", and "a board the page cannot read is
+  named there with that file and its error, rather than shown as offline, and a
+  phone is told the file name only".
+
 ## 0.20.0 — 2026-10-17
 
 - **The board's page can be opened from a phone on the same Wi-Fi.**

@@ -219,13 +219,17 @@ hook 运行的是 `/progress connect` 写好的 `~/.claude/progress-report.sh`�
 
 Gemini CLI 和 OpenCode 会自己把看板贴进提示；用技能（skill）的，则是 agent 运行脚本再把打印的内容给你看。Codex、Gemini CLI、OpenCode 实际运行过（接测试用的假模型，见下图）；Cursor、Grok Build、OpenClaw、Hermes Agent、Antigravity 的技能按它们文档写的位置放，没有实际运行过。Antigravity 只能看看板：它还没有回合结束的 hook 可以汇报。
 
-在终端：`node ~/.claude/agent-board.mjs` 打印一次看板，`--watch` 一直开着、每 2 秒重画（分屏放在 Codex 旁边），`--html` 写出 `progress.html` 并在浏览器打开。`--lang zh-CN`（或 `en`、`zh-TW`）选语言；默认用你最后用 `/progress lang` 选的语言（选 `auto` 时是那个对话的语言）；没选过就用第一个写出它的 Claude Code 对话的语言。
+在终端：`node ~/.claude/agent-board.mjs` 打印一次看板，`--watch` 一直开着、每 2 秒重画（分屏放在 Codex 旁边），`--html` 写出 `progress.html` 并在浏览器打开。`--lang zh-CN`（或 `en`、`zh-TW`）选语言；默认用你给面板选的语言：先看 `/config` 里这个插件的 **Pane language**，再看你最后用 `/progress lang` 选的语言（选 `auto` 时是那个对话的语言）；都没选过就用第一个写出它的 Claude Code 对话的语言。
 
 在终端里，`--watch` 也能用按键操作，就像面板能点：↑↓ 和 Enter 选一行并展开、`x` 勾掉手写工作的下一步、`a` 归档手写的工作或已停对话的区块（做完的会自己归档）、`1`–`9` 或 `y`／`n` 复制另一个 agent 问题的答案、`c` 复制命令或提问那个 Claude Code 对话的 ID、`o` 打开网页版、`q` 退出。除了这几个，看板只读不写。其他 agent 的 hook 留在收件箱的回合，要有开着的 Claude Code 对话才会整理成步骤；在那之前，看板照原样列出它们，问题排最前面。只是看看板的回合，不算工作。
 
 `--serve` 先打印看板，再在浏览器打开它的网页，同样的事在那里点一下就好：勾步骤、归档一件工作或全部做完的、复制答案或命令、回复已经结束的 Grok Build 或 Codex 对话（在那个对话自己的文件夹里，一次一条），以及贴上网页聊天写的区块。上面每个看板命令都会运行它，所以 agent 给你看的最后一行就是网址。网页只在 127.0.0.1 上提供，网址里带一把随机钥匙，30 分钟没人看就会关；详见[看板的网页](../README.zh-CN.md#看板的网页)。agent 回的话等它回来才会出现在网页上，可能要几分钟；还有一条在路上时，网页不会关。agent 若在沙箱里运行命令，可能不允许开网页：看板照样打印，最后一行会说网页打不开。这时自己在终端运行 `node ~/.claude/agent-board.mjs --serve`。
 
 要从同一个 Wi-Fi 上的手机看网页，加上 `--lan`：`node ~/.claude/agent-board.mjs --serve --lan` 还会打印网页在你网络上的网址，和一个手机相机扫了就能打开的二维码。那个网页有自己的钥匙，10 分钟没有手机来看就会关。手机在那里能勾步骤、归档、复制、贴上区块，但回复 agent 要从电脑上发。只在信得过的网络上用，原因见[看板的网页](../README.zh-CN.md#看板的网页)。
+
+如果终端看板读不到或存不了某个文件，它会在 stderr 打印完整路径和文件系统的错误；用 `--keys` 时会以状态 1 退出。只有文件不存在（`ENOENT`）才当成空的。先修好文件权限或腾出磁盘空间，看一下 `progress.md` 和那个月的归档与日志，再重试。`--watch` 每次重画都会再读一次，权限恢复后就会自己好。
+
+终端会先把完成的那一步写进日志，才勾掉那一步；先把工作写进归档，才把它从文件里拿掉。所以之后写看板如果失败，可能会同时留下历史记录和原来的工作，这时它会说没有全部存好，而不是说成功。重试归档时，已经存过一模一样的那一条会跳过。这不是跨文件的事务，也不是跨程序的锁，挡不住别的程序覆盖一次成功的更新。换文件时会保留原来 POSIX 的读、写、执行权限，新的历史文件只有你自己能读；文件的所有者、扩展 ACL 和崩溃后数据一定还在，这次都不保证。
 
 <img alt="终端里的看板，每 2 秒重画" src="images/live/terminal-zh-TW.png" width="560">
 <img alt="OpenCode 1.19.3：/board" src="images/live/opencode-zh-TW.png" width="560">
