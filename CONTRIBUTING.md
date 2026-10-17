@@ -47,10 +47,10 @@ The images in `docs/images/` are drawn by the pane's own code from the sample da
 
 ```
 bun docs/preview/render.ts     # the SVGs: the tour, how it works, the promotional card, the agent icons
-node docs/preview/png.mjs      # the social preview PNGs from the promotional cards; needs Playwright
+node docs/preview/png.mjs      # the social preview PNGs from the promotional cards; needs Playwright and Node 22.2+
 ```
 
-`render.ts` needs `.claude-plugin/types/` (run `claude --plugin-dir .` once) for its JSX setting. `terminal.ts` is the small layout engine that turns `drawPane`'s tree into a character grid and the grid into SVG.
+`render.ts` needs `.claude-plugin/types/` (run `claude --plugin-dir .` once) for its JSX setting. It ends by running `docs/preview/fonts.py`, which puts the letters each SVG uses into it (Inter, JetBrains Mono, Noto Sans TC and SC, all under the SIL Open Font License), since GitHub shows an SVG as an image and an image cannot load a font. That needs Python 3 with fontTools 4.60 or newer (`pip install "fonttools>=4.60" brotli`); the first run downloads the fonts into `docs/preview/out/fonts/`. `terminal.ts` is the small layout engine that turns `drawPane`'s tree into a character grid and the grid into SVG.
 
 ## Releases
 
@@ -58,9 +58,10 @@ To release, in this order:
 
 1. Raise `version` in `.claude-plugin/plugin.json`. Installed copies only update when it changes.
 2. Add an entry to `CHANGELOG.md`, newest first, headed `## x.y.z — YYYY-MM-DD`. Name the tests that cover each change.
-3. Run the checks above.
-4. Push.
-5. `claude plugin tag .`, then `git push --tags`.
+3. After the last merge of `main`, run `bun scripts/build-released.ts` (Bun 1.4.2, with the tags fetched: `git fetch --tags`). It adds the files this release generates to `hooks/released.ts`, so a later version still knows them as its own, and CI's `--check` fails until it is run.
+4. Run the checks above.
+5. Push.
+6. `claude plugin tag .`, then `git push --tags`.
 
 ## The agents table
 

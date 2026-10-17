@@ -20,7 +20,11 @@ export const langOf = (value: unknown): Lang | null => {
   return null
 }
 
-// What the pane speaks, first answer wins: the plugin's own setting (/config), what
-// `/progress lang` stored, Claude Code's `language` setting, the system's LANG, English.
+// The language the person picked: the plugin's own setting (/config), else what
+// `/progress lang` stored. Both are the same in every session on the machine.
+export const chosenLang = (option: unknown, stored: unknown): Lang | null => (option === 'auto' ? null : langOf(option)) ?? langOf(stored)
+
+// What the pane speaks, first answer wins: the language the person picked, Claude Code's
+// `language` setting, the system's LANG, English.
 export const resolveLang = (option: unknown, stored: unknown, setting: unknown, env: unknown): Lang =>
-  (option === 'auto' ? null : langOf(option)) ?? langOf(stored) ?? langOf(setting) ?? langOf(env) ?? 'en'
+  chosenLang(option, stored) ?? langOf(setting) ?? langOf(env) ?? 'en'

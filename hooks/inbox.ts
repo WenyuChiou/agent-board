@@ -16,6 +16,9 @@ export type AgentTurn = {
   prompt: string
   answer: string
   transcript: string
+  // The time in the file's name, which the reporter writes: when the turn ended, by that
+  // agent's clock (seconds from the sh reporter, milliseconds from the PowerShell one).
+  at?: number
 }
 
 // Inbox file names: agent, event, then anything. Lower-case letters, digits and dashes only.
@@ -36,11 +39,17 @@ export const inboxOrder = (a: string, b: string): number => {
   return timeA - timeB || endA - endB || a.localeCompare(b)
 }
 
-const text = (value: unknown): string => {
+// Words sit a few levels down in every agent's payload. Another program writes the file, and
+// one nested a hundred thousand deep would overflow the stack and leave the files taken with
+// it unread, so the search stops well short of that.
+const DEPTH_MAX = 32
+
+const text = (value: unknown, depth = 0): string => {
   if (typeof value === 'string') return value
+  if (depth >= DEPTH_MAX) return ''
   if (Array.isArray(value)) {
     for (let index = value.length - 1; index >= 0; index -= 1) {
-      const found = text(value[index])
+      const found = text(value[index], depth + 1)
       if (found.trim() !== '') return found
     }
     return ''
@@ -48,7 +57,7 @@ const text = (value: unknown): string => {
   if (value !== null && typeof value === 'object') {
     const record = value as Record<string, unknown>
     for (const key of ['text', 'content', 'message']) {
-      const found = text(record[key])
+      const found = text(record[key], depth + 1)
       if (found.trim() !== '') return found
     }
   }
@@ -116,14 +125,28 @@ export const readTurn = (fileName: string, body: string): AgentTurn | null => {
     cwd,
     // OpenClaw's turns run in its own workspace folder, whose name says nothing. The name
     // becomes a `##` heading, so a folder name with a line break or a comment opening in it
-    // cannot start a line or hide the lines after it.
+    // cannot start a line or hide the lines after it. blocks.ts cleans a Claude session's
+    // folder the same way, so both join one heading.
     project: OPENCLAW_WORKSPACE.test(cwd) ? 'OpenClaw' : baseName(cwd).replace(/<!--|-->/g, ' ').replace(/\s+/g, ' ').trim(),
     prompt: first(record, ['prompt', 'user_prompt', 'user_message', 'input-messages', 'input_messages', 'last_user_message']),
     // Gemini CLI says this when the turn had no text.
     answer: answer === '[no response text]' ? '' : answer,
     transcript: first(record, ['transcript_path', 'transcriptPath']),
+    at: inboxTime(fileName),
   }
 }
+
+// The time in an inbox file's name, or undefined when it holds none.
+export const inboxTime = (fileName: string): number | undefined => {
+  const found = /^[a-z0-9]+-(?:turn|end)-(\d+)/.exec(fileName)
+
+  return found === null ? undefined : Number(found[1])
+}
+
+// Where a turn falls in its session, as inboxOrder sorts files: by time, and in the same
+// second a turn before its session's end (Codex writes both within one second).
+export const turnOrder = (turn: Pick<AgentTurn, 'at' | 'event'>): number | undefined =>
+  turn.at === undefined ? undefined : turn.at * 2 + (turn.event === 'end' ? 1 : 0)
 
 // One line of a session log as a speaker and their words. Grok Build's log is ACP updates,
 // which stream a message in chunks.
@@ -225,11 +248,51 @@ export const keepInboxDone = (done: Readonly<Record<string, string>>, now: numbe
   return Object.fromEntries(recent.sort((a, b) => at(b[1]) - at(a[1])).slice(0, max))
 }
 
-// A file one session took for itself by renaming it: `<inbox name>.<session>.taking`.
-// Another session's rename of the same file fails, so each file is read by one session only.
-export const takenName = (name: string, session: string): string => `${name}.${session.replace(/[^\w-]/g, '') || 'x'}.taking`
+// A file one session took for itself by renaming it:
+// `<inbox name>.<session>-<when, base 36>-<attempt>.taking`. Another session's rename of the
+// same file fails, so one session at a time reads it. It stays taken until what it reports is
+// on the board: a file whose session closed half-way, or whose turn the board or the model
+// could not take, is taken again once CLAIM_MS have passed, and set aside as
+// `<inbox name>.failed` after MAX_TRIES attempts, kept rather than deleted.
+export const CLAIM_MS = 15 * 60 * 1000
+export const MAX_TRIES = 8
 
-export const isTakenFile = (name: string): boolean => /^[a-z][a-z0-9]*-(?:turn|end)-[\w.-]+\.json\.[\w-]+\.taking$/.test(name)
+export const takenName = (name: string, session: string, at: number, attempt = 1): string =>
+  `${name}.${session.replace(/\W/g, '') || 'x'}-${Math.max(0, Math.floor(at)).toString(36)}-${attempt}.taking`
+
+export type Claim = { name: string; at: number | null; attempt: number }
+
+// What a taken file's name says. A name from before claims carried their time
+// (`<inbox name>.<session>.taking`) has none.
+export const readClaim = (file: string): Claim | null => {
+  const found = /^(.+\.json)\.([\w-]+?)(?:-([0-9a-z]+)-(\d+))?\.taking$/.exec(file)
+  if (found === null || !isInboxFile(found[1] ?? '')) return null
+  const at = found[3] === undefined ? null : parseInt(found[3], 36)
+
+  return { name: found[1] ?? '', at, attempt: found[4] === undefined ? 1 : Math.max(1, Number(found[4])) }
+}
+
+export const isTakenFile = (name: string): boolean => readClaim(name) !== null
+
+export const failedName = (name: string): string => `${name}.failed`
+
+// What a session does with a file another look left taken: leave it to the session that may
+// still be on it, take it again, or set it aside. A claim without a time goes by the file's
+// own time and a day, the wait the older sweep gave it.
+export const claimAction = (claim: Claim, mtimeMs: number, now: number): 'leave' | 'retake' | 'setAside' => {
+  const isLeft = claim.at === null ? now - mtimeMs > 24 * 60 * 60 * 1000 : now - claim.at > CLAIM_MS
+  if (!isLeft) return 'leave'
+
+  return claim.attempt >= MAX_TRIES ? 'setAside' : 'retake'
+}
+
+// Why the files the board could not take are still in the inbox, by inbox name: `<attempt>:<time>:<why>`.
+// The newest `max` are kept.
+export const keepInboxFailed = (failed: Readonly<Record<string, string>>, max = 200): Record<string, string> => {
+  const at = (note: string): number => Number(note.split(':')[1] ?? 0)
+
+  return Object.fromEntries(Object.entries(failed).sort((a, b) => at(b[1]) - at(a[1])).slice(0, max))
+}
 
 // A turn that only showed the person the board (Gemini CLI's and OpenCode's /board, the
 // agent-board skill): looking at the board is not work, so it gets no block of its own.
@@ -254,20 +317,44 @@ const BOARD_PLAIN = new Set(Object.values(STRINGS).flatMap(s => [s.nothingForYou
 const isBoardLine = (line: string): boolean => /^(?:\s|[●▸⚑◐] |$)/.test(line) || BOARD_PLAIN.has(line.trim())
 const BOARD_LEAD = 40
 const BOARD_ASIDE = 160
+const BOARD_LINK = /https?:\/\/(?:127\.0\.0\.1|localhost):\d{1,5}\/\?t=[\w-]{1,64}/
 // A CJK character says about as much as two Latin ones.
 const weight = (text: string): number => [...text.trim()].reduce((sum, char) => sum + (/[ᄀ-ᅟ⺀-꓏가-힣豈-﫿︰-﹏＀-｠￠-￦]/.test(char) ? 2 : 1), 0)
 
+// Before the board, only a short line that leads into it: words that point at the board, then
+// a colon ("Here is where things stand:", 「目前所有專案的進度：」). Anything else told there,
+// however short, is work: a look taken for work leaves a block the person sees and archives,
+// while work taken for a look is dropped without a word. 目前 and 現在 also open a report
+// told with no comma (「目前已修好 429 看板如下：」), so a lead holding a word for work done is
+// work. 了 stays whole there: after any verb it says something was done (改了, 跑了), and
+// narrowing it to 好了 and 完成了 would drop that turn's work to spare a block. An English lead
+// can say so too (`Status: fixed 429:`); `updated` is left out, since it names a board
+// (`Here's the updated board:`) as often as it reports work.
+const LEAD_WORDS = /^(?:here\b|below\b|this is\b|where\b|current\b|progress\b|status\b|summary\b|(?:the )?(?:agent )?board\b|以下|下面|目前|這是|这是|現在|现在|進度|进度|看板)/i
+const DONE_WORDS = /[已了]|完成|修好|加好|改好|做好|\b(?:fixed|added|changed|merged|removed|wrote|ran)\b/i
+
+const isLeadIn = (text: string): boolean => {
+  const lead = text.replace(/[*_]/g, '').trim()
+
+  return lead === '' || (weight(lead) <= BOARD_LEAD && LEAD_WORDS.test(lead) && /^[^\n,，、;；.。!！?？—–]*[:：]$/.test(lead) && !/\s-\s/.test(lead) && !DONE_WORDS.test(lead))
+}
+
 export const isBoardAnswer = (answer: string): boolean => {
-  const lines = answer.replace(/\r\n/g, '\n').split('\n')
+  // The line with the board page's address (`--serve`) goes with the board, after it or inside
+  // the code block the board is shown in.
+  const lines = answer.replace(/\r\n/g, '\n').split('\n').filter(line => !BOARD_LINK.test(line))
   const at = lines.findIndex(line => line.length <= COUNTS_MAX && BOARD_COUNTS.test(line))
   if (at < 0) return false
   let end = at + 1
   while (end < lines.length && isBoardLine(lines[end] ?? '')) end += 1
   let from = at
-  // A fence goes with the board only when it holds the board and nothing else.
-  if (/^\s*```/.test(lines[at - 1] ?? '')) {
+  let open = at - 1
+  while (open >= 0 && (lines[open] ?? '').trim() === '') open -= 1
+  // A fence goes with the board only when it holds the board and nothing else; blank lines
+  // inside it are the board's.
+  if (/^\s*```/.test(lines[open] ?? '')) {
     if (!/^\s*```\s*$/.test(lines[end] ?? '')) return false
-    from = at - 1
+    from = open
     end += 1
   }
   const before = lines.slice(0, from).join('\n')
@@ -276,7 +363,7 @@ export const isBoardAnswer = (answer: string): boolean => {
   // The indent stays on its line, so a run of blank lines is not crossed again from each one.
   const isAside = (text: string): boolean => !/```|^[ \t]*(?:[-*+]|\d+[.)])\s/m.test(text)
 
-  return weight(before) <= BOARD_LEAD && weight(after) <= BOARD_ASIDE && isAside(before) && isAside(after)
+  return isLeadIn(before) && weight(after) <= BOARD_ASIDE && isAside(before) && isAside(after)
 }
 
 export const isBoardTurn = (turn: AgentTurn): boolean =>

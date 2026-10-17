@@ -167,6 +167,67 @@ def pipeline():
     check("7b board still has all blocks",
           all(s in r(board) for s in ["agent=muse", "agent=claude", "agent=codex"]))
 
+    # --- 15. retire: close the session honestly, mint a fresh id ---
+    rr = py("reporter.py", "retire", "chat-demo", "clean break in test")
+    check("15a retire ok", rr.returncode == 0, rr.stderr)
+    reg = json.load(open(os.path.join(T, "remote", "sessions.json")))
+    check("15b new session minted", reg["chat-demo"] != session)
+    old_frag = os.path.join(outbox, f"muse-{session}.md")
+    check("15c old fragment kept", os.path.exists(old_frag))
+    check("15d state=ended", "state=ended" in r(old_frag))
+    check("15e retired block valid", py("validate.py", "--block", old_frag).returncode == 0)
+    mr = py("merge.py", board, old_frag)
+    after4 = r(board)
+    check("15f merge ok", mr.returncode == 0, mr.stderr)
+    check("15g single muse block (no dup)", after4.count("session=" + session) == 2)
+    check("15h board shows ended", "state=ended" in after4)
+    retired = r(old_frag)
+    check("15i retired fragment keeps its project line, title, notes and steps, and adds the reason",
+          retired.startswith("## remote-demo\n\n<!-- auto ") and "### 測試遠端上報管線" in retired
+          and "> Context: 驗證遠端上報 board 的整條管線\n> clean break in test\n- [x] 確認架構與格式" in retired
+          and "- [>] 等 CI" in retired, retired)
+    registry = os.path.join(T, "remote", "sessions.json")
+    reg_before = r(registry)
+    rn = py("reporter.py", "retire", "chat-never-seen")
+    check("15j retire refuses a chat not in the registry", rn.returncode != 0 and "not in the registry" in rn.stderr, rn.stderr)
+    check("15k refused retire mints nothing", r(registry) == reg_before)
+    # init puts a chat in the registry before it reports anything.
+    py("reporter.py", "init", "chat-quiet")
+    reg_before = r(registry)
+    rq = py("reporter.py", "retire", "chat-quiet")
+    check("15l retire refuses a session that never reported, and mints nothing",
+          rq.returncode != 0 and "has not reported yet" in rq.stderr and r(registry) == reg_before, rq.stderr)
+    # A finished session keeps its state: retire only mints a new id.
+    py("reporter.py", "init", "chat-done")
+    py("reporter.py", "update", "chat-done", "done", "Finished work", os.path.join(T, "steps1.txt"))
+    done_sess = json.load(open(registry))["chat-done"]
+    done_frag = os.path.join(outbox, f"muse-{done_sess}.md")
+    done_before = r(done_frag)
+    rd = py("reporter.py", "retire", "chat-done")
+    check("15m retire after done leaves the done block as it was and mints a new id",
+          rd.returncode == 0 and r(done_frag) == done_before and json.load(open(registry))["chat-done"] != done_sess, rd.stderr)
+    # A reason that would break the block is refused cleanly, before anything is written.
+    py("reporter.py", "init", "chat-bad")
+    py("reporter.py", "update", "chat-bad", "working", "Some work", os.path.join(T, "steps1.txt"))
+    bad_sess = json.load(open(registry))["chat-bad"]
+    bad_frag = os.path.join(outbox, f"muse-{bad_sess}.md")
+    bad_before, reg_before = r(bad_frag), r(registry)
+    rb = py("reporter.py", "retire", "chat-bad", "end <!-- here")
+    check("15n a reason with a comment opening is refused without a traceback, and nothing changes",
+          rb.returncode != 0 and "Traceback" not in rb.stderr and r(bad_frag) == bad_before and r(registry) == reg_before, rb.stderr)
+    # The reason is checked on a finished session too, though its block is not rewritten.
+    py("reporter.py", "update", "chat-bad", "done", "Some work", os.path.join(T, "steps1.txt"))
+    reg_before = r(registry)
+    rb = py("reporter.py", "retire", "chat-bad", "end <!-- here")
+    check("15o a bad reason is refused on a done session too, and mints nothing",
+          rb.returncode != 0 and "Traceback" not in rb.stderr and r(registry) == reg_before, rb.stderr)
+    # A fragment cut off before its end marker would lose its last step if rewritten.
+    w(bad_frag, r(bad_frag).replace("state=done", "state=working").split("<!-- /auto")[0])
+    cut_before = r(bad_frag)
+    rc = py("reporter.py", "retire", "chat-bad")
+    check("15p a fragment that is not a valid block is refused, and nothing changes",
+          rc.returncode != 0 and "not a valid block" in rc.stderr and r(bad_frag) == cut_before and r(registry) == reg_before, rc.stderr)
+
 
 def placement():
     frag = block("12345678", agent="muse")
@@ -192,6 +253,17 @@ def placement():
     existing = merge_mod.merge_text("## a\n\n" + frag, [frag.replace("### t", "### t2")])
     check("8i an existing block is replaced in place, no --under needed",
           existing == "## a\n\n" + frag.replace("### t", "### t2"), existing)
+    posing = frag.replace("updated=2026-10-17T07:00:00Z", "updated=2026-10-17T07:00:00Z resume=01a14abb-d817-7f70-bf50-4728ff5d88da dir=%2Fsrv%2Fother pr=7")
+    out5 = merge_mod.merge_text("## a\n", [posing], under="a")
+    check("8j a fragment never names a session id or folder for the board page to answer into",
+          "resume=" not in out5 and "dir=" not in out5 and "updated=2026-10-17T07:00:00Z pr=7 -->" in out5, out5)
+    for bad in ("a<!--b", "x-->y"):
+        for frags, under in (([frag], "## " + bad), (["## " + bad + "\n\n" + frag], None)):
+            try:
+                merge_mod.merge_text("## other\n", frags, under=under)
+                check(f"8k a new heading with a comment opening or close is refused ({bad!r})", False, "no error")
+            except ValueError as e:
+                check(f"8k a new heading with a comment opening or close is refused ({bad!r})", "<!--" in str(e), str(e))
 
 
 def parser_parity():

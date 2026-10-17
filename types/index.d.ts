@@ -110,6 +110,17 @@ export type ProgressMirror = {
   // For another agent's session: the last reply summed up, so the same turn reported twice
   // (two hooks of one turn, or Grok running Cursor's hooks too) counts once.
   lastAnswer: string
+  // For another agent's session: that agent's own session id, written as `resume=` so the
+  // board's page can send a reply into the session once it has closed.
+  resume?: string
+  // For another agent's session: where the newest inbox file folded in falls (turnOrder), so
+  // a file taken again after a later one changes nothing.
+  turnOrder?: number
+  // Claude's steps the person has answered since they were asked: task id to the stepKey of
+  // the words they answered. A step stops waiting on them while its words match, until Claude
+  // asks again (a TaskUpdate that sets waiting to the person, or a turn that ends on a
+  // question) or its words change.
+  answered?: Record<string, string>
 }
 
 // What the pane shows under its input box: a side question's answer, what a quick add
@@ -132,6 +143,8 @@ declare module 'claude-code' {
       isLegendOpen: boolean
       opened: string[]
       doneSeen: Record<string, number>
+      hiddenAsks: string[]
+      revising: string
       lang: string
     }
   }

@@ -3,8 +3,8 @@ import { prWords } from './github'
 import { ZH_TW } from './i18n'
 import type { Strings } from './i18n'
 import { localDay } from './journal'
-import { fallbackTitle } from './mirror'
-import { AUTO_END, AUTO_START, autoOf, doneKey, isTaskComplete, parseAttrs, parseProgress, projectHead, readable } from './parse'
+import { fallbackTitle, isAnswered } from './mirror'
+import { AUTO_END, AUTO_START, autoOf, doneKey, isTaskComplete, parseAttrs, parseProgress, projectHead, readable, RESUME } from './parse'
 import type { QuickEntry } from './quick'
 import type { StepRef, TaskRef } from './view'
 
@@ -26,7 +26,26 @@ export const stateWords = (state: ProgressSessionState, s: Strings = ZH_TW): str
   return s.stateEnded
 }
 
-const oneLine = (text: string): string => text.replace(/\s+/g, ' ').replace(/^#+\s*/, '').trim()
+// Every line the mod writes into a block. A comment opening in a title or step (the model's
+// summing up, a first request) would hide every line up to the next `-->`, the next block's
+// markers with them, so it is left out; an arrow that would close one is written `->`.
+const plain = (text: string): string => text.replace(/<!--/g, ' ').replace(/--+>/g, '->').replace(/\s+/g, ' ').trim()
+const oneLine = (text: string): string => plain(text).replace(/^#+\s*/, '').trim()
+
+// A project name as a `##` heading: a comment opening or close in it would hide the lines
+// after it, so each becomes a space. Another agent's turn (`readTurn` in inbox.ts) and a pasted
+// block clean their project the same way, so a folder gets one heading whoever writes first.
+const cleanProject = (project: string): string => project.replace(/<!--|-->/g, ' ').replace(/\s+/g, ' ').trim()
+
+// A `##` heading the mod writes, for a folder name (Linux allows `<!--` in one) or a project
+// typed into a quick add. A leading `#` stays (`## #work` reads back as `#work`), and a name
+// left with nothing goes under the uncategorized heading rather than a `## ` the reader skips.
+const headingOf = (project: string, s: Strings): string => cleanProject(project) || s.uncategorized
+
+// The section a project's heading starts, by the cleaned name, else by the name as an earlier
+// version wrote it (`## a-->b`), so a second heading is not added beside it.
+const projectSection = (lines: readonly string[], project: string, heading: string): { heading: number; end: number } | null =>
+  sectionRange(lines, heading) ?? (heading !== project.trim() ? sectionRange(lines, project) : null)
 
 const markOf = (task: ProgressMirrorTask): string => {
   if (task.status === 'completed') return 'x'
@@ -46,13 +65,24 @@ const markerOf = (mirror: ProgressMirror): string => {
     `agent=${mirror.agent || 'claude'}`,
     `state=${mirror.state}`,
     `updated=${new Date(mirror.updated).toISOString()}`,
-    mirror.sessionId.length > 8 ? `resume=${mirror.sessionId}` : '',
+    // Another agent's block carries that agent's own session id, for a reply from the board's page.
+    mirror.resume !== undefined && RESUME.test(mirror.resume) ? `resume=${mirror.resume}` : mirror.sessionId.length > 8 ? `resume=${mirror.sessionId}` : '',
     mirror.cwd ? `dir=${encodeURIComponent(mirror.cwd)}` : '',
     pr === null ? '' : `pr=${pr.number} ci=${pr.ci}`,
     mirror.source === 'turns' ? 'source=turns' : '',
   ]
 
   return `<!-- auto ${attrs.filter(attr => attr !== '').join(' ')} -->`
+}
+
+// A task's step line after its mark: what the block holds, and what a reader of the file gets
+// back (trimmed). The pane keys a question on it too, so its key is the one every other reader
+// of the block works out.
+export const stepWords = (task: ProgressMirrorTask): string => {
+  const note = task.blocked !== null && task.blocked !== '' ? task.blocked : task.status === 'completed' ? '' : (task.why ?? '')
+  const reason = note === '' ? '' : ` — ${oneLine(note)}`
+
+  return `${oneLine(task.subject)}${reason}`
 }
 
 export const renderAutoBlock = (mirror: ProgressMirror, s: Strings = ZH_TW): string[] => {
@@ -62,15 +92,15 @@ export const renderAutoBlock = (mirror: ProgressMirror, s: Strings = ZH_TW): str
 
   return [
     markerOf(mirror),
-    `### ${oneLine(mirror.title) || fallbackTitle(mirror) || s.unnamed}`,
-    `> ${meta}`,
+    `### ${oneLine(mirror.title) || oneLine(fallbackTitle(mirror)) || s.unnamed}`,
+    `> ${oneLine(meta)}`,
     ...(mirror.context ? [s.contextNote(oneLine(mirror.context))] : []),
     ...(mirror.handoff ? [s.handoffNote(oneLine(mirror.handoff))] : []),
-    ...mirror.tasks.map(task => {
-      const note = task.blocked !== null && task.blocked !== '' ? task.blocked : task.status === 'completed' ? '' : (task.why ?? '')
-      const reason = note === '' ? '' : ` — ${oneLine(note)}`
+    ...mirror.tasks.map(asked => {
+      // A step the person answered is written as Claude's to do again, not as waiting on them.
+      const task = isAnswered(mirror, asked) ? { ...asked, waiting: null, why: s.answeredNote } : asked
 
-      return `- [${markOf(task)}] ${oneLine(task.subject)}${reason}`
+      return `- [${markOf(task)}] ${stepWords(task)}`
     }),
     `<!-- /auto session=${id} -->`,
   ]
@@ -164,14 +194,40 @@ const trimBlankEdges = (lines: string[], at: number): void => {
 const sectionRange = (raws: readonly string[], project: string): { heading: number; end: number } | null => {
   const lines = seenOf(raws)
   const head = projectHead(project)
+  // A name that starts with a bracket (`（未分類）`, `(PFC) notes`) has no first word to match
+  // by, so it is matched whole, or every such heading would be taken for one project.
   const heading = lines.findIndex(line => {
     const match = PROJECT.exec(line)
-    return match?.[1] !== undefined && projectHead(match[1]) === head
+    if (match?.[1] === undefined) return false
+    return head === '' ? match[1].trim() === project.trim() : projectHead(match[1]) === head
   })
   if (heading < 0) return null
   const next = lines.findIndex((line, index) => index > heading && PROJECT.test(line))
 
   return { heading, end: next < 0 ? lines.length : next }
+}
+
+// New lines (a block, a hand-kept task) at the end of their project's section, below whatever
+// is there; the section is made at the end of the file when missing.
+const placeUnder = (lines: string[], project: string, added: readonly string[], eol: string, s: Strings): string => {
+  const heading = headingOf(project, s)
+  if (lines.every(line => line.trim() === '')) {
+    return [s.fileTitle, '', `## ${heading}`, '', ...added].join(eol) + eol
+  }
+
+  const section = projectSection(lines, project, heading)
+  if (section === null) {
+    while (lines.length > 0 && lines[lines.length - 1]?.trim() === '') lines.pop()
+
+    return [...lines, '', `## ${heading}`, '', ...added].join(eol) + eol
+  }
+
+  let at = section.end
+  while (at > section.heading + 1 && lines[at - 1]?.trim() === '') at -= 1
+  const isLast = section.end >= lines.length
+  lines.splice(at, section.end - at, '', ...added, ...(isLast ? [] : ['']))
+
+  return lines.join(eol) + eol
 }
 
 export const upsertAutoBlock = (text: string, mirror: ProgressMirror, s: Strings = ZH_TW): string => {
@@ -187,23 +243,7 @@ export const upsertAutoBlock = (text: string, mirror: ProgressMirror, s: Strings
     return lines.join(eol) + eol
   }
 
-  if (lines.every(line => line.trim() === '')) {
-    return [s.fileTitle, '', `## ${mirror.project}`, '', ...block].join(eol) + eol
-  }
-
-  const section = sectionRange(lines, mirror.project)
-  if (section === null) {
-    while (lines.length > 0 && lines[lines.length - 1]?.trim() === '') lines.pop()
-
-    return [...lines, '', `## ${mirror.project}`, '', ...block].join(eol) + eol
-  }
-
-  let at = section.end
-  while (at > section.heading + 1 && lines[at - 1]?.trim() === '') at -= 1
-  const isLast = section.end >= lines.length
-  lines.splice(at, section.end - at, '', ...block, ...(isLast ? [] : ['']))
-
-  return lines.join(eol) + eol
+  return placeUnder(lines, mirror.project, block, eol, s)
 }
 
 // Drops `##` sections left with nothing in them, only among `touched` (the projects whose
@@ -280,11 +320,14 @@ export const takeArchivable = (text: string, now: number, keep?: string, s: Stri
 
 // Hand-kept tasks whose every step is done, a day after the pane first saw them done
 // (`seen`, by doneKey): moved out whole, heading to last step, like a session's block.
+// `isNow`: the person asked, so every finished one goes at once, under the day it was seen
+// done, or today when it never was.
 export const takeManualDone = (
   text: string,
   now: number,
   seenAt: (key: string) => number | undefined,
   s: Strings = ZH_TW,
+  isNow = false,
 ): Archived & { keys: string[] } => {
   const lines = linesOf(text)
   const seen = seenOf(lines)
@@ -295,8 +338,8 @@ export const takeManualDone = (
     for (const task of project.tasks) {
       if (task.auto !== null || task.line < 0 || !isTaskComplete(task)) continue
       const key = doneKey(project.name, task.title)
-      const at = seenAt(key)
-      if (at === undefined || now - at < DAY) continue
+      const at = seenAt(key) ?? (isNow ? now : undefined)
+      if (at === undefined || (!isNow && now - at < DAY)) continue
       let end = task.line
       for (let index = task.line + 1; index < lines.length; index += 1) {
         const line = seen[index] ?? ''
@@ -362,21 +405,8 @@ export const addManualTask = (text: string, entry: QuickEntry, s: Strings = ZH_T
     ...(entry.due === null ? [] : [s.dueNote(entry.due)]),
     ...entry.steps.map(step => `- [ ] ${oneLine(step)}`),
   ]
-  if (lines.every(line => line.trim() === '')) {
-    return [s.fileTitle, '', `## ${entry.project}`, '', ...task].join(eol) + eol
-  }
-  const section = sectionRange(lines, entry.project)
-  if (section === null) {
-    while (lines.length > 0 && lines[lines.length - 1]?.trim() === '') lines.pop()
 
-    return [...lines, '', `## ${entry.project}`, '', ...task].join(eol) + eol
-  }
-  let at = section.end
-  while (at > section.heading + 1 && lines[at - 1]?.trim() === '') at -= 1
-  const isLast = section.end >= lines.length
-  lines.splice(at, section.end - at, '', ...task, ...(isLast ? [] : ['']))
-
-  return lines.join(eol) + eol
+  return placeUnder(lines, entry.project, task, eol, s)
 }
 
 // How many tasks in the file carry the heading a quick add of `entry` writes: one more than
@@ -405,4 +435,63 @@ export const setManualStep = (text: string, ref: StepRef, mark: string): string 
   lines[at] = line.replace(STEP, (_all, lead: string, _mark: string, close: string, rest: string) => `${lead}${mark}${close}${rest}`)
 
   return lines.join(eol) + eol
+}
+
+// A block pasted into the board's page from a web chat (Muse, dot): the chat-relay prompt's
+// block, checked the way scripts/remote-reporter/validate.py checks a fragment, then put in
+// place of the earlier block with its id, or under its `## project` when new. It never takes
+// the place of a Claude block, another agent's block or one whose end marker is missing. A
+// chat does not know the time, so `updated=` becomes the moment it was pasted.
+export type PasteProblem = 'noBlock' | 'mixed' | 'badBlock' | 'noProject' | 'notYours'
+
+const HEX8 = /^[0-9a-f]{8}$/
+const AGENT_NAME = /^[a-z0-9][a-z0-9_.-]{0,31}$/
+const FENCE = /^\s*(?:```|~~~)/
+
+// Each of these would end the block early, or hide its end marker from the parser.
+const isHiding = (line: string): boolean => FENCE.test(line) || line.includes('<!--') || line.includes('-->') || /^#{1,2}\s/.test(line)
+
+const startAttrs = (line: string | undefined): string => AUTO_START.exec(line ?? '')?.[1] ?? ''
+
+export const mergeBlock = (text: string, pasted: string, now: number, s: Strings = ZH_TW): { text: string; title: string } | { problem: PasteProblem } => {
+  const raw = pasted.split(/\r?\n/).map(line => line.trimEnd())
+  const start = raw.findIndex(line => AUTO_START.test(line))
+  const auto = start < 0 ? null : autoOf(startAttrs(raw[start]))
+  const end = raw.findIndex((line, index) => start >= 0 && index > start && AUTO_END.test(line))
+  if (auto === null || end < 0) return { problem: 'noBlock' }
+  if (parseAttrs(raw[end] ?? '').session !== auto.session) return { problem: 'mixed' }
+  const named = parseAttrs(startAttrs(raw[start])).agent
+  const body = raw.slice(start + 1, end)
+  const title = TASK.exec(body[0] ?? '')?.[1]
+  // The chat names itself in lower case; a block without an agent would read as Claude's.
+  if (title === undefined || !HEX8.test(auto.session) || named === undefined || named !== auto.agent || !AGENT_NAME.test(named) || auto.agent === 'claude' || body.some(isHiding)) {
+    return { problem: 'badBlock' }
+  }
+  // The marker is written again from what was checked, so a chat cannot choose which session or
+  // folder a reply from the page goes to (resume=, dir=), nor claim a pull request.
+  const marker = `<!-- auto session=${auto.session} agent=${auto.agent} state=${auto.state} updated=${new Date(now).toISOString().replace(/\.\d{3}Z$/, 'Z')} -->`
+  const block = [marker, ...body, `<!-- /auto session=${auto.session} -->`]
+
+  const eol = eolOf(text)
+  const lines = linesOf(text)
+  const existing = scanBlocks(lines).find(span => span.session === auto.session)
+  if (existing !== undefined) {
+    const owner = autoOf(startAttrs(seenOf(lines)[existing.start]))
+    if (!existing.isClosed || owner?.agent !== auto.agent) return { problem: 'notYours' }
+    lines.splice(existing.start, existing.end - existing.start + 1, ...block)
+
+    return { text: lines.join(eol) + eol, title }
+  }
+  // The `##` line nearest above the block names its project; it becomes a heading, so no
+  // comment opening goes with it.
+  const project = raw
+    .slice(0, start)
+    .flatMap(line => {
+      const name = PROJECT.exec(line)?.[1]
+      return name === undefined ? [] : [cleanProject(name)]
+    })
+    .at(-1)
+  if (project === undefined || project === '') return { problem: 'noProject' }
+
+  return { text: placeUnder(lines, project, block, eol, s), title }
 }

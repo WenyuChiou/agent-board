@@ -1,7 +1,8 @@
 import type { ProgressMirror, ProgressProject } from '../types'
 import { ZH_TW } from './i18n'
 import type { Strings } from './i18n'
-import { countSteps, currentStepIndex, isTaskComplete } from './parse'
+import { waitsOnYou } from './mirror'
+import { countSteps, currentStepIndex, isTaskComplete, readable } from './parse'
 
 // A line per finished step, one file a month beside progress.md, so "what did I do this
 // week" has an answer after the blocks themselves are archived.
@@ -27,6 +28,17 @@ export const archivePath = (progressPath: string, now: number): string => `${pro
 
 export const journalPath = (progressPath: string, now: number): string =>
   `${progressPath.replace(/\.md$/i, '')}-journal-${localDay(now).slice(0, 7)}.md`
+
+// A retry may find the whole entry already saved, but a shorter task must never match
+// the beginning of an older, longer one. Fenced/commented headings are part of the body.
+export const hasArchiveEntry = (past: string, entry: string): boolean => {
+  const lines = past.replace(/\r\n/g, '\n').split('\n')
+  const starts = readable(lines).flatMap((line, index) => line !== null && /^##\s/.test(line) ? [index] : [])
+  const wanted = entry.replace(/\r\n/g, '\n').replace(/\n+$/, '')
+  return starts.some((start, index) =>
+    lines.slice(start, starts[index + 1] ?? lines.length).join('\n').replace(/\n+$/, '') === wanted,
+  )
+}
 
 // The month before, so a week that spans two months reads both files.
 export const previousMonth = (now: number): number => {
@@ -88,7 +100,7 @@ export const progressReport = (
     const left = mine.tasks.filter(task => task.status !== 'completed')
     const finished = mine.tasks.length - left.length
     open.push(`- ${mine.project} · ${mine.title || left[0]?.subject || ''}${s.pairSep}${s.reportNext(left[0]?.subject ?? '')} (${finished}/${mine.tasks.length})`)
-    for (const task of left) if (task.waiting === 'you') waiting.push(`- ${mine.project} · ${task.subject}`)
+    for (const task of left) if (waitsOnYou(mine, task)) waiting.push(`- ${mine.project} · ${task.subject}`)
   }
   const ownId = mine === null ? '' : mine.sessionId.slice(0, 8)
   for (const project of projects) {

@@ -17,7 +17,7 @@ Contents: [File](#file) · [Structure](#structure) · [Steps](#steps-and-marks) 
 | Encoding | UTF-8. Do not write a byte order mark. |
 | Line endings | LF or CRLF. Both are read. |
 | Missing file | Read as empty. The first writer creates it. |
-| Companions | Files the pane writes in the same folder, named after the file with its `.md` taken off: the archive and journal files (see [Lifecycle](#lifecycle)) and `progress.html`, a page that shows the whole file in a browser (see below). They are not part of the format. |
+| Companions | Files the pane writes in the same folder, named after the file with its `.md` taken off: the archive and journal files (see [Lifecycle](#lifecycle)), `progress.html`, a page that shows the whole file in a browser (see below), and `progress-answered.json`, the questions the person marked answered on this computer (JSON `{"answered": [...]}`, one entry per `[?]` step: its block's `session`, the step's place among the block's steps counting from 1, and the step's text, separated by single spaces). They are not part of the format, and marking a question answered never changes a block. |
 
 The pane checks the file's modification time and size every 2 seconds and parses it again when either changed.
 
@@ -149,12 +149,12 @@ An attribute is `name=value`, where the name is letters, digits, `_` or `-`, and
 
 | Attribute | Writers must give it | Value and effect |
 |---|---|---|
-| `session` | Yes. The parser needs only this one. | Identifies the block. Any text without whitespace; use 8 characters, `[0-9a-f]`, and use the same id for the end marker and for every rewrite. Two blocks must not share an id. |
-| `agent` | Yes | Name of the agent in lower case: `claude`, `codex`, `gemini`, `cursor`, `aider`, `continue`, or your own. If missing: `claude`. For every agent but `claude` the pane shows the name beside the block's project and questions, words a working block as `<agent> is working` (zh-TW: `<agent> 正在做`) instead of `Claude is working`, and tells the person to answer a `[?]` step in that agent's session (`Reply in the <project> session (<agent>)`). |
+| `session` | Yes. The parser needs only this one. | Identifies the block. Any text without whitespace; use 8 characters, `[0-9a-f]`, and use the same id for the end marker and for every rewrite. Two blocks must not share an id. The pane names it when it tells the person where to answer a `[?]` step, and for `agent=claude` offers it to copy (when there is no `resume`) only if it is a plain id: 6 to 64 letters, digits, dashes and underscores, starting with a letter or a digit. |
+| `agent` | Yes | Name of the agent in lower case: `claude`, `codex`, `gemini`, `cursor`, `aider`, `continue`, or your own. If missing: `claude`. For every agent but `claude` the pane shows the name beside the block's project and questions, words a working block as `<agent> is working` (zh-TW: `<agent> 正在做`) instead of `Claude is working`, and tells the person to answer a `[?]` step in that agent's session (`Reply in the "<task>" session (<session>, <agent>)`). |
 | `state` | Yes | `working`, `waiting`, `done` or `ended`; see [States](#states). If missing or not one of these: `waiting`. |
 | `updated` | Yes | When the block was last written, ISO 8601, read with `Date.parse`. Write UTC with a trailing `Z`, for example `2026-10-16T14:32:05Z`. A time with no zone is read as the local time of the machine running the pane; a date alone (`2026-10-16`) as midnight UTC. If missing or unreadable the block's age is unknown: it is never shown as stopped and never archived, whatever its end marker and state (a `done` block with no readable time is not listed as recently finished either), so it stays in the file until someone removes it. Always write it. |
-| `resume` | No | The agent's full session id: 6 to 64 letters, digits and dashes. Used only when `agent=claude`, to show the command `claude --resume <id>` for an ended or stopped session. Any other value is ignored. |
-| `dir` | No | The session's folder, percent-encoded as `encodeURIComponent` does (spaces become `%20`). Used with `resume` to show `cd '<dir>' && claude --resume <id>`, or a PowerShell `Set-Location` for a Windows path. An undecodable value, or one that decodes to a control character (a line break, a tab), is ignored. |
+| `resume` | No | The agent's full session id: 6 to 64 letters, digits, dashes and underscores, starting with a letter or a digit (so the commands below never read it as a flag). Beside the block's `[?]` steps, the pane, the terminal board, the board's page and `progress.html` name the session by the start of its id (for an id in parts, such as Hermes Agent's, the start of its last part) and show the whole id, to find the session in that agent's session list. Where the agent reopens a session by id, they add the command that does it once that session is closed, in its folder (`dir`): `claude --resume <id>`, `codex resume <id>`, `grok -r <id>`, `gemini --resume <id>`, `hermes --resume <id>` or `opencode -s <id>`. A phone on the local network gets the id only. The pane, the terminal board and the page also copy the id. For an ended or stopped session of those agents the pane shows that command. A block without it says there is no way back to its session from the board. With `agent=grok` or `agent=codex`, a UUID here (and `dir`) lets the board's page (`agent-board.mjs --serve`) answer the session once it is `ended`, by running `grok -r <id>` or `codex exec resume <id>`; the board writes it from that agent's own hook report, an agent that writes its own block leaves it out, and a block pasted into the page or merged from a remote fragment loses it. Any other value is ignored. |
+| `dir` | No | The session's folder, percent-encoded as `encodeURIComponent` does (spaces become `%20`). Used with `resume` to show `cd '<dir>' && claude --resume <id>` (or that agent's own command), or a PowerShell `Set-Location` for a Windows path, and as the folder the board's page runs Grok Build or Codex in; without it the page does not answer the session. Like `resume`, a pasted or merged block loses it. An undecodable value, or one that decodes to a control character (a line break, a tab), is ignored. |
 | `pr` | No | A pull request number, a positive integer. Shown as `PR #n`. Other values are ignored. |
 | `ci` | No | `none`, `pending`, `pass` or `fail`. Shown after the PR number, only when `pr` is present. Other values are ignored. |
 | `source` | No | `turns` when the steps were summed up from the session's turns because it keeps no task list; absent when they come from the agent's own list. Informational: readers show the block the same either way. |
@@ -188,7 +188,7 @@ Put the block under the `## project` heading of its repository, after what is al
 | `state` | Means | What the pane does |
 |---|---|---|
 | `working` | The agent is running now. | Shows the task as being worked on (`Claude is working`, or `<agent> is working`). `[?]` steps are still listed as questions. |
-| `waiting` | The agent stopped and steps remain. It is the person's turn. | Lists the block's `[?]` steps under "Waiting on you". With none, lists a general "waiting on your reply". |
+| `waiting` | The agent stopped and steps remain. It is the person's turn. | Lists the block's `[?]` steps under "Waiting on you". With none, the task stays with the work in progress, showing its next, running or current step. |
 | `done` | Every step is finished. | Lists the task as recently finished for up to a day after `updated`, and archives it. |
 | `ended` | The session closed with steps left. | Shows the task as left behind and open to take over, with its open steps. |
 
@@ -261,6 +261,7 @@ What the pane's writer puts in the file, by language:
 | Block with no title, empty journal field (also in the pane) | `(unnamed)` | `（未命名）` | `（未命名）` |
 | Project with no name (in the pane and in archive headings) | `(uncategorized)` | `（未分類）` | `（未分类）` |
 | Quick-add project when not in a repository | `To do` | `待辦` | `待办` |
+| Note of a step you answered in its own session | `answered, waiting on Claude` | `你已回覆，等 Claude 處理` | `你已回复，等 Claude 处理` |
 
 ## Waiting steps and ask kinds
 
@@ -297,7 +298,7 @@ A session's own questions are listed first, then the others'. Within each group,
 | `link` | String | The link for `review`. |
 | `blocked` | A reason, or `true` for none | Step is `[!]`, with the reason as its note. Wins over `waiting`. |
 
-A key set to `null` clears it (`false` and `""` also clear `waiting` and `blocked`). Clearing `waiting` also clears `why`, `ask`, `options`, `command` and `link`. Marking the step completed clears all of it. In the file a step is written as `[x]` completed, else `[!]` blocked, else `[?]` waiting on you, else `[>]` waiting on a run, else `[~]` in progress, else `[ ]`.
+A key set to `null` clears it (`false` and `""` also clear `waiting` and `blocked`). Clearing `waiting` also clears `why`, `ask`, `options`, `command` and `link`. Marking the step completed clears all of it. In the session that set it, the person's own message marks every open `waiting: "you"` step answered, and a pane button marks the step it answers when pressed. An answered step keeps what Claude set but is written as Claude's to do, with the note for an answered step in the pane's language (see [Language](#language)), until Claude sets `waiting: "you"` again, the step's subject or note changes, or a turn ends on a question the pane puts on that step. A notification, a scheduled prompt, another session's message or a turn with no typed text is not an answer. In the file a step is written as `[x]` completed, else `[!]` blocked, else `[?]` waiting on you, else `[>]` waiting on a run, else `[~]` in progress, else `[ ]`.
 
 Only the note travels through the file. `ask`, `options`, `command` and `link` stay in the owning session, so another session's pane works the kind out again from the words of the note. Write the note as a plain sentence that carries the question.
 
@@ -392,7 +393,7 @@ How the pane reads it:
 1. Read `progress.md`, or start an empty file. Read the file again right before every write.
 2. Make an 8-character id once per session, for example 8 hex characters from your random source. Keep it for the whole session.
 3. Find `## <repository name>`. If it is not there, add it at the end of the file.
-4. Write the start marker with `session`, `agent=<your name>`, `state=working` and `updated=<now, UTC, ending in Z>`. Add `pr` and `ci` if you know them. Leave out `resume` and `dir`: the pane builds a resume command for `claude` only.
+4. Write the start marker with `session`, `agent=<your name>`, `state=working` and `updated=<now, UTC, ending in Z>`. Add `pr` and `ci` if you know them. Leave out `resume` and `dir`: the pane writes them from an agent's own hook report.
 5. Write `### <title>` naming the outcome, then a one-line `> ` status, then `> Context: <why this work exists>`.
 6. Write the whole plan as steps, the one you are on as `[~]`. Mark any step that needs the person `[?]` and give it ` — <one line>` worded as in [Waiting steps and ask kinds](#waiting-steps-and-ask-kinds).
 7. Write the end marker with the same id.

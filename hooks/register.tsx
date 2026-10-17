@@ -1,5 +1,5 @@
 import { atom, read, update } from 'claude-code'
-import type { EngineInterface, PluginOptions, Register } from 'claude-code'
+import type { EngineInterface, PluginOptions, PromptSubmitResult, Register } from 'claude-code'
 
 import type { RenderSurface } from 'claude-code'
 
@@ -44,44 +44,51 @@ import {
   isAllDone,
   fromTaskList,
   isStaleStoreKey,
+  markAnswered,
   noticesOf,
   resumeNote,
   stateOf,
+  withoutMarks,
 } from './mirror'
 import type { ListedTask } from './mirror'
 import { baseName, countSteps, doneKey, isHereProject, isTaskComplete, parseProgress } from './parse'
 import type { ProgressProject } from '../types'
 import { dashboardHtml } from './dashboard'
 import { paletteFor } from './palette'
-import { drawPane } from './pane'
+import { drawPane, reviseKey } from './pane'
 import type { PaneActions, PaneModel, PaneUi } from './pane'
 import { isQuickAdd, parseQuickAdd, quickAddWords } from './quick'
 import type { Lang, Strings } from './i18n'
 import { RULE_ID, RULES } from './rule'
-import { langOf, resolveLang, STRINGS } from './strings'
-import { answerTurns, applyDigest, clearAsked, cleanHandoff, isWork, lastQuestion, markAsked, needsRefresh, parseDigest, replyData, turnTools } from './digest'
+import { chosenLang, langOf, resolveLang, STRINGS } from './strings'
+import { answerTurns, applyDigest, clearAsked, cleanHandoff, isAskingYou, isPersonsAnswer, isWork, lastQuestion, markAsked, needsRefresh, parseDigest, replyData, requestData, turnTools } from './digest'
 import type { Digest } from './digest'
-import { agentHooks, boardScript, COLLISION, DELETE, generatedFile, hasOurHook, isWindowsHost, OPENCLAW_MIN, openclawPrinted, openclawSavedBy, openclawTooOld, psQuote, reporterPs1, reporterSh, withoutSection } from './connect'
+import { agentHooks, boardLangOf, boardScript, COLLISION, DELETE, generatedFile, hasOurHook, isReleased, isReleasedBoard, isWindowsHost, OPENCLAW_MIN, openclawPrinted, openclawSavedBy, openclawTooOld, psQuote, reporterPs1, reporterSh, withoutSection } from './connect'
 import {
   ANSWER_KEEP,
   answerKey,
+  claimAction,
+  failedName,
   inboxOrder,
   isInboxFile,
-  isTakenFile,
   isTextLog,
   isTranscriptPath,
   keepInboxDone,
+  keepInboxFailed,
+  MAX_TRIES,
   promptKey,
+  readClaim,
   readTurn,
   takenName,
+  turnOrder,
   isBoardTurn,
   transcriptTail,
   turnsToDigest,
 } from './inbox'
 import type { AgentTurn } from './inbox'
 import { keepRecent, remindersOf } from './remind'
-import { buildView, statusLine } from './view'
-import type { StepRef, TaskRef, TaskRow } from './view'
+import { agentName, answeredJson, answeredPath, buildView, keptAnswered, parseAnswered, statusLine, withAnswered } from './view'
+import type { StepRef, TaskRef, TaskRow, WaitingItem } from './view'
 
 const PANE = 'agent-board'
 const POLL_MS = 2000
@@ -96,6 +103,9 @@ const DAY = 24 * 60 * 60 * 1000
 // How long a model call may take before it counts as no answer: one that never comes back
 // must not hold the inbox, or a task's name, for good.
 const MODEL_MS = 30 * 1000
+// Why an inbox file is still there, kept in the store's `inboxFailed`.
+const NO_SUMMARY = 'the model gave no summary and the reply asks nothing'
+const NOT_KEPT = 'the block was not on the board when read back'
 
 const EMPTY: ProgressSnapshot = { path: '', isMissing: true, error: null, mtimeMs: 0, size: 0, projects: [] }
 
@@ -119,6 +129,11 @@ const lang = atom({ plugin: 'agent-board', key: 'lang' } as const, 'zh-TW')
 const opened = atom({ plugin: 'agent-board', key: 'opened' } as const, [] as string[])
 // When the pane first saw each hand-kept task done (by doneKey), to archive it a day later.
 const doneSeen = atom({ plugin: 'agent-board', key: 'doneSeen' } as const, {} as Record<string, number>)
+// Questions the person marked answered (view.ts askKeys), read from progress-answered.json
+// beside progress.md, which every session on this machine and the board script share.
+const hiddenAsks = atom({ plugin: 'agent-board', key: 'hiddenAsks' } as const, [] as string[])
+// The review whose reply box Needs changes opened.
+const revising = atom({ plugin: 'agent-board', key: 'revising' } as const, '')
 
 const messageOf = (error: unknown): string => (error instanceof Error ? error.message : String(error))
 
@@ -141,6 +156,9 @@ let isReminderSeeded = false
 let isReminding = false
 // What the person said this turn, for summing the turn up when it ends.
 let turnPrompt = ''
+// Whether the prompt starting the next turn is the person's own message, as prompt.submit
+// saw it.
+let isNextTurnAnswer = false
 let isDraining = false
 // Other agents' turns are summed up one session's files at a time, after the drain that took
 // them has let go of the inbox.
@@ -148,6 +166,7 @@ let digests: Promise<unknown> = Promise.resolve()
 // Set once this session has made sure the store has a record of the inbox (see drainInbox).
 let hasInboxRecord = false
 let inboxSeen = -1
+let inboxListed = 0
 let dashboardAt = 0
 
 // CLAUDE_PROGRESS_FILE wins; then CLAUDE_CONFIG_DIR, where Claude Code keeps its own files
@@ -228,12 +247,82 @@ const complete = ($: EngineInterface, request: Parameters<EngineInterface['model
     $.model.complete(request).then(resolve, () => resolve(undefined))
   })
 
+// Another session on this machine, or the board script, may mark a question answered: its file
+// is a stat per poll too. A read that fails, or that catches a write half-way, is tried again on
+// the next poll, and the list in hand stays until then.
+// Null until the first look, so a list kept in the store is checked against the file even when
+// the file is gone.
+let answeredSeen: string | null = null
+const pollAnswered = async ($: EngineInterface, path: string): Promise<void> => {
+  const file = answeredPath(path)
+  const stat = await $.fs.stat(file).catch(() => undefined)
+  const seen = stat === undefined ? '' : `${stat.mtimeMs}:${stat.size}`
+  if (seen === answeredSeen) return
+  const now = await $.clock.now()
+  const list = stat === undefined ? [] : await $.fs.read(file).then(text => parseAnswered(text, now - stat.mtimeMs), () => null)
+  if (list === null) return
+  answeredSeen = seen
+  await update($, hiddenAsks, () => list)
+  // Before progress.md is first read the snapshot is empty; that first read draws both.
+  if ((await read($, snapshot)).path !== path) return
+  await refreshStatus($)
+  await writeDashboard($, true)
+}
+
+// Marks whose question has left the file go, so the same words asked again later show. Run once
+// the file has held still for a poll, so a write caught half-way never drops one, and only while
+// it still holds still (`mtimeMs`, `size`), on disk as well as in this session's last look: a
+// file another session or the board changed meanwhile waits for its own turn.
+let isPrunePending = false
+const pruneAnswered = async ($: EngineInterface, path: string, projects: readonly ProgressProject[], mtimeMs: number, size: number): Promise<void> => {
+  const list = await read($, hiddenAsks)
+  if (keptAnswered(list, projects).length === list.length) return
+  await enqueue(async () => {
+    const snap = await read($, snapshot)
+    if (snap.path !== path || snap.mtimeMs !== mtimeMs || snap.size !== size) return null
+    const disk = await $.fs.stat(path).catch(() => undefined)
+    if (disk === undefined || disk.mtimeMs !== mtimeMs || disk.size !== size) return null
+    return rewrite($, answeredPath(path), before => {
+      const now = parseAnswered(before)
+      return now === null ? AGAIN : answeredJson(keptAnswered(now, projects))
+    })
+  })
+}
+
+// Marks one question answered, or lists it again: only progress-answered.json changes, never a
+// block, and nothing is sent to any session. Read, changed, written and read back in the write
+// queue, so a press in another session or the board script is kept. False when it did not stick.
+const setAnswered = async ($: EngineInterface, item: WaitingItem, isHidden: boolean): Promise<boolean> => {
+  if (item.hideKey === '') return false
+  const snap = await read($, snapshot)
+  const file = answeredPath(snap.path || (await progressPath($)))
+  const list = await enqueue(async () => {
+    await rewrite(
+      $,
+      file,
+      async before => {
+        const stat = await $.fs.stat(file).catch(() => undefined)
+        const now = parseAnswered(before, stat === undefined ? 0 : (await $.clock.now()) - stat.mtimeMs)
+        return now === null ? AGAIN : answeredJson(withAnswered(now, [item.hideKey], isHidden))
+      },
+      check => parseAnswered(check)?.includes(item.hideKey) === isHidden,
+    )
+    return parseAnswered(await readText($, file))
+  }).catch(() => null)
+  if (list === null || list.includes(item.hideKey) !== isHidden) return false
+  await update($, hiddenAsks, () => list)
+  await refreshStatus($)
+  await writeDashboard($, true)
+  return true
+}
+
 // Re-reads the file only when its mtime or size moved, so the 2s timer is a stat.
 const poll = async ($: EngineInterface): Promise<void> => {
   if (isPolling) return
   isPolling = true
   try {
     const path = await progressPath($)
+    await pollAnswered($, path).catch(() => undefined)
     const previous = await read($, snapshot)
     const stat = await $.fs.stat(path).catch(() => undefined)
     if (stat === undefined) {
@@ -241,7 +330,14 @@ const poll = async ($: EngineInterface): Promise<void> => {
       return
     }
     const isSame = previous.path === path && previous.mtimeMs === stat.mtimeMs && previous.size === stat.size
-    if (isSame && previous.error === null && !previous.isMissing) return
+    if (isSame && previous.error === null && !previous.isMissing) {
+      if (isPrunePending) {
+        isPrunePending = false
+        // Not waited on: poll also runs inside queued jobs, which the prune would queue behind.
+        pruneAnswered($, path, previous.projects, stat.mtimeMs, stat.size).catch(() => undefined)
+      }
+      return
+    }
     try {
       const projects = parseProgress(await $.fs.read(path))
       await update($, snapshot, () => ({
@@ -253,6 +349,7 @@ const poll = async ($: EngineInterface): Promise<void> => {
         projects,
       }))
       await noteDone($, projects)
+      isPrunePending = true
       await refreshStatus($)
       await writeDashboard($)
       await remind($)
@@ -276,7 +373,7 @@ const writeDashboard = async ($: EngineInterface, force = false): Promise<string
   const path = dashboardPath(snap.path || (await progressPath($)))
   if (!force && at - dashboardAt < 60 * 1000) return path
   const s = await wordsOf($)
-  const view = buildView(snap.projects, [], null, at, await read($, today), await read($, doneSeen), s)
+  const view = buildView(snap.projects, [], null, at, await read($, today), await read($, doneSeen), s, await read($, hiddenAsks))
   const date = new Date(at)
   const html = dashboardHtml(view, s, snap.path, s.dashStamp(`${localDay(at)} ${pad2(date.getHours())}:${pad2(date.getMinutes())}`))
   dashboardAt = at
@@ -333,6 +430,7 @@ const refreshStatus = async ($: EngineInterface): Promise<void> => {
           await read($, today),
           await read($, doneSeen),
           s,
+          await read($, hiddenAsks),
         ),
         s,
       )
@@ -570,7 +668,7 @@ const nameTask = async ($: EngineInterface): Promise<void> => {
     model: 'haiku',
     maxTokens: 120,
     effort: 'low',
-    prompt: (await wordsOf($)).namePrompt(mirror.firstPrompt.slice(0, 1200), steps),
+    prompt: (await wordsOf($)).namePrompt(requestData(mirror.firstPrompt), steps),
   })
   const lines = asked?.isAnswered === true ? asked.text.split(/\r?\n/).filter(line => line.trim() !== '') : []
   const title = cleanTitle(lines[0] ?? '')
@@ -592,7 +690,7 @@ const refreshName = async ($: EngineInterface): Promise<void> => {
     model: 'haiku',
     maxTokens: 120,
     effort: 'low',
-    prompt: s.refreshPrompt(mirror.firstPrompt.slice(0, 1200), steps, mirror.title || fallbackTitle(mirror), mirror.context),
+    prompt: s.refreshPrompt(requestData(mirror.firstPrompt), steps, mirror.title || fallbackTitle(mirror), mirror.context),
   })
   const lines = asked?.isAnswered === true ? asked.text.split(/\r?\n/).filter(line => line.trim() !== '') : []
   const title = cleanTitle(lines[0] ?? '')
@@ -605,16 +703,29 @@ const refreshName = async ($: EngineInterface): Promise<void> => {
 // A turn summed up into a session's steps: what it finished, what comes next and what it
 // ended up asking. Without the model's answer, the question the reply ends on is still
 // caught. null when the turn gave nothing to track and the session is not tracked yet.
-const summarize = async ($: EngineInterface, mirror: ProgressMirror, prompt: string, answer: string): Promise<ProgressMirror | null> => {
+// `onSilence`: with neither the model's answer nor a question, an empty summary drops the
+// session's open steps, so another agent's turn is tried again later ('retry', it throws) or,
+// on its last try, leaves the steps as they are ('keep', null).
+const summarize = async (
+  $: EngineInterface,
+  mirror: ProgressMirror,
+  prompt: string,
+  answer: string,
+  onSilence: 'sum' | 'keep' | 'retry' = 'sum',
+): Promise<ProgressMirror | null> => {
   const s = await wordsOf($)
   const steps = mirror.tasks.map(task => `- [${task.status === 'completed' ? 'x' : ' '}] ${task.subject}`).join('\n')
   const asked = await complete($, {
     model: 'haiku',
     maxTokens: 300,
     effort: 'low',
-    prompt: s.digestPrompt(mirror.firstPrompt.slice(0, 1200), prompt.slice(0, 1200), replyData(answer), mirror.title, mirror.context, steps),
+    prompt: s.digestPrompt(requestData(mirror.firstPrompt), requestData(prompt), replyData(answer), mirror.title, mirror.context, steps),
   })
   const question = lastQuestion(answer)
+  if (asked?.isAnswered !== true && question === null) {
+    if (onSilence === 'retry') throw new Error(NO_SUMMARY)
+    if (onSilence === 'keep') return null
+  }
   const parsed = asked?.isAnswered === true ? parseDigest(asked.text) : null
   const empty: Digest = { title: '', context: '', done: '', next: '', ask: '', why: '' }
   const digest: Digest = { ...empty, ...parsed }
@@ -645,7 +756,12 @@ const digestTurn = async ($: EngineInterface, prompt: string, answer: string): P
 // waits on the model; whichever wrote second would drop the other's step. So the mirror is
 // checked again just before writing, and when it moved, these turns are folded onto it once
 // more (the fold skips a reply it has already seen).
-const takeAgentTurns = async ($: EngineInterface, turns: readonly AgentTurn[], isRetry = false): Promise<void> => {
+// It throws unless the block is on the board, read back, or the turns had nothing to track:
+// the inbox files stay until then. `isLastTry`: the model's silence no longer holds the turns
+// back, so what can be written without it is.
+// A turn older than one already folded in (a file taken again after a later turn of the same
+// session got through, its end included) changes nothing: its steps would stand over newer ones.
+const takeAgentTurns = async ($: EngineInterface, turns: readonly AgentTurn[], isRetry = false, isLastTry = false): Promise<void> => {
   const last = turns.at(-1)
   if (last === undefined) return
   const at = await $.clock.now()
@@ -653,10 +769,12 @@ const takeAgentTurns = async ($: EngineInterface, turns: readonly AgentTurn[], i
   const seen = JSON.stringify(stored ?? null)
   const fresh = emptyMirror(last.id, last.project || (await wordsOf($)).uncategorized, at, last.cwd, last.agent)
   const firstPrompt = promptKey(stored?.firstPrompt || turns.find(one => one.prompt !== '')?.prompt || '')
-  let mirror: ProgressMirror = { ...fresh, ...stored, firstPrompt, lastAnswer: answerKey(stored?.lastAnswer ?? '') }
+  let mirror: ProgressMirror = { ...fresh, ...stored, firstPrompt, lastAnswer: answerKey(stored?.lastAnswer ?? ''), resume: last.session }
+  const newest = typeof stored?.turnOrder === 'number' ? stored.turnOrder : -1
+  const isNewer = (turn: AgentTurn): boolean => (turnOrder(turn) ?? newest) >= newest
   const digested = turnsToDigest(turns)
   for (const [index, turn] of turns.entries()) {
-    if (turn.event !== 'turn') continue
+    if (turn.event !== 'turn' || !isNewer(turn)) continue
     let { prompt, answer } = turn
     // Codex's Stop carries the reply but not the request; the session log has both.
     if ((answer === '' || prompt === '') && isTranscriptPath(turn.transcript) && (digested.has(index) || mirror.firstPrompt === '')) {
@@ -671,13 +789,16 @@ const takeAgentTurns = async ($: EngineInterface, turns: readonly AgentTurn[], i
     if (answer === '' || answerKey(answer) === mirror.lastAnswer) continue
     if (digested.has(index)) {
       mirror = answerTurns(mirror)
-      mirror = (await summarize($, mirror, prompt, answer)) ?? mirror
+      mirror = (await summarize($, mirror, prompt, answer, isLastTry ? 'keep' : 'retry')) ?? mirror
     }
     mirror = { ...mirror, lastAnswer: answerKey(answer) }
   }
-  if (mirror.tasks.length === 0) return
-  const state = isAllDone(mirror) ? 'done' : last.event === 'end' ? 'ended' : 'waiting'
-  mirror = { ...mirror, state, updated: at }
+  const latest = turns.filter(isNewer).at(-1)
+  // Only older turns: the block already says more than they do, and writing it again would
+  // bring back one archived since.
+  if (mirror.tasks.length === 0 || latest === undefined) return
+  const state = isAllDone(mirror) ? 'done' : latest.event === 'end' ? 'ended' : 'waiting'
+  mirror = { ...mirror, state, updated: at, turnOrder: Math.max(newest, ...turns.map(one => turnOrder(one) ?? -1)) }
   const s = await wordsOf($)
   const written = mirror
   let hasMoved = false
@@ -687,15 +808,15 @@ const takeAgentTurns = async ($: EngineInterface, turns: readonly AgentTurn[], i
       return
     }
     await $.store.set(`agent:${last.id}`, written)
-    await rewrite(
-      $,
-      await progressPath($),
-      before => upsertAutoBlock(before, written, s),
-      (check, after) => extractAutoBlock(check, written.sessionId) === extractAutoBlock(after, written.sessionId),
-    )
+    const path = await progressPath($)
+    const isKept = (check: string): boolean =>
+      extractAutoBlock(check, written.sessionId) === extractAutoBlock(upsertAutoBlock(check, written, s), written.sessionId)
+    await rewrite($, path, before => upsertAutoBlock(before, written, s), isKept)
+    // Another session's write can undo it three times over; only a block read back counts.
+    if (!isKept(await readText($, path))) throw new Error(NOT_KEPT)
     await poll($)
   })
-  if (hasMoved) await takeAgentTurns($, turns, true)
+  if (hasMoved) await takeAgentTurns($, turns, true, isLastTry)
 }
 
 // `/progress connect`: the reporter script beside progress.md, and a hook for it in every
@@ -706,7 +827,7 @@ const takeAgentTurns = async ($: EngineInterface, turns: readonly AgentTurn[], i
 // nothing.
 type ConnectMode = 'connect' | 'remove' | 'auto'
 
-const connectAgents = async ($: EngineInterface, mode: ConnectMode): Promise<{ text: string; done: string[]; hasWarnings: boolean }> => {
+const connectAgents = async ($: EngineInterface, mode: ConnectMode, options: PluginOptions): Promise<{ text: string; done: string[]; hasWarnings: boolean }> => {
   const remove = mode === 'remove'
   const isAuto = mode === 'auto'
   const s = await wordsOf($)
@@ -722,7 +843,17 @@ const connectAgents = async ($: EngineInterface, mode: ConnectMode): Promise<{ t
   const reporter = isWin ? reporterPs1() : reporterSh(inboxPath(path))
   // The board for every other agent: their board commands run it, and so can any terminal.
   const board = `${path.replace(/[\\/][^\\/]*$/, '')}${sep}agent-board.mjs`
-  const boardCode = boardScript(path, s.lang)
+  // The board script and the board commands are one set of files for every session here. A
+  // language taken from Claude Code's setting or LANG can differ between two sessions (one
+  // from the desktop app, one from a terminal), which would take turns rewriting them at each
+  // start, so only a language the person picked replaces the one they hold: the one picked
+  // now, else the one `/progress lang` last settled. Both are read here, not at this
+  // session's start, since another session may have run `/progress lang` since. Whether the
+  // file is ours to write is `sharedFile`'s to say, below.
+  const held = await readText($, board).catch(() => '')
+  const fileLang =
+    chosenLang(options.language, await $.store.get('lang')) ?? langOf(await $.store.get('boardLang')) ?? langOf(boardLangOf(held)) ?? s.lang
+  const boardCode = boardScript(path, fileLang)
   const done: string[] = []
   const skipped: string[] = []
   const failedLabels = new Set<string>()
@@ -742,7 +873,7 @@ const connectAgents = async ($: EngineInterface, mode: ConnectMode): Promise<{ t
     if (generated) await $.store.set(ownershipKey(file), content)
   }
   const preserve = (file: string): void => { skipped.push(s.connectPreserved(file)) }
-  const sharedFile = async (file: string, content: string, legacy: readonly string[] = []): Promise<boolean> => {
+  const sharedFile = async (file: string, content: string, legacy: readonly string[] | ((text: string) => boolean) = [], failed: (file: string) => string = s.connectBoardFailed): Promise<boolean> => {
     try {
       const exists = await $.fs.exists(file)
       const before = await readText($, file)
@@ -758,21 +889,19 @@ const connectAgents = async ($: EngineInterface, mode: ConnectMode): Promise<{ t
       }
       return true
     } catch {
-      skipped.push(remove ? s.connectRemoveFailed(file) : s.connectBoardFailed(file))
+      skipped.push(remove ? s.connectRemoveFailed(file) : failed(file))
       return false
     }
   }
   // A foreign script must never become the command installed in another agent's hook.
   // The reporter is retained on removal for queued/in-flight hooks; only owned board
   // scripts with no remaining command files are removed below.
-  const hasReporter = remove || (await sharedFile(script, reporter))
-  // The 0.18.0 bundle differs only by these newly added, unused setup notices. Reconstruct
-  // its exact known bytes rather than treating every pre-record installation as foreign.
-  // Ownership still compares the whole file: an edited old bundle is preserved too.
-  const knownBoards = Object.values(STRINGS).flatMap(words => {
-    const code = boardScript(path, words.lang)
-    return [code, code.replace(/^  connect(?:Preserved|RemoveFailed|RemoveIncomplete|BoardRetained|Attention):[^\n]*\n/gm, '')]
-  })
+  // A file a release wrote before the plugin kept a record of its output is ours too, by its
+  // exact bytes (hooks/released.ts), so an upgrade from any of them goes through silently.
+  const hasReporter = remove || (await sharedFile(script, reporter, text => isReleased(isWin ? 'reporterPs1' : 'reporterSh', text, { inbox: inboxPath(path) }), s.connectReporterFailed))
+  // This bundle in another language is ours too, as is any released one. Ownership still
+  // compares the whole file: an edited bundle, old or new, is preserved.
+  const knownBoards = (text: string): boolean => Object.values(STRINGS).some(words => text === boardScript(path, words.lang)) || isReleasedBoard(text, path)
   const hasBoard = remove || (await sharedFile(board, boardCode, knownBoards))
   const savedBy = remove ? null : openclawSavedBy(await readText($, [openclawHome, 'openclaw.json'].join(sep)).catch(() => ''))
   // A config no OpenClaw has saved yet (installed, never run) says nothing of its version,
@@ -783,7 +912,7 @@ const connectAgents = async ($: EngineInterface, mode: ConnectMode): Promise<{ t
   // Agents with a hook file that could not be written. OpenClaw's config entry loads its
   // plugin file, so when the plugin file fails, the entry is not written either.
   const failed = new Set<string>()
-  for (const hook of agentHooks({ home, sep, isWindows: isWin, script, inbox: inboxPath(path), codexHome, grokHome, hermesHome, openclawHome, board, s })) {
+  for (const hook of agentHooks({ home, sep, isWindows: isWin, script, inbox: inboxPath(path), codexHome, grokHome, hermesHome, openclawHome, board, s: STRINGS[fileLang] })) {
     if (!remove && (failed.has(hook.agent) || (hook.label !== '' && !hasReporter) || (hook.label === '' && !hasBoard))) continue
     let isInstalled = false
     for (const dir of hook.dirs ?? [hook.dir]) isInstalled = isInstalled || (await $.fs.exists(dir))
@@ -817,7 +946,8 @@ const connectAgents = async ($: EngineInterface, mode: ConnectMode): Promise<{ t
         } else if (!isAuto && hook.label !== '') skipped.push(s.connectSkipped(hook.label, hook.file))
         continue
       }
-      const after = hook.edit(before, remove || (hook.agent === 'openclaw' && openclawOld !== null), await previousOutput(hook.file))
+      const previous = await previousOutput(hook.file)
+      const after = hook.edit(before, remove || (hook.agent === 'openclaw' && openclawOld !== null), previous)
       if ((hook.generated && exists && before === '') || after === COLLISION) {
         preserve(hook.file)
         failedLabels.add(hook.label)
@@ -861,7 +991,8 @@ const connectAgents = async ($: EngineInterface, mode: ConnectMode): Promise<{ t
       // Taking our hooks out also drops empty lists, so whether that changes the text says
       // nothing; the reporter's name in the file does.
       // Codex and Hermes ask the person to approve a changed hook again, so those still say so.
-      if (isAuto && hook.agent !== 'codex' && hook.agent !== 'hermes' && (hook.edit(before, true) === DELETE || hasOurHook(before))) continue
+      // A file of ours from an earlier version, by its record, is not news either.
+      if (isAuto && hook.agent !== 'codex' && hook.agent !== 'hermes' && (hook.edit(before, true, previous) === DELETE || hasOurHook(before))) continue
       // OpenClaw takes two files, a plugin and the config entry that loads it.
       if (hook.label === '' || done.includes(hook.label)) continue
       done.push(hook.label)
@@ -913,7 +1044,7 @@ const installedOpenclawOld = async ($: EngineInterface, isWin: boolean, savedBy:
 // option off, nothing is added behind their back.
 const autoConnect = async ($: EngineInterface, options: PluginOptions): Promise<void> => {
   if (options.autoConnect === false || (await $.store.get('autoConnectOff')) === true) return
-  const { text, done, hasWarnings } = await connectAgents($, 'auto')
+  const { text, done, hasWarnings } = await connectAgents($, 'auto', options)
   if (done.length === 0 && !hasWarnings) return
   const s = await wordsOf($)
   const title = hasWarnings ? s.connectAttention : s.autoConnectTitle
@@ -936,15 +1067,20 @@ const dropSection = async ($: EngineInterface, agent: string, home: string, code
 }
 
 // New files in the inbox, each taken by one open session: it renames the file to a name of
-// its own, which only one rename can do, reads what it renamed, and deletes it once summed
-// up. The inbox is let go of before the model is asked, so a slow answer never stops the
-// next look. The reporter script clears files older than two days that no session took.
+// its own, which only one rename can do, and reads what it renamed. The file is deleted only
+// once its turn is on the board, read back, or held nothing to track. A turn the board or the
+// model could not take leaves its file taken, and a later look takes it again (claimAction);
+// why it failed is in the store's `inboxFailed`. The inbox is let go of before the model is
+// asked, so a slow answer never stops the next look. The reporter script clears files older
+// than two days that no session took.
+type Taken = { path: string; name: string; attempt: number; turn: AgentTurn | null | undefined }
+
 const drainInbox = async ($: EngineInterface): Promise<void> => {
   if (isDraining) return
   isDraining = true
-  const taken: string[] = []
-  const turns: AgentTurn[] = []
+  const taken: Taken[] = []
   let isWin = false
+  let at = 0
   try {
     const path = await progressPath($)
     const dir = inboxPath(path)
@@ -959,9 +1095,9 @@ const drainInbox = async ($: EngineInterface): Promise<void> => {
       const names = (await $.fs.list(dir).catch(() => []))
         .filter(entry => entry.kind === 'file' && isInboxFile(entry.name))
         .map(entry => entry.name)
-      const at = await $.clock.now()
-      const stamp = `${(await read($, mine))?.sessionId.slice(0, 8) ?? '-'}:${at}`
-      await $.store.set('inboxDone', keepInboxDone(Object.fromEntries(names.map(name => [name, stamp])), at))
+      const now = await $.clock.now()
+      const stamp = `${(await read($, mine))?.sessionId.slice(0, 8) ?? '-'}:${now}`
+      await $.store.set('inboxDone', keepInboxDone(Object.fromEntries(names.map(name => [name, stamp])), now))
       hasInboxRecord = true
       return
     }
@@ -971,53 +1107,100 @@ const drainInbox = async ($: EngineInterface): Promise<void> => {
     // last listing: the folder is listed again while its time is that fresh.
     const stat = await $.fs.stat(dir).catch(() => undefined)
     if (stat === undefined) return
-    if (stat.mtimeMs === inboxSeen && (await $.clock.now()) - stat.mtimeMs > 2000) return
+    // A file left taken changes nothing in the folder, so it is listed once a minute anyway.
+    const now = await $.clock.now()
+    if (stat.mtimeMs === inboxSeen && now - stat.mtimeMs > 2000 && now - inboxListed < 60 * 1000) return
     inboxSeen = stat.mtimeMs
+    inboxListed = now
     const entries = await $.fs.list(dir).catch(() => [])
     const done = hasRecord ? (stored as Record<string, string>) : {}
-    const at = await $.clock.now()
-    // A file a session took and never deleted (it closed half-way) goes after a day.
-    await removeFiles(
-      $,
-      entries.filter(entry => entry.kind === 'file' && isTakenFile(entry.name) && at - entry.mtimeMs > DAY).map(entry => `${dir}${sep}${entry.name}`),
-      isWin,
-    )
+    at = await $.clock.now()
+    const session = (await read($, mine))?.sessionId.slice(0, 8) ?? '-'
+    // Files left taken. One whose turn reached the board, and only its delete failed, goes
+    // now; one whose session closed half-way, or whose turn failed, is taken again once its
+    // time is up, or set aside after its last try.
+    const delivered: string[] = []
+    for (const entry of entries) {
+      const claim = entry.kind === 'file' ? readClaim(entry.name) : null
+      if (claim === null || taken.length >= 20) continue
+      const from = `${dir}${sep}${entry.name}`
+      if (done[claim.name] !== undefined) {
+        delivered.push(from)
+        continue
+      }
+      const action = claimAction(claim, entry.mtimeMs, at)
+      if (action === 'setAside') await moveFile($, from, `${dir}${sep}${failedName(claim.name)}`, isWin)
+      if (action !== 'retake') continue
+      const to = `${dir}${sep}${takenName(claim.name, session, at, claim.attempt + 1)}`
+      if (await moveFile($, from, to, isWin)) taken.push({ path: to, name: claim.name, attempt: claim.attempt + 1, turn: undefined })
+    }
+    await removeFiles($, delivered, isWin)
     const fresh = entries
       .filter(entry => entry.kind === 'file' && isInboxFile(entry.name) && done[entry.name] === undefined)
       .map(entry => entry.name)
       .sort(inboxOrder)
-      .slice(0, 20)
-    if (fresh.length === 0) return
-    const session = (await read($, mine))?.sessionId.slice(0, 8) ?? '-'
+      .slice(0, Math.max(0, 20 - taken.length))
     for (const name of fresh) {
-      const to = `${dir}${sep}${takenName(name, session)}`
-      if (!(await moveFile($, `${dir}${sep}${name}`, to, isWin))) continue
-      taken.push(to)
-      // Read at once: the model may keep the turn waiting, and a taken file is only safe
-      // from the day-old sweep of another session while it is fresh.
-      const body = await $.fs.read(to).catch(() => '')
-      const turn = readTurn(name, typeof body === 'string' ? body : '')
-      if (turn !== null) turns.push(turn)
+      const to = `${dir}${sep}${takenName(name, session, at)}`
+      if (await moveFile($, `${dir}${sep}${name}`, to, isWin)) taken.push({ path: to, name, attempt: 1, turn: undefined })
     }
-    if (taken.length === 0) return
-    const stamp = `${session}:${at}`
-    const names = fresh.filter(name => taken.includes(`${dir}${sep}${takenName(name, session)}`))
-    await $.store.set('inboxDone', keepInboxDone({ ...done, ...Object.fromEntries(names.map(name => [name, stamp])) }, at)).catch(() => undefined)
+    // Read at once, before the model may keep the turn waiting. A file that cannot be read
+    // now stays taken for a later look; one that is not a turn (not JSON, no session in it)
+    // holds nothing to track, and one that cannot be parsed must not stop the loop.
+    for (const one of taken) {
+      const body = await $.fs.read(one.path).catch(() => undefined)
+      if (typeof body !== 'string') continue
+      try {
+        one.turn = readTurn(one.name, body)
+      } catch {
+        one.turn = null
+      }
+    }
   } finally {
     isDraining = false
   }
   if (taken.length === 0) return
   const job = digests.then(async () => {
-    try {
-      const bySession = new Map<string, AgentTurn[]>()
-      for (const turn of turns.filter(one => !isBoardTurn(one))) bySession.set(turn.id, [...(bySession.get(turn.id) ?? []), turn])
-      for (const group of bySession.values()) await takeAgentTurns($, group).catch(() => undefined)
-    } finally {
-      await removeFiles($, taken, isWin)
+    const settled = taken.filter(one => one.turn === null || (one.turn !== undefined && isBoardTurn(one.turn)))
+    const failed: Record<string, string> = {}
+    const bySession = new Map<string, Taken[]>()
+    for (const one of [...taken].sort((a, b) => inboxOrder(a.name, b.name))) {
+      if (one.turn === null || one.turn === undefined || isBoardTurn(one.turn)) continue
+      bySession.set(one.turn.id, [...(bySession.get(one.turn.id) ?? []), one])
     }
+    for (const all of bySession.values()) {
+      // The queue can run longer than a claim holds: a file another look took again while
+      // this job waited is that look's to finish.
+      const group: Taken[] = []
+      for (const one of all) if (await $.fs.exists(one.path)) group.push(one)
+      if (group.length === 0) continue
+      const isLastTry = group.some(one => one.attempt >= MAX_TRIES)
+      try {
+        await takeAgentTurns($, group.flatMap(one => (one.turn === null || one.turn === undefined ? [] : [one.turn])), false, isLastTry)
+        settled.push(...group)
+      } catch (error) {
+        const why = (error instanceof Error ? error.message : String(error)).replace(/\s+/g, ' ').slice(0, 200)
+        for (const one of group) failed[one.name] = `${one.attempt}:${at}:${why}`
+      }
+    }
+    await recordInbox($, settled.map(one => one.name), failed, at)
+    await removeFiles($, settled.map(one => one.path), isWin)
   })
   digests = job.catch(() => undefined)
   await job
+}
+
+// The store's record after a look: the files done, so a delete that failed is tried again
+// rather than the turn, and why each file still in the inbox is there.
+const recordInbox = async ($: EngineInterface, settled: readonly string[], failed: Readonly<Record<string, string>>, at: number): Promise<void> => {
+  if (settled.length === 0 && Object.keys(failed).length === 0) return
+  const stamp = `${(await read($, mine))?.sessionId.slice(0, 8) ?? '-'}:${at}`
+  const done = await $.store.get('inboxDone').catch(() => null)
+  const before = done !== null && typeof done === 'object' ? (done as Record<string, string>) : {}
+  await $.store.set('inboxDone', keepInboxDone({ ...before, ...Object.fromEntries(settled.map(name => [name, stamp])) }, at)).catch(() => undefined)
+  const held = await $.store.get('inboxFailed').catch(() => null)
+  const notes = Object.entries(held !== null && typeof held === 'object' ? (held as Record<string, string>) : {}).filter(([name]) => !settled.includes(name))
+  await $.store.set('inboxFailed', keepInboxFailed({ ...Object.fromEntries(notes), ...failed })).catch(() => undefined)
 }
 
 // A compaction's summary made into one line for whoever takes over, kept in the block.
@@ -1052,8 +1235,7 @@ const archiveOld = async ($: EngineInterface, isNow = false): Promise<number> =>
   const keys = new Set<string>()
   await rewrite($, path, async text => {
     const blocks = takeArchivable(text, at, keep, s, isNow)
-    // A hand-kept task the pane has not seen done yet counts as seen a day ago when asked.
-    const manual = takeManualDone(blocks.text, at, key => (isNow ? Math.min(seen[key] ?? at, at - DAY) : seen[key]), s)
+    const manual = takeManualDone(blocks.text, at, key => seen[key], s, isNow)
     const entries = [...blocks.entries, ...manual.entries]
     if (entries.length === 0) return null
     // Made again after another session's write, the same blocks are not archived twice.
@@ -1129,6 +1311,7 @@ const remindNow = async ($: EngineInterface): Promise<void> => {
     await read($, today),
     await read($, doneSeen),
     s,
+    await read($, hiddenAsks),
   )
   const stored = await $.store.get('told')
   const told = stored !== null && typeof stored === 'object' ? (stored as Record<string, number>) : {}
@@ -1277,7 +1460,8 @@ const showCopied = async ($: EngineInterface, question: string, text: string, su
 // The language from the four places it can come from (strings.ts resolveLang).
 const settleLang = async ($: EngineInterface, options: PluginOptions): Promise<void> => {
   const settings = (await $.settings.read().catch(() => ({}))) as { language?: unknown }
-  const chosen = resolveLang(options.language, await $.store.get('lang'), settings.language, await $.env.get('LANG'))
+  const stored = await $.store.get('lang')
+  const chosen = resolveLang(options.language, stored, settings.language, await $.env.get('LANG'))
   await update($, lang, () => chosen)
 }
 
@@ -1291,6 +1475,23 @@ const settle = async ($: EngineInterface): Promise<void> => {
   const at = await $.clock.now()
   await saveMine($, mirror => ({ ...mirror, state: stateOf(mirror, isTurnRunning), updated: at }))
   await queueWrite($)
+}
+
+// A prompt of this plugin's own, run as a turn once the session is idle. It is not the
+// person's message, even when another plugin's hook took theirs without passing it on, and
+// it skips this plugin's own prompt.submit hook.
+const submitOwn = ($: EngineInterface, text: string): Promise<PromptSubmitResult> => {
+  isNextTurnAnswer = false
+
+  return $.prompt.submit({ text })
+}
+
+// The person wrote in this session: with a Task list, every step Claude asked them is answered.
+const answerHere = async ($: EngineInterface): Promise<void> => {
+  const mirror = await read($, mine)
+  if (mirror === null || !isAskingYou(mirror)) return
+  await saveMine($, markAnswered, true)
+  await settle($)
 }
 
 export const register: Register = (on, options) => {
@@ -1384,6 +1585,11 @@ export const register: Register = (on, options) => {
       await settleLang($, options)
       $.ui.invalidate('ui.render')
       await refreshStatus($)
+      // The board script and the board commands take the language just settled, `auto`
+      // included, at once and at every later connect, so a session in another language, or a
+      // `/progress connect` run by hand with autoConnect off, leaves them so.
+      await $.store.set('boardLang', (await wordsOf($)).lang)
+      await autoConnect($, options).catch(() => undefined)
 
       return { text: (await wordsOf($)).langSet }
     }
@@ -1412,7 +1618,7 @@ export const register: Register = (on, options) => {
       const isRemove = connect[1] !== undefined
       if (isRemove) await $.store.set('autoConnectOff', true)
       else await $.store.delete('autoConnectOff')
-      return { text: (await connectAgents($, isRemove ? 'remove' : 'connect')).text }
+      return { text: (await connectAgents($, isRemove ? 'remove' : 'connect', options)).text }
     }
     const add = /^(?:加|新增|add|[+＋])\s*(.*)$/is.exec(arg)
     if (add !== null) return { text: await quickAdd($, add[1] ?? '') }
@@ -1443,17 +1649,37 @@ export const register: Register = (on, options) => {
     return { text: opened.isPlaced ? s.paneOpened(path) : s.paneNotOpened(opened.reason) }
   })
 
+  // Who wrote a prompt is known here, not at turn.start: only the person's own message answers
+  // what waits on them. A pane button's answer is marked when it is pressed.
+  on('prompt.submit', async ($, e, next) => {
+    const isAnswer = isPersonsAnswer(e)
+    if (e.turnId === undefined) isNextTurnAnswer = isAnswer
+    const entered = await next(e)
+    // Dropped: no turn starts, so the next one must not take this prompt's answer.
+    if (entered.drop !== undefined) isNextTurnAnswer = false
+    // Typed over a running turn, or queued behind it: it answers what waited on the person
+    // when they wrote it, though no turn of its own starts now.
+    else if (e.turnId !== undefined && isAnswer) await answerHere($)
+
+    return entered
+  })
+
   on('turn.start', async ($, e, next) => {
     if (e.agentId !== undefined) return next(e)
     isTurnRunning = true
     turnPrompt = e.text.trim()
+    const isAnswer = isNextTurnAnswer && e.text.trim() !== ''
+    isNextTurnAnswer = false
     const mirror = await read($, mine)
     if (mirror !== null && mirror.firstPrompt === '' && e.text.trim() !== '') {
       await saveMine($, one => ({ ...one, firstPrompt: promptKey(e.text) }))
     }
     // The person is answering: what waited on them from the last turn's question is settled.
-    if (mirror !== null && (mirror.autoAsk !== null || mirror.source === 'turns')) {
-      await saveMine($, one => answerTurns(clearAsked(one)), true)
+    // With a Task list, their own message also marks the steps Claude asked them answered,
+    // until Claude asks again. So an answered review does not stay up with a "Looks good"
+    // button that would say the opposite of what they wrote.
+    if (mirror !== null && (mirror.autoAsk !== null || mirror.source === 'turns' || (isAnswer && isAskingYou(mirror)))) {
+      await saveMine($, one => answerTurns(clearAsked(isAnswer && one.source === 'tasks' ? markAnswered(one) : one)), true)
     }
     if (mirror !== null && mirror.tasks.length > 0) {
       await settle($)
@@ -1462,8 +1688,10 @@ export const register: Register = (on, options) => {
       const note = await othersNote($)
       if (note !== null) {
         // The engine takes a plugin's row as a hidden (meta) user row; the file's words in it
-        // sit in a fence, marked as data.
-        await $.session.append({ message: { type: 'user', isMeta: true, content: [{ type: 'text', text: note }] } }).catch(() => undefined)
+        // sit in a fence, marked as data. The row has said `isMeta` since 0.12.0, which the
+        // engine's types do not name, so it is built apart from the call.
+        const message = { type: 'user' as const, isMeta: true, content: [{ type: 'text' as const, text: note }] }
+        await $.session.append({ message }).catch(() => undefined)
       }
     }
 
@@ -1634,7 +1862,7 @@ export const register: Register = (on, options) => {
     const at = (await read($, now)) || (await $.clock.now())
     const s = await wordsOf($)
     const palette = paletteFor(await read($, theme))
-    const view = buildView(snap.projects, await read($, here), await read($, mine), at, await read($, today), await read($, doneSeen), s)
+    const view = buildView(snap.projects, await read($, here), await read($, mine), at, await read($, today), await read($, doneSeen), s, await read($, hiddenAsks))
     const ui: PaneUi = {
       Box: table.Box,
       Text: table.Text,
@@ -1658,6 +1886,7 @@ export const register: Register = (on, options) => {
     const model: PaneModel = {
       view,
       expanded: await read($, expanded),
+      revising: await read($, revising),
       opened: await read($, opened),
       answer: await read($, answer),
       path: snap.path,
@@ -1673,7 +1902,7 @@ export const register: Register = (on, options) => {
         update($, expanded, open => (open === key ? '' : key)).catch(() => undefined)
       },
       continueHere: () => {
-        $.prompt.submit({ text: s.continueText }).catch(() => undefined)
+        submitOwn($, s.continueText).catch(() => undefined)
       },
       archive: () => {
         enqueue(() => archiveOld($, true)).catch(() => undefined)
@@ -1689,10 +1918,10 @@ export const register: Register = (on, options) => {
           .catch(() => undefined)
       },
       takeOver: row => {
-        $.prompt.submit({ text: takeOverPrompt(row, s) }).catch(() => undefined)
+        submitOwn($, takeOverPrompt(row, s)).catch(() => undefined)
       },
       handOver: row => {
-        $.prompt.submit({ text: handOverPrompt(row, s) }).catch(() => undefined)
+        submitOwn($, handOverPrompt(row, s)).catch(() => undefined)
       },
       tick: ref => {
         enqueue(() => tickStep($, ref))
@@ -1727,14 +1956,42 @@ export const register: Register = (on, options) => {
       },
       answer: (item, text) => {
         if (item.where !== 'here') return
-        $.prompt
-          .submit({ text: s.answerText(item.text, text) })
-          .then(() => update($, answer, () => ({ question: item.text, text: s.answered(text), isAsking: false })))
+        // This session's items are keyed `mine::<task id>`. The press is the answer: the step
+        // stops waiting on the person now, and waits again if the answer cannot be sent.
+        const id = item.key.replace(/^mine::/, '')
+        const unmark = () => saveMine($, one => ({ ...one, answered: withoutMarks(one, [id]) }), true).then(() => settle($))
+        saveMine($, one => markAnswered(one, [id]), true)
+          .then(() => settle($))
+          .then(() => submitOwn($, s.answerText(item.text, text)))
+          .then(
+            async entered => {
+              if (entered.drop !== undefined) return unmark()
+              await update($, answer, () => ({ question: item.text, text: s.answered(text), isAsking: false }))
+            },
+            unmark,
+          )
           .catch(() => undefined)
       },
       copyCommand: (item, surface) => {
         if (item.command === null) return
         showCopied($, s.commandOf(item.text), item.command, surface).catch(() => undefined)
+      },
+      copySessionId: (item, surface) => {
+        if (item.sessionId === null) return
+        showCopied($, s.sessionIdOf(item.task, agentName(item.agent), item.resumeVia), item.sessionId, surface).catch(() => undefined)
+      },
+      hide: item => {
+        setAnswered($, item, true)
+          .then(isDone => (isDone ? undefined : update($, answer, () => ({ question: item.text, text: s.hideFailed, isAsking: false }))))
+          .catch(() => undefined)
+      },
+      unhide: item => {
+        setAnswered($, item, false)
+          .then(isDone => (isDone ? undefined : update($, answer, () => ({ question: item.text, text: s.hideFailed, isAsking: false }))))
+          .catch(() => undefined)
+      },
+      revise: item => {
+        update($, revising, open => (open === reviseKey(item) ? '' : reviseKey(item))).catch(() => undefined)
       },
       toggleLegend: () => {
         update($, isLegendOpen, open => !open).catch(() => undefined)

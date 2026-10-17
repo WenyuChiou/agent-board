@@ -2,6 +2,7 @@ import { ZH_TW } from './i18n'
 import type { Strings } from './i18n'
 import { lastQuestion } from './digest'
 import { isBoardTurn, isTranscriptPath, readTurn, transcriptTail } from './inbox'
+import { replyHint } from './view'
 import type { StepRef, TaskRef, TaskRow, View, ViewStep, WaitingItem } from './view'
 
 // The board as plain text, for agents other than Claude Code: the standalone script that
@@ -106,14 +107,16 @@ export const boardText = (view: View, pending: readonly PendingTurn[], s: String
     })),
     ...pending.filter(turn => turn.isQuestion).map(turn => ({ where: [turn.project, turn.agent].filter(part => part !== '').join(' · '), text: turn.text, task: '' })),
   ]
+  // Questions marked answered in a pane are left out, and counted so they are not lost.
+  const hidden = view.hidden.length === 0 ? [] : [c('quiet', s.hiddenCount(view.hidden.length))]
   if (asks.length === 0) {
-    lines.push(c('done', s.nothingForYou), '')
+    lines.push(c('done', s.nothingForYou), ...hidden, '')
   } else {
     lines.push(c('waiting', `● ${s.sectionWaiting}`))
     for (const ask of asks) {
       lines.push(`  ${c('project', fit(ask.where + (ask.task ? ` › ${ask.task}` : ''), o.width - 4))}`, `    ${fit(ask.text, o.width - 6)}`)
     }
-    lines.push('')
+    lines.push(...hidden.map(line => `  ${line}`), '')
   }
 
   if (view.due.length > 0) {
@@ -158,6 +161,10 @@ export type BoardAction =
   | { type: 'tick'; ref: StepRef }
   | { type: 'archive'; ref: TaskRef; title: string }
   | { type: 'copy'; text: string }
+  // Kept off Waiting on you until the question changes (`hideKey`); null shows every hidden one
+  // again. Only the hidden list beside progress.md is written: nothing goes to the agent.
+  | { type: 'hide'; key: string; text: string }
+  | { type: 'unhide'; key: string | null }
   | { type: 'html' }
   | { type: 'quit' }
 
@@ -177,14 +184,16 @@ export const boardItems = (view: View, pending: readonly PendingTurn[]): BoardIt
   const rows = [...view.due, ...view.groups.flatMap(group => group.rows)].filter((row, index, all) => all.findIndex(one => one.key === row.key) === index)
 
   return [
-    ...view.waiting.map(ask => ({ type: 'ask' as const, key: `ask:${ask.key}`, ask })),
+    // A question's key holds its words, so a press made while it showed one question is refused
+    // once the same step asks another, rather than taken as the answer to the new one.
+    ...view.waiting.map(ask => ({ type: 'ask' as const, key: ask.hideKey === '' ? `ask:${ask.key}` : `ask:${ask.key}@${ask.hideKey}`, ask })),
     ...rows.map(row => ({ type: 'row' as const, key: `row:${row.key}`, row })),
     ...pending.map((turn, index) => ({ type: 'turn' as const, key: `turn:${turn.agent}:${turn.project}:${index}`, turn })),
   ]
 }
 
 // What each key does on the selected line, so the footer lists only keys that do something.
-const answersOf = (ask: WaitingItem, s: Strings): string[] =>
+export const answersOf = (ask: WaitingItem, s: Strings): string[] =>
   ask.kind === 'confirm' ? [s.yesAnswer, s.noAnswer] : ask.kind === 'choose' ? ask.options.slice(0, 9) : []
 
 // The state with the chosen line's key set, so a key pressed later acts on the line that was
@@ -204,6 +213,7 @@ export const boardKey = (state: BoardState, key: string, items: readonly BoardIt
   if (key === 'up' || key === 'k') return moved(Math.max(0, at - 1))
   if (key === 'down' || key === 'j') return moved(Math.min(last, at + 1))
   if (key === 'o') return { state, action: { type: 'html' } }
+  if (key === 'u') return { state, action: { type: 'unhide', key: null } }
   if (item === undefined) return { state, action: null }
   // The line under the cursor changed since the screen was drawn: choose what is there now and
   // let the person look before a key acts on it.
@@ -212,7 +222,13 @@ export const boardKey = (state: BoardState, key: string, items: readonly BoardIt
   if (item.type === 'ask') {
     const { ask } = item
     if (key === 'x' && ask.step !== null) return { state, action: { type: 'tick', ref: ask.step } }
+    if (key === 'h' && ask.hideKey !== '') return { state, action: { type: 'hide', key: ask.hideKey, text: ask.text } }
     if (key === 'c' && (ask.command ?? ask.link) !== null) return { state, action: { type: 'copy', text: plain((ask.command ?? ask.link) as string) } }
+    // Another session's question has nothing else to copy: the command that reopens that
+    // session where there is one (its line is cut to the terminal's width), else its id, which
+    // finds the session in its agent's list.
+    const back = replyHint(ask, s).reopen ?? ask.sessionId
+    if (key === 'c' && back !== null) return { state, action: { type: 'copy', text: plain(back) } }
     const answers = answersOf(ask, s)
     const pick = ask.kind === 'confirm' ? ['y', 'n'].indexOf(key) : /^[1-9]$/.test(key) ? Number(key) - 1 : -1
     const answer = pick >= 0 ? answers[pick] : undefined
@@ -236,7 +252,14 @@ const keysFor = (item: BoardItem | undefined, s: Strings): string[] => {
     return [
       ...(ask.step !== null ? [s.boardKeyTick] : []),
       ...(ask.kind === 'confirm' ? [s.boardKeyConfirm] : answers.length > 0 ? [s.boardKeyOptions(answers.length)] : []),
-      ...((ask.command ?? ask.link) !== null ? [s.boardKeyCopyCommand] : []),
+      ...((ask.command ?? ask.link) !== null
+        ? [s.boardKeyCopyCommand]
+        : replyHint(ask, s).reopen !== null
+          ? [s.boardKeyCopyResume]
+          : ask.sessionId !== null
+            ? [s.boardKeyCopyId]
+            : []),
+      ...(ask.hideKey !== '' ? [s.boardKeyHide] : []),
     ]
   }
   if (item.type === 'row') {
@@ -255,6 +278,7 @@ export const boardScreen = (view: View, pending: readonly PendingTurn[], state: 
   const waiting = view.overview.waiting + pending.filter(turn => turn.isQuestion).length
   const lines: string[] = [
     `${c('bold', s.paneTitle)}  ${c('waiting', `● ${waiting} ${s.countWaiting}`)}  ${c('accent', `▸ ${active} ${s.countActive}`)}  ${c('alert', `⚑ ${due} ${s.countDue}`)}  ${c('done', `✓ ${today} ${s.countToday}`)}`,
+    ...(view.hidden.length === 0 ? [] : [c('quiet', `${s.hiddenCount(view.hidden.length)} · ${s.boardKeyShowHidden}`)]),
     '',
   ]
   let section = ''
@@ -279,7 +303,15 @@ export const boardScreen = (view: View, pending: readonly PendingTurn[], state: 
         if (ask.note) lines.push(`    ${fit(ask.note, o.width - 6)}`)
         answersOf(ask, s).forEach((answer, n) => lines.push(`    ${c('accent', ask.kind === 'confirm' ? (n === 0 ? 'y' : 'n') : String(n + 1))} ${fit(answer, o.width - 8)}`))
         if (ask.command !== null) lines.push(`    ${c('accent', fit(`$ ${ask.command}`, o.width - 6))}`)
-        if (ask.where === 'other') lines.push(`    ${c('quiet', fit(s.replyElsewhere(ask.project, ask.agent), o.width - 6))}`)
+        if (ask.where === 'other') {
+          const hint = replyHint(ask, s)
+          lines.push(`    ${c('quiet', fit(hint.where, o.width - 6))}`)
+          lines.push(`    ${c('quiet', fit(hint.back, o.width - 6))}`)
+          if (hint.reopen !== null) {
+            lines.push(`    ${c('quiet', fit(hint.note, o.width - 6))}`)
+            lines.push(`    ${c('accent', fit(`$ ${hint.reopen}`, o.width - 6))}`)
+          }
+        }
       }
       return
     }

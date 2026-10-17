@@ -27,6 +27,7 @@ import tempfile
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from validate import (  # noqa: E402
     PROJECT_RE,
+    START_RE,
     classify,
     extract_blocks,
     fragment_parts,
@@ -36,6 +37,18 @@ from validate import (  # noqa: E402
     start_session,
     validate_block,
 )
+
+# The board's page answers a closed session by its `resume=` id, in its `dir=` folder. A session
+# on another machine cannot be resumed on this one, so a fragment never brings either: else text
+# from elsewhere would pick the folder a local agent runs in.
+LOCAL_ONLY = ("resume", "dir")
+
+
+def local_marker(line):
+    """The start marker without the attributes only this machine may write."""
+    attrs = START_RE.match(line).group(1).split()
+    kept = [a for a in attrs if a.split("=", 1)[0] not in LOCAL_ONLY]
+    return line if len(kept) == len(attrs) else f"<!-- auto {' '.join(kept)} -->"
 
 
 def heading_name(under):
@@ -56,7 +69,7 @@ def parse_fragments(fragments, under=None):
         errs = [e for e in validate_block(lines, strict=True) if not e.startswith("warning:")]
         if errs:
             raise ValueError(f"fragment invalid: {errs}")
-        parsed.append((start_session(lines[0]), project or default_project, lines))
+        parsed.append((start_session(lines[0]), project or default_project, [local_marker(lines[0]), *lines[1:]]))
     return parsed
 
 
@@ -81,6 +94,11 @@ def place_new(lines, project, block):
     """Insert a new block the way hooks/blocks.ts upsertAutoBlock does: after
     what is already in its section, one blank line before the start marker and
     one after the end marker (also before a following `##`)."""
+    # A comment opening in the heading would hide every line after it up to the next `-->`,
+    # other blocks with them. reporter.py refuses one in BOARD_PROJECT; a fragment written by
+    # hand, or --under, is refused here.
+    if "<!--" in project or "-->" in project:
+        raise ValueError(f"project heading has '<!--' or '-->': {project!r}")
     if all(not line.strip() for line in lines):
         return [f"## {project}", "", *block]
     section = section_range(lines, project)

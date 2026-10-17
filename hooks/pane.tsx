@@ -13,7 +13,7 @@ import type { ProgressAnswer, ProgressStepStatus } from '../types'
 import type { Strings } from './i18n'
 import { askColor, stepColor, toneColor } from './palette'
 import type { Palette } from './palette'
-import { progressBar } from './view'
+import { progressBar, replyHint, wayBackText } from './view'
 import type { Focus, PrView, StepRef, TaskRow, Tone, View, ViewStep, WaitingItem } from './view'
 
 // The pane's drawing, from the view and a set of actions; it never touches the engine,
@@ -50,6 +50,13 @@ export type PaneActions = {
   // An answer to one of this session's own questions, sent to Claude.
   answer: (item: WaitingItem, text: string) => void
   copyCommand: (item: WaitingItem, surface: RenderSurface) => void
+  // Another session's id, any agent's, so the person can find the session that asked.
+  copySessionId: (item: WaitingItem, surface: RenderSurface) => void
+  // Hides a question answered in its own session, on this machine only; sends nothing.
+  hide: (item: WaitingItem) => void
+  unhide: (item: WaitingItem) => void
+  // Opens the reply box under a review, for what should change; sends nothing.
+  revise: (item: WaitingItem) => void
   // A question for the side model, or a line starting with + to add a task.
   ask: (question: string) => void
   clearAnswer: () => void
@@ -64,6 +71,8 @@ export type PaneActions = {
 export type PaneModel = {
   view: View
   expanded: string
+  // The review whose reply box is open, by item key.
+  revising: string
   opened: readonly string[]
   answer: ProgressAnswer | null
   path: string
@@ -84,6 +93,10 @@ export const GLYPH: Record<ProgressStepStatus, string> = {
   blocked: '!',
   cancelled: '–',
 }
+
+// The review whose reply box Needs changes opened: by its words too, so the same task asking
+// something new starts with the box closed.
+export const reviseKey = (item: WaitingItem): string => `${item.key} ${item.text} — ${item.note}`
 
 // In the order of the strings' legendWords.
 const LEGEND: readonly ProgressStepStatus[] = ['done', 'doing', 'todo', 'waiting', 'running', 'blocked', 'cancelled']
@@ -176,6 +189,8 @@ export const drawPane = (ui: PaneUi, model: PaneModel, actions: PaneActions): Re
     if (item.where === 'other') {
       const run = item.kind === 'do' ? item.command : null
       const open = item.kind === 'review' ? item.link : null
+      const sessionId = item.sessionId
+      const hint = replyHint(item, s)
       return (
         <Box flexDirection="column">
           {run !== null && <Text color={palette.accent} wrap="wrap">{`$ ${run}`}</Text>}
@@ -187,7 +202,16 @@ export const drawPane = (ui: PaneUi, model: PaneModel, actions: PaneActions): Re
             </Box>
           )}
           {open !== null && Link !== null && <Link href={open} label={s.openLink} />}
-          {muted(s.replyElsewhere(item.project, item.agent))}
+          {muted(hint.where)}
+          {muted(wayBackText(hint))}
+          {hint.reopen !== null && <Text color={palette.accent} wrap="wrap">{`$ ${hint.reopen}`}</Text>}
+          {sessionId !== null && (
+            <Box marginTop={1}>
+              <Button key={`${item.key}::id`} onPress={press => actions.copySessionId(item, press.surface)}>
+                {s.copySessionId}
+              </Button>
+            </Box>
+          )}
         </Box>
       )
     }
@@ -262,13 +286,22 @@ export const drawPane = (ui: PaneUi, model: PaneModel, actions: PaneActions): Re
         </Box>
       )
     }
+    // Looks good and Needs changes side by side: with Looks good alone, a person who had already
+    // asked for changes in the chat had only an approval to press.
     if (item.kind === 'review') {
       const link = item.link
       return (
         <Box flexDirection="column">
           {link !== null && Link !== null && <Link href={link} label={s.openLink} />}
-          {buttons([[s.looksGood, s.looksGoodAnswer, true]])}
-          {reply(s.whatToChange)}
+          <Box flexDirection="row" flexWrap="wrap" gap={1} marginTop={1}>
+            <Button key={`${item.key}::${s.looksGood}`} variant="primary" onPress={() => actions.answer(item, s.looksGoodAnswer)}>
+              {s.looksGood}
+            </Button>
+            <Button key={`${item.key}::revise`} onPress={() => actions.revise(item)}>
+              {s.needsChanges}
+            </Button>
+          </Box>
+          {model.revising === reviseKey(item) && reply(s.whatToChange)}
         </Box>
       )
     }
@@ -289,6 +322,13 @@ export const drawPane = (ui: PaneUi, model: PaneModel, actions: PaneActions): Re
       {item.note === '' && item.context !== '' && muted(s.contextLine(item.context))}
       {item.when !== '' && muted(item.when)}
       {askActions(item)}
+      {item.hideKey !== '' && (
+        <Box marginTop={1}>
+          <Button key={`${item.key}::hide`} onPress={() => actions.hide(item)}>
+            {s.answeredHide}
+          </Button>
+        </Box>
+      )}
     </Box>
   )
 
@@ -455,6 +495,19 @@ export const drawPane = (ui: PaneUi, model: PaneModel, actions: PaneActions): Re
     </Box>
   )
 
+  // A question marked answered, muted, with the way to list it again.
+  const hiddenRow = (item: WaitingItem) => (
+    <Box flexDirection="column" marginTop={1} paddingLeft={1}>
+      {muted(item.text)}
+      {muted(`${item.project} › ${item.task}`)}
+      <Box marginTop={1}>
+        <Button key={`${item.key}::unhide`} onPress={() => actions.unhide(item)}>
+          {s.showAgain}
+        </Button>
+      </Box>
+    </Box>
+  )
+
   // The counts at the top; each opens what it counts. A zero stays, in the muted colour.
   const overview = () => {
     const { waiting, active, due, today } = view.overview
@@ -568,6 +621,14 @@ export const drawPane = (ui: PaneUi, model: PaneModel, actions: PaneActions): Re
 
       {view.waiting.length > 0 && fold('waiting', s.sectionWaiting, view.waiting.length, 'warn', '')}
       {isOpen('waiting') && view.waiting.map(waitingRow)}
+      {view.hidden.length > 0 && (
+        <Box marginTop={1}>
+          <Button key="section::hidden" plain onPress={() => actions.toggleSection('hidden')}>
+            {`${isOpen('hidden') ? '▾' : '▸'} ${s.hiddenCount(view.hidden.length)}`}
+          </Button>
+        </Box>
+      )}
+      {isOpen('hidden') && view.hidden.map(hiddenRow)}
 
       {view.due.length > 0 &&
         fold('due', s.sectionDue, view.due.length, 'soon', nearest === undefined ? '' : s.nearestDue(nearest.title, nearest.due?.left ?? ''))}

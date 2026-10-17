@@ -1,6 +1,9 @@
 import { BOARD_SCRIPT } from './board-script'
-import { ZH_TW } from './i18n'
+import { LANGS, ZH_TW } from './i18n'
 import type { Strings } from './i18n'
+import { RELEASED } from './released'
+import type { ReleasedKind } from './released'
+import { sha256 } from './sha256'
 import { STRINGS } from './strings'
 
 // The reporter script an agent's hook runs, written beside progress.md by `/progress
@@ -211,10 +214,12 @@ export const DELETE = Symbol('delete')
 export const COLLISION = Symbol('collision')
 
 // Whole generated files are replaced only when their exact bytes are known. The stored
-// previous output permits upgrades; legacy templates permit adoption before that record
-// existed. A familiar path or a copied header is not ownership of the rest of a file.
-export const generatedFile = (content: string, legacy: readonly string[] = []): AgentHook['edit'] => (text, remove, previous) => {
-  if (text !== '' && text !== content && text !== previous && !legacy.includes(text)) return COLLISION
+// previous output permits upgrades; legacy templates (a list, or a check such as
+// `isReleased`) permit adoption before that record existed. A familiar path or a copied
+// header is not ownership of the rest of a file.
+export const generatedFile = (content: string, legacy: readonly string[] | ((text: string) => boolean) = []): AgentHook['edit'] => (text, remove, previous) => {
+  const isKnown = (): boolean => (typeof legacy === 'function' ? legacy(text) : legacy.includes(text))
+  if (text !== '' && text !== content && text !== previous && !isKnown()) return COLLISION
 
   return remove ? (text === '' ? null : DELETE) : content
 }
@@ -294,7 +299,12 @@ export const withHermesHooks = (text: string, events: Array<[string, string]>): 
   // a session start neither rewrites the file nor says it connected Hermes again.
   const lines0 = text.split('\n')
   const items = hermesItems(lines0).map(([start, end]) => lines0.slice(start, end).join('\n'))
-  const isItemOf = (item: string, command: string): boolean => item.includes(command) || item.includes(JSON.stringify(command)) || item.includes(`'${command.replace(/'/g, "''")}'`)
+  // A dumper folds a long command onto the next line at a space (PyYAML at 80 columns, the
+  // way Hermes saves config.yaml, splits the Windows command), so a run of spaces and line
+  // breaks counts as one space.
+  const flat = (one: string): string => one.replace(/\s+/g, ' ')
+  const isItemOf = (item: string, command: string): boolean =>
+    [command, JSON.stringify(command), `'${command.replace(/'/g, "''")}'`].some(form => flat(item).includes(flat(form)))
   if (items.length === events.length && events.every(([, command]) => items.some(item => isItemOf(item, command)))) return text
   const base = stripHermesHooks(text, true)
   const item = (command: string): string => `- {command: ${JSON.stringify(command)}, timeout: 10}`
@@ -656,11 +666,51 @@ export default {
 // set on its first line (an ES module's imports run first either way).
 export const boardScript = (path: string, lang: string): string => `globalThis.AGENT_BOARD = ${JSON.stringify({ path, lang })}\n${BOARD_SCRIPT}`
 
+// The language a board script already written prints in, from its first line; '' when it
+// names none.
+export const boardLangOf = (code: string): string => {
+  const head = /^globalThis\.AGENT_BOARD = ([^\n]*)/.exec(code)
+  try {
+    const lang = (JSON.parse(head?.[1] ?? '') as { lang?: unknown } | null)?.lang
+    return typeof lang === 'string' ? lang : ''
+  } catch {
+    return ''
+  }
+}
+
+// What stands for this machine's paths in the hashes of hooks/released.ts. No file of ours
+// holds a NUL, so a file only matches once its own paths are put back.
+export const RELEASE_PATHS = { board: '\u0000board\u0000', inbox: '\u0000inbox\u0000' } as const
+
+// A file an earlier release wrote, before the plugin kept a record of its output: with this
+// machine's paths swapped for the placeholders, its bytes hash to one that release generated.
+// An installation from any tagged release (0.17.1 on) upgrades silently this way, while a file the person
+// edited by so much as a byte is still theirs.
+export const isReleased = (kind: ReleasedKind, text: string, paths: { board?: string; inbox?: string } = {}): boolean => {
+  let normal = text
+  if (paths.board) normal = normal.split(paths.board).join(RELEASE_PATHS.board)
+  if (paths.inbox) normal = normal.split(paths.inbox).join(RELEASE_PATHS.inbox)
+  const hash = sha256(normal)
+
+  return RELEASED.some(release => release[kind].includes(hash))
+}
+
+// The board script beside progress.md: its first line names this progress.md in one of the
+// languages, and the rest is a released bundle.
+export const isReleasedBoard = (text: string, path: string): boolean => {
+  const cut = text.indexOf('\n')
+  if (cut < 0) return false
+  const head = text.slice(0, cut)
+  if (!LANGS.some(lang => head === `globalThis.AGENT_BOARD = ${JSON.stringify({ path, lang })}`)) return false
+
+  return isReleased('board', text.slice(cut + 1))
+}
+
 // Each agent's way to show the board, so the person sees every agent's work from whichever
 // one they are in. Gemini CLI and OpenCode paste a command's output into the prompt before
 // the model reads it; the others read skills, whose model runs the command. Most of them
 // read ~/.agents/skills, so one skill there reaches Codex, Cursor, Grok Build, OpenClaw,
-// Gemini CLI and OpenCode; Hermes Agent and Antigravity keep their own folder.
+// Gemini CLI, OpenCode and Muse Code; Hermes Agent and Antigravity keep their own folder.
 const SKILL = 'agent-board'
 
 export const boardCommands = (ctx: ConnectContext): AgentHook[] => {
@@ -671,22 +721,24 @@ export const boardCommands = (ctx: ConnectContext): AgentHook[] => {
     const description = JSON.stringify(s.boardCommandDescription)
     return {
       skill: `---\nname: ${SKILL}\ndescription: ${description}\n---\n\n${s.boardSkillPrompt(run)}\n`,
-      gemini: `# Written by the Agent Board plugin (/progress connect).\ndescription = ${description}\nprompt = '''${s.boardCommandPrompt}\n\n!{${run}}\n'''\n`,
-      opencode: `---\ndescription: ${description}\n---\n\n${s.boardCommandPrompt}\n\n!\`${run}\`\n`,
+      gemini: `# Written by the Agent Board plugin (/progress connect).\ndescription = ${description}\nprompt = '''${s.boardCommandPrompt}\n\n!{${run} --serve}\n'''\n`,
+      opencode: `---\ndescription: ${description}\n---\n\n${s.boardCommandPrompt}\n\n!\`${run} --serve\`\n`,
     }
   }
   const current = contents(ctx.s ?? ZH_TW)
   // Before ownership records existed, a different session could have generated these
-  // exact files in another supported language. No other bytes may differ.
+  // exact files in another supported language, or an earlier release could have. No other
+  // bytes may differ.
   const known = Object.values(STRINGS).map(contents)
-  const file = (kind: keyof typeof current) => generatedFile(current[kind], known.map(one => one[kind]))
+  const file = (kind: keyof typeof current) =>
+    generatedFile(current[kind], text => known.some(one => one[kind] === text) || isReleased(kind, text, { board: ctx.board ?? '' }))
 
   return [
     {
       agent: 'skills',
       label: '',
       dir: ctx.codexHome,
-      dirs: [ctx.codexHome, join(ctx, '.cursor'), ...grokSigns(ctx), ctx.openclawHome, join(ctx, '.gemini'), join(ctx, '.config', 'opencode')],
+      dirs: [ctx.codexHome, join(ctx, '.cursor'), ...grokSigns(ctx), ctx.openclawHome, join(ctx, '.gemini'), join(ctx, '.config', 'opencode'), join(ctx, '.config', 'muse')],
       file: join(ctx, '.agents', 'skills', SKILL, 'SKILL.md'),
       generated: true,
       edit: file('skill'),

@@ -11,7 +11,7 @@ Needs only Python 3 (stdlib). No `claude` CLI.
 
 | File | Does |
 |---|---|
-| `reporter.py` | Builds this agent's block fragment, `<agent>-<session>.md` in the outbox. Keeps a session registry (`sessions.json`: chat id to 8-hex session) so the id survives restarts. Both live in `$AGENT_BOARD_REMOTE_DIR`, else `$CLAUDE_CONFIG_DIR/remote-reporter/`, else `~/.claude/remote-reporter/`, never in this folder. Agent name from `BOARD_AGENT_NAME` (default `remote`); with `BOARD_PROJECT` set, the fragment starts with `## <project>`. Refuses control characters, `<!--` and `-->` in text. |
+| `reporter.py` | Builds this agent's block fragment, `<agent>-<session>.md` in the outbox. Keeps a session registry (`sessions.json`: chat id to 8-hex session) so the id survives restarts. Both live in `$AGENT_BOARD_REMOTE_DIR`, else `$CLAUDE_CONFIG_DIR/remote-reporter/`, else `~/.claude/remote-reporter/`, never in this folder. Agent name from `BOARD_AGENT_NAME` (default `remote`); with `BOARD_PROJECT` set, the fragment starts with `## <project>`. Refuses control characters, `<!--` and `-->` in text. `retire` closes a session as `ended`, keeping its title and steps, and mints a new id for the chat. |
 | `merge.py` | Merges fragments into `progress.md`: replaces the block with the same session id (also one with no end marker), or places a new one under its `## <project>` (from the fragment or `--under`; refuses without one). Reads the file the way `hooks/parse.ts` does (code fences and HTML comments skipped, CRLF, any attribute order), keeps line endings and file mode, writes a temp file and `os.replace`s it, reads back and retries up to 3 times. Idempotent. Refuses invalid fragments. |
 | `validate.py` | Checks a board file or a fragment against FORMAT.md. On a board, a session id that is not 8 hex and a block with no end marker are warnings; in a fragment, 8 hex is required and no marker, fence, `##` or unclosed comment may sit in the body. |
 | `test_pipeline.py` | The tests. They run in a temporary folder and leave the checkout as it was. |
@@ -26,6 +26,10 @@ python3 reporter.py init <chat-id>
 
 # rebuild the fragment from a steps file
 python3 reporter.py update <chat-id> <working|waiting|done|ended> "<title>" steps.txt
+
+# close the session honestly and start fresh (clean break; the session must have reported,
+# and its id and fragment must still be in the registry and the outbox)
+python3 reporter.py retire <chat-id> ["reason"]
 
 # merge into the board file (transport-agnostic: git, chat relay, drive...)
 python3 merge.py /path/to/progress.md ~/.claude/remote-reporter/outbox/myagent-<session>.md
