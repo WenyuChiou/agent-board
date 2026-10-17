@@ -8,10 +8,18 @@ A Claude Code plugin that also follows Codex, Gemini CLI, OpenCode, Grok Build, 
 </p>
 
 <p align="center">
-<a href="https://github.com/WenyuChiou/agent-board/actions/workflows/test.yml"><img alt="Tests" src="https://github.com/WenyuChiou/agent-board/actions/workflows/test.yml/badge.svg"></a>
 <a href="CHANGELOG.md"><img alt="Version 0.18.0" src="https://img.shields.io/badge/version-0.18.0-blue"></a>
+<a href="#quick-start"><img alt="Needs Claude Code 2.1.287 or newer" src="https://img.shields.io/badge/Claude%20Code-%E2%89%A5%202.1.287-d97757"></a>
 <a href="LICENSE"><img alt="MIT license" src="https://img.shields.io/badge/license-MIT-green"></a>
 <img alt="macOS, Linux, Windows" src="https://img.shields.io/badge/macOS%20%C2%B7%20Linux%20%C2%B7%20Windows-lightgrey">
+</p>
+<p align="center">
+<a href="#supported-agents"><img alt="Tested live with Codex 0.163.0" src="https://img.shields.io/badge/Codex-0.163.0-brightgreen"></a>
+<a href="#supported-agents"><img alt="Tested live with Gemini CLI 0.64.0" src="https://img.shields.io/badge/Gemini%20CLI-0.64.0-brightgreen"></a>
+<a href="#supported-agents"><img alt="Tested live with OpenCode 1.19.3" src="https://img.shields.io/badge/OpenCode-1.19.3-brightgreen"></a>
+<a href="#supported-agents"><img alt="Tested live with Grok Build 1.0.62" src="https://img.shields.io/badge/Grok%20Build-1.0.62-brightgreen"></a>
+<a href="#supported-agents"><img alt="Tested live with Hermes Agent 0.19.0" src="https://img.shields.io/badge/Hermes%20Agent-0.19.0-yellowgreen"></a>
+<a href="#supported-agents"><img alt="Tested live with OpenClaw 2026.10.4" src="https://img.shields.io/badge/OpenClaw-2026.10.4-yellowgreen"></a>
 </p>
 
 <p align="center">English · <a href="README.zh-TW.md">繁體中文</a> · <a href="README.zh-CN.md">简体中文</a></p>
@@ -20,7 +28,7 @@ You have Claude Code on one project, Codex on another, Gemini on a third. Twenty
 
 ## Supported agents
 
-✅ works, tested live · ⚠️ works, with the limit in the last column · ❔ written from the agent's docs, not tested yet · ❌ does not work
+✅ works, tested live · ⚠️ works, with the limit in the last column · ❔ written from the agent's docs, not tested yet · ❌ does not work · the agent badges at the top: green ✅, yellow-green ⚠️
 
 | | Agent | Its turns on the board | The board inside it | Tested on | What to know |
 |:-:|---|:-:|:-:|---|---|
@@ -37,7 +45,7 @@ You have Claude Code on one project, Codex on another, Gemini on a third. Twenty
 |  | **dot**, **Muse** on the web | ⚠️ | ❌ | web, Oct 2026 | No hook: paste [one prompt](docs/REMOTE_REPORTERS.md#chat-relay-a-prompt-to-paste) into the chat, then merge each block it writes |
 |  | **Any other agent** (Aider, Copilot, Windsurf…) | ⚠️ | ❌ |  | Paste one section of [AGENTS.md](AGENTS.md) into its instructions; it writes its own block |
 
-The board inside another agent shows everything; answering its questions happens in that agent (the pane gives you the words or command to paste). "Tested on" is the version that ran a real turn whose hook fired and whose block the pane drew; those payloads are kept as tests. Here is the board reading them:
+The board inside another agent shows everything, as printed text to read: nothing in it can be clicked. To tick, archive or copy an answer, run the [board you work in](#the-board-in-every-agent) in a terminal beside it. Answering a question happens in the agent that asked it (the pane gives you the words or command to paste). "Tested on" is the version that ran a real turn whose hook fired and whose block the pane drew; those payloads are kept as tests. Here is the board reading them:
 
 <img alt="The board listing the question each of six agents asked in its live run: Codex, Gemini CLI, OpenClaw, OpenCode, Grok Build, Hermes Agent" src="docs/images/live/hooks-en.png" width="620">
 

@@ -24,6 +24,11 @@
   0.19.0 loaded the agent-board skill with `skill_view` and ran it with
   `terminal`; OpenClaw 2026.10.4 read it from `~/.agents/skills` and ran it
   with `exec`. The README table marks both ✅.
+- **README badges name what was tested.** The CI badge gives way to the
+  version, the Claude Code it needs (2.1.287 or newer) and one badge per
+  agent tested live, with the version tested: green where the table says ✅,
+  yellow-green where it says ⚠️. The table now says that the board inside an
+  agent is text to read, and acting on it is done in the terminal board.
 
 ## 0.17.1 — 2026-10-17
 

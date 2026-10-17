@@ -8,10 +8,18 @@ Claude Code 插件，也跟得上 Codex、Gemini CLI、OpenCode、Grok Build、H
 </p>
 
 <p align="center">
-<a href="https://github.com/WenyuChiou/agent-board/actions/workflows/test.yml"><img alt="测试" src="https://github.com/WenyuChiou/agent-board/actions/workflows/test.yml/badge.svg"></a>
 <a href="CHANGELOG.md"><img alt="版本 0.18.0" src="https://img.shields.io/badge/version-0.18.0-blue"></a>
+<img alt="需要 Claude Code 2.1.287 以上" src="https://img.shields.io/badge/Claude%20Code-%E2%89%A5%202.1.287-d97757">
 <a href="LICENSE"><img alt="MIT 许可" src="https://img.shields.io/badge/license-MIT-green"></a>
 <img alt="macOS、Linux、Windows" src="https://img.shields.io/badge/macOS%20%C2%B7%20Linux%20%C2%B7%20Windows-lightgrey">
+</p>
+<p align="center">
+<a href="#支持的-agent"><img alt="实测过 Codex 0.163.0" src="https://img.shields.io/badge/Codex-0.163.0-brightgreen"></a>
+<a href="#支持的-agent"><img alt="实测过 Gemini CLI 0.64.0" src="https://img.shields.io/badge/Gemini%20CLI-0.64.0-brightgreen"></a>
+<a href="#支持的-agent"><img alt="实测过 OpenCode 1.19.3" src="https://img.shields.io/badge/OpenCode-1.19.3-brightgreen"></a>
+<a href="#支持的-agent"><img alt="实测过 Grok Build 1.0.62" src="https://img.shields.io/badge/Grok%20Build-1.0.62-brightgreen"></a>
+<a href="#支持的-agent"><img alt="实测过 Hermes Agent 0.19.0" src="https://img.shields.io/badge/Hermes%20Agent-0.19.0-yellowgreen"></a>
+<a href="#支持的-agent"><img alt="实测过 OpenClaw 2026.10.4" src="https://img.shields.io/badge/OpenClaw-2026.10.4-yellowgreen"></a>
 </p>
 
 <p align="center"><a href="README.md">English</a> · <a href="README.zh-TW.md">繁體中文</a> · 简体中文</p>
@@ -20,7 +28,7 @@ Claude Code 插件，也跟得上 Codex、Gemini CLI、OpenCode、Grok Build、H
 
 ## 支持的 agent
 
-✅ 可以用，实测过 · ⚠️ 可以用，但有最后一栏写的限制 · ❔ 按 agent 文档写的，还没实测 · ❌ 不能用
+✅ 可以用，实测过 · ⚠️ 可以用，但有最后一栏写的限制 · ❔ 按 agent 文档写的，还没实测 · ❌ 不能用。顶端的 agent 徽章：绿色是 ✅，黄绿色是 ⚠️。
 
 | | Agent | 回合会出现在看板 | 在它里面看看板 | 实测版本 | 要知道的事 |
 |:-:|---|:-:|:-:|---|---|
@@ -37,7 +45,7 @@ Claude Code 插件，也跟得上 Codex、Gemini CLI、OpenCode、Grok Build、H
 |  | **dot**、网页版 **Muse** | ⚠️ | ❌ | 网页版，2026 年 10 月 | 没有 hook：把[一段提示](docs/REMOTE_REPORTERS.md#chat-relay-a-prompt-to-paste)贴进聊天，再把它写的每一块合并进来 |
 |  | **其他 agent**（Aider、Copilot、Windsurf…） | ⚠️ | ❌ |  | 把 [AGENTS.md](AGENTS.md) 的一段贴进它的说明文件，它会自己写一块 |
 
-在其他 agent 里看看板，看得到全部；回答它的问题则在那个 agent 里（面板会给你要贴过去的那句话或命令）。“实测版本”是真的跑过一个回合、hook 有触发、面板画出正确区块的版本，那些真实数据都留在测试里。下面是看板读它们的样子：
+在其他 agent 里看看板，看得到全部，但那是打印出来的文字，不能点。要勾步骤、归档或复制回答，在旁边的终端开[可以操作的看板](#每个-agent-里都看得到看板)。回答问题则在问的那个 agent 里（面板会给你要贴过去的那句话或命令）。“实测版本”是真的跑过一个回合、hook 有触发、面板画出正确区块的版本，那些真实数据都留在测试里。下面是看板读它们的样子：
 
 <img alt="看板列出 6 家 agent 实测时各自问的问题：Codex、Gemini CLI、OpenClaw、OpenCode、Grok Build、Hermes Agent" src="docs/images/live/hooks-zh-TW.png" width="620">
 
