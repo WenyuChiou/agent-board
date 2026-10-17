@@ -1087,6 +1087,11 @@ test('a turn that only showed the board is not work, in any language or agent', 
   for (const prompt of ['$agent-board', '/agent-board', ' /board', STRINGS.en.boardSkillPrompt(run), ZH_TW.boardSkillPrompt(run), STRINGS['zh-CN'].boardSkillPrompt(run), '<skill>\n<name>agent-board</name>\n</skill>', `${STRINGS.en.boardCommandPrompt}\n\nProgress`, `${ZH_TW.boardCommandPrompt}\n\n進度`]) {
     expect(isBoardTurn(turn(prompt)!)).toBe(true)
   }
+  // Asked in the person's own words, it is known by the board it shows back.
+  const shown = readTurn('hermes-turn-1-1.json', JSON.stringify({ session_id: 'h', cwd: '/w/app', prompt: '看一下 agent-board', last_assistant_message: '```\n進度  ● 1 等你  ▸ 0 進行中  ⚑ 0 快到期\n```\n現在最需要你的是…' }))
+  expect(isBoardTurn(shown!)).toBe(true)
+  const english = readTurn('hermes-turn-1-2.json', JSON.stringify({ session_id: 'h', cwd: '/w/app', prompt: 'show me the board', last_assistant_message: 'Progress  ● 0 waiting  ▸ 3 in progress' }))
+  expect(isBoardTurn(english!)).toBe(true)
   // Work on the board itself, or that only starts like a command, is work.
   for (const prompt of ['Fix the board layout on mobile', '/boarding-pass', '/board the plane and pack', '$agent-board-v2 setup', 'Fix the bug in scripts/board-cli.ts so agent-board.mjs prints colours']) {
     expect(isBoardTurn(turn(prompt)!)).toBe(false)
@@ -1215,9 +1220,20 @@ test('the board you work in marks the chosen line and lists only the keys that d
   expect(onAsk).toContain('› [Choose] Per-key limit')
   expect(onAsk).toContain('    2 300 a minute')
   expect(onAsk).toContain('1–2 copy answer · ↑↓ select')
-  const onJob = boardScreen(view, [], { selected: job, open: items[job]?.key ?? null, note: 'Copied: 300' }, STRINGS.en, { width: 100, isColor: false })
+  const onJob = boardScreen(view, [], { selected: job, key: null, open: items[job]?.key ?? null, note: 'Copied: 300' }, STRINGS.en, { width: 100, isColor: false })
   expect(onJob).toContain('› Fabrikam fellowship')
   expect(onJob).toContain('    ✓ 1 Draft the statement')
   expect(onJob).toContain('x done · a archive · ↑↓ select')
   expect(onJob.trimEnd().endsWith('Copied: 300')).toBe(true)
+})
+
+test('the chosen line stays chosen when a line above it comes or goes', () => {
+  const now = Date.parse('2026-10-17T08:45:00Z')
+  const before = boardItems(buildView(parseProgress(WORK_FILE), [], null, now, 0, {}, STRINGS.en), [])
+  const docs = before.findIndex(item => item.type === 'row' && item.row.title === 'Fix the broken links')
+  let state = emptyBoardState
+  for (let index = 0; index < docs; index += 1) state = boardKey(state, 'down', before, STRINGS.en).state
+  // The question at the top is answered elsewhere and leaves the board.
+  const after = boardItems(buildView(parseProgress(WORK_FILE.replace('- [?] Per-key limit — 100 or 300 a minute?', '- [x] Per-key limit 300')), [], null, now, 0, {}, STRINGS.en), [])
+  expect(boardKey(state, 'a', after, STRINGS.en).action).toMatchObject({ type: 'archive', title: 'Fix the broken links' })
 })

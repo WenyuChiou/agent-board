@@ -1,5 +1,34 @@
 # Changelog
 
+## 0.18.0 — 2026-10-17
+
+- **Work in the board from any agent, as in the pane.** `node
+  ~/.claude/agent-board.mjs --watch` in a terminal now takes keys: ↑↓ and
+  Enter pick and open a line, `x` ticks the next step of a hand-kept task
+  (into the work log too), `a` archives a finished or stopped block or task,
+  `1`–`9` or `y`/`n` copy the answer to another agent's question to paste
+  there, `c` copies a command, `o` opens the browser view, `q` quits. The
+  choice stays on its line when lines above it come or go. Writes go through a
+  temporary file, are read back and are made again if another session wrote
+  meanwhile; they reuse the pane's own `setManualStep` and `takeTask`. Run for
+  real in tmux beside Codex 0.163.0: a tick, an archive, and a Codex answer
+  reaching the board through Codex's hook. `--keys "down x"` plays keys
+  without a terminal, for tests. Tests: "on the board you work in, each line
+  offers what the pane offers: answers to copy, a step to tick, a block to
+  archive", "the board you work in marks the chosen line and lists only the
+  keys that do something on it", "the chosen line stays chosen when a line
+  above it comes or goes", "keys played on the board tick a hand-kept step,
+  archive a stopped block, and leave a line in the journal"
+  (`tests/board.test.mjs`).
+- **The board command in Hermes Agent and OpenClaw, tested live**: Hermes
+  0.19.0 loaded the agent-board skill with `skill_view` and ran it with
+  `terminal`; OpenClaw 2026.10.4 read it from `~/.agents/skills` and ran it
+  with `exec`. The README table marks both ✅.
+- **A turn that showed the board is known by the board in its reply**, so one
+  asked in the person's own words ("看一下 agent-board") is not counted as work
+  either. Test: "a turn that only showed the board is not work, in any language
+  or agent".
+
 ## 0.17.0 — 2026-10-17
 
 Brings the fixes below to existing installs (`claude plugin update` only

@@ -9,7 +9,7 @@ A Claude Code plugin that also follows Codex, Gemini CLI, OpenCode, Grok Build, 
 
 <p align="center">
 <a href="https://github.com/WenyuChiou/agent-board/actions/workflows/test.yml"><img alt="Tests" src="https://github.com/WenyuChiou/agent-board/actions/workflows/test.yml/badge.svg"></a>
-<a href="CHANGELOG.md"><img alt="Version 0.17.0" src="https://img.shields.io/badge/version-0.17.0-blue"></a>
+<a href="CHANGELOG.md"><img alt="Version 0.18.0" src="https://img.shields.io/badge/version-0.18.0-blue"></a>
 <a href="LICENSE"><img alt="MIT license" src="https://img.shields.io/badge/license-MIT-green"></a>
 <img alt="macOS, Linux, Windows" src="https://img.shields.io/badge/macOS%20%C2%B7%20Linux%20%C2%B7%20Windows-lightgrey">
 </p>
@@ -29,8 +29,8 @@ You have Claude Code on one project, Codex on another, Gemini on a third. Twenty
 | <img src="docs/images/agents/gemini-cli.svg" width="24" alt=""> | **Gemini CLI** | ✅ | ✅ `/board` | 0.64.0 | Gemini asks once before `/board` runs its command |
 | <img src="docs/images/agents/opencode.svg" width="24" alt=""> | **OpenCode** | ✅ | ✅ `/board` | 1.19.3 |  |
 | <img src="docs/images/agents/grok-build.svg" width="24" alt=""> | **Grok Build** | ✅ | ❔ `/agent-board` | 1.0.62 |  |
-| <img src="docs/images/agents/hermes-agent.svg" width="24" alt=""> | **Hermes Agent** | ⚠️ | ❔ `/agent-board` | 0.19.0, 0.16.0 (Windows) | Answer `y` once. A one-off `hermes -q` question shows as stopped, not waiting |
-| <img src="docs/images/agents/openclaw.svg" width="24" alt=""> | **OpenClaw** | ⚠️ | ❔ `/agent-board` | 2026.10.4 | Needs 2026.4.24 or newer; an older one is left out, and connect says so |
+| <img src="docs/images/agents/hermes-agent.svg" width="24" alt=""> | **Hermes Agent** | ⚠️ | ✅ `/agent-board` | 0.19.0, 0.16.0 (Windows) | Answer `y` once. A one-off `hermes -q` question shows as stopped, not waiting |
+| <img src="docs/images/agents/openclaw.svg" width="24" alt=""> | **OpenClaw** | ⚠️ | ✅ `/agent-board` | 2026.10.4 | Needs 2026.4.24 or newer; an older one is left out, and connect says so. It warns it "can't verify where this plugin came from" and loads it anyway |
 | <img src="docs/images/agents/cursor.svg" width="24" alt=""> | **Cursor** | ❌ | ❔ `/agent-board` | cursor-agent 2026.10.16 (Windows) | Not seen working: on Windows, Cursor runs every hook through bash, and another tool's PowerShell hook blocked the turn. macOS and Linux not tested |
 | <img src="docs/images/agents/muse-code.svg" width="24" alt=""> | **Muse Code** | ❔ | ❔ |  | The hook is written from its docs; Muse was tried only on the web (next rows) |
 |  | **Antigravity** | ❌ | ❔ `/agent-board` |  | No turn-end hook yet, so it can only show the board |
@@ -91,6 +91,11 @@ Connecting also gives each agent a way to show the board, so whichever one you a
 | Codex | `$agent-board` |
 | Cursor, Grok Build, OpenClaw, Hermes Agent, Antigravity | `/agent-board` |
 | Any terminal, next to any agent | `node ~/.claude/agent-board.mjs --watch` (`--html` opens it in the browser) |
+
+**Work in it, as in the pane.** In a terminal beside the agent (a split pane), `node ~/.claude/agent-board.mjs --watch` is the board you can act on: ↑↓ picks a line, Enter opens it, `x` ticks the next step of your own task, `a` archives a finished or stopped one, `1`–`9` (or `y`/`n`) copies the answer to another agent's question so you paste it there, `c` copies a command, `o` opens the browser view, `q` quits. Ticks go into the work log. It writes `progress.md` the careful way the pane does: through a temporary file, read back, and made again if another session wrote meanwhile; it never touches another session's block, except to archive one that has stopped.
+
+<img alt="Codex on the left; on the right the board, where x just ticked a step and the line under the keys says so" src="docs/images/live/work-zh-TW.png" width="100%">
+
 
 <table><tr>
 <td><img alt="Codex CLI 0.163.0: typing $agent-board runs the board script and shows the board" src="docs/images/live/codex-en.png"></td>

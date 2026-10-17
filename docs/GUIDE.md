@@ -212,7 +212,7 @@ Gemini CLI and OpenCode paste the board into the prompt themselves; with a skill
 
 In a terminal, `node ~/.claude/agent-board.mjs` prints the board once, `--watch` keeps it on screen and redraws it every 2 seconds (put it in a split beside Codex), and `--html` writes `progress.html` and opens it in the browser. `--lang en` (or `zh-TW`, `zh-CN`) picks the language; by default it uses the one your Claude Code session uses.
 
-The board only reads. Turns other agents' hooks leave in the inbox are summed up into steps by an open Claude Code session; until one takes them in, the board lists them as they came, a question first. A turn that only showed the board is not counted as work.
+On a terminal, `--watch` also takes keys, as the pane takes presses: ↑↓ and Enter to pick and open a line, `x` to tick the next step of a hand-kept task, `a` to archive a finished or stopped block or task, `1`–`9` or `y`/`n` to copy the answer to another agent's question, `c` to copy a command, `o` for the browser view, `q` to quit. Those are its only writes; otherwise the board only reads. Turns other agents' hooks leave in the inbox are summed up into steps by an open Claude Code session; until one takes them in, the board lists them as they came, a question first. A turn that only showed the board is not counted as work.
 
 <img alt="The board in a terminal, redrawn every 2 seconds" src="images/live/terminal-en.png" width="560">
 <img alt="OpenCode 1.19.3: /board" src="images/live/opencode-en.png" width="560">

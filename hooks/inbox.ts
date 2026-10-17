@@ -239,6 +239,14 @@ const BOARD_ASKS = /^\s*(?:\/board|[$/]agent-board)\s*$/
 // request that only mentions the script (someone working on this repository) is real work.
 const BOARD_WORDS = Object.values(STRINGS).flatMap(s => [s.boardCommandPrompt, s.boardSkillPrompt('\u0000').split('\u0000')[1] ?? ''].filter(words => words.trim() !== ''))
 
+// The board's own first line (`Progress  ● 2 waiting`), which a reply that showed it repeats:
+// how a turn is known when the request was the person's own words (Hermes, a skill the
+// model chose to load).
+const BOARD_HEADS = Object.values(STRINGS).map(s => new RegExp(`${s.paneTitle}\\s+● \\d+ ${s.countWaiting}\\s+▸ \\d+ ${s.countActive}`))
+
 export const isBoardTurn = (turn: AgentTurn): boolean =>
   turn.event === 'turn' &&
-  (BOARD_ASKS.test(turn.prompt) || /<name>agent-board<\/name>/.test(turn.prompt) || BOARD_WORDS.some(words => turn.prompt.includes(words)))
+  (BOARD_ASKS.test(turn.prompt) ||
+    /<name>agent-board<\/name>/.test(turn.prompt) ||
+    BOARD_WORDS.some(words => turn.prompt.includes(words)) ||
+    BOARD_HEADS.some(head => head.test(turn.answer)))

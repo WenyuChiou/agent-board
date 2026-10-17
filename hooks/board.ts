@@ -146,7 +146,8 @@ export type BoardItem =
   | { type: 'row'; key: string; row: TaskRow }
   | { type: 'turn'; key: string; turn: PendingTurn }
 
-export type BoardState = { selected: number; open: string | null; note: string }
+// `key` is the chosen line's, so the choice stays on it when lines above it come or go.
+export type BoardState = { selected: number; key: string | null; open: string | null; note: string }
 
 export type BoardAction =
   | { type: 'tick'; ref: StepRef }
@@ -155,7 +156,12 @@ export type BoardAction =
   | { type: 'html' }
   | { type: 'quit' }
 
-export const emptyBoardState: BoardState = { selected: 0, open: null, note: '' }
+export const emptyBoardState: BoardState = { selected: 0, key: null, open: null, note: '' }
+
+const chosen = (state: BoardState, items: readonly BoardItem[]): number => {
+  const byKey = state.key === null ? -1 : items.findIndex(item => item.key === state.key)
+  return byKey >= 0 ? byKey : Math.min(state.selected, Math.max(0, items.length - 1))
+}
 
 // In the order the screen shows them: what waits on you, each project's work, then turns
 // no Claude Code session has taken in.
@@ -176,15 +182,15 @@ const answersOf = (ask: WaitingItem, s: Strings): string[] =>
 
 export const boardKey = (state: BoardState, key: string, items: readonly BoardItem[], s: Strings = ZH_TW): { state: BoardState; action: BoardAction | null } => {
   const last = Math.max(0, items.length - 1)
-  const at = Math.min(state.selected, last)
+  const at = chosen(state, items)
   const item = items[at]
-  const moved = (selected: number): { state: BoardState; action: null } => ({ state: { ...state, selected, note: '' }, action: null })
+  const moved = (selected: number): { state: BoardState; action: null } => ({ state: { ...state, selected, key: items[selected]?.key ?? null, note: '' }, action: null })
   if (key === 'q' || key === '\u0003') return { state, action: { type: 'quit' } }
   if (key === 'up' || key === 'k') return moved(Math.max(0, at - 1))
   if (key === 'down' || key === 'j') return moved(Math.min(last, at + 1))
   if (key === 'o') return { state, action: { type: 'html' } }
   if (item === undefined) return { state, action: null }
-  if (key === 'enter' || key === ' ') return { state: { ...state, selected: at, open: state.open === item.key ? null : item.key, note: '' }, action: null }
+  if (key === 'enter' || key === ' ') return { state: { ...state, selected: at, key: item.key, open: state.open === item.key ? null : item.key, note: '' }, action: null }
   if (item.type === 'ask') {
     const { ask } = item
     if (key === 'x' && ask.step !== null) return { state, action: { type: 'tick', ref: ask.step } }
@@ -226,7 +232,7 @@ const keysFor = (item: BoardItem | undefined, s: Strings): string[] => {
 export const boardScreen = (view: View, pending: readonly PendingTurn[], state: BoardState, s: Strings = ZH_TW, o: BoardOptions = { width: 80, isColor: false }): string => {
   const c = paint(o.isColor)
   const items = boardItems(view, pending)
-  const at = Math.min(state.selected, Math.max(0, items.length - 1))
+  const at = chosen(state, items)
   const { active, due, today } = view.overview
   const waiting = view.overview.waiting + pending.filter(turn => turn.isQuestion).length
   const lines: string[] = [

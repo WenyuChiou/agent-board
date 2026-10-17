@@ -9,7 +9,7 @@ Claude Code 插件，也跟得上 Codex、Gemini CLI、OpenCode、Grok Build、H
 
 <p align="center">
 <a href="https://github.com/WenyuChiou/agent-board/actions/workflows/test.yml"><img alt="测试" src="https://github.com/WenyuChiou/agent-board/actions/workflows/test.yml/badge.svg"></a>
-<a href="CHANGELOG.md"><img alt="版本 0.17.0" src="https://img.shields.io/badge/version-0.17.0-blue"></a>
+<a href="CHANGELOG.md"><img alt="版本 0.18.0" src="https://img.shields.io/badge/version-0.18.0-blue"></a>
 <a href="LICENSE"><img alt="MIT 许可" src="https://img.shields.io/badge/license-MIT-green"></a>
 <img alt="macOS、Linux、Windows" src="https://img.shields.io/badge/macOS%20%C2%B7%20Linux%20%C2%B7%20Windows-lightgrey">
 </p>
@@ -29,8 +29,8 @@ Claude Code 插件，也跟得上 Codex、Gemini CLI、OpenCode、Grok Build、H
 | <img src="docs/images/agents/gemini-cli.svg" width="24" alt=""> | **Gemini CLI** | ✅ | ✅ `/board` | 0.64.0 | 第一次 `/board` 会问一次要不要让命令运行 |
 | <img src="docs/images/agents/opencode.svg" width="24" alt=""> | **OpenCode** | ✅ | ✅ `/board` | 1.19.3 |  |
 | <img src="docs/images/agents/grok-build.svg" width="24" alt=""> | **Grok Build** | ✅ | ❔ `/agent-board` | 1.0.62 |  |
-| <img src="docs/images/agents/hermes-agent.svg" width="24" alt=""> | **Hermes Agent** | ⚠️ | ❔ `/agent-board` | 0.19.0、0.16.0（Windows） | 回答一次 `y`。单次运行的 `hermes -q` 问的问题会显示成已停，不是等你 |
-| <img src="docs/images/agents/openclaw.svg" width="24" alt=""> | **OpenClaw** | ⚠️ | ❔ `/agent-board` | 2026.10.4 | 要 2026.4.24 以上；太旧的不会接，并会告诉你 |
+| <img src="docs/images/agents/hermes-agent.svg" width="24" alt=""> | **Hermes Agent** | ⚠️ | ✅ `/agent-board` | 0.19.0、0.16.0（Windows） | 回答一次 `y`。单次运行的 `hermes -q` 问的问题会显示成已停，不是等你 |
+| <img src="docs/images/agents/openclaw.svg" width="24" alt=""> | **OpenClaw** | ⚠️ | ✅ `/agent-board` | 2026.10.4 | 要 2026.4.24 以上；太旧的不会接，并会告诉你。它会警告“无法确认这个插件的来源”，但照样加载 |
 | <img src="docs/images/agents/cursor.svg" width="24" alt=""> | **Cursor** | ❌ | ❔ `/agent-board` | cursor-agent 2026.10.16（Windows） | 还没看到它成功：Windows 上 Cursor 用 bash 运行所有 hook，其他工具的 PowerShell hook 挡住了回合。macOS、Linux 没测 |
 | <img src="docs/images/agents/muse-code.svg" width="24" alt=""> | **Muse Code** | ❔ | ❔ |  | hook 按它的文档写；Muse 只测过网页版（下一行） |
 |  | **Antigravity** | ❌ | ❔ `/agent-board` |  | 还没有回合结束的 hook，只能看看板 |
@@ -91,6 +91,11 @@ claude -p "/progress connect"
 | Codex | `$agent-board` |
 | Cursor、Grok Build、OpenClaw、Hermes Agent、Antigravity | `/agent-board` |
 | 任何终端，开在任何 agent 旁边 | `node ~/.claude/agent-board.mjs --watch`（`--html` 在浏览器打开） |
+
+**像面板一样操作。** 在 agent 旁边开一个终端（分屏），`node ~/.claude/agent-board.mjs --watch` 就是能操作的看板：↑↓ 选一行、Enter 展开、`x` 勾掉自己工作的下一步、`a` 归档做完或停掉的、`1`–`9`（或 `y`／`n`）把另一个 agent 问题的答案复制起来好贴过去、`c` 复制命令、`o` 打开网页版、`q` 退出。勾掉的步骤会记进工作日志。它写 `progress.md` 的方式跟面板一样小心：先写临时文件、再读回确认，别的对话刚好也在写就重做一次；别的对话的区块不会动，除了归档已经停掉的。
+
+<img alt="左边是 Codex；右边是看板，刚按 x 勾掉一步，按键说明下面写着已完成" src="docs/images/live/work-zh-TW.png" width="100%">
+
 
 <table><tr>
 <td><img alt="Codex CLI 0.163.0：输入 $agent-board，运行看板脚本并显示看板" src="docs/images/live/codex-zh-TW.png"></td>
