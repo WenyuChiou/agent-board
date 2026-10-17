@@ -167,7 +167,7 @@ Claude 会列出 Task 清单，面板跟着走：卡片显示任务、它的背�
 
 ## 其他 agent
 
-在 Claude Code 里运行一次，或在任何终端运行 `claude -p "/progress connect"`（所以任何 agent 都能帮你跑）：
+Claude Code 会自己接上它们：每个对话开始时，会把这台电脑装了、但还没接上的 agent 接上（之后才装的也一样），并告诉你一次接了哪些。`/progress connect remove` 会去掉 hook 并停止自动接；在 `/config` 里关掉插件的 **Connect other agents automatically** 也能关掉。想手动接、并看看哪些配置文件改不了，就在 Claude Code 里运行，或在任何终端运行 `claude -p "/progress connect"`：
 
 ```
 /progress connect

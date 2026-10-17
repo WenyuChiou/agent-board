@@ -1,6 +1,6 @@
 {
   "name": "agent-board",
-  "version": "0.13.0",
+  "version": "0.14.0",
   "description": "See what every AI coding agent is doing, with whatever is waiting on you at the top: Claude Code, Codex, Gemini CLI, Cursor, OpenCode, Grok Build, Hermes Agent, Muse Code",
   "author": {
     "name": "Wenyu Chiou"
@@ -33,6 +33,12 @@
         "zh-CN"
       ],
       "default": "auto"
+    },
+    "autoConnect": {
+      "type": "boolean",
+      "title": "Connect other agents automatically",
+      "description": "Each Claude Code session hooks any coding agent installed on this machine (Codex, Gemini CLI, Cursor, OpenCode, Grok Build, Hermes Agent, Muse Code) into the pane, and says what it did. /progress connect remove also turns this off.",
+      "default": true
     }
   }
 }

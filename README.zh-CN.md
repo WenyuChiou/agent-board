@@ -9,7 +9,7 @@ Claude Code 插件，也跟得上 Codex、Gemini CLI、Cursor、OpenCode、Grok 
 
 <p align="center">
 <a href="https://github.com/WenyuChiou/agent-board/actions/workflows/test.yml"><img alt="测试" src="https://github.com/WenyuChiou/agent-board/actions/workflows/test.yml/badge.svg"></a>
-<a href="CHANGELOG.md"><img alt="版本 0.13.0" src="https://img.shields.io/badge/version-0.13.0-blue"></a>
+<a href="CHANGELOG.md"><img alt="版本 0.14.0" src="https://img.shields.io/badge/version-0.14.0-blue"></a>
 <a href="LICENSE"><img alt="MIT 许可" src="https://img.shields.io/badge/license-MIT-green"></a>
 <img alt="macOS、Linux、Windows" src="https://img.shields.io/badge/macOS%20%C2%B7%20Linux%20%C2%B7%20Windows-lightgrey">
 </p>
@@ -20,16 +20,16 @@ Claude Code 插件，也跟得上 Codex、Gemini CLI、Cursor、OpenCode、Grok 
 
 ## 支持的 agent
 
-| | Agent | 怎么汇报 | 你要做一次的事 | 实测过 |
+| | Agent | 怎么汇报 | 你要做一次的事（会自动接上） | 实测过 |
 |:-:|---|---|---|---|
 | <img src="docs/images/agents/claude-code.svg" width="24" alt=""> | **Claude Code** | 内置：每个对话都会出现，有没有 Task 清单都行 | 不用做什么 | ✅ 2.1.302 |
-| <img src="docs/images/agents/codex.svg" width="24" alt=""> | **Codex** | `Stop` hook | `/progress connect`，再到 Codex 的 `/hooks` 批准 | ✅ |
-| <img src="docs/images/agents/gemini-cli.svg" width="24" alt=""> | **Gemini CLI** | `AfterAgent` hook | `/progress connect` | ✅ 0.64.0 |
-| <img src="docs/images/agents/opencode.svg" width="24" alt=""> | **OpenCode** | 插件，在 `session.idle` 时 | `/progress connect` | ✅ 1.19.3 |
-| <img src="docs/images/agents/grok-build.svg" width="24" alt=""> | **Grok Build** | `Stop` hook | `/progress connect` | ✅ 1.0.62 |
-| <img src="docs/images/agents/hermes-agent.svg" width="24" alt=""> | **Hermes Agent** | `post_llm_call` shell hook | `/progress connect`，Hermes 第一次问时回答 `y` | ✅ 0.19.0 |
-| <img src="docs/images/agents/cursor.svg" width="24" alt=""> | **Cursor** | `afterAgentResponse` hook | `/progress connect` | 按 Cursor 文档实现 |
-| <img src="docs/images/agents/muse-code.svg" width="24" alt=""> | **Muse Code** | `Stop` hook | `/progress connect` | 按 Muse 文档实现 |
+| <img src="docs/images/agents/codex.svg" width="24" alt=""> | **Codex** | `Stop` hook | 到 Codex 的 `/hooks` 批准一次 | ✅ |
+| <img src="docs/images/agents/gemini-cli.svg" width="24" alt=""> | **Gemini CLI** | `AfterAgent` hook | 不用做什么 | ✅ 0.64.0 |
+| <img src="docs/images/agents/opencode.svg" width="24" alt=""> | **OpenCode** | 插件，在 `session.idle` 时 | 不用做什么 | ✅ 1.19.3 |
+| <img src="docs/images/agents/grok-build.svg" width="24" alt=""> | **Grok Build** | `Stop` hook | 不用做什么 | ✅ 1.0.62 |
+| <img src="docs/images/agents/hermes-agent.svg" width="24" alt=""> | **Hermes Agent** | `post_llm_call` shell hook | Hermes 第一次问时回答 `y` | ✅ 0.19.0 |
+| <img src="docs/images/agents/cursor.svg" width="24" alt=""> | **Cursor** | `afterAgentResponse` hook | 不用做什么 | 按 Cursor 文档实现 |
+| <img src="docs/images/agents/muse-code.svg" width="24" alt=""> | **Muse Code** | `Stop` hook | 不用做什么 | 按 Muse 文档实现 |
 | | **dot** | 本地交换（自行选用） | 见 [docs/LOCAL-EXCHANGE.md](docs/LOCAL-EXCHANGE.md) | 只测过文件约定 |
 | | **其他 agent**（Aider、Copilot、Windsurf…） | 自己写一块进度 | 把 [AGENTS.md](AGENTS.md) 的一段贴进它的说明文件 | |
 
@@ -42,12 +42,11 @@ Claude Code 插件，也跟得上 Codex、Gemini CLI、Cursor、OpenCode、Grok 
 ```
 claude plugin marketplace add WenyuChiou/agent-board
 claude plugin install agent-board@agent-board
-claude -p "/progress connect"
 ```
 
-**2. 重启其他 agent**，让它们加载新的 hook。第一次时，Codex 要在 `/hooks` 里批准，Hermes Agent 会问你一次，回答 `y`。
+**2. 打开 Claude Code。** 面板在右边（没看到就输入 `/progress`）。第一次打开时，它会自动接上这台电脑装的所有 coding agent，并告诉你接了哪些；之后才装的 agent，下次打开 Claude Code 时也会自动接上。
 
-**3. 打开 Claude Code。** 面板在右边（没看到就输入 `/progress`）。每个 agent 的回合几秒内就会出现。
+**3. 重启其他 agent 一次**，让它们加载新的 hook。第一次时，Codex 要在 `/hooks` 里批准，Hermes Agent 会问你一次，回答 `y`。之后每个 agent 的回合几秒内就会出现。
 
 <details>
 <summary><b>或者让 agent 帮你装</b></summary>
@@ -81,7 +80,7 @@ claude -p "/progress connect"
 | 输入 | 用途 |
 |---|---|
 | `/progress` | 打开面板 |
-| `/progress connect` | 把其他 agent 接上（`/progress connect remove` 去掉 hook） |
+| `/progress connect` | 现在就接上其他 agent，并看看改了什么；每个对话开始时也会自动做（`/progress connect remove` 去掉 hook 并停止自动接） |
 | `+ 项目：标题 截止 11-20；步骤；步骤` | 在面板输入框加一件自己的事（或用 `/progress add …`） |
 | `/progress open` | 在浏览器看 |
 | `/progress report` / `/progress today` | 复制最近 7 天／今天的进度 |

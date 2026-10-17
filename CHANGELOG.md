@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.14.0 — 2026-10-17
+
+- **Installing is all it takes.** Each Claude Code session now hooks in every
+  coding agent installed on this machine that is not hooked in yet (Codex,
+  Gemini CLI, Cursor, OpenCode, Grok Build, Hermes Agent, Muse Code), an agent
+  installed later included, and says once, in the pane and by a notification,
+  which it connected, what Codex and Hermes Agent still ask of you, and how to
+  undo it. Nothing is said when nothing changed. `/progress connect remove`
+  takes the hooks out and stops this until `/progress connect` is run again,
+  and the new option "Connect other agents automatically" (`autoConnect`)
+  turns it off. Install is two lines; `/progress connect` still connects at
+  once and names any config it could not edit. Tests: "a session hooks in the
+  agents installed here without /progress connect, and says so in the pane and
+  once by notification", "an agent already hooked in is left as it is, and
+  nothing is said", "once the hooks are taken out, a session does not put them
+  back", "with the autoConnect option off, a session hooks nothing in".
+
 ## 0.13.0 — 2026-10-17
 
 One contract for agents that are not hooked in: each writes its block as a

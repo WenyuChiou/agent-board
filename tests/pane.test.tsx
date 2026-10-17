@@ -1541,3 +1541,47 @@ test('on Windows, a progress file written with forward slashes still gets the Po
   expect(written.some(path => /Users\/me\/\.claude\/progress-report\.ps1$/.test(path))).toBe(true)
   expect(written.some(path => path.endsWith('progress-report.sh'))).toBe(false)
 })
+
+test('a session hooks in the agents installed here without /progress connect, and says so in the pane and once by notification', async ($, on) => {
+  const world: World = { files: new Map([['/home/me/.codex/config.toml', 'model = "gpt-6"\n']]), mtime: 1, hasTasks: true, ran: [] }
+  engineBeneath(on, world)
+  const seen = outside(on)
+  await $.session.start({ cwd: '/work/persona_framework', surface: 'terminal', isInteractive: true })
+  const codex = JSON.parse(world.files.get('/home/me/.codex/hooks.json') ?? '{}')
+  expect(codex.hooks.Stop[0].hooks[0].command).toBe("sh '/home/me/.claude/progress-report.sh' codex turn")
+  expect(world.files.get('/home/me/.claude/progress-report.sh')).toContain("dir='/home/me/.claude/progress-inbox'")
+  expect(seen.notified).toEqual(['已自動接上：Codex。重開它們之後，每個回合都會出現在這裡。'])
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal', props: PROPS })
+  expect(await ui.find({ type: 'Text', text: /Codex 第一次要在它的 \/hooks 裡核准這個 hook 才會跑。/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /\/progress connect remove/ })).toBeDefined()
+})
+
+test('an agent already hooked in is left as it is, and nothing is said', async ($, on) => {
+  const hooked = JSON.stringify({ hooks: { Stop: [{ hooks: [{ type: 'command', command: "sh '/home/me/.claude/progress-report.sh' codex turn", timeout: 10 }] }], SessionEnd: [{ hooks: [{ type: 'command', command: "sh '/home/me/.claude/progress-report.sh' codex end", timeout: 3 }] }] } }, null, 2) + '\n'
+  const world: World = { files: new Map([['/home/me/.codex/hooks.json', hooked]]), mtime: 1, hasTasks: true, ran: [] }
+  engineBeneath(on, world)
+  const seen = outside(on)
+  await $.session.start({ cwd: '/work/persona_framework', surface: 'terminal', isInteractive: true })
+  expect(world.files.get('/home/me/.codex/hooks.json')).toBe(hooked)
+  expect(seen.notified).toEqual([])
+})
+
+test('once the hooks are taken out, a session does not put them back', async ($, on) => {
+  const world: World = { files: new Map([['/home/me/.codex/config.toml', '']]), mtime: 1, hasTasks: true, ran: [], store: { inboxDone: {}, autoConnectOff: true } }
+  engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/persona_framework', surface: 'terminal', isInteractive: true })
+  expect(world.files.has('/home/me/.codex/hooks.json')).toBe(false)
+  // Connecting by hand works as before; taking the hooks out again keeps them out of later sessions.
+  await $.command.run({ ...TIDY, args: 'connect' })
+  expect(JSON.parse(world.files.get('/home/me/.codex/hooks.json') ?? '{}').hooks.Stop).toHaveLength(1)
+  await $.command.run({ ...TIDY, args: 'connect remove' })
+  await $.session.start({ cwd: '/work/persona_framework', surface: 'terminal', isInteractive: true })
+  expect(JSON.parse(world.files.get('/home/me/.codex/hooks.json') ?? '{}').hooks).toEqual({})
+})
+
+test('with the autoConnect option off, a session hooks nothing in', { options: { autoConnect: false } }, async ($, on) => {
+  const world: World = { files: new Map([['/home/me/.codex/config.toml', '']]), mtime: 1, hasTasks: true, ran: [] }
+  engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/persona_framework', surface: 'terminal', isInteractive: true })
+  expect(world.files.has('/home/me/.codex/hooks.json')).toBe(false)
+})

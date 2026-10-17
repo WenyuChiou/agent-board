@@ -9,7 +9,7 @@ A Claude Code plugin that also follows Codex, Gemini CLI, Cursor, OpenCode, Grok
 
 <p align="center">
 <a href="https://github.com/WenyuChiou/agent-board/actions/workflows/test.yml"><img alt="Tests" src="https://github.com/WenyuChiou/agent-board/actions/workflows/test.yml/badge.svg"></a>
-<a href="CHANGELOG.md"><img alt="Version 0.13.0" src="https://img.shields.io/badge/version-0.13.0-blue"></a>
+<a href="CHANGELOG.md"><img alt="Version 0.14.0" src="https://img.shields.io/badge/version-0.14.0-blue"></a>
 <a href="LICENSE"><img alt="MIT license" src="https://img.shields.io/badge/license-MIT-green"></a>
 <img alt="macOS, Linux, Windows" src="https://img.shields.io/badge/macOS%20%C2%B7%20Linux%20%C2%B7%20Windows-lightgrey">
 </p>
@@ -20,16 +20,16 @@ You have Claude Code on one project, Codex on another, Gemini on a third. Twenty
 
 ## Supported agents
 
-| | Agent | How it reports | What you do once | Tested live |
+| | Agent | How it reports | What you do once (it connects itself) | Tested live |
 |:-:|---|---|---|---|
 | <img src="docs/images/agents/claude-code.svg" width="24" alt=""> | **Claude Code** | Built in: every session, with or without a Task list | Nothing | ✅ 2.1.302 |
-| <img src="docs/images/agents/codex.svg" width="24" alt=""> | **Codex** | `Stop` hook | `/progress connect`, then approve the hook in Codex's `/hooks` | ✅ |
-| <img src="docs/images/agents/gemini-cli.svg" width="24" alt=""> | **Gemini CLI** | `AfterAgent` hook | `/progress connect` | ✅ 0.64.0 |
-| <img src="docs/images/agents/opencode.svg" width="24" alt=""> | **OpenCode** | Plugin, on `session.idle` | `/progress connect` | ✅ 1.19.3 |
-| <img src="docs/images/agents/grok-build.svg" width="24" alt=""> | **Grok Build** | `Stop` hook | `/progress connect` | ✅ 1.0.62 |
-| <img src="docs/images/agents/hermes-agent.svg" width="24" alt=""> | **Hermes Agent** | `post_llm_call` shell hook | `/progress connect`, then answer `y` the first time Hermes asks | ✅ 0.19.0 |
-| <img src="docs/images/agents/cursor.svg" width="24" alt=""> | **Cursor** | `afterAgentResponse` hook | `/progress connect` | Built from Cursor's docs |
-| <img src="docs/images/agents/muse-code.svg" width="24" alt=""> | **Muse Code** | `Stop` hook | `/progress connect` | Built from Muse's docs |
+| <img src="docs/images/agents/codex.svg" width="24" alt=""> | **Codex** | `Stop` hook | Approve the hook once in Codex's `/hooks` | ✅ |
+| <img src="docs/images/agents/gemini-cli.svg" width="24" alt=""> | **Gemini CLI** | `AfterAgent` hook | Nothing | ✅ 0.64.0 |
+| <img src="docs/images/agents/opencode.svg" width="24" alt=""> | **OpenCode** | Plugin, on `session.idle` | Nothing | ✅ 1.19.3 |
+| <img src="docs/images/agents/grok-build.svg" width="24" alt=""> | **Grok Build** | `Stop` hook | Nothing | ✅ 1.0.62 |
+| <img src="docs/images/agents/hermes-agent.svg" width="24" alt=""> | **Hermes Agent** | `post_llm_call` shell hook | Answer `y` the first time Hermes asks | ✅ 0.19.0 |
+| <img src="docs/images/agents/cursor.svg" width="24" alt=""> | **Cursor** | `afterAgentResponse` hook | Nothing | Built from Cursor's docs |
+| <img src="docs/images/agents/muse-code.svg" width="24" alt=""> | **Muse Code** | `Stop` hook | Nothing | Built from Muse's docs |
 | | **dot** | Local exchange (opt-in) | See [docs/LOCAL-EXCHANGE.md](docs/LOCAL-EXCHANGE.md) | File contract only |
 | | **Any other agent** (Aider, Copilot, Windsurf…) | Writes its own block | Paste one section of [AGENTS.md](AGENTS.md) into its instructions | |
 
@@ -42,12 +42,11 @@ You have Claude Code on one project, Codex on another, Gemini on a third. Twenty
 ```
 claude plugin marketplace add WenyuChiou/agent-board
 claude plugin install agent-board@agent-board
-claude -p "/progress connect"
 ```
 
-**2. Restart your other agents**, so they load the new hook. The first time, Codex asks you to approve it in `/hooks`, and Hermes Agent asks you to answer `y`.
+**2. Open Claude Code.** The pane sits on the right (type `/progress` if you don't see it). On its first start it connects every coding agent installed on this machine and tells you which; an agent you install later is connected the same way, the next time Claude Code starts.
 
-**3. Open Claude Code.** The pane sits on the right (type `/progress` if you don't see it). Every agent's turn appears within a few seconds.
+**3. Restart your other agents** once, so they load the new hook. The first time, Codex asks you to approve it in `/hooks`, and Hermes Agent asks you to answer `y`. From then on every agent's turn appears within a few seconds.
 
 <details>
 <summary><b>Or let an agent install it for you</b></summary>
@@ -81,7 +80,7 @@ Then show me what the last command printed and tell me which agents to restart.
 | Type | To |
 |---|---|
 | `/progress` | Open the pane |
-| `/progress connect` | Hook your other agents in (`/progress connect remove` takes the hooks out) |
+| `/progress connect` | Connect your other agents now and see what changed; each session also does this on its own (`/progress connect remove` takes the hooks out and stops it) |
 | `+ project: title due 11-20; step; step` | Add a task of your own, in the pane's box (or `/progress add …`) |
 | `/progress open` | See it in the browser |
 | `/progress report` / `/progress today` | Copy the last 7 days / today as text |
