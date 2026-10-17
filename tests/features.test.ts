@@ -2,10 +2,11 @@ import { expect, test } from 'claude-code/testing'
 
 import type { ProgressMirror, ProgressPr } from '../types'
 import { askOf } from '../hooks/ask'
+import { boardText, fit, peekInbox } from '../hooks/board'
 import { addManualTask, isArchivable, manualTaskCount, renderAutoBlock, setManualStep, takeArchivable, takeManualDone, takeTask, upsertAutoBlock } from '../hooks/blocks'
-import { agentHooks, DELETE, openclawPlugin, isWindowsHost, withFlatHook, withGroupedHook, withHermesHooks, withoutHermesHooks, withoutOurHooks, withoutSection } from '../hooks/connect'
+import { agentHooks, boardCommands, boardScript, DELETE, openclawPlugin, reportCommand, isWindowsHost, withFlatHook, withGroupedHook, withHermesHooks, withoutHermesHooks, withoutOurHooks, withoutSection } from '../hooks/connect'
 import { dashboardHtml } from '../hooks/dashboard'
-import { answerKey, blockId, isInboxFile, isTakenFile, isTranscriptPath, keepInboxDone, promptKey, readTurn, takenName, transcriptTail, turnsToDigest } from '../hooks/inbox'
+import { answerKey, blockId, isBoardTurn, isInboxFile, isTakenFile, isTranscriptPath, keepInboxDone, promptKey, readTurn, takenName, transcriptTail, turnsToDigest } from '../hooks/inbox'
 import { applyDigest, clearAsked, isWork, lastQuestion, markAsked, parseDigest, replyData, turnTools } from '../hooks/digest'
 import { ciFinished, prFromGh, prWords } from '../hooks/github'
 import { appendJournal, countDay, journalLine, parseJournal, progressReport } from '../hooks/journal'
@@ -687,7 +688,7 @@ test('each agent’s config gets the hook in the shape it reads, and nothing els
   const hooks = Object.fromEntries(agentHooks(ctx).map(hook => [hook.agent, hook]))
   const gemini = JSON.parse(String(hooks.gemini?.edit('{"theme":"dark"}', false)))
   expect(gemini.theme).toBe('dark')
-  expect(gemini.hooks.AfterAgent).toEqual([{ hooks: [{ name: 'agent-board', type: 'command', command: "sh '/h/.claude/progress-report.sh' gemini turn", timeout: 5000 }] }])
+  expect(gemini.hooks.AfterAgent).toEqual([{ hooks: [{ name: 'agent-board', type: 'command', command: "sh '/h/.claude/progress-report.sh' gemini turn || true", timeout: 5000 }] }])
   expect(gemini.tools).toBeUndefined()
   const muse = JSON.parse(String(hooks.muse?.edit('', false)))
   expect(muse.schema_version).toBe(1)
@@ -695,7 +696,7 @@ test('each agent’s config gets the hook in the shape it reads, and nothing els
   expect(hooks.grok?.file).toBe('/h/.grok/hooks/agent-board.json')
   expect(hooks.grok?.old).toBe('/h/.grok/hooks/progress-pane.json')
   expect(hooks.opencode?.old).toBe('/h/.config/opencode/plugin/progress-pane.js')
-  expect(JSON.parse(String(hooks.grok?.edit('', false))).hooks.Stop[0].hooks[0].command).toBe("sh '/h/.claude/progress-report.sh' grok turn")
+  expect(JSON.parse(String(hooks.grok?.edit('', false))).hooks.Stop[0].hooks[0].command).toBe("sh '/h/.claude/progress-report.sh' grok turn || true")
   expect(hooks.grok?.edit('{"hooks":{}}', true)).toBe(DELETE)
   expect(String(hooks.opencode?.edit('', false))).toContain('const INBOX = "/h/.claude/progress-inbox"')
   // Windows: PowerShell runs the .ps1 script.
@@ -719,8 +720,8 @@ test('Hermes Agent’s hooks go into its config.yaml beside the person’s own, 
   const once = String(hermes?.edit(own, false))
   expect(once).toBe(
     'model:\n  default: x\nhooks:\n  pre_tool_call:\n    - command: "~/guard.sh"\n      matcher: terminal\n  post_llm_call:\n' +
-      `  - {command: "sh '/h/.claude/progress-report.sh' hermes turn", timeout: 10}\n  - command: "~/log.sh"\n` +
-      `  on_session_finalize:\n    - {command: "sh '/h/.claude/progress-report.sh' hermes end", timeout: 10}\nagent:\n  max_turns: 5\n`,
+      `  - {command: "sh '/h/.claude/progress-report.sh' hermes turn || true", timeout: 10}\n  - command: "~/log.sh"\n` +
+      `  on_session_finalize:\n    - {command: "sh '/h/.claude/progress-report.sh' hermes end || true", timeout: 10}\nagent:\n  max_turns: 5\n`,
   )
   expect(hermes?.edit(once, false)).toBe(once)
   expect(hermes?.edit(once, true)).toBe(own)
@@ -909,7 +910,7 @@ test('Windows is told by the system or a drive letter, not by the slashes in the
 })
 
 test('a person’s own hook that only mentions the reporter’s name, like my-progress-report.sh, is kept', () => {
-  const ours = "sh '/home/me/.claude/progress-report.sh' codex turn"
+  const ours = "sh '/home/me/.claude/progress-report.sh' codex turn || true"
   const theirs = 'sh ~/bin/my-progress-report.sh'
   const grouped = withGroupedHook({ hooks: { Stop: [{ hooks: [{ type: 'command', command: theirs }] }] } }, 'Stop', ours)
   expect(grouped.hooks).toEqual({ Stop: [{ hooks: [{ type: 'command', command: theirs }] }, { hooks: [{ type: 'command', command: ours }] }] })
@@ -923,4 +924,109 @@ test('a person’s own hook that only mentions the reporter’s name, like my-pr
   const yaml = withHermesHooks(`hooks:\n  post_llm_call:\n    - {command: "${theirs}", timeout: 5}\n`, [['post_llm_call', windows]]) ?? ''
   expect(yaml).toContain(theirs)
   expect(withoutHermesHooks(yaml)).toBe(`hooks:\n  post_llm_call:\n    - {command: "${theirs}", timeout: 5}\n`)
+})
+
+const BOARD_FILE = `# Progress
+
+## api-gateway
+<!-- auto session=a1b2c3d4 agent=codex state=waiting updated=2026-10-17T08:30:00Z -->
+### Rate-limit the public endpoints
+> Context: Keep the public API up under abuse
+- [x] Added the token bucket middleware
+- [?] Per-key limit — 100 or 300 a minute?
+<!-- /auto session=a1b2c3d4 -->
+
+## acme-web
+<!-- auto session=9f8e7d6c state=working updated=2026-10-17T08:40:00Z -->
+### Dark mode for the settings page
+- [x] Theme tokens
+- [~] Settings page
+<!-- /auto session=9f8e7d6c -->
+`
+
+test('the board for other agents puts what waits on you first, then each project, then turns no session has taken in', () => {
+  const now = Date.parse('2026-10-17T08:45:00Z')
+  const pending = peekInbox([
+    { name: 'gemini-turn-1-1.json', body: JSON.stringify({ session_id: 'g1', cwd: '/w/docs-site', prompt: 'Fix the links', prompt_response: 'Fixed 12 broken links.' }), at: 1 },
+    { name: 'openclaw-turn-2-1.json', body: JSON.stringify({ session_id: 'o1', cwd: '/h/.openclaw/workspace', last_assistant_message: 'Done. Ship it to staging now?' }), at: 2 },
+  ])
+  const text = boardText(buildView(parseProgress(BOARD_FILE), [], null, now, 0, {}, STRINGS.en), pending, STRINGS.en, { width: 80, isColor: false })
+  const at = (part: string): number => text.indexOf(part)
+  expect(text.startsWith('Progress  ● 2 waiting')).toBe(true)
+  expect(at('api-gateway · codex › Rate-limit the public endpoints')).toBeGreaterThan(at('Waiting on you'))
+  expect(text).toContain('[Choose] Per-key limit — 100 or 300 a minute?')
+  expect(text).toContain('OpenClaw · openclaw\n    Ship it to staging now?')
+  expect(at('▸ acme-web')).toBeGreaterThan(at('Ship it to staging'))
+  expect(text).toContain('▸ 2 Settings page')
+  expect(at('docs-site · gemini: Fixed 12 broken links.')).toBeGreaterThan(at('▸ acme-web'))
+  expect(text).not.toContain('\u001b[')
+})
+
+test('the board only peeks at the inbox: a session’s end drops its turn, the newest turn of a session wins, and a reply is shown by its last line of prose', () => {
+  const turn = (session: string, answer: string) => JSON.stringify({ session_id: session, cwd: '/w/app', last_assistant_message: answer })
+  const pending = peekInbox([
+    { name: 'codex-turn-3-1.json', body: turn('c1', 'Second.'), at: 3 },
+    { name: 'codex-turn-1-1.json', body: turn('c1', 'First.'), at: 1 },
+    { name: 'grok-turn-1-1.json', body: turn('k1', 'Working on it.'), at: 1 },
+    { name: 'grok-end-2-1.json', body: JSON.stringify({ session_id: 'k1' }), at: 2 },
+    { name: 'codex-turn-4-1.json', body: 'not json', at: 4 },
+    { name: 'cursor-turn-5-1.json', body: turn('u1', 'Here is the board:\n```\n● 1 waiting\n```\nThe release plan needs you first.'), at: 5 },
+  ])
+  expect(pending).toEqual([
+    { agent: 'cursor', project: 'app', text: 'The release plan needs you first.', isQuestion: false, at: 5 },
+    { agent: 'codex', project: 'app', text: 'Second.', isQuestion: false, at: 3 },
+  ])
+})
+
+test('a board line is cut to the terminal, counting a CJK character as two columns', () => {
+  expect(fit('abcdef', 6)).toBe('abcdef')
+  expect(fit('abcdefg', 6)).toBe('abcde…')
+  expect(fit('進度看板很長', 6)).toBe('進度…')
+})
+
+test('a turn that only showed the board is not work, in any language or agent', () => {
+  const turn = (prompt: string) => readTurn('codex-turn-1-1.json', JSON.stringify({ session_id: 's', cwd: '/w/app', prompt, last_assistant_message: 'ok' }))
+  for (const prompt of ['$agent-board', '/agent-board', '/board', 'Run `node "/h/.claude/agent-board.mjs"` please', `${STRINGS.en.boardCommandPrompt}\n\nProgress`, `${ZH_TW.boardCommandPrompt}\n\n進度`]) {
+    expect(isBoardTurn(turn(prompt)!)).toBe(true)
+  }
+  expect(isBoardTurn(turn('Fix the board layout on mobile')!)).toBe(false)
+  expect(isBoardTurn(turn('/boarding-pass')!)).toBe(false)
+})
+
+test('each agent gets a board command in the form it reads, and a missing reporter never makes a hook exit 2', () => {
+  const ctx = { home: '/h', sep: '/', isWindows: false, script: '/h/.claude/progress-report.sh', inbox: '/h/.claude/progress-inbox', codexHome: '/h/.codex', grokHome: '/h/.grok', hermesHome: '/h/.hermes', openclawHome: '/h/.openclaw', board: '/h/.claude/agent-board.mjs', s: STRINGS.en }
+  const files = Object.fromEntries(boardCommands(ctx).map(hook => [hook.file, hook]))
+  const gemini = String(files['/h/.gemini/commands/board.toml']?.edit('', false))
+  // A TOML literal string, so a Windows path's backslashes stay as they are.
+  expect(gemini).toContain(`prompt = '''${STRINGS.en.boardCommandPrompt}\n\n!{node "/h/.claude/agent-board.mjs"}\n'''`)
+  expect(String(files['/h/.config/opencode/commands/board.md']?.edit('', false))).toContain('!`node "/h/.claude/agent-board.mjs"`')
+  const skill = String(files['/h/.agents/skills/agent-board/SKILL.md']?.edit('', false))
+  // The description has a colon in it; quoted, it stays one YAML value.
+  expect(skill.startsWith('---\nname: agent-board\ndescription: "Agent Board: what every agent is doing, and what waits on you"\n---\n')).toBe(true)
+  expect(files['/h/.agents/skills/agent-board/SKILL.md']?.dirs).toContain('/h/.codex')
+  expect(files['/h/.hermes/skills/agent-board/SKILL.md']?.edit('x', true)).toBe(DELETE)
+  expect(files['/h/.gemini/config/skills/agent-board/SKILL.md']?.dir).toBe('/h/.gemini/antigravity')
+  // Board files never count as connecting an agent: only its turns reaching the board do.
+  expect(boardCommands(ctx).every(hook => hook.label === '')).toBe(true)
+  expect(boardCommands({ ...ctx, board: undefined })).toEqual([])
+  expect(boardScript('/h/.claude/progress.md', 'en').split('\n')[0]).toBe('globalThis.AGENT_BOARD = {"path":"/h/.claude/progress.md","lang":"en"}')
+  expect(reportCommand('/h/.claude/progress-report.sh', 'gemini', 'turn', false)).toBe("sh '/h/.claude/progress-report.sh' gemini turn || true")
+})
+
+test('a Codex turn that showed the board is known by its session log, since its Stop leaves the request out', () => {
+  const user = (text: string) => JSON.stringify({ type: 'response_item', payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text }] } })
+  const reply = JSON.stringify({ type: 'response_item', payload: { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'Done.' }] } })
+  const logs: Record<string, string> = {
+    '/h/.codex/sessions/a.jsonl': [user('$agent-board'), user('<skill>\n<name>agent-board</name>\nRun `node "/h/.claude/agent-board.mjs"`\n</skill>'), reply].join('\n'),
+    '/h/.codex/sessions/b.jsonl': [user('Add rate limiting'), reply].join('\n'),
+  }
+  const stop = (session: string, log: string) => JSON.stringify({ session_id: session, cwd: '/w/app', transcript_path: log, last_assistant_message: 'Done.' })
+  const pending = peekInbox(
+    [
+      { name: 'codex-turn-1-1.json', body: stop('a', '/h/.codex/sessions/a.jsonl'), at: 1 },
+      { name: 'codex-turn-2-1.json', body: stop('b', '/h/.codex/sessions/b.jsonl'), at: 2 },
+    ],
+    path => logs[path] ?? '',
+  )
+  expect(pending.map(turn => turn.at)).toEqual([2])
 })

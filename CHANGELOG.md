@@ -1,5 +1,46 @@
 # Changelog
 
+## 0.16.0 — 2026-10-17
+
+- **The board in every agent.** Connecting (by hand or at a session's start)
+  now also writes `agent-board.mjs` beside `progress.md`, a script that prints
+  the board from the file with no Claude Code needed (`--watch` keeps it on
+  screen, `--html` opens it in the browser), and gives each installed agent a
+  command that shows it:
+  - `/board` in Gemini CLI and OpenCode, which paste the board into the prompt;
+  - `$agent-board` in Codex and `/agent-board` in Cursor, Grok Build and
+    OpenClaw, from one skill in `~/.agents/skills`;
+  - `/agent-board` in Hermes Agent and Antigravity, from their own skill
+    folders.
+
+  Board files never count as connecting an agent; the reply says how to open
+  the board in each one. Turns no Claude Code session has taken in yet are
+  listed as they came, a question first, and a turn that only showed the board
+  is not counted as work, even from Codex, whose `Stop` leaves the request out
+  (it is read from the session log). Run for real in Codex 0.163.0, Gemini
+  CLI 0.64.0 and OpenCode 1.19.3 against a mock model; the screenshots are in
+  `docs/images/live/`. Tests: "the board for other agents puts what waits on
+  you first, then each project, then turns no session has taken in", "the
+  board only peeks at the inbox: a session’s end drops its turn, the newest
+  turn of a session wins, and a reply is shown by its last line of prose", "a
+  board line is cut to the terminal, counting a CJK character as two columns",
+  "a turn that only showed the board is not work, in any language or agent",
+  "a Codex turn that showed the board is known by its session log, since its
+  Stop leaves the request out", "each agent gets a board command in the form
+  it reads, and a missing reporter never makes a hook exit 2", "connecting
+  writes the board script and each installed agent’s board command, says how
+  to open them, and removing takes them out", "an agent’s turn that only
+  showed the board gets no block", and "the board script prints the board
+  from the file it was written for, in its language" (`tests/board.test.mjs`).
+- **A missing reporter no longer makes an agent loop.** When
+  `progress-report.sh` was gone (`~/.claude` deleted, or the plugin removed
+  without `/progress connect remove`), `sh` exited 2, which Gemini CLI, Codex,
+  Grok Build and Muse Code read as "block" and ran the agent again, for ever.
+  Found in a live Gemini CLI run. Every POSIX hook command now ends in
+  `|| true`; existing hooks are rewritten at the next session's start. Test:
+  "each agent gets a board command in the form it reads, and a missing
+  reporter never makes a hook exit 2".
+
 ## 0.15.0 — 2026-10-17
 
 - **OpenClaw reports too.** Connecting (by hand or at a session's start) writes

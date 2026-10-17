@@ -9,7 +9,7 @@ A Claude Code plugin that also follows Codex, Gemini CLI, Cursor, OpenCode, Grok
 
 <p align="center">
 <a href="https://github.com/WenyuChiou/agent-board/actions/workflows/test.yml"><img alt="Tests" src="https://github.com/WenyuChiou/agent-board/actions/workflows/test.yml/badge.svg"></a>
-<a href="CHANGELOG.md"><img alt="Version 0.15.0" src="https://img.shields.io/badge/version-0.15.0-blue"></a>
+<a href="CHANGELOG.md"><img alt="Version 0.16.0" src="https://img.shields.io/badge/version-0.16.0-blue"></a>
 <a href="LICENSE"><img alt="MIT license" src="https://img.shields.io/badge/license-MIT-green"></a>
 <img alt="macOS, Linux, Windows" src="https://img.shields.io/badge/macOS%20%C2%B7%20Linux%20%C2%B7%20Windows-lightgrey">
 </p>
@@ -31,6 +31,7 @@ You have Claude Code on one project, Codex on another, Gemini on a third. Twenty
 | <img src="docs/images/agents/openclaw.svg" width="24" alt=""> | **OpenClaw** | Plugin, on `agent_end` | Nothing | ✅ 2026.10.4 |
 | <img src="docs/images/agents/cursor.svg" width="24" alt=""> | **Cursor** | `afterAgentResponse` hook | Nothing | Built from Cursor's docs |
 | <img src="docs/images/agents/muse-code.svg" width="24" alt=""> | **Muse Code** | `Stop` hook | Nothing | Built from Muse's docs |
+| | **Antigravity** | Does not report yet (no turn-end hook) | Nothing: it gets `/agent-board` to see the board | Built from its docs |
 | | **dot** | Local exchange (opt-in) | See [docs/LOCAL-EXCHANGE.md](docs/LOCAL-EXCHANGE.md) | File contract only |
 | | **Any other agent** (Aider, Copilot, Windsurf…) | Writes its own block | Paste one section of [AGENTS.md](AGENTS.md) into its instructions | |
 
@@ -76,6 +77,24 @@ Then show me what the last command printed and tell me which agents to restart.
 - **Tidies itself.** Finished work moves to a monthly archive; a journal keeps every finished step.
 - **One plain Markdown file.** Everything is in `~/.claude/progress.md`, which you can read and edit. English, 繁體中文 and 简体中文; light and dark.
 
+## The board in every agent
+
+Connecting also gives each agent a way to show the board, so whichever one you are in, you see what all of them are doing:
+
+| In | Type |
+|---|---|
+| Gemini CLI, OpenCode | `/board` |
+| Codex | `$agent-board` |
+| Cursor, Grok Build, OpenClaw, Hermes Agent, Antigravity | `/agent-board` |
+| Any terminal, next to any agent | `node ~/.claude/agent-board.mjs --watch` (`--html` opens it in the browser) |
+
+<table><tr>
+<td><img alt="Codex CLI 0.163.0: typing $agent-board runs the board script and shows the board" src="docs/images/live/codex-en.png"></td>
+<td><img alt="Gemini CLI 0.64.0: /board pastes the board into the prompt" src="docs/images/live/gemini-en.png"></td>
+</tr></table>
+
+Screenshots from real runs of Codex 0.163.0 and Gemini CLI 0.64.0 against a mock model; more, OpenCode's and the terminal's, are in the [guide](docs/GUIDE.md#the-board-in-every-agent). The board is read from `progress.md`, so it needs no Claude Code session. Other agents' turns are summed up into steps only while a Claude Code session is open; until then the board lists them as they came in.
+
 ## Commands
 
 | Type | To |
@@ -114,6 +133,12 @@ Each connected agent's hook saves its last reply into `~/.claude/progress-inbox/
 <summary><b>Do I need other agents, or does it work with Claude Code alone?</b></summary>
 
 It works with Claude Code alone. Every Claude Code session shows up by itself; connecting other agents is optional.
+</details>
+
+<details>
+<summary><b>I installed it from Codex (or another agent). Can that agent see Claude Code's work?</b></summary>
+
+Yes. The plugin lives in Claude Code, but connecting gives every agent its board command (see [The board in every agent](#the-board-in-every-agent)), and the board reads the one file every agent writes to. Keep a Claude Code session open somewhere if you want other agents' turns summed up into steps.
 </details>
 
 <details>

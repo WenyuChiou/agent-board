@@ -205,6 +205,27 @@ hook 运行的是 `/progress connect` 写好的 `~/.claude/progress-report.sh`�
 
 **dot，以及 Codex 的明确汇报**：自行选用的[本地交换](LOCAL-EXCHANGE.md)写的也是同一种片段，用同一个合并步骤放进去，并在本地保留一个带回执的消息队列。
 
+## 每个 agent 里都看得到看板
+
+`/progress connect`（以及每个对话开始时）也会在 `progress.md` 旁边写一个 `agent-board.mjs`：直接从 `progress.md` 打印看板的脚本，不用开 Claude Code。每个 agent 的看板命令都是运行它。
+
+| Agent | 文件 | 输入 |
+|---|---|---|
+| Gemini CLI | `~/.gemini/commands/board.toml` | `/board`。Gemini 第一次会问要不要让命令运行 |
+| OpenCode | `~/.config/opencode/commands/board.md` | `/board` |
+| Codex、Cursor、Grok Build、OpenClaw（还有 Gemini CLI、OpenCode） | `~/.agents/skills/agent-board/SKILL.md` | Codex 输入 `$agent-board`，其他输入 `/agent-board` |
+| Hermes Agent | `~/.hermes/skills/agent-board/SKILL.md` | `/agent-board` |
+| Antigravity | `~/.gemini/config/skills/agent-board/SKILL.md` | `/agent-board` |
+
+Gemini CLI 和 OpenCode 会自己把看板贴进提示；用技能（skill）的，则是 agent 运行脚本再把打印的内容给你看。Codex、Gemini CLI、OpenCode 实际运行过（接测试用的假模型，见下图）；Cursor、Grok Build、OpenClaw、Hermes Agent、Antigravity 的技能按它们文档写的位置放，没有实际运行过。Antigravity 只能看看板：它还没有回合结束的 hook 可以汇报。
+
+在终端：`node ~/.claude/agent-board.mjs` 打印一次看板，`--watch` 一直开着、每 2 秒重画（分屏放在 Codex 旁边），`--html` 写出 `progress.html` 并在浏览器打开。`--lang zh-CN`（或 `en`、`zh-TW`）选语言；默认跟你的 Claude Code 对话一样。
+
+看板只读不写。其他 agent 的 hook 留在收件箱的回合，要有开着的 Claude Code 对话才会整理成步骤；在那之前，看板照原样列出它们，问题排最前面。只是看看板的回合，不算工作。
+
+<img alt="终端里的看板，每 2 秒重画" src="images/live/terminal-zh-TW.png" width="560">
+<img alt="OpenCode 1.19.3：/board" src="images/live/opencode-zh-TW.png" width="560">
+
 ## 它怎么保持整齐
 
 | 项目 | 时机 |

@@ -60,7 +60,7 @@ import { RULE_ID, RULES } from './rule'
 import { langOf, resolveLang, STRINGS } from './strings'
 import { answerTurns, applyDigest, clearAsked, cleanHandoff, isWork, lastQuestion, markAsked, needsRefresh, parseDigest, replyData, turnTools } from './digest'
 import type { Digest } from './digest'
-import { agentHooks, DELETE, isWindowsHost, psQuote, reporterPs1, reporterSh, withoutSection } from './connect'
+import { agentHooks, boardScript, DELETE, isWindowsHost, psQuote, reporterPs1, reporterSh, withoutSection } from './connect'
 import {
   answerKey,
   inboxOrder,
@@ -71,6 +71,7 @@ import {
   promptKey,
   readTurn,
   takenName,
+  isBoardTurn,
   transcriptTail,
   turnsToDigest,
 } from './inbox'
@@ -648,6 +649,8 @@ const takeAgentTurns = async ($: EngineInterface, turns: readonly AgentTurn[]): 
       answer = answer || tail.answer
       prompt = prompt || tail.prompt
     }
+    // Known only now for Codex, whose Stop leaves the request out.
+    if (isBoardTurn({ ...turn, prompt })) continue
     if (mirror.firstPrompt === '' && prompt !== '') mirror = { ...mirror, firstPrompt: promptKey(prompt) }
     if (answer === '' || answerKey(answer) === mirror.lastAnswer) continue
     if (digested.has(index)) {
@@ -696,17 +699,24 @@ const connectAgents = async ($: EngineInterface, mode: ConnectMode): Promise<{ t
   const script = `${path.replace(/[\\/][^\\/]*$/, '')}${sep}progress-report.${isWin ? 'ps1' : 'sh'}`
   const reporter = isWin ? reporterPs1(inboxPath(path)) : reporterSh(inboxPath(path))
   if (!remove && (await readText($, script).catch(() => '')) !== reporter) await $.fs.write(script, reporter)
+  // The board for every other agent: their board commands run it, and so can any terminal.
+  const board = `${path.replace(/[\\/][^\\/]*$/, '')}${sep}agent-board.mjs`
+  const boardCode = boardScript(path, s.lang)
+  if (!remove && (await readText($, board).catch(() => '')) !== boardCode) await $.fs.write(board, boardCode)
+  if (remove && (await $.fs.exists(board))) await removeFiles($, [board], isWin)
   const done: string[] = []
   const skipped: string[] = []
   const removeFile = (file: string): Promise<void> => removeFiles($, [file], isWin)
-  for (const hook of agentHooks({ home, sep, isWindows: isWin, script, inbox: inboxPath(path), codexHome, grokHome, hermesHome, openclawHome })) {
-    if (!(await $.fs.exists(hook.dir))) continue
+  for (const hook of agentHooks({ home, sep, isWindows: isWin, script, inbox: inboxPath(path), codexHome, grokHome, hermesHome, openclawHome, board, s })) {
+    let isInstalled = false
+    for (const dir of hook.dirs ?? [hook.dir]) isInstalled = isInstalled || (await $.fs.exists(dir))
+    if (!isInstalled) continue
     // Left under the plugin's earlier name, it would report every turn a second time.
     const hadOld = hook.old !== undefined && (await $.fs.exists(hook.old))
     if (hadOld && hook.old !== undefined) await removeFile(hook.old)
     const before = await readText($, hook.file).catch(() => null)
     if (before === null) {
-      if (!isAuto) skipped.push(s.connectSkipped(hook.label, hook.file))
+      if (!isAuto && hook.label !== '') skipped.push(s.connectSkipped(hook.label, hook.file))
       continue
     }
     if (remove && before.trim() === '') {
@@ -715,7 +725,7 @@ const connectAgents = async ($: EngineInterface, mode: ConnectMode): Promise<{ t
     }
     const after = hook.edit(before, remove)
     if (after === null) {
-      if (mode === 'connect') skipped.push(s.connectSkipped(hook.label, hook.file))
+      if (mode === 'connect' && hook.label !== '') skipped.push(s.connectSkipped(hook.label, hook.file))
       continue
     }
     if (after === DELETE) {
@@ -725,7 +735,7 @@ const connectAgents = async ($: EngineInterface, mode: ConnectMode): Promise<{ t
     }
     if ((remove || isAuto) && after === before && !hadOld) continue
     // OpenClaw takes two files, a plugin and the config entry that loads it.
-    if (done.includes(hook.label)) continue
+    if (hook.label === '' || done.includes(hook.label)) continue
     done.push(hook.label)
     if (!remove) await dropSection($, hook.agent, home, codexHome, sep)
   }
@@ -733,8 +743,8 @@ const connectAgents = async ($: EngineInterface, mode: ConnectMode): Promise<{ t
   const lines = remove
     ? [done.length === 0 ? s.connectNothingRemoved : s.connectRemoved(done.join(s.listSep))]
     : isAuto
-      ? [s.autoConnected(done.join(s.listSep)), ...trust, s.autoConnectUndo]
-      : [done.length === 0 ? s.connectNone : s.connectDone(done.join(s.listSep)), ...trust]
+      ? [s.autoConnected(done.join(s.listSep)), ...trust, s.boardEverywhere(board), s.autoConnectUndo]
+      : [done.length === 0 ? s.connectNone : s.connectDone(done.join(s.listSep)), ...trust, s.boardEverywhere(board)]
 
   return { text: [...lines, ...skipped].join('\n'), done }
 }
@@ -841,7 +851,7 @@ const drainInbox = async ($: EngineInterface): Promise<void> => {
   const job = digests.then(async () => {
     try {
       const bySession = new Map<string, AgentTurn[]>()
-      for (const turn of turns) bySession.set(turn.id, [...(bySession.get(turn.id) ?? []), turn])
+      for (const turn of turns.filter(one => !isBoardTurn(one))) bySession.set(turn.id, [...(bySession.get(turn.id) ?? []), turn])
       for (const group of bySession.values()) await takeAgentTurns($, group).catch(() => undefined)
     } finally {
       await removeFiles($, taken, isWin)

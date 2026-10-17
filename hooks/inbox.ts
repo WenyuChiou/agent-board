@@ -1,4 +1,5 @@
 import { baseName } from './parse'
+import { STRINGS } from './strings'
 
 // What another agent's hook handed over at the end of a turn or a session, saved by the
 // reporter script as one file in the inbox (`<agent>-<turn|end>-<time>-<pid>.json`). Every
@@ -211,3 +212,11 @@ export const keepInboxDone = (done: Readonly<Record<string, string>>, now: numbe
 export const takenName = (name: string, session: string): string => `${name}.${session.replace(/[^\w-]/g, '') || 'x'}.taking`
 
 export const isTakenFile = (name: string): boolean => /^[a-z][a-z0-9]*-(?:turn|end)-[\w.-]+\.json\.[\w-]+\.taking$/.test(name)
+
+// A turn that only showed the person the board (Gemini CLI's and OpenCode's /board, the
+// agent-board skill): looking at the board is not work, so it gets no block of its own.
+const BOARD_ASKS = /^\s*(?:\/board|[$/]agent-board)\b/
+
+export const isBoardTurn = (turn: AgentTurn): boolean =>
+  turn.event === 'turn' &&
+  (BOARD_ASKS.test(turn.prompt) || turn.prompt.includes('agent-board.mjs') || Object.values(STRINGS).some(s => turn.prompt.includes(s.boardCommandPrompt)))

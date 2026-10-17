@@ -277,6 +277,14 @@ export const ZH_TW = {
   dashStamp: (time: string): string => `更新於 ${time}`,
   windowOpened: (path: string): string => `已在瀏覽器打開：${path}`,
   windowFailed: (path: string): string => `打不開瀏覽器，請自己開：${path}`,
+
+  // The board other agents show (the standalone script and each agent's board command)
+  boardInbox: '收件匣裡還沒整理的回合（開一個 Claude Code 對話就會整理進來）',
+  boardWatching: '每 2 秒更新，Ctrl+C 結束',
+  boardCommandDescription: 'Agent Board：每個 agent 在做什麼、什麼在等你',
+  boardCommandPrompt: '把下面的 Agent Board 原樣放在程式碼區塊裡給我看，再用一句話說現在最需要我處理的是什麼。不要改任何檔案。',
+  boardSkillPrompt: (command: string): string => `執行 \`${command}\`，把它印出的 Agent Board 原樣放在程式碼區塊裡給我看，再用一句話說現在最需要我處理的是什麼。不要改任何檔案。`,
+  boardEverywhere: (path: string): string => `在其他 agent 裡看這個看板：Gemini CLI、OpenCode 打 /board，Codex 打 $agent-board，其他打 /agent-board；任何終端機：node "${path}" --watch`,
 }
 
 export type Strings = typeof ZH_TW

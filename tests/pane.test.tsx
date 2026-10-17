@@ -1215,22 +1215,22 @@ test('/progress connect hooks the installed agents into the pane once, keeps the
   const first = await $.command.run({ ...TIDY, args: 'connect' })
   expect(first.text).toContain('已接上：Codex、Cursor、Grok Build。')
   expect(world.ran).toContainEqual(['rm', '-f', oldGrok])
-  expect(world.files.get('/home/me/.grok/hooks/agent-board.json')).toContain("progress-report.sh' grok turn")
+  expect(world.files.get('/home/me/.grok/hooks/agent-board.json')).toContain("progress-report.sh' grok turn || true")
   expect(first.text).toContain('Codex 第一次要在它的 /hooks 裡核准這個 hook 才會跑。')
   expect(first.text).toContain('Gemini CLI 的設定檔讀不懂，沒有動它：/home/me/.gemini/settings.json')
   expect(world.files.get('/home/me/.claude/progress-report.sh')).toContain("dir='/home/me/.claude/progress-inbox'")
   const codex = JSON.parse(world.files.get('/home/me/.codex/hooks.json') ?? '{}')
-  expect(codex.hooks.Stop[0].hooks[0]).toEqual({ type: 'command', command: "sh '/home/me/.claude/progress-report.sh' codex turn", timeout: 10 })
-  expect(codex.hooks.SessionEnd[0].hooks[0].command).toBe("sh '/home/me/.claude/progress-report.sh' codex end")
+  expect(codex.hooks.Stop[0].hooks[0]).toEqual({ type: 'command', command: "sh '/home/me/.claude/progress-report.sh' codex turn || true", timeout: 10 })
+  expect(codex.hooks.SessionEnd[0].hooks[0].command).toBe("sh '/home/me/.claude/progress-report.sh' codex end || true")
   expect(world.files.get('/home/me/.codex/AGENTS.md')).toBe('# Mine\n\nUse tabs.\n')
   expect(world.files.get('/home/me/.gemini/settings.json')).toBe('{ // my comment\n "theme": "dark" }')
 
   // Again: nothing doubles.
   await $.command.run({ ...TIDY, args: 'connect' })
   const cursor = JSON.parse(world.files.get('/home/me/.cursor/hooks.json') ?? '{}')
-  expect(cursor.hooks.stop).toEqual([{ command: 'say done' }, { command: "sh '/home/me/.claude/progress-report.sh' cursor turn" }])
+  expect(cursor.hooks.stop).toEqual([{ command: 'say done' }, { command: "sh '/home/me/.claude/progress-report.sh' cursor turn || true" }])
   expect(cursor.hooks.afterAgentResponse).toHaveLength(1)
-  expect(cursor.hooks.sessionEnd).toEqual([{ command: "sh '/home/me/.claude/progress-report.sh' cursor end" }])
+  expect(cursor.hooks.sessionEnd).toEqual([{ command: "sh '/home/me/.claude/progress-report.sh' cursor end || true" }])
 
   const removed = await $.command.run({ ...TIDY, args: 'connect remove' })
   expect(removed.text).toContain('已拿掉：Codex、Cursor、Grok Build。')
@@ -1557,7 +1557,7 @@ test('a session hooks in the agents installed here without /progress connect, an
   const seen = outside(on)
   await $.session.start({ cwd: '/work/persona_framework', surface: 'terminal', isInteractive: true })
   const codex = JSON.parse(world.files.get('/home/me/.codex/hooks.json') ?? '{}')
-  expect(codex.hooks.Stop[0].hooks[0].command).toBe("sh '/home/me/.claude/progress-report.sh' codex turn")
+  expect(codex.hooks.Stop[0].hooks[0].command).toBe("sh '/home/me/.claude/progress-report.sh' codex turn || true")
   expect(world.files.get('/home/me/.claude/progress-report.sh')).toContain("dir='/home/me/.claude/progress-inbox'")
   expect(seen.notified).toEqual(['已自動接上：Codex。重開它們之後，每個回合都會出現在這裡。'])
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal', props: PROPS })
@@ -1583,8 +1583,34 @@ test('a session hooks OpenClaw in by a plugin file and its config entry, names i
   expect(JSON.parse(world.files.get('/home/me/.openclaw/openclaw.json') ?? '{}')).toEqual({ gateway: { port: 18789 }, plugins: {} })
 })
 
+test('connecting writes the board script and each installed agent’s board command, says how to open them, and removing takes them out', async ($, on) => {
+  const world: World = { files: new Map([['/home/me/.gemini/settings.json', '{}'], ['/home/me/.codex/config.toml', '']]), mtime: 1, hasTasks: true, ran: [] }
+  engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/persona_framework', surface: 'terminal', isInteractive: true })
+  const board = world.files.get('/home/me/.claude/agent-board.mjs') ?? ''
+  expect(board.split('\n')[0]).toBe('globalThis.AGENT_BOARD = {"path":"/home/me/.claude/progress.md","lang":"zh-TW"}')
+  expect(world.files.get('/home/me/.gemini/commands/board.toml')).toContain('!{node "/home/me/.claude/agent-board.mjs"}')
+  expect(world.files.get('/home/me/.agents/skills/agent-board/SKILL.md')).toContain('node "/home/me/.claude/agent-board.mjs"')
+  expect(world.files.has('/home/me/.config/opencode/commands/board.md')).toBe(false)
+
+  const again = await $.command.run({ ...TIDY, args: 'connect' })
+  expect(again.text).toContain('Codex 打 $agent-board')
+  expect(again.text).toContain('node "/home/me/.claude/agent-board.mjs" --watch')
+  await $.command.run({ ...TIDY, args: 'connect remove' })
+  for (const file of ['/home/me/.claude/agent-board.mjs', '/home/me/.gemini/commands/board.toml', '/home/me/.agents/skills/agent-board/SKILL.md']) {
+    expect(world.ran.some(argv => argv.includes(file))).toBe(true)
+  }
+})
+
+test('an agent’s turn that only showed the board gets no block', async ($, on) => {
+  const look = JSON.stringify({ session_id: 'c9', cwd: '/home/me/work/api-gateway', prompt: '$agent-board', last_assistant_message: 'Here it is. The release plan needs you first.' })
+  const { text, asked } = await takeInbox($, on, [[`${INBOX}/codex-turn-1792220000-1.json`, look]])
+  expect(asked).toEqual([])
+  expect(text).not.toContain('agent=codex')
+})
+
 test('an agent already hooked in is left as it is, and nothing is said', async ($, on) => {
-  const hooked = JSON.stringify({ hooks: { Stop: [{ hooks: [{ type: 'command', command: "sh '/home/me/.claude/progress-report.sh' codex turn", timeout: 10 }] }], SessionEnd: [{ hooks: [{ type: 'command', command: "sh '/home/me/.claude/progress-report.sh' codex end", timeout: 3 }] }] } }, null, 2) + '\n'
+  const hooked = JSON.stringify({ hooks: { Stop: [{ hooks: [{ type: 'command', command: "sh '/home/me/.claude/progress-report.sh' codex turn || true", timeout: 10 }] }], SessionEnd: [{ hooks: [{ type: 'command', command: "sh '/home/me/.claude/progress-report.sh' codex end || true", timeout: 3 }] }] } }, null, 2) + '\n'
   const world: World = { files: new Map([['/home/me/.codex/hooks.json', hooked]]), mtime: 1, hasTasks: true, ran: [] }
   engineBeneath(on, world)
   const seen = outside(on)

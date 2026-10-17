@@ -272,4 +272,12 @@ export const EN: Strings = {
   dashStamp: (time: string): string => `updated ${time}`,
   windowOpened: (path: string): string => `Opened in your browser: ${path}`,
   windowFailed: (path: string): string => `Couldn't open a browser; open it yourself: ${path}`,
+
+  // The board other agents show (the standalone script and each agent's board command)
+  boardInbox: 'Turns in the inbox not summed up yet (open a Claude Code session to take them in)',
+  boardWatching: 'Updates every 2 seconds; Ctrl+C to stop',
+  boardCommandDescription: 'Agent Board: what every agent is doing, and what waits on you',
+  boardCommandPrompt: 'Show me the Agent Board below exactly as it is, in a code block. Then tell me in one sentence what needs me first. Do not change any file.',
+  boardSkillPrompt: (command: string): string => `Run \`${command}\` and show me the Agent Board it prints exactly as it is, in a code block. Then tell me in one sentence what needs me first. Do not change any file.`,
+  boardEverywhere: (path: string): string => `To see this board from another agent: /board in Gemini CLI and OpenCode, $agent-board in Codex, /agent-board in the others; in any terminal: node "${path}" --watch`,
 }
