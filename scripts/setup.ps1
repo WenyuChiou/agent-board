@@ -5,9 +5,10 @@
 #   powershell -ExecutionPolicy Bypass -File setup.ps1 [-KeepRule] [-NoInstall] [-ProfilePath <file>]
 #     [-Agents auto|codex,gemini,opencode] [-RemoveAgents]
 #
-# 1. With `claude` on PATH (and no -NoInstall): uninstalls project-progress and removes the
-#    claude-progress-pane marketplace, the plugin's names before 0.10, when they are there;
-#    then adds the agent-board marketplace and installs agent-board from it. Each step is a no-op once done.
+# 1. With `claude` on PATH (and no -NoInstall): adds the agent-board marketplace and installs
+#    agent-board from it; once that worked, uninstalls project-progress and removes the
+#    claude-progress-pane marketplace, the plugin's names before 0.10, when they are there.
+#    Each step is a no-op once done. Otherwise it names the commands that remove the old name.
 # 2. PowerShell profile ($PROFILE.CurrentUserCurrentHost, or -ProfilePath): adds
 #    $env:CLAUDE_CODE_ENABLE_TODO_TOOLS = "1" unless a line already sets it. Newer models
 #    leave the Task tools out without it, and the pane mirrors them. It goes in the profile,
@@ -59,39 +60,51 @@ function Install-AgentBoard {
   }
   catch { $autoOff = $false }
 
-  # The plugin itself
-  if (-not $NoInstall) {
-    if (Get-Command claude -ErrorAction SilentlyContinue) {
-      # Under its old name the plugin would load a second pane beside the new one.
-      $hasOld = $false
-      foreach ($file in (Join-Path (Join-Path $claude 'plugins') 'known_marketplaces.json'), (Join-Path $claude 'settings.json')) {
-        if ((Test-Path -LiteralPath $file) -and ([IO.File]::ReadAllText($file)).Contains("`"$oldMarket`"")) { $hasOld = $true }
-      }
-      if ($hasOld) {
-        & claude plugin uninstall $oldPlugin 2>&1 | Out-Null
-        & claude plugin marketplace remove $oldMarket 2>&1 | Out-Null
-        Write-Host "Removed $oldPlugin, the plugin's old name; $plugin takes its place."
-      }
-      & claude plugin marketplace add $marketplace
-      if ($LASTEXITCODE -ne 0) {
-        Write-Warning ("Could not add $marketplace. For a private repository run 'gh auth login' and " +
-          "'gh auth setup-git' once; without a GitHub SSH key also set CLAUDE_CODE_PLUGIN_PREFER_HTTPS=1. Then run this again.")
-        return
-      }
-      & claude plugin install $plugin
-      if ($LASTEXITCODE -ne 0) { Write-Warning "Could not install $plugin."; return }
-      # A fresh install leaves the language option unset and Claude Code says so; auto is what
-      # it means anyway. A language someone picked stays.
-      try {
-        $options = (& claude plugin configure $plugin --json | Out-String) | ConvertFrom-Json
-        if (@($options.unconfigured) -contains 'language') {
-          '{"language":"auto"}' | & claude plugin configure $plugin --values-stdin | Out-Null
-        }
-      }
-      catch { }
+  # Under its old name the plugin would load a second pane beside the new one. settings.json
+  # names it among enabledPlugins, so this is known with -NoInstall or without claude too.
+  $hasOld = $false
+  foreach ($file in (Join-Path (Join-Path $claude 'plugins') 'known_marketplaces.json'), (Join-Path $claude 'settings.json')) {
+    if (Test-Path -LiteralPath $file) {
+      $text = [IO.File]::ReadAllText($file)
+      if ($text.Contains("`"$oldMarket`"") -or $text.Contains("`"$oldPlugin`"")) { $hasOld = $true }
     }
-    else {
+  }
+  $oldSteps = "run 'claude plugin uninstall $oldPlugin' and 'claude plugin marketplace remove $oldMarket'"
+
+  # The plugin itself
+  if ((-not $NoInstall) -and (Get-Command claude -ErrorAction SilentlyContinue)) {
+    & claude plugin marketplace add $marketplace
+    if ($LASTEXITCODE -ne 0) {
+      Write-Warning ("Could not add $marketplace. For a private repository run 'gh auth login' and " +
+        "'gh auth setup-git' once; without a GitHub SSH key also set CLAUDE_CODE_PLUGIN_PREFER_HTTPS=1. Then run this again.")
+      return
+    }
+    & claude plugin install $plugin
+    if ($LASTEXITCODE -ne 0) { Write-Warning "Could not install $plugin; nothing else was changed. Run this again once it installs."; return }
+    # A fresh install leaves the language option unset and Claude Code says so; auto is what
+    # it means anyway. A language someone picked stays.
+    try {
+      $options = (& claude plugin configure $plugin --json | Out-String) | ConvertFrom-Json
+      if (@($options.unconfigured) -contains 'language') {
+        '{"language":"auto"}' | & claude plugin configure $plugin --values-stdin | Out-Null
+      }
+    }
+    catch { }
+    # Only once the new name is in, so a failed install never leaves no pane at all.
+    if ($hasOld) {
+      & claude plugin uninstall $oldPlugin 2>&1 | Out-Null
+      $isRemoved = $LASTEXITCODE -eq 0
+      & claude plugin marketplace remove $oldMarket 2>&1 | Out-Null
+      if ($isRemoved) { Write-Host "Removed $oldPlugin, the plugin's old name; $plugin takes its place." }
+      else { Write-Warning "Could not remove $oldPlugin, the plugin's old name, which shows a second pane: $oldSteps." }
+    }
+  }
+  else {
+    if (-not $NoInstall) {
       Write-Warning "claude is not on PATH: run 'claude plugin marketplace add $marketplace' and 'claude plugin install $plugin' yourself."
+    }
+    if ($hasOld) {
+      Write-Warning "$oldPlugin, the plugin's old name, is still installed and shows a second pane: once $plugin is in, $oldSteps."
     }
   }
 
