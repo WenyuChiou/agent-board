@@ -5,11 +5,11 @@
 <rect x="40" y="78" width="330" height="88" rx="12" fill="#1c1e21" stroke="#2f3236"/>
 <circle cx="62" cy="108" r="5" fill="#00A3AF"/>
 <text x="78" y="114" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans TC', 'Noto Sans SC', 'PingFang TC', 'Microsoft JhengHei', 'Microsoft YaHei', sans-serif" font-size="18" font-weight="600" fill="#e6e4dc">Claude Code 对话</text>
-<text x="78" y="140" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans TC', 'Noto Sans SC', 'PingFang TC', 'Microsoft JhengHei', 'Microsoft YaHei', sans-serif" font-size="14" fill="#afafb0">Task 清单由插件自动同步</text>
+<text x="78" y="140" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans TC', 'Noto Sans SC', 'PingFang TC', 'Microsoft JhengHei', 'Microsoft YaHei', sans-serif" font-size="14" fill="#afafb0">每回合自动整理，有没有 Task 清单都行</text>
 <rect x="40" y="218" width="330" height="88" rx="12" fill="#1c1e21" stroke="#2f3236"/>
 <circle cx="62" cy="248" r="5" fill="#A59ACA"/>
 <text x="78" y="254" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans TC', 'Noto Sans SC', 'PingFang TC', 'Microsoft JhengHei', 'Microsoft YaHei', sans-serif" font-size="18" font-weight="600" fill="#e6e4dc">其他 agent</text>
-<text x="78" y="280" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans TC', 'Noto Sans SC', 'PingFang TC', 'Microsoft JhengHei', 'Microsoft YaHei', sans-serif" font-size="14" fill="#afafb0">Codex、Gemini CLI、OpenCode、Cursor</text>
+<text x="78" y="280" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans TC', 'Noto Sans SC', 'PingFang TC', 'Microsoft JhengHei', 'Microsoft YaHei', sans-serif" font-size="14" fill="#afafb0">Codex、Gemini、Cursor、Grok 等</text>
 <rect x="40" y="358" width="330" height="88" rx="12" fill="#1c1e21" stroke="#2f3236"/>
 <circle cx="62" cy="388" r="5" fill="#F8B500"/>
 <text x="78" y="394" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans TC', 'Noto Sans SC', 'PingFang TC', 'Microsoft JhengHei', 'Microsoft YaHei', sans-serif" font-size="18" font-weight="600" fill="#e6e4dc">你</text>
@@ -18,7 +18,7 @@
 <path d="M370 262 C435 262 435 270 494 270" fill="none" stroke="#6E7268" stroke-width="1.6" marker-end="url(#head)"/>
 <path d="M370 402 C435 402 435 340 494 340" fill="none" stroke="#6E7268" stroke-width="1.6" marker-end="url(#head)"/>
 <text x="382" y="112" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans TC', 'Noto Sans SC', 'PingFang TC', 'Microsoft JhengHei', 'Microsoft YaHei', sans-serif" font-size="13" fill="#afafb0">自动</text>
-<text x="382" y="252" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans TC', 'Noto Sans SC', 'PingFang TC', 'Microsoft JhengHei', 'Microsoft YaHei', sans-serif" font-size="13" fill="#afafb0">AGENTS.md</text>
+<text x="382" y="252" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans TC', 'Noto Sans SC', 'PingFang TC', 'Microsoft JhengHei', 'Microsoft YaHei', sans-serif" font-size="13" fill="#afafb0">各自的 hook</text>
 <text x="382" y="392" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans TC', 'Noto Sans SC', 'PingFang TC', 'Microsoft JhengHei', 'Microsoft YaHei', sans-serif" font-size="13" fill="#afafb0">打字或编辑</text>
 <rect x="500" y="110" width="280" height="330" rx="14" fill="#1c1e21" stroke="#00A3AF" stroke-width="2"/>
 <text x="522" y="146" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', 'Noto Sans Mono CJK TC', 'Noto Sans CJK TC', 'PingFang TC', 'Microsoft JhengHei', monospace" font-size="17" font-weight="700" fill="#e6e4dc">progress.md</text>

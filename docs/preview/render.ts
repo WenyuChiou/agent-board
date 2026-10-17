@@ -59,19 +59,19 @@ const WORDS: Record<Lang, {
     tagline: ['A progress dashboard for coding agents.', 'What needs you first, every project at a glance.'],
     features: [
       ['●', 'waiting', 'One question at a time, with a button per answer'],
-      ['▸', 'accent', 'Claude, Codex, Gemini CLI and more, in one pane'],
-      ['⚑', 'soon', 'Background and deadlines on every task'],
+      ['▸', 'accent', 'Every agent reports through its own hooks'],
+      ['⚑', 'soon', 'Background, deadline and handoff on every task'],
       ['✓', 'done', 'Cleans itself up; nothing piles up'],
     ],
     agents: 'English  ·  繁體中文  ·  简体中文',
     captions: ['1  The one thing that needs you', '2  Everything waiting on you, by kind', '3  Answered from the pane; Claude moves on'],
     flow: {
       sources: [
-        ['Claude Code sessions', 'Task list, mirrored by the plugin'],
-        ['Other agents', 'Codex, Gemini CLI, OpenCode, Cursor'],
+        ['Claude Code sessions', 'Every turn, with or without a Task list'],
+        ['Other agents', 'Codex, Gemini, Cursor, Grok and more'],
         ['You', 'Tasks kept by hand, + quick add'],
       ],
-      into: ['automatically', 'AGENTS.md', 'type or edit'],
+      into: ['automatically', 'their hooks', 'type or edit'],
       file: 'one Markdown file, one block per session',
       outputs: [
         ['The pane', 'Needs you first, in Claude Code'],
@@ -87,19 +87,19 @@ const WORDS: Record<Lang, {
     tagline: ['給 coding agent 用的進度看板。', '需要你的事放最前面，每個專案一眼看完。'],
     features: [
       ['●', 'waiting', '一次一個問題，每個答案一個按鈕'],
-      ['▸', 'accent', 'Claude、Codex、Gemini CLI 等，都在同一個面板'],
-      ['⚑', 'soon', '每件事都有背景和截止日'],
+      ['▸', 'accent', '各家 agent 用自己的 hook 回報，不用記得'],
+      ['⚑', 'soon', '每件事都有背景、截止日和交接'],
       ['✓', 'done', '自己收拾，不會越積越多'],
     ],
     agents: 'English  ·  繁體中文  ·  简体中文',
     captions: ['1  最需要你的那一件事', '2  所有等你的事，依種類列好', '3  在面板上回答，Claude 接著做'],
     flow: {
       sources: [
-        ['Claude Code 對話', 'Task 清單由外掛自動同步'],
-        ['其他 agent', 'Codex、Gemini CLI、OpenCode、Cursor'],
+        ['Claude Code 對話', '每回合自動整理，有沒有 Task 清單都行'],
+        ['其他 agent', 'Codex、Gemini、Cursor、Grok 等'],
         ['你', '手記的事、用 + 快速新增'],
       ],
-      into: ['自動', 'AGENTS.md', '打字或編輯'],
+      into: ['自動', '各自的 hook', '打字或編輯'],
       file: '一個 Markdown 檔，每個對話一塊',
       outputs: [
         ['面板', '在 Claude Code 裡，需要你的放最前'],
@@ -115,19 +115,19 @@ const WORDS: Record<Lang, {
     tagline: ['给 coding agent 用的进度看板。', '需要你的事放最前面，每个项目一眼看完。'],
     features: [
       ['●', 'waiting', '一次一个问题，每个答案一个按钮'],
-      ['▸', 'accent', 'Claude、Codex、Gemini CLI 等，都在同一个面板'],
-      ['⚑', 'soon', '每件事都有背景和截止日期'],
+      ['▸', 'accent', '各家 agent 用自己的 hook 汇报，不用记得'],
+      ['⚑', 'soon', '每件事都有背景、截止日期和交接'],
       ['✓', 'done', '自己清理，不会越积越多'],
     ],
     agents: 'English  ·  繁體中文  ·  简体中文',
     captions: ['1  最需要你的那一件事', '2  所有等你的事，按种类列好', '3  在面板上回答，Claude 接着做'],
     flow: {
       sources: [
-        ['Claude Code 对话', 'Task 清单由插件自动同步'],
-        ['其他 agent', 'Codex、Gemini CLI、OpenCode、Cursor'],
+        ['Claude Code 对话', '每回合自动整理，有没有 Task 清单都行'],
+        ['其他 agent', 'Codex、Gemini、Cursor、Grok 等'],
         ['你', '手记的事、用 + 快速添加'],
       ],
-      into: ['自动', 'AGENTS.md', '打字或编辑'],
+      into: ['自动', '各自的 hook', '打字或编辑'],
       file: '一个 Markdown 文件，每个对话一块',
       outputs: [
         ['面板', '在 Claude Code 里，需要你的放最前'],
@@ -225,21 +225,28 @@ const demo = (lang: Lang, mode: Mode): string => {
     { opened: [], isAnswered: true },
   ]
   const grids = frames.map(frame => paneGrid(lang, mode, frame))
-  const rows = Math.max(...grids.map(one => one.grid.length))
+  // Every frame as tall as the shortest, so none leaves an empty window below it; a taller
+  // frame fades out at the bottom edge instead of stopping mid-line.
+  const rows = Math.min(...grids.map(one => one.grid.length))
   const top = 58
   const width = windowWidth + 48
   const height = top + BAR + PAD + rows * LINE + PAD + 24
   const press = [keyBox(grids[0]!.grid, 'focus::more'), keyBox(grids[1]!.grid, `mine::4::${grids[1]!.firstOption}`), null]
   const accent = TERMINAL[mode].palette.accent
+  const ground = TERMINAL[mode].ground
+  const fadeTop = top + BAR + PAD + (rows - 2) * LINE
   const groups = grids.map((one, i) => {
-    const body = gridSvg(one.grid, PAD, BAR + PAD, one.theme)
+    const body = gridSvg(one.grid.slice(0, rows), PAD, BAR + PAD, one.theme)
+    const fade =
+      one.grid.length > rows ? `<rect x="25" y="${fadeTop}" width="${windowWidth - 2}" height="${2 * LINE + PAD - 1}" fill="url(#fade)"/>` : ''
     const box = press[i]
     const ring = box
       ? `<rect class="p${i + 1}" x="${24 + PAD + box.col * CELL - 5}" y="${top + BAR + PAD + box.row * LINE - 3}" width="${box.span * CELL + 10}" height="${LINE + 6}" rx="6" fill="none" stroke="${accent}" stroke-width="2"/>`
       : ''
     return `<g class="f f${i + 1}">
 <text x="24" y="36" font-family="${SANS}" font-size="17" font-weight="600" fill="${page.ink}">${esc(w.captions[i] ?? '')}</text>
-${terminal(mode, w.window, body, one.grid.length, 24, top)}
+${terminal(mode, w.window, body, rows, 24, top)}
+${fade}
 ${ring}
 </g>`
   })
@@ -256,6 +263,7 @@ ${ring}
 @keyframes p2 { 0%, 49% { opacity: 0 } 51%, 64% { opacity: 1 } 66%, 100% { opacity: 0 } }
 @media (prefers-reduced-motion: reduce) { .f, .p1, .p2 { animation: none; } .f1 { opacity: 1; } }
 </style>
+<defs><linearGradient id="fade" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="${ground}" stop-opacity="0"/><stop offset="0.7" stop-color="${ground}" stop-opacity="1"/></linearGradient></defs>
 <rect width="${width}" height="${height}" rx="16" fill="${page.ground}"/>
 ${groups.join('\n')}
 </svg>
