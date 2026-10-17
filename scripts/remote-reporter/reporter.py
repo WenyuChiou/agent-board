@@ -13,8 +13,9 @@ Usage:
     python3 reporter.py show <chat-id>
         -> print the current fragment
     python3 reporter.py retire <chat-id> ["reason"]
-        -> close the current session as ended and mint a fresh session id
-           (for a lost registry or a clean break; avoids orphan blocks)
+        -> close the chat's current session as ended, keeping its title and
+           steps, and mint a fresh session id, for a clean break; the session
+           must have reported at least once
 
 Environment:
     BOARD_AGENT_NAME        the agent= name, lower case (default: remote)
@@ -50,7 +51,7 @@ AGENT_RE = re.compile(r"^[a-z0-9_-]+$")
 UNSAFE_RE = re.compile(r"[\x00-\x1f\x7f\u0085  ]|<!--|-->")
 
 sys.path.insert(0, HERE)
-from validate import validate_block  # noqa: E402
+from validate import START_RE, fragment_parts, parse_attrs, read_text, validate_block  # noqa: E402
 
 
 def remote_dir():
@@ -189,18 +190,56 @@ def cmd_show(chat_id):
 def cmd_retire(chat_id, reason="session retired"):
     """Close the current session honestly and mint a fresh id.
 
-    For a lost registry or a clean break: the old block is closed with
-    state=ended instead of being orphaned, and the next update starts
-    under a new session id.
+    For a clean break: the session's last fragment is written again as
+    state=ended, with its project, title, notes and steps kept and the reason
+    added as a note, so the block is closed instead of orphaned. A session
+    already done or ended is left as it is. The next update starts under a new
+    session id.
     """
-    sess = session_for(chat_id)
-    lines = build_block(sess, "ended", "(retired session)",
-                        [f"> {check_text('reason', reason)}"], [])
-    errs = [e for e in validate_block(lines) if not e.startswith("warning:")]
-    if errs:
-        raise SystemExit(f"retire block invalid: {errs}")
-    write_atomic(fragment_path(sess), "\n".join(lines) + "\n")
     reg = load_registry()
+    # A chat missing from the registry has no block on the board to close: minting one here
+    # would add an ended block for work that was never reported, and leave the real orphan.
+    if chat_id not in reg:
+        raise SystemExit(f"chat {chat_id!r} is not in the registry {registry_path()}: no session to retire")
+    sess = reg[chat_id]
+    if not re.fullmatch(r"[0-9a-f]{8}", sess):
+        raise SystemExit("registry session id malformed")
+    frag = fragment_path(sess)
+    # `init` and `show` put a chat in the registry before it reports anything, so being there
+    # does not mean a block exists to close.
+    if not os.path.exists(frag):
+        raise SystemExit(f"session {sess} has not reported yet ({frag} is missing): nothing to retire")
+    project, old = fragment_parts(read_text(frag))
+    # A fragment edited by hand or cut short could lose its last step when rewritten.
+    start = START_RE.match(old[0]) if old else None
+    if start is None or [e for e in validate_block(old) if not e.startswith("warning:")]:
+        raise SystemExit(f"{frag} is not a valid block: retire it by hand")
+    attrs = parse_attrs(start.group(1))
+    try:
+        note = f"> {check_text('reason', reason)}"
+    except ValueError as e:
+        raise SystemExit(str(e))
+    # A finished session keeps its own state: rewriting it as ended would move finished work
+    # to the left-behind group.
+    if attrs.get("state") not in ("done", "ended"):
+        body = old[2:-1]
+        notes = 0
+        while notes < len(body) and body[notes].startswith(">"):
+            notes += 1
+        lines = [
+            f"<!-- auto session={sess} agent={attrs.get('agent') or agent_name()} state=ended updated={now_iso()} -->",
+            old[1],
+            *body[:notes],
+            note,
+            *body[notes:],
+            f"<!-- /auto session={sess} -->",
+        ]
+        errs = [e for e in validate_block(lines) if not e.startswith("warning:")]
+        if errs:
+            raise SystemExit(f"retire block invalid: {errs}")
+        # The project line stays, so merge.py can still place the block if it is not on the board.
+        head = [f"## {project}", ""] if project else []
+        write_atomic(frag, "\n".join(head + lines) + "\n")
     reg[chat_id] = secrets.token_hex(4)
     write_atomic(registry_path(), json.dumps(reg, indent=2, sort_keys=True) + "\n")
     print(f"retired session {sess}; new session {reg[chat_id]} for {chat_id!r}")
