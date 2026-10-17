@@ -50,6 +50,8 @@ export type PaneActions = {
   // An answer to one of this session's own questions, sent to Claude.
   answer: (item: WaitingItem, text: string) => void
   copyCommand: (item: WaitingItem, surface: RenderSurface) => void
+  // Another Claude Code session's id, so the person can find the session that asked.
+  copySessionId: (item: WaitingItem, surface: RenderSurface) => void
   // A question for the side model, or a line starting with + to add a task.
   ask: (question: string) => void
   clearAnswer: () => void
@@ -176,6 +178,7 @@ export const drawPane = (ui: PaneUi, model: PaneModel, actions: PaneActions): Re
     if (item.where === 'other') {
       const run = item.kind === 'do' ? item.command : null
       const open = item.kind === 'review' ? item.link : null
+      const sessionId = item.sessionId
       return (
         <Box flexDirection="column">
           {run !== null && <Text color={palette.accent} wrap="wrap">{`$ ${run}`}</Text>}
@@ -187,7 +190,14 @@ export const drawPane = (ui: PaneUi, model: PaneModel, actions: PaneActions): Re
             </Box>
           )}
           {open !== null && Link !== null && <Link href={open} label={s.openLink} />}
-          {muted(s.replyElsewhere(item.project, item.agent))}
+          {muted(s.replyElsewhere(item.task, item.session, item.agent))}
+          {sessionId !== null && (
+            <Box marginTop={1}>
+              <Button key={`${item.key}::id`} onPress={press => actions.copySessionId(item, press.surface)}>
+                {s.copySessionId}
+              </Button>
+            </Box>
+          )}
         </Box>
       )
     }

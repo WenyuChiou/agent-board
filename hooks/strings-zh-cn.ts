@@ -198,7 +198,10 @@ export const ZH_CN: Strings = {
   paneTitle: '进度',
   legendWords: ['完成', '正在做', '还没做', '等你', '在跑', '卡住', '取消'],
   now: ' ← 现在',
-  replyElsewhere: (project: string, agent: string): string => `到 ${project} 的对话${agent === '' ? '' : `（${agent}）`}回复，这里回不了。`,
+  replyElsewhere: (task: string, session: string, agent: string): string => {
+    const who = [session, agent].filter(part => part !== '').join('，')
+    return `到“${task}”那个对话${who === '' ? '' : `（${who}）`}回复，这里回不了。`
+  },
   arrivedDone: '到了，完成',
   done: '完成',
   reply: '回复',
@@ -222,6 +225,7 @@ export const ZH_CN: Strings = {
   heldElsewhere: '另一个对话正在做。',
   takeOver: '接手做完',
   copyResume: '复制续接指令',
+  copySessionId: '复制对话 ID',
   tickStep: '完成这步',
   handOver: '交给 Claude',
   nothingForYou: '✓ 现在没有要你做的事',
@@ -270,6 +274,8 @@ export const ZH_CN: Strings = {
   answered: (text: string): string => `已回复 Claude：${text}`,
   commandOf: (step: string): string => `“${step}”要跑的指令`,
   resumeOf: (title: string): string => `回到“${title}”的指令，贴到终端执行`,
+  sessionIdOf: (title: string, canResume: boolean): string =>
+    `“${title}”那个对话的 ID：拿去对照对话列表${canResume ? '，或用 claude --resume 接回' : ''}`,
   fileUnreadable: '读不到进度文件',
   dashStamp: (time: string): string => `更新于 ${time}`,
   windowOpened: (path: string): string => `已在浏览器打开：${path}`,
@@ -286,6 +292,7 @@ export const ZH_CN: Strings = {
   boardKeyTick: 'x 完成这步',
   boardKeyArchive: 'a 归档',
   boardKeyCopyCommand: 'c 复制命令',
+  boardKeyCopyId: 'c 复制对话 ID',
   boardKeyCopyResume: 'c 复制续接命令',
   boardKeyConfirm: 'y／n 复制回答',
   boardKeyOptions: (n: number): string => `1–${n} 复制答案`,
@@ -299,7 +306,12 @@ export const ZH_CN: Strings = {
   // in English in every language: it is the one tested live, and its markers are literal.
   serveAt: (url: string): string => `可以点的看板（勾完成、归档、回答）：${url}`,
   serveIdle: '30 分钟没人用就会自己关掉。',
+  serveLanIdle: '在你的网络上，10 分钟没人用就会自己关掉。',
   serveFailed: (why: string): string => `打不开看板网页：${why}`,
+  serveLanAt: (url: string): string => `同一网络上的手机，打开 ${url} 或扫这个二维码：`,
+  serveLanNone: '找不到这台电脑在局域网上的地址，手机打不开这个看板。',
+  serveLanNotOurs: (address: string): string => `${address} 不是这台电脑在局域网上的私有地址，看板没办法开在那里。`,
+  serveLanFailed: '没法把看板开到局域网上。',
   serveClose: '关闭看板',
   serveClosed: '看板已关闭，这个标签页可以关了。要再打开，在 agent 里说“看进度”。',
   serveCloseBusy: '还有一句正在发给 agent，等它回完再关闭看板。',
@@ -320,6 +332,7 @@ export const ZH_CN: Strings = {
   serveSendBusy: (agent: string): string => `正在发另一句给这个 ${agent} 对话，等它回完再发。`,
   serveSendOpen: (agent: string): string => `这个 ${agent} 对话还开着，请到它的窗口回复（两边同时写同一个对话会乱掉）；答案可以先复制。`,
   serveSendNone: (agent: string): string => `${agent} 收不到这里发的话：复制后贴到它的对话。`,
+  serveLanSend: (agent: string): string => `回复 ${agent} 会在电脑上运行程序，所以要从电脑上的看板发送；这里可以先复制答案。`,
   serveSendTimeout: '等了 10 分钟还没回，先停了。',
   serveSendMissing: (agent: string): string => `这台电脑找不到 ${agent} 命令。`,
   serveSendExit: (code: number): string => `它结束时报告错误（${code}）。`,

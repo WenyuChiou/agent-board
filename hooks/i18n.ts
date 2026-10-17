@@ -236,7 +236,10 @@ export const ZH_TW = {
   paneTitle: '進度',
   legendWords: ['完成', '正在做', '還沒做', '等你', '在跑', '卡住', '取消'],
   now: ' ← 現在',
-  replyElsewhere: (project: string, agent: string): string => `到 ${project} 的對話${agent === '' ? '' : `（${agent}）`}回覆，這裡回不了。`,
+  replyElsewhere: (task: string, session: string, agent: string): string => {
+    const who = [session, agent].filter(part => part !== '').join('，')
+    return `到「${task}」那個對話${who === '' ? '' : `（${who}）`}回覆，這裡回不了。`
+  },
   arrivedDone: '到了，完成',
   done: '完成',
   reply: '回覆',
@@ -260,6 +263,7 @@ export const ZH_TW = {
   heldElsewhere: '另一個對話正在做。',
   takeOver: '接手做完',
   copyResume: '複製續接指令',
+  copySessionId: '複製對話 ID',
   tickStep: '完成這步',
   handOver: '交給 Claude',
   nothingForYou: '✓ 現在沒有要你做的事',
@@ -308,6 +312,8 @@ export const ZH_TW = {
   answered: (text: string): string => `已回覆 Claude：${text}`,
   commandOf: (step: string): string => `「${step}」要跑的指令`,
   resumeOf: (title: string): string => `回到「${title}」的指令，貼到終端機執行`,
+  sessionIdOf: (title: string, canResume: boolean): string =>
+    `「${title}」那個對話的 ID：拿去對照對話列表${canResume ? '，或用 claude --resume 接回' : ''}`,
   fileUnreadable: '讀不到進度檔',
   dashStamp: (time: string): string => `更新於 ${time}`,
   windowOpened: (path: string): string => `已在瀏覽器打開：${path}`,
@@ -324,6 +330,7 @@ export const ZH_TW = {
   boardKeyTick: 'x 完成這步',
   boardKeyArchive: 'a 封存',
   boardKeyCopyCommand: 'c 複製指令',
+  boardKeyCopyId: 'c 複製對話 ID',
   boardKeyCopyResume: 'c 複製續接指令',
   boardKeyConfirm: 'y／n 複製回答',
   boardKeyOptions: (n: number): string => `1–${n} 複製答案`,
@@ -337,7 +344,12 @@ export const ZH_TW = {
   // in English in every language: it is the one tested live, and its markers are literal.
   serveAt: (url: string): string => `可以點的看板（勾完成、封存、回答）：${url}`,
   serveIdle: '30 分鐘沒人用就會自己關掉。',
+  serveLanIdle: '在你的網路上，10 分鐘沒人用就會自己關掉。',
   serveFailed: (why: string): string => `開不了看板網頁：${why}`,
+  serveLanAt: (url: string): string => `同一個網路上的手機，打開 ${url} 或掃這個 QR 碼：`,
+  serveLanNone: '找不到這台電腦在區域網路上的位址，手機開不了這個看板。',
+  serveLanNotOurs: (address: string): string => `${address} 不是這台電腦在區域網路上的私人位址，看板沒辦法開在那裡。`,
+  serveLanFailed: '沒辦法把看板開到區域網路上。',
   serveClose: '關閉看板',
   serveClosed: '看板已關閉，這個分頁可以關了。要再開，在 agent 裡說「看進度」。',
   serveCloseBusy: '還有一句正在傳給 agent，等它回完再關閉看板。',
@@ -358,6 +370,7 @@ export const ZH_TW = {
   serveSendBusy: (agent: string): string => `正在傳另一句給這個 ${agent} 對話，等它回完再傳。`,
   serveSendOpen: (agent: string): string => `這個 ${agent} 對話還開著，請到它的視窗回覆（兩邊同時寫同一個對話會亂掉）；答案可以先複製。`,
   serveSendNone: (agent: string): string => `${agent} 收不到這裡傳的話：複製後貼到它的對話。`,
+  serveLanSend: (agent: string): string => `回覆 ${agent} 會在電腦上執行程式，所以要從電腦上的看板傳；這裡可以先複製答案。`,
   serveSendTimeout: '等了 10 分鐘還沒回，先停了。',
   serveSendMissing: (agent: string): string => `這台電腦找不到 ${agent} 指令。`,
   serveSendExit: (code: number): string => `它結束時回報錯誤（${code}）。`,

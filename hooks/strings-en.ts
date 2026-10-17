@@ -199,8 +199,10 @@ export const EN: Strings = {
   paneTitle: 'Progress',
   legendWords: ['Done', 'Doing', 'To do', 'Waiting on you', 'Running', 'Stuck', 'Canceled'],
   now: ' ← now',
-  replyElsewhere: (project: string, agent: string): string =>
-    `Reply in the ${project} session${agent === '' ? '' : ` (${agent})`}. Can't reply from here.`,
+  replyElsewhere: (task: string, session: string, agent: string): string => {
+    const who = [session, agent].filter(part => part !== '').join(', ')
+    return `Reply in the "${task}" session${who === '' ? '' : ` (${who})`}. Can't reply from here.`
+  },
   arrivedDone: 'It arrived, done',
   done: 'Done',
   reply: 'Reply',
@@ -224,6 +226,7 @@ export const EN: Strings = {
   heldElsewhere: 'Another session is working on it.',
   takeOver: 'Take over and finish',
   copyResume: 'Copy resume command',
+  copySessionId: 'Copy session ID',
   tickStep: 'Mark step done',
   handOver: 'Hand to Claude',
   nothingForYou: '✓ Nothing needs you right now',
@@ -272,6 +275,8 @@ export const EN: Strings = {
   answered: (text: string): string => `Replied to Claude: ${text}`,
   commandOf: (step: string): string => `Command to run for "${step}"`,
   resumeOf: (title: string): string => `Command to resume "${title}". Paste it into the terminal and run it.`,
+  sessionIdOf: (title: string, canResume: boolean): string =>
+    `ID of the "${title}" session. Find it in your session list${canResume ? ', or reopen it with claude --resume' : ''}.`,
   fileUnreadable: "Can't read the progress file",
   dashStamp: (time: string): string => `updated ${time}`,
   windowOpened: (path: string): string => `Opened in your browser: ${path}`,
@@ -288,6 +293,7 @@ export const EN: Strings = {
   boardKeyTick: 'x done',
   boardKeyArchive: 'a archive',
   boardKeyCopyCommand: 'c copy command',
+  boardKeyCopyId: 'c copy session ID',
   boardKeyCopyResume: 'c copy resume command',
   boardKeyConfirm: 'y/n copy answer',
   boardKeyOptions: (n: number): string => `1–${n} copy answer`,
@@ -301,7 +307,12 @@ export const EN: Strings = {
   // in English in every language: it is the one tested live, and its markers are literal.
   serveAt: (url: string): string => `The board you can click (tick, archive, answer): ${url}`,
   serveIdle: 'It closes itself after 30 minutes unused.',
+  serveLanIdle: 'On your network it closes itself after 10 minutes unused.',
   serveFailed: (why: string): string => `Couldn't open the board page: ${why}`,
+  serveLanAt: (url: string): string => `On a phone on the same network, open ${url} or scan this code:`,
+  serveLanNone: "This computer has no address on a local network, so a phone can't open the board.",
+  serveLanNotOurs: (address: string): string => `${address} is not a private network address of this computer, so the board can't open there.`,
+  serveLanFailed: "Couldn't open the board to the local network.",
   serveClose: 'Close the board',
   serveClosed: 'The board is closed; you can close this tab. To open it again, ask an agent to show the progress.',
   serveCloseBusy: 'A message is still on its way to an agent; close the board once it replies.',
@@ -322,6 +333,7 @@ export const EN: Strings = {
   serveSendBusy: (agent: string): string => `Another message is on its way to this ${agent} session; send again once it replies.`,
   serveSendOpen: (agent: string): string => `This ${agent} session is still open: answer in its own window (two writers on one session would mix up). You can copy the answer first.`,
   serveSendNone: (agent: string): string => `${agent} can't take a message from here: copy it and paste it into its chat.`,
+  serveLanSend: (agent: string): string => `A reply to ${agent} runs a program on the computer, so it is sent from the computer's own page. You can copy the answer here.`,
   serveSendTimeout: 'No reply after 10 minutes; stopped waiting.',
   serveSendMissing: (agent: string): string => `No ${agent} command on this computer.`,
   serveSendExit: (code: number): string => `It ended with an error (${code}).`,

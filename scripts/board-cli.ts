@@ -7,9 +7,10 @@
 // progress file and language the Claude Code session uses set on its first line. `--keys
 // "down x"` plays keys without a terminal and prints the board after them, for tests and checks.
 import { spawn, spawnSync } from 'node:child_process'
-import { closeSync, openSync, readdirSync, readFileSync, readSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
-import { homedir } from 'node:os'
-import { basename, dirname, join } from 'node:path'
+import { closeSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
+import { createHash } from 'node:crypto'
+import { homedir, tmpdir } from 'node:os'
+import { basename, dirname, join, resolve } from 'node:path'
 import { mergeBlock, takeArchivable, takeManualDone, takeTask, setManualStep } from '../hooks/blocks'
 import type { PasteProblem } from '../hooks/blocks'
 import { startServer } from './board-serve'
@@ -19,6 +20,7 @@ import { LOG_TAIL } from '../hooks/inbox'
 import { dashboardHtml } from '../hooks/dashboard'
 import { appendJournal, archivePath, countDay, journalLine, journalPath } from '../hooks/journal'
 import { parseProgress } from '../hooks/parse'
+import { qrModules, qrText } from '../hooks/qr'
 import { langOf, STRINGS } from '../hooks/strings'
 import { buildView } from '../hooks/view'
 
@@ -175,8 +177,6 @@ const openHtml = (done: (note: string) => void): void => {
   openInBrowser(html, isOpen => done(isOpen ? s.windowOpened(html) : s.windowFailed(html)))
 }
 
-const DAY = 24 * 60 * 60 * 1000
-
 // Into the archive first, then out of the file, as the pane does: a crash between the two
 // leaves the work in both, never in neither. An entry already archived by an earlier try
 // (another session wrote meanwhile) is not archived twice. How many entries went, or null
@@ -234,8 +234,8 @@ const tidy = (): string => {
   const now = Date.now()
   const count = archiveOut(text => {
     const blocks = takeArchivable(text, now, undefined, s, true)
-    // Asked for now, a finished hand-kept task counts as seen done a day ago.
-    const manual = takeManualDone(blocks.text, now, () => now - DAY, s)
+    // This script keeps no record of when a task was seen done: asked for now, it is today's.
+    const manual = takeManualDone(blocks.text, now, () => undefined, s, true)
     const entries = [...blocks.entries, ...manual.entries]
     return entries.length === 0 ? null : { text: manual.text, entries }
   }, now)
@@ -288,10 +288,42 @@ const paste = (text: string): { isAdded: boolean; note: string } => {
   return { isAdded: true, note: s.servePasted(found.title) }
 }
 
-// Where a running page leaves its address, beside progress.md, so the next `--serve` opens
-// that page instead of a second one. `built` is when this script was written: a page started
-// by an older copy (before an update) is closed and started again.
-const serveFile = `${path.replace(/\.md$/i, '')}-serve.json`
+// A folder only this account can use: on a shared one, another account could take the file's
+// name first and keep every page from starting.
+const isOwnFolder = (dir: string): boolean => {
+  try {
+    const found = lstatSync(dir)
+    return found.isDirectory() && (process.getuid === undefined || (found.uid === process.getuid() && (found.mode & 0o077) === 0))
+  } catch {
+    return false
+  }
+}
+
+// The folder for running programs when it is this account's own, else ~/.cache/agent-board
+// (the temp folder on Windows, which is the account's own there).
+const runFolder = (): string => {
+  const runtime = process.env.XDG_RUNTIME_DIR
+  if (runtime && isOwnFolder(runtime)) return runtime
+  if (process.platform === 'win32') return tmpdir()
+  const own = join(homedir(), '.cache', 'agent-board')
+  try {
+    mkdirSync(own, { recursive: true, mode: 0o700 })
+  } catch {}
+  return own
+}
+
+// Where a running page leaves its address, so the next `--serve` opens that page instead of a
+// second one. Not beside progress.md: the address holds the page's token, and that folder is
+// often a git repository that syncs itself. One file per progress.md. `built` is when this
+// script was written: a page started by an older copy (before an update) is closed and
+// started again.
+// Worked out only when serving, so a plain print makes no folder.
+let served: string | undefined
+// The same progress.md named two ways (C:/x and C:\x) is one board, with one page.
+const board = (file: string): string => resolve(file)
+const serveFile = (): string => (served ??= join(runFolder(), `agent-board-${createHash('sha256').update(board(path)).digest('hex').slice(0, 16)}.json`))
+// Where 0.19.0 left it, beside progress.md.
+const oldServeFile = `${path.replace(/\.md$/i, '')}-serve.json`
 const script = process.argv[1] ?? ''
 const built = (() => {
   try {
@@ -303,10 +335,15 @@ const built = (() => {
 
 type Running = { pid: number; port: number; url: string; path: string; built: string }
 
-const readRunning = (): Running | null => {
+const readRunning = (file = serveFile()): Running | null => {
   try {
-    const found = JSON.parse(read(serveFile)) as Partial<Running>
-    return typeof found.pid === 'number' && typeof found.port === 'number' && typeof found.url === 'string'
+    // Only a file of this account's own, never a link to one somewhere else.
+    const own = lstatSync(file)
+    if (own.isSymbolicLink() || (process.getuid !== undefined && own.uid !== process.getuid())) return null
+    const found = JSON.parse(read(file)) as Partial<Running>
+    // Only an address of the shape this server writes: anything else would stop `--serve` when
+    // it reads the token out of it.
+    return typeof found.pid === 'number' && typeof found.port === 'number' && typeof found.url === 'string' && /^http:\/\/127\.0\.0\.1:\d+\/\?t=[\w-]+$/.test(found.url)
       ? { pid: found.pid, port: found.port, url: found.url, path: String(found.path ?? ''), built: String(found.built ?? '') }
       : null
   } catch {
@@ -316,10 +353,26 @@ const readRunning = (): Running | null => {
 
 const tokenOf = (url: string): string => new URL(url).searchParams.get('t') ?? ''
 
-// The running page's own answer, or null when nothing answers at its address.
-const ping = async (running: Running): Promise<Record<string, unknown> | null> => {
+const isRunning = (pid: number): boolean => {
   try {
-    const res = await fetch(`http://127.0.0.1:${running.port}/api/ping`, { headers: { 'x-board-token': tokenOf(running.url) }, signal: AbortSignal.timeout(1500) })
+    process.kill(pid, 0)
+    return true
+  } catch {
+    // Gone, or running as another account, whose program took the number since.
+    return false
+  }
+}
+
+const unlinkIf = (file: string, isIt: () => boolean): void => {
+  try {
+    if (isIt()) unlinkSync(file)
+  } catch {}
+}
+
+// The running page's own answer, or null when nothing answers at its address.
+const ping = async (running: Running, waitMs = 1500): Promise<Record<string, unknown> | null> => {
+  try {
+    const res = await fetch(`http://127.0.0.1:${running.port}/api/ping`, { headers: { 'x-board-token': tokenOf(running.url) }, signal: AbortSignal.timeout(waitMs) })
     return res.ok ? ((await res.json()) as Record<string, unknown>) : null
   } catch {
     return null
@@ -339,9 +392,10 @@ const serveChild = (): void => {
     idleMs: 30 * 60 * 1000,
     onReady: (url, port) => {
       // Without its address file no later `--serve` finds this page, and each would start one
-      // more; so it does not start at all.
+      // more; so it does not start at all. Nor when the file is there already: another
+      // `--serve` started a page at the same moment and wrote first, and that one is the page.
       try {
-        writeFileSync(serveFile, JSON.stringify({ pid: process.pid, port, url, path, built }), { mode: 0o600 })
+        writeFileSync(serveFile(), JSON.stringify({ pid: process.pid, port, url, path, built }), { mode: 0o600, flag: 'wx' })
       } catch {
         return false
       }
@@ -352,14 +406,58 @@ const serveChild = (): void => {
     },
     onStop: () => {
       // The file goes only while it is still this server's: a newer one may have taken it over.
-      if (readRunning()?.pid === process.pid) {
-        try {
-          unlinkSync(serveFile)
-        } catch {}
-      }
+      unlinkIf(serveFile(), () => readRunning()?.pid === process.pid)
       process.exit(0)
     },
   })
+}
+
+// The page at that address is asked to close (it refuses while a reply is on its way, and then
+// stops by itself once idle), and its file goes while it still names that page: another
+// `--serve` may have started a new one since.
+const letGo = async (running: Running, file: string): Promise<void> => {
+  await fetch(`http://127.0.0.1:${running.port}/api/close`, { method: 'POST', headers: { 'x-board-token': tokenOf(running.url), 'content-type': 'application/json' }, body: '{}', signal: AbortSignal.timeout(1500) }).catch(() => undefined)
+  unlinkIf(file, () => readRunning(file)?.pid === running.pid)
+}
+
+// The running page of this copy for this file, or null. Any other page found in the file (one
+// that no longer answers, or an older copy's) is let go, so a new one can write the file.
+const runningPage = async (): Promise<Running | null> => {
+  const running = readRunning()
+  if (running === null) {
+    // A file that has not read for ten seconds (either way, should the clock have been set
+    // back) was cut short by a crash; it would keep every new page from starting.
+    unlinkIf(serveFile(), () => Math.abs(Date.now() - statSync(serveFile()).mtimeMs) > 10_000)
+    return null
+  }
+  // A page that is still running but slow to answer (a busy disk) gets longer before it counts
+  // as gone and a second one starts.
+  const answer = (await ping(running)) ?? (isRunning(running.pid) ? await ping(running, 5000) : null)
+  if (answer !== null && typeof answer.path === 'string' && board(answer.path) === board(path) && answer.built === built) return running
+  await letGo(running, serveFile())
+  return null
+}
+
+// `--lan`: the running page opens to the local network too, and its address there is printed
+// with a QR code a phone's camera opens. Never opened here: it is for the phone. `--lan
+// <address>` picks which of the computer's addresses.
+const showLan = async (url: string): Promise<void> => {
+  const wanted = flag('--lan')
+  const answer = await fetch(`http://127.0.0.1:${new URL(url).port}/api/lan`, {
+    method: 'POST',
+    headers: { 'x-board-token': tokenOf(url), 'content-type': 'application/json' },
+    body: JSON.stringify({ address: wanted !== undefined && /^[\d.]+$/.test(wanted) ? wanted : '' }),
+    signal: AbortSignal.timeout(5000),
+  })
+    .then(res => res.json() as Promise<{ url?: unknown; note?: unknown }>)
+    .catch(() => ({ note: s.serveLanFailed }) as { url?: unknown; note?: unknown })
+  const lanUrl = typeof answer.url === 'string' && /^http:\/\/[\d.]+:\d+\/\?t=[\w-]+$/.test(answer.url) ? answer.url : null
+  if (lanUrl === null) {
+    process.stdout.write(`\n${typeof answer.note === 'string' && answer.note !== '' ? answer.note : s.serveLanFailed}\n`)
+    return
+  }
+  const modules = qrModules(lanUrl)
+  process.stdout.write(`\n${s.serveLanAt(lanUrl)}\n${modules === null ? '' : `${qrText(modules, options().isColor)}\n`}`)
 }
 
 // Prints the board, then the address of its page, started in the background if no page of this
@@ -369,18 +467,16 @@ const serveBoard = async (): Promise<void> => {
   process.stdout.write(boardText(view(), pending(), s, options()))
   const show = async (url: string): Promise<void> => {
     process.stdout.write(`\n${s.serveAt(url)}\n`)
-    // The address can come from progress-serve.json and goes to a shell on Windows: only the
-    // shape this server writes is opened.
+    // The address comes from a file and goes to a shell on Windows: only the shape this server
+    // writes is opened.
     if (!args.includes('--no-open') && /^http:\/\/127\.0\.0\.1:\d+\/\?t=[\w-]+$/.test(url)) await new Promise<void>(done => openInBrowser(url, () => done()))
+    if (args.includes('--lan')) await showLan(url)
   }
-  const running = readRunning()
-  const answer = running === null ? null : await ping(running)
-  if (running !== null && answer !== null && answer.path === path && answer.built === built) return show(running.url)
-  // A page from an older copy of this script is closed (it refuses while a reply is on its way,
-  // and then stops by itself once idle).
-  if (running !== null && answer !== null) {
-    await fetch(`http://127.0.0.1:${running.port}/api/close`, { method: 'POST', headers: { 'x-board-token': tokenOf(running.url), 'content-type': 'application/json' }, body: '{}', signal: AbortSignal.timeout(1500) }).catch(() => undefined)
-  }
+  // 0.19.0 kept the address, token and all, beside progress.md.
+  const old = readRunning(oldServeFile)
+  if (old !== null) await letGo(old, oldServeFile)
+  const found = await runningPage()
+  if (found !== null) return show(found.url)
   const rest = ['--lang', '--port'].flatMap(name => {
     const value = flag(name)
     return value === undefined ? [] : [name, value]
@@ -407,6 +503,10 @@ const serveBoard = async (): Promise<void> => {
   child.stdout?.destroy()
   child.unref()
   if (url === null) {
+    // Another `--serve` started at the same moment may have written its address first: this
+    // page stopped then, and that one is the page to show.
+    const other = await runningPage()
+    if (other !== null) return show(other.url)
     process.stdout.write(`\n${s.serveFailed(s.serveOffline)}\n`)
     return
   }
