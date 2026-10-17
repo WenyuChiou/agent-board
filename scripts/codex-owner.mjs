@@ -1,4 +1,4 @@
-import { codexRequest } from '../hooks/exchange.ts'
+import { codexRequest } from './exchange-contract.ts'
 import { exchange } from './exchange.mjs'
 
 // The application supplies an existing authenticated owner transport and its verifier.
@@ -31,9 +31,12 @@ const bindCodexOwner = async (transport, thread, verifyOwner) => {
   }
   if (!await loaded()) throw new Error('THREAD_NOT_LOADED')
   return {
-    deliver: async command => {
+    // `sending` is called just before the steer request goes out. Up to then nothing
+    // has reached Codex, so a failure is a clean refusal, not an uncertain delivery.
+    deliver: async (command, sending) => {
       const planned = codexRequest(command, { agent: 'codex', thread, loaded: true, verified: true, canSteer: true })
       if (!await verifyOwner(transport) || !await loaded()) throw new Error('OWNER_UNAVAILABLE')
+      sending()
       const result = await request(planned.method, planned.params)
       if (result?.turnId !== command.turn) throw new Error('UNCERTAIN_DELIVERY')
       return { status: 'delivered', turnId: result.turnId }
@@ -41,17 +44,31 @@ const bindCodexOwner = async (transport, thread, verifyOwner) => {
   }
 }
 
-// A file receipt reserves the command across reconnects and process restarts. A timeout,
-// lost acknowledgement or receipt-write failure never triggers another attempt.
+// Bind and check the owner before reserving anything: a thread that is not loaded yet,
+// or a verifier that says no, leaves the command queued for a later attempt. After the
+// claim, a failure before the steer request is a terminal `rejected`. Only the request
+// itself, or the receipt write after it, leaves `uncertain`, and that is never retried.
 export const dispatchCodex = async (directory, target, transport, verifyOwner) => {
+  if (target?.agent !== 'codex') return { status: 'not-sent', error: 'TARGET_MISMATCH' }
+  let owner
+  try { owner = await bindCodexOwner(transport, target?.session, verifyOwner) } catch (error) {
+    return { status: 'not-sent', error: error.message }
+  }
   const claimed = await exchange('take', directory, target)
   if (claimed.status !== 'claimed') return claimed
+  const { command } = claimed
+  let isSent = false
   try {
-    const owner = await bindCodexOwner(transport, claimed.command.session, verifyOwner)
-    const delivered = await owner.deliver(claimed.command)
-    const receipt = await exchange('ack', directory, { version: 1, id: claimed.command.id, binding: claimed.command.binding, status: 'delivered' })
+    const delivered = await owner.deliver(command, () => { isSent = true })
+    const receipt = await exchange('ack', directory, { version: 1, id: command.id, binding: command.binding, status: 'delivered' })
     return { ...delivered, receipt }
   } catch (error) {
-    return { status: 'uncertain', error: error.message, receipt: claimed.receipt }
+    if (isSent) return { status: 'uncertain', error: error.message, receipt: claimed.receipt }
+    try {
+      const receipt = await exchange('ack', directory, { version: 1, id: command.id, binding: command.binding, status: 'rejected' })
+      return { status: 'rejected', error: error.message, receipt }
+    } catch (ackError) {
+      return { status: 'uncertain', error: error.message + '; ' + ackError.message, receipt: claimed.receipt }
+    }
   }
 }

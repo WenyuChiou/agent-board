@@ -7,7 +7,7 @@ import { fileURLToPath } from 'node:url'
 import { spawnSync } from 'node:child_process'
 import { exchange } from '../scripts/exchange.mjs'
 import { dispatchCodex } from '../scripts/codex-owner.mjs'
-import { bindingOf, progressBlock, commandOf, codexRequest } from '../hooks/exchange.ts'
+import { bindingOf, progressBlock, commandOf, codexRequest } from '../scripts/exchange-contract.ts'
 import { parseProgress } from '../hooks/parse.ts'
 import { EN } from '../hooks/strings-en.ts'
 import { ZH_TW } from '../hooks/i18n.ts'
@@ -182,17 +182,50 @@ test('a verified owner can steer only its loaded thread and the expected active 
   assert.equal(calls.filter(one => one.method === 'turn/steer').length, 1)
 })
 
-test('unverified owners, unloaded threads, missing methods and idle commands fail closed', async t => {
-  for (const reason of ['unverified', 'methods', 'unloaded', 'idle']) {
+test('unverified owners, unloaded threads and missing methods fail before the command is claimed', async t => {
+  for (const reason of ['unverified', 'methods', 'unloaded']) {
     const { directory, command, target } = await fixture(t, 'codex')
     const { transport, calls } = fakeOwner()
     if (reason === 'methods') transport.methods = []
     if (reason === 'unloaded') transport.request = async () => ({ data: [], nextCursor: null })
-    await exchange('enqueue', directory, { ...command, turn: reason === 'idle' ? '' : command.turn })
+    await exchange('enqueue', directory, command)
     const result = await dispatchCodex(directory, target, transport, async () => reason !== 'unverified')
-    assert.equal(result.status, 'uncertain')
+    assert.equal(result.status, 'not-sent')
+    assert.equal((await exchange('status', directory)).commands[0].status, 'queued')
     assert.equal(calls.filter(one => one.method === 'turn/steer').length, 0)
     assert.throws(() => codexRequest(command, { agent: 'codex', thread: 'wrong', loaded: true, verified: true, canSteer: true }), /TARGET_MISMATCH/)
+  }
+})
+
+test('a thread that loads after the first attempt can still receive the command', async t => {
+  const { directory, command, target } = await fixture(t, 'codex')
+  await exchange('enqueue', directory, command)
+  const { transport, calls } = fakeOwner()
+  const request = transport.request
+  let isLoaded = false
+  transport.request = async (method, params) =>
+    method === 'thread/loaded/list' && !isLoaded ? { data: [], nextCursor: null } : request(method, params)
+  const first = await dispatchCodex(directory, target, transport, async () => true)
+  assert.equal(first.status, 'not-sent')
+  assert.equal(first.error, 'THREAD_NOT_LOADED')
+  isLoaded = true
+  assert.equal((await dispatchCodex(directory, target, transport, async () => true)).status, 'delivered')
+  assert.equal((await exchange('status', directory)).commands[0].status, 'delivered')
+  assert.equal(calls.filter(one => one.method === 'turn/steer').length, 1)
+})
+
+test('a failure after the claim but before the steer request is a terminal rejection', async t => {
+  for (const reason of ['idle', 'owner-lost']) {
+    const { directory, command, target } = await fixture(t, 'codex')
+    const { transport, calls } = fakeOwner()
+    await exchange('enqueue', directory, { ...command, turn: reason === 'idle' ? '' : command.turn })
+    let checks = 0
+    const result = await dispatchCodex(directory, target, transport, async () => reason === 'idle' || ++checks === 1)
+    assert.equal(result.status, 'rejected')
+    assert.equal(result.error, reason === 'idle' ? 'ACTIVE_TURN_REQUIRED' : 'OWNER_UNAVAILABLE')
+    assert.equal((await exchange('status', directory)).commands[0].status, 'rejected')
+    assert.equal((await dispatchCodex(directory, target, transport, async () => true)).status, 'already-claimed')
+    assert.equal(calls.filter(one => one.method === 'turn/steer').length, 0)
   }
 })
 
@@ -209,6 +242,83 @@ test('lost acknowledgements stay uncertain and are never sent a second time', as
   assert.equal((await dispatchCodex(directory, target, transport, async () => true)).status, 'uncertain')
   await dispatchCodex(directory, target, transport, async () => true)
   assert.equal(calls.filter(one => one.method === 'turn/steer').length, 1)
+})
+
+test('report refuses to overwrite a progress.md that holds anything but its own block', async t => {
+  const { directory } = await fixture(t)
+  const report = { project: 'Synthetic', title: 'Own block', state: 'working', steps: [{ status: 'doing', text: 'Check' }] }
+  await exchange('report', directory, report)
+  await exchange('report', directory, { ...report, state: 'done', steps: [{ status: 'done', text: 'Check' }] })
+  const own = await readFile(join(directory, 'progress.md'), 'utf8')
+  const board = [
+    '## Real project\n\n### Hand-kept task\n- [ ] Keep me\n',
+    own + '\n## Another\n\n### Hand-kept\n- [ ] Keep me\n',
+    '<!-- auto session=abcdef12 agent=claude state=working updated=2026-01-31T09:30:00Z -->\n### Other\n- [~] Theirs\n<!-- /auto session=abcdef12 -->\n',
+  ]
+  for (const text of board) {
+    await writeFile(join(directory, 'progress.md'), text)
+    await assert.rejects(exchange('report', directory, report), /NOT_EXCHANGE_FILE/)
+    assert.equal(await readFile(join(directory, 'progress.md'), 'utf8'), text)
+  }
+})
+
+test('a lock left without its file gives LOCK_HELD naming the folder, and status lists it', async t => {
+  const { directory, command } = await fixture(t)
+  const { mkdir } = await import('node:fs/promises')
+  const lock = join(directory, 'commands', command.id + '.json.lock')
+  await mkdir(lock)
+  await assert.rejects(exchange('enqueue', directory, command), error => error.code === 'LOCK_HELD' && error.message.includes(lock))
+  assert.deepEqual((await exchange('status', directory)).locks, [lock])
+})
+
+test('text may hold angle brackets but not comment markers or control characters', async t => {
+  const { binding } = await fixture(t)
+  const report = { project: 'Synthetic', title: 'a < b and c > d', state: 'working', steps: [{ status: 'doing', text: '<tag> stays' }] }
+  const block = progressBlock(report, binding, 0, EN)
+  assert.match(block, /### a < b and c > d/)
+  assert.equal(parseProgress(block)[0].tasks[0].title, 'a < b and c > d')
+  for (const title of ['x <!-- y', 'x --> y', 'tab\there', 'bell\u0007', 'del\u007f']) {
+    assert.throws(() => progressBlock({ ...report, title }, binding, 0, EN), /INVALID_TEXT/)
+  }
+})
+
+test('Windows reserved device names are refused as ids', async t => {
+  const { binding, command } = await fixture(t)
+  for (const id of ['CON', 'prn', 'Aux', 'nul', 'COM1', 'com9', 'LPT1', 'lpt9']) {
+    assert.throws(() => commandOf({ ...command, id }, binding), /INVALID_ID/)
+    assert.throws(() => bindingOf({ ...binding, session: id }), /INVALID_ID/)
+  }
+  assert.equal(commandOf({ ...command, id: 'console' }, binding).id, 'console')
+  assert.equal(commandOf({ ...command, id: 'COM10' }, binding).id, 'COM10')
+})
+
+test('a decision written before a crash wins over a stale uncertain receipt and repairs it', async t => {
+  const { directory, binding, command, target } = await fixture(t)
+  await exchange('enqueue', directory, command)
+  await exchange('take', directory, target)
+  const receipt = join(directory, 'receipts', command.id + '.json')
+  await writeFile(receipt + '.decision', JSON.stringify({ version: 1, id: command.id, binding: binding.id, status: 'rejected' }))
+  assert.equal((await exchange('status', directory)).commands[0].status, 'rejected')
+  assert.equal(JSON.parse(await readFile(receipt, 'utf8')).status, 'rejected')
+  await assert.rejects(exchange('ack', directory, { version: 1, id: command.id, binding: binding.id, status: 'delivered' }), /RECEIPT_CONFLICT/)
+})
+
+test('every module the scripts load at run time is imported with an explicit .ts or .mjs extension', async () => {
+  const here = dirname(fileURLToPath(import.meta.url))
+  const seen = new Set()
+  const visit = async file => {
+    if (seen.has(file)) return
+    seen.add(file)
+    const text = await readFile(file, 'utf8')
+    // `import type` is erased before Node runs the file, so only value imports count.
+    for (const [, specifier] of text.matchAll(/^(?:import|export)\s+(?!type\b)[^'"]*?from\s+'([^']+)'/gm)) {
+      if (!specifier.startsWith('.')) { assert.match(specifier, /^node:/, file); continue }
+      assert.match(specifier, /\.(ts|mjs)$/, `${file} imports ${specifier}`)
+      await visit(join(dirname(file), specifier))
+    }
+  }
+  for (const entry of ['exchange.mjs', 'codex-owner.mjs']) await visit(join(here, '../scripts', entry))
+  assert.ok([...seen].some(one => one.endsWith('exchange-contract.ts')))
 })
 
 test('the CLI performs a synthetic dot round trip without any external runtime', async t => {

@@ -1,6 +1,6 @@
 // This optional contract carries only text a person or agent explicitly submits.
 // It is separate from turn reporting, which may contain a whole conversation.
-import type { Strings } from './i18n'
+import type { Strings } from '../hooks/i18n'
 export type Binding = { version: 1; agent: 'codex' | 'dot'; session: string; id: string }
 export type Command = { version: 1; id: string; binding: string; agent: string; session: string; text: string; turn: string }
 export type Receipt = { version: 1; id: string; binding: string; status: 'uncertain' | 'delivered' | 'rejected' }
@@ -11,12 +11,17 @@ const record = (value: unknown): Record<string, unknown> =>
 const keys = (value: Record<string, unknown>, allowed: string[]): void => {
   if (Object.keys(value).some(key => !allowed.includes(key))) fail('UNKNOWN_FIELD')
 }
+// Angle brackets are ordinary text (`a < b`). Only a comment opener or closer could
+// end or fake the auto markers around a block, so those and control characters go.
 const line = (value: unknown, limit = 240): string =>
-  typeof value === 'string' && value.trim() !== '' && value.length <= limit && !/[\r\n\u0000-\u001f<>]/.test(value)
+  typeof value === 'string' && value.trim() !== '' && value.length <= limit &&
+  !/[\u0000-\u001f\u007f]/.test(value) && !value.includes('<!--') && !value.includes('-->')
     ? value.trim()
     : fail('INVALID_TEXT')
+// Ids become file names, and Windows refuses these names whatever the extension.
+const RESERVED = /^(con|prn|aux|nul|com[1-9]|lpt[1-9])$/i
 const token = (value: unknown): string =>
-  typeof value === 'string' && /^[a-zA-Z0-9][a-zA-Z0-9_-]{0,95}$/.test(value) ? value : fail('INVALID_ID')
+  typeof value === 'string' && /^[a-zA-Z0-9][a-zA-Z0-9_-]{0,95}$/.test(value) && !RESERVED.test(value) ? value : fail('INVALID_ID')
 
 export const bindingOf = (value: unknown): Binding => {
   const one = record(value)

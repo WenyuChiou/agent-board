@@ -2,7 +2,7 @@ import { mkdir, readFile, writeFile, rename, unlink, rmdir, readdir, lstat } fro
 import { randomBytes } from 'node:crypto'
 import { resolve, join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { bindingOf, commandOf, receiptOf, progressBlock } from '../hooks/exchange.ts'
+import { bindingOf, commandOf, receiptOf, progressBlock } from './exchange-contract.ts'
 import { ZH_TW } from '../hooks/i18n.ts'
 import { EN } from '../hooks/strings-en.ts'
 import { ZH_CN } from '../hooks/strings-zh-cn.ts'
@@ -27,7 +27,12 @@ const existing = async path => { try { await lstat(path); return true } catch (e
 // leaves the lock in place: the receiver must reconcile it before attempting delivery.
 const create = async (path, value) => {
   const lock = path + '.lock'
-  await mkdir(lock, { mode: 0o700 })
+  try { await mkdir(lock, { mode: 0o700 }) } catch (error) {
+    // A lock with no file behind it is a write in progress or one a crash left behind.
+    // Name the folder so a person can reconcile it, rather than failing on a missing file.
+    if (error.code !== 'EEXIST' || await existing(path)) throw error
+    throw Object.assign(new Error('LOCK_HELD: ' + lock), { code: 'LOCK_HELD', lock })
+  }
   const temp = path + '.' + randomBytes(12).toString('hex') + '.tmp'
   try {
     if (await existing(path)) throw Object.assign(new Error('EEXIST'), { code: 'EEXIST' })
@@ -44,6 +49,19 @@ const replace = async (path, text) => {
     await writeFile(temp, text, { flag: 'wx', mode: 0o600 })
     await rename(temp, path)
   } finally { await unlink(temp).catch(error => { if (error.code !== 'ENOENT') throw error }) }
+}
+
+// The only file `report` writes over is one it wrote itself: a project heading, a blank
+// line and this binding's block, with nothing before or after it.
+const ownsFile = (text, id) => {
+  if (text.trim() === '') return true
+  const lines = text.replace(/\r\n/g, '\n').replace(/\n+$/, '').split('\n')
+  const [project, blank, open, title, ...rest] = lines
+  const close = rest.pop()
+  return /^## \S/.test(project ?? '') && blank === '' &&
+    (open ?? '').startsWith(`<!-- auto session=${id} `) && (open ?? '').endsWith(' -->') &&
+    /^### \S/.test(title ?? '') && close === `<!-- /auto session=${id} -->` &&
+    rest.length > 0 && rest.every(one => /^(> |- \[.\] )/.test(one))
 }
 
 export const exchange = async (action, directory, input = {}) => {
@@ -70,6 +88,14 @@ export const exchange = async (action, directory, input = {}) => {
   }
   const getReceipt = async command => {
     const path = paths(command).receipt
+    // The decision is written first and is final. A crash before the receipt caught up
+    // leaves the receipt saying uncertain; the decision wins and the receipt is repaired.
+    if (await existing(path + '.decision')) {
+      const decided = receiptOf(await read(await safe(path + '.decision')), command)
+      const stored = await existing(path) ? receiptOf(await read(await safe(path)), command) : null
+      if (stored?.status !== decided.status) await replace(path, json(decided))
+      return decided
+    }
     if (await existing(path + '.lock')) return { version: 1, id: command.id, binding: command.binding, status: 'uncertain' }
     return await existing(path) ? receiptOf(await read(await safe(path)), command) : null
   }
@@ -78,7 +104,9 @@ export const exchange = async (action, directory, input = {}) => {
     if (!['en', 'zh-TW', 'zh-CN'].includes(language)) throw new Error('UNSUPPORTED_LANGUAGE')
     const strings = { en: EN, 'zh-TW': ZH_TW, 'zh-CN': ZH_CN }[language]
     const path = join(root, 'progress.md')
-    if (await existing(path)) await safe(path)
+    // This file is standalone and holds one block only. Anything else means it is
+    // someone's board, and writing the whole file would wipe their work.
+    if (await existing(path) && !ownsFile(await readFile(await safe(path), 'utf8'), binding.id.slice(0, 8))) throw new Error('NOT_EXCHANGE_FILE')
     await replace(path, progressBlock(report, binding, Date.now(), strings))
     return { status: 'reported', path }
   }
@@ -99,8 +127,9 @@ export const exchange = async (action, directory, input = {}) => {
     // which requires reconciliation rather than automatic replay.
     const receipt = { version: 1, id: command.id, binding: binding.id, status: 'uncertain' }
     try { await create(paths(command).receipt, receipt) } catch (error) {
-      if (error.code !== 'EEXIST') throw error
-      return { status: 'already-claimed', receipt: await getReceipt(command) }
+      if (error.code !== 'EEXIST' && error.code !== 'LOCK_HELD') throw error
+      // A held claim lock is another claim in progress or a crashed one: never deliver.
+      return { status: 'already-claimed', receipt: await getReceipt(command), ...(error.lock ? { lock: error.lock } : {}) }
     }
     return { status: 'claimed', command, receipt }
   }
@@ -131,7 +160,11 @@ export const exchange = async (action, directory, input = {}) => {
       const command = await savedCommand(name.slice(0, -5))
       commands.push({ id: command.id, status: (await getReceipt(command))?.status ?? 'queued' })
     }
-    return { binding, mode: 'cooperative-file', native: 'unsupported', commands }
+    const locks = []
+    for (const folder of ['commands', 'receipts']) {
+      for (const name of (await readdir(join(root, folder))).filter(name => name.endsWith('.lock')).sort()) locks.push(join(root, folder, name))
+    }
+    return { binding, mode: 'cooperative-file', native: 'unsupported', commands, locks }
   }
   throw new Error('UNKNOWN_ACTION')
 }
