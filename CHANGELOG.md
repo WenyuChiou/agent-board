@@ -18,7 +18,8 @@
   - **One agent's failure.** An agent whose config cannot be written is named,
     and the agents after it are still hooked in. When OpenClaw's plugin file
     cannot be written, the config entry that would load it is not written
-    either.
+    either. A board command that cannot be written is named as one and
+    leaves the agent's hook in.
   - **Session-log paths in inbox files.** An inbox file can name a JSON file
     with no conversation in it (a key file) as its session log. That file now
     gives the model nothing; before, its last 20 lines were sent. Raw text is
@@ -34,10 +35,79 @@
   one that needs them is written", "an agent whose config cannot be written is
   named, and the agents after it are still hooked in", "an OpenClaw whose
   plugin file cannot be written gets no config entry that would load a missing
-  file", "a JSON file named as a session log that holds no conversation gives
+  file", "a board command that cannot be written is named as one, and the
+  agent is still hooked in", "a JSON file named as a session log that holds no conversation gives
   the model nothing, while a plain-text log still gives its tail", "a working
   folder with a line break or a comment opening in its name becomes a
   one-line project name that hides nothing".
+
+## 0.16.0 — 2026-10-17
+
+- **The board in every agent.** Connecting (by hand or at a session's start)
+  now also writes `agent-board.mjs` beside `progress.md`, a script that prints
+  the board from the file with no Claude Code needed (`--watch` keeps it on
+  screen, `--html` opens it in the browser), and gives each installed agent a
+  command that shows it:
+  - `/board` in Gemini CLI and OpenCode, which paste the board into the prompt;
+  - `$agent-board` in Codex and `/agent-board` in Cursor, Grok Build and
+    OpenClaw, from one skill in `~/.agents/skills`;
+  - `/agent-board` in Hermes Agent and Antigravity, from their own skill
+    folders.
+
+  Board files never count as connecting an agent; the reply says how to open
+  the board in each one. Turns no Claude Code session has taken in yet are
+  listed as they came, a question first, and a turn that only showed the board
+  is not counted as work, even from Codex, whose `Stop` leaves the request out
+  (it is read from the session log). Run for real in Codex 0.163.0, Gemini
+  CLI 0.64.0 and OpenCode 1.19.3 against a mock model; the screenshots are in
+  `docs/images/live/`. Tests: "the board for other agents puts what waits on
+  you first, then each project, then turns no session has taken in", "the
+  board only peeks at the inbox: a session’s end drops its turn, the newest
+  turn of a session wins, and a reply is shown by its last line of prose", "a
+  board line is cut to the terminal, counting a CJK character as two columns",
+  "a turn that only showed the board is not work, in any language or agent",
+  "a Codex turn that showed the board is known by its session log, since its
+  Stop leaves the request out", "each agent gets a board command in the form
+  it reads, and a missing reporter never makes a hook exit 2", "connecting
+  writes the board script and each installed agent’s board command, says how
+  to open them, and removing takes them out", "an agent’s turn that only
+  showed the board gets no block", and "the board script prints the board
+  from the file it was written for, in its language" (`tests/board.test.mjs`).
+- **A missing reporter no longer makes an agent loop.** When
+  `progress-report.sh` was gone (`~/.claude` deleted, or the plugin removed
+  without `/progress connect remove`), `sh` exited 2, which Gemini CLI, Codex,
+  Grok Build and Muse Code read as "block" and ran the agent again, for ever.
+  Found in a live Gemini CLI run. Every POSIX hook command now ends in
+  `|| true`; existing hooks are rewritten at the next session's start. Test:
+  "each agent gets a board command in the form it reads, and a missing
+  reporter never makes a hook exit 2".
+
+- **From the whole-project review.**
+  - A Hermes Agent hook of ours that a YAML dumper had rewritten in block style
+    left its `timeout:` line behind when it was replaced, breaking
+    `config.yaml` at every session's start; the whole item now goes. Test: "a
+    Hermes hook of ours rewritten in block style comes out whole, so
+    connecting again leaves valid YAML".
+  - A session log is read from its last 256 KB, folded in one pass, and the
+    board script keeps it while the file is unchanged: a 20 MB Codex log took
+    seconds before. Test: "only the end of a long session log is read, so a
+    tens-of-megabytes Codex log stays quick".
+  - When two open Claude Code sessions take turns of the same agent session at
+    once, the second to finish folds its turns onto what the first wrote
+    instead of writing over it. Traced, not tested: the mock engine runs one
+    session.
+  - A turn counts as only showing the board when its request is the command
+    itself or the command's own words, so work on the board script is kept.
+    Test: "a turn that only showed the board is not work, in any language or
+    agent".
+  - A session log must be JSON lines or text (or an older Gemini CLI
+    `chats/*.json`), so a credentials file named in an inbox file is never
+    read. Test: "only a session log is opened, never a key, env or credentials
+    file, nor a path that climbs out of its folder".
+  - Removing takes the emptied skill folders out too, and the guides say the
+    board needs Node.js 18 and that a JSON config is rewritten with two-space
+    indents once.
+
 - **`/progress connect` wires a stock Hermes Agent.** Hermes writes
   `hooks: {}` into a new `config.yaml`, and connect took that empty map for a
   flow-style block it could not follow, so it left Hermes out and said it

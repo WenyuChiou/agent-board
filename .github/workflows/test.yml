@@ -46,6 +46,16 @@ jobs:
       - name: Synthetic file exchange and mock owner tests
         run: node --test tests/exchange.test.mjs
 
+      # The board script other agents run, on plain Node.
+      - name: Board script tests
+        run: node --test tests/board.test.mjs
+
+      # hooks/board-script.ts is the bundle of scripts/board-cli.ts; it must match its sources.
+      # Bun is pinned so the bundle comes out the same.
+      - name: Board bundle up to date
+        if: runner.os != 'Windows' && matrix.node == 24
+        run: npx --yes bun@1.4.2 scripts/build-board.ts --check
+
   plugin:
     name: plugin (${{ matrix.os }})
     strategy:

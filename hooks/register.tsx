@@ -60,7 +60,7 @@ import { RULE_ID, RULES } from './rule'
 import { langOf, resolveLang, STRINGS } from './strings'
 import { answerTurns, applyDigest, clearAsked, cleanHandoff, isWork, lastQuestion, markAsked, needsRefresh, parseDigest, replyData, turnTools } from './digest'
 import type { Digest } from './digest'
-import { agentHooks, DELETE, isWindowsHost, OPENCLAW_MIN, openclawPrinted, openclawSavedBy, openclawTooOld, psQuote, reporterPs1, reporterSh, withoutSection } from './connect'
+import { agentHooks, boardScript, DELETE, isWindowsHost, OPENCLAW_MIN, openclawPrinted, openclawSavedBy, openclawTooOld, psQuote, reporterPs1, reporterSh, withoutSection } from './connect'
 import {
   ANSWER_KEEP,
   answerKey,
@@ -73,6 +73,7 @@ import {
   promptKey,
   readTurn,
   takenName,
+  isBoardTurn,
   transcriptTail,
   turnsToDigest,
 } from './inbox'
@@ -195,6 +196,11 @@ const removeFiles = async ($: EngineInterface, files: readonly string[], isWin: 
   const argv = isWin
     ? ['powershell', '-NoProfile', '-Command', `Remove-Item -Force -LiteralPath ${files.map(psQuote).join(',')}`]
     : ['rm', '-f', ...files]
+  await $.process.run(argv, { timeoutMs: 10000 }).catch(() => undefined)
+}
+
+const removeEmptyDir = async ($: EngineInterface, dir: string, isWin: boolean): Promise<void> => {
+  const argv = isWin ? ['powershell', '-NoProfile', '-Command', `[IO.Directory]::Delete(${psQuote(dir)})`] : ['rmdir', dir]
   await $.process.run(argv, { timeoutMs: 10000 }).catch(() => undefined)
 }
 
@@ -631,11 +637,16 @@ const digestTurn = async ($: EngineInterface, prompt: string, answer: string): P
 // the store, so whichever open session reads the next turn carries on from it. Only the
 // last two turns of a burst are summed up by the model; the earlier ones just move on what
 // the mirror remembers of the conversation.
-const takeAgentTurns = async ($: EngineInterface, turns: readonly AgentTurn[]): Promise<void> => {
+// Another open session can take a later turn of the same agent session while this one
+// waits on the model; whichever wrote second would drop the other's step. So the mirror is
+// checked again just before writing, and when it moved, these turns are folded onto it once
+// more (the fold skips a reply it has already seen).
+const takeAgentTurns = async ($: EngineInterface, turns: readonly AgentTurn[], isRetry = false): Promise<void> => {
   const last = turns.at(-1)
   if (last === undefined) return
   const at = await $.clock.now()
   const stored = (await $.store.get(`agent:${last.id}`)) as Partial<ProgressMirror> | undefined
+  const seen = JSON.stringify(stored ?? null)
   const fresh = emptyMirror(last.id, last.project || (await wordsOf($)).uncategorized, at, last.cwd, last.agent)
   const firstPrompt = promptKey(stored?.firstPrompt || turns.find(one => one.prompt !== '')?.prompt || '')
   let mirror: ProgressMirror = { ...fresh, ...stored, firstPrompt, lastAnswer: answerKey(stored?.lastAnswer ?? '') }
@@ -650,6 +661,8 @@ const takeAgentTurns = async ($: EngineInterface, turns: readonly AgentTurn[]): 
       answer = answer || tail.answer
       prompt = prompt || tail.prompt
     }
+    // Known only now for Codex, whose Stop leaves the request out.
+    if (isBoardTurn({ ...turn, prompt })) continue
     if (mirror.firstPrompt === '' && prompt !== '') mirror = { ...mirror, firstPrompt: promptKey(prompt) }
     if (answer === '' || answerKey(answer) === mirror.lastAnswer) continue
     if (digested.has(index)) {
@@ -661,10 +674,15 @@ const takeAgentTurns = async ($: EngineInterface, turns: readonly AgentTurn[]): 
   if (mirror.tasks.length === 0) return
   const state = isAllDone(mirror) ? 'done' : last.event === 'end' ? 'ended' : 'waiting'
   mirror = { ...mirror, state, updated: at }
-  await $.store.set(`agent:${last.id}`, mirror)
   const s = await wordsOf($)
   const written = mirror
+  let hasMoved = false
   await enqueue(async () => {
+    if (!isRetry && JSON.stringify((await $.store.get(`agent:${last.id}`)) ?? null) !== seen) {
+      hasMoved = true
+      return
+    }
+    await $.store.set(`agent:${last.id}`, written)
     await rewrite(
       $,
       await progressPath($),
@@ -673,6 +691,7 @@ const takeAgentTurns = async ($: EngineInterface, turns: readonly AgentTurn[]): 
     )
     await poll($)
   })
+  if (hasMoved) await takeAgentTurns($, turns, true)
 }
 
 // `/progress connect`: the reporter script beside progress.md, and a hook for it in every
@@ -698,16 +717,24 @@ const connectAgents = async ($: EngineInterface, mode: ConnectMode): Promise<{ t
   const script = `${path.replace(/[\\/][^\\/]*$/, '')}${sep}progress-report.${isWin ? 'ps1' : 'sh'}`
   const reporter = isWin ? reporterPs1() : reporterSh(inboxPath(path))
   if (!remove && (await readText($, script).catch(() => '')) !== reporter) await $.fs.write(script, reporter)
+  // The board for every other agent: their board commands run it, and so can any terminal.
+  const board = `${path.replace(/[\\/][^\\/]*$/, '')}${sep}agent-board.mjs`
+  const boardCode = boardScript(path, s.lang)
+  if (!remove && (await readText($, board).catch(() => '')) !== boardCode) await $.fs.write(board, boardCode)
+  if (remove && (await $.fs.exists(board))) await removeFiles($, [board], isWin)
   const done: string[] = []
   const skipped: string[] = []
   const removeFile = (file: string): Promise<void> => removeFiles($, [file], isWin)
   const savedBy = remove ? null : openclawSavedBy(await readText($, [openclawHome, 'openclaw.json'].join(sep)).catch(() => ''))
   const openclawOld = savedBy === null || openclawTooOld(savedBy) === null ? null : await installedOpenclawOld($, isWin, savedBy)
-  // Agents with a file that could not be written. OpenClaw's config entry loads its plugin
-  // file, so when the plugin file fails, the entry is not written either.
+  // Agents with a hook file that could not be written. OpenClaw's config entry loads its
+  // plugin file, so when the plugin file fails, the entry is not written either.
   const failed = new Set<string>()
-  for (const hook of agentHooks({ home, sep, isWindows: isWin, script, inbox: inboxPath(path), codexHome, grokHome, hermesHome, openclawHome })) {
-    if (failed.has(hook.agent) || !(await $.fs.exists(hook.dir))) continue
+  for (const hook of agentHooks({ home, sep, isWindows: isWin, script, inbox: inboxPath(path), codexHome, grokHome, hermesHome, openclawHome, board, s })) {
+    if (failed.has(hook.agent)) continue
+    let isInstalled = false
+    for (const dir of hook.dirs ?? [hook.dir]) isInstalled = isInstalled || (await $.fs.exists(dir))
+    if (!isInstalled) continue
     // One agent whose file cannot be written (a folder missing, a read-only file) is named and
     // passed over, so the agents after it are still hooked in.
     try {
@@ -716,7 +743,7 @@ const connectAgents = async ($: EngineInterface, mode: ConnectMode): Promise<{ t
       if (hadOld && hook.old !== undefined) await removeFile(hook.old)
       const before = await readText($, hook.file).catch(() => null)
       if (before === null) {
-        if (!isAuto) skipped.push(s.connectSkipped(hook.label, hook.file))
+        if (!isAuto && hook.label !== '') skipped.push(s.connectSkipped(hook.label, hook.file))
         continue
       }
       // An OpenClaw too old for our entry would not start with it in its config, so it is not
@@ -735,23 +762,28 @@ const connectAgents = async ($: EngineInterface, mode: ConnectMode): Promise<{ t
       }
       const after = hook.edit(before, remove)
       if (after === null) {
-        if (mode === 'connect') skipped.push(s.connectSkipped(hook.label, hook.file))
+        if (mode === 'connect' && hook.label !== '') skipped.push(s.connectSkipped(hook.label, hook.file))
         continue
       }
       if (after === DELETE) {
         await removeFile(hook.file)
+        // A skill is a folder of ours; an agent may complain of one left without its SKILL.md.
+        // Only an empty folder goes, so anything the person added stays.
+        if (/[\\/]SKILL\.md$/.test(hook.file)) await removeEmptyDir($, hook.file.replace(/[\\/][^\\/]*$/, ''), isWin)
       } else if (after !== before) {
         await $.fs.write(hook.file, after)
       }
       if ((remove || isAuto) && after === before && !hadOld) continue
       // OpenClaw takes two files, a plugin and the config entry that loads it.
-      if (done.includes(hook.label)) continue
+      if (hook.label === '' || done.includes(hook.label)) continue
       done.push(hook.label)
       // The old instructions section is only tidied away; the hook is in either way.
       if (!remove) await dropSection($, hook.agent, home, codexHome, sep).catch(() => undefined)
     } catch {
-      failed.add(hook.agent)
-      if (!isAuto) skipped.push(s.connectFailed(hook.label, hook.file))
+      // A board command (no label of its own) that cannot be written leaves the agent's hook
+      // as it is: the board is an extra, the hook is what reports.
+      if (hook.label !== '') failed.add(hook.agent)
+      if (!isAuto) skipped.push(hook.label === '' ? s.connectBoardFailed(hook.file) : s.connectFailed(hook.label, hook.file))
     }
   }
   const trust = [...(done.includes('Codex') ? [s.connectCodexTrust] : []), ...(done.includes('Hermes Agent') ? [s.connectHermesTrust] : [])]
@@ -760,10 +792,10 @@ const connectAgents = async ($: EngineInterface, mode: ConnectMode): Promise<{ t
   const lines = remove
     ? [done.length === 0 ? s.connectNothingRemoved : s.connectRemoved(done.join(s.listSep))]
     : isAuto
-      ? [s.autoConnected(done.join(s.listSep)), ...trust, s.autoConnectUndo]
+      ? [s.autoConnected(done.join(s.listSep)), ...trust, s.boardEverywhere(board), s.autoConnectUndo]
       : done.length === 0
-        ? none
-        : [s.connectDone(done.join(s.listSep)), ...trust]
+        ? [...none, s.boardEverywhere(board)]
+        : [s.connectDone(done.join(s.listSep)), ...trust, s.boardEverywhere(board)]
 
   return { text: [...lines, ...skipped].join('\n'), done }
 }
@@ -881,7 +913,7 @@ const drainInbox = async ($: EngineInterface): Promise<void> => {
   const job = digests.then(async () => {
     try {
       const bySession = new Map<string, AgentTurn[]>()
-      for (const turn of turns) bySession.set(turn.id, [...(bySession.get(turn.id) ?? []), turn])
+      for (const turn of turns.filter(one => !isBoardTurn(one))) bySession.set(turn.id, [...(bySession.get(turn.id) ?? []), turn])
       for (const group of bySession.values()) await takeAgentTurns($, group).catch(() => undefined)
     } finally {
       await removeFiles($, taken, isWin)

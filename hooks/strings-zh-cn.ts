@@ -183,6 +183,7 @@ export const ZH_CN: Strings = {
   connectHermesTrust: 'Hermes Agent 第一次运行这个 hook 前会问你一次，回答 y（或用 --accept-hooks 启动）。',
   connectSkipped: (name: string, path: string): string => `${name} 的配置文件读不懂，没有动它：${path}`,
   connectFailed: (name: string, path: string): string => `${name} 的配置文件写不进去：${path}`,
+  connectBoardFailed: (path: string): string => `看板命令文件写不进去：${path}`,
   connectTooOld: (name: string, version: string, min: string): string => `${name} ${version} 太旧，要 ${min} 以上才接得上，所以没有接它。更新之后再运行 /progress connect。`,
   autoConnectTitle: 'Agent Board 接上了其他 agent',
   autoConnected: (list: string): string => `已自动接上：${list}。重启它们之后，每个回合都会出现在这里。`,
@@ -272,4 +273,12 @@ export const ZH_CN: Strings = {
   dashStamp: (time: string): string => `更新于 ${time}`,
   windowOpened: (path: string): string => `已在浏览器打开：${path}`,
   windowFailed: (path: string): string => `打不开浏览器，请自己打开：${path}`,
+
+  // The board other agents show (the standalone script and each agent's board command)
+  boardInbox: '收件箱里还没整理的回合（开一个 Claude Code 对话就会整理进来）',
+  boardWatching: '每 2 秒更新，Ctrl+C 结束',
+  boardCommandDescription: 'Agent Board：每个 agent 在做什么、什么在等你',
+  boardCommandPrompt: '把下面的 Agent Board 原样放在代码块里给我看，再用一句话说现在最需要我处理的是什么。不要改任何文件。',
+  boardSkillPrompt: (command: string): string => `运行 \`${command}\`，把它打印的 Agent Board 原样放在代码块里给我看，再用一句话说现在最需要我处理的是什么。不要改任何文件。`,
+  boardEverywhere: (path: string): string => `在其他 agent 里看这个看板：Gemini CLI、OpenCode 输入 /board，Codex 输入 $agent-board，其他输入 /agent-board；任何终端：node "${path}" --watch`,
 }

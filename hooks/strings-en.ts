@@ -184,6 +184,7 @@ export const EN: Strings = {
   connectHermesTrust: 'Hermes Agent asks once before it runs a new hook: answer y (or start it with --accept-hooks).',
   connectSkipped: (name: string, path: string): string => `Could not read ${name}'s config, so it was left alone: ${path}`,
   connectFailed: (name: string, path: string): string => `Could not write ${name}'s config: ${path}`,
+  connectBoardFailed: (path: string): string => `Could not write the board command: ${path}`,
   connectTooOld: (name: string, version: string, min: string): string => `${name} ${version} is too old to hook in (it takes ${min} or newer), so it was left out. Update it, then run /progress connect.`,
   autoConnectTitle: 'Agent Board connected your other agents',
   autoConnected: (list: string): string => `Connected automatically: ${list}. After you restart them, every turn they finish shows here.`,
@@ -274,4 +275,12 @@ export const EN: Strings = {
   dashStamp: (time: string): string => `updated ${time}`,
   windowOpened: (path: string): string => `Opened in your browser: ${path}`,
   windowFailed: (path: string): string => `Couldn't open a browser; open it yourself: ${path}`,
+
+  // The board other agents show (the standalone script and each agent's board command)
+  boardInbox: 'Turns in the inbox not summed up yet (open a Claude Code session to take them in)',
+  boardWatching: 'Updates every 2 seconds; Ctrl+C to stop',
+  boardCommandDescription: 'Agent Board: what every agent is doing, and what waits on you',
+  boardCommandPrompt: 'Show me the Agent Board below exactly as it is, in a code block. Then tell me in one sentence what needs me first. Do not change any file.',
+  boardSkillPrompt: (command: string): string => `Run \`${command}\` and show me the Agent Board it prints exactly as it is, in a code block. Then tell me in one sentence what needs me first. Do not change any file.`,
+  boardEverywhere: (path: string): string => `To see this board from another agent: /board in Gemini CLI and OpenCode, $agent-board in Codex, /agent-board in the others; in any terminal: node "${path}" --watch`,
 }

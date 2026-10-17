@@ -1,4 +1,5 @@
 import { baseName } from './parse'
+import { STRINGS } from './strings'
 
 // What another agent's hook handed over at the end of a turn or a session, saved by the
 // reporter script as one file in the inbox (`<agent>-<turn|end>-<time>-<pid>.json`). Every
@@ -153,16 +154,22 @@ const logEntry = (line: string): LogEntry | null => {
 // The end of a session log, as text the model can read: the last assistant and user words
 // it can find in JSON lines, else, for a log written as plain text, the raw tail. A JSON
 // file with no words in it is no log (a key file, a config), so none of it goes to the model.
+// Only the end of a log is read: a long Codex rollout runs to tens of megabytes, and the last
+// exchange is all that is wanted.
+export const LOG_TAIL = 256 * 1024
+
 export const transcriptTail = (log: string, limit = 3000, isText = false): { prompt: string; answer: string } => {
-  const lines = log.split(/\r?\n/).filter(line => line.trim() !== '')
+  const tail = log.length > LOG_TAIL ? log.slice(log.indexOf('\n', log.length - LOG_TAIL) + 1) : log
+  const lines = tail.split(/\r?\n/).filter(line => line.trim() !== '')
   // Chunks of one message, one after another, read as the whole message.
-  const entries = lines.reduce<LogEntry[]>((all, line) => {
+  const entries: LogEntry[] = []
+  for (const line of lines) {
     const entry = logEntry(line)
-    if (entry === null) return all
-    const last = all.at(-1)
-    if (entry.isChunk && last !== undefined && last.isChunk && last.role === entry.role) return [...all.slice(0, -1), { ...last, words: last.words + entry.words }]
-    return [...all, entry]
-  }, [])
+    if (entry === null) continue
+    const last = entries.at(-1)
+    if (entry.isChunk && last !== undefined && last.isChunk && last.role === entry.role) entries[entries.length - 1] = { ...last, words: last.words + entry.words }
+    else entries.push(entry)
+  }
   let prompt = ''
   let answer = ''
   for (let index = entries.length - 1; index >= 0 && (prompt === '' || answer === ''); index -= 1) {
@@ -184,9 +191,12 @@ export const isTextLog = (path: string): boolean => /[\\/]agent-transcripts[\\/]
 
 // A session log the pane may open: the path comes from a file anyone on the machine can drop
 // into the inbox, so only the kinds agents write their logs in (JSON lines; Cursor's are
-// text) and no climbing out of a folder. A JSON file that holds no conversation gives the
-// model nothing (transcriptTail).
-export const isTranscriptPath = (path: string): boolean => /\.(?:jsonl?|txt)$/i.test(path) && !/(?:^|[\\/])\.\.(?:[\\/]|$)/.test(path)
+// text; older Gemini CLI writes chats/session-*.json), never a key, an env file or another
+// JSON file such as ~/.claude/.credentials.json or ~/.gemini/oauth_creds.json, and no
+// climbing out of a folder. A JSON file that holds no conversation gives the model nothing,
+// and only Cursor's own transcripts are read out as raw text (transcriptTail, isTextLog).
+export const isTranscriptPath = (path: string): boolean =>
+  (/\.(?:jsonl|txt)$/i.test(path) || /[\\/]chats[\\/][^\\/]+\.json$/i.test(path)) && !/(?:^|[\\/])\.\.(?:[\\/]|$)/.test(path)
 
 // How much of a turn a stored mirror keeps: the end of the last reply (what the next turn is
 // compared with) and the start of the first request (what the model names the work from).
@@ -220,3 +230,15 @@ export const keepInboxDone = (done: Readonly<Record<string, string>>, now: numbe
 export const takenName = (name: string, session: string): string => `${name}.${session.replace(/[^\w-]/g, '') || 'x'}.taking`
 
 export const isTakenFile = (name: string): boolean => /^[a-z][a-z0-9]*-(?:turn|end)-[\w.-]+\.json\.[\w-]+\.taking$/.test(name)
+
+// A turn that only showed the person the board (Gemini CLI's and OpenCode's /board, the
+// agent-board skill): looking at the board is not work, so it gets no block of its own.
+const BOARD_ASKS = /^\s*(?:\/board|[$/]agent-board)\s*$/
+
+// The words of each language's board command and skill, around the command they name; a
+// request that only mentions the script (someone working on this repository) is real work.
+const BOARD_WORDS = Object.values(STRINGS).flatMap(s => [s.boardCommandPrompt, s.boardSkillPrompt('\u0000').split('\u0000')[1] ?? ''].filter(words => words.trim() !== ''))
+
+export const isBoardTurn = (turn: AgentTurn): boolean =>
+  turn.event === 'turn' &&
+  (BOARD_ASKS.test(turn.prompt) || /<name>agent-board<\/name>/.test(turn.prompt) || BOARD_WORDS.some(words => turn.prompt.includes(words)))

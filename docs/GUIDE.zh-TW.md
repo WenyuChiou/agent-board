@@ -193,7 +193,7 @@ hook 執行的是 `/progress connect` 寫好的 `~/.claude/progress-report.sh`�
 
 其他規則：
 - 檔案裡你自己的 hook 會留著。
-- 不是純 JSON 的設定檔不會動，指令會告訴你是哪一個。
+- 不是純 JSON 的設定檔不會動，指令會告訴你是哪一個；JSON 的第一次會用兩格縮排重寫。
 - 之前用 setup `--agents` 寫進那個 agent 說明裡的 AGENTS.md 段落會被拿掉，免得同一件事出現兩次。
 - `/progress connect remove` 全部拿掉。
 
@@ -204,6 +204,27 @@ hook 執行的是 `/progress connect` 寫好的 `~/.claude/progress-report.sh`�
 **在別台機器上的 agent**（雲端 VM、聊天助理）也能回報：它把自己那塊寫成片段，由這台電腦上的合併步驟放進 `progress.md`，見 [Remote reporters](REMOTE_REPORTERS.md)。
 
 **dot，以及 Codex 的明確回報**：自行選用的[本機交換](LOCAL-EXCHANGE.md)寫的也是同一種片段，用同一個合併步驟放進去，並在本機保留一個有回條的訊息佇列。
+
+## 每個 agent 裡都看得到看板
+
+`/progress connect`（以及每個對話開始時）也會在 `progress.md` 旁邊寫一個 `agent-board.mjs`：直接從 `progress.md` 印出看板的腳本，不用開 Claude Code。每個 agent 的看板指令都是用 Node.js 18 以上跑它：Codex 和 Gemini CLI 本來就附 Node；OpenCode、Cursor、Grok Build、Hermes Agent、OpenClaw、Antigravity 若 `node --version` 找不到，請裝一下。
+
+| Agent | 檔案 | 打 |
+|---|---|---|
+| Gemini CLI | `~/.gemini/commands/board.toml` | `/board`。Gemini 第一次會問要不要讓指令執行 |
+| OpenCode | `~/.config/opencode/commands/board.md` | `/board` |
+| Codex、Cursor、Grok Build、OpenClaw（還有 Gemini CLI、OpenCode） | `~/.agents/skills/agent-board/SKILL.md` | Codex 打 `$agent-board`，其他打 `/agent-board` |
+| Hermes Agent | `~/.hermes/skills/agent-board/SKILL.md` | `/agent-board` |
+| Antigravity | `~/.gemini/config/skills/agent-board/SKILL.md` | `/agent-board` |
+
+Gemini CLI 和 OpenCode 會自己把看板貼進提示；用技能（skill）的，則是 agent 執行腳本再把印出的東西給你看。Codex、Gemini CLI、OpenCode 實際跑過（接測試用的假模型，見下圖）；Cursor、Grok Build、OpenClaw、Hermes Agent、Antigravity 的技能照它們文件寫的位置放，沒有實際跑過。Antigravity 只能看看板：它還沒有回合結束的 hook 可以回報。
+
+在終端機：`node ~/.claude/agent-board.mjs` 印一次看板，`--watch` 一直開著、每 2 秒重畫（分割視窗放在 Codex 旁邊），`--html` 寫出 `progress.html` 並在瀏覽器打開。`--lang zh-TW`（或 `en`、`zh-CN`）選語言；預設跟你的 Claude Code 對話一樣。
+
+看板只讀不寫。其他 agent 的 hook 留在收件匣的回合，要有開著的 Claude Code 對話才會整理成步驟；在那之前，看板照原樣列出它們，問題排最前面。只是看看板的回合，不算工作。
+
+<img alt="終端機裡的看板，每 2 秒重畫" src="images/live/terminal-zh-TW.png" width="560">
+<img alt="OpenCode 1.19.3：/board" src="images/live/opencode-zh-TW.png" width="560">
 
 ## 它怎麼保持整齊
 

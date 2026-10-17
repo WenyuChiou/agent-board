@@ -1,3 +1,7 @@
+import { BOARD_SCRIPT } from './board-script'
+import { ZH_TW } from './i18n'
+import type { Strings } from './i18n'
+
 // The reporter script an agent's hook runs, written beside progress.md by `/progress
 // connect`: it saves what the hook hands over into the inbox and clears files older than two
 // days. No dependencies: POSIX sh on macOS and Linux, Windows PowerShell 5.1 on Windows.
@@ -58,11 +62,15 @@ export const shellQuote = (text: string): string => `'${text.replace(/'/g, `'\\'
 
 export const psQuote = (text: string): string => `'${text.replace(/'/g, "''")}'`
 
-// The command line a hook runs for one agent and event.
+// The command line a hook runs for one agent and event. When the script is gone (the
+// person deleted ~/.claude, or uninstalled without `/progress connect remove`), sh exits 2,
+// which Gemini CLI, Codex, Grok Build and Muse Code read as "block" and run the agent
+// again, for ever; `|| true` keeps it at 0. PowerShell exits 64 for a missing file, which
+// they only warn about.
 export const reportCommand = (script: string, agent: string, event: 'turn' | 'end', isWindows: boolean): string =>
   isWindows
     ? `powershell -NoProfile -ExecutionPolicy Bypass -File "${script}" ${agent} ${event}`
-    : `sh ${shellQuote(script)} ${agent} ${event}`
+    : `sh ${shellQuote(script)} ${agent} ${event} || true`
 
 // A hook command this plugin wrote: it runs the reporter script by its path, so a person's
 // own `my-progress-report.sh` is not taken for ours.
@@ -177,12 +185,16 @@ export const withoutSection = (text: string): string => {
 // Where each agent keeps what `/progress connect` changes, and how. `dir` says the agent is
 // installed (its folder under the home directory); `edit` turns the file's text into the
 // new text, or null when the file cannot be read as JSON and is left alone.
-export type ConnectContext = { home: string; sep: string; isWindows: boolean; script: string; inbox: string; codexHome: string; grokHome: string; hermesHome: string; openclawHome: string }
+export type ConnectContext = { home: string; sep: string; isWindows: boolean; script: string; inbox: string; codexHome: string; grokHome: string; hermesHome: string; openclawHome: string; board?: string; s?: Strings }
 
 export type AgentHook = {
   agent: string
+  // '' for a file that only shows the board (a board command, the shared skill): it is
+  // written, but connecting an agent means its turns reach the board, so it is never named.
   label: string
   dir: string
+  // Any of these says the agent is installed, when there is more than one place to look.
+  dirs?: string[]
   file: string
   // The file an earlier name of the plugin wrote instead, taken away when connecting or removing.
   old?: string
@@ -230,8 +242,18 @@ const hasChildren = (lines: string[], at: number): boolean => {
 // rather than to the end of the file.
 const stripHermesHooks = (text: string, isKeepingTop: boolean): string => {
   const lines = text.split('\n')
-  // Only list items of ours; a comment or another line that names the script stays.
-  const kept = lines.filter(line => !(line.trimStart().startsWith('- ') && OURS.test(line)))
+  // Only list items of ours, with the lines that continue them: a YAML dumper (Hermes' own
+  // setup, or a person tidying the file) writes our flow-style item in block style, its
+  // timeout on a line of its own. A comment or another line that names the script stays.
+  const drop = new Set<number>()
+  lines.forEach((line, at) => {
+    if (!line.trimStart().startsWith('- ')) return
+    const indent = indentOf(line)
+    let end = at + 1
+    while (end < lines.length && isContent(lines[end] ?? '') && indentOf(lines[end] ?? '') > indent) end += 1
+    if (lines.slice(at, end).some(one => isContent(one) && OURS.test(one))) for (let index = at; index < end; index += 1) drop.add(index)
+  })
+  const kept = lines.filter((_, at) => !drop.has(at))
   if (kept.length === lines.length) return text
   const keys = kept.filter((line, at) => !(HERMES_KEY.test(line) && !hasChildren(kept, at)))
   const rest = isKeepingTop ? keys : keys.filter((line, at) => !(TOP_HOOKS.test(line) && !hasChildren(keys, at)))
@@ -398,6 +420,7 @@ export const agentHooks = (ctx: ConnectContext): AgentHook[] => {
       old: join(ctx, '.config', 'opencode', 'plugin', 'progress-pane.js'),
       edit: (text, remove) => (remove ? (text.trim() === '' ? null : DELETE) : opencodePlugin(ctx)),
     },
+    ...boardCommands(ctx),
   ]
 }
 
@@ -594,3 +617,52 @@ export default {
   },
 }
 `
+
+// The standalone board, with the progress file and language of the session that wrote it
+// set on its first line (an ES module's imports run first either way).
+export const boardScript = (path: string, lang: string): string => `globalThis.AGENT_BOARD = ${JSON.stringify({ path, lang })}\n${BOARD_SCRIPT}`
+
+// Each agent's way to show the board, so the person sees every agent's work from whichever
+// one they are in. Gemini CLI and OpenCode paste a command's output into the prompt before
+// the model reads it; the others read skills, whose model runs the command. Most of them
+// read ~/.agents/skills, so one skill there reaches Codex, Cursor, Grok Build, OpenClaw,
+// Gemini CLI and OpenCode; Hermes Agent and Antigravity keep their own folder.
+const SKILL = 'agent-board'
+
+export const boardCommands = (ctx: ConnectContext): AgentHook[] => {
+  if (ctx.board === undefined) return []
+  const s = ctx.s ?? ZH_TW
+  const run = `node "${ctx.board}"`
+  const file =
+    (content: string) =>
+    (text: string, remove: boolean): string | null | typeof DELETE =>
+      remove ? (text.trim() === '' ? null : DELETE) : content
+  // JSON is YAML too, so a description with a colon in it stays one value.
+  const description = JSON.stringify(s.boardCommandDescription)
+  const skill = `---\nname: ${SKILL}\ndescription: ${description}\n---\n\n${s.boardSkillPrompt(run)}\n`
+  const gemini = `# Written by the Agent Board plugin (/progress connect).\ndescription = ${description}\nprompt = '''${s.boardCommandPrompt}\n\n!{${run}}\n'''\n`
+  const opencode = `---\ndescription: ${description}\n---\n\n${s.boardCommandPrompt}\n\n!\`${run}\`\n`
+
+  return [
+    {
+      agent: 'skills',
+      label: '',
+      dir: ctx.codexHome,
+      dirs: [ctx.codexHome, join(ctx, '.cursor'), ctx.grokHome, ctx.openclawHome, join(ctx, '.gemini'), join(ctx, '.config', 'opencode')],
+      file: join(ctx, '.agents', 'skills', SKILL, 'SKILL.md'),
+      edit: file(skill),
+    },
+    { agent: 'gemini', label: '', dir: join(ctx, '.gemini'), file: join(ctx, '.gemini', 'commands', 'board.toml'), edit: file(gemini) },
+    { agent: 'opencode', label: '', dir: join(ctx, '.config', 'opencode'), file: join(ctx, '.config', 'opencode', 'commands', 'board.md'), edit: file(opencode) },
+    { agent: 'hermes', label: '', dir: ctx.hermesHome, file: [ctx.hermesHome, 'skills', SKILL, 'SKILL.md'].join(ctx.sep), edit: file(skill) },
+    {
+      // Antigravity reads its skills here; it has no turn-end hook of its own, so it only shows
+      // the board.
+      agent: 'antigravity',
+      label: '',
+      dir: join(ctx, '.gemini', 'antigravity'),
+      file: join(ctx, '.gemini', 'config', 'skills', SKILL, 'SKILL.md'),
+      edit: file(skill),
+    },
+  ]
+}

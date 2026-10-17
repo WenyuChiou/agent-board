@@ -9,7 +9,7 @@ Claude Code 外掛，也跟得上 Codex、Gemini CLI、Cursor、OpenCode、Grok 
 
 <p align="center">
 <a href="https://github.com/WenyuChiou/agent-board/actions/workflows/test.yml"><img alt="測試" src="https://github.com/WenyuChiou/agent-board/actions/workflows/test.yml/badge.svg"></a>
-<a href="CHANGELOG.md"><img alt="版本 0.15.0" src="https://img.shields.io/badge/version-0.15.0-blue"></a>
+<a href="CHANGELOG.md"><img alt="版本 0.16.0" src="https://img.shields.io/badge/version-0.16.0-blue"></a>
 <a href="LICENSE"><img alt="MIT 授權" src="https://img.shields.io/badge/license-MIT-green"></a>
 <img alt="macOS、Linux、Windows" src="https://img.shields.io/badge/macOS%20%C2%B7%20Linux%20%C2%B7%20Windows-lightgrey">
 </p>
@@ -31,6 +31,7 @@ Claude Code 外掛，也跟得上 Codex、Gemini CLI、Cursor、OpenCode、Grok 
 | <img src="docs/images/agents/openclaw.svg" width="24" alt=""> | **OpenClaw** | 外掛，在 `agent_end` 時 | 不用做什麼 | ✅ 2026.10.4 |
 | <img src="docs/images/agents/cursor.svg" width="24" alt=""> | **Cursor** | `afterAgentResponse` hook | 不用做什麼 | 依 Cursor 文件實作 |
 | <img src="docs/images/agents/muse-code.svg" width="24" alt=""> | **Muse Code** | `Stop` hook | 不用做什麼 | 依 Muse 文件實作 |
+| | **Antigravity** | 還不會回報（沒有回合結束的 hook） | 不用做什麼：它會有 `/agent-board` 看看板 | 按它的文件實作 |
 | | **dot** | 本機交換（自行選用） | 見 [docs/LOCAL-EXCHANGE.md](docs/LOCAL-EXCHANGE.md) | 只測過檔案約定 |
 | | **其他 agent**（Aider、Copilot、Windsurf…） | 自己寫一塊進度 | 把 [AGENTS.md](AGENTS.md) 的一段貼進它的說明檔 | |
 
@@ -76,6 +77,24 @@ claude -p "/progress connect"
 - **自己收拾。** 做完的事移到每月封存檔，日誌留下每一步完成紀錄。
 - **就是一個 Markdown 檔。** 全部在 `~/.claude/progress.md`，你可以自己看、自己改。支援 English、繁體中文、简体中文；淺色深色都有。
 
+## 每個 agent 裡都看得到看板
+
+接上時，每個 agent 也會拿到一個看看板的指令。不管你在哪一個裡面，都看得到全部 agent 在做什麼：
+
+| 在 | 打 |
+|---|---|
+| Gemini CLI、OpenCode | `/board` |
+| Codex | `$agent-board` |
+| Cursor、Grok Build、OpenClaw、Hermes Agent、Antigravity | `/agent-board` |
+| 任何終端機，開在任何 agent 旁邊 | `node ~/.claude/agent-board.mjs --watch`（`--html` 在瀏覽器開） |
+
+<table><tr>
+<td><img alt="Codex CLI 0.163.0：打 $agent-board，跑看板腳本並顯示看板" src="docs/images/live/codex-zh-TW.png"></td>
+<td><img alt="Gemini CLI 0.64.0：/board 把看板貼進提示" src="docs/images/live/gemini-zh-TW.png"></td>
+</tr></table>
+
+截圖是 Codex 0.163.0 和 Gemini CLI 0.64.0 實際執行的畫面（模型用的是測試用的假模型）；OpenCode 和終端機的截圖在[使用說明](docs/GUIDE.zh-TW.md#每個-agent-裡都看得到看板)。看板直接讀 `progress.md`，不用開 Claude Code；它用 Node.js 18 以上執行，Codex 和 Gemini CLI 裝的時候就有（其他 agent 若 `node --version` 找不到，就裝一下 Node）。其他 agent 的回合要有 Claude Code 對話開著才會整理成步驟；在那之前，看板照原樣列出它們。
+
 ## 指令
 
 | 輸入 | 用途 |
@@ -114,6 +133,12 @@ claude -p "/progress connect"
 <summary><b>一定要有其他 agent 嗎？只用 Claude Code 可以嗎？</b></summary>
 
 可以。每個 Claude Code 對話都會自己出現；接上其他 agent 是選用的。
+</details>
+
+<details>
+<summary><b>我是從 Codex（或其他 agent）裝的，它看得到 Claude Code 在做什麼嗎？</b></summary>
+
+看得到。插件裝在 Claude Code 裡，但接上時每個 agent 都會拿到看看板的指令（見[每個 agent 裡都看得到看板](#每個-agent-裡都看得到看板)），而看板讀的就是所有 agent 共用的那個檔案。想讓其他 agent 的回合整理成步驟，就在某處開著一個 Claude Code 對話。
 </details>
 
 <details>

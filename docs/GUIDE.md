@@ -186,7 +186,7 @@ It finds the agents installed on this machine and gives each one a hook that run
 | Muse Code | `~/.config/muse/settings.json` | `Stop` |
 | OpenClaw | `~/.openclaw/agent-board.mjs`, and `openclaw.json` beside it to load it (`$OPENCLAW_STATE_DIR`) | `agent_end`. Restart its gateway after connecting |
 
-The hook runs `~/.claude/progress-report.sh` (Windows: `progress-report.ps1`), which `/progress connect` writes. The script has no dependencies, always exits 0 and prints nothing, except `{}` for Cursor. Your own hooks in those files stay. A config file that is not plain JSON is left alone, and the command says which one. If setup `--agents` had put the AGENTS.md section into that agent's instructions, the section is removed, so the work does not show twice. `/progress connect remove` takes everything back out.
+The hook runs `~/.claude/progress-report.sh` (Windows: `progress-report.ps1`), which `/progress connect` writes. The script has no dependencies, always exits 0 and prints nothing, except `{}` for Cursor. Your own hooks in those files stay. A config file that is not plain JSON is left alone, and the command says which one; a JSON one is written back with two-space indents the first time. If setup `--agents` had put the AGENTS.md section into that agent's instructions, the section is removed, so the work does not show twice. `/progress connect remove` takes everything back out.
 
 Progress shows only while some Claude Code session is open. Turns that arrive while none is open wait in the inbox, and the reporter clears files older than two days.
 
@@ -195,6 +195,27 @@ Progress shows only while some Claude Code session is open. Turns that arrive wh
 **An agent on another machine** (a cloud VM, a chat assistant) can report too: it writes its block as a fragment, and a merge step on this machine puts it into `progress.md`; see [Remote reporters](REMOTE_REPORTERS.md).
 
 **dot, and explicit reports from Codex:** the opt-in [local exchange](LOCAL-EXCHANGE.md) writes the same kind of fragment, merged by the same step, and keeps a local message queue with receipts.
+
+## The board in every agent
+
+`/progress connect` (and each session's start) also writes `agent-board.mjs` beside `progress.md`: a script that prints the board from `progress.md`, with no Claude Code needed. Every agent's board command runs it with Node.js 18 or newer: Codex and Gemini CLI come with Node; for OpenCode, Cursor, Grok Build, Hermes Agent, OpenClaw or Antigravity, install it if `node --version` finds none.
+
+| Agent | File | Type |
+|---|---|---|
+| Gemini CLI | `~/.gemini/commands/board.toml` | `/board`. Gemini asks once to allow the command to run |
+| OpenCode | `~/.config/opencode/commands/board.md` | `/board` |
+| Codex, Cursor, Grok Build, OpenClaw (and Gemini CLI, OpenCode) | `~/.agents/skills/agent-board/SKILL.md` | `$agent-board` in Codex, `/agent-board` in the others |
+| Hermes Agent | `~/.hermes/skills/agent-board/SKILL.md` | `/agent-board` |
+| Antigravity | `~/.gemini/config/skills/agent-board/SKILL.md` | `/agent-board` |
+
+Gemini CLI and OpenCode paste the board into the prompt themselves; with a skill, the agent runs the script and shows what it prints. Codex, Gemini CLI and OpenCode were run for real (against a mock model, below); the skill for Cursor, Grok Build, OpenClaw, Hermes Agent and Antigravity is written where their documentation says, and was not run. Antigravity only shows the board: it has no turn-end hook to report with yet.
+
+In a terminal, `node ~/.claude/agent-board.mjs` prints the board once, `--watch` keeps it on screen and redraws it every 2 seconds (put it in a split beside Codex), and `--html` writes `progress.html` and opens it in the browser. `--lang en` (or `zh-TW`, `zh-CN`) picks the language; by default it uses the one your Claude Code session uses.
+
+The board only reads. Turns other agents' hooks leave in the inbox are summed up into steps by an open Claude Code session; until one takes them in, the board lists them as they came, a question first. A turn that only showed the board is not counted as work.
+
+<img alt="The board in a terminal, redrawn every 2 seconds" src="images/live/terminal-en.png" width="560">
+<img alt="OpenCode 1.19.3: /board" src="images/live/opencode-en.png" width="560">
 
 ## How it keeps itself tidy
 
