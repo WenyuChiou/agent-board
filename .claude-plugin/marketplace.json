@@ -1,12 +1,12 @@
 {
   "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
-  "name": "claude-progress-pane",
-  "description": "A progress dashboard for coding agents",
+  "name": "andon",
+  "description": "Andon: one progress pane for all your AI coding agents",
   "owner": { "name": "Wenyu Chiou" },
   "plugins": [
     {
-      "name": "project-progress",
-      "description": "A progress dashboard for coding agents: every project's work in one pane, what needs you first, kept in step with the Task list",
+      "name": "andon",
+      "description": "See what every AI coding agent is doing, with whatever is waiting on you at the top: Claude Code, Codex, Gemini CLI, Cursor, OpenCode, Grok Build, Muse Code",
       "source": "./",
       "category": "productivity",
       "strict": true

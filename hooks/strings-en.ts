@@ -166,7 +166,7 @@ export const EN: Strings = {
   stepSep: '; ',
 
   // /progress
-  commandDescription: 'Progress pane: show it; open (the web page), connect (other agents), tidy, sync, add …, report, today, notify on|off, lang en|zh-TW|zh-CN',
+  commandDescription: 'Andon: show the pane; open (the web page), connect (other agents), tidy, sync, add …, report, today, notify on|off, lang en|zh-TW|zh-CN',
   commandHint: '[open|connect|tidy|sync|add …|report|today|notify on|off|lang …]',
   tidyUnreadable: "Can't read the progress or archive file. No files were changed.",
   tidyNothing: 'Nothing to archive.',

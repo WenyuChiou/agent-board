@@ -1,5 +1,5 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1200" height="675" viewBox="0 0 1200 675" role="img" aria-label="Running a few AI agents at once? / Not anymore. Whatever needs you shows up first. / Your other agents report in on their own. / Wherever you use Claude Code. / Easy on the eyes, light or dark.">
-<title>claude-progress-pane: Stop checking on your agents. Let them tell you.</title>
+<title>Andon: Stop checking on your agents. Let them tell you.</title>
 <defs><clipPath id="body"><rect x="0" y="34" width="430.40000000000003" height="404"/></clipPath></defs>
 <style>
 .sc { opacity: 0; animation-duration: 48s; animation-iteration-count: infinite; animation-timing-function: linear; }
@@ -51,7 +51,7 @@
 }
 </style>
 <rect width="1200" height="675" rx="18" fill="#15171a"/>
-<text x="64" y="70" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans TC', 'Noto Sans SC', 'PingFang TC', 'Microsoft JhengHei', 'Microsoft YaHei', sans-serif" font-size="15" font-weight="600" letter-spacing="2.5" fill="#afafb0">CLAUDE-PROGRESS-PANE</text>
+<text x="64" y="70" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans TC', 'Noto Sans SC', 'PingFang TC', 'Microsoft JhengHei', 'Microsoft YaHei', sans-serif" font-size="15" font-weight="600" letter-spacing="2.5" fill="#afafb0">ANDON</text>
 <g font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans TC', 'Noto Sans SC', 'PingFang TC', 'Microsoft JhengHei', 'Microsoft YaHei', sans-serif">
 <g class="sc" style="animation-name:k27"><text x="64" y="230" font-size="42" font-weight="700" fill="#e6e4dc">Running a few</text><text x="64" y="286" font-size="42" font-weight="700" fill="#e6e4dc">AI agents at once?</text></g>
 <g class="sc" style="animation-name:k28"><text x="64" y="230" font-size="42" font-weight="700" fill="#e6e4dc">One has been waiting</text><text x="64" y="286" font-size="42" font-weight="700" fill="#e6e4dc">on you for 20 minutes.</text><text x="64" y="360" font-size="21" fill="#afafb0">And you didn't notice.</text></g>
@@ -95,7 +95,7 @@
 <text x="703.952" y="520" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', 'Noto Sans Mono CJK TC', 'Noto Sans CJK TC', 'PingFang TC', 'Microsoft JhengHei', monospace" font-size="14" fill="#00A3AF">▸ working…</text>
 
 </g>
-<g class="sc" style="animation-name:k29" data-still="1"><text x="64" y="204" font-size="42" font-weight="700" fill="#e6e4dc">Not anymore.</text><text x="64" y="260" font-size="42" font-weight="700" fill="#e6e4dc">Whatever needs you</text><text x="64" y="316" font-size="42" font-weight="700" fill="#e6e4dc">shows up first.</text><text x="64" y="390" font-size="21" fill="#afafb0">A plugin for Claude Code</text></g>
+<g class="sc" style="animation-name:k29" data-still="1"><text x="64" y="204" font-size="42" font-weight="700" fill="#e6e4dc">Not anymore.</text><text x="64" y="260" font-size="42" font-weight="700" fill="#e6e4dc">Whatever needs you</text><text x="64" y="316" font-size="42" font-weight="700" fill="#e6e4dc">shows up first.</text><text x="64" y="390" font-size="21" fill="#afafb0">Andon, a plugin for Claude Code</text></g>
 <g class="sc" style="animation-name:k30"><text x="64" y="230" font-size="42" font-weight="700" fill="#e6e4dc">Answer right here.</text><text x="64" y="286" font-size="42" font-weight="700" fill="#e6e4dc">No window hunting.</text><text x="64" y="360" font-size="21" fill="#afafb0">One click and the agent</text><text x="64" y="390" font-size="21" fill="#afafb0">gets back to work.</text></g>
 <g class="sc" style="animation-name:k31"><text x="64" y="230" font-size="42" font-weight="700" fill="#e6e4dc">Your other agents</text><text x="64" y="286" font-size="42" font-weight="700" fill="#e6e4dc">report in on their own.</text><text x="64" y="360" font-size="21" fill="#afafb0">One command connects them.</text></g>
 <g class="sc" style="animation-name:k16"><rect x="64" y="418" width="214" height="34" rx="17" fill="#1c1e21" stroke="#2f3236"/><text x="80" y="441" font-size="16" fill="#68BE8D">✓</text><text x="102" y="441" font-size="16" fill="#e6e4dc">Claude Code</text></g>
@@ -282,10 +282,10 @@
 <text x="22.0" y="390" textLength="193.2" lengthAdjust="spacingAndGlyphs" fill="#2b2b2b">4 more waiting on you ▸</text></g>
 </g>
 <g class="sc" style="animation-name:k26">
-<text x="600" y="268" text-anchor="middle" font-size="54" font-weight="700" fill="#e6e4dc">claude-progress-pane</text>
+<text x="600" y="268" text-anchor="middle" font-size="54" font-weight="700" fill="#e6e4dc">Andon</text>
 <text x="600" y="318" text-anchor="middle" font-size="24" fill="#afafb0">Stop checking on your agents. Let them tell you.</text>
 <rect x="270" y="356" width="660" height="52" rx="10" fill="#1c1e21" stroke="#00A3AF" stroke-width="1.6"/>
-<text x="600" y="389" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', 'Noto Sans Mono CJK TC', 'Noto Sans CJK TC', 'PingFang TC', 'Microsoft JhengHei', monospace" font-size="18" fill="#e6e4dc">claude plugin install project-progress@claude-progress-pane</text>
+<text x="600" y="389" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', 'Noto Sans Mono CJK TC', 'Noto Sans CJK TC', 'PingFang TC', 'Microsoft JhengHei', monospace" font-size="18" fill="#e6e4dc">claude plugin install andon@andon</text>
 </g>
 <g>
 <rect x="64" y="626" width="1072" height="4" rx="2" fill="#2f3236"/>

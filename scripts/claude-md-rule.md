@@ -1,5 +1,5 @@
-<!-- project-progress:start -->
-## 進度面板（project-progress Mod）
+<!-- andon:start -->
+## 進度面板（Andon）
 
 右側面板會自動把你的 Task 清單同步到 `~/.claude/progress.md`（Windows：`%USERPROFILE%\.claude\progress.md`），不用手動改這個檔。
 
@@ -8,4 +8,4 @@
 - 對話壓縮後、或新對話開始時，面板會把進度補進對話。照著接下去做，不要重建已經存在的任務。
 - 不在程式專案裡的事（例如求職），直接寫進 progress.md 自己的段落：`[x]` 完成、`[~]` 正在做、`[ ]` 還沒做、`[?]` 等我、`[>]` 在跑、`[!]` 卡住、`[-]` 取消；截止日寫 `截止 10-31`。
 - 不要改 `<!-- auto … -->` 標記之間的內容，那是面板自己維護的。
-<!-- project-progress:end -->
+<!-- andon:end -->

@@ -107,19 +107,19 @@ check 'settings.json: bytes that are not UTF-8 are left alone, with a message' \
   bash -c 'cmp -s "$1/.claude/settings.json" "$1/before.json" && grep -q "left as it is" "$1/out"' _ "$dir"
 
 # 11. The marketplace entry gets autoUpdate first, in its own indent; nothing else moves.
-new_case $'{\n  "extraKnownMarketplaces": {\n    "claude-progress-pane": {\n      "source": {\n        "source": "github",\n        "repo": "WenyuChiou/claude-progress-pane"\n      }\n    }\n  },\n  "enabledPlugins": {\n    "project-progress@claude-progress-pane": true\n  }\n}\n'
+new_case $'{\n  "extraKnownMarketplaces": {\n    "andon": {\n      "source": {\n        "source": "github",\n        "repo": "WenyuChiou/andon"\n      }\n    }\n  },\n  "enabledPlugins": {\n    "andon@andon": true\n  }\n}\n'
 run /bin/bash
 check 'auto-update: the marketplace entry gets "autoUpdate": true, the rest stays' \
-  same "$dir/.claude/settings.json" $'{\n  "extraKnownMarketplaces": {\n    "claude-progress-pane": {\n      "autoUpdate": true,\n      "source": {\n        "source": "github",\n        "repo": "WenyuChiou/claude-progress-pane"\n      }\n    }\n  },\n  "enabledPlugins": {\n    "project-progress@claude-progress-pane": true\n  }\n}\n'
+  same "$dir/.claude/settings.json" $'{\n  "extraKnownMarketplaces": {\n    "andon": {\n      "autoUpdate": true,\n      "source": {\n        "source": "github",\n        "repo": "WenyuChiou/andon"\n      }\n    }\n  },\n  "enabledPlugins": {\n    "andon@andon": true\n  }\n}\n'
 
 # 12. On one line it stays on one line.
-new_case '{"extraKnownMarketplaces": {"claude-progress-pane": {"source": {"source": "github", "repo": "WenyuChiou/claude-progress-pane"}}}}'
+new_case '{"extraKnownMarketplaces": {"andon": {"source": {"source": "github", "repo": "WenyuChiou/andon"}}}}'
 run /bin/bash
 check 'auto-update: an entry on one line stays on one line' \
-  same "$dir/.claude/settings.json" '{"extraKnownMarketplaces": {"claude-progress-pane": {"autoUpdate": true, "source": {"source": "github", "repo": "WenyuChiou/claude-progress-pane"}}}}'
+  same "$dir/.claude/settings.json" '{"extraKnownMarketplaces": {"andon": {"autoUpdate": true, "source": {"source": "github", "repo": "WenyuChiou/andon"}}}}'
 
 # 13. Turned off by hand: stays off, and the file is not touched.
-off=$'{\n  "extraKnownMarketplaces": {\n    "claude-progress-pane": {\n      "source": {\n        "source": "github",\n        "repo": "WenyuChiou/claude-progress-pane"\n      },\n      "autoUpdate": false\n    }\n  }\n}\n'
+off=$'{\n  "extraKnownMarketplaces": {\n    "andon": {\n      "source": {\n        "source": "github",\n        "repo": "WenyuChiou/andon"\n      },\n      "autoUpdate": false\n    }\n  }\n}\n'
 new_case "$off"
 run /bin/bash
 check 'auto-update: "autoUpdate": false is left alone' \
@@ -137,7 +137,7 @@ mkdir -p "$dir/.codex" "$dir/.gemini"
 printf '# My rules\n\nUse tabs.\n' > "$dir/.codex/AGENTS.md"
 run /bin/bash --agents
 check 'agents: Codex keeps its own text and gets the section after it' \
-  bash -c 'head -1 "$1" | grep -qx "# My rules" && grep -qx "Use tabs." "$1" && grep -q "^## Report your progress to the progress pane" "$1" && grep -q "claude-progress-pane:end" "$1" && [ -f "$1.bak" ]' _ "$dir/.codex/AGENTS.md"
+  bash -c 'head -1 "$1" | grep -qx "# My rules" && grep -qx "Use tabs." "$1" && grep -q "^## Report your progress to the progress pane" "$1" && grep -q "andon:end" "$1" && [ -f "$1.bak" ]' _ "$dir/.codex/AGENTS.md"
 check 'agents: Gemini CLI gets GEMINI.md with the section' grep -q "agent=NAME" "$dir/.gemini/GEMINI.md"
 check 'agents: OpenCode, not installed here, gets nothing' test ! -e "$dir/.config/opencode/AGENTS.md"
 cp "$dir/.codex/AGENTS.md" "$dir/codex-first"
@@ -156,15 +156,30 @@ check 'agents: without --agents it only says which agents it found' \
   bash -c 'grep -q "codex installed here too" "$1/out" && [ "$(cat "$1/.codex/AGENTS.override.md")" = "Override rules" ]' _ "$dir"
 run /bin/bash --agents=codex,opencode
 check 'agents: Codex reads AGENTS.override.md when it has text, so the section goes there' \
-  bash -c 'grep -q "claude-progress-pane:start" "$1/.codex/AGENTS.override.md" && [ ! -e "$1/.codex/AGENTS.md" ]' _ "$dir"
-check 'agents: a named agent gets the section even before it has a folder' grep -q "claude-progress-pane:start" "$dir/.config/opencode/AGENTS.md"
+  bash -c 'grep -q "andon:start" "$1/.codex/AGENTS.override.md" && [ ! -e "$1/.codex/AGENTS.md" ]' _ "$dir"
+check 'agents: a named agent gets the section even before it has a folder' grep -q "andon:start" "$dir/.config/opencode/AGENTS.md"
 run /bin/bash --agents=copilot
 check 'agents: an unknown name is refused' grep -q "unknown agent: copilot" "$dir/out"
 printf '{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"sh progress-report.sh codex turn"}]}]}}' > "$dir/.codex/hooks.json"
 rm -f "$dir/.codex/AGENTS.override.md"
 run /bin/bash --agents=codex
 check 'agents: an agent hooked by /progress connect gets no section' \
-  bash -c 'grep -q "codex: reports through its hook" "$1/out" && ! grep -q "claude-progress-pane:start" "$1/.codex/AGENTS.md" 2>/dev/null' _ "$dir"
+  bash -c 'grep -q "codex: reports through its hook" "$1/out" && ! grep -q "andon:start" "$1/.codex/AGENTS.md" 2>/dev/null' _ "$dir"
+
+# 17. Written under the old name: the agent section is replaced, not doubled; an auto-update
+# turned off then stays off; the old CLAUDE.md block goes.
+new_case $'{\n  "extraKnownMarketplaces": {\n    "claude-progress-pane": {\n      "autoUpdate": false\n    },\n    "andon": {\n      "source": {\n        "source": "github",\n        "repo": "WenyuChiou/andon"\n      }\n    }\n  }\n}\n'
+cp "$dir/.claude/settings.json" "$dir/before.json"
+mkdir -p "$dir/.codex"
+printf '# My rules\n\n<!-- claude-progress-pane:start -->\n## Report your progress to the progress pane\nold text\n<!-- claude-progress-pane:end -->\n' > "$dir/.codex/AGENTS.md"
+printf '# Mine\n\n<!-- project-progress:start -->\n## 進度面板（project-progress Mod）\n<!-- project-progress:end -->\n' > "$dir/.claude/CLAUDE.md"
+run /bin/bash --agents=codex
+check 'old name: the Codex section is replaced by one under the new markers' \
+  bash -c '[ "$(grep -c "andon:start" "$1")" = 1 ] && ! grep -q "claude-progress-pane" "$1" && ! grep -q "old text" "$1" && head -1 "$1" | grep -qx "# My rules"' _ "$dir/.codex/AGENTS.md"
+check 'old name: an auto-update turned off under it stays off' cmp -s "$dir/.claude/settings.json" "$dir/before.json"
+check 'old name: the old CLAUDE.md block goes' bash -c '[ "$(cat "$1")" = "# Mine" ]' _ "$dir/.claude/CLAUDE.md"
+run /bin/bash --remove-agents
+check 'old name: --remove-agents takes the new section out' bash -c '[ "$(cat "$1")" = "# My rules" ]' _ "$dir/.codex/AGENTS.md"
 
 echo
 if [ "$fails" -gt 0 ]; then echo "$fails fail"; exit 1; fi

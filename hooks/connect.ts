@@ -5,8 +5,8 @@
 // Arguments: the agent's name, `turn` or `end`, then optionally the JSON itself (as Codex's
 // legacy notify passes it) instead of on stdin.
 export const reporterSh = (inbox: string): string => `#!/bin/sh
-# Written by the project-progress plugin (/progress connect). An agent's hook runs it at the
-# end of a turn or a session; the progress pane reads what it saves.
+# Written by the Andon plugin (/progress connect). An agent's hook runs it at the end of
+# a turn or a session; the Andon pane reads what it saves.
 exec 2>/dev/null
 agent="\${1:-agent}"
 event="\${2:-turn}"
@@ -30,8 +30,8 @@ find "$dir" -name '*.json' -mtime +2 -exec rm -f {} +
 exit 0
 `
 
-export const reporterPs1 = (inbox: string): string => `# Written by the project-progress plugin (/progress connect). An agent's hook runs it at the
-# end of a turn or a session; the progress pane reads what it saves.
+export const reporterPs1 = (inbox: string): string => `# Written by the Andon plugin (/progress connect). An agent's hook runs it at the end of
+# a turn or a session; the Andon pane reads what it saves.
 param([string]$Agent = 'agent', [string]$Event = 'turn', [string]$Payload = '')
 $ErrorActionPreference = 'SilentlyContinue'
 $dir = ${psQuote(inbox)}
@@ -135,11 +135,16 @@ export const readConfig = (text: string): Json | null => {
 
 export const writeConfig = (config: Json): string => `${JSON.stringify(config, null, 2)}\n`
 
-// The section setup --agents puts in an agent's instruction file. A hook replaces it, so the
-// agent's work does not show twice.
-const SECTION = /\n*<!-- claude-progress-pane:start -->[\s\S]*?<!-- claude-progress-pane:end -->\n*/
+// The section setup --agents puts in an agent's instruction file, under the plugin's name or
+// the one it had before (claude-progress-pane). A hook replaces it, so the agent's work does
+// not show twice.
+const SECTION = /\n*<!-- (andon|claude-progress-pane):start -->[\s\S]*?<!-- \1:end -->\n*/g
 
-export const withoutSection = (text: string): string => (SECTION.test(text) ? text.replace(SECTION, '\n').replace(/^\n+/, '') : text)
+export const withoutSection = (text: string): string => {
+  const after = text.replace(SECTION, '\n')
+
+  return after === text ? text : after.replace(/^\n+/, '')
+}
 
 // Where each agent keeps what `/progress connect` changes, and how. `dir` says the agent is
 // installed (its folder under the home directory); `edit` turns the file's text into the
@@ -151,6 +156,8 @@ export type AgentHook = {
   label: string
   dir: string
   file: string
+  // The file an earlier name of the plugin wrote instead, taken away when connecting or removing.
+  old?: string
   edit: (text: string, remove: boolean) => string | null | typeof DELETE
 }
 
@@ -191,10 +198,10 @@ export const agentHooks = (ctx: ConnectContext): AgentHook[] => {
       file: join(ctx, '.gemini', 'settings.json'),
       edit: jsonEdit(config =>
         withGroupedHook(
-          withGroupedHook(config, 'AfterAgent', turn('gemini'), { name: 'progress-pane', timeout: 5000 }),
+          withGroupedHook(config, 'AfterAgent', turn('gemini'), { name: 'andon', timeout: 5000 }),
           'SessionEnd',
           end('gemini'),
-          { name: 'progress-pane-end', timeout: 5000 },
+          { name: 'andon-end', timeout: 5000 },
         ),
       ),
     },
@@ -214,7 +221,8 @@ export const agentHooks = (ctx: ConnectContext): AgentHook[] => {
       agent: 'grok',
       label: 'Grok Build',
       dir: ctx.grokHome,
-      file: [ctx.grokHome, 'hooks', 'progress-pane.json'].join(ctx.sep),
+      file: [ctx.grokHome, 'hooks', 'andon.json'].join(ctx.sep),
+      old: [ctx.grokHome, 'hooks', 'progress-pane.json'].join(ctx.sep),
       edit: (text, remove) =>
         remove
           ? text.trim() === ''
@@ -238,7 +246,8 @@ export const agentHooks = (ctx: ConnectContext): AgentHook[] => {
       agent: 'opencode',
       label: 'OpenCode',
       dir: join(ctx, '.config', 'opencode'),
-      file: join(ctx, '.config', 'opencode', 'plugin', 'progress-pane.js'),
+      file: join(ctx, '.config', 'opencode', 'plugin', 'andon.js'),
+      old: join(ctx, '.config', 'opencode', 'plugin', 'progress-pane.js'),
       edit: (text, remove) => (remove ? (text.trim() === '' ? null : DELETE) : opencodePlugin(ctx)),
     },
   ]
@@ -247,8 +256,8 @@ export const agentHooks = (ctx: ConnectContext): AgentHook[] => {
 // OpenCode takes plugins, not commands: this one writes the session's last exchange into the
 // inbox when the session goes idle (a subagent's session aside), and an end when it is
 // deleted. Every export of a plugin file must be a function.
-export const opencodePlugin = (ctx: ConnectContext): string => `// Written by the project-progress plugin (/progress connect): reports each finished turn to
-// the progress pane.
+export const opencodePlugin = (ctx: ConnectContext): string => `// Written by the Andon plugin (/progress connect): reports each finished turn to the Andon
+// pane.
 import { mkdirSync, renameSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 
@@ -269,7 +278,7 @@ const textOf = message =>
     .map(part => part.text)
     .join('\\n')
 
-export const ProgressPane = async ({ client, directory }) => ({
+export const Andon = async ({ client, directory }) => ({
   event: async ({ event }) => {
     try {
       if (event.type === 'session.idle') {

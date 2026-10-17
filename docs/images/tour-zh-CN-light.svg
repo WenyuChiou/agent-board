@@ -1,5 +1,5 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1200" height="675" viewBox="0 0 1200 675" role="img" aria-label="同时开好几个 AI agent 吗？ / 现在不会了。 谁在等你， 一眼就看到。 / 其他 agent 也会自己汇报。 / Claude Code 在哪， 它就在哪。 / 浅色深色 都看着舒服。">
-<title>claude-progress-pane: 别再一直盯着 agent 了，让它们来告诉你。</title>
+<title>Andon: 别再一直盯着 agent 了，让它们来告诉你。</title>
 <defs><clipPath id="body"><rect x="0" y="34" width="430.40000000000003" height="404"/></clipPath></defs>
 <style>
 .sc { opacity: 0; animation-duration: 48s; animation-iteration-count: infinite; animation-timing-function: linear; }
@@ -51,7 +51,7 @@
 }
 </style>
 <rect width="1200" height="675" rx="18" fill="#f6f5f0"/>
-<text x="64" y="70" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans TC', 'Noto Sans SC', 'PingFang TC', 'Microsoft JhengHei', 'Microsoft YaHei', sans-serif" font-size="15" font-weight="600" letter-spacing="2.5" fill="#595857">CLAUDE-PROGRESS-PANE</text>
+<text x="64" y="70" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans TC', 'Noto Sans SC', 'PingFang TC', 'Microsoft JhengHei', 'Microsoft YaHei', sans-serif" font-size="15" font-weight="600" letter-spacing="2.5" fill="#595857">ANDON</text>
 <g font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans TC', 'Noto Sans SC', 'PingFang TC', 'Microsoft JhengHei', 'Microsoft YaHei', sans-serif">
 <g class="sc" style="animation-name:k27"><text x="64" y="230" font-size="40" font-weight="700" fill="#2b2b2b">同时开好几个</text><text x="64" y="286" font-size="40" font-weight="700" fill="#2b2b2b">AI agent 吗？</text></g>
 <g class="sc" style="animation-name:k28"><text x="64" y="230" font-size="40" font-weight="700" fill="#2b2b2b">有一个已经</text><text x="64" y="286" font-size="40" font-weight="700" fill="#2b2b2b">等你 20 分钟了。</text><text x="64" y="360" font-size="21" fill="#595857">你完全没发现。</text></g>
@@ -95,7 +95,7 @@
 <text x="703.952" y="520" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', 'Noto Sans Mono CJK TC', 'Noto Sans CJK TC', 'PingFang TC', 'Microsoft JhengHei', monospace" font-size="14" fill="#165E83">▸ 工作中…</text>
 
 </g>
-<g class="sc" style="animation-name:k29" data-still="1"><text x="64" y="204" font-size="40" font-weight="700" fill="#2b2b2b">现在不会了。</text><text x="64" y="260" font-size="40" font-weight="700" fill="#2b2b2b">谁在等你，</text><text x="64" y="316" font-size="40" font-weight="700" fill="#2b2b2b">一眼就看到。</text><text x="64" y="390" font-size="21" fill="#595857">Claude Code 插件</text></g>
+<g class="sc" style="animation-name:k29" data-still="1"><text x="64" y="204" font-size="40" font-weight="700" fill="#2b2b2b">现在不会了。</text><text x="64" y="260" font-size="40" font-weight="700" fill="#2b2b2b">谁在等你，</text><text x="64" y="316" font-size="40" font-weight="700" fill="#2b2b2b">一眼就看到。</text><text x="64" y="390" font-size="21" fill="#595857">Andon，Claude Code 插件</text></g>
 <g class="sc" style="animation-name:k30"><text x="64" y="230" font-size="40" font-weight="700" fill="#2b2b2b">直接在这里回，</text><text x="64" y="286" font-size="40" font-weight="700" fill="#2b2b2b">不用到处找窗口。</text><text x="64" y="360" font-size="21" fill="#595857">点一下，agent 就接着干活。</text></g>
 <g class="sc" style="animation-name:k31"><text x="64" y="230" font-size="40" font-weight="700" fill="#2b2b2b">其他 agent</text><text x="64" y="286" font-size="40" font-weight="700" fill="#2b2b2b">也会自己汇报。</text><text x="64" y="360" font-size="21" fill="#595857">一行命令接上，之后不用管。</text></g>
 <g class="sc" style="animation-name:k16"><rect x="64" y="418" width="214" height="34" rx="17" fill="#ffffff" stroke="#dcdcd2"/><text x="80" y="441" font-size="16" fill="#007B43">✓</text><text x="102" y="441" font-size="16" fill="#2b2b2b">Claude Code</text></g>
@@ -353,10 +353,10 @@
 <text x="366.4" y="430" textLength="25.2" lengthAdjust="spacingAndGlyphs" fill="#AFAFB0">2/5</text></g>
 </g>
 <g class="sc" style="animation-name:k26">
-<text x="600" y="268" text-anchor="middle" font-size="54" font-weight="700" fill="#2b2b2b">claude-progress-pane</text>
+<text x="600" y="268" text-anchor="middle" font-size="54" font-weight="700" fill="#2b2b2b">Andon</text>
 <text x="600" y="318" text-anchor="middle" font-size="24" fill="#595857">别再一直盯着 agent 了，让它们来告诉你。</text>
 <rect x="270" y="356" width="660" height="52" rx="10" fill="#ffffff" stroke="#165E83" stroke-width="1.6"/>
-<text x="600" y="389" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', 'Noto Sans Mono CJK TC', 'Noto Sans CJK TC', 'PingFang TC', 'Microsoft JhengHei', monospace" font-size="18" fill="#2b2b2b">claude plugin install project-progress@claude-progress-pane</text>
+<text x="600" y="389" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', 'Noto Sans Mono CJK TC', 'Noto Sans CJK TC', 'PingFang TC', 'Microsoft JhengHei', monospace" font-size="18" fill="#2b2b2b">claude plugin install andon@andon</text>
 </g>
 <g>
 <rect x="64" y="626" width="1072" height="4" rx="2" fill="#dcdcd2"/>

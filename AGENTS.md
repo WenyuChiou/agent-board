@@ -1,6 +1,6 @@
 # AGENTS.md
 
-This repository is `project-progress`, a Claude Code plugin (a "mod") that draws a side pane of every project's work from one Markdown file, `~/.claude/progress.md`. The file format is specified in [docs/FORMAT.md](docs/FORMAT.md).
+This repository is Andon (plugin name `andon`), a Claude Code plugin (a "mod") that draws a side pane of every project's work from one Markdown file, `~/.claude/progress.md`. The file format is specified in [docs/FORMAT.md](docs/FORMAT.md).
 
 This file has two parts:
 
@@ -59,7 +59,7 @@ If you cannot run `claude` in your environment, say so in your report. Do not cl
 | `hooks/dashboard.ts` | Builds `progress.html` from a view: a standalone page that reloads itself every 30 seconds. `register.tsx` writes it beside `progress.md` (same name, `.html`), after it reads a changed file and on its 30-second tick, at most once a minute and only when the page changed; `/progress open` writes it at once and opens it in the browser. |
 | `types/index.d.ts` | Shared types and the plugin's state. |
 | `tests/` | `parse.test.ts` (parser), `logic.test.ts` (blocks, mirror, view logic), `features.test.ts` (later features through the pure modules: ask kinds, journal, PR and CI, quick add, palette, languages, `progress.html`), `pane.test.tsx` (the mod and the pane against a mock engine). `setup.check.sh` and `setup.check.ps1` are the installer checks; `claude plugin test` does not run them. |
-| `scripts/` | `setup.sh`, `setup.ps1` and the rule text. With `--agents` / `-Agents`, the setup scripts copy the last section of this file into the global instructions of Codex, Gemini CLI and OpenCode, between `<!-- claude-progress-pane:start -->` and `<!-- claude-progress-pane:end -->`; keep that section's heading as it is, since they find it by that heading. |
+| `scripts/` | `setup.sh`, `setup.ps1` and the rule text. With `--agents` / `-Agents`, the setup scripts copy the last section of this file into the global instructions of Codex, Gemini CLI and OpenCode, between `<!-- andon:start -->` and `<!-- andon:end -->` (a section under the old `claude-progress-pane` markers is found and replaced too); keep that section's heading as it is, since they find it by that heading. |
 | `.github/workflows/test.yml` | CI: `validate --strict`, `plugin test` and the installer check for the system, on Ubuntu and Windows. No `tsc -p .`. |
 | `docs/` | `FORMAT.md`, the format spec. `docs/images/` holds the README's images, drawn from sample data by `docs/preview/` (`render.ts` lays `drawPane`'s tree out as a terminal grid and writes SVG; `png.mjs` takes the `progress.html` screenshots); do not edit them by hand. |
 | `.github/` | CI, the issue forms and the pull request template. `SECURITY.md` and `CODE_OF_CONDUCT.md` are at the root. |
@@ -96,7 +96,7 @@ Release steps and the rules for changing the format are in [CONTRIBUTING.md](CON
 
 ## Report your progress to the progress pane
 
-The user watches a progress pane fed by `~/.claude/progress.md` (Windows: `%USERPROFILE%\.claude\progress.md`; the file named by `$CLAUDE_PROGRESS_FILE` if set, else `progress.md` in `$CLAUDE_CONFIG_DIR` if set). For work with two or more steps, keep one block of your own in it. Format: https://github.com/WenyuChiou/claude-progress-pane/blob/main/docs/FORMAT.md
+The user watches a progress pane fed by `~/.claude/progress.md` (Windows: `%USERPROFILE%\.claude\progress.md`; the file named by `$CLAUDE_PROGRESS_FILE` if set, else `progress.md` in `$CLAUDE_CONFIG_DIR` if set). For work with two or more steps, keep one block of your own in it. Format: https://github.com/WenyuChiou/andon/blob/main/docs/FORMAT.md
 
 ```markdown
 <!-- auto session=ID agent=NAME state=working updated=2026-01-31T09:30:00Z -->

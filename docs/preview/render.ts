@@ -55,7 +55,7 @@ const WORDS: Record<Lang, {
 }> = {
   en: {
     kicker: 'CLAUDE CODE PLUGIN  ·  MIT',
-    tagline: ['A progress dashboard for coding agents.', 'What needs you first, every project at a glance.'],
+    tagline: ['One pane for every AI coding agent.', 'Whatever is waiting on you comes first.'],
     features: [
       ['●', 'waiting', 'One question at a time, with a button per answer'],
       ['▸', 'accent', 'Every agent reports through its own hooks'],
@@ -82,7 +82,7 @@ const WORDS: Record<Lang, {
   },
   'zh-TW': {
     kicker: 'CLAUDE CODE 外掛  ·  MIT',
-    tagline: ['給 coding agent 用的進度看板。', '需要你的事放最前面，每個專案一眼看完。'],
+    tagline: ['所有 AI coding agent，一個面板看完。', '等你的事，永遠排第一個。'],
     features: [
       ['●', 'waiting', '一次一個問題，每個答案一個按鈕'],
       ['▸', 'accent', '各家 agent 用自己的 hook 回報，不用記得'],
@@ -109,7 +109,7 @@ const WORDS: Record<Lang, {
   },
   'zh-CN': {
     kicker: 'CLAUDE CODE 插件  ·  MIT',
-    tagline: ['给 coding agent 用的进度看板。', '需要你的事放最前面，每个项目一眼看完。'],
+    tagline: ['所有 AI coding agent，一个面板看完。', '等你的事，永远排第一个。'],
     features: [
       ['●', 'waiting', '一次一个问题，每个答案一个按钮'],
       ['▸', 'accent', '各家 agent 用自己的 hook 汇报，不用记得'],
@@ -227,13 +227,13 @@ const hero = (lang: Lang, mode: Mode): string => {
         `<text x="104" y="${y}" font-family="${SANS}" font-size="${isCjk ? 20 : 19}" fill="${page.ink}">${esc(text)}</text>`
     })
     .join('\n')
-  return `<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="640" viewBox="0 0 1280 640" role="img" aria-label="claude-progress-pane: ${esc(w.tagline.join(' '))}">
-<title>claude-progress-pane</title>
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="640" viewBox="0 0 1280 640" role="img" aria-label="Andon: ${esc(w.tagline.join(' '))}">
+<title>Andon</title>
 <defs><clipPath id="edge"><rect width="1280" height="640" rx="20"/></clipPath></defs>
 <g clip-path="url(#edge)">
 <rect width="1280" height="640" fill="${page.ground}"/>
 <text x="72" y="128" font-family="${SANS}" font-size="15" font-weight="600" letter-spacing="3" fill="${page.muted}">${esc(w.kicker)}</text>
-<text x="70" y="196" font-family="${SANS}" font-size="50" font-weight="700" fill="${page.ink}">claude-progress-pane</text>
+<text x="70" y="196" font-family="${SANS}" font-size="50" font-weight="700" fill="${page.ink}">Andon</text>
 <text x="72" y="256" font-family="${SANS}" font-size="${isCjk ? 25 : 24}" fill="${page.ink}">${esc(w.tagline[0])}</text>
 <text x="72" y="294" font-family="${SANS}" font-size="${isCjk ? 25 : 24}" fill="${page.muted}">${esc(w.tagline[1])}</text>
 ${features}
@@ -323,7 +323,7 @@ const TOUR: Record<Lang, TourWords> = {
     waiting: ['One has been waiting', 'on you for 20 minutes.'],
     waitingSub: ["And you didn't notice."],
     answer: ['Not anymore.', 'Whatever needs you', 'shows up first.'],
-    answerSub: 'A plugin for Claude Code',
+    answerSub: 'Andon, a plugin for Claude Code',
     press: ['Answer right here.', 'No window hunting.'],
     pressSub: ['One click and the agent', 'gets back to work.'],
     hooks: ['Your other agents', 'report in on their own.'],
@@ -346,7 +346,7 @@ const TOUR: Record<Lang, TourWords> = {
     waiting: ['有一個已經', '等你 20 分鐘了。'],
     waitingSub: ['你完全沒發現。'],
     answer: ['現在不會了。', '誰在等你，', '一眼就看到。'],
-    answerSub: 'Claude Code 外掛',
+    answerSub: 'Andon，Claude Code 外掛',
     press: ['直接在這裡回，', '不用到處找視窗。'],
     pressSub: ['按一下，agent 就繼續做。'],
     hooks: ['其他 agent', '也會自己回報。'],
@@ -369,7 +369,7 @@ const TOUR: Record<Lang, TourWords> = {
     waiting: ['有一个已经', '等你 20 分钟了。'],
     waitingSub: ['你完全没发现。'],
     answer: ['现在不会了。', '谁在等你，', '一眼就看到。'],
-    answerSub: 'Claude Code 插件',
+    answerSub: 'Andon，Claude Code 插件',
     press: ['直接在这里回，', '不用到处找窗口。'],
     pressSub: ['点一下，agent 就接着干活。'],
     hooks: ['其他 agent', '也会自己汇报。'],
@@ -556,9 +556,9 @@ ${isWaiting ? `<g class="${timed(at.waiting[0] + 0.4, at.waiting[1])}"><text cla
     .join('')}<text x="64" y="${352 + 2 * 94 - 4}" font-size="16" fill="${page.muted}">${esc(w.coloursSub)}</text></g>`
 
   // the end card.
-  const command = 'claude plugin install project-progress@claude-progress-pane'
+  const command = 'claude plugin install andon@andon'
   const endCard = `<g class="${timed(at.end[0], LOOP + 0.2)}">
-<text x="${W / 2}" y="268" text-anchor="middle" font-size="54" font-weight="700" fill="${page.ink}">claude-progress-pane</text>
+<text x="${W / 2}" y="268" text-anchor="middle" font-size="54" font-weight="700" fill="${page.ink}">Andon</text>
 <text x="${W / 2}" y="318" text-anchor="middle" font-size="24" fill="${page.muted}">${esc(w.end)}</text>
 <rect x="${W / 2 - 330}" y="356" width="660" height="52" rx="10" fill="${page.card}" stroke="${pal.accent}" stroke-width="1.6"/>
 <text x="${W / 2}" y="389" text-anchor="middle" font-family="${MONO}" font-size="18" fill="${page.ink}">${esc(command)}</text>
@@ -597,7 +597,7 @@ ${marks.map(([at, label]) => `<text x="${track.x + (at / LOOP) * track.w}" y="${
   const label = [w.why, w.answer, w.hooks, w.runs, w.colours].map(lines => lines.join(' ')).join(' / ')
 
   return `<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}" role="img" aria-label="${esc(label)}">
-<title>claude-progress-pane: ${esc(w.end)}</title>
+<title>Andon: ${esc(w.end)}</title>
 <defs><clipPath id="body"><rect x="0" y="${BAR}" width="${windowWidth}" height="${bodyH}"/></clipPath></defs>
 <style>
 .sc { opacity: 0; animation-duration: ${LOOP}s; animation-iteration-count: infinite; animation-timing-function: linear; }
@@ -614,7 +614,7 @@ ${keyframes.join('\n')}
 }
 </style>
 <rect width="${W}" height="${H}" rx="18" fill="${page.ground}"/>
-<text x="64" y="70" font-family="${SANS}" font-size="15" font-weight="600" letter-spacing="2.5" fill="${page.muted}">CLAUDE-PROGRESS-PANE</text>
+<text x="64" y="70" font-family="${SANS}" font-size="15" font-weight="600" letter-spacing="2.5" fill="${page.muted}">ANDON</text>
 <g font-family="${SANS}">
 ${scenes.join('\n')}
 ${timeline}

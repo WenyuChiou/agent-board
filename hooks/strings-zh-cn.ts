@@ -165,7 +165,7 @@ export const ZH_CN: Strings = {
   stepSep: '；',
 
   // /progress
-  commandDescription: '进度面板：打开；open 打开网页版、connect 接上其他 agent、整理、同步、加 …、周报、今天、通知 开/关、lang en|zh-TW|zh-CN',
+  commandDescription: 'Andon 进度面板：打开；open 打开网页版、connect 接上其他 agent、整理、同步、加 …、周报、今天、通知 开/关、lang en|zh-TW|zh-CN',
   commandHint: '[open|connect|整理|同步|加 …|周报|今天|通知 开/关|lang …]',
   tidyUnreadable: '读不到进度文件或归档文件，没有动任何文件。',
   tidyNothing: '没有要归档的。',

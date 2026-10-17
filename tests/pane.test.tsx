@@ -4,7 +4,7 @@ import type { Engine, MockClock } from 'claude-code/testing'
 
 const FILE = '/home/me/.claude/progress.md'
 const SESSION = '2be48af2-6193-5040-aacc-e0546d6784f1'
-const PANE = { plugin: 'project-progress', component: 'Pane', requestId: 'project-progress' } as const
+const PANE = { plugin: 'andon', component: 'Pane', requestId: 'andon' } as const
 
 const PROPS: RenderPropsOf['Pane'] = {
   title: '進度',
@@ -449,7 +449,7 @@ test('the rule rides the system prompt only while the session has a Task list', 
   const base = { model: 'claude-test', promptModel: 'claude-test', surfaces: [], outputStyle: null, traits: [] }
 
   const withTasks = await $.prompt.compose({ ...base, tools: ['Read', 'TaskCreate'] })
-  expect(withTasks.sections.map(s => s.id)).toEqual(['intro', 'project-progress:rule'])
+  expect(withTasks.sections.map(s => s.id)).toEqual(['intro', 'andon:rule'])
   expect(withTasks.sections[1]?.text).toContain('TaskCreate')
   expect(withTasks.sections[1]?.scope).toBe('session')
 
@@ -815,7 +815,7 @@ test('with the language option set to English, the pane, the file and the rule s
   await ui.unmount()
 
   const composed = await $.prompt.compose({ model: 'm', promptModel: 'm', surfaces: [], outputStyle: null, traits: [], tools: ['TaskCreate'] })
-  expect(composed.sections[1]?.text).toContain('# Progress pane (project-progress)')
+  expect(composed.sections[1]?.text).toContain('# Progress pane (Andon)')
 })
 
 test('/progress lang switches the language and remembers it; auto goes back to the system', async ($, on) => {
@@ -843,7 +843,7 @@ test('progress.html is written beside progress.md, and /progress open opens it i
   await start($, '幫我重做進度面板')
   await $.tool.call({ tool: 'TaskCreate', subject: '讀 API', description: '' })
   const page = world.files.get('/home/me/.claude/progress.html') ?? ''
-  expect(page).toContain('<title>進度</title>')
+  expect(page).toContain('<title>進度 · Andon</title>')
   expect(page).toContain('Google 暑期實習')
 
   const result = await $.command.run({ ...TIDY, args: 'open' })
@@ -1150,11 +1150,14 @@ test('another agent’s turn, left in the inbox by its hook, becomes its block o
 
 
 test('/progress connect hooks the installed agents into the pane once, keeps their own hooks, and takes ours back out', async ($, on) => {
+  // Both written under the plugin's earlier name, claude-progress-pane: they go.
   const section = '<!-- claude-progress-pane:start -->\n## Report your progress\n<!-- claude-progress-pane:end -->\n'
+  const oldGrok = '/home/me/.grok/hooks/progress-pane.json'
   const world: World = {
     files: new Map([
       ['/home/me/.codex/config.toml', 'model = "gpt-6"\n'],
       ['/home/me/.codex/AGENTS.md', `# Mine\n\nUse tabs.\n\n${section}`],
+      [oldGrok, '{"hooks":{}}'],
       ['/home/me/.cursor/hooks.json', JSON.stringify({ version: 1, hooks: { stop: [{ command: 'say done' }] } })],
       ['/home/me/.gemini/settings.json', '{ // my comment\n "theme": "dark" }'],
     ]),
@@ -1166,7 +1169,9 @@ test('/progress connect hooks the installed agents into the pane once, keeps the
   await $.session.start({ cwd: '/work/persona_framework', surface: 'terminal', isInteractive: true })
 
   const first = await $.command.run({ ...TIDY, args: 'connect' })
-  expect(first.text).toContain('已接上：Codex、Cursor。')
+  expect(first.text).toContain('已接上：Codex、Cursor、Grok Build。')
+  expect(world.ran).toContainEqual(['rm', '-f', oldGrok])
+  expect(world.files.get('/home/me/.grok/hooks/andon.json')).toContain("progress-report.sh' grok turn")
   expect(first.text).toContain('Codex 第一次要在它的 /hooks 裡核准這個 hook 才會跑。')
   expect(first.text).toContain('Gemini CLI 的設定檔讀不懂，沒有動它：/home/me/.gemini/settings.json')
   expect(world.files.get('/home/me/.claude/progress-report.sh')).toContain("dir='/home/me/.claude/progress-inbox'")
@@ -1184,7 +1189,7 @@ test('/progress connect hooks the installed agents into the pane once, keeps the
   expect(cursor.hooks.sessionEnd).toEqual([{ command: "sh '/home/me/.claude/progress-report.sh' cursor end" }])
 
   const removed = await $.command.run({ ...TIDY, args: 'connect remove' })
-  expect(removed.text).toContain('已拿掉：Codex、Cursor。')
+  expect(removed.text).toContain('已拿掉：Codex、Cursor、Grok Build。')
   expect(JSON.parse(world.files.get('/home/me/.cursor/hooks.json') ?? '{}').hooks).toEqual({ stop: [{ command: 'say done' }] })
   expect(JSON.parse(world.files.get('/home/me/.codex/hooks.json') ?? '{}').hooks).toEqual({})
 })

@@ -11,14 +11,14 @@ Needs Claude Code 2.1.287 or newer. Tested on 2.1.301 and 2.1.302.
 At the prompt of a Claude Code terminal session:
 
 ```
-/plugin install project-progress --marketplace WenyuChiou/claude-progress-pane
+/plugin install andon --marketplace WenyuChiou/andon
 ```
 
 Answer `y` to add the marketplace and pick the user scope. Or from a shell:
 
 ```
-claude plugin marketplace add WenyuChiou/claude-progress-pane
-claude plugin install project-progress@claude-progress-pane
+claude plugin marketplace add WenyuChiou/andon
+claude plugin install andon@andon
 ```
 
 ### 2. Run the setup script
@@ -28,13 +28,13 @@ Optional. It makes the two settings a plugin cannot make for itself, and is safe
 Windows (PowerShell):
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File "$env:USERPROFILE\.claude\plugins\marketplaces\claude-progress-pane\scripts\setup.ps1"
+powershell -ExecutionPolicy Bypass -File "$env:USERPROFILE\.claude\plugins\marketplaces\andon\scripts\setup.ps1"
 ```
 
 macOS / Linux:
 
 ```bash
-bash ~/.claude/plugins/marketplaces/claude-progress-pane/scripts/setup.sh
+bash ~/.claude/plugins/marketplaces/andon/scripts/setup.sh
 ```
 
 What it does:
@@ -204,8 +204,8 @@ The sweep runs when a session starts and every hour after. `/progress tidy` runs
 With auto-update on (the setup script turns it on), new versions arrive by themselves. To update by hand:
 
 ```
-claude plugin marketplace update claude-progress-pane
-claude plugin update project-progress@claude-progress-pane
+claude plugin marketplace update andon
+claude plugin update andon@andon
 ```
 
 then `/reload-plugins` in a running session, or start a new one.
@@ -213,11 +213,25 @@ then `/reload-plugins` in a running session, or start a new one.
 To uninstall:
 
 ```
-claude plugin uninstall project-progress@claude-progress-pane
-claude plugin marketplace remove claude-progress-pane
+claude plugin uninstall andon@andon
+claude plugin marketplace remove andon
 ```
 
 `progress.md`, its archives and journals, and the line in your shell profile stay.
+
+### Coming from the old name
+
+Before 0.10 the plugin was `project-progress`, from the `claude-progress-pane` marketplace. The setup script swaps it for you. By hand:
+
+```
+claude plugin uninstall project-progress@claude-progress-pane
+claude plugin marketplace remove claude-progress-pane
+claude plugin marketplace add WenyuChiou/andon
+claude plugin install andon@andon
+claude -p "/progress connect"
+```
+
+The last line moves the hooks in your other agents to the new name. `progress.md` stays as it is. The pane's language and notification settings go back to their defaults; set them again with `/progress lang` and `/progress notify`.
 
 ## Troubleshooting
 

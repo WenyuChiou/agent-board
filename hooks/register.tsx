@@ -64,7 +64,7 @@ import { keepRecent, remindersOf } from './remind'
 import { buildView, statusLine } from './view'
 import type { StepRef, TaskRef, TaskRow } from './view'
 
-const PANE = 'project-progress'
+const PANE = 'andon'
 const POLL_MS = 2000
 const TICK_MS = 30 * 1000
 // How often the inbox of other agents' turns is looked at: a stat, and a read when it changed.
@@ -77,26 +77,26 @@ const DAY = 24 * 60 * 60 * 1000
 
 const EMPTY: ProgressSnapshot = { path: '', isMissing: true, error: null, mtimeMs: 0, size: 0, projects: [] }
 
-const snapshot = atom({ plugin: 'project-progress', key: 'snapshot' } as const, EMPTY)
-const here = atom({ plugin: 'project-progress', key: 'here' } as const, [] as string[])
-const mine = atom({ plugin: 'project-progress', key: 'mine' } as const, null as ProgressMirror | null)
-const now = atom({ plugin: 'project-progress', key: 'now' } as const, 0)
-const hasTaskTools = atom({ plugin: 'project-progress', key: 'hasTaskTools' } as const, true)
+const snapshot = atom({ plugin: 'andon', key: 'snapshot' } as const, EMPTY)
+const here = atom({ plugin: 'andon', key: 'here' } as const, [] as string[])
+const mine = atom({ plugin: 'andon', key: 'mine' } as const, null as ProgressMirror | null)
+const now = atom({ plugin: 'andon', key: 'now' } as const, 0)
+const hasTaskTools = atom({ plugin: 'andon', key: 'hasTaskTools' } as const, true)
 
-const expanded = atom({ plugin: 'project-progress', key: 'expanded' } as const, '')
-const answer = atom({ plugin: 'project-progress', key: 'answer' } as const, null as ProgressAnswer | null)
-const isNotifyOn = atom({ plugin: 'project-progress', key: 'isNotifyOn' } as const, true)
+const expanded = atom({ plugin: 'andon', key: 'expanded' } as const, '')
+const answer = atom({ plugin: 'andon', key: 'answer' } as const, null as ProgressAnswer | null)
+const isNotifyOn = atom({ plugin: 'andon', key: 'isNotifyOn' } as const, true)
 // The person's /config theme, which picks the dark or light 和色 set.
-const theme = atom({ plugin: 'project-progress', key: 'theme' } as const, 'dark')
+const theme = atom({ plugin: 'andon', key: 'theme' } as const, 'dark')
 // Steps finished today, from the journal.
-const today = atom({ plugin: 'project-progress', key: 'today' } as const, 0)
-const isLegendOpen = atom({ plugin: 'project-progress', key: 'isLegendOpen' } as const, false)
+const today = atom({ plugin: 'andon', key: 'today' } as const, 0)
+const isLegendOpen = atom({ plugin: 'andon', key: 'isLegendOpen' } as const, false)
 // The language the pane speaks (strings.ts resolveLang), settled at session start.
-const lang = atom({ plugin: 'project-progress', key: 'lang' } as const, 'zh-TW')
+const lang = atom({ plugin: 'andon', key: 'lang' } as const, 'zh-TW')
 // Which folded sections the person opened; kept across sessions in $.store.
-const opened = atom({ plugin: 'project-progress', key: 'opened' } as const, [] as string[])
+const opened = atom({ plugin: 'andon', key: 'opened' } as const, [] as string[])
 // When the pane first saw each hand-kept task done (by doneKey), to archive it a day later.
-const doneSeen = atom({ plugin: 'project-progress', key: 'doneSeen' } as const, {} as Record<string, number>)
+const doneSeen = atom({ plugin: 'andon', key: 'doneSeen' } as const, {} as Record<string, number>)
 
 const messageOf = (error: unknown): string => (error instanceof Error ? error.message : String(error))
 
@@ -607,26 +607,35 @@ const connectAgents = async ($: EngineInterface, remove: boolean): Promise<strin
   if (!remove) await $.fs.write(script, isWindows ? reporterPs1(inboxPath(path)) : reporterSh(inboxPath(path)))
   const done: string[] = []
   const skipped: string[] = []
+  const removeFile = async (file: string): Promise<void> => {
+    const argv = isWindows ? ['powershell', '-NoProfile', '-Command', `Remove-Item -Force -LiteralPath '${file.replace(/'/g, "''")}'`] : ['rm', '-f', file]
+    await $.process.run(argv, { timeoutMs: 10000 }).catch(() => undefined)
+  }
   for (const hook of agentHooks({ home, sep, isWindows, script, inbox: inboxPath(path), codexHome, grokHome })) {
     if (!(await $.fs.exists(hook.dir))) continue
+    // Left under the plugin's earlier name, it would report every turn a second time.
+    const hadOld = hook.old !== undefined && (await $.fs.exists(hook.old))
+    if (hadOld && hook.old !== undefined) await removeFile(hook.old)
     const before = await readText($, hook.file).catch(() => null)
     if (before === null) {
       skipped.push(s.connectSkipped(hook.label, hook.file))
       continue
     }
-    if (remove && before.trim() === '') continue
+    if (remove && before.trim() === '') {
+      if (hadOld) done.push(hook.label)
+      continue
+    }
     const after = hook.edit(before, remove)
     if (after === null) {
       if (!remove) skipped.push(s.connectSkipped(hook.label, hook.file))
       continue
     }
     if (after === DELETE) {
-      const argv = isWindows ? ['powershell', '-NoProfile', '-Command', `Remove-Item -Force -LiteralPath '${hook.file.replace(/'/g, "''")}'`] : ['rm', '-f', hook.file]
-      await $.process.run(argv, { timeoutMs: 10000 }).catch(() => undefined)
+      await removeFile(hook.file)
     } else if (after !== before) {
       await $.fs.write(hook.file, after)
     }
-    if (remove && after === before) continue
+    if (remove && after === before && !hadOld) continue
     done.push(hook.label)
     if (!remove) await dropSection($, hook.agent, home, codexHome, sep)
   }

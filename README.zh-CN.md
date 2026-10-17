@@ -7,7 +7,7 @@
 
 [English](README.md) · [繁體中文](README.zh-TW.md) · 简体中文
 
-给同时开好几个 AI coding agent 的人用。哪个 agent 在等你，一看就知道，不会再让它们干等。
+**Andon** 给同时开好几个 AI coding agent 的人用。哪个 agent 在等你，一看就知道，不会再让它们干等。
 
 ## 为什么需要它
 
@@ -17,11 +17,13 @@
 - **你现在用的 agent 都接得上。** Claude Code、Codex、Gemini CLI、Cursor、OpenCode、Grok Build、Muse Code。一行命令接上，之后它们会自己汇报，不用另外交代。
 - **随时都能接着做。** 对话压缩、终端关掉、第二天再开都没关系，做完什么、卡在哪、下一步是什么，打开就看到。谁做到一半停了，你也能直接接手。
 
+名字来自工厂产线上的 andon（行灯）看板：每个工位一盏灯，哪个工位需要帮忙，哪盏就亮。这里亮的是你的 agent。
+
 ## 安装
 
 ```
-claude plugin marketplace add WenyuChiou/claude-progress-pane
-claude plugin install project-progress@claude-progress-pane
+claude plugin marketplace add WenyuChiou/andon
+claude plugin install andon@andon
 claude -p "/progress connect"
 ```
 
@@ -30,10 +32,10 @@ claude -p "/progress connect"
 **或者让 agent 帮你装。** 把下面这段贴给 Codex、Gemini CLI、Cursor、Grok、Muse，或任何能运行命令的 agent：
 
 ```text
-帮我在这台电脑装 Claude Code 的 claude-progress-pane 插件，并把这台电脑上的 coding agent 接上它。
+帮我在这台电脑装 Claude Code 的 Andon 插件，并把这台电脑上的 coding agent 接上它。
 依次运行这三行，任何一行失败就停下来告诉我：
-claude plugin marketplace add WenyuChiou/claude-progress-pane
-claude plugin install project-progress@claude-progress-pane
+claude plugin marketplace add WenyuChiou/andon
+claude plugin install andon@andon
 claude -p "/progress connect"
 最后把最后一行输出的内容给我看，并告诉我要重启哪些 agent。
 ```

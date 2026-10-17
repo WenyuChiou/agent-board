@@ -1,16 +1,16 @@
 #!/usr/bin/env bash
-# Installs the project-progress plugin and makes the settings it cannot make itself.
-# Safe to re-run; it is also how an old zip install moves over.
-#   curl -fsSL https://raw.githubusercontent.com/WenyuChiou/claude-progress-pane/main/scripts/setup.sh | bash
+# Installs the Andon plugin and makes the settings it cannot make itself.
+# Safe to re-run; it is also how an install under the old name (project-progress from the
+# claude-progress-pane marketplace) or an old zip install moves over.
+#   curl -fsSL https://raw.githubusercontent.com/WenyuChiou/andon/main/scripts/setup.sh | bash
 #   bash setup.sh [--keep-rule] [--no-install] [--agents[=codex,gemini,opencode]] [--remove-agents]
 # What each step does, and why: see the comment at the top of setup.ps1. Needs python3.
 # Step 2 here writes `export CLAUDE_CODE_ENABLE_TODO_TOOLS=1` to your shell's startup file
 # instead of a PowerShell profile: ~/.zshrc for zsh, ~/.bashrc for bash (~/.bash_profile on
 # macOS), ~/.profile otherwise; fish gets a line to add by hand, and settings.json keeps the
 # key until a line sets it.
-# It also turns on auto-update for the marketplace (extraKnownMarketplaces.claude-progress-pane
-# .autoUpdate), unless you turned it off: Claude Code updates only the official marketplace on
-# its own.
+# It also turns on auto-update for the marketplace (extraKnownMarketplaces.andon.autoUpdate),
+# unless you turned it off: Claude Code updates only the official marketplace on its own.
 # --agents puts the "Report your progress" section of AGENTS.md into the global instructions of
 # the other agents installed here (Codex: $CODEX_HOME/AGENTS.md, Gemini CLI: ~/.gemini/GEMINI.md,
 # OpenCode: ~/.config/opencode/AGENTS.md), between markers, so their work shows on the pane
@@ -18,8 +18,11 @@
 # that /progress connect hooked into the pane is skipped: its hook already reports.
 set -euo pipefail
 
-marketplace='WenyuChiou/claude-progress-pane'
-plugin='project-progress@claude-progress-pane'
+marketplace='WenyuChiou/andon'
+plugin='andon@andon'
+# The names it had before 0.10.
+old_market='claude-progress-pane'
+old_plugin="project-progress@$old_market"
 claude="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
 here="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" 2>/dev/null && pwd || pwd)"
 keep_rule=0
@@ -39,18 +42,26 @@ done
 
 # Read before `marketplace add`, which writes its entry anew without autoUpdate: an
 # auto-update you turned off stays off.
+# One turned off under the old name stays off under the new one.
 auto_off="$(python3 -c '
 import json, sys
 try:
     with open(sys.argv[1], encoding="utf-8-sig") as f:
-        entry = json.load(f)["extraKnownMarketplaces"]["claude-progress-pane"]
-    print(1 if entry.get("autoUpdate") is False else 0)
+        known = json.load(f)["extraKnownMarketplaces"]
+    print(1 if any(isinstance(known.get(name), dict) and known[name].get("autoUpdate") is False
+                   for name in ("andon", "claude-progress-pane")) else 0)
 except Exception:
     print(0)
 ' "$claude/settings.json" 2>/dev/null || echo 0)"
 
 if [ "$install" = 1 ]; then
   if command -v claude >/dev/null 2>&1; then
+    # Under its old name the plugin would load a second pane beside the new one.
+    if grep -qs "\"$old_market\"" "$claude/plugins/known_marketplaces.json" "$claude/settings.json"; then
+      claude plugin uninstall "$old_plugin" >/dev/null 2>&1 || true
+      claude plugin marketplace remove "$old_market" >/dev/null 2>&1 || true
+      echo "Removed $old_plugin, the plugin's old name; $plugin takes its place."
+    fi
     if ! claude plugin marketplace add "$marketplace"; then
       echo "Could not add $marketplace. For a private repository run 'gh auth login' and 'gh auth setup-git' once;" >&2
       echo "without a GitHub SSH key also set CLAUDE_CODE_PLUGIN_PREFER_HTTPS=1. Then run this again." >&2
@@ -70,9 +81,9 @@ fi
 
 # Beside this script, or in the marketplace's clone when the script came through a pipe.
 rule_file="$here/claude-md-rule.md"
-[ -f "$rule_file" ] || rule_file="$claude/plugins/marketplaces/claude-progress-pane/scripts/claude-md-rule.md"
+[ -f "$rule_file" ] || rule_file="$claude/plugins/marketplaces/andon/scripts/claude-md-rule.md"
 agents_file="$here/../AGENTS.md"
-[ -f "$agents_file" ] || agents_file="$claude/plugins/marketplaces/claude-progress-pane/AGENTS.md"
+[ -f "$agents_file" ] || agents_file="$claude/plugins/marketplaces/andon/AGENTS.md"
 
 python3 - "$claude" "$rule_file" "$keep_rule" "$HOME" "${SHELL:-}" "${ZDOTDIR:-}" "$auto_off" \
   "$agents" "$remove_agents" "$agents_file" "${CODEX_HOME:-}" "${XDG_CONFIG_HOME:-}" <<'PY'
@@ -115,7 +126,7 @@ if rc:
         with open(rc, 'rb') as f:
             old = f.read()
     if not re.search(rb'(?m)^[ \t]*(?:export[ \t]+)?CLAUDE_CODE_ENABLE_TODO_TOOLS=', old):
-        add = ('# claude-progress-pane: Task tools for claude started from this shell. Not in\n'
+        add = ('# Andon: Task tools for claude started from this shell. Not in\n'
                '# ~/.claude/settings.json, whose env also reaches desktop-app sessions.\n' + line + '\n')
         if old:
             shutil.copyfile(rc, rc + '.bak')
@@ -207,11 +218,11 @@ if settings is not None:
                     nxt = edit_pair(nxt, 'CLAUDE_CODE_PLUGIN_DIRS', None)
                 edits += ['removed %s from CLAUDE_CODE_PLUGIN_DIRS' % d for d in dirs if old_mod.search(d)]
     known = settings.get('extraKnownMarketplaces') if isinstance(settings, dict) else None
-    entry = known.get('claude-progress-pane') if isinstance(known, dict) else None
+    entry = known.get('andon') if isinstance(known, dict) else None
     if isinstance(entry, dict) and 'autoUpdate' not in entry and not auto_off:
         entry['autoUpdate'] = True
-        nxt = add_first(nxt, 'claude-progress-pane', '"autoUpdate": true')
-        edits.append('turned on auto-update for the claude-progress-pane marketplace')
+        nxt = add_first(nxt, 'andon', '"autoUpdate": true')
+        edits.append('turned on auto-update for the andon marketplace')
     if edits:
         try:
             same = nxt is not None and json.loads(nxt) == settings
@@ -229,7 +240,8 @@ md = ''
 if os.path.exists(md_path):
     with open(md_path, encoding='utf-8') as f:
         md = f.read()
-block_re = r'<!-- project-progress:start -->.*?<!-- project-progress:end -->'
+# Written as project-progress before 0.10.
+block_re = r'<!-- (?P<rule>andon|project-progress):start -->.*?<!-- (?P=rule):end -->'
 has_block = re.search(block_re, md, re.S) is not None
 nxt = md
 if keep_rule:
@@ -239,18 +251,19 @@ if keep_rule:
         block = f.read().strip()
     nxt = re.sub(block_re, lambda _: block, md, flags=re.S) if has_block else (md.rstrip() + '\n\n' + block).lstrip()
     nxt = nxt.rstrip() + '\n'
-    what = 'wrote the project-progress rule block'
+    what = 'wrote the Andon rule block'
 elif has_block:
     nxt = re.sub(r'(\r?\n)*' + block_re + r'(\r?\n)*', '\n\n', md, flags=re.S)
     nxt = nxt.lstrip('\r\n').rstrip() + '\n' if nxt.strip() else ''
-    what = 'removed the project-progress rule block (the plugin adds it now)'
+    what = 'removed the Andon rule block (the plugin adds it now)'
 if nxt != md:
     save(md_path, nxt)
     done.append('CLAUDE.md: ' + what)
 
 # Other agents: the AGENTS.md section they follow, in their own global instructions.
-START, END = '<!-- claude-progress-pane:start -->', '<!-- claude-progress-pane:end -->'
-section_re = re.escape(START) + r'.*?' + re.escape(END)
+# A section written under the old name, claude-progress-pane, is found and replaced too.
+START, END = '<!-- andon:start -->', '<!-- andon:end -->'
+section_re = r'<!-- (?P<name>andon|claude-progress-pane):start -->.*?<!-- (?P=name):end -->'
 
 def codex_file():
     # Codex reads AGENTS.override.md instead of AGENTS.md when the override has text.
@@ -282,14 +295,14 @@ def read_text(path):
 # An agent /progress connect hooked into the pane reports through its hook; the section
 # would show its work twice.
 HOOK_FILES = {
-    'codex': os.path.join(codex_home, 'hooks.json'),
-    'gemini': os.path.join(home, '.gemini', 'settings.json'),
-    'opencode': os.path.join(config_home, 'opencode', 'plugin', 'progress-pane.js'),
+    'codex': [os.path.join(codex_home, 'hooks.json')],
+    'gemini': [os.path.join(home, '.gemini', 'settings.json')],
+    'opencode': [os.path.join(config_home, 'opencode', 'plugin', one) for one in ('andon.js', 'progress-pane.js')],
 }
 
 def hooked(name):
-    text = read_text(HOOK_FILES[name]) or ''
-    return 'progress-report' in text or (name == 'opencode' and text != '')
+    texts = [read_text(path) or '' for path in HOOK_FILES[name]]
+    return any('progress-report' in text or (name == 'opencode' and text != '') for text in texts)
 
 found = [name for name, (base, _) in AGENT_FILES.items() if os.path.isdir(base)]
 if remove_agents:
@@ -329,18 +342,19 @@ for name in targets:
             continue
         nxt = re.sub(r'(\r?\n)*' + section_re + r'(\r?\n)*', nl + nl, old, flags=re.S).strip()
         nxt = nxt + nl if nxt else ''
-        what = 'removed the progress-pane section from'
+        what = 'removed the Andon section from'
     else:
         block = section.replace('\n', nl)
         nxt = re.sub(section_re, lambda _: block, old, flags=re.S) if has else (old.rstrip() + nl + nl + block).lstrip()
         nxt = nxt.rstrip() + nl
-        what = 'wrote the progress-pane section to'
+        what = 'wrote the Andon section to'
     if nxt != old:
         save(path, nxt.encode('utf-8'))
         done.append('%s: %s %s' % (name, what, path))
 if not agents and not remove_agents:
     texts = {name: read_text(AGENT_FILES[name][1]()) for name in found}
-    bare = [name for name in found if texts[name] is not None and START not in texts[name] and not hooked(name)]
+    bare = [name for name in found if texts[name] is not None and not re.search(section_re, texts[name], re.S)
+            and not hooked(name)]
     if bare:
         done.append('%s installed here too: run /progress connect in Claude Code to show their work on the pane'
                     % ' and '.join(bare))

@@ -7,8 +7,8 @@ Thanks for helping. This page covers setup, checks, the format rule and releases
 You need Claude Code 2.1.287 or newer (the minimum `README.md` gives). CI installs 2.1.301, pinned in `.github/workflows/test.yml`.
 
 ```
-git clone https://github.com/WenyuChiou/claude-progress-pane
-cd claude-progress-pane
+git clone https://github.com/WenyuChiou/andon
+cd andon
 claude --plugin-dir .
 ```
 

@@ -118,7 +118,7 @@ export type ProgressAnswer = { question: string; text: string; isAsking: boolean
 
 declare module 'claude-code' {
   interface PluginState {
-    'project-progress': {
+    andon: {
       snapshot: ProgressSnapshot
       here: string[]
       mine: ProgressMirror | null

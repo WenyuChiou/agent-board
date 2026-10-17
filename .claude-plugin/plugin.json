@@ -1,22 +1,24 @@
 {
-  "name": "project-progress",
-  "version": "0.9.0",
-  "description": "A progress dashboard for coding agents: every project's work in one pane, what needs you first, kept in step with the Task list",
+  "name": "andon",
+  "version": "0.10.0",
+  "description": "See what every AI coding agent is doing, with whatever is waiting on you at the top: Claude Code, Codex, Gemini CLI, Cursor, OpenCode, Grok Build, Muse Code",
   "author": {
     "name": "Wenyu Chiou"
   },
-  "homepage": "https://github.com/WenyuChiou/claude-progress-pane",
-  "repository": "https://github.com/WenyuChiou/claude-progress-pane",
+  "homepage": "https://github.com/WenyuChiou/andon",
+  "repository": "https://github.com/WenyuChiou/andon",
   "license": "MIT",
   "keywords": [
+    "andon",
     "progress",
-    "tasks",
+    "agents",
+    "multi-agent",
     "dashboard",
     "pane",
-    "agents",
-    "compaction",
     "codex",
-    "gemini"
+    "gemini",
+    "cursor",
+    "opencode"
   ],
   "types": "./types/index.d.ts",
   "userConfig": {

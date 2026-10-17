@@ -175,15 +175,15 @@ try {
   $entry = @(
     '{',
     '  "extraKnownMarketplaces": {',
-    '    "claude-progress-pane": {',
+    '    "andon": {',
     '      "source": {',
     '        "source": "github",',
-    '        "repo": "WenyuChiou/claude-progress-pane"',
+    '        "repo": "WenyuChiou/andon"',
     '      }',
     '    }',
     '  },',
     '  "enabledPlugins": {',
-    '    "project-progress@claude-progress-pane": true',
+    '    "andon@andon": true',
     '  }',
     '}',
     '')
@@ -193,13 +193,13 @@ try {
   Check 'auto-update: the marketplace entry gets "autoUpdate": true, the rest stays' ((Read-Settings $dir) -ceq ($want -join "`n"))
 
   # 14. On one line it stays on one line.
-  $dir = New-Case '{"extraKnownMarketplaces": {"claude-progress-pane": {"source": {"source": "github", "repo": "WenyuChiou/claude-progress-pane"}}}}'
+  $dir = New-Case '{"extraKnownMarketplaces": {"andon": {"source": {"source": "github", "repo": "WenyuChiou/andon"}}}}'
   Invoke-Setup $dir | Out-Null
   Check 'auto-update: an entry on one line stays on one line' `
-    ((Read-Settings $dir) -ceq '{"extraKnownMarketplaces": {"claude-progress-pane": {"autoUpdate": true, "source": {"source": "github", "repo": "WenyuChiou/claude-progress-pane"}}}}')
+    ((Read-Settings $dir) -ceq '{"extraKnownMarketplaces": {"andon": {"autoUpdate": true, "source": {"source": "github", "repo": "WenyuChiou/andon"}}}}')
 
   # 15. Turned off by hand: stays off, and the file is not touched.
-  $text = "{`n  `"extraKnownMarketplaces`": {`n    `"claude-progress-pane`": {`n      `"source`": {`"source`": `"github`", `"repo`": `"WenyuChiou/claude-progress-pane`"},`n      `"autoUpdate`": false`n    }`n  }`n}`n"
+  $text = "{`n  `"extraKnownMarketplaces`": {`n    `"andon`": {`n      `"source`": {`"source`": `"github`", `"repo`": `"WenyuChiou/andon`"},`n      `"autoUpdate`": false`n    }`n  }`n}`n"
   $dir = New-Case $text
   Invoke-Setup $dir | Out-Null
   Check 'auto-update: "autoUpdate": false is left alone' `
@@ -219,7 +219,7 @@ try {
   $codexText = [IO.File]::ReadAllText($codexPath)
   Check 'agents: Codex keeps its own text and gets the section after it' `
     ($codexText.StartsWith("# My rules`n`nUse tabs.`n") -and $codexText.Contains('## Report your progress to the progress pane') -and
-     $codexText.Contains('claude-progress-pane:end') -and (Test-Path "$codexPath.bak"))
+     $codexText.Contains('andon:end') -and (Test-Path "$codexPath.bak"))
   Check 'agents: Gemini CLI gets GEMINI.md with the section' `
     ([IO.File]::ReadAllText((Join-Path $dir '.gemini\GEMINI.md')).Contains('agent=NAME'))
   Check 'agents: OpenCode, not installed here, gets nothing' (-not (Test-Path (Join-Path $dir '.config\opencode\AGENTS.md')))
@@ -238,10 +238,10 @@ try {
   Check 'agents: without -Agents it only says which agents it found' ($out -match 'codex installed here too')
   Invoke-Setup $dir "'RemoteSigned'" '-Agents codex,opencode' | Out-Null
   Check 'agents: Codex reads AGENTS.override.md when it has text, so the section goes there' `
-    ([IO.File]::ReadAllText((Join-Path $dir '.codex\AGENTS.override.md')).Contains('claude-progress-pane:start') -and
+    ([IO.File]::ReadAllText((Join-Path $dir '.codex\AGENTS.override.md')).Contains('andon:start') -and
      -not (Test-Path (Join-Path $dir '.codex\AGENTS.md')))
   Check 'agents: a named agent gets the section even before it has a folder' `
-    ([IO.File]::ReadAllText((Join-Path $dir '.config\opencode\AGENTS.md')).Contains('claude-progress-pane:start'))
+    ([IO.File]::ReadAllText((Join-Path $dir '.config\opencode\AGENTS.md')).Contains('andon:start'))
   $out = Invoke-Setup $dir "'RemoteSigned'" '-Agents copilot'
   Check 'agents: an unknown name is refused' ($out -match 'unknown agent: copilot')
   [IO.File]::WriteAllText((Join-Path $dir '.codex\hooks.json'), '{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"powershell -File progress-report.ps1 codex turn"}]}]}}', $utf8)
@@ -249,6 +249,24 @@ try {
   $out = Invoke-Setup $dir "'RemoteSigned'" '-Agents codex'
   Check 'agents: an agent hooked by /progress connect gets no section' `
     (($out -match 'codex: reports through its hook') -and -not (Test-Path (Join-Path $dir '.codex\AGENTS.md')))
+
+  # 19. Written under the old name: the agent section is replaced, not doubled; an auto-update
+  # turned off then stays off; the old CLAUDE.md block goes.
+  $text = "{`n  `"extraKnownMarketplaces`": {`n    `"claude-progress-pane`": {`n      `"autoUpdate`": false`n    },`n    `"andon`": {`n      `"source`": {`"source`": `"github`", `"repo`": `"WenyuChiou/andon`"}`n    }`n  }`n}`n"
+  $dir = New-Case $text
+  New-Item -ItemType Directory -Path (Join-Path $dir '.codex') | Out-Null
+  $codexPath = Join-Path $dir '.codex\AGENTS.md'
+  [IO.File]::WriteAllText($codexPath, "# My rules`n`n<!-- claude-progress-pane:start -->`n## Report your progress to the progress pane`nold text`n<!-- claude-progress-pane:end -->`n", $utf8)
+  [IO.File]::WriteAllText((Join-Path $dir '.claude\CLAUDE.md'), "# Mine`n`n<!-- project-progress:start -->`n## old rule`n<!-- project-progress:end -->`n", $utf8)
+  Invoke-Setup $dir "'RemoteSigned'" '-Agents codex' | Out-Null
+  $codexText = [IO.File]::ReadAllText($codexPath)
+  Check 'old name: the Codex section is replaced by one under the new markers' `
+    ($codexText.StartsWith("# My rules`n") -and ([regex]::Matches($codexText, 'andon:start')).Count -eq 1 -and
+     -not $codexText.Contains('claude-progress-pane:') -and -not $codexText.Contains('old text'))
+  Check 'old name: an auto-update turned off under it stays off' ((Read-Settings $dir) -ceq $text)
+  Check 'old name: the old CLAUDE.md block goes' ([IO.File]::ReadAllText((Join-Path $dir '.claude\CLAUDE.md')) -ceq "# Mine`n")
+  Invoke-Setup $dir "'RemoteSigned'" '-RemoveAgents' | Out-Null
+  Check 'old name: -RemoveAgents takes the new section out' ([IO.File]::ReadAllText($codexPath) -ceq "# My rules`n")
 }
 finally {
   foreach ($one in $script:dirs) { if (Test-Path $one) { Remove-Item -LiteralPath $one -Recurse -Force } }

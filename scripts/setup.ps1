@@ -1,11 +1,13 @@
-# Installs the project-progress plugin and makes the settings it cannot make itself.
-# Safe to re-run; it is also how an old zip install moves over.
-#   irm https://raw.githubusercontent.com/WenyuChiou/claude-progress-pane/main/scripts/setup.ps1 | iex
+# Installs the Andon plugin and makes the settings it cannot make itself.
+# Safe to re-run; it is also how an install under the old name (project-progress from the
+# claude-progress-pane marketplace) or an old zip install moves over.
+#   irm https://raw.githubusercontent.com/WenyuChiou/andon/main/scripts/setup.ps1 | iex
 #   powershell -ExecutionPolicy Bypass -File setup.ps1 [-KeepRule] [-NoInstall] [-ProfilePath <file>]
 #     [-Agents auto|codex,gemini,opencode] [-RemoveAgents]
 #
-# 1. With `claude` on PATH (and no -NoInstall): adds the claude-progress-pane marketplace
-#    and installs project-progress from it. Both steps are no-ops once done.
+# 1. With `claude` on PATH (and no -NoInstall): uninstalls project-progress and removes the
+#    claude-progress-pane marketplace, the plugin's names before 0.10, when they are there;
+#    then adds the andon marketplace and installs andon from it. Each step is a no-op once done.
 # 2. PowerShell profile ($PROFILE.CurrentUserCurrentHost, or -ProfilePath): adds
 #    $env:CLAUDE_CODE_ENABLE_TODO_TOOLS = "1" unless a line already sets it. Newer models
 #    leave the Task tools out without it, and the pane mirrors them. It goes in the profile,
@@ -16,12 +18,13 @@
 #    CLAUDE_CODE_PLUGIN_DIRS, so the mod does not load twice. Only those pairs change; the
 #    rest of the file keeps its bytes. If that cannot be done exactly, the file is left alone.
 #    The key stays while the execution policy would keep the profile from running.
-# 4. CLAUDE.md: drops the <!-- project-progress:start/end --> block; the plugin now adds
+# 4. CLAUDE.md: drops the <!-- andon:start/end --> block (project-progress:start/end before
+#    0.10); the plugin now adds
 #    the rule itself. With -KeepRule it writes or refreshes that block instead: use it
 #    where an organization manages Claude Code, since the plugin's own rule does not run there.
-# 5. settings.json extraKnownMarketplaces.claude-progress-pane: adds "autoUpdate": true, so
-#    the plugin updates itself (Claude Code updates only the official marketplace on its own).
-#    An autoUpdate you set to false stays false.
+# 5. settings.json extraKnownMarketplaces.andon: adds "autoUpdate": true, so the plugin
+#    updates itself (Claude Code updates only the official marketplace on its own). An
+#    autoUpdate you set to false stays false, also one set under the old name.
 # 6. With -Agents: puts the "Report your progress" section of AGENTS.md into the global
 #    instructions of other agents, between markers, so their work shows on the pane too:
 #    Codex ($env:CODEX_HOME or ~\.codex, AGENTS.md or a non-empty AGENTS.override.md), Gemini CLI
@@ -32,11 +35,14 @@
 # -Agents codex,gemini arrives as an array; the function takes it joined.
 param([switch]$KeepRule, [switch]$NoInstall, [string]$ProfilePath, [string[]]$Agents, [switch]$RemoveAgents)
 
-function Install-ProgressPane {
+function Install-Andon {
   param([bool]$KeepRule, [bool]$NoInstall, [string]$Here, [string]$ProfilePath, [string]$Agents, [bool]$RemoveAgents)
   $ErrorActionPreference = 'Stop'
-  $marketplace = 'WenyuChiou/claude-progress-pane'
-  $plugin = 'project-progress@claude-progress-pane'
+  $marketplace = 'WenyuChiou/andon'
+  $plugin = 'andon@andon'
+  # The names it had before 0.10.
+  $oldMarket = 'claude-progress-pane'
+  $oldPlugin = "project-progress@$oldMarket"
 
   if ($env:CLAUDE_CONFIG_DIR) { $claude = $env:CLAUDE_CONFIG_DIR }
   else { $claude = Join-Path ([Environment]::GetFolderPath('UserProfile')) '.claude' }
@@ -44,17 +50,28 @@ function Install-ProgressPane {
   $done = @()
 
   # Read before `marketplace add`, which writes its entry anew without autoUpdate: an
-  # auto-update you turned off stays off.
+  # auto-update you turned off stays off, also one turned off under the old name.
   $autoOff = $false
   try {
     $prior = [IO.File]::ReadAllText((Join-Path $claude 'settings.json')) | ConvertFrom-Json
-    $autoOff = $prior.extraKnownMarketplaces.'claude-progress-pane'.autoUpdate -eq $false
+    $autoOff = ($prior.extraKnownMarketplaces.'andon'.autoUpdate -eq $false) -or
+      ($prior.extraKnownMarketplaces.'claude-progress-pane'.autoUpdate -eq $false)
   }
   catch { $autoOff = $false }
 
   # The plugin itself
   if (-not $NoInstall) {
     if (Get-Command claude -ErrorAction SilentlyContinue) {
+      # Under its old name the plugin would load a second pane beside the new one.
+      $hasOld = $false
+      foreach ($file in (Join-Path (Join-Path $claude 'plugins') 'known_marketplaces.json'), (Join-Path $claude 'settings.json')) {
+        if ((Test-Path -LiteralPath $file) -and ([IO.File]::ReadAllText($file)).Contains("`"$oldMarket`"")) { $hasOld = $true }
+      }
+      if ($hasOld) {
+        & claude plugin uninstall $oldPlugin 2>&1 | Out-Null
+        & claude plugin marketplace remove $oldMarket 2>&1 | Out-Null
+        Write-Host "Removed $oldPlugin, the plugin's old name; $plugin takes its place."
+      }
       & claude plugin marketplace add $marketplace
       if ($LASTEXITCODE -ne 0) {
         Write-Warning ("Could not add $marketplace. For a private repository run 'gh auth login' and " +
@@ -93,7 +110,7 @@ function Install-ProgressPane {
       try { $old = $reader.ReadToEnd(); $encoding = $reader.CurrentEncoding } finally { $reader.Close() }
     }
     if ($old -notmatch '(?m)^\s*\$env:CLAUDE_CODE_ENABLE_TODO_TOOLS\s*=') {
-      $add = "# claude-progress-pane: Task tools for claude started from PowerShell. Not in`r`n" +
+      $add = "# Andon: Task tools for claude started from PowerShell. Not in`r`n" +
         "# ~/.claude/settings.json, whose env also reaches desktop-app sessions.`r`n$line`r`n"
       if (Test-Path -LiteralPath $ProfilePath) {
         Copy-Item -LiteralPath $ProfilePath "$ProfilePath.bak" -Force
@@ -108,7 +125,7 @@ function Install-ProgressPane {
       if ($PSVersionTable.PSEdition -eq 'Core') { $other = 'powershell' }
       if (Get-Command $other -ErrorAction SilentlyContinue) {
         $self = $claude
-        foreach ($part in 'plugins', 'marketplaces', 'claude-progress-pane', 'scripts', 'setup.ps1') { $self = Join-Path $self $part }
+        foreach ($part in 'plugins', 'marketplaces', 'andon', 'scripts', 'setup.ps1') { $self = Join-Path $self $part }
         if ($Here -and (Test-Path -LiteralPath (Join-Path $Here 'setup.ps1'))) { $self = Join-Path $Here 'setup.ps1' }
         $done += "$other keeps its own profile. If you start claude from $other, also run: " +
           "$other -ExecutionPolicy Bypass -File `"$self`" -NoInstall"
@@ -221,15 +238,15 @@ function Install-ProgressPane {
     }
     $known = $null
     if ($settings.PSObject.Properties['extraKnownMarketplaces']) { $known = $settings.extraKnownMarketplaces }
-    if ($known -is [Management.Automation.PSCustomObject] -and $known.PSObject.Properties['claude-progress-pane']) {
-      $entry = $known.'claude-progress-pane'
+    if ($known -is [Management.Automation.PSCustomObject] -and $known.PSObject.Properties['andon']) {
+      $entry = $known.'andon'
       if ($entry -is [Management.Automation.PSCustomObject] -and -not $entry.PSObject.Properties['autoUpdate'] -and -not $autoOff) {
         # First, as in the text, so the check below compares the same key order.
         $fresh = [ordered]@{ autoUpdate = $true }
         foreach ($one in $entry.PSObject.Properties) { $fresh[$one.Name] = $one.Value }
-        $known.'claude-progress-pane' = [PSCustomObject]$fresh
-        if ($null -ne $next) { $next = Add-JsonFirst $next 'claude-progress-pane' '"autoUpdate": true' }
-        $edits += 'turned on auto-update for the claude-progress-pane marketplace'
+        $known.'andon' = [PSCustomObject]$fresh
+        if ($null -ne $next) { $next = Add-JsonFirst $next 'andon' '"autoUpdate": true' }
+        $edits += 'turned on auto-update for the andon marketplace'
       }
     }
     if ($edits.Count -gt 0) {
@@ -257,7 +274,8 @@ function Install-ProgressPane {
   $mdPath = Join-Path $claude 'CLAUDE.md'
   $md = ''
   if (Test-Path $mdPath) { $md = [IO.File]::ReadAllText($mdPath) }
-  $pattern = '(?s)<!-- project-progress:start -->.*?<!-- project-progress:end -->'
+  # Written as project-progress before 0.10.
+  $pattern = '(?s)<!-- (?<rule>andon|project-progress):start -->.*?<!-- \k<rule>:end -->'
   $next = $md
   if ($KeepRule) {
     # Beside this script, or in the marketplace's clone when the script came through iex.
@@ -265,7 +283,7 @@ function Install-ProgressPane {
     if ($Here) { $ruleFile = Join-Path $Here 'claude-md-rule.md' }
     if (-not $ruleFile -or -not (Test-Path $ruleFile)) {
       $ruleFile = $claude
-      foreach ($part in 'plugins', 'marketplaces', 'claude-progress-pane', 'scripts', 'claude-md-rule.md') {
+      foreach ($part in 'plugins', 'marketplaces', 'andon', 'scripts', 'claude-md-rule.md') {
         $ruleFile = Join-Path $ruleFile $part
       }
     }
@@ -276,12 +294,12 @@ function Install-ProgressPane {
     }
     else { $next = ($md.TrimEnd() + "`n`n" + $block).TrimStart() }
     $next = $next.TrimEnd() + "`n"
-    $what = 'wrote the project-progress rule block'
+    $what = 'wrote the Andon rule block'
   }
   elseif ([regex]::IsMatch($md, $pattern)) {
     $next = [regex]::Replace($md, "(\r?\n)*$pattern(\r?\n)*", "`n`n")
     if ($next.Trim()) { $next = $next.TrimStart("`r", "`n").TrimEnd() + "`n" } else { $next = '' }
-    $what = 'removed the project-progress rule block (the plugin adds it now)'
+    $what = 'removed the Andon rule block (the plugin adds it now)'
   }
   if ($next -ne $md) {
     if (Test-Path $mdPath) { Copy-Item $mdPath "$mdPath.bak" -Force }
@@ -290,9 +308,10 @@ function Install-ProgressPane {
   }
 
   # Other agents: the AGENTS.md section they follow, in their own global instructions.
-  $start = '<!-- claude-progress-pane:start -->'
-  $end = '<!-- claude-progress-pane:end -->'
-  $inner = [regex]::Escape($start) + '.*?' + [regex]::Escape($end)
+  # A section written under the old name, claude-progress-pane, is found and replaced too.
+  $start = '<!-- andon:start -->'
+  $end = '<!-- andon:end -->'
+  $inner = '<!-- (?<name>andon|claude-progress-pane):start -->.*?<!-- \k<name>:end -->'
   $userHome = $env:USERPROFILE
   if (-not $userHome) { $userHome = $HOME }
   $codexHome = $env:CODEX_HOME
@@ -315,14 +334,16 @@ function Install-ProgressPane {
   $hookFiles = @{
     codex = (Join-Path $codexHome 'hooks.json')
     gemini = (Join-Path $geminiHome 'settings.json')
-    opencode = (Join-Path (Join-Path $opencodeHome 'plugin') 'progress-pane.js')
+    opencode = @((Join-Path (Join-Path $opencodeHome 'plugin') 'andon.js'), (Join-Path (Join-Path $opencodeHome 'plugin') 'progress-pane.js'))
   }
   $hooked = {
     param([string]$name)
-    $file = $hookFiles[$name]
-    if (-not (Test-Path -LiteralPath $file)) { return $false }
-    if ($name -eq 'opencode') { return $true }
-    return ([IO.File]::ReadAllText($file)).Contains('progress-report')
+    foreach ($file in @($hookFiles[$name])) {
+      if (-not (Test-Path -LiteralPath $file)) { continue }
+      if ($name -eq 'opencode') { return $true }
+      if (([IO.File]::ReadAllText($file)).Contains('progress-report')) { return $true }
+    }
+    return $false
   }
   $found = @($agentFiles.Keys | Where-Object { Test-Path -LiteralPath $agentFiles[$_].base })
   $targets = @()
@@ -343,7 +364,7 @@ function Install-ProgressPane {
     if ($Here) { $agentsFile = Join-Path (Split-Path $Here) 'AGENTS.md' }
     if (-not $agentsFile -or -not (Test-Path -LiteralPath $agentsFile)) {
       $agentsFile = $claude
-      foreach ($part in 'plugins', 'marketplaces', 'claude-progress-pane', 'AGENTS.md') { $agentsFile = Join-Path $agentsFile $part }
+      foreach ($part in 'plugins', 'marketplaces', 'andon', 'AGENTS.md') { $agentsFile = Join-Path $agentsFile $part }
     }
     if (-not (Test-Path -LiteralPath $agentsFile)) { Write-Warning "AGENTS.md not found: $agentsFile"; return }
     # A Windows checkout gives AGENTS.md CRLF; the section is joined with `n here and takes the
@@ -377,14 +398,14 @@ function Install-ProgressPane {
       if (-not $has) { continue }
       $next = [regex]::Replace($old, '(?s)(\r?\n)*' + $inner + '(\r?\n)*', $nl + $nl).Trim()
       if ($next) { $next += $nl }
-      $what = 'removed the progress-pane section from'
+      $what = 'removed the Andon section from'
     }
     else {
       $block = $section.Replace("`n", $nl)
       if ($has) { $next = [regex]::Replace($old, '(?s)' + $inner, [Text.RegularExpressions.MatchEvaluator] { param($m) $block }) }
       else { $next = ($old.TrimEnd() + $nl + $nl + $block).TrimStart() }
       $next = $next.TrimEnd() + $nl
-      $what = 'wrote the progress-pane section to'
+      $what = 'wrote the Andon section to'
     }
     if ($next -cne $old) {
       if (Test-Path -LiteralPath $path) { Copy-Item -LiteralPath $path "$path.bak" -Force }
@@ -396,7 +417,7 @@ function Install-ProgressPane {
   if (-not $Agents -and -not $RemoveAgents) {
     $bare = @($found | Where-Object {
         $file = $agentFiles[$_].file
-        (-not (Test-Path -LiteralPath $file) -or -not ([IO.File]::ReadAllText($file)).Contains($start)) -and -not (& $hooked $_)
+        (-not (Test-Path -LiteralPath $file) -or -not [regex]::IsMatch([IO.File]::ReadAllText($file), '(?s)' + $inner)) -and -not (& $hooked $_)
       })
     if ($bare.Count -gt 0) {
       $done += (($bare -join ' and ') + ' installed here too: run /progress connect in Claude Code to show their work on the pane')
@@ -411,5 +432,5 @@ function Install-ProgressPane {
   Write-Host 'Desktop-app sessions keep their own task list; note their work in progress.md by hand.'
 }
 
-Install-ProgressPane -KeepRule:$KeepRule -NoInstall:$NoInstall -Here $PSScriptRoot -ProfilePath $ProfilePath `
+Install-Andon -KeepRule:$KeepRule -NoInstall:$NoInstall -Here $PSScriptRoot -ProfilePath $ProfilePath `
   -Agents ($Agents -join ',') -RemoveAgents:$RemoveAgents

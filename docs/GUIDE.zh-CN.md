@@ -11,14 +11,14 @@
 在 Claude Code 终端对话的输入框里：
 
 ```
-/plugin install project-progress --marketplace WenyuChiou/claude-progress-pane
+/plugin install andon --marketplace WenyuChiou/andon
 ```
 
 回答 `y` 添加 marketplace，并选 user scope。或者从 shell 运行：
 
 ```
-claude plugin marketplace add WenyuChiou/claude-progress-pane
-claude plugin install project-progress@claude-progress-pane
+claude plugin marketplace add WenyuChiou/andon
+claude plugin install andon@andon
 ```
 
 ### 2. 运行设置脚本
@@ -28,13 +28,13 @@ claude plugin install project-progress@claude-progress-pane
 Windows（PowerShell）：
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File "$env:USERPROFILE\.claude\plugins\marketplaces\claude-progress-pane\scripts\setup.ps1"
+powershell -ExecutionPolicy Bypass -File "$env:USERPROFILE\.claude\plugins\marketplaces\andon\scripts\setup.ps1"
 ```
 
 macOS / Linux：
 
 ```bash
-bash ~/.claude/plugins/marketplaces/claude-progress-pane/scripts/setup.sh
+bash ~/.claude/plugins/marketplaces/andon/scripts/setup.sh
 ```
 
 它做的事：
@@ -213,8 +213,8 @@ hook 运行的是 `/progress connect` 写好的 `~/.claude/progress-report.sh`�
 自动更新打开时（设置脚本会帮你打开），新版本会自己送到。要手动更新：
 
 ```
-claude plugin marketplace update claude-progress-pane
-claude plugin update project-progress@claude-progress-pane
+claude plugin marketplace update andon
+claude plugin update andon@andon
 ```
 
 然后在运行中的对话里输入 `/reload-plugins`，或开新的对话。
@@ -222,11 +222,25 @@ claude plugin update project-progress@claude-progress-pane
 要卸载：
 
 ```
-claude plugin uninstall project-progress@claude-progress-pane
-claude plugin marketplace remove claude-progress-pane
+claude plugin uninstall andon@andon
+claude plugin marketplace remove andon
 ```
 
 `progress.md`、它的归档文件和日志，以及 shell 的 profile 里那一行都会留着。
+
+### 从旧名称换过来
+
+0.10 以前插件叫 `project-progress`，来自 `claude-progress-pane` marketplace。设置脚本会自动帮你换；要手动换：
+
+```
+claude plugin uninstall project-progress@claude-progress-pane
+claude plugin marketplace remove claude-progress-pane
+claude plugin marketplace add WenyuChiou/andon
+claude plugin install andon@andon
+claude -p "/progress connect"
+```
+
+最后一行会把装在其他 agent 里的 hook 换成新名字。`progress.md` 原封不动。面板的语言和通知设置会回到默认，用 `/progress lang` 和 `/progress 通知` 再设一次。
 
 ## 问题排查
 

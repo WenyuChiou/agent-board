@@ -1,6 +1,6 @@
 # Security
 
-project-progress runs inside Claude Code on your own machine. It reads and writes `progress.md`, its archive, journal and `progress.html` beside it, and runs `gh pr view` when GitHub's CLI is installed. The setup scripts edit your shell profile, `~/.claude/settings.json`, `~/.claude/CLAUDE.md` and, with `--agents`, other agents' global instruction files, and back each one up as `<file>.bak` first. Nothing is sent anywhere by the plugin itself.
+Andon runs inside Claude Code on your own machine. It reads and writes `progress.md`, its archive, journal and `progress.html` beside it, and runs `gh pr view` when GitHub's CLI is installed. The setup scripts edit your shell profile, `~/.claude/settings.json`, `~/.claude/CLAUDE.md` and, with `--agents`, other agents' global instruction files, and back each one up as `<file>.bak` first. Nothing is sent anywhere by the plugin itself.
 
 ## Reporting a problem
 
