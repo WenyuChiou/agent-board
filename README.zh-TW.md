@@ -8,7 +8,7 @@ Claude Code 外掛，也跟得上 Codex、Gemini CLI、OpenCode、Grok Build、H
 </p>
 
 <p align="center">
-<a href="CHANGELOG.md"><img alt="版本 0.19.4" src="https://img.shields.io/badge/version-0.19.4-blue"></a>
+<a href="CHANGELOG.md"><img alt="版本 0.20.0" src="https://img.shields.io/badge/version-0.20.0-blue"></a>
 <img alt="需要 Claude Code 2.1.287 以上" src="https://img.shields.io/badge/Claude%20Code-%E2%89%A5%202.1.287-d97757">
 <a href="LICENSE"><img alt="MIT 授權" src="https://img.shields.io/badge/license-MIT-green"></a>
 <img alt="macOS、Linux、Windows" src="https://img.shields.io/badge/macOS%20%C2%B7%20Linux%20%C2%B7%20Windows-lightgrey">
@@ -163,9 +163,16 @@ claude -p "/progress connect"
 - **回覆**已經結束的 Grok Build 或 Codex 對話。回覆會在那個對話自己的資料夾裡執行 `grok -r <id>` 或 `codex exec resume <id>`，agent 回答後網頁會顯示它回了什麼，可能要幾分鐘。同一個對話一次只送一則。還開著的對話要在它自己的視窗回答，因為兩邊同時寫會把對話弄亂。
 - **貼上區塊**：從 Muse、dot 這類網頁聊天來的。先從網頁複製聊天提示，貼進聊天一次；之後把聊天印出的每個區塊貼進來。格式不對，或會蓋掉 Claude 或其他 agent 區塊的，會被拒絕。
 
-網頁只在 127.0.0.1 上聽，網址裡帶一把隨機鑰匙，所以別台電腦、你開著的其他網頁都用不了它。30 分鐘沒人看就會關，也可以按它的**關閉看板**；不過還有一則回覆在送給 agent 的路上時，不會關。
+網頁只在 127.0.0.1 上聽（除非加上 `--lan`，見下文），網址裡帶一把隨機鑰匙，所以別台電腦、你開著的其他網頁都用不了它。30 分鐘沒人看就會關，也可以按它的**關閉看板**；不過還有一則回覆在送給 agent 的路上時，不會關。
 
-**在手機上。** 網頁的版面適合手機，但只在電腦本機上提供。用手機時，透過 Remote Control 打開一個 Claude Code 對話，問它進度如何：它讀的是同一份 `progress.md`。從手機經由自己的網路直接打開網頁，目前還沒有提供。
+**在手機上。** 網頁的版面適合手機。要從和電腦連同一個 Wi-Fi 的手機打開，跑 `node ~/.claude/agent-board.mjs --serve --lan`：除了電腦本機的網址，它還會印出網頁在你網路上的網址和它的 QR code，用手機相機對著掃就好。電腦有不只一個網路位址時，用 `--lan 192.168.1.23` 指定一個。Windows 可能會問要不要讓 Node.js 使用網路：在私人網路上允許，並確認 Windows 把你的 Wi-Fi 算成私人網路（剛連上的網路它會先當成公用網路），不然手機連不到網頁。不在那個網路上時，透過 Remote Control 打開一個 Claude Code 對話，問它進度如何：它讀的是同一份 `progress.md`。
+
+網路上的網頁有這些限制：
+
+- 只有加了 `--lan` 才開，只開在電腦的私人位址上（開頭是 192.168、10，或 172.16 到 172.31 的位址，絕不是公開位址），也只回應送到那個位址的請求。
+- 它的網址帶著自己的一把鑰匙，不是電腦本機網頁那把。拿到這個網址或拍到 QR code 的人，在它關掉之前都能用這個網頁，所以只在信得過的網路上用，例如家裡的 Wi-Fi，不要在咖啡店的。
+- 在網路上，網頁走的是沒有加密的 HTTP，同一個 Wi-Fi 上的其他裝置可能讀得到傳過去的內容，包括 agent 的回答。所以手機可以勾步驟、封存、複製、貼上區塊和關閉看板，但不能回覆 agent：回覆會在電腦上跑一個程式，所以手機只顯示答案讓你複製，再從電腦本機的網頁送出。
+- 10 分鐘沒有手機來看就會關，電腦本機的網頁關掉時也跟著關。開著的時候再跑一次 `--serve --lan`，拿到的是同一個網址。
 
 ## 指令
 

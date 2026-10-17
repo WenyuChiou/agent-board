@@ -113,6 +113,8 @@ export type ServeRow = {
   where: string
   info: string
   isSending: boolean
+  // On the local network, where a reply that would be sent here is written and copied instead.
+  hasCopyBox: boolean
 }
 
 export type ServeTurn = { key: string; project: string; agent: string; text: string; isQuestion: boolean; info: string }
@@ -136,8 +138,12 @@ const infoOf = (mode: SendMode, agent: string, task: string, session: string, s:
 }
 
 // The keys are the terminal board's (`boardItems`), so a press names the line it was on.
-export const serveModel = (view: View, pending: readonly PendingTurn[], s: Strings = ZH_TW, sending: ReadonlySet<string> = new Set(), uncertain: ReadonlySet<string> = new Set()): ServeModel => {
+// `isLan`: the page as a phone sees it on the local network, where a reply that would run an
+// agent on the computer is offered as a copy instead.
+export const serveModel = (view: View, pending: readonly PendingTurn[], s: Strings = ZH_TW, sending: ReadonlySet<string> = new Set(), isLan = false, uncertain: ReadonlySet<string> = new Set()): ServeModel => {
   const isSending = (target: AgentTarget | null): boolean => target !== null && (sending.has(sendKey(target)) || uncertain.has(sendKey(target)))
+  const onLan = (mode: SendMode): SendMode => (isLan && mode === 'send' ? 'open' : mode)
+  const lanInfo = (mode: SendMode, agent: string): string | null => (isLan && mode === 'send' ? s.serveLanSend(agent) : null)
   const asks: ServeAsk[] = []
   const groups = new Map<string, ServeRow[]>()
   const turns: ServeTurn[] = []
@@ -145,7 +151,8 @@ export const serveModel = (view: View, pending: readonly PendingTurn[], s: Strin
     if (item.type === 'ask') {
       const { ask } = item
       const isManual = ask.where === 'manual'
-      const send = isManual ? 'none' : sendMode(ask.agent, ask.target)
+      const mode = isManual ? 'none' : sendMode(ask.agent, ask.target)
+      const send = onLan(mode)
       asks.push({
         key: item.key,
         identity: ask.source?.identity ?? '',
@@ -166,14 +173,15 @@ export const serveModel = (view: View, pending: readonly PendingTurn[], s: Strin
         send,
         session: ask.target?.session ?? '',
         where: send === 'send' ? (ask.target?.dir ?? '') : '',
-        info: ask.target !== null && uncertain.has(sendKey(ask.target)) ? s.serveSendUncertain(ask.agent) : isManual ? '' : infoOf(send, ask.agent, ask.task, ask.session, s),
+        info: ask.target !== null && uncertain.has(sendKey(ask.target)) ? s.serveSendUncertain(ask.agent) : isManual ? '' : (lanInfo(mode, ask.agent) ?? infoOf(send, ask.agent, ask.task, ask.session, s)),
         isSending: isSending(ask.target),
       })
       continue
     }
     if (item.type === 'row') {
       const { row } = item
-      const send = row.target === null ? (row.auto === null ? 'none' : 'claude') : sendMode(row.agent, row.target)
+      const mode = row.target === null ? (row.auto === null ? 'none' : 'claude') : sendMode(row.agent, row.target)
+      const send = onLan(mode)
       const rows = groups.get(row.project) ?? []
       groups.set(row.project, rows)
       rows.push({
@@ -194,14 +202,16 @@ export const serveModel = (view: View, pending: readonly PendingTurn[], s: Strin
         steps: row.steps.map(step => ({ text: step.text, note: step.note, status: step.status, isCurrent: step.isCurrent })),
         next: row.next?.step ?? null,
         canArchive: row.archive !== null,
-        resume: row.resume,
+        // The command to resume a session names its folder, and the account with it: the computer's only.
+        resume: isLan ? null : row.resume,
         handoff: row.handoff,
         send,
         session: row.target?.session ?? '',
         where: send === 'send' ? (row.target?.dir ?? '') : '',
         // A row says why only when a reply could otherwise be expected here.
-        info: row.target !== null && uncertain.has(sendKey(row.target)) ? s.serveSendUncertain(row.agent) : send === 'open' ? infoOf(send, row.agent, row.title, '', s) : '',
+        info: row.target !== null && uncertain.has(sendKey(row.target)) ? s.serveSendUncertain(row.agent) : (lanInfo(mode, row.agent) ?? (send === 'open' ? infoOf(send, row.agent, row.title, '', s) : '')),
         isSending: isSending(row.target),
+        hasCopyBox: lanInfo(mode, row.agent) !== null,
       })
       continue
     }
@@ -247,7 +257,9 @@ export const replyText = (raw: string): string =>
 
 // What a press on the page does, worked out again from the file as it is now: a line that is
 // gone or changed since the page drew it is refused, never taken for the one now in its place.
-export const serveAction = (items: readonly BoardItem[], request: ServeRequest, s: Strings = ZH_TW): ServeAction => {
+// From the local network (`isLan`) a reply to an agent is refused: it would run a program on
+// the computer, and the network's page is plain HTTP that others on the network could read.
+export const serveAction = (items: readonly BoardItem[], request: ServeRequest, s: Strings = ZH_TW, isLan = false): ServeAction => {
   const item = items.find(one => one.key === request.key)
   if (item === undefined) return { type: 'refuse', note: s.boardLineChanged }
   const expected = expectedItem(item)
@@ -270,6 +282,7 @@ export const serveAction = (items: readonly BoardItem[], request: ServeRequest, 
   const mode = target === null ? (agent === '' ? 'claude' : 'none') : sendMode(agent, target)
   const title = item.type === 'ask' ? item.ask.task : item.row.title
   if (mode !== 'send' || target === null) return { type: 'refuse', note: infoOf(mode, agent, title, item.type === 'ask' ? item.ask.session : '', s) }
+  if (isLan) return { type: 'refuse', note: s.serveLanSend(agent) }
   // Keys are a project and a title, which another session's block can take over between the
   // page's redraw and the press.
   if (request.session !== target.session) return { type: 'refuse', note: s.boardLineChanged }
@@ -282,6 +295,35 @@ export const serveAction = (items: readonly BoardItem[], request: ServeRequest, 
 
 export type PageRequest = { method: string; host: string; origin: string; contentType: string; token: string }
 
+// One of the computer's network addresses, as Node lists them (`family` was a number in Node 18.0
+// to 18.3).
+export type NetAddress = { address: string; family: string | number; internal: boolean }
+
+// Adapters a phone is not on: virtual machines, containers, WSL.
+const VIRTUAL = /virtual|vmware|vmnet|vbox|vethernet|hyper-v|wsl|docker|^br-|^veth|virbr|bridge|vpn|^tun|^tap|^wg|^utun|tailscale|zerotier|wireguard/i
+
+const privateRank = (address: string): number => {
+  const [a, b] = address.split('.').map(Number)
+  if (a === 192 && b === 168) return 0
+  if (a === 10) return 1
+  if (a === 172 && b !== undefined && b >= 16 && b <= 31) return 2
+  return -1
+}
+
+// The address a phone on the same network reaches the page at: a private IPv4 address of this
+// computer (192.168.x.x first, as home networks use, then 10.x.x.x, then 172.16-31.x.x), a real
+// adapter's before a virtual one's. Never a public, link-local or loopback address, so `--lan`
+// cannot put the page on the internet. `wanted` (`--lan <address>`) picks one of them by hand.
+export const lanAddress = (interfaces: Record<string, readonly NetAddress[] | undefined>, wanted: string | null = null): string | null => {
+  const found = Object.entries(interfaces)
+    .flatMap(([name, list]) => (list ?? []).map(one => ({ ...one, name })))
+    .filter(one => !one.internal && (one.family === 'IPv4' || one.family === 4) && privateRank(one.address) >= 0)
+    .map(one => ({ address: one.address, rank: privateRank(one.address) + (VIRTUAL.test(one.name) ? 10 : 0) }))
+    .sort((a, b) => a.rank - b.rank)
+  if (wanted !== null) return found.some(one => one.address === wanted) ? wanted : null
+  return found[0]?.address ?? null
+}
+
 const isSame = (a: string, b: string): boolean => {
   if (b === '' || a.length !== b.length) return false
   let diff = 0
@@ -290,13 +332,16 @@ const isSame = (a: string, b: string): boolean => {
   return diff === 0
 }
 
+// The names the page answers to on the computer.
+export const localHosts = (port: number): string[] => [`127.0.0.1:${port}`, `localhost:${port}`]
+
 // What a request to the page's server is refused with, or null to serve it. The server listens
-// on 127.0.0.1 only, but any web page the person has open can still send it requests: the
-// token stops one that does not know it, the Host check stops a name rebound to 127.0.0.1 (DNS
-// rebinding) from reading the answers, and a write must come from the page itself as JSON,
-// which a form on another site cannot send.
-export const requestProblem = (request: PageRequest, port: number, token: string): 403 | 405 | 415 | 421 | null => {
-  const hosts = [`127.0.0.1:${port}`, `localhost:${port}`]
+// on 127.0.0.1 (`localHosts`), and with `--lan` on one network address too, which takes only its
+// own `address:port` and its own token. Any web page the person has open can still send it
+// requests: the token stops one that does not know it, the Host check stops a name rebound to
+// the address (DNS rebinding) from reading the answers, and a write must come from the page
+// itself as JSON, which a form on another site cannot send.
+export const requestProblem = (request: PageRequest, hosts: readonly string[], token: string): 403 | 405 | 415 | 421 | null => {
   if (!hosts.includes(request.host.toLowerCase())) return 421
   if (!isSame(request.token, token)) return 403
   if (request.method === 'GET') return null
@@ -356,7 +401,8 @@ const esc = (text: string): string => text.replace(/&/g, '&amp;').replace(/</g, 
 export const pagePolicy = (nonce: string): string =>
   `default-src 'none'; script-src 'nonce-${nonce}'; style-src 'nonce-${nonce}'; connect-src 'self'; img-src data:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'`
 
-export const servePage = (s: Strings, nonce: string): string => `<!doctype html>
+// `isLan`: the page a phone opens on the local network, which closes sooner.
+export const servePage = (s: Strings, nonce: string, isLan = false): string => `<!doctype html>
 <html lang="${htmlLang(s)}">
 <head>
 <meta charset="utf-8">
@@ -428,7 +474,7 @@ details[open]>summary::before{content:"▾"}
 <div class="actions"><button type="button" class="primary" id="paste-go">${esc(s.servePaste)}</button><button type="button" id="relay">${esc(s.serveRelay)}</button></div>
 <p class="quiet small">${esc(s.serveRelayHint)}</p>
 </details>
-<p class="quiet small">${esc(s.serveIdle)}</p>
+<p class="quiet small">${esc(isLan ? s.serveLanIdle : s.serveIdle)}</p>
 <div id="note" role="status" aria-live="polite"></div>
 </main>
 <script type="application/json" id="words">${JSON.stringify(pageWords(s)).replace(/</g, '\\u003c')}</script>
@@ -622,6 +668,7 @@ const PAGE_SCRIPT = String.raw`
     if (actions.childNodes.length) add(body, actions);
     if (row.resume) add(body, el('code', '', row.resume));
     if (row.send === 'send') add(body, replyBox(row, w('serveMessagePlaceholder', row.agent), 'send', row.agent, row.where, row.isSending));
+    else if (row.hasCopyBox) add(body, replyBox(row, w('serveReplyPlaceholder'), 'copy', row.agent, '', false));
     if (row.info) add(body, el('div', 'quiet small', row.info));
     card.appendChild(body);
     return card;

@@ -1,20 +1,21 @@
 // The board's page for `agent-board.mjs --serve`: a server on 127.0.0.1 with a random token in
-// its address, and the agents' commands a reply from the page starts. What the page shows and
+// its address (and, asked by `--serve --lan`, a second one on a local network address with a
+// token of its own, for a phone), and the agents' commands a reply from the page starts. What the page shows and
 // what a press does are worked out in hooks/serve.ts; the writes are the terminal board's own
 // (board-cli.ts passes them in), so the page changes progress.md the way the pane does.
 import { spawn } from 'node:child_process'
 import type { ChildProcess } from 'node:child_process'
-import { randomBytes } from 'node:crypto'
+import { createHash, randomBytes } from 'node:crypto'
 import { existsSync, statSync } from 'node:fs'
 import { createServer } from 'node:http'
-import type { IncomingMessage, ServerResponse } from 'node:http'
+import type { IncomingMessage, Server, ServerResponse } from 'node:http'
 import type { AddressInfo } from 'node:net'
-import { homedir } from 'node:os'
+import { homedir, networkInterfaces } from 'node:os'
 import { delimiter, isAbsolute, join } from 'node:path'
-import { boardItems } from '../hooks/board'
+import { boardItems, expectedItem } from '../hooks/board'
 import type { BoardAction, PendingTurn } from '../hooks/board'
 import type { Strings } from '../hooks/i18n'
-import { pagePolicy, requestProblem, sendKey, sendPlan, serveAction, serveModel, servePage } from '../hooks/serve'
+import { lanAddress, localHosts, pagePolicy, requestProblem, sendKey, sendPlan, serveAction, serveModel, servePage } from '../hooks/serve'
 import type { SendPlan } from '../hooks/serve'
 import type { AgentTarget, View } from '../hooks/view'
 import { sendClaims } from './board-owner'
@@ -43,6 +44,9 @@ export type ServeOptions = {
 type Result = { ok: boolean; note: string }
 
 const MAX_BODY = 64 * 1024
+// The page on the local network stops after this long without a request from it, so an
+// address a phone was given does not stay open for the page's whole life.
+const LAN_IDLE = 10 * 60 * 1000
 const MAX_WAIT = 10 * 60 * 1000
 // After a reply that took too long is killed, how long to wait for it to be gone.
 const KILL_WAIT = 15 * 1000
@@ -80,6 +84,11 @@ const readBody = (req: IncomingMessage): Promise<Record<string, unknown> | null>
   })
 
 const text = (value: unknown): string => (typeof value === 'string' ? value : '')
+
+// Internal source snapshots can name private folders and resume ids. Only
+// opaque tokens cross HTTP; verified requests recover the current references.
+const sourceToken = (value: string): string => createHash('sha256').update(value).digest('hex')
+const publicSource = <T extends { identity: string; revision: string }>(value: T): T => ({ ...value, identity: sourceToken(value.identity), revision: sourceToken(value.revision) })
 
 const isFile = (path: string): boolean => {
   try {
@@ -223,13 +232,69 @@ export const startServer = (o: ServeOptions): void => {
   let port = 0
   let lastSeen = Date.now()
   let isStopping = false
+  // The page on the local network: its own server, address and token, so the computer's token
+  // never crosses the network.
+  let lan: { server: Server; host: string; token: string; url: string; lastSeen: number } | null = null
+  let lanOpening: Promise<{ url: string } | { note: string }> | null = null
+
+  const closeLan = (): void => {
+    if (lan === null) return
+    lan.server.close()
+    lan.server.closeAllConnections()
+    lan = null
+  }
 
   const stop = (): void => {
     if (isStopping) return
     isStopping = true
+    closeLan()
     server.close()
     server.closeAllConnections()
     o.onStop()
+  }
+
+  // On the same port as the computer's page when it is free there, else on any.
+  const listenLan = (address: string): Promise<{ url: string } | { note: string }> =>
+    new Promise(done => {
+      const token = randomBytes(16).toString('base64url')
+      const lanServer = createServer((req, res) => {
+        handle(req, res, true).catch(() => {
+          if (!res.headersSent) json(res, 500, {})
+        })
+      })
+      const attempt = (at: number): void => {
+        const fail = (error: NodeJS.ErrnoException): void => {
+          // The first try's callback would fire too once the second one listens.
+          lanServer.removeAllListeners('listening')
+          if (at !== 0 && error.code === 'EADDRINUSE') return attempt(0)
+          done({ note: o.s.serveLanFailed })
+        }
+        lanServer.once('error', fail)
+        lanServer.listen(at, address, () => {
+          lanServer.off('error', fail)
+          lanServer.on('error', closeLan)
+          const host = `${address}:${(lanServer.address() as AddressInfo).port}`
+          lan = { server: lanServer, host, token, url: `http://${host}/?t=${token}`, lastSeen: Date.now() }
+          done({ url: lan.url })
+        })
+      }
+      attempt(port)
+    })
+
+  const openLan = (wanted: string | null): Promise<{ url: string } | { note: string }> => {
+    // Asked again, it gives the same address with its 10 minutes counted afresh, so the code
+    // just printed does not close before the phone opens it.
+    if (lan !== null) {
+      lan.lastSeen = Date.now()
+      return Promise.resolve({ url: lan.url })
+    }
+    if (lanOpening !== null) return lanOpening
+    const address = lanAddress(networkInterfaces(), wanted)
+    if (address === null) return Promise.resolve({ note: wanted !== null && /^[\d.]+$/.test(wanted) ? o.s.serveLanNotOurs(wanted) : o.s.serveLanNone })
+    lanOpening = listenLan(address).finally(() => {
+      lanOpening = null
+    })
+    return lanOpening
   }
 
   // One reply at a time per session, in the background: the page asks for the board every 3
@@ -254,9 +319,12 @@ export const startServer = (o: ServeOptions): void => {
     return { status: 202, note: o.s.serveQueued(label) }
   }
 
-  const handle = async (req: IncomingMessage, res: ServerResponse): Promise<void> => {
+  // `isLan`: the request came to the page on the local network.
+  const handle = async (req: IncomingMessage, res: ServerResponse, isLan = false): Promise<void> => {
     const url = new URL(req.url ?? '/', 'http://127.0.0.1')
     const isPage = req.method === 'GET' && url.pathname === '/'
+    const side = isLan ? lan : null
+    if (isLan && side === null) return json(res, 404, {})
     const problem = requestProblem(
       {
         method: req.method ?? '',
@@ -265,15 +333,16 @@ export const startServer = (o: ServeOptions): void => {
         contentType: req.headers['content-type'] ?? '',
         token: isPage ? (url.searchParams.get('t') ?? '') : text(req.headers['x-board-token']),
       },
-      port,
-      token,
+      side === null ? localHosts(port) : [side.host],
+      side === null ? token : side.token,
     )
     if (problem !== null) return json(res, problem, {})
     lastSeen = Date.now()
+    if (side !== null) side.lastSeen = lastSeen
     if (isPage) {
       const nonce = randomBytes(16).toString('base64')
       res.writeHead(200, { ...HEADERS, 'content-type': 'text/html; charset=utf-8', 'content-security-policy': pagePolicy(nonce), 'x-frame-options': 'DENY' })
-      res.end(servePage(o.s, nonce))
+      res.end(servePage(o.s, nonce, isLan))
       return
     }
     if (req.method === 'GET') {
@@ -286,15 +355,21 @@ export const startServer = (o: ServeOptions): void => {
           const target = item.type === 'ask' ? item.ask.target : item.type === 'row' ? item.row.target : null
           if (target !== null && !sending.has(sendKey(target)) && claims.has(sendKey(target))) uncertain.add(sendKey(target))
         }
-        return json(res, 200, { model: { ...serveModel(view, pending, o.s, sending, uncertain), revision: snapshot.revision }, replies: [...replies.values()], now: Date.now() })
+        const model = serveModel(view, pending, o.s, sending, isLan, uncertain)
+        return json(res, 200, { model: { ...model, asks: model.asks.map(publicSource), groups: model.groups.map(group => ({ ...group, rows: group.rows.map(publicSource) })), revision: snapshot.revision }, replies: [...replies.values()], now: Date.now() })
       }
-      if (url.pathname === '/api/ping') return json(res, 200, { ...o.ping, sending: sending.size })
+      // Only the board script on the computer asks; the answer names progress.md's path.
+      if (url.pathname === '/api/ping' && !isLan) return json(res, 200, { ...o.ping, sending: sending.size })
       return json(res, 404, {})
     }
     const body = await readBody(req)
     if (body === null) return json(res, 400, {})
     if (url.pathname === '/api/act') {
-      const action = serveAction(boardItems(o.view(), o.pending()), { key: text(body.key), type: text(body.type), text: text(body.text), session: text(body.session), identity: text(body.identity), revision: text(body.revision) }, o.s)
+      const items = boardItems(o.view(), o.pending())
+      const item = items.find(one => one.key === text(body.key))
+      const expected = item === undefined ? undefined : expectedItem(item)
+      if (expected === undefined || text(body.identity) !== sourceToken(expected.identity) || text(body.revision) !== sourceToken(expected.revision)) return json(res, 409, { note: o.s.boardLineChanged })
+      const action = serveAction(items, { key: text(body.key), type: text(body.type), text: text(body.text), session: text(body.session), identity: expected.identity, revision: expected.revision }, o.s, isLan)
       if (action.type === 'refuse') return json(res, 409, { note: action.note })
       if (action.type === 'send') {
         const sent = send(action.target, action.text, action.title)
@@ -313,6 +388,14 @@ export const startServer = (o: ServeOptions): void => {
       if (text(body.revision) === '') return json(res, 409, { note: o.s.boardLineChanged })
       const pasted = o.paste(text(body.text), text(body.revision))
       return json(res, pasted.isAdded ? 200 : 409, { note: pasted.note })
+    }
+    // Only the board script on the computer opens the page to the network: it asks with the
+    // computer's token and no Origin, which a script on a web page always sends.
+    if (url.pathname === '/api/lan') {
+      if (isLan || req.headers.origin !== undefined) return json(res, 403, {})
+      const wanted = text(body.address)
+      const opened = await openLan(wanted === '' ? null : wanted)
+      return json(res, 'url' in opened ? 200 : 409, opened)
     }
     if (url.pathname === '/api/close') {
       // Closing would cut a reply off halfway: on Windows the agent goes with the server.
@@ -333,6 +416,7 @@ export const startServer = (o: ServeOptions): void => {
   // The page asks every 3 seconds while it is open; the server goes once nobody has asked for
   // `idleMs` and no reply is on its way.
   const idle = setInterval(() => {
+    if (lan !== null && Date.now() - lan.lastSeen > LAN_IDLE) closeLan()
     if (sending.size === 0 && Date.now() - lastSeen > o.idleMs) stop()
   }, Math.min(30_000, o.idleMs))
   server.on('close', () => clearInterval(idle))

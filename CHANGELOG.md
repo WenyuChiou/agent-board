@@ -6,6 +6,10 @@
   revision, and recheck writes against that source. Stale targets conflict;
   rejected replies keep their draft, and a changed target shows the old draft
   separately for copying. Terminal selections also keep their source revision.
+  Source bindings are opaque digests so they do not expose private folders,
+  resume ids or undisplayed task metadata to the network page. Tests:
+  `on the local network every agent's task shows as on the computer, except that a reply that would run grok or codex is a copy and no resume command is sent`
+  and `with --lan the page also opens on the local network, with a token of its own, where a phone can tick but not send to an agent`.
   Tests: `stale archive, reply and manual question requests cannot act on same-title replacements`
   and `page drafts stay with the same source revision and survive a rejected send`.
   Delayed acknowledgements clear the accepted draft after a redraw while preserving
@@ -28,6 +32,41 @@
   and `legacy uncertain claims block public startup after a crash and cannot be replayed`.
   Claims are checked again after legacy shutdown. Test:
   `an uncertain claim created while a legacy page closes still blocks private startup`.
+
+## 0.20.0 — 2026-10-17
+
+- **The board's page can be opened from a phone on the same Wi-Fi.**
+  `node ~/.claude/agent-board.mjs --serve --lan` also opens the page at a
+  private address of the computer (192.168.x.x, 10.x.x.x or
+  172.16-31.x.x, never a public one) and prints that address with a QR
+  code drawn in the terminal, which a phone's camera opens; `--lan
+  <address>` picks one of the computer's addresses. The QR code is made by
+  the board script itself, with no new dependency. That page has a key of
+  its own, answers only requests sent to its own address, and closes after
+  10 minutes without a request from the network, or with the computer's
+  page. It is plain HTTP on the network, so a reply to an agent, which
+  runs a program on the computer, is offered there only as a copy and
+  refused if sent; ticking, archiving, pasting a block and closing work as
+  on the computer. Neither the command to resume a Claude session nor the
+  path of `progress.md` is sent there, since both name the account's
+  folders. An address given to `--lan` that is not one of the computer's
+  own is named as such. "The board's page" in the README and the guide say how,
+  and why to keep it to a network you trust. Tests: "a QR code reads back
+  as the text it was made from: sized to fit it, with its three corner
+  squares, and none past version 10", "as text, a QR code puts two rows on
+  a line inside its quiet zone: black on white with colour, light on dark
+  without", "the page goes on the local network at a private address of
+  this computer, a real adapter's first, never a public one", "on the
+  local network the page answers only its own address, with its own
+  token, and says it closes sooner", "from the local network a reply to
+  an agent is offered as a copy, and refused if sent, since it would run
+  a program on the computer", "on the local network every agent's task
+  shows as on the computer, except that a reply that would run grok or
+  codex is a copy and no resume command is sent", and in
+  `tests/board.test.mjs` "with --lan the page also opens
+  on the local network, with a token of its own, where a phone can tick
+  but not send to an agent", "--serve --lan prints the page's network
+  address and a QR code of it, and a second run gives the same address".
 
 ## 0.19.4 — 2026-10-17
 

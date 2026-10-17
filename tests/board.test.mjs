@@ -896,3 +896,113 @@ test('the same progress.md named two ways brings back the same page', { timeout:
     await board.end(urls)
   }
 })
+
+// A request to the page at any of its addresses, the way a phone on the network sends one.
+const fetchAt = (host, port, method, target, headers = {}, body) =>
+  new Promise((done, fail) => {
+    const sent = { host: `${host}:${port}`, ...(body === undefined ? {} : { 'content-type': 'application/json' }), ...headers }
+    const req = request({ host, port, method, path: target, headers: sent }, res => {
+      let data = ''
+      res.setEncoding('utf8')
+      res.on('data', chunk => (data += chunk))
+      res.on('end', () => done({ status: res.statusCode, body: data, json: () => JSON.parse(data) }))
+    })
+    req.on('error', fail)
+    req.end(body === undefined ? undefined : JSON.stringify(body))
+  })
+
+test('with --lan the page also opens on the local network, with a token of its own, where a phone can tick but not send to an agent', { timeout: 30_000 }, async t => {
+  const board = await page()
+  try {
+    const { call, port, token, keyOf } = board
+    // Only the board script on the computer opens it: a script on a web page sends an Origin.
+    assert.equal((await call('POST', '/api/lan', { body: {}, headers: { origin: `http://127.0.0.1:${port}` } })).status, 403)
+    // An address that is not one of the computer's own is named as such.
+    const wrong = await call('POST', '/api/lan', { body: { address: '8.8.8.8' } })
+    assert.equal(wrong.status, 409)
+    assert.equal(wrong.json().note, "8.8.8.8 is not a private network address of this computer, so the board can't open there.")
+    const opened = await call('POST', '/api/lan', { body: {} })
+    if (opened.status === 409) {
+      t.skip(`no local network address here: ${opened.json().note}`)
+      return
+    }
+    assert.equal(opened.status, 200, opened.body)
+    const lan = new URL(opened.json().url)
+    const phone = lan.searchParams.get('t')
+    const host = lan.hostname
+    const lanPort = Number(lan.port)
+    assert.notEqual(phone, token)
+    // Asked again while it is open, it gives the same address.
+    assert.equal((await call('POST', '/api/lan', { body: {} })).json().url, lan.href)
+    assert.equal((await fetchAt(host, lanPort, 'GET', `/?t=${phone}`)).status, 200)
+    // The computer's token and names are not taken there, nor the phone's token on the computer.
+    assert.equal((await fetchAt(host, lanPort, 'GET', `/?t=${token}`)).status, 403)
+    assert.equal((await fetchAt(host, lanPort, 'GET', '/api/board', { host: `127.0.0.1:${lanPort}`, 'x-board-token': phone })).status, 421)
+    assert.equal((await call('GET', '/api/board', { headers: { 'x-board-token': phone } })).status, 403)
+    // From the network it cannot be opened again, and a reply to an agent is refused.
+    assert.equal((await fetchAt(host, lanPort, 'POST', '/api/lan', { 'x-board-token': phone }, {})).status, 403)
+    // Nor does it say where progress.md is, which names the person's account.
+    assert.equal((await fetchAt(host, lanPort, 'GET', '/api/ping', { 'x-board-token': phone })).status, 404)
+    assert.equal((await call('GET', '/api/ping')).status, 200)
+    const agents = ['claude', 'codex', 'gemini', 'cursor', 'grok', 'muse', 'hermes', 'openclaw', 'opencode']
+    const hiddenPath = join(board.dir, 'synthetic-private-account')
+    const hiddenResume = '11111111-2222-3333-4444-555555555555'
+    writeFileSync(board.path, readFileSync(board.path, 'utf8') + agents.map((agent, index) => `\n## privacy-${agent}\n<!-- auto session=${String(index + 1).repeat(8)} agent=${agent} state=ended updated=2026-10-17T08:30:00Z resume=${hiddenResume} dir=${encodeURIComponent(hiddenPath)} -->\n### Private metadata for ${agent}\n- [ ] Keep working\n<!-- /auto session=${String(index + 1).repeat(8)} -->\n`).join(''))
+    const seen = (await fetchAt(host, lanPort, 'GET', '/api/board', { 'x-board-token': phone })).json()
+    const payload = JSON.stringify(seen)
+    const privatePath = join(board.dir, 'api-gateway')
+    assert.ok(!payload.includes(JSON.stringify(privatePath).slice(1, -1)))
+    assert.ok(!payload.includes(encodeURIComponent(privatePath)))
+    assert.ok(!payload.includes(GROK_ID))
+    assert.ok(!payload.includes(JSON.stringify(hiddenPath).slice(1, -1)))
+    assert.ok(!payload.includes(encodeURIComponent(hiddenPath)))
+    assert.ok(!payload.includes(hiddenResume))
+    for (const agent of agents) {
+      const row = seen.model.groups.flatMap(group => group.rows).find(row => row.title === `Private metadata for ${agent}`)
+      assert.ok(row, `missing ${agent}`)
+      assert.match(row.identity, /^[a-f0-9]{64}$/)
+      assert.match(row.revision, /^[a-f0-9]{64}$/)
+    }
+    assert.equal(seen.model.groups.flatMap(group => group.rows).find(row => row.title === 'Pick the cache')?.send, 'open')
+    const row = seen.model.groups.flatMap(group => group.rows).find(row => row.title === 'Pick the cache')
+    assert.match(row.identity, /^[a-f0-9]{64}$/)
+    assert.match(row.revision, /^[a-f0-9]{64}$/)
+    const sent = await fetchAt(host, lanPort, 'POST', '/api/act', { 'x-board-token': phone }, { ...row, type: 'send', text: 'Redis' })
+    assert.equal(sent.status, 409)
+    assert.equal(sent.json().note, "A reply to grok runs a program on the computer, so it is sent from the computer's own page. You can copy the answer here.")
+    assert.ok(!existsSync(join(board.dir, 'grok-ran.json')))
+    // A tick from the phone is written the way the computer's page writes one.
+    const fabrikam = seen.model.groups.flatMap(group => group.rows).find(row => row.title === 'Fabrikam fellowship')
+    const ticked = await fetchAt(host, lanPort, 'POST', '/api/act', { 'x-board-token': phone }, { ...fabrikam, type: 'tick', text: 'Ask two referees' })
+    assert.equal(ticked.status, 200, ticked.body)
+    assert.ok(readFileSync(board.path, 'utf8').includes('- [x] Ask two referees'))
+  } finally {
+    await board.close()
+  }
+})
+
+test("--serve --lan prints the page's network address and a QR code of it, and a second run gives the same address", { timeout: 60_000 }, async t => {
+  const board = serveIn()
+  const urls = []
+  const serveLan = () =>
+    new Promise((done, fail) => execFile(process.execPath, [board.script, '--serve', '--no-open', '--lan'], { env: board.env, encoding: 'utf8', timeout: 20_000 }, (error, out) => (error ? fail(error) : done(out))))
+  try {
+    const out = await serveLan()
+    urls.push(board.urlOf(out))
+    assert.ok(urls[0], out)
+    const lan = out.match(/open (http:\/\/[\d.]+:\d+\/\?t=[\w-]+) or scan this code:/)?.[1]
+    if (lan === undefined) {
+      assert.ok(out.includes('This computer has no address on a local network'), out)
+      t.skip('no local network address here')
+      return
+    }
+    // NO_COLOR: the light modules are the ink, so the code's quiet zone prints as solid lines.
+    assert.match(out, /scan this code:\n█{29,}\n█{29,}\n/)
+    assert.ok(!out.includes('\u001b['))
+    const again = await serveLan()
+    assert.ok(again.includes(urls[0]), again)
+    assert.ok(again.includes(lan), again)
+  } finally {
+    await board.end(urls)
+  }
+})
