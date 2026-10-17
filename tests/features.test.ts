@@ -6,7 +6,7 @@ import { boardItems, boardKey, boardScreen, boardText, emptyBoardState, fit, pee
 import { addManualTask, isArchivable, manualTaskCount, mergeBlock, renderAutoBlock, setManualStep, takeArchivable, takeManualDone, takeTask, upsertAutoBlock } from '../hooks/blocks'
 import { agentHooks, boardCommands, boardScript, DELETE, isWindowsHost, openclawPlugin, openclawPrinted, openclawSavedBy, openclawTooOld, readConfig, reportCommand, reporterPs1, withFlatHook, withGroupedHook, withHermesHooks, withoutHermesHooks, withoutOurHooks, withoutSection } from '../hooks/connect'
 import { dashboardHtml } from '../hooks/dashboard'
-import { answerKey, blockId, isBoardAnswer, isBoardTurn, isInboxFile, isTakenFile, isTextLog, isTranscriptPath, keepInboxDone, promptKey, readTurn, takenName, transcriptTail, turnsToDigest } from '../hooks/inbox'
+import { answerKey, blockId, CLAIM_MS, claimAction, isBoardAnswer, isBoardTurn, isInboxFile, isTakenFile, isTextLog, isTranscriptPath, keepInboxDone, keepInboxFailed, MAX_TRIES, promptKey, readClaim, readTurn, takenName, transcriptTail, turnsToDigest } from '../hooks/inbox'
 import { applyDigest, clearAsked, isWork, lastQuestion, markAsked, parseDigest, replyData, requestData, turnTools } from '../hooks/digest'
 import { ciFinished, prFromGh, prWords } from '../hooks/github'
 import { appendJournal, countDay, journalLine, parseJournal, progressReport } from '../hooks/journal'
@@ -994,12 +994,34 @@ test('a burst of turns from one agent session asks the model about the last two 
 })
 
 test('an inbox file taken by a session is renamed to a name of its own, which no session reads as a new file', () => {
-  const taken = takenName('codex-turn-1792216380-1473.json', '2be48af2')
-  expect(taken).toBe('codex-turn-1792216380-1473.json.2be48af2.taking')
+  const at = Date.parse('2026-10-16T12:00:00.000Z')
+  const taken = takenName('codex-turn-1792216380-1473.json', '2be48af2', at)
+  expect(taken).toBe(`codex-turn-1792216380-1473.json.2be48af2-${at.toString(36)}-1.taking`)
   expect(isTakenFile(taken)).toBe(true)
   expect(isInboxFile(taken)).toBe(false)
   expect(isTakenFile('codex-turn-1792216380-1473.json')).toBe(false)
   expect(isTakenFile('notes.taking')).toBe(false)
+  // A name an earlier version gave a taken file is still read as one.
+  expect(readClaim('codex-turn-1792216380-1473.json.2be48af2.taking')).toEqual({ name: 'codex-turn-1792216380-1473.json', at: null, attempt: 1 })
+  expect(readClaim(takenName('codex-turn-1792216380-1473.json', '2be48af2', at, 3))).toEqual({ name: 'codex-turn-1792216380-1473.json', at, attempt: 3 })
+})
+
+test('a taken inbox file is left to its session for a while, then taken again, and set aside after its last try', () => {
+  const at = Date.parse('2026-10-16T12:00:00.000Z')
+  const name = 'codex-turn-1792216380-1473.json'
+  const claim = (taken: number, attempt: number) => readClaim(takenName(name, '2be48af2', taken, attempt)) ?? { name, at: null, attempt: 1 }
+  expect(claimAction(claim(at - 60_000, 1), 0, at)).toBe('leave')
+  expect(claimAction(claim(at - CLAIM_MS - 1, 1), 0, at)).toBe('retake')
+  expect(claimAction(claim(at - CLAIM_MS - 1, MAX_TRIES), 0, at)).toBe('setAside')
+  // A claim from before claims carried their time waits a day from the file's own time.
+  const old = readClaim(`${name}.2be48af2.taking`) ?? claim(at, 1)
+  expect(claimAction(old, at - 60 * 60 * 1000, at)).toBe('leave')
+  expect(claimAction(old, at - 25 * 60 * 60 * 1000, at)).toBe('retake')
+})
+
+test('the record of why inbox files are still there keeps the newest notes only', () => {
+  const notes = Object.fromEntries(Array.from({ length: 5 }, (_, n) => [`codex-turn-${n}-1.json`, `1:${n}:the board could not be written`]))
+  expect(Object.keys(keepInboxFailed(notes, 2))).toEqual(['codex-turn-4-1.json', 'codex-turn-3-1.json'])
 })
 
 test('Windows is told by the system or a drive letter, not by the slashes in the path', () => {
