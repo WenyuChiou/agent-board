@@ -1,51 +1,40 @@
 # Remote reporters
 
-Agents that do not run on the board's machine — a cloud VM, a chat-based
-assistant, anything without local hooks or a shared filesystem — can still
-report to the pane. This page describes the exchange interface. It is
-honest about what works and what does not; see [What this does not
-do](#what-this-does-not-do).
+Agents that do not run on the board's machine (a cloud VM, a chat-based
+assistant, anything without local hooks or a shared filesystem) can still
+report to the pane. This page covers only what is specific to them; see
+[What this does not do](#what-this-does-not-do) for the limits.
 
-## The interface
+## The contract
 
-### Outward: agent → board (real)
+There is one contract, and it is [FORMAT.md](FORMAT.md) v1: a block under
+its own `## <project>` heading, written as its
+[writer checklist](FORMAT.md#writing-a-block-from-another-agent) says. A
+remote reporter writes that block as a **fragment** (the block, optionally
+preceded by a `## <project>` line) and something carries the fragment to the
+board's machine, where one merge step puts it into `progress.md`.
 
-One block per session in `progress.md`, following [FORMAT.md](FORMAT.md) v1:
+What is different for a remote reporter:
 
-```
-<!-- auto session=<8 hex> agent=<name> state=<working|waiting|done|ended> updated=<UTC ISO 8601 Z> -->
-### The outcome, in plain words
-> Context: one line on why this work exists
-- [x] A finished step
-- [?] A step that needs the user — one line they can follow without reading the chat
-<!-- /auto session=<8 hex> -->
-```
+- **The session id must outlive the process.** A cloud agent restarts and
+  compacts more often than a terminal session. Mint the 8-hex id once per
+  logical session and keep it in a registry outside the plugin folder (a
+  plugin update replaces that folder, and a re-minted id leaves an orphan
+  block). `reporter.py` keeps it in `$AGENT_BOARD_REMOTE_DIR`, else
+  `$CLAUDE_CONFIG_DIR/remote-reporter/`, else `~/.claude/remote-reporter/`.
+- **The merge step, not the agent, follows FORMAT.md's concurrent-writer
+  discipline.** The agent never touches `progress.md`; `merge.py` reads it,
+  replaces only the fragments' blocks, writes atomically, reads back and
+  retries.
+- **A new block needs its project.** The fragment's first line
+  (`## <project>`) or `merge.py --under` names it; without one the merge
+  refuses rather than guess.
+- **Never fake a heartbeat.** Write on state changes only. A block whose
+  `updated=` is old must read as old.
+- **No secrets in blocks.** The transport is the trust boundary; the format
+  has no authentication and the board trusts the file.
 
-Rules for a remote reporter:
-
-1. **One stable `session` id per logical session.** Mint 8 hex chars once,
-   persist it (a local registry file survives restarts and compactions).
-   Reuse it for every rewrite; never mint a second id for the same session.
-2. **Write on state transitions**, not on a timer: start (`working`),
-   blocked or needs-the-user (`waiting` + a `[?]` step), finished (`done`),
-   abandoned (`ended`). Update `updated=` on every write, always UTC with `Z`.
-3. **Never fake a heartbeat.** A block whose `updated=` is old must read as
-   old. The board judges staleness from `updated=`; a fake heartbeat turns a
-   dead session into a live-looking one.
-4. **Place the block** under the `## <project>` heading of its repository
-   (add the heading at the end of the file if missing), after what is already
-   in that section, with a blank line before the start marker and after the
-   end marker — exactly what the pane's own writer does.
-5. **Rewrite only between your own markers.** Never touch another block or
-   anything outside your markers. Validate the block before writing; never
-   write a malformed block.
-6. **Write atomically**: temp file in the same folder + rename. Then read
-   back; if your block did not read back as written, retry (up to 3 times).
-   This is the concurrent-writer discipline from FORMAT.md.
-7. **No secrets in blocks.** The transport is the trust boundary; the file
-   format has no authentication and the board trusts the file.
-
-### Inward: board → agent (honestly: no reliable channel)
+### Inward: board to agent (no reliable channel)
 
 Writing something into `progress-inbox/` or into the file does **not** mean
 the remote agent received it. There is no wake-up channel to a cloud agent's
@@ -54,66 +43,55 @@ conversation. Do not build UI that implies delivery.
 - A `[?]` step or a "pending confirmation" note on the board is
   **informational**. The agent proceeds only on an explicit answer through a
   real channel (the chat with the user).
-- Consequential actions — especially merging a pull request — always need
-  the user's explicit consent for that specific change and its test results,
-  regardless of what the board shows.
+- Consequential actions, above all merging a pull request, always need the
+  user's explicit consent for that specific change and its test results,
+  whatever the board shows.
 
 ## Transports (the user's choice)
 
 The reporter writes a fragment file; something must carry it to the board's
-machine and merge it into `progress.md`. Options, simplest last to set up:
+machine and merge it into `progress.md`.
 
 | Transport | How | Notes |
 |---|---|---|
-| Chat relay | The agent pastes the block; the user (or their local agent) appends it | Zero setup; manual per update |
+| Chat relay | The agent pastes the fragment; the user (or their local agent) saves it and runs the merge | Zero setup; manual per update |
 | Git | Fragments pushed to a repo; the board's machine pulls on a schedule and merges | Automatic after one-time setup; versioned; recommended |
 | Cloud drive | Fragment in a shared folder; a local script pulls and merges | Needs a local script anyway |
 
-`scripts/remote-reporter/merge.py` is transport-agnostic: it merges fragment
-files into `progress.md` idempotently (re-merging is byte-identical), so any
-transport can call it.
+`scripts/remote-reporter/merge.py` is transport-agnostic and idempotent
+(re-merging the same fragments gives the same bytes), so any transport can
+call it as often as it likes.
 
 ## Risks and mitigations
 
 | Risk | Mitigation | Status |
 |---|---|---|
-| Overlapping / duplicate session delivery (same session via two paths, or a re-minted id after a restart) | One id per logical session in a persistent registry; merge dedupes by session id; a single merge point per board | Implemented in reference scripts |
-| Crash mid-write | Atomic temp+rename (POSIX); orphaned temp files are hidden and harmless | Implemented |
-| Lost update between concurrent writers | Read → change only own lines → write → read back → retry ×3 (FORMAT.md discipline) | Implemented and tested |
-| Two writers racing on the *same* block | Must not happen: one writer owns one session. Different blocks never conflict because each writer touches only its own lines | By construction |
-| Clock skew across machines | `updated=` must be UTC; staleness is approximate — documented, not solved | Documented |
-| Truncated / malformed fragment in transit | Validate before merge; invalid fragments are refused outright, never partially applied | Implemented and tested |
-| Replay (same fragment delivered twice) | Idempotent merge: byte-identical result | Implemented and tested |
-| Stale session looking live | Board must show the block's last-update time; reporters must not fake heartbeats | Board-side requirement (see below) |
-| Orphan blocks (session died without `state=ended`) | Existing staleness/archive rules apply; the registry makes orphans rare | Documented |
-| Impersonation (`agent=` is self-declared) | No auth in the format; acceptable for a personal board — documented | Documented |
+| Duplicate session (same session via two paths, or a re-minted id after a restart) | One id per logical session in a persistent registry outside the plugin folder; merge replaces by session id; one merge point per board | Implemented in the reference scripts |
+| Crash mid-write | Temp file in the same folder, then `os.replace`; the file keeps its mode and line endings | Implemented |
+| A concurrent write drops a merged block | The merge reads, changes only its blocks, writes, reads back and retries up to 3 times. A pane write that lands *after* the read-back can still drop the merged block; it comes back on the next merge, because merges are idempotent. There is no lock | Mitigated, not prevented |
+| Two writers on the *same* block | Must not happen: one writer owns one session. Different blocks never conflict, since each writer replaces only its own | By construction |
+| A merge rewriting something that only looks like a block | The scanner reads like `hooks/parse.ts`: blocks in code fences or HTML comments are skipped; CRLF, `<!--auto` and any attribute order are read | Implemented and tested |
+| Clock skew across machines | `updated=` must be UTC; staleness is approximate | Documented |
+| Truncated or malformed fragment | Validated before merge; an invalid fragment is refused outright, never partly applied. Text with newlines, control characters or comment markers is refused when the fragment is built | Implemented and tested |
+| Replay (same fragment delivered twice) | Idempotent merge | Implemented and tested |
+| Stale session looking live | The pane already shows a `working`/`waiting` block untouched for 12 hours as stopped; reporters must not fake heartbeats | Format rule |
+| Orphan blocks (session died without `state=ended`) | The usual staleness and archive rules apply; the registry makes orphans rare | Documented |
+| Impersonation (`agent=` is self-declared) | No auth in the format; acceptable for a personal board | Documented |
 | Secrets leaking through the transport | Keep secrets out of blocks; choose the transport accordingly | Documented |
-
-**Board-side requirement (not in this PR):** the pane should display each
-remote block's last-update time, so an offline session never looks like it is
-still running. Suggested as a follow-up for the pane renderer.
 
 ## What this does not do
 
-- **No live auto-sync of any specific agent's state.** Wiring a real
-  agent's (e.g. dot's) live status needs that agent's actual transport and
-  belongs in a follow-up issue per agent. This PR ships the interface only —
-  deliberately, to avoid a fake integration that pastes a name without a
-  connection.
-- **No board→agent notification channel.** See above: none exists that is
-  reliable; none is pretended.
-- **No changes to the pane, the format, or existing hooks.** Purely
-  additive.
+- **No live auto-sync of any specific agent.** Wiring a real agent's status
+  needs that agent's actual transport and belongs in a follow-up per agent.
+- **No board-to-agent notification channel.** None exists that is reliable;
+  none is pretended.
+- **No changes to the pane, the format, or existing hooks.**
 
 ## Reference implementation
 
-`scripts/remote-reporter/` holds a tested Python reference: `reporter.py`
-(builds blocks, keeps the session registry), `merge.py` (idempotent merge
-with read-back retry), `validate.py` (FORMAT.md checks), `test_pipeline.py`
-(31 tests: fresh merge, updates, multi-writer, idempotency, malformed
-fragments, read-back verification). Run `python3 test_pipeline.py` from that
-folder. It needs only Python 3 — no `claude` CLI.
-
-Note: the repo's own checks (`claude plugin validate`, `claude plugin test`,
-`tsc`) were not run for this change — no `claude` CLI in this environment —
-and are unaffected: this change adds standalone files only.
+[`scripts/remote-reporter/`](../scripts/remote-reporter/README.md) holds
+stdlib Python: `reporter.py` (builds fragments, keeps the session registry),
+`merge.py` (the merge step), `validate.py` (FORMAT.md checks, scanning a file
+the way the parser does) and `test_pipeline.py`. Run the tests with
+`python3 -B scripts/remote-reporter/test_pipeline.py`; CI runs them on
+Ubuntu and Windows.
