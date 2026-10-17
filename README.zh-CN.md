@@ -79,6 +79,7 @@ bash ~/.claude/plugins/marketplaces/claude-progress-pane/scripts/setup.sh
 - **打开 Task 工具。** 新模型要设了 `CLAUDE_CODE_ENABLE_TODO_TOOLS=1` 才有 Claude Code 的 Task 工具，而面板就是跟着这些工具走。脚本把这个变量加进你的 shell 的 profile（PowerShell 是 `$PROFILE`；`~/.zshrc`、`~/.bashrc`、macOS 上是 `~/.bash_profile`，或 `~/.profile`）。不加进 `settings.json`：那里的 env 也会进到 Claude 桌面 app，而桌面 app 自己有一份待办清单。
 - **打开自动更新**，这个 marketplace 的新版本会自己送到。你自己关掉的自动更新会保持关闭。
 - **把旧的安装换过来**，如果你用过 zip 版。
+- **帮你接上其他 agent（需要你开口）。** 加上 `--agents`（PowerShell 是 `-Agents auto`），它也会把汇报进度的说明交给 Codex、Gemini CLI 和 OpenCode（见[其他 agent](#其他-agent)）。
 
 它改的每个文件都会先复制一份 `<文件名>.bak`。加上 `-NoInstall`（`--no-install`）可以跳过安装这一步。
 
@@ -198,7 +199,31 @@ Claude 会列出 Task 清单，面板跟着走：卡片显示任务、它的背�
 
 ## 其他 agent
 
-任何能写文件的 agent 都可以把自己的工作显示在面板上。把 [AGENTS.md](AGENTS.md)（英文）最后那一节 **"Report your progress to the progress pane"** 复制到你项目的 `AGENTS.md`、`GEMINI.md` 或 `.cursorrules`。之后这个 agent 会维护一个自己的区块，面板会标上这个 agent 的名字。其他 agent 的问题和其他问题列在一起；你要到那个 agent 的对话里回答。
+任何能写文件的 agent 都可以把自己的工作显示在面板上。它只需要一段说明：[AGENTS.md](AGENTS.md)（英文）最后那一节 **"Report your progress to the progress pane"**。
+
+**Codex、Gemini CLI、OpenCode：** 运行设置脚本时加上 `--agents`。它会把这段说明加进每个 agent 的全局指令文件，之后每个项目都会用到：
+
+```bash
+bash ~/.claude/plugins/marketplaces/claude-progress-pane/scripts/setup.sh --agents
+```
+
+```powershell
+powershell -ExecutionPolicy Bypass -File "$env:USERPROFILE\.claude\plugins\marketplaces\claude-progress-pane\scripts\setup.ps1" -Agents auto
+```
+
+| Agent | 写入的文件 |
+|---|---|
+| Codex | `~/.codex/AGENTS.md`（`$CODEX_HOME`；如果 `AGENTS.override.md` 有内容就写进它） |
+| Gemini CLI | `~/.gemini/GEMINI.md` |
+| OpenCode | `~/.config/opencode/AGENTS.md` |
+
+`--agents` 会处理这台电脑上装了的 agent；`--agents=codex,gemini`（`-Agents codex,gemini`）可以指定；`--remove-agents`（`-RemoveAgents`）会把这段删掉。这段说明放在 `<!-- claude-progress-pane:start -->` 和 `<!-- claude-progress-pane:end -->` 之间，文件其他内容保持不变。
+
+**其他 agent**（Cursor、Aider、GitHub Copilot、Windsurf…）：把这段说明粘贴进项目的指令文件（`AGENTS.md`、`.cursorrules`、`CONVENTIONS.md`…）。
+
+之后这个 agent 会维护一个自己的区块，面板会标上它的名字。它的问题和其他问题列在一起，并写明要到哪里回答；它要你运行的命令可以直接在面板上复制，链接也可以直接打开。
+
+实测方式：让三个不同模型的 agent 只拿到这段说明，同时写同一个文件。面板把每个区块、agent 标签和问题种类都读对了，它们区块以外的内容一个字都没变。
 
 ## 它怎么保持整齐
 

@@ -1,6 +1,6 @@
 {
   "name": "project-progress",
-  "version": "0.7.0",
+  "version": "0.7.1",
   "description": "A progress dashboard for coding agents: every project's work in one pane, what needs you first, kept in step with the Task list",
   "author": {
     "name": "Wenyu Chiou"

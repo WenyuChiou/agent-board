@@ -79,6 +79,7 @@ What it does:
 - **Turns on the Task tools.** Recent models get Claude Code's Task tools only with `CLAUDE_CODE_ENABLE_TODO_TOOLS=1`, and the pane mirrors those tools. The script adds the variable to your shell profile (`$PROFILE` in PowerShell; `~/.zshrc`, `~/.bashrc`, `~/.bash_profile` on macOS, or `~/.profile`). Not to `settings.json`, whose env also reaches the Claude desktop app, which keeps a task list of its own.
 - **Turns on auto-update** for this marketplace, so new versions arrive by themselves. An auto-update you switched off stays off.
 - **Moves an old install over**, if you used the zip version.
+- **Connects your other agents, if you ask.** With `--agents` (PowerShell: `-Agents auto`) it also gives Codex, Gemini CLI and OpenCode the instructions to report to the pane (see [Other agents](#other-agents)).
 
 Every file it changes is copied to `<file>.bak` first. Run it with `-NoInstall` (`--no-install`) to skip the install step.
 
@@ -198,7 +199,31 @@ The full specification, for tools that read or write the file, is [docs/FORMAT.m
 
 ## Other agents
 
-Any agent that can write a file can show its work on the pane. Copy the section **"Report your progress to the progress pane"** at the end of [AGENTS.md](AGENTS.md) into the `AGENTS.md`, `GEMINI.md` or `.cursorrules` of your project. The agent then keeps one block of its own, and the pane labels it with the agent's name. Questions from other agents are listed with the rest; you answer them in that agent's session.
+Any agent that can write a file can show its work on the pane. All it needs is one section of instructions, **"Report your progress to the progress pane"** at the end of [AGENTS.md](AGENTS.md).
+
+**Codex, Gemini CLI, OpenCode:** run the setup script with `--agents`. It adds the section to each one's global instructions, so every project picks it up:
+
+```bash
+bash ~/.claude/plugins/marketplaces/claude-progress-pane/scripts/setup.sh --agents
+```
+
+```powershell
+powershell -ExecutionPolicy Bypass -File "$env:USERPROFILE\.claude\plugins\marketplaces\claude-progress-pane\scripts\setup.ps1" -Agents auto
+```
+
+| Agent | File it writes |
+|---|---|
+| Codex | `~/.codex/AGENTS.md` (`$CODEX_HOME`; `AGENTS.override.md` when that one has text) |
+| Gemini CLI | `~/.gemini/GEMINI.md` |
+| OpenCode | `~/.config/opencode/AGENTS.md` |
+
+`--agents` takes the agents installed on the machine; `--agents=codex,gemini` (`-Agents codex,gemini`) names them; `--remove-agents` (`-RemoveAgents`) takes the section out again. The section sits between `<!-- claude-progress-pane:start -->` and `<!-- claude-progress-pane:end -->`, and the rest of the file is left as it was.
+
+**Any other agent** (Cursor, Aider, GitHub Copilot, Windsurf…): paste the section into the project's instruction file (`AGENTS.md`, `.cursorrules`, `CONVENTIONS.md`, …).
+
+The agent then keeps one block of its own, and the pane labels it with the agent's name. Its questions are listed with the rest and say where to answer them; a command it asks you to run can be copied, and a link opened, right from the pane.
+
+Checked by giving agents on three different models only that section and having them write to one file at the same time: the pane read every block, label and kind of question right, and nothing outside their blocks changed.
 
 ## How it keeps itself tidy
 

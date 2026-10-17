@@ -1,5 +1,41 @@
 # Changelog
 
+## 0.7.1 — 2026-10-17
+
+Found by running the whole thing for real: installing from GitHub into a clean
+config, updating from 0.5.2, a headless Claude Code session doing a small task,
+and agents on three different models (as `codex`, `gemini`, `cursor`), each
+given only the AGENTS.md section, writing to one `progress.md` at the same
+time. All of it worked: every block, label and kind of question read right, and
+nothing outside the agents' own blocks changed. These are the rough edges it
+showed.
+
+- **Other agents in one step.** `setup.sh --agents` (`setup.ps1 -Agents auto`)
+  puts the AGENTS.md section into the global instructions of the agents
+  installed here: Codex (`$CODEX_HOME/AGENTS.md`, or `AGENTS.override.md` when
+  that one has text), Gemini CLI (`~/.gemini/GEMINI.md`), OpenCode
+  (`~/.config/opencode/AGENTS.md`), between markers, keeping the rest of each
+  file. `--agents=codex,gemini` names them, `--remove-agents` takes it out.
+  Without the option, the script says which agents it found.
+  Checks: `agents: …` in `tests/setup.check.sh` and `tests/setup.check.ps1`.
+- **Another agent's command and link, from here.** Its question is still
+  answered in its own session, but a command it asks you to run now shows with
+  **Copy command**, and a link with **Open it**.
+  Test: `another agent's question is answered there, but its command can be
+  copied and its link opened from here`.
+- **English titles are no longer chopped.** Titles and background lines are cut
+  by terminal width (a CJK character is two cells), at a word, with `…`: an
+  English title got 24 characters and read `Add README describing in`.
+  Test: `titles and background are cut by terminal width, at a word in English,
+  never mid-word`.
+- **progress.html** shows a backticked word as a command only in a step that
+  asks you to run something; in a question it is a name.
+- **The AGENTS.md section** says the `###` title is the agent's to word, other
+  `>` lines are allowed, and only commands go in backticks: the test agents
+  asked about the first two and put a file name in backticks.
+- **Setup** sets the language option to `auto` after a fresh install, so
+  Claude Code stops saying an option is not set. A language you picked stays.
+
 ## 0.7.0 — 2026-10-16
 
 Includes 0.6.0, which was not released on its own.
