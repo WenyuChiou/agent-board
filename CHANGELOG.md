@@ -1,5 +1,34 @@
 # Changelog
 
+## 0.20.0 — 2026-10-17
+
+- **The board's page can be opened from a phone on the same Wi-Fi.**
+  `node ~/.claude/agent-board.mjs --serve --lan` also opens the page at a
+  private address of the computer (192.168.x.x, 10.x.x.x or
+  172.16-31.x.x, never a public one) and prints that address with a QR
+  code drawn in the terminal, which a phone's camera opens; `--lan
+  <address>` picks one of the computer's addresses. The QR code is made by
+  the board script itself, with no new dependency. That page has a key of
+  its own, answers only requests sent to its own address, and closes after
+  10 minutes without a request from the network, or with the computer's
+  page. It is plain HTTP on the network, so a reply to an agent, which
+  runs a program on the computer, is offered there only as a copy and
+  refused if sent; ticking, archiving, pasting a block and closing work as
+  on the computer. "The board's page" in the README and the guide say how,
+  and why to keep it to a network you trust. Tests: "a QR code reads back
+  as the text it was made from: sized to fit it, with its three corner
+  squares, and none past version 10", "as text, a QR code puts two rows on
+  a line inside its quiet zone: black on white with colour, light on dark
+  without", "the page goes on the local network at a private address of
+  this computer, a real adapter's first, never a public one", "on the
+  local network the page answers only its own address, with its own
+  token, and says it closes sooner", "from the local network a reply to an agent is offered as a
+  copy, and refused if sent, since it would run a program on the
+  computer", and in `tests/board.test.mjs` "with --lan the page also opens
+  on the local network, with a token of its own, where a phone can tick
+  but not send to an agent", "--serve --lan prints the page's network
+  address and a QR code of it, and a second run gives the same address".
+
 ## 0.19.2 — 2026-10-17
 
 - **The page's address, key and all, is no longer kept beside

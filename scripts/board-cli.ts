@@ -20,6 +20,7 @@ import { LOG_TAIL } from '../hooks/inbox'
 import { dashboardHtml } from '../hooks/dashboard'
 import { appendJournal, archivePath, countDay, journalLine, journalPath } from '../hooks/journal'
 import { parseProgress } from '../hooks/parse'
+import { qrModules, qrText } from '../hooks/qr'
 import { langOf, STRINGS } from '../hooks/strings'
 import { buildView } from '../hooks/view'
 
@@ -433,6 +434,28 @@ const runningPage = async (): Promise<Running | null> => {
   return null
 }
 
+// `--lan`: the running page opens to the local network too, and its address there is printed
+// with a QR code a phone's camera opens. Never opened here: it is for the phone. `--lan
+// <address>` picks which of the computer's addresses.
+const showLan = async (url: string): Promise<void> => {
+  const wanted = flag('--lan')
+  const answer = await fetch(`http://127.0.0.1:${new URL(url).port}/api/lan`, {
+    method: 'POST',
+    headers: { 'x-board-token': tokenOf(url), 'content-type': 'application/json' },
+    body: JSON.stringify({ address: wanted !== undefined && /^[\d.]+$/.test(wanted) ? wanted : '' }),
+    signal: AbortSignal.timeout(5000),
+  })
+    .then(res => res.json() as Promise<{ url?: unknown; note?: unknown }>)
+    .catch(() => ({ note: s.serveLanFailed }) as { url?: unknown; note?: unknown })
+  const lanUrl = typeof answer.url === 'string' && /^http:\/\/[\d.]+:\d+\/\?t=[\w-]+$/.test(answer.url) ? answer.url : null
+  if (lanUrl === null) {
+    process.stdout.write(`\n${typeof answer.note === 'string' && answer.note !== '' ? answer.note : s.serveLanFailed}\n`)
+    return
+  }
+  const modules = qrModules(lanUrl)
+  process.stdout.write(`\n${s.serveLanAt(lanUrl)}\n${modules === null ? '' : `${qrText(modules, options().isColor)}\n`}`)
+}
+
 // Prints the board, then the address of its page, started in the background if no page of this
 // copy is running yet (and opened in the browser then, unless --no-open). It returns at once, so
 // an agent's command tool is not left waiting on the server.
@@ -443,6 +466,7 @@ const serveBoard = async (): Promise<void> => {
     // The address comes from a file and goes to a shell on Windows: only the shape this server
     // writes is opened.
     if (!args.includes('--no-open') && /^http:\/\/127\.0\.0\.1:\d+\/\?t=[\w-]+$/.test(url)) await new Promise<void>(done => openInBrowser(url, () => done()))
+    if (args.includes('--lan')) await showLan(url)
   }
   // 0.19.0 kept the address, token and all, beside progress.md.
   const old = readRunning(oldServeFile)

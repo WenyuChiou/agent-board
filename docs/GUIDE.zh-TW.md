@@ -225,6 +225,8 @@ Gemini CLI 和 OpenCode 會自己把看板貼進提示；用技能（skill）的
 
 `--serve` 先印出看板，再在瀏覽器打開它的網頁，同樣的事在那裡按一下就好：勾步驟、封存一件工作或全部做完的、複製答案或指令、回覆已經結束的 Grok Build 或 Codex 對話（在那個對話自己的資料夾裡，一次一則），以及貼上網頁聊天寫的區塊。上面每個看板指令都會跑它，所以 agent 給你看的最後一行就是網址。網頁只在 127.0.0.1 上提供，網址裡帶一把隨機鑰匙，30 分鐘沒人看就會關；詳見[看板的網頁](../README.zh-TW.md#看板的網頁)。agent 回的話等它回來才會出現在網頁上，可能要幾分鐘；還有一則在路上時，網頁不會關。agent 若在沙箱裡跑指令，可能不准開網頁：看板照樣印出，最後一行會說網頁打不開。這時自己在終端機跑 `node ~/.claude/agent-board.mjs --serve`。
 
+要從同一個 Wi-Fi 上的手機看網頁，加上 `--lan`：`node ~/.claude/agent-board.mjs --serve --lan` 還會印出網頁在你網路上的網址，和一個手機相機掃了就能開的 QR code。那個網頁有自己的鑰匙，10 分鐘沒有手機來看就會關。手機在那裡能勾步驟、封存、複製、貼上區塊，但回覆 agent 要從電腦上送。只在信得過的網路上用，原因見[看板的網頁](../README.zh-TW.md#看板的網頁)。
+
 <img alt="終端機裡的看板，每 2 秒重畫" src="images/live/terminal-zh-TW.png" width="560">
 <img alt="OpenCode 1.19.3：/board" src="images/live/opencode-zh-TW.png" width="560">
 

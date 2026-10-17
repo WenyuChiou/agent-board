@@ -463,3 +463,89 @@ test('an address file cut short by a crash is cleared once it is old, and the ne
     await board.end(urls)
   }
 })
+
+// A request to the page at any of its addresses, the way a phone on the network sends one.
+const fetchAt = (host, port, method, target, headers = {}, body) =>
+  new Promise((done, fail) => {
+    const sent = { host: `${host}:${port}`, ...(body === undefined ? {} : { 'content-type': 'application/json' }), ...headers }
+    const req = request({ host, port, method, path: target, headers: sent }, res => {
+      let data = ''
+      res.setEncoding('utf8')
+      res.on('data', chunk => (data += chunk))
+      res.on('end', () => done({ status: res.statusCode, body: data, json: () => JSON.parse(data) }))
+    })
+    req.on('error', fail)
+    req.end(body === undefined ? undefined : JSON.stringify(body))
+  })
+
+test('with --lan the page also opens on the local network, with a token of its own, where a phone can tick but not send to an agent', { timeout: 30_000 }, async t => {
+  const board = await page()
+  try {
+    const { call, port, token, keyOf } = board
+    // Only the board script on the computer opens it: a script on a web page sends an Origin.
+    assert.equal((await call('POST', '/api/lan', { body: {}, headers: { origin: `http://127.0.0.1:${port}` } })).status, 403)
+    const opened = await call('POST', '/api/lan', { body: {} })
+    if (opened.status === 409) {
+      t.skip(`no local network address here: ${opened.json().note}`)
+      return
+    }
+    assert.equal(opened.status, 200, opened.body)
+    const lan = new URL(opened.json().url)
+    const phone = lan.searchParams.get('t')
+    const host = lan.hostname
+    const lanPort = Number(lan.port)
+    assert.notEqual(phone, token)
+    // Asked again while it is open, it gives the same address.
+    assert.equal((await call('POST', '/api/lan', { body: {} })).json().url, lan.href)
+    assert.equal((await fetchAt(host, lanPort, 'GET', `/?t=${phone}`)).status, 200)
+    // The computer's token and names are not taken there, nor the phone's token on the computer.
+    assert.equal((await fetchAt(host, lanPort, 'GET', `/?t=${token}`)).status, 403)
+    assert.equal((await fetchAt(host, lanPort, 'GET', '/api/board', { host: `127.0.0.1:${lanPort}`, 'x-board-token': phone })).status, 421)
+    assert.equal((await call('GET', '/api/board', { headers: { 'x-board-token': phone } })).status, 403)
+    // From the network it cannot be opened again, and a reply to an agent is refused.
+    assert.equal((await fetchAt(host, lanPort, 'POST', '/api/lan', { 'x-board-token': phone }, {})).status, 403)
+    // Nor does it say where progress.md is, which names the person's account.
+    assert.equal((await fetchAt(host, lanPort, 'GET', '/api/ping', { 'x-board-token': phone })).status, 404)
+    assert.equal((await call('GET', '/api/ping')).status, 200)
+    const seen = (await fetchAt(host, lanPort, 'GET', '/api/board', { 'x-board-token': phone })).json()
+    assert.equal(seen.model.groups.flatMap(group => group.rows).find(row => row.title === 'Pick the cache')?.send, 'open')
+    const key = await keyOf('Pick the cache')
+    const sent = await fetchAt(host, lanPort, 'POST', '/api/act', { 'x-board-token': phone }, { key, type: 'send', text: 'Redis', session: 'b2c3d4e5' })
+    assert.equal(sent.status, 409)
+    assert.equal(sent.json().note, "A reply to grok runs a program on the computer, so it is sent from the computer's own page. You can copy the answer here.")
+    assert.ok(!existsSync(join(board.dir, 'grok-ran.json')))
+    // A tick from the phone is written the way the computer's page writes one.
+    const fabrikam = await keyOf('Fabrikam fellowship')
+    const ticked = await fetchAt(host, lanPort, 'POST', '/api/act', { 'x-board-token': phone }, { key: fabrikam, type: 'tick', text: 'Ask two referees' })
+    assert.equal(ticked.status, 200, ticked.body)
+    assert.ok(readFileSync(board.path, 'utf8').includes('- [x] Ask two referees'))
+  } finally {
+    await board.close()
+  }
+})
+
+test("--serve --lan prints the page's network address and a QR code of it, and a second run gives the same address", { timeout: 60_000 }, async t => {
+  const board = serveIn()
+  const urls = []
+  const serveLan = () =>
+    new Promise((done, fail) => execFile(process.execPath, [board.script, '--serve', '--no-open', '--lan'], { env: board.env, encoding: 'utf8', timeout: 20_000 }, (error, out) => (error ? fail(error) : done(out))))
+  try {
+    const out = await serveLan()
+    urls.push(board.urlOf(out))
+    assert.ok(urls[0], out)
+    const lan = out.match(/open (http:\/\/[\d.]+:\d+\/\?t=[\w-]+) or scan this code:/)?.[1]
+    if (lan === undefined) {
+      assert.ok(out.includes('This computer has no address on a local network'), out)
+      t.skip('no local network address here')
+      return
+    }
+    // NO_COLOR: the light modules are the ink, so the code's quiet zone prints as solid lines.
+    assert.match(out, /scan this code:\n█{29,}\n█{29,}\n/)
+    assert.ok(!out.includes('\u001b['))
+    const again = await serveLan()
+    assert.ok(again.includes(urls[0]), again)
+    assert.ok(again.includes(lan), again)
+  } finally {
+    await board.end(urls)
+  }
+})
