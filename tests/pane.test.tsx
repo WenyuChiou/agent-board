@@ -85,11 +85,20 @@ const engineBeneath = (on: On, world: World): MockClock => {
   on('fs.stat', ($, e) => {
     world.stats?.push(e.path)
     const text = world.files.get(posix(e.path))
+    const isDir = [...world.files.keys()].some(path => path.startsWith(`${posix(e.path)}/`))
+    if (text === undefined && isDir) return { value: { kind: 'dir' as const, size: 0, mtimeMs: world.mtime, isLink: false } }
     return text === undefined
       ? { deny: 'ENOENT' }
       : { value: { kind: 'file' as const, size: text.length, mtimeMs: world.mtime, isLink: false } }
   })
   on('fs.exists', ($, e) => ({ value: world.files.has(posix(e.path)) }))
+  on('fs.list', ($, e) => {
+    const dir = `${posix(e.path ?? '').replace(/\/$/, '')}/`
+    const names = [...world.files.keys()].filter(path => path.startsWith(dir) && !path.slice(dir.length).includes('/'))
+    return {
+      value: names.map(path => ({ name: path.slice(dir.length), kind: 'file' as const, size: (world.files.get(path) ?? '').length, mtimeMs: world.mtime, isLink: false })),
+    }
+  })
   on('fs.read', ($, e) => {
     const path = posix(e.path)
     const text = world.files.get(path)
@@ -1094,4 +1103,47 @@ test('a stopped session’s handoff line shows on its row and goes with 接手�
   await ui.press({ key: 'persona_framework::修 CI::take' })
   expect(submitted.at(-1)).toContain('交接：log 看完了；卡在 flaky 測試；下一步重跑三次')
   await ui.unmount()
+})
+
+
+const INBOX = '/home/me/.claude/progress-inbox'
+
+test('another agent’s turn, left in the inbox by its hook, becomes its block once, read by one session', async ($, on) => {
+  const payload = JSON.stringify({
+    type: 'agent-turn-complete',
+    'thread-id': '0199a7c3-codex-thread',
+    cwd: '/work/api-gateway',
+    'input-messages': ['幫我把公開端點加上限流'],
+    'last-assistant-message': '中介層加好了。每把金鑰一分鐘要 100 還是 300？',
+  })
+  const world: World = {
+    files: new Map([
+      [FILE, '# 專案進度\n'],
+      [`${INBOX}/codex-turn-1760000000-42.json`, payload],
+    ]),
+    mtime: 1,
+    hasTasks: true,
+    reply: DIGEST,
+  }
+  const clock = engineBeneath(on, world)
+  const seen = outside(on)
+  await $.session.start({ cwd: '/work/persona_framework', surface: 'desktop', isInteractive: true })
+  await clock.advance(5000)
+
+  const text = world.files.get(FILE) ?? ''
+  expect(text).toContain('## api-gateway\n\n<!-- auto session=')
+  expect(text).toContain('agent=codex state=waiting')
+  expect(text).toContain('- [?] 每把金鑰的上限 — 一分鐘 100 還是 300？')
+  expect(seen.notified.some(line => line.includes('codex 在問：每把金鑰的上限'))).toBe(true)
+
+  // Read once: the same file does not add the step again.
+  world.mtime += 1
+  await clock.advance(5000)
+  expect((world.files.get(FILE) ?? '').match(/加好限流中介層/g)).toHaveLength(1)
+
+  // The session ends: its block says so.
+  world.files.set(`${INBOX}/codex-end-1760000100-43.json`, JSON.stringify({ session_id: '0199a7c3-codex-thread', cwd: '/work/api-gateway' }))
+  world.mtime += 1
+  await clock.advance(5000)
+  expect(world.files.get(FILE) ?? '').toContain('agent=codex state=ended')
 })

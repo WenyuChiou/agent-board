@@ -81,6 +81,9 @@ export type ProgressMirrorTask = {
 
 export type ProgressMirror = {
   sessionId: string
+  // Which agent's session this is: claude for the session the mod runs in; another agent's
+  // when the mod writes that agent's block from what its hook reported.
+  agent: string
   project: string
   // The folder the session runs in; empty in a mirror stored before 0.5.0.
   cwd: string

@@ -37,6 +37,7 @@ import {
   completedSince,
   emptyMirror,
   fallbackTitle,
+  isAllDone,
   fromTaskList,
   isStaleStoreKey,
   noticesOf,
@@ -56,6 +57,8 @@ import { RULE_ID, RULES } from './rule'
 import { langOf, resolveLang, STRINGS } from './strings'
 import { answerTurns, applyDigest, clearAsked, cleanHandoff, isWork, lastQuestion, markAsked, needsRefresh, parseDigest, turnTools } from './digest'
 import type { Digest } from './digest'
+import { isInboxFile, readTurn, transcriptTail } from './inbox'
+import type { AgentTurn } from './inbox'
 import { keepRecent, remindersOf } from './remind'
 import { buildView, statusLine } from './view'
 import type { StepRef, TaskRef, TaskRow } from './view'
@@ -63,6 +66,8 @@ import type { StepRef, TaskRef, TaskRow } from './view'
 const PANE = 'project-progress'
 const POLL_MS = 2000
 const TICK_MS = 30 * 1000
+// How often the inbox of other agents' turns is looked at: a stat, and a read when it changed.
+const INBOX_MS = 5 * 1000
 // How often a pull request whose checks are still running is looked at again.
 const PR_MS = 2 * 60 * 1000
 // How often a session looks for work old enough to archive, besides at its start.
@@ -113,6 +118,8 @@ let isReminderSeeded = false
 let isReminding = false
 // What the person said this turn, for summing the turn up when it ends.
 let turnPrompt = ''
+let isDraining = false
+let inboxSeen = -1
 let dashboardAt = 0
 
 // CLAUDE_PROGRESS_FILE wins; then CLAUDE_CONFIG_DIR, where Claude Code keeps its own files
@@ -133,6 +140,13 @@ const progressPath = async ($: EngineInterface): Promise<string> => {
 // One archive file per month (progress-archive-2026-10.md), so none grows past what one
 // read can hold.
 const archivePath = (path: string, now: number): string => `${path.replace(/\.md$/i, '')}-archive-${localDay(now).slice(0, 7)}.md`
+
+// Where other agents' hooks leave their turns: a folder beside progress.md.
+const inboxPath = (path: string): string => {
+  const sep = path.includes('\\') ? '\\' : '/'
+
+  return `${path.replace(/[\\/][^\\/]*$/, '')}${sep}progress-inbox`
+}
 
 // Re-reads the file only when its mtime or size moved, so the 2s timer is a stat.
 const poll = async ($: EngineInterface): Promise<void> => {
@@ -485,12 +499,10 @@ const refreshName = async ($: EngineInterface): Promise<void> => {
   await queueWrite($)
 }
 
-// A turn of a session that keeps no Task list, summed up into its steps: what it finished,
-// what comes next, and what it ended up asking. Without the model's answer, the question
-// the reply ends on is still caught.
-const digestTurn = async ($: EngineInterface, prompt: string, answer: string): Promise<void> => {
-  const mirror = await read($, mine)
-  if (mirror === null || (mirror.source === 'tasks' && mirror.tasks.length > 0)) return
+// A turn summed up into a session's steps: what it finished, what comes next and what it
+// ended up asking. Without the model's answer, the question the reply ends on is still
+// caught. null when the turn gave nothing to track and the session is not tracked yet.
+const summarize = async ($: EngineInterface, mirror: ProgressMirror, prompt: string, answer: string): Promise<ProgressMirror | null> => {
   const s = await wordsOf($)
   const steps = mirror.tasks.map(task => `- [${task.status === 'completed' ? 'x' : ' '}] ${task.subject}`).join('\n')
   const asked = await $.model
@@ -516,10 +528,97 @@ const digestTurn = async ($: EngineInterface, prompt: string, answer: string): P
     digest.ask = clip(question, 48)
     digest.why = question
   }
-  if (digest.done === '' && digest.next === '' && digest.ask === '' && mirror.source !== 'turns') return
-  const at = await $.clock.now()
-  await saveMine($, one => applyDigest(one, digest, at))
+  if (digest.done === '' && digest.next === '' && digest.ask === '' && mirror.source !== 'turns') return null
+
+  return applyDigest(mirror, digest, await $.clock.now())
+}
+
+// A turn of this session, which keeps no Task list.
+const digestTurn = async ($: EngineInterface, prompt: string, answer: string): Promise<void> => {
+  const mirror = await read($, mine)
+  if (mirror === null || (mirror.source === 'tasks' && mirror.tasks.length > 0)) return
+  const summed = await summarize($, mirror, prompt, answer)
+  if (summed === null) return
+  await saveMine($, () => summed)
   await settle($)
+}
+
+// Another agent's turns, from its hook, written into its own block. Its mirror lives in
+// the store, so whichever open session reads the next turn carries on from it.
+const takeAgentTurns = async ($: EngineInterface, turns: readonly AgentTurn[]): Promise<void> => {
+  const last = turns.at(-1)
+  if (last === undefined) return
+  const at = await $.clock.now()
+  const stored = (await $.store.get(`agent:${last.id}`)) as Partial<ProgressMirror> | undefined
+  const fresh = emptyMirror(last.id, last.project || (await wordsOf($)).uncategorized, at, last.cwd, last.agent)
+  let mirror: ProgressMirror = { ...fresh, ...stored, firstPrompt: stored?.firstPrompt || turns.find(one => one.prompt !== '')?.prompt || '' }
+  for (const turn of turns) {
+    if (turn.event !== 'turn') continue
+    let { prompt, answer } = turn
+    if (answer === '' && turn.transcript !== '') {
+      const log = await $.fs.read(turn.transcript).catch(() => '')
+      const tail = transcriptTail(typeof log === 'string' ? log : '')
+      answer = tail.answer
+      prompt = prompt || tail.prompt
+    }
+    if (answer === '') continue
+    mirror = answerTurns(mirror)
+    mirror = (await summarize($, mirror, prompt, answer)) ?? mirror
+  }
+  if (mirror.tasks.length === 0) return
+  const state = isAllDone(mirror) ? 'done' : last.event === 'end' ? 'ended' : 'waiting'
+  mirror = { ...mirror, state, updated: at }
+  await $.store.set(`agent:${last.id}`, mirror)
+  const s = await wordsOf($)
+  const written = mirror
+  await enqueue(async () => {
+    const path = await progressPath($)
+    const before = await readText($, path)
+    const after = upsertAutoBlock(before, written, s)
+    if (after !== before) await $.fs.write(path, after)
+    await poll($)
+  })
+}
+
+// New files in the inbox, each taken by one open session: it stamps the file in the store,
+// looks again, and reads it only if its stamp stayed. The reporter script clears old files.
+const drainInbox = async ($: EngineInterface): Promise<void> => {
+  if (isDraining) return
+  isDraining = true
+  try {
+    const dir = inboxPath(await progressPath($))
+    // A file landing in the folder moves its modified time; nothing to read until it does.
+    const stat = await $.fs.stat(dir).catch(() => undefined)
+    if (stat === undefined || stat.mtimeMs === inboxSeen) return
+    inboxSeen = stat.mtimeMs
+    const entries = await $.fs.list(dir).catch(() => [])
+    const stored = await $.store.get('inboxDone')
+    const done = stored !== null && typeof stored === 'object' ? (stored as Record<string, string>) : {}
+    const fresh = entries
+      .filter(entry => entry.kind === 'file' && isInboxFile(entry.name) && done[entry.name] === undefined)
+      .map(entry => entry.name)
+      .sort()
+      .slice(0, 20)
+    if (fresh.length === 0) return
+    const at = await $.clock.now()
+    const stamp = `${(await read($, mine))?.sessionId.slice(0, 8) ?? '-'}:${at}`
+    const kept = Object.fromEntries(Object.entries(done).filter(([, value]) => at - Number(value.split(':')[1] ?? 0) < 3 * DAY))
+    await $.store.set('inboxDone', { ...kept, ...Object.fromEntries(fresh.map(name => [name, stamp])) })
+    const check = (await $.store.get('inboxDone')) as Record<string, string> | undefined
+    const taken = fresh.filter(name => check?.[name] === stamp)
+    const sep = dir.includes('\\') ? '\\' : '/'
+    const turns: AgentTurn[] = []
+    for (const name of taken) {
+      const body = await $.fs.read(`${dir}${sep}${name}`).catch(() => '')
+      const turn = readTurn(name, typeof body === 'string' ? body : '')
+      if (turn !== null) turns.push(turn)
+    }
+    const bySession = new Map<string, AgentTurn[]>()
+    for (const turn of turns) bySession.set(turn.id, [...(bySession.get(turn.id) ?? []), turn])
+    for (const group of bySession.values()) await takeAgentTurns($, group)
+  } finally {
+    isDraining = false
+  }
 }
 
 // A compaction's summary made into one line for whoever takes over, kept in the block.
@@ -800,6 +899,9 @@ export const register: Register = (on, options) => {
     // rejections are dropped rather than left unhandled.
     $.clock.every(POLL_MS, () => {
       poll($).catch(() => undefined)
+    })
+    $.clock.every(INBOX_MS, () => {
+      drainInbox($).catch(() => undefined)
     })
     $.clock.every(TICK_MS, () => {
       $.clock

@@ -42,7 +42,7 @@ const markerOf = (mirror: ProgressMirror): string => {
   const pr = mirror.pr ?? null
   const attrs = [
     `session=${shortId(mirror.sessionId)}`,
-    'agent=claude',
+    `agent=${mirror.agent || 'claude'}`,
     `state=${mirror.state}`,
     `updated=${new Date(mirror.updated).toISOString()}`,
     mirror.sessionId.length > 8 ? `resume=${mirror.sessionId}` : '',
