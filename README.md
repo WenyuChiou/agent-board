@@ -4,12 +4,12 @@
 
 <p align="center">
 <b>See what every AI coding agent is doing, with whatever is waiting on you at the top.</b><br>
-A Claude Code plugin that also follows Codex, Gemini CLI, Cursor, OpenCode, Grok Build, Hermes Agent and Muse Code.
+A Claude Code plugin that also follows Codex, Gemini CLI, Cursor, OpenCode, Grok Build, Hermes Agent, Muse Code and OpenClaw.
 </p>
 
 <p align="center">
 <a href="https://github.com/WenyuChiou/agent-board/actions/workflows/test.yml"><img alt="Tests" src="https://github.com/WenyuChiou/agent-board/actions/workflows/test.yml/badge.svg"></a>
-<a href="CHANGELOG.md"><img alt="Version 0.14.0" src="https://img.shields.io/badge/version-0.14.0-blue"></a>
+<a href="CHANGELOG.md"><img alt="Version 0.15.0" src="https://img.shields.io/badge/version-0.15.0-blue"></a>
 <a href="LICENSE"><img alt="MIT license" src="https://img.shields.io/badge/license-MIT-green"></a>
 <img alt="macOS, Linux, Windows" src="https://img.shields.io/badge/macOS%20%C2%B7%20Linux%20%C2%B7%20Windows-lightgrey">
 </p>
@@ -28,6 +28,7 @@ You have Claude Code on one project, Codex on another, Gemini on a third. Twenty
 | <img src="docs/images/agents/opencode.svg" width="24" alt=""> | **OpenCode** | Plugin, on `session.idle` | Nothing | ✅ 1.19.3 |
 | <img src="docs/images/agents/grok-build.svg" width="24" alt=""> | **Grok Build** | `Stop` hook | Nothing | ✅ 1.0.62 |
 | <img src="docs/images/agents/hermes-agent.svg" width="24" alt=""> | **Hermes Agent** | `post_llm_call` shell hook | Answer `y` the first time Hermes asks | ✅ 0.19.0 |
+| <img src="docs/images/agents/openclaw.svg" width="24" alt=""> | **OpenClaw** | Plugin, on `agent_end` | Nothing | ✅ 2026.10.4 |
 | <img src="docs/images/agents/cursor.svg" width="24" alt=""> | **Cursor** | `afterAgentResponse` hook | Nothing | Built from Cursor's docs |
 | <img src="docs/images/agents/muse-code.svg" width="24" alt=""> | **Muse Code** | `Stop` hook | Nothing | Built from Muse's docs |
 | | **dot** | Local exchange (opt-in) | See [docs/LOCAL-EXCHANGE.md](docs/LOCAL-EXCHANGE.md) | File contract only |

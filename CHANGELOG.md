@@ -1,5 +1,28 @@
 # Changelog
 
+## 0.15.0 — 2026-10-17
+
+- **OpenClaw reports too.** Connecting (by hand or at a session's start) writes
+  a one-file OpenClaw plugin, `~/.openclaw/agent-board.mjs`
+  (`$OPENCLAW_STATE_DIR`), and the `openclaw.json` entry that loads it: its
+  path in `plugins.load.paths`, the plugin enabled with
+  `allowConversationAccess` (OpenClaw hands a plugin a turn's words only with
+  it), and its id added to `plugins.allow` when that list is in use. The
+  person's own settings stay, a config hand-written as JSON5 is left alone,
+  and `/progress connect remove` takes the file and the entry back out. The
+  plugin writes each finished turn (`agent_end`) into the inbox itself, skips
+  OpenClaw's heartbeat and memory runs, and ends the block on `session_end`
+  but not on a compaction or a restart. A turn run in OpenClaw's own workspace
+  folder is filed under the project "OpenClaw". Tested live against OpenClaw
+  2026.10.4 with a mock model; its `session_end` did not fire in a one-shot
+  local run, so the end is covered by tests only. Tests: "OpenClaw gets a
+  plugin file and the config entry that loads it, beside the person’s own
+  plugins, and both come back out", "the OpenClaw plugin skips heartbeat and
+  memory runs and ends a session on anything but a compaction or restart", "a
+  real OpenClaw turn from its plugin becomes a block under OpenClaw, not under
+  its workspace folder", "a session hooks OpenClaw in by a plugin file and its
+  config entry, names it once, and takes both back out".
+
 ## 0.14.0 — 2026-10-17
 
 - **Installing is all it takes.** Each Claude Code session now hooks in every

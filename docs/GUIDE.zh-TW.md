@@ -184,6 +184,7 @@ Claude Code 會自己接上它們：每個對話開始時，會把這台電腦�
 | Grok Build | `~/.grok/hooks/agent-board.json`（`$GROK_HOME`） | `Stop` |
 | Hermes Agent | `~/.hermes/config.yaml`（`$HERMES_HOME`） | `post_llm_call`，Hermes 第一次跑新 hook 前會問一次，回答 `y` |
 | Muse Code | `~/.config/muse/settings.json` | `Stop` |
+| OpenClaw | `~/.openclaw/agent-board.mjs`，以及旁邊載入它的 `openclaw.json`（`$OPENCLAW_STATE_DIR`） | `agent_end`，接上後重開它的 gateway |
 
 hook 執行的是 `/progress connect` 寫好的 `~/.claude/progress-report.sh`（Windows 是 `progress-report.ps1`）。腳本：
 - 不需要裝任何東西；

@@ -3,7 +3,7 @@ import { expect, test } from 'claude-code/testing'
 import type { ProgressMirror, ProgressPr } from '../types'
 import { askOf } from '../hooks/ask'
 import { addManualTask, isArchivable, manualTaskCount, renderAutoBlock, setManualStep, takeArchivable, takeManualDone, takeTask, upsertAutoBlock } from '../hooks/blocks'
-import { agentHooks, DELETE, isWindowsHost, withFlatHook, withGroupedHook, withHermesHooks, withoutHermesHooks, withoutOurHooks, withoutSection } from '../hooks/connect'
+import { agentHooks, DELETE, openclawPlugin, isWindowsHost, withFlatHook, withGroupedHook, withHermesHooks, withoutHermesHooks, withoutOurHooks, withoutSection } from '../hooks/connect'
 import { dashboardHtml } from '../hooks/dashboard'
 import { answerKey, blockId, isInboxFile, isTakenFile, isTranscriptPath, keepInboxDone, promptKey, readTurn, takenName, transcriptTail, turnsToDigest } from '../hooks/inbox'
 import { applyDigest, clearAsked, isWork, lastQuestion, markAsked, parseDigest, replyData, turnTools } from '../hooks/digest'
@@ -683,7 +683,7 @@ test('each agent’s hook payload reads as a turn: session, folder, prompt and r
 })
 
 test('each agent’s config gets the hook in the shape it reads, and nothing else of the person’s changes', () => {
-  const ctx = { home: '/h', sep: '/', isWindows: false, script: '/h/.claude/progress-report.sh', inbox: '/h/.claude/progress-inbox', codexHome: '/h/.codex', grokHome: '/h/.grok', hermesHome: '/h/.hermes' }
+  const ctx = { home: '/h', sep: '/', isWindows: false, script: '/h/.claude/progress-report.sh', inbox: '/h/.claude/progress-inbox', codexHome: '/h/.codex', grokHome: '/h/.grok', hermesHome: '/h/.hermes', openclawHome: '/h/.openclaw' }
   const hooks = Object.fromEntries(agentHooks(ctx).map(hook => [hook.agent, hook]))
   const gemini = JSON.parse(String(hooks.gemini?.edit('{"theme":"dark"}', false)))
   expect(gemini.theme).toBe('dark')
@@ -712,7 +712,7 @@ test('each agent’s config gets the hook in the shape it reads, and nothing els
 })
 
 test('Hermes Agent’s hooks go into its config.yaml beside the person’s own, once, and come back out cleanly', () => {
-  const ctx = { home: '/h', sep: '/', isWindows: false, script: '/h/.claude/progress-report.sh', inbox: '/h/.claude/progress-inbox', codexHome: '/h/.codex', grokHome: '/h/.grok', hermesHome: '/h/.hermes' }
+  const ctx = { home: '/h', sep: '/', isWindows: false, script: '/h/.claude/progress-report.sh', inbox: '/h/.claude/progress-inbox', codexHome: '/h/.codex', grokHome: '/h/.grok', hermesHome: '/h/.hermes', openclawHome: '/h/.openclaw' }
   const hermes = agentHooks(ctx).find(hook => hook.agent === 'hermes')
   expect(hermes?.file).toBe('/h/.hermes/config.yaml')
   const own = 'model:\n  default: x\nhooks:\n  pre_tool_call:\n    - command: "~/guard.sh"\n      matcher: terminal\n  post_llm_call:\n  - command: "~/log.sh"\nagent:\n  max_turns: 5\n'
@@ -729,6 +729,42 @@ test('Hermes Agent’s hooks go into its config.yaml beside the person’s own, 
   expect(hermes?.edit(fresh, true)).toBe('model:\n  default: x\n')
   // A hooks block in flow style is not one this can edit line by line.
   expect(hermes?.edit('hooks: {}\n', false)).toBeNull()
+})
+
+test('OpenClaw gets a plugin file and the config entry that loads it, beside the person’s own plugins, and both come back out', () => {
+  const ctx = { home: '/h', sep: '/', isWindows: false, script: '/h/.claude/progress-report.sh', inbox: '/h/.claude/progress-inbox', codexHome: '/h/.codex', grokHome: '/h/.grok', hermesHome: '/h/.hermes', openclawHome: '/h/.openclaw' }
+  const [plugin, config] = agentHooks(ctx).filter(hook => hook.agent === 'openclaw')
+  // The plugin file goes first, so the config never loads a file that is not there yet.
+  expect(plugin?.file).toBe('/h/.openclaw/agent-board.mjs')
+  expect(config?.file).toBe('/h/.openclaw/openclaw.json')
+  expect(String(plugin?.edit('', false))).toContain('const INBOX = "/h/.claude/progress-inbox"')
+  expect(plugin?.edit('old', true)).toBe(DELETE)
+  const own = { gateway: { port: 18789 }, plugins: { allow: ['discord'], load: { paths: ['/h/mine.mjs'] }, entries: { discord: { enabled: true } } } }
+  const once = String(config?.edit(JSON.stringify(own), false))
+  expect(JSON.parse(once)).toEqual({
+    gateway: { port: 18789 },
+    plugins: {
+      allow: ['discord', 'agent-board'],
+      load: { paths: ['/h/mine.mjs', '/h/.openclaw/agent-board.mjs'] },
+      entries: { discord: { enabled: true }, 'agent-board': { enabled: true, hooks: { allowConversationAccess: true } } },
+    },
+  })
+  expect(config?.edit(once, false)).toBe(once)
+  expect(JSON.parse(String(config?.edit(once, true)))).toEqual(own)
+  // With no allow list, none is made: an empty one would shut every other plugin out.
+  expect(JSON.parse(String(config?.edit('', false))).plugins.allow).toBeUndefined()
+  expect(JSON.parse(String(config?.edit(String(config?.edit('{}', false)), true)))).toEqual({ plugins: {} })
+  // A config written by hand as JSON5 is left alone.
+  expect(config?.edit('{ plugins: {} }', false)).toBeNull()
+})
+
+test('the OpenClaw plugin skips heartbeat and memory runs and ends a session on anything but a compaction or restart', () => {
+  const code = openclawPlugin({ home: '/h', sep: '/', isWindows: false, script: '', inbox: '/h/in', codexHome: '', grokHome: '', hermesHome: '', openclawHome: '/h/.openclaw' })
+  expect(code).toContain("ctx.trigger === 'heartbeat' || ctx.trigger === 'memory'")
+  expect(code).toContain("event?.reason === 'compaction' || event?.reason === 'restart'")
+  expect(code).toContain("api.on('agent_end'")
+  expect(code).toContain("id: 'agent-board'")
+  expect(code).toContain(".join('\\n')")
 })
 
 test('Hermes Agent’s turn is read from under extra, and its session finalize is the end, not its per-turn session end', () => {

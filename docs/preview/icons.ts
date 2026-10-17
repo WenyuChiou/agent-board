@@ -12,4 +12,5 @@ export const AGENT_ICONS: AgentIcon[] = [
   { file: 'grok-build', name: 'Grok Build', tile: '#0B0B0F', letter: 'G' },
   { file: 'hermes-agent', name: 'Hermes Agent', tile: '#3B5BDB', letter: 'H' },
   { file: 'muse-code', name: 'Muse Code', tile: '#7048E8', letter: 'M' },
+  { file: 'openclaw', name: 'OpenClaw', tile: '#E8590C', letter: 'O' },
 ]

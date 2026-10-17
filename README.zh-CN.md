@@ -4,12 +4,12 @@
 
 <p align="center">
 <b>每个 AI coding agent 在做什么，一个面板看完；等你的事，永远排第一个。</b><br>
-Claude Code 插件，也跟得上 Codex、Gemini CLI、Cursor、OpenCode、Grok Build、Hermes Agent 和 Muse Code。
+Claude Code 插件，也跟得上 Codex、Gemini CLI、Cursor、OpenCode、Grok Build、Hermes Agent、Muse Code 和 OpenClaw。
 </p>
 
 <p align="center">
 <a href="https://github.com/WenyuChiou/agent-board/actions/workflows/test.yml"><img alt="测试" src="https://github.com/WenyuChiou/agent-board/actions/workflows/test.yml/badge.svg"></a>
-<a href="CHANGELOG.md"><img alt="版本 0.14.0" src="https://img.shields.io/badge/version-0.14.0-blue"></a>
+<a href="CHANGELOG.md"><img alt="版本 0.15.0" src="https://img.shields.io/badge/version-0.15.0-blue"></a>
 <a href="LICENSE"><img alt="MIT 许可" src="https://img.shields.io/badge/license-MIT-green"></a>
 <img alt="macOS、Linux、Windows" src="https://img.shields.io/badge/macOS%20%C2%B7%20Linux%20%C2%B7%20Windows-lightgrey">
 </p>
@@ -28,6 +28,7 @@ Claude Code 插件，也跟得上 Codex、Gemini CLI、Cursor、OpenCode、Grok 
 | <img src="docs/images/agents/opencode.svg" width="24" alt=""> | **OpenCode** | 插件，在 `session.idle` 时 | 不用做什么 | ✅ 1.19.3 |
 | <img src="docs/images/agents/grok-build.svg" width="24" alt=""> | **Grok Build** | `Stop` hook | 不用做什么 | ✅ 1.0.62 |
 | <img src="docs/images/agents/hermes-agent.svg" width="24" alt=""> | **Hermes Agent** | `post_llm_call` shell hook | Hermes 第一次问时回答 `y` | ✅ 0.19.0 |
+| <img src="docs/images/agents/openclaw.svg" width="24" alt=""> | **OpenClaw** | 插件，在 `agent_end` 时 | 不用做什么 | ✅ 2026.10.4 |
 | <img src="docs/images/agents/cursor.svg" width="24" alt=""> | **Cursor** | `afterAgentResponse` hook | 不用做什么 | 按 Cursor 文档实现 |
 | <img src="docs/images/agents/muse-code.svg" width="24" alt=""> | **Muse Code** | `Stop` hook | 不用做什么 | 按 Muse 文档实现 |
 | | **dot** | 本地交换（自行选用） | 见 [docs/LOCAL-EXCHANGE.md](docs/LOCAL-EXCHANGE.md) | 只测过文件约定 |

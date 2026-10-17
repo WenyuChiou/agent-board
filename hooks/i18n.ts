@@ -185,7 +185,7 @@ export const ZH_TW = {
   paneOpened: (path: string): string => `進度面板已開啟：${path}`,
   paneNotOpened: (reason: string): string => `進度面板開不了：${reason}`,
   connectDone: (list: string): string => `已接上：${list}。重開它們之後，每回合結束都會自動回報到面板。`,
-  connectNone: '沒找到可以接的 agent（Codex、Gemini CLI、Cursor、OpenCode、Grok Build、Hermes Agent、Muse Code）。',
+  connectNone: '沒找到可以接的 agent（Codex、Gemini CLI、Cursor、OpenCode、Grok Build、Hermes Agent、Muse Code、OpenClaw）。',
   connectCodexTrust: 'Codex 第一次要在它的 /hooks 裡核准這個 hook 才會跑。',
   connectHermesTrust: 'Hermes Agent 第一次跑這個 hook 前會問你一次，回答 y（或用 --accept-hooks 啟動）。',
   connectSkipped: (name: string, path: string): string => `${name} 的設定檔讀不懂，沒有動它：${path}`,

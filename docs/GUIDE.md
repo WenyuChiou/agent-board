@@ -184,6 +184,7 @@ It finds the agents installed on this machine and gives each one a hook that run
 | Grok Build | `~/.grok/hooks/agent-board.json` (`$GROK_HOME`) | `Stop` |
 | Hermes Agent | `~/.hermes/config.yaml` (`$HERMES_HOME`) | `post_llm_call`. Hermes asks once before it runs a new hook; answer `y` |
 | Muse Code | `~/.config/muse/settings.json` | `Stop` |
+| OpenClaw | `~/.openclaw/agent-board.mjs`, and `openclaw.json` beside it to load it (`$OPENCLAW_STATE_DIR`) | `agent_end`. Restart its gateway after connecting |
 
 The hook runs `~/.claude/progress-report.sh` (Windows: `progress-report.ps1`), which `/progress connect` writes. The script has no dependencies, always exits 0 and prints nothing, except `{}` for Cursor. Your own hooks in those files stay. A config file that is not plain JSON is left alone, and the command says which one. If setup `--agents` had put the AGENTS.md section into that agent's instructions, the section is removed, so the work does not show twice. `/progress connect remove` takes everything back out.
 

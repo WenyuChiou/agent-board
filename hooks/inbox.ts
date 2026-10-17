@@ -78,6 +78,8 @@ export const blockId = (agent: string, session: string): string => {
 // Hermes Agent's on_session_end comes after every turn; its on_session_finalize is the end.
 const END_EVENTS = /^(?:session[-_]?end|sessionend|session\.deleted|on_session_finalize)$/i
 
+const OPENCLAW_WORKSPACE = /[\\/]\.openclaw[\\/]workspace(?:-[^\\/]*)?[\\/]*$/
+
 // One inbox file read; null when it is not JSON or names no session.
 export const readTurn = (fileName: string, body: string): AgentTurn | null => {
   const name = NAME.exec(fileName)
@@ -111,7 +113,8 @@ export const readTurn = (fileName: string, body: string): AgentTurn | null => {
     session,
     id: blockId(agent, session),
     cwd,
-    project: baseName(cwd),
+    // OpenClaw's turns run in its own workspace folder, whose name says nothing.
+    project: OPENCLAW_WORKSPACE.test(cwd) ? 'OpenClaw' : baseName(cwd),
     prompt: first(record, ['prompt', 'user_prompt', 'user_message', 'input-messages', 'input_messages', 'last_user_message']),
     // Gemini CLI says this when the turn had no text.
     answer: answer === '[no response text]' ? '' : answer,

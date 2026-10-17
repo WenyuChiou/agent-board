@@ -692,13 +692,14 @@ const connectAgents = async ($: EngineInterface, mode: ConnectMode): Promise<{ t
   const codexHome = ((await $.env.get('CODEX_HOME')) ?? '').replace(/[\\/]+$/, '') || [home, '.codex'].join(sep)
   const grokHome = ((await $.env.get('GROK_HOME')) ?? '').replace(/[\\/]+$/, '') || [home, '.grok'].join(sep)
   const hermesHome = ((await $.env.get('HERMES_HOME')) ?? '').replace(/[\\/]+$/, '') || [home, '.hermes'].join(sep)
+  const openclawHome = ((await $.env.get('OPENCLAW_STATE_DIR')) ?? '').replace(/[\\/]+$/, '') || [home, '.openclaw'].join(sep)
   const script = `${path.replace(/[\\/][^\\/]*$/, '')}${sep}progress-report.${isWin ? 'ps1' : 'sh'}`
   const reporter = isWin ? reporterPs1(inboxPath(path)) : reporterSh(inboxPath(path))
   if (!remove && (await readText($, script).catch(() => '')) !== reporter) await $.fs.write(script, reporter)
   const done: string[] = []
   const skipped: string[] = []
   const removeFile = (file: string): Promise<void> => removeFiles($, [file], isWin)
-  for (const hook of agentHooks({ home, sep, isWindows: isWin, script, inbox: inboxPath(path), codexHome, grokHome, hermesHome })) {
+  for (const hook of agentHooks({ home, sep, isWindows: isWin, script, inbox: inboxPath(path), codexHome, grokHome, hermesHome, openclawHome })) {
     if (!(await $.fs.exists(hook.dir))) continue
     // Left under the plugin's earlier name, it would report every turn a second time.
     const hadOld = hook.old !== undefined && (await $.fs.exists(hook.old))
@@ -723,6 +724,8 @@ const connectAgents = async ($: EngineInterface, mode: ConnectMode): Promise<{ t
       await $.fs.write(hook.file, after)
     }
     if ((remove || isAuto) && after === before && !hadOld) continue
+    // OpenClaw takes two files, a plugin and the config entry that loads it.
+    if (done.includes(hook.label)) continue
     done.push(hook.label)
     if (!remove) await dropSection($, hook.agent, home, codexHome, sep)
   }
