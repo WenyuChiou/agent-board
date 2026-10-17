@@ -296,11 +296,14 @@ export const takeArchivable = (text: string, now: number, keep?: string, s: Stri
 
 // Hand-kept tasks whose every step is done, a day after the pane first saw them done
 // (`seen`, by doneKey): moved out whole, heading to last step, like a session's block.
+// `isNow`: the person asked, so every finished one goes at once, under the day it was seen
+// done, or today when it never was.
 export const takeManualDone = (
   text: string,
   now: number,
   seenAt: (key: string) => number | undefined,
   s: Strings = ZH_TW,
+  isNow = false,
 ): Archived & { keys: string[] } => {
   const lines = linesOf(text)
   const seen = seenOf(lines)
@@ -311,8 +314,8 @@ export const takeManualDone = (
     for (const task of project.tasks) {
       if (task.auto !== null || task.line < 0 || !isTaskComplete(task)) continue
       const key = doneKey(project.name, task.title)
-      const at = seenAt(key)
-      if (at === undefined || now - at < DAY) continue
+      const at = seenAt(key) ?? (isNow ? now : undefined)
+      if (at === undefined || (!isNow && now - at < DAY)) continue
       let end = task.line
       for (let index = task.line + 1; index < lines.length; index += 1) {
         const line = seen[index] ?? ''

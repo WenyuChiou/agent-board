@@ -8,7 +8,7 @@ Claude Code 插件，也跟得上 Codex、Gemini CLI、OpenCode、Grok Build、H
 </p>
 
 <p align="center">
-<a href="CHANGELOG.md"><img alt="版本 0.19.4" src="https://img.shields.io/badge/version-0.19.4-blue"></a>
+<a href="CHANGELOG.md"><img alt="版本 0.20.1" src="https://img.shields.io/badge/version-0.20.1-blue"></a>
 <img alt="需要 Claude Code 2.1.287 以上" src="https://img.shields.io/badge/Claude%20Code-%E2%89%A5%202.1.287-d97757">
 <a href="LICENSE"><img alt="MIT 许可" src="https://img.shields.io/badge/license-MIT-green"></a>
 <img alt="macOS、Linux、Windows" src="https://img.shields.io/badge/macOS%20%C2%B7%20Linux%20%C2%B7%20Windows-lightgrey">
@@ -165,9 +165,16 @@ claude -p "/progress connect"
 - **回复**已经结束的 Grok Build 或 Codex 对话。回复会在那个对话自己的文件夹里运行 `grok -r <id>` 或 `codex exec resume <id>`，agent 回答后网页会显示它回了什么，可能要几分钟。同一个对话一次只发一条。还开着的对话要在它自己的窗口回答，因为两边同时写会把对话弄乱。
 - **贴上区块**：从 Muse、dot 这类网页聊天来的。先从网页复制聊天提示，贴进聊天一次；之后把聊天打印出的每个区块贴进来。格式不对，或会覆盖 Claude 或其他 agent 区块的，会被拒绝。
 
-网页只在 127.0.0.1 上监听，网址里带一把随机钥匙，所以别的电脑、你开着的其他网页都用不了它。30 分钟没人看就会关，也可以点它的**关闭看板**；不过还有一条回复在发给 agent 的路上时，不会关。
+网页只在 127.0.0.1 上监听（除非加上 `--lan`，见下文），网址里带一把随机钥匙，所以别的电脑、你开着的其他网页都用不了它。30 分钟没人看就会关，也可以点它的**关闭看板**；不过还有一条回复在发给 agent 的路上时，不会关。
 
-**在手机上。** 网页的布局适合手机，但只在电脑本机上提供。用手机时，通过 Remote Control 打开一个 Claude Code 对话，问它进度如何：它读的是同一份 `progress.md`。从手机经由自己的网络直接打开网页，目前还没有提供。
+**在手机上。** 网页的布局适合手机。要从和电脑连同一个 Wi-Fi 的手机打开，运行 `node ~/.claude/agent-board.mjs --serve --lan`：除了电脑本机的网址，它还会打印网页在你网络上的网址和它的二维码，用手机相机对着扫就好。电脑有不止一个网络地址时，用 `--lan 192.168.1.23` 指定一个。Windows 可能会问要不要让 Node.js 使用网络：在专用网络上允许，并确认 Windows 把你的 Wi-Fi 算作专用网络（刚连上的网络它会先当成公用网络），不然手机连不到网页。不在那个网络上时，通过 Remote Control 打开一个 Claude Code 对话，问它进度如何：它读的是同一份 `progress.md`。
+
+网络上的网页有这些限制：
+
+- 只有加了 `--lan` 才开，只开在电脑的私有地址上（开头是 192.168、10，或 172.16 到 172.31 的地址，绝不是公网地址），也只响应发到那个地址的请求。
+- 它的网址带着自己的一把钥匙，不是电脑本机网页那把。拿到这个网址或拍到二维码的人，在它关掉之前都能用这个网页，所以只在信得过的网络上用，比如家里的 Wi-Fi，不要在咖啡店的。
+- 在网络上，网页走的是没有加密的 HTTP，同一个 Wi-Fi 上的其他设备可能读到传过去的内容，包括 agent 的回答。所以手机可以勾步骤、归档、标成已回复（和重新显示）、复制、贴上区块和关闭看板，但不能回复 agent：回复会在电脑上运行一个程序，所以手机只显示答案让你复制，再从电脑本机的网页发出。
+- 10 分钟没有手机来看就会关，电脑本机的网页关掉时也跟着关。开着的时候再运行一次 `--serve --lan`，拿到的是同一个网址。
 
 ## 命令
 
