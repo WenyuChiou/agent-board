@@ -29,8 +29,18 @@ export const stateWords = (state: ProgressSessionState, s: Strings = ZH_TW): str
 // Every line the mod writes into a block. A comment opening in a title or step (the model's
 // summing up, a first request) would hide every line up to the next `-->`, the next block's
 // markers with them, so it is left out; an arrow that would close one is written `->`.
-const oneLine = (text: string): string =>
-  text.replace(/<!--/g, ' ').replace(/--+>/g, '->').replace(/\s+/g, ' ').trim().replace(/^#+\s*/, '').trim()
+const plain = (text: string): string => text.replace(/<!--/g, ' ').replace(/--+>/g, '->').replace(/\s+/g, ' ').trim()
+const oneLine = (text: string): string => plain(text).replace(/^#+\s*/, '').trim()
+
+// A `##` heading the mod writes, for a folder name (Linux allows `<!--` in one) or a project
+// typed into a quick add. A leading `#` stays (`## #work` reads back as `#work`), and a name
+// left with nothing goes under the uncategorized heading rather than a `## ` the reader skips.
+const headingOf = (project: string, s: Strings): string => plain(project) || s.uncategorized
+
+// The section a project's heading starts, by the cleaned name, else by the name as an earlier
+// version wrote it (`## a-->b`), so a second heading is not added beside it.
+const projectSection = (lines: readonly string[], project: string, heading: string): { heading: number; end: number } | null =>
+  sectionRange(lines, heading) ?? (heading !== project.trim() ? sectionRange(lines, project) : null)
 
 const markOf = (task: ProgressMirrorTask): string => {
   if (task.status === 'completed') return 'x'
@@ -168,9 +178,12 @@ const trimBlankEdges = (lines: string[], at: number): void => {
 const sectionRange = (raws: readonly string[], project: string): { heading: number; end: number } | null => {
   const lines = seenOf(raws)
   const head = projectHead(project)
+  // A name that starts with a bracket (`（未分類）`, `(PFC) notes`) has no first word to match
+  // by, so it is matched whole, or every such heading would be taken for one project.
   const heading = lines.findIndex(line => {
     const match = PROJECT.exec(line)
-    return match?.[1] !== undefined && projectHead(match[1]) === head
+    if (match?.[1] === undefined) return false
+    return head === '' ? match[1].trim() === project.trim() : projectHead(match[1]) === head
   })
   if (heading < 0) return null
   const next = lines.findIndex((line, index) => index > heading && PROJECT.test(line))
@@ -191,15 +204,16 @@ export const upsertAutoBlock = (text: string, mirror: ProgressMirror, s: Strings
     return lines.join(eol) + eol
   }
 
+  const project = headingOf(mirror.project, s)
   if (lines.every(line => line.trim() === '')) {
-    return [s.fileTitle, '', `## ${mirror.project}`, '', ...block].join(eol) + eol
+    return [s.fileTitle, '', `## ${project}`, '', ...block].join(eol) + eol
   }
 
-  const section = sectionRange(lines, mirror.project)
+  const section = projectSection(lines, mirror.project, project)
   if (section === null) {
     while (lines.length > 0 && lines[lines.length - 1]?.trim() === '') lines.pop()
 
-    return [...lines, '', `## ${mirror.project}`, '', ...block].join(eol) + eol
+    return [...lines, '', `## ${project}`, '', ...block].join(eol) + eol
   }
 
   let at = section.end
@@ -366,14 +380,15 @@ export const addManualTask = (text: string, entry: QuickEntry, s: Strings = ZH_T
     ...(entry.due === null ? [] : [s.dueNote(entry.due)]),
     ...entry.steps.map(step => `- [ ] ${oneLine(step)}`),
   ]
+  const project = headingOf(entry.project, s)
   if (lines.every(line => line.trim() === '')) {
-    return [s.fileTitle, '', `## ${entry.project}`, '', ...task].join(eol) + eol
+    return [s.fileTitle, '', `## ${project}`, '', ...task].join(eol) + eol
   }
-  const section = sectionRange(lines, entry.project)
+  const section = projectSection(lines, entry.project, project)
   if (section === null) {
     while (lines.length > 0 && lines[lines.length - 1]?.trim() === '') lines.pop()
 
-    return [...lines, '', `## ${entry.project}`, '', ...task].join(eol) + eol
+    return [...lines, '', `## ${project}`, '', ...task].join(eol) + eol
   }
   let at = section.end
   while (at > section.heading + 1 && lines[at - 1]?.trim() === '') at -= 1

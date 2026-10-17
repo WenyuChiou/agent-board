@@ -219,7 +219,7 @@ hook 執行的是 `/progress connect` 寫好的 `~/.claude/progress-report.sh`�
 
 Gemini CLI 和 OpenCode 會自己把看板貼進提示；用技能（skill）的，則是 agent 執行腳本再把印出的東西給你看。Codex、Gemini CLI、OpenCode 實際跑過（接測試用的假模型，見下圖）；Cursor、Grok Build、OpenClaw、Hermes Agent、Antigravity 的技能照它們文件寫的位置放，沒有實際跑過。Antigravity 只能看看板：它還沒有回合結束的 hook 可以回報。
 
-在終端機：`node ~/.claude/agent-board.mjs` 印一次看板，`--watch` 一直開著、每 2 秒重畫（分割視窗放在 Codex 旁邊），`--html` 寫出 `progress.html` 並在瀏覽器打開。`--lang zh-TW`（或 `en`、`zh-CN`）選語言；預設用你最後以 `/progress lang` 選的語言（選 `auto` 時是那個對話的語言）；沒選過就用第一個寫出它的 Claude Code 對話的語言。
+在終端機：`node ~/.claude/agent-board.mjs` 印一次看板，`--watch` 一直開著、每 2 秒重畫（分割視窗放在 Codex 旁邊），`--html` 寫出 `progress.html` 並在瀏覽器打開。`--lang zh-TW`（或 `en`、`zh-CN`）選語言；預設用你替面板選的語言：先看 `/config` 裡這個外掛的 **Pane language**，再看你最後以 `/progress lang` 選的語言（選 `auto` 時是那個對話的語言）；都沒選過就用第一個寫出它的 Claude Code 對話的語言。
 
 在終端機裡，`--watch` 也能用按鍵操作，就像面板能點：↑↓ 和 Enter 選一行並展開、`x` 勾掉手寫工作的下一步、`a` 封存手寫的工作或已停對話的區塊（做完的會自己封存）、`1`–`9` 或 `y`／`n` 複製另一個 agent 問題的答案、`c` 複製指令、`o` 打開網頁版、`q` 離開。除了這幾個，看板只讀不寫。其他 agent 的 hook 留在收件匣的回合，要有開著的 Claude Code 對話才會整理成步驟；在那之前，看板照原樣列出它們，問題排最前面。只是看看板的回合，不算工作。
 

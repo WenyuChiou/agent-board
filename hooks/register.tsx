@@ -115,9 +115,6 @@ const today = atom({ plugin: 'agent-board', key: 'today' } as const, 0)
 const isLegendOpen = atom({ plugin: 'agent-board', key: 'isLegendOpen' } as const, false)
 // The language the pane speaks (strings.ts resolveLang), settled at session start.
 const lang = atom({ plugin: 'agent-board', key: 'lang' } as const, 'zh-TW')
-// Whether the person picked that language (strings.ts chosenLang), rather than it coming from
-// Claude Code's setting or LANG.
-const isLangChosen = atom({ plugin: 'agent-board', key: 'isLangChosen' } as const, false)
 // Which folded sections the person opened; kept across sessions in $.store.
 const opened = atom({ plugin: 'agent-board', key: 'opened' } as const, [] as string[])
 // When the pane first saw each hand-kept task done (by doneKey), to archive it a day later.
@@ -569,7 +566,7 @@ const nameTask = async ($: EngineInterface): Promise<void> => {
     model: 'haiku',
     maxTokens: 120,
     effort: 'low',
-    prompt: (await wordsOf($)).namePrompt(mirror.firstPrompt.slice(0, 1200), steps),
+    prompt: (await wordsOf($)).namePrompt(requestData(mirror.firstPrompt), steps),
   })
   const lines = asked?.isAnswered === true ? asked.text.split(/\r?\n/).filter(line => line.trim() !== '') : []
   const title = cleanTitle(lines[0] ?? '')
@@ -591,7 +588,7 @@ const refreshName = async ($: EngineInterface): Promise<void> => {
     model: 'haiku',
     maxTokens: 120,
     effort: 'low',
-    prompt: s.refreshPrompt(mirror.firstPrompt.slice(0, 1200), steps, mirror.title || fallbackTitle(mirror), mirror.context),
+    prompt: s.refreshPrompt(requestData(mirror.firstPrompt), steps, mirror.title || fallbackTitle(mirror), mirror.context),
   })
   const lines = asked?.isAnswered === true ? asked.text.split(/\r?\n/).filter(line => line.trim() !== '') : []
   const title = cleanTitle(lines[0] ?? '')
@@ -705,7 +702,7 @@ const takeAgentTurns = async ($: EngineInterface, turns: readonly AgentTurn[], i
 // nothing.
 type ConnectMode = 'connect' | 'remove' | 'auto'
 
-const connectAgents = async ($: EngineInterface, mode: ConnectMode): Promise<{ text: string; done: string[] }> => {
+const connectAgents = async ($: EngineInterface, mode: ConnectMode, options: PluginOptions): Promise<{ text: string; done: string[] }> => {
   const remove = mode === 'remove'
   const isAuto = mode === 'auto'
   const s = await wordsOf($)
@@ -726,9 +723,11 @@ const connectAgents = async ($: EngineInterface, mode: ConnectMode): Promise<{ t
   // language taken from Claude Code's setting or LANG can differ between two sessions (one
   // from the desktop app, one from a terminal), which would take turns rewriting them at each
   // start, so only a language the person picked replaces the one they hold: the one picked
-  // now, else the one `/progress lang` last settled.
+  // now, else the one `/progress lang` last settled. Both are read here, not at this
+  // session's start, since another session may have run `/progress lang` since.
   const held = await readText($, board).catch(() => '')
-  const fileLang = (await read($, isLangChosen)) ? s.lang : (langOf(await $.store.get('boardLang')) ?? langOf(boardLangOf(held)) ?? s.lang)
+  const fileLang =
+    chosenLang(options.language, await $.store.get('lang')) ?? langOf(await $.store.get('boardLang')) ?? langOf(boardLangOf(held)) ?? s.lang
   const boardCode = boardScript(path, fileLang)
   if (!remove && held !== boardCode) await $.fs.write(board, boardCode)
   if (remove && (await $.fs.exists(board))) await removeFiles($, [board], isWin)
@@ -840,7 +839,7 @@ const installedOpenclawOld = async ($: EngineInterface, isWin: boolean, savedBy:
 // option off, nothing is added behind their back.
 const autoConnect = async ($: EngineInterface, options: PluginOptions): Promise<void> => {
   if (options.autoConnect === false || (await $.store.get('autoConnectOff')) === true) return
-  const { text, done } = await connectAgents($, 'auto')
+  const { text, done } = await connectAgents($, 'auto', options)
   if (done.length === 0) return
   const s = await wordsOf($)
   await update($, answer, () => ({ question: s.autoConnectTitle, text, isAsking: false }))
@@ -1213,7 +1212,6 @@ const settleLang = async ($: EngineInterface, options: PluginOptions): Promise<v
   const stored = await $.store.get('lang')
   const chosen = resolveLang(options.language, stored, settings.language, await $.env.get('LANG'))
   await update($, lang, () => chosen)
-  await update($, isLangChosen, () => chosenLang(options.language, stored) !== null)
 }
 
 const setNotify = async ($: EngineInterface, isOn: boolean): Promise<void> => {
@@ -1352,7 +1350,7 @@ export const register: Register = (on, options) => {
       const isRemove = connect[1] !== undefined
       if (isRemove) await $.store.set('autoConnectOff', true)
       else await $.store.delete('autoConnectOff')
-      return { text: (await connectAgents($, isRemove ? 'remove' : 'connect')).text }
+      return { text: (await connectAgents($, isRemove ? 'remove' : 'connect', options)).text }
     }
     const add = /^(?:加|新增|add|[+＋])\s*(.*)$/is.exec(arg)
     if (add !== null) return { text: await quickAdd($, add[1] ?? '') }

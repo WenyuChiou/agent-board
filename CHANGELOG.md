@@ -1,5 +1,55 @@
 # Changelog
 
+## 0.18.2 — 2026-10-17
+
+What the reviews of 0.18.1 left open, most harmful first.
+
+- **A project named with a comment opening no longer hides the blocks after it.** A
+  folder name (Linux allows `<!--` in one) or a project typed into a quick add went into
+  its `##` heading as it was, and the reader then skipped every line up to the next
+  `-->`. The heading now leaves out `<!--` and writes `-->` as `->`, like the lines in a
+  block, and keeps a leading `#` (`## #work` reads back as `#work`). The section is found
+  by the cleaned name, else by the name as an earlier version wrote it, so a second
+  session in that folder joins the same heading; a name with nothing left goes under the
+  uncategorized heading. A project whose name starts with a bracket (`（未分類）`, `(PFC)
+  notes`) is now matched by its whole name: it has no first word, so before, every such
+  heading was taken for one project, and a session with no folder joined `## (PFC)
+  notes`. Tests: "a project folder or quick-add project named with a comment opening
+  hides no block after its heading, and keeps one heading", "a project heading an earlier
+  version wrote, with a leading # or an arrow in it, is still joined, and a project of
+  only marks goes under the uncategorized one", "a project whose name starts with a
+  bracket is matched whole, so the uncategorized heading never joins another one".
+- **What the user asked reaches the model fenced when a task is named and named
+  again.** 0.18.1 fenced the request in the prompt that sums up a turn; the prompts that
+  name a task, and look at its name again three steps later, still sent it bare. They
+  now put it between `<request>` tags too, in all three languages, with no tag inside
+  that could close the fence early. Tests: "what the user asked reaches the model fenced
+  as data when the task is named and named again, in every language", "the request a
+  task is named and named again from stays inside its fence, whatever tags it holds".
+- **A connect run by hand takes the language picked in another session.** Whether the
+  person had picked a language was read once, when the session started, so a session
+  started before another session's `/progress lang auto` wrote the board script and
+  skills in its own language at a `/progress connect`. The plugin's `language` option
+  and the stored `/progress lang` are now read at the connect itself. Test: "a connect
+  run by hand takes the language another session picked after this one started, auto
+  included".
+- **`Status:` and `Summary:` lead into a printed board, like `Here is where things
+  stand:`.** A reply that opens with one of them before the board is a look, not work.
+  A lead saying something was done is still work, in English now too (`Status: fixed
+  429:`, `Progress after I added the tests:`); `updated` is not counted, since `Here's
+  the updated board:` is a look. `了` still makes a lead work: after any
+  verb it says something was done
+  (`目前改了 429 看板如下：`), and narrowing it to `好了` and `完成了` would drop that turn's
+  work to spare a block. The captured Grok Build replies have no lead line, so they
+  still count as looks. Test: "a status or summary line that leads into the board is a
+  look, while a lead saying something was changed is still work".
+- **The guide names the plugin's Pane language for the board script.** The sentence on
+  `--lang` named only `/progress lang`; the **Pane language** option in `/config` comes
+  before it, and the three guides now say so. The order was already right in the code;
+  a test now pins it: "the plugin’s language option gives
+  the board script and skill their language ahead of the one /progress lang last
+  picked".
+
 ## 0.18.1 — 2026-10-17
 
 What the scan after the 0.17.1 merge left open, most harmful first.
