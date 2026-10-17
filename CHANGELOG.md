@@ -57,6 +57,19 @@
   board. Above the table, "At a glance" sorts the agents into works fully,
   works in part (with the limit) and not working yet.
 
+## 0.17.2 — 2026-10-17
+
+- **A reply full of board marks no longer holds up the inbox.** 0.17.1 looks
+  for the board's count line (`● … ▸ … ⚑ … ✓ …`) in every reply another
+  agent sends. A long line holding every mark but the ✓ made that search take
+  seconds per kilobyte, growing fast with length (92 s for 4.8 KB), and every
+  open session runs it every 5 seconds. Each count now takes all its digits,
+  each gap stops at the next mark, and only a line of up to 400 characters is
+  tried; the check for a list beside the board no longer crosses a run of
+  blank lines again from each one. Found by the scan after the 0.17.1 merge
+  and its review. Test: "a reply full of board marks with no
+  count line is read at once, not tried for seconds".
+
 ## 0.17.1 — 2026-10-17
 
 - **Fixes from a live test with Grok Build 1.0.62.**

@@ -1121,6 +1121,22 @@ test('a reply that is the printed board and a sentence is a look at the board, a
   expect(isBoardTurn(said('how many tasks are open?', 'Five are in progress and two wait on you.')!)).toBe(false)
 })
 
+test('a reply full of board marks with no count line is read at once, not tried for seconds', () => {
+  const said = (answer: string) => readTurn('grok-turn-1-1.json', JSON.stringify({ session_id: 's', cwd: '/w/app', prompt: '', last_assistant_message: answer }))
+  // One long line, and many lines just short enough to be tried: each has every mark but the ✓,
+  // some with long runs of digits. Then many blank lines before a board.
+  const long = `${'●1▸1⚑1'.repeat(400)} x`
+  const many = Array.from({ length: 50 }, () => `${'●1▸1⚑1'.repeat(66)} x`).join('\n')
+  const digits = Array.from({ length: 100 }, () => `●${'1'.repeat(133)}▸${'1'.repeat(132)}⚑${'1'.repeat(132)}`).join('\n')
+  const blank = `Here:${'\n'.repeat(40000)}Progress  ● 1 waiting  ▸ 1 in progress  ⚑ 0 due soon  ✓ 0 done today\n`
+  const started = performance.now()
+  expect(isBoardTurn(said(long)!)).toBe(false)
+  expect(isBoardTurn(said(many)!)).toBe(false)
+  expect(isBoardTurn(said(digits)!)).toBe(false)
+  expect(isBoardTurn(said(blank)!)).toBe(true)
+  expect(performance.now() - started).toBeLessThan(500)
+})
+
 test('each agent gets a board command in the form it reads, and a missing reporter never makes a hook exit 2', () => {
   const ctx = { home: '/h', sep: '/', isWindows: false, script: '/h/.claude/progress-report.sh', inbox: '/h/.claude/progress-inbox', codexHome: '/h/.codex', grokHome: '/h/.grok', hermesHome: '/h/.hermes', openclawHome: '/h/.openclaw', board: '/h/.claude/agent-board.mjs', s: STRINGS.en }
   const files = Object.fromEntries(boardCommands(ctx).map(hook => [hook.file, hook]))
