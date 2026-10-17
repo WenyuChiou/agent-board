@@ -54,28 +54,48 @@ except Exception:
     print(0)
 ' "$claude/settings.json" 2>/dev/null || echo 0)"
 
-if [ "$install" = 1 ]; then
-  if command -v claude >/dev/null 2>&1; then
-    # Under its old name the plugin would load a second pane beside the new one.
-    if grep -qs "\"$old_market\"" "$claude/plugins/known_marketplaces.json" "$claude/settings.json"; then
-      claude plugin uninstall "$old_plugin" >/dev/null 2>&1 || true
+# Under its old name the plugin would load a second pane beside the new one. settings.json
+# names it among enabledPlugins, so this is known with --no-install or without claude too.
+has_old=0
+if grep -Eqs "\"($old_plugin|$old_market)\"" "$claude/plugins/known_marketplaces.json" "$claude/settings.json"; then
+  has_old=1
+fi
+old_steps="run 'claude plugin uninstall $old_plugin' and 'claude plugin marketplace remove $old_market'"
+
+if [ "$install" = 1 ] && command -v claude >/dev/null 2>&1; then
+  if ! claude plugin marketplace add "$marketplace"; then
+    echo "Could not add $marketplace. For a private repository run 'gh auth login' and 'gh auth setup-git' once;" >&2
+    echo "without a GitHub SSH key also set CLAUDE_CODE_PLUGIN_PREFER_HTTPS=1. Then run this again." >&2
+    exit 1
+  fi
+  if ! claude plugin install "$plugin"; then
+    echo "Could not install $plugin; nothing else was changed. Run this again once it installs." >&2
+    exit 1
+  fi
+  # A fresh install leaves the language option unset and Claude Code says so; auto is what
+  # it means anyway. A language someone picked stays.
+  if claude plugin configure "$plugin" --json 2>/dev/null |
+    python3 -c 'import json, sys; sys.exit(0 if "language" in json.load(sys.stdin).get("unconfigured", []) else 1)' 2>/dev/null; then
+    printf '{"language":"auto"}' | claude plugin configure "$plugin" --values-stdin >/dev/null 2>&1 || true
+  fi
+  # Only once the new name is in, so a failed install never leaves no pane at all.
+  if [ "$has_old" = 1 ]; then
+    if claude plugin uninstall "$old_plugin" >/dev/null 2>&1; then
       claude plugin marketplace remove "$old_market" >/dev/null 2>&1 || true
       echo "Removed $old_plugin, the plugin's old name; $plugin takes its place."
+    else
+      claude plugin marketplace remove "$old_market" >/dev/null 2>&1 || true
+      echo "Could not remove $old_plugin, the plugin's old name, which shows a second pane: $old_steps." >&2
     fi
-    if ! claude plugin marketplace add "$marketplace"; then
-      echo "Could not add $marketplace. For a private repository run 'gh auth login' and 'gh auth setup-git' once;" >&2
-      echo "without a GitHub SSH key also set CLAUDE_CODE_PLUGIN_PREFER_HTTPS=1. Then run this again." >&2
-      exit 1
-    fi
-    claude plugin install "$plugin"
-    # A fresh install leaves the language option unset and Claude Code says so; auto is what
-    # it means anyway. A language someone picked stays.
-    if claude plugin configure "$plugin" --json 2>/dev/null |
-      python3 -c 'import json, sys; sys.exit(0 if "language" in json.load(sys.stdin).get("unconfigured", []) else 1)' 2>/dev/null; then
-      printf '{"language":"auto"}' | claude plugin configure "$plugin" --values-stdin >/dev/null 2>&1 || true
-    fi
-  else
+  fi
+else
+  if [ "$install" = 1 ]; then
     echo "claude is not on PATH: run 'claude plugin marketplace add $marketplace' and 'claude plugin install $plugin' yourself." >&2
+  fi
+  if [ "$has_old" = 1 ]; then
+    # The commands go on lines of their own: easy to copy.
+    printf '%s\n' "$old_plugin, the plugin's old name, is still installed and shows a second pane. Once $plugin is in, run:" \
+      "  claude plugin uninstall $old_plugin" "  claude plugin marketplace remove $old_market" >&2
   fi
 fi
 

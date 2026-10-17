@@ -48,6 +48,8 @@ A step that comes before any `###` goes into a task with no title. A step or tas
 - Fenced code. A line that starts (after optional spaces) with three backticks or three tildes toggles the fence, whichever character opens or closes it. Everything between, and the fence lines themselves, are skipped. An unclosed fence hides the rest of the file.
 - HTML comments. `<!-- … -->` is removed from a line, and a comment that opens without closing hides lines until `-->`. The exception is the block markers, which are read first, as whole lines.
 
+A tool that rewrites the file skips the same regions: a marker or heading inside a fence or a comment (a block pasted as an example) is never replaced, moved or archived.
+
 **Names.** A project name is its heading text. The pane puts the current session's project first. A heading belongs to a session's project when the heading's first word (up to the first space, `(`, `（`, `·` or `—`, compared without case) equals the repository name, the repository folder name, or the session folder name. `## persona_framework (PFC)` belongs to a session in the repository `persona_framework`. Name your project heading after the repository.
 
 ## Steps and marks
@@ -151,8 +153,8 @@ An attribute is `name=value`, where the name is letters, digits, `_` or `-`, and
 | `agent` | Yes | Name of the agent in lower case: `claude`, `codex`, `gemini`, `cursor`, `aider`, `continue`, or your own. If missing: `claude`. For every agent but `claude` the pane shows the name beside the block's project and questions, words a working block as `<agent> is working` (zh-TW: `<agent> 正在做`) instead of `Claude is working`, and tells the person to answer a `[?]` step in that agent's session (`Reply in the <project> session (<agent>)`). |
 | `state` | Yes | `working`, `waiting`, `done` or `ended`; see [States](#states). If missing or not one of these: `waiting`. |
 | `updated` | Yes | When the block was last written, ISO 8601, read with `Date.parse`. Write UTC with a trailing `Z`, for example `2026-10-16T14:32:05Z`. A time with no zone is read as the local time of the machine running the pane; a date alone (`2026-10-16`) as midnight UTC. If missing or unreadable the block's age is unknown: it is never shown as stopped and never archived, whatever its end marker and state (a `done` block with no readable time is not listed as recently finished either), so it stays in the file until someone removes it. Always write it. |
-| `resume` | No | The agent's full session id. Used only when `agent=claude`, to show the command `claude --resume <id>` for an ended or stopped session. |
-| `dir` | No | The session's folder, percent-encoded as `encodeURIComponent` does (spaces become `%20`). Used with `resume` to show `cd '<dir>' && claude --resume <id>`, or a PowerShell `Set-Location` for a Windows path. An undecodable value is ignored. |
+| `resume` | No | The agent's full session id: 6 to 64 letters, digits and dashes. Used only when `agent=claude`, to show the command `claude --resume <id>` for an ended or stopped session. Any other value is ignored. |
+| `dir` | No | The session's folder, percent-encoded as `encodeURIComponent` does (spaces become `%20`). Used with `resume` to show `cd '<dir>' && claude --resume <id>`, or a PowerShell `Set-Location` for a Windows path. An undecodable value, or one that decodes to a control character (a line break, a tab), is ignored. |
 | `pr` | No | A pull request number, a positive integer. Shown as `PR #n`. Other values are ignored. |
 | `ci` | No | `none`, `pending`, `pass` or `fail`. Shown after the PR number, only when `pr` is present. Other values are ignored. |
 | `source` | No | `turns` when the steps were summed up from the session's turns because it keeps no task list; absent when they come from the agent's own list. Informational: readers show the block the same either way. |

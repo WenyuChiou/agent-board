@@ -191,7 +191,9 @@ Progress shows only while some Claude Code session is open. Turns that arrive wh
 
 **Any other agent** (Aider, GitHub Copilot, Windsurf…): paste the section **"Report your progress to the progress pane"** from [AGENTS.md](../AGENTS.md) into its instruction file. It then writes its own block. `setup.sh --agents` (`setup.ps1 -Agents auto`) does this for Codex, Gemini CLI and OpenCode when they are not connected.
 
-**dot, and explicit reports from Codex:** the opt-in [local exchange](LOCAL-EXCHANGE.md) writes a standalone report file and keeps a local message queue with receipts; it never writes your `progress.md`.
+**An agent on another machine** (a cloud VM, a chat assistant) can report too: it writes its block as a fragment, and a merge step on this machine puts it into `progress.md`; see [Remote reporters](REMOTE_REPORTERS.md).
+
+**dot, and explicit reports from Codex:** the opt-in [local exchange](LOCAL-EXCHANGE.md) writes the same kind of fragment, merged by the same step, and keeps a local message queue with receipts.
 
 ## How it keeps itself tidy
 
@@ -247,5 +249,5 @@ The last line moves the hooks in your other agents to the new name. `progress.md
 - **PowerShell warns about the execution policy.** Your profile only runs where scripts may run: `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned`, then run the script again. Until then the variable stays in `settings.json`.
 - **Private fork.** Claude Code clones with your own git credentials. Run `gh auth login` and `gh auth setup-git` once; without a GitHub SSH key also set `CLAUDE_CODE_PLUGIN_PREFER_HTTPS=1`.
 - **Your organization manages Claude Code.** Plugins you install yourself do not get the system-prompt hook there. Run the setup script with `-KeepRule` (`--keep-rule`) to keep the rule in `~/.claude/CLAUDE.md` instead.
-- **An agent doesn't show up.** Run `/progress connect` again: it names every agent it connected and every config it could not edit. Restart the agent, and keep a Claude Code session open while it works. If no file appears in `~/.claude/progress-inbox/` after a turn, the agent's hook did not run.
+- **An agent doesn't show up.** Run `/progress connect` again: it names every agent it connected and every config it could not edit. Restart the agent, and keep a Claude Code session open while it works. An open session reads each file in `~/.claude/progress-inbox/` and deletes it, so to see what the hook saves, close every session first: if no file appears there after a turn, the agent's hook did not run.
 - **A new computer.** `progress.md`, the inbox and the hooks live on each computer. Install there and run `/progress connect`; copy `progress.md` and the `progress-archive-*.md` and `progress-journal-*.md` files beside it to bring your history. To share one board, point `CLAUDE_PROGRESS_FILE` on both computers at one file in a synced folder, and use one computer at a time.

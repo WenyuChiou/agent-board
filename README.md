@@ -9,7 +9,7 @@ A Claude Code plugin that also follows Codex, Gemini CLI, Cursor, OpenCode, Grok
 
 <p align="center">
 <a href="https://github.com/WenyuChiou/agent-board/actions/workflows/test.yml"><img alt="Tests" src="https://github.com/WenyuChiou/agent-board/actions/workflows/test.yml/badge.svg"></a>
-<a href="CHANGELOG.md"><img alt="Version 0.11.0" src="https://img.shields.io/badge/version-0.11.0-blue"></a>
+<a href="CHANGELOG.md"><img alt="Version 0.12.0" src="https://img.shields.io/badge/version-0.12.0-blue"></a>
 <a href="LICENSE"><img alt="MIT license" src="https://img.shields.io/badge/license-MIT-green"></a>
 <img alt="macOS, Linux, Windows" src="https://img.shields.io/badge/macOS%20%C2%B7%20Linux%20%C2%B7%20Windows-lightgrey">
 </p>
@@ -106,7 +106,7 @@ Press **Legend** at the bottom of the pane to see this list there.
 
 <img alt="Claude Code sessions, other agents through their hooks, and you all write one Markdown file, progress.md; the pane, progress.html, the archive and the status line read it." src="docs/images/flow-en.svg" width="100%">
 
-Each connected agent's hook saves its last reply into `~/.claude/progress-inbox/`. An open Claude Code session picks it up within five seconds, sums the turn up, and writes it into that agent's own block in `progress.md`. The format is in [docs/FORMAT.md](docs/FORMAT.md).
+Each connected agent's hook saves its last reply into `~/.claude/progress-inbox/`. An open Claude Code session picks it up within five seconds, sums the turn up, writes it into that agent's own block in `progress.md`, and deletes the file. The format is in [docs/FORMAT.md](docs/FORMAT.md).
 
 ## FAQ
 
@@ -130,7 +130,7 @@ To share one board between two computers, set `CLAUDE_PROGRESS_FILE` on both to 
 1. Run `/progress connect` again and read what it prints: it names every agent it connected and any config file it could not edit.
 2. Restart that agent; hooks load when it starts. Codex needs the hook approved in `/hooks`, and Hermes Agent asks once.
 3. Keep a Claude Code session open: the pane reads the inbox only while one is running. Turns that arrive meanwhile wait there for up to two days.
-4. Check `~/.claude/progress-inbox/`. If no file appears after a turn, the hook didn't run; if one does, open an issue with it.
+4. Close every Claude Code session (an open one reads each file and deletes it within seconds), then check `~/.claude/progress-inbox/`. If no file appears after a turn, the hook didn't run; if one does, open an issue with it.
 </details>
 
 <details>

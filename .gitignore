@@ -2,3 +2,5 @@
 .claude-plugin/types/
 node_modules/
 docs/preview/out/
+# Bytecode from running scripts/remote-reporter without -B
+scripts/remote-reporter/__pycache__/

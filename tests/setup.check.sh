@@ -181,6 +181,36 @@ check 'old name: the old CLAUDE.md block goes' bash -c '[ "$(cat "$1")" = "# Min
 run /bin/bash --remove-agents
 check 'old name: --remove-agents takes the new section out' bash -c '[ "$(cat "$1")" = "# My rules" ]' _ "$dir/.codex/AGENTS.md"
 
+# 18. The old name: the new plugin goes in first and the old one comes out only after it did.
+# A stand-in claude on PATH writes down what it was asked; FAIL_INSTALL makes install fail.
+old_settings='{"enabledPlugins": {"project-progress@claude-progress-pane": true}}'
+fake_claude() {  # fake_claude: a claude in $dir/bin that logs its arguments to $dir/calls
+  mkdir -p "$dir/bin"
+  printf '#!/bin/sh\necho "$*" >> "%s/calls"\n[ "$1 $2" = "plugin install" ] && [ -n "${FAIL_INSTALL:-}" ] && exit 1\nexit 0\n' "$dir" > "$dir/bin/claude"
+  chmod +x "$dir/bin/claude"
+}
+install_run() {  # install_run [ENV...]: setup.sh without --no-install, the stand-in first on PATH
+  env "$@" HOME="$dir" SHELL=/bin/bash ZDOTDIR="" CODEX_HOME="" XDG_CONFIG_HOME="" CLAUDE_CONFIG_DIR="$dir/.claude" \
+    PATH="$dir/bin:$PATH" bash "$setup" > "$dir/out" 2>&1
+}
+new_case "$old_settings"
+fake_claude
+install_run
+check 'old name: the new plugin is installed before the old one is uninstalled' \
+  bash -c 'install="$(grep -n "^plugin install agent-board@agent-board" "$1" | cut -d: -f1)"; old="$(grep -n "^plugin uninstall project-progress@claude-progress-pane" "$1" | cut -d: -f1)"; [ -n "$install" ] && [ -n "$old" ] && [ "$install" -lt "$old" ]' _ "$dir/calls"
+check 'old name: "Removed" is said once the uninstall worked' grep -q "^Removed project-progress@claude-progress-pane" "$dir/out"
+
+new_case "$old_settings"
+fake_claude
+install_run FAIL_INSTALL=1
+check 'old name: a failed install leaves the old plugin in and says nothing of removing it' \
+  bash -c '! grep -q "uninstall" "$1/calls" && ! grep -q "^Removed" "$1/out"' _ "$dir"
+
+new_case "$old_settings"
+run /bin/bash
+check 'old name: with --no-install it is still found in settings.json, with the two commands to remove it' \
+  bash -c 'grep -q "claude plugin uninstall project-progress@claude-progress-pane" "$1" && grep -q "claude plugin marketplace remove claude-progress-pane" "$1"' _ "$dir/out"
+
 echo
 if [ "$fails" -gt 0 ]; then echo "$fails fail"; exit 1; fi
 echo 'all pass'

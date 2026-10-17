@@ -267,6 +267,58 @@ try {
   Check 'old name: the old CLAUDE.md block goes' ([IO.File]::ReadAllText((Join-Path $dir '.claude\CLAUDE.md')) -ceq "# Mine`n")
   Invoke-Setup $dir "'RemoteSigned'" '-RemoveAgents' | Out-Null
   Check 'old name: -RemoveAgents takes the new section out' ([IO.File]::ReadAllText($codexPath) -ceq "# My rules`n")
+  # 20. The old name: the new plugin goes in first and the old one comes out only after it did.
+  # A stand-in claude.cmd first on PATH writes down what it was asked; FAIL_INSTALL makes
+  # install fail.
+  $oldSettings = '{"enabledPlugins": {"project-progress@claude-progress-pane": true}}'
+  function New-FakeClaude([string]$dir) {
+    $bin = Join-Path $dir 'bin'
+    New-Item -ItemType Directory -Path $bin | Out-Null
+    $cmd = "@echo off`r`necho %*>> `"%~dp0..\calls`"`r`nif `"%1 %2`"==`"plugin install`" if defined FAIL_INSTALL exit /b 1`r`nexit /b 0`r`n"
+    [IO.File]::WriteAllText((Join-Path $bin 'claude.cmd'), $cmd, (New-Object System.Text.ASCIIEncoding))
+  }
+  function Invoke-Install([string]$dir, [bool]$fail) {
+    $saved = @{ path = $env:PATH; config = $env:CLAUDE_CONFIG_DIR; user = $env:USERPROFILE; fail = $env:FAIL_INSTALL }
+    $env:PATH = (Join-Path $dir 'bin') + [IO.Path]::PathSeparator + $env:PATH
+    $env:CLAUDE_CONFIG_DIR = Join-Path $dir '.claude'
+    $env:USERPROFILE = $dir
+    $env:FAIL_INSTALL = if ($fail) { '1' } else { $null }
+    $ErrorActionPreference = 'Continue'
+    try {
+      $cmd = "function Get-ExecutionPolicy { param(`$Scope) 'RemoteSigned' }; " +
+        "& '$setup' -ProfilePath '$(Join-Path $dir 'profile.ps1')'"
+      $out = & powershell -NoProfile -ExecutionPolicy Bypass -Command $cmd 2>&1
+      ($out | Out-String)
+    }
+    finally {
+      $env:PATH = $saved.path
+      $env:CLAUDE_CONFIG_DIR = $saved.config
+      $env:USERPROFILE = $saved.user
+      $env:FAIL_INSTALL = $saved.fail
+    }
+  }
+  $dir = New-Case $oldSettings
+  New-FakeClaude $dir
+  $out = Invoke-Install $dir $false
+  $calls = @(Get-Content -LiteralPath (Join-Path $dir 'calls') -ErrorAction SilentlyContinue)
+  $install = [array]::FindIndex([string[]]$calls, [Predicate[string]] { param($one) $one -like 'plugin install agent-board@agent-board*' })
+  $uninstall = [array]::FindIndex([string[]]$calls, [Predicate[string]] { param($one) $one -like 'plugin uninstall project-progress@claude-progress-pane*' })
+  Check 'old name: the new plugin is installed before the old one is uninstalled' ($install -ge 0 -and $uninstall -gt $install)
+  Check 'old name: "Removed" is said once the uninstall worked' ($out -match '(?m)^Removed project-progress@claude-progress-pane')
+
+  $dir = New-Case $oldSettings
+  New-FakeClaude $dir
+  $out = Invoke-Install $dir $true
+  $calls = @(Get-Content -LiteralPath (Join-Path $dir 'calls') -ErrorAction SilentlyContinue)
+  Check 'old name: a failed install leaves the old plugin in and says nothing of removing it' `
+    (-not ($calls -match 'uninstall') -and -not ($out -match '(?m)^Removed'))
+
+  $dir = New-Case $oldSettings
+  $out = Invoke-Setup $dir
+  # Without whitespace, so a console that wraps a long line cannot split a command.
+  Check 'old name: with -NoInstall it is still found in settings.json, with the two commands to remove it' `
+    (($out -replace '\s', '').Contains('claudepluginuninstallproject-progress@claude-progress-pane') -and
+     ($out -replace '\s', '').Contains('claudepluginmarketplaceremoveclaude-progress-pane'))
 }
 finally {
   foreach ($one in $script:dirs) { if (Test-Path $one) { Remove-Item -LiteralPath $one -Recurse -Force } }

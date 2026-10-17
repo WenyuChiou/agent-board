@@ -54,6 +54,18 @@ export const parseAttrs = (raw: string): Record<string, string> => {
   return attrs
 }
 
+// `resume=` ends up in a command the person pastes into a terminal, and anyone can write the
+// file: only a plain session id is kept.
+const RESUME = /^[0-9a-zA-Z-]{6,64}$/
+
+// A folder with a control character (a newline above all) would break the pasted command
+// into two; the quote is escaped where the command is built.
+const folderOf = (value: string | undefined): string | null => {
+  const dir = decoded(value)
+
+  return dir === null || /[\u0000-\u001f\u007f]/.test(dir) ? null : dir
+}
+
 export const autoOf = (raw: string): ProgressAuto | null => {
   const attrs = parseAttrs(raw)
   const session = attrs.session
@@ -67,8 +79,8 @@ export const autoOf = (raw: string): ProgressAuto | null => {
     agent: (attrs.agent ?? 'claude').toLowerCase(),
     state,
     updated: Number.isNaN(updated) ? 0 : updated,
-    resume: attrs.resume ?? null,
-    dir: decoded(attrs.dir),
+    resume: attrs.resume !== undefined && RESUME.test(attrs.resume) ? attrs.resume : null,
+    dir: folderOf(attrs.dir),
     pr: Number.isInteger(pr) && pr > 0 ? pr : null,
     ci: CI_STATES.find(one => one === attrs.ci) ?? null,
   }
@@ -89,14 +101,46 @@ const dueOf = (task: ProgressTask): string | null => {
   return null
 }
 
+// What the format reads of each line, shared by the parser and the writer so neither sees a
+// block or heading the other skips: null inside a code fence (the fence lines too) or a
+// multi-line HTML comment; else the line with its comments taken out, an auto marker kept
+// whole.
+export const readable = (lines: readonly string[]): Array<string | null> => {
+  let isFenced = false
+  let isComment = false
+
+  return lines.map(raw => {
+    if (FENCE.test(raw)) {
+      isFenced = !isFenced
+      return null
+    }
+    if (isFenced) return null
+    let line = raw
+    if (isComment) {
+      const end = line.indexOf('-->')
+      if (end < 0) return null
+      isComment = false
+      line = line.slice(end + 3)
+    } else if (AUTO_START.test(raw) || AUTO_END.test(raw)) {
+      return raw
+    }
+    line = line.replace(/<!--.*?-->/g, '')
+    const open = line.indexOf('<!--')
+    if (open >= 0) {
+      isComment = true
+      line = line.slice(0, open)
+    }
+
+    return line
+  })
+}
+
 export const parseProgress = (markdown: string): ProgressProject[] => {
   const projects: ProgressProject[] = []
   let project: ProgressProject | undefined
   let task: ProgressTask | undefined
   let pendingAuto: ProgressAuto | null = null
   let openSession: string | null = null
-  let isFenced = false
-  let isComment = false
 
   const ensureProject = (): ProgressProject => {
     if (project === undefined) {
@@ -117,43 +161,27 @@ export const parseProgress = (markdown: string): ProgressProject[] => {
     return task
   }
 
-  markdown.split(/\r?\n/).forEach((raw, lineIndex) => {
-    if (FENCE.test(raw)) {
-      isFenced = !isFenced
-      return
-    }
-    if (isFenced) return
+  const raws = markdown.split(/\r?\n/)
+  readable(raws).forEach((line, lineIndex) => {
+    if (line === null) return
+    const raw = raws[lineIndex] ?? ''
 
-    const autoStart = AUTO_START.exec(raw)
-    if (autoStart?.[1] !== undefined && !isComment) {
+    const autoStart = AUTO_START.exec(line)
+    if (autoStart?.[1] !== undefined) {
       pendingAuto = autoOf(autoStart[1])
       openSession = pendingAuto?.session ?? null
       task = undefined
       return
     }
-    if (AUTO_END.test(raw) && !isComment) {
+    if (AUTO_END.test(line)) {
       // An end marker closes only its own block (or any, when it names none).
-      const ends = parseAttrs(raw).session
+      const ends = parseAttrs(line).session
       if (openSession !== null && (ends === undefined || ends === openSession)) {
         openSession = null
         pendingAuto = null
         task = undefined
       }
       return
-    }
-
-    let line = raw
-    if (isComment) {
-      const end = line.indexOf('-->')
-      if (end < 0) return
-      isComment = false
-      line = line.slice(end + 3)
-    }
-    line = line.replace(/<!--.*?-->/g, '')
-    const open = line.indexOf('<!--')
-    if (open >= 0) {
-      isComment = true
-      line = line.slice(0, open)
     }
     if (line.trim() === '') return
 

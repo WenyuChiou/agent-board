@@ -84,3 +84,12 @@ jobs:
       - name: Installer checks (setup.ps1)
         if: runner.os == 'Windows'
         run: powershell -NoProfile -ExecutionPolicy Bypass -File tests/setup.check.ps1
+
+      # The remote reporter is stdlib Python; it runs in a temp folder and writes no bytecode.
+      - name: Remote reporter tests
+        if: runner.os != 'Windows'
+        run: python3 -B scripts/remote-reporter/test_pipeline.py
+
+      - name: Remote reporter tests (Windows)
+        if: runner.os == 'Windows'
+        run: python -B scripts/remote-reporter/test_pipeline.py

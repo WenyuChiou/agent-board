@@ -175,3 +175,36 @@ export const transcriptTail = (log: string, limit = 3000): { prompt: string; ans
 // into the inbox, so only the kinds agents write their logs in (JSON lines; Cursor's are
 // text), never a key or an env file, and no climbing out of a folder.
 export const isTranscriptPath = (path: string): boolean => /\.(?:jsonl?|txt)$/i.test(path) && !/(?:^|[\\/])\.\.(?:[\\/]|$)/.test(path)
+
+// How much of a turn a stored mirror keeps: the end of the last reply (what the next turn is
+// compared with) and the start of the first request (what the model names the work from).
+export const ANSWER_KEEP = 3000
+export const PROMPT_KEEP = 1200
+
+export const answerKey = (answer: string): string => answer.trim().slice(-ANSWER_KEEP)
+
+export const promptKey = (prompt: string): string => prompt.trim().slice(0, PROMPT_KEEP)
+
+// Of one agent session's files in a drain, the turns worth a model call: the last `keep`
+// turns. A burst of older ones (a pane closed for a day) only moves the bookkeeping on, so
+// one drain never makes dozens of calls.
+export const turnsToDigest = (turns: readonly AgentTurn[], keep = 2): Set<number> => {
+  const indexes = turns.flatMap((turn, index) => (turn.event === 'turn' ? [index] : []))
+
+  return new Set(indexes.slice(-keep))
+}
+
+// The inbox files already taken, by name, each stamped `<session>:<time>`: three days of
+// them, at most the newest `max`, so the record stays small however busy the agents are.
+export const keepInboxDone = (done: Readonly<Record<string, string>>, now: number, max = 2000): Record<string, string> => {
+  const at = (stamp: string): number => Number(stamp.split(':')[1] ?? 0)
+  const recent = Object.entries(done).filter(([, stamp]) => now - at(stamp) < 3 * 24 * 60 * 60 * 1000)
+
+  return Object.fromEntries(recent.sort((a, b) => at(b[1]) - at(a[1])).slice(0, max))
+}
+
+// A file one session took for itself by renaming it: `<inbox name>.<session>.taking`.
+// Another session's rename of the same file fails, so each file is read by one session only.
+export const takenName = (name: string, session: string): string => `${name}.${session.replace(/[^\w-]/g, '') || 'x'}.taking`
+
+export const isTakenFile = (name: string): boolean => /^[a-z][a-z0-9]*-(?:turn|end)-[\w.-]+\.json\.[\w-]+\.taking$/.test(name)

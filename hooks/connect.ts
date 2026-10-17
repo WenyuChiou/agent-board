@@ -61,8 +61,14 @@ export const reportCommand = (script: string, agent: string, event: 'turn' | 'en
     ? `powershell -NoProfile -ExecutionPolicy Bypass -File "${script}" ${agent} ${event}`
     : `sh ${shellQuote(script)} ${agent} ${event}`
 
-// A hook command this plugin wrote: it names the reporter script.
-const OURS = /progress-report\.(?:sh|ps1)/
+// A hook command this plugin wrote: it runs the reporter script by its path, so a person's
+// own `my-progress-report.sh` is not taken for ours.
+const OURS = /(?:^|[\\/'"\s])progress-report\.(?:sh|ps1)(?:\\?['"])?(?:\s|$)/
+
+// Whether the computer is Windows: Windows sets OS=Windows_NT in every shell (Git Bash too),
+// and a path on a drive letter says so even when written with forward slashes
+// (`C:/Users/me/progress.md`). Backslashes alone are no sign either way.
+export const isWindowsHost = (os: string | undefined, path: string): boolean => os === 'Windows_NT' || /^[A-Za-z]:[\\/]/.test(path)
 
 type Json = Record<string, unknown>
 
