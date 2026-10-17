@@ -325,7 +325,7 @@ const TOUR: Record<Lang, TourWords> = {
     press: ['Answer right here.', 'No window hunting.'],
     pressSub: ['One click and the agent', 'gets back to work.'],
     hooks: ['Your other agents', 'report in on their own.'],
-    hooksSub: ['One command connects them.'],
+    hooksSub: ['Installing connects them.'],
     lost: ['Close it.', 'Come back tomorrow.'],
     lostLines: ["What's done, what's stuck, what's next", 'Take over a session left halfway', 'Finished work clears itself away'],
     runs: ['Wherever you use', 'Claude Code.'],
@@ -675,7 +675,7 @@ const dashboard = (lang: Lang): string => {
 const PROMO: Record<Lang, { headline: string[]; sub: string[]; works: string; note: [string, string, string]; answers: [string, string] }> = {
   en: {
     headline: ['Stop checking', 'on your agents.', 'Let them tell you.'],
-    sub: ['One board for every AI coding agent.', 'Whatever needs you comes first.'],
+    sub: ['One board for Claude Code, Codex, Gemini CLI and more.', 'Whatever needs you comes first.'],
     works: 'WORKS WITH',
     note: ['Codex', 'api-gateway · waiting on you', 'Per-key limit: 100 or 300 a minute?'],
     answers: ['100', '300'],

@@ -22,7 +22,7 @@ export const SAMPLES: Record<string, Sample> = {
     project: 'acme-web',
     path: '/Users/ana/.claude/progress.md',
     mine: {
-      title: 'Add a dark mode to the settings page',
+      title: 'Add a dark mode',
       context: 'Users asked for it in the last survey; it should follow the system theme',
       branch: 'feat/dark-mode',
       steps: [
@@ -105,8 +105,8 @@ export const SAMPLES: Record<string, Sample> = {
 <!-- /auto session=c55e2f10 -->
 `,
     journal: [
-      [0, 'acme-web', 'Add a dark mode to the settings page', 'Add colour tokens for dark'],
-      [0, 'acme-web', 'Add a dark mode to the settings page', 'Wire the theme switch'],
+      [0, 'acme-web', 'Add a dark mode', 'Add colour tokens for dark'],
+      [0, 'acme-web', 'Add a dark mode', 'Wire the theme switch'],
       [0, 'Job search', 'Northwind summer internship', 'Tailor the resume'],
       [0, 'mobile-app', 'Release 1.7.4', 'Tag the release'],
       [0, 'mobile-app', 'Release 1.7.4', 'Submit to the store'],
