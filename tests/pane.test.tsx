@@ -1111,6 +1111,29 @@ test('a hand-kept task done for a day leaves for the archive by itself, and the 
   expect(world.files.get(ARCHIVE)).toContain('### 發佈 1.7.4')
 })
 
+test('/progress tidy archives a finished hand-kept task under the day it was done, not the day before', async ($, on) => {
+  const now = Date.parse('2026-10-16T12:00:00.000Z')
+  const file = `# 專案進度
+
+## 求職
+### Google 暑期實習
+- [x] 改履歷
+- [x] 投遞
+
+### Meta 實習
+- [x] 投遞
+`
+  // Seen done just now; the other one the pane has not seen done yet.
+  const world: World = { files: new Map([[FILE, file]]), mtime: 1, hasTasks: true, store: { 'done:求職::Google 暑期實習': now } }
+  engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/persona_framework', surface: 'terminal', isInteractive: true })
+  const ran = await $.command.run(TIDY)
+  expect(ran.text).toBe('封存了 2 個任務。')
+  expect(world.files.get(ARCHIVE)).toContain('## 求職 · 2026-10-16\n### Google 暑期實習\n- [x] 改履歷\n- [x] 投遞')
+  expect(world.files.get(ARCHIVE)).toContain('## 求職 · 2026-10-16\n### Meta 實習\n- [x] 投遞')
+  expect(world.files.get(ARCHIVE)).not.toContain('2026-10-15')
+})
+
 test('on a light terminal no text falls back to the terminal dim', async ($, on) => {
   const world: World = { files: new Map([[FILE, JOBS]]), mtime: 1, hasTasks: true, store: { opened: ['others', 'waiting', 'recent', 'steps'] } }
   engineBeneath(on, world)
@@ -1652,7 +1675,7 @@ const OPENCLAW_TURN = "{\"session_id\":\"174e82e2-caf4-4bf7-ab73-ae4a2c9c1b31\",
 const RATE_LIMIT = 'TITLE: Rate-limit the public endpoints\nCONTEXT: Keep the public API up under abuse\nDONE: Added the token bucket middleware\nNEXT: -\nASK: Per-key limit — 100 or 300 a minute?'
 
 // Runs a session over these inbox files and hands back the file and what the model was asked.
-const takeInbox = async ($: Parameters<Parameters<typeof test>[1]>[0], on: On, files: Array<[string, string]>) => {
+const takeInbox = async ($: Engine, on: On, files: Array<[string, string]>) => {
   const asked: string[] = []
   const world: World = {
     files: new Map([[FILE, '# Progress\n'], ...files]),
@@ -2196,7 +2219,7 @@ test('connecting writes the board script and each installed agent’s board comm
   expect(again.text).toContain('node "/home/me/.claude/agent-board.mjs" --watch')
   await $.command.run({ ...TIDY, args: 'connect remove' })
   for (const file of ['/home/me/.claude/agent-board.mjs', '/home/me/.gemini/commands/board.toml', '/home/me/.agents/skills/agent-board/SKILL.md']) {
-    expect(world.ran.some(argv => argv.includes(file))).toBe(true)
+    expect(world.ran?.some(argv => argv.includes(file))).toBe(true)
   }
   expect(world.ran).toContainEqual(['rmdir', '/home/me/.agents/skills/agent-board'])
 })
@@ -2287,7 +2310,7 @@ test('an OpenClaw older than 2026.4.24 is not hooked in, what an earlier connect
   const connected = await $.command.run({ ...TIDY, args: 'connect' })
   expect(connected.text).toContain('OpenClaw 2026.3.8 太舊，要 2026.4.24 以上才接得上，所以沒有接它。更新之後再跑 /progress connect。')
   // Two files, one note, and no "none found" above it.
-  expect(connected.text.split('OpenClaw 2026.3.8').length).toBe(2)
+  expect(connected.text?.split('OpenClaw 2026.3.8').length).toBe(2)
   expect(connected.text).not.toContain('OpenClaw 的設定檔讀不懂')
   expect(connected.text).not.toContain('沒找到可以接的 agent')
   expect(world.files.get('/home/me/.openclaw/openclaw.json')).toBe(healed)
