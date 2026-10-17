@@ -1300,24 +1300,30 @@ test('a press on the page is worked out from the file as it is now: a line that 
   const items = boardItems(serveView(), [])
   const keyOf = (find: (item: (typeof items)[number]) => boolean) => items.find(find)?.key ?? ''
   const grok = keyOf(item => item.type === 'row' && item.row.title === 'Pick the cache')
-  const sent = serveAction(items, { key: grok, type: 'send', text: '  Redis\u0007, it is already in the stack \r\n', session: 'b2c3d4e5' }, STRINGS.en)
+  const press = (request: Parameters<typeof serveAction>[1]) => {
+    const item = items.find(one => one.key === request.key)
+    const source = item?.type === 'ask' ? item.ask.source : item?.type === 'row' ? item.row.source : undefined
+    return serveAction(items, { ...source, ...request }, STRINGS.en)
+  }
+  const sent = press({ key: grok, type: 'send', text: '  Redis\u0007, it is already in the stack \r\n', session: 'b2c3d4e5' })
   // The task goes with it, so the page can say which of two sessions answered.
   expect(sent).toEqual({ type: 'send', target: GROK, text: STRINGS.en.answerText('Redis or Memcached?', 'Redis, it is already in the stack'), title: 'Pick the cache' })
-  expect(serveAction(items, { key: grok, type: 'send', text: ' \u0000 ', session: 'b2c3d4e5' }, STRINGS.en)).toEqual({ type: 'refuse', note: '' })
+  expect(press({ key: grok, type: 'send', text: ' \u0000 ', session: 'b2c3d4e5' })).toEqual({ type: 'refuse', note: '' })
   // The line now belongs to another session than the one the page drew: refused, not sent there.
-  expect(serveAction(items, { key: grok, type: 'send', text: 'Redis', session: 'c0ffee12' }, STRINGS.en)).toEqual({ type: 'refuse', note: STRINGS.en.boardLineChanged })
-  expect(serveAction(items, { key: 'row:gone', type: 'tick', text: '', session: '' }, STRINGS.en)).toEqual({ type: 'refuse', note: STRINGS.en.boardLineChanged })
+  expect(press({ key: grok, type: 'send', text: 'Redis', session: 'c0ffee12' })).toEqual({ type: 'refuse', note: STRINGS.en.boardLineChanged })
+  expect(press({ key: 'row:gone', type: 'tick', text: '', session: '' })).toEqual({ type: 'refuse', note: STRINGS.en.boardLineChanged })
   // An open Codex session is answered in its own window.
   const codex = keyOf(item => item.type === 'ask' && item.ask.agent === 'codex')
-  expect(serveAction(items, { key: codex, type: 'send', text: '300', session: 'a1b2c3d4' }, STRINGS.en)).toEqual({ type: 'refuse', note: STRINGS.en.serveSendOpen('codex') })
+  expect(press({ key: codex, type: 'send', text: '300', session: 'a1b2c3d4' })).toEqual({ type: 'refuse', note: STRINGS.en.serveSendOpen('codex') })
   const manual = keyOf(item => item.type === 'ask' && item.ask.project === 'docs-site')
-  expect(serveAction(items, { key: manual, type: 'tick', text: '', session: '' }, STRINGS.en).type).toBe('tick')
-  expect(serveAction(items, { key: manual, type: 'send', text: 'yes', session: '' }, STRINGS.en)).toEqual({ type: 'refuse', note: '' })
+  const manualItem = items.find(item => item.key === manual)
+  expect(press({ key: manual, type: 'tick', text: manualItem?.type === 'ask' ? manualItem.ask.text : '', session: '' }).type).toBe('tick')
+  expect(press({ key: manual, type: 'send', text: 'yes', session: '' })).toEqual({ type: 'refuse', note: '' })
   // An ended block can go to the archive; a working one cannot yet.
-  expect(serveAction(items, { key: grok, type: 'archive', text: '', session: '' }, STRINGS.en)).toMatchObject({ type: 'archive', title: 'Pick the cache' })
+  expect(press({ key: grok, type: 'archive', text: '', session: '' })).toMatchObject({ type: 'archive', title: 'Pick the cache' })
   const working = keyOf(item => item.type === 'row' && item.row.title === 'Dark mode for the settings page')
-  expect(serveAction(items, { key: working, type: 'archive', text: '', session: '' }, STRINGS.en)).toEqual({ type: 'refuse', note: STRINGS.en.archiveGone })
-  expect(serveAction(items, { key: grok, type: 'delete', text: '', session: '' }, STRINGS.en)).toEqual({ type: 'refuse', note: '' })
+  expect(press({ key: working, type: 'archive', text: '', session: '' })).toEqual({ type: 'refuse', note: STRINGS.en.archiveGone })
+  expect(press({ key: grok, type: 'delete', text: '', session: '' })).toEqual({ type: 'refuse', note: '' })
   expect(replyText('x'.repeat(5000)).length).toBe(4000)
 })
 

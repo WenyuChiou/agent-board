@@ -268,6 +268,26 @@ The last line moves the hooks in your other agents to the new name. `progress.md
 
 ## Troubleshooting
 
+- **A page action says the line changed.** Reload the board and inspect the
+  current task before trying again. A display title is not a recipient: actions
+  and drafts are bound to the source session/object and revision. Rejected sends
+  keep their draft; drafts for a changed target appear separately for copying,
+  never silently in the new target's reply box. Drafts live in this page's memory,
+  so copy them before closing or reloading it.
+- **A board upgrade says a message is still on its way.** Keep the current page
+  until the send finishes. The refused close does not start another server.
+  Concurrent new copies share one lifetime owner lease beside `progress-serve.json`.
+- **A previous send has an uncertain outcome.** An interrupted or failed send
+  leaves a per-session record in `progress-serve.json.sends/` (named beside your
+  selected progress file). Restarting does not replay it. Reconcile the actual
+  receiving session first; only after confirming that outcome may you manually
+  remove its matching record. Do not delete all claims, resend under another
+  board path, or treat an ordinary message as tool/merge approval. A crashed
+  server's dead-PID lease may be recovered, but a corrupt lease or abandoned
+  `.owner.recover` directory fails closed and needs inspection. This handles
+  process crashes; it does not promise power-loss durability or exactly-once
+  execution, authenticate another local writer, or coordinate different board files.
+
 - **The pane says this session has no Task tools.** Run the setup script, then start `claude` from a new terminal window. Sessions that never get the variable (the desktop app, git-bash on Windows) can still keep `progress.md` by hand.
 - **No pane on screen.** In the terminal's fullscreen layout the pane docks on the right on its own from 144 columns wide, and through `/progress` from 110. Under tmux or `CLAUDE_CODE_NO_FLICKER=0` it sits above the prompt. Cloud sessions draw no pane.
 - **PowerShell warns about the execution policy.** Your profile only runs where scripts may run: `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned`, then run the script again. Until then the variable stays in `settings.json`.

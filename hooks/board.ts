@@ -152,11 +152,22 @@ export type BoardItem =
   | { type: 'turn'; key: string; turn: PendingTurn }
 
 // `key` is the chosen line's, so the choice stays on it when lines above it come or go.
-export type BoardState = { selected: number; key: string | null; open: string | null; note: string }
+export type BoardExpected = { key: string; identity: string; revision: string }
+export const itemSource = (item: BoardItem) => item.type === 'ask' ? item.ask.source : item.type === 'row' ? item.row.source : undefined
+export const expectedItem = (item: BoardItem): BoardExpected | undefined => {
+  const source = itemSource(item)
+  return source === undefined ? undefined : { key: item.key, ...source }
+}
+export const matchesExpected = (items: readonly BoardItem[], expected: BoardExpected): boolean => {
+  const item = items.find(one => one.key === expected.key)
+  const source = item === undefined ? undefined : itemSource(item)
+  return source !== undefined && source.identity === expected.identity && source.revision === expected.revision
+}
+export type BoardState = { selected: number; key: string | null; open: string | null; note: string; expected?: BoardExpected }
 
 export type BoardAction =
-  | { type: 'tick'; ref: StepRef }
-  | { type: 'archive'; ref: TaskRef; title: string }
+  | { type: 'tick'; ref: StepRef; expected?: BoardExpected }
+  | { type: 'archive'; ref: TaskRef; title: string; expected?: BoardExpected }
   | { type: 'copy'; text: string }
   | { type: 'html' }
   | { type: 'quit' }
@@ -191,15 +202,16 @@ export const answersOf = (ask: WaitingItem, s: Strings): string[] =>
 // on screen, or on nothing if that line has gone. The script calls it each time it draws.
 export const pinned = (state: BoardState, items: readonly BoardItem[]): BoardState => {
   const at = chosen(state, items)
-  return state.key !== null && items[at]?.key !== state.key ? state : { ...state, selected: at, key: items[at]?.key ?? null }
+  const item = items[at]
+  return state.key !== null && item?.key !== state.key ? state : { ...state, selected: at, key: item?.key ?? null, expected: item === undefined ? undefined : expectedItem(item) }
 }
 
 export const boardKey = (state: BoardState, key: string, items: readonly BoardItem[], s: Strings = ZH_TW): { state: BoardState; action: BoardAction | null } => {
   const last = Math.max(0, items.length - 1)
   const at = chosen(state, items)
   const item = items[at]
-  const isGone = state.key !== null && item?.key !== state.key
-  const moved = (selected: number): { state: BoardState; action: null } => ({ state: { ...state, selected, key: items[selected]?.key ?? null, note: '' }, action: null })
+  const isGone = state.key !== null && (item?.key !== state.key || (state.expected !== undefined && !matchesExpected(items, state.expected)))
+  const moved = (selected: number): { state: BoardState; action: null } => ({ state: { ...state, selected, key: items[selected]?.key ?? null, expected: items[selected] === undefined ? undefined : expectedItem(items[selected]!), note: '' }, action: null })
   if (key === 'q' || key === '\u0003') return { state, action: { type: 'quit' } }
   if (key === 'up' || key === 'k') return moved(Math.max(0, at - 1))
   if (key === 'down' || key === 'j') return moved(Math.min(last, at + 1))
@@ -207,11 +219,11 @@ export const boardKey = (state: BoardState, key: string, items: readonly BoardIt
   if (item === undefined) return { state, action: null }
   // The line under the cursor changed since the screen was drawn: choose what is there now and
   // let the person look before a key acts on it.
-  if (isGone) return { state: { ...state, selected: at, key: item.key, note: s.boardLineChanged }, action: null }
+  if (isGone) return { state: { ...state, selected: at, key: item.key, expected: expectedItem(item), note: s.boardLineChanged }, action: null }
   if (key === 'enter' || key === ' ') return { state: { ...state, selected: at, key: item.key, open: state.open === item.key ? null : item.key, note: '' }, action: null }
   if (item.type === 'ask') {
     const { ask } = item
-    if (key === 'x' && ask.step !== null) return { state, action: { type: 'tick', ref: ask.step } }
+    if (key === 'x' && ask.step !== null) return { state, action: { type: 'tick', ref: ask.step, expected: expectedItem(item) } }
     if (key === 'c' && (ask.command ?? ask.link) !== null) return { state, action: { type: 'copy', text: plain((ask.command ?? ask.link) as string) } }
     const answers = answersOf(ask, s)
     const pick = ask.kind === 'confirm' ? ['y', 'n'].indexOf(key) : /^[1-9]$/.test(key) ? Number(key) - 1 : -1
@@ -220,8 +232,8 @@ export const boardKey = (state: BoardState, key: string, items: readonly BoardIt
   }
   if (item.type === 'row') {
     const { row } = item
-    if (key === 'x' && row.next !== null) return { state, action: { type: 'tick', ref: row.next } }
-    if (key === 'a' && row.archive !== null) return { state, action: { type: 'archive', ref: row.archive, title: row.title } }
+    if (key === 'x' && row.next !== null) return { state, action: { type: 'tick', ref: row.next, expected: expectedItem(item) } }
+    if (key === 'a' && row.archive !== null) return { state, action: { type: 'archive', ref: row.archive, title: row.title, expected: expectedItem(item) } }
     if (key === 'c' && row.resume !== null) return { state, action: { type: 'copy', text: plain(row.resume) } }
   }
 

@@ -1,6 +1,6 @@
 import type { AskKind } from './ask'
-import { answersOf, boardItems } from './board'
-import type { BoardItem, PendingTurn } from './board'
+import { answersOf, boardItems, expectedItem } from './board'
+import type { BoardExpected, BoardItem, PendingTurn } from './board'
 import { htmlLang, vars } from './dashboard'
 import { RELAY, ZH_TW } from './i18n'
 import type { Strings } from './i18n'
@@ -57,12 +57,14 @@ export const sendMode = (agent: string, target: AgentTarget | null): SendMode =>
 }
 
 // One send at a time per session: the key the server holds while a reply is on its way.
-export const sendKey = (target: AgentTarget): string => `${target.agent}:${target.session}`
+export const sendKey = (target: AgentTarget): string => `${target.agent}:${(target.resume ?? target.session).toLowerCase()}`
 
 export type ServeStep = { text: string; note: string; status: string; isCurrent: boolean }
 
 export type ServeAsk = {
   key: string
+  identity: string
+  revision: string
   project: string
   agent: string
   task: string
@@ -88,6 +90,8 @@ export type ServeAsk = {
 
 export type ServeRow = {
   key: string
+  identity: string
+  revision: string
   project: string
   title: string
   context: string
@@ -131,8 +135,8 @@ const infoOf = (mode: SendMode, agent: string, project: string, s: Strings): str
 }
 
 // The keys are the terminal board's (`boardItems`), so a press names the line it was on.
-export const serveModel = (view: View, pending: readonly PendingTurn[], s: Strings = ZH_TW, sending: ReadonlySet<string> = new Set()): ServeModel => {
-  const isSending = (target: AgentTarget | null): boolean => target !== null && sending.has(sendKey(target))
+export const serveModel = (view: View, pending: readonly PendingTurn[], s: Strings = ZH_TW, sending: ReadonlySet<string> = new Set(), uncertain: ReadonlySet<string> = new Set()): ServeModel => {
+  const isSending = (target: AgentTarget | null): boolean => target !== null && (sending.has(sendKey(target)) || uncertain.has(sendKey(target)))
   const asks: ServeAsk[] = []
   const groups = new Map<string, ServeRow[]>()
   const turns: ServeTurn[] = []
@@ -143,6 +147,8 @@ export const serveModel = (view: View, pending: readonly PendingTurn[], s: Strin
       const send = isManual ? 'none' : sendMode(ask.agent, ask.target)
       asks.push({
         key: item.key,
+        identity: ask.source?.identity ?? '',
+        revision: ask.source?.revision ?? '',
         project: ask.project,
         agent: ask.agent,
         task: ask.task,
@@ -159,7 +165,7 @@ export const serveModel = (view: View, pending: readonly PendingTurn[], s: Strin
         send,
         session: ask.target?.session ?? '',
         where: send === 'send' ? (ask.target?.dir ?? '') : '',
-        info: isManual ? '' : infoOf(send, ask.agent, ask.project, s),
+        info: ask.target !== null && uncertain.has(sendKey(ask.target)) ? s.serveSendUncertain(ask.agent) : isManual ? '' : infoOf(send, ask.agent, ask.project, s),
         isSending: isSending(ask.target),
       })
       continue
@@ -171,6 +177,8 @@ export const serveModel = (view: View, pending: readonly PendingTurn[], s: Strin
       groups.set(row.project, rows)
       rows.push({
         key: item.key,
+        identity: row.source?.identity ?? '',
+        revision: row.source?.revision ?? '',
         project: row.project,
         title: row.title,
         context: row.context,
@@ -191,7 +199,7 @@ export const serveModel = (view: View, pending: readonly PendingTurn[], s: Strin
         session: row.target?.session ?? '',
         where: send === 'send' ? (row.target?.dir ?? '') : '',
         // A row says why only when a reply could otherwise be expected here.
-        info: send === 'open' ? infoOf(send, row.agent, row.project, s) : '',
+        info: row.target !== null && uncertain.has(sendKey(row.target)) ? s.serveSendUncertain(row.agent) : send === 'open' ? infoOf(send, row.agent, row.project, s) : '',
         isSending: isSending(row.target),
       })
       continue
@@ -217,11 +225,11 @@ export const serveModel = (view: View, pending: readonly PendingTurn[], s: Strin
   }
 }
 
-export type ServeRequest = { key: string; type: string; text: string; session: string }
+export type ServeRequest = { key: string; type: string; text: string; session: string; identity?: string; revision?: string }
 
 export type ServeAction =
-  | { type: 'tick'; ref: StepRef }
-  | { type: 'archive'; ref: TaskRef; title: string }
+  | { type: 'tick'; ref: StepRef; expected: BoardExpected }
+  | { type: 'archive'; ref: TaskRef; title: string; expected: BoardExpected }
   | { type: 'send'; target: AgentTarget; text: string; title: string }
   | { type: 'refuse'; note: string }
 
@@ -241,14 +249,16 @@ export const replyText = (raw: string): string =>
 export const serveAction = (items: readonly BoardItem[], request: ServeRequest, s: Strings = ZH_TW): ServeAction => {
   const item = items.find(one => one.key === request.key)
   if (item === undefined) return { type: 'refuse', note: s.boardLineChanged }
+  const expected = expectedItem(item)
+  if (expected === undefined || request.identity !== expected.identity || request.revision !== expected.revision) return { type: 'refuse', note: s.boardLineChanged }
   if (request.type === 'tick') {
     const ref = item.type === 'ask' ? item.ask.step : item.type === 'row' ? item.row.next : null
     // A task keeps its key while its next step moves on: only the step the page showed is ticked.
-    if (ref !== null && item.type === 'row' && request.text !== ref.step) return { type: 'refuse', note: s.boardLineChanged }
-    return ref === null ? { type: 'refuse', note: s.boardTickGone } : { type: 'tick', ref }
+    if (ref !== null && request.text !== (item.type === 'ask' ? item.ask.text : ref.step)) return { type: 'refuse', note: s.boardLineChanged }
+    return ref === null ? { type: 'refuse', note: s.boardTickGone } : { type: 'tick', ref, expected }
   }
   if (request.type === 'archive') {
-    return item.type === 'row' && item.row.archive !== null ? { type: 'archive', ref: item.row.archive, title: item.row.title } : { type: 'refuse', note: s.archiveGone }
+    return item.type === 'row' && item.row.archive !== null ? { type: 'archive', ref: item.row.archive, title: item.row.title, expected } : { type: 'refuse', note: s.archiveGone }
   }
   if (request.type !== 'send') return { type: 'refuse', note: '' }
   const text = replyText(request.text)
@@ -312,6 +322,7 @@ const PAGE_WORDS = [
   'serveTickNext',
   'serveArchive',
   'serveCopy',
+  'serveDraftRetained',
   'serveCopyResume',
   'serveCopyCommand',
   'serveOpenLink',
@@ -437,9 +448,13 @@ const PAGE_SCRIPT = String.raw`
   var GLYPH = { done: '✓', doing: '▸', todo: '○', waiting: '●', running: '◐', blocked: '!', cancelled: '–' };
   var last = '';
   var opened = {};
+  var drafts = Object.create(null);
+  var draftTitles = Object.create(null);
+  var retainedCards = Object.create(null);
   var timer = null;
   var isClosed = false;
   var since = null;
+  var revision = '';
 
   function w(key, a, b) {
     return String(W[key]).split('\u0001').join(a === undefined ? '' : String(a)).split('\u0002').join(b === undefined ? '' : String(b));
@@ -489,26 +504,45 @@ const PAGE_SCRIPT = String.raw`
     node.addEventListener('click', onPress);
     return node;
   }
-  function act(key, type, text, waiting, session) {
+  function act(target, type, text, waiting) {
     say(waiting || '…');
-    return call('/api/act', { key: key, type: type, text: text || '', session: session || '' }).then(function (data) {
+    return call('/api/act', { key: target.key, type: type, text: text || '', session: target.session || '', identity: target.identity, revision: target.revision }).then(function (data) {
       say(data.note || '', data.ok ? 'done' : 'alert');
+      return data;
     }, function () {
       say(w('serveOffline'), 'alert');
-    }).then(function () { refresh(); });
+      return { ok: false };
+    }).then(function (data) { refresh(); return data; });
   }
-  function replyBox(key, placeholder, mode, agent, where, isSending, session) {
+  function replyBox(target, placeholder, mode, agent, where, isSending) {
     var box = el('div', 'reply');
     var input = el('textarea');
     input.rows = 2;
     input.placeholder = placeholder;
+    var key = JSON.stringify([target.identity || target.key, target.revision || '']);
+    draftTitles[key] = [target.project, target.task || target.title, agent].filter(Boolean).join(' · ');
     input.setAttribute('data-key', key);
+    input.addEventListener('input', function () { drafts[key] = input.value; });
     var go = mode === 'send'
       ? button(w('serveSend', agent), function () {
         var text = input.value.trim();
         if (!text) return;
-        input.value = '';
-        act(key, 'send', text, w('serveSending', agent), session);
+        act(target, 'send', text, w('serveSending', agent)).then(function (data) {
+          if (data.ok) {
+            // Polling can replace the submitted textarea before its acknowledgement.
+            // Clear only the accepted text, including its currently mounted copy.
+            board.querySelectorAll('textarea[data-key]').forEach(function (box) {
+              if (box.getAttribute('data-key') === key && box.value.trim() === text) box.value = '';
+            });
+            if (key in drafts && drafts[key].trim() === text) {
+              delete drafts[key];
+              if (retainedCards[key]) {
+                board.removeChild(retainedCards[key]);
+                delete retainedCards[key];
+              }
+            }
+          }
+        });
       }, 'primary')
       : button(w('serveCopy'), function () {
         var text = input.value.trim();
@@ -541,11 +575,11 @@ const PAGE_SCRIPT = String.raw`
     else if (ask.context) add(card, el('div', 'quiet', ask.context));
     if (ask.command) add(card, el('code', '', '$ ' + ask.command));
     var actions = el('div', 'actions');
-    if (ask.canTick) actions.appendChild(button(w('serveTickNext', ask.text), function () { act(ask.key, 'tick'); }, 'primary'));
+    if (ask.canTick) actions.appendChild(button(w('serveTickNext', ask.text), function () { act(ask, 'tick', ask.text); }, 'primary'));
     ask.answers.forEach(function (answer, index) {
       var send = ask.send === 'send';
       var node = button(answer, function () {
-        if (send) act(ask.key, 'send', answer, w('serveSending', ask.agent), ask.session);
+        if (send) act(ask, 'send', answer, w('serveSending', ask.agent));
         else copy(answer);
       }, index === 0 ? 'primary' : '');
       node.disabled = send && ask.isSending;
@@ -560,15 +594,15 @@ const PAGE_SCRIPT = String.raw`
       actions.appendChild(link);
     }
     if (actions.childNodes.length) add(card, actions);
-    if (!ask.canTick) add(card, replyBox(ask.key, w('serveReplyPlaceholder'), ask.send, ask.agent, ask.where, ask.isSending, ask.session));
+    if (!ask.canTick) add(card, replyBox(ask, w('serveReplyPlaceholder'), ask.send, ask.agent, ask.where, ask.isSending));
     if (ask.info) add(card, el('div', 'quiet small', ask.info));
     return card;
   }
   function rowCard(row) {
     var card = el('details', 'card row');
     var isWaiting = row.steps.some(function (step) { return step.status === 'waiting'; });
-    card.open = row.key in opened ? opened[row.key] : row.send === 'send' || isWaiting;
-    card.addEventListener('toggle', function () { opened[row.key] = card.open; });
+    card.open = row.identity in opened ? opened[row.identity] : row.send === 'send' || isWaiting;
+    card.addEventListener('toggle', function () { opened[row.identity] = card.open; });
     var summary = el('summary');
     add(summary, el('span', 'title', row.title));
     if (row.due) add(summary, el('span', 'due', '⚑ ' + row.due));
@@ -580,12 +614,12 @@ const PAGE_SCRIPT = String.raw`
     if (row.steps.length) add(body, stepsList(row.steps));
     if (row.handoff) add(body, el('div', 'quiet small', row.handoff));
     var actions = el('div', 'actions');
-    if (row.next) actions.appendChild(button(w('serveTickNext', row.next), function () { act(row.key, 'tick', row.next); }, 'primary'));
-    if (row.canArchive) actions.appendChild(button(w('serveArchive'), function () { act(row.key, 'archive'); }));
+    if (row.next) actions.appendChild(button(w('serveTickNext', row.next), function () { act(row, 'tick', row.next); }, 'primary'));
+    if (row.canArchive) actions.appendChild(button(w('serveArchive'), function () { act(row, 'archive'); }));
     if (row.resume) actions.appendChild(button(w('serveCopyResume'), function () { copy(row.resume); }));
     if (actions.childNodes.length) add(body, actions);
     if (row.resume) add(body, el('code', '', row.resume));
-    if (row.send === 'send') add(body, replyBox(row.key, w('serveMessagePlaceholder', row.agent), 'send', row.agent, row.where, row.isSending, row.session));
+    if (row.send === 'send') add(body, replyBox(row, w('serveMessagePlaceholder', row.agent), 'send', row.agent, row.where, row.isSending));
     if (row.info) add(body, el('div', 'quiet small', row.info));
     card.appendChild(body);
     return card;
@@ -594,14 +628,13 @@ const PAGE_SCRIPT = String.raw`
     var card = el('article', 'card turn');
     add(card, el('div', 'where', [turn.project, turn.agent].filter(Boolean).join(' · ')));
     add(card, el('div', turn.isQuestion ? 'q' : '', turn.text));
-    if (turn.isQuestion) add(card, replyBox(turn.key, w('serveReplyPlaceholder'), 'copy', turn.agent, '', false));
+    if (turn.isQuestion) add(card, replyBox({ key: JSON.stringify([turn.key, turn.text]) }, w('serveReplyPlaceholder'), 'copy', turn.agent, '', false));
     if (turn.info) add(card, el('div', 'quiet small', turn.info));
     return card;
   }
   function render(model) {
     // What is typed, and where the cursor is, outlast a redraw.
-    var kept = {};
-    board.querySelectorAll('textarea[data-key]').forEach(function (box) { kept[box.getAttribute('data-key')] = box.value; });
+    board.querySelectorAll('textarea[data-key]').forEach(function (box) { drafts[box.getAttribute('data-key')] = box.value; });
     var active = document.activeElement;
     var focus = active && active.getAttribute ? active.getAttribute('data-key') : null;
     var caret = focus ? [active.selectionStart, active.selectionEnd] : null;
@@ -629,17 +662,31 @@ const PAGE_SCRIPT = String.raw`
       });
       add(board, add(el('div', 'card'), done, add(el('div', 'actions'), button(w('archiveNow'), function () {
         say('…');
-        call('/api/tidy', {}).then(function (data) { say(data.note || '', data.ok ? 'done' : 'alert'); refresh(); }, function () { say(w('serveOffline'), 'alert'); });
+        call('/api/tidy', { revision: model.revision }).then(function (data) { say(data.note || '', data.ok ? 'done' : 'alert'); refresh(); }, function () { say(w('serveOffline'), 'alert'); });
       }))));
     }
     if (model.groups.length === 0 && model.asks.length === 0 && model.turns.length === 0 && model.recent.length === 0) add(board, el('div', 'quiet', w('empty')));
     board.querySelectorAll('textarea[data-key]').forEach(function (box) {
       var key = box.getAttribute('data-key');
-      if (key in kept) box.value = kept[key];
+      if (key in drafts) box.value = drafts[key];
       if (key === focus) {
         box.focus();
         if (caret) box.setSelectionRange(caret[0], caret[1]);
       }
+    });
+  }
+  function retainedDrafts() {
+    retainedCards = Object.create(null);
+    var present = Object.create(null);
+    board.querySelectorAll('textarea[data-key]').forEach(function (box) { present[box.getAttribute('data-key')] = true; });
+    Object.keys(drafts).forEach(function (key) {
+      if (!drafts[key].trim() || present[key]) return;
+      var saved = el('textarea');
+      saved.value = drafts[key];
+      saved.readOnly = true;
+      retainedCards[key] = add(el('article', 'card'), el('b', '', w('serveDraftRetained', draftTitles[key] || '')), saved,
+        button(w('serveCopy'), function () { copy(drafts[key]); }));
+      add(board, retainedCards[key]);
     });
   }
   function refresh() {
@@ -647,8 +694,9 @@ const PAGE_SCRIPT = String.raw`
     clearTimeout(timer);
     call('/api/board').then(function (data) {
       if (!data.ok || !data.model) { say(w('serveOffline'), 'alert'); return; }
+      revision = data.model.revision;
       var text = JSON.stringify(data.model);
-      if (text !== last) { last = text; render(data.model); }
+      if (text !== last) { last = text; render(data.model); retainedDrafts(); }
       // A reply runs in the background; its answer comes with the board once the agent is done.
       if (since === null) since = data.now;
       (data.replies || []).forEach(function (reply) {
@@ -676,7 +724,7 @@ const PAGE_SCRIPT = String.raw`
   document.getElementById('paste-go').addEventListener('click', function () {
     var box = document.getElementById('paste');
     if (!box.value.trim()) return;
-    call('/api/paste', { text: box.value }).then(function (data) {
+    call('/api/paste', { text: box.value, revision: revision }).then(function (data) {
       say(data.note || '', data.ok ? 'done' : 'alert');
       if (data.ok) box.value = '';
       refresh();

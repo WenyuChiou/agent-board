@@ -1,5 +1,25 @@
 # Changelog
 
+## Unreleased
+
+- Bind browser actions and reply drafts to a source identity and expected
+  revision, and recheck writes against that source. Stale targets conflict;
+  rejected replies keep their draft, and a changed target shows the old draft
+  separately for copying. Terminal selections also keep their source revision.
+  Tests: `stale archive, reply and manual question requests cannot act on same-title replacements`
+  and `page drafts stay with the same source revision and survive a rejected send`.
+  Delayed acknowledgements clear the accepted draft after a redraw while preserving
+  later edits; terminal keys validate the task last drawn. Tests:
+  `a delayed send acknowledgement clears accepted text after redraw and preserves later edits`
+  and `terminal watch validates the last drawn task before acting on a same-key replacement`.
+- Hold one server lease per board across concurrent startup and upgrades. A
+  busy older server's refused close never launches a second sender. Reserve a
+  durable per-session send claim before spawning; an interrupted or failed send
+  stays uncertain across restart and is not replayed automatically. Tests:
+  `a busy older server refuses upgrade without publishing another sender`,
+  `simultaneous cold starters publish one server and reuse the winning page`,
+  and `an interrupted send remains uncertain after its server is restarted and cannot be replayed`.
+
 ## 0.19.2 — 2026-10-17
 
 Waiting on you lists only questions (#48).

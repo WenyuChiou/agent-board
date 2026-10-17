@@ -7,13 +7,15 @@
 // progress file and language the Claude Code session uses set on its first line. `--keys
 // "down x"` plays keys without a terminal and prints the board after them, for tests and checks.
 import { spawn, spawnSync } from 'node:child_process'
-import { closeSync, openSync, readdirSync, readFileSync, readSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
+import { createHash } from 'node:crypto'
+import { closeSync, existsSync, openSync, readdirSync, readFileSync, readSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { basename, dirname, join } from 'node:path'
 import { mergeBlock, takeArchivable, takeManualDone, takeTask, setManualStep } from '../hooks/blocks'
 import type { PasteProblem } from '../hooks/blocks'
 import { startServer } from './board-serve'
-import { boardKey, boardScreen, boardText, emptyBoardState, peekInbox, boardItems, pinned } from '../hooks/board'
+import { ownServer, processLives } from './board-owner'
+import { boardKey, boardScreen, boardText, emptyBoardState, peekInbox, boardItems, pinned, matchesExpected } from '../hooks/board'
 import type { BoardAction, BoardState } from '../hooks/board'
 import { LOG_TAIL } from '../hooks/inbox'
 import { dashboardHtml } from '../hooks/dashboard'
@@ -95,9 +97,10 @@ const pending = () => {
   return peekInbox(files, readLog)
 }
 
-const view = () => {
+const revisionOf = (text: string): string => createHash('sha256').update(text).digest('hex')
+const view = (text = read(path)) => {
   const now = Date.now()
-  return buildView(parseProgress(read(path)), [basename(process.cwd())], null, now, countDay(read(journalPath(path, now)), now), {}, s)
+  return buildView(parseProgress(text), [basename(process.cwd())], null, now, countDay(read(journalPath(path, now)), now), {}, s)
 }
 
 const pad = (n: number): string => String(n).padStart(2, '0')
@@ -206,20 +209,22 @@ const act = (action: BoardAction): string => {
     // Found once is found: a retry after another session's write may meet the step already
     // ticked by this press.
     let isFound = false
+    let isChanged = false
     const wrote = rewrite(path, text => {
+      if (action.expected !== undefined && !matchesExpected(boardItems(buildView(parseProgress(text), [], null, now, 0, {}, s), []), action.expected)) { isChanged = true; return text }
       const after = setManualStep(text, action.ref, 'x')
       if (after !== text) isFound = true
       return after
     })
     if (wrote === null) return s.boardWriteFailed
-    if (!isFound) return s.boardTickGone
+    if (!isFound) return isChanged ? s.boardLineChanged : s.boardTickGone
     // Once, even when another write to the journal makes it try again.
     const line = journalLine({ project: action.ref.project, task: action.ref.title, step: action.ref.step }, now, s)
     rewrite(journalPath(path, now), text => (text.includes(line) ? text : appendJournal(text, [line], s)))
     return s.boardTicked(action.ref.step)
   }
   if (action.type === 'archive') {
-    const count = archiveOut(text => takeTask(text, action.ref, now, s), now)
+    const count = archiveOut(text => action.expected !== undefined && !matchesExpected(boardItems(buildView(parseProgress(text), [], null, now, 0, {}, s), []), action.expected) ? null : takeTask(text, action.ref, now, s), now)
     if (count === null) return s.boardWriteFailed
     if (count === 0) return s.archiveGone
     return s.archivedOne(action.title)
@@ -230,9 +235,11 @@ const act = (action: BoardAction): string => {
 
 // Every finished task out now, the way `/progress tidy` and the pane's 現在封存 do it: done
 // blocks and finished hand-kept tasks at once, a stopped session's block after its three days.
-const tidy = (): string => {
+const tidy = (expectedRevision?: string): string => {
   const now = Date.now()
+  let isChanged = false
   const count = archiveOut(text => {
+    if (expectedRevision !== undefined && revisionOf(text) !== expectedRevision) { isChanged = true; return null }
     const blocks = takeArchivable(text, now, undefined, s, true)
     // Asked for now, a finished hand-kept task counts as seen done a day ago.
     const manual = takeManualDone(blocks.text, now, () => now - DAY, s)
@@ -240,6 +247,7 @@ const tidy = (): string => {
     return entries.length === 0 ? null : { text: manual.text, entries }
   }, now)
   if (count === null) return s.boardWriteFailed
+  if (isChanged && count === 0) return s.boardLineChanged
   return count === 0 ? s.tidyNothing : s.tidyMoved(count)
 }
 
@@ -268,9 +276,11 @@ const pin = (state: BoardState): BoardState => pinned(state, boardItems(view(), 
 
 // A block pasted into the page from a web chat, merged the way the remote reporter's merge
 // does: read, change only that block, write, read back.
-const paste = (text: string): { isAdded: boolean; note: string } => {
+const paste = (text: string, expectedRevision?: string): { isAdded: boolean; note: string } => {
   const found: { problem: PasteProblem | null; title: string } = { problem: null, title: '' }
+  let isChanged = false
   const wrote = rewrite(path, before => {
+    if (expectedRevision !== undefined && revisionOf(before) !== expectedRevision) { isChanged = true; return null }
     const merged = mergeBlock(before, text, Date.now(), s)
     if ('problem' in merged) {
       found.problem = merged.problem
@@ -284,6 +294,7 @@ const paste = (text: string): { isAdded: boolean; note: string } => {
     const why = { noBlock: s.pasteNoBlock, mixed: s.pasteMixed, badBlock: s.pasteBadBlock, noProject: s.pasteNoProject, notYours: s.pasteNotYours }[found.problem]
     return { isAdded: false, note: s.servePasteRefused(why) }
   }
+  if (isChanged) return { isAdded: false, note: s.boardLineChanged }
   if (wrote === null) return { isAdded: false, note: s.boardWriteFailed }
   return { isAdded: true, note: s.servePasted(found.title) }
 }
@@ -327,11 +338,16 @@ const ping = async (running: Running): Promise<Record<string, unknown> | null> =
 }
 
 const serveChild = (): void => {
+  const release = ownServer(serveFile + '.owner')
+  if (release === null) { process.exitCode = 1; return }
+  process.once('exit', release)
   startServer({
     s,
     port: Number(flag('--port') ?? 0) || 0,
     ping: { path, built },
+    sendDirectory: serveFile + '.sends',
     view,
+    snapshot: () => { const text = read(path); return { view: view(text), revision: revisionOf(text) } },
     pending,
     act,
     tidy,
@@ -374,12 +390,28 @@ const serveBoard = async (): Promise<void> => {
     if (!args.includes('--no-open') && /^http:\/\/127\.0\.0\.1:\d+\/\?t=[\w-]+$/.test(url)) await new Promise<void>(done => openInBrowser(url, () => done()))
   }
   const running = readRunning()
+  if (running === null && existsSync(serveFile)) {
+    process.stdout.write(`\n${s.serveFailed(s.serveOffline)}\n`)
+    process.exitCode = 1
+    return
+  }
   const answer = running === null ? null : await ping(running)
   if (running !== null && answer !== null && answer.path === path && answer.built === built) return show(running.url)
   // A page from an older copy of this script is closed (it refuses while a reply is on its way,
   // and then stops by itself once idle).
   if (running !== null && answer !== null) {
-    await fetch(`http://127.0.0.1:${running.port}/api/close`, { method: 'POST', headers: { 'x-board-token': tokenOf(running.url), 'content-type': 'application/json' }, body: '{}', signal: AbortSignal.timeout(1500) }).catch(() => undefined)
+    const closed = answer.path !== path ? null : await fetch(`http://127.0.0.1:${running.port}/api/close`, { method: 'POST', headers: { 'x-board-token': tokenOf(running.url), 'content-type': 'application/json' }, body: '{}', signal: AbortSignal.timeout(1500) }).catch(() => null)
+    if (closed === null || !closed.ok) {
+      process.stdout.write(`\n${closed?.status === 409 ? s.serveCloseBusy : s.serveFailed(s.serveOffline)}\n`)
+      process.exitCode = 1
+      return
+    }
+    for (let attempt = 0; attempt < 20 && await ping(running) !== null; attempt += 1) await new Promise(done => setTimeout(done, 50))
+    if (await ping(running) !== null) { process.stdout.write(`\n${s.serveFailed(s.serveOffline)}\n`); process.exitCode = 1; return }
+  } else if (running !== null && (processLives(running.pid) || !existsSync(serveFile + '.owner'))) {
+    process.stdout.write(`\n${s.serveFailed(s.serveOffline)}\n`)
+    process.exitCode = 1
+    return
   }
   const rest = ['--lang', '--port'].flatMap(name => {
     const value = flag(name)
@@ -407,7 +439,16 @@ const serveBoard = async (): Promise<void> => {
   child.stdout?.destroy()
   child.unref()
   if (url === null) {
+    // A concurrent child may have won the lifetime lease. Reuse its published
+    // page rather than launch another sender or overwrite its address.
+    for (let attempt = 0; attempt < 30; attempt += 1) {
+      const winner = readRunning()
+      const seen = winner === null ? null : await ping(winner)
+      if (winner !== null && seen?.path === path && seen.built === built) return show(winner.url)
+      await new Promise(done => setTimeout(done, 50))
+    }
     process.stdout.write(`\n${s.serveFailed(s.serveOffline)}\n`)
+    process.exitCode = 1
     return
   }
   await show(url)
@@ -447,7 +488,7 @@ if (args.includes('--serve-child')) {
     // Keys that came together (a held arrow) each act on the line the one before left chosen;
     // after a tick or an archive the rest wait, so no key lands on a line not yet drawn.
     for (const key of keysIn(chunk)) {
-      const pressed = press(pin(state), key)
+      const pressed = press(state, key)
       state = pressed.state
       if (pressed.isQuit) quit()
       if (pressed.isHtml) {

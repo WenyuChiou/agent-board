@@ -356,6 +356,8 @@ export const ZH_TW = {
   serveSent: (agent: string, reply: string): string => (reply === '' ? `已傳給 ${agent}。` : `已傳給 ${agent}，它回：${reply}`),
   serveSendFailed: (agent: string, why: string): string => `沒傳到 ${agent}：${why}`,
   serveSendBusy: (agent: string): string => `正在傳另一句給這個 ${agent} 對話，等它回完再傳。`,
+  serveSendUncertain: (agent: string): string => `傳給 ${agent} 的上一句結果不明。請先向收件對話確認，勿重傳；確認後才可人工清除對應的 .sends 記錄。`,
+  serveDraftRetained: (title: string): string => `目標已變更，保留未送出的草稿：${title}`,
   serveSendOpen: (agent: string): string => `這個 ${agent} 對話還開著，請到它的視窗回覆（兩邊同時寫同一個對話會亂掉）；答案可以先複製。`,
   serveSendNone: (agent: string): string => `${agent} 收不到這裡傳的話：複製後貼到它的對話。`,
   serveSendTimeout: '等了 10 分鐘還沒回，先停了。',

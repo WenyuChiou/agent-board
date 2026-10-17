@@ -318,6 +318,8 @@ export const ZH_CN: Strings = {
   serveSent: (agent: string, reply: string): string => (reply === '' ? `已发给 ${agent}。` : `已发给 ${agent}，它回：${reply}`),
   serveSendFailed: (agent: string, why: string): string => `没发到 ${agent}：${why}`,
   serveSendBusy: (agent: string): string => `正在发另一句给这个 ${agent} 对话，等它回完再发。`,
+  serveSendUncertain: (agent: string): string => `发给 ${agent} 的上一句结果不明。请先向接收对话确认，勿重发；确认后才可手动清除对应的 .sends 记录。`,
+  serveDraftRetained: (title: string): string => `目标已变更，保留未发送的草稿：${title}`,
   serveSendOpen: (agent: string): string => `这个 ${agent} 对话还开着，请到它的窗口回复（两边同时写同一个对话会乱掉）；答案可以先复制。`,
   serveSendNone: (agent: string): string => `${agent} 收不到这里发的话：复制后贴到它的对话。`,
   serveSendTimeout: '等了 10 分钟还没回，先停了。',

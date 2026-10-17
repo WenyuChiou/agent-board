@@ -46,6 +46,15 @@ export type StepRef = { project: string; title: string; step: string; line: numb
 // heading line, checked against the title so a task that moved is still found once.
 export type TaskRef = { project: string; title: string; line: number; session: string | null }
 
+export type SourceRef = { identity: string; revision: string }
+
+// Display keys are labels, not ownership. Keep the source snapshot separate so a
+// same-title replacement or a changed question cannot inherit a pending press.
+const sourceOf = (project: string, task: ProgressTask, step: number | null = null): SourceRef => ({
+  identity: JSON.stringify([project, task.auto === null ? ['manual', task.line, task.title] : ['session', task.auto.agent, task.auto.session, task.auto.resume, task.auto.dir], step]),
+  revision: JSON.stringify(task),
+})
+
 // Another agent's session, as its block names it: its block id, the session id its hook gave
 // (`resume=`), the folder it ran in (`dir=`), and whether it has closed (`state=ended`). The
 // board's page can send a reply into a closed Grok Build or Codex session; the pane does not.
@@ -58,6 +67,7 @@ const targetOf = (auto: ProgressAuto | null): AgentTarget | null =>
 
 export type WaitingItem = {
   key: string
+  source?: SourceRef
   project: string
   // The task it belongs to, its background, and what it needs from the person.
   task: string
@@ -91,6 +101,7 @@ export type Focus =
 
 export type TaskRow = {
   key: string
+  source?: SourceRef
   project: string
   title: string
   context: string
@@ -381,6 +392,7 @@ const ownWaiting = (mine: ProgressMirror): WaitingItem[] => {
     .filter(task => task.status !== 'completed' && task.waiting === 'you')
     .map(task => ({
       key: `mine::${task.id}`,
+      source: { identity: JSON.stringify([mine.sessionId, task.id]), revision: JSON.stringify(task) },
       project: mine.project,
       task: title,
       context,
@@ -448,6 +460,7 @@ export const buildView = (
         const parts = splitNote(step.text)
         waiting.push({
           key: `${key}::${index}`,
+          source: sourceOf(name, task, index),
           project: name,
           task: title,
           context,
@@ -483,6 +496,7 @@ export const buildView = (
       const open = task.steps[currentStepIndex(task)]
       const row: TaskRow = {
         key,
+        source: sourceOf(name, task),
         project: name,
         title,
         context,

@@ -17,19 +17,22 @@ import type { Strings } from '../hooks/i18n'
 import { pagePolicy, requestProblem, sendKey, sendPlan, serveAction, serveModel, servePage } from '../hooks/serve'
 import type { SendPlan } from '../hooks/serve'
 import type { AgentTarget, View } from '../hooks/view'
+import { sendClaims } from './board-owner'
 
 export type ServeOptions = {
   s: Strings
   port: number
   // What the server answers a second `--serve` with, so it can tell it is the same board.
   ping: Record<string, unknown>
+  sendDirectory: string
   view: () => View
+  snapshot: () => { view: View; revision: string }
   pending: () => PendingTurn[]
   // A tick or an archive, written the way the terminal board writes one: the line to show.
   act: (action: BoardAction) => string
   // Every finished task to the archive now: the line to show.
-  tidy: () => string
-  paste: (text: string) => { isAdded: boolean; note: string }
+  tidy: (revision: string) => string
+  paste: (text: string, revision: string) => { isAdded: boolean; note: string }
   // False when the server cannot be found again (its address file could not be written): it
   // stops then, rather than run on where no one can reach it.
   onReady: (url: string, port: number) => boolean
@@ -211,6 +214,7 @@ const run = (plan: SendPlan, s: Strings, label: string): Promise<Result> =>
   })
 
 export const startServer = (o: ServeOptions): void => {
+  const claims = sendClaims(o.sendDirectory)
   const token = randomBytes(24).toString('base64url')
   const sending = new Set<string>()
   // The last answer of each session the page sent to, until the next send to that session. One
@@ -236,12 +240,16 @@ export const startServer = (o: ServeOptions): void => {
     if (plan.cwd !== null && !isFolder(plan.cwd)) return { status: 409, note: o.s.serveSendFailed(target.agent, plan.cwd) }
     const key = sendKey(target)
     if (sending.has(key)) return { status: 409, note: o.s.serveSendBusy(target.agent) }
+    let complete: (() => boolean) | null
+    try { complete = claims.reserve(key) } catch { return { status: 409, note: o.s.serveSendUncertain(target.agent) } }
+    if (complete === null) return { status: 409, note: o.s.serveSendUncertain(target.agent) }
+    const finishClaim = complete
     sending.add(key)
     replies.delete(key)
     const label = `${target.agent} · ${title}`
     run(plan, o.s, label)
-      .then(result => replies.set(key, { ...result, at: Date.now() }))
-      .catch((error: unknown) => replies.set(key, { ok: false, note: o.s.serveSendFailed(label, String(error)), at: Date.now() }))
+      .then(result => replies.set(key, result.ok && finishClaim() ? { ...result, at: Date.now() } : { ok: false, note: o.s.serveSendUncertain(label), at: Date.now() }))
+      .catch(() => replies.set(key, { ok: false, note: o.s.serveSendUncertain(label), at: Date.now() }))
       .finally(() => sending.delete(key))
     return { status: 202, note: o.s.serveQueued(label) }
   }
@@ -270,7 +278,15 @@ export const startServer = (o: ServeOptions): void => {
     }
     if (req.method === 'GET') {
       if (url.pathname === '/api/board') {
-        return json(res, 200, { model: serveModel(o.view(), o.pending(), o.s, sending), replies: [...replies.values()], now: Date.now() })
+        const snapshot = o.snapshot()
+        const view = snapshot.view
+        const pending = o.pending()
+        const uncertain = new Set<string>()
+        for (const item of boardItems(view, pending)) {
+          const target = item.type === 'ask' ? item.ask.target : item.type === 'row' ? item.row.target : null
+          if (target !== null && !sending.has(sendKey(target)) && claims.has(sendKey(target))) uncertain.add(sendKey(target))
+        }
+        return json(res, 200, { model: { ...serveModel(view, pending, o.s, sending, uncertain), revision: snapshot.revision }, replies: [...replies.values()], now: Date.now() })
       }
       if (url.pathname === '/api/ping') return json(res, 200, { ...o.ping, sending: sending.size })
       return json(res, 404, {})
@@ -278,22 +294,24 @@ export const startServer = (o: ServeOptions): void => {
     const body = await readBody(req)
     if (body === null) return json(res, 400, {})
     if (url.pathname === '/api/act') {
-      const action = serveAction(boardItems(o.view(), o.pending()), { key: text(body.key), type: text(body.type), text: text(body.text), session: text(body.session) }, o.s)
+      const action = serveAction(boardItems(o.view(), o.pending()), { key: text(body.key), type: text(body.type), text: text(body.text), session: text(body.session), identity: text(body.identity), revision: text(body.revision) }, o.s)
       if (action.type === 'refuse') return json(res, 409, { note: action.note })
       if (action.type === 'send') {
         const sent = send(action.target, action.text, action.title)
         return json(res, sent.status, { note: sent.note })
       }
       const note = o.act(action)
-      const isDone = ![o.s.boardWriteFailed, o.s.boardTickGone, o.s.archiveGone].includes(note)
+      const isDone = ![o.s.boardWriteFailed, o.s.boardTickGone, o.s.archiveGone, o.s.boardLineChanged].includes(note)
       return json(res, isDone ? 200 : 409, { note })
     }
     if (url.pathname === '/api/tidy') {
-      const note = o.tidy()
-      return json(res, note === o.s.boardWriteFailed ? 409 : 200, { note })
+      if (text(body.revision) === '') return json(res, 409, { note: o.s.boardLineChanged })
+      const note = o.tidy(text(body.revision))
+      return json(res, [o.s.boardWriteFailed, o.s.boardLineChanged].includes(note) ? 409 : 200, { note })
     }
     if (url.pathname === '/api/paste') {
-      const pasted = o.paste(text(body.text))
+      if (text(body.revision) === '') return json(res, 409, { note: o.s.boardLineChanged })
+      const pasted = o.paste(text(body.text), text(body.revision))
       return json(res, pasted.isAdded ? 200 : 409, { note: pasted.note })
     }
     if (url.pathname === '/api/close') {
