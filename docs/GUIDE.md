@@ -1,9 +1,5 @@
 # Guide
 
-For explicit Codex/dot reports and a cooperative local command queue, see
-[Local exchange](LOCAL-EXCHANGE.md). It describes session binding, receipts,
-capability failures and the limits of sending to a running Codex session.
-
 English · [繁體中文](GUIDE.zh-TW.md) · [简体中文](GUIDE.zh-CN.md) · [Back to the README](../README.md)
 
 ## Get started
@@ -194,6 +190,8 @@ The hook runs `~/.claude/progress-report.sh` (Windows: `progress-report.ps1`), w
 Progress shows only while some Claude Code session is open. Turns that arrive while none is open wait in the inbox, and the reporter clears files older than two days.
 
 **Any other agent** (Aider, GitHub Copilot, Windsurf…): paste the section **"Report your progress to the progress pane"** from [AGENTS.md](../AGENTS.md) into its instruction file. It then writes its own block. `setup.sh --agents` (`setup.ps1 -Agents auto`) does this for Codex, Gemini CLI and OpenCode when they are not connected.
+
+**dot, and explicit reports from Codex:** the opt-in [local exchange](LOCAL-EXCHANGE.md) writes a standalone report file and keeps a local message queue with receipts; it never writes your `progress.md`.
 
 ## How it keeps itself tidy
 

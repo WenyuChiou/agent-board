@@ -1,7 +1,8 @@
 # Local exchange for Codex and dot
 
 This optional interface lets an agent report selected progress and receive an
-explicit message through local files. It requires Node 24 and a cooperating
+explicit message through local files. It requires Node 22.18 or newer (or
+Node 24), which loads the contract's `.ts` file directly, and a cooperating
 consumer. It does not install hooks, change global configuration, discover
 sessions, export conversations or start a model. Existing turn reporting and
 the Claude Code pane continue to work as before.
@@ -16,6 +17,14 @@ the Claude Code pane continue to work as before.
 `native: unsupported` in the CLI status is intentional. A directory binding
 declares a cooperating recipient; it does not prove an app is connected.
 The board buttons are not wired to this queue in this first implementation.
+
+Codex's own `Stop` hook (set up by `/progress connect`) already reports its
+completed turns to the board, and the pane's reply buttons submit to the
+current Claude Code session, not to a running Codex session. dot has no
+native connector in this plugin; this exchange is its only route. The Codex
+adapter below accepts an owner connection that the host supplies and
+verifies, and only steers a specified active turn: a new app-server or a
+thread id alone cannot control an existing CLI or Desktop session.
 
 ## Try a disposable exchange
 
@@ -55,11 +64,17 @@ Only `project`, `title`, `context`, `state`, `steps`, and optional `language`
 (`en`, `zh-TW`, `zh-CN`; default `en`) are accepted. The background label uses
 the board's existing language tables. Unknown
 fields, including transcript paths, are rejected. Text fields are single-line;
-states and step marks use the existing [progress format](FORMAT.md). Reports
-replace only this exchange's `progress.md`. They never alter the user's
-shared progress file. A deliberately configured board can read this file via
-its existing `CLAUDE_PROGRESS_FILE` option; configuring a live board is a
-separate opt-in step. No new Markdown syntax or resume command is required.
+states and step marks use the existing [progress format](FORMAT.md). No new
+Markdown syntax or resume command is required.
+
+The exchange's `progress.md` is standalone. It is never the board's file: do
+not point `CLAUDE_PROGRESS_FILE` at it, and do not point the exchange at
+`~/.claude/progress.md`. Each `report` rewrites the whole file with this
+binding's one block, so `report` refuses with `NOT_EXCHANGE_FILE` when the
+file holds anything else (another block, a hand-kept task, a second project).
+Showing an exchange report on the real board is a separate step that merges
+the block into the board's file under its own markers; PR #19 proposes a
+merge script for that. Until then the report stays in the exchange folder.
 
 ## Messages and receipts
 
@@ -94,7 +109,11 @@ not that a model completed a task. A timeout, crash or lost acknowledgement
 remains `uncertain`; reconcile with the receiver before doing anything else.
 Never create a fresh id merely to resend an uncertain command. Interrupted
 writes can leave `.lock` directories; inspect and reconcile them rather than
-deleting them automatically. This is conservative process-crash handling,
+deleting them automatically. `status` lists them under `locks`, and
+`enqueue` on a command whose lock has no file behind it fails with
+`LOCK_HELD` and the folder's path. If a crash falls between writing the
+terminal decision (`receipts/ID.json.decision`) and the receipt, the decision
+wins: `status` reports it and repairs the receipt. This is conservative process-crash handling,
 not a distributed transaction or a guarantee across power loss.
 
 Use a private, local directory shared only with trusted cooperating processes.
@@ -116,9 +135,15 @@ the host's timeout. A boolean read from a binding file, a new app-server,
 `codex resume`, a transcript path or terminal injection is insufficient.
 
 The transport advertises `methods` and implements `request(method, params)`
-returning the decoded JSON-RPC result. The adapter checks for
-`thread/loaded/list` and `turn/steer`, enumerates loaded threads on the same
-connection and checks again immediately before sending. Set the command's
+returning the decoded JSON-RPC result. Before it claims the command, the
+adapter runs the verifier, checks for `thread/loaded/list` and `turn/steer`,
+and enumerates loaded threads on the same connection. If any of that fails it
+returns `not-sent` and the command stays queued, so a thread that loads later
+can still receive it. After the claim it checks again immediately before
+sending. A failure after the claim but before the steer request goes out
+(the owner went away, or the command has no active turn) is acked
+`rejected`, a terminal receipt. Only a failure during or after the steer
+request, or while writing the receipt, leaves `uncertain`. Set the command's
 `turn` to the active turn id obtained by that host. It sends only:
 
 ```json
@@ -127,8 +152,9 @@ connection and checks again immediately before sending. Set the command's
 
 The expected-turn precondition protects against a turn changing between
 inspection and delivery. Idle delivery is unsupported: `turn/start` may steer
-an active turn after a race. Requests time out after five seconds and leave
-the receipt uncertain; the underlying request might still complete.
+an active turn after a race. Requests time out after five seconds. A steer
+request that times out leaves the receipt uncertain, since the request might
+still complete.
 
 The installed Codex 0.160.1 offline help/schema advertises these protocol
 methods and the required `expectedTurnId`. Schema generation timed out after
@@ -146,6 +172,7 @@ node --test tests/exchange.test.mjs
 The tests create and remove synthetic directories. They cover reporting,
 wrong targets, duplicate ids, competing consumers, immutable receipts,
 uncertain delivery and a real CLI file round trip. No test calls a model.
+`claude plugin test .` does not run this file; run it with Node 22.18+ or 24.
 
 To validate a live end-to-end integration, explicitly authorize a dedicated
 synthetic recipient and message, establish its supported owner connection

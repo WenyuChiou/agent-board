@@ -200,6 +200,8 @@ hook 运行的是 `/progress connect` 写好的 `~/.claude/progress-report.sh`�
 
 **其他 agent**（Aider、GitHub Copilot、Windsurf…）：把 [AGENTS.md](../AGENTS.md) 最后那段 **「Report your progress to the progress pane」** 贴进它的说明文件，它就会自己写一块。`setup.sh --agents`（`setup.ps1 -Agents auto`）会给还没接上的 Codex、Gemini CLI、OpenCode 做这件事。
 
+**dot，以及 Codex 的明确汇报**：自行选用的[本地交换](LOCAL-EXCHANGE.md)会写一个独立的汇报文件，并在本地保留一个带回执的消息队列；它不会写你的 `progress.md`。
+
 ## 它怎么保持整齐
 
 | 项目 | 时机 |

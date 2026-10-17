@@ -30,6 +30,7 @@ You have Claude Code on one project, Codex on another, Gemini on a third. Twenty
 | <img src="docs/images/agents/hermes-agent.svg" width="24" alt=""> | **Hermes Agent** | `post_llm_call` shell hook | `/progress connect`, then answer `y` the first time Hermes asks | ✅ 0.19.0 |
 | <img src="docs/images/agents/cursor.svg" width="24" alt=""> | **Cursor** | `afterAgentResponse` hook | `/progress connect` | Built from Cursor's docs |
 | <img src="docs/images/agents/muse-code.svg" width="24" alt=""> | **Muse Code** | `Stop` hook | `/progress connect` | Built from Muse's docs |
+| | **dot** | Local exchange (opt-in) | See [docs/LOCAL-EXCHANGE.md](docs/LOCAL-EXCHANGE.md) | File contract only |
 | | **Any other agent** (Aider, Copilot, Windsurf…) | Writes its own block | Paste one section of [AGENTS.md](AGENTS.md) into its instructions | |
 
 "Tested live" means the real CLI ran a turn, its hook fired, and the pane drew the right block from it. Those payloads are kept as tests.
@@ -106,19 +107,6 @@ Press **Legend** at the bottom of the pane to see this list there.
 <img alt="Claude Code sessions, other agents through their hooks, and you all write one Markdown file, progress.md; the pane, progress.html, the archive and the status line read it." src="docs/images/flow-en.svg" width="100%">
 
 Each connected agent's hook saves its last reply into `~/.claude/progress-inbox/`. An open Claude Code session picks it up within five seconds, sums the turn up, and writes it into that agent's own block in `progress.md`. The format is in [docs/FORMAT.md](docs/FORMAT.md).
-
-### Codex and dot
-
-Codex's hook reports completed turns to the board. Reply buttons submit to the
-current Claude Code session; they do not send to an existing Codex session.
-dot has no native connector in this plugin.
-
-For explicit, minimal reporting from either agent, the optional
-[local exchange](docs/LOCAL-EXCHANGE.md) provides a Node 24 CLI, session bindings,
-message claims and delivery receipts. It needs a cooperating receiver. Its Codex
-adapter accepts an owner connection supplied and verified by the host, and only
-steers a specified active turn. A new app-server or a thread id alone cannot
-control an existing CLI/Desktop session. Live native delivery is not verified.
 
 ## FAQ
 

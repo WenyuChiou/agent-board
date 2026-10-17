@@ -30,6 +30,7 @@ Claude Code 外掛，也跟得上 Codex、Gemini CLI、Cursor、OpenCode、Grok 
 | <img src="docs/images/agents/hermes-agent.svg" width="24" alt=""> | **Hermes Agent** | `post_llm_call` shell hook | `/progress connect`，Hermes 第一次問時回答 `y` | ✅ 0.19.0 |
 | <img src="docs/images/agents/cursor.svg" width="24" alt=""> | **Cursor** | `afterAgentResponse` hook | `/progress connect` | 依 Cursor 文件實作 |
 | <img src="docs/images/agents/muse-code.svg" width="24" alt=""> | **Muse Code** | `Stop` hook | `/progress connect` | 依 Muse 文件實作 |
+| | **dot** | 本機交換（自行選用） | 見 [docs/LOCAL-EXCHANGE.md](docs/LOCAL-EXCHANGE.md) | 只測過檔案約定 |
 | | **其他 agent**（Aider、Copilot、Windsurf…） | 自己寫一塊進度 | 把 [AGENTS.md](AGENTS.md) 的一段貼進它的說明檔 | |
 
 「實測過」是指：真的 CLI 跑了一個回合，它的 hook 有觸發，面板也從中畫出正確的一塊進度。那些真實資料都留在測試裡。
