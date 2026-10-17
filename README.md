@@ -33,11 +33,11 @@ English · [繁體中文](README.zh-TW.md) · [简体中文](README.zh-CN.md)
   A press goes straight back to that Claude session as your answer. A question from another session says where to answer it; a step you keep by hand gets one button that ticks it in the file.
 - **Background on every task.** Each task carries one line on why it exists (`Context: users asked for it in the last survey`), written when Claude names the task, so you never open a card and wonder what it was for.
 - **Every project, every agent.** One Markdown file, `~/.claude/progress.md`, holds one block per session. Blocks from other agents are labelled (`codex`, `gemini`) and say where to answer them. Things outside code, like a job search, go in by hand or with a one-line quick add.
-- **Cleans up after itself.** Finished work moves to a monthly archive after half a day, anything else after three days. A session silent for 12 hours shows as stopped instead of still asking you things. The file stays about what is open.
+- **Cleans up after itself.** Finished work moves to a monthly archive after half a day, anything else after three days. A session silent for 12 hours shows as stopped instead of still asking you things. The file stays about what is open. Open a stopped session or a task you keep by hand and press **Archive** to move it now.
 - **Survives compaction.** When Claude Code compacts a conversation, the new context gets the goal, the count, the step in progress and the next ones, so work picks up where it was.
 - **A window of its own.** `/progress open` opens `progress.html` in your browser: the same view as a page that refreshes itself, follows your system's light or dark mode, and fits a phone screen.
 - **Pull requests and CI.** With [gh](https://cli.github.com) signed in, the card shows this branch's PR, its checks and its review state, and checks again while CI runs.
-- **Stays out of the way.** Desktop notifications when a step needs you, when a list is done and when CI finishes. With the pane closed or the terminal too narrow, one line under the prompt says where things stand.
+- **Stays out of the way.** Desktop notifications when a step needs you, when another session or agent asks you something, when work is due today or late (once a day), when a list is done and when CI finishes. Each one pings once, however many sessions are open. With the pane closed or the terminal too narrow, one line under the prompt says where things stand.
 - **Journal and weekly report.** Every finished step is logged. `Weekly report` turns the last seven days into plain text (finished, open, waiting on you) and copies it, ready for a standup.
 - **Readable in any theme.** Traditional Japanese colours (和色), one set for dark terminals and one for light, every text colour at least 4.5:1 against its background. No faint grey text on white.
 - **English, 繁體中文, 简体中文.** Follows Claude Code's language setting, or pick one.
@@ -151,7 +151,7 @@ From top to bottom:
 1. **Counts.** `● waiting` · `▸ in progress` · `⚑ due soon` · `✓ done today`. Each one opens what it counts.
 2. **Needs you now.** The one question, deadline or stuck task that needs you most, with what it is about and what you can do. `N more waiting on you ▸` opens the rest.
 3. **This session's card.** Project and branch, the task, its background, the bar, where it stands, the step in progress and the next. `▸ All N steps` lists every step, numbered, the current one marked `← now`. The pull request, when there is one.
-4. **Folded sections.** Waiting on you, Due soon, Other open work (grouped by project), Done recently. Click a row to see its steps and its actions: **Take over and finish** for work a closed session in this project left, **Copy resume command** to reopen that session where it ran, **Mark step done** and **Hand to Claude** for tasks you keep by hand.
+4. **Folded sections.** Waiting on you, Due soon, Other open work (grouped by project), Done recently. Click a row to see its steps and its actions: **Take over and finish** for work a closed session in this project left, **Copy resume command** to reopen that session where it ran, **Mark step done** and **Hand to Claude** for tasks you keep by hand, and **Archive** for either kind to move it out of the file now.
 5. **The box.** Ask a side question (answered in the pane without interrupting Claude), or start with `+` to add a task.
 6. **Bottom row.** Weekly report · Notifications on/off · Legend.
 
@@ -252,6 +252,7 @@ Checked by giving agents on three different models only that section and having 
 | Any other block moves there | 3 days after its last update |
 | A hand-kept task with every step done moves there | 24 hours after the pane first saw it done |
 | A session that has not written for 12 hours | shows as stopped; its questions leave Needs you now |
+| You press **Archive** on a stopped session or a hand-kept task | right away |
 | A `##` section the archive emptied | is removed; one you left empty stays |
 
 The sweep runs when a session starts and every hour after. `/progress tidy` runs it now.
