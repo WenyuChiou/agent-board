@@ -26,6 +26,33 @@
 
 
 
+
+## 0.20.1 — 2026-10-17
+
+- **Terminal history survives read and write failures.** Only `ENOENT` is treated
+  as a missing file. Unreadable progress/archive/journal files abort the action;
+  failed writes report the path and error with a nonzero `--keys` exit instead of
+  claiming success. History is saved before the board changes, so a later failure
+  can leave an extra history entry; retrying an archive does not duplicate that
+  entry. Replacements retain POSIX permission bits and clean up owned temp files.
+  Tests: "an EACCES reading the archive aborts the action and preserves every
+  existing file", "a failed journal temp write preserves old bytes and reports
+  incomplete persistence", "an archive saved before a failed board replacement
+  survives retry without a duplicate entry", "an archive entry with a longer last
+  step does not suppress a distinct shorter task", and "replacing board and history
+  retains their POSIX permission bits despite a restrictive umask".
+- **The board's page says the same.** A tick, archive, tidy or pasted block on
+  the page that meets a file it cannot read or write is answered with that file
+  and its error, shown as a failure, instead of a bare server error; a board it
+  cannot read is named the same way instead of being shown as offline. A phone
+  opened with `--lan` is told the file's name only, not its folder. Its archive
+  and tidy, like the terminal board's archive, skip an entry the archive already
+  holds. `--html` names `progress.html` when it cannot write it. Tests: "a press
+  on the page that cannot write its history is answered with that file and its
+  error, and progress.md is left as it was", and "a board the page cannot read is
+  named there with that file and its error, rather than shown as offline, and a
+  phone is told the file name only".
+
 ## 0.20.0 — 2026-10-17
 
 - **The board's page can be opened from a phone on the same Wi-Fi.**

@@ -343,6 +343,7 @@ export const ZH_TW = {
   boardCopied: (text: string): string => `已複製：${text}`,
   boardCopyFailed: (text: string): string => `沒辦法放進剪貼簿，請自己複製：${text}`,
   boardWriteFailed: '寫不進進度檔，沒有改任何東西。',
+  boardStorageFailed: (file: string, code: string): string => `無法安全讀取或更新 ${file}（${code}）。部分檔案可能已經改動。請檢查進度與歷史紀錄，排除檔案存取或磁碟問題後再試。`,
   // The board's page in the browser (`agent-board.mjs --serve`). The chat-relay prompt stays
   // in English in every language: it is the one tested live, and its markers are literal.
   serveAt: (url: string): string => `可以點的看板（勾完成、封存、回答）：${url}`,

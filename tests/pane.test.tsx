@@ -1899,11 +1899,12 @@ test('an inbox turn the board will not take stays in the inbox and reaches the b
 
 test('a reply that asks nothing, with no summary from the model, is not dropped from the board but tried again', async ($, on) => {
   const ours = `${INBOX}/codex-turn-1792216380-1.json`
+  const body = JSON.stringify({ session_id: 'ours', cwd: '/work/web-app', prompt: 'Ship the page', last_assistant_message: 'Shipped the page.' })
   let isDown = true
   const world: World = {
     files: new Map([
       [FILE, '# Progress\n'],
-      [ours, JSON.stringify({ session_id: 'ours', cwd: '/work/web-app', prompt: 'Ship the page', last_assistant_message: 'Shipped the page.' })],
+      [ours, body],
     ]),
     mtime: 1,
     hasTasks: true,
@@ -1917,8 +1918,14 @@ test('a reply that asks nothing, with no summary from the model, is not dropped 
   expect(world.files.get(FILE)).toBe('# Progress\n')
   expect(takenOf(world)).toHaveLength(1)
 
+  const claimed = takenOf(world)[0]!
+  expect(world.files.get(claimed)).toBe(body)
+  // Seed the retained bytes as an expired claim instead of running every poll for
+  // fifteen simulated minutes. The pure claim-action tests cover the time boundary.
+  const expired = `${ours}.deadbeef-${(Date.parse('2026-10-16T12:00:00Z') - 16 * 60 * 1000).toString(36)}-1.taking`
+  world.files.set(expired, body)
+  world.files.delete(claimed)
   isDown = false
-  await clock.advance(15 * 60 * 1000)
   world.mtime += 1
   await clock.advance(5000)
   expect(world.files.get(FILE) ?? '').toContain('### Ship the page\n')
