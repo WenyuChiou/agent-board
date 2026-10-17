@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.20.1 — 2026-10-17
+## 0.20.2 — 2026-10-17
 
 An answered question can be put away without answering it again (#52).
 
@@ -35,14 +35,16 @@ An answered question can be put away without answering it again (#52).
   session's last look; the next quiet poll makes it again from the file as it is.
 - **The list is written with care.** A press reads, changes, writes and reads back the
   list in the session's write queue, so a press in another session or on the board is
-  kept; a list another program holds, or one written in the last 5 seconds that is not
-  JSON (most likely caught half-written), is never written over, and the press says it
-  did not stick (zh-TW 記不下「已回覆」，這一項還留在清單上。). A list left broken longer
-  than that, or dated well ahead of the clock, hides nothing and is written anew by the
-  next press. A
-  look that cannot read the list keeps the one in hand and reads it again at the next
-  poll. The list is read before `progress.md` at a session's start without drawing
-  `progress.html` from an empty file, and a press redraws `progress.html` at once.
+  kept. A list another program holds is never written over: the pane says the press did
+  not stick (zh-TW 記不下「已回覆」，這一項還留在清單上。), and the terminal board and its
+  page name the list with its error, as they do the board's other files. A list written
+  in the last 5 seconds that is not JSON (most likely caught half-written) is not written
+  over either, and the press says it did not stick on every surface. A list left broken
+  longer than that, or dated well ahead of the clock, hides nothing and is written anew
+  by the next press. A look in the pane that cannot read the list keeps the one in hand
+  and reads it again at the next poll. The list is read before `progress.md` at a
+  session's start without drawing `progress.html` from an empty file, and a press redraws
+  `progress.html` at once.
 - **A quick answer goes only to the question it was pressed on.** The board's page offers
   yes/no and choice buttons that go into an ended Codex or Grok session. A line's key now
   holds its question's words, so a press made while the page showed one question is
@@ -75,8 +77,38 @@ An answered question can be put away without answering it again (#52).
   `tests/board.test.mjs` "the board script leaves out a
   question a pane on this machine marked answered", "marking a question answered on the
   page or with h on the board writes only the hidden list, sends nothing, and shows it
-  again", "a press on the board never writes over an answered list it cannot read" (not on
-  Windows, nor as root).
+  again", "a press on the board names an answered list it cannot read or replace, with its
+  error, and never writes over it", "a hide on the page that cannot replace the answered
+  list is answered with that file and its error".
+- **The board script's tests no longer go stale.** Their sample question was dated
+  2026-10-17 08:30 UTC, so half a day later its session counted as stopped and the tests
+  that expect it to wait on you failed. It is now dated minutes before the tests run.
+
+## 0.20.1 — 2026-10-17
+
+- **Terminal history survives read and write failures.** Only `ENOENT` is treated
+  as a missing file. Unreadable progress/archive/journal files abort the action;
+  failed writes report the path and error with a nonzero `--keys` exit instead of
+  claiming success. History is saved before the board changes, so a later failure
+  can leave an extra history entry; retrying an archive does not duplicate that
+  entry. Replacements retain POSIX permission bits and clean up owned temp files.
+  Tests: "an EACCES reading the archive aborts the action and preserves every
+  existing file", "a failed journal temp write preserves old bytes and reports
+  incomplete persistence", "an archive saved before a failed board replacement
+  survives retry without a duplicate entry", "an archive entry with a longer last
+  step does not suppress a distinct shorter task", and "replacing board and history
+  retains their POSIX permission bits despite a restrictive umask".
+- **The board's page says the same.** A tick, archive, tidy or pasted block on
+  the page that meets a file it cannot read or write is answered with that file
+  and its error, shown as a failure, instead of a bare server error; a board it
+  cannot read is named the same way instead of being shown as offline. A phone
+  opened with `--lan` is told the file's name only, not its folder. Its archive
+  and tidy, like the terminal board's archive, skip an entry the archive already
+  holds. `--html` names `progress.html` when it cannot write it. Tests: "a press
+  on the page that cannot write its history is answered with that file and its
+  error, and progress.md is left as it was", and "a board the page cannot read is
+  named there with that file and its error, rather than shown as offline, and a
+  phone is told the file name only".
 
 ## 0.20.0 — 2026-10-17
 

@@ -1,8 +1,8 @@
 // The board script `/progress connect` writes, run the way every other agent runs it: plain
 // Node, no Claude Code. Needs Node 22.18+ or 24 (it reads hooks/board-script.ts directly).
-import { execFile, execFileSync, spawn } from 'node:child_process'
+import { execFile, execFileSync, spawn, spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'node:fs'
 import { request } from 'node:http'
 import { createServer as createNetServer } from 'node:net'
 import { tmpdir } from 'node:os'
@@ -11,10 +11,12 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { BOARD_SCRIPT } from '../hooks/board-script.ts'
 
+// Minutes ago, so the session still counts as waiting whenever the tests run.
+const ASKED = new Date(Date.now() - 10 * 60 * 1000).toISOString().replace(/\.\d{3}Z$/, 'Z')
 const FILE = `# Progress
 
 ## api-gateway
-<!-- auto session=a1b2c3d4 agent=codex state=waiting updated=2026-10-17T08:30:00Z -->
+<!-- auto session=a1b2c3d4 agent=codex state=waiting updated=${ASKED} -->
 ### Rate-limit the public endpoints
 - [x] Added the token bucket middleware
 - [?] Per-key limit — 100 or 300 a minute?
@@ -58,27 +60,47 @@ test('the board script leaves out a question a pane on this machine marked answe
   assert.ok(run('en', [], { 'progress-answered.json': '{' }).includes('Per-key limit'))
 })
 
-// A file only its owner's mode can shut: Windows has no such mode, and root reads it anyway.
-test('a press on the board never writes over an answered list it cannot read', { skip: process.platform === 'win32' || process.getuid?.() === 0 }, () => {
+// Only the named filesystem calls fail, injected before the bundled script loads; not a real
+// permission or disk failure.
+test('a press on the board names an answered list it cannot read or replace, with its error, and never writes over it', () => {
   const dir = mkdtempSync(join(tmpdir(), 'board-'))
-  const list = join(dir, 'progress-answered.json')
   try {
     const path = join(dir, 'progress.md')
+    const list = join(dir, 'progress-answered.json')
     writeFileSync(path, FILE)
     mkdirSync(join(dir, 'progress-inbox'))
     const held = JSON.stringify({ answered: ['c0ffee12 1 Ship it, OK?'] })
     writeFileSync(list, held)
-    chmodSync(list, 0o000)
     const script = join(dir, 'agent-board.mjs')
     writeFileSync(script, `globalThis.AGENT_BOARD = ${JSON.stringify({ path, lang: 'en' })}\n${BOARD_SCRIPT}`)
-    const out = execFileSync(process.execPath, [script, '--keys', 'h'], { env: { ...process.env, CLAUDE_PROGRESS_FILE: '', NO_COLOR: '1' }, encoding: 'utf8' })
-    assert.ok(out.includes("Couldn't save that it was answered"), out)
-    chmodSync(list, 0o600)
-    assert.equal(readFileSync(list, 'utf8'), held)
+    const preload = join(dir, 'fault.cjs')
+    const play = fault => {
+      writeFileSync(preload, `const fs = require('node:fs')\nconst { syncBuiltinESMExports } = require('node:module')\n${fault}\nsyncBuiltinESMExports()\n`)
+      return spawnSync(process.execPath, ['-r', preload, script, '--keys', 'h'], { encoding: 'utf8', timeout: 10000, env: { ...process.env, CLAUDE_PROGRESS_FILE: '', NO_COLOR: '1' } })
+    }
+    // `--keys h` reads the list twice to draw and choose the line, then once more to change it:
+    // only that third read fails, so the press itself meets the error.
+    const faults = [
+      [`const original = fs.readFileSync\nlet reads = 0\nfs.readFileSync = (file, ...rest) => { if (String(file) === ${JSON.stringify(list)} && ++reads === 3) throw Object.assign(new Error('injected read failure'), { code: 'EACCES' }); return original(file, ...rest) }`, 'EACCES'],
+      [`const original = fs.renameSync\nfs.renameSync = (from, to) => { if (String(to) === ${JSON.stringify(list)}) throw Object.assign(new Error('injected rename failure'), { code: 'EIO' }); return original(from, to) }`, 'EIO'],
+    ]
+    for (const [fault, code] of faults) {
+      const out = play(fault)
+      const said = out.stdout + out.stderr
+      assert.equal(out.status, 1, said)
+      assert.ok(said.includes(list) && said.includes(code), said)
+      assert.ok(!said.includes('Hidden:'), said)
+      // The board is drawn after the press, with the question still on it.
+      assert.ok(out.stdout.includes('Per-key limit'), said)
+      assert.equal(readFileSync(list, 'utf8'), held)
+      assert.ok(!readdirSync(dir).some(name => name.endsWith('.board-tmp')))
+    }
+    // Once it can be read and replaced, the same press hides the question and keeps the old mark.
+    const out = play('')
+    assert.equal(out.status, 0, out.stdout + out.stderr)
+    const answered = JSON.parse(readFileSync(list, 'utf8')).answered
+    assert.deepEqual([answered.length, answered[0], answered[1].startsWith('a1b2c3d4 2 ')], [2, 'c0ffee12 1 Ship it, OK?', true])
   } finally {
-    try {
-      chmodSync(list, 0o600)
-    } catch {}
     rmSync(dir, { recursive: true, force: true })
   }
 })
@@ -139,6 +161,7 @@ test('another session writing while the board ticks or archives loses neither th
     // Right after the board's first rename over progress.md, a Claude Code session writes its
     // own block, so the board's read-back differs and it tries again on the newer text.
     const preload = join(dir, 'other-session.cjs')
+    const later = new Date(Date.parse(ASKED) + 60_000).toISOString().replace(/\.\d{3}Z$/, 'Z')
     writeFileSync(preload, `const fs = require('node:fs')
 const { syncBuiltinESMExports } = require('node:module')
 const real = fs.renameSync
@@ -147,7 +170,7 @@ fs.renameSync = (from, to) => {
   real(from, to)
   if (!done && String(to).endsWith('progress.md')) {
     done = true
-    fs.writeFileSync(to, fs.readFileSync(to, 'utf8').replace('updated=2026-10-17T08:30:00Z', 'updated=2026-10-17T08:31:00Z'))
+    fs.writeFileSync(to, fs.readFileSync(to, 'utf8').replace('updated=${ASKED}', 'updated=${later}'))
   }
 }
 syncBuiltinESMExports()
@@ -159,7 +182,7 @@ syncBuiltinESMExports()
     const ticked = play('down x')
     assert.ok(ticked.includes('Done: “Ask two referees”.'), ticked)
     assert.ok(readFileSync(path, 'utf8').includes('- [x] Ask two referees'))
-    assert.ok(readFileSync(path, 'utf8').includes('updated=2026-10-17T08:31:00Z'))
+    assert.ok(readFileSync(path, 'utf8').includes(`updated=${later}`))
     const journal = readdirSync(dir).find(name => name.includes('-journal-'))
     assert.ok(journal && readFileSync(join(dir, journal), 'utf8').includes('Ask two referees'))
     writeFileSync(path, file)
@@ -184,7 +207,7 @@ const GROK_ID = '01a14a94-0dee-7543-8208-991a4266a1da'
 // (XDG_RUNTIME_DIR, here one of the test's own), named for the progress.md it serves.
 const servedAt = (run, path) => join(run, `agent-board-${createHash('sha256').update(path).digest('hex').slice(0, 16)}.json`)
 
-const page = async (more = '') => {
+const page = async (more = '', env = {}) => {
   const dir = mkdtempSync(join(tmpdir(), 'board-serve-'))
   const work = join(dir, 'api-gateway')
   mkdirSync(work)
@@ -221,7 +244,7 @@ setTimeout(() => process.stdout.write('Redis it is; wiring it up now.\\n'), 1000
   const script = join(dir, 'agent-board.mjs')
   writeFileSync(script, `globalThis.AGENT_BOARD = ${JSON.stringify({ path, lang: 'en' })}\n${BOARD_SCRIPT}`)
   const child = spawn(process.execPath, [script, '--serve-child'], {
-    env: { ...process.env, CLAUDE_PROGRESS_FILE: '', NO_COLOR: '1', AGENT_BOARD_GROK: stand, AGENT_BOARD_CODEX: stand, XDG_RUNTIME_DIR: run },
+    env: { ...process.env, CLAUDE_PROGRESS_FILE: '', NO_COLOR: '1', AGENT_BOARD_GROK: stand, AGENT_BOARD_CODEX: stand, XDG_RUNTIME_DIR: run, ...env },
     stdio: ['ignore', 'pipe', 'pipe'],
   })
   const exited = new Promise(done => child.once('exit', code => done(code)))
@@ -307,6 +330,8 @@ test('marking a question answered on the page or with h on the board writes only
     writeFileSync(list, '{"answered": ["x"')
     const kept = play('h')
     assert.ok(kept.includes("Couldn't save that it was answered"), kept)
+    const refused = await call('POST', '/api/act', { body: { key: ask.key, type: 'hide' } })
+    assert.deepEqual([refused.status, refused.json().note], [409, "Couldn't save that it was answered; it stays on the list."])
     assert.equal(readFileSync(list, 'utf8'), '{"answered": ["x"')
     const old = new Date(Date.now() - 60_000)
     utimesSync(list, old, old)
@@ -386,6 +411,99 @@ test('ticking and tidying from the page write progress.md the way the pane does,
     assert.ok(readFileSync(path, 'utf8').includes(`resume=${GROK_ID}`))
   } finally {
     await board.close()
+  }
+})
+
+test('a board the page cannot read is named there with that file and its error, rather than shown as offline, and a phone is told the file name only', { timeout: 30_000 }, async () => {
+  // Every read of the journal fails, the way a file without read access would.
+  const faults = mkdtempSync(join(tmpdir(), 'board-fault-'))
+  const preload = join(faults, 'fault.cjs')
+  writeFileSync(preload, `const fs = require('node:fs')
+const { syncBuiltinESMExports } = require('node:module')
+const original = fs.readFileSync
+fs.readFileSync = (path, ...args) => { if (String(path).includes('-journal-')) throw Object.assign(new Error('injected read failure'), { code: 'EACCES' }); return original(path, ...args) }
+syncBuiltinESMExports()
+`)
+  const board = await page('', { NODE_OPTIONS: `--require ${JSON.stringify(preload)}` })
+  try {
+    const seen = await board.call('GET', '/api/board')
+    assert.equal(seen.status, 409, seen.body)
+    assert.match(seen.json().note, /^Could not safely read or update .*-journal-.*\(EACCES\)/)
+    // The page says that note, and "offline" only when the board sent none.
+    const home = await board.call('GET', `/?t=${board.token}`, { headers: { 'x-board-token': '' } })
+    assert.ok(home.body.includes("say(data.note || w('serveOffline'), 'alert')"))
+    // A phone on the network is told the file's name, not the folder it is in, which names the
+    // person's account.
+    const opened = await board.call('POST', '/api/lan', { body: {} })
+    if (opened.status === 200) {
+      const lan = new URL(opened.json().url)
+      const far = await fetchAt(lan.hostname, Number(lan.port), 'GET', '/api/board', { 'x-board-token': lan.searchParams.get('t') })
+      assert.equal(far.status, 409, far.body)
+      assert.match(far.json().note, /^Could not safely read or update progress-journal-\d{4}-\d{2}\.md \(EACCES\)/)
+      assert.ok(!far.json().note.includes(board.dir), far.json().note)
+    }
+  } finally {
+    await board.close()
+    rmSync(faults, { recursive: true, force: true })
+  }
+})
+
+test('a press on the page that cannot write its history is answered with that file and its error, and progress.md is left as it was', { timeout: 30_000 }, async () => {
+  // Every write that would land on the journal fails, the way a failing disk would.
+  const faults = mkdtempSync(join(tmpdir(), 'board-fault-'))
+  const preload = join(faults, 'fault.cjs')
+  writeFileSync(preload, `const fs = require('node:fs')
+const { syncBuiltinESMExports } = require('node:module')
+const original = fs.renameSync
+fs.renameSync = (from, to) => { if (String(to).includes('-journal-')) throw Object.assign(new Error('injected rename failure'), { code: 'EIO' }); return original(from, to) }
+syncBuiltinESMExports()
+`)
+  const board = await page('', { NODE_OPTIONS: `--require ${JSON.stringify(preload)}` })
+  try {
+    const { path, call, keyOf } = board
+    const before = readFileSync(path, 'utf8')
+    const ticked = await call('POST', '/api/act', { body: { key: await keyOf('Fabrikam fellowship'), type: 'tick', text: 'Ask two referees' } })
+    assert.equal(ticked.status, 409, ticked.body)
+    assert.match(ticked.json().note, /^Could not safely read or update .*-journal-.*\(EIO\)/)
+    assert.equal(readFileSync(path, 'utf8'), before)
+    // The page runs on, with the step still there to tick again.
+    assert.equal((await call('GET', '/api/board')).status, 200)
+    assert.ok(await keyOf('Fabrikam fellowship'))
+  } finally {
+    await board.close()
+    rmSync(faults, { recursive: true, force: true })
+  }
+})
+
+test('a hide on the page that cannot replace the answered list is answered with that file and its error', { timeout: 30_000 }, async () => {
+  const faults = mkdtempSync(join(tmpdir(), 'board-fault-'))
+  const preload = join(faults, 'fault.cjs')
+  writeFileSync(preload, `const fs = require('node:fs')
+const { syncBuiltinESMExports } = require('node:module')
+const original = fs.renameSync
+fs.renameSync = (from, to) => { if (String(to).endsWith('progress-answered.json')) throw Object.assign(new Error('injected rename failure'), { code: 'EIO' }); return original(from, to) }
+syncBuiltinESMExports()
+`)
+  const board = await page(`
+## billing
+<!-- auto session=d4e5f6a7 agent=codex state=waiting updated=RECENT -->
+### Pick the invoice format
+- [?] PDF or HTML?
+<!-- /auto session=d4e5f6a7 -->
+`, { NODE_OPTIONS: `--require ${JSON.stringify(preload)}` })
+  try {
+    const { call, dir } = board
+    const ask = (await call('GET', '/api/board')).json().model.asks.find(one => one.agent === 'codex')
+    const hid = await call('POST', '/api/act', { body: { key: ask.key, type: 'hide' } })
+    assert.equal(hid.status, 409, hid.body)
+    assert.match(hid.json().note, /^Could not safely read or update .*progress-answered\.json \(EIO\)/)
+    assert.ok(!existsSync(join(dir, 'progress-answered.json')))
+    assert.ok(!readdirSync(dir).some(name => name.endsWith('.board-tmp')))
+    // The question is still asked on the page.
+    assert.ok((await call('GET', '/api/board')).json().model.asks.some(one => one.key === ask.key))
+  } finally {
+    await board.close()
+    rmSync(faults, { recursive: true, force: true })
   }
 })
 

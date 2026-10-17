@@ -218,6 +218,10 @@ On a terminal, `--watch` also takes keys, as the pane takes presses: ↑↓ and 
 
 To look at the page from a phone on the same Wi-Fi, add `--lan`: `node ~/.claude/agent-board.mjs --serve --lan` also prints the page's address on your network and a QR code the phone's camera opens. That page has a key of its own and closes after 10 minutes in which no phone looks at it. A phone can tick, archive, mark a question answered (and show it again), copy and paste a block there, but a reply to an agent is sent from the computer. Use it only on a network you trust; why, in [the board's page](../README.md#the-boards-page).
 
+If the terminal board cannot read or save a file, it reports the full path and filesystem error on stderr; `--keys` exits with status 1. Only a missing file (`ENOENT`) is treated as empty. Fix file access or free disk space, then inspect `progress.md` and that month's archive/journal before retrying. Watch mode keeps trying to read on its next redraw so it can recover after access is restored.
+
+The terminal saves a completion's journal entry before ticking the step, and saves an archive entry before removing the task. A later board-write failure can therefore leave the history entry and the original task together; it reports incomplete persistence rather than success. Retrying an archive skips an identical saved entry. This is not a transaction across files or a cross-process lock, and does not prevent another writer from replacing a successful update. Atomic replacement retains existing POSIX read/write/execute permission bits and creates new history files privately; ownership, extended ACLs and crash durability are not guaranteed by this change.
+
 <img alt="The board in a terminal, redrawn every 2 seconds" src="images/live/terminal-en.png" width="560">
 <img alt="OpenCode 1.19.3: /board" src="images/live/opencode-en.png" width="560">
 
