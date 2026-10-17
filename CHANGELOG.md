@@ -33,6 +33,34 @@
   Claims are checked again after legacy shutdown. Test:
   `an uncertain claim created while a legacy page closes still blocks private startup`.
 
+## 0.20.3 — 2026-10-17
+
+- **A remote reporter can close a session and start a fresh one.** `reporter.py
+  retire <chat-id> ["reason"]` writes the chat's last fragment again as `ended`,
+  keeping its project line, title, notes and steps and adding the reason as a note,
+  then gives the chat a new session id, so a clean break leaves no block reading as
+  live. A session already `done` or `ended` is left as it is, and only the id is
+  new. It refuses a chat that is not in the registry, and one that has not reported
+  yet: neither has a block on the board to close. A reason with a control character
+  or a comment marker, and a fragment that is no longer a valid block, are refused
+  before anything is written. Once a chat's id and fragment are lost, its block
+  still waits out the usual staleness and archive rules, and
+  `docs/REMOTE_REPORTERS.md` says so. Tests: `test_pipeline.py` "15a
+  retire ok" to "15h board shows ended" (the old block merges in place as `ended`,
+  once), "15i retired fragment keeps its project line, title, notes and steps, and
+  adds the reason", "15j retire refuses a chat not in the registry", "15k refused
+  retire mints nothing", "15l retire refuses a session that never reported, and
+  mints nothing", "15m retire after done leaves the done block as it was and mints
+  a new id", "15n a reason with a comment opening is refused without a traceback,
+  and nothing changes", "15o a bad reason is refused on a done session too, and
+  mints nothing", "15p a fragment that is not a valid block is refused, and nothing
+  changes".
+- **The remote reporter guide says the conversation wins.** For a remote reporter
+  the conversation with the user is the source of truth and the board a mirror; a
+  remote `[?]` step says where to answer; the transports table says how far behind
+  each one can leave the board; and a reporter closes its session (`done` or
+  `ended`) when the conversation ends. Docs only.
+
 ## 0.20.2 — 2026-10-17
 
 What the reviews of 0.18.1 left open, most harmful first.
