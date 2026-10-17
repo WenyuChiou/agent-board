@@ -1,5 +1,9 @@
 # Guide
 
+For explicit Codex/dot reports and a cooperative local command queue, see
+[Local exchange](LOCAL-EXCHANGE.md). It describes session binding, receipts,
+capability failures and the limits of sending to a running Codex session.
+
 English · [繁體中文](GUIDE.zh-TW.md) · [简体中文](GUIDE.zh-CN.md) · [Back to the README](../README.md)
 
 ## Get started

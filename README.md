@@ -60,6 +60,19 @@ Using Aider, Copilot or Windsurf? Paste the section "Report your progress to the
 
 Everything lives in one plain Markdown file, `~/.claude/progress.md`, so you can open it and edit it yourself. The format is written up in [docs/FORMAT.md](docs/FORMAT.md).
 
+### Codex and dot
+
+Codex's hook reports completed turns to the board. Reply buttons submit to the
+current Claude Code session; they do not send to an existing Codex session.
+dot has no native connector in this plugin.
+
+For explicit, minimal reporting from either agent, the optional
+[local exchange](docs/LOCAL-EXCHANGE.md) provides a Node 24 CLI, session bindings,
+message claims and delivery receipts. It needs a cooperating receiver. Its Codex
+adapter accepts an owner connection supplied and verified by the host, and only
+steers a specified active turn. A new app-server or a thread id alone cannot
+control an existing CLI/Desktop session. Live native delivery is not verified.
+
 ## More
 
 [Guide](docs/GUIDE.md) (setup script, reading the pane, every command, tidying, troubleshooting) · [Contributing](CONTRIBUTING.md) · [Changelog](CHANGELOG.md) · [MIT](LICENSE)

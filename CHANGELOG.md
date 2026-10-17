@@ -1,5 +1,23 @@
 # Changelog
 
+## Unreleased
+
+- Add an opt-in Node 24 local exchange for Codex and dot: explicit progress
+  reports, session bindings, message claims and immutable terminal receipts.
+  No hooks, user configuration, conversations or credentials are collected.
+  Covered by `dot reports only explicit minimal fields and emits a backward-compatible progress block`,
+  `one consumer claims a message and a restart never replays uncertain delivery`
+  and `the CLI performs a synthetic dot round trip without any external runtime`.
+  Strict enum input and language-table output are covered by
+  `non-string receipt and progress enums are rejected before writing state` and
+  `report context uses the existing English, Traditional Chinese and Simplified Chinese tables`.
+- Add a host-supplied, verified Codex owner adapter for `turn/steer` with an
+  expected active turn. No arbitrary-session attachment or idle `turn/start`.
+  Covered by `a verified owner can steer only its loaded thread and the expected active turn`,
+  `unverified owners, unloaded threads, missing methods and idle commands fail closed`
+  and `lost acknowledgements stay uncertain and are never sent a second time`.
+  Native owner delivery is mock-tested; dot requires an explicit file consumer.
+
 ## 0.10.0 — 2026-10-17
 
 - **New name: Agent Board.** The pane follows Claude Code, Codex, Gemini CLI, Cursor,
