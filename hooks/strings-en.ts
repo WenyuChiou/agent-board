@@ -305,6 +305,7 @@ export const EN: Strings = {
   serveFailed: (why: string): string => `Couldn't open the board page: ${why}`,
   serveLanAt: (url: string): string => `On a phone on the same network, open ${url} or scan this code:`,
   serveLanNone: "This computer has no address on a local network, so a phone can't open the board.",
+  serveLanNotOurs: (address: string): string => `${address} is not a private network address of this computer, so the board can't open there.`,
   serveLanFailed: "Couldn't open the board to the local network.",
   serveClose: 'Close the board',
   serveClosed: 'The board is closed; you can close this tab. To open it again, ask an agent to show the progress.',

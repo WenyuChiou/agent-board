@@ -14,7 +14,10 @@
   page. It is plain HTTP on the network, so a reply to an agent, which
   runs a program on the computer, is offered there only as a copy and
   refused if sent; ticking, archiving, pasting a block and closing work as
-  on the computer. "The board's page" in the README and the guide say how,
+  on the computer. Neither the command to resume a Claude session nor the
+  path of `progress.md` is sent there, since both name the account's
+  folders. An address given to `--lan` that is not one of the computer's
+  own is named as such. "The board's page" in the README and the guide say how,
   and why to keep it to a network you trust. Tests: "a QR code reads back
   as the text it was made from: sized to fit it, with its three corner
   squares, and none past version 10", "as text, a QR code puts two rows on

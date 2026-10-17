@@ -193,7 +193,8 @@ export const serveModel = (view: View, pending: readonly PendingTurn[], s: Strin
         steps: row.steps.map(step => ({ text: step.text, note: step.note, status: step.status, isCurrent: step.isCurrent })),
         next: row.next?.step ?? null,
         canArchive: row.archive !== null,
-        resume: row.resume,
+        // The command to resume a session names its folder, and the account with it: the computer's only.
+        resume: isLan ? null : row.resume,
         handoff: row.handoff,
         send,
         session: row.target?.session ?? '',

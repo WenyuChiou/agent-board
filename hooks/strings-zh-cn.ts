@@ -303,6 +303,7 @@ export const ZH_CN: Strings = {
   serveFailed: (why: string): string => `打不开看板网页：${why}`,
   serveLanAt: (url: string): string => `同一网络上的手机，打开 ${url} 或扫这个二维码：`,
   serveLanNone: '找不到这台电脑在局域网上的地址，手机打不开这个看板。',
+  serveLanNotOurs: (address: string): string => `${address} 不是这台电脑在局域网上的私有地址，看板没办法开在那里。`,
   serveLanFailed: '没法把看板开到局域网上。',
   serveClose: '关闭看板',
   serveClosed: '看板已关闭，这个标签页可以关了。要再打开，在 agent 里说“看进度”。',

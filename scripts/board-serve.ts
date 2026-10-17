@@ -281,7 +281,7 @@ export const startServer = (o: ServeOptions): void => {
     }
     if (lanOpening !== null) return lanOpening
     const address = lanAddress(networkInterfaces(), wanted)
-    if (address === null) return Promise.resolve({ note: o.s.serveLanNone })
+    if (address === null) return Promise.resolve({ note: wanted !== null && /^[\d.]+$/.test(wanted) ? o.s.serveLanNotOurs(wanted) : o.s.serveLanNone })
     lanOpening = listenLan(address).finally(() => {
       lanOpening = null
     })

@@ -1435,6 +1435,24 @@ test('from the local network a reply to an agent is offered as a copy, and refus
   // The row keeps a box to write the answer in and copy it, as the note says.
   expect(rows.find(one => one.title === 'Pick the cache')).toMatchObject({ send: 'open', where: '', info: STRINGS.en.serveLanSend('grok'), hasCopyBox: true })
   expect(serveModel(serveView(), [], STRINGS.en).groups.flatMap(group => group.rows).find(one => one.title === 'Pick the cache')).toMatchObject({ send: 'send', hasCopyBox: false })
+  // Nor is a command to resume a session shown there: it names the session's folder.
+  const ended = buildView(
+    parseProgress(`## FLOODABM
+<!-- auto session=dddddddd state=ended updated=2026-10-17T08:30:00Z resume=dddddddd-1111 dir=%2Fwork%2FFLOODABM -->
+### Run it
+- [ ] Run it 100 times
+<!-- /auto session=dddddddd -->
+`),
+    [],
+    null,
+    SERVE_NOW,
+    0,
+    {},
+    STRINGS.en,
+  )
+  const resumeOf = (isLan: boolean): string | null | undefined => serveModel(ended, [], STRINGS.en, new Set(), isLan).groups.flatMap(group => group.rows)[0]?.resume
+  expect(resumeOf(false)).toContain('claude --resume dddddddd-1111')
+  expect(resumeOf(true)).toBe(null)
   // What was not a send stays as it was.
   expect(model.asks.find(ask => ask.agent === 'codex')).toMatchObject({ send: 'open', info: STRINGS.en.serveSendOpen('codex') })
   expect(rows.find(one => one.title === 'Dark mode for the settings page')?.send).toBe('claude')

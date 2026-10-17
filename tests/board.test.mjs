@@ -484,6 +484,10 @@ test('with --lan the page also opens on the local network, with a token of its o
     const { call, port, token, keyOf } = board
     // Only the board script on the computer opens it: a script on a web page sends an Origin.
     assert.equal((await call('POST', '/api/lan', { body: {}, headers: { origin: `http://127.0.0.1:${port}` } })).status, 403)
+    // An address that is not one of the computer's own is named as such.
+    const wrong = await call('POST', '/api/lan', { body: { address: '8.8.8.8' } })
+    assert.equal(wrong.status, 409)
+    assert.equal(wrong.json().note, "8.8.8.8 is not a private network address of this computer, so the board can't open there.")
     const opened = await call('POST', '/api/lan', { body: {} })
     if (opened.status === 409) {
       t.skip(`no local network address here: ${opened.json().note}`)

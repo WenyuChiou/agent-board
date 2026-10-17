@@ -341,6 +341,7 @@ export const ZH_TW = {
   serveFailed: (why: string): string => `開不了看板網頁：${why}`,
   serveLanAt: (url: string): string => `同一個網路上的手機，打開 ${url} 或掃這個 QR 碼：`,
   serveLanNone: '找不到這台電腦在區域網路上的位址，手機開不了這個看板。',
+  serveLanNotOurs: (address: string): string => `${address} 不是這台電腦在區域網路上的私人位址，看板沒辦法開在那裡。`,
   serveLanFailed: '沒辦法把看板開到區域網路上。',
   serveClose: '關閉看板',
   serveClosed: '看板已關閉，這個分頁可以關了。要再開，在 agent 裡說「看進度」。',
