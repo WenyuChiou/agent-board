@@ -133,6 +133,7 @@ declare module 'claude-code' {
       opened: string[]
       doneSeen: Record<string, number>
       lang: string
+      isLangChosen: boolean
     }
   }
 }

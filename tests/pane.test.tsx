@@ -2,6 +2,10 @@ import type { On, RenderPropsOf } from 'claude-code'
 import { expect, mock, test } from 'claude-code/testing'
 import type { Engine, MockClock } from 'claude-code/testing'
 
+import { ZH_TW } from '../hooks/i18n'
+import { EN } from '../hooks/strings-en'
+import { ZH_CN } from '../hooks/strings-zh-cn'
+
 const FILE = '/home/me/.claude/progress.md'
 const SESSION = '2be48af2-6193-5040-aacc-e0546d6784f1'
 const PANE = { plugin: 'agent-board', component: 'Pane', requestId: 'agent-board' } as const
@@ -1505,6 +1509,30 @@ test('an inbox file is claimed by renaming it, read by that session only, and re
   expect(world.asked?.filter(prompt => prompt.includes('Added the middleware'))).toHaveLength(1)
 })
 
+test('an inbox file nested too deep to read strands no taken file, and the turn taken before it still gets its block', async ($, on) => {
+  const good = `${INBOX}/codex-turn-1792216380-1.json`
+  const deep = `${INBOX}/codex-turn-1792216381-2.json`
+  const nested = `${'{"text":'.repeat(100_000)}"x"${'}'.repeat(100_000)}`
+  const world: World = {
+    files: new Map([
+      [FILE, '# Progress\n'],
+      [good, JSON.stringify({ session_id: 'good', cwd: '/work/api-gateway', last_assistant_message: 'Added the middleware. 100 or 300 a minute?' })],
+      [deep, `{"session_id":"deep","cwd":"/work/web-app","prompt":${nested},"last_assistant_message":"ok"}`],
+    ]),
+    mtime: 1,
+    hasTasks: true,
+    ran: [],
+    asked: [],
+    reply: RATE_LIMIT_REPLY,
+  }
+  const clock = engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/persona_framework', surface: 'desktop', isInteractive: true })
+  await clock.advance(5000)
+
+  expect([...world.files.keys()].filter(path => path.endsWith('.taking'))).toEqual([])
+  expect(world.files.get(FILE) ?? '').toContain('## api-gateway\n')
+})
+
 test('a burst of turns from one agent session is summed up from its last two turns only', async ($, on) => {
   const turn = (n: number): [string, string] => [
     `${INBOX}/codex-turn-17922163${80 + n}-${n}.json`,
@@ -1648,6 +1676,61 @@ test('connecting writes the board script and each installed agent’s board comm
     expect(world.ran.some(argv => argv.includes(file))).toBe(true)
   }
   expect(world.ran).toContainEqual(['rmdir', '/home/me/.agents/skills/agent-board'])
+})
+
+test('a session whose system speaks another language leaves the board script and skill in the language they hold, until the person picks one, auto included', async ($, on) => {
+  const board = '/home/me/.claude/agent-board.mjs'
+  const skill = '/home/me/.agents/skills/agent-board/SKILL.md'
+  // A desktop session with LANG=zh_TW wrote them; this terminal session's LANG is English.
+  const world: World = {
+    files: new Map([
+      ['/home/me/.codex/config.toml', ''],
+      [board, 'globalThis.AGENT_BOARD = {"path":"/home/me/.claude/progress.md","lang":"zh-TW"}\n// an earlier board'],
+      [skill, ''],
+    ]),
+    env: { HOME: '/home/me', LANG: 'en_US.UTF-8' },
+    mtime: 1,
+    hasTasks: true,
+    ran: [],
+  }
+  engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/persona_framework', surface: 'terminal', isInteractive: true })
+  expect((world.files.get(board) ?? '').split('\n')[0]).toBe('globalThis.AGENT_BOARD = {"path":"/home/me/.claude/progress.md","lang":"zh-TW"}')
+  expect(world.files.get(skill)).toContain(`description: ${JSON.stringify(ZH_TW.boardCommandDescription)}`)
+
+  // A language picked takes the files with it at once; so does going back to auto, which
+  // then means this session's.
+  await $.command.run({ ...TIDY, args: 'lang zh-CN' })
+  expect((world.files.get(board) ?? '').split('\n')[0]).toBe('globalThis.AGENT_BOARD = {"path":"/home/me/.claude/progress.md","lang":"zh-CN"}')
+  expect(world.files.get(skill)).toContain(`description: ${JSON.stringify(ZH_CN.boardCommandDescription)}`)
+  await $.command.run({ ...TIDY, args: 'lang auto' })
+  expect((world.files.get(board) ?? '').split('\n')[0]).toBe('globalThis.AGENT_BOARD = {"path":"/home/me/.claude/progress.md","lang":"en"}')
+  expect(world.files.get(skill)).toContain(`description: ${JSON.stringify(EN.boardCommandDescription)}`)
+})
+
+test('with the autoConnect option off, going back to auto reaches the board script and skill at the next connect run by hand', { options: { autoConnect: false } }, async ($, on) => {
+  const board = '/home/me/.claude/agent-board.mjs'
+  const skill = '/home/me/.agents/skills/agent-board/SKILL.md'
+  // An earlier `/progress lang zh-CN` wrote them; this session's LANG is English.
+  const world: World = {
+    files: new Map([
+      ['/home/me/.codex/config.toml', ''],
+      [board, 'globalThis.AGENT_BOARD = {"path":"/home/me/.claude/progress.md","lang":"zh-CN"}\n// an earlier board'],
+      [skill, ''],
+    ]),
+    env: { HOME: '/home/me', LANG: 'en_US.UTF-8' },
+    mtime: 1,
+    hasTasks: true,
+    ran: [],
+  }
+  engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/persona_framework', surface: 'terminal', isInteractive: true })
+  // Nothing is written behind the person's back, so the files wait for a connect.
+  await $.command.run({ ...TIDY, args: 'lang auto' })
+  expect((world.files.get(board) ?? '').split('\n')[0]).toBe('globalThis.AGENT_BOARD = {"path":"/home/me/.claude/progress.md","lang":"zh-CN"}')
+  await $.command.run({ ...TIDY, args: 'connect' })
+  expect((world.files.get(board) ?? '').split('\n')[0]).toBe('globalThis.AGENT_BOARD = {"path":"/home/me/.claude/progress.md","lang":"en"}')
+  expect(world.files.get(skill)).toContain(`description: ${JSON.stringify(EN.boardCommandDescription)}`)
 })
 
 test('an agent’s turn that only showed the board gets no block', async ($, on) => {

@@ -282,7 +282,12 @@ export const withHermesHooks = (text: string, events: Array<[string, string]>): 
   // a session start neither rewrites the file nor says it connected Hermes again.
   const lines0 = text.split('\n')
   const items = hermesItems(lines0).map(([start, end]) => lines0.slice(start, end).join('\n'))
-  const isItemOf = (item: string, command: string): boolean => item.includes(command) || item.includes(JSON.stringify(command)) || item.includes(`'${command.replace(/'/g, "''")}'`)
+  // A dumper folds a long command onto the next line at a space (PyYAML at 80 columns, the
+  // way Hermes saves config.yaml, splits the Windows command), so a run of spaces and line
+  // breaks counts as one space.
+  const flat = (one: string): string => one.replace(/\s+/g, ' ')
+  const isItemOf = (item: string, command: string): boolean =>
+    [command, JSON.stringify(command), `'${command.replace(/'/g, "''")}'`].some(form => flat(item).includes(flat(form)))
   if (items.length === events.length && events.every(([, command]) => items.some(item => isItemOf(item, command)))) return text
   const base = stripHermesHooks(text, true)
   const item = (command: string): string => `- {command: ${JSON.stringify(command)}, timeout: 10}`
@@ -642,6 +647,18 @@ export default {
 // The standalone board, with the progress file and language of the session that wrote it
 // set on its first line (an ES module's imports run first either way).
 export const boardScript = (path: string, lang: string): string => `globalThis.AGENT_BOARD = ${JSON.stringify({ path, lang })}\n${BOARD_SCRIPT}`
+
+// The language a board script already written prints in, from its first line; '' when it
+// names none.
+export const boardLangOf = (code: string): string => {
+  const head = /^globalThis\.AGENT_BOARD = ([^\n]*)/.exec(code)
+  try {
+    const lang = (JSON.parse(head?.[1] ?? '') as { lang?: unknown } | null)?.lang
+    return typeof lang === 'string' ? lang : ''
+  } catch {
+    return ''
+  }
+}
 
 // Each agent's way to show the board, so the person sees every agent's work from whichever
 // one they are in. Gemini CLI and OpenCode paste a command's output into the prompt before

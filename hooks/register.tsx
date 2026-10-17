@@ -58,10 +58,10 @@ import type { PaneActions, PaneModel, PaneUi } from './pane'
 import { isQuickAdd, parseQuickAdd, quickAddWords } from './quick'
 import type { Lang, Strings } from './i18n'
 import { RULE_ID, RULES } from './rule'
-import { langOf, resolveLang, STRINGS } from './strings'
-import { answerTurns, applyDigest, clearAsked, cleanHandoff, isWork, lastQuestion, markAsked, needsRefresh, parseDigest, replyData, turnTools } from './digest'
+import { chosenLang, langOf, resolveLang, STRINGS } from './strings'
+import { answerTurns, applyDigest, clearAsked, cleanHandoff, isWork, lastQuestion, markAsked, needsRefresh, parseDigest, replyData, requestData, turnTools } from './digest'
 import type { Digest } from './digest'
-import { agentHooks, boardScript, DELETE, hasOurHook, isWindowsHost, OPENCLAW_MIN, openclawPrinted, openclawSavedBy, openclawTooOld, psQuote, reporterPs1, reporterSh, withoutSection } from './connect'
+import { agentHooks, boardLangOf, boardScript, DELETE, hasOurHook, isWindowsHost, OPENCLAW_MIN, openclawPrinted, openclawSavedBy, openclawTooOld, psQuote, reporterPs1, reporterSh, withoutSection } from './connect'
 import {
   ANSWER_KEEP,
   answerKey,
@@ -115,6 +115,9 @@ const today = atom({ plugin: 'agent-board', key: 'today' } as const, 0)
 const isLegendOpen = atom({ plugin: 'agent-board', key: 'isLegendOpen' } as const, false)
 // The language the pane speaks (strings.ts resolveLang), settled at session start.
 const lang = atom({ plugin: 'agent-board', key: 'lang' } as const, 'zh-TW')
+// Whether the person picked that language (strings.ts chosenLang), rather than it coming from
+// Claude Code's setting or LANG.
+const isLangChosen = atom({ plugin: 'agent-board', key: 'isLangChosen' } as const, false)
 // Which folded sections the person opened; kept across sessions in $.store.
 const opened = atom({ plugin: 'agent-board', key: 'opened' } as const, [] as string[])
 // When the pane first saw each hand-kept task done (by doneKey), to archive it a day later.
@@ -608,7 +611,7 @@ const summarize = async ($: EngineInterface, mirror: ProgressMirror, prompt: str
     model: 'haiku',
     maxTokens: 300,
     effort: 'low',
-    prompt: s.digestPrompt(mirror.firstPrompt.slice(0, 1200), prompt.slice(0, 1200), replyData(answer), mirror.title, mirror.context, steps),
+    prompt: s.digestPrompt(requestData(mirror.firstPrompt), requestData(prompt), replyData(answer), mirror.title, mirror.context, steps),
   })
   const question = lastQuestion(answer)
   const parsed = asked?.isAnswered === true ? parseDigest(asked.text) : null
@@ -719,8 +722,15 @@ const connectAgents = async ($: EngineInterface, mode: ConnectMode): Promise<{ t
   if (!remove && (await readText($, script).catch(() => '')) !== reporter) await $.fs.write(script, reporter)
   // The board for every other agent: their board commands run it, and so can any terminal.
   const board = `${path.replace(/[\\/][^\\/]*$/, '')}${sep}agent-board.mjs`
-  const boardCode = boardScript(path, s.lang)
-  if (!remove && (await readText($, board).catch(() => '')) !== boardCode) await $.fs.write(board, boardCode)
+  // The board script and the board commands are one set of files for every session here. A
+  // language taken from Claude Code's setting or LANG can differ between two sessions (one
+  // from the desktop app, one from a terminal), which would take turns rewriting them at each
+  // start, so only a language the person picked replaces the one they hold: the one picked
+  // now, else the one `/progress lang` last settled.
+  const held = await readText($, board).catch(() => '')
+  const fileLang = (await read($, isLangChosen)) ? s.lang : (langOf(await $.store.get('boardLang')) ?? langOf(boardLangOf(held)) ?? s.lang)
+  const boardCode = boardScript(path, fileLang)
+  if (!remove && held !== boardCode) await $.fs.write(board, boardCode)
   if (remove && (await $.fs.exists(board))) await removeFiles($, [board], isWin)
   const done: string[] = []
   const skipped: string[] = []
@@ -734,7 +744,7 @@ const connectAgents = async ($: EngineInterface, mode: ConnectMode): Promise<{ t
   // Agents with a hook file that could not be written. OpenClaw's config entry loads its
   // plugin file, so when the plugin file fails, the entry is not written either.
   const failed = new Set<string>()
-  for (const hook of agentHooks({ home, sep, isWindows: isWin, script, inbox: inboxPath(path), codexHome, grokHome, hermesHome, openclawHome, board, s })) {
+  for (const hook of agentHooks({ home, sep, isWindows: isWin, script, inbox: inboxPath(path), codexHome, grokHome, hermesHome, openclawHome, board, s: STRINGS[fileLang] })) {
     if (failed.has(hook.agent)) continue
     let isInstalled = false
     for (const dir of hook.dirs ?? [hook.dir]) isInstalled = isInstalled || (await $.fs.exists(dir))
@@ -912,7 +922,14 @@ const drainInbox = async ($: EngineInterface): Promise<void> => {
       // Read at once: the model may keep the turn waiting, and a taken file is only safe
       // from the day-old sweep of another session while it is fresh.
       const body = await $.fs.read(to).catch(() => '')
-      const turn = readTurn(name, typeof body === 'string' ? body : '')
+      // One file that cannot be read must not stop the loop, or the files taken before it
+      // wait a day for the sweep that deletes them unread.
+      let turn: AgentTurn | null = null
+      try {
+        turn = readTurn(name, typeof body === 'string' ? body : '')
+      } catch {
+        turn = null
+      }
       if (turn !== null) turns.push(turn)
     }
     if (taken.length === 0) return
@@ -1193,8 +1210,10 @@ const showCopied = async ($: EngineInterface, question: string, text: string, su
 // The language from the four places it can come from (strings.ts resolveLang).
 const settleLang = async ($: EngineInterface, options: PluginOptions): Promise<void> => {
   const settings = (await $.settings.read().catch(() => ({}))) as { language?: unknown }
-  const chosen = resolveLang(options.language, await $.store.get('lang'), settings.language, await $.env.get('LANG'))
+  const stored = await $.store.get('lang')
+  const chosen = resolveLang(options.language, stored, settings.language, await $.env.get('LANG'))
   await update($, lang, () => chosen)
+  await update($, isLangChosen, () => chosenLang(options.language, stored) !== null)
 }
 
 const setNotify = async ($: EngineInterface, isOn: boolean): Promise<void> => {
@@ -1300,6 +1319,11 @@ export const register: Register = (on, options) => {
       await settleLang($, options)
       $.ui.invalidate('ui.render')
       await refreshStatus($)
+      // The board script and the board commands take the language just settled, `auto`
+      // included, at once and at every later connect, so a session in another language, or a
+      // `/progress connect` run by hand with autoConnect off, leaves them so.
+      await $.store.set('boardLang', (await wordsOf($)).lang)
+      await autoConnect($, options).catch(() => undefined)
 
       return { text: (await wordsOf($)).langSet }
     }

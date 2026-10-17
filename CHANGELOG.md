@@ -1,5 +1,66 @@
 # Changelog
 
+## 0.18.1 — 2026-10-17
+
+What the scan after the 0.17.1 merge left open, most harmful first.
+
+- **A comment opening in a block's words no longer hides the blocks after it.** A
+  summed-up title such as `TITLE: <!-- x`, a step, a branch name or a first request
+  holding `<!--` was written into the block as it was, and the reader then skipped
+  every line up to the next `-->`, the next session's block markers with them. Every
+  line the mod writes into a block now leaves out `<!--` and writes `-->` as `->`. Test: "a
+  comment opening in a summed-up title, a step, a branch or a first request is written
+  as plain words, so it hides no block after it".
+- **A short report before the printed board is work again.** 0.17.1 let up to about
+  40 characters stand before the board in a look at it, so `Fixed the 429 header and
+  added a test.` above the board was taken for a look, and that turn's work never
+  reached the pane. Only a short line that points at the board and ends in a colon
+  (`Here is where things stand:`, `目前進度：`) may stand there now, and not one that
+  says work was done (`目前已修好 429 看板如下：`). A blank line between the opening fence
+  and the board no longer turns a look into work. A single bullet, or a wrap-up longer
+  than about 160 Latin characters (80 Chinese ones), after the board still counts as
+  work: it reads the same as work told there, and a look taken for work only leaves a
+  block the person sees and archives, while work taken for a look is lost without a
+  word. The live Grok Build replies still count as looks. Test: "a short report before
+  the printed board is work, a lead-in line
+  or a blank line inside its fence is still a look, and a bullet or a long wrap-up after
+  it keeps its block".
+- **One unreadable inbox file no longer strands the turns taken with it.** A payload
+  nested about 100,000 deep overflowed the stack while its words were looked for, and
+  the files that session had already taken in the same look were left unread until the
+  day-old sweep deleted them. The search now stops 32 levels down, and a file that
+  cannot be read is passed over. Test: "an inbox file nested too deep to read strands
+  no taken file, and the turn taken before it still gets its block".
+- **Two sessions in different languages no longer take turns rewriting the board
+  files.** The board script and the board skills and commands were written in each
+  session's language, so a desktop session and a terminal session whose `LANG` differed
+  rewrote them at every start. A language taken from Claude Code's setting or `LANG` now
+  keeps the one the files hold; only a language the person picked (`/progress lang`, the
+  plugin's `language` option) replaces it. `/progress lang`, `auto` included, rewrites
+  them at once, and with the `autoConnect` option off, at the next `/progress connect`.
+  Tests: "a session whose system speaks another language leaves the board script and
+  skill in the language they hold, until the person picks one, auto included", "with
+  the autoConnect option off, going back to auto reaches the board script and skill at
+  the next connect run by hand".
+- **Hermes hooks that Hermes folded onto two lines are left as they are.** Hermes 0.16.0
+  and 0.19.0 save `config.yaml` with PyYAML at its usual 80 columns, which splits the
+  Windows command onto a second line; the next session start no longer takes that for a
+  missing hook, rewrites it and asks the person to approve it again. Test: "Hermes hooks
+  of ours that Hermes folded onto two lines are left as they are, so a session start says
+  nothing".
+- **What the user asked reaches the model fenced as data, like the reply.** When a turn
+  is summed up, the first request and this turn's request now sit between `<request>`
+  tags too, in all three languages, with no tag inside that could close the fence early.
+  Test: "what the user asked, first and this turn, reaches the model fenced as data like
+  the reply, in every language".
+
+Checked and left as they are: the Hermes command inside a double-quoted YAML value
+reads back unchanged with a `'`, `"` or `\` in the path (checked with the PyYAML 6.0.3
+Hermes runs, which is what loads `config.yaml`), and a Windows path cannot hold a `"`.
+A comment naming the reporter script does not keep a first Hermes connection quiet: a
+session start always names Hermes and Codex, which ask the person to approve a changed
+hook, and the other agents' configs are JSON, which holds no comments.
+
 ## 0.18.0 — 2026-10-17
 
 - **Work in the board from any agent, as in the pane.** `node
