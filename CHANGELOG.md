@@ -2,22 +2,26 @@
 
 ## 0.10.0 — 2026-10-17
 
-- **New name: Andon.** The pane follows Claude Code, Codex, Gemini CLI, Cursor,
+- **New name: Agent Board.** The pane follows Claude Code, Codex, Gemini CLI, Cursor,
   OpenCode, Grok Build and Muse Code, so a name starting with "claude" said too
-  little. An andon is the light board over a factory line: every station has a
-  light, and the one that needs help turns on.
-  - The plugin is `andon`, from the `andon` marketplace, in the
-    `WenyuChiou/andon` repository: `claude plugin install andon@andon`.
+  little. The new one says what it is: one board for all your agents.
+  - The plugin is `agent-board`, from the `agent-board` marketplace, in the
+    `WenyuChiou/agent-board` repository:
+    `claude plugin install agent-board@agent-board`.
   - The tour, the social preview, the READMEs, the guides and the page title of
     `progress.html` carry the new name, and the plugin has a description that
     says what it is for.
+  - The tour reads better at README size: the pane window is larger, every
+    line of small text is bigger, and each moment eases in and out (headlines
+    rise into place, the pane's frames dissolve into each other, the end card
+    grows in) instead of a flat fade.
   - `/progress connect` writes Grok Build's and OpenCode's hook files as
-    `andon.json` and `andon.js`, and takes away the `progress-pane` ones it
+    `agent-board.json` and `agent-board.js`, and takes away the `progress-pane` ones it
     wrote before, so no turn is reported twice. The section between
     `claude-progress-pane` markers in an agent's instructions is still found
     and removed.
   - The setup scripts uninstall `project-progress@claude-progress-pane` and
-    remove its marketplace before they install `andon@andon`. An auto-update
+    remove its marketplace before they install `agent-board@agent-board`. An auto-update
     turned off under the old name stays off, and an agent section or a
     CLAUDE.md block under the old markers is replaced rather than doubled.
   - Unchanged: the `/progress` command, `~/.claude/progress.md` and its format,

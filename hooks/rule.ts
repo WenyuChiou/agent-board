@@ -3,9 +3,9 @@ import type { Lang } from './i18n'
 // How Claude should use its Task list so the pane can follow; added to the system prompt
 // by the mod itself, in the pane's language, so it leaves with the mod and needs no
 // CLAUDE.md edit.
-export const RULE_ID = 'andon:rule'
+export const RULE_ID = 'agent-board:rule'
 
-const ZH_TW_RULE = `# 進度面板（Andon）
+const ZH_TW_RULE = `# 進度面板（Agent Board）
 
 使用者右側的進度面板會自動把 Task 清單同步到 ~/.claude/progress.md（Windows：%USERPROFILE%\\.claude\\progress.md），不需要手動改這個檔。
 
@@ -15,7 +15,7 @@ const ZH_TW_RULE = `# 進度面板（Andon）
 - 不在程式專案裡的事（例如求職），直接寫進 progress.md 自己的段落：[x] 完成、[~] 正在做、[ ] 還沒做、[?] 等使用者、[>] 在跑、[!] 卡住、[-] 取消；截止日寫「截止 10-31」。
 - 不要改 <!-- auto … --> 標記之間的內容，那是面板自己維護的。`
 
-const ZH_CN_RULE = `# 进度面板（Andon）
+const ZH_CN_RULE = `# 进度面板（Agent Board）
 
 用户右侧的进度面板会自动把 Task 列表同步到 ~/.claude/progress.md（Windows：%USERPROFILE%\\.claude\\progress.md），不需要手动改这个文件。
 
@@ -25,7 +25,7 @@ const ZH_CN_RULE = `# 进度面板（Andon）
 - 不在代码项目里的事（例如求职），直接写进 progress.md 自己的段落：[x] 完成、[~] 正在做、[ ] 还没做、[?] 等用户、[>] 在跑、[!] 卡住、[-] 取消；截止日写「截止 10-31」。
 - 不要改 <!-- auto … --> 标记之间的内容，那是面板自己维护的。`
 
-const EN_RULE = `# Progress pane (Andon)
+const EN_RULE = `# Progress pane (Agent Board)
 
 The person's progress pane mirrors your Task list into ~/.claude/progress.md (Windows: %USERPROFILE%\\.claude\\progress.md) by itself; never edit that file for your own work.
 

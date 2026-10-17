@@ -1,10 +1,10 @@
 # progress.md format, version 1
 
-`progress.md` is the one file the Andon pane reads. Anything that can write a text file can put its work on the pane: Claude Code, Codex CLI, Gemini CLI, Cursor, Aider, Continue, a shell script, or a person with an editor.
+`progress.md` is the one file the Agent Board pane reads. Anything that can write a text file can put its work on the pane: Claude Code, Codex CLI, Gemini CLI, Cursor, Aider, Continue, a shell script, or a person with an editor.
 
 This page says what the pane's parser accepts and what the pane's writer produces. It is written from the code (`hooks/parse.ts`, `hooks/blocks.ts`, `hooks/mirror.ts`, `hooks/ask.ts`, `hooks/journal.ts`, `hooks/view.ts`, `hooks/register.tsx`, and the words the writer uses in `hooks/i18n.ts`). Where this page and the code disagree, the code wins and this page has a bug.
 
-In this page "must" and "should" are meant as in RFC 2119, and "the pane" means the Andon plugin.
+In this page "must" and "should" are meant as in RFC 2119, and "the pane" means the Agent Board plugin.
 
 Contents: [File](#file) · [Structure](#structure) · [Steps](#steps-and-marks) · [Tasks](#tasks) · [Agent blocks](#agent-blocks) · [Lifecycle](#lifecycle) · [Language](#language) · [Waiting steps](#waiting-steps-and-ask-kinds) · [Example](#worked-example) · [Checklist](#writing-a-block-from-another-agent) · [Versioning](#versioning)
 

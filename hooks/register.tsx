@@ -64,7 +64,7 @@ import { keepRecent, remindersOf } from './remind'
 import { buildView, statusLine } from './view'
 import type { StepRef, TaskRef, TaskRow } from './view'
 
-const PANE = 'andon'
+const PANE = 'agent-board'
 const POLL_MS = 2000
 const TICK_MS = 30 * 1000
 // How often the inbox of other agents' turns is looked at: a stat, and a read when it changed.
@@ -77,26 +77,26 @@ const DAY = 24 * 60 * 60 * 1000
 
 const EMPTY: ProgressSnapshot = { path: '', isMissing: true, error: null, mtimeMs: 0, size: 0, projects: [] }
 
-const snapshot = atom({ plugin: 'andon', key: 'snapshot' } as const, EMPTY)
-const here = atom({ plugin: 'andon', key: 'here' } as const, [] as string[])
-const mine = atom({ plugin: 'andon', key: 'mine' } as const, null as ProgressMirror | null)
-const now = atom({ plugin: 'andon', key: 'now' } as const, 0)
-const hasTaskTools = atom({ plugin: 'andon', key: 'hasTaskTools' } as const, true)
+const snapshot = atom({ plugin: 'agent-board', key: 'snapshot' } as const, EMPTY)
+const here = atom({ plugin: 'agent-board', key: 'here' } as const, [] as string[])
+const mine = atom({ plugin: 'agent-board', key: 'mine' } as const, null as ProgressMirror | null)
+const now = atom({ plugin: 'agent-board', key: 'now' } as const, 0)
+const hasTaskTools = atom({ plugin: 'agent-board', key: 'hasTaskTools' } as const, true)
 
-const expanded = atom({ plugin: 'andon', key: 'expanded' } as const, '')
-const answer = atom({ plugin: 'andon', key: 'answer' } as const, null as ProgressAnswer | null)
-const isNotifyOn = atom({ plugin: 'andon', key: 'isNotifyOn' } as const, true)
+const expanded = atom({ plugin: 'agent-board', key: 'expanded' } as const, '')
+const answer = atom({ plugin: 'agent-board', key: 'answer' } as const, null as ProgressAnswer | null)
+const isNotifyOn = atom({ plugin: 'agent-board', key: 'isNotifyOn' } as const, true)
 // The person's /config theme, which picks the dark or light 和色 set.
-const theme = atom({ plugin: 'andon', key: 'theme' } as const, 'dark')
+const theme = atom({ plugin: 'agent-board', key: 'theme' } as const, 'dark')
 // Steps finished today, from the journal.
-const today = atom({ plugin: 'andon', key: 'today' } as const, 0)
-const isLegendOpen = atom({ plugin: 'andon', key: 'isLegendOpen' } as const, false)
+const today = atom({ plugin: 'agent-board', key: 'today' } as const, 0)
+const isLegendOpen = atom({ plugin: 'agent-board', key: 'isLegendOpen' } as const, false)
 // The language the pane speaks (strings.ts resolveLang), settled at session start.
-const lang = atom({ plugin: 'andon', key: 'lang' } as const, 'zh-TW')
+const lang = atom({ plugin: 'agent-board', key: 'lang' } as const, 'zh-TW')
 // Which folded sections the person opened; kept across sessions in $.store.
-const opened = atom({ plugin: 'andon', key: 'opened' } as const, [] as string[])
+const opened = atom({ plugin: 'agent-board', key: 'opened' } as const, [] as string[])
 // When the pane first saw each hand-kept task done (by doneKey), to archive it a day later.
-const doneSeen = atom({ plugin: 'andon', key: 'doneSeen' } as const, {} as Record<string, number>)
+const doneSeen = atom({ plugin: 'agent-board', key: 'doneSeen' } as const, {} as Record<string, number>)
 
 const messageOf = (error: unknown): string => (error instanceof Error ? error.message : String(error))
 

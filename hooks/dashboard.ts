@@ -110,7 +110,7 @@ export const dashboardHtml = (view: View, s: Strings, path: string, stamp: strin
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>${esc(s.paneTitle)} · Andon</title>
+<title>${esc(s.paneTitle)} · Agent Board</title>
 <style>
 :root{${vars(LIGHT)};--ground:#fbfaf5;--ink:#2b2b2b;--line:#e3e1d7;color-scheme:light}
 @media (prefers-color-scheme:dark){:root{${vars(DARK)};--ground:#1e2022;--ink:#e6e4dc;--line:#34373a;color-scheme:dark}}

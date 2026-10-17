@@ -1,10 +1,10 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="640" viewBox="0 0 1280 640" role="img" aria-label="Andon: One pane for every AI coding agent. Whatever is waiting on you comes first.">
-<title>Andon</title>
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="640" viewBox="0 0 1280 640" role="img" aria-label="Agent Board: One pane for every AI coding agent. Whatever is waiting on you comes first.">
+<title>Agent Board</title>
 <defs><clipPath id="edge"><rect width="1280" height="640" rx="20"/></clipPath></defs>
 <g clip-path="url(#edge)">
 <rect width="1280" height="640" fill="#f6f5f0"/>
 <text x="72" y="128" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans TC', 'Noto Sans SC', 'PingFang TC', 'Microsoft JhengHei', 'Microsoft YaHei', sans-serif" font-size="15" font-weight="600" letter-spacing="3" fill="#595857">CLAUDE CODE PLUGIN  ·  MIT</text>
-<text x="70" y="196" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans TC', 'Noto Sans SC', 'PingFang TC', 'Microsoft JhengHei', 'Microsoft YaHei', sans-serif" font-size="50" font-weight="700" fill="#2b2b2b">Andon</text>
+<text x="70" y="196" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans TC', 'Noto Sans SC', 'PingFang TC', 'Microsoft JhengHei', 'Microsoft YaHei', sans-serif" font-size="50" font-weight="700" fill="#2b2b2b">Agent Board</text>
 <text x="72" y="256" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans TC', 'Noto Sans SC', 'PingFang TC', 'Microsoft JhengHei', 'Microsoft YaHei', sans-serif" font-size="24" fill="#2b2b2b">One pane for every AI coding agent.</text>
 <text x="72" y="294" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans TC', 'Noto Sans SC', 'PingFang TC', 'Microsoft JhengHei', 'Microsoft YaHei', sans-serif" font-size="24" fill="#595857">Whatever is waiting on you comes first.</text>
 <text x="72" y="392" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', 'Noto Sans Mono CJK TC', 'Noto Sans CJK TC', 'PingFang TC', 'Microsoft JhengHei', monospace" font-size="20" fill="#715C1F">●</text><text x="104" y="392" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans TC', 'Noto Sans SC', 'PingFang TC', 'Microsoft JhengHei', 'Microsoft YaHei', sans-serif" font-size="19" fill="#2b2b2b">One question at a time, with a button per answer</text>

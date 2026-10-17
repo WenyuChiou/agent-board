@@ -11,14 +11,14 @@
 在 Claude Code 终端对话的输入框里：
 
 ```
-/plugin install andon --marketplace WenyuChiou/andon
+/plugin install agent-board --marketplace WenyuChiou/agent-board
 ```
 
 回答 `y` 添加 marketplace，并选 user scope。或者从 shell 运行：
 
 ```
-claude plugin marketplace add WenyuChiou/andon
-claude plugin install andon@andon
+claude plugin marketplace add WenyuChiou/agent-board
+claude plugin install agent-board@agent-board
 ```
 
 ### 2. 运行设置脚本
@@ -28,13 +28,13 @@ claude plugin install andon@andon
 Windows（PowerShell）：
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File "$env:USERPROFILE\.claude\plugins\marketplaces\andon\scripts\setup.ps1"
+powershell -ExecutionPolicy Bypass -File "$env:USERPROFILE\.claude\plugins\marketplaces\agent-board\scripts\setup.ps1"
 ```
 
 macOS / Linux：
 
 ```bash
-bash ~/.claude/plugins/marketplaces/andon/scripts/setup.sh
+bash ~/.claude/plugins/marketplaces/agent-board/scripts/setup.sh
 ```
 
 它做的事：
@@ -213,8 +213,8 @@ hook 运行的是 `/progress connect` 写好的 `~/.claude/progress-report.sh`�
 自动更新打开时（设置脚本会帮你打开），新版本会自己送到。要手动更新：
 
 ```
-claude plugin marketplace update andon
-claude plugin update andon@andon
+claude plugin marketplace update agent-board
+claude plugin update agent-board@agent-board
 ```
 
 然后在运行中的对话里输入 `/reload-plugins`，或开新的对话。
@@ -222,8 +222,8 @@ claude plugin update andon@andon
 要卸载：
 
 ```
-claude plugin uninstall andon@andon
-claude plugin marketplace remove andon
+claude plugin uninstall agent-board@agent-board
+claude plugin marketplace remove agent-board
 ```
 
 `progress.md`、它的归档文件和日志，以及 shell 的 profile 里那一行都会留着。
@@ -235,8 +235,8 @@ claude plugin marketplace remove andon
 ```
 claude plugin uninstall project-progress@claude-progress-pane
 claude plugin marketplace remove claude-progress-pane
-claude plugin marketplace add WenyuChiou/andon
-claude plugin install andon@andon
+claude plugin marketplace add WenyuChiou/agent-board
+claude plugin install agent-board@agent-board
 claude -p "/progress connect"
 ```
 

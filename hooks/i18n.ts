@@ -172,7 +172,7 @@ export const ZH_TW = {
   stepSep: '；',
 
   // /progress
-  commandDescription: 'Andon 進度面板：開啟；open 開網頁版、connect 接上其他 agent、整理、同步、加 …、週報、今天、通知 開/關、lang en|zh-TW|zh-CN',
+  commandDescription: 'Agent Board 進度面板：開啟；open 開網頁版、connect 接上其他 agent、整理、同步、加 …、週報、今天、通知 開/關、lang en|zh-TW|zh-CN',
   commandHint: '[open|connect|整理|同步|加 …|週報|今天|通知 開/關|lang …]',
   tidyUnreadable: '讀不到進度檔或封存檔，沒有動任何檔案。',
   tidyNothing: '沒有要封存的。',

@@ -23,7 +23,7 @@ const SESSION = '2be48af2-6193-5040-aacc-e0546d6784f1'
 
 const PR: ProgressPr = {
   number: 12,
-  url: 'https://github.com/WenyuChiou/andon/pull/12',
+  url: 'https://github.com/WenyuChiou/agent-board/pull/12',
   state: 'open',
   isDraft: false,
   ci: 'fail',
@@ -687,12 +687,12 @@ test('each agent’s config gets the hook in the shape it reads, and nothing els
   const hooks = Object.fromEntries(agentHooks(ctx).map(hook => [hook.agent, hook]))
   const gemini = JSON.parse(String(hooks.gemini?.edit('{"theme":"dark"}', false)))
   expect(gemini.theme).toBe('dark')
-  expect(gemini.hooks.AfterAgent).toEqual([{ hooks: [{ name: 'andon', type: 'command', command: "sh '/h/.claude/progress-report.sh' gemini turn", timeout: 5000 }] }])
+  expect(gemini.hooks.AfterAgent).toEqual([{ hooks: [{ name: 'agent-board', type: 'command', command: "sh '/h/.claude/progress-report.sh' gemini turn", timeout: 5000 }] }])
   expect(gemini.tools).toBeUndefined()
   const muse = JSON.parse(String(hooks.muse?.edit('', false)))
   expect(muse.schema_version).toBe(1)
   expect(Object.keys(muse.hooks.Stop[0].hooks[0]).sort()).toEqual(['command', 'timeout', 'type'])
-  expect(hooks.grok?.file).toBe('/h/.grok/hooks/andon.json')
+  expect(hooks.grok?.file).toBe('/h/.grok/hooks/agent-board.json')
   expect(hooks.grok?.old).toBe('/h/.grok/hooks/progress-pane.json')
   expect(hooks.opencode?.old).toBe('/h/.config/opencode/plugin/progress-pane.js')
   expect(JSON.parse(String(hooks.grok?.edit('', false))).hooks.Stop[0].hooks[0].command).toBe("sh '/h/.claude/progress-report.sh' grok turn")
@@ -705,8 +705,8 @@ test('each agent’s config gets the hook in the shape it reads, and nothing els
   )
   // A file that is not JSON is left alone; the AGENTS.md section a hook replaces goes.
   expect(hooks.codex?.edit('# toml? no', false)).toBeNull()
-  expect(withoutSection('a\n\n<!-- andon:start -->\nx\n<!-- andon:end -->\n')).toBe('a\n')
+  expect(withoutSection('a\n\n<!-- agent-board:start -->\nx\n<!-- agent-board:end -->\n')).toBe('a\n')
   // ...and the one written under the earlier name, claude-progress-pane.
   expect(withoutSection('a\n\n<!-- claude-progress-pane:start -->\nx\n<!-- claude-progress-pane:end -->\n')).toBe('a\n')
-  expect(withoutSection('a\n<!-- andon:start -->\nx\n<!-- claude-progress-pane:end -->\n')).toBe('a\n<!-- andon:start -->\nx\n<!-- claude-progress-pane:end -->\n')
+  expect(withoutSection('a\n<!-- agent-board:start -->\nx\n<!-- claude-progress-pane:end -->\n')).toBe('a\n<!-- agent-board:start -->\nx\n<!-- claude-progress-pane:end -->\n')
 })

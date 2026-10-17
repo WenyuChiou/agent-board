@@ -75,6 +75,19 @@ const isFlexible = (node: Node | string): boolean =>
 const isSpacer = (node: Node | string): boolean =>
   typeof node !== 'string' && node.type === 'Box' && node.props.flexGrow !== undefined && node.children.length === 0
 
+// Some JSX runtimes hand back elements with the children inside props (React's shape)
+// rather than beside them; bring either into the one shape layout reads.
+export const toNode = (value: unknown): Node | string | null => {
+  if (value === null || value === undefined || value === false || value === true) return null
+  if (typeof value === 'string' || typeof value === 'number') return String(value)
+  if (Array.isArray(value)) return { type: 'Box', props: {}, children: value.map(toNode).filter((one): one is Node | string => one !== null) }
+  const element = value as { type: string; props?: Record<string, any>; children?: unknown }
+  const { children: inProps, ...props } = element.props ?? {}
+  const raw = element.children ?? inProps
+  const list = (Array.isArray(raw) ? raw : [raw]).flat(Infinity)
+  return { type: element.type, props, children: list.map(toNode).filter((one): one is Node | string => one !== null) }
+}
+
 export const layout = (node: Node | string, width: number, theme: Theme): Block => {
   if (typeof node === 'string') return wrap(node, width).map(line => toCells(line, {}))
   const p = node.props

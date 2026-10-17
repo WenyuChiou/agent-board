@@ -11,14 +11,14 @@ Needs Claude Code 2.1.287 or newer. Tested on 2.1.301 and 2.1.302.
 At the prompt of a Claude Code terminal session:
 
 ```
-/plugin install andon --marketplace WenyuChiou/andon
+/plugin install agent-board --marketplace WenyuChiou/agent-board
 ```
 
 Answer `y` to add the marketplace and pick the user scope. Or from a shell:
 
 ```
-claude plugin marketplace add WenyuChiou/andon
-claude plugin install andon@andon
+claude plugin marketplace add WenyuChiou/agent-board
+claude plugin install agent-board@agent-board
 ```
 
 ### 2. Run the setup script
@@ -28,13 +28,13 @@ Optional. It makes the two settings a plugin cannot make for itself, and is safe
 Windows (PowerShell):
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File "$env:USERPROFILE\.claude\plugins\marketplaces\andon\scripts\setup.ps1"
+powershell -ExecutionPolicy Bypass -File "$env:USERPROFILE\.claude\plugins\marketplaces\agent-board\scripts\setup.ps1"
 ```
 
 macOS / Linux:
 
 ```bash
-bash ~/.claude/plugins/marketplaces/andon/scripts/setup.sh
+bash ~/.claude/plugins/marketplaces/agent-board/scripts/setup.sh
 ```
 
 What it does:
@@ -204,8 +204,8 @@ The sweep runs when a session starts and every hour after. `/progress tidy` runs
 With auto-update on (the setup script turns it on), new versions arrive by themselves. To update by hand:
 
 ```
-claude plugin marketplace update andon
-claude plugin update andon@andon
+claude plugin marketplace update agent-board
+claude plugin update agent-board@agent-board
 ```
 
 then `/reload-plugins` in a running session, or start a new one.
@@ -213,8 +213,8 @@ then `/reload-plugins` in a running session, or start a new one.
 To uninstall:
 
 ```
-claude plugin uninstall andon@andon
-claude plugin marketplace remove andon
+claude plugin uninstall agent-board@agent-board
+claude plugin marketplace remove agent-board
 ```
 
 `progress.md`, its archives and journals, and the line in your shell profile stay.
@@ -226,8 +226,8 @@ Before 0.10 the plugin was `project-progress`, from the `claude-progress-pane` m
 ```
 claude plugin uninstall project-progress@claude-progress-pane
 claude plugin marketplace remove claude-progress-pane
-claude plugin marketplace add WenyuChiou/andon
-claude plugin install andon@andon
+claude plugin marketplace add WenyuChiou/agent-board
+claude plugin install agent-board@agent-board
 claude -p "/progress connect"
 ```
 

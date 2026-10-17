@@ -5,8 +5,8 @@
 // Arguments: the agent's name, `turn` or `end`, then optionally the JSON itself (as Codex's
 // legacy notify passes it) instead of on stdin.
 export const reporterSh = (inbox: string): string => `#!/bin/sh
-# Written by the Andon plugin (/progress connect). An agent's hook runs it at the end of
-# a turn or a session; the Andon pane reads what it saves.
+# Written by the Agent Board plugin (/progress connect). An agent's hook runs it at the end of
+# a turn or a session; the Agent Board pane reads what it saves.
 exec 2>/dev/null
 agent="\${1:-agent}"
 event="\${2:-turn}"
@@ -30,8 +30,8 @@ find "$dir" -name '*.json' -mtime +2 -exec rm -f {} +
 exit 0
 `
 
-export const reporterPs1 = (inbox: string): string => `# Written by the Andon plugin (/progress connect). An agent's hook runs it at the end of
-# a turn or a session; the Andon pane reads what it saves.
+export const reporterPs1 = (inbox: string): string => `# Written by the Agent Board plugin (/progress connect). An agent's hook runs it at the end of
+# a turn or a session; the Agent Board pane reads what it saves.
 param([string]$Agent = 'agent', [string]$Event = 'turn', [string]$Payload = '')
 $ErrorActionPreference = 'SilentlyContinue'
 $dir = ${psQuote(inbox)}
@@ -138,7 +138,7 @@ export const writeConfig = (config: Json): string => `${JSON.stringify(config, n
 // The section setup --agents puts in an agent's instruction file, under the plugin's name or
 // the one it had before (claude-progress-pane). A hook replaces it, so the agent's work does
 // not show twice.
-const SECTION = /\n*<!-- (andon|claude-progress-pane):start -->[\s\S]*?<!-- \1:end -->\n*/g
+const SECTION = /\n*<!-- (agent-board|claude-progress-pane):start -->[\s\S]*?<!-- \1:end -->\n*/g
 
 export const withoutSection = (text: string): string => {
   const after = text.replace(SECTION, '\n')
@@ -198,10 +198,10 @@ export const agentHooks = (ctx: ConnectContext): AgentHook[] => {
       file: join(ctx, '.gemini', 'settings.json'),
       edit: jsonEdit(config =>
         withGroupedHook(
-          withGroupedHook(config, 'AfterAgent', turn('gemini'), { name: 'andon', timeout: 5000 }),
+          withGroupedHook(config, 'AfterAgent', turn('gemini'), { name: 'agent-board', timeout: 5000 }),
           'SessionEnd',
           end('gemini'),
-          { name: 'andon-end', timeout: 5000 },
+          { name: 'agent-board-end', timeout: 5000 },
         ),
       ),
     },
@@ -221,7 +221,7 @@ export const agentHooks = (ctx: ConnectContext): AgentHook[] => {
       agent: 'grok',
       label: 'Grok Build',
       dir: ctx.grokHome,
-      file: [ctx.grokHome, 'hooks', 'andon.json'].join(ctx.sep),
+      file: [ctx.grokHome, 'hooks', 'agent-board.json'].join(ctx.sep),
       old: [ctx.grokHome, 'hooks', 'progress-pane.json'].join(ctx.sep),
       edit: (text, remove) =>
         remove
@@ -246,7 +246,7 @@ export const agentHooks = (ctx: ConnectContext): AgentHook[] => {
       agent: 'opencode',
       label: 'OpenCode',
       dir: join(ctx, '.config', 'opencode'),
-      file: join(ctx, '.config', 'opencode', 'plugin', 'andon.js'),
+      file: join(ctx, '.config', 'opencode', 'plugin', 'agent-board.js'),
       old: join(ctx, '.config', 'opencode', 'plugin', 'progress-pane.js'),
       edit: (text, remove) => (remove ? (text.trim() === '' ? null : DELETE) : opencodePlugin(ctx)),
     },
@@ -256,7 +256,7 @@ export const agentHooks = (ctx: ConnectContext): AgentHook[] => {
 // OpenCode takes plugins, not commands: this one writes the session's last exchange into the
 // inbox when the session goes idle (a subagent's session aside), and an end when it is
 // deleted. Every export of a plugin file must be a function.
-export const opencodePlugin = (ctx: ConnectContext): string => `// Written by the Andon plugin (/progress connect): reports each finished turn to the Andon
+export const opencodePlugin = (ctx: ConnectContext): string => `// Written by the Agent Board plugin (/progress connect): reports each finished turn to the Agent Board
 // pane.
 import { mkdirSync, renameSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
@@ -278,7 +278,7 @@ const textOf = message =>
     .map(part => part.text)
     .join('\\n')
 
-export const Andon = async ({ client, directory }) => ({
+export const AgentBoard = async ({ client, directory }) => ({
   event: async ({ event }) => {
     try {
       if (event.type === 'session.idle') {

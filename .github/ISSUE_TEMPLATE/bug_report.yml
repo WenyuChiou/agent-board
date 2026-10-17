@@ -19,7 +19,7 @@ body:
     attributes:
       label: Versions
       description: Plugin version (`claude plugin list`) and Claude Code version (`claude --version`).
-      placeholder: andon 0.10.0, Claude Code 2.1.302
+      placeholder: agent-board 0.10.0, Claude Code 2.1.302
     validations:
       required: true
   - type: input

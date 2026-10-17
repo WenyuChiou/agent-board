@@ -175,15 +175,15 @@ try {
   $entry = @(
     '{',
     '  "extraKnownMarketplaces": {',
-    '    "andon": {',
+    '    "agent-board": {',
     '      "source": {',
     '        "source": "github",',
-    '        "repo": "WenyuChiou/andon"',
+    '        "repo": "WenyuChiou/agent-board"',
     '      }',
     '    }',
     '  },',
     '  "enabledPlugins": {',
-    '    "andon@andon": true',
+    '    "agent-board@agent-board": true',
     '  }',
     '}',
     '')
@@ -193,13 +193,13 @@ try {
   Check 'auto-update: the marketplace entry gets "autoUpdate": true, the rest stays' ((Read-Settings $dir) -ceq ($want -join "`n"))
 
   # 14. On one line it stays on one line.
-  $dir = New-Case '{"extraKnownMarketplaces": {"andon": {"source": {"source": "github", "repo": "WenyuChiou/andon"}}}}'
+  $dir = New-Case '{"extraKnownMarketplaces": {"agent-board": {"source": {"source": "github", "repo": "WenyuChiou/agent-board"}}}}'
   Invoke-Setup $dir | Out-Null
   Check 'auto-update: an entry on one line stays on one line' `
-    ((Read-Settings $dir) -ceq '{"extraKnownMarketplaces": {"andon": {"autoUpdate": true, "source": {"source": "github", "repo": "WenyuChiou/andon"}}}}')
+    ((Read-Settings $dir) -ceq '{"extraKnownMarketplaces": {"agent-board": {"autoUpdate": true, "source": {"source": "github", "repo": "WenyuChiou/agent-board"}}}}')
 
   # 15. Turned off by hand: stays off, and the file is not touched.
-  $text = "{`n  `"extraKnownMarketplaces`": {`n    `"andon`": {`n      `"source`": {`"source`": `"github`", `"repo`": `"WenyuChiou/andon`"},`n      `"autoUpdate`": false`n    }`n  }`n}`n"
+  $text = "{`n  `"extraKnownMarketplaces`": {`n    `"agent-board`": {`n      `"source`": {`"source`": `"github`", `"repo`": `"WenyuChiou/agent-board`"},`n      `"autoUpdate`": false`n    }`n  }`n}`n"
   $dir = New-Case $text
   Invoke-Setup $dir | Out-Null
   Check 'auto-update: "autoUpdate": false is left alone' `
@@ -219,7 +219,7 @@ try {
   $codexText = [IO.File]::ReadAllText($codexPath)
   Check 'agents: Codex keeps its own text and gets the section after it' `
     ($codexText.StartsWith("# My rules`n`nUse tabs.`n") -and $codexText.Contains('## Report your progress to the progress pane') -and
-     $codexText.Contains('andon:end') -and (Test-Path "$codexPath.bak"))
+     $codexText.Contains('agent-board:end') -and (Test-Path "$codexPath.bak"))
   Check 'agents: Gemini CLI gets GEMINI.md with the section' `
     ([IO.File]::ReadAllText((Join-Path $dir '.gemini\GEMINI.md')).Contains('agent=NAME'))
   Check 'agents: OpenCode, not installed here, gets nothing' (-not (Test-Path (Join-Path $dir '.config\opencode\AGENTS.md')))
@@ -238,10 +238,10 @@ try {
   Check 'agents: without -Agents it only says which agents it found' ($out -match 'codex installed here too')
   Invoke-Setup $dir "'RemoteSigned'" '-Agents codex,opencode' | Out-Null
   Check 'agents: Codex reads AGENTS.override.md when it has text, so the section goes there' `
-    ([IO.File]::ReadAllText((Join-Path $dir '.codex\AGENTS.override.md')).Contains('andon:start') -and
+    ([IO.File]::ReadAllText((Join-Path $dir '.codex\AGENTS.override.md')).Contains('agent-board:start') -and
      -not (Test-Path (Join-Path $dir '.codex\AGENTS.md')))
   Check 'agents: a named agent gets the section even before it has a folder' `
-    ([IO.File]::ReadAllText((Join-Path $dir '.config\opencode\AGENTS.md')).Contains('andon:start'))
+    ([IO.File]::ReadAllText((Join-Path $dir '.config\opencode\AGENTS.md')).Contains('agent-board:start'))
   $out = Invoke-Setup $dir "'RemoteSigned'" '-Agents copilot'
   Check 'agents: an unknown name is refused' ($out -match 'unknown agent: copilot')
   [IO.File]::WriteAllText((Join-Path $dir '.codex\hooks.json'), '{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"powershell -File progress-report.ps1 codex turn"}]}]}}', $utf8)
@@ -252,7 +252,7 @@ try {
 
   # 19. Written under the old name: the agent section is replaced, not doubled; an auto-update
   # turned off then stays off; the old CLAUDE.md block goes.
-  $text = "{`n  `"extraKnownMarketplaces`": {`n    `"claude-progress-pane`": {`n      `"autoUpdate`": false`n    },`n    `"andon`": {`n      `"source`": {`"source`": `"github`", `"repo`": `"WenyuChiou/andon`"}`n    }`n  }`n}`n"
+  $text = "{`n  `"extraKnownMarketplaces`": {`n    `"claude-progress-pane`": {`n      `"autoUpdate`": false`n    },`n    `"agent-board`": {`n      `"source`": {`"source`": `"github`", `"repo`": `"WenyuChiou/agent-board`"}`n    }`n  }`n}`n"
   $dir = New-Case $text
   New-Item -ItemType Directory -Path (Join-Path $dir '.codex') | Out-Null
   $codexPath = Join-Path $dir '.codex\AGENTS.md'
@@ -261,7 +261,7 @@ try {
   Invoke-Setup $dir "'RemoteSigned'" '-Agents codex' | Out-Null
   $codexText = [IO.File]::ReadAllText($codexPath)
   Check 'old name: the Codex section is replaced by one under the new markers' `
-    ($codexText.StartsWith("# My rules`n") -and ([regex]::Matches($codexText, 'andon:start')).Count -eq 1 -and
+    ($codexText.StartsWith("# My rules`n") -and ([regex]::Matches($codexText, 'agent-board:start')).Count -eq 1 -and
      -not $codexText.Contains('claude-progress-pane:') -and -not $codexText.Contains('old text'))
   Check 'old name: an auto-update turned off under it stays off' ((Read-Settings $dir) -ceq $text)
   Check 'old name: the old CLAUDE.md block goes' ([IO.File]::ReadAllText((Join-Path $dir '.claude\CLAUDE.md')) -ceq "# Mine`n")

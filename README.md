@@ -7,7 +7,7 @@
 
 English · [繁體中文](README.zh-TW.md) · [简体中文](README.zh-CN.md)
 
-**Andon** is for anyone running more than one AI coding agent. It tells you which one is waiting on you, so none of them sits there doing nothing.
+**Agent Board** is for anyone running more than one AI coding agent. It tells you which one is waiting on you, so none of them sits there doing nothing.
 
 ## Why you'd want it
 
@@ -17,13 +17,11 @@ You've got Claude Code on one project, Codex on another, maybe Gemini on a third
 - **It works with the agents you already use.** Claude Code, Codex, Gemini CLI, Cursor, OpenCode, Grok Build and Muse Code. Connect them with one command and they report on their own. You don't have to tell them anything.
 - **You can always pick up where you left off.** Compact the chat, close the terminal, come back tomorrow: you'll see what got done, what's stuck and what's next. If a session stopped halfway, you can take it over.
 
-The name comes from the andon board in a factory: every station has a light, and the one that needs help turns on. Same idea, for your agents.
-
 ## Install
 
 ```
-claude plugin marketplace add WenyuChiou/andon
-claude plugin install andon@andon
+claude plugin marketplace add WenyuChiou/agent-board
+claude plugin install agent-board@agent-board
 claude -p "/progress connect"
 ```
 
@@ -32,10 +30,10 @@ The last line connects the other agents on your machine. Restart them afterwards
 **Or let your agent do it.** Paste this into Codex, Gemini CLI, Cursor, Grok, Muse, or any agent that can run commands:
 
 ```text
-Install the Andon plugin for Claude Code and connect this machine's coding agents to it.
+Install the Agent Board plugin for Claude Code and connect this machine's coding agents to it.
 Run these three commands in order, and stop and tell me if one fails:
-claude plugin marketplace add WenyuChiou/andon
-claude plugin install andon@andon
+claude plugin marketplace add WenyuChiou/agent-board
+claude plugin install agent-board@agent-board
 claude -p "/progress connect"
 Then show me what the last command printed and tell me which agents to restart.
 ```

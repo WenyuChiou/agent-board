@@ -1,15 +1,15 @@
 {
-  "name": "andon",
+  "name": "agent-board",
   "version": "0.10.0",
   "description": "See what every AI coding agent is doing, with whatever is waiting on you at the top: Claude Code, Codex, Gemini CLI, Cursor, OpenCode, Grok Build, Muse Code",
   "author": {
     "name": "Wenyu Chiou"
   },
-  "homepage": "https://github.com/WenyuChiou/andon",
-  "repository": "https://github.com/WenyuChiou/andon",
+  "homepage": "https://github.com/WenyuChiou/agent-board",
+  "repository": "https://github.com/WenyuChiou/agent-board",
   "license": "MIT",
   "keywords": [
-    "andon",
+    "agent-board",
     "progress",
     "agents",
     "multi-agent",
