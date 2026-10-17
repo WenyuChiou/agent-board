@@ -64,7 +64,7 @@ To release, in this order:
 
 ## The agents table
 
-The "Supported agents" table in the three READMEs says, per agent, whether its turns reach the board and whether the board works inside it: ✅ tested live, ⚠️ works with a limit (say which in the last column), ❔ written from the agent's docs and not run, ❌ does not work. Change a mark only on evidence: a live run whose hook fired and whose block the pane drew (keep its payload as a test, and put the version in "Tested on"), or a run that failed (say how, in one line). An agent's new version that was not run keeps the version that was.
+The "Supported agents" section of the three READMEs sorts the agents into works fully, works in part (with its limit in one line) and not supported yet, and its table says, per agent, whether its turns reach the board and whether the board works inside it: ✅ works, ⚠️ works with a limit, ❔ not verified yet, ❌ not supported yet. Change a mark only on evidence: a live run whose hook fired and whose block the pane drew (keep its payload as a test, and put the version in "Verified on"), or a run that failed (say how, in one line). An agent's new version that was not run keeps the version that was. Keep the list, the table and the agent badges at the top in step: a green badge for works fully, yellow-green for works in part, none for the rest.
 
 ## Bug reports
 

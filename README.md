@@ -4,7 +4,7 @@
 
 <p align="center">
 <b>See what every AI coding agent is doing, with whatever is waiting on you at the top.</b><br>
-A Claude Code plugin that also follows Codex, Gemini CLI, OpenCode, Grok Build, Hermes Agent and OpenClaw (each tested live), with more in the table below.
+A Claude Code plugin that also follows Codex, Gemini CLI, OpenCode, Grok Build, Hermes Agent and OpenClaw, with more <a href="#supported-agents">below</a>.
 </p>
 
 <p align="center">
@@ -14,58 +14,17 @@ A Claude Code plugin that also follows Codex, Gemini CLI, OpenCode, Grok Build, 
 <img alt="macOS, Linux, Windows" src="https://img.shields.io/badge/macOS%20%C2%B7%20Linux%20%C2%B7%20Windows-lightgrey">
 </p>
 <p align="center">
-<a href="#supported-agents"><img alt="Tested live with Codex 0.163.0" src="https://img.shields.io/badge/Codex-0.163.0-brightgreen"></a>
-<a href="#supported-agents"><img alt="Tested live with Gemini CLI 0.64.0" src="https://img.shields.io/badge/Gemini%20CLI-0.64.0-brightgreen"></a>
-<a href="#supported-agents"><img alt="Tested live with OpenCode 1.19.3" src="https://img.shields.io/badge/OpenCode-1.19.3-brightgreen"></a>
-<a href="#supported-agents"><img alt="Tested live with Grok Build 1.0.62" src="https://img.shields.io/badge/Grok%20Build-1.0.62-yellowgreen"></a>
-<a href="#supported-agents"><img alt="Tested live with Hermes Agent 0.19.0" src="https://img.shields.io/badge/Hermes%20Agent-0.19.0-yellowgreen"></a>
-<a href="#supported-agents"><img alt="Tested live with OpenClaw 2026.10.4" src="https://img.shields.io/badge/OpenClaw-2026.10.4-yellowgreen"></a>
+<a href="#supported-agents"><img alt="Codex 0.163.0, works fully" src="https://img.shields.io/badge/Codex-0.163.0-brightgreen"></a>
+<a href="#supported-agents"><img alt="Gemini CLI 0.64.0, works fully" src="https://img.shields.io/badge/Gemini%20CLI-0.64.0-brightgreen"></a>
+<a href="#supported-agents"><img alt="OpenCode 1.19.3, works fully" src="https://img.shields.io/badge/OpenCode-1.19.3-brightgreen"></a>
+<a href="#supported-agents"><img alt="Grok Build 1.0.62, works in part" src="https://img.shields.io/badge/Grok%20Build-1.0.62-yellowgreen"></a>
+<a href="#supported-agents"><img alt="Hermes Agent 0.19.0, works in part" src="https://img.shields.io/badge/Hermes%20Agent-0.19.0-yellowgreen"></a>
+<a href="#supported-agents"><img alt="OpenClaw 2026.10.4, works in part" src="https://img.shields.io/badge/OpenClaw-2026.10.4-yellowgreen"></a>
 </p>
 
 <p align="center">English · <a href="README.zh-TW.md">繁體中文</a> · <a href="README.zh-CN.md">简体中文</a></p>
 
 You have Claude Code on one project, Codex on another, Gemini on a third. Twenty minutes in, one of them stops to ask you something, and you only find out when you happen to switch back. **Agent Board** puts that question in front of you the moment it's asked, with a button for each answer.
-
-## Supported agents
-
-### At a glance
-
-**Works fully**: its turns show up on the board by themselves, and the board opens inside it; both tested live.
-- **Claude Code** 2.1.302 (the pane)
-- **Codex** 0.163.0 (`$agent-board`)
-- **Gemini CLI** 0.64.0 (`/board`)
-- **OpenCode** 1.19.3 (`/board`)
-
-**Works in part**: the limit follows each name.
-- **Grok Build** 1.0.62: turns tested; the board command inside it (`/agent-board`) not tested yet
-- **Hermes Agent** 0.19.0: both work; a one-off `hermes -q` question shows as stopped, not waiting
-- **OpenClaw** 2026.10.4: both work; needs 2026.4.24 or newer, and warns about the plugin's origin
-- **dot**, **Muse** on the web, **any other agent**: no hook, so you paste a prompt and merge what it writes; no board inside it
-
-**Not working yet**: **Cursor** (its hook was blocked on Windows; macOS and Linux not tested), **Muse Code** CLI (not tested), **Antigravity** (no turn-end hook).
-
-The table below has the details per capability.
-
-✅ works, tested live · ⚠️ works, with the limit in the last column · ❔ written from the agent's docs, not tested yet · ❌ does not work · the agent badges at the top: green works fully, yellow-green works in part
-
-| | Agent | Its turns on the board | The board inside it | Tested on | What to know |
-|:-:|---|:-:|:-:|---|---|
-| <img src="docs/images/agents/claude-code.svg" width="24" alt=""> | **Claude Code** | ✅ | ✅ the pane | 2.1.302 | Every session shows up by itself; answer a question with one click |
-| <img src="docs/images/agents/codex.svg" width="24" alt=""> | **Codex** | ✅ | ✅ `$agent-board` | 0.163.0 | Approve the hook once in Codex's `/hooks` |
-| <img src="docs/images/agents/gemini-cli.svg" width="24" alt=""> | **Gemini CLI** | ✅ | ✅ `/board` | 0.64.0 | Gemini asks once before `/board` runs its command |
-| <img src="docs/images/agents/opencode.svg" width="24" alt=""> | **OpenCode** | ✅ | ✅ `/board` | 1.19.3 |  |
-| <img src="docs/images/agents/grok-build.svg" width="24" alt=""> | **Grok Build** | ✅ | ❔ `/agent-board` | 1.0.62 |  |
-| <img src="docs/images/agents/hermes-agent.svg" width="24" alt=""> | **Hermes Agent** | ⚠️ | ✅ `/agent-board` | 0.19.0, 0.16.0 (Windows) | Answer `y` once. A one-off `hermes -q` question shows as stopped, not waiting |
-| <img src="docs/images/agents/openclaw.svg" width="24" alt=""> | **OpenClaw** | ⚠️ | ✅ `/agent-board` | 2026.10.4 | Needs 2026.4.24 or newer; an older one is left out, and connect says so. It warns it "can't verify where this plugin came from" and loads it anyway |
-| <img src="docs/images/agents/cursor.svg" width="24" alt=""> | **Cursor** | ❌ | ❔ `/agent-board` | cursor-agent 2026.10.16 (Windows) | Not seen working: on Windows, Cursor runs every hook through bash, and another tool's PowerShell hook blocked the turn. macOS and Linux not tested |
-| <img src="docs/images/agents/muse-code.svg" width="24" alt=""> | **Muse Code** | ❔ | ❔ |  | The hook is written from its docs; Muse was tried only on the web (next rows) |
-|  | **Antigravity** | ❌ | ❔ `/agent-board` |  | No turn-end hook yet, so it can only show the board |
-|  | **dot**, **Muse** on the web | ⚠️ | ❌ | web, Oct 2026 | No hook: paste [one prompt](docs/REMOTE_REPORTERS.md#chat-relay-a-prompt-to-paste) into the chat, then merge each block it writes |
-|  | **Any other agent** (Aider, Copilot, Windsurf…) | ⚠️ | ❌ |  | Paste one section of [AGENTS.md](AGENTS.md) into its instructions; it writes its own block |
-
-The board inside another agent shows everything, as printed text to read: nothing in it can be clicked. To tick, archive or copy an answer, run the [board you work in](#the-board-in-every-agent) in a terminal beside it. Answering a question happens in the agent that asked it (the pane gives you the words or command to paste). "Tested on" is the version that ran a real turn whose hook fired and whose block the pane drew; those payloads are kept as tests. Here is the board reading them:
-
-<img alt="The board listing the question each of six agents asked in its live run: Codex, Gemini CLI, OpenClaw, OpenCode, Grok Build, Hermes Agent" src="docs/images/live/hooks-en.png" width="620">
 
 ## Quick start
 
@@ -99,13 +58,58 @@ Then show me what the last command printed and tell me which agents to restart.
 ## What you get
 
 - **Whatever needs you comes first.** A question from any agent sits at the top with a button for each answer. In Claude Code, one click answers it; for other agents you get the exact words or command to paste.
-- **Every agent in one place.** Grouped by project, with a title, a line of background and numbered steps for each session, written for you by a quick summary of each turn.
+- **Every agent in one place.** Grouped by project, with a title, a line of background and numbered steps for each session, summed up for you after every turn.
 - **Pick up where you left off.** Compaction, a closed terminal, the next morning: you see what's done, what's stuck and what's next. A session that stopped halfway can be taken over in one click.
 - **Your own to-dos too.** Type `+ Job search: Fabrikam fellowship due 11-20` in the pane's box. Due dates turn the row amber, then red.
 - **Outside the terminal.** `/progress open` shows the same view in your browser (it works on a phone too). The status line and desktop notifications tell you when something needs you while the pane is closed.
 - **Reports.** `/progress report` and `/progress today` copy what got done, as text.
 - **Tidies itself.** Finished work moves to a monthly archive; a journal keeps every finished step.
 - **One plain Markdown file.** Everything is in `~/.claude/progress.md`, which you can read and edit. English, 繁體中文 and 简体中文; light and dark.
+
+## Supported agents
+
+Install it in Claude Code, and every time Claude Code starts it connects the agents installed on the machine. The badges at the top follow the same grouping: green works fully, yellow-green works in part.
+
+**Works fully**: its turns reach the board by themselves, and the board opens inside it.
+- **Claude Code** 2.1.302, in the pane; answer a question with one click
+- **Codex** 0.163.0, with `$agent-board`; approve the hook once in Codex's `/hooks`
+- **Gemini CLI** 0.64.0, with `/board`; Gemini asks once before it runs the command
+- **OpenCode** 1.19.3, with `/board`
+
+**Works in part**
+- **Grok Build** 1.0.62: its turns reach the board; `/agent-board` inside it is not verified yet
+- **Hermes Agent** 0.19.0: both work; answer `y` once; a one-off `hermes -q` question shows as stopped, not waiting
+- **OpenClaw** 2026.10.4: both work; needs 2026.4.24 or newer, and warns that it can't verify where the plugin came from, then loads it
+- **dot** and **Muse** on the web: no hook, so paste [one prompt](docs/REMOTE_REPORTERS.md#chat-relay-a-prompt-to-paste) into the chat and merge the blocks it writes; no board inside them
+- **Any other agent** (Aider, Copilot, Windsurf…): paste one section of [AGENTS.md](AGENTS.md) into its instructions and it writes its own block; no board inside it
+
+**Not supported yet**
+- **Cursor**: on Windows it runs every hook through bash, and another tool's PowerShell hook blocked its turns; macOS and Linux not verified yet
+- **Muse Code**: the hook follows its documentation and is not verified yet
+- **Antigravity**: it has no turn-end hook, so its turns can't reach the board
+
+### By capability
+
+✅ works · ⚠️ works, with a limit above · ❔ not verified yet · ❌ not supported yet
+
+| | Agent | Its turns on the board | The board inside it | Verified on |
+|:-:|---|:-:|:-:|---|
+| <img src="docs/images/agents/claude-code.svg" width="24" alt=""> | **Claude Code** | ✅ | ✅ the pane | 2.1.302 |
+| <img src="docs/images/agents/codex.svg" width="24" alt=""> | **Codex** | ✅ | ✅ `$agent-board` | 0.163.0 |
+| <img src="docs/images/agents/gemini-cli.svg" width="24" alt=""> | **Gemini CLI** | ✅ | ✅ `/board` | 0.64.0 |
+| <img src="docs/images/agents/opencode.svg" width="24" alt=""> | **OpenCode** | ✅ | ✅ `/board` | 1.19.3 |
+| <img src="docs/images/agents/grok-build.svg" width="24" alt=""> | **Grok Build** | ✅ | ❔ `/agent-board` | 1.0.62 |
+| <img src="docs/images/agents/hermes-agent.svg" width="24" alt=""> | **Hermes Agent** | ⚠️ | ✅ `/agent-board` | 0.19.0, 0.16.0 (Windows) |
+| <img src="docs/images/agents/openclaw.svg" width="24" alt=""> | **OpenClaw** | ⚠️ | ✅ `/agent-board` | 2026.10.4 |
+| <img src="docs/images/agents/cursor.svg" width="24" alt=""> | **Cursor** | ❌ | ❔ `/agent-board` | 2026.10.16 (Windows) |
+| <img src="docs/images/agents/muse-code.svg" width="24" alt=""> | **Muse Code** | ❔ | ❔ | |
+| | **Antigravity** | ❌ | ❔ `/agent-board` | |
+| | **dot**, **Muse** (web) | ⚠️ | ❌ | |
+| | **Any other agent** | ⚠️ | ❌ | |
+
+Inside an agent, the board is printed text: it shows everything, but nothing in it can be clicked. To tick a step, archive a task or copy an answer, open the [board you work in](#the-board-in-every-agent) in a terminal beside it. A question is answered in the agent that asked it.
+
+<img alt="The board listing a question from each of six agents: Codex, Gemini CLI, OpenClaw, OpenCode, Grok Build, Hermes Agent" src="docs/images/live/hooks-en.png" width="620">
 
 ## The board in every agent
 
@@ -115,20 +119,33 @@ Connecting also gives each agent a way to show the board, so whichever one you a
 |---|---|
 | Gemini CLI, OpenCode | `/board` |
 | Codex | `$agent-board` |
-| Cursor, Grok Build, OpenClaw, Hermes Agent, Antigravity | `/agent-board` |
+| OpenClaw, Hermes Agent | `/agent-board` |
+| Grok Build, Cursor, Antigravity (not verified yet) | `/agent-board` |
 | Any terminal, next to any agent | `node ~/.claude/agent-board.mjs --watch` (`--html` opens it in the browser) |
 
-**Work in it, as in the pane.** In a terminal beside the agent (a split pane), `node ~/.claude/agent-board.mjs --watch` is the board you can act on: ↑↓ picks a line, Enter opens it, `x` ticks the next step of your own task, `a` archives one of your own tasks or a stopped session’s block (finished work leaves the board by itself), `1`–`9` (or `y`/`n`) copies the answer to another agent's question so you paste it there, `c` copies a command, `o` opens the browser view, `q` quits. Ticks go into the work log. It writes `progress.md` the careful way the pane does: through a temporary file, read back, and made again if another session wrote meanwhile; it never touches another session's block, except to archive one that has stopped.
+**Work in it, as in the pane.** Run `node ~/.claude/agent-board.mjs --watch` in a terminal beside the agent (a split pane):
+
+| Key | Does |
+|---|---|
+| ↑ ↓, Enter | Pick a line, open it |
+| `x` | Tick the next step of your own task; it goes into the work log |
+| `a` | Archive one of your own tasks, or a stopped session's block |
+| `1`–`9`, `y` / `n` | Copy the answer to another agent's question, to paste in that agent |
+| `c` | Copy a command |
+| `o`, `q` | Open the browser view; quit |
+
+Finished work leaves the board by itself. The board writes `progress.md` as carefully as the pane does, and leaves other sessions' blocks alone unless you archive one that has stopped.
 
 <img alt="Codex on the left; on the right the board, where x just ticked a step and the line under the keys says so" src="docs/images/live/work-zh-TW.png" width="100%">
-
 
 <table><tr>
 <td><img alt="Codex CLI 0.163.0: typing $agent-board runs the board script and shows the board" src="docs/images/live/codex-en.png"></td>
 <td><img alt="Gemini CLI 0.64.0: /board pastes the board into the prompt" src="docs/images/live/gemini-en.png"></td>
 </tr></table>
 
-Screenshots from real runs of Codex 0.163.0 and Gemini CLI 0.64.0 against a mock model; more, OpenCode's and the terminal's, are in the [guide](docs/GUIDE.md#the-board-in-every-agent). The board is read from `progress.md`, so it needs no Claude Code session; it runs on Node.js 18 or newer, which Codex and Gemini CLI install with them (for the other agents, install Node if `node --version` finds none). Other agents' turns are summed up into steps only while a Claude Code session is open; until then the board lists them as they came in.
+Above, Codex 0.163.0 and Gemini CLI 0.64.0; OpenCode and the terminal are in the [guide](docs/GUIDE.md#the-board-in-every-agent).
+
+The board reads `progress.md` directly, so it needs no Claude Code session, only Node.js 18 or newer: Codex and Gemini CLI bring it, and for other agents, install Node if `node --version` finds none. Other agents' turns are summed up into steps while a Claude Code session is open; until then the board lists them as they came in.
 
 ## Commands
 
