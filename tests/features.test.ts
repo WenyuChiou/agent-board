@@ -6,7 +6,7 @@ import { addManualTask, isArchivable, takeArchivable, takeManualDone, upsertAuto
 import { dashboardHtml } from '../hooks/dashboard'
 import { ciFinished, prFromGh, prWords } from '../hooks/github'
 import { appendJournal, countDay, journalLine, parseJournal, progressReport } from '../hooks/journal'
-import { applyTaskCreate, applyTaskUpdate, cleanContext, completedSince, emptyMirror, noticesOf } from '../hooks/mirror'
+import { applyTaskCreate, applyTaskUpdate, cleanContext, cleanTitle, clip, completedSince, emptyMirror, noticesOf } from '../hooks/mirror'
 import { DARK, LIGHT, paletteFor } from '../hooks/palette'
 import { parseProgress } from '../hooks/parse'
 import { LANGS, ZH_TW } from '../hooks/i18n'
@@ -473,4 +473,17 @@ test('可以 / 能不能 opening a question make a confirm; a date that does not
   const view = buildView(parseProgress('## P\n\n### Odd date\n> due 13-45\n- [ ] a\n'), [], null, NOW, 0, {}, STRINGS.en)
   expect(view.due).toEqual([])
   expect(journalLine({ project: '', task: 'Task', step: 'Step' }, NOW, STRINGS.en)).toContain(' · (unnamed) · Task · Step')
+})
+
+test('titles and background are cut by terminal width, at a word in English, never mid-word', () => {
+  expect(cleanTitle('Add README describing index.js')).toBe('Add README describing index.js')
+  expect(cleanTitle('Move the payment webhook to the new queue and retry duplicates safely')).toBe(
+    'Move the payment webhook to the new queue and…',
+  )
+  expect([...cleanTitle('長'.repeat(30))]).toHaveLength(24)
+  expect(cleanContext('A README is needed so newcomers can understand index.js and run it without asking anyone')).toBe(
+    'A README is needed so newcomers can understand index.js and run it without asking anyone',
+  )
+  expect([...cleanContext('長'.repeat(80))]).toHaveLength(60)
+  expect(clip('Add a README.md to this repo describing index.js', 38)).toBe('Add a README.md to this repo…')
 })

@@ -169,7 +169,26 @@ export const drawPane = (ui: PaneUi, model: PaneModel, actions: PaneActions): Re
 
   // What the person can do about one waiting step, by what it asks and whose it is.
   const askActions = (item: WaitingItem) => {
-    if (item.where === 'other') return muted(s.replyElsewhere(item.project, item.agent))
+    // Another session's (or agent's) question is answered there, but a command to run or a
+    // link to open is the person's to use from here, whoever asked.
+    if (item.where === 'other') {
+      const run = item.kind === 'do' ? item.command : null
+      const open = item.kind === 'review' ? item.link : null
+      return (
+        <Box flexDirection="column">
+          {run !== null && <Text color={palette.accent} wrap="wrap">{`$ ${run}`}</Text>}
+          {run !== null && (
+            <Box marginTop={1}>
+              <Button key={`${item.key}::copy`} onPress={press => actions.copyCommand(item, press.surface)}>
+                {s.copyCommand}
+              </Button>
+            </Box>
+          )}
+          {open !== null && Link !== null && <Link href={open} label={s.openLink} />}
+          {muted(s.replyElsewhere(item.project, item.agent))}
+        </Box>
+      )
+    }
     const step = item.step
     if (item.where === 'manual') {
       return step === null ? null : (

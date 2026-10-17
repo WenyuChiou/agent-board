@@ -849,3 +849,39 @@ test('on the phone (no input box) the pane still draws, focus first, with its bu
   expect(world.files.get(FILE)).toContain('- [x] 推薦信 — 等教授回覆')
   await ui.unmount()
 })
+
+test('another agent’s question is answered there, but its command can be copied and its link opened from here', async ($, on) => {
+  const board = `# Project progress
+
+## data-pipeline
+
+<!-- auto session=3db00eaf agent=gemini state=waiting updated=2026-10-16T11:50:00Z -->
+### Backfill last year's events
+> Context: the warehouse lost three months in the migration
+- [x] Write backfill.sh
+- [?] Log in to the warehouse — run \`gcloud auth login\` on your own machine
+<!-- /auto session=3db00eaf -->
+
+## docs-site
+
+<!-- auto session=239098eb agent=cursor state=waiting updated=2026-10-16T11:55:00Z -->
+### October release notes
+- [?] Check the preview — https://docs.example.com/preview/2026-10
+<!-- /auto session=239098eb -->
+`
+  const world: World = { files: new Map([[FILE, board]]), mtime: 1, hasTasks: true, store: { opened: ['waiting'] } }
+  engineBeneath(on, world)
+  const seen = outside(on)
+  await $.session.start({ cwd: '/work/persona_framework', surface: 'desktop', isInteractive: true })
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
+
+  expect(await ui.find({ type: 'Text', text: '$ gcloud auth login' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /到 data-pipeline 的對話（gemini）回覆/ })).toBeDefined()
+  await ui.press({ key: "data-pipeline::Backfill last year's events::1::copy" })
+  expect(seen.copied.at(-1)).toBe('gcloud auth login')
+
+  await ui.press({ key: 'ask::docs-site::October release notes::0' })
+  const links = (await ui.findAll({ type: 'Link' })).map(link => link.props.href)
+  expect(links).toContain('https://docs.example.com/preview/2026-10')
+  await ui.unmount()
+})

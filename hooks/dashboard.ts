@@ -58,7 +58,8 @@ const waitingItem = (item: WaitingItem, s: Strings): string =>
   `<b>${esc(item.text)}</b></div>` +
   `<div class="where">${esc(item.project)} › ${esc(item.task)}${item.agent === '' ? '' : ` · ${esc(item.agent)}`}</div>` +
   (item.note === '' ? (item.context === '' ? '' : `<div class="quiet">${esc(s.contextLine(item.context))}</div>`) : `<div>${esc(item.note)}</div>`) +
-  (item.command === null ? '' : `<code>${esc(item.command)}</code>`) +
+  // A backticked word in another kind of question is a name, not something to run.
+  (item.command === null || item.kind !== 'do' ? '' : `<code>${esc(item.command)}</code>`) +
   (item.link === null ? '' : `<a href="${esc(item.link)}">${esc(s.openLink)}</a>`) +
   `<div class="quiet">${esc(item.where === 'manual' ? '' : s.replyElsewhere(item.project, item.agent))}${item.when === '' ? '' : ` · ${esc(item.when)}`}</div></div>`
 

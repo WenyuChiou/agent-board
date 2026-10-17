@@ -238,22 +238,43 @@ export const doingTask = (mirror: ProgressMirror): ProgressMirrorTask | undefine
   mirror.tasks.find(task => task.status === 'in_progress' && task.waiting === null && task.blocked === null) ??
   mirror.tasks.find(task => task.status === 'in_progress')
 
+// A CJK or full-width character takes two terminal cells, anything else one.
+const WIDE = /[ᄀ-ᅟ⺀-꓏가-힣豈-﫿︰-﹏＀-｠￠-￦]/u
+const cells = (char: string): number => (WIDE.test(char) || char.length > 1 ? 2 : 1)
+
+// Text cut to `width` cells with `…`, at a space when the text is words, so a limit sized
+// for Chinese does not chop English mid-word ("Add README describing in").
+export const clip = (text: string, width: number): string => {
+  const chars = [...text]
+  let used = 0
+  let fits = 0
+  for (const char of chars) {
+    if (used + cells(char) > width) break
+    used += cells(char)
+    fits += 1
+  }
+  if (fits === chars.length) return text
+  const room = chars.slice(0, Math.max(0, fits - 1))
+  const space = room.lastIndexOf(' ')
+  const kept = space > room.length / 2 ? room.slice(0, space) : room
+
+  return `${kept.join('').replace(/[\s,.;:，、；：]+$/, '')}…`
+}
+
 // A title until the model names the task: the first line of the request, or the first step.
 export const fallbackTitle = (mirror: ProgressMirror): string => {
   const prompt = mirror.firstPrompt.split(/\r?\n/).find(line => line.trim() !== '')?.trim() ?? ''
   const source = prompt !== '' ? prompt : (mirror.tasks[0]?.subject ?? '')
-  const chars = [...source]
 
-  return chars.length > 18 ? `${chars.slice(0, 18).join('')}…` : source
+  return clip(source, 38)
 }
 
 // What the model answered, made into a title: one line, no quotes or end punctuation.
 export const cleanTitle = (answer: string): string => {
   const line = answer.split(/\r?\n/).find(one => one.trim() !== '')?.trim() ?? ''
   const bare = line.replace(/^["'「『《【\s]+|["'」』》】。．.！!？?\s]+$/g, '').replace(/^(任務名稱|名稱|Title)[:：]\s*/i, '')
-  const chars = [...bare]
 
-  return chars.length > 24 ? chars.slice(0, 24).join('') : bare
+  return clip(bare, 48)
 }
 
 // The model's second line, made into one line of background.
@@ -262,9 +283,8 @@ export const cleanContext = (answer: string): string => {
     .replace(/^["'「『\s]+|["'」』\s]+$/g, '')
     .replace(/^(背景|Background|Context)\s*[:：]\s*/i, '')
     .replace(/\s+/g, ' ')
-  const chars = [...line.trim()]
 
-  return chars.length > 60 ? `${chars.slice(0, 59).join('')}…` : chars.join('')
+  return clip(line.trim(), 120)
 }
 
 // The note the conversation gets after a compaction: where this session's task stands.
