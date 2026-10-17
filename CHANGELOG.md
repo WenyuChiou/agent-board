@@ -15,6 +15,9 @@
     line of small text is bigger, and each moment eases in and out (headlines
     rise into place, the pane's frames dissolve into each other, the end card
     grows in) instead of a flat fade.
+  - The "How it works" picture is redrawn: three numbered columns (who
+    reports, the one file, where you see it), type about half again as large,
+    and shorter words.
   - `/progress connect` writes Grok Build's and OpenCode's hook files as
     `agent-board.json` and `agent-board.js`, and takes away the `progress-pane` ones it
     wrote before, so no turn is reported twice. The section between

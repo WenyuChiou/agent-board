@@ -50,7 +50,7 @@ const WORDS: Record<Lang, {
   tagline: [string, string]
   features: Array<[string, keyof Palette, string]>
   agents: string
-  flow: { sources: Array<[string, string]>; outputs: Array<[string, string]>; into: [string, string, string]; file: string }
+  flow: { heads: [string, string, string]; sources: Array<[string, string]>; outputs: Array<[string, string]>; into: [string, string, string]; file: string }
   window: string
 }> = {
   en: {
@@ -64,18 +64,19 @@ const WORDS: Record<Lang, {
     ],
     agents: 'English  ·  繁體中文  ·  简体中文',
     flow: {
+      heads: ['Who reports', 'One file', 'Where you see it'],
       sources: [
-        ['Claude Code sessions', 'Every turn, with or without a Task list'],
-        ['Other agents', 'Codex, Gemini, Cursor, Grok and more'],
-        ['You', 'Tasks kept by hand, + quick add'],
+        ['Claude Code', 'Reports every turn by itself'],
+        ['Other agents', 'Codex, Gemini, Cursor…'],
+        ['You', 'Add a task by hand'],
       ],
-      into: ['automatically', 'their hooks', 'type or edit'],
-      file: 'one Markdown file, one block per session',
+      into: ['on its own', 'through hooks', 'type it in'],
+      file: 'One Markdown file, one block per session',
       outputs: [
-        ['The pane', 'Needs you first, in Claude Code'],
-        ['progress.html', 'Browser and phone, refreshes itself'],
-        ['Archive and journal', 'Monthly files, weekly report'],
-        ['Status line, notifications', 'When the pane is closed'],
+        ['The pane', 'What needs you comes first'],
+        ['progress.html', 'Any browser, even your phone'],
+        ['Archive & report', 'Monthly files, weekly report'],
+        ['Status line & alerts', 'Even with the pane closed'],
       ],
     },
     window: 'claude  —  acme-web',
@@ -91,18 +92,19 @@ const WORDS: Record<Lang, {
     ],
     agents: 'English  ·  繁體中文  ·  简体中文',
     flow: {
+      heads: ['誰在回報', '寫進同一個檔', '在哪裡看'],
       sources: [
-        ['Claude Code 對話', '每回合自動整理，有沒有 Task 清單都行'],
-        ['其他 agent', 'Codex、Gemini、Cursor、Grok 等'],
-        ['你', '手記的事、用 + 快速新增'],
+        ['Claude Code', '每回合自動回報'],
+        ['其他 agent', 'Codex、Gemini、Cursor…'],
+        ['你', '自己加一件事'],
       ],
-      into: ['自動', '各自的 hook', '打字或編輯'],
+      into: ['自動', '透過 hook', '自己打'],
       file: '一個 Markdown 檔，每個對話一塊',
       outputs: [
-        ['面板', '在 Claude Code 裡，需要你的放最前'],
-        ['progress.html', '瀏覽器和手機，自己更新'],
-        ['封存與日誌', '每月檔案、週報'],
-        ['狀態列、通知', '面板關著時也知道'],
+        ['面板', '等你的事排最前面'],
+        ['progress.html', '瀏覽器、手機都能看'],
+        ['封存與週報', '每月存檔，每週報告'],
+        ['狀態列與通知', '面板關著也知道'],
       ],
     },
     window: 'claude  —  acme-web',
@@ -118,18 +120,19 @@ const WORDS: Record<Lang, {
     ],
     agents: 'English  ·  繁體中文  ·  简体中文',
     flow: {
+      heads: ['谁在汇报', '写进同一个文件', '在哪里看'],
       sources: [
-        ['Claude Code 对话', '每回合自动整理，有没有 Task 清单都行'],
-        ['其他 agent', 'Codex、Gemini、Cursor、Grok 等'],
-        ['你', '手记的事、用 + 快速添加'],
+        ['Claude Code', '每回合自动汇报'],
+        ['其他 agent', 'Codex、Gemini、Cursor…'],
+        ['你', '自己加一件事'],
       ],
-      into: ['自动', '各自的 hook', '打字或编辑'],
+      into: ['自动', '通过 hook', '自己打'],
       file: '一个 Markdown 文件，每个对话一块',
       outputs: [
-        ['面板', '在 Claude Code 里，需要你的放最前'],
-        ['progress.html', '浏览器和手机，自己刷新'],
-        ['归档与日志', '每月文件、周报'],
-        ['状态栏、通知', '面板关着时也知道'],
+        ['面板', '等你的事排最前面'],
+        ['progress.html', '浏览器、手机都能看'],
+        ['归档与周报', '每月存档，每周报告'],
+        ['状态栏与通知', '面板关着也知道'],
       ],
     },
     window: 'claude  —  acme-web',
@@ -244,49 +247,68 @@ ${terminal(mode, w.window, body, rows + 6, 1280 - windowWidth - 64, 64)}
 `
 }
 
-// How it works: who writes progress.md, and what reads it.
+// How it works: who writes progress.md, and what reads it. Three numbered columns, big
+// type and few words, so it reads at the width GitHub shows it.
 const flow = (lang: Lang, mode: Mode): string => {
   const w = WORDS[lang].flow
   const page = PAGE[mode]
   const pal = TERMINAL[mode].palette
-  const card = (x: number, y: number, cw: number, ch: number, title: string, sub: string, dot: string) =>
-    `<rect x="${x}" y="${y}" width="${cw}" height="${ch}" rx="12" fill="${page.card}" stroke="${page.line}"/>
-<circle cx="${x + 22}" cy="${y + 30}" r="5" fill="${dot}"/>
-<text x="${x + 38}" y="${y + 36}" font-family="${SANS}" font-size="18" font-weight="600" fill="${page.ink}">${esc(title)}</text>
-<text x="${x + 38}" y="${y + 62}" font-family="${SANS}" font-size="14" fill="${page.muted}">${esc(sub)}</text>`
+  const W = 1280
+  const H = 620
+  const card = (x: number, y: number, cw: number, ch: number, title: string, sub: string, dot: string, big: number) =>
+    `<rect x="${x}" y="${y}" width="${cw}" height="${ch}" rx="14" fill="${page.card}" stroke="${page.line}" stroke-width="1.4"/>
+<circle cx="${x + 28}" cy="${y + ch / 2 - 15}" r="7" fill="${dot}"/>
+<text x="${x + 48}" y="${y + ch / 2 - 6}" font-size="${big}" font-weight="700" fill="${page.ink}">${esc(title)}</text>
+<text x="${x + 48}" y="${y + ch / 2 + 26}" font-size="19" fill="${page.muted}">${esc(sub)}</text>`
   const dots = [pal.accent, pal.running, pal.waiting]
   const outDots = [pal.accent, pal.project, pal.done, pal.soon]
-  const left = w.sources.map(([title, sub], i) => card(40, 78 + i * 140, 330, 88, title, sub, dots[i] ?? pal.accent)).join('\n')
-  const right = w.outputs.map(([title, sub], i) => card(910, 52 + i * 112, 330, 88, title, sub, outDots[i] ?? pal.accent)).join('\n')
-  const doc = { x: 500, y: 110, w: 280, h: 330 }
-  const text = FILE_LINES[lang]
+  const top = 120
+  const left = { x: 40, w: 316, h: 116, gap: 152 }
+  const right = { x: 904, w: 336, h: 94, gap: 112 }
+  const doc = { x: 508, y: top, w: 316, h: 430 }
+  const sources = w.sources.map(([title, sub], i) => card(left.x, top + i * left.gap, left.w, left.h, title, sub, dots[i] ?? pal.accent, 28)).join('\n')
+  const outputs = w.outputs.map(([title, sub], i) => card(right.x, top + i * right.gap, right.w, right.h, title, sub, outDots[i] ?? pal.accent, 24)).join('\n')
   const colors = [pal.project, page.muted, page.ink, pal.done, pal.accent, pal.waiting, page.ink, pal.project, page.muted, pal.waiting, page.ink, pal.project, pal.soon]
-  const lines: Array<[string, string]> = text.map((one, i) => [one, colors[i] ?? page.ink])
-  const fileText = lines
-    .map(([text, color], i) => (text === '' ? '' : `<text x="${doc.x + 22}" y="${doc.y + 72 + i * 19}" fill="${color}">${esc(text)}</text>`))
+  const fileText = FILE_LINES[lang]
+    .map((line, i) => (line === '' ? '' : `<text x="${doc.x + 24}" y="${doc.y + 84 + i * 25}" fill="${colors[i] ?? page.ink}">${esc(line)}</text>`))
     .join('\n')
   const arrow = (x1: number, y1: number, x2: number, y2: number) => {
     const mid = (x1 + x2) / 2
-    return `<path d="M${x1} ${y1} C${mid} ${y1} ${mid} ${y2} ${x2 - 6} ${y2}" fill="none" stroke="${pal.frame}" stroke-width="1.6" marker-end="url(#head)"/>`
+    return `<path d="M${x1} ${y1} C${mid} ${y1} ${mid} ${y2} ${x2 - 8} ${y2}" fill="none" stroke="${pal.accent}" stroke-opacity="0.55" stroke-width="2.6" marker-end="url(#head)"/>`
   }
-  const ins = w.sources.map((_, i) => arrow(370, 122 + i * 140, doc.x, doc.y + 90 + i * 70)).join('\n')
+  const ins = w.sources.map((_, i) => arrow(left.x + left.w, top + i * left.gap + left.h / 2, doc.x, doc.y + 110 + i * 110)).join('\n')
   const labels = w.into
-    .map((text, i) => `<text x="382" y="${112 + i * 140}" font-family="${SANS}" font-size="13" fill="${page.muted}">${esc(text)}</text>`)
+    // Above the arrow, except the last, whose arrow climbs through that spot.
+    .map((text, i) => `<text x="${left.x + left.w + 14}" y="${top + i * left.gap + left.h / 2 + (i === w.into.length - 1 ? 30 : -14)}" font-size="17" font-weight="600" fill="${page.muted}">${esc(text)}</text>`)
     .join('\n')
-  const outs = w.outputs.map((_, i) => arrow(doc.x + doc.w, doc.y + 70 + i * 62, 910, 96 + i * 112)).join('\n')
-  return `<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="520" viewBox="0 0 1280 520" role="img" aria-label="progress.md: ${esc(w.file)}">
+  const outs = w.outputs.map((_, i) => arrow(doc.x + doc.w, doc.y + 90 + i * 84, right.x, top + i * right.gap + right.h / 2)).join('\n')
+  // The column heads, numbered in reading order, over the middle of each column.
+  const heads = w.heads
+    .map((text, i) => {
+      const cx = [left.x + left.w / 2, doc.x + doc.w / 2, right.x + right.w / 2][i] ?? 0
+      // Roughly how wide the heading sets, so the number and the words centre as one.
+      const textW = [...text].reduce((sum, ch) => sum + (/[\u2E80-\uFFFF]/.test(ch) ? 24 : 13.5), 0)
+      const x0 = cx - (32 + 12 + textW) / 2
+      return `<circle cx="${x0 + 16}" cy="68" r="16" fill="${pal.accent}"/><text x="${x0 + 16}" y="75" text-anchor="middle" font-size="19" font-weight="700" fill="${page.card}">${i + 1}</text>` +
+        `<text x="${x0 + 44}" y="76" font-size="24" font-weight="700" fill="${page.ink}">${esc(text)}</text>`
+    })
+    .join('\n')
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}" role="img" aria-label="progress.md: ${esc(w.file)}">
 <title>progress.md</title>
-<defs><marker id="head" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="${pal.frame}"/></marker></defs>
-<rect width="1280" height="520" rx="20" fill="${page.ground}"/>
-${left}
+<defs><marker id="head" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="5" markerHeight="5" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="${pal.accent}"/></marker></defs>
+<rect width="${W}" height="${H}" rx="20" fill="${page.ground}"/>
+<g font-family="${SANS}">
+${heads}
+${sources}
 ${ins}
 ${labels}
-<rect x="${doc.x}" y="${doc.y}" width="${doc.w}" height="${doc.h}" rx="14" fill="${page.card}" stroke="${pal.accent}" stroke-width="2"/>
-<text x="${doc.x + 22}" y="${doc.y + 36}" font-family="${MONO}" font-size="17" font-weight="700" fill="${page.ink}">progress.md</text>
-<g font-family="${MONO}" font-size="13">${fileText}</g>
-<text x="${doc.x + doc.w / 2}" y="${doc.y + doc.h + 34}" text-anchor="middle" font-family="${SANS}" font-size="14" fill="${page.muted}">${esc(w.file)}</text>
+<rect x="${doc.x}" y="${doc.y}" width="${doc.w}" height="${doc.h}" rx="16" fill="${page.card}" stroke="${pal.accent}" stroke-width="2.6"/>
+<text x="${doc.x + 24}" y="${doc.y + 44}" font-family="${MONO}" font-size="22" font-weight="700" fill="${page.ink}">progress.md</text>
+<g font-family="${MONO}" font-size="16">${fileText}</g>
+<text x="${doc.x + doc.w / 2}" y="${doc.y + doc.h + 40}" text-anchor="middle" font-size="19" fill="${page.muted}">${esc(w.file)}</text>
 ${outs}
-${right}
+${outputs}
+</g>
 </svg>
 `
 }
