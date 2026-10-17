@@ -243,7 +243,11 @@ const BOARD_WORDS = Object.values(STRINGS).flatMap(s => [s.boardCommandPrompt, s
 // the reply tells. The skill asks for the board first and one sentence on what needs the
 // person after it; work done in the same turn is told before the board, or as more than a
 // sentence after it.
-const BOARD_COUNTS = /●\s*\d+[^\n]*▸\s*\d+[^\n]*⚑\s*\d+[^\n]*✓\s*\d+/
+// Each count takes all its digits and each gap stops at the next mark, and only a short line is
+// tried: another agent writes the reply, and a long line of marks or digits with no ✓ at the
+// end must not keep the inbox busy.
+const BOARD_COUNTS = /●\s*\d+(?!\d)[^\n▸]*▸\s*\d+(?!\d)[^\n⚑]*⚑\s*\d+(?!\d)[^\n✓]*✓\s*\d+/
+const COUNTS_MAX = 400
 // What boardText prints below its count line: blank or indented lines, a section or project
 // under its mark, and the line for nothing waiting or nothing open.
 const BOARD_PLAIN = new Set(Object.values(STRINGS).flatMap(s => [s.nothingForYou, s.empty]))
@@ -255,7 +259,7 @@ const weight = (text: string): number => [...text.trim()].reduce((sum, char) => 
 
 export const isBoardAnswer = (answer: string): boolean => {
   const lines = answer.replace(/\r\n/g, '\n').split('\n')
-  const at = lines.findIndex(line => BOARD_COUNTS.test(line))
+  const at = lines.findIndex(line => line.length <= COUNTS_MAX && BOARD_COUNTS.test(line))
   if (at < 0) return false
   let end = at + 1
   while (end < lines.length && isBoardLine(lines[end] ?? '')) end += 1
@@ -269,7 +273,8 @@ export const isBoardAnswer = (answer: string): boolean => {
   const before = lines.slice(0, from).join('\n')
   const after = lines.slice(end).join('\n')
   // A code block or a list beside the board (a test log, a diff, what was done) is work.
-  const isAside = (text: string): boolean => !/```|^\s*(?:[-*+]|\d+[.)])\s/m.test(text)
+  // The indent stays on its line, so a run of blank lines is not crossed again from each one.
+  const isAside = (text: string): boolean => !/```|^[ \t]*(?:[-*+]|\d+[.)])\s/m.test(text)
 
   return weight(before) <= BOARD_LEAD && weight(after) <= BOARD_ASIDE && isAside(before) && isAside(after)
 }

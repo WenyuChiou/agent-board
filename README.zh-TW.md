@@ -9,7 +9,7 @@ Claude Code 外掛，也跟得上 Codex、Gemini CLI、OpenCode、Grok Build、H
 
 <p align="center">
 <a href="https://github.com/WenyuChiou/agent-board/actions/workflows/test.yml"><img alt="測試" src="https://github.com/WenyuChiou/agent-board/actions/workflows/test.yml/badge.svg"></a>
-<a href="CHANGELOG.md"><img alt="版本 0.17.1" src="https://img.shields.io/badge/version-0.17.1-blue"></a>
+<a href="CHANGELOG.md"><img alt="版本 0.17.2" src="https://img.shields.io/badge/version-0.17.2-blue"></a>
 <a href="LICENSE"><img alt="MIT 授權" src="https://img.shields.io/badge/license-MIT-green"></a>
 <img alt="macOS、Linux、Windows" src="https://img.shields.io/badge/macOS%20%C2%B7%20Linux%20%C2%B7%20Windows-lightgrey">
 </p>
