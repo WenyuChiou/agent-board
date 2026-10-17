@@ -221,7 +221,7 @@ Gemini CLI 和 OpenCode 會自己把看板貼進提示；用技能（skill）的
 
 在終端機：`node ~/.claude/agent-board.mjs` 印一次看板，`--watch` 一直開著、每 2 秒重畫（分割視窗放在 Codex 旁邊），`--html` 寫出 `progress.html` 並在瀏覽器打開。`--lang zh-TW`（或 `en`、`zh-CN`）選語言；預設跟你的 Claude Code 對話一樣。
 
-在終端機裡，`--watch` 也能用按鍵操作，就像面板能點：↑↓ 和 Enter 選一行並展開、`x` 勾掉手寫工作的下一步、`a` 封存做完或停掉的區塊或工作、`1`–`9` 或 `y`／`n` 複製另一個 agent 問題的答案、`c` 複製指令、`o` 打開網頁版、`q` 離開。除了這幾個，看板只讀不寫。其他 agent 的 hook 留在收件匣的回合，要有開著的 Claude Code 對話才會整理成步驟；在那之前，看板照原樣列出它們，問題排最前面。只是看看板的回合，不算工作。
+在終端機裡，`--watch` 也能用按鍵操作，就像面板能點：↑↓ 和 Enter 選一行並展開、`x` 勾掉手寫工作的下一步、`a` 封存手寫的工作或已停對話的區塊（做完的會自己封存）、`1`–`9` 或 `y`／`n` 複製另一個 agent 問題的答案、`c` 複製指令、`o` 打開網頁版、`q` 離開。除了這幾個，看板只讀不寫。其他 agent 的 hook 留在收件匣的回合，要有開著的 Claude Code 對話才會整理成步驟；在那之前，看板照原樣列出它們，問題排最前面。只是看看板的回合，不算工作。
 
 <img alt="終端機裡的看板，每 2 秒重畫" src="images/live/terminal-zh-TW.png" width="560">
 <img alt="OpenCode 1.19.3：/board" src="images/live/opencode-zh-TW.png" width="560">

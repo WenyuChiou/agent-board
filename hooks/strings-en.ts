@@ -292,6 +292,7 @@ export const EN: Strings = {
   boardKeyOptions: (n: number): string => `1–${n} copy answer`,
   boardTicked: (step: string): string => `Done: “${step}”.`,
   boardTickGone: 'That step is not there any more; it may have changed.',
+  boardLineChanged: 'That line just changed; check the one chosen now and press again.',
   boardCopied: (text: string): string => `Copied: ${text}`,
   boardCopyFailed: (text: string): string => `Couldn't reach the clipboard; copy it yourself: ${text}`,
   boardWriteFailed: "Couldn't write the progress file; nothing changed.",

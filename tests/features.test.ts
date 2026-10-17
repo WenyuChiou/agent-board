@@ -2,7 +2,7 @@ import { expect, test } from 'claude-code/testing'
 
 import type { ProgressMirror, ProgressPr } from '../types'
 import { askOf } from '../hooks/ask'
-import { boardItems, boardKey, boardScreen, boardText, emptyBoardState, fit, peekInbox } from '../hooks/board'
+import { boardItems, boardKey, boardScreen, boardText, emptyBoardState, fit, peekInbox, pinned } from '../hooks/board'
 import { addManualTask, isArchivable, manualTaskCount, renderAutoBlock, setManualStep, takeArchivable, takeManualDone, takeTask, upsertAutoBlock } from '../hooks/blocks'
 import { agentHooks, boardCommands, boardScript, DELETE, isWindowsHost, openclawPlugin, openclawPrinted, openclawSavedBy, openclawTooOld, readConfig, reportCommand, reporterPs1, withFlatHook, withGroupedHook, withHermesHooks, withoutHermesHooks, withoutOurHooks, withoutSection } from '../hooks/connect'
 import { dashboardHtml } from '../hooks/dashboard'
@@ -1259,4 +1259,29 @@ test('the chosen line stays chosen when a line above it comes or goes', () => {
   // The question at the top is answered elsewhere and leaves the board.
   const after = boardItems(buildView(parseProgress(WORK_FILE.replace('- [?] Per-key limit — 100 or 300 a minute?', '- [x] Per-key limit 300')), [], null, now, 0, {}, STRINGS.en), [])
   expect(boardKey(state, 'a', after, STRINGS.en).action).toMatchObject({ type: 'archive', title: 'Fix the broken links' })
+})
+
+test('a key does nothing to a line that took the chosen one’s place before the screen showed it', () => {
+  const now = Date.parse('2026-10-17T08:45:00Z')
+  const before = boardItems(buildView(parseProgress(WORK_FILE), [], null, now, 0, {}, STRINGS.en), [])
+  const docs = before.findIndex(item => item.type === 'row' && item.row.title === 'Fix the broken links')
+  let state = pinned(emptyBoardState, before)
+  for (let index = 0; index < docs; index += 1) state = pinned(boardKey(state, 'down', before, STRINGS.en).state, before)
+  // Another session archives the block under the cursor; another line now sits where it was.
+  const after = boardItems(buildView(parseProgress(WORK_FILE.replace('Fix the broken links', 'Wire the money')), [], null, now, 0, {}, STRINGS.en), [])
+  const pressed = boardKey(pinned(state, after), 'a', after, STRINGS.en)
+  expect(pressed.action).toBeNull()
+  expect(pressed.state.note).toBe(STRINGS.en.boardLineChanged)
+  // Once the screen shows the new line, the same key acts on it.
+  expect(boardKey(pressed.state, 'a', after, STRINGS.en).action).toMatchObject({ type: 'archive', title: 'Wire the money' })
+})
+
+test('escape sequences from another agent’s text never reach the terminal or the clipboard', () => {
+  expect(fit('Pay \u001b[2J\u001b[Hnow\u0007', 40)).toBe('Pay [2J[Hnow')
+  const file = WORK_FILE.replace('100 or 300 a minute?', '100 or 300 a minute? `rm -rf /tmp/x\u001b[2J`')
+  const items = boardItems(buildView(parseProgress(file), [], null, Date.parse('2026-10-17T08:45:00Z'), 0, {}, STRINGS.en), [])
+  const screen = boardScreen(buildView(parseProgress(file), [], null, Date.parse('2026-10-17T08:45:00Z'), 0, {}, STRINGS.en), [], emptyBoardState, STRINGS.en)
+  expect(screen.includes('\u001b')).toBe(false)
+  const copied = boardKey(pinned(emptyBoardState, items), 'c', items, STRINGS.en).action
+  if (copied?.type === 'copy') expect(copied.text.includes('\u001b')).toBe(false)
 })

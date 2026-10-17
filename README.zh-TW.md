@@ -118,7 +118,7 @@ claude -p "/progress connect"
 | Cursor、Grok Build、OpenClaw、Hermes Agent、Antigravity | `/agent-board` |
 | 任何終端機，開在任何 agent 旁邊 | `node ~/.claude/agent-board.mjs --watch`（`--html` 在瀏覽器開） |
 
-**像面板一樣操作。** 在 agent 旁邊開一個終端機（分割視窗），`node ~/.claude/agent-board.mjs --watch` 就是能操作的看板：↑↓ 選一行、Enter 展開、`x` 勾掉自己工作的下一步、`a` 封存做完或停掉的、`1`–`9`（或 `y`／`n`）把另一個 agent 問題的答案複製起來好貼過去、`c` 複製指令、`o` 打開網頁版、`q` 離開。勾掉的步驟會記進工作日誌。它寫 `progress.md` 的方式跟面板一樣小心：先寫暫存檔、再讀回確認，別的對話剛好也在寫就重做一次；別的對話的區塊不會動，除了封存已經停掉的。
+**像面板一樣操作。** 在 agent 旁邊開一個終端機（分割視窗），`node ~/.claude/agent-board.mjs --watch` 就是能操作的看板：↑↓ 選一行、Enter 展開、`x` 勾掉自己工作的下一步、`a` 封存自己的工作或已停對話的區塊（做完的會自己封存）、`1`–`9`（或 `y`／`n`）把另一個 agent 問題的答案複製起來好貼過去、`c` 複製指令、`o` 打開網頁版、`q` 離開。勾掉的步驟會記進工作日誌。它寫 `progress.md` 的方式跟面板一樣小心：先寫暫存檔、再讀回確認，別的對話剛好也在寫就重做一次；別的對話的區塊不會動，除了封存已經停掉的。
 
 <img alt="左邊是 Codex；右邊是看板，剛按 x 勾掉一步，按鍵說明下面寫著已完成" src="docs/images/live/work-zh-TW.png" width="100%">
 

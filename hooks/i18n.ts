@@ -297,6 +297,7 @@ export const ZH_TW = {
   boardKeyOptions: (n: number): string => `1–${n} 複製答案`,
   boardTicked: (step: string): string => `已完成「${step}」。`,
   boardTickGone: '找不到那一步，可能已經改過了。',
+  boardLineChanged: '這一行剛換成別的了；看清楚現在選到的，再按一次。',
   boardCopied: (text: string): string => `已複製：${text}`,
   boardCopyFailed: (text: string): string => `沒辦法放進剪貼簿，請自己複製：${text}`,
   boardWriteFailed: '寫不進進度檔，沒有改任何東西。',

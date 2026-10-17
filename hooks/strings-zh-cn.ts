@@ -290,6 +290,7 @@ export const ZH_CN: Strings = {
   boardKeyOptions: (n: number): string => `1–${n} 复制答案`,
   boardTicked: (step: string): string => `已完成“${step}”。`,
   boardTickGone: '找不到那一步，可能已经改过了。',
+  boardLineChanged: '这一行刚换成别的了；看清楚现在选到的，再按一次。',
   boardCopied: (text: string): string => `已复制：${text}`,
   boardCopyFailed: (text: string): string => `没办法放进剪贴板，请自己复制：${text}`,
   boardWriteFailed: '写不进进度文件，没有改任何东西。',

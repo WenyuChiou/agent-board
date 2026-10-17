@@ -5,7 +5,7 @@
 - **Work in the board from any agent, as in the pane.** `node
   ~/.claude/agent-board.mjs --watch` in a terminal now takes keys: ↑↓ and
   Enter pick and open a line, `x` ticks the next step of a hand-kept task
-  (into the work log too), `a` archives a finished or stopped block or task,
+  (into the work log too), `a` archives a hand-kept task or a stopped session’s block,
   `1`–`9` or `y`/`n` copy the answer to another agent's question to paste
   there, `c` copies a command, `o` opens the browser view, `q` quits. The
   choice stays on its line when lines above it come or go. Writes go through a
@@ -20,6 +20,31 @@
   above it comes or goes", "keys played on the board tick a hand-kept step,
   archive a stopped block, and leave a line in the journal"
   (`tests/board.test.mjs`).
+- **Its writes hold up when another session writes at the same moment**
+  (found in review, each one reproduced first):
+  - **An archive is no longer lost.** The block goes into the archive file
+    before it leaves `progress.md`, as in the pane. A retry after another
+    session's write no longer drops it with "Could not find that task".
+  - **A tick made on a retry is reported and journaled.** Before, it showed
+    as "not there".
+  - **Each board uses a temp file of its own.** Two boards at once no
+    longer write over each other's temp file. A failed rename (on Windows,
+    a file another program holds open) is tried again.
+  - **A key never acts on a line the screen has not shown yet.** If another
+    session replaced the chosen line, the key only moves the choice there
+    and says so.
+  - **Escape sequences in another agent's text are dropped.** They no longer
+    reach the terminal or the copied answer.
+  - **The board is easier to live with.** Copying counts as done when the
+    terminal took it (OSC 52, over SSH too). A clipboard tool gets 2
+    seconds. The cursor comes back however the board ends. Keys that arrive
+    together (a held arrow) are all read.
+
+  Tests: "another session writing while the board ticks or archives loses
+  neither the tick nor the archived block", "a key does nothing to a line
+  that took the chosen one’s place before the screen showed it", "escape
+  sequences from another agent’s text never reach the terminal or the
+  clipboard".
 - **The board command in Hermes Agent and OpenClaw, tested live**: Hermes
   0.19.0 loaded the agent-board skill with `skill_view` and ran it with
   `terminal`; OpenClaw 2026.10.4 read it from `~/.agents/skills` and ran it
