@@ -1,10 +1,20 @@
-# claude-progress-pane
+<h1 align="center">
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/images/hero-zh-TW-dark.svg">
+  <img alt="claude-progress-pane：給 coding agent 用的進度看板" src="docs/images/hero-zh-TW-light.svg" width="100%">
+</picture>
+</h1>
 
 **給 coding agent 用的進度看板。** 一個側邊面板列出每個專案的工作和每一步，把需要你處理的事放在最上面。它跟著 Claude Code 的 Task 清單走，不用手動改任何檔案；Codex、Gemini、Cursor 或 shell 腳本也能把自己的工作放上來。
 
 [English](README.md) · 繁體中文 · [简体中文](README.zh-CN.md)
 
-![深色和淺色終端機裡的面板。左邊是收合的樣子：現在最需要你的問題（每個選項一個按鈕），下面是這個對話的卡片。右邊展開了「等你處理」清單，每個問題都標著種類。](docs/images/pane-zh-TW.png)
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/images/demo-zh-TW-dark.svg">
+    <img alt="面板的三個步驟：最需要你的那一個問題，每個答案一個按鈕；所有等你的事，標好種類；回答之後 Claude 接著做。" src="docs/images/demo-zh-TW-light.svg">
+  </picture>
+</p>
 
 ## 功能
 
@@ -38,6 +48,15 @@
 <td width="32%"><img src="docs/images/dashboard-phone-zh-TW.png" alt="同一個頁面在手機上的深色模式。"></td>
 </tr>
 </table>
+
+## 怎麼運作
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/images/flow-zh-TW-dark.svg">
+  <img alt="Claude Code 對話、其他 agent 和你都寫進同一個 Markdown 檔 progress.md；面板、progress.html、封存與日誌、狀態列都讀它。" src="docs/images/flow-zh-TW-light.svg" width="100%">
+</picture>
+
+所有內容都在一個純 Markdown 檔裡。每個 Claude Code 對話把自己的 Task 清單同步成其中一塊；Codex、Gemini CLI、OpenCode、Cursor 照 AGENTS.md 那段說明維護自己的一塊；其他的由你手寫或用快速新增。面板、`progress.html`、每月封存與日誌、狀態列都讀這個檔，所以每個專案、每個 agent 都出現在同一個地方。格式是公開的：[docs/FORMAT.md](docs/FORMAT.md)（英文）。
 
 ## 開始使用
 

@@ -1,0 +1,21 @@
+name: Idea
+description: Something the pane could do, or an agent it should work with.
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What you are trying to do
+      description: The situation, not the solution. "I lose track of which session asked me something" helps more than "add a button".
+    validations:
+      required: true
+  - type: textarea
+    id: idea
+    attributes:
+      label: What would help
+  - type: checkboxes
+    id: format
+    attributes:
+      label: File format
+      options:
+        - label: This would need a change to progress.md (docs/FORMAT.md). Additions go on the marker as optional attributes; a new mark or state is a breaking change.

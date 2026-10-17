@@ -1,0 +1,59 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="520" viewBox="0 0 1280 520" role="img" aria-label="progress.md: 一个 Markdown 文件，每个对话一块">
+<title>progress.md</title>
+<defs><marker id="head" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="#6E7268"/></marker></defs>
+<rect width="1280" height="520" rx="20" fill="#15171a"/>
+<rect x="40" y="78" width="330" height="88" rx="12" fill="#1c1e21" stroke="#2f3236"/>
+<circle cx="62" cy="108" r="5" fill="#00A3AF"/>
+<text x="78" y="114" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans TC', 'Noto Sans SC', 'PingFang TC', 'Microsoft JhengHei', 'Microsoft YaHei', sans-serif" font-size="18" font-weight="600" fill="#e6e4dc">Claude Code 对话</text>
+<text x="78" y="140" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans TC', 'Noto Sans SC', 'PingFang TC', 'Microsoft JhengHei', 'Microsoft YaHei', sans-serif" font-size="14" fill="#afafb0">Task 清单由插件自动同步</text>
+<rect x="40" y="218" width="330" height="88" rx="12" fill="#1c1e21" stroke="#2f3236"/>
+<circle cx="62" cy="248" r="5" fill="#A59ACA"/>
+<text x="78" y="254" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans TC', 'Noto Sans SC', 'PingFang TC', 'Microsoft JhengHei', 'Microsoft YaHei', sans-serif" font-size="18" font-weight="600" fill="#e6e4dc">其他 agent</text>
+<text x="78" y="280" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans TC', 'Noto Sans SC', 'PingFang TC', 'Microsoft JhengHei', 'Microsoft YaHei', sans-serif" font-size="14" fill="#afafb0">Codex、Gemini CLI、OpenCode、Cursor</text>
+<rect x="40" y="358" width="330" height="88" rx="12" fill="#1c1e21" stroke="#2f3236"/>
+<circle cx="62" cy="388" r="5" fill="#F8B500"/>
+<text x="78" y="394" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans TC', 'Noto Sans SC', 'PingFang TC', 'Microsoft JhengHei', 'Microsoft YaHei', sans-serif" font-size="18" font-weight="600" fill="#e6e4dc">你</text>
+<text x="78" y="420" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans TC', 'Noto Sans SC', 'PingFang TC', 'Microsoft JhengHei', 'Microsoft YaHei', sans-serif" font-size="14" fill="#afafb0">手记的事、用 + 快速添加</text>
+<path d="M370 122 C435 122 435 200 494 200" fill="none" stroke="#6E7268" stroke-width="1.6" marker-end="url(#head)"/>
+<path d="M370 262 C435 262 435 270 494 270" fill="none" stroke="#6E7268" stroke-width="1.6" marker-end="url(#head)"/>
+<path d="M370 402 C435 402 435 340 494 340" fill="none" stroke="#6E7268" stroke-width="1.6" marker-end="url(#head)"/>
+<text x="382" y="112" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans TC', 'Noto Sans SC', 'PingFang TC', 'Microsoft JhengHei', 'Microsoft YaHei', sans-serif" font-size="13" fill="#afafb0">自动</text>
+<text x="382" y="252" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans TC', 'Noto Sans SC', 'PingFang TC', 'Microsoft JhengHei', 'Microsoft YaHei', sans-serif" font-size="13" fill="#afafb0">AGENTS.md</text>
+<text x="382" y="392" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans TC', 'Noto Sans SC', 'PingFang TC', 'Microsoft JhengHei', 'Microsoft YaHei', sans-serif" font-size="13" fill="#afafb0">打字或编辑</text>
+<rect x="500" y="110" width="280" height="330" rx="14" fill="#1c1e21" stroke="#00A3AF" stroke-width="2"/>
+<text x="522" y="146" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', 'Noto Sans Mono CJK TC', 'Noto Sans CJK TC', 'PingFang TC', 'Microsoft JhengHei', monospace" font-size="17" font-weight="700" fill="#e6e4dc">progress.md</text>
+<g font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', 'Noto Sans Mono CJK TC', 'Noto Sans CJK TC', 'PingFang TC', 'Microsoft JhengHei', monospace" font-size="13"><text x="522" y="182" fill="#5C9291">## acme-web</text>
+<text x="522" y="201" fill="#afafb0">&lt;!-- auto agent=claude --&gt;</text>
+<text x="522" y="220" fill="#e6e4dc">### 设置页加上深色模式</text>
+<text x="522" y="239" fill="#68BE8D">- [x] 加深色的颜色 token</text>
+<text x="522" y="258" fill="#00A3AF">- [~] 修图表对比度</text>
+<text x="522" y="277" fill="#F8B500">- [?] 上线方式</text>
+
+<text x="522" y="315" fill="#5C9291">## api-gateway</text>
+<text x="522" y="334" fill="#afafb0">&lt;!-- auto agent=codex --&gt;</text>
+<text x="522" y="353" fill="#F8B500">- [?] 每分钟 100 还是 300？</text>
+
+<text x="522" y="391" fill="#5C9291">## 求职</text>
+<text x="522" y="410" fill="#ED6D3D">- [ ] 投递   截止 10-31</text></g>
+<text x="640" y="474" text-anchor="middle" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans TC', 'Noto Sans SC', 'PingFang TC', 'Microsoft JhengHei', 'Microsoft YaHei', sans-serif" font-size="14" fill="#afafb0">一个 Markdown 文件，每个对话一块</text>
+<path d="M780 180 C845 180 845 96 904 96" fill="none" stroke="#6E7268" stroke-width="1.6" marker-end="url(#head)"/>
+<path d="M780 242 C845 242 845 208 904 208" fill="none" stroke="#6E7268" stroke-width="1.6" marker-end="url(#head)"/>
+<path d="M780 304 C845 304 845 320 904 320" fill="none" stroke="#6E7268" stroke-width="1.6" marker-end="url(#head)"/>
+<path d="M780 366 C845 366 845 432 904 432" fill="none" stroke="#6E7268" stroke-width="1.6" marker-end="url(#head)"/>
+<rect x="910" y="52" width="330" height="88" rx="12" fill="#1c1e21" stroke="#2f3236"/>
+<circle cx="932" cy="82" r="5" fill="#00A3AF"/>
+<text x="948" y="88" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans TC', 'Noto Sans SC', 'PingFang TC', 'Microsoft JhengHei', 'Microsoft YaHei', sans-serif" font-size="18" font-weight="600" fill="#e6e4dc">面板</text>
+<text x="948" y="114" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans TC', 'Noto Sans SC', 'PingFang TC', 'Microsoft JhengHei', 'Microsoft YaHei', sans-serif" font-size="14" fill="#afafb0">在 Claude Code 里，需要你的放最前</text>
+<rect x="910" y="164" width="330" height="88" rx="12" fill="#1c1e21" stroke="#2f3236"/>
+<circle cx="932" cy="194" r="5" fill="#5C9291"/>
+<text x="948" y="200" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans TC', 'Noto Sans SC', 'PingFang TC', 'Microsoft JhengHei', 'Microsoft YaHei', sans-serif" font-size="18" font-weight="600" fill="#e6e4dc">progress.html</text>
+<text x="948" y="226" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans TC', 'Noto Sans SC', 'PingFang TC', 'Microsoft JhengHei', 'Microsoft YaHei', sans-serif" font-size="14" fill="#afafb0">浏览器和手机，自己刷新</text>
+<rect x="910" y="276" width="330" height="88" rx="12" fill="#1c1e21" stroke="#2f3236"/>
+<circle cx="932" cy="306" r="5" fill="#68BE8D"/>
+<text x="948" y="312" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans TC', 'Noto Sans SC', 'PingFang TC', 'Microsoft JhengHei', 'Microsoft YaHei', sans-serif" font-size="18" font-weight="600" fill="#e6e4dc">归档与日志</text>
+<text x="948" y="338" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans TC', 'Noto Sans SC', 'PingFang TC', 'Microsoft JhengHei', 'Microsoft YaHei', sans-serif" font-size="14" fill="#afafb0">每月文件、周报</text>
+<rect x="910" y="388" width="330" height="88" rx="12" fill="#1c1e21" stroke="#2f3236"/>
+<circle cx="932" cy="418" r="5" fill="#ED6D3D"/>
+<text x="948" y="424" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans TC', 'Noto Sans SC', 'PingFang TC', 'Microsoft JhengHei', 'Microsoft YaHei', sans-serif" font-size="18" font-weight="600" fill="#e6e4dc">状态栏、通知</text>
+<text x="948" y="450" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans TC', 'Noto Sans SC', 'PingFang TC', 'Microsoft JhengHei', 'Microsoft YaHei', sans-serif" font-size="14" fill="#afafb0">面板关着时也知道</text>
+</svg>

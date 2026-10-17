@@ -1,0 +1,58 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="640" viewBox="0 0 1280 640" role="img" aria-label="claude-progress-pane: A progress dashboard for coding agents. What needs you first, every project at a glance.">
+<title>claude-progress-pane</title>
+<defs><clipPath id="edge"><rect width="1280" height="640" rx="20"/></clipPath></defs>
+<g clip-path="url(#edge)">
+<rect width="1280" height="640" fill="#f6f5f0"/>
+<text x="72" y="128" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans TC', 'Noto Sans SC', 'PingFang TC', 'Microsoft JhengHei', 'Microsoft YaHei', sans-serif" font-size="15" font-weight="600" letter-spacing="3" fill="#595857">CLAUDE CODE PLUGIN  ·  MIT</text>
+<text x="70" y="196" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans TC', 'Noto Sans SC', 'PingFang TC', 'Microsoft JhengHei', 'Microsoft YaHei', sans-serif" font-size="50" font-weight="700" fill="#2b2b2b">claude-progress-pane</text>
+<text x="72" y="256" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans TC', 'Noto Sans SC', 'PingFang TC', 'Microsoft JhengHei', 'Microsoft YaHei', sans-serif" font-size="24" fill="#2b2b2b">A progress dashboard for coding agents.</text>
+<text x="72" y="294" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans TC', 'Noto Sans SC', 'PingFang TC', 'Microsoft JhengHei', 'Microsoft YaHei', sans-serif" font-size="24" fill="#595857">What needs you first, every project at a glance.</text>
+<text x="72" y="392" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', 'Noto Sans Mono CJK TC', 'Noto Sans CJK TC', 'PingFang TC', 'Microsoft JhengHei', monospace" font-size="20" fill="#715C1F">●</text><text x="104" y="392" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans TC', 'Noto Sans SC', 'PingFang TC', 'Microsoft JhengHei', 'Microsoft YaHei', sans-serif" font-size="19" fill="#2b2b2b">One question at a time, with a button per answer</text>
+<text x="72" y="436" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', 'Noto Sans Mono CJK TC', 'Noto Sans CJK TC', 'PingFang TC', 'Microsoft JhengHei', monospace" font-size="20" fill="#165E83">▸</text><text x="104" y="436" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans TC', 'Noto Sans SC', 'PingFang TC', 'Microsoft JhengHei', 'Microsoft YaHei', sans-serif" font-size="19" fill="#2b2b2b">Claude, Codex, Gemini CLI and more, in one pane</text>
+<text x="72" y="480" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', 'Noto Sans Mono CJK TC', 'Noto Sans CJK TC', 'PingFang TC', 'Microsoft JhengHei', monospace" font-size="20" fill="#BB5535">⚑</text><text x="104" y="480" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans TC', 'Noto Sans SC', 'PingFang TC', 'Microsoft JhengHei', 'Microsoft YaHei', sans-serif" font-size="19" fill="#2b2b2b">Background and deadlines on every task</text>
+<text x="72" y="524" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', 'Noto Sans Mono CJK TC', 'Noto Sans CJK TC', 'PingFang TC', 'Microsoft JhengHei', monospace" font-size="20" fill="#007B43">✓</text><text x="104" y="524" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans TC', 'Noto Sans SC', 'PingFang TC', 'Microsoft JhengHei', 'Microsoft YaHei', sans-serif" font-size="19" fill="#2b2b2b">Cleans itself up; nothing piles up</text>
+<text x="72" y="594" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans TC', 'Noto Sans SC', 'PingFang TC', 'Microsoft JhengHei', 'Microsoft YaHei', sans-serif" font-size="15" fill="#595857">English  ·  繁體中文  ·  简体中文</text>
+<g transform="translate(785.5999999999999 64)">
+<rect width="430.40000000000003" height="738" rx="12" fill="#fbfaf5" stroke="#d9d7cc"/>
+<path d="M12 0.5h406.40000000000003a11.5 11.5 0 0 1 11.5 11.5v22h-429.40000000000003v-22a11.5 11.5 0 0 1 11.5-11.5z" fill="#f1efe7"/>
+<line x1="0.5" y1="34" x2="429.90000000000003" y2="34" stroke="#d9d7cc"/>
+<g fill="#9EA19A"><circle cx="20" cy="17" r="5"/><circle cx="38" cy="17" r="5"/><circle cx="56" cy="17" r="5"/></g>
+<text x="215.20000000000002" y="22" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', 'Noto Sans Mono CJK TC', 'Noto Sans CJK TC', 'PingFang TC', 'Microsoft JhengHei', monospace" font-size="12" fill="#595857">claude  —  acme-web</text>
+<g font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', 'Noto Sans Mono CJK TC', 'Noto Sans CJK TC', 'PingFang TC', 'Microsoft JhengHei', monospace" font-size="14" style="white-space:pre" xml:space="preserve"><path d="M38.8 506h84" fill="none" stroke="#165E83" stroke-width="3" stroke-linecap="round"/>
+<path d="M26.2 316V310q0 -4 4 -4H30.4M30.4 306h302.40000000000003M332.8 306h8.4M337 306V316M341.2 306h58.800000000000004M400 306H400.2q4 0 4 4V316M26.2 316v20M337 316v20M404.2 316v20M26.2 336V342q0 4 4 4H30.4M30.4 346h302.40000000000003M332.8 346h8.4M337 346V336M341.2 346h58.800000000000004M400 346H400.2q4 0 4 -4V336M26.2 436V430q0 -4 4 -4H30.4M30.4 426h369.6M400 426H400.2q4 0 4 4V436M26.2 436v20M404.2 436v20M26.2 456v20M404.2 456v20M26.2 476v20M404.2 476v20M26.2 496v20M122.80000000000001 506h134.4M404.2 496v20M26.2 516v20M404.2 516v20M26.2 536v20M404.2 536v20M26.2 556v20M404.2 556v20M26.2 576v20M404.2 576v20" fill="none" stroke="#9EA19A" stroke-width="1.2" stroke-linecap="butt"/>
+<text x="22.0" y="70" textLength="67.2" lengthAdjust="spacingAndGlyphs" fill="#2b2b2b" font-weight="700">Progress</text>
+<text x="22.0" y="110" textLength="25.2" lengthAdjust="spacingAndGlyphs" fill="#715C1F">● 5</text>
+<text x="55.6" y="110" textLength="58.8" lengthAdjust="spacingAndGlyphs" fill="#2b2b2b">waiting</text>
+<text x="131.2" y="110" textLength="25.2" lengthAdjust="spacingAndGlyphs" fill="#165E83">▸ 6</text>
+<text x="164.8" y="110" textLength="92.4" lengthAdjust="spacingAndGlyphs" fill="#2b2b2b">in progress</text>
+<text x="274.0" y="110" textLength="25.2" lengthAdjust="spacingAndGlyphs" fill="#BB5535">⚑ 1</text>
+<text x="307.6" y="110" textLength="67.2" lengthAdjust="spacingAndGlyphs" fill="#2b2b2b">due soon</text>
+<text x="22.0" y="130" textLength="25.2" lengthAdjust="spacingAndGlyphs" fill="#007B43">✓ 5</text>
+<text x="55.6" y="130" textLength="84.0" lengthAdjust="spacingAndGlyphs" fill="#2b2b2b">done today</text>
+<text x="22.0" y="170" textLength="109.2" lengthAdjust="spacingAndGlyphs" fill="#595857">Needs you now</text>
+<text x="22.0" y="190" textLength="67.2" lengthAdjust="spacingAndGlyphs" fill="#715C1F">[Choose]</text>
+<text x="97.6" y="190" textLength="100.8" lengthAdjust="spacingAndGlyphs" fill="#2b2b2b" font-weight="700">Release plan</text>
+<text x="22.0" y="210" textLength="386.4" lengthAdjust="spacingAndGlyphs" fill="#005243">acme-web › Add a dark mode to the settings pa…</text>
+<text x="22.0" y="230" textLength="344.4" lengthAdjust="spacingAndGlyphs" fill="#2b2b2b">Behind a flag first, or everyone at once?</text>
+<text x="22.0" y="270" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#9EA19A">[</text>
+<text x="38.8" y="270" textLength="109.2" lengthAdjust="spacingAndGlyphs" fill="#165E83" font-weight="700">Behind a flag</text>
+<text x="156.4" y="270" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#9EA19A">]</text>
+<text x="173.2" y="270" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#9EA19A">[</text>
+<text x="190.0" y="270" textLength="67.2" lengthAdjust="spacingAndGlyphs" fill="#2b2b2b">Everyone</text>
+<text x="265.6" y="270" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#9EA19A">]</text>
+<text x="38.8" y="330" textLength="226.8" lengthAdjust="spacingAndGlyphs" fill="#595857">None of these? Type a reply</text>
+<text x="349.6" y="330" textLength="42.0" lengthAdjust="spacingAndGlyphs" fill="#2b2b2b">Reply</text>
+<text x="22.0" y="390" textLength="193.2" lengthAdjust="spacingAndGlyphs" fill="#2b2b2b">4 more waiting on you ▸</text>
+<text x="38.8" y="450" textLength="210.0" lengthAdjust="spacingAndGlyphs" fill="#005243">acme-web · feat/dark-mode</text>
+<text x="366.4" y="450" textLength="25.2" lengthAdjust="spacingAndGlyphs" fill="#595857">2/5</text>
+<text x="38.8" y="470" textLength="302.4" lengthAdjust="spacingAndGlyphs" fill="#2b2b2b" font-weight="700">Add a dark mode to the settings page</text>
+<text x="38.8" y="490" textLength="352.8" lengthAdjust="spacingAndGlyphs" fill="#595857">Context: Users asked for it in the last s…</text>
+<text x="265.6" y="510" textLength="25.2" lengthAdjust="spacingAndGlyphs" fill="#595857">40%</text>
+<text x="38.8" y="530" textLength="235.2" lengthAdjust="spacingAndGlyphs" fill="#715C1F">waiting on you: Release plan</text>
+<text x="38.8" y="550" textLength="243.6" lengthAdjust="spacingAndGlyphs" fill="#2b2b2b">▸ now: Fix contrast on charts</text>
+<text x="38.8" y="570" textLength="310.8" lengthAdjust="spacingAndGlyphs" fill="#595857">○ next: Release plan (waiting on you)</text>
+<text x="38.8" y="590" textLength="344.4" lengthAdjust="spacingAndGlyphs" fill="#165E83" text-decoration="underline">PR #128 · CI running · waiting for review</text>
+<text x="391.6" y="590" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#165E83">●</text></g>
+</g>
+</g>
+</svg>

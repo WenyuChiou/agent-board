@@ -41,9 +41,16 @@ A change comes with a test in `tests/`. Logic goes in a pure module under `hooks
 - Change the code that reads the format (`hooks/parse.ts`, and `hooks/view.ts` and `hooks/ask.ts` for a task's notes), its tests and `docs/FORMAT.md` in the same pull request. Add a test that reads a file written in the old shape.
 - If you change the rule text in `hooks/rule.ts`, change it in all three languages, and change `scripts/claude-md-rule.md` (the Traditional Chinese rule) too.
 
-## Screenshots
+## Images
 
-The images in `docs/images/` are drawn by the pane's own code (`drawPane` and `dashboardHtml`) from sample data, in each language; they are not edited by hand. If your change alters how the pane looks, say so in the pull request, and the maintainer redraws them.
+The images in `docs/images/` are drawn by the pane's own code from the sample data in `docs/preview/samples.ts`, in each language and in a light and a dark version. Do not edit them by hand. If your change alters how the pane looks, redraw them:
+
+```
+bun docs/preview/render.ts     # the SVGs: banner, demo, how it works (drawPane laid out like a terminal)
+node docs/preview/png.mjs      # progress.html screenshots and the social preview; needs Playwright
+```
+
+`render.ts` needs `.claude-plugin/types/` (run `claude --plugin-dir .` once) for its JSX setting. `terminal.ts` is the small layout engine that turns `drawPane`'s tree into a character grid and the grid into SVG.
 
 ## Releases
 

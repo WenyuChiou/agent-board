@@ -1,3 +1,4 @@
 # Written by Claude Code each time it loads the mod from a folder (claude --plugin-dir .)
 .claude-plugin/types/
 node_modules/
+docs/preview/out/

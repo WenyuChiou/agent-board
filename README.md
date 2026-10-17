@@ -1,10 +1,20 @@
-# claude-progress-pane
+<h1 align="center">
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/images/hero-en-dark.svg">
+  <img alt="claude-progress-pane: a progress dashboard for coding agents" src="docs/images/hero-en-light.svg" width="100%">
+</picture>
+</h1>
 
 **A progress dashboard for coding agents.** One side pane shows every project's work and every step, and puts what needs you at the top. It stays in step with Claude Code's Task list without anyone editing a file, and Codex, Gemini, Cursor or a shell script can put their own work on it too.
 
 English · [繁體中文](README.zh-TW.md) · [简体中文](README.zh-CN.md)
 
-![The pane in a dark and a light terminal. On the left, folded: the question that needs you now with one button per option, then this session's card. On the right, the "Waiting on you" list opened, each question labelled by kind.](docs/images/pane-en.png)
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/images/demo-en-dark.svg">
+    <img alt="The pane in three steps: the one question that needs you, with a button per answer; everything waiting on you, labelled by kind; and the pane after you answer, with Claude moving on." src="docs/images/demo-en-light.svg">
+  </picture>
+</p>
 
 ## Features
 
@@ -38,6 +48,15 @@ English · [繁體中文](README.zh-TW.md) · [简体中文](README.zh-CN.md)
 <td width="32%"><img src="docs/images/dashboard-phone-en.png" alt="The same page on a phone in dark mode."></td>
 </tr>
 </table>
+
+## How it works
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/images/flow-en-dark.svg">
+  <img alt="Claude Code sessions, other agents and you write one Markdown file, progress.md; the pane, progress.html, the archive and journal, and the status line read it." src="docs/images/flow-en-light.svg" width="100%">
+</picture>
+
+Everything lives in one plain Markdown file. Each Claude Code session keeps one block of it in step with its Task list; Codex, Gemini CLI, OpenCode or Cursor keep their own block by following the AGENTS.md section; you write the rest by hand or with a quick add. The pane, `progress.html`, the monthly archive and journal, and the status line all read that file, so every project and every agent shows up in one place. The format is open: [docs/FORMAT.md](docs/FORMAT.md).
 
 ## Get started
 

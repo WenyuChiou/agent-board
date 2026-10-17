@@ -1,5 +1,19 @@
 # Changelog
 
+## Unreleased
+
+- **The repository's front page.** The README opens with a banner and an
+  animated demo of the pane (the question that needs you, everything waiting by
+  kind, the pane after you answer), and has a "How it works" diagram, each in
+  English, 繁體中文 and 简体中文 and in a light and a dark version that follows
+  GitHub's theme. They are SVG drawn from `drawPane` itself by
+  `docs/preview/render.ts`, which lays the pane out like a terminal
+  (`docs/preview/terminal.ts`); `docs/preview/png.mjs` takes the `progress.html`
+  screenshots and a 1280 × 640 social preview. The PNG screenshots of the pane
+  are gone.
+- **Community files**: issue forms (bug, idea), a pull request template with
+  the checks, `SECURITY.md` and `CODE_OF_CONDUCT.md`.
+
 ## 0.7.1 — 2026-10-17
 
 Found by running the whole thing for real: installing from GitHub into a clean
