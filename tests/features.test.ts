@@ -1898,6 +1898,18 @@ test('a project folder or quick-add project named with a comment opening hides n
   expect(file.split('\n').filter(line => /<!--|-->/.test(line) && !/^<!-- \/?auto /.test(line))).toEqual([])
 })
 
+test('a folder with a comment mark in its name gets one heading, whether a Claude session or another agent writes there first', () => {
+  // readTurn names another agent's project from its folder; a Claude session passes the folder.
+  const turn = readTurn('codex-turn-1-2.json', JSON.stringify({ session_id: 's1', cwd: '/w/a-->b<!--c', hook_event_name: 'Stop', last_assistant_message: 'done' }))
+  const codex = { ...emptyMirror('cccc3333-3', turn?.project ?? '', NOW), title: 'Codex', state: 'working' as const }
+  const claude = { ...emptyMirror('aaaa1111-1', 'a-->b<!--c', NOW), title: 'Claude', state: 'working' as const }
+  for (const order of [[codex, claude], [claude, codex]]) {
+    const file = order.reduce((text, mirror) => upsertAutoBlock(text, mirror), '')
+    expect(file.split('\n').filter(line => line.startsWith('## '))).toEqual(['## a b c'])
+    expect(parseProgress(file).flatMap(project => project.tasks).map(task => task.title).sort()).toEqual(['Claude', 'Codex'])
+  }
+})
+
 test('a project heading an earlier version wrote, with a leading # or an arrow in it, is still joined, and a project of only marks goes under the uncategorized one', () => {
   // 0.18.1 wrote these headings as they were; each reads back as its project.
   const earlier = '# 專案進度\n\n## #work\n\n### Call\n- [ ] dial\n\n## a-->b\n\n### Ship\n- [ ] tag\n'

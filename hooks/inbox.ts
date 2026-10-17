@@ -125,7 +125,8 @@ export const readTurn = (fileName: string, body: string): AgentTurn | null => {
     cwd,
     // OpenClaw's turns run in its own workspace folder, whose name says nothing. The name
     // becomes a `##` heading, so a folder name with a line break or a comment opening in it
-    // cannot start a line or hide the lines after it.
+    // cannot start a line or hide the lines after it. blocks.ts cleans a Claude session's
+    // folder the same way, so both join one heading.
     project: OPENCLAW_WORKSPACE.test(cwd) ? 'OpenClaw' : baseName(cwd).replace(/<!--|-->/g, ' ').replace(/\s+/g, ' ').trim(),
     prompt: first(record, ['prompt', 'user_prompt', 'user_message', 'input-messages', 'input_messages', 'last_user_message']),
     // Gemini CLI says this when the turn had no text.

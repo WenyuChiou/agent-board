@@ -32,10 +32,15 @@ export const stateWords = (state: ProgressSessionState, s: Strings = ZH_TW): str
 const plain = (text: string): string => text.replace(/<!--/g, ' ').replace(/--+>/g, '->').replace(/\s+/g, ' ').trim()
 const oneLine = (text: string): string => plain(text).replace(/^#+\s*/, '').trim()
 
+// A project name as a `##` heading: a comment opening or close in it would hide the lines
+// after it, so each becomes a space. Another agent's turn (`readTurn` in inbox.ts) and a pasted
+// block clean their project the same way, so a folder gets one heading whoever writes first.
+const cleanProject = (project: string): string => project.replace(/<!--|-->/g, ' ').replace(/\s+/g, ' ').trim()
+
 // A `##` heading the mod writes, for a folder name (Linux allows `<!--` in one) or a project
 // typed into a quick add. A leading `#` stays (`## #work` reads back as `#work`), and a name
 // left with nothing goes under the uncategorized heading rather than a `## ` the reader skips.
-const headingOf = (project: string, s: Strings): string => plain(project) || s.uncategorized
+const headingOf = (project: string, s: Strings): string => cleanProject(project) || s.uncategorized
 
 // The section a project's heading starts, by the cleaned name, else by the name as an earlier
 // version wrote it (`## a-->b`), so a second heading is not added beside it.
@@ -473,7 +478,7 @@ export const mergeBlock = (text: string, pasted: string, now: number, s: Strings
     .slice(0, start)
     .flatMap(line => {
       const name = PROJECT.exec(line)?.[1]
-      return name === undefined ? [] : [name.replace(/<!--|-->/g, ' ').replace(/\s+/g, ' ').trim()]
+      return name === undefined ? [] : [cleanProject(name)]
     })
     .at(-1)
   if (project === undefined || project === '') return { problem: 'noProject' }

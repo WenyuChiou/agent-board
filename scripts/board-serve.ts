@@ -31,6 +31,10 @@ export type ServeOptions = {
   // Every finished task to the archive now: the line to show.
   tidy: () => string
   paste: (text: string) => { isAdded: boolean; note: string }
+  // Why the board or a press could not be made when it met a file the board could not read or
+  // write (the note the terminal board shows), or null for an error of any other kind. A phone
+  // on the network is told the file's name only, as it is never told progress.md's path.
+  failure: (error: unknown, isLan: boolean) => string | null
   // False when the server cannot be found again (its address file could not be written): it
   // stops then, rather than run on where no one can reach it.
   onReady: (url: string, port: number) => boolean
@@ -334,7 +338,14 @@ export const startServer = (o: ServeOptions): void => {
     }
     if (req.method === 'GET') {
       if (url.pathname === '/api/board') {
-        return json(res, 200, { model: serveModel(o.view(), o.pending(), o.s, sending, isLan), replies: [...replies.values()], now: Date.now() })
+        // A file the board cannot read is named on the page, which would otherwise say it is offline.
+        try {
+          return json(res, 200, { model: serveModel(o.view(), o.pending(), o.s, sending, isLan), replies: [...replies.values()], now: Date.now() })
+        } catch (error) {
+          const note = o.failure(error, isLan)
+          if (note === null) throw error
+          return json(res, 409, { note })
+        }
       }
       // Only the board script on the computer asks; the answer names progress.md's path.
       if (url.pathname === '/api/ping' && !isLan) return json(res, 200, { ...o.ping, sending: sending.size })
@@ -342,24 +353,32 @@ export const startServer = (o: ServeOptions): void => {
     }
     const body = await readBody(req)
     if (body === null) return json(res, 400, {})
-    if (url.pathname === '/api/act') {
-      const action = serveAction(boardItems(o.view(), o.pending()), { key: text(body.key), type: text(body.type), text: text(body.text), session: text(body.session) }, o.s, isLan)
-      if (action.type === 'refuse') return json(res, 409, { note: action.note })
-      if (action.type === 'send') {
-        const sent = send(action.target, action.text, action.title)
-        return json(res, sent.status, { note: sent.note })
+    // A press that met a file the board could not read or write is answered with why; any other
+    // error stays a bare server error.
+    try {
+      if (url.pathname === '/api/act') {
+        const action = serveAction(boardItems(o.view(), o.pending()), { key: text(body.key), type: text(body.type), text: text(body.text), session: text(body.session) }, o.s, isLan)
+        if (action.type === 'refuse') return json(res, 409, { note: action.note })
+        if (action.type === 'send') {
+          const sent = send(action.target, action.text, action.title)
+          return json(res, sent.status, { note: sent.note })
+        }
+        const note = o.act(action)
+        const isDone = ![o.s.boardWriteFailed, o.s.boardTickGone, o.s.archiveGone].includes(note)
+        return json(res, isDone ? 200 : 409, { note })
       }
-      const note = o.act(action)
-      const isDone = ![o.s.boardWriteFailed, o.s.boardTickGone, o.s.archiveGone].includes(note)
-      return json(res, isDone ? 200 : 409, { note })
-    }
-    if (url.pathname === '/api/tidy') {
-      const note = o.tidy()
-      return json(res, note === o.s.boardWriteFailed ? 409 : 200, { note })
-    }
-    if (url.pathname === '/api/paste') {
-      const pasted = o.paste(text(body.text))
-      return json(res, pasted.isAdded ? 200 : 409, { note: pasted.note })
+      if (url.pathname === '/api/tidy') {
+        const note = o.tidy()
+        return json(res, note === o.s.boardWriteFailed ? 409 : 200, { note })
+      }
+      if (url.pathname === '/api/paste') {
+        const pasted = o.paste(text(body.text))
+        return json(res, pasted.isAdded ? 200 : 409, { note: pasted.note })
+      }
+    } catch (error) {
+      const note = o.failure(error, isLan)
+      if (note === null) throw error
+      return json(res, 409, { note })
     }
     // Only the board script on the computer opens the page to the network: it asks with the
     // computer's token and no Origin, which a script on a web page always sends.
