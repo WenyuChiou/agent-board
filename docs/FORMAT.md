@@ -188,7 +188,7 @@ Put the block under the `## project` heading of its repository, after what is al
 | `state` | Means | What the pane does |
 |---|---|---|
 | `working` | The agent is running now. | Shows the task as being worked on (`Claude is working`, or `<agent> is working`). `[?]` steps are still listed as questions. |
-| `waiting` | The agent stopped and steps remain. It is the person's turn. | Lists the block's `[?]` steps under "Waiting on you". With none, lists a general "waiting on your reply". |
+| `waiting` | The agent stopped and steps remain. It is the person's turn. | Lists the block's `[?]` steps under "Waiting on you". With none, the task stays with the work in progress, showing its next, running or current step. |
 | `done` | Every step is finished. | Lists the task as recently finished for up to a day after `updated`, and archives it. |
 | `ended` | The session closed with steps left. | Shows the task as left behind and open to take over, with its open steps. |
 
