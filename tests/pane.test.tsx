@@ -1702,6 +1702,23 @@ test('a ~/.grok that only another tool put hooks in is not taken for Grok Build'
   expect(world.files.has('/home/me/.grok/hooks/agent-board.json')).toBe(false)
 })
 
+test('an OpenClaw that has not saved its config yet is asked its version, and an old one is left out', async ($, on) => {
+  const world: World = { files: new Map([['/home/me/.openclaw/openclaw.json', '{}']]), mtime: 1, hasTasks: true, ran: [], openclaw: 'OpenClaw 2026.3.8 (abc)\n' }
+  engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/persona_framework', surface: 'terminal', isInteractive: true })
+  expect(world.ran).toContainEqual(['openclaw', '--version'])
+  expect(world.files.get('/home/me/.openclaw/openclaw.json')).toBe('{}')
+  expect(world.files.has('/home/me/.openclaw/agent-board.mjs')).toBe(false)
+})
+
+test('taking the hooks out also takes out a Grok hook an earlier version left in a ~/.grok without Grok', async ($, on) => {
+  const orphan = '/home/me/.grok/hooks/agent-board.json'
+  const world: World = { files: new Map([[orphan, '{"hooks":{}}']]), mtime: 1, hasTasks: true, ran: [] }
+  engineBeneath(on, world)
+  await $.command.run({ ...TIDY, args: 'connect remove' })
+  expect(world.ran).toContainEqual(['rm', '-f', orphan])
+})
+
 test('an agent already hooked in is left as it is, and nothing is said', async ($, on) => {
   const hooked = JSON.stringify({ hooks: { Stop: [{ hooks: [{ type: 'command', command: "sh '/home/me/.claude/progress-report.sh' codex turn || true", timeout: 10 }] }], SessionEnd: [{ hooks: [{ type: 'command', command: "sh '/home/me/.claude/progress-report.sh' codex end || true", timeout: 3 }] }] } }, null, 2) + '\n'
   const world: World = { files: new Map([['/home/me/.codex/hooks.json', hooked]]), mtime: 1, hasTasks: true, ran: [] }

@@ -726,7 +726,11 @@ const connectAgents = async ($: EngineInterface, mode: ConnectMode): Promise<{ t
   const skipped: string[] = []
   const removeFile = (file: string): Promise<void> => removeFiles($, [file], isWin)
   const savedBy = remove ? null : openclawSavedBy(await readText($, [openclawHome, 'openclaw.json'].join(sep)).catch(() => ''))
-  const openclawOld = savedBy === null || openclawTooOld(savedBy) === null ? null : await installedOpenclawOld($, isWin, savedBy)
+  // A config no OpenClaw has saved yet (installed, never run) says nothing of its version,
+  // so OpenClaw is asked, as it is when the config names one too old.
+  const hasOpenclaw = !remove && (await $.fs.exists(openclawHome))
+  const openclawOld =
+    !hasOpenclaw || (savedBy !== null && openclawTooOld(savedBy) === null) ? null : await installedOpenclawOld($, isWin, savedBy ?? '')
   // Agents with a hook file that could not be written. OpenClaw's config entry loads its
   // plugin file, so when the plugin file fails, the entry is not written either.
   const failed = new Set<string>()
@@ -734,6 +738,9 @@ const connectAgents = async ($: EngineInterface, mode: ConnectMode): Promise<{ t
     if (failed.has(hook.agent)) continue
     let isInstalled = false
     for (const dir of hook.dirs ?? [hook.dir]) isInstalled = isInstalled || (await $.fs.exists(dir))
+    // Taking ours out, a file of ours is reason enough: one written before the agent's marks
+    // were checked (a ~/.grok that only another tool used) must not be left behind.
+    if (remove && !isInstalled) isInstalled = await $.fs.exists(hook.file)
     if (!isInstalled) continue
     // One agent whose file cannot be written (a folder missing, a read-only file) is named and
     // passed over, so the agents after it are still hooked in.

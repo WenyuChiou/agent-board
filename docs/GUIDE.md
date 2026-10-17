@@ -228,7 +228,7 @@ The board only reads. Turns other agents' hooks leave in the inbox are summed up
 | You press **Archive** on a stopped session or a hand-kept task | right away |
 | A `##` section the archive emptied | is removed; one you left empty stays |
 
-The sweep runs when a session starts and every hour after. `/progress tidy` runs it now.
+The sweep runs when a session starts and every hour after. `/progress tidy` and the pane's archive button run it now, and skip the waits for finished work: a block done a minute ago, or a hand-kept task with every step ticked, goes at once (another session's done block too; if that session writes again, its block comes back). A stopped session still gets its three days.
 
 ## Update and uninstall
 

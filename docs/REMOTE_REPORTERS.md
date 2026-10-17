@@ -79,10 +79,16 @@ Marks: [x] done, [~] doing, [ ] todo, [?] needs me, [>] waiting on someone else,
 options and a question mark ("100 or 300?").
 ````
 
-Save each block it gives you as a file and merge it: `python3
-scripts/remote-reporter/merge.py ~/.claude/progress.md fragment.md` (`validate.py
-fragment.md` first if you like). Merging the same session's block again replaces
-it.
+Save each block it gives you as a file, keeping only the lines between the code-block
+fences (leave out the `` ``` `` lines), then check it and merge it:
+
+```text
+python3 scripts/remote-reporter/validate.py --block fragment.md
+python3 scripts/remote-reporter/merge.py ~/.claude/progress.md fragment.md
+```
+
+`--block` checks the file as one fragment, so a file that still holds a fence line fails
+there instead of at the merge. Merging the same session's block again replaces it.
 
 ## Transports (the user's choice)
 

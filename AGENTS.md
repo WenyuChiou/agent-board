@@ -82,7 +82,7 @@ If you cannot run `claude` in your environment, say so in your report. Do not cl
 | Argument | Does |
 |---|---|
 | `lang en`, `lang zh-TW`, `lang zh-CN`, `lang auto` | Stores the pane language (`auto` removes the stored choice) and applies it at once. Also `language`, `語言`, `语言`. |
-| `tidy` | Archives old work now. Also `整理`, `archive`. |
+| `tidy` | Archives finished work now, without the half-day wait (`archiveOld($, true)`); a stopped session still gets its three days. Also `整理`, `archive`. |
 | `open` | Writes `progress.html` and opens it in the browser. Also `window`, `html`, `視窗`, `窗口`, `網頁`, `网页`. |
 | `sync` | Reads Claude's Task list and the pull request again. Also `同步`. |
 | `add …` | Adds a hand-kept task from a quick-add line, same as `+ …` in the pane's box. Also `加`, `新增`, `+`. |

@@ -22,6 +22,23 @@ runs on Windows found.
   `docs/REMOTE_REPORTERS.md` now has the prompt with the exact block, checked
   with `validate.py` and `merge.py`, and the READMEs point dot and Muse on the
   web to it.
+- **From a review of #22, #25, #26 and this release.**
+  - Hermes hooks of ours that Hermes had rewritten in block style are left as
+    they are, so a session start no longer rewrites `config.yaml` and says it
+    connected Hermes each time. Test: "Hermes hooks of ours that Hermes
+    rewrote in block style are left as they are, so a session start says
+    nothing".
+  - An OpenClaw that has not saved its config yet is asked its version, so an
+    old one is left out there too. Test: "an OpenClaw that has not saved its
+    config yet is asked its version, and an old one is left out".
+  - `/progress connect remove` takes out a Grok hook an earlier version wrote
+    into a `~/.grok` with no Grok. Test: "taking the hooks out also takes out a
+    Grok hook an earlier version left in a ~/.grok without Grok".
+  - A comment after `hooks: {}` stays. Test: "a comment after an empty Hermes
+    hooks: {} stays when ours go in under it".
+  - The web-chat prompt says to save only the lines between the fences and to
+    check with `validate.py --block`; the guides say tidy now skips the wait
+    and also moves another session's done block.
 - The guides say why Cursor on Windows can stop at "blocked" (another tool's
   PowerShell hook run through bash) and why a one-off `hermes -q` question
   shows as stopped.
