@@ -523,11 +523,15 @@ test('a reply goes into a closed Grok session once, in its own folder, and the p
     assert.equal(stale.status, 409)
     assert.ok(!existsSync(join(board.dir, 'grok-ran.json')))
     // The send is taken at once; the answer comes later, with the board.
-    const first = await call('POST', '/api/act', { body: { key, type: 'send', text: 'Redis', session: 'b2c3d4e5' } })
+    // A reply written under a question the task no longer asks does not go either.
+    const reworded = await call('POST', '/api/act', { body: { key, type: 'send', text: 'Redis', session: 'b2c3d4e5', asked: 'Which port?' } })
+    assert.equal(reworded.status, 409)
+    assert.ok(!existsSync(join(board.dir, 'grok-ran.json')))
+    const first = await call('POST', '/api/act', { body: { key, type: 'send', text: 'Redis', session: 'b2c3d4e5', asked: 'Redis or Memcached?' } })
     assert.equal(first.status, 202, first.body)
     assert.equal(first.json().note, 'Sent to grok · Pick the cache; its reply shows here when it comes (it can take a few minutes).')
     assert.equal((await rows()).find(row => row.key === key)?.isSending, true)
-    const second = await call('POST', '/api/act', { body: { key, type: 'send', text: 'Memcached', session: 'b2c3d4e5' } })
+    const second = await call('POST', '/api/act', { body: { key, type: 'send', text: 'Memcached', session: 'b2c3d4e5', asked: 'Redis or Memcached?' } })
     assert.equal(second.status, 409)
     assert.equal(second.json().note, 'Another message is on its way to this grok session; send again once it replies.')
     // Closing now would cut the agent off halfway.

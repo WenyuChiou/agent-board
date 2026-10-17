@@ -5,7 +5,7 @@ import type { Strings } from './i18n'
 import type { AskKind } from './ask'
 import { shortId, stepWords } from './blocks'
 import { ciWords, prWords } from './github'
-import { doingTask, fallbackTitle } from './mirror'
+import { doingTask, fallbackTitle, isAnswered, waitsOnYou } from './mirror'
 import type { Tone } from './palette'
 import { countSteps, currentStepIndex, doneKey, isHereProject, isStale, isTaskComplete, RESUME } from './parse'
 
@@ -273,7 +273,7 @@ export const foldSteps = (steps: readonly ViewStep[], room = 6, s: Strings = ZH_
 const currentOf = (mirror: ProgressMirror, s: Strings): CurrentView | null => {
   if (mirror.tasks.length === 0) return null
   const doing = doingTask(mirror)
-  const waitingYou = mirror.tasks.find(task => task.status !== 'completed' && task.waiting === 'you')
+  const waitingYou = mirror.tasks.find(task => waitsOnYou(mirror, task))
   const blocked = mirror.tasks.find(task => task.status !== 'completed' && task.blocked !== null)
   const done = mirror.tasks.filter(task => task.status === 'completed').length
   let status = s.waitingReply
@@ -291,14 +291,15 @@ const currentOf = (mirror: ProgressMirror, s: Strings): CurrentView | null => {
     tone = 'accent'
   }
   const steps = mirror.tasks.map((task, index) => {
+    const hasAnswer = isAnswered(mirror, task)
     let stepStatus: ProgressStepStatus = task.status === 'completed' ? 'done' : 'todo'
     if (task.status !== 'completed') {
       if (task.blocked !== null) stepStatus = 'blocked'
-      else if (task.waiting === 'you') stepStatus = 'waiting'
+      else if (task.waiting === 'you' && !hasAnswer) stepStatus = 'waiting'
       else if (task.waiting === 'run') stepStatus = 'running'
       else if (task.status === 'in_progress') stepStatus = 'doing'
     }
-    const note = stepStatus === 'blocked' ? (task.blocked ?? '') : stepStatus === 'done' ? '' : (task.why ?? '')
+    const note = stepStatus === 'blocked' ? (task.blocked ?? '') : stepStatus === 'done' ? '' : hasAnswer ? s.answeredNote : (task.why ?? '')
     return {
       text: `${task.subject}${suffixOf(stepStatus, s)}`,
       note,
@@ -396,12 +397,12 @@ const ownWaiting = (mine: ProgressMirror): WaitingItem[] => {
   // other reader lists as a question, so it cannot be marked answered.
   const keys = askKeys(
     shortId(mine.sessionId),
-    mine.tasks.map(task => (task.status !== 'completed' && task.blocked === null && task.waiting === 'you' ? stepWords(task).trim() : null)),
+    mine.tasks.map(task => (waitsOnYou(mine, task) && task.blocked === null ? stepWords(task).trim() : null)),
   )
 
   return mine.tasks
     .map((task, index) => ({ task, hideKey: keys[index] ?? '' }))
-    .filter(({ task }) => task.status !== 'completed' && task.waiting === 'you')
+    .filter(({ task }) => waitsOnYou(mine, task))
     .map(({ task, hideKey }) => ({
       key: `mine::${task.id}`,
       project: mine.project,
@@ -505,7 +506,7 @@ export const buildView = (
   // on you, its count and the focus, and listed under `hidden` instead.
   answered: readonly string[] = [],
 ): View => {
-  const isAnswered = new Set(answered)
+  const marked = new Set(answered)
   const ownId = mine === null ? '' : shortId(mine.sessionId)
   const waiting: WaitingItem[] = []
   const due: Array<TaskRow & { days: number }> = []
@@ -536,7 +537,7 @@ export const buildView = (
       const stale = isStale(task.auto, now)
       const isLive = task.auto !== null && task.auto.state !== 'ended' && !stale
       const keys = blockKeys(task)
-      const isAsked = (index: number): boolean => !isAnswered.has(keys[index] ?? '')
+      const isAsked = (index: number): boolean => !marked.has(keys[index] ?? '')
 
       task.steps.forEach((step, index) => {
         if (step.status !== 'waiting' || (!isManual && !isLive)) return
@@ -659,8 +660,8 @@ export const buildView = (
   const all = [...(mine === null ? [] : ownWaiting(mine)), ...waiting].sort(
     (a, b) => whereRank(a) - whereRank(b) || askRank(a.kind) - askRank(b.kind),
   )
-  const asks = all.filter(item => item.hideKey === '' || !isAnswered.has(item.hideKey))
-  const hidden = all.filter(item => item.hideKey !== '' && isAnswered.has(item.hideKey))
+  const asks = all.filter(item => item.hideKey === '' || !marked.has(item.hideKey))
+  const hidden = all.filter(item => item.hideKey !== '' && marked.has(item.hideKey))
   const dueRows = due.map(({ days: _days, ...row }) => row)
   const now1 = asks.find(item => askRank(item.kind) < 2)
   const today1 = due.find(row => row.days <= 1)

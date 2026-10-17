@@ -1,5 +1,5 @@
 import { atom, read, update } from 'claude-code'
-import type { EngineInterface, PluginOptions, Register } from 'claude-code'
+import type { EngineInterface, PluginOptions, PromptSubmitResult, Register } from 'claude-code'
 
 import type { RenderSurface } from 'claude-code'
 
@@ -44,9 +44,11 @@ import {
   isAllDone,
   fromTaskList,
   isStaleStoreKey,
+  markAnswered,
   noticesOf,
   resumeNote,
   stateOf,
+  withoutMarks,
 } from './mirror'
 import type { ListedTask } from './mirror'
 import { baseName, countSteps, doneKey, isHereProject, isTaskComplete, parseProgress } from './parse'
@@ -59,7 +61,7 @@ import { isQuickAdd, parseQuickAdd, quickAddWords } from './quick'
 import type { Lang, Strings } from './i18n'
 import { RULE_ID, RULES } from './rule'
 import { chosenLang, langOf, resolveLang, STRINGS } from './strings'
-import { answerTurns, applyDigest, clearAsked, cleanHandoff, isWork, lastQuestion, markAsked, needsRefresh, parseDigest, replyData, requestData, turnTools } from './digest'
+import { answerTurns, applyDigest, clearAsked, cleanHandoff, isAskingYou, isPersonsAnswer, isWork, lastQuestion, markAsked, needsRefresh, parseDigest, replyData, requestData, turnTools } from './digest'
 import type { Digest } from './digest'
 import { agentHooks, boardLangOf, boardScript, DELETE, hasOurHook, isWindowsHost, OPENCLAW_MIN, openclawPrinted, openclawSavedBy, openclawTooOld, psQuote, reporterPs1, reporterSh, withoutSection } from './connect'
 import {
@@ -154,6 +156,9 @@ let isReminderSeeded = false
 let isReminding = false
 // What the person said this turn, for summing the turn up when it ends.
 let turnPrompt = ''
+// Whether the prompt starting the next turn is the person's own message, as prompt.submit
+// saw it.
+let isNextTurnAnswer = false
 let isDraining = false
 // Other agents' turns are summed up one session's files at a time, after the drain that took
 // them has let go of the inbox.
@@ -1387,6 +1392,23 @@ const settle = async ($: EngineInterface): Promise<void> => {
   await queueWrite($)
 }
 
+// A prompt of this plugin's own, run as a turn once the session is idle. It is not the
+// person's message, even when another plugin's hook took theirs without passing it on, and
+// it skips this plugin's own prompt.submit hook.
+const submitOwn = ($: EngineInterface, text: string): Promise<PromptSubmitResult> => {
+  isNextTurnAnswer = false
+
+  return $.prompt.submit({ text })
+}
+
+// The person wrote in this session: with a Task list, every step Claude asked them is answered.
+const answerHere = async ($: EngineInterface): Promise<void> => {
+  const mirror = await read($, mine)
+  if (mirror === null || !isAskingYou(mirror)) return
+  await saveMine($, markAnswered, true)
+  await settle($)
+}
+
 export const register: Register = (on, options) => {
   on('session.start', async ($, e, next) => {
     knownPath = await findProgressPath($)
@@ -1542,17 +1564,37 @@ export const register: Register = (on, options) => {
     return { text: opened.isPlaced ? s.paneOpened(path) : s.paneNotOpened(opened.reason) }
   })
 
+  // Who wrote a prompt is known here, not at turn.start: only the person's own message answers
+  // what waits on them. A pane button's answer is marked when it is pressed.
+  on('prompt.submit', async ($, e, next) => {
+    const isAnswer = isPersonsAnswer(e)
+    if (e.turnId === undefined) isNextTurnAnswer = isAnswer
+    const entered = await next(e)
+    // Dropped: no turn starts, so the next one must not take this prompt's answer.
+    if (entered.drop !== undefined) isNextTurnAnswer = false
+    // Typed over a running turn, or queued behind it: it answers what waited on the person
+    // when they wrote it, though no turn of its own starts now.
+    else if (e.turnId !== undefined && isAnswer) await answerHere($)
+
+    return entered
+  })
+
   on('turn.start', async ($, e, next) => {
     if (e.agentId !== undefined) return next(e)
     isTurnRunning = true
     turnPrompt = e.text.trim()
+    const isAnswer = isNextTurnAnswer && e.text.trim() !== ''
+    isNextTurnAnswer = false
     const mirror = await read($, mine)
     if (mirror !== null && mirror.firstPrompt === '' && e.text.trim() !== '') {
       await saveMine($, one => ({ ...one, firstPrompt: promptKey(e.text) }))
     }
     // The person is answering: what waited on them from the last turn's question is settled.
-    if (mirror !== null && (mirror.autoAsk !== null || mirror.source === 'turns')) {
-      await saveMine($, one => answerTurns(clearAsked(one)), true)
+    // With a Task list, their own message also marks the steps Claude asked them answered,
+    // until Claude asks again. So an answered review does not stay up with a "Looks good"
+    // button that would say the opposite of what they wrote.
+    if (mirror !== null && (mirror.autoAsk !== null || mirror.source === 'turns' || (isAnswer && isAskingYou(mirror)))) {
+      await saveMine($, one => answerTurns(clearAsked(isAnswer && one.source === 'tasks' ? markAnswered(one) : one)), true)
     }
     if (mirror !== null && mirror.tasks.length > 0) {
       await settle($)
@@ -1775,7 +1817,7 @@ export const register: Register = (on, options) => {
         update($, expanded, open => (open === key ? '' : key)).catch(() => undefined)
       },
       continueHere: () => {
-        $.prompt.submit({ text: s.continueText }).catch(() => undefined)
+        submitOwn($, s.continueText).catch(() => undefined)
       },
       archive: () => {
         enqueue(() => archiveOld($, true)).catch(() => undefined)
@@ -1791,10 +1833,10 @@ export const register: Register = (on, options) => {
           .catch(() => undefined)
       },
       takeOver: row => {
-        $.prompt.submit({ text: takeOverPrompt(row, s) }).catch(() => undefined)
+        submitOwn($, takeOverPrompt(row, s)).catch(() => undefined)
       },
       handOver: row => {
-        $.prompt.submit({ text: handOverPrompt(row, s) }).catch(() => undefined)
+        submitOwn($, handOverPrompt(row, s)).catch(() => undefined)
       },
       tick: ref => {
         enqueue(() => tickStep($, ref))
@@ -1829,9 +1871,20 @@ export const register: Register = (on, options) => {
       },
       answer: (item, text) => {
         if (item.where !== 'here') return
-        $.prompt
-          .submit({ text: s.answerText(item.text, text) })
-          .then(() => update($, answer, () => ({ question: item.text, text: s.answered(text), isAsking: false })))
+        // This session's items are keyed `mine::<task id>`. The press is the answer: the step
+        // stops waiting on the person now, and waits again if the answer cannot be sent.
+        const id = item.key.replace(/^mine::/, '')
+        const unmark = () => saveMine($, one => ({ ...one, answered: withoutMarks(one, [id]) }), true).then(() => settle($))
+        saveMine($, one => markAnswered(one, [id]), true)
+          .then(() => settle($))
+          .then(() => submitOwn($, s.answerText(item.text, text)))
+          .then(
+            async entered => {
+              if (entered.drop !== undefined) return unmark()
+              await update($, answer, () => ({ question: item.text, text: s.answered(text), isAsking: false }))
+            },
+            unmark,
+          )
           .catch(() => undefined)
       },
       copyCommand: (item, surface) => {

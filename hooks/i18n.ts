@@ -68,6 +68,8 @@ export const ZH_TW = {
   foldedDone: (n: number): string => `已完成 ${n} 步`,
   foldedRest: (n: number): string => `還有 ${n} 步`,
   waitingReply: '等你回覆',
+  // A step of this session the person answered in chat, until Claude asks again.
+  answeredNote: '你已回覆，等 Claude 處理',
   allDone: '全部完成',
   claudeWorking: 'Claude 正在做',
   agentWorking: (agent: string): string => `${agent} 正在做`,

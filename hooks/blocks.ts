@@ -3,7 +3,7 @@ import { prWords } from './github'
 import { ZH_TW } from './i18n'
 import type { Strings } from './i18n'
 import { localDay } from './journal'
-import { fallbackTitle } from './mirror'
+import { fallbackTitle, isAnswered } from './mirror'
 import { AUTO_END, AUTO_START, autoOf, doneKey, isTaskComplete, parseAttrs, parseProgress, projectHead, readable, RESUME } from './parse'
 import type { QuickEntry } from './quick'
 import type { StepRef, TaskRef } from './view'
@@ -96,7 +96,12 @@ export const renderAutoBlock = (mirror: ProgressMirror, s: Strings = ZH_TW): str
     `> ${oneLine(meta)}`,
     ...(mirror.context ? [s.contextNote(oneLine(mirror.context))] : []),
     ...(mirror.handoff ? [s.handoffNote(oneLine(mirror.handoff))] : []),
-    ...mirror.tasks.map(task => `- [${markOf(task)}] ${stepWords(task)}`),
+    ...mirror.tasks.map(asked => {
+      // A step the person answered is written as Claude's to do again, not as waiting on them.
+      const task = isAnswered(mirror, asked) ? { ...asked, waiting: null, why: s.answeredNote } : asked
+
+      return `- [${markOf(task)}] ${stepWords(task)}`
+    }),
     `<!-- /auto session=${id} -->`,
   ]
 }

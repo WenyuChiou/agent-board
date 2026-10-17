@@ -261,6 +261,7 @@ What the pane's writer puts in the file, by language:
 | Block with no title, empty journal field (also in the pane) | `(unnamed)` | `（未命名）` | `（未命名）` |
 | Project with no name (in the pane and in archive headings) | `(uncategorized)` | `（未分類）` | `（未分类）` |
 | Quick-add project when not in a repository | `To do` | `待辦` | `待办` |
+| Note of a step you answered in its own session | `answered, waiting on Claude` | `你已回覆，等 Claude 處理` | `你已回复，等 Claude 处理` |
 
 ## Waiting steps and ask kinds
 
@@ -297,7 +298,7 @@ A session's own questions are listed first, then the others'. Within each group,
 | `link` | String | The link for `review`. |
 | `blocked` | A reason, or `true` for none | Step is `[!]`, with the reason as its note. Wins over `waiting`. |
 
-A key set to `null` clears it (`false` and `""` also clear `waiting` and `blocked`). Clearing `waiting` also clears `why`, `ask`, `options`, `command` and `link`. Marking the step completed clears all of it. In the file a step is written as `[x]` completed, else `[!]` blocked, else `[?]` waiting on you, else `[>]` waiting on a run, else `[~]` in progress, else `[ ]`.
+A key set to `null` clears it (`false` and `""` also clear `waiting` and `blocked`). Clearing `waiting` also clears `why`, `ask`, `options`, `command` and `link`. Marking the step completed clears all of it. In the session that set it, the person's own message marks every open `waiting: "you"` step answered, and a pane button marks the step it answers when pressed. An answered step keeps what Claude set but is written as Claude's to do, with the note for an answered step in the pane's language (see [Language](#language)), until Claude sets `waiting: "you"` again, the step's subject or note changes, or a turn ends on a question the pane puts on that step. A notification, a scheduled prompt, another session's message or a turn with no typed text is not an answer. In the file a step is written as `[x]` completed, else `[!]` blocked, else `[?]` waiting on you, else `[>]` waiting on a run, else `[~]` in progress, else `[ ]`.
 
 Only the note travels through the file. `ask`, `options`, `command` and `link` stay in the owning session, so another session's pane works the kind out again from the words of the note. Write the note as a plain sentence that carries the question.
 

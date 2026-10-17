@@ -1,4 +1,4 @@
-import type { On, RenderPropsOf } from 'claude-code'
+import type { On, PromptOrigin, RenderPropsOf } from 'claude-code'
 import { expect, mock, test } from 'claude-code/testing'
 import type { Engine, MockClock } from 'claude-code/testing'
 
@@ -1442,6 +1442,9 @@ test('without a Task list, a turn that changed something is summed up into steps
   // The person answers: the question counts as settled; the next turn adds what it did.
   world.reply = (prompt: string) => (prompt.includes('TITLE:') ? 'TITLE: 幫 API 加上限流\nCONTEXT: -\nDONE: 寫好限流測試\nNEXT: -\nASK: -' : undefined)
   await $.turn.start({ text: '100', turnId: 't2' })
+  await clock.advance(10)
+  // Settled as soon as the answer starts a turn, before that turn ends.
+  expect(world.files.get(FILE) ?? '').toContain('- [x] 每把金鑰的上限\n')
   await $.turn.complete({ answer: '測試寫好了，都過了。', durationMs: 1, isAborted: false, turnId: 't2', reason: 'answer' })
   await clock.advance(10)
   const after = world.files.get(FILE) ?? ''
@@ -1483,6 +1486,187 @@ test('a turn that ends on a question waits on you even when Claude did not mark 
   await $.turn.start({ text: '和色', turnId: 't2' })
   await clock.advance(10)
   expect(world.files.get(FILE) ?? '').toContain('- [~] 選配色\n')
+})
+
+// The person's message reaching this session: through prompt.submit, stamped with where it
+// came from, then the turn it starts.
+const say = async ($: Engine, text: string, turnId: string, origin: PromptOrigin = { kind: 'composer' }): Promise<void> => {
+  await $.prompt.submit({ text, origin, wait: false })
+  await $.turn.start({ text, turnId })
+}
+
+test('a review Claude marked as waiting on you stops waiting once you write in that session, so 沒問題 cannot answer it, and shows again only when Claude asks again', async ($, on) => {
+  const world: World = { files: new Map(), mtime: 1, hasTasks: true }
+  const clock = engineBeneath(on, world)
+  const seen = outside(on)
+  const submitted: string[] = []
+  on('prompt.submit', ($, e) => {
+    submitted.push(e.text)
+    return { text: e.text }
+  })
+  await start($, '幫我重畫範例圖')
+  await $.tool.call({ tool: 'TaskCreate', subject: '重畫圖 1', description: '' })
+  await $.tool.call({ tool: 'TaskCreate', subject: '檢查圖 2', description: '' })
+  await $.tool.call({ tool: 'TaskUpdate', taskId: '1', status: 'completed' })
+  const review = { waiting: 'you', ask: 'review', why: '新的座標軸刻度看起來對嗎' }
+  await $.tool.call({ tool: 'TaskUpdate', taskId: '2', status: 'in_progress', metadata: review })
+  await $.turn.complete({ answer: '圖 2 重畫好了。', durationMs: 1, isAborted: false, turnId: 't1', reason: 'answer' })
+  await clock.advance(10)
+  const asked = '- [?] 檢查圖 2 — 新的座標軸刻度看起來對嗎\n'
+  expect(world.files.get(FILE) ?? '').toContain(asked)
+  const before = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
+  expect(await before.find({ type: 'Text', text: '〔看一下〕' })).toBeDefined()
+  expect(await before.find({ type: 'Button', key: 'mine::2::沒問題' })).toBeDefined()
+  await before.unmount()
+
+  // The person says in that session what is wrong: the review is answered, Claude's to act on.
+  await say($, '圖 2 不對，圖例蓋住資料了', 't2')
+  await clock.advance(10)
+  const answered = '- [~] 檢查圖 2 — 你已回覆，等 Claude 處理\n'
+  expect(world.files.get(FILE) ?? '').toContain(answered)
+  const after = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
+  expect(await after.find({ type: 'Text', text: '〔看一下〕' })).toBeUndefined()
+  expect(await after.find({ type: 'Button', key: 'mine::2::沒問題' })).toBeUndefined()
+  expect(await after.find({ type: 'Text', text: '● 0' })).toBeDefined()
+  await after.unmount()
+
+  // Claude moving on with other steps, or this one, does not ask again.
+  await $.tool.call({ tool: 'TaskCreate', subject: '調字型', description: '' })
+  await $.tool.call({ tool: 'TaskUpdate', taskId: '3', status: 'in_progress' })
+  await $.tool.call({ tool: 'TaskUpdate', taskId: '2', status: 'in_progress' })
+  await $.turn.complete({ answer: '在改圖例的位置。', durationMs: 1, isAborted: false, turnId: 't2', reason: 'answer' })
+  await clock.advance(10)
+  expect(world.files.get(FILE) ?? '').toContain(answered)
+  expect(seen.notified.filter(text => text === '需要你：檢查圖 2')).toHaveLength(1)
+
+  // Claude's own TaskUpdate still decides: asked again, even in the same words, the step
+  // waits on the person again, says so again, and 沒問題 answers it by name.
+  await $.tool.call({ tool: 'TaskUpdate', taskId: '2', metadata: review })
+  expect(world.files.get(FILE) ?? '').toContain(asked)
+  expect(seen.notified.filter(text => text === '需要你：檢查圖 2')).toHaveLength(2)
+  const again = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
+  await again.press({ key: 'mine::2::沒問題' })
+  await again.unmount()
+  expect(submitted.at(-1)).toBe('關於「檢查圖 2」：看過了，沒問題')
+})
+
+test('only your own message settles this session’s waiting steps: not a background task’s notice, an app event, a turn with no typed text, or another session’s question', async ($, on) => {
+  const other = ASKED('要不要重跑 — 可以重跑嗎？')
+  const world: World = { files: new Map([[FILE, other]]), mtime: 1, hasTasks: true }
+  const clock = engineBeneath(on, world)
+  // Another hook holds one message back: it never reaches Claude.
+  on('prompt.submit', ($, e) => (e.text === '別管它' ? { drop: '先擋下' } : { text: e.text }))
+  await start($, '幫我發版')
+  await $.tool.call({ tool: 'TaskCreate', subject: '推上 main', description: '' })
+  await $.tool.call({ tool: 'TaskUpdate', taskId: '1', metadata: { waiting: 'you', why: '可以直接推到 main 嗎？' } })
+  await $.turn.complete({ answer: '準備好了。', durationMs: 1, isAborted: false, turnId: 't1', reason: 'answer' })
+  await clock.advance(10)
+  const asked = '- [?] 推上 main — 可以直接推到 main 嗎？\n'
+  expect(world.files.get(FILE) ?? '').toContain(asked)
+
+  // None of these is the person answering.
+  await say($, '<task-notification>\n<status>completed</status>\n</task-notification>', 't2', { kind: 'task-notification' })
+  await say($, '<system-reminder>\n連結的工作階段\n</system-reminder>\n<side-sessions-event>其他工作階段結束了</side-sessions-event>', 't3', { kind: 'sdk' })
+  await say($, '檢查 CI', 't4', { kind: 'scheduled-trigger' })
+  // A message whose turn never started (another hook dropped it) is not carried over to a
+  // turn with no typed text, such as a continuation.
+  await $.prompt.submit({ text: '先別動', origin: { kind: 'composer' }, wait: false })
+  await $.turn.start({ text: '', turnId: 't5' })
+  // A message another hook dropped answers nothing, not even the next turn's.
+  await $.prompt.submit({ text: '別管它', origin: { kind: 'composer' }, wait: false })
+  await $.turn.start({ text: '檢查 CI', turnId: 't5b' })
+  await clock.advance(10)
+  expect(world.files.get(FILE) ?? '').toContain(asked)
+  const before = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
+  expect(await before.find({ type: 'Text', text: '● 2' })).toBeDefined()
+  await before.unmount()
+
+  // The person's own message, as an app hosting Claude Code sends it, behind a reminder.
+  await say($, '<system-reminder>\n連結的工作階段\n</system-reminder>\n先不要推，等 CI 跑完', 't6', { kind: 'sdk' })
+  await clock.advance(10)
+  const text = world.files.get(FILE) ?? ''
+  expect(text).toContain('- [ ] 推上 main — 你已回覆，等 Claude 處理\n')
+  // The other session's block is its own to change: every line of it is still there.
+  expect(text).toContain(other.replace('# 專案進度\n\n', ''))
+  const after = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
+  expect(await after.find({ type: 'Text', text: '● 1' })).toBeDefined()
+  await after.unmount()
+})
+
+test('a pane button answers only the step it belongs to: another step waiting on you stays', async ($, on) => {
+  const world: World = { files: new Map(), mtime: 1, hasTasks: true }
+  const clock = engineBeneath(on, world)
+  const submitted: string[] = []
+  on('prompt.submit', ($, e) => {
+    submitted.push(e.text)
+    return { text: e.text }
+  })
+  await start($, '幫我重畫範例圖')
+  await $.tool.call({ tool: 'TaskCreate', subject: '選配色', description: '' })
+  await $.tool.call({ tool: 'TaskCreate', subject: '檢查圖 2', description: '' })
+  await $.tool.call({ tool: 'TaskUpdate', taskId: '1', metadata: { waiting: 'you', ask: 'choose', options: ['和色', 'Nord'], why: '用哪組？' } })
+  await $.tool.call({ tool: 'TaskUpdate', taskId: '2', metadata: { waiting: 'you', ask: 'review', why: '新的座標軸刻度看起來對嗎' } })
+  await $.turn.complete({ answer: '兩件事要你決定。', durationMs: 1, isAborted: false, turnId: 't1', reason: 'answer' })
+  await clock.advance(10)
+
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
+  await ui.press({ key: 'mine::1::Nord' })
+  await ui.unmount()
+  expect(submitted.at(-1)).toBe('關於「選配色」：Nord')
+  // Answered from the press, before the turn it starts.
+  await clock.advance(10)
+  expect(world.files.get(FILE) ?? '').toContain('- [ ] 選配色 — 你已回覆，等 Claude 處理\n')
+  await $.turn.start({ text: submitted.at(-1) ?? '', turnId: 't2' })
+  await clock.advance(10)
+  const text = world.files.get(FILE) ?? ''
+  expect(text).toContain('- [ ] 選配色 — 你已回覆，等 Claude 處理\n')
+  expect(text).toContain('- [?] 檢查圖 2 — 新的座標軸刻度看起來對嗎\n')
+  const left = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
+  expect(await left.find({ type: 'Button', key: 'mine::1::Nord' })).toBeUndefined()
+  expect(await left.find({ type: 'Button', key: 'mine::2::沒問題' })).toBeDefined()
+  await left.unmount()
+})
+
+test('a pane button whose answer does not reach Claude leaves its step waiting on you, buttons and all', async ($, on) => {
+  const world: World = { files: new Map(), mtime: 1, hasTasks: true }
+  const clock = engineBeneath(on, world)
+  on('prompt.submit', ($, e) => (e.text.startsWith('關於') ? { drop: '先擋下' } : { text: e.text }))
+  await start($, '幫我重畫範例圖')
+  await $.tool.call({ tool: 'TaskCreate', subject: '選配色', description: '' })
+  await $.tool.call({ tool: 'TaskUpdate', taskId: '1', metadata: { waiting: 'you', ask: 'choose', options: ['和色', 'Nord'], why: '用哪組？' } })
+  await $.turn.complete({ answer: '要你決定。', durationMs: 1, isAborted: false, turnId: 't1', reason: 'answer' })
+  await clock.advance(10)
+
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
+  await ui.press({ key: 'mine::1::Nord' })
+  await ui.unmount()
+  await clock.advance(10)
+  expect(world.files.get(FILE) ?? '').toContain('- [?] 選配色 — 用哪組？\n')
+  const after = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
+  expect(await after.find({ type: 'Button', key: 'mine::1::Nord' })).toBeDefined()
+  await after.unmount()
+})
+
+test('your message typed while Claude is still working answers too; a notice delivered into that turn does not', async ($, on) => {
+  const world: World = { files: new Map(), mtime: 1, hasTasks: true }
+  const clock = engineBeneath(on, world)
+  on('prompt.submit', ($, e) => ({ text: e.text }))
+  await start($, '幫我發版')
+  await $.tool.call({ tool: 'TaskCreate', subject: '推上 main', description: '' })
+  await $.tool.call({ tool: 'TaskUpdate', taskId: '1', metadata: { waiting: 'you', why: '可以直接推到 main 嗎？' } })
+  await $.turn.complete({ answer: '準備好了。', durationMs: 1, isAborted: false, turnId: 't1', reason: 'answer' })
+  await clock.advance(10)
+
+  // A scheduled check runs a turn; a background task's notice reaches Claude inside it.
+  await say($, '檢查 CI', 't2', { kind: 'scheduled-trigger' })
+  await $.prompt.submit({ text: '<task-notification>\n<status>completed</status>\n</task-notification>', origin: { kind: 'task-notification' }, turnId: 't2', wait: false })
+  await clock.advance(10)
+  expect(world.files.get(FILE) ?? '').toContain('- [?] 推上 main — 可以直接推到 main 嗎？\n')
+
+  // The person types over that turn: answered now, though no turn of its own starts.
+  await $.prompt.submit({ text: '先不要推', origin: { kind: 'composer' }, turnId: 't2', wait: false })
+  await clock.advance(10)
+  expect(world.files.get(FILE) ?? '').toContain('- [ ] 推上 main — 你已回覆，等 Claude 處理\n')
 })
 
 test('a compaction leaves a handoff line in the block', async ($, on) => {
@@ -1755,6 +1939,49 @@ test('a real Grok Build turn takes its request from the session log and ends on 
   expect(text).toContain('### Rate-limit the public endpoints\n')
   expect(text.match(/<!-- auto session=/g)?.length).toBe(1)
 })
+
+// Cursor's afterAgentResponse and Muse's Stop, with the fields readTurn takes from them.
+const CURSOR_TURN = JSON.stringify({ conversation_id: '5d0c9b7e-31a4-4f0e-9d62-7c1e8f2a4b90', generation_id: 'f3a1c2d4-0b5e-4c6f-8a7d-9e0f1a2b3c4d', hook_event_name: 'afterAgentResponse', workspace_roots: ['/home/me/work/api-gateway'], text: 'Added the token bucket middleware. Should the per-key limit be 100 or 300 a minute?' })
+const MUSE_TURN = JSON.stringify({ session_id: 'c81f2e64-7a3b-4d95-b0e2-5f6a7b8c9d01', cwd: '/home/me/work/api-gateway', hook_event_name: 'Stop', last_assistant_message: 'Added the token bucket middleware. Should the per-key limit be 100 or 300 a minute?' })
+// The same session's next turn, after the person answered.
+const NEXT_TURN = (turn: string): string =>
+  turn.replaceAll('Added the token bucket middleware. Should the per-key limit be 100 or 300 a minute?', 'Set the per-key limit to 300 a minute.').replace(/Add rate limiting to (?:the public endpoints|the API)/g, '300 a minute')
+const SETTLED = 'TITLE: Rate-limit the public endpoints\nCONTEXT: Keep the public API up under abuse\nDONE: Set the per-key limit to 300 a minute\nNEXT: -\nASK: -'
+const AGENT_TURNS = [
+  ['codex', CODEX_STOP],
+  ['gemini', GEMINI_TURN],
+  ['cursor', CURSOR_TURN],
+  ['grok', GROK_STOP],
+  ['muse', MUSE_TURN],
+  ['hermes', HERMES_TURN],
+  ['openclaw', OPENCLAW_TURN],
+  ['opencode', OPENCODE_TURN],
+] as const
+
+// None of these agents tells the board when the person writes, only when a turn ends: the
+// question waits until the turn that answers it ends, then counts as answered.
+for (const [agent, turn] of AGENT_TURNS) {
+  test(`${agent}: a turn that ends on a question stops waiting on you once the next turn in that session ends`, async ($, on) => {
+    const world: World = {
+      files: new Map([[FILE, '# Progress\n'], [`${INBOX}/${agent}-turn-1792216380-1.json`, turn]]),
+      mtime: 1,
+      hasTasks: true,
+      reply: prompt => (!prompt.includes('TITLE:') ? undefined : prompt.includes('Set the per-key limit to 300') ? SETTLED : RATE_LIMIT),
+    }
+    const clock = engineBeneath(on, world)
+    await $.session.start({ cwd: '/work/persona_framework', surface: 'desktop', isInteractive: true })
+    await clock.advance(5000)
+    expect(world.files.get(FILE) ?? '').toContain('- [?] Per-key limit — 100 or 300 a minute?\n')
+
+    world.files.set(`${INBOX}/${agent}-turn-1792216390-2.json`, NEXT_TURN(turn))
+    world.mtime += 1
+    await clock.advance(5000)
+    const text = world.files.get(FILE) ?? ''
+    expect(text).toContain('- [x] Per-key limit\n')
+    expect(text).not.toContain('- [?]')
+    expect(text.match(/<!-- auto session=/g)?.length).toBe(1)
+  })
+}
 
 const RATE_LIMIT_REPLY = (prompt: string): string | undefined => (prompt.includes('TITLE:') ? RATE_LIMIT : undefined)
 

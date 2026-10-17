@@ -29,6 +29,15 @@ What is different for a remote reporter:
 - **A new block needs its project.** The fragment's first line
   (`## <project>`) or `merge.py --under` names it; without one the merge
   refuses rather than guess.
+- **Close the session when the conversation ends.** Write `state=done` or
+  `state=ended` as the last update: a block left `working` reads as live
+  for up to 12 hours. For a clean break in the same chat, `reporter.py
+  retire` writes the session's last fragment again as `ended`, keeping its
+  title and steps and adding the reason as a note, and mints a fresh id; a
+  session already `done` or `ended` is left as it is. It needs the chat in
+  the registry and the session's fragment in the outbox. Once those are
+  lost, `retire` cannot reach the old block, and it waits out the usual
+  staleness and archive rules.
 - **Never fake a heartbeat.** Write on state changes only. A block whose
   `updated=` is old must read as old.
 - **No secrets in blocks.** The transport is the trust boundary; the format
@@ -46,17 +55,25 @@ conversation. Do not build UI that implies delivery.
 - Consequential actions, above all merging a pull request, always need the
   user's explicit consent for that specific change and its test results,
   whatever the board shows.
+- **Source of truth.** For a remote reporter, the conversation with the user
+  is the source of truth; the board is a mirror. If they ever disagree, the
+  conversation wins. A remote `[?]` step should say where to answer, e.g.
+  `- [?] Git or chat relay for transport? (please reply in the chat)`.
 
 ## Transports (the user's choice)
 
 The reporter writes a fragment file; something must carry it to the board's
 machine and merge it into `progress.md`.
 
-| Transport | How | Notes |
-|---|---|---|
-| Chat relay | The agent pastes the fragment; the user (or their local agent) saves it and runs the merge | Zero setup; manual per update |
-| Git | Fragments pushed to a repo; the board's machine pulls on a schedule and merges | Automatic after one-time setup; versioned; recommended |
-| Cloud drive | Fragment in a shared folder; a local script pulls and merges | Needs a local script anyway |
+| Transport | How | Notes | Expected latency |
+|---|---|---|---|
+| Chat relay | The agent pastes the fragment; the user (or their local agent) saves it and runs the merge | Zero setup; manual per update | Immediate on paste, but only when the user acts |
+| Git | Fragments pushed to a repo; the board's machine pulls on a schedule and merges | Automatic after one-time setup; versioned; recommended | As often as the pull schedule runs |
+| Cloud drive | Fragment in a shared folder; a local script pulls and merges | Needs a local script anyway | As often as the sync and the local script run |
+
+The board can lag the conversation by that latency. When they disagree, the
+conversation wins (see [Source of truth](#inward-board-to-agent-no-reliable-channel)
+above).
 
 `scripts/remote-reporter/merge.py` is transport-agnostic and idempotent
 (re-merging the same fragments gives the same bytes), so any transport can
@@ -136,7 +153,7 @@ checks the prompt above and the page's copy match word for word.
 | Truncated or malformed fragment | Validated before merge; an invalid fragment is refused outright, never partly applied. Text with newlines, control characters or comment markers is refused when the fragment is built | Implemented and tested |
 | Replay (same fragment delivered twice) | Idempotent merge | Implemented and tested |
 | Stale session looking live | The pane already shows a `working`/`waiting` block untouched for 12 hours as stopped; reporters must not fake heartbeats | Format rule |
-| Orphan blocks (session died without `state=ended`) | The usual staleness and archive rules apply; the registry makes orphans rare | Documented |
+| Orphan blocks (session died without `state=ended`) | The usual staleness and archive rules apply; the registry makes orphans rare, and `reporter.py retire` closes the session honestly while its id is in the registry and its fragment in the outbox — a lost id leaves an orphan that only the staleness and archive rules clear | Implemented and tested |
 | Impersonation (`agent=` is self-declared) | No auth in the format; acceptable for a personal board | Documented |
 | A fragment choosing where a local agent runs | The board's page answers a closed Grok Build or Codex session by its `resume=` id in its `dir=` folder; `merge.py` drops both from every fragment, since a session on another machine cannot be resumed here | Implemented and tested |
 | Secrets leaking through the transport | Keep secrets out of blocks; choose the transport accordingly | Documented |
@@ -152,8 +169,8 @@ checks the prompt above and the page's copy match word for word.
 ## Reference implementation
 
 [`scripts/remote-reporter/`](../scripts/remote-reporter/README.md) holds
-stdlib Python: `reporter.py` (builds fragments, keeps the session registry),
-`merge.py` (the merge step), `validate.py` (FORMAT.md checks, scanning a file
+stdlib Python: `reporter.py` (builds fragments, keeps the session registry,
+retires sessions), `merge.py` (the merge step), `validate.py` (FORMAT.md checks, scanning a file
 the way the parser does) and `test_pipeline.py`. Run the tests with
 `python3 -B scripts/remote-reporter/test_pipeline.py`; CI runs them on
 Ubuntu and Windows.

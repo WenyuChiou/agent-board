@@ -1,5 +1,5 @@
 import type { ProgressMirror, ProgressMirrorTask } from '../types'
-import { cleanContext, cleanTitle, clip } from './mirror'
+import { cleanContext, cleanTitle, clip, waitsOnYou, withoutMarks } from './mirror'
 
 // A session's progress without its Task list: what each turn finished, the next step and
 // the question it ended on, as the model sums the turn up. Also the question a turn ends
@@ -129,14 +129,17 @@ export const applyDigest = (mirror: ProgressMirror, given: Digest, now: number):
 // person: the step in progress (else the next one) waits on them, with the question as its
 // note, until they answer.
 export const markAsked = (mirror: ProgressMirror, question: string): ProgressMirror => {
-  if (mirror.tasks.some(one => one.status !== 'completed' && one.waiting === 'you')) return mirror
+  if (mirror.tasks.some(one => waitsOnYou(mirror, one))) return mirror
   const target = mirror.tasks.find(one => one.status === 'in_progress') ?? mirror.tasks.find(one => one.status === 'pending')
   if (target === undefined) return mirror
 
   return {
     ...mirror,
     autoAsk: target.id,
-    tasks: mirror.tasks.map(one => (one.id === target.id ? { ...one, waiting: 'you', why: question } : one)),
+    // Asked again, even in the words the person answered: it waits on them again, as a plain
+    // question. The kind, options, command and link Claude set were for the one they answered.
+    answered: withoutMarks(mirror, [target.id]),
+    tasks: mirror.tasks.map(one => (one.id === target.id ? { ...one, waiting: 'you', why: question, ask: null, options: [], command: null, link: null } : one)),
   }
 }
 
@@ -151,6 +154,35 @@ export const clearAsked = (mirror: ProgressMirror): ProgressMirror => {
     autoAsk: null,
     tasks: mirror.tasks.map(one => (one.id === id && one.waiting === 'you' ? { ...one, waiting: null, why: null } : one)),
   }
+}
+
+// Whether a session that keeps a Task list has a step waiting on the person.
+export const isAskingYou = (mirror: ProgressMirror): boolean => mirror.source === 'tasks' && mirror.tasks.some(one => waitsOnYou(mirror, one))
+
+// The origins of a prompt that are the person writing: typed, from their phone (bridge), a
+// ping from Slack, or an app that hosts Claude Code through the SDK. Notifications, schedules,
+// other sessions and prompts no one stamped are not.
+const PERSON: readonly string[] = ['composer', 'bridge', 'slack-ping', 'sdk']
+
+// An app that hosts Claude Code sends its own events down the same path as the person's
+// messages, and can put <system-reminder> blocks before either. Its events open with a tag
+// of hyphenated words (<task-notification>, <side-sessions-event>, …); any such tag counts,
+// so a new kind of event is not taken for the person. A person who opens with one is missed.
+const REMINDER = /^\s*<system-reminder>[\s\S]*?<\/system-reminder>/
+const APP_EVENT = /^(?:<[a-z]+(?:-[a-z]+)+\b|\[SYSTEM NOTIFICATION)/
+
+type Submitted = { text: string; isMeta?: true; command?: object; origin: { kind: string; asUser?: true } }
+
+// Whether a prompt is the person's own message, which marks every step of this session that
+// waits on them answered. Another plugin's counts only when it sends the person's own words.
+export const isPersonsAnswer = (e: Submitted): boolean => {
+  if (e.isMeta === true || e.command !== undefined) return false
+  if (!PERSON.includes(e.origin.kind) && !(e.origin.kind === 'plugin' && e.origin.asUser === true)) return false
+  let text = e.text
+  while (REMINDER.test(text)) text = text.replace(REMINDER, '')
+  text = text.trim()
+
+  return text !== '' && !APP_EVENT.test(text)
 }
 
 // Summed-up questions are answered by the next prompt: the waiting step counts as done.

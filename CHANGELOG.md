@@ -1,12 +1,13 @@
 # Changelog
 
-## 0.20.3 — 2026-10-17
+## 0.20.5 — 2026-10-17
 
 An answered question can be put away without answering it again (#52).
 
 - **Already answered, hide.** A question from any agent stayed in Waiting on you until its
   session changed its block. A session with a Task list keeps its `[?]` step until Claude
-  marks it, so a question already answered in the chat kept coming back. Every question
+  marks it or the person writes in that session (0.20.4), so a question answered somewhere
+  else kept coming back. Every question
   from a session's block, whichever agent wrote it (Claude Code, Codex, Gemini CLI,
   Cursor, Grok Build, Muse, Hermes Agent, OpenClaw, OpenCode, or one written by hand under
   the AGENTS.md rule), can now be marked answered: **Already answered, hide**
@@ -21,7 +22,7 @@ An answered question can be put away without answering it again (#52).
   shows them all again. A hand-kept question is the person's own and is ticked instead.
   A session that stops or ends keeps its questions in its own row, as before; one hidden
   there stays out of the row's status and its reply framing, and is listed again only if
-  the session asks it again.
+  the session asks something new.
 - **How a question is matched.** By its session's block id, the step's place in that
   block, and its words as the block holds them. The session that asked works out the same
   key from its Task list through the line it writes, so headings, empty subjects and `—`
@@ -80,6 +81,95 @@ An answered question can be put away without answering it again (#52).
   again", "a press on the board names an answered list it cannot read or replace, with its
   error, and never writes over it", "a hide on the page that cannot replace the answered
   list is answered with that file and its error".
+
+## 0.20.4 — 2026-10-17
+
+A question you answered in its own session stops waiting on you (#57).
+
+- **Your message marks a Task-list session's `[?]` steps answered.** When Claude marked a
+  step `waiting: "you"` with `TaskUpdate`, the step stayed under Waiting on you after the
+  person answered in that session, until Claude marked the task done or cleared `waiting`
+  itself, which it often did not. A review left up this way kept its "Looks good" button,
+  so one click told Claude the opposite of what the person had just written. Now the
+  person's own message marks every open step of that session that waits on them as
+  answered, also when they type it while Claude is still working. What the step asked
+  stays, for Claude. An answered step leaves Waiting on you, its buttons and the count, and
+  the block writes it as Claude's to do with the note "answered, waiting on Claude", so the
+  board's page and other sessions no longer offer to answer it either. The mark is kept in
+  the session's mirror with the step's words. It ends when Claude's `TaskUpdate` sets
+  `waiting: "you"` again, even in the same words, or when the step's subject or note
+  changes. A turn that ends on a question can ask on the step again too, as a plain
+  question without the buttons of the one the person answered. Claude moving other steps,
+  or a re-read of the Task list, keeps the mark.
+- **A pane button marks its own step when pressed.** Only that step stops waiting, and the
+  answer it sends names the step (for example `關於「檢查圖 2」：看過了，沒問題`). If the answer does
+  not reach Claude (another hook holds it back), the step waits again, buttons and all.
+- **Only the person's message counts.** Who wrote a prompt is read from its origin at
+  `prompt.submit`: typed, from Remote Control, a Slack ping, an app or script that drives
+  Claude Code through the SDK, or another plugin's prompt sent as the person's own words
+  (`asUser`). A background task's notification, a scheduled prompt, another session's
+  message, a hidden prompt, a slash command, a dropped prompt or a turn with no typed text
+  (a continuation) does not mark these steps. Neither does an event an app sends down the
+  person's path: one that opens with a tag of hyphenated words (`<task-notification>`,
+  `<side-sessions-event>`, `<ci-monitor-event>`, `<cross-session-message>`, …) or with
+  `[SYSTEM NOTIFICATION`, with any `<system-reminder>` blocks in front of it taken off
+  first. Another session's block is never touched. `docs/FORMAT.md` says so.
+- **The board's page answers only the question it showed.** A reply goes with the question
+  the page drew it under, and is refused when the task asks something else since or nothing
+  at all, as a task kept its key while its question changed (an ended Grok Build or Codex
+  session's reply box). Before, it went out as the answer to whatever the task asked now.
+- **Every agent.** A Claude session without a Task list already settled its question when
+  the next prompt started a turn; a test now pins it. Codex, Gemini CLI, Cursor, Grok Build,
+  Muse, Hermes Agent, OpenClaw and OpenCode tell the board only when a turn ends, so their
+  question is settled when the next turn in that session ends; a test per agent pins it. A
+  block an agent writes by hand is that agent's to change (#52).
+- Tests: "a review Claude marked as waiting on you stops waiting once you write in that
+  session, so 沒問題 cannot answer it, and shows again only when Claude asks again", "only
+  your own message settles this session’s waiting steps: not a background task’s notice, an
+  app event, a turn with no typed text, or another session’s question", "a pane button
+  answers only the step it belongs to: another step waiting on you stays", "a pane button
+  whose answer does not reach Claude leaves its step waiting on you, buttons and all", "your
+  message typed while Claude is still working answers too; a notice delivered into that turn
+  does not", "your message marks every step of a Task list that waited on you answered,
+  keeps what it asked, and only Claude asking again or new words bring it back", "a turn
+  that ends on a question after you answered a step asks it plainly, without the buttons of
+  the question you answered", "an answered mark goes with its step: deleted, its id taken by
+  a new step, or no longer listed", "only the person’s own message is an answer: not a
+  notice, a schedule, another session, an app’s event, a hidden prompt or a command",
+  "<agent>: a turn that ends on a question stops waiting on you once the next turn in that
+  session ends" (one per agent), and the turn-session check in "without a Task list, a turn
+  that changed something is summed up into steps and its question", "a press on the page is
+  worked out from the file as it is now: a line that is gone is refused, and a reply goes with
+  its question", and "a reply goes into a closed Grok session once, in its own folder, and the
+  page waits for its answer before it closes" (`tests/board.test.mjs`).
+
+## 0.20.3 — 2026-10-17
+
+- **A remote reporter can close a session and start a fresh one.** `reporter.py
+  retire <chat-id> ["reason"]` writes the chat's last fragment again as `ended`,
+  keeping its project line, title, notes and steps and adding the reason as a note,
+  then gives the chat a new session id, so a clean break leaves no block reading as
+  live. A session already `done` or `ended` is left as it is, and only the id is
+  new. It refuses a chat that is not in the registry, and one that has not reported
+  yet: neither has a block on the board to close. A reason with a control character
+  or a comment marker, and a fragment that is no longer a valid block, are refused
+  before anything is written. Once a chat's id and fragment are lost, its block
+  still waits out the usual staleness and archive rules, and
+  `docs/REMOTE_REPORTERS.md` says so. Tests: `test_pipeline.py` "15a
+  retire ok" to "15h board shows ended" (the old block merges in place as `ended`,
+  once), "15i retired fragment keeps its project line, title, notes and steps, and
+  adds the reason", "15j retire refuses a chat not in the registry", "15k refused
+  retire mints nothing", "15l retire refuses a session that never reported, and
+  mints nothing", "15m retire after done leaves the done block as it was and mints
+  a new id", "15n a reason with a comment opening is refused without a traceback,
+  and nothing changes", "15o a bad reason is refused on a done session too, and
+  mints nothing", "15p a fragment that is not a valid block is refused, and nothing
+  changes".
+- **The remote reporter guide says the conversation wins.** For a remote reporter
+  the conversation with the user is the source of truth and the board a mirror; a
+  remote `[?]` step says where to answer; the transports table says how far behind
+  each one can leave the board; and a reporter closes its session (`done` or
+  `ended`) when the conversation ends. Docs only.
 
 ## 0.20.2 — 2026-10-17
 

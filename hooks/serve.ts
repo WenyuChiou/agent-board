@@ -108,6 +108,8 @@ export type ServeRow = {
   handoff: string
   // Its session still asks the person something (not marked answered): the card opens by itself.
   isAsking: boolean
+  // That question, as a reply from the page names it; '' when none.
+  question: string
   send: SendMode
   session: string
   where: string
@@ -207,6 +209,7 @@ export const serveModel = (view: View, pending: readonly PendingTurn[], s: Strin
         resume: isLan ? null : row.resume,
         handoff: row.handoff,
         isAsking: row.question !== null,
+        question: row.question ?? '',
         send,
         session: row.target?.session ?? '',
         where: send === 'send' ? (row.target?.dir ?? '') : '',
@@ -239,7 +242,8 @@ export const serveModel = (view: View, pending: readonly PendingTurn[], s: Strin
   }
 }
 
-export type ServeRequest = { key: string; type: string; text: string; session: string }
+// `asked`: with a reply, the question the page showed it under ('' for none).
+export type ServeRequest = { key: string; type: string; text: string; session: string; asked?: string }
 
 export type ServeAction =
   | { type: 'tick'; ref: StepRef }
@@ -293,9 +297,12 @@ export const serveAction = (items: readonly BoardItem[], request: ServeRequest, 
   // Keys are a project and a title, which another session's block can take over between the
   // page's redraw and the press.
   if (request.session !== target.session) return { type: 'refuse', note: s.boardLineChanged }
-  if (text === '') return { type: 'refuse', note: '' }
-  // An answer goes with the question it answers, the way the pane words one for Claude.
+  // An answer goes with the question it answers, the way the pane words one for Claude, and
+  // only while that question is still the one asked: a task keeps its key while its question
+  // is answered, reworded, replaced by another or marked answered here.
   const question = item.type === 'ask' ? item.ask.text : (item.row.question ?? undefined)
+  if ((request.asked ?? '') !== (question ?? '')) return { type: 'refuse', note: s.boardLineChanged }
+  if (text === '') return { type: 'refuse', note: '' }
 
   return { type: 'send', target, text: question === undefined ? text : s.answerText(question, text), title }
 }
@@ -557,15 +564,15 @@ const PAGE_SCRIPT = String.raw`
     node.addEventListener('click', onPress);
     return node;
   }
-  function act(key, type, text, waiting, session) {
+  function act(key, type, text, waiting, session, asked) {
     say(waiting || '…');
-    return call('/api/act', { key: key, type: type, text: text || '', session: session || '' }).then(function (data) {
+    return call('/api/act', { key: key, type: type, text: text || '', session: session || '', asked: asked || '' }).then(function (data) {
       say(data.note || '', data.ok ? 'done' : 'alert');
     }, function () {
       say(w('serveOffline'), 'alert');
     }).then(function () { refresh(); });
   }
-  function replyBox(key, placeholder, mode, agent, where, isSending, session) {
+  function replyBox(key, placeholder, mode, agent, where, isSending, session, asked) {
     var box = el('div', 'reply');
     var input = el('textarea');
     input.rows = 2;
@@ -576,7 +583,7 @@ const PAGE_SCRIPT = String.raw`
         var text = input.value.trim();
         if (!text) return;
         input.value = '';
-        act(key, 'send', text, w('serveSending', agent), session);
+        act(key, 'send', text, w('serveSending', agent), session, asked);
       }, 'primary')
       : button(w('serveCopy'), function () {
         var text = input.value.trim();
@@ -613,7 +620,7 @@ const PAGE_SCRIPT = String.raw`
     ask.answers.forEach(function (answer, index) {
       var send = ask.send === 'send';
       var node = button(answer, function () {
-        if (send) act(ask.key, 'send', answer, w('serveSending', ask.agent), ask.session);
+        if (send) act(ask.key, 'send', answer, w('serveSending', ask.agent), ask.session, ask.text);
         else copy(answer);
       }, index === 0 ? 'primary' : '');
       node.disabled = send && ask.isSending;
@@ -629,13 +636,15 @@ const PAGE_SCRIPT = String.raw`
       actions.appendChild(link);
     }
     if (actions.childNodes.length) add(card, actions);
-    if (!ask.canTick) add(card, replyBox(ask.key, w('serveReplyPlaceholder'), ask.send, ask.agent, ask.where, ask.isSending, ask.session));
+    if (!ask.canTick) add(card, replyBox(ask.key, w('serveReplyPlaceholder'), ask.send, ask.agent, ask.where, ask.isSending, ask.session, ask.text));
     if (ask.info) add(card, el('div', 'quiet small', ask.info));
     return card;
   }
   function rowCard(row) {
     var card = el('details', 'card row');
     var isWaiting = row.isAsking;
+    // A reply goes with the question it was written under, and only while it is still asked.
+    var asked = row.question;
     card.open = row.key in opened ? opened[row.key] : row.send === 'send' || isWaiting;
     card.addEventListener('toggle', function () { opened[row.key] = card.open; });
     var summary = el('summary');
@@ -654,7 +663,7 @@ const PAGE_SCRIPT = String.raw`
     if (row.resume) actions.appendChild(button(w('serveCopyResume'), function () { copy(row.resume); }));
     if (actions.childNodes.length) add(body, actions);
     if (row.resume) add(body, el('code', '', row.resume));
-    if (row.send === 'send') add(body, replyBox(row.key, w('serveMessagePlaceholder', row.agent), 'send', row.agent, row.where, row.isSending, row.session));
+    if (row.send === 'send') add(body, replyBox(row.key, w('serveMessagePlaceholder', row.agent), 'send', row.agent, row.where, row.isSending, row.session, asked));
     else if (row.hasCopyBox) add(body, replyBox(row.key, w('serveReplyPlaceholder'), 'copy', row.agent, '', false));
     if (row.info) add(body, el('div', 'quiet small', row.info));
     card.appendChild(body);
