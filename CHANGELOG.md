@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.19.2 — 2026-10-17
+
+Waiting on you lists only questions (#48).
+
+- **A session that asked nothing is no longer listed as waiting on you.** Every turn's
+  end writes `state=waiting`, and a block in that state with no `[?]` step got a "waiting
+  on your reply" item in Waiting on you with nothing to answer: a Claude Code session
+  that had just finished a turn, a Codex session waiting on CI (`[>]`), or the older of
+  two sessions on one pull request, which then looked like the same work listed twice.
+  Such a block now stays with the work in progress, showing its next step, its running
+  step or what it is doing, or under Due soon when it has a date close by. Waiting on you
+  holds `[?]` steps (and, on the terminal board and the board page, inbox turns not read
+  yet that end on a question), the same in the pane, the terminal board, `progress.html`
+  and the board page. With it go the desktop notification "<agent> asks: waiting on your
+  reply" that every such turn's end sent, and its place in the status line's waiting
+  count. `docs/FORMAT.md` says so for `state=waiting`. Tests: "a turn that ends with no
+  question, or waits only on CI, is not listed as waiting on the person", "the view sorts
+  work into this session, waiting on you, due soon, other and done".
+
 ## 0.19.1 — 2026-10-17
 
 Another agent's turn is no longer lost on its way to the board (#40).

@@ -468,28 +468,10 @@ export const buildView = (
       }
 
       const auto = task.auto === null || task.auto.state === 'done' ? null : stale ? 'ended' : task.auto.state
-      if (auto === 'waiting') {
-        if (!task.steps.some(step => step.status === 'waiting')) {
-          waiting.push({
-            key,
-            project: name,
-            task: title,
-            context,
-            text: s.waitingReply,
-            note: '',
-            when,
-            kind: 'reply',
-            options: [],
-            command: null,
-            link: null,
-            where: 'other',
-            agent: task.auto?.agent === 'claude' ? '' : (task.auto?.agent ?? ''),
-            step: null,
-            target: targetOf(task.auto),
-          })
-        }
-        continue
-      }
+      // A session whose turn ended on a question is in 等你處理 by its [?] steps. One whose
+      // turn simply ended (`state=waiting` is written at every turn's end), or that waits on
+      // CI or another agent, asks the person nothing: it stays with the work in progress.
+      if (auto === 'waiting' && task.steps.some(step => step.status === 'waiting')) continue
 
       const { done, total } = countSteps(task)
       const phrase =
