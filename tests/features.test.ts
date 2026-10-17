@@ -1548,7 +1548,7 @@ test('the board you work in marks the chosen line and lists only the keys that d
   const onAsk = boardScreen(view, [], emptyBoardState, STRINGS.en, { width: 100, isColor: false })
   expect(onAsk).toContain('› [Choose] Per-key limit')
   expect(onAsk).toContain('    2 300 a minute')
-  expect(onAsk).toContain('1–2 copy answer · ↑↓ select')
+  expect(onAsk).toContain('1–2 copy answer · h already answered, hide · ↑↓ select')
   const onJob = boardScreen(view, [], { selected: job, key: null, open: items[job]?.key ?? null, note: 'Copied: 300' }, STRINGS.en, { width: 100, isColor: false })
   expect(onJob).toContain('› Fabrikam fellowship')
   expect(onJob).toContain('    ✓ 1 Draft the statement')
@@ -1683,4 +1683,90 @@ test('a comment opening in a summed-up title, a step, a branch or a first reques
   expect(tasks.map(task => [task.title, task.auto?.session])).toEqual([['x', 'aaaa1111'], ['note', 'bbbb2222'], ['Third', 'cccc3333']])
   expect(tasks[0]?.steps.map(step => step.text)).toEqual(['fixed it', 'ship ->'])
   expect(file.split('\n').filter(line => /<!--|-->/.test(line) && !/^<!-- \/?auto /.test(line))).toEqual([])
+})
+
+test('the terminal board, progress.html and the board page leave out a question marked answered and say how many are hidden', () => {
+  const file = `# Project progress
+
+## data-pipeline
+<!-- auto session=a1b2c3d4 state=waiting updated=2026-10-17T08:40:00Z -->
+### Backfill the events
+- [?] Keep the old table, OK?
+<!-- /auto session=a1b2c3d4 -->
+`
+  const now = Date.parse('2026-10-17T08:45:00Z')
+  const view = buildView(parseProgress(file), [], null, now, 0, {}, STRINGS.en, ['a1b2c3d4 1 Keep the old table, OK?'])
+  const text = boardText(view, [], STRINGS.en, { width: 100, isColor: false })
+  expect(text).toContain('1 answered, hidden')
+  const screen = boardScreen(view, [], emptyBoardState, STRINGS.en, { width: 100, isColor: false })
+  expect(screen).toContain('1 answered, hidden · u show them again')
+  const html = dashboardHtml(view, STRINGS['zh-TW'], 'p', 'now')
+  expect(html).toContain('已回覆、隱藏的 1 項')
+  for (const shown of [text, screen]) expect(shown).not.toContain('waiting on you: Keep the old table')
+  expect(html).not.toContain('等你：Keep the old table')
+  expect(serveModel(view, [], STRINGS.en).asks).toEqual([])
+  expect(serveModel(view, [], STRINGS.en).counts.waiting).toBe(0)
+  // Its task is back with the work in progress, no longer saying it waits on you.
+  expect(view.groups.flatMap(group => group.rows).map(row => [row.title, row.tone])).toEqual([['Backfill the events', 'quiet']])
+})
+
+test("the terminal board and the board page mark any agent's question answered without sending it anything, and show it again", () => {
+  const view = serveView()
+  const items = boardItems(view, [])
+  const codex = items.findIndex(item => item.type === 'ask' && item.ask.agent === 'codex')
+  const manual = items.findIndex(item => item.type === 'ask' && item.ask.where === 'manual')
+  const key = 'a1b2c3d4 2 Per-key limit — 100 or 300 a minute?'
+  // h on the terminal board, a button on the page: both name the question by its block's words.
+  expect(boardKey({ ...emptyBoardState, selected: codex }, 'h', items, STRINGS.en).action).toEqual({ type: 'hide', key, text: 'Per-key limit' })
+  expect(boardScreen(view, [], { ...emptyBoardState, selected: codex }, STRINGS.en, { width: 200, isColor: false })).toContain('h already answered, hide')
+  // A hand-kept question is the person's own: ticking it is the answer.
+  expect(boardKey({ ...emptyBoardState, selected: manual }, 'h', items, STRINGS.en).action).toBeNull()
+  expect(boardKey(emptyBoardState, 'u', items, STRINGS.en).action).toEqual({ type: 'unhide', key: null })
+  const model = serveModel(view, [], STRINGS.en)
+  expect(model.asks.find(ask => ask.agent === 'codex')?.canHide).toBe(true)
+  expect(model.asks.find(ask => ask.project === 'docs-site')?.canHide).toBe(false)
+  const press = (type: string, on: string) => serveAction(items, { key: on, type, text: '', session: '' }, STRINGS.en)
+  const codexKey = items[codex]?.key ?? ''
+  expect(press('hide', codexKey)).toEqual({ type: 'hide', key, text: 'Per-key limit' })
+  expect(press('hide', items[manual]?.key ?? '').type).toBe('refuse')
+  // Hidden, it is listed apart with a way back, and its quick answers go with it.
+  const hidden = serveModel(buildView(parseProgress(SERVE_FILE), [], null, SERVE_NOW, 0, {}, STRINGS.en, [key]), [], STRINGS.en)
+  expect(hidden.asks.some(ask => ask.agent === 'codex')).toBe(false)
+  expect(hidden.hidden).toEqual([{ key: `hidden:${key}`, project: 'api-gateway', agent: 'codex', task: 'Rate-limit the public endpoints', text: 'Per-key limit' }])
+  expect(press('unhide', `hidden:${key}`)).toEqual({ type: 'unhide', key })
+  expect(press('unhide', codexKey)).toEqual({ type: 'refuse', note: '' })
+  // The page's script and words carry the buttons.
+  const page = servePage(STRINGS.en, 'n')
+  expect(page).toContain("act(ask.key, 'hide')")
+  expect(page).toContain("act(one.key, 'unhide')")
+  expect(pageWords(STRINGS.en).hiddenCount).toBe('\u0001 answered, hidden')
+})
+
+test('a quick answer pressed while the page showed one question is refused once the same step asks another', () => {
+  const asked = boardItems(serveView(), [])
+  const shown = asked.find(item => item.type === 'ask' && item.ask.agent === 'codex')?.key ?? ''
+  const reworded = SERVE_FILE.replace('Per-key limit — 100 or 300 a minute?', 'Per-key limit — 300 or 1000 a minute?')
+  const now = boardItems(buildView(parseProgress(reworded), [], null, SERVE_NOW, 0, {}, STRINGS.en), [])
+  expect(now.some(item => item.key === shown)).toBe(false)
+  for (const type of ['send', 'hide', 'tick']) {
+    expect(serveAction(now, { key: shown, type, text: '300 a minute', session: 'a1b2c3d4' }, STRINGS.en)).toEqual({ type: 'refuse', note: STRINGS.en.boardLineChanged })
+  }
+  // The terminal board says the line changed under the cursor instead of copying an answer for it.
+  const at = asked.findIndex(item => item.key === shown)
+  const state = pinned({ ...emptyBoardState, selected: at }, asked)
+  expect(boardKey(state, '2', now, STRINGS.en)).toMatchObject({ action: null, state: { note: STRINGS.en.boardLineChanged } })
+})
+
+test('a reply on the line of a task whose question was marked answered goes as it was typed, and the line no longer opens as asking', () => {
+  const key = 'b2c3d4e5 2 Redis or Memcached?'
+  const view = buildView(parseProgress(SERVE_FILE), [], null, SERVE_NOW, 0, {}, STRINGS.en, [key])
+  const items = boardItems(view, [])
+  const grok = items.find(item => item.type === 'row' && item.row.title === 'Pick the cache')?.key ?? ''
+  expect(serveAction(items, { key: grok, type: 'send', text: 'Use Redis', session: 'b2c3d4e5' }, STRINGS.en)).toEqual({ type: 'send', target: GROK, text: 'Use Redis', title: 'Pick the cache' })
+  const row = (model: ReturnType<typeof serveModel>) => model.groups.flatMap(group => group.rows).find(one => one.title === 'Pick the cache')
+  expect(row(serveModel(view, [], STRINGS.en))?.isAsking).toBe(false)
+  // Still asked, it opens by itself and a reply goes as its answer.
+  expect(row(serveModel(serveView(), [], STRINGS.en))?.isAsking).toBe(true)
+  // The step itself still shows in the task's steps.
+  expect(row(serveModel(view, [], STRINGS.en))?.steps.map(step => step.text)).toContain('Redis or Memcached?')
 })

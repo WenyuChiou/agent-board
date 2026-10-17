@@ -17,7 +17,7 @@ Contents: [File](#file) · [Structure](#structure) · [Steps](#steps-and-marks) 
 | Encoding | UTF-8. Do not write a byte order mark. |
 | Line endings | LF or CRLF. Both are read. |
 | Missing file | Read as empty. The first writer creates it. |
-| Companions | Files the pane writes in the same folder, named after the file with its `.md` taken off: the archive and journal files (see [Lifecycle](#lifecycle)) and `progress.html`, a page that shows the whole file in a browser (see below). They are not part of the format. |
+| Companions | Files the pane writes in the same folder, named after the file with its `.md` taken off: the archive and journal files (see [Lifecycle](#lifecycle)), `progress.html`, a page that shows the whole file in a browser (see below), and `progress-answered.json`, the questions the person marked answered on this computer (JSON `{"answered": [...]}`, one entry per `[?]` step: its block's `session`, the step's place among the block's steps counting from 1, and the step's text, separated by single spaces). They are not part of the format, and marking a question answered never changes a block. |
 
 The pane checks the file's modification time and size every 2 seconds and parses it again when either changed.
 

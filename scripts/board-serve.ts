@@ -285,7 +285,7 @@ export const startServer = (o: ServeOptions): void => {
         return json(res, sent.status, { note: sent.note })
       }
       const note = o.act(action)
-      const isDone = ![o.s.boardWriteFailed, o.s.boardTickGone, o.s.archiveGone].includes(note)
+      const isDone = ![o.s.boardWriteFailed, o.s.boardTickGone, o.s.archiveGone, o.s.hideFailed].includes(note)
       return json(res, isDone ? 200 : 409, { note })
     }
     if (url.pathname === '/api/tidy') {

@@ -53,7 +53,7 @@ import { baseName, countSteps, doneKey, isHereProject, isTaskComplete, parseProg
 import type { ProgressProject } from '../types'
 import { dashboardHtml } from './dashboard'
 import { paletteFor } from './palette'
-import { drawPane } from './pane'
+import { drawPane, reviseKey } from './pane'
 import type { PaneActions, PaneModel, PaneUi } from './pane'
 import { isQuickAdd, parseQuickAdd, quickAddWords } from './quick'
 import type { Lang, Strings } from './i18n'
@@ -85,8 +85,8 @@ import {
 } from './inbox'
 import type { AgentTurn } from './inbox'
 import { keepRecent, remindersOf } from './remind'
-import { buildView, statusLine } from './view'
-import type { StepRef, TaskRef, TaskRow } from './view'
+import { answeredJson, answeredPath, buildView, keptAnswered, parseAnswered, statusLine, withAnswered } from './view'
+import type { StepRef, TaskRef, TaskRow, WaitingItem } from './view'
 
 const PANE = 'agent-board'
 const POLL_MS = 2000
@@ -130,6 +130,11 @@ const isLangChosen = atom({ plugin: 'agent-board', key: 'isLangChosen' } as cons
 const opened = atom({ plugin: 'agent-board', key: 'opened' } as const, [] as string[])
 // When the pane first saw each hand-kept task done (by doneKey), to archive it a day later.
 const doneSeen = atom({ plugin: 'agent-board', key: 'doneSeen' } as const, {} as Record<string, number>)
+// Questions the person marked answered (view.ts askKeys), read from progress-answered.json
+// beside progress.md, which every session on this machine and the board script share.
+const hiddenAsks = atom({ plugin: 'agent-board', key: 'hiddenAsks' } as const, [] as string[])
+// The review whose reply box Needs changes opened.
+const revising = atom({ plugin: 'agent-board', key: 'revising' } as const, '')
 
 const messageOf = (error: unknown): string => (error instanceof Error ? error.message : String(error))
 
@@ -236,12 +241,82 @@ const complete = ($: EngineInterface, request: Parameters<EngineInterface['model
     $.model.complete(request).then(resolve, () => resolve(undefined))
   })
 
+// Another session on this machine, or the board script, may mark a question answered: its file
+// is a stat per poll too. A read that fails, or that catches a write half-way, is tried again on
+// the next poll, and the list in hand stays until then.
+// Null until the first look, so a list kept in the store is checked against the file even when
+// the file is gone.
+let answeredSeen: string | null = null
+const pollAnswered = async ($: EngineInterface, path: string): Promise<void> => {
+  const file = answeredPath(path)
+  const stat = await $.fs.stat(file).catch(() => undefined)
+  const seen = stat === undefined ? '' : `${stat.mtimeMs}:${stat.size}`
+  if (seen === answeredSeen) return
+  const now = await $.clock.now()
+  const list = stat === undefined ? [] : await $.fs.read(file).then(text => parseAnswered(text, now - stat.mtimeMs), () => null)
+  if (list === null) return
+  answeredSeen = seen
+  await update($, hiddenAsks, () => list)
+  // Before progress.md is first read the snapshot is empty; that first read draws both.
+  if ((await read($, snapshot)).path !== path) return
+  await refreshStatus($)
+  await writeDashboard($, true)
+}
+
+// Marks whose question has left the file go, so the same words asked again later show. Run once
+// the file has held still for a poll, so a write caught half-way never drops one, and only while
+// it still holds still (`mtimeMs`, `size`), on disk as well as in this session's last look: a
+// file another session or the board changed meanwhile waits for its own turn.
+let isPrunePending = false
+const pruneAnswered = async ($: EngineInterface, path: string, projects: readonly ProgressProject[], mtimeMs: number, size: number): Promise<void> => {
+  const list = await read($, hiddenAsks)
+  if (keptAnswered(list, projects).length === list.length) return
+  await enqueue(async () => {
+    const snap = await read($, snapshot)
+    if (snap.path !== path || snap.mtimeMs !== mtimeMs || snap.size !== size) return null
+    const disk = await $.fs.stat(path).catch(() => undefined)
+    if (disk === undefined || disk.mtimeMs !== mtimeMs || disk.size !== size) return null
+    return rewrite($, answeredPath(path), before => {
+      const now = parseAnswered(before)
+      return now === null ? AGAIN : answeredJson(keptAnswered(now, projects))
+    })
+  })
+}
+
+// Marks one question answered, or lists it again: only progress-answered.json changes, never a
+// block, and nothing is sent to any session. Read, changed, written and read back in the write
+// queue, so a press in another session or the board script is kept. False when it did not stick.
+const setAnswered = async ($: EngineInterface, item: WaitingItem, isHidden: boolean): Promise<boolean> => {
+  if (item.hideKey === '') return false
+  const snap = await read($, snapshot)
+  const file = answeredPath(snap.path || (await progressPath($)))
+  const list = await enqueue(async () => {
+    await rewrite(
+      $,
+      file,
+      async before => {
+        const stat = await $.fs.stat(file).catch(() => undefined)
+        const now = parseAnswered(before, stat === undefined ? 0 : (await $.clock.now()) - stat.mtimeMs)
+        return now === null ? AGAIN : answeredJson(withAnswered(now, [item.hideKey], isHidden))
+      },
+      check => parseAnswered(check)?.includes(item.hideKey) === isHidden,
+    )
+    return parseAnswered(await readText($, file))
+  }).catch(() => null)
+  if (list === null || list.includes(item.hideKey) !== isHidden) return false
+  await update($, hiddenAsks, () => list)
+  await refreshStatus($)
+  await writeDashboard($, true)
+  return true
+}
+
 // Re-reads the file only when its mtime or size moved, so the 2s timer is a stat.
 const poll = async ($: EngineInterface): Promise<void> => {
   if (isPolling) return
   isPolling = true
   try {
     const path = await progressPath($)
+    await pollAnswered($, path).catch(() => undefined)
     const previous = await read($, snapshot)
     const stat = await $.fs.stat(path).catch(() => undefined)
     if (stat === undefined) {
@@ -249,7 +324,14 @@ const poll = async ($: EngineInterface): Promise<void> => {
       return
     }
     const isSame = previous.path === path && previous.mtimeMs === stat.mtimeMs && previous.size === stat.size
-    if (isSame && previous.error === null && !previous.isMissing) return
+    if (isSame && previous.error === null && !previous.isMissing) {
+      if (isPrunePending) {
+        isPrunePending = false
+        // Not waited on: poll also runs inside queued jobs, which the prune would queue behind.
+        pruneAnswered($, path, previous.projects, stat.mtimeMs, stat.size).catch(() => undefined)
+      }
+      return
+    }
     try {
       const projects = parseProgress(await $.fs.read(path))
       await update($, snapshot, () => ({
@@ -261,6 +343,7 @@ const poll = async ($: EngineInterface): Promise<void> => {
         projects,
       }))
       await noteDone($, projects)
+      isPrunePending = true
       await refreshStatus($)
       await writeDashboard($)
       await remind($)
@@ -284,7 +367,7 @@ const writeDashboard = async ($: EngineInterface, force = false): Promise<string
   const path = dashboardPath(snap.path || (await progressPath($)))
   if (!force && at - dashboardAt < 60 * 1000) return path
   const s = await wordsOf($)
-  const view = buildView(snap.projects, [], null, at, await read($, today), await read($, doneSeen), s)
+  const view = buildView(snap.projects, [], null, at, await read($, today), await read($, doneSeen), s, await read($, hiddenAsks))
   const date = new Date(at)
   const html = dashboardHtml(view, s, snap.path, s.dashStamp(`${localDay(at)} ${pad2(date.getHours())}:${pad2(date.getMinutes())}`))
   dashboardAt = at
@@ -341,6 +424,7 @@ const refreshStatus = async ($: EngineInterface): Promise<void> => {
           await read($, today),
           await read($, doneSeen),
           s,
+          await read($, hiddenAsks),
         ),
         s,
       )
@@ -1139,6 +1223,7 @@ const remindNow = async ($: EngineInterface): Promise<void> => {
     await read($, today),
     await read($, doneSeen),
     s,
+    await read($, hiddenAsks),
   )
   const stored = await $.store.get('told')
   const told = stored !== null && typeof stored === 'object' ? (stored as Record<string, number>) : {}
@@ -1651,7 +1736,7 @@ export const register: Register = (on, options) => {
     const at = (await read($, now)) || (await $.clock.now())
     const s = await wordsOf($)
     const palette = paletteFor(await read($, theme))
-    const view = buildView(snap.projects, await read($, here), await read($, mine), at, await read($, today), await read($, doneSeen), s)
+    const view = buildView(snap.projects, await read($, here), await read($, mine), at, await read($, today), await read($, doneSeen), s, await read($, hiddenAsks))
     const ui: PaneUi = {
       Box: table.Box,
       Text: table.Text,
@@ -1675,6 +1760,7 @@ export const register: Register = (on, options) => {
     const model: PaneModel = {
       view,
       expanded: await read($, expanded),
+      revising: await read($, revising),
       opened: await read($, opened),
       answer: await read($, answer),
       path: snap.path,
@@ -1756,6 +1842,19 @@ export const register: Register = (on, options) => {
       copySessionId: (item, surface) => {
         if (item.sessionId === null) return
         showCopied($, s.sessionIdOf(item.task, item.sessionId !== item.session), item.sessionId, surface).catch(() => undefined)
+      },
+      hide: item => {
+        setAnswered($, item, true)
+          .then(isDone => (isDone ? undefined : update($, answer, () => ({ question: item.text, text: s.hideFailed, isAsking: false }))))
+          .catch(() => undefined)
+      },
+      unhide: item => {
+        setAnswered($, item, false)
+          .then(isDone => (isDone ? undefined : update($, answer, () => ({ question: item.text, text: s.hideFailed, isAsking: false }))))
+          .catch(() => undefined)
+      },
+      revise: item => {
+        update($, revising, open => (open === reviseKey(item) ? '' : reviseKey(item))).catch(() => undefined)
       },
       toggleLegend: () => {
         update($, isLegendOpen, open => !open).catch(() => undefined)

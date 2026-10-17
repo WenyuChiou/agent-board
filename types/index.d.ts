@@ -138,6 +138,8 @@ declare module 'claude-code' {
       isLegendOpen: boolean
       opened: string[]
       doneSeen: Record<string, number>
+      hiddenAsks: string[]
+      revising: string
       lang: string
       isLangChosen: boolean
     }

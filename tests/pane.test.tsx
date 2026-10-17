@@ -783,6 +783,261 @@ test('a question this session asks is answered from the pane, with the buttons i
   await ui.unmount()
 })
 
+const ANSWERED = '/home/me/.claude/progress-answered.json'
+
+test('a question marked answered leaves Waiting on you until that session asks something new, and nothing is sent', async ($, on) => {
+  const board = `# Project progress
+
+## data-pipeline
+
+<!-- auto session=a1b2c3d4 state=waiting updated=2026-10-16T11:50:00Z resume=a1b2c3d4-1111-2222-3333 -->
+### Backfill last year's events
+- [?] Keep the old table, OK?
+<!-- /auto session=a1b2c3d4 -->
+`
+  const world: World = { files: new Map([[FILE, board]]), mtime: 1, hasTasks: true, store: { opened: ['waiting'] } }
+  const clock = engineBeneath(on, world)
+  const submitted: string[] = []
+  on('prompt.submit', ($, e) => {
+    submitted.push(e.text)
+    return { text: e.text }
+  })
+  await $.session.start({ cwd: '/work/persona_framework', surface: 'desktop', isInteractive: true })
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
+  const key = "data-pipeline::Backfill last year's events::0"
+  expect(await ui.find({ type: 'Button', key: `${key}::hide`, text: '已回覆，先隱藏' })).toBeDefined()
+
+  // Only the list beside progress.md changes: the block stays its session's, and no prompt goes.
+  await ui.press({ key: `${key}::hide` })
+  expect(submitted).toEqual([])
+  expect(world.files.get(FILE)).toBe(board)
+  expect(JSON.parse(world.files.get(ANSWERED) ?? '{}')).toEqual({ answered: ['a1b2c3d4 1 Keep the old table, OK?'] })
+  expect(await ui.find({ type: 'Button', key: `${key}::hide` })).toBeUndefined()
+  expect(await ui.find({ type: 'Text', text: '● 0' })).toBeDefined()
+  expect(await ui.find({ type: 'Button', key: 'section::hidden', text: '▸ 已回覆、隱藏的 1 項' })).toBeDefined()
+
+  // Listed again on request.
+  await ui.press({ key: 'section::hidden' })
+  await ui.press({ key: `${key}::unhide` })
+  expect(JSON.parse(world.files.get(ANSWERED) ?? '{}')).toEqual({ answered: [] })
+  expect(await ui.find({ type: 'Button', key: 'section::hidden' })).toBeUndefined()
+
+  // Hidden again, it comes back once the session asks something else.
+  await ui.press({ key: `${key}::hide` })
+  world.files.set(FILE, board.replace('Keep the old table, OK?', 'Keep the old table for a week, OK?'))
+  world.mtime += 1
+  await clock.advance(2100)
+  expect(await ui.find({ type: 'Button', key: `${key}::hide` })).toBeDefined()
+  expect(await ui.find({ type: 'Button', key: 'section::hidden' })).toBeUndefined()
+
+  // Another session on this machine marks it answered: this pane follows at its next look.
+  world.files.set(ANSWERED, JSON.stringify({ answered: ['a1b2c3d4 1 Keep the old table for a week, OK?'] }))
+  world.mtime += 1
+  await clock.advance(2100)
+  expect(await ui.find({ type: 'Button', key: 'section::hidden', text: '▾ 已回覆、隱藏的 1 項' })).toBeDefined()
+  expect(submitted).toEqual([])
+  await ui.unmount()
+})
+
+test('a review this session asks offers Needs changes beside Looks good, and marking it answered sends nothing', async ($, on) => {
+  const world: World = { files: new Map(), mtime: 1, hasTasks: true }
+  engineBeneath(on, world)
+  const submitted: string[] = []
+  on('prompt.submit', ($, e) => {
+    submitted.push(e.text)
+    return { text: e.text }
+  })
+  await start($, '幫我畫圖')
+  await $.tool.call({ tool: 'TaskCreate', subject: '畫圖 2', description: '' })
+  await $.tool.call({ tool: 'TaskUpdate', taskId: '1', metadata: { waiting: 'you', ask: 'review', why: '圖 2 這樣可以嗎？' } })
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
+  expect(await ui.find({ type: 'Button', key: 'mine::1::沒問題' })).toBeDefined()
+  expect(await ui.find({ type: 'Button', key: 'mine::1::revise', text: '要修改' })).toBeDefined()
+  expect(await ui.find({ type: 'Input', key: 'mine::1::reply' })).toBeUndefined()
+
+  // Needs changes only opens the box: what should change goes to Claude when the person sends it.
+  await ui.press({ key: 'mine::1::revise' })
+  expect(submitted).toEqual([])
+  expect(await ui.find({ type: 'Input', key: 'mine::1::reply' })).toBeDefined()
+  await ui.input({ key: 'mine::1::reply', text: '圖 2 的座標軸要從 0 開始' })
+  expect(submitted).toEqual(['關於「畫圖 2」：圖 2 的座標軸要從 0 開始'])
+  // Asked something new, the review starts with the box closed again.
+  await $.tool.call({ tool: 'TaskUpdate', taskId: '1', metadata: { why: '圖 2 改好了，這樣可以嗎？' } })
+  expect(await ui.find({ type: 'Input', key: 'mine::1::reply' })).toBeUndefined()
+
+  // Already answered in the chat: hidden here, nothing sent, the block left as Claude wrote it.
+  const block = world.files.get(FILE) ?? ''
+  expect(block).toContain('- [?] 畫圖 2 — 圖 2 改好了，這樣可以嗎？')
+  await ui.press({ key: 'mine::1::hide' })
+  expect(submitted).toEqual(['關於「畫圖 2」：圖 2 的座標軸要從 0 開始'])
+  expect(world.files.get(FILE)).toBe(block)
+  expect(JSON.parse(world.files.get(ANSWERED) ?? '{}')).toEqual({ answered: ['2be48af2 1 畫圖 2 — 圖 2 改好了，這樣可以嗎？'] })
+  expect(await ui.find({ type: 'Button', key: 'mine::1::沒問題' })).toBeUndefined()
+  await ui.unmount()
+})
+
+test('the answered list survives a session start, a read that fails and a press that cannot read it, and forgets a question that left the file', async ($, on) => {
+  const board = `# Project progress
+
+## data-pipeline
+
+<!-- auto session=a1b2c3d4 state=waiting updated=2026-10-16T11:50:00Z -->
+### Backfill last year's events
+- [?] Keep the old table, OK?
+<!-- /auto session=a1b2c3d4 -->
+`
+  const key = 'a1b2c3d4 1 Keep the old table, OK?'
+  // A session with no block in the file yet keeps its mark.
+  const other = 'c0ffee12 1 Ship it, OK?'
+  const listed = JSON.stringify({ answered: [other, key] })
+  const world: World = { files: new Map([[FILE, board], [ANSWERED, listed]]), mtime: 1, hasTasks: true, store: { opened: ['waiting', 'hidden'] } }
+  const clock = engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/persona_framework', surface: 'desktop', isInteractive: true })
+  // The list is read before progress.md at the start: the page written then still holds the file.
+  const page = world.files.get('/home/me/.claude/progress.html') ?? ''
+  expect(page).toContain('Backfill last year')
+  expect(page).toContain('已回覆、隱藏的 1 項')
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
+  const item = "data-pipeline::Backfill last year's events::0"
+  expect(await ui.find({ type: 'Button', key: `${item}::unhide` })).toBeDefined()
+
+  // Another program holds the list: a press does not write over it, and says it did not stick.
+  world.unreadable = new Set([ANSWERED])
+  await ui.press({ key: `${item}::unhide` })
+  expect(world.files.get(ANSWERED)).toBe(listed)
+  expect(await ui.find({ type: 'Text', text: '記不下「已回覆」，這一項還留在清單上。' })).toBeDefined()
+  // A look that cannot read it keeps the list in hand, and reads it again once it can.
+  world.mtime += 1
+  await clock.advance(2100)
+  expect(await ui.find({ type: 'Button', key: `${item}::unhide` })).toBeDefined()
+  world.unreadable = new Set()
+  await clock.advance(2100)
+  expect(await ui.find({ type: 'Button', key: `${item}::unhide` })).toBeDefined()
+
+  // The session moves on: once progress.md holds still, the mark for what it no longer asks goes.
+  world.files.set(FILE, board.replace('- [?] Keep the old table, OK?', '- [x] Keep the old table, OK?'))
+  world.mtime += 1
+  await clock.advance(2100)
+  await clock.advance(2100)
+  expect(JSON.parse(world.files.get(ANSWERED) ?? '{}')).toEqual({ answered: [other] })
+  // Asked again in the same words later, it is a new question.
+  world.files.set(FILE, board)
+  world.mtime += 1
+  await clock.advance(2100)
+  expect(await ui.find({ type: 'Button', key: `${item}::hide` })).toBeDefined()
+  await ui.unmount()
+})
+
+test('a mark for a question that is gone is cleared without holding up a write that looks at the file from inside the queue', async ($, on) => {
+  const board = `# Project progress
+
+## data-pipeline
+
+<!-- auto session=a1b2c3d4 state=waiting updated=2026-10-16T11:50:00Z -->
+### Backfill last year's events
+- [?] Keep the old table, OK?
+<!-- /auto session=a1b2c3d4 -->
+`
+  const world: World = { files: new Map([[FILE, board]]), mtime: 1, hasTasks: true, store: { opened: ['waiting'] } }
+  const clock = engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/persona_framework', surface: 'desktop', isInteractive: true })
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
+  // Another session marked a question this block no longer asks, and progress.md is read again.
+  const stale = JSON.stringify({ answered: ['a1b2c3d4 1 Drop the old table, OK?'] })
+  world.files.set(ANSWERED, stale)
+  world.files.set(FILE, board.replace('11:50:00Z', '11:51:00Z'))
+  world.mtime += 1
+  await clock.advance(2100)
+  expect(world.files.get(ANSWERED)).toBe(stale)
+  // The next look at the file comes from inside the write queue: /progress tidy, nothing to archive.
+  expect((await $.command.run(TIDY)).text).toBe(ZH_TW.tidyNothing)
+  // The mark went, and a press queued after it still lands.
+  const item = "data-pipeline::Backfill last year's events::0"
+  await ui.press({ key: `${item}::hide` })
+  expect(JSON.parse(world.files.get(ANSWERED) ?? '{}')).toEqual({ answered: ['a1b2c3d4 1 Keep the old table, OK?'] })
+  await ui.unmount()
+})
+
+test('a clean-up of the answered list waits while progress.md moves, so a question hidden meanwhile stays hidden', async ($, on) => {
+  const board = `# Project progress
+
+## data-pipeline
+
+<!-- auto session=a1b2c3d4 state=waiting updated=2026-10-16T11:50:00Z -->
+### Backfill last year's events
+- [?] Keep the old table, OK?
+- [ ] Drop it
+<!-- /auto session=a1b2c3d4 -->
+`
+  const stale = 'a1b2c3d4 9 Gone, OK?'
+  const world: World = { files: new Map([[FILE, board], [ANSWERED, JSON.stringify({ answered: [stale] })]]), mtime: 1, hasTasks: true }
+  const clock = engineBeneath(on, world)
+  await start($, '幫我重做進度面板')
+  // This session's next write is held at the file, and the looks meanwhile queue a clean-up
+  // of the stale mark behind it, from the file as it was.
+  let release = (): void => {}
+  let reached = (): void => {}
+  const atGate = new Promise<void>(resolve => {
+    reached = resolve
+  })
+  world.hold = {
+    reached,
+    release: new Promise<void>(resolve => {
+      release = resolve
+    }),
+  }
+  const pending = $.tool.call({ tool: 'TaskCreate', subject: '讀 API', description: '' })
+  await atGate
+  for (let look = 0; look < 3; look += 1) await clock.advance(2100)
+  // Meanwhile another session asks its next step, and the person hides it on the board.
+  const asked = 'a1b2c3d4 2 Drop it — OK?'
+  world.files.set(ANSWERED, JSON.stringify({ answered: [stale, asked] }))
+  world.afterWrite = () => (world.files.get(FILE) ?? '').replace('- [ ] Drop it', '- [?] Drop it — OK?')
+  release()
+  await pending
+  // The clean-up made from the old file is dropped; the next one, from the file as it is, keeps
+  // the new mark and drops only the stale one.
+  await $.command.run(TIDY)
+  for (let look = 0; look < 3; look += 1) await clock.advance(2100)
+  await $.command.run(TIDY)
+  expect(JSON.parse(world.files.get(ANSWERED) ?? '{}')).toEqual({ answered: [asked] })
+})
+
+test('an answered list that is not JSON is left alone while it may be half-written, and written anew once it has stayed broken', async ($, on) => {
+  const board = `# Project progress
+
+## data-pipeline
+
+<!-- auto session=a1b2c3d4 state=waiting updated=2026-10-16T11:50:00Z -->
+### Backfill last year's events
+- [?] Keep the old table, OK?
+<!-- /auto session=a1b2c3d4 -->
+`
+  const key = 'a1b2c3d4 1 Keep the old table, OK?'
+  // File times here are this clock's: the list was written a second ago.
+  const listed = JSON.stringify({ answered: [key] })
+  const world: World = { files: new Map([[FILE, board], [ANSWERED, listed]]), mtime: Date.parse('2026-10-16T12:00:00Z') - 1000, hasTasks: true, store: { opened: ['waiting', 'hidden'] } }
+  const clock = engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/persona_framework', surface: 'desktop', isInteractive: true })
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
+  const item = "data-pipeline::Backfill last year's events::0"
+  expect(await ui.find({ type: 'Button', key: `${item}::unhide` })).toBeDefined()
+  // Another write is caught half-way: the pane keeps the list in hand, and a press leaves the file.
+  world.files.set(ANSWERED, '{')
+  world.mtime += 1
+  await clock.advance(2100)
+  expect(await ui.find({ type: 'Button', key: `${item}::unhide` })).toBeDefined()
+  await ui.press({ key: `${item}::unhide` })
+  expect(world.files.get(ANSWERED)).toBe('{')
+  expect(await ui.find({ type: 'Text', text: ZH_TW.hideFailed })).toBeDefined()
+  // Still broken seconds later, it hides nothing, and the next press writes it anew.
+  await clock.advance(6000)
+  expect(await ui.find({ type: 'Button', key: `${item}::hide` })).toBeDefined()
+  await ui.press({ key: `${item}::hide` })
+  expect(JSON.parse(world.files.get(ANSWERED) ?? '{}')).toEqual({ answered: [key] })
+  await ui.unmount()
+})
+
 test('folded sections open on a press and stay open in the next session', async ($, on) => {
   const world: World = { files: new Map([[FILE, JOBS]]), mtime: 1, hasTasks: true, store: { opened: ['recent'] } }
   engineBeneath(on, world)

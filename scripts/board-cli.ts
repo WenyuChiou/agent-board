@@ -7,7 +7,7 @@
 // progress file and language the Claude Code session uses set on its first line. `--keys
 // "down x"` plays keys without a terminal and prints the board after them, for tests and checks.
 import { spawn, spawnSync } from 'node:child_process'
-import { closeSync, openSync, readdirSync, readFileSync, readSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
+import { closeSync, existsSync, openSync, readdirSync, readFileSync, readSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { basename, dirname, join } from 'node:path'
 import { mergeBlock, takeArchivable, takeManualDone, takeTask, setManualStep } from '../hooks/blocks'
@@ -20,7 +20,7 @@ import { dashboardHtml } from '../hooks/dashboard'
 import { appendJournal, archivePath, countDay, journalLine, journalPath } from '../hooks/journal'
 import { parseProgress } from '../hooks/parse'
 import { langOf, STRINGS } from '../hooks/strings'
-import { buildView } from '../hooks/view'
+import { answeredJson, answeredPath, buildView, parseAnswered, withAnswered } from '../hooks/view'
 
 // The line `/progress connect` puts above the bundle sets it.
 const BAKED = (globalThis as { AGENT_BOARD?: { path?: string; lang?: string } }).AGENT_BOARD ?? {}
@@ -97,7 +97,8 @@ const pending = () => {
 
 const view = () => {
   const now = Date.now()
-  return buildView(parseProgress(read(path)), [basename(process.cwd())], null, now, countDay(read(journalPath(path, now)), now), {}, s)
+  // A question marked answered in a pane on this machine is kept off the board too.
+  return buildView(parseProgress(read(path)), [basename(process.cwd())], null, now, countDay(read(journalPath(path, now)), now), {}, s, parseAnswered(read(answeredPath(path))) ?? [])
 }
 
 const pad = (n: number): string => String(n).padStart(2, '0')
@@ -198,6 +199,16 @@ const archiveOut = (take: (text: string) => { text: string; entries: string[] } 
   return wrote === null ? null : archived.size
 }
 
+// The hidden list as it is now; null when it is there and cannot be read (another program holds
+// it), or is a write caught half-way, so a press never writes over the marks in it.
+const readAnswered = (file: string): string[] | null => {
+  try {
+    return parseAnswered(readFileSync(file, 'utf8'), Date.now() - statSync(file).mtimeMs)
+  } catch {
+    return existsSync(file) ? null : []
+  }
+}
+
 // What a key's action does to the files, and the line the board shows after it.
 const act = (action: BoardAction): string => {
   const now = Date.now()
@@ -223,6 +234,19 @@ const act = (action: BoardAction): string => {
     if (count === null) return s.boardWriteFailed
     if (count === 0) return s.archiveGone
     return s.archivedOne(action.title)
+  }
+  if (action.type === 'hide' || action.type === 'unhide') {
+    // The list every pane on this machine reads too; nothing goes to the agent that asked.
+    const keys = action.type === 'hide' || action.key !== null ? [action.key ?? ''] : view().hidden.map(item => item.hideKey)
+    if (keys.length === 0) return ''
+    const isHidden = action.type === 'hide'
+    const file = answeredPath(path)
+    const wrote = rewrite(file, () => {
+      const answered = readAnswered(file)
+      return answered === null ? null : answeredJson(withAnswered(answered, keys, isHidden))
+    })
+    if (wrote === null) return s.hideFailed
+    return action.type === 'hide' ? s.boardHidden(action.text) : s.boardShown
   }
 
   return ''

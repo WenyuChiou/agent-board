@@ -161,6 +161,7 @@ footer{color:var(--muted);font-size:.85rem;display:grid;gap:4px;border-top:1px s
     .join('')}</section>
 ${focus(view.focus, s)}
 ${section('waiting', s.sectionWaiting, view.waiting.length, 'waiting', '', view.waiting.map(item => waitingItem(item, s)).join(''), true)}
+${view.hidden.length === 0 ? '' : `<p class="quiet">${esc(s.hiddenCount(view.hidden.length))}</p>`}
 ${section('due', s.sectionDue, view.due.length, 'soon', nearest === undefined ? '' : s.nearestDue(nearest.title, nearest.due?.left ?? ''), view.due.map(it => row(it, s, true)).join(''), false)}
 ${section(
   'others',

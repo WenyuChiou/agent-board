@@ -1,7 +1,7 @@
 // The board script `/progress connect` writes, run the way every other agent runs it: plain
 // Node, no Claude Code. Needs Node 22.18+ or 24 (it reads hooks/board-script.ts directly).
 import { execFileSync, spawn } from 'node:child_process'
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'node:fs'
 import { request } from 'node:http'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -19,11 +19,12 @@ const FILE = `# Progress
 <!-- /auto session=a1b2c3d4 -->
 `
 
-const run = (lang, args = []) => {
+const run = (lang, args = [], beside = {}) => {
   const dir = mkdtempSync(join(tmpdir(), 'board-'))
   try {
     const path = join(dir, 'progress.md')
     writeFileSync(path, FILE)
+    for (const [name, text] of Object.entries(beside)) writeFileSync(join(dir, name), text)
     mkdirSync(join(dir, 'progress-inbox'))
     writeFileSync(join(dir, 'progress-inbox', 'gemini-turn-1-1.json'), JSON.stringify({ session_id: 'g1', cwd: join(dir, 'docs-site'), prompt_response: 'Fixed 12 broken links.' }))
     const script = join(dir, 'agent-board.mjs')
@@ -42,6 +43,42 @@ test('the board script prints the board from the file it was written for, in its
   assert.ok(text.includes('docs-site · gemini: Fixed 12 broken links.'), text)
   assert.ok(run('zh-TW').startsWith('進度  ● 1 等你'))
   assert.ok(run('en', ['--lang', 'zh-CN']).startsWith('进度'))
+})
+
+test('the board script leaves out a question a pane on this machine marked answered', () => {
+  const answered = JSON.stringify({ answered: ['a1b2c3d4 2 Per-key limit — 100 or 300 a minute?'] })
+  const text = run('en', [], { 'progress-answered.json': answered })
+  assert.ok(text.startsWith('Progress  ● 0 waiting'), text)
+  assert.ok(text.includes('Nothing needs you right now\n1 answered, hidden'), text)
+  // Its task stays with the work in progress, no longer saying it waits on you.
+  assert.ok(text.includes('Rate-limit the public endpoints') && !text.includes('waiting on you'), text)
+  // A broken file hides nothing.
+  assert.ok(run('en', [], { 'progress-answered.json': '{' }).includes('Per-key limit'))
+})
+
+// A file only its owner's mode can shut: Windows has no such mode, and root reads it anyway.
+test('a press on the board never writes over an answered list it cannot read', { skip: process.platform === 'win32' || process.getuid?.() === 0 }, () => {
+  const dir = mkdtempSync(join(tmpdir(), 'board-'))
+  const list = join(dir, 'progress-answered.json')
+  try {
+    const path = join(dir, 'progress.md')
+    writeFileSync(path, FILE)
+    mkdirSync(join(dir, 'progress-inbox'))
+    const held = JSON.stringify({ answered: ['c0ffee12 1 Ship it, OK?'] })
+    writeFileSync(list, held)
+    chmodSync(list, 0o000)
+    const script = join(dir, 'agent-board.mjs')
+    writeFileSync(script, `globalThis.AGENT_BOARD = ${JSON.stringify({ path, lang: 'en' })}\n${BOARD_SCRIPT}`)
+    const out = execFileSync(process.execPath, [script, '--keys', 'h'], { env: { ...process.env, CLAUDE_PROGRESS_FILE: '', NO_COLOR: '1' }, encoding: 'utf8' })
+    assert.ok(out.includes("Couldn't save that it was answered"), out)
+    chmodSync(list, 0o600)
+    assert.equal(readFileSync(list, 'utf8'), held)
+  } finally {
+    try {
+      chmodSync(list, 0o600)
+    } catch {}
+    rmSync(dir, { recursive: true, force: true })
+  }
 })
 
 test('keys played on the board tick a hand-kept step, archive a stopped block, and leave a line in the journal', () => {
@@ -141,7 +178,7 @@ syncBuiltinESMExports()
 // a finished Gemini block. AGENT_BOARD_GROK stands in for Grok Build.
 const GROK_ID = '01a14a94-0dee-7543-8208-991a4266a1da'
 
-const page = async () => {
+const page = async (more = '') => {
   const dir = mkdtempSync(join(tmpdir(), 'board-serve-'))
   const work = join(dir, 'api-gateway')
   mkdirSync(work)
@@ -166,7 +203,7 @@ const page = async () => {
 ### Fix the broken links
 - [x] Fix them
 <!-- /auto session=c3d4e5f6 -->
-`)
+${more.replaceAll('RECENT', recent)}`)
   const stand = join(dir, 'grok-stand-in.mjs')
   // Writes down how it was run, then answers after a second, so a second send meets the first.
   writeFileSync(stand, `import { writeFileSync } from 'node:fs'
@@ -176,7 +213,7 @@ setTimeout(() => process.stdout.write('Redis it is; wiring it up now.\\n'), 1000
   const script = join(dir, 'agent-board.mjs')
   writeFileSync(script, `globalThis.AGENT_BOARD = ${JSON.stringify({ path, lang: 'en' })}\n${BOARD_SCRIPT}`)
   const child = spawn(process.execPath, [script, '--serve-child'], {
-    env: { ...process.env, CLAUDE_PROGRESS_FILE: '', NO_COLOR: '1', AGENT_BOARD_GROK: stand },
+    env: { ...process.env, CLAUDE_PROGRESS_FILE: '', NO_COLOR: '1', AGENT_BOARD_GROK: stand, AGENT_BOARD_CODEX: stand },
     stdio: ['ignore', 'pipe', 'pipe'],
   })
   const exited = new Promise(done => child.once('exit', code => done(code)))
@@ -214,6 +251,64 @@ setTimeout(() => process.stdout.write('Redis it is; wiring it up now.\\n'), 1000
   }
   return { dir, path, url, port, token, call, rows, keyOf, close, exited }
 }
+
+test('marking a question answered on the page or with h on the board writes only the hidden list, sends nothing, and shows it again', { timeout: 30_000 }, async () => {
+  const board = await page(`
+## billing
+<!-- auto session=d4e5f6a7 agent=codex state=waiting updated=RECENT -->
+### Pick the invoice format
+- [?] PDF or HTML?
+<!-- /auto session=d4e5f6a7 -->
+`)
+  try {
+    const { call, dir, path } = board
+    const before = readFileSync(path, 'utf8')
+    const hidden = () => JSON.parse(readFileSync(join(dir, 'progress-answered.json'), 'utf8')).answered
+    const model = async () => (await call('GET', '/api/board')).json().model
+    const ask = (await model()).asks.find(one => one.agent === 'codex')
+    assert.equal(ask.canHide, true)
+    assert.deepEqual(ask.answers, ['PDF', 'HTML'])
+    const hid = await call('POST', '/api/act', { body: { key: ask.key, type: 'hide' } })
+    assert.equal(hid.status, 200, hid.body)
+    assert.equal(hid.json().note, 'Hidden: “PDF or HTML?”; it comes back when the question changes.')
+    assert.deepEqual(hidden(), ['d4e5f6a7 1 PDF or HTML?'])
+    const after = await model()
+    assert.equal(after.asks.some(one => one.agent === 'codex'), false)
+    assert.deepEqual(after.hidden.map(one => one.text), ['PDF or HTML?'])
+    // A quick answer pressed on the page drawn before the question was hidden is refused.
+    assert.equal((await call('POST', '/api/act', { body: { key: ask.key, type: 'send', text: 'PDF', session: 'd4e5f6a7' } })).status, 409)
+    const shown = await call('POST', '/api/act', { body: { key: after.hidden[0].key, type: 'unhide' } })
+    assert.equal(shown.status, 200, shown.body)
+    assert.deepEqual(hidden(), [])
+    // The terminal board's h writes the same list, and u lists everything hidden again.
+    const script = join(dir, 'agent-board.mjs')
+    const play = keys => execFileSync(process.execPath, [script, '--keys', keys], { env: { ...process.env, CLAUDE_PROGRESS_FILE: '', NO_COLOR: '1' }, encoding: 'utf8' })
+    const marked = play('h')
+    assert.ok(marked.includes('Hidden: “PDF or HTML?”'), marked)
+    assert.ok(marked.includes('1 answered, hidden · u show them again'), marked)
+    assert.deepEqual(hidden(), ['d4e5f6a7 1 PDF or HTML?'])
+    assert.equal((await model()).hidden.length, 1)
+    const again = play('u')
+    assert.ok(again.includes('The hidden questions are shown again.'), again)
+    assert.deepEqual(hidden(), [])
+    // A list written just now that is not JSON may be another write caught half-way: the press
+    // leaves it and says so. Left broken for a while, it is written anew by the next press.
+    const list = join(dir, 'progress-answered.json')
+    writeFileSync(list, '{"answered": ["x"')
+    const kept = play('h')
+    assert.ok(kept.includes("Couldn't save that it was answered"), kept)
+    assert.equal(readFileSync(list, 'utf8'), '{"answered": ["x"')
+    const old = new Date(Date.now() - 60_000)
+    utimesSync(list, old, old)
+    play('h')
+    assert.deepEqual(hidden(), ['d4e5f6a7 1 PDF or HTML?'])
+    // Nothing went to any agent, and every block is as its session wrote it.
+    assert.equal(readFileSync(path, 'utf8'), before)
+    assert.ok(!existsSync(join(dir, 'grok-ran.json')))
+  } finally {
+    await board.close()
+  }
+})
 
 test('the page answers only with its token and its own host, and closing it stops the server', { timeout: 30_000 }, async () => {
   const board = await page()

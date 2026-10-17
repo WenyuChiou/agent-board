@@ -1,9 +1,9 @@
-import type { ProgressAuto, ProgressMirror, ProgressProject, ProgressStepStatus, ProgressTask } from '../types'
+import type { ProgressAuto, ProgressMirror, ProgressProject, ProgressStep, ProgressStepStatus, ProgressTask } from '../types'
 import { askOf, askRank } from './ask'
 import { ZH_TW } from './i18n'
 import type { Strings } from './i18n'
 import type { AskKind } from './ask'
-import { shortId } from './blocks'
+import { shortId, stepWords } from './blocks'
 import { ciWords, prWords } from './github'
 import { doingTask, fallbackTitle } from './mirror'
 import type { Tone } from './palette'
@@ -82,6 +82,9 @@ export type WaitingItem = {
   // and find that session or reopen it with `claude --resume`; null for every other item. Anyone
   // can write `session=`, so a block id that is not a plain id is never offered for the clipboard.
   sessionId: string | null
+  // What the person's Answered press keeps, to hide the question until the session asks
+  // something else (`answeredKey`); '' for a hand-kept step, which is ticked instead.
+  hideKey: string
   // A hand-kept step can be ticked from the pane; another session's cannot.
   step: StepRef | null
   // Another agent's session the question came from; null for Claude's and hand-kept ones.
@@ -119,6 +122,9 @@ export type TaskRow = {
   agent: string
   // For an ended session: the command that reopens it, ready to paste.
   resume: string | null
+  // The question its session still asks the person, as Waiting on you words it; null when none
+  // does or the person marked it answered. A reply to the session is framed as its answer.
+  question: string | null
   // The line its session left at its last compaction for whoever takes over.
   handoff: string
   // Set when the person may take the row out now: a hand-kept task, or a block whose session
@@ -147,6 +153,8 @@ export type View = {
   overview: Overview
   focus: Focus | null
   waiting: WaitingItem[]
+  // Questions the person marked answered, until their session asks something else.
+  hidden: WaitingItem[]
   due: TaskRow[]
   active: TaskRow[]
   groups: RowGroup[]
@@ -220,10 +228,11 @@ export const contextOf = (task: ProgressTask): string => {
     .join(' · ')
 }
 
-const stepPhrase = (task: ProgressTask, s: Strings): { status: string; tone: Tone } => {
+// `isAsked` leaves out a question the person marked answered.
+const stepPhrase = (task: ProgressTask, s: Strings, isAsked: (index: number) => boolean = () => true): { status: string; tone: Tone } => {
   const blocked = task.steps.find(step => step.status === 'blocked')
   if (blocked !== undefined) return { status: s.stuck(splitNote(blocked.text).text), tone: 'alert' }
-  const waiting = task.steps.find(step => step.status === 'waiting')
+  const waiting = task.steps.find((step, index) => step.status === 'waiting' && isAsked(index))
   if (waiting !== undefined) return { status: s.waitsOnYou(splitNote(waiting.text).text), tone: 'warn' }
   const running = task.steps.find(step => step.status === 'running')
   if (running !== undefined) return { status: s.runningStep(splitNote(running.text).text), tone: 'running' }
@@ -383,10 +392,17 @@ const rowSteps = (task: ProgressTask, s: Strings): ViewStep[] => {
 const ownWaiting = (mine: ProgressMirror): WaitingItem[] => {
   const title = mine.title || fallbackTitle(mine)
   const context = contextFor(mine)
+  // Keyed on the steps this session's block marks [?]: a blocked one is written [!], which no
+  // other reader lists as a question, so it cannot be marked answered.
+  const keys = askKeys(
+    shortId(mine.sessionId),
+    mine.tasks.map(task => (task.status !== 'completed' && task.blocked === null && task.waiting === 'you' ? stepWords(task).trim() : null)),
+  )
 
   return mine.tasks
-    .filter(task => task.status !== 'completed' && task.waiting === 'you')
-    .map(task => ({
+    .map((task, index) => ({ task, hideKey: keys[index] ?? '' }))
+    .filter(({ task }) => task.status !== 'completed' && task.waiting === 'you')
+    .map(({ task, hideKey }) => ({
       key: `mine::${task.id}`,
       project: mine.project,
       task: title,
@@ -404,10 +420,74 @@ const ownWaiting = (mine: ProgressMirror): WaitingItem[] => {
       agent: '',
       session: shortId(mine.sessionId),
       sessionId: null,
+      hideKey,
       step: null,
       target: null,
     }))
 }
+
+// Each step's key when it asks the person ('' when it does not): the session that asked, the
+// step's place in that block (from 1) and its words as the block holds them. The same in the
+// asking session's pane (from its Task list) and in every other reader (from its block); new as
+// soon as the session words the step anew, and never another step's, even one worded alike.
+export const askKeys = (session: string, texts: ReadonlyArray<string | null>): string[] =>
+  texts.map((text, index) => (text === null ? '' : `${session} ${index + 1} ${text}`))
+
+const blockKeys = (task: ProgressTask): string[] =>
+  task.auto === null ? task.steps.map(() => '') : askKeys(task.auto.session, task.steps.map(step => (step.status === 'waiting' ? step.text : null)))
+
+// The questions marked answered live beside progress.md (`progress-answered.json`), so every
+// pane on this machine and the board script read the same list; nothing goes into the blocks,
+// which stay their sessions' to change.
+export const answeredPath = (path: string): string => `${path.replace(/\.md$/i, '')}-answered.json`
+
+const ANSWERED_MAX = 200
+
+// How long a list that is not JSON is taken for another write caught half-way.
+const HALF_WRITE_MS = 5000
+
+// Null for text that is not JSON and was written less than HALF_WRITE_MS ago (`age`): read it
+// again rather than write over it. Older, or dated well ahead of this clock, it is broken: it
+// reads as none, so it only shows the questions again, and the next press writes over it. So
+// does anything but a list of strings.
+export const parseAnswered = (text: string, age = 0): string[] | null => {
+  if (text.trim() === '') return []
+  try {
+    const data: unknown = JSON.parse(text)
+    const list = data !== null && typeof data === 'object' && 'answered' in data ? data.answered : null
+    return Array.isArray(list) ? list.filter((one): one is string => typeof one === 'string' && one !== '').slice(-ANSWERED_MAX) : []
+  } catch {
+    return Math.abs(age) < HALF_WRITE_MS ? null : []
+  }
+}
+
+// The marks still wanted: one whose session's block is in the file but no longer asks it goes,
+// so the same words asked again later show. A session with no block in the file yet keeps its
+// marks (the pane can show its own question before its block is written).
+export const keptAnswered = (answered: readonly string[], projects: readonly ProgressProject[]): string[] => {
+  const sessions = new Set<string>()
+  const asked = new Set<string>()
+  for (const project of projects) {
+    for (const task of project.tasks) {
+      if (task.auto === null) continue
+      sessions.add(task.auto.session)
+      for (const key of blockKeys(task)) if (key !== '') asked.add(key)
+    }
+  }
+
+  return answered.filter(key => !sessions.has(key.slice(0, key.indexOf(' '))) || asked.has(key))
+}
+
+// The list after one press: only the pressed questions change. A press can come from a view a
+// moment old, so marks whose question left the file are dropped by keptAnswered once the file
+// holds still, not here.
+export const withAnswered = (answered: readonly string[], keys: readonly string[], isHidden: boolean): string[] => {
+  const kept = answered.filter(one => !keys.includes(one))
+
+  return (isHidden ? [...kept, ...keys] : kept).slice(-ANSWERED_MAX)
+}
+
+export const answeredJson = (answered: readonly string[]): string => `${JSON.stringify({ answered }, null, 2)}\n`
 
 const whereRank = (item: WaitingItem): number => (item.where === 'here' ? 0 : 1)
 
@@ -421,7 +501,11 @@ export const buildView = (
   // as done just now.
   doneSeen: Readonly<Record<string, number>> = {},
   s: Strings = ZH_TW,
+  // Questions the person marked answered on this machine (by answeredKey): kept out of Waiting
+  // on you, its count and the focus, and listed under `hidden` instead.
+  answered: readonly string[] = [],
 ): View => {
+  const isAnswered = new Set(answered)
   const ownId = mine === null ? '' : shortId(mine.sessionId)
   const waiting: WaitingItem[] = []
   const due: Array<TaskRow & { days: number }> = []
@@ -451,6 +535,8 @@ export const buildView = (
       // not in 等你處理, where nobody could answer them.
       const stale = isStale(task.auto, now)
       const isLive = task.auto !== null && task.auto.state !== 'ended' && !stale
+      const keys = blockKeys(task)
+      const isAsked = (index: number): boolean => !isAnswered.has(keys[index] ?? '')
 
       task.steps.forEach((step, index) => {
         if (step.status !== 'waiting' || (!isManual && !isLive)) return
@@ -468,6 +554,7 @@ export const buildView = (
           session: task.auto?.session ?? '',
           sessionId:
             task.auto?.agent === 'claude' ? (task.auto.resume ?? (RESUME.test(task.auto.session) ? task.auto.session : null)) : null,
+          hideKey: keys[index] ?? '',
           step: isManual ? { project: name, title, step: step.text, line: step.line, raw: step.raw } : null,
           target: targetOf(task.auto),
         })
@@ -483,7 +570,8 @@ export const buildView = (
       // A session whose turn ended on a question is in 等你處理 by its [?] steps. One whose
       // turn simply ended (`state=waiting` is written at every turn's end), or that waits on
       // CI or another agent, asks the person nothing: it stays with the work in progress.
-      if (auto === 'waiting' && task.steps.some(step => step.status === 'waiting')) continue
+      // One whose questions were all marked answered is back with the work in progress.
+      if (auto === 'waiting' && task.steps.some((step, index) => step.status === 'waiting' && isAsked(index))) continue
 
       const { done, total } = countSteps(task)
       const phrase =
@@ -491,7 +579,7 @@ export const buildView = (
           ? { status: task.auto?.agent === 'claude' ? s.claudeWorking : s.agentWorking(task.auto?.agent ?? ''), tone: 'accent' as const }
           : auto === 'ended'
             ? { status: stale ? s.sessionStopped(when) : s.sessionEnded, tone: 'warn' as const }
-            : stepPhrase(task, s)
+            : stepPhrase(task, s, isAsked)
       const open = task.steps[currentStepIndex(task)]
       const row: TaskRow = {
         key,
@@ -506,6 +594,9 @@ export const buildView = (
         auto,
         steps: rowSteps(task, s),
         left: task.steps.filter(step => step.status !== 'done' && step.status !== 'cancelled').map(step => step.text),
+        question: ((asked: ProgressStep | undefined) => (asked === undefined ? null : splitNote(asked.text).text))(
+          task.steps.find((step, index) => step.status === 'waiting' && isAsked(index)),
+        ),
         next:
           isManual && open !== undefined
             ? { project: name, title, step: open.text, line: open.line, raw: open.raw }
@@ -565,9 +656,11 @@ export const buildView = (
       .join(' · ')
   }
 
-  const asks = [...(mine === null ? [] : ownWaiting(mine)), ...waiting].sort(
+  const all = [...(mine === null ? [] : ownWaiting(mine)), ...waiting].sort(
     (a, b) => whereRank(a) - whereRank(b) || askRank(a.kind) - askRank(b.kind),
   )
+  const asks = all.filter(item => item.hideKey === '' || !isAnswered.has(item.hideKey))
+  const hidden = all.filter(item => item.hideKey !== '' && isAnswered.has(item.hideKey))
   const dueRows = due.map(({ days: _days, ...row }) => row)
   const now1 = asks.find(item => askRank(item.kind) < 2)
   const today1 = due.find(row => row.days <= 1)
@@ -590,6 +683,7 @@ export const buildView = (
     overview: { waiting: asks.length, active: rows.length + due.length, due: due.length, today },
     focus,
     waiting: asks,
+    hidden,
     due: dueRows,
     active: rows,
     groups,

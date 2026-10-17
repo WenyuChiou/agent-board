@@ -1,5 +1,83 @@
 # Changelog
 
+## 0.19.4 — 2026-10-17
+
+An answered question can be put away without answering it again (#52).
+
+- **Already answered, hide.** A question from any agent stayed in Waiting on you until its
+  session changed its block. A session with a Task list keeps its `[?]` step until Claude
+  marks it, so a question already answered in the chat kept coming back. Every question
+  from a session's block, whichever agent wrote it (Claude Code, Codex, Gemini CLI,
+  Cursor, Grok Build, Muse, Hermes Agent, OpenClaw, OpenCode, or one written by hand under
+  the AGENTS.md rule), can now be marked answered: **Already answered, hide**
+  (zh-TW 已回覆，先隱藏) in the pane and on the board's page, `h` on the terminal board.
+  It sends nothing to any session and changes no block: it adds the question to
+  `progress-answered.json` beside `progress.md`, which the pane, the terminal board, the
+  board's page and `progress.html` all read, so it leaves Waiting on you, its count and
+  Needs you now on each of them. A task whose questions are all hidden goes back with the
+  work in progress instead of saying it waits on you, and a reply sent from its line goes
+  as typed rather than as the answer to that question. **N answered, hidden** lists the
+  hidden ones with **Show again** in the pane and on the page; `u` on the terminal board
+  shows them all again. A hand-kept question is the person's own and is ticked instead.
+  A session that stops or ends keeps its questions in its own row, as before; one hidden
+  there stays out of the row's status and its reply framing, and is listed again only if
+  the session asks it again.
+- **How a question is matched.** By its session's block id, the step's place in that
+  block, and its words as the block holds them. The session that asked works out the same
+  key from its Task list through the line it writes, so headings, empty subjects and `—`
+  in a subject agree. Two questions with the same words are hidden one at a time, and
+  ticking one never moves a mark onto the other. A blocked step is written `[!]`, so it
+  cannot be marked. A press changes only the question pressed. When `progress.md` has held
+  still for a poll, a mark whose question left its session's block is dropped, so the same
+  words asked again later show; a session with no block in the file yet keeps its marks.
+  That clean-up waits its turn in the write queue without holding up the write that
+  noticed it, and is dropped if the file moved in the meantime, on disk or in this
+  session's last look; the next quiet poll makes it again from the file as it is.
+- **The list is written with care.** A press reads, changes, writes and reads back the
+  list in the session's write queue, so a press in another session or on the board is
+  kept; a list another program holds, or one written in the last 5 seconds that is not
+  JSON (most likely caught half-written), is never written over, and the press says it
+  did not stick (zh-TW 記不下「已回覆」，這一項還留在清單上。). A list left broken longer
+  than that, or dated well ahead of the clock, hides nothing and is written anew by the
+  next press. A
+  look that cannot read the list keeps the one in hand and reads it again at the next
+  poll. The list is read before `progress.md` at a session's start without drawing
+  `progress.html` from an empty file, and a press redraws `progress.html` at once.
+- **A quick answer goes only to the question it was pressed on.** The board's page offers
+  yes/no and choice buttons that go into an ended Codex or Grok session. A line's key now
+  holds its question's words, so a press made while the page showed one question is
+  refused once the same step asks another, and a hidden question offers none. The
+  terminal board does the same for `y`/`n` and `1`–`9`.
+- **Needs changes beside Looks good.** A review this session asks had one button, **Looks
+  good**, which tells Claude the work is fine. Someone who had asked for changes in the
+  chat could only press that. It now has **Needs changes** too, which opens the box for
+  what should change and sends nothing until the person sends it. The box closes when the
+  same task asks something new.
+- Tests: in `tests/logic.test.ts` "a question marked answered leaves Waiting on you until
+  that session asks something new", "this session and every other reader key a question
+  the same way, whatever its words, and two alike stay apart", "a question from every
+  agent that writes a block can be marked answered"; in `tests/pane.test.tsx` "a question
+  marked answered leaves Waiting on you until that session asks something new, and nothing
+  is sent", "a review this session asks offers Needs changes beside Looks good, and marking
+  it answered sends nothing", "the answered list survives a session start, a read that
+  fails and a press that cannot read it, and forgets a question that left the file", "a
+  mark for a question that is gone is cleared without holding up a write that looks at
+  the file from inside the queue", "a clean-up of the answered list waits while
+  progress.md moves, so a question hidden meanwhile stays hidden", "an answered list that
+  is not JSON is left alone while it may be half-written, and written anew once it has
+  stayed broken"; in
+  `tests/features.test.ts` "the terminal board, progress.html and the board page leave out
+  a question marked answered and say how many are hidden", "the terminal board and the
+  board page mark any agent's question answered without sending it anything, and show it
+  again", "a quick answer pressed while the page showed one question is refused once the
+  same step asks another", "a reply on the line of a task whose question was marked
+  answered goes as it was typed, and the line no longer opens as asking"; in
+  `tests/board.test.mjs` "the board script leaves out a
+  question a pane on this machine marked answered", "marking a question answered on the
+  page or with h on the board writes only the hidden list, sends nothing, and shows it
+  again", "a press on the board never writes over an answered list it cannot read" (not on
+  Windows, nor as root).
+
 ## 0.19.3 — 2026-10-17
 
 The reply hint names the session that asked (#49).
