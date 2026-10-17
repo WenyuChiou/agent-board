@@ -4,7 +4,7 @@ import { ZH_TW } from './i18n'
 import type { Strings } from './i18n'
 import { localDay } from './journal'
 import { fallbackTitle } from './mirror'
-import { AUTO_END, AUTO_START, autoOf, doneKey, isTaskComplete, parseAttrs, parseProgress, projectHead } from './parse'
+import { AUTO_END, AUTO_START, autoOf, doneKey, isTaskComplete, parseAttrs, parseProgress, projectHead, readable } from './parse'
 import type { QuickEntry } from './quick'
 import type { StepRef, TaskRef } from './view'
 
@@ -93,6 +93,12 @@ const eolOf = (text: string): string => (text.includes('\r\n') ? '\r\n' : '\n')
 
 const linesOf = (text: string): string[] => (text === '' ? [] : text.replace(/\r?\n$/, '').split(/\r?\n/))
 
+// The lines as the parser reads them: what sits in a code fence or a comment is never taken
+// for a marker or a heading, so a block pasted there as an example is left alone.
+const HIDDEN = '\u0000'
+
+const seenOf = (lines: readonly string[]): string[] => readable(lines).map(line => line ?? HIDDEN)
+
 const endsBlock = (line: string, session: string): boolean => {
   if (!AUTO_END.test(line)) return false
   const named = parseAttrs(line).session
@@ -100,8 +106,9 @@ const endsBlock = (line: string, session: string): boolean => {
   return named === undefined || named === session
 }
 
-export const scanBlocks = (lines: readonly string[]): BlockSpan[] => {
+export const scanBlocks = (raws: readonly string[]): BlockSpan[] => {
   const spans: BlockSpan[] = []
+  const lines = seenOf(raws)
   let project = ''
 
   lines.forEach((line, index) => {
@@ -132,7 +139,7 @@ export const scanBlocks = (lines: readonly string[]): BlockSpan[] => {
     let headings = 0
     for (let at = index + 1; at < lines.length; at += 1) {
       const next = lines[at] ?? ''
-      if (next.trim() === '' || AUTO_START.test(next) || PROJECT.test(next) || AUTO_END.test(next)) break
+      if ((raws[at] ?? '').trim() === '' || next === HIDDEN || AUTO_START.test(next) || PROJECT.test(next) || AUTO_END.test(next)) break
       if (TASK.test(next)) {
         headings += 1
         if (headings > 1) break
@@ -154,7 +161,8 @@ const trimBlankEdges = (lines: string[], at: number): void => {
   if (to - from > 1) lines.splice(from, to - from, '')
 }
 
-const sectionRange = (lines: readonly string[], project: string): { heading: number; end: number } | null => {
+const sectionRange = (raws: readonly string[], project: string): { heading: number; end: number } | null => {
+  const lines = seenOf(raws)
   const head = projectHead(project)
   const heading = lines.findIndex(line => {
     const match = PROJECT.exec(line)
@@ -202,9 +210,10 @@ export const upsertAutoBlock = (text: string, mirror: ProgressMirror, s: Strings
 // blocks or tasks were just removed): an empty section someone keeps on purpose stays.
 const dropEmptySections = (lines: string[], touched: ReadonlySet<string>): void => {
   for (let index = lines.length - 1; index >= 0; index -= 1) {
-    const heading = PROJECT.exec(lines[index] ?? '')
+    const seen = seenOf(lines)
+    const heading = PROJECT.exec(seen[index] ?? '')
     if (heading?.[1] === undefined || !touched.has(heading[1])) continue
-    const next = lines.findIndex((line, at) => at > index && PROJECT.test(line))
+    const next = seen.findIndex((line, at) => at > index && PROJECT.test(line))
     const end = next < 0 ? lines.length : next
     const body = lines.slice(index + 1, end)
     if (body.every(line => line.trim() === '')) lines.splice(index, end - index)
@@ -272,10 +281,11 @@ export const takeArchivable = (text: string, now: number, keep?: string, s: Stri
 export const takeManualDone = (
   text: string,
   now: number,
-  seen: (key: string) => number | undefined,
+  seenAt: (key: string) => number | undefined,
   s: Strings = ZH_TW,
 ): Archived & { keys: string[] } => {
   const lines = linesOf(text)
+  const seen = seenOf(lines)
   const spans: BlockSpan[] = []
   const entries: string[] = []
   const keys: string[] = []
@@ -283,13 +293,13 @@ export const takeManualDone = (
     for (const task of project.tasks) {
       if (task.auto !== null || task.line < 0 || !isTaskComplete(task)) continue
       const key = doneKey(project.name, task.title)
-      const at = seen(key)
+      const at = seenAt(key)
       if (at === undefined || now - at < DAY) continue
       let end = task.line
       for (let index = task.line + 1; index < lines.length; index += 1) {
-        const line = lines[index] ?? ''
+        const line = seen[index] ?? ''
         if (PROJECT.test(line) || TASK.test(line) || AUTO_START.test(line)) break
-        if (line.trim() !== '') end = index
+        if ((lines[index] ?? '').trim() !== '') end = index
       }
       const last = end
       // The blank lines after it go too, so the next task moves up into its place.
@@ -311,6 +321,7 @@ export const takeManualDone = (
 // gone or has a twin, or a heading inside some session's block.
 export const takeTask = (text: string, ref: TaskRef, now: number, s: Strings = ZH_TW): Archived | null => {
   const lines = linesOf(text)
+  const seen = seenOf(lines)
   const spans = scanBlocks(lines)
   const heading = `## ${ref.project || s.uncategorized} · ${localDay(now)}`
   if (ref.session !== null) {
@@ -320,17 +331,17 @@ export const takeTask = (text: string, ref: TaskRef, now: number, s: Strings = Z
     return { text: removeSpans(text, [span]), entries: [[heading, ...lines.slice(span.start + 1, span.end)].join('\n')] }
   }
   const isHeading = (line: string | undefined): boolean => TASK.exec(line ?? '')?.[1] === ref.title
-  let at = isHeading(lines[ref.line]) ? ref.line : -1
+  let at = isHeading(seen[ref.line]) ? ref.line : -1
   if (at < 0) {
-    const same = lines.flatMap((line, index) => (isHeading(line) ? [index] : []))
+    const same = seen.flatMap((line, index) => (isHeading(line) ? [index] : []))
     if (same.length === 1) at = same[0] ?? -1
   }
   if (at < 0 || spans.some(span => at >= span.start && at <= span.end)) return null
   let end = at
   for (let index = at + 1; index < lines.length; index += 1) {
-    const line = lines[index] ?? ''
+    const line = seen[index] ?? ''
     if (PROJECT.test(line) || TASK.test(line) || AUTO_START.test(line)) break
-    if (line.trim() !== '') end = index
+    if ((lines[index] ?? '').trim() !== '') end = index
   }
   const last = end
   while (end + 1 < lines.length && lines[end + 1]?.trim() === '') end += 1
@@ -366,15 +377,25 @@ export const addManualTask = (text: string, entry: QuickEntry, s: Strings = ZH_T
   return lines.join(eol) + eol
 }
 
+// How many tasks in the file carry the heading a quick add of `entry` writes: one more than
+// before means the add is already in.
+export const manualTaskCount = (text: string, entry: QuickEntry): number => {
+  const heading = `### ${oneLine(entry.title)}`
+
+  return seenOf(linesOf(text)).filter(line => line.trimEnd() === heading).length
+}
+
 // Ticks one step of a hand-kept task (a press in the pane): the line the pane showed, if it
 // still reads as it did; else the one line in the file that does, if there is exactly one.
 // Anything else (the step changed, or has a twin) leaves the file alone.
 export const setManualStep = (text: string, ref: StepRef, mark: string): string => {
   const eol = eolOf(text)
   const lines = linesOf(text)
-  let at = lines[ref.line] === ref.raw ? ref.line : -1
+  const seen = seenOf(lines)
+  const isStep = (index: number): boolean => lines[index] === ref.raw && seen[index] !== HIDDEN
+  let at = isStep(ref.line) ? ref.line : -1
   if (at < 0) {
-    const same = lines.flatMap((line, index) => (line === ref.raw ? [index] : []))
+    const same = lines.flatMap((_line, index) => (isStep(index) ? [index] : []))
     if (same.length === 1) at = same[0] ?? -1
   }
   const line = lines[at]
