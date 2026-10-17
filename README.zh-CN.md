@@ -5,19 +5,41 @@
 </picture>
 </h1>
 
-[English](README.md) · [繁體中文](README.zh-TW.md) · 简体中文
+<p align="center">
+<b>每个 AI coding agent 在做什么，一个面板看完；等你的事，永远排第一个。</b><br>
+Claude Code 插件，也跟得上 Codex、Gemini CLI、Cursor、OpenCode、Grok Build、Hermes Agent 和 Muse Code。
+</p>
 
-**Agent Board** 给同时开好几个 AI coding agent 的人用。哪个 agent 在等你，一看就知道，不会再让它们干等。
+<p align="center">
+<a href="https://github.com/WenyuChiou/agent-board/actions/workflows/test.yml"><img alt="测试" src="https://github.com/WenyuChiou/agent-board/actions/workflows/test.yml/badge.svg"></a>
+<a href="CHANGELOG.md"><img alt="版本 0.11.0" src="https://img.shields.io/badge/version-0.11.0-blue"></a>
+<a href="LICENSE"><img alt="MIT 许可" src="https://img.shields.io/badge/license-MIT-green"></a>
+<img alt="macOS、Linux、Windows" src="https://img.shields.io/badge/macOS%20%C2%B7%20Linux%20%C2%B7%20Windows-lightgrey">
+</p>
 
-## 为什么需要它
+<p align="center"><a href="README.md">English</a> · <a href="README.zh-TW.md">繁體中文</a> · 简体中文</p>
 
-一个项目开 Claude Code，另一个开 Codex，可能还有一个在跑 Gemini。过了二十分钟，其中一个停下来问你事情，你却要等到刚好切回去才发现。这个面板会在它一开口的时候，就把问题放到你眼前。
+你在一个项目开 Claude Code，另一个开 Codex，第三个开 Gemini。二十分钟后，其中一个停下来问你事情，你要等到刚好切回去才会发现。**Agent Board** 在它一开口就把问题放到你眼前，每个答案一个按钮。
 
-- **再也不会漏掉问题。** 等你的事排在最上面，每个答案一个按钮，点下去 agent 就接着干。
-- **你现在用的 agent 都接得上。** Claude Code、Codex、Gemini CLI、Cursor、OpenCode、Grok Build、Muse Code。一行命令接上，之后它们会自己汇报，不用另外交代。
-- **随时都能接着做。** 对话压缩、终端关掉、第二天再开都没关系，做完什么、卡在哪、下一步是什么，打开就看到。谁做到一半停了，你也能直接接手。
+## 支持的 agent
 
-## 安装
+| | Agent | 怎么汇报 | 你要做一次的事 | 实测过 |
+|:-:|---|---|---|---|
+| <img src="docs/images/agents/claude-code.svg" width="24" alt=""> | **Claude Code** | 内置：每个对话都会出现，有没有 Task 清单都行 | 不用做什么 | ✅ 2.1.302 |
+| <img src="docs/images/agents/codex.svg" width="24" alt=""> | **Codex** | `Stop` hook | `/progress connect`，再到 Codex 的 `/hooks` 批准 | ✅ |
+| <img src="docs/images/agents/gemini-cli.svg" width="24" alt=""> | **Gemini CLI** | `AfterAgent` hook | `/progress connect` | ✅ 0.64.0 |
+| <img src="docs/images/agents/opencode.svg" width="24" alt=""> | **OpenCode** | 插件，在 `session.idle` 时 | `/progress connect` | ✅ 1.19.3 |
+| <img src="docs/images/agents/grok-build.svg" width="24" alt=""> | **Grok Build** | `Stop` hook | `/progress connect` | ✅ 1.0.62 |
+| <img src="docs/images/agents/hermes-agent.svg" width="24" alt=""> | **Hermes Agent** | `post_llm_call` shell hook | `/progress connect`，Hermes 第一次问时回答 `y` | ✅ 0.19.0 |
+| <img src="docs/images/agents/cursor.svg" width="24" alt=""> | **Cursor** | `afterAgentResponse` hook | `/progress connect` | 按 Cursor 文档实现 |
+| <img src="docs/images/agents/muse-code.svg" width="24" alt=""> | **Muse Code** | `Stop` hook | `/progress connect` | 按 Muse 文档实现 |
+| | **其他 agent**（Aider、Copilot、Windsurf…） | 自己写一块进度 | 把 [AGENTS.md](AGENTS.md) 的一段贴进它的说明文件 | |
+
+“实测过”是指：真的 CLI 跑了一个回合，它的 hook 有触发，面板也从中画出正确的一块进度。那些真实数据都留在测试里。
+
+## 快速开始
+
+**1. 安装**（需要 Claude Code 2.1.287 以上）：
 
 ```
 claude plugin marketplace add WenyuChiou/agent-board
@@ -25,9 +47,14 @@ claude plugin install agent-board@agent-board
 claude -p "/progress connect"
 ```
 
-最后一行会把你电脑上其他的 agent 接上。接完把它们重启（Codex 第一次会请你在它的 `/hooks` 里点批准）。然后打开 Claude Code，面板就在右边。
+**2. 重启其他 agent**，让它们加载新的 hook。第一次时，Codex 要在 `/hooks` 里批准，Hermes Agent 会问你一次，回答 `y`。
 
-**或者让 agent 帮你装。** 把下面这段贴给 Codex、Gemini CLI、Cursor、Grok、Muse，或任何能运行命令的 agent：
+**3. 打开 Claude Code。** 面板在右边（没看到就输入 `/progress`）。每个 agent 的回合几秒内就会出现。
+
+<details>
+<summary><b>或者让 agent 帮你装</b></summary>
+
+把下面这段贴给 Codex、Gemini CLI、Cursor、Grok、Hermes、Muse，或任何能运行命令的 agent：
 
 ```text
 帮我在这台电脑装 Claude Code 的 Agent Board 插件，并把这台电脑上的 coding agent 接上它。
@@ -35,21 +62,47 @@ claude -p "/progress connect"
 claude plugin marketplace add WenyuChiou/agent-board
 claude plugin install agent-board@agent-board
 claude -p "/progress connect"
-最后把最后一行输出的内容给我看，并告诉我要重启哪些 agent。
+最后把最后一行打印的内容给我看，并告诉我要重启哪些 agent。
 ```
 
-用的是 Aider、Copilot 或 Windsurf？把 [AGENTS.md](AGENTS.md) 里「Report your progress to the progress pane」那段贴进它的说明文件，它也会汇报。
+</details>
 
-## 用法
+## 功能
 
-| | |
+- **需要你的事排最前面。** 任何 agent 的问题都放在最上面，每个答案一个按钮。在 Claude Code 里点一下就回答了；其他 agent 则给你要贴过去的那句话或命令。
+- **所有 agent 一处看。** 按项目分组，每个对话都有标题、一行背景和编号步骤，由每个回合的简短摘要自动写好。
+- **随时接着做。** 对话压缩、终端关掉、第二天早上都没关系：做完什么、卡在哪、下一步是什么，打开就看到。做到一半停掉的对话，点一下就能接手。
+- **你自己的待办也放得进来。** 在面板的输入框打 `+ 求职：Fabrikam 研究员 截止 11-20`。快到期会变黄，到期会变红。
+- **不在终端也看得到。** `/progress open` 在浏览器打开同一个画面（手机也行）。面板关着时，状态栏和桌面通知会告诉你有事在等你。
+- **周报。** `/progress report` 和 `/progress today` 把做完的事复制成文字。
+- **自己清理。** 做完的事移到每月归档文件，日志留下每一步完成记录。
+- **就是一个 Markdown 文件。** 全部在 `~/.claude/progress.md`，你可以自己看、自己改。支持 English、繁體中文、简体中文；浅色深色都有。
+
+## 命令
+
+| 输入 | 用途 |
 |---|---|
-| 照常干活就好 | 每个对话会自己出现：做到哪、为什么做、在等什么 |
-| `+ 求职：Fabrikam 研究员 截止 11-20` | 在面板的输入框：加一件自己的事 |
-| `/progress open` | 在浏览器看同一个画面 |
-| `/progress connect` | 把其他 agent 接上面板 |
-| `/progress report` | 复制最近七天的进度 |
+| `/progress` | 打开面板 |
+| `/progress connect` | 把其他 agent 接上（`/progress connect remove` 去掉 hook） |
+| `+ 项目：标题 截止 11-20；步骤；步骤` | 在面板输入框加一件自己的事（或用 `/progress add …`） |
+| `/progress open` | 在浏览器看 |
+| `/progress report` / `/progress today` | 复制最近 7 天／今天的进度 |
+| `/progress notify on` / `off` | 桌面通知 |
 | `/progress lang zh-CN` | `en`、`zh-TW`、`zh-CN` 或 `auto` |
+| `/progress tidy` | 现在就归档做完的事 |
+
+## 颜色与符号
+
+面板跟着 Claude Code 的主题走。输入 `/config`，选 **Theme**：选浅色主题，面板就用浅色那组颜色；其他主题用深色那组。`progress.html` 跟着你电脑的浅色或深色模式。两组都是日本传统色（和色），选来让每个字都清楚好读。
+
+| 符号 | 意思 | | 符号 | 意思 |
+|:-:|---|---|:-:|---|
+| ● | 等你 | | ◐ | 在跑，或在等别人 |
+| ▸ | 正在做 | | ! | 卡住 |
+| ○ | 还没做 | | ⚑ | 两周内到期 |
+| ✓ | 完成 | | – | 取消 |
+
+点面板最下面的“说明”，面板里也会列出这张表。
 
 ## 怎么运作
 
@@ -58,8 +111,72 @@ claude -p "/progress connect"
   <img alt="Claude Code 对话、通过 hook 的其他 agent、和你，都写进同一个 Markdown 文件 progress.md；面板、progress.html、归档与状态栏都读它。" src="docs/images/flow-zh-CN-light.svg" width="100%">
 </picture>
 
-所有东西都在一个 Markdown 文件里：`~/.claude/progress.md`，你也可以自己打开来改。格式写在 [docs/FORMAT.md](docs/FORMAT.md)（英文）。
+每个接上的 agent，hook 会把它最后的回复存进 `~/.claude/progress-inbox/`。开着的 Claude Code 对话五秒内读到，把那个回合整理好，写进 `progress.md` 里那个 agent 自己的一块。格式写在 [docs/FORMAT.md](docs/FORMAT.md)（英文）。
 
-## 更多
+## 常见问题
 
-[使用说明](docs/GUIDE.zh-CN.md)（安装脚本、看懂面板、所有命令、自动整理、问题排查）· [参与贡献](CONTRIBUTING.md) · [更新记录](CHANGELOG.md) · [MIT](LICENSE)
+<details>
+<summary><b>一定要有其他 agent 吗？只用 Claude Code 可以吗？</b></summary>
+
+可以。每个 Claude Code 对话都会自己出现；接上其他 agent 是可选的。
+</details>
+
+<details>
+<summary><b>换了一台电脑，东西都没了吗？</b></summary>
+
+不会没，但也不会自己搬过去：`progress.md`、收件箱和 hook 都只在各自的电脑上。在新电脑跑那三行安装命令，再重启 agent 就好。要带上以前的记录，就把 `~/.claude/progress.md` 和旁边的 `progress-archive-*.md`、`progress-journal-*.md` 复制过去。
+
+想让两台电脑共用一个面板，就在两台都把 `CLAUDE_PROGRESS_FILE` 设成同步文件夹（OneDrive、Dropbox、iCloud）里的同一个文件。一次只用一台最稳：两台同时写，同步软件可能会留下冲突副本。
+</details>
+
+<details>
+<summary><b>某个 agent 没出现。</b></summary>
+
+1. 再运行一次 `/progress connect`，看它打印什么：它会列出接上了哪些 agent，以及哪些配置文件改不了。
+2. 重启那个 agent，hook 是在启动时加载的。Codex 要在 `/hooks` 批准，Hermes Agent 会问一次。
+3. 开着一个 Claude Code 对话：面板只在有对话开着时读收件箱。这段时间进来的回合会在那里等，最多两天。
+4. 看看 `~/.claude/progress-inbox/`。回合结束后没有新文件，就是 hook 没运行；有文件却没出现，请开 issue 附上那个文件。
+</details>
+
+<details>
+<summary><b>会把数据传出去吗？要花多少钱？</b></summary>
+
+`progress.md`、收件箱和 `progress.html` 都留在你的电脑上。回合的摘要由 Claude Haiku 通过你自己的 Claude Code 登录来做：其他 agent 每个回合一次简短调用，没有 Task 清单的 Claude Code 对话也是。装了 GitHub 的 `gh` 的话，面板会用它查你的 pull request 状态。其他什么都不会发出去。详见 [SECURITY.md](SECURITY.md)（英文）。
+</details>
+
+<details>
+<summary><b>Windows 能用吗？</b></summary>
+
+可以：macOS、Linux、Windows，在终端、桌面版和 VS Code 都行。Windows 上的 hook 运行的是 PowerShell 脚本，不需要 `sh`。
+</details>
+
+<details>
+<summary><b>以前用的是 <code>claude-progress-pane</code>。</b></summary>
+
+插件在 0.10.0 改了名，不会自己换过去。按[从旧名称换过来](docs/GUIDE.zh-CN.md#从旧名称换过来)的步骤做就好，`progress.md` 不会动。
+</details>
+
+<details>
+<summary><b>怎么卸载？</b></summary>
+
+```
+claude -p "/progress connect remove"
+claude plugin uninstall agent-board@agent-board
+claude plugin marketplace remove agent-board
+```
+
+第一行会把其他 agent 里的 hook 去掉。`progress.md` 会留着。
+</details>
+
+更多问题请看使用说明的[问题排查](docs/GUIDE.zh-CN.md#问题排查)。
+
+## 文档
+
+- [使用说明](docs/GUIDE.zh-CN.md)：设置脚本、看懂面板、所有命令、其他 agent、自动整理、问题排查
+- [文件格式](docs/FORMAT.md)（英文）：`progress.md` 怎么写，给任何想写进去的程序
+- [AGENTS.md](AGENTS.md)（英文）：代码结构，以及任何 agent 都能照着手动汇报的那一段
+- [更新记录](CHANGELOG.md) · [参与贡献](CONTRIBUTING.md) · [安全性](SECURITY.md)
+
+## 许可
+
+[MIT](LICENSE)。agent 的图标来自 [Simple Icons](https://simpleicons.org)（CC0），商标属于各自的所有者；没有免费图标的 agent 以名字的第一个字母表示。

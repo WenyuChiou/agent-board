@@ -179,6 +179,7 @@ export const ZH_CN: Strings = {
   connectDone: (list: string): string => `已接上：${list}。重启它们之后，每回合结束都会自动汇报到面板。`,
   connectNone: '没找到可以接的 agent（Codex、Gemini CLI、Cursor、OpenCode、Grok Build、Muse Code）。',
   connectCodexTrust: 'Codex 第一次要在它的 /hooks 里批准这个 hook 才会运行。',
+  connectHermesTrust: 'Hermes Agent 第一次运行这个 hook 前会问你一次，回答 y（或用 --accept-hooks 启动）。',
   connectSkipped: (name: string, path: string): string => `${name} 的配置文件读不懂，没有动它：${path}`,
   connectRemoved: (list: string): string => `已去掉：${list}。`,
   connectNothingRemoved: '没有接上过任何 agent。',

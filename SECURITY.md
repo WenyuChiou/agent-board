@@ -1,6 +1,6 @@
 # Security
 
-Agent Board runs inside Claude Code on your own machine. It reads and writes `progress.md`, its archive, journal and `progress.html` beside it, and runs `gh pr view` when GitHub's CLI is installed. The setup scripts edit your shell profile, `~/.claude/settings.json`, `~/.claude/CLAUDE.md` and, with `--agents`, other agents' global instruction files, and back each one up as `<file>.bak` first. Nothing is sent anywhere by the plugin itself.
+Agent Board runs inside Claude Code on your own machine. It reads and writes `progress.md`, its archive, journal and `progress.html` beside it, and runs `gh pr view` when GitHub's CLI is installed. The setup scripts edit your shell profile, `~/.claude/settings.json`, `~/.claude/CLAUDE.md` and, with `--agents`, other agents' global instruction files, and back each one up as `<file>.bak` first. `/progress connect` adds a hook to each installed agent's own config (the files are listed in the [guide](docs/GUIDE.md#other-agents)) and writes `progress-report.sh` (Windows: `progress-report.ps1`) beside `progress.md`; `/progress connect remove` takes them out again. To sum up a turn, the plugin asks Claude Haiku through Claude Code's own model access, sending that turn's request and reply. Nothing else is sent anywhere by the plugin itself.
 
 ## Reporting a problem
 

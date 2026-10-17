@@ -15,6 +15,7 @@ import { parseProgress } from '../../hooks/parse'
 import { STRINGS } from '../../hooks/strings'
 import { buildView } from '../../hooks/view'
 import { NOW, SAMPLES, SESSION, MIN } from './samples'
+import { AGENT_ICONS } from './icons'
 import { CELL, LINE, MONO, gridSvg, keyBox, layout, rowOf, toNode } from './terminal'
 import type { Theme } from './terminal'
 
@@ -418,7 +419,7 @@ const AGENTS: Array<[string, string]> = [
   ['Cursor', 'docs-site'],
   ['Grok Build', 'mobile-app'],
 ]
-const HOOKED = ['Claude Code', 'Codex', 'Gemini CLI', 'Cursor', 'OpenCode', 'Grok Build', 'Muse Code']
+const HOOKED = ['Claude Code', 'Codex', 'Gemini CLI', 'Cursor', 'OpenCode', 'Grok Build', 'Hermes Agent', 'Muse Code']
 
 const ENDED_TITLE: Record<Lang, string> = { en: 'Upgrade to React 19', 'zh-TW': '升級到 React 19', 'zh-CN': '升级到 React 19' }
 
@@ -513,7 +514,7 @@ const tour = (lang: Lang, mode: Mode): string => {
   const body = (grid: typeof frame1, offset: number, start: number, end: number, still = false): string =>
     `<g class="${timed(start, end, 'swap')}"${still ? ' data-still="1"' : ''}><rect x="0" y="${BAR}" width="${windowWidth}" height="${bodyH}" fill="${grid.theme.ground}"/>${gridSvg(grid.grid.slice(offset, offset + VIS + 1), PAD, BAR + PAD, grid.theme)}</g>`
   const ring = (row: number, col: number, span: number, rows: number, start: number, end: number): string =>
-    `<rect class="${timed(start, end, 'fade')}" x="${PAD + col * CELL - 6}" y="${BAR + PAD + row * LINE - 4}" width="${span * CELL + 12}" height="${rows * LINE + 8}" rx="7" fill="none" stroke="${pal.accent}" stroke-width="2.4"/>`
+    `<rect class="${timed(start, end, 'fade')}" x="${PAD + col * CELL - 6}" y="${BAR + PAD + row * LINE - 1}" width="${span * CELL + 12}" height="${rows * LINE + 2}" rx="6" fill="none" stroke="${pal.accent}" stroke-width="2.4"/>`
   const windowFrame = (m: Mode, inner: string, cls: string, still = false): string => {
     const t = TERMINAL[m]
     const h = BAR + bodyH
@@ -654,7 +655,7 @@ ${marks.map(([at, label]) => `<text x="${track.x + (at / LOOP) * track.w}" y="${
 
   return `<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}" role="img" aria-label="${esc(label)}">
 <title>Agent Board: ${esc(w.end)}</title>
-<defs><clipPath id="body"><rect x="0" y="${BAR}" width="${windowWidth}" height="${bodyH}"/></clipPath></defs>
+<defs><clipPath id="body"><path d="M1 ${BAR}h${windowWidth - 2}v${bodyH - 12}a11 11 0 0 1 -11 11h-${windowWidth - 24}a11 11 0 0 1 -11 -11z"/></clipPath></defs>
 <style>
 .sc { opacity: 0; animation-duration: ${LOOP}s; animation-iteration-count: infinite; animation-timing-function: linear; }
 .zoom { transform-box: fill-box; transform-origin: center; }
@@ -687,6 +688,117 @@ const dashboard = (lang: Lang): string => {
   const view = buildView(parseProgress(file), [], null, NOW, today(lang), {}, s)
   return dashboardHtml(view, s, sample.path, s.dashStamp('2026-10-16 09:40'))
 }
+
+// The promotional card, for GitHub's social preview and for sharing: a headline, the agents
+// it works with, and the pane itself with a question that has just come in.
+const PROMO: Record<Lang, { headline: string[]; sub: string[]; works: string; note: [string, string, string]; answers: [string, string] }> = {
+  en: {
+    headline: ['Stop checking', 'on your agents.', 'Let them tell you.'],
+    sub: ['One board for every AI coding agent.', 'Whatever needs you comes first.'],
+    works: 'WORKS WITH',
+    note: ['Codex', 'api-gateway · waiting on you', 'Per-key limit: 100 or 300 a minute?'],
+    answers: ['100', '300'],
+  },
+  'zh-TW': {
+    headline: ['別再一直盯著 agent，', '讓它們來告訴你。'],
+    sub: ['所有 AI coding agent 一個面板看完，', '等你的事排第一個。'],
+    works: '支援',
+    note: ['Codex', 'api-gateway · 在等你', '每把金鑰一分鐘上限：100 還是 300？'],
+    answers: ['100', '300'],
+  },
+  'zh-CN': {
+    headline: ['别再一直盯着 agent，', '让它们来告诉你。'],
+    sub: ['所有 AI coding agent 一个面板看完，', '等你的事排第一个。'],
+    works: '支持',
+    note: ['Codex', 'api-gateway · 在等你', '每个密钥一分钟上限：100 还是 300？'],
+    answers: ['100', '300'],
+  },
+}
+
+const promo = (lang: Lang): string => {
+  const w = PROMO[lang]
+  const pal = DARK
+  const { grid, theme } = paneGrid(lang, 'dark', { opened: [], isAnswered: false })
+  // The pane whole, down to the line before its second box (the first is the reply box), so
+  // no line is cut off.
+  const boxes = grid.flatMap((row, i) => ((row[0]?.ch ?? '') === '╭' ? [i] : []))
+  const rows = Math.max(1, (boxes[1] ?? Math.min(grid.length, 18)) - 1)
+  const body = gridSvg(grid.slice(0, rows), PAD, BAR + PAD, theme)
+  const isCjk = lang !== 'en'
+  const size = isCjk ? 50 : 52
+  // The headline's last line is the promise, in the accent colour.
+  const lineGap = size + 10
+  const top = isCjk ? 200 : 180
+  const headline = w.headline
+    .map((line, i) => `<text x="72" y="${top + i * lineGap}" font-size="${size}" font-weight="800" fill="${i === w.headline.length - 1 ? pal.accent : '#f7f6f2'}">${esc(line)}</text>`)
+    .join('\n')
+  const subY = top + (w.headline.length - 1) * lineGap + 26
+  const icons = AGENT_ICONS.map((icon, i) => {
+    const x = 72 + i * 58
+    const mark =
+      icon.path !== undefined
+        ? `<path transform="translate(${x + 11} 471) scale(0.9)" fill="#fff" d="${icon.path}"/>`
+        : `<text x="${x + 22}" y="${459 + 29}" text-anchor="middle" font-size="20" font-weight="700" fill="#fff">${esc(icon.letter ?? '')}</text>`
+    return `<rect x="${x + 0.5}" y="459.5" width="43" height="43" rx="10" fill="${icon.tile}" stroke="#fff" stroke-opacity="0.2"/>${mark}`
+  }).join('\n')
+  // The pane, and under it the notification that has just come in; neither covers the other.
+  const wx = 760
+  const wy = 44
+  const nx = wx
+  const ny = wy + BAR + PAD * 2 + rows * LINE + 18
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="640" viewBox="0 0 1280 640" role="img" aria-label="Agent Board: ${esc(w.headline.join(' '))}">
+<title>Agent Board</title>
+<defs>
+<linearGradient id="sky" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#0f1a24"/><stop offset="0.55" stop-color="#0c1116"/><stop offset="1" stop-color="#090b0d"/></linearGradient>
+<radialGradient id="glow" cx="0.78" cy="0.35" r="0.55"><stop offset="0" stop-color="${pal.accent}" stop-opacity="0.22"/><stop offset="1" stop-color="${pal.accent}" stop-opacity="0"/></radialGradient>
+<pattern id="dots" width="24" height="24" patternUnits="userSpaceOnUse"><circle cx="2" cy="2" r="1" fill="#fff" fill-opacity="0.05"/></pattern>
+<filter id="lift" x="-20%" y="-20%" width="140%" height="160%"><feDropShadow dx="0" dy="18" stdDeviation="22" flood-color="#000" flood-opacity="0.55"/></filter>
+<clipPath id="edge"><rect width="1280" height="640" rx="24"/></clipPath>
+</defs>
+<g clip-path="url(#edge)" font-family="${SANS}">
+<rect width="1280" height="640" fill="url(#sky)"/>
+<rect width="1280" height="640" fill="url(#glow)"/>
+<rect width="1280" height="640" fill="url(#dots)"/>
+<g transform="translate(72 70)"><rect width="34" height="34" rx="9" fill="${pal.accent}"/><rect x="8" y="9" width="18" height="3.5" rx="1.75" fill="#0c1116"/><rect x="8" y="15.5" width="12" height="3.5" rx="1.75" fill="#0c1116"/><circle cx="23" cy="22" r="3.6" fill="${pal.waiting}"/></g>
+<text x="118" y="96" font-size="25" font-weight="700" fill="#f2f1ec" letter-spacing="0.3">Agent Board</text>
+${headline}
+${w.sub.map((line, i) => `<text x="72" y="${subY + 24 + i * 33}" font-size="${isCjk ? 23 : 22}" fill="#b9bcc0">${esc(line)}</text>`).join('')}
+<text x="72" y="444" font-size="14" font-weight="700" letter-spacing="${isCjk ? 2 : 2.5}" fill="#8b9096">${esc(w.works)}</text>
+${icons}
+<text x="72" y="572" font-family="${MONO}" font-size="19" fill="#d7d9dc">github.com/<tspan fill="#f7f6f2" font-weight="700">WenyuChiou/agent-board</tspan></text>
+<g filter="url(#lift)">${terminal('dark', WORDS[lang].window, body, rows, wx, wy)}</g>
+<g filter="url(#lift)">
+<rect x="${nx}" y="${ny}" width="${windowWidth}" height="132" rx="14" fill="#23272b" stroke="${pal.waiting}" stroke-opacity="0.85" stroke-width="1.6"/>
+<rect x="${nx + 20}" y="${ny + 20}" width="34" height="34" rx="8" fill="#0B0B0F" stroke="#fff" stroke-opacity="0.2"/><text x="${nx + 37}" y="${ny + 43}" text-anchor="middle" font-size="17" font-weight="700" fill="#fff">C</text>
+<text x="${nx + 68}" y="${ny + 34}" font-size="17" font-weight="700" fill="#f2f1ec">${esc(w.note[0])}</text>
+<text x="${nx + 68}" y="${ny + 54}" font-size="14" fill="${pal.waiting}">● ${esc(w.note[1])}</text>
+<text x="${nx + 20}" y="${ny + 84}" font-size="17" fill="#e6e4dc">${esc(w.note[2])}</text>
+<rect x="${nx + 20}" y="${ny + 96}" width="80" height="26" rx="7" fill="${pal.accent}"/><text x="${nx + 60}" y="${ny + 114}" text-anchor="middle" font-size="14" font-weight="700" fill="#0c1116">${esc(w.answers[0])}</text>
+<rect x="${nx + 110}" y="${ny + 96}" width="80" height="26" rx="7" fill="none" stroke="#5b6168"/><text x="${nx + 150}" y="${ny + 114}" text-anchor="middle" font-size="14" font-weight="600" fill="#e6e4dc">${esc(w.answers[1])}</text>
+</g>
+</g>
+</svg>
+`
+}
+
+// One tile per supported agent, the same in a light and a dark README: a white mark on the
+// agent's own colour.
+const agentIcon = (icon: (typeof AGENT_ICONS)[number]): string => {
+  const mark =
+    icon.path !== undefined
+      ? `<path transform="translate(12 12)" fill="#fff" d="${icon.path}"/>`
+      : `<text x="24" y="31.5" text-anchor="middle" font-family="${SANS}" font-size="22" font-weight="700" fill="#fff">${esc(icon.letter ?? '')}</text>`
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="48" height="48" viewBox="0 0 48 48" role="img" aria-label="${esc(icon.name)}">
+<title>${esc(icon.name)}</title>
+<rect x="0.5" y="0.5" width="47" height="47" rx="10.5" fill="${icon.tile}" stroke="#fff" stroke-opacity="0.22"/>
+${mark}
+</svg>
+`
+}
+
+mkdirSync(join(OUT, 'agents'), { recursive: true })
+for (const icon of AGENT_ICONS) writeFileSync(join(OUT, 'agents', `${icon.file}.svg`), agentIcon(icon))
+for (const lang of LANGS) writeFileSync(join(OUT, `promo-${lang}.svg`), promo(lang))
 
 for (const lang of LANGS) {
   for (const mode of ['light', 'dark'] as const) {

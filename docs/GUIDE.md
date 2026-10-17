@@ -92,6 +92,10 @@ The pane follows Claude Code's `language` setting, then your system locale. To c
 
 or set **Pane language** for the plugin in `/config`.
 
+### 8. Pick the colours
+
+The pane takes its colours from Claude Code's theme: run `/config` and choose **Theme**. A light theme (`light`, `light-daltonized`, `light-ansi`) gives it the light set, any other the dark set, and it repaints as soon as you change it. `progress.html` follows your computer's light or dark mode instead. The marks and what they mean are under **Legend** at the bottom of the pane.
+
 ## Reading the pane
 
 From top to bottom:
@@ -180,8 +184,9 @@ It finds the agents installed on this machine and gives each one a hook that run
 | Codex | `~/.codex/hooks.json` (`$CODEX_HOME`) | `Stop`. Approve it once in Codex's `/hooks` |
 | Gemini CLI | `~/.gemini/settings.json` | `AfterAgent` |
 | Cursor | `~/.cursor/hooks.json` | `afterAgentResponse`, `stop` |
-| OpenCode | `~/.config/opencode/plugin/progress-pane.js` | `session.idle` |
-| Grok Build | `~/.grok/hooks/progress-pane.json` (`$GROK_HOME`) | `Stop` |
+| OpenCode | `~/.config/opencode/plugin/agent-board.js` | `session.idle` |
+| Grok Build | `~/.grok/hooks/agent-board.json` (`$GROK_HOME`) | `Stop` |
+| Hermes Agent | `~/.hermes/config.yaml` (`$HERMES_HOME`) | `post_llm_call`. Hermes asks once before it runs a new hook; answer `y` |
 | Muse Code | `~/.config/muse/settings.json` | `Stop` |
 
 The hook runs `~/.claude/progress-report.sh` (Windows: `progress-report.ps1`), which `/progress connect` writes. The script has no dependencies, always exits 0 and prints nothing, except `{}` for Cursor. Your own hooks in those files stay. A config file that is not plain JSON is left alone, and the command says which one. If setup `--agents` had put the AGENTS.md section into that agent's instructions, the section is removed, so the work does not show twice. `/progress connect remove` takes everything back out.
@@ -244,3 +249,5 @@ The last line moves the hooks in your other agents to the new name. `progress.md
 - **PowerShell warns about the execution policy.** Your profile only runs where scripts may run: `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned`, then run the script again. Until then the variable stays in `settings.json`.
 - **Private fork.** Claude Code clones with your own git credentials. Run `gh auth login` and `gh auth setup-git` once; without a GitHub SSH key also set `CLAUDE_CODE_PLUGIN_PREFER_HTTPS=1`.
 - **Your organization manages Claude Code.** Plugins you install yourself do not get the system-prompt hook there. Run the setup script with `-KeepRule` (`--keep-rule`) to keep the rule in `~/.claude/CLAUDE.md` instead.
+- **An agent doesn't show up.** Run `/progress connect` again: it names every agent it connected and every config it could not edit. Restart the agent, and keep a Claude Code session open while it works. If no file appears in `~/.claude/progress-inbox/` after a turn, the agent's hook did not run.
+- **A new computer.** `progress.md`, the inbox and the hooks live on each computer. Install there and run `/progress connect`; copy `progress.md` and the `progress-archive-*.md` and `progress-journal-*.md` files beside it to bring your history. To share one board, point `CLAUDE_PROGRESS_FILE` on both computers at one file in a synced folder, and use one computer at a time.

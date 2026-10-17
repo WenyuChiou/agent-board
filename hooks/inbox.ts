@@ -75,7 +75,8 @@ export const blockId = (agent: string, session: string): string => {
   return hash.toString(16).padStart(8, '0')
 }
 
-const END_EVENTS = /^(?:session[-_]?end|sessionend|session\.deleted)$/i
+// Hermes Agent's on_session_end comes after every turn; its on_session_finalize is the end.
+const END_EVENTS = /^(?:session[-_]?end|sessionend|session\.deleted|on_session_finalize)$/i
 
 // One inbox file read; null when it is not JSON or names no session.
 export const readTurn = (fileName: string, body: string): AgentTurn | null => {
@@ -89,7 +90,9 @@ export const readTurn = (fileName: string, body: string): AgentTurn | null => {
     return null
   }
   if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) return null
-  const record = parsed as Record<string, unknown>
+  // Hermes Agent puts each event's own fields under `extra`.
+  const extra = (parsed as Record<string, unknown>).extra
+  const record = { ...(extra !== null && typeof extra === 'object' && !Array.isArray(extra) ? (extra as Record<string, unknown>) : {}), ...(parsed as Record<string, unknown>) }
   // Grok Build also runs Cursor's hooks; its camelCase fields say whose turn it really is.
   const agent = typeof record.hookEventName === 'string' && 'workspaceRoot' in record ? 'grok' : (name[1] ?? 'agent')
   const session = first(record, ['session_id', 'sessionId', 'sessionID', 'thread-id', 'thread_id', 'conversation_id', 'conversationId'])
@@ -100,7 +103,7 @@ export const readTurn = (fileName: string, body: string): AgentTurn | null => {
   // Grok Build sends one more Stop as a session closes; it ends the session, it is no turn.
   const closing = typeof record.reason === 'string' && /^(?:channel_closed|shutdown)$/.test(record.reason)
   const event = name[2] === 'end' || END_EVENTS.test(hookEvent) || closing ? 'end' : 'turn'
-  const answer = first(record, ['last_assistant_message', 'lastAssistantMessage', 'last-assistant-message', 'prompt_response', 'response', 'text'])
+  const answer = first(record, ['last_assistant_message', 'lastAssistantMessage', 'last-assistant-message', 'prompt_response', 'assistant_response', 'response', 'text'])
 
   return {
     agent,
@@ -109,31 +112,56 @@ export const readTurn = (fileName: string, body: string): AgentTurn | null => {
     id: blockId(agent, session),
     cwd,
     project: baseName(cwd),
-    prompt: first(record, ['prompt', 'user_prompt', 'input-messages', 'input_messages', 'last_user_message']),
+    prompt: first(record, ['prompt', 'user_prompt', 'user_message', 'input-messages', 'input_messages', 'last_user_message']),
     // Gemini CLI says this when the turn had no text.
     answer: answer === '[no response text]' ? '' : answer,
     transcript: first(record, ['transcript_path', 'transcriptPath']),
   }
 }
 
+// One line of a session log as a speaker and their words. Grok Build's log is ACP updates,
+// which stream a message in chunks.
+type LogEntry = { role: string; words: string; isChunk: boolean }
+
+const logEntry = (line: string): LogEntry | null => {
+  let entry: unknown
+  try {
+    entry = JSON.parse(line)
+  } catch {
+    return null
+  }
+  if (entry === null || typeof entry !== 'object') return null
+  const record = entry as Record<string, unknown>
+  const params = record.params as Record<string, unknown> | undefined
+  const update = params?.update as Record<string, unknown> | undefined
+  if (update !== undefined && typeof update.sessionUpdate === 'string') {
+    const kind = /^(user|agent)_message_chunk$/.exec(update.sessionUpdate)
+    const content = update.content as Record<string, unknown> | undefined
+    return kind === null ? null : { role: kind[1] === 'user' ? 'user' : 'assistant', words: text(content?.text), isChunk: true }
+  }
+  const inner = (record.message ?? record.payload ?? record) as Record<string, unknown>
+  const role = String(inner.role ?? record.role ?? record.type ?? '')
+
+  return { role, words: text(inner.content ?? inner.text ?? record.content ?? record.text), isChunk: false }
+}
+
 // The end of a session log, as text the model can read: the last assistant and user words
 // it can find in JSON lines, else the raw tail.
 export const transcriptTail = (log: string, limit = 3000): { prompt: string; answer: string } => {
   const lines = log.split(/\r?\n/).filter(line => line.trim() !== '')
+  // Chunks of one message, one after another, read as the whole message.
+  const entries = lines.reduce<LogEntry[]>((all, line) => {
+    const entry = logEntry(line)
+    if (entry === null) return all
+    const last = all.at(-1)
+    if (entry.isChunk && last !== undefined && last.isChunk && last.role === entry.role) return [...all.slice(0, -1), { ...last, words: last.words + entry.words }]
+    return [...all, entry]
+  }, [])
   let prompt = ''
   let answer = ''
-  for (let index = lines.length - 1; index >= 0 && (prompt === '' || answer === ''); index -= 1) {
-    let entry: unknown
-    try {
-      entry = JSON.parse(lines[index] ?? '')
-    } catch {
-      continue
-    }
-    if (entry === null || typeof entry !== 'object') continue
-    const record = entry as Record<string, unknown>
-    const inner = (record.message ?? record.payload ?? record) as Record<string, unknown>
-    const role = String(inner.role ?? record.role ?? record.type ?? '')
-    const words = text(inner.content ?? inner.text ?? record.content ?? record.text).trim()
+  for (let index = entries.length - 1; index >= 0 && (prompt === '' || answer === ''); index -= 1) {
+    const { role, words: raw } = entries[index] ?? { role: '', words: '' }
+    const words = raw.trim()
     if (words === '') continue
     if (answer === '' && /assistant|model|agent/i.test(role)) answer = words
     else if (prompt === '' && /user|human/i.test(role) && answer !== '') prompt = words
@@ -142,3 +170,8 @@ export const transcriptTail = (log: string, limit = 3000): { prompt: string; ans
 
   return { prompt: prompt.slice(-1200), answer: answer.slice(-limit) }
 }
+
+// A session log the pane may open: the path comes from a file anyone on the machine can drop
+// into the inbox, so only the kinds agents write their logs in (JSON lines; Cursor's are
+// text), never a key or an env file, and no climbing out of a folder.
+export const isTranscriptPath = (path: string): boolean => /\.(?:jsonl?|txt)$/i.test(path) && !/(?:^|[\\/])\.\.(?:[\\/]|$)/.test(path)

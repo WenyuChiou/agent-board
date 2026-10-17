@@ -88,6 +88,10 @@ Claude 會列出 Task 清單，面板跟著走：卡片顯示任務、它的背�
 
 或在 `/config` 裡設定這個外掛的 **Pane language**。
 
+### 8. 選顏色
+
+面板的顏色跟著 Claude Code 的主題：輸入 `/config`，選 **Theme**。淺色主題（`light`、`light-daltonized`、`light-ansi`）用淺色那組，其他主題用深色那組，一換就立刻重畫。`progress.html` 則跟著你電腦的淺色或深色模式。各個符號的意思，按面板最下面的「說明」就看得到。
+
 ## 看懂面板
 
 從上到下：
@@ -176,8 +180,9 @@ Claude 會列出 Task 清單，面板跟著走：卡片顯示任務、它的背�
 | Codex | `~/.codex/hooks.json`（`$CODEX_HOME`） | `Stop`，第一次要在 Codex 的 `/hooks` 裡核准 |
 | Gemini CLI | `~/.gemini/settings.json` | `AfterAgent` |
 | Cursor | `~/.cursor/hooks.json` | `afterAgentResponse`、`stop` |
-| OpenCode | `~/.config/opencode/plugin/progress-pane.js` | `session.idle` |
-| Grok Build | `~/.grok/hooks/progress-pane.json`（`$GROK_HOME`） | `Stop` |
+| OpenCode | `~/.config/opencode/plugin/agent-board.js` | `session.idle` |
+| Grok Build | `~/.grok/hooks/agent-board.json`（`$GROK_HOME`） | `Stop` |
+| Hermes Agent | `~/.hermes/config.yaml`（`$HERMES_HOME`） | `post_llm_call`，Hermes 第一次跑新 hook 前會問一次，回答 `y` |
 | Muse Code | `~/.config/muse/settings.json` | `Stop` |
 
 hook 執行的是 `/progress connect` 寫好的 `~/.claude/progress-report.sh`（Windows 是 `progress-report.ps1`）。腳本：
@@ -249,3 +254,5 @@ claude -p "/progress connect"
 - **PowerShell 警告執行原則。** PowerShell 要允許執行腳本才會執行你的 profile：`Set-ExecutionPolicy -Scope CurrentUser RemoteSigned`，然後再跑一次腳本。在那之前，這個變數會留在 `settings.json`。
 - **私人 fork。** Claude Code 用你自己的 git 認證 clone。執行一次 `gh auth login` 和 `gh auth setup-git`；沒有 GitHub SSH key 的話，再設 `CLAUDE_CODE_PLUGIN_PREFER_HTTPS=1`。
 - **你的組織統一管理 Claude Code。** 在那種環境裡，你自己裝的外掛收不到系統提示的 hook。執行設定腳本時加 `-KeepRule`（`--keep-rule`），改把規則留在 `~/.claude/CLAUDE.md`。
+- **某個 agent 沒出現。** 再跑一次 `/progress connect`：它會列出接上了哪些 agent，以及哪些設定檔改不了。重開那個 agent，並在它工作時開著一個 Claude Code 對話。如果回合結束後 `~/.claude/progress-inbox/` 裡沒有新檔案，就是那個 agent 的 hook 沒有執行。
+- **換了一台電腦。** `progress.md`、收件匣和 hook 都只在各自的電腦上。在新電腦安裝並執行 `/progress connect`；要帶上紀錄，就把 `progress.md` 和旁邊的 `progress-archive-*.md`、`progress-journal-*.md` 複製過去。要兩台共用一個面板，就在兩台都把 `CLAUDE_PROGRESS_FILE` 指向同步資料夾裡的同一個檔案，並且一次只用一台。
