@@ -168,8 +168,9 @@ const act = (action: BoardAction): string => {
     })
     if (wrote === null) return s.boardWriteFailed
     if (!isFound) return s.boardTickGone
-    const journal = journalPath(path, now)
-    rewrite(journal, text => appendJournal(text, [journalLine({ project: action.ref.project, task: action.ref.title, step: action.ref.step }, now, s)], s))
+    // Once, even when another write to the journal makes it try again.
+    const line = journalLine({ project: action.ref.project, task: action.ref.title, step: action.ref.step }, now, s)
+    rewrite(journalPath(path, now), text => (text.includes(line) ? text : appendJournal(text, [line], s)))
     return s.boardTicked(action.ref.step)
   }
   if (action.type === 'archive') {
@@ -200,17 +201,18 @@ const act = (action: BoardAction): string => {
 // than one key (a held arrow, a paste).
 const keyName = (one: string): string =>
   one === '\u001b[A' || one === '\u001bOA' ? 'up' : one === '\u001b[B' || one === '\u001bOB' ? 'down' : one === '\r' || one === '\n' ? 'enter' : one
-const keysIn = (chunk: string): string[] => (chunk.replace(/\r\n/g, '\r').match(/\u001b[[O][0-9;]*[A-Za-z~]|[\s\S]/gu) ?? []).map(keyName)
+// An escape and the character after it (Alt with a letter) is one key the board ignores.
+const keysIn = (chunk: string): string[] => (chunk.replace(/\r\n/g, '\r').match(/\u001b[[O][0-9;]*[A-Za-z~]|\u001b[\s\S]?|[\s\S]/gu) ?? []).map(keyName)
 
-const press = (state: BoardState, key: string): { state: BoardState; isQuit: boolean; isHtml: boolean } => {
+const press = (state: BoardState, key: string): { state: BoardState; isQuit: boolean; isHtml: boolean; isWrite: boolean } => {
   const items = boardItems(view(), pending())
   const { state: next, action } = boardKey(state, key, items, s)
-  if (action === null) return { state: next, isQuit: false, isHtml: false }
-  if (action.type === 'quit') return { state: next, isQuit: true, isHtml: false }
-  if (action.type === 'html') return { state: next, isQuit: false, isHtml: true }
+  if (action === null) return { state: next, isQuit: false, isHtml: false, isWrite: false }
+  if (action.type === 'quit') return { state: next, isQuit: true, isHtml: false, isWrite: false }
+  if (action.type === 'html') return { state: next, isQuit: false, isHtml: true, isWrite: false }
 
   // After a write the lines move; the choice is made again from the screen drawn next.
-  return { state: { ...next, key: null, note: act(action) }, isQuit: false, isHtml: false }
+  return { state: { ...next, key: null, note: act(action) }, isQuit: false, isHtml: false, isWrite: action.type !== 'copy' }
 }
 
 const screen = (state: BoardState): string => boardScreen(view(), pending(), state, s, options())
@@ -245,8 +247,10 @@ if (args.includes('--html')) {
   process.on('exit', () => process.stdout.write('\u001b[?25h\n'))
   for (const signal of ['SIGTERM', 'SIGHUP'] as const) process.on(signal, () => process.exit(0))
   process.stdin.on('data', (chunk: string) => {
+    // Keys that came together (a held arrow) each act on the line the one before left chosen;
+    // after a tick or an archive the rest wait, so no key lands on a line not yet drawn.
     for (const key of keysIn(chunk)) {
-      const pressed = press(state, key)
+      const pressed = press(pin(state), key)
       state = pressed.state
       if (pressed.isQuit) quit()
       if (pressed.isHtml) {
@@ -255,6 +259,7 @@ if (args.includes('--html')) {
           draw()
         })
       }
+      if (pressed.isWrite) break
     }
     draw()
   })

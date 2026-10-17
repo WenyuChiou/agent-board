@@ -38,7 +38,9 @@
   - **The board is easier to live with.** Copying counts as done when the
     terminal took it (OSC 52, over SSH too). A clipboard tool gets 2
     seconds. The cursor comes back however the board ends. Keys that arrive
-    together (a held arrow) are all read.
+    together (a held arrow) are all read, each on the line the one before
+    left chosen, and the rest wait after a tick or an archive. Alt with a
+    letter does nothing. A tick is journaled once, even on a retry.
 
   Tests: "another session writing while the board ticks or archives loses
   neither the tick nor the archived block", "a key does nothing to a line
