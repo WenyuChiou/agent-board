@@ -1,5 +1,42 @@
 # Changelog
 
+## 0.19.1 — 2026-10-17
+
+- **The page's address, key and all, is no longer kept beside
+  `progress.md`.** `--serve` kept it in `progress-serve.json` in the same
+  folder, and that folder is often a git repository that syncs itself. It
+  is now kept in a folder only your account can use: the folder for running
+  programs (`XDG_RUNTIME_DIR`) when it is yours alone, else
+  `~/.cache/agent-board` (the temp folder on Windows), in a file named for
+  the `progress.md` it serves, readable by you only. The file 0.19.0 left
+  beside `progress.md` is removed, and its page asked to close, the next
+  time `--serve` runs. Tests: in `tests/board.test.mjs`, "the page's address
+  stays out of progress.md's folder, and a file left by a page that is gone
+  does not keep the next one from starting".
+- **Two `--serve` at the same moment open one page, not two.** A new page
+  writes its address file only when there is none; when another page wrote
+  first, the new one stops and its `--serve` prints the other's address. A
+  file left by a page that is gone (it does not answer, also after five
+  more seconds when it still runs) is removed first, and so is one cut
+  short by a crash, once it is ten seconds old. Tests: in
+  `tests/board.test.mjs`, "two --serve run at the same moment open one page
+  between them, and a server started while it runs stops at once", "an
+  address file cut short by a crash is cleared once it is old, and the next
+  --serve starts a page".
+- **Archiving now dates a finished hand-kept task on the right day.** The
+  page's **Archive now** and `/progress tidy` put a task the pane had seen
+  done less than a day ago under the day before. It now goes under the day
+  it was seen done, or today when it never was. Tests: "archived at the
+  person's word, a finished hand-kept task carries the day it was seen
+  done, or today when it never was", "/progress tidy archives a finished
+  hand-kept task under the day it was done, not the day before", and in
+  `tests/board.test.mjs` "ticking and tidying from the page write
+  progress.md the way the pane does, and a pasted block is merged into it",
+  which now checks the day.
+- `tsc -p .` reports no errors again. Seven had built up in the tests and in
+  one engine call over earlier releases; the fixes change only types, not
+  what runs.
+
 ## 0.19.0 — 2026-10-17
 
 - **A board page you can click, for the agents that are not Claude Code.**

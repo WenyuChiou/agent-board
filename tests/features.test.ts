@@ -346,6 +346,18 @@ test('finished hand-kept tasks leave a day after they were first seen done, whol
   expect(takeManualDone(text, NOW, () => undefined).entries).toEqual([])
 })
 
+test("archived at the person's word, a finished hand-kept task carries the day it was seen done, or today when it never was", () => {
+  const text = '# 專案進度\n\n## 研究\n### 讀論文\n- [x] 讀完\n\n### 寫摘要\n- [x] 寫完\n\n### 投稿\n- [ ] 送出\n'
+  const seen: Record<string, number> = { 'done:研究::讀論文': NOW }
+  // Not asked: neither has been done a day yet.
+  expect(takeManualDone(text, NOW, key => seen[key]).entries).toEqual([])
+  const out = takeManualDone(text, NOW, key => seen[key], ZH_TW, true)
+  expect(out.keys).toEqual(['done:研究::讀論文', 'done:研究::寫摘要'])
+  // The day it was done, not the day before it.
+  expect(out.entries).toEqual(['## 研究 · 2026-10-16\n### 讀論文\n- [x] 讀完', '## 研究 · 2026-10-16\n### 寫摘要\n- [x] 寫完'])
+  expect(out.text).toBe('# 專案進度\n\n## 研究\n### 投稿\n- [ ] 送出\n')
+})
+
 test('blocks leave after half a day when done and after three days otherwise', () => {
   const span = (state: 'done' | 'ended' | 'working', hours: number) => ({
     session: 'x',
@@ -737,7 +749,7 @@ test('Hermes Agent’s hooks go into its config.yaml beside the person’s own, 
 })
 
 test('a Hermes config.yaml with the empty hooks: {} it ships with gets our hooks in its place, Windows line ends and all', () => {
-  const ctx = { home: '/h', sep: '/', isWindows: false, script: '/h/.claude/progress-report.sh', inbox: '/h/.claude/progress-inbox', codexHome: '/h/.codex', grokHome: '/h/.grok', hermesHome: '/h/.hermes' }
+  const ctx = { home: '/h', sep: '/', isWindows: false, script: '/h/.claude/progress-report.sh', inbox: '/h/.claude/progress-inbox', codexHome: '/h/.codex', grokHome: '/h/.grok', hermesHome: '/h/.hermes', openclawHome: '/h/.openclaw' }
   const hermes = agentHooks(ctx).find(hook => hook.agent === 'hermes')
   const ours =
     `  post_llm_call:\n    - {command: "sh '/h/.claude/progress-report.sh' hermes turn || true", timeout: 10}\n` +
@@ -884,7 +896,8 @@ test('a config already holding our hooks keeps its own formatting, while one tha
   const ctx = { home: '/h', sep: '/', isWindows: false, script: '/h/.claude/progress-report.sh', inbox: '/h/.claude/progress-inbox', codexHome: '/h/.codex', grokHome: '/h/.grok', hermesHome: '/h/.hermes', openclawHome: '/h/.openclaw' }
   for (const agent of ['codex', 'gemini', 'openclaw']) {
     const hook = agentHooks(ctx).find(one => one.agent === agent && one.file.endsWith('.json'))
-    const written = hook?.edit('{"theme": "dark"}', false) ?? ''
+    const edited = hook?.edit('{"theme": "dark"}', false)
+    const written = typeof edited === 'string' ? edited : ''
     expect(JSON.parse(written).theme).toBe('dark')
     // The same contents, indented four spaces and with Windows line ends, as an editor saves them.
     const own = JSON.stringify(JSON.parse(written), null, 4).replace(/\n/g, '\r\n')
