@@ -698,6 +698,9 @@ test('each agent’s config gets the hook in the shape it reads, and nothing els
   expect(hooks.opencode?.old).toBe('/h/.config/opencode/plugin/progress-pane.js')
   expect(JSON.parse(String(hooks.grok?.edit('', false))).hooks.Stop[0].hooks[0].command).toBe("sh '/h/.claude/progress-report.sh' grok turn || true")
   expect(hooks.grok?.edit('{"hooks":{}}', true)).toBe(DELETE)
+  // PowerShell alone took 0.6 s of the end hook's time on Windows: it gets 5.
+  expect(JSON.parse(String(hooks.grok?.edit('', false))).hooks.SessionEnd[0].hooks[0].timeout).toBe(5)
+  expect(muse.hooks.SessionEnd[0].hooks[0].timeout).toBe(5)
   expect(String(hooks.opencode?.edit('', false))).toContain('const INBOX = "/h/.claude/progress-inbox"')
   // Windows: PowerShell runs the .ps1 script.
   const win = agentHooks({ ...ctx, isWindows: true, sep: '\\', script: 'C:\\Users\\a\\.claude\\progress-report.ps1' })
@@ -1091,6 +1094,26 @@ test('a turn that only showed the board is not work, in any language or agent', 
   for (const prompt of ['Fix the board layout on mobile', '/boarding-pass', '/board the plane and pack', '$agent-board-v2 setup', 'Fix the bug in scripts/board-cli.ts so agent-board.mjs prints colours']) {
     expect(isBoardTurn(turn(prompt)!)).toBe(false)
   }
+})
+
+test('a reply that is the printed board and a sentence is a look at the board, asked in plain words, while work that shows it too is not', () => {
+  const said = (prompt: string, answer: string) => readTurn('grok-turn-1-1.json', JSON.stringify({ session_id: 's', cwd: '/w/app', prompt, last_assistant_message: answer }))
+  const board = 'Progress  ● 2 waiting  ▸ 5 in progress  ⚑ 0 due soon  ✓ 1 done today\n\n● Waiting on you\n  api-gateway › Rate limits\n    [Choose] 100 or 300 a minute?\n\n▸ api-gateway  1 item · 1 working\n  Rate limits\n    1/3 grok is working\n'
+  const zh = '進度  ● 2 等你  ▸ 5 進行中  ⚑ 0 快到期  ✓ 1 今天完成\n\n● 現在最需要你\n  api-gateway › 限流\n'
+  // Grok Build took "我想看一下進度" for the board skill: the request alone does not say so.
+  expect(isBoardTurn(said('我想看一下目前所有專案的進度', `\`\`\`\n${zh}\`\`\`\n\n先回 persona_framework 的 T10：三個重判決定還等你拍板。`)!)).toBe(true)
+  expect(isBoardTurn(said('where do things stand?', `${board}\nThe rate limit question needs you first.`)!)).toBe(true)
+  expect(isBoardTurn(said('看進度', `${'進度  ● 0 等你  ▸ 0 進行中  ⚑ 0 快到期  ✓ 0 今天完成'}\n\n${ZH_TW.nothingForYou}\n\n${ZH_TW.empty}\n`)!)).toBe(true)
+  // Work done in the same turn is told before the board, or at more length after it.
+  const report = 'Added the token bucket middleware to every public route, wrote tests for the 429 path and the Retry-After header, and moved the limits into config so staging and production can differ. The per-key limit still needs your call.'
+  expect(isBoardTurn(said('add rate limiting, then show me the board', `${report}\n\n\`\`\`\n${board}\`\`\``)!)).toBe(false)
+  expect(isBoardTurn(said('add rate limiting', `Added the token bucket middleware and its tests; the limit is in config now.\n\n\`\`\`\n${board}\`\`\``)!)).toBe(false)
+  expect(isBoardTurn(said('加上限流', `已經在每個公開路由加上 token bucket，也寫了 429 的測試。\n\n\`\`\`\n${zh}\`\`\``)!)).toBe(false)
+  expect(isBoardTurn(said('fix it', `${board}\n- Fixed the 429 header\n- Added a test`)!)).toBe(false)
+  expect(isBoardTurn(said('run the tests', `\`\`\`\n$ npm test\n12 passed\n${board}\`\`\``)!)).toBe(false)
+  expect(isBoardTurn(said('patch it', `\`\`\`diff\n- limit = 100\n+ limit = 300\n${board}`)!)).toBe(false)
+  // A reply that only mentions counts is not the board.
+  expect(isBoardTurn(said('how many tasks are open?', 'Five are in progress and two wait on you.')!)).toBe(false)
 })
 
 test('each agent gets a board command in the form it reads, and a missing reporter never makes a hook exit 2', () => {

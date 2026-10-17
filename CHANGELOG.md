@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.16.1 — 2026-10-17
 
 - **Hardening from a review of the whole plugin.**
   - **Home folders with Chinese names.** On Windows, agents' turns now reach
@@ -64,6 +64,32 @@
   done blocks go to the month's archive file, after what it already holds",
   "/progress connect hooks the installed agents into the pane once, keeps
   their own hooks, and takes ours back out".
+- **Fixes from a live test with Grok Build 1.0.62.**
+  - **A look at the board asked in plain words gets no block.** Grok Build
+    picked the board skill on its own for 我想看一下目前所有專案的進度 ("I
+    want to see where all my projects stand"), so the request named no board
+    command, and the turn got a block of its own holding a copy of another
+    project's question. A reply that starts with the printed board (its count
+    line, alone in a fence or unfenced) and adds at most a sentence after it
+    now counts as a look at the board, whatever the request said. Work told
+    before the board, as a list, or at more length after it still gets its
+    block.
+  - **End hooks get 5 seconds.** Grok Build's and Muse Code's session-end
+    hook had 1 second; on Windows PowerShell alone took 0.6 of it in the live
+    test, so a slow start could lose the session's end.
+  - **An update to a hook already in place is made without a word.** A
+    session that rewrites its own hook in an agent's config (as this release
+    does for those timeouts) no longer announces the agent as newly
+    connected.
+
+  Tests: "a reply that is the printed board and a sentence is a look at the
+  board, asked in plain words, while work that shows it too is not", "a Grok
+  Build turn that printed the board for a plain request gets no block, and
+  copies no other project’s question", "each agent’s config gets the hook in
+  the shape it reads, and nothing else of the person’s changes", "an agent
+  hooked in by an earlier version gets the new hook without a word", "a
+  first connection to a config holding only an empty hook list is still
+  announced".
 
 ## 0.16.0 — 2026-10-17
 

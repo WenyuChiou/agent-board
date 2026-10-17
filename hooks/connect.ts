@@ -76,6 +76,9 @@ export const reportCommand = (script: string, agent: string, event: 'turn' | 'en
 // own `my-progress-report.sh` is not taken for ours.
 const OURS = /(?:^|[\\/'"\s])progress-report\.(?:sh|ps1)(?:\\?['"])?(?:\s|$)/
 
+// Whether a config already runs our reporter, whatever else taking our hooks out would tidy.
+export const hasOurHook = (text: string): boolean => OURS.test(text)
+
 // Whether the computer is Windows: Windows sets OS=Windows_NT in every shell (Git Bash too),
 // and a path on a drive letter says so even when written with forward slashes
 // (`C:/Users/me/progress.md`). Backslashes alone are no sign either way.
@@ -352,7 +355,8 @@ export const agentHooks = (ctx: ConnectContext): AgentHook[] => {
       ),
     },
     {
-      // A file of its own in ~/.grok/hooks; Stop carries lastAssistantMessage. Timeout in s.
+      // A file of its own in ~/.grok/hooks; Stop carries lastAssistantMessage. Timeout in s: on
+      // Windows PowerShell alone takes most of a second to start, so the end hook gets 5.
       agent: 'grok',
       label: 'Grok Build',
       dir: ctx.grokHome,
@@ -364,18 +368,17 @@ export const agentHooks = (ctx: ConnectContext): AgentHook[] => {
           ? text.trim() === ''
             ? null
             : DELETE
-          : writeConfig(withGroupedHook(withGroupedHook({}, 'Stop', turn('grok'), { timeout: 10 }), 'SessionEnd', end('grok'), { timeout: 1 })),
+          : writeConfig(withGroupedHook(withGroupedHook({}, 'Stop', turn('grok'), { timeout: 10 }), 'SessionEnd', end('grok'), { timeout: 5 })),
     },
     {
-      // Muse wants schema_version 1 and no handler keys beyond type, command, timeout.
+      // Muse wants schema_version 1 and no handler keys beyond type, command, timeout. The end
+      // hook gets 5 s for the same reason as Grok's.
       agent: 'muse',
       label: 'Muse Code',
       dir: join(ctx, '.config', 'muse'),
       file: join(ctx, '.config', 'muse', 'settings.json'),
       edit: jsonEdit(config =>
-        withGroupedHook(withGroupedHook({ schema_version: 1, ...config }, 'Stop', turn('muse'), { timeout: 10 }), 'SessionEnd', end('muse'), {
-          timeout: 1,
-        }),
+        withGroupedHook(withGroupedHook({ schema_version: 1, ...config }, 'Stop', turn('muse'), { timeout: 10 }), 'SessionEnd', end('muse'), { timeout: 5 }),
       ),
     },
     {
