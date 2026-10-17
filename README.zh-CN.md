@@ -4,7 +4,7 @@
 
 <p align="center">
 <b>每个 AI coding agent 在做什么，一个面板看完；等你的事，永远排第一个。</b><br>
-Claude Code 插件，也跟得上 Codex、Gemini CLI、Cursor、OpenCode、Grok Build、Hermes Agent、Muse Code 和 OpenClaw。
+Claude Code 插件，也跟得上 Codex、Gemini CLI、OpenCode、Grok Build、Hermes Agent 和 OpenClaw（都实测过），更多见下表。
 </p>
 
 <p align="center">
@@ -35,7 +35,9 @@ Claude Code 插件，也跟得上 Codex、Gemini CLI、Cursor、OpenCode、Grok 
 | | **dot** | 本地交换（自行选用） | 见 [docs/LOCAL-EXCHANGE.md](docs/LOCAL-EXCHANGE.md) | 只测过文件约定 |
 | | **其他 agent**（Aider、Copilot、Windsurf…） | 自己写一块进度 | 把 [AGENTS.md](AGENTS.md) 的一段贴进它的说明文件 | |
 
-“实测过”是指：真的 CLI 跑了一个回合，它的 hook 有触发，面板也从中画出正确的一块进度。那些真实数据都留在测试里。
+“实测过”是指：真的 CLI 跑了一个回合，它的 hook 有触发，面板也从中画出正确的一块进度。那些真实数据都留在测试里；下面是看板读它们的样子：
+
+<img alt="看板列出 6 家 agent 实测时各自问的问题：Codex、Gemini CLI、OpenClaw、OpenCode、Grok Build、Hermes Agent" src="docs/images/live/hooks-zh-TW.png" width="620">
 
 ## 快速开始
 

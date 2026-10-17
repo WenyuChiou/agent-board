@@ -4,7 +4,7 @@
 
 <p align="center">
 <b>See what every AI coding agent is doing, with whatever is waiting on you at the top.</b><br>
-A Claude Code plugin that also follows Codex, Gemini CLI, Cursor, OpenCode, Grok Build, Hermes Agent, Muse Code and OpenClaw.
+A Claude Code plugin that also follows Codex, Gemini CLI, OpenCode, Grok Build, Hermes Agent and OpenClaw (each tested live), with more in the table below.
 </p>
 
 <p align="center">
@@ -35,7 +35,9 @@ You have Claude Code on one project, Codex on another, Gemini on a third. Twenty
 | | **dot** | Local exchange (opt-in) | See [docs/LOCAL-EXCHANGE.md](docs/LOCAL-EXCHANGE.md) | File contract only |
 | | **Any other agent** (Aider, Copilot, Windsurf…) | Writes its own block | Paste one section of [AGENTS.md](AGENTS.md) into its instructions | |
 
-"Tested live" means the real CLI ran a turn, its hook fired, and the pane drew the right block from it. Those payloads are kept as tests.
+"Tested live" means the real CLI ran a turn, its hook fired, and the pane drew the right block from it. Those payloads are kept as tests; here is the board reading them:
+
+<img alt="The board listing the question each of six agents asked in its live run: Codex, Gemini CLI, OpenClaw, OpenCode, Grok Build, Hermes Agent" src="docs/images/live/hooks-en.png" width="620">
 
 ## Quick start
 
