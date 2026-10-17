@@ -195,9 +195,12 @@ const jsonEdit =
 // Hermes Agent keeps its hooks in YAML: `hooks.<event>` is a list of `{ command, timeout }`.
 // With no YAML parser here, ours go in as one flow-style line each, found again by the
 // reporter script's name, and a `hooks:` written in a shape this cannot follow (flow style)
-// is left alone.
-const HERMES_KEY = /^\s+(?:post_llm_call|on_session_finalize)\s*:\s*(?:#.*)?$/
-const TOP_HOOKS = /^hooks\s*:\s*(?:#.*)?$/
+// is left alone. The empty map `hooks: {}` is the one flow-style value it can follow: Hermes
+// writes that into a new config.yaml, and it holds nothing to keep.
+// A comment runs to the line end, a Windows `\r` included.
+const HERMES_KEY = /^\s+(?:post_llm_call|on_session_finalize)\s*:\s*(?:#[^\n]*)?$/
+const TOP_HOOKS = /^hooks\s*:\s*(?:#[^\n]*)?$/
+const EMPTY_HOOKS = /^hooks\s*:\s*\{\s*\}\s*(?:#[^\n]*)?$/
 
 const indentOf = (line: string): number => line.length - line.trimStart().length
 
@@ -213,7 +216,9 @@ const hasChildren = (lines: string[], at: number): boolean => {
   return indentOf(next) > indent || (indentOf(next) === indent && next.trimStart().startsWith('- '))
 }
 
-export const withoutHermesHooks = (text: string): string => {
+// Adding ours again keeps a `hooks:` that only held ours, so they go back where they were
+// rather than to the end of the file.
+const stripHermesHooks = (text: string, isKeepingTop: boolean): string => {
   const lines = text.split('\n')
   // Only list items of ours, with the lines that continue them: a YAML dumper (Hermes' own
   // setup, or a person tidying the file) writes our flow-style item in block style, its
@@ -229,19 +234,27 @@ export const withoutHermesHooks = (text: string): string => {
   const kept = lines.filter((_, at) => !drop.has(at))
   if (kept.length === lines.length) return text
   const keys = kept.filter((line, at) => !(HERMES_KEY.test(line) && !hasChildren(kept, at)))
-  const rest = keys.filter((line, at) => !(TOP_HOOKS.test(line) && !hasChildren(keys, at)))
+  const rest = isKeepingTop ? keys : keys.filter((line, at) => !(TOP_HOOKS.test(line) && !hasChildren(keys, at)))
 
   return `${rest.join('\n').replace(/\n{3,}/g, '\n\n').replace(/\n+$/, '')}\n`.replace(/^\n$/, '')
 }
 
+export const withoutHermesHooks = (text: string): string => stripHermesHooks(text, false)
+
 export const withHermesHooks = (text: string, events: Array<[string, string]>): string | null => {
-  const base = withoutHermesHooks(text)
+  const base = stripHermesHooks(text, true)
   const item = (command: string): string => `- {command: ${JSON.stringify(command)}, timeout: 10}`
-  const lines = base.replace(/\n+$/, '').split('\n')
+  // Lines of ours end the way the file's own lines do.
+  const eol = text.includes('\r\n') ? '\r' : ''
+  // An empty `hooks: {}` becomes a bare `hooks:` that ours go under.
+  const lines = base
+    .replace(/\n+$/, '')
+    .split('\n')
+    .map(line => (EMPTY_HOOKS.test(line) ? `hooks:${line.endsWith('\r') ? '\r' : ''}` : line))
   const at = lines.findIndex(line => /^hooks\s*:/.test(line))
   if (at === -1) {
-    const added = ['hooks:', ...events.flatMap(([event, command]) => [`  ${event}:`, `    ${item(command)}`])].join('\n')
-    return base.trim() === '' ? `${added}\n` : `${base.replace(/\n+$/, '')}\n\n${added}\n`
+    const added = ['hooks:', ...events.flatMap(([event, command]) => [`  ${event}:`, `    ${item(command)}`])].join(`${eol}\n`)
+    return base.trim() === '' ? `${added}${eol}\n` : `${base.replace(/(?:\r?\n)+$/, '')}${eol}\n${eol}\n${added}${eol}\n`
   }
   if (!TOP_HOOKS.test(lines[at] ?? '')) return null
   let end = lines.findIndex((line, index) => index > at && isContent(line) && indentOf(line) === 0)
@@ -253,7 +266,7 @@ export const withHermesHooks = (text: string, events: Array<[string, string]>): 
   for (const [event, command] of events) {
     const key = lines.findIndex((line, index) => index > at && index < end && indentOf(line) === indent && new RegExp(`^\\s*${event}\\s*:`).test(line))
     if (key === -1) {
-      lines.splice(insert, 0, `${' '.repeat(indent)}${event}:`, `${' '.repeat(indent + 2)}${item(command)}`)
+      lines.splice(insert, 0, `${' '.repeat(indent)}${event}:${eol}`, `${' '.repeat(indent + 2)}${item(command)}${eol}`)
       insert += 2
       end += 2
       continue
@@ -262,7 +275,7 @@ export const withHermesHooks = (text: string, events: Array<[string, string]>): 
     if (after !== '' && !after.startsWith('#')) return null
     const next = lines.slice(key + 1, end).find(isContent)
     const nested = next !== undefined && (indentOf(next) > indent || (indentOf(next) === indent && next.trimStart().startsWith('- ')))
-    lines.splice(key + 1, 0, `${' '.repeat(nested && next !== undefined ? indentOf(next) : indent + 2)}${item(command)}`)
+    lines.splice(key + 1, 0, `${' '.repeat(nested && next !== undefined ? indentOf(next) : indent + 2)}${item(command)}${eol}`)
     if (key < insert) insert += 1
     end += 1
   }
@@ -372,6 +385,8 @@ export const agentHooks = (ctx: ConnectContext): AgentHook[] => {
         const config = readConfig(text)
         if (config === null) return null
         const file = [ctx.openclawHome, OPENCLAW_FILE].join(ctx.sep)
+        // Nothing of ours to take out: the person's file stays byte for byte.
+        if (remove && !hasOpenclawPlugin(config, file)) return text
         return writeConfig(remove ? withoutOpenclawPlugin(config, file) : withOpenclawPlugin(config, file))
       },
     },
@@ -434,6 +449,49 @@ export const AgentBoard = async ({ client, directory }) => ({
 
 const OPENCLAW_ID = 'agent-board'
 const OPENCLAW_FILE = `${OPENCLAW_ID}.mjs`
+
+// The first OpenClaw whose config check takes plugins.entries.<id>.hooks.allowConversationAccess
+// (its changelog, #71221). An older one will not start with our entry in its config. Seen live
+// on 2026.3.8, which also wants a manifest beside a plugin file; by that changelog, 2026.4.23
+// asks for the grant before agent_end but still refuses the key.
+export const OPENCLAW_MIN = '2026.4.24'
+
+// A version the way OpenClaw reads one (2026.4.24, v2026.4.24, 2026.4.24-beta.1) as one number
+// to compare; null when it is not one.
+const calver = (version: string): number | null => {
+  const parts = /^v?(\d+)\.(\d+)\.(\d+)/.exec(version.trim())
+
+  return parts === null ? null : Number(parts[1]) * 10000 + Number(parts[2]) * 100 + Number(parts[3])
+}
+
+// The version, when it is older than OPENCLAW_MIN; null when it is that or newer, or is not a
+// version at all.
+export const openclawTooOld = (version: string): string | null => {
+  const at = calver(version)
+  const min = calver(OPENCLAW_MIN)
+
+  return at !== null && min !== null && at < min ? version.trim() : null
+}
+
+// The version that last saved an OpenClaw config (meta.lastTouchedVersion). Updating OpenClaw
+// leaves it as it was until OpenClaw saves the file again.
+export const openclawSavedBy = (text: string): string | null => {
+  const config = readConfig(text)
+  const version = config !== null && isRecord(config.meta) ? config.meta.lastTouchedVersion : undefined
+
+  return typeof version === 'string' ? version : null
+}
+
+// The version `openclaw --version` prints: `OpenClaw 2026.3.8 (3caab92)`.
+export const openclawPrinted = (stdout: string): string | null => /\bv?(\d+\.\d+\.\d+\S*)/.exec(stdout)?.[1] ?? null
+
+const hasOpenclawPlugin = (config: Json, file: string): boolean => {
+  const plugins = isRecord(config.plugins) ? config.plugins : {}
+  const load = isRecord(plugins.load) ? plugins.load : {}
+  const entries = isRecord(plugins.entries) ? plugins.entries : {}
+
+  return (Array.isArray(load.paths) && load.paths.includes(file)) || OPENCLAW_ID in entries || (Array.isArray(plugins.allow) && plugins.allow.includes(OPENCLAW_ID))
+}
 
 // OpenClaw loads a plugin that is not bundled only when enabled, and passes it a turn's
 // words (agent_end) only with allowConversationAccess. A restrictive plugins.allow list

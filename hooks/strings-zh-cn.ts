@@ -182,6 +182,7 @@ export const ZH_CN: Strings = {
   connectCodexTrust: 'Codex 第一次要在它的 /hooks 里批准这个 hook 才会运行。',
   connectHermesTrust: 'Hermes Agent 第一次运行这个 hook 前会问你一次，回答 y（或用 --accept-hooks 启动）。',
   connectSkipped: (name: string, path: string): string => `${name} 的配置文件读不懂，没有动它：${path}`,
+  connectTooOld: (name: string, version: string, min: string): string => `${name} ${version} 太旧，要 ${min} 以上才接得上，所以没有接它。更新之后再运行 /progress connect。`,
   autoConnectTitle: 'Agent Board 接上了其他 agent',
   autoConnected: (list: string): string => `已自动接上：${list}。重启它们之后，每个回合都会出现在这里。`,
   autoConnectUndo: '不要的话：/progress connect remove（之后就不会再自动接）。',

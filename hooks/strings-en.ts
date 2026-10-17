@@ -183,6 +183,7 @@ export const EN: Strings = {
   connectCodexTrust: 'Codex runs a new hook only after you approve it once in its /hooks.',
   connectHermesTrust: 'Hermes Agent asks once before it runs a new hook: answer y (or start it with --accept-hooks).',
   connectSkipped: (name: string, path: string): string => `Could not read ${name}'s config, so it was left alone: ${path}`,
+  connectTooOld: (name: string, version: string, min: string): string => `${name} ${version} is too old to hook in (it takes ${min} or newer), so it was left out. Update it, then run /progress connect.`,
   autoConnectTitle: 'Agent Board connected your other agents',
   autoConnected: (list: string): string => `Connected automatically: ${list}. After you restart them, every turn they finish shows here.`,
   autoConnectUndo: 'To undo: /progress connect remove (it then stops connecting on its own).',

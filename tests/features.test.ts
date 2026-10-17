@@ -4,7 +4,7 @@ import type { ProgressMirror, ProgressPr } from '../types'
 import { askOf } from '../hooks/ask'
 import { boardText, fit, peekInbox } from '../hooks/board'
 import { addManualTask, isArchivable, manualTaskCount, renderAutoBlock, setManualStep, takeArchivable, takeManualDone, takeTask, upsertAutoBlock } from '../hooks/blocks'
-import { agentHooks, boardCommands, boardScript, DELETE, openclawPlugin, reportCommand, isWindowsHost, withFlatHook, withGroupedHook, withHermesHooks, withoutHermesHooks, withoutOurHooks, withoutSection } from '../hooks/connect'
+import { agentHooks, boardCommands, boardScript, DELETE, isWindowsHost, openclawPlugin, openclawPrinted, openclawSavedBy, openclawTooOld, reportCommand, withFlatHook, withGroupedHook, withHermesHooks, withoutHermesHooks, withoutOurHooks, withoutSection } from '../hooks/connect'
 import { dashboardHtml } from '../hooks/dashboard'
 import { answerKey, blockId, isBoardTurn, isInboxFile, isTakenFile, isTranscriptPath, keepInboxDone, promptKey, readTurn, takenName, transcriptTail, turnsToDigest } from '../hooks/inbox'
 import { applyDigest, clearAsked, isWork, lastQuestion, markAsked, parseDigest, replyData, turnTools } from '../hooks/digest'
@@ -729,7 +729,29 @@ test('Hermes Agent’s hooks go into its config.yaml beside the person’s own, 
   expect(fresh).toContain('model:\n  default: x\n\nhooks:\n  post_llm_call:\n    - {command:')
   expect(hermes?.edit(fresh, true)).toBe('model:\n  default: x\n')
   // A hooks block in flow style is not one this can edit line by line.
-  expect(hermes?.edit('hooks: {}\n', false)).toBeNull()
+  expect(hermes?.edit('hooks: {post_llm_call: [{command: "~/log.sh"}]}\n', false)).toBeNull()
+})
+
+test('a Hermes config.yaml with the empty hooks: {} it ships with gets our hooks in its place, Windows line ends and all', () => {
+  const ctx = { home: '/h', sep: '/', isWindows: false, script: '/h/.claude/progress-report.sh', inbox: '/h/.claude/progress-inbox', codexHome: '/h/.codex', grokHome: '/h/.grok', hermesHome: '/h/.hermes' }
+  const hermes = agentHooks(ctx).find(hook => hook.agent === 'hermes')
+  const ours =
+    `  post_llm_call:\n    - {command: "sh '/h/.claude/progress-report.sh' hermes turn || true", timeout: 10}\n` +
+    `  on_session_finalize:\n    - {command: "sh '/h/.claude/progress-report.sh' hermes end || true", timeout: 10}\n`
+  const stock = 'model:\n  default: x\nhooks: {}\nhooks_auto_accept: false\n'
+  const once = String(hermes?.edit(stock, false))
+  expect(once).toBe(`model:\n  default: x\nhooks:\n${ours}hooks_auto_accept: false\n`)
+  expect(hermes?.edit(once, false)).toBe(once)
+  expect(hermes?.edit(once, true)).toBe('model:\n  default: x\nhooks_auto_accept: false\n')
+  expect(hermes?.edit('hooks: {}  # none yet\n', false)).toBe(`hooks:\n${ours}`)
+  const stockWindows = stock.replace(/\n/g, '\r\n')
+  const windows = String(hermes?.edit(stockWindows, false))
+  expect(windows).toBe(once.replace(/\n/g, '\r\n'))
+  expect(hermes?.edit(windows, false)).toBe(windows)
+  expect(hermes?.edit(windows, true)).toBe('model:\r\n  default: x\r\nhooks_auto_accept: false\r\n')
+  const spaced = String(hermes?.edit('a: 1\r\nhooks: { } # none yet\r\nb: 2\r\n', false))
+  expect(spaced).toBe(`a: 1\r\nhooks:\r\n${ours.replace(/\n/g, '\r\n')}b: 2\r\n`)
+  expect(hermes?.edit('a: 1\r\n', false)).toBe(`a: 1\r\n\r\nhooks:\r\n${ours.replace(/\n/g, '\r\n')}`)
 })
 
 test('OpenClaw gets a plugin file and the config entry that loads it, beside the person’s own plugins, and both come back out', () => {
@@ -757,6 +779,29 @@ test('OpenClaw gets a plugin file and the config entry that loads it, beside the
   expect(JSON.parse(String(config?.edit(String(config?.edit('{}', false)), true)))).toEqual({ plugins: {} })
   // A config written by hand as JSON5 is left alone.
   expect(config?.edit('{ plugins: {} }', false)).toBeNull()
+})
+
+test('an OpenClaw older than 2026.4.24 reads as too old, from its config or from what it prints, and a config with nothing of ours is not rewritten to take ours out', () => {
+  expect(openclawTooOld('2026.3.8')).toBe('2026.3.8')
+  expect(openclawTooOld(' v2026.3.8 ')).toBe('v2026.3.8')
+  expect(openclawTooOld('2026.4.23')).toBe('2026.4.23')
+  expect(openclawTooOld('2026.4.24')).toBeNull()
+  // Months are compared as numbers, so 10 comes after 4.
+  expect(openclawTooOld('2026.10.4-beta.1')).toBeNull()
+  expect(openclawTooOld('unknown')).toBeNull()
+  const by = (version: unknown): string => JSON.stringify({ meta: { lastTouchedVersion: version } })
+  expect(openclawSavedBy(by('2026.3.8'))).toBe('2026.3.8')
+  expect(openclawSavedBy(by(20260308))).toBeNull()
+  expect(openclawSavedBy('{}')).toBeNull()
+  expect(openclawSavedBy('')).toBeNull()
+  expect(openclawSavedBy('{ meta: {} }')).toBeNull()
+  expect(openclawPrinted('OpenClaw 2026.3.8 (3caab92)\n')).toBe('2026.3.8')
+  expect(openclawPrinted('OpenClaw v2026.10.4-beta.1')).toBe('2026.10.4-beta.1')
+  expect(openclawPrinted('claude/progress-mod\n')).toBeNull()
+  const ctx = { home: '/h', sep: '/', isWindows: false, script: '/h/.claude/progress-report.sh', inbox: '/h/.claude/progress-inbox', codexHome: '/h/.codex', grokHome: '/h/.grok', hermesHome: '/h/.hermes', openclawHome: '/h/.openclaw' }
+  const config = agentHooks(ctx).find(hook => hook.file === '/h/.openclaw/openclaw.json')
+  const own = '{"plugins":{"allow":["discord"],"entries":{"discord":{"enabled":true}}}}'
+  expect(config?.edit(own, true)).toBe(own)
 })
 
 test('the OpenClaw plugin skips heartbeat and memory runs and ends a session on anything but a compaction or restart', () => {
