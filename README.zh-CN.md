@@ -4,7 +4,7 @@
 
 <p align="center">
 <b>每个 AI coding agent 在做什么，一个面板看完；等你的事，永远排第一个。</b><br>
-Claude Code 插件，也跟得上 Codex、Gemini CLI、Cursor、OpenCode、Grok Build、Hermes Agent、Muse Code 和 OpenClaw。
+Claude Code 插件，也跟得上 Codex、Gemini CLI、OpenCode、Grok Build、Hermes Agent 和 OpenClaw（都实测过），更多见下表。
 </p>
 
 <p align="center">
@@ -20,22 +20,26 @@ Claude Code 插件，也跟得上 Codex、Gemini CLI、Cursor、OpenCode、Grok 
 
 ## 支持的 agent
 
-| | Agent | 怎么汇报 | 你要做一次的事（会自动接上） | 实测过 |
-|:-:|---|---|---|---|
-| <img src="docs/images/agents/claude-code.svg" width="24" alt=""> | **Claude Code** | 内置：每个对话都会出现，有没有 Task 清单都行 | 不用做什么 | ✅ 2.1.302 |
-| <img src="docs/images/agents/codex.svg" width="24" alt=""> | **Codex** | `Stop` hook | 到 Codex 的 `/hooks` 批准一次 | ✅ |
-| <img src="docs/images/agents/gemini-cli.svg" width="24" alt=""> | **Gemini CLI** | `AfterAgent` hook | 不用做什么 | ✅ 0.64.0 |
-| <img src="docs/images/agents/opencode.svg" width="24" alt=""> | **OpenCode** | 插件，在 `session.idle` 时 | 不用做什么 | ✅ 1.19.3 |
-| <img src="docs/images/agents/grok-build.svg" width="24" alt=""> | **Grok Build** | `Stop` hook | 不用做什么 | ✅ 1.0.62 |
-| <img src="docs/images/agents/hermes-agent.svg" width="24" alt=""> | **Hermes Agent** | `post_llm_call` shell hook | Hermes 第一次问时回答 `y` | ✅ 0.19.0 |
-| <img src="docs/images/agents/openclaw.svg" width="24" alt=""> | **OpenClaw** | 插件，在 `agent_end` 时 | 不用做什么 | ✅ 2026.10.4 |
-| <img src="docs/images/agents/cursor.svg" width="24" alt=""> | **Cursor** | `afterAgentResponse` hook | 不用做什么 | 按 Cursor 文档实现 |
-| <img src="docs/images/agents/muse-code.svg" width="24" alt=""> | **Muse Code** | `Stop` hook | 不用做什么 | 按 Muse 文档实现 |
-| | **Antigravity** | 还不会汇报（没有回合结束的 hook） | 不用做什么：它会有 `/agent-board` 看看板 | 按它的文档实现 |
-| | **dot**、网页版 **Muse**、其他网页聊天 | 在聊天里写出自己的区块，你再合并进来 | 把[一段提示](docs/REMOTE_REPORTERS.md#tell-a-web-chat-agent-how-paste-this)贴进聊天 | ✅ dot、Muse（网页） |
-| | **其他 agent**（Aider、Copilot、Windsurf…） | 自己写一块进度 | 把 [AGENTS.md](AGENTS.md) 的一段贴进它的说明文件 | |
+✅ 可以用，实测过 · ⚠️ 可以用，但有最后一栏写的限制 · ❔ 按 agent 文档写的，还没实测 · ❌ 不能用
 
-“实测过”是指：真的 CLI 跑了一个回合，它的 hook 有触发，面板也从中画出正确的一块进度。那些真实数据都留在测试里。
+| | Agent | 回合会出现在看板 | 在它里面看看板 | 实测版本 | 要知道的事 |
+|:-:|---|:-:|:-:|---|---|
+| <img src="docs/images/agents/claude-code.svg" width="24" alt=""> | **Claude Code** | ✅ | ✅ 面板 | 2.1.302 | 每个对话自己出现；问题点一下就回答 |
+| <img src="docs/images/agents/codex.svg" width="24" alt=""> | **Codex** | ✅ | ✅ `$agent-board` | 0.163.0 | 第一次要在 Codex 的 `/hooks` 批准 |
+| <img src="docs/images/agents/gemini-cli.svg" width="24" alt=""> | **Gemini CLI** | ✅ | ✅ `/board` | 0.64.0 | 第一次 `/board` 会问一次要不要让命令运行 |
+| <img src="docs/images/agents/opencode.svg" width="24" alt=""> | **OpenCode** | ✅ | ✅ `/board` | 1.19.3 |  |
+| <img src="docs/images/agents/grok-build.svg" width="24" alt=""> | **Grok Build** | ✅ | ❔ `/agent-board` | 1.0.62 |  |
+| <img src="docs/images/agents/hermes-agent.svg" width="24" alt=""> | **Hermes Agent** | ⚠️ | ❔ `/agent-board` | 0.19.0、0.16.0（Windows） | 回答一次 `y`。单次运行的 `hermes -q` 问的问题会显示成已停，不是等你 |
+| <img src="docs/images/agents/openclaw.svg" width="24" alt=""> | **OpenClaw** | ⚠️ | ❔ `/agent-board` | 2026.10.4 | 要 2026.4.24 以上；太旧的不会接，并会告诉你 |
+| <img src="docs/images/agents/cursor.svg" width="24" alt=""> | **Cursor** | ❌ | ❔ `/agent-board` | cursor-agent 2026.10.16（Windows） | 还没看到它成功：Windows 上 Cursor 用 bash 运行所有 hook，其他工具的 PowerShell hook 挡住了回合。macOS、Linux 没测 |
+| <img src="docs/images/agents/muse-code.svg" width="24" alt=""> | **Muse Code** | ❔ | ❔ |  | hook 按它的文档写；Muse 只测过网页版（下一行） |
+|  | **Antigravity** | ❌ | ❔ `/agent-board` |  | 还没有回合结束的 hook，只能看看板 |
+|  | **dot**、网页版 **Muse** | ⚠️ | ❌ | 网页版，2026 年 10 月 | 没有 hook：把[一段提示](docs/REMOTE_REPORTERS.md#chat-relay-a-prompt-to-paste)贴进聊天，再把它写的每一块合并进来 |
+|  | **其他 agent**（Aider、Copilot、Windsurf…） | ⚠️ | ❌ |  | 把 [AGENTS.md](AGENTS.md) 的一段贴进它的说明文件，它会自己写一块 |
+
+在其他 agent 里看看板，看得到全部；回答它的问题则在那个 agent 里（面板会给你要贴过去的那句话或命令）。“实测版本”是真的跑过一个回合、hook 有触发、面板画出正确区块的版本，那些真实数据都留在测试里。下面是看板读它们的样子：
+
+<img alt="看板列出 6 家 agent 实测时各自问的问题：Codex、Gemini CLI、OpenClaw、OpenCode、Grok Build、Hermes Agent" src="docs/images/live/hooks-zh-TW.png" width="620">
 
 ## 快速开始
 
@@ -106,7 +110,7 @@ claude -p "/progress connect"
 | `/progress report` / `/progress today` | 复制最近 7 天／今天的进度 |
 | `/progress notify on` / `off` | 桌面通知 |
 | `/progress lang zh-CN` | `en`、`zh-TW`、`zh-CN` 或 `auto` |
-| `/progress tidy` | 现在就归档做完的事 |
+| `/progress tidy` | 现在就归档做完的工作，以及停太久的工作（见[使用说明](docs/GUIDE.zh-CN.md#它怎么保持整齐)） |
 
 ## 颜色与符号
 

@@ -206,6 +206,10 @@ export const DELETE = Symbol('delete')
 
 const join = (ctx: ConnectContext, ...parts: string[]): string => [ctx.home, ...parts].join(ctx.sep)
 
+// Other tools (Orca among them) put hooks in ~/.grok/hooks for a Grok Build that may never
+// be installed, so the folder alone is no sign of it: Grok's own config or sessions are.
+const grokSigns = (ctx: ConnectContext): string[] => ['config.toml', 'sessions', '.metadata_version', 'agent_id'].map(name => [ctx.grokHome, name].join(ctx.sep))
+
 const jsonEdit =
   (add: (config: Json) => Json) =>
   (text: string, remove: boolean): string | null => {
@@ -318,10 +322,6 @@ export const withHermesHooks = (text: string, events: Array<[string, string]>): 
   return `${lines.join('\n')}\n`
 }
 
-// Other tools put hooks of their own in ~/.grok too, so the folder alone does not say Grok
-// Build is installed; these do, written by Grok itself at its first start.
-const grokMarks = (ctx: ConnectContext): string[] => ['.metadata_version', 'agent_id', 'sessions'].map(name => [ctx.grokHome, name].join(ctx.sep))
-
 export const agentHooks = (ctx: ConnectContext): AgentHook[] => {
   const turn = (agent: string): string => reportCommand(ctx.script, agent, 'turn', ctx.isWindows)
   const end = (agent: string): string => reportCommand(ctx.script, agent, 'end', ctx.isWindows)
@@ -369,7 +369,7 @@ export const agentHooks = (ctx: ConnectContext): AgentHook[] => {
       agent: 'grok',
       label: 'Grok Build',
       dir: ctx.grokHome,
-      dirs: grokMarks(ctx),
+      dirs: grokSigns(ctx),
       file: [ctx.grokHome, 'hooks', 'agent-board.json'].join(ctx.sep),
       old: [ctx.grokHome, 'hooks', 'progress-pane.json'].join(ctx.sep),
       edit: (text, remove) =>
@@ -666,7 +666,7 @@ export const boardCommands = (ctx: ConnectContext): AgentHook[] => {
       agent: 'skills',
       label: '',
       dir: ctx.codexHome,
-      dirs: [ctx.codexHome, join(ctx, '.cursor'), ...grokMarks(ctx), ctx.openclawHome, join(ctx, '.gemini'), join(ctx, '.config', 'opencode')],
+      dirs: [ctx.codexHome, join(ctx, '.cursor'), ...grokSigns(ctx), ctx.openclawHome, join(ctx, '.gemini'), join(ctx, '.config', 'opencode')],
       file: join(ctx, '.agents', 'skills', SKILL, 'SKILL.md'),
       edit: file(skill),
     },

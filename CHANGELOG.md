@@ -12,16 +12,11 @@ runs on Windows found.
   for the automatic tidy, and a stopped session still gets its three days.
   Test: "asked to tidy, a block done a minute ago goes now, while a stopped
   one still gets its three days".
-- **A `~/.grok` folder is not taken for Grok Build** unless Grok itself wrote
-  in it (`.metadata_version`, `agent_id` or `sessions`): another tool's hooks
-  there made connect say "Connected: Grok Build" with no Grok installed. Test:
-  "a ~/.grok that only another tool put hooks in is not taken for Grok
-  Build".
-- **A web chat agent gets one prompt to paste.** Muse and dot, with no copy of
-  FORMAT.md, invented their own markers and the merge refused them;
-  `docs/REMOTE_REPORTERS.md` now has the prompt with the exact block, checked
-  with `validate.py` and `merge.py`, and the READMEs point dot and Muse on the
-  web to it.
+- **The README's agents table says what works, agent by agent**: whether its
+  turns reach the board and whether the board works inside it, as tested live
+  (✅), working with a limit (⚠️, which one), written from docs and not run (❔)
+  or not working (❌), with the version tested. CONTRIBUTING says when a mark
+  may change.
 - **From a review of #22, #25, #26 and this release.**
   - Hermes hooks of ours that Hermes had rewritten in block style are left as
     they are, so a session start no longer rewrites `config.yaml` and says it
@@ -31,14 +26,16 @@ runs on Windows found.
   - An OpenClaw that has not saved its config yet is asked its version, so an
     old one is left out there too. Test: "an OpenClaw that has not saved its
     config yet is asked its version, and an old one is left out".
-  - `/progress connect remove` takes out a Grok hook an earlier version wrote
-    into a `~/.grok` with no Grok. Test: "taking the hooks out also takes out a
-    Grok hook an earlier version left in a ~/.grok without Grok".
+  - Grok Build also counts as installed by the `.metadata_version` or
+    `agent_id` it writes, besides its `config.toml` and `sessions`. Tests: "a
+    ~/.grok that only another tool put hooks in is not taken for Grok Build",
+    "taking the hooks out also takes out a Grok hook an earlier version left in
+    a ~/.grok without Grok".
   - A comment after `hooks: {}` stays. Test: "a comment after an empty Hermes
     hooks: {} stays when ours go in under it".
-  - The web-chat prompt says to save only the lines between the fences and to
-    check with `validate.py --block`; the guides say tidy now skips the wait
-    and also moves another session's done block.
+  - The guides say tidy now skips the wait and also moves another session's
+    done block, and the READMEs point dot and Muse on the web to the chat-relay
+    prompt.
 - The guides say why Cursor on Windows can stop at "blocked" (another tool's
   PowerShell hook run through bash) and why a one-off `hermes -q` question
   shows as stopped.
@@ -81,6 +78,29 @@ runs on Windows found.
   the model nothing, while a plain-text log still gives its tail", "a working
   folder with a line break or a comment opening in its name becomes a
   one-line project name that hides nothing".
+- **Fixes from a live test with Muse, dot, Hermes and Cursor.**
+  - **Grok Build is no longer found where it is not installed.** Other tools
+    (Orca among them) put hooks in `~/.grok/hooks` before Grok Build is there,
+    and that folder was enough for connect to say "connected" to Grok Build
+    and write the shared skill. Grok Build now counts as installed once its
+    own `config.toml` or `sessions` folder is in `~/.grok`. `/progress connect
+    remove` takes out a hook file of ours wherever it finds one, so the hook
+    an earlier connect left in such a folder comes out too; run `/progress
+    connect` after it to turn connecting at session start back on.
+  - **`/progress tidy` says what it does**: when nothing is left to archive,
+    the reply says what goes when, and the count no longer calls every
+    archived task finished. (This release also makes it archive finished work
+    at once; see the first entry.)
+  - **A prompt to paste for a chat relay.** [Remote
+    reporters](docs/REMOTE_REPORTERS.md#chat-relay-a-prompt-to-paste) gives the
+    block with its exact markers for a chat assistant to repeat, since one
+    left to guess invented markers the merge refuses.
+
+  Tests: "a ~/.grok folder with only another tool’s hooks in it is not taken
+  for Grok Build, and connect remove still takes out a hook left there", "old
+  done blocks go to the month's archive file, after what it already holds",
+  "/progress connect hooks the installed agents into the pane once, keeps
+  their own hooks, and takes ours back out".
 
 ## 0.16.0 — 2026-10-17
 

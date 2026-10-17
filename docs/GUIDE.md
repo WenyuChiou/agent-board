@@ -123,7 +123,7 @@ Marks:
 | `/progress open` | Opens `progress.html` in the browser |
 | `/progress connect` / `connect remove` | Hooks the other agents installed here into the pane / takes the hooks out |
 | `/progress add <line>` | Adds a task, same as `+` in the pane |
-| `/progress tidy` | Archives finished work now |
+| `/progress tidy` | Archives finished work now, and stopped work past its age ([How it keeps itself tidy](#how-it-keeps-itself-tidy)) |
 | `/progress sync` | Re-reads Claude's Task list and the PR |
 | `/progress report` / `today` | Copies a report of the last 7 days / today |
 | `/progress notify on` / `off` | Turns notifications on or off |
@@ -181,7 +181,7 @@ It finds the agents installed on this machine and gives each one a hook that run
 | Gemini CLI | `~/.gemini/settings.json` | `AfterAgent` |
 | Cursor | `~/.cursor/hooks.json` | `afterAgentResponse`, `stop` |
 | OpenCode | `~/.config/opencode/plugin/agent-board.js` | `session.idle` |
-| Grok Build | `~/.grok/hooks/agent-board.json` (`$GROK_HOME`) | `Stop` |
+| Grok Build | `~/.grok/hooks/agent-board.json` (`$GROK_HOME`) | `Stop`. Found once Grok has written its `config.toml` or `sessions` in `~/.grok`; other tools' hooks in the folder do not count |
 | Hermes Agent | `~/.hermes/config.yaml` (`$HERMES_HOME`) | `post_llm_call`. Hermes asks once before it runs a new hook; answer `y` |
 | Muse Code | `~/.config/muse/settings.json` | `Stop` |
 | OpenClaw | `~/.openclaw/agent-board.mjs`, and `openclaw.json` beside it to load it (`$OPENCLAW_STATE_DIR`) | `agent_end`. Restart its gateway after connecting |
