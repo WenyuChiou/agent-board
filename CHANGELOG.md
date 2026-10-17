@@ -25,9 +25,12 @@
   without", "the page goes on the local network at a private address of
   this computer, a real adapter's first, never a public one", "on the
   local network the page answers only its own address, with its own
-  token, and says it closes sooner", "from the local network a reply to an agent is offered as a
-  copy, and refused if sent, since it would run a program on the
-  computer", and in `tests/board.test.mjs` "with --lan the page also opens
+  token, and says it closes sooner", "from the local network a reply to
+  an agent is offered as a copy, and refused if sent, since it would run
+  a program on the computer", "on the local network every agent's task
+  shows as on the computer, except that a reply that would run grok or
+  codex is a copy and no resume command is sent", and in
+  `tests/board.test.mjs` "with --lan the page also opens
   on the local network, with a token of its own, where a phone can tick
   but not send to an agent", "--serve --lan prints the page's network
   address and a QR code of it, and a second run gives the same address".

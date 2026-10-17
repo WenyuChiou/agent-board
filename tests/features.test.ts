@@ -1464,6 +1464,47 @@ test('from the local network a reply to an agent is offered as a copy, and refus
   expect(serveAction(items, { ...press, type: 'archive' }, STRINGS.en, true)).toMatchObject({ type: 'archive', title: 'Pick the cache' })
 })
 
+test("on the local network every agent's task shows as on the computer, except that a reply that would run grok or codex is a copy and no resume command is sent", () => {
+  // One ended session of each agent the board knows, each with a session to resume and a folder.
+  const agents = ['claude', 'codex', 'gemini', 'cursor', 'grok', 'muse', 'hermes', 'openclaw', 'opencode']
+  const file = agents
+    .map(
+      (agent, i) => `## project-${agent}
+<!-- auto session=${String(i + 1).repeat(8)} agent=${agent} state=ended updated=2026-10-17T08:30:00Z resume=0199a2b3-c4d5-7e6f-8a9b-0c1d2e3f4a5${i} dir=%2Fw%2F${agent} -->
+### Work for ${agent}
+- [x] Start it
+- [ ] Ship it
+<!-- /auto session=${String(i + 1).repeat(8)} -->
+`,
+    )
+    .join('\n')
+  const view = buildView(parseProgress(file), [], null, SERVE_NOW, 0, {}, STRINGS.en)
+  const rowsOf = (isLan: boolean) => serveModel(view, [], STRINGS.en, new Set(), isLan).groups.flatMap(group => group.rows)
+  const computer = rowsOf(false)
+  const lan = rowsOf(true)
+  // Claude's own rows carry no agent name.
+  const who = (row: { agent: string }): string => (row.agent === '' ? 'claude' : row.agent)
+  expect(lan.map(who).sort()).toEqual([...agents].sort())
+  // Only Grok Build and Codex are sent a reply from the computer's page.
+  expect(computer.filter(row => row.send === 'send').map(row => row.agent).sort()).toEqual(['codex', 'grok'])
+  for (const agent of agents) {
+    const here = computer.find(row => who(row) === agent)
+    const there = lan.find(row => who(row) === agent)
+    if (here === undefined || there === undefined) throw new Error(`no row for ${agent}`)
+    if (here.send === 'send') expect(there).toEqual({ ...here, send: 'open', where: '', info: STRINGS.en.serveLanSend(agent), hasCopyBox: true, resume: null })
+    else expect(there).toEqual({ ...here, resume: null })
+  }
+  // Claude's row has a command to resume it on the computer, which stays there.
+  expect(computer.find(row => who(row) === 'claude')?.resume).toContain('--resume')
+  // A reply sent anyway from the network is refused, whoever it is for.
+  const items = boardItems(view, [])
+  const rows = items.flatMap(item => (item.type === 'row' ? [item] : []))
+  expect(rows.length).toBe(agents.length)
+  for (const item of rows) {
+    expect(serveAction(items, { key: item.key, type: 'send', text: 'Go', session: item.row.target?.session ?? '' }, STRINGS.en, true).type).toBe('refuse')
+  }
+})
+
 test("the page runs only its own script, and the chat prompt in it cannot close the script it sits in", () => {
   const page = servePage(STRINGS.en, 'n0nce')
   expect(page).toContain('<script nonce="n0nce">')
