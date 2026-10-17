@@ -8,7 +8,7 @@ Claude Code 外掛，也跟得上 Codex、Gemini CLI、OpenCode、Grok Build、H
 </p>
 
 <p align="center">
-<a href="CHANGELOG.md"><img alt="版本 0.20.0" src="https://img.shields.io/badge/version-0.20.0-blue"></a>
+<a href="CHANGELOG.md"><img alt="版本 0.20.4" src="https://img.shields.io/badge/version-0.20.4-blue"></a>
 <img alt="需要 Claude Code 2.1.287 以上" src="https://img.shields.io/badge/Claude%20Code-%E2%89%A5%202.1.287-d97757">
 <a href="LICENSE"><img alt="MIT 授權" src="https://img.shields.io/badge/license-MIT-green"></a>
 <img alt="macOS、Linux、Windows" src="https://img.shields.io/badge/macOS%20%C2%B7%20Linux%20%C2%B7%20Windows-lightgrey">
@@ -138,7 +138,7 @@ claude -p "/progress connect"
 | `x` | 勾掉自己工作的下一步，並記進工作日誌 |
 | `a` | 封存自己的工作，或已停對話的區塊 |
 | `1`–`9`、`y`／`n` | 複製另一個 agent 問題的答案，貼到那個 agent |
-| `c` | 複製指令，或提問那個 Claude Code 對話的 ID |
+| `c` | 複製指令，或接回提問那個對話的指令（沒有指令就複製它的 ID） |
 | `o`、`q` | 打開網頁版；離開 |
 
 做完的工作會自己離開看板。看板寫 `progress.md` 跟面板一樣小心；別的對話的區塊不會動，除非你封存一個已經停掉的。
@@ -159,7 +159,7 @@ claude -p "/progress connect"
 上面的看板指令會先印出看板，再在瀏覽器打開它的網頁，最後一行是網址；在任何終端機執行 `node ~/.claude/agent-board.mjs --serve` 也一樣（加 `--no-open` 只印網址）。再跑一次 `--serve` 會叫回已經開著的那一頁。在網頁上可以：
 
 - **勾掉**自己工作的下一步、**封存**一件工作，或按**現在封存**把做完的全部收走。
-- **複製**另一個 agent 問題的答案、對話的續接指令，或步驟裡的指令。
+- **複製**另一個 agent 問題的答案、問這個問題的對話 ID、對話的續接指令，或步驟裡的指令。
 - **回覆**已經結束的 Grok Build 或 Codex 對話。回覆會在那個對話自己的資料夾裡執行 `grok -r <id>` 或 `codex exec resume <id>`，agent 回答後網頁會顯示它回了什麼，可能要幾分鐘。同一個對話一次只送一則。還開著的對話要在它自己的視窗回答，因為兩邊同時寫會把對話弄亂。
 - **貼上區塊**：從 Muse、dot 這類網頁聊天來的。先從網頁複製聊天提示，貼進聊天一次；之後把聊天印出的每個區塊貼進來。格式不對，或會蓋掉 Claude 或其他 agent 區塊的，會被拒絕。
 

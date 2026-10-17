@@ -13,7 +13,7 @@ import type { ProgressAnswer, ProgressStepStatus } from '../types'
 import type { Strings } from './i18n'
 import { askColor, stepColor, toneColor } from './palette'
 import type { Palette } from './palette'
-import { progressBar } from './view'
+import { progressBar, replyHint, wayBackText } from './view'
 import type { Focus, PrView, StepRef, TaskRow, Tone, View, ViewStep, WaitingItem } from './view'
 
 // The pane's drawing, from the view and a set of actions; it never touches the engine,
@@ -50,7 +50,7 @@ export type PaneActions = {
   // An answer to one of this session's own questions, sent to Claude.
   answer: (item: WaitingItem, text: string) => void
   copyCommand: (item: WaitingItem, surface: RenderSurface) => void
-  // Another Claude Code session's id, so the person can find the session that asked.
+  // Another session's id, any agent's, so the person can find the session that asked.
   copySessionId: (item: WaitingItem, surface: RenderSurface) => void
   // A question for the side model, or a line starting with + to add a task.
   ask: (question: string) => void
@@ -179,6 +179,7 @@ export const drawPane = (ui: PaneUi, model: PaneModel, actions: PaneActions): Re
       const run = item.kind === 'do' ? item.command : null
       const open = item.kind === 'review' ? item.link : null
       const sessionId = item.sessionId
+      const hint = replyHint(item, s)
       return (
         <Box flexDirection="column">
           {run !== null && <Text color={palette.accent} wrap="wrap">{`$ ${run}`}</Text>}
@@ -190,7 +191,9 @@ export const drawPane = (ui: PaneUi, model: PaneModel, actions: PaneActions): Re
             </Box>
           )}
           {open !== null && Link !== null && <Link href={open} label={s.openLink} />}
-          {muted(s.replyElsewhere(item.task, item.session, item.agent))}
+          {muted(hint.where)}
+          {muted(wayBackText(hint))}
+          {hint.reopen !== null && <Text color={palette.accent} wrap="wrap">{`$ ${hint.reopen}`}</Text>}
           {sessionId !== null && (
             <Box marginTop={1}>
               <Button key={`${item.key}::id`} onPress={press => actions.copySessionId(item, press.surface)}>

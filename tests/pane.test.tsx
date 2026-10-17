@@ -982,8 +982,9 @@ test('another agent’s question is answered there, but its command can be copie
 
   expect(await ui.find({ type: 'Text', text: '$ gcloud auth login' })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /到「Backfill last year's events」那個對話（3db00eaf，gemini）回覆/ })).toBeDefined()
-  // Only a Claude Code session's id is offered to copy.
+  // A block that left no session id offers none to copy, and says there is no way back.
   expect(await ui.find({ type: 'Button', key: "data-pipeline::Backfill last year's events::1::id" })).toBeUndefined()
+  expect(await ui.find({ type: 'Text', text: '它沒留下對話 ID，這裡帶不了你回去。' })).toBeDefined()
   await ui.press({ key: "data-pipeline::Backfill last year's events::1::copy" })
   expect(seen.copied.at(-1)).toBe('gcloud auth login')
 
@@ -1007,6 +1008,11 @@ test('an item from another session in the same folder names that session’s tas
 ### Rename the export job
 - [?] Ship the rename to staging, OK?
 <!-- /auto session=e5f6a7b8 -->
+
+<!-- auto session=c9d8e7f6 agent=codex state=waiting updated=2026-10-16T11:56:00Z resume=0199a2b3-c4d5-7e6f-8a9b-0c1d2e3f4a5b -->
+### Pick the cache
+- [?] Redis or Memcached?
+<!-- /auto session=c9d8e7f6 -->
 `
   const world: World = { files: new Map([[FILE, board]]), mtime: 1, hasTasks: true, store: { opened: ['waiting'] } }
   engineBeneath(on, world)
@@ -1022,6 +1028,19 @@ test('an item from another session in the same folder names that session’s tas
   await ui.press({ key: 'data-pipeline::Rename the export job::0::id' })
   expect(seen.copied.at(-1)).toBe('e5f6a7b8-4444-5555-6666')
   expect(await ui.find({ type: 'Text', text: '已複製到剪貼簿' })).toBeDefined()
+  // Another agent's session is named by the start of its own id, which is offered to copy with
+  // the command that reopens it.
+  await ui.press({ key: 'ask::data-pipeline::Pick the cache::0' })
+  expect(await ui.find({ type: 'Text', text: /到「Pick the cache」那個對話（0199a2b3，codex）回覆/ })).toBeDefined()
+  await ui.press({ key: 'data-pipeline::Pick the cache::0::id' })
+  expect(seen.copied.at(-1)).toBe('0199a2b3-c4d5-7e6f-8a9b-0c1d2e3f4a5b')
+  expect(await ui.find({ type: 'Text', text: /對照 codex 的對話列表，關掉之後也可以用 codex resume 接回/ })).toBeDefined()
+  // The way back is on the line itself too, as on the other surfaces, with the command that
+  // reopens the session once it is closed.
+  expect(
+    await ui.find({ type: 'Text', text: '對話 ID 0199a2b3-c4d5-7e6f-8a9b-0c1d2e3f4a5b：到 codex 的對話列表找。那個對話關掉之後，可以用這行接回：' }),
+  ).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: '$ codex resume 0199a2b3-c4d5-7e6f-8a9b-0c1d2e3f4a5b' })).toBeDefined()
   await ui.unmount()
 })
 

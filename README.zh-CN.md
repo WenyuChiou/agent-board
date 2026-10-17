@@ -8,7 +8,7 @@ Claude Code 插件，也跟得上 Codex、Gemini CLI、OpenCode、Grok Build、H
 </p>
 
 <p align="center">
-<a href="CHANGELOG.md"><img alt="版本 0.20.0" src="https://img.shields.io/badge/version-0.20.0-blue"></a>
+<a href="CHANGELOG.md"><img alt="版本 0.20.4" src="https://img.shields.io/badge/version-0.20.4-blue"></a>
 <img alt="需要 Claude Code 2.1.287 以上" src="https://img.shields.io/badge/Claude%20Code-%E2%89%A5%202.1.287-d97757">
 <a href="LICENSE"><img alt="MIT 许可" src="https://img.shields.io/badge/license-MIT-green"></a>
 <img alt="macOS、Linux、Windows" src="https://img.shields.io/badge/macOS%20%C2%B7%20Linux%20%C2%B7%20Windows-lightgrey">
@@ -138,7 +138,7 @@ claude -p "/progress connect"
 | `x` | 勾掉自己工作的下一步，并记进工作日志 |
 | `a` | 归档自己的工作，或已停对话的区块 |
 | `1`–`9`、`y`／`n` | 复制另一个 agent 问题的答案，贴到那个 agent |
-| `c` | 复制命令，或提问那个 Claude Code 对话的 ID |
+| `c` | 复制命令，或接回提问那个对话的命令（没有命令就复制它的 ID） |
 | `o`、`q` | 打开网页版；退出 |
 
 做完的工作会自己离开看板。看板写 `progress.md` 跟面板一样小心；别的对话的区块不会动，除非你归档一个已经停掉的。
@@ -159,7 +159,7 @@ claude -p "/progress connect"
 上面的看板命令会先打印看板，再在浏览器打开它的网页，最后一行是网址；在任何终端运行 `node ~/.claude/agent-board.mjs --serve` 也一样（加 `--no-open` 只打印网址）。再运行一次 `--serve` 会叫回已经开着的那一页。在网页上可以：
 
 - **勾掉**自己工作的下一步、**归档**一件工作，或点**现在归档**把做完的全部收走。
-- **复制**另一个 agent 问题的答案、对话的续接命令，或步骤里的命令。
+- **复制**另一个 agent 问题的答案、问这个问题的对话 ID、对话的续接命令，或步骤里的命令。
 - **回复**已经结束的 Grok Build 或 Codex 对话。回复会在那个对话自己的文件夹里运行 `grok -r <id>` 或 `codex exec resume <id>`，agent 回答后网页会显示它回了什么，可能要几分钟。同一个对话一次只发一条。还开着的对话要在它自己的窗口回答，因为两边同时写会把对话弄乱。
 - **贴上区块**：从 Muse、dot 这类网页聊天来的。先从网页复制聊天提示，贴进聊天一次；之后把聊天打印出的每个区块贴进来。格式不对，或会覆盖 Claude 或其他 agent 区块的，会被拒绝。
 

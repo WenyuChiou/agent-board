@@ -202,6 +202,9 @@ export const ZH_CN: Strings = {
     const who = [session, agent].filter(part => part !== '').join('，')
     return `到“${task}”那个对话${who === '' ? '' : `（${who}）`}回复，这里回不了。`
   },
+  wayBack: (agent: string, id: string): string => `对话 ID ${id}：到 ${agent} 的对话列表找。`,
+  reopenWhenClosed: '那个对话关掉之后，可以用这行接回：',
+  noWayBack: '它没留下对话 ID，这里带不了你回去。',
   arrivedDone: '到了，完成',
   done: '完成',
   reply: '回复',
@@ -274,8 +277,8 @@ export const ZH_CN: Strings = {
   answered: (text: string): string => `已回复 Claude：${text}`,
   commandOf: (step: string): string => `“${step}”要跑的指令`,
   resumeOf: (title: string): string => `回到“${title}”的指令，贴到终端执行`,
-  sessionIdOf: (title: string, canResume: boolean): string =>
-    `“${title}”那个对话的 ID：拿去对照对话列表${canResume ? '，或用 claude --resume 接回' : ''}`,
+  sessionIdOf: (title: string, agent: string, via: string | null): string =>
+    `“${title}”那个对话的 ID：拿去对照 ${agent} 的对话列表${via === null ? '' : `，关掉之后也可以用 ${via} 接回`}`,
   fileUnreadable: '读不到进度文件',
   dashStamp: (time: string): string => `更新于 ${time}`,
   windowOpened: (path: string): string => `已在浏览器打开：${path}`,

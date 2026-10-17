@@ -85,7 +85,7 @@ import {
 } from './inbox'
 import type { AgentTurn } from './inbox'
 import { keepRecent, remindersOf } from './remind'
-import { buildView, statusLine } from './view'
+import { agentName, buildView, statusLine } from './view'
 import type { StepRef, TaskRef, TaskRow } from './view'
 
 const PANE = 'agent-board'
@@ -1756,7 +1756,7 @@ export const register: Register = (on, options) => {
       },
       copySessionId: (item, surface) => {
         if (item.sessionId === null) return
-        showCopied($, s.sessionIdOf(item.task, item.sessionId !== item.session), item.sessionId, surface).catch(() => undefined)
+        showCopied($, s.sessionIdOf(item.task, agentName(item.agent), item.resumeVia), item.sessionId, surface).catch(() => undefined)
       },
       toggleLegend: () => {
         update($, isLegendOpen, open => !open).catch(() => undefined)
