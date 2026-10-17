@@ -27,7 +27,7 @@ python3 reporter.py init <chat-id>
 # rebuild the fragment from a steps file
 python3 reporter.py update <chat-id> <working|waiting|done|ended> "<title>" steps.txt
 
-# close the session honestly and start fresh (lost registry, clean break)
+# close the session honestly and start fresh (clean break; the id must still be in the registry)
 python3 reporter.py retire <chat-id> ["reason"]
 
 # merge into the board file (transport-agnostic: git, chat relay, drive...)

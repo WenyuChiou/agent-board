@@ -31,8 +31,12 @@ What is different for a remote reporter:
   refuses rather than guess.
 - **Close the session when the conversation ends.** Write `state=done` or
   `state=ended` as the last update: a block left `working` reads as live
-  for up to 12 hours. If the registry was lost and the id is gone,
-  `reporter.py retire` closes the old block honestly and mints a fresh id.
+  for up to 12 hours. `reporter.py retire` closes the session honestly and
+  mints a fresh id — but only while its id is still in the registry. Once
+  the id is truly lost, `retire` cannot reach the old block; the orphan
+  then waits out the usual staleness and archive rules. Keep the session id
+  somewhere durable (your notes, MEMORY.md) so `retire` stays possible
+  after a wipe.
 - **Never fake a heartbeat.** Write on state changes only. A block whose
   `updated=` is old must read as old.
 - **No secrets in blocks.** The transport is the trust boundary; the format
@@ -148,7 +152,7 @@ checks the prompt above and the page's copy match word for word.
 | Truncated or malformed fragment | Validated before merge; an invalid fragment is refused outright, never partly applied. Text with newlines, control characters or comment markers is refused when the fragment is built | Implemented and tested |
 | Replay (same fragment delivered twice) | Idempotent merge | Implemented and tested |
 | Stale session looking live | The pane already shows a `working`/`waiting` block untouched for 12 hours as stopped; reporters must not fake heartbeats | Format rule |
-| Orphan blocks (session died without `state=ended`) | The usual staleness and archive rules apply; the registry makes orphans rare, and `reporter.py retire` closes one honestly when the id is lost | Implemented |
+| Orphan blocks (session died without `state=ended`) | The usual staleness and archive rules apply; the registry makes orphans rare, and `reporter.py retire` closes the session honestly while its id is still in the registry — a truly lost id leaves an orphan that only the staleness/archive rules clear | Implemented |
 | Impersonation (`agent=` is self-declared) | No auth in the format; acceptable for a personal board | Documented |
 | A fragment choosing where a local agent runs | The board's page answers a closed Grok Build or Codex session by its `resume=` id in its `dir=` folder; `merge.py` drops both from every fragment, since a session on another machine cannot be resumed here | Implemented and tested |
 | Secrets leaking through the transport | Keep secrets out of blocks; choose the transport accordingly | Documented |
