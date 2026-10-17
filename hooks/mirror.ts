@@ -33,6 +33,10 @@ export const emptyMirror = (sessionId: string, project: string, now: number, cwd
   state: 'working',
   tasks: [],
   updated: now,
+  source: 'tasks',
+  autoAsk: null,
+  handoff: '',
+  namedSteps: 0,
 })
 
 const WAITING_YOU = new Set(['you', 'user', 'me', 'human', 'person', '使用者', '用户', '我'])
@@ -131,9 +135,11 @@ export const applyTaskCreate = (
     },
     input.metadata,
   )
-  const tasks = [...mirror.tasks.filter(one => one.id !== id), task]
+  // Steps summed up from turns give way to the real list the moment Claude starts one.
+  const kept = mirror.source === 'turns' ? [] : mirror.tasks
+  const tasks = [...kept.filter(one => one.id !== id), task]
 
-  return { ...mirror, tasks, updated: now }
+  return { ...mirror, tasks, source: 'tasks', autoAsk: mirror.source === 'turns' ? null : mirror.autoAsk, updated: now }
 }
 
 export const applyTaskUpdate = (mirror: ProgressMirror, input: TaskUpdateInput, now: number): ProgressMirror => {
@@ -161,6 +167,8 @@ export const applyTaskUpdate = (mirror: ProgressMirror, input: TaskUpdateInput, 
 
 export const applyTodoWrite = (mirror: ProgressMirror, todos: readonly TodoInput[], now: number): ProgressMirror => ({
   ...mirror,
+  source: 'tasks',
+  autoAsk: null,
   tasks: todos.map((todo, index) => ({
     id: String(index + 1),
     subject: todo.content,
@@ -178,8 +186,12 @@ export const applyTodoWrite = (mirror: ProgressMirror, todos: readonly TodoInput
 export type ListedTask = { id: string; subject: string; status: Status; blockedBy: readonly string[] }
 
 // TaskList after a reload or a resume: keeps what the mirror knew of each task.
-export const fromTaskList = (mirror: ProgressMirror, listed: readonly ListedTask[], now: number): ProgressMirror => ({
+export const fromTaskList = (mirror: ProgressMirror, listed: readonly ListedTask[], now: number): ProgressMirror =>
+  mirror.source === 'turns' && listed.length === 0 ? mirror : readList(mirror, listed, now)
+
+const readList = (mirror: ProgressMirror, listed: readonly ListedTask[], now: number): ProgressMirror => ({
   ...mirror,
+  source: 'tasks',
   tasks: listed.map(item => {
     const known = mirror.tasks.find(task => task.id === item.id)
 

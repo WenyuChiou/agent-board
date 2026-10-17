@@ -87,6 +87,7 @@ export const EN: Strings = {
   stateEnded: 'session ended, can be taken over',
   fileTitle: '# Project progress',
   contextNote: (text: string): string => `> Context: ${text}`,
+  handoffNote: (text: string): string => `> Handoff: ${text}`,
   dueNote: (date: string): string => `> due ${date}`,
   archiveTitle: '# Progress archive',
   journalTitle: '# Work log',
@@ -117,6 +118,23 @@ export const EN: Strings = {
     'Reply with two lines, in English, no quotes:\n' +
     'Line 1: a title for this piece of work, 3 to 7 words, naming what it should produce. No punctuation.\n' +
     'Line 2: one sentence of background, under 20 words, for someone who has not seen this conversation: why it is being done and what it will lead to.',
+  digestPrompt: (goal: string, prompt: string, answer: string, title: string, context: string, steps: string): string =>
+    `What the user first asked for:\n${goal}\n\nWhat the user said this turn:\n${prompt}\n\nThe AI's last reply this turn:\n${answer}\n\n` +
+    `Current title: ${title || '-'}\nCurrent background: ${context || '-'}\nCurrent steps:\n${steps || '-'}\n\n` +
+    'Reply with exactly these five lines, in English, no quotes, - when there is nothing:\n' +
+    'TITLE: a title for the work, 3 to 7 words, naming what it should produce; copy the current one if the goal has not changed\n' +
+    'CONTEXT: one sentence of background, under 20 words: why and what it leads to; copy the current one if the goal has not changed\n' +
+    'DONE: what this turn finished, under 10 words; - if it only answered a question\n' +
+    'NEXT: the next step, under 10 words; - if everything is done\n' +
+    'ASK: what the AI is waiting for the user to answer or do, as "short label — the question as asked"; - if nothing',
+  refreshPrompt: (request: string, steps: string, title: string, context: string): string =>
+    `User request:\n${request}\n\nSteps:\n${steps}\n\nCurrent title: ${title}\nCurrent background: ${context || '-'}\n\n` +
+    'Reply with two lines, in English, no quotes. Copy the current two lines if the goal has not changed:\n' +
+    'Line 1: a title for this piece of work, 3 to 7 words, naming what it should produce. No punctuation.\n' +
+    'Line 2: one sentence of background, under 20 words: why it is being done and what it will lead to.',
+  handoffPrompt: (title: string, summary: string): string =>
+    `Below is the compacted summary of an AI coding session working on "${title}":\n\n${summary}\n\n` +
+    'Write one handoff line for whoever takes over, in English, under 30 words: what is done, what is stuck (skip if nothing), the next step. No quotes.',
   asideSuffix: '(Side-pane question: answer in English in three sentences or fewer, and do not change any files.)',
   asideNotStarted: "This session hasn't started yet. Say something to Claude first, then ask.",
   asideFailed: "Couldn't get an answer. Try again.",
@@ -138,6 +156,7 @@ export const EN: Strings = {
   takeOverHead: (title: string, project: string, done: number, total: number): string =>
     `Take over "${title}" (${project}; the earlier session did not finish, done ${done}/${total}).`,
   takeOverLeft: (list: string): string => `left: ${list}`,
+  takeOverHandoff: (text: string): string => `Handoff: ${text}`,
   takeOverTail: 'First rebuild the remaining steps with TaskCreate, then start from the first unfinished one.',
   handOverHead: (title: string, project: string): string => `Help me with "${title}" (${project}).`,
   handOverContext: (text: string): string => `context: ${text}.`,
@@ -185,6 +204,7 @@ export const EN: Strings = {
   readyAnswer: 'Ready, go on',
   replyPlaceholder: 'Reply to Claude…',
   contextLine: (text: string): string => `Context: ${text}`,
+  handoffLine: (text: string): string => `Handoff: ${text}`,
   continueElsewhere: (project: string): string => `Continue in the ${project} session.`,
   heldElsewhere: 'Another session is working on it.',
   takeOver: 'Take over and finish',

@@ -33,6 +33,7 @@ import {
   applyTodoWrite,
   cleanContext,
   cleanTitle,
+  clip,
   completedSince,
   emptyMirror,
   fallbackTitle,
@@ -53,6 +54,8 @@ import { isQuickAdd, parseQuickAdd, quickAddWords } from './quick'
 import type { Lang, Strings } from './i18n'
 import { RULE_ID, RULES } from './rule'
 import { langOf, resolveLang, STRINGS } from './strings'
+import { answerTurns, applyDigest, clearAsked, cleanHandoff, isWork, lastQuestion, markAsked, needsRefresh, parseDigest, turnTools } from './digest'
+import type { Digest } from './digest'
 import { keepRecent, remindersOf } from './remind'
 import { buildView, statusLine } from './view'
 import type { StepRef, TaskRef, TaskRow } from './view'
@@ -108,6 +111,8 @@ let lastDashboard = ''
 // Set once the questions and due dates already on file at the start are counted as told.
 let isReminderSeeded = false
 let isReminding = false
+// What the person said this turn, for summing the turn up when it ends.
+let turnPrompt = ''
 let dashboardAt = 0
 
 // CLAUDE_PROGRESS_FILE wins; then CLAUDE_CONFIG_DIR, where Claude Code keeps its own files
@@ -437,8 +442,8 @@ const refreshPr = async ($: EngineInterface): Promise<void> => {
 
 const nameTask = async ($: EngineInterface): Promise<void> => {
   const mirror = await read($, mine)
-  if (mirror === null || mirror.isTitleFinal || mirror.tasks.length === 0) return
-  await saveMine($, one => ({ ...one, isTitleFinal: true, title: one.title || fallbackTitle(one) }))
+  if (mirror === null || mirror.isTitleFinal || mirror.tasks.length === 0 || mirror.source === 'turns') return
+  await saveMine($, one => ({ ...one, isTitleFinal: true, title: one.title || fallbackTitle(one), namedSteps: one.tasks.length }))
   const steps = mirror.tasks.map(task => `- ${task.subject}`).join('\n')
   const asked = await $.model
     .complete({
@@ -453,6 +458,81 @@ const nameTask = async ($: EngineInterface): Promise<void> => {
   const context = cleanContext(lines[1] ?? '')
   if (title === '' && context === '') return
   await saveMine($, one => ({ ...one, title: title || one.title, context: context || one.context }))
+  await queueWrite($)
+}
+
+// The list grew well past what the title and background were written for: the model looks
+// again, and keeps both when the goal is the same.
+const refreshName = async ($: EngineInterface): Promise<void> => {
+  const mirror = await read($, mine)
+  if (mirror === null || !needsRefresh(mirror)) return
+  await saveMine($, one => ({ ...one, namedSteps: one.tasks.length }), true)
+  const s = await wordsOf($)
+  const steps = mirror.tasks.map(task => `- ${task.subject}`).join('\n')
+  const asked = await $.model
+    .complete({
+      model: 'haiku',
+      maxTokens: 120,
+      effort: 'low',
+      prompt: s.refreshPrompt(mirror.firstPrompt.slice(0, 1200), steps, mirror.title || fallbackTitle(mirror), mirror.context),
+    })
+    .catch(() => undefined)
+  const lines = asked?.isAnswered === true ? asked.text.split(/\r?\n/).filter(line => line.trim() !== '') : []
+  const title = cleanTitle(lines[0] ?? '')
+  const context = cleanContext(lines[1] ?? '')
+  if (title === '' && context === '') return
+  await saveMine($, one => ({ ...one, title: title || one.title, context: context || one.context }), true)
+  await queueWrite($)
+}
+
+// A turn of a session that keeps no Task list, summed up into its steps: what it finished,
+// what comes next, and what it ended up asking. Without the model's answer, the question
+// the reply ends on is still caught.
+const digestTurn = async ($: EngineInterface, prompt: string, answer: string): Promise<void> => {
+  const mirror = await read($, mine)
+  if (mirror === null || (mirror.source === 'tasks' && mirror.tasks.length > 0)) return
+  const s = await wordsOf($)
+  const steps = mirror.tasks.map(task => `- [${task.status === 'completed' ? 'x' : ' '}] ${task.subject}`).join('\n')
+  const asked = await $.model
+    .complete({
+      model: 'haiku',
+      maxTokens: 300,
+      effort: 'low',
+      prompt: s.digestPrompt(
+        mirror.firstPrompt.slice(0, 1200),
+        prompt.slice(0, 1200),
+        answer.slice(-3000),
+        mirror.title,
+        mirror.context,
+        steps,
+      ),
+    })
+    .catch(() => undefined)
+  const question = lastQuestion(answer)
+  const parsed = asked?.isAnswered === true ? parseDigest(asked.text) : null
+  const empty: Digest = { title: '', context: '', done: '', next: '', ask: '', why: '' }
+  const digest: Digest = { ...empty, ...parsed }
+  if (digest.ask === '' && question !== null) {
+    digest.ask = clip(question, 48)
+    digest.why = question
+  }
+  if (digest.done === '' && digest.next === '' && digest.ask === '' && mirror.source !== 'turns') return
+  const at = await $.clock.now()
+  await saveMine($, one => applyDigest(one, digest, at))
+  await settle($)
+}
+
+// A compaction's summary made into one line for whoever takes over, kept in the block.
+const writeHandoff = async ($: EngineInterface, summary: string): Promise<void> => {
+  const mirror = await read($, mine)
+  if (mirror === null || mirror.tasks.length === 0 || summary.trim() === '') return
+  const s = await wordsOf($)
+  const asked = await $.model
+    .complete({ model: 'haiku', maxTokens: 160, effort: 'low', prompt: s.handoffPrompt(mirror.title || fallbackTitle(mirror), summary.slice(0, 6000)) })
+    .catch(() => undefined)
+  const line = asked?.isAnswered === true ? cleanHandoff(asked.text) : ''
+  if (line === '') return
+  await saveMine($, one => ({ ...one, handoff: line }), true)
   await queueWrite($)
 }
 
@@ -586,6 +666,7 @@ const takeOverPrompt = (row: TaskRow, s: Strings): string =>
   [
     s.takeOverHead(row.title, row.project, row.done, row.total),
     row.context === '' ? '' : s.resumeContext(row.context),
+    row.handoff === '' ? '' : s.takeOverHandoff(row.handoff),
     row.left.length === 0 ? '' : s.takeOverLeft(row.left.join(s.stepSep)),
     s.takeOverTail,
   ]
@@ -827,9 +908,14 @@ export const register: Register = (on, options) => {
   on('turn.start', async ($, e, next) => {
     if (e.agentId !== undefined) return next(e)
     isTurnRunning = true
+    turnPrompt = e.text.trim()
     const mirror = await read($, mine)
     if (mirror !== null && mirror.firstPrompt === '' && e.text.trim() !== '') {
       await saveMine($, one => ({ ...one, firstPrompt: e.text.trim() }))
+    }
+    // The person is answering: what waited on them from the last turn's question is settled.
+    if (mirror !== null && (mirror.autoAsk !== null || mirror.source === 'turns')) {
+      await saveMine($, one => answerTurns(clearAsked(one)), true)
     }
     if (mirror !== null && mirror.tasks.length > 0) {
       await settle($)
@@ -848,13 +934,31 @@ export const register: Register = (on, options) => {
     if (e.agentId !== undefined) return next(e)
     isTurnRunning = false
     const mirror = await read($, mine)
+    const question = e.isAborted ? null : lastQuestion(e.answer)
     if (mirror !== null && mirror.tasks.length > 0) {
       const branch = await branchName($)
       await saveMine($, one => ({ ...one, branch }))
+      // A turn that ended on a question waits on the person even if Claude did not mark it.
+      if (question !== null && mirror.source === 'tasks') await saveMine($, one => markAsked(one, question))
       await settle($)
       if (!mirror.isTitleFinal) {
         $.clock.after(1, () => {
           nameTask($).catch(() => undefined)
+        })
+      } else if (needsRefresh(mirror)) {
+        $.clock.after(1, () => {
+          refreshName($).catch(() => undefined)
+        })
+      }
+    }
+    // No Task list: a turn that changed something, or any turn once the session is tracked,
+    // is summed up into steps.
+    if (mirror !== null && !e.isAborted && (mirror.tasks.length === 0 || mirror.source === 'turns')) {
+      const messages = await $.session.messages().catch(() => [])
+      if (mirror.source === 'turns' || isWork(turnTools(messages))) {
+        const prompt = turnPrompt
+        $.clock.after(1, () => {
+          digestTurn($, prompt, e.answer).catch(() => undefined)
         })
       }
     }
@@ -931,6 +1035,11 @@ export const register: Register = (on, options) => {
     const keep = (await wordsOf($)).compactKeep
     const out = await next({ ...e, instructions: [e.instructions, keep].filter(Boolean).join('\n') })
     if (out.skip !== undefined || e.trigger === 'precompute') return out
+    // The summary leads what the compaction keeps; a line of it goes into the block.
+    const summary = out.messages[0]?.text ?? ''
+    $.clock.after(1, () => {
+      writeHandoff($, summary).catch(() => undefined)
+    })
 
     return { ...out, messages: [...out.messages, { role: 'user' as const, text: note, toolUses: [] }] }
   })

@@ -100,6 +100,8 @@ export type TaskRow = {
   agent: string
   // For an ended session: the command that reopens it, ready to paste.
   resume: string | null
+  // The line its session left at its last compaction for whoever takes over.
+  handoff: string
   // Set when the person may take the row out now: a hand-kept task, or a block whose session
   // ended or stopped. A live session's block is that session's to change.
   archive: TaskRef | null
@@ -179,6 +181,11 @@ const DUE_WORDS = /(?:截止|\bdue)[:：\s]*(?:\d{4}[-/])?\d{1,2}[-/]\d{1,2}/gi
 // A block's background note, in any language the pane writes: 背景： / Context: / Background:
 const CONTEXT = /^(?:背景|Context|Background)\s*[:：]\s*/i
 
+// A block's handoff note, written at its session's last compaction: 交接： / Handoff:
+const HANDOFF = /^(?:交接|Handoff)\s*[:：]\s*/i
+
+export const handoffOf = (task: ProgressTask): string => task.notes.find(note => HANDOFF.test(note))?.replace(HANDOFF, '') ?? ''
+
 // A task's background: its `> 背景：` line; for a hand-kept task, its other notes.
 export const contextOf = (task: ProgressTask): string => {
   const marked = task.notes.find(note => CONTEXT.test(note))
@@ -186,6 +193,7 @@ export const contextOf = (task: ProgressTask): string => {
   if (task.auto !== null) return ''
 
   return task.notes
+    .filter(note => !HANDOFF.test(note))
     .map(note => note.replace(DUE_WORDS, '').replace(/^[\s·・,，]+|[\s·・,，]+$/g, ''))
     .filter(note => note !== '')
     .join(' · ')
@@ -499,6 +507,7 @@ export const buildView = (
           auto === 'ended' && task.auto?.agent === 'claude' && task.auto.resume
             ? resumeCommand(task.auto.resume, task.auto.dir)
             : null,
+        handoff: handoffOf(task),
         archive:
           isManual && task.line >= 0
             ? { project: name, title: task.title, line: task.line, session: null }

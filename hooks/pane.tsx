@@ -359,6 +359,7 @@ export const drawPane = (ui: PaneUi, model: PaneModel, actions: PaneActions): Re
       </Text>
       <Text wrap="wrap">{row.status}</Text>
       {row.context !== '' && muted(s.contextLine(row.context))}
+      {row.handoff !== '' && muted(s.handoffLine(row.handoff))}
       {rowActions(row)}
     </Box>
   )
@@ -430,6 +431,7 @@ export const drawPane = (ui: PaneUi, model: PaneModel, actions: PaneActions): Re
           <Box paddingLeft={2} flexDirection="column" marginTop={1}>
             {bar(row.done, row.total, 12, true)}
             {row.context !== '' && muted(s.contextLine(row.context))}
+            {row.handoff !== '' && muted(s.handoffLine(row.handoff))}
             {steps(row.steps)}
             {rowActions(row)}
           </Box>

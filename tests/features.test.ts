@@ -2,8 +2,9 @@ import { expect, test } from 'claude-code/testing'
 
 import type { ProgressMirror, ProgressPr } from '../types'
 import { askOf } from '../hooks/ask'
-import { addManualTask, isArchivable, takeArchivable, takeManualDone, takeTask, upsertAutoBlock } from '../hooks/blocks'
+import { addManualTask, isArchivable, renderAutoBlock, takeArchivable, takeManualDone, takeTask, upsertAutoBlock } from '../hooks/blocks'
 import { dashboardHtml } from '../hooks/dashboard'
+import { applyDigest, clearAsked, isWork, lastQuestion, markAsked, parseDigest, turnTools } from '../hooks/digest'
 import { ciFinished, prFromGh, prWords } from '../hooks/github'
 import { appendJournal, countDay, journalLine, parseJournal, progressReport } from '../hooks/journal'
 import { applyTaskCreate, applyTaskUpdate, cleanContext, cleanTitle, clip, completedSince, emptyMirror, noticesOf } from '../hooks/mirror'
@@ -13,7 +14,7 @@ import { LANGS, ZH_TW } from '../hooks/i18n'
 import { resolveLang, STRINGS } from '../hooks/strings'
 import { parseQuickAdd } from '../hooks/quick'
 import { keepRecent, remindersOf } from '../hooks/remind'
-import { buildView, resumeCommand, statusLine } from '../hooks/view'
+import { buildView, contextOf, handoffOf, resumeCommand, statusLine } from '../hooks/view'
 
 const NOW = Date.parse('2026-10-16T12:00:00.000Z')
 const SESSION = '2be48af2-6193-5040-aacc-e0546d6784f1'
@@ -569,4 +570,77 @@ test('reminders: another session’s question once, and work due today or late o
   // The next day the due date is said again; the question is not.
   expect(remindersOf(view, told, NOW + 24 * 60 * 60 * 1000, '2026-10-17').map(one => one.kind)).toEqual(['due'])
   expect(Object.keys(keepRecent(told, NOW + 4 * 24 * 60 * 60 * 1000))).toEqual([])
+})
+
+test('the question a reply ends on: its last paragraph only, without code or markdown', () => {
+  expect(lastQuestion('改好了。\n\n要我順便更新 README 嗎？')).toBe('要我順便更新 README 嗎？')
+  expect(lastQuestion('Done. Should I also bump the version? Or leave it?')).toBe('Or leave it?')
+  expect(lastQuestion('**Which one?**\n- `a`\n- `b` — pick one?')).toBe('b — pick one?')
+  // A question earlier on, then a statement: nothing is asked any more.
+  expect(lastQuestion('要用哪個？\n\n我先用 A，之後可以換。')).toBeNull()
+  // A question mark inside code is not a question.
+  expect(lastQuestion('改成這樣：\n\n```ts\nconst a = b ? c : d\n```')).toBeNull()
+  expect(lastQuestion('')).toBeNull()
+})
+
+test('the model’s summary of a turn: five keyed lines, - for nothing, the question split from its label', () => {
+  const digest = parseDigest('TITLE: 「幫 API 加上限流」\nCONTEXT: 背景：公開端點被刷爆\nDONE: 加好中介層\nNEXT: -\nASK: 上限 — 100 還是 300？')
+  expect(digest).toEqual({ title: '幫 API 加上限流', context: '公開端點被刷爆', done: '加好中介層', next: '', ask: '上限', why: '100 還是 300？' })
+  expect(parseDigest('**TITLE**: Rate limits\nASK: none')?.ask).toBe('')
+  expect(parseDigest('sorry, I cannot help')).toBeNull()
+})
+
+test('a turn counts as work when it edited a file or ran a command', () => {
+  const turn = [
+    { role: 'user' as const, text: '舊的問題', toolUses: [{ tool: 'Write' }] },
+    { role: 'user' as const, text: '幫我看一下', toolUses: [] },
+    { role: 'assistant' as const, text: '', toolUses: [{ tool: 'Read' }, { tool: 'Grep' }] },
+    { role: 'user' as const, text: '', toolUses: [], toolResults: [{}] },
+    { role: 'assistant' as const, text: '看完了', toolUses: [] },
+  ]
+  expect(turnTools(turn)).toEqual(['Read', 'Grep'])
+  expect(isWork(turnTools(turn))).toBe(false)
+  expect(isWork(['Read', 'Bash'])).toBe(true)
+})
+
+test('a summed-up list keeps the last six finished turns and puts the question before the next step', () => {
+  let mirror = { ...emptyMirror('s', 'p', NOW), firstPrompt: '做事' }
+  for (let n = 1; n <= 8; n += 1) mirror = applyDigest(mirror, { title: '做事', context: '', done: `第 ${n} 步`, next: '', ask: '', why: '' }, NOW)
+  mirror = applyDigest(mirror, { title: '', context: '', done: '', next: '收尾', ask: '要發布嗎', why: '現在發布嗎？' }, NOW)
+  expect(mirror.tasks.map(task => `${task.status}:${task.subject}`)).toEqual([
+    'completed:第 3 步',
+    'completed:第 4 步',
+    'completed:第 5 步',
+    'completed:第 6 步',
+    'completed:第 7 步',
+    'completed:第 8 步',
+    'in_progress:要發布嗎',
+    'pending:收尾',
+  ])
+  expect(mirror.tasks[6]).toMatchObject({ waiting: 'you', why: '現在發布嗎？' })
+  expect(mirror.source).toBe('turns')
+  expect(new Set(mirror.tasks.map(task => task.id)).size).toBe(8)
+})
+
+test('a question marks the step in progress, never one Claude already marked, and the answer clears only its own mark', () => {
+  const base = applyTaskUpdate(
+    applyTaskCreate(applyTaskCreate(emptyMirror('s', 'p', NOW), { subject: '讀' }, '1', NOW), { subject: '寫' }, '2', NOW),
+    { taskId: '2', status: 'in_progress' },
+    NOW,
+  )
+  const asked = markAsked(base, '要哪個？')
+  expect(asked.autoAsk).toBe('2')
+  expect(asked.tasks[1]).toMatchObject({ waiting: 'you', why: '要哪個？' })
+  expect(clearAsked(asked).tasks[1]).toMatchObject({ waiting: null, why: null })
+  const marked = applyTaskUpdate(base, { taskId: '1', metadata: { waiting: 'you', why: '等授權' } }, NOW)
+  expect(markAsked(marked, '要哪個？')).toBe(marked)
+})
+
+test('a handoff note is its own line: not background, and the block writes it after the background', () => {
+  const mirror = { ...emptyMirror('2be48af2-0000', 'p', NOW), title: '修 CI', context: '測試不穩', handoff: '卡在 flaky；下一步重跑', tasks: applyTaskCreate(emptyMirror('s', 'p', NOW), { subject: '重跑' }, '1', NOW).tasks }
+  const lines = renderAutoBlock(mirror)
+  expect(lines.slice(2, 5)).toEqual(['> Claude 正在做', '> 背景：測試不穩', '> 交接：卡在 flaky；下一步重跑'])
+  const task = parseProgress(`## p\n${lines.join('\n')}\n`)[0]?.tasks[0]
+  expect(task === undefined ? '' : contextOf(task)).toBe('測試不穩')
+  expect(task === undefined ? '' : handoffOf(task)).toBe('卡在 flaky；下一步重跑')
 })

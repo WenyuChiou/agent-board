@@ -84,11 +84,17 @@ A task is a `###` heading with its notes and steps.
 
 **Hand-kept tasks** are tasks outside any agent block: the ones a person or an agent writes without markers, and the ones the pane's quick add writes (`+ project: title due 11-20; step; step` in the pane's box, or `/progress add …`; it adds a `###` task at the end of the project's section, with a due note and one `- [ ]` line per step). Their `>` notes are the task's background, with any due-date phrase removed, joined by ` · `. If one note starts with a background label (see below) that note alone is the background.
 
-**Background line.** The background of an agent block is the first note that starts with a background label, followed by one line of text in any language. The label is `背景`, `Context` or `Background` (any letter case), then optionally spaces, then a `:` or `：`. Other `>` notes of a block are not shown by the pane; people reading the file see them. The pane's writer uses `背景：` in zh-TW and zh-CN and `Context:` in English (see [Language](#language)); a reader accepts all three.
+**Background line.** The background of an agent block is the first note that starts with a background label, followed by one line of text in any language. The label is `背景`, `Context` or `Background` (any letter case), then optionally spaces, then a `:` or `：`. Other `>` notes of a block are not shown by the pane, except the handoff line below; people reading the file see them. The pane's writer uses `背景：` in zh-TW and zh-CN and `Context:` in English (see [Language](#language)); a reader accepts all three.
 
 ```
 > Context: Duplicate charges happen when a provider retries a webhook.
 > 背景：Duplicate charges happen when a provider retries a webhook.
+```
+
+**Handoff line.** Optional. A note that starts with `交接` or `Handoff` (any letter case), then a `:` or `：`, is one line for whoever takes the work over: what is done, what is stuck, the next step. The pane shows it on the opened row and passes it on with **Take over and finish**. It is never part of the background. The pane's writer adds it after a compaction, in the pane's language (`交接：` in zh-TW and zh-CN, `Handoff:` in English).
+
+```
+> Handoff: Webhook dedupe written; stuck on the flaky retry test; next, rerun it three times.
 ```
 
 **Due date.** The first match, looking at the task title and then each note in order (never the steps), of:
@@ -149,6 +155,7 @@ An attribute is `name=value`, where the name is letters, digits, `_` or `-`, and
 | `dir` | No | The session's folder, percent-encoded as `encodeURIComponent` does (spaces become `%20`). Used with `resume` to show `cd '<dir>' && claude --resume <id>`, or a PowerShell `Set-Location` for a Windows path. An undecodable value is ignored. |
 | `pr` | No | A pull request number, a positive integer. Shown as `PR #n`. Other values are ignored. |
 | `ci` | No | `none`, `pending`, `pass` or `fail`. Shown after the PR number, only when `pr` is present. Other values are ignored. |
+| `source` | No | `turns` when the steps were summed up from the session's turns because it keeps no task list; absent when they come from the agent's own list. Informational: readers show the block the same either way. |
 
 ### Body
 

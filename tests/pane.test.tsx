@@ -31,6 +31,10 @@ type World = {
   ran?: string[][]
   // What the model answers when asked to name the task.
   named?: string
+  // What the model answers to a prompt, when the answer depends on what was asked.
+  reply?: (prompt: string) => string | undefined
+  // The transcript $.session.messages() returns.
+  messages?: Array<{ role: 'user' | 'assistant'; text: string; toolUses: Array<{ tool_use_id: string; tool: string; input: Record<string, unknown> }> }>
   // Answers `gh`; other commands (git) answer the branch.
   gh?: () => { exitCode: number; stdout: string; stderr: string }
 }
@@ -70,10 +74,11 @@ const engineBeneath = (on: On, world: World): MockClock => {
     world.ran?.push([...e.argv])
     return { value: { ...ran, isStdoutTruncated: false, isStderrTruncated: false } }
   })
-  on('model.complete', () => ({
+  on('session.messages', () => ({ value: world.messages ?? [] }))
+  on('model.complete', ($, e) => ({
     value: {
       isAnswered: true as const,
-      text: world.named ?? '「重做進度面板」',
+      text: world.reply?.(typeof e.prompt === 'string' ? e.prompt : '') ?? world.named ?? '「重做進度面板」',
       usage: { input_tokens: 1, output_tokens: 1, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 },
     },
   }))
@@ -982,4 +987,111 @@ test('the first run ever says nothing about what is already in the file', async 
   await $.session.start({ cwd: '/work/persona_framework', surface: 'desktop', isInteractive: true })
   await clock.advance(60 * 1000)
   expect(seen.notified).toEqual([])
+})
+
+
+const EDITED = [
+  { role: 'user' as const, text: '幫我把限流加到 API', toolUses: [] },
+  { role: 'assistant' as const, text: '', toolUses: [{ tool_use_id: 'u1', tool: 'Edit', input: {} }] },
+]
+
+const DIGEST = (prompt: string): string | undefined =>
+  prompt.includes('TITLE:')
+    ? 'TITLE: 幫 API 加上限流\nCONTEXT: 公開端點被刷爆，要擋掉濫用\nDONE: 加好限流中介層\nNEXT: 寫限流測試\nASK: 每把金鑰的上限 — 一分鐘 100 還是 300？'
+    : undefined
+
+test('without a Task list, a turn that changed something is summed up into steps and its question', async ($, on) => {
+  const world: World = { files: new Map(), mtime: 1, hasTasks: false, messages: EDITED, reply: DIGEST }
+  const clock = engineBeneath(on, world)
+  const seen = outside(on)
+  await start($, '幫我把限流加到 API')
+  await $.turn.complete({ answer: '加好了。每把金鑰一分鐘要 100 還是 300？', durationMs: 1, isAborted: false, turnId: 't1', reason: 'answer' })
+  await clock.advance(10)
+
+  const written = world.files.get(FILE) ?? ''
+  expect(written).toContain('source=turns')
+  expect(written).toContain('### 幫 API 加上限流\n> 等你回覆')
+  expect(written).toContain('> 背景：公開端點被刷爆，要擋掉濫用\n- [x] 加好限流中介層\n- [?] 每把金鑰的上限 — 一分鐘 100 還是 300？\n- [ ] 寫限流測試\n')
+  expect(seen.notified).toContain('需要你：每把金鑰的上限')
+
+  // The person answers: the question counts as settled; the next turn adds what it did.
+  world.reply = (prompt: string) => (prompt.includes('TITLE:') ? 'TITLE: 幫 API 加上限流\nCONTEXT: -\nDONE: 寫好限流測試\nNEXT: -\nASK: -' : undefined)
+  await $.turn.start({ text: '100', turnId: 't2' })
+  await $.turn.complete({ answer: '測試寫好了，都過了。', durationMs: 1, isAborted: false, turnId: 't2', reason: 'answer' })
+  await clock.advance(10)
+  const after = world.files.get(FILE) ?? ''
+  expect(after).toContain('state=done')
+  expect(after).toContain('- [x] 加好限流中介層\n- [x] 每把金鑰的上限\n- [x] 寫好限流測試\n')
+
+  // Claude starting a real list replaces the summed-up steps.
+  await $.turn.start({ text: '再加上 IP 限流', turnId: 't3' })
+  await $.tool.call({ tool: 'TaskCreate', subject: '加 IP 限流', description: '' })
+  const listed = world.files.get(FILE) ?? ''
+  expect(listed).not.toContain('source=turns')
+  expect(listed).toContain('- [ ] 加 IP 限流\n<!-- /auto')
+  expect(listed).not.toContain('加好限流中介層')
+})
+
+test('a turn that only answered a question leaves no block behind', async ($, on) => {
+  const world: World = { files: new Map(), mtime: 1, hasTasks: false, reply: DIGEST, messages: [{ role: 'user', text: '這段程式在做什麼？', toolUses: [] }] }
+  const clock = engineBeneath(on, world)
+  await start($, '這段程式在做什麼？')
+  await $.turn.complete({ answer: '它在解析設定檔。還有別的嗎？', durationMs: 1, isAborted: false, turnId: 't1', reason: 'answer' })
+  await clock.advance(10)
+  expect(world.files.get(FILE) ?? '').not.toContain('<!-- auto')
+})
+
+test('a turn that ends on a question waits on you even when Claude did not mark it, until you answer', async ($, on) => {
+  const world: World = { files: new Map(), mtime: 1, hasTasks: true }
+  const clock = engineBeneath(on, world)
+  const seen = outside(on)
+  await start($, '幫我重做進度面板')
+  await $.tool.call({ tool: 'TaskCreate', subject: '讀 API', description: '' })
+  await $.tool.call({ tool: 'TaskCreate', subject: '選配色', description: '' })
+  await $.tool.call({ tool: 'TaskUpdate', taskId: '1', status: 'completed' })
+  await $.tool.call({ tool: 'TaskUpdate', taskId: '2', status: 'in_progress' })
+  await $.turn.complete({ answer: '我準備了兩組。\n\n要用和色還是 Nord？', durationMs: 1, isAborted: false, turnId: 't1', reason: 'answer' })
+  await clock.advance(10)
+  expect(world.files.get(FILE) ?? '').toContain('- [?] 選配色 — 要用和色還是 Nord？')
+  expect(seen.notified).toContain('需要你：選配色')
+
+  await $.turn.start({ text: '和色', turnId: 't2' })
+  await clock.advance(10)
+  expect(world.files.get(FILE) ?? '').toContain('- [~] 選配色\n')
+})
+
+test('a compaction leaves a handoff line in the block', async ($, on) => {
+  const world: World = {
+    files: new Map(),
+    mtime: 1,
+    hasTasks: true,
+    reply: (prompt: string) => (prompt.includes('交接') ? '交接：讀完 API；卡在授權；下一步寫 Mod' : undefined),
+  }
+  const clock = engineBeneath(on, world)
+  on('session.compact', () => ({ messages: [{ role: 'user' as const, text: '摘要：讀完 API，授權那段還沒解', toolUses: [] }] }))
+  await start($, '幫我重做進度面板')
+  await $.tool.call({ tool: 'TaskCreate', subject: '讀 API', description: '' })
+  await $.tool.call({ tool: 'TaskCreate', subject: '寫 Mod', description: '' })
+  await $.session.compact({ trigger: 'auto', messages: [{ role: 'user', text: '幫我重做進度面板', toolUses: [] }] })
+  await clock.advance(10)
+  expect(world.files.get(FILE) ?? '').toContain('> 交接：讀完 API；卡在授權；下一步寫 Mod\n')
+})
+
+test('a stopped session’s handoff line shows on its row and goes with 接手做完', async ($, on) => {
+  const file = JOBS.replace('### 修 CI\n', '### 修 CI\n> 交接：log 看完了；卡在 flaky 測試；下一步重跑三次\n')
+  const world: World = { files: new Map([[FILE, file]]), mtime: 1, hasTasks: true }
+  engineBeneath(on, world)
+  const submitted: string[] = []
+  on('prompt.submit', ($, e) => {
+    submitted.push(e.text)
+    return { text: e.text }
+  })
+  await $.session.start({ cwd: '/work/persona_framework', surface: 'desktop', isInteractive: true })
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
+  await ui.press({ key: 'section::others' })
+  await ui.press({ key: 'persona_framework::修 CI' })
+  expect(await ui.find({ type: 'Text', text: '交接：log 看完了；卡在 flaky 測試；下一步重跑三次' })).toBeDefined()
+  await ui.press({ key: 'persona_framework::修 CI::take' })
+  expect(submitted.at(-1)).toContain('交接：log 看完了；卡在 flaky 測試；下一步重跑三次')
+  await ui.unmount()
 })

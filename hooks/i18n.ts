@@ -94,6 +94,7 @@ export const ZH_TW = {
   stateEnded: '對話已結束，可接手',
   fileTitle: '# 專案進度',
   contextNote: (text: string): string => `> 背景：${text}`,
+  handoffNote: (text: string): string => `> 交接：${text}`,
   dueNote: (date: string): string => `> 截止 ${date}`,
   archiveTitle: '# 進度封存',
   journalTitle: '# 工作日誌',
@@ -123,6 +124,23 @@ export const ZH_TW = {
     '回兩行，用繁體中文，不要引號：\n' +
     '第一行：這件工作的名稱，4 到 14 個字，像待辦清單的標題：白話、具體、說出要做成什麼，不要標點。\n' +
     '第二行：一句 40 字以內的背景，給一個沒看過這段對話的人看：為什麼要做、做完會怎樣。',
+  digestPrompt: (goal: string, prompt: string, answer: string, title: string, context: string, steps: string): string =>
+    `使用者一開始的需求：\n${goal}\n\n這一回合使用者說：\n${prompt}\n\nAI 這一回合最後的回覆：\n${answer}\n\n` +
+    `目前的名稱：${title || '-'}\n目前的背景：${context || '-'}\n目前的步驟：\n${steps || '-'}\n\n` +
+    '只回下面五行，用繁體中文，不要引號，沒有就寫 -：\n' +
+    'TITLE: 這件工作的名稱，4 到 14 個字，白話具體；目標沒變就照抄目前的名稱\n' +
+    'CONTEXT: 一句 40 字以內的背景，為什麼做、做完會怎樣；目標沒變就照抄\n' +
+    'DONE: 這一回合做完的事，20 字以內；只是回答問題就寫 -\n' +
+    'NEXT: 接下來要做的一步，20 字以內；都做完了就寫 -\n' +
+    'ASK: AI 最後在等使用者回答或動手的事，寫成「短標題 — 原本的問題」；沒有就寫 -',
+  refreshPrompt: (request: string, steps: string, title: string, context: string): string =>
+    `使用者的需求：\n${request}\n\n步驟：\n${steps}\n\n目前的名稱：${title}\n目前的背景：${context || '-'}\n\n` +
+    '回兩行，用繁體中文，不要引號。目標沒變就照抄目前的兩行：\n' +
+    '第一行：這件工作的名稱，4 到 14 個字，白話、具體、說出要做成什麼，不要標點。\n' +
+    '第二行：一句 40 字以內的背景：為什麼要做、做完會怎樣。',
+  handoffPrompt: (title: string, summary: string): string =>
+    `下面是一段 AI 寫程式對話壓縮後的摘要，工作是「${title}」：\n\n${summary}\n\n` +
+    '寫一行交接給接手的人，用繁體中文，60 字以內，依序說：做完什麼、卡在哪（沒有就略過）、下一步。不要引號。',
   asideSuffix: '（側邊面板的問題：用繁體中文、三句以內回答，不要動任何檔案。）',
   asideNotStarted: '這個對話還沒開始，先跟 Claude 說一句話再問。',
   asideFailed: '沒問到，再試一次。',
@@ -144,6 +162,7 @@ export const ZH_TW = {
   takeOverHead: (title: string, project: string, done: number, total: number): string =>
     `接手「${title}」（${project}，之前的對話沒做完，完成 ${done}/${total}）。`,
   takeOverLeft: (list: string): string => `剩下：${list}`,
+  takeOverHandoff: (text: string): string => `交接：${text}`,
   takeOverTail: '先用 TaskCreate 重建剩下的步驟，再從第一個沒做完的開始。',
   handOverHead: (title: string, project: string): string => `幫我處理「${title}」（${project}）。`,
   handOverContext: (text: string): string => `背景：${text}。`,
@@ -190,6 +209,7 @@ export const ZH_TW = {
   readyAnswer: '好了，可以繼續',
   replyPlaceholder: '回覆 Claude…',
   contextLine: (text: string): string => `背景：${text}`,
+  handoffLine: (text: string): string => `交接：${text}`,
   continueElsewhere: (project: string): string => `到 ${project} 的對話接著做。`,
   heldElsewhere: '另一個對話正在做。',
   takeOver: '接手做完',

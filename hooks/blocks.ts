@@ -48,6 +48,7 @@ const markerOf = (mirror: ProgressMirror): string => {
     mirror.sessionId.length > 8 ? `resume=${mirror.sessionId}` : '',
     mirror.cwd ? `dir=${encodeURIComponent(mirror.cwd)}` : '',
     pr === null ? '' : `pr=${pr.number} ci=${pr.ci}`,
+    mirror.source === 'turns' ? 'source=turns' : '',
   ]
 
   return `<!-- auto ${attrs.filter(attr => attr !== '').join(' ')} -->`
@@ -63,6 +64,7 @@ export const renderAutoBlock = (mirror: ProgressMirror, s: Strings = ZH_TW): str
     `### ${oneLine(mirror.title) || s.unnamed}`,
     `> ${meta}`,
     ...(mirror.context ? [s.contextNote(oneLine(mirror.context))] : []),
+    ...(mirror.handoff ? [s.handoffNote(oneLine(mirror.handoff))] : []),
     ...mirror.tasks.map(task => {
       const note = task.blocked !== null && task.blocked !== '' ? task.blocked : task.status === 'completed' ? '' : (task.why ?? '')
       const reason = note === '' ? '' : ` — ${oneLine(note)}`
