@@ -1,5 +1,24 @@
 # Changelog
 
+## Unreleased
+
+- Preserve existing or modified commands, skills and standalone integration scripts
+  during automatic connection, updates and removal. Exact known output or the
+  plugin's recorded previous output is required before replacing a generated file;
+  collisions show their paths even when no new agent connects. Empty user files
+  and additional files inside skill folders stay. Tests: "generated files require
+  exact current or recorded bytes, never a familiar name or header", "automatic
+  connection and removal preserve personal commands and skills, including edits
+  after installation", and "a collision is announced even when all installed
+  reporting hooks were already connected".
+- Verify deletion results before reporting disconnection. Failed cleanup lists
+  exact paths, leaves remaining board commands with their shared script, and can
+  be retried. Reporter scripts and inbox data are retained. Tests: "failed and
+  falsely successful deletes report exact leftovers, retain the board, and permit
+  a later retry" and "a failed primary plugin deletion is not counted as
+  disconnected and other cleanup continues". Addresses #37 and the verified
+  removal-results portion of #39; the wider uninstall documentation remains open.
+
 ## 0.18.0 — 2026-10-17
 
 - **Work in the board from any agent, as in the pane.** `node

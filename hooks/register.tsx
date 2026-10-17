@@ -61,7 +61,7 @@ import { RULE_ID, RULES } from './rule'
 import { langOf, resolveLang, STRINGS } from './strings'
 import { answerTurns, applyDigest, clearAsked, cleanHandoff, isWork, lastQuestion, markAsked, needsRefresh, parseDigest, replyData, turnTools } from './digest'
 import type { Digest } from './digest'
-import { agentHooks, boardScript, DELETE, hasOurHook, isWindowsHost, OPENCLAW_MIN, openclawPrinted, openclawSavedBy, openclawTooOld, psQuote, reporterPs1, reporterSh, withoutSection } from './connect'
+import { agentHooks, boardScript, COLLISION, DELETE, generatedFile, hasOurHook, isWindowsHost, OPENCLAW_MIN, openclawPrinted, openclawSavedBy, openclawTooOld, psQuote, reporterPs1, reporterSh, withoutSection } from './connect'
 import {
   ANSWER_KEEP,
   answerKey,
@@ -191,12 +191,16 @@ const isWindows = async ($: EngineInterface, path: string): Promise<boolean> => 
 const sepOf = (path: string): string => (path.includes('\\') ? '\\' : '/')
 
 // The engine's file calls cannot rename or delete; the system's own commands do.
-const removeFiles = async ($: EngineInterface, files: readonly string[], isWin: boolean): Promise<void> => {
-  if (files.length === 0) return
+const removeFiles = async ($: EngineInterface, files: readonly string[], isWin: boolean): Promise<boolean> => {
+  if (files.length === 0) return true
   const argv = isWin
-    ? ['powershell', '-NoProfile', '-Command', `Remove-Item -Force -LiteralPath ${files.map(psQuote).join(',')}`]
+    ? ['powershell', '-NoProfile', '-Command', `Remove-Item -Force -LiteralPath ${files.map(psQuote).join(',')} -ErrorAction Stop`]
     : ['rm', '-f', ...files]
-  await $.process.run(argv, { timeoutMs: 10000 }).catch(() => undefined)
+  const ran = await $.process.run(argv, { timeoutMs: 10000 }).catch(() => null)
+  if (ran === null || ran.exitCode !== 0) return false
+  for (const file of files) if (await $.fs.exists(file)) return false
+
+  return true
 }
 
 const removeEmptyDir = async ($: EngineInterface, dir: string, isWin: boolean): Promise<void> => {
@@ -702,7 +706,7 @@ const takeAgentTurns = async ($: EngineInterface, turns: readonly AgentTurn[], i
 // nothing.
 type ConnectMode = 'connect' | 'remove' | 'auto'
 
-const connectAgents = async ($: EngineInterface, mode: ConnectMode): Promise<{ text: string; done: string[] }> => {
+const connectAgents = async ($: EngineInterface, mode: ConnectMode): Promise<{ text: string; done: string[]; hasWarnings: boolean }> => {
   const remove = mode === 'remove'
   const isAuto = mode === 'auto'
   const s = await wordsOf($)
@@ -716,15 +720,60 @@ const connectAgents = async ($: EngineInterface, mode: ConnectMode): Promise<{ t
   const openclawHome = ((await $.env.get('OPENCLAW_STATE_DIR')) ?? '').replace(/[\\/]+$/, '') || [home, '.openclaw'].join(sep)
   const script = `${path.replace(/[\\/][^\\/]*$/, '')}${sep}progress-report.${isWin ? 'ps1' : 'sh'}`
   const reporter = isWin ? reporterPs1() : reporterSh(inboxPath(path))
-  if (!remove && (await readText($, script).catch(() => '')) !== reporter) await $.fs.write(script, reporter)
   // The board for every other agent: their board commands run it, and so can any terminal.
   const board = `${path.replace(/[\\/][^\\/]*$/, '')}${sep}agent-board.mjs`
   const boardCode = boardScript(path, s.lang)
-  if (!remove && (await readText($, board).catch(() => '')) !== boardCode) await $.fs.write(board, boardCode)
-  if (remove && (await $.fs.exists(board))) await removeFiles($, [board], isWin)
   const done: string[] = []
   const skipped: string[] = []
-  const removeFile = (file: string): Promise<void> => removeFiles($, [file], isWin)
+  const failedLabels = new Set<string>()
+  let canRemoveBoard = true
+  const ownershipKey = (file: string): string => `generated:${file}`
+  const previousOutput = async (file: string): Promise<string | undefined> => {
+    const value = await $.store.get(ownershipKey(file))
+    return typeof value === 'string' ? value : undefined
+  }
+  const removeFile = async (file: string): Promise<void> => {
+    if (!(await removeFiles($, [file], isWin))) throw new Error('Removal could not be verified')
+    await $.store.delete(ownershipKey(file))
+  }
+  const writeFile = async (file: string, content: string, generated = false): Promise<void> => {
+    await $.fs.write(file, content)
+    if ((await readText($, file)) !== content) throw new Error('Write could not be verified')
+    if (generated) await $.store.set(ownershipKey(file), content)
+  }
+  const preserve = (file: string): void => { skipped.push(s.connectPreserved(file)) }
+  const sharedFile = async (file: string, content: string, legacy: readonly string[] = []): Promise<boolean> => {
+    try {
+      const exists = await $.fs.exists(file)
+      const before = await readText($, file)
+      const after = generatedFile(content, legacy)(before, remove, await previousOutput(file))
+      if ((exists && before === '') || after === COLLISION) {
+        preserve(file)
+        return false
+      }
+      if (after === DELETE) await removeFile(file)
+      else if (typeof after === 'string') {
+        if (after !== before) await writeFile(file, after, true)
+        else await $.store.set(ownershipKey(file), after)
+      }
+      return true
+    } catch {
+      skipped.push(remove ? s.connectRemoveFailed(file) : s.connectBoardFailed(file))
+      return false
+    }
+  }
+  // A foreign script must never become the command installed in another agent's hook.
+  // The reporter is retained on removal for queued/in-flight hooks; only owned board
+  // scripts with no remaining command files are removed below.
+  const hasReporter = remove || (await sharedFile(script, reporter))
+  // The 0.18.0 bundle differs only by these newly added, unused setup notices. Reconstruct
+  // its exact known bytes rather than treating every pre-record installation as foreign.
+  // Ownership still compares the whole file: an edited old bundle is preserved too.
+  const knownBoards = Object.values(STRINGS).flatMap(words => {
+    const code = boardScript(path, words.lang)
+    return [code, code.replace(/^  connect(?:Preserved|RemoveFailed|RemoveIncomplete|BoardRetained|Attention):[^\n]*\n/gm, '')]
+  })
+  const hasBoard = remove || (await sharedFile(board, boardCode, knownBoards))
   const savedBy = remove ? null : openclawSavedBy(await readText($, [openclawHome, 'openclaw.json'].join(sep)).catch(() => ''))
   // A config no OpenClaw has saved yet (installed, never run) says nothing of its version,
   // so OpenClaw is asked, as it is when the config names one too old.
@@ -735,7 +784,7 @@ const connectAgents = async ($: EngineInterface, mode: ConnectMode): Promise<{ t
   // plugin file, so when the plugin file fails, the entry is not written either.
   const failed = new Set<string>()
   for (const hook of agentHooks({ home, sep, isWindows: isWin, script, inbox: inboxPath(path), codexHome, grokHome, hermesHome, openclawHome, board, s })) {
-    if (failed.has(hook.agent)) continue
+    if (!remove && (failed.has(hook.agent) || (hook.label !== '' && !hasReporter) || (hook.label === '' && !hasBoard))) continue
     let isInstalled = false
     for (const dir of hook.dirs ?? [hook.dir]) isInstalled = isInstalled || (await $.fs.exists(dir))
     // Taking the hooks out goes by our own files, so one an earlier connect left where the
@@ -744,21 +793,43 @@ const connectAgents = async ($: EngineInterface, mode: ConnectMode): Promise<{ t
     if (!isInstalled) continue
     // One agent whose file cannot be written (a folder missing, a read-only file) is named and
     // passed over, so the agents after it are still hooked in.
+    let activeFile = hook.file
     try {
       // Left under the plugin's earlier name, it would report every turn a second time.
       const hadOld = hook.old !== undefined && (await $.fs.exists(hook.old))
-      if (hadOld && hook.old !== undefined) await removeFile(hook.old)
+      if (hadOld && hook.old !== undefined) {
+        activeFile = hook.old
+        const old = await readText($, hook.old)
+        if (hook.edit(old, true, await previousOutput(hook.old)) !== DELETE) {
+          preserve(hook.old)
+          failedLabels.add(hook.label)
+          if (!remove) { failed.add(hook.agent); continue }
+        } else await removeFile(hook.old)
+      }
+      activeFile = hook.file
+      const exists = await $.fs.exists(hook.file)
       const before = await readText($, hook.file).catch(() => null)
       if (before === null) {
-        if (!isAuto && hook.label !== '') skipped.push(s.connectSkipped(hook.label, hook.file))
+        if (remove) {
+          skipped.push(s.connectRemoveFailed(hook.file))
+          failedLabels.add(hook.label)
+          if (hook.label === '') canRemoveBoard = false
+        } else if (!isAuto && hook.label !== '') skipped.push(s.connectSkipped(hook.label, hook.file))
+        continue
+      }
+      const after = hook.edit(before, remove || (hook.agent === 'openclaw' && openclawOld !== null), await previousOutput(hook.file))
+      if ((hook.generated && exists && before === '') || after === COLLISION) {
+        preserve(hook.file)
+        failedLabels.add(hook.label)
+        if (hook.label === '') canRemoveBoard = false
+        if (!remove && hook.label !== '') failed.add(hook.agent)
         continue
       }
       // An OpenClaw too old for our entry would not start with it in its config, so it is not
       // hooked in, and what an earlier connect put there comes back out.
       if (hook.agent === 'openclaw' && openclawOld !== null) {
-        const after = before.trim() === '' ? null : hook.edit(before, true)
         if (after === DELETE) await removeFile(hook.file)
-        else if (after !== null && after !== before) await $.fs.write(hook.file, after)
+        else if (typeof after === 'string' && after !== before) await writeFile(hook.file, after, hook.generated)
         const note = s.connectTooOld(hook.label, openclawOld, OPENCLAW_MIN)
         if (mode === 'connect' && !skipped.includes(note)) skipped.push(note)
         continue
@@ -767,9 +838,11 @@ const connectAgents = async ($: EngineInterface, mode: ConnectMode): Promise<{ t
         if (hadOld) done.push(hook.label)
         continue
       }
-      const after = hook.edit(before, remove)
       if (after === null) {
-        if (mode === 'connect' && hook.label !== '') skipped.push(s.connectSkipped(hook.label, hook.file))
+        if (remove && before.trim() !== '') {
+          skipped.push(s.connectRemoveFailed(hook.file))
+          failedLabels.add(hook.label)
+        } else if (mode === 'connect' && hook.label !== '') skipped.push(s.connectSkipped(hook.label, hook.file))
         continue
       }
       if (after === DELETE) {
@@ -778,7 +851,9 @@ const connectAgents = async ($: EngineInterface, mode: ConnectMode): Promise<{ t
         // Only an empty folder goes, so anything the person added stays.
         if (/[\\/]SKILL\.md$/.test(hook.file)) await removeEmptyDir($, hook.file.replace(/[\\/][^\\/]*$/, ''), isWin)
       } else if (after !== before) {
-        await $.fs.write(hook.file, after)
+        await writeFile(hook.file, after, hook.generated)
+      } else if (!remove && hook.generated) {
+        await $.store.set(ownershipKey(hook.file), after)
       }
       if ((remove || isAuto) && after === before && !hadOld) continue
       // A session that only brings our own hook up to date (a new timeout, say) does not
@@ -796,21 +871,29 @@ const connectAgents = async ($: EngineInterface, mode: ConnectMode): Promise<{ t
       // A board command (no label of its own) that cannot be written leaves the agent's hook
       // as it is: the board is an extra, the hook is what reports.
       if (hook.label !== '') failed.add(hook.agent)
-      if (!isAuto) skipped.push(hook.label === '' ? s.connectBoardFailed(hook.file) : s.connectFailed(hook.label, hook.file))
+      failedLabels.add(hook.label)
+      if (hook.label === '') canRemoveBoard = false
+      if (remove) skipped.push(s.connectRemoveFailed(activeFile))
+      else if (!isAuto) skipped.push(hook.label === '' ? s.connectBoardFailed(activeFile) : s.connectFailed(hook.label, activeFile))
     }
   }
-  const trust = [...(done.includes('Codex') ? [s.connectCodexTrust] : []), ...(done.includes('Hermes Agent') ? [s.connectHermesTrust] : [])]
+  if (remove) {
+    if (canRemoveBoard) await sharedFile(board, boardCode, knownBoards)
+    else if (await $.fs.exists(board)) skipped.push(s.connectBoardRetained(board))
+  }
+  const completed = done.filter(label => !failedLabels.has(label))
+  const trust = [...(completed.includes('Codex') ? [s.connectCodexTrust] : []), ...(completed.includes('Hermes Agent') ? [s.connectHermesTrust] : [])]
   // An agent found but left out is named below it, so "none found" would contradict that.
   const none = skipped.length === 0 ? [s.connectNone] : []
   const lines = remove
-    ? [done.length === 0 ? s.connectNothingRemoved : s.connectRemoved(done.join(s.listSep))]
+    ? [...(skipped.length > 0 ? [s.connectRemoveIncomplete] : []), ...(completed.length > 0 ? [s.connectRemoved(completed.join(s.listSep))] : skipped.length === 0 ? [s.connectNothingRemoved] : [])]
     : isAuto
-      ? [s.autoConnected(done.join(s.listSep)), ...trust, s.boardEverywhere(board), s.autoConnectUndo]
-      : done.length === 0
-        ? [...none, s.boardEverywhere(board)]
-        : [s.connectDone(done.join(s.listSep)), ...trust, s.boardEverywhere(board)]
+      ? [...(completed.length > 0 ? [s.autoConnected(completed.join(s.listSep))] : []), ...trust, ...(hasBoard ? [s.boardEverywhere(board)] : []), s.autoConnectUndo]
+      : completed.length === 0
+        ? [...none, ...(hasBoard ? [s.boardEverywhere(board)] : [])]
+        : [s.connectDone(completed.join(s.listSep)), ...trust, ...(hasBoard ? [s.boardEverywhere(board)] : [])]
 
-  return { text: [...lines, ...skipped].join('\n'), done }
+  return { text: [...lines, ...skipped].join('\n'), done: completed, hasWarnings: skipped.length > 0 }
 }
 
 // An OpenClaw config can name a version older than the one installed, since an update leaves
@@ -830,11 +913,12 @@ const installedOpenclawOld = async ($: EngineInterface, isWin: boolean, savedBy:
 // option off, nothing is added behind their back.
 const autoConnect = async ($: EngineInterface, options: PluginOptions): Promise<void> => {
   if (options.autoConnect === false || (await $.store.get('autoConnectOff')) === true) return
-  const { text, done } = await connectAgents($, 'auto')
-  if (done.length === 0) return
+  const { text, done, hasWarnings } = await connectAgents($, 'auto')
+  if (done.length === 0 && !hasWarnings) return
   const s = await wordsOf($)
-  await update($, answer, () => ({ question: s.autoConnectTitle, text, isAsking: false }))
-  await $.ui.notify(s.autoConnected(done.join(s.listSep)), { title: s.autoConnectTitle }).catch(() => undefined)
+  const title = hasWarnings ? s.connectAttention : s.autoConnectTitle
+  await update($, answer, () => ({ question: title, text, isAsking: false }))
+  await $.ui.notify(hasWarnings ? text : s.autoConnected(done.join(s.listSep)), { title }).catch(() => undefined)
 }
 
 // The instruction files setup --agents writes the section into, per agent.

@@ -4,7 +4,7 @@ import type { ProgressMirror, ProgressPr } from '../types'
 import { askOf } from '../hooks/ask'
 import { boardItems, boardKey, boardScreen, boardText, emptyBoardState, fit, peekInbox, pinned } from '../hooks/board'
 import { addManualTask, isArchivable, manualTaskCount, renderAutoBlock, setManualStep, takeArchivable, takeManualDone, takeTask, upsertAutoBlock } from '../hooks/blocks'
-import { agentHooks, boardCommands, boardScript, DELETE, isWindowsHost, openclawPlugin, openclawPrinted, openclawSavedBy, openclawTooOld, readConfig, reportCommand, reporterPs1, withFlatHook, withGroupedHook, withHermesHooks, withoutHermesHooks, withoutOurHooks, withoutSection } from '../hooks/connect'
+import { agentHooks, boardCommands, boardScript, COLLISION, DELETE, generatedFile, isWindowsHost, openclawPlugin, openclawPrinted, openclawSavedBy, openclawTooOld, readConfig, reportCommand, reporterPs1, withFlatHook, withGroupedHook, withHermesHooks, withoutHermesHooks, withoutOurHooks, withoutSection } from '../hooks/connect'
 import { dashboardHtml } from '../hooks/dashboard'
 import { answerKey, blockId, isBoardTurn, isInboxFile, isTakenFile, isTextLog, isTranscriptPath, keepInboxDone, promptKey, readTurn, takenName, transcriptTail, turnsToDigest } from '../hooks/inbox'
 import { applyDigest, clearAsked, isWork, lastQuestion, markAsked, parseDigest, replyData, turnTools } from '../hooks/digest'
@@ -697,7 +697,7 @@ test('each agent’s config gets the hook in the shape it reads, and nothing els
   expect(hooks.grok?.old).toBe('/h/.grok/hooks/progress-pane.json')
   expect(hooks.opencode?.old).toBe('/h/.config/opencode/plugin/progress-pane.js')
   expect(JSON.parse(String(hooks.grok?.edit('', false))).hooks.Stop[0].hooks[0].command).toBe("sh '/h/.claude/progress-report.sh' grok turn || true")
-  expect(hooks.grok?.edit('{"hooks":{}}', true)).toBe(DELETE)
+  expect(hooks.grok?.edit('{"hooks":{}}', true)).toBe(COLLISION)
   // PowerShell alone took 0.6 s of the end hook's time on Windows: it gets 5.
   expect(JSON.parse(String(hooks.grok?.edit('', false))).hooks.SessionEnd[0].hooks[0].timeout).toBe(5)
   expect(muse.hooks.SessionEnd[0].hooks[0].timeout).toBe(5)
@@ -764,7 +764,8 @@ test('OpenClaw gets a plugin file and the config entry that loads it, beside the
   expect(plugin?.file).toBe('/h/.openclaw/agent-board.mjs')
   expect(config?.file).toBe('/h/.openclaw/openclaw.json')
   expect(String(plugin?.edit('', false))).toContain('const INBOX = "/h/.claude/progress-inbox"')
-  expect(plugin?.edit('old', true)).toBe(DELETE)
+  expect(plugin?.edit('old', true)).toBe(COLLISION)
+  expect(plugin?.edit(String(plugin?.edit('', false)), true)).toBe(DELETE)
   const own = { gateway: { port: 18789 }, plugins: { allow: ['discord'], load: { paths: ['/h/mine.mjs'] }, entries: { discord: { enabled: true } } } }
   const once = String(config?.edit(JSON.stringify(own), false))
   expect(JSON.parse(once)).toEqual({
@@ -1148,13 +1149,42 @@ test('each agent gets a board command in the form it reads, and a missing report
   // The description has a colon in it; quoted, it stays one YAML value.
   expect(skill.startsWith('---\nname: agent-board\ndescription: "Agent Board: what every agent is doing, and what waits on you"\n---\n')).toBe(true)
   expect(files['/h/.agents/skills/agent-board/SKILL.md']?.dirs).toContain('/h/.codex')
-  expect(files['/h/.hermes/skills/agent-board/SKILL.md']?.edit('x', true)).toBe(DELETE)
+  expect(files['/h/.hermes/skills/agent-board/SKILL.md']?.edit('x', true)).toBe(COLLISION)
   expect(files['/h/.gemini/config/skills/agent-board/SKILL.md']?.dir).toBe('/h/.gemini/antigravity')
   // Board files never count as connecting an agent: only its turns reaching the board do.
   expect(boardCommands(ctx).every(hook => hook.label === '')).toBe(true)
   expect(boardCommands({ ...ctx, board: undefined })).toEqual([])
   expect(boardScript('/h/.claude/progress.md', 'en').split('\n')[0]).toBe('globalThis.AGENT_BOARD = {"path":"/h/.claude/progress.md","lang":"en"}')
   expect(reportCommand('/h/.claude/progress-report.sh', 'gemini', 'turn', false)).toBe("sh '/h/.claude/progress-report.sh' gemini turn || true")
+})
+
+test('generated files require exact current or recorded bytes, never a familiar name or header', () => {
+  const current = '# Written by Agent Board\nnew output\n'
+  const previous = '# Written by Agent Board\nearlier output\n'
+  const edit = generatedFile(current)
+  expect(edit('', false)).toBe(current)
+  expect(edit(current, false)).toBe(current)
+  expect(edit(current, true)).toBe(DELETE)
+  expect(edit(previous, false)).toBe(COLLISION)
+  expect(edit(previous, false, previous)).toBe(current)
+  expect(edit(previous, true, previous)).toBe(DELETE)
+  for (const personal of ['personal command', ' ', `${current}my addition\n`, `${previous}my addition\n`]) {
+    expect(edit(personal, false, previous)).toBe(COLLISION)
+    expect(edit(personal, true, previous)).toBe(COLLISION)
+  }
+  expect(generatedFile(current, [previous])(previous, false)).toBe(current)
+})
+
+test('setup safety notices retain their paths and recovery command in every language', () => {
+  const path = 'C:\\synthetic\\commands\\board.toml'
+  for (const s of Object.values(STRINGS)) {
+    expect(s.connectPreserved(path)).toContain(path)
+    expect(s.connectRemoveFailed(path)).toContain(path)
+    expect(s.connectRemoveFailed(path)).toContain('/progress connect remove')
+    expect(s.connectBoardRetained(path)).toContain(path)
+    expect(s.connectRemoveIncomplete.length > 0).toBe(true)
+    expect(s.connectAttention.length > 0).toBe(true)
+  }
 })
 
 test('a Codex turn that showed the board is known by its session log, since its Stop leaves the request out', () => {

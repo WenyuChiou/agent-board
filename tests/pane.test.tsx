@@ -1,10 +1,14 @@
 import type { On, RenderPropsOf } from 'claude-code'
 import { expect, mock, test } from 'claude-code/testing'
 import type { Engine, MockClock } from 'claude-code/testing'
+import { agentHooks, boardScript, openclawPlugin } from '../hooks/connect'
+import { STRINGS } from '../hooks/strings'
 
 const FILE = '/home/me/.claude/progress.md'
 const SESSION = '2be48af2-6193-5040-aacc-e0546d6784f1'
 const PANE = { plugin: 'agent-board', component: 'Pane', requestId: 'agent-board' } as const
+const CONNECT = { home: '/home/me', sep: '/', isWindows: false, script: '/home/me/.claude/progress-report.sh', inbox: '/home/me/.claude/progress-inbox', codexHome: '/home/me/.codex', grokHome: '/home/me/.grok', hermesHome: '/home/me/.hermes', openclawHome: '/home/me/.openclaw', board: '/home/me/.claude/agent-board.mjs' }
+const grokHook = (): string => String(agentHooks(CONNECT).find(hook => hook.agent === 'grok')?.edit('', false))
 
 const PROPS: RenderPropsOf['Pane'] = {
   title: '進度',
@@ -51,6 +55,9 @@ type World = {
   openclaw?: string
   // Paths a write to fails (a read-only file, a folder that is not there).
   unwritable?: Set<string>
+  // A removal that fails, or reports success while the file still exists.
+  unremovable?: Set<string>
+  retainedOnRemove?: Set<string>
 }
 
 // On Windows the engine resolves /home/me/... to X:\home\me\... before fs.* reaches these
@@ -95,7 +102,12 @@ const engineBeneath = (on: On, world: World): MockClock => {
           world.files.set(posix(e.argv[2] ?? ''), text)
         }
       } else {
-        for (const path of e.argv.slice(1)) if (path !== '-f') world.files.delete(posix(path))
+        for (const path of e.argv.slice(1)) {
+          if (path === '-f') continue
+          const target = posix(path)
+          if (world.unremovable?.has(target)) exitCode = 1
+          else if (!world.retainedOnRemove?.has(target)) world.files.delete(target)
+        }
       }
       return { value: { exitCode, stdout: '', stderr: exitCode === 0 ? '' : 'No such file or directory', isStdoutTruncated: false, isStderrTruncated: false } }
     }
@@ -1219,7 +1231,7 @@ test('/progress connect hooks the installed agents into the pane once, keeps the
     files: new Map([
       ['/home/me/.codex/config.toml', 'model = "gpt-6"\n'],
       ['/home/me/.codex/AGENTS.md', `# Mine\n\nUse tabs.\n\n${section}`],
-      [oldGrok, '{"hooks":{}}'],
+      [oldGrok, grokHook()],
       ['/home/me/.grok/.metadata_version', '3'],
 
       ['/home/me/.grok/config.toml', 'model = "grok-build"\n'],
@@ -1272,7 +1284,7 @@ test('a ~/.grok folder with only another tool’s hooks in it is not taken for G
   expect(world.files.has('/home/me/.agents/skills/agent-board/SKILL.md')).toBe(false)
 
   // An earlier version took the folder for Grok Build and wrote its hook there.
-  world.files.set(ours, '{"hooks":{}}')
+  world.files.set(ours, grokHook())
   const removed = await $.command.run({ ...TIDY, args: 'connect remove' })
   expect(removed.text).toContain('已拿掉：Grok Build。')
   expect(world.files.has(ours)).toBe(false)
@@ -1669,7 +1681,7 @@ test('a Grok Build turn that printed the board for a plain request gets no block
 test('an OpenClaw older than 2026.4.24 is not hooked in, what an earlier connect put there comes back out, and connecting by hand says why', async ($, on) => {
   const meta = { lastTouchedVersion: '2026.3.8' }
   const earlier = { meta, gateway: { port: 18789 }, plugins: { load: { paths: ['/home/me/.openclaw/agent-board.mjs'] }, entries: { 'agent-board': { enabled: true, hooks: { allowConversationAccess: true } } } } }
-  const world: World = { files: new Map([['/home/me/.openclaw/openclaw.json', JSON.stringify(earlier)], ['/home/me/.openclaw/agent-board.mjs', '// written by an earlier connect']]), mtime: 1, hasTasks: true, ran: [] }
+  const world: World = { files: new Map([['/home/me/.openclaw/openclaw.json', JSON.stringify(earlier)], ['/home/me/.openclaw/agent-board.mjs', openclawPlugin(CONNECT)]]), mtime: 1, hasTasks: true, ran: [] }
   engineBeneath(on, world)
   const seen = outside(on)
   await $.session.start({ cwd: '/work/persona_framework', surface: 'terminal', isInteractive: true })
@@ -1761,7 +1773,7 @@ test('an OpenClaw that has not saved its config yet is asked its version, and an
 
 test('taking the hooks out also takes out a Grok hook an earlier version left in a ~/.grok without Grok', async ($, on) => {
   const orphan = '/home/me/.grok/hooks/agent-board.json'
-  const world: World = { files: new Map([[orphan, '{"hooks":{}}']]), mtime: 1, hasTasks: true, ran: [] }
+  const world: World = { files: new Map([[orphan, grokHook()]]), mtime: 1, hasTasks: true, ran: [] }
   engineBeneath(on, world)
   await $.command.run({ ...TIDY, args: 'connect remove' })
   expect(world.ran).toContainEqual(['rm', '-f', orphan])
@@ -1828,4 +1840,158 @@ test('with the autoConnect option off, a session hooks nothing in', { options: {
   engineBeneath(on, world)
   await $.session.start({ cwd: '/work/persona_framework', surface: 'terminal', isInteractive: true })
   expect(world.files.has('/home/me/.codex/hooks.json')).toBe(false)
+})
+
+test('automatic connection and removal preserve personal commands and skills, including edits after installation', async ($, on) => {
+  const files = ['/home/me/.gemini/commands/board.toml', '/home/me/.config/opencode/commands/board.md', '/home/me/.agents/skills/agent-board/SKILL.md', '/home/me/.hermes/skills/agent-board/SKILL.md', '/home/me/.gemini/config/skills/agent-board/SKILL.md']
+  const world: World = {
+    files: new Map([
+      ...files.map(file => [file, `personal content in ${file}\r\n`] as [string, string]),
+      ['/home/me/.gemini/antigravity/config.json', '{}'],
+      ['/home/me/.codex/config.toml', ''],
+    ]),
+    mtime: 1, hasTasks: true,
+  }
+  engineBeneath(on, world)
+  const seen = outside(on)
+  await $.session.start({ cwd: '/work/persona_framework', surface: 'terminal', isInteractive: true })
+  for (const file of files) expect(world.files.get(file)).toBe(`personal content in ${file}\r\n`)
+  expect(seen.notified.some(text => text.includes(files[0] ?? 'missing'))).toBe(true)
+  const connected = await $.command.run({ ...TIDY, args: 'connect' })
+  for (const file of files) expect(connected.text).toContain(file)
+  const removed = await $.command.run({ ...TIDY, args: 'connect remove' })
+  expect(removed.text).toContain('清理尚未完成')
+  for (const file of files) expect(world.files.get(file)).toBe(`personal content in ${file}\r\n`)
+
+  // Unmodified owned output can upgrade with a language change, while a later user edit stays.
+  world.files.delete(files[0] ?? '')
+  await $.command.run({ ...TIDY, args: 'connect' })
+  await $.command.run({ ...TIDY, args: 'lang en' })
+  await $.command.run({ ...TIDY, args: 'connect' })
+  const gemini = files[0] ?? ''
+  expect(world.files.get(gemini)).toContain('Show me the Agent Board')
+  const edited = `${world.files.get(gemini)}\n# my change\n`
+  world.files.set(gemini, edited)
+  await $.command.run({ ...TIDY, args: 'connect' })
+  await $.command.run({ ...TIDY, args: 'connect remove' })
+  expect(world.files.get(gemini)).toBe(edited)
+})
+
+test('an empty personal file and an unowned legacy plugin are preserved, and a foreign reporter is never hooked in', async ($, on) => {
+  const empty = '/home/me/.gemini/commands/board.toml'
+  const old = '/home/me/.config/opencode/plugin/progress-pane.js'
+  const reporter = '/home/me/.claude/progress-report.sh'
+  const world: World = { files: new Map([[empty, ''], [old, '// personal plugin\n'], [reporter, '#!/bin/sh\necho personal\n']]), mtime: 1, hasTasks: true }
+  engineBeneath(on, world)
+  const seen = outside(on)
+  await $.session.start({ cwd: '/work/persona_framework', surface: 'terminal', isInteractive: true })
+  expect(world.files.get(empty)).toBe('')
+  expect(world.files.get(old)).toBe('// personal plugin\n')
+  expect(world.files.get(reporter)).toBe('#!/bin/sh\necho personal\n')
+  expect(world.files.has('/home/me/.gemini/settings.json')).toBe(false)
+  expect(seen.notified.some(text => text.includes(reporter))).toBe(true)
+  const removed = await $.command.run({ ...TIDY, args: 'connect remove' })
+  expect(removed.text).toContain(old)
+  expect(world.files.get(old)).toBe('// personal plugin\n')
+  expect(world.files.get(empty)).toBe('')
+})
+
+test('a collision is announced even when all installed reporting hooks were already connected', async ($, on) => {
+  const settings = '/home/me/.gemini/settings.json'
+  const command = '/home/me/.gemini/commands/board.toml'
+  const hook = agentHooks(CONNECT).find(one => one.agent === 'gemini' && one.label !== '')
+  const world: World = { files: new Map([[settings, String(hook?.edit('', false))], [command, 'personal']]), mtime: 1, hasTasks: true }
+  engineBeneath(on, world)
+  const seen = outside(on)
+  await $.session.start({ cwd: '/work/persona_framework', surface: 'terminal', isInteractive: true })
+  expect(seen.notified).toHaveLength(1)
+  expect(seen.notified[0]).toContain(command)
+  expect(seen.notified[0]).not.toContain('已自動接上：。')
+})
+
+test('failed and falsely successful deletes report exact leftovers, retain the board, and permit a later retry', async ($, on) => {
+  const command = '/home/me/.gemini/commands/board.toml'
+  const skill = '/home/me/.agents/skills/agent-board/SKILL.md'
+  const board = '/home/me/.claude/agent-board.mjs'
+  const sibling = '/home/me/.agents/skills/agent-board/my-notes.txt'
+  const world: World = { files: new Map([['/home/me/.gemini/settings.json', '{}'], [sibling, 'keep me']]), mtime: 1, hasTasks: true, unremovable: new Set(), retainedOnRemove: new Set() }
+  engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/persona_framework', surface: 'terminal', isInteractive: true })
+  world.unremovable?.add(command)
+  world.retainedOnRemove?.add(skill)
+  const removed = await $.command.run({ ...TIDY, args: 'connect remove' })
+  expect(removed.text).toContain('清理尚未完成')
+  expect(removed.text).toContain(`無法確認移除結果；請檢查這個檔案，再重試 /progress connect remove：${command}`)
+  expect(removed.text).toContain(`無法確認移除結果；請檢查這個檔案，再重試 /progress connect remove：${skill}`)
+  expect(removed.text).toContain('仍有指令檔未移除')
+  for (const file of [command, skill, board, sibling]) expect(world.files.has(file)).toBe(true)
+  world.unremovable?.clear()
+  world.retainedOnRemove?.clear()
+  const retried = await $.command.run({ ...TIDY, args: 'connect remove' })
+  expect(retried.text).not.toContain('清理尚未完成')
+  for (const file of [command, skill, board]) expect(world.files.has(file)).toBe(false)
+  expect(world.files.get(sibling)).toBe('keep me')
+  expect(world.files.has('/home/me/.claude/progress-report.sh')).toBe(true)
+})
+
+test('a failed primary plugin deletion is not counted as disconnected and other cleanup continues', async ($, on) => {
+  const plugin = '/home/me/.grok/hooks/agent-board.json'
+  const world: World = { files: new Map([['/home/me/.grok/config.toml', ''], ['/home/me/.gemini/settings.json', '{}']]), mtime: 1, hasTasks: true, unremovable: new Set() }
+  engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/persona_framework', surface: 'terminal', isInteractive: true })
+  world.unremovable?.add(plugin)
+  const removed = await $.command.run({ ...TIDY, args: 'connect remove' })
+  expect(removed.text).toContain(plugin)
+  expect(removed.text).not.toContain('已拿掉：Gemini CLI、Grok Build')
+  expect(removed.text).toContain('已拿掉：Gemini CLI。')
+  expect(world.files.has(plugin)).toBe(true)
+  expect(JSON.parse(world.files.get('/home/me/.gemini/settings.json') ?? '{}').hooks).toEqual({})
+})
+
+test('recorded generated bytes permit an upgrade while unreadable or subsequently edited artifacts stay intact', async ($, on) => {
+  const board = '/home/me/.claude/agent-board.mjs'
+  const command = '/home/me/.gemini/commands/board.toml'
+  const old = '# earlier generated version\n'
+  const world: World = { files: new Map([[board, old], [command, 'personal file']]), mtime: 1, hasTasks: true, unreadable: new Set([command]), store: { inboxDone: {}, [`generated:${board}`]: old } }
+  engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/persona_framework', surface: 'terminal', isInteractive: true })
+  expect(world.files.get(board)).toBe(boardScript(FILE, 'zh-TW'))
+  const removed = await $.command.run({ ...TIDY, args: 'connect remove' })
+  expect(removed.text).toContain(command)
+  expect(world.files.get(command)).toBe('personal file')
+  expect(world.files.has(board)).toBe(true)
+})
+
+test('Windows removal requests terminating errors and still checks whether the file disappeared', async ($, on) => {
+  const command = '/home/me/.gemini/commands/board.toml'
+  const world: World = { files: new Map([['/home/me/.gemini/settings.json', '{}']]), mtime: 1, hasTasks: true, ran: [], env: { HOME: '/home/me', LANG: 'en', OS: 'Windows_NT' } }
+  engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/persona_framework', surface: 'terminal', isInteractive: true })
+  // The fake PowerShell returns 0 but deliberately leaves the files where they are.
+  const removed = await $.command.run({ ...TIDY, args: 'connect remove' })
+  expect(removed.text).toContain('Could not verify removal')
+  expect(removed.text).toContain(command)
+  expect(world.files.has(command)).toBe(true)
+  expect(world.ran?.some(argv => argv[0] === 'powershell' && argv.at(-1)?.includes('-ErrorAction Stop'))).toBe(true)
+})
+
+test('an exact pre-ownership 0.18 board and commands migrate across languages, while a modified old board stays', async ($, on) => {
+  const board = '/home/me/.claude/agent-board.mjs'
+  const old = boardScript(FILE, 'en').replace(/^  connect(?:Preserved|RemoveFailed|RemoveIncomplete|BoardRetained|Attention):[^\n]*\n/gm, '')
+  const command = agentHooks({ ...CONNECT, s: STRINGS.en }).find(hook => hook.file === '/home/me/.gemini/commands/board.toml')
+  const world: World = { files: new Map([[board, old], ['/home/me/.gemini/commands/board.toml', String(command?.edit('', false))]]), mtime: 1, hasTasks: true }
+  engineBeneath(on, world)
+  const seen = outside(on)
+  await $.session.start({ cwd: '/work/persona_framework', surface: 'terminal', isInteractive: true })
+  expect(world.files.get(board)).toBe(boardScript(FILE, 'zh-TW'))
+  expect(world.files.get('/home/me/.gemini/commands/board.toml')).toContain(STRINGS['zh-TW'].boardCommandPrompt)
+  expect(seen.notified.some(text => text.includes('已保留'))).toBe(false)
+  const personal = `${old}\n// my addition\n`
+  world.files.set(board, personal)
+  const connected = await $.command.run({ ...TIDY, args: 'connect' })
+  expect(connected.text).toContain(board)
+  expect(world.files.get(board)).toBe(personal)
+  const removed = await $.command.run({ ...TIDY, args: 'connect remove' })
+  expect(removed.text).toContain('清理尚未完成')
+  expect(world.files.get(board)).toBe(personal)
 })
