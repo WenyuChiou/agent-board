@@ -179,16 +179,43 @@ test('the view sorts work into this session, waiting on you, due soon, other and
   const view = buildView(parseProgress(others), ['persona_framework'], sampleMirror(), NOW)
   expect(view.current?.title).toBe('進度面板')
   expect(view.current?.status).toBe('正在做：寫 Mod 中')
-  expect(view.waiting.map(w => [w.task, w.text, w.note])).toEqual([
-    ['修 CI', '等你回覆', ''],
-    ['Google 暑期實習', '推薦信', '等教授回覆'],
-  ])
+  // 修 CI's turn ended without asking anything: it is work in progress, not waiting on you.
+  expect(view.waiting.map(w => [w.task, w.text, w.note])).toEqual([['Google 暑期實習', '推薦信', '等教授回覆']])
   expect(view.due.map(d => [d.title, d.due?.left, d.due?.tone, d.status])).toEqual([
     ['Google 暑期實習', '還有 2 天', 'alert', '等你：推薦信'],
   ])
   // Listed under 快到期, so not again under 其他進行中.
-  expect(view.active.map(a => [a.project, a.status])).toEqual([['FLOODABM', '對話已結束，可接手']])
+  expect(view.active.map(a => [a.project, a.status])).toEqual([
+    ['persona_framework', '下一步：修'],
+    ['FLOODABM', '對話已結束，可接手'],
+  ])
   expect(view.recent.map(r => r.title)).toEqual(['發佈 1.7.3'])
+})
+
+test('a turn that ends with no question, or waits only on CI, is not listed as waiting on the person', () => {
+  const block = (id: string, agent: string, title: string, steps: string, extra = ''): string =>
+    `<!-- auto session=${id} agent=${agent} state=waiting updated=2026-10-16T11:00:00.000Z${extra} -->\n### ${title}\n${steps}<!-- /auto session=${id} -->\n`
+  const file = [
+    '# 專案進度\n\n## api-gateway\n',
+    block('a1a1a1a1', 'claude', '修 CI', '- [x] 看 log\n- [ ] 修\n'),
+    block('b2b2b2b2', 'codex', '合併 #350', '- [x] 修好\n- [>] 等 CI 跑完\n'),
+    block('c3c3c3c3', 'codex', '對照 2007 到 2009', '- [x] 讀資料\n- [~] 比對\n'),
+    // Two sessions on one pull request: the older one finished, the newer one asks.
+    block('d4d4d4d4', 'claude', '量測 T10', '- [x] 跑完\n- [ ] 寫報告\n', ' pr=402'),
+    block('e5e5e5e5', 'claude', '重評 T1', '- [x] 重評\n- [?] 新基準 — 接受這 11 張卡當新基準，OK?\n', ' pr=402'),
+    // With a date close by, such a block is listed under 快到期 like any other open work.
+    block('f6f6f6f6', 'codex', '交報告', '> 截止 10-18\n- [ ] 寫結論\n'),
+  ].join('\n')
+  const view = buildView(parseProgress(file), ['elsewhere'], null, NOW)
+  expect(view.waiting.map(w => [w.task, w.text])).toEqual([['重評 T1', '新基準']])
+  expect(view.active.map(a => [a.title, a.status])).toEqual([
+    ['修 CI', '下一步：修'],
+    ['合併 #350', '在跑：等 CI 跑完'],
+    ['對照 2007 到 2009', '正在做：比對'],
+    ['量測 T10', '下一步：寫報告'],
+  ])
+  expect(view.due.map(d => [d.title, d.status])).toEqual([['交報告', '下一步：寫結論']])
+  expect(view.overview.waiting).toBe(1)
 })
 
 test('long lists fold finished steps and the far end', () => {

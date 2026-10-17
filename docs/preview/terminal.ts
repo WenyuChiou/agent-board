@@ -203,12 +203,13 @@ const esc = (text: string): string => text.replace(/&/g, '&amp;').replace(/</g, 
 
 export const CELL = 8.4
 export const LINE = 20
-export const MONO =
-  "ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', 'Noto Sans Mono CJK TC', 'Noto Sans CJK TC', 'PingFang TC', 'Microsoft JhengHei', monospace"
+const WIDE_SIZE = 15.4
 
 // Box-drawing characters become vector strokes: fonts draw them with gaps between lines, and
-// a terminal's own cells have none.
+// a terminal's own cells have none. So does a to-do step's ○, which JetBrains Mono lacks and a
+// Chinese font draws 1 em wide, spilling into the next cell.
 const STROKES: Record<string, (x: number, y: number) => string> = {
+  '○': (x, y) => `M${x + CELL / 2 - 3} ${y + LINE / 2 - 1}a3 3 0 1 0 6 0a3 3 0 1 0 -6 0z`,
   '─': (x, y) => `M${x} ${y + LINE / 2}h${CELL}`,
   '━': (x, y) => `M${x} ${y + LINE / 2}h${CELL}`,
   '│': (x, y) => `M${x + CELL / 2} ${y}v${LINE}`,
@@ -221,7 +222,9 @@ const STROKES: Record<string, (x: number, y: number) => string> = {
 }
 
 // The grid as SVG text runs. Each run is one style and one cell width (narrow or wide), and is
-// stretched to its exact cell count, so columns line up whatever font the viewer has.
+// spaced out to its exact cell count, so columns line up whatever font the viewer has. A wide
+// (Chinese) letter is 1 em and its two cells 1.2 em of the terminal's 14 px: it is drawn at
+// WIDE_SIZE px, so it nearly fills them and a thin gap is left, rather than stretched wide or spread.
 export const gridSvg = (block: Block, x0: number, y0: number, theme: Theme): string => {
   const out: string[] = []
   const strokes = new Map<string, string[]>()
@@ -233,7 +236,7 @@ export const gridSvg = (block: Block, x0: number, y0: number, theme: Theme): str
       const cell = line[c] as Cell
       const draw = STROKES[cell.ch]
       if (draw !== undefined) {
-        const key = `${cell.style.fg ?? theme.frame}|${cell.ch === '━' ? 3 : 1.2}`
+        const key = `${cell.style.fg ?? (cell.ch === '○' ? theme.ink : theme.frame)}|${cell.ch === '━' ? 3 : 1.2}`
         const list = strokes.get(key) ?? []
         // A run of one horizontal line is one stroke, so it shows no seams between cells.
         let end = c + 1
@@ -269,7 +272,7 @@ export const gridSvg = (block: Block, x0: number, y0: number, theme: Theme): str
         const s = cell.style
         const cellsOf = wide ? 2 : 1
         out.push(
-          `<text x="${(x0 + (c + lead * cellsOf) * CELL).toFixed(1)}" y="${y}" textLength="${((span - (lead + trail) * cellsOf) * CELL).toFixed(1)}" lengthAdjust="spacingAndGlyphs"` +
+          `<text x="${(x0 + (c + lead * cellsOf) * CELL).toFixed(1)}" y="${y}" textLength="${((span - (lead + trail) * cellsOf) * CELL).toFixed(1)}" lengthAdjust="spacing"${wide ? ` font-size="${WIDE_SIZE}"` : ''}` +
             ` fill="${s.fg ?? theme.ink}"${s.bold ? ' font-weight="700"' : ''}${s.underline ? ' text-decoration="underline"' : ''}>${esc(trimmed)}</text>`,
         )
       }

@@ -199,8 +199,10 @@ export const EN: Strings = {
   paneTitle: 'Progress',
   legendWords: ['Done', 'Doing', 'To do', 'Waiting on you', 'Running', 'Stuck', 'Canceled'],
   now: ' ← now',
-  replyElsewhere: (project: string, agent: string): string =>
-    `Reply in the ${project} session${agent === '' ? '' : ` (${agent})`}. Can't reply from here.`,
+  replyElsewhere: (task: string, session: string, agent: string): string => {
+    const who = [session, agent].filter(part => part !== '').join(', ')
+    return `Reply in the "${task}" session${who === '' ? '' : ` (${who})`}. Can't reply from here.`
+  },
   arrivedDone: 'It arrived, done',
   done: 'Done',
   reply: 'Reply',
@@ -224,6 +226,7 @@ export const EN: Strings = {
   heldElsewhere: 'Another session is working on it.',
   takeOver: 'Take over and finish',
   copyResume: 'Copy resume command',
+  copySessionId: 'Copy session ID',
   tickStep: 'Mark step done',
   handOver: 'Hand to Claude',
   nothingForYou: '✓ Nothing needs you right now',
@@ -272,6 +275,8 @@ export const EN: Strings = {
   answered: (text: string): string => `Replied to Claude: ${text}`,
   commandOf: (step: string): string => `Command to run for "${step}"`,
   resumeOf: (title: string): string => `Command to resume "${title}". Paste it into the terminal and run it.`,
+  sessionIdOf: (title: string, canResume: boolean): string =>
+    `ID of the "${title}" session. Find it in your session list${canResume ? ', or reopen it with claude --resume' : ''}.`,
   fileUnreadable: "Can't read the progress file",
   dashStamp: (time: string): string => `updated ${time}`,
   windowOpened: (path: string): string => `Opened in your browser: ${path}`,
@@ -288,6 +293,7 @@ export const EN: Strings = {
   boardKeyTick: 'x done',
   boardKeyArchive: 'a archive',
   boardKeyCopyCommand: 'c copy command',
+  boardKeyCopyId: 'c copy session ID',
   boardKeyCopyResume: 'c copy resume command',
   boardKeyConfirm: 'y/n copy answer',
   boardKeyOptions: (n: number): string => `1–${n} copy answer`,

@@ -32,7 +32,7 @@
   but not send to an agent", "--serve --lan prints the page's network
   address and a QR code of it, and a second run gives the same address".
 
-## 0.19.2 — 2026-10-17
+## 0.19.4 — 2026-10-17
 
 - **The page's address, key and all, is no longer kept beside
   `progress.md`.** `--serve` kept it in `progress-serve.json` in the same
@@ -50,11 +50,13 @@
   first, the new one stops and its `--serve` prints the other's address. A
   file left by a page that is gone (it does not answer, also after five
   more seconds when it still runs) is removed first, and so is one cut
-  short by a crash, once it is ten seconds old. Tests: in
-  `tests/board.test.mjs`, "two --serve run at the same moment open one page
-  between them, and a server started while it runs stops at once", "an
-  address file cut short by a crash is cleared once it is old, and the next
-  --serve starts a page".
+  short by a crash or holding no page address, once it is ten seconds old.
+  The same `progress.md` named two ways (`C:/x` and `C:\x`) has one page
+  too. Tests: in `tests/board.test.mjs`, "two --serve run at the same moment
+  open one page between them, and a server started while it runs stops at
+  once", "an address file cut short by a crash is cleared once it is old,
+  and the next --serve starts a page", "the same progress.md named two ways
+  brings back the same page".
 - **Archiving now dates a finished hand-kept task on the right day.** The
   page's **Archive now** and `/progress tidy` put a task the pane had seen
   done less than a day ago under the day before. It now goes under the day
@@ -68,6 +70,50 @@
 - `tsc -p .` reports no errors again. Seven had built up in the tests and in
   one engine call over earlier releases; the fixes change only types, not
   what runs.
+
+## 0.19.3 — 2026-10-17
+
+The reply hint names the session that asked (#49).
+
+- **A question from another session says which session to answer in.** The hint under
+  it said "Reply in the <project> session", but several sessions often share one folder,
+  and the desktop app lists sessions by title, so the person could see the question and
+  not find where to answer it. It now names the task and the session's short ID, plus
+  the agent when it is not Claude: `Reply in the "Rate-limit the public endpoints"
+  session (7f3c19ab, codex). Can't reply from here.` The same words are in the pane, the
+  terminal board, `progress.html` and the board page, in all three languages.
+- **A Claude Code session's question offers its ID to copy.** The pane's item has a
+  **Copy session ID** button, and `c` on the terminal board copies it, so the person can
+  find that session in the session list or reopen it with `claude --resume`. The full ID
+  comes from the block's `resume=`; a block without one gives its short ID, and only when
+  that is a plain ID (6 to 64 letters, digits and dashes), since anyone can write the
+  file and the clipboard must not get a command dressed as an ID. Another agent's ID
+  finds no Claude Code session, so its question offers none. `docs/FORMAT.md` says so.
+- Tests: "an item from another session in the same folder names that session’s task
+  and id", "the terminal board, progress.html and the board page name the session that
+  asked, and c copies a Claude Code session’s id", "a Claude Code block with no resume id
+  offers its block id to copy only when it is a plain id", and "another agent’s question
+  is answered there, but its command can be copied and its link opened from here"
+  (changed).
+
+## 0.19.2 — 2026-10-17
+
+Waiting on you lists only questions (#48).
+
+- **A session that asked nothing is no longer listed as waiting on you.** Every turn's
+  end writes `state=waiting`, and a block in that state with no `[?]` step got a "waiting
+  on your reply" item in Waiting on you with nothing to answer: a Claude Code session
+  that had just finished a turn, a Codex session waiting on CI (`[>]`), or the older of
+  two sessions on one pull request, which then looked like the same work listed twice.
+  Such a block now stays with the work in progress, showing its next step, its running
+  step or what it is doing, or under Due soon when it has a date close by. Waiting on you
+  holds `[?]` steps (and, on the terminal board and the board page, inbox turns not read
+  yet that end on a question), the same in the pane, the terminal board, `progress.html`
+  and the board page. With it go the desktop notification "<agent> asks: waiting on your
+  reply" that every such turn's end sent, and its place in the status line's waiting
+  count. `docs/FORMAT.md` says so for `state=waiting`. Tests: "a turn that ends with no
+  question, or waits only on CI, is not listed as waiting on the person", "the view sorts
+  work into this session, waiting on you, due soon, other and done".
 
 ## 0.19.1 — 2026-10-17
 

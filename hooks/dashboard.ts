@@ -61,7 +61,7 @@ const waitingItem = (item: WaitingItem, s: Strings): string =>
   // A backticked word in another kind of question is a name, not something to run.
   (item.command === null || item.kind !== 'do' ? '' : `<code>${esc(item.command)}</code>`) +
   (item.link === null ? '' : `<a href="${esc(item.link)}">${esc(s.openLink)}</a>`) +
-  `<div class="quiet">${esc(item.where === 'manual' ? '' : s.replyElsewhere(item.project, item.agent))}${item.when === '' ? '' : ` · ${esc(item.when)}`}</div></div>`
+  `<div class="quiet">${esc(item.where === 'manual' ? '' : s.replyElsewhere(item.task, item.session, item.agent))}${item.when === '' ? '' : ` · ${esc(item.when)}`}</div></div>`
 
 const row = (it: TaskRow, s: Strings, showProject: boolean): string => {
   const meta = [it.due === null ? '' : it.due.date, showProject ? it.project : '', it.agent, it.status, it.pr, it.when].filter(

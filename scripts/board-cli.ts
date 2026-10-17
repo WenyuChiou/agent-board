@@ -10,7 +10,7 @@ import { spawn, spawnSync } from 'node:child_process'
 import { closeSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
 import { createHash } from 'node:crypto'
 import { homedir, tmpdir } from 'node:os'
-import { basename, dirname, join } from 'node:path'
+import { basename, dirname, join, resolve } from 'node:path'
 import { mergeBlock, takeArchivable, takeManualDone, takeTask, setManualStep } from '../hooks/blocks'
 import type { PasteProblem } from '../hooks/blocks'
 import { startServer } from './board-serve'
@@ -319,7 +319,9 @@ const runFolder = (): string => {
 // started again.
 // Worked out only when serving, so a plain print makes no folder.
 let served: string | undefined
-const serveFile = (): string => (served ??= join(runFolder(), `agent-board-${createHash('sha256').update(path).digest('hex').slice(0, 16)}.json`))
+// The same progress.md named two ways (C:/x and C:\x) is one board, with one page.
+const board = (file: string): string => resolve(file)
+const serveFile = (): string => (served ??= join(runFolder(), `agent-board-${createHash('sha256').update(board(path)).digest('hex').slice(0, 16)}.json`))
 // Where 0.19.0 left it, beside progress.md.
 const oldServeFile = `${path.replace(/\.md$/i, '')}-serve.json`
 const script = process.argv[1] ?? ''
@@ -339,7 +341,9 @@ const readRunning = (file = serveFile()): Running | null => {
     const own = lstatSync(file)
     if (own.isSymbolicLink() || (process.getuid !== undefined && own.uid !== process.getuid())) return null
     const found = JSON.parse(read(file)) as Partial<Running>
-    return typeof found.pid === 'number' && typeof found.port === 'number' && typeof found.url === 'string'
+    // Only an address of the shape this server writes: anything else would stop `--serve` when
+    // it reads the token out of it.
+    return typeof found.pid === 'number' && typeof found.port === 'number' && typeof found.url === 'string' && /^http:\/\/127\.0\.0\.1:\d+\/\?t=[\w-]+$/.test(found.url)
       ? { pid: found.pid, port: found.port, url: found.url, path: String(found.path ?? ''), built: String(found.built ?? '') }
       : null
   } catch {
@@ -429,7 +433,7 @@ const runningPage = async (): Promise<Running | null> => {
   // A page that is still running but slow to answer (a busy disk) gets longer before it counts
   // as gone and a second one starts.
   const answer = (await ping(running)) ?? (isRunning(running.pid) ? await ping(running, 5000) : null)
-  if (answer !== null && answer.path === path && answer.built === built) return running
+  if (answer !== null && typeof answer.path === 'string' && board(answer.path) === board(path) && answer.built === built) return running
   await letGo(running, serveFile())
   return null
 }
