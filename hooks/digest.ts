@@ -45,6 +45,10 @@ export const parseDigest = (answer: string): Digest | null => {
   }
 }
 
+// A reply as the digest prompt quotes it: its end, with no tag that could close the
+// <reply> fence it sits in early.
+export const replyData = (answer: string): string => answer.slice(-3000).replace(/<\/?\s*reply\b[^>]*>/gi, '')
+
 // The question a reply ends on, if its last paragraph asks one: the last sentence there
 // with a question mark, without code or markdown. A reply that ends on a statement asks
 // nothing, even if it asked something earlier.
@@ -85,7 +89,10 @@ const KEEP_DONE = 6
 
 // A turn summed up, folded into a session that keeps no Task list: what it finished joins
 // the done steps, and the open steps become this turn's next step and question.
-export const applyDigest = (mirror: ProgressMirror, digest: Digest, now: number): ProgressMirror => {
+export const applyDigest = (mirror: ProgressMirror, given: Digest, now: number): ProgressMirror => {
+  // The question may come straight from a reply rather than through parseDigest: kept to the
+  // same size either way.
+  const digest = { ...given, ask: clip(given.ask, 48), why: clip(given.why, 120) }
   const done = mirror.source === 'turns' ? mirror.tasks.filter(one => one.status === 'completed') : []
   let seq = Math.max(0, ...mirror.tasks.map(one => Number(one.id.replace(/^t/, '')) || 0))
   const id = (): string => {

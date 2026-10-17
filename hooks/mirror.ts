@@ -301,6 +301,25 @@ export const cleanContext = (answer: string): string => {
   return clip(line.trim(), 120)
 }
 
+// Text from progress.md, which any program can write, made fit to show Claude as data: one
+// line, no backtick to close the fence it sits in, no comment or marker opening, at most
+// `limit` characters.
+export const asData = (text: string, limit = 120): string => {
+  const line = text
+    .replace(/`/g, "'")
+    .replace(/<!--|-->/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+  const chars = [...line]
+
+  return chars.length <= limit ? line : `${chars.slice(0, limit - 1).join('')}…`
+}
+
+// Lines of file text for Claude, inside a fence and after a sentence saying they are data,
+// not instructions; each line should already have been through asData.
+export const dataBlock = (lines: readonly string[], s: Strings = ZH_TW): string[] =>
+  lines.length === 0 ? [] : [s.dataNote, '```text', ...lines, '```']
+
 // The note the conversation gets after a compaction: where this session's task stands.
 export const resumeNote = (mirror: ProgressMirror, s: Strings = ZH_TW): string | null => {
   const open = mirror.tasks.filter(task => task.status !== 'completed')
@@ -309,21 +328,18 @@ export const resumeNote = (mirror: ProgressMirror, s: Strings = ZH_TW): string |
   const doing = doingTask(mirror)
   const next = open.filter(task => task !== doing).slice(0, 4)
   const waiting = open.filter(task => task.waiting === 'you' || task.blocked !== null)
-
-  return [
-    s.resumeHead,
-    s.resumeGoal(mirror.title || fallbackTitle(mirror), mirror.project),
-    mirror.context === '' || mirror.context === undefined ? '' : s.resumeContext(mirror.context),
+  const facts = [
+    s.resumeGoal(asData(mirror.title || fallbackTitle(mirror)), asData(mirror.project)),
+    mirror.context === '' || mirror.context === undefined ? '' : s.resumeContext(asData(mirror.context)),
     s.resumeDone(done, mirror.tasks.length),
-    doing === undefined ? '' : s.resumeDoing(doing.subject),
-    next.length === 0 ? '' : s.resumeNext(next.map(task => task.subject).join(s.stepSep)),
+    doing === undefined ? '' : s.resumeDoing(asData(doing.subject)),
+    next.length === 0 ? '' : s.resumeNext(next.map(task => asData(task.subject)).join(s.stepSep)),
     waiting.length === 0
       ? ''
-      : s.resumeWaiting(waiting.map(task => (task.blocked ? `${task.subject} (${task.blocked})` : task.subject)).join(s.stepSep)),
-    s.resumeTail,
-  ]
-    .filter(line => line !== '')
-    .join('\n')
+      : s.resumeWaiting(waiting.map(task => asData(task.blocked ? `${task.subject} (${task.blocked})` : task.subject)).join(s.stepSep)),
+  ].filter(line => line !== '')
+
+  return [s.resumeHead, ...dataBlock(facts, s), s.resumeTail].join('\n')
 }
 
 // Only the mod's own per-session records age out of the store; a setting the person made
