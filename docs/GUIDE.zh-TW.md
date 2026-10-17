@@ -200,6 +200,10 @@ hook 執行的是 `/progress connect` 寫好的 `~/.claude/progress-report.sh`�
 
 **其他 agent**（Aider、GitHub Copilot、Windsurf…）：把 [AGENTS.md](../AGENTS.md) 最後那段 **「Report your progress to the progress pane」** 貼進它的說明檔，它就會自己寫一塊。`setup.sh --agents`（`setup.ps1 -Agents auto`）會幫還沒接上的 Codex、Gemini CLI、OpenCode 做這件事。
 
+**在別台機器上的 agent**（雲端 VM、聊天助理）也能回報：它把自己那塊寫成片段，由這台電腦上的合併步驟放進 `progress.md`，見 [Remote reporters](REMOTE_REPORTERS.md)。
+
+**dot，以及 Codex 的明確回報**：自行選用的[本機交換](LOCAL-EXCHANGE.md)寫的也是同一種片段，用同一個合併步驟放進去，並在本機保留一個有回條的訊息佇列。
+
 ## 它怎麼保持整齊
 
 | 項目 | 時機 |

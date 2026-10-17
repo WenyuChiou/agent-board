@@ -20,11 +20,13 @@ claude plugin test .                   # runs tests/*.test.ts and tests/*.test.t
 tsc -p .                               # type check; needs .claude-plugin/types/ from the first command
 bash tests/setup.check.sh              # installer checks for scripts/setup.sh (CI: Linux); needs bash and python3
 powershell -NoProfile -ExecutionPolicy Bypass -File tests/setup.check.ps1   # installer checks for scripts/setup.ps1 (CI: Windows)
+node --test tests/exchange.test.mjs    # local exchange scripts; needs Node 22.18+ or 24 (loads .ts files directly)
+python3 -B scripts/remote-reporter/test_pipeline.py   # remote reporter tests; stdlib Python, runs in a temp folder
 ```
 
-`claude plugin test` does not run the two installer checks: they run `scripts/setup.sh` or `scripts/setup.ps1` against temp folders and never touch your own `~/.claude` or shell profile. Run the one that matches the script you changed.
+`claude plugin test` does not run `tests/exchange.test.mjs`, nor the two installer checks. The exchange tests run the `scripts/exchange*` files under plain Node; run them when you change those scripts, `scripts/exchange-contract.ts` or a `hooks/` file they import. The installer checks run `scripts/setup.sh` or `scripts/setup.ps1` against temp folders and never touch your own `~/.claude` or shell profile. Run the one that matches the script you changed.
 
-CI (`.github/workflows/test.yml`, on every pull request and every push to `main`) runs `claude plugin validate --strict .`, `claude plugin test .` and the installer check for the runner's system, on Ubuntu and on Windows. It does not run `tsc -p .`, so run that yourself.
+CI (`.github/workflows/test.yml`, on every pull request and every push to `main`) runs `claude plugin validate --strict .`, `claude plugin test .`, the installer check for the runner's system and the remote reporter tests, on Ubuntu and on Windows, and `node --test tests/exchange.test.mjs` on Node 22 and 24 on both. It does not run `tsc -p .`, so run that yourself.
 
 `.claude-plugin/types/` is written by Claude Code every time it loads the mod from a folder. It is gitignored. Do not edit it. If `tsc -p .` complains about missing files or modules, run `claude --plugin-dir .` once.
 
@@ -60,8 +62,14 @@ If you cannot run `claude` in your environment, say so in your report. Do not cl
 | `types/index.d.ts` | Shared types and the plugin's state. |
 | `tests/` | `parse.test.ts` (parser), `logic.test.ts` (blocks, mirror, view logic), `features.test.ts` (later features through the pure modules: ask kinds, journal, PR and CI, quick add, palette, languages, `progress.html`), `pane.test.tsx` (the mod and the pane against a mock engine). `setup.check.sh` and `setup.check.ps1` are the installer checks; `claude plugin test` does not run them. |
 | `scripts/` | `setup.sh`, `setup.ps1` and the rule text. With `--agents` / `-Agents`, the setup scripts copy the last section of this file into the global instructions of Codex, Gemini CLI and OpenCode, between `<!-- agent-board:start -->` and `<!-- agent-board:end -->` (a section under the old `claude-progress-pane` markers is found and replaced too); keep that section's heading as it is, since they find it by that heading. |
+| `scripts/exchange.mjs` | The opt-in local exchange CLI (`init`, `report`, `enqueue`, `take`, `ack`, `status`) for Codex and dot: a report fragment for the remote reporter merge script, a message queue and receipts in one folder. No hook loads it. See `docs/LOCAL-EXCHANGE.md`. |
+| `scripts/codex-owner.mjs` | `dispatchCodex`: delivers one queued command to a running Codex thread through an owner connection the host supplies and verifies (`turn/steer` on an active turn only). |
+| `scripts/exchange-contract.ts` | The exchange's pure contract: reads bindings, commands and receipts, writes the report block, plans the Codex request. Imported by the two scripts with explicit `.ts` extensions; it may import only `hooks/` files whose own run-time imports carry extensions. |
 | `.github/workflows/test.yml` | CI: `validate --strict`, `plugin test` and the installer check for the system, on Ubuntu and Windows. No `tsc -p .`. |
 | `docs/` | `FORMAT.md`, the format spec. `docs/images/` holds the README's images, drawn from sample data by `docs/preview/` (`render.ts` lays `drawPane`'s tree out as a terminal grid and writes SVG: the tour `tour-<lang>.svg`, how it works `flow-<lang>.svg`, the promotional card `promo-<lang>.svg` and the agent icons from `icons.ts`, all in one brand look; `png.mjs` turns the promotional cards into `social-preview*.png`); do not edit them by hand. |
+| `docs/LOCAL-EXCHANGE.md` | How to use the local exchange, what it guarantees and what it does not. |
+| `scripts/remote-reporter/` | Stdlib Python for remote reporters: `reporter.py` builds an agent's block fragment (registry and outbox in `$AGENT_BOARD_REMOTE_DIR`, else `$CLAUDE_CONFIG_DIR/remote-reporter/`, else `~/.claude/remote-reporter/`), `merge.py` merges fragments into `progress.md`, `validate.py` scans a file the way `hooks/parse.ts` does, `test_pipeline.py` tests them. Keep the scanner in step with `parse.ts`. |
+| `docs/REMOTE_REPORTERS.md` | How an agent that does not run on the board's machine reports: the fragment and merge step, transports, and what has no inward channel. |
 | `.github/` | CI, the issue forms and the pull request template. `SECURITY.md` and `CODE_OF_CONDUCT.md` are at the root. |
 
 `/progress` (the `command.run` handler in `register.tsx`) takes these arguments; the Chinese and alternative names are listed beside each. With no argument, or one it does not know, it opens the pane.

@@ -9,7 +9,7 @@ Claude Code 插件，也跟得上 Codex、Gemini CLI、Cursor、OpenCode、Grok 
 
 <p align="center">
 <a href="https://github.com/WenyuChiou/agent-board/actions/workflows/test.yml"><img alt="测试" src="https://github.com/WenyuChiou/agent-board/actions/workflows/test.yml/badge.svg"></a>
-<a href="CHANGELOG.md"><img alt="版本 0.12.0" src="https://img.shields.io/badge/version-0.12.0-blue"></a>
+<a href="CHANGELOG.md"><img alt="版本 0.13.0" src="https://img.shields.io/badge/version-0.13.0-blue"></a>
 <a href="LICENSE"><img alt="MIT 许可" src="https://img.shields.io/badge/license-MIT-green"></a>
 <img alt="macOS、Linux、Windows" src="https://img.shields.io/badge/macOS%20%C2%B7%20Linux%20%C2%B7%20Windows-lightgrey">
 </p>
@@ -30,6 +30,7 @@ Claude Code 插件，也跟得上 Codex、Gemini CLI、Cursor、OpenCode、Grok 
 | <img src="docs/images/agents/hermes-agent.svg" width="24" alt=""> | **Hermes Agent** | `post_llm_call` shell hook | `/progress connect`，Hermes 第一次问时回答 `y` | ✅ 0.19.0 |
 | <img src="docs/images/agents/cursor.svg" width="24" alt=""> | **Cursor** | `afterAgentResponse` hook | `/progress connect` | 按 Cursor 文档实现 |
 | <img src="docs/images/agents/muse-code.svg" width="24" alt=""> | **Muse Code** | `Stop` hook | `/progress connect` | 按 Muse 文档实现 |
+| | **dot** | 本地交换（自行选用） | 见 [docs/LOCAL-EXCHANGE.md](docs/LOCAL-EXCHANGE.md) | 只测过文件约定 |
 | | **其他 agent**（Aider、Copilot、Windsurf…） | 自己写一块进度 | 把 [AGENTS.md](AGENTS.md) 的一段贴进它的说明文件 | |
 
 “实测过”是指：真的 CLI 跑了一个回合，它的 hook 有触发，面板也从中画出正确的一块进度。那些真实数据都留在测试里。
