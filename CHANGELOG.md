@@ -2,6 +2,28 @@
 
 ## Unreleased
 
+- **A 30-second tour at the top of the README.** It replaces the banner and the
+  three-frame demo, in three acts:
+  - Why (0–10 s): five agents, one of them waiting on you, then the pane.
+  - What it does (10–21 s): answering with one press, every agent reporting
+    through its own hooks, a handoff line and take-over.
+  - Where it runs and how it looks (21–30 s): the surfaces and systems, then
+    the light and dark 和色 palettes with each colour's name, and an end card
+    with the install command.
+
+  A timeline along the bottom shows how far the tour has come. It is one SVG per
+  language and theme, drawn from `drawPane` by `docs/preview/render.ts`, and
+  animated with CSS alone, so GitHub plays it. With reduced motion, it shows one
+  still frame. The banner remains only as the social preview.
+- **README speaks to the reader's problem first.** It opens with the situation:
+  several agents running, and one of them stuck waiting on you without you
+  knowing. Then it says what the pane does about that, and only then lists the
+  features, in plain words. The tour's captions follow the same order.
+- **Faster poll.** The path of `progress.md` is worked out once per session
+  instead of on every 2-second poll and 5-second inbox look. The test that
+  simulates an hour went from about 4.8 s to about 2.8 s, which takes it well
+  clear of the 5 s test timeout it had been brushing against.
+
 - **Set up from any agent.** The README's install section is now three shell
   lines, ending with `claude -p "/progress connect"`. It also gives a prompt to
   paste into Codex, Gemini CLI, Cursor, Grok, Muse or any agent that can run

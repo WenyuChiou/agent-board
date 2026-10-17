@@ -1,0 +1,367 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="675" viewBox="0 0 1200 675" role="img" aria-label="同时开好几个 AI agent 吗？ / 现在不会了。 谁在等你， 一眼就看到。 / 其他 agent 也会自己汇报。 / Claude Code 在哪， 它就在哪。 / 浅色深色 都看着舒服。">
+<title>claude-progress-pane: 别再一直盯着 agent 了，让它们来告诉你。</title>
+<defs><clipPath id="body"><rect x="0" y="34" width="430.40000000000003" height="404"/></clipPath></defs>
+<style>
+.sc { opacity: 0; animation-duration: 30s; animation-iteration-count: infinite; animation-timing-function: linear; }
+.bar { transform-box: fill-box; transform-origin: 0 50%; animation: grow 30s linear infinite; }
+.blink { animation: blink 0.9s steps(2, jump-none) infinite; }
+@keyframes grow { from { transform: scaleX(0) } to { transform: scaleX(1) } }
+@keyframes blink { from { opacity: 1 } to { opacity: 0.25 } }
+@keyframes k0 { 0%, 41.67% { opacity: 0 } 43.17%, 45.17% { opacity: 1 } 46.67%, 100% { opacity: 0 } }
+@keyframes k1 { 0%, 22.67% { opacity: 0 } 24.17%, 39.83% { opacity: 1 } 41.33%, 100% { opacity: 0 } }
+@keyframes k2 { 0%, 24.67% { opacity: 0 } 26.17%, 33.17% { opacity: 1 } 34.67%, 100% { opacity: 0 } }
+@keyframes k3 { 0%, 36.00% { opacity: 0 } 37.50%, 39.83% { opacity: 1 } 41.33%, 100% { opacity: 0 } }
+@keyframes k4 { 0%, 41.33% { opacity: 0 } 42.83%, 45.17% { opacity: 1 } 46.67%, 100% { opacity: 0 } }
+@keyframes k5 { 0%, 46.67% { opacity: 0 } 48.17%, 56.83% { opacity: 1 } 58.33%, 100% { opacity: 0 } }
+@keyframes k6 { 0%, 58.33% { opacity: 0 } 59.83%, 68.50% { opacity: 1 } 70.00%, 100% { opacity: 0 } }
+@keyframes k7 { 0%, 60.67% { opacity: 0 } 62.17%, 68.50% { opacity: 1 } 70.00%, 100% { opacity: 0 } }
+@keyframes k8 { 0%, 64.00% { opacity: 0 } 65.50%, 68.50% { opacity: 1 } 70.00%, 100% { opacity: 0 } }
+@keyframes k9 { 0%, 70.00% { opacity: 0 } 71.50%, 81.17% { opacity: 1 } 82.67%, 100% { opacity: 0 } }
+@keyframes k10 { 0%, 1.00% { opacity: 0 } 2.50%, 21.17% { opacity: 1 } 22.67%, 100% { opacity: 0 } }
+@keyframes k11 { 0%, 2.17% { opacity: 0 } 3.67%, 21.17% { opacity: 1 } 22.67%, 100% { opacity: 0 } }
+@keyframes k12 { 0%, 12.67% { opacity: 0 } 14.17%, 21.17% { opacity: 1 } 22.67%, 100% { opacity: 0 } }
+@keyframes k13 { 0%, 3.33% { opacity: 0 } 4.83%, 21.17% { opacity: 1 } 22.67%, 100% { opacity: 0 } }
+@keyframes k14 { 0%, 4.50% { opacity: 0 } 6.00%, 21.17% { opacity: 1 } 22.67%, 100% { opacity: 0 } }
+@keyframes k15 { 0%, 5.67% { opacity: 0 } 7.17%, 21.17% { opacity: 1 } 22.67%, 100% { opacity: 0 } }
+@keyframes k16 { 0%, 47.67% { opacity: 0 } 49.17%, 56.83% { opacity: 1 } 58.33%, 100% { opacity: 0 } }
+@keyframes k17 { 0%, 48.27% { opacity: 0 } 49.77%, 56.83% { opacity: 1 } 58.33%, 100% { opacity: 0 } }
+@keyframes k18 { 0%, 48.87% { opacity: 0 } 50.37%, 56.83% { opacity: 1 } 58.33%, 100% { opacity: 0 } }
+@keyframes k19 { 0%, 49.47% { opacity: 0 } 50.97%, 56.83% { opacity: 1 } 58.33%, 100% { opacity: 0 } }
+@keyframes k20 { 0%, 50.07% { opacity: 0 } 51.57%, 56.83% { opacity: 1 } 58.33%, 100% { opacity: 0 } }
+@keyframes k21 { 0%, 50.67% { opacity: 0 } 52.17%, 56.83% { opacity: 1 } 58.33%, 100% { opacity: 0 } }
+@keyframes k22 { 0%, 51.27% { opacity: 0 } 52.77%, 56.83% { opacity: 1 } 58.33%, 100% { opacity: 0 } }
+@keyframes k23 { 0%, 58.33% { opacity: 0 } 59.83%, 68.50% { opacity: 1 } 70.00%, 100% { opacity: 0 } }
+@keyframes k24 { 0%, 71.00% { opacity: 0 } 72.50%, 80.50% { opacity: 1 } 82.00%, 100% { opacity: 0 } }
+@keyframes k25 { 0%, 82.67% { opacity: 0 } 84.17%, 90.50% { opacity: 1 } 92.00%, 100% { opacity: 0 } }
+@keyframes k26 { 0%, 92.00% { opacity: 0 } 93.50%, 99.17% { opacity: 1 } 100.00%, 100% { opacity: 0 } }
+@keyframes k27 { 0%, 9.83% { opacity: 1 } 11.33%, 100% { opacity: 0 } }
+@keyframes k28 { 0%, 11.33% { opacity: 0 } 12.83%, 21.17% { opacity: 1 } 22.67%, 100% { opacity: 0 } }
+@keyframes k29 { 0%, 22.67% { opacity: 0 } 24.17%, 33.17% { opacity: 1 } 34.67%, 100% { opacity: 0 } }
+@keyframes k30 { 0%, 34.67% { opacity: 0 } 36.17%, 45.17% { opacity: 1 } 46.67%, 100% { opacity: 0 } }
+@keyframes k31 { 0%, 46.67% { opacity: 0 } 48.17%, 56.83% { opacity: 1 } 58.33%, 100% { opacity: 0 } }
+@keyframes k32 { 0%, 70.00% { opacity: 0 } 71.50%, 80.50% { opacity: 1 } 82.00%, 100% { opacity: 0 } }
+@keyframes k33 { 0%, 82.00% { opacity: 0 } 83.50%, 90.50% { opacity: 1 } 92.00%, 100% { opacity: 0 } }
+@keyframes k34 { 0%, 22.67% { opacity: 0 } 24.17%, 81.17% { opacity: 1 } 82.67%, 100% { opacity: 0 } }
+@keyframes k35 { 0%, 82.00% { opacity: 0 } 83.50%, 91.17% { opacity: 1 } 92.67%, 100% { opacity: 0 } }
+@media (prefers-reduced-motion: reduce) {
+  .sc, .bar, .blink { animation: none; }
+  .sc { opacity: 0; }
+  [data-still] { opacity: 1; }
+  .bar { transform: none; }
+}
+</style>
+<rect width="1200" height="675" rx="18" fill="#f6f5f0"/>
+<text x="64" y="70" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans TC', 'Noto Sans SC', 'PingFang TC', 'Microsoft JhengHei', 'Microsoft YaHei', sans-serif" font-size="15" font-weight="600" letter-spacing="2.5" fill="#595857">CLAUDE-PROGRESS-PANE</text>
+<g font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans TC', 'Noto Sans SC', 'PingFang TC', 'Microsoft JhengHei', 'Microsoft YaHei', sans-serif">
+<g class="sc" style="animation-name:k27"><text x="64" y="230" font-size="40" font-weight="700" fill="#2b2b2b">同时开好几个</text><text x="64" y="286" font-size="40" font-weight="700" fill="#2b2b2b">AI agent 吗？</text></g>
+<g class="sc" style="animation-name:k28"><text x="64" y="230" font-size="40" font-weight="700" fill="#2b2b2b">有一个已经</text><text x="64" y="286" font-size="40" font-weight="700" fill="#2b2b2b">等你 20 分钟了。</text><text x="64" y="360" font-size="21" fill="#595857">你完全没发现。</text></g>
+<g class="sc" style="animation-name:k10">
+<rect x="685.952" y="108" width="420" height="70" rx="12" fill="#ffffff" stroke="#dcdcd2"/>
+<g fill="#9EA19A"><circle cx="703.952" cy="126" r="4"/><circle cx="717.952" cy="126" r="4"/><circle cx="731.952" cy="126" r="4"/></g>
+<text x="749.952" y="131" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', 'Noto Sans Mono CJK TC', 'Noto Sans CJK TC', 'PingFang TC', 'Microsoft JhengHei', monospace" font-size="15" font-weight="700" fill="#2b2b2b">Claude Code</text>
+<text x="860.352" y="131" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', 'Noto Sans Mono CJK TC', 'Noto Sans CJK TC', 'PingFang TC', 'Microsoft JhengHei', monospace" font-size="14" fill="#005243">acme-web</text>
+<text x="703.952" y="160" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', 'Noto Sans Mono CJK TC', 'Noto Sans CJK TC', 'PingFang TC', 'Microsoft JhengHei', monospace" font-size="14" fill="#165E83">▸ 工作中…</text>
+
+</g>
+<g class="sc" style="animation-name:k11">
+<rect x="685.952" y="198" width="420" height="70" rx="12" fill="#ffffff" stroke="#dcdcd2"/>
+<g fill="#9EA19A"><circle cx="703.952" cy="216" r="4"/><circle cx="717.952" cy="216" r="4"/><circle cx="731.952" cy="216" r="4"/></g>
+<text x="749.952" y="221" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', 'Noto Sans Mono CJK TC', 'Noto Sans CJK TC', 'PingFang TC', 'Microsoft JhengHei', monospace" font-size="15" font-weight="700" fill="#2b2b2b">Codex</text>
+<text x="805.152" y="221" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', 'Noto Sans Mono CJK TC', 'Noto Sans CJK TC', 'PingFang TC', 'Microsoft JhengHei', monospace" font-size="14" fill="#005243">api-gateway</text>
+<text x="703.952" y="250" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', 'Noto Sans Mono CJK TC', 'Noto Sans CJK TC', 'PingFang TC', 'Microsoft JhengHei', monospace" font-size="14" fill="#165E83">▸ 工作中…</text>
+<g class="sc" style="animation-name:k12"><text class="blink" x="1089.952" y="250" text-anchor="end" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans TC', 'Noto Sans SC', 'PingFang TC', 'Microsoft JhengHei', 'Microsoft YaHei', sans-serif" font-size="15" font-weight="700" fill="#715C1F">● 等你 20 分钟</text></g>
+</g>
+<g class="sc" style="animation-name:k13">
+<rect x="685.952" y="288" width="420" height="70" rx="12" fill="#ffffff" stroke="#dcdcd2"/>
+<g fill="#9EA19A"><circle cx="703.952" cy="306" r="4"/><circle cx="717.952" cy="306" r="4"/><circle cx="731.952" cy="306" r="4"/></g>
+<text x="749.952" y="311" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', 'Noto Sans Mono CJK TC', 'Noto Sans CJK TC', 'PingFang TC', 'Microsoft JhengHei', monospace" font-size="15" font-weight="700" fill="#2b2b2b">Gemini CLI</text>
+<text x="851.152" y="311" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', 'Noto Sans Mono CJK TC', 'Noto Sans CJK TC', 'PingFang TC', 'Microsoft JhengHei', monospace" font-size="14" fill="#005243">data-pipeline</text>
+<text x="703.952" y="340" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', 'Noto Sans Mono CJK TC', 'Noto Sans CJK TC', 'PingFang TC', 'Microsoft JhengHei', monospace" font-size="14" fill="#165E83">▸ 工作中…</text>
+
+</g>
+<g class="sc" style="animation-name:k14">
+<rect x="685.952" y="378" width="420" height="70" rx="12" fill="#ffffff" stroke="#dcdcd2"/>
+<g fill="#9EA19A"><circle cx="703.952" cy="396" r="4"/><circle cx="717.952" cy="396" r="4"/><circle cx="731.952" cy="396" r="4"/></g>
+<text x="749.952" y="401" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', 'Noto Sans Mono CJK TC', 'Noto Sans CJK TC', 'PingFang TC', 'Microsoft JhengHei', monospace" font-size="15" font-weight="700" fill="#2b2b2b">Cursor</text>
+<text x="814.352" y="401" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', 'Noto Sans Mono CJK TC', 'Noto Sans CJK TC', 'PingFang TC', 'Microsoft JhengHei', monospace" font-size="14" fill="#005243">docs-site</text>
+<text x="703.952" y="430" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', 'Noto Sans Mono CJK TC', 'Noto Sans CJK TC', 'PingFang TC', 'Microsoft JhengHei', monospace" font-size="14" fill="#165E83">▸ 工作中…</text>
+
+</g>
+<g class="sc" style="animation-name:k15">
+<rect x="685.952" y="468" width="420" height="70" rx="12" fill="#ffffff" stroke="#dcdcd2"/>
+<g fill="#9EA19A"><circle cx="703.952" cy="486" r="4"/><circle cx="717.952" cy="486" r="4"/><circle cx="731.952" cy="486" r="4"/></g>
+<text x="749.952" y="491" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', 'Noto Sans Mono CJK TC', 'Noto Sans CJK TC', 'PingFang TC', 'Microsoft JhengHei', monospace" font-size="15" font-weight="700" fill="#2b2b2b">Grok Build</text>
+<text x="851.152" y="491" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', 'Noto Sans Mono CJK TC', 'Noto Sans CJK TC', 'PingFang TC', 'Microsoft JhengHei', monospace" font-size="14" fill="#005243">mobile-app</text>
+<text x="703.952" y="520" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', 'Noto Sans Mono CJK TC', 'Noto Sans CJK TC', 'PingFang TC', 'Microsoft JhengHei', monospace" font-size="14" fill="#165E83">▸ 工作中…</text>
+
+</g>
+<g class="sc" style="animation-name:k29" data-still="1"><text x="64" y="204" font-size="40" font-weight="700" fill="#2b2b2b">现在不会了。</text><text x="64" y="260" font-size="40" font-weight="700" fill="#2b2b2b">谁在等你，</text><text x="64" y="316" font-size="40" font-weight="700" fill="#2b2b2b">一眼就看到。</text><text x="64" y="390" font-size="21" fill="#595857">Claude Code 插件</text></g>
+<g class="sc" style="animation-name:k30"><text x="64" y="230" font-size="40" font-weight="700" fill="#2b2b2b">直接在这里回，</text><text x="64" y="286" font-size="40" font-weight="700" fill="#2b2b2b">不用到处找窗口。</text><text x="64" y="360" font-size="21" fill="#595857">点一下，agent 就接着干活。</text></g>
+<g class="sc" style="animation-name:k31"><text x="64" y="230" font-size="40" font-weight="700" fill="#2b2b2b">其他 agent</text><text x="64" y="286" font-size="40" font-weight="700" fill="#2b2b2b">也会自己汇报。</text><text x="64" y="360" font-size="21" fill="#595857">一行命令接上，之后不用管。</text></g>
+<g class="sc" style="animation-name:k16"><rect x="64" y="418" width="214" height="34" rx="17" fill="#ffffff" stroke="#dcdcd2"/><text x="80" y="441" font-size="16" fill="#007B43">✓</text><text x="102" y="441" font-size="16" fill="#2b2b2b">Claude Code</text></g>
+<g class="sc" style="animation-name:k17"><rect x="294" y="418" width="214" height="34" rx="17" fill="#ffffff" stroke="#dcdcd2"/><text x="310" y="441" font-size="16" fill="#007B43">✓</text><text x="332" y="441" font-size="16" fill="#2b2b2b">Codex</text></g>
+<g class="sc" style="animation-name:k18"><rect x="64" y="462" width="214" height="34" rx="17" fill="#ffffff" stroke="#dcdcd2"/><text x="80" y="485" font-size="16" fill="#007B43">✓</text><text x="102" y="485" font-size="16" fill="#2b2b2b">Gemini CLI</text></g>
+<g class="sc" style="animation-name:k19"><rect x="294" y="462" width="214" height="34" rx="17" fill="#ffffff" stroke="#dcdcd2"/><text x="310" y="485" font-size="16" fill="#007B43">✓</text><text x="332" y="485" font-size="16" fill="#2b2b2b">Cursor</text></g>
+<g class="sc" style="animation-name:k20"><rect x="64" y="506" width="214" height="34" rx="17" fill="#ffffff" stroke="#dcdcd2"/><text x="80" y="529" font-size="16" fill="#007B43">✓</text><text x="102" y="529" font-size="16" fill="#2b2b2b">OpenCode</text></g>
+<g class="sc" style="animation-name:k21"><rect x="294" y="506" width="214" height="34" rx="17" fill="#ffffff" stroke="#dcdcd2"/><text x="310" y="529" font-size="16" fill="#007B43">✓</text><text x="332" y="529" font-size="16" fill="#2b2b2b">Grok Build</text></g>
+<g class="sc" style="animation-name:k22"><rect x="64" y="550" width="214" height="34" rx="17" fill="#ffffff" stroke="#dcdcd2"/><text x="80" y="573" font-size="16" fill="#007B43">✓</text><text x="102" y="573" font-size="16" fill="#2b2b2b">Muse Code</text></g>
+<g class="sc" style="animation-name:k23"><text x="64" y="200" font-size="40" font-weight="700" fill="#2b2b2b">关掉、压缩、</text><text x="64" y="256" font-size="40" font-weight="700" fill="#2b2b2b">第二天再开都没事。</text><text x="64" y="330" font-size="21" fill="#007B43">✓</text><text x="96" y="330" font-size="21" fill="#2b2b2b">做到哪、卡在哪、下一步，都还在</text><text x="64" y="376" font-size="21" fill="#007B43">✓</text><text x="96" y="376" font-size="21" fill="#2b2b2b">别人做到一半的，可以直接接手</text><text x="64" y="422" font-size="21" fill="#007B43">✓</text><text x="96" y="422" font-size="21" fill="#2b2b2b">做完的会自己收走</text></g>
+<g class="sc" style="animation-name:k32"><text x="64" y="230" font-size="40" font-weight="700" fill="#2b2b2b">Claude Code 在哪，</text><text x="64" y="286" font-size="40" font-weight="700" fill="#2b2b2b">它就在哪。</text></g>
+<g class="sc" style="animation-name:k24"><rect x="64" y="368" width="234" height="42" rx="10" fill="#ffffff" stroke="#dcdcd2"/><text x="181" y="395" text-anchor="middle" font-size="18" fill="#2b2b2b">终端</text><rect x="314" y="368" width="234" height="42" rx="10" fill="#ffffff" stroke="#dcdcd2"/><text x="431" y="395" text-anchor="middle" font-size="18" fill="#2b2b2b">桌面版</text><rect x="64" y="424" width="234" height="42" rx="10" fill="#ffffff" stroke="#dcdcd2"/><text x="181" y="451" text-anchor="middle" font-size="18" fill="#2b2b2b">VS Code</text><rect x="314" y="424" width="234" height="42" rx="10" fill="#ffffff" stroke="#dcdcd2"/><text x="431" y="451" text-anchor="middle" font-size="18" fill="#2b2b2b">浏览器、手机</text><text x="64" y="512" font-size="16" fill="#595857">macOS · Linux · Windows  ·  English · 繁體中文 · 简体中文</text></g>
+<g class="sc" style="animation-name:k33"><text x="64" y="230" font-size="40" font-weight="700" fill="#2b2b2b">浅色深色</text><text x="64" y="286" font-size="40" font-weight="700" fill="#2b2b2b">都看着舒服。</text></g>
+<g class="sc" style="animation-name:k25"><circle cx="78" cy="352" r="14" fill="#165E83"/><circle cx="108" cy="352" r="14" fill="#00A3AF" stroke="#dcdcd2"/><text x="64" y="388" font-size="14" fill="#2b2b2b">蓝</text><text x="64" y="408" font-size="14" fill="#595857">浅葱</text><circle cx="264" cy="352" r="14" fill="#007B43"/><circle cx="294" cy="352" r="14" fill="#68BE8D" stroke="#dcdcd2"/><text x="250" y="388" font-size="14" fill="#2b2b2b">常磐</text><text x="250" y="408" font-size="14" fill="#595857">若竹</text><circle cx="450" cy="352" r="14" fill="#715C1F"/><circle cx="480" cy="352" r="14" fill="#F8B500" stroke="#dcdcd2"/><text x="436" y="388" font-size="14" fill="#2b2b2b">莺茶</text><text x="436" y="408" font-size="14" fill="#595857">山吹</text><circle cx="78" cy="446" r="14" fill="#745399"/><circle cx="108" cy="446" r="14" fill="#A59ACA" stroke="#dcdcd2"/><text x="64" y="482" font-size="14" fill="#2b2b2b">江户紫</text><text x="64" y="502" font-size="14" fill="#595857">藤紫</text><circle cx="264" cy="446" r="14" fill="#BB5535"/><circle cx="294" cy="446" r="14" fill="#ED6D3D" stroke="#dcdcd2"/><text x="250" y="482" font-size="14" fill="#2b2b2b">代赭</text><text x="250" y="502" font-size="14" fill="#595857">柿</text><circle cx="450" cy="446" r="14" fill="#B7282E"/><circle cx="480" cy="446" r="14" fill="#E9546B" stroke="#dcdcd2"/><text x="436" y="482" font-size="14" fill="#2b2b2b">茜</text><text x="436" y="502" font-size="14" fill="#595857">蔷薇</text><text x="64" y="536" font-size="16" fill="#595857">用日本传统色，每个字都清楚好读</text></g>
+<g class="win sc" style="animation-name:k34" data-still="1" transform="translate(662.0 92) scale(1.12)">
+<rect width="430.40000000000003" height="438" rx="12" fill="#fbfaf5" stroke="#d9d7cc"/>
+<path d="M12 0.5h406.40000000000003a11.5 11.5 0 0 1 11.5 11.5v22h-429.40000000000003v-22a11.5 11.5 0 0 1 11.5-11.5z" fill="#f1efe7"/>
+<line x1="0.5" y1="34" x2="429.90000000000003" y2="34" stroke="#d9d7cc"/>
+<g fill="#9EA19A"><circle cx="20" cy="17" r="5"/><circle cx="38" cy="17" r="5"/><circle cx="56" cy="17" r="5"/></g>
+<text x="215.20000000000002" y="22" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', 'Noto Sans Mono CJK TC', 'Noto Sans CJK TC', 'PingFang TC', 'Microsoft JhengHei', monospace" font-size="12" fill="#595857">claude  —  acme-web</text>
+<g clip-path="url(#body)" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', 'Noto Sans Mono CJK TC', 'Noto Sans CJK TC', 'PingFang TC', 'Microsoft JhengHei', monospace" font-size="14" style="white-space:pre" xml:space="preserve"><g class="sc" style="animation-name:k1" data-still="1"><path d="M26.2 296V290q0 -4 4 -4H30.4M30.4 286h310.8M341.2 286h8.4M345.4 286V296M349.6 286h50.400000000000006M400 286H400.2q4 0 4 4V296M26.2 296v20M345.4 296v20M404.2 296v20M26.2 316V322q0 4 4 4H30.4M30.4 326h310.8M341.2 326h8.4M345.4 326V316M349.6 326h50.400000000000006M400 326H400.2q4 0 4 -4V316M26.2 416V410q0 -4 4 -4H30.4M30.4 406h369.6M400 406H400.2q4 0 4 4V416M26.2 416v20M404.2 416v20" fill="none" stroke="#9EA19A" stroke-width="1.2" stroke-linecap="butt"/>
+<text x="22.0" y="70" textLength="33.6" lengthAdjust="spacingAndGlyphs" fill="#2b2b2b" font-weight="700">进度</text>
+<text x="22.0" y="110" textLength="25.2" lengthAdjust="spacingAndGlyphs" fill="#715C1F">● 5</text>
+<text x="55.6" y="110" textLength="33.6" lengthAdjust="spacingAndGlyphs" fill="#2b2b2b">等你</text>
+<text x="106.0" y="110" textLength="25.2" lengthAdjust="spacingAndGlyphs" fill="#165E83">▸ 6</text>
+<text x="139.6" y="110" textLength="50.4" lengthAdjust="spacingAndGlyphs" fill="#2b2b2b">进行中</text>
+<text x="206.8" y="110" textLength="25.2" lengthAdjust="spacingAndGlyphs" fill="#BB5535">⚑ 1</text>
+<text x="240.4" y="110" textLength="50.4" lengthAdjust="spacingAndGlyphs" fill="#2b2b2b">快到期</text>
+<text x="307.6" y="110" textLength="25.2" lengthAdjust="spacingAndGlyphs" fill="#007B43">✓ 5</text>
+<text x="341.2" y="110" textLength="67.2" lengthAdjust="spacingAndGlyphs" fill="#2b2b2b">今天完成</text>
+<text x="22.0" y="150" textLength="100.8" lengthAdjust="spacingAndGlyphs" fill="#595857">现在最需要你</text>
+<text x="22.0" y="170" textLength="84.0" lengthAdjust="spacingAndGlyphs" fill="#715C1F">〔选一个〕</text>
+<text x="106.0" y="170" textLength="67.2" lengthAdjust="spacingAndGlyphs" fill="#2b2b2b" font-weight="700">上线方式</text>
+<text x="22.0" y="190" textLength="84.0" lengthAdjust="spacingAndGlyphs" fill="#005243">acme-web ›</text>
+<text x="114.4" y="190" textLength="151.2" lengthAdjust="spacingAndGlyphs" fill="#005243">设置页加上深色模式</text>
+<text x="22.0" y="210" textLength="319.2" lengthAdjust="spacingAndGlyphs" fill="#2b2b2b">先用开关给部分用户，还是直接全部开放？</text>
+<text x="22.0" y="250" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#9EA19A">[</text>
+<text x="38.8" y="250" textLength="67.2" lengthAdjust="spacingAndGlyphs" fill="#165E83" font-weight="700">先开开关</text>
+<text x="114.4" y="250" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#9EA19A">]</text>
+<text x="131.2" y="250" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#9EA19A">[</text>
+<text x="148.0" y="250" textLength="67.2" lengthAdjust="spacingAndGlyphs" fill="#2b2b2b">全部开放</text>
+<text x="223.6" y="250" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#9EA19A">]</text>
+<text x="38.8" y="310" textLength="134.4" lengthAdjust="spacingAndGlyphs" fill="#595857">都不是？打字回复</text>
+<text x="358.0" y="310" textLength="33.6" lengthAdjust="spacingAndGlyphs" fill="#2b2b2b">回复</text>
+<text x="22.0" y="370" textLength="33.6" lengthAdjust="spacingAndGlyphs" fill="#2b2b2b">还有</text>
+<text x="64.0" y="370" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#2b2b2b">4</text>
+<text x="80.8" y="370" textLength="50.4" lengthAdjust="spacingAndGlyphs" fill="#2b2b2b">件等你</text>
+<text x="139.6" y="370" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#2b2b2b">▸</text>
+<text x="38.8" y="430" textLength="210.0" lengthAdjust="spacingAndGlyphs" fill="#005243">acme-web · feat/dark-mode</text>
+<text x="366.4" y="430" textLength="25.2" lengthAdjust="spacingAndGlyphs" fill="#595857">2/5</text></g>
+<rect class="sc" style="animation-name:k2" x="16" y="132" width="398.40000000000003" height="208" rx="7" fill="none" stroke="#165E83" stroke-width="2.4"/>
+<rect class="sc" style="animation-name:k3" x="16" y="232" width="112.80000000000001" height="28" rx="7" fill="none" stroke="#165E83" stroke-width="2.4"/>
+<g class="sc" style="animation-name:k4"><path d="M38.8 426h176.4" fill="none" stroke="#165E83" stroke-width="3" stroke-linecap="round"/>
+<path d="M26.2 356V350q0 -4 4 -4H30.4M30.4 346h369.6M400 346H400.2q4 0 4 4V356M26.2 356v20M404.2 356v20M26.2 376v20M404.2 376v20M26.2 396v20M404.2 396v20M26.2 416v20M215.20000000000002 426h42M404.2 416v20" fill="none" stroke="#9EA19A" stroke-width="1.2" stroke-linecap="butt"/>
+<text x="22.0" y="70" textLength="33.6" lengthAdjust="spacingAndGlyphs" fill="#2b2b2b" font-weight="700">进度</text>
+<text x="22.0" y="110" textLength="25.2" lengthAdjust="spacingAndGlyphs" fill="#715C1F">● 4</text>
+<text x="55.6" y="110" textLength="33.6" lengthAdjust="spacingAndGlyphs" fill="#2b2b2b">等你</text>
+<text x="106.0" y="110" textLength="25.2" lengthAdjust="spacingAndGlyphs" fill="#165E83">▸ 6</text>
+<text x="139.6" y="110" textLength="50.4" lengthAdjust="spacingAndGlyphs" fill="#2b2b2b">进行中</text>
+<text x="206.8" y="110" textLength="25.2" lengthAdjust="spacingAndGlyphs" fill="#BB5535">⚑ 1</text>
+<text x="240.4" y="110" textLength="50.4" lengthAdjust="spacingAndGlyphs" fill="#2b2b2b">快到期</text>
+<text x="307.6" y="110" textLength="25.2" lengthAdjust="spacingAndGlyphs" fill="#007B43">✓ 5</text>
+<text x="341.2" y="110" textLength="67.2" lengthAdjust="spacingAndGlyphs" fill="#2b2b2b">今天完成</text>
+<text x="22.0" y="150" textLength="100.8" lengthAdjust="spacingAndGlyphs" fill="#595857">现在最需要你</text>
+<text x="22.0" y="170" textLength="84.0" lengthAdjust="spacingAndGlyphs" fill="#715C1F">〔选一个〕</text>
+<text x="106.0" y="170" textLength="117.6" lengthAdjust="spacingAndGlyphs" fill="#2b2b2b" font-weight="700">每个密钥的上限</text>
+<text x="22.0" y="190" textLength="109.2" lengthAdjust="spacingAndGlyphs" fill="#005243">api-gateway ›</text>
+<text x="139.6" y="190" textLength="33.6" lengthAdjust="spacingAndGlyphs" fill="#005243">公开</text>
+<text x="181.6" y="190" textLength="25.2" lengthAdjust="spacingAndGlyphs" fill="#005243">API</text>
+<text x="215.2" y="190" textLength="50.4" lengthAdjust="spacingAndGlyphs" fill="#005243">加限流</text>
+<text x="274.0" y="190" textLength="58.8" lengthAdjust="spacingAndGlyphs" fill="#005243">· codex</text>
+<text x="22.0" y="210" textLength="50.4" lengthAdjust="spacingAndGlyphs" fill="#2b2b2b">每分钟</text>
+<text x="80.8" y="210" textLength="25.2" lengthAdjust="spacingAndGlyphs" fill="#2b2b2b">100</text>
+<text x="114.4" y="210" textLength="33.6" lengthAdjust="spacingAndGlyphs" fill="#2b2b2b">还是</text>
+<text x="156.4" y="210" textLength="25.2" lengthAdjust="spacingAndGlyphs" fill="#2b2b2b">300</text>
+<text x="181.6" y="210" textLength="16.8" lengthAdjust="spacingAndGlyphs" fill="#2b2b2b">？</text>
+<text x="22.0" y="230" textLength="16.8" lengthAdjust="spacingAndGlyphs" fill="#595857">25</text>
+<text x="47.2" y="230" textLength="50.4" lengthAdjust="spacingAndGlyphs" fill="#595857">分钟前</text>
+<text x="22.0" y="250" textLength="16.8" lengthAdjust="spacingAndGlyphs" fill="#595857">到</text>
+<text x="47.2" y="250" textLength="92.4" lengthAdjust="spacingAndGlyphs" fill="#595857">api-gateway</text>
+<text x="22.0" y="270" textLength="67.2" lengthAdjust="spacingAndGlyphs" fill="#595857">的对话（</text>
+<text x="89.2" y="270" textLength="42.0" lengthAdjust="spacingAndGlyphs" fill="#595857">codex</text>
+<text x="131.2" y="270" textLength="168.0" lengthAdjust="spacingAndGlyphs" fill="#595857">）回复，这里回不了。</text>
+<text x="22.0" y="310" textLength="33.6" lengthAdjust="spacingAndGlyphs" fill="#2b2b2b">还有</text>
+<text x="64.0" y="310" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#2b2b2b">3</text>
+<text x="80.8" y="310" textLength="50.4" lengthAdjust="spacingAndGlyphs" fill="#2b2b2b">件等你</text>
+<text x="139.6" y="310" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#2b2b2b">▸</text>
+<text x="38.8" y="370" textLength="210.0" lengthAdjust="spacingAndGlyphs" fill="#005243">acme-web · feat/dark-mode</text>
+<text x="366.4" y="370" textLength="25.2" lengthAdjust="spacingAndGlyphs" fill="#595857">4/5</text>
+<text x="38.8" y="390" textLength="151.2" lengthAdjust="spacingAndGlyphs" fill="#2b2b2b" font-weight="700">设置页加上深色模式</text>
+<text x="38.8" y="410" textLength="336.0" lengthAdjust="spacingAndGlyphs" fill="#595857">背景：上次问卷很多人要；默认跟着系统主题</text>
+<text x="374.8" y="410" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#595857">…</text>
+<text x="265.6" y="430" textLength="25.2" lengthAdjust="spacingAndGlyphs" fill="#595857">80%</text></g>
+<g class="sc" style="animation-name:k0"><rect x="0.5" y="372" width="429.40000000000003" height="65.5" fill="#fbfaf5"/><line x1="0.5" y1="372" x2="429.90000000000003" y2="372" stroke="#007B43" stroke-width="1.6"/><text x="22" y="402" font-weight="700" fill="#007B43">✓ 已回复 Claude：先开开关</text></g>
+<g class="sc" style="animation-name:k5"><text x="22.0" y="90" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#2b2b2b">▾</text>
+<text x="38.8" y="90" textLength="67.2" lengthAdjust="spacingAndGlyphs" fill="#2b2b2b">等你处理</text>
+<text x="114.4" y="90" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#715C1F">5</text>
+<text x="22.0" y="130" textLength="84.0" lengthAdjust="spacingAndGlyphs" fill="#715C1F">〔选一个〕</text>
+<text x="106.0" y="130" textLength="67.2" lengthAdjust="spacingAndGlyphs" fill="#2b2b2b">上线方式</text>
+<text x="341.2" y="130" textLength="67.2" lengthAdjust="spacingAndGlyphs" fill="#595857">acme-web</text>
+<text x="22.0" y="170" textLength="84.0" lengthAdjust="spacingAndGlyphs" fill="#715C1F">〔选一个〕</text>
+<text x="106.0" y="170" textLength="117.6" lengthAdjust="spacingAndGlyphs" fill="#2b2b2b">每个密钥的上限</text>
+<text x="316.0" y="170" textLength="92.4" lengthAdjust="spacingAndGlyphs" fill="#595857">api-gateway</text>
+<text x="22.0" y="210" textLength="67.2" lengthAdjust="spacingAndGlyphs" fill="#BB5535">〔动手〕</text>
+<text x="89.2" y="210" textLength="67.2" lengthAdjust="spacingAndGlyphs" fill="#2b2b2b">仓库登录</text>
+<text x="299.2" y="210" textLength="109.2" lengthAdjust="spacingAndGlyphs" fill="#595857">data-pipeline</text>
+<text x="22.0" y="250" textLength="84.0" lengthAdjust="spacingAndGlyphs" fill="#745399">〔看一下〕</text>
+<text x="106.0" y="250" textLength="84.0" lengthAdjust="spacingAndGlyphs" fill="#2b2b2b">看一下预览</text>
+<text x="332.8" y="250" textLength="75.6" lengthAdjust="spacingAndGlyphs" fill="#595857">docs-site</text>
+<text x="22.0" y="290" textLength="84.0" lengthAdjust="spacingAndGlyphs" fill="#595857">〔等别人〕</text>
+<text x="106.0" y="290" textLength="50.4" lengthAdjust="spacingAndGlyphs" fill="#2b2b2b">推荐信</text>
+<text x="374.8" y="290" textLength="33.6" lengthAdjust="spacingAndGlyphs" fill="#595857">求职</text>
+<text x="22.0" y="330" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#2b2b2b">▸</text>
+<text x="38.8" y="330" textLength="50.4" lengthAdjust="spacingAndGlyphs" fill="#2b2b2b">快到期</text>
+<text x="97.6" y="330" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#BB5535">1</text>
+<text x="122.8" y="330" textLength="50.4" lengthAdjust="spacingAndGlyphs" fill="#595857">最近：</text>
+<text x="173.2" y="330" textLength="75.6" lengthAdjust="spacingAndGlyphs" fill="#595857">Northwind</text>
+<text x="257.2" y="330" textLength="67.2" lengthAdjust="spacingAndGlyphs" fill="#595857">暑期实习</text>
+<text x="332.8" y="330" textLength="33.6" lengthAdjust="spacingAndGlyphs" fill="#595857">还有</text>
+<text x="374.8" y="330" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#595857">2</text>
+<text x="391.6" y="330" textLength="16.8" lengthAdjust="spacingAndGlyphs" fill="#595857">天</text>
+<text x="22.0" y="370" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#2b2b2b">▸</text>
+<text x="38.8" y="370" textLength="84.0" lengthAdjust="spacingAndGlyphs" fill="#2b2b2b">其他进行中</text>
+<text x="131.2" y="370" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#165E83">5</text>
+<text x="156.4" y="370" textLength="67.2" lengthAdjust="spacingAndGlyphs" fill="#595857">acme-web</text>
+<text x="223.6" y="370" textLength="16.8" lengthAdjust="spacingAndGlyphs" fill="#595857">、</text>
+<text x="240.4" y="370" textLength="109.2" lengthAdjust="spacingAndGlyphs" fill="#595857">data-pipeline</text>
+<text x="349.6" y="370" textLength="50.4" lengthAdjust="spacingAndGlyphs" fill="#595857">、求职</text>
+<text x="400.0" y="370" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#595857">…</text>
+<text x="22.0" y="410" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#2b2b2b">▸</text>
+<text x="38.8" y="410" textLength="67.2" lengthAdjust="spacingAndGlyphs" fill="#2b2b2b">最近完成</text>
+<text x="114.4" y="410" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#007B43">1</text></g>
+<g class="sc" style="animation-name:k6"><path d="M89.2 166h67.2" fill="none" stroke="#9EA19A" stroke-width="1.2" stroke-linecap="butt"/>
+<path d="M55.6 166h33.6" fill="none" stroke="#165E83" stroke-width="3" stroke-linecap="round"/>
+<text x="30.4" y="90" textLength="67.2" lengthAdjust="spacingAndGlyphs" fill="#005243" font-weight="700">acme-web</text>
+<text x="97.6" y="90" textLength="100.8" lengthAdjust="spacingAndGlyphs" fill="#005243" font-weight="700">（这个项目）</text>
+<text x="299.2" y="90" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#595857">1</text>
+<text x="316.0" y="90" textLength="16.8" lengthAdjust="spacingAndGlyphs" fill="#595857">件</text>
+<text x="341.2" y="90" textLength="25.2" lengthAdjust="spacingAndGlyphs" fill="#595857">· 1</text>
+<text x="374.8" y="90" textLength="33.6" lengthAdjust="spacingAndGlyphs" fill="#595857">已停</text>
+<text x="38.8" y="110" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#2b2b2b">▾</text>
+<text x="55.6" y="110" textLength="50.4" lengthAdjust="spacingAndGlyphs" fill="#2b2b2b">升级到</text>
+<text x="114.4" y="110" textLength="67.2" lengthAdjust="spacingAndGlyphs" fill="#2b2b2b">React 19</text>
+<text x="383.2" y="110" textLength="25.2" lengthAdjust="spacingAndGlyphs" fill="#595857">1/3</text>
+<text x="55.6" y="130" textLength="151.2" lengthAdjust="spacingAndGlyphs" fill="#715C1F">对话已结束，可接手</text>
+<text x="215.2" y="130" textLength="25.2" lengthAdjust="spacingAndGlyphs" fill="#715C1F">· 3</text>
+<text x="248.8" y="130" textLength="50.4" lengthAdjust="spacingAndGlyphs" fill="#715C1F">小时前</text>
+<text x="164.8" y="170" textLength="25.2" lengthAdjust="spacingAndGlyphs" fill="#595857">33%</text>
+<text x="55.6" y="190" textLength="184.8" lengthAdjust="spacingAndGlyphs" fill="#595857">背景：旧版本挡住了新的</text>
+<text x="248.8" y="190" textLength="50.4" lengthAdjust="spacingAndGlyphs" fill="#595857">router</text>
+<text x="55.6" y="210" textLength="151.2" lengthAdjust="spacingAndGlyphs" fill="#595857">交接：包升好了；新</text>
+<text x="215.2" y="210" textLength="50.4" lengthAdjust="spacingAndGlyphs" fill="#595857">router</text>
+<text x="274.0" y="210" textLength="16.8" lengthAdjust="spacingAndGlyphs" fill="#595857">让</text>
+<text x="299.2" y="210" textLength="16.8" lengthAdjust="spacingAndGlyphs" fill="#595857">12</text>
+<text x="55.6" y="230" textLength="201.6" lengthAdjust="spacingAndGlyphs" fill="#595857">个测试挂掉；下一步修测试</text>
+<text x="55.6" y="250" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#595857">1</text>
+<text x="72.4" y="250" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#007B43">✓</text>
+<text x="89.2" y="250" textLength="100.8" lengthAdjust="spacingAndGlyphs" fill="#595857">升级依赖版本</text>
+<text x="55.6" y="270" textLength="25.2" lengthAdjust="spacingAndGlyphs" fill="#595857">2 ○</text>
+<text x="89.2" y="270" textLength="100.8" lengthAdjust="spacingAndGlyphs" fill="#2b2b2b" font-weight="700">修失败的测试</text>
+<text x="198.4" y="270" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#165E83">←</text>
+<text x="215.2" y="270" textLength="33.6" lengthAdjust="spacingAndGlyphs" fill="#165E83">现在</text>
+<text x="55.6" y="290" textLength="25.2" lengthAdjust="spacingAndGlyphs" fill="#595857">3 ○</text>
+<text x="89.2" y="290" textLength="67.2" lengthAdjust="spacingAndGlyphs" fill="#2b2b2b">删掉旧的</text>
+<text x="164.8" y="290" textLength="67.2" lengthAdjust="spacingAndGlyphs" fill="#2b2b2b">polyfill</text>
+<text x="55.6" y="330" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#9EA19A">[</text>
+<text x="72.4" y="330" textLength="67.2" lengthAdjust="spacingAndGlyphs" fill="#165E83" font-weight="700">接手做完</text>
+<text x="148.0" y="330" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#9EA19A">]</text>
+<text x="164.8" y="330" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#9EA19A">[</text>
+<text x="181.6" y="330" textLength="100.8" lengthAdjust="spacingAndGlyphs" fill="#2b2b2b">复制续接指令</text>
+<text x="290.8" y="330" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#9EA19A">]</text>
+<text x="307.6" y="330" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#9EA19A">[</text>
+<text x="324.4" y="330" textLength="33.6" lengthAdjust="spacingAndGlyphs" fill="#2b2b2b">归档</text>
+<text x="366.4" y="330" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#9EA19A">]</text>
+<text x="30.4" y="370" textLength="109.2" lengthAdjust="spacingAndGlyphs" fill="#005243" font-weight="700">data-pipeline</text>
+<text x="299.2" y="370" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#595857">1</text>
+<text x="316.0" y="370" textLength="16.8" lengthAdjust="spacingAndGlyphs" fill="#595857">件</text>
+<text x="341.2" y="370" textLength="25.2" lengthAdjust="spacingAndGlyphs" fill="#595857">· 1</text>
+<text x="374.8" y="370" textLength="33.6" lengthAdjust="spacingAndGlyphs" fill="#595857">在做</text>
+<text x="38.8" y="390" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#2b2b2b">▸</text>
+<text x="55.6" y="390" textLength="151.2" lengthAdjust="spacingAndGlyphs" fill="#2b2b2b">回补去年的事件数据</text>
+<text x="383.2" y="390" textLength="25.2" lengthAdjust="spacingAndGlyphs" fill="#595857">1/4</text>
+<text x="55.6" y="410" textLength="126.0" lengthAdjust="spacingAndGlyphs" fill="#165E83">gemini · gemini</text>
+<text x="190.0" y="410" textLength="50.4" lengthAdjust="spacingAndGlyphs" fill="#165E83">正在做</text>
+<text x="248.8" y="410" textLength="25.2" lengthAdjust="spacingAndGlyphs" fill="#165E83">· 6</text>
+<text x="282.4" y="410" textLength="50.4" lengthAdjust="spacingAndGlyphs" fill="#165E83">分钟前</text></g>
+<rect class="sc" style="animation-name:k7" x="16" y="192" width="398.40000000000003" height="48" rx="7" fill="none" stroke="#165E83" stroke-width="2.4"/>
+<rect class="sc" style="animation-name:k8" x="49.6" y="312" width="112.80000000000001" height="28" rx="7" fill="none" stroke="#165E83" stroke-width="2.4"/>
+<g class="sc" style="animation-name:k9"><path d="M26.2 296V290q0 -4 4 -4H30.4M30.4 286h310.8M341.2 286h8.4M345.4 286V296M349.6 286h50.400000000000006M400 286H400.2q4 0 4 4V296M26.2 296v20M345.4 296v20M404.2 296v20M26.2 316V322q0 4 4 4H30.4M30.4 326h310.8M341.2 326h8.4M345.4 326V316M349.6 326h50.400000000000006M400 326H400.2q4 0 4 -4V316M26.2 416V410q0 -4 4 -4H30.4M30.4 406h369.6M400 406H400.2q4 0 4 4V416M26.2 416v20M404.2 416v20" fill="none" stroke="#9EA19A" stroke-width="1.2" stroke-linecap="butt"/>
+<text x="22.0" y="70" textLength="33.6" lengthAdjust="spacingAndGlyphs" fill="#2b2b2b" font-weight="700">进度</text>
+<text x="22.0" y="110" textLength="25.2" lengthAdjust="spacingAndGlyphs" fill="#715C1F">● 5</text>
+<text x="55.6" y="110" textLength="33.6" lengthAdjust="spacingAndGlyphs" fill="#2b2b2b">等你</text>
+<text x="106.0" y="110" textLength="25.2" lengthAdjust="spacingAndGlyphs" fill="#165E83">▸ 6</text>
+<text x="139.6" y="110" textLength="50.4" lengthAdjust="spacingAndGlyphs" fill="#2b2b2b">进行中</text>
+<text x="206.8" y="110" textLength="25.2" lengthAdjust="spacingAndGlyphs" fill="#BB5535">⚑ 1</text>
+<text x="240.4" y="110" textLength="50.4" lengthAdjust="spacingAndGlyphs" fill="#2b2b2b">快到期</text>
+<text x="307.6" y="110" textLength="25.2" lengthAdjust="spacingAndGlyphs" fill="#007B43">✓ 5</text>
+<text x="341.2" y="110" textLength="67.2" lengthAdjust="spacingAndGlyphs" fill="#2b2b2b">今天完成</text>
+<text x="22.0" y="150" textLength="100.8" lengthAdjust="spacingAndGlyphs" fill="#595857">现在最需要你</text>
+<text x="22.0" y="170" textLength="84.0" lengthAdjust="spacingAndGlyphs" fill="#715C1F">〔选一个〕</text>
+<text x="106.0" y="170" textLength="67.2" lengthAdjust="spacingAndGlyphs" fill="#2b2b2b" font-weight="700">上线方式</text>
+<text x="22.0" y="190" textLength="84.0" lengthAdjust="spacingAndGlyphs" fill="#005243">acme-web ›</text>
+<text x="114.4" y="190" textLength="151.2" lengthAdjust="spacingAndGlyphs" fill="#005243">设置页加上深色模式</text>
+<text x="22.0" y="210" textLength="319.2" lengthAdjust="spacingAndGlyphs" fill="#2b2b2b">先用开关给部分用户，还是直接全部开放？</text>
+<text x="22.0" y="250" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#9EA19A">[</text>
+<text x="38.8" y="250" textLength="67.2" lengthAdjust="spacingAndGlyphs" fill="#165E83" font-weight="700">先开开关</text>
+<text x="114.4" y="250" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#9EA19A">]</text>
+<text x="131.2" y="250" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#9EA19A">[</text>
+<text x="148.0" y="250" textLength="67.2" lengthAdjust="spacingAndGlyphs" fill="#2b2b2b">全部开放</text>
+<text x="223.6" y="250" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#9EA19A">]</text>
+<text x="38.8" y="310" textLength="134.4" lengthAdjust="spacingAndGlyphs" fill="#595857">都不是？打字回复</text>
+<text x="358.0" y="310" textLength="33.6" lengthAdjust="spacingAndGlyphs" fill="#2b2b2b">回复</text>
+<text x="22.0" y="370" textLength="33.6" lengthAdjust="spacingAndGlyphs" fill="#2b2b2b">还有</text>
+<text x="64.0" y="370" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#2b2b2b">4</text>
+<text x="80.8" y="370" textLength="50.4" lengthAdjust="spacingAndGlyphs" fill="#2b2b2b">件等你</text>
+<text x="139.6" y="370" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#2b2b2b">▸</text>
+<text x="38.8" y="430" textLength="210.0" lengthAdjust="spacingAndGlyphs" fill="#005243">acme-web · feat/dark-mode</text>
+<text x="366.4" y="430" textLength="25.2" lengthAdjust="spacingAndGlyphs" fill="#595857">2/5</text></g></g>
+</g>
+<g class="win sc" style="animation-name:k35" transform="translate(662.0 92) scale(1.12)">
+<rect width="430.40000000000003" height="438" rx="12" fill="#1e2022" stroke="#34373a"/>
+<path d="M12 0.5h406.40000000000003a11.5 11.5 0 0 1 11.5 11.5v22h-429.40000000000003v-22a11.5 11.5 0 0 1 11.5-11.5z" fill="#26292b"/>
+<line x1="0.5" y1="34" x2="429.90000000000003" y2="34" stroke="#34373a"/>
+<g fill="#6E7268"><circle cx="20" cy="17" r="5"/><circle cx="38" cy="17" r="5"/><circle cx="56" cy="17" r="5"/></g>
+<text x="215.20000000000002" y="22" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', 'Noto Sans Mono CJK TC', 'Noto Sans CJK TC', 'PingFang TC', 'Microsoft JhengHei', monospace" font-size="12" fill="#AFAFB0">claude  —  acme-web</text>
+<g clip-path="url(#body)" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', 'Noto Sans Mono CJK TC', 'Noto Sans CJK TC', 'PingFang TC', 'Microsoft JhengHei', monospace" font-size="14" style="white-space:pre" xml:space="preserve"><path d="M26.2 296V290q0 -4 4 -4H30.4M30.4 286h310.8M341.2 286h8.4M345.4 286V296M349.6 286h50.400000000000006M400 286H400.2q4 0 4 4V296M26.2 296v20M345.4 296v20M404.2 296v20M26.2 316V322q0 4 4 4H30.4M30.4 326h310.8M341.2 326h8.4M345.4 326V316M349.6 326h50.400000000000006M400 326H400.2q4 0 4 -4V316M26.2 416V410q0 -4 4 -4H30.4M30.4 406h369.6M400 406H400.2q4 0 4 4V416M26.2 416v20M404.2 416v20" fill="none" stroke="#6E7268" stroke-width="1.2" stroke-linecap="butt"/>
+<text x="22.0" y="70" textLength="33.6" lengthAdjust="spacingAndGlyphs" fill="#e6e4dc" font-weight="700">进度</text>
+<text x="22.0" y="110" textLength="25.2" lengthAdjust="spacingAndGlyphs" fill="#F8B500">● 5</text>
+<text x="55.6" y="110" textLength="33.6" lengthAdjust="spacingAndGlyphs" fill="#e6e4dc">等你</text>
+<text x="106.0" y="110" textLength="25.2" lengthAdjust="spacingAndGlyphs" fill="#00A3AF">▸ 6</text>
+<text x="139.6" y="110" textLength="50.4" lengthAdjust="spacingAndGlyphs" fill="#e6e4dc">进行中</text>
+<text x="206.8" y="110" textLength="25.2" lengthAdjust="spacingAndGlyphs" fill="#ED6D3D">⚑ 1</text>
+<text x="240.4" y="110" textLength="50.4" lengthAdjust="spacingAndGlyphs" fill="#e6e4dc">快到期</text>
+<text x="307.6" y="110" textLength="25.2" lengthAdjust="spacingAndGlyphs" fill="#68BE8D">✓ 5</text>
+<text x="341.2" y="110" textLength="67.2" lengthAdjust="spacingAndGlyphs" fill="#e6e4dc">今天完成</text>
+<text x="22.0" y="150" textLength="100.8" lengthAdjust="spacingAndGlyphs" fill="#AFAFB0">现在最需要你</text>
+<text x="22.0" y="170" textLength="84.0" lengthAdjust="spacingAndGlyphs" fill="#F8B500">〔选一个〕</text>
+<text x="106.0" y="170" textLength="67.2" lengthAdjust="spacingAndGlyphs" fill="#e6e4dc" font-weight="700">上线方式</text>
+<text x="22.0" y="190" textLength="84.0" lengthAdjust="spacingAndGlyphs" fill="#5C9291">acme-web ›</text>
+<text x="114.4" y="190" textLength="151.2" lengthAdjust="spacingAndGlyphs" fill="#5C9291">设置页加上深色模式</text>
+<text x="22.0" y="210" textLength="319.2" lengthAdjust="spacingAndGlyphs" fill="#e6e4dc">先用开关给部分用户，还是直接全部开放？</text>
+<text x="22.0" y="250" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#6E7268">[</text>
+<text x="38.8" y="250" textLength="67.2" lengthAdjust="spacingAndGlyphs" fill="#00A3AF" font-weight="700">先开开关</text>
+<text x="114.4" y="250" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#6E7268">]</text>
+<text x="131.2" y="250" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#6E7268">[</text>
+<text x="148.0" y="250" textLength="67.2" lengthAdjust="spacingAndGlyphs" fill="#e6e4dc">全部开放</text>
+<text x="223.6" y="250" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#6E7268">]</text>
+<text x="38.8" y="310" textLength="134.4" lengthAdjust="spacingAndGlyphs" fill="#AFAFB0">都不是？打字回复</text>
+<text x="358.0" y="310" textLength="33.6" lengthAdjust="spacingAndGlyphs" fill="#e6e4dc">回复</text>
+<text x="22.0" y="370" textLength="33.6" lengthAdjust="spacingAndGlyphs" fill="#e6e4dc">还有</text>
+<text x="64.0" y="370" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#e6e4dc">4</text>
+<text x="80.8" y="370" textLength="50.4" lengthAdjust="spacingAndGlyphs" fill="#e6e4dc">件等你</text>
+<text x="139.6" y="370" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#e6e4dc">▸</text>
+<text x="38.8" y="430" textLength="210.0" lengthAdjust="spacingAndGlyphs" fill="#5C9291">acme-web · feat/dark-mode</text>
+<text x="366.4" y="430" textLength="25.2" lengthAdjust="spacingAndGlyphs" fill="#AFAFB0">2/5</text></g>
+</g>
+<g class="sc" style="animation-name:k26">
+<text x="600" y="268" text-anchor="middle" font-size="54" font-weight="700" fill="#2b2b2b">claude-progress-pane</text>
+<text x="600" y="318" text-anchor="middle" font-size="24" fill="#595857">别再一直盯着 agent 了，让它们来告诉你。</text>
+<rect x="270" y="356" width="660" height="52" rx="10" fill="#ffffff" stroke="#165E83" stroke-width="1.6"/>
+<text x="600" y="389" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', 'Noto Sans Mono CJK TC', 'Noto Sans CJK TC', 'PingFang TC', 'Microsoft JhengHei', monospace" font-size="18" fill="#2b2b2b">claude plugin install project-progress@claude-progress-pane</text>
+</g>
+<g>
+<rect x="64" y="626" width="1072" height="4" rx="2" fill="#dcdcd2"/>
+<rect class="bar" x="64" y="626" width="1072" height="4" rx="2" fill="#165E83"/>
+<text x="64" y="614" font-size="14" fill="#595857">为什么需要</text><text x="435.62666666666667" y="614" font-size="14" fill="#595857">它帮你做什么</text><text x="814.4" y="614" font-size="14" fill="#595857">在哪用、长怎样</text>
+</g>
+</g>
+</svg>

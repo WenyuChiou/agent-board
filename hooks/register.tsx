@@ -127,7 +127,16 @@ let dashboardAt = 0
 // when moved; otherwise ~/.claude/progress.md. USERPROFILE comes before HOME because that is
 // where Claude Code keeps ~/.claude on Windows even when HOME is set (Git Bash, MSYS); it is
 // unset on macOS and Linux.
+// Worked out once per session (session.start); the 2-second poll and the inbox look reuse it.
+let knownPath: string | null = null
+
 const progressPath = async ($: EngineInterface): Promise<string> => {
+  if (knownPath === null) knownPath = await findProgressPath($)
+
+  return knownPath
+}
+
+const findProgressPath = async ($: EngineInterface): Promise<string> => {
   const explicit = await $.env.get('CLAUDE_PROGRESS_FILE')
   if (explicit !== undefined && explicit !== '') return explicit
   const config = (await $.env.get('CLAUDE_CONFIG_DIR'))?.replace(/[\\/]+$/, '')
@@ -933,6 +942,7 @@ const settle = async ($: EngineInterface): Promise<void> => {
 
 export const register: Register = (on, options) => {
   on('session.start', async ($, e, next) => {
+    knownPath = await findProgressPath($)
     await settleLang($, options)
     const words = await wordsOf($)
     await $.command.register({ name: 'progress', description: words.commandDescription, argumentHint: words.commandHint })

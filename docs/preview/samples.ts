@@ -61,6 +61,7 @@ export const SAMPLES: Record<string, Sample> = {
 ### Upgrade to React 19
 > Session ended, open to take over
 > Context: the old version blocks the new router
+> Handoff: packages bumped; 12 tests fail on the new router; next, fix them
 - [x] Bump the packages
 - [ ] Fix the failing tests
 - [ ] Remove the old polyfills
@@ -159,6 +160,7 @@ export const SAMPLES: Record<string, Sample> = {
 ### 升級到 React 19
 > 對話已結束，可接手
 > 背景：舊版擋住新的 router
+> 交接：套件升好了；新 router 讓 12 個測試壞掉；下一步修測試
 - [x] 升套件版本
 - [ ] 修壞掉的測試
 - [ ] 拿掉舊 polyfill
@@ -257,6 +259,7 @@ export const SAMPLES: Record<string, Sample> = {
 ### 升级到 React 19
 > 对话已结束，可接手
 > 背景：旧版本挡住了新的 router
+> 交接：包升好了；新 router 让 12 个测试挂掉；下一步修测试
 - [x] 升级依赖版本
 - [ ] 修失败的测试
 - [ ] 删掉旧的 polyfill

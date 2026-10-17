@@ -283,4 +283,7 @@ export const keyBox = (block: Block, key: string): { row: number; col: number; s
   return null
 }
 
+// The first row whose text contains `text`, or -1.
+export const rowOf = (block: Block, text: string): number => block.findIndex(line => line.map(cell => cell.ch).join('').includes(text))
+
 export const widthCells = widthOf

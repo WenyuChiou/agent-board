@@ -1,7 +1,7 @@
 // Draws the README images from the pane's own code: drawPane's tree, laid out like a terminal
 // (terminal.ts), written as SVG. One set per language and per light / dark theme.
 //   bun docs/preview/render.ts          (run `claude --plugin-dir .` once first, for the JSX setup)
-// Writes docs/images/{hero,demo,flow}-<lang>-<theme>.svg, and docs/preview/out/dashboard-<lang>.html
+// Writes docs/images/{tour,hero,flow}-<lang>-<theme>.svg, and docs/preview/out/dashboard-<lang>.html
 // for docs/preview/png.mjs, which takes the progress.html screenshots and the social preview.
 import { mkdirSync, writeFileSync } from 'fs'
 import { join } from 'path'
@@ -15,7 +15,7 @@ import { parseProgress } from '../../hooks/parse'
 import { STRINGS } from '../../hooks/strings'
 import { buildView } from '../../hooks/view'
 import { NOW, SAMPLES, SESSION, MIN } from './samples'
-import { CELL, LINE, MONO, gridSvg, keyBox, layout } from './terminal'
+import { CELL, LINE, MONO, gridSvg, keyBox, layout, rowOf } from './terminal'
 import type { Node, Theme } from './terminal'
 
 // The JSX in pane.tsx compiles to h(type, props, ...children).
@@ -50,7 +50,6 @@ const WORDS: Record<Lang, {
   tagline: [string, string]
   features: Array<[string, keyof Palette, string]>
   agents: string
-  captions: [string, string, string]
   flow: { sources: Array<[string, string]>; outputs: Array<[string, string]>; into: [string, string, string]; file: string }
   window: string
 }> = {
@@ -64,7 +63,6 @@ const WORDS: Record<Lang, {
       ['✓', 'done', 'Cleans itself up; nothing piles up'],
     ],
     agents: 'English  ·  繁體中文  ·  简体中文',
-    captions: ['1  The one thing that needs you', '2  Everything waiting on you, by kind', '3  Answered from the pane; Claude moves on'],
     flow: {
       sources: [
         ['Claude Code sessions', 'Every turn, with or without a Task list'],
@@ -92,7 +90,6 @@ const WORDS: Record<Lang, {
       ['✓', 'done', '自己收拾，不會越積越多'],
     ],
     agents: 'English  ·  繁體中文  ·  简体中文',
-    captions: ['1  最需要你的那一件事', '2  所有等你的事，依種類列好', '3  在面板上回答，Claude 接著做'],
     flow: {
       sources: [
         ['Claude Code 對話', '每回合自動整理，有沒有 Task 清單都行'],
@@ -120,7 +117,6 @@ const WORDS: Record<Lang, {
       ['✓', 'done', '自己清理，不会越积越多'],
     ],
     agents: 'English  ·  繁體中文  ·  简体中文',
-    captions: ['1  最需要你的那一件事', '2  所有等你的事，按种类列好', '3  在面板上回答，Claude 接着做'],
     flow: {
       sources: [
         ['Claude Code 对话', '每回合自动整理，有没有 Task 清单都行'],
@@ -178,7 +174,7 @@ const mineOf = (lang: Lang, isAnswered: boolean) => {
 const today = (lang: Lang): number =>
   countDay((SAMPLES[lang] as (typeof SAMPLES)[string]).journal.map(([days, project, task, step]) => journalLine({ project, task, step }, NOW - days * 24 * 60 * MIN)).join('\n'), NOW)
 
-type Frame = { opened: string[]; isAnswered: boolean }
+type Frame = { opened: string[]; isAnswered: boolean; expanded?: string }
 
 const paneGrid = (lang: Lang, mode: Mode, frame: Frame) => {
   const s = STRINGS[lang]
@@ -191,7 +187,7 @@ const paneGrid = (lang: Lang, mode: Mode, frame: Frame) => {
   const answer = frame.isAnswered ? { question: sample.mine.steps[3]?.[0] ?? '', text: s.answered(option[0] ?? ''), isAsking: false } : null
   const tree = drawPane(
     { Box: 'Box', Text: 'Text', Button: 'Button', Input: 'Input', Link: 'Link' } as never,
-    { view, expanded: '', opened: frame.opened, answer, path: sample.path, width: 26, hasTaskTools: true, isNotifyOn: true, isLegendOpen: false, palette: t.palette, s } as never,
+    { view, expanded: frame.expanded ?? '', opened: frame.opened, answer, path: sample.path, width: 26, hasTaskTools: true, isNotifyOn: true, isLegendOpen: false, palette: t.palette, s } as never,
     {} as never,
   ) as unknown as Node
   const theme: Theme = { ground: t.ground, ink: t.ink, edge: t.edge, muted: t.palette.muted, accent: t.palette.accent, frame: t.palette.frame }
@@ -215,62 +211,7 @@ const terminal = (mode: Mode, title: string, body: string, rows: number, x: numb
 </g>`
 }
 
-// 1. The animated demo: three states of the pane, each with the button that leads to the next.
-const demo = (lang: Lang, mode: Mode): string => {
-  const w = WORDS[lang]
-  const page = PAGE[mode]
-  const frames: Frame[] = [
-    { opened: [], isAnswered: false },
-    { opened: ['waiting'], isAnswered: false },
-    { opened: [], isAnswered: true },
-  ]
-  const grids = frames.map(frame => paneGrid(lang, mode, frame))
-  // Every frame as tall as the shortest, so none leaves an empty window below it; a taller
-  // frame fades out at the bottom edge instead of stopping mid-line.
-  const rows = Math.min(...grids.map(one => one.grid.length))
-  const top = 58
-  const width = windowWidth + 48
-  const height = top + BAR + PAD + rows * LINE + PAD + 24
-  const press = [keyBox(grids[0]!.grid, 'focus::more'), keyBox(grids[1]!.grid, `mine::4::${grids[1]!.firstOption}`), null]
-  const accent = TERMINAL[mode].palette.accent
-  const ground = TERMINAL[mode].ground
-  const fadeTop = top + BAR + PAD + (rows - 2) * LINE
-  const groups = grids.map((one, i) => {
-    const body = gridSvg(one.grid.slice(0, rows), PAD, BAR + PAD, one.theme)
-    const fade =
-      one.grid.length > rows ? `<rect x="25" y="${fadeTop}" width="${windowWidth - 2}" height="${2 * LINE + PAD - 1}" fill="url(#fade)"/>` : ''
-    const box = press[i]
-    const ring = box
-      ? `<rect class="p${i + 1}" x="${24 + PAD + box.col * CELL - 5}" y="${top + BAR + PAD + box.row * LINE - 3}" width="${box.span * CELL + 10}" height="${LINE + 6}" rx="6" fill="none" stroke="${accent}" stroke-width="2"/>`
-      : ''
-    return `<g class="f f${i + 1}">
-<text x="24" y="36" font-family="${SANS}" font-size="17" font-weight="600" fill="${page.ink}">${esc(w.captions[i] ?? '')}</text>
-${terminal(mode, w.window, body, rows, 24, top)}
-${fade}
-${ring}
-</g>`
-  })
-  return `<svg xmlns="http://www.w3.org/2000/svg" width="${Math.round(width * 1.25)}" height="${Math.round(height * 1.25)}" viewBox="0 0 ${width} ${height}" role="img" aria-label="${esc(w.captions.join(' / '))}">
-<title>${esc(w.captions.join(' / '))}</title>
-<style>
-.f { opacity: 0; animation: 12s infinite; }
-.f1 { animation-name: a1; } .f2 { animation-name: a2; } .f3 { animation-name: a3; }
-.p1, .p2 { opacity: 0; animation: 12s infinite; } .p1 { animation-name: p1; } .p2 { animation-name: p2; }
-@keyframes a1 { 0%, 32% { opacity: 1 } 34%, 98% { opacity: 0 } 100% { opacity: 1 } }
-@keyframes a2 { 0%, 32% { opacity: 0 } 34%, 65% { opacity: 1 } 67%, 100% { opacity: 0 } }
-@keyframes a3 { 0%, 65% { opacity: 0 } 67%, 98% { opacity: 1 } 100% { opacity: 0 } }
-@keyframes p1 { 0%, 17% { opacity: 0 } 19%, 31% { opacity: 1 } 33%, 100% { opacity: 0 } }
-@keyframes p2 { 0%, 49% { opacity: 0 } 51%, 64% { opacity: 1 } 66%, 100% { opacity: 0 } }
-@media (prefers-reduced-motion: reduce) { .f, .p1, .p2 { animation: none; } .f1 { opacity: 1; } }
-</style>
-<defs><linearGradient id="fade" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="${ground}" stop-opacity="0"/><stop offset="0.7" stop-color="${ground}" stop-opacity="1"/></linearGradient></defs>
-<rect width="${width}" height="${height}" rx="16" fill="${page.ground}"/>
-${groups.join('\n')}
-</svg>
-`
-}
-
-// 2. The banner: what it is on the left, the pane on the right, rising from the bottom edge.
+// The banner, for GitHub's social preview: what it is on the left, the pane on the right.
 const hero = (lang: Lang, mode: Mode): string => {
   const w = WORDS[lang]
   const page = PAGE[mode]
@@ -303,7 +244,7 @@ ${terminal(mode, w.window, body, rows + 6, 1280 - windowWidth - 64, 64)}
 `
 }
 
-// 3. How it works: who writes progress.md, and what reads it.
+// How it works: who writes progress.md, and what reads it.
 const flow = (lang: Lang, mode: Mode): string => {
   const w = WORDS[lang].flow
   const page = PAGE[mode]
@@ -350,6 +291,328 @@ ${right}
 `
 }
 
+// The 30-second tour at the top of the README: why (0–10.4 s), what it does (10.4–21 s),
+// where it runs and how it looks (21–30 s). One SVG, CSS keyframes only, so GitHub plays it.
+type TourWords = {
+  why: string[]
+  waiting: string[]
+  waitingSub: string[]
+  answer: string[]
+  answerSub: string
+  press: string[]
+  pressSub: string[]
+  hooks: string[]
+  hooksSub: string[]
+  lost: string[]
+  lostLines: string[]
+  runs: string[]
+  surfaces: string[]
+  systems: string
+  colours: string[]
+  coloursSub: string
+  names: Array<[string, string]>
+  end: string
+  timeline: [string, string, string]
+  working: string
+  waitsOnYou: string
+}
+
+const TOUR: Record<Lang, TourWords> = {
+  en: {
+    why: ['Running a few', 'AI agents at once?'],
+    waiting: ['One has been waiting', 'on you for 20 minutes.'],
+    waitingSub: ["And you didn't notice."],
+    answer: ['Not anymore.', 'Whatever needs you', 'shows up first.'],
+    answerSub: 'A plugin for Claude Code',
+    press: ['Answer right here.', 'No window hunting.'],
+    pressSub: ['One click and the agent', 'gets back to work.'],
+    hooks: ['Your other agents', 'report in on their own.'],
+    hooksSub: ['One command connects them.'],
+    lost: ['Close it.', 'Come back tomorrow.'],
+    lostLines: ["What's done, what's stuck, what's next", 'Take over a session left halfway', 'Finished work clears itself away'],
+    runs: ['Wherever you use', 'Claude Code.'],
+    surfaces: ['Terminal', 'Desktop app', 'VS Code', 'Browser and phone'],
+    systems: 'macOS · Linux · Windows  ·  English · 繁體中文 · 简体中文',
+    colours: ['Easy on the eyes,', 'light or dark.'],
+    coloursSub: 'Traditional Japanese colours, and every word stays readable',
+    names: [['藍 Ai', '浅葱 Asagi'], ['常磐 Tokiwa', '若竹 Wakatake'], ['鶯茶 Uguisucha', '山吹 Yamabuki'], ['江戸紫 Edomurasaki', '藤紫 Fujimurasaki'], ['代赭 Taisha', '柿 Kaki'], ['茜 Akane', '薔薇 Bara']],
+    end: 'Stop checking on your agents. Let them tell you.',
+    timeline: ['Why you need it', 'What it does', 'Where it runs'],
+    working: 'working…',
+    waitsOnYou: '● waiting on you · 20 min',
+  },
+  'zh-TW': {
+    why: ['同時開好幾個', 'AI agent 嗎？'],
+    waiting: ['有一個已經', '等你 20 分鐘了。'],
+    waitingSub: ['你完全沒發現。'],
+    answer: ['現在不會了。', '誰在等你，', '一眼就看到。'],
+    answerSub: 'Claude Code 外掛',
+    press: ['直接在這裡回，', '不用到處找視窗。'],
+    pressSub: ['按一下，agent 就繼續做。'],
+    hooks: ['其他 agent', '也會自己回報。'],
+    hooksSub: ['一行指令接上，之後不用管。'],
+    lost: ['關掉、壓縮、', '隔天再開都沒差。'],
+    lostLines: ['做到哪、卡在哪、下一步，都還在', '別人做到一半的，可以直接接手', '做完的會自己收走'],
+    runs: ['Claude Code 在哪，', '它就在哪。'],
+    surfaces: ['終端機', '桌面版', 'VS Code', '瀏覽器、手機'],
+    systems: 'macOS · Linux · Windows  ·  English · 繁體中文 · 简体中文',
+    colours: ['淺色深色', '都看得舒服。'],
+    coloursSub: '用日本傳統色，每個字都清楚好讀',
+    names: [['藍', '浅葱'], ['常磐', '若竹'], ['鶯茶', '山吹'], ['江戸紫', '藤紫'], ['代赭', '柿'], ['茜', '薔薇']],
+    end: '別再一直盯著 agent 了，讓它們來告訴你。',
+    timeline: ['為什麼需要', '它幫你做什麼', '在哪用、長怎樣'],
+    working: '工作中…',
+    waitsOnYou: '● 等你 20 分鐘',
+  },
+  'zh-CN': {
+    why: ['同时开好几个', 'AI agent 吗？'],
+    waiting: ['有一个已经', '等你 20 分钟了。'],
+    waitingSub: ['你完全没发现。'],
+    answer: ['现在不会了。', '谁在等你，', '一眼就看到。'],
+    answerSub: 'Claude Code 插件',
+    press: ['直接在这里回，', '不用到处找窗口。'],
+    pressSub: ['点一下，agent 就接着干活。'],
+    hooks: ['其他 agent', '也会自己汇报。'],
+    hooksSub: ['一行命令接上，之后不用管。'],
+    lost: ['关掉、压缩、', '第二天再开都没事。'],
+    lostLines: ['做到哪、卡在哪、下一步，都还在', '别人做到一半的，可以直接接手', '做完的会自己收走'],
+    runs: ['Claude Code 在哪，', '它就在哪。'],
+    surfaces: ['终端', '桌面版', 'VS Code', '浏览器、手机'],
+    systems: 'macOS · Linux · Windows  ·  English · 繁體中文 · 简体中文',
+    colours: ['浅色深色', '都看着舒服。'],
+    coloursSub: '用日本传统色，每个字都清楚好读',
+    names: [['蓝', '浅葱'], ['常磐', '若竹'], ['莺茶', '山吹'], ['江户紫', '藤紫'], ['代赭', '柿'], ['茜', '蔷薇']],
+    end: '别再一直盯着 agent 了，让它们来告诉你。',
+    timeline: ['为什么需要', '它帮你做什么', '在哪用、长怎样'],
+    working: '工作中…',
+    waitsOnYou: '● 等你 20 分钟',
+  },
+}
+
+const AGENTS: Array<[string, string]> = [
+  ['Claude Code', 'acme-web'],
+  ['Codex', 'api-gateway'],
+  ['Gemini CLI', 'data-pipeline'],
+  ['Cursor', 'docs-site'],
+  ['Grok Build', 'mobile-app'],
+]
+const HOOKED = ['Claude Code', 'Codex', 'Gemini CLI', 'Cursor', 'OpenCode', 'Grok Build', 'Muse Code']
+
+const ENDED_TITLE: Record<Lang, string> = { en: 'Upgrade to React 19', 'zh-TW': '升級到 React 19', 'zh-CN': '升级到 React 19' }
+
+const tour = (lang: Lang, mode: Mode): string => {
+  const W = 1200
+  const H = 675
+  const LOOP = 30
+  const FADE = 0.45
+  const w = TOUR[lang]
+  const s = STRINGS[lang]
+  const page = PAGE[mode]
+  const term = TERMINAL[mode]
+  const pal = term.palette
+  const other: Mode = mode === 'light' ? 'dark' : 'light'
+  const isCjk = lang !== 'en'
+  const keyframes: string[] = []
+  // Visible from `start` to `end` seconds, fading in and out.
+  const timed = (start: number, end: number): string => {
+    const name = `k${keyframes.length}`
+    const p = (sec: number): string => `${Math.max(0, Math.min(100, (sec / LOOP) * 100)).toFixed(2)}%`
+    keyframes.push(
+      start <= 0
+        ? `@keyframes ${name} { 0%, ${p(end - FADE)} { opacity: 1 } ${p(end)}, 100% { opacity: 0 } }`
+        : `@keyframes ${name} { 0%, ${p(start)} { opacity: 0 } ${p(start + FADE)}, ${p(end - FADE)} { opacity: 1 } ${p(end)}, 100% { opacity: 0 } }`,
+    )
+    return `sc" style="animation-name:${name}`
+  }
+
+  // Left column: the headline of each moment.
+  const head = (lines: string[], sub: string[], start: number, end: number, still = false): string => {
+    const size = isCjk ? 40 : 42
+    const top = 230 - (lines.length - 2) * 26
+    const big = lines.map((line, i) => `<text x="64" y="${top + i * 56}" font-size="${size}" font-weight="700" fill="${page.ink}">${esc(line)}</text>`).join('')
+    const small = sub
+      .map((line, i) => `<text x="64" y="${top + lines.length * 56 + 18 + i * 30}" font-size="21" fill="${page.muted}">${esc(line)}</text>`)
+      .join('')
+    return `<g class="${timed(start, end)}"${still ? ' data-still="1"' : ''}>${big}${small}</g>`
+  }
+
+  // The pane: a terminal window at the right, scaled up a little; the body switches with the
+  // moment, scrolled to the part it is about.
+  const VIS = 18
+  const SCALE = 1.12
+  const winX = W - windowWidth * SCALE - 56
+  const winY = 92
+  const bodyH = PAD + VIS * LINE + PAD
+  const frame1 = paneGrid(lang, mode, { opened: [], isAnswered: false })
+  const frame2 = paneGrid(lang, mode, { opened: ['waiting'], isAnswered: false })
+  const frame3 = paneGrid(lang, mode, { opened: [], isAnswered: true })
+  const endedKey = `acme-web::${ENDED_TITLE[lang]}`
+  const frameH = paneGrid(lang, mode, { opened: ['others'], isAnswered: false, expanded: endedKey })
+  const frameDark = paneGrid(lang, other, { opened: [], isAnswered: false })
+  const body = (grid: typeof frame1, offset: number, start: number, end: number, still = false): string =>
+    `<g class="${timed(start, end)}"${still ? ' data-still="1"' : ''}>${gridSvg(grid.grid.slice(offset, offset + VIS + 1), PAD, BAR + PAD, grid.theme)}</g>`
+  const ring = (row: number, col: number, span: number, rows: number, start: number, end: number): string =>
+    `<rect class="${timed(start, end)}" x="${PAD + col * CELL - 6}" y="${BAR + PAD + row * LINE - 4}" width="${span * CELL + 12}" height="${rows * LINE + 8}" rx="7" fill="none" stroke="${pal.accent}" stroke-width="2.4"/>`
+  const windowFrame = (m: Mode, inner: string, cls: string, still = false): string => {
+    const t = TERMINAL[m]
+    const h = BAR + bodyH
+    return `<g class="${cls}"${still ? ' data-still="1"' : ''} transform="translate(${winX.toFixed(1)} ${winY}) scale(${SCALE})">
+<rect width="${windowWidth}" height="${h}" rx="12" fill="${t.ground}" stroke="${t.edge}"/>
+<path d="M12 0.5h${windowWidth - 24}a11.5 11.5 0 0 1 11.5 11.5v${BAR - 12}h-${windowWidth - 1}v-${BAR - 12}a11.5 11.5 0 0 1 11.5-11.5z" fill="${t.bar}"/>
+<line x1="0.5" y1="${BAR}" x2="${windowWidth - 0.5}" y2="${BAR}" stroke="${t.edge}"/>
+<g fill="${t.palette.frame}"><circle cx="20" cy="17" r="5"/><circle cx="38" cy="17" r="5"/><circle cx="56" cy="17" r="5"/></g>
+<text x="${windowWidth / 2}" y="22" text-anchor="middle" font-family="${MONO}" font-size="12" fill="${t.palette.muted}">${esc(WORDS[lang].window)}</text>
+<g clip-path="url(#body)" font-family="${MONO}" font-size="14" style="white-space:pre" xml:space="preserve">${inner}</g>
+</g>`
+  }
+
+  const focusTop = Math.max(0, rowOf(frame1.grid, s.mostNeeded))
+  const more = keyBox(frame1.grid, 'focus::more')
+  const option = keyBox(frame1.grid, `mine::4::${frame1.firstOption}`)
+  const waitingAt = Math.max(0, rowOf(frame2.grid, s.sectionWaiting) - 1)
+  const endedAt = Math.max(0, rowOf(frameH.grid, ENDED_TITLE[lang]) - 2)
+  const take = keyBox(frameH.grid, `${endedKey}::take`)
+  const handoffRow = rowOf(frameH.grid, s.handoffLine('').trim().replace(/[:：]$/, ''))
+  // Lines of the handoff note, which wraps: up to the first numbered step.
+  let handoffRows = 1
+  while (handoffRow >= 0 && handoffRows < 4 && !/^\s*\d+ /.test((frameH.grid[handoffRow + handoffRows] ?? []).map(cell => cell.ch).join(''))) handoffRows++
+  // What the press did, as a band along the bottom of the window.
+  const bandY = BAR + PAD + (VIS - 2) * LINE - 4
+  const toast = `<g class="${timed(12.5, 14)}"><rect x="0.5" y="${bandY}" width="${windowWidth - 1}" height="${BAR + bodyH - bandY - 0.5}" fill="${term.ground}"/><line x1="0.5" y1="${bandY}" x2="${windowWidth - 0.5}" y2="${bandY}" stroke="${pal.done}" stroke-width="1.6"/><text x="${PAD}" y="${bandY + 30}" font-weight="700" fill="${pal.done}">✓ ${esc(s.answered(frame1.firstOption))}</text></g>`
+  const inner = [
+    body(frame1, 0, 6.8, 12.4, true),
+    focusTop >= 0 && more !== null ? ring(focusTop, 0, WIDTH, more.row - focusTop - 1, 7.4, 10.4) : '',
+    option !== null ? ring(option.row, option.col, option.span, 1, 10.8, 12.4) : '',
+    body(frame3, 0, 12.4, 14),
+    toast,
+    body(frame2, waitingAt, 14, 17.5),
+    body(frameH, endedAt, 17.5, 21),
+    handoffRow >= 0 ? ring(handoffRow - endedAt, 0, WIDTH, handoffRows, 18.2, 21) : '',
+    take !== null ? ring(take.row - endedAt, take.col, take.span, 1, 19.2, 21) : '',
+    body(frame1, 0, 21, 24.8),
+  ].join('\n')
+  const darkInner = gridSvg(frameDark.grid.slice(0, VIS + 1), PAD, BAR + PAD, frameDark.theme)
+
+  // 0–6.8 s: five agents, each in its own window; two of them are waiting on you.
+  const cards = AGENTS.map(([name, project], i) => {
+    const y = 108 + i * 90
+    const x = winX + 24
+    const isWaiting = i === 1
+    return `<g class="${timed(0.3 + i * 0.35, 6.8)}">
+<rect x="${x}" y="${y}" width="420" height="70" rx="12" fill="${page.card}" stroke="${page.line}"/>
+<g fill="${pal.frame}"><circle cx="${x + 18}" cy="${y + 18}" r="4"/><circle cx="${x + 32}" cy="${y + 18}" r="4"/><circle cx="${x + 46}" cy="${y + 18}" r="4"/></g>
+<text x="${x + 64}" y="${y + 23}" font-family="${MONO}" font-size="15" font-weight="700" fill="${page.ink}">${esc(name)}</text>
+<text x="${x + 64 + (name.length + 1) * 9.2}" y="${y + 23}" font-family="${MONO}" font-size="14" fill="${pal.project}">${esc(project)}</text>
+<text x="${x + 18}" y="${y + 52}" font-family="${MONO}" font-size="14" fill="${pal.accent}">▸ ${esc(w.working)}</text>
+${isWaiting ? `<g class="${timed(3.8, 6.8)}"><text class="blink" x="${x + 404}" y="${y + 52}" text-anchor="end" font-family="${SANS}" font-size="15" font-weight="700" fill="${pal.waiting}">${esc(w.waitsOnYou)}</text></g>` : ''}
+</g>`
+  }).join('\n')
+
+  // 14–17.5 s: the agents that report through their hooks.
+  const chips = HOOKED.map((name, i) => {
+    const col = i % 2
+    const row = Math.floor(i / 2)
+    const x = 64 + col * 230
+    const y = 418 + row * 44
+    return `<g class="${timed(14.3 + i * 0.18, 17.5)}"><rect x="${x}" y="${y}" width="214" height="34" rx="17" fill="${page.card}" stroke="${page.line}"/><text x="${x + 16}" y="${y + 23}" font-size="16" fill="${pal.done}">✓</text><text x="${x + 38}" y="${y + 23}" font-size="16" fill="${page.ink}">${esc(name)}</text></g>`
+  }).join('\n')
+
+  // 17.5–21 s: nothing lost.
+  const lost = `<g class="${timed(17.5, 21)}">${w.lost
+    .map((line, i) => `<text x="64" y="${200 + i * 56}" font-size="${isCjk ? 40 : 42}" font-weight="700" fill="${page.ink}">${esc(line)}</text>`)
+    .join('')}${w.lostLines
+    .map((line, i) => `<text x="64" y="${330 + i * 46}" font-size="21" fill="${pal.done}">✓</text><text x="96" y="${330 + i * 46}" font-size="21" fill="${page.ink}">${esc(line)}</text>`)
+    .join('')}</g>`
+
+  // 21–24.6 s: where it runs.
+  const surfaces = `<g class="${timed(21.3, 24.6)}">${w.surfaces
+    .map((name, i) => {
+      const x = 64 + (i % 2) * 250
+      const y = 368 + Math.floor(i / 2) * 56
+      return `<rect x="${x}" y="${y}" width="234" height="42" rx="10" fill="${page.card}" stroke="${page.line}"/><text x="${x + 117}" y="${y + 27}" text-anchor="middle" font-size="18" fill="${page.ink}">${esc(name)}</text>`
+    })
+    .join('')}<text x="64" y="512" font-size="16" fill="${page.muted}">${esc(w.systems)}</text></g>`
+
+  // 24.6–27.6 s: the colours, light and dark, with their names; the pane turns to the other set.
+  const roles = ['accent', 'done', 'waiting', 'running', 'soon', 'alert'] as const
+  const swatches = `<g class="${timed(24.8, 27.6)}">${roles
+    .map((role, i) => {
+      const x = 64 + (i % 3) * 186
+      const y = 352 + Math.floor(i / 3) * 94
+      const [lightName, darkName] = w.names[i] ?? ['', '']
+      return `<circle cx="${x + 14}" cy="${y}" r="14" fill="${LIGHT[role]}"/><circle cx="${x + 44}" cy="${y}" r="14" fill="${DARK[role]}" stroke="${page.line}"/>` +
+        `<text x="${x}" y="${y + 36}" font-size="14" fill="${page.ink}">${esc(lightName)}</text><text x="${x}" y="${y + 56}" font-size="14" fill="${page.muted}">${esc(darkName)}</text>`
+    })
+    .join('')}<text x="64" y="${352 + 2 * 94 - 4}" font-size="16" fill="${page.muted}">${esc(w.coloursSub)}</text></g>`
+
+  // 27.6–30 s: the end card.
+  const command = 'claude plugin install project-progress@claude-progress-pane'
+  const endCard = `<g class="${timed(27.6, 30.2)}">
+<text x="${W / 2}" y="268" text-anchor="middle" font-size="54" font-weight="700" fill="${page.ink}">claude-progress-pane</text>
+<text x="${W / 2}" y="318" text-anchor="middle" font-size="24" fill="${page.muted}">${esc(w.end)}</text>
+<rect x="${W / 2 - 330}" y="356" width="660" height="52" rx="10" fill="${page.card}" stroke="${pal.accent}" stroke-width="1.6"/>
+<text x="${W / 2}" y="389" text-anchor="middle" font-family="${MONO}" font-size="18" fill="${page.ink}">${esc(command)}</text>
+</g>`
+
+  // The timeline along the bottom: the three parts, and how far the tour has come.
+  const track = { x: 64, y: 626, w: W - 128 }
+  const marks: Array<[number, string]> = [
+    [0, w.timeline[0]],
+    [10.4, w.timeline[1]],
+    [21, w.timeline[2]],
+  ]
+  const timeline = `<g>
+<rect x="${track.x}" y="${track.y}" width="${track.w}" height="4" rx="2" fill="${page.line}"/>
+<rect class="bar" x="${track.x}" y="${track.y}" width="${track.w}" height="4" rx="2" fill="${pal.accent}"/>
+${marks.map(([at, label]) => `<text x="${track.x + (at / LOOP) * track.w}" y="${track.y - 12}" font-size="14" fill="${page.muted}">${esc(label)}</text>`).join('')}
+</g>`
+
+  const scenes = [
+    head(w.why, [], 0, 3.4),
+    head(w.waiting, w.waitingSub, 3.4, 6.8),
+    cards,
+    head(w.answer, [w.answerSub], 6.8, 10.4, true),
+    head(w.press, w.pressSub, 10.4, 14),
+    head(w.hooks, w.hooksSub, 14, 17.5),
+    chips,
+    lost,
+    head(w.runs, [], 21, 24.6),
+    surfaces,
+    head(w.colours, [], 24.6, 27.6),
+    swatches,
+    windowFrame(mode, inner, `win ${timed(6.8, 24.8)}`, true),
+    windowFrame(other, darkInner, `win ${timed(24.6, 27.8)}`),
+    endCard,
+  ]
+  const label = [w.why, w.answer, w.hooks, w.runs, w.colours].map(lines => lines.join(' ')).join(' / ')
+
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}" role="img" aria-label="${esc(label)}">
+<title>claude-progress-pane: ${esc(w.end)}</title>
+<defs><clipPath id="body"><rect x="0" y="${BAR}" width="${windowWidth}" height="${bodyH}"/></clipPath></defs>
+<style>
+.sc { opacity: 0; animation-duration: ${LOOP}s; animation-iteration-count: infinite; animation-timing-function: linear; }
+.bar { transform-box: fill-box; transform-origin: 0 50%; animation: grow ${LOOP}s linear infinite; }
+.blink { animation: blink 0.9s steps(2, jump-none) infinite; }
+@keyframes grow { from { transform: scaleX(0) } to { transform: scaleX(1) } }
+@keyframes blink { from { opacity: 1 } to { opacity: 0.25 } }
+${keyframes.join('\n')}
+@media (prefers-reduced-motion: reduce) {
+  .sc, .bar, .blink { animation: none; }
+  .sc { opacity: 0; }
+  [data-still] { opacity: 1; }
+  .bar { transform: none; }
+}
+</style>
+<rect width="${W}" height="${H}" rx="18" fill="${page.ground}"/>
+<text x="64" y="70" font-family="${SANS}" font-size="15" font-weight="600" letter-spacing="2.5" fill="${page.muted}">CLAUDE-PROGRESS-PANE</text>
+<g font-family="${SANS}">
+${scenes.join('\n')}
+${timeline}
+</g>
+</svg>
+`
+}
+
 const dashboard = (lang: Lang): string => {
   const s = STRINGS[lang]
   const sample = SAMPLES[lang] as (typeof SAMPLES)[string]
@@ -360,8 +623,8 @@ const dashboard = (lang: Lang): string => {
 
 for (const lang of LANGS) {
   for (const mode of ['light', 'dark'] as const) {
+    writeFileSync(join(OUT, `tour-${lang}-${mode}.svg`), tour(lang, mode))
     writeFileSync(join(OUT, `hero-${lang}-${mode}.svg`), hero(lang, mode))
-    writeFileSync(join(OUT, `demo-${lang}-${mode}.svg`), demo(lang, mode))
     writeFileSync(join(OUT, `flow-${lang}-${mode}.svg`), flow(lang, mode))
   }
   writeFileSync(join(PAGES, `dashboard-${lang}.html`), dashboard(lang))
