@@ -1,7 +1,7 @@
 <h1 align="center">
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/images/tour-en-dark.svg">
-  <img alt="A 30-second tour: five agents, and the one that needs you; answering from the pane; every agent reporting through its own hooks; nothing lost; where it runs; its light and dark colours." src="docs/images/tour-en-light.svg" width="100%">
+  <img alt="A short tour: five agents, and the one that needs you; answering from the pane; every agent reporting through its own hooks; nothing lost; where it runs; its light and dark colours." src="docs/images/tour-en-light.svg" width="100%">
 </picture>
 </h1>
 

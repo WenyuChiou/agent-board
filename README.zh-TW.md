@@ -1,7 +1,7 @@
 <h1 align="center">
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/images/tour-zh-TW-dark.svg">
-  <img alt="30 秒導覽：五個 agent 裡哪個在等你；在面板上回答；各家用自己的 hook 回報；什麼都不會丟；在哪裡能用；深淺兩組和色配色。" src="docs/images/tour-zh-TW-light.svg" width="100%">
+  <img alt="導覽動畫：五個 agent 裡哪個在等你；在面板上回答；各家用自己的 hook 回報；什麼都不會丟；在哪裡能用；深淺兩組和色配色。" src="docs/images/tour-zh-TW-light.svg" width="100%">
 </picture>
 </h1>
 

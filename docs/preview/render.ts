@@ -291,8 +291,8 @@ ${right}
 `
 }
 
-// The 30-second tour at the top of the README: why (0–10.4 s), what it does (10.4–21 s),
-// where it runs and how it looks (21–30 s). One SVG, CSS keyframes only, so GitHub plays it.
+// The tour at the top of the README, about 48 s: why you need it, what it does,
+// where it runs and how it looks. One SVG, CSS keyframes only, so GitHub plays it.
 type TourWords = {
   why: string[]
   waiting: string[]
@@ -403,7 +403,17 @@ const ENDED_TITLE: Record<Lang, string> = { en: 'Upgrade to React 19', 'zh-TW': 
 const tour = (lang: Lang, mode: Mode): string => {
   const W = 1200
   const H = 675
-  const LOOP = 30
+  // How long each moment stays on screen, in seconds; each starts where the one before ends.
+  const HOLD = { why: 5.4, waiting: 5.4, answer: 5.6, press: 5.6, hooks: 5.5, lost: 5.5, runs: 5.6, colours: 5, end: 4.4 }
+  const at = {} as Record<keyof typeof HOLD, [number, number]>
+  let clock = 0
+  for (const key of Object.keys(HOLD) as Array<keyof typeof HOLD>) {
+    at[key] = [clock, clock + HOLD[key]]
+    clock += HOLD[key]
+  }
+  const LOOP = clock
+  // Within the press moment: the button lights up, then the pane after the answer.
+  const answered = at.press[0] + 3
   const FADE = 0.45
   const w = TOUR[lang]
   const s = STRINGS[lang]
@@ -478,54 +488,54 @@ const tour = (lang: Lang, mode: Mode): string => {
   while (handoffRow >= 0 && handoffRows < 4 && !/^\s*\d+ /.test((frameH.grid[handoffRow + handoffRows] ?? []).map(cell => cell.ch).join(''))) handoffRows++
   // What the press did, as a band along the bottom of the window.
   const bandY = BAR + PAD + (VIS - 2) * LINE - 4
-  const toast = `<g class="${timed(12.5, 14)}"><rect x="0.5" y="${bandY}" width="${windowWidth - 1}" height="${BAR + bodyH - bandY - 0.5}" fill="${term.ground}"/><line x1="0.5" y1="${bandY}" x2="${windowWidth - 0.5}" y2="${bandY}" stroke="${pal.done}" stroke-width="1.6"/><text x="${PAD}" y="${bandY + 30}" font-weight="700" fill="${pal.done}">✓ ${esc(s.answered(frame1.firstOption))}</text></g>`
+  const toast = `<g class="${timed(answered + 0.1, at.press[1])}"><rect x="0.5" y="${bandY}" width="${windowWidth - 1}" height="${BAR + bodyH - bandY - 0.5}" fill="${term.ground}"/><line x1="0.5" y1="${bandY}" x2="${windowWidth - 0.5}" y2="${bandY}" stroke="${pal.done}" stroke-width="1.6"/><text x="${PAD}" y="${bandY + 30}" font-weight="700" fill="${pal.done}">✓ ${esc(s.answered(frame1.firstOption))}</text></g>`
   const inner = [
-    body(frame1, 0, 6.8, 12.4, true),
-    focusTop >= 0 && more !== null ? ring(focusTop, 0, WIDTH, more.row - focusTop - 1, 7.4, 10.4) : '',
-    option !== null ? ring(option.row, option.col, option.span, 1, 10.8, 12.4) : '',
-    body(frame3, 0, 12.4, 14),
+    body(frame1, 0, at.answer[0], answered, true),
+    focusTop >= 0 && more !== null ? ring(focusTop, 0, WIDTH, more.row - focusTop - 1, at.answer[0] + 0.6, at.answer[1]) : '',
+    option !== null ? ring(option.row, option.col, option.span, 1, at.press[0] + 0.4, answered) : '',
+    body(frame3, 0, answered, at.press[1]),
     toast,
-    body(frame2, waitingAt, 14, 17.5),
-    body(frameH, endedAt, 17.5, 21),
-    handoffRow >= 0 ? ring(handoffRow - endedAt, 0, WIDTH, handoffRows, 18.2, 21) : '',
-    take !== null ? ring(take.row - endedAt, take.col, take.span, 1, 19.2, 21) : '',
-    body(frame1, 0, 21, 24.8),
+    body(frame2, waitingAt, ...at.hooks),
+    body(frameH, endedAt, ...at.lost),
+    handoffRow >= 0 ? ring(handoffRow - endedAt, 0, WIDTH, handoffRows, at.lost[0] + 0.7, at.lost[1]) : '',
+    take !== null ? ring(take.row - endedAt, take.col, take.span, 1, at.lost[0] + 2.2, at.lost[1]) : '',
+    body(frame1, 0, at.runs[0], at.runs[1] + 0.2),
   ].join('\n')
   const darkInner = gridSvg(frameDark.grid.slice(0, VIS + 1), PAD, BAR + PAD, frameDark.theme)
 
-  // 0–6.8 s: five agents, each in its own window; two of them are waiting on you.
+  // five agents, each in its own window; two of them are waiting on you.
   const cards = AGENTS.map(([name, project], i) => {
     const y = 108 + i * 90
     const x = winX + 24
     const isWaiting = i === 1
-    return `<g class="${timed(0.3 + i * 0.35, 6.8)}">
+    return `<g class="${timed(0.3 + i * 0.35, at.waiting[1])}">
 <rect x="${x}" y="${y}" width="420" height="70" rx="12" fill="${page.card}" stroke="${page.line}"/>
 <g fill="${pal.frame}"><circle cx="${x + 18}" cy="${y + 18}" r="4"/><circle cx="${x + 32}" cy="${y + 18}" r="4"/><circle cx="${x + 46}" cy="${y + 18}" r="4"/></g>
 <text x="${x + 64}" y="${y + 23}" font-family="${MONO}" font-size="15" font-weight="700" fill="${page.ink}">${esc(name)}</text>
 <text x="${x + 64 + (name.length + 1) * 9.2}" y="${y + 23}" font-family="${MONO}" font-size="14" fill="${pal.project}">${esc(project)}</text>
 <text x="${x + 18}" y="${y + 52}" font-family="${MONO}" font-size="14" fill="${pal.accent}">▸ ${esc(w.working)}</text>
-${isWaiting ? `<g class="${timed(3.8, 6.8)}"><text class="blink" x="${x + 404}" y="${y + 52}" text-anchor="end" font-family="${SANS}" font-size="15" font-weight="700" fill="${pal.waiting}">${esc(w.waitsOnYou)}</text></g>` : ''}
+${isWaiting ? `<g class="${timed(at.waiting[0] + 0.4, at.waiting[1])}"><text class="blink" x="${x + 404}" y="${y + 52}" text-anchor="end" font-family="${SANS}" font-size="15" font-weight="700" fill="${pal.waiting}">${esc(w.waitsOnYou)}</text></g>` : ''}
 </g>`
   }).join('\n')
 
-  // 14–17.5 s: the agents that report through their hooks.
+  // the agents that report through their hooks.
   const chips = HOOKED.map((name, i) => {
     const col = i % 2
     const row = Math.floor(i / 2)
     const x = 64 + col * 230
     const y = 418 + row * 44
-    return `<g class="${timed(14.3 + i * 0.18, 17.5)}"><rect x="${x}" y="${y}" width="214" height="34" rx="17" fill="${page.card}" stroke="${page.line}"/><text x="${x + 16}" y="${y + 23}" font-size="16" fill="${pal.done}">✓</text><text x="${x + 38}" y="${y + 23}" font-size="16" fill="${page.ink}">${esc(name)}</text></g>`
+    return `<g class="${timed(at.hooks[0] + 0.3 + i * 0.18, at.hooks[1])}"><rect x="${x}" y="${y}" width="214" height="34" rx="17" fill="${page.card}" stroke="${page.line}"/><text x="${x + 16}" y="${y + 23}" font-size="16" fill="${pal.done}">✓</text><text x="${x + 38}" y="${y + 23}" font-size="16" fill="${page.ink}">${esc(name)}</text></g>`
   }).join('\n')
 
-  // 17.5–21 s: nothing lost.
-  const lost = `<g class="${timed(17.5, 21)}">${w.lost
+  // nothing lost.
+  const lost = `<g class="${timed(...at.lost)}">${w.lost
     .map((line, i) => `<text x="64" y="${200 + i * 56}" font-size="${isCjk ? 40 : 42}" font-weight="700" fill="${page.ink}">${esc(line)}</text>`)
     .join('')}${w.lostLines
     .map((line, i) => `<text x="64" y="${330 + i * 46}" font-size="21" fill="${pal.done}">✓</text><text x="96" y="${330 + i * 46}" font-size="21" fill="${page.ink}">${esc(line)}</text>`)
     .join('')}</g>`
 
-  // 21–24.6 s: where it runs.
-  const surfaces = `<g class="${timed(21.3, 24.6)}">${w.surfaces
+  // where it runs.
+  const surfaces = `<g class="${timed(at.runs[0] + 0.3, at.runs[1])}">${w.surfaces
     .map((name, i) => {
       const x = 64 + (i % 2) * 250
       const y = 368 + Math.floor(i / 2) * 56
@@ -533,9 +543,9 @@ ${isWaiting ? `<g class="${timed(3.8, 6.8)}"><text class="blink" x="${x + 404}" 
     })
     .join('')}<text x="64" y="512" font-size="16" fill="${page.muted}">${esc(w.systems)}</text></g>`
 
-  // 24.6–27.6 s: the colours, light and dark, with their names; the pane turns to the other set.
+  // the colours, light and dark, with their names; the pane turns to the other set.
   const roles = ['accent', 'done', 'waiting', 'running', 'soon', 'alert'] as const
-  const swatches = `<g class="${timed(24.8, 27.6)}">${roles
+  const swatches = `<g class="${timed(at.colours[0] + 0.2, at.colours[1])}">${roles
     .map((role, i) => {
       const x = 64 + (i % 3) * 186
       const y = 352 + Math.floor(i / 3) * 94
@@ -545,9 +555,9 @@ ${isWaiting ? `<g class="${timed(3.8, 6.8)}"><text class="blink" x="${x + 404}" 
     })
     .join('')}<text x="64" y="${352 + 2 * 94 - 4}" font-size="16" fill="${page.muted}">${esc(w.coloursSub)}</text></g>`
 
-  // 27.6–30 s: the end card.
+  // the end card.
   const command = 'claude plugin install project-progress@claude-progress-pane'
-  const endCard = `<g class="${timed(27.6, 30.2)}">
+  const endCard = `<g class="${timed(at.end[0], LOOP + 0.2)}">
 <text x="${W / 2}" y="268" text-anchor="middle" font-size="54" font-weight="700" fill="${page.ink}">claude-progress-pane</text>
 <text x="${W / 2}" y="318" text-anchor="middle" font-size="24" fill="${page.muted}">${esc(w.end)}</text>
 <rect x="${W / 2 - 330}" y="356" width="660" height="52" rx="10" fill="${page.card}" stroke="${pal.accent}" stroke-width="1.6"/>
@@ -558,8 +568,8 @@ ${isWaiting ? `<g class="${timed(3.8, 6.8)}"><text class="blink" x="${x + 404}" 
   const track = { x: 64, y: 626, w: W - 128 }
   const marks: Array<[number, string]> = [
     [0, w.timeline[0]],
-    [10.4, w.timeline[1]],
-    [21, w.timeline[2]],
+    [at.press[0], w.timeline[1]],
+    [at.runs[0], w.timeline[2]],
   ]
   const timeline = `<g>
 <rect x="${track.x}" y="${track.y}" width="${track.w}" height="4" rx="2" fill="${page.line}"/>
@@ -568,20 +578,20 @@ ${marks.map(([at, label]) => `<text x="${track.x + (at / LOOP) * track.w}" y="${
 </g>`
 
   const scenes = [
-    head(w.why, [], 0, 3.4),
-    head(w.waiting, w.waitingSub, 3.4, 6.8),
+    head(w.why, [], ...at.why),
+    head(w.waiting, w.waitingSub, ...at.waiting),
     cards,
-    head(w.answer, [w.answerSub], 6.8, 10.4, true),
-    head(w.press, w.pressSub, 10.4, 14),
-    head(w.hooks, w.hooksSub, 14, 17.5),
+    head(w.answer, [w.answerSub], ...at.answer, true),
+    head(w.press, w.pressSub, ...at.press),
+    head(w.hooks, w.hooksSub, ...at.hooks),
     chips,
     lost,
-    head(w.runs, [], 21, 24.6),
+    head(w.runs, [], ...at.runs),
     surfaces,
-    head(w.colours, [], 24.6, 27.6),
+    head(w.colours, [], ...at.colours),
     swatches,
-    windowFrame(mode, inner, `win ${timed(6.8, 24.8)}`, true),
-    windowFrame(other, darkInner, `win ${timed(24.6, 27.8)}`),
+    windowFrame(mode, inner, `win ${timed(at.answer[0], at.runs[1] + 0.2)}`, true),
+    windowFrame(other, darkInner, `win ${timed(at.colours[0], at.colours[1] + 0.2)}`),
     endCard,
   ]
   const label = [w.why, w.answer, w.hooks, w.runs, w.colours].map(lines => lines.join(' ')).join(' / ')

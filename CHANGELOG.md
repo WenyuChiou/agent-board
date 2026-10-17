@@ -2,12 +2,13 @@
 
 ## Unreleased
 
-- **A 30-second tour at the top of the README.** It replaces the banner and the
+- **A short tour at the top of the README** (about 48 seconds, each screen
+  held long enough to read). It replaces the banner and the
   three-frame demo, in three acts:
-  - Why (0–10 s): five agents, one of them waiting on you, then the pane.
-  - What it does (10–21 s): answering with one press, every agent reporting
-    through its own hooks, a handoff line and take-over.
-  - Where it runs and how it looks (21–30 s): the surfaces and systems, then
+  - Why: five agents, one of them waiting on you, then the pane.
+  - What it does: answering with one press, every agent reporting through its
+    own hooks, a handoff line and take-over.
+  - Where it runs and how it looks: the surfaces and systems, then
     the light and dark 和色 palettes with each colour's name, and an end card
     with the install command.
 
