@@ -39,7 +39,49 @@ export const emptyMirror = (sessionId: string, project: string, now: number, cwd
   handoff: '',
   namedSteps: 0,
   lastAnswer: '',
+  answered: {},
 })
+
+// A short key for a step's words (FNV-1a, 32 bits, in hex): an answer is kept for the words
+// it answered, so the same step asking something new waits on the person again.
+const stepKey = (text: string): string => {
+  let hash = 0x811c9dc5
+  for (let index = 0; index < text.length; index += 1) {
+    hash ^= text.charCodeAt(index)
+    hash = Math.imul(hash, 0x01000193)
+  }
+
+  return (hash >>> 0).toString(16).padStart(8, '0')
+}
+
+// The words a step asks with, as the person saw them: its subject and its note.
+const askedWords = (task: ProgressMirrorTask): string => `${task.subject}\n${task.why ?? ''}`
+
+// An open step that asked the person, answered since, and still asking the same.
+export const isAnswered = (mirror: ProgressMirror, task: ProgressMirrorTask): boolean =>
+  task.status !== 'completed' && task.waiting === 'you' && mirror.answered?.[task.id] === stepKey(askedWords(task))
+
+// A step that waits on the person: asked, open, and not answered since.
+export const waitsOnYou = (mirror: ProgressMirror, task: ProgressMirrorTask): boolean =>
+  task.status !== 'completed' && task.waiting === 'you' && !isAnswered(mirror, task)
+
+// The person answered: the steps that wait on them (all, or the ones `only` names) are marked
+// answered with the words they answered. What the steps asked stays, for Claude's next call.
+export const markAnswered = (mirror: ProgressMirror, only?: readonly string[]): ProgressMirror => {
+  const answered: Record<string, string> = {}
+  for (const task of mirror.tasks) {
+    if (task.status === 'completed' || task.waiting !== 'you') continue
+    if (isAnswered(mirror, task) || (waitsOnYou(mirror, task) && (only === undefined || only.includes(task.id)))) {
+      answered[task.id] = stepKey(askedWords(task))
+    }
+  }
+
+  return { ...mirror, answered }
+}
+
+// Marks without the steps they name: a step asked again, gone, or renumbered.
+export const withoutMarks = (mirror: ProgressMirror, ids: readonly string[]): Record<string, string> =>
+  Object.fromEntries(Object.entries(mirror.answered ?? {}).filter(([id]) => !ids.includes(id)))
 
 const WAITING_YOU = new Set(['you', 'user', 'me', 'human', 'person', '使用者', '用户', '我'])
 
@@ -141,12 +183,23 @@ export const applyTaskCreate = (
   const kept = mirror.source === 'turns' ? [] : mirror.tasks
   const tasks = [...kept.filter(one => one.id !== id), task]
 
-  return { ...mirror, tasks, source: 'tasks', autoAsk: mirror.source === 'turns' ? null : mirror.autoAsk, updated: now }
+  return {
+    ...mirror,
+    tasks,
+    source: 'tasks',
+    autoAsk: mirror.source === 'turns' ? null : mirror.autoAsk,
+    answered: mirror.source === 'turns' ? {} : withoutMarks(mirror, [id]),
+    updated: now,
+  }
 }
+
+// Whether a TaskUpdate's metadata asks the person (again).
+const asksYou = (metadata: object | undefined): boolean =>
+  metadata !== undefined && waitingOf((metadata as Record<string, unknown>).waiting, null) === 'you'
 
 export const applyTaskUpdate = (mirror: ProgressMirror, input: TaskUpdateInput, now: number): ProgressMirror => {
   if (input.status === 'deleted') {
-    return { ...mirror, tasks: mirror.tasks.filter(one => one.id !== input.taskId), updated: now }
+    return { ...mirror, tasks: mirror.tasks.filter(one => one.id !== input.taskId), answered: withoutMarks(mirror, [input.taskId]), updated: now }
   }
   const status = input.status
   const tasks = mirror.tasks.map(task => {
@@ -163,14 +216,17 @@ export const applyTaskUpdate = (mirror: ProgressMirror, input: TaskUpdateInput, 
 
     return withMetadata(done, next.status === 'completed' ? undefined : input.metadata)
   })
+  // Claude asking the person again brings the step back, even in the words they answered.
+  const isAskedAgain = input.status !== 'completed' && asksYou(input.metadata)
 
-  return { ...mirror, tasks, updated: now }
+  return { ...mirror, tasks, answered: isAskedAgain ? withoutMarks(mirror, [input.taskId]) : mirror.answered, updated: now }
 }
 
 export const applyTodoWrite = (mirror: ProgressMirror, todos: readonly TodoInput[], now: number): ProgressMirror => ({
   ...mirror,
   source: 'tasks',
   autoAsk: null,
+  answered: {},
   tasks: todos.map((todo, index) => ({
     id: String(index + 1),
     subject: todo.content,
@@ -194,6 +250,8 @@ export const fromTaskList = (mirror: ProgressMirror, listed: readonly ListedTask
 const readList = (mirror: ProgressMirror, listed: readonly ListedTask[], now: number): ProgressMirror => ({
   ...mirror,
   source: 'tasks',
+  // Marks of steps no longer listed go, and the turns' steps had none of Claude's.
+  answered: mirror.source === 'turns' ? {} : Object.fromEntries(Object.entries(mirror.answered ?? {}).filter(([id]) => listed.some(item => item.id === id))),
   tasks: listed.map(item => {
     const known = mirror.tasks.find(task => task.id === item.id)
 
@@ -228,12 +286,7 @@ export const completedSince = (before: ProgressMirror, after: ProgressMirror): P
 // What deserves a desktop notification between two states of the mirror: a step that now
 // needs the person, and the whole list finishing.
 export const noticesOf = (before: ProgressMirror, after: ProgressMirror, s: Strings = ZH_TW): string[] => {
-  const needs = after.tasks.filter(
-    task =>
-      task.status !== 'completed' &&
-      task.waiting === 'you' &&
-      !before.tasks.some(old => old.id === task.id && old.status !== 'completed' && old.waiting === 'you'),
-  )
+  const needs = after.tasks.filter(task => waitsOnYou(after, task) && !before.tasks.some(old => old.id === task.id && waitsOnYou(before, old)))
   const title = after.title || fallbackTitle(after)
 
   return [
@@ -249,7 +302,7 @@ export const stateOf = (mirror: ProgressMirror, isTurnRunning: boolean): Progres
 }
 
 export const doingTask = (mirror: ProgressMirror): ProgressMirrorTask | undefined =>
-  mirror.tasks.find(task => task.status === 'in_progress' && task.waiting === null && task.blocked === null) ??
+  mirror.tasks.find(task => task.status === 'in_progress' && (task.waiting === null || isAnswered(mirror, task)) && task.blocked === null) ??
   mirror.tasks.find(task => task.status === 'in_progress')
 
 // A CJK or full-width character takes two terminal cells, anything else one.
@@ -327,7 +380,7 @@ export const resumeNote = (mirror: ProgressMirror, s: Strings = ZH_TW): string |
   const done = mirror.tasks.length - open.length
   const doing = doingTask(mirror)
   const next = open.filter(task => task !== doing).slice(0, 4)
-  const waiting = open.filter(task => task.waiting === 'you' || task.blocked !== null)
+  const waiting = open.filter(task => waitsOnYou(mirror, task) || task.blocked !== null)
   const facts = [
     s.resumeGoal(asData(mirror.title || fallbackTitle(mirror)), asData(mirror.project)),
     mirror.context === '' || mirror.context === undefined ? '' : s.resumeContext(asData(mirror.context)),

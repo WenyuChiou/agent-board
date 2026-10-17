@@ -5,7 +5,7 @@ import type { Strings } from './i18n'
 import type { AskKind } from './ask'
 import { shortId } from './blocks'
 import { ciWords, prWords } from './github'
-import { doingTask, fallbackTitle } from './mirror'
+import { doingTask, fallbackTitle, isAnswered, waitsOnYou } from './mirror'
 import type { Tone } from './palette'
 import { countSteps, currentStepIndex, doneKey, isHereProject, isStale, isTaskComplete, RESUME } from './parse'
 
@@ -264,7 +264,7 @@ export const foldSteps = (steps: readonly ViewStep[], room = 6, s: Strings = ZH_
 const currentOf = (mirror: ProgressMirror, s: Strings): CurrentView | null => {
   if (mirror.tasks.length === 0) return null
   const doing = doingTask(mirror)
-  const waitingYou = mirror.tasks.find(task => task.status !== 'completed' && task.waiting === 'you')
+  const waitingYou = mirror.tasks.find(task => waitsOnYou(mirror, task))
   const blocked = mirror.tasks.find(task => task.status !== 'completed' && task.blocked !== null)
   const done = mirror.tasks.filter(task => task.status === 'completed').length
   let status = s.waitingReply
@@ -282,14 +282,15 @@ const currentOf = (mirror: ProgressMirror, s: Strings): CurrentView | null => {
     tone = 'accent'
   }
   const steps = mirror.tasks.map((task, index) => {
+    const hasAnswer = isAnswered(mirror, task)
     let stepStatus: ProgressStepStatus = task.status === 'completed' ? 'done' : 'todo'
     if (task.status !== 'completed') {
       if (task.blocked !== null) stepStatus = 'blocked'
-      else if (task.waiting === 'you') stepStatus = 'waiting'
+      else if (task.waiting === 'you' && !hasAnswer) stepStatus = 'waiting'
       else if (task.waiting === 'run') stepStatus = 'running'
       else if (task.status === 'in_progress') stepStatus = 'doing'
     }
-    const note = stepStatus === 'blocked' ? (task.blocked ?? '') : stepStatus === 'done' ? '' : (task.why ?? '')
+    const note = stepStatus === 'blocked' ? (task.blocked ?? '') : stepStatus === 'done' ? '' : hasAnswer ? s.answeredNote : (task.why ?? '')
     return {
       text: `${task.subject}${suffixOf(stepStatus, s)}`,
       note,
@@ -385,7 +386,7 @@ const ownWaiting = (mine: ProgressMirror): WaitingItem[] => {
   const context = contextFor(mine)
 
   return mine.tasks
-    .filter(task => task.status !== 'completed' && task.waiting === 'you')
+    .filter(task => waitsOnYou(mine, task))
     .map(task => ({
       key: `mine::${task.id}`,
       project: mine.project,
