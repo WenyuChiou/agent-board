@@ -3,7 +3,7 @@ import { expect, test } from 'claude-code/testing'
 import type { ProgressMirror, ProgressPr } from '../types'
 import { askOf } from '../hooks/ask'
 import { addManualTask, isArchivable, manualTaskCount, renderAutoBlock, setManualStep, takeArchivable, takeManualDone, takeTask, upsertAutoBlock } from '../hooks/blocks'
-import { agentHooks, DELETE, openclawPlugin, isWindowsHost, withFlatHook, withGroupedHook, withHermesHooks, withoutHermesHooks, withoutOurHooks, withoutSection } from '../hooks/connect'
+import { agentHooks, DELETE, openclawPlugin, openclawPrinted, openclawSavedBy, openclawTooOld, isWindowsHost, withFlatHook, withGroupedHook, withHermesHooks, withoutHermesHooks, withoutOurHooks, withoutSection } from '../hooks/connect'
 import { dashboardHtml } from '../hooks/dashboard'
 import { answerKey, blockId, isInboxFile, isTakenFile, isTranscriptPath, keepInboxDone, promptKey, readTurn, takenName, transcriptTail, turnsToDigest } from '../hooks/inbox'
 import { applyDigest, clearAsked, isWork, lastQuestion, markAsked, parseDigest, replyData, turnTools } from '../hooks/digest'
@@ -778,6 +778,29 @@ test('OpenClaw gets a plugin file and the config entry that loads it, beside the
   expect(JSON.parse(String(config?.edit(String(config?.edit('{}', false)), true)))).toEqual({ plugins: {} })
   // A config written by hand as JSON5 is left alone.
   expect(config?.edit('{ plugins: {} }', false)).toBeNull()
+})
+
+test('an OpenClaw older than 2026.4.24 reads as too old, from its config or from what it prints, and a config with nothing of ours is not rewritten to take ours out', () => {
+  expect(openclawTooOld('2026.3.8')).toBe('2026.3.8')
+  expect(openclawTooOld(' v2026.3.8 ')).toBe('v2026.3.8')
+  expect(openclawTooOld('2026.4.23')).toBe('2026.4.23')
+  expect(openclawTooOld('2026.4.24')).toBeNull()
+  // Months are compared as numbers, so 10 comes after 4.
+  expect(openclawTooOld('2026.10.4-beta.1')).toBeNull()
+  expect(openclawTooOld('unknown')).toBeNull()
+  const by = (version: unknown): string => JSON.stringify({ meta: { lastTouchedVersion: version } })
+  expect(openclawSavedBy(by('2026.3.8'))).toBe('2026.3.8')
+  expect(openclawSavedBy(by(20260308))).toBeNull()
+  expect(openclawSavedBy('{}')).toBeNull()
+  expect(openclawSavedBy('')).toBeNull()
+  expect(openclawSavedBy('{ meta: {} }')).toBeNull()
+  expect(openclawPrinted('OpenClaw 2026.3.8 (3caab92)\n')).toBe('2026.3.8')
+  expect(openclawPrinted('OpenClaw v2026.10.4-beta.1')).toBe('2026.10.4-beta.1')
+  expect(openclawPrinted('claude/progress-mod\n')).toBeNull()
+  const ctx = { home: '/h', sep: '/', isWindows: false, script: '/h/.claude/progress-report.sh', inbox: '/h/.claude/progress-inbox', codexHome: '/h/.codex', grokHome: '/h/.grok', hermesHome: '/h/.hermes', openclawHome: '/h/.openclaw' }
+  const config = agentHooks(ctx).find(hook => hook.file === '/h/.openclaw/openclaw.json')
+  const own = '{"plugins":{"allow":["discord"],"entries":{"discord":{"enabled":true}}}}'
+  expect(config?.edit(own, true)).toBe(own)
 })
 
 test('the OpenClaw plugin skips heartbeat and memory runs and ends a session on anything but a compaction or restart', () => {

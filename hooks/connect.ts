@@ -363,6 +363,8 @@ export const agentHooks = (ctx: ConnectContext): AgentHook[] => {
         const config = readConfig(text)
         if (config === null) return null
         const file = [ctx.openclawHome, OPENCLAW_FILE].join(ctx.sep)
+        // Nothing of ours to take out: the person's file stays byte for byte.
+        if (remove && !hasOpenclawPlugin(config, file)) return text
         return writeConfig(remove ? withoutOpenclawPlugin(config, file) : withOpenclawPlugin(config, file))
       },
     },
@@ -424,6 +426,49 @@ export const AgentBoard = async ({ client, directory }) => ({
 
 const OPENCLAW_ID = 'agent-board'
 const OPENCLAW_FILE = `${OPENCLAW_ID}.mjs`
+
+// The first OpenClaw whose config check takes plugins.entries.<id>.hooks.allowConversationAccess
+// (its changelog, #71221). An older one will not start with our entry in its config. Seen live
+// on 2026.3.8, which also wants a manifest beside a plugin file; by that changelog, 2026.4.23
+// asks for the grant before agent_end but still refuses the key.
+export const OPENCLAW_MIN = '2026.4.24'
+
+// A version the way OpenClaw reads one (2026.4.24, v2026.4.24, 2026.4.24-beta.1) as one number
+// to compare; null when it is not one.
+const calver = (version: string): number | null => {
+  const parts = /^v?(\d+)\.(\d+)\.(\d+)/.exec(version.trim())
+
+  return parts === null ? null : Number(parts[1]) * 10000 + Number(parts[2]) * 100 + Number(parts[3])
+}
+
+// The version, when it is older than OPENCLAW_MIN; null when it is that or newer, or is not a
+// version at all.
+export const openclawTooOld = (version: string): string | null => {
+  const at = calver(version)
+  const min = calver(OPENCLAW_MIN)
+
+  return at !== null && min !== null && at < min ? version.trim() : null
+}
+
+// The version that last saved an OpenClaw config (meta.lastTouchedVersion). Updating OpenClaw
+// leaves it as it was until OpenClaw saves the file again.
+export const openclawSavedBy = (text: string): string | null => {
+  const config = readConfig(text)
+  const version = config !== null && isRecord(config.meta) ? config.meta.lastTouchedVersion : undefined
+
+  return typeof version === 'string' ? version : null
+}
+
+// The version `openclaw --version` prints: `OpenClaw 2026.3.8 (3caab92)`.
+export const openclawPrinted = (stdout: string): string | null => /\bv?(\d+\.\d+\.\d+\S*)/.exec(stdout)?.[1] ?? null
+
+const hasOpenclawPlugin = (config: Json, file: string): boolean => {
+  const plugins = isRecord(config.plugins) ? config.plugins : {}
+  const load = isRecord(plugins.load) ? plugins.load : {}
+  const entries = isRecord(plugins.entries) ? plugins.entries : {}
+
+  return (Array.isArray(load.paths) && load.paths.includes(file)) || OPENCLAW_ID in entries || (Array.isArray(plugins.allow) && plugins.allow.includes(OPENCLAW_ID))
+}
 
 // OpenClaw loads a plugin that is not bundled only when enabled, and passes it a turn's
 // words (agent_end) only with allowConversationAccess. A restrictive plugins.allow list

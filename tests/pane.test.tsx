@@ -47,6 +47,8 @@ type World = {
   appended?: unknown[]
   // Another session's stale write to progress.md, landing right after the next one.
   afterWrite?: () => string
+  // What `openclaw --version` prints.
+  openclaw?: string
 }
 
 // On Windows the engine resolves /home/me/... to X:\home\me\... before fs.* reaches these
@@ -98,7 +100,9 @@ const engineBeneath = (on: On, world: World): MockClock => {
     const ran =
       e.argv[0] === 'gh' && world.gh !== undefined
         ? world.gh()
-        : { exitCode: e.argv[0] === 'gh' ? 1 : 0, stdout: e.argv[0] === 'gh' ? '' : 'claude/progress-mod\n', stderr: '' }
+        : e.argv.includes('openclaw') && world.openclaw !== undefined
+          ? { exitCode: 0, stdout: world.openclaw, stderr: '' }
+          : { exitCode: e.argv[0] === 'gh' ? 1 : 0, stdout: e.argv[0] === 'gh' ? '' : 'claude/progress-mod\n', stderr: '' }
     world.ran?.push([...e.argv])
     return { value: { ...ran, isStdoutTruncated: false, isStderrTruncated: false } }
   })
@@ -1581,6 +1585,38 @@ test('a session hooks OpenClaw in by a plugin file and its config entry, names i
   expect(removed.text).toContain('已拿掉：OpenClaw。')
   expect(world.ran).toContainEqual(['rm', '-f', '/home/me/.openclaw/agent-board.mjs'])
   expect(JSON.parse(world.files.get('/home/me/.openclaw/openclaw.json') ?? '{}')).toEqual({ gateway: { port: 18789 }, plugins: {} })
+})
+
+test('an OpenClaw older than 2026.4.24 is not hooked in, what an earlier connect put there comes back out, and connecting by hand says why', async ($, on) => {
+  const meta = { lastTouchedVersion: '2026.3.8' }
+  const earlier = { meta, gateway: { port: 18789 }, plugins: { load: { paths: ['/home/me/.openclaw/agent-board.mjs'] }, entries: { 'agent-board': { enabled: true, hooks: { allowConversationAccess: true } } } } }
+  const world: World = { files: new Map([['/home/me/.openclaw/openclaw.json', JSON.stringify(earlier)], ['/home/me/.openclaw/agent-board.mjs', '// written by an earlier connect']]), mtime: 1, hasTasks: true, ran: [] }
+  engineBeneath(on, world)
+  const seen = outside(on)
+  await $.session.start({ cwd: '/work/persona_framework', surface: 'terminal', isInteractive: true })
+  expect(world.ran).toContainEqual(['rm', '-f', '/home/me/.openclaw/agent-board.mjs'])
+  const healed = world.files.get('/home/me/.openclaw/openclaw.json') ?? ''
+  expect(JSON.parse(healed)).toEqual({ meta, gateway: { port: 18789 }, plugins: {} })
+  expect(seen.notified).toEqual([])
+
+  const connected = await $.command.run({ ...TIDY, args: 'connect' })
+  expect(connected.text).toContain('OpenClaw 2026.3.8 太舊，要 2026.4.24 以上才接得上，所以沒有接它。更新之後再跑 /progress connect。')
+  // Two files, one note, and no "none found" above it.
+  expect(connected.text.split('OpenClaw 2026.3.8').length).toBe(2)
+  expect(connected.text).not.toContain('OpenClaw 的設定檔讀不懂')
+  expect(connected.text).not.toContain('沒找到可以接的 agent')
+  expect(world.files.get('/home/me/.openclaw/openclaw.json')).toBe(healed)
+})
+
+test('an OpenClaw updated since it last saved its config is hooked in, since the installed one says which version it is', async ($, on) => {
+  const config = JSON.stringify({ meta: { lastTouchedVersion: '2026.3.8' } })
+  const world: World = { files: new Map([['/home/me/.openclaw/openclaw.json', config]]), mtime: 1, hasTasks: true, ran: [], openclaw: 'OpenClaw 2026.5.2 (1a2b3c4)\n' }
+  engineBeneath(on, world)
+  const seen = outside(on)
+  await $.session.start({ cwd: '/work/persona_framework', surface: 'terminal', isInteractive: true })
+  expect(world.ran).toContainEqual(['openclaw', '--version'])
+  expect(JSON.parse(world.files.get('/home/me/.openclaw/openclaw.json') ?? '{}').plugins.entries['agent-board']).toEqual({ enabled: true, hooks: { allowConversationAccess: true } })
+  expect(seen.notified).toEqual(['已自動接上：OpenClaw。重開它們之後，每個回合都會出現在這裡。'])
 })
 
 test('an agent already hooked in is left as it is, and nothing is said', async ($, on) => {

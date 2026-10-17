@@ -15,6 +15,23 @@
   with gets our hooks in its place, Windows line ends and all", "Hermes
   Agent’s hooks go into its config.yaml beside the person’s own, once, and
   come back out cleanly".
+- **Connecting no longer stops an older OpenClaw from starting.** OpenClaw's
+  config check takes `hooks.allowConversationAccess` from 2026.4.24 on, and
+  an older one refuses to start with it in `openclaw.json` (2026.3 also wants
+  a manifest beside a plugin file). Connect, by hand or at a session's start,
+  now leaves an OpenClaw older than 2026.4.24 out, takes back out what an
+  earlier connect put there, and says so when you connect by hand. The
+  version is the one `openclaw --version` prints, else the one that last
+  saved the config, which an update leaves as it was. A config with nothing
+  of ours in it is never rewritten to take ours out, and a connect that only
+  left agents out no longer also says it found none. Found by a live run
+  against OpenClaw 2026.3.8. Tests: "an OpenClaw older than 2026.4.24 reads
+  as too old, from its config or from what it prints, and a config with
+  nothing of ours is not rewritten to take ours out", "an OpenClaw older than
+  2026.4.24 is not hooked in, what an earlier connect put there comes back
+  out, and connecting by hand says why", "an OpenClaw updated since it last
+  saved its config is hooked in, since the installed one says which version
+  it is".
 
 ## 0.15.0 — 2026-10-17
 

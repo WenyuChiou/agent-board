@@ -60,7 +60,7 @@ import { RULE_ID, RULES } from './rule'
 import { langOf, resolveLang, STRINGS } from './strings'
 import { answerTurns, applyDigest, clearAsked, cleanHandoff, isWork, lastQuestion, markAsked, needsRefresh, parseDigest, replyData, turnTools } from './digest'
 import type { Digest } from './digest'
-import { agentHooks, DELETE, isWindowsHost, psQuote, reporterPs1, reporterSh, withoutSection } from './connect'
+import { agentHooks, DELETE, isWindowsHost, OPENCLAW_MIN, openclawPrinted, openclawSavedBy, openclawTooOld, psQuote, reporterPs1, reporterSh, withoutSection } from './connect'
 import {
   answerKey,
   inboxOrder,
@@ -699,6 +699,8 @@ const connectAgents = async ($: EngineInterface, mode: ConnectMode): Promise<{ t
   const done: string[] = []
   const skipped: string[] = []
   const removeFile = (file: string): Promise<void> => removeFiles($, [file], isWin)
+  const savedBy = remove ? null : openclawSavedBy(await readText($, [openclawHome, 'openclaw.json'].join(sep)).catch(() => ''))
+  const openclawOld = savedBy === null || openclawTooOld(savedBy) === null ? null : await installedOpenclawOld($, isWin, savedBy)
   for (const hook of agentHooks({ home, sep, isWindows: isWin, script, inbox: inboxPath(path), codexHome, grokHome, hermesHome, openclawHome })) {
     if (!(await $.fs.exists(hook.dir))) continue
     // Left under the plugin's earlier name, it would report every turn a second time.
@@ -707,6 +709,16 @@ const connectAgents = async ($: EngineInterface, mode: ConnectMode): Promise<{ t
     const before = await readText($, hook.file).catch(() => null)
     if (before === null) {
       if (!isAuto) skipped.push(s.connectSkipped(hook.label, hook.file))
+      continue
+    }
+    // An OpenClaw too old for our entry would not start with it in its config, so it is not
+    // hooked in, and what an earlier connect put there comes back out.
+    if (hook.agent === 'openclaw' && openclawOld !== null) {
+      const after = before.trim() === '' ? null : hook.edit(before, true)
+      if (after === DELETE) await removeFile(hook.file)
+      else if (after !== null && after !== before) await $.fs.write(hook.file, after)
+      const note = s.connectTooOld(hook.label, openclawOld, OPENCLAW_MIN)
+      if (mode === 'connect' && !skipped.includes(note)) skipped.push(note)
       continue
     }
     if (remove && before.trim() === '') {
@@ -730,13 +742,28 @@ const connectAgents = async ($: EngineInterface, mode: ConnectMode): Promise<{ t
     if (!remove) await dropSection($, hook.agent, home, codexHome, sep)
   }
   const trust = [...(done.includes('Codex') ? [s.connectCodexTrust] : []), ...(done.includes('Hermes Agent') ? [s.connectHermesTrust] : [])]
+  // An agent found but left out is named below it, so "none found" would contradict that.
+  const none = skipped.length === 0 ? [s.connectNone] : []
   const lines = remove
     ? [done.length === 0 ? s.connectNothingRemoved : s.connectRemoved(done.join(s.listSep))]
     : isAuto
       ? [s.autoConnected(done.join(s.listSep)), ...trust, s.autoConnectUndo]
-      : [done.length === 0 ? s.connectNone : s.connectDone(done.join(s.listSep)), ...trust]
+      : done.length === 0
+        ? none
+        : [s.connectDone(done.join(s.listSep)), ...trust]
 
   return { text: [...lines, ...skipped].join('\n'), done }
+}
+
+// An OpenClaw config can name a version older than the one installed, since an update leaves
+// it as it was, so the installed OpenClaw has the last word; when it cannot be asked, the
+// config's stands. The version when it is too old, else null.
+const installedOpenclawOld = async ($: EngineInterface, isWin: boolean, savedBy: string): Promise<string | null> => {
+  const argv = isWin ? ['cmd', '/c', 'openclaw', '--version'] : ['openclaw', '--version']
+  const ran = await $.process.run(argv, { timeoutMs: 10000 }).catch(() => null)
+  const printed = ran !== null && ran.exitCode === 0 ? openclawPrinted(ran.stdout) : null
+
+  return openclawTooOld(printed ?? savedBy)
 }
 
 // Installing the plugin should be all it takes: each session hooks in any agent installed
