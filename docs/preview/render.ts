@@ -40,30 +40,13 @@ const TERMINAL: Record<Mode, { ground: string; ink: string; edge: string; bar: s
   dark: { ground: '#1e2022', ink: '#e6e4dc', edge: '#34373a', bar: '#26292b', palette: DARK },
   light: { ground: '#fbfaf5', ink: '#2b2b2b', edge: '#d9d7cc', bar: '#f1efe7', palette: LIGHT },
 }
-const PAGE: Record<Mode, { ground: string; card: string; line: string; ink: string; muted: string; accent: string }> = {
-  light: { ground: '#f6f5f0', card: '#ffffff', line: '#dcdcd2', ink: '#2b2b2b', muted: '#595857', accent: '#165e83' },
-  dark: { ground: '#15171a', card: '#1c1e21', line: '#2f3236', ink: '#e6e4dc', muted: '#afafb0', accent: '#4fb3bf' },
-}
 const SANS = "-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans TC', 'Noto Sans SC', 'PingFang TC', 'Microsoft JhengHei', 'Microsoft YaHei', sans-serif"
 
 const WORDS: Record<Lang, {
-  kicker: string
-  tagline: [string, string]
-  features: Array<[string, keyof Palette, string]>
-  agents: string
   flow: { heads: [string, string, string]; sources: Array<[string, string]>; outputs: Array<[string, string]>; into: [string, string, string]; file: string }
   window: string
 }> = {
   en: {
-    kicker: 'CLAUDE CODE PLUGIN  ·  MIT',
-    tagline: ['One pane for every AI coding agent.', 'Whatever is waiting on you comes first.'],
-    features: [
-      ['●', 'waiting', 'One question at a time, with a button per answer'],
-      ['▸', 'accent', 'Every agent reports through its own hooks'],
-      ['⚑', 'soon', 'Background, deadline and handoff on every task'],
-      ['✓', 'done', 'Cleans itself up; nothing piles up'],
-    ],
-    agents: 'English  ·  繁體中文  ·  简体中文',
     flow: {
       heads: ['Who reports', 'One file', 'Where you see it'],
       sources: [
@@ -83,15 +66,6 @@ const WORDS: Record<Lang, {
     window: 'claude  —  acme-web',
   },
   'zh-TW': {
-    kicker: 'CLAUDE CODE 外掛  ·  MIT',
-    tagline: ['所有 AI coding agent，一個面板看完。', '等你的事，永遠排第一個。'],
-    features: [
-      ['●', 'waiting', '一次一個問題，每個答案一個按鈕'],
-      ['▸', 'accent', '各家 agent 用自己的 hook 回報，不用記得'],
-      ['⚑', 'soon', '每件事都有背景、截止日和交接'],
-      ['✓', 'done', '自己收拾，不會越積越多'],
-    ],
-    agents: 'English  ·  繁體中文  ·  简体中文',
     flow: {
       heads: ['誰在回報', '寫進同一個檔', '在哪裡看'],
       sources: [
@@ -111,15 +85,6 @@ const WORDS: Record<Lang, {
     window: 'claude  —  acme-web',
   },
   'zh-CN': {
-    kicker: 'CLAUDE CODE 插件  ·  MIT',
-    tagline: ['所有 AI coding agent，一个面板看完。', '等你的事，永远排第一个。'],
-    features: [
-      ['●', 'waiting', '一次一个问题，每个答案一个按钮'],
-      ['▸', 'accent', '各家 agent 用自己的 hook 汇报，不用记得'],
-      ['⚑', 'soon', '每件事都有背景、截止日期和交接'],
-      ['✓', 'done', '自己清理，不会越积越多'],
-    ],
-    agents: 'English  ·  繁體中文  ·  简体中文',
     flow: {
       heads: ['谁在汇报', '写进同一个文件', '在哪里看'],
       sources: [
@@ -215,48 +180,48 @@ const terminal = (mode: Mode, title: string, body: string, rows: number, x: numb
 </g>`
 }
 
-// The banner, for GitHub's social preview: what it is on the left, the pane on the right.
-const hero = (lang: Lang, mode: Mode): string => {
-  const w = WORDS[lang]
-  const page = PAGE[mode]
-  const pal = TERMINAL[mode].palette
-  const { grid, theme } = paneGrid(lang, mode, { opened: [], isAnswered: false })
-  const rows = Math.min(grid.length, 27)
-  const body = gridSvg(grid.slice(0, rows), PAD, BAR + PAD, theme)
-  const isCjk = lang !== 'en'
-  const features = w.features
-    .map(([glyph, role, text], i) => {
-      const y = 392 + i * 44
-      return `<text x="72" y="${y}" font-family="${MONO}" font-size="20" fill="${pal[role]}">${glyph}</text>` +
-        `<text x="104" y="${y}" font-family="${SANS}" font-size="${isCjk ? 20 : 19}" fill="${page.ink}">${esc(text)}</text>`
-    })
-    .join('\n')
-  return `<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="640" viewBox="0 0 1280 640" role="img" aria-label="Agent Board: ${esc(w.tagline.join(' '))}">
-<title>Agent Board</title>
-<defs><clipPath id="edge"><rect width="1280" height="640" rx="20"/></clipPath></defs>
-<g clip-path="url(#edge)">
-<rect width="1280" height="640" fill="${page.ground}"/>
-<text x="72" y="128" font-family="${SANS}" font-size="15" font-weight="600" letter-spacing="3" fill="${page.muted}">${esc(w.kicker)}</text>
-<text x="70" y="196" font-family="${SANS}" font-size="50" font-weight="700" fill="${page.ink}">Agent Board</text>
-<text x="72" y="256" font-family="${SANS}" font-size="${isCjk ? 25 : 24}" fill="${page.ink}">${esc(w.tagline[0])}</text>
-<text x="72" y="294" font-family="${SANS}" font-size="${isCjk ? 25 : 24}" fill="${page.muted}">${esc(w.tagline[1])}</text>
-${features}
-<text x="72" y="594" font-family="${SANS}" font-size="15" fill="${page.muted}">${esc(w.agents)}</text>
-${terminal(mode, w.window, body, rows + 6, 1280 - windowWidth - 64, 64)}
-</g>
-</svg>
-`
+// The look the README's pictures share with the promotional card: a deep blue ground with a
+// faint dot grid and a teal glow, dark cards, the board mark, and each agent's own tile.
+const BRAND = { ground: '#0c1116', card: '#151b21', line: '#29313a', ink: '#f2f1ec', muted: '#9aa0a6', accent: DARK.accent }
+
+const brandDefs = (w: number, h: number, glow: [number, number] = [0.78, 0.35]): string =>
+  `<linearGradient id="sky" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#0f1a24"/><stop offset="0.55" stop-color="#0c1116"/><stop offset="1" stop-color="#090b0d"/></linearGradient>
+<radialGradient id="glow" cx="${glow[0]}" cy="${glow[1]}" r="0.55"><stop offset="0" stop-color="${BRAND.accent}" stop-opacity="0.2"/><stop offset="1" stop-color="${BRAND.accent}" stop-opacity="0"/></radialGradient>
+<pattern id="dots" width="24" height="24" patternUnits="userSpaceOnUse"><circle cx="2" cy="2" r="1" fill="#fff" fill-opacity="0.05"/></pattern>
+<filter id="lift" x="-20%" y="-20%" width="140%" height="160%"><feDropShadow dx="0" dy="18" stdDeviation="22" flood-color="#000" flood-opacity="0.55"/></filter>
+<clipPath id="edge"><rect width="${w}" height="${h}" rx="24"/></clipPath>`
+
+const brandGround = (w: number, h: number): string =>
+  `<rect width="${w}" height="${h}" fill="url(#sky)"/><rect width="${w}" height="${h}" fill="url(#glow)"/><rect width="${w}" height="${h}" fill="url(#dots)"/>`
+
+// The board mark and the name beside it.
+const brandMark = (x: number, y: number, size = 34, hasName = true): string => {
+  const k = size / 34
+  const name = `<text x="${x + size + 12}" y="${y + size * 0.74}" font-family="${SANS}" font-size="${Math.round(size * 0.72)}" font-weight="700" fill="${BRAND.ink}" letter-spacing="0.3">Agent Board</text>`
+  return `<g transform="translate(${x} ${y}) scale(${k})"><rect width="34" height="34" rx="9" fill="${BRAND.accent}"/><rect x="8" y="9" width="18" height="3.5" rx="1.75" fill="#0c1116"/><rect x="8" y="15.5" width="12" height="3.5" rx="1.75" fill="#0c1116"/><circle cx="23" cy="22" r="3.6" fill="${DARK.waiting}"/></g>${hasName ? name : ''}`
+}
+
+// An agent's tile, `size` square, from its name; nothing for a name without one.
+const iconTile = (name: string, x: number, y: number, size: number): string => {
+  const icon = AGENT_ICONS.find(one => one.name === name)
+  if (icon === undefined) return ''
+  const k = size / 48
+  const mark =
+    icon.path !== undefined
+      ? `<path transform="translate(${x + 12 * k} ${y + 12 * k}) scale(${k})" fill="#fff" d="${icon.path}"/>`
+      : `<text x="${x + size / 2}" y="${y + size * 0.66}" text-anchor="middle" font-family="${SANS}" font-size="${Math.round(size * 0.46)}" font-weight="700" fill="#fff">${esc(icon.letter ?? '')}</text>`
+  return `<rect x="${x + 0.5}" y="${y + 0.5}" width="${size - 1}" height="${size - 1}" rx="${size * 0.23}" fill="${icon.tile}" stroke="#fff" stroke-opacity="0.2"/>${mark}`
 }
 
 // How it works: who writes progress.md, and what reads it. Three numbered columns, big
 // type and few words, so it reads at the width GitHub shows it.
-const flow = (lang: Lang, mode: Mode): string => {
+const flow = (lang: Lang): string => {
   const w = WORDS[lang].flow
-  const page = PAGE[mode]
-  const pal = TERMINAL[mode].palette
+  const page = BRAND
+  const pal = DARK
   const W = 1280
   const H = 620
-  const card = (x: number, y: number, cw: number, ch: number, title: string, sub: string, dot: string, big: number) =>
+  const card = (x: number, y: number, cw: number, ch: number, title: string, sub: string, dot: string, big: number): string =>
     `<rect x="${x}" y="${y}" width="${cw}" height="${ch}" rx="14" fill="${page.card}" stroke="${page.line}" stroke-width="1.4"/>
 <circle cx="${x + 28}" cy="${y + ch / 2 - 15}" r="7" fill="${dot}"/>
 <text x="${x + 48}" y="${y + ch / 2 - 6}" font-size="${big}" font-weight="700" fill="${page.ink}">${esc(title)}</text>
@@ -267,7 +232,17 @@ const flow = (lang: Lang, mode: Mode): string => {
   const left = { x: 40, w: 316, h: 116, gap: 152 }
   const right = { x: 904, w: 336, h: 94, gap: 112 }
   const doc = { x: 508, y: top, w: 316, h: 430 }
-  const sources = w.sources.map(([title, sub], i) => card(left.x, top + i * left.gap, left.w, left.h, title, sub, dots[i] ?? pal.accent, 28)).join('\n')
+  // Claude Code wears its tile; the other agents are shown by theirs instead of a list of names.
+  const others = AGENT_ICONS.filter(icon => icon.name !== 'Claude Code')
+  const sources = w.sources
+    .map(([title, sub], i) => {
+      const y = top + i * left.gap
+      const base = card(left.x, y, left.w, left.h, title, i === 1 ? '' : sub, dots[i] ?? pal.accent, 28)
+      if (i === 0) return `${base}<rect x="${left.x + 14}" y="${y + left.h / 2 - 29}" width="28" height="28" fill="${page.card}"/>${iconTile('Claude Code', left.x + 14, y + left.h / 2 - 29, 28)}`
+      if (i === 1) return `${base}${others.map((icon, k) => iconTile(icon.name, left.x + 48 + k * 34, y + left.h / 2 + 8, 28)).join('')}`
+      return base
+    })
+    .join('\n')
   const outputs = w.outputs.map(([title, sub], i) => card(right.x, top + i * right.gap, right.w, right.h, title, sub, outDots[i] ?? pal.accent, 24)).join('\n')
   const colors = [pal.project, page.muted, page.ink, pal.done, pal.accent, pal.waiting, page.ink, pal.project, page.muted, pal.waiting, page.ink, pal.project, pal.soon]
   const fileText = FILE_LINES[lang]
@@ -296,9 +271,9 @@ const flow = (lang: Lang, mode: Mode): string => {
     .join('\n')
   return `<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}" role="img" aria-label="progress.md: ${esc(w.file)}">
 <title>progress.md</title>
-<defs><marker id="head" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="5" markerHeight="5" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="${pal.accent}"/></marker></defs>
-<rect width="${W}" height="${H}" rx="20" fill="${page.ground}"/>
-<g font-family="${SANS}">
+<defs>${brandDefs(W, H, [0.5, 0.45])}<marker id="head" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="5" markerHeight="5" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="${pal.accent}"/></marker></defs>
+<g clip-path="url(#edge)" font-family="${SANS}">
+${brandGround(W, H)}
 ${heads}
 ${sources}
 ${ins}
@@ -432,7 +407,8 @@ const wrapWords = (text: string, max: number): string[] =>
     return lines
   }, [])
 
-const tour = (lang: Lang, mode: Mode): string => {
+const tour = (lang: Lang): string => {
+  const mode: Mode = 'dark'
   const W = 1200
   const H = 675
   // How long each moment stays on screen, in seconds; each starts where the one before ends.
@@ -452,7 +428,7 @@ const tour = (lang: Lang, mode: Mode): string => {
   const OUT = 0.4
   const w = TOUR[lang]
   const s = STRINGS[lang]
-  const page = PAGE[mode]
+  const page = BRAND
   const term = TERMINAL[mode]
   const pal = term.palette
   const other: Mode = mode === 'light' ? 'dark' : 'light'
@@ -488,7 +464,7 @@ const tour = (lang: Lang, mode: Mode): string => {
   const head = (lines: string[], sub: string[], start: number, end: number, still = false): string => {
     const size = isCjk ? 40 : 42
     const top = 230 - (lines.length - 2) * 26
-    const big = lines.map((line, i) => `<text x="64" y="${top + i * 56}" font-size="${size}" font-weight="700" fill="${page.ink}">${esc(line)}</text>`).join('')
+    const big = lines.map((line, i) => `<text x="64" y="${top + i * 56}" font-size="${size}" font-weight="800" fill="${i === lines.length - 1 ? page.accent : page.ink}">${esc(line)}</text>`).join('')
     const small = sub
       .map((line, i) => `<text x="64" y="${top + lines.length * 56 + 22 + i * 34}" font-size="25" fill="${page.muted}">${esc(line)}</text>`)
       .join('')
@@ -519,7 +495,7 @@ const tour = (lang: Lang, mode: Mode): string => {
     const t = TERMINAL[m]
     const h = BAR + bodyH
     // The class sits on an outer group: its CSS motion would replace a transform on the same element.
-    return `<g class="${cls}"${still ? ' data-still="1"' : ''}><g transform="translate(${winX.toFixed(1)} ${winY}) scale(${SCALE})">
+    return `<g class="${cls}"${still ? ' data-still="1"' : ''}><g filter="url(#lift)" transform="translate(${winX.toFixed(1)} ${winY}) scale(${SCALE})">
 <rect width="${windowWidth}" height="${h}" rx="12" fill="${t.ground}" stroke="${t.edge}"/>
 <path d="M12 0.5h${windowWidth - 24}a11.5 11.5 0 0 1 11.5 11.5v${BAR - 12}h-${windowWidth - 1}v-${BAR - 12}a11.5 11.5 0 0 1 11.5-11.5z" fill="${t.bar}"/>
 <line x1="0.5" y1="${BAR}" x2="${windowWidth - 0.5}" y2="${BAR}" stroke="${t.edge}"/>
@@ -563,11 +539,11 @@ const tour = (lang: Lang, mode: Mode): string => {
     const isWaiting = i === 1
     return `<g class="${timed(0.3 + i * 0.35, at.waiting[1])}">
 <rect x="${x}" y="${y}" width="480" height="78" rx="12" fill="${page.card}" stroke="${page.line}"/>
-<g fill="${pal.frame}"><circle cx="${x + 18}" cy="${y + 18}" r="4"/><circle cx="${x + 32}" cy="${y + 18}" r="4"/><circle cx="${x + 46}" cy="${y + 18}" r="4"/></g>
-<text x="${x + 64}" y="${y + 25}" font-family="${MONO}" font-size="18" font-weight="700" fill="${page.ink}">${esc(name)}</text>
-<text x="${x + 64 + (name.length + 1) * 10.9}" y="${y + 25}" font-family="${MONO}" font-size="17" fill="${pal.project}">${esc(project)}</text>
-<text x="${x + 18}" y="${y + 58}" font-family="${MONO}" font-size="17" fill="${pal.accent}">▸ ${esc(w.working)}</text>
-${isWaiting ? `<g class="${timed(at.waiting[0] + 0.4, at.waiting[1], 'zoom')}"><text class="blink" x="${x + 462}" y="${y + 58}" text-anchor="end" font-family="${SANS}" font-size="19" font-weight="700" fill="${pal.waiting}">${esc(w.waitsOnYou)}</text></g>` : ''}
+${iconTile(name, x + 16, y + 9, 30)}
+<text x="${x + 58}" y="${y + 30}" font-family="${MONO}" font-size="18" font-weight="700" fill="${page.ink}">${esc(name)}</text>
+<text x="${x + 58 + (name.length + 1) * 10.9}" y="${y + 30}" font-family="${MONO}" font-size="17" fill="${pal.project}">${esc(project)}</text>
+<text x="${x + 18}" y="${y + 62}" font-family="${MONO}" font-size="17" fill="${pal.accent}">▸ ${esc(w.working)}</text>
+${isWaiting ? `<g class="${timed(at.waiting[0] + 0.4, at.waiting[1], 'zoom')}"> <text class="blink" x="${x + 462}" y="${y + 62}" text-anchor="end" font-family="${SANS}" font-size="19" font-weight="700" fill="${pal.waiting}">${esc(w.waitsOnYou)}</text></g>` : ''}
 </g>`
   }).join('\n')
 
@@ -577,12 +553,12 @@ ${isWaiting ? `<g class="${timed(at.waiting[0] + 0.4, at.waiting[1], 'zoom')}"><
     const row = Math.floor(i / 2)
     const x = 64 + col * 248
     const y = 396 + row * 48
-    return `<g class="${timed(at.hooks[0] + 0.5 + i * 0.15, at.hooks[1], 'zoom')}"><rect x="${x}" y="${y}" width="232" height="40" rx="20" fill="${page.card}" stroke="${page.line}"/><text x="${x + 18}" y="${y + 27}" font-size="20" fill="${pal.done}">✓</text><text x="${x + 44}" y="${y + 27}" font-size="20" fill="${page.ink}">${esc(name)}</text></g>`
+    return `<g class="${timed(at.hooks[0] + 0.5 + i * 0.15, at.hooks[1], 'zoom')}"><rect x="${x}" y="${y}" width="232" height="40" rx="20" fill="${page.card}" stroke="${page.line}"/>${iconTile(name, x + 7, y + 7, 26)}<text x="${x + 44}" y="${y + 27}" font-size="20" fill="${page.ink}">${esc(name)}</text></g>`
   }).join('\n')
 
   // nothing lost.
   const lost = `<g class="${timed(...at.lost)}">${w.lost
-    .map((line, i) => `<text x="64" y="${200 + i * 56}" font-size="${isCjk ? 40 : 42}" font-weight="700" fill="${page.ink}">${esc(line)}</text>`)
+    .map((line, i) => `<text x="64" y="${200 + i * 56}" font-size="${isCjk ? 40 : 42}" font-weight="800" fill="${i === w.lost.length - 1 ? page.accent : page.ink}">${esc(line)}</text>`)
     .join('')}</g>${w.lostLines
     .map((line, i) => `<g class="${timed(at.lost[0] + 0.4 + i * 0.2, at.lost[1])}"><text x="64" y="${336 + i * 52}" font-size="24" fill="${pal.done}">✓</text><text x="100" y="${336 + i * 52}" font-size="24" fill="${page.ink}">${esc(line)}</text></g>`)
     .join('')}`
@@ -612,14 +588,17 @@ ${isWaiting ? `<g class="${timed(at.waiting[0] + 0.4, at.waiting[1], 'zoom')}"><
 
   // the end card.
   const command = 'claude plugin install agent-board@agent-board'
+  const tiles = AGENT_ICONS.map((icon, i) => iconTile(icon.name, W / 2 - (AGENT_ICONS.length * 52 - 12) / 2 + i * 52, 452, 40)).join('')
   const endCard = `<g class="${timed(at.end[0], LOOP + 0.2, 'zoom')}">
-<text x="${W / 2}" y="262" text-anchor="middle" font-size="64" font-weight="700" fill="${page.ink}">Agent Board</text>
-<text x="${W / 2}" y="318" text-anchor="middle" font-size="28" fill="${page.muted}">${esc(w.end)}</text>
+${brandMark(W / 2 - 30, 128, 60, false)}
+<text x="${W / 2}" y="262" text-anchor="middle" font-size="64" font-weight="800" fill="${page.ink}">Agent Board</text>
+<text x="${W / 2}" y="314" text-anchor="middle" font-size="28" fill="${page.accent}">${esc(w.end)}</text>
 </g>
 <g class="${timed(at.end[0] + 0.35, LOOP + 0.2)}">
-<rect x="${W / 2 - 330}" y="358" width="660" height="60" rx="12" fill="${page.card}" stroke="${pal.accent}" stroke-width="1.8"/>
-<text x="${W / 2}" y="396" text-anchor="middle" font-family="${MONO}" font-size="21" fill="${page.ink}">${esc(command)}</text>
-</g>`
+<rect x="${W / 2 - 330}" y="350" width="660" height="60" rx="12" fill="${page.card}" stroke="${pal.accent}" stroke-width="1.8"/>
+<text x="${W / 2}" y="388" text-anchor="middle" font-family="${MONO}" font-size="21" fill="${page.ink}">${esc(command)}</text>
+</g>
+<g class="${timed(at.end[0] + 0.6, LOOP + 0.2)}">${tiles}</g>`
 
   // The timeline along the bottom: the three parts, and how far the tour has come.
   const track = { x: 64, y: 626, w: W - 128 }
@@ -655,7 +634,7 @@ ${marks.map(([at, label]) => `<text x="${track.x + (at / LOOP) * track.w}" y="${
 
   return `<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}" role="img" aria-label="${esc(label)}">
 <title>Agent Board: ${esc(w.end)}</title>
-<defs><clipPath id="body"><path d="M1 ${BAR}h${windowWidth - 2}v${bodyH - 12}a11 11 0 0 1 -11 11h-${windowWidth - 24}a11 11 0 0 1 -11 -11z"/></clipPath></defs>
+<defs>${brandDefs(W, H)}<clipPath id="body"><path d="M1 ${BAR}h${windowWidth - 2}v${bodyH - 12}a11 11 0 0 1 -11 11h-${windowWidth - 24}a11 11 0 0 1 -11 -11z"/></clipPath></defs>
 <style>
 .sc { opacity: 0; animation-duration: ${LOOP}s; animation-iteration-count: infinite; animation-timing-function: linear; }
 .zoom { transform-box: fill-box; transform-origin: center; }
@@ -671,11 +650,13 @@ ${keyframes.join('\n')}
   .bar { transform: none; }
 }
 </style>
-<rect width="${W}" height="${H}" rx="18" fill="${page.ground}"/>
-<text x="64" y="66" font-family="${SANS}" font-size="18" font-weight="600" letter-spacing="3" fill="${page.muted}">AGENT BOARD</text>
+<g clip-path="url(#edge)">
+${brandGround(W, H)}
+${brandMark(64, 36, 30)}
 <g font-family="${SANS}">
 ${scenes.join('\n')}
 ${timeline}
+</g>
 </g>
 </svg>
 `
@@ -733,14 +714,7 @@ const promo = (lang: Lang): string => {
     .map((line, i) => `<text x="72" y="${top + i * lineGap}" font-size="${size}" font-weight="800" fill="${i === w.headline.length - 1 ? pal.accent : '#f7f6f2'}">${esc(line)}</text>`)
     .join('\n')
   const subY = top + (w.headline.length - 1) * lineGap + 26
-  const icons = AGENT_ICONS.map((icon, i) => {
-    const x = 72 + i * 58
-    const mark =
-      icon.path !== undefined
-        ? `<path transform="translate(${x + 11} 471) scale(0.9)" fill="#fff" d="${icon.path}"/>`
-        : `<text x="${x + 22}" y="${459 + 29}" text-anchor="middle" font-size="20" font-weight="700" fill="#fff">${esc(icon.letter ?? '')}</text>`
-    return `<rect x="${x + 0.5}" y="459.5" width="43" height="43" rx="10" fill="${icon.tile}" stroke="#fff" stroke-opacity="0.2"/>${mark}`
-  }).join('\n')
+  const icons = AGENT_ICONS.map((icon, i) => iconTile(icon.name, 72 + i * 58, 459, 44)).join('\n')
   // The pane, and under it the notification that has just come in; neither covers the other.
   const wx = 760
   const wy = 44
@@ -748,19 +722,10 @@ const promo = (lang: Lang): string => {
   const ny = wy + BAR + PAD * 2 + rows * LINE + 18
   return `<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="640" viewBox="0 0 1280 640" role="img" aria-label="Agent Board: ${esc(w.headline.join(' '))}">
 <title>Agent Board</title>
-<defs>
-<linearGradient id="sky" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#0f1a24"/><stop offset="0.55" stop-color="#0c1116"/><stop offset="1" stop-color="#090b0d"/></linearGradient>
-<radialGradient id="glow" cx="0.78" cy="0.35" r="0.55"><stop offset="0" stop-color="${pal.accent}" stop-opacity="0.22"/><stop offset="1" stop-color="${pal.accent}" stop-opacity="0"/></radialGradient>
-<pattern id="dots" width="24" height="24" patternUnits="userSpaceOnUse"><circle cx="2" cy="2" r="1" fill="#fff" fill-opacity="0.05"/></pattern>
-<filter id="lift" x="-20%" y="-20%" width="140%" height="160%"><feDropShadow dx="0" dy="18" stdDeviation="22" flood-color="#000" flood-opacity="0.55"/></filter>
-<clipPath id="edge"><rect width="1280" height="640" rx="24"/></clipPath>
-</defs>
+<defs>${brandDefs(1280, 640)}</defs>
 <g clip-path="url(#edge)" font-family="${SANS}">
-<rect width="1280" height="640" fill="url(#sky)"/>
-<rect width="1280" height="640" fill="url(#glow)"/>
-<rect width="1280" height="640" fill="url(#dots)"/>
-<g transform="translate(72 70)"><rect width="34" height="34" rx="9" fill="${pal.accent}"/><rect x="8" y="9" width="18" height="3.5" rx="1.75" fill="#0c1116"/><rect x="8" y="15.5" width="12" height="3.5" rx="1.75" fill="#0c1116"/><circle cx="23" cy="22" r="3.6" fill="${pal.waiting}"/></g>
-<text x="118" y="96" font-size="25" font-weight="700" fill="#f2f1ec" letter-spacing="0.3">Agent Board</text>
+${brandGround(1280, 640)}
+${brandMark(72, 70)}
 ${headline}
 ${w.sub.map((line, i) => `<text x="72" y="${subY + 24 + i * 33}" font-size="${isCjk ? 23 : 22}" fill="#b9bcc0">${esc(line)}</text>`).join('')}
 <text x="72" y="444" font-size="14" font-weight="700" letter-spacing="${isCjk ? 2 : 2.5}" fill="#8b9096">${esc(w.works)}</text>
@@ -801,11 +766,8 @@ for (const icon of AGENT_ICONS) writeFileSync(join(OUT, 'agents', `${icon.file}.
 for (const lang of LANGS) writeFileSync(join(OUT, `promo-${lang}.svg`), promo(lang))
 
 for (const lang of LANGS) {
-  for (const mode of ['light', 'dark'] as const) {
-    writeFileSync(join(OUT, `tour-${lang}-${mode}.svg`), tour(lang, mode))
-    writeFileSync(join(OUT, `hero-${lang}-${mode}.svg`), hero(lang, mode))
-    writeFileSync(join(OUT, `flow-${lang}-${mode}.svg`), flow(lang, mode))
-  }
+  writeFileSync(join(OUT, `tour-${lang}.svg`), tour(lang))
+  writeFileSync(join(OUT, `flow-${lang}.svg`), flow(lang))
   writeFileSync(join(PAGES, `dashboard-${lang}.html`), dashboard(lang))
 }
-console.log(`wrote ${LANGS.length * 6} SVGs to ${OUT} and ${LANGS.length} progress.html pages to ${PAGES}`)
+console.log(`wrote the tour, flow and promotional card in ${LANGS.length} languages and ${AGENT_ICONS.length} agent icons to ${OUT}, and ${LANGS.length} progress.html pages to ${PAGES}`)

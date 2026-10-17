@@ -1,8 +1,5 @@
 <h1 align="center">
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/images/tour-zh-TW-dark.svg">
-  <img alt="簡短導覽：五個 agent，其中一個在等你；直接在面板回答；每個 agent 透過自己的 hook 回報；什麼都不會漏；在哪裡用；淺色深色兩種配色。" src="docs/images/tour-zh-TW-light.svg" width="100%">
-</picture>
+<img alt="簡短導覽：五個 agent，其中一個在等你；直接在面板回答；每個 agent 透過自己的 hook 回報；什麼都不會漏；在哪裡用；淺色深色兩種配色。" src="docs/images/tour-zh-TW.svg" width="100%">
 </h1>
 
 <p align="center">
@@ -106,10 +103,7 @@ claude -p "/progress connect"
 
 ## 怎麼運作
 
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/images/flow-zh-TW-dark.svg">
-  <img alt="Claude Code 對話、透過 hook 的其他 agent、和你，都寫進同一個 Markdown 檔 progress.md；面板、progress.html、封存與狀態列都讀它。" src="docs/images/flow-zh-TW-light.svg" width="100%">
-</picture>
+<img alt="Claude Code 對話、透過 hook 的其他 agent、和你，都寫進同一個 Markdown 檔 progress.md；面板、progress.html、封存與狀態列都讀它。" src="docs/images/flow-zh-TW.svg" width="100%">
 
 每個接上的 agent，hook 會把它最後的回覆存進 `~/.claude/progress-inbox/`。開著的 Claude Code 對話五秒內讀到，把那個回合整理好，寫進 `progress.md` 裡那個 agent 自己的一塊。格式寫在 [docs/FORMAT.md](docs/FORMAT.md)（英文）。
 

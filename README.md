@@ -1,8 +1,5 @@
 <h1 align="center">
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/images/tour-en-dark.svg">
-  <img alt="A short tour: five agents, and the one that needs you; answering from the pane; every agent reporting through its own hooks; nothing lost; where it runs; its light and dark colours." src="docs/images/tour-en-light.svg" width="100%">
-</picture>
+<img alt="A short tour: five agents, and the one that needs you; answering from the pane; every agent reporting through its own hooks; nothing lost; where it runs; its light and dark colours." src="docs/images/tour-en.svg" width="100%">
 </h1>
 
 <p align="center">
@@ -106,10 +103,7 @@ Press **Legend** at the bottom of the pane to see this list there.
 
 ## How it works
 
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/images/flow-en-dark.svg">
-  <img alt="Claude Code sessions, other agents through their hooks, and you all write one Markdown file, progress.md; the pane, progress.html, the archive and the status line read it." src="docs/images/flow-en-light.svg" width="100%">
-</picture>
+<img alt="Claude Code sessions, other agents through their hooks, and you all write one Markdown file, progress.md; the pane, progress.html, the archive and the status line read it." src="docs/images/flow-en.svg" width="100%">
 
 Each connected agent's hook saves its last reply into `~/.claude/progress-inbox/`. An open Claude Code session picks it up within five seconds, sums the turn up, and writes it into that agent's own block in `progress.md`. The format is in [docs/FORMAT.md](docs/FORMAT.md).
 
