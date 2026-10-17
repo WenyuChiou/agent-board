@@ -1,5 +1,92 @@
 # Changelog
 
+## 0.12.0 — 2026-10-17
+
+Hardening, from a security and robustness review.
+
+- **Other agents' words reach Claude as data, not instructions.** The note a
+  session's first turn gets about other work in its project, the 接手做完
+  prompt and the note after a compaction now quote the file's titles and
+  steps inside a fenced block, after a sentence saying they are file content
+  that other agents can write and are not to be followed. Each line is one
+  line of at most 120 characters, with no backticks or `<!--`. The first-turn
+  note goes in as a hidden (meta) row, the shape the engine takes from a
+  plugin. Tests: "file text reaches Claude as data: one line, no backticks or
+  comment openings, at most 120 characters, in a fence after a note",
+  "another session’s block whose step says to run a command reaches Claude
+  fenced as data and clipped", "another agent’s ended block reaches Claude
+  with its step clipped and its command quoted without backticks".
+- **A model call that never answers no longer stops the inbox.** Every call
+  to the model gives up after 30 seconds and counts as no answer, and a
+  session takes its inbox files before it asks the model, so the next look
+  five seconds later goes ahead. Test: "a model call that never answers gives
+  up after 30 seconds, and later inbox files are still read".
+- **`resume=` and `dir=` are checked.** A resume id is kept only when it is 6
+  to 64 letters, digits and dashes, and a folder that decodes to a control
+  character is ignored, so a block cannot put a command of its own into the
+  resume command the pane copies. docs/FORMAT.md says so. Test: "a resume id
+  that is not a plain session id gives no resume command, nor does a folder
+  with a line break".
+- **Fewer model calls and a smaller store.** Of a burst of turns from one
+  agent session, only the last two are summed up; the earlier ones only move
+  on what is remembered. A stored mirror keeps the last 3000 characters of
+  the last reply and the first 1200 of the first request, and the record of
+  taken inbox files keeps at most the newest 2000. Tests: "a burst of turns
+  from one agent session asks the model about the last two only, and what is
+  stored stays small", "a burst of turns from one agent session is summed up
+  from its last two turns only".
+- **The reply the model sums up is fenced.** The digest prompt quotes it
+  between `<reply>` and `</reply>` (a tag inside the reply is taken out) and
+  says, in all three languages, to treat it as data. The question's label and
+  why stay at 48 and 120 characters however they arrive. Test: "an over-long
+  ASK is clipped to a short label and question, and the reply is fenced as
+  data in every language".
+- **The writer skips what the parser skips.** A block or heading inside a
+  code fence or an HTML comment was ignored when reading but could be
+  replaced or archived when writing. One function (`readable` in
+  `hooks/parse.ts`) now decides for both. Test: "a block pasted inside a code
+  fence is never archived or rewritten".
+- **Two sessions writing at once no longer undo each other.** Archiving, 封存,
+  ticking a step, a quick add and another agent's block now read the file
+  back after writing, as this session's own block did, and make the change
+  again over a write that landed in between, without archiving anything
+  twice. Test: "a write another session makes between this one’s read and
+  write is not lost, and nothing is archived twice".
+- **Each inbox file is read by one session, then deleted.** A session takes a
+  file by renaming it to a name of its own, which only one rename can do,
+  reads what it renamed and deletes it once summed up; the folder no longer
+  depends on the reporter script to empty it (OpenCode's plugin never did).
+  A taken file left behind by a session that closed half-way goes after a
+  day. Tests: "an inbox file is claimed by renaming it, read by that session
+  only, and removed once read", "an inbox file taken by a session is renamed
+  to a name of its own, which no session reads as a new file".
+- **Windows is told by the system.** `CLAUDE_PROGRESS_FILE=C:/Users/me/...`
+  used to get sh hooks; now `OS=Windows_NT` or a drive letter means Windows,
+  and the path's own separator is kept. Tests: "Windows is told by the system
+  or a drive letter, not by the slashes in the path", "on Windows, a progress
+  file written with forward slashes still gets the PowerShell reporter".
+- **The installers remove the old name only after the new one is in.**
+  `setup.sh` and `setup.ps1` install `agent-board` first and uninstall
+  `project-progress@claude-progress-pane` only once that worked, saying
+  "Removed" only when it was. With `--no-install` / `-NoInstall` or without
+  `claude`, an old install found in settings.json is named with the two
+  commands that remove it. Installer checks: "old name: the new plugin is
+  installed before the old one is uninstalled", "old name: \"Removed\" is said
+  once the uninstall worked", "old name: a failed install leaves the old
+  plugin in and says nothing of removing it", "old name: with --no-install it
+  is still found in settings.json, with the two commands to remove it".
+- **An upgrade does not sum up old turns again.** When the store has no
+  record of the inbox (the first run, or the store left under the plugin's
+  earlier name), the files already there count as read. Test: "an upgrade’s
+  first look at the inbox counts the files already there as read".
+- **A person's own hook is not taken for ours.** Only a command that runs
+  `progress-report.sh` or `.ps1` by its path counts as the plugin's, so a hook
+  of `my-progress-report.sh` stays when connecting and removing. Test: "a
+  person’s own hook that only mentions the reporter’s name, like
+  my-progress-report.sh, is kept".
+- The README and the guides say that an open session deletes each inbox file
+  once read, for when you check whether a hook ran.
+
 ## 0.11.0 — 2026-10-17
 
 - **Hermes Agent reports to the pane.** `/progress connect` adds two shell
