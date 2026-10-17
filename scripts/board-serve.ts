@@ -357,14 +357,14 @@ export const startServer = (o: ServeOptions): void => {
     // error stays a bare server error.
     try {
       if (url.pathname === '/api/act') {
-        const action = serveAction(boardItems(o.view(), o.pending()), { key: text(body.key), type: text(body.type), text: text(body.text), session: text(body.session) }, o.s, isLan)
+        const action = serveAction(boardItems(o.view(), o.pending()), { key: text(body.key), type: text(body.type), text: text(body.text), session: text(body.session), asked: text(body.asked) }, o.s, isLan)
         if (action.type === 'refuse') return json(res, 409, { note: action.note })
         if (action.type === 'send') {
           const sent = send(action.target, action.text, action.title)
           return json(res, sent.status, { note: sent.note })
         }
         const note = o.act(action)
-        const isDone = ![o.s.boardWriteFailed, o.s.boardTickGone, o.s.archiveGone].includes(note)
+        const isDone = ![o.s.boardWriteFailed, o.s.boardTickGone, o.s.archiveGone, o.s.hideFailed].includes(note)
         return json(res, isDone ? 200 : 409, { note })
       }
       if (url.pathname === '/api/tidy') {

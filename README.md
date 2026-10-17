@@ -8,7 +8,7 @@ A Claude Code plugin that also follows Codex, Gemini CLI, OpenCode, Grok Build, 
 </p>
 
 <p align="center">
-<a href="CHANGELOG.md"><img alt="Version 0.20.2" src="https://img.shields.io/badge/version-0.20.2-blue"></a>
+<a href="CHANGELOG.md"><img alt="Version 0.20.5" src="https://img.shields.io/badge/version-0.20.5-blue"></a>
 <a href="#quick-start"><img alt="Needs Claude Code 2.1.287 or newer" src="https://img.shields.io/badge/Claude%20Code-%E2%89%A5%202.1.287-d97757"></a>
 <a href="LICENSE"><img alt="MIT license" src="https://img.shields.io/badge/license-MIT-green"></a>
 <img alt="macOS, Linux, Windows" src="https://img.shields.io/badge/macOS%20%C2%B7%20Linux%20%C2%B7%20Windows-lightgrey">
@@ -28,7 +28,7 @@ You have Claude Code on one project, Codex on another, Gemini on a third. Twenty
 
 ## What you get
 
-- **Whatever needs you comes first.** A question from any agent sits at the top with a button for each answer. In Claude Code, one click answers it; for other agents you get the exact words or command to paste.
+- **Whatever needs you comes first.** A question from any agent sits at the top with a button for each answer. In Claude Code, one click answers it; for other agents you get the exact words or command to paste. Already answered it in the chat? **Already answered, hide** puts it away on this computer and sends nothing; it comes back if that session asks something new.
 - **Every agent in one place.** Grouped by project, with a title, a line of background and numbered steps for each session, summed up for you after every turn.
 - **Pick up where you left off.** Compaction, a closed terminal, the next morning: you see what's done, what's stuck and what's next. A session that stopped halfway can be taken over in one click.
 - **Your own to-dos too.** Type `+ Job search: Fabrikam fellowship due 11-20` in the pane's box. Due dates turn the row amber, then red.
@@ -139,6 +139,7 @@ Connecting also gives each agent a way to show the board, so whichever one you a
 | `a` | Archive one of your own tasks, or a stopped session's block |
 | `1`–`9`, `y` / `n` | Copy the answer to another agent's question, to paste in that agent |
 | `c` | Copy a command, or the ID of the Claude Code session that asked |
+| `h`, `u` | Mark another agent's question already answered: hidden on this computer, nothing sent; show the hidden ones again |
 | `o`, `q` | Open the browser view; quit |
 
 Finished work leaves the board by itself. The board writes `progress.md` as carefully as the pane does, and leaves other sessions' blocks alone unless you archive one that has stopped.
@@ -160,6 +161,7 @@ The board commands above print the board, then open its page in the browser and 
 
 - **Tick** the next step of your own task, **archive** a task, or press **Archive now** to put away everything finished.
 - **Copy** the answer to another agent's question, a session's resume command, or a command in a step.
+- **Already answered, hide** a question you answered in its own session. It is hidden on this computer, on the page, the pane and the terminal board alike, and nothing is sent. It comes back when that session asks something new; **Show again** brings it back sooner.
 - **Answer** a Grok Build or Codex session that has ended. The reply runs `grok -r <id>` or `codex exec resume <id>` in that session's own folder, and the page shows what the agent says back once it answers, which can take a few minutes. One reply at a time per session. A session that is still open is answered in its own window, because two writers would mix one session up.
 - **Paste a block** from a web chat such as Muse or dot. Copy the chat prompt from the page into the chat once, then paste each block the chat prints. A block that is not in the format, or that would replace Claude's or another agent's block, is refused.
 
@@ -171,7 +173,7 @@ The page on your network comes with these limits:
 
 - It opens only when you add `--lan`, only at a private address of the computer (one starting with 192.168, 10, or 172.16 to 172.31, never a public one), and it answers only requests sent to that address.
 - Its address carries a key of its own, not the key of the computer's page. Anyone who has that address, or photographs the QR code, can use the page until it closes, so use it on a network you trust, such as your home Wi-Fi, not a café's.
-- On the network the page uses plain HTTP, which is not encrypted, so another device on the same Wi-Fi could read what passes, agents' answers included. That is why a phone can tick, archive, copy, paste a block and close the board, but not answer an agent: a reply runs a program on the computer, so the phone shows the answer for you to copy, and you send it from the computer's page.
+- On the network the page uses plain HTTP, which is not encrypted, so another device on the same Wi-Fi could read what passes, agents' answers included. That is why a phone can tick, archive, mark a question answered (and show it again), copy, paste a block and close the board, but not answer an agent: a reply runs a program on the computer, so the phone shows the answer for you to copy, and you send it from the computer's page.
 - It closes after 10 minutes in which no phone looks at it, and whenever the computer's page closes. A second `--serve --lan` while it is open gives the same address.
 
 ## Commands
