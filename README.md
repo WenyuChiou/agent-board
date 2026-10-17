@@ -27,9 +27,23 @@ A Claude Code plugin. One pane shows what every coding agent is doing, and puts 
 ```
 claude plugin marketplace add WenyuChiou/claude-progress-pane
 claude plugin install project-progress@claude-progress-pane
+claude -p "/progress connect"
 ```
 
-Start Claude Code and the pane opens on the right. To bring in your other agents, run `/progress connect` once.
+The last line hooks in the other agents installed here (Codex, Gemini CLI, Cursor, OpenCode, Grok Build, Muse Code). Restart those agents; Codex asks you to approve the hook once in its `/hooks`. Start Claude Code and the pane opens on the right.
+
+**Let any agent set it up.** Paste this into Codex, Gemini CLI, Cursor, Grok, Muse or any agent that can run commands:
+
+```text
+Install the claude-progress-pane plugin for Claude Code and connect this machine's coding agents to it.
+Run these three commands in order, and stop and tell me if one fails:
+claude plugin marketplace add WenyuChiou/claude-progress-pane
+claude plugin install project-progress@claude-progress-pane
+claude -p "/progress connect"
+Then show me what the last command printed and tell me which agents to restart.
+```
+
+An agent with no hooks (Aider, Copilot, Windsurf…) can report too. Paste the section "Report your progress to the progress pane" from [AGENTS.md](AGENTS.md) into its instructions.
 
 ## Use
 

@@ -27,9 +27,23 @@ Claude Code 插件。一个面板看所有 coding agent 在做什么，最需要
 ```
 claude plugin marketplace add WenyuChiou/claude-progress-pane
 claude plugin install project-progress@claude-progress-pane
+claude -p "/progress connect"
 ```
 
-打开 Claude Code，面板会自己出现在右边。要接上其他 agent，运行一次 `/progress connect`。
+最后一行会把这台电脑上的其他 agent 接上（Codex、Gemini CLI、Cursor、OpenCode、Grok Build、Muse Code）。重启那些 agent；Codex 第一次要在它的 `/hooks` 里批准。打开 Claude Code，面板会自己出现在右边。
+
+**让任何 agent 帮你装。** 把这段贴给 Codex、Gemini CLI、Cursor、Grok、Muse，或任何能运行命令的 agent：
+
+```text
+帮我在这台电脑装 Claude Code 的 claude-progress-pane 插件，并把这台电脑上的 coding agent 接上它。
+依次运行这三行，任何一行失败就停下来告诉我：
+claude plugin marketplace add WenyuChiou/claude-progress-pane
+claude plugin install project-progress@claude-progress-pane
+claude -p "/progress connect"
+最后把最后一行输出的内容给我看，并告诉我要重启哪些 agent。
+```
+
+没有 hook 的 agent（Aider、Copilot、Windsurf…）也能汇报：把 [AGENTS.md](AGENTS.md) 里「Report your progress to the progress pane」那段贴进它的说明文件。
 
 ## 用法
 

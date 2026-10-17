@@ -163,7 +163,7 @@ Claude 会列出 Task 清单，面板跟着走：卡片显示任务、它的背�
 
 ## 其他 agent
 
-在 Claude Code 里运行一次：
+在 Claude Code 里运行一次，或在任何终端运行 `claude -p "/progress connect"`（所以任何 agent 都能帮你跑）：
 
 ```
 /progress connect

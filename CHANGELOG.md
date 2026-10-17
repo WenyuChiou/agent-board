@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+- **Set up from any agent.** The README's install section is now three shell
+  lines, ending with `claude -p "/progress connect"`. It also gives a prompt to
+  paste into Codex, Gemini CLI, Cursor, Grok, Muse or any agent that can run
+  commands, so that agent does the setup. Checked in a clean home directory:
+  after a real `marketplace add` and `install`, `claude -p "/progress connect"`
+  connected the agents found there.
+
 ## 0.9.0 — 2026-10-17
 
 The pane no longer depends on an agent remembering to report. Each agent's own

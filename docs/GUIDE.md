@@ -163,7 +163,7 @@ The full specification, for tools that read or write the file, is [docs/FORMAT.m
 
 ## Other agents
 
-Run this once in Claude Code:
+Run this once in Claude Code, or `claude -p "/progress connect"` from any shell (so any agent can run it for you):
 
 ```
 /progress connect
