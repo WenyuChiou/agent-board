@@ -68,6 +68,8 @@ export const ZH_TW = {
   foldedDone: (n: number): string => `已完成 ${n} 步`,
   foldedRest: (n: number): string => `還有 ${n} 步`,
   waitingReply: '等你回覆',
+  // A step of this session the person answered in chat, until Claude asks again.
+  answeredNote: '你已回覆，等 Claude 處理',
   allDone: '全部完成',
   claudeWorking: 'Claude 正在做',
   agentWorking: (agent: string): string => `${agent} 正在做`,
@@ -266,6 +268,12 @@ export const ZH_TW = {
   takeOver: '接手做完',
   copyResume: '複製續接指令',
   copySessionId: '複製對話 ID',
+  // Hides a question already answered in its own session; it sends nothing, so it must not
+  // read as an answer ("looks good") to it.
+  answeredHide: '已回覆，先隱藏',
+  needsChanges: '要修改',
+  showAgain: '重新顯示',
+  hiddenCount: (n: number): string => `已回覆、隱藏的 ${n} 項`,
   tickStep: '完成這步',
   handOver: '交給 Claude',
   nothingForYou: '✓ 現在沒有要你做的事',
@@ -336,6 +344,11 @@ export const ZH_TW = {
   boardKeyCopyResume: 'c 複製續接指令',
   boardKeyConfirm: 'y／n 複製回答',
   boardKeyOptions: (n: number): string => `1–${n} 複製答案`,
+  boardKeyHide: 'h 已回覆，先隱藏',
+  boardKeyShowHidden: 'u 全部重新顯示',
+  boardHidden: (text: string): string => `已隱藏「${text}」；問題一改就會再出現。`,
+  boardShown: '隱藏的問題都重新顯示了。',
+  hideFailed: '記不下「已回覆」，這一項還留在清單上。',
   boardTicked: (step: string): string => `已完成「${step}」。`,
   boardTickGone: '找不到那一步，可能已經改過了。',
   boardLineChanged: '這一行剛換成別的了；看清楚現在選到的，再按一次。',

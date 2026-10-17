@@ -23,7 +23,7 @@ import { appendJournal, archivePath, countDay, hasArchiveEntry, journalLine, jou
 import { parseProgress } from '../hooks/parse'
 import { qrModules, qrText } from '../hooks/qr'
 import { langOf, STRINGS } from '../hooks/strings'
-import { buildView } from '../hooks/view'
+import { answeredJson, answeredPath, buildView, parseAnswered, withAnswered } from '../hooks/view'
 
 // The line `/progress connect` puts above the bundle sets it.
 const BAKED = (globalThis as { AGENT_BOARD?: { path?: string; lang?: string } }).AGENT_BOARD ?? {}
@@ -111,7 +111,8 @@ const pending = () => {
 const revisionOf = (text: string): string => createHash('sha256').update(text).digest('hex')
 const view = (text = read(path)) => {
   const now = Date.now()
-  return buildView(parseProgress(text), [basename(process.cwd())], null, now, countDay(read(journalPath(path, now)), now), {}, s)
+  // A question marked answered in a pane on this machine is kept off the board too.
+  return buildView(parseProgress(text), [basename(process.cwd())], null, now, countDay(read(journalPath(path, now)), now), {}, s, parseAnswered(read(answeredPath(path))) ?? [])
 }
 
 const pad = (n: number): string => String(n).padStart(2, '0')
@@ -236,6 +237,16 @@ const archiveOut = (take: (text: string) => { text: string; entries: string[] } 
   return wrote === null ? null : archived.size
 }
 
+// How long ago the hidden list was written; 0 when that cannot be told, so a list that is not
+// JSON counts as a write caught half-way and a press never writes over the marks in it.
+const answeredAge = (file: string): number => {
+  try {
+    return Date.now() - statSync(file).mtimeMs
+  } catch {
+    return 0
+  }
+}
+
 // What a key's action does to the files, and the line the board shows after it.
 const act = (action: BoardAction): string => {
   const now = Date.now()
@@ -247,7 +258,7 @@ const act = (action: BoardAction): string => {
     let isChanged = false
     const line = journalLine({ project: action.ref.project, task: action.ref.title, step: action.ref.step }, now, s)
     const wrote = rewrite(path, text => {
-      if (action.expected !== undefined && !matchesExpected(boardItems(buildView(parseProgress(text), [], null, now, 0, {}, s), []), action.expected)) { isChanged = true; return text }
+      if (action.expected !== undefined && !matchesExpected(boardItems(view(text), []), action.expected)) { isChanged = true; return text }
       const after = setManualStep(text, action.ref, 'x')
       if (after !== text) {
         // Save history before ticking: a journal failure must leave the step available
@@ -262,10 +273,24 @@ const act = (action: BoardAction): string => {
     return s.boardTicked(action.ref.step)
   }
   if (action.type === 'archive') {
-    const count = archiveOut(text => action.expected !== undefined && !matchesExpected(boardItems(buildView(parseProgress(text), [], null, now, 0, {}, s), []), action.expected) ? null : takeTask(text, action.ref, now, s), now)
+    const count = archiveOut(text => action.expected !== undefined && !matchesExpected(boardItems(view(text), []), action.expected) ? null : takeTask(text, action.ref, now, s), now)
     if (count === null) return s.boardWriteFailed
     if (count === 0) return s.archiveGone
     return s.archivedOne(action.title)
+  }
+  if (action.type === 'hide' || action.type === 'unhide') {
+    // The list every pane on this machine reads too; nothing goes to the agent that asked.
+    const keys = action.type === 'hide' || action.key !== null ? [action.key ?? ''] : view().hidden.map(item => item.hideKey)
+    if (keys.length === 0) return ''
+    const isHidden = action.type === 'hide'
+    const file = answeredPath(path)
+    // A list the board cannot read or replace is named with its error, as its other files are.
+    const wrote = rewrite(file, before => {
+      const answered = parseAnswered(before, answeredAge(file))
+      return answered === null ? null : answeredJson(withAnswered(answered, keys, isHidden))
+    })
+    if (wrote === null) return s.hideFailed
+    return action.type === 'hide' ? s.boardHidden(action.text) : s.boardShown
   }
 
   return ''

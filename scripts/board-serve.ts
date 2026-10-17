@@ -379,18 +379,21 @@ export const startServer = (o: ServeOptions): void => {
     // error stays a bare server error.
     try {
       if (url.pathname === '/api/act') {
-        const items = boardItems(o.view(), o.pending())
+        const view = o.view()
+        const items = boardItems(view, o.pending())
         const item = items.find(one => one.key === text(body.key))
         const expected = item === undefined ? undefined : expectedItem(item)
-        if (expected === undefined || text(body.identity) !== sourceToken(expected.identity) || text(body.revision) !== sourceToken(expected.revision)) return json(res, 409, { note: o.s.boardLineChanged })
-        const action = serveAction(items, { key: text(body.key), type: text(body.type), text: text(body.text), session: text(body.session), identity: expected.identity, revision: expected.revision }, o.s, isLan)
+        // Hidden cards are off the actionable list; only a currently hidden key can be restored.
+        const isUnhide = text(body.type) === 'unhide'
+        if (isUnhide ? !view.hidden.some(one => `hidden:${one.hideKey}` === text(body.key)) : expected === undefined || text(body.identity) !== sourceToken(expected.identity) || text(body.revision) !== sourceToken(expected.revision)) return json(res, 409, { note: o.s.boardLineChanged })
+        const action = serveAction(items, { key: text(body.key), type: text(body.type), text: text(body.text), session: text(body.session), identity: expected?.identity, revision: expected?.revision, asked: text(body.asked) }, o.s, isLan)
         if (action.type === 'refuse') return json(res, 409, { note: action.note })
         if (action.type === 'send') {
           const sent = send(action.target, action.text, action.title)
           return json(res, sent.status, { note: sent.note })
         }
         const note = o.act(action)
-        const isDone = ![o.s.boardWriteFailed, o.s.boardTickGone, o.s.archiveGone, o.s.boardLineChanged].includes(note)
+        const isDone = ![o.s.boardWriteFailed, o.s.boardTickGone, o.s.archiveGone, o.s.boardLineChanged, o.s.hideFailed].includes(note)
         return json(res, isDone ? 200 : 409, { note })
       }
       if (url.pathname === '/api/tidy') {

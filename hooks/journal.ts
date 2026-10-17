@@ -1,6 +1,7 @@
 import type { ProgressMirror, ProgressProject } from '../types'
 import { ZH_TW } from './i18n'
 import type { Strings } from './i18n'
+import { waitsOnYou } from './mirror'
 import { countSteps, currentStepIndex, isTaskComplete, readable } from './parse'
 
 // A line per finished step, one file a month beside progress.md, so "what did I do this
@@ -99,7 +100,7 @@ export const progressReport = (
     const left = mine.tasks.filter(task => task.status !== 'completed')
     const finished = mine.tasks.length - left.length
     open.push(`- ${mine.project} · ${mine.title || left[0]?.subject || ''}${s.pairSep}${s.reportNext(left[0]?.subject ?? '')} (${finished}/${mine.tasks.length})`)
-    for (const task of left) if (task.waiting === 'you') waiting.push(`- ${mine.project} · ${task.subject}`)
+    for (const task of left) if (waitsOnYou(mine, task)) waiting.push(`- ${mine.project} · ${task.subject}`)
   }
   const ownId = mine === null ? '' : mine.sessionId.slice(0, 8)
   for (const project of projects) {

@@ -7,10 +7,10 @@ import { addManualTask, isArchivable, manualTaskCount, mergeBlock, renderAutoBlo
 import { agentHooks, boardCommands, boardScript, DELETE, isWindowsHost, openclawPlugin, openclawPrinted, openclawSavedBy, openclawTooOld, readConfig, reportCommand, reporterPs1, withFlatHook, withGroupedHook, withHermesHooks, withoutHermesHooks, withoutOurHooks, withoutSection } from '../hooks/connect'
 import { dashboardHtml } from '../hooks/dashboard'
 import { answerKey, blockId, CLAIM_MS, claimAction, isBoardAnswer, isBoardTurn, isInboxFile, isTakenFile, isTextLog, isTranscriptPath, keepInboxDone, keepInboxFailed, MAX_TRIES, promptKey, readClaim, readTurn, takenName, transcriptTail, turnsToDigest } from '../hooks/inbox'
-import { applyDigest, clearAsked, isWork, lastQuestion, markAsked, parseDigest, replyData, requestData, turnTools } from '../hooks/digest'
+import { applyDigest, clearAsked, isAskingYou, isPersonsAnswer, isWork, lastQuestion, markAsked, parseDigest, replyData, requestData, turnTools } from '../hooks/digest'
 import { ciFinished, prFromGh, prWords } from '../hooks/github'
 import { appendJournal, countDay, journalLine, parseJournal, progressReport } from '../hooks/journal'
-import { applyTaskCreate, applyTaskUpdate, asData, cleanContext, cleanTitle, clip, completedSince, dataBlock, emptyMirror, noticesOf, resumeNote } from '../hooks/mirror'
+import { applyTaskCreate, applyTaskUpdate, asData, cleanContext, cleanTitle, clip, completedSince, dataBlock, emptyMirror, fromTaskList, markAnswered, noticesOf, resumeNote, waitsOnYou } from '../hooks/mirror'
 import { DARK, LIGHT, paletteFor } from '../hooks/palette'
 import { autoOf, parseProgress } from '../hooks/parse'
 import { LANGS, RELAY, ZH_TW } from '../hooks/i18n'
@@ -651,6 +651,102 @@ test('a question marks the step in progress, never one Claude already marked, an
   expect(clearAsked(asked).tasks[1]).toMatchObject({ waiting: null, why: null })
   const marked = applyTaskUpdate(base, { taskId: '1', metadata: { waiting: 'you', why: '等授權' } }, NOW)
   expect(markAsked(marked, '要哪個？')).toBe(marked)
+})
+
+test('your message marks every step of a Task list that waited on you answered, keeps what it asked, and only Claude asking again or new words bring it back', () => {
+  const listed = [
+    { subject: '重畫圖 1', status: 'completed' as const, metadata: undefined },
+    { subject: '檢查圖 2', status: 'in_progress' as const, metadata: { waiting: 'you', ask: 'review', link: 'https://example.com/fig2.png', why: '刻度對嗎' } },
+    { subject: '選配色', status: 'pending' as const, metadata: { waiting: 'you', ask: 'choose', options: ['和色', 'Nord'], why: '用哪組？' } },
+    { subject: '跑測試', status: 'in_progress' as const, metadata: { waiting: 'run', why: 'CI 在跑' } },
+  ]
+  const mirror = listed.reduce(
+    (one, step, index) =>
+      applyTaskUpdate(applyTaskCreate(one, { subject: step.subject }, String(index + 1), NOW), { taskId: String(index + 1), status: step.status, metadata: step.metadata }, NOW),
+    emptyMirror('s', 'p', NOW),
+  )
+  expect(isAskingYou(mirror)).toBe(true)
+
+  const answered = markAnswered(mirror)
+  expect(isAskingYou(answered)).toBe(false)
+  // What the steps asked stays for Claude; only the marks are new. A step waiting on a run,
+  // and a finished one, are not the person's to answer.
+  expect(answered.tasks).toEqual(mirror.tasks)
+  expect(Object.keys(answered.answered ?? {})).toEqual(['2', '3'])
+  expect(noticesOf(mirror, answered)).toEqual([])
+  // The block writes them as Claude's to do, answered.
+  const block = renderAutoBlock(answered).join('\n')
+  expect(block).toContain('- [~] 檢查圖 2 — 你已回覆，等 Claude 處理')
+  expect(block).toContain('- [ ] 選配色 — 你已回覆，等 Claude 處理')
+  expect(block).toContain('- [>] 跑測試 — CI 在跑')
+  // Read back from the file, as the board's page and other sessions read it, it asks nothing.
+  expect(parseProgress(`## p\n${block}\n`)[0]?.tasks[0]?.steps.filter(step => step.status === 'waiting')).toEqual([])
+
+  // An unrelated TaskUpdate, and a re-read of the whole list, leave them answered.
+  const moved = applyTaskUpdate(applyTaskUpdate(answered, { taskId: '2', status: 'in_progress' }, NOW), { taskId: '4', status: 'completed' }, NOW)
+  const reread = fromTaskList(moved, moved.tasks.map(task => ({ id: task.id, subject: task.subject, status: task.status, blockedBy: task.blockedBy })), NOW)
+  expect(isAskingYou(reread)).toBe(false)
+
+  // Claude asks again, in the same words: that step waits again, and says so again.
+  const again = applyTaskUpdate(reread, { taskId: '2', metadata: { waiting: 'you' } }, NOW)
+  expect(waitsOnYou(again, again.tasks[1]!)).toBe(true)
+  expect(waitsOnYou(again, again.tasks[2]!)).toBe(false)
+  expect(noticesOf(reread, again)).toEqual(['需要你：檢查圖 2'])
+  // New words bring a step back too: a new subject, or a new question.
+  const renamed = applyTaskUpdate(reread, { taskId: '3', subject: '選深色配色' }, NOW)
+  expect(waitsOnYou(renamed, renamed.tasks[2]!)).toBe(true)
+  const reworded = applyTaskUpdate(reread, { taskId: '3', metadata: { why: '深色版用哪組？' } }, NOW)
+  expect(waitsOnYou(reworded, reworded.tasks[2]!)).toBe(true)
+  // A turn that ends on a question asks again, even in the words already answered.
+  expect(isAskingYou(markAsked(reread, '刻度對嗎'))).toBe(true)
+
+  // A pane button's answer names its step: the other one still waits.
+  const named = markAnswered(mirror, ['3'])
+  expect(waitsOnYou(named, named.tasks[1]!)).toBe(true)
+  expect(waitsOnYou(named, named.tasks[2]!)).toBe(false)
+
+  // Steps summed up from turns are answerTurns' to settle.
+  expect(isAskingYou({ ...mirror, source: 'turns' as const })).toBe(false)
+})
+
+test('only the person’s own message is an answer: not a notice, a schedule, another session, an app’s event, a hidden prompt or a command', () => {
+  const by = (kind: string, text = '好，照做'): boolean => isPersonsAnswer({ text, origin: { kind } })
+  for (const kind of ['composer', 'bridge', 'slack-ping', 'sdk']) expect(by(kind)).toBe(true)
+  for (const kind of ['task-notification', 'scheduled-trigger', 'peer', 'peer-send-message', 'projects-relay', 'coordinator', 'observer', 'auto-continuation', 'unclassified', 'channel', 'plugin']) {
+    expect(by(kind)).toBe(false)
+  }
+  // An app's events come down the same path, with reminders in front of them or of the
+  // person's words.
+  expect(by('sdk', '<system-reminder>\n連結的工作階段\n</system-reminder>\n<ci-monitor-event>CI 失敗</ci-monitor-event>')).toBe(false)
+  expect(by('sdk', '<cross-session-message from="x">完成了</cross-session-message>')).toBe(false)
+  expect(by('sdk', '[SYSTEM NOTIFICATION] 背景工作結束')).toBe(false)
+  // A kind of event this list has not seen yet is no answer either.
+  expect(by('sdk', '<agent-status-update>重跑中</agent-status-update>')).toBe(false)
+  expect(by('composer', '<system-reminder>a</system-reminder>\n<system-reminder>b</system-reminder>\n好，照做')).toBe(true)
+  expect(by('composer', '<system-reminder>a</system-reminder>\n')).toBe(false)
+  expect(isPersonsAnswer({ text: '好', isMeta: true, origin: { kind: 'composer' } })).toBe(false)
+  expect(isPersonsAnswer({ text: '/compact', command: { name: 'compact', args: '' }, origin: { kind: 'composer' } })).toBe(false)
+  // A plugin's prompt counts only when it sends the person's own words.
+  expect(isPersonsAnswer({ text: '好', origin: { kind: 'plugin', asUser: true } })).toBe(true)
+})
+
+test('a turn that ends on a question after you answered a step asks it plainly, without the buttons of the question you answered', () => {
+  let mirror = applyTaskCreate(emptyMirror('s', 'p', NOW), { subject: '選配色' }, '1', NOW)
+  mirror = applyTaskUpdate(mirror, { taskId: '1', status: 'in_progress', metadata: { waiting: 'you', ask: 'choose', options: ['和色', 'Nord'], why: '用哪組？' } }, NOW)
+  const asked = markAsked(markAnswered(mirror), '要不要順便把圖 3 也改了？')
+  expect(asked.tasks[0]).toMatchObject({ waiting: 'you', why: '要不要順便把圖 3 也改了？', ask: null, options: [], command: null, link: null })
+  expect(waitsOnYou(asked, asked.tasks[0]!)).toBe(true)
+})
+
+test('an answered mark goes with its step: deleted, its id taken by a new step, or no longer listed', () => {
+  let mirror = applyTaskCreate(applyTaskCreate(emptyMirror('s', 'p', NOW), { subject: '選配色' }, '1', NOW), { subject: '檢查圖 2' }, '2', NOW)
+  mirror = applyTaskUpdate(applyTaskUpdate(mirror, { taskId: '1', metadata: { waiting: 'you', why: '用哪組？' } }, NOW), { taskId: '2', metadata: { waiting: 'you', why: '刻度對嗎' } }, NOW)
+  const answered = markAnswered(mirror)
+  expect(Object.keys(answered.answered ?? {})).toEqual(['1', '2'])
+  expect(Object.keys(applyTaskUpdate(answered, { taskId: '1', status: 'deleted' }, NOW).answered ?? {})).toEqual(['2'])
+  expect(Object.keys(applyTaskCreate(answered, { subject: '換字型' }, '2', NOW).answered ?? {})).toEqual(['1'])
+  const listed = answered.tasks.filter(task => task.id === '2').map(task => ({ id: task.id, subject: task.subject, status: task.status, blockedBy: task.blockedBy }))
+  expect(Object.keys(fromTaskList(answered, listed, NOW).answered ?? {})).toEqual(['2'])
 })
 
 test('a handoff note is its own line: not background, and the block writes it after the background', () => {
@@ -1335,12 +1431,17 @@ test('a press on the page is worked out from the file as it is now: a line that 
     const source = item?.type === 'ask' ? item.ask.source : item?.type === 'row' ? item.row.source : undefined
     return serveAction(items, { ...source, ...request }, STRINGS.en)
   }
-  const sent = press({ key: grok, type: 'send', text: '  Redis\u0007, it is already in the stack \r\n', session: 'b2c3d4e5' })
+  const asked = 'Redis or Memcached?'
+  const sent = press({ key: grok, type: 'send', text: '  Redis\u0007, it is already in the stack \r\n', session: 'b2c3d4e5', asked })
   // The task goes with it, so the page can say which of two sessions answered.
   expect(sent).toEqual({ type: 'send', target: GROK, text: STRINGS.en.answerText('Redis or Memcached?', 'Redis, it is already in the stack'), title: 'Pick the cache' })
-  expect(press({ key: grok, type: 'send', text: ' \u0000 ', session: 'b2c3d4e5' })).toEqual({ type: 'refuse', note: '' })
+  expect(press({ key: grok, type: 'send', text: ' \u0000 ', session: 'b2c3d4e5', asked })).toEqual({ type: 'refuse', note: '' })
   // The line now belongs to another session than the one the page drew: refused, not sent there.
-  expect(press({ key: grok, type: 'send', text: 'Redis', session: 'c0ffee12' })).toEqual({ type: 'refuse', note: STRINGS.en.boardLineChanged })
+  expect(press({ key: grok, type: 'send', text: 'Redis', session: 'c0ffee12', asked })).toEqual({ type: 'refuse', note: STRINGS.en.boardLineChanged })
+  // The task asks something else now, or nothing: a reply written under the old question is
+  // refused, never taken as the answer to the new one.
+  expect(press({ key: grok, type: 'send', text: 'Redis', session: 'b2c3d4e5', asked: 'Which port?' })).toEqual({ type: 'refuse', note: STRINGS.en.boardLineChanged })
+  expect(press({ key: grok, type: 'send', text: 'Redis', session: 'b2c3d4e5' })).toEqual({ type: 'refuse', note: STRINGS.en.boardLineChanged })
   expect(press({ key: 'row:gone', type: 'tick', text: '', session: '' })).toEqual({ type: 'refuse', note: STRINGS.en.boardLineChanged })
   // An open Codex session is answered in its own window.
   const codex = keyOf(item => item.type === 'ask' && item.ask.agent === 'codex')
@@ -1480,7 +1581,7 @@ test('from the local network a reply to an agent is offered as a copy, and refus
   expect(rows.find(one => one.title === 'Dark mode for the settings page')?.send).toBe('claude')
   const items = boardItems(serveView(), [])
   const key = items.find(item => item.type === 'row' && item.row.title === 'Pick the cache')?.key ?? ''
-  const press = { ...rows.find(row => row.key === key), key, type: 'send', text: 'Redis', session: GROK.session }
+  const press = { ...rows.find(row => row.key === key), key, type: 'send', text: 'Redis', session: GROK.session, asked: 'Redis or Memcached?' }
   expect(serveAction(items, press, STRINGS.en).type).toBe('send')
   expect(serveAction(items, press, STRINGS.en, true)).toEqual({ type: 'refuse', note: STRINGS.en.serveLanSend('grok') })
   expect(serveAction(items, { ...press, type: 'archive' }, STRINGS.en, true)).toMatchObject({ type: 'archive', title: 'Pick the cache' })
@@ -1739,7 +1840,7 @@ test('the board you work in marks the chosen line and lists only the keys that d
   const onAsk = boardScreen(view, [], emptyBoardState, STRINGS.en, { width: 100, isColor: false })
   expect(onAsk).toContain('› [Choose] Per-key limit')
   expect(onAsk).toContain('    2 300 a minute')
-  expect(onAsk).toContain('1–2 copy answer · ↑↓ select')
+  expect(onAsk).toContain('1–2 copy answer · h already answered, hide · ↑↓ select')
   const onJob = boardScreen(view, [], { selected: job, key: null, open: items[job]?.key ?? null, note: 'Copied: 300' }, STRINGS.en, { width: 100, isColor: false })
   expect(onJob).toContain('› Fabrikam fellowship')
   expect(onJob).toContain('    ✓ 1 Draft the statement')
@@ -1883,6 +1984,114 @@ test('a comment opening in a summed-up title, a step, a branch or a first reques
   expect(tasks.map(task => [task.title, task.auto?.session])).toEqual([['x', 'aaaa1111'], ['note', 'bbbb2222'], ['Third', 'cccc3333']])
   expect(tasks[0]?.steps.map(step => step.text)).toEqual(['fixed it', 'ship ->'])
   expect(file.split('\n').filter(line => /<!--|-->/.test(line) && !/^<!-- \/?auto /.test(line))).toEqual([])
+})
+
+test('the terminal board, progress.html and the board page leave out a question marked answered and say how many are hidden', () => {
+  const file = `# Project progress
+
+## data-pipeline
+<!-- auto session=a1b2c3d4 state=waiting updated=2026-10-17T08:40:00Z -->
+### Backfill the events
+- [?] Keep the old table, OK?
+<!-- /auto session=a1b2c3d4 -->
+`
+  const now = Date.parse('2026-10-17T08:45:00Z')
+  const view = buildView(parseProgress(file), [], null, now, 0, {}, STRINGS.en, ['a1b2c3d4 1 Keep the old table, OK?'])
+  const text = boardText(view, [], STRINGS.en, { width: 100, isColor: false })
+  expect(text).toContain('1 answered, hidden')
+  const screen = boardScreen(view, [], emptyBoardState, STRINGS.en, { width: 100, isColor: false })
+  expect(screen).toContain('1 answered, hidden · u show them again')
+  const html = dashboardHtml(view, STRINGS['zh-TW'], 'p', 'now')
+  expect(html).toContain('已回覆、隱藏的 1 項')
+  for (const shown of [text, screen]) expect(shown).not.toContain('waiting on you: Keep the old table')
+  expect(html).not.toContain('等你：Keep the old table')
+  expect(serveModel(view, [], STRINGS.en).asks).toEqual([])
+  expect(serveModel(view, [], STRINGS.en).counts.waiting).toBe(0)
+  // Its task is back with the work in progress, no longer saying it waits on you.
+  expect(view.groups.flatMap(group => group.rows).map(row => [row.title, row.tone])).toEqual([['Backfill the events', 'quiet']])
+})
+
+test("the terminal board and the board page mark any agent's question answered without sending it anything, and show it again", () => {
+  const view = serveView()
+  const items = boardItems(view, [])
+  const codex = items.findIndex(item => item.type === 'ask' && item.ask.agent === 'codex')
+  const manual = items.findIndex(item => item.type === 'ask' && item.ask.where === 'manual')
+  const key = 'a1b2c3d4 2 Per-key limit — 100 or 300 a minute?'
+  // h on the terminal board, a button on the page: both name the question by its block's words.
+  expect(boardKey({ ...emptyBoardState, selected: codex }, 'h', items, STRINGS.en).action).toEqual({ type: 'hide', key, text: 'Per-key limit' })
+  expect(boardScreen(view, [], { ...emptyBoardState, selected: codex }, STRINGS.en, { width: 200, isColor: false })).toContain('h already answered, hide')
+  // A hand-kept question is the person's own: ticking it is the answer.
+  expect(boardKey({ ...emptyBoardState, selected: manual }, 'h', items, STRINGS.en).action).toBeNull()
+  expect(boardKey(emptyBoardState, 'u', items, STRINGS.en).action).toEqual({ type: 'unhide', key: null })
+  const model = serveModel(view, [], STRINGS.en)
+  expect(model.asks.find(ask => ask.agent === 'codex')?.canHide).toBe(true)
+  expect(model.asks.find(ask => ask.project === 'docs-site')?.canHide).toBe(false)
+  const press = (type: string, on: string, isLan = false) => {
+    const item = items.find(one => one.key === on)
+    const source = item?.type === 'ask' ? item.ask.source : item?.type === 'row' ? item.row.source : undefined
+    return serveAction(items, { ...source, key: on, type, text: '', session: '' }, STRINGS.en, isLan)
+  }
+  const codexKey = items[codex]?.key ?? ''
+  expect(press('hide', codexKey)).toEqual({ type: 'hide', key, text: 'Per-key limit' })
+  // A phone on the local network may hide and show again too: only the list beside the file changes.
+  expect(press('hide', codexKey, true)).toEqual({ type: 'hide', key, text: 'Per-key limit' })
+  expect(serveAction(items, { key: `hidden:${key}`, type: 'unhide', text: '', session: '' }, STRINGS.en, true)).toEqual({ type: 'unhide', key })
+  expect(press('hide', items[manual]?.key ?? '').type).toBe('refuse')
+  // Hidden, it is listed apart with a way back, and its quick answers go with it.
+  const hidden = serveModel(buildView(parseProgress(SERVE_FILE), [], null, SERVE_NOW, 0, {}, STRINGS.en, [key]), [], STRINGS.en)
+  expect(hidden.asks.some(ask => ask.agent === 'codex')).toBe(false)
+  expect(hidden.hidden).toEqual([{ key: `hidden:${key}`, project: 'api-gateway', agent: 'codex', task: 'Rate-limit the public endpoints', text: 'Per-key limit' }])
+  expect(press('unhide', `hidden:${key}`)).toEqual({ type: 'unhide', key })
+  expect(press('unhide', codexKey)).toEqual({ type: 'refuse', note: '' })
+  // The page's script and words carry the buttons.
+  const page = servePage(STRINGS.en, 'n')
+  expect(page).toContain("act(ask, 'hide')")
+  expect(page).toContain("act(one, 'unhide')")
+  expect(pageWords(STRINGS.en).hiddenCount).toBe('\u0001 answered, hidden')
+})
+
+test('a quick answer pressed while the page showed one question is refused once the same step asks another', () => {
+  const asked = boardItems(serveView(), [])
+  const shown = asked.find(item => item.type === 'ask' && item.ask.agent === 'codex')?.key ?? ''
+  const reworded = SERVE_FILE.replace('Per-key limit — 100 or 300 a minute?', 'Per-key limit — 300 or 1000 a minute?')
+  const now = boardItems(buildView(parseProgress(reworded), [], null, SERVE_NOW, 0, {}, STRINGS.en), [])
+  expect(now.some(item => item.key === shown)).toBe(false)
+  for (const type of ['send', 'hide', 'tick']) {
+    expect(serveAction(now, { key: shown, type, text: '300 a minute', session: 'a1b2c3d4' }, STRINGS.en)).toEqual({ type: 'refuse', note: STRINGS.en.boardLineChanged })
+  }
+  // The terminal board says the line changed under the cursor instead of copying an answer for it.
+  const at = asked.findIndex(item => item.key === shown)
+  const state = pinned({ ...emptyBoardState, selected: at }, asked)
+  expect(boardKey(state, '2', now, STRINGS.en)).toMatchObject({ action: null, state: { note: STRINGS.en.boardLineChanged } })
+})
+
+test('a reply on the line of a task whose question was marked answered goes as it was typed, and the line no longer opens as asking', () => {
+  const key = 'b2c3d4e5 2 Redis or Memcached?'
+  const view = buildView(parseProgress(SERVE_FILE), [], null, SERVE_NOW, 0, {}, STRINGS.en, [key])
+  const items = boardItems(view, [])
+  const grok = items.find(item => item.type === 'row' && item.row.title === 'Pick the cache')?.key ?? ''
+  const hiddenRow = items.find(item => item.key === grok)
+  const source = hiddenRow?.type === 'row' ? hiddenRow.row.source : undefined
+  expect(serveAction(items, { ...source, key: grok, type: 'send', text: 'Use Redis', session: 'b2c3d4e5' }, STRINGS.en)).toEqual({ type: 'send', target: GROK, text: 'Use Redis', title: 'Pick the cache' })
+  const row = (model: ReturnType<typeof serveModel>) => model.groups.flatMap(group => group.rows).find(one => one.title === 'Pick the cache')
+  expect(row(serveModel(view, [], STRINGS.en))?.isAsking).toBe(false)
+  // The page names no question for it, and a reply written while the page still showed the
+  // question is refused: it would answer one that is off the board.
+  expect(row(serveModel(view, [], STRINGS.en))?.question).toBe('')
+  const shown = boardItems(serveView(), [])
+  const shownRow = shown.find(item => item.key === grok)
+  const shownSource = shownRow?.type === 'row' ? shownRow.row.source : undefined
+  // The block did not change, but its reply meaning did: a draft must not inherit this new mode.
+  expect(source?.identity).toBe(shownSource?.identity)
+  expect(source?.revision).not.toBe(shownSource?.revision)
+  const stale = { ...shownSource, key: grok, type: 'send', text: 'Use Redis', session: 'b2c3d4e5', asked: 'Redis or Memcached?' }
+  expect(serveAction(items, stale, STRINGS.en)).toEqual({ type: 'refuse', note: STRINGS.en.boardLineChanged })
+  expect(servePage(STRINGS.en, 'n')).toContain('var asked = row.question;')
+  // Still asked, it opens by itself and a reply goes as its answer.
+  expect([row(serveModel(serveView(), [], STRINGS.en))?.isAsking, row(serveModel(serveView(), [], STRINGS.en))?.question]).toEqual([true, 'Redis or Memcached?'])
+  expect(serveAction(shown, stale, STRINGS.en)).toMatchObject({ type: 'send', text: expect.stringContaining('Use Redis') })
+  // The step itself still shows in the task's steps.
+  expect(row(serveModel(view, [], STRINGS.en))?.steps.map(step => step.text)).toContain('Redis or Memcached?')
 })
 
 test('a project folder or quick-add project named with a comment opening hides no block after its heading, and keeps one heading', () => {
