@@ -58,7 +58,7 @@ import { langOf, resolveLang, STRINGS } from './strings'
 import { answerTurns, applyDigest, clearAsked, cleanHandoff, isWork, lastQuestion, markAsked, needsRefresh, parseDigest, turnTools } from './digest'
 import type { Digest } from './digest'
 import { agentHooks, DELETE, reporterPs1, reporterSh, withoutSection } from './connect'
-import { isInboxFile, readTurn, transcriptTail } from './inbox'
+import { inboxOrder, isInboxFile, readTurn, transcriptTail } from './inbox'
 import type { AgentTurn } from './inbox'
 import { keepRecent, remindersOf } from './remind'
 import { buildView, statusLine } from './view'
@@ -565,12 +565,14 @@ const takeAgentTurns = async ($: EngineInterface, turns: readonly AgentTurn[]): 
   for (const turn of turns) {
     if (turn.event !== 'turn') continue
     let { prompt, answer } = turn
-    if (answer === '' && turn.transcript !== '') {
+    // Codex's Stop carries the reply but not the request; the session log has both.
+    if ((answer === '' || prompt === '') && turn.transcript !== '') {
       const log = await $.fs.read(turn.transcript).catch(() => '')
       const tail = transcriptTail(typeof log === 'string' ? log : '')
-      answer = tail.answer
+      answer = answer || tail.answer
       prompt = prompt || tail.prompt
     }
+    if (mirror.firstPrompt === '' && prompt !== '') mirror = { ...mirror, firstPrompt: prompt }
     if (answer === '' || answer.trim() === mirror.lastAnswer) continue
     mirror = answerTurns(mirror)
     mirror = { ...((await summarize($, mirror, prompt, answer)) ?? mirror), lastAnswer: answer.trim() }
@@ -669,7 +671,7 @@ const drainInbox = async ($: EngineInterface): Promise<void> => {
     const fresh = entries
       .filter(entry => entry.kind === 'file' && isInboxFile(entry.name) && done[entry.name] === undefined)
       .map(entry => entry.name)
-      .sort()
+      .sort(inboxOrder)
       .slice(0, 20)
     if (fresh.length === 0) return
     const at = await $.clock.now()

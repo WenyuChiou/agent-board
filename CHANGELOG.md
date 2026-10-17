@@ -2,6 +2,24 @@
 
 ## Unreleased
 
+- **Codex, tested for real.** Codex CLI 0.163.0 ran one turn of `codex exec`
+  against a stand-in model server. `/progress connect` had installed the hooks,
+  and Codex ran its Stop and SessionEnd hooks. The reporter saved both payloads,
+  and an open Claude Code session turned them into Codex's block. That run
+  found three things, now fixed:
+  - **No name.** Codex's Stop carries the reply but not the request, so the
+    block had no name or background. The request is now read from the session
+    log the payload points to.
+  - **Wrong state.** `codex exec` writes the turn and the session end in the
+    same second, and sorting by file name put the end first, so the block said
+    "waiting" for a finished session. Files are now taken by time, with a turn
+    before its session's end.
+  - **"(unnamed)" title.** A block with no name now falls back to the request or
+    its first step.
+
+  Test: `a real Codex turn and its session end, written in the same second,
+  become one ended block named from the request`, built on the payloads and
+  log lines Codex actually wrote.
 - **A short tour at the top of the README** (about 48 seconds, each screen
   held long enough to read). It replaces the banner and the
   three-frame demo, in three acts:

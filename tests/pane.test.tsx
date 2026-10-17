@@ -1188,3 +1188,42 @@ test('/progress connect hooks the installed agents into the pane once, keeps the
   expect(JSON.parse(world.files.get('/home/me/.cursor/hooks.json') ?? '{}').hooks).toEqual({ stop: [{ command: 'say done' }] })
   expect(JSON.parse(world.files.get('/home/me/.codex/hooks.json') ?? '{}').hooks).toEqual({})
 })
+
+// What Codex 0.163.0 handed its Stop and SessionEnd hooks, and the lines of its session log the
+// pane reads, from a real `codex exec` turn (home directory renamed to /home/me).
+const CODEX_STOP = "{\"session_id\":\"01a1486b-b48b-7621-8c35-f8c0c2e2d4f6\",\"turn_id\":\"01a1486b-b4a4-71c3-9f5f-5c50844a08ba\",\"transcript_path\":\"/home/me/.codex/sessions/2026/10/17/rollout-2026-10-17T05-53-00-01a1486b-b48b-7621-8c35-f8c0c2e2d4f6.jsonl\",\"cwd\":\"/home/me/work/api-gateway\",\"hook_event_name\":\"Stop\",\"model\":\"mock-model\",\"permission_mode\":\"bypassPermissions\",\"stop_hook_active\":false,\"last_assistant_message\":\"Added the token bucket middleware. Should the per-key limit be 100 or 300 a minute?\"}"
+const CODEX_END = "{\"session_id\":\"01a1486b-b48b-7621-8c35-f8c0c2e2d4f6\",\"transcript_path\":\"/home/me/.codex/sessions/2026/10/17/rollout-2026-10-17T05-53-00-01a1486b-b48b-7621-8c35-f8c0c2e2d4f6.jsonl\",\"cwd\":\"/home/me/work/api-gateway\",\"hook_event_name\":\"SessionEnd\",\"reason\":\"other\"}"
+const CODEX_ROLLOUT = "{\"timestamp\":\"2026-10-17T05:53:00.625Z\",\"ordinal\":3,\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"id\":\"msg_01a1486b-b4cb-7423-9bc1-70f09cad585f\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"<environment_context>\\n  <cwd>/home/me/work/api-gateway</cwd>\\n  <shell>bash</shell>\\n  <current_date>2026-10-17</current_date>\\n  <timezone>Etc/UTC</timezone>\\n  <filesystem><workspace_roots><root>/home/me/work/api-gateway</root></workspace_roots><permission_profile type=\\\"managed\\\"><file_system type=\\\"restricted\\\"><entry access=\\\"read\\\"><special>:root</special></entry></file_system></permission_profile></filesystem>\\n</environment_context>\"}],\"internal_chat_message_metadata_passthrough\":{\"turn_id\":\"01a1486b-b4a4-71c3-9f5f-5c50844a08ba\",\"create_time\":1792216380.6198695,\"content_item_kinds\":[\"environments.environment_context\"]}}}\n{\"timestamp\":\"2026-10-17T05:53:00.644Z\",\"ordinal\":7,\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"id\":\"msg_01a1486b-b4e4-7b50-a7d0-331c8e1059ec\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"Add rate limiting to the public endpoints\"}],\"internal_chat_message_metadata_passthrough\":{\"turn_id\":\"01a1486b-b4a4-71c3-9f5f-5c50844a08ba\",\"create_time\":1792216380.6447554,\"content_item_kinds\":[\"user.text\"]}},\"metadata\":{\"retained_source\":{\"id\":{\"message_id\":\"msg_01a1486b-b4e4-7b50-a7d0-331c8e1059ec\",\"turn_id\":\"01a1486b-b4a4-71c3-9f5f-5c50844a08ba\",\"role\":\"user\"},\"revision\":\"retained_01a1486b-b4e4-7b50-a7d0-333ccd7ec592\",\"complete\":true},\"client_authored\":false,\"user_input_order\":0,\"mcp_attribution\":{\"status\":\"none\"}}}\n{\"timestamp\":\"2026-10-17T05:53:00.664Z\",\"ordinal\":10,\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"id\":\"msg_1\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Added the token bucket middleware. Should the per-key limit be 100 or 300 a minute?\"}],\"internal_chat_message_metadata_passthrough\":{\"turn_id\":\"01a1486b-b4a4-71c3-9f5f-5c50844a08ba\",\"content_item_kinds\":[\"unknown\"]}},\"metadata\":{\"retained_source\":{\"id\":{\"message_id\":\"msg_1\",\"turn_id\":\"01a1486b-b4a4-71c3-9f5f-5c50844a08ba\",\"role\":\"assistant\"},\"revision\":\"retained_01a1486b-b4f8-7542-ab8c-2860525eccd1\",\"complete\":true},\"client_authored\":false,\"user_input_order\":1}}\n{\"timestamp\":\"2026-10-17T05:53:00.708Z\",\"ordinal\":13,\"type\":\"event_msg\",\"payload\":{\"type\":\"task_complete\",\"root_turn_id\":\"01a1486b-b4a4-71c3-9f5f-5c50844a08ba\",\"turn_id\":\"01a1486b-b4a4-71c3-9f5f-5c50844a08ba\",\"last_agent_message\":\"Added the token bucket middleware. Should the per-key limit be 100 or 300 a minute?\",\"started_at\":1792216380,\"completed_at\":1792216380,\"duration_ms\":123,\"time_to_first_token_ms\":76}}\n"
+
+test('a real Codex turn and its session end, written in the same second, become one ended block named from the request', async ($, on) => {
+  const rollout = '/home/me/.codex/sessions/2026/10/17/rollout-2026-10-17T05-53-00-01a1486b-b48b-7621-8c35-f8c0c2e2d4f6.jsonl'
+  const asked: string[] = []
+  const world: World = {
+    files: new Map([
+      [FILE, '# 專案進度\n'],
+      [rollout, CODEX_ROLLOUT],
+      // The same second: sorted by name, the end would come first.
+      [`${INBOX}/codex-end-1792216380-1500.json`, CODEX_END],
+      [`${INBOX}/codex-turn-1792216380-1473.json`, CODEX_STOP],
+    ]),
+    mtime: 1,
+    hasTasks: true,
+    reply: (prompt: string) => {
+      asked.push(prompt)
+      return prompt.includes('TITLE:')
+        ? 'TITLE: 公開端點加上限流\nCONTEXT: -\nDONE: 加好 token bucket 中介層\nNEXT: -\nASK: 每把金鑰的上限 — 一分鐘 100 還是 300？'
+        : undefined
+    },
+  }
+  const clock = engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/persona_framework', surface: 'desktop', isInteractive: true })
+  await clock.advance(5000)
+
+  // The request came from the session log, since Stop carries only the reply.
+  expect(asked.some(prompt => prompt.includes('Add rate limiting to the public endpoints'))).toBe(true)
+  const text = world.files.get(FILE) ?? ''
+  expect(text).toContain('## api-gateway\n\n<!-- auto session=')
+  expect(text).toContain('agent=codex state=ended')
+  expect(text).toContain('### 公開端點加上限流\n')
+  expect(text).toContain('- [x] 加好 token bucket 中介層\n- [?] 每把金鑰的上限 — 一分鐘 100 還是 300？\n')
+})

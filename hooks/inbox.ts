@@ -22,6 +22,19 @@ const NAME = /^([a-z][a-z0-9]*)-(turn|end)-[\w.-]+\.json$/
 
 export const isInboxFile = (name: string): boolean => NAME.test(name)
 
+// Oldest first by the time in the name; in the same second a turn comes before its session's
+// end (Codex writes both within one second when `codex exec` finishes).
+export const inboxOrder = (a: string, b: string): number => {
+  const parts = (name: string): [number, number] => {
+    const found = /^[a-z0-9]+-(turn|end)-(\d+)/.exec(name)
+    return [Number(found?.[2] ?? 0), found?.[1] === 'end' ? 1 : 0]
+  }
+  const [timeA, endA] = parts(a)
+  const [timeB, endB] = parts(b)
+
+  return timeA - timeB || endA - endB || a.localeCompare(b)
+}
+
 const text = (value: unknown): string => {
   if (typeof value === 'string') return value
   if (Array.isArray(value)) {
