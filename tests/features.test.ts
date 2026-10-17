@@ -1185,6 +1185,22 @@ test('a short report before the printed board is work, a lead-in line or a blank
   expect(isBoardTurn(said(`\`\`\`\n${board}\`\`\`\n${ask} ${'It has waited since Monday and blocks the release. '.repeat(3)}`)!)).toBe(false)
 })
 
+test('a status or summary line that leads into the board is a look, while a lead saying something was changed is still work', () => {
+  const said = (answer: string) => readTurn('grok-turn-1-1.json', JSON.stringify({ session_id: 's', cwd: '/w/app', prompt: 'where do things stand?', last_assistant_message: answer }))
+  const board = 'Progress  ● 2 waiting  ▸ 5 in progress  ⚑ 0 due soon  ✓ 1 done today\n\n● Waiting on you\n  api-gateway › Rate limits\n'
+  const zh = '進度  ● 2 等你  ▸ 5 進行中  ⚑ 0 快到期  ✓ 1 今天完成\n\n● 現在最需要你\n  api-gateway › 限流\n'
+  expect(isBoardTurn(said(`Status:\n\`\`\`\n${board}\`\`\`\nThe rate limit question needs you first.`)!)).toBe(true)
+  expect(isBoardTurn(said(`**Summary of every project:**\n\n\`\`\`\n${board}\`\`\`\nThe rate limit question needs you first.`)!)).toBe(true)
+  expect(isBoardTurn(said(`Status: fixed the 429 header.\n\`\`\`\n${board}\`\`\``)!)).toBe(false)
+  expect(isBoardTurn(said(`Status: fixed 429:\n\`\`\`\n${board}\`\`\``)!)).toBe(false)
+  expect(isBoardTurn(said(`Progress after I added the tests:\n\`\`\`\n${board}\`\`\``)!)).toBe(false)
+  // `updated` names a board as often as it reports work, so it says nothing either way.
+  expect(isBoardTurn(said(`Here's the updated board:\n\`\`\`\n${board}\`\`\`\nThe rate limit question needs you first.`)!)).toBe(true)
+  // 了 after any verb says work was done (改了, 修了, 跑了), not only 好了 and 完成了.
+  expect(isBoardTurn(said(`目前改了 429 看板如下：\n\`\`\`\n${zh}\`\`\`\n先回限流。`)!)).toBe(false)
+  expect(isBoardTurn(said(`現在跑了測試看板如下：\n\`\`\`\n${zh}\`\`\`\n先回限流。`)!)).toBe(false)
+})
+
 test('a reply full of board marks with no count line is read at once, not tried for seconds', () => {
   const said = (answer: string) => readTurn('grok-turn-1-1.json', JSON.stringify({ session_id: 's', cwd: '/w/app', prompt: '', last_assistant_message: answer }))
   // One long line, and many lines just short enough to be tried: each has every mark but the ✓,
@@ -1841,6 +1857,15 @@ test('what the user asked, first and this turn, reaches the model fenced as data
   }
 })
 
+test('what the user asked reaches the model fenced as data when the task is named and named again, in every language', () => {
+  for (const lang of LANGS) {
+    for (const prompt of [STRINGS[lang].namePrompt('ASKED', '- step'), STRINGS[lang].refreshPrompt('ASKED', '- step', 'Title', '')]) {
+      expect(prompt).toContain('<request>\nASKED\n</request>')
+      expect(prompt.slice(0, prompt.indexOf('<request>\nASKED'))).toContain('</request>')
+    }
+  }
+})
+
 test('a comment opening in a summed-up title, a step, a branch or a first request is written as plain words, so it hides no block after it', () => {
   const none = { title: '', context: '', done: '', next: '', ask: '', why: '' }
   const summed = applyDigest(emptyMirror('aaaa1111-1', 'p', NOW), parseDigest('TITLE: <!-- x\nDONE: fixed <!-- it\nNEXT: ship -->\nASK: -') ?? none, NOW)
@@ -1941,4 +1966,60 @@ test('a reply on the line of a task whose question was marked answered goes as i
   expect(row(serveModel(serveView(), [], STRINGS.en))?.isAsking).toBe(true)
   // The step itself still shows in the task's steps.
   expect(row(serveModel(view, [], STRINGS.en))?.steps.map(step => step.text)).toContain('Redis or Memcached?')
+})
+
+test('a project folder or quick-add project named with a comment opening hides no block after its heading, and keeps one heading', () => {
+  // A Linux folder name may hold `<!--`; a quick add takes the project the person typed.
+  const first = { ...emptyMirror('aaaa1111-1', 'web<!--app', NOW), title: 'First', state: 'working' as const }
+  const second = { ...emptyMirror('bbbb2222-2', 'web<!--app', NOW), title: 'Second', state: 'working' as const }
+  const typed = addManualTask([first, second].reduce((text, mirror) => upsertAutoBlock(text, mirror), ''), { project: 'notes<!--', title: 'Call', due: null, steps: ['dial'] })
+  const third = { ...emptyMirror('cccc3333-3', 'api', NOW), title: 'Third', state: 'working' as const }
+  const file = upsertAutoBlock(addManualTask(typed, { project: 'notes<!--', title: 'Write', due: null, steps: ['draft'] }), third)
+  const tasks = parseProgress(file).flatMap(project => project.tasks)
+  expect(tasks.map(task => [task.title, task.auto?.session ?? null])).toEqual([
+    ['First', 'aaaa1111'],
+    ['Second', 'bbbb2222'],
+    ['Call', null],
+    ['Write', null],
+    ['Third', 'cccc3333'],
+  ])
+  expect(file.split('\n').filter(line => line.startsWith('## '))).toHaveLength(3)
+  expect(file.split('\n').filter(line => /<!--|-->/.test(line) && !/^<!-- \/?auto /.test(line))).toEqual([])
+})
+
+test('a folder with a comment mark in its name gets one heading, whether a Claude session or another agent writes there first', () => {
+  // readTurn names another agent's project from its folder; a Claude session passes the folder.
+  const turn = readTurn('codex-turn-1-2.json', JSON.stringify({ session_id: 's1', cwd: '/w/a-->b<!--c', hook_event_name: 'Stop', last_assistant_message: 'done' }))
+  const codex = { ...emptyMirror('cccc3333-3', turn?.project ?? '', NOW), title: 'Codex', state: 'working' as const }
+  const claude = { ...emptyMirror('aaaa1111-1', 'a-->b<!--c', NOW), title: 'Claude', state: 'working' as const }
+  for (const order of [[codex, claude], [claude, codex]]) {
+    const file = order.reduce((text, mirror) => upsertAutoBlock(text, mirror), '')
+    expect(file.split('\n').filter(line => line.startsWith('## '))).toEqual(['## a b c'])
+    expect(parseProgress(file).flatMap(project => project.tasks).map(task => task.title).sort()).toEqual(['Claude', 'Codex'])
+  }
+})
+
+test('a project heading an earlier version wrote, with a leading # or an arrow in it, is still joined, and a project of only marks goes under the uncategorized one', () => {
+  // 0.18.1 wrote these headings as they were; each reads back as its project.
+  const earlier = '# 專案進度\n\n## #work\n\n### Call\n- [ ] dial\n\n## a-->b\n\n### Ship\n- [ ] tag\n'
+  const added = addManualTask(earlier, { project: '#work', title: 'Write', due: null, steps: ['draft'] })
+  const joined = upsertAutoBlock(added, { ...emptyMirror('aaaa1111-1', 'a-->b', NOW), title: 'Fix', state: 'working' as const })
+  const projects = parseProgress(joined)
+  expect(projects.map(project => [project.name, project.tasks.map(task => task.title)])).toEqual([
+    ['#work', ['Call', 'Write']],
+    ['a-->b', ['Ship', 'Fix']],
+  ])
+  const marks = upsertAutoBlock(earlier, { ...emptyMirror('bbbb2222-2', '<!--', NOW), title: 'Odd', state: 'working' as const })
+  const odd = parseProgress(marks).find(project => project.tasks.some(task => task.title === 'Odd'))
+  expect(odd?.name).toBe(ZH_TW.uncategorized)
+})
+
+test('a project whose name starts with a bracket is matched whole, so the uncategorized heading never joins another one', () => {
+  const file = '# 專案進度\n\n## (PFC) notes\n\n### Read\n- [ ] paper\n'
+  const odd = upsertAutoBlock(file, { ...emptyMirror('aaaa1111-1', '<!--', NOW), title: 'Odd', state: 'working' as const })
+  const same = addManualTask(odd, { project: '(PFC) notes', title: 'Write', due: null, steps: ['draft'] })
+  expect(parseProgress(same).map(project => [project.name, project.tasks.map(task => task.title)])).toEqual([
+    ['(PFC) notes', ['Read', 'Write']],
+    [ZH_TW.uncategorized, ['Odd']],
+  ])
 })

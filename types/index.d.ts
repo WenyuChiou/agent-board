@@ -141,7 +141,6 @@ declare module 'claude-code' {
       hiddenAsks: string[]
       revising: string
       lang: string
-      isLangChosen: boolean
     }
   }
 }

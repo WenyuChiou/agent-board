@@ -11,12 +11,10 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { BOARD_SCRIPT } from '../hooks/board-script.ts'
 
-// Minutes ago, so the session still counts as waiting whenever the tests run.
-const ASKED = new Date(Date.now() - 10 * 60 * 1000).toISOString().replace(/\.\d{3}Z$/, 'Z')
 const FILE = `# Progress
 
 ## api-gateway
-<!-- auto session=a1b2c3d4 agent=codex state=waiting updated=${ASKED} -->
+<!-- auto session=a1b2c3d4 agent=codex state=waiting updated=2026-10-17T08:30:00Z -->
 ### Rate-limit the public endpoints
 - [x] Added the token bucket middleware
 - [?] Per-key limit — 100 or 300 a minute?
@@ -161,7 +159,6 @@ test('another session writing while the board ticks or archives loses neither th
     // Right after the board's first rename over progress.md, a Claude Code session writes its
     // own block, so the board's read-back differs and it tries again on the newer text.
     const preload = join(dir, 'other-session.cjs')
-    const later = new Date(Date.parse(ASKED) + 60_000).toISOString().replace(/\.\d{3}Z$/, 'Z')
     writeFileSync(preload, `const fs = require('node:fs')
 const { syncBuiltinESMExports } = require('node:module')
 const real = fs.renameSync
@@ -170,7 +167,7 @@ fs.renameSync = (from, to) => {
   real(from, to)
   if (!done && String(to).endsWith('progress.md')) {
     done = true
-    fs.writeFileSync(to, fs.readFileSync(to, 'utf8').replace('updated=${ASKED}', 'updated=${later}'))
+    fs.writeFileSync(to, fs.readFileSync(to, 'utf8').replace('updated=2026-10-17T08:30:00Z', 'updated=2026-10-17T08:31:00Z'))
   }
 }
 syncBuiltinESMExports()
@@ -182,7 +179,7 @@ syncBuiltinESMExports()
     const ticked = play('down x')
     assert.ok(ticked.includes('Done: “Ask two referees”.'), ticked)
     assert.ok(readFileSync(path, 'utf8').includes('- [x] Ask two referees'))
-    assert.ok(readFileSync(path, 'utf8').includes(`updated=${later}`))
+    assert.ok(readFileSync(path, 'utf8').includes('updated=2026-10-17T08:31:00Z'))
     const journal = readdirSync(dir).find(name => name.includes('-journal-'))
     assert.ok(journal && readFileSync(join(dir, journal), 'utf8').includes('Ask two referees'))
     writeFileSync(path, file)
