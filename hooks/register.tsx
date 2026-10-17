@@ -61,7 +61,7 @@ import { RULE_ID, RULES } from './rule'
 import { langOf, resolveLang, STRINGS } from './strings'
 import { answerTurns, applyDigest, clearAsked, cleanHandoff, isWork, lastQuestion, markAsked, needsRefresh, parseDigest, replyData, turnTools } from './digest'
 import type { Digest } from './digest'
-import { agentHooks, boardScript, DELETE, isWindowsHost, OPENCLAW_MIN, openclawPrinted, openclawSavedBy, openclawTooOld, psQuote, reporterPs1, reporterSh, withoutSection } from './connect'
+import { agentHooks, boardScript, DELETE, hasOurHook, isWindowsHost, OPENCLAW_MIN, openclawPrinted, openclawSavedBy, openclawTooOld, psQuote, reporterPs1, reporterSh, withoutSection } from './connect'
 import {
   ANSWER_KEEP,
   answerKey,
@@ -662,7 +662,7 @@ const takeAgentTurns = async ($: EngineInterface, turns: readonly AgentTurn[], i
       prompt = prompt || tail.prompt
     }
     // Known only now for Codex, whose Stop leaves the request out.
-    if (isBoardTurn({ ...turn, prompt })) continue
+    if (isBoardTurn({ ...turn, prompt, answer })) continue
     if (mirror.firstPrompt === '' && prompt !== '') mirror = { ...mirror, firstPrompt: promptKey(prompt) }
     if (answer === '' || answerKey(answer) === mirror.lastAnswer) continue
     if (digested.has(index)) {
@@ -781,6 +781,12 @@ const connectAgents = async ($: EngineInterface, mode: ConnectMode): Promise<{ t
         await $.fs.write(hook.file, after)
       }
       if ((remove || isAuto) && after === before && !hadOld) continue
+      // A session that only brings our own hook up to date (a new timeout, say) does not
+      // announce the agent as newly connected.
+      // Taking our hooks out also drops empty lists, so whether that changes the text says
+      // nothing; the reporter's name in the file does.
+      // Codex and Hermes ask the person to approve a changed hook again, so those still say so.
+      if (isAuto && hook.agent !== 'codex' && hook.agent !== 'hermes' && (hook.edit(before, true) === DELETE || hasOurHook(before))) continue
       // OpenClaw takes two files, a plugin and the config entry that loads it.
       if (hook.label === '' || done.includes(hook.label)) continue
       done.push(hook.label)

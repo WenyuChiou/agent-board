@@ -239,14 +239,41 @@ const BOARD_ASKS = /^\s*(?:\/board|[$/]agent-board)\s*$/
 // request that only mentions the script (someone working on this repository) is real work.
 const BOARD_WORDS = Object.values(STRINGS).flatMap(s => [s.boardCommandPrompt, s.boardSkillPrompt('\u0000').split('\u0000')[1] ?? ''].filter(words => words.trim() !== ''))
 
-// The board's own first line (`Progress  ● 2 waiting`), which a reply that showed it repeats:
-// how a turn is known when the request was the person's own words (Hermes, a skill the
-// model chose to load).
-const BOARD_HEADS = Object.values(STRINGS).map(s => new RegExp(`${s.paneTitle}\\s+● \\d+ ${s.countWaiting}\\s+▸ \\d+ ${s.countActive}`))
+// An agent can pick the board skill from plain words ("where do things stand?"), and then only
+// the reply tells. The skill asks for the board first and one sentence on what needs the
+// person after it; work done in the same turn is told before the board, or as more than a
+// sentence after it.
+const BOARD_COUNTS = /●\s*\d+[^\n]*▸\s*\d+[^\n]*⚑\s*\d+[^\n]*✓\s*\d+/
+// What boardText prints below its count line: blank or indented lines, a section or project
+// under its mark, and the line for nothing waiting or nothing open.
+const BOARD_PLAIN = new Set(Object.values(STRINGS).flatMap(s => [s.nothingForYou, s.empty]))
+const isBoardLine = (line: string): boolean => /^(?:\s|[●▸⚑◐] |$)/.test(line) || BOARD_PLAIN.has(line.trim())
+const BOARD_LEAD = 40
+const BOARD_ASIDE = 160
+// A CJK character says about as much as two Latin ones.
+const weight = (text: string): number => [...text.trim()].reduce((sum, char) => sum + (/[ᄀ-ᅟ⺀-꓏가-힣豈-﫿︰-﹏＀-｠￠-￦]/.test(char) ? 2 : 1), 0)
+
+export const isBoardAnswer = (answer: string): boolean => {
+  const lines = answer.replace(/\r\n/g, '\n').split('\n')
+  const at = lines.findIndex(line => BOARD_COUNTS.test(line))
+  if (at < 0) return false
+  let end = at + 1
+  while (end < lines.length && isBoardLine(lines[end] ?? '')) end += 1
+  let from = at
+  // A fence goes with the board only when it holds the board and nothing else.
+  if (/^\s*```/.test(lines[at - 1] ?? '')) {
+    if (!/^\s*```\s*$/.test(lines[end] ?? '')) return false
+    from = at - 1
+    end += 1
+  }
+  const before = lines.slice(0, from).join('\n')
+  const after = lines.slice(end).join('\n')
+  // A code block or a list beside the board (a test log, a diff, what was done) is work.
+  const isAside = (text: string): boolean => !/```|^\s*(?:[-*+]|\d+[.)])\s/m.test(text)
+
+  return weight(before) <= BOARD_LEAD && weight(after) <= BOARD_ASIDE && isAside(before) && isAside(after)
+}
 
 export const isBoardTurn = (turn: AgentTurn): boolean =>
   turn.event === 'turn' &&
-  (BOARD_ASKS.test(turn.prompt) ||
-    /<name>agent-board<\/name>/.test(turn.prompt) ||
-    BOARD_WORDS.some(words => turn.prompt.includes(words)) ||
-    BOARD_HEADS.some(head => head.test(turn.answer)))
+  (BOARD_ASKS.test(turn.prompt) || /<name>agent-board<\/name>/.test(turn.prompt) || BOARD_WORDS.some(words => turn.prompt.includes(words)) || isBoardAnswer(turn.answer))

@@ -24,10 +24,37 @@
   0.19.0 loaded the agent-board skill with `skill_view` and ran it with
   `terminal`; OpenClaw 2026.10.4 read it from `~/.agents/skills` and ran it
   with `exec`. The README table marks both ✅.
-- **A turn that showed the board is known by the board in its reply**, so one
-  asked in the person's own words ("看一下 agent-board") is not counted as work
-  either. Test: "a turn that only showed the board is not work, in any language
-  or agent".
+
+## 0.17.1 — 2026-10-17
+
+- **Fixes from a live test with Grok Build 1.0.62.**
+  - **A look at the board asked in plain words gets no block.** Grok Build
+    picked the board skill on its own for 我想看一下目前所有專案的進度 ("I
+    want to see where all my projects stand"), so the request named no board
+    command, and the turn got a block of its own holding a copy of another
+    project's question. A reply that starts with the printed board (its count
+    line, alone in a fence or unfenced) and adds at most a sentence after it
+    now counts as a look at the board, whatever the request said. Work told
+    before the board, as a list, or at more length after it still gets its
+    block.
+  - **End hooks get 5 seconds.** Grok Build's and Muse Code's session-end
+    hook had 1 second; on Windows PowerShell alone took 0.6 of it in the live
+    test, so a slow start could lose the session's end.
+  - **An update to a hook already in place is made without a word.** A
+    session that rewrites its own hook in an agent's config (as this release
+    does for those timeouts) no longer announces the agent as newly
+    connected. Codex and Hermes still say so, since each asks the person to
+    approve a changed hook again.
+
+  Tests: "a reply that is the printed board and a sentence is a look at the
+  board, asked in plain words, while work that shows it too is not", "a Grok
+  Build turn that printed the board for a plain request gets no block, and
+  copies no other project’s question", "each agent’s config gets the hook in
+  the shape it reads, and nothing else of the person’s changes", "an agent
+  hooked in by an earlier version gets the new hook without a word", "a
+  changed hook of ours in Codex is still announced, since Codex asks to
+  approve it again", "a first connection to a config holding only an empty
+  hook list is still announced".
 
 ## 0.17.0 — 2026-10-17
 

@@ -1657,6 +1657,15 @@ test('an agent’s turn that only showed the board gets no block', async ($, on)
   expect(text).not.toContain('agent=codex')
 })
 
+test('a Grok Build turn that printed the board for a plain request gets no block, and copies no other project’s question', async ($, on) => {
+  // Grok Build 1.0.62 took "我想看一下目前所有專案的進度" for the board skill on its own.
+  const board = '```\nProgress  ● 1 waiting  ▸ 2 in progress  ⚑ 0 due soon  ✓ 0 done today\n\n● Waiting on you\n  persona_framework › T10\n    [Review] Three rejudgments wait for your call\n```\n\nThe T10 review needs you first.'
+  const stop = { ...JSON.parse(GROK_STOP), lastAssistantMessage: board, last_assistant_message: board }
+  const { text, asked } = await takeInbox($, on, [[`${INBOX}/grok-turn-1792220000-1.json`, JSON.stringify(stop)]])
+  expect(asked).toEqual([])
+  expect(text).not.toContain('agent=grok')
+})
+
 test('an OpenClaw older than 2026.4.24 is not hooked in, what an earlier connect put there comes back out, and connecting by hand says why', async ($, on) => {
   const meta = { lastTouchedVersion: '2026.3.8' }
   const earlier = { meta, gateway: { port: 18789 }, plugins: { load: { paths: ['/home/me/.openclaw/agent-board.mjs'] }, entries: { 'agent-board': { enabled: true, hooks: { allowConversationAccess: true } } } } }
@@ -1766,6 +1775,39 @@ test('an agent already hooked in is left as it is, and nothing is said', async (
   await $.session.start({ cwd: '/work/persona_framework', surface: 'terminal', isInteractive: true })
   expect(world.files.get('/home/me/.codex/hooks.json')).toBe(hooked)
   expect(seen.notified).toEqual([])
+})
+
+test('an agent hooked in by an earlier version gets the new hook without a word', async ($, on) => {
+  // 0.17.0 and earlier gave Grok Build's end hook 1 second.
+  const earlier = JSON.stringify({ hooks: { Stop: [{ hooks: [{ type: 'command', command: "sh '/home/me/.claude/progress-report.sh' grok turn || true", timeout: 10 }] }], SessionEnd: [{ hooks: [{ type: 'command', command: "sh '/home/me/.claude/progress-report.sh' grok end || true", timeout: 1 }] }] } }, null, 2) + '\n'
+  const ours = '/home/me/.grok/hooks/agent-board.json'
+  const world: World = { files: new Map([['/home/me/.grok/config.toml', ''], [ours, earlier]]), mtime: 1, hasTasks: true, ran: [] }
+  engineBeneath(on, world)
+  const seen = outside(on)
+  await $.session.start({ cwd: '/work/persona_framework', surface: 'terminal', isInteractive: true })
+  expect(JSON.parse(world.files.get(ours) ?? '{}').hooks.SessionEnd[0].hooks[0].timeout).toBe(5)
+  expect(seen.notified).toEqual([])
+})
+
+test('a changed hook of ours in Codex is still announced, since Codex asks to approve it again', async ($, on) => {
+  const earlier = JSON.stringify({ hooks: { Stop: [{ hooks: [{ type: 'command', command: "sh '/home/me/.claude/progress-report.sh' codex turn || true", timeout: 1 }] }], SessionEnd: [{ hooks: [{ type: 'command', command: "sh '/home/me/.claude/progress-report.sh' codex end || true", timeout: 3 }] }] } }, null, 2) + '\n'
+  const ours = '/home/me/.codex/hooks.json'
+  const world: World = { files: new Map([[ours, earlier]]), mtime: 1, hasTasks: true, ran: [] }
+  engineBeneath(on, world)
+  const seen = outside(on)
+  await $.session.start({ cwd: '/work/persona_framework', surface: 'terminal', isInteractive: true })
+  expect(JSON.parse(world.files.get(ours) ?? '{}').hooks.Stop[0].hooks[0].timeout).toBe(10)
+  expect(seen.notified).toEqual(['已自動接上：Codex。重開它們之後，每個回合都會出現在這裡。'])
+})
+
+test('a first connection to a config holding only an empty hook list is still announced', async ($, on) => {
+  // Taking our hooks out of this config would drop the empty list, though none of ours is in it.
+  const world: World = { files: new Map([['/home/me/.codex/hooks.json', '{"hooks":{"PreToolUse":[]}}']]), mtime: 1, hasTasks: true, ran: [] }
+  engineBeneath(on, world)
+  const seen = outside(on)
+  await $.session.start({ cwd: '/work/persona_framework', surface: 'terminal', isInteractive: true })
+  expect(JSON.parse(world.files.get('/home/me/.codex/hooks.json') ?? '{}').hooks.Stop).toHaveLength(1)
+  expect(seen.notified).toEqual(['已自動接上：Codex。重開它們之後，每個回合都會出現在這裡。'])
 })
 
 test('once the hooks are taken out, a session does not put them back', async ($, on) => {
