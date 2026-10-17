@@ -11,6 +11,9 @@
   Strict enum input and language-table output are covered by
   `non-string receipt and progress enums are rejected before writing state` and
   `report context uses the existing English, Traditional Chinese and Simplified Chinese tables`.
+  Windows path spellings are accepted while linked roots and ancestors are
+  rejected before writes. Tests: `Windows drive-letter aliases do not count as symbolic links`
+  and `linked roots and linked ancestors are rejected before initializing or reporting`.
 - Add a host-supplied, verified Codex owner adapter for `turn/steer` with an
   expected active turn. No arbitrary-session attachment or idle `turn/start`.
   Covered by `a verified owner can steer only its loaded thread and the expected active turn`,

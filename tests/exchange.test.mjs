@@ -79,6 +79,27 @@ test('explicit bindings reject wrong recipients and paths disguised as ids', asy
   assert.throws(() => bindingOf({ ...binding, version: 2 }), /UNSUPPORTED_BINDING/)
 })
 
+test('Windows drive-letter aliases do not count as symbolic links', { skip: process.platform !== 'win32' }, async t => {
+  const { directory } = await fixture(t)
+  const alternate = directory[0] === directory[0].toUpperCase()
+    ? directory[0].toLowerCase() + directory.slice(1)
+    : directory[0].toUpperCase() + directory.slice(1)
+  assert.notEqual(alternate, directory)
+  assert.equal((await exchange('status', alternate)).native, 'unsupported')
+})
+
+test('linked roots and linked ancestors are rejected before initializing or reporting', async t => {
+  const { root, directory } = await fixture(t)
+  const alias = join(root, 'alias')
+  await symlink(directory, alias, process.platform === 'win32' ? 'junction' : 'dir')
+  await assert.rejects(exchange('status', alias), /SYMLINK_UNSUPPORTED/)
+  await exchange('init', join(directory, 'child'), { agent: 'dot', session: 'synthetic-child' })
+  await assert.rejects(exchange('report', join(alias, 'child'), { project: 'Synthetic', title: 'Must not write', state: 'working', steps: [] }), /SYMLINK_UNSUPPORTED/)
+  await assert.rejects(exchange('init', join(alias, 'another-child'), { agent: 'dot', session: 'synthetic-child' }), /SYMLINK_UNSUPPORTED/)
+  await assert.rejects(readFile(join(directory, 'child', 'progress.md')), { code: 'ENOENT' })
+  await assert.rejects(readFile(join(directory, 'another-child', 'binding.json')), { code: 'ENOENT' })
+})
+
 test('enqueue is idempotent but refuses reuse of an id for different text', async t => {
   const { directory, command } = await fixture(t)
   assert.equal((await exchange('enqueue', directory, command)).status, 'queued')

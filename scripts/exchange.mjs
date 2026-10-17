@@ -1,4 +1,4 @@
-import { mkdir, readFile, writeFile, rename, unlink, rmdir, readdir, lstat, realpath } from 'node:fs/promises'
+import { mkdir, readFile, writeFile, rename, unlink, rmdir, readdir, lstat } from 'node:fs/promises'
 import { randomBytes } from 'node:crypto'
 import { resolve, join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -12,6 +12,14 @@ const read = async path => JSON.parse(await readFile(path, 'utf8'))
 const safe = async path => {
   if ((await lstat(path)).isSymbolicLink()) throw new Error('SYMLINK_UNSUPPORTED')
   return path
+}
+// Canonical spelling can differ on Windows (drive case and short names). Inspect
+// each actual path component instead of treating a spelling change as a link.
+const safeDirectory = async path => {
+  for (let cursor = path; ; cursor = dirname(cursor)) {
+    await safe(cursor)
+    if (dirname(cursor) === cursor) return
+  }
 }
 const existing = async path => { try { await lstat(path); return true } catch (error) { if (error.code === 'ENOENT') return false; throw error } }
 
@@ -42,14 +50,14 @@ export const exchange = async (action, directory, input = {}) => {
   const root = resolve(directory)
   if (action === 'init') {
     const binding = bindingOf({ ...input, version: 1, id: randomBytes(16).toString('hex') })
+    await safeDirectory(dirname(root))
     await mkdir(root, { mode: 0o700 })
     await mkdir(join(root, 'commands'), { mode: 0o700 })
     await mkdir(join(root, 'receipts'), { mode: 0o700 })
     await create(join(root, 'binding.json'), binding)
     return { binding, native: 'unsupported', mode: 'cooperative-file' }
   }
-  await safe(root)
-  if (await realpath(root) !== root) throw new Error('SYMLINK_UNSUPPORTED')
+  await safeDirectory(root)
   const binding = bindingOf(await read(await safe(join(root, 'binding.json'))))
   await safe(join(root, 'commands'))
   await safe(join(root, 'receipts'))
