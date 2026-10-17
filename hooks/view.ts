@@ -7,7 +7,7 @@ import { shortId } from './blocks'
 import { ciWords, prWords } from './github'
 import { doingTask, fallbackTitle } from './mirror'
 import type { Tone } from './palette'
-import { countSteps, currentStepIndex, doneKey, isHereProject, isStale, isTaskComplete } from './parse'
+import { countSteps, currentStepIndex, doneKey, isHereProject, isStale, isTaskComplete, RESUME } from './parse'
 
 // What the pane shows, worked out from the file and this session's own list, so the
 // drawing code only lays it out.
@@ -46,6 +46,16 @@ export type StepRef = { project: string; title: string; step: string; line: numb
 // heading line, checked against the title so a task that moved is still found once.
 export type TaskRef = { project: string; title: string; line: number; session: string | null }
 
+// Another agent's session, as its block names it: its block id, the session id its hook gave
+// (`resume=`), the folder it ran in (`dir=`), and whether it has closed (`state=ended`). The
+// board's page can send a reply into a closed Grok Build or Codex session; the pane does not.
+export type AgentTarget = { agent: string; session: string; resume: string | null; dir: string | null; isClosed: boolean }
+
+const targetOf = (auto: ProgressAuto | null): AgentTarget | null =>
+  auto === null || auto.agent === 'claude'
+    ? null
+    : { agent: auto.agent, session: auto.session, resume: auto.resume, dir: auto.dir, isClosed: auto.state === 'ended' }
+
 export type WaitingItem = {
   key: string
   project: string
@@ -65,8 +75,17 @@ export type WaitingItem = {
   where: 'here' | 'other' | 'manual'
   // The agent of another session's block when it is not Claude, else ''.
   agent: string
+  // The block id of the session that asked, named in the reply hint: several sessions often
+  // share one folder, so the folder alone does not say where to answer. '' for a hand-kept step.
+  session: string
+  // A Claude Code session's full id (its `resume=`, else its block id), for the person to copy
+  // and find that session or reopen it with `claude --resume`; null for every other item. Anyone
+  // can write `session=`, so a block id that is not a plain id is never offered for the clipboard.
+  sessionId: string | null
   // A hand-kept step can be ticked from the pane; another session's cannot.
   step: StepRef | null
+  // Another agent's session the question came from; null for Claude's and hand-kept ones.
+  target: AgentTarget | null
 }
 
 // The one thing the top of the pane puts in front of the person: the most pressing thing
@@ -105,6 +124,8 @@ export type TaskRow = {
   // Set when the person may take the row out now: a hand-kept task, or a block whose session
   // ended or stopped. A live session's block is that session's to change.
   archive: TaskRef | null
+  // Another agent's session the row is; null for Claude's and hand-kept ones.
+  target: AgentTarget | null
 }
 
 // This session's pull request, for the card.
@@ -381,7 +402,10 @@ const ownWaiting = (mine: ProgressMirror): WaitingItem[] => {
       }),
       where: 'here' as const,
       agent: '',
+      session: shortId(mine.sessionId),
+      sessionId: null,
       step: null,
+      target: null,
     }))
 }
 
@@ -441,7 +465,11 @@ export const buildView = (
           ...askOf(parts.text, parts.note),
           where: isManual ? 'manual' : 'other',
           agent: task.auto === null || task.auto.agent === 'claude' ? '' : task.auto.agent,
+          session: task.auto?.session ?? '',
+          sessionId:
+            task.auto?.agent === 'claude' ? (task.auto.resume ?? (RESUME.test(task.auto.session) ? task.auto.session : null)) : null,
           step: isManual ? { project: name, title, step: step.text, line: step.line, raw: step.raw } : null,
+          target: targetOf(task.auto),
         })
       })
 
@@ -452,27 +480,10 @@ export const buildView = (
       }
 
       const auto = task.auto === null || task.auto.state === 'done' ? null : stale ? 'ended' : task.auto.state
-      if (auto === 'waiting') {
-        if (!task.steps.some(step => step.status === 'waiting')) {
-          waiting.push({
-            key,
-            project: name,
-            task: title,
-            context,
-            text: s.waitingReply,
-            note: '',
-            when,
-            kind: 'reply',
-            options: [],
-            command: null,
-            link: null,
-            where: 'other',
-            agent: task.auto?.agent === 'claude' ? '' : (task.auto?.agent ?? ''),
-            step: null,
-          })
-        }
-        continue
-      }
+      // A session whose turn ended on a question is in 等你處理 by its [?] steps. One whose
+      // turn simply ended (`state=waiting` is written at every turn's end), or that waits on
+      // CI or another agent, asks the person nothing: it stays with the work in progress.
+      if (auto === 'waiting' && task.steps.some(step => step.status === 'waiting')) continue
 
       const { done, total } = countSteps(task)
       const phrase =
@@ -514,6 +525,7 @@ export const buildView = (
             : auto === 'ended' && task.auto !== null
               ? { project: name, title: task.title, line: task.line, session: task.auto.session }
               : null,
+        target: targetOf(task.auto),
       }
 
       // Work with a date close by is listed once, under 快到期.

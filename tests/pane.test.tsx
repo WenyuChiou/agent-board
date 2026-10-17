@@ -43,6 +43,8 @@ type World = {
   gh?: () => { exitCode: number; stdout: string; stderr: string }
   // A move of this file fails, as when another session renamed it first.
   isMoveRefused?: (path: string) => boolean
+  // A delete of this file fails, as with a file another program holds open.
+  isRemoveRefused?: (path: string) => boolean
   // What the model answers asynchronously; a promise that never settles is a hung call.
   hang?: (prompt: string) => boolean
   // Every prompt the model was given.
@@ -99,7 +101,7 @@ const engineBeneath = (on: On, world: World): MockClock => {
           world.files.set(posix(e.argv[2] ?? ''), text)
         }
       } else {
-        for (const path of e.argv.slice(1)) if (path !== '-f') world.files.delete(posix(path))
+        for (const path of e.argv.slice(1)) if (path !== '-f' && world.isRemoveRefused?.(posix(path)) !== true) world.files.delete(posix(path))
       }
       return { value: { exitCode, stdout: '', stderr: exitCode === 0 ? '' : 'No such file or directory', isStdoutTruncated: false, isStderrTruncated: false } }
     }
@@ -835,6 +837,29 @@ test('a hand-kept task done for a day leaves for the archive by itself, and the 
   expect(world.files.get(ARCHIVE)).toContain('### 發佈 1.7.4')
 })
 
+test('/progress tidy archives a finished hand-kept task under the day it was done, not the day before', async ($, on) => {
+  const now = Date.parse('2026-10-16T12:00:00.000Z')
+  const file = `# 專案進度
+
+## 求職
+### Google 暑期實習
+- [x] 改履歷
+- [x] 投遞
+
+### Meta 實習
+- [x] 投遞
+`
+  // Seen done just now; the other one the pane has not seen done yet.
+  const world: World = { files: new Map([[FILE, file]]), mtime: 1, hasTasks: true, store: { 'done:求職::Google 暑期實習': now } }
+  engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/persona_framework', surface: 'terminal', isInteractive: true })
+  const ran = await $.command.run(TIDY)
+  expect(ran.text).toBe('封存了 2 個任務。')
+  expect(world.files.get(ARCHIVE)).toContain('## 求職 · 2026-10-16\n### Google 暑期實習\n- [x] 改履歷\n- [x] 投遞')
+  expect(world.files.get(ARCHIVE)).toContain('## 求職 · 2026-10-16\n### Meta 實習\n- [x] 投遞')
+  expect(world.files.get(ARCHIVE)).not.toContain('2026-10-15')
+})
+
 test('on a light terminal no text falls back to the terminal dim', async ($, on) => {
   const world: World = { files: new Map([[FILE, JOBS]]), mtime: 1, hasTasks: true, store: { opened: ['others', 'waiting', 'recent', 'steps'] } }
   engineBeneath(on, world)
@@ -956,13 +981,47 @@ test('another agent’s question is answered there, but its command can be copie
   const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
 
   expect(await ui.find({ type: 'Text', text: '$ gcloud auth login' })).toBeDefined()
-  expect(await ui.find({ type: 'Text', text: /到 data-pipeline 的對話（gemini）回覆/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /到「Backfill last year's events」那個對話（3db00eaf，gemini）回覆/ })).toBeDefined()
+  // Only a Claude Code session's id is offered to copy.
+  expect(await ui.find({ type: 'Button', key: "data-pipeline::Backfill last year's events::1::id" })).toBeUndefined()
   await ui.press({ key: "data-pipeline::Backfill last year's events::1::copy" })
   expect(seen.copied.at(-1)).toBe('gcloud auth login')
 
   await ui.press({ key: 'ask::docs-site::October release notes::0' })
   const links = (await ui.findAll({ type: 'Link' })).map(link => link.props.href)
   expect(links).toContain('https://docs.example.com/preview/2026-10')
+  await ui.unmount()
+})
+
+test('an item from another session in the same folder names that session’s task and id', async ($, on) => {
+  const board = `# Project progress
+
+## data-pipeline
+
+<!-- auto session=a1b2c3d4 state=waiting updated=2026-10-16T11:50:00Z resume=a1b2c3d4-1111-2222-3333 -->
+### Backfill last year's events
+- [?] Keep the old table, OK?
+<!-- /auto session=a1b2c3d4 -->
+
+<!-- auto session=e5f6a7b8 state=waiting updated=2026-10-16T11:55:00Z resume=e5f6a7b8-4444-5555-6666 -->
+### Rename the export job
+- [?] Ship the rename to staging, OK?
+<!-- /auto session=e5f6a7b8 -->
+`
+  const world: World = { files: new Map([[FILE, board]]), mtime: 1, hasTasks: true, store: { opened: ['waiting'] } }
+  engineBeneath(on, world)
+  const seen = outside(on)
+  await $.session.start({ cwd: '/work/persona_framework', surface: 'desktop', isInteractive: true })
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
+
+  // Two sessions in one folder: the folder alone would send the person to either.
+  expect(await ui.find({ type: 'Text', text: /到 data-pipeline 的對話/ })).toBeUndefined()
+  expect(await ui.find({ type: 'Text', text: /到「Backfill last year's events」那個對話（a1b2c3d4）回覆，這裡回不了/ })).toBeDefined()
+  await ui.press({ key: 'ask::data-pipeline::Rename the export job::0' })
+  expect(await ui.find({ type: 'Text', text: /到「Rename the export job」那個對話（e5f6a7b8）回覆，這裡回不了/ })).toBeDefined()
+  await ui.press({ key: 'data-pipeline::Rename the export job::0::id' })
+  expect(seen.copied.at(-1)).toBe('e5f6a7b8-4444-5555-6666')
+  expect(await ui.find({ type: 'Text', text: '已複製到剪貼簿' })).toBeDefined()
   await ui.unmount()
 })
 
@@ -1342,7 +1401,7 @@ const OPENCLAW_TURN = "{\"session_id\":\"174e82e2-caf4-4bf7-ab73-ae4a2c9c1b31\",
 const RATE_LIMIT = 'TITLE: Rate-limit the public endpoints\nCONTEXT: Keep the public API up under abuse\nDONE: Added the token bucket middleware\nNEXT: -\nASK: Per-key limit — 100 or 300 a minute?'
 
 // Runs a session over these inbox files and hands back the file and what the model was asked.
-const takeInbox = async ($: Parameters<Parameters<typeof test>[1]>[0], on: On, files: Array<[string, string]>) => {
+const takeInbox = async ($: Engine, on: On, files: Array<[string, string]>) => {
   const asked: string[] = []
   const world: World = {
     files: new Map([[FILE, '# Progress\n'], ...files]),
@@ -1495,8 +1554,9 @@ test('an inbox file is claimed by renaming it, read by that session only, and re
   await $.session.start({ cwd: '/work/persona_framework', surface: 'desktop', isInteractive: true })
   await clock.advance(5000)
 
-  expect(world.ran).toContainEqual(['mv', ours, `${ours}.2be48af2.taking`])
-  expect(world.ran).toContainEqual(['rm', '-f', `${ours}.2be48af2.taking`])
+  const claimed = `${ours}.2be48af2-${(Date.parse('2026-10-16T12:00:00.000Z') + 5000).toString(36)}-1.taking`
+  expect(world.ran).toContainEqual(['mv', ours, claimed])
+  expect(world.ran).toContainEqual(['rm', '-f', claimed])
   expect(world.files.has(ours)).toBe(false)
   expect([...world.files.keys()].some(path => path.endsWith('.taking'))).toBe(false)
   const text = world.files.get(FILE) ?? ''
@@ -1531,6 +1591,218 @@ test('an inbox file nested too deep to read strands no taken file, and the turn 
 
   expect([...world.files.keys()].filter(path => path.endsWith('.taking'))).toEqual([])
   expect(world.files.get(FILE) ?? '').toContain('## api-gateway\n')
+})
+
+const takenOf = (world: World): string[] => [...world.files.keys()].filter(path => path.endsWith('.taking'))
+
+test('an inbox turn the board will not take stays in the inbox and reaches the board on a later look', async ($, on) => {
+  const ours = `${INBOX}/codex-turn-1792216380-1.json`
+  const world: World = {
+    files: new Map([
+      [FILE, '# Progress\n'],
+      [ours, JSON.stringify({ session_id: 'ours', cwd: '/work/api-gateway', last_assistant_message: 'Added the middleware. 100 or 300 a minute?' })],
+    ]),
+    mtime: 1,
+    hasTasks: true,
+    reply: RATE_LIMIT_REPLY,
+  }
+  const clock = engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/persona_framework', surface: 'desktop', isInteractive: true })
+  // The board cannot be written: a full disk, a file another program locked.
+  world.unwritable = new Set([FILE])
+  await clock.advance(5000)
+  expect(world.files.get(FILE)).toBe('# Progress\n')
+  expect(takenOf(world)).toHaveLength(1)
+
+  // Written again once the board takes writes and the claim's time is up.
+  world.unwritable = new Set()
+  await clock.advance(15 * 60 * 1000)
+  world.mtime += 1
+  await clock.advance(5000)
+  expect(world.files.get(FILE) ?? '').toContain('## api-gateway\n')
+  expect(takenOf(world)).toEqual([])
+})
+
+test('a reply that asks nothing, with no summary from the model, is not dropped from the board but tried again', async ($, on) => {
+  const ours = `${INBOX}/codex-turn-1792216380-1.json`
+  let isDown = true
+  const world: World = {
+    files: new Map([
+      [FILE, '# Progress\n'],
+      [ours, JSON.stringify({ session_id: 'ours', cwd: '/work/web-app', prompt: 'Ship the page', last_assistant_message: 'Shipped the page.' })],
+    ]),
+    mtime: 1,
+    hasTasks: true,
+    hang: () => isDown,
+    reply: prompt => (prompt.includes('TITLE:') ? 'TITLE: Ship the page\nCONTEXT: -\nDONE: Shipped the page\nNEXT: Watch the errors\nASK: -' : undefined),
+  }
+  const clock = engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/persona_framework', surface: 'desktop', isInteractive: true })
+  await clock.advance(5000)
+  await clock.advance(30000)
+  expect(world.files.get(FILE)).toBe('# Progress\n')
+  expect(takenOf(world)).toHaveLength(1)
+
+  isDown = false
+  await clock.advance(15 * 60 * 1000)
+  world.mtime += 1
+  await clock.advance(5000)
+  expect(world.files.get(FILE) ?? '').toContain('### Ship the page\n')
+  expect(takenOf(world)).toEqual([])
+})
+
+test('a file a closed session left taken is taken again rather than swept away unread', async ($, on) => {
+  const at = Date.parse('2026-10-16T12:00:00.000Z')
+  const left = `${INBOX}/codex-turn-1792216380-1.json.deadbeef.taking`
+  const stale = `${INBOX}/codex-turn-1792216381-2.json.deadbeef-${(at - 16 * 60 * 1000).toString(36)}-1.taking`
+  const busy = `${INBOX}/codex-turn-1792216382-3.json.cafe0001-${(at - 60 * 1000).toString(36)}-1.taking`
+  const world: World = {
+    files: new Map([
+      [FILE, '# Progress\n'],
+      [left, JSON.stringify({ session_id: 'left', cwd: '/work/api-gateway', last_assistant_message: 'Added the middleware. 100 or 300 a minute?' })],
+      [stale, JSON.stringify({ session_id: 'stale', cwd: '/work/web-app', last_assistant_message: 'Shipped the page. Deploy it, OK?' })],
+      [busy, JSON.stringify({ session_id: 'busy', cwd: '/work/docs-site', last_assistant_message: 'Fixed the links. Publish, OK?' })],
+    ]),
+    mtime: 1,
+    hasTasks: true,
+    reply: RATE_LIMIT_REPLY,
+  }
+  const clock = engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/persona_framework', surface: 'desktop', isInteractive: true })
+  await clock.advance(5000)
+  const text = world.files.get(FILE) ?? ''
+  expect(text).toContain('## api-gateway\n')
+  expect(text).toContain('## web-app\n')
+  // Another open session took this one a minute ago and may still be on it.
+  expect(text).not.toContain('## docs-site')
+  expect(takenOf(world)).toEqual([busy])
+})
+
+test('a turn already on the board whose file could not be deleted is not summed up again', async ($, on) => {
+  const ours = `${INBOX}/codex-turn-1792216380-1.json`
+  let isLocked = true
+  const world: World = {
+    files: new Map([
+      [FILE, '# Progress\n'],
+      [ours, JSON.stringify({ session_id: 'ours', cwd: '/work/api-gateway', last_assistant_message: 'Added the middleware. 100 or 300 a minute?' })],
+    ]),
+    mtime: 1,
+    hasTasks: true,
+    asked: [],
+    reply: RATE_LIMIT_REPLY,
+    isRemoveRefused: path => isLocked && path.endsWith('.taking'),
+  }
+  const clock = engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/persona_framework', surface: 'desktop', isInteractive: true })
+  await clock.advance(5000)
+  expect(world.files.get(FILE) ?? '').toContain('## api-gateway\n')
+  expect(takenOf(world)).toHaveLength(1)
+
+  isLocked = false
+  world.mtime += 1
+  await clock.advance(5000)
+  expect(takenOf(world)).toEqual([])
+  expect(world.asked?.filter(prompt => prompt.includes('Added the middleware'))).toHaveLength(1)
+})
+
+test('an inbox file that cannot be read stays taken for a later look', async ($, on) => {
+  const ours = `${INBOX}/codex-turn-1792216380-1.json`
+  const world: World = {
+    files: new Map([
+      [FILE, '# Progress\n'],
+      [ours, JSON.stringify({ session_id: 'ours', cwd: '/work/api-gateway', last_assistant_message: 'Added the middleware. 100 or 300 a minute?' })],
+    ]),
+    mtime: 1,
+    hasTasks: true,
+    reply: RATE_LIMIT_REPLY,
+  }
+  const clock = engineBeneath(on, world)
+  // The taken file refuses to be read this time.
+  world.unreadable = new Set([`${ours}.2be48af2-${(Date.parse('2026-10-16T12:00:00.000Z') + 5000).toString(36)}-1.taking`])
+  await $.session.start({ cwd: '/work/persona_framework', surface: 'desktop', isInteractive: true })
+  await clock.advance(5000)
+  expect(world.files.get(FILE)).toBe('# Progress\n')
+  expect(takenOf(world)).toHaveLength(1)
+
+  world.unreadable = new Set()
+  await clock.advance(15 * 60 * 1000)
+  world.mtime += 1
+  await clock.advance(5000)
+  expect(world.files.get(FILE) ?? '').toContain('## api-gateway\n')
+  expect(takenOf(world)).toEqual([])
+})
+
+test('a file left taken past its last try is kept as a .failed file, not deleted', async ($, on) => {
+  const at = Date.parse('2026-10-16T12:00:00.000Z')
+  const name = 'codex-turn-1792216380-1.json'
+  const left = `${INBOX}/${name}.deadbeef-${(at - 16 * 60 * 1000).toString(36)}-8.taking`
+  const body = JSON.stringify({ session_id: 'ours', cwd: '/work/api-gateway', last_assistant_message: 'Added the middleware. 100 or 300 a minute?' })
+  const world: World = { files: new Map([[FILE, '# Progress\n'], [left, body]]), mtime: 1, hasTasks: true, reply: RATE_LIMIT_REPLY }
+  const clock = engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/persona_framework', surface: 'desktop', isInteractive: true })
+  await clock.advance(5000)
+  expect(world.files.get(`${INBOX}/${name}.failed`)).toBe(body)
+  expect(takenOf(world)).toEqual([])
+  expect(world.files.get(FILE)).toBe('# Progress\n')
+})
+
+test('on its last try, a turn the model gives no summary for keeps the block’s open steps', async ($, on) => {
+  const at = Date.parse('2026-10-16T12:00:00.000Z')
+  const world: World = {
+    files: new Map([
+      [FILE, '# Progress\n'],
+      [`${INBOX}/codex-turn-1792216380-1.json`, JSON.stringify({ session_id: 'ours', cwd: '/work/web-app', prompt: 'Ship the page', last_assistant_message: 'Shipped the page.' })],
+    ]),
+    mtime: 1,
+    hasTasks: true,
+    hang: prompt => prompt.includes('SILENT'),
+    reply: prompt => (prompt.includes('TITLE:') ? 'TITLE: Ship the page\nCONTEXT: -\nDONE: Shipped the page\nNEXT: Watch the errors\nASK: -' : undefined),
+  }
+  const clock = engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/persona_framework', surface: 'desktop', isInteractive: true })
+  await clock.advance(5000)
+  expect(world.files.get(FILE) ?? '').toContain('- [ ] Watch the errors\n')
+
+  // Its seventh try was left; the eighth is the last, and the model says nothing.
+  const left = `${INBOX}/codex-turn-1792216390-2.json.deadbeef-${(at - 16 * 60 * 1000).toString(36)}-7.taking`
+  world.files.set(left, JSON.stringify({ session_id: 'ours', cwd: '/work/web-app', last_assistant_message: 'SILENT tidied the logs.' }))
+  world.mtime += 1
+  await clock.advance(5000)
+  await clock.advance(30000)
+  const text = world.files.get(FILE) ?? ''
+  expect(text).toContain('- [ ] Watch the errors\n')
+  expect(text).toContain('agent=codex state=waiting')
+  expect(takenOf(world)).toEqual([])
+})
+
+test('a turn taken again after its session ended does not bring the session back', async ($, on) => {
+  const at = Date.parse('2026-10-16T12:00:00.000Z')
+  const world: World = {
+    files: new Map([
+      [FILE, '# Progress\n'],
+      [`${INBOX}/codex-turn-1792216380-1.json`, JSON.stringify({ session_id: 'ours', cwd: '/work/api-gateway', last_assistant_message: 'Added the middleware. 100 or 300 a minute?' })],
+      [`${INBOX}/codex-end-1792216400-3.json`, JSON.stringify({ session_id: 'ours', cwd: '/work/api-gateway' })],
+    ]),
+    mtime: 1,
+    hasTasks: true,
+    asked: [],
+    reply: RATE_LIMIT_REPLY,
+  }
+  const clock = engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/persona_framework', surface: 'desktop', isInteractive: true })
+  await clock.advance(5000)
+  expect(world.files.get(FILE) ?? '').toContain('agent=codex state=ended')
+
+  // Turns from before the end, one in the same second, which a look failed on and left taken.
+  const claimed = (time: number, pid: number): string => `${INBOX}/codex-turn-${time}-${pid}.json.deadbeef-${(at - 16 * 60 * 1000).toString(36)}-1.taking`
+  world.files.set(claimed(1792216390, 2), JSON.stringify({ session_id: 'ours', cwd: '/work/api-gateway', last_assistant_message: 'Wrote the tests. Ship it, OK?' }))
+  world.files.set(claimed(1792216400, 4), JSON.stringify({ session_id: 'ours', cwd: '/work/api-gateway', last_assistant_message: 'Wrote the tests. Ship it, OK?' }))
+  world.mtime += 1
+  await clock.advance(5000)
+  const text = world.files.get(FILE) ?? ''
+  expect(text).toContain('agent=codex state=ended')
+  expect(world.asked?.some(prompt => prompt.includes('Wrote the tests'))).toBe(false)
+  expect(takenOf(world)).toEqual([])
 })
 
 test('a burst of turns from one agent session is summed up from its last two turns only', async ($, on) => {
@@ -1664,7 +1936,7 @@ test('connecting writes the board script and each installed agent’s board comm
   await $.session.start({ cwd: '/work/persona_framework', surface: 'terminal', isInteractive: true })
   const board = world.files.get('/home/me/.claude/agent-board.mjs') ?? ''
   expect(board.split('\n')[0]).toBe('globalThis.AGENT_BOARD = {"path":"/home/me/.claude/progress.md","lang":"zh-TW"}')
-  expect(world.files.get('/home/me/.gemini/commands/board.toml')).toContain('!{node "/home/me/.claude/agent-board.mjs"}')
+  expect(world.files.get('/home/me/.gemini/commands/board.toml')).toContain('!{node "/home/me/.claude/agent-board.mjs" --serve}')
   expect(world.files.get('/home/me/.agents/skills/agent-board/SKILL.md')).toContain('node "/home/me/.claude/agent-board.mjs"')
   expect(world.files.has('/home/me/.config/opencode/commands/board.md')).toBe(false)
 
@@ -1673,7 +1945,7 @@ test('connecting writes the board script and each installed agent’s board comm
   expect(again.text).toContain('node "/home/me/.claude/agent-board.mjs" --watch')
   await $.command.run({ ...TIDY, args: 'connect remove' })
   for (const file of ['/home/me/.claude/agent-board.mjs', '/home/me/.gemini/commands/board.toml', '/home/me/.agents/skills/agent-board/SKILL.md']) {
-    expect(world.ran.some(argv => argv.includes(file))).toBe(true)
+    expect(world.ran?.some(argv => argv.includes(file))).toBe(true)
   }
   expect(world.ran).toContainEqual(['rmdir', '/home/me/.agents/skills/agent-board'])
 })
@@ -1764,7 +2036,7 @@ test('an OpenClaw older than 2026.4.24 is not hooked in, what an earlier connect
   const connected = await $.command.run({ ...TIDY, args: 'connect' })
   expect(connected.text).toContain('OpenClaw 2026.3.8 太舊，要 2026.4.24 以上才接得上，所以沒有接它。更新之後再跑 /progress connect。')
   // Two files, one note, and no "none found" above it.
-  expect(connected.text.split('OpenClaw 2026.3.8').length).toBe(2)
+  expect(connected.text?.split('OpenClaw 2026.3.8').length).toBe(2)
   expect(connected.text).not.toContain('OpenClaw 的設定檔讀不懂')
   expect(connected.text).not.toContain('沒找到可以接的 agent')
   expect(world.files.get('/home/me/.openclaw/openclaw.json')).toBe(healed)

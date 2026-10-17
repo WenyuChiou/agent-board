@@ -184,7 +184,7 @@ export const boardItems = (view: View, pending: readonly PendingTurn[]): BoardIt
 }
 
 // What each key does on the selected line, so the footer lists only keys that do something.
-const answersOf = (ask: WaitingItem, s: Strings): string[] =>
+export const answersOf = (ask: WaitingItem, s: Strings): string[] =>
   ask.kind === 'confirm' ? [s.yesAnswer, s.noAnswer] : ask.kind === 'choose' ? ask.options.slice(0, 9) : []
 
 // The state with the chosen line's key set, so a key pressed later acts on the line that was
@@ -213,6 +213,8 @@ export const boardKey = (state: BoardState, key: string, items: readonly BoardIt
     const { ask } = item
     if (key === 'x' && ask.step !== null) return { state, action: { type: 'tick', ref: ask.step } }
     if (key === 'c' && (ask.command ?? ask.link) !== null) return { state, action: { type: 'copy', text: plain((ask.command ?? ask.link) as string) } }
+    // A Claude Code session's question has nothing else to copy: its id finds the session.
+    if (key === 'c' && ask.sessionId !== null) return { state, action: { type: 'copy', text: plain(ask.sessionId) } }
     const answers = answersOf(ask, s)
     const pick = ask.kind === 'confirm' ? ['y', 'n'].indexOf(key) : /^[1-9]$/.test(key) ? Number(key) - 1 : -1
     const answer = pick >= 0 ? answers[pick] : undefined
@@ -236,7 +238,7 @@ const keysFor = (item: BoardItem | undefined, s: Strings): string[] => {
     return [
       ...(ask.step !== null ? [s.boardKeyTick] : []),
       ...(ask.kind === 'confirm' ? [s.boardKeyConfirm] : answers.length > 0 ? [s.boardKeyOptions(answers.length)] : []),
-      ...((ask.command ?? ask.link) !== null ? [s.boardKeyCopyCommand] : []),
+      ...((ask.command ?? ask.link) !== null ? [s.boardKeyCopyCommand] : ask.sessionId !== null ? [s.boardKeyCopyId] : []),
     ]
   }
   if (item.type === 'row') {
@@ -279,7 +281,7 @@ export const boardScreen = (view: View, pending: readonly PendingTurn[], state: 
         if (ask.note) lines.push(`    ${fit(ask.note, o.width - 6)}`)
         answersOf(ask, s).forEach((answer, n) => lines.push(`    ${c('accent', ask.kind === 'confirm' ? (n === 0 ? 'y' : 'n') : String(n + 1))} ${fit(answer, o.width - 8)}`))
         if (ask.command !== null) lines.push(`    ${c('accent', fit(`$ ${ask.command}`, o.width - 6))}`)
-        if (ask.where === 'other') lines.push(`    ${c('quiet', fit(s.replyElsewhere(ask.project, ask.agent), o.width - 6))}`)
+        if (ask.where === 'other') lines.push(`    ${c('quiet', fit(s.replyElsewhere(ask.task, ask.session, ask.agent), o.width - 6))}`)
       }
       return
     }

@@ -25,12 +25,12 @@ const esc = (text: string): string =>
   text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;')
 
 // Each colour role as a CSS variable, light by default and dark under the system's choice.
-const vars = (palette: Palette): string =>
+export const vars = (palette: Palette): string =>
   Object.entries(palette)
     .map(([key, value]) => `--${key}:${value}`)
     .join(';')
 
-const htmlLang = (s: Strings): string => (s.lang === 'en' ? 'en' : s.lang === 'zh-CN' ? 'zh-Hans' : 'zh-Hant')
+export const htmlLang = (s: Strings): string => (s.lang === 'en' ? 'en' : s.lang === 'zh-CN' ? 'zh-Hans' : 'zh-Hant')
 
 const steps = (list: readonly ViewStep[]): string =>
   `<ol class="steps">${list
@@ -61,7 +61,7 @@ const waitingItem = (item: WaitingItem, s: Strings): string =>
   // A backticked word in another kind of question is a name, not something to run.
   (item.command === null || item.kind !== 'do' ? '' : `<code>${esc(item.command)}</code>`) +
   (item.link === null ? '' : `<a href="${esc(item.link)}">${esc(s.openLink)}</a>`) +
-  `<div class="quiet">${esc(item.where === 'manual' ? '' : s.replyElsewhere(item.project, item.agent))}${item.when === '' ? '' : ` · ${esc(item.when)}`}</div></div>`
+  `<div class="quiet">${esc(item.where === 'manual' ? '' : s.replyElsewhere(item.task, item.session, item.agent))}${item.when === '' ? '' : ` · ${esc(item.when)}`}</div></div>`
 
 const row = (it: TaskRow, s: Strings, showProject: boolean): string => {
   const meta = [it.due === null ? '' : it.due.date, showProject ? it.project : '', it.agent, it.status, it.pr, it.when].filter(

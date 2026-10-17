@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.20.1 — 2026-10-17
 
 - **Terminal history survives read and write failures.** Only `ENOENT` is treated
   as a missing file. Unreadable progress/archive/journal files abort the action;
@@ -14,6 +14,266 @@
   survives retry without a duplicate entry", "an archive entry with a longer last
   step does not suppress a distinct shorter task", and "replacing board and history
   retains their POSIX permission bits despite a restrictive umask".
+- **The board's page says the same.** A tick, archive, tidy or pasted block on
+  the page that meets a file it cannot read or write is answered with that file
+  and its error, shown as a failure, instead of a bare server error; a board it
+  cannot read is named the same way instead of being shown as offline. A phone
+  opened with `--lan` is told the file's name only, not its folder. Its archive
+  and tidy, like the terminal board's archive, skip an entry the archive already
+  holds. `--html` names `progress.html` when it cannot write it. Tests: "a press
+  on the page that cannot write its history is answered with that file and its
+  error, and progress.md is left as it was", and "a board the page cannot read is
+  named there with that file and its error, rather than shown as offline, and a
+  phone is told the file name only".
+
+## 0.20.0 — 2026-10-17
+
+- **The board's page can be opened from a phone on the same Wi-Fi.**
+  `node ~/.claude/agent-board.mjs --serve --lan` also opens the page at a
+  private address of the computer (192.168.x.x, 10.x.x.x or
+  172.16-31.x.x, never a public one) and prints that address with a QR
+  code drawn in the terminal, which a phone's camera opens; `--lan
+  <address>` picks one of the computer's addresses. The QR code is made by
+  the board script itself, with no new dependency. That page has a key of
+  its own, answers only requests sent to its own address, and closes after
+  10 minutes without a request from the network, or with the computer's
+  page. It is plain HTTP on the network, so a reply to an agent, which
+  runs a program on the computer, is offered there only as a copy and
+  refused if sent; ticking, archiving, pasting a block and closing work as
+  on the computer. Neither the command to resume a Claude session nor the
+  path of `progress.md` is sent there, since both name the account's
+  folders. An address given to `--lan` that is not one of the computer's
+  own is named as such. "The board's page" in the README and the guide say how,
+  and why to keep it to a network you trust. Tests: "a QR code reads back
+  as the text it was made from: sized to fit it, with its three corner
+  squares, and none past version 10", "as text, a QR code puts two rows on
+  a line inside its quiet zone: black on white with colour, light on dark
+  without", "the page goes on the local network at a private address of
+  this computer, a real adapter's first, never a public one", "on the
+  local network the page answers only its own address, with its own
+  token, and says it closes sooner", "from the local network a reply to
+  an agent is offered as a copy, and refused if sent, since it would run
+  a program on the computer", "on the local network every agent's task
+  shows as on the computer, except that a reply that would run grok or
+  codex is a copy and no resume command is sent", and in
+  `tests/board.test.mjs` "with --lan the page also opens
+  on the local network, with a token of its own, where a phone can tick
+  but not send to an agent", "--serve --lan prints the page's network
+  address and a QR code of it, and a second run gives the same address".
+
+## 0.19.4 — 2026-10-17
+
+- **The page's address, key and all, is no longer kept beside
+  `progress.md`.** `--serve` kept it in `progress-serve.json` in the same
+  folder, and that folder is often a git repository that syncs itself. It
+  is now kept in a folder only your account can use: the folder for running
+  programs (`XDG_RUNTIME_DIR`) when it is yours alone, else
+  `~/.cache/agent-board` (the temp folder on Windows), in a file named for
+  the `progress.md` it serves, readable by you only. The file 0.19.0 left
+  beside `progress.md` is removed, and its page asked to close, the next
+  time `--serve` runs. Tests: in `tests/board.test.mjs`, "the page's address
+  stays out of progress.md's folder, and a file left by a page that is gone
+  does not keep the next one from starting".
+- **Two `--serve` at the same moment open one page, not two.** A new page
+  writes its address file only when there is none; when another page wrote
+  first, the new one stops and its `--serve` prints the other's address. A
+  file left by a page that is gone (it does not answer, also after five
+  more seconds when it still runs) is removed first, and so is one cut
+  short by a crash or holding no page address, once it is ten seconds old.
+  The same `progress.md` named two ways (`C:/x` and `C:\x`) has one page
+  too. Tests: in `tests/board.test.mjs`, "two --serve run at the same moment
+  open one page between them, and a server started while it runs stops at
+  once", "an address file cut short by a crash is cleared once it is old,
+  and the next --serve starts a page", "the same progress.md named two ways
+  brings back the same page".
+- **Archiving now dates a finished hand-kept task on the right day.** The
+  page's **Archive now** and `/progress tidy` put a task the pane had seen
+  done less than a day ago under the day before. It now goes under the day
+  it was seen done, or today when it never was. Tests: "archived at the
+  person's word, a finished hand-kept task carries the day it was seen
+  done, or today when it never was", "/progress tidy archives a finished
+  hand-kept task under the day it was done, not the day before", and in
+  `tests/board.test.mjs` "ticking and tidying from the page write
+  progress.md the way the pane does, and a pasted block is merged into it",
+  which now checks the day.
+- `tsc -p .` reports no errors again. Seven had built up in the tests and in
+  one engine call over earlier releases; the fixes change only types, not
+  what runs.
+
+## 0.19.3 — 2026-10-17
+
+The reply hint names the session that asked (#49).
+
+- **A question from another session says which session to answer in.** The hint under
+  it said "Reply in the <project> session", but several sessions often share one folder,
+  and the desktop app lists sessions by title, so the person could see the question and
+  not find where to answer it. It now names the task and the session's short ID, plus
+  the agent when it is not Claude: `Reply in the "Rate-limit the public endpoints"
+  session (7f3c19ab, codex). Can't reply from here.` The same words are in the pane, the
+  terminal board, `progress.html` and the board page, in all three languages.
+- **A Claude Code session's question offers its ID to copy.** The pane's item has a
+  **Copy session ID** button, and `c` on the terminal board copies it, so the person can
+  find that session in the session list or reopen it with `claude --resume`. The full ID
+  comes from the block's `resume=`; a block without one gives its short ID, and only when
+  that is a plain ID (6 to 64 letters, digits and dashes), since anyone can write the
+  file and the clipboard must not get a command dressed as an ID. Another agent's ID
+  finds no Claude Code session, so its question offers none. `docs/FORMAT.md` says so.
+- Tests: "an item from another session in the same folder names that session’s task
+  and id", "the terminal board, progress.html and the board page name the session that
+  asked, and c copies a Claude Code session’s id", "a Claude Code block with no resume id
+  offers its block id to copy only when it is a plain id", and "another agent’s question
+  is answered there, but its command can be copied and its link opened from here"
+  (changed).
+
+## 0.19.2 — 2026-10-17
+
+Waiting on you lists only questions (#48).
+
+- **A session that asked nothing is no longer listed as waiting on you.** Every turn's
+  end writes `state=waiting`, and a block in that state with no `[?]` step got a "waiting
+  on your reply" item in Waiting on you with nothing to answer: a Claude Code session
+  that had just finished a turn, a Codex session waiting on CI (`[>]`), or the older of
+  two sessions on one pull request, which then looked like the same work listed twice.
+  Such a block now stays with the work in progress, showing its next step, its running
+  step or what it is doing, or under Due soon when it has a date close by. Waiting on you
+  holds `[?]` steps (and, on the terminal board and the board page, inbox turns not read
+  yet that end on a question), the same in the pane, the terminal board, `progress.html`
+  and the board page. With it go the desktop notification "<agent> asks: waiting on your
+  reply" that every such turn's end sent, and its place in the status line's waiting
+  count. `docs/FORMAT.md` says so for `state=waiting`. Tests: "a turn that ends with no
+  question, or waits only on CI, is not listed as waiting on the person", "the view sorts
+  work into this session, waiting on you, due soon, other and done".
+
+## 0.19.1 — 2026-10-17
+
+Another agent's turn is no longer lost on its way to the board (#40).
+
+- **An inbox file stays until its turn is on the board.** A session took a file from
+  `progress-inbox/` by renaming it, recorded it as read, and deleted it after summing it
+  up, whether or not the block reached the board: a `progress.md` that could not be
+  written lost the turn without a word. The file is now deleted only once the block is
+  read back from the board, or the turn held nothing to track; otherwise it stays taken
+  and a later look tries again. Test: "an inbox turn the board will not take stays in the
+  inbox and reaches the board on a later look".
+- **No summary from the model no longer empties a block.** When the model gave no answer
+  and the reply asks nothing, an empty summary replaced the block's open steps, and could
+  mark it done. Such a turn now waits for a later look, and on its last try it leaves the
+  steps as they are. A reply that ends on a question still gets its step at once, as
+  before. Tests: "a reply that asks nothing, with no summary from the model, is not
+  dropped from the board but tried again", "on its last try, a turn the model gives no
+  summary for keeps the block’s open steps", "a model call that never answers gives up
+  after 30 seconds, and later inbox files are still read".
+- **A file a closed session left taken is taken again, not deleted unread.** A taken
+  file's name now carries when it was taken and the attempt
+  (`<name>.<session>-<time>-<attempt>.taking`). One left for 15 minutes is taken again
+  by any open session, and after 8 attempts it is kept as `<name>.failed` rather than
+  deleted; why it failed is kept in the store (`inboxFailed`). A name an earlier version
+  gave is taken again after a day, the wait the old sweep gave it. A left file does not
+  change the folder, so the inbox is also listed once a minute, and files taken again
+  count toward the 20 a look takes. A file another look took again while this one's
+  queue waited is left to that look. Tests: "a file a closed session left taken is taken
+  again rather than swept away unread", "a file left taken past its last try is kept as a
+  .failed file, not deleted", "a taken inbox file is left to its session for a while, then
+  taken again, and set aside after its last try", "the record of why inbox files are
+  still there keeps the newest notes only".
+- **A turn taken again changes nothing once a later one is on the board.** Each agent
+  session's block remembers where the newest inbox file folded in falls (by the time in
+  its name, and in the same second a session's end after its turn); an older turn taken
+  again (after a later turn, or the session's end, got through) leaves the block as it
+  is, without writing it again, so an ended session is not brought back. Test: "a turn
+  taken again after its session ended does not bring the session back".
+- **A file that cannot be read stays for a later look**, and a turn already on the board
+  whose file could not be deleted is deleted at the next look without being summed up
+  again. Tests: "an inbox file that cannot be read stays taken for a later look", "a turn
+  already on the board whose file could not be deleted is not summed up again".
+- Known limit: a session still running an earlier version sweeps taken files older than
+  a day, as before, until it restarts.
+
+## 0.19.0 — 2026-10-17
+
+- **A board page you can click, for the agents that are not Claude Code.**
+  `node ~/.claude/agent-board.mjs --serve` prints the board, then starts its
+  page on 127.0.0.1 in the background (or brings back the one already open)
+  and gives its address on the last line; `--no-open` only prints it.
+  `/board` in Gemini CLI and OpenCode and the `agent-board` skill (Codex, Grok
+  Build, OpenClaw, Hermes Agent and the rest) now run it, so asking for the
+  board opens the page. On it: tick the next step of a hand-kept task, archive
+  a task, **Archive now**, copy an answer, a resume command or a command. Its
+  writes are the terminal board's (a temp file, read back, made again when
+  another session wrote meanwhile), so the page changes `progress.md` the way
+  the pane does. A tick goes only to the step the page showed: if that step
+  was done elsewhere meanwhile, the press is refused. Run in a browser on a synthetic `progress.md`: a tick and
+  **Archive now**, seen in the file, the journal and the archive. Tests: "the
+  page offers a send only into a Grok or Codex session that has closed; an
+  open one, Claude and a hand-kept task each get their own way", "a press on
+  the page is worked out from the file as it is now: a line that is gone is
+  refused, and a reply goes with its question", and in `tests/board.test.mjs`
+  "ticking and tidying from the page write progress.md the way the pane does,
+  and a pasted block is merged into it", "--serve starts the page in the
+  background once, and the next --serve brings back the same page".
+- **Answer a Grok Build or Codex session from the page.** Only one that has
+  ended (`state=ended`), so the page is its only writer; a session still open
+  is answered in its own window. Only by the session's own id, a UUID, so a
+  reply never goes to the newest session of a folder or to one with a
+  similar name, and only in the session's own folder (`dir=`): Grok Build
+  runs `grok -r <id> --single=<reply>`, Codex runs `codex exec resume <id> -`
+  with the reply on stdin (on Windows its `.cmd` needs the shell, and only
+  constants and the checked id go through it). The program is looked for in the PATH folders
+  only, never in the session's folder. A reply is sent in the background, one
+  at a time per session: what the agent answered shows on the page when it
+  comes, named with the agent and the task, the page does not close while a
+  reply is on its way, and one that runs past 10 minutes is stopped with
+  everything it started. A page drawn
+  when another session held that line does not send into the new one.
+  Another agent's block now keeps that agent's own session id as `resume=`.
+  Tests: "a send runs the agent with constants and a checked id only, and
+  Codex on Windows takes the reply on stdin", "an agent's block keeps that
+  agent's own session id as resume=, so the page can answer into it", and in
+  `tests/board.test.mjs`, through a stand-in for Grok Build, "a reply goes
+  into a closed Grok session once, in its own folder, and the page waits for
+  its answer before it closes".
+- **Paste a web chat's block (Muse, dot) into the page.** The page offers the
+  chat prompt of `docs/REMOTE_REPORTERS.md` to copy, and takes the block the
+  chat prints, fence and all: checked the way `validate.py --block` checks
+  one, put under its `## project`, replacing only the same agent's closed
+  block, never Claude's or another agent's, with `updated=` set to the time of
+  the paste. Its marker is written again from the fields that were checked,
+  so a pasted block cannot name a session id or a folder for the page to
+  answer into; `merge.py` drops `resume=` and `dir=` from a remote fragment
+  for the same reason (check "8j a fragment never names a session id or
+  folder for the board page to answer into" in
+  `scripts/remote-reporter/test_pipeline.py`). A title that opens a
+  comment is refused too, as `validate.py` refuses it. Tests: "a block pasted from a web chat joins its project, then
+  replaces its own earlier copy, with the time it was pasted", "a pasted block
+  never takes the place of Claude’s, another agent’s or an unclosed block, and
+  one that would hide its own end is refused".
+- **Only the page can use the page.** It listens on 127.0.0.1 only, with a
+  random token in its address (the page sends it as a header). A request
+  naming another host is refused, so a name rebound to 127.0.0.1 cannot read
+  it; a write must be JSON, from the page itself, at most 64 KB. The page's
+  script runs by nonce under a content security policy, sets every word from
+  the file as text, opens only `https` links and never passes its address on.
+  On Windows the board starts the browser and the clipboard tool by their full
+  path, from its own folder, so a `cmd.exe` or `clip.exe` in a cloned
+  repository is never run in their place (checked by hand with a planted one).
+  It closes after 30 minutes nobody looks at it, or with its button. Tests:
+  "the page server answers only its own host, with its token, and takes
+  writes only as JSON from the page", "the page runs only its own script, and
+  the chat prompt in it cannot close the script it sits in", and in
+  `tests/board.test.mjs` "the page answers only with its token and its own
+  host, and closing it stops the server".
+- **On a phone.** The page fits a phone's width (16px text boxes, 44px buttons
+  on touch screens), but it is served on the computer only. From a phone,
+  reach a Claude Code session through Remote Control. Opening the page from a
+  phone over your own network is not offered yet.
+- **Muse Code gets the board skill.** Its config folder now counts as a reason
+  to write `~/.agents/skills/agent-board/SKILL.md`, which Muse Code reads; not
+  run on Muse Code itself. Test: "each agent gets a board command in the form
+  it reads, and a missing reporter never makes a hook exit 2".
+- **A turn that showed the board and the page's address is still only a look
+  at the board,** not work, also when the model puts the address inside the
+  code block it shows the board in. Test: "a reply that ends with the board
+  page’s address is still only a look at the board".
 
 ## 0.18.1 — 2026-10-17
 

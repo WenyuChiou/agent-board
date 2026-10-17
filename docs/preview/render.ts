@@ -3,7 +3,7 @@
 //   bun docs/preview/render.ts          (run `claude --plugin-dir .` once first, for the JSX setup)
 // Writes docs/images/{tour,hero,flow}-<lang>-<theme>.svg, and docs/preview/out/dashboard-<lang>.html
 // for docs/preview/png.mjs, which takes the progress.html screenshots and the social preview.
-import { mkdirSync, writeFileSync } from 'fs'
+import { mkdirSync, readdirSync, writeFileSync } from 'fs'
 import { join } from 'path'
 import { upsertAutoBlock } from '../../hooks/blocks'
 import { dashboardHtml } from '../../hooks/dashboard'
@@ -16,7 +16,8 @@ import { STRINGS } from '../../hooks/strings'
 import { buildView } from '../../hooks/view'
 import { NOW, SAMPLES, SESSION, MIN } from './samples'
 import { AGENT_ICONS, TESTED_ICONS } from './icons'
-import { CELL, LINE, MONO, gridSvg, keyBox, layout, rowOf, toNode } from './terminal'
+import type { AgentIcon } from './icons'
+import { CELL, LINE, gridSvg, keyBox, layout, rowOf, toNode } from './terminal'
 import type { Theme } from './terminal'
 
 // The JSX in pane.tsx compiles to h(type, props, ...children).
@@ -40,7 +41,23 @@ const TERMINAL: Record<Mode, { ground: string; ink: string; edge: string; bar: s
   dark: { ground: '#1e2022', ink: '#e6e4dc', edge: '#34373a', bar: '#26292b', palette: DARK },
   light: { ground: '#fbfaf5', ink: '#2b2b2b', edge: '#d9d7cc', bar: '#f1efe7', palette: LIGHT },
 }
-const SANS = "-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans TC', 'Noto Sans SC', 'PingFang TC', 'Microsoft JhengHei', 'Microsoft YaHei', sans-serif"
+// The fonts, which fonts.py puts into each SVG (GitHub shows it as an image, and an image may
+// not fetch a font): Inter for the words, JetBrains Mono for the terminal, and Noto Sans for
+// Chinese, the image's own script first. JetBrains Mono is 0.6 em wide, so at 14 px a letter
+// fills one CELL exactly. The system fonts after them catch a sign none of these has, and stand
+// in when the fonts inside are blocked (raw.githubusercontent.com's policy blocks them when the
+// SVG is opened by itself): the Latin ones come first, since a Chinese font's letters are not
+// 0.6 em and would not fit the terminal's cells.
+const CJK: Record<Lang, { inside: string; system: string }> = {
+  en: { inside: "'Noto Sans TC', 'Noto Sans SC'", system: "'PingFang TC', 'Microsoft JhengHei'" },
+  'zh-TW': { inside: "'Noto Sans TC', 'Noto Sans SC'", system: "'PingFang TC', 'Microsoft JhengHei'" },
+  'zh-CN': { inside: "'Noto Sans SC', 'Noto Sans TC'", system: "'PingFang SC', 'Microsoft YaHei'" },
+}
+const sansOf = (lang: Lang): string => `'Inter', ${CJK[lang].inside}, -apple-system, 'Segoe UI', ${CJK[lang].system}, sans-serif`
+const monoOf = (lang: Lang): string => `'JetBrains Mono', ${CJK[lang].inside}, ui-monospace, Menlo, Consolas, ${CJK[lang].system}, monospace`
+// A big headline is set a little tighter, with Chinese punctuation at half width (the font's
+// 'palt'), so a comma or full stop does not leave a hole the size of a letter.
+const HEADLINE = `letter-spacing="-0.02em" style="font-feature-settings: 'palt'"`
 
 const WORDS: Record<Lang, {
   flow: { heads: [string, string, string]; sources: Array<[string, string]>; outputs: Array<[string, string]>; into: [string, string, string]; file: string }
@@ -50,7 +67,7 @@ const WORDS: Record<Lang, {
     flow: {
       heads: ['Who reports', 'One file', 'Where you see it'],
       sources: [
-        ['Claude Code', 'Reports every turn by itself'],
+        ['Claude Code', 'Every turn, by itself'],
         ['Other agents', 'Codex, Gemini, OpenCode…'],
         ['You', 'Add a task by hand'],
       ],
@@ -167,7 +184,7 @@ const paneGrid = (lang: Lang, mode: Mode, frame: Frame) => {
 const PAD = 22
 const BAR = 34
 const windowWidth = WIDTH * CELL + PAD * 2
-const terminal = (mode: Mode, title: string, body: string, rows: number, x: number, y: number): string => {
+const terminal = (mode: Mode, mono: string, title: string, body: string, rows: number, x: number, y: number): string => {
   const t = TERMINAL[mode]
   const h = BAR + PAD + rows * LINE + PAD
   return `<g transform="translate(${x} ${y})">
@@ -175,8 +192,8 @@ const terminal = (mode: Mode, title: string, body: string, rows: number, x: numb
 <path d="M12 0.5h${windowWidth - 24}a11.5 11.5 0 0 1 11.5 11.5v${BAR - 12}h-${windowWidth - 1}v-${BAR - 12}a11.5 11.5 0 0 1 11.5-11.5z" fill="${t.bar}"/>
 <line x1="0.5" y1="${BAR}" x2="${windowWidth - 0.5}" y2="${BAR}" stroke="${t.edge}"/>
 <g fill="${t.palette.frame}"><circle cx="20" cy="17" r="5"/><circle cx="38" cy="17" r="5"/><circle cx="56" cy="17" r="5"/></g>
-<text x="${windowWidth / 2}" y="22" text-anchor="middle" font-family="${MONO}" font-size="12" fill="${t.palette.muted}">${esc(title)}</text>
-<g font-family="${MONO}" font-size="14" style="white-space:pre" xml:space="preserve">${body}</g>
+<text x="${windowWidth / 2}" y="22" text-anchor="middle" font-family="${mono}" font-size="12" fill="${t.palette.muted}">${esc(title)}</text>
+<g font-family="${mono}" font-size="14" style="white-space:pre" xml:space="preserve">${body}</g>
 </g>`
 }
 
@@ -197,25 +214,40 @@ const brandGround = (w: number, h: number): string =>
 // The board mark and the name beside it.
 const brandMark = (x: number, y: number, size = 34, hasName = true): string => {
   const k = size / 34
-  const name = `<text x="${x + size + 12}" y="${y + size * 0.74}" font-family="${SANS}" font-size="${Math.round(size * 0.72)}" font-weight="700" fill="${BRAND.ink}" letter-spacing="0.3">Agent Board</text>`
+  const name = `<text x="${x + size + 12}" y="${y + size * 0.74}" font-size="${Math.round(size * 0.72)}" font-weight="700" fill="${BRAND.ink}">Agent Board</text>`
   return `<g transform="translate(${x} ${y}) scale(${k})"><rect width="34" height="34" rx="9" fill="${BRAND.accent}"/><rect x="8" y="9" width="18" height="3.5" rx="1.75" fill="#0c1116"/><rect x="8" y="15.5" width="12" height="3.5" rx="1.75" fill="#0c1116"/><circle cx="23" cy="22" r="3.6" fill="${DARK.waiting}"/></g>${hasName ? name : ''}`
 }
+
+// The logo takes seven tenths of its tile: smaller, a logo with thin lines (OpenAI's) or fine
+// detail (Nous Research's) blurs at the table's 24 px.
+const GLYPH = 0.7
+const num = (value: number): string => String(Math.round(value * 100) / 100)
+
+// An agent's white mark, centred in a tile `size` square at x, y: its logo, else its initial.
+const glyph = (icon: AgentIcon, x: number, y: number, size: number): string => {
+  if (icon.paths === undefined) {
+    return `<text x="${num(x + size / 2)}" y="${num(y + size * 0.66)}" text-anchor="middle" font-size="${Math.round(size * 0.46)}" font-weight="700" fill="#fff">${esc(icon.letter ?? '')}</text>`
+  }
+  const g = size * GLYPH
+  const rule = icon.isEvenOdd === true ? ' fill-rule="evenodd"' : ''
+  return `<g transform="translate(${num(x + (size - g) / 2)} ${num(y + (size - g) / 2)}) scale(${Math.round((g / 24) * 10000) / 10000})" fill="#fff"${rule}>${icon.paths.map(d => `<path d="${d}"/>`).join('')}</g>`
+}
+
+// A near-black tile gets a faint rim, or it sinks into a dark page; a coloured one needs none.
+const isDark = (tile: string): boolean => parseInt(tile.slice(1, 3), 16) + parseInt(tile.slice(3, 5), 16) + parseInt(tile.slice(5, 7), 16) < 120
 
 // An agent's tile, `size` square, from its name; nothing for a name without one.
 const iconTile = (name: string, x: number, y: number, size: number): string => {
   const icon = AGENT_ICONS.find(one => one.name === name)
   if (icon === undefined) return ''
-  const k = size / 48
-  const mark =
-    icon.path !== undefined
-      ? `<path transform="translate(${x + 12 * k} ${y + 12 * k}) scale(${k})" fill="#fff" d="${icon.path}"/>`
-      : `<text x="${x + size / 2}" y="${y + size * 0.66}" text-anchor="middle" font-family="${SANS}" font-size="${Math.round(size * 0.46)}" font-weight="700" fill="#fff">${esc(icon.letter ?? '')}</text>`
-  return `<rect x="${x + 0.5}" y="${y + 0.5}" width="${size - 1}" height="${size - 1}" rx="${size * 0.23}" fill="${icon.tile}" stroke="#fff" stroke-opacity="0.2"/>${mark}`
+  const rim = isDark(icon.tile) ? `<rect x="${x + 0.5}" y="${y + 0.5}" width="${size - 1}" height="${size - 1}" rx="${size * 0.23 - 0.5}" fill="none" stroke="#fff" stroke-opacity="0.22"/>` : ''
+  return `<rect x="${x}" y="${y}" width="${size}" height="${size}" rx="${size * 0.23}" fill="${icon.tile}"/>${rim}${glyph(icon, x, y, size)}`
 }
 
 // How it works: who writes progress.md, and what reads it. Three numbered columns, big
 // type and few words, so it reads at the width GitHub shows it.
 const flow = (lang: Lang): string => {
+  const mono = monoOf(lang)
   const w = WORDS[lang].flow
   const page = BRAND
   const pal = DARK
@@ -232,15 +264,20 @@ const flow = (lang: Lang): string => {
   const left = { x: 40, w: 316, h: 116, gap: 152 }
   const right = { x: 904, w: 336, h: 94, gap: 112 }
   const doc = { x: 508, y: top, w: 316, h: 430 }
-  // Claude Code wears its tile; the other agents are shown by theirs instead of a list of names.
+  // Every source card has a dot and a name, then one more line: Claude Code's tile and its
+  // words, the other agents' tiles in place of a list of names, or your words.
   const others = TESTED_ICONS.filter(icon => icon.name !== 'Claude Code')
   const sources = w.sources
     .map(([title, sub], i) => {
+      const x = left.x
       const y = top + i * left.gap
-      const base = card(left.x, y, left.w, left.h, title, i === 1 ? '' : sub, dots[i] ?? pal.accent, 28)
-      if (i === 0) return `${base}<rect x="${left.x + 14}" y="${y + left.h / 2 - 29}" width="28" height="28" fill="${page.card}"/>${iconTile('Claude Code', left.x + 14, y + left.h / 2 - 29, 28)}`
-      if (i === 1) return `${base}${others.map((icon, k) => iconTile(icon.name, left.x + 48 + k * 34, y + left.h / 2 + 8, 28)).join('')}`
-      return base
+      const head = `<rect x="${x}" y="${y}" width="${left.w}" height="${left.h}" rx="14" fill="${page.card}" stroke="${page.line}" stroke-width="1.4"/>
+<circle cx="${x + 28}" cy="${y + 37}" r="7" fill="${dots[i] ?? pal.accent}"/>
+<text x="${x + 48}" y="${y + 47}" font-size="28" font-weight="700" fill="${page.ink}">${esc(title)}</text>`
+      const words = (at: number): string => `<text x="${at}" y="${y + 86}" font-size="19" fill="${page.muted}">${esc(sub)}</text>`
+      if (i === 0) return `${head}${iconTile('Claude Code', x + 48, y + 62, 32)}${words(x + 92)}`
+      if (i === 1) return `${head}${others.map((icon, k) => iconTile(icon.name, x + 48 + k * 38, y + 62, 32)).join('')}`
+      return `${head}${words(x + 48)}`
     })
     .join('\n')
   const outputs = w.outputs.map(([title, sub], i) => card(right.x, top + i * right.gap, right.w, right.h, title, sub, outDots[i] ?? pal.accent, 24)).join('\n')
@@ -252,10 +289,17 @@ const flow = (lang: Lang): string => {
     const mid = (x1 + x2) / 2
     return `<path d="M${x1} ${y1} C${mid} ${y1} ${mid} ${y2} ${x2 - 8} ${y2}" fill="none" stroke="${pal.accent}" stroke-opacity="0.55" stroke-width="2.6" marker-end="url(#head)"/>`
   }
-  const ins = w.sources.map((_, i) => arrow(left.x + left.w, top + i * left.gap + left.h / 2, doc.x, doc.y + 110 + i * 110)).join('\n')
+  // Each source's arrow lands on the block it writes in the file (the first and last line of
+  // it in FILE_LINES), which a bar in the source's colour marks. No arrow climbs, so every
+  // label sits above its arrow.
+  const lineY = (i: number): number => doc.y + 84 + i * 25
+  const blocks: Array<[number, number]> = [[1, 5], [8, 9], [11, 12]]
+  const bars = blocks
+    .map(([a, b], i) => `<rect x="${doc.x + 11}" y="${lineY(a) - 16}" width="3" height="${lineY(b) - lineY(a) + 22}" rx="1.5" fill="${dots[i] ?? pal.accent}"/>`)
+    .join('\n')
+  const ins = blocks.map(([a, b], i) => arrow(left.x + left.w, top + i * left.gap + left.h / 2, doc.x, (lineY(a) + lineY(b)) / 2 - 5)).join('\n')
   const labels = w.into
-    // Above the arrow, except the last, whose arrow climbs through that spot.
-    .map((text, i) => `<text x="${left.x + left.w + 14}" y="${top + i * left.gap + left.h / 2 + (i === w.into.length - 1 ? 30 : -14)}" font-size="17" font-weight="600" fill="${page.muted}">${esc(text)}</text>`)
+    .map((text, i) => `<text x="${left.x + left.w + 14}" y="${top + i * left.gap + left.h / 2 - 14}" font-size="17" font-weight="600" fill="${page.muted}">${esc(text)}</text>`)
     .join('\n')
   const outs = w.outputs.map((_, i) => arrow(doc.x + doc.w, doc.y + 90 + i * 84, right.x, top + i * right.gap + right.h / 2)).join('\n')
   // The column heads, numbered in reading order, over the middle of each column.
@@ -269,18 +313,19 @@ const flow = (lang: Lang): string => {
         `<text x="${x0 + 44}" y="76" font-size="24" font-weight="700" fill="${page.ink}">${esc(text)}</text>`
     })
     .join('\n')
-  return `<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}" role="img" aria-label="progress.md: ${esc(w.file)}">
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}" role="img" aria-label="progress.md: ${esc(w.file)}" font-family="${sansOf(lang)}">
 <title>progress.md</title>
 <defs>${brandDefs(W, H, [0.5, 0.45])}<marker id="head" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="5" markerHeight="5" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="${pal.accent}"/></marker></defs>
-<g clip-path="url(#edge)" font-family="${SANS}">
+<g clip-path="url(#edge)">
 ${brandGround(W, H)}
 ${heads}
 ${sources}
 ${ins}
 ${labels}
 <rect x="${doc.x}" y="${doc.y}" width="${doc.w}" height="${doc.h}" rx="16" fill="${page.card}" stroke="${pal.accent}" stroke-width="2.6"/>
-<text x="${doc.x + 24}" y="${doc.y + 44}" font-family="${MONO}" font-size="22" font-weight="700" fill="${page.ink}">progress.md</text>
-<g font-family="${MONO}" font-size="16">${fileText}</g>
+<text x="${doc.x + 24}" y="${doc.y + 44}" font-family="${mono}" font-size="22" font-weight="700" fill="${page.ink}">progress.md</text>
+${bars}
+<g font-family="${mono}" font-size="16">${fileText}</g>
 <text x="${doc.x + doc.w / 2}" y="${doc.y + doc.h + 40}" text-anchor="middle" font-size="19" fill="${page.muted}">${esc(w.file)}</text>
 ${outs}
 ${outputs}
@@ -408,6 +453,7 @@ const wrapWords = (text: string, max: number): string[] =>
   }, [])
 
 const tour = (lang: Lang): string => {
+  const mono = monoOf(lang)
   const mode: Mode = 'dark'
   const W = 1200
   const H = 675
@@ -464,7 +510,7 @@ const tour = (lang: Lang): string => {
   const head = (lines: string[], sub: string[], start: number, end: number, still = false): string => {
     const size = isCjk ? 40 : 42
     const top = 230 - (lines.length - 2) * 26
-    const big = lines.map((line, i) => `<text x="64" y="${top + i * 56}" font-size="${size}" font-weight="800" fill="${i === lines.length - 1 ? page.accent : page.ink}">${esc(line)}</text>`).join('')
+    const big = lines.map((line, i) => `<text x="64" y="${top + i * 56}" font-size="${size}" font-weight="800" ${HEADLINE} fill="${i === lines.length - 1 ? page.accent : page.ink}">${esc(line)}</text>`).join('')
     const small = sub
       .map((line, i) => `<text x="64" y="${top + lines.length * 56 + 22 + i * 34}" font-size="25" fill="${page.muted}">${esc(line)}</text>`)
       .join('')
@@ -489,8 +535,9 @@ const tour = (lang: Lang): string => {
   // Each frame has its own ground, so the one coming in covers the one going out.
   const body = (grid: typeof frame1, offset: number, start: number, end: number, still = false): string =>
     `<g class="${timed(start, end, 'swap')}"${still ? ' data-still="1"' : ''}><rect x="0" y="${BAR}" width="${windowWidth}" height="${bodyH}" fill="${grid.theme.ground}"/>${gridSvg(grid.grid.slice(offset, offset + VIS + 1), PAD, BAR + PAD, grid.theme)}</g>`
+  // A ring round some rows of the pane, with room above for the tops of Chinese letters.
   const ring = (row: number, col: number, span: number, rows: number, start: number, end: number): string =>
-    `<rect class="${timed(start, end, 'fade')}" x="${PAD + col * CELL - 6}" y="${BAR + PAD + row * LINE - 1}" width="${span * CELL + 12}" height="${rows * LINE + 2}" rx="6" fill="none" stroke="${pal.accent}" stroke-width="2.4"/>`
+    `<rect class="${timed(start, end, 'fade')}" x="${PAD + col * CELL - 6}" y="${BAR + PAD + row * LINE - 3}" width="${span * CELL + 12}" height="${rows * LINE + 5}" rx="6" fill="none" stroke="${pal.accent}" stroke-width="2.4"/>`
   const windowFrame = (m: Mode, inner: string, cls: string, still = false): string => {
     const t = TERMINAL[m]
     const h = BAR + bodyH
@@ -500,8 +547,8 @@ const tour = (lang: Lang): string => {
 <path d="M12 0.5h${windowWidth - 24}a11.5 11.5 0 0 1 11.5 11.5v${BAR - 12}h-${windowWidth - 1}v-${BAR - 12}a11.5 11.5 0 0 1 11.5-11.5z" fill="${t.bar}"/>
 <line x1="0.5" y1="${BAR}" x2="${windowWidth - 0.5}" y2="${BAR}" stroke="${t.edge}"/>
 <g fill="${t.palette.frame}"><circle cx="20" cy="17" r="5"/><circle cx="38" cy="17" r="5"/><circle cx="56" cy="17" r="5"/></g>
-<text x="${windowWidth / 2}" y="22" text-anchor="middle" font-family="${MONO}" font-size="12" fill="${t.palette.muted}">${esc(WORDS[lang].window)}</text>
-<g clip-path="url(#body)" font-family="${MONO}" font-size="14" style="white-space:pre" xml:space="preserve">${inner}</g>
+<text x="${windowWidth / 2}" y="22" text-anchor="middle" font-family="${mono}" font-size="12" fill="${t.palette.muted}">${esc(WORDS[lang].window)}</text>
+<g clip-path="url(#body)" font-family="${mono}" font-size="14" style="white-space:pre" xml:space="preserve">${inner}</g>
 </g></g>`
   }
 
@@ -540,10 +587,10 @@ const tour = (lang: Lang): string => {
     return `<g class="${timed(0.3 + i * 0.35, at.waiting[1])}">
 <rect x="${x}" y="${y}" width="480" height="78" rx="12" fill="${page.card}" stroke="${page.line}"/>
 ${iconTile(name, x + 16, y + 9, 30)}
-<text x="${x + 58}" y="${y + 30}" font-family="${MONO}" font-size="18" font-weight="700" fill="${page.ink}">${esc(name)}</text>
-<text x="${x + 58 + (name.length + 1) * 10.9}" y="${y + 30}" font-family="${MONO}" font-size="17" fill="${pal.project}">${esc(project)}</text>
-<text x="${x + 18}" y="${y + 62}" font-family="${MONO}" font-size="17" fill="${pal.accent}">▸ ${esc(w.working)}</text>
-${isWaiting ? `<g class="${timed(at.waiting[0] + 0.4, at.waiting[1], 'zoom')}"> <text class="blink" x="${x + 462}" y="${y + 62}" text-anchor="end" font-family="${SANS}" font-size="19" font-weight="700" fill="${pal.waiting}">${esc(w.waitsOnYou)}</text></g>` : ''}
+<text x="${x + 58}" y="${y + 30}" font-family="${mono}" font-size="18" font-weight="700" fill="${page.ink}">${esc(name)}</text>
+<text x="${x + 58 + (name.length + 1) * 18 * 0.6}" y="${y + 30}" font-family="${mono}" font-size="17" fill="${pal.project}">${esc(project)}</text>
+<text x="${x + 18}" y="${y + 62}" font-family="${mono}" font-size="17" fill="${pal.accent}">▸ ${esc(w.working)}</text>
+${isWaiting ? `<g class="${timed(at.waiting[0] + 0.4, at.waiting[1], 'zoom')}"> <text class="blink" x="${x + 462}" y="${y + 62}" text-anchor="end" font-size="19" font-weight="700" fill="${pal.waiting}">${esc(w.waitsOnYou)}</text></g>` : ''}
 </g>`
   }).join('\n')
 
@@ -558,7 +605,7 @@ ${isWaiting ? `<g class="${timed(at.waiting[0] + 0.4, at.waiting[1], 'zoom')}"> 
 
   // nothing lost.
   const lost = `<g class="${timed(...at.lost)}">${w.lost
-    .map((line, i) => `<text x="64" y="${200 + i * 56}" font-size="${isCjk ? 40 : 42}" font-weight="800" fill="${i === w.lost.length - 1 ? page.accent : page.ink}">${esc(line)}</text>`)
+    .map((line, i) => `<text x="64" y="${200 + i * 56}" font-size="${isCjk ? 40 : 42}" font-weight="800" ${HEADLINE} fill="${i === w.lost.length - 1 ? page.accent : page.ink}">${esc(line)}</text>`)
     .join('')}</g>${w.lostLines
     .map((line, i) => `<g class="${timed(at.lost[0] + 0.4 + i * 0.2, at.lost[1])}"><text x="64" y="${336 + i * 52}" font-size="24" fill="${pal.done}">✓</text><text x="100" y="${336 + i * 52}" font-size="24" fill="${page.ink}">${esc(line)}</text></g>`)
     .join('')}`
@@ -591,12 +638,12 @@ ${isWaiting ? `<g class="${timed(at.waiting[0] + 0.4, at.waiting[1], 'zoom')}"> 
   const tiles = TESTED_ICONS.map((icon, i) => iconTile(icon.name, W / 2 - (TESTED_ICONS.length * 52 - 12) / 2 + i * 52, 452, 40)).join('')
   const endCard = `<g class="${timed(at.end[0], LOOP + 0.2, 'zoom')}">
 ${brandMark(W / 2 - 30, 128, 60, false)}
-<text x="${W / 2}" y="262" text-anchor="middle" font-size="64" font-weight="800" fill="${page.ink}">Agent Board</text>
+<text x="${W / 2}" y="262" text-anchor="middle" font-size="64" font-weight="800" ${HEADLINE} fill="${page.ink}">Agent Board</text>
 <text x="${W / 2}" y="314" text-anchor="middle" font-size="28" fill="${page.accent}">${esc(w.end)}</text>
 </g>
 <g class="${timed(at.end[0] + 0.35, LOOP + 0.2)}">
 <rect x="${W / 2 - 330}" y="350" width="660" height="60" rx="12" fill="${page.card}" stroke="${pal.accent}" stroke-width="1.8"/>
-<text x="${W / 2}" y="388" text-anchor="middle" font-family="${MONO}" font-size="21" fill="${page.ink}">${esc(command)}</text>
+<text x="${W / 2}" y="388" text-anchor="middle" font-family="${mono}" font-size="21" fill="${page.ink}">${esc(command)}</text>
 </g>
 <g class="${timed(at.end[0] + 0.6, LOOP + 0.2)}">${tiles}</g>`
 
@@ -632,7 +679,7 @@ ${marks.map(([at, label]) => `<text x="${track.x + (at / LOOP) * track.w}" y="${
   ]
   const label = [w.why, w.answer, w.hooks, w.runs, w.colours].map(lines => lines.join(' ')).join(' / ')
 
-  return `<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}" role="img" aria-label="${esc(label)}">
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}" role="img" aria-label="${esc(label)}" font-family="${sansOf(lang)}">
 <title>Agent Board: ${esc(w.end)}</title>
 <defs>${brandDefs(W, H)}<clipPath id="body"><path d="M1 ${BAR}h${windowWidth - 2}v${bodyH - 12}a11 11 0 0 1 -11 11h-${windowWidth - 24}a11 11 0 0 1 -11 -11z"/></clipPath></defs>
 <style>
@@ -653,10 +700,8 @@ ${keyframes.join('\n')}
 <g clip-path="url(#edge)">
 ${brandGround(W, H)}
 ${brandMark(64, 36, 30)}
-<g font-family="${SANS}">
 ${scenes.join('\n')}
 ${timeline}
-</g>
 </g>
 </svg>
 `
@@ -697,6 +742,7 @@ const PROMO: Record<Lang, { headline: string[]; sub: string[]; works: string; no
 }
 
 const promo = (lang: Lang): string => {
+  const mono = monoOf(lang)
   const w = PROMO[lang]
   const pal = DARK
   const { grid, theme } = paneGrid(lang, 'dark', { opened: [], isAnswered: false })
@@ -711,7 +757,7 @@ const promo = (lang: Lang): string => {
   const lineGap = size + 10
   const top = isCjk ? 200 : 180
   const headline = w.headline
-    .map((line, i) => `<text x="72" y="${top + i * lineGap}" font-size="${size}" font-weight="800" fill="${i === w.headline.length - 1 ? pal.accent : '#f7f6f2'}">${esc(line)}</text>`)
+    .map((line, i) => `<text x="72" y="${top + i * lineGap}" font-size="${size}" font-weight="800" ${HEADLINE} fill="${i === w.headline.length - 1 ? pal.accent : '#f7f6f2'}">${esc(line)}</text>`)
     .join('\n')
   const subY = top + (w.headline.length - 1) * lineGap + 26
   const icons = TESTED_ICONS.map((icon, i) => iconTile(icon.name, 72 + i * 58, 459, 44)).join('\n')
@@ -720,21 +766,21 @@ const promo = (lang: Lang): string => {
   const wy = 44
   const nx = wx
   const ny = wy + BAR + PAD * 2 + rows * LINE + 18
-  return `<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="640" viewBox="0 0 1280 640" role="img" aria-label="Agent Board: ${esc(w.headline.join(' '))}">
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="640" viewBox="0 0 1280 640" role="img" aria-label="Agent Board: ${esc(w.headline.join(' '))}" font-family="${sansOf(lang)}">
 <title>Agent Board</title>
 <defs>${brandDefs(1280, 640)}</defs>
-<g clip-path="url(#edge)" font-family="${SANS}">
+<g clip-path="url(#edge)">
 ${brandGround(1280, 640)}
 ${brandMark(72, 70)}
 ${headline}
 ${w.sub.map((line, i) => `<text x="72" y="${subY + 24 + i * 33}" font-size="${isCjk ? 23 : 22}" fill="#b9bcc0">${esc(line)}</text>`).join('')}
 <text x="72" y="444" font-size="14" font-weight="700" letter-spacing="${isCjk ? 2 : 2.5}" fill="#8b9096">${esc(w.works)}</text>
 ${icons}
-<text x="72" y="572" font-family="${MONO}" font-size="19" fill="#d7d9dc">github.com/<tspan fill="#f7f6f2" font-weight="700">WenyuChiou/agent-board</tspan></text>
-<g filter="url(#lift)">${terminal('dark', WORDS[lang].window, body, rows, wx, wy)}</g>
+<text x="72" y="572" font-family="${mono}" font-size="19" fill="#d7d9dc">github.com/<tspan fill="#f7f6f2" font-weight="700">WenyuChiou/agent-board</tspan></text>
+<g filter="url(#lift)">${terminal('dark', mono, WORDS[lang].window, body, rows, wx, wy)}</g>
 <g filter="url(#lift)">
 <rect x="${nx}" y="${ny}" width="${windowWidth}" height="132" rx="14" fill="#23272b" stroke="${pal.waiting}" stroke-opacity="0.85" stroke-width="1.6"/>
-<rect x="${nx + 20}" y="${ny + 20}" width="34" height="34" rx="8" fill="#0B0B0F" stroke="#fff" stroke-opacity="0.2"/><text x="${nx + 37}" y="${ny + 43}" text-anchor="middle" font-size="17" font-weight="700" fill="#fff">C</text>
+${iconTile(w.note[0], nx + 20, ny + 20, 34)}
 <text x="${nx + 68}" y="${ny + 34}" font-size="17" font-weight="700" fill="#f2f1ec">${esc(w.note[0])}</text>
 <text x="${nx + 68}" y="${ny + 54}" font-size="14" fill="${pal.waiting}">● ${esc(w.note[1])}</text>
 <text x="${nx + 20}" y="${ny + 84}" font-size="17" fill="#e6e4dc">${esc(w.note[2])}</text>
@@ -747,19 +793,33 @@ ${icons}
 }
 
 // One tile per supported agent, the same in a light and a dark README: a white mark on the
-// agent's own colour.
-const agentIcon = (icon: (typeof AGENT_ICONS)[number]): string => {
-  const mark =
-    icon.path !== undefined
-      ? `<path transform="translate(12 12)" fill="#fff" d="${icon.path}"/>`
-      : `<text x="24" y="31.5" text-anchor="middle" font-family="${SANS}" font-size="22" font-weight="700" fill="#fff">${esc(icon.letter ?? '')}</text>`
-  return `<svg xmlns="http://www.w3.org/2000/svg" width="48" height="48" viewBox="0 0 48 48" role="img" aria-label="${esc(icon.name)}">
+// agent's own colour. The README shows it at 24 px, half its size, so its edges sit on whole
+// units of 2: the tile fills the square, and a dark tile's rim is 2 units wide, one pixel, inside it.
+const agentIcon = (icon: AgentIcon): string =>
+  `<svg xmlns="http://www.w3.org/2000/svg" width="48" height="48" viewBox="0 0 48 48" role="img" aria-label="${esc(icon.name)}" font-family="'Inter', sans-serif">
 <title>${esc(icon.name)}</title>
-<rect x="0.5" y="0.5" width="47" height="47" rx="10.5" fill="${icon.tile}" stroke="#fff" stroke-opacity="0.22"/>
-${mark}
+<rect width="48" height="48" rx="11" fill="${icon.tile}"/>${isDark(icon.tile) ? '<rect x="1" y="1" width="46" height="46" rx="10" fill="none" stroke="#fff" stroke-opacity="0.18" stroke-width="2"/>' : ''}
+${glyph(icon, 0, 0, 48)}
 </svg>
 `
+
+// fonts.py, run at the end, needs Python with fontTools 4.60 or newer and brotli; it is found
+// before anything is written, so without it the images stay as they were. Another fontTools
+// version cuts the fonts into slightly different bytes, so every image would show as changed.
+// A name that is not installed throws rather than failing, and Windows may answer `python3`
+// with a stub, so each is tried with what fonts.py needs.
+const FONT_TOOLS = "import fontTools, brotli; assert tuple(int(n) for n in fontTools.version.split('.')[:2]) >= (4, 60)"
+const hasFontTools = (name: string): boolean => {
+  try {
+    return Bun.spawnSync([name, '-c', FONT_TOOLS]).exitCode === 0
+  } catch {
+    return false
+  }
 }
+const named = process.env.PYTHON
+if (named !== undefined && !hasFontTools(named)) throw new Error(`PYTHON is ${named}, which has no fontTools 4.60 or newer with brotli: pip install "fonttools>=4.60" brotli`)
+const python = named ?? ['python3', 'python'].find(hasFontTools)
+if (python === undefined) throw new Error('docs/preview/fonts.py needs Python 3 with fontTools 4.60 or newer: pip install "fonttools>=4.60" brotli (or set PYTHON)')
 
 mkdirSync(join(OUT, 'agents'), { recursive: true })
 for (const icon of AGENT_ICONS) writeFileSync(join(OUT, 'agents', `${icon.file}.svg`), agentIcon(icon))
@@ -770,4 +830,12 @@ for (const lang of LANGS) {
   writeFileSync(join(OUT, `flow-${lang}.svg`), flow(lang))
   writeFileSync(join(PAGES, `dashboard-${lang}.html`), dashboard(lang))
 }
+
+// Each SVG then gets the letters it draws from its fonts (fonts.py, which needs fontTools).
+const svgs = [
+  ...readdirSync(OUT).filter(name => name.endsWith('.svg')).map(name => join(OUT, name)),
+  ...AGENT_ICONS.map(icon => join(OUT, 'agents', `${icon.file}.svg`)),
+]
+const fonts = Bun.spawnSync([python, join(import.meta.dir, 'fonts.py'), ...svgs], { stdout: 'inherit', stderr: 'inherit' })
+if (fonts.exitCode !== 0) throw new Error(`fonts.py stopped with exit code ${fonts.exitCode}`)
 console.log(`wrote the tour, flow and promotional card in ${LANGS.length} languages and ${AGENT_ICONS.length} agent icons to ${OUT}, and ${LANGS.length} progress.html pages to ${PAGES}`)

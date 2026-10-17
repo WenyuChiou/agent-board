@@ -110,6 +110,12 @@ export type ProgressMirror = {
   // For another agent's session: the last reply summed up, so the same turn reported twice
   // (two hooks of one turn, or Grok running Cursor's hooks too) counts once.
   lastAnswer: string
+  // For another agent's session: that agent's own session id, written as `resume=` so the
+  // board's page can send a reply into the session once it has closed.
+  resume?: string
+  // For another agent's session: where the newest inbox file folded in falls (turnOrder), so
+  // a file taken again after a later one changes nothing.
+  turnOrder?: number
 }
 
 // What the pane shows under its input box: a side question's answer, what a quick add
