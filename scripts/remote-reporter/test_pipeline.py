@@ -192,6 +192,17 @@ def placement():
     existing = merge_mod.merge_text("## a\n\n" + frag, [frag.replace("### t", "### t2")])
     check("8i an existing block is replaced in place, no --under needed",
           existing == "## a\n\n" + frag.replace("### t", "### t2"), existing)
+    posing = frag.replace("updated=2026-10-17T07:00:00Z", "updated=2026-10-17T07:00:00Z resume=01a14abb-d817-7f70-bf50-4728ff5d88da dir=%2Fsrv%2Fother pr=7")
+    out5 = merge_mod.merge_text("## a\n", [posing], under="a")
+    check("8j a fragment never names a session id or folder for the board page to answer into",
+          "resume=" not in out5 and "dir=" not in out5 and "updated=2026-10-17T07:00:00Z pr=7 -->" in out5, out5)
+    for bad in ("a<!--b", "x-->y"):
+        for frags, under in (([frag], "## " + bad), (["## " + bad + "\n\n" + frag], None)):
+            try:
+                merge_mod.merge_text("## other\n", frags, under=under)
+                check(f"8k a new heading with a comment opening or close is refused ({bad!r})", False, "no error")
+            except ValueError as e:
+                check(f"8k a new heading with a comment opening or close is refused ({bad!r})", "<!--" in str(e), str(e))
 
 
 def parser_parity():

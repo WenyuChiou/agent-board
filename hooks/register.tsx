@@ -65,15 +65,20 @@ import { agentHooks, boardLangOf, boardScript, DELETE, hasOurHook, isWindowsHost
 import {
   ANSWER_KEEP,
   answerKey,
+  claimAction,
+  failedName,
   inboxOrder,
   isInboxFile,
-  isTakenFile,
   isTextLog,
   isTranscriptPath,
   keepInboxDone,
+  keepInboxFailed,
+  MAX_TRIES,
   promptKey,
+  readClaim,
   readTurn,
   takenName,
+  turnOrder,
   isBoardTurn,
   transcriptTail,
   turnsToDigest,
@@ -96,6 +101,9 @@ const DAY = 24 * 60 * 60 * 1000
 // How long a model call may take before it counts as no answer: one that never comes back
 // must not hold the inbox, or a task's name, for good.
 const MODEL_MS = 30 * 1000
+// Why an inbox file is still there, kept in the store's `inboxFailed`.
+const NO_SUMMARY = 'the model gave no summary and the reply asks nothing'
+const NOT_KEPT = 'the block was not on the board when read back'
 
 const EMPTY: ProgressSnapshot = { path: '', isMissing: true, error: null, mtimeMs: 0, size: 0, projects: [] }
 
@@ -148,6 +156,7 @@ let digests: Promise<unknown> = Promise.resolve()
 // Set once this session has made sure the store has a record of the inbox (see drainInbox).
 let hasInboxRecord = false
 let inboxSeen = -1
+let inboxListed = 0
 let dashboardAt = 0
 
 // CLAUDE_PROGRESS_FILE wins; then CLAUDE_CONFIG_DIR, where Claude Code keeps its own files
@@ -601,7 +610,16 @@ const refreshName = async ($: EngineInterface): Promise<void> => {
 // A turn summed up into a session's steps: what it finished, what comes next and what it
 // ended up asking. Without the model's answer, the question the reply ends on is still
 // caught. null when the turn gave nothing to track and the session is not tracked yet.
-const summarize = async ($: EngineInterface, mirror: ProgressMirror, prompt: string, answer: string): Promise<ProgressMirror | null> => {
+// `onSilence`: with neither the model's answer nor a question, an empty summary drops the
+// session's open steps, so another agent's turn is tried again later ('retry', it throws) or,
+// on its last try, leaves the steps as they are ('keep', null).
+const summarize = async (
+  $: EngineInterface,
+  mirror: ProgressMirror,
+  prompt: string,
+  answer: string,
+  onSilence: 'sum' | 'keep' | 'retry' = 'sum',
+): Promise<ProgressMirror | null> => {
   const s = await wordsOf($)
   const steps = mirror.tasks.map(task => `- [${task.status === 'completed' ? 'x' : ' '}] ${task.subject}`).join('\n')
   const asked = await complete($, {
@@ -611,6 +629,10 @@ const summarize = async ($: EngineInterface, mirror: ProgressMirror, prompt: str
     prompt: s.digestPrompt(requestData(mirror.firstPrompt), requestData(prompt), replyData(answer), mirror.title, mirror.context, steps),
   })
   const question = lastQuestion(answer)
+  if (asked?.isAnswered !== true && question === null) {
+    if (onSilence === 'retry') throw new Error(NO_SUMMARY)
+    if (onSilence === 'keep') return null
+  }
   const parsed = asked?.isAnswered === true ? parseDigest(asked.text) : null
   const empty: Digest = { title: '', context: '', done: '', next: '', ask: '', why: '' }
   const digest: Digest = { ...empty, ...parsed }
@@ -641,7 +663,12 @@ const digestTurn = async ($: EngineInterface, prompt: string, answer: string): P
 // waits on the model; whichever wrote second would drop the other's step. So the mirror is
 // checked again just before writing, and when it moved, these turns are folded onto it once
 // more (the fold skips a reply it has already seen).
-const takeAgentTurns = async ($: EngineInterface, turns: readonly AgentTurn[], isRetry = false): Promise<void> => {
+// It throws unless the block is on the board, read back, or the turns had nothing to track:
+// the inbox files stay until then. `isLastTry`: the model's silence no longer holds the turns
+// back, so what can be written without it is.
+// A turn older than one already folded in (a file taken again after a later turn of the same
+// session got through, its end included) changes nothing: its steps would stand over newer ones.
+const takeAgentTurns = async ($: EngineInterface, turns: readonly AgentTurn[], isRetry = false, isLastTry = false): Promise<void> => {
   const last = turns.at(-1)
   if (last === undefined) return
   const at = await $.clock.now()
@@ -649,10 +676,12 @@ const takeAgentTurns = async ($: EngineInterface, turns: readonly AgentTurn[], i
   const seen = JSON.stringify(stored ?? null)
   const fresh = emptyMirror(last.id, last.project || (await wordsOf($)).uncategorized, at, last.cwd, last.agent)
   const firstPrompt = promptKey(stored?.firstPrompt || turns.find(one => one.prompt !== '')?.prompt || '')
-  let mirror: ProgressMirror = { ...fresh, ...stored, firstPrompt, lastAnswer: answerKey(stored?.lastAnswer ?? '') }
+  let mirror: ProgressMirror = { ...fresh, ...stored, firstPrompt, lastAnswer: answerKey(stored?.lastAnswer ?? ''), resume: last.session }
+  const newest = typeof stored?.turnOrder === 'number' ? stored.turnOrder : -1
+  const isNewer = (turn: AgentTurn): boolean => (turnOrder(turn) ?? newest) >= newest
   const digested = turnsToDigest(turns)
   for (const [index, turn] of turns.entries()) {
-    if (turn.event !== 'turn') continue
+    if (turn.event !== 'turn' || !isNewer(turn)) continue
     let { prompt, answer } = turn
     // Codex's Stop carries the reply but not the request; the session log has both.
     if ((answer === '' || prompt === '') && isTranscriptPath(turn.transcript) && (digested.has(index) || mirror.firstPrompt === '')) {
@@ -667,13 +696,16 @@ const takeAgentTurns = async ($: EngineInterface, turns: readonly AgentTurn[], i
     if (answer === '' || answerKey(answer) === mirror.lastAnswer) continue
     if (digested.has(index)) {
       mirror = answerTurns(mirror)
-      mirror = (await summarize($, mirror, prompt, answer)) ?? mirror
+      mirror = (await summarize($, mirror, prompt, answer, isLastTry ? 'keep' : 'retry')) ?? mirror
     }
     mirror = { ...mirror, lastAnswer: answerKey(answer) }
   }
-  if (mirror.tasks.length === 0) return
-  const state = isAllDone(mirror) ? 'done' : last.event === 'end' ? 'ended' : 'waiting'
-  mirror = { ...mirror, state, updated: at }
+  const latest = turns.filter(isNewer).at(-1)
+  // Only older turns: the block already says more than they do, and writing it again would
+  // bring back one archived since.
+  if (mirror.tasks.length === 0 || latest === undefined) return
+  const state = isAllDone(mirror) ? 'done' : latest.event === 'end' ? 'ended' : 'waiting'
+  mirror = { ...mirror, state, updated: at, turnOrder: Math.max(newest, ...turns.map(one => turnOrder(one) ?? -1)) }
   const s = await wordsOf($)
   const written = mirror
   let hasMoved = false
@@ -683,15 +715,15 @@ const takeAgentTurns = async ($: EngineInterface, turns: readonly AgentTurn[], i
       return
     }
     await $.store.set(`agent:${last.id}`, written)
-    await rewrite(
-      $,
-      await progressPath($),
-      before => upsertAutoBlock(before, written, s),
-      (check, after) => extractAutoBlock(check, written.sessionId) === extractAutoBlock(after, written.sessionId),
-    )
+    const path = await progressPath($)
+    const isKept = (check: string): boolean =>
+      extractAutoBlock(check, written.sessionId) === extractAutoBlock(upsertAutoBlock(check, written, s), written.sessionId)
+    await rewrite($, path, before => upsertAutoBlock(before, written, s), isKept)
+    // Another session's write can undo it three times over; only a block read back counts.
+    if (!isKept(await readText($, path))) throw new Error(NOT_KEPT)
     await poll($)
   })
-  if (hasMoved) await takeAgentTurns($, turns, true)
+  if (hasMoved) await takeAgentTurns($, turns, true, isLastTry)
 }
 
 // `/progress connect`: the reporter script beside progress.md, and a hook for it in every
@@ -861,15 +893,20 @@ const dropSection = async ($: EngineInterface, agent: string, home: string, code
 }
 
 // New files in the inbox, each taken by one open session: it renames the file to a name of
-// its own, which only one rename can do, reads what it renamed, and deletes it once summed
-// up. The inbox is let go of before the model is asked, so a slow answer never stops the
-// next look. The reporter script clears files older than two days that no session took.
+// its own, which only one rename can do, and reads what it renamed. The file is deleted only
+// once its turn is on the board, read back, or held nothing to track. A turn the board or the
+// model could not take leaves its file taken, and a later look takes it again (claimAction);
+// why it failed is in the store's `inboxFailed`. The inbox is let go of before the model is
+// asked, so a slow answer never stops the next look. The reporter script clears files older
+// than two days that no session took.
+type Taken = { path: string; name: string; attempt: number; turn: AgentTurn | null | undefined }
+
 const drainInbox = async ($: EngineInterface): Promise<void> => {
   if (isDraining) return
   isDraining = true
-  const taken: string[] = []
-  const turns: AgentTurn[] = []
+  const taken: Taken[] = []
   let isWin = false
+  let at = 0
   try {
     const path = await progressPath($)
     const dir = inboxPath(path)
@@ -884,9 +921,9 @@ const drainInbox = async ($: EngineInterface): Promise<void> => {
       const names = (await $.fs.list(dir).catch(() => []))
         .filter(entry => entry.kind === 'file' && isInboxFile(entry.name))
         .map(entry => entry.name)
-      const at = await $.clock.now()
-      const stamp = `${(await read($, mine))?.sessionId.slice(0, 8) ?? '-'}:${at}`
-      await $.store.set('inboxDone', keepInboxDone(Object.fromEntries(names.map(name => [name, stamp])), at))
+      const now = await $.clock.now()
+      const stamp = `${(await read($, mine))?.sessionId.slice(0, 8) ?? '-'}:${now}`
+      await $.store.set('inboxDone', keepInboxDone(Object.fromEntries(names.map(name => [name, stamp])), now))
       hasInboxRecord = true
       return
     }
@@ -896,60 +933,100 @@ const drainInbox = async ($: EngineInterface): Promise<void> => {
     // last listing: the folder is listed again while its time is that fresh.
     const stat = await $.fs.stat(dir).catch(() => undefined)
     if (stat === undefined) return
-    if (stat.mtimeMs === inboxSeen && (await $.clock.now()) - stat.mtimeMs > 2000) return
+    // A file left taken changes nothing in the folder, so it is listed once a minute anyway.
+    const now = await $.clock.now()
+    if (stat.mtimeMs === inboxSeen && now - stat.mtimeMs > 2000 && now - inboxListed < 60 * 1000) return
     inboxSeen = stat.mtimeMs
+    inboxListed = now
     const entries = await $.fs.list(dir).catch(() => [])
     const done = hasRecord ? (stored as Record<string, string>) : {}
-    const at = await $.clock.now()
-    // A file a session took and never deleted (it closed half-way) goes after a day.
-    await removeFiles(
-      $,
-      entries.filter(entry => entry.kind === 'file' && isTakenFile(entry.name) && at - entry.mtimeMs > DAY).map(entry => `${dir}${sep}${entry.name}`),
-      isWin,
-    )
+    at = await $.clock.now()
+    const session = (await read($, mine))?.sessionId.slice(0, 8) ?? '-'
+    // Files left taken. One whose turn reached the board, and only its delete failed, goes
+    // now; one whose session closed half-way, or whose turn failed, is taken again once its
+    // time is up, or set aside after its last try.
+    const delivered: string[] = []
+    for (const entry of entries) {
+      const claim = entry.kind === 'file' ? readClaim(entry.name) : null
+      if (claim === null || taken.length >= 20) continue
+      const from = `${dir}${sep}${entry.name}`
+      if (done[claim.name] !== undefined) {
+        delivered.push(from)
+        continue
+      }
+      const action = claimAction(claim, entry.mtimeMs, at)
+      if (action === 'setAside') await moveFile($, from, `${dir}${sep}${failedName(claim.name)}`, isWin)
+      if (action !== 'retake') continue
+      const to = `${dir}${sep}${takenName(claim.name, session, at, claim.attempt + 1)}`
+      if (await moveFile($, from, to, isWin)) taken.push({ path: to, name: claim.name, attempt: claim.attempt + 1, turn: undefined })
+    }
+    await removeFiles($, delivered, isWin)
     const fresh = entries
       .filter(entry => entry.kind === 'file' && isInboxFile(entry.name) && done[entry.name] === undefined)
       .map(entry => entry.name)
       .sort(inboxOrder)
-      .slice(0, 20)
-    if (fresh.length === 0) return
-    const session = (await read($, mine))?.sessionId.slice(0, 8) ?? '-'
+      .slice(0, Math.max(0, 20 - taken.length))
     for (const name of fresh) {
-      const to = `${dir}${sep}${takenName(name, session)}`
-      if (!(await moveFile($, `${dir}${sep}${name}`, to, isWin))) continue
-      taken.push(to)
-      // Read at once: the model may keep the turn waiting, and a taken file is only safe
-      // from the day-old sweep of another session while it is fresh.
-      const body = await $.fs.read(to).catch(() => '')
-      // One file that cannot be read must not stop the loop, or the files taken before it
-      // wait a day for the sweep that deletes them unread.
-      let turn: AgentTurn | null = null
-      try {
-        turn = readTurn(name, typeof body === 'string' ? body : '')
-      } catch {
-        turn = null
-      }
-      if (turn !== null) turns.push(turn)
+      const to = `${dir}${sep}${takenName(name, session, at)}`
+      if (await moveFile($, `${dir}${sep}${name}`, to, isWin)) taken.push({ path: to, name, attempt: 1, turn: undefined })
     }
-    if (taken.length === 0) return
-    const stamp = `${session}:${at}`
-    const names = fresh.filter(name => taken.includes(`${dir}${sep}${takenName(name, session)}`))
-    await $.store.set('inboxDone', keepInboxDone({ ...done, ...Object.fromEntries(names.map(name => [name, stamp])) }, at)).catch(() => undefined)
+    // Read at once, before the model may keep the turn waiting. A file that cannot be read
+    // now stays taken for a later look; one that is not a turn (not JSON, no session in it)
+    // holds nothing to track, and one that cannot be parsed must not stop the loop.
+    for (const one of taken) {
+      const body = await $.fs.read(one.path).catch(() => undefined)
+      if (typeof body !== 'string') continue
+      try {
+        one.turn = readTurn(one.name, body)
+      } catch {
+        one.turn = null
+      }
+    }
   } finally {
     isDraining = false
   }
   if (taken.length === 0) return
   const job = digests.then(async () => {
-    try {
-      const bySession = new Map<string, AgentTurn[]>()
-      for (const turn of turns.filter(one => !isBoardTurn(one))) bySession.set(turn.id, [...(bySession.get(turn.id) ?? []), turn])
-      for (const group of bySession.values()) await takeAgentTurns($, group).catch(() => undefined)
-    } finally {
-      await removeFiles($, taken, isWin)
+    const settled = taken.filter(one => one.turn === null || (one.turn !== undefined && isBoardTurn(one.turn)))
+    const failed: Record<string, string> = {}
+    const bySession = new Map<string, Taken[]>()
+    for (const one of [...taken].sort((a, b) => inboxOrder(a.name, b.name))) {
+      if (one.turn === null || one.turn === undefined || isBoardTurn(one.turn)) continue
+      bySession.set(one.turn.id, [...(bySession.get(one.turn.id) ?? []), one])
     }
+    for (const all of bySession.values()) {
+      // The queue can run longer than a claim holds: a file another look took again while
+      // this job waited is that look's to finish.
+      const group: Taken[] = []
+      for (const one of all) if (await $.fs.exists(one.path)) group.push(one)
+      if (group.length === 0) continue
+      const isLastTry = group.some(one => one.attempt >= MAX_TRIES)
+      try {
+        await takeAgentTurns($, group.flatMap(one => (one.turn === null || one.turn === undefined ? [] : [one.turn])), false, isLastTry)
+        settled.push(...group)
+      } catch (error) {
+        const why = (error instanceof Error ? error.message : String(error)).replace(/\s+/g, ' ').slice(0, 200)
+        for (const one of group) failed[one.name] = `${one.attempt}:${at}:${why}`
+      }
+    }
+    await recordInbox($, settled.map(one => one.name), failed, at)
+    await removeFiles($, settled.map(one => one.path), isWin)
   })
   digests = job.catch(() => undefined)
   await job
+}
+
+// The store's record after a look: the files done, so a delete that failed is tried again
+// rather than the turn, and why each file still in the inbox is there.
+const recordInbox = async ($: EngineInterface, settled: readonly string[], failed: Readonly<Record<string, string>>, at: number): Promise<void> => {
+  if (settled.length === 0 && Object.keys(failed).length === 0) return
+  const stamp = `${(await read($, mine))?.sessionId.slice(0, 8) ?? '-'}:${at}`
+  const done = await $.store.get('inboxDone').catch(() => null)
+  const before = done !== null && typeof done === 'object' ? (done as Record<string, string>) : {}
+  await $.store.set('inboxDone', keepInboxDone({ ...before, ...Object.fromEntries(settled.map(name => [name, stamp])) }, at)).catch(() => undefined)
+  const held = await $.store.get('inboxFailed').catch(() => null)
+  const notes = Object.entries(held !== null && typeof held === 'object' ? (held as Record<string, string>) : {}).filter(([name]) => !settled.includes(name))
+  await $.store.set('inboxFailed', keepInboxFailed({ ...Object.fromEntries(notes), ...failed })).catch(() => undefined)
 }
 
 // A compaction's summary made into one line for whoever takes over, kept in the block.
@@ -984,8 +1061,7 @@ const archiveOld = async ($: EngineInterface, isNow = false): Promise<number> =>
   const keys = new Set<string>()
   await rewrite($, path, async text => {
     const blocks = takeArchivable(text, at, keep, s, isNow)
-    // A hand-kept task the pane has not seen done yet counts as seen a day ago when asked.
-    const manual = takeManualDone(blocks.text, at, key => (isNow ? Math.min(seen[key] ?? at, at - DAY) : seen[key]), s)
+    const manual = takeManualDone(blocks.text, at, key => seen[key], s, isNow)
     const entries = [...blocks.entries, ...manual.entries]
     if (entries.length === 0) return null
     // Made again after another session's write, the same blocks are not archived twice.
@@ -1400,8 +1476,10 @@ export const register: Register = (on, options) => {
       const note = await othersNote($)
       if (note !== null) {
         // The engine takes a plugin's row as a hidden (meta) user row; the file's words in it
-        // sit in a fence, marked as data.
-        await $.session.append({ message: { type: 'user', isMeta: true, content: [{ type: 'text', text: note }] } }).catch(() => undefined)
+        // sit in a fence, marked as data. The row has said `isMeta` since 0.12.0, which the
+        // engine's types do not name, so it is built apart from the call.
+        const message = { type: 'user' as const, isMeta: true, content: [{ type: 'text' as const, text: note }] }
+        await $.session.append({ message }).catch(() => undefined)
       }
     }
 
@@ -1673,6 +1751,10 @@ export const register: Register = (on, options) => {
       copyCommand: (item, surface) => {
         if (item.command === null) return
         showCopied($, s.commandOf(item.text), item.command, surface).catch(() => undefined)
+      },
+      copySessionId: (item, surface) => {
+        if (item.sessionId === null) return
+        showCopied($, s.sessionIdOf(item.task, item.sessionId !== item.session), item.sessionId, surface).catch(() => undefined)
       },
       toggleLegend: () => {
         update($, isLegendOpen, open => !open).catch(() => undefined)

@@ -114,6 +114,15 @@ assistant can be asked to fix just that. A chat assistant often does not know
 the time: check `updated=` before merging, since a block with an old one shows
 as stopped and leaves at the next archive sweep.
 
+Or, with no script to run: open the board's page (`node
+~/.claude/agent-board.mjs --serve`, or `/board` in another agent), copy this
+prompt from it with **Copy the prompt for a web chat**, and paste each block
+the chat prints into its box, fence and all. The page checks the block the
+way `validate.py --block` does, replaces the earlier block with the same id
+only when it is the same agent's and closed, never Claude's or another
+agent's, and sets `updated=` to the time of the paste. `tests/board.test.mjs`
+checks the prompt above and the page's copy match word for word.
+
 ## Risks and mitigations
 
 | Risk | Mitigation | Status |
@@ -129,6 +138,7 @@ as stopped and leaves at the next archive sweep.
 | Stale session looking live | The pane already shows a `working`/`waiting` block untouched for 12 hours as stopped; reporters must not fake heartbeats | Format rule |
 | Orphan blocks (session died without `state=ended`) | The usual staleness and archive rules apply; the registry makes orphans rare | Documented |
 | Impersonation (`agent=` is self-declared) | No auth in the format; acceptable for a personal board | Documented |
+| A fragment choosing where a local agent runs | The board's page answers a closed Grok Build or Codex session by its `resume=` id in its `dir=` folder; `merge.py` drops both from every fragment, since a session on another machine cannot be resumed here | Implemented and tested |
 | Secrets leaking through the transport | Keep secrets out of blocks; choose the transport accordingly | Documented |
 
 ## What this does not do
