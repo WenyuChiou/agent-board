@@ -2,7 +2,7 @@ import { expect, test } from 'claude-code/testing'
 
 import type { ProgressMirror, ProgressPr } from '../types'
 import { askOf } from '../hooks/ask'
-import { addManualTask, isArchivable, takeArchivable, takeManualDone, upsertAutoBlock } from '../hooks/blocks'
+import { addManualTask, isArchivable, takeArchivable, takeManualDone, takeTask, upsertAutoBlock } from '../hooks/blocks'
 import { dashboardHtml } from '../hooks/dashboard'
 import { ciFinished, prFromGh, prWords } from '../hooks/github'
 import { appendJournal, countDay, journalLine, parseJournal, progressReport } from '../hooks/journal'
@@ -12,6 +12,7 @@ import { parseProgress } from '../hooks/parse'
 import { LANGS, ZH_TW } from '../hooks/i18n'
 import { resolveLang, STRINGS } from '../hooks/strings'
 import { parseQuickAdd } from '../hooks/quick'
+import { keepRecent, remindersOf } from '../hooks/remind'
 import { buildView, resumeCommand, statusLine } from '../hooks/view'
 
 const NOW = Date.parse('2026-10-16T12:00:00.000Z')
@@ -486,4 +487,86 @@ test('titles and background are cut by terminal width, at a word in English, nev
   )
   expect([...cleanContext('長'.repeat(80))]).toHaveLength(60)
   expect(clip('Add a README.md to this repo describing index.js', 38)).toBe('Add a README.md to this repo…')
+})
+
+test('封存 takes out one task now: an ended block by its session, a hand-kept task by its heading', () => {
+  const text = `# 專案進度
+
+## 求職
+### Google 暑期實習
+> 截止 10-31
+- [x] 改履歷
+- [ ] 投遞
+
+### Meta 實習
+- [ ] 改履歷
+
+## FLOODABM
+<!-- auto session=dddddddd state=ended updated=2026-10-16T10:00:00.000Z -->
+### 跑實驗
+- [x] 準備資料
+- [ ] 跑 100 次
+<!-- /auto session=dddddddd -->
+`
+  const view = buildView(parseProgress(text), [], null, NOW)
+  const rows = [...view.due, ...view.active, ...view.groups.flatMap(group => group.rows)]
+  const google = rows.find(row => row.title === 'Google 暑期實習')
+  const flood = rows.find(row => row.title === '跑實驗')
+  expect(google?.archive).toEqual({ project: '求職', title: 'Google 暑期實習', line: 3, session: null })
+  expect(flood?.archive).toEqual({ project: 'FLOODABM', title: '跑實驗', line: 13, session: 'dddddddd' })
+
+  const one = takeTask(text, { project: '求職', title: 'Google 暑期實習', line: 3, session: null }, NOW)
+  expect(one?.entries).toEqual(['## 求職 · 2026-10-16\n### Google 暑期實習\n> 截止 10-31\n- [x] 改履歷\n- [ ] 投遞'])
+  expect(one?.text).toContain('## 求職\n### Meta 實習\n- [ ] 改履歷\n\n## FLOODABM')
+
+  // The heading moved since the pane drew it: found by its title, once.
+  expect(takeTask(`\n${text}`, { project: '求職', title: 'Google 暑期實習', line: 3, session: null }, NOW)?.entries).toHaveLength(1)
+
+  const block = takeTask(text, { project: 'FLOODABM', title: '跑實驗', line: 13, session: 'dddddddd' }, NOW)
+  expect(block?.entries).toEqual(['## FLOODABM · 2026-10-16\n### 跑實驗\n- [x] 準備資料\n- [ ] 跑 100 次'])
+  expect(block?.text).not.toContain('dddddddd')
+  expect(block?.text).toContain('### Meta 實習')
+})
+
+test('封存 leaves the file alone when it cannot be sure which task it means', () => {
+  const twins = '# 專案進度\n\n## a\n### 同名\n- [ ] 一\n\n## b\n### 同名\n- [ ] 二\n'
+  expect(takeTask(twins, { project: 'a', title: '同名', line: 0, session: null }, NOW)).toBeNull()
+  // A title inside some session's block is that session's, not the person's.
+  const inside = '## p\n<!-- auto session=aaaaaaaa state=working updated=2026-10-16T11:00:00.000Z -->\n### 修 CI\n- [ ] 修\n<!-- /auto session=aaaaaaaa -->\n'
+  expect(takeTask(inside, { project: 'p', title: '修 CI', line: 0, session: null }, NOW)).toBeNull()
+  // A block that lost its end marker.
+  expect(takeTask('## p\n<!-- auto session=bbbbbbbb state=ended updated=2026-10-16T11:00:00.000Z -->\n### x\n', { project: 'p', title: 'x', line: 2, session: 'bbbbbbbb' }, NOW)).toBeNull()
+  // A live session's row has no 封存: its block is that session's to change.
+  const live = buildView(parseProgress(inside), [], null, NOW)
+  expect(live.active.map(row => row.archive)).toEqual([null])
+})
+
+test('reminders: another session’s question once, and work due today or late once a day', () => {
+  const text = `# 專案進度
+
+## 求職
+### Google 暑期實習
+> 截止 10-16
+- [ ] 投遞
+
+### 自己的事
+- [?] 問教授 — 等回信
+
+## FLOODABM
+<!-- auto session=dddddddd agent=codex state=waiting updated=2026-10-16T11:30:00.000Z -->
+### 跑實驗
+- [?] 要不要重跑 — 可以重跑嗎？
+<!-- /auto session=dddddddd -->
+`
+  const view = buildView(parseProgress(text), [], null, NOW)
+  const first = remindersOf(view, {}, NOW, '2026-10-16')
+  expect(first.map(one => one.text)).toEqual(['codex 在問：要不要重跑', '到期：Google 暑期實習（今天截止）'])
+  // A hand-kept question is the person's own note, not something asked of them.
+  expect(first.some(one => one.text.includes('問教授'))).toBe(false)
+
+  const told = Object.fromEntries(first.map(one => [one.key, NOW]))
+  expect(remindersOf(view, told, NOW, '2026-10-16')).toEqual([])
+  // The next day the due date is said again; the question is not.
+  expect(remindersOf(view, told, NOW + 24 * 60 * 60 * 1000, '2026-10-17').map(one => one.kind)).toEqual(['due'])
+  expect(Object.keys(keepRecent(told, NOW + 4 * 24 * 60 * 60 * 1000))).toEqual([])
 })

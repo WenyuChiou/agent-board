@@ -885,3 +885,101 @@ test('another agent’s question is answered there, but its command can be copie
   expect(links).toContain('https://docs.example.com/preview/2026-10')
   await ui.unmount()
 })
+
+test('封存 on a row takes that task out of the file now and into this month’s archive', async ($, on) => {
+  const world: World = { files: new Map([[FILE, JOBS]]), mtime: 1, hasTasks: true }
+  engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/persona_framework', surface: 'desktop', isInteractive: true })
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
+
+  // A session of this project that stopped.
+  await ui.press({ key: 'section::others' })
+  await ui.press({ key: 'persona_framework::修 CI' })
+  await ui.press({ key: 'persona_framework::修 CI::archive' })
+  expect(world.files.get(FILE)).not.toContain('修 CI')
+  expect(world.files.get(ARCHIVE)).toBe('# 進度封存\n\n## persona_framework · 2026-10-16\n### 修 CI\n- [x] 看 log\n- [ ] 修測試\n')
+  expect(await ui.find({ type: 'Text', text: '已封存「修 CI」。' })).toBeDefined()
+
+  // A hand-kept task, steps and note with it.
+  await ui.press({ key: '求職::Google 暑期實習' })
+  await ui.press({ key: '求職::Google 暑期實習::archive' })
+  expect(world.files.get(FILE)).not.toContain('Google')
+  expect(world.files.get(ARCHIVE)).toContain('\n\n## 求職 · 2026-10-16\n### Google 暑期實習\n> 截止 12-20\n- [x] 改履歷\n- [?] 推薦信 — 等教授回覆\n- [ ] 投遞\n')
+  expect(await ui.find({ type: 'Button', key: '求職::Google 暑期實習' })).toBeUndefined()
+  await ui.unmount()
+})
+
+test('封存 of a task someone changed meanwhile says so and leaves the file alone', async ($, on) => {
+  const world: World = { files: new Map([[FILE, JOBS]]), mtime: 1, hasTasks: true }
+  engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/persona_framework', surface: 'desktop', isInteractive: true })
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
+  await ui.press({ key: 'section::others' })
+  await ui.press({ key: 'persona_framework::修 CI' })
+  // Another session reopened the block before the press: it has no end marker now.
+  const changed = JOBS.replace('<!-- /auto session=a81d0c42 -->\n', '')
+  world.files.set(FILE, changed)
+  await ui.press({ key: 'persona_framework::修 CI::archive' })
+  expect(world.files.get(FILE)).toBe(changed)
+  expect(world.files.has(ARCHIVE)).toBe(false)
+  expect(await ui.find({ type: 'Text', text: '找不到這件工作，可能已經改過或封存了。' })).toBeDefined()
+  await ui.unmount()
+})
+
+const ASKED = (text: string): string => `# 專案進度
+
+## FLOODABM
+<!-- auto session=dddddddd agent=codex state=waiting updated=2026-10-16T11:59:00.000Z -->
+### 跑實驗
+- [?] ${text}
+<!-- /auto session=dddddddd -->
+`
+
+const DUE = '# 專案進度\n\n## 求職\n### Google 暑期實習\n> 截止 10-16\n- [ ] 投遞\n'
+
+test('a question another agent asks notifies once, not the ones already there at the start', async ($, on) => {
+  const world: World = { files: new Map([[FILE, ASKED('要不要重跑 — 可以重跑嗎？')]]), mtime: 1, hasTasks: true, store: { told: { old: Date.parse('2026-10-16T00:00:00.000Z') } } }
+  const clock = engineBeneath(on, world)
+  const seen = outside(on)
+  await $.session.start({ cwd: '/work/persona_framework', surface: 'desktop', isInteractive: true })
+  expect(seen.notified).toEqual([])
+
+  world.files.set(FILE, ASKED('選哪個種子 — 42 還是 7'))
+  world.mtime += 1
+  await clock.advance(2000)
+  expect(seen.notified).toEqual(['codex 在問：選哪個種子'])
+  await clock.advance(30 * 1000)
+  expect(seen.notified).toEqual(['codex 在問：選哪個種子'])
+})
+
+test('work due today notifies once that day', async ($, on) => {
+  const world: World = { files: new Map([[FILE, DUE]]), mtime: 1, hasTasks: true, store: { told: { old: Date.parse('2026-10-16T00:00:00.000Z') } } }
+  const clock = engineBeneath(on, world)
+  const seen = outside(on)
+  await $.session.start({ cwd: '/work/persona_framework', surface: 'desktop', isInteractive: true })
+  expect(seen.notified).toEqual(['到期：Google 暑期實習（今天截止）'])
+  await clock.advance(60 * 1000)
+  expect(seen.notified).toHaveLength(1)
+})
+
+test('with notifications off, reminders stay quiet', async ($, on) => {
+  const store = { told: { old: Date.parse('2026-10-16T00:00:00.000Z') }, notifyOff: true }
+  const world: World = { files: new Map([[FILE, DUE]]), mtime: 1, hasTasks: true, store }
+  const clock = engineBeneath(on, world)
+  const seen = outside(on)
+  await $.session.start({ cwd: '/work/persona_framework', surface: 'desktop', isInteractive: true })
+  world.files.set(FILE, `${DUE}${ASKED('選哪個種子 — 42 還是 7').replace('# 專案進度\n', '')}`)
+  world.mtime += 1
+  await clock.advance(60 * 1000)
+  expect(seen.notified).toEqual([])
+})
+
+test('the first run ever says nothing about what is already in the file', async ($, on) => {
+  const both = `${DUE}${ASKED('要不要重跑 — 可以重跑嗎？').replace('# 專案進度\n', '')}`
+  const world: World = { files: new Map([[FILE, both]]), mtime: 1, hasTasks: true }
+  const clock = engineBeneath(on, world)
+  const seen = outside(on)
+  await $.session.start({ cwd: '/work/persona_framework', surface: 'desktop', isInteractive: true })
+  await clock.advance(60 * 1000)
+  expect(seen.notified).toEqual([])
+})

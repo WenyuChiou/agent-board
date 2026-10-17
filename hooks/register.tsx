@@ -12,6 +12,7 @@ import {
   shortId,
   takeArchivable,
   takeManualDone,
+  takeTask,
   upsertAutoBlock,
 } from './blocks'
 import { ciFinished, GH_FIELDS, prFromGh } from './github'
@@ -52,8 +53,9 @@ import { isQuickAdd, parseQuickAdd, quickAddWords } from './quick'
 import type { Lang, Strings } from './i18n'
 import { RULE_ID, RULES } from './rule'
 import { langOf, resolveLang, STRINGS } from './strings'
+import { keepRecent, remindersOf } from './remind'
 import { buildView, statusLine } from './view'
-import type { StepRef, TaskRow } from './view'
+import type { StepRef, TaskRef, TaskRow } from './view'
 
 const PANE = 'project-progress'
 const POLL_MS = 2000
@@ -103,6 +105,9 @@ let isCheckingPr = false
 let hasGh = true
 let countedDay = ''
 let lastDashboard = ''
+// Set once the questions and due dates already on file at the start are counted as told.
+let isReminderSeeded = false
+let isReminding = false
 let dashboardAt = 0
 
 // CLAUDE_PROGRESS_FILE wins; then CLAUDE_CONFIG_DIR, where Claude Code keeps its own files
@@ -151,6 +156,7 @@ const poll = async ($: EngineInterface): Promise<void> => {
       await noteDone($, projects)
       await refreshStatus($)
       await writeDashboard($)
+      await remind($)
     } catch (error) {
       await update($, snapshot, () => ({ ...EMPTY, path, isMissing: false, error: messageOf(error) }))
     }
@@ -479,6 +485,72 @@ const archiveOld = async ($: EngineInterface): Promise<number> => {
   return entries.length
 }
 
+// One task to the archive at the person's word, written the way archiveOld writes. False when
+// it could not be found for sure, so the file is left as it was.
+const archiveOne = async ($: EngineInterface, ref: TaskRef): Promise<boolean> => {
+  const path = await progressPath($)
+  const text = await readText($, path)
+  const at = await $.clock.now()
+  const s = await wordsOf($)
+  const taken = takeTask(text, ref, at, s)
+  if (taken === null) return false
+  const archive = archivePath(path, at)
+  const past = await readText($, archive)
+  const head = past.trim() === '' ? `${s.archiveTitle}\n\n` : past.replace(/\s*$/, '\n\n')
+  await $.fs.write(archive, head + taken.entries.join('\n\n') + '\n')
+  await $.fs.write(path, taken.text)
+  if (ref.session === null) {
+    const key = doneKey(ref.project, ref.title)
+    await update($, doneSeen, old => Object.fromEntries(Object.entries(old).filter(([one]) => one !== key)))
+    await $.store.delete(key)
+  }
+  await poll($)
+
+  return true
+}
+
+// Tells the person, once across every open session, of a question another session or agent
+// put to them and of work due today or late. Questions already on file when a session starts
+// count as told (the pane opening shows them), and the first run ever says nothing at all, so
+// installing does not replay the whole file.
+const remind = async ($: EngineInterface): Promise<void> => {
+  if (isReminding) return
+  isReminding = true
+  try {
+    await remindNow($)
+  } finally {
+    isReminding = false
+  }
+}
+
+const remindNow = async ($: EngineInterface): Promise<void> => {
+  const at = await $.clock.now()
+  const s = await wordsOf($)
+  const view = buildView(
+    (await read($, snapshot)).projects,
+    await read($, here),
+    await read($, mine),
+    at,
+    await read($, today),
+    await read($, doneSeen),
+    s,
+  )
+  const stored = await $.store.get('told')
+  const told = stored !== null && typeof stored === 'object' ? (stored as Record<string, number>) : {}
+  const fresh = remindersOf(view, told, at, localDay(at), s)
+  const isSeeding = !isReminderSeeded
+  isReminderSeeded = true
+  if (fresh.length === 0) return
+  const next = keepRecent(told, at)
+  for (const one of fresh) next[one.key] = at
+  await $.store.set('told', next)
+  if (isSeeding && Object.keys(told).length === 0) return
+  for (const one of fresh) {
+    if (isSeeding && one.kind === 'ask') continue
+    await notify($, one.text, one.project)
+  }
+}
+
 // For a session's first turn: work in this project that other sessions left or hold.
 const othersNote = async ($: EngineInterface): Promise<string | null> => {
   const names = await read($, here)
@@ -657,6 +729,8 @@ export const register: Register = (on, options) => {
           if (localDay(at) !== countedDay) await countToday($)
           await refreshStatus($)
           await writeDashboard($)
+          // A date turns due at midnight with nothing in the file changing.
+          await remind($)
         })
         .catch(() => undefined)
     })
@@ -954,6 +1028,16 @@ export const register: Register = (on, options) => {
       },
       archive: () => {
         enqueue(() => archiveOld($)).catch(() => undefined)
+      },
+      archiveRow: row => {
+        const ref = row.archive
+        if (ref === null) return
+        enqueue(() => archiveOne($, ref))
+          .then(isTaken =>
+            update($, answer, () => ({ question: row.title, text: isTaken ? s.archivedOne(row.title) : s.archiveGone, isAsking: false })),
+          )
+          .then(() => update($, expanded, open => (open === row.key ? '' : open)))
+          .catch(() => undefined)
       },
       takeOver: row => {
         $.prompt.submit({ text: takeOverPrompt(row, s) }).catch(() => undefined)

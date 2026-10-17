@@ -54,6 +54,8 @@ export type PaneActions = {
   ask: (question: string) => void
   clearAnswer: () => void
   copyResume: (row: TaskRow, surface: RenderSurface) => void
+  // Moves one task to the archive file now: an ended session's block or a hand-kept task.
+  archiveRow: (row: TaskRow) => void
   report: (surface: RenderSurface) => void
   toggleNotify: () => void
   toggleLegend: () => void
@@ -291,11 +293,23 @@ export const drawPane = (ui: PaneUi, model: PaneModel, actions: PaneActions): Re
   )
 
   // What a row offers once opened: take it over here, reopen the session that left it, tick
-  // its step, or hand it to Claude.
+  // its step, hand it to Claude, or put it in the archive now instead of waiting for cleanup.
   const rowActions = (row: TaskRow) => {
+    const archive = row.archive === null ? null : (
+      <Button key={`${row.key}::archive`} onPress={() => actions.archiveRow(row)}>
+        {s.archiveThis}
+      </Button>
+    )
     if (row.auto === 'ended') {
       const resume = row.resume
-      if (!row.isHere && resume === null) return muted(s.continueElsewhere(row.project))
+      if (!row.isHere && resume === null) {
+        return (
+          <Box flexDirection="column">
+            {muted(s.continueElsewhere(row.project))}
+            {archive !== null && <Box marginTop={1}>{archive}</Box>}
+          </Box>
+        )
+      }
 
       return (
         <Box flexDirection="row" marginTop={1} gap={1}>
@@ -309,6 +323,7 @@ export const drawPane = (ui: PaneUi, model: PaneModel, actions: PaneActions): Re
               {s.copyResume}
             </Button>
           )}
+          {archive}
         </Box>
       )
     }
@@ -316,7 +331,7 @@ export const drawPane = (ui: PaneUi, model: PaneModel, actions: PaneActions): Re
       return muted(row.isHere ? s.heldElsewhere : s.continueElsewhere(row.project))
     }
     const next = row.next
-    if (next === null) return null
+    if (next === null) return archive === null ? null : <Box marginTop={1}>{archive}</Box>
 
     return (
       <Box flexDirection="row" marginTop={1} gap={1}>
@@ -326,6 +341,7 @@ export const drawPane = (ui: PaneUi, model: PaneModel, actions: PaneActions): Re
         <Button key={`${row.key}::hand`} onPress={() => actions.handOver(row)}>
           {s.handOver}
         </Button>
+        {archive}
       </Box>
     )
   }

@@ -5,7 +5,7 @@ import type { Strings } from './i18n'
 import { localDay } from './journal'
 import { AUTO_END, AUTO_START, autoOf, doneKey, isTaskComplete, parseAttrs, parseProgress, projectHead } from './parse'
 import type { QuickEntry } from './quick'
-import type { StepRef } from './view'
+import type { StepRef, TaskRef } from './view'
 
 // Each session's mod owns one block of the file, between its own markers, and rewrites
 // only that block: whatever people or other sessions wrote elsewhere stays byte for byte.
@@ -300,6 +300,40 @@ export const takeManualDone = (
   if (spans.length === 0) return { text, entries: [], keys: [] }
 
   return { text: removeSpans(text, spans), entries, keys }
+}
+
+// One task out now, at the person's word (a row's 封存): an ended session's block, or a
+// hand-kept task from its heading to its last line, in the entry form takeArchivable uses.
+// null when it cannot be found for sure: a block without its end marker, a heading that is
+// gone or has a twin, or a heading inside some session's block.
+export const takeTask = (text: string, ref: TaskRef, now: number, s: Strings = ZH_TW): Archived | null => {
+  const lines = linesOf(text)
+  const spans = scanBlocks(lines)
+  const heading = `## ${ref.project || s.uncategorized} · ${localDay(now)}`
+  if (ref.session !== null) {
+    const span = spans.find(one => one.session === ref.session)
+    if (span === undefined || !span.isClosed) return null
+
+    return { text: removeSpans(text, [span]), entries: [[heading, ...lines.slice(span.start + 1, span.end)].join('\n')] }
+  }
+  const isHeading = (line: string | undefined): boolean => TASK.exec(line ?? '')?.[1] === ref.title
+  let at = isHeading(lines[ref.line]) ? ref.line : -1
+  if (at < 0) {
+    const same = lines.flatMap((line, index) => (isHeading(line) ? [index] : []))
+    if (same.length === 1) at = same[0] ?? -1
+  }
+  if (at < 0 || spans.some(span => at >= span.start && at <= span.end)) return null
+  let end = at
+  for (let index = at + 1; index < lines.length; index += 1) {
+    const line = lines[index] ?? ''
+    if (PROJECT.test(line) || TASK.test(line) || AUTO_START.test(line)) break
+    if (line.trim() !== '') end = index
+  }
+  const last = end
+  while (end + 1 < lines.length && lines[end + 1]?.trim() === '') end += 1
+  const span: BlockSpan = { session: '', state: 'done', updated: now, project: ref.project, start: at, end, isClosed: true }
+
+  return { text: removeSpans(text, [span]), entries: [[heading, ...lines.slice(at, last + 1)].join('\n')] }
 }
 
 // A quick add from the pane: a hand-kept task at the end of its project's section (made

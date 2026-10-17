@@ -42,6 +42,10 @@ export type CurrentView = {
 // A step of a hand-kept task, addressed so a press can tick exactly the line it showed.
 export type StepRef = { project: string; title: string; step: string; line: number; raw: string }
 
+// What a row's 封存 press takes out: a session's block by its id, or a hand-kept task by its
+// heading line, checked against the title so a task that moved is still found once.
+export type TaskRef = { project: string; title: string; line: number; session: string | null }
+
 export type WaitingItem = {
   key: string
   project: string
@@ -96,6 +100,9 @@ export type TaskRow = {
   agent: string
   // For an ended session: the command that reopens it, ready to paste.
   resume: string | null
+  // Set when the person may take the row out now: a hand-kept task, or a block whose session
+  // ended or stopped. A live session's block is that session's to change.
+  archive: TaskRef | null
 }
 
 // This session's pull request, for the card.
@@ -492,6 +499,12 @@ export const buildView = (
           auto === 'ended' && task.auto?.agent === 'claude' && task.auto.resume
             ? resumeCommand(task.auto.resume, task.auto.dir)
             : null,
+        archive:
+          isManual && task.line >= 0
+            ? { project: name, title: task.title, line: task.line, session: null }
+            : auto === 'ended' && task.auto !== null
+              ? { project: name, title: task.title, line: task.line, session: task.auto.session }
+              : null,
       }
 
       // Work with a date close by is listed once, under 快到期.
