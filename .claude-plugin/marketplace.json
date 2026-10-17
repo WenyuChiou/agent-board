@@ -6,7 +6,7 @@
   "plugins": [
     {
       "name": "agent-board",
-      "description": "See what every AI coding agent is doing, with whatever is waiting on you at the top: Claude Code, Codex, Gemini CLI, Cursor, OpenCode, Grok Build, Hermes Agent, Muse Code",
+      "description": "See what every AI coding agent is doing, with whatever is waiting on you at the top: Claude Code, Codex, Gemini CLI, Cursor, OpenCode, Grok Build, Hermes Agent, Muse Code, OpenClaw",
       "source": "./",
       "category": "productivity",
       "strict": true

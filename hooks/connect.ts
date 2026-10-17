@@ -155,7 +155,7 @@ export const withoutSection = (text: string): string => {
 // Where each agent keeps what `/progress connect` changes, and how. `dir` says the agent is
 // installed (its folder under the home directory); `edit` turns the file's text into the
 // new text, or null when the file cannot be read as JSON and is left alone.
-export type ConnectContext = { home: string; sep: string; isWindows: boolean; script: string; inbox: string; codexHome: string; grokHome: string; hermesHome: string }
+export type ConnectContext = { home: string; sep: string; isWindows: boolean; script: string; inbox: string; codexHome: string; grokHome: string; hermesHome: string; openclawHome: string }
 
 export type AgentHook = {
   agent: string
@@ -346,6 +346,27 @@ export const agentHooks = (ctx: ConnectContext): AgentHook[] => {
             ]),
     },
     {
+      // OpenClaw takes plugins, not commands. A standalone file goes in plugins.load.paths and
+      // takes its file name as its id; it must come before the config entry that loads it.
+      agent: 'openclaw',
+      label: 'OpenClaw',
+      dir: ctx.openclawHome,
+      file: [ctx.openclawHome, OPENCLAW_FILE].join(ctx.sep),
+      edit: (text, remove) => (remove ? (text.trim() === '' ? null : DELETE) : openclawPlugin(ctx)),
+    },
+    {
+      agent: 'openclaw',
+      label: 'OpenClaw',
+      dir: ctx.openclawHome,
+      file: [ctx.openclawHome, 'openclaw.json'].join(ctx.sep),
+      edit: (text, remove) => {
+        const config = readConfig(text)
+        if (config === null) return null
+        const file = [ctx.openclawHome, OPENCLAW_FILE].join(ctx.sep)
+        return writeConfig(remove ? withoutOpenclawPlugin(config, file) : withOpenclawPlugin(config, file))
+      },
+    },
+    {
       agent: 'opencode',
       label: 'OpenCode',
       dir: join(ctx, '.config', 'opencode'),
@@ -399,4 +420,110 @@ export const AgentBoard = async ({ client, directory }) => ({
     } catch {}
   },
 })
+`
+
+const OPENCLAW_ID = 'agent-board'
+const OPENCLAW_FILE = `${OPENCLAW_ID}.mjs`
+
+// OpenClaw loads a plugin that is not bundled only when enabled, and passes it a turn's
+// words (agent_end) only with allowConversationAccess. A restrictive plugins.allow list
+// still wins, so ours joins it when there is one. OpenClaw writes this file as plain JSON;
+// one hand-written as JSON5 is left alone.
+export const withOpenclawPlugin = (config: Json, file: string): Json => {
+  const plugins = isRecord(config.plugins) ? config.plugins : {}
+  const load = isRecord(plugins.load) ? plugins.load : {}
+  const paths = Array.isArray(load.paths) ? (load.paths as unknown[]) : []
+  const entries = isRecord(plugins.entries) ? plugins.entries : {}
+  const entry = isRecord(entries[OPENCLAW_ID]) ? (entries[OPENCLAW_ID] as Json) : {}
+  const hooks = isRecord(entry.hooks) ? entry.hooks : {}
+  const allow = Array.isArray(plugins.allow) && plugins.allow.length > 0 && !plugins.allow.includes(OPENCLAW_ID) ? { allow: [...plugins.allow, OPENCLAW_ID] } : {}
+
+  return {
+    ...config,
+    plugins: {
+      ...plugins,
+      ...allow,
+      load: { ...load, paths: paths.includes(file) ? paths : [...paths, file] },
+      entries: { ...entries, [OPENCLAW_ID]: { ...entry, enabled: true, hooks: { ...hooks, allowConversationAccess: true } } },
+    },
+  }
+}
+
+export const withoutOpenclawPlugin = (config: Json, file: string): Json => {
+  if (!isRecord(config.plugins)) return config
+  const { load, entries, allow, ...rest } = config.plugins
+  const plugins: Json = { ...rest }
+  if (isRecord(load)) {
+    const paths = Array.isArray(load.paths) ? (load.paths as unknown[]).filter(path => path !== file) : undefined
+    const { paths: _, ...other } = load
+    const kept = paths === undefined || paths.length === 0 ? other : { ...other, paths }
+    if (Object.keys(kept).length > 0) plugins.load = kept
+  } else if (load !== undefined) {
+    plugins.load = load
+  }
+  if (isRecord(entries)) {
+    const { [OPENCLAW_ID]: _, ...other } = entries
+    if (Object.keys(other).length > 0) plugins.entries = other
+  } else if (entries !== undefined) {
+    plugins.entries = entries
+  }
+  if (Array.isArray(allow)) {
+    const kept = allow.filter(id => id !== OPENCLAW_ID)
+    if (kept.length > 0) plugins.allow = kept
+  } else if (allow !== undefined) {
+    plugins.allow = allow
+  }
+
+  return { ...config, plugins }
+}
+
+// Writes each finished turn into the inbox itself, as the OpenCode plugin does, so it needs
+// no shell. Heartbeat and memory runs are OpenClaw talking to itself, not the person's work;
+// a compaction or a restart does not end the session.
+export const openclawPlugin = (ctx: ConnectContext): string => `// Written by the Agent Board plugin (/progress connect): reports each finished turn to the Agent Board
+// pane.
+import { mkdirSync, renameSync, writeFileSync } from 'node:fs'
+import { join } from 'node:path'
+
+const INBOX = ${JSON.stringify(ctx.inbox)}
+
+const save = (event, payload) => {
+  try {
+    mkdirSync(INBOX, { recursive: true })
+    const name = \`openclaw-\${event}-\${Date.now()}-\${process.pid}\`
+    writeFileSync(join(INBOX, name + '.tmp'), JSON.stringify(payload))
+    renameSync(join(INBOX, name + '.tmp'), join(INBOX, name + '.json'))
+  } catch {}
+}
+
+const textOf = message =>
+  typeof message?.content === 'string'
+    ? message.content
+    : Array.isArray(message?.content)
+      ? message.content.filter(part => part?.type === 'text').map(part => part.text).join('\\n')
+      : ''
+
+export default {
+  id: '${OPENCLAW_ID}',
+  name: 'Agent Board',
+  register(api) {
+    api.on('agent_end', (event, ctx) => {
+      try {
+        if (!ctx?.sessionId || ctx.trigger === 'heartbeat' || ctx.trigger === 'memory') return
+        const messages = Array.isArray(event?.messages) ? event.messages : []
+        const last = role => [...messages].reverse().find(message => message?.role === role)
+        const answer = textOf(last('assistant'))
+        if (answer.trim() === '') return
+        save('turn', { session_id: ctx.sessionId, cwd: ctx.workspaceDir ?? '', prompt: textOf(last('user')), last_assistant_message: answer })
+      } catch {}
+    })
+    api.on('session_end', (event, ctx) => {
+      try {
+        if (event?.reason === 'compaction' || event?.reason === 'restart') return
+        const id = ctx?.sessionId ?? event?.sessionId
+        if (id) save('end', { session_id: id, cwd: ctx?.workspaceDir ?? '' })
+      } catch {}
+    })
+  },
+}
 `

@@ -676,7 +676,14 @@ const takeAgentTurns = async ($: EngineInterface, turns: readonly AgentTurn[]): 
 // `/progress connect`: the reporter script beside progress.md, and a hook for it in every
 // agent installed here. Its AGENTS.md-style section goes, so its work does not show twice.
 // `remove` takes all of it back out. Files that are not JSON are named and left alone.
-const connectAgents = async ($: EngineInterface, remove: boolean): Promise<string> => {
+// `auto` is the same connect run at a session's start: it counts only the agents it newly
+// hooked in, and says nothing of a config it cannot read, so an unchanged machine hears
+// nothing.
+type ConnectMode = 'connect' | 'remove' | 'auto'
+
+const connectAgents = async ($: EngineInterface, mode: ConnectMode): Promise<{ text: string; done: string[] }> => {
+  const remove = mode === 'remove'
+  const isAuto = mode === 'auto'
   const s = await wordsOf($)
   const path = await progressPath($)
   const isWin = await isWindows($, path)
@@ -685,19 +692,21 @@ const connectAgents = async ($: EngineInterface, remove: boolean): Promise<strin
   const codexHome = ((await $.env.get('CODEX_HOME')) ?? '').replace(/[\\/]+$/, '') || [home, '.codex'].join(sep)
   const grokHome = ((await $.env.get('GROK_HOME')) ?? '').replace(/[\\/]+$/, '') || [home, '.grok'].join(sep)
   const hermesHome = ((await $.env.get('HERMES_HOME')) ?? '').replace(/[\\/]+$/, '') || [home, '.hermes'].join(sep)
+  const openclawHome = ((await $.env.get('OPENCLAW_STATE_DIR')) ?? '').replace(/[\\/]+$/, '') || [home, '.openclaw'].join(sep)
   const script = `${path.replace(/[\\/][^\\/]*$/, '')}${sep}progress-report.${isWin ? 'ps1' : 'sh'}`
-  if (!remove) await $.fs.write(script, isWin ? reporterPs1(inboxPath(path)) : reporterSh(inboxPath(path)))
+  const reporter = isWin ? reporterPs1(inboxPath(path)) : reporterSh(inboxPath(path))
+  if (!remove && (await readText($, script).catch(() => '')) !== reporter) await $.fs.write(script, reporter)
   const done: string[] = []
   const skipped: string[] = []
   const removeFile = (file: string): Promise<void> => removeFiles($, [file], isWin)
-  for (const hook of agentHooks({ home, sep, isWindows: isWin, script, inbox: inboxPath(path), codexHome, grokHome, hermesHome })) {
+  for (const hook of agentHooks({ home, sep, isWindows: isWin, script, inbox: inboxPath(path), codexHome, grokHome, hermesHome, openclawHome })) {
     if (!(await $.fs.exists(hook.dir))) continue
     // Left under the plugin's earlier name, it would report every turn a second time.
     const hadOld = hook.old !== undefined && (await $.fs.exists(hook.old))
     if (hadOld && hook.old !== undefined) await removeFile(hook.old)
     const before = await readText($, hook.file).catch(() => null)
     if (before === null) {
-      skipped.push(s.connectSkipped(hook.label, hook.file))
+      if (!isAuto) skipped.push(s.connectSkipped(hook.label, hook.file))
       continue
     }
     if (remove && before.trim() === '') {
@@ -706,7 +715,7 @@ const connectAgents = async ($: EngineInterface, remove: boolean): Promise<strin
     }
     const after = hook.edit(before, remove)
     if (after === null) {
-      if (!remove) skipped.push(s.connectSkipped(hook.label, hook.file))
+      if (mode === 'connect') skipped.push(s.connectSkipped(hook.label, hook.file))
       continue
     }
     if (after === DELETE) {
@@ -714,15 +723,33 @@ const connectAgents = async ($: EngineInterface, remove: boolean): Promise<strin
     } else if (after !== before) {
       await $.fs.write(hook.file, after)
     }
-    if (remove && after === before && !hadOld) continue
+    if ((remove || isAuto) && after === before && !hadOld) continue
+    // OpenClaw takes two files, a plugin and the config entry that loads it.
+    if (done.includes(hook.label)) continue
     done.push(hook.label)
     if (!remove) await dropSection($, hook.agent, home, codexHome, sep)
   }
+  const trust = [...(done.includes('Codex') ? [s.connectCodexTrust] : []), ...(done.includes('Hermes Agent') ? [s.connectHermesTrust] : [])]
   const lines = remove
     ? [done.length === 0 ? s.connectNothingRemoved : s.connectRemoved(done.join(s.listSep))]
-    : [done.length === 0 ? s.connectNone : s.connectDone(done.join(s.listSep)), ...(done.includes('Codex') ? [s.connectCodexTrust] : []), ...(done.includes('Hermes Agent') ? [s.connectHermesTrust] : [])]
+    : isAuto
+      ? [s.autoConnected(done.join(s.listSep)), ...trust, s.autoConnectUndo]
+      : [done.length === 0 ? s.connectNone : s.connectDone(done.join(s.listSep)), ...trust]
 
-  return [...lines, ...skipped].join('\n')
+  return { text: [...lines, ...skipped].join('\n'), done }
+}
+
+// Installing the plugin should be all it takes: each session hooks in any agent installed
+// here that is not hooked in yet, an agent installed later included, and says so once. Once
+// the person takes the hooks out with `/progress connect remove`, or turns the autoConnect
+// option off, nothing is added behind their back.
+const autoConnect = async ($: EngineInterface, options: PluginOptions): Promise<void> => {
+  if (options.autoConnect === false || (await $.store.get('autoConnectOff')) === true) return
+  const { text, done } = await connectAgents($, 'auto')
+  if (done.length === 0) return
+  const s = await wordsOf($)
+  await update($, answer, () => ({ question: s.autoConnectTitle, text, isAsking: false }))
+  await $.ui.notify(s.autoConnected(done.join(s.listSep)), { title: s.autoConnectTitle }).catch(() => undefined)
 }
 
 // The instruction files setup --agents writes the section into, per agent.
@@ -1120,6 +1147,7 @@ export const register: Register = (on, options) => {
     const hasTools = tools.length === 0 || tools.some(tool => tool.name === 'TaskCreate' || tool.name === 'TodoWrite')
     await update($, hasTaskTools, () => hasTools)
     await poll($)
+    await autoConnect($, options).catch(() => undefined)
     const startedAt = await $.clock.now()
     await update($, now, () => startedAt)
     await pruneStore($, startedAt)
@@ -1207,7 +1235,14 @@ export const register: Register = (on, options) => {
       return { text: s.synced }
     }
     const connect = /^(?:connect|接上|连接|連接)\s*(remove|off|拿掉|去掉|移除)?$/i.exec(arg)
-    if (connect !== null) return { text: await connectAgents($, connect[1] !== undefined) }
+    if (connect !== null) {
+      // Taking the hooks out also stops a session from putting them back; connecting again
+      // lets it.
+      const isRemove = connect[1] !== undefined
+      if (isRemove) await $.store.set('autoConnectOff', true)
+      else await $.store.delete('autoConnectOff')
+      return { text: (await connectAgents($, isRemove ? 'remove' : 'connect')).text }
+    }
     const add = /^(?:加|新增|add|[+＋])\s*(.*)$/is.exec(arg)
     if (add !== null) return { text: await quickAdd($, add[1] ?? '') }
     if (/^(週報|周报|今天|report|weekly|today)$/i.test(arg)) {

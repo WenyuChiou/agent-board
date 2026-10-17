@@ -167,7 +167,7 @@ The full specification, for tools that read or write the file, is [docs/FORMAT.m
 
 ## Other agents
 
-Run this once in Claude Code, or `claude -p "/progress connect"` from any shell (so any agent can run it for you):
+Claude Code connects them on its own: each session hooks in every agent installed here that is not hooked in yet (one installed later included), and says once which it connected. `/progress connect remove` takes the hooks out and stops this; the plugin's **Connect other agents automatically** option in `/config` turns it off too. To connect by hand, and see which config files could not be edited, run this in Claude Code, or `claude -p "/progress connect"` from any shell:
 
 ```
 /progress connect
@@ -184,6 +184,7 @@ It finds the agents installed on this machine and gives each one a hook that run
 | Grok Build | `~/.grok/hooks/agent-board.json` (`$GROK_HOME`) | `Stop` |
 | Hermes Agent | `~/.hermes/config.yaml` (`$HERMES_HOME`) | `post_llm_call`. Hermes asks once before it runs a new hook; answer `y` |
 | Muse Code | `~/.config/muse/settings.json` | `Stop` |
+| OpenClaw | `~/.openclaw/agent-board.mjs`, and `openclaw.json` beside it to load it (`$OPENCLAW_STATE_DIR`) | `agent_end`. Restart its gateway after connecting |
 
 The hook runs `~/.claude/progress-report.sh` (Windows: `progress-report.ps1`), which `/progress connect` writes. The script has no dependencies, always exits 0 and prints nothing, except `{}` for Cursor. Your own hooks in those files stay. A config file that is not plain JSON is left alone, and the command says which one. If setup `--agents` had put the AGENTS.md section into that agent's instructions, the section is removed, so the work does not show twice. `/progress connect remove` takes everything back out.
 

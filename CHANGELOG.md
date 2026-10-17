@@ -8,12 +8,53 @@
   could not read the file. The empty map now becomes a `hooks:` block with
   ours under it, and our lines end the way the file's do (`\r\n` on
   Windows); a flow-style block with anything in it is still left alone. A
-  `hooks:` key with a comment after it is followed in a Windows file too. Connecting again leaves the block where it is
-  instead of moving it to the end of the file. Found by a live run on
+  `hooks:` key with a comment after it is followed in a Windows file too.
+  Connecting again leaves the block where it is instead of moving it to the
+  end of the file. Found by a live run on
   Windows. Tests: "a Hermes config.yaml with the empty hooks: {} it ships
   with gets our hooks in its place, Windows line ends and all", "Hermes
   Agent’s hooks go into its config.yaml beside the person’s own, once, and
   come back out cleanly".
+
+## 0.15.0 — 2026-10-17
+
+- **OpenClaw reports too.** Connecting (by hand or at a session's start) writes
+  a one-file OpenClaw plugin, `~/.openclaw/agent-board.mjs`
+  (`$OPENCLAW_STATE_DIR`), and the `openclaw.json` entry that loads it: its
+  path in `plugins.load.paths`, the plugin enabled with
+  `allowConversationAccess` (OpenClaw hands a plugin a turn's words only with
+  it), and its id added to `plugins.allow` when that list is in use. The
+  person's own settings stay, a config hand-written as JSON5 is left alone,
+  and `/progress connect remove` takes the file and the entry back out. The
+  plugin writes each finished turn (`agent_end`) into the inbox itself, skips
+  OpenClaw's heartbeat and memory runs, and ends the block on `session_end`
+  but not on a compaction or a restart. A turn run in OpenClaw's own workspace
+  folder is filed under the project "OpenClaw". Tested live against OpenClaw
+  2026.10.4 with a mock model; its `session_end` did not fire in a one-shot
+  local run, so the end is covered by tests only. Tests: "OpenClaw gets a
+  plugin file and the config entry that loads it, beside the person’s own
+  plugins, and both come back out", "the OpenClaw plugin skips heartbeat and
+  memory runs and ends a session on anything but a compaction or restart", "a
+  real OpenClaw turn from its plugin becomes a block under OpenClaw, not under
+  its workspace folder", "a session hooks OpenClaw in by a plugin file and its
+  config entry, names it once, and takes both back out".
+
+## 0.14.0 — 2026-10-17
+
+- **Installing is all it takes.** Each Claude Code session now hooks in every
+  coding agent installed on this machine that is not hooked in yet (Codex,
+  Gemini CLI, Cursor, OpenCode, Grok Build, Hermes Agent, Muse Code), an agent
+  installed later included, and says once, in the pane and by a notification,
+  which it connected, what Codex and Hermes Agent still ask of you, and how to
+  undo it. Nothing is said when nothing changed. `/progress connect remove`
+  takes the hooks out and stops this until `/progress connect` is run again,
+  and the new option "Connect other agents automatically" (`autoConnect`)
+  turns it off. Install is two lines; `/progress connect` still connects at
+  once and names any config it could not edit. Tests: "a session hooks in the
+  agents installed here without /progress connect, and says so in the pane and
+  once by notification", "an agent already hooked in is left as it is, and
+  nothing is said", "once the hooks are taken out, a session does not put them
+  back", "with the autoConnect option off, a session hooks nothing in".
 
 ## 0.13.0 — 2026-10-17
 

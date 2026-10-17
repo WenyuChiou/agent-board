@@ -167,7 +167,7 @@ Claude 會列出 Task 清單，面板跟著走：卡片顯示任務、它的背�
 
 ## 其他 agent
 
-在 Claude Code 裡執行一次，或在任何終端機執行 `claude -p "/progress connect"`（所以任何 agent 都能幫你跑）：
+Claude Code 會自己接上它們：每個對話開始時，會把這台電腦裝了、但還沒接上的 agent 接上（之後才裝的也一樣），並告訴你一次接了哪些。`/progress connect remove` 會拿掉 hook 並停止自動接；在 `/config` 裡關掉外掛的 **Connect other agents automatically** 也能關掉。想手動接、並看看哪些設定檔改不了，就在 Claude Code 裡執行，或在任何終端機執行 `claude -p "/progress connect"`：
 
 ```
 /progress connect
@@ -184,6 +184,7 @@ Claude 會列出 Task 清單，面板跟著走：卡片顯示任務、它的背�
 | Grok Build | `~/.grok/hooks/agent-board.json`（`$GROK_HOME`） | `Stop` |
 | Hermes Agent | `~/.hermes/config.yaml`（`$HERMES_HOME`） | `post_llm_call`，Hermes 第一次跑新 hook 前會問一次，回答 `y` |
 | Muse Code | `~/.config/muse/settings.json` | `Stop` |
+| OpenClaw | `~/.openclaw/agent-board.mjs`，以及旁邊載入它的 `openclaw.json`（`$OPENCLAW_STATE_DIR`） | `agent_end`，接上後重開它的 gateway |
 
 hook 執行的是 `/progress connect` 寫好的 `~/.claude/progress-report.sh`（Windows 是 `progress-report.ps1`）。腳本：
 - 不需要裝任何東西；

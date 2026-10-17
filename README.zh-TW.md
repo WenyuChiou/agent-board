@@ -4,12 +4,12 @@
 
 <p align="center">
 <b>每個 AI coding agent 在做什麼，一個面板看完；等你的事，永遠排第一個。</b><br>
-Claude Code 外掛，也跟得上 Codex、Gemini CLI、Cursor、OpenCode、Grok Build、Hermes Agent 和 Muse Code。
+Claude Code 外掛，也跟得上 Codex、Gemini CLI、Cursor、OpenCode、Grok Build、Hermes Agent、Muse Code 和 OpenClaw。
 </p>
 
 <p align="center">
 <a href="https://github.com/WenyuChiou/agent-board/actions/workflows/test.yml"><img alt="測試" src="https://github.com/WenyuChiou/agent-board/actions/workflows/test.yml/badge.svg"></a>
-<a href="CHANGELOG.md"><img alt="版本 0.13.0" src="https://img.shields.io/badge/version-0.13.0-blue"></a>
+<a href="CHANGELOG.md"><img alt="版本 0.15.0" src="https://img.shields.io/badge/version-0.15.0-blue"></a>
 <a href="LICENSE"><img alt="MIT 授權" src="https://img.shields.io/badge/license-MIT-green"></a>
 <img alt="macOS、Linux、Windows" src="https://img.shields.io/badge/macOS%20%C2%B7%20Linux%20%C2%B7%20Windows-lightgrey">
 </p>
@@ -20,16 +20,17 @@ Claude Code 外掛，也跟得上 Codex、Gemini CLI、Cursor、OpenCode、Grok 
 
 ## 支援的 agent
 
-| | Agent | 怎麼回報 | 你要做一次的事 | 實測過 |
+| | Agent | 怎麼回報 | 你要做一次的事（會自動接上） | 實測過 |
 |:-:|---|---|---|---|
 | <img src="docs/images/agents/claude-code.svg" width="24" alt=""> | **Claude Code** | 內建：每個對話都會出現，有沒有 Task 清單都行 | 不用做什麼 | ✅ 2.1.302 |
-| <img src="docs/images/agents/codex.svg" width="24" alt=""> | **Codex** | `Stop` hook | `/progress connect`，再到 Codex 的 `/hooks` 核准 | ✅ |
-| <img src="docs/images/agents/gemini-cli.svg" width="24" alt=""> | **Gemini CLI** | `AfterAgent` hook | `/progress connect` | ✅ 0.64.0 |
-| <img src="docs/images/agents/opencode.svg" width="24" alt=""> | **OpenCode** | 外掛，在 `session.idle` 時 | `/progress connect` | ✅ 1.19.3 |
-| <img src="docs/images/agents/grok-build.svg" width="24" alt=""> | **Grok Build** | `Stop` hook | `/progress connect` | ✅ 1.0.62 |
-| <img src="docs/images/agents/hermes-agent.svg" width="24" alt=""> | **Hermes Agent** | `post_llm_call` shell hook | `/progress connect`，Hermes 第一次問時回答 `y` | ✅ 0.19.0 |
-| <img src="docs/images/agents/cursor.svg" width="24" alt=""> | **Cursor** | `afterAgentResponse` hook | `/progress connect` | 依 Cursor 文件實作 |
-| <img src="docs/images/agents/muse-code.svg" width="24" alt=""> | **Muse Code** | `Stop` hook | `/progress connect` | 依 Muse 文件實作 |
+| <img src="docs/images/agents/codex.svg" width="24" alt=""> | **Codex** | `Stop` hook | 到 Codex 的 `/hooks` 核准一次 | ✅ |
+| <img src="docs/images/agents/gemini-cli.svg" width="24" alt=""> | **Gemini CLI** | `AfterAgent` hook | 不用做什麼 | ✅ 0.64.0 |
+| <img src="docs/images/agents/opencode.svg" width="24" alt=""> | **OpenCode** | 外掛，在 `session.idle` 時 | 不用做什麼 | ✅ 1.19.3 |
+| <img src="docs/images/agents/grok-build.svg" width="24" alt=""> | **Grok Build** | `Stop` hook | 不用做什麼 | ✅ 1.0.62 |
+| <img src="docs/images/agents/hermes-agent.svg" width="24" alt=""> | **Hermes Agent** | `post_llm_call` shell hook | Hermes 第一次問時回答 `y` | ✅ 0.19.0 |
+| <img src="docs/images/agents/openclaw.svg" width="24" alt=""> | **OpenClaw** | 外掛，在 `agent_end` 時 | 不用做什麼 | ✅ 2026.10.4 |
+| <img src="docs/images/agents/cursor.svg" width="24" alt=""> | **Cursor** | `afterAgentResponse` hook | 不用做什麼 | 依 Cursor 文件實作 |
+| <img src="docs/images/agents/muse-code.svg" width="24" alt=""> | **Muse Code** | `Stop` hook | 不用做什麼 | 依 Muse 文件實作 |
 | | **dot** | 本機交換（自行選用） | 見 [docs/LOCAL-EXCHANGE.md](docs/LOCAL-EXCHANGE.md) | 只測過檔案約定 |
 | | **其他 agent**（Aider、Copilot、Windsurf…） | 自己寫一塊進度 | 把 [AGENTS.md](AGENTS.md) 的一段貼進它的說明檔 | |
 
@@ -42,12 +43,11 @@ Claude Code 外掛，也跟得上 Codex、Gemini CLI、Cursor、OpenCode、Grok 
 ```
 claude plugin marketplace add WenyuChiou/agent-board
 claude plugin install agent-board@agent-board
-claude -p "/progress connect"
 ```
 
-**2. 重開其他 agent**，讓它們載入新的 hook。第一次時，Codex 要在 `/hooks` 裡核准，Hermes Agent 會問你一次，回答 `y`。
+**2. 打開 Claude Code。** 面板在右邊（沒看到就輸入 `/progress`）。第一次開的時候，它會自動接上這台電腦裝的所有 coding agent，並告訴你接了哪些；之後才裝的 agent，下次開 Claude Code 時也會自動接上。
 
-**3. 打開 Claude Code。** 面板在右邊（沒看到就輸入 `/progress`）。每個 agent 的回合幾秒內就會出現。
+**3. 重開其他 agent 一次**，讓它們載入新的 hook。第一次時，Codex 要在 `/hooks` 裡核准，Hermes Agent 會問你一次，回答 `y`。之後每個 agent 的回合幾秒內就會出現。
 
 <details>
 <summary><b>或者讓 agent 幫你裝</b></summary>
@@ -81,7 +81,7 @@ claude -p "/progress connect"
 | 輸入 | 用途 |
 |---|---|
 | `/progress` | 打開面板 |
-| `/progress connect` | 把其他 agent 接上（`/progress connect remove` 拿掉 hook） |
+| `/progress connect` | 現在就接上其他 agent，並看看改了什麼；每個對話開始時也會自動做（`/progress connect remove` 拿掉 hook 並停止自動接） |
 | `+ 專案：標題 截止 11-20；步驟；步驟` | 在面板輸入框加一件自己的事（或用 `/progress add …`） |
 | `/progress open` | 在瀏覽器看 |
 | `/progress report` / `/progress today` | 複製最近 7 天／今天的進度 |

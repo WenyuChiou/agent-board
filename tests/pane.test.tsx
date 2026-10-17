@@ -1277,8 +1277,8 @@ test('a real Codex turn and its session end, written in the same second, become 
   expect(text).toContain('- [x] 加好 token bucket 中介層\n- [?] 每把金鑰的上限 — 一分鐘 100 還是 300？\n')
 })
 
-// Real payloads from Gemini CLI 0.64.0, OpenCode 1.19.3, Hermes Agent 0.19.0 and Grok Build
-// 1.0.62, each run once against a mock model; only the home folder is renamed.
+// Real payloads from Gemini CLI 0.64.0, OpenCode 1.19.3, Hermes Agent 0.19.0, Grok Build
+// 1.0.62 and OpenClaw 2026.10.4, each run once against a mock model; only the home folder is renamed.
 const GEMINI_TURN = "{\"session_id\":\"1f482f61-a6df-4dcb-96cc-b949340956b7\",\"transcript_path\":\"/home/me/.gemini/tmp/api-gateway/chats/session-2026-10-17T06-24-1f482f61.jsonl\",\"cwd\":\"/home/me/work/api-gateway\",\"hook_event_name\":\"AfterAgent\",\"timestamp\":\"2026-10-17T06:24:57.946Z\",\"prompt\":\"Add rate limiting to the public endpoints\",\"prompt_response\":\"Added the token bucket middleware. Should the per-key limit be 100 or 300 a minute?\",\"stop_hook_active\":false}"
 const GEMINI_END = "{\"session_id\":\"1f482f61-a6df-4dcb-96cc-b949340956b7\",\"transcript_path\":\"/home/me/.gemini/tmp/api-gateway/chats/session-2026-10-17T06-24-1f482f61.jsonl\",\"cwd\":\"/home/me/work/api-gateway\",\"hook_event_name\":\"SessionEnd\",\"timestamp\":\"2026-10-17T06:24:57.967Z\",\"reason\":\"exit\"}"
 const OPENCODE_TURN = "{\"session_id\":\"ses_eb75cd77affeN3SUn9NJonlKvA\",\"cwd\":\"/home/me/work/api-gateway\",\"prompt\":\"\\\"Add rate limiting to the public endpoints\\\"\",\"last_assistant_message\":\"Added the token bucket middleware. Should the per-key limit be 100 or 300 a minute?\"}"
@@ -1287,6 +1287,7 @@ const GROK_STOP = "{\"hookEventName\":\"stop\",\"sessionId\":\"01a148a9-24e5-7ff
 const GROK_SHUTDOWN = "{\"hookEventName\":\"stop\",\"sessionId\":\"01a148a9-24e5-7ff2-8b96-237d7daf0923\",\"cwd\":\"/home/me/work/api-gateway\",\"workspaceRoot\":\"/home/me/work/api-gateway\",\"timestamp\":\"2026-10-17T07:00:07.293629986+00:00\",\"transcriptPath\":\"/home/me/.grok/sessions/%2Fhome%2Fme%2Fwork%2Fapi-gateway/01a148a9-24e5-7ff2-8b96-237d7daf0923/updates.jsonl\",\"permissionMode\":\"default\",\"reason\":\"shutdown\",\"stopHookActive\":false,\"hook_event_name\":\"Stop\",\"session_id\":\"01a148a9-24e5-7ff2-8b96-237d7daf0923\",\"transcript_path\":\"/home/me/.grok/sessions/%2Fhome%2Fme%2Fwork%2Fapi-gateway/01a148a9-24e5-7ff2-8b96-237d7daf0923/updates.jsonl\",\"permission_mode\":\"default\",\"stop_hook_active\":false}\n"
 const GROK_END = "{\"hookEventName\":\"session_end\",\"sessionId\":\"01a148a9-24e5-7ff2-8b96-237d7daf0923\",\"cwd\":\"/home/me/work/api-gateway\",\"workspaceRoot\":\"/home/me/work/api-gateway\",\"timestamp\":\"2026-10-17T07:00:07.278036235+00:00\",\"transcriptPath\":\"/home/me/.grok/sessions/%2Fhome%2Fme%2Fwork%2Fapi-gateway/01a148a9-24e5-7ff2-8b96-237d7daf0923/updates.jsonl\",\"permissionMode\":\"default\",\"reason\":\"shutdown\",\"hook_event_name\":\"SessionEnd\",\"session_id\":\"01a148a9-24e5-7ff2-8b96-237d7daf0923\",\"transcript_path\":\"/home/me/.grok/sessions/%2Fhome%2Fme%2Fwork%2Fapi-gateway/01a148a9-24e5-7ff2-8b96-237d7daf0923/updates.jsonl\",\"permission_mode\":\"default\"}\n"
 const GROK_UPDATES = "{\"timestamp\":1792220407,\"method\":\"session/update\",\"params\":{\"sessionId\":\"01a148a9-24e5-7ff2-8b96-237d7daf0923\",\"update\":{\"sessionUpdate\":\"user_message_chunk\",\"content\":{\"type\":\"text\",\"text\":\"Add rate limiting to the public endpoints\"},\"_meta\":{\"modelId\":\"grok-code-fast-1\",\"promptIndex\":0}},\"_meta\":{\"eventId\":\"01a148a9-24e5-7ff2-8b96-237d7daf0923-2\",\"agentTimestampMs\":1792220407173}}}\n{\"timestamp\":1792220407,\"method\":\"session/update\",\"params\":{\"sessionId\":\"01a148a9-24e5-7ff2-8b96-237d7daf0923\",\"update\":{\"sessionUpdate\":\"agent_message_chunk\",\"content\":{\"type\":\"text\",\"text\":\"Added the token bucket middleware. Should the per-key limit be 100 or 300 a minute?\"}},\"_meta\":{\"totalTokens\":1282,\"requestTrimmedTokens\":0,\"eventId\":\"01a148a9-24e5-7ff2-8b96-237d7daf0923-4\",\"agentTimestampMs\":1792220407201,\"promptId\":\"46159f6e-bf07-40de-96f9-e001b03ffeed\",\"streamStartMs\":1792220407198,\"turnStartMs\":1792220407167,\"updateType\":\"AgentMessageChunk\",\"chunkId\":1}}}\n{\"timestamp\":1792220407,\"method\":\"_x.ai/session/update\",\"params\":{\"sessionId\":\"01a148a9-24e5-7ff2-8b96-237d7daf0923\",\"update\":{\"sessionUpdate\":\"hook_execution\",\"event_name\":\"stop\",\"prompt_id\":\"46159f6e-bf07-40de-96f9-e001b03ffeed\",\"runs\":[{\"name\":\"global/agent-board:stop[0].hooks[0]\",\"status\":{\"status\":\"success\",\"elapsed_ms\":26}}]},\"_meta\":{\"eventId\":\"01a148a9-24e5-7ff2-8b96-237d7daf0923-8\",\"agentTimestampMs\":1792220407242}}}\n{\"timestamp\":1792220407,\"method\":\"_x.ai/session/update\",\"params\":{\"sessionId\":\"01a148a9-24e5-7ff2-8b96-237d7daf0923\",\"update\":{\"sessionUpdate\":\"turn_completed\",\"prompt_id\":\"46159f6e-bf07-40de-96f9-e001b03ffeed\",\"stop_reason\":\"end_turn\",\"usage\":{\"inputTokens\":1,\"outputTokens\":1,\"totalTokens\":2,\"cachedReadTokens\":0,\"cacheCreationTokens\":0,\"reasoningTokens\":0,\"modelCalls\":1,\"apiDurationMs\":11,\"modelUsage\":{\"grok-code-fast-1\":{\"inputTokens\":1,\"outputTokens\":1,\"totalTokens\":2,\"cachedReadTokens\":0,\"cacheCreationTokens\":0,\"reasoningTokens\":0,\"modelCalls\":1,\"apiDurationMs\":11}},\"numTurns\":1},\"elapsed_ms\":96},\"_meta\":{\"eventId\":\"01a148a9-24e5-7ff2-8b96-237d7daf0923-9\",\"agentTimestampMs\":1792220407263}}}\n{\"timestamp\":1792220407,\"method\":\"_x.ai/session/update\",\"params\":{\"sessionId\":\"01a148a9-24e5-7ff2-8b96-237d7daf0923\",\"update\":{\"sessionUpdate\":\"hook_execution\",\"event_name\":\"session_end\",\"runs\":[{\"name\":\"global/agent-board:session_end[0].hooks[0]\",\"status\":{\"status\":\"success\",\"elapsed_ms\":11}}]},\"_meta\":{\"eventId\":\"01a148a9-24e5-7ff2-8b96-237d7daf0923-10\",\"agentTimestampMs\":1792220407290}}}\n{\"timestamp\":1792220407,\"method\":\"_x.ai/session/update\",\"params\":{\"sessionId\":\"01a148a9-24e5-7ff2-8b96-237d7daf0923\",\"update\":{\"sessionUpdate\":\"hook_execution\",\"event_name\":\"stop\",\"runs\":[{\"name\":\"global/agent-board:stop[0].hooks[0]\",\"status\":{\"status\":\"success\",\"elapsed_ms\":12}}]},\"_meta\":{\"eventId\":\"01a148a9-24e5-7ff2-8b96-237d7daf0923-11\",\"agentTimestampMs\":1792220407306}}}\n"
+const OPENCLAW_TURN = "{\"session_id\":\"174e82e2-caf4-4bf7-ab73-ae4a2c9c1b31\",\"cwd\":\"/home/me/.openclaw/workspace\",\"prompt\":\"Add rate limiting to the API\",\"last_assistant_message\":\"Added the token bucket middleware. Should the per-key limit be 100 or 300 a minute?\"}"
 const RATE_LIMIT = 'TITLE: Rate-limit the public endpoints\nCONTEXT: Keep the public API up under abuse\nDONE: Added the token bucket middleware\nNEXT: -\nASK: Per-key limit — 100 or 300 a minute?'
 
 // Runs a session over these inbox files and hands back the file and what the model was asked.
@@ -1330,6 +1331,14 @@ test('a real Hermes Agent turn, its words under extra, becomes a block waiting o
   expect(asked.some(prompt => prompt.includes('Add rate limiting to the public endpoints') && prompt.includes('100 or 300 a minute'))).toBe(true)
   expect(text).toContain('agent=hermes state=waiting')
   expect(text).toContain('### Rate-limit the public endpoints\n')
+})
+
+test('a real OpenClaw turn from its plugin becomes a block under OpenClaw, not under its workspace folder', async ($, on) => {
+  const { text, asked } = await takeInbox($, on, [[`${INBOX}/openclaw-turn-1792224341713-21162.json`, OPENCLAW_TURN]])
+  expect(asked.some(prompt => prompt.includes('Add rate limiting to the API') && prompt.includes('100 or 300 a minute'))).toBe(true)
+  expect(text).toContain('## OpenClaw\n')
+  expect(text).not.toContain('## workspace')
+  expect(text).toContain('agent=openclaw state=waiting')
 })
 
 test('a real Grok Build turn takes its request from the session log and ends on the shutdown stop', async ($, on) => {
@@ -1540,4 +1549,66 @@ test('on Windows, a progress file written with forward slashes still gets the Po
   const written = [...world.files.keys()]
   expect(written.some(path => /Users\/me\/\.claude\/progress-report\.ps1$/.test(path))).toBe(true)
   expect(written.some(path => path.endsWith('progress-report.sh'))).toBe(false)
+})
+
+test('a session hooks in the agents installed here without /progress connect, and says so in the pane and once by notification', async ($, on) => {
+  const world: World = { files: new Map([['/home/me/.codex/config.toml', 'model = "gpt-6"\n']]), mtime: 1, hasTasks: true, ran: [] }
+  engineBeneath(on, world)
+  const seen = outside(on)
+  await $.session.start({ cwd: '/work/persona_framework', surface: 'terminal', isInteractive: true })
+  const codex = JSON.parse(world.files.get('/home/me/.codex/hooks.json') ?? '{}')
+  expect(codex.hooks.Stop[0].hooks[0].command).toBe("sh '/home/me/.claude/progress-report.sh' codex turn")
+  expect(world.files.get('/home/me/.claude/progress-report.sh')).toContain("dir='/home/me/.claude/progress-inbox'")
+  expect(seen.notified).toEqual(['已自動接上：Codex。重開它們之後，每個回合都會出現在這裡。'])
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal', props: PROPS })
+  expect(await ui.find({ type: 'Text', text: /Codex 第一次要在它的 \/hooks 裡核准這個 hook 才會跑。/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /\/progress connect remove/ })).toBeDefined()
+})
+
+test('a session hooks OpenClaw in by a plugin file and its config entry, names it once, and takes both back out', async ($, on) => {
+  const world: World = { files: new Map([['/home/me/.openclaw/openclaw.json', '{"gateway":{"port":18789}}']]), mtime: 1, hasTasks: true, ran: [] }
+  engineBeneath(on, world)
+  const seen = outside(on)
+  await $.session.start({ cwd: '/work/persona_framework', surface: 'terminal', isInteractive: true })
+  expect(world.files.get('/home/me/.openclaw/agent-board.mjs')).toContain('const INBOX = "/home/me/.claude/progress-inbox"')
+  const config = JSON.parse(world.files.get('/home/me/.openclaw/openclaw.json') ?? '{}')
+  expect(config.gateway).toEqual({ port: 18789 })
+  expect(config.plugins.load.paths).toEqual(['/home/me/.openclaw/agent-board.mjs'])
+  expect(config.plugins.entries['agent-board']).toEqual({ enabled: true, hooks: { allowConversationAccess: true } })
+  expect(seen.notified).toEqual(['已自動接上：OpenClaw。重開它們之後，每個回合都會出現在這裡。'])
+
+  const removed = await $.command.run({ ...TIDY, args: 'connect remove' })
+  expect(removed.text).toContain('已拿掉：OpenClaw。')
+  expect(world.ran).toContainEqual(['rm', '-f', '/home/me/.openclaw/agent-board.mjs'])
+  expect(JSON.parse(world.files.get('/home/me/.openclaw/openclaw.json') ?? '{}')).toEqual({ gateway: { port: 18789 }, plugins: {} })
+})
+
+test('an agent already hooked in is left as it is, and nothing is said', async ($, on) => {
+  const hooked = JSON.stringify({ hooks: { Stop: [{ hooks: [{ type: 'command', command: "sh '/home/me/.claude/progress-report.sh' codex turn", timeout: 10 }] }], SessionEnd: [{ hooks: [{ type: 'command', command: "sh '/home/me/.claude/progress-report.sh' codex end", timeout: 3 }] }] } }, null, 2) + '\n'
+  const world: World = { files: new Map([['/home/me/.codex/hooks.json', hooked]]), mtime: 1, hasTasks: true, ran: [] }
+  engineBeneath(on, world)
+  const seen = outside(on)
+  await $.session.start({ cwd: '/work/persona_framework', surface: 'terminal', isInteractive: true })
+  expect(world.files.get('/home/me/.codex/hooks.json')).toBe(hooked)
+  expect(seen.notified).toEqual([])
+})
+
+test('once the hooks are taken out, a session does not put them back', async ($, on) => {
+  const world: World = { files: new Map([['/home/me/.codex/config.toml', '']]), mtime: 1, hasTasks: true, ran: [], store: { inboxDone: {}, autoConnectOff: true } }
+  engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/persona_framework', surface: 'terminal', isInteractive: true })
+  expect(world.files.has('/home/me/.codex/hooks.json')).toBe(false)
+  // Connecting by hand works as before; taking the hooks out again keeps them out of later sessions.
+  await $.command.run({ ...TIDY, args: 'connect' })
+  expect(JSON.parse(world.files.get('/home/me/.codex/hooks.json') ?? '{}').hooks.Stop).toHaveLength(1)
+  await $.command.run({ ...TIDY, args: 'connect remove' })
+  await $.session.start({ cwd: '/work/persona_framework', surface: 'terminal', isInteractive: true })
+  expect(JSON.parse(world.files.get('/home/me/.codex/hooks.json') ?? '{}').hooks).toEqual({})
+})
+
+test('with the autoConnect option off, a session hooks nothing in', { options: { autoConnect: false } }, async ($, on) => {
+  const world: World = { files: new Map([['/home/me/.codex/config.toml', '']]), mtime: 1, hasTasks: true, ran: [] }
+  engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/persona_framework', surface: 'terminal', isInteractive: true })
+  expect(world.files.has('/home/me/.codex/hooks.json')).toBe(false)
 })
