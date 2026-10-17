@@ -156,8 +156,7 @@
 <text x="349.6" y="330" textLength="42.0" lengthAdjust="spacingAndGlyphs" fill="#e6e4dc">Reply</text></g>
 <rect class="sc fade" style="animation-name:k2" x="16" y="155" width="398.40000000000003" height="202" rx="6" fill="none" stroke="#00A3AF" stroke-width="2.4"/>
 <rect class="sc fade" style="animation-name:k3" x="16" y="255" width="154.8" height="22" rx="6" fill="none" stroke="#00A3AF" stroke-width="2.4"/>
-<g class="sc swap" style="animation-name:k4"><rect x="0" y="34" width="430.40000000000003" height="344" fill="#1e2022"/><path d="M26.2 376V370q0 -4 4 -4H30.4M30.4 366h369.6M400 366H400.2q4 0 4 4V376" fill="none" stroke="#6E7268" stroke-width="1.2" stroke-linecap="butt"/>
-<text x="22.0" y="70" textLength="67.2" lengthAdjust="spacingAndGlyphs" fill="#e6e4dc" font-weight="700">Progress</text>
+<g class="sc swap" style="animation-name:k4"><rect x="0" y="34" width="430.40000000000003" height="344" fill="#1e2022"/><text x="22.0" y="70" textLength="67.2" lengthAdjust="spacingAndGlyphs" fill="#e6e4dc" font-weight="700">Progress</text>
 <text x="22.0" y="110" textLength="25.2" lengthAdjust="spacingAndGlyphs" fill="#F8B500">● 4</text>
 <text x="55.6" y="110" textLength="58.8" lengthAdjust="spacingAndGlyphs" fill="#e6e4dc">waiting</text>
 <text x="131.2" y="110" textLength="25.2" lengthAdjust="spacingAndGlyphs" fill="#00A3AF">▸ 6</text>
@@ -172,9 +171,10 @@
 <text x="22.0" y="210" textLength="386.4" lengthAdjust="spacingAndGlyphs" fill="#5C9291">api-gateway › Rate-limit the public endpoints…</text>
 <text x="22.0" y="230" textLength="168.0" lengthAdjust="spacingAndGlyphs" fill="#e6e4dc">100 or 300 a minute?</text>
 <text x="22.0" y="250" textLength="84.0" lengthAdjust="spacingAndGlyphs" fill="#AFAFB0">25 min ago</text>
-<text x="22.0" y="270" textLength="344.4" lengthAdjust="spacingAndGlyphs" fill="#AFAFB0">Reply in the api-gateway session (codex).</text>
-<text x="22.0" y="290" textLength="184.8" lengthAdjust="spacingAndGlyphs" fill="#AFAFB0">Can't reply from here.</text>
-<text x="22.0" y="330" textLength="193.2" lengthAdjust="spacingAndGlyphs" fill="#e6e4dc">3 more waiting on you ▸</text></g>
+<text x="22.0" y="270" textLength="386.4" lengthAdjust="spacingAndGlyphs" fill="#AFAFB0">Reply in the "Rate-limit the public endpoints"</text>
+<text x="22.0" y="290" textLength="361.2" lengthAdjust="spacingAndGlyphs" fill="#AFAFB0">session (7f3c19ab, codex). Can't reply from</text>
+<text x="22.0" y="310" textLength="42.0" lengthAdjust="spacingAndGlyphs" fill="#AFAFB0">here.</text>
+<text x="22.0" y="350" textLength="193.2" lengthAdjust="spacingAndGlyphs" fill="#e6e4dc">3 more waiting on you ▸</text></g>
 <g class="sc fade" style="animation-name:k0"><rect x="0.5" y="312" width="429.40000000000003" height="65.5" fill="#1e2022"/><line x1="0.5" y1="312" x2="429.90000000000003" y2="312" stroke="#68BE8D" stroke-width="1.6"/><text x="22" y="342" font-weight="700" fill="#68BE8D">✓ Replied to Claude: Behind a flag</text></g>
 <g class="sc swap" style="animation-name:k5"><rect x="0" y="34" width="430.40000000000003" height="344" fill="#1e2022"/><text x="22.0" y="90" textLength="134.4" lengthAdjust="spacingAndGlyphs" fill="#e6e4dc">▾ Waiting on you</text>
 <text x="164.8" y="90" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#F8B500">5</text>

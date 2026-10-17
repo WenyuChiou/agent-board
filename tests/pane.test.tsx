@@ -958,13 +958,47 @@ test('another agent’s question is answered there, but its command can be copie
   const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
 
   expect(await ui.find({ type: 'Text', text: '$ gcloud auth login' })).toBeDefined()
-  expect(await ui.find({ type: 'Text', text: /到 data-pipeline 的對話（gemini）回覆/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /到「Backfill last year's events」那個對話（3db00eaf，gemini）回覆/ })).toBeDefined()
+  // Only a Claude Code session's id is offered to copy.
+  expect(await ui.find({ type: 'Button', key: "data-pipeline::Backfill last year's events::1::id" })).toBeUndefined()
   await ui.press({ key: "data-pipeline::Backfill last year's events::1::copy" })
   expect(seen.copied.at(-1)).toBe('gcloud auth login')
 
   await ui.press({ key: 'ask::docs-site::October release notes::0' })
   const links = (await ui.findAll({ type: 'Link' })).map(link => link.props.href)
   expect(links).toContain('https://docs.example.com/preview/2026-10')
+  await ui.unmount()
+})
+
+test('an item from another session in the same folder names that session’s task and id', async ($, on) => {
+  const board = `# Project progress
+
+## data-pipeline
+
+<!-- auto session=a1b2c3d4 state=waiting updated=2026-10-16T11:50:00Z resume=a1b2c3d4-1111-2222-3333 -->
+### Backfill last year's events
+- [?] Keep the old table, OK?
+<!-- /auto session=a1b2c3d4 -->
+
+<!-- auto session=e5f6a7b8 state=waiting updated=2026-10-16T11:55:00Z resume=e5f6a7b8-4444-5555-6666 -->
+### Rename the export job
+- [?] Ship the rename to staging, OK?
+<!-- /auto session=e5f6a7b8 -->
+`
+  const world: World = { files: new Map([[FILE, board]]), mtime: 1, hasTasks: true, store: { opened: ['waiting'] } }
+  engineBeneath(on, world)
+  const seen = outside(on)
+  await $.session.start({ cwd: '/work/persona_framework', surface: 'desktop', isInteractive: true })
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
+
+  // Two sessions in one folder: the folder alone would send the person to either.
+  expect(await ui.find({ type: 'Text', text: /到 data-pipeline 的對話/ })).toBeUndefined()
+  expect(await ui.find({ type: 'Text', text: /到「Backfill last year's events」那個對話（a1b2c3d4）回覆，這裡回不了/ })).toBeDefined()
+  await ui.press({ key: 'ask::data-pipeline::Rename the export job::0' })
+  expect(await ui.find({ type: 'Text', text: /到「Rename the export job」那個對話（e5f6a7b8）回覆，這裡回不了/ })).toBeDefined()
+  await ui.press({ key: 'data-pipeline::Rename the export job::0::id' })
+  expect(seen.copied.at(-1)).toBe('e5f6a7b8-4444-5555-6666')
+  expect(await ui.find({ type: 'Text', text: '已複製到剪貼簿' })).toBeDefined()
   await ui.unmount()
 })
 

@@ -1556,6 +1556,72 @@ test('the board you work in marks the chosen line and lists only the keys that d
   expect(onJob.trimEnd().endsWith('Copied: 300')).toBe(true)
 })
 
+test('the terminal board, progress.html and the board page name the session that asked, and c copies a Claude Code session’s id', () => {
+  const file = `# Project progress
+
+## data-pipeline
+<!-- auto session=a1b2c3d4 state=waiting updated=2026-10-17T08:40:00Z resume=a1b2c3d4-1111-2222-3333 -->
+### Backfill the events
+- [?] Keep the old table, OK?
+<!-- /auto session=a1b2c3d4 -->
+
+<!-- auto session=c9d8e7f6 agent=codex state=waiting updated=2026-10-17T08:40:00Z -->
+### Rename the export job
+- [?] Ship the rename to staging, OK?
+<!-- /auto session=c9d8e7f6 -->
+`
+  const now = Date.parse('2026-10-17T08:45:00Z')
+  const view = buildView(parseProgress(file), [], null, now, 0, {}, STRINGS.en)
+  const items = boardItems(view, [])
+  const claude = items.findIndex(item => item.type === 'ask' && item.ask.task === 'Backfill the events')
+  const codex = items.findIndex(item => item.type === 'ask' && item.ask.task === 'Rename the export job')
+  expect(boardKey({ ...emptyBoardState, selected: claude }, 'c', items, STRINGS.en).action).toEqual({ type: 'copy', text: 'a1b2c3d4-1111-2222-3333' })
+  // Another agent's id finds no Claude Code session: there is nothing to copy.
+  expect(boardKey({ ...emptyBoardState, selected: codex }, 'c', items, STRINGS.en).action).toBeNull()
+  const screen = boardScreen(view, [], { ...emptyBoardState, selected: claude }, STRINGS.en, { width: 120, isColor: false })
+  expect(screen).toContain(`Reply in the "Backfill the events" session (a1b2c3d4). Can't reply from here.`)
+  expect(screen).toContain('c copy session ID')
+  const onCodex = boardScreen(view, [], { ...emptyBoardState, selected: codex }, STRINGS.en, { width: 120, isColor: false })
+  expect(onCodex).toContain(`Reply in the "Rename the export job" session (c9d8e7f6, codex). Can't reply from here.`)
+  expect(onCodex).not.toContain('c copy session ID')
+
+  const html = dashboardHtml(view, STRINGS['zh-TW'], 'p', 'updated now')
+  expect(html).toContain('到「Backfill the events」那個對話（a1b2c3d4）回覆，這裡回不了。')
+  expect(html).not.toContain('到 data-pipeline 的對話')
+  const page = serveModel(view, [], STRINGS['zh-CN']).asks.find(ask => ask.task === 'Backfill the events')
+  expect(page?.info).toBe('到“Backfill the events”那个对话（a1b2c3d4）回复，这里回不了。')
+})
+
+test('a Claude Code block with no resume id offers its block id to copy only when it is a plain id', () => {
+  const file = `# Project progress
+
+## data-pipeline
+<!-- auto session=a1b2c3d4 state=waiting updated=2026-10-17T08:40:00Z -->
+### Backfill the events
+- [?] Keep the old table, OK?
+<!-- /auto session=a1b2c3d4 -->
+
+<!-- auto session=$(id|sh) state=waiting updated=2026-10-17T08:40:00Z -->
+### Rename the export job
+- [?] Ship the rename to staging, OK?
+<!-- /auto session=$(id|sh) -->
+`
+  const now = Date.parse('2026-10-17T08:45:00Z')
+  const view = buildView(parseProgress(file), [], null, now, 0, {}, STRINGS.en)
+  expect(view.waiting.map(item => [item.task, item.sessionId])).toEqual([
+    ['Backfill the events', 'a1b2c3d4'],
+    ['Rename the export job', null],
+  ])
+  const items = boardItems(view, [])
+  const odd = items.findIndex(item => item.type === 'ask' && item.ask.task === 'Rename the export job')
+  // Anyone can write the file: text that is not a plain id never reaches the clipboard.
+  expect(boardKey({ ...emptyBoardState, selected: odd }, 'c', items, STRINGS.en).action).toBeNull()
+  expect(boardScreen(view, [], { ...emptyBoardState, selected: odd }, STRINGS.en, { width: 120, isColor: false })).not.toContain('c copy session ID')
+  // A block id alone does not reopen a session with claude --resume, so the note does not offer it.
+  expect(STRINGS.en.sessionIdOf('Backfill the events', false)).not.toContain('--resume')
+  expect(STRINGS.en.sessionIdOf('Backfill the events', true)).toContain('claude --resume')
+})
+
 test('the chosen line stays chosen when a line above it comes or goes', () => {
   const now = Date.parse('2026-10-17T08:45:00Z')
   const before = boardItems(buildView(parseProgress(WORK_FILE), [], null, now, 0, {}, STRINGS.en), [])
