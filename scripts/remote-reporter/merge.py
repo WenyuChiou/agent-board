@@ -94,6 +94,11 @@ def place_new(lines, project, block):
     """Insert a new block the way hooks/blocks.ts upsertAutoBlock does: after
     what is already in its section, one blank line before the start marker and
     one after the end marker (also before a following `##`)."""
+    # A comment opening in the heading would hide every line after it up to the next `-->`,
+    # other blocks with them. reporter.py refuses one in BOARD_PROJECT; a fragment written by
+    # hand, or --under, is refused here.
+    if "<!--" in project or "-->" in project:
+        raise ValueError(f"project heading has '<!--' or '-->': {project!r}")
     if all(not line.strip() for line in lines):
         return [f"## {project}", "", *block]
     section = section_range(lines, project)

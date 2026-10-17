@@ -745,7 +745,12 @@ const promo = (lang: Lang): string => {
   const mono = monoOf(lang)
   const w = PROMO[lang]
   const pal = DARK
-  const { grid, theme } = paneGrid(lang, 'dark', { opened: [], isAnswered: false })
+  const { grid: whole, theme } = paneGrid(lang, 'dark', { opened: [], isAnswered: false })
+  // The card has no room for the Already answered line under the reply box (nor the blank line
+  // above it): the notification under the pane would run off the card.
+  const hide = whole.findIndex(row => row.map(cell => cell.ch).join('').includes(STRINGS[lang].answeredHide))
+  const isBlankAbove = hide > 0 && (whole[hide - 1] ?? []).every(cell => cell.ch === ' ')
+  const grid = isBlankAbove ? [...whole.slice(0, hide - 1), ...whole.slice(hide + 1)] : whole
   // The pane whole, down to the line before its second box (the first is the reply box), so
   // no line is cut off.
   const boxes = grid.flatMap((row, i) => ((row[0]?.ch ?? '') === '╭' ? [i] : []))

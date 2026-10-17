@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.20.4 — 2026-10-17
+## 0.20.6 — 2026-10-17
 
 Another agent's question says how to get back to the session that asked it, for every
 agent (#49).
@@ -14,9 +14,10 @@ agent (#49).
   `hermes --resume` or `opencode -s`. Cursor and OpenClaw sessions get the ID only. A
   session that left no ID says plainly that there is no way back to it from here: a block
   written by hand under the AGENTS.md rule, or one pasted from a web chat such as Muse. A
-  phone on the local network gets the ID but not the command or its folder. The pane and
-  the board's page (**Copy session ID**, and **Copy resume command** where there is one)
-  copy for any agent, and the note after copying names that agent's list and command. On
+  phone on the local network gets the ID but not the command or its folder. The pane
+  (**Copy session ID**) and the board's page (that, and **Copy resume command** where there
+  is one) copy for any agent, and the note after copying names that agent's list and
+  command. On
   the terminal board, `c` copies the whole command where there is one, since its line is
   cut to the terminal's width, else the ID (unless the step has a command or link of its
   own).
@@ -40,12 +41,269 @@ agent (#49).
   how to get back to that session, or plainly that there is none, on every surface" (the
   terminal board at 120 and 80 columns), "the terminal board, progress.html and the board
   page name the session that asked, and c copies the whole command that reopens it",
-  "an ended session offers the command that reopens it where it ran" and "a Claude
+  "an ended session offers the command that reopens it where it ran", "another agent’s
+  question marked answered shows no way back anywhere, and one still asked offers both c
+  and h" and "a Claude
   Code block with no resume id offers its block id to copy only when it is a plain id"; in
   `tests/pane.test.tsx` "another agent’s question is answered there, but its command can
   be copied and its link opened from here", which now says there is no way back for a block
   with no ID, and "an item from another session in the same folder names that session’s
   task and id", which now copies a Codex session's ID and shows its command.
+
+## 0.20.5 — 2026-10-17
+
+An answered question can be put away without answering it again (#52).
+
+- **Already answered, hide.** A question from any agent stayed in Waiting on you until its
+  session changed its block. A session with a Task list keeps its `[?]` step until Claude
+  marks it or the person writes in that session (0.20.4), so a question answered somewhere
+  else kept coming back. Every question
+  from a session's block, whichever agent wrote it (Claude Code, Codex, Gemini CLI,
+  Cursor, Grok Build, Muse, Hermes Agent, OpenClaw, OpenCode, or one written by hand under
+  the AGENTS.md rule), can now be marked answered: **Already answered, hide**
+  (zh-TW 已回覆，先隱藏) in the pane and on the board's page, `h` on the terminal board.
+  It sends nothing to any session and changes no block: it adds the question to
+  `progress-answered.json` beside `progress.md`, which the pane, the terminal board, the
+  board's page and `progress.html` all read, so it leaves Waiting on you, its count and
+  Needs you now on each of them. A task whose questions are all hidden goes back with the
+  work in progress instead of saying it waits on you, and a reply sent from its line goes
+  as typed rather than as the answer to that question. **N answered, hidden** lists the
+  hidden ones with **Show again** in the pane and on the page; `u` on the terminal board
+  shows them all again. A hand-kept question is the person's own and is ticked instead.
+  A session that stops or ends keeps its questions in its own row, as before; one hidden
+  there stays out of the row's status and its reply framing, and is listed again only if
+  the session asks something new.
+- **How a question is matched.** By its session's block id, the step's place in that
+  block, and its words as the block holds them. The session that asked works out the same
+  key from its Task list through the line it writes, so headings, empty subjects and `—`
+  in a subject agree. Two questions with the same words are hidden one at a time, and
+  ticking one never moves a mark onto the other. A blocked step is written `[!]`, so it
+  cannot be marked. A press changes only the question pressed. When `progress.md` has held
+  still for a poll, a mark whose question left its session's block is dropped, so the same
+  words asked again later show; a session with no block in the file yet keeps its marks.
+  That clean-up waits its turn in the write queue without holding up the write that
+  noticed it, and is dropped if the file moved in the meantime, on disk or in this
+  session's last look; the next quiet poll makes it again from the file as it is.
+- **The list is written with care.** A press reads, changes, writes and reads back the
+  list in the session's write queue, so a press in another session or on the board is
+  kept. A list another program holds is never written over: the pane says the press did
+  not stick (zh-TW 記不下「已回覆」，這一項還留在清單上。), and the terminal board and its
+  page name the list with its error, as they do the board's other files. A list written
+  in the last 5 seconds that is not JSON (most likely caught half-written) is not written
+  over either, and the press says it did not stick on every surface. A list left broken
+  longer than that, or dated well ahead of the clock, hides nothing and is written anew
+  by the next press. A look in the pane that cannot read the list keeps the one in hand
+  and reads it again at the next poll. The list is read before `progress.md` at a
+  session's start without drawing `progress.html` from an empty file, and a press redraws
+  `progress.html` at once.
+- **A quick answer goes only to the question it was pressed on.** The board's page offers
+  yes/no and choice buttons that go into an ended Codex or Grok session. A line's key now
+  holds its question's words, so a press made while the page showed one question is
+  refused once the same step asks another, and a hidden question offers none. The
+  terminal board does the same for `y`/`n` and `1`–`9`.
+- **Needs changes beside Looks good.** A review this session asks had one button, **Looks
+  good**, which tells Claude the work is fine. Someone who had asked for changes in the
+  chat could only press that. It now has **Needs changes** too, which opens the box for
+  what should change and sends nothing until the person sends it. The box closes when the
+  same task asks something new.
+- Tests: in `tests/logic.test.ts` "a question marked answered leaves Waiting on you until
+  that session asks something new", "this session and every other reader key a question
+  the same way, whatever its words, and two alike stay apart", "a question from every
+  agent that writes a block can be marked answered"; in `tests/pane.test.tsx` "a question
+  marked answered leaves Waiting on you until that session asks something new, and nothing
+  is sent", "a review this session asks offers Needs changes beside Looks good, and marking
+  it answered sends nothing", "the answered list survives a session start, a read that
+  fails and a press that cannot read it, and forgets a question that left the file", "a
+  mark for a question that is gone is cleared without holding up a write that looks at
+  the file from inside the queue", "a clean-up of the answered list waits while
+  progress.md moves, so a question hidden meanwhile stays hidden", "an answered list that
+  is not JSON is left alone while it may be half-written, and written anew once it has
+  stayed broken"; in
+  `tests/features.test.ts` "the terminal board, progress.html and the board page leave out
+  a question marked answered and say how many are hidden", "the terminal board and the
+  board page mark any agent's question answered without sending it anything, and show it
+  again", "a quick answer pressed while the page showed one question is refused once the
+  same step asks another", "a reply on the line of a task whose question was marked
+  answered goes as it was typed, and the line no longer opens as asking"; in
+  `tests/board.test.mjs` "the board script leaves out a
+  question a pane on this machine marked answered", "marking a question answered on the
+  page or with h on the board writes only the hidden list, sends nothing, and shows it
+  again", "a press on the board names an answered list it cannot read or replace, with its
+  error, and never writes over it", "a hide on the page that cannot replace the answered
+  list is answered with that file and its error".
+
+## 0.20.4 — 2026-10-17
+
+A question you answered in its own session stops waiting on you (#57).
+
+- **Your message marks a Task-list session's `[?]` steps answered.** When Claude marked a
+  step `waiting: "you"` with `TaskUpdate`, the step stayed under Waiting on you after the
+  person answered in that session, until Claude marked the task done or cleared `waiting`
+  itself, which it often did not. A review left up this way kept its "Looks good" button,
+  so one click told Claude the opposite of what the person had just written. Now the
+  person's own message marks every open step of that session that waits on them as
+  answered, also when they type it while Claude is still working. What the step asked
+  stays, for Claude. An answered step leaves Waiting on you, its buttons and the count, and
+  the block writes it as Claude's to do with the note "answered, waiting on Claude", so the
+  board's page and other sessions no longer offer to answer it either. The mark is kept in
+  the session's mirror with the step's words. It ends when Claude's `TaskUpdate` sets
+  `waiting: "you"` again, even in the same words, or when the step's subject or note
+  changes. A turn that ends on a question can ask on the step again too, as a plain
+  question without the buttons of the one the person answered. Claude moving other steps,
+  or a re-read of the Task list, keeps the mark.
+- **A pane button marks its own step when pressed.** Only that step stops waiting, and the
+  answer it sends names the step (for example `關於「檢查圖 2」：看過了，沒問題`). If the answer does
+  not reach Claude (another hook holds it back), the step waits again, buttons and all.
+- **Only the person's message counts.** Who wrote a prompt is read from its origin at
+  `prompt.submit`: typed, from Remote Control, a Slack ping, an app or script that drives
+  Claude Code through the SDK, or another plugin's prompt sent as the person's own words
+  (`asUser`). A background task's notification, a scheduled prompt, another session's
+  message, a hidden prompt, a slash command, a dropped prompt or a turn with no typed text
+  (a continuation) does not mark these steps. Neither does an event an app sends down the
+  person's path: one that opens with a tag of hyphenated words (`<task-notification>`,
+  `<side-sessions-event>`, `<ci-monitor-event>`, `<cross-session-message>`, …) or with
+  `[SYSTEM NOTIFICATION`, with any `<system-reminder>` blocks in front of it taken off
+  first. Another session's block is never touched. `docs/FORMAT.md` says so.
+- **The board's page answers only the question it showed.** A reply goes with the question
+  the page drew it under, and is refused when the task asks something else since or nothing
+  at all, as a task kept its key while its question changed (an ended Grok Build or Codex
+  session's reply box). Before, it went out as the answer to whatever the task asked now.
+- **Every agent.** A Claude session without a Task list already settled its question when
+  the next prompt started a turn; a test now pins it. Codex, Gemini CLI, Cursor, Grok Build,
+  Muse, Hermes Agent, OpenClaw and OpenCode tell the board only when a turn ends, so their
+  question is settled when the next turn in that session ends; a test per agent pins it. A
+  block an agent writes by hand is that agent's to change (#52).
+- Tests: "a review Claude marked as waiting on you stops waiting once you write in that
+  session, so 沒問題 cannot answer it, and shows again only when Claude asks again", "only
+  your own message settles this session’s waiting steps: not a background task’s notice, an
+  app event, a turn with no typed text, or another session’s question", "a pane button
+  answers only the step it belongs to: another step waiting on you stays", "a pane button
+  whose answer does not reach Claude leaves its step waiting on you, buttons and all", "your
+  message typed while Claude is still working answers too; a notice delivered into that turn
+  does not", "your message marks every step of a Task list that waited on you answered,
+  keeps what it asked, and only Claude asking again or new words bring it back", "a turn
+  that ends on a question after you answered a step asks it plainly, without the buttons of
+  the question you answered", "an answered mark goes with its step: deleted, its id taken by
+  a new step, or no longer listed", "only the person’s own message is an answer: not a
+  notice, a schedule, another session, an app’s event, a hidden prompt or a command",
+  "<agent>: a turn that ends on a question stops waiting on you once the next turn in that
+  session ends" (one per agent), and the turn-session check in "without a Task list, a turn
+  that changed something is summed up into steps and its question", "a press on the page is
+  worked out from the file as it is now: a line that is gone is refused, and a reply goes with
+  its question", and "a reply goes into a closed Grok session once, in its own folder, and the
+  page waits for its answer before it closes" (`tests/board.test.mjs`).
+
+## 0.20.3 — 2026-10-17
+
+- **A remote reporter can close a session and start a fresh one.** `reporter.py
+  retire <chat-id> ["reason"]` writes the chat's last fragment again as `ended`,
+  keeping its project line, title, notes and steps and adding the reason as a note,
+  then gives the chat a new session id, so a clean break leaves no block reading as
+  live. A session already `done` or `ended` is left as it is, and only the id is
+  new. It refuses a chat that is not in the registry, and one that has not reported
+  yet: neither has a block on the board to close. A reason with a control character
+  or a comment marker, and a fragment that is no longer a valid block, are refused
+  before anything is written. Once a chat's id and fragment are lost, its block
+  still waits out the usual staleness and archive rules, and
+  `docs/REMOTE_REPORTERS.md` says so. Tests: `test_pipeline.py` "15a
+  retire ok" to "15h board shows ended" (the old block merges in place as `ended`,
+  once), "15i retired fragment keeps its project line, title, notes and steps, and
+  adds the reason", "15j retire refuses a chat not in the registry", "15k refused
+  retire mints nothing", "15l retire refuses a session that never reported, and
+  mints nothing", "15m retire after done leaves the done block as it was and mints
+  a new id", "15n a reason with a comment opening is refused without a traceback,
+  and nothing changes", "15o a bad reason is refused on a done session too, and
+  mints nothing", "15p a fragment that is not a valid block is refused, and nothing
+  changes".
+- **The remote reporter guide says the conversation wins.** For a remote reporter
+  the conversation with the user is the source of truth and the board a mirror; a
+  remote `[?]` step says where to answer; the transports table says how far behind
+  each one can leave the board; and a reporter closes its session (`done` or
+  `ended`) when the conversation ends. Docs only.
+
+## 0.20.2 — 2026-10-17
+
+What the reviews of 0.18.1 left open, most harmful first.
+
+- **A project named with a comment opening no longer hides the blocks after it.** A
+  folder name (Linux allows `<!--` in one) or a project typed into a quick add went into
+  its `##` heading as it was, and the reader then skipped every line up to the next
+  `-->`. The heading now writes `<!--` and `-->` as a space, as the heading for another
+  agent's turn in that folder already was, and keeps a leading `#` (`## #work` reads back
+  as `#work`). The section is found by the cleaned name, else by the name as an earlier
+  version wrote it, so a second session in that folder, Claude's or another agent's,
+  joins the same heading; a name with nothing left goes under the uncategorized
+  heading. A project whose name starts with a bracket (`（未分類）`, `(PFC)
+  notes`) is now matched by its whole name: it has no first word, so before, every such
+  heading was taken for one project, and a session with no folder joined `## (PFC)
+  notes`. Tests: "a project folder or quick-add project named with a comment opening
+  hides no block after its heading, and keeps one heading", "a folder with a comment mark
+  in its name gets one heading, whether a Claude session or another agent writes there
+  first", "a project heading an earlier
+  version wrote, with a leading # or an arrow in it, is still joined, and a project of
+  only marks goes under the uncategorized one", "a project whose name starts with a
+  bracket is matched whole, so the uncategorized heading never joins another one".
+- **What the user asked reaches the model fenced when a task is named and named
+  again.** 0.18.1 fenced the request in the prompt that sums up a turn; the prompts that
+  name a task, and look at its name again three steps later, still sent it bare. They
+  now put it between `<request>` tags too, in all three languages, with no tag inside
+  that could close the fence early. Tests: "what the user asked reaches the model fenced
+  as data when the task is named and named again, in every language", "the request a
+  task is named and named again from stays inside its fence, whatever tags it holds".
+- **A connect run by hand takes the language picked in another session.** Whether the
+  person had picked a language was read once, when the session started, so a session
+  started before another session's `/progress lang auto` wrote the board script and
+  skills in its own language at a `/progress connect`. The plugin's `language` option
+  and the stored `/progress lang` are now read at the connect itself. Test: "a connect
+  run by hand takes the language another session picked after this one started, auto
+  included".
+- **`Status:` and `Summary:` lead into a printed board, like `Here is where things
+  stand:`.** A reply that opens with one of them before the board is a look, not work.
+  A lead saying something was done is still work, in English now too (`Status: fixed
+  429:`, `Progress after I added the tests:`); `updated` is not counted, since `Here's
+  the updated board:` is a look. `了` still makes a lead work: after any verb it says
+  something was done (`目前改了 429 看板如下：`), and narrowing it to `好了` and `完成了`
+  would drop that turn's work to spare a block. The captured Grok Build replies have no
+  lead line, so they still count as looks. Test: "a status or summary line that leads
+  into the board is a look, while a lead saying something was changed is still work".
+- **The guide names the plugin's Pane language for the board script.** The sentence on
+  `--lang` named only `/progress lang`; the **Pane language** option in `/config` comes
+  before it, and the three guides now say so. The order was already right in the code;
+  a test now pins it: "the plugin’s language option gives the board script and skill
+  their language ahead of the one /progress lang last picked".
+- **A remote reporter's merge cannot open a comment in a heading either.** `merge.py`
+  wrote a new block's `## <project>` heading from the fragment's first line or from
+  `--under` as it was, so a heading holding `<!--` hid the blocks after it, the way the
+  first entry above describes. It now refuses a heading holding `<!--` or `-->`, as
+  `reporter.py` already refused one in `BOARD_PROJECT`. Test: "8k a new heading with a
+  comment opening or close is refused", for both marks, through `--under` and through
+  the fragment's own heading.
+
+## 0.20.1 — 2026-10-17
+
+- **Terminal history survives read and write failures.** Only `ENOENT` is treated
+  as a missing file. Unreadable progress/archive/journal files abort the action;
+  failed writes report the path and error with a nonzero `--keys` exit instead of
+  claiming success. History is saved before the board changes, so a later failure
+  can leave an extra history entry; retrying an archive does not duplicate that
+  entry. Replacements retain POSIX permission bits and clean up owned temp files.
+  Tests: "an EACCES reading the archive aborts the action and preserves every
+  existing file", "a failed journal temp write preserves old bytes and reports
+  incomplete persistence", "an archive saved before a failed board replacement
+  survives retry without a duplicate entry", "an archive entry with a longer last
+  step does not suppress a distinct shorter task", and "replacing board and history
+  retains their POSIX permission bits despite a restrictive umask".
+- **The board's page says the same.** A tick, archive, tidy or pasted block on
+  the page that meets a file it cannot read or write is answered with that file
+  and its error, shown as a failure, instead of a bare server error; a board it
+  cannot read is named the same way instead of being shown as offline. A phone
+  opened with `--lan` is told the file's name only, not its folder. Its archive
+  and tidy, like the terminal board's archive, skip an entry the archive already
+  holds. `--html` names `progress.html` when it cannot write it. Tests: "a press
+  on the page that cannot write its history is answered with that file and its
+  error, and progress.md is left as it was", and "a board the page cannot read is
+  named there with that file and its error, rather than shown as offline, and a
+  phone is told the file name only".
 
 ## 0.20.0 — 2026-10-17
 

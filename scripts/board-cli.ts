@@ -7,7 +7,7 @@
 // progress file and language the Claude Code session uses set on its first line. `--keys
 // "down x"` plays keys without a terminal and prints the board after them, for tests and checks.
 import { spawn, spawnSync } from 'node:child_process'
-import { closeSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
+import { chmodSync, closeSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
 import { createHash } from 'node:crypto'
 import { homedir, tmpdir } from 'node:os'
 import { basename, dirname, join, resolve } from 'node:path'
@@ -18,11 +18,11 @@ import { boardKey, boardScreen, boardText, emptyBoardState, peekInbox, boardItem
 import type { BoardAction, BoardState } from '../hooks/board'
 import { LOG_TAIL } from '../hooks/inbox'
 import { dashboardHtml } from '../hooks/dashboard'
-import { appendJournal, archivePath, countDay, journalLine, journalPath } from '../hooks/journal'
+import { appendJournal, archivePath, countDay, hasArchiveEntry, journalLine, journalPath } from '../hooks/journal'
 import { parseProgress } from '../hooks/parse'
 import { qrModules, qrText } from '../hooks/qr'
 import { langOf, STRINGS } from '../hooks/strings'
-import { buildView } from '../hooks/view'
+import { answeredJson, answeredPath, buildView, parseAnswered, withAnswered } from '../hooks/view'
 
 // The line `/progress connect` puts above the bundle sets it.
 const BAKED = (globalThis as { AGENT_BOARD?: { path?: string; lang?: string } }).AGENT_BOARD ?? {}
@@ -45,11 +45,21 @@ const progressFile = (): string => {
 const path = progressFile()
 const s = STRINGS[langOf(flag('--lang')) ?? langOf(BAKED.lang) ?? langOf(process.env.LANG) ?? 'en']
 
+class BoardFileError extends Error {
+  constructor(readonly file: string, readonly code: string) {
+    super(code)
+  }
+}
+
+const fileError = (file: string, error: unknown): BoardFileError =>
+  new BoardFileError(file, String((error as { code?: string } | null)?.code ?? 'UNKNOWN'))
+
 const read = (file: string): string => {
   try {
     return readFileSync(file, 'utf8')
-  } catch {
-    return ''
+  } catch (error) {
+    if ((error as { code?: string } | null)?.code === 'ENOENT') return ''
+    throw fileError(file, error)
   }
 }
 
@@ -99,7 +109,8 @@ const pending = () => {
 
 const view = () => {
   const now = Date.now()
-  return buildView(parseProgress(read(path)), [basename(process.cwd())], null, now, countDay(read(journalPath(path, now)), now), {}, s)
+  // A question marked answered in a pane on this machine is kept off the board too.
+  return buildView(parseProgress(read(path)), [basename(process.cwd())], null, now, countDay(read(journalPath(path, now)), now), {}, s, parseAnswered(read(answeredPath(path))) ?? [])
 }
 
 const pad = (n: number): string => String(n).padStart(2, '0')
@@ -112,28 +123,44 @@ const options = () => ({
 // A write to a file a Claude Code session may write at the same moment: to a temp file of
 // this process's own (two boards can run at once), renamed over it, then read back; made
 // again from the new text when another write landed in between or the rename failed (on
-// Windows, a file another program holds open), as the pane's own writes are. Null when it
-// could not be made to stick. `change` can run more than once, on newer text each time.
+// Windows, a file another program holds open), as the pane's own writes are. A failed
+// read is never an empty file. `change` can run more than once, on newer text each time.
 const rewrite = (file: string, change: (text: string) => string | null): string | null => {
+  let failure: unknown = { code: 'EAGAIN' }
   for (let attempt = 0; attempt < 3; attempt += 1) {
     const before = read(file)
     const after = change(before)
     if (after === null) return null
     if (after === before) return after
     const temp = `${file}.${process.pid}.${Date.now().toString(36)}.board-tmp`
+    let isOwned = false
     try {
-      writeFileSync(temp, after)
-      renameSync(temp, file)
-    } catch {
+      let mode: number | undefined
       try {
-        unlinkSync(temp)
+        mode = statSync(file).mode & 0o777
+      } catch (error) {
+        if ((error as { code?: string } | null)?.code !== 'ENOENT') throw error
+      }
+      // Exclusive creation avoids truncating somebody else's temp. Apply the old mode
+      // after writing too, since the process umask may be more restrictive than it.
+      const fd = openSync(temp, 'wx', mode ?? 0o600)
+      isOwned = true
+      closeSync(fd)
+      writeFileSync(temp, after)
+      if (mode !== undefined) chmodSync(temp, mode)
+      renameSync(temp, file)
+    } catch (error) {
+      failure = error
+      try {
+        if (isOwned) unlinkSync(temp)
       } catch {}
       continue
     }
     if (read(file) === after) return after
+    failure = { code: 'EAGAIN' }
   }
 
-  return null
+  throw fileError(file, failure)
 }
 
 // Windows looks in the current folder first for a program started by name, and an agent's folder
@@ -173,7 +200,13 @@ const openHtml = (done: (note: string) => void): void => {
   const now = new Date()
   const stamp = s.dashStamp(`${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())} ${pad(now.getHours())}:${pad(now.getMinutes())}`)
   const html = path.replace(/\.md$/i, '') + '.html'
-  writeFileSync(html, dashboardHtml(view(), s, path, stamp))
+  const page = dashboardHtml(view(), s, path, stamp)
+  // Named like any other file the board cannot write, so --watch reports it and runs on.
+  try {
+    writeFileSync(html, page)
+  } catch (error) {
+    throw fileError(html, error)
+  }
   openInBrowser(html, isOpen => done(isOpen ? s.windowOpened(html) : s.windowFailed(html)))
 }
 
@@ -188,7 +221,11 @@ const archiveOut = (take: (text: string) => { text: string; entries: string[] } 
     if (taken === null) return text
     const fresh = taken.entries.filter(entry => !archived.has(entry))
     if (fresh.length > 0) {
-      const kept = rewrite(archivePath(path, now), past => `${past.trim() === '' ? `${s.archiveTitle}\n\n` : past.replace(/\s*$/, '\n\n')}${fresh.join('\n\n')}\n`)
+      const kept = rewrite(archivePath(path, now), past => {
+        // A previous process may have saved the archive but failed to remove the task.
+        const missing = fresh.filter(entry => !hasArchiveEntry(past, entry))
+        return missing.length === 0 ? past : `${past.trim() === '' ? `${s.archiveTitle}\n\n` : past.replace(/\s*$/, '\n\n')}${missing.join('\n\n')}\n`
+      })
       if (kept === null) return null
       for (const entry of fresh) archived.add(entry)
     }
@@ -196,6 +233,16 @@ const archiveOut = (take: (text: string) => { text: string; entries: string[] } 
   })
 
   return wrote === null ? null : archived.size
+}
+
+// How long ago the hidden list was written; 0 when that cannot be told, so a list that is not
+// JSON counts as a write caught half-way and a press never writes over the marks in it.
+const answeredAge = (file: string): number => {
+  try {
+    return Date.now() - statSync(file).mtimeMs
+  } catch {
+    return 0
+  }
 }
 
 // What a key's action does to the files, and the line the board shows after it.
@@ -206,16 +253,19 @@ const act = (action: BoardAction): string => {
     // Found once is found: a retry after another session's write may meet the step already
     // ticked by this press.
     let isFound = false
+    const line = journalLine({ project: action.ref.project, task: action.ref.title, step: action.ref.step }, now, s)
     const wrote = rewrite(path, text => {
       const after = setManualStep(text, action.ref, 'x')
-      if (after !== text) isFound = true
+      if (after !== text) {
+        // Save history before ticking: a journal failure must leave the step available
+        // to retry. A later board failure can leave an extra journal line, and is reported.
+        rewrite(journalPath(path, now), past => (past.includes(line) ? past : appendJournal(past, [line], s)))
+        isFound = true
+      }
       return after
     })
     if (wrote === null) return s.boardWriteFailed
     if (!isFound) return s.boardTickGone
-    // Once, even when another write to the journal makes it try again.
-    const line = journalLine({ project: action.ref.project, task: action.ref.title, step: action.ref.step }, now, s)
-    rewrite(journalPath(path, now), text => (text.includes(line) ? text : appendJournal(text, [line], s)))
     return s.boardTicked(action.ref.step)
   }
   if (action.type === 'archive') {
@@ -223,6 +273,20 @@ const act = (action: BoardAction): string => {
     if (count === null) return s.boardWriteFailed
     if (count === 0) return s.archiveGone
     return s.archivedOne(action.title)
+  }
+  if (action.type === 'hide' || action.type === 'unhide') {
+    // The list every pane on this machine reads too; nothing goes to the agent that asked.
+    const keys = action.type === 'hide' || action.key !== null ? [action.key ?? ''] : view().hidden.map(item => item.hideKey)
+    if (keys.length === 0) return ''
+    const isHidden = action.type === 'hide'
+    const file = answeredPath(path)
+    // A list the board cannot read or replace is named with its error, as its other files are.
+    const wrote = rewrite(file, before => {
+      const answered = parseAnswered(before, answeredAge(file))
+      return answered === null ? null : answeredJson(withAnswered(answered, keys, isHidden))
+    })
+    if (wrote === null) return s.hideFailed
+    return action.type === 'hide' ? s.boardHidden(action.text) : s.boardShown
   }
 
   return ''
@@ -250,6 +314,16 @@ const keyName = (one: string): string =>
 // An escape and the character after it (Alt with a letter) is one key the board ignores.
 const keysIn = (chunk: string): string[] => (chunk.replace(/\r\n/g, '\r').match(/\u001b[[O][0-9;]*[A-Za-z~]|\u001b[\s\S]?|[\s\S]/gu) ?? []).map(keyName)
 
+const failureNote = (error: unknown): string => {
+  if (!(error instanceof BoardFileError)) throw error
+  process.exitCode = 1
+  const note = s.boardStorageFailed(error.file, error.code)
+  // The board's one-line status is clipped to terminal width; keep the full path and
+  // recovery advice on stderr too, including for an agent using --keys.
+  process.stderr.write(`${note}\n`)
+  return note
+}
+
 const press = (state: BoardState, key: string): { state: BoardState; isQuit: boolean; isHtml: boolean; isWrite: boolean } => {
   const items = boardItems(view(), pending())
   const { state: next, action } = boardKey(state, key, items, s)
@@ -258,7 +332,13 @@ const press = (state: BoardState, key: string): { state: BoardState; isQuit: boo
   if (action.type === 'html') return { state: next, isQuit: false, isHtml: true, isWrite: false }
 
   // After a write the lines move; the choice is made again from the screen drawn next.
-  return { state: { ...next, key: null, note: act(action) }, isQuit: false, isHtml: false, isWrite: action.type !== 'copy' }
+  let note: string
+  try {
+    note = act(action)
+  } catch (error) {
+    note = failureNote(error)
+  }
+  return { state: { ...next, key: null, note }, isQuit: false, isHtml: false, isWrite: action.type !== 'copy' }
 }
 
 const screen = (state: BoardState): string => boardScreen(view(), pending(), state, s, options())
@@ -389,6 +469,10 @@ const serveChild = (): void => {
     act,
     tidy,
     paste,
+    // The page names a file it could not read or write the way the terminal board does, for a
+    // press and for the board it shows. The page is answered, so the exit code and stderr are
+    // left alone. A phone is told the file name only: the folder names the person's account.
+    failure: (error, isLan) => (error instanceof BoardFileError ? s.boardStorageFailed(isLan ? basename(error.file) : error.file, error.code) : null),
     idleMs: 30 * 60 * 1000,
     onReady: (url, port) => {
       // Without its address file no later `--serve` finds this page, and each would start one
@@ -513,60 +597,85 @@ const serveBoard = async (): Promise<void> => {
   await show(url)
 }
 
-if (args.includes('--serve-child')) {
-  serveChild()
-} else if (args.includes('--serve')) {
-  await serveBoard()
-} else if (args.includes('--html')) {
-  openHtml(note => process.stdout.write(`${note}\n`))
-} else if (flag('--keys') !== undefined) {
-  let state = emptyBoardState
-  for (const key of (flag('--keys') ?? '').split(/\s+/).filter(one => one !== '')) {
-    const pressed = press(pin(state), key)
-    state = pressed.state
-    if (pressed.isQuit) break
-  }
-  process.stdout.write(screen(state))
-} else if (args.includes('--watch') && process.stdin.isTTY) {
-  let state = emptyBoardState
-  const draw = (): void => {
-    state = pin(state)
-    process.stdout.write(`\u001b[2J\u001b[H${screen(state)}`)
-  }
-  const quit = (): void => {
-    process.stdin.setRawMode(false)
-    process.exit(0)
-  }
-  process.stdin.setRawMode(true)
-  process.stdin.setEncoding('utf8')
-  process.stdout.write('\u001b[?25l')
-  // The cursor comes back however the board ends (q, a signal, an error).
-  process.on('exit', () => process.stdout.write('\u001b[?25h\n'))
-  for (const signal of ['SIGTERM', 'SIGHUP'] as const) process.on(signal, () => process.exit(0))
-  process.stdin.on('data', (chunk: string) => {
-    // Keys that came together (a held arrow) each act on the line the one before left chosen;
-    // after a tick or an archive the rest wait, so no key lands on a line not yet drawn.
-    for (const key of keysIn(chunk)) {
+const run = async (): Promise<void> => {
+  if (args.includes('--serve-child')) {
+    serveChild()
+  } else if (args.includes('--serve')) {
+    await serveBoard()
+  } else if (args.includes('--html')) {
+    openHtml(note => process.stdout.write(`${note}\n`))
+  } else if (flag('--keys') !== undefined) {
+    let state = emptyBoardState
+    for (const key of (flag('--keys') ?? '').split(/\s+/).filter(one => one !== '')) {
       const pressed = press(pin(state), key)
       state = pressed.state
-      if (pressed.isQuit) quit()
-      if (pressed.isHtml) {
-        openHtml(note => {
-          state = { ...state, note }
-          draw()
-        })
-      }
-      if (pressed.isWrite) break
+      if (pressed.isQuit) break
     }
+    process.stdout.write(screen(state))
+  } else if (args.includes('--watch') && process.stdin.isTTY) {
+    let state = emptyBoardState
+    const draw = (): void => {
+      try {
+        state = pin(state)
+        process.stdout.write(`\u001b[2J\u001b[H${screen(state)}`)
+      } catch (error) {
+        process.stdout.write(`\u001b[2J\u001b[H${failureNote(error)}\n`)
+      }
+    }
+    const quit = (): void => {
+      process.stdin.setRawMode(false)
+      process.exit(process.exitCode ?? 0)
+    }
+    process.stdin.setRawMode(true)
+    process.stdin.setEncoding('utf8')
+    process.stdout.write('\u001b[?25l')
+    // The cursor comes back however the board ends (q, a signal, an error).
+    process.on('exit', () => process.stdout.write('\u001b[?25h\n'))
+    for (const signal of ['SIGTERM', 'SIGHUP'] as const) process.on(signal, () => process.exit(process.exitCode ?? 0))
+    process.stdin.on('data', (chunk: string) => {
+      try {
+        // Keys that came together (a held arrow) each act on the line the one before left chosen;
+        // after a tick or an archive the rest wait, so no key lands on a line not yet drawn.
+        for (const key of keysIn(chunk)) {
+          // Quitting must work while the files cannot be read, before pin/view runs.
+          if (key === 'q' || key === '\u0003') quit()
+          const pressed = press(pin(state), key)
+          state = pressed.state
+          if (pressed.isQuit) quit()
+          if (pressed.isHtml) {
+            openHtml(note => {
+              state = { ...state, note }
+              draw()
+            })
+          }
+          if (pressed.isWrite) break
+        }
+        draw()
+      } catch (error) {
+        state = { ...state, note: failureNote(error) }
+        draw()
+      }
+    })
     draw()
-  })
-  draw()
-  setInterval(draw, 2000)
-} else if (args.includes('--watch')) {
-  // Not a terminal (piped, or an agent's tool): no keys to read, so it only redraws.
-  const tick = () => process.stdout.write(`\u001b[2J\u001b[H${boardText(view(), pending(), s, options())}\n${s.boardWatching}\n`)
-  tick()
-  setInterval(tick, 2000)
-} else {
-  process.stdout.write(boardText(view(), pending(), s, options()))
+    setInterval(draw, 2000)
+  } else if (args.includes('--watch')) {
+    // Not a terminal (piped, or an agent's tool): no keys to read, so it only redraws.
+    const tick = () => {
+      try {
+        process.stdout.write(`\u001b[2J\u001b[H${boardText(view(), pending(), s, options())}\n${s.boardWatching}\n`)
+      } catch (error) {
+        process.stdout.write(`\u001b[2J\u001b[H${failureNote(error)}\n`)
+      }
+    }
+    tick()
+    setInterval(tick, 2000)
+  } else {
+    process.stdout.write(boardText(view(), pending(), s, options()))
+  }
+}
+
+try {
+  await run()
+} catch (error) {
+  failureNote(error)
 }

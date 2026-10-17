@@ -1,7 +1,8 @@
 import { expect, test } from 'claude-code/testing'
 
 import type { ProgressMirror } from '../types'
-import { extractAutoBlock, removeAutoBlock, scanBlocks, setManualStep, takeArchivable, upsertAutoBlock } from '../hooks/blocks'
+import { extractAutoBlock, removeAutoBlock, renderAutoBlock, scanBlocks, setManualStep, takeArchivable, upsertAutoBlock } from '../hooks/blocks'
+import { ZH_TW } from '../hooks/i18n'
 import {
   applyTaskCreate,
   applyTaskUpdate,
@@ -14,7 +15,7 @@ import {
   stateOf,
 } from '../hooks/mirror'
 import { parseProgress } from '../hooks/parse'
-import { buildView, dueDays, foldSteps, relativeTime } from '../hooks/view'
+import { answeredJson, answeredPath, buildView, dueDays, foldSteps, keptAnswered, parseAnswered, relativeTime, withAnswered } from '../hooks/view'
 
 const NOW = Date.parse('2026-10-16T12:00:00.000Z')
 const HOUR = 60 * 60 * 1000
@@ -345,4 +346,97 @@ test('a task row keeps every open step for the take-over prompt, past the fold',
   const [row] = buildView(parseProgress(text), ['FLOODABM'], null, NOW).active
   expect(row?.steps.some(s => s.text.startsWith('還有'))).toBe(true)
   expect(row?.left).toEqual(['步驟 3', '步驟 4', '步驟 5', '步驟 6', '步驟 7', '步驟 8', '步驟 9'])
+})
+
+test('a question marked answered leaves Waiting on you until that session asks something new', () => {
+  const mirror = applyTaskUpdate(sampleMirror(), { taskId: '3', metadata: { waiting: 'you', why: '可以推上 main 嗎？' } }, NOW)
+  // This session's own question, and the same step as its block shows it to every other session.
+  const own = buildView([], [], mirror, NOW).waiting[0]
+  const file = ['# 專案進度', '', '## persona_framework', ...renderAutoBlock(mirror), ''].join('\n')
+  const seen = buildView(parseProgress(file), [], null, NOW).waiting[0]
+  expect(own?.where).toBe('here')
+  expect(seen?.where).toBe('other')
+  const key = own?.hideKey ?? ''
+  // The session, the step's place in its block (task 3 is the third step) and its words.
+  expect(key).toBe('2be48af2 3 推分支 — 可以推上 main 嗎？')
+  expect(seen?.hideKey).toBe(key)
+
+  // Marked answered: out of the list, its count and the focus, and listed as hidden instead.
+  const view = buildView(parseProgress(file), [], null, NOW, 0, {}, ZH_TW, [key])
+  expect(view.waiting).toEqual([])
+  expect(view.overview.waiting).toBe(0)
+  expect(view.focus?.type).not.toBe('ask')
+  expect(view.hidden.map(item => item.text)).toEqual(['推分支'])
+  expect(buildView([], [], mirror, NOW, 0, {}, ZH_TW, [key]).hidden.map(item => item.where)).toEqual(['here'])
+
+  // The session words it anew: a new question, shown again.
+  const asked = file.replace('推分支 — 可以推上 main 嗎？', '推分支 — 推到 release 分支好嗎？')
+  expect(asked).not.toBe(file)
+  expect(buildView(parseProgress(asked), [], null, NOW, 0, {}, ZH_TW, [key]).waiting.map(item => item.text)).toEqual(['推分支'])
+  // A hand-kept step is ticked, never hidden.
+  const manual = ['# 專案進度', '', '## 求職', '### 實習', '- [?] 推薦信', ''].join('\n')
+  expect(buildView(parseProgress(manual), [], null, NOW, 0, {}, ZH_TW, ['']).waiting[0]?.hideKey).toBe('')
+
+  // A press changes only the questions pressed, whatever the view it came from showed.
+  const projects = parseProgress(file)
+  expect(withAnswered(['2be48af2 3 舊的問題', 'ffffffff 1 別的對話', key], ['new'], true)).toEqual(['2be48af2 3 舊的問題', 'ffffffff 1 別的對話', key, 'new'])
+  expect(withAnswered([key], [key], false)).toEqual([])
+  // A mark whose question left its session's block goes, so the same words asked later show;
+  // a session with no block in the file yet keeps its marks.
+  expect(keptAnswered(['2be48af2 3 舊的問題', 'ffffffff 1 別的對話', key], projects)).toEqual(['ffffffff 1 別的對話', key])
+  expect(keptAnswered([key], parseProgress(asked))).toEqual([])
+  expect(keptAnswered([key], [])).toEqual([key])
+  // A file just caught half-way reads as null, to be read again rather than written over; one
+  // that has stayed broken reads as none, so the next press writes it anew.
+  expect(parseAnswered(answeredJson([key]))).toEqual([key])
+  expect(parseAnswered('{"answered": [1, "a", ""]}')).toEqual(['a'])
+  expect(parseAnswered('')).toEqual([])
+  expect(parseAnswered('{"answered": ["a"')).toBeNull()
+  expect(parseAnswered('{"answered": ["a"', 4000)).toBeNull()
+  expect(parseAnswered('{"answered": ["a"', 6000)).toEqual([])
+  expect(parseAnswered('{"answered": ["a"', -60000)).toEqual([])
+  expect(answeredPath('/home/me/.claude/progress.md')).toBe('/home/me/.claude/progress-answered.json')
+})
+
+test('this session and every other reader key a question the same way, whatever its words, and two alike stay apart', () => {
+  // Words the block writer changes on the way in: heading marks, no subject, the note mark itself.
+  const subjects = [['# # A', 'x'], ['', '只有說明'], ['先試 — 再說', '好嗎？'], ['推分支', ''], ['a <!-- b --> c', 'd\ne']]
+  for (const [subject, why] of subjects) {
+    const mirror = applyTaskUpdate(sampleMirror(), { taskId: '3', subject, metadata: { waiting: 'you', why } }, NOW)
+    const file = ['# 專案進度', '', '## persona_framework', ...renderAutoBlock(mirror), ''].join('\n')
+    const own = buildView([], [], mirror, NOW).waiting[0]?.hideKey
+    expect(own).not.toBe('')
+    expect(buildView(parseProgress(file), [], null, NOW).waiting[0]?.hideKey).toBe(own)
+  }
+  // A blocked step is written [!]: no other reader lists it as a question, so it is not marked.
+  const stuck = applyTaskUpdate(sampleMirror(), { taskId: '3', metadata: { waiting: 'you', why: '要你決定', blocked: '等 CI' } }, NOW)
+  expect(buildView([], [], stuck, NOW).waiting.map(item => item.hideKey)).toEqual([''])
+  // Two steps with the same words: marking one leaves the other.
+  const at = new Date(NOW - HOUR).toISOString()
+  const twice = ['## api', `<!-- auto session=c0ffee12 agent=codex state=waiting updated=${at} -->`, '### Ship', '- [?] Merge it, OK?', '- [x] Tests', '- [?] Merge it, OK?', '<!-- /auto session=c0ffee12 -->', ''].join('\n')
+  const keys = buildView(parseProgress(twice), [], null, NOW).waiting.map(item => item.hideKey)
+  expect(keys).toEqual(['c0ffee12 1 Merge it, OK?', 'c0ffee12 3 Merge it, OK?'])
+  expect(buildView(parseProgress(twice), [], null, NOW, 0, {}, ZH_TW, [keys[0] ?? '']).waiting.map(item => item.hideKey)).toEqual([keys[1]])
+  // The first is then ticked: the third keeps its own key, so it neither takes the first one's
+  // mark nor loses its own.
+  const ticked = parseProgress(twice.replace('- [?] Merge it, OK?', '- [x] Merge it, OK?'))
+  expect(buildView(ticked, [], null, NOW, 0, {}, ZH_TW, [keys[0] ?? '']).waiting.map(item => item.hideKey)).toEqual([keys[1]])
+  expect(buildView(ticked, [], null, NOW, 0, {}, ZH_TW, [keys[1] ?? '']).waiting).toEqual([])
+})
+
+test('a question from every agent that writes a block can be marked answered', () => {
+  const agents = ['claude', 'codex', 'gemini', 'cursor', 'grok', 'muse', 'hermes', 'openclaw', 'opencode', 'aider']
+  const at = new Date(NOW - HOUR).toISOString()
+  const blocks = agents.flatMap((agent, index) => {
+    const id = `a${String(index).padStart(7, '0')}`
+    return [`<!-- auto session=${id} agent=${agent} state=waiting updated=${at} -->`, `### ${agent} work`, '- [?] Ship it, OK?', `<!-- /auto session=${id} -->`]
+  })
+  const file = ['# Progress', '', '## api', ...blocks, ''].join('\n')
+  const view = buildView(parseProgress(file), [], null, NOW)
+  expect(view.waiting.map(item => item.agent || 'claude').sort()).toEqual([...agents].sort())
+  const keys = view.waiting.map(item => item.hideKey)
+  expect(keys.every(key => key !== '')).toBe(true)
+  const hidden = buildView(parseProgress(file), [], null, NOW, 0, {}, ZH_TW, keys)
+  expect(hidden.waiting).toEqual([])
+  expect(hidden.hidden.map(item => item.agent || 'claude').sort()).toEqual([...agents].sort())
 })
