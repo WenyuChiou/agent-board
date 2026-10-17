@@ -48,7 +48,7 @@ jobs:
 
       # The board script other agents run, on plain Node.
       - name: Board script tests
-        run: node --test tests/board.test.mjs
+        run: node --test tests/board.test.mjs tests/board-storage.test.mjs
 
       # hooks/board-script.ts is the bundle of scripts/board-cli.ts; it must match its sources.
       # Bun is pinned so the bundle comes out the same.

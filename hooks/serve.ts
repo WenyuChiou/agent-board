@@ -742,7 +742,7 @@ const PAGE_SCRIPT = String.raw`
     if (isClosed) return;
     clearTimeout(timer);
     call('/api/board').then(function (data) {
-      if (!data.ok || !data.model) { say(w('serveOffline'), 'alert'); return; }
+      if (!data.ok || !data.model) { say(data.note || w('serveOffline'), 'alert'); return; }
       revision = data.model.revision;
       var text = JSON.stringify(data.model);
       if (text !== last) { last = text; render(data.model); retainedDrafts(); }
