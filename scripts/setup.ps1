@@ -331,7 +331,9 @@ function Install-ProgressPane {
       foreach ($part in 'plugins', 'marketplaces', 'claude-progress-pane', 'AGENTS.md') { $agentsFile = Join-Path $agentsFile $part }
     }
     if (-not (Test-Path -LiteralPath $agentsFile)) { Write-Warning "AGENTS.md not found: $agentsFile"; return }
-    $source = [IO.File]::ReadAllText($agentsFile, $utf8)
+    # A Windows checkout gives AGENTS.md CRLF; the section is joined with `n here and takes the
+    # target file's own line ending below.
+    $source = [IO.File]::ReadAllText($agentsFile, $utf8).Replace("`r`n", "`n")
     $at = $source.IndexOf('## Report your progress to the progress pane')
     if ($at -lt 0) { Write-Warning "AGENTS.md has no 'Report your progress' section: $agentsFile"; return }
     $section = $start + "`n" + $source.Substring($at).Trim() + "`n" + $end
