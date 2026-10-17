@@ -17,7 +17,7 @@ Claude Code 插件，也跟得上 Codex、Gemini CLI、OpenCode、Grok Build、H
 <a href="#支持的-agent"><img alt="实测过 Codex 0.163.0" src="https://img.shields.io/badge/Codex-0.163.0-brightgreen"></a>
 <a href="#支持的-agent"><img alt="实测过 Gemini CLI 0.64.0" src="https://img.shields.io/badge/Gemini%20CLI-0.64.0-brightgreen"></a>
 <a href="#支持的-agent"><img alt="实测过 OpenCode 1.19.3" src="https://img.shields.io/badge/OpenCode-1.19.3-brightgreen"></a>
-<a href="#支持的-agent"><img alt="实测过 Grok Build 1.0.62" src="https://img.shields.io/badge/Grok%20Build-1.0.62-brightgreen"></a>
+<a href="#支持的-agent"><img alt="实测过 Grok Build 1.0.62" src="https://img.shields.io/badge/Grok%20Build-1.0.62-yellowgreen"></a>
 <a href="#支持的-agent"><img alt="实测过 Hermes Agent 0.19.0" src="https://img.shields.io/badge/Hermes%20Agent-0.19.0-yellowgreen"></a>
 <a href="#支持的-agent"><img alt="实测过 OpenClaw 2026.10.4" src="https://img.shields.io/badge/OpenClaw-2026.10.4-yellowgreen"></a>
 </p>
@@ -28,7 +28,25 @@ Claude Code 插件，也跟得上 Codex、Gemini CLI、OpenCode、Grok Build、H
 
 ## 支持的 agent
 
-✅ 可以用，实测过 · ⚠️ 可以用，但有最后一栏写的限制 · ❔ 按 agent 文档写的，还没实测 · ❌ 不能用。顶端的 agent 徽章：绿色是 ✅，黄绿色是 ⚠️。
+### 一眼看懂
+
+**完全可用**：回合会自己上看板，在它里面也叫得出看板，两者都实测过。
+- **Claude Code** 2.1.302（面板）
+- **Codex** 0.163.0（`$agent-board`）
+- **Gemini CLI** 0.64.0（`/board`）
+- **OpenCode** 1.19.3（`/board`）
+
+**部分可用**：缺什么写在后面。
+- **Grok Build** 1.0.62：回合实测过；在它里面叫看板（`/agent-board`）还没实测
+- **Hermes Agent** 0.19.0：两者都能用；`hermes -q` 单次提问会显示成已停，不是等你
+- **OpenClaw** 2026.10.4：两者都能用；需要 2026.4.24 以上，会警告无法确认 plugin 来源
+- **dot**、网页版 **Muse**、**其他 agent**：没有 hook，要贴一段提示、再合并它写的区块；在它里面看不到看板
+
+**还不能用**：**Cursor**（Windows 上 hook 被挡；macOS、Linux 没测）、**Muse Code** CLI（没实测）、**Antigravity**（没有回合结束的 hook）。
+
+下表按能力逐项列出细节。
+
+✅ 可以用，实测过 · ⚠️ 可以用，但有最后一栏写的限制 · ❔ 按 agent 文档写的，还没实测 · ❌ 不能用。顶端的 agent 徽章：绿色是完全可用，黄绿色是部分可用。
 
 | | Agent | 回合会出现在看板 | 在它里面看看板 | 实测版本 | 要知道的事 |
 |:-:|---|:-:|:-:|---|---|

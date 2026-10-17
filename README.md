@@ -17,7 +17,7 @@ A Claude Code plugin that also follows Codex, Gemini CLI, OpenCode, Grok Build, 
 <a href="#supported-agents"><img alt="Tested live with Codex 0.163.0" src="https://img.shields.io/badge/Codex-0.163.0-brightgreen"></a>
 <a href="#supported-agents"><img alt="Tested live with Gemini CLI 0.64.0" src="https://img.shields.io/badge/Gemini%20CLI-0.64.0-brightgreen"></a>
 <a href="#supported-agents"><img alt="Tested live with OpenCode 1.19.3" src="https://img.shields.io/badge/OpenCode-1.19.3-brightgreen"></a>
-<a href="#supported-agents"><img alt="Tested live with Grok Build 1.0.62" src="https://img.shields.io/badge/Grok%20Build-1.0.62-brightgreen"></a>
+<a href="#supported-agents"><img alt="Tested live with Grok Build 1.0.62" src="https://img.shields.io/badge/Grok%20Build-1.0.62-yellowgreen"></a>
 <a href="#supported-agents"><img alt="Tested live with Hermes Agent 0.19.0" src="https://img.shields.io/badge/Hermes%20Agent-0.19.0-yellowgreen"></a>
 <a href="#supported-agents"><img alt="Tested live with OpenClaw 2026.10.4" src="https://img.shields.io/badge/OpenClaw-2026.10.4-yellowgreen"></a>
 </p>
@@ -28,7 +28,25 @@ You have Claude Code on one project, Codex on another, Gemini on a third. Twenty
 
 ## Supported agents
 
-✅ works, tested live · ⚠️ works, with the limit in the last column · ❔ written from the agent's docs, not tested yet · ❌ does not work · the agent badges at the top: green ✅, yellow-green ⚠️
+### At a glance
+
+**Works fully**: its turns show up on the board by themselves, and the board opens inside it; both tested live.
+- **Claude Code** 2.1.302 (the pane)
+- **Codex** 0.163.0 (`$agent-board`)
+- **Gemini CLI** 0.64.0 (`/board`)
+- **OpenCode** 1.19.3 (`/board`)
+
+**Works in part**: the limit follows each name.
+- **Grok Build** 1.0.62: turns tested; the board command inside it (`/agent-board`) not tested yet
+- **Hermes Agent** 0.19.0: both work; a one-off `hermes -q` question shows as stopped, not waiting
+- **OpenClaw** 2026.10.4: both work; needs 2026.4.24 or newer, and warns about the plugin's origin
+- **dot**, **Muse** on the web, **any other agent**: no hook, so you paste a prompt and merge what it writes; no board inside it
+
+**Not working yet**: **Cursor** (its hook was blocked on Windows; macOS and Linux not tested), **Muse Code** CLI (not tested), **Antigravity** (no turn-end hook).
+
+The table below has the details per capability.
+
+✅ works, tested live · ⚠️ works, with the limit in the last column · ❔ written from the agent's docs, not tested yet · ❌ does not work · the agent badges at the top: green works fully, yellow-green works in part
 
 | | Agent | Its turns on the board | The board inside it | Tested on | What to know |
 |:-:|---|:-:|:-:|---|---|
