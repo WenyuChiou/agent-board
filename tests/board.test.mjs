@@ -462,4 +462,33 @@ test('an address file cut short by a crash is cleared once it is old, and the ne
   } finally {
     await board.end(urls)
   }
+  // So is one whose address is not an address.
+  const second = serveIn()
+  writeFileSync(second.served, JSON.stringify({ pid: 1, port: 1, url: 'x' }))
+  utimesSync(second.served, past, past)
+  const more = []
+  try {
+    more.push(second.urlOf(await second.serve()))
+    assert.ok(more[0])
+  } finally {
+    await second.end(more)
+  }
+})
+
+test('the same progress.md named two ways brings back the same page', { timeout: 60_000 }, async () => {
+  const board = serveIn()
+  const urls = []
+  try {
+    urls.push(board.urlOf(await board.serve()))
+    assert.ok(urls[0])
+    // The board script was written for this file; the person names it again with / for \ and a detour.
+    const other = `${board.dir}/run/../progress.md`.replace(/\\/g, '/')
+    const again = await new Promise((done, fail) =>
+      execFile(process.execPath, [board.script, '--serve', '--no-open'], { env: { ...board.env, CLAUDE_PROGRESS_FILE: other }, encoding: 'utf8', timeout: 20_000 }, (error, out) => (error ? fail(error) : done(out))),
+    )
+    urls.push(board.urlOf(again))
+    assert.equal(urls[1], urls[0], again)
+  } finally {
+    await board.end(urls)
+  }
 })

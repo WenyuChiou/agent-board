@@ -18,11 +18,13 @@
   first, the new one stops and its `--serve` prints the other's address. A
   file left by a page that is gone (it does not answer, also after five
   more seconds when it still runs) is removed first, and so is one cut
-  short by a crash, once it is ten seconds old. Tests: in
-  `tests/board.test.mjs`, "two --serve run at the same moment open one page
-  between them, and a server started while it runs stops at once", "an
-  address file cut short by a crash is cleared once it is old, and the next
-  --serve starts a page".
+  short by a crash or holding no page address, once it is ten seconds old.
+  The same `progress.md` named two ways (`C:/x` and `C:\x`) has one page
+  too. Tests: in `tests/board.test.mjs`, "two --serve run at the same moment
+  open one page between them, and a server started while it runs stops at
+  once", "an address file cut short by a crash is cleared once it is old,
+  and the next --serve starts a page", "the same progress.md named two ways
+  brings back the same page".
 - **Archiving now dates a finished hand-kept task on the right day.** The
   page's **Archive now** and `/progress tidy` put a task the pane had seen
   done less than a day ago under the day before. It now goes under the day
