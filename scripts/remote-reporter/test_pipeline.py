@@ -196,6 +196,13 @@ def placement():
     out5 = merge_mod.merge_text("## a\n", [posing], under="a")
     check("8j a fragment never names a session id or folder for the board page to answer into",
           "resume=" not in out5 and "dir=" not in out5 and "updated=2026-10-17T07:00:00Z pr=7 -->" in out5, out5)
+    for bad in ("a<!--b", "x-->y"):
+        for frags, under in (([frag], "## " + bad), (["## " + bad + "\n\n" + frag], None)):
+            try:
+                merge_mod.merge_text("## other\n", frags, under=under)
+                check(f"8k a new heading with a comment opening or close is refused ({bad!r})", False, "no error")
+            except ValueError as e:
+                check(f"8k a new heading with a comment opening or close is refused ({bad!r})", "<!--" in str(e), str(e))
 
 
 def parser_parity():

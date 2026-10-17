@@ -13,10 +13,18 @@ import assert from 'node:assert/strict'
 import { runInNewContext } from 'node:vm'
 import { BOARD_SCRIPT } from '../hooks/board-script.ts'
 
+// The board script reads these times against the real clock: a waiting block shows as stopped
+// after 12 hours, and an ended one is archived after three days. A fixed date would stop
+// meaning the same thing the day after it was written, so each is an age from now.
+const ago = ms => new Date(Date.now() - ms).toISOString().replace(/\.\d{3}Z$/, 'Z')
+const WAITING_AT = ago(45 * 60 * 1000)
+const WRITTEN_AT = ago(44 * 60 * 1000)
+const ENDED_AT = ago(23 * 60 * 60 * 1000)
+
 const FILE = `# Progress
 
 ## api-gateway
-<!-- auto session=a1b2c3d4 agent=codex state=waiting updated=2026-10-17T08:30:00Z -->
+<!-- auto session=a1b2c3d4 agent=codex state=waiting updated=${WAITING_AT} -->
 ### Rate-limit the public endpoints
 - [x] Added the token bucket middleware
 - [?] Per-key limit — 100 or 300 a minute?
@@ -59,7 +67,7 @@ test('keys played on the board tick a hand-kept step, archive a stopped block, a
 - [ ] Ask two referees
 
 ## docs-site
-<!-- auto session=b2c3d4e5 agent=gemini state=ended updated=2026-10-16T10:00:00Z -->
+<!-- auto session=b2c3d4e5 agent=gemini state=ended updated=${ENDED_AT} -->
 ### Fix the broken links
 - [ ] Fix them
 <!-- /auto session=b2c3d4e5 -->
@@ -96,7 +104,7 @@ test('another session writing while the board ticks or archives loses neither th
 - [ ] Ask two referees
 
 ## docs-site
-<!-- auto session=b2c3d4e5 agent=gemini state=ended updated=2026-10-16T10:00:00Z -->
+<!-- auto session=b2c3d4e5 agent=gemini state=ended updated=${ENDED_AT} -->
 ### Fix the broken links
 - [ ] Fix them
 <!-- /auto session=b2c3d4e5 -->
@@ -112,7 +120,7 @@ fs.renameSync = (from, to) => {
   real(from, to)
   if (!done && String(to).endsWith('progress.md')) {
     done = true
-    fs.writeFileSync(to, fs.readFileSync(to, 'utf8').replace('updated=2026-10-17T08:30:00Z', 'updated=2026-10-17T08:31:00Z'))
+    fs.writeFileSync(to, fs.readFileSync(to, 'utf8').replace(${JSON.stringify(`updated=${WAITING_AT}`)}, ${JSON.stringify(`updated=${WRITTEN_AT}`)}))
   }
 }
 syncBuiltinESMExports()
@@ -124,7 +132,7 @@ syncBuiltinESMExports()
     const ticked = play('down x')
     assert.ok(ticked.includes('Done: “Ask two referees”.'), ticked)
     assert.ok(readFileSync(path, 'utf8').includes('- [x] Ask two referees'))
-    assert.ok(readFileSync(path, 'utf8').includes('updated=2026-10-17T08:31:00Z'))
+    assert.ok(readFileSync(path, 'utf8').includes(`updated=${WRITTEN_AT}`))
     const journal = readdirSync(dir).find(name => name.includes('-journal-'))
     assert.ok(journal && readFileSync(join(dir, journal), 'utf8').includes('Ask two referees'))
     writeFileSync(path, file)
