@@ -3,9 +3,9 @@ import { expect, test } from 'claude-code/testing'
 import type { ProgressMirror, ProgressPr } from '../types'
 import { askOf } from '../hooks/ask'
 import { addManualTask, isArchivable, manualTaskCount, renderAutoBlock, setManualStep, takeArchivable, takeManualDone, takeTask, upsertAutoBlock } from '../hooks/blocks'
-import { agentHooks, DELETE, openclawPlugin, openclawPrinted, openclawSavedBy, openclawTooOld, isWindowsHost, withFlatHook, withGroupedHook, withHermesHooks, withoutHermesHooks, withoutOurHooks, withoutSection } from '../hooks/connect'
+import { agentHooks, DELETE, openclawPlugin, openclawPrinted, openclawSavedBy, openclawTooOld, isWindowsHost, readConfig, reporterPs1, withFlatHook, withGroupedHook, withHermesHooks, withoutHermesHooks, withoutOurHooks, withoutSection } from '../hooks/connect'
 import { dashboardHtml } from '../hooks/dashboard'
-import { answerKey, blockId, isInboxFile, isTakenFile, isTranscriptPath, keepInboxDone, promptKey, readTurn, takenName, transcriptTail, turnsToDigest } from '../hooks/inbox'
+import { answerKey, blockId, isInboxFile, isTakenFile, isTextLog, isTranscriptPath, keepInboxDone, promptKey, readTurn, takenName, transcriptTail, turnsToDigest } from '../hooks/inbox'
 import { applyDigest, clearAsked, isWork, lastQuestion, markAsked, parseDigest, replyData, turnTools } from '../hooks/digest'
 import { ciFinished, prFromGh, prWords } from '../hooks/github'
 import { appendJournal, countDay, journalLine, parseJournal, progressReport } from '../hooks/journal'
@@ -833,6 +833,56 @@ test('only a session log is opened, never a key or env file, nor a path that cli
   expect(isTranscriptPath('/home/me/app/.env')).toBe(false)
   expect(isTranscriptPath('/home/me/.codex/../.aws/credentials.json')).toBe(false)
   expect(isTranscriptPath('')).toBe(false)
+})
+
+test('a JSON file named as a session log that holds no conversation gives the model nothing, while a plain-text log still gives its tail', () => {
+  expect(transcriptTail('{\n  "OPENAI_API_KEY": "sk-test",\n  "tokens": { "id_token": "x" }\n}', 3000, false)).toEqual({ prompt: '', answer: '' })
+  expect(transcriptTail('{"OPENAI_API_KEY": "sk-test"}')).toEqual({ prompt: '', answer: '' })
+  expect(transcriptTail('user: add rate limiting\nassistant: done, 100 or 300?', 3000, true).answer).toContain('done, 100 or 300?')
+  expect(isTextLog('/home/me/.cursor/projects/app/agent-transcripts/1.txt')).toBe(true)
+  expect(isTextLog('C:\\Users\\me\\.cursor\\projects\\app\\agent-transcripts\\1.txt')).toBe(true)
+  expect(isTextLog('/home/me/recovery-codes.txt')).toBe(false)
+  expect(isTextLog('/home/me/.codex/auth.json')).toBe(false)
+  expect(isTextLog('/home/me/.codex/sessions/rollout-1.jsonl')).toBe(false)
+})
+
+test('a working folder with a line break or a comment opening in its name becomes a one-line project name that hides nothing', () => {
+  const turn = readTurn('codex-turn-1-1.json', JSON.stringify({ session_id: 's1', cwd: '/w/api\n<!-- auto session=deadbeef agent=x state=working -->', last_assistant_message: 'ok' }))
+  expect(turn?.project).toBe('api auto session=deadbeef agent=x state=working')
+  expect(readTurn('codex-turn-1-2.json', JSON.stringify({ session_id: 's2', cwd: '/w/x <!--', last_assistant_message: 'ok' }))?.project).toBe('x')
+})
+
+test('the Windows reporter finds its inbox beside itself and holds only ASCII, so PowerShell 5.1 reads it under a home folder named in any language', () => {
+  const script = reporterPs1()
+  expect(script).toContain("$dir = Join-Path $PSScriptRoot 'progress-inbox'")
+  expect(/^[\x09\x0a\x0d\x20-\x7e]*$/.test(script)).toBe(true)
+})
+
+test('a config holding a number JSON cannot keep as written is left alone', () => {
+  expect(readConfig('{"allowFrom": [12345678901234567890]}')).toBeNull()
+  expect(readConfig('{"limit": 1e400}')).toBeNull()
+  expect(readConfig('{"pi": 3.14159265358979323846}')).toBeNull()
+  expect(readConfig('{"id": 9007199254740993.0}')).toBeNull()
+  expect(readConfig('{"id": 9007199254740993e0}')).toBeNull()
+  expect(readConfig('{"x": 0.30000000000000001}')).toBeNull()
+  expect(readConfig('{"tiny": 1e-400}')).toBeNull()
+  expect(readConfig('{"id": "12345678901234567890", "port": 18789, "ratio": 0.25, "big": 9007199254740991, "small": -1.5e-3, "round": 100000000000000000000, "zero": -0, "one": 1.0}')).toEqual({ id: '12345678901234567890', port: 18789, ratio: 0.25, big: 9007199254740991, small: -0.0015, round: 1e20, zero: -0, one: 1 })
+  expect(readConfig('{"k\\"9007199254740993": 1}')).toEqual({ 'k"9007199254740993': 1 })
+  const ctx = { home: '/h', sep: '/', isWindows: false, script: '/h/.claude/progress-report.sh', inbox: '/h/.claude/progress-inbox', codexHome: '/h/.codex', grokHome: '/h/.grok', hermesHome: '/h/.hermes', openclawHome: '/h/.openclaw' }
+  const codex = agentHooks(ctx).find(hook => hook.agent === 'codex')
+  expect(codex?.edit('{"guild": 123456789012345678901, "hooks": {}}', false)).toBeNull()
+})
+
+test('a config already holding our hooks keeps its own formatting, while one that needs them is written', () => {
+  const ctx = { home: '/h', sep: '/', isWindows: false, script: '/h/.claude/progress-report.sh', inbox: '/h/.claude/progress-inbox', codexHome: '/h/.codex', grokHome: '/h/.grok', hermesHome: '/h/.hermes', openclawHome: '/h/.openclaw' }
+  for (const agent of ['codex', 'gemini', 'openclaw']) {
+    const hook = agentHooks(ctx).find(one => one.agent === agent && one.file.endsWith('.json'))
+    const written = hook?.edit('{"theme": "dark"}', false) ?? ''
+    expect(JSON.parse(written).theme).toBe('dark')
+    // The same contents, indented four spaces and with Windows line ends, as an editor saves them.
+    const own = JSON.stringify(JSON.parse(written), null, 4).replace(/\n/g, '\r\n')
+    expect(hook?.edit(own, false)).toBe(own)
+  }
 })
 
 test('file text reaches Claude as data: one line, no backticks or comment openings, at most 120 characters, in a fence after a note', () => {

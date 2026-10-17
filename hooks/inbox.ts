@@ -113,8 +113,10 @@ export const readTurn = (fileName: string, body: string): AgentTurn | null => {
     session,
     id: blockId(agent, session),
     cwd,
-    // OpenClaw's turns run in its own workspace folder, whose name says nothing.
-    project: OPENCLAW_WORKSPACE.test(cwd) ? 'OpenClaw' : baseName(cwd),
+    // OpenClaw's turns run in its own workspace folder, whose name says nothing. The name
+    // becomes a `##` heading, so a folder name with a line break or a comment opening in it
+    // cannot start a line or hide the lines after it.
+    project: OPENCLAW_WORKSPACE.test(cwd) ? 'OpenClaw' : baseName(cwd).replace(/<!--|-->/g, ' ').replace(/\s+/g, ' ').trim(),
     prompt: first(record, ['prompt', 'user_prompt', 'user_message', 'input-messages', 'input_messages', 'last_user_message']),
     // Gemini CLI says this when the turn had no text.
     answer: answer === '[no response text]' ? '' : answer,
@@ -149,8 +151,9 @@ const logEntry = (line: string): LogEntry | null => {
 }
 
 // The end of a session log, as text the model can read: the last assistant and user words
-// it can find in JSON lines, else the raw tail.
-export const transcriptTail = (log: string, limit = 3000): { prompt: string; answer: string } => {
+// it can find in JSON lines, else, for a log written as plain text, the raw tail. A JSON
+// file with no words in it is no log (a key file, a config), so none of it goes to the model.
+export const transcriptTail = (log: string, limit = 3000, isText = false): { prompt: string; answer: string } => {
   const lines = log.split(/\r?\n/).filter(line => line.trim() !== '')
   // Chunks of one message, one after another, read as the whole message.
   const entries = lines.reduce<LogEntry[]>((all, line) => {
@@ -169,14 +172,20 @@ export const transcriptTail = (log: string, limit = 3000): { prompt: string; ans
     if (answer === '' && /assistant|model|agent/i.test(role)) answer = words
     else if (prompt === '' && /user|human/i.test(role) && answer !== '') prompt = words
   }
-  if (answer === '') answer = lines.slice(-20).join('\n')
+  if (answer === '' && isText) answer = lines.slice(-20).join('\n')
 
   return { prompt: prompt.slice(-1200), answer: answer.slice(-limit) }
 }
 
+// Cursor writes its session logs as plain text, in its agent-transcripts folder; every other
+// agent's are JSON. Any other text file an inbox file names (a list of recovery codes) is
+// not read out raw.
+export const isTextLog = (path: string): boolean => /[\\/]agent-transcripts[\\/][^\\/]+\.txt$/i.test(path)
+
 // A session log the pane may open: the path comes from a file anyone on the machine can drop
 // into the inbox, so only the kinds agents write their logs in (JSON lines; Cursor's are
-// text), never a key or an env file, and no climbing out of a folder.
+// text) and no climbing out of a folder. A JSON file that holds no conversation gives the
+// model nothing (transcriptTail).
 export const isTranscriptPath = (path: string): boolean => /\.(?:jsonl?|txt)$/i.test(path) && !/(?:^|[\\/])\.\.(?:[\\/]|$)/.test(path)
 
 // How much of a turn a stored mirror keeps: the end of the last reply (what the next turn is

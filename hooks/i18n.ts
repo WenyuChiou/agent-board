@@ -189,6 +189,7 @@ export const ZH_TW = {
   connectCodexTrust: 'Codex 第一次要在它的 /hooks 裡核准這個 hook 才會跑。',
   connectHermesTrust: 'Hermes Agent 第一次跑這個 hook 前會問你一次，回答 y（或用 --accept-hooks 啟動）。',
   connectSkipped: (name: string, path: string): string => `${name} 的設定檔讀不懂，沒有動它：${path}`,
+  connectFailed: (name: string, path: string): string => `${name} 的設定檔寫不進去：${path}`,
   connectTooOld: (name: string, version: string, min: string): string => `${name} ${version} 太舊，要 ${min} 以上才接得上，所以沒有接它。更新之後再跑 /progress connect。`,
   autoConnectTitle: 'Agent Board 接上了其他 agent',
   autoConnected: (list: string): string => `已自動接上：${list}。重開它們之後，每個回合都會出現在這裡。`,

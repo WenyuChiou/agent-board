@@ -2,6 +2,42 @@
 
 ## Unreleased
 
+- **Hardening from a review of the whole plugin.**
+  - **Home folders with Chinese names.** On Windows, agents' turns now reach
+    the board when the home folder's name is not plain ASCII. The PowerShell
+    reporter used to hold the inbox's path. PowerShell 5.1 reads a script with
+    no byte-order mark in the system's code page, so the reporter saved every
+    turn into a garbled folder that the board never read. The reporter now
+    finds the inbox beside itself.
+  - **Numbers JSON cannot keep.** Connect no longer rewrites an agent's JSON
+    config that holds a number it would change: an id past 2^53, `1e400`,
+    `1e-400`, or more digits than a double keeps. Such a file is left alone.
+  - **Unchanged configs.** A config whose contents would not change keeps its
+    own formatting (indent, line ends) instead of being rewritten, and
+    announced, at every session start.
+  - **One agent's failure.** An agent whose config cannot be written is named,
+    and the agents after it are still hooked in. When OpenClaw's plugin file
+    cannot be written, the config entry that would load it is not written
+    either.
+  - **Session-log paths in inbox files.** An inbox file can name a JSON file
+    with no conversation in it (a key file) as its session log. That file now
+    gives the model nothing; before, its last 20 lines were sent. Raw text is
+    read only from Cursor's `agent-transcripts` folder.
+  - **Folder names with a line break or a comment opening.** A working folder
+    with a line break or `<!--` in its name becomes a one-line project heading
+    that hides nothing after it.
+
+  Tests: "the Windows reporter finds its inbox beside itself and holds only
+  ASCII, so PowerShell 5.1 reads it under a home folder named in any
+  language", "a config holding a number JSON cannot keep as written is left
+  alone", "a config already holding our hooks keeps its own formatting, while
+  one that needs them is written", "an agent whose config cannot be written is
+  named, and the agents after it are still hooked in", "an OpenClaw whose
+  plugin file cannot be written gets no config entry that would load a missing
+  file", "a JSON file named as a session log that holds no conversation gives
+  the model nothing, while a plain-text log still gives its tail", "a working
+  folder with a line break or a comment opening in its name becomes a
+  one-line project name that hides nothing".
 - **`/progress connect` wires a stock Hermes Agent.** Hermes writes
   `hooks: {}` into a new `config.yaml`, and connect took that empty map for a
   flow-style block it could not follow, so it left Hermes out and said it

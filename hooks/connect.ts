@@ -30,11 +30,14 @@ find "$dir" -name '*.json' -mtime +2 -exec rm -f {} +
 exit 0
 `
 
-export const reporterPs1 = (inbox: string): string => `# Written by the Agent Board plugin (/progress connect). An agent's hook runs it at the end of
+// The inbox is found from the script's own folder (both sit beside progress.md), so the
+// script holds no path: PowerShell 5.1 reads a file with no byte-order mark in the system's
+// code page, which would turn a home folder named in Chinese into a different folder.
+export const reporterPs1 = (): string => `# Written by the Agent Board plugin (/progress connect). An agent's hook runs it at the end of
 # a turn or a session; the Agent Board pane reads what it saves.
 param([string]$Agent = 'agent', [string]$Event = 'turn', [string]$Payload = '')
 $ErrorActionPreference = 'SilentlyContinue'
-$dir = ${psQuote(inbox)}
+$dir = Join-Path $PSScriptRoot 'progress-inbox'
 New-Item -ItemType Directory -Force -Path $dir | Out-Null
 if ($Payload -eq '' -and [Console]::IsInputRedirected) {
   [Console]::InputEncoding = [Text.Encoding]::UTF8
@@ -127,17 +130,36 @@ export const withoutOurHooks = (config: Json): Json => {
   return { ...config, hooks }
 }
 
+// A number's significant digits, without sign, point, exponent or the zeros around them.
+const digitsOf = (number: string): string => number.replace(/[eE].*$/, '').replace(/[-.]/g, '').replace(/^0+/, '').replace(/0+$/, '')
+
+// A number JSON.parse cannot hold as written: an integer past 2^53 (a Discord or Telegram
+// id), one past a double's range (1e400, 1e-400), or more digits than a double keeps.
+// Written back, it would come out as a different number: the digits a double prints for
+// itself are not the ones written.
+const losesNumbers = (text: string): boolean =>
+  (text.replace(/"(?:[^"\\]|\\.)*"/g, '""').match(/-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?/g) ?? []).some(literal => {
+    const value = Number(literal)
+    return !Number.isFinite(value) || digitsOf(value.toExponential()) !== digitsOf(literal)
+  })
+
 // A config file read as JSON: `{}` when it is missing or empty, null when it holds
-// something that is not a JSON object (comments, a typo), which is then left alone.
+// something that is not a JSON object (comments, a typo) or a number it would change, which
+// is then left alone.
 export const readConfig = (text: string): Json | null => {
   if (text.trim() === '') return {}
   try {
     const parsed: unknown = JSON.parse(text)
-    return isRecord(parsed) ? parsed : null
+    return isRecord(parsed) && !losesNumbers(text) ? parsed : null
   } catch {
     return null
   }
 }
+
+// The config written back, or the text as it was when nothing in it changed, so a file the
+// person or the agent formats its own way is not rewritten (and announced) at every start.
+const writeChanged = (text: string, before: Json, after: Json): string =>
+  JSON.stringify(after) === JSON.stringify(before) ? text : writeConfig(after)
 
 export const writeConfig = (config: Json): string => `${JSON.stringify(config, null, 2)}\n`
 
@@ -177,7 +199,7 @@ const jsonEdit =
   (text: string, remove: boolean): string | null => {
     const config = readConfig(text)
     if (config === null) return null
-    return writeConfig(remove ? withoutOurHooks(config) : add(withoutOurHooks(config)))
+    return writeChanged(text, config, remove ? withoutOurHooks(config) : add(withoutOurHooks(config)))
   }
 
 // Hermes Agent keeps its hooks in YAML: `hooks.<event>` is a list of `{ command, timeout }`.
@@ -365,7 +387,7 @@ export const agentHooks = (ctx: ConnectContext): AgentHook[] => {
         const file = [ctx.openclawHome, OPENCLAW_FILE].join(ctx.sep)
         // Nothing of ours to take out: the person's file stays byte for byte.
         if (remove && !hasOpenclawPlugin(config, file)) return text
-        return writeConfig(remove ? withoutOpenclawPlugin(config, file) : withOpenclawPlugin(config, file))
+        return writeChanged(text, config, remove ? withoutOpenclawPlugin(config, file) : withOpenclawPlugin(config, file))
       },
     },
     {

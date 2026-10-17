@@ -49,6 +49,8 @@ type World = {
   afterWrite?: () => string
   // What `openclaw --version` prints.
   openclaw?: string
+  // Paths a write to fails (a read-only file, a folder that is not there).
+  unwritable?: Set<string>
 }
 
 // On Windows the engine resolves /home/me/... to X:\home\me\... before fs.* reaches these
@@ -148,6 +150,7 @@ const engineBeneath = (on: On, world: World): MockClock => {
   })
   on('fs.write', async ($, e) => {
     const path = posix(e.path)
+    if (world.unwritable?.has(path)) return { deny: 'EACCES' }
     const hold = world.hold
     if (hold !== undefined && path === FILE) {
       world.hold = undefined
@@ -1606,6 +1609,40 @@ test('an OpenClaw older than 2026.4.24 is not hooked in, what an earlier connect
   expect(connected.text).not.toContain('OpenClaw 的設定檔讀不懂')
   expect(connected.text).not.toContain('沒找到可以接的 agent')
   expect(world.files.get('/home/me/.openclaw/openclaw.json')).toBe(healed)
+})
+
+test('an agent whose config cannot be written is named, and the agents after it are still hooked in', async ($, on) => {
+  const world: World = {
+    files: new Map([
+      ['/home/me/.codex/config.toml', 'model = "gpt-6"\n'],
+      ['/home/me/.gemini/settings.json', '{}\n'],
+    ]),
+    mtime: 1,
+    hasTasks: true,
+    ran: [],
+    unwritable: new Set(['/home/me/.codex/hooks.json']),
+  }
+  engineBeneath(on, world)
+  const seen = outside(on)
+  await $.session.start({ cwd: '/work/persona_framework', surface: 'terminal', isInteractive: true })
+  expect(world.files.has('/home/me/.codex/hooks.json')).toBe(false)
+  expect(JSON.parse(world.files.get('/home/me/.gemini/settings.json') ?? '{}').hooks.AfterAgent[0].hooks[0].command).toBe("sh '/home/me/.claude/progress-report.sh' gemini turn")
+  expect(seen.notified).toEqual(['已自動接上：Gemini CLI。重開它們之後，每個回合都會出現在這裡。'])
+
+  const connected = await $.command.run({ ...TIDY, args: 'connect' })
+  expect(connected.text).toContain('Codex 的設定檔寫不進去：/home/me/.codex/hooks.json')
+  expect(connected.text).not.toContain('沒找到可以接的 agent')
+})
+
+test('an OpenClaw whose plugin file cannot be written gets no config entry that would load a missing file', async ($, on) => {
+  const config = JSON.stringify({ meta: { lastTouchedVersion: '2026.5.2' }, gateway: { port: 18789 } })
+  const world: World = { files: new Map([['/home/me/.openclaw/openclaw.json', config]]), mtime: 1, hasTasks: true, ran: [], unwritable: new Set(['/home/me/.openclaw/agent-board.mjs']) }
+  engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/persona_framework', surface: 'terminal', isInteractive: true })
+  expect(world.files.get('/home/me/.openclaw/openclaw.json')).toBe(config)
+  const connected = await $.command.run({ ...TIDY, args: 'connect' })
+  expect(connected.text).toContain('OpenClaw 的設定檔寫不進去：/home/me/.openclaw/agent-board.mjs')
+  expect(world.files.get('/home/me/.openclaw/openclaw.json')).toBe(config)
 })
 
 test('an OpenClaw updated since it last saved its config is hooked in, since the installed one says which version it is', async ($, on) => {
