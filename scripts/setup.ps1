@@ -103,8 +103,11 @@ function Install-AgentBoard {
     if (-not $NoInstall) {
       Write-Warning "claude is not on PATH: run 'claude plugin marketplace add $marketplace' and 'claude plugin install $plugin' yourself."
     }
+    # The commands go on lines of their own: short enough not to wrap, and easy to copy.
     if ($hasOld) {
-      Write-Warning "$oldPlugin, the plugin's old name, is still installed and shows a second pane: once $plugin is in, $oldSteps."
+      Write-Warning "$oldPlugin, the plugin's old name, is still installed and shows a second pane. Once $plugin is in, run:"
+      Write-Host "  claude plugin uninstall $oldPlugin"
+      Write-Host "  claude plugin marketplace remove $oldMarket"
     }
   }
 

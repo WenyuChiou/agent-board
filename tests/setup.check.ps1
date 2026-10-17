@@ -316,7 +316,9 @@ try {
   $dir = New-Case $oldSettings
   $out = Invoke-Setup $dir
   Check 'old name: with -NoInstall it is still found in settings.json, with the two commands to remove it' `
-    ($out.Contains('claude plugin uninstall project-progress@claude-progress-pane') -and $out.Contains('claude plugin marketplace remove claude-progress-pane'))
+    # Without whitespace, so a console that wraps a long line cannot split a command.
+    (($out -replace '\s', '').Contains('claudepluginuninstallproject-progress@claude-progress-pane') -and
+     ($out -replace '\s', '').Contains('claudepluginmarketplaceremoveclaude-progress-pane'))
 }
 finally {
   foreach ($one in $script:dirs) { if (Test-Path $one) { Remove-Item -LiteralPath $one -Recurse -Force } }

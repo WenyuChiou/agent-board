@@ -93,7 +93,9 @@ else
     echo "claude is not on PATH: run 'claude plugin marketplace add $marketplace' and 'claude plugin install $plugin' yourself." >&2
   fi
   if [ "$has_old" = 1 ]; then
-    echo "$old_plugin, the plugin's old name, is still installed and shows a second pane: once $plugin is in, $old_steps." >&2
+    # The commands go on lines of their own: easy to copy.
+    printf '%s\n' "$old_plugin, the plugin's old name, is still installed and shows a second pane. Once $plugin is in, run:" \
+      "  claude plugin uninstall $old_plugin" "  claude plugin marketplace remove $old_market" >&2
   fi
 fi
 
