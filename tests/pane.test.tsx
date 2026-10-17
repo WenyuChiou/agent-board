@@ -91,7 +91,7 @@ const engineBeneath = (on: On, world: World): MockClock => {
       ? { deny: 'ENOENT' }
       : { value: { kind: 'file' as const, size: text.length, mtimeMs: world.mtime, isLink: false } }
   })
-  on('fs.exists', ($, e) => ({ value: world.files.has(posix(e.path)) }))
+  on('fs.exists', ($, e) => ({ value: world.files.has(posix(e.path)) || [...world.files.keys()].some(path => path.startsWith(`${posix(e.path)}/`)) }))
   on('fs.list', ($, e) => {
     const dir = `${posix(e.path ?? '').replace(/\/$/, '')}/`
     const names = [...world.files.keys()].filter(path => path.startsWith(dir) && !path.slice(dir.length).includes('/'))
@@ -1146,4 +1146,45 @@ test('another agent’s turn, left in the inbox by its hook, becomes its block o
   world.mtime += 1
   await clock.advance(5000)
   expect(world.files.get(FILE) ?? '').toContain('agent=codex state=ended')
+})
+
+
+test('/progress connect hooks the installed agents into the pane once, keeps their own hooks, and takes ours back out', async ($, on) => {
+  const section = '<!-- claude-progress-pane:start -->\n## Report your progress\n<!-- claude-progress-pane:end -->\n'
+  const world: World = {
+    files: new Map([
+      ['/home/me/.codex/config.toml', 'model = "gpt-6"\n'],
+      ['/home/me/.codex/AGENTS.md', `# Mine\n\nUse tabs.\n\n${section}`],
+      ['/home/me/.cursor/hooks.json', JSON.stringify({ version: 1, hooks: { stop: [{ command: 'say done' }] } })],
+      ['/home/me/.gemini/settings.json', '{ // my comment\n "theme": "dark" }'],
+    ]),
+    mtime: 1,
+    hasTasks: true,
+    ran: [],
+  }
+  engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/persona_framework', surface: 'terminal', isInteractive: true })
+
+  const first = await $.command.run({ ...TIDY, args: 'connect' })
+  expect(first.text).toContain('已接上：Codex、Cursor。')
+  expect(first.text).toContain('Codex 第一次要在它的 /hooks 裡核准這個 hook 才會跑。')
+  expect(first.text).toContain('Gemini CLI 的設定檔讀不懂，沒有動它：/home/me/.gemini/settings.json')
+  expect(world.files.get('/home/me/.claude/progress-report.sh')).toContain("dir='/home/me/.claude/progress-inbox'")
+  const codex = JSON.parse(world.files.get('/home/me/.codex/hooks.json') ?? '{}')
+  expect(codex.hooks.Stop[0].hooks[0]).toEqual({ type: 'command', command: "sh '/home/me/.claude/progress-report.sh' codex turn", timeout: 10 })
+  expect(codex.hooks.SessionEnd[0].hooks[0].command).toBe("sh '/home/me/.claude/progress-report.sh' codex end")
+  expect(world.files.get('/home/me/.codex/AGENTS.md')).toBe('# Mine\n\nUse tabs.\n')
+  expect(world.files.get('/home/me/.gemini/settings.json')).toBe('{ // my comment\n "theme": "dark" }')
+
+  // Again: nothing doubles.
+  await $.command.run({ ...TIDY, args: 'connect' })
+  const cursor = JSON.parse(world.files.get('/home/me/.cursor/hooks.json') ?? '{}')
+  expect(cursor.hooks.stop).toEqual([{ command: 'say done' }, { command: "sh '/home/me/.claude/progress-report.sh' cursor turn" }])
+  expect(cursor.hooks.afterAgentResponse).toHaveLength(1)
+  expect(cursor.hooks.sessionEnd).toEqual([{ command: "sh '/home/me/.claude/progress-report.sh' cursor end" }])
+
+  const removed = await $.command.run({ ...TIDY, args: 'connect remove' })
+  expect(removed.text).toContain('已拿掉：Codex、Cursor。')
+  expect(JSON.parse(world.files.get('/home/me/.cursor/hooks.json') ?? '{}').hooks).toEqual({ stop: [{ command: 'say done' }] })
+  expect(JSON.parse(world.files.get('/home/me/.codex/hooks.json') ?? '{}').hooks).toEqual({})
 })

@@ -38,6 +38,7 @@ export const emptyMirror = (sessionId: string, project: string, now: number, cwd
   autoAsk: null,
   handoff: '',
   namedSteps: 0,
+  lastAnswer: '',
 })
 
 const WAITING_YOU = new Set(['you', 'user', 'me', 'human', 'person', '使用者', '用户', '我'])

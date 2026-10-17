@@ -107,6 +107,9 @@ export type ProgressMirror = {
   handoff: string
   // How many steps the list had when the title and background were last written.
   namedSteps: number
+  // For another agent's session: the last reply summed up, so the same turn reported twice
+  // (two hooks of one turn, or Grok running Cursor's hooks too) counts once.
+  lastAnswer: string
 }
 
 // What the pane shows under its input box: a side question's answer, what a quick add

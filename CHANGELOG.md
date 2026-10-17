@@ -1,6 +1,9 @@
 # Changelog
 
-## Unreleased
+## 0.9.0 — 2026-10-17
+
+The pane no longer depends on an agent remembering to report. Each agent's own
+harness says when a turn ends, and the pane sums the turn up.
 
 - **Progress without a Task list.** A session that keeps no Task list still
   shows up: a turn that edited a file or ran a command is summed up by Haiku
@@ -27,6 +30,35 @@
   documents the note and the `source` attribute. Tests: `a compaction leaves a
   handoff line in the block`, `a stopped session’s handoff line shows on its row
   and goes with 接手做完`, `a handoff note is its own line …`.
+- **Other agents through their own hooks: `/progress connect`.** One command
+  finds the agents installed here and adds a turn-end hook to each:
+  - Codex: `Stop` in `hooks.json`. Codex asks you to approve it once in `/hooks`.
+  - Gemini CLI: `AfterAgent` in `settings.json`.
+  - Cursor: `afterAgentResponse` and `stop` in `hooks.json`.
+  - OpenCode: a plugin on `session.idle`.
+  - Grok Build: a file in `~/.grok/hooks`.
+  - Muse Code: `Stop` in `settings.json`, with the `schema_version` it needs.
+
+  Each hook runs `progress-report.sh` (or `.ps1`), written beside
+  `progress.md`. The script has no dependencies, saves the hook's input into
+  `progress-inbox/`, clears files older than two days, prints nothing (`{}`
+  for Cursor) and always exits 0, because some agents read exit 2 as "keep
+  going". Every 5 seconds an open session checks the folder: a stat, plus a
+  listing only when the folder changed. It stamps new files in the store so
+  only one session reads each, and sums the agent's turns up into its own
+  block. If one turn is reported twice, it counts once: two hooks of the same
+  turn, or Grok Build also running Cursor's hooks.
+
+  Your own hooks stay. A config file that is not plain JSON is left alone and
+  named. The AGENTS.md section that setup `--agents` wrote for that agent is
+  removed, and setup now skips agents that are connected.
+  `/progress connect remove` takes it all out. Payload fields come from each
+  agent's source code or docs; none of these agents was run live here.
+  Tests: `/progress connect hooks the installed agents into the pane once …`,
+  `another agent’s turn, left in the inbox by its hook, becomes its block once
+  …`, `each agent’s hook payload reads as a turn …`, `each agent’s config gets
+  the hook in the shape it reads …`, and `agents: an agent hooked by /progress
+  connect gets no section` in both setup checks.
 - **README.** 56 lines instead of 294 in each language: what it is, the
   interaction demo, three points, install, what to type, how it works. The rest
   moves to `docs/GUIDE.md` (and `GUIDE.zh-TW.md`, `GUIDE.zh-CN.md`). The demo's

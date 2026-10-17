@@ -165,8 +165,8 @@ export const ZH_CN: Strings = {
   stepSep: '；',
 
   // /progress
-  commandDescription: '进度面板：打开；open 打开网页版、整理、同步、加 …、周报、今天、通知 开/关、lang en|zh-TW|zh-CN',
-  commandHint: '[open|整理|同步|加 …|周报|今天|通知 开/关|lang …]',
+  commandDescription: '进度面板：打开；open 打开网页版、connect 接上其他 agent、整理、同步、加 …、周报、今天、通知 开/关、lang en|zh-TW|zh-CN',
+  commandHint: '[open|connect|整理|同步|加 …|周报|今天|通知 开/关|lang …]',
   tidyUnreadable: '读不到进度文件或归档文件，没有动任何文件。',
   tidyNothing: '没有要归档的。',
   tidyMoved: (n: number): string => `归档了 ${n} 个完成的任务。`,
@@ -176,6 +176,12 @@ export const ZH_CN: Strings = {
   notifyOff: '桌面通知已关闭。',
   paneOpened: (path: string): string => `进度面板已打开：${path}`,
   paneNotOpened: (reason: string): string => `进度面板打不开：${reason}`,
+  connectDone: (list: string): string => `已接上：${list}。重启它们之后，每回合结束都会自动汇报到面板。`,
+  connectNone: '没找到可以接的 agent（Codex、Gemini CLI、Cursor、OpenCode、Grok Build、Muse Code）。',
+  connectCodexTrust: 'Codex 第一次要在它的 /hooks 里批准这个 hook 才会运行。',
+  connectSkipped: (name: string, path: string): string => `${name} 的配置文件读不懂，没有动它：${path}`,
+  connectRemoved: (list: string): string => `已去掉：${list}。`,
+  connectNothingRemoved: '没有接上过任何 agent。',
   langSet: '面板改用简体中文。',
   langUnknown: '支持的语言：en、zh-TW、zh-CN、auto。',
 

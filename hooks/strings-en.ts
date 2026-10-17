@@ -166,8 +166,8 @@ export const EN: Strings = {
   stepSep: '; ',
 
   // /progress
-  commandDescription: 'Progress pane: show it; open (the web page), tidy, sync, add …, report, today, notify on|off, lang en|zh-TW|zh-CN',
-  commandHint: '[open|tidy|sync|add …|report|today|notify on|off|lang …]',
+  commandDescription: 'Progress pane: show it; open (the web page), connect (other agents), tidy, sync, add …, report, today, notify on|off, lang en|zh-TW|zh-CN',
+  commandHint: '[open|connect|tidy|sync|add …|report|today|notify on|off|lang …]',
   tidyUnreadable: "Can't read the progress or archive file. No files were changed.",
   tidyNothing: 'Nothing to archive.',
   tidyMoved: (n: number): string => `Archived ${n} finished ${n === 1 ? 'task' : 'tasks'}.`,
@@ -177,6 +177,12 @@ export const EN: Strings = {
   notifyOff: 'Desktop notifications off.',
   paneOpened: (path: string): string => `Progress pane opened: ${path}`,
   paneNotOpened: (reason: string): string => `Couldn't open the progress pane: ${reason}`,
+  connectDone: (list: string): string => `Connected: ${list}. After you restart them, every turn they finish reports to the pane.`,
+  connectNone: 'No agent to connect was found (Codex, Gemini CLI, Cursor, OpenCode, Grok Build, Muse Code).',
+  connectCodexTrust: 'Codex runs a new hook only after you approve it once in its /hooks.',
+  connectSkipped: (name: string, path: string): string => `Could not read ${name}'s config, so it was left alone: ${path}`,
+  connectRemoved: (list: string): string => `Disconnected: ${list}.`,
+  connectNothingRemoved: 'No agent was connected.',
   langSet: 'The pane now speaks English.',
   langUnknown: 'Supported languages: en, zh-TW, zh-CN, auto.',
 

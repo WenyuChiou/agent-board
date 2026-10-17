@@ -70,19 +70,24 @@ export const readTurn = (fileName: string, body: string): AgentTurn | null => {
   if (name === null) return null
   let parsed: unknown
   try {
-    parsed = JSON.parse(body)
+    // Cursor on Windows starts its JSON with a byte-order mark.
+    parsed = JSON.parse(body.replace(/^\uFEFF/, ''))
   } catch {
     return null
   }
   if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) return null
   const record = parsed as Record<string, unknown>
-  const agent = name[1] ?? 'agent'
+  // Grok Build also runs Cursor's hooks; its camelCase fields say whose turn it really is.
+  const agent = typeof record.hookEventName === 'string' && 'workspaceRoot' in record ? 'grok' : (name[1] ?? 'agent')
   const session = first(record, ['session_id', 'sessionId', 'sessionID', 'thread-id', 'thread_id', 'conversation_id', 'conversationId'])
   if (session === '') return null
   const roots = record.workspace_roots
-  const cwd = first(record, ['cwd', 'workspace', 'project_dir', 'directory']) || (Array.isArray(roots) ? text(roots[0]) : '')
+  const cwd = first(record, ['cwd', 'workspaceRoot', 'workspace', 'project_dir', 'directory']) || (Array.isArray(roots) ? text(roots[0]) : '')
   const hookEvent = first(record, ['hook_event_name', 'hookEventName', 'event', 'type'])
-  const event = name[2] === 'end' || END_EVENTS.test(hookEvent) ? 'end' : 'turn'
+  // Grok Build sends one more Stop as a session closes; it ends the session, it is no turn.
+  const closing = typeof record.reason === 'string' && /^(?:channel_closed|shutdown)$/.test(record.reason)
+  const event = name[2] === 'end' || END_EVENTS.test(hookEvent) || closing ? 'end' : 'turn'
+  const answer = first(record, ['last_assistant_message', 'lastAssistantMessage', 'last-assistant-message', 'prompt_response', 'response', 'text'])
 
   return {
     agent,
@@ -92,8 +97,9 @@ export const readTurn = (fileName: string, body: string): AgentTurn | null => {
     cwd,
     project: baseName(cwd),
     prompt: first(record, ['prompt', 'user_prompt', 'input-messages', 'input_messages', 'last_user_message']),
-    answer: first(record, ['last_assistant_message', 'last-assistant-message', 'prompt_response', 'response', 'last_message']),
-    transcript: first(record, ['transcript_path', 'transcriptPath', 'log_path']),
+    // Gemini CLI says this when the turn had no text.
+    answer: answer === '[no response text]' ? '' : answer,
+    transcript: first(record, ['transcript_path', 'transcriptPath']),
   }
 }
 

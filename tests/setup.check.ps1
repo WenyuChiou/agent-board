@@ -244,6 +244,11 @@ try {
     ([IO.File]::ReadAllText((Join-Path $dir '.config\opencode\AGENTS.md')).Contains('claude-progress-pane:start'))
   $out = Invoke-Setup $dir "'RemoteSigned'" '-Agents copilot'
   Check 'agents: an unknown name is refused' ($out -match 'unknown agent: copilot')
+  [IO.File]::WriteAllText((Join-Path $dir '.codex\hooks.json'), '{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"powershell -File progress-report.ps1 codex turn"}]}]}}', $utf8)
+  Remove-Item -LiteralPath (Join-Path $dir '.codex\AGENTS.override.md') -Force
+  $out = Invoke-Setup $dir "'RemoteSigned'" '-Agents codex'
+  Check 'agents: an agent hooked by /progress connect gets no section' `
+    (($out -match 'codex: reports through its hook') -and -not (Test-Path (Join-Path $dir '.codex\AGENTS.md')))
 }
 finally {
   foreach ($one in $script:dirs) { if (Test-Path $one) { Remove-Item -LiteralPath $one -Recurse -Force } }

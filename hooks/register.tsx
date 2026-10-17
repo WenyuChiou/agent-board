@@ -57,6 +57,7 @@ import { RULE_ID, RULES } from './rule'
 import { langOf, resolveLang, STRINGS } from './strings'
 import { answerTurns, applyDigest, clearAsked, cleanHandoff, isWork, lastQuestion, markAsked, needsRefresh, parseDigest, turnTools } from './digest'
 import type { Digest } from './digest'
+import { agentHooks, DELETE, reporterPs1, reporterSh, withoutSection } from './connect'
 import { isInboxFile, readTurn, transcriptTail } from './inbox'
 import type { AgentTurn } from './inbox'
 import { keepRecent, remindersOf } from './remind'
@@ -561,9 +562,9 @@ const takeAgentTurns = async ($: EngineInterface, turns: readonly AgentTurn[]): 
       answer = tail.answer
       prompt = prompt || tail.prompt
     }
-    if (answer === '') continue
+    if (answer === '' || answer.trim() === mirror.lastAnswer) continue
     mirror = answerTurns(mirror)
-    mirror = (await summarize($, mirror, prompt, answer)) ?? mirror
+    mirror = { ...((await summarize($, mirror, prompt, answer)) ?? mirror), lastAnswer: answer.trim() }
   }
   if (mirror.tasks.length === 0) return
   const state = isAllDone(mirror) ? 'done' : last.event === 'end' ? 'ended' : 'waiting'
@@ -580,6 +581,65 @@ const takeAgentTurns = async ($: EngineInterface, turns: readonly AgentTurn[]): 
   })
 }
 
+// `/progress connect`: the reporter script beside progress.md, and a hook for it in every
+// agent installed here. Its AGENTS.md-style section goes, so its work does not show twice.
+// `remove` takes all of it back out. Files that are not JSON are named and left alone.
+const connectAgents = async ($: EngineInterface, remove: boolean): Promise<string> => {
+  const s = await wordsOf($)
+  const path = await progressPath($)
+  const isWindows = path.includes('\\')
+  const sep = isWindows ? '\\' : '/'
+  const home = ((await $.env.get('USERPROFILE')) ?? (await $.env.get('HOME')) ?? '').replace(/[\\/]+$/, '')
+  const codexHome = ((await $.env.get('CODEX_HOME')) ?? '').replace(/[\\/]+$/, '') || [home, '.codex'].join(sep)
+  const grokHome = ((await $.env.get('GROK_HOME')) ?? '').replace(/[\\/]+$/, '') || [home, '.grok'].join(sep)
+  const script = `${path.replace(/[\\/][^\\/]*$/, '')}${sep}progress-report.${isWindows ? 'ps1' : 'sh'}`
+  if (!remove) await $.fs.write(script, isWindows ? reporterPs1(inboxPath(path)) : reporterSh(inboxPath(path)))
+  const done: string[] = []
+  const skipped: string[] = []
+  for (const hook of agentHooks({ home, sep, isWindows, script, inbox: inboxPath(path), codexHome, grokHome })) {
+    if (!(await $.fs.exists(hook.dir))) continue
+    const before = await readText($, hook.file).catch(() => null)
+    if (before === null) {
+      skipped.push(s.connectSkipped(hook.label, hook.file))
+      continue
+    }
+    if (remove && before.trim() === '') continue
+    const after = hook.edit(before, remove)
+    if (after === null) {
+      if (!remove) skipped.push(s.connectSkipped(hook.label, hook.file))
+      continue
+    }
+    if (after === DELETE) {
+      const argv = isWindows ? ['powershell', '-NoProfile', '-Command', `Remove-Item -Force -LiteralPath '${hook.file.replace(/'/g, "''")}'`] : ['rm', '-f', hook.file]
+      await $.process.run(argv, { timeoutMs: 10000 }).catch(() => undefined)
+    } else if (after !== before) {
+      await $.fs.write(hook.file, after)
+    }
+    if (remove && after === before) continue
+    done.push(hook.label)
+    if (!remove) await dropSection($, hook.agent, home, codexHome, sep)
+  }
+  const lines = remove
+    ? [done.length === 0 ? s.connectNothingRemoved : s.connectRemoved(done.join(s.listSep))]
+    : [done.length === 0 ? s.connectNone : s.connectDone(done.join(s.listSep)), ...(done.includes('Codex') ? [s.connectCodexTrust] : [])]
+
+  return [...lines, ...skipped].join('\n')
+}
+
+// The instruction files setup --agents writes the section into, per agent.
+const dropSection = async ($: EngineInterface, agent: string, home: string, codexHome: string, sep: string): Promise<void> => {
+  const files: Record<string, string[]> = {
+    codex: [[codexHome, 'AGENTS.md'].join(sep), [codexHome, 'AGENTS.override.md'].join(sep)],
+    gemini: [[home, '.gemini', 'GEMINI.md'].join(sep)],
+    opencode: [[home, '.config', 'opencode', 'AGENTS.md'].join(sep)],
+  }
+  for (const file of files[agent] ?? []) {
+    const text = await readText($, file).catch(() => '')
+    const after = withoutSection(text)
+    if (after !== text) await $.fs.write(file, after)
+  }
+}
+
 // New files in the inbox, each taken by one open session: it stamps the file in the store,
 // looks again, and reads it only if its stamp stayed. The reporter script clears old files.
 const drainInbox = async ($: EngineInterface): Promise<void> => {
@@ -588,8 +648,11 @@ const drainInbox = async ($: EngineInterface): Promise<void> => {
   try {
     const dir = inboxPath(await progressPath($))
     // A file landing in the folder moves its modified time; nothing to read until it does.
+    // On a file system that keeps whole seconds, a file can land in the same second as the
+    // last listing: the folder is listed again while its time is that fresh.
     const stat = await $.fs.stat(dir).catch(() => undefined)
-    if (stat === undefined || stat.mtimeMs === inboxSeen) return
+    if (stat === undefined) return
+    if (stat.mtimeMs === inboxSeen && (await $.clock.now()) - stat.mtimeMs > 2000) return
     inboxSeen = stat.mtimeMs
     const entries = await $.fs.list(dir).catch(() => [])
     const stored = await $.store.get('inboxDone')
@@ -978,6 +1041,8 @@ export const register: Register = (on, options) => {
 
       return { text: s.synced }
     }
+    const connect = /^(?:connect|接上|连接|連接)\s*(remove|off|拿掉|去掉|移除)?$/i.exec(arg)
+    if (connect !== null) return { text: await connectAgents($, connect[1] !== undefined) }
     const add = /^(?:加|新增|add|[+＋])\s*(.*)$/is.exec(arg)
     if (add !== null) return { text: await quickAdd($, add[1] ?? '') }
     if (/^(週報|周报|今天|report|weekly|today)$/i.test(arg)) {

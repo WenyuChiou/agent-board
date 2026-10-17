@@ -160,6 +160,11 @@ check 'agents: Codex reads AGENTS.override.md when it has text, so the section g
 check 'agents: a named agent gets the section even before it has a folder' grep -q "claude-progress-pane:start" "$dir/.config/opencode/AGENTS.md"
 run /bin/bash --agents=copilot
 check 'agents: an unknown name is refused' grep -q "unknown agent: copilot" "$dir/out"
+printf '{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"sh progress-report.sh codex turn"}]}]}}' > "$dir/.codex/hooks.json"
+rm -f "$dir/.codex/AGENTS.override.md"
+run /bin/bash --agents=codex
+check 'agents: an agent hooked by /progress connect gets no section' \
+  bash -c 'grep -q "codex: reports through its hook" "$1/out" && ! grep -q "claude-progress-pane:start" "$1/.codex/AGENTS.md" 2>/dev/null' _ "$dir"
 
 echo
 if [ "$fails" -gt 0 ]; then echo "$fails fail"; exit 1; fi

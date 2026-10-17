@@ -3,7 +3,9 @@ import { expect, test } from 'claude-code/testing'
 import type { ProgressMirror, ProgressPr } from '../types'
 import { askOf } from '../hooks/ask'
 import { addManualTask, isArchivable, renderAutoBlock, takeArchivable, takeManualDone, takeTask, upsertAutoBlock } from '../hooks/blocks'
+import { agentHooks, DELETE, withoutSection } from '../hooks/connect'
 import { dashboardHtml } from '../hooks/dashboard'
+import { blockId, readTurn } from '../hooks/inbox'
 import { applyDigest, clearAsked, isWork, lastQuestion, markAsked, parseDigest, turnTools } from '../hooks/digest'
 import { ciFinished, prFromGh, prWords } from '../hooks/github'
 import { appendJournal, countDay, journalLine, parseJournal, progressReport } from '../hooks/journal'
@@ -643,4 +645,63 @@ test('a handoff note is its own line: not background, and the block writes it af
   const task = parseProgress(`## p\n${lines.join('\n')}\n`)[0]?.tasks[0]
   expect(task === undefined ? '' : contextOf(task)).toBe('測試不穩')
   expect(task === undefined ? '' : handoffOf(task)).toBe('卡在 flaky；下一步重跑')
+})
+
+test('each agent’s hook payload reads as a turn: session, folder, prompt and reply, whatever the field names', () => {
+  // Codex Stop hook
+  expect(readTurn('codex-turn-1-2.json', JSON.stringify({ session_id: 's1', cwd: '/w/api', hook_event_name: 'Stop', last_assistant_message: '好了。', transcript_path: null }))).toMatchObject({
+    agent: 'codex',
+    event: 'turn',
+    session: 's1',
+    project: 'api',
+    answer: '好了。',
+  })
+  // Codex notify (argv)
+  expect(readTurn('codex-turn-1-3.json', JSON.stringify({ type: 'agent-turn-complete', 'thread-id': 't1', cwd: '/w/api', 'input-messages': ['加限流', '再加 IP'], 'last-assistant-message': '好' }))).toMatchObject({
+    session: 't1',
+    prompt: '再加 IP',
+    answer: '好',
+  })
+  // Gemini CLI AfterAgent; a turn with no text says so in words
+  expect(readTurn('gemini-turn-1-4.json', JSON.stringify({ session_id: 'g', cwd: '/w', prompt: '修測試', prompt_response: '修好了' }))).toMatchObject({ prompt: '修測試', answer: '修好了' })
+  expect(readTurn('gemini-turn-1-5.json', JSON.stringify({ session_id: 'g', prompt_response: '[no response text]' }))?.answer).toBe('')
+  // Cursor afterAgentResponse, with the byte-order mark Windows adds; stop carries no text
+  expect(readTurn('cursor-turn-1-6.json', `﻿${JSON.stringify({ conversation_id: 'c', workspace_roots: ['/w/web'], text: '改好了' })}`)).toMatchObject({ session: 'c', project: 'web', answer: '改好了' })
+  expect(readTurn('cursor-turn-1-7.json', JSON.stringify({ conversation_id: 'c', status: 'completed' }))?.answer).toBe('')
+  // Grok Build, also when it runs Cursor's hook; its closing Stop is an end
+  const grok = { hookEventName: 'stop', hook_event_name: 'Stop', sessionId: 'k', workspaceRoot: '/w/k', reason: 'end_turn', lastAssistantMessage: '完成' }
+  expect(readTurn('cursor-turn-1-8.json', JSON.stringify(grok))).toMatchObject({ agent: 'grok', event: 'turn', session: 'k', project: 'k', answer: '完成' })
+  expect(readTurn('grok-turn-1-9.json', JSON.stringify({ ...grok, reason: 'shutdown' }))?.event).toBe('end')
+  // Muse Code Stop
+  expect(readTurn('muse-turn-1-10.json', JSON.stringify({ session_id: 'm', cwd: '/w/m', transcript_path: null, last_assistant_message: '要發布嗎？' }))?.answer).toBe('要發布嗎？')
+  // Not ours, or no session
+  expect(readTurn('notes.json', '{}')).toBeNull()
+  expect(readTurn('codex-turn-1-11.json', '{"cwd":"/w"}')).toBeNull()
+  expect(readTurn('codex-turn-1-12.json', 'not json')).toBeNull()
+  expect(blockId('codex', 's1')).toMatch(/^[0-9a-f]{8}$/)
+  expect(blockId('codex', 's1')).not.toBe(blockId('grok', 's1'))
+})
+
+test('each agent’s config gets the hook in the shape it reads, and nothing else of the person’s changes', () => {
+  const ctx = { home: '/h', sep: '/', isWindows: false, script: '/h/.claude/progress-report.sh', inbox: '/h/.claude/progress-inbox', codexHome: '/h/.codex', grokHome: '/h/.grok' }
+  const hooks = Object.fromEntries(agentHooks(ctx).map(hook => [hook.agent, hook]))
+  const gemini = JSON.parse(String(hooks.gemini?.edit('{"theme":"dark"}', false)))
+  expect(gemini.theme).toBe('dark')
+  expect(gemini.hooks.AfterAgent).toEqual([{ hooks: [{ name: 'progress-pane', type: 'command', command: "sh '/h/.claude/progress-report.sh' gemini turn", timeout: 5000 }] }])
+  expect(gemini.tools).toBeUndefined()
+  const muse = JSON.parse(String(hooks.muse?.edit('', false)))
+  expect(muse.schema_version).toBe(1)
+  expect(Object.keys(muse.hooks.Stop[0].hooks[0]).sort()).toEqual(['command', 'timeout', 'type'])
+  expect(hooks.grok?.file).toBe('/h/.grok/hooks/progress-pane.json')
+  expect(JSON.parse(String(hooks.grok?.edit('', false))).hooks.Stop[0].hooks[0].command).toBe("sh '/h/.claude/progress-report.sh' grok turn")
+  expect(hooks.grok?.edit('{"hooks":{}}', true)).toBe(DELETE)
+  expect(String(hooks.opencode?.edit('', false))).toContain('const INBOX = "/h/.claude/progress-inbox"')
+  // Windows: PowerShell runs the .ps1 script.
+  const win = agentHooks({ ...ctx, isWindows: true, sep: '\\', script: 'C:\\Users\\a\\.claude\\progress-report.ps1' })
+  expect(JSON.parse(String(win[0]?.edit('', false))).hooks.Stop[0].hooks[0].command).toBe(
+    'powershell -NoProfile -ExecutionPolicy Bypass -File "C:\\Users\\a\\.claude\\progress-report.ps1" codex turn',
+  )
+  // A file that is not JSON is left alone; the AGENTS.md section a hook replaces goes.
+  expect(hooks.codex?.edit('# toml? no', false)).toBeNull()
+  expect(withoutSection('a\n\n<!-- claude-progress-pane:start -->\nx\n<!-- claude-progress-pane:end -->\n')).toBe('a\n')
 })

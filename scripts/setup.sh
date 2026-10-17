@@ -14,7 +14,8 @@
 # --agents puts the "Report your progress" section of AGENTS.md into the global instructions of
 # the other agents installed here (Codex: $CODEX_HOME/AGENTS.md, Gemini CLI: ~/.gemini/GEMINI.md,
 # OpenCode: ~/.config/opencode/AGENTS.md), between markers, so their work shows on the pane
-# too; --agents=codex,gemini names them; --remove-agents takes the section out again.
+# too; --agents=codex,gemini names them; --remove-agents takes the section out again. An agent
+# that /progress connect hooked into the pane is skipped: its hook already reports.
 set -euo pipefail
 
 marketplace='WenyuChiou/claude-progress-pane'
@@ -278,6 +279,18 @@ def read_text(path):
     except ValueError:
         return None
 
+# An agent /progress connect hooked into the pane reports through its hook; the section
+# would show its work twice.
+HOOK_FILES = {
+    'codex': os.path.join(codex_home, 'hooks.json'),
+    'gemini': os.path.join(home, '.gemini', 'settings.json'),
+    'opencode': os.path.join(config_home, 'opencode', 'plugin', 'progress-pane.js'),
+}
+
+def hooked(name):
+    text = read_text(HOOK_FILES[name]) or ''
+    return 'progress-report' in text or (name == 'opencode' and text != '')
+
 found = [name for name, (base, _) in AGENT_FILES.items() if os.path.isdir(base)]
 if remove_agents:
     targets = list(AGENT_FILES)
@@ -301,6 +314,9 @@ if targets and not remove_agents:
         sys.exit('AGENTS.md has no "Report your progress" section: ' + agents_file)
     section = START + '\n' + source[at:].strip() + '\n' + END
 for name in targets:
+    if not remove_agents and hooked(name):
+        done.append('%s: reports through its hook (/progress connect); no section needed' % name)
+        continue
     path = AGENT_FILES[name][1]()
     old = read_text(path)
     if old is None:
@@ -324,9 +340,9 @@ for name in targets:
         done.append('%s: %s %s' % (name, what, path))
 if not agents and not remove_agents:
     texts = {name: read_text(AGENT_FILES[name][1]()) for name in found}
-    bare = [name for name in found if texts[name] is not None and START not in texts[name]]
+    bare = [name for name in found if texts[name] is not None and START not in texts[name] and not hooked(name)]
     if bare:
-        done.append('%s installed here too: run this again with --agents to show their work on the pane'
+        done.append('%s installed here too: run /progress connect in Claude Code to show their work on the pane'
                     % ' and '.join(bare))
 
 print('\n'.join('- ' + one for one in done) if done else 'Settings: nothing to change.')

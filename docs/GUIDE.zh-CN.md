@@ -23,7 +23,7 @@ claude plugin install project-progress@claude-progress-pane
 
 ### 2. 运行设置脚本
 
-它会做两项插件自己做不到的设置，可以重复运行。
+可以不做。它会做两项插件自己做不到的设置，可以重复运行。没运行也能用：没有 Task 清单的对话会一回合一回合自动整理。
 
 Windows（PowerShell）：
 
@@ -117,6 +117,7 @@ Claude 会列出 Task 清单，面板跟着走：卡片显示任务、它的背�
 |---|---|
 | `/progress` | 打开面板 |
 | `/progress open` | 在浏览器打开 `progress.html` |
+| `/progress connect` / `connect remove` | 把这台电脑上的其他 agent 接上面板／去掉 |
 | `/progress add <line>` | 添加一件事，和在面板里输入 `+` 一样 |
 | `/progress tidy` | 立刻归档做完的工作 |
 | `/progress sync` | 重新读取 Claude 的 Task 清单和 PR |
@@ -162,31 +163,37 @@ Claude 会列出 Task 清单，面板跟着走：卡片显示任务、它的背�
 
 ## 其他 agent
 
-任何能写文件的 agent 都可以把自己的工作显示在面板上。它只需要一段说明：[AGENTS.md](../AGENTS.md)（英文）最后那一节 **"Report your progress to the progress pane"**。
+在 Claude Code 里运行一次：
 
-**Codex、Gemini CLI、OpenCode：** 运行设置脚本时加上 `--agents`。它会把这段说明加进每个 agent 的全局指令文件，之后每个项目都会用到：
-
-```bash
-bash ~/.claude/plugins/marketplaces/claude-progress-pane/scripts/setup.sh --agents
+```
+/progress connect
 ```
 
-```powershell
-powershell -ExecutionPolicy Bypass -File "$env:USERPROFILE\.claude\plugins\marketplaces\claude-progress-pane\scripts\setup.ps1" -Agents auto
-```
+它会找出这台电脑上装了哪些 agent，给每个装一个在回合结束时运行的 hook。hook 只做一件事：把 agent 交出来的内容（最后的回复，有给的话也包括你的提问）存进 `~/.claude/progress-inbox/`。开着的 Claude Code 对话几秒内就会读到，整理成那个 agent 自己的一块进度。agent 不用照什么说明做，也不用记得汇报。接上之后，重启那个 agent 才会生效。
 
-| Agent | 写入的文件 |
-|---|---|
-| Codex | `~/.codex/AGENTS.md`（`$CODEX_HOME`；如果 `AGENTS.override.md` 有内容就写进它） |
-| Gemini CLI | `~/.gemini/GEMINI.md` |
-| OpenCode | `~/.config/opencode/AGENTS.md` |
+| Agent | 改的文件 | 回合结束事件 |
+|---|---|---|
+| Codex | `~/.codex/hooks.json`（`$CODEX_HOME`） | `Stop`，第一次要在 Codex 的 `/hooks` 里批准 |
+| Gemini CLI | `~/.gemini/settings.json` | `AfterAgent` |
+| Cursor | `~/.cursor/hooks.json` | `afterAgentResponse`、`stop` |
+| OpenCode | `~/.config/opencode/plugin/progress-pane.js` | `session.idle` |
+| Grok Build | `~/.grok/hooks/progress-pane.json`（`$GROK_HOME`） | `Stop` |
+| Muse Code | `~/.config/muse/settings.json` | `Stop` |
 
-`--agents` 会处理这台电脑上装了的 agent；`--agents=codex,gemini`（`-Agents codex,gemini`）可以指定；`--remove-agents`（`-RemoveAgents`）会把这段删掉。这段说明放在 `<!-- claude-progress-pane:start -->` 和 `<!-- claude-progress-pane:end -->` 之间，文件其他内容保持不变。
+hook 运行的是 `/progress connect` 写好的 `~/.claude/progress-report.sh`（Windows 是 `progress-report.ps1`）。脚本：
+- 不需要装任何东西；
+- 永远返回 0；
+- 什么都不输出，只有 Cursor 会输出 `{}`。
 
-**其他 agent**（Cursor、Aider、GitHub Copilot、Windsurf…）：把这段说明粘贴进项目的指令文件（`AGENTS.md`、`.cursorrules`、`CONVENTIONS.md`…）。
+其他规则：
+- 文件里你自己的 hook 会保留。
+- 不是纯 JSON 的配置文件不会动，命令会告诉你是哪一个。
+- 之前用 setup `--agents` 写进那个 agent 说明里的 AGENTS.md 段落会被去掉，免得同一件事出现两次。
+- `/progress connect remove` 全部去掉。
 
-之后这个 agent 会维护一个自己的区块，面板会标上它的名字。它的问题和其他问题列在一起，并写明要到哪里回答；它要你运行的命令可以直接在面板上复制，链接也可以直接打开。
+要有 Claude Code 对话开着才会更新。都没开的时候，回合会先存在收件箱，超过两天的文件由汇报脚本自己清掉。
 
-实测方式：让三个不同模型的 agent 只拿到这段说明，同时写同一个文件。面板把每个区块、agent 标签和问题种类都读对了，它们区块以外的内容一个字都没变。
+**其他 agent**（Aider、GitHub Copilot、Windsurf…）：把 [AGENTS.md](../AGENTS.md) 最后那段 **「Report your progress to the progress pane」** 贴进它的说明文件，它就会自己写一块。`setup.sh --agents`（`setup.ps1 -Agents auto`）会给还没接上的 Codex、Gemini CLI、OpenCode 做这件事。
 
 ## 它怎么保持整齐
 

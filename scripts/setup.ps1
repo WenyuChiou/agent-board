@@ -26,7 +26,8 @@
 #    instructions of other agents, between markers, so their work shows on the pane too:
 #    Codex ($env:CODEX_HOME or ~\.codex, AGENTS.md or a non-empty AGENTS.override.md), Gemini CLI
 #    (~\.gemini\GEMINI.md), OpenCode (~\.config\opencode\AGENTS.md). -Agents auto takes the ones
-#    installed here; -RemoveAgents takes the section out again.
+#    installed here; -RemoveAgents takes the section out again. An agent that /progress connect
+#    hooked into the pane is skipped: its hook already reports.
 # Each file it changes is copied to <file>.bak first. It deletes nothing on disk.
 # -Agents codex,gemini arrives as an array; the function takes it joined.
 param([switch]$KeepRule, [switch]$NoInstall, [string]$ProfilePath, [string[]]$Agents, [switch]$RemoveAgents)
@@ -309,6 +310,20 @@ function Install-ProgressPane {
     gemini = @{ base = $geminiHome; file = (Join-Path $geminiHome 'GEMINI.md') }
     opencode = @{ base = $opencodeHome; file = (Join-Path $opencodeHome 'AGENTS.md') }
   }
+  # An agent /progress connect hooked into the pane reports through its hook; the section
+  # would show its work twice.
+  $hookFiles = @{
+    codex = (Join-Path $codexHome 'hooks.json')
+    gemini = (Join-Path $geminiHome 'settings.json')
+    opencode = (Join-Path (Join-Path $opencodeHome 'plugin') 'progress-pane.js')
+  }
+  $hooked = {
+    param([string]$name)
+    $file = $hookFiles[$name]
+    if (-not (Test-Path -LiteralPath $file)) { return $false }
+    if ($name -eq 'opencode') { return $true }
+    return ([IO.File]::ReadAllText($file)).Contains('progress-report')
+  }
   $found = @($agentFiles.Keys | Where-Object { Test-Path -LiteralPath $agentFiles[$_].base })
   $targets = @()
   if ($RemoveAgents) { $targets = @($agentFiles.Keys) }
@@ -339,6 +354,10 @@ function Install-ProgressPane {
     $section = $start + "`n" + $source.Substring($at).Trim() + "`n" + $end
   }
   foreach ($name in $targets) {
+    if (-not $RemoveAgents -and (& $hooked $name)) {
+      $done += "${name}: reports through its hook (/progress connect); no section needed"
+      continue
+    }
     $path = $agentFiles[$name].file
     $old = ''
     $agentBom = $false
@@ -377,10 +396,10 @@ function Install-ProgressPane {
   if (-not $Agents -and -not $RemoveAgents) {
     $bare = @($found | Where-Object {
         $file = $agentFiles[$_].file
-        -not (Test-Path -LiteralPath $file) -or -not ([IO.File]::ReadAllText($file)).Contains($start)
+        (-not (Test-Path -LiteralPath $file) -or -not ([IO.File]::ReadAllText($file)).Contains($start)) -and -not (& $hooked $_)
       })
     if ($bare.Count -gt 0) {
-      $done += (($bare -join ' and ') + ' installed here too: run this again with -Agents auto to show their work on the pane')
+      $done += (($bare -join ' and ') + ' installed here too: run /progress connect in Claude Code to show their work on the pane')
     }
   }
 

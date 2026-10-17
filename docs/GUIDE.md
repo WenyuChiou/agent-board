@@ -23,7 +23,7 @@ claude plugin install project-progress@claude-progress-pane
 
 ### 2. Run the setup script
 
-It makes the two settings a plugin cannot make for itself, and is safe to re-run.
+Optional. It makes the two settings a plugin cannot make for itself, and is safe to re-run. Without it the pane still works: a session without a Task list is summed up turn by turn.
 
 Windows (PowerShell):
 
@@ -117,6 +117,7 @@ Marks:
 |---|---|
 | `/progress` | Opens the pane |
 | `/progress open` | Opens `progress.html` in the browser |
+| `/progress connect` / `connect remove` | Hooks the other agents installed here into the pane / takes the hooks out |
 | `/progress add <line>` | Adds a task, same as `+` in the pane |
 | `/progress tidy` | Archives finished work now |
 | `/progress sync` | Re-reads Claude's Task list and the PR |
@@ -162,31 +163,28 @@ The full specification, for tools that read or write the file, is [docs/FORMAT.m
 
 ## Other agents
 
-Any agent that can write a file can show its work on the pane. All it needs is one section of instructions, **"Report your progress to the progress pane"** at the end of [AGENTS.md](../AGENTS.md).
+Run this once in Claude Code:
 
-**Codex, Gemini CLI, OpenCode:** run the setup script with `--agents`. It adds the section to each one's global instructions, so every project picks it up:
-
-```bash
-bash ~/.claude/plugins/marketplaces/claude-progress-pane/scripts/setup.sh --agents
+```
+/progress connect
 ```
 
-```powershell
-powershell -ExecutionPolicy Bypass -File "$env:USERPROFILE\.claude\plugins\marketplaces\claude-progress-pane\scripts\setup.ps1" -Agents auto
-```
+It finds the agents installed on this machine and gives each one a hook that runs at the end of every turn. The hook only saves what the agent hands over (its last reply, and the prompt when the agent passes it) into `~/.claude/progress-inbox/`. An open Claude Code session reads it within a few seconds and sums the turn up into that agent's own block. No agent has to follow instructions or remember anything. Restart an agent after connecting it.
 
-| Agent | File it writes |
-|---|---|
-| Codex | `~/.codex/AGENTS.md` (`$CODEX_HOME`; `AGENTS.override.md` when that one has text) |
-| Gemini CLI | `~/.gemini/GEMINI.md` |
-| OpenCode | `~/.config/opencode/AGENTS.md` |
+| Agent | What it changes | Turn-end event |
+|---|---|---|
+| Codex | `~/.codex/hooks.json` (`$CODEX_HOME`) | `Stop`. Approve it once in Codex's `/hooks` |
+| Gemini CLI | `~/.gemini/settings.json` | `AfterAgent` |
+| Cursor | `~/.cursor/hooks.json` | `afterAgentResponse`, `stop` |
+| OpenCode | `~/.config/opencode/plugin/progress-pane.js` | `session.idle` |
+| Grok Build | `~/.grok/hooks/progress-pane.json` (`$GROK_HOME`) | `Stop` |
+| Muse Code | `~/.config/muse/settings.json` | `Stop` |
 
-`--agents` takes the agents installed on the machine; `--agents=codex,gemini` (`-Agents codex,gemini`) names them; `--remove-agents` (`-RemoveAgents`) takes the section out again. The section sits between `<!-- claude-progress-pane:start -->` and `<!-- claude-progress-pane:end -->`, and the rest of the file is left as it was.
+The hook runs `~/.claude/progress-report.sh` (Windows: `progress-report.ps1`), which `/progress connect` writes. The script has no dependencies, always exits 0 and prints nothing, except `{}` for Cursor. Your own hooks in those files stay. A config file that is not plain JSON is left alone, and the command says which one. If setup `--agents` had put the AGENTS.md section into that agent's instructions, the section is removed, so the work does not show twice. `/progress connect remove` takes everything back out.
 
-**Any other agent** (Cursor, Aider, GitHub Copilot, Windsurf…): paste the section into the project's instruction file (`AGENTS.md`, `.cursorrules`, `CONVENTIONS.md`, …).
+Progress shows only while some Claude Code session is open. Turns that arrive while none is open wait in the inbox, and the reporter clears files older than two days.
 
-The agent then keeps one block of its own, and the pane labels it with the agent's name. Its questions are listed with the rest and say where to answer them; a command it asks you to run can be copied, and a link opened, right from the pane.
-
-Checked by giving agents on three different models only that section and having them write to one file at the same time: the pane read every block, label and kind of question right, and nothing outside their blocks changed.
+**Any other agent** (Aider, GitHub Copilot, Windsurf…): paste the section **"Report your progress to the progress pane"** from [AGENTS.md](../AGENTS.md) into its instruction file. It then writes its own block. `setup.sh --agents` (`setup.ps1 -Agents auto`) does this for Codex, Gemini CLI and OpenCode when they are not connected.
 
 ## How it keeps itself tidy
 
