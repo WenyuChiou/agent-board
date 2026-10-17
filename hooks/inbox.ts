@@ -16,6 +16,9 @@ export type AgentTurn = {
   prompt: string
   answer: string
   transcript: string
+  // The time in the file's name, which the reporter writes: when the turn ended, by that
+  // agent's clock (seconds from the sh reporter, milliseconds from the PowerShell one).
+  at?: number
 }
 
 // Inbox file names: agent, event, then anything. Lower-case letters, digits and dashes only.
@@ -128,8 +131,21 @@ export const readTurn = (fileName: string, body: string): AgentTurn | null => {
     // Gemini CLI says this when the turn had no text.
     answer: answer === '[no response text]' ? '' : answer,
     transcript: first(record, ['transcript_path', 'transcriptPath']),
+    at: inboxTime(fileName),
   }
 }
+
+// The time in an inbox file's name, or undefined when it holds none.
+export const inboxTime = (fileName: string): number | undefined => {
+  const found = /^[a-z0-9]+-(?:turn|end)-(\d+)/.exec(fileName)
+
+  return found === null ? undefined : Number(found[1])
+}
+
+// Where a turn falls in its session, as inboxOrder sorts files: by time, and in the same
+// second a turn before its session's end (Codex writes both within one second).
+export const turnOrder = (turn: Pick<AgentTurn, 'at' | 'event'>): number | undefined =>
+  turn.at === undefined ? undefined : turn.at * 2 + (turn.event === 'end' ? 1 : 0)
 
 // One line of a session log as a speaker and their words. Grok Build's log is ACP updates,
 // which stream a message in chunks.
@@ -231,11 +247,51 @@ export const keepInboxDone = (done: Readonly<Record<string, string>>, now: numbe
   return Object.fromEntries(recent.sort((a, b) => at(b[1]) - at(a[1])).slice(0, max))
 }
 
-// A file one session took for itself by renaming it: `<inbox name>.<session>.taking`.
-// Another session's rename of the same file fails, so each file is read by one session only.
-export const takenName = (name: string, session: string): string => `${name}.${session.replace(/[^\w-]/g, '') || 'x'}.taking`
+// A file one session took for itself by renaming it:
+// `<inbox name>.<session>-<when, base 36>-<attempt>.taking`. Another session's rename of the
+// same file fails, so one session at a time reads it. It stays taken until what it reports is
+// on the board: a file whose session closed half-way, or whose turn the board or the model
+// could not take, is taken again once CLAIM_MS have passed, and set aside as
+// `<inbox name>.failed` after MAX_TRIES attempts, kept rather than deleted.
+export const CLAIM_MS = 15 * 60 * 1000
+export const MAX_TRIES = 8
 
-export const isTakenFile = (name: string): boolean => /^[a-z][a-z0-9]*-(?:turn|end)-[\w.-]+\.json\.[\w-]+\.taking$/.test(name)
+export const takenName = (name: string, session: string, at: number, attempt = 1): string =>
+  `${name}.${session.replace(/\W/g, '') || 'x'}-${Math.max(0, Math.floor(at)).toString(36)}-${attempt}.taking`
+
+export type Claim = { name: string; at: number | null; attempt: number }
+
+// What a taken file's name says. A name from before claims carried their time
+// (`<inbox name>.<session>.taking`) has none.
+export const readClaim = (file: string): Claim | null => {
+  const found = /^(.+\.json)\.([\w-]+?)(?:-([0-9a-z]+)-(\d+))?\.taking$/.exec(file)
+  if (found === null || !isInboxFile(found[1] ?? '')) return null
+  const at = found[3] === undefined ? null : parseInt(found[3], 36)
+
+  return { name: found[1] ?? '', at, attempt: found[4] === undefined ? 1 : Math.max(1, Number(found[4])) }
+}
+
+export const isTakenFile = (name: string): boolean => readClaim(name) !== null
+
+export const failedName = (name: string): string => `${name}.failed`
+
+// What a session does with a file another look left taken: leave it to the session that may
+// still be on it, take it again, or set it aside. A claim without a time goes by the file's
+// own time and a day, the wait the older sweep gave it.
+export const claimAction = (claim: Claim, mtimeMs: number, now: number): 'leave' | 'retake' | 'setAside' => {
+  const isLeft = claim.at === null ? now - mtimeMs > 24 * 60 * 60 * 1000 : now - claim.at > CLAIM_MS
+  if (!isLeft) return 'leave'
+
+  return claim.attempt >= MAX_TRIES ? 'setAside' : 'retake'
+}
+
+// Why the files the board could not take are still in the inbox, by inbox name: `<attempt>:<time>:<why>`.
+// The newest `max` are kept.
+export const keepInboxFailed = (failed: Readonly<Record<string, string>>, max = 200): Record<string, string> => {
+  const at = (note: string): number => Number(note.split(':')[1] ?? 0)
+
+  return Object.fromEntries(Object.entries(failed).sort((a, b) => at(b[1]) - at(a[1])).slice(0, max))
+}
 
 // A turn that only showed the person the board (Gemini CLI's and OpenCode's /board, the
 // agent-board skill): looking at the board is not work, so it gets no block of its own.

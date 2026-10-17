@@ -43,6 +43,8 @@ type World = {
   gh?: () => { exitCode: number; stdout: string; stderr: string }
   // A move of this file fails, as when another session renamed it first.
   isMoveRefused?: (path: string) => boolean
+  // A delete of this file fails, as with a file another program holds open.
+  isRemoveRefused?: (path: string) => boolean
   // What the model answers asynchronously; a promise that never settles is a hung call.
   hang?: (prompt: string) => boolean
   // Every prompt the model was given.
@@ -99,7 +101,7 @@ const engineBeneath = (on: On, world: World): MockClock => {
           world.files.set(posix(e.argv[2] ?? ''), text)
         }
       } else {
-        for (const path of e.argv.slice(1)) if (path !== '-f') world.files.delete(posix(path))
+        for (const path of e.argv.slice(1)) if (path !== '-f' && world.isRemoveRefused?.(posix(path)) !== true) world.files.delete(posix(path))
       }
       return { value: { exitCode, stdout: '', stderr: exitCode === 0 ? '' : 'No such file or directory', isStdoutTruncated: false, isStderrTruncated: false } }
     }
@@ -1518,8 +1520,9 @@ test('an inbox file is claimed by renaming it, read by that session only, and re
   await $.session.start({ cwd: '/work/persona_framework', surface: 'desktop', isInteractive: true })
   await clock.advance(5000)
 
-  expect(world.ran).toContainEqual(['mv', ours, `${ours}.2be48af2.taking`])
-  expect(world.ran).toContainEqual(['rm', '-f', `${ours}.2be48af2.taking`])
+  const claimed = `${ours}.2be48af2-${(Date.parse('2026-10-16T12:00:00.000Z') + 5000).toString(36)}-1.taking`
+  expect(world.ran).toContainEqual(['mv', ours, claimed])
+  expect(world.ran).toContainEqual(['rm', '-f', claimed])
   expect(world.files.has(ours)).toBe(false)
   expect([...world.files.keys()].some(path => path.endsWith('.taking'))).toBe(false)
   const text = world.files.get(FILE) ?? ''
@@ -1554,6 +1557,218 @@ test('an inbox file nested too deep to read strands no taken file, and the turn 
 
   expect([...world.files.keys()].filter(path => path.endsWith('.taking'))).toEqual([])
   expect(world.files.get(FILE) ?? '').toContain('## api-gateway\n')
+})
+
+const takenOf = (world: World): string[] => [...world.files.keys()].filter(path => path.endsWith('.taking'))
+
+test('an inbox turn the board will not take stays in the inbox and reaches the board on a later look', async ($, on) => {
+  const ours = `${INBOX}/codex-turn-1792216380-1.json`
+  const world: World = {
+    files: new Map([
+      [FILE, '# Progress\n'],
+      [ours, JSON.stringify({ session_id: 'ours', cwd: '/work/api-gateway', last_assistant_message: 'Added the middleware. 100 or 300 a minute?' })],
+    ]),
+    mtime: 1,
+    hasTasks: true,
+    reply: RATE_LIMIT_REPLY,
+  }
+  const clock = engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/persona_framework', surface: 'desktop', isInteractive: true })
+  // The board cannot be written: a full disk, a file another program locked.
+  world.unwritable = new Set([FILE])
+  await clock.advance(5000)
+  expect(world.files.get(FILE)).toBe('# Progress\n')
+  expect(takenOf(world)).toHaveLength(1)
+
+  // Written again once the board takes writes and the claim's time is up.
+  world.unwritable = new Set()
+  await clock.advance(15 * 60 * 1000)
+  world.mtime += 1
+  await clock.advance(5000)
+  expect(world.files.get(FILE) ?? '').toContain('## api-gateway\n')
+  expect(takenOf(world)).toEqual([])
+})
+
+test('a reply that asks nothing, with no summary from the model, is not dropped from the board but tried again', async ($, on) => {
+  const ours = `${INBOX}/codex-turn-1792216380-1.json`
+  let isDown = true
+  const world: World = {
+    files: new Map([
+      [FILE, '# Progress\n'],
+      [ours, JSON.stringify({ session_id: 'ours', cwd: '/work/web-app', prompt: 'Ship the page', last_assistant_message: 'Shipped the page.' })],
+    ]),
+    mtime: 1,
+    hasTasks: true,
+    hang: () => isDown,
+    reply: prompt => (prompt.includes('TITLE:') ? 'TITLE: Ship the page\nCONTEXT: -\nDONE: Shipped the page\nNEXT: Watch the errors\nASK: -' : undefined),
+  }
+  const clock = engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/persona_framework', surface: 'desktop', isInteractive: true })
+  await clock.advance(5000)
+  await clock.advance(30000)
+  expect(world.files.get(FILE)).toBe('# Progress\n')
+  expect(takenOf(world)).toHaveLength(1)
+
+  isDown = false
+  await clock.advance(15 * 60 * 1000)
+  world.mtime += 1
+  await clock.advance(5000)
+  expect(world.files.get(FILE) ?? '').toContain('### Ship the page\n')
+  expect(takenOf(world)).toEqual([])
+})
+
+test('a file a closed session left taken is taken again rather than swept away unread', async ($, on) => {
+  const at = Date.parse('2026-10-16T12:00:00.000Z')
+  const left = `${INBOX}/codex-turn-1792216380-1.json.deadbeef.taking`
+  const stale = `${INBOX}/codex-turn-1792216381-2.json.deadbeef-${(at - 16 * 60 * 1000).toString(36)}-1.taking`
+  const busy = `${INBOX}/codex-turn-1792216382-3.json.cafe0001-${(at - 60 * 1000).toString(36)}-1.taking`
+  const world: World = {
+    files: new Map([
+      [FILE, '# Progress\n'],
+      [left, JSON.stringify({ session_id: 'left', cwd: '/work/api-gateway', last_assistant_message: 'Added the middleware. 100 or 300 a minute?' })],
+      [stale, JSON.stringify({ session_id: 'stale', cwd: '/work/web-app', last_assistant_message: 'Shipped the page. Deploy it, OK?' })],
+      [busy, JSON.stringify({ session_id: 'busy', cwd: '/work/docs-site', last_assistant_message: 'Fixed the links. Publish, OK?' })],
+    ]),
+    mtime: 1,
+    hasTasks: true,
+    reply: RATE_LIMIT_REPLY,
+  }
+  const clock = engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/persona_framework', surface: 'desktop', isInteractive: true })
+  await clock.advance(5000)
+  const text = world.files.get(FILE) ?? ''
+  expect(text).toContain('## api-gateway\n')
+  expect(text).toContain('## web-app\n')
+  // Another open session took this one a minute ago and may still be on it.
+  expect(text).not.toContain('## docs-site')
+  expect(takenOf(world)).toEqual([busy])
+})
+
+test('a turn already on the board whose file could not be deleted is not summed up again', async ($, on) => {
+  const ours = `${INBOX}/codex-turn-1792216380-1.json`
+  let isLocked = true
+  const world: World = {
+    files: new Map([
+      [FILE, '# Progress\n'],
+      [ours, JSON.stringify({ session_id: 'ours', cwd: '/work/api-gateway', last_assistant_message: 'Added the middleware. 100 or 300 a minute?' })],
+    ]),
+    mtime: 1,
+    hasTasks: true,
+    asked: [],
+    reply: RATE_LIMIT_REPLY,
+    isRemoveRefused: path => isLocked && path.endsWith('.taking'),
+  }
+  const clock = engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/persona_framework', surface: 'desktop', isInteractive: true })
+  await clock.advance(5000)
+  expect(world.files.get(FILE) ?? '').toContain('## api-gateway\n')
+  expect(takenOf(world)).toHaveLength(1)
+
+  isLocked = false
+  world.mtime += 1
+  await clock.advance(5000)
+  expect(takenOf(world)).toEqual([])
+  expect(world.asked?.filter(prompt => prompt.includes('Added the middleware'))).toHaveLength(1)
+})
+
+test('an inbox file that cannot be read stays taken for a later look', async ($, on) => {
+  const ours = `${INBOX}/codex-turn-1792216380-1.json`
+  const world: World = {
+    files: new Map([
+      [FILE, '# Progress\n'],
+      [ours, JSON.stringify({ session_id: 'ours', cwd: '/work/api-gateway', last_assistant_message: 'Added the middleware. 100 or 300 a minute?' })],
+    ]),
+    mtime: 1,
+    hasTasks: true,
+    reply: RATE_LIMIT_REPLY,
+  }
+  const clock = engineBeneath(on, world)
+  // The taken file refuses to be read this time.
+  world.unreadable = new Set([`${ours}.2be48af2-${(Date.parse('2026-10-16T12:00:00.000Z') + 5000).toString(36)}-1.taking`])
+  await $.session.start({ cwd: '/work/persona_framework', surface: 'desktop', isInteractive: true })
+  await clock.advance(5000)
+  expect(world.files.get(FILE)).toBe('# Progress\n')
+  expect(takenOf(world)).toHaveLength(1)
+
+  world.unreadable = new Set()
+  await clock.advance(15 * 60 * 1000)
+  world.mtime += 1
+  await clock.advance(5000)
+  expect(world.files.get(FILE) ?? '').toContain('## api-gateway\n')
+  expect(takenOf(world)).toEqual([])
+})
+
+test('a file left taken past its last try is kept as a .failed file, not deleted', async ($, on) => {
+  const at = Date.parse('2026-10-16T12:00:00.000Z')
+  const name = 'codex-turn-1792216380-1.json'
+  const left = `${INBOX}/${name}.deadbeef-${(at - 16 * 60 * 1000).toString(36)}-8.taking`
+  const body = JSON.stringify({ session_id: 'ours', cwd: '/work/api-gateway', last_assistant_message: 'Added the middleware. 100 or 300 a minute?' })
+  const world: World = { files: new Map([[FILE, '# Progress\n'], [left, body]]), mtime: 1, hasTasks: true, reply: RATE_LIMIT_REPLY }
+  const clock = engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/persona_framework', surface: 'desktop', isInteractive: true })
+  await clock.advance(5000)
+  expect(world.files.get(`${INBOX}/${name}.failed`)).toBe(body)
+  expect(takenOf(world)).toEqual([])
+  expect(world.files.get(FILE)).toBe('# Progress\n')
+})
+
+test('on its last try, a turn the model gives no summary for keeps the block’s open steps', async ($, on) => {
+  const at = Date.parse('2026-10-16T12:00:00.000Z')
+  const world: World = {
+    files: new Map([
+      [FILE, '# Progress\n'],
+      [`${INBOX}/codex-turn-1792216380-1.json`, JSON.stringify({ session_id: 'ours', cwd: '/work/web-app', prompt: 'Ship the page', last_assistant_message: 'Shipped the page.' })],
+    ]),
+    mtime: 1,
+    hasTasks: true,
+    hang: prompt => prompt.includes('SILENT'),
+    reply: prompt => (prompt.includes('TITLE:') ? 'TITLE: Ship the page\nCONTEXT: -\nDONE: Shipped the page\nNEXT: Watch the errors\nASK: -' : undefined),
+  }
+  const clock = engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/persona_framework', surface: 'desktop', isInteractive: true })
+  await clock.advance(5000)
+  expect(world.files.get(FILE) ?? '').toContain('- [ ] Watch the errors\n')
+
+  // Its seventh try was left; the eighth is the last, and the model says nothing.
+  const left = `${INBOX}/codex-turn-1792216390-2.json.deadbeef-${(at - 16 * 60 * 1000).toString(36)}-7.taking`
+  world.files.set(left, JSON.stringify({ session_id: 'ours', cwd: '/work/web-app', last_assistant_message: 'SILENT tidied the logs.' }))
+  world.mtime += 1
+  await clock.advance(5000)
+  await clock.advance(30000)
+  const text = world.files.get(FILE) ?? ''
+  expect(text).toContain('- [ ] Watch the errors\n')
+  expect(text).toContain('agent=codex state=waiting')
+  expect(takenOf(world)).toEqual([])
+})
+
+test('a turn taken again after its session ended does not bring the session back', async ($, on) => {
+  const at = Date.parse('2026-10-16T12:00:00.000Z')
+  const world: World = {
+    files: new Map([
+      [FILE, '# Progress\n'],
+      [`${INBOX}/codex-turn-1792216380-1.json`, JSON.stringify({ session_id: 'ours', cwd: '/work/api-gateway', last_assistant_message: 'Added the middleware. 100 or 300 a minute?' })],
+      [`${INBOX}/codex-end-1792216400-3.json`, JSON.stringify({ session_id: 'ours', cwd: '/work/api-gateway' })],
+    ]),
+    mtime: 1,
+    hasTasks: true,
+    asked: [],
+    reply: RATE_LIMIT_REPLY,
+  }
+  const clock = engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/persona_framework', surface: 'desktop', isInteractive: true })
+  await clock.advance(5000)
+  expect(world.files.get(FILE) ?? '').toContain('agent=codex state=ended')
+
+  // Turns from before the end, one in the same second, which a look failed on and left taken.
+  const claimed = (time: number, pid: number): string => `${INBOX}/codex-turn-${time}-${pid}.json.deadbeef-${(at - 16 * 60 * 1000).toString(36)}-1.taking`
+  world.files.set(claimed(1792216390, 2), JSON.stringify({ session_id: 'ours', cwd: '/work/api-gateway', last_assistant_message: 'Wrote the tests. Ship it, OK?' }))
+  world.files.set(claimed(1792216400, 4), JSON.stringify({ session_id: 'ours', cwd: '/work/api-gateway', last_assistant_message: 'Wrote the tests. Ship it, OK?' }))
+  world.mtime += 1
+  await clock.advance(5000)
+  const text = world.files.get(FILE) ?? ''
+  expect(text).toContain('agent=codex state=ended')
+  expect(world.asked?.some(prompt => prompt.includes('Wrote the tests'))).toBe(false)
+  expect(takenOf(world)).toEqual([])
 })
 
 test('a burst of turns from one agent session is summed up from its last two turns only', async ($, on) => {

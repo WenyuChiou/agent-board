@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.19.1 — 2026-10-17
+## 0.19.2 — 2026-10-17
 
 - **The page's address, key and all, is no longer kept beside
   `progress.md`.** `--serve` kept it in `progress-serve.json` in the same
@@ -36,6 +36,51 @@
 - `tsc -p .` reports no errors again. Seven had built up in the tests and in
   one engine call over earlier releases; the fixes change only types, not
   what runs.
+
+## 0.19.1 — 2026-10-17
+
+Another agent's turn is no longer lost on its way to the board (#40).
+
+- **An inbox file stays until its turn is on the board.** A session took a file from
+  `progress-inbox/` by renaming it, recorded it as read, and deleted it after summing it
+  up, whether or not the block reached the board: a `progress.md` that could not be
+  written lost the turn without a word. The file is now deleted only once the block is
+  read back from the board, or the turn held nothing to track; otherwise it stays taken
+  and a later look tries again. Test: "an inbox turn the board will not take stays in the
+  inbox and reaches the board on a later look".
+- **No summary from the model no longer empties a block.** When the model gave no answer
+  and the reply asks nothing, an empty summary replaced the block's open steps, and could
+  mark it done. Such a turn now waits for a later look, and on its last try it leaves the
+  steps as they are. A reply that ends on a question still gets its step at once, as
+  before. Tests: "a reply that asks nothing, with no summary from the model, is not
+  dropped from the board but tried again", "on its last try, a turn the model gives no
+  summary for keeps the block’s open steps", "a model call that never answers gives up
+  after 30 seconds, and later inbox files are still read".
+- **A file a closed session left taken is taken again, not deleted unread.** A taken
+  file's name now carries when it was taken and the attempt
+  (`<name>.<session>-<time>-<attempt>.taking`). One left for 15 minutes is taken again
+  by any open session, and after 8 attempts it is kept as `<name>.failed` rather than
+  deleted; why it failed is kept in the store (`inboxFailed`). A name an earlier version
+  gave is taken again after a day, the wait the old sweep gave it. A left file does not
+  change the folder, so the inbox is also listed once a minute, and files taken again
+  count toward the 20 a look takes. A file another look took again while this one's
+  queue waited is left to that look. Tests: "a file a closed session left taken is taken
+  again rather than swept away unread", "a file left taken past its last try is kept as a
+  .failed file, not deleted", "a taken inbox file is left to its session for a while, then
+  taken again, and set aside after its last try", "the record of why inbox files are
+  still there keeps the newest notes only".
+- **A turn taken again changes nothing once a later one is on the board.** Each agent
+  session's block remembers where the newest inbox file folded in falls (by the time in
+  its name, and in the same second a session's end after its turn); an older turn taken
+  again (after a later turn, or the session's end, got through) leaves the block as it
+  is, without writing it again, so an ended session is not brought back. Test: "a turn
+  taken again after its session ended does not bring the session back".
+- **A file that cannot be read stays for a later look**, and a turn already on the board
+  whose file could not be deleted is deleted at the next look without being summed up
+  again. Tests: "an inbox file that cannot be read stays taken for a later look", "a turn
+  already on the board whose file could not be deleted is not summed up again".
+- Known limit: a session still running an earlier version sweeps taken files older than
+  a day, as before, until it restarts.
 
 ## 0.19.0 — 2026-10-17
 
