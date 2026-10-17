@@ -62,3 +62,85 @@ export const reportArgv = (script: string, agent: string, event: 'turn' | 'end',
   isWindows
     ? ['powershell', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', script, agent, event]
     : ['sh', script, agent, event]
+
+// A hook command this plugin wrote: it names the reporter script.
+const OURS = /progress-report\.(?:sh|ps1)/
+
+type Json = Record<string, unknown>
+
+const isRecord = (value: unknown): value is Json => value !== null && typeof value === 'object' && !Array.isArray(value)
+
+const commandOf = (entry: unknown): string => {
+  if (!isRecord(entry)) return ''
+  if (typeof entry.command === 'string') return entry.command
+  if (Array.isArray(entry.command)) return entry.command.join(' ')
+
+  return ''
+}
+
+// Hooks grouped the way Claude Code writes them (Codex, Gemini CLI, Grok Build and Muse
+// Code take the same shape): `hooks.<Event>` is a list of `{ matcher?, hooks: [{ type,
+// command }] }`. Ours replaces any earlier one of ours; everything else stays.
+export const withGroupedHook = (config: Json, event: string, command: string, matcher?: string): Json => {
+  const hooks = isRecord(config.hooks) ? config.hooks : {}
+  const groups = Array.isArray(hooks[event]) ? (hooks[event] as unknown[]) : []
+  const kept = groups.filter(group => !(isRecord(group) && Array.isArray(group.hooks) && group.hooks.some(one => OURS.test(commandOf(one)))))
+  const ours = { ...(matcher === undefined ? {} : { matcher }), hooks: [{ type: 'command', command }] }
+
+  return { ...config, hooks: { ...hooks, [event]: [...kept, ours] } }
+}
+
+// Cursor's shape: `{ version: 1, hooks: { <event>: [{ command }] } }`.
+export const withFlatHook = (config: Json, event: string, command: string): Json => {
+  const hooks = isRecord(config.hooks) ? config.hooks : {}
+  const list = Array.isArray(hooks[event]) ? (hooks[event] as unknown[]) : []
+  const kept = list.filter(one => !OURS.test(commandOf(one)))
+
+  return { version: 1, ...config, hooks: { ...hooks, [event]: [...kept, { command }] } }
+}
+
+// Every hook of ours taken out, in either shape; an event left empty goes too.
+export const withoutOurHooks = (config: Json): Json => {
+  if (!isRecord(config.hooks)) return config
+  const hooks: Json = {}
+  for (const [event, value] of Object.entries(config.hooks)) {
+    if (!Array.isArray(value)) {
+      hooks[event] = value
+      continue
+    }
+    const kept = value
+      .map(entry => {
+        if (isRecord(entry) && Array.isArray(entry.hooks)) {
+          const inner = entry.hooks.filter(one => !OURS.test(commandOf(one)))
+          return inner.length === 0 ? null : { ...entry, hooks: inner }
+        }
+        return OURS.test(commandOf(entry)) ? null : entry
+      })
+      .filter(entry => entry !== null)
+    if (kept.length > 0) hooks[event] = kept
+  }
+
+  return { ...config, hooks }
+}
+
+export const hasOurHook = (config: Json): boolean => JSON.stringify(config.hooks ?? {}).match(OURS) !== null
+
+// A config file read as JSON: `{}` when it is missing or empty, null when it holds
+// something that is not a JSON object (comments, a typo), which is then left alone.
+export const readConfig = (text: string): Json | null => {
+  if (text.trim() === '') return {}
+  try {
+    const parsed: unknown = JSON.parse(text)
+    return isRecord(parsed) ? parsed : null
+  } catch {
+    return null
+  }
+}
+
+export const writeConfig = (config: Json): string => `${JSON.stringify(config, null, 2)}\n`
+
+// The section setup --agents puts in an agent's instruction file. A hook replaces it, so the
+// agent's work does not show twice.
+const SECTION = /\n*<!-- claude-progress-pane:start -->[\s\S]*?<!-- claude-progress-pane:end -->\n*/
+
+export const withoutSection = (text: string): string => (SECTION.test(text) ? text.replace(SECTION, '\n').replace(/^\n+/, '') : text)

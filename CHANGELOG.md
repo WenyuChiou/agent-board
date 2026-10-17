@@ -1,5 +1,38 @@
 # Changelog
 
+## Unreleased
+
+- **Progress without a Task list.** A session that keeps no Task list still
+  shows up: a turn that edited a file or ran a command is summed up by Haiku
+  into a title, a line of background, what it finished, the next step and what
+  it ended up asking. The block keeps the last six finished turns and says
+  `source=turns`; the first TaskCreate replaces the summed-up steps with the
+  real list. A turn that only answered a question leaves nothing behind.
+  Tests: `without a Task list, a turn that changed something is summed up into
+  steps and its question`, `a turn that only answered a question leaves no
+  block behind`, and the pure `the model’s summary of a turn …`, `a turn counts
+  as work …`, `a summed-up list keeps the last six finished turns …`.
+- **A question at the end of a turn waits on you.** When a turn ends on a
+  question and Claude marked nothing as waiting, the step in progress waits on
+  you with the question as its note, and you get a notification. Your next
+  prompt clears it. Tests: `a turn that ends on a question waits on you even
+  when Claude did not mark it, until you answer`, `the question a reply ends
+  on …`, `a question marks the step in progress …`.
+- **Background follows the goal.** Once the list has grown by three steps since
+  the title and background were written, Haiku looks at both again and keeps
+  them when the goal is the same.
+- **Handoff at compaction.** A compaction leaves one line in the block (what is
+  done, what is stuck, the next step) as a `Handoff:` / `交接：` note. The
+  opened row shows it, and **Take over and finish** passes it on. `docs/FORMAT.md`
+  documents the note and the `source` attribute. Tests: `a compaction leaves a
+  handoff line in the block`, `a stopped session’s handoff line shows on its row
+  and goes with 接手做完`, `a handoff note is its own line …`.
+- **README.** 56 lines instead of 294 in each language: what it is, the
+  interaction demo, three points, install, what to type, how it works. The rest
+  moves to `docs/GUIDE.md` (and `GUIDE.zh-TW.md`, `GUIDE.zh-CN.md`). The demo's
+  three frames are as tall as the shortest, so none leaves an empty window. The
+  `progress.html` screenshots are gone.
+
 ## 0.8.0 — 2026-10-17
 
 - **Archive a row now.** Open a stopped session or a task you keep by hand and
