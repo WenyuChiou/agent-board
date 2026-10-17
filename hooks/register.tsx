@@ -58,7 +58,7 @@ import { langOf, resolveLang, STRINGS } from './strings'
 import { answerTurns, applyDigest, clearAsked, cleanHandoff, isWork, lastQuestion, markAsked, needsRefresh, parseDigest, turnTools } from './digest'
 import type { Digest } from './digest'
 import { agentHooks, DELETE, reporterPs1, reporterSh, withoutSection } from './connect'
-import { inboxOrder, isInboxFile, readTurn, transcriptTail } from './inbox'
+import { inboxOrder, isInboxFile, isTranscriptPath, readTurn, transcriptTail } from './inbox'
 import type { AgentTurn } from './inbox'
 import { keepRecent, remindersOf } from './remind'
 import { buildView, statusLine } from './view'
@@ -566,7 +566,7 @@ const takeAgentTurns = async ($: EngineInterface, turns: readonly AgentTurn[]): 
     if (turn.event !== 'turn') continue
     let { prompt, answer } = turn
     // Codex's Stop carries the reply but not the request; the session log has both.
-    if ((answer === '' || prompt === '') && turn.transcript !== '') {
+    if ((answer === '' || prompt === '') && isTranscriptPath(turn.transcript)) {
       const log = await $.fs.read(turn.transcript).catch(() => '')
       const tail = transcriptTail(typeof log === 'string' ? log : '')
       answer = answer || tail.answer
@@ -603,6 +603,7 @@ const connectAgents = async ($: EngineInterface, remove: boolean): Promise<strin
   const home = ((await $.env.get('USERPROFILE')) ?? (await $.env.get('HOME')) ?? '').replace(/[\\/]+$/, '')
   const codexHome = ((await $.env.get('CODEX_HOME')) ?? '').replace(/[\\/]+$/, '') || [home, '.codex'].join(sep)
   const grokHome = ((await $.env.get('GROK_HOME')) ?? '').replace(/[\\/]+$/, '') || [home, '.grok'].join(sep)
+  const hermesHome = ((await $.env.get('HERMES_HOME')) ?? '').replace(/[\\/]+$/, '') || [home, '.hermes'].join(sep)
   const script = `${path.replace(/[\\/][^\\/]*$/, '')}${sep}progress-report.${isWindows ? 'ps1' : 'sh'}`
   if (!remove) await $.fs.write(script, isWindows ? reporterPs1(inboxPath(path)) : reporterSh(inboxPath(path)))
   const done: string[] = []
@@ -611,7 +612,7 @@ const connectAgents = async ($: EngineInterface, remove: boolean): Promise<strin
     const argv = isWindows ? ['powershell', '-NoProfile', '-Command', `Remove-Item -Force -LiteralPath '${file.replace(/'/g, "''")}'`] : ['rm', '-f', file]
     await $.process.run(argv, { timeoutMs: 10000 }).catch(() => undefined)
   }
-  for (const hook of agentHooks({ home, sep, isWindows, script, inbox: inboxPath(path), codexHome, grokHome })) {
+  for (const hook of agentHooks({ home, sep, isWindows, script, inbox: inboxPath(path), codexHome, grokHome, hermesHome })) {
     if (!(await $.fs.exists(hook.dir))) continue
     // Left under the plugin's earlier name, it would report every turn a second time.
     const hadOld = hook.old !== undefined && (await $.fs.exists(hook.old))
@@ -641,7 +642,7 @@ const connectAgents = async ($: EngineInterface, remove: boolean): Promise<strin
   }
   const lines = remove
     ? [done.length === 0 ? s.connectNothingRemoved : s.connectRemoved(done.join(s.listSep))]
-    : [done.length === 0 ? s.connectNone : s.connectDone(done.join(s.listSep)), ...(done.includes('Codex') ? [s.connectCodexTrust] : [])]
+    : [done.length === 0 ? s.connectNone : s.connectDone(done.join(s.listSep)), ...(done.includes('Codex') ? [s.connectCodexTrust] : []), ...(done.includes('Hermes Agent') ? [s.connectHermesTrust] : [])]
 
   return [...lines, ...skipped].join('\n')
 }

@@ -5,7 +5,7 @@ import { askOf } from '../hooks/ask'
 import { addManualTask, isArchivable, renderAutoBlock, takeArchivable, takeManualDone, takeTask, upsertAutoBlock } from '../hooks/blocks'
 import { agentHooks, DELETE, withoutSection } from '../hooks/connect'
 import { dashboardHtml } from '../hooks/dashboard'
-import { blockId, readTurn } from '../hooks/inbox'
+import { blockId, isTranscriptPath, readTurn, transcriptTail } from '../hooks/inbox'
 import { applyDigest, clearAsked, isWork, lastQuestion, markAsked, parseDigest, turnTools } from '../hooks/digest'
 import { ciFinished, prFromGh, prWords } from '../hooks/github'
 import { appendJournal, countDay, journalLine, parseJournal, progressReport } from '../hooks/journal'
@@ -683,7 +683,7 @@ test('each agent’s hook payload reads as a turn: session, folder, prompt and r
 })
 
 test('each agent’s config gets the hook in the shape it reads, and nothing else of the person’s changes', () => {
-  const ctx = { home: '/h', sep: '/', isWindows: false, script: '/h/.claude/progress-report.sh', inbox: '/h/.claude/progress-inbox', codexHome: '/h/.codex', grokHome: '/h/.grok' }
+  const ctx = { home: '/h', sep: '/', isWindows: false, script: '/h/.claude/progress-report.sh', inbox: '/h/.claude/progress-inbox', codexHome: '/h/.codex', grokHome: '/h/.grok', hermesHome: '/h/.hermes' }
   const hooks = Object.fromEntries(agentHooks(ctx).map(hook => [hook.agent, hook]))
   const gemini = JSON.parse(String(hooks.gemini?.edit('{"theme":"dark"}', false)))
   expect(gemini.theme).toBe('dark')
@@ -709,4 +709,47 @@ test('each agent’s config gets the hook in the shape it reads, and nothing els
   // ...and the one written under the earlier name, claude-progress-pane.
   expect(withoutSection('a\n\n<!-- claude-progress-pane:start -->\nx\n<!-- claude-progress-pane:end -->\n')).toBe('a\n')
   expect(withoutSection('a\n<!-- agent-board:start -->\nx\n<!-- claude-progress-pane:end -->\n')).toBe('a\n<!-- agent-board:start -->\nx\n<!-- claude-progress-pane:end -->\n')
+})
+
+test('Hermes Agent’s hooks go into its config.yaml beside the person’s own, once, and come back out cleanly', () => {
+  const ctx = { home: '/h', sep: '/', isWindows: false, script: '/h/.claude/progress-report.sh', inbox: '/h/.claude/progress-inbox', codexHome: '/h/.codex', grokHome: '/h/.grok', hermesHome: '/h/.hermes' }
+  const hermes = agentHooks(ctx).find(hook => hook.agent === 'hermes')
+  expect(hermes?.file).toBe('/h/.hermes/config.yaml')
+  const own = 'model:\n  default: x\nhooks:\n  pre_tool_call:\n    - command: "~/guard.sh"\n      matcher: terminal\n  post_llm_call:\n  - command: "~/log.sh"\nagent:\n  max_turns: 5\n'
+  const once = String(hermes?.edit(own, false))
+  expect(once).toBe(
+    'model:\n  default: x\nhooks:\n  pre_tool_call:\n    - command: "~/guard.sh"\n      matcher: terminal\n  post_llm_call:\n' +
+      `  - {command: "sh '/h/.claude/progress-report.sh' hermes turn", timeout: 10}\n  - command: "~/log.sh"\n` +
+      `  on_session_finalize:\n    - {command: "sh '/h/.claude/progress-report.sh' hermes end", timeout: 10}\nagent:\n  max_turns: 5\n`,
+  )
+  expect(hermes?.edit(once, false)).toBe(once)
+  expect(hermes?.edit(once, true)).toBe(own)
+  const fresh = String(hermes?.edit('model:\n  default: x\n', false))
+  expect(fresh).toContain('model:\n  default: x\n\nhooks:\n  post_llm_call:\n    - {command:')
+  expect(hermes?.edit(fresh, true)).toBe('model:\n  default: x\n')
+  // A hooks block in flow style is not one this can edit line by line.
+  expect(hermes?.edit('hooks: {}\n', false)).toBeNull()
+})
+
+test('Hermes Agent’s turn is read from under extra, and its session finalize is the end, not its per-turn session end', () => {
+  const turn = readTurn('hermes-turn-1-1.json', JSON.stringify({ hook_event_name: 'post_llm_call', session_id: 's1', cwd: '/w/app', extra: { user_message: 'Fix the login', assistant_response: 'Fixed it.' } }))
+  expect(turn).toMatchObject({ agent: 'hermes', event: 'turn', prompt: 'Fix the login', answer: 'Fixed it.', project: 'app' })
+  expect(readTurn('hermes-turn-1-2.json', JSON.stringify({ hook_event_name: 'on_session_end', session_id: 's1', extra: { completed: true } }))?.event).toBe('turn')
+  expect(readTurn('hermes-end-1-3.json', JSON.stringify({ hook_event_name: 'on_session_finalize', session_id: 's1' }))?.event).toBe('end')
+})
+
+test('a Grok Build session log gives back the request and reply it streamed in chunks', () => {
+  const chunk = (kind: string, text: string) => JSON.stringify({ method: 'session/update', params: { update: { sessionUpdate: kind, content: { type: 'text', text } } } })
+  const log = [chunk('user_message_chunk', 'Add rate '), chunk('user_message_chunk', 'limiting'), JSON.stringify({ method: '_x.ai/session/update', params: { update: { sessionUpdate: 'retry_state' } } }), chunk('agent_message_chunk', 'Done. '), chunk('agent_message_chunk', '100 or 300?')].join('\n')
+  expect(transcriptTail(log)).toEqual({ prompt: 'Add rate limiting', answer: 'Done. 100 or 300?' })
+})
+
+test('only a session log is opened, never a key or env file, nor a path that climbs out of its folder', () => {
+  expect(isTranscriptPath('/home/me/.codex/sessions/2026/10/17/rollout-1.jsonl')).toBe(true)
+  expect(isTranscriptPath('C:\\Users\\me\\.gemini\\tmp\\app\\chats\\session-1.json')).toBe(true)
+  expect(isTranscriptPath('/home/me/.cursor/projects/app/agent-transcripts/1.txt')).toBe(true)
+  expect(isTranscriptPath('/home/me/.ssh/id_ed25519')).toBe(false)
+  expect(isTranscriptPath('/home/me/app/.env')).toBe(false)
+  expect(isTranscriptPath('/home/me/.codex/../.aws/credentials.json')).toBe(false)
+  expect(isTranscriptPath('')).toBe(false)
 })

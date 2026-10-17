@@ -180,6 +180,7 @@ export const EN: Strings = {
   connectDone: (list: string): string => `Connected: ${list}. After you restart them, every turn they finish reports to the pane.`,
   connectNone: 'No agent to connect was found (Codex, Gemini CLI, Cursor, OpenCode, Grok Build, Muse Code).',
   connectCodexTrust: 'Codex runs a new hook only after you approve it once in its /hooks.',
+  connectHermesTrust: 'Hermes Agent asks once before it runs a new hook: answer y (or start it with --accept-hooks).',
   connectSkipped: (name: string, path: string): string => `Could not read ${name}'s config, so it was left alone: ${path}`,
   connectRemoved: (list: string): string => `Disconnected: ${list}.`,
   connectNothingRemoved: 'No agent was connected.',

@@ -1232,3 +1232,72 @@ test('a real Codex turn and its session end, written in the same second, become 
   expect(text).toContain('### 公開端點加上限流\n')
   expect(text).toContain('- [x] 加好 token bucket 中介層\n- [?] 每把金鑰的上限 — 一分鐘 100 還是 300？\n')
 })
+
+// Real payloads from Gemini CLI 0.64.0, OpenCode 1.19.3, Hermes Agent 0.19.0 and Grok Build
+// 1.0.62, each run once against a mock model; only the home folder is renamed.
+const GEMINI_TURN = "{\"session_id\":\"1f482f61-a6df-4dcb-96cc-b949340956b7\",\"transcript_path\":\"/home/me/.gemini/tmp/api-gateway/chats/session-2026-10-17T06-24-1f482f61.jsonl\",\"cwd\":\"/home/me/work/api-gateway\",\"hook_event_name\":\"AfterAgent\",\"timestamp\":\"2026-10-17T06:24:57.946Z\",\"prompt\":\"Add rate limiting to the public endpoints\",\"prompt_response\":\"Added the token bucket middleware. Should the per-key limit be 100 or 300 a minute?\",\"stop_hook_active\":false}"
+const GEMINI_END = "{\"session_id\":\"1f482f61-a6df-4dcb-96cc-b949340956b7\",\"transcript_path\":\"/home/me/.gemini/tmp/api-gateway/chats/session-2026-10-17T06-24-1f482f61.jsonl\",\"cwd\":\"/home/me/work/api-gateway\",\"hook_event_name\":\"SessionEnd\",\"timestamp\":\"2026-10-17T06:24:57.967Z\",\"reason\":\"exit\"}"
+const OPENCODE_TURN = "{\"session_id\":\"ses_eb75cd77affeN3SUn9NJonlKvA\",\"cwd\":\"/home/me/work/api-gateway\",\"prompt\":\"\\\"Add rate limiting to the public endpoints\\\"\",\"last_assistant_message\":\"Added the token bucket middleware. Should the per-key limit be 100 or 300 a minute?\"}"
+const HERMES_TURN = "{\"hook_event_name\": \"post_llm_call\", \"tool_name\": null, \"tool_input\": null, \"session_id\": \"20261017_065228_82992a\", \"cwd\": \"/home/me/work/api-gateway\", \"extra\": {\"task_id\": \"d480bffd-5115-4d30-8b71-7f2fd19b4a4e\", \"turn_id\": \"20261017_065228_82992a:d480bffd-5115-4d30-8b71-7f2fd19b4a4e:89152e5f\", \"user_message\": \"Add rate limiting to the public endpoints\", \"assistant_response\": \"Added the token bucket middleware. Should the per-key limit be 100 or 300 a minute?\", \"conversation_history\": [{\"role\": \"user\", \"content\": \"Add rate limiting to the public endpoints\", \"_db_persisted\": true}, {\"role\": \"assistant\", \"content\": \"Added the token bucket middleware. Should the per-key limit be 100 or 300 a minute?\", \"reasoning\": null, \"finish_reason\": \"stop\", \"_db_persisted\": true}], \"model\": \"mock-model\", \"platform\": \"cli\", \"telemetry_schema_version\": \"hermes.observer.v1\"}}"
+const GROK_STOP = "{\"hookEventName\":\"stop\",\"sessionId\":\"01a148a9-24e5-7ff2-8b96-237d7daf0923\",\"cwd\":\"/home/me/work/api-gateway\",\"workspaceRoot\":\"/home/me/work/api-gateway\",\"timestamp\":\"2026-10-17T07:00:07.211798674+00:00\",\"transcriptPath\":\"/home/me/.grok/sessions/%2Fhome%2Fme%2Fwork%2Fapi-gateway/01a148a9-24e5-7ff2-8b96-237d7daf0923/updates.jsonl\",\"promptId\":\"46159f6e-bf07-40de-96f9-e001b03ffeed\",\"permissionMode\":\"default\",\"reason\":\"end_turn\",\"stopHookActive\":false,\"lastAssistantMessage\":\"Added the token bucket middleware. Should the per-key limit be 100 or 300 a minute?\",\"backgroundTasks\":[],\"sessionCrons\":[],\"hook_event_name\":\"Stop\",\"session_id\":\"01a148a9-24e5-7ff2-8b96-237d7daf0923\",\"transcript_path\":\"/home/me/.grok/sessions/%2Fhome%2Fme%2Fwork%2Fapi-gateway/01a148a9-24e5-7ff2-8b96-237d7daf0923/updates.jsonl\",\"permission_mode\":\"default\",\"stop_hook_active\":false,\"last_assistant_message\":\"Added the token bucket middleware. Should the per-key limit be 100 or 300 a minute?\"}\n"
+const GROK_SHUTDOWN = "{\"hookEventName\":\"stop\",\"sessionId\":\"01a148a9-24e5-7ff2-8b96-237d7daf0923\",\"cwd\":\"/home/me/work/api-gateway\",\"workspaceRoot\":\"/home/me/work/api-gateway\",\"timestamp\":\"2026-10-17T07:00:07.293629986+00:00\",\"transcriptPath\":\"/home/me/.grok/sessions/%2Fhome%2Fme%2Fwork%2Fapi-gateway/01a148a9-24e5-7ff2-8b96-237d7daf0923/updates.jsonl\",\"permissionMode\":\"default\",\"reason\":\"shutdown\",\"stopHookActive\":false,\"hook_event_name\":\"Stop\",\"session_id\":\"01a148a9-24e5-7ff2-8b96-237d7daf0923\",\"transcript_path\":\"/home/me/.grok/sessions/%2Fhome%2Fme%2Fwork%2Fapi-gateway/01a148a9-24e5-7ff2-8b96-237d7daf0923/updates.jsonl\",\"permission_mode\":\"default\",\"stop_hook_active\":false}\n"
+const GROK_END = "{\"hookEventName\":\"session_end\",\"sessionId\":\"01a148a9-24e5-7ff2-8b96-237d7daf0923\",\"cwd\":\"/home/me/work/api-gateway\",\"workspaceRoot\":\"/home/me/work/api-gateway\",\"timestamp\":\"2026-10-17T07:00:07.278036235+00:00\",\"transcriptPath\":\"/home/me/.grok/sessions/%2Fhome%2Fme%2Fwork%2Fapi-gateway/01a148a9-24e5-7ff2-8b96-237d7daf0923/updates.jsonl\",\"permissionMode\":\"default\",\"reason\":\"shutdown\",\"hook_event_name\":\"SessionEnd\",\"session_id\":\"01a148a9-24e5-7ff2-8b96-237d7daf0923\",\"transcript_path\":\"/home/me/.grok/sessions/%2Fhome%2Fme%2Fwork%2Fapi-gateway/01a148a9-24e5-7ff2-8b96-237d7daf0923/updates.jsonl\",\"permission_mode\":\"default\"}\n"
+const GROK_UPDATES = "{\"timestamp\":1792220407,\"method\":\"session/update\",\"params\":{\"sessionId\":\"01a148a9-24e5-7ff2-8b96-237d7daf0923\",\"update\":{\"sessionUpdate\":\"user_message_chunk\",\"content\":{\"type\":\"text\",\"text\":\"Add rate limiting to the public endpoints\"},\"_meta\":{\"modelId\":\"grok-code-fast-1\",\"promptIndex\":0}},\"_meta\":{\"eventId\":\"01a148a9-24e5-7ff2-8b96-237d7daf0923-2\",\"agentTimestampMs\":1792220407173}}}\n{\"timestamp\":1792220407,\"method\":\"session/update\",\"params\":{\"sessionId\":\"01a148a9-24e5-7ff2-8b96-237d7daf0923\",\"update\":{\"sessionUpdate\":\"agent_message_chunk\",\"content\":{\"type\":\"text\",\"text\":\"Added the token bucket middleware. Should the per-key limit be 100 or 300 a minute?\"}},\"_meta\":{\"totalTokens\":1282,\"requestTrimmedTokens\":0,\"eventId\":\"01a148a9-24e5-7ff2-8b96-237d7daf0923-4\",\"agentTimestampMs\":1792220407201,\"promptId\":\"46159f6e-bf07-40de-96f9-e001b03ffeed\",\"streamStartMs\":1792220407198,\"turnStartMs\":1792220407167,\"updateType\":\"AgentMessageChunk\",\"chunkId\":1}}}\n{\"timestamp\":1792220407,\"method\":\"_x.ai/session/update\",\"params\":{\"sessionId\":\"01a148a9-24e5-7ff2-8b96-237d7daf0923\",\"update\":{\"sessionUpdate\":\"hook_execution\",\"event_name\":\"stop\",\"prompt_id\":\"46159f6e-bf07-40de-96f9-e001b03ffeed\",\"runs\":[{\"name\":\"global/agent-board:stop[0].hooks[0]\",\"status\":{\"status\":\"success\",\"elapsed_ms\":26}}]},\"_meta\":{\"eventId\":\"01a148a9-24e5-7ff2-8b96-237d7daf0923-8\",\"agentTimestampMs\":1792220407242}}}\n{\"timestamp\":1792220407,\"method\":\"_x.ai/session/update\",\"params\":{\"sessionId\":\"01a148a9-24e5-7ff2-8b96-237d7daf0923\",\"update\":{\"sessionUpdate\":\"turn_completed\",\"prompt_id\":\"46159f6e-bf07-40de-96f9-e001b03ffeed\",\"stop_reason\":\"end_turn\",\"usage\":{\"inputTokens\":1,\"outputTokens\":1,\"totalTokens\":2,\"cachedReadTokens\":0,\"cacheCreationTokens\":0,\"reasoningTokens\":0,\"modelCalls\":1,\"apiDurationMs\":11,\"modelUsage\":{\"grok-code-fast-1\":{\"inputTokens\":1,\"outputTokens\":1,\"totalTokens\":2,\"cachedReadTokens\":0,\"cacheCreationTokens\":0,\"reasoningTokens\":0,\"modelCalls\":1,\"apiDurationMs\":11}},\"numTurns\":1},\"elapsed_ms\":96},\"_meta\":{\"eventId\":\"01a148a9-24e5-7ff2-8b96-237d7daf0923-9\",\"agentTimestampMs\":1792220407263}}}\n{\"timestamp\":1792220407,\"method\":\"_x.ai/session/update\",\"params\":{\"sessionId\":\"01a148a9-24e5-7ff2-8b96-237d7daf0923\",\"update\":{\"sessionUpdate\":\"hook_execution\",\"event_name\":\"session_end\",\"runs\":[{\"name\":\"global/agent-board:session_end[0].hooks[0]\",\"status\":{\"status\":\"success\",\"elapsed_ms\":11}}]},\"_meta\":{\"eventId\":\"01a148a9-24e5-7ff2-8b96-237d7daf0923-10\",\"agentTimestampMs\":1792220407290}}}\n{\"timestamp\":1792220407,\"method\":\"_x.ai/session/update\",\"params\":{\"sessionId\":\"01a148a9-24e5-7ff2-8b96-237d7daf0923\",\"update\":{\"sessionUpdate\":\"hook_execution\",\"event_name\":\"stop\",\"runs\":[{\"name\":\"global/agent-board:stop[0].hooks[0]\",\"status\":{\"status\":\"success\",\"elapsed_ms\":12}}]},\"_meta\":{\"eventId\":\"01a148a9-24e5-7ff2-8b96-237d7daf0923-11\",\"agentTimestampMs\":1792220407306}}}\n"
+const RATE_LIMIT = 'TITLE: Rate-limit the public endpoints\nCONTEXT: Keep the public API up under abuse\nDONE: Added the token bucket middleware\nNEXT: -\nASK: Per-key limit — 100 or 300 a minute?'
+
+// Runs a session over these inbox files and hands back the file and what the model was asked.
+const takeInbox = async ($: Parameters<Parameters<typeof test>[1]>[0], on: On, files: Array<[string, string]>) => {
+  const asked: string[] = []
+  const world: World = {
+    files: new Map([[FILE, '# Progress\n'], ...files]),
+    mtime: 1,
+    hasTasks: true,
+    reply: (prompt: string) => {
+      asked.push(prompt)
+      return prompt.includes('TITLE:') ? RATE_LIMIT : undefined
+    },
+  }
+  const clock = engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/persona_framework', surface: 'desktop', isInteractive: true })
+  await clock.advance(5000)
+  return { text: world.files.get(FILE) ?? '', asked }
+}
+
+test('a real Gemini CLI turn and its session end become one ended block, its request taken from AfterAgent', async ($, on) => {
+  const { text, asked } = await takeInbox($, on, [
+    [`${INBOX}/gemini-end-1792218297-695.json`, GEMINI_END],
+    [`${INBOX}/gemini-turn-1792218297-688.json`, GEMINI_TURN],
+  ])
+  expect(asked.some(prompt => prompt.includes('Add rate limiting to the public endpoints'))).toBe(true)
+  expect(text).toContain('agent=gemini state=ended')
+  expect(text).toContain('### Rate-limit the public endpoints\n')
+  expect(text).toContain('- [?] Per-key limit — 100 or 300 a minute?\n')
+})
+
+test('a real OpenCode turn from its plugin becomes a block waiting on the person', async ($, on) => {
+  const { text, asked } = await takeInbox($, on, [[`${INBOX}/opencode-turn-1792220017516-5648.json`, OPENCODE_TURN]])
+  expect(asked.some(prompt => prompt.includes('Should the per-key limit be 100 or 300 a minute?'))).toBe(true)
+  expect(text).toContain('## api-gateway\n')
+  expect(text).toContain('agent=opencode state=waiting')
+})
+
+test('a real Hermes Agent turn, its words under extra, becomes a block waiting on the person', async ($, on) => {
+  const { text, asked } = await takeInbox($, on, [[`${INBOX}/hermes-turn-1792219950-5488.json`, HERMES_TURN]])
+  expect(asked.some(prompt => prompt.includes('Add rate limiting to the public endpoints') && prompt.includes('100 or 300 a minute'))).toBe(true)
+  expect(text).toContain('agent=hermes state=waiting')
+  expect(text).toContain('### Rate-limit the public endpoints\n')
+})
+
+test('a real Grok Build turn takes its request from the session log and ends on the shutdown stop', async ($, on) => {
+  const { text, asked } = await takeInbox($, on, [
+    ["/home/me/.grok/sessions/%2Fhome%2Fme%2Fwork%2Fapi-gateway/01a148a9-24e5-7ff2-8b96-237d7daf0923/updates.jsonl", GROK_UPDATES],
+    [`${INBOX}/grok-end-1792220407-6698.json`, GROK_END],
+    [`${INBOX}/grok-turn-1792220407-6688.json`, GROK_STOP],
+    [`${INBOX}/grok-turn-1792220407-6706.json`, GROK_SHUTDOWN],
+  ])
+  // Grok's Stop has the reply but not the request; its ACP log streams the request in chunks.
+  expect(asked.some(prompt => prompt.includes('Add rate limiting to the public endpoints'))).toBe(true)
+  expect(text).toContain('agent=grok state=ended')
+  expect(text).toContain('### Rate-limit the public endpoints\n')
+  expect(text.match(/<!-- auto session=/g)?.length).toBe(1)
+})

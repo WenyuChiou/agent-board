@@ -149,7 +149,7 @@ export const withoutSection = (text: string): string => {
 // Where each agent keeps what `/progress connect` changes, and how. `dir` says the agent is
 // installed (its folder under the home directory); `edit` turns the file's text into the
 // new text, or null when the file cannot be read as JSON and is left alone.
-export type ConnectContext = { home: string; sep: string; isWindows: boolean; script: string; inbox: string; codexHome: string; grokHome: string }
+export type ConnectContext = { home: string; sep: string; isWindows: boolean; script: string; inbox: string; codexHome: string; grokHome: string; hermesHome: string }
 
 export type AgentHook = {
   agent: string
@@ -173,6 +173,74 @@ const jsonEdit =
     if (config === null) return null
     return writeConfig(remove ? withoutOurHooks(config) : add(withoutOurHooks(config)))
   }
+
+// Hermes Agent keeps its hooks in YAML: `hooks.<event>` is a list of `{ command, timeout }`.
+// With no YAML parser here, ours go in as one flow-style line each, found again by the
+// reporter script's name, and a `hooks:` written in a shape this cannot follow (flow style)
+// is left alone.
+const HERMES_KEY = /^\s+(?:post_llm_call|on_session_finalize)\s*:\s*(?:#.*)?$/
+const TOP_HOOKS = /^hooks\s*:\s*(?:#.*)?$/
+
+const indentOf = (line: string): number => line.length - line.trimStart().length
+
+const isContent = (line: string): boolean => line.trim() !== '' && !line.trimStart().startsWith('#')
+
+// Whether the key on line `at` has anything under it (YAML lets a list sit at the key's own
+// indent).
+const hasChildren = (lines: string[], at: number): boolean => {
+  const indent = indentOf(lines[at] ?? '')
+  const next = lines.slice(at + 1).find(isContent)
+  if (next === undefined) return false
+
+  return indentOf(next) > indent || (indentOf(next) === indent && next.trimStart().startsWith('- '))
+}
+
+export const withoutHermesHooks = (text: string): string => {
+  const lines = text.split('\n')
+  // Only list items of ours; a comment or another line that names the script stays.
+  const kept = lines.filter(line => !(line.trimStart().startsWith('- ') && OURS.test(line)))
+  if (kept.length === lines.length) return text
+  const keys = kept.filter((line, at) => !(HERMES_KEY.test(line) && !hasChildren(kept, at)))
+  const rest = keys.filter((line, at) => !(TOP_HOOKS.test(line) && !hasChildren(keys, at)))
+
+  return `${rest.join('\n').replace(/\n{3,}/g, '\n\n').replace(/\n+$/, '')}\n`.replace(/^\n$/, '')
+}
+
+export const withHermesHooks = (text: string, events: Array<[string, string]>): string | null => {
+  const base = withoutHermesHooks(text)
+  const item = (command: string): string => `- {command: ${JSON.stringify(command)}, timeout: 10}`
+  const lines = base.replace(/\n+$/, '').split('\n')
+  const at = lines.findIndex(line => /^hooks\s*:/.test(line))
+  if (at === -1) {
+    const added = ['hooks:', ...events.flatMap(([event, command]) => [`  ${event}:`, `    ${item(command)}`])].join('\n')
+    return base.trim() === '' ? `${added}\n` : `${base.replace(/\n+$/, '')}\n\n${added}\n`
+  }
+  if (!TOP_HOOKS.test(lines[at] ?? '')) return null
+  let end = lines.findIndex((line, index) => index > at && isContent(line) && indentOf(line) === 0)
+  if (end === -1) end = lines.length
+  let insert = end
+  while (insert - 1 > at && !isContent(lines[insert - 1] ?? '')) insert -= 1
+  const firstChild = lines.slice(at + 1, end).find(isContent)
+  const indent = firstChild === undefined ? 2 : indentOf(firstChild)
+  for (const [event, command] of events) {
+    const key = lines.findIndex((line, index) => index > at && index < end && indentOf(line) === indent && new RegExp(`^\\s*${event}\\s*:`).test(line))
+    if (key === -1) {
+      lines.splice(insert, 0, `${' '.repeat(indent)}${event}:`, `${' '.repeat(indent + 2)}${item(command)}`)
+      insert += 2
+      end += 2
+      continue
+    }
+    const after = (lines[key] ?? '').replace(/^[^:]*:/, '').trim()
+    if (after !== '' && !after.startsWith('#')) return null
+    const next = lines.slice(key + 1, end).find(isContent)
+    const nested = next !== undefined && (indentOf(next) > indent || (indentOf(next) === indent && next.trimStart().startsWith('- ')))
+    lines.splice(key + 1, 0, `${' '.repeat(nested && next !== undefined ? indentOf(next) : indent + 2)}${item(command)}`)
+    if (key < insert) insert += 1
+    end += 1
+  }
+
+  return `${lines.join('\n')}\n`
+}
 
 export const agentHooks = (ctx: ConnectContext): AgentHook[] => {
   const turn = (agent: string): string => reportCommand(ctx.script, agent, 'turn', ctx.isWindows)
@@ -241,6 +309,22 @@ export const agentHooks = (ctx: ConnectContext): AgentHook[] => {
           timeout: 1,
         }),
       ),
+    },
+    {
+      // post_llm_call carries the turn's words under `extra`. Its on_session_end fires after
+      // every turn, so the end is on_session_finalize. Hermes asks once before it runs a new
+      // hook (or takes --accept-hooks). Timeout in s.
+      agent: 'hermes',
+      label: 'Hermes Agent',
+      dir: ctx.hermesHome,
+      file: [ctx.hermesHome, 'config.yaml'].join(ctx.sep),
+      edit: (text, remove) =>
+        remove
+          ? withoutHermesHooks(text)
+          : withHermesHooks(text, [
+              ['post_llm_call', turn('hermes')],
+              ['on_session_finalize', end('hermes')],
+            ]),
     },
     {
       agent: 'opencode',
