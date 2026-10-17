@@ -16,9 +16,11 @@ import type { PasteProblem } from '../hooks/blocks'
 import { startServer } from './board-serve'
 import { boardKey, boardScreen, boardText, emptyBoardState, peekInbox, boardItems, pinned } from '../hooks/board'
 import type { BoardAction, BoardState } from '../hooks/board'
+import { chatDigest, reportMode } from '../hooks/chat'
+import type { ChatSource } from '../hooks/chat'
 import { LOG_TAIL } from '../hooks/inbox'
 import { dashboardHtml } from '../hooks/dashboard'
-import { appendJournal, archivePath, countDay, hasArchiveEntry, journalLine, journalPath } from '../hooks/journal'
+import { appendJournal, archivePath, countDay, hasArchiveEntry, journalLine, journalPath, parseJournal } from '../hooks/journal'
 import { parseProgress } from '../hooks/parse'
 import { qrModules, qrText } from '../hooks/qr'
 import { langOf, STRINGS } from '../hooks/strings'
@@ -87,12 +89,13 @@ const readLog = (file: string): string => {
   }
 }
 
-const pending = () => {
+const pending = (withSession = false, onProblem: (state: ChatSource['state']) => void = () => {}) => {
   const dir = join(dirname(path), 'progress-inbox')
   let names: string[] = []
   try {
     names = readdirSync(dir).filter(name => name.endsWith('.json'))
-  } catch {
+  } catch (error) {
+    onProblem((error as { code?: string } | null)?.code === 'ENOENT' ? 'missing' : 'unavailable')
     return []
   }
   const files = names.flatMap(name => {
@@ -100,11 +103,37 @@ const pending = () => {
       const file = join(dir, name)
       return [{ name, body: read(file), at: statSync(file).mtimeMs }]
     } catch {
+      onProblem('unavailable')
       return []
     }
   })
 
-  return peekInbox(files, readLog)
+  return peekInbox(files, readLog, withSession)
+}
+
+// Separate from the terminal's error messages, which intentionally name local paths.
+// A partial read remains partial; no writes, model calls, browser or relay are involved.
+const chat = (): string => {
+  const now = Date.now()
+  const load = (file: string): { text: string; source: ChatSource } => {
+    try {
+      return { text: readFileSync(file, 'utf8'), source: { state: 'read', at: statSync(file).mtimeMs } }
+    } catch (error) {
+      return { text: '', source: { state: (error as { code?: string } | null)?.code === 'ENOENT' ? 'missing' : 'unavailable' } }
+    }
+  }
+  const board = load(path)
+  const answers = load(answeredPath(path))
+  const journal = load(journalPath(path, now))
+  const answered = parseAnswered(answers.text)
+  if (answered === null) answers.source = { state: 'unavailable' }
+  const inbox: ChatSource = { state: 'read' }
+  const turns = pending(true, state => { inbox.state = state })
+  return chatDigest({
+    projects: parseProgress(board.text), answered: answered ?? [], pending: turns,
+    journal: parseJournal(journal.text), now,
+    sources: { board: board.source, answered: answers.source, inbox, journal: journal.source },
+  }, s)
 }
 
 const view = () => {
@@ -598,7 +627,11 @@ const serveBoard = async (): Promise<void> => {
 }
 
 const run = async (): Promise<void> => {
-  if (args.includes('--serve-child')) {
+  // Existing CLI callers explicitly have the terminal surface. Only --chat opts in;
+  // message-only hosts may use reportMode with their declared capabilities instead.
+  if (reportMode(args.includes('--chat') ? {} : { terminal: true }) === 'chat') {
+    process.stdout.write(chat())
+  } else if (args.includes('--serve-child')) {
     serveChild()
   } else if (args.includes('--serve')) {
     await serveBoard()

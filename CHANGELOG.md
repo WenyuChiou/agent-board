@@ -1,5 +1,19 @@
 # Changelog
 
+## Unreleased
+
+- **An opt-in progress message for message-only hosts.** `agent-board.mjs --chat`
+  prints decisions, blockers, journal-recorded completions and other work directly
+  for the host to send in its existing conversation (#73). Existing terminal and
+  page commands keep their defaults. The shared View supplies answered/hidden and
+  stale-session semantics; the digest labels snapshot/source times and the local
+  calendar-day completion window, with no precise since-last-message claim. Paths,
+  credential assignments and links are withheld. Tests: "a chat digest orders
+  decisions blockers recorded completions and other work without repeating a task",
+  "chat keeps retained answered questions hidden when their board block is absent",
+  "chat withholds namespaced and quoted credential assignments completely" and
+  "--chat stays read-only beside action flags and withholds paths and secrets".
+
 ## 0.20.7 — 2026-10-17
 
 Connecting, updating and removing the plugin never overwrite or delete a file the person

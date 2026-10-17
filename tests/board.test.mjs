@@ -55,6 +55,68 @@ test('the board script prints the board from the file it was written for, in its
   assert.ok(run('en', ['--lang', 'zh-CN']).startsWith('进度'))
 })
 
+test('--chat prints a message snapshot with journal dates and shared hidden questions', () => {
+  const now = new Date()
+  const day = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`
+  const text = run('en', ['--chat'], {
+    [`progress-journal-${day.slice(0, 7)}.md`]: `- ${day} 10:00 · Example project · Prepare label · Proofread the label\n`,
+  })
+  assert.ok(text.startsWith('Progress snapshot · '), text)
+  assert.ok(text.includes('Decisions needed\n- api-gateway · Rate-limit the public endpoints'), text)
+  assert.equal(text.split('Rate-limit the public endpoints').length, 2, text)
+  assert.ok(text.includes('Recorded completed step: Proofread the label'), text)
+  assert.ok(text.includes('unmerged report; received '), text)
+  assert.ok(text.includes('Journal dates only; precise completion time'), text)
+  assert.ok(!text.includes('\u001b') && !text.includes('<!--'), text)
+  const hidden = run('en', ['--chat'], { 'progress-answered.json': JSON.stringify({ answered: ['a1b2c3d4 2 Per-key limit — 100 or 300 a minute?'] }) })
+  assert.ok(hidden.includes('1 answered, hidden'), hidden)
+  assert.ok(!hidden.includes('100 or 300 a minute?'), hidden)
+  assert.ok(run('zh-TW', ['--chat']).startsWith('進度快照 · '))
+  assert.ok(run('en', ['--chat', '--lang', 'zh-CN']).startsWith('进度快照 · '))
+})
+
+test('--chat stays read-only beside action flags and withholds paths and secrets', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'board-chat-'))
+  try {
+    const path = join(dir, 'progress.md')
+    const title = '合成多語言資料'.repeat(60) + 'the entire ending'
+    const file = `## Example project\n### ${title}\n- [ ] Read C:\\synthetic\\private /home/synthetic/private https://example.test/?token=synthetic token=synthetic-secret OPENAI_API_KEY=synthetic-openai-secret AWS_SECRET_ACCESS_KEY=synthetic-aws-secret DATABASE_PASSWORD=synthetic-password\n`
+    writeFileSync(path, file)
+    const script = join(dir, 'agent-board.mjs')
+    writeFileSync(script, `globalThis.AGENT_BOARD = ${JSON.stringify({ path, lang: 'en' })}\n${BOARD_SCRIPT}`)
+    const before = readdirSync(dir).sort()
+    const out = spawnSync(process.execPath, [script, '--chat', '--keys', 'x', '--html', '--serve'], { env: { ...process.env, CLAUDE_PROGRESS_FILE: '', NO_COLOR: '' }, encoding: 'utf8', timeout: 10000 })
+    assert.equal(out.status, 0, out.stdout + out.stderr)
+    assert.equal(out.stderr, '')
+    assert.ok(out.stdout.includes(title), out.stdout)
+    for (const secret of ['C:\\synthetic', '/home/synthetic', 'https://', 'synthetic-secret', 'synthetic-openai-secret', 'synthetic-aws-secret', 'synthetic-password', '\u001b', dir]) assert.ok(!out.stdout.includes(secret), out.stdout)
+    assert.equal(readFileSync(path, 'utf8'), file)
+    assert.deepEqual(readdirSync(dir).sort(), before)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('--chat labels unreadable sources without exposing a failing path or claiming an empty live board', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'board-chat-fault-'))
+  try {
+    const path = join(dir, 'progress.md')
+    writeFileSync(path, FILE)
+    const script = join(dir, 'agent-board.mjs')
+    writeFileSync(script, `globalThis.AGENT_BOARD = ${JSON.stringify({ path, lang: 'en' })}\n${BOARD_SCRIPT}`)
+    const preload = join(dir, 'fault.cjs')
+    writeFileSync(preload, `const fs = require('node:fs')\nconst { syncBuiltinESMExports } = require('node:module')\nconst original = fs.readFileSync\nfs.readFileSync = (file, ...rest) => { if (String(file) === ${JSON.stringify(path)}) throw Object.assign(new Error('synthetic access failure'), { code: 'EACCES' }); return original(file, ...rest) }\nsyncBuiltinESMExports()\n`)
+    const out = spawnSync(process.execPath, ['-r', preload, script, '--chat'], { env: { ...process.env, CLAUDE_PROGRESS_FILE: '' }, encoding: 'utf8', timeout: 10000 })
+    assert.equal(out.status, 0, out.stdout + out.stderr)
+    assert.ok(out.stdout.includes('Board: unavailable or incomplete'), out.stdout)
+    assert.ok(out.stdout.includes('Inbox: missing'), out.stdout)
+    assert.ok(!out.stdout.includes(path) && !out.stderr.includes(path), out.stdout + out.stderr)
+    assert.ok(!out.stdout.includes('Nothing needs you right now'), out.stdout)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
 test('the board script leaves out a question a pane on this machine marked answered', () => {
   const answered = JSON.stringify({ answered: ['a1b2c3d4 2 Per-key limit — 100 or 300 a minute?'] })
   const text = run('en', [], { 'progress-answered.json': answered })

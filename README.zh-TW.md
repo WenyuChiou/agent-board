@@ -34,6 +34,7 @@ Claude Code 外掛，也跟得上 Codex、Gemini CLI、OpenCode、Grok Build、H
 - **你自己的待辦也放得進來。** 在面板的輸入框打 `+ 求職：Fabrikam 研究員 截止 11-20`。快到期會變黃，到期會變紅。
 - **不在終端機也看得到。** `/progress open` 在瀏覽器打開同一個畫面（手機也行）；其他 agent 會打開[可以點的網頁](#看板的網頁)，在上面勾步驟、封存、回答。面板關著時，狀態列和桌面通知會告訴你有事在等你。
 - **週報。** `/progress report` 和 `/progress today` 把做完的事複製成文字。
+- **只能透過訊息看進度時。** 明確選用 `node ~/.claude/agent-board.mjs --chat`，有權讀取紀錄的 host 可直接把摘要送進原對話，依待確認、阻擋、紀錄的完成步驟、其他工作排序。不必開網頁、看截圖或下載檔案。[訊息介面說明](docs/REMOTE_REPORTERS.md#message-first-progress-opt-in)不假設有內嵌按鈕、同步或回覆 API；既有 CLI 與 UI 流程不變。
 - **自己收拾。** 做完的事移到每月封存檔，日誌留下每一步完成紀錄。
 - **就是一個 Markdown 檔。** 全部在 `~/.claude/progress.md`，你可以自己看、自己改。支援 English、繁體中文、简体中文；淺色深色都有。
 
@@ -86,7 +87,7 @@ claude -p "/progress connect"
 - **Grok Build** 1.0.62：回合會上看板；在它裡面打 `/agent-board` 還沒驗證
 - **Hermes Agent** 0.19.0：兩者都能用；第一次回答 `y`；單次的 `hermes -q` 提問會顯示成已停，不是等你
 - **OpenClaw** 2026.10.4：兩者都能用；需要 2026.4.24 以上，會警告無法確認外掛來源，但照樣載入
-- 網頁版 **dot**、**Muse**：沒有 hook，要把[一段提示](docs/REMOTE_REPORTERS.md#chat-relay-a-prompt-to-paste)貼進聊天，再把它寫的每個區塊貼進[看板的網頁](#看板的網頁)；在它們裡面看不到看板
+- **dot**、**Muse** 的純訊息介面：依 host 能讀到的紀錄，直接在[原對話顯示摘要](docs/REMOTE_REPORTERS.md#message-first-progress-opt-in)；沒有內嵌看板或自動同步。若也需要看板鏡像，再自行選用區塊貼上流程。依 host 實際能力選用，品牌或雲端 VM 本身不決定輸出。
 - **其他 agent**（Aider、Copilot、Windsurf…）：把 [AGENTS.md](AGENTS.md) 的一段貼進它的說明檔，它會自己寫一塊；在它裡面看不到看板
 
 **還不支援**

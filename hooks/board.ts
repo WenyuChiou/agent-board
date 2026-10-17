@@ -11,7 +11,7 @@ import type { StepRef, TaskRef, TaskRow, View, ViewStep, WaitingItem } from './v
 
 // A turn another agent's hook left that no Claude Code session has summed up yet. The
 // board only peeks at it: taking it is a Claude Code session's job, so the two never race.
-export type PendingTurn = { agent: string; project: string; text: string; isQuestion: boolean; at: number }
+export type PendingTurn = { agent: string; project: string; text: string; isQuestion: boolean; at: number; session?: string }
 
 // A reply's last line of prose, its code blocks left out: where a reply usually says what
 // came of the turn.
@@ -23,7 +23,7 @@ const closing = (answer: string): string | undefined =>
     .at(-1)
 
 // `readLog` reads an agent's session log, for the request a hook leaves out (Codex's Stop).
-export const peekInbox = (files: ReadonlyArray<{ name: string; body: string; at: number }>, readLog: (path: string) => string = () => ''): PendingTurn[] => {
+export const peekInbox = (files: ReadonlyArray<{ name: string; body: string; at: number }>, readLog: (path: string) => string = () => '', withSession = false): PendingTurn[] => {
   const latest = new Map<string, PendingTurn>()
   for (const file of [...files].sort((a, b) => a.at - b.at)) {
     const read = readTurn(file.name, file.body)
@@ -37,7 +37,7 @@ export const peekInbox = (files: ReadonlyArray<{ name: string; body: string; at:
     const question = lastQuestion(turn.answer)
     const text = (question ?? closing(turn.answer) ?? turn.prompt).trim()
     if (text === '') continue
-    latest.set(turn.id, { agent: turn.agent, project: turn.project, text, isQuestion: question !== null, at: file.at })
+    latest.set(turn.id, { agent: turn.agent, project: turn.project, text, isQuestion: question !== null, at: file.at, ...(withSession ? { session: turn.id } : {}) })
   }
 
   return [...latest.values()].sort((a, b) => Number(b.isQuestion) - Number(a.isQuestion) || b.at - a.at)

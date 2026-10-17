@@ -34,6 +34,7 @@ You have Claude Code on one project, Codex on another, Gemini on a third. Twenty
 - **Your own to-dos too.** Type `+ Job search: Fabrikam fellowship due 11-20` in the pane's box. Due dates turn the row amber, then red.
 - **Outside the terminal.** `/progress open` shows the same view in your browser (it works on a phone too), and other agents open [a page you can click](#the-boards-page) to tick, archive and answer. The status line and desktop notifications tell you when something needs you while the pane is closed.
 - **Reports.** `/progress report` and `/progress today` copy what got done, as text.
+- **Progress in a message, when that is your only surface.** Opt in with `node ~/.claude/agent-board.mjs --chat`. A host with access to the records can send the resulting digest directly in the conversation: decisions, blockers, recorded completions, then other work. No page, screenshot or download is required. [Message-only hosts](docs/REMOTE_REPORTERS.md#message-first-progress-opt-in) have no implied inline buttons, sync or reply API; existing CLI and UI flows stay as they are.
 - **Tidies itself.** Finished work moves to a monthly archive; a journal keeps every finished step.
 - **One plain Markdown file.** Everything is in `~/.claude/progress.md`, which you can read and edit. English, 繁體中文 and 简体中文; light and dark.
 
@@ -86,7 +87,7 @@ Install it in Claude Code, and every time Claude Code starts it connects the age
 - **Grok Build** 1.0.62: its turns reach the board; `/agent-board` inside it is not verified yet
 - **Hermes Agent** 0.19.0: both work; answer `y` once; a one-off `hermes -q` question shows as stopped, not waiting
 - **OpenClaw** 2026.10.4: both work; needs 2026.4.24 or newer, and warns that it can't verify where the plugin came from, then loads it
-- **dot** and **Muse** on the web: no hook, so paste [one prompt](docs/REMOTE_REPORTERS.md#chat-relay-a-prompt-to-paste) into the chat and paste each block it writes into [the board's page](#the-boards-page); no board inside them
+- **dot** and **Muse** in a message-only surface: use a [readable digest in that conversation](docs/REMOTE_REPORTERS.md#message-first-progress-opt-in) from the records the host can access; no embedded board or automatic sync. The fragment-and-paste relay is optional if you also want a board mirror. Choose by the host's actual capabilities, not its name or whether it runs in a cloud VM.
 - **Any other agent** (Aider, Copilot, Windsurf…): paste one section of [AGENTS.md](AGENTS.md) into its instructions and it writes its own block; no board inside it
 
 **Not supported yet**

@@ -5,6 +5,75 @@ assistant, anything without local hooks or a shared filesystem) can still
 report to the pane. This page covers only what is specific to them; see
 [What this does not do](#what-this-does-not-do) for the limits.
 
+## Message-first progress (opt-in)
+
+For a host running in a VM or cloud environment where the user receives progress
+only through messages, send a readable digest **in the existing conversation**.
+The user does not need to open a page, download Markdown, inspect a screenshot or
+copy transport fragments to read the work. dot and Muse in such a surface are
+examples; their names do not select a route. A cloud host with a working CLI or UI
+keeps that workflow, just as a desktop host does.
+
+This is an optional report adapter over the same board state, not a connector.
+A host that can execute commands and read the board records can opt in with:
+
+```sh
+node ~/.claude/agent-board.mjs --chat --lang en
+```
+
+Use the board script from this checkout/build or a version containing this option.
+The command prints plain text to stdout once, without writing files, opening a
+browser, copying to a clipboard or calling a model. `--chat` takes precedence over
+action flags. Existing invocations without it, including `--watch`, `--serve`,
+`--html` and board commands, retain their behavior. No installation or hook change
+is needed to use an already available script.
+
+The host sends that output through its **existing supported message channel**.
+This code does not send the message or create a connection. If the host cannot
+read a board on another machine, report only accessible conversation/task records
+and say that the other board is unavailable; do not imply synchronization or
+invent work from an example. A host unable to run code can follow the same text
+structure using its actual accessible records. Fragment transport and browser/file
+exports below are optional ways to maintain a separate board mirror.
+
+For hosts embedding the pure formatter, `hooks/chat.ts` exports
+`chatDigest(snapshot, strings)` and the declarative `reportMode(capabilities)`:
+
+| Known surface capability | Suggested presentation |
+|---|---|
+| Only messages, or capabilities unknown (`reportMode()`) | `chat` text, discussed in the conversation |
+| Terminal available (`{ terminal: true }`) | Existing `terminal` flow |
+| Interactive board available (`{ interactive: true }`) | Existing `interactive` flow |
+
+Supply verified capabilities explicitly; this helper performs no discovery or
+automatic host rerouting. The CLI declares its existing terminal surface unless
+`--chat` is explicitly requested. Program execution may support automatic recording;
+it does not imply the message surface can embed UI. No inline buttons or new APIs
+are promised. A conversational confirmation is neither execution nor authorization;
+reply in the conversation that asked, and separately verify any resulting action.
+
+The digest lists decisions, blockers and recorded unblock conditions, completed
+steps, then remaining work. Each task appears in its highest-priority section;
+completed steps for an open task stay with that task. It reads shared View answered
+and hidden semantics, retaining the existing 12-hour stale-session rule. The
+proposed 3/7-day question aging in #66 is **not implemented** by this option.
+
+The UTC snapshot time is when the records were read. Source modification times,
+block `updated=` values and inbox receipt times describe records, not verified live
+observations. Missing, unreadable and incomplete sources are named without local
+paths. Unmerged reports are excerpts, not proof of completion. Hidden questions
+are not repeated in task details or matching pending excerpts.
+
+"Completed" means journal entries for **today's local calendar date
+(00:00–24:00)**. `parseJournal` retains dates only: exact completion times and a
+since-last-message delta are unknown. Duplicate journal entries are grouped by
+project, task title and step text; the journal has no session identity. A task
+reported done without a matching entry appears as reported complete with no
+established completion date, not as newly completed. No percentage is inferred.
+The formatter withholds paths, credential forms, links, HTML and control sequences;
+it does not shorten work to terminal width. All examples in the automated tests
+are synthetic, and tests use no live user board or real model.
+
 ## The contract
 
 There is one contract, and it is [FORMAT.md](FORMAT.md) v1: a block under

@@ -34,6 +34,7 @@ Claude Code 插件，也跟得上 Codex、Gemini CLI、OpenCode、Grok Build、H
 - **你自己的待办也放得进来。** 在面板的输入框打 `+ 求职：Fabrikam 研究员 截止 11-20`。快到期会变黄，到期会变红。
 - **不在终端也看得到。** `/progress open` 在浏览器打开同一个画面（手机也行）；其他 agent 会打开[可以点的网页](#看板的网页)，在上面勾步骤、归档、回答。面板关着时，状态栏和桌面通知会告诉你有事在等你。
 - **周报。** `/progress report` 和 `/progress today` 把做完的事复制成文字。
+- **只能通过消息看进度时。** 明确选用 `node ~/.claude/agent-board.mjs --chat`，有权读取记录的 host 可直接把摘要发送到原对话，依待确认、阻碍、记录的完成步骤、其他工作排序。不必开网页、看截图或下载文件。[消息界面说明](docs/REMOTE_REPORTERS.md#message-first-progress-opt-in)不假设有内嵌按钮、同步或回复 API；现有 CLI 与 UI 流程不变。
 - **自己清理。** 做完的事移到每月归档文件，日志留下每一步完成记录。
 - **就是一个 Markdown 文件。** 全部在 `~/.claude/progress.md`，你可以自己看、自己改。支持 English、繁體中文、简体中文；浅色深色都有。
 
@@ -86,7 +87,7 @@ claude -p "/progress connect"
 - **Grok Build** 1.0.62：回合会上看板；在它里面打 `/agent-board` 还没验证
 - **Hermes Agent** 0.19.0：两者都能用；第一次回答 `y`；单次的 `hermes -q` 提问会显示成已停，不是等你
 - **OpenClaw** 2026.10.4：两者都能用；需要 2026.4.24 以上，会警告无法确认插件来源，但照样加载
-- 网页版 **dot**、**Muse**：没有 hook，要把[一段提示](docs/REMOTE_REPORTERS.md#chat-relay-a-prompt-to-paste)贴进聊天，再把它写的每个区块贴进[看板的网页](#看板的网页)；在它们里面看不到看板
+- **dot**、**Muse** 的纯消息界面：依 host 能读取的记录，直接在[原对话显示摘要](docs/REMOTE_REPORTERS.md#message-first-progress-opt-in)；没有内嵌看板或自动同步。若也需要看板镜像，再自行选用区块粘贴流程。依 host 实际能力选用，品牌或云端 VM 本身不决定输出。
 - **其他 agent**（Aider、Copilot、Windsurf…）：把 [AGENTS.md](AGENTS.md) 的一段贴进它的说明文件，它会自己写一块；在它里面看不到看板
 
 **还不支持**
