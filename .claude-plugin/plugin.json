@@ -1,7 +1,7 @@
 {
   "name": "agent-board",
-  "version": "0.10.0",
-  "description": "See what every AI coding agent is doing, with whatever is waiting on you at the top: Claude Code, Codex, Gemini CLI, Cursor, OpenCode, Grok Build, Muse Code",
+  "version": "0.11.0",
+  "description": "See what every AI coding agent is doing, with whatever is waiting on you at the top: Claude Code, Codex, Gemini CLI, Cursor, OpenCode, Grok Build, Hermes Agent, Muse Code",
   "author": {
     "name": "Wenyu Chiou"
   },

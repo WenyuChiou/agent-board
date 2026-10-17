@@ -1,5 +1,47 @@
 # Changelog
 
+## 0.11.0 — 2026-10-17
+
+- **Hermes Agent reports to the pane.** `/progress connect` adds two shell
+  hooks to `~/.hermes/config.yaml` (`$HERMES_HOME`): `post_llm_call` for each
+  turn, whose words Hermes puts under `extra`, and `on_session_finalize` for
+  the end (Hermes fires its `on_session_end` after every turn). The YAML is
+  edited line by line, beside the person's own hooks, and a `hooks:` block in
+  flow style is left alone. Hermes asks once before it runs a new hook.
+  Tests: "Hermes Agent’s hooks go into its config.yaml beside the person’s
+  own, once, and come back out cleanly", "Hermes Agent’s turn is read from
+  under extra, and its session finalize is the end, not its per-turn session
+  end", "a real Hermes Agent turn, its words under extra, becomes a block
+  waiting on the person".
+- **Grok Build's blocks are named from the request.** Grok's `Stop` carries
+  the reply but not the request, so its block was titled with the reply and
+  had no background line. The request is now read from Grok's session log,
+  which streams messages in ACP chunks. Tests: "a Grok Build session log gives
+  back the request and reply it streamed in chunks", "a real Grok Build turn
+  takes its request from the session log and ends on the shutdown stop".
+- **A session log is opened only when it is one.** The path came straight
+  from the inbox file, which any program on the machine can write; now only a
+  `.json`, `.jsonl` or `.txt` path with no `..` in it is read. Test: "only a
+  session log is opened, never a key or env file, nor a path that climbs out
+  of its folder".
+- **Tested live against the real CLIs**: Gemini CLI 0.64.0, OpenCode 1.19.3,
+  Hermes Agent 0.19.0 and Grok Build 1.0.62 each ran a turn against a mock
+  model; their payloads are now tests. Tests: "a real Gemini CLI turn and its
+  session end become one ended block, its request taken from AfterAgent", "a
+  real OpenCode turn from its plugin becomes a block waiting on the person",
+  and the Hermes and Grok tests above.
+- **README rewritten**: a table of supported agents with icons and what was
+  tested live, a quick start, what you get, colours and marks, and answers to
+  common questions (a new computer, an agent that doesn't show up, what leaves
+  the machine, Windows, uninstalling). The guides gain "Pick the colours",
+  Hermes Agent, and troubleshooting for a missing agent and a new computer,
+  and now name the `agent-board.*` hook files. SECURITY.md says what
+  `/progress connect` changes and that turns are summed up by Claude Haiku.
+- **A promotional card** (`docs/images/social-preview.png`, with `-zh-TW` and
+  `-zh-CN`): the pitch, the agents it works with, and the pane with a question
+  just in. The tour lists Hermes Agent, keeps its window's rounded corners,
+  and its handoff ring no longer crosses Chinese text.
+
 ## 0.10.0 — 2026-10-17
 
 - **New name: Agent Board.** The pane follows Claude Code, Codex, Gemini CLI, Cursor,
