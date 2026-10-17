@@ -38,7 +38,7 @@ test('dot reports only explicit minimal fields and emits a backward-compatible p
   const { directory, binding } = await fixture(t)
   const report = { project: 'Synthetic lab', title: 'Explicit report', context: 'Synthetic data only', state: 'waiting', steps: [{ status: 'done', text: 'Finished check' }, { status: 'waiting', text: 'Continue?' }] }
   await exchange('report', directory, report)
-  const text = await readFile(join(directory, 'progress.md'), 'utf8')
+  const text = await readFile(join(directory, 'fragment.md'), 'utf8')
   assert.match(text, /agent=dot state=waiting/)
   assert.match(text, /- \[x\] Finished check\n- \[\?\] Continue\?/)
   assert.ok(!text.includes('resume='))
@@ -55,7 +55,7 @@ test('report context uses the existing English, Traditional Chinese and Simplifi
   const { directory } = await fixture(t)
   for (const [language, strings] of [['en', EN], ['zh-TW', ZH_TW], ['zh-CN', ZH_CN]]) {
     await exchange('report', directory, { language, project: 'Synthetic', title: 'Localized report', context: 'Explicit background', state: 'waiting', steps: [{ status: 'todo', text: 'Next check' }] })
-    const text = await readFile(join(directory, 'progress.md'), 'utf8')
+    const text = await readFile(join(directory, 'fragment.md'), 'utf8')
     assert.ok(text.includes(strings.contextNote('Explicit background')))
     assert.equal(parseProgress(text)[0].tasks[0].notes[0], strings.contextNote('Explicit background').replace(/^>\s*/, ''))
   }
@@ -68,7 +68,7 @@ test('Codex uses the same cooperative report contract without claiming native at
   const status = await exchange('status', directory)
   assert.equal(status.native, 'unsupported')
   assert.equal(status.mode, 'cooperative-file')
-  assert.match(await readFile(join(directory, 'progress.md'), 'utf8'), /agent=codex state=working/)
+  assert.match(await readFile(join(directory, 'fragment.md'), 'utf8'), /agent=codex state=working/)
 })
 
 test('explicit bindings reject wrong recipients and paths disguised as ids', async t => {
@@ -96,7 +96,7 @@ test('linked roots and linked ancestors are rejected before initializing or repo
   await exchange('init', join(directory, 'child'), { agent: 'dot', session: 'synthetic-child' })
   await assert.rejects(exchange('report', join(alias, 'child'), { project: 'Synthetic', title: 'Must not write', state: 'working', steps: [] }), /SYMLINK_UNSUPPORTED/)
   await assert.rejects(exchange('init', join(alias, 'another-child'), { agent: 'dot', session: 'synthetic-child' }), /SYMLINK_UNSUPPORTED/)
-  await assert.rejects(readFile(join(directory, 'child', 'progress.md')), { code: 'ENOENT' })
+  await assert.rejects(readFile(join(directory, 'child', 'fragment.md')), { code: 'ENOENT' })
   await assert.rejects(readFile(join(directory, 'another-child', 'binding.json')), { code: 'ENOENT' })
 })
 
@@ -135,14 +135,14 @@ test('non-string receipt and progress enums are rejected before writing state', 
   await exchange('take', directory, target)
   const report = { project: 'Synthetic', title: 'Strict enums', state: 'waiting', steps: [{ status: 'todo', text: 'Next check' }] }
   await exchange('report', directory, report)
-  const before = await readFile(join(directory, 'progress.md'), 'utf8')
+  const before = await readFile(join(directory, 'fragment.md'), 'utf8')
   const invalid = [[['delivered'], ['waiting'], ['todo']], ...[{}, true, 1, null].map(value => [value, value, value])]
   for (const [receipt, state, step] of invalid) {
     await assert.rejects(exchange('ack', directory, { version: 1, id: command.id, binding: binding.id, status: receipt }), /INVALID_RECEIPT/)
     assert.equal((await exchange('status', directory)).commands[0].status, 'uncertain')
     await assert.rejects(exchange('report', directory, { ...report, state }), /INVALID_STATE/)
     await assert.rejects(exchange('report', directory, { ...report, steps: [{ status: step, text: 'Invalid step' }] }), /INVALID_STEP/)
-    assert.equal(await readFile(join(directory, 'progress.md'), 'utf8'), before)
+    assert.equal(await readFile(join(directory, 'fragment.md'), 'utf8'), before)
   }
   await exchange('ack', directory, { version: 1, id: command.id, binding: binding.id, status: 'delivered' })
   assert.equal((await exchange('status', directory)).commands[0].status, 'delivered')
@@ -244,21 +244,21 @@ test('lost acknowledgements stay uncertain and are never sent a second time', as
   assert.equal(calls.filter(one => one.method === 'turn/steer').length, 1)
 })
 
-test('report refuses to overwrite a progress.md that holds anything but its own block', async t => {
+test('report refuses to overwrite a fragment.md that holds anything but its own block', async t => {
   const { directory } = await fixture(t)
   const report = { project: 'Synthetic', title: 'Own block', state: 'working', steps: [{ status: 'doing', text: 'Check' }] }
   await exchange('report', directory, report)
   await exchange('report', directory, { ...report, state: 'done', steps: [{ status: 'done', text: 'Check' }] })
-  const own = await readFile(join(directory, 'progress.md'), 'utf8')
+  const own = await readFile(join(directory, 'fragment.md'), 'utf8')
   const board = [
     '## Real project\n\n### Hand-kept task\n- [ ] Keep me\n',
     own + '\n## Another\n\n### Hand-kept\n- [ ] Keep me\n',
     '<!-- auto session=abcdef12 agent=claude state=working updated=2026-01-31T09:30:00Z -->\n### Other\n- [~] Theirs\n<!-- /auto session=abcdef12 -->\n',
   ]
   for (const text of board) {
-    await writeFile(join(directory, 'progress.md'), text)
+    await writeFile(join(directory, 'fragment.md'), text)
     await assert.rejects(exchange('report', directory, report), /NOT_EXCHANGE_FILE/)
-    assert.equal(await readFile(join(directory, 'progress.md'), 'utf8'), text)
+    assert.equal(await readFile(join(directory, 'fragment.md'), 'utf8'), text)
   }
 })
 
@@ -338,4 +338,24 @@ test('the CLI performs a synthetic dot round trip without any external runtime',
   assert.equal(run('take', { id: command.id, binding: binding.id, session: binding.session, agent: 'dot' }).command.text, command.text)
   run('ack', { version: 1, id: command.id, binding: binding.id, status: 'delivered' })
   assert.equal(run('status', {}).commands[0].status, 'delivered')
+})
+
+// The exchange's report is the same fragment every outside agent produces, so it reaches
+// the board only through the one merge script; this runs that script for real.
+test('a report reaches a real board through the remote reporter merge script, beside the blocks already there', async t => {
+  const python = process.platform === 'win32' ? 'python' : 'python3'
+  if (spawnSync(python, ['--version']).error) return t.skip('no Python here')
+  const { root, directory, binding } = await fixture(t)
+  await exchange('report', directory, { project: 'Synthetic lab', title: 'Merged report', state: 'waiting', steps: [{ status: 'waiting', text: 'Continue?' }] })
+  const board = join(root, 'progress.md')
+  const mine = '<!-- auto session=aa11bb22 agent=claude state=working updated=2026-10-17T06:00:00Z -->\n### Fix login\n- [ ] fix\n<!-- /auto session=aa11bb22 -->'
+  await writeFile(board, `# Progress\n\n## webapp\n\n${mine}\n\n## Synthetic lab\n\nHand-kept notes.\n`)
+  const merge = join(dirname(fileURLToPath(import.meta.url)), '../scripts/remote-reporter/merge.py')
+  const run = spawnSync(python, ['-B', merge, board, join(directory, 'fragment.md')], { encoding: 'utf8', timeout: 20000 })
+  assert.equal(run.status, 0, run.stderr)
+  const text = await readFile(board, 'utf8')
+  assert.ok(text.includes(mine) && text.includes('Hand-kept notes.'))
+  const lab = parseProgress(text).find(project => project.name === 'Synthetic lab')
+  assert.equal(lab?.tasks.find(task => task.auto?.agent === 'dot')?.title, 'Merged report')
+  assert.ok(text.includes(`session=${binding.id.slice(0, 8)}`))
 })

@@ -67,14 +67,20 @@ fields, including transcript paths, are rejected. Text fields are single-line;
 states and step marks use the existing [progress format](FORMAT.md). No new
 Markdown syntax or resume command is required.
 
-The exchange's `progress.md` is standalone. It is never the board's file: do
-not point `CLAUDE_PROGRESS_FILE` at it, and do not point the exchange at
-`~/.claude/progress.md`. Each `report` rewrites the whole file with this
-binding's one block, so `report` refuses with `NOT_EXCHANGE_FILE` when the
+`report` writes the exchange's `fragment.md`: a `## <project>` line and this
+binding's one block. That is the same fragment every outside agent produces
+([Remote reporters](REMOTE_REPORTERS.md)), and the one way it reaches the board
+is the merge script, which replaces only this block or places it under its
+project:
+
+```text
+python3 scripts/remote-reporter/merge.py ~/.claude/progress.md ./example-dot/fragment.md
+```
+
+The fragment is never the board's file: do not point `CLAUDE_PROGRESS_FILE` at
+it, and do not point the exchange at `~/.claude/progress.md`. Each `report`
+rewrites the whole fragment, so it refuses with `NOT_EXCHANGE_FILE` when the
 file holds anything else (another block, a hand-kept task, a second project).
-Showing an exchange report on the real board is a separate step that merges
-the block into the board's file under its own markers; PR #19 proposes a
-merge script for that. Until then the report stays in the exchange folder.
 
 ## Messages and receipts
 

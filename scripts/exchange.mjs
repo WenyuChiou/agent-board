@@ -103,9 +103,11 @@ export const exchange = async (action, directory, input = {}) => {
     const { language = 'en', ...report } = input
     if (!['en', 'zh-TW', 'zh-CN'].includes(language)) throw new Error('UNSUPPORTED_LANGUAGE')
     const strings = { en: EN, 'zh-TW': ZH_TW, 'zh-CN': ZH_CN }[language]
-    const path = join(root, 'progress.md')
-    // This file is standalone and holds one block only. Anything else means it is
-    // someone's board, and writing the whole file would wipe their work.
+    // A fragment, the one contract for outside agents (docs/REMOTE_REPORTERS.md):
+    // `## project` and this binding's block, which scripts/remote-reporter/merge.py
+    // merges into the board. It holds one block only; anything else means someone
+    // pointed it at a board, and writing the whole file would wipe their work.
+    const path = join(root, 'fragment.md')
     if (await existing(path) && !ownsFile(await readFile(await safe(path), 'utf8'), binding.id.slice(0, 8))) throw new Error('NOT_EXCHANGE_FILE')
     await replace(path, progressBlock(report, binding, Date.now(), strings))
     return { status: 'reported', path }
