@@ -70,8 +70,8 @@ Markdown syntax or resume command is required.
 `report` writes the exchange's `fragment.md`: a `## <project>` line and this
 binding's one block. That is the same fragment every outside agent produces
 ([Remote reporters](REMOTE_REPORTERS.md)), and the one way it reaches the board
-is the merge script, which replaces only this block or places it under its
-project:
+is the merge script, which replaces only this block, and only with a newer
+one, or places it under its project:
 
 ```text
 python3 scripts/remote-reporter/merge.py ~/.claude/progress.md ./example-dot/fragment.md

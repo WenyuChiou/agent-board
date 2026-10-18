@@ -39,7 +39,7 @@ import os
 import re
 import secrets
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 STATES = {"working", "waiting", "done", "ended"}
@@ -85,8 +85,18 @@ def fragment_path(session):
     return os.path.join(outbox_dir(), f"{agent_name()}-{session}.md")
 
 
-def now_iso():
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+def now_iso(previous=None):
+    stamp = datetime.now(timezone.utc).replace(microsecond=0)
+    if previous:
+        try:
+            last = datetime.fromisoformat(previous.replace("Z", "+00:00"))
+            # Rapid updates and a clock moving backwards must still follow the previous fragment.
+            if last.tzinfo is not None:
+                stamp = max(stamp, last + timedelta(seconds=1))
+        except (ValueError, OverflowError):
+            # A previous time that is not a date, or the last one a date can hold, cannot be followed.
+            pass
+    return stamp.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
 def write_atomic(path, text):
@@ -122,10 +132,10 @@ def check_text(what, text):
     return text.strip()
 
 
-def build_block(session, state, title, quote_lines, steps, agent=None):
+def build_block(session, state, title, quote_lines, steps, agent=None, updated=None):
     agent = agent or agent_name()
     lines = [
-        f"<!-- auto session={session} agent={agent} state={state} updated={now_iso()} -->",
+        f"<!-- auto session={session} agent={agent} state={state} updated={updated or now_iso()} -->",
         f"### {check_text('title', title)}",
     ]
     lines.extend(quote_lines)
@@ -165,9 +175,20 @@ def cmd_update(chat_id, state, title, steps_file):
     sess = session_for(chat_id)
     if not re.fullmatch(r"[0-9a-f]{8}", sess):
         raise SystemExit("registry session id malformed")
+    frag = fragment_path(sess)
+    previous = None
+    if os.path.exists(frag):
+        # An unreadable previous fragment is overwritten, as it was before updates followed it.
+        try:
+            _, old = fragment_parts(read_text(frag))
+        except (OSError, UnicodeDecodeError):
+            old = []
+        start = START_RE.match(old[0]) if old else None
+        if start is not None:
+            previous = parse_attrs(start.group(1)).get("updated")
     try:
         quotes, steps = parse_steps_file(steps_file)
-        lines = build_block(sess, state, title, quotes, steps)
+        lines = build_block(sess, state, title, quotes, steps, updated=now_iso(previous))
         project = os.environ.get("BOARD_PROJECT", "").strip()
         if project:
             check_text("BOARD_PROJECT", project)
@@ -177,7 +198,6 @@ def cmd_update(chat_id, state, title, steps_file):
     if errs:
         raise SystemExit(f"generated block invalid: {errs}")
     head = [f"## {project}", ""] if project else []
-    frag = fragment_path(sess)
     write_atomic(frag, "\n".join(head + lines) + "\n")
     print(f"wrote {frag} (session {sess}, state {state})")
 
@@ -227,7 +247,7 @@ def cmd_retire(chat_id, reason="session retired"):
         while notes < len(body) and body[notes].startswith(">"):
             notes += 1
         lines = [
-            f"<!-- auto session={sess} agent={attrs.get('agent') or agent_name()} state=ended updated={now_iso()} -->",
+            f"<!-- auto session={sess} agent={attrs.get('agent') or agent_name()} state=ended updated={now_iso(attrs.get('updated'))} -->",
             old[1],
             *body[:notes],
             note,

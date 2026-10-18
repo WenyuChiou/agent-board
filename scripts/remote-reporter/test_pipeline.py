@@ -12,6 +12,8 @@ import stat
 import subprocess
 import sys
 import tempfile
+from datetime import datetime, timezone
+from unittest.mock import patch
 
 # Importing merge and validate below must not leave __pycache__ in the checkout.
 sys.dont_write_bytecode = True
@@ -61,6 +63,12 @@ MARK = "<!-- auto session={s} agent={a} state=working updated=2026-10-17T07:00:0
 def block(session, agent="codex", title="t", steps=("- [ ] step",)):
     return "\n".join([MARK.format(s=session, a=agent), f"### {title}", *steps,
                       f"<!-- /auto session={session} -->"]) + "\n"
+
+
+def at_time(text, updated):
+    _, lines = validate_mod.fragment_parts(text)
+    attrs = validate_mod.parse_attrs(validate_mod.START_RE.match(lines[0]).group(1))
+    return text.replace("updated=" + attrs["updated"], "updated=" + updated, 1)
 
 
 def setup():
@@ -250,9 +258,10 @@ def placement():
           out3 == "## a\nnotes\n\n" + frag + "\n## b\nmore\n", out3)
     out4 = merge_mod.merge_text("", ["## fresh\n\n" + frag])
     check("8h empty board: heading from the fragment", out4 == "## fresh\n\n" + frag, out4)
-    existing = merge_mod.merge_text("## a\n\n" + frag, [frag.replace("### t", "### t2")])
+    replacement = at_time(frag.replace("### t", "### t2"), "2026-10-17T08:00:00Z")
+    existing = merge_mod.merge_text("## a\n\n" + frag, [replacement])
     check("8i an existing block is replaced in place, no --under needed",
-          existing == "## a\n\n" + frag.replace("### t", "### t2"), existing)
+          existing == "## a\n\n" + replacement, existing)
     posing = frag.replace("updated=2026-10-17T07:00:00Z", "updated=2026-10-17T07:00:00Z resume=01a14abb-d817-7f70-bf50-4728ff5d88da dir=%2Fsrv%2Fother pr=7")
     out5 = merge_mod.merge_text("## a\n", [posing], under="a")
     check("8j a fragment never names a session id or folder for the board page to answer into",
@@ -267,7 +276,7 @@ def placement():
 
 
 def parser_parity():
-    frag = block("12345678", title="new")
+    frag = at_time(block("12345678", title="new"), "2026-10-17T08:00:00Z")
     old = block("12345678", title="old")
 
     # --- 9. fenced code and HTML comments are not blocks ---
@@ -295,8 +304,8 @@ def parser_parity():
     check("10d attributes in any order and trailing spaces", out == "## a\n\n" + frag, out)
     check("10e validate_file accepts a reordered marker", validate_mod.validate_text(reordered) == [],
           validate_mod.validate_text(reordered))
-    reordered_frag = frag.replace(MARK.format(s="12345678", a="codex"),
-                                  "<!-- auto agent=codex state=working updated=2026-10-17T07:00:00Z session=12345678 -->")
+    reordered_frag = frag.replace(frag.splitlines()[0],
+                                  "<!-- auto agent=codex state=working updated=2026-10-17T08:00:00Z session=12345678 -->")
     check("10f fragment with session= not first is valid", validate_mod.validate_fragment_text(reordered_frag) == [])
 
     # --- 11. board session ids per FORMAT.md, unterminated blocks ---
@@ -369,6 +378,195 @@ def file_handling():
         check("14 check_text refuses a carriage return", True)
 
 
+def merge_order():
+    board = os.path.join(T, "order.md")
+    frag = os.path.join(T, "order-fragment.md")
+    working = block("12345678").replace("07:00:00Z", "18:00:00Z")
+    done = working.replace("18:00:00Z", "19:00:00Z").replace("state=working", "state=done")
+    cases = [
+        ("an older working fragment keeps the done block and reports why it was skipped",
+         done, working, done, "skipped: older fragment"),
+        ("different content at the same time keeps the existing block and reports a conflict",
+         done, done.replace("### t", "### changed"), done, "conflict: equal updated"),
+        ("an identical import changes no bytes and reports a no-op",
+         done, done, done, "no-op: identical block"),
+        ("a newer fragment replaces the existing block and reports the replacement",
+         working, done, done, "replaced: newer fragment"),
+    ]
+    for name, before, incoming, expected, outcome in cases:
+        # A skipped import must also preserve CRLF and the absence of a final newline.
+        original = ("## a\n\n" + before).replace("\n", "\r\n").rstrip("\r\n")
+        w(board, original)
+        w(frag, incoming)
+        result = py("merge.py", board, frag)
+        wanted = original if expected == before else ("## a\n\n" + expected).replace("\n", "\r\n")
+        check(name, result.returncode == 0 and r(board) == wanted and outcome in result.stdout,
+              result.stdout + result.stderr)
+
+    missing = working.replace("updated=2026-10-17T18:00:00Z ", "")
+    invalid = working.replace("updated=2026-10-17T18:00:00Z", "updated=not-a-time")
+    unzoned = working.replace("18:00:00Z", "18:00:00")
+    for name, before, incoming in [
+        ("a board block with no time is replaced with a comparison warning", missing, done),
+        ("a board block with an unreadable time is replaced with a comparison warning", invalid, done),
+        ("a board time without a timezone is replaced with a comparison warning", unzoned, done),
+        ("a fragment time without a timezone replaces the board block with a comparison warning", done, unzoned),
+    ]:
+        w(board, "## a\n\n" + before)
+        w(frag, incoming)
+        result = py("merge.py", board, frag)
+        check(name, result.returncode == 0 and r(board) == "## a\n\n" + incoming
+              and "replaced: updated stamps cannot be compared" in result.stdout, result.stdout + result.stderr)
+
+    refused_ok = True
+    for bad in ("", "updated=not-a-time "):
+        w(board, "## a\n\n" + done)
+        w(frag, working.replace("updated=2026-10-17T18:00:00Z ", bad))
+        result = py("merge.py", board, frag)
+        refused_ok = refused_ok and result.returncode != 0 and r(board) == "## a\n\n" + done
+    check("a fragment with a missing or unreadable time is refused and the board is unchanged", refused_ok)
+
+    for name, incoming, expected, outcome in [
+        ("an older instant with a timezone offset is skipped", working.replace("18:00:00Z", "20:00:00+02:00"),
+         done, "skipped: older fragment"),
+        ("equal instants with different timezone offsets report a conflict", done.replace("19:00:00Z", "21:00:00+02:00"),
+         done, "conflict: equal updated"),
+        ("a fragment newer by a fraction of a second replaces the board block", done.replace("19:00:00Z", "19:00:00.001Z"),
+         done.replace("19:00:00Z", "19:00:00.001Z"), "replaced: newer fragment"),
+        ("a date alone is compared as midnight UTC and skipped when older", done.replace("2026-10-17T19:00:00Z", "2026-10-17"),
+         done, "skipped: older fragment"),
+    ]:
+        w(board, "## a\n\n" + done)
+        w(frag, incoming)
+        result = py("merge.py", board, frag)
+        check(name, result.returncode == 0 and r(board) == "## a\n\n" + expected
+              and outcome in result.stdout, result.stdout + result.stderr)
+
+    second = os.path.join(T, "order-second.md")
+    w(board, "## a\n")
+    w(frag, "## a\n\n" + done)
+    w(second, working)
+    result = py("merge.py", board, frag, second)
+    check("two fragments for one session keep the newer block and pass read-back verification",
+          result.returncode == 0 and r(board) == "## a\n\n" + done
+          and "skipped: older fragment" in result.stdout, result.stdout + result.stderr)
+
+    text, outcomes = merge_mod.merge_text("## a\n\n" + done,
+                                         [working, done.replace("### t", "### changed"), done], with_outcomes=True)
+    check("the pure merge returns each skipped, conflicting and identical outcome",
+          text == "## a\n\n" + done and outcomes == [
+              ("12345678", "skipped: older fragment"),
+              ("12345678", "conflict: equal updated stamps with different content"),
+              ("12345678", "no-op: identical block"),
+          ], outcomes)
+
+    original_write = merge_mod.atomic_write
+    newest = at_time(done, "2026-10-17T20:00:00Z")
+
+    def concurrent_write(path, text):
+        original_write(path, text)
+        w(path, "## a\n\n" + newest)
+
+    w(board, "## a\n\n" + working)
+    w(frag, done)
+    merge_mod.atomic_write = concurrent_write
+    try:
+        attempts, outcomes = merge_mod.merge_file(board, [frag], with_outcomes=True)
+    finally:
+        merge_mod.atomic_write = original_write
+    check("a read-back retry keeps a newer concurrent update and reports the older fragment",
+          attempts == 2 and r(board) == "## a\n\n" + newest
+          and outcomes == [("12345678", "skipped: older fragment")], outcomes)
+
+
+def merge_repairs():
+    board = os.path.join(T, "repair.md")
+    frag = os.path.join(T, "repair-fragment.md")
+    incoming = block("12345678", title="repaired")
+    w(frag, "## a\n\n" + incoming)
+    for name, opening in [
+        ("an open code fence aborts the merge cleanly before the board is written", "```md"),
+        ("an open comment aborts the merge cleanly before the board is written", "<!--"),
+    ]:
+        before = "# Board\r\n" + opening + "\r\n## a\r\nnotes\r\n"
+        w(board, before)
+        result = py("merge.py", board, frag)
+        check(name, result.returncode != 0 and r(board) == before and "Traceback" not in result.stderr
+              and "merge aborted: session 12345678 would be hidden by an open fence or comment" in result.stderr,
+              result.stdout + result.stderr)
+
+    for name, stamp in [
+        ("a board block with no end marker is repaired even when its timestamp equals the fragment", "2026-10-17T07:00:00Z"),
+        ("a board block with no end marker is repaired even when its timestamp is newer than the fragment", "2026-10-17T08:00:00Z"),
+    ]:
+        broken = at_time(block("12345678"), stamp).split("<!-- /auto")[0]
+        w(board, "## a\n\n" + broken + "\nhand notes\n")
+        result = py("merge.py", board, frag)
+        check(name, result.returncode == 0 and r(board) == "## a\n\n" + incoming + "\nhand notes\n"
+              and "replaced: the board block had no end marker" in result.stdout, result.stdout + result.stderr)
+
+    original_merge = merge_mod.merge_text
+
+    def changed_merge(*args, **kwargs):
+        text, outcomes = original_merge(*args, **kwargs)
+        return text.replace("### repaired", "### changed"), outcomes
+
+    for name, before in [
+        ("read-back checks an inserted block against the fragment itself", "## a\n"),
+        ("read-back checks a replaced block against the fragment itself", "## a\n\n" + at_time(incoming, "2026-10-17T06:00:00Z")),
+    ]:
+        w(board, before)
+        with patch.object(merge_mod, "merge_text", changed_merge):
+            try:
+                merge_mod.merge_file(board, [frag], retries=1)
+                check(name, False, "the changed block was accepted")
+            except SystemExit as e:
+                check(name, "did not read back as written" in str(e), str(e))
+
+
+def reporter_order():
+    steps = os.path.join(T, "steps1.txt")
+    board = os.path.join(T, "reporter-order.md")
+    instant = datetime(2026, 10, 17, 12, tzinfo=timezone.utc)
+    with patch.dict(os.environ, ENV), patch.object(reporter_mod, "datetime", wraps=datetime) as clock:
+        clock.now.return_value = instant
+        reporter_mod.cmd_update("chat-order", "working", "First update", steps)
+        frag = reporter_mod.fragment_path(reporter_mod.session_for("chat-order"))
+        w(board, "")
+        merge_mod.merge_file(board, [frag])
+        reporter_mod.cmd_update("chat-order", "waiting", "Second update", steps)
+        same_second = r(frag)
+        merge_mod.merge_file(board, [frag])
+        merged = validate_mod.extract_blocks(r(board)) == validate_mod.extract_blocks(same_second)
+        clock.now.return_value = instant.replace(second=10)
+        reporter_mod.cmd_update("chat-order", "working", "Later update", steps)
+        check("reporter updates within one second advance the timestamp and merge while later clock times are kept",
+              "updated=2026-10-17T12:00:01Z" in same_second and merged
+              and "updated=2026-10-17T12:00:10Z" in r(frag))
+
+        clock.now.return_value = instant
+        reporter_mod.cmd_update("chat-order", "waiting", "Clock moved back", steps)
+        check("a reporter update advances beyond the previous timestamp when the clock moves backwards",
+              "updated=2026-10-17T12:00:11Z" in r(frag))
+        merge_mod.merge_file(board, [frag])
+        reporter_mod.cmd_retire("chat-order")
+        merge_mod.merge_file(board, [frag])
+        check("retiring a session advances its timestamp so the ended block reaches the board",
+              "updated=2026-10-17T12:00:12Z" in r(frag) and "state=ended" in r(board)
+              and validate_mod.extract_blocks(r(board)) == validate_mod.extract_blocks(r(frag)))
+
+        check("a reporter update after the last representable timestamp uses the clock instead of failing",
+              reporter_mod.now_iso("9999-12-31T23:59:59Z") == "2026-10-17T12:00:00Z")
+
+        reporter_mod.cmd_update("chat-bytes", "working", "Before the bad bytes", steps)
+        bad = reporter_mod.fragment_path(reporter_mod.session_for("chat-bytes"))
+        with open(bad, "wb") as f:
+            f.write(b"\xff\xfe not utf-8")
+        reporter_mod.cmd_update("chat-bytes", "waiting", "After the bad bytes", steps)
+        check("a reporter update overwrites a previous fragment that is not valid UTF-8",
+              "After the bad bytes" in r(bad) and "updated=2026-10-17T12:00:00Z" in r(bad))
+
+
 def main():
     global T, ENV
     with tempfile.TemporaryDirectory() as tmp:
@@ -383,6 +581,9 @@ def main():
         placement()
         parser_parity()
         file_handling()
+        merge_order()
+        merge_repairs()
+        reporter_order()
 
     print(f"\n==== {len(passed)} passed, {len(failed)} failed ====")
     if failed:

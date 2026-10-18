@@ -118,18 +118,31 @@ Rules:
 ```
 
 Save each block the assistant prints, from `## <project>` to the end marker,
-to a file, check it and merge it; a later block with the same id replaces
-the earlier one:
+to a file, check it and merge it:
 
 ```
 python3 scripts/remote-reporter/validate.py --block muse.md
 python3 scripts/remote-reporter/merge.py ~/.claude/progress.md muse.md
 ```
 
+For the same session, `merge.py` reports and skips older fragments, reports a
+conflict and keeps the existing block when equal `updated=` times have
+different content, and leaves identical imports unchanged.
+A newer fragment replaces the block. A board block with no end marker is
+repaired regardless of its timestamp. If the block on the board has no
+readable time, or either time has no timezone (a date alone counts as
+midnight UTC), the fragment replaces the block as before and the merge
+reports that the times cannot be compared; arrival time is never used. A
+fragment whose own time is missing or not a date is refused, as before.
+The exit status stays 0 on a skip or conflict: callers must read the
+`session <id>: ...` outcome lines to tell whether each fragment was applied.
+
 `validate.py --block` names what is wrong with a block it refuses, so the
 assistant can be asked to fix just that. A chat assistant often does not know
-the time: check `updated=` before merging, since a block with an old one shows
-as stopped and leaves at the next archive sweep.
+the time: check `updated=` before merging, since a block with an old timestamp
+is skipped as older when the board has a newer one. If inserted, an old block
+shows as stopped and leaves at the next archive sweep. Blocks pasted on the
+board page get the board's own clock instead.
 
 Or, with no script to run: open the board's page (`node
 ~/.claude/agent-board.mjs --serve`, or `/board` in another agent), copy this
@@ -149,7 +162,7 @@ checks the prompt above and the page's copy match word for word.
 | A concurrent write drops a merged block | The merge reads, changes only its blocks, writes, reads back and retries up to 3 times. A pane write that lands *after* the read-back can still drop the merged block; it comes back on the next merge, because merges are idempotent. There is no lock | Mitigated, not prevented |
 | Two writers on the *same* block | Must not happen: one writer owns one session. Different blocks never conflict, since each writer replaces only its own | By construction |
 | A merge rewriting something that only looks like a block | The scanner reads like `hooks/parse.ts`: blocks in code fences or HTML comments are skipped; CRLF, `<!--auto` and any attribute order are read | Implemented and tested |
-| Clock skew across machines | `updated=` must be UTC; staleness is approximate | Documented |
+| Clock skew across machines | `updated=` must be UTC; clock skew can decide which block wins, so a clock ahead can cause later work to be skipped as older. A skip still exits 0: read the `session <id>: ...` lines. The reporter advances each timestamp by at least one second from its previous fragment to avoid same-second ties; bursts of updates can put it ahead of the clock | Documented |
 | Truncated or malformed fragment | Validated before merge; an invalid fragment is refused outright, never partly applied. Text with newlines, control characters or comment markers is refused when the fragment is built | Implemented and tested |
 | Replay (same fragment delivered twice) | Idempotent merge | Implemented and tested |
 | Stale session looking live | The pane already shows a `working`/`waiting` block untouched for 12 hours as stopped; reporters must not fake heartbeats | Format rule |

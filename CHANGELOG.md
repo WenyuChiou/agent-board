@@ -1,5 +1,60 @@
 # Changelog
 
+## 0.21.3 — 2026-10-18
+
+`scripts/remote-reporter/merge.py` replaced a session's block with any fragment for that
+session, without comparing which was newer. A report that arrived late, by git pull, a
+cloud drive or a chat-relay block saved to a file, could put a `done` block back to
+`working` (#82).
+
+- **An older fragment never replaces a newer block.** The merge compares the two
+  `updated=` times and prints one `session <id>: <outcome>` line per fragment: an older
+  fragment is skipped, equal times with different content are a conflict that keeps the
+  board's block, an identical import changes no bytes, and a newer fragment replaces the
+  block. Arrival time is never used. The exit status stays 0 on a skip or a conflict, so a
+  caller reads the outcome lines. Tests: "an older working fragment keeps the done block and
+  reports why it was skipped", "different content at the same time keeps the existing block
+  and reports a conflict", "an identical import changes no bytes and reports a no-op", "a
+  newer fragment replaces the existing block and reports the replacement", "the pure merge
+  returns each skipped, conflicting and identical outcome", "an older instant with a
+  timezone offset is skipped", "equal instants with different timezone offsets report a
+  conflict", "a fragment newer by a fraction of a second replaces the board block", "two
+  fragments for one session keep the newer block and pass read-back verification", "a
+  read-back retry keeps a newer concurrent update and reports the older fragment".
+- **Times that cannot be compared keep the old behaviour, and say so.** When the board's
+  block has no time, an unreadable one, or either time has no timezone, the fragment
+  replaces the block and the outcome says the times could not be compared. A date alone
+  counts as midnight UTC. A fragment whose own time is missing or not a date is still
+  refused. A board block with no end marker is repaired whatever its time. Tests: "a board
+  block with no time is replaced with a comparison warning", "a board block with an
+  unreadable time is replaced with a comparison warning", "a board time without a timezone
+  is replaced with a comparison warning", "a fragment time without a timezone replaces the
+  board block with a comparison warning", "a date alone is compared as midnight UTC and
+  skipped when older", "a fragment with a missing or unreadable time is refused and the
+  board is unchanged", "a board block with no end marker is repaired even when its
+  timestamp equals the fragment", "a board block with no end marker is repaired even when
+  its timestamp is newer than the fragment".
+- **Read-back checks each block against the fragment itself,** and a fragment that an open
+  code fence or comment on the board would hide stops the merge before anything is
+  written. Tests: "read-back checks an inserted block against the fragment itself",
+  "read-back checks a replaced block against the fragment itself", "an open code fence
+  aborts the merge cleanly before the board is written", "an open comment aborts the merge
+  cleanly before the board is written".
+- **`reporter.py` stamps each fragment at least one second after the previous one,** so two
+  updates in the same second, or an update after the clock moved back, still read as newer;
+  `retire` does the same. A previous time it cannot follow, or a previous fragment it cannot
+  read, no longer stops an update. Tests: "reporter updates within one second advance the
+  timestamp and merge while later clock times are kept", "a reporter update advances beyond
+  the previous timestamp when the clock moves backwards", "retiring a session advances its
+  timestamp so the ended block reaches the board", "a reporter update after the last
+  representable timestamp uses the clock instead of failing", "a reporter update overwrites
+  a previous fragment that is not valid UTF-8".
+
+Known limit: a burst of updates can put the reporter's stamps ahead of the clock (1,000
+updates in one second end about 17 minutes ahead); they fall back in step once real time
+catches up. A clock that runs ahead can still make later work from another machine look
+older, as `docs/REMOTE_REPORTERS.md` says.
+
 ## 0.21.2 — 2026-10-18
 
 A question another agent (Codex, Gemini CLI, Cursor, Grok Build, Muse Code, Hermes Agent,

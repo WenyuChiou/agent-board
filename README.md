@@ -8,7 +8,7 @@ A Claude Code plugin that also follows Codex, Gemini CLI, OpenCode, Grok Build, 
 </p>
 
 <p align="center">
-<a href="CHANGELOG.md"><img alt="Version 0.21.2" src="https://img.shields.io/badge/version-0.21.2-blue"></a>
+<a href="CHANGELOG.md"><img alt="Version 0.21.3" src="https://img.shields.io/badge/version-0.21.3-blue"></a>
 <a href="#quick-start"><img alt="Needs Claude Code 2.1.287 or newer" src="https://img.shields.io/badge/Claude%20Code-%E2%89%A5%202.1.287-d97757"></a>
 <a href="LICENSE"><img alt="MIT license" src="https://img.shields.io/badge/license-MIT-green"></a>
 <img alt="macOS, Linux, Windows" src="https://img.shields.io/badge/macOS%20%C2%B7%20Linux%20%C2%B7%20Windows-lightgrey">

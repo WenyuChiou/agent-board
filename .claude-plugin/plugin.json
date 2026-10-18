@@ -1,6 +1,6 @@
 {
   "name": "agent-board",
-  "version": "0.21.2",
+  "version": "0.21.3",
   "description": "See what every AI coding agent is doing, with whatever is waiting on you at the top: Claude Code, Codex, Gemini CLI, OpenCode, Grok Build, Hermes Agent, OpenClaw, and more",
   "author": {
     "name": "Wenyu Chiou"

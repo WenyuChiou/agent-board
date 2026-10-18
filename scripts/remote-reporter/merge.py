@@ -10,7 +10,8 @@ Usage:
 
 Each fragment file holds one agent block (markers and body), optionally
 preceded by a `## <project>` line. A fragment whose session id is already on
-the board replaces that block in place. A new block goes under its own
+the board replaces that block in place only if its update is newer or the
+times cannot be compared. A new block goes under its own
 `## <project>` heading, taken from the fragment's first line or else from
 --under; with neither, the merge refuses, because FORMAT.md places a block
 under its own project and the last heading in the file is someone else's.
@@ -23,6 +24,7 @@ import os
 import stat
 import sys
 import tempfile
+from datetime import datetime, timezone
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from validate import (  # noqa: E402
@@ -31,6 +33,7 @@ from validate import (  # noqa: E402
     classify,
     extract_blocks,
     fragment_parts,
+    parse_attrs,
     read_text,
     scan_blocks,
     split_lines,
@@ -115,17 +118,53 @@ def place_new(lines, project, block):
     return [*lines[:at], "", *block, *([] if is_last else [""]), *lines[end:]]
 
 
-def merge_text(board_text, fragments, under=None):
+def updated_time(marker):
+    """Read an instant without guessing a zone for a local date and time."""
+    value = parse_attrs(START_RE.match(marker).group(1)).get("updated", "")
+    try:
+        stamp = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        if stamp.tzinfo is None:
+            if len(value) != 10:
+                return None
+            stamp = stamp.replace(tzinfo=timezone.utc)
+        return stamp.astimezone(timezone.utc)
+    except (ValueError, OverflowError):
+        return None
+
+
+def merge_text(board_text, fragments, under=None, with_outcomes=False):
     """Return the board text with fragments merged. Pure function (testable).
 
-    Raises ValueError for an invalid fragment, or for a new block with no
-    project heading to go under.
+    With with_outcomes, return (text, [(session, outcome), ...]). Raises
+    ValueError for an invalid fragment, or for a new block with no project
+    heading to go under.
     """
     lines, eol = split_lines(board_text)
+    outcomes = []
+    changed = False
     for session, project, block in parse_fragments(fragments, under):
         existing = next((s for s in scan_blocks(lines) if s["session"] == session), None)
         if existing is not None:
+            previous = lines[existing["start"]:existing["end"] + 1]
+            incoming_time, existing_time = updated_time(block[0]), updated_time(previous[0])
+            if not existing["closed"]:
+                outcome = "replaced: the board block had no end marker"
+            elif previous == block:
+                outcomes.append((session, "no-op: identical block"))
+                continue
+            elif incoming_time is not None and existing_time is not None:
+                if incoming_time < existing_time:
+                    outcomes.append((session, "skipped: older fragment"))
+                    continue
+                if incoming_time == existing_time:
+                    outcomes.append((session, "conflict: equal updated stamps with different content"))
+                    continue
+                outcome = "replaced: newer fragment"
+            else:
+                outcome = "replaced: updated stamps cannot be compared (missing, invalid or without a timezone)"
             lines = [*lines[:existing["start"]], *block, *lines[existing["end"] + 1:]]
+            changed = True
+            outcomes.append((session, outcome))
             continue
         if project is None:
             raise ValueError(
@@ -133,7 +172,10 @@ def merge_text(board_text, fragments, under=None):
                 f"--under '## <project>' or a '## <project>' first line in the fragment"
             )
         lines = place_new(lines, project, block)
-    return eol.join(lines) + eol
+        changed = True
+        outcomes.append((session, "inserted: new session"))
+    text = eol.join(lines) + eol if changed else board_text
+    return (text, outcomes) if with_outcomes else text
 
 
 def atomic_write(path, text):
@@ -154,11 +196,12 @@ def atomic_write(path, text):
             os.unlink(tmp)
 
 
-def merge_file(board_path, fragment_paths, retries=3, under=None):
-    """Merge fragments into the board file with read-back retry. Returns attempts used."""
+def merge_file(board_path, fragment_paths, retries=3, under=None, with_outcomes=False):
+    """Merge with read-back retry. Return attempts, or (attempts, outcomes)."""
     fragments = [read_text(p) for p in fragment_paths]
     try:
-        expected = {sess: block for sess, _, block in parse_fragments(fragments, under)}
+        parsed = parse_fragments(fragments, under)
+        sessions = {sess for sess, _, _ in parsed}
     except ValueError as e:
         raise SystemExit(f"merge aborted: {e}")
 
@@ -166,14 +209,24 @@ def merge_file(board_path, fragment_paths, retries=3, under=None):
     for attempt in range(1, retries + 1):
         current = read_text(board_path)
         try:
-            new_text = merge_text(current, fragments, under=under)
+            new_text, outcomes = merge_text(current, fragments, under=under, with_outcomes=True)
         except ValueError as e:
             raise SystemExit(f"merge aborted: {e}")
-        atomic_write(board_path, new_text)
+        intended = extract_blocks(new_text)
+        missing = [s for s in sorted(sessions) if s not in intended]
+        if missing:
+            raise SystemExit(f"merge aborted: session {missing[0]} would be hidden by an open fence or comment")
+        expected = {sess: intended[sess] for sess in sessions}
+        # With repeated session ids, the last accepted fragment is the one that must read back.
+        for (sess, _, block), (_, outcome) in zip(parsed, outcomes):
+            if outcome.startswith(("inserted:", "replaced:")):
+                expected[sess] = block
+        if new_text != current:
+            atomic_write(board_path, new_text)
         blocks = extract_blocks(read_text(board_path))
         bad = [s for s, block in expected.items() if blocks.get(s) != block]
         if not bad:
-            return attempt
+            return (attempt, outcomes) if with_outcomes else attempt
         last_err = f"session {bad[0]} did not read back as written (attempt {attempt})"
     raise SystemExit(f"merge failed after {retries} retries: {last_err}")
 
@@ -198,8 +251,10 @@ def main():
         # FORMAT.md: a missing file reads as empty and the first writer creates it.
         with open(board, "w", encoding="utf-8"):
             pass
-    attempts = merge_file(board, frags, under=under)
-    print(f"merged {len(frags)} fragment(s) into {board} (attempts: {attempts})")
+    attempts, outcomes = merge_file(board, frags, under=under, with_outcomes=True)
+    for session, outcome in outcomes:
+        print(f"session {session}: {outcome}")
+    print(f"processed {len(frags)} fragment(s) for {board} (attempts: {attempts})")
     return 0
 
 
