@@ -7,7 +7,9 @@ import { request } from 'node:http'
 import { createServer as createNetServer } from 'node:net'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { pathToFileURL } from 'node:url'
 import { test } from 'node:test'
+import { runInNewContext } from 'node:vm'
 import assert from 'node:assert/strict'
 import { BOARD_SCRIPT } from '../hooks/board-script.ts'
 
@@ -203,6 +205,85 @@ syncBuiltinESMExports()
   }
 })
 
+// The real --watch key handler on a pretend terminal: the file is changed (or not) right after
+// the first screen is drawn, and the keys arrive before the next 2-second redraw, the way a press
+// does when an agent writes between a draw and a key.
+const watchPress = (initial, replacement, keys) => {
+  const dir = mkdtempSync(join(tmpdir(), 'board-watch-'))
+  try {
+    const path = join(dir, 'progress.md')
+    const script = join(dir, 'agent-board.mjs')
+    const preload = join(dir, 'preload.mjs')
+    writeFileSync(path, initial)
+    writeFileSync(script, `globalThis.AGENT_BOARD = ${JSON.stringify({ path, lang: 'en' })}\n${BOARD_SCRIPT}`)
+    writeFileSync(preload, `import fs from 'node:fs'
+Object.defineProperty(process.stdin, 'isTTY', { value: true })
+process.stdin.setRawMode = () => {}
+const write = process.stdout.write.bind(process.stdout)
+let drawn = false
+process.stdout.write = function (text, ...rest) {
+  const result = write(text, ...rest)
+  if (!drawn && String(text).startsWith('\\x1b[2J\\x1b[H')) {
+    drawn = true
+    fs.writeFileSync(${JSON.stringify(path)}, ${JSON.stringify(replacement)})
+    queueMicrotask(() => {
+      for (const key of ${JSON.stringify(keys)}) process.stdin.emit('data', key)
+      process.stdin.emit('data', 'q')
+    })
+  }
+  return result
+}
+`)
+    const out = execFileSync(process.execPath, ['--import', pathToFileURL(preload).href, script, '--watch'], { env: { ...process.env, CLAUDE_PROGRESS_FILE: '', NO_COLOR: '1' }, encoding: 'utf8', timeout: 10_000 })
+    return { out, after: readFileSync(path, 'utf8'), dir }
+  } finally {
+    rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 })
+  }
+}
+
+const LINE_CHANGED = 'That line just changed; check the one chosen now and press again.'
+
+test('the terminal board archives with a only the block it drew: another session’s block under the same title is left alone and named as changed', { timeout: 30_000 }, () => {
+  const updated = ago(20 * 60 * 60 * 1000)
+  const initial = `# Progress\n\n## synthetic\n<!-- auto session=a1b2c3d4 agent=codex state=ended updated=${updated} -->\n### Synthetic same-title task\n- [ ] Keep this task\n<!-- /auto session=a1b2c3d4 -->\n`
+  const replacement = initial.replaceAll('a1b2c3d4', 'd4e5f6a7')
+  const refused = watchPress(initial, replacement, ['a'])
+  assert.equal(refused.after, replacement)
+  assert.ok(refused.out.includes(LINE_CHANGED), refused.out)
+  assert.ok(!refused.out.includes('Archived'), refused.out)
+  // The block that was drawn, still there, goes to the archive as before.
+  const archived = watchPress(initial, initial, ['a'])
+  assert.ok(archived.out.includes('Archived “Synthetic same-title task”.'), archived.out)
+  assert.ok(!archived.after.includes('a1b2c3d4'))
+})
+
+test('the terminal board ticks with x only the step it drew: a step that became next since is named as changed and left open', { timeout: 30_000 }, () => {
+  const initial = `# Progress\n\n## synthetic\n### Synthetic manual task\n- [ ] Step one\n- [ ] Step two\n`
+  const replacement = `# Progress\n\n## synthetic\n### Synthetic manual task\n- [x] Step one\n- [ ] Step two\n`
+  const refused = watchPress(initial, replacement, ['x'])
+  assert.ok(refused.out.split('\u001b[2J\u001b[H')[1].includes('Step one'))
+  assert.equal(refused.after, replacement)
+  assert.ok(refused.out.includes(LINE_CHANGED), refused.out)
+  // Nothing changed between the draw and the key: the step shown is ticked.
+  const ticked = watchPress(initial, initial, ['x'])
+  assert.ok(ticked.after.includes('- [x] Step one') && ticked.after.includes('- [ ] Step two'), ticked.after)
+  assert.ok(ticked.out.includes('Done: “Step one”.'), ticked.out)
+})
+
+test('the terminal board archives with a only the hand-kept task it drew: once the first of two with the same words has gone, the one that took its key is left and named as changed', { timeout: 30_000 }, () => {
+  const initial = `# Progress\n\n## Home\n### Weekly review\n- [ ] Write notes\n\n### Weekly review\n- [x] Call Bob\n- [ ] Write notes\n`
+  const replacement = `# Progress\n\n## Home\n### Weekly review\n- [x] Call Bob\n- [ ] Write notes\n`
+  const refused = watchPress(initial, replacement, ['a'])
+  assert.equal(refused.after, replacement)
+  assert.ok(refused.out.includes(LINE_CHANGED), refused.out)
+  assert.ok(!refused.out.includes('Archived'), refused.out)
+  // Nothing gone since the draw: the first one is archived, and only it.
+  const archived = watchPress(initial, initial, ['a'])
+  assert.ok(archived.out.includes('Archived “Weekly review”.'), archived.out)
+  assert.equal(archived.after.split('### Weekly review').length - 1, 1, archived.after)
+  assert.ok(archived.after.includes('Call Bob'), archived.after)
+})
+
 // The page's server, started the way `--serve` starts it in the background, on a synthetic
 // progress.md: a closed Grok session with a question, a hand-kept task one step from done and
 // a finished Gemini block. AGENT_BOARD_GROK stands in for Grok Build.
@@ -277,7 +358,8 @@ setTimeout(() => process.stdout.write('Redis it is; wiring it up now.\\n'), 1000
       req.end(body === undefined ? undefined : JSON.stringify(body))
     })
   const rows = async () => (await call('GET', '/api/board')).json().model.groups.flatMap(group => group.rows)
-  const keyOf = async title => (await rows()).find(row => row.title === title)?.key
+  const rowOf = async title => (await rows()).find(row => row.title === title)
+  const keyOf = async title => (await rowOf(title))?.key
   const close = async () => {
     if (child.exitCode === null) await call('POST', '/api/close', { body: {} }).catch(() => undefined)
     const code = await Promise.race([exited, new Promise(done => setTimeout(() => done('still running'), 5000))])
@@ -285,7 +367,7 @@ setTimeout(() => process.stdout.write('Redis it is; wiring it up now.\\n'), 1000
     rmSync(dir, { recursive: true, force: true })
     return code
   }
-  return { dir, path, url, port, token, call, rows, keyOf, close, exited, served: servedAt(run, path) }
+  return { dir, path, url, port, token, call, rows, rowOf, keyOf, close, exited, served: servedAt(run, path) }
 }
 
 test('marking a question answered on the page or with h on the board writes only the hidden list, sends nothing, and shows it again', { timeout: 30_000 }, async () => {
@@ -380,11 +462,11 @@ test('the page answers only with its token and its own host, and closing it stop
 test('ticking and tidying from the page write progress.md the way the pane does, and a pasted block is merged into it', { timeout: 30_000 }, async () => {
   const board = await page()
   try {
-    const { path, call, keyOf } = board
+    const { path, call, rowOf } = board
     // The page sends the step it showed; once that step is done, the next one is not ticked in its place.
-    const fabrikam = await keyOf('Fabrikam fellowship')
-    assert.equal((await call('POST', '/api/act', { body: { key: fabrikam, type: 'tick', text: 'Draft the statement' } })).status, 409)
-    const ticked = await call('POST', '/api/act', { body: { key: fabrikam, type: 'tick', text: 'Ask two referees' } })
+    const { key: fabrikam, fp } = await rowOf('Fabrikam fellowship')
+    assert.equal((await call('POST', '/api/act', { body: { key: fabrikam, type: 'tick', text: 'Draft the statement', fp } })).status, 409)
+    const ticked = await call('POST', '/api/act', { body: { key: fabrikam, type: 'tick', text: 'Ask two referees', fp } })
     assert.equal(ticked.status, 200, ticked.body)
     assert.equal(ticked.json().note, 'Done: “Ask two referees”.')
     assert.ok(readFileSync(path, 'utf8').includes('- [x] Ask two referees'))
@@ -465,9 +547,9 @@ syncBuiltinESMExports()
 `)
   const board = await page('', { NODE_OPTIONS: `--require ${JSON.stringify(preload)}` })
   try {
-    const { path, call, keyOf } = board
+    const { path, call, keyOf, rowOf } = board
     const before = readFileSync(path, 'utf8')
-    const ticked = await call('POST', '/api/act', { body: { key: await keyOf('Fabrikam fellowship'), type: 'tick', text: 'Ask two referees' } })
+    const ticked = await call('POST', '/api/act', { body: { key: await keyOf('Fabrikam fellowship'), type: 'tick', text: 'Ask two referees', fp: (await rowOf('Fabrikam fellowship')).fp } })
     assert.equal(ticked.status, 409, ticked.body)
     assert.match(ticked.json().note, /^Could not safely read or update .*-journal-.*\(EIO\)/)
     assert.equal(readFileSync(path, 'utf8'), before)
@@ -515,23 +597,23 @@ syncBuiltinESMExports()
 test('a reply goes into a closed Grok session once, in its own folder, and the page waits for its answer before it closes', { timeout: 30_000 }, async () => {
   const board = await page()
   try {
-    const { call, keyOf, rows } = board
-    const key = await keyOf('Pick the cache')
+    const { call, rowOf, rows } = board
+    const { key, fp } = await rowOf('Pick the cache')
     assert.equal((await rows()).find(row => row.key === key)?.send, 'send')
     // A page drawn when another session held that line does not send into this one.
-    const stale = await call('POST', '/api/act', { body: { key, type: 'send', text: 'Redis', session: 'c0ffee12' } })
+    const stale = await call('POST', '/api/act', { body: { key, type: 'send', text: 'Redis', session: 'c0ffee12', fp } })
     assert.equal(stale.status, 409)
     assert.ok(!existsSync(join(board.dir, 'grok-ran.json')))
     // The send is taken at once; the answer comes later, with the board.
     // A reply written under a question the task no longer asks does not go either.
-    const reworded = await call('POST', '/api/act', { body: { key, type: 'send', text: 'Redis', session: 'b2c3d4e5', asked: 'Which port?' } })
+    const reworded = await call('POST', '/api/act', { body: { key, type: 'send', text: 'Redis', session: 'b2c3d4e5', asked: 'Which port?', fp } })
     assert.equal(reworded.status, 409)
     assert.ok(!existsSync(join(board.dir, 'grok-ran.json')))
-    const first = await call('POST', '/api/act', { body: { key, type: 'send', text: 'Redis', session: 'b2c3d4e5', asked: 'Redis or Memcached?' } })
+    const first = await call('POST', '/api/act', { body: { key, type: 'send', text: 'Redis', session: 'b2c3d4e5', asked: 'Redis or Memcached?', fp } })
     assert.equal(first.status, 202, first.body)
     assert.equal(first.json().note, 'Sent to grok · Pick the cache; its reply shows here when it comes (it can take a few minutes).')
     assert.equal((await rows()).find(row => row.key === key)?.isSending, true)
-    const second = await call('POST', '/api/act', { body: { key, type: 'send', text: 'Memcached', session: 'b2c3d4e5', asked: 'Redis or Memcached?' } })
+    const second = await call('POST', '/api/act', { body: { key, type: 'send', text: 'Memcached', session: 'b2c3d4e5', asked: 'Redis or Memcached?', fp } })
     assert.equal(second.status, 409)
     assert.equal(second.json().note, 'Another message is on its way to this grok session; send again once it replies.')
     // Closing now would cut the agent off halfway.
@@ -550,6 +632,228 @@ test('a reply goes into a closed Grok session once, in its own folder, and the p
     const ran = JSON.parse(readFileSync(join(board.dir, 'grok-ran.json'), 'utf8'))
     assert.deepEqual(ran.args, ['-r', GROK_ID, '--single=About "Redis or Memcached?": Redis'])
     assert.equal(ran.cwd.toLowerCase(), join(board.dir, 'api-gateway').toLowerCase())
+  } finally {
+    await board.close()
+  }
+})
+
+test('a press on the page for a task whose block another session took under the same title is refused, and nothing is archived until the page draws the block that is there now', { timeout: 30_000 }, async () => {
+  const board = await page()
+  try {
+    const { call, path, rowOf } = board
+    const row = await rowOf('Pick the cache')
+    assert.equal(row.canArchive, true)
+    // Another Grok session replaces the block between the page's draw and the press.
+    const swapped = readFileSync(path, 'utf8').replaceAll('b2c3d4e5', 'd4e5f6a7').replaceAll(GROK_ID, '22222222-2222-2222-2222-222222222222')
+    writeFileSync(path, swapped)
+    const press = fp => call('POST', '/api/act', { body: { key: row.key, type: 'archive', text: '', session: row.session, fp } })
+    const refused = await press(row.fp)
+    assert.equal(refused.status, 409, refused.body)
+    assert.equal(refused.json().note, LINE_CHANGED)
+    assert.equal(readFileSync(path, 'utf8'), swapped)
+    // A page from before the fingerprint existed sends none: refused the same way.
+    assert.equal((await press(undefined)).status, 409)
+    assert.equal(readFileSync(path, 'utf8'), swapped)
+    // Drawn again, the line has a fingerprint of its own, and the press archives that block.
+    const now = await rowOf('Pick the cache')
+    assert.notEqual(now.fp, row.fp)
+    const archived = await press(now.fp)
+    assert.equal(archived.status, 200, archived.body)
+    assert.ok(!readFileSync(path, 'utf8').includes('d4e5f6a7'))
+  } finally {
+    await board.close()
+  }
+})
+
+test('a tick on the page for a hand-kept question that was reworded since the page drew it is refused, and the reworded step stays open', { timeout: 30_000 }, async () => {
+  const board = await page()
+  try {
+    const { call, path } = board
+    const model = async () => (await call('GET', '/api/board')).json().model
+    const ask = async () => (await model()).asks.find(one => one.project === 'Job search')
+    const text = () => readFileSync(path, 'utf8')
+    writeFileSync(path, text().replace('- [ ] Ask two referees', '- [?] Ask two referees'))
+    const drawn = await ask()
+    assert.equal(drawn.text, 'Ask two referees')
+    const reworded = text().replace('- [?] Ask two referees', '- [?] Submit the replacement application')
+    writeFileSync(path, reworded)
+    const press = fp => call('POST', '/api/act', { body: { key: drawn.key, type: 'tick', text: '', session: '', fp } })
+    const refused = await press(drawn.fp)
+    assert.equal(refused.status, 409, refused.body)
+    assert.equal(refused.json().note, LINE_CHANGED)
+    assert.equal(text(), reworded)
+    // Drawn again, the page ticks the step it now shows.
+    const now = await ask()
+    assert.equal(now.key, drawn.key)
+    assert.notEqual(now.fp, drawn.fp)
+    assert.equal((await press(now.fp)).status, 200)
+    assert.ok(text().includes('- [x] Submit the replacement application'))
+  } finally {
+    await board.close()
+  }
+})
+
+test('a second press on the page for the first of two hand-kept tasks with the same words is refused once it is archived, and the second task stays', { timeout: 30_000 }, async () => {
+  const board = await page(`\n## Home\n### Weekly review\n- [ ] Write notes\n\n### Weekly review\n- [x] Call Bob\n- [ ] Write notes\n`)
+  try {
+    const { call, path, rows } = board
+    const twins = (await rows()).filter(row => row.title === 'Weekly review')
+    assert.equal(twins.length, 2)
+    const [first] = twins
+    const press = () => call('POST', '/api/act', { body: { key: first.key, type: 'archive', text: '', session: '', fp: first.fp } })
+    // A double click sends the same press twice, with what the page drew.
+    const archived = await press()
+    assert.equal(archived.status, 200, archived.body)
+    assert.equal(readFileSync(path, 'utf8').split('### Weekly review').length - 1, 1)
+    const afterFirst = readFileSync(path, 'utf8')
+    const refused = await press()
+    assert.equal(refused.status, 409, refused.body)
+    assert.equal(refused.json().note, LINE_CHANGED)
+    assert.equal(readFileSync(path, 'utf8'), afterFirst)
+    assert.ok(afterFirst.includes('Call Bob'))
+    // Drawn again, the task that is left has a fingerprint of its own.
+    const left = (await rows()).find(row => row.title === 'Weekly review')
+    assert.equal(left.key, first.key)
+    assert.notEqual(left.fp, first.fp)
+  } finally {
+    await board.close()
+  }
+})
+
+// The page's own script run against a minimal DOM, to see what it keeps across a redraw and what
+// it sends. `redraw` hands it the next board, as the page's next poll would get it.
+const pageDom = async (html, first) => {
+  const nodes = new Map()
+  class Element {
+    constructor(tag) {
+      this.tag = tag
+      this.childNodes = []
+      this.attributes = {}
+      this.events = {}
+      this.value = ''
+      this.text = ''
+      this.style = {}
+    }
+    set textContent(value) {
+      this.text = value
+      this.childNodes = []
+    }
+    get textContent() {
+      return this.text + this.childNodes.map(child => child.textContent).join('')
+    }
+    appendChild(child) {
+      this.childNodes.push(child)
+      return child
+    }
+    removeChild(child) {
+      this.childNodes = this.childNodes.filter(one => one !== child)
+    }
+    setAttribute(name, value) {
+      this.attributes[name] = value
+    }
+    getAttribute(name) {
+      return this.attributes[name] ?? null
+    }
+    addEventListener(name, run) {
+      this.events[name] = run
+    }
+    querySelectorAll() {
+      return this.childNodes.flatMap(child => [...(child.tag === 'textarea' && child.getAttribute('data-key') !== null ? [child] : []), ...child.querySelectorAll()])
+    }
+    click() {
+      if (!this.disabled) this.events.click?.()
+    }
+    focus() {}
+    setSelectionRange() {}
+  }
+  const get = id => {
+    if (!nodes.has(id)) nodes.set(id, new Element(id))
+    return nodes.get(id)
+  }
+  get('words').textContent = html.match(/<script[^>]*id="words"[^>]*>([\s\S]*?)<\/script>/)[1]
+  const document = {
+    getElementById: get,
+    createElement: tag => new Element(tag),
+    createTextNode: text => {
+      const node = new Element('text')
+      node.textContent = text
+      return node
+    },
+    querySelector: get,
+    activeElement: null,
+  }
+  let model = first
+  let scheduled
+  const requests = []
+  const script = [...html.matchAll(/<script[^>]*>([\s\S]*?)<\/script>/g)].map(found => found[1]).find(code => code.includes('(function ()'))
+  runInNewContext(script, {
+    document,
+    location: { search: '?t=x' },
+    URLSearchParams,
+    navigator: {},
+    window: {},
+    setTimeout: run => {
+      scheduled = run
+      return 1
+    },
+    clearTimeout: () => {},
+    fetch: async (target, options) => {
+      if (target === '/api/board') return { ok: true, json: async () => ({ model, now: 1 }) }
+      requests.push({ path: target, body: JSON.parse(options.body) })
+      return { ok: true, json: async () => ({ note: '' }) }
+    },
+  })
+  const flush = () => new Promise(done => setImmediate(done))
+  await flush()
+  const buttons = node => node.childNodes.flatMap(child => [...(child.tag === 'button' ? [child] : []), ...buttons(child)])
+  return {
+    boxes: () => get('board').querySelectorAll(),
+    send: () => buttons(get('board')).find(button => button.textContent === 'Send to grok'),
+    requests,
+    flush,
+    redraw: async next => {
+      model = next
+      scheduled()
+      await flush()
+    },
+  }
+}
+
+test('a reply typed for one session is dropped when the box is redrawn for another session under the same title, and a new reply goes to the session shown', { timeout: 30_000 }, async () => {
+  const board = await page()
+  try {
+    const { call, path, rowOf, token } = board
+    const html = (await call('GET', `/?t=${token}`, { headers: { 'x-board-token': '' } })).body
+    const model = async () => (await call('GET', '/api/board')).json().model
+    const first = await model()
+    const dom = await pageDom(html, first)
+    const [boxA] = dom.boxes()
+    boxA.value = 'Synthetic draft meant for session A'
+    // The same session drawn again, with a count changed: what is typed stays.
+    await dom.redraw({ ...first, counts: { ...first.counts, today: first.counts.today + 1 } })
+    assert.equal(dom.boxes()[0].value, 'Synthetic draft meant for session A')
+    // Session A leaves and a second session takes the title while the text is still in the box.
+    writeFileSync(path, readFileSync(path, 'utf8').replaceAll('b2c3d4e5', 'd4e5f6a7').replaceAll(GROK_ID, '22222222-2222-2222-2222-222222222222'))
+    const second = await model()
+    await dom.redraw(second)
+    const [boxB] = dom.boxes()
+    assert.equal(boxB.value, '')
+    // Send with nothing in the box sends nothing.
+    dom.send().click()
+    await dom.flush()
+    assert.equal(dom.requests.length, 0)
+    // What is typed now goes to the session shown, with the fingerprint of the line shown.
+    boxB.value = 'Synthetic reply for session B'
+    dom.send().click()
+    await dom.flush()
+    const row = await rowOf('Pick the cache')
+    assert.equal(dom.requests.length, 1)
+    assert.deepEqual([dom.requests[0].path, dom.requests[0].body.session, dom.requests[0].body.fp], ['/api/act', 'd4e5f6a7', row.fp])
+    const sent = await call('POST', '/api/act', { body: dom.requests[0].body })
+    assert.equal(sent.status, 202, sent.body)
+    // The agent stand-in answers after a second; the page is not closed while it is on its way.
+    for (let tries = 0; tries < 50 && (await call('GET', '/api/board')).json().replies.length === 0; tries++) await new Promise(done => setTimeout(done, 200))
+    assert.equal(JSON.parse(readFileSync(join(board.dir, 'grok-ran.json'), 'utf8')).args[1], '22222222-2222-2222-2222-222222222222')
   } finally {
     await board.close()
   }
@@ -775,8 +1079,8 @@ test('a newer --serve does not start a second page while the page it would repla
   const { board } = held
   const urls = []
   try {
-    const key = await board.keyOf('Pick the cache')
-    const reply = { key, type: 'send', text: 'Redis', session: 'b2c3d4e5', asked: 'Redis or Memcached?' }
+    const drawn = await board.rowOf('Pick the cache')
+    const reply = { key: drawn.key, type: 'send', text: 'Redis', session: 'b2c3d4e5', asked: 'Redis or Memcached?', fp: drawn.fp }
     assert.equal((await board.call('POST', '/api/act', { body: reply })).status, 202)
     held.update()
     const out = await held.serve()
@@ -877,7 +1181,7 @@ const fetchAt = (host, port, method, target, headers = {}, body) =>
 test('with --lan the page also opens on the local network, with a token of its own, where a phone can tick but not send to an agent', { timeout: 30_000 }, async t => {
   const board = await page()
   try {
-    const { call, port, token, keyOf } = board
+    const { call, port, token, keyOf, rowOf } = board
     // Only the board script on the computer opens it: a script on a web page sends an Origin.
     assert.equal((await call('POST', '/api/lan', { body: {}, headers: { origin: `http://127.0.0.1:${port}` } })).status, 403)
     // An address that is not one of the computer's own is named as such.
@@ -915,8 +1219,8 @@ test('with --lan the page also opens on the local network, with a token of its o
     assert.equal(sent.json().note, "A reply to grok runs a program on the computer, so it is sent from the computer's own page. You can copy the answer here.")
     assert.ok(!existsSync(join(board.dir, 'grok-ran.json')))
     // A tick from the phone is written the way the computer's page writes one.
-    const fabrikam = await keyOf('Fabrikam fellowship')
-    const ticked = await fetchAt(host, lanPort, 'POST', '/api/act', { 'x-board-token': phone }, { key: fabrikam, type: 'tick', text: 'Ask two referees' })
+    const fabrikam = await rowOf('Fabrikam fellowship')
+    const ticked = await fetchAt(host, lanPort, 'POST', '/api/act', { 'x-board-token': phone }, { key: fabrikam.key, type: 'tick', text: 'Ask two referees', fp: fabrikam.fp })
     assert.equal(ticked.status, 200, ticked.body)
     assert.ok(readFileSync(board.path, 'utf8').includes('- [x] Ask two referees'))
   } finally {

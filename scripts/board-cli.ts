@@ -634,11 +634,15 @@ const run = async (): Promise<void> => {
     }
     process.stdout.write(screen(state))
   } else if (args.includes('--watch') && process.stdin.isTTY) {
-    let state = emptyBoardState
+    // No fingerprint is kept before the first draw succeeds, and x, a and c then refuse every line.
+    let state: BoardState = { ...emptyBoardState, seen: {} }
+    // The fingerprints kept are those of the very lines this screen shows: one read does both.
     const draw = (): void => {
       try {
-        state = pin(state)
-        process.stdout.write(`\u001b[2J\u001b[H${screen(state)}`)
+        const shown = view()
+        const turns = pending()
+        state = pinned(state, boardItems(shown, turns))
+        process.stdout.write(`\u001b[2J\u001b[H${boardScreen(shown, turns, state, s, options())}`)
       } catch (error) {
         process.stdout.write(`\u001b[2J\u001b[H${failureNote(error)}\n`)
       }
@@ -656,11 +660,13 @@ const run = async (): Promise<void> => {
     process.stdin.on('data', (chunk: string) => {
       try {
         // Keys that came together (a held arrow) each act on the line the one before left chosen;
-        // after a tick or an archive the rest wait, so no key lands on a line not yet drawn.
+        // after a tick or an archive the rest wait, so no key lands on a line not yet drawn. A
+        // key acts on the state of the last draw, not on a fresh pin: x and a check that the
+        // line is still the one drawn.
         for (const key of keysIn(chunk)) {
           // Quitting must work while the files cannot be read, before pin/view runs.
           if (key === 'q' || key === '\u0003') quit()
-          const pressed = press(pin(state), key)
+          const pressed = press(state, key)
           state = pressed.state
           if (pressed.isQuit) quit()
           if (pressed.isHtml) {

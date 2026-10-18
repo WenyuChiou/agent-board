@@ -1,5 +1,69 @@
 # Changelog
 
+## 0.20.11 — 2026-10-17
+
+A press on the board, or a reply from its page, now acts only on the line it showed, never on
+another session's block or another step that took its place (#76, which replaces part of #59).
+
+Why: the board and its page find a target by project and title (a repeated title gets `#2`,
+and a question also by its step number), and the check before a write compared only the line's
+text, not which block the line belongs to. So a second session with the same project and title,
+or a hand-kept step reworded under the same key, could receive a tick, an archive or a reply
+meant for the first.
+
+- **Every row and question carries a short fingerprint: its block id and the exact step words
+  shown.** It is worked out in one place (`fingerprint` in `hooks/board.ts`) for the page's
+  model, the page's server and the terminal board alike, and holds the same for every agent's
+  block (Claude Code, Codex, Gemini CLI, Cursor, Grok Build, Muse, Hermes, OpenClaw, OpenCode)
+  and for a hand-kept task. A hand-kept task has no block id, so two of them with the same
+  title and next step would look alike, and once the first is archived the second takes its
+  key (`#2` goes away); their fingerprint therefore also holds how many tasks and questions
+  share the project and title, and changes only when such a twin comes or goes. Tests: "a
+  press on the page goes through only on the block and step words the page drew, for the block
+  of every agent and for a hand-kept task", "two hand-kept tasks with the same title and next
+  step are told apart by how many share them: a press meant for the first is refused once it
+  has gone, on the page and on the board" and "two hand-kept questions with the same title and
+  words are told apart by how many share them: a tick meant for the first is refused once it
+  has gone".
+- **On the page, a tick, an archive and a reply send the fingerprint back.** The server works
+  it out again from the file as it is now, and when it differs (or is missing, as from a page
+  opened before this version) it answers 409 with the existing "line changed" note and writes
+  nothing. Hide and unhide send nothing to an agent and need no fingerprint. Tests: "a press
+  on the page for a task whose block another session took under the same title is refused, and
+  nothing is archived until the page draws the block that is there now", "a tick on the page
+  for a hand-kept question that was reworded since the page drew it is refused, and the
+  reworded step stays open" and "a second press on the page for the first of two hand-kept
+  tasks with the same words is refused once it is archived, and the second task stays" (a
+  double click). The 0.20.10 test "a newer --serve does not start a second page while the page
+  it would replace is sending a reply, shows that page with a note, and replaces it once the
+  reply is in" now sends the fingerprint, as the page does.
+- **The terminal board keeps each line's fingerprint from its last draw.** `x`, `a` and `c`
+  (which copies the command that reopens a session) act only while the line still has it, and
+  otherwise show the existing "line changed" note; the next redraw shows the line as it is, and
+  the key acts on that. Until a first draw has worked, no fingerprint is kept and these keys
+  refuse every line. The keys read the state of the last draw instead of pinning the line
+  again, and a draw now reads the files once for both the screen and the fingerprints. Tests:
+  "the terminal board archives with a only the block it drew: another session’s block under the
+  same title is left alone and named as changed", "the terminal board archives with a only the
+  hand-kept task it drew: once the first of two with the same words has gone, the one that took
+  its key is left and named as changed", "the terminal board ticks with x only the step it
+  drew: a step that became next since is named as changed and left open", "on the board you
+  work in, x and a act only on the line as the last draw showed it, and the line now there is
+  acted on once drawn" and "on the board you work in, c copies the command only of the block the
+  last draw showed: another session’s block under the same title is named as changed". The
+  test "a key does nothing to a line that took the chosen one’s place before the screen showed
+  it" now redraws before its last key, as the board does.
+- **A reply being typed belongs to its session and question.** The page kept drafts under the
+  title-based key alone, so a redraw for a second session with the same title left the text in
+  its box and Send resumed the wrong session. The draft is now kept under the key, the session
+  and the question; a redraw for another session or a new question starts an empty box and the
+  old text is dropped. Test: "a reply typed for one session is dropped when the box is redrawn
+  for another session under the same title, and a new reply goes to the session shown".
+- Unchanged: a question answered in chat (#71), the "Already answered" and "Needs changes"
+  choices (#65) and the session-ID and return hints with their copy buttons (#72) behave as
+  before, a reply sent from a phone is still refused, and hiding or showing a question still
+  writes only the hidden list.
+
 ## 0.20.10 — 2026-10-17
 
 A newer board script no longer starts a second page while the page it would replace is

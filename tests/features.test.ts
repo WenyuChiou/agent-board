@@ -2,7 +2,7 @@ import { expect, test } from 'claude-code/testing'
 
 import type { ProgressMirror, ProgressPr } from '../types'
 import { askOf } from '../hooks/ask'
-import { boardItems, boardKey, boardScreen, boardText, emptyBoardState, fit, peekInbox, pinned } from '../hooks/board'
+import { boardItems, boardKey, boardScreen, boardText, emptyBoardState, fingerprint, fit, peekInbox, pinned } from '../hooks/board'
 import { addManualTask, isArchivable, manualTaskCount, mergeBlock, renderAutoBlock, setManualStep, takeArchivable, takeManualDone, takeTask, upsertAutoBlock } from '../hooks/blocks'
 import { agentHooks, boardCommands, boardScript, COLLISION, DELETE, generatedFile, isNodeSupported, isReleased, isReleasedBoard, isSetupState, isWindowsHost, NODE_MIN, nodeVersionOf, openclawPlugin, openclawPrinted, openclawSavedBy, openclawTooOld, readConfig, RELEASE_PATHS, reportCommand, reporterPs1, reporterSh, setupAgents, setupLines, withFlatHook, withGroupedHook, withHermesHooks, withoutHermesHooks, withoutOurHooks, withoutSection } from '../hooks/connect'
 import { dashboardHtml } from '../hooks/dashboard'
@@ -1517,6 +1517,12 @@ const SERVE_NOW = Date.parse('2026-10-17T08:45:00Z')
 const serveView = () => buildView(parseProgress(SERVE_FILE), [], null, SERVE_NOW, 0, {}, STRINGS.en)
 const GROK = { agent: 'grok', session: 'b2c3d4e5', resume: '01a14a94-0dee-7543-8208-991a4266a1da', dir: '/w/api-gateway', isClosed: true }
 
+// The fingerprint a page drawn from these lines holds for the one under `key`.
+const fpIn = (items: ReturnType<typeof boardItems>, key: string): string => {
+  const item = items.find(one => one.key === key)
+  return item === undefined ? '' : fingerprint(item, items)
+}
+
 test('the page offers a send only into a Grok or Codex session that has closed; an open one, Claude and a hand-kept task each get their own way', () => {
   const model = serveModel(serveView(), [], STRINGS.en)
   const row = (title: string) => model.groups.flatMap(group => group.rows).find(one => one.title === title)
@@ -1576,7 +1582,7 @@ test('a press on the page is worked out from the file as it is now: a line that 
   const keyOf = (find: (item: (typeof items)[number]) => boolean) => items.find(find)?.key ?? ''
   const grok = keyOf(item => item.type === 'row' && item.row.title === 'Pick the cache')
   const asked = 'Redis or Memcached?'
-  const sent = serveAction(items, { key: grok, type: 'send', text: '  Redis\u0007, it is already in the stack \r\n', session: 'b2c3d4e5', asked }, STRINGS.en)
+  const sent = serveAction(items, { key: grok, type: 'send', text: '  Redis\u0007, it is already in the stack \r\n', session: 'b2c3d4e5', asked, fp: fpIn(items, grok) }, STRINGS.en)
   // The task goes with it, so the page can say which of two sessions answered.
   expect(sent).toEqual({ type: 'send', target: GROK, text: STRINGS.en.answerText('Redis or Memcached?', 'Redis, it is already in the stack'), title: 'Pick the cache' })
   expect(serveAction(items, { key: grok, type: 'send', text: ' \u0000 ', session: 'b2c3d4e5', asked }, STRINGS.en)).toEqual({ type: 'refuse', note: '' })
@@ -1591,14 +1597,66 @@ test('a press on the page is worked out from the file as it is now: a line that 
   const codex = keyOf(item => item.type === 'ask' && item.ask.agent === 'codex')
   expect(serveAction(items, { key: codex, type: 'send', text: '300', session: 'a1b2c3d4' }, STRINGS.en)).toEqual({ type: 'refuse', note: STRINGS.en.serveSendOpen('codex') })
   const manual = keyOf(item => item.type === 'ask' && item.ask.project === 'docs-site')
-  expect(serveAction(items, { key: manual, type: 'tick', text: '', session: '' }, STRINGS.en).type).toBe('tick')
+  expect(serveAction(items, { key: manual, type: 'tick', text: '', session: '', fp: fpIn(items, manual) }, STRINGS.en).type).toBe('tick')
   expect(serveAction(items, { key: manual, type: 'send', text: 'yes', session: '' }, STRINGS.en)).toEqual({ type: 'refuse', note: '' })
   // An ended block can go to the archive; a working one cannot yet.
-  expect(serveAction(items, { key: grok, type: 'archive', text: '', session: '' }, STRINGS.en)).toMatchObject({ type: 'archive', title: 'Pick the cache' })
+  expect(serveAction(items, { key: grok, type: 'archive', text: '', session: '', fp: fpIn(items, grok) }, STRINGS.en)).toMatchObject({ type: 'archive', title: 'Pick the cache' })
   const working = keyOf(item => item.type === 'row' && item.row.title === 'Dark mode for the settings page')
   expect(serveAction(items, { key: working, type: 'archive', text: '', session: '' }, STRINGS.en)).toEqual({ type: 'refuse', note: STRINGS.en.archiveGone })
   expect(serveAction(items, { key: grok, type: 'delete', text: '', session: '' }, STRINGS.en)).toEqual({ type: 'refuse', note: '' })
   expect(replyText('x'.repeat(5000)).length).toBe(4000)
+})
+
+test('a press on the page goes through only on the block and step words the page drew, for the block of every agent and for a hand-kept task', () => {
+  // One ended session of each agent, and the same titles again under other session ids: the
+  // keys are alike, the blocks are not. The hand-kept task has no block, only its step words.
+  const agents = ['claude', 'codex', 'gemini', 'cursor', 'grok', 'muse', 'hermes', 'openclaw', 'opencode']
+  const fileOf = (tail: string, step: string): string =>
+    [
+      ...agents.map((agent, i) => {
+        const session = `${i + 1}${i + 1}${i + 1}${i + 1}${tail}`
+        return `## project-${agent}
+<!-- auto session=${session} agent=${agent} state=ended updated=2026-10-17T08:30:00Z resume=0199a2b3-c4d5-7e6f-8a9b-0c1d2e3f4a5${i} dir=%2Fw%2F${agent} -->
+### Work for ${agent}
+- [x] Start it
+- [?] ${step}
+<!-- /auto session=${session} -->
+`
+      }),
+      `## Job search\n### Fabrikam fellowship\n- [x] Draft the statement\n- [ ] ${step}\n`,
+    ].join('\n')
+  const itemsOf = (file: string) => boardItems(buildView(parseProgress(file), [], null, SERVE_NOW, 0, {}, STRINGS.en), [])
+  const drawn = itemsOf(fileOf('0000', 'Ship it, OK?'))
+  const taken = itemsOf(fileOf('eeee', 'Ship it, OK?'))
+  const reworded = itemsOf(fileOf('0000', 'Ship it Friday, OK?'))
+  const changed = { type: 'refuse', note: STRINGS.en.boardLineChanged }
+  const rows = drawn.flatMap(item => (item.type === 'row' ? [item] : []))
+  expect(rows.length).toBe(agents.length + 1)
+  const senders: string[] = []
+  for (const item of rows) {
+    const isManual = item.row.auto === null
+    const press = { key: item.key, type: isManual ? 'tick' : 'archive', text: item.row.next?.step ?? '', session: '', fp: fingerprint(item, drawn) }
+    const wanted = isManual ? { type: 'tick' } : { type: 'archive' }
+    expect(serveAction(drawn, press, STRINGS.en)).toMatchObject(wanted)
+    // No fingerprint, as from a page drawn before there were any, goes nowhere.
+    expect(serveAction(drawn, { key: press.key, type: press.type, text: press.text, session: '' }, STRINGS.en)).toEqual(changed)
+    // The step reworded under the same key, in a block or in the hand-kept task.
+    expect(serveAction(reworded, press, STRINGS.en)).toEqual(changed)
+    const twin = taken.find(one => one.key === item.key)
+    expect(twin?.key).toBe(item.key)
+    if (isManual || twin === undefined) continue
+    // Another session's block under the same project and title, with the same words.
+    expect(serveAction(taken, press, STRINGS.en)).toEqual(changed)
+    expect(serveAction(taken, { ...press, fp: fingerprint(twin, taken) }, STRINGS.en)).toMatchObject(wanted)
+    // A reply into a closed Grok or Codex session goes to the block it was written for only.
+    if (item.row.target === null || twin.type !== 'row' || twin.row.target === null) continue
+    const reply = { key: item.key, type: 'send', text: 'Go', session: twin.row.target.session, asked: item.row.question ?? '', fp: fingerprint(item, drawn) }
+    if (serveAction(drawn, { ...reply, session: item.row.target.session }, STRINGS.en).type !== 'send') continue
+    senders.push(item.row.agent)
+    expect(serveAction(taken, reply, STRINGS.en)).toEqual(changed)
+    expect(serveAction(taken, { ...reply, fp: fingerprint(twin, taken) }, STRINGS.en).type).toBe('send')
+  }
+  expect(senders.sort()).toEqual(['codex', 'grok'])
 })
 
 test('the page server answers only its own host, with its token, and takes writes only as JSON from the page', () => {
@@ -1724,7 +1782,7 @@ test('from the local network a reply to an agent is offered as a copy, and refus
   expect(rows.find(one => one.title === 'Dark mode for the settings page')?.send).toBe('claude')
   const items = boardItems(serveView(), [])
   const key = items.find(item => item.type === 'row' && item.row.title === 'Pick the cache')?.key ?? ''
-  const press = { key, type: 'send', text: 'Redis', session: GROK.session, asked: 'Redis or Memcached?' }
+  const press = { key, type: 'send', text: 'Redis', session: GROK.session, asked: 'Redis or Memcached?', fp: fpIn(items, key) }
   expect(serveAction(items, press, STRINGS.en).type).toBe('send')
   expect(serveAction(items, press, STRINGS.en, true)).toEqual({ type: 'refuse', note: STRINGS.en.serveLanSend('grok') })
   expect(serveAction(items, { ...press, type: 'archive' }, STRINGS.en, true)).toMatchObject({ type: 'archive', title: 'Pick the cache' })
@@ -2241,7 +2299,109 @@ test('a key does nothing to a line that took the chosen one’s place before the
   expect(pressed.action).toBeNull()
   expect(pressed.state.note).toBe(STRINGS.en.boardLineChanged)
   // Once the screen shows the new line, the same key acts on it.
-  expect(boardKey(pressed.state, 'a', after, STRINGS.en).action).toMatchObject({ type: 'archive', title: 'Wire the money' })
+  expect(boardKey(pinned(pressed.state, after), 'a', after, STRINGS.en).action).toMatchObject({ type: 'archive', title: 'Wire the money' })
+})
+
+test('on the board you work in, x and a act only on the line as the last draw showed it, and the line now there is acted on once drawn', () => {
+  const now = Date.parse('2026-10-17T08:45:00Z')
+  const itemsOf = (file: string) => boardItems(buildView(parseProgress(file), [], null, now, 0, {}, STRINGS.en), [])
+  const before = itemsOf(WORK_FILE)
+  const at = (title: string): number => before.findIndex(item => item.type === 'row' && item.row.title === title)
+  const drawn = (title: string) => pinned({ ...emptyBoardState, selected: at(title) }, before)
+  const changed = (state: ReturnType<typeof drawn>, key: string, items: typeof before) => {
+    const pressed = boardKey(state, key, items, STRINGS.en)
+    return { action: pressed.action, note: pressed.state.note, state: pressed.state }
+  }
+  // Nothing changed since the draw: both keys act.
+  expect(boardKey(drawn('Fabrikam fellowship'), 'x', before, STRINGS.en).action).toMatchObject({ type: 'tick', ref: { step: 'Ask two referees' } })
+  expect(boardKey(drawn('Fix the broken links'), 'a', before, STRINGS.en).action).toMatchObject({ type: 'archive', title: 'Fix the broken links' })
+  // The next step moved on after the draw: x names the change and ticks nothing; once the screen
+  // shows the new step, x ticks that one.
+  const moved = itemsOf(WORK_FILE.replace('- [ ] Ask two referees', '- [x] Ask two referees\n- [ ] Submit it'))
+  const tick = changed(drawn('Fabrikam fellowship'), 'x', moved)
+  expect([tick.action, tick.note]).toEqual([null, STRINGS.en.boardLineChanged])
+  expect(boardKey(pinned(tick.state, moved), 'x', moved, STRINGS.en).action).toMatchObject({ type: 'tick', ref: { step: 'Submit it' } })
+  // Another session's block took the title after the draw: a names the change and archives nothing.
+  const taken = itemsOf(WORK_FILE.replaceAll('b2c3d4e5', 'c3d4e5f6'))
+  const archive = changed(drawn('Fix the broken links'), 'a', taken)
+  expect([archive.action, archive.note]).toEqual([null, STRINGS.en.boardLineChanged])
+  expect(boardKey(pinned(archive.state, taken), 'a', taken, STRINGS.en).action).toMatchObject({ type: 'archive', title: 'Fix the broken links' })
+  // A line that was not on the screen is never acted on, even one with a key that was.
+  const added = itemsOf(`${WORK_FILE}\n## Job search\n### Brand new task\n- [ ] First step\n`)
+  const fresh = added.findIndex(item => item.type === 'row' && item.row.title === 'Brand new task')
+  expect(boardKey({ ...drawn('Fabrikam fellowship'), selected: fresh, key: added[fresh]?.key ?? null }, 'x', added, STRINGS.en).action).toBeNull()
+})
+
+test('on the board you work in, c copies the command only of the block the last draw showed: another session’s block under the same title is named as changed', () => {
+  const now = Date.parse('2026-10-17T08:45:00Z')
+  const first = '0199a2b3-c4d5-7e6f-8a9b-0c1d2e3f4a5b'
+  const second = '0199a2b3-c4d5-7e6f-8a9b-0c1d2e3f4a5c'
+  const fileOf = (session: string, id: string): string =>
+    `## api\n<!-- auto session=${session} agent=codex state=ended updated=2026-10-17T08:30:00Z resume=${id} dir=%2Fw%2Fapi -->\n### Wire the cache\n- [ ] Pick a size\n<!-- /auto session=${session} -->\n`
+  const itemsOf = (file: string) => boardItems(buildView(parseProgress(file), [], null, now, 0, {}, STRINGS.en), [])
+  const before = itemsOf(fileOf('a1000000', first))
+  const taken = itemsOf(fileOf('a2000000', second))
+  const drawn = pinned(emptyBoardState, before)
+  expect(before[drawn.selected]?.type).toBe('row')
+  // Nothing changed since the draw: the command of the block drawn is copied.
+  expect(boardKey(drawn, 'c', before, STRINGS.en).action).toEqual({ type: 'copy', text: `cd '/w/api' && codex resume ${first}` })
+  // The other session’s block took the title: its command is not copied for the line drawn.
+  const pressed = boardKey(drawn, 'c', taken, STRINGS.en)
+  expect([pressed.action, pressed.state.note]).toEqual([null, STRINGS.en.boardLineChanged])
+  // Once the screen shows that block, c copies its command.
+  expect(boardKey(pinned(pressed.state, taken), 'c', taken, STRINGS.en).action).toEqual({ type: 'copy', text: `cd '/w/api' && codex resume ${second}` })
+})
+
+test('two hand-kept tasks with the same title and next step are told apart by how many share them: a press meant for the first is refused once it has gone, on the page and on the board', () => {
+  const now = Date.parse('2026-10-17T08:45:00Z')
+  const itemsOf = (file: string) => boardItems(buildView(parseProgress(file), [], null, now, 0, {}, STRINGS.en), [])
+  const changed = { type: 'refuse', note: STRINGS.en.boardLineChanged }
+  const first = '- [ ] Write notes\n\n'
+  const twins = `## Home\n### Weekly review\n${first}### Weekly review\n- [x] Call Bob\n- [ ] Write notes\n`
+  const before = itemsOf(twins)
+  const gone = itemsOf(twins.replace(`### Weekly review\n${first}`, ''))
+  const [one, two] = before.flatMap(item => (item.type === 'row' && item.row.title === 'Weekly review' ? [item.key] : []))
+  expect([one, two]).toEqual(['row:Home::Weekly review', 'row:Home::Weekly review#2'])
+  // The second took the first's key and has the first's words, and a press meant for the first
+  // is no longer taken for it.
+  expect(gone.map(item => item.key).filter(key => key.includes('Weekly review'))).toEqual([one])
+  expect(fpIn(gone, one ?? '')).not.toBe(fpIn(before, one ?? ''))
+  const press = { key: one ?? '', type: 'archive', text: '', session: '', fp: fpIn(before, one ?? '') }
+  expect(serveAction(before, press, STRINGS.en)).toMatchObject({ type: 'archive', title: 'Weekly review' })
+  expect(serveAction(gone, press, STRINGS.en)).toEqual(changed)
+  expect(serveAction(gone, { ...press, fp: fpIn(gone, one ?? '') }, STRINGS.en)).toMatchObject({ type: 'archive', title: 'Weekly review' })
+  const drawn = pinned({ ...emptyBoardState, selected: before.findIndex(item => item.key === one) }, before)
+  for (const key of ['a', 'x']) {
+    const pressed = boardKey(drawn, key, gone, STRINGS.en)
+    expect([key, pressed.action, pressed.state.note]).toEqual([key, null, STRINGS.en.boardLineChanged])
+  }
+  expect(boardKey(drawn, 'a', before, STRINGS.en).action).toMatchObject({ type: 'archive', title: 'Weekly review' })
+  // The count is all that moves it: a twin coming changes it, other lines coming or going do not.
+  expect(fpIn(itemsOf(`${twins}\n### Weekly review\n- [ ] Write notes\n`), one ?? '')).not.toBe(fpIn(before, one ?? ''))
+  expect(fpIn(itemsOf(`${twins}\n## Work\n### Weekly review\n- [ ] Write notes\n`), one ?? '')).toBe(fpIn(before, one ?? ''))
+  // A block has an id of its own, and a same-titled block of another session does not change it.
+  const block = (session: string): string => `## api\n<!-- auto session=${session} agent=codex state=ended updated=2026-10-17T08:30:00Z resume=0199a2b3-c4d5-7e6f-8a9b-0c1d2e3f4a5b dir=%2Fw%2Fapi -->\n### Wire the cache\n- [ ] Pick a size\n<!-- /auto session=${session} -->\n`
+  const alone = itemsOf(block('a1000000'))
+  expect(fpIn(itemsOf(`${block('a1000000')}\n${block('a2000000')}`), alone[0]?.key ?? '')).toBe(fpIn(alone, alone[0]?.key ?? ''))
+})
+
+test('two hand-kept questions with the same title and words are told apart by how many share them: a tick meant for the first is refused once it has gone', () => {
+  const now = Date.parse('2026-10-17T08:45:00Z')
+  const itemsOf = (file: string) => boardItems(buildView(parseProgress(file), [], null, now, 0, {}, STRINGS.en), [])
+  const twins = '## Home\n### Weekly review\n- [?] Which day?\n\n### Weekly review\n- [?] Which day?\n- [x] Call Bob\n'
+  const before = itemsOf(twins)
+  const gone = itemsOf(twins.replace('### Weekly review\n- [?] Which day?\n\n', ''))
+  const keys = before.flatMap(item => (item.type === 'ask' ? [item.key] : []))
+  const one = keys[0] ?? ''
+  expect(keys.length).toBe(2)
+  expect(gone.some(item => item.key === one)).toBe(true)
+  const press = { key: one, type: 'tick', text: '', session: '', fp: fpIn(before, one) }
+  expect(serveAction(before, press, STRINGS.en).type).toBe('tick')
+  expect(serveAction(gone, press, STRINGS.en)).toEqual({ type: 'refuse', note: STRINGS.en.boardLineChanged })
+  const drawn = pinned({ ...emptyBoardState, selected: before.findIndex(item => item.key === one) }, before)
+  const pressed = boardKey(drawn, 'x', gone, STRINGS.en)
+  expect([pressed.action, pressed.state.note]).toEqual([null, STRINGS.en.boardLineChanged])
+  expect(boardKey(pinned(pressed.state, gone), 'x', gone, STRINGS.en).action).toMatchObject({ type: 'tick', ref: { title: 'Weekly review', step: 'Which day?' } })
 })
 
 test('escape sequences from another agent’s text never reach the terminal or the clipboard', () => {
@@ -2370,7 +2530,7 @@ test('a reply on the line of a task whose question was marked answered goes as i
   const view = buildView(parseProgress(SERVE_FILE), [], null, SERVE_NOW, 0, {}, STRINGS.en, [key])
   const items = boardItems(view, [])
   const grok = items.find(item => item.type === 'row' && item.row.title === 'Pick the cache')?.key ?? ''
-  expect(serveAction(items, { key: grok, type: 'send', text: 'Use Redis', session: 'b2c3d4e5' }, STRINGS.en)).toEqual({ type: 'send', target: GROK, text: 'Use Redis', title: 'Pick the cache' })
+  expect(serveAction(items, { key: grok, type: 'send', text: 'Use Redis', session: 'b2c3d4e5', fp: fpIn(items, grok) }, STRINGS.en)).toEqual({ type: 'send', target: GROK, text: 'Use Redis', title: 'Pick the cache' })
   const row = (model: ReturnType<typeof serveModel>) => model.groups.flatMap(group => group.rows).find(one => one.title === 'Pick the cache')
   expect(row(serveModel(view, [], STRINGS.en))?.isAsking).toBe(false)
   // The page names no question for it, and a reply written while the page still showed the
@@ -2381,7 +2541,8 @@ test('a reply on the line of a task whose question was marked answered goes as i
   expect(servePage(STRINGS.en, 'n')).toContain('var asked = row.question;')
   // Still asked, it opens by itself and a reply goes as its answer.
   expect([row(serveModel(serveView(), [], STRINGS.en))?.isAsking, row(serveModel(serveView(), [], STRINGS.en))?.question]).toEqual([true, 'Redis or Memcached?'])
-  expect(serveAction(boardItems(serveView(), []), stale, STRINGS.en)).toMatchObject({ type: 'send', text: expect.stringContaining('Use Redis') })
+  const asking = boardItems(serveView(), [])
+  expect(serveAction(asking, { ...stale, fp: fpIn(asking, grok) }, STRINGS.en)).toMatchObject({ type: 'send', text: expect.stringContaining('Use Redis') })
   // The step itself still shows in the task's steps.
   expect(row(serveModel(view, [], STRINGS.en))?.steps.map(step => step.text)).toContain('Redis or Memcached?')
 })

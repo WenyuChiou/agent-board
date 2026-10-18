@@ -1,5 +1,5 @@
 import type { AskKind } from './ask'
-import { answersOf, boardItems } from './board'
+import { answersOf, boardItems, fingerprint } from './board'
 import type { BoardItem, PendingTurn } from './board'
 import { htmlLang, vars } from './dashboard'
 import { RELAY, ZH_TW } from './i18n'
@@ -82,6 +82,8 @@ export type ServeAsk = {
   // The session a reply goes to: the page sends it back with the reply, so a line that now
   // belongs to another session is refused.
   session: string
+  // The line's fingerprint (hooks/board.ts): the page sends it back with every press.
+  fp: string
   // The folder a reply runs in, shown beside the box before it is sent.
   where: string
   // Why a reply cannot be sent from here, when it cannot.
@@ -120,6 +122,7 @@ export type ServeRow = {
   question: string
   send: SendMode
   session: string
+  fp: string
   where: string
   info: string
   isSending: boolean
@@ -161,7 +164,8 @@ export const serveModel = (view: View, pending: readonly PendingTurn[], s: Strin
   const asks: ServeAsk[] = []
   const groups = new Map<string, ServeRow[]>()
   const turns: ServeTurn[] = []
-  for (const item of boardItems(view, pending)) {
+  const items = boardItems(view, pending)
+  for (const item of items) {
     if (item.type === 'ask') {
       const { ask } = item
       const isManual = ask.where === 'manual'
@@ -187,6 +191,7 @@ export const serveModel = (view: View, pending: readonly PendingTurn[], s: Strin
         canHide: ask.hideKey !== '',
         send,
         session: ask.target?.session ?? '',
+        fp: fingerprint(item, items),
         where: send === 'send' ? (ask.target?.dir ?? '') : '',
         info: isManual ? '' : (lanInfo(mode, ask.agent) ?? infoOf(send, ask.agent, ask.task, ask.session, s)),
         back: wayBackText(hint),
@@ -225,6 +230,7 @@ export const serveModel = (view: View, pending: readonly PendingTurn[], s: Strin
         question: row.question ?? '',
         send,
         session: row.target?.session ?? '',
+        fp: fingerprint(item, items),
         where: send === 'send' ? (row.target?.dir ?? '') : '',
         // A row says why only when a reply could otherwise be expected here.
         info: lanInfo(mode, row.agent) ?? (send === 'open' ? infoOf(send, row.agent, row.title, '', s) : ''),
@@ -255,8 +261,9 @@ export const serveModel = (view: View, pending: readonly PendingTurn[], s: Strin
   }
 }
 
-// `asked`: with a reply, the question the page showed it under ('' for none).
-export type ServeRequest = { key: string; type: string; text: string; session: string; asked?: string }
+// `asked`: with a reply, the question the page showed it under ('' for none). `fp`: the line's
+// fingerprint as the page drew it; a tick, an archive and a reply need it, hide and unhide do not.
+export type ServeRequest = { key: string; type: string; text: string; session: string; asked?: string; fp?: string }
 
 export type ServeAction =
   | { type: 'tick'; ref: StepRef }
@@ -282,6 +289,16 @@ export const replyText = (raw: string): string =>
 // From the local network (`isLan`) a reply to an agent is refused: it would run a program on
 // the computer, and the network's page is plain HTTP that others on the network could read.
 export const serveAction = (items: readonly BoardItem[], request: ServeRequest, s: Strings = ZH_TW, isLan = false): ServeAction => {
+  const action = actionOf(items, request, s, isLan)
+  if (action.type !== 'tick' && action.type !== 'archive' && action.type !== 'send') return action
+  // The key is a project and a title, which another session's block can take over, and a step
+  // can be reworded under it: the press goes through only on the block and words the page drew.
+  const item = items.find(one => one.key === request.key)
+
+  return item !== undefined && request.fp === fingerprint(item, items) ? action : { type: 'refuse', note: s.boardLineChanged }
+}
+
+const actionOf = (items: readonly BoardItem[], request: ServeRequest, s: Strings, isLan: boolean): ServeAction => {
   // A hidden question is off the board: it is named by the key it was hidden under.
   if (request.type === 'unhide') return request.key.startsWith('hidden:') ? { type: 'unhide', key: request.key.slice('hidden:'.length) } : { type: 'refuse', note: '' }
   const item = items.find(one => one.key === request.key)
@@ -578,26 +595,29 @@ const PAGE_SCRIPT = String.raw`
     node.addEventListener('click', onPress);
     return node;
   }
-  function act(key, type, text, waiting, session, asked) {
+  // fp: the fingerprint the line was drawn with, which the server checks before it writes.
+  function act(key, type, text, waiting, session, asked, fp) {
     say(waiting || '…');
-    return call('/api/act', { key: key, type: type, text: text || '', session: session || '', asked: asked || '' }).then(function (data) {
+    return call('/api/act', { key: key, type: type, text: text || '', session: session || '', asked: asked || '', fp: fp || '' }).then(function (data) {
       say(data.note || '', data.ok ? 'done' : 'alert');
     }, function () {
       say(w('serveOffline'), 'alert');
     }).then(function () { refresh(); });
   }
-  function replyBox(key, placeholder, mode, agent, where, isSending, session, asked) {
+  function replyBox(key, placeholder, mode, agent, where, isSending, session, asked, fp) {
     var box = el('div', 'reply');
     var input = el('textarea');
     input.rows = 2;
     input.placeholder = placeholder;
-    input.setAttribute('data-key', key);
+    // A draft belongs to its session and its question: a redraw that puts another session's
+    // line under the same key starts an empty box, so the text is never sent to that session.
+    input.setAttribute('data-key', [key, session || '', asked || ''].join('\u0001'));
     var go = mode === 'send'
       ? button(w('serveSend', agent), function () {
         var text = input.value.trim();
         if (!text) return;
         input.value = '';
-        act(key, 'send', text, w('serveSending', agent), session, asked);
+        act(key, 'send', text, w('serveSending', agent), session, asked, fp);
       }, 'primary')
       : button(w('serveCopy'), function () {
         var text = input.value.trim();
@@ -630,11 +650,11 @@ const PAGE_SCRIPT = String.raw`
     else if (ask.context) add(card, el('div', 'quiet', ask.context));
     if (ask.command) add(card, el('code', '', '$ ' + ask.command));
     var actions = el('div', 'actions');
-    if (ask.canTick) actions.appendChild(button(w('serveTickNext', ask.text), function () { act(ask.key, 'tick'); }, 'primary'));
+    if (ask.canTick) actions.appendChild(button(w('serveTickNext', ask.text), function () { act(ask.key, 'tick', '', '', '', '', ask.fp); }, 'primary'));
     ask.answers.forEach(function (answer, index) {
       var send = ask.send === 'send';
       var node = button(answer, function () {
-        if (send) act(ask.key, 'send', answer, w('serveSending', ask.agent), ask.session, ask.text);
+        if (send) act(ask.key, 'send', answer, w('serveSending', ask.agent), ask.session, ask.text, ask.fp);
         else copy(answer);
       }, index === 0 ? 'primary' : '');
       node.disabled = send && ask.isSending;
@@ -652,7 +672,7 @@ const PAGE_SCRIPT = String.raw`
       actions.appendChild(link);
     }
     if (actions.childNodes.length) add(card, actions);
-    if (!ask.canTick) add(card, replyBox(ask.key, w('serveReplyPlaceholder'), ask.send, ask.agent, ask.where, ask.isSending, ask.session, ask.text));
+    if (!ask.canTick) add(card, replyBox(ask.key, w('serveReplyPlaceholder'), ask.send, ask.agent, ask.where, ask.isSending, ask.session, ask.text, ask.fp));
     if (ask.info) add(card, el('div', 'quiet small', ask.info));
     if (ask.back) add(card, el('div', 'quiet small', ask.back));
     if (ask.reopen) add(card, el('code', '', '$ ' + ask.reopen));
@@ -676,13 +696,13 @@ const PAGE_SCRIPT = String.raw`
     if (row.steps.length) add(body, stepsList(row.steps));
     if (row.handoff) add(body, el('div', 'quiet small', row.handoff));
     var actions = el('div', 'actions');
-    if (row.next) actions.appendChild(button(w('serveTickNext', row.next), function () { act(row.key, 'tick', row.next); }, 'primary'));
-    if (row.canArchive) actions.appendChild(button(w('serveArchive'), function () { act(row.key, 'archive'); }));
+    if (row.next) actions.appendChild(button(w('serveTickNext', row.next), function () { act(row.key, 'tick', row.next, '', '', '', row.fp); }, 'primary'));
+    if (row.canArchive) actions.appendChild(button(w('serveArchive'), function () { act(row.key, 'archive', '', '', '', '', row.fp); }));
     if (row.resume) actions.appendChild(button(w('serveCopyResume'), function () { copy(row.resume); }));
     if (actions.childNodes.length) add(body, actions);
     if (row.resume) add(body, el('code', '', row.resume));
-    if (row.send === 'send') add(body, replyBox(row.key, w('serveMessagePlaceholder', row.agent), 'send', row.agent, row.where, row.isSending, row.session, asked));
-    else if (row.hasCopyBox) add(body, replyBox(row.key, w('serveReplyPlaceholder'), 'copy', row.agent, '', false));
+    if (row.send === 'send') add(body, replyBox(row.key, w('serveMessagePlaceholder', row.agent), 'send', row.agent, row.where, row.isSending, row.session, asked, row.fp));
+    else if (row.hasCopyBox) add(body, replyBox(row.key, w('serveReplyPlaceholder'), 'copy', row.agent, '', false, row.session, asked));
     if (row.info) add(body, el('div', 'quiet small', row.info));
     card.appendChild(body);
     return card;

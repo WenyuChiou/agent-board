@@ -2,6 +2,7 @@ import { ZH_TW } from './i18n'
 import type { Strings } from './i18n'
 import { lastQuestion } from './digest'
 import { isBoardTurn, isTranscriptPath, readTurn, transcriptTail } from './inbox'
+import { sha256 } from './sha256'
 import { replyHint } from './view'
 import type { StepRef, TaskRef, TaskRow, View, ViewStep, WaitingItem } from './view'
 
@@ -154,8 +155,9 @@ export type BoardItem =
   | { type: 'row'; key: string; row: TaskRow }
   | { type: 'turn'; key: string; turn: PendingTurn }
 
-// `key` is the chosen line's, so the choice stays on it when lines above it come or go.
-export type BoardState = { selected: number; key: string | null; open: string | null; note: string }
+// `key` is the chosen line's, so the choice stays on it when lines above it come or go. `seen`
+// holds each line's fingerprint as the last draw showed it (null before the first draw).
+export type BoardState = { selected: number; key: string | null; open: string | null; note: string; seen: Record<string, string> | null }
 
 export type BoardAction =
   | { type: 'tick'; ref: StepRef }
@@ -168,7 +170,7 @@ export type BoardAction =
   | { type: 'html' }
   | { type: 'quit' }
 
-export const emptyBoardState: BoardState = { selected: 0, key: null, open: null, note: '' }
+export const emptyBoardState: BoardState = { selected: 0, key: null, open: null, note: '', seen: null }
 
 // The line on screen that the keys act on. A line whose key is gone was replaced under the
 // cursor since the screen was drawn; isGone stops a key from acting on a line not yet seen.
@@ -192,15 +194,53 @@ export const boardItems = (view: View, pending: readonly PendingTurn[]): BoardIt
   ]
 }
 
+// How many hand-kept tasks and questions of `items` share this one's project and title. Two
+// such tasks have no block id to tell them apart and the second one is keyed `#2`; once the
+// first is gone the second takes the first's key with the same words. The count is what
+// changes when a twin comes or goes.
+const twinsOf = (item: BoardItem, items: readonly BoardItem[]): number => {
+  const [project, title] = item.type === 'ask' ? [item.ask.project, item.ask.task] : item.type === 'row' ? [item.row.project, item.row.title] : ['', '']
+  const tasks = new Set<string>()
+  for (const one of items) {
+    if (one.type === 'row' && one.row.project === project && one.row.title === title) tasks.add(one.row.key)
+    // A question's key is its task's key and the step's number.
+    if (one.type === 'ask' && one.ask.project === project && one.ask.task === title) tasks.add(one.ask.key.replace(/::\d+$/, ''))
+  }
+
+  return tasks.size
+}
+
+// Which block a line is and the words it shows, as a short hash. A key is only a project and a
+// title (and a question's step number), which another session's block, or the same step
+// reworded, can take over between a draw and a press. Whoever draws a line keeps its
+// fingerprint, and a tick, an archive, a reply or a copy acts only while the line still has it.
+// `items` are the lines drawn together with it: a hand-kept task has no block id, so its
+// fingerprint also holds how many tasks share its project and title.
+export const fingerprint = (item: BoardItem, items: readonly BoardItem[]): string => {
+  const session = item.type === 'ask' ? (item.ask.target?.session ?? item.ask.session) : item.type === 'row' ? (item.row.archive?.session ?? item.row.target?.session ?? '') : ''
+  const parts =
+    item.type === 'ask'
+      ? [session, item.ask.target?.resume ?? '', item.ask.project, item.ask.task, item.ask.text, item.ask.note]
+      : item.type === 'row'
+        ? [session, item.row.target?.resume ?? '', item.row.project, item.row.title, item.row.next?.step ?? '', item.row.question ?? '', item.row.resume ?? '']
+        : [item.turn.agent, item.turn.project, item.turn.text]
+  if (item.type !== 'turn' && session === '') parts.push(String(twinsOf(item, items)))
+
+  return sha256(parts.join('\u0000')).slice(0, 12)
+}
+
 // What each key does on the selected line, so the footer lists only keys that do something.
 export const answersOf = (ask: WaitingItem, s: Strings): string[] =>
   ask.kind === 'confirm' ? [s.yesAnswer, s.noAnswer] : ask.kind === 'choose' ? ask.options.slice(0, 9) : []
 
 // The state with the chosen line's key set, so a key pressed later acts on the line that was
-// on screen, or on nothing if that line has gone. The script calls it each time it draws.
+// on screen, or on nothing if that line has gone, and with every line's fingerprint as drawn.
+// The script calls it each time it draws, and only then.
 export const pinned = (state: BoardState, items: readonly BoardItem[]): BoardState => {
   const at = chosen(state, items)
-  return state.key !== null && items[at]?.key !== state.key ? state : { ...state, selected: at, key: items[at]?.key ?? null }
+  if (state.key !== null && items[at]?.key !== state.key) return state
+
+  return { ...state, selected: at, key: items[at]?.key ?? null, seen: Object.fromEntries(items.map(item => [item.key, fingerprint(item, items)])) }
 }
 
 export const boardKey = (state: BoardState, key: string, items: readonly BoardItem[], s: Strings = ZH_TW): { state: BoardState; action: BoardAction | null } => {
@@ -217,7 +257,11 @@ export const boardKey = (state: BoardState, key: string, items: readonly BoardIt
   if (item === undefined) return { state, action: null }
   // The line under the cursor changed since the screen was drawn: choose what is there now and
   // let the person look before a key acts on it.
-  if (isGone) return { state: { ...state, selected: at, key: item.key, note: s.boardLineChanged }, action: null }
+  const changed = { state: { ...state, selected: at, key: item.key, note: s.boardLineChanged }, action: null }
+  if (isGone) return changed
+  // A tick, an archive or a copy of what to say acts on the line as the last draw showed it: the
+  // same key can now be another session's block, or the same step reworded.
+  if ((key === 'x' || key === 'a' || key === 'c') && state.seen !== null && state.seen[item.key] !== fingerprint(item, items)) return changed
   if (key === 'enter' || key === ' ') return { state: { ...state, selected: at, key: item.key, open: state.open === item.key ? null : item.key, note: '' }, action: null }
   if (item.type === 'ask') {
     const { ask } = item
