@@ -266,14 +266,34 @@ claude plugin update agent-board@agent-board
 
 然后在运行中的对话里输入 `/reload-plugins`，或开新的对话。
 
-要卸载：
+要卸载，请依次运行以下命令。插件还在时，先断开其他 agent 的连接：
 
 ```
+claude -p "/progress connect remove"
 claude plugin uninstall agent-board@agent-board
 claude plugin marketplace remove agent-board
 ```
 
-`progress.md`、它的归档文件和日志，以及 shell 的 profile 里那一行都会留着。
+如果第一个命令说清理尚未完成，先处理完再卸载插件。它会列出保留的文件，或无法确认已删除的文件的完整路径。你改过的文件会保留。处理列出的问题后，再运行一次 `claude -p "/progress connect remove"`。删除失败不会算成已断开连接；其他 agent 的清理仍会继续。只要还有看板命令或 skill 留着，它们共用的 `agent-board.mjs` 也会保留。
+
+如果还没断开连接就已经卸载插件，请重新安装，才能运行清理。如果连 marketplace 也移除了，先运行 `claude plugin marketplace add WenyuChiou/agent-board`。然后：
+
+```
+claude plugin install agent-board@agent-board
+claude -p "/progress connect remove"
+claude plugin uninstall agent-board@agent-board
+claude plugin marketplace remove agent-board
+```
+
+这里也要先处理完列出的清理问题，再运行卸载命令。
+
+以下文件会特意保留：
+
+- 你的历史记录：`~/.claude/progress.md`，以及旁边的 `progress-archive-YYYY-MM.md` 和 `progress-journal-YYYY-MM.md`。
+- 已创建的汇报脚本 `~/.claude/progress-report.sh`、`~/.claude/progress-report.ps1`，以及收件箱文件夹 `~/.claude/progress-inbox/`，给排队中或正在运行的 hook 用。等 agent 都断开连接、这些 hook 也结束后，如果不需要排队中的回合，可以自行删除这些脚本和收件箱。
+- shell 的 profile 里那一行、你或 setup `--agents` 写进 agent 说明文件的汇报段落，以及你自己放进 skill 文件夹的其他文件。不再需要时，请自行移除。
+
+以上是默认路径。如果设置了 `CLAUDE_PROGRESS_FILE` 或 `CLAUDE_CONFIG_DIR`，历史记录、汇报脚本和 `progress-inbox/` 会在那个进度文件旁边。
 
 ### 从旧名称换过来
 

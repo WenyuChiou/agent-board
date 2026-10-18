@@ -263,7 +263,7 @@ claude plugin uninstall agent-board@agent-board
 claude plugin marketplace remove agent-board
 ```
 
-第一行会把其他 agent 里的 hook 去掉。`progress.md` 会留着。
+第一行会断开其他 agent 的连接；先处理完列出的清理问题，再卸载插件。历史记录、汇报脚本和收件箱会留着。重试方式、已经卸载插件时的补救步骤，以及保留文件的位置，请看使用说明的[完整卸载步骤](docs/GUIDE.zh-CN.md#更新和卸载)。
 </details>
 
 更多问题请看使用说明的[问题排查](docs/GUIDE.zh-CN.md#问题排查)。

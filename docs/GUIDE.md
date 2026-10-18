@@ -257,14 +257,34 @@ claude plugin update agent-board@agent-board
 
 then `/reload-plugins` in a running session, or start a new one.
 
-To uninstall:
+To uninstall, run these commands in order. Disconnect the other agents while the plugin is still installed:
 
 ```
+claude -p "/progress connect remove"
 claude plugin uninstall agent-board@agent-board
 claude plugin marketplace remove agent-board
 ```
 
-`progress.md`, its archives and journals, and the line in your shell profile stay.
+If the first command reports `Cleanup is incomplete`, finish that cleanup before uninstalling. It lists the exact paths it preserved or could not verify as removed. Files you edited are kept. Fix the reported problem, then run `claude -p "/progress connect remove"` again. A failed delete is not counted as a disconnection; cleanup of other agents continues. If a board command or skill remains, its shared `agent-board.mjs` is kept too.
+
+If you already uninstalled the plugin before disconnecting, reinstall it to run the cleanup. If you also removed the marketplace, first run `claude plugin marketplace add WenyuChiou/agent-board`. Then:
+
+```
+claude plugin install agent-board@agent-board
+claude -p "/progress connect remove"
+claude plugin uninstall agent-board@agent-board
+claude plugin marketplace remove agent-board
+```
+
+Finish any reported cleanup before the uninstall command here too.
+
+These files stay on purpose:
+
+- Your history: `~/.claude/progress.md`, `progress-archive-YYYY-MM.md` and `progress-journal-YYYY-MM.md` beside it.
+- The reporter scripts `~/.claude/progress-report.sh` and `~/.claude/progress-report.ps1` (whichever were created), and the inbox folder `~/.claude/progress-inbox/`, for queued or running hooks. Once the agents are disconnected and those hooks have finished, you can delete these scripts and the inbox yourself if you no longer need the queued turns.
+- The line in your shell profile, any reporting section that you or `setup --agents` added to an agent's instruction file, and extra files you put inside a skill folder. Remove these yourself if you no longer need them.
+
+The paths above are the defaults. If you set `CLAUDE_PROGRESS_FILE` or `CLAUDE_CONFIG_DIR`, look beside that progress file for its history, reporter scripts and `progress-inbox/` instead.
 
 ### Coming from the old name
 

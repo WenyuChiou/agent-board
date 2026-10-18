@@ -266,14 +266,34 @@ claude plugin update agent-board@agent-board
 
 然後在執行中的對話裡打 `/reload-plugins`，或開新的對話。
 
-要移除：
+要移除，請依序執行以下指令。外掛還在時，先把其他 agent 的 hook 拿掉：
 
 ```
+claude -p "/progress connect remove"
 claude plugin uninstall agent-board@agent-board
 claude plugin marketplace remove agent-board
 ```
 
-`progress.md`、它的封存檔和日誌，以及 shell 的 profile 裡那一行都會留著。
+如果第一個指令說清理尚未完成，先處理完再移除外掛。它會列出保留的檔案，或無法確認已刪除的檔案的完整路徑。你改過的檔案會保留。處理列出的問題後，再跑一次 `claude -p "/progress connect remove"`。刪除失敗不會算成已拿掉；其他 agent 的清理仍會繼續。只要還有看板指令或 skill 留著，它們共用的 `agent-board.mjs` 也會保留。
+
+如果還沒拿掉 hook 就已經移除外掛，請重新安裝，才能執行清理。如果連 marketplace 也移除了，先跑 `claude plugin marketplace add WenyuChiou/agent-board`。然後：
+
+```
+claude plugin install agent-board@agent-board
+claude -p "/progress connect remove"
+claude plugin uninstall agent-board@agent-board
+claude plugin marketplace remove agent-board
+```
+
+這裡也要先處理完列出的清理問題，再執行移除指令。
+
+以下檔案會刻意保留：
+
+- 你的歷史紀錄：`~/.claude/progress.md`，以及旁邊的 `progress-archive-YYYY-MM.md` 和 `progress-journal-YYYY-MM.md`。
+- 已建立的回報腳本 `~/.claude/progress-report.sh`、`~/.claude/progress-report.ps1`，以及收件匣資料夾 `~/.claude/progress-inbox/`，給排隊中或正在跑的 hook 用。等 hook 都拿掉、也都跑完後，如果不需要排隊中的回合，可以自行刪掉這些腳本和收件匣。
+- shell 的 profile 裡那一行、你或 setup `--agents` 寫進 agent 說明檔的回報段落，以及你自己放進 skill 資料夾的其他檔案。不再需要時，請自行移除。
+
+以上是預設路徑。如果設定了 `CLAUDE_PROGRESS_FILE` 或 `CLAUDE_CONFIG_DIR`，歷史紀錄、回報腳本和 `progress-inbox/` 會在那個進度檔旁邊。
 
 ### 從舊名稱換過來
 

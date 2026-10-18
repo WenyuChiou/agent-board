@@ -263,7 +263,7 @@ claude plugin uninstall agent-board@agent-board
 claude plugin marketplace remove agent-board
 ```
 
-The first line takes the hooks out of your other agents. `progress.md` stays.
+The first line disconnects the other agents; finish any reported cleanup before uninstalling. Your history, reporter scripts and inbox stay. See the guide's [complete uninstall procedure](docs/GUIDE.md#update-and-uninstall) for retries, recovery if you already uninstalled, and the retained files and their locations.
 </details>
 
 More answers are in the guide's [Troubleshooting](docs/GUIDE.md#troubleshooting).
