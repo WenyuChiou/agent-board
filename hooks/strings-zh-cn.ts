@@ -293,6 +293,8 @@ export const ZH_CN: Strings = {
   archiveThis: '归档',
   archivedOne: (title: string): string => `已归档「${title}」。`,
   archiveGone: '找不到这件工作，可能已经改过或归档了。',
+  journalNoticeTitle: '完成记录没有保存成功',
+  journalFailed: '步骤已完成，但工作日志没有保存成功。待保存的记录会在下次完成步骤或下一回合重试。',
   askPlaceholder: '问一句；+ 开头就新增一件事',
   send: '发送',
   question: (text: string): string => `问：${text}`,

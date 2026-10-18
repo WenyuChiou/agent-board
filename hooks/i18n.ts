@@ -334,6 +334,8 @@ export const ZH_TW = {
   archiveThis: '封存',
   archivedOne: (title: string): string => `已封存「${title}」。`,
   archiveGone: '找不到這件工作，可能已經改過或封存了。',
+  journalNoticeTitle: '完成紀錄沒有存成功',
+  journalFailed: '步驟已完成，但工作日誌沒有存成功。待存的紀錄會在下次完成步驟或下一回合重試。',
   askPlaceholder: '問一句；+ 開頭就新增一件事',
   send: '送出',
   question: (text: string): string => `問：${text}`,

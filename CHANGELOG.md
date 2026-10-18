@@ -1,5 +1,46 @@
 # Changelog
 
+## 0.21.1 — 2026-10-18
+
+Finishing a step in the Claude Code pane writes a line to this month's journal. When
+that read or write failed, the pane said nothing: the step looked finished and its
+history was simply missing (#68).
+
+- **The pane now says when a step is done but its history was not saved,** in all three
+  languages, under its own heading. The step stays done. The notice does not replace an
+  aside that is still loading or a copied report, shows once and stays dismissed until
+  the history is saved, then goes away. A journal that cannot be read is never
+  overwritten with only the new lines. Tests: "a synthetic journal <read or write>
+  failure keeps the step done and retries once in <language>" (en, zh-TW and zh-CN), "a synthetic
+  journal failure leaves a loading aside in place", "a synthetic journal failure leaves a
+  copied report in place", "a synthetic journal failure notice stays dismissed through
+  failed turn retries", "a synthetic pending-store read failure without entries does not
+  show a journal notice".
+- **Unsaved lines are kept and retried,** with their original time and month: at the next
+  step that finishes, the next message, when the session ends, and, for a session that
+  ended first, when the next session starts. A retry adds only lines that are not in the
+  journal yet, so nothing is written twice; one consequence is that two identical
+  completions of the same step in the same minute are recorded once. A damaged retry
+  record is set aside and new completions are still saved. Tests: "a synthetic journal
+  write failure retains automatic completions until the next journal write", "a
+  synthetic journal read-back failure retries an already saved line without a
+  duplicate", "a restored pending journal saves each line once in its original month",
+  "a synthetic pending journal is retried when its session ends", "synthetic pending
+  journals from ended sessions are saved at the next session start", "a synthetic
+  journal sweep keeps newer entries when its original lines all save", "a synthetic
+  journal sweep keeps newer entries when one original month fails", "a synthetic journal
+  sweep failure for another session does not promise a next message retry", "a
+  synthetic corrupt pending journal is moved aside and new completions are saved", "a
+  synthetic store write failure still saves the new journal line", "synthetic store and
+  journal write failures keep new lines for a later retry".
+- **A message never waits for the journal.** The retry at the start of a turn runs in the
+  background, and the block's `working` state is now written without holding up the
+  start of the turn (in the same order: the write queue keeps it). Test: "a synthetic held
+  journal failure does not hold up or fail turn start".
+- When the journal cannot be read, today's count keeps its last value, and resets to 0
+  once the day has changed. Test: "a synthetic journal read failure preserves the count
+  only until the local day changes".
+
 ## 0.21.0 — 2026-10-17
 
 The board can now be read in a chat app. Hermes Agent and OpenClaw, which answer in

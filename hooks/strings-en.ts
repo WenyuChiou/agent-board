@@ -294,6 +294,8 @@ export const EN: Strings = {
   archiveThis: 'Archive',
   archivedOne: (title: string): string => `Archived “${title}”.`,
   archiveGone: 'Could not find that task; it may have changed or been archived already.',
+  journalNoticeTitle: 'Step history not saved',
+  journalFailed: 'The steps are done, but their history was not saved. We’ll try again the next time a step finishes or when you send your next message.',
   askPlaceholder: 'Ask something; start with + to add a task',
   send: 'Send',
   question: (text: string): string => `Q: ${text}`,

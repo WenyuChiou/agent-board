@@ -171,6 +171,9 @@ let inboxSeen = -1
 let inboxListed = 0
 // Each retained file and reason is named once, so two stuck files cannot take turns notifying.
 const inboxNoticesShown = new Set<string>()
+const pendingJournals = new Map<string, Record<string, string[]>>()
+const journalNoticesShown = new Set<string>()
+let journalNoticeKey = ''
 let dashboardAt = 0
 
 // CLAUDE_PROGRESS_FILE wins; then CLAUDE_CONFIG_DIR, where Claude Code keeps its own files
@@ -524,27 +527,120 @@ const notify = async ($: EngineInterface, text: string, project: string): Promis
 // Recounts today's finished steps from this month's journal.
 const countToday = async ($: EngineInterface): Promise<void> => {
   const at = await $.clock.now()
-  const text = await readText($, journalPath(await progressPath($), at)).catch(() => '')
+  const text = await readText($, journalPath(await progressPath($), at)).catch(() => null)
+  if (text === null) {
+    if (localDay(at) !== countedDay) await update($, today, () => 0)
+    return
+  }
   countedDay = localDay(at)
   await update($, today, () => countDay(text, at))
 }
 
-// Finished steps, a line each in this month's journal.
-const journal = ($: EngineInterface, entries: ReadonlyArray<Omit<JournalEntry, 'at'>>): Promise<void> =>
-  enqueue(async () => {
+// Keep the original month and timestamp across retries, including a module reload.
+const journal = ($: EngineInterface, entries: ReadonlyArray<Omit<JournalEntry, 'at'>> = [], storedKey?: string): Promise<void> => {
+  let hasPending = entries.length > 0
+  let key = storedKey ?? ''
+  return enqueue(async () => {
     const at = await $.clock.now()
-    const path = journalPath(await progressPath($), at)
-    const before = await readText($, path)
     const s = await wordsOf($)
-    const after = appendJournal(
-      before,
-      entries.map(entry => journalLine(entry, at, s)),
-      s,
-    )
-    await $.fs.write(path, after)
-    countedDay = localDay(at)
-    await update($, today, () => countDay(after, at))
-  }).catch(() => undefined)
+    if (key === '') key = `pendingJournal:${await $.session.id()}`
+    const pending = { ...pendingJournals.get(key) }
+    hasPending ||= Object.values(pending).some(lines => lines.length > 0)
+    let isStoreReadable = true
+    let stored: unknown
+    try {
+      stored = await $.store.get(key)
+    } catch {
+      isStoreReadable = false
+    }
+    if (stored !== undefined && stored !== null && (typeof stored !== 'object' || Array.isArray(stored) || Object.values(stored).some(lines => !Array.isArray(lines) || lines.some(line => typeof line !== 'string')))) {
+      try {
+        await $.store.set(key.replace('pendingJournal:', 'pendingJournalBad:'), stored)
+        await $.store.delete(key)
+      } catch {
+        isStoreReadable = false
+      }
+    } else {
+      for (const [path, lines] of Object.entries((stored ?? {}) as Record<string, string[]>)) {
+        pending[path] = [...new Set([...(pending[path] ?? []), ...lines])]
+      }
+    }
+    if (entries.length > 0) {
+      const path = journalPath(await progressPath($), at)
+      pending[path] = [...new Set([...(pending[path] ?? []), ...entries.map(entry => journalLine(entry, at, s))])]
+    }
+    hasPending ||= Object.values(pending).some(lines => lines.length > 0)
+    // A broken store must not prevent the file write or a retry in this module.
+    if (hasPending) {
+      pendingJournals.set(key, pending)
+      if (isStoreReadable && storedKey === undefined) await $.store.set(key, { ...pending }).catch(() => undefined)
+    }
+    let hasFailed = false
+    const verified: Record<string, string[]> = {}
+    for (const [path, lines] of Object.entries(pending)) {
+      try {
+        await rewrite($, path, before => {
+          const saved = new Set(before.split(/\r?\n/))
+          return appendJournal(before, lines.filter(line => !saved.has(line)), s)
+        })
+        const saved = new Set((await readText($, path)).split(/\r?\n/))
+        if (lines.some(line => !saved.has(line))) throw new Error('JOURNAL_NOT_VERIFIED')
+        verified[path] = lines
+        delete pending[path]
+      } catch {
+        hasFailed = true
+      }
+    }
+    if (Object.keys(pending).length === 0) {
+      pendingJournals.delete(key)
+    }
+    if (isStoreReadable) {
+      try {
+        // The owner may have added lines while this session was saving its earlier ones.
+        const latest = await $.store.get(key)
+        if (latest === undefined || latest === null || typeof latest === 'object' && !Array.isArray(latest) && Object.values(latest).every(lines => Array.isArray(lines) && lines.every(line => typeof line === 'string'))) {
+          const remaining = { ...pending }
+          for (const [path, lines] of Object.entries((latest ?? {}) as Record<string, string[]>)) {
+            const saved = new Set(verified[path])
+            const rest = [...new Set([...(remaining[path] ?? []), ...lines])].filter(line => !saved.has(line))
+            if (rest.length > 0) remaining[path] = rest
+            else delete remaining[path]
+          }
+          if (Object.keys(remaining).length === 0) await $.store.delete(key)
+          else await $.store.set(key, remaining)
+        }
+      } catch {
+        // Unsaved lines stay in memory when the store cannot be updated.
+      }
+    }
+    if (hasFailed) throw new Error('JOURNAL_NOT_VERIFIED')
+    if (hasPending) {
+      await countToday($)
+      journalNoticesShown.delete(key)
+      if (journalNoticeKey === key) {
+        await update($, answer, current => Object.values(STRINGS).some(words => current?.text === words.journalFailed) ? null : current)
+        journalNoticeKey = ''
+      }
+    }
+  }).catch(async () => {
+    try {
+      if (!hasPending || key !== `pendingJournal:${await $.session.id()}` || journalNoticesShown.has(key)) return
+      const s = await wordsOf($)
+      let isShown = false
+      await update($, answer, current => {
+        if (current?.isAsking || current?.copied !== undefined) return current
+        isShown = true
+        return { question: s.journalNoticeTitle, text: s.journalFailed, isAsking: false }
+      })
+      if (isShown) {
+        journalNoticesShown.add(key)
+        journalNoticeKey = key
+      }
+    } catch {
+      // Even a notice that cannot be drawn must not reject the turn or completion.
+    }
+  })
+}
 
 // The theme as /config shows it; the palette follows it.
 const readTheme = async ($: EngineInterface): Promise<void> => {
@@ -570,10 +666,10 @@ const saveMine = async (
     const finished = completedSince(current, next)
     const title = next.title || fallbackTitle(next)
     if (finished.length > 0) {
-      journal(
+      await journal(
         $,
         finished.map(task => ({ project: next.project, task: title, step: task.subject })),
-      ).catch(() => undefined)
+      )
     }
     for (const text of noticesOf(current, next, await wordsOf($))) await notify($, text, next.project)
   }
@@ -1510,6 +1606,8 @@ const othersNote = async ($: EngineInterface): Promise<string | null> => {
 // Keeps the store to the last month of sessions.
 const pruneStore = async ($: EngineInterface, at: number): Promise<void> => {
   for (const key of await $.store.keys()) {
+    // Journal retries remove verified keys; failed lines and quarantined values stay.
+    if (key.startsWith('pendingJournal:') || key.startsWith('pendingJournalBad:')) continue
     if (isStaleStoreKey(key, await $.store.get(key), at, 30 * DAY)) await $.store.delete(key)
   }
 }
@@ -1622,10 +1720,11 @@ const setNotify = async ($: EngineInterface, isOn: boolean): Promise<void> => {
   else await $.store.set('notifyOff', true)
 }
 
-const settle = async ($: EngineInterface): Promise<void> => {
+const settle = async ($: EngineInterface, isWriteBlocking = true): Promise<void> => {
   const at = await $.clock.now()
   await saveMine($, mirror => ({ ...mirror, state: stateOf(mirror, isTurnRunning), updated: at }))
-  await queueWrite($)
+  const writing = queueWrite($)
+  if (isWriteBlocking) await writing
 }
 
 // A prompt of this plugin's own, run as a turn once the session is idle. It is not the
@@ -1656,6 +1755,10 @@ export const register: Register = (on, options) => {
     await update($, isNotifyOn, () => true)
     if ((await $.store.get('notifyOff')) === true) await update($, isNotifyOn, () => false)
     await readTheme($)
+    const journalKeys = new Set([...(await $.store.keys().catch(() => [])), ...pendingJournals.keys()])
+    for (const key of journalKeys) {
+      if (key.startsWith('pendingJournal:')) await journal($, [], key)
+    }
     await countToday($)
     const storedOpen = await $.store.get('opened')
     await update($, opened, () => (Array.isArray(storedOpen) ? storedOpen.filter((one): one is string => typeof one === 'string') : []))
@@ -1823,6 +1926,7 @@ export const register: Register = (on, options) => {
 
   on('turn.start', async ($, e, next) => {
     if (e.agentId !== undefined) return next(e)
+    journal($).catch(() => undefined)
     isTurnRunning = true
     turnPrompt = e.text.trim()
     const isAnswer = isNextTurnAnswer && e.text.trim() !== ''
@@ -1839,7 +1943,7 @@ export const register: Register = (on, options) => {
       await saveMine($, one => answerTurns(clearAsked(isAnswer && one.source === 'tasks' ? markAnswered(one) : one)), true)
     }
     if (mirror !== null && mirror.tasks.length > 0) {
-      await settle($)
+      await settle($, false)
     } else if (mirror !== null && (await $.store.get(`hinted:${mirror.sessionId}`)) === undefined) {
       await $.store.set(`hinted:${mirror.sessionId}`, await $.clock.now())
       const note = await othersNote($)
@@ -1970,6 +2074,7 @@ export const register: Register = (on, options) => {
   })
 
   on('session.end', async ($, e, next) => {
+    await journal($)
     const mirror = await read($, mine)
     if (mirror !== null && mirror.tasks.length > 0) {
       const at = await $.clock.now()

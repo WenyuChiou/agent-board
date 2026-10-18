@@ -28,6 +28,7 @@ type World = {
   files: Map<string, string>
   mtime: number
   hasTasks: boolean
+  at?: number
   env?: Record<string, string>
   stats?: string[]
   // Paths that exist but refuse to be read (too big, locked).
@@ -61,6 +62,9 @@ type World = {
   appended?: unknown[]
   // Another session's stale write to progress.md, landing right after the next one.
   afterWrite?: () => string
+  // A synthetic read-back failure after a journal write has already saved its bytes.
+  afterJournalWrite?: () => void
+  holdJournalRead?: { reached: () => void; release: Promise<void> }
   // What `openclaw --version` prints.
   openclaw?: string
   // What `node --version` prints; null when there is no node to run. Unset, a supported one.
@@ -81,7 +85,7 @@ const posix = (path: string): string => path.replace(/^[A-Za-z]:\\/, '/').replac
 
 // Everything a session's engine answers beneath the plugin, with files kept in memory.
 const engineBeneath = (on: On, world: World): MockClock => {
-  const clock = mock.clock(on, { now: Date.parse('2026-10-16T12:00:00.000Z') })
+  const clock = mock.clock(on, { now: world.at ?? Date.parse('2026-10-16T12:00:00.000Z') })
   // The system says Traditional Chinese, so the pane speaks it unless a test says otherwise.
   mock.env(on, world.env ?? { HOME: '/home/me', LANG: 'zh_TW.UTF-8' })
   // A store that has looked at the inbox before, unless a test says otherwise.
@@ -199,8 +203,15 @@ const engineBeneath = (on: On, world: World): MockClock => {
       value: names.map(path => ({ name: path.slice(dir.length), kind: 'file' as const, size: (world.files.get(path) ?? '').length, mtimeMs: world.mtime, isLink: false })),
     }
   })
-  on('fs.read', ($, e) => {
+  on('fs.read', async ($, e) => {
     const path = posix(e.path)
+    const hold = world.holdJournalRead
+    if (path.includes('-journal-') && hold !== undefined) {
+      world.holdJournalRead = undefined
+      hold.reached()
+      await hold.release
+      return { deny: 'EIO' }
+    }
     const text = world.files.get(path)
     if (world.unreadable?.has(path)) return { deny: 'EFBIG' }
     return text === undefined ? { deny: 'ENOENT' } : { value: text }
@@ -216,6 +227,7 @@ const engineBeneath = (on: On, world: World): MockClock => {
     }
     world.files.set(path, e.text)
     world.mtime += 1
+    if (path.includes('-journal-')) world.afterJournalWrite?.()
     // Another session's write, made from what it read before this one, lands right after.
     const stale = world.afterWrite
     if (stale !== undefined && path === FILE) {
@@ -837,6 +849,346 @@ test('the rule rides the system prompt only while the session has a Task list', 
 })
 
 const JOURNAL = '/home/me/.claude/progress-journal-2026-10.md'
+
+test('a synthetic corrupt pending journal is moved aside and new completions are saved', async ($, on) => {
+  const world: World = { files: new Map([[FILE, '## demo-1\n### Demo task\n- [?] Demo step\n']]), mtime: 1, hasTasks: true, store: { inboxDone: {} } }
+  engineBeneath(on, world)
+  await probeStart($)
+  const bad = { [JOURNAL]: 'damaged synthetic value' }
+  world.store![`pendingJournal:${SESSION}`] = bad
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
+  await ui.press({ key: 'demo-1::Demo task::0::done' })
+  expect(world.store![`pendingJournalBad:${SESSION}`]).toEqual(bad)
+  expect(world.files.get(JOURNAL)).toContain(' · Demo step\n')
+  expect(world.store![`pendingJournal:${SESSION}`]).toBeUndefined()
+  await ui.unmount()
+})
+
+test('a synthetic store write failure still saves the new journal line', async ($, on) => {
+  const world: World = { files: new Map([[FILE, '## demo-1\n### Demo task\n- [?] Demo step\n']]), mtime: 1, hasTasks: true }
+  engineBeneath(on, world)
+  await probeStart($)
+  world.failStore = (operation, key) => operation === 'set' && key.startsWith('pendingJournal:')
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
+  await ui.press({ key: 'demo-1::Demo task::0::done' })
+  expect(world.files.get(JOURNAL)).toContain(' · Demo step\n')
+  expect(await ui.find({ type: 'Text', text: ZH_TW.journalFailed })).toBeUndefined()
+  await ui.unmount()
+})
+
+test('synthetic store and journal write failures keep new lines for a later retry', async ($, on) => {
+  const world: World = { files: new Map([[FILE, '## demo-1\n### Demo task\n- [?] Demo step\n']]), mtime: 1, hasTasks: true }
+  engineBeneath(on, world)
+  await probeStart($)
+  world.failStore = (operation, key) => operation === 'set' && key.startsWith('pendingJournal:')
+  world.unwritable = new Set([JOURNAL])
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
+  await ui.press({ key: 'demo-1::Demo task::0::done' })
+  expect(await ui.find({ type: 'Text', text: ZH_TW.journalFailed })).toBeDefined()
+  world.failStore = undefined
+  world.unwritable.clear()
+  await $.session.end({ reason: 'other', sessionId: SESSION, resume: { id: SESSION } as never })
+  expect((world.files.get(JOURNAL) ?? '').split(' · Demo step\n')).toHaveLength(2)
+  await ui.unmount()
+})
+
+test('a synthetic held journal failure does not hold up or fail turn start', async ($, on) => {
+  const line = '- 2026-10-16 08:00 · demo-1 · Demo task · Demo step'
+  const world: World = { files: new Map([[JOURNAL, '# Work log\n']]), mtime: 1, hasTasks: true, store: { inboxDone: {} } }
+  const clock = engineBeneath(on, world)
+  let release = (): void => {}
+  let reached = (): void => {}
+  const atGate = new Promise<void>(resolve => { reached = resolve })
+  const gate = new Promise<void>(resolve => { release = resolve })
+  await start($, 'Demo work')
+  await $.tool.call({ tool: 'TaskCreate', subject: 'Next step', description: '' })
+  await clock.advance(10)
+  world.store![`pendingJournal:${SESSION}`] = { [JOURNAL]: [line] }
+  world.holdJournalRead = { reached, release: gate }
+  let isStarted = false
+  const starting = $.turn.start({ text: 'Continue demo', turnId: 'held-journal' }).then(() => { isStarted = true })
+  await atGate
+  await clock.advance(1)
+  const startedWhileHeld = isStarted
+  release()
+  await starting
+  await $.session.end({ reason: 'other', sessionId: SESSION, resume: { id: SESSION } as never })
+  expect(startedWhileHeld).toBe(true)
+  expect((world.files.get(JOURNAL) ?? '').split(`${line}\n`)).toHaveLength(2)
+})
+
+test('a synthetic journal failure leaves a loading aside in place', async ($, on) => {
+  const world: World = { files: new Map([[FILE, '## demo-1\n### Demo task\n- [?] Demo step\n']]), mtime: 1, hasTasks: true }
+  engineBeneath(on, world)
+  let release = (): void => {}
+  let reached = (): void => {}
+  const atGate = new Promise<void>(resolve => { reached = resolve })
+  const gate = new Promise<void>(resolve => { release = resolve })
+  on('model.fork', async () => {
+    reached()
+    await gate
+    return { value: { isAnswered: true as const, text: 'Demo answer', usage: { input_tokens: 1, output_tokens: 1, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 } } }
+  })
+  await probeStart($)
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
+  const asking = ui.input({ key: 'ask', text: 'Demo question' })
+  await atGate
+  world.unwritable = new Set([JOURNAL])
+  await ui.press({ key: 'demo-1::Demo task::0::done' })
+  const loading = await ui.find({ type: 'Text', text: ZH_TW.thinking })
+  const notice = await ui.find({ type: 'Text', text: ZH_TW.journalFailed })
+  release()
+  await asking
+  expect(loading).toBeDefined()
+  expect(notice).toBeUndefined()
+  expect(await ui.find({ type: 'Text', text: 'Demo answer' })).toBeDefined()
+  await ui.unmount()
+})
+
+test('synthetic pending journals from ended sessions are saved at the next session start', async ($, on) => {
+  const line = '- 2026-10-16 08:00 · demo-1 · Demo task · Demo step'
+  const other = 'pendingJournal:demo-ended'
+  const bad = 'pendingJournalBad:demo-ended'
+  const world: World = { files: new Map(), mtime: 1, hasTasks: true, store: { inboxDone: {}, [other]: { [JOURNAL]: [line] }, [bad]: { '/synthetic/leave-alone.md': [line] }, 'pendingJournal:demo-empty': {} } }
+  engineBeneath(on, world)
+  await probeStart($)
+  expect((world.files.get(JOURNAL) ?? '').split(`${line}\n`)).toHaveLength(2)
+  expect(world.store![other]).toBeUndefined()
+  expect(world.store!['pendingJournal:demo-empty']).toBeUndefined()
+  expect(world.store![bad]).toEqual({ '/synthetic/leave-alone.md': [line] })
+  expect(world.files.has('/synthetic/leave-alone.md')).toBe(false)
+})
+
+for (const isPartial of [false, true]) {
+  test(`a synthetic journal sweep keeps newer entries when ${isPartial ? 'one original month fails' : 'its original lines all save'}`, async ($, on) => {
+    const line = '- 2026-10-16 08:00 · demo-1 · Demo task · First step'
+    const newer = '- 2026-10-16 08:01 · demo-1 · Demo task · Newer step'
+    const previous = '/home/me/.claude/progress-journal-2026-09.md'
+    const older = '- 2026-09-30 08:00 · demo-1 · Demo task · Older step'
+    const other = 'pendingJournal:demo-active'
+    const pending = isPartial ? { [previous]: [older], [JOURNAL]: [line] } : { [JOURNAL]: [line] }
+    const shared: Record<string, unknown> = { inboxDone: {}, autoConnectOff: true, [other]: pending }
+    const world: World = {
+      files: new Map([[previous, '# Work log\n']]), mtime: 1, hasTasks: true, shared,
+      unreadable: new Set(isPartial ? [previous] : []),
+      // The owner adds a completion and fails to save it after the sweep read its key.
+      afterJournalWrite: () => { shared[other] = { ...pending, [JOURNAL]: [line, newer] } },
+    }
+    engineBeneath(on, world)
+    await probeStart($)
+    expect(shared[other]).toEqual(isPartial ? { [previous]: [older], [JOURNAL]: [newer] } : { [JOURNAL]: [newer] })
+    expect((world.files.get(JOURNAL) ?? '').split(`${line}\n`)).toHaveLength(2)
+    expect(world.files.get(JOURNAL)).not.toContain(newer)
+
+    world.afterJournalWrite = undefined
+    world.unreadable!.clear()
+    await probeStart($)
+    expect(shared[other]).toBeUndefined()
+    expect((world.files.get(JOURNAL) ?? '').split(`${line}\n`)).toHaveLength(2)
+    expect((world.files.get(JOURNAL) ?? '').split(`${newer}\n`)).toHaveLength(2)
+    if (isPartial) expect((world.files.get(previous) ?? '').split(`${older}\n`)).toHaveLength(2)
+  })
+}
+
+test('a synthetic journal sweep failure for another session does not promise a next message retry', async ($, on) => {
+  const line = '- 2026-10-16 08:00 · demo-1 · Demo task · Demo step'
+  const other = 'pendingJournal:demo-ended'
+  const world: World = { files: new Map(), mtime: 1, hasTasks: true, store: { inboxDone: {}, [other]: { [JOURNAL]: [line] } }, unwritable: new Set([JOURNAL]) }
+  engineBeneath(on, world)
+  await probeStart($)
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
+  expect(await ui.find({ type: 'Text', text: ZH_TW.journalFailed })).toBeUndefined()
+  expect(world.store![other]).toEqual({ [JOURNAL]: [line] })
+
+  world.unwritable!.clear()
+  await $.turn.start({ text: 'Continue demo', turnId: 'other-session-pending' })
+  await $.session.end({ reason: 'other', sessionId: SESSION, resume: { id: SESSION } as never })
+  expect(world.files.get(JOURNAL)).toBeUndefined()
+  expect(world.store![other]).toEqual({ [JOURNAL]: [line] })
+  await probeStart($)
+  expect((world.files.get(JOURNAL) ?? '').split(`${line}\n`)).toHaveLength(2)
+  expect(world.store![other]).toBeUndefined()
+  await ui.unmount()
+})
+
+test('a synthetic pending journal is retried when its session ends', async ($, on) => {
+  const world: World = { files: new Map([[FILE, '## demo-1\n### Demo task\n- [?] Demo step\n']]), mtime: 1, hasTasks: true, store: { inboxDone: {} } }
+  engineBeneath(on, world)
+  await probeStart($)
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
+  world.unwritable = new Set([JOURNAL])
+  await ui.press({ key: 'demo-1::Demo task::0::done' })
+  world.unwritable.clear()
+  await $.session.end({ reason: 'other', sessionId: SESSION, resume: { id: SESSION } as never })
+  expect((world.files.get(JOURNAL) ?? '').split(' · Demo step\n')).toHaveLength(2)
+  expect(world.store![`pendingJournal:${SESSION}`]).toBeUndefined()
+  await ui.unmount()
+})
+
+test('a synthetic journal failure notice stays dismissed through failed turn retries', async ($, on) => {
+  const world: World = { files: new Map([[FILE, '## demo-1\n### Demo task\n- [?] Demo step\n']]), mtime: 1, hasTasks: true }
+  engineBeneath(on, world)
+  await probeStart($)
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
+  world.unwritable = new Set([JOURNAL])
+  await ui.press({ key: 'demo-1::Demo task::0::done' })
+  await ui.press({ key: 'clear-answer' })
+  await $.turn.start({ text: 'Continue demo', turnId: 'failed-journal-retry' })
+  await $.session.end({ reason: 'other', sessionId: SESSION, resume: { id: SESSION } as never })
+  expect(await ui.find({ type: 'Text', text: ZH_TW.journalFailed })).toBeUndefined()
+  await ui.unmount()
+})
+
+test('a synthetic journal failure leaves a copied report in place', async ($, on) => {
+  const world: World = { files: new Map([[FILE, '## demo-1\n### Demo task\n- [?] Demo step\n']]), mtime: 1, hasTasks: true }
+  engineBeneath(on, world)
+  outside(on)
+  await probeStart($)
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
+  await ui.press({ key: 'report' })
+  world.unwritable = new Set([JOURNAL])
+  await ui.press({ key: 'demo-1::Demo task::0::done' })
+  expect(await ui.find({ type: 'Text', text: ZH_TW.copied })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: ZH_TW.journalFailed })).toBeUndefined()
+  await ui.unmount()
+})
+
+test('a synthetic pending-store read failure without entries does not show a journal notice', async ($, on) => {
+  const world: World = { files: new Map(), mtime: 1, hasTasks: true }
+  engineBeneath(on, world)
+  await probeStart($)
+  world.failStore = (operation, key) => operation === 'get' && key.startsWith('pendingJournal:')
+  await $.turn.start({ text: 'Demo work', turnId: 'unreadable-pending' })
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
+  expect(await ui.find({ type: 'Text', text: ZH_TW.journalFailed })).toBeUndefined()
+  await ui.unmount()
+})
+
+test('a synthetic journal read failure preserves the count only until the local day changes', async ($, on) => {
+  const world: World = { files: new Map([[FILE, '## demo-1\n### Demo task\n- [?] Demo step\n']]), mtime: 1, hasTasks: true, at: new Date(2026, 9, 16, 23, 59).getTime() }
+  const clock = engineBeneath(on, world)
+  await probeStart($)
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
+  await ui.press({ key: 'demo-1::Demo task::0::done' })
+  expect(await ui.find({ type: 'Text', text: '✓ 1' })).toBeDefined()
+  world.unreadable = new Set([JOURNAL])
+  await $.session.start({ cwd: '/work/demo-1', surface: 'desktop', isInteractive: true })
+  expect(await ui.find({ type: 'Text', text: '✓ 1' })).toBeDefined()
+  await clock.advance(2 * 60 * 1000)
+  expect(await ui.find({ type: 'Text', text: '✓ 0' })).toBeDefined()
+  await ui.unmount()
+})
+
+// Synthetic file failures use only the in-memory engine.
+for (const [language, words] of [['en', EN], ['zh-TW', ZH_TW], ['zh-CN', ZH_CN]] as const) {
+  for (const failure of ['read', 'write'] as const) {
+    test(`a synthetic journal ${failure} failure keeps the step done and retries once in ${language}`, async ($, on) => {
+      const past = '# Work log\n- 2026-10-15 12:00 · demo-1 · Earlier work · Earlier step\n'
+      const world: World = {
+        files: new Map([[FILE, '## demo-1\n### Demo task\n- [?] Demo step\n- [?] Next step\n'], [JOURNAL, past]]),
+        mtime: 1,
+        hasTasks: true,
+        store: { inboxDone: {}, notifyOff: true },
+      }
+      const clock = engineBeneath(on, world)
+      await $.session.start({ cwd: '/work/demo-1', surface: 'desktop', isInteractive: true })
+      await $.command.run({ ...TIDY, args: `lang ${language}` })
+      const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
+      if (failure === 'read') world.unreadable = new Set([JOURNAL])
+      else world.unwritable = new Set([JOURNAL])
+
+      // Both clicks use the same drawn button before the first tick removes it.
+      await Promise.all([
+        ui.press({ key: 'demo-1::Demo task::0::done' }),
+        ui.press({ key: 'demo-1::Demo task::0::done' }),
+      ])
+      expect(world.files.get(FILE)).toContain('- [x] Demo step')
+      expect(world.files.get(JOURNAL)).toBe(past)
+      expect(await ui.find({ type: 'Text', text: words.journalFailed })).toBeDefined()
+      expect(await ui.find({ type: 'Text', text: words.question(words.journalNoticeTitle) })).toBeDefined()
+
+      await clock.advance(2 * 60 * 1000)
+      world.unreadable?.clear()
+      world.unwritable?.clear()
+      await $.turn.start({ text: 'Continue demo', turnId: 'journal-retry' })
+      const saved = world.files.get(JOURNAL) ?? ''
+      expect(saved.startsWith(past)).toBe(true)
+      expect(saved.split(' · Demo step\n')).toHaveLength(2)
+      expect(await ui.find({ type: 'Text', text: words.journalFailed })).toBeUndefined()
+      await $.turn.start({ text: 'Continue demo again', turnId: 'journal-retry-again' })
+      expect(world.files.get(JOURNAL)).toBe(saved)
+      await ui.press({ key: 'demo-1::Demo task::1::done' })
+      expect((world.files.get(JOURNAL) ?? '').split(' · Demo step\n')).toHaveLength(2)
+      expect((world.files.get(JOURNAL) ?? '').split(' · Next step\n')).toHaveLength(2)
+      await ui.unmount()
+    })
+  }
+}
+
+test('a synthetic journal write failure retains automatic completions until the next journal write', async ($, on) => {
+  const world: World = { files: new Map(), mtime: 1, hasTasks: true, named: 'Demo task' }
+  const clock = engineBeneath(on, world)
+  await start($, 'Demo work')
+  await $.tool.call({ tool: 'TaskCreate', subject: 'Demo step', description: '' })
+  await $.tool.call({ tool: 'TaskCreate', subject: 'Next step', description: '' })
+  await clock.advance(10)
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
+  world.unwritable = new Set([JOURNAL])
+  await $.tool.call({ tool: 'TaskUpdate', taskId: '1', status: 'completed' })
+  expect(await ui.find({ type: 'Text', text: ZH_TW.journalFailed })).toBeDefined()
+  await $.tool.call({ tool: 'TaskUpdate', taskId: '1', status: 'completed' })
+  world.unwritable.clear()
+  await $.tool.call({ tool: 'TaskUpdate', taskId: '2', status: 'completed' })
+  const saved = world.files.get(JOURNAL) ?? ''
+  expect(saved.split(' · Demo step\n')).toHaveLength(2)
+  expect(saved.split(' · Next step\n')).toHaveLength(2)
+  expect(await ui.find({ type: 'Text', text: ZH_TW.journalFailed })).toBeUndefined()
+  await ui.unmount()
+})
+
+test('a synthetic journal read-back failure retries an already saved line without a duplicate', async ($, on) => {
+  const world: World = {
+    files: new Map([[FILE, '## demo-1\n### Demo task\n- [?] Demo step\n']]),
+    mtime: 1,
+    hasTasks: true,
+    store: { inboxDone: {} },
+  }
+  engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/demo-1', surface: 'desktop', isInteractive: true })
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
+  world.afterJournalWrite = () => { world.unreadable = new Set([JOURNAL]) }
+  await ui.press({ key: 'demo-1::Demo task::0::done' })
+  const saved = world.files.get(JOURNAL)
+  expect(saved).toContain(' · Demo step\n')
+  expect(await ui.find({ type: 'Text', text: ZH_TW.journalFailed })).toBeDefined()
+  expect(Object.keys(world.store?.[`pendingJournal:${SESSION}`] ?? {})).toEqual([JOURNAL])
+  world.afterJournalWrite = undefined
+  world.unreadable?.clear()
+  await $.turn.start({ text: 'Continue demo', turnId: 'journal-read-back' })
+  expect(world.files.get(JOURNAL)).toBe(saved)
+  expect(world.store?.[`pendingJournal:${SESSION}`]).toBeUndefined()
+  expect(await ui.find({ type: 'Text', text: ZH_TW.journalFailed })).toBeUndefined()
+  await ui.unmount()
+})
+
+test('a restored pending journal saves each line once in its original month', async ($, on) => {
+  const previous = '/home/me/.claude/progress-journal-2026-09.md'
+  const first = '- 2026-09-30 12:00 · demo-1 · Demo task · Earlier step'
+  const second = '- 2026-10-01 12:00 · demo-1 · Demo task · Later step'
+  const world: World = {
+    files: new Map([[previous, `# Work log\r\n${first}\r\n`]]),
+    mtime: 1,
+    hasTasks: true,
+    store: { inboxDone: {}, [`pendingJournal:${SESSION}`]: { [previous]: [first], [JOURNAL]: [second] } },
+  }
+  engineBeneath(on, world)
+  await start($, 'Continue demo')
+  expect(world.files.get(previous)).toBe(`# Work log\r\n${first}\r\n`)
+  expect(world.files.get(JOURNAL)).toBe(`${ZH_TW.journalTitle}\n${second}\n`)
+  expect(world.store?.[`pendingJournal:${SESSION}`]).toBeUndefined()
+  await $.turn.start({ text: 'Continue demo again', turnId: 'journal-restored-again' })
+  expect(world.files.get(JOURNAL)).toBe(`${ZH_TW.journalTitle}\n${second}\n`)
+})
 
 // The engine's side of what the mod shows outside its pane, written down for the tests.
 const outside = (on: On) => {
