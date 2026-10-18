@@ -1,5 +1,33 @@
 # Changelog
 
+## 0.22.2 — 2026-10-18
+
+Four smaller faults in `/progress connect`, found in an audit (#96).
+
+- **Each approval is asked for once.** A connect you run by hand printed the Codex `/hooks`
+  line and the Hermes `y` line twice: once as a notice and once in the status lines. The status
+  lines now say it alone, and the Hermes status line now also names `--accept-hooks`. Test: "a
+  hand-run connect names each approval it needs once".
+- **A file that cannot be read says so.** A config, the board script, a board command or an
+  old hook file that could not be read got the words for a file that could not be written.
+  Reads now have their own words in all three languages, and the agent's status line points to
+  them; a config that is read but is not valid JSON keeps its own words. Test: "a file that
+  cannot be read is named as unreadable, not as unwritable".
+- **Stored problems follow the language of the session that shows them.** A problem was stored
+  in the words of the session that found it, so `/progress connect status` in another language
+  showed it untranslated. Problems are now stored by their string's name and its values, and
+  worded when shown; a record written by an earlier release still shows its words, and one
+  stored problem that is unknown or damaged is left out without hiding the rest. Tests: "a
+  problem stored by an English session is shown in the language of the session that asks", "a
+  stored setup status keeps the agents and valid problems when another problem is unknown or
+  damaged", "/progress connect status keeps valid problems and agents when a stored problem is
+  unknown", "every stored problem names a string each language has, taking the arguments it is
+  stored with".
+- **A Node.js release candidate or nightly counts.** `v22.0.0-rc.1` or a nightly build read
+  as no Node.js at all, so the board command was reported as needing Node.js. It is now read
+  by its major version. Test: "a Node.js release candidate or nightly counts by its major
+  version".
+
 ## 0.22.1 — 2026-10-18
 
 `/progress connect remove` deletes the board's SKILL.md and then its folder, if the folder is

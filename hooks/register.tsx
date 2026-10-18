@@ -1165,7 +1165,7 @@ const connectAgents = async (
   // board script still goes (nothing runs it), and the next remove looks at the folder again.
   const tidyFolder = async (folder: string | null, label: string): Promise<void> => {
     if (folder === null || (await removeEmptyDir($, folder, isWin))) return
-    warn(`removeFailed:${folder}`, s.connectRemoveFailed(folder))
+    warn(`removeFailed:${folder}`, { message: 'connectRemoveFailed', args: [folder] })
     failedLabels.add(label)
   }
   for (const hook of agentHooks({ home, sep, isWindows: isWin, script, inbox: inboxPath(path), codexHome, grokHome, hermesHome, openclawHome, board, s: STRINGS[fileLang] })) {
