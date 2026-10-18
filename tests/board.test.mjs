@@ -68,6 +68,125 @@ test('the board script leaves out a question a pane on this machine marked answe
   assert.ok(run('en', [], { 'progress-answered.json': '{' }).includes('Per-key limit'))
 })
 
+const htmlRun = ({ file = '', inbox = {}, age = 0, lang = 'en', home = dir => dir } = {}) => {
+  const dir = mkdtempSync(join(tmpdir(), 'board-html-'))
+  try {
+    const path = join(dir, 'progress.md')
+    writeFileSync(path, file)
+    mkdirSync(join(dir, 'progress-inbox'))
+    for (const [name, body] of Object.entries(typeof inbox === 'function' ? inbox(dir) : inbox)) {
+      const target = join(dir, 'progress-inbox', name)
+      writeFileSync(target, body)
+      const at = new Date(Date.now() - (typeof age === 'function' ? age(name) : age))
+      utimesSync(target, at, at)
+    }
+    // A static page is inspected from disk; the test never opens a browser.
+    assert.ok(BOARD_SCRIPT.includes('openInBrowser(html,'))
+    const script = join(dir, 'agent-board.mjs')
+    writeFileSync(script, `globalThis.AGENT_BOARD = ${JSON.stringify({ path, lang })}\n${BOARD_SCRIPT.replace('openInBrowser(html,', '((target, done) => done(false))(html,')}`)
+    execFileSync(process.execPath, [script, '--html'], {
+      env: { ...process.env, CLAUDE_PROGRESS_FILE: path, HOME: home(dir), USERPROFILE: home(dir) },
+      encoding: 'utf8',
+    })
+    return readFileSync(join(dir, 'progress.html'), 'utf8')
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+}
+
+const HTML_TURN = 'codex-turn-1792152000-1.json'
+const HTML_QUESTION = 'Use 100 or 300 a minute?'
+const htmlTurn = answer => JSON.stringify({ session_id: 'demo-1', cwd: '/work/api-gateway', last_assistant_message: answer })
+
+test('the HTML board shows pending questions with an empty progress file and cannot send replies', () => {
+  for (const [lang, label, hint] of [
+    ['en', 'Turns in the inbox not summed up yet', 'this page cannot send replies'],
+    ['zh-TW', '收件匣裡還沒整理的回合', '請回到該 agent 的對話裡回覆；這個頁面不能傳送回覆。'],
+    ['zh-CN', '收件箱里还没整理的回合', '请回到该 agent 的对话里回复；这个页面不能发送回复。'],
+  ]) {
+    const page = htmlRun({ inbox: { [HTML_TURN]: htmlTurn(HTML_QUESTION) }, lang })
+    assert.ok(page.includes(label) && page.includes(hint), page)
+    assert.ok(page.includes('api-gateway · codex'), page)
+    assert.equal(page.split(HTML_QUESTION).length - 1, 1)
+    assert.ok(page.includes('data-key="section:inbox" open'), page)
+    assert.ok(!/Nothing needs you right now|<form|<textarea|<button|fetch\(/.test(page), page)
+    assert.ok(/● 1<\/span>/.test(page), page)
+  }
+})
+
+test('the HTML board keeps a stale inbox question visible until it is processed', () => {
+  const page = htmlRun({ inbox: { [HTML_TURN]: htmlTurn(HTML_QUESTION) }, age: 7 * 24 * 60 * 60 * 1000 })
+  assert.ok(page.includes(HTML_QUESTION) && page.includes('Turns in the inbox not summed up yet'), page)
+})
+
+test('the HTML board shows only the newest thirty inbox files', () => {
+  const inbox = Object.fromEntries(Array.from({ length: 35 }, (_, i) => [
+    `codex-turn-1792152000-${i}.json`,
+    JSON.stringify({ session_id: `demo-${i}`, cwd: '/work/api-gateway', last_assistant_message: `Use limit ${i}?` }),
+  ]))
+  const page = htmlRun({ inbox, age: name => Number(name.match(/-(\d+)\.json$/)[1]) * 1000 })
+  for (let i = 0; i < 35; i++) assert.equal(page.includes(`Use limit ${i}?`), i < 30, page)
+})
+
+test('the HTML board skips malformed inbox files without losing a valid question', () => {
+  const page = htmlRun({ inbox: { 'codex-turn-1792152000-2.json': '{ broken', [HTML_TURN]: htmlTurn(HTML_QUESTION) } })
+  assert.ok(page.includes(HTML_QUESTION) && !page.includes('{ broken'), page)
+  assert.ok(!htmlRun({ inbox: { [HTML_TURN]: '{ broken' } }).includes('data-key="section:inbox"'))
+})
+
+test('the HTML board escapes pending turn text and project names', () => {
+  const page = htmlRun({ inbox: {
+    [HTML_TURN]: JSON.stringify({ session_id: 'demo-1', cwd: '/work/<img "demo" &>', last_assistant_message: '<script>alert("demo")</script> & done?' }),
+    'gemini-turn-1792152000-2.json': JSON.stringify({ session_id: 'demo-2', cwd: '/work/api-gateway', prompt_response: 'Use <demo> & "yes"?' }),
+  } })
+  assert.ok(page.includes('&lt;scriptalert(&quot;demo&quot;)&lt;/script &amp; done?'), page)
+  assert.ok(page.includes('&lt;img &quot;demo&quot; &amp;&gt;'), page)
+  assert.ok(page.includes('&lt;demo') && page.includes('&amp; &quot;yes&quot;?'), page)
+  assert.ok(!/<script>alert|<img|<demo/.test(page), page)
+})
+
+// The CLI cannot read the plugin store's inboxDone; only a claimed file is excluded here.
+test('the HTML board skips claimed inbox files while keeping the question in progress.md', () => {
+  const page = htmlRun({
+    file: FILE.replace('Per-key limit — 100 or 300 a minute?', HTML_QUESTION),
+    inbox: { [`${HTML_TURN}.deadbeef-abc-1.taking`]: htmlTurn(HTML_QUESTION) },
+  })
+  assert.ok(!page.includes('data-key="section:inbox"'), page)
+  const waiting = page.match(/data-key="section:waiting"[\s\S]*?<\/details>/)?.[0] ?? ''
+  assert.equal(waiting.split(HTML_QUESTION).length - 1, 1, page)
+})
+
+test('the HTML board lists a question in both an agent block and the inbox like the terminal board and --serve', () => {
+  const page = htmlRun({
+    file: FILE.replace('Per-key limit — 100 or 300 a minute?', HTML_QUESTION),
+    inbox: { [HTML_TURN]: htmlTurn(HTML_QUESTION) },
+  })
+  const pending = page.match(/data-key="section:inbox"[\s\S]*?<\/details>/)?.[0] ?? ''
+  const waiting = page.match(/data-key="section:waiting"[\s\S]*?<\/details>/)?.[0] ?? ''
+  assert.equal(pending.split(HTML_QUESTION).length - 1, 1, page)
+  assert.equal(waiting.split(HTML_QUESTION).length - 1, 1, page)
+  assert.ok(/● 2<\/span>/.test(page), page)
+})
+
+test('the HTML board redacts home paths and credentials before clipping pending questions', () => {
+  const secret = `sk-${'a'.repeat(40)}`
+  const page = htmlRun({
+    home: dir => join(dir, 'demo-home'),
+    inbox: dir => ({ [HTML_TURN]: htmlTurn(`Use ${join(dir, 'demo-home', 'private')} with ${secret} or wait?`) }),
+  })
+  assert.ok(page.includes('~') && page.includes('•••') && page.includes('or wait?'), page)
+  assert.ok(!page.includes('demo-home') && !page.includes(secret), page)
+})
+
+test('the HTML board shows only the agent and project for a pending turn without a question', () => {
+  const page = htmlRun({ inbox: {
+    [HTML_TURN]: JSON.stringify({ session_id: 'demo-1', cwd: '/work/api-gateway', prompt: 'Private prompt contents', last_assistant_message: '' }),
+    'gemini-turn-1792152000-2.json': JSON.stringify({ session_id: 'demo-2', cwd: '/work/api-gateway', prompt_response: 'Private reply contents.' }),
+  } })
+  assert.ok(page.includes('api-gateway · codex') && page.includes('api-gateway · gemini'), page)
+  assert.ok(!page.includes('Private prompt contents') && !page.includes('Private reply contents'), page)
+})
+
 // `--chat` in a folder of its own, with the home folder, the temp folders and every XDG folder
 // inside it, so no run can read or write the real ones. `home` is a path inside it. `change`
 // edits the script's text first, to make it fail the way a bug in it would.
@@ -520,6 +639,33 @@ setTimeout(() => process.stdout.write('Redis it is; wiring it up now.\\n'), 1000
   }
   return { dir, path, url, port, token, call, rows, rowOf, keyOf, close, exited, served: servedAt(run, path) }
 }
+
+test('the terminal and served boards show only the newest thirty inbox files', { timeout: 30_000 }, async () => {
+  const board = await page()
+  try {
+    const inbox = join(board.dir, 'progress-inbox')
+    mkdirSync(inbox)
+    const now = Date.now()
+    for (let i = 0; i < 35; i++) {
+      const file = join(inbox, `codex-turn-1792152000-${i}.json`)
+      writeFileSync(file, JSON.stringify({ session_id: `demo-${i}`, cwd: '/work/api-gateway', last_assistant_message: `Use limit ${i}?` }))
+      const at = new Date(now - i * 1000)
+      utimesSync(file, at, at)
+    }
+    const terminal = execFileSync(process.execPath, [join(board.dir, 'agent-board.mjs')], {
+      env: { ...process.env, CLAUDE_PROGRESS_FILE: board.path, NO_COLOR: '1' },
+      encoding: 'utf8',
+    })
+    const served = (await board.call('GET', '/api/board')).json().model.turns
+    assert.equal(served.length, 30)
+    for (let i = 0; i < 35; i++) {
+      assert.equal(terminal.includes(`Use limit ${i}?`), i < 30, terminal)
+      assert.equal(served.some(turn => turn.text === `Use limit ${i}?`), i < 30, JSON.stringify(served))
+    }
+  } finally {
+    await board.close()
+  }
+})
 
 test('marking a question answered on the page or with h on the board writes only the hidden list, sends nothing, and shows it again', { timeout: 30_000 }, async () => {
   const board = await page(`

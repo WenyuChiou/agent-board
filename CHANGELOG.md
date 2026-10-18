@@ -1,5 +1,57 @@
 # Changelog
 
+## 0.21.2 — 2026-10-18
+
+A question another agent (Codex, Gemini CLI, Cursor, Grok Build, Muse Code, Hermes Agent,
+OpenClaw, OpenCode) ended its turn on reached the pane, the terminal board and the board page, but
+not `progress.html`: until a Claude session summed the turn up into `progress.md`, the HTML
+board showed nothing waiting (#42).
+
+- **`progress.html` now lists the inbox's unprocessed turns in their own section,** with
+  the waiting count raised by each question, both from the pane and from
+  `agent-board.mjs --html`. A question shows its text, clipped to 200 characters; a turn
+  that is not a question shows only its agent and project. The section says replies go
+  back in that agent's own conversation, since the page cannot send one. Tests: "the HTML
+  board shows pending questions with an empty progress file and cannot send replies",
+  "progress.html shows unprocessed inbox questions before a digest and drops the pending
+  copy afterwards", "the HTML board shows only the agent and project for a pending turn
+  without a question", "progress.html shows only the agent and project for a pending turn
+  without a question", "the static dashboard clips each pending question to two hundred
+  characters", "the HTML board keeps a stale inbox question visible until it is
+  processed", "the HTML board lists a question in both an agent block and the inbox like
+  the terminal board and --serve".
+- **The text is treated as untrusted.** It is HTML-escaped, and home folders and known
+  credential forms are hidden before it is clipped, as `--chat` does. When the pane builds
+  the page it reads no transcript and starts no process, so a transcript path in an inbox
+  file cannot pass options to Node. Tests: "the HTML board escapes pending turn text and project
+  names", "progress.html escapes inbox text and skips turns already recorded as
+  processed", "the HTML board redacts home paths and credentials before clipping pending
+  questions", "progress.html redacts home paths and credentials before clipping pending
+  questions", "progress.html shows pending questions without reading transcripts or
+  starting a process", "progress.html starts no process for a pending turn whose
+  transcript path is a Node option".
+- **A broken inbox never stops the page.** When the record of processed turns is damaged
+  or cannot be read, every inbox file counts as not processed yet, and `progress.html` is
+  still written and reminders still run. Malformed inbox files are skipped, and claimed
+  ones still are. Tests: "progress.html is still
+  written and reminders run when inboxDone is malformed", "progress.html is still written
+  and reminders run when reading inboxDone is denied", "the HTML board skips malformed
+  inbox files without losing a valid question", "the HTML board skips claimed inbox files
+  while keeping the question in progress.md".
+- **Every board reads at most the newest 30 inbox files.** The terminal board,
+  `--serve` and `--html` used to read every `.json` file in `progress-inbox/`; they now
+  take the same files the pane does: the newest 30 whose names are an agent's turn or
+  session end, so other `.json` files there are ignored. Tests:
+  "progress.html reads only the newest thirty unprocessed inbox files", "the HTML board
+  shows only the newest thirty inbox files", "the terminal and served boards show only the
+  newest thirty inbox files".
+
+Known gaps: `agent-board.mjs --html` cannot read the pane's record of processed turns.
+Inbox files that were already in the folder when the pane first looked are recorded there
+as read and left off the pane's page, but `--html` still lists them, as the terminal board
+does. And the script still reads a log tail for a turn with no reply text, so `--html` can
+show a bare ◐ line for a turn that the pane's page leaves out.
+
 ## 0.21.1 — 2026-10-18
 
 Finishing a step in the Claude Code pane writes a line to this month's journal. When

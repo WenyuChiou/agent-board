@@ -7,6 +7,8 @@ import { STRINGS } from '../hooks/strings'
 import { ZH_TW } from '../hooks/i18n'
 import { EN } from '../hooks/strings-en'
 import { ZH_CN } from '../hooks/strings-zh-cn'
+import { dashboardHtml } from '../hooks/dashboard'
+import { buildView } from '../hooks/view'
 import { RELEASE_0_18_1, RELEASE_0_20_5 } from './fixtures/released'
 
 const FILE = '/home/me/.claude/progress.md'
@@ -31,12 +33,15 @@ type World = {
   at?: number
   env?: Record<string, string>
   stats?: string[]
+  reads?: string[]
+  mtimes?: Record<string, number>
   // Paths that exist but refuse to be read (too big, locked).
   unreadable?: Set<string>
   // When set, the next write to progress.md waits here; `reached` resolves once it does.
   hold?: { reached: () => void; release: Promise<void> }
   // What the store holds at the start.
   store?: Record<string, unknown>
+  storeReads?: string[]
   // In place of `store`: the store every session on the machine shares, which the test
   // changes mid-way as another session would.
   shared?: Record<string, unknown>
@@ -92,7 +97,10 @@ const engineBeneath = (on: On, world: World): MockClock => {
   const shared = world.shared
   if (shared === undefined) {
     const store: Record<string, unknown> = world.store ?? { inboxDone: {} }
-    on('store.get', ($, e) => world.failStore?.('get', e.key) ? { deny: 'EIO' } : { value: store[e.key] })
+    on('store.get', ($, e) => {
+      world.storeReads?.push(e.key)
+      return world.failStore?.('get', e.key) ? { deny: 'EIO' } : { value: store[e.key] }
+    })
     on('store.set', ($, e) => {
       if (world.failStore?.('set', e.key)) return { deny: 'EIO' }
       if (world.ignoreStore?.(e.key)) return { value: undefined }
@@ -200,11 +208,12 @@ const engineBeneath = (on: On, world: World): MockClock => {
     const dir = `${posix(e.path ?? '').replace(/\/$/, '')}/`
     const names = [...world.files.keys()].filter(path => path.startsWith(dir) && !path.slice(dir.length).includes('/'))
     return {
-      value: names.map(path => ({ name: path.slice(dir.length), kind: 'file' as const, size: (world.files.get(path) ?? '').length, mtimeMs: world.mtime, isLink: false })),
+      value: names.map(path => ({ name: path.slice(dir.length), kind: 'file' as const, size: (world.files.get(path) ?? '').length, mtimeMs: world.mtimes?.[path] ?? world.mtime, isLink: false })),
     }
   })
   on('fs.read', async ($, e) => {
     const path = posix(e.path)
+    world.reads?.push(path)
     const hold = world.holdJournalRead
     if (path.includes('-journal-') && hold !== undefined) {
       world.holdJournalRead = undefined
@@ -1878,6 +1887,188 @@ test('progress.html is written beside progress.md, and /progress open opens it i
   const result = await $.command.run({ ...TIDY, args: 'open' })
   expect(ran.at(-1)).toEqual(['xdg-open', '/home/me/.claude/progress.html'])
   expect(result.text).toBe('已在瀏覽器打開：/home/me/.claude/progress.html')
+})
+
+test('progress.html shows unprocessed inbox questions before a digest and drops the pending copy afterwards', async ($, on) => {
+  const question = 'Use 100 or 300 a minute?'
+  const inbox = '/home/me/.claude/progress-inbox'
+  const name = 'codex-turn-1792152000-1.json'
+  const world: World = {
+    files: new Map([
+      [FILE, ''],
+      [`${inbox}/${name}`, JSON.stringify({ session_id: 'demo-1', cwd: '/work/api-gateway', prompt: 'Add the limiter', last_assistant_message: question })],
+      [`${inbox}/codex-turn-1792152000-2.json`, '{ broken'],
+    ]),
+    mtime: 1,
+    hasTasks: true,
+    store: { inboxDone: {}, autoConnectOff: true },
+    reply: () => `TITLE: Add the limiter\nDONE: Read the code\nNEXT: Write the limit tests\nASK: ${question}`,
+  }
+  const clock = engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/persona_framework', surface: 'terminal', isInteractive: true })
+  const page = world.files.get('/home/me/.claude/progress.html') ?? ''
+  expect(page).toContain('data-key="section:inbox" open')
+  expect(page).toContain('收件匣裡還沒整理的回合')
+  expect(page.split(question)).toHaveLength(2)
+  expect(page).toContain('這個頁面不能傳送回覆')
+  expect(page).not.toContain('{ broken')
+  await clock.advance(5000)
+  await $.command.run({ ...TIDY, args: 'open' })
+  const digested = world.files.get('/home/me/.claude/progress.html') ?? ''
+  expect(world.files.get(FILE)).toContain(question)
+  expect(digested).toContain(question)
+  expect(digested).not.toContain('data-key="section:inbox"')
+})
+
+test('progress.html escapes inbox text and skips turns already recorded as processed', async ($, on) => {
+  const inbox = '/home/me/.claude/progress-inbox'
+  const name = 'codex-turn-1792152000-1.json'
+  const world: World = {
+    files: new Map([
+      [FILE, ''],
+      [`${inbox}/${name}`, JSON.stringify({ session_id: 'demo-1', cwd: '/work/<img "demo" &>', last_assistant_message: '<script>alert("demo")</script> & done?' })],
+      [`${inbox}/gemini-turn-1792152000-2.json`, JSON.stringify({ session_id: 'demo-2', cwd: '/work/api-gateway', prompt_response: 'Already processed' })],
+    ]),
+    mtime: 1,
+    hasTasks: true,
+    store: { inboxDone: { 'gemini-turn-1792152000-2.json': 'deadbeef:1792152000000' }, autoConnectOff: true },
+  }
+  engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/persona_framework', surface: 'terminal', isInteractive: true })
+  const page = world.files.get('/home/me/.claude/progress.html') ?? ''
+  expect(page).toContain('&lt;scriptalert(&quot;demo&quot;)&lt;/script &amp; done?')
+  expect(page).toContain('&lt;img &quot;demo&quot; &amp;&gt;')
+  expect(page).not.toContain('<script>alert')
+  expect(page).not.toContain('Already processed')
+})
+
+test('progress.html is still written and reminders run when inboxDone is malformed', async ($, on) => {
+  const world: World = { files: new Map([[FILE, JOBS], [`${INBOX}/codex-turn-1792152000-1.json`, JSON.stringify({ session_id: 'demo-1', cwd: '/work/api-gateway', last_assistant_message: 'Ship the demo build, OK?' })]]), mtime: 1, hasTasks: true, store: { inboxDone: 'oops', autoConnectOff: true }, storeReads: [] }
+  engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/persona_framework', surface: 'terminal', isInteractive: true })
+  const page = world.files.get('/home/me/.claude/progress.html') ?? ''
+  expect(page).toContain('Google 暑期實習')
+  // With no readable record of processed turns, every inbox file counts as not processed yet.
+  expect(page).toContain('data-key="section:inbox"')
+  expect(page).toContain('Ship the demo build, OK?')
+  expect(world.storeReads).toContain('told')
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal', props: PROPS })
+  expect(await ui.find({ type: 'Text', text: '● 1' })).toBeDefined()
+  await ui.unmount()
+})
+
+test('progress.html is still written and reminders run when reading inboxDone is denied', async ($, on) => {
+  const world: World = { files: new Map([[FILE, JOBS], [`${INBOX}/codex-turn-1792152000-1.json`, JSON.stringify({ session_id: 'demo-1', cwd: '/work/api-gateway', last_assistant_message: 'Ship the demo build, OK?' })]]), mtime: 1, hasTasks: true, store: { inboxDone: {}, autoConnectOff: true }, storeReads: [], failStore: (operation, key) => operation === 'get' && key === 'inboxDone' }
+  engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/persona_framework', surface: 'terminal', isInteractive: true })
+  const page = world.files.get('/home/me/.claude/progress.html') ?? ''
+  expect(page).toContain('Google 暑期實習')
+  // With no readable record of processed turns, every inbox file counts as not processed yet.
+  expect(page).toContain('data-key="section:inbox"')
+  expect(page).toContain('Ship the demo build, OK?')
+  expect(world.storeReads).toContain('told')
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal', props: PROPS })
+  expect(await ui.find({ type: 'Text', text: '● 1' })).toBeDefined()
+  await ui.unmount()
+})
+
+test('progress.html redacts home paths and credentials before clipping pending questions', async ($, on) => {
+  const secret = `sk-${'a'.repeat(40)}`
+  const question = `Use /home/me/private with ${secret} or wait?`
+  const world: World = {
+    files: new Map([[FILE, ''], [`${INBOX}/codex-turn-1792152000-1.json`, JSON.stringify({ session_id: 'demo-1', cwd: '/work/api-gateway', last_assistant_message: question })]]),
+    mtime: 1,
+    hasTasks: true,
+    store: { inboxDone: {}, autoConnectOff: true },
+  }
+  engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/persona_framework', surface: 'terminal', isInteractive: true })
+  const page = world.files.get('/home/me/.claude/progress.html') ?? ''
+  expect(page).toContain('~/private')
+  expect(page).toContain('•••')
+  expect(page).not.toContain('/home/me/private')
+  expect(page).not.toContain(secret)
+  expect(page).toContain('or wait?')
+})
+
+test('progress.html shows only the agent and project for a pending turn without a question', async ($, on) => {
+  const world: World = {
+    files: new Map([[FILE, ''], [`${INBOX}/codex-turn-1792152000-1.json`, JSON.stringify({ session_id: 'demo-1', cwd: '/work/api-gateway', prompt: 'Private prompt contents', last_assistant_message: '' })]]),
+    mtime: 1,
+    hasTasks: true,
+    store: { inboxDone: {}, autoConnectOff: true },
+  }
+  engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/persona_framework', surface: 'terminal', isInteractive: true })
+  const page = world.files.get('/home/me/.claude/progress.html') ?? ''
+  expect(page).toContain('api-gateway · codex')
+  expect(page).toContain('data-key="section:inbox"')
+  expect(page).not.toContain('Private prompt contents')
+})
+
+test('progress.html reads only the newest thirty unprocessed inbox files', async ($, on) => {
+  const world: World = { files: new Map([[FILE, '']]), mtime: 1, hasTasks: true, store: { inboxDone: {}, autoConnectOff: true }, reads: [], mtimes: {} }
+  for (let i = 0; i < 35; i++) {
+    const path = `${INBOX}/codex-turn-1792152000-${i}.json`
+    world.files.set(path, JSON.stringify({ session_id: `demo-${i}`, cwd: '/work/api-gateway', prompt: 'Add the limiter', last_assistant_message: `Use limit ${i}?` }))
+    world.mtimes![path] = i
+  }
+  world.store!.inboxDone = { 'codex-turn-1792152000-34.json': 'deadbeef:1792152000000' }
+  engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/persona_framework', surface: 'terminal', isInteractive: true })
+  const page = world.files.get('/home/me/.claude/progress.html') ?? ''
+  const reads = world.reads!.filter(path => path.startsWith(`${INBOX}/`))
+  expect(reads).toHaveLength(30)
+  expect(page).toContain('Use limit 33?')
+  expect(page).toContain('Use limit 4?')
+  expect(page).not.toContain('Use limit 3?')
+  expect(page).not.toContain('Use limit 34?')
+})
+
+test('progress.html shows pending questions without reading transcripts or starting a process', async ($, on) => {
+  const transcript = '/home/me/.codex/sessions/demo.jsonl'
+  const body = JSON.stringify({ session_id: 'demo-1', cwd: '/work/api-gateway', transcript_path: transcript, last_assistant_message: 'Use 100 or 300 a minute?' })
+  const world: World = {
+    files: new Map([[FILE, ''], [`${INBOX}/codex-turn-1792152000-1.json`, body], [`${INBOX}/codex-turn-1792152000-2.json`, body], [transcript, 'Private transcript contents']]),
+    mtime: 1,
+    hasTasks: true,
+    store: { inboxDone: {}, autoConnectOff: true },
+    ran: [],
+    reads: [],
+  }
+  engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/persona_framework', surface: 'terminal', isInteractive: true })
+  expect(world.files.get('/home/me/.claude/progress.html')).toContain('Use 100 or 300 a minute?')
+  expect(world.reads).not.toContain(transcript)
+  expect(world.ran).toEqual([])
+})
+
+test('progress.html starts no process for a pending turn whose transcript path is a Node option', async ($, on) => {
+  const transcript = '--require=/home/me/x.txt'
+  const world: World = {
+    files: new Map([[FILE, ''], [`${INBOX}/codex-turn-1792152000-1.json`, JSON.stringify({ session_id: 'demo-1', cwd: '/work/api-gateway', transcript_path: transcript, last_assistant_message: 'Private reply contents.' })]]),
+    mtime: 1,
+    hasTasks: true,
+    store: { inboxDone: {}, autoConnectOff: true },
+    ran: [],
+    reads: [],
+  }
+  engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/persona_framework', surface: 'terminal', isInteractive: true })
+  const page = world.files.get('/home/me/.claude/progress.html') ?? ''
+  expect(page).toContain('data-key="section:inbox"')
+  expect(page).toContain('api-gateway · codex')
+  expect(page).not.toContain('Private reply contents.')
+  expect(page).not.toContain(transcript)
+  expect(world.reads).not.toContain(transcript)
+  expect(world.ran).toEqual([])
+})
+
+test('the static dashboard clips each pending question to two hundred characters', () => {
+  const page = dashboardHtml(buildView([], [], null, 0), EN, '/work/progress.md', '', [{ agent: 'codex', project: 'api-gateway', text: `${'a'.repeat(200)}private tail?`, isQuestion: true, at: 0 }])
+  expect(page).toContain('a'.repeat(199))
+  expect(page).not.toContain('a'.repeat(201))
+  expect(page).not.toContain('private tail?')
 })
 
 test('on the phone (no input box) the pane still draws, focus first, with its buttons', async ($, on) => {

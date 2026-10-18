@@ -1,4 +1,6 @@
 import type { ProgressStepStatus } from '../types'
+import type { PendingTurn } from './board'
+import { clip } from './mirror'
 import { askRole, DARK, LIGHT, stepRole, toneRole } from './palette'
 import type { Palette } from './palette'
 import type { Strings } from './i18n'
@@ -6,8 +8,8 @@ import { replyHint, wayBackText } from './view'
 import type { Focus, ReplyHint, TaskRow, View, ViewStep, WaitingItem } from './view'
 
 // progress.html: the same view as the pane, as a page any browser keeps open in a window of
-// its own, beside progress.md. Built from the file alone (no session's own card), so every
-// session writes the same page and every agent's work is on it. It reloads itself every 30
+// its own, beside progress.md. Built from the file and pending inbox turns, without a session's
+// own card, so every agent's work is on it. It reloads itself every 30
 // seconds and keeps the sections the person opened, and follows the system's light or dark.
 
 const GLYPH: Record<ProgressStepStatus, string> = {
@@ -101,8 +103,9 @@ const section = (id: string, title: string, count: number, tone: string, hint: s
     : `<details class="section" data-key="section:${id}"${isOpen ? ' open' : ''}><summary><span class="title">${esc(title)}</span>` +
       `<span class="count" style="color:var(--${tone})">${count}</span>${hint === '' ? '' : `<span class="quiet">${esc(hint)}</span>`}</summary>${body}</details>`
 
-export const dashboardHtml = (view: View, s: Strings, path: string, stamp: string): string => {
-  const { waiting, active, due, today } = view.overview
+export const dashboardHtml = (view: View, s: Strings, path: string, stamp: string, pending: readonly PendingTurn[] = []): string => {
+  const { active, due, today } = view.overview
+  const waiting = view.overview.waiting + pending.filter(turn => turn.isQuestion).length
   const nearest = view.due[0]
   const counts = [
     ['●', waiting, s.countWaiting, 'waiting'],
@@ -165,7 +168,19 @@ footer{color:var(--muted);font-size:.85rem;display:grid;gap:4px;border-top:1px s
 <section class="counts">${counts
     .map(([glyph, n, word, role]) => `<span><span style="color:var(--${n > 0 ? role : 'muted'})">${glyph} ${n}</span> ${esc(word)}</span>`)
     .join('')}</section>
-${focus(view.focus, s)}
+${view.focus === null && pending.some(turn => turn.isQuestion) ? '' : focus(view.focus, s)}
+${section(
+  'inbox',
+  s.boardInbox,
+  pending.length,
+  'accent',
+  '',
+  `<p class="quiet">${esc(s.dashInboxHint)}</p>` + pending.map(turn =>
+    `<div class="ask"><div class="where">${esc([turn.project, turn.agent].filter(part => part !== '').join(' · '))}</div>` +
+    `<div><span style="color:var(--${turn.isQuestion ? 'waiting' : 'accent'})">${turn.isQuestion ? '●' : '◐'}</span> ${turn.isQuestion ? esc(clip(turn.text, 200)) : ''}</div></div>`,
+  ).join(''),
+  true,
+)}
 ${section('waiting', s.sectionWaiting, view.waiting.length, 'waiting', '', view.waiting.map(item => waitingItem(item, s)).join(''), true)}
 ${view.hidden.length === 0 ? '' : `<p class="quiet">${esc(s.hiddenCount(view.hidden.length))}</p>`}
 ${section('due', s.sectionDue, view.due.length, 'soon', nearest === undefined ? '' : s.nearestDue(nearest.title, nearest.due?.left ?? ''), view.due.map(it => row(it, s, true)).join(''), false)}

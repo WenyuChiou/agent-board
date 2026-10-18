@@ -317,6 +317,7 @@ export const EN: Strings = {
     `ID of the "${title}" session. Find it in ${agent}'s session list${via === null ? '' : `, or reopen it with ${via} once it is closed`}.`,
   fileUnreadable: "Can't read the progress file",
   dashStamp: (time: string): string => `updated ${time}`,
+  dashInboxHint: "Reply in the agent's own session; this page cannot send replies.",
   windowOpened: (path: string): string => `Opened in your browser: ${path}`,
   windowFailed: (path: string): string => `Couldn't open a browser; open it yourself: ${path}`,
 

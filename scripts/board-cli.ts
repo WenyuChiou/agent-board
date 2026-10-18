@@ -17,7 +17,7 @@ import type { PasteProblem } from '../hooks/blocks'
 import { startServer } from './board-serve'
 import { boardKey, boardScreen, boardText, chatText, doneToday, emptyBoardState, peekInbox, boardItems, pinned, redact } from '../hooks/board'
 import type { BoardAction, BoardState } from '../hooks/board'
-import { LOG_TAIL } from '../hooks/inbox'
+import { LOG_TAIL, isInboxFile } from '../hooks/inbox'
 import { dashboardHtml } from '../hooks/dashboard'
 import { appendJournal, archivePath, countDay, hasArchiveEntry, journalLine, journalPath } from '../hooks/journal'
 import { parseProgress } from '../hooks/parse'
@@ -93,14 +93,23 @@ const pending = (scrub?: (text: string) => string) => {
   const dir = join(dirname(path), 'progress-inbox')
   let names: string[] = []
   try {
-    names = readdirSync(dir).filter(name => name.endsWith('.json'))
+    names = readdirSync(dir).filter(name => isInboxFile(name))
   } catch {
     return []
   }
-  const files = names.flatMap(name => {
+  const entries = names.flatMap(name => {
     try {
-      const file = join(dir, name)
-      return [{ name, body: read(file), at: statSync(file).mtimeMs }]
+      const stat = statSync(join(dir, name))
+      return stat.isFile() ? [{ name, at: stat.mtimeMs }] : []
+    } catch {
+      return []
+    }
+  })
+    .sort((a, b) => b.at - a.at)
+    .slice(0, 30)
+  const files = entries.flatMap(entry => {
+    try {
+      return [{ ...entry, body: read(join(dir, entry.name)) }]
     } catch {
       return []
     }
@@ -202,7 +211,8 @@ const openHtml = (done: (note: string) => void): void => {
   const now = new Date()
   const stamp = s.dashStamp(`${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())} ${pad(now.getHours())}:${pad(now.getMinutes())}`)
   const html = path.replace(/\.md$/i, '') + '.html'
-  const page = dashboardHtml(view(), s, path, stamp)
+  const home = homeOrNone()
+  const page = dashboardHtml(view(), s, path, stamp, pending(text => redact(text, home, process.platform === 'win32')))
   // Named like any other file the board cannot write, so --watch reports it and runs on.
   try {
     writeFileSync(html, page)

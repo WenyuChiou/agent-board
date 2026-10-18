@@ -357,6 +357,7 @@ export const ZH_TW = {
     `「${title}」那個對話的 ID：拿去對照 ${agent} 的對話列表${via === null ? '' : `，關掉之後也可以用 ${via} 接回`}`,
   fileUnreadable: '讀不到進度檔',
   dashStamp: (time: string): string => `更新於 ${time}`,
+  dashInboxHint: '請回到該 agent 的對話裡回覆；這個頁面不能傳送回覆。',
   windowOpened: (path: string): string => `已在瀏覽器打開：${path}`,
   windowFailed: (path: string): string => `打不開瀏覽器，請自己開：${path}`,
 

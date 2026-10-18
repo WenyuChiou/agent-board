@@ -316,6 +316,7 @@ export const ZH_CN: Strings = {
     `“${title}”那个对话的 ID：拿去对照 ${agent} 的对话列表${via === null ? '' : `，关掉之后也可以用 ${via} 接回`}`,
   fileUnreadable: '读不到进度文件',
   dashStamp: (time: string): string => `更新于 ${time}`,
+  dashInboxHint: '请回到该 agent 的对话里回复；这个页面不能发送回复。',
   windowOpened: (path: string): string => `已在浏览器打开：${path}`,
   windowFailed: (path: string): string => `打不开浏览器，请自己打开：${path}`,
 

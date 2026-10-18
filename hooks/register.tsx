@@ -54,6 +54,8 @@ import type { ListedTask } from './mirror'
 import { baseName, countSteps, doneKey, isHereProject, isTaskComplete, parseProgress } from './parse'
 import type { ProgressProject } from '../types'
 import { dashboardHtml } from './dashboard'
+import { peekInbox, redact } from './board'
+import type { PendingTurn } from './board'
 import { paletteFor } from './palette'
 import { drawPane, reviseKey } from './pane'
 import type { PaneActions, PaneModel, PaneUi } from './pane'
@@ -372,8 +374,31 @@ const dashboardPath = (path: string): string => `${path.replace(/\.md$/i, '')}.h
 
 const pad2 = (n: number): string => String(n).padStart(2, '0')
 
-// progress.html beside progress.md: the whole file's view, the same from every session, at
-// most once a minute and only when it changed.
+// Pending turns are optional: an unavailable inbox must not stop the board or its reminders.
+const pendingTurns = async ($: EngineInterface): Promise<PendingTurn[]> => {
+  try {
+    const path = await progressPath($)
+    const dir = inboxPath(path)
+    const done = await readInboxRecord($, 'inboxDone').catch(() => ({} as Record<string, string>))
+    const entries = (await $.fs.list(dir))
+      .filter(entry => entry.kind === 'file' && isInboxFile(entry.name) && done[entry.name] === undefined)
+      .sort((a, b) => b.mtimeMs - a.mtimeMs)
+      .slice(0, 30)
+    const files: Array<{ name: string; body: string; at: number }> = []
+    for (const entry of entries) {
+      const body = await $.fs.read(`${dir}${sepOf(dir)}${entry.name}`).catch(() => '')
+      files.push({ name: entry.name, body, at: entry.mtimeMs })
+    }
+    const home = ((await $.env.get('USERPROFILE')) ?? (await $.env.get('HOME')) ?? '').replace(/[\\/]+$/, '')
+    const isWin = await isWindows($, path)
+    return peekInbox(files, () => '', text => redact(text, home, isWin))
+  } catch {
+    return []
+  }
+}
+
+// progress.html beside progress.md: the file's view and pending turns, at most once a minute
+// and only when it changed.
 const writeDashboard = async ($: EngineInterface, force = false): Promise<string> => {
   const snap = await read($, snapshot)
   const at = await $.clock.now()
@@ -381,8 +406,9 @@ const writeDashboard = async ($: EngineInterface, force = false): Promise<string
   if (!force && at - dashboardAt < 60 * 1000) return path
   const s = await wordsOf($)
   const view = buildView(snap.projects, [], null, at, await read($, today), await read($, doneSeen), s, await read($, hiddenAsks))
+  const pending = await pendingTurns($)
   const date = new Date(at)
-  const html = dashboardHtml(view, s, snap.path, s.dashStamp(`${localDay(at)} ${pad2(date.getHours())}:${pad2(date.getMinutes())}`))
+  const html = dashboardHtml(view, s, snap.path, s.dashStamp(`${localDay(at)} ${pad2(date.getHours())}:${pad2(date.getMinutes())}`), pending)
   dashboardAt = at
   if (html === lastDashboard) return path
   lastDashboard = html
