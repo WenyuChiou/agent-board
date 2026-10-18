@@ -2,7 +2,7 @@
 // Node, no Claude Code. Needs Node 22.18+ or 24 (it reads hooks/board-script.ts directly).
 import { execFile, execFileSync, spawn, spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs'
 import { request } from 'node:http'
 import { createServer as createNetServer } from 'node:net'
 import { tmpdir } from 'node:os'
@@ -714,6 +714,149 @@ test('the same progress.md named two ways brings back the same page', { timeout:
     assert.equal(urls[1], urls[0], again)
   } finally {
     await board.end(urls)
+  }
+})
+
+const pause = ms => new Promise(done => setTimeout(done, ms))
+
+// Asks the page at that address to close, and waits for its address file to go.
+const closeAt = async (url, served) => {
+  const { port, searchParams } = new URL(url)
+  await new Promise(done => {
+    const req = request({ host: '127.0.0.1', port, method: 'POST', path: '/api/close', headers: { host: `127.0.0.1:${port}`, 'x-board-token': searchParams.get('t'), 'content-type': 'application/json' } }, res => res.resume().on('end', done))
+    req.on('error', done)
+    req.end('{}')
+  })
+  for (let tries = 0; existsSync(served) && tries < 50; tries++) await pause(100)
+}
+
+// A page whose agent stand-in writes down each run and holds it until `release` is written (or
+// 8 seconds pass), like a long agent turn; and the `--serve` of a copy of its script beside it.
+const holdingPage = async () => {
+  const hold = mkdtempSync(join(tmpdir(), 'board-hold-'))
+  const stand = join(hold, 'grok-stand-in.mjs')
+  const calls = join(hold, 'calls.jsonl')
+  const gate = join(hold, 'release')
+  writeFileSync(stand, `import { appendFileSync, existsSync } from 'node:fs'
+appendFileSync(${JSON.stringify(calls)}, JSON.stringify(process.argv.slice(2)) + '\\n')
+const end = Date.now() + 8000
+const timer = setInterval(() => { if (existsSync(${JSON.stringify(gate)}) || Date.now() > end) { clearInterval(timer); process.stdout.write('Redis it is.\\n'); process.exit(0) } }, 25)
+`)
+  const agents = { AGENT_BOARD_GROK: stand, AGENT_BOARD_CODEX: stand }
+  const board = await page('', agents)
+  const script = join(board.dir, 'agent-board.mjs')
+  const env = { ...process.env, CLAUDE_PROGRESS_FILE: '', NO_COLOR: '1', XDG_RUNTIME_DIR: join(board.dir, 'run'), ...agents }
+  return {
+    board,
+    ran: () => (existsSync(calls) ? readFileSync(calls, 'utf8').split('\n').filter(Boolean) : []),
+    // A new copy of the script, as after an update: another build time, so --serve means to replace the page.
+    update: () => {
+      const { atime, mtimeMs } = statSync(script)
+      utimesSync(script, atime, new Date(mtimeMs + 5000))
+    },
+    serve: () => new Promise((done, fail) => execFile(process.execPath, [script, '--serve', '--no-open'], { env, encoding: 'utf8', timeout: 30_000 }, (error, out) => (error ? fail(error) : done(out)))),
+    // Lets the reply go, waits until the page has none in flight, and closes it if it is still there.
+    stop: async () => {
+      writeFileSync(gate, 'go')
+      for (let tries = 0; tries < 100; tries++) {
+        const ping = await board.call('GET', '/api/ping').catch(() => null)
+        if (ping === null || ping.json().sending === 0) break
+        await pause(50)
+      }
+      await board.close()
+      rmSync(hold, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })
+    },
+    release: () => writeFileSync(gate, 'go'),
+  }
+}
+
+test('a newer --serve does not start a second page while the page it would replace is sending a reply, shows that page with a note, and replaces it once the reply is in', { timeout: 60_000 }, async () => {
+  const held = await holdingPage()
+  const { board } = held
+  const urls = []
+  try {
+    const key = await board.keyOf('Pick the cache')
+    const reply = { key, type: 'send', text: 'Redis', session: 'b2c3d4e5', asked: 'Redis or Memcached?' }
+    assert.equal((await board.call('POST', '/api/act', { body: reply })).status, 202)
+    held.update()
+    const out = await held.serve()
+    // The page that is sending is the only address shown, with the note above it, and no second
+    // page took its place in the address file.
+    assert.deepEqual(out.match(/http:\/\/127\.0\.0\.1:\d+\/\?t=[\w-]+/g), [board.url.href], out)
+    assert.ok(out.includes('A reply may still be on its way to an agent, so the board page that is already open is kept'), out)
+    assert.ok(out.trimEnd().endsWith(board.url.href), out)
+    assert.equal(JSON.parse(readFileSync(board.served, 'utf8')).url, board.url.href)
+    // Another reply to that session meets the one in flight; only one run of the agent started.
+    const second = await board.call('POST', '/api/act', { body: { ...reply, text: 'Memcached' } })
+    assert.equal(second.status, 409)
+    assert.equal(held.ran().length, 1)
+    // The address file 0.19.0 left beside progress.md is kept the same way while its page sends.
+    const beside = join(board.dir, 'progress-serve.json')
+    renameSync(board.served, beside)
+    const old = await held.serve()
+    assert.deepEqual(old.match(/http:\/\/127\.0\.0\.1:\d+\/\?t=[\w-]+/g), [board.url.href], old)
+    assert.ok(existsSync(beside) && !existsSync(board.served))
+    renameSync(beside, board.served)
+    // Once the reply is in, the page agrees to close and the newer copy starts its own.
+    held.release()
+    for (let tries = 0; (await board.call('GET', '/api/ping')).json().sending !== 0 && tries < 100; tries++) await pause(50)
+    const next = await held.serve()
+    const url = next.match(/answer\): (http:\/\/127\.0\.0\.1:\d+\/\?t=[\w-]+)/)?.[1]
+    assert.ok(url, next)
+    urls.push(url)
+    assert.notEqual(url, board.url.href)
+    assert.ok(!next.includes('already open is kept'), next)
+    assert.equal(JSON.parse(readFileSync(board.served, 'utf8')).url, url)
+    assert.equal(await Promise.race([board.exited, pause(5000).then(() => 'still running')]), 0)
+  } finally {
+    for (const url of urls) await closeAt(url, board.served)
+    await held.stop()
+  }
+})
+
+test('an address file naming a dead process, or a running one with nothing at its port, does not keep the next --serve from starting a page', { timeout: 60_000 }, async () => {
+  // 999999 is a number no process has. The test's own is one that runs, as a number a restarted
+  // computer gave to another program does.
+  for (const pid of [999999, process.pid]) {
+    const board = serveIn()
+    const port = await freePort()
+    const stale = `http://127.0.0.1:${port}/?t=gone`
+    writeFileSync(board.served, JSON.stringify({ pid, port, url: stale, path: board.path, built: '' }))
+    const urls = []
+    try {
+      const out = await board.serve()
+      urls.push(board.urlOf(out))
+      assert.ok(urls[0], out)
+      assert.notEqual(urls[0], stale)
+      assert.ok(!out.includes('already open is kept'), out)
+      assert.equal(JSON.parse(readFileSync(board.served, 'utf8')).url, urls[0])
+    } finally {
+      await board.end(urls)
+    }
+  }
+})
+
+test('a page whose process runs and whose port takes the connection but says nothing is shown with the note, and no second page starts', { timeout: 60_000 }, async () => {
+  const board = serveIn()
+  const sockets = new Set()
+  const quiet = createNetServer(socket => {
+    sockets.add(socket)
+    socket.on('error', () => undefined)
+  })
+  await new Promise(done => quiet.listen(0, '127.0.0.1', done))
+  const { port } = quiet.address()
+  const stale = `http://127.0.0.1:${port}/?t=quiet`
+  writeFileSync(board.served, JSON.stringify({ pid: process.pid, port, url: stale, path: board.path, built: '' }))
+  try {
+    const out = await board.serve()
+    assert.equal(board.urlOf(out), stale, out)
+    assert.ok(out.includes('A reply may still be on its way to an agent, so the board page that is already open is kept'), out)
+    assert.equal(JSON.parse(readFileSync(board.served, 'utf8')).url, stale)
+  } finally {
+    for (const socket of sockets) socket.destroy()
+    quiet.close()
+    rmSync(board.served, { force: true })
+    await board.end([])
   }
 })
 

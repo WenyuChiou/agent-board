@@ -348,6 +348,7 @@ export const EN: Strings = {
   // The board's page in the browser (`agent-board.mjs --serve`). The chat-relay prompt stays
   // in English in every language: it is the one tested live, and its markers are literal.
   serveAt: (url: string): string => `The board you can click (tick, archive, answer): ${url}`,
+  serveKept: 'A reply may still be on its way to an agent, so the board page that is already open is kept; it updates when the reply arrives. Run this again after that for the newest page.',
   serveIdle: 'It closes itself after 30 minutes unused.',
   serveLanIdle: 'On your network it closes itself after 10 minutes unused.',
   serveFailed: (why: string): string => `Couldn't open the board page: ${why}`,

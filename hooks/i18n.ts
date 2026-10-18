@@ -388,6 +388,7 @@ export const ZH_TW = {
   // The board's page in the browser (`agent-board.mjs --serve`). The chat-relay prompt stays
   // in English in every language: it is the one tested live, and its markers are literal.
   serveAt: (url: string): string => `可以點的看板（勾完成、封存、回答）：${url}`,
+  serveKept: '可能還有一句正在傳給 agent，所以先保留已經開著的看板網頁；回覆到了它會自己更新。之後再執行一次，就會換成最新的看板。',
   serveIdle: '30 分鐘沒人用就會自己關掉。',
   serveLanIdle: '在你的網路上，10 分鐘沒人用就會自己關掉。',
   serveFailed: (why: string): string => `開不了看板網頁：${why}`,

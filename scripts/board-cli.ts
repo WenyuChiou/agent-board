@@ -449,13 +449,15 @@ const unlinkIf = (file: string, isIt: () => boolean): void => {
   } catch {}
 }
 
-// The running page's own answer, or null when nothing answers at its address.
-const ping = async (running: Running, waitMs = 1500): Promise<Record<string, unknown> | null> => {
+// The running page's own answer; null when nothing there answers like a board page (nobody at
+// the address, or another program), and 'silent' when something takes the connection but says
+// nothing in time.
+const ping = async (running: Running, waitMs = 1500): Promise<Record<string, unknown> | 'silent' | null> => {
   try {
     const res = await fetch(`http://127.0.0.1:${running.port}/api/ping`, { headers: { 'x-board-token': tokenOf(running.url) }, signal: AbortSignal.timeout(waitMs) })
     return res.ok ? ((await res.json()) as Record<string, unknown>) : null
-  } catch {
-    return null
+  } catch (error) {
+    return error instanceof Error && error.name === 'TimeoutError' ? 'silent' : null
   }
 }
 
@@ -496,17 +498,35 @@ const serveChild = (): void => {
   })
 }
 
-// The page at that address is asked to close (it refuses while a reply is on its way, and then
-// stops by itself once idle), and its file goes while it still names that page: another
-// `--serve` may have started a new one since.
-const letGo = async (running: Running, file: string): Promise<void> => {
-  await fetch(`http://127.0.0.1:${running.port}/api/close`, { method: 'POST', headers: { 'x-board-token': tokenOf(running.url), 'content-type': 'application/json' }, body: '{}', signal: AbortSignal.timeout(1500) }).catch(() => undefined)
+// The page at that address is asked to close, and whether it agreed is answered. It refuses while
+// a reply is on its way (and then stops by itself once idle). Its file goes only when it agreed,
+// and while it still names that page: another `--serve` may have started a new one since.
+const letGo = async (running: Running, file: string): Promise<boolean> => {
+  const isClosed = await fetch(`http://127.0.0.1:${running.port}/api/close`, { method: 'POST', headers: { 'x-board-token': tokenOf(running.url), 'content-type': 'application/json' }, body: '{}', signal: AbortSignal.timeout(1500) }).then(
+    res => res.ok,
+    () => false,
+  )
+  if (isClosed) unlinkIf(file, () => readRunning(file)?.pid === running.pid)
+  return isClosed
+}
+
+// Whether a page that is not wanted has to stay. One that did not agree to close is still there
+// if it answers, or if its process runs and keeps the connection but says nothing; a reply may be
+// on its way from it, and a second page beside it would send that reply again. A number a
+// restarted computer gave to another program, with nothing of ours at the port, is not it: its
+// file goes, so a stale address never keeps the board from starting.
+const stays = async (running: Running, file: string): Promise<boolean> => {
+  if (await letGo(running, file)) return false
+  const answer = await ping(running, 500)
+  if (answer === 'silent' ? isRunning(running.pid) : answer !== null) return true
   unlinkIf(file, () => readRunning(file)?.pid === running.pid)
+  return false
 }
 
 // The running page of this copy for this file, or null. Any other page found in the file (one
-// that no longer answers, or an older copy's) is let go, so a new one can write the file.
-const runningPage = async (): Promise<Running | null> => {
+// that no longer answers, or an older copy's) is let go, so a new one can write the file; but an
+// older copy's page that will not close (a reply is on its way) is kept, and `isKept` says so.
+const runningPage = async (): Promise<{ page: Running; isKept: boolean } | null> => {
   const running = readRunning()
   if (running === null) {
     // A file that has not read for ten seconds (either way, should the clock have been set
@@ -516,10 +536,10 @@ const runningPage = async (): Promise<Running | null> => {
   }
   // A page that is still running but slow to answer (a busy disk) gets longer before it counts
   // as gone and a second one starts.
-  const answer = (await ping(running)) ?? (isRunning(running.pid) ? await ping(running, 5000) : null)
-  if (answer !== null && typeof answer.path === 'string' && board(answer.path) === board(path) && answer.built === built) return running
-  await letGo(running, serveFile())
-  return null
+  const first = await ping(running)
+  const answer = first !== null && first !== 'silent' ? first : isRunning(running.pid) ? await ping(running, 5000) : first
+  if (answer !== null && answer !== 'silent' && typeof answer.path === 'string' && board(answer.path) === board(path) && answer.built === built) return { page: running, isKept: false }
+  return (await stays(running, serveFile())) ? { page: running, isKept: true } : null
 }
 
 // `--lan`: the running page opens to the local network too, and its address there is printed
@@ -549,8 +569,9 @@ const showLan = async (url: string): Promise<void> => {
 // an agent's command tool is not left waiting on the server.
 const serveBoard = async (): Promise<void> => {
   process.stdout.write(boardText(view(), pending(), s, options()))
-  const show = async (url: string): Promise<void> => {
-    process.stdout.write(`\n${s.serveAt(url)}\n`)
+  // The note goes above the address, so the address stays the last line an agent shows.
+  const show = async (url: string, isKept = false): Promise<void> => {
+    process.stdout.write(`\n${isKept ? `${s.serveKept}\n` : ''}${s.serveAt(url)}\n`)
     // The address comes from a file and goes to a shell on Windows: only the shape this server
     // writes is opened.
     if (!args.includes('--no-open') && /^http:\/\/127\.0\.0\.1:\d+\/\?t=[\w-]+$/.test(url)) await new Promise<void>(done => openInBrowser(url, () => done()))
@@ -558,9 +579,9 @@ const serveBoard = async (): Promise<void> => {
   }
   // 0.19.0 kept the address, token and all, beside progress.md.
   const old = readRunning(oldServeFile)
-  if (old !== null) await letGo(old, oldServeFile)
+  if (old !== null && (await stays(old, oldServeFile))) return show(old.url, true)
   const found = await runningPage()
-  if (found !== null) return show(found.url)
+  if (found !== null) return show(found.page.url, found.isKept)
   const rest = ['--lang', '--port'].flatMap(name => {
     const value = flag(name)
     return value === undefined ? [] : [name, value]
@@ -590,7 +611,7 @@ const serveBoard = async (): Promise<void> => {
     // Another `--serve` started at the same moment may have written its address first: this
     // page stopped then, and that one is the page to show.
     const other = await runningPage()
-    if (other !== null) return show(other.url)
+    if (other !== null) return show(other.page.url, other.isKept)
     process.stdout.write(`\n${s.serveFailed(s.serveOffline)}\n`)
     return
   }

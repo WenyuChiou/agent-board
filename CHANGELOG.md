@@ -1,5 +1,30 @@
 # Changelog
 
+## 0.20.10 — 2026-10-17
+
+A newer board script no longer starts a second page while the page it would replace is
+sending a reply to an agent (#77, replacing part of #59).
+
+- **`--serve` keeps a page that will not close.** The old page refuses to close while a reply
+  is on its way (up to 10 minutes). `letGo` ignored that refusal, took the page's address file
+  away and started a second page, so both could send: in a synthetic check, one session got two
+  turns 371 ms apart. `letGo` now says whether the page agreed to close and takes the address
+  file only if it did. A page that refused, or whose process runs and holds the connection but
+  says nothing, stays: `--serve` starts nothing, prints a note above the page's address (the
+  address is still the last line an agent shows) and the next run after the reply replaces the
+  page. The same holds for the address file 0.19.0 left beside `progress.md`. A file that names
+  a dead process, or a running one with nothing of ours at its port (a number a restarted
+  computer gave to another program), is still cleared, so the board is never locked out.
+  Concurrent first starts were already safe (the exclusive address file lets one server
+  publish) and are unchanged. Tests: "a newer --serve does not start a second page while the
+  page it would replace is sending a reply, shows that page with a note, and replaces it once
+  the reply is in", "an address file naming a dead process, or a running one with nothing at its
+  port, does not keep the next --serve from starting a page" and "a page whose process runs and
+  whose port takes the connection but says nothing is shown with the note, and no second page
+  starts".
+- **New text:** `serveKept` in the three string tables, and one sentence about it in the three
+  guides (`docs/GUIDE.md`, `docs/GUIDE.zh-TW.md`, `docs/GUIDE.zh-CN.md`).
+
 ## 0.20.9 — 2026-10-17
 
 The inbox no longer loses a report or its receipt when a read or write fails, and orders
