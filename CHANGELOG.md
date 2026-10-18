@@ -1,5 +1,54 @@
 # Changelog
 
+## 0.20.8 — 2026-10-17
+
+A session start no longer hides a setup problem. It names each one once, and tells a
+configured hook from a working board command (#38).
+
+- **Every setup problem is named, once.** A session start used to say nothing of a config it
+  could not read or write, or of an OpenClaw too old to hook in, though connecting by hand
+  named them. Now it names each such problem, with its path and what to do, the first time
+  it finds it. Later starts stay quiet while the problem stays the same, and one that goes
+  away and comes back is named again. A machine with nothing new to report hears nothing.
+  Tests: "a setup failure a session start used to hide is announced once, the next start
+  stays quiet, and /progress connect status still lists it", "a config a session start
+  cannot read is named once, and nothing in it is changed", "an agent whose config cannot
+  be written is named, and the agents after it are still hooked in", "an OpenClaw older
+  than 2026.4.24 is not hooked in, what an earlier connect put there comes back out, and
+  connecting by hand says why" and "a problem that goes away and comes back is announced
+  again".
+- **`/progress connect status`, agent by agent.** It shows what the last connect found and
+  writes nothing:
+  - each agent's reporting hook: configured, not configured, config not understood, or too
+    old;
+  - what the agent still asks of the person: Codex's approval in `/hooks`, Hermes Agent's
+    question, OpenClaw's gateway restart;
+  - whether its board command is ready;
+  - then the problems.
+
+  `/progress connect` run by hand ends with the same lines, the problems below them. A
+  removal that could not finish leaves its problems for the status. A written hook is no longer
+  taken for a working board: the board command has a state of its own. Tests: "the status
+  says what each agent still needs, Codex approving, Hermes Agent asking and OpenClaw
+  restarting, apart from whether its board command is ready", "once the hooks are taken
+  out, the status says so rather than showing the last setup", "a removal that could not
+  finish is still shown by the status, with what is left", "each agent’s board command
+  is ready only when a board file it reads is in place and Node.js runs, and a hook that
+  failed does not hide it", "the setup status in every language names each agent, its hook,
+  what it still needs and its board command, then the problems" and "a stored setup state
+  is checked before it is shown, so an older or damaged record is not".
+- **Node.js is checked.** The board commands and the terminal board run Node.js 18 or newer,
+  which a native Codex install does not bring. When a board command is in place, the
+  session runs `node --version`. If there is no Node.js, or only one too old, it says so
+  once and marks every board command as needing Node.js; the reporting hooks still go in.
+  It checks from Claude Code's own PATH, so it says to ignore it when `node --version`
+  works in a terminal.
+  The READMEs and guides no longer say Codex always brings Node.js. Tests: "without Node.js
+  the board commands are named as needing it, once, while the reporting hooks are
+  configured", "a Node.js older than the board needs is named with its version when
+  connecting by hand" and "a Node.js version is read from node --version, and only 18 or
+  newer runs the board".
+
 ## 0.20.7 — 2026-10-17
 
 Connecting, updating and removing the plugin never overwrite or delete a file the person

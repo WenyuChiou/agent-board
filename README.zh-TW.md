@@ -8,7 +8,7 @@ Claude Code 外掛，也跟得上 Codex、Gemini CLI、OpenCode、Grok Build、H
 </p>
 
 <p align="center">
-<a href="CHANGELOG.md"><img alt="版本 0.20.7" src="https://img.shields.io/badge/version-0.20.7-blue"></a>
+<a href="CHANGELOG.md"><img alt="版本 0.20.8" src="https://img.shields.io/badge/version-0.20.8-blue"></a>
 <img alt="需要 Claude Code 2.1.287 以上" src="https://img.shields.io/badge/Claude%20Code-%E2%89%A5%202.1.287-d97757">
 <a href="LICENSE"><img alt="MIT 授權" src="https://img.shields.io/badge/license-MIT-green"></a>
 <img alt="macOS、Linux、Windows" src="https://img.shields.io/badge/macOS%20%C2%B7%20Linux%20%C2%B7%20Windows-lightgrey">
@@ -153,7 +153,7 @@ claude -p "/progress connect"
 
 上圖是 Codex 0.163.0 和 Gemini CLI 0.64.0；OpenCode 和終端機的畫面在[使用說明](docs/GUIDE.zh-TW.md#每個-agent-裡都看得到看板)。
 
-看板直接讀 `progress.md`，不用開 Claude Code，只要 Node.js 18 以上：Codex 和 Gemini CLI 裝的時候就有，其他 agent 若 `node --version` 找不到，就裝一下 Node。其他 agent 的回合要有 Claude Code 對話開著才會整理成步驟；在那之前，看板照原樣列出它們。
+看板直接讀 `progress.md`，不用開 Claude Code，只要 Node.js 18 以上：用 npm 裝的 Codex 和 Gemini CLI 會帶著它，原生安裝的 Codex 不會；`node --version` 找不到的話，就裝一下 Node。少了它，對話開始時會說一次，`/progress connect status` 也看得到。其他 agent 的回合要有 Claude Code 對話開著才會整理成步驟；在那之前，看板照原樣列出它們。
 
 ### 看板的網頁
 

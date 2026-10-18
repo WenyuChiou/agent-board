@@ -1,7 +1,7 @@
 import type { On, PromptOrigin, RenderPropsOf } from 'claude-code'
 import { expect, mock, test } from 'claude-code/testing'
 import type { Engine, MockClock } from 'claude-code/testing'
-import { agentHooks, boardScript, openclawPlugin, RELEASE_PATHS } from '../hooks/connect'
+import { agentHooks, boardScript, NODE_MIN, openclawPlugin, RELEASE_PATHS } from '../hooks/connect'
 import { STRINGS } from '../hooks/strings'
 
 import { ZH_TW } from '../hooks/i18n'
@@ -63,6 +63,8 @@ type World = {
   afterWrite?: () => string
   // What `openclaw --version` prints.
   openclaw?: string
+  // What `node --version` prints; null when there is no node to run. Unset, a supported one.
+  node?: string | null
   // Paths a write to fails (a read-only file, a folder that is not there).
   unwritable?: Set<string>
   // A removal that fails, or reports success while the file still exists.
@@ -139,6 +141,10 @@ const engineBeneath = (on: On, world: World): MockClock => {
         ? world.gh()
         : e.argv.includes('openclaw') && world.openclaw !== undefined
           ? { exitCode: 0, stdout: world.openclaw, stderr: '' }
+          : e.argv[0] === 'node'
+            ? world.node === null
+              ? { exitCode: 127, stdout: '', stderr: 'node: command not found' }
+              : { exitCode: 0, stdout: world.node ?? 'v24.1.0\n', stderr: '' }
           : { exitCode: e.argv[0] === 'gh' ? 1 : 0, stdout: e.argv[0] === 'gh' ? '' : 'claude/progress-mod\n', stderr: '' }
     world.ran?.push([...e.argv])
     return { value: { ...ran, isStdoutTruncated: false, isStderrTruncated: false } }
@@ -2637,7 +2643,8 @@ test('an OpenClaw older than 2026.4.24 is not hooked in, what an earlier connect
   expect(world.ran).toContainEqual(['rm', '-f', '/home/me/.openclaw/agent-board.mjs'])
   const healed = world.files.get('/home/me/.openclaw/openclaw.json') ?? ''
   expect(JSON.parse(healed)).toEqual({ meta, gateway: { port: 18789 }, plugins: {} })
-  expect(seen.notified).toEqual([])
+  // The session start says why, once, where it used to leave the person guessing.
+  expect(seen.notified).toEqual([`OpenClaw 2026.3.8 太舊，要 2026.4.24 以上才接得上，所以沒有接它。更新之後再跑 /progress connect。\n${ZH_TW.setupStatusHint}`])
 
   const connected = await $.command.run({ ...TIDY, args: 'connect' })
   expect(connected.text).toContain('OpenClaw 2026.3.8 太舊，要 2026.4.24 以上才接得上，所以沒有接它。更新之後再跑 /progress connect。')
@@ -2664,7 +2671,9 @@ test('an agent whose config cannot be written is named, and the agents after it 
   await $.session.start({ cwd: '/work/persona_framework', surface: 'terminal', isInteractive: true })
   expect(world.files.has('/home/me/.codex/hooks.json')).toBe(false)
   expect(JSON.parse(world.files.get('/home/me/.gemini/settings.json') ?? '{}').hooks.AfterAgent[0].hooks[0].command).toBe("sh '/home/me/.claude/progress-report.sh' gemini turn || true")
-  expect(seen.notified).toEqual(['已自動接上：Gemini CLI。重開它們之後，每個回合都會出現在這裡。'])
+  expect(seen.notified).toHaveLength(1)
+  expect(seen.notified[0]).toContain('已自動接上：Gemini CLI。')
+  expect(seen.notified[0]).toContain('Codex 的設定檔寫不進去：/home/me/.codex/hooks.json')
 
   const connected = await $.command.run({ ...TIDY, args: 'connect' })
   expect(connected.text).toContain('Codex 的設定檔寫不進去：/home/me/.codex/hooks.json')
@@ -2679,6 +2688,126 @@ test('a board command that cannot be written is named as one, and the agent is s
   const connected = await $.command.run({ ...TIDY, args: 'connect' })
   expect(connected.text).toContain('看板指令檔寫不進去：/home/me/.gemini/commands/board.toml')
   expect(connected.text).not.toContain('的設定檔寫不進去')
+})
+
+test('a setup failure a session start used to hide is announced once, the next start stays quiet, and /progress connect status still lists it', async ($, on) => {
+  const world: World = {
+    files: new Map([
+      ['/home/me/.codex/config.toml', 'model = "gpt-6"\n'],
+      ['/home/me/.gemini/settings.json', '{}\n'],
+    ]),
+    mtime: 1,
+    hasTasks: true,
+    ran: [],
+    shared: { inboxDone: {} },
+    unwritable: new Set(['/home/me/.codex/hooks.json']),
+  }
+  engineBeneath(on, world)
+  const seen = outside(on)
+  await $.session.start({ cwd: '/work/persona_framework', surface: 'terminal', isInteractive: true })
+  expect(seen.notified).toHaveLength(1)
+  expect(seen.notified[0]).toContain('Gemini CLI')
+  expect(seen.notified[0]).toContain('Codex 的設定檔寫不進去：/home/me/.codex/hooks.json')
+  expect(seen.notified[0]).toContain(ZH_TW.setupStatusHint)
+  await $.session.start({ cwd: '/work/persona_framework', surface: 'terminal', isInteractive: true })
+  expect(seen.notified).toHaveLength(1)
+  // Asking for the status writes nothing.
+  const files = [...world.files]
+  const status = await $.command.run({ ...TIDY, args: 'connect status' })
+  expect([...world.files]).toEqual(files)
+  expect(status.text).toContain(ZH_TW.setupStatusTitle)
+  expect(status.text).toContain(ZH_TW.setupAgent('Gemini CLI', [ZH_TW.setupHookConfigured, ZH_TW.setupBoardReady]))
+  // Its hook did not go in, yet the board command it shares with the others did.
+  expect(status.text).toContain(ZH_TW.setupAgent('Codex', [ZH_TW.setupHookFailed, ZH_TW.setupBoardReady]))
+  expect(status.text).toContain('Codex 的設定檔寫不進去：/home/me/.codex/hooks.json')
+})
+
+test('a config a session start cannot read is named once, and nothing in it is changed', async ($, on) => {
+  const world: World = { files: new Map([['/home/me/.cursor/hooks.json', '{ not json']]), mtime: 1, hasTasks: true, ran: [], shared: { inboxDone: {} } }
+  engineBeneath(on, world)
+  const seen = outside(on)
+  await $.session.start({ cwd: '/work/persona_framework', surface: 'terminal', isInteractive: true })
+  expect(seen.notified).toHaveLength(1)
+  expect(seen.notified[0]).toContain('Cursor 的設定檔讀不懂，沒有動它：/home/me/.cursor/hooks.json')
+  expect(world.files.get('/home/me/.cursor/hooks.json')).toBe('{ not json')
+  await $.session.start({ cwd: '/work/persona_framework', surface: 'terminal', isInteractive: true })
+  expect(seen.notified).toHaveLength(1)
+  const status = await $.command.run({ ...TIDY, args: 'connect status' })
+  expect(status.text).toContain(ZH_TW.setupAgent('Cursor', [ZH_TW.setupHookUnreadable, ZH_TW.setupBoardReady]))
+})
+
+test('without Node.js the board commands are named as needing it, once, while the reporting hooks are configured', async ($, on) => {
+  const world: World = { files: new Map([['/home/me/.gemini/settings.json', '{}\n']]), mtime: 1, hasTasks: true, ran: [], shared: { inboxDone: {} }, node: null }
+  engineBeneath(on, world)
+  const seen = outside(on)
+  await $.session.start({ cwd: '/work/persona_framework', surface: 'terminal', isInteractive: true })
+  expect(world.ran).toContainEqual(['node', '--version'])
+  expect(JSON.parse(world.files.get('/home/me/.gemini/settings.json') ?? '{}').hooks.AfterAgent).toHaveLength(1)
+  expect(seen.notified).toHaveLength(1)
+  expect(seen.notified[0]).toContain(ZH_TW.setupNodeMissing(NODE_MIN))
+  await $.session.start({ cwd: '/work/persona_framework', surface: 'terminal', isInteractive: true })
+  expect(seen.notified).toHaveLength(1)
+  const status = await $.command.run({ ...TIDY, args: 'connect status' })
+  expect(status.text).toContain(ZH_TW.setupAgent('Gemini CLI', [ZH_TW.setupHookConfigured, ZH_TW.setupBoardNeedsNode(NODE_MIN)]))
+  expect(status.text).toContain(ZH_TW.setupNodeMissing(NODE_MIN))
+})
+
+test('a problem that goes away and comes back is announced again', async ($, on) => {
+  const world: World = { files: new Map([['/home/me/.gemini/settings.json', '{}\n']]), mtime: 1, hasTasks: true, ran: [], shared: { inboxDone: {} }, node: null }
+  engineBeneath(on, world)
+  const seen = outside(on)
+  await $.session.start({ cwd: '/work/persona_framework', surface: 'terminal', isInteractive: true })
+  expect(seen.notified).toHaveLength(1)
+  world.node = 'v24.1.0\n'
+  await $.session.start({ cwd: '/work/persona_framework', surface: 'terminal', isInteractive: true })
+  expect(seen.notified).toHaveLength(1)
+  world.node = null
+  await $.session.start({ cwd: '/work/persona_framework', surface: 'terminal', isInteractive: true })
+  expect(seen.notified).toHaveLength(2)
+  expect(seen.notified[1]).toContain(ZH_TW.setupNodeMissing(NODE_MIN))
+})
+
+test('a removal that could not finish is still shown by the status, with what is left', async ($, on) => {
+  const world: World = { files: new Map([['/home/me/.gemini/settings.json', '{}\n']]), mtime: 1, hasTasks: true, ran: [] }
+  engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/persona_framework', surface: 'terminal', isInteractive: true })
+  world.unwritable = new Set(['/home/me/.gemini/settings.json'])
+  expect((await $.command.run({ ...TIDY, args: 'connect remove' })).text).toContain(ZH_TW.connectRemoveIncomplete)
+  const status = (await $.command.run({ ...TIDY, args: 'connect status' })).text
+  expect(status).not.toBe(ZH_TW.setupRemoved)
+  expect(status).not.toContain(ZH_TW.connectNone)
+  expect(status).toContain('/home/me/.gemini/settings.json')
+})
+
+test('a Node.js older than the board needs is named with its version when connecting by hand', async ($, on) => {
+  const world: World = { files: new Map([['/home/me/.gemini/settings.json', '{}\n']]), mtime: 1, hasTasks: true, ran: [], node: 'v16.20.2\n' }
+  engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/persona_framework', surface: 'terminal', isInteractive: true })
+  const connected = await $.command.run({ ...TIDY, args: 'connect' })
+  expect(connected.text).toContain(ZH_TW.setupNodeOld('v16.20.2', NODE_MIN))
+  expect(connected.text).toContain(ZH_TW.setupAgent('Gemini CLI', [ZH_TW.setupHookConfigured, ZH_TW.setupBoardNeedsNode(NODE_MIN)]))
+})
+
+test('the status says what each agent still needs, Codex approving, Hermes Agent asking and OpenClaw restarting, apart from whether its board command is ready', async ($, on) => {
+  const world: World = { files: new Map(EVERY_AGENT), mtime: 1, hasTasks: true, ran: [], openclaw: 'OpenClaw 2026.5.2 (1a2b3c4)\n' }
+  engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/persona_framework', surface: 'terminal', isInteractive: true })
+  const status = await $.command.run({ ...TIDY, args: 'connect status' })
+  expect(status.text).toContain(ZH_TW.setupAgent('Codex', [ZH_TW.setupHookConfigured, ZH_TW.setupCodexTrust, ZH_TW.setupBoardReady]))
+  expect(status.text).toContain(ZH_TW.setupAgent('Hermes Agent', [ZH_TW.setupHookConfigured, ZH_TW.setupHermesTrust, ZH_TW.setupBoardReady]))
+  expect(status.text).toContain(ZH_TW.setupAgent('OpenClaw', [ZH_TW.setupHookConfigured, ZH_TW.setupOpenclawRestart, ZH_TW.setupBoardReady]))
+  for (const label of ['Gemini CLI', 'Cursor', 'Grok Build', 'Muse Code', 'OpenCode']) expect(status.text).toContain(ZH_TW.setupAgent(label, [ZH_TW.setupHookConfigured, ZH_TW.setupBoardReady]))
+  // Antigravity only shows the board; it has no turn-end hook.
+  expect(status.text).toContain(ZH_TW.setupAgent('Antigravity', [ZH_TW.setupBoardReady]))
+})
+
+test('once the hooks are taken out, the status says so rather than showing the last setup', async ($, on) => {
+  const world: World = { files: new Map([['/home/me/.gemini/settings.json', '{}\n']]), mtime: 1, hasTasks: true, ran: [] }
+  engineBeneath(on, world)
+  expect((await $.command.run({ ...TIDY, args: 'connect status' })).text).toBe(ZH_TW.setupNoState)
+  await $.session.start({ cwd: '/work/persona_framework', surface: 'terminal', isInteractive: true })
+  await $.command.run({ ...TIDY, args: 'connect remove' })
+  expect((await $.command.run({ ...TIDY, args: 'connect status' })).text).toBe(ZH_TW.setupRemoved)
 })
 
 test('a reporter that cannot be written is named as the reporter, and no agent is hooked in to run it', async ($, on) => {

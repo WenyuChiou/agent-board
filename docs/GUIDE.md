@@ -121,7 +121,7 @@ Marks:
 |---|---|
 | `/progress` | Opens the pane |
 | `/progress open` | Opens `progress.html` in the browser |
-| `/progress connect` / `connect remove` | Hooks the other agents installed here into the pane / takes the hooks out |
+| `/progress connect` / `connect remove` / `connect status` | Hooks the other agents installed here into the pane / takes the hooks out / shows, agent by agent, whether its hook and board command are ready |
 | `/progress add <line>` | Adds a task, same as `+` in the pane |
 | `/progress tidy` | Archives finished work now, and stopped work past its age ([How it keeps itself tidy](#how-it-keeps-itself-tidy)) |
 | `/progress sync` | Re-reads Claude's Task list and the PR |
@@ -167,7 +167,7 @@ The full specification, for tools that read or write the file, is [docs/FORMAT.m
 
 ## Other agents
 
-Claude Code connects them on its own: each session hooks in every agent installed here that is not hooked in yet (one installed later included), and says once which it connected. `/progress connect remove` takes the hooks out and stops this; the plugin's **Connect other agents automatically** option in `/config` turns it off too. To connect by hand, and see which config files could not be edited, run this in Claude Code, or `claude -p "/progress connect"` from any shell:
+Claude Code connects them on its own: each session hooks in every agent installed here that is not hooked in yet (one installed later included), and says once which it connected. It also says once about any problem: a config it could not read or write, a file it kept, an OpenClaw too old, or no Node.js (or one too old) for the board commands. `/progress connect status` lists each agent again: its reporting hook, what the agent still asks of you (Codex's approval, Hermes Agent's question, OpenClaw's gateway restart), and whether its board command is ready. `/progress connect remove` takes the hooks out and stops this; the plugin's **Connect other agents automatically** option in `/config` turns it off too. To connect by hand, and see which config files could not be edited, run this in Claude Code, or `claude -p "/progress connect"` from any shell:
 
 ```
 /progress connect
@@ -202,7 +202,7 @@ Progress shows only while some Claude Code session is open. Turns that arrive wh
 
 ## The board in every agent
 
-`/progress connect` (and each session's start) also writes `agent-board.mjs` beside `progress.md`: a script that prints the board from `progress.md`, with no Claude Code needed. Every agent's board command runs it with Node.js 18 or newer: Codex and Gemini CLI come with Node; for OpenCode, Cursor, Grok Build, Hermes Agent, OpenClaw or Antigravity, install it if `node --version` finds none.
+`/progress connect` (and each session's start) also writes `agent-board.mjs` beside `progress.md`: a script that prints the board from `progress.md`, with no Claude Code needed. Every agent's board command runs it with Node.js 18 or newer: Codex and Gemini CLI installed with npm come with Node, a native Codex install does not; for it and for OpenCode, Cursor, Grok Build, Hermes Agent, OpenClaw or Antigravity, install it if `node --version` finds none. Without it, the session start says so once, and the reporting hooks still work.
 
 | Agent | File | Type |
 |---|---|---|

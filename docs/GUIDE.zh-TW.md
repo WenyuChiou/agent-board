@@ -121,7 +121,7 @@ Claude 會列出 Task 清單，面板跟著走：卡片顯示任務、它的背�
 |---|---|
 | `/progress` | 打開面板 |
 | `/progress open` | 在瀏覽器打開 `progress.html` |
-| `/progress connect` / `connect remove` | 把這台電腦上的其他 agent 接上面板／拿掉 |
+| `/progress connect` / `connect remove` / `connect status` | 把這台電腦上的其他 agent 接上面板／拿掉／逐一列出每個 agent 的 hook 和看板指令能不能用 |
 | `/progress add <line>` | 新增一件事，和在面板裡打 `+` 一樣 |
 | `/progress tidy` | 立刻封存做完的工作，以及停太久的工作（見[它怎麼保持整齊](#它怎麼保持整齊)） |
 | `/progress sync` | 重新讀 Claude 的 Task 清單和 PR |
@@ -167,7 +167,7 @@ Claude 會列出 Task 清單，面板跟著走：卡片顯示任務、它的背�
 
 ## 其他 agent
 
-Claude Code 會自己接上它們：每個對話開始時，會把這台電腦裝了、但還沒接上的 agent 接上（之後才裝的也一樣），並告訴你一次接了哪些。`/progress connect remove` 會拿掉 hook 並停止自動接；在 `/config` 裡關掉外掛的 **Connect other agents automatically** 也能關掉。想手動接、並看看哪些設定檔改不了，就在 Claude Code 裡執行，或在任何終端機執行 `claude -p "/progress connect"`：
+Claude Code 會自己接上它們：每個對話開始時，會把這台電腦裝了、但還沒接上的 agent 接上（之後才裝的也一樣），並告訴你一次接了哪些。有問題也只說一次：讀不懂或寫不進去的設定檔、保留下來的檔案、太舊的 OpenClaw，或看板指令缺 Node.js（或版本太舊）。`/progress connect status` 會再逐一列出每個 agent：回報 hook、它還要你做的事（Codex 要核准、Hermes Agent 會問、OpenClaw 要重開 gateway），以及看板指令能不能用。`/progress connect remove` 會拿掉 hook 並停止自動接；在 `/config` 裡關掉外掛的 **Connect other agents automatically** 也能關掉。想手動接、並看看哪些設定檔改不了，就在 Claude Code 裡執行，或在任何終端機執行 `claude -p "/progress connect"`：
 
 ```
 /progress connect
@@ -211,7 +211,7 @@ hook 執行的是 `/progress connect` 寫好的 `~/.claude/progress-report.sh`�
 
 ## 每個 agent 裡都看得到看板
 
-`/progress connect`（以及每個對話開始時）也會在 `progress.md` 旁邊寫一個 `agent-board.mjs`：直接從 `progress.md` 印出看板的腳本，不用開 Claude Code。每個 agent 的看板指令都是用 Node.js 18 以上跑它：Codex 和 Gemini CLI 本來就附 Node；OpenCode、Cursor、Grok Build、Hermes Agent、OpenClaw、Antigravity 若 `node --version` 找不到，請裝一下。
+`/progress connect`（以及每個對話開始時）也會在 `progress.md` 旁邊寫一個 `agent-board.mjs`：直接從 `progress.md` 印出看板的腳本，不用開 Claude Code。每個 agent 的看板指令都是用 Node.js 18 以上跑它：用 npm 裝的 Codex 和 Gemini CLI 本來就附 Node，原生安裝的 Codex 沒有；它和 OpenCode、Cursor、Grok Build、Hermes Agent、OpenClaw、Antigravity 若 `node --version` 找不到，請裝一下。少了它，對話開始時會說一次，回報用的 hook 照樣能用。
 
 | Agent | 檔案 | 打 |
 |---|---|---|

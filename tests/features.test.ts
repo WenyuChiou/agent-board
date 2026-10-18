@@ -4,7 +4,7 @@ import type { ProgressMirror, ProgressPr } from '../types'
 import { askOf } from '../hooks/ask'
 import { boardItems, boardKey, boardScreen, boardText, emptyBoardState, fit, peekInbox, pinned } from '../hooks/board'
 import { addManualTask, isArchivable, manualTaskCount, mergeBlock, renderAutoBlock, setManualStep, takeArchivable, takeManualDone, takeTask, upsertAutoBlock } from '../hooks/blocks'
-import { agentHooks, boardCommands, boardScript, COLLISION, DELETE, generatedFile, isReleased, isReleasedBoard, isWindowsHost, openclawPlugin, openclawPrinted, openclawSavedBy, openclawTooOld, readConfig, RELEASE_PATHS, reportCommand, reporterPs1, reporterSh, withFlatHook, withGroupedHook, withHermesHooks, withoutHermesHooks, withoutOurHooks, withoutSection } from '../hooks/connect'
+import { agentHooks, boardCommands, boardScript, COLLISION, DELETE, generatedFile, isNodeSupported, isReleased, isReleasedBoard, isSetupState, isWindowsHost, NODE_MIN, nodeVersionOf, openclawPlugin, openclawPrinted, openclawSavedBy, openclawTooOld, readConfig, RELEASE_PATHS, reportCommand, reporterPs1, reporterSh, setupAgents, setupLines, withFlatHook, withGroupedHook, withHermesHooks, withoutHermesHooks, withoutOurHooks, withoutSection } from '../hooks/connect'
 import { dashboardHtml } from '../hooks/dashboard'
 import { answerKey, blockId, CLAIM_MS, claimAction, isBoardAnswer, isBoardTurn, isInboxFile, isTakenFile, isTextLog, isTranscriptPath, keepInboxDone, keepInboxFailed, MAX_TRIES, promptKey, readClaim, readTurn, takenName, transcriptTail, turnsToDigest } from '../hooks/inbox'
 import { applyDigest, clearAsked, isAskingYou, isPersonsAnswer, isWork, lastQuestion, markAsked, parseDigest, replyData, requestData, turnTools } from '../hooks/digest'
@@ -1412,6 +1412,66 @@ test('a file an earlier release wrote is known by its exact bytes with this mach
     expect(isReleased('gemini', written, { board: windows })).toBe(true)
     expect(isReleased('gemini', `${written} `, { board: windows })).toBe(false)
   }
+})
+
+test('a Node.js version is read from node --version, and only 18 or newer runs the board', () => {
+  expect(nodeVersionOf('v24.1.0\n')).toBe('v24.1.0')
+  expect(nodeVersionOf('  v18.0.0  ')).toBe('v18.0.0')
+  for (const printed of ['', 'claude/progress-mod\n', '24.1.0', 'node: command not found']) expect(nodeVersionOf(printed)).toBe(null)
+  expect(NODE_MIN).toBe(18)
+  for (const version of ['v18.0.0', 'v22.18.0', 'v24.1.0']) expect(isNodeSupported(version)).toBe(true)
+  for (const version of ['v16.20.2', 'v17.9.1']) expect(isNodeSupported(version)).toBe(false)
+})
+
+test('each agent’s board command is ready only when a board file it reads is in place and Node.js runs, and a hook that failed does not hide it', () => {
+  const hooks = [
+    { agent: 'codex', label: 'Codex', hook: 'failed' as const },
+    { agent: 'gemini', label: 'Gemini CLI', hook: 'configured' as const },
+    { agent: 'hermes', label: 'Hermes Agent', hook: 'configured' as const },
+  ]
+  const boards = { skills: 'ok' as const, gemini: 'failed' as const, hermes: 'failed' as const, antigravity: 'ok' as const }
+  expect(setupAgents(hooks, boards, true)).toEqual([
+    { agent: 'codex', label: 'Codex', hook: 'failed', board: 'ready' },
+    // The shared skill shows it, though its own command could not be written.
+    { agent: 'gemini', label: 'Gemini CLI', hook: 'configured', board: 'ready' },
+    { agent: 'hermes', label: 'Hermes Agent', hook: 'configured', board: 'failed' },
+    { agent: 'antigravity', label: 'Antigravity', hook: null, board: 'ready' },
+  ])
+  expect(setupAgents(hooks, boards, false).map(one => one.board)).toEqual(['runtime', 'runtime', 'failed', 'runtime'])
+  expect(setupAgents(hooks, {}, true).map(one => one.board)).toEqual(['none', 'none', 'none'])
+})
+
+test('the setup status in every language names each agent, its hook, what it still needs and its board command, then the problems', () => {
+  for (const s of Object.values(STRINGS)) {
+    const state = {
+      agents: [
+        { agent: 'codex', label: 'Codex', hook: 'configured' as const, board: 'runtime' as const },
+        { agent: 'cursor', label: 'Cursor', hook: 'unreadable' as const, board: 'ready' as const },
+        { agent: 'openclaw', label: 'OpenClaw', hook: 'tooOld' as const, board: 'failed' as const },
+        { agent: 'antigravity', label: 'Antigravity', hook: null, board: 'none' as const },
+      ],
+      problems: [{ key: 'node:missing', text: s.setupNodeMissing(NODE_MIN) }],
+      node: null,
+    }
+    expect(setupLines(state, s)).toEqual([
+      s.setupStatusTitle,
+      s.setupAgent('Codex', [s.setupHookConfigured, s.setupCodexTrust, s.setupBoardNeedsNode(NODE_MIN)]),
+      s.setupAgent('Cursor', [s.setupHookUnreadable, s.setupBoardReady]),
+      s.setupAgent('OpenClaw', [s.setupHookTooOld, s.setupBoardFailed]),
+      s.setupAgent('Antigravity', []),
+      s.setupNodeMissing(NODE_MIN),
+    ])
+    expect(setupLines(state, s, false)).not.toContain(s.setupNodeMissing(NODE_MIN))
+    expect(setupLines({ agents: [], problems: [], node: 'v24.1.0' }, s)).toEqual([s.setupStatusTitle, s.connectNone])
+    for (const text of [s.setupNodeMissing(NODE_MIN), s.setupNodeOld('v16.20.2', NODE_MIN), s.setupBoardNeedsNode(NODE_MIN)]) expect(text).toContain(String(NODE_MIN))
+    expect(s.setupNodeOld('v16.20.2', NODE_MIN)).toContain('v16.20.2')
+    expect(s.setupStatusHint).toContain('/progress connect status')
+  }
+})
+
+test('a stored setup state is checked before it is shown, so an older or damaged record is not', () => {
+  expect(isSetupState({ agents: [{ agent: 'codex', label: 'Codex', hook: 'configured', board: 'ready' }], problems: [{ key: 'node:missing', text: 'x' }], node: null })).toBe(true)
+  for (const value of [null, 'x', {}, { agents: [], problems: [{ text: 1 }] }, { agents: [{ label: 2 }], problems: [] }, { agents: {}, problems: [] }]) expect(isSetupState(value)).toBe(false)
 })
 
 test('setup safety notices retain their paths and recovery command in every language', () => {

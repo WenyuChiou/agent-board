@@ -706,6 +706,88 @@ export const isReleasedBoard = (text: string, path: string): boolean => {
   return isReleased('board', text.slice(cut + 1))
 }
 
+// The board script needs this Node.js or newer (the README says so): its commands run it, and
+// so does the terminal board. The reporting hooks do not.
+export const NODE_MIN = 18
+// What `node --version` printed, when it is a version.
+export const nodeVersionOf = (printed: string): string | null => {
+  const version = printed.trim()
+  return /^v\d+\.\d+\.\d+$/.test(version) ? version : null
+}
+export const isNodeSupported = (version: string): boolean => Number(/^v(\d+)\./.exec(version)?.[1] ?? 0) >= NODE_MIN
+
+// What a session start found for each agent here, so a written hook is never taken for a
+// working board, and `/progress connect status` can say it again later.
+export type HookState = 'configured' | 'failed' | 'unreadable' | 'tooOld'
+export type BoardState = 'ready' | 'runtime' | 'failed' | 'none'
+export type AgentSetup = { agent: string; label: string; hook: HookState | null; board: BoardState }
+export type SetupProblem = { key: string; text: string }
+export type SetupState = { agents: AgentSetup[]; problems: SetupProblem[]; node: string | null }
+
+// Of an agent's files, the worst one says how its hook came out: OpenClaw takes two.
+const HOOK_RANK: Record<HookState, number> = { configured: 0, tooOld: 1, unreadable: 2, failed: 3 }
+export const worseHook = (one: HookState, other: HookState): HookState => (HOOK_RANK[other] > HOOK_RANK[one] ? other : one)
+
+// The agents each board file (`boardCommands`, by its agent) shows the board in.
+export const BOARD_FOR: Record<string, readonly string[]> = {
+  skills: ['codex', 'cursor', 'grok', 'openclaw', 'gemini', 'opencode', 'muse'],
+  gemini: ['gemini'],
+  opencode: ['opencode'],
+  hermes: ['hermes'],
+  antigravity: ['antigravity'],
+}
+
+// An agent's board command is ready when a board file it reads is in place and Node.js runs;
+// one that could not be written, with none in place, failed. Antigravity has a board file and
+// no hook.
+export const setupAgents = (
+  hooks: readonly Omit<AgentSetup, 'board'>[],
+  boards: Partial<Record<string, 'ok' | 'failed'>>,
+  isNodeReady: boolean,
+): AgentSetup[] => {
+  const all = boards.antigravity === undefined ? [...hooks] : [...hooks, { agent: 'antigravity', label: 'Antigravity', hook: null }]
+
+  return all.map(one => {
+    const read = Object.keys(BOARD_FOR).filter(file => BOARD_FOR[file]?.includes(one.agent)).map(file => boards[file])
+    const board: BoardState = read.includes('ok') ? (isNodeReady ? 'ready' : 'runtime') : read.includes('failed') ? 'failed' : 'none'
+    return { ...one, board }
+  })
+}
+
+// The status, agent by agent: its hook, what the agent still asks of the person (Codex's
+// approval, Hermes Agent's question, OpenClaw's restart), its board command, then the problems.
+export const setupLines = (state: SetupState, s: Strings = ZH_TW, withProblems = true): string[] => {
+  const hookWords = (one: AgentSetup): string[] => {
+    if (one.hook === null) return []
+    if (one.hook !== 'configured') return [one.hook === 'unreadable' ? s.setupHookUnreadable : one.hook === 'tooOld' ? s.setupHookTooOld : s.setupHookFailed]
+    const needs = one.agent === 'codex' ? [s.setupCodexTrust] : one.agent === 'hermes' ? [s.setupHermesTrust] : one.agent === 'openclaw' ? [s.setupOpenclawRestart] : []
+    return [s.setupHookConfigured, ...needs]
+  }
+  const boardWords = (one: AgentSetup): string[] =>
+    one.board === 'ready' ? [s.setupBoardReady] : one.board === 'runtime' ? [s.setupBoardNeedsNode(NODE_MIN)] : one.board === 'failed' ? [s.setupBoardFailed] : []
+
+  return [
+    s.setupStatusTitle,
+    ...(state.agents.length === 0 ? (withProblems && state.problems.length > 0 ? [] : [s.connectNone]) : state.agents.map(one => s.setupAgent(one.label, [...hookWords(one), ...boardWords(one)]))),
+    ...(withProblems ? state.problems.map(one => one.text) : []),
+  ]
+}
+
+// The store holds what an earlier version, or a damaged write, may have left.
+export const isSetupState = (value: unknown): value is SetupState => {
+  if (typeof value !== 'object' || value === null) return false
+  const { agents, problems } = value as { agents?: unknown; problems?: unknown }
+  const isObject = (one: unknown): one is Record<string, unknown> => typeof one === 'object' && one !== null
+  const hooks: unknown[] = [null, 'configured', 'failed', 'unreadable', 'tooOld']
+  const boards: unknown[] = ['ready', 'runtime', 'failed', 'none']
+  return (
+    Array.isArray(agents) &&
+    agents.every(one => isObject(one) && typeof one.agent === 'string' && typeof one.label === 'string' && hooks.includes(one.hook) && boards.includes(one.board)) &&
+    Array.isArray(problems) &&
+    problems.every(one => isObject(one) && typeof one.key === 'string' && typeof one.text === 'string')
+  )
+}
+
 // Each agent's way to show the board, so the person sees every agent's work from whichever
 // one they are in. Gemini CLI and OpenCode paste a command's output into the prompt before
 // the model reads it; the others read skills, whose model runs the command. Most of them

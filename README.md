@@ -8,7 +8,7 @@ A Claude Code plugin that also follows Codex, Gemini CLI, OpenCode, Grok Build, 
 </p>
 
 <p align="center">
-<a href="CHANGELOG.md"><img alt="Version 0.20.7" src="https://img.shields.io/badge/version-0.20.7-blue"></a>
+<a href="CHANGELOG.md"><img alt="Version 0.20.8" src="https://img.shields.io/badge/version-0.20.8-blue"></a>
 <a href="#quick-start"><img alt="Needs Claude Code 2.1.287 or newer" src="https://img.shields.io/badge/Claude%20Code-%E2%89%A5%202.1.287-d97757"></a>
 <a href="LICENSE"><img alt="MIT license" src="https://img.shields.io/badge/license-MIT-green"></a>
 <img alt="macOS, Linux, Windows" src="https://img.shields.io/badge/macOS%20%C2%B7%20Linux%20%C2%B7%20Windows-lightgrey">
@@ -153,7 +153,7 @@ Finished work leaves the board by itself. The board writes `progress.md` as care
 
 Above, Codex 0.163.0 and Gemini CLI 0.64.0; OpenCode and the terminal are in the [guide](docs/GUIDE.md#the-board-in-every-agent).
 
-The board reads `progress.md` directly, so it needs no Claude Code session, only Node.js 18 or newer: Codex and Gemini CLI bring it, and for other agents, install Node if `node --version` finds none. Other agents' turns are summed up into steps while a Claude Code session is open; until then the board lists them as they came in.
+The board reads `progress.md` directly, so it needs no Claude Code session, only Node.js 18 or newer. Codex and Gemini CLI installed with npm bring it, a native Codex install does not; if `node --version` finds none, install Node. When it is missing, a session start says so once, and `/progress connect status` shows it. Other agents' turns are summed up into steps while a Claude Code session is open; until then the board lists them as they came in.
 
 ### The board's page
 
