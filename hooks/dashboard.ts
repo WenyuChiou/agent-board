@@ -183,6 +183,7 @@ ${section(
 )}
 ${section('waiting', s.sectionWaiting, view.waiting.length, 'waiting', '', view.waiting.map(item => waitingItem(item, s)).join(''), true)}
 ${view.hidden.length === 0 ? '' : `<p class="quiet">${esc(s.hiddenCount(view.hidden.length))}</p>`}
+${view.idle.length === 0 ? '' : `<details class="section" data-key="section:idle"><summary><span class="quiet">${esc(s.idleCount(view.idle.length))}</span></summary>${view.idle.map(it => row(it, s, true)).join('')}</details>`}
 ${section('due', s.sectionDue, view.due.length, 'soon', nearest === undefined ? '' : s.nearestDue(nearest.title, nearest.due?.left ?? ''), view.due.map(it => row(it, s, true)).join(''), false)}
 ${section(
   'others',

@@ -8,6 +8,7 @@ import { ciWords, prWords } from './github'
 import { doingTask, fallbackTitle, isAnswered, waitsOnYou } from './mirror'
 import type { Tone } from './palette'
 import { countSteps, currentStepIndex, doneKey, isHereProject, isStale, isTaskComplete, RESUME } from './parse'
+import { sha256 } from './sha256'
 
 // What the pane shows, worked out from the file and this session's own list, so the
 // drawing code only lays it out.
@@ -151,7 +152,7 @@ export type RowGroup = { project: string; isHere: boolean; rows: TaskRow[]; summ
 
 // The line of counts at the top: what waits on you (here and elsewhere), what is open,
 // what is due within two weeks (the 快到期 list), and the steps finished today.
-export type Overview = { waiting: number; active: number; due: number; today: number }
+export type Overview = { waiting: number; active: number; due: number; today: number; idle: number }
 
 export type View = {
   current: CurrentView | null
@@ -161,6 +162,7 @@ export type View = {
   waiting: WaitingItem[]
   // Questions the person marked answered, until their session asks something else.
   hidden: WaitingItem[]
+  idle: TaskRow[]
   due: TaskRow[]
   active: TaskRow[]
   groups: RowGroup[]
@@ -170,6 +172,7 @@ export type View = {
 const MINUTE = 60 * 1000
 const HOUR = 60 * MINUTE
 const DAY = 24 * HOUR
+export const IDLE_MS = 7 * DAY
 
 export const relativeTime = (then: number, now: number, s: Strings = ZH_TW): string => {
   if (then <= 0) return ''
@@ -552,6 +555,63 @@ export const withAnswered = (answered: readonly string[], keys: readonly string[
 
 export const answeredJson = (answered: readonly string[]): string => `${JSON.stringify({ answered }, null, 2)}\n`
 
+export const seenPath = (path: string): string => `${path.replace(/\.md$/i, '')}-seen.json`
+
+const SEEN_MAX = 500
+const hasTime = (time: unknown): time is number => typeof time === 'number' && Number.isFinite(time) && time > 0
+
+// Notes and indentation do not mean the task's work changed.
+export const taskFingerprint = (project: string, task: ProgressTask): string =>
+  sha256(JSON.stringify([project, task.title, task.steps.map(step => [step.status, step.text.trim()])]))
+
+export const parseSeen = (text: string, age = 0): Record<string, number> | null => {
+  if (text.trim() === '') return {}
+  try {
+    const data: unknown = JSON.parse(text)
+    const list = data !== null && typeof data === 'object' && 'seen' in data ? data.seen : null
+    if (list === null || typeof list !== 'object' || Array.isArray(list)) return {}
+    return Object.fromEntries(Object.entries(list).filter(([key, time]) => /^[0-9a-f]{64}$/.test(key) && hasTime(time)).slice(0, SEEN_MAX))
+  } catch {
+    return Math.abs(age) < HALF_WRITE_MS ? null : {}
+  }
+}
+
+// Earliest wins when two readers merge: a lost race only makes a task look fresher,
+// never hides it early. Keep this reader's observations across write retries.
+// Tasks the file no longer holds are kept, after the ones it holds, unless `isSettled`: one
+// read of a file caught empty or half-written must not reset every task's age, so they are
+// dropped only once the file has held still.
+export const withSeen = (
+  seen: Readonly<Record<string, number>>,
+  projects: readonly ProgressProject[],
+  now: number,
+  other: Readonly<Record<string, number>> = {},
+  isSettled = false,
+): Record<string, number> => {
+  const entries = new Map<string, number>()
+  const earliest = (key: string): number | undefined => {
+    const times = [seen[key], other[key]].filter(hasTime)
+    return times.length > 0 ? Math.min(...times) : undefined
+  }
+  for (const project of projects) {
+    for (const task of project.tasks) {
+      if (hasTime(task.auto?.updated)) continue
+      const key = taskFingerprint(project.name, task)
+      const time = earliest(key) ?? now
+      if (hasTime(time)) entries.set(key, time)
+    }
+  }
+  if (!isSettled) {
+    for (const key of [...Object.keys(seen), ...Object.keys(other)]) {
+      const time = earliest(key)
+      if (!entries.has(key) && time !== undefined) entries.set(key, time)
+    }
+  }
+  return Object.fromEntries([...entries].slice(0, SEEN_MAX))
+}
+
+export const seenJson = (seen: Readonly<Record<string, number>>): string => `${JSON.stringify({ seen }, null, 2)}\n`
+
 const whereRank = (item: WaitingItem): number => (item.where === 'here' ? 0 : 1)
 
 export const buildView = (
@@ -567,6 +627,7 @@ export const buildView = (
   // Questions the person marked answered on this machine (by answeredKey): kept out of Waiting
   // on you, its count and the focus, and listed under `hidden` instead.
   answered: readonly string[] = [],
+  seen: Readonly<Record<string, number>> = {},
 ): View => {
   const marked = new Set(answered)
   const ownId = mine === null ? '' : shortId(mine.sessionId)
@@ -574,8 +635,9 @@ export const buildView = (
   const due: Array<TaskRow & { days: number }> = []
   const active: Array<TaskRow & { rank: number; order: number }> = []
   const recent: Array<DoneItem & { at: number }> = []
+  const idle: TaskRow[] = []
   let order = 0
-  const seen = new Map<string, number>()
+  const repeats = new Map<string, number>()
 
   for (const project of projects) {
     const name = project.name || s.uncategorized
@@ -586,13 +648,17 @@ export const buildView = (
       const title = task.title || s.unnamed
       // A repeated title gets #2, #3, … so its row and buttons are its own.
       const base = `${name}::${title}`
-      const repeat = (seen.get(base) ?? 0) + 1
-      seen.set(base, repeat)
+      const repeat = (repeats.get(base) ?? 0) + 1
+      repeats.set(base, repeat)
       const key = repeat === 1 ? base : `${base}#${repeat}`
       const updated = task.auto?.updated ?? 0
       const when = relativeTime(updated, now, s)
       const isComplete = isTaskComplete(task) || task.auto?.state === 'done'
       const isManual = task.auto === null
+      const lastActive = hasTime(updated) ? updated : seen[taskFingerprint(project.name, task)]
+      const days = task.due === null ? null : dueDays(task.due, now)
+      const isDue = task.due !== null && days !== null && days <= 14
+      const isIdle = !isComplete && !isDue && hasTime(lastActive) && now - lastActive > IDLE_MS
       const context = contextOf(task)
       // A session that stopped writing is treated as ended: its questions wait in its row,
       // not in 等你處理, where nobody could answer them.
@@ -603,6 +669,7 @@ export const buildView = (
 
       task.steps.forEach((step, index) => {
         if (step.status !== 'waiting' || (!isManual && !isLive)) return
+        if (isIdle && !marked.has(keys[index] ?? '')) return
         const parts = splitNote(step.text)
         waiting.push({
           key: `${key}::${index}`,
@@ -640,7 +707,7 @@ export const buildView = (
       // turn simply ended (`state=waiting` is written at every turn's end), or that waits on
       // CI or another agent, asks the person nothing: it stays with the work in progress.
       // One whose questions were all marked answered is back with the work in progress.
-      if (auto === 'waiting' && task.steps.some((step, index) => step.status === 'waiting' && isAsked(index))) continue
+      if (!isIdle && auto === 'waiting' && task.steps.some((step, index) => step.status === 'waiting' && isAsked(index))) continue
 
       const { done, total } = countSteps(task)
       const phrase =
@@ -658,7 +725,7 @@ export const buildView = (
         done,
         total,
         ...phrase,
-        when,
+        when: isIdle ? relativeTime(lastActive ?? 0, now, s) : when,
         isHere,
         auto,
         steps: rowSteps(task, s),
@@ -686,9 +753,12 @@ export const buildView = (
       }
 
       // Work with a date close by is listed once, under 快到期.
-      const days = task.due === null ? null : dueDays(task.due, now)
       if (task.due !== null && days !== null && days <= 14) {
         due.push({ ...row, due: { date: task.due, ...dueLabel(days, s) }, days })
+        continue
+      }
+      if (isIdle) {
+        idle.push(row)
         continue
       }
       active.push({ ...row, rank: isHere ? 0 : 1, order })
@@ -746,10 +816,11 @@ export const buildView = (
   return {
     current: mine === null ? null : currentOf(mine, s),
     pr: prView(mine, s),
-    overview: { waiting: asks.length, active: rows.length + due.length, due: due.length, today },
+    overview: { waiting: asks.length, active: rows.length + due.length, due: due.length, today, idle: idle.length },
     focus,
     waiting: asks,
     hidden,
+    idle,
     due: dueRows,
     active: rows,
     groups,

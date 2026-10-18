@@ -1,5 +1,44 @@
 # Changelog
 
+## 0.22.0 — 2026-10-18
+
+Work nobody had touched for a week still filled the board. A hand-kept task carries no time,
+so it stayed until every step was ticked, and a block was only archived while a Claude Code
+pane ran (#97).
+
+- **A task idle for more than 7 days steps aside on every surface.** The pane, the terminal
+  board, the board's page and `progress.html` leave it out of Needs you now, the counts, the
+  focus and the project lists, and show one collapsed **N idle 7+ days** line that lists
+  them with how long each has been idle and its question, if it asks one. Exactly 7 days is
+  not idle; a time in the future never is; work due within two weeks, finished work and this
+  session's own task never step aside. Nothing in `progress.md` changes, and the idle rows
+  keep their tick and archive actions. Tests: "a task idle exactly seven days stays on the
+  board and one idle a millisecond longer is hidden", "an idle task's question leaves Waiting
+  on you and the counts but stays in its idle row", "a task due within two weeks, this
+  session's own block and a future timestamp are never hidden as idle", "the idle shelf keeps
+  terminal and page row actions without putting its question back in Waiting on you", "the
+  pane hides idle tasks behind one toggle and shows them with their age when opened",
+  "progress.html lists idle tasks in a closed shelf with their count", "every language has
+  the idle count words".
+- **A task with no time of its own is aged from when its steps were first seen.**
+  `progress-seen.json` beside `progress.md` keeps a hash of each such task and when the pane
+  or the board first saw it; changing a step makes it fresh again, and two writers keep the
+  earlier time. A task the record does not know, or any while the record cannot be read or
+  written, stays on the board. A task gone from `progress.md` leaves the record only once the
+  file has held still, so one read of a file caught empty does not reset every task's age.
+  The pane reads the record when its stat changes. Tests: "a hand-kept task is aged from when
+  its content was first seen, and editing a step makes it fresh again", "a hand-kept task the
+  seen record does not know is never hidden", "the seen record keeps the earliest time per
+  task, drops tasks no longer in the file only once it has held still, and reads a broken
+  file as empty", "the pane records first observations once and keeps undated work visible
+  when its record cannot be read or written", "one empty read of progress.md does not reset
+  a task's first-seen time".
+- **The terminal board.** `i` shows or folds the idle tasks in `--watch`; `--all` prints
+  them; `--help` prints the flags. Only `--watch` and `--serve` write the record; a plain
+  print and `--chat` only read it. Tests: "the board script leaves idle tasks off the board,
+  names how many, and lists them with --all", "the board script's --chat run reads the seen
+  record and writes nothing".
+
 ## 0.21.3 — 2026-10-18
 
 `scripts/remote-reporter/merge.py` replaced a session's block with any fragment for that

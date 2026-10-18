@@ -91,7 +91,7 @@ import {
 } from './inbox'
 import type { AgentTurn } from './inbox'
 import { keepRecent, remindersOf } from './remind'
-import { agentName, answeredJson, answeredPath, buildView, keptAnswered, parseAnswered, statusLine, withAnswered } from './view'
+import { agentName, answeredJson, answeredPath, buildView, keptAnswered, parseAnswered, parseSeen, seenJson, seenPath, statusLine, withAnswered, withSeen } from './view'
 import type { StepRef, TaskRef, TaskRow, WaitingItem } from './view'
 
 const PANE = 'agent-board'
@@ -136,6 +136,7 @@ const doneSeen = atom({ plugin: 'agent-board', key: 'doneSeen' } as const, {} as
 // Questions the person marked answered (view.ts askKeys), read from progress-answered.json
 // beside progress.md, which every session on this machine and the board script share.
 const hiddenAsks = atom({ plugin: 'agent-board', key: 'hiddenAsks' } as const, [] as string[])
+const firstSeen = atom({ plugin: 'agent-board', key: 'firstSeen' } as const, {} as Record<string, number>)
 // The review whose reply box Needs changes opened.
 const revising = atom({ plugin: 'agent-board', key: 'revising' } as const, '')
 
@@ -325,6 +326,84 @@ const setAnswered = async ($: EngineInterface, item: WaitingItem, isHidden: bool
   return true
 }
 
+// A task with no time of its own is aged from when its words were first seen, kept in
+// progress-seen.json beside progress.md, which the board script keeps too. It is read when it
+// changed (a stat per poll, as the answered list is) and written when progress.md changed. A
+// failure leaves the record empty, so an undated task shows rather than hides; a record caught
+// half-written keeps the one in hand, which is safe because changed words make a new key.
+// Tasks gone from progress.md leave the record only once that file has held still for a poll
+// (`still`), and only while it still does, on disk as well (as answered marks do).
+// A write that fails is tried again on a later change, or after a minute.
+const SEEN_RETRY_MS = 60_000
+let seenStat: string | null = null
+let hasSeenPending = false
+let seenRetryAt = 0
+const pollSeen = async (
+  $: EngineInterface,
+  path: string,
+  projects: readonly ProgressProject[],
+  isChanged: boolean,
+  still: { mtimeMs: number; size: number } | null = null,
+): Promise<void> => {
+  const file = seenPath(path)
+  const before = await read($, firstSeen)
+  const set = async (seen: Record<string, number>): Promise<void> => {
+    if (seenJson(seen) === seenJson(before)) return
+    await update($, firstSeen, () => seen)
+    // A changed progress.md redraws both after this; otherwise only the record moved.
+    if (isChanged || (await read($, snapshot)).path !== path) return
+    await refreshStatus($)
+    await writeDashboard($, true)
+  }
+  let at = 0
+  let record: Record<string, number> | null = null
+  try {
+    at = await $.clock.now()
+    const stat = await $.fs.stat(file).catch(() => undefined)
+    const key = stat === undefined ? '' : `${stat.mtimeMs}:${stat.size}`
+    const isRetry = hasSeenPending && at >= seenRetryAt
+    if (!isChanged && !isRetry && still === null && key === seenStat) return
+    // Read again at the next poll after anything but a clean read with nothing to write.
+    seenStat = null
+    record = parseSeen(await readText($, file), stat === undefined ? 0 : at - stat.mtimeMs)
+    if (record === null) {
+      hasSeenPending = hasSeenPending || isChanged
+      return
+    }
+    const isStale = still !== null && projects.length > 0 && seenJson(withSeen(record, projects, at, {}, true)) !== seenJson(withSeen(record, projects, at))
+    if (isChanged || isRetry || isStale) {
+      hasSeenPending = true
+      let observed = withSeen(record, projects, at)
+      await rewrite($, file, async text => {
+        const disk = await $.fs.stat(file).catch(() => undefined)
+        const current = parseSeen(text, disk === undefined ? 0 : at - disk.mtimeMs)
+        if (current === null) return AGAIN
+        const held = still === null ? undefined : await $.fs.stat(path).catch(() => undefined)
+        const isSettled = isStale && held !== undefined && held.mtimeMs === still?.mtimeMs && held.size === still.size
+        observed = withSeen(current, projects, at, observed, isSettled)
+        return seenJson(observed) === seenJson(current) ? null : seenJson(observed)
+      })
+      const kept = parseSeen(await readText($, file))
+      if (kept === null || seenJson(kept) !== seenJson(observed)) {
+        seenRetryAt = at + SEEN_RETRY_MS
+        // Another writer's record is as good as ours: its new tasks show until ours lands.
+        if (kept !== null) await set(kept)
+        return
+      }
+      hasSeenPending = false
+      await set(kept)
+    } else {
+      seenStat = key
+      await set(record)
+    }
+  } catch {
+    hasSeenPending = hasSeenPending || isChanged
+    seenRetryAt = at + SEEN_RETRY_MS
+    // A record read but not written still holds the times it had; one not read holds none.
+    await set(record ?? {})
+  }
+}
+
 // Re-reads the file only when its mtime or size moved, so the 2s timer is a stat.
 const poll = async ($: EngineInterface): Promise<void> => {
   if (isPolling) return
@@ -335,11 +414,13 @@ const poll = async ($: EngineInterface): Promise<void> => {
     const previous = await read($, snapshot)
     const stat = await $.fs.stat(path).catch(() => undefined)
     if (stat === undefined) {
+      if (Object.keys(await read($, firstSeen)).length > 0) await update($, firstSeen, () => ({}))
       if (!previous.isMissing || previous.path !== path) await update($, snapshot, () => ({ ...EMPTY, path }))
       return
     }
     const isSame = previous.path === path && previous.mtimeMs === stat.mtimeMs && previous.size === stat.size
     if (isSame && previous.error === null && !previous.isMissing) {
+      await pollSeen($, path, previous.projects, false, isPrunePending ? { mtimeMs: stat.mtimeMs, size: stat.size } : null)
       if (isPrunePending) {
         isPrunePending = false
         // Not waited on: poll also runs inside queued jobs, which the prune would queue behind.
@@ -357,6 +438,7 @@ const poll = async ($: EngineInterface): Promise<void> => {
         size: stat.size,
         projects,
       }))
+      await pollSeen($, path, projects, true)
       await noteDone($, projects)
       isPrunePending = true
       await refreshStatus($)
@@ -405,7 +487,7 @@ const writeDashboard = async ($: EngineInterface, force = false): Promise<string
   const path = dashboardPath(snap.path || (await progressPath($)))
   if (!force && at - dashboardAt < 60 * 1000) return path
   const s = await wordsOf($)
-  const view = buildView(snap.projects, [], null, at, await read($, today), await read($, doneSeen), s, await read($, hiddenAsks))
+  const view = buildView(snap.projects, [], null, at, await read($, today), await read($, doneSeen), s, await read($, hiddenAsks), await read($, firstSeen))
   const pending = await pendingTurns($)
   const date = new Date(at)
   const html = dashboardHtml(view, s, snap.path, s.dashStamp(`${localDay(at)} ${pad2(date.getHours())}:${pad2(date.getMinutes())}`), pending)
@@ -464,6 +546,7 @@ const refreshStatus = async ($: EngineInterface): Promise<void> => {
           await read($, doneSeen),
           s,
           await read($, hiddenAsks),
+          await read($, firstSeen),
         ),
         s,
       )
@@ -1585,6 +1668,7 @@ const remindNow = async ($: EngineInterface): Promise<void> => {
     await read($, doneSeen),
     s,
     await read($, hiddenAsks),
+    await read($, firstSeen),
   )
   const stored = await $.store.get('told')
   const told = stored !== null && typeof stored === 'object' ? (stored as Record<string, number>) : {}
@@ -2150,7 +2234,7 @@ export const register: Register = (on, options) => {
     const at = (await read($, now)) || (await $.clock.now())
     const s = await wordsOf($)
     const palette = paletteFor(await read($, theme))
-    const view = buildView(snap.projects, await read($, here), await read($, mine), at, await read($, today), await read($, doneSeen), s, await read($, hiddenAsks))
+    const view = buildView(snap.projects, await read($, here), await read($, mine), at, await read($, today), await read($, doneSeen), s, await read($, hiddenAsks), await read($, firstSeen))
     const ui: PaneUi = {
       Box: table.Box,
       Text: table.Text,

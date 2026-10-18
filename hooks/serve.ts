@@ -139,6 +139,7 @@ export type ServeModel = {
   counts: { waiting: number; active: number; due: number; today: number }
   asks: ServeAsk[]
   hidden: ServeHidden[]
+  idle: ServeRow[]
   groups: Array<{ project: string; rows: ServeRow[] }>
   turns: ServeTurn[]
   // Finished in the last day, until it goes to the archive.
@@ -163,6 +164,8 @@ export const serveModel = (view: View, pending: readonly PendingTurn[], s: Strin
   const lanInfo = (mode: SendMode, agent: string): string | null => (isLan && mode === 'send' ? s.serveLanSend(agent) : null)
   const asks: ServeAsk[] = []
   const groups = new Map<string, ServeRow[]>()
+  const idle: ServeRow[] = []
+  const idleKeys = new Set(view.idle.map(row => row.key))
   const turns: ServeTurn[] = []
   const items = boardItems(view, pending)
   for (const item of items) {
@@ -205,8 +208,8 @@ export const serveModel = (view: View, pending: readonly PendingTurn[], s: Strin
       const { row } = item
       const mode = row.target === null ? (row.auto === null ? 'none' : 'claude') : sendMode(row.agent, row.target)
       const send = onLan(mode)
-      const rows = groups.get(row.project) ?? []
-      groups.set(row.project, rows)
+      const rows = idleKeys.has(row.key) ? idle : (groups.get(row.project) ?? [])
+      if (!idleKeys.has(row.key)) groups.set(row.project, rows)
       rows.push({
         key: item.key,
         project: row.project,
@@ -254,6 +257,7 @@ export const serveModel = (view: View, pending: readonly PendingTurn[], s: Strin
   return {
     counts: { ...view.overview, waiting: view.overview.waiting + pending.filter(turn => turn.isQuestion).length },
     asks,
+    idle,
     hidden: view.hidden.map(item => ({ key: `hidden:${item.hideKey}`, project: item.project, agent: item.agent, task: item.task, text: item.text })),
     groups: [...groups].map(([project, rows]) => ({ project, rows })),
     turns,
@@ -420,6 +424,7 @@ const PAGE_WORDS = [
   'answeredHide',
   'showAgain',
   'hiddenCount',
+  'idleCount',
   'serveReplyPlaceholder',
   'serveMessagePlaceholder',
   'serveSend',
@@ -740,6 +745,16 @@ const PAGE_SCRIPT = String.raw`
       });
       board.appendChild(shelf);
     }
+    if (model.idle.length) {
+      var idleShelf = el('details', 'card');
+      idleShelf.open = opened['idle:'] === true;
+      idleShelf.addEventListener('toggle', function () { opened['idle:'] = idleShelf.open; });
+      add(idleShelf, add(el('summary'), el('span', 'quiet', w('idleCount', model.idle.length))));
+      model.idle.forEach(function (row) {
+        add(idleShelf, el('div', 'where', row.project), rowCard(row));
+      });
+      board.appendChild(idleShelf);
+    }
     model.groups.forEach(function (group) {
       add(board, el('h2', 'where', '▸ ' + group.project));
       group.rows.forEach(function (row) { board.appendChild(rowCard(row)); });
@@ -759,7 +774,7 @@ const PAGE_SCRIPT = String.raw`
         call('/api/tidy', {}).then(function (data) { say(data.note || '', data.ok ? 'done' : 'alert'); refresh(); }, function () { say(w('serveOffline'), 'alert'); });
       }))));
     }
-    if (model.groups.length === 0 && model.asks.length === 0 && model.hidden.length === 0 && model.turns.length === 0 && model.recent.length === 0) add(board, el('div', 'quiet', w('empty')));
+    if (model.groups.length === 0 && model.asks.length === 0 && model.hidden.length === 0 && model.idle.length === 0 && model.turns.length === 0 && model.recent.length === 0) add(board, el('div', 'quiet', w('empty')));
     board.querySelectorAll('textarea[data-key]').forEach(function (box) {
       var key = box.getAttribute('data-key');
       if (key in kept) box.value = kept[key];

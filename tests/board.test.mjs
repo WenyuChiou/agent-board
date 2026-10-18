@@ -212,8 +212,10 @@ const chatRun = (args, { file = () => FILE, beside = {}, lang = 'en', isFolder =
       CLAUDE_PROGRESS_FILE: '', CLAUDE_CONFIG_DIR: '', NO_COLOR: '1',
     }
     const before = readdirSync(dirs['.claude']).sort()
+    const unchanged = new Map(before.filter(name => statSync(join(dirs['.claude'], name)).isFile()).map(name => [name, { bytes: readFileSync(join(dirs['.claude'], name)), mtime: statSync(join(dirs['.claude'], name)).mtimeMs }]))
     const ran = spawnSync(process.execPath, [script, ...args], { env, encoding: 'utf8', timeout: 20000 })
-    return { ...ran, home, path, wrote: readdirSync(dirs['.claude']).filter(name => !before.includes(name)), served: readdirSync(dirs.run) }
+    const modified = [...unchanged].filter(([name, old]) => !existsSync(join(dirs['.claude'], name)) || !readFileSync(join(dirs['.claude'], name)).equals(old.bytes) || statSync(join(dirs['.claude'], name)).mtimeMs !== old.mtime).map(([name]) => name)
+    return { ...ran, home, path, modified, wrote: readdirSync(dirs['.claude']).filter(name => !before.includes(name)), served: readdirSync(dirs.run) }
   } finally {
     rmSync(root, { recursive: true, force: true })
   }
@@ -1549,4 +1551,65 @@ test("--serve --lan prints the page's network address and a QR code of it, and a
   } finally {
     await board.end(urls)
   }
+})
+
+
+const IDLE_NOW = Date.parse('2026-10-17T12:00:00Z')
+const IDLE_FILE = `## demo
+### Quiet plan
+- [?] Publish, OK?
+- [ ] Finish
+<!-- auto session=b1c2d3e4 agent=codex state=ended updated=2026-10-08T12:00:00Z -->
+### Quiet block
+- [ ] Finish automatically
+<!-- /auto session=b1c2d3e4 -->
+`
+const idleRecord = () => JSON.stringify({ seen: {
+  [createHash('sha256').update(JSON.stringify(['demo', 'Quiet plan', [['waiting', 'Publish, OK?'], ['todo', 'Finish']]])).digest('hex')]: IDLE_NOW - 9 * 24 * 60 * 60 * 1000,
+} })
+const idleRun = (args, beside = { 'progress-seen.json': idleRecord() }) => chatRun(args, {
+  file: () => IDLE_FILE,
+  beside,
+  change: script => `Date.now = () => ${IDLE_NOW}\n${script}`,
+})
+
+test('the board script leaves idle tasks off the board, names how many, and lists them with --all', () => {
+  const closed = idleRun([])
+  assert.equal(closed.status, 0, closed.stderr)
+  assert.ok(closed.stdout.includes('2 idle 7+ days'), closed.stdout)
+  assert.ok(closed.stdout.includes('● 0 waiting') && closed.stdout.includes('▸ 0 in progress'), closed.stdout)
+  assert.ok(!closed.stdout.includes('Quiet plan') && !closed.stdout.includes('Quiet block'), closed.stdout)
+  assert.deepEqual(closed.wrote, [])
+  assert.deepEqual(closed.modified, [])
+  const opened = idleRun(['--all'])
+  assert.equal(opened.status, 0, opened.stderr)
+  assert.ok(opened.stdout.includes('Quiet plan') && opened.stdout.includes('Quiet block'), opened.stdout)
+  assert.ok(opened.stdout.includes('9 days ago') && opened.stdout.includes('Publish, OK?'), opened.stdout)
+  assert.deepEqual(opened.wrote, [])
+  assert.deepEqual(opened.modified, [])
+  const keys = idleRun(['--keys', 'i'])
+  assert.equal(keys.status, 0, keys.stderr)
+  assert.ok(keys.stdout.includes('Quiet plan') && keys.stdout.includes('Quiet block'), keys.stdout)
+  assert.ok(idleRun(['--keys', 'i i']).stdout.includes('2 idle 7+ days'))
+  assert.ok(!idleRun(['--keys', 'i i']).stdout.includes('Quiet plan'))
+  const broken = idleRun([], { 'progress-seen.json': '{' })
+  assert.equal(broken.status, 0, broken.stderr)
+  assert.ok(broken.stdout.includes('Quiet plan'), broken.stdout)
+})
+
+test("the board script's --chat run reads the seen record and writes nothing", () => {
+  for (const args of [['--chat'], ['--chat', '--all', '--watch', '--serve', '--html', '--keys', 'i x']]) {
+    const ran = idleRun(args)
+    assert.equal(ran.status, 0, ran.stderr)
+    assert.ok(ran.stdout.includes('2 idle 7+ days'), ran.stdout)
+    assert.ok(!ran.stdout.includes('Quiet plan') && !ran.stdout.includes('Publish, OK?'), ran.stdout)
+    assert.deepEqual(ran.wrote, [])
+    assert.deepEqual(ran.modified, [])
+    assert.deepEqual(ran.served, [])
+  }
+  const fresh = idleRun(['--chat'], {})
+  assert.equal(fresh.status, 0, fresh.stderr)
+  assert.ok(fresh.stdout.includes('Publish, OK?'), fresh.stdout)
+  assert.deepEqual(fresh.wrote, [])
+  assert.deepEqual(fresh.modified, [])
 })

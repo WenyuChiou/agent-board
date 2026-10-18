@@ -144,6 +144,7 @@ declare module 'claude-code' {
       opened: string[]
       doneSeen: Record<string, number>
       hiddenAsks: string[]
+      firstSeen: Record<string, number>
       revising: string
       lang: string
     }
