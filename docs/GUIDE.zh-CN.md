@@ -121,7 +121,7 @@ Claude 会列出 Task 清单，面板跟着走：卡片显示任务、它的背�
 |---|---|
 | `/progress` | 打开面板 |
 | `/progress open` | 在浏览器打开 `progress.html` |
-| `/progress connect` / `connect remove` | 把这台电脑上的其他 agent 接上面板／去掉 |
+| `/progress connect` / `connect remove` / `connect status` | 把这台电脑上的其他 agent 接上面板／去掉／逐一列出每个 agent 的 hook 和看板命令能不能用 |
 | `/progress add <line>` | 添加一件事，和在面板里输入 `+` 一样 |
 | `/progress tidy` | 立刻归档做完的工作，以及停太久的工作（见[它怎么保持整齐](#它怎么保持整齐)） |
 | `/progress sync` | 重新读取 Claude 的 Task 清单和 PR |
@@ -167,7 +167,7 @@ Claude 会列出 Task 清单，面板跟着走：卡片显示任务、它的背�
 
 ## 其他 agent
 
-Claude Code 会自己接上它们：每个对话开始时，会把这台电脑装了、但还没接上的 agent 接上（之后才装的也一样），并告诉你一次接了哪些。`/progress connect remove` 会去掉 hook 并停止自动接；在 `/config` 里关掉插件的 **Connect other agents automatically** 也能关掉。想手动接、并看看哪些配置文件改不了，就在 Claude Code 里运行，或在任何终端运行 `claude -p "/progress connect"`：
+Claude Code 会自己接上它们：每个对话开始时，会把这台电脑装了、但还没接上的 agent 接上（之后才装的也一样），并告诉你一次接了哪些。有问题也只说一次：读不懂或写不进去的配置文件、保留下来的文件、太旧的 OpenClaw，或看板命令缺 Node.js（或版本太旧）。`/progress connect status` 会再逐一列出每个 agent：汇报 hook、它还要你做的事（Codex 要批准、Hermes Agent 会问、OpenClaw 要重启 gateway），以及看板命令能不能用。`/progress connect remove` 会去掉 hook 并停止自动接；在 `/config` 里关掉插件的 **Connect other agents automatically** 也能关掉。想手动接、并看看哪些配置文件改不了，就在 Claude Code 里运行，或在任何终端运行 `claude -p "/progress connect"`：
 
 ```
 /progress connect
@@ -195,7 +195,11 @@ hook 运行的是 `/progress connect` 写好的 `~/.claude/progress-report.sh`�
 - 文件里你自己的 hook 会保留。
 - 不是纯 JSON 的配置文件不会动，命令会告诉你是哪一个；JSON 的第一次会用两格缩进重写。
 - 之前用 setup `--agents` 写进那个 agent 说明里的 AGENTS.md 段落会被去掉，免得同一件事出现两次。
-- `/progress connect remove` 全部去掉。
+- `/progress connect remove` 去掉汇报用的 hook 和我们写的看板命令，保留的规则见下面。
+
+命令、skill 和独立脚本只有在整份内容和已知模板、这个插件上次记下的输出，或之前某个版本写的文件完全一样时，才会更新或删除。原本就是空的文件和你改过的文件会保留，警告里会列出路径，自动接上时也一样。想让 Agent Board 用那个路径，先把那个文件改名，再重新接上。没有记录的旧文件，只有名称或开头对得上不算数。
+
+移除时会同时看命令的结果和文件是不是真的不见了。没清干净就会列出没能确认或保留下来的路径；照提示处理后，再运行一次 `/progress connect remove`。只要还有命令或 skill 留着，它们共用的 `agent-board.mjs` 也会留着。汇报脚本和收件箱会保留，给排队中或正在运行的 hook 用；进度文件、归档、日志，以及你自己加进 skill 文件夹的文件都不会动。记录只保存插件生成的内容，放在插件自己的存储里，确认删除后就清掉。两个程序同时在连接，或连接时你正好在改文件，这种情况没有防护。
 
 要有 Claude Code 对话开着才会更新。都没开的时候，回合会先存在收件箱，超过两天的文件由汇报脚本自己清掉。
 
@@ -207,7 +211,7 @@ hook 运行的是 `/progress connect` 写好的 `~/.claude/progress-report.sh`�
 
 ## 每个 agent 里都看得到看板
 
-`/progress connect`（以及每个对话开始时）也会在 `progress.md` 旁边写一个 `agent-board.mjs`：直接从 `progress.md` 打印看板的脚本，不用开 Claude Code。每个 agent 的看板命令都是用 Node.js 18 以上运行它：Codex 和 Gemini CLI 本来就带 Node；OpenCode、Cursor、Grok Build、Hermes Agent、OpenClaw、Antigravity 若 `node --version` 找不到，请装一下。
+`/progress connect`（以及每个对话开始时）也会在 `progress.md` 旁边写一个 `agent-board.mjs`：直接从 `progress.md` 打印看板的脚本，不用开 Claude Code。每个 agent 的看板命令都是用 Node.js 18 以上运行它：用 npm 安装的 Codex 和 Gemini CLI 本来就带 Node，原生安装的 Codex 没有；它和 OpenCode、Cursor、Grok Build、Hermes Agent、OpenClaw、Antigravity 若 `node --version` 找不到，请装一下。少了它，对话开始时会说一次，汇报用的 hook 照样能用。
 
 | Agent | 文件 | 输入 |
 |---|---|---|
@@ -288,7 +292,7 @@ claude -p "/progress connect"
 - **PowerShell 警告执行策略。** PowerShell 要允许运行脚本才会执行你的 profile：`Set-ExecutionPolicy -Scope CurrentUser RemoteSigned`，然后再运行一次脚本。在那之前，这个变量会留在 `settings.json`。
 - **私有 fork。** Claude Code 用你自己的 git 凭据 clone。运行一次 `gh auth login` 和 `gh auth setup-git`；没有 GitHub SSH key 的话，再设置 `CLAUDE_CODE_PLUGIN_PREFER_HTTPS=1`。
 - **你的组织统一管理 Claude Code。** 在那种环境里，你自己装的插件收不到系统提示的 hook。运行设置脚本时加 `-KeepRule`（`--keep-rule`），改把规则留在 `~/.claude/CLAUDE.md`。
-- **某个 agent 没出现。** 再运行一次 `/progress connect`：它会列出接上了哪些 agent，以及哪些配置文件改不了。重启那个 agent，并在它工作时开着一个 Claude Code 对话。开着的对话读完 `~/.claude/progress-inbox/` 里的文件就会删掉，所以要看 hook 存了什么，先关掉所有对话：回合结束后那里没有新文件，就是那个 agent 的 hook 没有运行。看板没能收下的回合（`progress.md` 写不进去，或模型没给摘要、回复里也没有提问）会以 `.taking` 文件留在那里，每 15 分钟再试一次；试满 8 次就改成 `.failed` 文件保留，不会删掉。
+- **某个 agent 没出现。** 再运行一次 `/progress connect`：它会列出接上了哪些 agent，以及哪些配置文件改不了。重启那个 agent，并在它工作时开着一个 Claude Code 对话。开着的对话读完 `~/.claude/progress-inbox/` 里的文件就会删掉，所以要看 hook 存了什么，先关掉所有对话：回合结束后那里没有新文件，就是那个 agent 的 hook 没有运行。看板没能收下的回合（`progress.md` 写不进去，或模型没给摘要、回复里也没有提问）会以 `.taking` 文件留在那里，每 15 分钟再试一次；试满 8 次就改成 `.failed` 文件保留，不会删掉。不是有效 JSON、或没写是哪个对话的报告，会直接改成 `.failed` 文件保留，面板会告诉你在哪里；`.failed` 文件不会自动清掉，看完再自己删。
 - **Windows 上的 Cursor 停在“blocked”。** `cursor-agent` 一律用 bash 运行 hook，连写给 PowerShell 的也是，所以 `~/.cursor/hooks.json` 里其他工具的 PowerShell hook 会出现 `syntax error near unexpected token '&'`；`preToolUse` hook 失败会挡住整个回合（Agent Board 的 hook 根本轮不到）。修好或删掉那个工具的 hook。
 - **Hermes Agent 单次运行的问题显示成已停，不是等你。** `hermes -q` 回合一结束就关掉对话，所以问你事情的那块会显示“对话已结束，可接手”。问题仍是最后一步；长时间开着的 Hermes（它的 gateway）就会保持等你。
 - **换了一台电脑。** `progress.md`、收件箱和 hook 都只在各自的电脑上。在新电脑安装并运行 `/progress connect`；要带上记录，就把 `progress.md` 和旁边的 `progress-archive-*.md`、`progress-journal-*.md` 复制过去。要两台共用一个面板，就在两台都把 `CLAUDE_PROGRESS_FILE` 指向同步文件夹里的同一个文件，并且一次只用一台。

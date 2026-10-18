@@ -121,7 +121,7 @@ Marks:
 |---|---|
 | `/progress` | Opens the pane |
 | `/progress open` | Opens `progress.html` in the browser |
-| `/progress connect` / `connect remove` | Hooks the other agents installed here into the pane / takes the hooks out |
+| `/progress connect` / `connect remove` / `connect status` | Hooks the other agents installed here into the pane / takes the hooks out / shows, agent by agent, whether its hook and board command are ready |
 | `/progress add <line>` | Adds a task, same as `+` in the pane |
 | `/progress tidy` | Archives finished work now, and stopped work past its age ([How it keeps itself tidy](#how-it-keeps-itself-tidy)) |
 | `/progress sync` | Re-reads Claude's Task list and the PR |
@@ -167,7 +167,7 @@ The full specification, for tools that read or write the file, is [docs/FORMAT.m
 
 ## Other agents
 
-Claude Code connects them on its own: each session hooks in every agent installed here that is not hooked in yet (one installed later included), and says once which it connected. `/progress connect remove` takes the hooks out and stops this; the plugin's **Connect other agents automatically** option in `/config` turns it off too. To connect by hand, and see which config files could not be edited, run this in Claude Code, or `claude -p "/progress connect"` from any shell:
+Claude Code connects them on its own: each session hooks in every agent installed here that is not hooked in yet (one installed later included), and says once which it connected. It also says once about any problem: a config it could not read or write, a file it kept, an OpenClaw too old, or no Node.js (or one too old) for the board commands. `/progress connect status` lists each agent again: its reporting hook, what the agent still asks of you (Codex's approval, Hermes Agent's question, OpenClaw's gateway restart), and whether its board command is ready. `/progress connect remove` takes the hooks out and stops this; the plugin's **Connect other agents automatically** option in `/config` turns it off too. To connect by hand, and see which config files could not be edited, run this in Claude Code, or `claude -p "/progress connect"` from any shell:
 
 ```
 /progress connect
@@ -186,7 +186,11 @@ It finds the agents installed on this machine and gives each one a hook that run
 | Muse Code | `~/.config/muse/settings.json` | `Stop` |
 | OpenClaw | `~/.openclaw/agent-board.mjs`, and `openclaw.json` beside it to load it (`$OPENCLAW_STATE_DIR`) | `agent_end`. Restart its gateway after connecting |
 
-The hook runs `~/.claude/progress-report.sh` (Windows: `progress-report.ps1`), which `/progress connect` writes. The script has no dependencies, always exits 0 and prints nothing, except `{}` for Cursor. Your own hooks in those files stay. A config file that is not plain JSON is left alone, and the command says which one; a JSON one is written back with two-space indents the first time. If setup `--agents` had put the AGENTS.md section into that agent's instructions, the section is removed, so the work does not show twice. `/progress connect remove` takes everything back out.
+The hook runs `~/.claude/progress-report.sh` (Windows: `progress-report.ps1`), which `/progress connect` writes. The script has no dependencies, always exits 0 and prints nothing, except `{}` for Cursor. Your own hooks in those files stay. A config file that is not plain JSON is left alone, and the command says which one; a JSON one is written back with two-space indents the first time. If setup `--agents` had put the AGENTS.md section into that agent's instructions, the section is removed, so the work does not show twice. `/progress connect remove` takes the reporting hooks and owned board commands back out, with the retention rules below.
+
+Generated commands, skills and standalone scripts are updated or removed only when their complete contents match a known template or the last output recorded by this plugin. Existing empty files and files you edited are preserved, with their paths shown in a warning, including during automatic setup. Move a conflicting file to another name before reconnecting if you want Agent Board to use that path. An older file without an ownership record is adopted only when its complete contents match a supported template or the exact file an earlier release wrote; a name or header alone is not enough.
+
+Removal checks both the command result and whether the file is gone. An incomplete cleanup lists the unverified or preserved paths; fix the reported problem and retry `/progress connect remove`. If a command or skill remains, its shared `agent-board.mjs` is kept too. Reporter scripts and the inbox are retained for queued or in-flight hooks; progress files, archives, journals and extra files you added inside a skill folder are preserved. The ownership record contains only generated output, is kept in the plugin's store, and is removed after verified deletion. This does not provide cross-process locking for concurrent setup or user edits.
 
 Progress shows only while some Claude Code session is open. Turns that arrive while none is open wait in the inbox, and the reporter clears files older than two days.
 
@@ -198,7 +202,7 @@ Progress shows only while some Claude Code session is open. Turns that arrive wh
 
 ## The board in every agent
 
-`/progress connect` (and each session's start) also writes `agent-board.mjs` beside `progress.md`: a script that prints the board from `progress.md`, with no Claude Code needed. Every agent's board command runs it with Node.js 18 or newer: Codex and Gemini CLI come with Node; for OpenCode, Cursor, Grok Build, Hermes Agent, OpenClaw or Antigravity, install it if `node --version` finds none.
+`/progress connect` (and each session's start) also writes `agent-board.mjs` beside `progress.md`: a script that prints the board from `progress.md`, with no Claude Code needed. Every agent's board command runs it with Node.js 18 or newer: Codex and Gemini CLI installed with npm come with Node, a native Codex install does not; for it and for OpenCode, Cursor, Grok Build, Hermes Agent, OpenClaw or Antigravity, install it if `node --version` finds none. Without it, the session start says so once, and the reporting hooks still work.
 
 | Agent | File | Type |
 |---|---|---|
@@ -279,7 +283,7 @@ The last line moves the hooks in your other agents to the new name. `progress.md
 - **PowerShell warns about the execution policy.** Your profile only runs where scripts may run: `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned`, then run the script again. Until then the variable stays in `settings.json`.
 - **Private fork.** Claude Code clones with your own git credentials. Run `gh auth login` and `gh auth setup-git` once; without a GitHub SSH key also set `CLAUDE_CODE_PLUGIN_PREFER_HTTPS=1`.
 - **Your organization manages Claude Code.** Plugins you install yourself do not get the system-prompt hook there. Run the setup script with `-KeepRule` (`--keep-rule`) to keep the rule in `~/.claude/CLAUDE.md` instead.
-- **An agent doesn't show up.** Run `/progress connect` again: it names every agent it connected and every config it could not edit. Restart the agent, and keep a Claude Code session open while it works. An open session reads each file in `~/.claude/progress-inbox/` and deletes it, so to see what the hook saves, close every session first: if no file appears there after a turn, the agent's hook did not run. A turn the board could not take (`progress.md` could not be written, or the model gave no summary of a reply that asks nothing) stays there as a `.taking` file and is tried again every 15 minutes; after 8 tries it is kept as a `.failed` file, not deleted.
+- **An agent doesn't show up.** Run `/progress connect` again: it names every agent it connected and every config it could not edit. Restart the agent, and keep a Claude Code session open while it works. An open session reads each file in `~/.claude/progress-inbox/` and deletes it, so to see what the hook saves, close every session first: if no file appears there after a turn, the agent's hook did not run. A turn the board could not take (`progress.md` could not be written, or the model gave no summary of a reply that asks nothing) stays there as a `.taking` file and is tried again every 15 minutes; after 8 tries it is kept as a `.failed` file, not deleted. A report that is not valid JSON, or names no session, is kept as a `.failed` file at once, and the pane says where; `.failed` files are not cleaned up, so remove them once you have looked.
 - **Cursor on Windows stops at "blocked".** `cursor-agent` runs every hook through bash, even one written for PowerShell, so another tool's PowerShell hook in `~/.cursor/hooks.json` fails with `syntax error near unexpected token '&'`, and a failing `preToolUse` hook blocks the whole turn (Agent Board's hook never gets to run). Fix or remove that tool's hook.
 - **A one-off Hermes Agent question shows as stopped, not waiting.** `hermes -q` ends its session right after the turn, so a block that asks you something reads "session ended, can be taken over". Its question is still the last step; a long-running Hermes (its gateway) keeps it waiting.
 - **A new computer.** `progress.md`, the inbox and the hooks live on each computer. Install there and run `/progress connect`; copy `progress.md` and the `progress-archive-*.md` and `progress-journal-*.md` files beside it to bring your history. To share one board, point `CLAUDE_PROGRESS_FILE` on both computers at one file in a synced folder, and use one computer at a time.
