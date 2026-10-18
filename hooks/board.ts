@@ -53,7 +53,7 @@ export const peekInbox = (
   return [...latest.values()].sort((a, b) => Number(b.isQuestion) - Number(a.isQuestion) || b.at - a.at)
 }
 
-export type BoardOptions = { width: number; isColor: boolean }
+export type BoardOptions = { width: number; isColor: boolean; isIdleOpen?: boolean }
 
 const CODES = { waiting: '33', accent: '36', done: '32', alert: '31', quiet: '2', bold: '1', project: '35' } as const
 
@@ -150,6 +150,16 @@ export const boardText = (view: View, pending: readonly PendingTurn[], s: String
     lines.push('')
   }
 
+  if (view.idle.length > 0) {
+    lines.push(c('quiet', o.isIdleOpen ? s.idleCount(view.idle.length) : `${s.idleCount(view.idle.length)} · --all`))
+    if (o.isIdleOpen) {
+      for (const row of view.idle) {
+        lines.push(`  ${c('project', fit(row.project, o.width - 4))}`, ...rowLines(row, s, o))
+      }
+    }
+    lines.push('')
+  }
+
   const news = pending.filter(turn => !turn.isQuestion)
   if (news.length > 0) {
     lines.push(c('accent', `◐ ${s.boardInbox}`))
@@ -157,7 +167,7 @@ export const boardText = (view: View, pending: readonly PendingTurn[], s: String
     lines.push('')
   }
 
-  if (view.groups.every(group => group.rows.length === 0) && asks.length === 0 && news.length === 0) lines.push(c('quiet', s.empty), '')
+  if (view.groups.every(group => group.rows.length === 0) && asks.length === 0 && news.length === 0 && view.idle.length === 0 && view.due.length === 0) lines.push(c('quiet', s.empty), '')
 
   return `${lines.join('\n').replace(/\n+$/, '')}\n`
 }
@@ -305,6 +315,7 @@ export const chatText = (
     items.push([...(index === 0 ? ['', `● ${s.sectionWaiting}`] : []), line(ask.where + (ask.task ? ` › ${ask.task}` : ''), 2), line(ask.text, 4)].join('\n'))
   })
   if (asks.length > 0 && hidden !== null) items.push(`  ${hidden}`)
+  if (view.idle.length > 0) items.push(line(s.idleCount(view.idle.length)))
   // A question is told above, answered or not: it is never the "next step" of its task.
   const isNext = (step: ViewStep): boolean => step.number !== null && !['done', 'cancelled', 'waiting'].includes(step.status)
   rows.forEach(({ row, mark }, index) => {
@@ -312,7 +323,7 @@ export const chatText = (
     const words = `${mark} ${named(row.project)} › ${row.title}${row.due === null ? '' : ` · ${row.due.left}`}${next === undefined ? '' : ` — ${s.reportNext(next)}`}`
     items.push(`${index === 0 ? '\n' : ''}${line(words)}`)
   })
-  if (asks.length === 0 && rows.length === 0) items.push(s.empty)
+  if (asks.length === 0 && rows.length === 0 && view.idle.length === 0) items.push(s.empty)
   // Each starts with its project (`project · task: step`).
   const doneWords = (words: string): string => {
     const [project = '', ...rest] = words.split(' · ')
@@ -346,7 +357,7 @@ export type BoardItem =
 
 // `key` is the chosen line's, so the choice stays on it when lines above it come or go. `seen`
 // holds each line's fingerprint as the last draw showed it (null before the first draw).
-export type BoardState = { selected: number; key: string | null; open: string | null; note: string; seen: Record<string, string> | null }
+export type BoardState = { selected: number; key: string | null; open: string | null; note: string; seen: Record<string, string> | null; isIdleOpen?: boolean }
 
 export type BoardAction =
   | { type: 'tick'; ref: StepRef }
@@ -370,9 +381,11 @@ const chosen = (state: BoardState, items: readonly BoardItem[]): number => {
 
 // In the order the screen shows them: what waits on you, each project's work, then turns
 // no Claude Code session has taken in.
-export const boardItems = (view: View, pending: readonly PendingTurn[]): BoardItem[] => {
+// The full action catalog includes idle rows for the page server. Terminal callers pass
+// their shelf state so only rows the person can see are selectable.
+export const boardItems = (view: View, pending: readonly PendingTurn[], isIdleOpen = true): BoardItem[] => {
   // Work due soon first, then each project's; a row is listed once.
-  const rows = [...view.due, ...view.groups.flatMap(group => group.rows)].filter((row, index, all) => all.findIndex(one => one.key === row.key) === index)
+  const rows = [...view.due, ...view.groups.flatMap(group => group.rows), ...(isIdleOpen ? view.idle : [])].filter((row, index, all) => all.findIndex(one => one.key === row.key) === index)
 
   return [
     // A question's key holds its words, so a press made while it showed one question is refused
@@ -442,6 +455,7 @@ export const boardKey = (state: BoardState, key: string, items: readonly BoardIt
   if (key === 'up' || key === 'k') return moved(Math.max(0, at - 1))
   if (key === 'down' || key === 'j') return moved(Math.min(last, at + 1))
   if (key === 'o') return { state, action: { type: 'html' } }
+  if (key === 'i') return { state: { ...state, isIdleOpen: !state.isIdleOpen, selected: 0, key: null, open: null, note: '', seen: {} }, action: null }
   if (key === 'u') return { state, action: { type: 'unhide', key: null } }
   if (item === undefined) return { state, action: null }
   // The line under the cursor changed since the screen was drawn: choose what is there now and
@@ -505,13 +519,14 @@ const keysFor = (item: BoardItem | undefined, s: Strings): string[] => {
 
 export const boardScreen = (view: View, pending: readonly PendingTurn[], state: BoardState, s: Strings = ZH_TW, o: BoardOptions = { width: 80, isColor: false }): string => {
   const c = paint(o.isColor)
-  const items = boardItems(view, pending)
+  const items = boardItems(view, pending, state.isIdleOpen ?? false)
   const at = chosen(state, items)
   const { active, due, today } = view.overview
   const waiting = view.overview.waiting + pending.filter(turn => turn.isQuestion).length
   const lines: string[] = [
     `${c('bold', s.paneTitle)}  ${c('waiting', `● ${waiting} ${s.countWaiting}`)}  ${c('accent', `▸ ${active} ${s.countActive}`)}  ${c('alert', `⚑ ${due} ${s.countDue}`)}  ${c('done', `✓ ${today} ${s.countToday}`)}`,
     ...(view.hidden.length === 0 ? [] : [c('quiet', `${s.hiddenCount(view.hidden.length)} · ${s.boardKeyShowHidden}`)]),
+    ...(view.idle.length === 0 ? [] : [c('quiet', `${s.idleCount(view.idle.length)} · ${s.boardKeyIdle}`)]),
     '',
   ]
   let section = ''
@@ -555,6 +570,7 @@ export const boardScreen = (view: View, pending: readonly PendingTurn[], state: 
       lines.push(`${mark} ${line(fit(row.title, o.width - 4))}`)
       lines.push(`    ${c('quiet', fit(`${count}${row.status}${who}${row.when ? ` · ${row.when}` : ''}`, o.width - 6))}${row.due ? `  ${c('alert', `⚑ ${row.due.left}`)}` : ''}`)
       if (isOpen) {
+        if (row.question) lines.push(`    ${fit(row.question, o.width - 6)}`)
         if (row.context) lines.push(`    ${c('quiet', fit(row.context, o.width - 6))}`)
         for (const step of row.steps) lines.push(`    ${fit(stepLine(step), o.width - 6)}`)
         if (row.handoff) lines.push(`    ${c('quiet', fit(row.handoff, o.width - 6))}`)

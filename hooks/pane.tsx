@@ -40,7 +40,7 @@ export type PaneUi = {
 
 export type PaneActions = {
   toggle: (key: string) => void
-  // Opens or folds a section: waiting, due, others, recent, steps.
+  // Opens or folds a section: waiting, due, others, recent, steps, hidden, idle.
   toggleSection: (id: string) => void
   continueHere: () => void
   archive: () => void
@@ -592,6 +592,7 @@ export const drawPane = (ui: PaneUi, model: PaneModel, actions: PaneActions): Re
     view.waiting.length === 0 &&
     view.due.length === 0 &&
     view.active.length === 0 &&
+    view.idle.length === 0 &&
     view.recent.length === 0
 
   return (
@@ -629,6 +630,19 @@ export const drawPane = (ui: PaneUi, model: PaneModel, actions: PaneActions): Re
         </Box>
       )}
       {isOpen('hidden') && view.hidden.map(hiddenRow)}
+      {view.idle.length > 0 && (
+        <Box marginTop={1}>
+          <Button key="section::idle" plain onPress={() => actions.toggleSection('idle')}>
+            {`${isOpen('idle') ? '▾' : '▸'} ${s.idleCount(view.idle.length)}`}
+          </Button>
+        </Box>
+      )}
+      {isOpen('idle') && view.idle.map(row => (
+        <Box key={`idle::${row.key}`} flexDirection="column" marginTop={1} paddingLeft={1}>
+          {taskRow(row, true)}
+          {row.question !== null && muted(row.question)}
+        </Box>
+      ))}
 
       {view.due.length > 0 &&
         fold('due', s.sectionDue, view.due.length, 'soon', nearest === undefined ? '' : s.nearestDue(nearest.title, nearest.due?.left ?? ''))}

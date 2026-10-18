@@ -8,7 +8,7 @@ Claude Code 插件，也跟得上 Codex、Gemini CLI、OpenCode、Grok Build、H
 </p>
 
 <p align="center">
-<a href="CHANGELOG.md"><img alt="版本 0.21.3" src="https://img.shields.io/badge/version-0.21.3-blue"></a>
+<a href="CHANGELOG.md"><img alt="版本 0.22.1" src="https://img.shields.io/badge/version-0.22.1-blue"></a>
 <img alt="需要 Claude Code 2.1.287 以上" src="https://img.shields.io/badge/Claude%20Code-%E2%89%A5%202.1.287-d97757">
 <a href="LICENSE"><img alt="MIT 许可" src="https://img.shields.io/badge/license-MIT-green"></a>
 <img alt="macOS、Linux、Windows" src="https://img.shields.io/badge/macOS%20%C2%B7%20Linux%20%C2%B7%20Windows-lightgrey">
@@ -34,7 +34,7 @@ Claude Code 插件，也跟得上 Codex、Gemini CLI、OpenCode、Grok Build、H
 - **你自己的待办也放得进来。** 在面板的输入框打 `+ 求职：Fabrikam 研究员 截止 11-20`。快到期会变黄，到期会变红。
 - **不在终端也看得到。** `/progress open` 在浏览器打开同一个画面（手机也行）；其他 agent 会打开[可以点的网页](#看板的网页)，在上面勾步骤、归档、回答。面板关着时，状态栏和桌面通知会告诉你有事在等你。
 - **周报。** `/progress report` 和 `/progress today` 把做完的事复制成文字。
-- **自己清理。** 做完的事移到每月归档文件，日志留下每一步完成记录。
+- **自己清理。** 做完的事移到每月归档文件，日志留下每一步完成记录。超过一周没人动的工作收进一行 **N 项超过 7 天没动**，文件里一字不改。
 - **就是一个 Markdown 文件。** 全部在 `~/.claude/progress.md`，你可以自己看、自己改。支持 English、繁體中文、简体中文；浅色深色都有。
 
 ## 怎么运作
@@ -143,6 +143,7 @@ claude -p "/progress connect"
 | `1`–`9`、`y`／`n` | 复制另一个 agent 问题的答案，贴到那个 agent |
 | `c` | 复制命令，或接回提问那个对话的命令（没有命令就复制它的 ID） |
 | `h`、`u` | 把另一个 agent 的问题标成已回复：只在这台电脑上隐藏，不发出任何话；把隐藏的全部重新显示 |
+| `i` | 展开或收起超过 7 天没动的工作 |
 | `o`、`q` | 打开网页版；退出 |
 
 做完的工作会自己离开看板。看板写 `progress.md` 跟面板一样小心；别的对话的区块不会动，除非你归档一个已经停掉的。

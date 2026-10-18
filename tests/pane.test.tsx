@@ -8,7 +8,8 @@ import { ZH_TW } from '../hooks/i18n'
 import { EN } from '../hooks/strings-en'
 import { ZH_CN } from '../hooks/strings-zh-cn'
 import { dashboardHtml } from '../hooks/dashboard'
-import { buildView } from '../hooks/view'
+import { buildView, IDLE_MS, parseSeen, seenJson, seenPath, withSeen } from '../hooks/view'
+import { parseProgress } from '../hooks/parse'
 import { RELEASE_0_18_1, RELEASE_0_20_5 } from './fixtures/released'
 
 const FILE = '/home/me/.claude/progress.md'
@@ -28,6 +29,8 @@ const PROPS: RenderPropsOf['Pane'] = {
 
 type World = {
   files: Map<string, string>
+  dirs?: Set<string>
+  unlistable?: Set<string>
   mtime: number
   hasTasks: boolean
   at?: number
@@ -82,6 +85,7 @@ type World = {
   // A removal that fails, or reports success while the file still exists.
   unremovable?: Set<string>
   retainedOnRemove?: Set<string>
+  rejectedOnRemove?: Set<string>
 }
 
 // On Windows the engine resolves /home/me/... to X:\home\me\... before fs.* reaches these
@@ -139,6 +143,15 @@ const engineBeneath = (on: On, world: World): MockClock => {
     value: world.hasTasks ? [{ name: 'TaskCreate', description: '', mcp: false }] : [{ name: 'Read', description: '', mcp: false }],
   }))
   on('process.run', ($, e) => {
+    if (e.argv[0] === 'rmdir') {
+      world.ran?.push([...e.argv])
+      const dir = posix(e.argv[1] ?? '')
+      if (world.rejectedOnRemove?.has(dir)) return { deny: 'EACCES' }
+      const hasEntries = [...world.files.keys()].some(path => path.startsWith(`${dir}/`))
+      const exitCode = world.unremovable?.has(dir) || hasEntries ? 1 : 0
+      if (exitCode === 0 && !world.retainedOnRemove?.has(dir)) world.dirs?.delete(dir)
+      return { value: { exitCode, stdout: '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
+    }
     // mv and rm act on the files in memory: a move of a file that is gone fails, as it does.
     if (e.argv[0] === 'mv' || e.argv[0] === 'rm') {
       world.ran?.push([...e.argv])
@@ -203,8 +216,9 @@ const engineBeneath = (on: On, world: World): MockClock => {
       ? { deny: 'ENOENT' }
       : { value: { kind: 'file' as const, size: text.length, mtimeMs: world.mtime, isLink: false } }
   })
-  on('fs.exists', ($, e) => ({ value: world.files.has(posix(e.path)) || [...world.files.keys()].some(path => path.startsWith(`${posix(e.path)}/`)) }))
+  on('fs.exists', ($, e) => ({ value: world.dirs?.has(posix(e.path)) || world.files.has(posix(e.path)) || [...world.files.keys()].some(path => path.startsWith(`${posix(e.path)}/`)) }))
   on('fs.list', ($, e) => {
+    if (world.unlistable?.has(posix(e.path ?? ''))) return { deny: 'EACCES' }
     const dir = `${posix(e.path ?? '').replace(/\/$/, '')}/`
     const names = [...world.files.keys()].filter(path => path.startsWith(dir) && !path.slice(dir.length).includes('/'))
     return {
@@ -3313,7 +3327,7 @@ test('a session hooks OpenClaw in by a plugin file and its config entry, names i
 })
 
 test('connecting writes the board script and each installed agent’s board command, says how to open them, and removing takes them out', async ($, on) => {
-  const world: World = { files: new Map([['/home/me/.gemini/settings.json', '{}'], ['/home/me/.codex/config.toml', '']]), mtime: 1, hasTasks: true, ran: [] }
+  const world: World = { files: new Map([['/home/me/.gemini/settings.json', '{}'], ['/home/me/.codex/config.toml', '']]), dirs: new Set(['/home/me/.agents/skills/agent-board']), mtime: 1, hasTasks: true, ran: [] }
   engineBeneath(on, world)
   await $.session.start({ cwd: '/work/persona_framework', surface: 'terminal', isInteractive: true })
   const board = world.files.get('/home/me/.claude/agent-board.mjs') ?? ''
@@ -4077,8 +4091,8 @@ test('failed and falsely successful deletes report exact leftovers, retain the b
   world.retainedOnRemove?.add(skill)
   const removed = await $.command.run({ ...TIDY, args: 'connect remove' })
   expect(removed.text).toContain('清理尚未完成')
-  expect(removed.text).toContain(`無法確認移除結果；請檢查這個檔案，再重試 /progress connect remove：${command}`)
-  expect(removed.text).toContain(`無法確認移除結果；請檢查這個檔案，再重試 /progress connect remove：${skill}`)
+  expect(removed.text).toContain(ZH_TW.connectRemoveFailed(command))
+  expect(removed.text).toContain(ZH_TW.connectRemoveFailed(skill))
   expect(removed.text).toContain('仍有指令檔未移除')
   for (const file of [command, skill, board, sibling]) expect(world.files.has(file)).toBe(true)
   world.unremovable?.clear()
@@ -4088,6 +4102,97 @@ test('failed and falsely successful deletes report exact leftovers, retain the b
   for (const file of [command, skill, board]) expect(world.files.has(file)).toBe(false)
   expect(world.files.get(sibling)).toBe('keep me')
   expect(world.files.has('/home/me/.claude/progress-report.sh')).toBe(true)
+})
+
+test('an empty skill folder that cannot be removed is named by the remove, and the status still lists it', async ($, on) => {
+  const dir = '/home/me/.agents/skills/agent-board'
+  const board = '/home/me/.claude/agent-board.mjs'
+  const world: World = { files: new Map([['/home/me/.gemini/settings.json', '{}']]), dirs: new Set([dir]), mtime: 1, hasTasks: true, ran: [], unremovable: new Set([dir]) }
+  engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/persona_framework', surface: 'terminal', isInteractive: true })
+  const removed = await $.command.run({ ...TIDY, args: 'connect remove' })
+  expect(removed.text).toContain(ZH_TW.connectRemoveIncomplete)
+  expect(removed.text).toContain(ZH_TW.connectRemoveFailed(dir))
+  expect(world.ran).toContainEqual(['rmdir', dir])
+  expect(world.files.has(`${dir}/SKILL.md`)).toBe(false)
+  expect(world.dirs?.has(dir)).toBe(true)
+  // Nothing runs the board script once the skill is gone, so it goes, and nothing says it stayed.
+  expect(world.files.has(board)).toBe(false)
+  expect(removed.text).not.toContain(ZH_TW.connectBoardRetained(board))
+  const files = [...world.files]
+  const ran = [...(world.ran ?? [])]
+  const status = await $.command.run({ ...TIDY, args: 'connect status' })
+  expect(status.text).toContain(ZH_TW.connectRemoveFailed(dir))
+  expect([...world.files]).toEqual(files)
+  expect(world.ran).toEqual(ran)
+})
+
+test('a second remove names the empty skill folder again, and takes it once it can', async ($, on) => {
+  const dir = '/home/me/.agents/skills/agent-board'
+  const world: World = { files: new Map([['/home/me/.gemini/settings.json', '{}']]), dirs: new Set([dir]), mtime: 1, hasTasks: true, ran: [], unremovable: new Set([dir]) }
+  engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/persona_framework', surface: 'terminal', isInteractive: true })
+  await $.command.run({ ...TIDY, args: 'connect remove' })
+  const again = await $.command.run({ ...TIDY, args: 'connect remove' })
+  expect(again.text).toContain(ZH_TW.connectRemoveFailed(dir))
+  expect((await $.command.run({ ...TIDY, args: 'connect status' })).text).toContain(ZH_TW.connectRemoveFailed(dir))
+  world.unremovable?.clear()
+  const last = await $.command.run({ ...TIDY, args: 'connect remove' })
+  expect(last.text).not.toContain(ZH_TW.connectRemoveIncomplete)
+  expect(world.dirs?.has(dir)).toBe(false)
+  expect((await $.command.run({ ...TIDY, args: 'connect status' })).text).toBe(ZH_TW.setupRemoved)
+})
+
+test('a skill folder with another file in it stays and nothing is reported', async ($, on) => {
+  const dir = '/home/me/.agents/skills/agent-board'
+  const sibling = `${dir}/my-notes.txt`
+  const world: World = { files: new Map([['/home/me/.gemini/settings.json', '{}'], [sibling, 'keep me']]), dirs: new Set([dir]), mtime: 1, hasTasks: true, ran: [] }
+  engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/persona_framework', surface: 'terminal', isInteractive: true })
+  const removed = await $.command.run({ ...TIDY, args: 'connect remove' })
+  expect(removed.text).not.toContain(ZH_TW.connectRemoveIncomplete)
+  expect(removed.text).not.toContain(dir)
+  // Removing refuses a folder with anything in it, so it is tried and the file stays.
+  expect(world.files.has(`${dir}/SKILL.md`)).toBe(false)
+  expect(world.files.get(sibling)).toBe('keep me')
+  expect(world.dirs?.has(dir)).toBe(true)
+  expect((await $.command.run({ ...TIDY, args: 'connect status' })).text).toBe(ZH_TW.setupRemoved)
+})
+
+test('a skill folder that cannot be listed is reported and left in place', async ($, on) => {
+  const dir = '/home/me/.agents/skills/agent-board'
+  const world: World = { files: new Map([['/home/me/.gemini/settings.json', '{}']]), dirs: new Set([dir]), mtime: 1, hasTasks: true, ran: [], unlistable: new Set([dir]), unremovable: new Set([dir]) }
+  engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/persona_framework', surface: 'terminal', isInteractive: true })
+  const removed = await $.command.run({ ...TIDY, args: 'connect remove' })
+  expect(removed.text).toContain(ZH_TW.connectRemoveIncomplete)
+  expect(removed.text).toContain(ZH_TW.connectRemoveFailed(dir))
+  expect(world.dirs?.has(dir)).toBe(true)
+  expect((await $.command.run({ ...TIDY, args: 'connect status' })).text).toContain(ZH_TW.connectRemoveFailed(dir))
+})
+
+for (const failure of ['rejectedOnRemove', 'retainedOnRemove'] as const) {
+  test(`an empty skill folder is reported when its removal is ${failure === 'rejectedOnRemove' ? 'rejected' : 'falsely successful'}`, async ($, on) => {
+    const dir = '/home/me/.agents/skills/agent-board'
+    const world: World = { files: new Map([['/home/me/.gemini/settings.json', '{}']]), dirs: new Set([dir]), mtime: 1, hasTasks: true, [failure]: new Set([dir]) }
+    engineBeneath(on, world)
+    await $.session.start({ cwd: '/work/persona_framework', surface: 'terminal', isInteractive: true })
+    const removed = await $.command.run({ ...TIDY, args: 'connect remove' })
+    expect(removed.text).toContain(ZH_TW.connectRemoveIncomplete)
+    expect(removed.text).toContain(ZH_TW.connectRemoveFailed(dir))
+    expect(world.dirs?.has(dir)).toBe(true)
+  })
+}
+
+test('an empty skill folder is removed successfully', async ($, on) => {
+  const dir = '/home/me/.agents/skills/agent-board'
+  const world: World = { files: new Map([['/home/me/.gemini/settings.json', '{}']]), dirs: new Set([dir]), mtime: 1, hasTasks: true, ran: [] }
+  engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/persona_framework', surface: 'terminal', isInteractive: true })
+  const removed = await $.command.run({ ...TIDY, args: 'connect remove' })
+  expect(removed.text).not.toContain(ZH_TW.connectRemoveIncomplete)
+  expect(world.ran).toContainEqual(['rmdir', dir])
+  expect(world.dirs?.has(dir)).toBe(false)
 })
 
 test('a failed primary plugin deletion is not counted as disconnected and other cleanup continues', async ($, on) => {
@@ -4151,4 +4256,95 @@ test('an exact pre-ownership board and command from a release upgrade in the lan
   const removed = await $.command.run({ ...TIDY, args: 'connect remove' })
   expect(removed.text).toContain('清理尚未完成')
   expect(world.files.get(board)).toBe(personal)
+})
+
+
+test('the pane hides idle tasks behind one toggle and shows them with their age when opened', async ($, on) => {
+  const at = Date.parse('2026-10-16T12:00:00Z')
+  const board = '## demo\n### Old plan\n- [?] Publish, OK?\n- [ ] Finish\n'
+  const record = seenJson(withSeen({}, parseProgress(board), at - 9 * 24 * 60 * 60 * 1000))
+  const world: World = { files: new Map([[FILE, board], [seenPath(FILE), record]]), mtime: 1, hasTasks: true }
+  engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/persona_framework', surface: 'desktop', isInteractive: true })
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
+  expect(await ui.find({ type: 'Button', key: 'demo::Old plan' })).toBeUndefined()
+  expect(await ui.find({ type: 'Button', key: 'section::idle', text: '▸ 1 項超過 7 天沒動' })).toBeDefined()
+  expect(await ui.find({ type: 'Button', key: 'section::waiting' })).toBeUndefined()
+  expect(await ui.find({ type: 'Text', text: '● 0' })).toBeDefined()
+  await ui.press({ key: 'section::idle' })
+  expect(await ui.find({ type: 'Button', key: 'demo::Old plan' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /9 天前/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: 'Publish, OK?' })).toBeDefined()
+  await ui.press({ key: 'demo::Old plan' })
+  expect(await ui.find({ type: 'Button', key: 'demo::Old plan::tick' })).toBeDefined()
+  expect(await ui.find({ type: 'Button', key: 'demo::Old plan::archive' })).toBeDefined()
+  await ui.press({ key: 'section::idle' })
+  expect(world.files.get(FILE)).toBe(board)
+  expect(world.files.get(seenPath(FILE))).toBe(record)
+  await ui.unmount()
+})
+
+test('the pane records first observations once and keeps undated work visible when its record cannot be read or written', async ($, on) => {
+  const board = '## demo\n### Fresh plan\n- [ ] Finish\n'
+  const world: World = { files: new Map([[FILE, board]]), mtime: 1, hasTasks: true }
+  const clock = engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/persona_framework', surface: 'desktop', isInteractive: true })
+  const record = world.files.get(seenPath(FILE))
+  expect(record).toBeDefined()
+  await clock.advance(5000)
+  expect(world.files.get(seenPath(FILE))).toBe(record)
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
+  world.files.set(seenPath(FILE), seenJson(withSeen({}, parseProgress(board), Date.parse('2026-10-16T12:00:00Z') - IDLE_MS - 1)))
+  world.mtime += 1
+  await clock.advance(5000)
+  expect(await ui.find({ type: 'Button', key: 'section::idle' })).toBeDefined()
+  // A record that turns unreadable (a lock or a permission change) has a new stat too.
+  world.unreadable = new Set([seenPath(FILE)])
+  world.mtime += 1
+  await clock.advance(5000)
+  expect(await ui.find({ type: 'Button', key: 'section::idle' })).toBeUndefined()
+  world.unreadable = new Set()
+  world.unwritable = new Set([seenPath(FILE)])
+  await clock.advance(5000)
+  expect(await ui.find({ type: 'Button', key: 'section::idle' })).toBeDefined()
+  // A record that is read but cannot be written keeps the times it holds; a task it does not
+  // know yet stays on the board.
+  world.files.set(FILE, board + '### New plan\n- [ ] Finish\n')
+  world.mtime += 1
+  // One poll: the one that fails to write.
+  await clock.advance(2000)
+  expect(await ui.find({ type: 'Button', key: 'section::others' })).toBeDefined()
+  expect(await ui.find({ type: 'Button', key: 'section::idle', text: '▸ 1 項超過 7 天沒動' })).toBeDefined()
+  await clock.advance(70000)
+  expect(await ui.find({ type: 'Button', key: 'section::others' })).toBeDefined()
+  expect(await ui.find({ type: 'Button', key: 'section::idle' })).toBeDefined()
+  await ui.unmount()
+})
+
+test("one empty read of progress.md does not reset a task's first-seen time", async ($, on) => {
+  const board = '## demo\n### Old plan\n- [ ] Finish\n'
+  const old = seenJson(withSeen({}, parseProgress(board), Date.parse('2026-10-16T12:00:00Z') - IDLE_MS - 1))
+  const world: World = { files: new Map([[FILE, board], [seenPath(FILE), old]]), mtime: 1, hasTasks: true }
+  const clock = engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/persona_framework', surface: 'desktop', isInteractive: true })
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
+  await clock.advance(5000)
+  expect(await ui.find({ type: 'Button', key: 'section::idle' })).toBeDefined()
+  // Another program empties the file before writing it again, and the pane reads it in between,
+  // even for a whole poll.
+  world.files.set(FILE, '')
+  world.mtime += 1
+  await clock.advance(5000)
+  world.files.set(FILE, board)
+  world.mtime += 1
+  await clock.advance(5000)
+  expect(world.files.get(seenPath(FILE))).toBe(old)
+  expect(await ui.find({ type: 'Button', key: 'section::idle' })).toBeDefined()
+  // A task gone for good leaves the record once the file has held still.
+  world.files.set(FILE, '## demo\n### New plan\n- [ ] Start\n')
+  world.mtime += 1
+  await clock.advance(5000)
+  const kept = parseSeen(world.files.get(seenPath(FILE)) ?? '') ?? {}
+  expect(Object.keys(kept)).toEqual(Object.keys(withSeen({}, parseProgress(world.files.get(FILE) ?? ''), 1)))
+  await ui.unmount()
 })

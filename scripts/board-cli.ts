@@ -23,7 +23,7 @@ import { appendJournal, archivePath, countDay, hasArchiveEntry, journalLine, jou
 import { parseProgress } from '../hooks/parse'
 import { qrModules, qrText } from '../hooks/qr'
 import { langOf, STRINGS } from '../hooks/strings'
-import { answeredJson, answeredPath, buildView, parseAnswered, withAnswered } from '../hooks/view'
+import { answeredJson, answeredPath, buildView, parseAnswered, parseSeen, seenJson, seenPath, withAnswered, withSeen } from '../hooks/view'
 
 // The line `/progress connect` puts above the bundle sets it.
 const BAKED = (globalThis as { AGENT_BOARD?: { path?: string; lang?: string } }).AGENT_BOARD ?? {}
@@ -118,10 +118,49 @@ const pending = (scrub?: (text: string) => string) => {
   return peekInbox(files, readLog, scrub)
 }
 
+// The record last read, kept when the next read catches it half-written, and progress.md's
+// time and size, and since when it has held them: tasks gone from it leave the record only once
+// it held still for a second (a key press draws twice within milliseconds), so a read caught
+// part way through a write never resets every task's age.
+let lastSeen: Record<string, number> = {}
+let lastStat = { stat: '', at: 0 }
 const view = () => {
   const now = Date.now()
+  const projects = parseProgress(read(path))
+  let stat = ''
+  try {
+    const one = statSync(path)
+    stat = `${one.mtimeMs}:${one.size}`
+  } catch {
+    // A missing file holds no task to keep or drop.
+  }
+  if (stat !== lastStat.stat) lastStat = { stat, at: now }
+  const isSettled = stat !== '' && now - lastStat.at >= 1000 && projects.length > 0
+  let seen = lastSeen
+  try {
+    const file = seenPath(path)
+    const record = parseSeen(read(file), answeredAge(file))
+    if (record !== null) {
+      seen = record
+      // Chat wins over every other flag and must never write a sidecar.
+      if (!args.includes('--chat') && args.some(arg => ['--watch', '--serve', '--serve-child'].includes(arg))) {
+        let observed = withSeen(record, projects, now)
+        const wrote = rewrite(file, before => {
+          const current = parseSeen(before, answeredAge(file))
+          if (current === null) return null
+          observed = withSeen(current, projects, now, observed, isSettled)
+          return seenJson(observed) === seenJson(current) ? before : seenJson(observed)
+        })
+        seen = wrote === null ? seen : (parseSeen(wrote) ?? seen)
+      }
+    }
+  } catch {
+    // A locked or unwritable record does not stop drawing or hide an undated task.
+    seen = {}
+  }
+  lastSeen = seen
   // A question marked answered in a pane on this machine is kept off the board too.
-  return buildView(parseProgress(read(path)), [basename(process.cwd())], null, now, countDay(read(journalPath(path, now)), now), {}, s, parseAnswered(read(answeredPath(path))) ?? [])
+  return buildView(projects, [basename(process.cwd())], null, now, countDay(read(journalPath(path, now)), now), {}, s, parseAnswered(read(answeredPath(path))) ?? [], seen)
 }
 
 const pad = (n: number): string => String(n).padStart(2, '0')
@@ -129,6 +168,7 @@ const pad = (n: number): string => String(n).padStart(2, '0')
 const options = () => ({
   width: Math.max(40, Math.min(process.stdout.columns || 80, 120)),
   isColor: process.stdout.isTTY === true && !process.env.NO_COLOR && !args.includes('--no-color'),
+  isIdleOpen: args.includes('--all'),
 })
 
 // A write to a file a Claude Code session may write at the same moment: to a temp file of
@@ -337,7 +377,7 @@ const failureNote = (error: unknown): string => {
 }
 
 const press = (state: BoardState, key: string): { state: BoardState; isQuit: boolean; isHtml: boolean; isWrite: boolean } => {
-  const items = boardItems(view(), pending())
+  const items = boardItems(view(), pending(), state.isIdleOpen ?? false)
   const { state: next, action } = boardKey(state, key, items, s)
   if (action === null) return { state: next, isQuit: false, isHtml: false, isWrite: false }
   if (action.type === 'quit') return { state: next, isQuit: true, isHtml: false, isWrite: false }
@@ -356,7 +396,7 @@ const press = (state: BoardState, key: string): { state: BoardState; isQuit: boo
 const screen = (state: BoardState): string => boardScreen(view(), pending(), state, s, options())
 
 // What the screen shows is what the next key acts on.
-const pin = (state: BoardState): BoardState => pinned(state, boardItems(view(), pending()))
+const pin = (state: BoardState): BoardState => pinned(state, boardItems(view(), pending(), state.isIdleOpen ?? false))
 
 // A block pasted into the page from a web chat, merged the way the remote reporter's merge
 // does: read, change only that block, write, read back.
@@ -661,7 +701,9 @@ const chat = (): void => {
 }
 
 const run = async (): Promise<void> => {
-  if (args.includes('--serve-child')) {
+  if (args.includes('--help') && !args.includes('--chat')) {
+    process.stdout.write(`${s.boardUsage}\n`)
+  } else if (args.includes('--serve-child')) {
     serveChild()
   } else if (args.includes('--chat')) {
     // Before the flags that serve, open or write: a chat reply never starts a page.
@@ -680,13 +722,13 @@ const run = async (): Promise<void> => {
     process.stdout.write(screen(state))
   } else if (args.includes('--watch') && process.stdin.isTTY) {
     // No fingerprint is kept before the first draw succeeds, and x, a and c then refuse every line.
-    let state: BoardState = { ...emptyBoardState, seen: {} }
+    let state: BoardState = { ...emptyBoardState, seen: {}, isIdleOpen: args.includes('--all') }
     // The fingerprints kept are those of the very lines this screen shows: one read does both.
     const draw = (): void => {
       try {
         const shown = view()
         const turns = pending()
-        state = pinned(state, boardItems(shown, turns))
+        state = pinned(state, boardItems(shown, turns, state.isIdleOpen ?? false))
         process.stdout.write(`\u001b[2J\u001b[H${boardScreen(shown, turns, state, s, options())}`)
       } catch (error) {
         process.stdout.write(`\u001b[2J\u001b[H${failureNote(error)}\n`)
