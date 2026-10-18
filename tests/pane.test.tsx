@@ -1,7 +1,7 @@
 import type { On, PromptOrigin, RenderPropsOf } from 'claude-code'
 import { expect, mock, test } from 'claude-code/testing'
 import type { Engine, MockClock } from 'claude-code/testing'
-import { agentHooks, boardScript, NODE_MIN, openclawPlugin, RELEASE_PATHS } from '../hooks/connect'
+import { agentHooks, boardScript, isSetupState, NODE_MIN, openclawPlugin, RELEASE_PATHS } from '../hooks/connect'
 import { STRINGS } from '../hooks/strings'
 
 import { ZH_TW } from '../hooks/i18n'
@@ -2632,7 +2632,7 @@ test('/progress connect hooks the installed agents into the pane once, keeps the
   expect(first.text).toContain('已接上：Codex、Cursor、Grok Build。')
   expect(world.ran).toContainEqual(['rm', '-f', oldGrok])
   expect(world.files.get('/home/me/.grok/hooks/agent-board.json')).toContain("progress-report.sh' grok turn || true")
-  expect(first.text).toContain('Codex 第一次要在它的 /hooks 裡核准這個 hook 才會跑。')
+  expect(first.text).toContain(ZH_TW.setupCodexTrust)
   expect(first.text).toContain('Gemini CLI 的設定檔讀不懂，沒有動它：/home/me/.gemini/settings.json')
   expect(world.files.get('/home/me/.claude/progress-report.sh')).toContain("dir='/home/me/.claude/progress-inbox'")
   const codex = JSON.parse(world.files.get('/home/me/.codex/hooks.json') ?? '{}')
@@ -3514,6 +3514,126 @@ test('a board command that cannot be written is named as one, and the agent is s
   const connected = await $.command.run({ ...TIDY, args: 'connect' })
   expect(connected.text).toContain('看板指令檔寫不進去：/home/me/.gemini/commands/board.toml')
   expect(connected.text).not.toContain('的設定檔寫不進去')
+})
+
+test('a hand-run connect names each approval it needs once', { options: { autoConnect: false } }, async ($, on) => {
+  const world: World = { files: new Map([['/home/me/.codex/config.toml', ''], ['/home/me/.hermes/config.yaml', '']]), mtime: 1, hasTasks: true }
+  engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/persona_framework', surface: 'terminal', isInteractive: true })
+  for (const s of Object.values(STRINGS)) {
+    await $.command.run({ ...TIDY, args: `lang ${s.lang}` })
+    for (let run = 0; run < 2; run++) {
+      const connected = await $.command.run({ ...TIDY, args: 'connect' })
+      expect(connected.text.split(s.setupCodexTrust)).toHaveLength(2)
+      expect(connected.text.split(s.setupHermesTrust)).toHaveLength(2)
+      expect(connected.text.split('--accept-hooks')).toHaveLength(2)
+      expect(connected.text).toContain(s.setupCodexTrust)
+      expect(connected.text).toContain(s.setupHermesTrust)
+      expect(connected.text).not.toContain(s.connectCodexTrust)
+      expect(connected.text).not.toContain(s.connectHermesTrust)
+    }
+    const status = await $.command.run({ ...TIDY, args: 'connect status' })
+    expect(status.text.split(s.setupCodexTrust)).toHaveLength(2)
+    expect(status.text.split(s.setupHermesTrust)).toHaveLength(2)
+  }
+})
+
+test('a file that cannot be read is named as unreadable, not as unwritable', { options: { autoConnect: false } }, async ($, on) => {
+  const board = '/home/me/.claude/agent-board.mjs'
+  const reporter = '/home/me/.claude/progress-report.sh'
+  const command = '/home/me/.gemini/commands/board.toml'
+  const config = '/home/me/.cursor/hooks.json'
+  const old = '/home/me/.grok/hooks/progress-pane.json'
+  const world: World = { files: new Map(), mtime: 1, hasTasks: true }
+  engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/persona_framework', surface: 'terminal', isInteractive: true })
+  for (const s of Object.values(STRINGS)) {
+    await $.command.run({ ...TIDY, args: `lang ${s.lang}` })
+    for (const file of [board, reporter, command, config, old]) {
+      world.files = new Map([['/home/me/.gemini/settings.json', '{}'], ['/home/me/.grok/config.toml', ''], [file, 'unreadable bytes']])
+      world.unreadable = new Set([file])
+      const connected = await $.command.run({ ...TIDY, args: 'connect' })
+      const expected = file === config ? s.connectReadFailed('Cursor', file) : file === old ? s.connectReadFailed('Grok Build', file) : s.connectBoardReadFailed(file)
+      expect(connected.text.split(expected)).toHaveLength(2)
+      expect(connected.text).not.toContain(s.connectBoardFailed(file))
+      expect(connected.text).not.toContain(s.connectReporterFailed(file))
+      expect(connected.text).not.toContain(s.connectFailed(file === config ? 'Cursor' : 'Grok Build', file))
+      if (file === config) expect(connected.text).not.toContain(s.connectSkipped('Cursor', file))
+      expect(connected.text).not.toContain(s.setupHookUnreadable)
+      expect(world.files.get(file)).toBe('unreadable bytes')
+      const status = await $.command.run({ ...TIDY, args: 'connect status' })
+      expect(status.text.split(expected)).toHaveLength(2)
+    }
+    world.unreadable = new Set()
+    world.files = new Map([[config, 'invalid json']])
+    const connected = await $.command.run({ ...TIDY, args: 'connect' })
+    expect(connected.text.split(s.connectSkipped('Cursor', config))).toHaveLength(2)
+    expect(connected.text).toContain(s.setupHookUnreadable)
+    expect(connected.text).not.toContain(s.connectReadFailed('Cursor', config))
+  }
+})
+
+test('a problem stored by an English session is shown in the language of the session that asks', { options: { autoConnect: false } }, async ($, on) => {
+  const config = '/home/me/.codex/hooks.json'
+  const command = '/home/me/.gemini/commands/board.toml'
+  const shared: Record<string, unknown> = { inboxDone: {}, lang: 'en' }
+  const world: World = {
+    files: new Map([['/home/me/.codex/config.toml', ''], ['/home/me/.gemini/settings.json', '{}'], [command, 'personal command']]),
+    mtime: 1,
+    hasTasks: true,
+    shared,
+    unwritable: new Set([config]),
+    node: null,
+  }
+  engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/persona_framework', surface: 'terminal', isInteractive: true })
+  const connected = await $.command.run({ ...TIDY, args: 'connect' })
+  expect(connected.text).toContain(EN.connectFailed('Codex', config))
+  expect(connected.text).toContain(EN.connectPreserved(command))
+  expect(connected.text).toContain(EN.setupNodeMissing(NODE_MIN))
+  const state = shared.setupState
+  expect(isSetupState(state)).toBe(true)
+  if (!isSetupState(state)) throw new Error('Expected a saved setup state')
+  expect(state.problems).toContainEqual({ key: `writeFailed:${config}`, message: 'connectFailed', args: ['Codex', config] })
+  expect(state.problems).toContainEqual({ key: 'node:missing', message: 'setupNodeMissing', args: [NODE_MIN] })
+  const legacy = EN.connectPreserved('/synthetic/legacy')
+  state.problems.push({ key: 'legacy', text: legacy })
+  const stored = structuredClone(state)
+  const files = [...world.files]
+  shared.lang = 'zh-TW'
+  await $.session.start({ cwd: '/work/persona_framework', surface: 'terminal', isInteractive: true })
+  const status = await $.command.run({ ...TIDY, args: 'connect status' })
+  expect(status.text).toContain(ZH_TW.connectFailed('Codex', config))
+  expect(status.text).toContain(ZH_TW.connectPreserved(command))
+  expect(status.text).toContain(ZH_TW.setupNodeMissing(NODE_MIN))
+  expect(status.text).toContain(legacy)
+  expect(status.text).not.toContain(EN.connectFailed('Codex', config))
+  expect(status.text).not.toContain(EN.connectPreserved(command))
+  expect(status.text).not.toContain(EN.setupNodeMissing(NODE_MIN))
+  expect(shared.setupState).toEqual(stored)
+  expect([...world.files]).toEqual(files)
+})
+
+test('/progress connect status keeps valid problems and agents when a stored problem is unknown', { options: { autoConnect: false } }, async ($, on) => {
+  const state = {
+    agents: [{ agent: 'codex', label: 'Codex', hook: 'configured', board: 'ready' }],
+    problems: [
+      { key: 'node:missing', message: 'setupNodeMissing', args: [NODE_MIN] },
+      { key: 'unknown', message: 'notAStringKey', args: [] },
+    ],
+    node: null,
+  }
+  const shared = { inboxDone: {}, setupState: state }
+  const world: World = { files: new Map(), mtime: 1, hasTasks: true, shared }
+  engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/persona_framework', surface: 'terminal', isInteractive: true })
+  const status = await $.command.run({ ...TIDY, args: 'connect status' })
+  expect(status.text).toBe([
+    ZH_TW.setupStatusTitle,
+    ZH_TW.setupAgent('Codex', [ZH_TW.setupHookConfigured, ZH_TW.setupCodexTrust, ZH_TW.setupBoardReady]),
+    ZH_TW.setupNodeMissing(NODE_MIN),
+  ].join('\n'))
+  expect(shared.setupState).toEqual(state)
 })
 
 test('a setup failure a session start used to hide is announced once, the next start stays quiet, and /progress connect status still lists it', async ($, on) => {

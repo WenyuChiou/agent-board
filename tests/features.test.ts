@@ -4,7 +4,7 @@ import type { ProgressMirror, ProgressPr } from '../types'
 import { askOf } from '../hooks/ask'
 import { boardItems, boardKey, boardScreen, boardText, CHAT_MAX, chatText, doneToday, emptyBoardState, fingerprint, fit, peekInbox, pinned, redact } from '../hooks/board'
 import { addManualTask, isArchivable, manualTaskCount, mergeBlock, renderAutoBlock, setManualStep, takeArchivable, takeManualDone, takeTask, upsertAutoBlock } from '../hooks/blocks'
-import { agentHooks, boardCommands, boardScript, COLLISION, DELETE, generatedFile, isNodeSupported, isReleased, isReleasedBoard, isSetupState, isWindowsHost, NODE_MIN, nodeVersionOf, openclawPlugin, openclawPrinted, openclawSavedBy, openclawTooOld, readConfig, RELEASE_PATHS, reportCommand, reporterPs1, reporterSh, setupAgents, setupLines, withFlatHook, withGroupedHook, withHermesHooks, withoutHermesHooks, withoutOurHooks, withoutSection } from '../hooks/connect'
+import { agentHooks, boardCommands, boardScript, COLLISION, DELETE, generatedFile, isNodeSupported, isReleased, isReleasedBoard, isSetupState, isWindowsHost, NODE_MIN, nodeVersionOf, openclawPlugin, openclawPrinted, openclawSavedBy, openclawTooOld, PROBLEM_ARGS, readConfig, RELEASE_PATHS, reportCommand, reporterPs1, reporterSh, setupAgents, setupLines, withFlatHook, withGroupedHook, withHermesHooks, withoutHermesHooks, withoutOurHooks, withoutSection } from '../hooks/connect'
 import { dashboardHtml } from '../hooks/dashboard'
 import { answerKey, blockId, CLAIM_MS, claimAction, isBoardAnswer, isBoardTurn, isInboxFile, isTakenFile, isTextLog, isTranscriptPath, keepInboxDone, keepInboxFailed, MAX_TRIES, promptKey, readClaim, readTurn, takenName, transcriptTail, turnsToDigest } from '../hooks/inbox'
 import { applyDigest, clearAsked, isAskingYou, isPersonsAnswer, isWork, lastQuestion, markAsked, parseDigest, replyData, requestData, turnTools } from '../hooks/digest'
@@ -1776,6 +1776,18 @@ test('a Node.js version is read from node --version, and only 18 or newer runs t
   for (const version of ['v16.20.2', 'v17.9.1']) expect(isNodeSupported(version)).toBe(false)
 })
 
+test('a Node.js release candidate or nightly counts by its major version', () => {
+  for (const version of ['v22.0.0-rc.1', 'v23.0.0-nightly20241010abcdef', `v${NODE_MIN}.0.0-rc.1`]) {
+    const parsed = nodeVersionOf(`  ${version}\n`)
+    expect(parsed).toBe(version)
+    expect(isNodeSupported(parsed ?? '')).toBe(true)
+  }
+  const old = `v${NODE_MIN - 1}.0.0-rc.1`
+  expect(nodeVersionOf(old)).toBe(old)
+  expect(isNodeSupported(old)).toBe(false)
+  for (const printed of ['v22.0.0-', 'v22.0.0-rc..1', 'v22.0.0-rc.1\nerror']) expect(nodeVersionOf(printed)).toBe(null)
+})
+
 test('each agent’s board command is ready only when a board file it reads is in place and Node.js runs, and a hook that failed does not hide it', () => {
   const hooks = [
     { agent: 'codex', label: 'Codex', hook: 'failed' as const },
@@ -1824,7 +1836,55 @@ test('the setup status in every language names each agent, its hook, what it sti
 
 test('a stored setup state is checked before it is shown, so an older or damaged record is not', () => {
   expect(isSetupState({ agents: [{ agent: 'codex', label: 'Codex', hook: 'configured', board: 'ready' }], problems: [{ key: 'node:missing', text: 'x' }], node: null })).toBe(true)
-  for (const value of [null, 'x', {}, { agents: [], problems: [{ text: 1 }] }, { agents: [{ label: 2 }], problems: [] }, { agents: {}, problems: [] }]) expect(isSetupState(value)).toBe(false)
+  expect(isSetupState({ agents: [], problems: [{ key: 'node:missing', message: 'setupNodeMissing', args: [NODE_MIN] }], node: null })).toBe(true)
+  for (const problem of [
+    { key: 'node:missing', message: 'setupNodeMissing', args: ['18'] },
+    { key: 'node:missing', message: 'setupNodeMissing', args: [] },
+    { key: 'node:missing', message: 'setupNodeMissing', args: [18, 19] },
+    { key: 'unknown', message: 'toString', args: [] },
+    { key: 'unknown', message: 'notAStringKey', args: [] },
+    { key: 'unknown', message: 'connectReadFailed', args: ['Codex'] },
+  ]) {
+    const state = { agents: [], problems: [problem], node: null }
+    expect(isSetupState(state)).toBe(true)
+    expect(setupLines(state)).toEqual([ZH_TW.setupStatusTitle, ZH_TW.connectNone])
+  }
+  for (const value of [null, 'x', {}, { agents: [], problems: {} }, { agents: [{ label: 2 }], problems: [] }, { agents: {}, problems: [] }]) expect(isSetupState(value)).toBe(false)
+})
+
+test('every stored problem names a string each language has, taking the arguments it is stored with', () => {
+  for (const s of Object.values(STRINGS)) {
+    for (const [key, args] of Object.entries(PROBLEM_ARGS)) {
+      const words = s[key as keyof typeof PROBLEM_ARGS]
+      expect(typeof words).toBe('function')
+      expect(words.length).toBe(args.length)
+    }
+  }
+})
+
+test('a stored setup status keeps the agents and valid problems when another problem is unknown or damaged', () => {
+  const state = {
+    agents: [{ agent: 'codex', label: 'Codex', hook: 'configured', board: 'ready' }],
+    problems: [
+      { key: 'node:missing', message: 'setupNodeMissing', args: [NODE_MIN] },
+      { key: 'unknown', message: 'notAStringKey', args: [] },
+      { key: 'bad:args', message: 'connectReadFailed', args: ['Codex'] },
+      null,
+      { text: 1 },
+    ],
+    node: null,
+  }
+  const before = structuredClone(state)
+  expect(isSetupState(state)).toBe(true)
+  if (!isSetupState(state)) throw new Error('Expected a saved setup state')
+  for (const s of Object.values(STRINGS)) {
+    expect(setupLines(state, s)).toEqual([
+      s.setupStatusTitle,
+      s.setupAgent('Codex', [s.setupHookConfigured, s.setupCodexTrust, s.setupBoardReady]),
+      s.setupNodeMissing(NODE_MIN),
+    ])
+  }
+  expect(state).toEqual(before)
 })
 
 test('setup safety notices retain their paths and recovery command in every language', () => {

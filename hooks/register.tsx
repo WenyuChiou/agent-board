@@ -65,8 +65,8 @@ import { RULE_ID, RULES } from './rule'
 import { chosenLang, langOf, resolveLang, STRINGS } from './strings'
 import { answerTurns, applyDigest, clearAsked, cleanHandoff, isAskingYou, isPersonsAnswer, isWork, lastQuestion, markAsked, needsRefresh, parseDigest, replyData, requestData, turnTools } from './digest'
 import type { Digest } from './digest'
-import { agentHooks, boardLangOf, boardScript, COLLISION, DELETE, generatedFile, hasOurHook, isNodeSupported, isReleased, isReleasedBoard, isSetupState, isWindowsHost, NODE_MIN, nodeVersionOf, OPENCLAW_MIN, openclawPrinted, openclawSavedBy, openclawTooOld, psQuote, reporterPs1, reporterSh, setupAgents, setupLines, withoutSection, worseHook } from './connect'
-import type { AgentSetup, HookState, SetupProblem, SetupState } from './connect'
+import { agentHooks, boardLangOf, boardScript, COLLISION, DELETE, generatedFile, hasOurHook, isNodeSupported, isReleased, isReleasedBoard, isSetupState, isWindowsHost, NODE_MIN, nodeVersionOf, OPENCLAW_MIN, openclawPrinted, openclawSavedBy, openclawTooOld, psQuote, reporterPs1, reporterSh, setupAgents, setupLines, setupProblemText, withoutSection, worseHook } from './connect'
+import type { AgentSetup, HookState, SetupNotice, SetupProblem, SetupState } from './connect'
 import {
   ANSWER_KEEP,
   answerKey,
@@ -988,8 +988,8 @@ const connectAgents = async (
   // What needs the person, each under a key of its own (its kind and path), so a session start
   // tells of it once, whatever the language.
   const problems: SetupProblem[] = []
-  const warn = (key: string, text: string): void => {
-    if (!problems.some(one => one.key === key)) problems.push({ key, text })
+  const warn = (key: string, notice: SetupNotice): void => {
+    if (!problems.some(one => one.key === key)) problems.push({ key, ...notice })
   }
   // How the hook of each agent found here came out, and which board files are in place.
   const hookStates = new Map<string, Omit<AgentSetup, 'board'>>()
@@ -1019,11 +1019,13 @@ const connectAgents = async (
     if ((await readText($, file)) !== content) throw new Error('Write could not be verified')
     if (generated) await $.store.set(ownershipKey(file), content)
   }
-  const preserve = (file: string): void => warn(`preserved:${file}`, s.connectPreserved(file))
-  const sharedFile = async (file: string, content: string, legacy: readonly string[] | ((text: string) => boolean) = [], failed: (file: string) => string = s.connectBoardFailed): Promise<boolean> => {
+  const preserve = (file: string): void => warn(`preserved:${file}`, { message: 'connectPreserved', args: [file] })
+  const sharedFile = async (file: string, content: string, legacy: readonly string[] | ((text: string) => boolean) = [], failed: 'connectBoardFailed' | 'connectReporterFailed' = 'connectBoardFailed'): Promise<boolean> => {
+    let isReading = true
     try {
       const exists = await $.fs.exists(file)
       const before = await readText($, file)
+      isReading = false
       const after = generatedFile(content, legacy)(before, remove, await previousOutput(file))
       if ((exists && before === '') || after === COLLISION) {
         preserve(file)
@@ -1036,8 +1038,9 @@ const connectAgents = async (
       }
       return true
     } catch {
-      if (remove) warn(`removeFailed:${file}`, s.connectRemoveFailed(file))
-      else warn(`writeFailed:${file}`, failed(file))
+      if (isReading) warn(`unreadable:${file}`, { message: 'connectBoardReadFailed', args: [file] })
+      else if (remove) warn(`removeFailed:${file}`, { message: 'connectRemoveFailed', args: [file] })
+      else warn(`writeFailed:${file}`, { message: failed, args: [file] })
       return false
     }
   }
@@ -1046,7 +1049,7 @@ const connectAgents = async (
   // scripts with no remaining command files are removed below.
   // A file a release wrote before the plugin kept a record of its output is ours too, by its
   // exact bytes (hooks/released.ts), so an upgrade from any of them goes through silently.
-  const hasReporter = remove || (await sharedFile(script, reporter, text => isReleased(isWin ? 'reporterPs1' : 'reporterSh', text, { inbox: inboxPath(path) }), s.connectReporterFailed))
+  const hasReporter = remove || (await sharedFile(script, reporter, text => isReleased(isWin ? 'reporterPs1' : 'reporterSh', text, { inbox: inboxPath(path) }), 'connectReporterFailed'))
   // This bundle in another language is ours too, as is any released one. Ownership still
   // compares the whole file: an edited bundle, old or new, is preserved.
   const knownBoards = (text: string): boolean => Object.values(STRINGS).some(words => text === boardScript(path, words.lang)) || isReleasedBoard(text, path)
@@ -1080,12 +1083,14 @@ const connectAgents = async (
     // One agent whose file cannot be written (a folder missing, a read-only file) is named and
     // passed over, so the agents after it are still hooked in.
     let activeFile = hook.file
+    let isReading = true
     try {
       // Left under the plugin's earlier name, it would report every turn a second time.
       const hadOld = hook.old !== undefined && (await $.fs.exists(hook.old))
       if (hadOld && hook.old !== undefined) {
         activeFile = hook.old
         const old = await readText($, hook.old)
+        isReading = false
         if (hook.edit(old, true, await previousOutput(hook.old)) !== DELETE) {
           preserve(hook.old)
           failedLabels.add(hook.label)
@@ -1093,17 +1098,20 @@ const connectAgents = async (
         } else await removeFile(hook.old)
       }
       activeFile = hook.file
+      isReading = true
       const exists = await $.fs.exists(hook.file)
       const before = await readText($, hook.file).catch(() => null)
+      isReading = false
       if (before === null) {
         if (remove) {
-          warn(`removeFailed:${hook.file}`, s.connectRemoveFailed(hook.file))
+          warn(`removeFailed:${hook.file}`, { message: 'connectRemoveFailed', args: [hook.file] })
           failedLabels.add(hook.label)
           if (hook.label === '') canRemoveBoard = false
         } else {
           // A session start says so too, once: an agent left out without a word looks set up.
-          mark(hook, 'unreadable')
-          warn(`unreadable:${hook.file}`, hook.label === '' ? s.connectBoardFailed(hook.file) : s.connectSkipped(hook.label, hook.file))
+          // Its status line points below, where the read failure is named.
+          mark(hook, 'failed')
+          warn(`unreadable:${hook.file}`, hook.label === '' ? { message: 'connectBoardReadFailed', args: [hook.file] } : { message: 'connectReadFailed', args: [hook.label, hook.file] })
         }
         continue
       }
@@ -1123,7 +1131,7 @@ const connectAgents = async (
         if (after === DELETE) await removeFile(hook.file)
         else if (typeof after === 'string' && after !== before) await writeFile(hook.file, after, hook.generated)
         mark(hook, 'tooOld')
-        warn('tooOld:openclaw', s.connectTooOld(hook.label, openclawOld, OPENCLAW_MIN))
+        warn('tooOld:openclaw', { message: 'connectTooOld', args: [hook.label, openclawOld, OPENCLAW_MIN] })
         continue
       }
       if (remove && before.trim() === '') {
@@ -1132,11 +1140,11 @@ const connectAgents = async (
       }
       if (after === null) {
         if (remove && before.trim() !== '') {
-          warn(`removeFailed:${hook.file}`, s.connectRemoveFailed(hook.file))
+          warn(`removeFailed:${hook.file}`, { message: 'connectRemoveFailed', args: [hook.file] })
           failedLabels.add(hook.label)
         } else if (!remove && hook.label !== '') {
           mark(hook, 'unreadable')
-          warn(`unreadable:${hook.file}`, s.connectSkipped(hook.label, hook.file))
+          warn(`unreadable:${hook.file}`, { message: 'connectSkipped', args: [hook.label, hook.file] })
         }
         continue
       }
@@ -1165,27 +1173,28 @@ const connectAgents = async (
       // The old instructions section is only tidied away; the hook is in either way.
       if (!remove) await dropSection($, hook.agent, home, codexHome, sep).catch(() => undefined)
     } catch {
-      // A board command (no label of its own) that cannot be written leaves the agent's hook
+      // A board command (no label of its own) that fails leaves the agent's hook
       // as it is: the board is an extra, the hook is what reports.
       if (hook.label !== '') failed.add(hook.agent)
       mark(hook, 'failed')
       failedLabels.add(hook.label)
       if (hook.label === '') canRemoveBoard = false
-      if (remove) warn(`removeFailed:${activeFile}`, s.connectRemoveFailed(activeFile))
-      else warn(`writeFailed:${activeFile}`, hook.label === '' ? s.connectBoardFailed(activeFile) : s.connectFailed(hook.label, activeFile))
+      if (isReading) warn(`unreadable:${activeFile}`, hook.label === '' ? { message: 'connectBoardReadFailed', args: [activeFile] } : { message: 'connectReadFailed', args: [hook.label, activeFile] })
+      else if (remove) warn(`removeFailed:${activeFile}`, { message: 'connectRemoveFailed', args: [activeFile] })
+      else warn(`writeFailed:${activeFile}`, hook.label === '' ? { message: 'connectBoardFailed', args: [activeFile] } : { message: 'connectFailed', args: [hook.label, activeFile] })
     }
   }
   if (remove) {
     if (canRemoveBoard) await sharedFile(board, boardCode, knownBoards)
-    else if (await $.fs.exists(board)) warn(`boardRetained:${board}`, s.connectBoardRetained(board))
+    else if (await $.fs.exists(board)) warn(`boardRetained:${board}`, { message: 'connectBoardRetained', args: [board] })
   }
   // A written hook says nothing of the board: its commands run Node.js, which a native Codex
   // install, say, does not bring.
   const hasBoardCommand = !remove && Object.values(boardFiles).includes('ok')
   const node = hasBoardCommand ? await nodeVersion($) : null
   const isNodeReady = node !== null && isNodeSupported(node)
-  if (hasBoardCommand && node === null) warn('node:missing', s.setupNodeMissing(NODE_MIN))
-  else if (hasBoardCommand && node !== null && !isNodeReady) warn(`node:old:${node}`, s.setupNodeOld(node, NODE_MIN))
+  if (hasBoardCommand && node === null) warn('node:missing', { message: 'setupNodeMissing', args: [NODE_MIN] })
+  else if (hasBoardCommand && node !== null && !isNodeReady) warn(`node:old:${node}`, { message: 'setupNodeOld', args: [node, NODE_MIN] })
   const state: SetupState = { agents: setupAgents([...hookStates.values()], boardFiles, isNodeReady), problems, node }
   // Kept for `/progress connect status`; taking the hooks out leaves nothing to show, unless
   // the removal could not finish, whose problems stay to be shown.
@@ -1204,10 +1213,10 @@ const connectAgents = async (
       ? [...(completed.length > 0 ? [s.autoConnected(completed.join(s.listSep))] : []), ...trust, ...(hasBoard ? [s.boardEverywhere(board)] : []), s.autoConnectUndo]
       : completed.length === 0
         ? [...none, ...(hasBoard ? [s.boardEverywhere(board)] : [])]
-        : [s.connectDone(completed.join(s.listSep)), ...trust, ...(hasBoard ? [s.boardEverywhere(board)] : [])]
+        : [s.connectDone(completed.join(s.listSep)), ...(hasBoard ? [s.boardEverywhere(board)] : [])]
 
   // Connecting by hand also shows where each agent stands, with the problems below it.
-  const status = mode === 'connect' && state.agents.length > 0 ? setupLines(state, s) : problems.map(one => one.text)
+  const status = mode === 'connect' && state.agents.length > 0 ? setupLines(state, s) : problems.map(one => setupProblemText(one, s))
 
   return { text: [...lines, ...status].join('\n'), lines, done: completed, problems }
 }
@@ -1246,7 +1255,7 @@ const autoConnect = async ($: EngineInterface, options: PluginOptions): Promise<
   if (done.length === 0 && fresh.length === 0) return
   const s = await wordsOf($)
   const title = fresh.length > 0 ? s.connectAttention : s.autoConnectTitle
-  const text = [...(done.length > 0 ? lines : []), ...fresh.map(one => one.text), ...(fresh.length > 0 ? [s.setupStatusHint] : [])].join('\n')
+  const text = [...(done.length > 0 ? lines : []), ...fresh.map(one => setupProblemText(one, s)), ...(fresh.length > 0 ? [s.setupStatusHint] : [])].join('\n')
   await update($, answer, () => ({ question: title, text, isAsking: false }))
   await $.ui.notify(fresh.length > 0 ? text : s.autoConnected(done.join(s.listSep)), { title }).catch(() => undefined)
 }

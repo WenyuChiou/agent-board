@@ -712,7 +712,7 @@ export const NODE_MIN = 18
 // What `node --version` printed, when it is a version.
 export const nodeVersionOf = (printed: string): string | null => {
   const version = printed.trim()
-  return /^v\d+\.\d+\.\d+$/.test(version) ? version : null
+  return /^v\d+\.\d+\.\d+(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/.test(version) ? version : null
 }
 export const isNodeSupported = (version: string): boolean => Number(/^v(\d+)\./.exec(version)?.[1] ?? 0) >= NODE_MIN
 
@@ -721,8 +721,56 @@ export const isNodeSupported = (version: string): boolean => Number(/^v(\d+)\./.
 export type HookState = 'configured' | 'failed' | 'unreadable' | 'tooOld'
 export type BoardState = 'ready' | 'runtime' | 'failed' | 'none'
 export type AgentSetup = { agent: string; label: string; hook: HookState | null; board: BoardState }
-export type SetupProblem = { key: string; text: string }
+type ProblemArgs<T> = {
+  [K in keyof T]: T[K] extends (...args: infer A) => string
+    ? { readonly [I in keyof A]: A[I] extends string ? 'string' : A[I] extends number ? 'number' : never }
+    : never
+}
+export const PROBLEM_ARGS = {
+  connectPreserved: ['string'],
+  connectRemoveFailed: ['string'],
+  connectBoardRetained: ['string'],
+  connectBoardReadFailed: ['string'],
+  connectBoardFailed: ['string'],
+  connectReporterFailed: ['string'],
+  connectReadFailed: ['string', 'string'],
+  connectSkipped: ['string', 'string'],
+  connectFailed: ['string', 'string'],
+  connectTooOld: ['string', 'string', 'string'],
+  setupNodeMissing: ['number'],
+  setupNodeOld: ['string', 'number'],
+} as const satisfies Partial<ProblemArgs<Strings>>
+export type SetupNotice = {
+  [K in keyof typeof PROBLEM_ARGS]: { message: K; args: Parameters<Strings[K]> }
+}[keyof typeof PROBLEM_ARGS]
+export type SetupProblem = { key: string } & (SetupNotice | { text: string })
 export type SetupState = { agents: AgentSetup[]; problems: SetupProblem[]; node: string | null }
+type StoredSetupState = Omit<SetupState, 'problems'> & { problems: unknown[] }
+
+const isSetupProblem = (value: unknown): value is SetupProblem => {
+  if (typeof value !== 'object' || value === null) return false
+  const one = value as Record<string, unknown>
+  if (typeof one.key !== 'string') return false
+  if (typeof one.text === 'string') return true
+  if (typeof one.message !== 'string' || !Object.prototype.hasOwnProperty.call(PROBLEM_ARGS, one.message) || !Array.isArray(one.args)) return false
+  const types: readonly string[] = PROBLEM_ARGS[one.message as keyof typeof PROBLEM_ARGS]
+  return one.args.length === types.length && types.every((type, index) => typeof (one.args as unknown[])[index] === type)
+}
+
+// Earlier releases stored the words themselves; new records follow the session's language.
+export const setupProblemText = (problem: SetupProblem, s: Strings = ZH_TW): string => {
+  if ('text' in problem) return problem.text
+  // The repeated branches exist only so the type checker sees each call's argument types.
+  switch (problem.message) {
+    case 'setupNodeMissing': return s[problem.message](...problem.args)
+    case 'setupNodeOld': return s[problem.message](...problem.args)
+    case 'connectTooOld': return s[problem.message](...problem.args)
+    case 'connectReadFailed':
+    case 'connectSkipped':
+    case 'connectFailed': return s[problem.message](...problem.args)
+    default: return s[problem.message](...problem.args)
+  }
+}
 
 // Of an agent's files, the worst one says how its hook came out: OpenClaw takes two.
 const HOOK_RANK: Record<HookState, number> = { configured: 0, tooOld: 1, unreadable: 2, failed: 3 }
@@ -756,7 +804,8 @@ export const setupAgents = (
 
 // The status, agent by agent: its hook, what the agent still asks of the person (Codex's
 // approval, Hermes Agent's question, OpenClaw's restart), its board command, then the problems.
-export const setupLines = (state: SetupState, s: Strings = ZH_TW, withProblems = true): string[] => {
+export const setupLines = (state: StoredSetupState, s: Strings = ZH_TW, withProblems = true): string[] => {
+  const problems = state.problems.filter(isSetupProblem)
   const hookWords = (one: AgentSetup): string[] => {
     if (one.hook === null) return []
     if (one.hook !== 'configured') return [one.hook === 'unreadable' ? s.setupHookUnreadable : one.hook === 'tooOld' ? s.setupHookTooOld : s.setupHookFailed]
@@ -768,13 +817,13 @@ export const setupLines = (state: SetupState, s: Strings = ZH_TW, withProblems =
 
   return [
     s.setupStatusTitle,
-    ...(state.agents.length === 0 ? (withProblems && state.problems.length > 0 ? [] : [s.connectNone]) : state.agents.map(one => s.setupAgent(one.label, [...hookWords(one), ...boardWords(one)]))),
-    ...(withProblems ? state.problems.map(one => one.text) : []),
+    ...(state.agents.length === 0 ? (withProblems && problems.length > 0 ? [] : [s.connectNone]) : state.agents.map(one => s.setupAgent(one.label, [...hookWords(one), ...boardWords(one)]))),
+    ...(withProblems ? problems.map(one => setupProblemText(one, s)) : []),
   ]
 }
 
 // The store holds what an earlier version, or a damaged write, may have left.
-export const isSetupState = (value: unknown): value is SetupState => {
+export const isSetupState = (value: unknown): value is StoredSetupState => {
   if (typeof value !== 'object' || value === null) return false
   const { agents, problems } = value as { agents?: unknown; problems?: unknown }
   const isObject = (one: unknown): one is Record<string, unknown> => typeof one === 'object' && one !== null
@@ -783,8 +832,7 @@ export const isSetupState = (value: unknown): value is SetupState => {
   return (
     Array.isArray(agents) &&
     agents.every(one => isObject(one) && typeof one.agent === 'string' && typeof one.label === 'string' && hooks.includes(one.hook) && boards.includes(one.board)) &&
-    Array.isArray(problems) &&
-    problems.every(one => isObject(one) && typeof one.key === 'string' && typeof one.text === 'string')
+    Array.isArray(problems)
   )
 }
 
