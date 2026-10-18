@@ -482,7 +482,7 @@ test('malformed legacy metadata blocks migration without changing either address
   }
 })
 
-test('legacy uncertain claims block public startup after a crash and cannot be replayed', { timeout: 30_000 }, async () => {
+test('beside-board send records block public startup defensively and cannot be replayed', { timeout: 30_000 }, async () => {
   const board = await page()
   const gate = join(board.dir, 'release')
   const legacy = join(board.dir, 'progress-serve.json')
@@ -784,9 +784,9 @@ test('--serve starts the page in the background once, and the next --serve bring
   let url = null
   try {
     const first = serve()
-    assert.ok(first.startsWith('Progress  ● 1 waiting'), first)
     url = first.match(/answer\): (http:\/\/127\.0\.0\.1:\d+\/\?t=[\w-]+)/)?.[1] ?? null
     assert.ok(url, first)
+    assert.ok(first.startsWith('Progress  ● 1 waiting'), first)
     assert.equal(JSON.parse(readFileSync(served, 'utf8')).url, url)
     const again = serve()
     assert.ok(again.includes(url), again)
@@ -801,7 +801,7 @@ test('--serve starts the page in the background once, and the next --serve bring
       for (let tries = 0; existsSync(served) && tries < 50; tries++) await new Promise(done => setTimeout(done, 100))
       assert.ok(!existsSync(served))
     }
-    rmSync(dir, { recursive: true, force: true })
+    rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })
   }
 })
 
@@ -884,6 +884,172 @@ const pageDom = async (html, first, action = async () => ({ ok: false, json: asy
   await flush()
   return { board: nodes.get('board'), requests, flush, redraw: async next => { model = next; scheduled(); await flush() } }
 }
+
+for (const failure of ['missing', 'spawn', 'exit']) test(`send failure ${failure} preserves its reason and only a started command stays uncertain`, { timeout: 30_000 }, async () => {
+  const absent = join(tmpdir(), `board-absent-${process.pid}-${Date.now()}`)
+  const board = await page('', failure === 'missing' ? { PATH: '', AGENT_BOARD_CODEX: '' } : failure === 'spawn' ? { AGENT_BOARD_GROK: absent } : {})
+  try {
+    if (failure === 'missing') writeFileSync(board.path, readFileSync(board.path, 'utf8').replace('agent=grok', 'agent=codex'))
+    if (failure === 'exit') writeFileSync(board.stand, "process.stderr.write('Synthetic agent rejection'); process.exitCode = 3\n")
+    const row = (await board.rows()).find(row => row.title === 'Pick the cache')
+    const send = () => board.call('POST', '/api/act', { body: { ...row, type: 'send', text: 'Synthetic retry' } })
+    const first = await send()
+    if (failure === 'missing') {
+      assert.equal(first.status, 409, first.body)
+      assert.ok(first.json().note.includes('No codex command'), first.body)
+    } else {
+      assert.equal(first.status, 202, first.body)
+      let answer
+      for (let i = 0; i < 150; i++) {
+        const state = (await board.call('GET', '/api/board')).json()
+        answer = state.replies[0]
+        if (answer) break
+        await new Promise(done => setTimeout(done, 25))
+      }
+      assert.ok(answer, 'the command failure must be reported')
+      assert.ok(answer.note.includes(failure === 'exit' ? 'Synthetic agent rejection' : 'No grok command'), answer.note)
+      assert.equal(answer.note.includes('uncertain outcome'), failure === 'exit', answer.note)
+    }
+    const held = existsSync(board.served + '.sends') ? readdirSync(board.served + '.sends') : []
+    assert.equal(held.length, failure === 'exit' ? 1 : 0)
+    const retry = await send()
+    assert.equal(retry.status, failure === 'spawn' ? 202 : 409, retry.body)
+    assert.equal(retry.json().note.includes('uncertain outcome'), failure === 'exit', retry.body)
+  } finally { await board.close() }
+})
+
+test('unconfirmed owners name exact recovery paths and keep reused PID, empty and abandoned recovery files', { timeout: 60_000 }, async () => {
+  const board = await page()
+  try {
+    const address = JSON.parse(readFileSync(board.served, 'utf8'))
+    await board.call('POST', '/api/close', { body: {} })
+    await board.exited
+    const owner = board.served + '.owner'
+    const recovery = owner + '.recover'
+    for (const problem of ['reused PID', 'empty', 'abandoned recovery']) {
+      const held = problem === 'empty' ? '' : JSON.stringify({ pid: problem === 'reused PID' ? process.pid : 999999, nonce: 'synthetic-old-owner' })
+      writeFileSync(owner, held)
+      if (problem === 'reused PID') writeFileSync(board.served, JSON.stringify({ ...address, pid: process.pid }))
+      if (problem === 'abandoned recovery') mkdirSync(recovery)
+      const result = spawnSync(process.execPath, [board.script, '--serve', '--no-open'], { env: { ...process.env, CLAUDE_PROGRESS_FILE: '', NO_COLOR: '1', XDG_RUNTIME_DIR: board.run }, encoding: 'utf8', timeout: 20_000, windowsHide: true })
+      assert.equal(result.status, 1, result.stdout + result.stderr)
+      for (const file of [board.served, owner, recovery]) assert.ok(result.stdout.includes(file), `${problem}: ${result.stdout}`)
+      assert.equal(readFileSync(owner, 'utf8'), held)
+      if (problem === 'reused PID') assert.equal(JSON.parse(readFileSync(board.served, 'utf8')).pid, process.pid)
+      if (problem === 'abandoned recovery') assert.ok(existsSync(recovery))
+      // Only this fixture's records, after its server has exited. Never remove send claims.
+      rmSync(owner)
+      rmSync(board.served, { force: true })
+      if (problem === 'abandoned recovery') rmSync(recovery, { recursive: true })
+    }
+    assert.ok(!existsSync(join(board.dir, 'grok-ran.json')))
+  } finally { await board.close() }
+})
+
+test('an archive target changing during its write reports a changed line and preserves the replacement', { timeout: 30_000 }, async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'board-archive-race-'))
+  const gate = join(dir, 'gate')
+  const preload = join(dir, 'race.cjs')
+  writeFileSync(preload, `const fs = require('node:fs')
+const { syncBuiltinESMExports } = require('node:module')
+const read = fs.readFileSync
+let reads = 0
+fs.readFileSync = (file, ...args) => {
+  if (String(file).endsWith('progress.md') && fs.existsSync(${JSON.stringify(gate)}) && ++reads === 2) {
+    fs.writeFileSync(file, read(file, 'utf8').replace('Pick the cache', 'Replacement during archive'))
+    fs.unlinkSync(${JSON.stringify(gate)})
+  }
+  return read(file, ...args)
+}
+syncBuiltinESMExports()
+`)
+  let board
+  try {
+    board = await page('', { NODE_OPTIONS: `--require ${JSON.stringify(preload)}` })
+    const row = (await board.rows()).find(row => row.title === 'Pick the cache')
+    writeFileSync(gate, 'change on the write read')
+    const answer = await board.call('POST', '/api/act', { body: { ...row, type: 'archive' } })
+    assert.equal(answer.status, 409, answer.body)
+    assert.equal(answer.json().note, 'That line just changed; check the one chosen now and press again.')
+    assert.ok(readFileSync(board.path, 'utf8').includes('Replacement during archive'))
+    assert.ok(!readdirSync(board.dir).some(name => name.includes('-archive-')))
+  } finally {
+    if (board) await board.close()
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+for (const action of ['tick', 'archive']) test(`write-time line shifts ${action} the intended duplicate task using its current reference`, { timeout: 30_000 }, async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'board-offset-race-'))
+  const gate = join(dir, 'gate')
+  const preload = join(dir, 'race.cjs')
+  writeFileSync(preload, `const fs = require('node:fs')
+const { syncBuiltinESMExports } = require('node:module')
+const read = fs.readFileSync
+let reads = 0
+fs.readFileSync = (file, ...args) => {
+  if (String(file).endsWith('progress.md') && fs.existsSync(${JSON.stringify(gate)}) && ++reads === 2) {
+    fs.writeFileSync(file, '\\n\\n\\n' + read(file, 'utf8'))
+    fs.unlinkSync(${JSON.stringify(gate)})
+  }
+  return read(file, ...args)
+}
+syncBuiltinESMExports()
+`)
+  let board
+  try {
+    board = await page('', { NODE_OPTIONS: `--require ${JSON.stringify(preload)}` })
+    writeFileSync(board.path, '# Progress\n## Repeated\n### Duplicate\n> Context: first\n- [ ] Shared step\n### Duplicate\n> Context: intended\n- [ ] Shared step\n')
+    const row = (await board.rows()).find(row => row.context === 'intended')
+    assert.ok(row)
+    writeFileSync(gate, 'shift on the write read')
+    const answer = await board.call('POST', '/api/act', { body: { ...row, type: action, text: row.next } })
+    assert.equal(answer.status, 200, answer.body)
+    const after = readFileSync(board.path, 'utf8')
+    assert.ok(after.includes('> Context: first\n- [ ] Shared step'), after)
+    if (action === 'tick') assert.ok(after.includes('> Context: intended\n- [x] Shared step'), after)
+    else {
+      assert.ok(!after.includes('> Context: intended'), after)
+      const archive = readdirSync(board.dir).find(name => name.includes('-archive-'))
+      const kept = readFileSync(join(board.dir, archive), 'utf8')
+      assert.ok(kept.includes('> Context: intended') && !kept.includes('> Context: first'), kept)
+    }
+  } finally {
+    if (board) await board.close()
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('line shifts and refreshed timestamps preserve draft recipients and allow cached manual actions', { timeout: 30_000 }, async () => {
+  const board = await page()
+  try {
+    const html = (await board.call('GET', `/?t=${board.token}`)).body
+    const first = (await board.call('GET', '/api/board')).json().model
+    const rows = model => model.groups.flatMap(group => group.rows)
+    const grok = rows(first).find(row => row.title === 'Pick the cache')
+    const manual = rows(first).find(row => row.title === 'Fabrikam fellowship')
+    const dom = await pageDom(html, first)
+    const draftKey = JSON.stringify([grok.identity, grok.revision])
+    const box = dom.board.querySelectorAll('textarea[data-key]').find(one => one.getAttribute('data-key') === draftKey)
+    box.value = 'Synthetic draft stays here'
+    box.events.input()
+    writeFileSync(board.path, '\n\n' + readFileSync(board.path, 'utf8').replace(/updated=[\w:.-]+/g, `updated=${new Date().toISOString()}`))
+    const after = (await board.call('GET', '/api/board')).json().model
+    for (const before of [grok, manual]) {
+      const current = rows(after).find(row => row.title === before.title)
+      assert.equal(current.identity, before.identity)
+      assert.equal(current.revision, before.revision)
+    }
+    await dom.redraw(after)
+    assert.equal(dom.board.querySelectorAll('textarea[data-key]').find(one => one.getAttribute('data-key') === draftKey).value, 'Synthetic draft stays here')
+    assert.ok(!dom.board.textContent.includes('Target changed; unsent draft retained:'))
+    const tick = await board.call('POST', '/api/act', { body: { ...manual, type: 'tick', text: manual.next } })
+    assert.equal(tick.status, 200, tick.body)
+    assert.ok(readFileSync(board.path, 'utf8').includes('- [x] Ask two referees'))
+    const archived = await board.call('POST', '/api/act', { body: { ...grok, type: 'archive' } })
+    assert.equal(archived.status, 200, archived.body)
+  } finally { await board.close() }
+})
 
 for (const duplicate of [false, true]) test(duplicate ? 'hiding one of two same-word questions retains its draft instead of moving it to the other question' : 'hiding a question retains its old draft instead of converting it into a general message', { timeout: 30_000 }, async () => {
   const board = await page()
@@ -1228,6 +1394,21 @@ test('with --lan the page also opens on the local network, with a token of its o
     const ticked = await fetchAt(host, lanPort, 'POST', '/api/act', { 'x-board-token': phone }, { ...fabrikam, type: 'tick', text: 'Ask two referees' })
     assert.equal(ticked.status, 200, ticked.body)
     assert.ok(readFileSync(board.path, 'utf8').includes('- [x] Ask two referees'))
+    // Local command diagnostics can name private folders and claim files, never to the phone.
+    writeFileSync(board.stand, `process.stderr.write(${JSON.stringify(privatePath)}); process.exitCode = 3\n`)
+    const localRow = (await board.rows()).find(row => row.title === 'Pick the cache')
+    assert.equal((await call('POST', '/api/act', { body: { ...localRow, type: 'send', text: 'Synthetic local failure' } })).status, 202)
+    let local
+    for (let i = 0; i < 150; i++) {
+      local = (await call('GET', '/api/board')).json()
+      if (local.replies.length) break
+      await new Promise(done => setTimeout(done, 25))
+    }
+    assert.ok(local.replies[0]?.note.includes(privatePath))
+    assert.ok(local.replies[0]?.note.includes(board.served + '.sends'))
+    const privateAnswer = (await fetchAt(host, lanPort, 'GET', '/api/board', { 'x-board-token': phone })).json()
+    assert.deepEqual(privateAnswer.replies, [])
+    assert.ok(!JSON.stringify(privateAnswer).includes(JSON.stringify(privatePath).slice(1, -1)))
   } finally {
     await board.close()
   }

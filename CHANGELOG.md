@@ -21,22 +21,165 @@
   `hiding a question retains its old draft instead of converting it into a general message`.
   Two steps with the same question words keep separate draft revisions. Test:
   `hiding one of two same-word questions retains its draft instead of moving it to the other question`.
+  Line shifts and heartbeat timestamps no longer invalidate an unchanged source;
+  manual duplicate titles keep distinct identities. Test:
+  `line shifts and refreshed timestamps preserve draft recipients and allow cached manual actions`.
+  Writes resolve that matched item's current reference again, so an insertion
+  cannot redirect a tick or archive to a duplicate heading or step. Tests:
+  `write-time line shifts tick the intended duplicate task using its current reference`
+  and `write-time line shifts archive the intended duplicate task using its current reference`.
+  An archive refused during its write says the line changed. Test:
+  `an archive target changing during its write reports a changed line and preserves the replacement`.
 - Extend exclusive address publication with one lifetime server lease per board
   in the private runtime folder, across concurrent startup and upgrades. A
   busy older server's refused close never launches a second sender. Reserve a
-  durable per-session send claim before spawning; an interrupted or failed send
-  stays uncertain across restart and is not replayed automatically. Tests:
+  durable per-session send claim before spawning; an interrupted or started-but-failed
+  send stays uncertain across restart and is not replayed automatically. Tests:
   `a busy older server refuses upgrade without publishing another sender`,
   `simultaneous cold starters publish one server and reuse the winning page`,
   and `an interrupted send remains uncertain after its server is restarted and cannot be replayed`.
   Legacy migration also respects a refused close. Test:
   `a busy legacy page keeps its address and blocks migration until the send finishes`.
-  Malformed legacy addresses and legacy uncertain claims block migration without
-  being removed or replayed. Tests:
+  Malformed legacy addresses and pre-existing beside-board send records block
+  migration without being removed or replayed. Released versions through 0.20.9
+  did not write claims beside the board; this is a defensive check. Tests:
   `malformed legacy metadata blocks migration without changing either address`
-  and `legacy uncertain claims block public startup after a crash and cannot be replayed`.
+  and `beside-board send records block public startup defensively and cannot be replayed`.
   Claims are checked again after legacy shutdown. Test:
   `an uncertain claim created while a legacy page closes still blocks private startup`.
+  Missing commands are checked before reserving a claim; a confirmed failure
+  before the spawn event releases its claim. Started failures retain the original
+  error and name the uncertain record locally; command replies never cross to
+  the LAN page. Tests: `send failure missing preserves its reason and only a started command stays uncertain`,
+  `send failure spawn preserves its reason and only a started command stays uncertain`,
+  `send failure exit preserves its reason and only a started command stays uncertain`,
+  and the local-network page test above. A reused PID or damaged owner remains
+  blocked with exact paths and safe manual recovery instructions in all three
+  guides. Test: `unconfirmed owners name exact recovery paths and keep reused PID, empty and abandoned recovery files`.
+
+## 0.20.9 — 2026-10-17
+
+The inbox no longer loses a report or its receipt when a read or write fails, and orders
+reports from the shell and PowerShell reporters correctly (a follow-up to #40 and #53).
+
+- **Inbox ordering compares shell seconds and PowerShell milliseconds in the same
+  unit, including stored v0.19.1 order values.** A later seconds report can follow
+  a millisecond report, while older turns stay older after upgrading. Tests:
+  "reporter seconds and milliseconds share a chronological order", "the same
+  reporter instant orders a turn before its end across timestamp units", and
+  "legacy seconds order in a stored mirror still rejects older turns after migration".
+- **Receipt failures retain inputs and existing records.** Both maps must be read
+  and their writes verified before settled claims are deleted; errors surface in
+  the pane with the retained path. Tests: "a receipt read failure cannot replace
+  other inputs processed records", "a receipt write that returns success but does
+  not persist cannot authorize deletion", and "receipt read-back failure retains
+  input until a later read verifies persistence", "an unreadable claimed input
+  keeps its bytes and immediately names the failure", and "a denied board write
+  immediately names the retained claim and persistence failure".
+- **Malformed and sessionless inbox inputs are retained as `.failed` files with
+  diagnostics, without processed receipts.** Quarantine cannot overwrite earlier
+  evidence. Tests: "malformed JSON remains available for diagnosis rather than
+  being acknowledged and deleted", "a report missing its session remains
+  available for diagnosis", and "quarantining invalid input preserves an earlier
+  failed payload with the same name". A later payload of the same name takes the next
+  free name (`.failed.1`). Each retained file is named once, and a model that gave no
+  summary is still retried quietly, as before.
+
+## 0.20.8 — 2026-10-17
+
+A session start no longer hides a setup problem. It names each one once, and tells a
+configured hook from a working board command (#38).
+
+- **Every setup problem is named, once.** A session start used to say nothing of a config it
+  could not read or write, or of an OpenClaw too old to hook in, though connecting by hand
+  named them. Now it names each such problem, with its path and what to do, the first time
+  it finds it. Later starts stay quiet while the problem stays the same, and one that goes
+  away and comes back is named again. A machine with nothing new to report hears nothing.
+  Tests: "a setup failure a session start used to hide is announced once, the next start
+  stays quiet, and /progress connect status still lists it", "a config a session start
+  cannot read is named once, and nothing in it is changed", "an agent whose config cannot
+  be written is named, and the agents after it are still hooked in", "an OpenClaw older
+  than 2026.4.24 is not hooked in, what an earlier connect put there comes back out, and
+  connecting by hand says why" and "a problem that goes away and comes back is announced
+  again".
+- **`/progress connect status`, agent by agent.** It shows what the last connect found and
+  writes nothing:
+  - each agent's reporting hook: configured, not configured, config not understood, or too
+    old;
+  - what the agent still asks of the person: Codex's approval in `/hooks`, Hermes Agent's
+    question, OpenClaw's gateway restart;
+  - whether its board command is ready;
+  - then the problems.
+
+  `/progress connect` run by hand ends with the same lines, the problems below them. A
+  removal that could not finish leaves its problems for the status. A written hook is no longer
+  taken for a working board: the board command has a state of its own. Tests: "the status
+  says what each agent still needs, Codex approving, Hermes Agent asking and OpenClaw
+  restarting, apart from whether its board command is ready", "once the hooks are taken
+  out, the status says so rather than showing the last setup", "a removal that could not
+  finish is still shown by the status, with what is left", "each agent’s board command
+  is ready only when a board file it reads is in place and Node.js runs, and a hook that
+  failed does not hide it", "the setup status in every language names each agent, its hook,
+  what it still needs and its board command, then the problems" and "a stored setup state
+  is checked before it is shown, so an older or damaged record is not".
+- **Node.js is checked.** The board commands and the terminal board run Node.js 18 or newer,
+  which a native Codex install does not bring. When a board command is in place, the
+  session runs `node --version`. If there is no Node.js, or only one too old, it says so
+  once and marks every board command as needing Node.js; the reporting hooks still go in.
+  It checks from Claude Code's own PATH, so it says to ignore it when `node --version`
+  works in a terminal.
+  The READMEs and guides no longer say Codex always brings Node.js. Tests: "without Node.js
+  the board commands are named as needing it, once, while the reporting hooks are
+  configured", "a Node.js older than the board needs is named with its version when
+  connecting by hand" and "a Node.js version is read from node --version, and only 18 or
+  newer runs the board".
+
+## 0.20.7 — 2026-10-17
+
+Connecting, updating and removing the plugin never overwrite or delete a file the person
+changed, and an installation from an earlier release still upgrades without a word (#37).
+
+- **A file is replaced only when its bytes are the plugin's own.** A command, skill,
+  board script or reporter is rewritten or removed only when it is exactly what this
+  version writes, what the plugin recorded writing last time, or what a tagged release
+  wrote. A familiar name or first line is not enough. Anything else stays as it is, and
+  its path is named, even when no new agent connects. An empty file and extra files in a
+  skill folder stay too. Tests: "generated files require exact current or recorded bytes,
+  never a familiar name or header", "automatic connection and removal preserve personal
+  commands and skills, including edits after installation", "a collision is announced
+  even when all installed reporting hooks were already connected" and "recorded
+  generated bytes permit an upgrade while unreadable or subsequently edited artifacts
+  stay intact".
+- **An installation from before the plugin kept a record upgrades silently.**
+  `hooks/released.ts` holds a hash of every board script, reporter, skill and Gemini CLI
+  and OpenCode `/board` command each tagged release generated, in each language, with
+  the machine's paths taken out. A file from 0.17.1 to 0.20.6 that matches is the
+  plugin's own, so its board, every agent's `/board` command and skill and its reporter
+  are brought up to date, and no agent's hook is passed over. A file edited by a single
+  byte is still kept and named. `scripts/build-released.ts` writes the table from the
+  git tags with no new dependency, and CI fails while it is out of date. Tests: "sha256
+  gives the standard digests, past one block and over UTF-8", "a file an earlier release
+  wrote is known by its exact bytes with this machine’s paths in it, and an edited one is
+  not", "an installation from 0.20.5 with no record upgrades silently: its board script,
+  every agent’s board command and skill, and its reporter, with no agent’s hook passed
+  over", "board commands and skills written before --serve (0.17.1 to 0.18.1), with no
+  record, upgrade silently in every agent", "a released file edited by hand, with no
+  record, is still preserved byte for byte and named" and "an exact pre-ownership board
+  and command from a release upgrade in the language they hold, while a modified old
+  board stays".
+- **Removal says what it could not remove.** A disconnection is reported only once the
+  file is gone. A failed delete lists its exact paths, leaves the remaining board
+  commands with the board script they run, and can be retried; reporter scripts and
+  inbox data stay. Tests: "failed and falsely successful deletes report exact leftovers,
+  retain the board, and permit a later retry" and "a failed primary plugin deletion is
+  not counted as disconnected and other cleanup continues". This is the verified-removal
+  part of #39; the wider uninstall documentation stays open there.
+- **Clearer notices while connecting.** A reporting script that cannot be written is named
+  as one, not as a board command, and a plugin file this plugin recorded writing in an
+  earlier version is brought up to date without announcing the agent as newly connected.
+  Tests: "a reporter that cannot be written is named as the reporter, and no agent is
+  hooked in to run it" and "a plugin file this plugin recorded writing in an earlier
+  version is brought up to date without announcing the agent again".
 
 ## 0.20.6 — 2026-10-17
 

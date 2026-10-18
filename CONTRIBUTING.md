@@ -58,9 +58,10 @@ To release, in this order:
 
 1. Raise `version` in `.claude-plugin/plugin.json`. Installed copies only update when it changes.
 2. Add an entry to `CHANGELOG.md`, newest first, headed `## x.y.z — YYYY-MM-DD`. Name the tests that cover each change.
-3. Run the checks above.
-4. Push.
-5. `claude plugin tag .`, then `git push --tags`.
+3. After the last merge of `main`, run `bun scripts/build-released.ts` (Bun 1.4.2, with the tags fetched: `git fetch --tags`). It adds the files this release generates to `hooks/released.ts`, so a later version still knows them as its own, and CI's `--check` fails until it is run.
+4. Run the checks above.
+5. Push.
+6. `claude plugin tag .`, then `git push --tags`.
 
 ## The agents table
 

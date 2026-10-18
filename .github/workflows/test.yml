@@ -40,6 +40,8 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          # The whole history with its tags, for the released files table below.
+          fetch-depth: 0
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: ${{ matrix.node }}
@@ -55,6 +57,12 @@ jobs:
       - name: Board bundle up to date
         if: runner.os != 'Windows' && matrix.node == 24
         run: npx --yes bun@1.4.2 scripts/build-board.ts --check
+
+      # hooks/released.ts holds the hash of every file each tagged release generated, so an
+      # installation from before the plugin kept a record of its output upgrades silently.
+      - name: Released files table up to date
+        if: runner.os != 'Windows' && matrix.node == 24
+        run: npx --yes bun@1.4.2 scripts/build-released.ts --check
 
   plugin:
     name: plugin (${{ matrix.os }})

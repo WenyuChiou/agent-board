@@ -46,6 +46,7 @@ export type ServeOptions = {
 }
 
 type Result = { ok: boolean; note: string }
+type RunResult = Result & { started: boolean }
 
 const MAX_BODY = 64 * 1024
 // The page on the local network stops after this long without a request from it, so an
@@ -168,23 +169,19 @@ const killTree = (child: ChildProcess): void => {
 
 // Runs the agent with the reply and waits for its answer, at most 10 minutes. `label` names the
 // agent and the task in what the page says, since two sessions can be answered at once.
-const run = (plan: SendPlan, s: Strings, label: string): Promise<Result> =>
+const run = (plan: SendPlan, program: Program, s: Strings, label: string): Promise<RunResult> =>
   new Promise(resolve => {
-    const program = programOf(plan)
-    if (program === null) {
-      resolve({ ok: false, note: s.serveSendFailed(label, s.serveSendMissing(plan.agent)) })
-      return
-    }
     let out = ''
     let err = ''
     let timer: ReturnType<typeof setTimeout> | undefined
     let isTimedOut = false
     let isDone = false
+    let isStarted = false
     const finish = (ok: boolean, note: string): void => {
       if (isDone) return
       isDone = true
       if (timer !== undefined) clearTimeout(timer)
-      resolve({ ok, note })
+      resolve({ ok, note, started: isStarted })
     }
     // The current folder is never searched for a program a shell or a script starts by name.
     const options = { cwd: plan.cwd ?? homedir(), detached: !isWindows, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] as ['pipe', 'pipe', 'pipe'], env: { ...process.env, NoDefaultCurrentDirectoryInExePath: '1' } }
@@ -196,6 +193,7 @@ const run = (plan: SendPlan, s: Strings, label: string): Promise<Result> =>
       return
     }
     // The session stays held until the agent is gone, so a second reply never meets it.
+    child.once('spawn', () => { isStarted = true })
     timer = setTimeout(() => {
       isTimedOut = true
       killTree(child)
@@ -309,16 +307,19 @@ export const startServer = (o: ServeOptions): void => {
     if (plan.cwd !== null && !isFolder(plan.cwd)) return { status: 409, note: o.s.serveSendFailed(target.agent, plan.cwd) }
     const key = sendKey(target)
     if (sending.has(key)) return { status: 409, note: o.s.serveSendBusy(target.agent) }
+    const label = `${target.agent} · ${title}`
+    const program = programOf(plan)
+    if (program === null) return { status: 409, note: o.s.serveSendFailed(label, o.s.serveSendMissing(plan.agent)) }
+    const uncertain = (): string => o.s.serveSendUncertain(label, claims.file(key))
     let complete: (() => boolean) | null
-    try { complete = claims.reserve(key) } catch { return { status: 409, note: o.s.serveSendUncertain(target.agent) } }
-    if (complete === null) return { status: 409, note: o.s.serveSendUncertain(target.agent) }
+    try { complete = claims.reserve(key) } catch { return { status: 409, note: uncertain() } }
+    if (complete === null) return { status: 409, note: uncertain() }
     const finishClaim = complete
     sending.add(key)
     replies.delete(key)
-    const label = `${target.agent} · ${title}`
-    run(plan, o.s, label)
-      .then(result => replies.set(key, result.ok && finishClaim() ? { ...result, at: Date.now() } : { ok: false, note: o.s.serveSendUncertain(label), at: Date.now() }))
-      .catch(() => replies.set(key, { ok: false, note: o.s.serveSendUncertain(label), at: Date.now() }))
+    run(plan, program, o.s, label)
+      .then(result => replies.set(key, (result.ok || !result.started) && finishClaim() ? { ...result, at: Date.now() } : { ok: false, note: `${result.note} ${uncertain()}`, at: Date.now() }))
+      .catch(error => replies.set(key, { ok: false, note: `${o.s.serveSendFailed(label, String(error))} ${uncertain()}`, at: Date.now() }))
       .finally(() => sending.delete(key))
     return { status: 202, note: o.s.serveQueued(label) }
   }
@@ -362,7 +363,7 @@ export const startServer = (o: ServeOptions): void => {
             if (target !== null && !sending.has(sendKey(target)) && claims.has(sendKey(target))) uncertain.add(sendKey(target))
           }
           const model = serveModel(view, pending, o.s, sending, isLan, uncertain)
-          return json(res, 200, { model: { ...model, asks: model.asks.map(publicSource), groups: model.groups.map(group => ({ ...group, rows: group.rows.map(publicSource) })), revision: snapshot.revision }, replies: [...replies.values()], now: Date.now() })
+          return json(res, 200, { model: { ...model, asks: model.asks.map(publicSource), groups: model.groups.map(group => ({ ...group, rows: group.rows.map(publicSource) })), revision: snapshot.revision }, replies: isLan ? [] : [...replies.values()], now: Date.now() })
         } catch (error) {
           const note = o.failure(error, isLan)
           if (note === null) throw error

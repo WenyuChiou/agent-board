@@ -4,7 +4,7 @@ import type { ProgressMirror, ProgressPr } from '../types'
 import { askOf } from '../hooks/ask'
 import { boardItems, boardKey, boardScreen, boardText, emptyBoardState, fit, peekInbox, pinned } from '../hooks/board'
 import { addManualTask, isArchivable, manualTaskCount, mergeBlock, renderAutoBlock, setManualStep, takeArchivable, takeManualDone, takeTask, upsertAutoBlock } from '../hooks/blocks'
-import { agentHooks, boardCommands, boardScript, DELETE, isWindowsHost, openclawPlugin, openclawPrinted, openclawSavedBy, openclawTooOld, readConfig, reportCommand, reporterPs1, withFlatHook, withGroupedHook, withHermesHooks, withoutHermesHooks, withoutOurHooks, withoutSection } from '../hooks/connect'
+import { agentHooks, boardCommands, boardScript, COLLISION, DELETE, generatedFile, isNodeSupported, isReleased, isReleasedBoard, isSetupState, isWindowsHost, NODE_MIN, nodeVersionOf, openclawPlugin, openclawPrinted, openclawSavedBy, openclawTooOld, readConfig, RELEASE_PATHS, reportCommand, reporterPs1, reporterSh, setupAgents, setupLines, withFlatHook, withGroupedHook, withHermesHooks, withoutHermesHooks, withoutOurHooks, withoutSection } from '../hooks/connect'
 import { dashboardHtml } from '../hooks/dashboard'
 import { answerKey, blockId, CLAIM_MS, claimAction, isBoardAnswer, isBoardTurn, isInboxFile, isTakenFile, isTextLog, isTranscriptPath, keepInboxDone, keepInboxFailed, MAX_TRIES, promptKey, readClaim, readTurn, takenName, transcriptTail, turnsToDigest } from '../hooks/inbox'
 import { applyDigest, clearAsked, isAskingYou, isPersonsAnswer, isWork, lastQuestion, markAsked, parseDigest, replyData, requestData, turnTools } from '../hooks/digest'
@@ -19,6 +19,9 @@ import { parseQuickAdd } from '../hooks/quick'
 import { keepRecent, remindersOf } from '../hooks/remind'
 import { lanAddress, localHosts, pagePolicy, pageWords, replyText, requestProblem, sendKey, sendMode, sendPlan, serveAction, serveModel, servePage } from '../hooks/serve'
 import { qrModules, qrText } from '../hooks/qr'
+import { RELEASED } from '../hooks/released'
+import { sha256 } from '../hooks/sha256'
+import { RELEASE_0_18_1, RELEASE_0_20_5 } from './fixtures/released'
 import { agentName, buildView, contextOf, handoffOf, replyHint, resumeCommand, resumeVia, statusLine, wayBackText } from '../hooks/view'
 
 const NOW = Date.parse('2026-10-16T12:00:00.000Z')
@@ -818,7 +821,7 @@ test('each agent’s config gets the hook in the shape it reads, and nothing els
   expect(hooks.grok?.old).toBe('/h/.grok/hooks/progress-pane.json')
   expect(hooks.opencode?.old).toBe('/h/.config/opencode/plugin/progress-pane.js')
   expect(JSON.parse(String(hooks.grok?.edit('', false))).hooks.Stop[0].hooks[0].command).toBe("sh '/h/.claude/progress-report.sh' grok turn || true")
-  expect(hooks.grok?.edit('{"hooks":{}}', true)).toBe(DELETE)
+  expect(hooks.grok?.edit('{"hooks":{}}', true)).toBe(COLLISION)
   // PowerShell alone took 0.6 s of the end hook's time on Windows: it gets 5.
   expect(JSON.parse(String(hooks.grok?.edit('', false))).hooks.SessionEnd[0].hooks[0].timeout).toBe(5)
   expect(muse.hooks.SessionEnd[0].hooks[0].timeout).toBe(5)
@@ -885,7 +888,8 @@ test('OpenClaw gets a plugin file and the config entry that loads it, beside the
   expect(plugin?.file).toBe('/h/.openclaw/agent-board.mjs')
   expect(config?.file).toBe('/h/.openclaw/openclaw.json')
   expect(String(plugin?.edit('', false))).toContain('const INBOX = "/h/.claude/progress-inbox"')
-  expect(plugin?.edit('old', true)).toBe(DELETE)
+  expect(plugin?.edit('old', true)).toBe(COLLISION)
+  expect(plugin?.edit(String(plugin?.edit('', false)), true)).toBe(DELETE)
   const own = { gateway: { port: 18789 }, plugins: { allow: ['discord'], load: { paths: ['/h/mine.mjs'] }, entries: { discord: { enabled: true } } } }
   const once = String(config?.edit(JSON.stringify(own), false))
   expect(JSON.parse(once)).toEqual({
@@ -1339,13 +1343,147 @@ test('each agent gets a board command in the form it reads, and a missing report
   // Muse Code reads ~/.agents/skills too, so its config folder is enough to write the skill.
   expect(files['/h/.agents/skills/agent-board/SKILL.md']?.dirs).toContain('/h/.config/muse')
   expect(skill).toContain('node "/h/.claude/agent-board.mjs" --serve')
-  expect(files['/h/.hermes/skills/agent-board/SKILL.md']?.edit('x', true)).toBe(DELETE)
+  expect(files['/h/.hermes/skills/agent-board/SKILL.md']?.edit('x', true)).toBe(COLLISION)
   expect(files['/h/.gemini/config/skills/agent-board/SKILL.md']?.dir).toBe('/h/.gemini/antigravity')
   // Board files never count as connecting an agent: only its turns reaching the board do.
   expect(boardCommands(ctx).every(hook => hook.label === '')).toBe(true)
   expect(boardCommands({ ...ctx, board: undefined })).toEqual([])
   expect(boardScript('/h/.claude/progress.md', 'en').split('\n')[0]).toBe('globalThis.AGENT_BOARD = {"path":"/h/.claude/progress.md","lang":"en"}')
   expect(reportCommand('/h/.claude/progress-report.sh', 'gemini', 'turn', false)).toBe("sh '/h/.claude/progress-report.sh' gemini turn || true")
+})
+
+test('generated files require exact current or recorded bytes, never a familiar name or header', () => {
+  const current = '# Written by Agent Board\nnew output\n'
+  const previous = '# Written by Agent Board\nearlier output\n'
+  const edit = generatedFile(current)
+  expect(edit('', false)).toBe(current)
+  expect(edit(current, false)).toBe(current)
+  expect(edit(current, true)).toBe(DELETE)
+  expect(edit(previous, false)).toBe(COLLISION)
+  expect(edit(previous, false, previous)).toBe(current)
+  expect(edit(previous, true, previous)).toBe(DELETE)
+  for (const personal of ['personal command', ' ', `${current}my addition\n`, `${previous}my addition\n`]) {
+    expect(edit(personal, false, previous)).toBe(COLLISION)
+    expect(edit(personal, true, previous)).toBe(COLLISION)
+  }
+  expect(generatedFile(current, [previous])(previous, false)).toBe(current)
+  expect(generatedFile(current, text => text === previous)(previous, false)).toBe(current)
+  expect(generatedFile(current, text => text === previous)(`${previous} `, false)).toBe(COLLISION)
+})
+
+test('sha256 gives the standard digests, past one block and over UTF-8', () => {
+  expect(sha256('')).toBe('e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855')
+  expect(sha256('abc')).toBe('ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad')
+  expect(sha256('abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq')).toBe('248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1')
+  expect(sha256('a'.repeat(1000))).toBe('41edece42d63e8d9bf515a9ba6932e1c20cbc9f5a5d134645adb5db1b9737ea3')
+  expect(sha256('進度 ● 等你')).toBe('00debfc89bf0195b68370bfd54ef91b042cff903d3895a1bf1ae084211d122be')
+})
+
+test('a file an earlier release wrote is known by its exact bytes with this machine’s paths in it, and an edited one is not', () => {
+  const path = '/h/.claude/progress.md'
+  const board = `globalThis.AGENT_BOARD = ${JSON.stringify({ path, lang: 'en' })}\n${RELEASE_0_20_5.board}`
+  expect(isReleasedBoard(board, path)).toBe(true)
+  expect(isReleasedBoard(board.replace('"lang":"en"', '"lang":"zh-CN"'), path)).toBe(true)
+  for (const other of [`${board}// mine\n`, board.replace('"lang":"en"', '"lang":"fr"'), RELEASE_0_20_5.board]) expect(isReleasedBoard(other, path)).toBe(false)
+  expect(isReleasedBoard(board, '/elsewhere/progress.md')).toBe(false)
+  const at = '/h/.claude/agent-board.mjs'
+  for (const kind of ['skill', 'gemini', 'opencode'] as const) {
+    for (const text of [...RELEASE_0_18_1[kind], ...RELEASE_0_20_5[kind]]) {
+      const written = text.split(RELEASE_PATHS.board).join(at)
+      expect(isReleased(kind, written, { board: at })).toBe(true)
+      expect(isReleased(kind, `${written}\n`, { board: at })).toBe(false)
+      expect(isReleased(kind, written, { board: '/other/agent-board.mjs' })).toBe(false)
+    }
+  }
+  // The board commands from before --serve were the same from 0.17.1, before 0.18.0, to 0.18.1.
+  const first = RELEASED.find(release => release.version === '0.17.1')
+  for (const text of RELEASE_0_18_1.gemini) expect(first?.gemini).toContain(sha256(text))
+  // The reporter has not changed since, so today's is a released one too.
+  const inbox = '/h/.claude/progress-inbox'
+  expect(reporterSh(inbox)).toBe(RELEASE_0_20_5.reporterSh.split(RELEASE_PATHS.inbox).join(inbox))
+  expect(isReleased('reporterSh', reporterSh(inbox), { inbox })).toBe(true)
+  expect(isReleased('reporterPs1', reporterPs1())).toBe(true)
+  expect(isReleased('reporterSh', `${reporterSh(inbox)}# mine\n`, { inbox })).toBe(false)
+  // On Windows the board's path has backslashes, and a board command holds it as it is.
+  const windows = 'C:\\Users\\synthetic\\.claude\\agent-board.mjs'
+  for (const text of RELEASE_0_20_5.gemini) {
+    const written = text.split(RELEASE_PATHS.board).join(windows)
+    expect(written).toContain(windows)
+    expect(isReleased('gemini', written, { board: windows })).toBe(true)
+    expect(isReleased('gemini', `${written} `, { board: windows })).toBe(false)
+  }
+})
+
+test('a Node.js version is read from node --version, and only 18 or newer runs the board', () => {
+  expect(nodeVersionOf('v24.1.0\n')).toBe('v24.1.0')
+  expect(nodeVersionOf('  v18.0.0  ')).toBe('v18.0.0')
+  for (const printed of ['', 'claude/progress-mod\n', '24.1.0', 'node: command not found']) expect(nodeVersionOf(printed)).toBe(null)
+  expect(NODE_MIN).toBe(18)
+  for (const version of ['v18.0.0', 'v22.18.0', 'v24.1.0']) expect(isNodeSupported(version)).toBe(true)
+  for (const version of ['v16.20.2', 'v17.9.1']) expect(isNodeSupported(version)).toBe(false)
+})
+
+test('each agent’s board command is ready only when a board file it reads is in place and Node.js runs, and a hook that failed does not hide it', () => {
+  const hooks = [
+    { agent: 'codex', label: 'Codex', hook: 'failed' as const },
+    { agent: 'gemini', label: 'Gemini CLI', hook: 'configured' as const },
+    { agent: 'hermes', label: 'Hermes Agent', hook: 'configured' as const },
+  ]
+  const boards = { skills: 'ok' as const, gemini: 'failed' as const, hermes: 'failed' as const, antigravity: 'ok' as const }
+  expect(setupAgents(hooks, boards, true)).toEqual([
+    { agent: 'codex', label: 'Codex', hook: 'failed', board: 'ready' },
+    // The shared skill shows it, though its own command could not be written.
+    { agent: 'gemini', label: 'Gemini CLI', hook: 'configured', board: 'ready' },
+    { agent: 'hermes', label: 'Hermes Agent', hook: 'configured', board: 'failed' },
+    { agent: 'antigravity', label: 'Antigravity', hook: null, board: 'ready' },
+  ])
+  expect(setupAgents(hooks, boards, false).map(one => one.board)).toEqual(['runtime', 'runtime', 'failed', 'runtime'])
+  expect(setupAgents(hooks, {}, true).map(one => one.board)).toEqual(['none', 'none', 'none'])
+})
+
+test('the setup status in every language names each agent, its hook, what it still needs and its board command, then the problems', () => {
+  for (const s of Object.values(STRINGS)) {
+    const state = {
+      agents: [
+        { agent: 'codex', label: 'Codex', hook: 'configured' as const, board: 'runtime' as const },
+        { agent: 'cursor', label: 'Cursor', hook: 'unreadable' as const, board: 'ready' as const },
+        { agent: 'openclaw', label: 'OpenClaw', hook: 'tooOld' as const, board: 'failed' as const },
+        { agent: 'antigravity', label: 'Antigravity', hook: null, board: 'none' as const },
+      ],
+      problems: [{ key: 'node:missing', text: s.setupNodeMissing(NODE_MIN) }],
+      node: null,
+    }
+    expect(setupLines(state, s)).toEqual([
+      s.setupStatusTitle,
+      s.setupAgent('Codex', [s.setupHookConfigured, s.setupCodexTrust, s.setupBoardNeedsNode(NODE_MIN)]),
+      s.setupAgent('Cursor', [s.setupHookUnreadable, s.setupBoardReady]),
+      s.setupAgent('OpenClaw', [s.setupHookTooOld, s.setupBoardFailed]),
+      s.setupAgent('Antigravity', []),
+      s.setupNodeMissing(NODE_MIN),
+    ])
+    expect(setupLines(state, s, false)).not.toContain(s.setupNodeMissing(NODE_MIN))
+    expect(setupLines({ agents: [], problems: [], node: 'v24.1.0' }, s)).toEqual([s.setupStatusTitle, s.connectNone])
+    for (const text of [s.setupNodeMissing(NODE_MIN), s.setupNodeOld('v16.20.2', NODE_MIN), s.setupBoardNeedsNode(NODE_MIN)]) expect(text).toContain(String(NODE_MIN))
+    expect(s.setupNodeOld('v16.20.2', NODE_MIN)).toContain('v16.20.2')
+    expect(s.setupStatusHint).toContain('/progress connect status')
+  }
+})
+
+test('a stored setup state is checked before it is shown, so an older or damaged record is not', () => {
+  expect(isSetupState({ agents: [{ agent: 'codex', label: 'Codex', hook: 'configured', board: 'ready' }], problems: [{ key: 'node:missing', text: 'x' }], node: null })).toBe(true)
+  for (const value of [null, 'x', {}, { agents: [], problems: [{ text: 1 }] }, { agents: [{ label: 2 }], problems: [] }, { agents: {}, problems: [] }]) expect(isSetupState(value)).toBe(false)
+})
+
+test('setup safety notices retain their paths and recovery command in every language', () => {
+  const path = 'C:\\synthetic\\commands\\board.toml'
+  for (const s of Object.values(STRINGS)) {
+    expect(s.connectPreserved(path)).toContain(path)
+    expect(s.connectRemoveFailed(path)).toContain(path)
+    expect(s.connectRemoveFailed(path)).toContain('/progress connect remove')
+    expect(s.connectBoardRetained(path)).toContain(path)
+    expect(s.connectRemoveIncomplete.length > 0).toBe(true)
+    expect(s.connectAttention.length > 0).toBe(true)
+  }
 })
 
 const SERVE_FILE = `# Progress

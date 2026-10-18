@@ -16,8 +16,7 @@ export type AgentTurn = {
   prompt: string
   answer: string
   transcript: string
-  // The time in the file's name, which the reporter writes: when the turn ended, by that
-  // agent's clock (seconds from the sh reporter, milliseconds from the PowerShell one).
+  // When the turn ended, normalized to milliseconds from the reporter's file name.
   at?: number
 }
 
@@ -31,7 +30,7 @@ export const isInboxFile = (name: string): boolean => NAME.test(name)
 export const inboxOrder = (a: string, b: string): number => {
   const parts = (name: string): [number, number] => {
     const found = /^[a-z0-9]+-(turn|end)-(\d+)/.exec(name)
-    return [Number(found?.[2] ?? 0), found?.[1] === 'end' ? 1 : 0]
+    return [inboxTime(name) ?? 0, found?.[1] === 'end' ? 1 : 0]
   }
   const [timeA, endA] = parts(a)
   const [timeB, endB] = parts(b)
@@ -136,17 +135,28 @@ export const readTurn = (fileName: string, body: string): AgentTurn | null => {
   }
 }
 
-// The time in an inbox file's name, or undefined when it holds none.
+// Shell reporters use Unix seconds; PowerShell uses milliseconds. Their current
+// epochs differ by three digits. Normalize before comparing or persisting order.
+const milliseconds = (time: number): number => time < 1e12 ? time * 1000 : time
+
+// The time in an inbox file's name, in milliseconds, or undefined when it holds none.
 export const inboxTime = (fileName: string): number | undefined => {
   const found = /^[a-z0-9]+-(?:turn|end)-(\d+)/.exec(fileName)
 
-  return found === null ? undefined : Number(found[1])
+  const at = found === null ? NaN : Number(found[1])
+  return Number.isSafeInteger(at) ? milliseconds(at) : undefined
 }
+
+// v0.19.1 stored raw seconds or milliseconds, doubled with an end-event bit.
+// Keep that bit while migrating old mirrors; otherwise an upgrade could replay
+// an older seconds event over a newer, already stored seconds event.
+export const normalizeTurnOrder = (order: unknown): number | undefined =>
+  typeof order !== 'number' || !Number.isSafeInteger(order) || order < 0 ? undefined : milliseconds(Math.floor(order / 2)) * 2 + order % 2
 
 // Where a turn falls in its session, as inboxOrder sorts files: by time, and in the same
 // second a turn before its session's end (Codex writes both within one second).
 export const turnOrder = (turn: Pick<AgentTurn, 'at' | 'event'>): number | undefined =>
-  turn.at === undefined ? undefined : turn.at * 2 + (turn.event === 'end' ? 1 : 0)
+  turn.at === undefined ? undefined : milliseconds(turn.at) * 2 + (turn.event === 'end' ? 1 : 0)
 
 // One line of a session log as a speaker and their words. Grok Build's log is ACP updates,
 // which stream a message in chunks.

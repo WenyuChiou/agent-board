@@ -258,8 +258,17 @@ const act = (action: BoardAction): string => {
     let isChanged = false
     const line = journalLine({ project: action.ref.project, task: action.ref.title, step: action.ref.step }, now, s)
     const wrote = rewrite(path, text => {
-      if (action.expected !== undefined && !matchesExpected(boardItems(view(text), []), action.expected)) { isChanged = true; return text }
-      const after = setManualStep(text, action.ref, 'x')
+      let ref = action.ref
+      if (action.expected !== undefined) {
+        const items = boardItems(view(text), [])
+        if (!matchesExpected(items, action.expected)) { isChanged = true; return text }
+        const item = items.find(one => one.key === action.expected?.key)
+        const current = item?.type === 'ask' ? item.ask.step : item?.type === 'row' ? item.row.next : null
+        if (current === null) { isChanged = true; return text }
+        // Semantic identity survives an insertion, but its old line offset does not.
+        ref = current
+      }
+      const after = setManualStep(text, ref, 'x')
       if (after !== text) {
         // Save history before ticking: a journal failure must leave the step available
         // to retry. A later board failure can leave an extra journal line, and is reported.
@@ -273,9 +282,20 @@ const act = (action: BoardAction): string => {
     return s.boardTicked(action.ref.step)
   }
   if (action.type === 'archive') {
-    const count = archiveOut(text => action.expected !== undefined && !matchesExpected(boardItems(view(text), []), action.expected) ? null : takeTask(text, action.ref, now, s), now)
+    let isChanged = false
+    const count = archiveOut(text => {
+      let ref = action.ref
+      if (action.expected !== undefined) {
+        const items = boardItems(view(text), [])
+        if (!matchesExpected(items, action.expected)) { isChanged = true; return null }
+        const item = items.find(one => one.key === action.expected?.key)
+        if (item?.type !== 'row' || item.row.archive === null) { isChanged = true; return null }
+        ref = item.row.archive
+      }
+      return takeTask(text, ref, now, s)
+    }, now)
     if (count === null) return s.boardWriteFailed
-    if (count === 0) return s.archiveGone
+    if (count === 0) return isChanged ? s.boardLineChanged : s.archiveGone
     return s.archivedOne(action.title)
   }
   if (action.type === 'hide' || action.type === 'unhide') {
@@ -414,8 +434,8 @@ const board = (file: string): string => resolve(file)
 const serveFile = (): string => (served ??= join(runFolder(), `agent-board-${createHash('sha256').update(board(path)).digest('hex').slice(0, 16)}.json`))
 // Where 0.19.0 left it, beside progress.md.
 const oldServeFile = `${path.replace(/\.md$/i, '')}-serve.json`
-// Legacy claims remain authoritative after the address moves. Do not delete or
-// replay them automatically; even an unreadable directory needs reconciliation.
+// Defensively retain beside-board claims from development builds. Released
+// versions used this address location but did not write send claims there.
 const hasLegacyClaims = (): boolean => {
   try {
     const folder = lstatSync(oldServeFile + '.sends')
@@ -471,7 +491,7 @@ const ping = async (running: Running, waitMs = 1500): Promise<Record<string, unk
 
 const serveChild = (): void => {
   const release = ownServer(serveFile() + '.owner')
-  if (release === null) { process.exitCode = 1; return }
+  if (release === null) { process.stderr.write(`${s.serveOwnerBlocked(serveFile())}\n`); process.exitCode = 1; return }
   process.once('exit', release)
   startServer({
     s,
@@ -516,7 +536,7 @@ const serveChild = (): void => {
 const letGo = async (running: Running, file: string): Promise<string | null> => {
   const closed = await fetch(`http://127.0.0.1:${running.port}/api/close`, { method: 'POST', headers: { 'x-board-token': tokenOf(running.url), 'content-type': 'application/json' }, body: '{}', signal: AbortSignal.timeout(1500) }).catch(() => null)
   if (closed === null) {
-    if (processLives(running.pid)) return s.serveFailed(s.serveOffline)
+    if (processLives(running.pid)) return s.serveFailed(s.serveOwnerBlocked(file))
   } else {
     if (!closed.ok) return closed.status === 409 ? s.serveCloseBusy : s.serveFailed(s.serveOffline)
     for (let attempt = 0; attempt < 20 && await ping(running) !== null; attempt += 1) await new Promise(done => setTimeout(done, 50))
@@ -626,7 +646,7 @@ const serveBoard = async (): Promise<void> => {
       if (winner !== null && typeof seen?.path === 'string' && board(seen.path) === board(path) && seen.built === built) return show(winner.url)
       await new Promise(done => setTimeout(done, 50))
     }
-    process.stdout.write(`\n${s.serveFailed(s.serveOffline)}\n`)
+    process.stdout.write(`\n${s.serveFailed(s.serveOwnerBlocked(serveFile()))}\n`)
     process.exitCode = 1
     return
   }

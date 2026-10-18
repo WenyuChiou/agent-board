@@ -39,10 +39,12 @@ export const ownServer = (file: string): (() => void) | null => {
 }
 
 // A reservation exists before any agent process starts. Only a confirmed
-// successful exit removes it; a crash or interrupted send remains uncertain.
+// successful exit or a confirmed failure to launch removes it; a crash or an
+// interrupted command that started remains uncertain.
 export const sendClaims = (directory: string) => {
   const path = (key: string): string => join(directory, createHash('sha256').update(key).digest('hex') + '.json')
   return {
+    file: path,
     has: (key: string): boolean => existsSync(path(key)),
     reserve: (key: string): (() => boolean) | null => {
       mkdirSync(directory, { recursive: true, mode: 0o700 })

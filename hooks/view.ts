@@ -50,10 +50,16 @@ export type SourceRef = { identity: string; revision: string }
 
 // Display keys are labels, not ownership. Keep the source snapshot separate so a
 // same-title replacement or a changed question cannot inherit a pending press.
-const sourceOf = (project: string, task: ProgressTask, step: number | null = null, question?: number | null): SourceRef => ({
-  identity: JSON.stringify([project, task.auto === null ? ['manual', task.line, task.title] : ['session', task.auto.agent, task.auto.session, task.auto.resume, task.auto.dir], step]),
-  revision: JSON.stringify(question === undefined ? task : [task, question]),
-})
+const sourceOf = (project: string, task: ProgressTask, step: number | null = null, question?: number | null, occurrence = 1): SourceRef => {
+  // Line offsets and heartbeat times do not change the recipient or the task.
+  // Keep duplicate manual titles separate without tying them to file offsets.
+  const auto = task.auto === null ? null : { agent: task.auto.agent, session: task.auto.session, state: task.auto.state, resume: task.auto.resume, dir: task.auto.dir, pr: task.auto.pr, ci: task.auto.ci }
+  const content = { title: task.title, notes: task.notes, due: task.due, auto, steps: task.steps.map(one => ({ text: one.text, status: one.status, depth: one.depth, raw: one.raw })) }
+  return {
+    identity: JSON.stringify([project, auto === null ? ['manual', task.title, occurrence] : ['session', auto.agent, auto.session, auto.resume, auto.dir], step]),
+    revision: JSON.stringify(question === undefined ? content : [content, question]),
+  }
+}
 
 // Another agent's session, as its block names it: its block id, the session id its hook gave
 // (`resume=`), the folder it ran in (`dir=`), and whether it has closed (`state=ended`). The
@@ -618,7 +624,7 @@ export const buildView = (
         const parts = splitNote(step.text)
         waiting.push({
           key: `${key}::${index}`,
-          source: sourceOf(name, task, index),
+          source: sourceOf(name, task, index, undefined, repeat),
           project: name,
           task: title,
           context,
@@ -669,7 +675,7 @@ export const buildView = (
       const question = asked === undefined ? null : splitNote(asked.text).text
       const row: TaskRow = {
         key,
-        source: sourceOf(name, task, null, asked === undefined ? null : task.steps.indexOf(asked)),
+        source: sourceOf(name, task, null, asked === undefined ? null : task.steps.indexOf(asked), repeat),
         project: name,
         title,
         context,
