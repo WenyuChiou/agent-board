@@ -160,7 +160,7 @@ claude -p "/progress connect"
 
 ### 看板的网页
 
-上面的看板命令会先打印看板，再在浏览器打开它的网页，最后一行是网址；在任何终端运行 `node ~/.claude/agent-board.mjs --serve` 也一样（加 `--no-open` 只打印网址）。再运行一次 `--serve` 会叫回已经开着的那一页。在网页上可以：
+上面的看板命令和技能通常会运行 `--serve`：打印看板、启动后台服务器、写入地址文件、在浏览器打开网页，并把带 token 的链接打印到 agent 的对话中。在任何终端运行 `node ~/.claude/agent-board.mjs --serve` 也一样（加 `--no-open` 只打印网址）。再运行一次 `--serve` 会叫回已经开着的那一页。在聊天 app 中，技能会改用 `--chat`，不会打印链接。在网页上可以：
 
 - **勾掉**自己工作的下一步、**归档**一件工作，或点**现在归档**把做完的全部收走。
 - **复制**另一个 agent 问题的答案、问这个问题的对话 ID、对话的续接命令，或步骤里的命令。
@@ -168,7 +168,7 @@ claude -p "/progress connect"
 - **回复**已经结束的 Grok Build 或 Codex 对话。回复会在那个对话自己的文件夹里运行 `grok -r <id>` 或 `codex exec resume <id>`，agent 回答后网页会显示它回了什么，可能要几分钟。同一个对话一次只发一条。还开着的对话要在它自己的窗口回答，因为两边同时写会把对话弄乱。
 - **贴上区块**：从 Muse、dot 这类网页聊天来的。先从网页复制聊天提示，贴进聊天一次；之后把聊天打印出的每个区块贴进来。格式不对，或会覆盖 Claude 或其他 agent 区块的，会被拒绝。
 
-网页只在 127.0.0.1 上监听（除非加上 `--lan`，见下文），网址里带一把随机钥匙，所以别的电脑、你开着的其他网页都用不了它。30 分钟没人看就会关，也可以点它的**关闭看板**；不过还有一条回复在发给 agent 的路上时，不会关。
+网页只在 127.0.0.1 上监听（除非加上 `--lan`，见下文），网址里带一把随机钥匙。这台电脑上的任何程序只要有链接就能使用。30 分钟没人看就会关，也可以点它的**关闭看板**；不过还有一条回复在发给 agent 的路上时，不会关。
 
 **在手机上。** 网页的布局适合手机。要从和电脑连同一个 Wi-Fi 的手机打开，运行 `node ~/.claude/agent-board.mjs --serve --lan`：除了电脑本机的网址，它还会打印网页在你网络上的网址和它的二维码，用手机相机对着扫就好。电脑有不止一个网络地址时，用 `--lan 192.168.1.23` 指定一个。Windows 可能会问要不要让 Node.js 使用网络：在专用网络上允许，并确认 Windows 把你的 Wi-Fi 算作专用网络（刚连上的网络它会先当成公用网络），不然手机连不到网页。不在那个网络上时，通过 Remote Control 打开一个 Claude Code 对话，问它进度如何：它读的是同一份 `progress.md`。
 
@@ -233,13 +233,33 @@ claude -p "/progress connect"
 1. 再运行一次 `/progress connect`，看它打印什么：它会列出接上了哪些 agent，以及哪些配置文件改不了。
 2. 重启那个 agent，hook 是在启动时加载的。Codex 要在 `/hooks` 批准，Hermes Agent 会问一次。
 3. 开着一个 Claude Code 对话：面板只在有对话开着时读收件箱。这段时间进来的回合会在那里等，最多两天。
-4. 先关掉所有 Claude Code 对话（开着的对话几秒内就会读走并删掉文件），再看看 `~/.claude/progress-inbox/`。回合结束后没有新文件，就是 hook 没运行；有文件却没出现，请开 issue 附上那个文件。看板没能收下的回合（`progress.md` 写不进去，或模型没给摘要、回复里也没有提问）会以 `.taking` 文件留在那里，每 15 分钟再试一次；试满 8 次就改成 `.failed` 文件保留，不会删掉。不是有效 JSON、或没写是哪个对话的报告，会直接改成 `.failed` 文件保留，面板会告诉你在哪里；`.failed` 文件不会自动清掉，看完再自己删。
+4. 先关掉所有 Claude Code 对话（开着的对话几秒内就会读走并删掉文件），再在本机确认回合结束后 `~/.claude/progress-inbox/` 是否出现新文件。没有新文件，就是 hook 没运行。这些文件可能包含提问、回复和私人路径，请勿附到 issue。看板没能收下的回合（`progress.md` 写不进去，或模型没给摘要、回复里也没有提问）会以 `.taking` 文件留在那里，每 15 分钟再试一次；试满 8 次就改成 `.failed` 文件保留，不会删掉。不是有效 JSON、或没写是哪个对话的报告，会直接改成 `.failed` 文件保留，面板会告诉你在哪里；`.failed` 文件不会自动清掉，看完再自己删。
+
+公开反馈问题时，请提供：
+
+- Claude Code（`claude --version`）、插件（`claude plugin list`）、Node.js（`node --version`）和受影响 agent 的版本。
+- 操作系统、哪个 agent、做了什么、预期结果和实际结果。
+- 已移除私人信息的 `/progress connect status` 输出。
+
+不要上传原始收件箱、进度或会话日志文件。分享输出或截图前，移除提问、回复、私人路径、token（包括看板链接和二维码），以及人名或项目名称。请另写一个小示例。`--chat` 只会尽力隐藏自身输出中的主目录路径和常见凭据格式，无法保证完整，也不会清理诊断文件。
+
+虚构示例（填上版本，不需要真实对话）：
+
+```text
+操作系统：演示系统；Claude Code／插件／Node.js／Codex 版本：<版本>
+操作：在 demo-1 完成一个回合。预期：看板出现一行。实际：没有出现。
+/progress connect status：<已检查并移除私人信息的状态>
+```
+
+私密或涉及安全性的问题，请通过 GitHub 的 [Report a vulnerability](https://github.com/WenyuChiou/agent-board/security/advisories/new) 反馈。详见 [SECURITY.md](SECURITY.md)（英文）。
 </details>
 
 <details>
 <summary><b>会把数据传出去吗？要花多少钱？</b></summary>
 
-`progress.md`、收件箱和 `progress.html` 都留在你的电脑上。回合的摘要由 Claude Haiku 通过你自己的 Claude Code 登录来做：其他 agent 每个回合一次简短调用，没有 Task 清单的 Claude Code 对话也是。装了 GitHub 的 `gh` 的话，面板会用它查你的 pull request 状态。其他什么都不会发出去。详见 [SECURITY.md](SECURITY.md)（英文）。
+看板文件保存在本机。通过你自己的 Claude Code 登录／模型访问，回合摘要会把提问和回复发送给 Claude Haiku；标题会发送该对话的第一个请求和步骤名称；交接行会发送最多 6,000 个字符的压缩摘要。面板的侧边提问框也会通过同一个登录，把你的问题发送给模型，根据这段对话的记录回答。这些调用使用该账号的额度或计费。面板会运行 `git branch --show-current`，装了 GitHub 的 `gh` 的话，也会用它查 pull request 和 CI 状态。从本机看板网页发送回复，可以恢复已结束的 Codex 或 Grok Build 对话，使用该 agent 的权限和网络访问。连接 OpenClaw 时会设置 `allowConversationAccess: true`，让插件读取该对话。
+
+`--serve` 默认只监听本机（`127.0.0.1`）；这台电脑上的任何程序只要有链接就能使用。`--serve --lan` 会通过带 token 的 HTTP 链接，在私有网络分享网页。token 是访问密钥，不会加密：同一网络上任何拿到 LAN 链接的人都能读看板、修改看板文件（包括导入区块），也能停止服务器。LAN 网页会拒绝启动 agent 的回复，也不显示恢复会话的命令。私有网络地址不代表咖啡馆或酒店的网络值得信任。不要分享链接或二维码。要停止服务，请按网页上的“关闭”按钮；若正在发送回复，请等完成后重试。只关标签页，后台服务器仍会运行到空闲超时。看板服务器或 LAN 监听器每次重新启动都会生成新的 token，因此停止后旧链接就无法使用。文件变更、启动的程序、网络访问和 `--chat` 隐藏信息的限制，详见 [SECURITY.md](SECURITY.md)（英文）。
 </details>
 
 <details>

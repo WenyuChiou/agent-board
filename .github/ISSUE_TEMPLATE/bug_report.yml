@@ -11,8 +11,8 @@ body:
   - type: textarea
     id: file
     attributes:
-      label: The part of progress.md it is about
-      description: The project heading and the block or task that goes wrong, with private names removed. Most bugs are about how one block or step is read, and the text answers that at once.
+      label: Synthetic example of the block or task
+      description: Write a small example from scratch with a fake project heading and block or task. Do not attach raw progress, inbox or session-log files. Remove prompts, replies, private paths, tokens, board links and personal or project names from any output or screenshot.
       render: markdown
   - type: input
     id: versions
@@ -23,6 +23,14 @@ body:
     validations:
       required: true
   - type: input
+    id: node_version
+    attributes:
+      label: Node.js version
+      description: Optional; run `node --version`, especially for board command or page problems.
+      placeholder: v24.14.0
+    validations:
+      required: false
+  - type: input
     id: system
     attributes:
       label: System, terminal and pane language
@@ -30,5 +38,13 @@ body:
   - type: input
     id: agent
     attributes:
-      label: Which agent wrote the block
+      label: Agent name
       description: claude, codex, gemini, cursor, … Leave empty for a task you keep by hand.
+  - type: input
+    id: agent_version
+    attributes:
+      label: Agent version
+      description: Optional; include the version of the agent named above.
+      placeholder: <version>
+    validations:
+      required: false

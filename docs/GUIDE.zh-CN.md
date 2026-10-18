@@ -300,3 +300,27 @@ claude -p "/progress connect"
 - **Windows 上的 Cursor 停在“blocked”。** `cursor-agent` 一律用 bash 运行 hook，连写给 PowerShell 的也是，所以 `~/.cursor/hooks.json` 里其他工具的 PowerShell hook 会出现 `syntax error near unexpected token '&'`；`preToolUse` hook 失败会挡住整个回合（Agent Board 的 hook 根本轮不到）。修好或删掉那个工具的 hook。
 - **Hermes Agent 单次运行的问题显示成已停，不是等你。** `hermes -q` 回合一结束就关掉对话，所以问你事情的那块会显示“对话已结束，可接手”。问题仍是最后一步；长时间开着的 Hermes（它的 gateway）就会保持等你。
 - **换了一台电脑。** `progress.md`、收件箱和 hook 都只在各自的电脑上。在新电脑安装并运行 `/progress connect`；要带上记录，就把 `progress.md` 和旁边的 `progress-archive-*.md`、`progress-journal-*.md` 复制过去。要两台共用一个面板，就在两台都把 `CLAUDE_PROGRESS_FILE` 指向同步文件夹里的同一个文件，并且一次只用一台。
+- **要求显示看板时会启动什么？** `/progress connect` 写入的命令和技能通常会运行 `--serve`，启动后台服务器、写入地址文件、打开浏览器，并把带 token 的链接打印到 agent 的对话中。若服务器已在运行，就沿用同一个网页。在聊天 app 中，技能会改用 `--chat`，不会打印链接。
+- **谁能使用看板网页？** `--serve` 默认只监听本机（`127.0.0.1`）；这台电脑上的任何程序只要有链接就能使用。`--serve --lan` 会在私有网络开放 HTTP 网页，链接里带有 token。token 是访问密钥，不会加密：同一网络上任何拿到 LAN 链接的人都能读看板、修改看板文件（包括导入区块），也能停止服务器。私有网络地址不代表咖啡馆或酒店的网络值得信任。请使用可信任的网络，不要分享链接或二维码。本机网页可以恢复已结束的 Codex 或 Grok Build 对话；LAN 网页会拒绝启动 agent 的回复，也不显示恢复会话的命令。要停止服务，请按网页上的“关闭”按钮；若正在发送回复，请等完成后重试。只关标签页，后台服务器仍会运行到空闲超时。看板服务器或 LAN 监听器每次重新启动都会生成新的 token，因此停止后旧链接就无法使用。详见[安全性说明](../SECURITY.md)（英文）。
+
+### 安全地反馈问题
+
+收件箱文件（包括 `.taking` 和 `.failed`）可能包含提问、回复、会话标识和私人路径。若待处理回合指定了会话记录文件（Codex 就会）却没有提问，看板可能会读取该记录文件的末尾；缺少回复时，面板也可能读取它。请只在自己的电脑上检查这些文件。不要将原始收件箱、进度、归档、日志或会话记录文件上传到公开 issue。
+
+公开反馈问题时，请提供：
+
+- Claude Code（`claude --version`）、插件（`claude plugin list`）、Node.js（`node --version`）和受影响 agent 的版本。
+- 操作系统、哪个 agent、做了什么、预期结果和实际结果。
+- 已移除私人信息的 `/progress connect status` 输出。它显示上次连接的结果，不会测试 hook 是否运行。
+
+分享输出或截图前，移除提问、回复、私人路径、token（包括看板链接和二维码），以及人名或项目名称。请另写一个小示例。`--chat` 只会尽力隐藏自身输出中的主目录路径和常见凭据格式，无法保证完整，也不会清理诊断文件或其他视图。
+
+虚构示例（填上版本，不需要真实对话）：
+
+```text
+操作系统：演示系统；Claude Code／插件／Node.js／Codex 版本：<版本>
+操作：在 demo-1 完成一个回合。预期：看板出现一行。实际：没有出现。
+/progress connect status：<已检查并移除私人信息的状态>
+```
+
+私密或涉及安全性的问题，请通过 GitHub 的 [Report a vulnerability](https://github.com/WenyuChiou/agent-board/security/advisories/new) 反馈。即使是私密反馈，也不要附上凭据或未编辑的对话。[SECURITY.md](../SECURITY.md)（英文）说明文件变更、启动的程序、模型调用和网络访问。

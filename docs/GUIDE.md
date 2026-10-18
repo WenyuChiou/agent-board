@@ -291,3 +291,27 @@ The last line moves the hooks in your other agents to the new name. `progress.md
 - **Cursor on Windows stops at "blocked".** `cursor-agent` runs every hook through bash, even one written for PowerShell, so another tool's PowerShell hook in `~/.cursor/hooks.json` fails with `syntax error near unexpected token '&'`, and a failing `preToolUse` hook blocks the whole turn (Agent Board's hook never gets to run). Fix or remove that tool's hook.
 - **A one-off Hermes Agent question shows as stopped, not waiting.** `hermes -q` ends its session right after the turn, so a block that asks you something reads "session ended, can be taken over". Its question is still the last step; a long-running Hermes (its gateway) keeps it waiting.
 - **A new computer.** `progress.md`, the inbox and the hooks live on each computer. Install there and run `/progress connect`; copy `progress.md` and the `progress-archive-*.md` and `progress-journal-*.md` files beside it to bring your history. To share one board, point `CLAUDE_PROGRESS_FILE` on both computers at one file in a synced folder, and use one computer at a time.
+- **What starts when I ask for the board?** The commands and skills written by `/progress connect` normally run `--serve`, which starts a background server, writes its address file, opens the browser and prints the token link into the agent's conversation. If it is already running, the same page is reused. In a chat app, the skill uses `--chat`, which prints no link.
+- **Who can use the board page?** `--serve` listens on loopback (`127.0.0.1`) by default; any program on this computer that has the link can use it. `--serve --lan` opens an HTTP page on your private network with a token in its link. The token is an access key, not encryption: anyone on that network with the LAN link can read the board, change board files (including importing blocks) and stop the server. A private network address does not make a café or hotel network trusted. Use a trusted network and do not share the link or QR code. The local page can resume ended Codex or Grok Build sessions; the LAN page refuses replies that would start an agent and omits resume commands. Use the page's **Close** button to stop serving; if a reply is running, wait and try again. Closing the tab alone leaves the background server running until its idle timeout. A new token is issued each time the board server or its LAN listener restarts, so stopping it makes its old link useless. See [Security](../SECURITY.md) for details.
+
+### Reporting a problem safely
+
+Inbox files, including `.taking` and `.failed` files, may contain prompts, replies, session identifiers and private paths. A pending turn that names a session log (Codex's does) and has no prompt can cause the board to read that log's tail; the pane can also read it when a reply is missing. Inspect these files only on your own computer. Do not upload raw inbox, progress, archive, journal or session-log files to a public issue.
+
+For a public bug report, include:
+
+- Claude Code (`claude --version`), plugin (`claude plugin list`), Node.js (`node --version`) and affected agent versions.
+- Your OS, which agent, what you did, what you expected and what happened.
+- `/progress connect status` output, after removing private details. This shows the last connection result; it does not test whether a hook ran.
+
+Remove prompts, replies, private paths, tokens (including board links/QR codes), and personal or project names from any output or screenshot. Use a small example written from scratch. `--chat` only hides home paths and common credential forms in its own output; it is best-effort, not a guarantee, and does not clean diagnostic files or other views.
+
+Synthetic example (fill in versions; no real conversation needed):
+
+```text
+OS: demo OS; Claude Code/plugin/Node.js/Codex versions: <versions>
+Action: finished a turn in demo-1. Expected: a board row. Actual: no row.
+/progress connect status: <reviewed status, with private details removed>
+```
+
+Send private or security-sensitive reports through GitHub's [Report a vulnerability](https://github.com/WenyuChiou/agent-board/security/advisories/new). Do not include credentials or an unedited conversation, even in a private report. [SECURITY.md](../SECURITY.md) describes file changes, started processes, model calls and network access.

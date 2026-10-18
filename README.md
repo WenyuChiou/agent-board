@@ -160,7 +160,7 @@ The board reads `progress.md` directly, so it needs no Claude Code session, only
 
 ### The board's page
 
-The board commands above print the board, then open its page in the browser and give its address on the last line; `node ~/.claude/agent-board.mjs --serve` does the same from any terminal (`--no-open` only prints the address). A second `--serve` brings back the page that is already open. On the page you can:
+The board commands and skills above normally run `--serve`: they print the board, start a background server, write its address file, open its page in the browser and print the token link into the agent's conversation. `node ~/.claude/agent-board.mjs --serve` does the same from any terminal (`--no-open` only prints the address). A second `--serve` brings back the page that is already open. In a chat app, the skill uses `--chat`, which prints no link. On the page you can:
 
 - **Tick** the next step of your own task, **archive** a task, or press **Archive now** to put away everything finished.
 - **Copy** the answer to another agent's question, the ID of the session that asked it, a session's resume command, or a command in a step.
@@ -168,7 +168,7 @@ The board commands above print the board, then open its page in the browser and 
 - **Answer** a Grok Build or Codex session that has ended. The reply runs `grok -r <id>` or `codex exec resume <id>` in that session's own folder, and the page shows what the agent says back once it answers, which can take a few minutes. One reply at a time per session. A session that is still open is answered in its own window, because two writers would mix one session up.
 - **Paste a block** from a web chat such as Muse or dot. Copy the chat prompt from the page into the chat once, then paste each block the chat prints. A block that is not in the format, or that would replace Claude's or another agent's block, is refused.
 
-The page listens on 127.0.0.1 only (unless you add `--lan`, below), and its address carries a random key, so neither other computers nor other web pages you have open can use it. It closes after 30 minutes without anyone looking at it, or with its **Close the board** button, but not while a reply is still on its way to an agent.
+The page listens on 127.0.0.1 only (unless you add `--lan`, below), and its address carries a random key. Any program on this computer that has the link can use it. It closes after 30 minutes without anyone looking at it, or with its **Close the board** button, but not while a reply is still on its way to an agent.
 
 **On a phone.** The page fits a phone's screen. To open it from a phone on the same Wi-Fi as the computer, run `node ~/.claude/agent-board.mjs --serve --lan`. Besides the computer's address, it prints the page's address on your network and a QR code of it: point the phone's camera at the code. When the computer has more than one network address, `--lan 192.168.1.23` picks one. Windows may ask whether Node.js may use the network: allow it on private networks, and check that Windows counts your Wi-Fi as a private one (it calls a network it has just joined public), or the phone can't reach the page. Away from that network, open a Claude Code session through Remote Control and ask it where things stand: it reads the same `progress.md`.
 
@@ -233,13 +233,33 @@ To share one board between two computers, set `CLAUDE_PROGRESS_FILE` on both to 
 1. Run `/progress connect` again and read what it prints: it names every agent it connected and any config file it could not edit.
 2. Restart that agent; hooks load when it starts. Codex needs the hook approved in `/hooks`, and Hermes Agent asks once.
 3. Keep a Claude Code session open: the pane reads the inbox only while one is running. Turns that arrive meanwhile wait there for up to two days.
-4. Close every Claude Code session (an open one reads each file and deletes it within seconds), then check `~/.claude/progress-inbox/`. If no file appears after a turn, the hook didn't run; if one does, open an issue with it. A turn the board could not take (`progress.md` could not be written, or the model gave no summary of a reply that asks nothing) stays there as a `.taking` file and is tried again every 15 minutes; after 8 tries it is kept as a `.failed` file, not deleted. A report that is not valid JSON, or names no session, is kept as a `.failed` file at once, and the pane says where; `.failed` files are not cleaned up, so remove them once you have looked.
+4. Close every Claude Code session (an open one reads each file and deletes it within seconds), then check locally whether a file appears in `~/.claude/progress-inbox/` after a turn. If none appears, the hook didn't run. These files may contain prompts, replies and private paths; do not attach them to an issue. A turn the board could not take (`progress.md` could not be written, or the model gave no summary of a reply that asks nothing) stays there as a `.taking` file and is tried again every 15 minutes; after 8 tries it is kept as a `.failed` file, not deleted. A report that is not valid JSON, or names no session, is kept as a `.failed` file at once, and the pane says where; `.failed` files are not cleaned up, so remove them once you have looked.
+
+For a public bug report, include:
+
+- Claude Code (`claude --version`), plugin (`claude plugin list`), Node.js (`node --version`) and affected agent versions.
+- Your OS, which agent, what you did, what you expected and what happened.
+- `/progress connect status` output, after removing private details.
+
+Do not upload raw inbox, progress or session-log files. Remove prompts, replies, private paths, tokens (including board links/QR codes), and personal or project names from any output or screenshot. Use a small example written from scratch. `--chat` only hides home paths and common credential forms in its own output; it is best-effort and does not clean diagnostic files.
+
+Synthetic example (fill in versions; no real conversation needed):
+
+```text
+OS: demo OS; Claude Code/plugin/Node.js/Codex versions: <versions>
+Action: finished a turn in demo-1. Expected: a board row. Actual: no row.
+/progress connect status: <reviewed status, with private details removed>
+```
+
+Send private or security-sensitive reports through GitHub's [Report a vulnerability](https://github.com/WenyuChiou/agent-board/security/advisories/new). See [SECURITY.md](SECURITY.md) for details.
 </details>
 
 <details>
 <summary><b>Does anything leave my machine? What does it cost?</b></summary>
 
-`progress.md`, the inbox and `progress.html` stay on your computer. Turns are summed up by Claude Haiku through your own Claude Code login: one short call per turn of another agent, or of a Claude Code session that keeps no Task list. If GitHub's `gh` is installed, the pane asks it for the state of your pull request. Nothing else is sent anywhere. See [SECURITY.md](SECURITY.md).
+Board files are stored locally. Through your own Claude Code login/model access, turn summaries send prompt and reply text to Claude Haiku; titles send the session's first request plus step names; and handoff lines send up to 6,000 characters of a compaction summary. The pane's side-question box also sends your question to the model over the session's transcript through that same login. These calls use that account's allowance or billing. The pane runs `git branch --show-current` and, if GitHub's `gh` is installed, uses it to check your pull request and CI state. Sending a reply from the local board page can resume an ended Codex or Grok Build session with that agent's permissions and network access. Connecting OpenClaw sets `allowConversationAccess: true`, letting the plugin read that conversation.
+
+`--serve` listens on loopback (`127.0.0.1`) by default; any program on this computer that has the link can use it. `--serve --lan` shares the page on your private network through an HTTP link with a token. The token is an access key, not encryption: anyone on that network with the LAN link can read the board, change board files (including importing blocks) and stop the server. The LAN page refuses replies that would start an agent and omits resume commands. A private network address does not make a café or hotel network trusted. Do not share the link or QR code. Use the page's **Close** button to stop serving; if a reply is running, wait and try again. Closing the tab alone leaves the server running until its idle timeout. A new token is issued each time the board server or its LAN listener restarts, so stopping it makes its old link useless. See [SECURITY.md](SECURITY.md) for file changes, processes, network access and the limits of `--chat` redaction.
 </details>
 
 <details>

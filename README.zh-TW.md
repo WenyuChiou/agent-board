@@ -160,7 +160,7 @@ claude -p "/progress connect"
 
 ### 看板的網頁
 
-上面的看板指令會先印出看板，再在瀏覽器打開它的網頁，最後一行是網址；在任何終端機執行 `node ~/.claude/agent-board.mjs --serve` 也一樣（加 `--no-open` 只印網址）。再跑一次 `--serve` 會叫回已經開著的那一頁。在網頁上可以：
+上面的看板指令和技能通常會執行 `--serve`：印出看板、啟動背景伺服器、寫入位址檔、在瀏覽器開啟網頁，並把帶 token 的連結印進 agent 的對話。在任何終端機執行 `node ~/.claude/agent-board.mjs --serve` 也一樣（加 `--no-open` 只印網址）。再跑一次 `--serve` 會叫回已經開著的那一頁。在聊天 app 中，技能會改用 `--chat`，不會印出連結。在網頁上可以：
 
 - **勾掉**自己工作的下一步、**封存**一件工作，或按**現在封存**把做完的全部收走。
 - **複製**另一個 agent 問題的答案、問這個問題的對話 ID、對話的續接指令，或步驟裡的指令。
@@ -168,7 +168,7 @@ claude -p "/progress connect"
 - **回覆**已經結束的 Grok Build 或 Codex 對話。回覆會在那個對話自己的資料夾裡執行 `grok -r <id>` 或 `codex exec resume <id>`，agent 回答後網頁會顯示它回了什麼，可能要幾分鐘。同一個對話一次只送一則。還開著的對話要在它自己的視窗回答，因為兩邊同時寫會把對話弄亂。
 - **貼上區塊**：從 Muse、dot 這類網頁聊天來的。先從網頁複製聊天提示，貼進聊天一次；之後把聊天印出的每個區塊貼進來。格式不對，或會蓋掉 Claude 或其他 agent 區塊的，會被拒絕。
 
-網頁只在 127.0.0.1 上聽（除非加上 `--lan`，見下文），網址裡帶一把隨機鑰匙，所以別台電腦、你開著的其他網頁都用不了它。30 分鐘沒人看就會關，也可以按它的**關閉看板**；不過還有一則回覆在送給 agent 的路上時，不會關。
+網頁只在 127.0.0.1 上聽（除非加上 `--lan`，見下文），網址裡帶一把隨機鑰匙。這台電腦上的任何程式只要有連結就能使用。30 分鐘沒人看就會關，也可以按它的**關閉看板**；不過還有一則回覆在送給 agent 的路上時，不會關。
 
 **在手機上。** 網頁的版面適合手機。要從和電腦連同一個 Wi-Fi 的手機打開，跑 `node ~/.claude/agent-board.mjs --serve --lan`：除了電腦本機的網址，它還會印出網頁在你網路上的網址和它的 QR code，用手機相機對著掃就好。電腦有不只一個網路位址時，用 `--lan 192.168.1.23` 指定一個。Windows 可能會問要不要讓 Node.js 使用網路：在私人網路上允許，並確認 Windows 把你的 Wi-Fi 算成私人網路（剛連上的網路它會先當成公用網路），不然手機連不到網頁。不在那個網路上時，透過 Remote Control 打開一個 Claude Code 對話，問它進度如何：它讀的是同一份 `progress.md`。
 
@@ -233,13 +233,33 @@ claude -p "/progress connect"
 1. 再跑一次 `/progress connect`，看它印出什麼：它會列出接上了哪些 agent，以及哪些設定檔改不了。
 2. 重開那個 agent，hook 是在啟動時載入的。Codex 要在 `/hooks` 核准，Hermes Agent 會問一次。
 3. 開著一個 Claude Code 對話：面板只在有對話開著時讀收件匣。這段期間進來的回合會在那裡等，最多兩天。
-4. 先關掉所有 Claude Code 對話（開著的對話幾秒內就會讀走並刪掉檔案），再看看 `~/.claude/progress-inbox/`。回合結束後沒有新檔案，就是 hook 沒跑；有檔案卻沒出現，請開 issue 附上那個檔案。看板沒能收下的回合（`progress.md` 寫不進去，或模型沒給摘要、回覆裡也沒有提問）會以 `.taking` 檔留在那裡，每 15 分鐘再試一次；試滿 8 次就改成 `.failed` 檔保留，不會刪掉。不是有效 JSON、或沒寫是哪個對話的報告，會直接改成 `.failed` 檔保留，面板會告訴你在哪裡；`.failed` 檔不會自動清掉，看完再自己刪。
+4. 先關掉所有 Claude Code 對話（開著的對話幾秒內就會讀走並刪掉檔案），再在本機確認回合結束後 `~/.claude/progress-inbox/` 是否出現新檔案。沒有新檔案，就是 hook 沒跑。這些檔案可能包含提問、回覆和私人路徑，請勿附到 issue。看板沒能收下的回合（`progress.md` 寫不進去，或模型沒給摘要、回覆裡也沒有提問）會以 `.taking` 檔留在那裡，每 15 分鐘再試一次；試滿 8 次就改成 `.failed` 檔保留，不會刪掉。不是有效 JSON、或沒寫是哪個對話的報告，會直接改成 `.failed` 檔保留，面板會告訴你在哪裡；`.failed` 檔不會自動清掉，看完再自己刪。
+
+公開回報問題時，請提供：
+
+- Claude Code（`claude --version`）、外掛（`claude plugin list`）、Node.js（`node --version`）和受影響 agent 的版本。
+- 作業系統、哪個 agent、做了什麼、預期結果和實際結果。
+- 已移除私人資訊的 `/progress connect status` 輸出。
+
+不要上傳原始收件匣、進度或對話紀錄檔。分享輸出或截圖前，移除提問、回覆、私人路徑、token（包括看板連結和 QR code），以及人名或專案名稱。請另寫一個小範例。`--chat` 只會盡力隱藏自身輸出中的家目錄路徑和常見憑證格式，無法保證完整，也不會清理診斷檔案。
+
+虛構範例（填上版本，不需要真實對話）：
+
+```text
+作業系統：示範系統；Claude Code／外掛／Node.js／Codex 版本：<版本>
+操作：在 demo-1 完成一個回合。預期：看板出現一列。實際：沒有出現。
+/progress connect status：<已檢查並移除私人資訊的狀態>
+```
+
+私人或涉及安全性的問題，請透過 GitHub 的 [Report a vulnerability](https://github.com/WenyuChiou/agent-board/security/advisories/new) 回報。詳見 [SECURITY.md](SECURITY.md)（英文）。
 </details>
 
 <details>
 <summary><b>會把資料傳出去嗎？要花多少錢？</b></summary>
 
-`progress.md`、收件匣和 `progress.html` 都留在你的電腦上。回合的摘要由 Claude Haiku 透過你自己的 Claude Code 登入來做：其他 agent 每個回合一次簡短呼叫，沒有 Task 清單的 Claude Code 對話也是。裝了 GitHub 的 `gh` 的話，面板會用它查你的 pull request 狀態。其他什麼都不會送出去。詳見 [SECURITY.md](SECURITY.md)（英文）。
+看板檔案儲存在本機。透過你自己的 Claude Code 登入／模型存取，回合摘要會把提問和回覆傳給 Claude Haiku；標題會傳送該對話的第一個請求和步驟名稱；交接行會傳送最多 6,000 個字元的壓縮摘要。面板的側邊提問框也會透過同一個登入，把你的問題傳給模型，依這段對話的紀錄回答。這些呼叫使用該帳號的額度或計費。面板會執行 `git branch --show-current`，裝了 GitHub 的 `gh` 的話，也會用它查 pull request 和 CI 狀態。從本機看板網頁送出回覆，可以恢復已結束的 Codex 或 Grok Build 對話，使用該 agent 的權限和網路存取。連接 OpenClaw 時會設定 `allowConversationAccess: true`，讓外掛讀取該對話。
+
+`--serve` 預設只監聽本機（`127.0.0.1`）；這台電腦上的任何程式只要有連結就能使用。`--serve --lan` 會透過帶 token 的 HTTP 連結，在私人網路分享網頁。token 是存取金鑰，不會加密：同一網路上任何拿到 LAN 連結的人都能讀看板、修改看板檔案（包括匯入區塊），也能停止伺服器。LAN 網頁會拒絕啟動 agent 的回覆，也不顯示恢復對話的指令。私人網路位址不代表咖啡廳或旅館的網路值得信任。不要分享連結或 QR code。要停止服務，請按網頁上的「關閉」按鈕；若正在傳送回覆，請等完成後重試。只關分頁，背景伺服器仍會運作到閒置逾時。看板伺服器或 LAN 監聽器每次重新啟動都會產生新的 token，因此停止後舊連結就無法使用。檔案變更、啟動的程式、網路存取和 `--chat` 隱藏資訊的限制，詳見 [SECURITY.md](SECURITY.md)（英文）。
 </details>
 
 <details>

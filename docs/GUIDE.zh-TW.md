@@ -300,3 +300,27 @@ claude -p "/progress connect"
 - **Windows 上的 Cursor 停在「blocked」。** `cursor-agent` 一律用 bash 跑 hook，連寫給 PowerShell 的也是，所以 `~/.cursor/hooks.json` 裡其他工具的 PowerShell hook 會出現 `syntax error near unexpected token '&'`；`preToolUse` hook 失敗會擋住整個回合（Agent Board 的 hook 根本輪不到）。修好或拿掉那個工具的 hook。
 - **Hermes Agent 單次執行的問題顯示成已停，不是等你。** `hermes -q` 回合一結束就關掉對話，所以問你事情的那塊會顯示「對話已結束，可接手」。問題仍是最後一步；長時間開著的 Hermes（它的 gateway）就會維持等你。
 - **換了一台電腦。** `progress.md`、收件匣和 hook 都只在各自的電腦上。在新電腦安裝並執行 `/progress connect`；要帶上紀錄，就把 `progress.md` 和旁邊的 `progress-archive-*.md`、`progress-journal-*.md` 複製過去。要兩台共用一個面板，就在兩台都把 `CLAUDE_PROGRESS_FILE` 指向同步資料夾裡的同一個檔案，並且一次只用一台。
+- **要求顯示看板時會啟動什麼？** `/progress connect` 寫入的指令和技能通常會執行 `--serve`，啟動背景伺服器、寫入位址檔、開啟瀏覽器，並把帶 token 的連結印進 agent 的對話。若伺服器已在運作，就沿用同一個網頁。在聊天 app 中，技能會改用 `--chat`，不會印出連結。
+- **誰能使用看板網頁？** `--serve` 預設只監聽本機（`127.0.0.1`）；這台電腦上的任何程式只要有連結就能使用。`--serve --lan` 會在私人網路開放 HTTP 網頁，連結裡帶有 token。token 是存取金鑰，不會加密：同一網路上任何拿到 LAN 連結的人都能讀看板、修改看板檔案（包括匯入區塊），也能停止伺服器。私人網路位址不代表咖啡廳或旅館的網路值得信任。請使用可信任的網路，不要分享連結或 QR code。本機網頁可以恢復已結束的 Codex 或 Grok Build 對話；LAN 網頁會拒絕啟動 agent 的回覆，也不顯示恢復對話的指令。要停止服務，請按網頁上的「關閉」按鈕；若正在傳送回覆，請等完成後重試。只關分頁，背景伺服器仍會運作到閒置逾時。看板伺服器或 LAN 監聽器每次重新啟動都會產生新的 token，因此停止後舊連結就無法使用。詳見[安全性說明](../SECURITY.md)（英文）。
+
+### 安全地回報問題
+
+收件匣檔案（包括 `.taking` 和 `.failed`）可能包含提問、回覆、對話識別碼和私人路徑。若待處理回合指定了對話紀錄檔（Codex 就會）卻沒有提問，看板可能會讀取該紀錄檔的尾端；缺少回覆時，面板也可能讀取它。請只在自己的電腦上檢查這些檔案。不要將原始收件匣、進度、封存、日誌或對話紀錄檔上傳到公開 issue。
+
+公開回報問題時，請提供：
+
+- Claude Code（`claude --version`）、外掛（`claude plugin list`）、Node.js（`node --version`）和受影響 agent 的版本。
+- 作業系統、哪個 agent、做了什麼、預期結果和實際結果。
+- 已移除私人資訊的 `/progress connect status` 輸出。它顯示上次連接的結果，不會測試 hook 是否執行。
+
+分享輸出或截圖前，移除提問、回覆、私人路徑、token（包括看板連結和 QR code），以及人名或專案名稱。請另寫一個小範例。`--chat` 只會盡力隱藏自身輸出中的家目錄路徑和常見憑證格式，無法保證完整，也不會清理診斷檔案或其他檢視。
+
+虛構範例（填上版本，不需要真實對話）：
+
+```text
+作業系統：示範系統；Claude Code／外掛／Node.js／Codex 版本：<版本>
+操作：在 demo-1 完成一個回合。預期：看板出現一列。實際：沒有出現。
+/progress connect status：<已檢查並移除私人資訊的狀態>
+```
+
+私人或涉及安全性的問題，請透過 GitHub 的 [Report a vulnerability](https://github.com/WenyuChiou/agent-board/security/advisories/new) 回報。即使是私人回報，也不要附上憑證或未編輯的對話。[SECURITY.md](../SECURITY.md)（英文）說明檔案變更、啟動的程式、模型呼叫和網路存取。
