@@ -323,7 +323,14 @@ export const EN: Strings = {
   boardWatching: 'Updates every 2 seconds; Ctrl+C to stop',
   boardCommandDescription: 'Agent Board: what every agent is doing, and what waits on you',
   boardCommandPrompt: 'Show me the Agent Board below exactly as it is, in a code block, with the link to the board you can click from its last line. Then tell me in one sentence what needs me first. Do not change any file.',
-  boardSkillPrompt: (command: string): string => `Run \`${command} --serve\` and show me the Agent Board it prints exactly as it is, in a code block, with the link to the board you can click from its last line. Then tell me in one sentence what needs me first. Do not change any file.`,
+  // The rule for a chat app comes first, so an agent that always answers in one reads it first.
+  // What follows the last command is the sentence earlier releases wrote, word for word
+  // (inbox.ts knows a board request by it).
+  boardSkillPrompt: (command: string): string => `If you are replying in a chat app, run \`${command} --chat\` and send what it prints exactly as it is, with no code block and no link. Otherwise run \`${command} --serve\` and show me the Agent Board it prints exactly as it is, in a code block, with the link to the board you can click from its last line. Then tell me in one sentence what needs me first. Do not change any file.`,
+  boardChatSkillPrompt: (command: string): string => `Run \`${command} --chat\` and send me what it prints exactly as it is, as plain text and nothing else. Do not add a link, do not open a page, and do not change any file.`,
+  chatMore: (n: number): string => `+${n} more`,
+  chatReadFailed: (file: string, code: string): string => `Could not read ${file} (${code}). Nothing was changed. Check the file access, then ask again.`,
+  chatFailed: (reason: string): string => `The board could not be shown (${reason}). Check that the board file can be read, then ask again.`,
   boardEverywhere: (path: string): string => `To see this board from another agent: /board in Gemini CLI and OpenCode, $agent-board in Codex, /agent-board in the others; in any terminal: node "${path}" --watch`,
   boardKeysMove: '↑↓ select · Enter open · o browser · q quit',
   boardKeyTick: 'x done',

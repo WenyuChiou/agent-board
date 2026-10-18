@@ -2,6 +2,7 @@ import { ZH_TW } from './i18n'
 import type { Strings } from './i18n'
 import { lastQuestion } from './digest'
 import { isBoardTurn, isTranscriptPath, readTurn, transcriptTail } from './inbox'
+import { localDay, parseJournal, progressReport } from './journal'
 import { sha256 } from './sha256'
 import { replyHint } from './view'
 import type { StepRef, TaskRef, TaskRow, View, ViewStep, WaitingItem } from './view'
@@ -24,7 +25,14 @@ const closing = (answer: string): string | undefined =>
     .at(-1)
 
 // `readLog` reads an agent's session log, for the request a hook leaves out (Codex's Stop).
-export const peekInbox = (files: ReadonlyArray<{ name: string; body: string; at: number }>, readLog: (path: string) => string = () => ''): PendingTurn[] => {
+// `scrub` runs on a reply before its question is picked and cut to length: a text that is sent
+// on as it is hides what it must first, while all of it is still there (a token cut in half,
+// or stripped of its underscores, is no longer a shape anything knows).
+export const peekInbox = (
+  files: ReadonlyArray<{ name: string; body: string; at: number }>,
+  readLog: (path: string) => string = () => '',
+  scrub: (text: string) => string = text => text,
+): PendingTurn[] => {
   const latest = new Map<string, PendingTurn>()
   for (const file of [...files].sort((a, b) => a.at - b.at)) {
     const read = readTurn(file.name, file.body)
@@ -35,8 +43,9 @@ export const peekInbox = (files: ReadonlyArray<{ name: string; body: string; at:
       latest.delete(turn.id)
       continue
     }
-    const question = lastQuestion(turn.answer)
-    const text = (question ?? closing(turn.answer) ?? turn.prompt).trim()
+    const answer = scrub(turn.answer)
+    const question = lastQuestion(answer)
+    const text = (question ?? closing(answer) ?? turn.prompt).trim()
     if (text === '') continue
     latest.set(turn.id, { agent: turn.agent, project: turn.project, text, isQuestion: question !== null, at: file.at })
   }
@@ -91,23 +100,31 @@ const rowLines = (row: TaskRow, s: Strings, o: BoardOptions): string[] => {
   return lines
 }
 
-export const boardText = (view: View, pending: readonly PendingTurn[], s: Strings = ZH_TW, o: BoardOptions = { width: 80, isColor: false }): string => {
-  const c = paint(o.isColor)
+// The line of counts at the top of the board.
+const countLine = (view: View, pending: readonly PendingTurn[], s: Strings, c: ReturnType<typeof paint>): string => {
   const { active, due, today } = view.overview
   const waiting = view.overview.waiting + pending.filter(turn => turn.isQuestion).length
-  const lines: string[] = [
-    `${c('bold', s.paneTitle)}  ${c('waiting', `● ${waiting} ${s.countWaiting}`)}  ${c('accent', `▸ ${active} ${s.countActive}`)}  ${c('alert', `⚑ ${due} ${s.countDue}`)}  ${c('done', `✓ ${today} ${s.countToday}`)}`,
-    '',
-  ]
 
-  const asks = [
-    ...view.waiting.map(item => ({
-      where: [item.project, item.agent].filter(part => part !== '').join(' · '),
-      text: `${s.chip(s.ask[item.kind])}${item.text}${item.note ? ` — ${item.note}` : ''}`,
-      task: item.task,
-    })),
-    ...pending.filter(turn => turn.isQuestion).map(turn => ({ where: [turn.project, turn.agent].filter(part => part !== '').join(' · '), text: turn.text, task: '' })),
-  ]
+  return `${c('bold', s.paneTitle)}  ${c('waiting', `● ${waiting} ${s.countWaiting}`)}  ${c('accent', `▸ ${active} ${s.countActive}`)}  ${c('alert', `⚑ ${due} ${s.countDue}`)}  ${c('done', `✓ ${today} ${s.countToday}`)}`
+}
+
+// What waits on the person: the questions of the work on the board, then those in turns no
+// session has taken in yet. Questions marked answered are not in `view.waiting`. `named` says
+// how a project is told (the chat shows the home folder's name as `~`).
+const asksOf = (view: View, pending: readonly PendingTurn[], s: Strings, named: (project: string) => string = project => project): Array<{ where: string; text: string; task: string }> => [
+  ...view.waiting.map(item => ({
+    where: [named(item.project), item.agent].filter(part => part !== '').join(' · '),
+    text: `${s.chip(s.ask[item.kind])}${item.text}${item.note ? ` — ${item.note}` : ''}`,
+    task: item.task,
+  })),
+  ...pending.filter(turn => turn.isQuestion).map(turn => ({ where: [named(turn.project), turn.agent].filter(part => part !== '').join(' · '), text: turn.text, task: '' })),
+]
+
+export const boardText = (view: View, pending: readonly PendingTurn[], s: Strings = ZH_TW, o: BoardOptions = { width: 80, isColor: false }): string => {
+  const c = paint(o.isColor)
+  const lines: string[] = [countLine(view, pending, s, c), '']
+
+  const asks = asksOf(view, pending, s)
   // Questions marked answered in a pane are left out, and counted so they are not lost.
   const hidden = view.hidden.length === 0 ? [] : [c('quiet', s.hiddenCount(view.hidden.length))]
   if (asks.length === 0) {
@@ -143,6 +160,178 @@ export const boardText = (view: View, pending: readonly PendingTurn[], s: String
   if (view.groups.every(group => group.rows.length === 0) && asks.length === 0 && news.length === 0) lines.push(c('quiet', s.empty), '')
 
   return `${lines.join('\n').replace(/\n+$/, '')}\n`
+}
+
+// The board for a phone, in a chat app (`--chat`): its reply is sent as it is, so nothing in
+// it may be a link that only opens on this computer, a path that names the person's account,
+// or a credential. Every line goes through `redact`. It names the credential forms below, not
+// every secret there could be.
+const MASK = '•••'
+
+const escapeRegExp = (text: string): string => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+
+// Every way the home folder is written: both slashes, the doubled backslashes that JSON and
+// Python error messages print, and on Windows the form Git Bash gives (/c/Users/me). A folder
+// name may hold spaces.
+const homeForms = (home: string): string[] => {
+  const folder = home.replace(/[\\/]+$/, '')
+  if (folder === '') return []
+  const slashed = folder.replace(/\\/g, '/')
+  const drive = /^([A-Za-z]):\//.exec(slashed)
+  const forms = new Set([folder, slashed, slashed.replace(/\//g, '\\'), slashed.replace(/\//g, '\\\\'), ...(drive === null ? [] : [`/${drive[1]}${slashed.slice(2)}`])])
+
+  return [...forms].sort((a, b) => b.length - a.length)
+}
+
+// Another account's folder, or this one written as this computer does not report it (WSL's
+// /mnt/c/Users/me). A name here may hold spaces ("Jane Doe"), up to three words: where it ends
+// is the slash after it, and more words than that is a sentence, not a name. A path in a link
+// (`https://site/home/x`) is not one: a word comes before its slash.
+const NAME_WORD = '[^\\\\/\\s:*?"<>|`\'()]+'
+const OTHER_HOMES = new RegExp(`(?<![\\w.-])(?:[A-Za-z]:[\\\\/]Users|\\/mnt\\/[A-Za-z]\\/Users|\\/Users|\\/home)[\\\\/]${NAME_WORD}(?: ${NAME_WORD}){0,2}(?=[\\\\/])`, 'gi')
+
+// A secret's name, then its value: quoted (it may hold spaces) or up to the next space. A quote
+// that is never closed hides the rest of the line: where the value ends is not known. The name
+// before the keyword is kept short, so a long unbroken word is not tried from every letter.
+const VALUE = `"[^"\\n]*(?:"|$)|'[^'\\n]*(?:'|$)|\\S+`
+const ASSIGNED = new RegExp(`([\\w-]{0,40}(?:key|secret|token|pass(?:word|wd)?|pwd|credentials?)["']?[ \\t]*[:=][ \\t]*)(?:${VALUE})`, 'gim')
+const FLAG = new RegExp(`(--(?:password|token|secret|api-key)[= ])(?:${VALUE})`, 'gim')
+const BEARER = /\b(Bearer)\s+\S+/gi
+// "Basic" is also a plain word ("Basic setup"): what follows must look like an encoded
+// value, four letters or more with a capital, a digit, + / or = after its first letter.
+const BASIC = /\b([Bb]asic)\s+(?=\S[A-Za-z0-9+/_-]*[A-Z0-9+/=])[A-Za-z0-9+/_-]{4,}={0,2}/g
+const PREFIXED = /(?<![A-Za-z0-9])(?:(?:sk-|sk_(?:live|test)_|rk_|xox[abprs]-|glpat-|AIza|hf_|npm_|gh[pousr]_|github_pat_)[\w-]+|A(?:KIA|SIA)[0-9A-Z]{16}|eyJ[\w-]+\.[\w-]+\.[\w-]+)/g
+// A user may be empty (`redis://:secret@host`) and a password may hold an @ or a / (an access
+// key does): it runs to the last @ before a space, and the host follows. That also hides the @
+// of a link's own query (`http://host:3000/a?mail=a@b.com`): the safe side. `ssh://git@host`,
+// `https://a@b.com` and `mailto:` have no password.
+const USER_PASS = /(\b[a-z][a-z0-9+.-]*:\/\/)[^\s/?#@:]*:\S*@/gi
+// The board's own address carries its key as ?t=; other links carry theirs under these names.
+const KEYED = 't|token|access_token|id_token|auth|key|api_key|apikey|secret|sig|signature'
+const KEYED_LATER = new RegExp(`&(?:${KEYED})=[^&\\s#]*`, 'gi')
+const KEYED_FIRST_MORE = new RegExp(`\\?(?:${KEYED})=[^&\\s#]*&`, 'gi')
+const KEYED_FIRST = new RegExp(`\\?(?:${KEYED})=[^&\\s#]*`, 'gi')
+
+// `home` is the person's home folder (`os.homedir()`); on Windows a folder's letters may be
+// written in any case.
+export const redact = (text: string, home: string, isWindows = false): string => {
+  const forms = homeForms(home)
+  const own = forms.length === 0 ? null : new RegExp(`(?<![\\w.-])(?:${forms.map(escapeRegExp).join('|')})(?![\\w-]|\\.\\w)`, isWindows ? 'gi' : 'g')
+
+  return (own === null ? text : text.replace(own, '~'))
+    .replace(OTHER_HOMES, '~')
+    .replace(USER_PASS, `$1${MASK}@`)
+    .replace(KEYED_LATER, '')
+    .replace(KEYED_FIRST_MORE, '?')
+    .replace(KEYED_FIRST, '')
+    .replace(FLAG, `$1${MASK}`)
+    .replace(BEARER, `$1 ${MASK}`)
+    .replace(BASIC, `$1 ${MASK}`)
+    .replace(ASSIGNED, `$1${MASK}`)
+    .replace(PREFIXED, MASK)
+}
+
+// A message in a chat app is cut off a little past this (Telegram's is 4,096).
+export const CHAT_MAX = 3500
+const CHAT_LINE = 200
+
+// Control characters out first (they could split a secret into a shape the patterns miss),
+// then the secrets and the home folder, then cut to length: the last cut is after the patterns,
+// so a secret is never half cut into something they no longer know. The text is clipped before
+// them too, since another agent writes it and it can be any length; that clip drops the word it
+// falls in, so a secret is never half cut there either (a half of one is not a shape the
+// patterns know). A text that fits is left whole.
+const CHAT_CLIP = 600
+
+// The start of a folder left at the end of a clipped line is no whole folder for `redact` to
+// know, and shows part of a name ("C:\Users\Jane" of "C:\Users\Jane Doe"): it goes too, for
+// this home folder in each way it is written, and for another account's.
+const OTHER_HOME_START = /(?<![\w.-])(?:[A-Za-z]:[\\/]Users|\/mnt\/[A-Za-z]\/Users|\/Users|\/home)(?:[\\/][^\\/]*)?$/i
+const withoutHomeStart = (text: string, home: string, isWindows: boolean): string => {
+  const fold = (value: string): string => (isWindows ? value.toLowerCase() : value)
+  const tail = fold(text)
+  let cut = text.length
+  for (const form of homeForms(home)) {
+    for (let length = form.length - 1; length >= 1; length -= 1) {
+      const start = text.length - length
+      if (start < cut && tail.endsWith(fold(form.slice(0, length))) && !/[\w.-]/.test(text[start - 1] ?? '')) cut = start
+    }
+  }
+
+  return text.slice(0, cut).replace(OTHER_HOME_START, '').trimEnd()
+}
+
+const clipped = (text: string, home: string, isWindows: boolean): string =>
+  text.length <= CHAT_CLIP ? text : withoutHomeStart(text.slice(0, CHAT_CLIP).replace(/\s*\S*$/, ''), home, isWindows)
+
+const chatLine = (text: string, indent: number, home: string, isWindows: boolean): string =>
+  `${' '.repeat(indent)}${fit(redact(clipped(plain(text), home, isWindows), home, isWindows), CHAT_LINE - indent)}`
+
+// What finished today, by the local calendar day, from the journal and in the weekly report's
+// own words (`project · task: step, step`).
+export const doneToday = (journal: string, now: number, s: Strings = ZH_TW): string[] => {
+  const day = localDay(now)
+  const entries = parseJournal(journal).filter(entry => entry.at === day)
+
+  return entries.length === 0 ? [] : progressReport(entries, [], null, now, 1, s).split('\n').slice(3).map(line => line.replace(/^- /, ''))
+}
+
+// Plain text with no link and no colour: the counts, what waits on the person (each with its
+// project and agent), one line for each task with its next step, then what was done today.
+// Cut at `max` characters, with how many items were left out. The questions come first, so
+// they are the last to go.
+export const chatText = (
+  view: View,
+  pending: readonly PendingTurn[],
+  done: readonly string[],
+  s: Strings,
+  home: string,
+  isWindows = false,
+  max = CHAT_MAX,
+): string => {
+  const line = (text: string, indent = 0): string => chatLine(text, indent, home, isWindows)
+  // A session started in the home folder is named after it, and the folder's name is the person's.
+  const folder = home.replace(/[\\/]+$/, '').split(/[\\/]/).at(-1) ?? ''
+  const isHome = (name: string): boolean => folder !== '' && (isWindows ? name.toLowerCase() === folder.toLowerCase() : name === folder)
+  const named = (project: string): string => (isHome(project) ? '~' : project)
+  const asks = asksOf(view, pending, s, named)
+  const rows = [...view.due.map(row => ({ row, mark: '⚑' })), ...view.groups.flatMap(group => group.rows.map(row => ({ row, mark: '▸' })))]
+  // Each item is cut whole, never in the middle. A heading belongs to its first item.
+  const items: string[] = [chatLine(countLine(view, pending, s, paint(false)), 0, home, isWindows)]
+  // Questions marked answered are left out and counted, as on the terminal board.
+  const hidden = view.hidden.length === 0 ? null : s.hiddenCount(view.hidden.length)
+  if (asks.length === 0) items.push(`\n${s.nothingForYou}${hidden === null ? '' : `\n${hidden}`}`)
+  asks.forEach((ask, index) => {
+    items.push([...(index === 0 ? ['', `● ${s.sectionWaiting}`] : []), line(ask.where + (ask.task ? ` › ${ask.task}` : ''), 2), line(ask.text, 4)].join('\n'))
+  })
+  if (asks.length > 0 && hidden !== null) items.push(`  ${hidden}`)
+  // A question is told above, answered or not: it is never the "next step" of its task.
+  const isNext = (step: ViewStep): boolean => step.number !== null && !['done', 'cancelled', 'waiting'].includes(step.status)
+  rows.forEach(({ row, mark }, index) => {
+    const next = (row.steps.find(step => step.isCurrent && isNext(step)) ?? row.steps.find(isNext))?.text
+    const words = `${mark} ${named(row.project)} › ${row.title}${row.due === null ? '' : ` · ${row.due.left}`}${next === undefined ? '' : ` — ${s.reportNext(next)}`}`
+    items.push(`${index === 0 ? '\n' : ''}${line(words)}`)
+  })
+  if (asks.length === 0 && rows.length === 0) items.push(s.empty)
+  // Each starts with its project (`project · task: step`).
+  const doneWords = (words: string): string => {
+    const [project = '', ...rest] = words.split(' · ')
+
+    return rest.length > 0 && isHome(project) ? ['~', ...rest].join(' · ') : words
+  }
+  done.forEach((words, index) => items.push(`${index === 0 ? '\n' : ''}${line(`✓ ${doneWords(words)}`, 2)}`))
+
+  const length = (list: readonly string[]): number => list.reduce((sum, item) => sum + item.length + 1, 0)
+  let shown = items.length
+  if (length(items) > max) {
+    // The "+N more" line is part of the message, so room is kept for it.
+    const room = max - s.chatMore(items.length).length - 2
+    shown = 1
+    while (shown < items.length && length(items.slice(0, shown + 1)) <= room) shown += 1
+  }
+  const text = items.slice(0, shown).join('\n')
+
+  return `${shown < items.length ? `${text}\n\n${s.chatMore(items.length - shown)}` : text}\n`
 }
 
 // The board you can work in, for a terminal beside another agent (`--watch` on a terminal):

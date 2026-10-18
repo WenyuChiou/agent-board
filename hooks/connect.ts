@@ -801,8 +801,11 @@ export const boardCommands = (ctx: ConnectContext): AgentHook[] => {
   // JSON is YAML too, so a description with a colon in it stays one value.
   const contents = (s: Strings) => {
     const description = JSON.stringify(s.boardCommandDescription)
+    const skill = (prompt: string): string => `---\nname: ${SKILL}\ndescription: ${description}\n---\n\n${prompt}\n`
     return {
-      skill: `---\nname: ${SKILL}\ndescription: ${description}\n---\n\n${s.boardSkillPrompt(run)}\n`,
+      skill: skill(s.boardSkillPrompt(run)),
+      // Hermes Agent answers in a chat app (Telegram), where a link to this computer does not open.
+      hermes: skill(s.boardChatSkillPrompt(run)),
       gemini: `# Written by the Agent Board plugin (/progress connect).\ndescription = ${description}\nprompt = '''${s.boardCommandPrompt}\n\n!{${run} --serve}\n'''\n`,
       opencode: `---\ndescription: ${description}\n---\n\n${s.boardCommandPrompt}\n\n!\`${run} --serve\`\n`,
     }
@@ -813,7 +816,7 @@ export const boardCommands = (ctx: ConnectContext): AgentHook[] => {
   // bytes may differ.
   const known = Object.values(STRINGS).map(contents)
   const file = (kind: keyof typeof current) =>
-    generatedFile(current[kind], text => known.some(one => one[kind] === text) || isReleased(kind, text, { board: ctx.board ?? '' }))
+    generatedFile(current[kind], text => known.some(one => one[kind] === text) || isReleased(kind === 'hermes' ? 'skill' : kind, text, { board: ctx.board ?? '' }))
 
   return [
     {
@@ -827,7 +830,7 @@ export const boardCommands = (ctx: ConnectContext): AgentHook[] => {
     },
     { agent: 'gemini', label: '', dir: join(ctx, '.gemini'), file: join(ctx, '.gemini', 'commands', 'board.toml'), generated: true, edit: file('gemini') },
     { agent: 'opencode', label: '', dir: join(ctx, '.config', 'opencode'), file: join(ctx, '.config', 'opencode', 'commands', 'board.md'), generated: true, edit: file('opencode') },
-    { agent: 'hermes', label: '', dir: ctx.hermesHome, file: [ctx.hermesHome, 'skills', SKILL, 'SKILL.md'].join(ctx.sep), generated: true, edit: file('skill') },
+    { agent: 'hermes', label: '', dir: ctx.hermesHome, file: [ctx.hermesHome, 'skills', SKILL, 'SKILL.md'].join(ctx.sep), generated: true, edit: file('hermes') },
     {
       // Antigravity reads its skills here; it has no turn-end hook of its own, so it only shows
       // the board.

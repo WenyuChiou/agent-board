@@ -8,7 +8,7 @@ A Claude Code plugin that also follows Codex, Gemini CLI, OpenCode, Grok Build, 
 </p>
 
 <p align="center">
-<a href="CHANGELOG.md"><img alt="Version 0.20.11" src="https://img.shields.io/badge/version-0.20.11-blue"></a>
+<a href="CHANGELOG.md"><img alt="Version 0.21.0" src="https://img.shields.io/badge/version-0.21.0-blue"></a>
 <a href="#quick-start"><img alt="Needs Claude Code 2.1.287 or newer" src="https://img.shields.io/badge/Claude%20Code-%E2%89%A5%202.1.287-d97757"></a>
 <a href="LICENSE"><img alt="MIT license" src="https://img.shields.io/badge/license-MIT-green"></a>
 <img alt="macOS, Linux, Windows" src="https://img.shields.io/badge/macOS%20%C2%B7%20Linux%20%C2%B7%20Windows-lightgrey">
@@ -129,6 +129,9 @@ Connecting also gives each agent a way to show the board, so whichever one you a
 | Grok Build, Cursor, Antigravity (not verified yet) | `/agent-board` |
 | Any terminal, next to any agent | `node ~/.claude/agent-board.mjs --watch` (`--html` opens it in the browser) |
 | A browser, from any agent | `node ~/.claude/agent-board.mjs --serve` |
+| A chat app, through an agent (Hermes Agent, OpenClaw) | `node ~/.claude/agent-board.mjs --chat` (plain text, no page or address; the agent runs it) |
+
+**In a chat app.** `--chat` prints the board as plain text, with no page, no address and no browser, cut to fit one message (it ends with "+N more" when there is more). Questions waiting on you come first, then each task with its next step, then what finished today. It shows your home folder as `~` and hides the credential forms it knows (such as `token=...`, `Bearer ...` and common key prefixes); a secret in another shape is not recognised, so keep secrets out of the board. The Hermes Agent skill runs it for you and sends what it prints as it is.
 
 **Work in it, as in the pane.** Run `node ~/.claude/agent-board.mjs --watch` in a terminal beside the agent (a split pane):
 

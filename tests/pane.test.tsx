@@ -3345,16 +3345,18 @@ const fromEarlierRelease = async ($: Engine, on: On, put: (world: World, written
 }
 
 test('an installation from 0.20.5 with no record upgrades silently: its board script, every agent’s board command and skill, and its reporter, with no agent’s hook passed over', async ($, on) => {
-  // 0.20.5's commands, skill and reporter are byte for byte today's, so of these only the
-  // board goes through the release table; the next test takes the commands through it.
+  // 0.20.5's reporter and its gemini and opencode commands are byte for byte today's. Its skill
+  // is not: today's gained a sentence about chat apps, and Hermes Agent's has its own words.
   const { world, shared, written, notices } = await fromEarlierRelease($, on, (world, before) => {
     world.files.set(BOARD_SCRIPT_FILE, releasedBoard(RELEASE_0_20_5.board))
     world.files.set(REPORTER_FILE, here(RELEASE_0_20_5.reporterSh))
-    // 0.20.5's board commands and skill, in the language they were written in.
+    // 0.20.5's board commands and skill (one skill for every agent), in the language they were written in.
     for (const file of BOARD_FILES) {
       const kind = file.endsWith('.toml') ? 'gemini' : file.endsWith('board.md') ? 'opencode' : 'skill'
-      const text = RELEASE_0_20_5[kind].map(here).find(one => one === before.get(file))
+      const texts = RELEASE_0_20_5[kind].map(here)
+      const text = kind === 'skill' ? texts.find(one => one.includes(JSON.stringify(ZH_TW.boardCommandDescription))) : texts.find(one => one === before.get(file))
       expect(text).toBeDefined()
+      if (kind === 'skill') expect(text).not.toBe(before.get(file))
       world.files.set(file, text ?? '')
     }
   })

@@ -68,6 +68,157 @@ test('the board script leaves out a question a pane on this machine marked answe
   assert.ok(run('en', [], { 'progress-answered.json': '{' }).includes('Per-key limit'))
 })
 
+// `--chat` in a folder of its own, with the home folder, the temp folders and every XDG folder
+// inside it, so no run can read or write the real ones. `home` is a path inside it. `change`
+// edits the script's text first, to make it fail the way a bug in it would.
+const chatRun = (args, { file = () => FILE, beside = {}, lang = 'en', isFolder = false, change = text => text, inbox = {} } = {}) => {
+  const root = mkdtempSync(join(tmpdir(), 'board-chat-'))
+  try {
+    const home = join(root, 'Jane Doe')
+    const dirs = Object.fromEntries(['.claude', 'AppData', 'Local', 'Roaming', 'config', 'data', 'state', 'cache', 'run'].map(name => [name, join(home, name)]))
+    for (const dir of Object.values(dirs)) mkdirSync(dir, { recursive: true })
+    const path = join(dirs['.claude'], 'progress.md')
+    if (!isFolder) writeFileSync(path, file(home))
+    else mkdirSync(path)
+    for (const [name, text] of Object.entries(beside)) writeFileSync(join(dirs['.claude'], name), text)
+    mkdirSync(join(dirs['.claude'], 'progress-inbox'))
+    for (const [name, body] of Object.entries(inbox)) writeFileSync(join(dirs['.claude'], 'progress-inbox', name), body)
+    const script = join(dirs['.claude'], 'agent-board.mjs')
+    writeFileSync(script, `globalThis.AGENT_BOARD = ${JSON.stringify({ path, lang })}\n${change(BOARD_SCRIPT)}`)
+    const env = {
+      ...process.env,
+      HOME: home, USERPROFILE: home, LOCALAPPDATA: dirs.Local, APPDATA: dirs.Roaming,
+      XDG_CONFIG_HOME: dirs.config, XDG_DATA_HOME: dirs.data, XDG_STATE_HOME: dirs.state, XDG_CACHE_HOME: dirs.cache, XDG_RUNTIME_DIR: dirs.run,
+      TMPDIR: dirs.run, TEMP: dirs.run, TMP: dirs.run,
+      CLAUDE_PROGRESS_FILE: '', CLAUDE_CONFIG_DIR: '', NO_COLOR: '1',
+    }
+    const before = readdirSync(dirs['.claude']).sort()
+    const ran = spawnSync(process.execPath, [script, ...args], { env, encoding: 'utf8', timeout: 20000 })
+    return { ...ran, home, path, wrote: readdirSync(dirs['.claude']).filter(name => !before.includes(name)), served: readdirSync(dirs.run) }
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+}
+
+const CHAT_PROGRESS = home => `# Progress
+
+## api-gateway
+<!-- auto session=a1b2c3d4 agent=codex state=waiting updated=${WAITING_AT} -->
+### Rate-limit the public endpoints
+- [x] Added the token bucket middleware
+- [?] Per-key limit — 100 or 300 a minute?
+- [ ] Write the limit tests
+<!-- /auto session=a1b2c3d4 -->
+
+## docs-site
+<!-- auto session=b2c3d4e5 agent=gemini state=working updated=${WRITTEN_AT} -->
+### Fix the broken links
+- [x] Read the list of pages
+- [~] Open ${join(home, 'site', 'links.md')}, set OPENAI_API_KEY=sk-test1234567890abcdef and check https://ci.example.com/run?t=abc123&page=2
+<!-- /auto session=b2c3d4e5 -->
+`
+
+test('--chat prints the board as plain text and starts nothing: no page, no browser, no link, no file written', () => {
+  // --serve beside it would start a page and print its address; --chat comes first.
+  for (const args of [['--chat'], ['--chat', '--serve'], ['--serve', '--chat', '--lan'], ['--chat', '--watch'], ['--chat', '--html'], ['--chat', '--keys', 'down x']]) {
+    const ran = chatRun(args, { file: CHAT_PROGRESS })
+    assert.equal(ran.status, 0, ran.stderr)
+    assert.ok(ran.stdout.startsWith('Progress  ● 1 waiting  ▸ 1 in progress'), ran.stdout)
+    assert.ok(ran.stdout.includes('● Waiting on you\n  api-gateway · codex › Rate-limit the public endpoints\n    [Choose] Per-key limit — 100 or 300 a minute?\n'), ran.stdout)
+    assert.ok(ran.stdout.includes('\n▸ docs-site › Fix the broken links — next Open ~'), ran.stdout)
+    assert.ok(ran.stdout.includes('set OPENAI_API_KEY=••• and check https://ci.example.com/run?page=2'), ran.stdout)
+    assert.ok(!/127\.0\.0\.1|localhost|[?]t=|\u001b|board you can click/i.test(ran.stdout), ran.stdout)
+    assert.equal(ran.stderr, '')
+    assert.deepEqual([ran.wrote, ran.served], [[], []])
+  }
+})
+
+test('--chat hides the home folder, with a space in its name, and the credentials it knows, in everything it prints', () => {
+  const ran = chatRun(['--chat'], { file: CHAT_PROGRESS })
+  const home = ran.home
+  assert.ok(home.includes('Jane Doe'))
+  assert.ok(!ran.stdout.includes(home) && !ran.stdout.includes('Jane Doe'), ran.stdout)
+  assert.ok(!ran.stdout.includes('sk-test') && !ran.stdout.includes('abc123'), ran.stdout)
+  // The file it cannot read is told in the same plain text, with its path hidden as well.
+  const unreadable = chatRun(['--chat'], { isFolder: true })
+  assert.equal(unreadable.status, 1)
+  assert.ok(unreadable.stdout.includes('~') && unreadable.stdout.includes('progress.md') && unreadable.stdout.includes('EISDIR'), unreadable.stdout)
+  // It only reads: it does not say, as the board does after a write, that files may already have changed.
+  assert.ok(unreadable.stdout.includes('Nothing was changed') && !/may already have changed/.test(unreadable.stdout), unreadable.stdout)
+  assert.ok(!unreadable.stdout.includes(unreadable.home) && !unreadable.stdout.includes('Jane Doe') && !unreadable.stderr.includes('Jane Doe'), unreadable.stdout + unreadable.stderr)
+})
+
+test('--chat that fails for a reason that is no file says so in one plain line with the home folder hidden, never as a stack trace', () => {
+  // The journal call is made to throw an error that names the home folder, as a bug in it might.
+  const call = 'doneToday(read('
+  assert.ok(BOARD_SCRIPT.includes(call), 'the call this test breaks is no longer in the script')
+  const broken = script => script.replace(call, '((...rest) => { throw new TypeError("cannot go on in " + process.env.HOME + "/notes.md") })(read(')
+  for (const [lang, start] of [['en', 'The board could not be shown (cannot go on in ~/notes.md).'], ['zh-TW', '看板顯示不出來（cannot go on in ~/notes.md）。']]) {
+    const ran = chatRun(['--chat', '--lang', lang], { file: CHAT_PROGRESS, change: broken })
+    assert.equal(ran.status, 1, ran.stderr)
+    assert.ok(ran.stdout.startsWith(start), ran.stdout)
+    assert.equal(ran.stdout.trimEnd().split('\n').length, 1, ran.stdout)
+    assert.ok(!ran.stdout.includes('Jane Doe') && !ran.stdout.includes(ran.home), ran.stdout)
+    // No stack trace on either stream: it would carry the folders of the script and of the home.
+    assert.ok(!/\n\s+at |board-chat-|node:internal|Error:/.test(ran.stdout + ran.stderr), ran.stdout + ran.stderr)
+    assert.equal(ran.stderr, '')
+    assert.deepEqual([ran.wrote, ran.served], [[], []])
+  }
+})
+
+test('--chat hides a token in a waiting reply before its question is picked, so no piece of it reaches the chat', () => {
+  const reply = (session, answer) => JSON.stringify({ session_id: session, cwd: '/h/.openclaw/workspace', last_assistant_message: answer })
+  const token = ['ghp', '16C7e42F292c6912E7710c838347Ae178B4a'].join('_')
+  const ran = chatRun(['--chat'], {
+    file: CHAT_PROGRESS,
+    inbox: {
+      'openclaw-turn-2-1.json': reply('o1', `Done.\n\nShould I set it to ${token} in CI?`),
+      'openclaw-turn-3-1.json': reply('o2', `Should I use postgres://app:${'x'.repeat(100)}/K7MDENG@dbhost as the URL for the staging database?`),
+    },
+  })
+  assert.equal(ran.status, 0, ran.stderr)
+  assert.ok(ran.stdout.includes('Should I set it to ••• in CI?'), ran.stdout)
+  assert.ok(ran.stdout.includes('Should I use postgres://•••@dbhost as the URL for the staging database?'), ran.stdout)
+  // Not a piece of it, nor the token with its underscores taken out.
+  for (const leak of [token.slice(4, 14), token.replace(/_/g, ''), 'xxxx', 'K7MDENG']) assert.ok(!ran.stdout.includes(leak), leak + '\n' + ran.stdout)
+})
+
+test('--chat leaves out a question marked answered, and a damaged answered list drops none', () => {
+  const answered = JSON.stringify({ answered: ['a1b2c3d4 2 Per-key limit — 100 or 300 a minute?'] })
+  const hidden = chatRun(['--chat'], { file: CHAT_PROGRESS, beside: { 'progress-answered.json': answered } })
+  assert.ok(hidden.stdout.startsWith('Progress  ● 0 waiting'), hidden.stdout)
+  assert.ok(!hidden.stdout.includes('Per-key limit') && !hidden.stdout.includes('Waiting on you'), hidden.stdout)
+  assert.ok(hidden.stdout.includes('✓ Nothing needs you right now\n1 answered, hidden\n'), hidden.stdout)
+  for (const broken of ['{', '', 'not json at all', '{"answered": "a1b2c3d4 2 Per-key limit — 100 or 300 a minute?"}', '{"answered": [1, null]}']) {
+    const shown = chatRun(['--chat'], { file: CHAT_PROGRESS, beside: { 'progress-answered.json': broken } })
+    assert.ok(shown.stdout.startsWith('Progress  ● 1 waiting'), `${broken}\n${shown.stdout}`)
+    assert.ok(shown.stdout.includes('[Choose] Per-key limit — 100 or 300 a minute?'), `${broken}\n${shown.stdout}`)
+    // Reading it did not write over it.
+    assert.deepEqual(shown.wrote, [])
+  }
+})
+
+test('--chat names what was done today from the journal, and keeps to one message however long the board is', () => {
+  const pad = n => String(n).padStart(2, '0')
+  const now = new Date()
+  const stamp = (date, hour, minute) => `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(hour)}:${pad(minute)}`
+  const yesterday = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1)
+  const month = `${now.getFullYear()}-${pad(now.getMonth() + 1)}`
+  const journal = `# Journal\n- ${stamp(now, 0, 0)} · docs-site · Fix the broken links · Read the list\n- ${stamp(yesterday, 23, 59)} · docs-site · Fix the broken links · Old step\n`
+  const tasks = Array.from({ length: 80 }, (_, index) => `### Task ${pad(index + 1)} with a title that runs on a little\n- [~] Step two for task ${pad(index + 1)}, which takes a while to describe\n- [ ] Step three\n`).join('\n')
+  const ran = chatRun(['--chat'], { file: home => `${CHAT_PROGRESS(home)}\n## big-project\n${tasks}`, beside: { [`progress-journal-${month}.md`]: journal } })
+  assert.ok(ran.stdout.length <= 3500, String(ran.stdout.length))
+  assert.ok(/\n\n\+\d+ more\n$/.test(ran.stdout), ran.stdout.slice(-200))
+  // The questions stay when the tasks are cut.
+  assert.ok(ran.stdout.includes('Per-key limit'), ran.stdout)
+  const small = chatRun(['--chat'], { file: CHAT_PROGRESS, beside: { [`progress-journal-${month}.md`]: journal } })
+  assert.ok(small.stdout.includes('\n\n  ✓ docs-site · Fix the broken links: Read the list\n'), small.stdout)
+  assert.ok(!small.stdout.includes('Old step') && !/more\n$/.test(small.stdout), small.stdout)
+  assert.ok(small.stdout.startsWith('Progress  ● 1 waiting  ▸ 1 in progress  ⚑ 0 due soon  ✓ 1 done today'), small.stdout)
+  // In the language the board script was written for, or --lang.
+  assert.ok(chatRun(['--chat', '--lang', 'zh-CN'], { file: CHAT_PROGRESS }).stdout.startsWith('进度  ● 1 等你'))
+})
+
 // Only the named filesystem calls fail, injected before the bundled script loads; not a real
 // permission or disk failure.
 test('a press on the board names an answered list it cannot read or replace, with its error, and never writes over it', () => {

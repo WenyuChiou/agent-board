@@ -310,7 +310,12 @@ const BOARD_ASKS = /^\s*(?:\/board|[$/]agent-board)\s*$/
 
 // The words of each language's board command and skill, around the command they name; a
 // request that only mentions the script (someone working on this repository) is real work.
-const BOARD_WORDS = Object.values(STRINGS).flatMap(s => [s.boardCommandPrompt, s.boardSkillPrompt('\u0000').split('\u0000')[1] ?? ''].filter(words => words.trim() !== ''))
+// The skill names its command twice (chat app first, then the page): the words after each, so
+// the last ones are the sentence every earlier release wrote and a skill installed by one is
+// still known.
+const BOARD_WORDS = Object.values(STRINGS).flatMap(s =>
+  [s.boardCommandPrompt, ...s.boardSkillPrompt('\u0000').split('\u0000').slice(1), ...s.boardChatSkillPrompt('\u0000').split('\u0000').slice(1)].filter(words => words.trim() !== ''),
+)
 
 // An agent can pick the board skill from plain words ("where do things stand?"), and then only
 // the reply tells. The skill asks for the board first and one sentence on what needs the

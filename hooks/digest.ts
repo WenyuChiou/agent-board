@@ -57,6 +57,14 @@ export const replyData = (answer: string): string => answer.slice(-3000).replace
 // reply is.
 export const requestData = (text: string): string => text.slice(0, 1200).replace(FENCE_TAG, '')
 
+// Markdown's `_` marks emphasis at the edge of a word; inside one (`snake_case`, `ghp_16C7`,
+// `sk_live_abc`) it is part of the word and stays. Dropping it changed the word, and left a
+// token in a shape no pattern for tokens knows.
+const withoutEmphasis = (line: string): string =>
+  line
+    .replace(/[*#>]+/g, '')
+    .replace(/_+/g, (run, at: number, whole: string) => (/[A-Za-z0-9]/.test(whole[at - 1] ?? '') && /[A-Za-z0-9]/.test(whole[at + run.length] ?? '') ? run : ''))
+
 // The question a reply ends on, if its last paragraph asks one: the last sentence there
 // with a question mark, without code or markdown. A reply that ends on a statement asks
 // nothing, even if it asked something earlier.
@@ -67,7 +75,7 @@ export const lastQuestion = (answer: string): string | null => {
   if (last === undefined) return null
   const lines = last
     .split(/\r?\n/)
-    .map(line => line.replace(/^\s*(?:[-*+]|\d+[.)])\s+/, '').replace(/[*_#>]+/g, '').trim())
+    .map(line => withoutEmphasis(line.replace(/^\s*(?:[-*+]|\d+[.)])\s+/, '')).trim())
     .filter(line => line !== '')
   const tail = lines.at(-1) ?? ''
   if (!/[?？]/.test(tail)) return null

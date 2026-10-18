@@ -8,7 +8,7 @@ Claude Code 插件，也跟得上 Codex、Gemini CLI、OpenCode、Grok Build、H
 </p>
 
 <p align="center">
-<a href="CHANGELOG.md"><img alt="版本 0.20.11" src="https://img.shields.io/badge/version-0.20.11-blue"></a>
+<a href="CHANGELOG.md"><img alt="版本 0.21.0" src="https://img.shields.io/badge/version-0.21.0-blue"></a>
 <img alt="需要 Claude Code 2.1.287 以上" src="https://img.shields.io/badge/Claude%20Code-%E2%89%A5%202.1.287-d97757">
 <a href="LICENSE"><img alt="MIT 许可" src="https://img.shields.io/badge/license-MIT-green"></a>
 <img alt="macOS、Linux、Windows" src="https://img.shields.io/badge/macOS%20%C2%B7%20Linux%20%C2%B7%20Windows-lightgrey">
@@ -129,6 +129,9 @@ claude -p "/progress connect"
 | Grok Build、Cursor、Antigravity（还没验证） | `/agent-board` |
 | 任何终端，开在任何 agent 旁边 | `node ~/.claude/agent-board.mjs --watch`（`--html` 在浏览器打开） |
 | 浏览器，从任何 agent | `node ~/.claude/agent-board.mjs --serve` |
+| 聊天软件，通过 agent（Hermes Agent、OpenClaw） | `node ~/.claude/agent-board.mjs --chat`（纯文本，没有网页也没有网址；由 agent 去运行） |
+
+**在聊天软件里。** `--chat` 把看板打印成纯文本，没有网页、没有网址、也不开浏览器，并缩到一条消息放得下（还有更多时结尾是“还有 N 项”）。等你回复的问题排最前面，接着是每件工作和它的下一步，最后是今天做完的。它会把你的主目录显示成 `~`，并遮掉它认得的凭证形式（例如 `token=...`、`Bearer ...` 和常见的密钥开头）；其他形状的机密它认不出来，所以别把机密写进看板。Hermes Agent 的 skill 会替你运行它，并把打印出来的内容原样发出。
 
 **像面板一样操作。** 在 agent 旁边开一个终端（分屏），运行 `node ~/.claude/agent-board.mjs --watch`：
 

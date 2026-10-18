@@ -1,5 +1,86 @@
 # Changelog
 
+## 0.21.0 — 2026-10-17
+
+The board can now be read in a chat app. Hermes Agent and OpenClaw, which answer in
+Telegram, used to run `--serve`: it sent back a link that only opens on the computer, with
+its key in it, started a server and opened a browser, and a 24-task board is longer than
+one Telegram message (#73).
+
+- **`agent-board.mjs --chat` prints the board as plain text and starts nothing.** No page,
+  no browser, no address, no file written. Questions waiting on you come first, each with
+  the agent and project that asked, then one line per task with its next step, then what
+  was finished today (from the journal, by the local calendar day). It keeps to about 3,500
+  characters and, when there is more, ends with `+N more`. Questions marked answered or
+  hidden are left out and counted in one line, as on the terminal board, and a damaged
+  answered list drops no question. A project started in your home folder, which is named
+  after it, is shown as `~`. Whatever goes wrong, even a fault that is no file, it prints
+  one short plain line with the home folder hidden, never a stack trace, and exits with
+  status 1; a file it cannot read is told with a message that says only that nothing was
+  changed, since `--chat` writes nothing (it no longer uses the board's "files may
+  already have changed"). Tests: "--chat prints the board as plain text and starts
+  nothing: no page, no browser, no link, no file written", "--chat leaves out a question
+  marked answered, and a damaged answered list drops none", "--chat that fails for a
+  reason that is no file says so in one plain line with the home folder hidden, never as
+  a stack trace", "a session started in the home folder is shown as ~, not by the
+  person’s name", "--chat names what was done today from the journal, and keeps to one message
+  however long the board is", "a chat board puts the questions first, each with its
+  project and agent, and leaves answered and hidden ones out", "a chat board of 24 tasks
+  fits in one message where the terminal board does not, and a longer one ends with how
+  many it left out", and "what was done today comes from the journal by the local calendar
+  day, in the weekly report’s words".
+- **One function hides the home folder and the credential forms the board knows, in
+  everything `--chat` prints.** Your home folder becomes `~` (both slash styles, with a
+  space in its name, and in any letter case on Windows; "CI/CD", "24/7", "10/17" and
+  "and/or" are left alone). Another account's folder goes too, its name read up to the
+  slash after it, spaces included (`/mnt/c/Users/Jane Doe/...`). `key=...`, `token: ...`,
+  `--password ...`, `Bearer ...`, `Basic ...`, `user:pass@` in an address (the user may
+  be empty and the password may hold an `@` or a `/`: it runs to the last `@` before a
+  space), the key prefixes (`sk-`, `ghp_`, `gho_`, `ghu_`, `ghs_`, `ghr_`, `AKIA...`,
+  `ASIA...` and the like) and login tokens that start `eyJ` become `•••`, and a `?t=` key
+  is taken out of an address. A quote that is never closed hides the rest of its line. A
+  long line is clipped before this runs, and the clip drops the word it falls in and any
+  start of a folder (`C:\Users\Jane` of `C:\Users\Jane Doe`) left at the end, so neither a
+  secret nor part of a name is left half shown. A reply that an agent left waiting is
+  hidden whole before its question is picked and cut to 120 characters, so a token is
+  never cut in half or loses its underscores first. A secret in any other shape is not
+  recognised, and the help and docs say only that. Tests: "chat redaction replaces the
+  home folder with ~ in both slash styles, even with a space in its name, and leaves
+  CI/CD, 24/7, 10/17 and and/or alone", "chat redaction masks the credential forms it
+  knows, drops tokens from links, and keeps the rest of the line", "a token in a waiting
+  reply is hidden before its question is picked and cut, so no piece of it reaches the
+  chat", "--chat hides a token in a waiting reply before its question is picked, so no
+  piece of it reaches the chat", "a clipped line never shows the start of the home folder
+  or of another account’s folder, even a name with a space in it", "--chat hides the home
+  folder, with a space in its name, and the credentials it knows, in everything it
+  prints", and "a chat board has no colour, no page address and no home folder or
+  credential, whatever the board holds".
+- **A question keeps the underscores inside its words, on every surface.** The question a
+  reply ends on (the waiting line of an agent whose turn no session has taken in, and the
+  `[?]` step written for a Claude Code turn that ended on a question) used to lose every
+  `_`, so `snake_case` read `snakecase` and `ghp_16C7...` lost the underscore that makes
+  it a token. An underscore inside a word now stays; one at the edge of a word, which is
+  Markdown's emphasis (`_this_`, `__that__`), is still taken out. No earlier test pinned the
+  old result. The test "the question a reply ends on: its last paragraph only, without
+  code or markdown" gains two lines that do.
+- **The Hermes Agent skill runs `--chat` and sends what it prints as it is, with no link.**
+  The shared skill for the other agents now starts with the chat rule: in a chat app, run
+  `--chat` and send what it prints with no code block or link; otherwise run `--serve` as
+  before. OpenClaw, which always answers in a chat app, reads it first. Both are in all
+  three languages. A Hermes skill written by an earlier release is still recognised as
+  the plugin's own and is updated; one you edited is kept. On Windows the plugin writes
+  the board's path with `\`, so a file that has `/` there is kept too. A chat reply
+  counts as a look at the board, so it makes no block of its own, and neither does the
+  request an earlier release's shared skill made. Tests: "Hermes Agent’s board skill runs
+  --chat and sends the output as it is, while the shared skill puts the chat app rule
+  first and keeps --serve for any other", "Hermes Agent’s skill from an
+  earlier release is still the plugin’s own and is updated, and an edited one is kept",
+  "a chat board counts as a look at the board in every language, so the chat reply does
+  not make a block of its own", and the 0.20.5 upgrade test "an installation from 0.20.5
+  with no record upgrades silently: its board script, every agent’s board command and
+  skill, and its reporter, with no agent’s hook passed over", which now picks the older
+  skill text it expects by its own wording.
+
 ## 0.20.11 — 2026-10-17
 
 A press on the board, or a reply from its page, now acts only on the line it showed, never on

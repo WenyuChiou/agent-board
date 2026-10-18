@@ -2,7 +2,7 @@ import { expect, test } from 'claude-code/testing'
 
 import type { ProgressMirror, ProgressPr } from '../types'
 import { askOf } from '../hooks/ask'
-import { boardItems, boardKey, boardScreen, boardText, emptyBoardState, fingerprint, fit, peekInbox, pinned } from '../hooks/board'
+import { boardItems, boardKey, boardScreen, boardText, CHAT_MAX, chatText, doneToday, emptyBoardState, fingerprint, fit, peekInbox, pinned, redact } from '../hooks/board'
 import { addManualTask, isArchivable, manualTaskCount, mergeBlock, renderAutoBlock, setManualStep, takeArchivable, takeManualDone, takeTask, upsertAutoBlock } from '../hooks/blocks'
 import { agentHooks, boardCommands, boardScript, COLLISION, DELETE, generatedFile, isNodeSupported, isReleased, isReleasedBoard, isSetupState, isWindowsHost, NODE_MIN, nodeVersionOf, openclawPlugin, openclawPrinted, openclawSavedBy, openclawTooOld, readConfig, RELEASE_PATHS, reportCommand, reporterPs1, reporterSh, setupAgents, setupLines, withFlatHook, withGroupedHook, withHermesHooks, withoutHermesHooks, withoutOurHooks, withoutSection } from '../hooks/connect'
 import { dashboardHtml } from '../hooks/dashboard'
@@ -612,6 +612,9 @@ test('the question a reply ends on: its last paragraph only, without code or mar
   // A question mark inside code is not a question.
   expect(lastQuestion('改成這樣：\n\n```ts\nconst a = b ? c : d\n```')).toBeNull()
   expect(lastQuestion('')).toBeNull()
+  // An underscore inside a word belongs to it (a name, a token); at the edge of one it is markdown.
+  expect(lastQuestion('Should I rename `snake_case` to ghp_16C7e42F in CI?')).toBe('Should I rename snake_case to ghp_16C7e42F in CI?')
+  expect(lastQuestion('Use _this_ or __that__, not my__name?')).toBe('Use this or that, not my__name?')
 })
 
 test('the model’s summary of a turn: five keyed lines, - for nothing, the question split from its label', () => {
@@ -1326,6 +1329,356 @@ test('a reply full of board marks with no count line is read at once, not tried 
   expect(isBoardTurn(said(digits)!)).toBe(false)
   expect(isBoardTurn(said(blank)!)).toBe(true)
   expect(performance.now() - started).toBeLessThan(500)
+})
+
+// --chat: the board as plain text for an agent that answers in a chat app (Telegram), sent as it is.
+const CHAT_FILE = `# Progress
+
+## api-gateway
+<!-- auto session=a1b2c3d4 agent=codex state=waiting updated=2026-10-17T08:30:00Z -->
+### Rate-limit the public endpoints
+- [x] Added the token bucket middleware
+- [?] Per-key limit — 100 or 300 a minute?
+- [ ] Write the limit tests
+<!-- /auto session=a1b2c3d4 -->
+
+## docs-site
+<!-- auto session=b2c3d4e5 agent=gemini state=waiting updated=2026-10-17T08:35:00Z -->
+### Fix the broken links
+- [?] Publish the fixed pages, OK?
+<!-- /auto session=b2c3d4e5 -->
+
+## acme-web
+<!-- auto session=9f8e7d6c state=working updated=2026-10-17T08:40:00Z -->
+### Dark mode for the settings page
+- [x] Theme tokens
+- [~] Settings page
+- [ ] Contrast checks
+<!-- /auto session=9f8e7d6c -->
+`
+const CHAT_NOW = Date.parse('2026-10-17T08:45:00Z')
+const chatView = (file: string, answered: string[] = []) => buildView(parseProgress(file), [], null, CHAT_NOW, 0, {}, STRINGS.en, answered)
+
+test('chat redaction replaces the home folder with ~ in both slash styles, even with a space in its name, and leaves CI/CD, 24/7, 10/17 and and/or alone', () => {
+  const windows = (text: string): string => redact(text, 'C:\\Users\\Jane Doe', true)
+  expect(windows('see C:\\Users\\Jane Doe\\Documents\\notes.md now')).toBe('see ~\\Documents\\notes.md now')
+  expect(windows('see C:/Users/Jane Doe/Documents/notes.md now')).toBe('see ~/Documents/notes.md now')
+  expect(windows('see c:\\users\\JANE DOE\\x')).toBe('see ~\\x')
+  expect(windows('in /c/Users/Jane Doe/work')).toBe('in ~/work')
+  expect(windows('at C:\\Users\\Jane Doe')).toBe('at ~')
+  // JSON and Python error messages double each backslash.
+  expect(windows('No such file: C:\\\\Users\\\\Jane Doe\\\\survey\\\\raw.csv')).toBe('No such file: ~\\\\survey\\\\raw.csv')
+  // Another account's folder goes too; its name is read up to the next slash, and may hold spaces.
+  expect(windows('C:\\Users\\Pat\\Desktop\\a.txt')).toBe('~\\Desktop\\a.txt')
+  expect(windows('C:\\Users\\Pat Lee\\Desktop\\a.txt')).toBe('~\\Desktop\\a.txt')
+  const posix = (text: string): string => redact(text, '/home/jane', false)
+  expect(posix('open /mnt/c/Users/Jane Doe/proj/a.md')).toBe('open ~/proj/a.md')
+  expect(posix('open /Users/Mary Ann Smith/code')).toBe('open ~/code')
+  // Words after a folder's name are kept when no slash follows them to end a name.
+  expect(posix('see /home/ci and the rest')).toBe('see /home/ci and the rest')
+  expect(posix('cd /home/jane/code/app && ls')).toBe('cd ~/code/app && ls')
+  // A longer name that starts the same is another folder, not this one with a tail.
+  expect(posix('/home/janet/code')).toBe('~/code')
+  // A path in a link is not a folder on this computer.
+  expect(posix('see https://example.com/home/jane/profile')).toBe('see https://example.com/home/jane/profile')
+  const slashes = 'Fix CI/CD and/or the 24/7 job by 10/17'
+  expect(windows(slashes)).toBe(slashes)
+  expect(posix(slashes)).toBe(slashes)
+})
+
+test('chat redaction masks the credential forms it knows, drops tokens from links, and keeps the rest of the line', () => {
+  const home = '/home/jane'
+  const cases: Array<[string, string]> = [
+    ['OPENAI_API_KEY=sk-test1234567890abcdef', 'OPENAI_API_KEY=•••'],
+    ['password: hunter2 done', 'password: ••• done'],
+    ['the db_password = "two words" ok', 'the db_password = ••• ok'],
+    ['{"client_secret": "abc"}', '{"client_secret": •••}'],
+    ['run with --password hunter2 now', 'run with --password ••• now'],
+    ['run with --token=abc123', 'run with --token=•••'],
+    ['run with --api-key abc', 'run with --api-key •••'],
+    ['Authorization: Bearer abc.def.ghi', 'Authorization: Bearer •••'],
+    ['Authorization: Basic dXNlcjpwYXNz', 'Authorization: Basic •••'],
+    ['clone https://deploy:s3cret@git.example.com/repo.git', 'clone https://•••@git.example.com/repo.git'],
+    ['http://127.0.0.1:5173/?t=abc123', 'http://127.0.0.1:5173/'],
+    ['https://x.example/run?t=abc&page=2', 'https://x.example/run?page=2'],
+    ['https://x.example/run?page=2&token=abc&t=z', 'https://x.example/run?page=2'],
+    ['https://x.example/run?key=a&t=b&x=1', 'https://x.example/run?x=1'],
+    // An address's user may be empty, and its password may hold an @: the last @ ends it.
+    ['redis://:pass@h:6379', 'redis://•••@h:6379'],
+    ['https://user:p@ss@host', 'https://•••@host'],
+    ['postgres://app:pw@db.example.com:5432/x', 'postgres://•••@db.example.com:5432/x'],
+    // A password may hold a /, as an access key does: it runs to the last @ before a space.
+    ['postgres://app:wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY@db.example.com:5432/x', 'postgres://•••@db.example.com:5432/x'],
+    // The same hides the @ of a link's own query: the safe side.
+    ['open http://localhost:3000/a?mail=a@b.com now', 'open http://•••@b.com now'],
+    // A quote that is never closed hides the rest of the line, and only that line.
+    ['PGPASSWORD="two words here"', 'PGPASSWORD=•••'],
+    ['PGPASSWORD="two wo', 'PGPASSWORD=•••'],
+    ["token: 'abc def\nnext line", 'token: •••\nnext line'],
+    ['run with --password "two wo', 'run with --password •••'],
+  ]
+  for (const [text, masked] of cases) expect(redact(text, home)).toBe(masked)
+  for (const secret of [
+    'sk-abc123', 'sk_live_abc123', 'sk_test_abc123', 'rk_live_abc123', 'xoxb-123-456', 'glpat-abc123', 'AIzaSyA1234567890', 'hf_abc123', 'npm_abc123',
+    'ghp_abc123', 'gho_abc123', 'ghu_abc123', 'ghs_abc123', 'ghr_abc123', 'github_pat_abc_123', 'AKIAABCDEFGHIJKLMNOP', 'ASIAABCDEFGHIJKLMNOP',
+    'eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0In0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U',
+  ]) {
+    expect(redact(`use ${secret} for it`, home)).toBe('use ••• for it')
+  }
+  // Words that only look like them stay: a key is not a credential, nor is a "Basic" setup.
+  for (const text of [
+    'Per-key limit — 100 or 300 a minute?',
+    'Add the token bucket middleware',
+    'a passport photo, the keyboard and the monkey patch',
+    'task-force, risk-based and ask-me',
+    'AKIAABCDEFGHIJKLMNO is one letter short',
+    'ASIAABCDEFGHIJKLMNO is one letter short',
+    'Basic setup and Basic auth and a basic rule',
+    // An address with an @ that is no password.
+    'clone ssh://git@github.com/org/repo.git',
+    'write to https://a@b.com or mailto:a@b.com',
+    'open https://example.com:8080/path and mail a@b.com',
+  ]) {
+    expect(redact(text, home)).toBe(text)
+  }
+  // A long line is clipped before the patterns run, and the clip drops the word it falls in: a
+  // secret that the cut would split is never left half shown. A masked long token pulls what
+  // follows it into view, so every place the cut can fall in the secret is tried.
+  const shown = (text: string): string => chatText(chatView(`# Progress\n\n## p\n### T\n- [~] ${text}\n`), [], [], STRINGS.en, home)
+  for (let size = 480; size <= 620; size += 1) {
+    const address = shown(`Bearer ${'A'.repeat(size)} https://deploy:s3cretpassword@host`)
+    expect(address).not.toMatch(/deploy|s3cret|passw/)
+    const quoted = shown(`Bearer ${'A'.repeat(size)} PGPASSWORD="two words here"`)
+    expect(quoted).not.toMatch(/two|words|here|PGPASSWORD=••• \S/)
+  }
+  for (const size of [520, 540, 560]) {
+    expect(shown(`Bearer ${'A'.repeat(size)} https://deploy:s3cretpassword@host`)).toContain('Bearer •••')
+    expect(shown(`Bearer ${'A'.repeat(size)} PGPASSWORD="two words here"`)).toContain('Bearer ••• PGPASSWORD=•••')
+  }
+  // A line that fits is shown whole, its last word too.
+  expect(shown('Open the report and send it')).toContain('next Open the report and send it\n')
+})
+
+test('a chat board puts the questions first, each with its project and agent, and leaves answered and hidden ones out', () => {
+  const pending = peekInbox([{ name: 'openclaw-turn-2-1.json', body: JSON.stringify({ session_id: 'o1', cwd: '/h/.openclaw/workspace', last_assistant_message: 'Done. Ship it to staging now?' }), at: 2 }])
+  const text = chatText(chatView(CHAT_FILE), pending, [], STRINGS.en, '/home/jane')
+  const at = (part: string): number => text.indexOf(part)
+  expect(text.startsWith('Progress  ● 3 waiting  ▸ 1 in progress  ⚑ 0 due soon  ✓ 0 done today\n\n● Waiting on you\n')).toBe(true)
+  expect(text).toContain('  api-gateway · codex › Rate-limit the public endpoints\n    [Choose] Per-key limit — 100 or 300 a minute?\n')
+  expect(text).toContain('  docs-site · gemini › Fix the broken links\n    [Confirm] Publish the fixed pages, OK?\n')
+  expect(text).toContain('  OpenClaw · openclaw\n    Ship it to staging now?\n')
+  // Then one line for each task: its title and its next step.
+  expect(text).toContain('\n▸ acme-web › Dark mode for the settings page — next Settings page\n')
+  for (const question of ['Per-key limit', 'Publish the fixed pages', 'Ship it to staging']) expect(at('▸ acme-web')).toBeGreaterThan(at(question))
+  // One marked answered in a pane on this machine, and one hidden since, are not asked again.
+  const answered = chatText(chatView(CHAT_FILE, ['a1b2c3d4 2 Per-key limit — 100 or 300 a minute?']), [], [], STRINGS.en, '/home/jane')
+  expect(answered).not.toContain('Per-key limit')
+  expect(answered).toContain('[Confirm] Publish the fixed pages, OK?')
+  expect(answered.startsWith('Progress  ● 1 waiting  ▸ 2 in progress')).toBe(true)
+  // They are counted, as on the terminal board, after the questions that remain.
+  expect(answered).toContain('    [Confirm] Publish the fixed pages, OK?\n  1 answered, hidden\n')
+  // Its task goes on with the work that is not waiting, and its next step is the one after the question.
+  expect(answered).toContain('\n▸ api-gateway › Rate-limit the public endpoints — next Write the limit tests\n')
+  const none = chatText(chatView(CHAT_FILE, ['a1b2c3d4 2 Per-key limit — 100 or 300 a minute?', 'b2c3d4e5 1 Publish the fixed pages, OK?']), [], [], STRINGS.en, '/home/jane')
+  expect(none).toContain('✓ Nothing needs you right now\n2 answered, hidden\n')
+  expect(none).not.toContain('Waiting on you')
+  expect(chatText(chatView(CHAT_FILE), [], [], STRINGS.en, '/home/jane')).not.toContain('answered, hidden')
+})
+
+const MANY = (count: number): string =>
+  `# Progress\n\n## big-project\n${Array.from({ length: count }, (_, index) => {
+    const n = String(index + 1).padStart(2, '0')
+    return `### Task ${n} with a title that runs on a little\n- [x] Step one\n- [~] Step two for task ${n}, which takes a while to describe\n- [ ] Step three\n- [ ] Step four\n- [ ] Step five\n- [ ] Step six\n`
+  }).join('\n')}`
+
+test('a chat board of 24 tasks fits in one message where the terminal board does not, and a longer one ends with how many it left out', () => {
+  const terminal = boardText(chatView(MANY(24)), [], STRINGS.en, { width: 80, isColor: false })
+  expect(terminal.length).toBeGreaterThan(4096)
+  const full = chatText(chatView(MANY(24)), [], [], STRINGS.en, '/home/jane')
+  expect(full.length).toBeLessThanOrEqual(CHAT_MAX)
+  expect(full.split('\n').filter(line => line.startsWith('▸ '))).toHaveLength(24)
+  expect(full).toContain('▸ big-project › Task 24 with a title that runs on a little — next Step two for task 24, which takes a while to describe\n')
+  expect(full).not.toMatch(/\+\d+ more/)
+  // Three questions and sixty tasks: the questions stay, the last tasks go.
+  const asking = ['c1', 'c2', 'c3'].map(id => `## ask-${id}\n<!-- auto session=${id}${id}${id}${id} agent=codex state=waiting updated=2026-10-17T08:30:00Z -->\n### Question ${id}\n- [?] Which of these do you want for ${id}, A or B?\n<!-- /auto session=${id}${id}${id}${id} -->\n`).join('\n')
+  const cut = chatText(chatView(`${MANY(60)}\n${asking}`), [], [], STRINGS.en, '/home/jane')
+  expect(cut.length).toBeLessThanOrEqual(CHAT_MAX)
+  const shown = cut.split('\n').filter(line => line.startsWith('▸ ')).length
+  const more = /\n\n\+(\d+) more\n$/.exec(cut)
+  expect(more).not.toBeNull()
+  expect(shown + Number(more?.[1])).toBe(60)
+  for (const id of ['c1', 'c2', 'c3']) expect(cut).toContain(`Which of these do you want for ${id}, A or B?`)
+  expect(cut).not.toContain('Task 60')
+  // The line is the language's own.
+  expect(chatText(chatView(`${MANY(60)}`), [], [], ZH_TW, '/home/jane')).toMatch(/\n\n還有 \d+ 項\n$/)
+})
+
+test('a chat board has no colour, no page address and no home folder or credential, whatever the board holds', () => {
+  const file = `# Progress
+
+## docs-site
+<!-- auto session=b2c3d4e5 agent=gemini state=working updated=2026-10-17T08:40:00Z -->
+### Fix the broken links in C:\\Users\\Jane Doe\\site
+- [x] Read C:\\Users\\Jane Doe\\site\\links.md
+- [~] Set OPENAI_API_KEY=sk-test1234567890abcdef, then open http://127.0.0.1:5173/?t=abc123 or https://ci.example.com/run?t=zzz&page=2
+- [ ] Log in with --password hunter2
+<!-- /auto session=b2c3d4e5 -->
+`
+  const pending = peekInbox([{ name: 'gemini-turn-1-1.json', body: JSON.stringify({ session_id: 'g1', cwd: 'C:\\Users\\Jane Doe\\site', prompt_response: 'Deployed with Bearer abc.def.ghi. Retry the upload, OK?' }), at: 1 }])
+  const text = chatText(chatView(file), pending, ['docs-site · Fix the links: Read C:\\Users\\Jane Doe\\x, key=abc'], STRINGS.en, 'C:\\Users\\Jane Doe', true)
+  expect(text).toContain('Fix the broken links in ~\\site')
+  expect(text).toContain('Set OPENAI_API_KEY=•••')
+  expect(text).toContain('https://ci.example.com/run?page=2')
+  expect(text).toContain('  ✓ docs-site · Fix the links: Read ~\\x, key=•••')
+  for (const leak of ['\u001b', 'Jane', 'sk-test', '?t=', 'abc123', 'zzz', 'hunter2', 'abc.def.ghi']) expect(text).not.toContain(leak)
+})
+
+test('a token in a waiting reply is hidden before its question is picked and cut, so no piece of it reaches the chat', () => {
+  const home = '/home/jane'
+  const tokens = [
+    ['ghp', '16C7e42F292c6912E7710c838347Ae178B4a'].join('_'),
+    ['sk', 'live', 'FAKE0fake1FAKE2fake3FAKE'].join('_'),
+    ['github', 'pat', '11ABCDEFG0abcdefghijkl', 'mnopqrstuvwxyz0123456789'].join('_'),
+    ['npm', 'abcdefghijklmnopqrstuvwxyz0123456789'].join('_'),
+    ['hf', 'abcdefghijklmnopqrstuvwxyz0123456'].join('_'),
+  ]
+  const reply = (answer: string) => [{ name: 'openclaw-turn-2-1.json', body: JSON.stringify({ session_id: 'o1', cwd: '/h/.openclaw/workspace', last_assistant_message: answer }), at: 2 }]
+  const told = (answer: string): string => chatText(chatView(CHAT_FILE), peekInbox(reply(answer), undefined, text => redact(text, home)), [], STRINGS.en, home)
+  for (const token of tokens) {
+    const text = told(`Done.\n\nShould I set it to ${token} in CI?`)
+    expect(text).toContain('Should I set it to ••• in CI?')
+    // Not a piece of it, nor the token with its underscores taken out.
+    expect(text).not.toContain(token.slice(4, 14))
+    expect(text).not.toContain(token.replace(/_/g, ''))
+  }
+  // A long address with a password: cut to 120 before its @ it would show the password.
+  const long = told(`Should I use postgres://app:${'x'.repeat(100)}/K7MDENG@dbhost as the URL for the staging database?`)
+  expect(long).toContain('Should I use postgres://•••@dbhost as the URL for the staging database?')
+  expect(long).not.toContain('xxxx')
+  // A question with no token is told as it was, snake_case names whole.
+  expect(told('Should I rename build_all_targets in CI?')).toContain('Should I rename build_all_targets in CI?')
+})
+
+test('a clipped line never shows the start of the home folder or of another account’s folder, even a name with a space in it', () => {
+  const home = 'C:\\Users\\Jane Doe'
+  const shown = (text: string): string => chatText(chatView(`# Progress\n\n## p\n### T\n- [~] ${text}\n`), [], [], STRINGS.en, home, true)
+  // A masked long token pulls what follows it into view, so every place the cut can fall is tried.
+  for (let size = 480; size <= 620; size += 1) {
+    expect(shown(`Bearer ${'A'.repeat(size)} ${home}\\notes\\a.md`)).not.toMatch(/Jane|Doe|Users/)
+    expect(shown(`Bearer ${'A'.repeat(size)} C:\\Users\\Pat Lee\\notes\\a.md`)).not.toMatch(/Pat|Lee|Users/)
+    expect(shown(`Bearer ${'A'.repeat(size)} /mnt/c/Users/Pat Lee/notes/a.md`)).not.toMatch(/Pat|Lee|Users/)
+  }
+  // A line that is not cut tells the folder as ~, as before.
+  expect(shown(`Bearer ${'A'.repeat(520)} ${home}\\notes\\a.md`)).toContain('Bearer ••• ~\\notes\\a.md')
+})
+
+test('a session started in the home folder is shown as ~, not by the person’s name', () => {
+  const file = `# Progress
+
+## Jane Doe
+<!-- auto session=h1h1h1h1 agent=hermes state=waiting updated=2026-10-17T08:30:00Z -->
+### Chat with Hermes
+- [?] Which model should it use?
+<!-- /auto session=h1h1h1h1 -->
+
+## Jane Doe
+### Tidy the notes
+- [~] Sort the files
+
+## acme-web
+### Dark mode
+- [~] Settings page
+`
+  const pending = peekInbox([{ name: 'openclaw-turn-2-1.json', body: JSON.stringify({ session_id: 'o1', cwd: 'C:\\Users\\Jane Doe', last_assistant_message: 'Ship it now?' }), at: 2 }])
+  const text = chatText(chatView(file), pending, ['Jane Doe · Tidy the notes: Sort the files', 'acme-web · Dark mode: Theme'], STRINGS.en, 'C:\\Users\\Jane Doe', true)
+  expect(text).toContain('  ~ · hermes › Chat with Hermes\n')
+  expect(text).toContain('  ~ · openclaw\n    Ship it now?\n')
+  expect(text).toContain('\n▸ ~ › Tidy the notes — next Sort the files\n')
+  expect(text).toContain('  ✓ ~ · Tidy the notes: Sort the files\n')
+  expect(text).not.toMatch(/Jane|Doe/)
+  // Any other project keeps its name, and so does one that only starts with the folder's.
+  expect(text).toContain('▸ acme-web › Dark mode — next Settings page')
+  expect(text).toContain('  ✓ acme-web · Dark mode: Theme')
+  expect(chatText(chatView(file.replace(/## Jane Doe/g, '## Jane Doe Jr')), [], [], STRINGS.en, 'C:\\Users\\Jane Doe', true)).toContain('Jane Doe Jr')
+  // Case does not matter on Windows, and does elsewhere.
+  expect(chatText(chatView(file), [], [], STRINGS.en, 'C:\\Users\\JANE DOE', true)).toContain('▸ ~ › Tidy the notes')
+  expect(chatText(chatView(file), [], [], STRINGS.en, '/home/jane doe')).toContain('▸ Jane Doe › Tidy the notes')
+})
+
+test('what was done today comes from the journal by the local calendar day, in the weekly report’s words', () => {
+  const now = new Date(2026, 9, 17, 15, 30).getTime()
+  const at = (hour: number, minute = 0, day = 17): number => new Date(2026, 9, day, hour, minute).getTime()
+  const entry = (project: string, task: string, step: string, when: number): string => journalLine({ project, task, step }, when, STRINGS.en)
+  const journal = appendJournal('', [
+    entry('docs-site', 'Fix the broken links', 'Find them', at(9)),
+    entry('docs-site', 'Fix the broken links', 'Fix them', at(14, 5)),
+    entry('acme-web', 'Dark mode', 'Theme tokens', at(23, 59, 16)),
+    entry('acme-web', 'Dark mode', 'Settings page', at(0, 1, 17)),
+  ], STRINGS.en)
+  expect(doneToday(journal, now, STRINGS.en)).toEqual(['docs-site · Fix the broken links: Find them, Fix them', 'acme-web · Dark mode: Settings page'])
+  expect(doneToday(journal, new Date(2026, 9, 18, 8).getTime(), STRINGS.en)).toEqual([])
+  expect(doneToday('', now, STRINGS.en)).toEqual([])
+  const text = chatText(chatView(CHAT_FILE), [], doneToday(journal, now, STRINGS.en), STRINGS.en, '/home/jane')
+  expect(text).toContain('\n\n  ✓ docs-site · Fix the broken links: Find them, Fix them\n  ✓ acme-web · Dark mode: Settings page\n')
+})
+
+test('a chat board counts as a look at the board in every language, so the chat reply does not make a block of its own', () => {
+  for (const words of Object.values(STRINGS)) {
+    const text = chatText(buildView(parseProgress(CHAT_FILE), [], null, CHAT_NOW, 0, {}, words, []), [], ['docs-site · Fix the links: Find them'], words, '/home/jane')
+    expect(isBoardAnswer(text)).toBe(true)
+    const turn = readTurn('hermes-turn-1-1.json', JSON.stringify({ session_id: 'h', cwd: '/w/app', prompt: 'where do things stand?', last_assistant_message: text }))
+    expect(isBoardTurn(turn!)).toBe(true)
+  }
+  const cut = chatText(chatView(MANY(60)), [], [], STRINGS.en, '/home/jane')
+  expect(isBoardAnswer(cut)).toBe(true)
+})
+
+test('Hermes Agent’s board skill runs --chat and sends the output as it is, while the shared skill puts the chat app rule first and keeps --serve for any other', () => {
+  const ctx = { home: '/h', sep: '/', isWindows: false, script: '/h/.claude/progress-report.sh', inbox: '/h/.claude/progress-inbox', codexHome: '/h/.codex', grokHome: '/h/.grok', hermesHome: '/h/.hermes', openclawHome: '/h/.openclaw', board: '/h/.claude/agent-board.mjs' }
+  const run = 'node "/h/.claude/agent-board.mjs"'
+  for (const words of Object.values(STRINGS)) {
+    const files = Object.fromEntries(boardCommands({ ...ctx, s: words }).map(hook => [hook.file, hook]))
+    const hermes = String(files['/h/.hermes/skills/agent-board/SKILL.md']?.edit('', false))
+    expect(hermes).toContain(`${run} --chat`)
+    expect(hermes).toContain(words.boardChatSkillPrompt(run))
+    // It never starts the page, and is not asked for the code block and the clickable address the other skill asks for.
+    expect(hermes).not.toContain('--serve')
+    expect(hermes).not.toContain('http')
+    for (const left of ['code block', '程式碼區塊', '代码块', 'the link to the board', '可以點的看板網址', '可以点的看板网址']) expect(hermes).not.toContain(left)
+    const shared = String(files['/h/.agents/skills/agent-board/SKILL.md']?.edit('', false))
+    // An agent that always answers in a chat app (OpenClaw) reads the chat rule first, and is not asked for a code block or a link.
+    expect(shared).toContain(`${run} --serve`)
+    expect(shared).toContain(`${run} --chat`)
+    expect(shared.indexOf(`${run} --chat`)).toBeLessThan(shared.indexOf(`${run} --serve`))
+    expect(shared).toContain(words.boardSkillPrompt(run))
+    expect(String(files['/h/.gemini/config/skills/agent-board/SKILL.md']?.edit('', false))).toBe(shared)
+  }
+  // The request itself is a look at the board, not work.
+  const asked = readTurn('hermes-turn-1-1.json', JSON.stringify({ session_id: 'h', cwd: '/w/app', prompt: STRINGS.en.boardChatSkillPrompt(run), last_assistant_message: 'ok' }))
+  expect(isBoardTurn(asked!)).toBe(true)
+})
+
+test('Hermes Agent’s skill from an earlier release is still the plugin’s own and is updated, and an edited one is kept', () => {
+  const ctx = { home: '/h', sep: '/', isWindows: false, script: '/h/.claude/progress-report.sh', inbox: '/h/.claude/progress-inbox', codexHome: '/h/.codex', grokHome: '/h/.grok', hermesHome: '/h/.hermes', openclawHome: '/h/.openclaw', board: '/h/.claude/agent-board.mjs', s: STRINGS.en }
+  const hermes = boardCommands(ctx).find(hook => hook.agent === 'hermes')
+  const current = String(hermes?.edit('', false))
+  // Before this release Hermes Agent was given the shared skill: the text each earlier release wrote.
+  for (const text of [...RELEASE_0_18_1.skill, ...RELEASE_0_20_5.skill]) {
+    const written = text.split(RELEASE_PATHS.board).join(ctx.board)
+    expect(written).not.toBe(current)
+    expect(hermes?.edit(written, false)).toBe(current)
+    expect(hermes?.edit(`${written}# mine\n`, false)).toBe(COLLISION)
+  }
+  // What the skill of 0.20.5 to 0.20.9 asks of an agent is still known as a look at the board, not work, now that the sentence has a chat rule before it.
+  for (const text of RELEASE_0_20_5.skill) {
+    const prompt = text.split(RELEASE_PATHS.board).join(ctx.board)
+    expect(isBoardTurn(readTurn('hermes-turn-1-1.json', JSON.stringify({ session_id: 'h', cwd: '/w/app', prompt, last_assistant_message: 'ok' }))!)).toBe(true)
+  }
+  // On Windows the plugin writes the command with \, so a file that has / there is not byte for byte its own: it is kept.
+  const windows = { ...ctx, sep: '\\', isWindows: true, hermesHome: 'C:\\Users\\me\\AppData\\Local\\hermes', board: 'C:\\Users\\me\\.claude\\agent-board.mjs' }
+  const onWindows = boardCommands(windows).find(hook => hook.agent === 'hermes')
+  const slashed = String(onWindows?.edit('', false)).replace('C:\\Users\\me\\.claude\\agent-board.mjs', 'C:/Users/me/.claude/agent-board.mjs')
+  expect(onWindows?.edit(slashed, false)).toBe(COLLISION)
 })
 
 test('each agent gets a board command in the form it reads, and a missing reporter never makes a hook exit 2', () => {

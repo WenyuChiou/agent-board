@@ -2,7 +2,8 @@
 // prints the board once, `--watch` keeps it on screen and, on a terminal, lets you work in it
 // the way the pane does (arrows, Enter, x, a, c, digits), and `--html` writes progress.html
 // and opens it. `--serve` prints the board and opens the board's page in the browser, where it
-// can be clicked (board-serve.ts). `/progress connect` writes the bundled copy of this file
+// can be clicked (board-serve.ts). `--chat` prints the board as plain text short enough for a
+// chat app, with no link and no secrets, for an agent that answers there. `/progress connect` writes the bundled copy of this file
 // beside progress.md (scripts/build-board.ts bundles it into hooks/board-script.ts), with the
 // progress file and language the Claude Code session uses set on its first line. `--keys
 // "down x"` plays keys without a terminal and prints the board after them, for tests and checks.
@@ -14,7 +15,7 @@ import { basename, dirname, join, resolve } from 'node:path'
 import { mergeBlock, takeArchivable, takeManualDone, takeTask, setManualStep } from '../hooks/blocks'
 import type { PasteProblem } from '../hooks/blocks'
 import { startServer } from './board-serve'
-import { boardKey, boardScreen, boardText, emptyBoardState, peekInbox, boardItems, pinned } from '../hooks/board'
+import { boardKey, boardScreen, boardText, chatText, doneToday, emptyBoardState, peekInbox, boardItems, pinned, redact } from '../hooks/board'
 import type { BoardAction, BoardState } from '../hooks/board'
 import { LOG_TAIL } from '../hooks/inbox'
 import { dashboardHtml } from '../hooks/dashboard'
@@ -87,7 +88,8 @@ const readLog = (file: string): string => {
   }
 }
 
-const pending = () => {
+// `scrub` hides what must not be sent on, in a reply, before its question is picked and cut.
+const pending = (scrub?: (text: string) => string) => {
   const dir = join(dirname(path), 'progress-inbox')
   let names: string[] = []
   try {
@@ -104,7 +106,7 @@ const pending = () => {
     }
   })
 
-  return peekInbox(files, readLog)
+  return peekInbox(files, readLog, scrub)
 }
 
 const view = () => {
@@ -618,9 +620,42 @@ const serveBoard = async (): Promise<void> => {
   await show(url)
 }
 
+// The home folder, or none when the computer does not say: a failure must not raise another.
+const homeOrNone = (): string => {
+  try {
+    return homedir()
+  } catch {
+    return ''
+  }
+}
+
+// The board for a chat app. Nothing is served, opened or written. Whatever goes wrong, the reply
+// is one plain line, never a stack trace (it names folders and is sent as it is): a file it
+// cannot read says which and why, anything else says what it can, and both go through the same
+// hiding as the board.
+const chat = (): void => {
+  const isWin = process.platform === 'win32'
+  try {
+    const now = Date.now()
+    const home = homeOrNone()
+    // A reply is hidden whole, before its question is picked and cut to length.
+    process.stdout.write(chatText(view(), pending(text => redact(text, home, isWin)), doneToday(read(journalPath(path, now)), now, s), s, home, isWin))
+  } catch (error) {
+    process.exitCode = 1
+    const code = (error as { code?: unknown } | null)?.code
+    const reason = typeof code === 'string' ? code : error instanceof Error ? error.message.split('\n')[0]?.slice(0, 160) || error.name : 'UNKNOWN'
+    // Nothing here writes, so the board's own advice (files "may already have changed") is not told.
+    const told = error instanceof BoardFileError ? s.chatReadFailed(error.file, error.code) : s.chatFailed(reason)
+    process.stdout.write(`${redact(told, homeOrNone(), isWin)}\n`)
+  }
+}
+
 const run = async (): Promise<void> => {
   if (args.includes('--serve-child')) {
     serveChild()
+  } else if (args.includes('--chat')) {
+    // Before the flags that serve, open or write: a chat reply never starts a page.
+    chat()
   } else if (args.includes('--serve')) {
     await serveBoard()
   } else if (args.includes('--html')) {
