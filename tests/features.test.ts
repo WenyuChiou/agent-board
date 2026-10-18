@@ -22,7 +22,7 @@ import { qrModules, qrText } from '../hooks/qr'
 import { RELEASED } from '../hooks/released'
 import { sha256 } from '../hooks/sha256'
 import { RELEASE_0_18_1, RELEASE_0_20_5 } from './fixtures/released'
-import { agentName, buildView, contextOf, handoffOf, replyHint, resumeCommand, resumeVia, statusLine, wayBackText } from '../hooks/view'
+import { agentName, buildView, contextOf, handoffOf, replyHint, resumeCommand, resumeVia, statusLine, wayBackText, withSeen, IDLE_MS } from '../hooks/view'
 
 const NOW = Date.parse('2026-10-16T12:00:00.000Z')
 const SESSION = '2be48af2-6193-5040-aacc-e0546d6784f1'
@@ -234,7 +234,7 @@ test('other work is grouped by project, this one first, with numbered steps, not
   const google = view.groups[1]?.rows[0]
   expect(google?.context).toBe('寫推薦信的是王教授')
   expect(google?.steps[1]).toMatchObject({ number: 2, text: '推薦信', note: '等教授回覆' })
-  expect(view.overview).toEqual({ waiting: 1, active: 2, due: 0, today: 4 })
+  expect(view.overview).toEqual({ waiting: 1, active: 2, due: 0, today: 4, idle: 0 })
 })
 
 test('the model answer becomes a title and a line of background', () => {
@@ -2954,4 +2954,61 @@ test('a project whose name starts with a bracket is matched whole, so the uncate
     ['(PFC) notes', ['Read', 'Write']],
     [ZH_TW.uncategorized, ['Odd']],
   ])
+})
+
+
+test('progress.html lists idle tasks in a closed shelf with their count', () => {
+  const projects = parseProgress('## demo\n### Old <plan>\n- [?] Publish, OK?\n- [ ] Finish\n')
+  const seen = withSeen({}, projects, NOW - 9 * 24 * 60 * 60 * 1000)
+  const view = buildView(projects, [], null, NOW, 0, {}, STRINGS.en, [], seen)
+  const html = dashboardHtml(view, STRINGS.en, '/tmp/progress.md', 'now')
+  expect(html).toContain('<details class="section" data-key="section:idle">')
+  expect(html).not.toContain('data-key="section:idle" open')
+  expect(html).toContain('1 idle 7+ days')
+  expect(html).toContain('Old &lt;plan&gt;')
+  expect(html).toContain('9 days ago')
+  expect(html).toContain('Publish, OK?')
+  expect(html).not.toContain('data-key="section:waiting"')
+  expect(html).not.toContain('data-key="section:others"')
+})
+
+test('every language has the idle count words', () => {
+  expect(STRINGS.en.idleCount(2)).toBe('2 idle 7+ days')
+  expect(STRINGS['zh-TW'].idleCount(2)).toBe('2 項超過 7 天沒動')
+  expect(STRINGS['zh-CN'].idleCount(2)).toBe('2 项超过 7 天没动')
+  for (const words of Object.values(STRINGS)) {
+    expect(words.boardKeyIdle).toMatch(/^i /)
+    expect(words.boardUsage).toContain('--all')
+    expect(pageWords(words).idleCount).toBe(words.idleCount(1).replace('1', '\u0001'))
+  }
+})
+
+test('the idle shelf keeps terminal and page row actions without putting its question back in Waiting on you', () => {
+  const projects = parseProgress('## demo\n### Plan\n- [?] Publish, OK?\n- [ ] Finish\n')
+  const view = buildView(projects, [], null, NOW, 0, {}, STRINGS.en, [], withSeen({}, projects, NOW - IDLE_MS - 1))
+  const closed = boardScreen(view, [], emptyBoardState, STRINGS.en)
+  expect(closed).toContain('1 idle 7+ days · i show/hide idle')
+  expect(closed).not.toContain('Publish, OK?')
+  expect(boardItems(view, [], false)).toEqual([])
+  const toggled = boardKey(emptyBoardState, 'i', [], STRINGS.en)
+  expect(toggled.action).toBe(null)
+  const items = boardItems(view, [], toggled.state.isIdleOpen)
+  const state = pinned(toggled.state, items)
+  const opened = boardScreen(view, [], state, STRINGS.en)
+  expect(opened).toContain('Plan')
+  expect(opened).toContain('7 days ago')
+  expect(boardKey(state, 'x', items, STRINGS.en).action?.type).toBe('tick')
+  expect(boardKey(state, 'a', items, STRINGS.en).action?.type).toBe('archive')
+  expect(boardText(view, [], STRINGS.en, { width: 100, isColor: false, isIdleOpen: true })).toContain('Publish, OK?')
+  const model = serveModel(view, [], STRINGS.en)
+  expect(model.asks).toEqual([])
+  expect(model.groups).toEqual([])
+  expect(model.counts.waiting).toBe(0)
+  expect(model.idle).toHaveLength(1)
+  const row = model.idle[0]
+  expect(row?.question).toBe('Publish, OK?')
+  expect(row?.canArchive).toBe(true)
+  expect(serveAction(boardItems(view, []), { key: row?.key ?? '', type: 'tick', text: row?.next ?? '', session: '', fp: row?.fp }, STRINGS.en).type).toBe('tick')
+  expect(serveAction(boardItems(view, []), { key: row?.key ?? '', type: 'archive', text: '', session: '', fp: row?.fp }, STRINGS.en).type).toBe('archive')
+  expect(servePage(STRINGS.en, 'nonce')).toContain("opened['idle:'] === true")
 })

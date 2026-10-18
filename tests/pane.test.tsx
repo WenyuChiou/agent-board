@@ -8,7 +8,8 @@ import { ZH_TW } from '../hooks/i18n'
 import { EN } from '../hooks/strings-en'
 import { ZH_CN } from '../hooks/strings-zh-cn'
 import { dashboardHtml } from '../hooks/dashboard'
-import { buildView } from '../hooks/view'
+import { buildView, IDLE_MS, parseSeen, seenJson, seenPath, withSeen } from '../hooks/view'
+import { parseProgress } from '../hooks/parse'
 import { RELEASE_0_18_1, RELEASE_0_20_5 } from './fixtures/released'
 
 const FILE = '/home/me/.claude/progress.md'
@@ -4135,4 +4136,95 @@ test('an exact pre-ownership board and command from a release upgrade in the lan
   const removed = await $.command.run({ ...TIDY, args: 'connect remove' })
   expect(removed.text).toContain('清理尚未完成')
   expect(world.files.get(board)).toBe(personal)
+})
+
+
+test('the pane hides idle tasks behind one toggle and shows them with their age when opened', async ($, on) => {
+  const at = Date.parse('2026-10-16T12:00:00Z')
+  const board = '## demo\n### Old plan\n- [?] Publish, OK?\n- [ ] Finish\n'
+  const record = seenJson(withSeen({}, parseProgress(board), at - 9 * 24 * 60 * 60 * 1000))
+  const world: World = { files: new Map([[FILE, board], [seenPath(FILE), record]]), mtime: 1, hasTasks: true }
+  engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/persona_framework', surface: 'desktop', isInteractive: true })
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
+  expect(await ui.find({ type: 'Button', key: 'demo::Old plan' })).toBeUndefined()
+  expect(await ui.find({ type: 'Button', key: 'section::idle', text: '▸ 1 項超過 7 天沒動' })).toBeDefined()
+  expect(await ui.find({ type: 'Button', key: 'section::waiting' })).toBeUndefined()
+  expect(await ui.find({ type: 'Text', text: '● 0' })).toBeDefined()
+  await ui.press({ key: 'section::idle' })
+  expect(await ui.find({ type: 'Button', key: 'demo::Old plan' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /9 天前/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: 'Publish, OK?' })).toBeDefined()
+  await ui.press({ key: 'demo::Old plan' })
+  expect(await ui.find({ type: 'Button', key: 'demo::Old plan::tick' })).toBeDefined()
+  expect(await ui.find({ type: 'Button', key: 'demo::Old plan::archive' })).toBeDefined()
+  await ui.press({ key: 'section::idle' })
+  expect(world.files.get(FILE)).toBe(board)
+  expect(world.files.get(seenPath(FILE))).toBe(record)
+  await ui.unmount()
+})
+
+test('the pane records first observations once and keeps undated work visible when its record cannot be read or written', async ($, on) => {
+  const board = '## demo\n### Fresh plan\n- [ ] Finish\n'
+  const world: World = { files: new Map([[FILE, board]]), mtime: 1, hasTasks: true }
+  const clock = engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/persona_framework', surface: 'desktop', isInteractive: true })
+  const record = world.files.get(seenPath(FILE))
+  expect(record).toBeDefined()
+  await clock.advance(5000)
+  expect(world.files.get(seenPath(FILE))).toBe(record)
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
+  world.files.set(seenPath(FILE), seenJson(withSeen({}, parseProgress(board), Date.parse('2026-10-16T12:00:00Z') - IDLE_MS - 1)))
+  world.mtime += 1
+  await clock.advance(5000)
+  expect(await ui.find({ type: 'Button', key: 'section::idle' })).toBeDefined()
+  // A record that turns unreadable (a lock or a permission change) has a new stat too.
+  world.unreadable = new Set([seenPath(FILE)])
+  world.mtime += 1
+  await clock.advance(5000)
+  expect(await ui.find({ type: 'Button', key: 'section::idle' })).toBeUndefined()
+  world.unreadable = new Set()
+  world.unwritable = new Set([seenPath(FILE)])
+  await clock.advance(5000)
+  expect(await ui.find({ type: 'Button', key: 'section::idle' })).toBeDefined()
+  // A record that is read but cannot be written keeps the times it holds; a task it does not
+  // know yet stays on the board.
+  world.files.set(FILE, board + '### New plan\n- [ ] Finish\n')
+  world.mtime += 1
+  // One poll: the one that fails to write.
+  await clock.advance(2000)
+  expect(await ui.find({ type: 'Button', key: 'section::others' })).toBeDefined()
+  expect(await ui.find({ type: 'Button', key: 'section::idle', text: '▸ 1 項超過 7 天沒動' })).toBeDefined()
+  await clock.advance(70000)
+  expect(await ui.find({ type: 'Button', key: 'section::others' })).toBeDefined()
+  expect(await ui.find({ type: 'Button', key: 'section::idle' })).toBeDefined()
+  await ui.unmount()
+})
+
+test("one empty read of progress.md does not reset a task's first-seen time", async ($, on) => {
+  const board = '## demo\n### Old plan\n- [ ] Finish\n'
+  const old = seenJson(withSeen({}, parseProgress(board), Date.parse('2026-10-16T12:00:00Z') - IDLE_MS - 1))
+  const world: World = { files: new Map([[FILE, board], [seenPath(FILE), old]]), mtime: 1, hasTasks: true }
+  const clock = engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/persona_framework', surface: 'desktop', isInteractive: true })
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
+  await clock.advance(5000)
+  expect(await ui.find({ type: 'Button', key: 'section::idle' })).toBeDefined()
+  // Another program empties the file before writing it again, and the pane reads it in between,
+  // even for a whole poll.
+  world.files.set(FILE, '')
+  world.mtime += 1
+  await clock.advance(5000)
+  world.files.set(FILE, board)
+  world.mtime += 1
+  await clock.advance(5000)
+  expect(world.files.get(seenPath(FILE))).toBe(old)
+  expect(await ui.find({ type: 'Button', key: 'section::idle' })).toBeDefined()
+  // A task gone for good leaves the record once the file has held still.
+  world.files.set(FILE, '## demo\n### New plan\n- [ ] Start\n')
+  world.mtime += 1
+  await clock.advance(5000)
+  const kept = parseSeen(world.files.get(seenPath(FILE)) ?? '') ?? {}
+  expect(Object.keys(kept)).toEqual(Object.keys(withSeen({}, parseProgress(world.files.get(FILE) ?? ''), 1)))
+  await ui.unmount()
 })

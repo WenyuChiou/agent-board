@@ -15,7 +15,7 @@ import {
   stateOf,
 } from '../hooks/mirror'
 import { parseProgress } from '../hooks/parse'
-import { answeredJson, answeredPath, buildView, dueDays, foldSteps, keptAnswered, parseAnswered, relativeTime, withAnswered } from '../hooks/view'
+import { answeredJson, answeredPath, buildView, dueDays, foldSteps, IDLE_MS, keptAnswered, parseAnswered, parseSeen, relativeTime, seenJson, seenPath, taskFingerprint, withAnswered, withSeen } from '../hooks/view'
 
 const NOW = Date.parse('2026-10-16T12:00:00.000Z')
 const HOUR = 60 * 60 * 1000
@@ -439,4 +439,126 @@ test('a question from every agent that writes a block can be marked answered', (
   const hidden = buildView(parseProgress(file), [], null, NOW, 0, {}, ZH_TW, keys)
   expect(hidden.waiting).toEqual([])
   expect(hidden.hidden.map(item => item.agent || 'claude').sort()).toEqual([...agents].sort())
+})
+
+
+test('a task idle exactly seven days stays on the board and one idle a millisecond longer is hidden', () => {
+  const file = (at: number): string => `## demo
+<!-- auto session=a1b2c3d4 state=ended updated=${new Date(at).toISOString()} -->
+### Old work
+- [ ] Finish
+<!-- /auto session=a1b2c3d4 -->`
+  const boundary = buildView(parseProgress(file(NOW - IDLE_MS)), [], null, NOW)
+  expect(boundary.active).toHaveLength(1)
+  expect(boundary.idle).toEqual([])
+  const older = buildView(parseProgress(file(NOW - IDLE_MS - 1)), [], null, NOW)
+  expect(older.active).toEqual([])
+  expect(older.groups).toEqual([])
+  expect(older.idle[0]?.when).toBe(relativeTime(NOW - IDLE_MS - 1, NOW))
+  expect(older.overview.idle).toBe(1)
+})
+
+test('a hand-kept task is aged from when its content was first seen, and editing a step makes it fresh again', () => {
+  const file = '## demo\n### Plan\n> Context: a note\n- [ ] Finish\n'
+  const projects = parseProgress(file)
+  const seen = withSeen({}, projects, NOW - IDLE_MS - 1)
+  const view = (text: string) => buildView(parseProgress(text), [], null, NOW, 0, {}, ZH_TW, [], seen)
+  expect(view(file).idle).toHaveLength(1)
+  expect(view(file.replace('a note', 'another note').replace('- [ ] Finish', '  - [ ] Finish  ')).idle).toHaveLength(1)
+  expect(view(file.replace('Finish', 'Finish carefully')).idle).toEqual([])
+  expect(view(file.replace('[ ]', '[~]')).active).toHaveLength(1)
+  expect(withSeen(seen, projects, NOW)).toEqual(seen)
+  expect(Object.keys(seen)[0]).toMatch(/^[0-9a-f]{64}$/)
+})
+
+test('a hand-kept task the seen record does not know is never hidden', () => {
+  const file = `## demo
+### Unknown
+- [ ] Finish
+<!-- auto session=a1b2c3d4 state=waiting updated=invalid -->
+### Undated block
+- [?] Continue, OK?
+<!-- /auto session=a1b2c3d4 -->`
+  const projects = parseProgress(file)
+  expect(buildView(projects, [], null, NOW).idle).toEqual([])
+  expect(buildView(projects, [], null, NOW, 0, {}, ZH_TW, [], parseSeen('{', 6000) ?? {}).idle).toEqual([])
+  const seen = withSeen({}, projects, NOW - IDLE_MS - 1)
+  const aged = buildView(projects, [], null, NOW, 0, {}, ZH_TW, [], seen)
+  expect(aged.idle.map(row => row.title)).toEqual(['Unknown', 'Undated block'])
+  expect(aged.waiting).toEqual([])
+})
+
+test("an idle task's question leaves Waiting on you and the counts but stays in its idle row", () => {
+  const projects = parseProgress('## demo\n### Question\n- [?] Publish, OK?\n')
+  const seen = withSeen({}, projects, NOW - 9 * 24 * HOUR)
+  const view = buildView(projects, [], null, NOW, 0, {}, ZH_TW, [], seen)
+  expect(view.waiting).toEqual([])
+  expect(view.hidden).toEqual([])
+  expect(view.overview).toEqual({ waiting: 0, active: 0, due: 0, today: 0, idle: 1 })
+  expect(view.focus).toBe(null)
+  expect(view.idle[0]?.question).toBe('Publish, OK?')
+  expect(view.idle[0]?.when).toBe(relativeTime(NOW - 9 * 24 * HOUR, NOW))
+  expect(view.idle[0]?.next).not.toBe(null)
+  expect(view.idle[0]?.archive).not.toBe(null)
+})
+
+test("a task due within two weeks, this session's own block and a future timestamp are never hidden as idle", () => {
+  const file = `## demo
+### Due
+> due 2026-10-30
+- [?] Ship, OK?
+### Late
+> due 2026-10-15
+- [ ] Finish
+### Later
+> due 2026-10-31
+- [ ] Finish
+### Completed
+- [x] Finished
+<!-- auto session=2be48af2 state=working updated=2026-09-01T12:00:00Z -->
+### Mine
+- [~] Work
+<!-- /auto session=2be48af2 -->
+<!-- auto session=a1b2c3d4 state=working updated=2026-11-01T12:00:00Z -->
+### Future
+- [~] Work
+<!-- /auto session=a1b2c3d4 -->`
+  const projects = parseProgress(file)
+  const seen = withSeen({}, projects, NOW - IDLE_MS - 1)
+  const view = buildView(projects, [], sampleMirror(), NOW, 0, {}, ZH_TW, [], seen)
+  expect(view.idle.map(row => row.title)).toEqual(['Later'])
+  expect(view.due.map(row => row.title)).toEqual(['Late', 'Due'])
+  // A due task's question stays in Waiting on you, however long it has waited.
+  expect(view.waiting.map(item => item.text)).toContain('Ship, OK?')
+  expect(view.current).not.toBe(null)
+  expect(view.active.map(row => row.title)).toEqual(['Future'])
+  expect(view.recent.some(row => row.title === 'Completed')).toBe(true)
+  const futureSeen = withSeen({}, parseProgress('## demo\n### Future manual\n- [ ] Finish'), NOW + 1)
+  expect(buildView(parseProgress('## demo\n### Future manual\n- [ ] Finish'), [], null, NOW, 0, {}, ZH_TW, [], futureSeen).idle).toEqual([])
+})
+
+test('the seen record keeps the earliest time per task, drops tasks no longer in the file only once it has held still, and reads a broken file as empty', () => {
+  const projects = parseProgress('## demo\n### Plan\n- [ ] Finish\n')
+  const earlier = withSeen({}, projects, NOW - IDLE_MS - 1)
+  const later = withSeen({}, projects, NOW)
+  expect(withSeen(later, projects, NOW, earlier)).toEqual(earlier)
+  expect(withSeen(earlier, projects, NOW, later)).toEqual(earlier)
+  // One read of a file caught empty keeps every task's age; a file that held still drops them.
+  expect(withSeen(earlier, [], NOW)).toEqual(earlier)
+  expect(withSeen({}, [], NOW, earlier)).toEqual(earlier)
+  expect(withSeen(earlier, [], NOW, {}, true)).toEqual({})
+  const other = parseProgress('## demo\n### Other\n- [ ] Start\n')
+  expect(Object.keys(withSeen(earlier, other, NOW))[0]).toBe(Object.keys(withSeen({}, other, NOW))[0])
+  expect(parseSeen(seenJson(earlier))).toEqual(earlier)
+  expect(parseSeen('{', 4999)).toBe(null)
+  expect(parseSeen('{', -4999)).toBe(null)
+  expect(parseSeen('{', 5000)).toEqual({})
+  for (const text of ['', 'null', '[]', '{"seen":[]}', '{"seen":null}', '{"seen":5}']) expect(parseSeen(text)).toEqual({})
+  const key = Object.keys(earlier)[0] ?? ''
+  for (const value of ['0', '-1', '1e400', '"123"', 'null']) expect(parseSeen(`{"seen":{"${key}":${value}}}`)).toEqual({})
+  const many = parseProgress('## demo\n' + Array.from({ length: 510 }, (_, i) => `### Task ${i}\n- [ ] Finish\n`).join(''))
+  expect(Object.keys(withSeen({}, many, NOW))).toHaveLength(500)
+  expect(Object.keys(parseSeen(seenJson(Object.fromEntries(many[0]?.tasks.map(task => [taskFingerprint('demo', task), NOW]) ?? []))) ?? {})).toHaveLength(500)
+  expect(seenPath('/tmp/progress.md')).toBe('/tmp/progress-seen.json')
+  expect(seenPath('/tmp/BOARD.MD')).toBe('/tmp/BOARD-seen.json')
 })

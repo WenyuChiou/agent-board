@@ -8,7 +8,7 @@ A Claude Code plugin that also follows Codex, Gemini CLI, OpenCode, Grok Build, 
 </p>
 
 <p align="center">
-<a href="CHANGELOG.md"><img alt="Version 0.21.3" src="https://img.shields.io/badge/version-0.21.3-blue"></a>
+<a href="CHANGELOG.md"><img alt="Version 0.22.0" src="https://img.shields.io/badge/version-0.22.0-blue"></a>
 <a href="#quick-start"><img alt="Needs Claude Code 2.1.287 or newer" src="https://img.shields.io/badge/Claude%20Code-%E2%89%A5%202.1.287-d97757"></a>
 <a href="LICENSE"><img alt="MIT license" src="https://img.shields.io/badge/license-MIT-green"></a>
 <img alt="macOS, Linux, Windows" src="https://img.shields.io/badge/macOS%20%C2%B7%20Linux%20%C2%B7%20Windows-lightgrey">
@@ -34,7 +34,7 @@ You have Claude Code on one project, Codex on another, Gemini on a third. Twenty
 - **Your own to-dos too.** Type `+ Job search: Fabrikam fellowship due 11-20` in the pane's box. Due dates turn the row amber, then red.
 - **Outside the terminal.** `/progress open` shows the same view in your browser (it works on a phone too), and other agents open [a page you can click](#the-boards-page) to tick, archive and answer. The status line and desktop notifications tell you when something needs you while the pane is closed.
 - **Reports.** `/progress report` and `/progress today` copy what got done, as text.
-- **Tidies itself.** Finished work moves to a monthly archive; a journal keeps every finished step.
+- **Tidies itself.** Finished work moves to a monthly archive; a journal keeps every finished step. Work nobody has touched for more than a week steps aside behind one **N idle 7+ days** line, with nothing in the file changed.
 - **One plain Markdown file.** Everything is in `~/.claude/progress.md`, which you can read and edit. English, 繁體中文 and 简体中文; light and dark.
 
 ## How it works
@@ -143,6 +143,7 @@ Connecting also gives each agent a way to show the board, so whichever one you a
 | `1`–`9`, `y` / `n` | Copy the answer to another agent's question, to paste in that agent |
 | `c` | Copy a command, or the command that reopens the session that asked (its ID where there is none) |
 | `h`, `u` | Mark another agent's question already answered: hidden on this computer, nothing sent; show the hidden ones again |
+| `i` | Show or fold the tasks idle more than 7 days |
 | `o`, `q` | Open the browser view; quit |
 
 Finished work leaves the board by itself. The board writes `progress.md` as carefully as the pane does, and leaves other sessions' blocks alone unless you archive one that has stopped.
