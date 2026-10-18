@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.22.1 — 2026-10-18
+
+`/progress connect remove` deletes the board's SKILL.md and then its folder, if the folder is
+empty. A failed folder removal was ignored, so the remove said it was done while an empty
+folder stayed, and a later remove never looked at it again (#95).
+
+- **An empty skill folder that stays is named.** The removal runs first (it refuses a folder
+  with anything in it); a folder that is gone, or stays because something else is in it, is
+  fine. An empty folder that stays, or one that cannot be looked into, is named, the remove is
+  reported incomplete, and `/progress connect status` lists it. The board script still goes,
+  since nothing runs it once the skill is gone. A later remove tries the folder again. The
+  message now says "this path", since it names folders too. Tests: "an empty skill folder that
+  cannot be removed is named by the remove, and the status still lists it", "a second remove
+  names the empty skill folder again, and takes it once it can", "a skill folder with another
+  file in it stays and nothing is reported", "a skill folder that cannot be listed is reported
+  and left in place", "an empty skill folder is reported when its removal is rejected", "an
+  empty skill folder is reported when its removal is falsely successful", "an empty skill
+  folder is removed successfully".
+
 ## 0.22.0 — 2026-10-18
 
 Work nobody had touched for a week still filled the board. A hand-kept task carries no time,
