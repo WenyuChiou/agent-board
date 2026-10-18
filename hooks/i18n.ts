@@ -249,7 +249,7 @@ export const ZH_TW = {
   setupNoState: '還沒有設定紀錄：開一個新對話，或跑 /progress connect。',
   setupRemoved: '回報用的 hook 已經拿掉了。要再接上：/progress connect。',
   connectPreserved: (path: string): string => `已保留既有或修改過的檔案：${path}。若要讓 Agent Board 使用這個路徑，請先將它移到其他名稱，再重新連接。`,
-  connectRemoveFailed: (path: string): string => `無法確認移除結果；請檢查這個檔案，再重試 /progress connect remove：${path}`,
+  connectRemoveFailed: (path: string): string => `無法確認移除結果；請檢查這個位置，再重試 /progress connect remove：${path}`,
   connectRemoveIncomplete: '清理尚未完成。下方列出已保留或無法確認移除的檔案。',
   connectBoardRetained: (path: string): string => `仍有指令檔未移除，因此保留共用看板程式：${path}`,
   connectAttention: 'Agent Board 設定需要處理',

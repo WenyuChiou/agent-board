@@ -211,7 +211,7 @@ export const EN: Strings = {
   setupNoState: 'No setup record yet: start a new session, or run /progress connect.',
   setupRemoved: 'The reporting hooks are taken out. To connect again: /progress connect.',
   connectPreserved: (path: string): string => `Preserved an existing or modified file: ${path}. Move it to another name before reconnecting if you want Agent Board to use this path.`,
-  connectRemoveFailed: (path: string): string => `Could not verify removal; inspect this file and retry /progress connect remove: ${path}`,
+  connectRemoveFailed: (path: string): string => `Could not verify removal; inspect this path and retry /progress connect remove: ${path}`,
   connectRemoveIncomplete: 'Cleanup is incomplete. Preserved or unverified files are listed below.',
   connectBoardRetained: (path: string): string => `Kept the shared board script because some command files remain: ${path}`,
   connectAttention: 'Agent Board setup needs attention',

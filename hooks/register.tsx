@@ -231,10 +231,24 @@ const removeFiles = async ($: EngineInterface, files: readonly string[], isWin: 
   return true
 }
 
-const removeEmptyDir = async ($: EngineInterface, dir: string, isWin: boolean): Promise<void> => {
-  const argv = isWin ? ['powershell', '-NoProfile', '-Command', `[IO.Directory]::Delete(${psQuote(dir)})`] : ['rmdir', dir]
-  await $.process.run(argv, { timeoutMs: 10000 }).catch(() => undefined)
+// A skill's folder once its SKILL.md is gone: true when the folder is gone, or stays because
+// something else is in it (the person's, so it is kept); false when an empty folder could not
+// be removed, or could not be looked into. Removing refuses a folder with anything in it, so it
+// runs first, and the folder is looked into only when it stays.
+const removeEmptyDir = async ($: EngineInterface, dir: string, isWin: boolean): Promise<boolean> => {
+  try {
+    if (!(await $.fs.exists(dir))) return true
+    const argv = isWin ? ['powershell', '-NoProfile', '-Command', `[IO.Directory]::Delete(${psQuote(dir)})`] : ['rmdir', dir]
+    await $.process.run(argv, { timeoutMs: 10000 }).catch(() => undefined)
+    if (!(await $.fs.exists(dir))) return true
+
+    return (await $.fs.list(dir)).length > 0
+  } catch {
+    return false
+  }
 }
+
+const skillFolder = (file: string): string | null => (/[\\/]SKILL\.md$/.test(file) ? file.replace(/[\\/][^\\/]*$/, '') : null)
 
 // A rename either happens or fails as a whole, so two sessions renaming one file cannot both
 // succeed: true for the one that did.
@@ -1060,12 +1074,22 @@ const connectAgents = async (
   // Agents with a hook file that could not be written. OpenClaw's config entry loads its
   // plugin file, so when the plugin file fails, the entry is not written either.
   const failed = new Set<string>()
+  // A skill is a folder of ours; an agent may complain of one left without its SKILL.md. Only
+  // an empty folder goes, so anything the person added stays. One that stays empty is named, the
+  // board script still goes (nothing runs it), and the next remove looks at the folder again.
+  const tidyFolder = async (folder: string | null, label: string): Promise<void> => {
+    if (folder === null || (await removeEmptyDir($, folder, isWin))) return
+    warn(`removeFailed:${folder}`, s.connectRemoveFailed(folder))
+    failedLabels.add(label)
+  }
   for (const hook of agentHooks({ home, sep, isWindows: isWin, script, inbox: inboxPath(path), codexHome, grokHome, hermesHome, openclawHome, board, s: STRINGS[fileLang] })) {
     let isInstalled = false
     for (const dir of hook.dirs ?? [hook.dir]) isInstalled = isInstalled || (await $.fs.exists(dir))
     // Taking the hooks out goes by our own files, so one an earlier connect left where the
-    // agent is not (or is no longer) found comes out too.
-    if (remove) for (const file of [hook.file, ...(hook.old === undefined ? [] : [hook.old])]) isInstalled = isInstalled || (await $.fs.exists(file))
+    // agent is not (or is no longer) found comes out too, and so does a skill folder an earlier
+    // remove could not take away.
+    const folder = skillFolder(hook.file)
+    if (remove) for (const file of [hook.file, ...(hook.old === undefined ? [] : [hook.old]), ...(folder === null ? [] : [folder])]) isInstalled = isInstalled || (await $.fs.exists(file))
     if (!isInstalled) continue
     // Found, but its reporter or the board script is not ours to run: the problem with that
     // file is named above, and the agent is named as not set up.
@@ -1128,6 +1152,7 @@ const connectAgents = async (
       }
       if (remove && before.trim() === '') {
         if (hadOld) done.push(hook.label)
+        if (!exists) await tidyFolder(folder, hook.label)
         continue
       }
       if (after === null) {
@@ -1142,9 +1167,7 @@ const connectAgents = async (
       }
       if (after === DELETE) {
         await removeFile(hook.file)
-        // A skill is a folder of ours; an agent may complain of one left without its SKILL.md.
-        // Only an empty folder goes, so anything the person added stays.
-        if (/[\\/]SKILL\.md$/.test(hook.file)) await removeEmptyDir($, hook.file.replace(/[\\/][^\\/]*$/, ''), isWin)
+        await tidyFolder(folder, hook.label)
       } else if (after !== before) {
         await writeFile(hook.file, after, hook.generated)
       } else if (!remove && hook.generated) {

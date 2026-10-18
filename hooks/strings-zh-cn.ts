@@ -210,7 +210,7 @@ export const ZH_CN: Strings = {
   setupNoState: '还没有设置记录：开一个新对话，或运行 /progress connect。',
   setupRemoved: '汇报用的 hook 已经去掉了。要再接上：/progress connect。',
   connectPreserved: (path: string): string => `已保留现有或修改过的文件：${path}。如需让 Agent Board 使用此路径，请先将它移到其他名称，再重新连接。`,
-  connectRemoveFailed: (path: string): string => `无法确认移除结果；请检查此文件，再重试 /progress connect remove：${path}`,
+  connectRemoveFailed: (path: string): string => `无法确认移除结果；请检查此位置，再重试 /progress connect remove：${path}`,
   connectRemoveIncomplete: '清理尚未完成。下方列出已保留或无法确认移除的文件。',
   connectBoardRetained: (path: string): string => `仍有命令文件未移除，因此保留共享看板程序：${path}`,
   connectAttention: 'Agent Board 配置需要处理',
