@@ -2,8 +2,12 @@ import { expect, test } from 'claude-code/testing'
 import { agentHooks, COLLISION, DELETE, openclawPlugin, opencodePlugin } from '../hooks/connect'
 import { answerAgentPrompt, blockId, inboxOrder, normalizeTurnOrder, readTurn, turnOrder, turnsToDigest, withAgentPrompts } from '../hooks/inbox'
 import { emptyMirror, isStaleStoreKey } from '../hooks/mirror'
-import { applyDigest } from '../hooks/digest'
+import { answerTurns, applyDigest, markAsked } from '../hooks/digest'
 import { peekInbox } from '../hooks/board'
+import { stepWords, upsertAutoBlock } from '../hooks/blocks'
+import { parseProgress } from '../hooks/parse'
+import { emptyQuestions, observeQuestions } from '../hooks/questions'
+import { EN } from '../hooks/strings-en'
 
 const CTX = { home: '/h', sep: '/', isWindows: false, script: '/h/progress-report.sh', inbox: '/h/progress-inbox', codexHome: '/h/.codex', grokHome: '/h/.grok', hermesHome: '/h/.hermes', openclawHome: '/h/.openclaw' }
 const AT = Date.parse('2026-10-16T12:00:00Z')
@@ -52,6 +56,29 @@ test('prompt ordering preserves saved binary turn and end numbers and answers on
   expect(normalizeTurnOrder(1792152000 * 2 + 1)).toBe(1792152000000 * 2 + 1)
   expect(turnOrder({ event: 'end', at: AT })).toBe(AT * 2 + 1)
   expect(['codex-end-1792152000-1.json', 'codex-turn-1792152000-1.json', 'codex-prompt-1792152000-1.json'].sort(inboxOrder)).toEqual(['codex-prompt-1792152000-1.json', 'codex-turn-1792152000-1.json', 'codex-end-1792152000-1.json'])
+})
+
+test("a prompt keeps the answered question's words on its finished step, so the question's record closes", () => {
+  const asked = { ...markAsked(applyDigest(emptyMirror(ID, 'demo', AT, '/demo', 'codex'), { title: 'Release', context: '', done: '', next: 'Ship it', ask: '', why: '' }, AT), 'Ship it to staging now, OK?'), resume: SESSION, turnOrder: AT * 2 }
+  // A note the block writer cleans (a leading `#`, runs of spaces) must close the same way.
+  const cleaned = { ...applyDigest(emptyMirror(ID, 'demo', AT, '/demo', 'codex'), { title: 'Migration', context: '', done: '', next: 'Continue', ask: 'Database', why: '#42 is failing,   retry?' }, AT), resume: SESSION, turnOrder: AT * 2 }
+  for (const current of [mirror(), asked, cleaned]) {
+    const before = upsertAutoBlock('# Progress\n', current, EN)
+    const waiting = observeQuestions(emptyQuestions(), parseProgress(before), null, [], AT + 500, true).ledger
+    expect(waiting.records.filter(record => record.isUnresolved)).toHaveLength(1)
+    const answered = upsertAutoBlock(before, answerAgentPrompt(current, prompt(), AT + 2000)!, EN)
+    expect(answered).toContain(`- [x] ${waiting.records[0]!.words}`)
+    expect(observeQuestions(waiting, parseProgress(answered), null, [], AT + 2500, true).ledger.records.filter(record => record.isUnresolved)).toEqual([])
+  }
+})
+
+test("the person's next prompt keeps this session's summed-up question's words on its finished step, so its record closes", () => {
+  const mine = applyDigest(emptyMirror('own-session', 'demo', AT, '/demo'), { title: 'Migration', context: '', done: '', next: 'Continue', ask: 'Database', why: '#7 or staging?' }, AT)
+  const open = observeQuestions(emptyQuestions(), [], mine, [], AT + 500, true).ledger
+  expect(open.records.filter(record => record.isUnresolved)).toHaveLength(1)
+  const answered = answerTurns(mine)
+  expect(answered.tasks.filter(task => task.status === 'completed').map(task => stepWords(task))).toEqual([open.records[0]!.words])
+  expect(observeQuestions(open, [], answered, [], AT + 1000, true).ledger.records.filter(record => record.isUnresolved)).toEqual([])
 })
 
 test('a known agent without a valid stored source clock keeps its questions despite a later heartbeat', () => {

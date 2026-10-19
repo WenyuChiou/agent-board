@@ -800,6 +800,23 @@ test('another agent prompt immediately answers its visible question without a mo
   expect(world.files.get(FILE)?.endsWith(foreign)).toBe(true)
 })
 
+test("a prompt that answers another agent's question takes it off Waiting on you and closes its question record", async ($, on) => {
+  const { world } = questionWorld()
+  const ledger = () => (JSON.parse(world.files.get(FILE.replace('.md', '-questions.json')) ?? '{"records":[]}').records as Array<{ words: string; isUnresolved?: boolean }>).filter(row => row.isUnresolved)
+  const clock = engineBeneath(on, world)
+  await probeStart($)
+  await clock.advance(5000)
+  expect(ledger().map(row => row.words)).toEqual(['Database — Use staging?'])
+  addPrompt(world, PROMPT_AT + 1000)
+  await clock.advance(5000)
+  expect(world.files.get(FILE)).toContain('- [x] Database — Use staging?')
+  expect(ledger()).toEqual([])
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
+  expect(await ui.find({ type: 'Text', text: '● 0' })).toBeDefined()
+  expect(JSON.stringify(await ui.drawn())).not.toContain('Use staging?')
+  await ui.unmount()
+})
+
 test('unknown stale equal-clock and unclocked agent prompts change neither mirrors nor board', async ($, on) => {
   const { world, mirror } = questionWorld()
   const before = world.files.get(FILE)
@@ -881,7 +898,9 @@ test('another session prompt barrier survives an older digest read-back retry', 
   await probeStart($)
   await clock.advance(5000)
   expect(world.files.get(FILE)).toContain('state=working')
-  expect(world.files.get(FILE)).not.toContain('OLD_QUESTION')
+  // The answered question keeps its words on a finished step, so its record can close.
+  expect(world.files.get(FILE)).not.toContain('- [?]')
+  expect(world.files.get(FILE)).toContain('- [x] Old decision — OLD_QUESTION?')
   expect((world.store![`agent:${PROMPT_ID}`] as { state: string }).state).toBe('working')
   expect(world.asked).toHaveLength(1)
 })
@@ -3147,13 +3166,13 @@ test('without a Task list, a turn that changed something is summed up into steps
   world.reply = (prompt: string) => (prompt.includes('TITLE:') ? 'TITLE: 幫 API 加上限流\nCONTEXT: -\nDONE: 寫好限流測試\nNEXT: -\nASK: -' : undefined)
   await $.turn.start({ text: '100', turnId: 't2' })
   await clock.advance(10)
-  // Settled as soon as the answer starts a turn, before that turn ends.
-  expect(world.files.get(FILE) ?? '').toContain('- [x] 每把金鑰的上限\n')
+  // Settled as soon as the answer starts a turn, before that turn ends, in the words it asked in.
+  expect(world.files.get(FILE) ?? '').toContain('- [x] 每把金鑰的上限 — 一分鐘 100 還是 300？\n')
   await $.turn.complete({ answer: '測試寫好了，都過了。', durationMs: 1, isAborted: false, turnId: 't2', reason: 'answer' })
   await clock.advance(10)
   const after = world.files.get(FILE) ?? ''
   expect(after).toContain('state=done')
-  expect(after).toContain('- [x] 加好限流中介層\n- [x] 每把金鑰的上限\n- [x] 寫好限流測試\n')
+  expect(after).toContain('- [x] 加好限流中介層\n- [x] 每把金鑰的上限 — 一分鐘 100 還是 300？\n- [x] 寫好限流測試\n')
 
   // Claude starting a real list replaces the summed-up steps.
   await $.turn.start({ text: '再加上 IP 限流', turnId: 't3' })
@@ -3712,9 +3731,12 @@ for (const [agent, turn] of AGENT_TURNS) {
     world.mtime += 1
     await clock.advance(5000)
     const text = world.files.get(FILE) ?? ''
-    expect(text).toContain('- [x] Per-key limit\n')
+    // Finished in the words it asked in, so its question record closes too.
+    expect(text).toContain('- [x] Per-key limit — 100 or 300 a minute?\n')
     expect(text).not.toContain('- [?]')
     expect(text.match(/<!-- auto session=/g)?.length).toBe(1)
+    const records = JSON.parse(world.files.get(FILE.replace('.md', '-questions.json')) ?? '{"records":[]}').records as Array<{ words: string; isUnresolved?: boolean }>
+    expect(records.filter(row => row.words === 'Per-key limit — 100 or 300 a minute?').map(row => row.isUnresolved)).toEqual([false])
   })
 }
 

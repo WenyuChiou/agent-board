@@ -1,5 +1,6 @@
 import type { ProgressMirror, ProgressMirrorTask } from '../types'
 import { cleanContext, cleanTitle, clip, renewQuestion, waitsOnYou, withoutMarks } from './mirror'
+import { answeredStep } from './step-words'
 
 // A session's progress without its Task list: what each turn finished, the next step and
 // the question it ended on, as the model sums the turn up. Also the question a turn ends
@@ -212,7 +213,7 @@ export const answerTurns = (mirror: ProgressMirror): ProgressMirror =>
     ? mirror
     : {
         ...mirror,
-        tasks: mirror.tasks.map(one => (one.waiting === 'you' ? { ...one, status: 'completed', waiting: null, why: null } : one)),
+        tasks: mirror.tasks.map(one => (one.waiting === 'you' ? answeredStep(one) : one)),
       }
 
 // Whether the list grew enough since the title and background were written to look again.

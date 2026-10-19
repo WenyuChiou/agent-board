@@ -8,6 +8,7 @@ import { AUTO_END, AUTO_START, autoOf, doneKey, isTaskComplete, parseAttrs, pars
 import type { QuickEntry } from './quick'
 import type { StepRef, TaskRef } from './view'
 import { sha256 } from './sha256'
+import { oneLine, plain } from './step-words'
 import { isStale } from './parse'
 import type { JournalEntry } from './journal'
 
@@ -28,12 +29,6 @@ export const stateWords = (state: ProgressSessionState, s: Strings = ZH_TW): str
 
   return s.stateEnded
 }
-
-// Every line the mod writes into a block. A comment opening in a title or step (the model's
-// summing up, a first request) would hide every line up to the next `-->`, the next block's
-// markers with them, so it is left out; an arrow that would close one is written `->`.
-const plain = (text: string): string => text.replace(/<!--/g, ' ').replace(/--+>/g, '->').replace(/\s+/g, ' ').trim()
-const oneLine = (text: string): string => plain(text).replace(/^#+\s*/, '').trim()
 
 // A project name as a `##` heading: a comment opening or close in it would hide the lines
 // after it, so each becomes a space. Another agent's turn (`readTurn` in inbox.ts) and a pasted

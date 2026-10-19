@@ -1,4 +1,5 @@
 import { baseName } from './parse'
+import { answeredStep } from './step-words'
 import { STRINGS } from './strings'
 import type { ProgressMirror } from '../types'
 
@@ -180,7 +181,7 @@ export const answerAgentPrompt = (mirror: (ProgressMirror & { confirmedAt?: numb
   if (barrier < 0 || order <= barrier) return null
   return {
     ...mirror, state: 'working', updated: now, promptOrder: order, autoAsk: null,
-    tasks: mirror.tasks.map(one => one.waiting === 'you' ? { ...one, status: 'completed', waiting: null, why: null } : one),
+    tasks: mirror.tasks.map(one => one.waiting === 'you' ? answeredStep(one) : one),
   }
 }
 
