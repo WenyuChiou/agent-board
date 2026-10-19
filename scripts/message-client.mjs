@@ -36,11 +36,14 @@ export const boardClient = address => {
       const registered = await call('register', { agent, session, surface, turn, scope })
       const credentials = { connection: registered.id, secret: registered.secret }
       let isClosed = false, isPolling = false, leaseUntil = registered.expires
+      let finishClose
+      const closed = new Promise(done => { finishClose = done })
       const close = async () => {
-        if (isClosed) return
+        if (isClosed) return closed
         isClosed = true
         clearInterval(timer)
-        await call('disconnect', { ...credentials, turn }).catch(() => undefined)
+        try { await call('disconnect', { ...credentials, turn }).catch(() => undefined) }
+        finally { finishClose() }
       }
       const receipt = (message, status, reply, error) => call('receipt', { ...credentials, id: message.id, status, ...(reply === undefined ? {} : { reply }), ...(error === undefined ? {} : { error }) })
       const processMessage = async message => {
@@ -92,7 +95,7 @@ export const boardClient = address => {
       const timer = setInterval(() => { void poll() }, 2000)
       void poll()
       return {
-        id: registered.id, agent, session, surface, turn, close,
+        id: registered.id, agent, session, surface, turn, close, closed,
         send: async body => {
           let isOwned = false
           try { isOwned = !isClosed && await verify() } catch { /* An unverifiable owner cannot send. */ }

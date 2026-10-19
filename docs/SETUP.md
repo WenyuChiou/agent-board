@@ -152,6 +152,12 @@ conversation ended. If a relay lacks direct authorization, surface the blocker a
 for an exact new report; see [connection observations](MESSAGING.md#connecting-a-session-that-was-already-open).
 Progress, live receiving and an actual model ACK are separate checks. Supported transports,
 surface-specific evidence and limits are listed in [messaging](MESSAGING.md).
+For a supported, explicitly bound active Codex turn, the installed board also offers
+`--codex-connect`; see [connection setup](MESSAGING.md#codex-existing-owner-adapter).
+Installing hooks alone does not start this connection or enable Send.
+The command closes at turn end and cannot wake an idle session. The observed Windows
+desktop socket remains unsupported. Current evidence and pending checks are in the
+[command validation record](validation/2026-10-19-codex-send-command.md).
 
 Local reports use the same Markdown scanner as the board. Fenced examples stay unchanged;
 an unfinished code fence/comment or incomplete owned block is refused before either the

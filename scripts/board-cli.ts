@@ -9,6 +9,7 @@
 // "down x"` plays keys without a terminal and prints the board after them, for tests and checks.
 import { spawn, spawnSync } from 'node:child_process'
 import { runCodexLocal } from './codex-local'
+import { runCodexConnect } from './codex-connect.mjs'
 import { legacyConnect } from './connect-transaction'
 import { chmodSync, closeSync, existsSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
 import { createHash, randomUUID } from 'node:crypto'
@@ -880,6 +881,7 @@ const chat = (): void => {
 }
 
 const run = async (): Promise<void> => {
+  if (await runCodexConnect(args)) return
   const request = flag('--legacy-connect-request')
   if (request !== undefined) {
     const trusted = (globalThis as { AGENT_BOARD_WORKER_SOURCE?: string }).AGENT_BOARD_WORKER_SOURCE

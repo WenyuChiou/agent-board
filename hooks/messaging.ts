@@ -81,6 +81,7 @@ export const messageReceipt = (state: MessageState, target: Connection, input: R
 }
 export const disconnectMessages = (state: MessageState, target: string, now: number): MessageState => ({
   messages: state.messages.map(one => one.target !== target || ['rejected', 'acknowledged'].includes(one.status) ? one : {
-    ...one, status: one.status === 'queued' ? 'rejected' : 'uncertain', error: 'DISCONNECTED', updated: now,
+    // Keep the delivery failure that was durably recorded before cleanup.
+    ...one, status: one.status === 'queued' ? 'rejected' : 'uncertain', error: one.error || 'DISCONNECTED', updated: now,
   }),
 })

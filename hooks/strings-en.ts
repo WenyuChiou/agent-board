@@ -427,7 +427,7 @@ export const EN: Strings = {
   serveSent: (agent: string, reply: string): string => (reply === '' ? `Sent to ${agent}.` : `Sent to ${agent}. It replied: ${reply}`),
   serveSendFailed: (agent: string, why: string): string => `Couldn't send to ${agent}: ${why}`,
   serveSendBusy: (agent: string): string => `Another message is on its way to this ${agent} session; send again once it replies.`,
-  serveSendOpen: (agent: string): string => `Cannot send here. Open ${agent} to reply, or copy the message.`,
+  serveSendOpen: (agent: string): string => `Direct messaging isn't connected. Reply in ${agent}, or copy the message.`,
   serveSendNone: (agent: string): string => `${agent} can't take a message from here: copy it and paste it into its chat.`,
   serveLanSend: (agent: string): string => `A reply to ${agent} runs a program on the computer, so it is sent from the computer's own page. You can copy the answer here.`,
   serveSendTimeout: 'No reply after 10 minutes; stopped waiting.',

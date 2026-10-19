@@ -172,10 +172,59 @@ The original host remains responsible for its normal permission checks.
 
 ## Codex existing-owner adapter
 
-`scripts/codex-message-connector.mjs` uses the installed Codex executable's existing
-`app-server proxy` control socket. It does not start a daemon or create/resume a thread.
-After a person approves the exact disposable server/thread/active-turn binding, give it
-JSON on stdin:
+The installed board includes a connection command; a separate source checkout is no
+longer needed to run the proxy adapter:
+
+```sh
+node /path/to/agent-board.mjs --codex-connect --help
+# Pipe the exact, reviewed binding below to:
+node /path/to/agent-board.mjs --codex-connect
+```
+
+First open the board with `--serve --messages-dir /private/local/message-data` after
+reviewing that local storage scope. Pass its private URL, the exact loaded thread and
+active turn as one JSON object on stdin. For a control socket, supply the absolute
+Codex executable and optional absolute `socket`. Alternatively, with Node.js 22+,
+supply an existing `endpoint` such as `ws://127.0.0.1:4500`:
+
+```json
+{"boardUrl":"<private board URL>","endpoint":"ws://127.0.0.1:4500","thread":"<exact loaded thread>","turn":"<exact active turn>","joinLoaded":true}
+```
+
+Endpoint mode opens no process. It accepts only a loopback WebSocket URL without
+credentials, query or fragment, and cannot be combined with `socket`. It does not
+discover credentials or attach to an arbitrary desktop instance. When
+`CODEX_THREAD_ID` is present, the supplied thread must match it. Do not guess a turn or
+reuse a completed test binding. The command rejects unknown fields and remote board
+URLs before opening a transport. Its output omits the URL, token and session identifiers.
+
+The CLI defaults `joinLoaded` to `true`. On the same transport, it first verifies the
+exact thread with `thread/loaded/list`, then sends only
+`thread/resume { threadId, excludeTurns: true }`. Before registering a receiver, it
+requires the same returned thread id, an empty returned `turns` array and
+`status.type: active`. It supplies no configuration, model, permission, path or history
+overrides. Saved conversation turns are not returned. The exported
+`connectCodexProxy` function defaults `joinLoaded` to `false` for existing integrations;
+the CLI can explicitly select `false` too.
+
+The loaded check and metadata join are not atomic. If the thread unloads between
+them, the native resume RPC can reload metadata. The post-join active-status check
+and each send's `expectedTurnId` fence prevent delivery to an inactive or different
+turn; they do not make the join an atomic loaded-only operation.
+
+Keep the command running while that active turn is available. It unregisters and exits
+on turn completion, owner loss, terminal board disconnection or Ctrl+C. It starts no
+owner process, server, thread or model turn and changes no permanent setting. Control
+socket mode starts only its own proxy process. It cannot wake an idle session. A new
+turn needs a new explicit binding; it does not silently reconnect or replay messages.
+A connected status is still not an ACK. Unsupported desktop sockets remain disconnected,
+with Copy and a short explanation on the task card. This command does not repair the
+desktop host's missing external control interface.
+
+`scripts/codex-message-connector.mjs` remains a compatible import path and source CLI
+wrapper. It uses the same command behavior and accepts either the existing
+`app-server proxy` control socket or explicit WebSocket endpoint. After approval of
+the exact binding, a control-socket input can be:
 
 ```json
 {"boardUrl":"<private loopback board URL>","executable":"<absolute Codex executable>","thread":"<actual thread UUID>","turn":"<actual active turn id>","surface":"Codex CLI"}
@@ -183,9 +232,12 @@ JSON on stdin:
 
 An explicit `socket` path may select an already-running owner. Preflight and each poll
 check `thread/loaded/list`; each send uses `turn/steer` with `expectedTurnId`. A stale turn
-fails at the host instead of resuming another session. Only matching `item/completed`
-agent-message notifications from that same thread and turn supply an ACK. The connector
-retains the ACK line only, and ignores approval requests. No saved history is read.
+fails at the host. A delivery error blocks further claims, attempts its durable uncertainty
+receipt and then closes the binding. Only matching `item/completed`
+agent-message notifications from that same thread and turn supply an ACK. The same
+native turn must also finish successfully before delivery is acknowledged. The connector
+retains the ACK line only, preserves a recorded failure through disconnect cleanup and
+ignores approval requests.
 
 Availability of this socket differs by surface. The Windows desktop tested with Codex
 0.163.0-alpha.10.2 had no reachable shared control socket (OS error 10050). Therefore this
@@ -197,6 +249,11 @@ adapter actually registers.
 Tests: `node --test tests/messaging.test.mjs`. They cover synthetic routing, idempotence,
 conflicts, offline/expired bindings, stale turns, crash uncertainty, fake approvals, and a
 mock Codex proxy. A real `AB-TEST-001` ACK must be verified separately with consent.
+The new command's one approved native ephemeral-session attempt ended in
+`ACK_TIMEOUT`, with no native ACK; its one-turn budget was used and the binding was
+stopped. A separate zero-model persisted-thread probe verified metadata joining.
+Neither establishes a new delivery success; see the
+[command validation record](validation/2026-10-19-codex-send-command.md).
 
 ## Codex exclusive-owner adapter
 

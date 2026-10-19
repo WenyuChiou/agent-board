@@ -275,8 +275,9 @@ export const serveModel = (view: View, pending: readonly PendingTurn[], s: Strin
         session: connection?.session ?? row.target?.session ?? '',
         fp: fingerprint(item, items),
         where: send === 'send' ? (row.target?.dir ?? '') : '',
-        // A row says why only when a reply could otherwise be expected here.
-        info: connection ? '' : lanInfo(baseMode, row.agent) ?? (send === 'open' ? infoOf(send, row.agent, row.title, '', s) : ''),
+        // A progress-only reporter may lack a resume directory. Its Copy box still
+        // needs to explain why direct messaging is unavailable.
+        info: connection ? '' : lanInfo(baseMode, row.agent) ?? (send === 'open' || row.auto !== null && (messaging !== undefined || !allowResume) ? s.serveSendOpen(row.agent || 'Claude Code') : ''),
         isSending: isSending(row.target) || connection !== undefined && (messaging?.messages.some(one => one.target === connection.id && ['queued', 'uncertain', 'accepted'].includes(one.status)) ?? false),
         hasCopyBox: lanInfo(baseMode, row.agent) !== null || (messaging !== undefined || !allowResume) && row.auto !== null && connection === undefined,
       })

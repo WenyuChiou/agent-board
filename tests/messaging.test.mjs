@@ -1,8 +1,9 @@
-import { spawn } from 'node:child_process'
+import { spawn, spawnSync } from 'node:child_process'
 import { mkdtempSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createServer } from 'node:http'
+import { createHash } from 'node:crypto'
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { BOARD_SCRIPT } from '../hooks/board-script.ts'
@@ -14,6 +15,11 @@ import { attachCodexSession } from '../scripts/codex-session-connector.mjs'
 import { attachAntigravitySession } from '../scripts/antigravity-session-connector.mjs'
 
 const pause = ms => new Promise(done => setTimeout(done, ms))
+const boundedWait = async (promise, code) => {
+  let timer
+  try { return await Promise.race([promise, new Promise((_, reject) => { timer = setTimeout(() => reject(Error(code)), 10000) })]) }
+  finally { clearTimeout(timer) }
+}
 const target = { id: 'binding1', agent: 'codex', session: 'session1', turn: 'turn1', surface: 'fixture', expires: 2000 }
 const input = { id: 'AB-TEST-001', target: target.id, turn: target.turn, text: '收到後請回覆 ACK AB-TEST-001，並回報目前任務狀態；不要修改檔案或執行其他動作。' }
 
@@ -194,6 +200,240 @@ const waitFor = async fn => {
   while (Date.now() < until) { const found = await fn(); if (found) return found; await pause(100) }
   throw new Error('condition timed out')
 }
+
+test('installed Codex connect help and invalid bindings never start a host or reveal board secrets', async () => fixture(async (board, dir) => {
+  const script = join(dir, 'board.mjs')
+  const thread = '11111111-2222-4333-8444-555555555555'
+  const env = { ...process.env, CODEX_THREAD_ID: thread }
+  const help = spawnSync(process.execPath, [script, '--codex-connect', '--help'], { env, encoding: 'utf8', windowsHide: true, timeout: 5000 })
+  assert.equal(help.status, 0, help.stderr)
+  assert.match(help.stdout, /--codex-connect/)
+  const base = { boardUrl: board.address, executable: join(dir, 'never-start-this.exe'), thread, turn: 'turn1' }
+  for (const payload of [
+    { ...base, thread: 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee' },
+    { ...base, approval: true },
+    { ...base, boardUrl: 'https://example.com/?t=synthetic-secret' },
+    { ...base, executable: 'relative-codex' },
+    { ...base, endpoint: 'ws://example.com:4500' },
+    { ...base, endpoint: 'ws://127.0.0.1:4500/?token=synthetic-secret' },
+    { ...base, turn: '' },
+    { ...base, joinLoaded: 'true' },
+    'x'.repeat(16001),
+  ]) {
+    const result = spawnSync(process.execPath, [script, '--codex-connect'], { env, input: typeof payload === 'string' ? payload : JSON.stringify(payload), encoding: 'utf8', windowsHide: true, timeout: 5000 })
+    assert.equal(result.status, 1, result.stdout + result.stderr)
+    assert.ok(result.stderr.length < 200)
+    assert.ok(!result.stdout.includes('connected'))
+    assert.ok(!result.stderr.includes('OWNER_DISCONNECTED'), 'preflight must refuse before spawning a host')
+    assert.ok(!result.stderr.includes(board.address))
+    assert.ok(!result.stderr.includes('synthetic-secret'))
+  }
+  assert.deepEqual((await board.call('/api/board')).body.messaging.connections, [])
+}))
+
+test('a receiver publishes terminal close only after disconnecting and repeated close is harmless', async () => fixture(async board => {
+  let owned = true, deliveries = 0
+  const receiver = await boardClient(board.address).attach({ agent: 'fixture', session: 'close-lifecycle', turn: 'turn1', surface: 'Synthetic lifecycle', verify: async () => owned, deliver: async () => { deliveries++; return 'ACK NEVER' } })
+  owned = false
+  await boundedWait(receiver.closed, 'TERMINAL_CLOSE_NOT_PUBLISHED')
+  assert.deepEqual((await board.call('/api/board')).body.messaging.connections, [])
+  await Promise.all([receiver.close(), receiver.close()])
+  assert.equal(deliveries, 0)
+}))
+
+test('installed Codex connect drives an exact synthetic proxy, records ACK once and exits on turn end', async () => fixture(async (board, dir) => {
+  const thread = '11111111-2222-4333-8444-555555555555'
+  const proxy = join(dir, 'synthetic-native.mjs'), log = join(dir, 'synthetic-rpc.log')
+  writeFileSync(proxy, `import {createInterface} from 'node:readline';import{appendFileSync}from'node:fs';
+const emit=v=>console.log(JSON.stringify(v));
+createInterface({input:process.stdin}).on('line',line=>{const v=JSON.parse(line);appendFileSync(${JSON.stringify(log)},line+'\\n');
+if(v.method==='initialize')emit({id:v.id,result:{}});
+if(v.method==='thread/loaded/list')emit({id:v.id,result:{data:[${JSON.stringify(thread)}],nextCursor:null}});
+if(v.method==='thread/resume')emit({id:v.id,result:{thread:{id:${JSON.stringify(thread)},turns:[],status:{type:'active'}}}});
+if(v.method==='turn/steer'){emit({id:v.id,result:{turnId:'turn1'}});emit({id:999,method:'item/commandExecution/requestApproval',params:{}});
+setTimeout(()=>emit({method:'item/completed',params:{threadId:${JSON.stringify(thread)},turnId:'turn1',item:{type:'agentMessage',text:'ACK AB-TEST-001'}}}),150);
+setTimeout(()=>emit({method:'turn/completed',params:{threadId:${JSON.stringify(thread)},turn:{id:'turn1',status:'completed'}}}),350);}
+});`)
+  const command = spawn(process.execPath, [join(dir, 'board.mjs'), '--codex-connect'], { env: { ...process.env, CODEX_THREAD_ID: thread }, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] })
+  let stdout = '', stderr = ''
+  command.stdout.on('data', data => { stdout += data })
+  command.stderr.on('data', data => { stderr += data })
+  const exited = new Promise(done => command.once('exit', (code, signal) => done({ code, signal })))
+  command.stdin.end(JSON.stringify({ boardUrl: board.address, executable: proxy, thread, turn: 'turn1', surface: 'Synthetic CLI command test' }))
+  try {
+    const receiver = await waitFor(async () => (await board.call('/api/board')).body.messaging.connections[0])
+    const sent = { ...input, target: receiver.id }
+    await board.call('/api/messages/send', sent)
+    const receipt = await waitFor(async () => {
+      const message = (await board.call('/api/board')).body.messaging.messages[0]
+      return message?.status === 'acknowledged' && message
+    })
+    assert.equal(receipt.reply, 'ACK AB-TEST-001')
+    const exit = await boundedWait(exited, 'CONNECT_COMMAND_DID_NOT_EXIT')
+    assert.equal(exit.code, 0, stderr)
+    assert.match(stdout, /connected/)
+    assert.ok(!stdout.includes(thread))
+    assert.ok(!stdout.includes(receiver.id))
+    assert.ok(!stdout.includes(board.address))
+    assert.deepEqual((await board.call('/api/board')).body.messaging.connections, [])
+    assert.equal((await board.call('/api/messages/send', sent)).body.status, 'acknowledged')
+    assert.equal((await board.call('/api/messages/send', { ...sent, text: 'Changed content' })).body.error, 'ID_CONFLICT')
+    assert.equal((await board.call('/api/messages/send', { ...sent, id: 'AB-OFFLINE' })).body.error, 'OFFLINE')
+    const calls = readFileSync(log, 'utf8').trim().split('\n').map(JSON.parse)
+    assert.equal(calls.filter(value => value.method === 'turn/steer').length, 1)
+    assert.equal(calls.find(value => value.method === 'turn/steer').params.expectedTurnId, 'turn1')
+    assert.ok(calls.every(value => value.id !== 999))
+    assert.deepEqual(calls.filter(value => value.method === 'thread/resume').map(value => value.params), [{ threadId: thread, excludeTurns: true }])
+    assert.ok(calls.every(value => !['thread/start', 'thread/read'].includes(value.method)))
+  } finally {
+    if (command.exitCode === null && command.signalCode === null) command.kill()
+    await exited
+  }
+}))
+
+// A synthetic WebSocket owner, not an AI host. It accepts only the small text
+// frames used by this test and never loads a native application or credential.
+const websocketOwner = async (thread, { isLoaded = true, joined = {}, isSteerRejected = false } = {}) => {
+  const server = createServer(), sockets = new Set(), calls = []
+  let client
+  const emit = value => {
+    const payload = Buffer.from(JSON.stringify(value, null, 2))
+    const header = Buffer.alloc(payload.length < 126 ? 2 : 4)
+    header[0] = 0x81
+    if (payload.length < 126) header[1] = payload.length
+    else { header[1] = 126; header.writeUInt16BE(payload.length, 2) }
+    client.write(Buffer.concat([header, payload]))
+  }
+  server.on('upgrade', (request, socket) => {
+    client = socket; sockets.add(socket)
+    socket.on('close', () => sockets.delete(socket))
+    socket.on('error', () => undefined)
+    const key = createHash('sha1').update(request.headers['sec-websocket-key'] + '258EAFA5-E914-47DA-95CA-C5AB0DC85B11').digest('base64')
+    socket.write('HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: ' + key + '\r\n\r\n')
+    let buffered = Buffer.alloc(0)
+    socket.on('data', data => {
+      buffered = Buffer.concat([buffered, data])
+      while (buffered.length >= 2) {
+        const opcode = buffered[0] & 15, masked = (buffered[1] & 128) !== 0
+        let length = buffered[1] & 127, offset = 2
+        if (length === 127 || !masked) { socket.destroy(); return }
+        if (length === 126) { if (buffered.length < 4) return; length = buffered.readUInt16BE(2); offset = 4 }
+        if (buffered.length < offset + 4 + length) return
+        const mask = buffered.subarray(offset, offset + 4), payload = Buffer.from(buffered.subarray(offset + 4, offset + 4 + length))
+        buffered = buffered.subarray(offset + 4 + length)
+        for (let index = 0; index < payload.length; index++) payload[index] ^= mask[index % 4]
+        if (opcode === 8) { socket.end(Buffer.from([0x88, 0])); return }
+        if (opcode !== 1) { socket.destroy(); return }
+        const value = JSON.parse(payload.toString('utf8')); calls.push(value)
+        if (value.method === 'initialize') emit({ id: value.id, result: {} })
+        if (value.method === 'thread/loaded/list') emit({ id: value.id, result: { data: isLoaded ? [thread] : [] } })
+        if (value.method === 'thread/resume') emit({ id: value.id, result: { thread: { id: thread, turns: [], status: { type: 'active' }, ...joined } } })
+        if (value.method === 'turn/steer') {
+          if (isSteerRejected) { emit({ id: value.id, error: { code: -32600, message: 'Synthetic stale turn' } }); continue }
+          emit({ id: value.id, result: { turnId: 'turn1' } })
+          emit({ id: 999, method: 'item/commandExecution/requestApproval', params: {} })
+          emit({ method: 'item/completed', params: { threadId: thread, turnId: 'wrong-turn', item: { type: 'agentMessage', text: 'ACK AB-TEST-001' } } })
+        }
+      }
+    })
+  })
+  await new Promise(done => server.listen(0, '127.0.0.1', done))
+  return { endpoint: `ws://127.0.0.1:${server.address().port}`, calls, emit, close: async () => { for (const socket of sockets) socket.destroy(); await new Promise(done => server.close(done)) } }
+}
+
+test('installed Codex connect joins only metadata on an explicit synthetic WebSocket owner', async () => fixture(async (board, dir) => {
+  const thread = '11111111-2222-4333-8444-555555555555', owner = await websocketOwner(thread)
+  const command = spawn(process.execPath, [join(dir, 'board.mjs'), '--codex-connect'], { env: { ...process.env, CODEX_THREAD_ID: thread }, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] })
+  let stdout = '', stderr = ''
+  command.stdout.on('data', data => { stdout += data }); command.stderr.on('data', data => { stderr += data })
+  const exited = new Promise(done => command.once('exit', done))
+  command.stdin.end(JSON.stringify({ boardUrl: board.address, endpoint: owner.endpoint, thread, turn: 'turn1' }))
+  try {
+    const receiver = await waitFor(async () => (await board.call('/api/board')).body.messaging.connections[0])
+    await board.call('/api/messages/send', { ...input, target: receiver.id })
+    await waitFor(() => owner.calls.some(value => value.method === 'turn/steer'))
+    assert.notEqual((await board.call('/api/board')).body.messaging.messages[0].status, 'acknowledged', 'a wrong-turn ACK cannot acknowledge delivery')
+    owner.emit({ method: 'item/completed', params: { threadId: thread, turnId: 'turn1', item: { type: 'agentMessage', text: 'ACK AB-TEST-001' } } })
+    assert.notEqual((await board.call('/api/board')).body.messaging.messages[0].status, 'acknowledged', 'native turn completion is required')
+    owner.emit({ method: 'turn/completed', params: { threadId: thread, turn: { id: 'turn1', status: 'completed' } } })
+    await waitFor(async () => (await board.call('/api/board')).body.messaging.messages[0]?.status === 'acknowledged')
+    assert.equal(await boundedWait(exited, 'WEBSOCKET_CONNECT_DID_NOT_EXIT'), 0, stderr)
+    assert.deepEqual((await board.call('/api/board')).body.messaging.connections, [])
+    assert.ok(!stdout.includes(thread) && !stdout.includes(owner.endpoint) && !stdout.includes(board.address))
+    assert.deepEqual(owner.calls.filter(value => value.method === 'thread/resume').map(value => value.params), [{ threadId: thread, excludeTurns: true }])
+    assert.ok(owner.calls.every(value => !['thread/start', 'thread/read'].includes(value.method) && value.id !== 999))
+  } finally {
+    if (command.exitCode === null && command.signalCode === null) command.kill()
+    await exited; await owner.close()
+  }
+}))
+
+test('Codex metadata joining refuses unloaded, idle, foreign or history-bearing targets before registration', async () => fixture(async (board, dir) => {
+  const thread = '11111111-2222-4333-8444-555555555555'
+  for (const options of [
+    { isLoaded: false },
+    { joined: { status: { type: 'idle' } } },
+    { joined: { id: 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee' } },
+    { joined: { turns: [{ id: 'synthetic-history' }] } },
+  ]) {
+    const owner = await websocketOwner(thread, options)
+    const command = spawn(process.execPath, [join(dir, 'board.mjs'), '--codex-connect'], { env: { ...process.env, CODEX_THREAD_ID: thread }, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] })
+    let stdout = '', stderr = ''
+    command.stdout.on('data', data => { stdout += data }); command.stderr.on('data', data => { stderr += data })
+    const exited = new Promise(done => command.once('exit', done))
+    command.stdin.end(JSON.stringify({ boardUrl: board.address, endpoint: owner.endpoint, thread, turn: 'turn1' }))
+    try {
+      assert.equal(await boundedWait(exited, 'INVALID_JOIN_DID_NOT_EXIT'), 1)
+      assert.match(stderr, options.isLoaded === false ? /HOST_NOT_CONNECTED/ : /ACTIVE_THREAD_REQUIRED/)
+      assert.ok(!stdout.includes('connected'))
+      assert.deepEqual((await board.call('/api/board')).body.messaging.connections, [])
+      const joins = owner.calls.filter(value => value.method === 'thread/resume')
+      assert.equal(joins.length, options.isLoaded === false ? 0 : 1)
+      if (joins.length) assert.deepEqual(joins[0].params, { threadId: thread, excludeTurns: true })
+      assert.ok(!owner.calls.some(value => value.method === 'turn/steer' || value.method === 'thread/start'))
+    } finally {
+      if (command.exitCode === null && command.signalCode === null) command.kill()
+      await exited; await owner.close()
+    }
+  }
+}))
+
+test('a rejected Codex steer keeps its uncertainty receipt before disconnecting and cannot replay', async () => fixture(async board => {
+  const thread = '11111111-2222-4333-8444-555555555555', owner = await websocketOwner(thread, { isSteerRejected: true })
+  const errors = []
+  const receiver = await connectCodexProxy({ boardUrl: board.address, endpoint: owner.endpoint, thread, turn: 'turn1', joinLoaded: true, onError: error => { errors.push(error.message) } })
+  try {
+    const sent = { ...input, target: receiver.id }
+    await board.call('/api/messages/send', sent)
+    await boundedWait(receiver.closed, 'REJECTED_STEER_DID_NOT_CLOSE')
+    const model = (await board.call('/api/board')).body.messaging
+    assert.equal(model.messages[0].status, 'uncertain')
+    assert.equal(model.messages[0].error, 'OWNER_REJECTED')
+    assert.equal(model.messages[0].reply, '')
+    assert.deepEqual(model.connections, [])
+    assert.deepEqual(errors, ['OWNER_REJECTED'])
+    assert.equal((await board.call('/api/messages/send', sent)).body.status, 'uncertain')
+    assert.equal((await board.call('/api/messages/send', { ...sent, text: 'Changed content' })).body.error, 'ID_CONFLICT')
+    assert.equal((await board.call('/api/messages/send', { ...sent, id: 'AB-OFFLINE' })).body.error, 'OFFLINE')
+    assert.equal(owner.calls.filter(value => value.method === 'turn/steer').length, 1)
+  } finally { await receiver.close(); await owner.close() }
+}))
+
+test('a proxy ACK in a failed native Codex turn remains uncertain', async () => fixture(async board => {
+  const thread = '11111111-2222-4333-8444-555555555555', owner = await websocketOwner(thread)
+  const receiver = await connectCodexProxy({ boardUrl: board.address, endpoint: owner.endpoint, thread, turn: 'turn1', joinLoaded: true })
+  try {
+    await board.call('/api/messages/send', { ...input, target: receiver.id })
+    await waitFor(() => owner.calls.some(value => value.method === 'turn/steer'))
+    owner.emit({ method: 'item/completed', params: { threadId: thread, turnId: 'turn1', item: { type: 'agentMessage', text: 'ACK AB-TEST-001' } } })
+    owner.emit({ method: 'turn/completed', params: { threadId: thread, turn: { id: 'turn1', status: 'failed' } } })
+    await boundedWait(receiver.closed, 'FAILED_TURN_DID_NOT_CLOSE')
+    const result = (await board.call('/api/board')).body.messaging.messages[0]
+    assert.equal(result.status, 'uncertain')
+    assert.equal(result.error, 'TURN_NOT_COMPLETED')
+    assert.equal(result.reply, '')
+  } finally { await receiver.close(); await owner.close() }
+}))
 
 test('a transient message-store rename failure recovers polling without replaying delivery', async () => {
   for (const code of ['EPERM', 'EBUSY', 'EAGAIN']) await fixture(async (board, dir) => {
@@ -555,7 +795,7 @@ createInterface({input:process.stdin}).on('line',line=>{const v=JSON.parse(line)
 if(v.method==='initialize')emit({id:v.id,result:{}});
 if(v.method==='thread/loaded/list')emit({id:v.id,result:{data:[${JSON.stringify(thread)}],nextCursor:null}});
 if(v.method==='turn/steer'){emit({id:v.id,result:{turnId:'turn1'}});emit({id:999,method:'item/commandExecution/requestApproval',params:{}});
-setTimeout(()=>emit({method:'item/completed',params:{threadId:${JSON.stringify(thread)},turnId:'turn1',item:{type:'agentMessage',text:'ACK AB-TEST-001'}}}),100);}
+setTimeout(()=>{emit({method:'item/completed',params:{threadId:${JSON.stringify(thread)},turnId:'turn1',item:{type:'agentMessage',text:'ACK AB-TEST-001'}}});emit({method:'turn/completed',params:{threadId:${JSON.stringify(thread)},turn:{id:'turn1',status:'completed'}}});},100);}
 });`)
   const connector = await connectCodexProxy({ boardUrl: board.address, executable: fake, thread, turn: 'turn1', surface: 'Mock proxy' })
   try {

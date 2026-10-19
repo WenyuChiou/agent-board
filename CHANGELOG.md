@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Add installed `--codex-connect` for a supported existing Codex active turn, with metadata-only joining, exact turn fencing and private loopback input. Require a matching ACK and successful native turn completion; preserve failure details through disconnection. Progress-only cards explain Copy in all three languages. Idle wake and the observed Windows desktop remain unsupported. Tests: `installed Codex connect joins only metadata on an explicit synthetic WebSocket owner`, `a rejected Codex steer keeps its uncertainty receipt before disconnecting and cannot replay`, and `a proxy ACK in a failed native Codex turn remains uncertain`. See [acceptance evidence](docs/validation/2026-10-19-codex-send-command.md) for native limits.
+
 - Keep the tagged-adoption fixtures host-free after trust discovery is added: omit the general fixture's explicit missing executable only inside the empty-PATH, child-process-blocked cases. Preserve the no-native-attempt assertion. Tests: the four `bundled tagged board adoption` cases.
 
 - Compare a denied historical-hide action with the exact bytes present after startup migration, while retaining the original legacy keys and later renewal/migration assertions. Test: `historical hide marks survive failed reads while an observed renewed question gets a fresh identity`.

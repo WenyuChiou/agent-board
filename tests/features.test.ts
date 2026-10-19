@@ -216,6 +216,26 @@ test('every agent keeps live blocks safe across terminal and page at the twelve-
 const NOW = Date.parse('2026-10-16T12:00:00.000Z')
 const SESSION = '2be48af2-6193-5040-aacc-e0546d6784f1'
 
+test('progress-only cards explain Copy without inventing a live receiving connection', () => {
+  for (const s of Object.values(STRINGS)) for (const agent of ['codex', 'antigravity', 'opencode'] as const) {
+    const owner = sha256(`${agent}:${SESSION}`)
+    const report = { ...codexReport(null, SESSION, { title: 'Progress without direct messaging', state: 'working', steps: ['- [~] Actual task step'] }, new Date(NOW).toISOString(), s), agent }
+    const view = buildView(parseProgress(putCodexBlock('', report, owner)), [], null, NOW, 0, {}, s)
+    for (const messaging of [undefined, { connections: [], messages: [] }]) {
+      const row = serveModel(view, [], s, new Set(), false, messaging).groups.flatMap(group => group.rows)[0]
+      expect(row?.hasCopyBox).toBe(true)
+      expect(row?.info).toBe(s.serveSendOpen(agent))
+      expect(row?.delivery).toBeUndefined()
+      expect(row?.send).not.toBe('connected')
+    }
+    const connection = { id: 'synthetic-binding', agent, session: SESSION, surface: 'Synthetic owner', turn: 'turn1', expires: NOW + 15000 }
+    const row = serveModel(view, [], s, new Set(), false, { connections: [connection], messages: [] }).groups.flatMap(group => group.rows)[0]
+    expect(row?.send).toBe('connected')
+    expect(row?.hasCopyBox).toBe(false)
+    expect(row?.info).toBe('')
+  }
+})
+
 test('independent local progress cards match only their full native session receiver', () => {
   for (const agent of ['codex', 'cursor', 'opencode'] as const) {
     const owner = sha256(`${agent}:${SESSION}`)

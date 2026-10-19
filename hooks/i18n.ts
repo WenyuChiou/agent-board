@@ -464,7 +464,7 @@ export const ZH_TW = {
   serveSent: (agent: string, reply: string): string => (reply === '' ? `已傳給 ${agent}。` : `已傳給 ${agent}，它回：${reply}`),
   serveSendFailed: (agent: string, why: string): string => `沒傳到 ${agent}：${why}`,
   serveSendBusy: (agent: string): string => `正在傳另一句給這個 ${agent} 對話，等它回完再傳。`,
-  serveSendOpen: (agent: string): string => `目前無法從這裡傳送。請開啟 ${agent} 回覆，或先複製訊息。`,
+  serveSendOpen: (agent: string): string => `尚未接通直接傳訊。請在 ${agent} 回覆，或先複製訊息。`,
   serveSendNone: (agent: string): string => `${agent} 收不到這裡傳的話：複製後貼到它的對話。`,
   serveLanSend: (agent: string): string => `回覆 ${agent} 會在電腦上執行程式，所以要從電腦上的看板傳；這裡可以先複製答案。`,
   serveSendTimeout: '等了 10 分鐘還沒回，先停了。',
