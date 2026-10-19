@@ -8,7 +8,7 @@
 </p>
 
 <p align="center">
-<a href="CHANGELOG.md"><img alt="版本 0.23.3" src="https://img.shields.io/badge/version-0.23.3-blue"></a>
+<a href="CHANGELOG.md"><img alt="版本 0.23.4" src="https://img.shields.io/badge/version-0.23.4-blue"></a>
 <a href="#快速開始"><img alt="Node.js 18+" src="https://img.shields.io/badge/Node.js-%E2%89%A5%2018-339933"></a>
 <a href="LICENSE"><img alt="MIT 授權" src="https://img.shields.io/badge/license-MIT-green"></a>
 <img alt="macOS、Linux、Windows" src="https://img.shields.io/badge/macOS%20%C2%B7%20Linux%20%C2%B7%20Windows-lightgrey">
