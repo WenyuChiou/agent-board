@@ -1,25 +1,21 @@
-**只用 Codex：** 執行 `node scripts/setup-codex.mjs` 預覽本機安裝，確認範圍後加上
-`--apply`。不需要 Claude Code。見 [Codex 安裝與 CLI／桌面版分開驗收](docs/CODEX.md)。
-Cursor、OpenCode 可用 `node scripts/setup-agent.mjs --agent cursor`／`--agent opencode`，採相同的預覽與確認安裝流程。
-
 <h1 align="center">
 <img alt="簡短導覽：五個 agent，其中一個在等你；直接在面板回答；每個 agent 透過自己的 hook 回報；什麼都不會漏；在哪裡用；淺色深色兩種配色。" src="docs/images/tour-zh-TW.svg" width="100%">
 </h1>
 
 <p align="center">
 <b>每個 AI coding agent 在做什麼，一個面板看完；等你的事，永遠排第一個。</b><br>
-Claude Code 外掛，也跟得上 Codex、Gemini CLI、OpenCode、Grok Build、Hermes Agent 和 OpenClaw，更多見<a href="#支援的-agent">下方</a>。
+本機互動看板，從你正在使用的 agent 開始；Claude Code 原生側欄是選用功能。各 host 能力見<a href="#支援的-agent">下方</a>。
 </p>
 
 <p align="center">
 <a href="CHANGELOG.md"><img alt="版本 0.22.2" src="https://img.shields.io/badge/version-0.22.2-blue"></a>
-<img alt="需要 Claude Code 2.1.287 以上" src="https://img.shields.io/badge/Claude%20Code-%E2%89%A5%202.1.287-d97757">
+<a href="#快速開始"><img alt="Node.js 18+" src="https://img.shields.io/badge/Node.js-%E2%89%A5%2018-339933"></a>
 <a href="LICENSE"><img alt="MIT 授權" src="https://img.shields.io/badge/license-MIT-green"></a>
 <img alt="macOS、Linux、Windows" src="https://img.shields.io/badge/macOS%20%C2%B7%20Linux%20%C2%B7%20Windows-lightgrey">
 </p>
 <p align="center">
 <a href="#支援的-agent"><img alt="Codex 0.163.0，完全可用" src="https://img.shields.io/badge/Codex-0.163.0-brightgreen"></a>
-<a href="#支援的-agent"><img alt="Gemini CLI 0.64.0，完全可用" src="https://img.shields.io/badge/Gemini%20CLI-0.64.0-brightgreen"></a>
+<a href="#支援的-agent"><img alt="Antigravity CLI native hooks" src="https://img.shields.io/badge/Antigravity%20CLI-native%20hooks-yellowgreen"></a>
 <a href="#支援的-agent"><img alt="OpenCode 1.19.3，完全可用" src="https://img.shields.io/badge/OpenCode-1.19.3-brightgreen"></a>
 <a href="#支援的-agent"><img alt="Grok Build 1.0.62，部分可用" src="https://img.shields.io/badge/Grok%20Build-1.0.62-yellowgreen"></a>
 <a href="#支援的-agent"><img alt="Hermes Agent 0.19.0，部分可用" src="https://img.shields.io/badge/Hermes%20Agent-0.19.0-yellowgreen"></a>
@@ -28,98 +24,103 @@ Claude Code 外掛，也跟得上 Codex、Gemini CLI、OpenCode、Grok Build、H
 
 <p align="center"><a href="README.md">English</a> · 繁體中文 · <a href="README.zh-CN.md">简体中文</a></p>
 
-你在一個專案開 Claude Code，另一個開 Codex，第三個開 Gemini。二十分鐘後，其中一個停下來問你事情，你要等到剛好切回去才會發現。**Agent Board** 在它一開口就把問題放到你眼前，每個答案一個按鈕。
+你在一個專案開 Claude Code，另一個開 Codex，第三個開 Antigravity。二十分鐘後，其中一個停下來問你事情，你要等到剛好切回去才會發現。**Agent Board** 在它一開口就把問題放到你眼前，每個答案一個按鈕。
 
 ## 功能
 
 - **需要你的事排最前面。** 任何 agent 的問題都放在最上面，每個答案一個按鈕。在 Claude Code 裡按一下就回答了；其他 agent 則給你要貼過去的那句話或指令。已經在對話裡回過了？按**已回覆，先隱藏**，只在這台電腦上收起來，不會送出任何話；那個對話問了新的問題，它會再出現。
-- **所有 agent 一處看。** 依專案分組，每個對話都有標題、一行背景和編號步驟，由每個回合的簡短摘要自動寫好。
+- **所有 agent 一處看。** 各 session 明確回報真實任務步驟，支援的原生 hooks 回報活動狀態；依專案分組，不讀私人對話。
 - **隨時接著做。** 對話壓縮、終端機關掉、隔天早上都沒關係：做完什麼、卡在哪、下一步是什麼，打開就看到。做到一半停掉的對話，按一下就能接手。
 - **你自己的待辦也放得進來。** 在面板的輸入框打 `+ 求職：Fabrikam 研究員 截止 11-20`。快到期會變黃，到期會變紅。
 - **不在終端機也看得到。** `/progress open` 在瀏覽器打開同一個畫面（手機也行）；其他 agent 會打開[可以點的網頁](#看板的網頁)，在上面勾步驟、封存、回答。面板關著時，狀態列和桌面通知會告訴你有事在等你。
 - **週報。** `/progress report` 和 `/progress today` 把做完的事複製成文字。
 - **自己收拾。** 做完的事移到每月封存檔，日誌留下每一步完成紀錄。超過一週沒人動的工作收進一行 **N 項超過 7 天沒動**，檔案裡一字不改。
-- **就是一個 Markdown 檔。** 全部在 `~/.claude/progress.md`，你可以自己看、自己改。支援 English、繁體中文、简体中文；淺色深色都有。
+- **就是一個 Markdown 檔。** 獨立安裝預設用 `~/.agent-board/progress.md`，既有安裝沿用原路徑；你可以自己看、自己改。支援 English、繁體中文、简体中文；淺色深色都有。
 
 ## 怎麼運作
 
 <img alt="Claude Code 對話、透過 hook 的其他 agent、和你，都寫進同一個 Markdown 檔 progress.md；面板、progress.html、封存與狀態列都讀它。" src="docs/images/flow-zh-TW.svg" width="100%">
 
-每個接上的 agent，hook 會把它最後的回覆存進 `~/.claude/progress-inbox/`。開著的 Claude Code 對話五秒內讀到，把那個回合整理好，寫進 `progress.md` 裡那個 agent 自己的一塊，然後刪掉那個檔案。格式寫在 [docs/FORMAT.md](docs/FORMAT.md)（英文）。
+獨立 reporter 將原生 session 活動與明確任務摘要寫到同一個本機 `progress.md`，每個 session 只更新自己的區塊；網頁看板不需要另一個模型。上圖是選用 Claude 外掛的 inbox 與摘要流程。格式見 [docs/FORMAT.md](docs/FORMAT.md)。
 
 ## 快速開始
 
-**1. 安裝**（需要 Claude Code 2.1.287 以上）：
+<details open>
+<summary><b>讓 agent 幫你安裝</b></summary>
 
-```
-claude plugin marketplace add WenyuChiou/agent-board
-claude plugin install agent-board@agent-board
-```
-
-**2. 打開 Claude Code。** 面板在右邊（沒看到就輸入 `/progress`）。第一次開的時候，它會自動接上這台電腦裝的所有 coding agent，並告訴你接了哪些；之後才裝的 agent，下次開 Claude Code 時也會自動接上。
-
-**3. 重開其他 agent 一次**，讓它們載入新的 hook。第一次時，Codex 要在 `/hooks` 裡核准，Hermes Agent 會問你一次，回答 `y`。之後每個 agent 的回合幾秒內就會出現。
-
-<details>
-<summary><b>或者讓 agent 幫你裝</b></summary>
-
-把下面這段貼給 Codex、Gemini CLI、Cursor、Grok、Hermes、Muse，或任何能執行指令的 agent：
+把下面這段貼給你正在用的 agent，不必先選哪一家的安裝路線：
 
 ```text
-幫我在這台電腦裝 Claude Code 的 Agent Board 外掛，並把這台電腦上的 coding agent 接上它。
-依序執行這三行，任何一行失敗就停下來告訴我：
+幫我在這台電腦安裝 https://github.com/WenyuChiou/agent-board 的 Agent Board。
+先讀 AGENTS.md、README 與安裝指南，辨識目前的 host 和這台電腦已安裝的其他 coding agent，再用共同入口 node scripts/setup-agent.mjs 預覽。
+保留既有設定與共用進度路徑，依我對永久改動的確認要求，完成適用的 hooks、plugin 與看板入口；不要依賴或呼叫另一家 AI 來初始化。
+完成原生 host 必要的限定範圍信任並讀回設定，讓目前 session 回報自己的真實任務進度，開啟互動看板。
+CLI、桌面 App、IDE 的實際 hook 事件分開驗收；安裝檔案、傳輸接受、收到 ACK 和進度接通是不同結果。
+列出哪些既有 session 需要重新載入，以及尚未支援或未驗收的部分。不要掃描私密對話，也不要默默略過阻擋。
+```
+
+</details>
+
+手動安裝只需要 Node.js 18 以上與 Git。先預覽，再套用已檢查的安裝範圍：
+
+```sh
+git clone https://github.com/WenyuChiou/agent-board.git
+cd agent-board
+node scripts/setup-agent.mjs
+node scripts/setup-agent.mjs --apply
+```
+
+安裝器偵測的是設定目錄，不代表那些 agent 正在執行。安裝後用看板 skill 開啟互動頁面；關掉分頁後可用 `node ~/.agent-board/agent-board.mjs --serve` 再開啟。見[共用安裝指南](docs/SETUP.md)。
+
+<details>
+<summary>Claude Code 原生側欄（選用）</summary>
+
+需要 Claude Code 2.1.287 以上。安裝外掛後開啟 Claude Code，輸入 `/progress`；其他 host 可獨立使用互動看板。
+
+```sh
 claude plugin marketplace add WenyuChiou/agent-board
 claude plugin install agent-board@agent-board
-claude -p "/progress connect"
-最後把最後一行印出的內容給我看，並告訴我要重開哪些 agent。
 ```
 
 </details>
 
 ## 支援的 agent
 
-在 Claude Code 裡安裝，之後 Claude Code 每次啟動都會把這台電腦上裝了的 agent 接上。頂端徽章用同樣的分法：綠色是完全可用，黃綠色是部分可用。
+所有 agent 使用同一個安裝器。進度、互動網頁、在線收訊分開驗收；安裝完成不代表已開著的 session 載入了 hooks。見[共用安裝指南](docs/SETUP.md)與[各介面傳訊能力](docs/MESSAGING.md#agent-and-surface-support)。
 
-**完全可用**：回合自己上看板，在它裡面也叫得出看板。
-- **Claude Code** 2.1.302，在面板裡；問題點一下就回答
-- **Codex** 0.163.0，打 `$agent-board`；第一次要在 Codex 的 `/hooks` 核准
-- **Gemini CLI** 0.64.0，打 `/board`；第一次執行指令前會問一次
-- **OpenCode** 1.19.3，打 `/board`
-
-**部分可用**
-- **Grok Build** 1.0.62：回合會上看板；在它裡面打 `/agent-board` 還沒驗證
-- **Hermes Agent** 0.19.0：兩者都能用；第一次回答 `y`；單次的 `hermes -q` 提問會顯示成已停，不是等你
-- **OpenClaw** 2026.10.4：兩者都能用；需要 2026.4.24 以上，會警告無法確認外掛來源，但照樣載入
-- 網頁版 **dot**、**Muse**：沒有 hook，要把[一段提示](docs/REMOTE_REPORTERS.md#chat-relay-a-prompt-to-paste)貼進聊天，再把它寫的每個區塊貼進[看板的網頁](#看板的網頁)；在它們裡面看不到看板
-- **其他 agent**（Aider、Copilot、Windsurf…）：把 [AGENTS.md](AGENTS.md) 的一段貼進它的說明檔，它會自己寫一塊；在它裡面看不到看板
-
-**還不支援**
-- **Cursor**：Windows 上它用 bash 跑所有 hook，其他工具的 PowerShell hook 擋住了它的回合；macOS、Linux 還沒驗證
-- **Muse Code**：hook 照它的文件設定，`/agent-board` 技能放在它會讀的 `~/.agents/skills`；兩者都還沒驗證
-- **Antigravity**：沒有回合結束的 hook，回合上不了看板
+| Host／介面 | 獨立安裝與驗收狀態 |
+| --- | --- |
+| Codex CLI | 六個 hooks 與自身 thread reporter；已觀察 owned app-server 的 SessionStart、UserPromptSubmit、Stop，TTY 另驗。 |
+| Codex 桌面 App | 真實自身進度與互動網頁已驗證；桌面自動 hooks、原生反向收訊仍未驗收。 |
+| Antigravity CLI | 四個具名原生 hooks 與共用 skill；Windows CLI 原生事件與實機 ACK 已驗證，App／IDE 另驗。 |
+| Antigravity App／IDE | 共用全域 hook 格式，但各介面的執行與收訊須分開驗收。 |
+| Cursor、OpenCode、Grok Build、Muse Code | 可產生獨立 hooks 或 plugin；仍須檢查 host 啟用與實際事件，安裝不代表原生收訊。 |
+| Hermes Agent、OpenClaw | 安裝看板與 skill；獨立原生生命週期 adapter 尚待實作。 |
+| Claude Code | 原生側欄與外掛連接流程可選用；其他 host 不需透過它初始化。 |
+| dot、網頁 Muse、其他 agent | 明確回報自身進度或[手動 chat relay](docs/REMOTE_REPORTERS.md#chat-relay-a-prompt-to-paste)；未建立自動原生接收器。 |
 
 ### 依能力
 
-✅ 可以用 · ⚠️ 可以用，限制見上 · ❔ 還沒驗證 · ❌ 還不支援
+生命週期支援見[安裝 adapter 表](docs/SETUP.md#native-status-adapters)；精確 session 綁定、ACK 與介面限制見[傳訊文件](docs/MESSAGING.md)。
 
-| | Agent | 回合上看板 | 在它裡面看看板 | 驗證版本 |
-|:-:|---|:-:|:-:|---|
-| <img src="docs/images/agents/claude-code.svg" width="24" alt=""> | **Claude Code** | ✅ | ✅ 面板 | 2.1.302 |
-| <img src="docs/images/agents/codex.svg" width="24" alt=""> | **Codex** | ✅ | ✅ `$agent-board` | 0.163.0 |
-| <img src="docs/images/agents/gemini-cli.svg" width="24" alt=""> | **Gemini CLI** | ✅ | ✅ `/board` | 0.64.0 |
-| <img src="docs/images/agents/opencode.svg" width="24" alt=""> | **OpenCode** | ✅ | ✅ `/board` | 1.19.3 |
-| <img src="docs/images/agents/grok-build.svg" width="24" alt=""> | **Grok Build** | ✅ | ❔ `/agent-board` | 1.0.62 |
-| <img src="docs/images/agents/hermes-agent.svg" width="24" alt=""> | **Hermes Agent** | ⚠️ | ✅ `/agent-board` | 0.19.0、0.16.0（Windows） |
-| <img src="docs/images/agents/openclaw.svg" width="24" alt=""> | **OpenClaw** | ⚠️ | ✅ `/agent-board` | 2026.10.4 |
-| <img src="docs/images/agents/cursor.svg" width="24" alt=""> | **Cursor** | ❌ | ❔ `/agent-board` | 2026.10.16（Windows） |
-| <img src="docs/images/agents/muse-code.svg" width="24" alt=""> | **Muse Code** | ❔ | ❔ `/agent-board` | |
-| | **Antigravity** | ❌ | ❔ `/agent-board` | |
-| | **dot**、**Muse**（網頁版） | ⚠️ | ❌ | |
-| | **其他 agent** | ⚠️ | ❌ | |
+<details>
+<summary>舊 Gemini CLI 相容性</summary>
+
+Google 已於 2026 年 6 月 18 日停止 Gemini CLI 的免費個人版及 Google AI Pro／Ultra 服務，改用 Antigravity CLI；企業授權與付費 API key 管道另計。保留明確指定的 `--agent gemini` 相容目標，不把它當成 Antigravity 的別名。[官方公告](https://developers.googleblog.com/an-important-update-transitioning-gemini-cli-to-antigravity-cli/)。
+
+</details>
+
 
 在 agent 裡看到的看板是印出來的文字：看得到全部，但不能點。所以看板指令也會在瀏覽器打開[看板的網頁](#看板的網頁)，在那裡勾步驟、封存工作、複製回答，或回覆已經結束的 Grok Build、Codex 對話。還開著的對話，在那個 agent 裡回答。
 
+<details>
+<summary>選用 Claude connector 的歷史截圖</summary>
+
+這張歷史圖片含舊 Gemini CLI；目前一般使用者入口改為 Antigravity CLI，圖片不算 Antigravity 驗收證據。
+
 <img alt="看板列出 6 家 agent 各自問的問題：Codex、Gemini CLI、OpenClaw、OpenCode、Grok Build、Hermes Agent" src="docs/images/live/hooks-zh-TW.png" width="620">
+
+</details>
 
 ## 每個 agent 裡都看得到看板
 
@@ -127,17 +128,17 @@ claude -p "/progress connect"
 
 | 在 | 打 |
 |---|---|
-| Gemini CLI、OpenCode | `/board` |
+| OpenCode | `/board` |
 | Codex | `$agent-board` |
 | OpenClaw、Hermes Agent | `/agent-board` |
 | Grok Build、Cursor、Antigravity（還沒驗證） | `/agent-board` |
-| 任何終端機，開在任何 agent 旁邊 | `node ~/.claude/agent-board.mjs --watch`（`--html` 在瀏覽器開） |
-| 瀏覽器，從任何 agent | `node ~/.claude/agent-board.mjs --serve` |
-| 聊天軟體，透過 agent（Hermes Agent、OpenClaw） | `node ~/.claude/agent-board.mjs --chat`（純文字，沒有網頁也沒有網址；由 agent 去跑） |
+| 任何終端機，開在任何 agent 旁邊 | `node ~/.agent-board/agent-board.mjs --watch`（`--html` 在瀏覽器開） |
+| 瀏覽器，從任何 agent | `node ~/.agent-board/agent-board.mjs --serve` |
+| 聊天軟體，透過 agent（Hermes Agent、OpenClaw） | `node ~/.agent-board/agent-board.mjs --chat`（純文字，沒有網頁也沒有網址；由 agent 去跑） |
 
 **在聊天軟體裡。** `--chat` 把看板印成純文字，沒有網頁、沒有網址、也不開瀏覽器，並縮到一則訊息放得下（還有更多時結尾是「還有 N 項」）。等你回覆的問題排最前面，接著是每件工作和它的下一步，最後是今天做完的。它會把你的家目錄顯示成 `~`，並遮掉它認得的憑證形式（例如 `token=...`、`Bearer ...` 和常見的金鑰開頭）；其他形狀的機密它認不出來，所以別把機密寫進看板。Hermes Agent 的 skill 會替你執行它，並把印出來的內容原樣送出。
 
-**像面板一樣操作。** 在 agent 旁邊開一個終端機（分割視窗），執行 `node ~/.claude/agent-board.mjs --watch`：
+**像面板一樣操作。** 在 agent 旁邊開一個終端機（分割視窗），執行 `node ~/.agent-board/agent-board.mjs --watch`：
 
 | 按鍵 | 作用 |
 |---|---|
@@ -154,18 +155,15 @@ claude -p "/progress connect"
 
 <img alt="左邊是 Codex；右邊是看板，剛按 x 勾掉一步，按鍵說明下面寫著已完成" src="docs/images/live/work-zh-TW.png" width="100%">
 
-<table><tr>
-<td><img alt="Codex CLI 0.163.0：打 $agent-board，跑看板腳本並顯示看板" src="docs/images/live/codex-zh-TW.png"></td>
-<td><img alt="Gemini CLI 0.64.0：/board 把看板貼進提示" src="docs/images/live/gemini-zh-TW.png"></td>
-</tr></table>
+<img alt="Codex CLI 0.163.0：打 $agent-board，跑看板腳本並顯示看板" src="docs/images/live/codex-zh-TW.png">
 
-上圖是 Codex 0.163.0 和 Gemini CLI 0.64.0；OpenCode 和終端機的畫面在[使用說明](docs/GUIDE.zh-TW.md#每個-agent-裡都看得到看板)。
+上圖為 Codex CLI 0.163.0。其他歷史截圖見[使用說明](docs/GUIDE.zh-TW.md#每個-agent-裡都看得到看板)；不代表目前桌面版或原生收訊已驗收。
 
-看板直接讀 `progress.md`，不用開 Claude Code，只要 Node.js 18 以上：用 npm 裝的 Codex 和 Gemini CLI 會帶著它，原生安裝的 Codex 不會；`node --version` 找不到的話，就裝一下 Node。少了它，對話開始時會說一次，`/progress connect status` 也看得到。其他 agent 的回合要有 Claude Code 對話開著才會整理成步驟；在那之前，看板照原樣列出它們。
+獨立看板需要 Node.js 18+，直接讀 `progress.md`。原生 hooks 回報 session 活動，agent 明確回報任務步驟，兩者都不需要 Claude Code 對話。選用的 Claude 外掛可另外透過它的模型整理已連接的 inbox。
 
 ### 看板的網頁
 
-上面的看板指令和技能通常會執行 `--serve`：印出看板、啟動背景伺服器、寫入位址檔、在瀏覽器開啟網頁，並把帶 token 的連結印進 agent 的對話。在任何終端機執行 `node ~/.claude/agent-board.mjs --serve` 也一樣（加 `--no-open` 只印網址）。再跑一次 `--serve` 會叫回已經開著的那一頁。在聊天 app 中，技能會改用 `--chat`，不會印出連結。在網頁上可以：
+上面的看板指令和技能通常會執行 `--serve`：印出看板、啟動背景伺服器、寫入位址檔、在瀏覽器開啟網頁，並把帶 token 的連結印進 agent 的對話。在任何終端機執行 `node ~/.agent-board/agent-board.mjs --serve` 也一樣（加 `--no-open` 只印網址）。再跑一次 `--serve` 會叫回已經開著的那一頁。在聊天 app 中，技能會改用 `--chat`，不會印出連結。在網頁上可以：
 
 - **勾掉**自己工作的下一步、**封存**一件工作，或按**現在封存**把做完的全部收走。
 - **複製**另一個 agent 問題的答案、問這個問題的對話 ID、對話的續接指令，或步驟裡的指令。
@@ -173,9 +171,9 @@ claude -p "/progress connect"
 - **回覆**已經結束的 Grok Build 或 Codex 對話。回覆會在那個對話自己的資料夾裡執行 `grok -r <id>` 或 `codex exec resume <id>`，agent 回答後網頁會顯示它回了什麼，可能要幾分鐘。同一個對話一次只送一則。還開著的對話要在它自己的視窗回答，因為兩邊同時寫會把對話弄亂。
 - **貼上區塊**：從 Muse、dot 這類網頁聊天來的。先從網頁複製聊天提示，貼進聊天一次；之後把聊天印出的每個區塊貼進來。格式不對，或會蓋掉 Claude 或其他 agent 區塊的，會被拒絕。
 
-網頁只在 127.0.0.1 上聽（除非加上 `--lan`，見下文），網址裡帶一把隨機鑰匙。這台電腦上的任何程式只要有連結就能使用。30 分鐘沒人看就會關，也可以按它的**關閉看板**；不過還有一則回覆在送給 agent 的路上時，不會關。
+網頁只在 127.0.0.1 上聽（除非加上 `--lan`，見下文），網址裡帶一把隨機鑰匙。這台電腦上的任何程式只要有連結就能使用。關掉分頁後本機服務會繼續執行，使用 $agent-board 或 --serve 可重開；按**關閉看板**才停止。可用 --idle-minutes 30 選擇閒置關閉，0 代表停用；LAN 仍保留 10 分鐘限制。傳訊進行中不會關閉。
 
-**在手機上。** 網頁的版面適合手機。要從和電腦連同一個 Wi-Fi 的手機打開，跑 `node ~/.claude/agent-board.mjs --serve --lan`：除了電腦本機的網址，它還會印出網頁在你網路上的網址和它的 QR code，用手機相機對著掃就好。電腦有不只一個網路位址時，用 `--lan 192.168.1.23` 指定一個。Windows 可能會問要不要讓 Node.js 使用網路：在私人網路上允許，並確認 Windows 把你的 Wi-Fi 算成私人網路（剛連上的網路它會先當成公用網路），不然手機連不到網頁。不在那個網路上時，透過 Remote Control 打開一個 Claude Code 對話，問它進度如何：它讀的是同一份 `progress.md`。
+**在手機上。** 網頁的版面適合手機。要從和電腦連同一個 Wi-Fi 的手機打開，跑 `node ~/.agent-board/agent-board.mjs --serve --lan`：除了電腦本機的網址，它還會印出網頁在你網路上的網址和它的 QR code，用手機相機對著掃就好。電腦有不只一個網路位址時，用 `--lan 192.168.1.23` 指定一個。Windows 可能會問要不要讓 Node.js 使用網路：在私人網路上允許，並確認 Windows 把你的 Wi-Fi 算成私人網路（剛連上的網路它會先當成公用網路），不然手機連不到網頁。不在那個網路上時，透過 Remote Control 打開一個 Claude Code 對話，問它進度如何：它讀的是同一份 `progress.md`。
 
 網路上的網頁有這些限制：
 
@@ -213,15 +211,15 @@ claude -p "/progress connect"
 ## 常見問題
 
 <details>
-<summary><b>一定要有其他 agent 嗎？只用 Claude Code 可以嗎？</b></summary>
+<summary><b>可以只從一個 agent 開始嗎？</b></summary>
 
-可以。每個 Claude Code 對話都會自己出現；接上其他 agent 是選用的。
+可以，使用共用安裝器從支援的任一 agent 開始，不需要另一家 AI。原生 hooks 依 host 而異；看板和明確回報自身進度的入口共用。
 </details>
 
 <details>
 <summary><b>我是從 Codex（或其他 agent）裝的，它看得到 Claude Code 在做什麼嗎？</b></summary>
 
-看得到。插件裝在 Claude Code 裡，但接上時每個 agent 都會拿到看看板的指令（見[每個 agent 裡都看得到看板](#每個-agent-裡都看得到看板)），而看板讀的就是所有 agent 共用的那個檔案。想讓其他 agent 的回合整理成步驟，就在某處開著一個 Claude Code 對話。
+可以，只要各 session 回報到同一個本機進度檔。獨立 reporter 不需要 Claude Code 就能更新自己的區塊；選用側欄也讀同一檔案。開啟看板和接上原生收訊是兩件事。
 </details>
 
 <details>
@@ -235,10 +233,12 @@ claude -p "/progress connect"
 <details>
 <summary><b>某個 agent 沒出現。</b></summary>
 
-1. 再跑一次 `/progress connect`，看它印出什麼：它會列出接上了哪些 agent，以及哪些設定檔改不了。
-2. 重開那個 agent，hook 是在啟動時載入的。Codex 要在 `/hooks` 核准，Hermes Agent 會問一次。
-3. 開著一個 Claude Code 對話：面板只在有對話開著時讀收件匣。這段期間進來的回合會在那裡等，最多兩天。
-4. 先關掉所有 Claude Code 對話（開著的對話幾秒內就會讀走並刪掉檔案），再在本機確認回合結束後 `~/.claude/progress-inbox/` 是否出現新檔案。沒有新檔案，就是 hook 沒跑。這些檔案可能包含提問、回覆和私人路徑，請勿附到 issue。看板沒能收下的回合（`progress.md` 寫不進去，或模型沒給摘要、回覆裡也沒有提問）會以 `.taking` 檔留在那裡，每 15 分鐘再試一次；試滿 8 次就改成 `.failed` 檔保留，不會刪掉。不是有效 JSON、或沒寫是哪個對話的報告，會直接改成 `.failed` 檔保留，面板會告訴你在哪裡；`.failed` 檔不會自動清掉，看完再自己刪。
+1. 執行 `node scripts/setup-agent.mjs` 預覽目前 host，查看衝突與 `adapter-pending`。
+2. 依 host 要求重載，完成限定範圍的原生 hook 信任／啟用，再讀回確認。
+3. 由該 session 使用自己的原生 id 回報，檢查精確區塊與更新時間；不要替其他 session 猜任務。
+4. 另外觀察新的原生生命週期事件。進度出現不代表可以反向收訊，見[接線檢查](docs/MESSAGING.md#connecting-a-session-that-was-already-open)。
+
+選用 Claude 外掛另有 inbox 流程，該安裝可用 `/progress connect status` 查詢；獨立狀態 hooks 不需要 Claude 對話開著。
 
 公開回報問題時，請提供：
 
@@ -262,7 +262,7 @@ claude -p "/progress connect"
 <details>
 <summary><b>會把資料傳出去嗎？要花多少錢？</b></summary>
 
-看板檔案儲存在本機。透過你自己的 Claude Code 登入／模型存取，回合摘要會把提問和回覆傳給 Claude Haiku；標題會傳送該對話的第一個請求和步驟名稱；交接行會傳送最多 6,000 個字元的壓縮摘要。面板的側邊提問框也會透過同一個登入，把你的問題傳給模型，依這段對話的紀錄回答。這些呼叫使用該帳號的額度或計費。面板會執行 `git branch --show-current`，裝了 GitHub 的 `gh` 的話，也會用它查 pull request 和 CI 狀態。從本機看板網頁送出回覆，可以恢復已結束的 Codex 或 Grok Build 對話，使用該 agent 的權限和網路存取。連接 OpenClaw 時會設定 `allowConversationAccess: true`，讓外掛讀取該對話。
+獨立 reporter 只在本機保留挑選過的 session 中繼資料，不呼叫摘要模型。發訊給在線接收器會使用目標 agent 的模型與額度。下列模型與對話存取適用於選用的 Claude 外掛流程：看板檔案儲存在本機。透過你自己的 Claude Code 登入／模型存取，回合摘要會把提問和回覆傳給 Claude Haiku；標題會傳送該對話的第一個請求和步驟名稱；交接行會傳送最多 6,000 個字元的壓縮摘要。面板的側邊提問框也會透過同一個登入，把你的問題傳給模型，依這段對話的紀錄回答。這些呼叫使用該帳號的額度或計費。面板會執行 `git branch --show-current`，裝了 GitHub 的 `gh` 的話，也會用它查 pull request 和 CI 狀態。從本機看板網頁送出回覆，可以恢復已結束的 Codex 或 Grok Build 對話，使用該 agent 的權限和網路存取。連接 OpenClaw 時會設定 `allowConversationAccess: true`，讓外掛讀取該對話。
 
 `--serve` 預設只監聽本機（`127.0.0.1`）；這台電腦上的任何程式只要有連結就能使用。`--serve --lan` 會透過帶 token 的 HTTP 連結，在私人網路分享網頁。token 是存取金鑰，不會加密：同一網路上任何拿到 LAN 連結的人都能讀看板、修改看板檔案（包括匯入區塊），也能停止伺服器。LAN 網頁會拒絕啟動 agent 的回覆，也不顯示恢復對話的指令。私人網路位址不代表咖啡廳或旅館的網路值得信任。不要分享連結或 QR code。要停止服務，請按網頁上的「關閉」按鈕；若正在傳送回覆，請等完成後重試。只關分頁，背景伺服器仍會運作到閒置逾時。看板伺服器或 LAN 監聽器每次重新啟動都會產生新的 token，因此停止後舊連結就無法使用。檔案變更、啟動的程式、網路存取和 `--chat` 隱藏資訊的限制，詳見 [SECURITY.md](SECURITY.md)（英文）。
 </details>

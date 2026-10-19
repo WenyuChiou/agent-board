@@ -6,7 +6,7 @@ import { codexEvent, codexEvents, codexReport, putCodexBlock } from '../hooks/co
 import type { CodexReport } from '../hooks/codex'
 import type { Strings } from '../hooks/i18n'
 import { STRINGS } from '../hooks/strings'
-import { cursorEvent, cursorEvents, lifecycleCapability, localAgents, opencodePlugin, statusEvents } from '../hooks/local-agents'
+import { antigravityHooks, cursorEvent, cursorEvents, lifecycleCapability, localAgents, opencodePlugin, statusEvents } from '../hooks/local-agents'
 import type { LocalAgent } from '../hooks/local-agents'
 import { trustCodex } from './codex-host'
 
@@ -97,6 +97,7 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
     gemini: join(home, '.gemini', 'settings.json'),
     grok: join(flag('--grok-dir') ?? (process.env.GROK_HOME || join(home, '.grok')), 'hooks', 'agent-board-local.json'),
     muse: join(home, '.config', 'muse', 'settings.json'),
+    antigravity: join(home, '.gemini', 'config', 'hooks.json'),
   }
   const config = configs[agent] ?? ''
   const script = join(root, 'agent-board.mjs')
@@ -109,7 +110,7 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
     const payload = agent === 'cursor' && mode === '--codex-event' ? cursorEvent(raw) : raw
     // Only metadata selected below is retained. Never open transcript_path or save prompts,
     // tool inputs, last_assistant_message, or permission decisions from a hook payload.
-    const session = mode !== '--codex-report' ? payload.session_id ?? payload.sessionId ?? payload.sessionID ?? (agent === 'grok' ? process.env.GROK_SESSION_ID : undefined) : flag('--session') ?? (agent === 'codex' ? process.env.CODEX_THREAD_ID : process.env.AGENT_BOARD_AGENT === agent ? process.env.AGENT_BOARD_SESSION_ID : undefined)
+    const session = mode !== '--codex-report' ? agent === 'antigravity' ? payload.conversationId : payload.session_id ?? payload.sessionId ?? payload.sessionID ?? (agent === 'grok' ? process.env.GROK_SESSION_ID : undefined) : flag('--session') ?? (agent === 'codex' ? process.env.CODEX_THREAD_ID : process.env.AGENT_BOARD_AGENT === agent ? process.env.AGENT_BOARD_SESSION_ID : undefined)
     if (typeof session !== 'string' || !/^[a-zA-Z0-9][a-zA-Z0-9_-]{5,127}$/.test(session)) throw new Error('INVALID_SESSION')
     const owner = hash(`${agent}:${session}`)
     const recordFile = join(root, 'sessions', `${owner}.json`)
@@ -120,18 +121,21 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
     if (mode === '--agent-status' && (agent === 'codex' || agent === 'cursor')) throw new Error('INVALID_EVENT')
     const status = flag('--state') ?? payload.state
     if (mode === '--agent-status' && !['working', 'waiting', 'ended'].includes(String(status))) throw new Error('INVALID_STATE')
+    const event = agent === 'antigravity' && mode === '--agent-status' ? flag('--event') : undefined
+    if (event !== undefined && statusEvents.antigravity?.[event] !== status) throw new Error('INVALID_EVENT_STATE')
     const base = mode === '--codex-event' ? codexEvent(previous, payload, now, s) : codexReport(previous, session, mode === '--agent-status' ? {
       title: previous?.title ?? s.localAgentTask(agent), project: previous?.project ?? agent,
       state: status === 'working' ? 'working' : previous?.state === 'done' ? 'done' : status,
-      steps: previous?.steps ?? [`- [>] ${s.codexLifecycle}`],
+      steps: previous?.steps ?? [`- [>] ${s.localAgentLifecycle}`],
     } : payload, now, s)
-    const report = { ...base, agent, ...(mode === '--codex-event' && !previous ? { title: s.localAgentTask(agent), project: agent } : {}) }
+    const priorActivity = previous?.activity ?? []
+    const report = { ...base, agent, ...(mode === '--codex-event' && !previous ? { title: s.localAgentTask(agent), project: agent } : {}), ...(event === undefined ? {} : { activity: [...priorActivity, { event, state: String(status), updated: now }].slice(-16) }) }
     if (mode !== '--codex-report' && previous) {
       // Replayed hooks do not refresh the time or regress an explicit task report.
       const same = previous.state === report.state && previous.turn === report.turn
-      if (same) {
+      if (same && (event === undefined || priorActivity.at(-1)?.event === event)) {
         if (agent === 'cursor') output(raw.hook_event_name === 'sessionStart' ? { env: { AGENT_BOARD_SESSION_ID: session, AGENT_BOARD_AGENT: agent } } : {})
-        else if (agent === 'gemini') output({})
+        else if (agent === 'gemini' || agent === 'antigravity') output({})
         return true
       }
     }
@@ -146,7 +150,7 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
     })
     if (mode === '--codex-report') output({ session, block: owner.slice(0, 8), state: report.state, updated: report.updated, progress })
     else if (agent === 'cursor') output(raw.hook_event_name === 'sessionStart' ? { env: { AGENT_BOARD_SESSION_ID: session, AGENT_BOARD_AGENT: agent } } : {})
-    else if (agent === 'gemini') output({})
+    else if (agent === 'gemini' || agent === 'antigravity') output({})
     return true
   }
 
@@ -160,7 +164,7 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
   const changes: { file: string; action: string }[] = []
   const nextHooks: Json = { ...hooks }
   const groups: Json = {}
-  for (const event of !hasHooks ? [] : agent === 'cursor' ? Object.keys(cursorEvents) : agent === 'codex' ? codexEvents : Object.keys(statusEvents[agent] ?? {})) {
+  for (const event of !hasHooks || agent === 'antigravity' ? [] : agent === 'cursor' ? Object.keys(cursorEvents) : agent === 'codex' ? codexEvents : Object.keys(statusEvents[agent] ?? {})) {
     const state = statusEvents[agent]?.[event]
     const eventCommand = state === undefined ? command : `${quote(process.execPath)} ${quote(script)} --agent-status --agent ${agent} --state ${state} --progress-file ${quote(progress)}`
     const group = agent === 'cursor' ? { command: eventCommand } : { hooks: [{ type: 'command', command: eventCommand, timeout: agent === 'gemini' ? 3000 : 3 }] }
@@ -176,7 +180,25 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
     } else if (kept.length) nextHooks[event] = kept
     else delete nextHooks[event]
   }
-  const nextConfig = { ...(agent === 'cursor' ? { version: 1 } : agent === 'muse' ? { schema_version: 1 } : {}), ...hookConfig, hooks: nextHooks }
+  let nextConfig: Json = { ...(agent === 'cursor' ? { version: 1 } : agent === 'muse' ? { schema_version: 1 } : {}), ...hookConfig, hooks: nextHooks }
+  if (agent === 'antigravity') {
+    const name = 'agent-board-local'
+    const desired = antigravityHooks((event, state) => {
+      const argv = [process.execPath, script, '--agent-status', '--agent', 'antigravity', '--state', state, '--event', event, '--progress-file', progress]
+      if (process.platform !== 'win32') return argv.map(quote).join(' ')
+      // Antigravity's Windows executor passes one quoted argument to cmd /c using
+      // CreateProcess escaping. Embedded executable quotes become literal \" bytes.
+      // Keep that command free of inner quotes; PowerShell forwards stdin to Node.
+      const launch = `& ${argv.map(value => `'${value.replaceAll("'", "''")}'`).join(' ')}; exit $LASTEXITCODE`
+      return `powershell.exe -NoLogo -NoProfile -NonInteractive -EncodedCommand ${Buffer.from(launch, 'utf16le').toString('base64')}`
+    })
+    const existing = hookConfig[name], owned = manifest.groups[name]
+    if (existing !== undefined && !(owned !== undefined && isSame(existing, owned)) && !(!remove && isSame(existing, desired))) conflicts.push(`${config}:${name}`)
+    if (owned !== undefined && existing === undefined) conflicts.push(`${config}:${name}`)
+    nextConfig = { ...hookConfig }
+    if (!remove) { nextConfig[name] = desired; groups[name] = desired }
+    else if (owned !== undefined) delete nextConfig[name]
+  }
   const skillText = `---\nname: agent-board\ndescription: ${JSON.stringify(s.localAgentSkillDescription)}\n---\n\n${s.localAgentSkill(`${quote(process.execPath)} ${quote(script)}`)}\n\n${s.localAgentHandoff}\n\n${s.codexTrust}\n\nCodex: ${configs.codex}\n${codexEvents.join(', ')}\n`
   const legacySkills = Object.values(STRINGS).map(words => `---\nname: agent-board\ndescription: ${JSON.stringify(words.boardCommandDescription)}\n---\n\n${words.boardSkillPrompt(`node "${join(home, '.claude', 'agent-board.mjs')}"`)}\n`)
   const original = readFileSync(process.argv[1] ?? '', 'utf8').replace(/^globalThis\.AGENT_BOARD[^\n]*\n/, '')
@@ -203,7 +225,7 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
   if (remove ? readLocal(manifestFile) !== null : readLocal(manifestFile) !== nextManifest) changes.push({ file: manifestFile, action: remove ? 'remove' : readLocal(manifestFile) === null ? 'create' : 'update' })
   const plan = {
     mode: remove ? 'remove' : 'install', agent, progress, data: root, changes, conflicts,
-    notice: s.codexTrust, privacy: s.codexPrivacy,
+    notice: agent === 'codex' ? s.codexTrust : s.localHostReview, privacy: s.codexPrivacy,
     capabilities: { ui: 'web-and-tui', progress: 'explicit-reports', lifecycle: lifecycleCapability(agent), turnBinding: agent === 'codex' || agent === 'cursor' ? 'host-event-id' : 'unavailable-in-status-events', liveReply: false },
   }
   if (mode === '--codex-trust') {

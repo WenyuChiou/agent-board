@@ -16,8 +16,8 @@ const home = homeAt < 0 ? homedir() : args[homeAt + 1]
 if (!home || !selector) throw new Error('MISSING_ARGUMENT')
 const signs = {
   codex: ['.codex'], cursor: ['.cursor'], opencode: ['.config/opencode'],
-  gemini: ['.gemini'], grok: ['.grok/config.toml', '.grok/sessions'], muse: ['.config/muse'],
-  hermes: ['.hermes'], openclaw: ['.openclaw'], antigravity: ['.gemini/config'],
+  gemini: ['.gemini/settings.json'], grok: ['.grok/config.toml', '.grok/sessions'], muse: ['.config/muse'],
+  hermes: ['.hermes'], openclaw: ['.openclaw'], antigravity: ['.gemini/antigravity-cli', '.gemini/antigravity', '.gemini/antigravity-ide'],
 }
 const selected = selector === 'all' ? targets : selector === 'auto' ? targets.filter(agent => signs[agent].some(sign => existsSync(join(home, sign)))) : selector.split(',')
 if (!selected.length || selected.some(agent => !targets.includes(agent)) || new Set(selected).size !== selected.length) throw new Error('INVALID_TARGETS')

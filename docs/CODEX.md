@@ -214,7 +214,7 @@ session id actually provided by that host, never a guessed name or a transcript 
 | Muse Code | Stop, SessionEnd | Coarse status; no working-turn event |
 | Hermes Agent | Board and agent-specific skill installed | Native adapter pending |
 | OpenClaw | Shared board and skill installed | Native adapter pending; no conversation grant added |
-| Antigravity | Board and agent-specific skill installed | Explicit reports only; no verified lifecycle hook |
+| Antigravity | Named native lifecycle hooks and board skill | No session-end event or turn fence; verify CLI/App/IDE separately |
 
 Doctor distinguishes `installed`, `ready` and `connected`. Pending native adapters never
 report ready; `connected` stays unverified until host execution is observed. Shared-file
@@ -225,5 +225,5 @@ Progress sharing is local file interoperability. It does not imply active-sessio
 remote synchronization, a real dot connection, or tool/merge approval from ordinary replies.
 
 The opt-in [connected-session messaging](MESSAGING.md) feature provides a separate web
-target picker and host-adapter API. Its live connection and ACK acceptance are independent
+card reply action and host-adapter API. Its live connection and ACK acceptance are independent
 of this progress integration. No receiving target is inferred from an agent name or card.

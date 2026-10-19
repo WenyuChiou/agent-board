@@ -4,9 +4,15 @@ export const statusEvents: Partial<Record<LocalAgent, Record<string, string>>> =
   gemini: { SessionStart: 'waiting', BeforeAgent: 'working', AfterAgent: 'waiting', SessionEnd: 'ended' },
   grok: { SessionStart: 'waiting', Stop: 'waiting', SessionEnd: 'ended' },
   muse: { Stop: 'waiting', SessionEnd: 'ended' },
+  antigravity: { SessionStart: 'waiting', PreInvocation: 'working', PostInvocation: 'working', Stop: 'waiting' },
 }
 export const lifecycleCapability = (agent: LocalAgent): string =>
-  agent === 'antigravity' ? 'explicit-only' : agent === 'hermes' || agent === 'openclaw' ? 'adapter-pending' : 'adapter-installed-unverified'
+  agent === 'hermes' || agent === 'openclaw' ? 'adapter-pending' : 'adapter-installed-unverified'
+
+// Antigravity groups events under a named definition, rather than hooks.<event>.
+// Stop ends an execution loop, not the conversation. No session-end event is invented.
+export const antigravityHooks = (command: (event: string, state: string) => string): Record<string, unknown> =>
+  Object.fromEntries(Object.entries(statusEvents.antigravity!).map(([event, state]) => [event, [{ type: 'command', command: command(event, state), timeout: 3 }]]))
 
 export const cursorEvents: Record<string, string> = {
   sessionStart: 'SessionStart', beforeSubmitPrompt: 'UserPromptSubmit',

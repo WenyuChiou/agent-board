@@ -10,7 +10,7 @@ import { pathToFileURL } from 'node:url'
 const setup = resolve('scripts/setup-codex.mjs')
 const session = 'test-codex-session-123'
 const fixture = fn => {
-  const home = mkdtempSync(join(tmpdir(), 'codex-local-'))
+  const home = mkdtempSync(join(tmpdir(), 'codex local-'))
   const root = join(home, '.agent-board')
   const script = join(root, 'agent-board.mjs')
   const progress = join(root, 'progress.md')
@@ -286,6 +286,18 @@ test('an unsupported bootstrap target is refused without installing anything', (
   assert.ok(!existsSync(f.root))
 }))
 
+test('auto setup does not mistake an Antigravity profile or the shared gemini directory for Gemini CLI', () => fixture(f => {
+  mkdirSync(join(f.home, '.gemini', 'antigravity-cli'), { recursive: true })
+  const args = [resolve('scripts/setup-agent.mjs'), '--home', f.home, '--codex-dir', join(f.home, '.codex')]
+  const run = () => spawnSync(process.execPath, args, { env: { ...process.env, CLAUDE_PROGRESS_FILE: '' }, encoding: 'utf8', windowsHide: true })
+  const result = run()
+  assert.equal(result.status, 0, result.stderr)
+  assert.deepEqual(JSON.parse(result.stdout).targets, ['antigravity'])
+  assert.equal(existsSync(join(f.home, '.gemini', 'settings.json')), false)
+  f.save(join(f.home, '.gemini', 'settings.json'), '{}')
+  assert.deepEqual(JSON.parse(run().stdout).targets, ['gemini', 'antigravity'])
+}))
+
 test('all targets initialize one shared board and explicitly name unfinished native adapters', () => fixture(f => {
   const installer = resolve('scripts/setup-agent.mjs')
   const result = spawnSync(process.execPath, [installer, '--agent', 'all', '--home', f.home, '--codex-dir', join(f.home, '.codex'), '--grok-dir', join(f.home, '.grok'), '--hermes-dir', join(f.home, '.hermes'), '--apply'], { env: { ...process.env, CLAUDE_PROGRESS_FILE: '' }, encoding: 'utf8', windowsHide: true, timeout: 30000 })
@@ -294,7 +306,7 @@ test('all targets initialize one shared board and explicitly name unfinished nat
   assert.equal(plans.length, 9)
   assert.equal(new Set(plans.map(plan => plan.progress)).size, 1)
   for (const agent of ['hermes', 'openclaw']) assert.equal(plans.find(plan => plan.agent === agent).capabilities.lifecycle, 'adapter-pending')
-  assert.equal(plans.find(plan => plan.agent === 'antigravity').capabilities.lifecycle, 'explicit-only')
+  assert.equal(plans.find(plan => plan.agent === 'antigravity').capabilities.lifecycle, 'adapter-installed-unverified')
   assert.ok(existsSync(join(f.home, '.gemini', 'commands', 'board.toml')))
   assert.ok(existsSync(join(f.home, '.hermes', 'skills', 'agent-board', 'SKILL.md')))
   for (const agent of ['gemini', 'grok', 'muse']) {
@@ -304,6 +316,62 @@ test('all targets initialize one shared board and explicitly name unfinished nat
   const text = readFileSync(f.progress, 'utf8')
   for (const agent of ['gemini', 'grok', 'muse']) assert.ok(text.includes(`agent=${agent} `))
   assert.ok(!text.includes('PRIVATE_PAYLOAD'))
+}))
+
+test('Antigravity setup merges its named native hooks and removes only the owned definition', () => fixture(f => {
+  const file = join(f.home, '.gemini', 'config', 'hooks.json')
+  const foreign = { custom: { Stop: [{ command: 'user-command' }] } }
+  f.save(file, JSON.stringify(foreign))
+  const plan = JSON.parse(f.install('--agent', 'antigravity').stdout)
+  assert.ok(plan.changes.some(one => one.file === file))
+  assert.deepEqual(JSON.parse(readFileSync(file, 'utf8')), foreign)
+  assert.equal(f.install('--agent', 'antigravity', '--apply').status, 0)
+  const config = JSON.parse(readFileSync(file, 'utf8'))
+  assert.deepEqual(config.custom, foreign.custom)
+  assert.deepEqual(Object.keys(config['agent-board-local']), ['SessionStart', 'PreInvocation', 'PostInvocation', 'Stop'])
+  assert.equal(config.hooks, undefined)
+  const stop = config['agent-board-local'].Stop[0].command
+  const launch = process.platform === 'win32' ? Buffer.from(stop.split(' ').at(-1), 'base64').toString('utf16le') : stop
+  assert.match(launch, /--state['"]? ['"]?waiting['"]? ['"]?--event['"]? ['"]?Stop/)
+  assert.deepEqual(JSON.parse(f.install('--agent', 'antigravity').stdout).changes, [])
+  assert.equal(f.command(['--codex-remove', '--agent', 'antigravity', '--apply']).status, 0)
+  assert.deepEqual(JSON.parse(readFileSync(file, 'utf8')), foreign)
+}))
+
+test('native Antigravity hook commands bind conversationId, record metadata only and keep Stop resumable', () => fixture(f => {
+  assert.equal(f.install('--agent', 'antigravity', '--apply').status, 0)
+  const hooks = JSON.parse(readFileSync(join(f.home, '.gemini', 'config', 'hooks.json'), 'utf8'))['agent-board-local']
+  const conversationId = '11111111-2222-4333-8444-555555555555'
+  const record = join(f.root, 'sessions', createHash('sha256').update('antigravity:' + conversationId).digest('hex') + '.json')
+  // Match the native Windows executor's cmd /c + CreateProcess argument escaping,
+  // not Node's shell:true workaround. The installation path deliberately has spaces.
+  const fire = event => spawnSync(process.platform === 'win32' ? process.env.ComSpec || 'cmd.exe' : '/bin/sh', [process.platform === 'win32' ? '/c' : '-c', hooks[event][0].command], { env: f.env, input: JSON.stringify({ conversationId, session_id: 'foreign-id-must-not-bind', transcriptPath: 'PRIVATE_TRANSCRIPT_DO_NOT_OPEN', workspacePaths: ['PRIVATE_WORKSPACE'], prompt: 'PRIVATE_PROMPT', toolCall: { args: 'PRIVATE_TOOL' } }), encoding: 'utf8', windowsHide: true, timeout: 10000 })
+  for (const event of Object.keys(hooks)) {
+    const result = fire(event)
+    assert.equal(result.status, 0, result.stderr); assert.deepEqual(JSON.parse(result.stdout), {})
+    const saved = JSON.parse(readFileSync(record, 'utf8'))
+    assert.equal(saved.session, conversationId)
+    assert.equal(saved.activity.at(-1).event, event)
+    assert.equal(saved.state, event === 'SessionStart' || event === 'Stop' ? 'waiting' : 'working')
+    assert.ok(!JSON.stringify(saved).includes('PRIVATE_'))
+  }
+  const saved = JSON.parse(readFileSync(record, 'utf8'))
+  assert.deepEqual(saved.activity.map(one => one.event), Object.keys(hooks))
+  assert.ok(readFileSync(f.progress, 'utf8').includes('resume=' + conversationId))
+  assert.equal(fire('PreInvocation').status, 0)
+  assert.equal(JSON.parse(readFileSync(record, 'utf8')).state, 'working')
+  assert.notEqual(f.command(['--agent-status', '--agent', 'antigravity', '--state', 'ended', '--event', 'Stop'], { conversationId }).status, 0)
+}))
+
+test('an edited Antigravity definition is a conflict rather than an automatic trust or overwrite', () => fixture(f => {
+  f.install('--agent', 'antigravity', '--apply')
+  const file = join(f.home, '.gemini', 'config', 'hooks.json')
+  const edited = JSON.parse(readFileSync(file, 'utf8'))
+  edited['agent-board-local'].enabled = false
+  writeFileSync(file, JSON.stringify(edited))
+  assert.notEqual(f.install('--agent', 'antigravity', '--apply').status, 0)
+  assert.deepEqual(JSON.parse(readFileSync(file, 'utf8')), edited)
+  assert.notEqual(f.command(['--codex-remove', '--agent', 'antigravity', '--apply']).status, 0)
 }))
 
 test('concurrent agents preserve every shared progress block and foreign manual text', async () => {

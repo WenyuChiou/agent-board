@@ -100,9 +100,9 @@ The progress support described in the README is separate from connected-session 
 
 | Agent / surface | Progress integration in this repository | Connected-session messaging evidence |
 | --- | --- | --- |
-| Codex | Independent setup, explicit own-session reporter and lifecycle hooks; hook trust and actual events require separate verification | Owned disposable app-server native ACK verified; CLI TTY and desktop chat transport are separate, not verified |
-| Antigravity CLI | No automatic turn-end progress hook; a live owned receiver is visible without inventing a progress card | Owned native stream ACK verified; mutual model-to-model delivery still needs acceptance |
-| Antigravity editor UI | No automatic progress/session discovery established | No existing-editor receiver established |
+| Codex | Independent setup and explicit reporter; isolated native app-server SessionStart, UserPromptSubmit and Stop observed | Authenticated owners forwarded two prompts each way with Antigravity and native ACKs; autonomous model tools, CLI TTY and desktop chat remain separate |
+| Antigravity CLI | Independent named hooks; all four native Windows events observed after the command-quoting fix | Same cross-host owner acceptance; native stream ACK, idle continuation, deduplication, conflict and offline rejection verified |
+| Antigravity App / IDE | Same global hook path; each host must load and execute it, with no arbitrary session discovery | No existing-editor receiver established |
 | Gemini CLI | Existing AfterAgent / SessionEnd reporter hooks and `/board` integration | Generic client API only; no Gemini-native connector or bidirectional acceptance yet |
 | OpenCode | Independent setup, session-context progress tool and plugin events | Generic client API only; no native receiving adapter or real bidirectional acceptance yet |
 | OpenClaw | Existing reporter plugin and board skill, with documented version/restart requirements | Its native session tools are not yet integrated into this hub; no real bidirectional acceptance |

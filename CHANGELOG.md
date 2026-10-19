@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+- **Unify setup and install Antigravity's native hooks.** All three READMEs now start
+  with an expanded, agent-neutral installation prompt and the common installer.
+  Antigravity is the current consumer CLI entry; Gemini CLI is documented separately
+  for enterprise/API compatibility. Detection no longer treats the shared `.gemini`
+  parent as proof of Gemini CLI. Antigravity setup merges its named native schema,
+  binds `conversationId`, records bounded metadata and keeps Stop resumable. Foreign
+  or edited hooks remain untouched. Windows commands also survive the native executor's
+  `cmd /c` quoting of paths containing spaces, without changing shell policy. Tests:
+  `auto setup does not mistake an Antigravity
+  profile or the shared gemini directory for Gemini CLI`, `Antigravity setup merges
+  its named native hooks and removes only the owned definition`, `native Antigravity
+  hook commands bind conversationId, record metadata only and keep Stop resumable`,
+  `an edited Antigravity definition is a conflict rather than an automatic trust or overwrite`.
+
 - **Keep the local board available after closing a tab.** Local idle shutdown is
   disabled by default; `--idle-minutes 30` opts in and zero disables it. The page
   explains its actual setting, reopening reuses a matching service, and Close the

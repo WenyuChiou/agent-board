@@ -13,6 +13,7 @@ export type CodexReport = {
   events?: string[]
   retiredTurns?: string[]
   agent?: LocalAgent
+  activity?: { event: string; state: string; updated: string }[]
 }
 
 export const codexEvents = ['SessionStart', 'UserPromptSubmit', 'PermissionRequest', 'Stop', 'Interrupt', 'SessionEnd'] as const
@@ -66,6 +67,7 @@ export const codexReport = (previous: CodexReport | null, session: string, input
     title: line(input.title), project: input.project === undefined ? previous?.project ?? s.codexProject : line(input.project),
     steps, updated: now,
     events: previous?.events ?? [], retiredTurns: previous?.retiredTurns ?? [],
+    ...(previous?.activity === undefined ? {} : { activity: previous.activity }),
   }
 }
 
