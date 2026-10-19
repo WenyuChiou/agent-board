@@ -1,4 +1,5 @@
 Fixes #
+Author: <agent>, <branch>
 
 <!-- One issue per pull request (CONTRIBUTING.md, Pull requests). Other findings go into new issues. Release pull request: delete the Fixes line. -->
 
