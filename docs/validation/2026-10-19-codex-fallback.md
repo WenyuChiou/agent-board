@@ -89,6 +89,21 @@ The initial internal-write-only fix left direct sidecar replacements unstamped. 
 
 No full suite was run after this change. The focused regression proves timestamp isolation and direct-replacement compatibility, not the cause or resolution of full-suite timeouts or prior large Node walltime stalls. Final-input hashes are retained in `issue-102-mtime-inputs.json`; all previous full-suite failures remain retained. Parent-owned board timeout guards are outside this scoped commit.
 
+## Adoption fixture integration
+
+The first PR #141 CI head, `7645141`, failed the four actual bundled-adoption
+cases because the shared fixture now supplied an explicit missing control binary.
+The preload correctly blocked that attempted spawn, failing the existing
+no-child-process assertion before any host could execute. These four cases now
+omit that shared option while retaining their own allowlisted home, empty PATH
+and child-process blocker. General trust fixtures still use an explicit synthetic
+or missing executable, and the no-native-attempt assertion is unchanged.
+
+All four adoption cases passed afterward on Node 24.12.0 in 4.514 seconds
+(`issue-102-adoption-guard-green.log`). The initial CI failures are retained in
+the acceptance workspace, not replaced by this focused result. Product code,
+trust and permanent settings are unchanged by this fixture correction.
+
 ## Bounded page fixtures
 
 The next complete 11-file Node attempt on actual-main merge `720a952` was interrupted
@@ -106,3 +121,11 @@ protection in 2223.94 ms and three-language Confirm done in 4544.56 ms
 (`issue-102-bounded-pages.log`). This proves the bounded helper's positive paths,
 not the cause of the earlier stalls. Final complete suites and exact-head CI
 remain required.
+
+## Historical hide snapshot fixture
+
+At `7645141`, CI and local full plugin runs reached the same assertion failure in `historical hide marks survive failed reads while an observed renewed question gets a fresh identity`. Ubuntu CI recorded 516 passed/one failed in 113.32 seconds; local `issue-102-fixed-plugin.log` recorded 516 passed/one failed in 296.16 seconds, with this case failing in 1063.47 ms. The expected bytes were the initial compact two-key JSON, while the actual bytes retained both legacy keys and added the legitimate durable question/migration keys during startup. These are assertion failures, not 5000 ms timeout failures; their logs remain retained.
+
+The fixture now captures exact ANSWERED bytes immediately before making the file unreadable, first asserts the original `[other, key]` prefix, and checks byte equality against that snapshot after the denied press. All later renewal/migration assertions and the 5000 ms limit remain unchanged. No product code changed.
+
+One focused offline Claude Code 2.1.301 SDK run passed this complete case in **2910.37 ms** (`issue-102-hide-snapshot-focused.log`). Its normalized test-body SHA-256 is `0db1fd7bc1be18c8c8d60adce67986a24552c6d7ee6007f63f1b7df60a4b2525`; final source hashes are retained in `issue-102-hide-snapshot-inputs.json`. No full rerun was performed in this packet, and no overall timing-cause claim follows from the focused pass.

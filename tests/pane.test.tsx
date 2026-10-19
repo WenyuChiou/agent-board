@@ -2432,9 +2432,11 @@ test('historical hide marks survive failed reads while an observed renewed quest
   expect(await ui.find({ type: 'Button', key: `${item}::unhide` })).toBeDefined()
 
   // Another program holds the list: a press does not write over it, and says it did not stick.
+  const beforeUnreadable = world.files.get(ANSWERED)!
+  expect((JSON.parse(beforeUnreadable).answered as string[]).slice(0, 2)).toEqual([other, key])
   world.unreadable = new Set([ANSWERED])
   await ui.press({ key: `${item}::unhide` })
-  expect(world.files.get(ANSWERED)).toBe(listed)
+  expect(world.files.get(ANSWERED)).toBe(beforeUnreadable)
   expect(await ui.find({ type: 'Text', text: '記不下「已回覆」，這一項還留在清單上。' })).toBeDefined()
   // A look that cannot read it keeps the list in hand, and reads it again once it can.
   world.mtime += 1

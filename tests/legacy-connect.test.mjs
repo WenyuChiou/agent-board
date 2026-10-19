@@ -66,7 +66,10 @@ const adoption = (f, code, hasPriorOwnership = false) => {
   env.CLAUDE_PROGRESS_FILE = f.progress
   const dirs = { codex: join(f.home, '.codex'), grok: join(f.home, '.grok'), hermes: join(f.home, '.hermes'), openclaw: join(f.home, '.openclaw'), opencode: join(f.home, '.config', 'opencode') }
   const seed = hasPriorOwnership ? { owned: { [board]: createHash('sha256').update(before).digest('hex') } } : undefined
-  const request = f.request('connect', { dirs, ...(seed ? { seed } : {}) })
+  // This fixture's empty PATH proves there is no discoverable host. Do not
+  // inherit the general fixture's explicit missing binary: even a blocked
+  // attempt to spawn that path correctly fails the no-child-process guard.
+  const { codexExecutable: _missingHost, ...request } = f.request('connect', { dirs, ...(seed ? { seed } : {}) })
   const result = spawnSync(process.execPath, ['--import', pathToFileURL(guard).href, f.script, '--legacy-connect-request', JSON.stringify(request)], { cwd: f.home, env, encoding: 'utf8', windowsHide: true, timeout: 10000 })
   assert.equal(result.status, 0, result.stderr + result.stdout)
   assert.equal(existsSync(attempted), false, 'no native host discovery or invocation')
