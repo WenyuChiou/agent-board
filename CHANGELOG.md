@@ -7,6 +7,10 @@
   explains its actual setting, reopening reuses a matching service, and Close the
   board still stops it. The separate LAN timeout is unchanged. Test: `a local board
   stays available by default while an explicit idle timeout closes only that server`.
+  Windows concurrent reporters also wait within the existing lock deadline when
+  exclusive creation meets a delete-pending `EPERM`; no lock is removed or permission
+  changed. Test: `concurrent agents preserve every shared progress block and foreign
+  manual text` (the Windows Node 24 CI exposed this race).
 
 - **Observe connection handoffs instead of treating sends as completion.** A bounded
   local observation waits for an exact newer progress report, shows a timeout with

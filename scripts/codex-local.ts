@@ -46,7 +46,10 @@ const locked = <T>(file: string, action: () => T): T => {
   let fd: number
   for (;;) {
     try { fd = openSync(file, 'wx', 0o600); break } catch (error) {
-      if ((error as { code?: string }).code !== 'EEXIST' || Date.now() - started > 2000) throw error
+      const code = (error as { code?: string }).code
+      // Windows may report a delete-pending lock as EPERM before its last handle
+      // closes. Retry only exclusive creation, with the same bound; never remove it.
+      if (!(code === 'EEXIST' || process.platform === 'win32' && code === 'EPERM') || Date.now() - started > 2000) throw error
       // Different agents share a board. Wait briefly for its writer, but never remove
       // a lock whose owning process we cannot verify.
       Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10)
