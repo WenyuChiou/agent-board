@@ -444,6 +444,13 @@ export const EN: Strings = {
   pasteBadBlock: 'The line after the start marker must be a "### title", and the block cannot hold ```, <!-- -->, # headings or a second block.',
   pasteNoProject: 'A new block needs a "## project" line first.',
   pasteNotYours: "That id belongs to a local reporter, a session with a resume binding, another agent, or an unclosed block; it can't be replaced.",
+  pasteBadTime: 'Source time is missing or invalid. Ask the reporter for its current full report with a real UTC updated= time ending in Z, then paste again.',
+  pasteFutureTime: 'The source clock is ahead of this board. Check both clocks and ask for a corrected current report; paste time will not replace source time.',
+  pasteOlder: 'This report is older than the board copy. Keep the newer copy; ask the reporter for its current report.',
+  pasteConflict: 'Different reports have the same source time. Keep the board copy; ask the reporter to reconcile them and issue a newer report.',
+  pasteUnknownOrder: 'The board copy has an unknown or future source time. Compare both reports before replacing it.',
+  pasteUnchanged: 'Already on the board; unchanged.',
+  pasteReview: (current: string, incoming: string): string => `Source order is unknown.\n\nOn the board:\n${current}\n\nIncoming report:\n${incoming}\n\nReplace this progress report? This sends no message and approves no action.`,
   serveRelay: 'Copy the prompt for a web chat',
   serveRelayHint: 'Paste it into the chat once, at the start; every reply then ends with the block, to paste here.',
 }

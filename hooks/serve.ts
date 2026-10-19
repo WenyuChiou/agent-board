@@ -476,6 +476,7 @@ const PAGE_WORDS = [
   'serveSend',
   'serveSending',
   'serveRelay',
+  'pasteReview',
   'boardCopied',
   'boardCopyFailed',
 ] as const satisfies ReadonlyArray<keyof Strings>
@@ -901,9 +902,15 @@ const PAGE_SCRIPT = String.raw`
   document.getElementById('paste-go').addEventListener('click', function () {
     var box = document.getElementById('paste');
     if (!box.value.trim()) return;
-    call('/api/paste', { text: box.value }).then(function (data) {
+    var pasted = box.value;
+    call('/api/paste', { text: pasted }).then(function (data) {
+      if (data.review && window.confirm(w('pasteReview', data.review.current, data.review.incoming))) {
+        return call('/api/paste', { text: pasted, reviewToken: data.review.token });
+      }
+      return data;
+    }).then(function (data) {
       say(data.note || '', data.ok ? 'done' : 'alert');
-      if (data.ok) box.value = '';
+      if (data.ok && box.value === pasted) box.value = '';
       refresh();
     }, function () { say(w('serveOffline'), 'alert'); });
   });

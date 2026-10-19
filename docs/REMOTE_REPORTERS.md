@@ -141,8 +141,7 @@ The exit status stays 0 on a skip or conflict: callers must read the
 assistant can be asked to fix just that. A chat assistant often does not know
 the time: check `updated=` before merging, since a block with an old timestamp
 is skipped as older when the board has a newer one. If inserted, an old block
-shows as stopped and leaves at the next archive sweep. Blocks pasted on the
-board page get the board's own clock instead.
+shows as stopped and leaves at the next archive sweep.
 
 Or, with no script to run: open the board's page (`node
 ~/.claude/agent-board.mjs --serve`, or `/board` in another agent), copy this
@@ -150,8 +149,21 @@ prompt from it with **Copy the prompt for a web chat**, and paste each block
 the chat prints into its box, fence and all. The page checks the block the
 way `validate.py --block` does, replaces the earlier block with the same id
 only when it is the same agent's and closed, never Claude's or another
-agent's, and sets `updated=` to the time of the paste. `tests/board.test.mjs`
+agent's. It preserves the source `updated=` instead of stamping the paste time.
+Older reports and different reports with the same source time are refused;
+identical imports change neither content nor freshness. This applies to local
+and LAN pages. `tests/board.test.mjs`
 checks the prompt above and the page's copy match word for word.
+
+The page requires a real UTC source time ending in `Z`. Missing, invalid,
+timezone-free or future times are refused: check both clocks and ask the reporter
+for a corrected current report. Do not use paste time as event time. If the
+existing board copy has an unknown or future clock, the page shows both reports
+for explicit comparison before replacement. That confirmation applies only to
+the exact pair reviewed; changing either report requires a new comparison. It
+changes the displayed progress only, never answers a question, delivers a message
+or approves a tool. The Python importer retains its separately documented
+fallback for incomparable historical timestamps above.
 
 ## Risks and mitigations
 

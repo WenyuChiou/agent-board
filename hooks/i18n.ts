@@ -481,6 +481,13 @@ export const ZH_TW = {
   pasteBadBlock: '開頭標記的下一行要是「### 標題」；區塊裡不能有 ```、<!-- -->、# 標題或第二個區塊。',
   pasteNoProject: '新區塊的第一行要寫「## 專案名稱」。',
   pasteNotYours: '這個 id 屬於本機回報器、有續接資訊的 session、另一個 agent，或沒有結尾標記的區塊，不能蓋掉。',
+  pasteBadTime: '來源時間缺少或無效。請回報者提供目前完整進度，updated= 使用真實 UTC 時間並以 Z 結尾，再貼一次。',
+  pasteFutureTime: '來源時鐘比看板快。請檢查兩端時鐘並取得修正後的目前進度；貼上時間不會取代來源時間。',
+  pasteOlder: '這份進度比看板上的舊。保留新版，請回報者提供目前進度。',
+  pasteConflict: '兩份不同進度的來源時間相同。保留看板版本，請回報者核對並提供較新的進度。',
+  pasteUnknownOrder: '看板原有進度的來源時間不明或超前。請比較兩份內容後，再決定是否取代。',
+  pasteUnchanged: '看板已有相同進度，未變更。',
+  pasteReview: (current: string, incoming: string): string => `無法判定來源先後。\n\n看板原有進度：\n${current}\n\n貼上的進度：\n${incoming}\n\n要取代這份進度嗎？這不會傳訊或批准任何動作。`,
   serveRelay: '複製給網頁聊天的提示',
   serveRelayHint: '在聊天一開始貼一次，之後它每次回覆都會附上區塊，再貼到這裡。',
 }

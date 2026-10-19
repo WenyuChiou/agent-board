@@ -440,6 +440,13 @@ export const ZH_CN: Strings = {
   pasteBadBlock: '开头标记的下一行要是“### 标题”；区块里不能有 ```、<!-- -->、# 标题或第二个区块。',
   pasteNoProject: '新区块的第一行要写“## 项目名称”。',
   pasteNotYours: '这个 id 属于本地报告器、有续接信息的 session、另一个 agent，或没有结尾标记的区块，不能盖掉。',
+  pasteBadTime: '来源时间缺少或无效。请报告者提供当前完整进度，updated= 使用真实 UTC 时间并以 Z 结尾，再粘贴一次。',
+  pasteFutureTime: '来源时钟比看板快。请检查两端时钟并取得修正后的当前进度；粘贴时间不会取代来源时间。',
+  pasteOlder: '这份进度比看板上的旧。保留新版，请报告者提供当前进度。',
+  pasteConflict: '两份不同进度的来源时间相同。保留看板版本，请报告者核对并提供较新的进度。',
+  pasteUnknownOrder: '看板原有进度的来源时间不明或超前。请比较两份内容后，再决定是否取代。',
+  pasteUnchanged: '看板已有相同进度，未变更。',
+  pasteReview: (current: string, incoming: string): string => `无法判定来源先后。\n\n看板原有进度：\n${current}\n\n粘贴的进度：\n${incoming}\n\n要取代这份进度吗？这不会传信或批准任何动作。`,
   serveRelay: '复制给网页聊天的提示',
   serveRelayHint: '在聊天一开始贴一次，之后它每次回复都会附上区块，再贴到这里。',
 }

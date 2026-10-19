@@ -7,6 +7,7 @@ import { fallbackTitle, isAnswered } from './mirror'
 import { AUTO_END, AUTO_START, autoOf, doneKey, isTaskComplete, parseAttrs, parseProgress, projectHead, readable, RESUME } from './parse'
 import type { QuickEntry } from './quick'
 import type { StepRef, TaskRef } from './view'
+import { sha256 } from './sha256'
 
 // Each session's mod owns one block of the file, between its own markers, and rewrites
 // only that block: whatever people or other sessions wrote elsewhere stays byte for byte.
@@ -440,9 +441,11 @@ export const setManualStep = (text: string, ref: StepRef, mark: string): string 
 // A block pasted into the board's page from a web chat (Muse, dot): the chat-relay prompt's
 // block, checked the way scripts/remote-reporter/validate.py checks a fragment, then put in
 // place of the earlier block with its id, or under its `## project` when new. It never takes
-// the place of a Claude block, another agent's block or one whose end marker is missing. A
-// chat does not know the time, so `updated=` becomes the moment it was pasted.
-export type PasteProblem = 'noBlock' | 'mixed' | 'badBlock' | 'noProject' | 'notYours'
+// the place of a Claude block, another agent's block or one whose end marker is missing.
+// Arrival time cannot make a delayed report fresh or give it precedence over newer work.
+export type PasteProblem = 'noBlock' | 'mixed' | 'badBlock' | 'noProject' | 'notYours' | 'badTime' | 'futureTime' | 'older' | 'conflict' | 'unknownOrder'
+export type PasteReview = { token: string; current: string; incoming: string }
+export type PasteResult = { text: string; title: string; isUnchanged: boolean } | { problem: PasteProblem; review?: PasteReview }
 
 const HEX8 = /^[0-9a-f]{8}$/
 const AGENT_NAME = /^[a-z0-9][a-z0-9_.-]{0,31}$/
@@ -453,36 +456,68 @@ const isHiding = (line: string): boolean => FENCE.test(line) || line.includes('<
 
 const startAttrs = (line: string | undefined): string => AUTO_START.exec(line ?? '')?.[1] ?? ''
 
-export const mergeBlock = (text: string, pasted: string, now: number, s: Strings = ZH_TW): { text: string; title: string } | { problem: PasteProblem } => {
+// The relay prompt requires a UTC event time. Date.parse alone accepts local clocks and
+// silently rolls impossible dates forward; neither can establish source ordering.
+const sourceTime = (value: string | undefined): number | null => {
+  if (value === undefined || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?Z$/.test(value)) return null
+  const time = Date.parse(value)
+  const canonical = value.replace(/(?:\.(\d{1,3}))?Z$/, (_all, fraction: string | undefined) => `.${(fraction ?? '').padEnd(3, '0')}Z`)
+  return Number.isFinite(time) && new Date(time).toISOString() === canonical ? time : null
+}
+
+export const mergeBlock = (text: string, pasted: string, now: number, s: Strings = ZH_TW, reviewToken = ''): PasteResult => {
   const raw = pasted.split(/\r?\n/).map(line => line.trimEnd())
   const start = raw.findIndex(line => AUTO_START.test(line))
   const auto = start < 0 ? null : autoOf(startAttrs(raw[start]))
   const end = raw.findIndex((line, index) => start >= 0 && index > start && AUTO_END.test(line))
   if (auto === null || end < 0) return { problem: 'noBlock' }
   if (parseAttrs(raw[end] ?? '').session !== auto.session) return { problem: 'mixed' }
-  const named = parseAttrs(startAttrs(raw[start])).agent
+  const incomingAttrs = parseAttrs(startAttrs(raw[start]))
+  const named = incomingAttrs.agent
   const body = raw.slice(start + 1, end)
   const title = TASK.exec(body[0] ?? '')?.[1]
   // The chat names itself in lower case; a block without an agent would read as Claude's.
   if (title === undefined || !HEX8.test(auto.session) || named === undefined || named !== auto.agent || !AGENT_NAME.test(named) || auto.agent === 'claude' || body.some(isHiding)) {
     return { problem: 'badBlock' }
   }
-  // The marker is written again from what was checked, so a chat cannot choose which session or
-  // folder a reply from the page goes to (resume=, dir=), nor claim a pull request.
-  const marker = `<!-- auto session=${auto.session} agent=${auto.agent} state=${auto.state} updated=${new Date(now).toISOString().replace(/\.\d{3}Z$/, 'Z')} -->`
-  const block = [marker, ...body, `<!-- /auto session=${auto.session} -->`]
-
   const eol = eolOf(text)
   const lines = linesOf(text)
-  const existing = scanBlocks(lines).find(span => span.session === auto.session)
+  const matching = scanBlocks(lines).filter(span => span.session === auto.session)
+  if (matching.length > 1) return { problem: 'notYours' }
+  const existing = matching[0]
+  const time = sourceTime(incomingAttrs.updated)
   if (existing !== undefined) {
     const owner = autoOf(startAttrs(seenOf(lines)[existing.start]))
     const attrs = parseAttrs(startAttrs(seenOf(lines)[existing.start]))
     // A local reporter's binding must survive a pasted block with the same agent and id.
     if (!existing.isClosed || owner?.agent !== auto.agent || attrs.owner !== undefined || owner.resume !== null || owner.dir !== null) return { problem: 'notYours' }
+    const currentBody = lines.slice(existing.start + 1, existing.end).map(line => line.trimEnd())
+    if (owner.state === auto.state && attrs.updated === incomingAttrs.updated && currentBody.join('\n') === body.join('\n')) return { text, title, isUnchanged: true }
+  }
+  if (time === null) return { problem: 'badTime' }
+  if (time > now) return { problem: 'futureTime' }
+  // Rebuild only checked fields; a remote fragment cannot select a local receiving session,
+  // working folder or pull request. Keep the source time exactly, including its precision.
+  const marker = `<!-- auto session=${auto.session} agent=${auto.agent} state=${auto.state} updated=${incomingAttrs.updated} -->`
+  const block = [marker, ...body, `<!-- /auto session=${auto.session} -->`]
+  if (existing !== undefined) {
+    const oldTime = sourceTime(parseAttrs(startAttrs(lines[existing.start])).updated)
+    if (oldTime === null || oldTime > now) {
+      const current = lines.slice(existing.start, existing.end + 1).join('\n')
+      // A review applies only to this exact pair, not a changed report or newer board state.
+      const token = sha256(JSON.stringify(['relay-clock-review', existing.project, current, block]))
+      if (reviewToken !== token) return { problem: 'unknownOrder', review: {
+        token,
+        current: [parseAttrs(startAttrs(lines[existing.start])).updated ?? '?', ...lines.slice(existing.start + 1, existing.end)].join('\n'),
+        incoming: [incomingAttrs.updated, ...body].join('\n'),
+      } }
+    } else {
+      if (time < oldTime) return { problem: 'older' }
+      if (time === oldTime) return { problem: 'conflict' }
+    }
     lines.splice(existing.start, existing.end - existing.start + 1, ...block)
 
-    return { text: lines.join(eol) + eol, title }
+    return { text: lines.join(eol) + eol, title, isUnchanged: false }
   }
   // The `##` line nearest above the block names its project; it becomes a heading, so no
   // comment opening goes with it.
@@ -495,5 +530,5 @@ export const mergeBlock = (text: string, pasted: string, now: number, s: Strings
     .at(-1)
   if (project === undefined || project === '') return { problem: 'noProject' }
 
-  return { text: placeUnder(lines, project, block, eol, s), title }
+  return { text: placeUnder(lines, project, block, eol, s), title, isUnchanged: false }
 }

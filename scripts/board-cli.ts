@@ -14,7 +14,6 @@ import { createHash } from 'node:crypto'
 import { homedir, tmpdir } from 'node:os'
 import { basename, dirname, join, resolve } from 'node:path'
 import { mergeBlock, takeArchivable, takeManualDone, takeTask, setManualStep } from '../hooks/blocks'
-import type { PasteProblem } from '../hooks/blocks'
 import { startServer } from './board-serve'
 import { idleTimeout } from '../hooks/serve'
 import { boardKey, boardScreen, boardText, chatText, doneToday, emptyBoardState, peekInbox, boardItems, pinned, redact } from '../hooks/board'
@@ -407,24 +406,19 @@ const pin = (state: BoardState): BoardState => pinned(state, boardItems(view(), 
 
 // A block pasted into the page from a web chat, merged the way the remote reporter's merge
 // does: read, change only that block, write, read back.
-const paste = (text: string): { isAdded: boolean; note: string } => {
-  const found: { problem: PasteProblem | null; title: string } = { problem: null, title: '' }
+const paste = (text: string, reviewToken = '') => {
+  let latest: ReturnType<typeof mergeBlock> | null = null
   const wrote = rewrite(path, before => {
-    const merged = mergeBlock(before, text, Date.now(), s)
-    if ('problem' in merged) {
-      found.problem = merged.problem
-      return null
-    }
-    found.problem = null
-    found.title = merged.title
-    return merged.text
+    latest = mergeBlock(before, text, Date.now(), s, reviewToken)
+    return 'problem' in latest ? null : latest.text
   })
-  if (found.problem !== null) {
-    const why = { noBlock: s.pasteNoBlock, mixed: s.pasteMixed, badBlock: s.pasteBadBlock, noProject: s.pasteNoProject, notYours: s.pasteNotYours }[found.problem]
-    return { isAdded: false, note: s.servePasteRefused(why) }
+  const found = latest as ReturnType<typeof mergeBlock> | null
+  if (found !== null && 'problem' in found) {
+    const why = { noBlock: s.pasteNoBlock, mixed: s.pasteMixed, badBlock: s.pasteBadBlock, noProject: s.pasteNoProject, notYours: s.pasteNotYours, badTime: s.pasteBadTime, futureTime: s.pasteFutureTime, older: s.pasteOlder, conflict: s.pasteConflict, unknownOrder: s.pasteUnknownOrder }[found.problem]
+    return { isAdded: false, note: s.servePasteRefused(why), review: found.review }
   }
-  if (wrote === null) return { isAdded: false, note: s.boardWriteFailed }
-  return { isAdded: true, note: s.servePasted(found.title) }
+  if (wrote === null || found === null) return { isAdded: false, note: s.boardWriteFailed }
+  return { isAdded: true, note: found.isUnchanged ? s.pasteUnchanged : s.servePasted(found.title) }
 }
 
 // A folder only this account can use: on a shared one, another account could take the file's

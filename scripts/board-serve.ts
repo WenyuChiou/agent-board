@@ -35,7 +35,7 @@ export type ServeOptions = {
   act: (action: BoardAction) => string
   // Every finished task to the archive now: the line to show.
   tidy: () => string
-  paste: (text: string) => { isAdded: boolean; note: string }
+  paste: (text: string, reviewToken?: string) => { isAdded: boolean; note: string; review?: { token: string; current: string; incoming: string } }
   // Why the board or a press could not be made when it met a file the board could not read or
   // write (the note the terminal board shows), or null for an error of any other kind. A phone
   // on the network is told the file's name only, as it is never told progress.md's path.
@@ -398,8 +398,8 @@ export const startServer = (o: ServeOptions): void => {
         return json(res, note === o.s.boardWriteFailed ? 409 : 200, { note })
       }
       if (url.pathname === '/api/paste') {
-        const pasted = o.paste(text(body.text))
-        return json(res, pasted.isAdded ? 200 : 409, { note: pasted.note })
+        const pasted = o.paste(text(body.text), text(body.reviewToken))
+        return json(res, pasted.isAdded ? 200 : 409, { note: pasted.note, review: pasted.review })
       }
     } catch (error) {
       const note = o.failure(error, isLan)

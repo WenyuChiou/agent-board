@@ -2322,20 +2322,23 @@ test("the page runs only its own script, and the chat prompt in it cannot close 
   expect(Object.values(pageWords(STRINGS['zh-CN'])).every(word => typeof word === 'string' && word !== '')).toBe(true)
 })
 
-test('a block pasted from a web chat joins its project, then replaces its own earlier copy, with the time it was pasted', () => {
+test('a block pasted from a web chat keeps its source time and only a newer report replaces it', () => {
   const pasted = (session: string, agent: string, body = '### Draft the launch post\n- [x] Outline\n- [?] Ship it Friday, OK?', project = '## launch') =>
     `Here is the block:\n\n${project}\n<!-- auto session=${session} agent=${agent} state=waiting updated=2020-01-01T00:00:00Z -->\n${body}\n<!-- /auto session=${session} -->\n`
   const now = Date.parse('2026-10-17T09:00:00Z')
   const added = mergeBlock(SERVE_FILE, pasted('c0ffee12', 'muse'), now, STRINGS.en)
   expect('title' in added ? added.title : added.problem).toBe('Draft the launch post')
   const text = 'text' in added ? added.text : ''
-  expect(text).toContain('## launch\n\n<!-- auto session=c0ffee12 agent=muse state=waiting updated=2026-10-17T09:00:00Z -->')
+  expect(text).toContain('## launch\n\n<!-- auto session=c0ffee12 agent=muse state=waiting updated=2020-01-01T00:00:00Z -->')
   expect(parseProgress(text).find(project => project.name === 'launch')?.tasks[0]?.auto).toMatchObject({ agent: 'muse', state: 'waiting' })
-  const again = mergeBlock(text, pasted('c0ffee12', 'muse', '### Draft the launch post\n- [x] Outline\n- [x] Ship it Friday, OK?'), now + 60_000, STRINGS.en)
+  const again = mergeBlock(text, pasted('c0ffee12', 'muse', '### Draft the launch post\n- [x] Outline\n- [x] Ship it Friday, OK?').replace('2020-01-01T00:00:00Z', '2020-01-01T00:01:00Z'), now + 60_000, STRINGS.en)
   const merged = 'text' in again ? again.text : ''
   expect(merged.split('session=c0ffee12 agent=muse').length).toBe(2)
   expect(merged).toContain('- [x] Ship it Friday, OK?')
-  expect(merged).toContain('updated=2026-10-17T09:01:00Z')
+  expect(merged).toContain('updated=2020-01-01T00:01:00Z')
+  expect(merged).toContain('## api-gateway')
+  expect(mergeBlock(merged, pasted('c0ffee12', 'muse'), now + 120_000, STRINGS.en)).toMatchObject({ problem: 'older' })
+  expect(mergeBlock(text, pasted('c0ffee12', 'muse'), now + 120_000, STRINGS.en)).toMatchObject({ text, isUnchanged: true })
   // A project the file has already takes it under its heading, before the next project.
   const under = mergeBlock(SERVE_FILE, pasted('d00dfeed', 'dot', '### Cache keys\n- [ ] Name them', '## api-gateway'), now, STRINGS.en)
   const placed = 'text' in under ? under.text : ''
@@ -2346,13 +2349,34 @@ test('a block pasted from a web chat joins its project, then replaces its own ea
   const posing = pasted('d00dfeed', 'grok').replace(' updated=2020-01-01T00:00:00Z', ' updated=2020-01-01T00:00:00Z resume=01a14a94-0dee-7543-8208-991a4266a1da dir=%2Fw%2Fevil pr=7').replace('state=waiting', 'state=ended')
   const posed = mergeBlock(SERVE_FILE, posing, now, STRINGS.en)
   const posedText = 'text' in posed ? posed.text : ''
-  expect(posedText).toContain('<!-- auto session=d00dfeed agent=grok state=ended updated=2026-10-17T09:00:00Z -->')
+  expect(posedText).toContain('<!-- auto session=d00dfeed agent=grok state=ended updated=2020-01-01T00:00:00Z -->')
   expect(posedText).not.toContain('dir=%2Fw%2Fevil')
-  const posedRow = serveModel(buildView(parseProgress(posedText), [], null, now, 0, {}, STRINGS.en), [], STRINGS.en).groups.flatMap(group => group.rows).find(row => row.title === 'Draft the launch post')
+  // Sanitizing a binding is independent of hiding a report whose source time is six years old.
+  const posedNow = Date.parse('2020-01-01T00:01:00Z')
+  const posedRow = serveModel(buildView(parseProgress(posedText), [], null, posedNow, 0, {}, STRINGS.en), [], STRINGS.en).groups.flatMap(group => group.rows).find(row => row.title === 'Draft the launch post')
   expect(posedRow?.send).toBe('none')
-  // A marker with no time gets one.
+  // A marker with no time never acquires a fake event time from the paste.
   const bare = pasted('c0ffee12', 'muse').replace(' updated=2020-01-01T00:00:00Z', '')
-  expect('text' in mergeBlock(SERVE_FILE, bare, now, STRINGS.en) ? 'merged' : 'refused').toBe('merged')
+  expect(mergeBlock(SERVE_FILE, bare, now, STRINGS.en)).toMatchObject({ problem: 'badTime' })
+})
+
+test('an ambiguous historical relay clock needs a review of that exact report pair in every language', () => {
+  const old = '## launch\n<!-- auto session=c0ffee12 agent=muse state=working -->\n### Draft\n- [ ] Old task\n<!-- /auto session=c0ffee12 -->\n'
+  const incoming = old.replace('state=working', 'state=done updated=2026-10-17T08:00:00.123Z').replace('- [ ] Old task', '- [x] Finished')
+  for (const s of Object.values(STRINGS)) {
+    const first = mergeBlock(old, incoming, SERVE_NOW, s)
+    expect(first).toMatchObject({ problem: 'unknownOrder' })
+    const review = 'problem' in first ? first.review : undefined
+    expect(review?.current).toContain('Old task')
+    expect(review?.incoming).toContain('Finished')
+    expect(review?.current).not.toContain('session=')
+    expect(mergeBlock(old, incoming, SERVE_NOW, s, 'approved')).toMatchObject({ problem: 'unknownOrder' })
+    const accepted = mergeBlock(old, incoming, SERVE_NOW, s, review?.token)
+    expect('text' in accepted ? accepted.text : '').toContain('state=done updated=2026-10-17T08:00:00.123Z')
+    expect(mergeBlock(old.replace('Old task', 'Changed meanwhile'), incoming, SERVE_NOW, s, review?.token)).toMatchObject({ problem: 'unknownOrder' })
+    expect(mergeBlock(old, incoming.replace('Finished', 'Other report'), SERVE_NOW, s, review?.token)).toMatchObject({ problem: 'unknownOrder' })
+    expect(s.pasteReview(review?.current ?? '', review?.incoming ?? '')).toContain('Finished')
+  }
 })
 
 test('a pasted block cannot overwrite a local reporter or resume binding with the same agent and session', () => {

@@ -853,7 +853,7 @@ test('ticking and tidying from the page write progress.md the way the pane does,
     const pasted = await call('POST', '/api/paste', { body: { text: `Here it is:\n\`\`\`\n${block}\n\`\`\`\n` } })
     assert.equal(pasted.status, 200, pasted.body)
     assert.ok(readFileSync(path, 'utf8').includes('## launch\n\n<!-- auto session=c0ffee12 agent=muse state=waiting updated='))
-    assert.ok(!readFileSync(path, 'utf8').includes('updated=2020-01-01'))
+    assert.ok(readFileSync(path, 'utf8').includes('updated=2020-01-01T00:00:00Z'))
     const refused = await call('POST', '/api/paste', { body: { text: block.replaceAll('c0ffee12', 'b2c3d4e5') } })
     assert.equal(refused.status, 409)
     assert.ok(readFileSync(path, 'utf8').includes(`resume=${GROK_ID}`))
@@ -865,6 +865,100 @@ test('ticking and tidying from the page write progress.md the way the pane does,
   } finally {
     await board.close()
   }
+})
+
+const relayFragment = (at, state = 'waiting', step = '- [?] Ship it Friday, OK?') => `## launch\n<!-- auto session=c0ffee12 agent=muse state=${state} updated=${at} -->\n### Draft the launch post\n${step}\n<!-- /auto session=c0ffee12 -->`
+
+test('chat relay keeps newer progress and refuses an older question on both local and LAN imports', { timeout: 30_000 }, async t => {
+  const board = await page()
+  try {
+    const local = text => board.call('POST', '/api/paste', { body: { text } })
+    const senders = [local]
+    const opened = await board.call('POST', '/api/lan', { body: {} })
+    if (opened.status === 200) {
+      const lan = new URL(opened.json().url)
+      senders.push(text => fetchAt(lan.hostname, Number(lan.port), 'POST', '/api/paste', { 'x-board-token': lan.searchParams.get('t') }, { text }))
+    } else t.diagnostic('No private network address: LAN listener untested; loopback path still exercised.')
+    const newer = new Date(Date.now() - 60_000).toISOString()
+    const older = new Date(Date.now() - 120_000).toISOString()
+    assert.equal((await local(relayFragment(newer, 'done', '- [x] Ship it Friday'))).status, 200)
+    const before = readFileSync(board.path, 'utf8')
+    assert.ok(before.includes(`updated=${newer}`), 'source timestamp must survive import')
+    for (const send of senders) {
+      const result = await send(relayFragment(older))
+      assert.equal(result.status, 409, result.body)
+      assert.match(result.json().note, /older/i)
+      assert.equal(readFileSync(board.path, 'utf8'), before)
+    }
+  } finally { await board.close() }
+})
+
+test('chat relay repeated imports change neither bytes nor freshness and equal-time edits conflict', { timeout: 30_000 }, async () => {
+  const board = await page()
+  try {
+    const at = new Date(Date.now() - 60_000).toISOString()
+    const fragment = relayFragment(at)
+    assert.equal((await board.call('POST', '/api/paste', { body: { text: fragment } })).status, 200)
+    const before = readFileSync(board.path, 'utf8')
+    utimesSync(board.path, 1, 1)
+    const mtime = statSync(board.path).mtimeMs
+    const repeated = await board.call('POST', '/api/paste', { body: { text: fragment } })
+    assert.equal(repeated.status, 200, repeated.body)
+    assert.match(repeated.json().note, /unchanged/i)
+    assert.equal(readFileSync(board.path, 'utf8'), before)
+    assert.equal(statSync(board.path).mtimeMs, mtime)
+    const conflict = await board.call('POST', '/api/paste', { body: { text: relayFragment(at, 'done', '- [x] Ship it Friday') } })
+    assert.equal(conflict.status, 409, conflict.body)
+    assert.match(conflict.json().note, /same source time/i)
+    assert.equal(readFileSync(board.path, 'utf8'), before)
+  } finally { await board.close() }
+})
+
+test('chat relay refuses unknown and future source clocks without inventing an update time', { timeout: 30_000 }, async () => {
+  const board = await page()
+  try {
+    const before = readFileSync(board.path, 'utf8')
+    for (const at of ['', 'not-a-time', '2026-02-30T00:00:00Z', '2026-01-01T00:00:00', new Date(Date.now() + 60_000).toISOString()]) {
+      const result = await board.call('POST', '/api/paste', { body: { text: relayFragment(at) } })
+      assert.equal(result.status, 409, at + ': ' + result.body)
+      assert.match(result.json().note, /source time|clock/i)
+      assert.equal(readFileSync(board.path, 'utf8'), before)
+    }
+  } finally { await board.close() }
+})
+
+test('chat relay reviews unknown historical clocks and rejects confirmations after either report changes', { timeout: 30_000 }, async () => {
+  const board = await page()
+  try {
+    const before = readFileSync(board.path, 'utf8')
+    const old = relayFragment('unknown', 'working', '- [ ] Review the draft')
+    writeFileSync(board.path, before + '\n' + old + '\n')
+    const incoming = relayFragment(new Date(Date.now() - 60_000).toISOString(), 'done', '- [x] Review the draft')
+    const send = body => board.call('POST', '/api/paste', { body })
+    const first = await send({ text: incoming })
+    assert.equal(first.status, 409, first.body)
+    const { review } = first.json()
+    assert.ok(review.token && review.current.includes('- [ ]') && review.incoming.includes('- [x]'))
+    assert.ok(!review.current.includes('session='))
+    assert.equal(readFileSync(board.path, 'utf8'), before + '\n' + old + '\n')
+    assert.equal((await send({ text: incoming, reviewToken: 'approved' })).status, 409)
+    const changed = await send({ text: incoming.replace('Review the draft', 'Other report'), reviewToken: review.token })
+    assert.equal(changed.status, 409)
+    writeFileSync(board.path, before + '\n' + old.replace('Review the draft', 'Changed meanwhile') + '\n')
+    assert.equal((await send({ text: incoming, reviewToken: review.token })).status, 409)
+    const fresh = await send({ text: incoming })
+    const accepted = await send({ text: incoming, reviewToken: fresh.json().review.token })
+    assert.equal(accepted.status, 200, accepted.body)
+    assert.ok(readFileSync(board.path, 'utf8').startsWith(before))
+    const newer = incoming.replace(/updated=\S+/, 'updated=' + new Date(Date.now() - 30_000).toISOString())
+    assert.equal((await send({ text: newer })).status, 200)
+    const latest = readFileSync(board.path, 'utf8')
+    // A past review cannot override reliable newer state or local ownership.
+    assert.equal((await send({ text: incoming, reviewToken: fresh.json().review.token })).status, 409)
+    assert.equal(readFileSync(board.path, 'utf8'), latest)
+    writeFileSync(board.path, latest.replace('agent=muse state=done', 'agent=muse owner=local state=done'))
+    assert.equal((await send({ text: newer, reviewToken: fresh.json().review.token })).status, 409)
+  } finally { await board.close() }
 })
 
 test('a board the page cannot read is named there with that file and its error, rather than shown as offline, and a phone is told the file name only', { timeout: 30_000 }, async () => {
@@ -1088,7 +1182,7 @@ test('a second press on the page for the first of two hand-kept tasks with the s
 
 // The page's own script run against a minimal DOM, to see what it keeps across a redraw and what
 // it sends. `redraw` hands it the next board, as the page's next poll would get it.
-const pageDom = async (html, first) => {
+const pageDom = async (html, first, { post, confirm } = {}) => {
   const nodes = new Map()
   class Element {
     constructor(tag) {
@@ -1157,7 +1251,7 @@ const pageDom = async (html, first) => {
     location: { search: '?t=x' },
     URLSearchParams,
     navigator: {},
-    window: {},
+    window: { confirm },
     setTimeout: run => {
       scheduled = run
       return 1
@@ -1166,6 +1260,7 @@ const pageDom = async (html, first) => {
     fetch: async (target, options) => {
       if (target === '/api/board') return { ok: true, json: async () => ({ model, now: 1 }) }
       requests.push({ path: target, body: JSON.parse(options.body) })
+      if (post) return post(requests.at(-1))
       return { ok: true, json: async () => ({ note: '' }) }
     },
   })
@@ -1176,6 +1271,7 @@ const pageDom = async (html, first) => {
     boxes: () => get('board').querySelectorAll(),
     send: () => buttons(get('board')).find(button => button.textContent === 'Send to grok'),
     requests,
+    node: get,
     flush,
     redraw: async next => {
       model = next
@@ -1184,6 +1280,33 @@ const pageDom = async (html, first) => {
     },
   }
 }
+
+test('the relay page compares unknown-clock reports before retrying and keeps a declined paste', { timeout: 30_000 }, async () => {
+  const board = await page()
+  try {
+    const html = (await board.call('GET', `/?t=${board.token}`)).body
+    const model = (await board.call('GET', '/api/board')).json().model
+    for (const accepts of [false, true]) {
+      const comparisons = []
+      const dom = await pageDom(html, model, {
+        confirm: message => { comparisons.push(message); return accepts },
+        post: async request => ({
+          ok: Boolean(request.body.reviewToken),
+          json: async () => request.body.reviewToken ? { note: 'Imported.' } : { note: 'Unknown clock.', review: { token: 'pair-token', current: 'Old draft', incoming: 'New draft' } },
+        }),
+      })
+      dom.node('paste').value = 'selected report'
+      dom.node('paste-go').click()
+      await dom.flush()
+      assert.equal(comparisons.length, 1)
+      assert.match(comparisons[0], /On the board:\nOld draft/)
+      assert.match(comparisons[0], /Incoming report:\nNew draft/)
+      assert.equal(dom.requests.length, accepts ? 2 : 1)
+      if (accepts) assert.deepEqual(JSON.parse(JSON.stringify(dom.requests[1].body)), { text: 'selected report', reviewToken: 'pair-token' })
+      assert.equal(dom.node('paste').value, accepts ? '' : 'selected report')
+    }
+  } finally { await board.close() }
+})
 
 test('a reply typed for one session is dropped when the box is redrawn for another session under the same title, and a new reply goes to the session shown', { timeout: 30_000 }, async () => {
   const board = await page('', {}, ['--allow-resume'])
