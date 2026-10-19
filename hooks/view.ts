@@ -58,6 +58,7 @@ const targetOf = (auto: ProgressAuto | null): AgentTarget | null =>
     : { agent: auto.agent, session: auto.session, resume: auto.resume, dir: auto.dir, isClosed: auto.state === 'ended' }
 
 export type WaitingItem = {
+  nativeSession?: string
   key: string
   project: string
   // The task it belongs to, its background, and what it needs from the person.
@@ -107,6 +108,7 @@ export type Focus =
   | { type: 'blocked'; row: TaskRow }
 
 export type TaskRow = {
+  nativeSession?: string
   key: string
   project: string
   title: string
@@ -484,6 +486,7 @@ const ownWaiting = (mine: ProgressMirror): WaitingItem[] => {
       agent: '',
       session: shortId(mine.sessionId),
       sessionId: null,
+      nativeSession: mine.sessionId,
       resumeVia: null,
       reopen: null,
       hideKey,
@@ -693,6 +696,7 @@ export const buildView = (
           hideKey: keys[index] ?? '',
           step: isManual ? { project: name, title, step: step.text, line: step.line, raw: step.raw } : null,
           target: targetOf(task.auto),
+          ...(task.auto === null ? {} : { nativeSession: task.auto.resume ?? task.auto.session }),
         })
       })
 
@@ -750,6 +754,7 @@ export const buildView = (
               ? { project: name, title: task.title, line: task.line, session: task.auto.session }
               : null,
         target: targetOf(task.auto),
+        ...(task.auto === null ? {} : { nativeSession: task.auto.resume ?? task.auto.session }),
       }
 
       // Work with a date close by is listed once, under 快到期.

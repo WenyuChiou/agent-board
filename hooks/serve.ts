@@ -9,6 +9,7 @@ import type { Tone } from './palette'
 import { RESUME } from './parse'
 import { replyHint, wayBackText } from './view'
 import type { AgentTarget, StepRef, TaskRef, View } from './view'
+import type { Connection, Message } from './messaging'
 
 // The board's page: what `agent-board.mjs --serve` shows in a browser for agents other than
 // Claude Code, and what a press on it does. It does what the pane does: tick a hand-kept step,
@@ -19,7 +20,19 @@ import type { AgentTarget, StepRef, TaskRef, View } from './view'
 // Grok Build or Codex session that has closed, so the page is its only writer); open: in its
 // own window, since it is still open and two writers on one session would mix up; claude: in
 // that Claude Code session; none: copied, then pasted into the agent's chat.
-export type SendMode = 'send' | 'open' | 'claude' | 'none'
+export type SendMode = 'send' | 'connected' | 'open' | 'claude' | 'none'
+type Delivery = { id: string; turn: string; agent: string }
+type Receipt = Pick<Message, 'id' | 'status' | 'reply' | 'error'>
+type Messaging = { connections: readonly Connection[]; messages: readonly Message[] }
+
+const liveTarget = (agent: string, session: string | undefined, connections: readonly Connection[]): Connection | undefined => {
+  const matches = connections.filter(one => one.agent === (agent || 'claude') && one.session === session)
+  return matches.length === 1 ? matches[0] : undefined
+}
+const rowReceipt = (agent: string, session: string | undefined, messages: readonly Message[]): { receipt?: Receipt } => {
+  const one = session === undefined ? undefined : messages.filter(message => message.to === `${agent || 'claude'}:${session}`).at(-1)
+  return one === undefined ? {} : { receipt: { id: one.id, status: one.status, reply: one.reply, error: one.error } }
+}
 
 // One argument list per agent that takes a reply from outside. Every argument is a constant, a
 // session id the parser checked (RESUME) or, for Grok, the reply as one argument with no shell
@@ -63,6 +76,8 @@ export const sendKey = (target: AgentTarget): string => `${target.agent}:${targe
 export type ServeStep = { text: string; note: string; status: string; isCurrent: boolean }
 
 export type ServeAsk = {
+  delivery?: Delivery
+  receipt?: Receipt
   key: string
   project: string
   agent: string
@@ -99,6 +114,8 @@ export type ServeAsk = {
 }
 
 export type ServeRow = {
+  delivery?: Delivery
+  receipt?: Receipt
   key: string
   project: string
   title: string
@@ -158,7 +175,7 @@ const infoOf = (mode: SendMode, agent: string, task: string, session: string, s:
 // The keys are the terminal board's (`boardItems`), so a press names the line it was on.
 // `isLan`: the page as a phone sees it on the local network, where a reply that would run an
 // agent on the computer is offered as a copy instead.
-export const serveModel = (view: View, pending: readonly PendingTurn[], s: Strings = ZH_TW, sending: ReadonlySet<string> = new Set(), isLan = false): ServeModel => {
+export const serveModel = (view: View, pending: readonly PendingTurn[], s: Strings = ZH_TW, sending: ReadonlySet<string> = new Set(), isLan = false, messaging?: Messaging): ServeModel => {
   const isSending = (target: AgentTarget | null): boolean => target !== null && sending.has(sendKey(target))
   const onLan = (mode: SendMode): SendMode => (isLan && mode === 'send' ? 'open' : mode)
   const lanInfo = (mode: SendMode, agent: string): string | null => (isLan && mode === 'send' ? s.serveLanSend(agent) : null)
@@ -172,11 +189,15 @@ export const serveModel = (view: View, pending: readonly PendingTurn[], s: Strin
     if (item.type === 'ask') {
       const { ask } = item
       const isManual = ask.where === 'manual'
-      const mode = isManual ? 'none' : sendMode(ask.agent, ask.target)
+      const connection = isManual || isLan ? undefined : liveTarget(ask.agent, ask.nativeSession, messaging?.connections ?? [])
+      const baseMode = isManual ? 'none' : sendMode(ask.agent, ask.target)
+      const mode = connection ? 'connected' : messaging && baseMode === 'send' ? 'open' : baseMode
       const send = onLan(mode)
       // A phone on the local network gets the id, but neither the command nor its folder.
       const hint = replyHint(ask, s, !isLan)
       asks.push({
+        ...(connection === undefined ? {} : { delivery: { id: connection.id, turn: connection.turn, agent: connection.agent } }),
+        ...(isLan ? {} : rowReceipt(ask.agent, ask.nativeSession, messaging?.messages ?? [])),
         key: item.key,
         project: ask.project,
         agent: ask.agent,
@@ -193,24 +214,28 @@ export const serveModel = (view: View, pending: readonly PendingTurn[], s: Strin
         canTick: ask.step !== null,
         canHide: ask.hideKey !== '',
         send,
-        session: ask.target?.session ?? '',
+        session: connection?.session ?? ask.target?.session ?? '',
         fp: fingerprint(item, items),
         where: send === 'send' ? (ask.target?.dir ?? '') : '',
-        info: isManual ? '' : (lanInfo(mode, ask.agent) ?? infoOf(send, ask.agent, ask.task, ask.session, s)),
+        info: connection ? s.messagesConnectedVia(connection.surface, connection.session) : isManual ? '' : (lanInfo(mode, ask.agent) ?? infoOf(send, ask.agent, ask.task, ask.session, s)),
         back: wayBackText(hint),
         sessionId: ask.where === 'other' ? ask.sessionId : null,
         reopen: hint.reopen,
-        isSending: isSending(ask.target),
+        isSending: isSending(ask.target) || connection !== undefined && (messaging?.messages.some(one => one.target === connection.id && ['queued', 'uncertain', 'accepted'].includes(one.status)) ?? false),
       })
       continue
     }
     if (item.type === 'row') {
       const { row } = item
-      const mode = row.target === null ? (row.auto === null ? 'none' : 'claude') : sendMode(row.agent, row.target)
+      const connection = isLan ? undefined : liveTarget(row.agent, row.nativeSession, messaging?.connections ?? [])
+      const baseMode = row.target === null ? (row.auto === null ? 'none' : 'claude') : sendMode(row.agent, row.target)
+      const mode = connection ? 'connected' : messaging && baseMode === 'send' ? 'open' : baseMode
       const send = onLan(mode)
       const rows = idleKeys.has(row.key) ? idle : (groups.get(row.project) ?? [])
       if (!idleKeys.has(row.key)) groups.set(row.project, rows)
       rows.push({
+        ...(connection === undefined ? {} : { delivery: { id: connection.id, turn: connection.turn, agent: connection.agent } }),
+        ...(isLan ? {} : rowReceipt(row.agent, row.nativeSession, messaging?.messages ?? [])),
         key: item.key,
         project: row.project,
         title: row.title,
@@ -232,13 +257,13 @@ export const serveModel = (view: View, pending: readonly PendingTurn[], s: Strin
         isAsking: row.question !== null,
         question: row.question ?? '',
         send,
-        session: row.target?.session ?? '',
+        session: connection?.session ?? row.target?.session ?? '',
         fp: fingerprint(item, items),
         where: send === 'send' ? (row.target?.dir ?? '') : '',
         // A row says why only when a reply could otherwise be expected here.
-        info: lanInfo(mode, row.agent) ?? (send === 'open' ? infoOf(send, row.agent, row.title, '', s) : ''),
-        isSending: isSending(row.target),
-        hasCopyBox: lanInfo(mode, row.agent) !== null,
+        info: connection ? s.messagesConnectedVia(connection.surface, connection.session) : lanInfo(mode, row.agent) ?? (send === 'open' ? infoOf(send, row.agent, row.title, '', s) : ''),
+        isSending: isSending(row.target) || connection !== undefined && (messaging?.messages.some(one => one.target === connection.id && ['queued', 'uncertain', 'accepted'].includes(one.status)) ?? false),
+        hasCopyBox: lanInfo(mode, row.agent) !== null || messaging !== undefined && row.auto !== null && connection === undefined,
       })
       continue
     }
@@ -267,7 +292,7 @@ export const serveModel = (view: View, pending: readonly PendingTurn[], s: Strin
 
 // `asked`: with a reply, the question the page showed it under ('' for none). `fp`: the line's
 // fingerprint as the page drew it; a tick, an archive and a reply need it, hide and unhide do not.
-export type ServeRequest = { key: string; type: string; text: string; session: string; asked?: string; fp?: string }
+export type ServeRequest = { key: string; type: string; text: string; session: string; asked?: string; fp?: string; connection?: string; turn?: string }
 
 export type ServeAction =
   | { type: 'tick'; ref: StepRef }
@@ -275,6 +300,7 @@ export type ServeAction =
   | { type: 'hide'; key: string; text: string }
   | { type: 'unhide'; key: string | null }
   | { type: 'send'; target: AgentTarget; text: string; title: string }
+  | { type: 'message'; connection: Delivery; text: string; title: string }
   | { type: 'refuse'; note: string }
 
 const MAX_REPLY = 4000
@@ -292,9 +318,9 @@ export const replyText = (raw: string): string =>
 // gone or changed since the page drew it is refused, never taken for the one now in its place.
 // From the local network (`isLan`) a reply to an agent is refused: it would run a program on
 // the computer, and the network's page is plain HTTP that others on the network could read.
-export const serveAction = (items: readonly BoardItem[], request: ServeRequest, s: Strings = ZH_TW, isLan = false): ServeAction => {
-  const action = actionOf(items, request, s, isLan)
-  if (action.type !== 'tick' && action.type !== 'archive' && action.type !== 'send') return action
+export const serveAction = (items: readonly BoardItem[], request: ServeRequest, s: Strings = ZH_TW, isLan = false, connections: readonly Connection[] = [], isMessaging = false): ServeAction => {
+  const action = actionOf(items, request, s, isLan, connections, isMessaging)
+  if (action.type !== 'tick' && action.type !== 'archive' && action.type !== 'send' && action.type !== 'message') return action
   // The key is a project and a title, which another session's block can take over, and a step
   // can be reworded under it: the press goes through only on the block and words the page drew.
   const item = items.find(one => one.key === request.key)
@@ -302,7 +328,7 @@ export const serveAction = (items: readonly BoardItem[], request: ServeRequest, 
   return item !== undefined && request.fp === fingerprint(item, items) ? action : { type: 'refuse', note: s.boardLineChanged }
 }
 
-const actionOf = (items: readonly BoardItem[], request: ServeRequest, s: Strings, isLan: boolean): ServeAction => {
+const actionOf = (items: readonly BoardItem[], request: ServeRequest, s: Strings, isLan: boolean, connections: readonly Connection[], isMessaging: boolean): ServeAction => {
   // A hidden question is off the board: it is named by the key it was hidden under.
   if (request.type === 'unhide') return request.key.startsWith('hidden:') ? { type: 'unhide', key: request.key.slice('hidden:'.length) } : { type: 'refuse', note: '' }
   const item = items.find(one => one.key === request.key)
@@ -318,7 +344,7 @@ const actionOf = (items: readonly BoardItem[], request: ServeRequest, s: Strings
   if (request.type === 'archive') {
     return item.type === 'row' && item.row.archive !== null ? { type: 'archive', ref: item.row.archive, title: item.row.title } : { type: 'refuse', note: s.archiveGone }
   }
-  if (request.type !== 'send') return { type: 'refuse', note: '' }
+  if (request.type !== 'send' && request.type !== 'message') return { type: 'refuse', note: '' }
   const text = replyText(request.text)
   if (item.type === 'turn') return { type: 'refuse', note: infoOf(SENDERS.has(item.turn.agent) ? 'open' : 'none', item.turn.agent, '', '', s) }
   const { agent, target } = item.type === 'ask' ? item.ask : item.row
@@ -326,6 +352,14 @@ const actionOf = (items: readonly BoardItem[], request: ServeRequest, s: Strings
   if (item.type === 'ask' && item.ask.where === 'manual') return { type: 'refuse', note: '' }
   const mode = target === null ? (agent === '' ? 'claude' : 'none') : sendMode(agent, target)
   const title = item.type === 'ask' ? item.ask.task : item.row.title
+  if (request.type === 'message') {
+    const native = item.type === 'ask' ? item.ask.nativeSession : item.row.nativeSession
+    const connected = liveTarget(agent, native, connections)
+    const question = item.type === 'ask' ? item.ask.text : item.row.question ?? ''
+    if (isLan || !connected || connected.id !== request.connection || connected.turn !== request.turn || connected.session !== request.session || (request.asked ?? '') !== question || !text) return { type: 'refuse', note: s.messagesFailed }
+    return { type: 'message', connection: { id: connected.id, turn: connected.turn, agent: connected.agent }, text, title }
+  }
+  if (isMessaging) return { type: 'refuse', note: s.messagesFailed }
   if (mode !== 'send' || target === null) return { type: 'refuse', note: infoOf(mode, agent, title, item.type === 'ask' ? item.ask.session : '', s) }
   if (isLan) return { type: 'refuse', note: s.serveLanSend(agent) }
   // Keys are a project and a title, which another session's block can take over between the
@@ -523,12 +557,6 @@ details[open]>summary::before{content:"▾"}
 <header><h1>${esc(s.paneTitle)}</h1><button type="button" id="close">${esc(s.serveClose)}</button></header>
 <section class="counts" id="counts"></section>
 <div id="board"></div>
-${isLan ? '' : `<details class="card paste" id="messages"><summary>${esc(s.messagesTitle)}</summary>
-<p class="quiet small">${esc(s.messagesHint)}</p>
-<select id="message-target" aria-label="${esc(s.messagesChoose)}"></select>
-<textarea id="message-text" placeholder="${esc(s.messagesPlaceholder)}" aria-label="${esc(s.messagesPlaceholder)}"></textarea>
-<button type="button" class="primary" id="message-send" disabled>${esc(s.messagesSend)}</button>
-<p id="message-availability" class="quiet small"></p><div id="message-receipts"></div></details>`}
 <details class="card paste"><summary>${esc(s.servePasteTitle)}</summary>
 <p class="quiet small">${esc(s.servePasteHint)}</p>
 <textarea id="paste" spellcheck="false"></textarea>
@@ -560,9 +588,7 @@ const PAGE_SCRIPT = String.raw`
   var timer = null;
   var isClosed = false;
   var since = null;
-  var messageTargets = [];
-  var lastMessages = '';
-  var messageAttempt = null;
+  var messageAttempts = {};
 
   function w(key, a, b) {
     return String(W[key]).split('\u0001').join(a === undefined ? '' : String(a)).split('\u0002').join(b === undefined ? '' : String(b));
@@ -621,18 +647,41 @@ const PAGE_SCRIPT = String.raw`
       say(w('serveOffline'), 'alert');
     }).then(function () { refresh(); });
   }
-  function replyBox(key, placeholder, mode, agent, where, isSending, session, asked, fp) {
+  function nativeAct(key, text, delivery, session, asked, fp, go) {
+    var slot = JSON.stringify([key, delivery.id, delivery.turn, session, asked, fp]);
+    var attempt = messageAttempts[slot];
+    if (!attempt || attempt.text !== text) attempt = messageAttempts[slot] = { id: 'AB-' + crypto.randomUUID(), text: text };
+    go.disabled = true;
+    say(w('serveSending', agentName(delivery.agent)));
+    return call('/api/act', { key: key, type: 'message', id: attempt.id, text: text, connection: delivery.id, turn: delivery.turn, session: session, asked: asked || '', fp: fp }).then(function (data) {
+      say(data.note || '', data.ok ? 'done' : 'alert');
+      if (!data.ok) go.disabled = false;
+      return data.ok;
+    }, function () { say(w('messagesFailed'), 'alert'); go.disabled = false; return false; }).then(function (ok) { refresh(); return ok; });
+  }
+  function agentName(agent) { return agent || 'claude'; }
+  function receiptLine(receipt) {
+    if (!receipt) return null;
+    var labels = { queued: 'messagesQueued', uncertain: 'messagesUncertain', accepted: 'messagesAccepted', acknowledged: 'messagesAcknowledged', rejected: 'messagesRejected' };
+    if (receipt.status === 'acknowledged' || receipt.status === 'rejected') Object.keys(messageAttempts).forEach(function (slot) { if (messageAttempts[slot].id === receipt.id) delete messageAttempts[slot]; });
+    return el('p', 'quiet small', receipt.id + ' · ' + w(receipt.status === 'uncertain' && /TIMEOUT/.test(receipt.error) ? 'messagesTimeout' : labels[receipt.status]) + (receipt.reply ? ' · ' + receipt.reply : ''));
+  }
+  function replyBox(key, placeholder, mode, agent, where, isSending, session, asked, fp, delivery) {
     var box = el('div', 'reply');
     var input = el('textarea');
     input.rows = 2;
     input.placeholder = placeholder;
     // A draft belongs to its session and its question: a redraw that puts another session's
     // line under the same key starts an empty box, so the text is never sent to that session.
-    input.setAttribute('data-key', [key, session || '', asked || ''].join('\u0001'));
-    var go = mode === 'send'
-      ? button(w('serveSend', agent), function () {
+    input.setAttribute('data-key', [key, session || '', asked || '', delivery ? delivery.id + ':' + delivery.turn : ''].join('\u0001'));
+    var go = mode === 'send' || mode === 'connected'
+      ? button(w('serveSend', agentName(agent)), function () {
         var text = input.value.trim();
         if (!text) return;
+        if (mode === 'connected') {
+          nativeAct(key, text, delivery, session, asked, fp, go).then(function (ok) { if (ok) input.value = ''; });
+          return;
+        }
         input.value = '';
         act(key, 'send', text, w('serveSending', agent), session, asked, fp);
       }, 'primary')
@@ -669,9 +718,10 @@ const PAGE_SCRIPT = String.raw`
     var actions = el('div', 'actions');
     if (ask.canTick) actions.appendChild(button(w('serveTickNext', ask.text), function () { act(ask.key, 'tick', '', '', '', '', ask.fp); }, 'primary'));
     ask.answers.forEach(function (answer, index) {
-      var send = ask.send === 'send';
+      var send = ask.send === 'send' || ask.send === 'connected';
       var node = button(answer, function () {
-        if (send) act(ask.key, 'send', answer, w('serveSending', ask.agent), ask.session, ask.text, ask.fp);
+        if (ask.send === 'connected') nativeAct(ask.key, answer, ask.delivery, ask.session, ask.text, ask.fp, node);
+        else if (send) act(ask.key, 'send', answer, w('serveSending', ask.agent), ask.session, ask.text, ask.fp);
         else copy(answer);
       }, index === 0 ? 'primary' : '');
       node.disabled = send && ask.isSending;
@@ -689,7 +739,8 @@ const PAGE_SCRIPT = String.raw`
       actions.appendChild(link);
     }
     if (actions.childNodes.length) add(card, actions);
-    if (!ask.canTick) add(card, replyBox(ask.key, w('serveReplyPlaceholder'), ask.send, ask.agent, ask.where, ask.isSending, ask.session, ask.text, ask.fp));
+    if (!ask.canTick) add(card, replyBox(ask.key, w('serveReplyPlaceholder'), ask.send, ask.agent, ask.where, ask.isSending, ask.session, ask.text, ask.fp, ask.delivery));
+    if (ask.receipt) add(card, receiptLine(ask.receipt));
     if (ask.info) add(card, el('div', 'quiet small', ask.info));
     if (ask.back) add(card, el('div', 'quiet small', ask.back));
     if (ask.reopen) add(card, el('code', '', '$ ' + ask.reopen));
@@ -718,8 +769,9 @@ const PAGE_SCRIPT = String.raw`
     if (row.resume) actions.appendChild(button(w('serveCopyResume'), function () { copy(row.resume); }));
     if (actions.childNodes.length) add(body, actions);
     if (row.resume) add(body, el('code', '', row.resume));
-    if (row.send === 'send') add(body, replyBox(row.key, w('serveMessagePlaceholder', row.agent), 'send', row.agent, row.where, row.isSending, row.session, asked, row.fp));
+    if (row.send === 'send' || row.send === 'connected') add(body, replyBox(row.key, w('serveMessagePlaceholder', agentName(row.agent)), row.send, row.agent, row.where, row.isSending, row.session, asked, row.fp, row.delivery));
     else if (row.hasCopyBox) add(body, replyBox(row.key, w('serveReplyPlaceholder'), 'copy', row.agent, '', false, row.session, asked));
+    if (row.receipt) add(body, receiptLine(row.receipt));
     if (row.info) add(body, el('div', 'quiet small', row.info));
     card.appendChild(body);
     return card;
@@ -796,61 +848,6 @@ const PAGE_SCRIPT = String.raw`
       }
     });
   }
-  function renderMessages(data) {
-    var target = document.getElementById('message-target');
-    if (!target) return;
-    var snapshot = JSON.stringify(data);
-    if (snapshot === lastMessages) return;
-    lastMessages = snapshot;
-    var selected = target.value;
-    messageTargets = data && data.enabled ? data.connections : [];
-    target.textContent = '';
-    var placeholder = el('option', '', w('messagesChoose'));
-    placeholder.value = '';
-    target.appendChild(placeholder);
-    messageTargets.forEach(function (one) {
-      var option = el('option', '', one.agent + ' · ' + one.surface + ' · ' + one.session + ' · ' + (one.scope === 'session' ? w('messagesSessionScope') : one.turn));
-      option.value = one.id;
-      target.appendChild(option);
-    });
-    target.value = messageTargets.some(function (one) { return one.id === selected; }) ? selected : '';
-    if (selected && !target.value) {
-      document.getElementById('message-text').value = '';
-      messageAttempt = null;
-    }
-    document.getElementById('message-send').disabled = !target.value;
-    document.getElementById('message-availability').textContent = !data || !data.enabled ? w('messagesDisabled') : messageTargets.length ? '' : w('messagesNone');
-    var receipts = document.getElementById('message-receipts');
-    receipts.textContent = '';
-    var labels = { queued: 'messagesQueued', uncertain: 'messagesUncertain', accepted: 'messagesAccepted', acknowledged: 'messagesAcknowledged', rejected: 'messagesRejected' };
-    (data && data.messages || []).slice(-20).reverse().forEach(function (one) {
-      add(receipts, el('p', 'small', one.id + ' · ' + one.from + ' → ' + one.to + ' · ' + w(one.status === 'uncertain' && /TIMEOUT/.test(one.error) ? 'messagesTimeout' : labels[one.status]) + (one.reply ? ' · ' + one.reply : '')));
-    });
-  }
-  var messageSend = document.getElementById('message-send');
-  if (messageSend) {
-    document.getElementById('message-target').addEventListener('change', function () {
-      messageSend.disabled = !this.value;
-      messageAttempt = null;
-      document.getElementById('message-text').value = '';
-    });
-    messageSend.addEventListener('click', function () {
-      var target = document.getElementById('message-target').value;
-      var one = messageTargets.find(function (entry) { return entry.id === target; });
-      var box = document.getElementById('message-text');
-      if (!one || !box.value.trim()) return;
-      var content = JSON.stringify([target, one.turn, box.value]);
-      // A network retry reuses its id; editing the text creates a distinct message.
-      if (!messageAttempt || messageAttempt.content !== content) messageAttempt = { id: 'AB-' + crypto.randomUUID(), content: content };
-      messageSend.disabled = true;
-      call('/api/messages/send', { id: messageAttempt.id, target: target, turn: one.turn, text: box.value }).then(function (data) {
-        messageSend.disabled = !document.getElementById('message-target').value;
-        say(data.ok ? w('messagesQueued') : w(data.error === 'ID_CONFLICT' ? 'messagesConflict' : 'messagesFailed'), data.ok ? 'done' : 'alert');
-        if (data.ok) { box.value = ''; messageAttempt = null; }
-        refresh();
-      }, function () { say(w('messagesFailed'), 'alert'); messageSend.disabled = false; });
-    });
-  }
   function refresh() {
     if (isClosed) return;
     clearTimeout(timer);
@@ -858,7 +855,6 @@ const PAGE_SCRIPT = String.raw`
       if (!data.ok || !data.model) { say(data.note || w('serveOffline'), 'alert'); return; }
       var text = JSON.stringify(data.model);
       if (text !== last) { last = text; render(data.model); }
-      renderMessages(data.messaging);
       // A reply runs in the background; its answer comes with the board once the agent is done.
       if (since === null) since = data.now;
       (data.replies || []).forEach(function (reply) {

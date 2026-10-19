@@ -201,7 +201,7 @@ test('an owned idle Codex session accepts only its actual new turn ACK and dedup
     request: async (method, params) => {
       if (method === 'thread/loaded/list') return { data: [thread], nextCursor: null }
       assert.equal(method, 'turn/start'); assert.equal(params.threadId, thread)
-      assert.equal(params.input[0].text, input.text); starts += 1
+      assert.ok(params.input[0].text.includes(input.text)); assert.ok(params.input[0].text.includes('ACK AB-TEST-001')); starts += 1
       current = { thread, status: 'active', turn: 'actual-turn' }
       const emit = (targetThread, turnId, text) => listener({ method: 'item/completed', params: { threadId: targetThread, turnId, item: { type: 'agentMessage', text } } })
       emit('wrong-thread', 'actual-turn', 'ACK AB-TEST-001 WRONG_THREAD')
@@ -239,4 +239,49 @@ test('an owned Codex session refuses an unverified owner, a busy session and a f
   const result = await board.call('/api/messages/register', { agent: 'codex', session: thread, surface: 'Mock', scope: 'session', turn: 'fabricated-turn' })
   assert.equal(result.body.error, 'INVALID_CONNECTION_SCOPE')
   assert.equal((await board.call('/api/board')).body.messaging.connections.length, 0)
+}))
+
+test('an existing card sends only to its exact live receiver and preserves mark read and unhide', async () => fixture(async (board, dir) => {
+  const thread = '11111111-2222-4333-8444-555555555555'
+  const progress = `# Progress\n\n## Synthetic\n<!-- auto session=abcdef01 agent=codex resume=${thread} state=waiting updated=${new Date().toISOString()} -->\n### Card reply fixture\n- [?] Confirm the synthetic choice?\n<!-- /auto session=abcdef01 -->\n`
+  writeFileSync(join(dir, 'progress.md'), progress)
+  const before = (await board.call('/api/board')).body.model
+  const offline = before.asks.find(one => one.agent === 'codex')
+  assert.ok(!['send', 'connected'].includes(offline.send)); assert.equal(offline.delivery, undefined)
+  const connected = (await board.call('/api/messages/register', { agent: 'codex', session: thread, turn: 'turn1', surface: 'Synthetic Codex CLI' })).body
+  const ask = (await board.call('/api/board')).body.model.asks.find(one => one.agent === 'codex')
+  assert.equal(ask.send, 'connected'); assert.equal(ask.canHide, offline.canHide)
+  assert.equal(ask.session, thread); assert.equal(ask.delivery.id, connected.id)
+  const request = { key: ask.key, type: 'message', id: 'AB-TEST-001', text: input.text, session: ask.session, asked: ask.text, fp: ask.fp, connection: ask.delivery.id, turn: ask.delivery.turn }
+  for (const wrong of [{ connection: 'wrong-session' }, { turn: 'stale-turn' }, { session: 'another-session' }, { fp: 'changed-line' }]) assert.equal((await board.call('/api/act', { ...request, ...wrong })).status, 409)
+  assert.equal((await board.call('/api/act', request)).status, 200)
+  assert.equal((await board.call('/api/act', request)).status, 200)
+  assert.equal((await board.call('/api/act', { ...request, text: 'conflict' })).status, 409)
+  assert.equal((await board.call('/api/board')).body.messaging.messages.length, 1)
+  assert.equal(readFileSync(join(dir, 'progress.md'), 'utf8'), progress)
+  const credentials = { connection: connected.id, secret: connected.secret }
+  await board.call('/api/messages/poll', { ...credentials, turn: 'turn1' })
+  await board.call('/api/messages/receipt', { ...credentials, id: request.id, status: 'acknowledged', reply: 'ACK AB-TEST-001' })
+  assert.equal((await board.call('/api/board')).body.model.asks[0].receipt.reply, 'ACK AB-TEST-001')
+  await board.call('/api/messages/disconnect', { ...credentials, turn: 'turn1' })
+  const disconnected = (await board.call('/api/board')).body.model.asks[0]
+  assert.ok(!['send', 'connected'].includes(disconnected.send)); assert.equal(disconnected.delivery, undefined)
+  assert.equal(disconnected.receipt.status, 'acknowledged')
+  assert.equal((await board.call('/api/act', { ...request, id: 'AB-TEST-002' })).status, 409)
+  assert.equal((await board.call('/api/act', { key: ask.key, type: 'hide' })).status, 200)
+  const hidden = (await board.call('/api/board')).body.model
+  assert.equal(hidden.asks.length, 0); assert.equal(hidden.hidden.length, 1)
+  assert.equal((await board.call('/api/act', { key: hidden.hidden[0].key, type: 'unhide' })).status, 200)
+  assert.equal((await board.call('/api/board')).body.model.asks.length, 1)
+}))
+
+test('a card cannot infer a receiving connection from a matching title, prefix or another agent', async () => fixture(async (board, dir) => {
+  const thread = '11111111-2222-4333-8444-555555555555'
+  writeFileSync(join(dir, 'progress.md'), `## Synthetic\n<!-- auto session=abcdef01 agent=codex resume=${thread} state=waiting updated=${new Date().toISOString()} -->\n### Same title\n- [?] Confirm the synthetic choice?\n<!-- /auto session=abcdef01 -->\n`)
+  await board.call('/api/messages/register', { agent: 'codex', session: thread.slice(0, 8), turn: 'turn1', surface: 'Synthetic prefix' })
+  await board.call('/api/messages/register', { agent: 'gemini', session: thread, turn: 'turn1', surface: 'Synthetic different agent' })
+  const model = (await board.call('/api/board')).body.model
+  assert.ok(!['send', 'connected'].includes(model.asks[0].send))
+  assert.equal(model.asks[0].delivery, undefined)
+  assert.equal((await board.call('/api/board')).body.messaging.messages.length, 0)
 }))

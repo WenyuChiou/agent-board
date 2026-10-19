@@ -4,8 +4,17 @@ The interactive web board can route a message to a receiving adapter for an exac
 session and turn, or an explicitly identified idle session owned by its host. A progress
 card alone never enables sending. The adapter must verify its
 existing host connection, register a short-lived lease, and keep it alive. Disconnected
-adapters disappear from the target picker within 15 seconds. Ordinary messages cannot
+adapters lose their card's Send action within 15 seconds. Ordinary messages cannot
 approve tools, grant hook trust or merge a PR.
+
+Use the existing reply box on the session's card. Its Copy button becomes Send Codex
+(or that receiver's agent name) only when the full native session id and agent match a
+live receiver. The connection's actual host surface is shown below it. There is no
+separate target-picker workflow. Queue, transport and actual ACK receipts appear on the
+same card. Mark read, show again, collapse, tick and archive keep their existing actions.
+An offline card retains Copy. When messaging is enabled, an offline Send cannot silently
+fall back to spawning a CLI or resuming a saved session. The existing copy-resume command
+remains available where the board already offered it.
 
 ## Enable locally
 
@@ -123,7 +132,7 @@ Do not claim exclusive ownership of someone else's desktop chat or a concurrentl
 controlled CLI thread. Attaching creates no server, thread or model call.
 
 This adapter advertises `scope: session`, with the literal binding `turn: session`,
-which is explicitly labelled in the target picker. That literal is not an active turn
+which is explicitly identified by the receiver binding. That literal is not an active turn
 id. A send checks the same loaded thread is idle, starts its new turn, and accepts only
 an ACK from the native response's actual turn id. It retains the ACK line only. A busy,
 unverified or disconnected owner is not registered; changes during delivery are
@@ -136,7 +145,7 @@ conservative uncertainty without replay. The existing-proxy adapter continues to
 | --- | --- | --- |
 | Disposable Codex app-server, exclusively owned | A real `AB-TEST-001` ACK; one native turn; exact retry caused no second turn; changed contents returned `ID_CONFLICT`; no tool action observed | Product installation of a receiver into each supported host |
 | Codex CLI | Adapter API and mock proxy tests | Real live CLI owner/socket, native ACK and actual TTY acceptance |
-| Codex desktop App | Interactive web controls tested with a labelled synthetic receiver | A supported live connection to that desktop chat; its own native ACK |
+| Codex desktop App | Interactive web controls and card API tested; exact native session binding and offline fallback | A supported live connection to that desktop chat; its own native ACK |
 | dot | Generic adapter API only | A supported dot owner connector and actual dot ACK |
 | Claude Code CLI | Existing plugin progress and prompt submission design | Native receiver integration and actual bidirectional ACK |
 | Claude desktop / other AI UIs | No equivalent transport established by this change | Product-specific connection and acceptance |

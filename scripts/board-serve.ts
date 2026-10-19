@@ -344,7 +344,8 @@ export const startServer = (o: ServeOptions): void => {
       if (url.pathname === '/api/board') {
         // A file the board cannot read is named on the page, which would otherwise say it is offline.
         try {
-          return json(res, 200, { model: serveModel(o.view(), o.pending(), o.s, sending, isLan), replies: [...replies.values()], messaging: isLan ? undefined : messaging?.snapshot(Date.now()) ?? { enabled: false, connections: [], messages: [] }, now: Date.now() })
+          const state = isLan ? undefined : messaging?.snapshot(Date.now())
+          return json(res, 200, { model: serveModel(o.view(), o.pending(), o.s, sending, isLan, state), replies: [...replies.values()], messaging: isLan ? undefined : state ?? { enabled: false, connections: [], messages: [] }, now: Date.now() })
         } catch (error) {
           const note = o.failure(error, isLan)
           if (note === null) throw error
@@ -369,8 +370,16 @@ export const startServer = (o: ServeOptions): void => {
     // error stays a bare server error.
     try {
       if (url.pathname === '/api/act') {
-        const action = serveAction(boardItems(o.view(), o.pending()), { key: text(body.key), type: text(body.type), text: text(body.text), session: text(body.session), asked: text(body.asked), fp: text(body.fp) }, o.s, isLan)
+        const state = isLan ? undefined : messaging?.snapshot(Date.now())
+        const action = serveAction(boardItems(o.view(), o.pending()), { key: text(body.key), type: text(body.type), text: text(body.text), session: text(body.session), asked: text(body.asked), fp: text(body.fp), connection: text(body.connection), turn: text(body.turn) }, o.s, isLan, state?.connections, messaging !== null)
         if (action.type === 'refuse') return json(res, 409, { note: action.note })
+        if (action.type === 'message') {
+          if (!messaging || isLan) return json(res, 403, {})
+          try {
+            const receipt = messaging.act('send', { id: body.id, target: action.connection.id, turn: action.connection.turn, text: action.text }, Date.now())
+            return json(res, 200, { note: o.s.messagesQueued, receipt })
+          } catch (error) { return json(res, 409, { note: error instanceof Error && error.message === 'ID_CONFLICT' ? o.s.messagesConflict : o.s.messagesFailed }) }
+        }
         if (action.type === 'send') {
           const sent = send(action.target, action.text, action.title)
           return json(res, sent.status, { note: sent.note })

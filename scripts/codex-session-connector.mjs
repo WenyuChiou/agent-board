@@ -1,4 +1,4 @@
-import { boardClient } from './message-client.mjs'
+import { boardClient, deliveryPrompt } from './message-client.mjs'
 
 // For an application that already owns a loaded Codex session and its notifications.
 // No socket, thread or model is created by attaching this adapter. `session` scope
@@ -44,7 +44,7 @@ export const attachCodexSession = async ({ boardUrl, transport, thread, state, v
       })
       void answer.catch(() => undefined)
       try {
-        const result = await transport.request('turn/start', { threadId: thread, input: [{ type: 'text', text: message.text, text_elements: [] }] })
+        const result = await transport.request('turn/start', { threadId: thread, input: [{ type: 'text', text: deliveryPrompt(message), text_elements: [] }] })
         if (!result.turn?.id) throw new Error('INVALID_TURN_RESPONSE')
         pending.turn = result.turn.id
         if (pending.observed?.turn === pending.turn) pending.done(pending.observed.line)

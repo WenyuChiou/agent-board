@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- **Reply through the existing card.** A live receiver changes that session's existing
+  Copy reply button to Send, using its full native session id and agent. The same card
+  shows queue and ACK receipts; disconnecting restores Copy. Mark read and show again
+  retain their existing actions. There is no separate target picker, and an offline
+  card in messaging mode cannot silently resume a saved CLI session. Both Codex
+  adapters now include the message-id ACK instruction for ordinary card text.
+  Tests: `an existing card sends only to its exact live receiver and preserves mark
+  read and unhide`, `a card cannot infer a receiving connection from a matching title,
+  prefix or another agent`.
+
 - **Route messages through live session adapters.** An opt-in loopback message hub and
   web target picker bind a receiver to its agent/session/turn, expire disconnected
   leases, persist message ids before delivery and distinguish queue, claim, transport
