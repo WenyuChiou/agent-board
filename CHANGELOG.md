@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.23.1 — 2026-10-19
+
 - **Keep session ids out of the native pane and terminal too.** Identify questions by task and agent, remove id-only clipboard actions, and copy the exact resume command only when requested. The read-only page omits resume internals. Tests: `every agent keeps exact resume bindings without showing session identifiers in board text`, `another session shows its task without ids and copies only an actionable resume command`.
 
 - **Keep connection internals off the progress board.** Show only actionable update waits/timeouts, without transport inventory or native session identifiers. Preserve Send, hide and restore. Test: `the page keeps actionable progress delays without connection inventory or native identifiers` (all three languages).

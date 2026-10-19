@@ -8,7 +8,7 @@ A local interactive board for your coding agents, with an optional native pane i
 </p>
 
 <p align="center">
-<a href="CHANGELOG.md"><img alt="Version 0.23.0" src="https://img.shields.io/badge/version-0.23.0-blue"></a>
+<a href="CHANGELOG.md"><img alt="Version 0.23.1" src="https://img.shields.io/badge/version-0.23.1-blue"></a>
 <a href="#quick-start"><img alt="Node.js 18+" src="https://img.shields.io/badge/Node.js-%E2%89%A5%2018-339933"></a>
 <a href="LICENSE"><img alt="MIT license" src="https://img.shields.io/badge/license-MIT-green"></a>
 <img alt="macOS, Linux, Windows" src="https://img.shields.io/badge/macOS%20%C2%B7%20Linux%20%C2%B7%20Windows-lightgrey">

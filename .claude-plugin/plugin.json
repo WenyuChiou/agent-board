@@ -1,6 +1,6 @@
 {
   "name": "agent-board",
-  "version": "0.23.0",
+  "version": "0.23.1",
   "description": "A local interactive board for coding agents: shared progress, questions and live-session replies, with an optional Claude Code pane.",
   "author": {
     "name": "Wenyu Chiou"
