@@ -55,10 +55,19 @@ Several agents (Claude Code sessions, Codex and others) work in this repository 
 4. **Branch from current `main`**, named `<type>/<short-slug>` (`fix/question-ledger-write`). Before merging, bring the branch up to date with `main` and rerun the checks.
 5. **Commits** use `<type>: <summary>` or `<type>(<scope>): <summary>` (for example `feat`, `fix`, `docs`, `test`, `refactor`, `chore`), with a body that says why. The pull request title uses the same form. Commit regenerated files (`hooks/board-script.ts`, `hooks/released.ts`) together with the source change that needs them.
 6. **CHANGELOG.** A fix or feature pull request adds its entry under `## Unreleased` and names its covering tests by their exact titles. Only a release pull request ([Releases](#releases)) raises the version and turns `Unreleased` into a dated section.
-7. **The pull request body** fills in every section of the template, including the checks you could not run and why.
-8. **Merge only when every CI job in `.github/workflows/test.yml` is green**, not only the ones GitHub marks as required. Squash-merge the tested head: `gh pr merge <N> --squash --match-head-commit <tested sha>`. Then delete the branch, and comment on the closed issue with the merge commit and the evidence. A pull request that reports a check it did not run is not ready to merge.
-9. **Undoing what a merged pull request did** needs an issue that names that pull request. A revert also goes through a pull request.
-10. **Governance files** (`AGENTS.md`, `CONTRIBUTING.md`, `.github/`) change only in a pull request the owner merges. An agent's comment is not approval.
+7. **The pull request body** fills in every section of the template, including the checks you could not run and why. When it is ready, the author comments `Ready for review` and changes it only when the reviewer asks.
+8. **Authors never merge.** Any agent or person may open issues and pull requests, but only the reviewer merges: the owner, or the Claude Code session the owner has named maintainer of this repository. No author decides that its own pull request is done.
+9. **The reviewer verifies before merging.** The reviewer:
+   - reads the whole diff against its issue: one issue, nothing extra;
+   - reruns the checks that cover the change on its own copy, rather than trusting the reported results;
+   - comments on the pull request `Review: APPROVE` with what was verified, or `Review: REQUEST CHANGES` with the findings;
+   - merges only after `Review: APPROVE` and once every CI job in `.github/workflows/test.yml` is green, not only the ones GitHub marks as required. The merge is a squash merge of the tested head: `gh pr merge <N> --squash --match-head-commit <tested sha>`.
+   - then deletes the branch, and comments on the closed issue with the merge commit and the evidence.
+
+   A pull request that reports a check it did not run is not ready to merge.
+10. **At most five open pull requests at a time**, counting all authors together. Split large work into step pull requests: each covers one issue and can be merged on its own. Open the next step only while fewer than five are open; a sixth waits.
+11. **Undoing what a merged pull request did** needs an issue that names that pull request. A revert also goes through a pull request.
+12. **Governance files** (`AGENTS.md`, `CONTRIBUTING.md`, `.github/`) change only in a pull request the owner merges. An agent's comment is not approval.
 
 ## The file format is versioned
 
@@ -75,7 +84,7 @@ Keep the original README tour/flow SVGs and dark terminal illustration. The bott
 3. Fetch tags (`git fetch --tags origin`), then run `bun scripts/build-released.ts` with Bun 1.4.2. It records this version's generated-file ownership; do not edit its output manually.
    Run `bun scripts/build-board.ts`, then regenerate the released table once more. Both `--check` commands must pass together. The bundle omits its mutable pre-tag fingerprint and its own exact tagged fingerprint. Newer source with the same manifest version includes the frozen tag's fingerprint so upgrades still recognize it; historical board and command ownership remain included.
 4. Run applicable checks and generated-file checks. State any unavailable full SDK typecheck.
-5. Open a regular PR, wait until every CI job is green, and squash-merge the exact tested head (`--match-head-commit`) under the owner's authorization.
+5. Open a regular PR. The reviewer verifies it as in [Pull requests](#pull-requests) and, under the owner's authorization, squash-merges the exact tested head (`--match-head-commit`) once every CI job is green.
 6. On the merged release commit, run `claude plugin tag . --dry-run`, then `claude plugin tag .`. Push only the new exact tag, for example `git push origin agent-board--v0.23.0`. Never replace an existing release tag or push unrelated local tags.
 
 ## Support matrix
