@@ -41,9 +41,17 @@ completion; an ACK from a failed turn remains uncertain. No idle wake is added.
 - The current desktop instance's default proxy still fails with OS error 10050 and
   exposes no TCP listener. This change does not claim Send to that desktop chat.
 
-These suite results predate the metadata join correction. Updated focused tests passed
-**8/0**; strict standalone TypeScript and bundle generation/check passed. Combined Node
-and plugin checks are running. The new focused run first exposed disconnect cleanup
+These suite results predate the metadata join correction. After that correction:
+
+- **Focused Node: 8 passed, 0 failed.**
+- **Combined Node: 205 passed, 0 failed, 2 skipped**, 207 cases, 458.48 seconds:
+  `node --test --test-timeout=60000 --test-concurrency=1 tests/exchange.test.mjs tests/messaging.test.mjs tests/board.test.mjs tests/board-storage.test.mjs tests/codex-local.test.mjs`.
+- **Offline plugin: 518 passed, 0 failed**, 10 files, 284.19 seconds;
+  `claude plugin validate --strict .` also passed.
+- Strict standalone TypeScript, pinned Bun bundle generation/check and released-file
+  check passed. Full SDK typechecking remains unrun.
+
+The new focused run first exposed disconnect cleanup
 overwriting the durable failure reason; both affected cases passed after preserving it.
 The first pre-join focused
 run exercised an old bundle and failed; its output is retained with the later green run.
