@@ -439,6 +439,8 @@ const PAGE_WORDS = [
   'messagesTitle', 'messagesHint', 'messagesDisabled', 'messagesNone', 'messagesChoose', 'messagesSessionScope',
   'messagesPlaceholder', 'messagesSend', 'messagesQueued', 'messagesUncertain',
   'messagesAccepted', 'messagesAcknowledged', 'messagesRejected', 'messagesFailed', 'messagesConflict', 'messagesTimeout',
+  'sessionsTitle', 'sessionsHint', 'sessionsWaiting', 'sessionsReported', 'sessionsTimedOut',
+  'sessionsReceiving', 'sessionsNotReceiving', 'sessionsProgress', 'sessionsNoProgress',
   'countWaiting',
   'countActive',
   'countDue',
@@ -581,6 +583,7 @@ const PAGE_SCRIPT = String.raw`
   var board = document.getElementById('board');
   var counts = document.getElementById('counts');
   var note = document.getElementById('note');
+  var presence = null;
   var GLYPH = { done: '✓', doing: '▸', todo: '○', waiting: '●', running: '◐', blocked: '!', cancelled: '–' };
   var last = '';
   var opened = {};
@@ -851,8 +854,21 @@ const PAGE_SCRIPT = String.raw`
     clearTimeout(timer);
     call('/api/board').then(function (data) {
       if (!data.ok || !data.model) { say(data.note || w('serveOffline'), 'alert'); return; }
-      var text = JSON.stringify(data.model);
-      if (text !== last) { last = text; render(data.model); }
+      var text = JSON.stringify([data.model, data.messaging && data.messaging.sessions]);
+      if (text !== last) {
+        last = text; render(data.model);
+        if (presence) { presence.remove(); presence = null; }
+        var sessions = data.messaging && data.messaging.sessions || [];
+        if (sessions.length) {
+          presence = el('section', 'card');
+          add(presence, el('h2', '', w('sessionsTitle')), el('p', 'quiet small', w('sessionsHint')));
+          sessions.forEach(function (one) {
+            var state = one.status === 'reported' ? w('sessionsReported') : one.status === 'timed_out' ? w('sessionsTimedOut') : one.status === 'waiting' ? w('sessionsWaiting') : '';
+            add(presence, add(el('div'), el('div', 'where', [one.agent, one.surface, one.session.slice(0, 8)].join(' · ')), el('div', one.status === 'timed_out' ? 's-blocked small' : 'small', state), el('div', 'quiet small', [w(one.progress ? 'sessionsProgress' : 'sessionsNoProgress'), w(one.receiving ? 'sessionsReceiving' : 'sessionsNotReceiving')].join(' · '))));
+          });
+          board.insertAdjacentElement('afterend', presence);
+        }
+      }
       // A reply runs in the background; its answer comes with the board once the agent is done.
       if (since === null) since = data.now;
       (data.replies || []).forEach(function (reply) {

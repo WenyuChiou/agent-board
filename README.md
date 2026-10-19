@@ -100,6 +100,10 @@ Install it in Claude Code, and every time Claude Code starts it connects the age
 
 ### By capability
 
+Progress reporting does not imply a live message receiver. See the separate
+[agent/surface messaging matrix](docs/MESSAGING.md#agent-and-surface-support) and
+[existing-session connection checks](docs/MESSAGING.md#connecting-a-session-that-was-already-open).
+
 ✅ works · ⚠️ works, with a limit above · ❔ not verified yet · ❌ not supported yet
 
 | | Agent | Its turns on the board | The board inside it | Verified on |

@@ -1,8 +1,8 @@
 import { randomBytes, timingSafeEqual } from 'node:crypto'
 import { existsSync, lstatSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
-import { claimMessages, disconnectMessages, messageFields, messageId, messageReceipt, messageText, queueMessage } from '../hooks/messaging'
-import type { Connection, MessageState } from '../hooks/messaging'
+import { claimMessages, disconnectMessages, messageFields, messageId, messageReceipt, messageText, observeSession, queueMessage } from '../hooks/messaging'
+import type { Connection, MessageState, ProgressBinding, SessionExpectation } from '../hooks/messaging'
 
 const LEASE_MS = 15_000
 const same = (a: string, b: string): boolean => {
@@ -22,6 +22,7 @@ export const createMessaging = (directory: string) => {
   writeFileSync(lock, String(process.pid), { flag: 'wx', mode: 0o600 })
   let state: MessageState = { messages: [] }
   const connections = new Map<string, Live>()
+  const expectations = new Map<string, SessionExpectation>()
   if (existsSync(file)) {
     if (!lstatSync(file).isFile() || lstatSync(file).isSymbolicLink()) throw new Error('UNSAFE_MESSAGE_FILE')
     const saved = JSON.parse(readFileSync(file, 'utf8')) as { version: unknown; messages: MessageState['messages'] }
@@ -58,12 +59,42 @@ export const createMessaging = (directory: string) => {
   }
   return {
     close: () => { if (existsSync(lock) && readFileSync(lock, 'utf8') === String(process.pid)) unlinkSync(lock) },
-    snapshot: (now: number) => {
+    snapshot: (now: number, reports: readonly ProgressBinding[] = []) => {
       expire(now)
-      return { enabled: true, connections: [...connections.values()].map(({ secret: _secret, ...one }) => one), messages: state.messages }
+      for (const [id, one] of expectations) expectations.set(id, observeSession(one, reports, now))
+      return {
+        enabled: true, connections: [...connections.values()].map(({ secret: _secret, ...one }) => one), messages: state.messages,
+        sessions: [
+          ...[...expectations.values()].map(one => ({
+            id: one.id, agent: one.agent, session: one.session, surface: one.surface,
+            status: one.observed !== null ? 'reported' : now >= one.deadline ? 'timed_out' : 'waiting',
+            progress: reports.some(report => report.agent === one.agent && report.session === one.session),
+            receiving: [...connections.values()].some(live => live.agent === one.agent && live.session === one.session),
+          })),
+          ...[...connections.values()].filter(live => ![...expectations.values()].some(one => one.agent === live.agent && one.session === live.session)).map(one => ({
+            id: one.id, agent: one.agent, session: one.session, surface: one.surface, status: 'connected',
+            progress: reports.some(report => report.agent === one.agent && report.session === one.session), receiving: true,
+          })),
+        ],
+      }
     },
-    act: (action: string, body: Record<string, unknown>, now: number) => {
+    act: (action: string, body: Record<string, unknown>, now: number, reports: readonly ProgressBinding[] = []) => {
       expire(now)
+      if (action === 'expect') {
+        messageFields(body, ['id', 'agent', 'session', 'surface', 'timeoutMs'])
+        const id = messageId(body.id), agent = messageId(body.agent), session = messageId(body.session), surface = messageText(body.surface, 100)
+        const timeoutMs = body.timeoutMs ?? 60_000
+        if (typeof timeoutMs !== 'number' || !Number.isInteger(timeoutMs) || timeoutMs < 1000 || timeoutMs > 600_000) throw new Error('INVALID_EXPECTATION_TIMEOUT')
+        const existing = expectations.get(id)
+        if (existing) {
+          if (existing.agent !== agent || existing.session !== session || existing.surface !== surface || existing.deadline - existing.created !== timeoutMs) throw new Error('ID_CONFLICT')
+          return { id, deadline: existing.deadline }
+        }
+        if (expectations.size >= 100) throw new Error('EXPECTATION_LIMIT')
+        const baseline = Math.max(-1, ...reports.filter(one => one.agent === agent && one.session === session).map(one => one.updated))
+        expectations.set(id, { id, agent, session, surface, created: now, deadline: now + timeoutMs, baseline, observed: null })
+        return { id, deadline: now + timeoutMs }
+      }
       if (action === 'register') {
         messageFields(body, ['agent', 'session', 'surface', 'turn', 'scope'])
         const agent = messageId(body.agent), session = messageId(body.session), turn = messageId(body.turn), surface = messageText(body.surface, 100)

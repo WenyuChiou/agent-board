@@ -6,7 +6,8 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { BOARD_SCRIPT } from '../hooks/board-script.ts'
 import { claimMessages, disconnectMessages, messageReceipt, queueMessage } from '../hooks/messaging.ts'
-import { boardClient } from '../scripts/message-client.mjs'
+import { boardClient, connectionPrompt } from '../scripts/message-client.mjs'
+import { observeSession } from '../hooks/messaging.ts'
 import { connectCodexProxy } from '../scripts/codex-message-connector.mjs'
 import { attachCodexSession } from '../scripts/codex-session-connector.mjs'
 import { attachAntigravitySession } from '../scripts/antigravity-session-connector.mjs'
@@ -34,6 +35,19 @@ test('AB-TEST-001 deduplicates exact retries and rejects conflicting contents or
   assert.equal(claimed.state.messages[0].status, 'uncertain')
   assert.equal(claimMessages(claimed.state, target, 1002).messages.length, 0)
   assert.equal(disconnectMessages(claimed.state, target.id, 1003).messages[0].status, 'uncertain')
+})
+
+test('a connection observation requires one exact newer report, never a relay claim or ACK', () => {
+  const one = { id: 'link1', agent: 'codex', session: 'native1', surface: 'Synthetic desktop', created: 10000, deadline: 20000, baseline: 9000, observed: null }
+  for (const reports of [[], [{ agent: 'gemini', session: 'native1', updated: 11000 }], [{ agent: 'codex', session: 'native', updated: 11000 }], [{ agent: 'codex', session: 'native1', updated: 9000 }], [{ agent: 'codex', session: 'native1', updated: 13000 }]]) assert.equal(observeSession(one, reports, 12000), one)
+  const report = { agent: 'codex', session: 'native1', updated: 11000 }
+  assert.equal(observeSession(one, [report, report], 12000), one)
+  assert.equal(observeSession(one, [report], 12000).observed, 11000)
+  const prompt = connectionPrompt(one)
+  assert.match(prompt, /not proof of human authorization/)
+  assert.match(prompt, /BLOCKED link1 DIRECT_USER_CONFIRMATION_REQUIRED/)
+  assert.match(prompt, /An ACK alone does not complete/)
+  assert.throws(() => connectionPrompt({ ...one, session: 'bad\ninstruction' }), /INVALID_CONNECTION_REQUEST/)
 })
 
 test('transport acceptance is distinct from an actual reply and cannot grant tool or merge approval', () => {
@@ -86,6 +100,45 @@ const waitFor = async fn => {
   while (Date.now() < until) { const found = await fn(); if (found) return found; await pause(100) }
   throw new Error('condition timed out')
 }
+
+test('handoffs time out visibly until exact fresh progress appears, independently of a live receiver', async () => fixture(async (board, dir) => {
+  const client = boardClient(board.address)
+  const request = { id: 'link1', agent: 'antigravity', session: 'native1', surface: 'Synthetic CLI', timeoutMs: 1000 }
+  const progress = updated => `## Synthetic\n<!-- auto session=12345678 agent=antigravity state=working updated=${new Date(updated).toISOString()} resume=native1 -->\n### Fixture\n- [~] Explicit report\n<!-- /auto session=12345678 -->\n`
+  const old = Date.now() - 60000
+  writeFileSync(join(dir, 'progress.md'), progress(old))
+  const first = await client.expect(request)
+  assert.deepEqual(await client.expect(request), first)
+  assert.equal((await board.call('/api/messages/expect', { ...request, approve: true })).body.error, 'UNKNOWN_FIELD')
+  assert.equal((await board.call('/api/messages/expect', request, { origin: new URL(board.address).origin })).status, 403)
+  assert.equal((await board.call('/api/messages/expect', { ...request, session: 'native2' })).body.error, 'ID_CONFLICT')
+  let row = (await board.call('/api/board')).body.messaging.sessions[0]
+  assert.equal(row.status, 'waiting'); assert.equal(row.progress, true); assert.equal(row.receiving, false)
+  const receiver = await client.attach({ agent: request.agent, session: request.session, surface: 'Synthetic CLI', scope: 'session', turn: 'session', verify: async () => true, deliver: async message => 'ACK ' + message.id })
+  try {
+    await client.send({ id: 'setup1', target: receiver.id, turn: 'session', text: 'Synthetic setup request' })
+    await waitFor(async () => (await board.call('/api/board')).body.messaging.messages[0]?.status === 'acknowledged')
+    row = (await board.call('/api/board')).body.messaging.sessions[0]
+    assert.equal(row.status, 'timed_out'); assert.equal(row.receiving, true)
+    writeFileSync(join(dir, 'progress.md'), progress(Date.now()).replace('resume=native1', 'resume=native10'))
+    assert.equal((await board.call('/api/board')).body.messaging.sessions[0].status, 'timed_out')
+    writeFileSync(join(dir, 'progress.md'), progress(Date.now()))
+    assert.equal((await board.call('/api/board')).body.messaging.sessions[0].status, 'reported')
+  } finally { await receiver.close() }
+  row = (await board.call('/api/board')).body.messaging.sessions[0]
+  assert.equal(row.status, 'reported'); assert.equal(row.receiving, false)
+  // No expectation or live receiver survives a board restart as a false connection.
+  await board.close(); Object.assign(board, await start(dir))
+  assert.deepEqual((await board.call('/api/board')).body.messaging.sessions, [])
+}))
+
+test('a live receiver without a progress card is visible and disappears on disconnect', async () => fixture(async board => {
+  const receiver = await boardClient(board.address).attach({ agent: 'antigravity', session: 'native1', surface: 'Synthetic owned stream', scope: 'session', turn: 'session', verify: async () => true, deliver: async () => '' })
+  const row = (await board.call('/api/board')).body.messaging.sessions[0]
+  assert.equal(row.agent, 'antigravity'); assert.equal(row.progress, false); assert.equal(row.receiving, true)
+  await receiver.close()
+  assert.deepEqual((await board.call('/api/board')).body.messaging.sessions, [])
+}))
 
 test('the served message API authenticates connectors and persists claims across a server restart', async () => fixture(async (board, dir) => {
   const registration = { agent: 'codex', session: 'synthetic-session', turn: 'turn1', surface: 'Synthetic adapter' }

@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- **Observe connection handoffs instead of treating sends as completion.** A bounded
+  local observation waits for an exact newer progress report, shows a timeout with
+  recovery guidance, and never treats a relay claim or ACK as authorization. A status
+  area distinguishes progress records from live receivers, including receivers with
+  no progress card. It adds no send picker or copy-id button. Requests are ephemeral
+  and never retry or change host settings. Tests: `a connection observation requires
+  one exact newer report, never a relay claim or ACK`, `handoffs time out visibly until
+  exact fresh progress appears, independently of a live receiver`, `a live receiver
+  without a progress card is visible and disappears on disconnect`.
+
 - **Receive messages through an owned Antigravity CLI stream.** An adapter can bind
   the host's initialized native conversation to the local message hub without
   starting or resuming a process. It requires a fresh user-input step and the next

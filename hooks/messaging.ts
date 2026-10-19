@@ -14,6 +14,21 @@ export type Message = {
 }
 export type MessageState = { messages: Message[] }
 
+// Observation is not an authorization token. Only an exact, newer progress report
+// satisfies a handoff; a transport acceptance or even an ACK cannot do so.
+export type ProgressBinding = { agent: string; session: string; updated: number }
+export type SessionExpectation = {
+  id: string; agent: string; session: string; surface: string
+  created: number; deadline: number; baseline: number; observed: number | null
+}
+export const observeSession = (one: SessionExpectation, reports: readonly ProgressBinding[], now: number): SessionExpectation => {
+  const matches = reports.filter(report => report.agent === one.agent && report.session === one.session)
+  if (one.observed !== null || matches.length !== 1) return one
+  const updated = matches[0]!.updated
+  return Number.isFinite(updated) && updated > one.baseline && updated >= Math.floor(one.created / 1000) * 1000 && updated <= now
+    ? { ...one, observed: updated } : one
+}
+
 export const messageText = (value: unknown, max = 8000): string => {
   if (typeof value !== 'string' || !value.trim() || value.length > max || value.includes('\0')) throw new Error('INVALID_TEXT')
   return value

@@ -517,6 +517,7 @@ const ping = async (running: Running, waitMs = 1500): Promise<Record<string, unk
 const serveChild = (): void => {
   startServer({
     messagesDirectory: flag('--messages-dir'),
+    reports: () => parseProgress(read(path)).flatMap(project => project.tasks.flatMap(task => task.auto === null ? [] : [{ agent: task.auto.agent, session: task.auto.resume ?? task.auto.session, updated: task.auto.updated }])),
     s,
     port: Number(flag('--port') ?? 0) || 0,
     ping: { path, built, messagesDirectory: flag('--messages-dir') ? resolve(flag('--messages-dir')!) : null },

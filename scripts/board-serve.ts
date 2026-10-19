@@ -19,9 +19,11 @@ import { lanAddress, localHosts, pagePolicy, requestProblem, sendKey, sendPlan, 
 import type { SendPlan } from '../hooks/serve'
 import type { AgentTarget, View } from '../hooks/view'
 import { createMessaging } from './board-messaging'
+import type { ProgressBinding } from '../hooks/messaging'
 
 export type ServeOptions = {
   messagesDirectory?: string
+  reports?: () => ProgressBinding[]
   s: Strings
   port: number
   // What the server answers a second `--serve` with, so it can tell it is the same board.
@@ -344,7 +346,7 @@ export const startServer = (o: ServeOptions): void => {
       if (url.pathname === '/api/board') {
         // A file the board cannot read is named on the page, which would otherwise say it is offline.
         try {
-          const state = isLan ? undefined : messaging?.snapshot(Date.now())
+          const state = isLan ? undefined : messaging?.snapshot(Date.now(), o.reports?.())
           return json(res, 200, { model: serveModel(o.view(), o.pending(), o.s, sending, isLan, state), replies: [...replies.values()], messaging: isLan ? undefined : state ?? { enabled: false, connections: [], messages: [] }, now: Date.now() })
         } catch (error) {
           const note = o.failure(error, isLan)
@@ -363,7 +365,7 @@ export const startServer = (o: ServeOptions): void => {
       const action = url.pathname.slice('/api/messages/'.length)
       // A browser can send a message, but cannot impersonate a receiving host adapter.
       if (action !== 'send' && req.headers.origin !== undefined) return json(res, 403, {})
-      try { return json(res, 200, messaging.act(action, body, Date.now())) }
+      try { return json(res, 200, messaging.act(action, body, Date.now(), action === 'expect' ? o.reports?.() : undefined)) }
       catch (error) { return json(res, 409, { error: error instanceof Error ? error.message : 'MESSAGE_FAILED' }) }
     }
     // A press that met a file the board could not read or write is answered with why; any other
