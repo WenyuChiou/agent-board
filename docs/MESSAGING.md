@@ -155,3 +155,54 @@ a read-only sandbox and synthetic input, after approval of its exact server/thre
 binding. It did not use or inspect an existing private conversation. Both test servers
 were stopped afterward. This proves the exclusive-owner app-server layer; it is not a
 CLI, desktop or dot acceptance result, nor proof that all agents install a receiver.
+
+## Antigravity exclusive-owner CLI stream
+
+An application that already owns an initialized Antigravity CLI NDJSON stream can
+import `attachAntigravitySession` from `scripts/antigravity-session-connector.mjs`.
+The native protocol is documented in [Google's headless mode guide](https://antigravity.google/docs/cli/headless/).
+It emits one `init` with the actual `conversation_id`, a native `user_input` step for
+each prompt, and a final `result` with a cumulative `num_turns` counter.
+
+```js
+const receiver = await attachAntigravitySession({
+  boardUrl: privateBoardUrl,
+  transport,
+  session: owner.nativeConversationId,
+  state: () => ({
+    session: owner.nativeConversationId,
+    status: owner.status,
+    turns: owner.completedNativeTurns,
+    step: owner.lastNativeStepIndex,
+  }),
+  verifyOwner: candidate => candidate === transport && owner.isExclusiveAndConnected(),
+  surface: 'Antigravity owned CLI stream',
+})
+```
+
+The owner must observe the actual native `init` before attaching. Before its first
+turn, the counter is `0` and last step index is `-1`. It must update state from native
+events before notifying adapter listeners. `transport.listen(callback)` returns an
+unsubscribe function; `transport.write(object)` writes one NDJSON object into that
+same already-owned stdin stream. The adapter sends only a `user` message and never
+answers a permission request. Never supply a guessed conversation id, scan saved
+conversations or share ownership with an interactive terminal/editor.
+
+The CLI's observed command supports `--input-format stream-json --output-format
+stream-json --mode plan --sandbox`. An acceptance harness may launch it in an empty
+disposable workspace without sending stdin, verify the native id/PID/review mode,
+and ask for permission before the first model prompt. Attaching this library starts
+no process, resumes no conversation, reads no credentials and changes no settings.
+
+Each delivery requires an idle owner, a fresh matching native user-input step, and
+the next matching `num_turns` result containing the exact message-id ACK. An old or
+foreign result cannot acknowledge it. A valid receipt retains a bounded response
+body after the ACK so task status can be displayed. Failed/missing ACKs remain
+uncertain without replay. Disconnection or another `init` removes availability;
+ordinary model text cannot approve tools or merges.
+
+This is an owned CLI-stream adapter, not attachment to an arbitrary already-open
+Antigravity editor UI or TUI. Synthetic tests and observing a real zero-prompt
+native `init` are not a real delivery result. A native ACK still requires a separate
+explicitly approved disposable-session test. No permanent auto-install or host-wide
+discovery is claimed by this adapter.

@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+- **Receive messages through an owned Antigravity CLI stream.** An adapter can bind
+  the host's initialized native conversation to the local message hub without
+  starting or resuming a process. It requires a fresh user-input step and the next
+  native result counter before recording an ACK, keeps a bounded response body,
+  ignores permission requests and removes availability on reinitialization. It
+  does not attach to existing editor UIs or claim automatic installation.
+  Tests: `an owned Antigravity stream requires native input and the next matching
+  result before its ACK`, `an Antigravity stream refuses a busy, foreign or
+  unverified native owner`, `an Antigravity response without its ACK stays
+  uncertain and is never replayed`.
+
 - **Keep native ids on independent progress cards.** Local reporters now preserve
   their validated full native session id in `resume`, while the block retains its
   short owner-hash id. An exact live receiver can therefore match an installed

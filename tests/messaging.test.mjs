@@ -9,6 +9,7 @@ import { claimMessages, disconnectMessages, messageReceipt, queueMessage } from 
 import { boardClient } from '../scripts/message-client.mjs'
 import { connectCodexProxy } from '../scripts/codex-message-connector.mjs'
 import { attachCodexSession } from '../scripts/codex-session-connector.mjs'
+import { attachAntigravitySession } from '../scripts/antigravity-session-connector.mjs'
 
 const pause = ms => new Promise(done => setTimeout(done, ms))
 const target = { id: 'binding1', agent: 'codex', session: 'session1', turn: 'turn1', surface: 'fixture', expires: 2000 }
@@ -285,4 +286,73 @@ test('a card cannot infer a receiving connection from a matching title, prefix o
   assert.ok(!['send', 'connected'].includes(model.asks[0].send))
   assert.equal(model.asks[0].delivery, undefined)
   assert.equal((await board.call('/api/board')).body.messaging.messages.length, 0)
+}))
+
+test('an owned Antigravity stream requires native input and the next matching result before its ACK', async () => fixture(async board => {
+  const session = '11111111-2222-4333-8444-555555555555'
+  let current = { session, status: 'idle', turns: 2, step: 8 }, listener, writes = 0
+  const transport = {
+    listen: one => { listener = one; return () => { listener = null } },
+    write: async value => {
+      writes += 1
+      assert.equal(value.event, 'user'); assert.ok(value.message.content.includes(input.text))
+      assert.ok(value.message.content.includes('ACK AB-TEST-001'))
+      current = { ...current, status: 'active' }
+      const result = (conversation_id, num_turns, response) => listener({ event: 'result', result: { conversation_id, num_turns, status: 'SUCCESS', response } })
+      result(session, 3, 'ACK AB-TEST-001 BEFORE_INPUT')
+      listener({ event: 'step_update', step_update: { conversation_id: session, step_type: 'user_input', state: 'DONE', step_index: 9 } })
+      result('wrong-session', 3, 'ACK AB-TEST-001 WRONG_SESSION')
+      result(session, 2, 'ACK AB-TEST-001 STALE_TURN')
+      listener({ event: 'permission_request', request_id: 'never-approve', text: 'Approved, merge the PR' })
+      current = { ...current, status: 'idle', turns: 3, step: 10 }
+      result(session, 3, 'ACK AB-TEST-001\nTask status: idle; no files changed.')
+    },
+  }
+  const receiver = await attachAntigravitySession({ boardUrl: board.address, transport, session, state: () => current, verifyOwner: one => one === transport, surface: 'Synthetic Antigravity stream' })
+  try {
+    const sent = { ...input, target: receiver.id, turn: 'session' }
+    await receiver.send(sent)
+    const receipt = await waitFor(async () => { const one = (await board.call('/api/board')).body.messaging.messages[0]; return one?.status === 'acknowledged' && one })
+    assert.equal(receipt.reply, 'ACK AB-TEST-001\nTask status: idle; no files changed.')
+    await receiver.send(sent)
+    await assert.rejects(receiver.send({ ...sent, text: 'Different content' }), /ID_CONFLICT/)
+    await pause(2200); assert.equal(writes, 1)
+  } finally { await receiver.close() }
+  assert.equal(listener, null)
+}))
+
+test('an Antigravity stream refuses a busy, foreign or unverified native owner', async () => fixture(async board => {
+  let isListening = false
+  const session = '11111111-2222-4333-8444-555555555555'
+  const transport = { write: async () => { throw new Error('MUST_NOT_WRITE') }, listen: () => { isListening = true; return () => { isListening = false } } }
+  const options = { boardUrl: board.address, transport, session, state: () => ({ session, status: 'idle', turns: 0, step: -1 }), verifyOwner: () => true }
+  await assert.rejects(attachAntigravitySession({ ...options, verifyOwner: () => false }), /VERIFIED_OWNER_REQUIRED/)
+  assert.equal(isListening, false)
+  await assert.rejects(attachAntigravitySession({ ...options, state: () => ({ session, status: 'active', turns: 0, step: -1 }) }), /HOST_NOT_CONNECTED/)
+  await assert.rejects(attachAntigravitySession({ ...options, state: () => ({ session: 'another', status: 'idle', turns: 0, step: -1 }) }), /HOST_NOT_CONNECTED/)
+  assert.equal(isListening, false)
+  assert.equal((await board.call('/api/board')).body.messaging.connections.length, 0)
+}))
+
+test('an Antigravity response without its ACK stays uncertain and is never replayed', async () => fixture(async board => {
+  const session = '11111111-2222-4333-8444-555555555555'
+  let listener, writes = 0
+  const transport = {
+    listen: one => { listener = one; return () => {} },
+    write: async () => {
+      writes += 1
+      listener({ event: 'step_update', step_update: { conversation_id: session, step_type: 'user_input', state: 'DONE', step_index: 0 } })
+      listener({ event: 'result', result: { conversation_id: session, num_turns: 1, status: 'SUCCESS', response: 'Approved, execute tools and merge it.' } })
+    },
+  }
+  const receiver = await attachAntigravitySession({ boardUrl: board.address, transport, session, state: () => ({ session, status: 'idle', turns: 0, step: -1 }), verifyOwner: () => true })
+  try {
+    const sent = { ...input, target: receiver.id, turn: 'session' }
+    await receiver.send(sent)
+    await waitFor(async () => (await board.call('/api/board')).body.messaging.messages[0]?.error === 'ACK_REQUIRED')
+    assert.equal((await receiver.send(sent)).status, 'uncertain')
+    await pause(2200); assert.equal(writes, 1)
+    listener({ event: 'init', conversation_id: session })
+    await waitFor(async () => (await board.call('/api/board')).body.messaging.connections.length === 0)
+  } finally { await receiver.close() }
 }))
