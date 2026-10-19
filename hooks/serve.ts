@@ -455,7 +455,6 @@ const PAGE_WORDS = [
   'serveArchive',
   'serveCopy',
   'serveCopyResume',
-  'copySessionId',
   'serveCopyCommand',
   'serveOpenLink',
   'answeredHide',
@@ -654,7 +653,7 @@ const PAGE_SCRIPT = String.raw`
     go.disabled = true;
     say(w('serveSending', agentName(delivery.agent)));
     return call('/api/act', { key: key, type: 'message', id: attempt.id, text: text, connection: delivery.id, turn: delivery.turn, session: session, asked: asked || '', fp: fp }).then(function (data) {
-      say(data.note || '', data.ok ? 'done' : 'alert');
+      say(data.ok ? '' : data.note || '', data.ok ? 'done' : 'alert');
       if (!data.ok) go.disabled = false;
       return data.ok;
     }, function () { say(w('messagesFailed'), 'alert'); go.disabled = false; return false; }).then(function (ok) { refresh(); return ok; });
@@ -728,7 +727,6 @@ const PAGE_SCRIPT = String.raw`
       actions.appendChild(node);
     });
     if (ask.command) actions.appendChild(button(w('serveCopyCommand'), function () { copy(ask.command); }));
-    if (ask.sessionId) actions.appendChild(button(w('copySessionId'), function () { copy(ask.sessionId); }));
     if (ask.reopen) actions.appendChild(button(w('serveCopyResume'), function () { copy(ask.reopen); }));
     if (ask.canHide) actions.appendChild(button(w('answeredHide'), function () { act(ask.key, 'hide'); }));
     if (ask.link && /^https:\/\//i.test(ask.link)) {

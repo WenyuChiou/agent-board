@@ -8,6 +8,8 @@
   retain their existing actions. There is no separate target picker, and an offline
   card in messaging mode cannot silently resume a saved CLI session. Both Codex
   adapters now include the message-id ACK instruction for ordinary card text.
+  The web card keeps Copy resume command and removes the extra Copy session ID
+  button. Its receipt carries delivery status without a stale queued toast after ACK.
   Tests: `an existing card sends only to its exact live receiver and preserves mark
   read and unhide`, `a card cannot infer a receiving connection from a matching title,
   prefix or another agent`.

@@ -263,6 +263,7 @@ test('an existing card sends only to its exact live receiver and preserves mark 
   await board.call('/api/messages/poll', { ...credentials, turn: 'turn1' })
   await board.call('/api/messages/receipt', { ...credentials, id: request.id, status: 'acknowledged', reply: 'ACK AB-TEST-001' })
   assert.equal((await board.call('/api/board')).body.model.asks[0].receipt.reply, 'ACK AB-TEST-001')
+  assert.equal((await board.call('/api/act', request)).body.note, 'Session replied with ACK')
   await board.call('/api/messages/disconnect', { ...credentials, turn: 'turn1' })
   const disconnected = (await board.call('/api/board')).body.model.asks[0]
   assert.ok(!['send', 'connected'].includes(disconnected.send)); assert.equal(disconnected.delivery, undefined)

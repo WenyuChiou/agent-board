@@ -2635,10 +2635,9 @@ test('every agent’s question says where to answer it and how to get back to th
     expect([seen.ask?.back, seen.ask?.sessionId, seen.ask?.reopen]).toEqual([STRINGS.en.noWayBack, null, null])
   }
   expect(html).toContain(STRINGS['zh-TW'].noWayBack)
-  // The page's script and words carry the copy buttons.
-  expect(servePage(STRINGS.en, 'n')).toContain("copy(ask.sessionId)")
+  // The web card keeps the actionable resume command without another id-only button.
+  expect(servePage(STRINGS.en, 'n')).not.toContain("copy(ask.sessionId)")
   expect(servePage(STRINGS.en, 'n')).toContain("copy(ask.reopen)")
-  expect(pageWords(STRINGS.en).copySessionId).toBe('Copy session ID')
 
   // Ended, a session whose agent reopens one by id offers that command, in its own folder.
   const ended = buildView(parseProgress(file.replaceAll('state=waiting', 'state=ended')), [], null, now, 0, {}, STRINGS.en).active

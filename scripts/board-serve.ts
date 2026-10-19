@@ -377,7 +377,9 @@ export const startServer = (o: ServeOptions): void => {
           if (!messaging || isLan) return json(res, 403, {})
           try {
             const receipt = messaging.act('send', { id: body.id, target: action.connection.id, turn: action.connection.turn, text: action.text }, Date.now())
-            return json(res, 200, { note: o.s.messagesQueued, receipt })
+            const notes = { queued: o.s.messagesQueued, uncertain: o.s.messagesUncertain, accepted: o.s.messagesAccepted, acknowledged: o.s.messagesAcknowledged, rejected: o.s.messagesRejected }
+            const note = 'status' in receipt ? notes[receipt.status] : o.s.messagesFailed
+            return json(res, 200, { note, receipt })
           } catch (error) { return json(res, 409, { note: error instanceof Error && error.message === 'ID_CONFLICT' ? o.s.messagesConflict : o.s.messagesFailed }) }
         }
         if (action.type === 'send') {
