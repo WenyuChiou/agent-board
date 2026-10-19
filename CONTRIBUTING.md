@@ -51,7 +51,7 @@ For optional OpenCode SDK/DeepSeek loader checks, use the pinned packages and di
 
 ## Images
 
-The READMEs share one English screenshot of the current interactive board, labelled synthetic. Keep it short; there is no gallery in the guides. Historical assets remain in `docs/images/`. Generated SVGs come from `bun docs/preview/render.ts`; never hand-edit them. `node docs/preview/png.mjs` renders social previews; its fonts/tool requirements are documented in the preview sources. A synthetic render is not native acceptance evidence. Keep bearer URLs, conversations and private identifiers out of public images.
+Keep the original README tour/flow SVGs and dark terminal illustration. The bottom pair uses English Codex/Antigravity board screenshots labelled synthetic. Do not add a gallery to the guides. Historical assets remain in `docs/images/`. Generated SVGs come from `bun docs/preview/render.ts`; never hand-edit them. `node docs/preview/png.mjs` renders social previews; its fonts/tool requirements are documented in the preview sources. A synthetic render is not native acceptance evidence. Keep bearer URLs, conversations and private identifiers out of public images.
 
 ## Releases
 

@@ -1182,7 +1182,7 @@ test('a second press on the page for the first of two hand-kept tasks with the s
 
 // The page's own script run against a minimal DOM, to see what it keeps across a redraw and what
 // it sends. `redraw` hands it the next board, as the page's next poll would get it.
-const pageDom = async (html, first, { post, confirm } = {}) => {
+const pageDom = async (html, first, { post, confirm, messaging } = {}) => {
   const nodes = new Map()
   class Element {
     constructor(tag) {
@@ -1207,6 +1207,13 @@ const pageDom = async (html, first, { post, confirm } = {}) => {
     }
     removeChild(child) {
       this.childNodes = this.childNodes.filter(one => one !== child)
+    }
+    insertAdjacentElement(position, child) {
+      assert.equal(position, 'afterend')
+      get('main').appendChild(child)
+    }
+    remove() {
+      get('main').removeChild(this)
     }
     setAttribute(name, value) {
       this.attributes[name] = value
@@ -1258,7 +1265,7 @@ const pageDom = async (html, first, { post, confirm } = {}) => {
     },
     clearTimeout: () => {},
     fetch: async (target, options) => {
-      if (target === '/api/board') return { ok: true, json: async () => ({ model, now: 1 }) }
+      if (target === '/api/board') return { ok: true, json: async () => ({ model, now: 1, messaging }) }
       requests.push({ path: target, body: JSON.parse(options.body) })
       if (post) return post(requests.at(-1))
       return { ok: true, json: async () => ({ note: '' }) }
@@ -1280,6 +1287,31 @@ const pageDom = async (html, first, { post, confirm } = {}) => {
     },
   }
 }
+
+test('the page keeps actionable progress delays without connection inventory or native identifiers', async () => {
+  const model = { counts: { waiting: 0, active: 0, due: 0, today: 0 }, asks: [], hidden: [], idle: [], groups: [], turns: [], recent: [] }
+  for (const lang of ['en', 'zh-TW', 'zh-CN']) {
+    const board = await page('', {}, ['--lang', lang])
+    try {
+      const html = (await board.call('GET', `/?t=${board.token}`)).body
+      const s = JSON.parse(html.match(/<script[^>]*id="words"[^>]*>([\s\S]*?)<\/script>/)[1])
+      const sessions = [
+        { agent: 'codex', status: 'connected', progress: false, receiving: true, session: 'private-native-session', surface: 'Private transport' },
+        { agent: 'antigravity', status: 'waiting', progress: false, receiving: true, session: 'private-native-session' },
+        { agent: 'opencode', status: 'timed_out', progress: true, receiving: false, session: 'private-native-session' },
+      ]
+      const dom = await pageDom(html, model, { messaging: { sessions } })
+      const shown = dom.node('main').textContent
+      assert.ok(shown.includes(s.sessionsWaiting), shown)
+      assert.ok(shown.includes(s.sessionsTimedOut), shown)
+      assert.match(shown, /antigravity/)
+      assert.doesNotMatch(shown, /codex|receiv|收訊|接收|連線|连接|private-native-session|Private transport/i)
+      sessions.splice(0)
+      await dom.redraw(model)
+      assert.equal(dom.node('main').textContent, '')
+    } finally { await board.close() }
+  }
+})
 
 test('the relay page compares unknown-clock reports before retrying and keeps a declined paste', { timeout: 30_000 }, async () => {
   const board = await page()

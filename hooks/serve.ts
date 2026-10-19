@@ -444,11 +444,9 @@ export const requestProblem = (request: PageRequest, hosts: readonly string[], t
 
 // The words the page's script fills in itself, each with its blanks as \u0001 and \u0002.
 const PAGE_WORDS = [
-  'messagesTitle', 'messagesHint', 'messagesDisabled', 'messagesNone', 'messagesChoose', 'messagesSessionScope',
   'messagesPlaceholder', 'messagesSend', 'messagesQueued', 'messagesUncertain',
   'messagesAccepted', 'messagesAcknowledged', 'messagesRejected', 'messagesFailed', 'messagesConflict', 'messagesTimeout',
-  'sessionsTitle', 'sessionsHint', 'sessionsWaiting', 'sessionsReported', 'sessionsTimedOut',
-  'sessionsReceiving', 'sessionsNotReceiving', 'sessionsProgress', 'sessionsNoProgress',
+  'sessionsTitle', 'sessionsWaiting', 'sessionsTimedOut',
   'countWaiting',
   'countActive',
   'countDue',
@@ -864,13 +862,14 @@ const PAGE_SCRIPT = String.raw`
       if (text !== last) {
         last = text; render(data.model);
         if (presence) { presence.remove(); presence = null; }
-        var sessions = (data.messaging && data.messaging.sessions || []).filter(function (one) { return !one.progress || one.status === 'waiting' || one.status === 'timed_out'; });
+        // Show actionable progress delays, never transport inventory or native identifiers.
+        var sessions = (data.messaging && data.messaging.sessions || []).filter(function (one) { return one.status === 'waiting' || one.status === 'timed_out'; });
         if (sessions.length) {
           presence = el('section', 'card');
           add(presence, el('h2', '', w('sessionsTitle')));
           sessions.forEach(function (one) {
-            var state = one.status === 'reported' ? w('sessionsReported') : one.status === 'timed_out' ? w('sessionsTimedOut') : one.status === 'waiting' ? w('sessionsWaiting') : '';
-            add(presence, add(el('div'), el('div', 'where', agentName(one.agent)), el('div', one.status === 'timed_out' ? 's-blocked small' : 'small', [state, w(one.receiving ? 'sessionsReceiving' : 'sessionsNotReceiving'), one.progress ? '' : w('sessionsNoProgress')].filter(Boolean).join(' · '))));
+            var state = one.status === 'timed_out' ? w('sessionsTimedOut') : w('sessionsWaiting');
+            add(presence, add(el('div'), el('div', 'where', agentName(one.agent)), el('div', one.status === 'timed_out' ? 's-blocked small' : 'small', state)));
           });
           board.insertAdjacentElement('afterend', presence);
         }
