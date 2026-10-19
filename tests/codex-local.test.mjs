@@ -131,6 +131,7 @@ test('Codex explicit reports bind the current thread and preserve other blocks b
   assert.equal(first.status, 0, first.stderr)
   assert.equal(JSON.parse(first.stdout).session, session)
   assert.ok(readFileSync(f.progress, 'utf8').startsWith(foreign))
+  assert.ok(readFileSync(f.progress, 'utf8').includes(` resume=${session} `))
   assert.equal(f.report('waiting', ['- [?] Need a decision']).status, 0)
   assert.equal((readFileSync(f.progress, 'utf8').match(/source=codex-local/g) ?? []).length, 1)
   assert.ok(f.command([]).stdout.includes('Task'))

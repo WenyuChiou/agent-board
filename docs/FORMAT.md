@@ -160,6 +160,13 @@ An attribute is `name=value`, where the name is letters, digits, `_` or `-`, and
 | `source` | No | `turns` when steps were summed up from session turns; `codex-local`, `cursor-local` or `opencode-local` for the independent local reporter. Readers show the block the same way. |
 | `owner` | No | Full SHA-256 of `<agent>:<full-session-id>` for a local reporter. Prevents accidental short-id collisions and pasted replacements of its block; it is not an authentication credential. Older readers ignore it. |
 
+The independent local reporter keeps its hash prefix in `session` and writes its own
+validated full native id in `resume`. Live receivers match that full id and agent,
+not the hash prefix or a task title. This identifies the report; it does not register
+a receiving connection or prove that lifecycle hooks ran. The reporter adds no `dir`
+or permission to start another process. Ordinary hand-written agent blocks still
+leave these local bindings to the host integration.
+
 ### Body
 
 Between the markers, in this order:

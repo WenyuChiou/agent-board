@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- **Keep native ids on independent progress cards.** Local reporters now preserve
+  their validated full native session id in `resume`, while the block retains its
+  short owner-hash id. An exact live receiver can therefore match an installed
+  reporter's card. Invalid ids do not acquire a binding; no directory or receiving
+  lease is invented. This does not establish automatic desktop discovery.
+  Tests: `independent local progress cards match only their full native session
+  receiver`, `a local report with an invalid native id never invents a resume binding`.
+
 - **Reply through the existing card.** A live receiver changes that session's existing
   Copy reply button to Send, using its full native session id and agent. The same card
   shows queue and ACK receipts; disconnecting restores Copy. Mark read and show again

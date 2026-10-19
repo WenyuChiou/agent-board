@@ -1,5 +1,6 @@
 import type { Strings } from './i18n'
 import type { LocalAgent } from './local-agents'
+import { RESUME } from './parse'
 
 export type CodexReport = {
   session: string
@@ -73,7 +74,9 @@ export const putCodexBlock = (text: string, report: CodexReport, owner: string):
   if (!/^[a-f0-9]{64}$/.test(owner)) throw new Error('INVALID_OWNER')
   const id = owner.slice(0, 8)
   const agent = report.agent ?? 'codex'
-  const marker = `<!-- auto session=${id} agent=${agent} source=${agent}-local owner=${owner} state=${report.state} updated=${report.updated} -->`
+  // The block id is a hash prefix; only the host's full id can match a live receiver.
+  const resume = RESUME.test(report.session) ? ` resume=${report.session}` : ''
+  const marker = `<!-- auto session=${id} agent=${agent} source=${agent}-local owner=${owner} state=${report.state} updated=${report.updated}${resume} -->`
   const eol = text.includes('\r\n') ? '\r\n' : '\n'
   const block = [marker, `### ${report.title}`, ...report.steps, `<!-- /auto session=${id} -->`].join(eol)
   const start = new RegExp(`^<!-- auto [^\\r\\n]*\\bsession=${id}(?: | -->)[^\\r\\n]*`, 'gm')

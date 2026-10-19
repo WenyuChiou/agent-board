@@ -6,6 +6,7 @@ import { boardItems, boardKey, boardScreen, boardText, CHAT_MAX, chatText, doneT
 import { addManualTask, isArchivable, manualTaskCount, mergeBlock, renderAutoBlock, setManualStep, takeArchivable, takeManualDone, takeTask, upsertAutoBlock } from '../hooks/blocks'
 import { agentHooks, boardCommands, boardScript, COLLISION, DELETE, generatedFile, isNodeSupported, isReleased, isReleasedBoard, isSetupState, isWindowsHost, NODE_MIN, nodeVersionOf, openclawPlugin, openclawPrinted, openclawSavedBy, openclawTooOld, PROBLEM_ARGS, readConfig, RELEASE_PATHS, reportCommand, reporterPs1, reporterSh, setupAgents, setupLines, withFlatHook, withGroupedHook, withHermesHooks, withoutHermesHooks, withoutOurHooks, withoutSection } from '../hooks/connect'
 import { dashboardHtml } from '../hooks/dashboard'
+import { codexReport, putCodexBlock } from '../hooks/codex'
 import { answerKey, blockId, CLAIM_MS, claimAction, isBoardAnswer, isBoardTurn, isInboxFile, isTakenFile, isTextLog, isTranscriptPath, keepInboxDone, keepInboxFailed, MAX_TRIES, promptKey, readClaim, readTurn, takenName, transcriptTail, turnsToDigest } from '../hooks/inbox'
 import { applyDigest, clearAsked, isAskingYou, isPersonsAnswer, isWork, lastQuestion, markAsked, parseDigest, replyData, requestData, turnTools } from '../hooks/digest'
 import { ciFinished, prFromGh, prWords } from '../hooks/github'
@@ -26,6 +27,30 @@ import { agentName, buildView, contextOf, handoffOf, replyHint, resumeCommand, r
 
 const NOW = Date.parse('2026-10-16T12:00:00.000Z')
 const SESSION = '2be48af2-6193-5040-aacc-e0546d6784f1'
+
+test('independent local progress cards match only their full native session receiver', () => {
+  for (const agent of ['codex', 'cursor', 'opencode'] as const) {
+    const owner = sha256(`${agent}:${SESSION}`)
+    const report = { ...codexReport(null, SESSION, { title: 'Native card binding', state: 'waiting', steps: ['- [?] Reply to this session?'] }, new Date(NOW).toISOString(), STRINGS.en), agent }
+    const text = putCodexBlock('', report, owner)
+    const view = buildView(parseProgress(text), [], null, NOW, 0, {}, STRINGS.en)
+    const connection = { id: 'fixture-receiver', agent, session: SESSION, surface: 'Synthetic owner', turn: 'session', scope: 'session' as const, expires: NOW + 15000 }
+    const online = serveModel(view, [], STRINGS.en, new Set(), false, { connections: [connection], messages: [] }).asks[0]
+    expect(online?.send).toBe('connected')
+    expect(online?.session).toBe(SESSION)
+    expect(online?.delivery?.id).toBe(connection.id)
+    const offline = serveModel(view, [], STRINGS.en, new Set(), false, { connections: [{ ...connection, session: owner.slice(0, 8) }], messages: [] }).asks[0]
+    expect(offline?.delivery).toBeUndefined()
+    expect(offline?.send).not.toBe('send')
+    expect(putCodexBlock(text, report, owner)).toBe(text)
+    expect(text).not.toContain(' dir=')
+  }
+})
+
+test('a local report with an invalid native id never invents a resume binding', () => {
+  const report = codexReport(null, 'invalid id with spaces', { title: 'Synthetic report', state: 'waiting', steps: ['- [?] Synthetic reply?'] }, new Date(NOW).toISOString(), STRINGS.en)
+  expect(putCodexBlock('', report, 'a'.repeat(64))).not.toContain(' resume=')
+})
 
 const PR: ProgressPr = {
   number: 12,
