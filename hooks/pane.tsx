@@ -13,7 +13,7 @@ import type { ProgressAnswer, ProgressStepStatus } from '../types'
 import type { Strings } from './i18n'
 import { askColor, stepColor, toneColor } from './palette'
 import type { Palette } from './palette'
-import { progressBar, replyHint, wayBackText } from './view'
+import { progressBar, replyHint } from './view'
 import type { Focus, PrView, StepRef, TaskRow, Tone, View, ViewStep, WaitingItem } from './view'
 
 // The pane's drawing, from the view and a set of actions; it never touches the engine,
@@ -50,8 +50,7 @@ export type PaneActions = {
   // An answer to one of this session's own questions, sent to Claude.
   answer: (item: WaitingItem, text: string) => void
   copyCommand: (item: WaitingItem, surface: RenderSurface) => void
-  // Another session's id, any agent's, so the person can find the session that asked.
-  copySessionId: (item: WaitingItem, surface: RenderSurface) => void
+  copyAskedResume: (item: WaitingItem, surface: RenderSurface) => void
   // Hides a question answered in its own session, on this machine only; sends nothing.
   hide: (item: WaitingItem) => void
   unhide: (item: WaitingItem) => void
@@ -189,7 +188,6 @@ export const drawPane = (ui: PaneUi, model: PaneModel, actions: PaneActions): Re
     if (item.where === 'other') {
       const run = item.kind === 'do' ? item.command : null
       const open = item.kind === 'review' ? item.link : null
-      const sessionId = item.sessionId
       const hint = replyHint(item, s)
       return (
         <Box flexDirection="column">
@@ -203,12 +201,10 @@ export const drawPane = (ui: PaneUi, model: PaneModel, actions: PaneActions): Re
           )}
           {open !== null && Link !== null && <Link href={open} label={s.openLink} />}
           {muted(hint.where)}
-          {muted(wayBackText(hint))}
-          {hint.reopen !== null && <Text color={palette.accent} wrap="wrap">{`$ ${hint.reopen}`}</Text>}
-          {sessionId !== null && (
+          {hint.reopen !== null && (
             <Box marginTop={1}>
-              <Button key={`${item.key}::id`} onPress={press => actions.copySessionId(item, press.surface)}>
-                {s.copySessionId}
+              <Button key={`${item.key}::resume`} onPress={press => actions.copyAskedResume(item, press.surface)}>
+                {s.copyResume}
               </Button>
             </Box>
           )}

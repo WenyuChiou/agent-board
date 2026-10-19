@@ -361,19 +361,17 @@ const sessionName = (id: string): string => {
 // The agent as the person knows it, in the words that tell them where to look.
 export const agentName = (agent: string): string => (agent === '' || agent === 'claude' ? 'Claude Code' : agent)
 
-// Where to answer another session's question, then how to get back to that session: its own id,
-// said plainly when it left none, and, where the agent's resume by id is known, the command on a
-// line of its own (a terminal is too narrow for both on one). `withCommand` false leaves the
-// command out (a phone on the local network gets neither the command nor its folder).
+// User-facing hints name tasks and agents. Exact ids stay in internal bindings and in the
+// resume command copied on demand. `withCommand` false omits it on the LAN page.
 export type ReplyHint = { where: string; back: string; note: string; reopen: string | null }
 export const replyHint = (item: WaitingItem, s: Strings, withCommand = true): ReplyHint => {
   if (item.where !== 'other') return { where: '', back: '', note: '', reopen: null }
   const reopen = withCommand && item.sessionId !== null ? item.reopen : null
 
   return {
-    where: s.replyElsewhere(item.task, item.session, item.agent),
-    back: item.sessionId === null ? s.noWayBack : s.wayBack(agentName(item.agent), item.sessionId),
-    note: reopen === null ? '' : s.reopenWhenClosed,
+    where: s.replyElsewhere(item.task, '', item.agent),
+    back: '',
+    note: '',
     reopen,
   }
 }

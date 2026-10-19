@@ -4,8 +4,7 @@ import { clip } from './mirror'
 import { askRole, DARK, LIGHT, stepRole, toneRole } from './palette'
 import type { Palette } from './palette'
 import type { Strings } from './i18n'
-import { replyHint, wayBackText } from './view'
-import type { Focus, ReplyHint, TaskRow, View, ViewStep, WaitingItem } from './view'
+import type { Focus, TaskRow, View, ViewStep, WaitingItem } from './view'
 
 // progress.html: the same view as the pane, as a page any browser keeps open in a window of
 // its own, beside progress.md. Built from the file and pending inbox turns, without a session's
@@ -56,9 +55,6 @@ const bar = (done: number, total: number): string => {
   return `<span class="bar"><span style="width:${percent}%;background:var(--${done === total && total > 0 ? 'done' : 'accent'})"></span></span>`
 }
 
-const wayBackHtml = (hint: ReplyHint): string =>
-  `<div class="quiet">${esc(wayBackText(hint))}</div>` + (hint.reopen === null ? '' : `<code>${esc(hint.reopen)}</code>`)
-
 const waitingItem = (item: WaitingItem, s: Strings): string =>
   `<div class="ask"><div><span class="chip" style="color:var(--${askVar(item.kind)})">${esc(s.chip(s.ask[item.kind]))}</span>` +
   `<b>${esc(item.text)}</b></div>` +
@@ -67,8 +63,7 @@ const waitingItem = (item: WaitingItem, s: Strings): string =>
   // A backticked word in another kind of question is a name, not something to run.
   (item.command === null || item.kind !== 'do' ? '' : `<code>${esc(item.command)}</code>`) +
   (item.link === null ? '' : `<a href="${esc(item.link)}">${esc(s.openLink)}</a>`) +
-  `<div class="quiet">${esc(item.where === 'manual' ? '' : s.replyElsewhere(item.task, item.session, item.agent))}${item.when === '' ? '' : ` · ${esc(item.when)}`}</div>` +
-  (item.where === 'other' ? wayBackHtml(replyHint(item, s)) : '') +
+  `<div class="quiet">${esc(item.where === 'manual' ? '' : s.replyElsewhere(item.task, '', item.agent))}${item.when === '' ? '' : ` · ${esc(item.when)}`}</div>` +
   '</div>'
 
 const row = (it: TaskRow, s: Strings, showProject: boolean): string => {
@@ -81,7 +76,6 @@ const row = (it: TaskRow, s: Strings, showProject: boolean): string => {
     `<span class="meta" style="color:var(--${toneVar(it.tone)})">${bar(it.done, it.total)} ${esc(meta.join(' · '))}</span></summary>` +
     (it.context === '' ? '' : `<p class="quiet">${esc(s.contextLine(it.context))}</p>`) +
     steps(it.steps) +
-    (it.resume === null ? '' : `<p class="quiet">${esc(s.copyResume)}</p><code>${esc(it.resume)}</code>`) +
     '</details>'
   )
 }

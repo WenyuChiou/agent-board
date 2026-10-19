@@ -258,9 +258,6 @@ export const ZH_CN: Strings = {
     const who = [session, agent].filter(part => part !== '').join('，')
     return `到“${task}”那个对话${who === '' ? '' : `（${who}）`}回复，这里回不了。`
   },
-  wayBack: (agent: string, id: string): string => `对话 ID ${id}：到 ${agent} 的对话列表找。`,
-  reopenWhenClosed: '那个对话关掉之后，可以用这行接回：',
-  noWayBack: '它没留下对话 ID，这里带不了你回去。',
   arrivedDone: '到了，完成',
   done: '完成',
   reply: '回复',
@@ -284,7 +281,6 @@ export const ZH_CN: Strings = {
   heldElsewhere: '另一个对话正在做。',
   takeOver: '接手做完',
   copyResume: '复制续接指令',
-  copySessionId: '复制对话 ID',
   answeredHide: '已回复，先隐藏',
   needsChanges: '要修改',
   showAgain: '重新显示',
@@ -340,8 +336,6 @@ export const ZH_CN: Strings = {
   answered: (text: string): string => `已回复 Claude：${text}`,
   commandOf: (step: string): string => `“${step}”要跑的指令`,
   resumeOf: (title: string): string => `回到“${title}”的指令，贴到终端执行`,
-  sessionIdOf: (title: string, agent: string, via: string | null): string =>
-    `“${title}”那个对话的 ID：拿去对照 ${agent} 的对话列表${via === null ? '' : `，关掉之后也可以用 ${via} 接回`}`,
   fileUnreadable: '读不到进度文件',
   dashStamp: (time: string): string => `更新于 ${time}`,
   dashInboxHint: '请回到该 agent 的对话里回复；这个页面不能发送回复。',
@@ -363,7 +357,6 @@ export const ZH_CN: Strings = {
   boardKeyTick: 'x 完成这步',
   boardKeyArchive: 'a 归档',
   boardKeyCopyCommand: 'c 复制命令',
-  boardKeyCopyId: 'c 复制对话 ID',
   boardKeyCopyResume: 'c 复制续接命令',
   boardKeyConfirm: 'y／n 复制回答',
   boardKeyOptions: (n: number): string => `1–${n} 复制答案`,

@@ -75,7 +75,7 @@ node scripts/setup-agent.mjs --apply
 <details>
 <summary>Claude Code 原生側欄（選用）</summary>
 
-需要 Claude Code 2.1.301 以上。安裝外掛後開啟 Claude Code，輸入 `/progress`；其他 host 可獨立使用互動看板。
+需要 Claude Code 2.1.287 以上；離線 CI 使用 2.1.301。安裝外掛後開啟 Claude Code，輸入 `/progress`；其他 host 可獨立使用互動看板。
 
 ```sh
 claude plugin marketplace add WenyuChiou/agent-board

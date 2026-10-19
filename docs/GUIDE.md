@@ -51,6 +51,8 @@ Add `--lang en`, `zh-TW` or `zh-CN` to select the board language. Windows/custom
 
 Questions appear first. Expand a task for its steps. You can tick manual steps, archive, paste a valid progress block, copy a reply or resume command, mark a question read and show it again. Mark read only changes the local hidden list; it sends nothing. The question returns when its words change. There is no general task-editing form.
 
+The pane, terminal and pages identify work by task and agent. Connection inventory and session ids stay out of the display; supported resume commands are copied only on request.
+
 Pasted reports keep their source time. Repeats do nothing; older or equal-time conflicting reports are refused. Invalid or future clocks need correction. An existing report with an unknown clock requires comparing both copies before replacement. [Remote reporting](REMOTE_REPORTERS.md) explains recovery.
 
 A card offers Send only when its exact session has a live adapter. Otherwise use Copy or open the agent yourself. [Messaging](MESSAGING.md) explains adapter setup, actual replies, duplicates, conflicts and timeouts. Setup does not attach receivers to arbitrary existing chats. Ordinary replies cannot approve tools, trust changes or PR merges.

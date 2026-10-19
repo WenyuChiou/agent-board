@@ -2382,9 +2382,9 @@ export const register: Register = (on, options) => {
         if (item.command === null) return
         showCopied($, s.commandOf(item.text), item.command, surface).catch(() => undefined)
       },
-      copySessionId: (item, surface) => {
-        if (item.sessionId === null) return
-        showCopied($, s.sessionIdOf(item.task, agentName(item.agent), item.resumeVia), item.sessionId, surface).catch(() => undefined)
+      copyAskedResume: (item, surface) => {
+        if (item.reopen === null) return
+        showCopied($, s.resumeOf(item.task), item.reopen, surface).catch(() => undefined)
       },
       hide: item => {
         setAnswered($, item, true)

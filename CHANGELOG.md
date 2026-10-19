@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- **Keep session ids out of the native pane and terminal too.** Identify questions by task and agent, remove id-only clipboard actions, and copy the exact resume command only when requested. The read-only page omits resume internals. Tests: `every agent keeps exact resume bindings without showing session identifiers in board text`, `another session shows its task without ids and copies only an actionable resume command`.
+
 - **Keep connection internals off the progress board.** Show only actionable update waits/timeouts, without transport inventory or native session identifiers. Preserve Send, hide and restore. Test: `the page keeps actionable progress delays without connection inventory or native identifiers` (all three languages).
 - **Restore the original README layout.** Retain tour/flow SVGs and the dark terminal illustration, correct outdated setup/privacy/surface claims, and align English Codex/Antigravity board examples at the bottom in all three languages. Images use synthetic data and are separate from native acceptance evidence.
 

@@ -2587,15 +2587,15 @@ test('the terminal board, progress.html and the board page name the session that
   // A block written by hand under the AGENTS.md rule leaves no id: there is nothing to copy.
   expect(boardKey({ ...emptyBoardState, selected: codex }, 'c', items, STRINGS.en).action).toBeNull()
   const screen = boardScreen(view, [], { ...emptyBoardState, selected: claude }, STRINGS.en, { width: 120, isColor: false })
-  expect(screen).toContain(`Reply in the "Backfill the events" session (a1b2c3d4). Can't reply from here.`)
+  expect(screen).toContain(`Reply in the "Backfill the events" session. Can't reply from here.`)
   expect(screen).toContain('c copy resume command')
   const onCodex = boardScreen(view, [], { ...emptyBoardState, selected: codex }, STRINGS.en, { width: 120, isColor: false })
-  expect(onCodex).toContain(`Reply in the "Rename the export job" session (c9d8e7f6, codex). Can't reply from here.`)
+  expect(onCodex).toContain(`Reply in the "Rename the export job" session (codex). Can't reply from here.`)
   expect(onCodex).not.toContain('c copy session ID')
-  expect(onCodex).toContain(STRINGS.en.noWayBack)
+  expect(onCodex).not.toContain('c9d8e7f6')
 
   const html = dashboardHtml(view, STRINGS['zh-TW'], 'p', 'updated now')
-  expect(html).toContain('到「Backfill the events」那個對話（a1b2c3d4）回覆，這裡回不了。')
+  expect(html).toContain('到「Backfill the events」那個對話回覆，這裡回不了。')
   expect(html).not.toContain('到 data-pipeline 的對話')
   const page = serveModel(view, [], STRINGS['zh-CN']).asks.find(ask => ask.task === 'Backfill the events')
   expect(page?.info).toBe('到“Backfill the events”那个对话回复，这里回不了。')
@@ -2627,12 +2627,10 @@ test('a Claude Code block with no resume id offers its block id to copy only whe
   expect(boardKey({ ...emptyBoardState, selected: odd }, 'c', items, STRINGS.en).action).toBeNull()
   expect(boardScreen(view, [], { ...emptyBoardState, selected: odd }, STRINGS.en, { width: 120, isColor: false })).not.toContain('c copy session ID')
   // A block id alone does not reopen a session with claude --resume, so the note does not offer it.
-  expect(STRINGS.en.sessionIdOf('Backfill the events', 'Claude Code', null)).not.toContain('--resume')
-  expect(STRINGS.en.sessionIdOf('Backfill the events', 'Claude Code', 'claude --resume')).toContain('claude --resume')
   expect(view.waiting.map(item => item.resumeVia)).toEqual([null, null])
 })
 
-test('every agent’s question says where to answer it and how to get back to that session, or plainly that there is none, on every surface', () => {
+test('every agent keeps exact resume bindings without showing session identifiers in board text', () => {
   const at = '2026-10-17T08:40:00Z'
   const block = (session: string, agent: string, resume: string, title: string): string =>
     [
@@ -2690,40 +2688,35 @@ test('every agent’s question says where to answer it and how to get back to th
   }
   for (const [agent, id, name, via] of ids) {
     const seen = on(agent)
-    const back = STRINGS.en.wayBack(agentName(agent), id)
+    const back = ''
     const reopen = via === null ? null : `cd '/w/api' && ${via} ${id}`
     expect([agent, seen.item?.sessionId, seen.item?.resumeVia, seen.item?.reopen, seen.back]).toEqual([agent, id, via, reopen, back])
-    // The hint names the session as the agent's own list shows it.
+    // Internal bindings stay exact; user-facing hints use the task and agent.
     expect([agent, seen.item?.session]).toEqual([agent, name])
-    expect(seen.screen).toContain(back)
-    // On a terminal 80 wide the sentence may lose its end, but never the id.
-    expect(seen.narrow).toContain(`對話 ID ${id}：`)
-    // The whole command, said to work once that session is closed.
-    const said = reopen === null ? back : `${back} ${STRINGS.en.reopenWhenClosed}`
+    const said = ''
     expect(seen.item === undefined ? '' : wayBackText(replyHint(seen.item, STRINGS.en))).toBe(said)
     for (const screen of [seen.screen, seen.narrow]) {
-      if (reopen === null) expect(screen).not.toContain('$ ')
-      else expect(screen).toContain(`$ ${reopen}`)
+      expect(screen).not.toContain(id)
+      expect(screen).not.toContain('Session ID')
+      expect(screen).not.toContain('對話 ID')
     }
-    expect(seen.screen.includes(STRINGS.en.reopenWhenClosed)).toBe(reopen !== null)
-    // c copies the command where there is one, else the id.
-    expect(seen.copy).toEqual({ type: 'copy', text: reopen ?? id })
-    expect(seen.screen).toContain(reopen === null ? 'c copy session ID' : 'c copy resume command')
-    expect(html).toContain(STRINGS['zh-TW'].wayBack(agentName(agent), id))
-    if (reopen !== null) expect(html).toContain(`<code>${reopen.replaceAll('&', '&amp;')}</code>`)
+    expect(seen.copy).toEqual(reopen === null ? null : { type: 'copy', text: reopen })
+    expect(seen.screen.includes('c copy resume command')).toBe(reopen !== null)
+    expect(seen.screen).not.toContain('c copy session ID')
+    expect(html).not.toContain(id)
     expect([seen.ask?.back, seen.ask?.sessionId, seen.ask?.reopen]).toEqual([said, id, reopen])
-    // A phone on the local network gets the id, but neither the command nor its folder.
+    // Models retain exact metadata for binding; phones receive no executable command.
     const far = lan.asks.find(ask => (ask.agent || 'claude') === agent)
     expect([far?.back, far?.sessionId, far?.reopen]).toEqual([back, id, null])
   }
   for (const agent of none) {
     const seen = on(agent)
-    expect([agent, seen.item?.sessionId, seen.back]).toEqual([agent, null, STRINGS.en.noWayBack])
-    expect(seen.screen).toContain(STRINGS.en.noWayBack)
+    expect([agent, seen.item?.sessionId, seen.back]).toEqual([agent, null, ''])
+    expect(seen.screen).not.toContain('session ID')
     expect(seen.copy).toBeNull()
-    expect([seen.ask?.back, seen.ask?.sessionId, seen.ask?.reopen]).toEqual([STRINGS.en.noWayBack, null, null])
+    expect([seen.ask?.back, seen.ask?.sessionId, seen.ask?.reopen]).toEqual(['', null, null])
   }
-  expect(html).toContain(STRINGS['zh-TW'].noWayBack)
+  expect(html).not.toContain('對話 ID')
   // The web card keeps the actionable resume command without another id-only button.
   expect(servePage(STRINGS.en, 'n')).not.toContain("copy(ask.sessionId)")
   expect(servePage(STRINGS.en, 'n')).toContain("copy(ask.reopen)")
@@ -2764,7 +2757,6 @@ test('another agent’s question marked answered shows no way back anywhere, and
     '',
   ].join('\n')
   const now = Date.parse('2026-10-17T08:45:00Z')
-  const back = STRINGS.en.wayBack(agentName('codex'), id)
   const reopen = `cd '/w/api' && codex resume ${id}`
   const asked = buildView(parseProgress(file), [], null, now, 0, {}, STRINGS.en)
   const [item] = asked.waiting
@@ -2772,7 +2764,7 @@ test('another agent’s question marked answered shows no way back anywhere, and
   const items = boardItems(asked, [])
   const at = items.findIndex(one => one.type === 'ask' && one.ask.task === 'codex work')
   const screen = boardScreen(asked, [], { ...emptyBoardState, selected: at }, STRINGS.en, { width: 120, isColor: false })
-  expect([screen.includes('c copy resume command'), screen.includes('h already answered, hide'), screen.includes(back)]).toEqual([true, true, true])
+  expect([screen.includes('c copy resume command'), screen.includes('h already answered, hide'), screen.includes(id)]).toEqual([true, true, false])
 
   // Marked answered, it leaves every surface, its way back and command with it.
   const hidden = buildView(parseProgress(file), [], null, now, 0, {}, STRINGS.en, [item?.hideKey ?? ''])
@@ -2781,7 +2773,7 @@ test('another agent’s question marked answered shows no way back anywhere, and
   const html = dashboardHtml(hidden, STRINGS.en, 'p', 'updated now')
   const page = serveModel(hidden, [], STRINGS.en)
   for (const shown of [board, html, JSON.stringify(page.asks)]) {
-    expect([shown.includes(back), shown.includes(reopen), shown.includes(STRINGS.en.reopenWhenClosed)]).toEqual([false, false, false])
+    expect([shown.includes(id), shown.includes(reopen)]).toEqual([false, false])
   }
 })
 

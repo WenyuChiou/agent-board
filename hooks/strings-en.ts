@@ -259,9 +259,6 @@ export const EN: Strings = {
     const who = [session, agent].filter(part => part !== '').join(', ')
     return `Reply in the "${task}" session${who === '' ? '' : ` (${who})`}. Can't reply from here.`
   },
-  wayBack: (agent: string, id: string): string => `Session ID ${id}: find it in ${agent}'s session list.`,
-  reopenWhenClosed: 'Once that session is closed, this reopens it:',
-  noWayBack: 'It left no session ID, so there is no way back to it from here.',
   arrivedDone: 'It arrived, done',
   done: 'Done',
   reply: 'Reply',
@@ -285,7 +282,6 @@ export const EN: Strings = {
   heldElsewhere: 'Another session is working on it.',
   takeOver: 'Take over and finish',
   copyResume: 'Copy resume command',
-  copySessionId: 'Copy session ID',
   answeredHide: 'Already answered, hide',
   needsChanges: 'Needs changes',
   showAgain: 'Show again',
@@ -341,8 +337,6 @@ export const EN: Strings = {
   answered: (text: string): string => `Replied to Claude: ${text}`,
   commandOf: (step: string): string => `Command to run for "${step}"`,
   resumeOf: (title: string): string => `Command to resume "${title}". Paste it into the terminal and run it.`,
-  sessionIdOf: (title: string, agent: string, via: string | null): string =>
-    `ID of the "${title}" session. Find it in ${agent}'s session list${via === null ? '' : `, or reopen it with ${via} once it is closed`}.`,
   fileUnreadable: "Can't read the progress file",
   dashStamp: (time: string): string => `updated ${time}`,
   dashInboxHint: "Reply in the agent's own session; this page cannot send replies.",
@@ -367,7 +361,6 @@ export const EN: Strings = {
   boardKeyTick: 'x done',
   boardKeyArchive: 'a archive',
   boardKeyCopyCommand: 'c copy command',
-  boardKeyCopyId: 'c copy session ID',
   boardKeyCopyResume: 'c copy resume command',
   boardKeyConfirm: 'y/n copy answer',
   boardKeyOptions: (n: number): string => `1–${n} copy answer`,

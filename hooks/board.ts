@@ -471,10 +471,8 @@ export const boardKey = (state: BoardState, key: string, items: readonly BoardIt
     if (key === 'x' && ask.step !== null) return { state, action: { type: 'tick', ref: ask.step } }
     if (key === 'h' && ask.hideKey !== '') return { state, action: { type: 'hide', key: ask.hideKey, text: ask.text } }
     if (key === 'c' && (ask.command ?? ask.link) !== null) return { state, action: { type: 'copy', text: plain((ask.command ?? ask.link) as string) } }
-    // Another session's question has nothing else to copy: the command that reopens that
-    // session where there is one (its line is cut to the terminal's width), else its id, which
-    // finds the session in its agent's list.
-    const back = replyHint(ask, s).reopen ?? ask.sessionId
+    // Copy an actionable command on demand; a raw session id is not a clipboard action.
+    const back = replyHint(ask, s).reopen
     if (key === 'c' && back !== null) return { state, action: { type: 'copy', text: plain(back) } }
     const answers = answersOf(ask, s)
     const pick = ask.kind === 'confirm' ? ['y', 'n'].indexOf(key) : /^[1-9]$/.test(key) ? Number(key) - 1 : -1
@@ -503,9 +501,7 @@ const keysFor = (item: BoardItem | undefined, s: Strings): string[] => {
         ? [s.boardKeyCopyCommand]
         : replyHint(ask, s).reopen !== null
           ? [s.boardKeyCopyResume]
-          : ask.sessionId !== null
-            ? [s.boardKeyCopyId]
-            : []),
+          : []),
       ...(ask.hideKey !== '' ? [s.boardKeyHide] : []),
     ]
   }
@@ -554,11 +550,6 @@ export const boardScreen = (view: View, pending: readonly PendingTurn[], state: 
         if (ask.where === 'other') {
           const hint = replyHint(ask, s)
           lines.push(`    ${c('quiet', fit(hint.where, o.width - 6))}`)
-          lines.push(`    ${c('quiet', fit(hint.back, o.width - 6))}`)
-          if (hint.reopen !== null) {
-            lines.push(`    ${c('quiet', fit(hint.note, o.width - 6))}`)
-            lines.push(`    ${c('accent', fit(`$ ${hint.reopen}`, o.width - 6))}`)
-          }
         }
       }
       return
