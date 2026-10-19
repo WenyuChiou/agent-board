@@ -437,7 +437,8 @@ export const ZH_TW = {
   // in English in every language: it is the one tested live, and its markers are literal.
   serveAt: (url: string): string => `可以點的看板（勾完成、封存、回答）：${url}`,
   serveKept: '可能還有一句正在傳給 agent，所以先保留已經開著的看板網頁；回覆到了它會自己更新。之後再執行一次，就會換成最新的看板。',
-  serveIdle: '30 分鐘沒人用就會自己關掉。',
+  serveIdle: '本機看板會持續執行；關掉分頁後可用 $agent-board 或 --serve 再開啟，按「關閉看板」才停止服務。',
+  serveIdleTimed: (minutes: number): string => `此看板已設定閒置 ${minutes} 分鐘後自動關閉；可用 --serve 再開啟。`,
   serveLanIdle: '在你的網路上，10 分鐘沒人用就會自己關掉。',
   serveFailed: (why: string): string => `開不了看板網頁：${why}`,
   serveLanAt: (url: string): string => `同一個網路上的手機，打開 ${url} 或掃這個 QR 碼：`,

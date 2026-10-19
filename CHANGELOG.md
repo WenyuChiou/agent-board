@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- **Keep the local board available after closing a tab.** Local idle shutdown is
+  disabled by default; `--idle-minutes 30` opts in and zero disables it. The page
+  explains its actual setting, reopening reuses a matching service, and Close the
+  board still stops it. The separate LAN timeout is unchanged. Test: `a local board
+  stays available by default while an explicit idle timeout closes only that server`.
+
 - **Observe connection handoffs instead of treating sends as completion.** A bounded
   local observation waits for an exact newer progress report, shows a timeout with
   recovery guidance, and never treats a relay claim or ACK as authorization. A status

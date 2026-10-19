@@ -2188,7 +2188,8 @@ test('on the local network the page answers only its own address, with its own t
   expect(requestProblem({ ...post, origin: 'http://127.0.0.1:5000' }, lan, 'phone')).toBe(403)
   // And it says when it closes, which is sooner than the computer's page.
   expect(servePage(STRINGS.en, 'n', true)).toContain('after 10 minutes unused')
-  expect(servePage(STRINGS.en, 'n')).toContain('after 30 minutes unused')
+  expect(servePage(STRINGS.en, 'n')).toContain('The local board stays running')
+  expect(servePage(STRINGS.en, 'n', false, 30 * 60000)).toContain('after 30 minutes unused')
 })
 
 test('from the local network a reply to an agent is offered as a copy, and refused if sent, since it would run a program on the computer', () => {

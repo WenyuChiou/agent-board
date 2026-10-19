@@ -565,7 +565,7 @@ const GROK_ID = '01a14a94-0dee-7543-8208-991a4266a1da'
 // (XDG_RUNTIME_DIR, here one of the test's own), named for the progress.md it serves.
 const servedAt = (run, path) => join(run, `agent-board-${createHash('sha256').update(path).digest('hex').slice(0, 16)}.json`)
 
-const page = async (more = '', env = {}) => {
+const page = async (more = '', env = {}, serveArgs = []) => {
   const dir = mkdtempSync(join(tmpdir(), 'board-serve-'))
   const work = join(dir, 'api-gateway')
   mkdirSync(work)
@@ -601,7 +601,7 @@ setTimeout(() => process.stdout.write('Redis it is; wiring it up now.\\n'), 1000
 `)
   const script = join(dir, 'agent-board.mjs')
   writeFileSync(script, `globalThis.AGENT_BOARD = ${JSON.stringify({ path, lang: 'en' })}\n${BOARD_SCRIPT}`)
-  const child = spawn(process.execPath, [script, '--serve-child'], {
+  const child = spawn(process.execPath, [script, '--serve-child', ...serveArgs], {
     env: { ...process.env, CLAUDE_PROGRESS_FILE: '', NO_COLOR: '1', AGENT_BOARD_GROK: stand, AGENT_BOARD_CODEX: stand, XDG_RUNTIME_DIR: run, ...env },
     stdio: ['ignore', 'pipe', 'pipe'],
   })
@@ -729,6 +729,21 @@ test('marking a question answered on the page or with h on the board writes only
   } finally {
     await board.close()
   }
+})
+
+test('a local board stays available by default while an explicit idle timeout closes only that server', { timeout: 30_000 }, async () => {
+  const persistent = await page()
+  const timed = await page('', {}, ['--idle-minutes', '0.02'])
+  try {
+    assert.equal((await persistent.call('GET', '/api/ping')).json().idleMs, 0)
+    assert.equal((await timed.call('GET', '/api/ping')).json().idleMs, 1200)
+    assert.ok((await persistent.call('GET', '/?t=' + persistent.token)).body.includes('The local board stays running'))
+    assert.ok((await timed.call('GET', '/?t=' + timed.token)).body.includes('after 0.02 minutes unused'))
+    await new Promise(done => setTimeout(done, 2600))
+    assert.equal((await persistent.call('GET', '/api/board')).status, 200)
+    assert.equal(await Promise.race([timed.exited, new Promise(done => setTimeout(() => done('still running'), 2500))]), 0)
+    assert.equal(existsSync(timed.served), false)
+  } finally { await persistent.close(); await timed.close() }
 })
 
 test('the page answers only with its token and its own host, and closing it stops the server', { timeout: 30_000 }, async () => {

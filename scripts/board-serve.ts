@@ -339,7 +339,7 @@ export const startServer = (o: ServeOptions): void => {
     if (isPage) {
       const nonce = randomBytes(16).toString('base64')
       res.writeHead(200, { ...HEADERS, 'content-type': 'text/html; charset=utf-8', 'content-security-policy': pagePolicy(nonce), 'x-frame-options': 'DENY' })
-      res.end(servePage(o.s, nonce, isLan))
+      res.end(servePage(o.s, nonce, isLan, o.idleMs))
       return
     }
     if (req.method === 'GET') {
@@ -433,8 +433,8 @@ export const startServer = (o: ServeOptions): void => {
   // `idleMs` and no reply is on its way.
   const idle = setInterval(() => {
     if (lan !== null && Date.now() - lan.lastSeen > LAN_IDLE) closeLan()
-    if (sending.size === 0 && Date.now() - lastSeen > o.idleMs) stop()
-  }, Math.min(30_000, o.idleMs))
+    if (o.idleMs > 0 && sending.size === 0 && Date.now() - lastSeen > o.idleMs) stop()
+  }, o.idleMs > 0 ? Math.min(30_000, Math.max(10, o.idleMs)) : 30_000)
   server.on('close', () => clearInterval(idle))
   server.listen(o.port, '127.0.0.1', () => {
     port = (server.address() as AddressInfo).port

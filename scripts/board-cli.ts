@@ -16,6 +16,7 @@ import { basename, dirname, join, resolve } from 'node:path'
 import { mergeBlock, takeArchivable, takeManualDone, takeTask, setManualStep } from '../hooks/blocks'
 import type { PasteProblem } from '../hooks/blocks'
 import { startServer } from './board-serve'
+import { idleTimeout } from '../hooks/serve'
 import { boardKey, boardScreen, boardText, chatText, doneToday, emptyBoardState, peekInbox, boardItems, pinned, redact } from '../hooks/board'
 import type { BoardAction, BoardState } from '../hooks/board'
 import { LOG_TAIL, isInboxFile } from '../hooks/inbox'
@@ -33,6 +34,11 @@ const args = process.argv.slice(2)
 const flag = (name: string): string | undefined => {
   const at = args.indexOf(name)
   return at === -1 ? undefined : args[at + 1]
+}
+const idleMs = (): number => {
+  const value = flag('--idle-minutes')
+  if (args.includes('--idle-minutes') && value === undefined) throw new Error('INVALID_IDLE_MINUTES')
+  return idleTimeout(value)
 }
 
 const progressFile = (): string => {
@@ -520,7 +526,7 @@ const serveChild = (): void => {
     reports: () => parseProgress(read(path)).flatMap(project => project.tasks.flatMap(task => task.auto === null ? [] : [{ agent: task.auto.agent, session: task.auto.resume ?? task.auto.session, updated: task.auto.updated }])),
     s,
     port: Number(flag('--port') ?? 0) || 0,
-    ping: { path, built, messagesDirectory: flag('--messages-dir') ? resolve(flag('--messages-dir')!) : null },
+    ping: { path, built, idleMs: idleMs(), messagesDirectory: flag('--messages-dir') ? resolve(flag('--messages-dir')!) : null },
     view,
     pending,
     act,
@@ -530,7 +536,7 @@ const serveChild = (): void => {
     // press and for the board it shows. The page is answered, so the exit code and stderr are
     // left alone. A phone is told the file name only: the folder names the person's account.
     failure: (error, isLan) => (error instanceof BoardFileError ? s.boardStorageFailed(isLan ? basename(error.file) : error.file, error.code) : null),
-    idleMs: 30 * 60 * 1000,
+    idleMs: idleMs(),
     onReady: (url, port) => {
       // Without its address file no later `--serve` finds this page, and each would start one
       // more; so it does not start at all. Nor when the file is there already: another
@@ -593,7 +599,7 @@ const runningPage = async (): Promise<{ page: Running; isKept: boolean } | null>
   // as gone and a second one starts.
   const first = await ping(running)
   const answer = first !== null && first !== 'silent' ? first : isRunning(running.pid) ? await ping(running, 5000) : first
-  if (answer !== null && answer !== 'silent' && typeof answer.path === 'string' && board(answer.path) === board(path) && answer.built === built && (flag('--messages-dir') === undefined || answer.messagesDirectory === resolve(flag('--messages-dir')!))) return { page: running, isKept: false }
+  if (answer !== null && answer !== 'silent' && typeof answer.path === 'string' && board(answer.path) === board(path) && answer.built === built && answer.idleMs === idleMs() && (flag('--messages-dir') === undefined || answer.messagesDirectory === resolve(flag('--messages-dir')!))) return { page: running, isKept: false }
   return (await stays(running, serveFile())) ? { page: running, isKept: true } : null
 }
 
@@ -637,7 +643,8 @@ const serveBoard = async (): Promise<void> => {
   if (old !== null && (await stays(old, oldServeFile))) return show(old.url, true)
   const found = await runningPage()
   if (found !== null) return show(found.page.url, found.isKept)
-  const rest = ['--lang', '--port', '--messages-dir'].flatMap(name => {
+  idleMs()
+  const rest = ['--lang', '--port', '--messages-dir', '--idle-minutes'].flatMap(name => {
     const value = flag(name)
     return value === undefined ? [] : [name, value]
   })

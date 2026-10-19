@@ -73,6 +73,12 @@ export const sendMode = (agent: string, target: AgentTarget | null): SendMode =>
 // One send at a time per session: the key the server holds while a reply is on its way.
 export const sendKey = (target: AgentTarget): string => `${target.agent}:${target.session}`
 
+export const idleTimeout = (value: string | undefined): number => {
+  if (value === undefined) return 0
+  if (!/^\d+(?:\.\d+)?$/.test(value) || !Number.isFinite(Number(value)) || Number(value) > 525600) throw new Error('INVALID_IDLE_MINUTES')
+  return Number(value) * 60_000
+}
+
 export type ServeStep = { text: string; note: string; status: string; isCurrent: boolean }
 
 export type ServeAsk = {
@@ -492,7 +498,7 @@ export const pagePolicy = (nonce: string): string =>
   `default-src 'none'; script-src 'nonce-${nonce}'; style-src 'nonce-${nonce}'; connect-src 'self'; img-src data:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'`
 
 // `isLan`: the page a phone opens on the local network, which closes sooner.
-export const servePage = (s: Strings, nonce: string, isLan = false): string => `<!doctype html>
+export const servePage = (s: Strings, nonce: string, isLan = false, idleMs = 0): string => `<!doctype html>
 <html lang="${htmlLang(s)}">
 <head>
 <meta charset="utf-8">
@@ -564,7 +570,7 @@ details[open]>summary::before{content:"▾"}
 <div class="actions"><button type="button" class="primary" id="paste-go">${esc(s.servePaste)}</button><button type="button" id="relay">${esc(s.serveRelay)}</button></div>
 <p class="quiet small">${esc(s.serveRelayHint)}</p>
 </details>
-<p class="quiet small">${esc(isLan ? s.serveLanIdle : s.serveIdle)}</p>
+<p class="quiet small">${esc(isLan ? s.serveLanIdle : idleMs > 0 ? s.serveIdleTimed(idleMs / 60_000) : s.serveIdle)}</p>
 <div id="note" role="status" aria-live="polite"></div>
 </main>
 <script type="application/json" id="words">${JSON.stringify(pageWords(s)).replace(/</g, '\\u003c')}</script>

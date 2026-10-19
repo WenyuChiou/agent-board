@@ -400,7 +400,8 @@ export const EN: Strings = {
   // in English in every language: it is the one tested live, and its markers are literal.
   serveAt: (url: string): string => `The board you can click (tick, archive, answer): ${url}`,
   serveKept: 'A reply may still be on its way to an agent, so the board page that is already open is kept; it updates when the reply arrives. Run this again after that for the newest page.',
-  serveIdle: 'It closes itself after 30 minutes unused.',
+  serveIdle: 'The local board stays running. Reopen a closed tab with $agent-board or --serve; Close the board stops the service.',
+  serveIdleTimed: (minutes: number): string => `This board is configured to close after ${minutes} minutes unused. Reopen with --serve.`,
   serveLanIdle: 'On your network it closes itself after 10 minutes unused.',
   serveFailed: (why: string): string => `Couldn't open the board page: ${why}`,
   serveLanAt: (url: string): string => `On a phone on the same network, open ${url} or scan this code:`,

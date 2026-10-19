@@ -30,7 +30,10 @@ drive or publish it. The board's bearer URL and connector secrets must not be po
 issues. This flag opens no network listener beyond the existing loopback board; messaging
 and its history are absent from the LAN page. Setup does not silently enable it or install
 a background receiver. Reopen with the same command and directory. Closing the board
-disconnects its receivers; they must reconnect explicitly to the new board URL.
+disconnects its receivers; they must reconnect explicitly to the new board URL. Closing
+only the browser tab leaves the local service and receivers running. Local idle shutdown
+is disabled by default; `--idle-minutes 30` opts in. The LAN listener's separate timeout
+is unchanged.
 
 ## What the receipts mean
 

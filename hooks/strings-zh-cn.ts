@@ -396,7 +396,8 @@ export const ZH_CN: Strings = {
   // in English in every language: it is the one tested live, and its markers are literal.
   serveAt: (url: string): string => `可以点的看板（勾完成、归档、回答）：${url}`,
   serveKept: '可能还有一句正在发给 agent，所以先保留已经打开的看板网页；回复到了它会自己更新。之后再运行一次，就会换成最新的看板。',
-  serveIdle: '30 分钟没人用就会自己关掉。',
+  serveIdle: '本地看板会持续运行；关掉标签页后可用 $agent-board 或 --serve 再打开，按“关闭看板”才停止服务。',
+  serveIdleTimed: (minutes: number): string => `此看板已设置闲置 ${minutes} 分钟后自动关闭；可用 --serve 再打开。`,
   serveLanIdle: '在你的网络上，10 分钟没人用就会自己关掉。',
   serveFailed: (why: string): string => `打不开看板网页：${why}`,
   serveLanAt: (url: string): string => `同一网络上的手机，打开 ${url} 或扫这个二维码：`,
