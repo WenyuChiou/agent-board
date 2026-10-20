@@ -253,10 +253,10 @@ test('the HTML board shows only the agent and project for a pending turn without
 // `--chat` in a folder of its own, with the home folder, the temp folders and every XDG folder
 // inside it, so no run can read or write the real ones. `home` is a path inside it. `change`
 // edits the script's text first, to make it fail the way a bug in it would.
-const chatRun = (args, { file = () => FILE, beside = {}, lang = 'en', isFolder = false, change = text => text, inbox = {}, inboxTimes = {} } = {}) => {
+const chatRun = (args, { file = () => FILE, beside = {}, lang = 'en', isFolder = false, change = text => text, inbox = {}, inboxTimes = {}, preload = '', inspect = () => ({}), isRelativePath = false, homeName = 'Jane Doe' } = {}) => {
   const root = mkdtempSync(join(tmpdir(), 'board-chat-'))
   try {
-    const home = join(root, 'Jane Doe')
+    const home = join(root, homeName)
     const dirs = Object.fromEntries(['.claude', 'AppData', 'Local', 'Roaming', 'config', 'data', 'state', 'cache', 'run'].map(name => [name, join(home, name)]))
     for (const dir of Object.values(dirs)) mkdirSync(dir, { recursive: true })
     const path = join(dirs['.claude'], 'progress.md')
@@ -270,7 +270,7 @@ const chatRun = (args, { file = () => FILE, beside = {}, lang = 'en', isFolder =
       if (inboxTimes[name] !== undefined) utimesSync(target, inboxTimes[name] / 1000, inboxTimes[name] / 1000)
     }
     const script = join(dirs['.claude'], 'agent-board.mjs')
-    writeFileSync(script, `globalThis.AGENT_BOARD = ${JSON.stringify({ path, lang })}\n${change(BOARD_SCRIPT)}`)
+    writeFileSync(script, `globalThis.AGENT_BOARD = ${JSON.stringify({ path: isRelativePath ? join('.claude', 'progress.md') : path, lang })}\n${change(BOARD_SCRIPT)}`)
     const env = {
       ...process.env,
       HOME: home, USERPROFILE: home, LOCALAPPDATA: dirs.Local, APPDATA: dirs.Roaming,
@@ -284,13 +284,161 @@ const chatRun = (args, { file = () => FILE, beside = {}, lang = 'en', isFolder =
       const relative = join('progress-inbox', name), source = join(dirs['.claude'], relative)
       unchanged.set(relative, { bytes: readFileSync(source), mtime: statSync(source).mtimeMs })
     }
-    const ran = spawnSync(process.execPath, [script, ...args], { env, encoding: 'utf8', timeout: 20000 })
+    const prelude = join(dirs['.claude'], 'fault.cjs')
+    if (preload) writeFileSync(prelude, preload)
+    const ran = spawnSync(process.execPath, [...(preload ? ['--require', prelude] : []), script, ...args], { env, cwd: isRelativePath ? home : undefined, encoding: 'utf8', timeout: 20000 })
     const modified = [...unchanged].filter(([name, old]) => !existsSync(join(dirs['.claude'], name)) || !readFileSync(join(dirs['.claude'], name)).equals(old.bytes) || statSync(join(dirs['.claude'], name)).mtimeMs !== old.mtime).map(([name]) => name)
-    return { ...ran, home, path, modified, answered: existsSync(join(dirs['.claude'], 'progress-answered.json')) ? readFileSync(join(dirs['.claude'], 'progress-answered.json'), 'utf8') : null, wrote: readdirSync(dirs['.claude']).filter(name => !before.includes(name)), served: readdirSync(dirs.run) }
+    return { ...ran, home, path, modified, answered: existsSync(join(dirs['.claude'], 'progress-answered.json')) ? readFileSync(join(dirs['.claude'], 'progress-answered.json'), 'utf8') : null, wrote: readdirSync(dirs['.claude']).filter(name => !before.includes(name)), served: readdirSync(dirs.run), ...inspect(dirs['.claude']) }
   } finally {
     rmSync(root, { recursive: true, force: true })
   }
 }
+
+const questionFiles = dir => ({ files: Object.fromEntries(readdirSync(dir).filter(name => name.startsWith('progress-questions')).map(name => [name, readFileSync(join(dir, name), 'utf8')])) })
+const questionFault = code => `const fs = require('node:fs')
+const cp = require('node:child_process')
+const path = require('node:path')
+const ledger = path.join(__dirname, 'progress-questions.json')
+${code}
+require('node:module').syncBuiltinESMExports()
+`
+
+test('the terminal board quarantines torn ledgers and rebuilds captured identities so hiding works again', () => {
+  const seed = chatRun(['--keys', ''], { inspect: questionFiles })
+  assert.equal(seed.status, 0, seed.stderr)
+  const original = JSON.parse(seed.files['progress-questions.json'])
+  assert.equal(original.records.length, 1)
+  assert.ok(Object.keys(seed.files).some(name => name.startsWith('progress-questions-source-')))
+  for (const torn of ['{"version":1,"records":[', '{"version":1}\0']) {
+    const ran = chatRun(['--keys', 'down h'], {
+      beside: { ...seed.files, 'progress-questions.json': torn }, inspect: questionFiles,
+    })
+    assert.equal(ran.status, 0, ran.stderr)
+    assert.ok(ran.answered, ran.stdout)
+    assert.deepEqual(JSON.parse(ran.answered).answered, [original.records[0].id])
+    assert.ok(JSON.parse(ran.files['progress-questions.json']).records.some(row => row.id === original.records[0].id))
+    const saved = Object.keys(ran.files).filter(name => /\.torn-\d+-\d+$/.test(name))
+    assert.equal(saved.length, 1)
+    assert.equal(ran.files[saved[0]], torn)
+  }
+})
+
+test('the terminal board preserves unknown JSON ledgers and never overwrites a quarantine collision', () => {
+  const unknown = '{"version":99,"future":"keep these bytes"}\n'
+  const kept = chatRun(['--keys', 'down h'], { beside: { 'progress-questions.json': unknown }, inspect: questionFiles })
+  assert.equal(kept.status, 0, kept.stderr)
+  assert.deepEqual(kept.files, { 'progress-questions.json': unknown })
+  assert.equal(kept.answered, null)
+  const torn = '{"version":'
+  const collision = chatRun(['--keys', 'down h'], {
+    beside: { 'progress-questions.json': torn }, inspect: questionFiles,
+    preload: questionFault(`Date.now = () => ${Date.now()}
+fs.writeFileSync(ledger + '.torn-' + Date.now() + '-' + process.pid, 'earlier quarantine')`),
+  })
+  assert.equal(collision.status, 0, collision.stderr)
+  assert.equal(collision.files['progress-questions.json'], torn)
+  assert.deepEqual(Object.values(collision.files).sort(), ['earlier quarantine', torn].sort())
+  assert.equal(collision.answered, null)
+})
+
+test('ledger recovery accepts relative progress paths and treats shell-sensitive folders literally', () => {
+  const settings = { isRelativePath: true, homeName: "Jane's $Board `literal`", inspect: questionFiles }
+  const seed = chatRun(['--keys', ''], settings)
+  assert.equal(seed.status, 0, seed.stderr)
+  const ran = chatRun(['--keys', 'down h'], { ...settings, beside: { ...seed.files, 'progress-questions.json': '{' } })
+  assert.equal(ran.status, 0, ran.stderr)
+  assert.deepEqual(JSON.parse(ran.answered).answered, [JSON.parse(seed.files['progress-questions.json']).records[0].id])
+  assert.ok(Object.values(ran.files).includes('{'))
+})
+
+test('a good ledger raced into quarantine is restored without replacing a newer ledger', () => {
+  for (const hasNewer of [false, true]) {
+    const good = '{"version":99,"writer":"before move"}\n'
+    const newer = '{"version":99,"writer":"after move"}\n'
+    const ran = chatRun(['--keys', 'down h'], {
+      beside: { 'progress-questions.json': '{' }, inspect: questionFiles,
+      preload: questionFault(`const native = cp.spawnSync
+let raced = false
+cp.spawnSync = (tool, argv, options) => {
+  const quarantine = argv.some(arg => String(arg).includes('.torn-'))
+  if (!raced && quarantine) {
+    raced = true
+    fs.writeFileSync(ledger, ${JSON.stringify(good)})
+    const result = native(tool, argv, options)
+    if (${hasNewer}) fs.writeFileSync(ledger, ${JSON.stringify(newer)})
+    return result
+  }
+  return native(tool, argv, options)
+}`),
+    })
+    assert.equal(ran.status, 0, ran.stderr)
+    assert.equal(ran.files['progress-questions.json'], hasNewer ? newer : good)
+    assert.equal(ran.answered, null)
+    const asides = Object.keys(ran.files).filter(name => name.includes('.torn-'))
+    assert.equal(asides.length, hasNewer ? 1 : 0)
+    if (hasNewer) assert.equal(ran.files[asides[0]], good)
+  }
+})
+
+test('a missing ledger install never replaces a concurrent writer or leaves its own skipped temp', () => {
+  const other = '{"version":99,"writer":"concurrent"}\n'
+  const ran = chatRun(['--keys', 'down h'], {
+    inspect: questionFiles,
+    preload: questionFault(`const native = cp.spawnSync
+let raced = false
+cp.spawnSync = (tool, argv, options) => {
+  if (!raced && argv.some(arg => String(arg).includes('.board-tmp'))) {
+    raced = true
+    fs.writeFileSync(ledger, ${JSON.stringify(other)})
+  }
+  return native(tool, argv, options)
+}`),
+  })
+  assert.equal(ran.status, 0, ran.stderr)
+  assert.equal(ran.files['progress-questions.json'], other)
+  assert.ok(!Object.keys(ran.files).some(name => name.endsWith('.board-tmp')))
+  assert.equal(ran.answered, null)
+})
+
+test('a failed ledger replace restores the complete temp or keeps it when every move fails', () => {
+  const seed = chatRun(['--keys', ''], { inspect: questionFiles })
+  assert.equal(seed.status, 0, seed.stderr)
+  for (const isMoveBlocked of [false, true]) {
+    const ran = chatRun(['--keys', 'down h'], {
+      file: () => FILE.replace('Per-key limit', 'Per-account limit'), beside: seed.files, inspect: questionFiles,
+      preload: questionFault(`const native = fs.renameSync
+fs.renameSync = (from, to) => {
+  if (to !== ledger) return native(from, to)
+  fs.unlinkSync(ledger)
+  throw Object.assign(new Error('synthetic replace failure'), { code: 'EACCES' })
+}
+if (${isMoveBlocked}) {
+  const move = cp.spawnSync
+  cp.spawnSync = (tool, argv, options) => argv.some(arg => String(arg).includes('.board-tmp')) ? { status: 1 } : move(tool, argv, options)
+}`),
+    })
+    if (isMoveBlocked) {
+      assert.equal(ran.status, 1)
+      assert.equal(ran.files['progress-questions.json'], undefined)
+      const complete = Object.entries(ran.files).filter(([name]) => name.endsWith('.board-tmp'))
+      assert.ok(complete.length > 0)
+      assert.ok(complete.every(([, text]) => JSON.parse(text).records.some(row => row.words.includes('Per-account'))))
+    } else {
+      assert.equal(ran.status, 0, ran.stderr)
+      assert.ok(JSON.parse(ran.files['progress-questions.json']).records.some(row => row.words.includes('Per-account')))
+      assert.ok(!Object.keys(ran.files).some(name => name.endsWith('.board-tmp')))
+    }
+  }
+})
+
+test('--chat remains read-only beside interactive flags even with a torn question ledger', () => {
+  for (const torn of ['{', '{"version":1}\0']) {
+    const ran = chatRun(['--chat', '--watch', '--serve', '--keys', 'down h'], { beside: { 'progress-questions.json': torn }, inspect: questionFiles })
+    assert.equal(ran.status, 0, ran.stderr)
+    assert.deepEqual(ran.files, { 'progress-questions.json': torn })
+    assert.deepEqual([ran.modified, ran.wrote, ran.served], [[], [], []])
+  }
+})
 
 const CHAT_PROGRESS = home => `# Progress
 
@@ -1012,6 +1160,30 @@ test('marking a question answered on the page or with h on the board writes only
     // Nothing went to any agent, and every block is as its session wrote it.
     assert.equal(readFileSync(path, 'utf8'), before)
     assert.ok(!existsSync(join(dir, 'grok-ran.json')))
+  } finally {
+    await board.close()
+  }
+})
+
+test('the serve page repairs a torn ledger and hides its captured question without changing the report', { timeout: 30_000 }, async () => {
+  const board = await page()
+  try {
+    const report = readFileSync(board.path, 'utf8')
+    const model = async () => (await board.call('GET', '/api/board')).json().model
+    const before = (await model()).asks[0]
+    const ledger = join(board.dir, 'progress-questions.json')
+    const identity = JSON.parse(readFileSync(ledger, 'utf8')).records.find(row => row.isWaiting).id
+    writeFileSync(ledger, '{"version":1,')
+    const restored = (await model()).asks.find(row => row.text === before.text)
+    assert.ok(restored?.canHide)
+    const hid = await board.call('POST', '/api/act', { body: { key: restored.key, type: 'hide' } })
+    assert.equal(hid.status, 200, hid.body)
+    assert.deepEqual(JSON.parse(readFileSync(join(board.dir, 'progress-answered.json'), 'utf8')).answered, [identity])
+    assert.equal((await model()).asks.length, 0)
+    assert.equal(readFileSync(board.path, 'utf8'), report)
+    const saved = readdirSync(board.dir).filter(name => name.startsWith('progress-questions.json.torn-'))
+    assert.equal(saved.length, 1)
+    assert.equal(readFileSync(join(board.dir, saved[0]), 'utf8'), '{"version":1,')
   } finally {
     await board.close()
   }
