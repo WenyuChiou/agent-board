@@ -406,6 +406,9 @@ export const ZH_CN: Strings = {
   boardCopied: (text: string): string => `已复制：${text}`,
   boardCopyFailed: (text: string): string => `没办法放进剪贴板，请自己复制：${text}`,
   boardWriteFailed: '写不进进度文件，没有改任何东西。',
+  progressIncomplete: (n: number): string => `progress.md 有一行标记未写完，可能有 ${n} 项工作未显示`,
+  reporterFailed: (reason: string): string => `进度报告未能保存（${reason}），请检查进度文件后重试。`,
+  tailRepairFailed: '无法安全修复不完整的结尾，没有改动任何内容。请检查进度文件后重新报告。',
   boardStorageFailed: (file: string, code: string): string => `无法安全读取或更新 ${file}（${code}）。部分文件可能已经改动。请检查进度与历史记录，排除文件访问或磁盘问题后重试。`,
   // The board's page in the browser (`agent-board.mjs --serve`). The chat-relay prompt stays
   // in English in every language: it is the one tested live, and its markers are literal.

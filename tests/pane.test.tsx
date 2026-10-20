@@ -39,6 +39,20 @@ const PROPS: RenderPropsOf['Pane'] = {
   view: {},
 }
 
+test('the pane and its HTML warn once about a torn tail without losing complete tasks', async ($, on) => {
+  const source = '## Synthetic day\n### Hand kept\n- [ ] Keep\n' + Array.from({ length: 7 }, (_, i) => `<!-- auto session=${10000000 + i} agent=codex state=working updated=2026-10-16T12:00:00Z -->\n### Day task ${i}\n- [ ] Next\n${i === 6 ? '<!-- /auto se' : `<!-- /auto session=${10000000 + i} -->\n`}`).join('\n')
+  const world: World = { files: new Map([[FILE, source]]), mtime: 1, hasTasks: true, store: { lang: 'en', autoConnectOff: true, opened: ['others'] } }
+  engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/other-project', surface: 'desktop', isInteractive: true })
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
+  const warning = EN.progressIncomplete(1)
+  expect(await ui.find({ type: 'Text', text: warning })).toBeDefined()
+  for (let i = 0; i < 7; i++) expect(await ui.find({ type: 'Button', key: `Synthetic day::Day task ${i}` })).toBeDefined()
+  expect(world.files.get(FILE)).toBe(source)
+  expect((world.files.get(FILE.replace('.md', '.html')) ?? '').split(warning).length - 1).toBe(1)
+  await ui.unmount()
+})
+
 test('a task handoff removes Continue while retaining the recipient in the pane and file', async ($, on) => {
   const world: World = { files: new Map(), mtime: 1, hasTasks: true }
   const clock = engineBeneath(on, world)

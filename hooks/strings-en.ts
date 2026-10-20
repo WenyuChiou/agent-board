@@ -410,6 +410,9 @@ export const EN: Strings = {
   boardCopied: (text: string): string => `Copied: ${text}`,
   boardCopyFailed: (text: string): string => `Couldn't reach the clipboard; copy it yourself: ${text}`,
   boardWriteFailed: "Couldn't write the progress file; nothing changed.",
+  progressIncomplete: (n: number): string => `progress.md has a cut-off marker line; ${n} ${n === 1 ? 'task' : 'tasks'} may be hidden`,
+  reporterFailed: (reason: string): string => `The report could not be saved (${reason}); check the progress file and retry.`,
+  tailRepairFailed: 'The incomplete end could not be safely repaired; nothing changed. Check the progress file before retrying.',
   boardStorageFailed: (file: string, code: string): string => `Could not safely read or update ${file} (${code}). Some files may already have changed. Check the board and history, fix the file access or disk problem, then retry.`,
   // The board's page in the browser (`agent-board.mjs --serve`). The chat-relay prompt stays
   // in English in every language: it is the one tested live, and its markers are literal.
