@@ -1,0 +1,4 @@
+# The npm command and its manifest keep LF on every checkout: a CR at the end of the first line
+# breaks `#!/usr/bin/env node` on Linux and macOS, and the tests compare package.json byte for byte.
+bin/agent-board.mjs text eol=lf
+package.json text eol=lf

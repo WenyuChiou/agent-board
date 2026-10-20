@@ -1,6 +1,7 @@
 # Set up the local board from any agent
 
-Use Node.js 18+ and a checkout of this repository. The same entry point previews every
+Use Node.js 18+ and a checkout of this repository, or the npm package (Node.js 22+,
+[below](#install-with-npm)). The same entry point previews every
 applicable target before applying any change:
 
 ```sh
@@ -59,6 +60,35 @@ Removal records disable intent before cleanup, fencing delayed automatic setup.
 Damaged authority or recovery records are retained and reported rather than reset.
 Status may initialize recognized legacy display metadata; it does not change host
 configuration or prove native execution.
+
+## Install with npm
+
+From its first npm release (planned for 0.24.0), the same installer is on npm as `@wenyuchiou/agent-board`. With Node.js 22+ (what the
+package's `engines` field asks for) and no checkout:
+
+```sh
+npx @wenyuchiou/agent-board setup
+npx @wenyuchiou/agent-board setup --apply
+npx @wenyuchiou/agent-board --serve
+```
+
+`npx @wenyuchiou/agent-board setup` runs this same `setup-agent.mjs` from the package and takes the
+same options (`--agent`, `--home`, `--data-dir`, `--progress-file`). It writes the same
+files: the board script lands at `~/.agent-board/agent-board.mjs`, and no hook points into
+npm's cache, so clearing that cache breaks nothing. `npm install -g @wenyuchiou/agent-board` gives a
+lasting `agent-board` command in place of `npx`.
+
+Every other call (`--serve`, `--watch`, `--chat`, `--html`, or none to print the board)
+runs the board script setup installed: the one beside `$CLAUDE_PROGRESS_FILE`, else
+`~/.agent-board/agent-board.mjs`, else the Claude Code plugin's beside
+`~/.claude/progress.md`. It never runs a second copy from the package, which would restart
+the page the installed copy serves. When the installed copy comes from another release,
+`agent-board` says so on stderr and names the command that updates it. For an independent
+install, that is a setup preview for the same agents and data folder; add `--apply` to update
+it, which still leaves files you edited alone. For the Claude Code plugin's copy, it is
+updating the plugin, then `/progress connect`. Installing runs nothing: the package has no
+dependencies and no install scripts. Pre-releases are on the `next` tag
+(`npx @wenyuchiou/agent-board@next setup`); what makes a release stable is in [RELEASING.md](RELEASING.md).
 
 ## Native status adapters
 
