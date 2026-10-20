@@ -3,6 +3,8 @@ import { ZH_TW } from './i18n'
 import type { Strings } from './i18n'
 import { sha256 } from './sha256'
 import { normalizeTurnOrder } from './inbox'
+import { renewQuestion } from './step-words'
+export { renewQuestion } from './step-words'
 
 // Claude's own task list, mirrored from the calls it makes (TaskCreate, TaskUpdate,
 // TodoWrite). The list is the source of truth; the file is a view of it.
@@ -230,13 +232,6 @@ const withMetadata = (task: ProgressMirrorTask, metadata: object | undefined): P
 
 const NO_ASK = { ask: null, options: [], command: null, link: null }
 
-// Explicit producer asks advance only this task. Heartbeats, list reloads and unrelated
-// metadata keep its revision; decimal strings do not wrap a numeric counter.
-export const renewQuestion = (task: ProgressMirrorTask, floor = '0'): ProgressMirrorTask => ({
-  ...task,
-  questionRevision: ([task.questionRevision ?? '0', floor].filter(value => /^\d+$/.test(value)).reduce((latest, value) => BigInt(value) > latest ? BigInt(value) : latest, 0n) + 1n).toString(),
-})
-
 export const questionToken = (task: ProgressMirrorTask): string =>
   /^[1-9]\d*$/.test(task.questionRevision ?? '') ? `${sha256(task.id)}:${task.questionRevision}` : ''
 
@@ -397,6 +392,7 @@ export const noticesOf = (before: ProgressMirror, after: ProgressMirror, s: Stri
 }
 
 export const stateOf = (mirror: ProgressMirror, isTurnRunning: boolean): ProgressSessionState => {
+  if ((mirror.backgroundJobs ?? 0) > 0) return !isTurnRunning && mirror.tasks.some(task => waitsOnYou(mirror, task)) ? 'waiting' : 'working'
   if (isAllDone(mirror)) return 'done'
 
   return isTurnRunning ? 'working' : 'waiting'

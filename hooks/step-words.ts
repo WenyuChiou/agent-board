@@ -1,5 +1,12 @@
 import type { ProgressMirrorTask } from '../types'
 
+// Explicit producer asks advance only this task. Heartbeats, list reloads and unrelated
+// metadata keep its revision; decimal strings do not wrap a numeric counter.
+export const renewQuestion = (task: ProgressMirrorTask, floor = '0'): ProgressMirrorTask => ({
+  ...task,
+  questionRevision: ([task.questionRevision ?? '0', floor].filter(value => /^\d+$/.test(value)).reduce((latest, value) => BigInt(value) > latest ? BigInt(value) : latest, 0n) + 1n).toString(),
+})
+
 // Every line the mod writes into a block. A comment opening in a title or step (the model's
 // summing up, a first request) would hide every line up to the next `-->`, the next block's
 // markers with them, so it is left out; an arrow that would close one is written `->`.
