@@ -28,6 +28,18 @@ git clone https://github.com/WenyuChiou/agent-board.git
 cd agent-board
 ```
 
+### Install with npm
+
+From its first npm release (planned for 0.24.0), the installer and the board are also on npm, so no checkout is needed. This needs Node.js 22+:
+
+```sh
+npx @wenyuchiou/agent-board setup
+npx @wenyuchiou/agent-board setup --apply
+npx @wenyuchiou/agent-board --serve
+```
+
+The first command shows what setup would change and writes nothing. The second makes the change, and the third opens the board's page. `npx @wenyuchiou/agent-board setup` takes the same options as the `setup-agent.mjs` lines below, such as `--agent codex`. `--watch`, `--chat` and `--html` open the other views. More in the [setup guide](docs/SETUP.md#install-with-npm).
+
 ## Pick your agent
 
 | | Agent | Connect it | Open the board |
