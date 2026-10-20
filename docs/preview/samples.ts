@@ -57,7 +57,7 @@ export const SAMPLES: Record<string, Sample> = {
 <!-- /auto session=a81d0c42 -->
 
 ## acme-web
-<!-- auto session=b72e4d19 agent=claude state=ended updated=${iso(NOW - 3 * 60 * MIN)} resume=b72e4d19-0c1d-4e5f-9a8b-7c6d5e4f3a2b dir=%2FUsers%2Fana%2Facme-web -->
+<!-- auto session=b72e4d19 agent=claude state=ended updated=${iso(NOW - 3 * 60 * MIN)} resume=00000000-0000-0000-0000-000000000001 dir=%2FUsers%2Fana%2Facme-web -->
 ### Upgrade to React 19
 > Session ended, open to take over
 > Context: the old version blocks the new router
@@ -119,7 +119,7 @@ export const SAMPLES: Record<string, Sample> = {
 
   'zh-TW': {
     project: 'acme-web',
-    path: 'C:\\Users\\wenyu\\.claude\\progress.md',
+    path: 'C:\\Users\\ana\\.claude\\progress.md',
     mine: {
       title: '設定頁加上深色模式',
       context: '上次問卷很多人要；預設跟著系統主題切換',
@@ -156,7 +156,7 @@ export const SAMPLES: Record<string, Sample> = {
 <!-- /auto session=a81d0c42 -->
 
 ## acme-web
-<!-- auto session=b72e4d19 agent=claude state=ended updated=${iso(NOW - 3 * 60 * MIN)} resume=b72e4d19-0c1d-4e5f-9a8b-7c6d5e4f3a2b dir=C%3A%5CUsers%5Cwenyu%5Cacme-web -->
+<!-- auto session=b72e4d19 agent=claude state=ended updated=${iso(NOW - 3 * 60 * MIN)} resume=00000000-0000-0000-0000-000000000001 dir=C%3A%5CUsers%5Cana%5Cacme-web -->
 ### 升級到 React 19
 > 對話已結束，可接手
 > 背景：舊版擋住新的 router
@@ -255,7 +255,7 @@ export const SAMPLES: Record<string, Sample> = {
 <!-- /auto session=a81d0c42 -->
 
 ## acme-web
-<!-- auto session=b72e4d19 agent=claude state=ended updated=${iso(NOW - 3 * 60 * MIN)} resume=b72e4d19-0c1d-4e5f-9a8b-7c6d5e4f3a2b dir=%2Fhome%2Fli%2Facme-web -->
+<!-- auto session=b72e4d19 agent=claude state=ended updated=${iso(NOW - 3 * 60 * MIN)} resume=00000000-0000-0000-0000-000000000001 dir=%2Fhome%2Fli%2Facme-web -->
 ### 升级到 React 19
 > 对话已结束，可接手
 > 背景：旧版本挡住了新的 router

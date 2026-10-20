@@ -150,6 +150,75 @@ node ~/.agent-board/agent-board.mjs --codex-remove --agent <name> --apply
 
 0.10 前的選用 plugin 名稱是 `project-progress@claude-progress-pane`。移除舊 plugin／marketplace，安裝上方新名稱；若使用其連接器，再於 Claude Code 內執行 `/progress connect`。保留原進度檔。獨立安裝不需要 Claude 遷移。
 
+## 常見問題
+
+### 可以只從一個 agent 開始嗎？
+
+可以，使用共用安裝器從支援的任一 agent 開始，不需要另一家 AI。原生 hooks 依 host 而異；看板和明確回報自身進度的入口共用。
+
+### 我是從 Codex（或其他 agent）裝的，它看得到 Claude Code 在做什麼嗎？
+
+可以，只要各 session 回報到同一個本機進度檔。獨立 reporter 不需要 Claude Code 就能更新自己的區塊；選用側欄也讀同一檔案。開啟看板和接上原生收訊是兩件事。
+
+### 換了一台電腦，東西都不見了嗎？
+
+不會不見，但也不會自己搬過去：`progress.md`、收件匣和 hook 都只在各自的電腦上。在新電腦執行通用安裝器，再重開 agent 就好。要帶上以前的紀錄，就把你選用的 `progress.md` 和旁邊的 `progress-archive-*.md`、`progress-journal-*.md` 複製過去。
+
+想讓兩台電腦共用一個面板，就在兩台都把 `CLAUDE_PROGRESS_FILE` 設成同步資料夾（OneDrive、Dropbox、iCloud）裡的同一個檔案。一次只用一台最穩：兩台同時寫，同步軟體可能會留下衝突副本。
+
+### 某個 agent 沒出現。
+
+1. 執行 `node scripts/setup-agent.mjs` 預覽目前 host，查看衝突與 `adapter-pending`。
+2. 依 host 要求重載，完成限定範圍的原生 hook 信任／啟用，再讀回確認。
+3. 由該 session 使用自己的原生 id 回報，檢查精確區塊與更新時間；不要替其他 session 猜任務。
+4. 另外觀察新的原生生命週期事件。進度出現不代表可以反向收訊，見[接線檢查](MESSAGING.md#connecting-a-session-that-was-already-open)。
+
+選用 Claude 外掛另有 inbox 流程，該安裝可用 `/progress connect status` 查詢；獨立狀態 hooks 不需要 Claude 對話開著。
+
+公開回報問題時，請提供：
+
+- 看板、Node.js（`node --version`）與受影響 agent 的版本；使用選用 Claude 整合時才附該外掛版本。
+- 作業系統、哪個 agent、做了什麼、預期結果和實際結果。
+- 已移除私人資訊的安裝／doctor 輸出。
+
+不要上傳原始收件匣、進度或對話紀錄檔。分享輸出或截圖前，移除提問、回覆、私人路徑、token（包括看板連結和 QR code），以及人名或專案名稱。請另寫一個小範例。`--chat` 只會盡力隱藏自身輸出中的家目錄路徑和常見憑證格式，無法保證完整，也不會清理診斷檔案。
+
+虛構範例（填上版本，不需要真實對話）：
+
+```text
+作業系統：示範系統；看板／Node.js／agent 版本：<版本>
+操作：在 demo-1 完成一個回合。預期：看板出現一列。實際：沒有出現。
+安裝／doctor：<已檢查並移除私人資訊的狀態>
+```
+
+私人或涉及安全性的問題，請透過 GitHub 的 [Report a vulnerability](https://github.com/WenyuChiou/agent-board/security/advisories/new) 回報。詳見 [SECURITY.md](../SECURITY.md)（英文）。
+
+### 會把資料傳出去嗎？要花多少錢？
+
+獨立 reporter 只在本機保留挑選過的 session 中繼資料，不呼叫摘要模型。發訊給在線 agent會使用目標 agent 的模型與額度。下列模型與對話存取適用於選用的 Claude 外掛流程：看板檔案儲存在本機。透過你自己的 Claude Code 登入／模型存取，回合摘要會把提問和回覆傳給 Claude Haiku；標題會傳送該對話的第一個請求和步驟名稱；交接行會傳送最多 6,000 個字元的壓縮摘要。面板的側邊提問框也會透過同一個登入，把你的問題傳給模型，依這段對話的紀錄回答。這些呼叫使用該帳號的額度或計費。面板會執行 `git branch --show-current`，裝了 GitHub 的 `gh` 的話，也會用它查 pull request 和 CI 狀態。預設只傳給確切在線的對話；舊版 Codex／Grok 程序續接須明確加上 `--allow-resume`，使用該 agent 的權限與網路。獨立 OpenClaw 外掛停用對話存取；選用 Claude 連接器則設定 `allowConversationAccess: true`。
+
+`--serve` 預設只監聽本機（`127.0.0.1`）；這台電腦上的任何程式只要有連結就能使用。`--serve --lan` 會透過帶 token 的 HTTP 連結，在私人網路分享網頁。token 是存取金鑰，不會加密：同一網路上任何拿到 LAN 連結的人都能讀看板、修改看板檔案（包括匯入區塊），也能停止伺服器。LAN 網頁會拒絕啟動 agent 的回覆，也不顯示恢復對話的指令。私人網路位址不代表咖啡廳或旅館的網路值得信任。不要分享連結或 QR code。要停止服務，請按網頁上的「關閉看板」按鈕；若正在傳送回覆，請等完成後重試。只關分頁，背景服務會繼續運作；閒置關閉須自行啟用。看板伺服器或 LAN 監聽器每次重新啟動都會產生新的 token，因此停止後舊連結就無法使用。檔案變更、啟動的程式、網路存取和 `--chat` 隱藏資訊的限制，詳見 [SECURITY.md](../SECURITY.md)（英文）。
+
+### Windows 能用嗎？
+
+本機看板支援 macOS、Linux、Windows；原生 hooks 與傳訊依 host 和介面分開驗收，見 README 的[支援的 agent](../README.zh-TW.md#支援的-agent)。獨立 Windows hooks 使用 Node，不需要 `sh`。
+
+### 以前用的是 `claude-progress-pane`。
+
+外掛在 0.10.0 改了名，不會自己換過去。照[從舊名稱換過來](#從舊名稱換過來)的步驟做就好，`progress.md` 不會動。
+
+### 怎麼移除？
+
+獨立安裝：先關閉看板，預覽 `node ~/.agent-board/agent-board.mjs --codex-remove --agent <name>`，確認後加上 `--apply`。進度與歷史會保留。選用 Claude 外掛的移除方式：
+
+```sh
+claude -p "/progress connect remove"
+claude plugin uninstall agent-board@agent-board
+claude plugin marketplace remove agent-board
+```
+
+第一行會把其他 agent 裡的 hook 拿掉；先處理完列出的清理問題，再移除外掛。歷史紀錄、回報腳本和收件匣會留著。重試方式、已經移除外掛時的補救步驟，以及保留檔案的位置，請看上面的[更新與移除](#更新與移除)。
+
 ## 疑難排解
 
 - **沒卡片：** 檢查路徑、adapter、信任與重新載入；觀察真正事件並讀回確切 session 區塊，不手動製造事件宣稱通過。

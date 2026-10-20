@@ -841,7 +841,8 @@ const cliBoard = (lang: Lang, mode: Mode, agent: CliAgent): string => {
   const s = STRINGS[lang]
   const t = TERMINAL[mode]
   const mono = monoOf(lang)
-  const file = CLI_FILES[lang] ?? ''
+  const file = CLI_FILES[lang]
+  if (file === undefined) throw new Error(`there is no CLI sample for ${lang}`)
   // Every step the sample ticks was ticked this morning, so they are what "done today" counts.
   const view = buildView(parseProgress(file), [], null, NOW, (file.match(/^- \[x\] /gm) ?? []).length, {}, s)
   const items = boardItems(view, [], false, false)
@@ -863,6 +864,26 @@ const cliBoard = (lang: Lang, mode: Mode, agent: CliAgent): string => {
   return `<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}" role="img" aria-label="${esc(title)}" font-family="${sansOf(lang)}">
 <title>${esc(title)}</title>
 ${terminal(mode, mono, title, gridSvg(grid, PAD, BAR + PAD, theme), grid.length, 0.5, 0.5, cols)}
+</svg>
+`
+}
+
+// The top of the pane as it first opens, for the top of the README: the same sample and
+// drawPane as the tour, without the motion, in a light and a dark version so GitHub can show the
+// one that matches its theme. It stops at the line that counts the other questions waiting, so
+// the first screen of the README shows what needs you rather than the whole pane.
+const pane = (lang: Lang, mode: Mode): string => {
+  const whole = paneGrid(lang, mode, { opened: [], isAnswered: false })
+  const more = keyBox(whole.grid, 'focus::more')
+  if (more === null) throw new Error(`the ${lang} pane sample has no "more waiting" line to stop at`)
+  const grid = whole.grid.slice(0, more.row + 1)
+  const theme = whole.theme
+  const title = WORDS[lang].window
+  const W = windowWidth + 1
+  const H = BAR + PAD + grid.length * LINE + PAD + 1
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}" role="img" aria-label="${esc(title)}" font-family="${sansOf(lang)}">
+<title>${esc(title)}</title>
+${terminal(mode, monoOf(lang), title, gridSvg(grid, PAD, BAR + PAD, theme), grid.length, 0.5, 0.5)}
 </svg>
 `
 }
@@ -892,6 +913,7 @@ for (const lang of LANGS) writeFileSync(join(OUT, `promo-${lang}.svg`), promo(la
 mkdirSync(join(OUT, 'board'), { recursive: true })
 for (const lang of LANGS) {
   for (const agent of CLI_AGENTS) for (const mode of ['light', 'dark'] as const) writeFileSync(join(OUT, 'board', `${agent}-${lang}-${mode}.svg`), cliBoard(lang, mode, agent))
+  for (const mode of ['light', 'dark'] as const) writeFileSync(join(OUT, `pane-${lang}-${mode}.svg`), pane(lang, mode))
   writeFileSync(join(OUT, `tour-${lang}.svg`), tour(lang))
   writeFileSync(join(OUT, `flow-${lang}.svg`), flow(lang))
   writeFileSync(join(PAGES, `dashboard-${lang}.html`), dashboard(lang))
@@ -905,4 +927,4 @@ const svgs = [
 ]
 const fonts = Bun.spawnSync([python, join(import.meta.dir, 'fonts.py'), ...svgs], { stdout: 'inherit', stderr: 'inherit' })
 if (fonts.exitCode !== 0) throw new Error(`fonts.py stopped with exit code ${fonts.exitCode}`)
-console.log(`wrote the tour, flow, promotional card and CLI boards in ${LANGS.length} languages and ${AGENT_ICONS.length} agent icons to ${OUT}, and ${LANGS.length} progress.html pages to ${PAGES}`)
+console.log(`wrote the pane top, tour, flow, promotional card and CLI boards in ${LANGS.length} languages and ${AGENT_ICONS.length} agent icons to ${OUT}, and ${LANGS.length} progress.html pages to ${PAGES}`)
