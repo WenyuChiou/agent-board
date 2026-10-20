@@ -16,8 +16,7 @@ import type { World } from './fixtures/pane-world'
 const english = { HOME: '/home/me', LANG: 'en_US.UTF-8' }
 
 const noPaneMachineIds = async (text: string, world: World, { allow = [] }: { allow?: readonly string[] } = {}): Promise<void> => {
-  noMachineIds(text, world, [FILE, ...allow])
-  await knownFailure(250, () => noMachineIds(text, world, allow))
+  noMachineIds(text, world, allow)
 }
 
 const block = ({
@@ -49,7 +48,7 @@ describe('L1 first run', () => {
 
     expect(await ui.find({ type: 'Text', text: 'No work in progress right now.' })).toBeDefined()
     expect(await ui.find({ type: 'Text', text: /Once Claude starts on a Task list/ })).toBeDefined()
-    noMachineIds(visiblePaneText(await ui.drawn()), world, [FILE])
+    noMachineIds(visiblePaneText(await ui.drawn()), world)
 
     world.files.set(FILE, block())
     world.mtime += 1
@@ -92,7 +91,7 @@ describe('L2 a working day', () => {
     const before = world.files.get(FILE) ?? ''
     expect(await ui.find({ type: 'Text', text: '● 1' })).toBeDefined()
     expect(await ui.find({ type: 'Button', key: 'mine::1::Canary' })).toBeDefined()
-    noMachineIds(visiblePaneText(await ui.drawn()), world, [FILE])
+    noMachineIds(visiblePaneText(await ui.drawn()), world)
     const started = clock.now()
     await ui.press({ key: 'mine::1::Canary' })
     await clock.advance(10)
@@ -180,13 +179,8 @@ describe('L3 across agents and sessions', () => {
     expect(surfaces.terminal).not.toContain('● 1 Retry limit')
     expect(surfaces.html).toContain('● 0</span> waiting')
     expect(surfaces.html).toContain('Nothing needs you right now')
-    for (const [surface, visible] of Object.entries(surfaces)) {
-      if (surface === 'html') {
-        noMachineIds(visible, world, [FILE])
-        await knownFailure(250, () => noMachineIds(visible, world))
-      } else {
-        noMachineIds(visible, world)
-      }
+    for (const visible of Object.values(surfaces)) {
+      noMachineIds(visible, world)
       expect(visible).not.toContain('1 waiting')
     }
     await ui.unmount()
@@ -298,4 +292,87 @@ describe('L3b messages between sessions and agents', () => {
       })
     } finally { await ui.unmount() }
   })
+})
+
+
+test('L7 pane: no session id, hash or file path on the default pane', async ($, on) => {
+  const source = block({ resume: '12345678-1234-4234-8234-123456789abc', state: 'waiting', steps: '- [?] Publish the gateway, OK?' }) +
+    block({ project: 'docs-site', session: 'b1000002', agent: 'claude', resume: '22345678-1234-4234-8234-123456789abc', title: 'Prepare documentation' })
+  const at = Date.parse('2026-10-16T12:00:00Z')
+  const ledger = observeQuestions(emptyQuestions(), parseProgress(source), null, [], at, true, 'plain-words:1').ledger
+  const world = makeWorld([[FILE, source], ['/home/me/.claude/progress-questions.json', questionsJson(ledger)]])
+  world.env = english
+  engineBeneath(on, world)
+  await start($)
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
+  try {
+    noMachineIds(visiblePaneText(await ui.drawn()), world)
+    await ui.press({ key: 'section::others' })
+    const visible = visiblePaneText(await ui.drawn())
+    expect(visible).toContain('Ship request tracing')
+    expect(visible).toContain('Prepare documentation')
+    expect(visible).toContain(EN.progressFileShown)
+    noMachineIds(visible, world)
+  } finally { await ui.unmount() }
+})
+
+test('L7 pane: an unreadable progress file is named in words, with no path and no raw error', async ($, on) => {
+  const world = makeWorld([[FILE, block()]])
+  world.env = english
+  engineBeneath(((...args: Parameters<typeof on>) => {
+    if (args[0] !== 'fs.read') return Reflect.apply(on, undefined, args)
+    return on('fs.read', ($, e) => {
+      const path = e.path.replace(/^[A-Za-z]:\\/, '/').replace(/\\/g, '/')
+      if (path === FILE) return { deny: 'EACCES' }
+      const text = world.files.get(path)
+      return text === undefined ? { deny: 'ENOENT' } : { value: text }
+    })
+  }) as typeof on, world)
+  await start($, 'Inspect the unreadable progress file')
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
+  try {
+    const visible = visiblePaneText(await ui.drawn())
+    expect(visible).toContain(EN.fileUnreadable)
+    expect(visible).toContain(EN.storageReadOnly)
+    expect(visible).not.toContain(FILE)
+    expect(visible).not.toContain('EACCES')
+    noMachineIds(visible, world)
+  } finally { await ui.unmount() }
+})
+
+test('L7 pane: an unreadable progress file never shows a word from its path or an unknown error code', async ($, on) => {
+  const path = '/home/EVAN/TEAM_DATA/.claude/progress.md'
+  const messages = [`open '${path}' failed: EPERM`, 'EIO: i/o error, read', 'something went wrong']
+  let message = messages[0]!
+  const world = makeWorld([[FILE, block()]])
+  world.env = english
+  const clock = engineBeneath(((...args: Parameters<typeof on>) => {
+    if (args[0] !== 'fs.read') return Reflect.apply(on, undefined, args)
+    return on('fs.read', ($, e) => {
+      const file = e.path.replace(/^[A-Za-z]:\\/, '/').replace(/\\/g, '/')
+      if (file === FILE) return { deny: message }
+      const text = world.files.get(file)
+      return text === undefined ? { deny: 'ENOENT' } : { value: text }
+    })
+  }) as typeof on, world)
+  await start($, 'Inspect synthetic read failures')
+  for (const [index, error] of messages.entries()) {
+    message = error
+    world.mtime += 1
+    await clock.advance(2000)
+    const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
+    try {
+      const visible = visiblePaneText(await ui.drawn())
+      expect(visible).toContain(EN.fileUnreadable)
+      if (index === 0) expect(visible).toContain(EN.storageReadOnly)
+      else {
+        expect(visible).not.toContain(EN.storageReadOnly)
+        expect(visible).not.toContain(EN.storageBusy)
+        expect(visible).not.toContain(EN.storageFull)
+        expect(visible.trim()).toBe(EN.fileUnreadable)
+      }
+      for (const hidden of [path, FILE, 'EVAN', 'TEAM_DATA', 'EPERM', 'EIO', 'UNKNOWN']) expect(visible).not.toContain(hidden)
+      noMachineIds(visible, world)
+    } finally { await ui.unmount() }
+  }
 })

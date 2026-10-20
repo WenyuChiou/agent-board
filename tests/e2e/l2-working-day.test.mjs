@@ -189,8 +189,7 @@ describe('L2 a working day', { concurrency: 2 }, () => {
         // strict assertion, independently of the allowed copied command.
         noMachineIds((await terminal.screen(world, ['--all'])), world)
         const visible = (await html(world)).visible
-        noMachineIds(visible, world, { allow: [world.path] })
-        await knownFailure(250, () => assert.ok(!visible.includes(world.path), 'HTML footer exposes the full progress file path'))
+        noMachineIds(visible, world)
       }
       await inspectSurfaces(world)
     } finally { await world.close() }

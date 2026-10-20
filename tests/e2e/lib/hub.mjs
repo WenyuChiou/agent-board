@@ -270,11 +270,8 @@ export const withHub = async (specs, fn) => {
       },
       cleanPage: async (sent) => {
         const text = (await hub.page()).text()
-        const rawId = sent?.from === 'board' && /^AB-[a-f0-9]{8}-/.test(sent.id) ? sent.id : undefined
-        noMachineIds(text, world, { allow: rawId ? ['ACK ' + rawId] : [] })
-        if (rawId) await knownFailure('hold:raw-ack-id', () => {
-          assert.ok(!text.includes(rawId), 'The page shows the raw message id ' + rawId)
-        })
+        noMachineIds(text, world)
+        if (sent) assert.ok(!text.includes(sent.id), 'The page shows the raw message id ' + sent.id)
       },
       fallback: async (actor, text) => {
         const draft = await hub.draft(actor, text)

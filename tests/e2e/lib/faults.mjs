@@ -139,3 +139,28 @@ export const reinstall = world => {
   renameSync(world.installAside, world.claudeDir)
   world.installAside = undefined
 }
+
+// An exact-file fault can be enabled after server startup and works even under root.
+export const storageFault = (world, { file = world.path, code = 'EACCES' } = {}) => {
+  const marker = world.write('storage-fault-state', '')
+  const preload = world.write('storage-fault.cjs', `const fs = require('node:fs')
+const { resolve } = require('node:path')
+const { syncBuiltinESMExports } = require('node:module')
+const read = fs.readFileSync
+const target = ${JSON.stringify(file)}
+const fails = (file, operation) => {
+  if (resolve(String(file)) !== resolve(target)) return
+  if (read(${JSON.stringify(marker)}, 'utf8') !== operation) return
+  throw Object.assign(new Error('synthetic storage fault'), { code: ${JSON.stringify(code)} })
+}
+fs.readFileSync = (file, ...args) => { fails(file, 'read'); return read(file, ...args) }
+const rename = fs.renameSync
+fs.renameSync = (from, to) => { fails(to, 'write'); return rename(from, to) }
+syncBuiltinESMExports()
+`)
+  const before = world.env.NODE_OPTIONS
+  world.env.NODE_OPTIONS += ` --require=${JSON.stringify(preload)}`
+  const restore = () => { world.env.NODE_OPTIONS = before }
+  world.cleanups.push(restore)
+  return { enable: operation => world.write('storage-fault-state', operation), restore }
+}
