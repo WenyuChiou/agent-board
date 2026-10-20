@@ -1,31 +1,37 @@
-// Diagnostic only (draft pull request, never merged): how long the board's PowerShell Move-Item
-// takes in a fresh journey world on this runner, with the world's pinned module path and unset.
+// Diagnostic only (draft pull request, never merged): why the board's PowerShell Move-Item takes
+// over 20 s in a fresh journey world on this runner. Each variant runs in its own fresh world.
 import { test } from 'node:test'
-import { readdirSync, writeFileSync, existsSync } from 'node:fs'
+import { writeFileSync, existsSync } from 'node:fs'
 import { join } from 'node:path'
 import { makeWorld } from './lib/world.mjs'
-import { spawnIsolated } from './lib/spawn.mjs'
+import { spawnIsolated, ISOLATED_VARIABLES } from './lib/spawn.mjs'
 
-const count = dir => { try { return readdirSync(dir).length } catch { return 'missing' } }
 const quote = text => `'${text.replaceAll("'", "''")}'`
+// Machine-wide variables a stripped world leaves out; none of them names a user folder.
+const SYSTEM = ['SystemDrive', 'ProgramData', 'ProgramFiles', 'ProgramFiles(x86)', 'ProgramW6432', 'CommonProgramFiles', 'CommonProgramFiles(x86)', 'CommonProgramW6432', 'ALLUSERSPROFILE', 'PUBLIC', 'PROCESSOR_ARCHITECTURE', 'PROCESSOR_IDENTIFIER', 'PROCESSOR_LEVEL', 'PROCESSOR_REVISION', 'NUMBER_OF_PROCESSORS', 'OS', 'COMPUTERNAME', 'USERNAME', 'USERDOMAIN', 'DriverData', 'PSModulePath']
+const variants = {
+  world: world => { const env = { ...world.env }; delete env.PSModulePath; return env },
+  'world+system': world => { const env = { ...world.env }; for (const key of SYSTEM) if (process.env[key] !== undefined) env[key] = process.env[key]; return env },
+  'full+world-homes': world => { const env = { ...process.env }; for (const key of [...ISOLATED_VARIABLES, 'NODE_OPTIONS']) delete env[key]; return { ...env, ...Object.fromEntries(ISOLATED_VARIABLES.map(key => [key, world.env[key]])) } },
+}
 
-test('diag: PowerShell Move-Item in a fresh journey world, pinned and unset module path', { skip: process.platform !== 'win32', timeout: 300000 }, async () => {
-  console.log('runner PSModulePath: ' + (process.env.PSModulePath ?? '(unset)').split(';').map(dir => `${dir} [${count(dir)}]`).join(' | '))
-  for (const label of ['pinned', 'unset', 'pinned']) {
-    const world = makeWorld()
-    try {
-      const env = { ...world.env }
-      if (label === 'unset') delete env.PSModulePath
-      const ps = join(env.SystemRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe')
-      for (let attempt = 1; attempt <= 2; attempt++) {
-        const from = join(world.root, `probe-${attempt}.tmp`)
-        const to = join(world.root, `probe-${attempt}.json`)
+test('diag: PowerShell startup and Move-Item in fresh journey worlds by environment', { skip: process.platform !== 'win32', timeout: 600000 }, async () => {
+  console.log('runner variables present: ' + SYSTEM.filter(key => process.env[key] !== undefined).join(' '))
+  for (const [label, make] of Object.entries(variants)) {
+    for (const op of ['exit', 'move']) {
+      const world = makeWorld()
+      try {
+        const env = make(world)
+        const ps = join(process.env.SystemRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe')
+        const from = join(world.root, 'probe.tmp')
+        const to = join(world.root, 'probe.json')
         writeFileSync(from, 'x')
+        const command = op === 'exit' ? 'exit 0' : `Move-Item -LiteralPath ${quote(from)} -Destination ${quote(to)} -ErrorAction Stop`
         const start = Date.now()
-        const child = spawnIsolated(ps, ['-NoProfile', '-NonInteractive', '-Command', `Move-Item -LiteralPath ${quote(from)} -Destination ${quote(to)} -ErrorAction Stop`], { env, cwd: world.root, stdio: 'ignore', timeout: 120000 })
+        const child = spawnIsolated(ps, ['-NoProfile', '-NonInteractive', '-Command', command], { env, cwd: world.root, stdio: 'ignore', timeout: 120000 })
         const status = await new Promise(resolve => child.once('close', resolve))
-        console.log(`${label} world, move ${attempt}: ${Date.now() - start} ms, status ${status}, moved ${existsSync(to)}`)
-      }
-    } finally { await world.close() }
+        console.log(`${label}, ${op}: ${Date.now() - start} ms, status ${status}${op === 'move' ? `, moved ${existsSync(to)}` : ''}`)
+      } finally { await world.close() }
+    }
   }
 })
