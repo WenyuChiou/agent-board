@@ -468,16 +468,16 @@ test("an ended or stale session's task moves to the Stopped shelf and leaves the
   expect(view.recent.map(row => row.title)).toEqual(['Finished'])
 })
 
-test('a stopped task with a question shows once under Waiting on you and is not also counted as In progress', () => {
+test('a stopped task keeps its question on the Stopped shelf and is not counted as In progress', () => {
   const file = '## demo\n<!-- auto session=a1b2c3d4 agent=codex state=ended updated=2026-10-16T11:00:00Z resume=codex-session-123 dir=%2Fw -->\n### Release\n- [?] Publish, OK?\n- [ ] Finish\n<!-- /auto session=a1b2c3d4 -->'
   const view = buildView(parseProgress(file), [], null, NOW)
-  expect(view.waiting.map(item => item.text)).toEqual(['Publish, OK?'])
-  expect(view.overview.waiting).toBe(1)
+  expect(view.waiting).toEqual([])
+  expect(view.overview.waiting).toBe(0)
   expect(view.overview.active).toBe(0)
   expect(view.active).toEqual([])
   expect(view.groups).toEqual([])
   expect(view.stopped[0]).toMatchObject({ question: 'Publish, OK?', resume: "cd '/w' && codex resume codex-session-123" })
-  const hidden = buildView(parseProgress(file), [], null, NOW, 0, {}, ZH_TW, [view.waiting[0]?.hideKey ?? ''])
+  const hidden = buildView(parseProgress(file), [], null, NOW, 0, {}, ZH_TW, [view.stopped[0]?.questions?.[0]?.hideKey ?? ''])
   expect(hidden.waiting).toEqual([])
   expect(hidden.hidden).toHaveLength(1)
   expect(hidden.stopped).toHaveLength(1)

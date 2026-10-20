@@ -173,7 +173,7 @@ export type ServeModel = {
   groups: Array<{ project: string; rows: ServeRow[] }>
   turns: ServeTurn[]
   // Finished in the last day, until it goes to the archive.
-  recent: Array<{ project: string; title: string; when: string }>
+  recent: Array<{ project: string; title: string; when: string; questions?: string[] }>
 }
 
 // `task` and `session` name the Claude Code session to answer in, the way the pane does.
@@ -307,7 +307,7 @@ export const serveModel = (view: View, pending: readonly PendingTurn[], s: Strin
     older: (view.older ?? []).map(({ project, agent, task, text, note, context, when }) => ({ project, agent, task, text, note, context, when })),
     groups: [...groups].map(([project, rows]) => ({ project, rows })),
     turns,
-    recent: view.recent.map(item => ({ project: item.project, title: item.title, when: item.when })),
+    recent: view.recent.map(item => ({ project: item.project, title: item.title, when: item.when, questions: item.questions?.map(question => [question.text, question.note].filter(Boolean).join(' — ')) })),
   }
 }
 
@@ -889,6 +889,7 @@ const PAGE_SCRIPT = String.raw`
       var done = el('ul', 'steps');
       model.recent.forEach(function (item) {
         add(done, add(el('li'), el('span', 's-done', '✓'), el('span', 't-quiet', [item.project, item.title, item.when].filter(Boolean).join(' · '))));
+        (item.questions || []).forEach(function (question) { add(done, add(el('li'), el('span'), el('span', 't-quiet', question))); });
       });
       add(board, add(el('div', 'card'), done, add(el('div', 'actions'), button(w('archiveNow'), function () {
         say('…');
