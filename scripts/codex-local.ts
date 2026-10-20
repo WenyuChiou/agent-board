@@ -1,7 +1,8 @@
 import { createHash, randomUUID } from 'node:crypto'
-import { closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs'
+import { closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, readdirSync, renameSync, unlinkSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
+import { performance } from 'node:perf_hooks'
 import { pathToFileURL } from 'node:url'
 import { answerLocalQuestions, boardConfirmedReport, codexEvent, codexEvents, codexReport, putCodexBlock } from '../hooks/codex'
 import type { CodexReport } from '../hooks/codex'
@@ -145,8 +146,6 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
     // tool inputs, last_assistant_message, or permission decisions from a hook payload.
     const session = mode !== '--codex-report' ? agent === 'antigravity' ? payload.conversationId : payload.session_id ?? payload.sessionId ?? payload.sessionID ?? (agent === 'grok' ? process.env.GROK_SESSION_ID : undefined) : flag('--session') ?? (agent === 'codex' ? process.env.CODEX_THREAD_ID : process.env.AGENT_BOARD_AGENT === agent ? process.env.AGENT_BOARD_SESSION_ID : undefined)
     if (typeof session !== 'string' || !/^[a-zA-Z0-9][a-zA-Z0-9_-]{5,127}$/.test(session)) throw new Error('INVALID_SESSION')
-    const owner = hash(`${agent}:${session}`)
-    const recordFile = join(root, 'sessions', `${owner}.json`)
     const now = new Date().toISOString().replace(/\.\d{3}Z$/, 'Z')
     if (mode === '--agent-status' && (agent === 'codex' || agent === 'cursor')) throw new Error('INVALID_EVENT')
     const status = flag('--state') ?? payload.state
@@ -157,8 +156,28 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
     // ordering without treating a board lookup as an answer to the question.
     const isBoardPrompt = (isPromptEvent(raw) || raw.prompt_submitted === true) && (raw.board_request === true || isBoardRequest(raw, boardRequestWords(Object.values(STRINGS))))
     const isPrompt = !isBoardPrompt && mode === '--agent-status' && status === 'working' && (payload.prompt_submitted === true || /^(?:UserPromptSubmit|user_prompt_submit|BeforeAgent)$/.test(String(payload.hook_event_name ?? payload.hookEventName)))
-    let report!: CodexReport
-    withLocalLock(`${progress}.agent-board-lock`, () => {
+    type Pending = {
+      version: number; progress: string; mode: string; agent: LocalAgent; session: string; now: string
+      status: unknown; event?: string; isBoardPrompt: boolean; isPrompt: boolean; payload: Json
+    }
+    // A queued event keeps metadata only: the host's own fields stay out, as they do above.
+    const current: Pending = {
+      version: 1, progress, mode, agent, session, now, status: mode === '--agent-status' ? status : undefined, event, isBoardPrompt, isPrompt,
+      payload: mode === '--codex-report' ? payload : mode === '--codex-event' ? {
+        session_id: payload.session_id, hook_event_name: payload.hook_event_name,
+        turn_id: payload.turn_id, prompt_submitted: payload.prompt_submitted,
+      } : {},
+    }
+    // A program holding progress.md open makes Windows refuse its read (EBUSY) and the rename
+    // onto it (EPERM). Any other EPERM or EACCES is a real refusal and fails as before.
+    const isBusy = (error: unknown): boolean => {
+      const failure = error as { code?: string; syscall?: string; dest?: string } | null
+      const isLockedRename = process.platform === 'win32' && failure?.code === 'EPERM' && failure.syscall === 'rename' && typeof failure.dest === 'string' && resolve(failure.dest) === progress
+      return failure?.code === 'EBUSY' || failure?.code === 'EAGAIN' || isLockedRename || error instanceof Error && error.message === 'LOCK_BUSY'
+    }
+    const apply = ({ mode, agent, session, now, status, event, isBoardPrompt, isPrompt, payload }: Pending): CodexReport => {
+      const owner = hash(`${agent}:${session}`)
+      const recordFile = join(root, 'sessions', `${owner}.json`)
       const saved = readLocal(recordFile)
       const original = saved === null ? null : JSON.parse(saved) as CodexReport
       if (original?.agent && original.agent !== agent) throw new Error('SESSION_CONFLICT')
@@ -172,10 +191,10 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
         steps: isPrompt && previous ? answerLocalQuestions(previous.steps) : previous?.steps ?? [`- [ ] ${s.localAgentLifecycle}`],
       } : payload, clock, s)
       const priorActivity = previous?.activity ?? []
-      report = { ...base, ...(isBoardPrompt && previous ? { state: previous.state, steps: previous.steps } : {}), agent, ...(mode === '--codex-event' && !previous ? { title: s.localAgentTask(agent), project: agent } : {}), ...(event === undefined ? {} : { activity: [...priorActivity, { event, state: String(status), updated: clock }].slice(-16) }) }
+      const report = { ...base, ...(isBoardPrompt && previous ? { state: previous.state, steps: previous.steps } : {}), agent, ...(mode === '--codex-event' && !previous ? { title: s.localAgentTask(agent), project: agent } : {}), ...(event === undefined ? {} : { activity: [...priorActivity, { event, state: String(status), updated: clock }].slice(-16) }) }
       // A replay can skip writes only after a board completion reached the cache too.
       const repaired = reporterTail(bytes)
-      if (repaired.fragment === null && mode !== '--codex-report' && previous === original && previous !== null && previous.state === report.state && previous.turn === report.turn && JSON.stringify(previous.steps) === JSON.stringify(report.steps) && (event === undefined || priorActivity.at(-1)?.event === event)) return
+      if (repaired.fragment === null && mode !== '--codex-report' && previous === original && previous !== null && previous.state === report.state && previous.turn === report.turn && JSON.stringify(previous.steps) === JSON.stringify(report.steps) && (event === undefined || priorActivity.at(-1)?.event === event)) return report
       // Encode only the new report; existing bytes, including partial UTF-8, pass through unchanged.
       const encoded = (value: string): string => Buffer.from(value, 'utf8').toString('latin1')
       const next = Buffer.from(putCodexBlock(repaired.bytes.toString('latin1'), {
@@ -189,8 +208,68 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
         throw error
       }
       atomic(recordFile, `${JSON.stringify(report, null, 2)}\n`)
-    })
-    if (mode === '--codex-report') output({ session, block: owner.slice(0, 8), state: report.state, updated: report.updated, progress })
+      return report
+    }
+    const pending = join(root, 'pending')
+    const pendingFiles = (): string[] => existsSync(pending) ? readdirSync(pending).filter(name => name.endsWith('.json')).sort() : []
+    // A queued entry passes the same checks a live event passes above before it is applied.
+    const isHookEntry = (entry: Pending): boolean =>
+      (entry.mode === '--codex-event' || entry.mode === '--agent-status' && entry.agent !== 'codex' && entry.agent !== 'cursor' && ['working', 'waiting', 'ended'].includes(String(entry.status)))
+      && localAgents.includes(entry.agent) && /^[a-zA-Z0-9][a-zA-Z0-9_-]{5,127}$/.test(String(entry.session))
+      && typeof entry.now === 'string' && typeof entry.isPrompt === 'boolean' && typeof entry.isBoardPrompt === 'boolean'
+      && (entry.event === undefined || entry.agent === 'antigravity' && entry.mode === '--agent-status' && statusEvents.antigravity?.[entry.event] === entry.status)
+      // A live event's own session_id is either missing or the session it is filed under.
+      && (entry.mode !== '--codex-event' || [undefined, entry.session].includes(object(entry.payload).session_id as string | undefined))
+    // A status event has no turn to order it by: one that lands behind a newer event of its
+    // session would move that session back, so it is dropped instead. `now` keeps whole seconds,
+    // so an older event from the same second as the session's last report is not caught and applies.
+    const isOverdue = (entry: Pending): boolean => {
+      if (entry.mode !== '--agent-status') return false
+      const saved = readLocal(join(root, 'sessions', `${hash(`${entry.agent}:${entry.session}`)}.json`))
+      return saved !== null && Date.parse(entry.now) < Date.parse(String(object(JSON.parse(saved)).updated))
+    }
+    const deadline = performance.now() + 1800
+    let delay = 50
+    let report: CodexReport | undefined
+    for (;;) {
+      try {
+        report = withLocalLock(`${progress}.agent-board-lock`, () => {
+          // Queued events go first, oldest first, so every session's events land in the order
+          // they happened. One that can never apply is dropped rather than block the rest.
+          for (const name of pendingFiles()) {
+            const file = join(pending, name)
+            try {
+              const entry = object(JSON.parse(readFileSync(file, 'utf8'))) as Pending
+              if (entry.version === 1 && typeof entry.progress === 'string' && isHookEntry(entry)) {
+                if (entry.progress !== progress) continue
+                if (!isOverdue(entry)) apply(entry)
+              }
+            } catch (error) {
+              if (isBusy(error)) throw error
+            }
+            // Two boards sharing one data folder can both drop the same entry.
+            try { unlinkSync(file) } catch (error) {
+              if ((error as { code?: string }).code !== 'ENOENT') throw error
+            }
+          }
+          return apply(current)
+        }, { waitMs: Math.max(0, deadline - performance.now()) })
+        break
+      } catch (error) {
+        if (!isBusy(error)) throw error
+        const left = deadline - performance.now()
+        if (left <= 0) {
+          if (mode === '--codex-report') throw error
+          mkdirSync(pending, { recursive: true })
+          if (pendingFiles().length >= 64) throw error
+          atomic(join(pending, `${String(Date.now()).padStart(15, '0')}-${randomUUID()}.json`), `${JSON.stringify(current)}\n`)
+          break
+        }
+        await new Promise(done => setTimeout(done, Math.min(delay, left)))
+        delay = Math.min(delay * 2, 400)
+      }
+    }
+    if (mode === '--codex-report') output({ session, block: hash(`${agent}:${session}`).slice(0, 8), state: report!.state, updated: report!.updated, progress })
     else if (agent === 'cursor') output(raw.hook_event_name === 'sessionStart' ? { env: { AGENT_BOARD_SESSION_ID: session, AGENT_BOARD_AGENT: agent } } : {})
     else if (agent === 'gemini' || agent === 'antigravity') output({})
     return true

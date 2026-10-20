@@ -1829,6 +1829,70 @@ test('chat relay reviews unknown historical clocks and rejects confirmations aft
   } finally { await board.close() }
 })
 
+test('L7 errors: every error is one plain sentence with no stack trace and no full path', { timeout: 90_000 }, async () => {
+  for (const code of ['EBUSY', 'EAGAIN']) {
+    for (const [lang, note] of [
+      ['en', 'progress.md is locked by another program; nothing was changed.'],
+      ['zh-TW', 'progress.md 被其他程式鎖住了，沒有改動任何檔案。'],
+      ['zh-CN', 'progress.md 被其他程序锁住了，没有改动任何文件。'],
+    ]) {
+      const preload = questionFault(`const original = fs.readFileSync
+fs.readFileSync = (file, ...args) => { if (file === path.join(__dirname, 'progress.md')) throw Object.assign(new Error('EBUSY: resource busy or locked'), { code: '${code}' }); return original(file, ...args) }`)
+      for (const args of [[], ['--keys', 'q'], ['--chat']]) {
+        const ran = chatRun(args, { lang, preload })
+        assert.equal(ran.status, 1, ran.stderr)
+        assert.equal(ran.stdout + ran.stderr, `${note}\n`)
+        assert.equal(args.includes('--chat') ? ran.stderr : ran.stdout, '')
+        assert.doesNotMatch(ran.stdout + ran.stderr, /\bat |may already have changed/)
+        assert.ok(!`${ran.stdout}${ran.stderr}`.includes(ran.home), ran.stdout + ran.stderr)
+      }
+      const watched = chatRun(['--watch'], { lang, preload: preload + `
+const write = process.stdout.write.bind(process.stdout)
+process.stdout.write = (chunk, ...args) => { const result = write(chunk, ...args); if (String(chunk).includes(${JSON.stringify(note)})) process.exit(1); return result }
+` })
+      assert.equal(watched.status, 1, watched.stderr)
+      assert.equal(watched.stderr, `${note}\n`)
+      assert.equal(watched.stdout, `\u001b[2J\u001b[H${note}\n`)
+    }
+    const faults = mkdtempSync(join(tmpdir(), 'board-locked-'))
+    const preload = join(faults, 'fault.cjs')
+    const lock = join(faults, 'locked')
+    writeFileSync(lock, '')
+    writeFileSync(preload, `const fs = require('node:fs')
+const { basename } = require('node:path')
+const original = fs.readFileSync
+fs.readFileSync = (file, ...args) => { if (basename(String(file)) === 'progress.md' && fs.existsSync(${JSON.stringify(lock)})) throw Object.assign(new Error('EBUSY: resource busy or locked'), { code: '${code}' }); return original(file, ...args) }
+require('node:module').syncBuiltinESMExports()
+`)
+    let board
+    try {
+      board = await page('', { NODE_OPTIONS: `--require ${JSON.stringify(preload)}` })
+      const note = 'progress.md is locked by another program; nothing was changed.'
+      const seen = await board.call('GET', '/api/board')
+      assert.equal(seen.status, 409, seen.body)
+      assert.equal(seen.json().note, note)
+      const opened = await board.call('POST', '/api/lan', { body: {} })
+      if (opened.status === 200) {
+        const lan = new URL(opened.json().url)
+        const far = await fetchAt(lan.hostname, Number(lan.port), 'GET', '/api/board', { 'x-board-token': lan.searchParams.get('t') })
+        assert.equal(far.status, 409, far.body)
+        assert.equal(far.json().note, note)
+      }
+      rmSync(lock)
+      const printed = spawnSync(process.execPath, [join(board.dir, 'agent-board.mjs')], {
+        env: { ...process.env, CLAUDE_PROGRESS_FILE: '', NODE_OPTIONS: `--require ${JSON.stringify(preload)}`, NO_COLOR: '1' },
+        encoding: 'utf8', timeout: 5000,
+      })
+      assert.equal(printed.status, 0, printed.stderr)
+      assert.ok(printed.stdout.includes('Fabrikam fellowship'), printed.stdout)
+      assert.equal(printed.stderr, '')
+      assert.equal((await board.call('GET', '/api/board')).status, 200)
+    } finally {
+      try { if (board) await board.close() } finally { rmSync(faults, { recursive: true, force: true }) }
+    }
+  }
+})
+
 test('a board the page cannot read is named there with that file and its error, rather than shown as offline, and a phone is told the file name only', { timeout: 30_000 }, async () => {
   // Every read of the journal fails, the way a file without read access would.
   const faults = mkdtempSync(join(tmpdir(), 'board-fault-'))
@@ -1887,6 +1951,39 @@ syncBuiltinESMExports()
     // The page runs on, with the step still there to tick again.
     assert.equal((await call('GET', '/api/board')).status, 200)
     assert.ok(await keyOf('Fabrikam fellowship'))
+  } finally {
+    await board.close()
+    rmSync(faults, { recursive: true, force: true })
+  }
+})
+
+test('a press that wrote its history before progress.md was locked says files may have changed, not that nothing was', { timeout: 30_000 }, async () => {
+  // The tick writes the journal first. Then another program holds progress.md: the rename onto
+  // it is refused, and every read of it after that is too.
+  const faults = mkdtempSync(join(tmpdir(), 'board-fault-'))
+  const preload = join(faults, 'fault.cjs')
+  writeFileSync(preload, `const fs = require('node:fs')
+const { syncBuiltinESMExports } = require('node:module')
+let isHeld = false
+const isBoard = file => String(file).endsWith('progress.md')
+const rename = fs.renameSync
+const read = fs.readFileSync
+fs.renameSync = (from, to) => { if (isBoard(to)) { isHeld = true; throw Object.assign(new Error('injected rename refusal'), { code: 'EPERM' }) } return rename(from, to) }
+fs.readFileSync = (file, ...args) => { if (isHeld && isBoard(file)) throw Object.assign(new Error('injected busy read'), { code: 'EBUSY' }); return read(file, ...args) }
+syncBuiltinESMExports()
+`)
+  const board = await page('', { NODE_OPTIONS: `--require ${JSON.stringify(preload)}` })
+  try {
+    const { call, keyOf, rowOf } = board
+    const ticked = await call('POST', '/api/act', { body: { key: await keyOf('Fabrikam fellowship'), type: 'tick', text: 'Ask two referees', fp: (await rowOf('Fabrikam fellowship')).fp } })
+    assert.equal(ticked.status, 409, ticked.body)
+    assert.match(ticked.json().note, /^Could not safely read or update .*progress\.md \(EBUSY\)\. Some files may already have changed\./)
+    assert.doesNotMatch(ticked.json().note, /locked by another program/)
+    // The page reads the board again right after every press, and that note replaces the press's.
+    const refreshed = await call('GET', '/api/board')
+    assert.equal(refreshed.status, 409, refreshed.body)
+    assert.match(refreshed.json().note, /Some files may already have changed\./)
+    assert.doesNotMatch(refreshed.json().note, /nothing was changed/)
   } finally {
     await board.close()
     rmSync(faults, { recursive: true, force: true })

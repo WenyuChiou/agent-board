@@ -466,6 +466,7 @@ export const ZH_TW = {
   reporterFailed: (reason: string): string => `進度回報未能儲存（${reason}），請檢查進度檔後再試。`,
   tailRepairFailed: '無法安全修復不完整的結尾，沒有改任何東西。請檢查進度檔後再重新回報。',
   boardStorageFailed: (file: string, code: string): string => `無法安全讀取或更新 ${file}（${code}）。部分檔案可能已經改動。請檢查進度與歷史紀錄，排除檔案存取或磁碟問題後再試。`,
+  boardLocked: (file: string): string => `${file} 被其他程式鎖住了，沒有改動任何檔案。`,
   // The board's page in the browser (`agent-board.mjs --serve`). The chat-relay prompt stays
   // in English in every language: it is the one tested live, and its markers are literal.
   serveAt: (url: string): string => `可以點的看板（勾完成、封存、回答）：${url}`,
