@@ -1,4 +1,4 @@
-// Diagnostic only (draft pull request, never merged): which machine-wide variable the board's
+// Diagnostic only (draft pull request, never merged): which variable beyond the machine-wide ones the board's
 // PowerShell Move-Item needs to stay fast in a fresh journey world. Each variant has its own world.
 import { test } from 'node:test'
 import { writeFileSync, existsSync } from 'node:fs'
@@ -9,13 +9,14 @@ import { spawnIsolated } from './lib/spawn.mjs'
 const quote = text => `'${text.replaceAll("'", "''")}'`
 const MACHINE = ['SystemDrive', 'ProgramData', 'ProgramFiles', 'ProgramFiles(x86)', 'ProgramW6432', 'CommonProgramFiles', 'CommonProgramFiles(x86)', 'CommonProgramW6432', 'ALLUSERSPROFILE', 'PUBLIC', 'PROCESSOR_ARCHITECTURE', 'PROCESSOR_IDENTIFIER', 'PROCESSOR_LEVEL', 'PROCESSOR_REVISION', 'NUMBER_OF_PROCESSORS', 'OS', 'DriverData']
 const stripped = world => { const env = { ...world.env }; for (const key of MACHINE) delete env[key]; return env }
+const added = keys => world => ({ ...world.env, ...Object.fromEntries(keys.map(key => [key, process.env[key]])) })
 const variants = {
   'world as built': world => world.env,
-  stripped,
-  ...Object.fromEntries(['SystemDrive', 'ProgramData', 'ProgramFiles', 'ALLUSERSPROFILE'].map(key => [`stripped + ${key}`, world => ({ ...stripped(world), [key]: process.env[key] })])),
+  ...Object.fromEntries(['USERNAME', 'USERDOMAIN', 'COMPUTERNAME', 'PSModulePath'].map(key => [`world + ${key}`, added([key])])),
+  'world + USERNAME USERDOMAIN COMPUTERNAME': added(['USERNAME', 'USERDOMAIN', 'COMPUTERNAME']),
 }
 
-test('diag: Move-Item in fresh journey worlds with and without each machine variable', { skip: process.platform !== 'win32', timeout: 600000 }, async () => {
+test('diag: Move-Item in fresh journey worlds with each identity variable added', { skip: process.platform !== 'win32', timeout: 600000 }, async () => {
   for (const [label, make] of Object.entries(variants)) {
     const world = makeWorld()
     try {
