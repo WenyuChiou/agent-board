@@ -54,7 +54,10 @@ removal fail closed without it. Ownership, disable intent and last setup status
 live in `~/.agent-board/legacy-connect.json`, shared across Claude data roots and
 protected by the independent installer's home-level lock. Reload older plugin
 sessions before migration: writers that ignore the lock are not coordinated.
-Automatic probes run after pane/polling startup and outside the mutation lock.
+Automatic probes run after pane/polling startup and outside the mutation lock,
+and only for the default Claude data folder (`CLAUDE_CONFIG_DIR` unset or `~/.claude`) with the
+default progress file or the one last connected by hand; any other session
+connects only when you run `/progress connect` in it.
 Removal records disable intent before cleanup, fencing delayed automatic setup.
 Damaged authority or recovery records are retained and reported rather than reset.
 Status may initialize recognized legacy display metadata; it does not change host
