@@ -4,7 +4,7 @@ Read [AGENTS.md](AGENTS.md) for code layout and conventions. Keep changes scoped
 
 ## Set up
 
-Clone the repository and use Node 22.18+ or 24 for the tests (the installed bundle supports Node 18+). Use Bun 1.4.2 when rebuilding generated files. There is no package manifest or runtime dependency installation.
+Clone the repository and use Node 22.18+ or 24 for the tests (the installed bundle supports Node 18+). Use Bun 1.4.2 when rebuilding generated files. `package.json` is only the npm package's manifest: it has no dependencies and no scripts, so there is nothing to install.
 
 Independent development and installation do not require Claude Code. Optional pane validation uses Claude Code 2.1.301 in CI, pinned in `.github/workflows/test.yml`; `plugin validate` and `plugin test` are offline and need no model login.
 
@@ -15,6 +15,7 @@ From the repository root, with Node 22.18+ or 24 and npm (for `npx`), the checks
 ```sh
 node --test tests/exchange.test.mjs tests/messaging.test.mjs tests/pr-check.test.mjs tests/preflight.test.mjs tests/changelog-fold.test.mjs
 node --test tests/board.test.mjs tests/board-storage.test.mjs tests/codex-local.test.mjs tests/local-lock.test.mjs tests/prompt-hooks.test.mjs tests/codex-host.test.mjs tests/codex-fallback.test.mjs tests/legacy-connect.test.mjs tests/connect-worker.test.mjs
+node --test tests/npm-package.test.mjs
 npx --yes bun@1.4.2 scripts/build-board.ts --check
 npx --yes bun@1.4.2 scripts/build-released.ts --check
 node scripts/pr-check.mjs --pr <N>
@@ -36,7 +37,7 @@ python3 -B scripts/remote-reporter/test_pipeline.py
 
 Run strict TypeScript for changed standalone modules with Node typings from your development environment. Full `tsc -p .` additionally needs the host-generated `.claude-plugin/types/` SDK, written when Claude Code loads the local plugin (`claude --plugin-dir .`). It is gitignored and must not be invented or edited. If unavailable, report full typechecking as unrun; passing standalone checks does not replace it. Do not start model work merely to claim an offline check passed.
 
-CI runs plugin/installer/reporter checks on Linux and Windows; Node 22/24 exchange, messaging and board checks on both systems; the Node 22/24 PR-check tests on both systems, in jobs of their own; and the PR check (`.github/workflows/pr-check.yml`). It checks generated bundles/releases, but not full `tsc -p .`.
+CI runs plugin/installer/reporter checks on Linux and Windows; Node 22/24 exchange, messaging and board checks on both systems; the Node 22/24 PR-check tests and npm package tests on both systems, in jobs of their own; and the PR check (`.github/workflows/pr-check.yml`). It checks generated bundles/releases, but not full `tsc -p .`.
 
 ## Changes and evidence
 
@@ -51,7 +52,7 @@ For optional OpenCode SDK/DeepSeek loader checks, use the pinned packages and di
 Several agents (Claude Code sessions, Codex, Antigravity, cloud agents such as dot and Muse, and agents on other computers) work in this repository at the same time. These rules keep their work from overlapping. They apply to every agent and person. [docs/CONTRIBUTOR-PATH.md](docs/CONTRIBUTOR-PATH.md) walks through them with the exact commands; where the two disagree, this section wins. `node scripts/pr-check.mjs` checks rules 2, 6 and 10; the `Author:` line, the template sections and pictures' alt text (rule 7); the branch and title names (rules 4 and 5); that a claim names you and your branch (rule 3, not yet its end time: #303); private data in the body and added docs; and, when you run it yourself, the board bundle (rule 5). It runs on your computer and on every pull request; the rest is the reviewer's to check.
 
 1. **Nothing reaches `main` except through a pull request.** Never push to `main`. Never force-push a branch: bring it up to date by merging (rule 4).
-2. **One issue, one pull request.** Start from an issue; open one if none fits. A pull request fixes one issue, and its body opens with `Fixes #N`. When an issue is split into steps, each step's pull request opens with `Part of #N` and the last one with `Fixes #N`. Anything else you find goes into a new issue, not into the same pull request. A release pull request needs no issue and has no `Fixes` line.
+2. **One issue, one pull request.** Start from an issue; open one if none fits. A pull request fixes one issue, and its body opens with `Fixes #N`. When an issue is split into steps, each step's pull request opens with `Part of #N` and the last one with `Fixes #N`. Anything else you find goes in a comment on your issue, not into the same pull request; the maintainer files it if it qualifies. A release pull request needs no issue and has no `Fixes` line.
 3. **Find work, then claim it.** Work ready to start carries the label `ready`; `for-agent` means any agent may take it and `for-dot` means dot or Muse. The issue body says who it is planned for (`Executor`), what must pass (`Acceptance tests`) and what must land first (`Blocked by`); the body is the current scope. Leave issues labelled `blocked` alone, and those labelled `claimed` unless the claim has run out (below). Before you branch, check the open pull requests (`gh pr list --state open`) and the issue's comments. To claim, comment on the issue
 
    `Claim: <agent>, <branch>, until <YYYY-MM-DD HH:MM> UTC`
@@ -96,13 +97,16 @@ README pictures are SVGs that `bun docs/preview/render.ts` draws from synthetic 
 
 ## Releases
 
-1. Update `.claude-plugin/plugin.json`, the three README badges and concise marketplace descriptions. Keep support claims aligned with evidence.
+The full checklist, what makes a release stable, and the npm steps are in [docs/RELEASING.md](docs/RELEASING.md). In short:
+
+1. Update `.claude-plugin/plugin.json` and `package.json` to the same version, the three README badges and concise marketplace descriptions. Keep support claims aligned with evidence.
 2. Run `node scripts/changelog-fold.mjs x.y.z` to see what it will do, then `node scripts/changelog-fold.mjs x.y.z --write`. It moves every fragment in `changelog.d/` and any entry left under `## Unreleased` into `## x.y.z — YYYY-MM-DD` and removes the folded fragments.
 3. Fetch tags (`git fetch --tags origin`), then run `bun scripts/build-released.ts` with Bun 1.4.2. It records this version's generated-file ownership; do not edit its output manually.
    Run `bun scripts/build-board.ts`, then regenerate the released table once more. Both `--check` commands must pass together. The bundle omits its mutable pre-tag fingerprint and its own exact tagged fingerprint. Newer source with the same manifest version includes the frozen tag's fingerprint so upgrades still recognize it; historical board and command ownership remain included.
-4. Run applicable checks and generated-file checks. State any unavailable full SDK typecheck.
-5. Open a regular PR. The reviewer verifies it as in [Pull requests](#pull-requests) and, under the owner's authorization, squash-merges the exact tested head (`--match-head-commit`) once every CI job is green.
+4. Run applicable checks and generated-file checks, including `node --test tests/npm-package.test.mjs`, which fails when `package.json` and `plugin.json` disagree. State any unavailable full SDK typecheck.
+5. Open a regular PR titled `chore(release): Agent Board x.y.z` (pr-check treats a title starting `chore(release):` as a release). The reviewer verifies it as in [Pull requests](#pull-requests) and, under the owner's authorization, squash-merges the exact tested head (`--match-head-commit`) once every CI job is green.
 6. On the merged release commit, run `claude plugin tag . --dry-run`, then `claude plugin tag .`. Push only the new exact tag, for example `git push origin agent-board--v0.23.0`. Never replace an existing release tag or push unrelated local tags.
+7. Pick the channel by the release gate in docs/RELEASING.md. A stable release gets a GitHub release marked Latest and npm's `latest` tag; any other release is a GitHub pre-release and npm's `next` tag. Write the GitHub release notes from the version's CHANGELOG section. Only the owner publishes to npm, from the exact tagged commit, typing the one-time code; agents never run `npm login` or `npm publish`.
 
 ## Support matrix
 
