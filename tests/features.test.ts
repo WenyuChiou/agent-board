@@ -4,7 +4,7 @@ import { expect, test } from 'claude-code/testing'
 import type { ProgressMirror, ProgressPr } from '../types'
 import { askOf } from '../hooks/ask'
 import { boardItems, boardKey, boardScreen, boardText, CHAT_MAX, chatText, doneToday, emptyBoardState, fingerprint, fit, peekInbox, pinned, redact } from '../hooks/board'
-import { addManualTask, isArchivable, manualTaskCount, mergeBlock, renderAutoBlock, setManualStep, takeArchivable, takeManualDone, takeTask, upsertAutoBlock } from '../hooks/blocks'
+import { addManualTask, isArchivable, manualTaskCount, mergeBlock, renderAutoBlock, scanBlocks, setManualStep, takeArchivable, takeManualDone, takeTask, upsertAutoBlock } from '../hooks/blocks'
 import { agentHooks, boardCommands, boardScript, COLLISION, DELETE, generatedFile, isNodeSupported, isReleased, isReleasedBoard, isSetupState, isWindowsHost, NODE_MIN, nodeVersionOf, openclawPlugin, openclawPrinted, openclawSavedBy, openclawTooOld, PROBLEM_ARGS, readConfig, RELEASE_PATHS, reportCommand, reporterPs1, reporterSh, setupAgents, setupLines, withFlatHook, withGroupedHook, withHermesHooks, withoutHermesHooks, withoutOurHooks, withoutSection } from '../hooks/connect'
 import { boardRun } from '../hooks/board-commands'
 import { dashboardHtml } from '../hooks/dashboard'
@@ -2707,10 +2707,51 @@ test("the page runs only its own script, and the chat prompt in it cannot close 
   expect(Object.values(pageWords(STRINGS['zh-CN'])).every(word => typeof word === 'string' && word !== '')).toBe(true)
 })
 
+const oldClockFragment = (at: number, state = 'working'): string =>
+  `## launch\n<!-- auto session=c0ffee12 agent=muse state=${state} updated=${new Date(at).toISOString()} -->\n### Draft the launch post\n- [~] Outline\n<!-- /auto session=c0ffee12 -->\n`
+
+test('a pasted working block whose clock is three weeks old is refused and nothing is written', () => {
+  const day = 24 * 60 * 60 * 1000
+  const at = SERVE_NOW - 21 * day
+  for (const s of Object.values(STRINGS)) {
+    for (const state of ['working', 'waiting']) {
+      const pasted = oldClockFragment(at, state)
+      for (const before of [SERVE_FILE, pasted, pasted.replace('Outline', 'Earlier outline')]) {
+        const result = mergeBlock(before, pasted, SERVE_NOW, s)
+        expect(result).toEqual({ problem: 'oldTime', daysBehind: 21 })
+        expect('text' in result).toBe(false)
+      }
+    }
+  }
+})
+
+test('a pasted done block with an old clock is still merged', () => {
+  const at = SERVE_NOW - 21 * 24 * 60 * 60 * 1000
+  for (const state of ['done', 'ended']) {
+    const result = mergeBlock(SERVE_FILE, oldClockFragment(at, state), SERVE_NOW, STRINGS.en)
+    expect('text' in result ? result.text : '').toContain(`state=${state} updated=${new Date(at).toISOString()}`)
+  }
+})
+
+test('a pasted working block is merged up to exactly three days old and refused a millisecond later', () => {
+  const day = 24 * 60 * 60 * 1000
+  for (const state of ['working', 'waiting']) {
+    for (const age of [2 * day, 3 * day]) {
+      const pasted = oldClockFragment(SERVE_NOW - age, state)
+      const result = mergeBlock(SERVE_FILE, pasted, SERVE_NOW, STRINGS.en)
+      expect('text' in result ? result.text : '').toContain(pasted.slice(pasted.indexOf('<!-- auto')))
+      const span = scanBlocks(pasted.split('\n'))[0]
+      expect(span === undefined ? null : isArchivable(span, SERVE_NOW)).toBe(false)
+      expect(span === undefined ? null : isArchivable(span, SERVE_NOW + day)).toBe(age === 3 * day)
+    }
+    expect(mergeBlock(SERVE_FILE, oldClockFragment(SERVE_NOW - 3 * day - 1, state), SERVE_NOW, STRINGS.en)).toEqual({ problem: 'oldTime', daysBehind: 3 })
+  }
+})
+
 test('a block pasted from a web chat keeps its source time and only a newer report replaces it', () => {
   const pasted = (session: string, agent: string, body = '### Draft the launch post\n- [x] Outline\n- [?] Ship it Friday, OK?', project = '## launch') =>
     `Here is the block:\n\n${project}\n<!-- auto session=${session} agent=${agent} state=waiting updated=2020-01-01T00:00:00Z -->\n${body}\n<!-- /auto session=${session} -->\n`
-  const now = Date.parse('2026-10-17T09:00:00Z')
+  const now = Date.parse('2020-01-01T00:00:00Z')
   const added = mergeBlock(SERVE_FILE, pasted('c0ffee12', 'muse'), now, STRINGS.en)
   expect('title' in added ? added.title : added.problem).toBe('Draft the launch post')
   const text = 'text' in added ? added.text : ''

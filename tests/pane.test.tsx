@@ -159,7 +159,7 @@ type World = {
   unwritable?: Set<string>
   ignoreQuestionWrites?: boolean
   failQuestionCapture?: 'read' | 'write'
-  failStore?: (operation: 'get' | 'set', key: string) => boolean
+  failStore?: (operation: 'get' | 'set' | 'delete', key: string) => boolean
   beforeStoreSet?: (key: string) => void
   ignoreStore?: (key: string) => boolean
   afterMove?: (from: string, to: string) => boolean
@@ -214,7 +214,11 @@ const engineBeneath = (on: On, world: World): MockClock => {
       store[e.key] = e.value
       return { value: undefined }
     })
-    on('store.delete', ($, e) => { delete store[e.key]; return { value: undefined } })
+    on('store.delete', ($, e) => {
+      if (world.failStore?.('delete', e.key)) return { deny: 'EIO' }
+      delete store[e.key]
+      return { value: undefined }
+    })
     on('store.keys', () => ({ value: Object.keys(store) }))
   } else {
     on('store.get', ($, e) => ({ value: structuredClone(shared[e.key]) }))
@@ -4318,6 +4322,335 @@ test('a stopped session’s handoff line shows on its row and goes with 接手�
 
 const INBOX = '/home/me/.claude/progress-inbox'
 
+const QUESTION_TURN = 'codex-turn-1792152000-213.json'
+const QUESTION_TEXT = 'Added the middleware. Keep the complete question, OK?'
+const pendingQuestionWorld = (): World => ({
+  files: new Map([[FILE, '# Progress\n'], [`${INBOX}/${QUESTION_TURN}`, JSON.stringify({ session_id: 'demo-question', cwd: '/work/api-gateway', last_assistant_message: QUESTION_TEXT })]]),
+  mtime: 1,
+  hasTasks: true,
+  store: { inboxDone: {}, autoConnectOff: true, lang: 'en' },
+  reply: prompt => prompt.includes('TITLE:') ? 'TITLE: Add the limiter\nDONE: Added the middleware\nNEXT: Write the tests\nASK: Keep the complete question, OK?' : undefined,
+})
+const breakQuestionFile = (world: World): void => {
+  world.files.set(QUESTIONS, (world.files.get(QUESTIONS) ?? '') + '\0'.repeat(32))
+  world.isMoveRefused = path => path === QUESTIONS
+}
+const pendingQuestionEntries = (world: World): unknown[] => Object.entries(world.store ?? {}).filter(([key]) => key.startsWith('pendingInboxQuestion:')).map(([, value]) => value)
+
+test('another agent\'s turn that ends on a question is written to the board even when the question file cannot be read', async ($, on) => {
+  const world = pendingQuestionWorld()
+  const clock = engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/demo', surface: 'desktop', isInteractive: true })
+  breakQuestionFile(world)
+  await clock.advance(5000)
+  const board = world.files.get(FILE) ?? ''
+  expect(board).toContain('agent=codex state=waiting')
+  expect(board).toContain('- [x] Added the middleware')
+  expect(board).toContain('- [?] Keep the complete question, OK?')
+  expect(board).toContain('- [ ] Write the tests')
+  expect(takenOf(world)).toEqual([])
+  expect((world.store!.inboxDone as Record<string, string>)[QUESTION_TURN]).toBeDefined()
+  expect(pendingQuestionEntries(world)).toHaveLength(1)
+})
+
+test('a question that could not be kept is kept on a later poll once the question file reads again', async ($, on) => {
+  const world = pendingQuestionWorld()
+  const clock = engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/demo', surface: 'desktop', isInteractive: true })
+  breakQuestionFile(world)
+  await clock.advance(5000)
+  expect(pendingQuestionEntries(world)).toHaveLength(1)
+  world.isMoveRefused = undefined
+  await clock.advance(2000)
+  expect(storedQuestion(world, 'Keep the complete question, OK?')).not.toBe('')
+  expect(pendingQuestionEntries(world)).toEqual([])
+  const captures = [...world.files].filter(([path]) => path.includes('-questions-source-')).map(([, text]) => text)
+  expect(captures.some(text => text.includes(QUESTION_TEXT))).toBe(true)
+  expect((world.files.get(FILE) ?? '').match(/- \[x\] Added the middleware/g)).toHaveLength(1)
+})
+
+test('a question file that cannot be read shows one line at once instead of retrying the turn for hours', async ($, on) => {
+  const world = pendingQuestionWorld()
+  const clock = engineBeneath(on, world)
+  const seen = outside(on, world)
+  await $.session.start({ cwd: '/work/demo', surface: 'desktop', isInteractive: true })
+  // Start the failure in the digest, after the ordinary 2-second polls have run.
+  world.reply = prompt => {
+    if (!prompt.includes('TITLE:')) return undefined
+    breakQuestionFile(world)
+    return 'TITLE: Add the limiter\nDONE: Added the middleware\nNEXT: Write the tests\nASK: Keep the complete question, OK?'
+  }
+  await clock.advance(5000)
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
+  const line = EN.inboxQuestionNotKept
+  expect(await ui.find({ type: 'Text', text: line })).toBeDefined()
+  const status = await $.command.run({ ...TIDY, args: 'connect status' })
+  expect(status.text).toContain(line)
+  const notifications = [...seen.notified]
+  await clock.advance(4000)
+  expect(seen.notified).toEqual(notifications)
+  expect(await ui.find({ type: 'Text', text: line })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: EN.questionsUnreadable(QUESTIONS) })).toBeDefined()
+  world.isMoveRefused = undefined
+  await clock.advance(2000)
+  expect(await ui.find({ type: 'Text', text: line })).toBeUndefined()
+  await ui.unmount()
+})
+
+test('a race while keeping an agent\'s question retries on the next poll instead of fifteen minutes later', async ($, on) => {
+  const world = pendingQuestionWorld()
+  const clock = engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/demo', surface: 'desktop', isInteractive: true })
+  let isRacing = true
+  let changes = 0
+  world.beforeRead = path => {
+    if (isRacing && path === FILE) {
+      world.files.set(FILE, (world.files.get(FILE) ?? '') + `\n<!-- concurrent write ${++changes} -->\n`)
+      world.mtime += 1
+    }
+  }
+  await clock.advance(5000)
+  expect(changes > 1).toBe(true)
+  expect(takenOf(world)).toEqual([])
+  expect(pendingQuestionEntries(world)).toHaveLength(1)
+  expect((world.store!.inboxFailed as Record<string, string> | undefined)?.[QUESTION_TURN]).toBeUndefined()
+  isRacing = false
+  await clock.advance(2000)
+  expect(storedQuestion(world, 'Keep the complete question, OK?')).not.toBe('')
+  expect(pendingQuestionEntries(world)).toEqual([])
+})
+
+const seedPendingQuestion = (world: World, age = 0): string => {
+  const turn = peekInbox([{ name: QUESTION_TURN, body: world.files.get(`${INBOX}/${QUESTION_TURN}`)!, at: Date.parse('2026-10-16T12:00:00Z') }])[0]!
+  turn.sourceAt = Date.parse('2026-10-16T12:00:00Z') - age
+  turn.at = turn.sourceAt
+  const key = `pendingInboxQuestion:${sha256(FILE)}:${sha256(JSON.stringify([turn.id, turn.sourceRevisions]))}`
+  world.store![key] = turn
+  world.files.delete(`${INBOX}/${QUESTION_TURN}`)
+  return key
+}
+
+test('a session that starts while progress.md is locked still polls and takes turns', async ($, on) => {
+  const world = pendingQuestionWorld()
+  seedPendingQuestion(world)
+  world.unreadable = new Set([FILE])
+  const clock = engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/demo', surface: 'desktop', isInteractive: true })
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
+  expect(await ui.find({ type: 'Text', text: EN.inboxQuestionNotKept })).toBeDefined()
+  world.unreadable.clear()
+  world.files.set(`${INBOX}/${QUESTION_TURN}`, JSON.stringify({ session_id: 'another-owner', cwd: '/work/api-gateway', last_assistant_message: QUESTION_TEXT }))
+  world.mtime += 1
+  await clock.advance(6000)
+  expect(world.files.get(FILE) ?? '').toContain('- [x] Added the middleware')
+  expect(takenOf(world)).toEqual([])
+  expect(pendingQuestionEntries(world)).toEqual([])
+  await ui.unmount()
+})
+
+test('one damaged pending question does not hold other agents\' turns', async ($, on) => {
+  const world = pendingQuestionWorld()
+  const key = `pendingInboxQuestion:${sha256(FILE)}:damaged`
+  world.store![key] = { isQuestion: true, text: 'Broken' }
+  const clock = engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/demo', surface: 'desktop', isInteractive: true })
+  breakQuestionFile(world)
+  await clock.advance(5000)
+  expect(world.files.get(FILE) ?? '').toContain('- [x] Added the middleware')
+  expect(takenOf(world)).toEqual([])
+  expect((world.store!.inboxDone as Record<string, string>)[QUESTION_TURN]).toBeDefined()
+  expect(world.store![key]).toBeUndefined()
+  expect(pendingQuestionEntries(world)).toHaveLength(1)
+})
+
+test('a pending question that cannot be loaded at startup retries without stopping polling', async ($, on) => {
+  const world = pendingQuestionWorld()
+  seedPendingQuestion(world)
+  world.failStore = (operation, key) => operation === 'get' && key.startsWith('pendingInboxQuestion:')
+  const clock = engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/demo', surface: 'desktop', isInteractive: true })
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
+  expect(await ui.find({ type: 'Text', text: EN.inboxQuestionNotKept })).toBeDefined()
+  world.failStore = undefined
+  await clock.advance(2000)
+  expect(pendingQuestionEntries(world)).toEqual([])
+  expect(storedQuestion(world, 'Keep the complete question, OK?')).not.toBe('')
+  expect(await ui.find({ type: 'Text', text: EN.inboxQuestionNotKept })).toBeUndefined()
+  await ui.unmount()
+})
+
+test('a pending question older than three days is dropped', async ($, on) => {
+  const world = pendingQuestionWorld()
+  const key = seedPendingQuestion(world, 3 * 24 * 60 * 60 * 1000 + 1)
+  engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/demo', surface: 'desktop', isInteractive: true })
+  expect(world.store![key]).toBeUndefined()
+  expect(storedQuestion(world, 'Keep the complete question, OK?')).toBe('')
+})
+
+test('a pending question that cannot be saved does not hold another agent\'s turn', async ($, on) => {
+  const world = pendingQuestionWorld()
+  const key = seedPendingQuestion(world)
+  breakQuestionFile(world)
+  const clock = engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/demo', surface: 'desktop', isInteractive: true })
+  delete world.store![key]
+  world.failStore = (operation, one) => one === key && (operation === 'get' || operation === 'set')
+  world.files.set(`${INBOX}/${QUESTION_TURN}`, JSON.stringify({ session_id: 'another-owner', cwd: '/work/api-gateway', last_assistant_message: QUESTION_TEXT }))
+  world.mtime += 1
+  await clock.advance(5000)
+  expect(world.files.get(FILE) ?? '').toContain('- [x] Added the middleware')
+  expect(takenOf(world)).toEqual([])
+  expect((world.store!.inboxDone as Record<string, string>)[QUESTION_TURN]).toBeDefined()
+  expect(pendingQuestionEntries(world)).toHaveLength(1)
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
+  expect(await ui.find({ type: 'Text', text: EN.inboxQuestionNotKept })).toBeDefined()
+  world.failStore = undefined
+  world.isMoveRefused = undefined
+  await clock.advance(2000)
+  expect(pendingQuestionEntries(world)).toEqual([])
+  expect(await ui.find({ type: 'Text', text: EN.inboxQuestionNotKept })).toBeUndefined()
+  await ui.unmount()
+})
+
+test('a saved question whose removal failed is removed on a later poll and the warning goes away', async ($, on) => {
+  const world = pendingQuestionWorld()
+  const key = seedPendingQuestion(world, 3 * 24 * 60 * 60 * 1000 + 1)
+  world.failStore = (operation, one) => operation === 'delete' && one === key
+  const clock = engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/demo', surface: 'desktop', isInteractive: true })
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
+  expect(world.store![key]).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: EN.inboxQuestionNotKept })).toBeDefined()
+  world.failStore = undefined
+  await clock.advance(2000)
+  expect(world.store![key]).toBeUndefined()
+  expect(await ui.find({ type: 'Text', text: EN.inboxQuestionNotKept })).toBeUndefined()
+  expect(storedQuestion(world, 'Keep the complete question, OK?')).toBe('')
+  await ui.unmount()
+})
+
+test('a captured question with an old source clock still gets its first save', async ($, on) => {
+  const world = pendingQuestionWorld()
+  const key = seedPendingQuestion(world, 4 * 24 * 60 * 60 * 1000)
+  const turn = world.store![key] as { at: number; sourceAt: number }
+  turn.at = Date.parse('2026-10-16T12:00:00Z')
+  engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/demo', surface: 'desktop', isInteractive: true })
+  expect(world.store![key]).toBeUndefined()
+  const records = JSON.parse(world.files.get(QUESTIONS) ?? '{}').records as Array<{ words: string; firstObserved: number }>
+  expect(records.find(row => row.words === 'Keep the complete question, OK?')?.firstObserved).toBe(turn.sourceAt)
+})
+
+test('expired pending questions from another progress path are pruned at startup', async ($, on) => {
+  const world = pendingQuestionWorld()
+  const key = seedPendingQuestion(world, 3 * 24 * 60 * 60 * 1000 + 1)
+  const old = `pendingInboxQuestion:${sha256('/other/progress.md')}:old`
+  const recent = `pendingInboxQuestion:${sha256('/other/progress.md')}:recent`
+  world.store![old] = world.store![key]
+  world.store![recent] = { ...(world.store![key] as object), at: Date.parse('2026-10-16T12:00:00Z') }
+  engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/demo', surface: 'desktop', isInteractive: true })
+  expect(world.store![old]).toBeUndefined()
+  expect(world.store![recent]).toBeDefined()
+})
+
+test('a failed startup prune still registers polling and takes turns', async ($, on) => {
+  const world = pendingQuestionWorld()
+  world.store!.unrelated = 'keep'
+  world.failStore = (operation, key) => operation === 'get' && key === 'unrelated'
+  const clock = engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/demo', surface: 'desktop', isInteractive: true })
+  await clock.advance(5000)
+  expect(world.files.get(FILE) ?? '').toContain('- [x] Added the middleware')
+  expect(takenOf(world)).toEqual([])
+  expect((world.store!.inboxDone as Record<string, string>)[QUESTION_TURN]).toBeDefined()
+})
+
+test('a pending question whose step is already done is not kept', async ($, on) => {
+  const world = pendingQuestionWorld()
+  breakQuestionFile(world)
+  const clock = engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/demo', surface: 'desktop', isInteractive: true })
+  await clock.advance(5000)
+  expect(pendingQuestionEntries(world)).toHaveLength(1)
+  world.files.set(FILE, world.files.get(FILE)!.replace('- [?] Keep the complete question, OK?', '- [x] Keep the complete question, OK?'))
+  world.mtime += 1
+  world.isMoveRefused = undefined
+  await clock.advance(2000)
+  expect(pendingQuestionEntries(world)).toEqual([])
+  const records = (JSON.parse(world.files.get(QUESTIONS) ?? '{}').records ?? []) as Array<{ words: string; isUnresolved?: boolean; source?: { kind: string } }>
+  expect(records.filter(row => row.words === 'Keep the complete question, OK?' && row.isUnresolved)).toEqual([])
+  expect([...world.files].some(([path, text]) => path.includes('-questions-source-') && text.includes(QUESTION_TEXT))).toBe(false)
+})
+
+test('a failed pending question deletion does not hold a processed turn', async ($, on) => {
+  const world = pendingQuestionWorld()
+  world.failStore = (operation, key) => operation === 'delete' && key.startsWith('pendingInboxQuestion:')
+  const clock = engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/demo', surface: 'desktop', isInteractive: true })
+  await clock.advance(5000)
+  expect(world.files.get(FILE) ?? '').toContain('- [x] Added the middleware')
+  expect(takenOf(world)).toEqual([])
+  expect((world.store!.inboxDone as Record<string, string>)[QUESTION_TURN]).toBeDefined()
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
+  expect(await ui.find({ type: 'Text', text: EN.inboxQuestionNotKept })).toBeDefined()
+  world.failStore = undefined
+  await clock.advance(2000)
+  expect(pendingQuestionEntries(world)).toEqual([])
+  expect(await ui.find({ type: 'Text', text: EN.inboxQuestionNotKept })).toBeUndefined()
+  await ui.unmount()
+})
+
+test('pending questions keep their turn time and unchanged retries do not rewrite them', async ($, on) => {
+  const world = pendingQuestionWorld()
+  const firstAt = Date.parse('2026-10-16T11:00:00Z')
+  seedPendingQuestion(world, 60 * 60 * 1000)
+  breakQuestionFile(world)
+  const clock = engineBeneath(on, world)
+  let writes = 0
+  world.beforeStoreSet = key => { if (key.startsWith('pendingInboxQuestion:')) writes += 1 }
+  await $.session.start({ cwd: '/work/demo', surface: 'desktop', isInteractive: true })
+  await clock.advance(4000)
+  expect(writes).toBe(0)
+  world.isMoveRefused = undefined
+  await clock.advance(2000)
+  const records = JSON.parse(world.files.get(QUESTIONS) ?? '{}').records as Array<{ words: string; firstObserved: number }>
+  expect(records.find(row => row.words === 'Keep the complete question, OK?')?.firstObserved).toBe(firstAt)
+  expect(pendingQuestionEntries(world)).toEqual([])
+})
+
+test('pending questions keep only the newest fifty while the question file is unreadable', async ($, on) => {
+  const world = pendingQuestionWorld()
+  const key = seedPendingQuestion(world)
+  const turn = world.store![key] as Record<string, unknown>
+  delete world.store![key]
+  const firstAt = Date.parse('2026-10-16T12:00:00Z')
+  for (let n = 0; n < 51; n += 1) world.store![`${key}-${n}`] = { ...turn, sourceAt: firstAt - n * 1000, text: `Question ${n}, OK?` }
+  breakQuestionFile(world)
+  const clock = engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/demo', surface: 'desktop', isInteractive: true })
+  expect(pendingQuestionEntries(world)).toHaveLength(50)
+  expect(world.store![`${key}-50`]).toBeUndefined()
+  expect(world.store![`${key}-0`]).toBeDefined()
+  await clock.advance(2000)
+  expect(pendingQuestionEntries(world)).toHaveLength(50)
+})
+
+test('a fresh session keeps a pending inbox question from the store without its turn file', async ($, on) => {
+  const world = pendingQuestionWorld()
+  const turn = peekInbox([{ name: QUESTION_TURN, body: world.files.get(`${INBOX}/${QUESTION_TURN}`)!, at: Date.parse('2026-10-16T12:00:00Z') }])[0]!
+  world.files.delete(`${INBOX}/${QUESTION_TURN}`)
+  const key = `pendingInboxQuestion:${sha256(FILE)}:${sha256(JSON.stringify([turn.id, turn.sourceRevisions]))}`
+  world.store![key] = turn
+  const clock = engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/demo', surface: 'desktop', isInteractive: true })
+  expect(storedQuestion(world, 'Keep the complete question, OK?')).not.toBe('')
+  expect(pendingQuestionEntries(world)).toEqual([])
+  await clock.advance(2000)
+  expect(storedQuestion(world, 'Keep the complete question, OK?')).not.toBe('')
+})
+
 test('another agent’s turn, left in the inbox by its hook, becomes its block once, read by one session', async ($, on) => {
   const payload = JSON.stringify({
     type: 'agent-turn-complete',
@@ -6182,7 +6515,7 @@ test('an exact pre-ownership board and command from a release upgrade in the lan
 
 
 for (const failure of ['read', 'write'] as const) {
-  test(`immutable question capture ${failure} failure keeps unseen same-batch end sources unprocessed`, async ($, on) => {
+  test(`immutable question capture ${failure} failure marks same-batch end sources processed with the question pending`, async ($, on) => {
     const first = `${INBOX}/codex-turn-1792152000-1.json`
     const end = `${INBOX}/codex-end-1792152000-2.json`
     const body = (question: string) => JSON.stringify({ session_id: 'one-owner', cwd: '/work/demo', last_assistant_message: question })
@@ -6190,16 +6523,17 @@ for (const failure of ['read', 'write'] as const) {
     const clock = engineBeneath(on, world)
     await $.session.start({ cwd: '/work/persona_framework', surface: 'terminal', isInteractive: true })
     await clock.advance(5000)
-    expect(Object.keys(world.store?.inboxDone ?? {})).toEqual([])
-    expect([...world.files.values()].some(text => text === body('Keep the first full original?'))).toBe(true)
-    expect([...world.files.values()].some(text => text === body('Keep the end-only full original?'))).toBe(true)
+    expect(Object.keys(world.store?.inboxDone ?? {})).toHaveLength(2)
+    expect(world.files.get(FILE) ?? '').toContain('Keep the end-only full original?')
+    expect(pendingQuestionEntries(world)).toHaveLength(2)
+    expect(takenOf(world)).toEqual([])
     world.failQuestionCapture = undefined
-    expireTaken(world)
     world.mtime += 1
-    await clock.advance(5000)
+    await clock.advance(2000)
     const captures = [...world.files].filter(([path]) => path.includes('-questions-source-')).map(([, text]) => JSON.parse(text))
     expect(captures.some(capture => capture.record.source.text === 'Keep the first full original?')).toBe(true)
     expect(captures.some(capture => capture.record.source.text === 'Keep the end-only full original?')).toBe(true)
+    expect(pendingQuestionEntries(world)).toEqual([])
   })
 }
 

@@ -109,7 +109,7 @@ import type { AgentTurn } from './inbox'
 import { keepRecent, remindersOf } from './remind'
 import { agentName, answeredJson, answeredPath, buildView, mirrorMatchesTask, parseAnswered, parseSeen, seenJson, seenPath, statusLine, withAnswered, withSeen } from './view'
 import type { StepRef, TaskRef, TaskRow, WaitingItem } from './view'
-import { acknowledgementKeys, archiveQuestionsKept, captureHashOf, captureJson, capturePath, emptyQuestions, parseCapture, withCaptures, isQuestionProof, isQuestionSnapshot, isTornLedger, migratedAnswered, observeQuestions, parseQuestions, questionProofJson, questionProofOf, questionProofPath, questionsJson, questionsPath } from './questions'
+import { acknowledgementKeys, archiveQuestionsKept, captureHashOf, captureJson, capturePath, emptyQuestions, parseCapture, withCaptures, isQuestionProof, isQuestionSnapshot, isTornLedger, migratedAnswered, observeQuestions, parseQuestions, questionProofJson, questionProofOf, questionProofPath, questionWords, questionsJson, questionsPath } from './questions'
 import type { QuestionCapture, QuestionProofs, QuestionRecord } from './questions'
 
 const PANE = 'agent-board'
@@ -156,6 +156,7 @@ const doneSeen = atom({ plugin: 'agent-board', key: 'doneSeen' } as const, {} as
 const hiddenAsks = atom({ plugin: 'agent-board', key: 'hiddenAsks' } as const, [] as string[])
 const questionLedger = atom({ plugin: 'agent-board', key: 'questionLedger' } as const, emptyQuestions())
 const hasQuestionsProblem = atom({ plugin: 'agent-board', key: 'hasQuestionsProblem' } as const, false)
+const hasPendingQuestionsProblem = atom({ plugin: 'agent-board', key: 'hasPendingQuestionsProblem' } as const, false)
 const firstSeen = atom({ plugin: 'agent-board', key: 'firstSeen' } as const, {} as Record<string, number>)
 // The review whose reply box Needs changes opened.
 const revising = atom({ plugin: 'agent-board', key: 'revising' } as const, '')
@@ -203,6 +204,10 @@ let inboxListed = 0
 // Each retained file and reason is named once, so two stuck files cannot take turns notifying.
 const inboxNoticesShown = new Set<string>()
 const pendingJournals = new Map<string, Record<string, string[]>>()
+const pendingInboxQuestions = new Map<string, PendingTurn>()
+const droppingInboxQuestions = new Set<string>()
+let pendingQuestionRetry: Promise<void> | null = null
+let hasRestoredInboxQuestions = false
 const journalNoticesShown = new Set<string>()
 let journalNoticeKey = ''
 let dashboardAt = 0
@@ -399,6 +404,14 @@ const pollQuestions = async ($: EngineInterface, path: string, projects: readonl
     const mirror = await read($, mine)
     const answered = await read($, hiddenAsks)
     const pending = [...(await pendingTurns($)), ...captured]
+    // A delayed save keeps the turn's age, including when a normal poll saw its block first.
+    const observe = (current: ReturnType<typeof emptyQuestions>, proofs: QuestionProofs | undefined): ReturnType<typeof emptyQuestions> => {
+      const observed = observeQuestions(current, projects, mirror, answered, at, isSettled, incarnation, proofs, pending).ledger
+      return { ...observed, records: observed.records.map(record => {
+        const times = captured.filter(turn => record.producerSources?.includes(JSON.stringify(turn))).map(turn => turn.sourceAt ?? turn.at).filter(time => Number.isFinite(time) && time >= 0)
+        return times.length === 0 ? record : { ...record, firstObserved: Math.min(record.firstObserved, ...times) }
+      }) }
+    }
     const session = await $.session.id()
     const incarnation = `${session}:${at}:${questionWrite++}`
     const isWin = await isWindows($, file)
@@ -449,7 +462,7 @@ const pollQuestions = async ($: EngineInterface, path: string, projects: readonl
       const captures = await questionCapturesFor($, path)
       if (parsed === null || captures === null) return AGAIN
       const current = withCaptures(parsed, captures)
-      let observed = observeQuestions(current, projects, mirror, answered, at, isSettled, incarnation, proofs ?? undefined, pending).ledger
+      let observed = observe(current, proofs ?? undefined)
       for (const record of observed.records) {
         if (record.source === undefined) continue
         if (record.isUnresolved && !captures.some(capture => captureJson(capture.record, capture.disposition) === captureJson(record, 'unresolved'))) await keepQuestionCapture($, path, record, 'unresolved')
@@ -460,7 +473,7 @@ const pollQuestions = async ($: EngineInterface, path: string, projects: readonl
       }
       proofs = await questionProofsFor($, path)
       if (proofs === null) return AGAIN
-      observed = observeQuestions(current, projects, mirror, answered, at, isSettled, incarnation, proofs, pending).ledger
+      observed = observe(current, proofs)
       expected = questionsJson(observed)
       return questionsJson(observed) === questionsJson(parsed) ? null : questionsJson(observed)
     }, undefined, async (target, text) => {
@@ -1546,6 +1559,111 @@ const quarantineInbox = async ($: EngineInterface, from: string, to: string, rea
   await inboxNotice($, target, reason)
 }
 
+const pendingQuestionsProblem = async ($: EngineInterface, hasProblem: boolean): Promise<void> => {
+  if (await read($, hasPendingQuestionsProblem) !== hasProblem) await update($, hasPendingQuestionsProblem, () => hasProblem)
+}
+
+// Keep only the ledger's source preview, never the original inbox payload. Each source has its
+// own store key so another session can recover it without replacing this session's pending list.
+const keepInboxQuestions = async ($: EngineInterface, captured: readonly PendingTurn[], isRestoring: boolean): Promise<void> => {
+  const path = await progressPath($)
+  const prefix = `pendingInboxQuestion:${sha256(path)}:`
+  const own = new Set(captured.map(turn => `${prefix}${sha256(JSON.stringify([turn.id, turn.sourceRevisions]))}`))
+  for (const turn of captured) pendingInboxQuestions.set(`${prefix}${sha256(JSON.stringify([turn.id, turn.sourceRevisions]))}`, turn)
+  await enqueue(async () => {
+    let hasCleanupProblem = false
+    const discard = async (key: string): Promise<void> => {
+      let isRemoved = false
+      try {
+        await $.store.delete(key)
+        isRemoved = await $.store.get(key) == null
+      } catch {
+        // A saved question can retry cleanup without holding its processed turn.
+      }
+      pendingInboxQuestions.delete(key)
+      if (isRemoved) droppingInboxQuestions.delete(key)
+      else {
+        droppingInboxQuestions.add(key)
+        hasCleanupProblem = true
+      }
+    }
+    for (const key of [...droppingInboxQuestions]) {
+      if (key.startsWith(prefix)) await discard(key)
+    }
+    let hasRestoreProblem = false
+    if (isRestoring || !hasRestoredInboxQuestions) {
+      const keys = await $.store.keys().catch(() => { hasRestoreProblem = true; return [] as string[] })
+      for (const key of keys) {
+        if (!key.startsWith(prefix) || droppingInboxQuestions.has(key)) continue
+        const value = await $.store.get(key).catch(() => { hasRestoreProblem = true; return undefined })
+        if (value === undefined || value === null) continue
+        if (typeof value !== 'object' || !('isQuestion' in value) || value.isQuestion !== true || !('id' in value) || typeof value.id !== 'string' || !('text' in value) || typeof value.text !== 'string' || !('agent' in value) || typeof value.agent !== 'string' || !('project' in value) || typeof value.project !== 'string' || !('at' in value) || typeof value.at !== 'number' || !Number.isFinite(value.at) || value.at < 0 || 'sourceAt' in value && (typeof value.sourceAt !== 'number' || !Number.isFinite(value.sourceAt) || value.sourceAt < 0) || ['sources', 'sourceRevisions'].some(field => field in value && (!Array.isArray((value as Record<string, unknown>)[field]) || ((value as Record<string, unknown>)[field] as unknown[]).some(one => typeof one !== 'string')))) {
+          await discard(key)
+          continue
+        }
+        if (!pendingInboxQuestions.has(key)) pendingInboxQuestions.set(key, value as PendingTurn)
+      }
+      hasRestoredInboxQuestions = !hasRestoreProblem
+    }
+    const at = await $.clock.now()
+    let pending = [...pendingInboxQuestions].filter(([key]) => key.startsWith(prefix)).sort((a, b) => b[1].at - a[1].at)
+    for (const [index, [key, turn]] of pending.entries()) {
+      if (at - turn.at > 3 * DAY || index >= 50) await discard(key)
+    }
+    pending = pending.filter(([key]) => pendingInboxQuestions.has(key))
+    // An older failed save cannot hold the turn files this drain owns.
+    const unkept = new Set<string>()
+    for (const [key, turn] of pending) {
+      const isKept = await $.store.get(key).then(value => JSON.stringify(value) === JSON.stringify(turn)).catch(() => false)
+        || await $.store.set(key, turn).then(async () => JSON.stringify(await $.store.get(key)) === JSON.stringify(turn)).catch(() => false)
+      if (isKept) continue
+      if (!own.has(key)) {
+        unkept.add(key)
+        continue
+      }
+      for (const one of own) pendingInboxQuestions.delete(one)
+      await pendingQuestionsProblem($, true)
+      throw new Error('PENDING_QUESTION_NOT_KEPT')
+    }
+    pending = pending.filter(([key]) => !unkept.has(key))
+    if (pending.length === 0) {
+      await pendingQuestionsProblem($, hasCleanupProblem || hasRestoreProblem || unkept.size > 0)
+      return
+    }
+    const text = await readText($, path).catch(() => null)
+    if (text === null || !isQuestionSnapshot(text)) {
+      await pendingQuestionsProblem($, true)
+      return
+    }
+    const projects = parseProgress(text)
+    for (const [key, turn] of pending) {
+      const words = questionWords(turn.text)
+      const steps = projects.filter(project => project.name === turn.project).flatMap(project => project.tasks).filter(task => task.auto?.session === turn.id && task.auto.agent === turn.agent).flatMap(task => task.steps).filter(step => questionWords(step.text) === words || questionWords(step.text).endsWith(` — ${words}`))
+      if (steps.length > 0 && !steps.some(step => step.status === 'waiting')) await discard(key)
+    }
+    pending = pending.filter(([key]) => pendingInboxQuestions.has(key))
+    // #149: Thread the branch's answer evidence through this retry too.
+    if (pending.length > 0 && !(await pollQuestions($, path, projects, false, pending.map(([, turn]) => turn)))) {
+      await pendingQuestionsProblem($, true)
+      return
+    }
+    for (const [key] of pending) await discard(key)
+    await pendingQuestionsProblem($, hasCleanupProblem || hasRestoreProblem || unkept.size > 0)
+  })
+}
+
+const retainInboxQuestions = async ($: EngineInterface, captured: readonly PendingTurn[] = [], isRestoring = false): Promise<void> => {
+  if (captured.length === 0 && (pendingQuestionRetry !== null || !isRestoring && hasRestoredInboxQuestions && pendingInboxQuestions.size === 0 && droppingInboxQuestions.size === 0)) return
+  const job = keepInboxQuestions($, captured, isRestoring)
+  if (captured.length > 0) return job
+  pendingQuestionRetry = job
+  try {
+    await job
+  } finally {
+    pendingQuestionRetry = null
+  }
+}
+
 const drainInbox = async ($: EngineInterface): Promise<void> => {
   if (isDraining) return
   isDraining = true
@@ -1686,11 +1804,10 @@ const drainInbox = async ($: EngineInterface): Promise<void> => {
       if (group.length === 0) continue
       const isLastTry = group.some(one => one.attempt >= MAX_TRIES)
       try {
-        const path = await progressPath($)
         const home = ((await $.env.get('USERPROFILE')) ?? (await $.env.get('HOME')) ?? '').replace(/[\\/]+$/, '')
-        const questions = peekInbox(group.flatMap(one => one.body === undefined ? [] : [{ name: one.name, body: one.body, at }]), () => '', text => redact(text, home, isWin)).filter(turn => turn.isQuestion)
-        if (questions.length > 0 && !(await pollQuestions($, path, parseProgress(await readText($, path)), false, questions))) throw new Error('QUESTION_RETENTION_FAILED')
         await takeAgentTurns($, group.flatMap(one => (one.turn === null || one.turn === undefined ? [] : [one.turn])), 0, isLastTry)
+        const questions = peekInbox(group.flatMap(one => one.body === undefined ? [] : [{ name: one.name, body: one.body, at }]), () => '', text => redact(text, home, isWin)).filter(turn => turn.isQuestion)
+        if (questions.length > 0) await retainInboxQuestions($, questions)
         settled.push(...group)
       } catch (error) {
         const why = (error instanceof Error ? error.message : String(error)).replace(/\s+/g, ' ').slice(0, 200)
@@ -1961,6 +2078,11 @@ const pruneStore = async ($: EngineInterface, at: number): Promise<void> => {
   for (const key of await $.store.keys()) {
     // Journal retries remove verified keys; failed lines and quarantined values stay.
     if (key.startsWith('pendingJournal:') || key.startsWith('pendingJournalBad:')) continue
+    if (key.startsWith('pendingInboxQuestion:')) {
+      const value = await $.store.get(key) as { at?: number } | null | undefined
+      if (typeof value?.at !== 'number' || at - value.at > 3 * DAY) await $.store.delete(key)
+      continue
+    }
     if (isStaleStoreKey(key, await $.store.get(key), at, 30 * DAY)) await $.store.delete(key)
   }
 }
@@ -2128,13 +2250,14 @@ export const register: Register = (on, options) => {
     const hasTools = tools.length === 0 || tools.some(tool => tool.name === 'TaskCreate' || tool.name === 'TodoWrite')
     await update($, hasTaskTools, () => hasTools)
     await poll($)
+    await retainInboxQuestions($, [], true).catch(async () => pendingQuestionsProblem($, true)).catch(() => undefined)
     const startedAt = await $.clock.now()
     await update($, now, () => startedAt)
-    await pruneStore($, startedAt)
+    await pruneStore($, startedAt).catch(() => undefined)
     // Work left running past a dispatch can outlive the module (a reload, the end): its
     // rejections are dropped rather than left unhandled.
     $.clock.every(POLL_MS, () => {
-      poll($).catch(() => undefined)
+      poll($).catch(() => undefined).then(() => retainInboxQuestions($)).catch(async () => pendingQuestionsProblem($, true)).catch(() => undefined)
     })
     $.clock.every(INBOX_MS, () => {
       drainInbox($).catch(() => undefined)
@@ -2228,7 +2351,10 @@ export const register: Register = (on, options) => {
       try {
         const mode = /^(status|狀態|状态)$/i.test(connect[1] ?? '') ? 'status' : connect[1] !== undefined ? 'remove' : 'connect'
         const reply = await connectAgents($, mode, options)
-        if (mode === 'status') return { text: reply.state.setup === undefined ? reply.state.disabled ? s.setupRemoved : s.setupNoState : setupLines(reply.state.setup, s).join('\n') }
+        if (mode === 'status') {
+          const text = reply.state.setup === undefined ? reply.state.disabled ? s.setupRemoved : s.setupNoState : setupLines(reply.state.setup, s).join('\n')
+          return { text: await read($, hasPendingQuestionsProblem) ? `${text}\n${s.inboxQuestionNotKept}` : text }
+        }
         return { text: reply.result?.text ?? s.setupNoState }
       } catch (error) { return { text: s.connectWorkerFailed(workerProblem(error)) } }
     }
@@ -2547,6 +2673,7 @@ export const register: Register = (on, options) => {
       return (
         <Box flexDirection="column">
           <Text color={palette.alert}>{s.fileUnreadable}</Text>
+          {await read($, hasPendingQuestionsProblem) && <Text color={palette.alert}>{s.inboxQuestionNotKept}</Text>}
           {await read($, hasQuestionsProblem) && <Text color={palette.alert}>{s.questionsUnreadable(questionsPath(snap.path))}</Text>}
           <Text color={palette.muted}>{snap.error}</Text>
           <Text color={palette.muted} wrap="truncate-start">
@@ -2564,6 +2691,7 @@ export const register: Register = (on, options) => {
       path: snap.path,
       width: Math.max(8, Math.min(28, e.props.bodyColumns - 4)),
       hasTaskTools: await read($, hasTaskTools),
+      hasPendingQuestionsProblem: await read($, hasPendingQuestionsProblem),
       isNotifyOn: await read($, isNotifyOn),
       isLegendOpen: await read($, isLegendOpen),
       hasQuestionsProblem: await read($, hasQuestionsProblem),
