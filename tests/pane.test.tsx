@@ -12,7 +12,7 @@ import { dashboardHtml } from '../hooks/dashboard'
 import { buildView, IDLE_MS, parseSeen, seenJson, seenPath, withSeen } from '../hooks/view'
 import { parseProgress } from '../hooks/parse'
 import { chatText, peekInbox } from '../hooks/board'
-import { answerAgentPrompt, blockId, isInboxFile, takenName, withAgentPrompts } from '../hooks/inbox'
+import { answerAgentPrompt, blockId, CLAIM_MS, isInboxFile, takenName, withAgentPrompts } from '../hooks/inbox'
 import { completionKey, completionOverlay, emptyMirror } from '../hooks/mirror'
 import { applyDigest, startBackgroundJob } from '../hooks/digest'
 import { upsertAutoBlock } from '../hooks/blocks'
@@ -766,6 +766,197 @@ const addPrompt = (world: World, at: number, session = PROMPT_SESSION): string =
 }
 
 const effectivePromptMirror = (world: World) => withAgentPrompts(world.store![`agent:${PROMPT_ID}`] as ReturnType<typeof emptyMirror>, Object.entries(world.store!).filter(([key]) => key.startsWith(`agentPrompt:${PROMPT_ID}:`)).map(([, value]) => value), Date.parse('2026-10-16T13:00:00Z'))!
+
+test('the board command sent to a session leaves its question waiting on you', async ($, on) => {
+  const { world, mirror } = questionWorld()
+  const before = world.files.get(FILE)
+  world.files.set(`${INBOX}/codex-prompt-${PROMPT_AT + 1000}-77.json`, JSON.stringify({ session_id: PROMPT_SESSION, board_request: true }))
+  const clock = engineBeneath(on, world)
+  await probeStart($)
+  await clock.advance(5000)
+  expect(world.files.get(FILE)).toBe(before)
+  expect(effectivePromptMirror(world)).toEqual(mirror)
+  expect(world.asked).toEqual([])
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
+  expect(JSON.stringify(await ui.drawn())).toContain('Use staging?')
+  await ui.unmount()
+})
+
+test('a free-words board request followed by a board-only reply puts the question back once', async ($, on) => {
+  const { world } = questionWorld()
+  const clock = engineBeneath(on, world)
+  await probeStart($)
+  addPrompt(world, PROMPT_AT + 1000)
+  await clock.advance(5000)
+  expect(world.files.get(FILE)).toContain('- [x] Database — Use staging?')
+  const name = `${INBOX}/codex-turn-${PROMPT_AT + 2000}-77.json`
+  const body = JSON.stringify({ session_id: PROMPT_SESSION, prompt: 'where do things stand?', last_assistant_message: 'Progress  ● 1 waiting  ▸ 0 in progress  ⚑ 0 due soon  ✓ 0 done today' })
+  world.files.set(name, body)
+  await clock.advance(5000)
+  expect(world.files.get(FILE)).toContain('- [?] Database — Use staging?')
+  expect(effectivePromptMirror(world).state).toBe('waiting')
+  expect(world.asked).toEqual([])
+  const restored = world.files.get(FILE)
+  world.files.set(name, body)
+  await clock.advance(5000)
+  expect(world.files.get(FILE)).toBe(restored)
+  const ledger = JSON.parse(world.files.get(FILE.replace('.md', '-questions.json'))!).records
+  expect(ledger.filter((row: { isUnresolved?: boolean }) => row.isUnresolved)).toHaveLength(1)
+})
+
+test('a real answer after a board request still answers the question', async ($, on) => {
+  const { world } = questionWorld()
+  const clock = engineBeneath(on, world)
+  await probeStart($)
+  addPrompt(world, PROMPT_AT + 1000)
+  await clock.advance(5000)
+  addPrompt(world, PROMPT_AT + 3000)
+  await clock.advance(5000)
+  world.files.set(`${INBOX}/codex-turn-${PROMPT_AT + 2000}-77.json`, JSON.stringify({ session_id: PROMPT_SESSION, prompt: '/board', last_assistant_message: 'Board' }))
+  await clock.advance(5000)
+  expect(world.files.get(FILE)).toContain('- [x] Database — Use staging?')
+  expect(effectivePromptMirror(world).state).toBe('working')
+  expect(effectivePromptMirror(world).tasks.some(one => one.waiting === 'you')).toBe(false)
+})
+
+test('a board reply in the same second as a real answer leaves the question answered', async ($, on) => {
+  const { world } = questionWorld()
+  const clock = engineBeneath(on, world)
+  await probeStart($)
+  addPrompt(world, PROMPT_AT + 1000)
+  world.files.set(`${INBOX}/codex-turn-${(PROMPT_AT + 1000) / 1000}-77.json`, JSON.stringify({ session_id: PROMPT_SESSION, prompt: '/board', last_assistant_message: 'Board' }))
+  await clock.advance(5000)
+  expect(world.files.get(FILE)).toContain('- [x] Database — Use staging?')
+  expect(effectivePromptMirror(world).state).toBe('working')
+  expect(effectivePromptMirror(world).tasks.some(one => one.waiting === 'you')).toBe(false)
+  expect(world.asked).toEqual([])
+})
+
+test('a board request, its restoring reply, then a real answer answers the question again', async ($, on) => {
+  const { world } = questionWorld()
+  const clock = engineBeneath(on, world)
+  await probeStart($)
+  addPrompt(world, PROMPT_AT + 1000)
+  await clock.advance(5000)
+  world.files.set(`${INBOX}/codex-turn-${PROMPT_AT + 2000}-77.json`, JSON.stringify({ session_id: PROMPT_SESSION, prompt: 'where do things stand?', last_assistant_message: 'Progress  ● 1 waiting  ▸ 0 in progress  ⚑ 0 due soon  ✓ 0 done today' }))
+  await clock.advance(5000)
+  expect(world.files.get(FILE)).toContain('- [?] Database — Use staging?')
+  expect(effectivePromptMirror(world).state).toBe('waiting')
+  addPrompt(world, PROMPT_AT + 3000)
+  await clock.advance(5000)
+  expect(world.files.get(FILE)).toContain('- [x] Database — Use staging?')
+  expect(effectivePromptMirror(world).state).toBe('working')
+  expect(effectivePromptMirror(world).tasks.some(one => one.waiting === 'you')).toBe(false)
+  const ledger = JSON.parse(world.files.get(FILE.replace('.md', '-questions.json'))!).records
+  expect(ledger.filter((row: { isUnresolved?: boolean }) => row.isUnresolved)).toHaveLength(0)
+  expect(world.asked).toEqual([])
+})
+
+test('a question followed by a board turn in one drain keeps the session waiting', async ($, on) => {
+  const { world } = questionWorld()
+  const clock = engineBeneath(on, world)
+  await probeStart($)
+  world.files.set(`${INBOX}/codex-turn-${PROMPT_AT + 1000}-77.json`, JSON.stringify({ session_id: PROMPT_SESSION, prompt: 'Plan migration', last_assistant_message: 'Use staging?' }))
+  world.files.set(`${INBOX}/codex-turn-${PROMPT_AT + 2000}-77.json`, JSON.stringify({ session_id: PROMPT_SESSION, prompt: '/board', last_assistant_message: 'Board' }))
+  await clock.advance(5000)
+  expect(effectivePromptMirror(world).state).toBe('waiting')
+  expect(effectivePromptMirror(world).tasks.some(one => one.waiting === 'you')).toBe(true)
+  expect(world.asked).toHaveLength(1)
+})
+
+// A later turn with text settles an agent's inbox question (#149), but a board look is not an answer.
+test('a board turn after an inbox question in one drain does not settle that question', async ($, on) => {
+  const { world } = questionWorld()
+  const clock = engineBeneath(on, world)
+  await probeStart($)
+  world.files.set(`${INBOX}/codex-turn-${PROMPT_AT + 1000}-77.json`, JSON.stringify({ session_id: PROMPT_SESSION, prompt: 'Plan migration', last_assistant_message: 'Should the new column be nullable?' }))
+  world.files.set(`${INBOX}/codex-turn-${PROMPT_AT + 2000}-77.json`, JSON.stringify({ session_id: PROMPT_SESSION, prompt: '/board', last_assistant_message: 'Board' }))
+  await clock.advance(5000)
+  await clock.advance(2000)
+  const records = JSON.parse(world.files.get(FILE.replace('.md', '-questions.json')) ?? '{"records":[]}').records as Array<{ isUnresolved?: boolean; source?: { kind: string } }>
+  expect(records.filter(row => row.source?.kind === 'inbox').map(row => row.isUnresolved)).toEqual([true])
+  expect(effectivePromptMirror(world).state).toBe('waiting')
+})
+
+test('a board command prompt after an inbox question does not settle that question', async ($, on) => {
+  const { world } = questionWorld()
+  const clock = engineBeneath(on, world)
+  await probeStart($)
+  world.files.set(`${INBOX}/codex-turn-${PROMPT_AT + 1000}-77.json`, JSON.stringify({ session_id: PROMPT_SESSION, prompt: 'Plan migration', last_assistant_message: 'Should the new column be nullable?' }))
+  await clock.advance(5000)
+  world.files.set(`${INBOX}/codex-prompt-${PROMPT_AT + 2000}-77.json`, JSON.stringify({ session_id: PROMPT_SESSION, board_request: true }))
+  world.mtime += 1
+  await clock.advance(5000)
+  await clock.advance(2000)
+  const records = JSON.parse(world.files.get(FILE.replace('.md', '-questions.json')) ?? '{"records":[]}').records as Array<{ isUnresolved?: boolean; source?: { kind: string } }>
+  expect(records.filter(row => row.source?.kind === 'inbox').map(row => row.isUnresolved)).toEqual([true])
+})
+
+test('a work turn followed by two board looks in one drain is still summed up', async ($, on) => {
+  const { world } = questionWorld()
+  world.reply = () => 'TITLE: Migration\nCONTEXT: fixture\nDONE: Updated schema\nNEXT: Run migration\nASK: -'
+  const clock = engineBeneath(on, world)
+  await probeStart($)
+  for (const [delta, prompt, answer] of [
+    [1000, 'Plan migration', 'Updated schema; run migration next.'],
+    [2000, '/board', 'Board'],
+    [3000, '/board', 'Board'],
+  ] as const) world.files.set(`${INBOX}/codex-turn-${PROMPT_AT + delta}-77.json`, JSON.stringify({ session_id: PROMPT_SESSION, prompt, last_assistant_message: answer }))
+  await clock.advance(5000)
+  expect(world.asked).toHaveLength(1)
+  expect(world.files.get(FILE)).toContain('Updated schema')
+  expect(world.files.get(FILE)).toContain('Run migration')
+})
+
+test('a board look whose block was undone after it was stored restores its question on the retry', async ($, on) => {
+  const { world } = questionWorld()
+  const clock = engineBeneath(on, world)
+  await probeStart($)
+  addPrompt(world, PROMPT_AT + 1000)
+  await clock.advance(5000)
+  const answered = world.files.get(FILE)!
+  const name = `codex-turn-${PROMPT_AT + 2000}-77.json`
+  let undid = 0
+  const undo = (): string => {
+    undid += 1
+    world.afterWrite = undo
+    return answered
+  }
+  world.afterWrite = undo
+  world.files.set(`${INBOX}/${name}`, JSON.stringify({ session_id: PROMPT_SESSION, prompt: 'where do things stand?', last_assistant_message: 'Progress  ● 1 waiting  ▸ 0 in progress  ⚑ 0 due soon  ✓ 0 done today' }))
+  await clock.advance(5000)
+  expect(undid).toBe(3)
+  expect(world.files.get(FILE)).toBe(answered)
+  expect(effectivePromptMirror(world).state).toBe('waiting')
+  expect((world.store!.inboxFailed as Record<string, string>)[name]).toContain('the block was not on the board when read back')
+  world.afterWrite = undefined
+  const claimed = [...world.files.keys()].find(path => path.startsWith(`${INBOX}/${name}.`) && path.endsWith('.taking'))!
+  const body = world.files.get(claimed)!
+  world.files.delete(claimed)
+  // Expire this claim without running fifteen minutes of unrelated mock polls.
+  world.files.set(`${INBOX}/${takenName(name, SESSION.slice(0, 8), PROMPT_AT - CLAIM_MS)}`, body)
+  world.mtime += 1
+  await clock.advance(5000)
+  expect(world.files.get(FILE)).toContain('- [?] Database — Use staging?')
+  expect(effectivePromptMirror(world).state).toBe('waiting')
+  expect(world.asked).toEqual([])
+  expect(Object.hasOwn(world.store!.inboxDone as object, name)).toBe(true)
+})
+
+test('a session end clears a provisional question before a later board turn', async ($, on) => {
+  const { world } = questionWorld()
+  const clock = engineBeneath(on, world)
+  await probeStart($)
+  addPrompt(world, PROMPT_AT + 1000)
+  await clock.advance(5000)
+  world.files.set(`${INBOX}/codex-end-${PROMPT_AT + 2000}-77.json`, JSON.stringify({ session_id: PROMPT_SESSION }))
+  world.files.set(`${INBOX}/codex-turn-${PROMPT_AT + 3000}-77.json`, JSON.stringify({ session_id: PROMPT_SESSION, prompt: '/board', last_assistant_message: 'Board' }))
+  await clock.advance(5000)
+  expect(effectivePromptMirror(world).promptQuestion).toBe(null)
+  expect(effectivePromptMirror(world).state).toBe('ended')
+  expect(effectivePromptMirror(world).tasks.some(one => one.waiting === 'you')).toBe(false)
+  expect(world.asked).toEqual([])
+})
 
 for (const [when, delta] of [['older', -1000], ['equal', 0], ['newer', 1000]] as const) test(`raw-owner completion and ${when} prompts compose without restoring prior questions`, async ($, on) => {
   const { world, mirror } = questionWorld()

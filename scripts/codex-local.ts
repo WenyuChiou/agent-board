@@ -15,6 +15,8 @@ import { deepseekLocalPlugin, deepseekPatch, openclawLocalPlugin } from '../hook
 import { trustCodex } from './codex-host'
 import { withLocalLock } from './local-lock'
 import { withInstallLock } from './install-control'
+import { boardRequestWords, isBoardRequest } from '../hooks/board-commands'
+import { PROMPT_EVENTS } from '../hooks/inbox'
 
 type Json = Record<string, unknown>
 type Manifest = { files: Record<string, string>; groups: Record<string, unknown> }
@@ -151,7 +153,10 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
     if (mode === '--agent-status' && !['working', 'waiting', 'ended'].includes(String(status))) throw new Error('INVALID_STATE')
     const event = agent === 'antigravity' && mode === '--agent-status' ? flag('--event') : undefined
     if (event !== undefined && statusEvents.antigravity?.[event] !== status) throw new Error('INVALID_EVENT_STATE')
-    const isPrompt = mode === '--agent-status' && status === 'working' && (payload.prompt_submitted === true || /^(?:UserPromptSubmit|user_prompt_submit|BeforeAgent)$/.test(String(payload.hook_event_name ?? payload.hookEventName)))
+    // Classify before Cursor's adapter drops prompt text; retain lifecycle
+    // ordering without treating a board lookup as an answer to the question.
+    const isBoardPrompt = (isPromptEvent(raw) || raw.prompt_submitted === true) && (raw.board_request === true || isBoardRequest(raw, boardRequestWords(Object.values(STRINGS))))
+    const isPrompt = !isBoardPrompt && mode === '--agent-status' && status === 'working' && (payload.prompt_submitted === true || /^(?:UserPromptSubmit|user_prompt_submit|BeforeAgent)$/.test(String(payload.hook_event_name ?? payload.hookEventName)))
     let report!: CodexReport
     withLocalLock(`${progress}.agent-board-lock`, () => {
       const saved = readLocal(recordFile)
@@ -161,13 +166,13 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
       const text = bytes.toString('utf8')
       const previous = original === null || mode === '--codex-report' ? original : boardConfirmedReport(text, original, owner)
       const clock = previous === null ? now : new Date(Math.max(Date.parse(now), Date.parse(previous.updated))).toISOString()
-      const base = mode === '--codex-event' ? codexEvent(previous, payload, clock, s) : codexReport(previous, session, mode === '--agent-status' ? {
+      const base = mode === '--codex-event' ? codexEvent(previous, isBoardPrompt ? { ...payload, prompt_submitted: false } : payload, clock, s) : codexReport(previous, session, mode === '--agent-status' ? {
         title: previous?.title ?? s.localAgentTask(agent), project: previous?.project ?? agent,
-        state: status === 'working' ? 'working' : previous?.state === 'done' ? 'done' : status,
+        state: isBoardPrompt && previous ? previous.state : status === 'working' ? 'working' : previous?.state === 'done' ? 'done' : status,
         steps: isPrompt && previous ? answerLocalQuestions(previous.steps) : previous?.steps ?? [`- [ ] ${s.localAgentLifecycle}`],
       } : payload, clock, s)
       const priorActivity = previous?.activity ?? []
-      report = { ...base, agent, ...(mode === '--codex-event' && !previous ? { title: s.localAgentTask(agent), project: agent } : {}), ...(event === undefined ? {} : { activity: [...priorActivity, { event, state: String(status), updated: clock }].slice(-16) }) }
+      report = { ...base, ...(isBoardPrompt && previous ? { state: previous.state, steps: previous.steps } : {}), agent, ...(mode === '--codex-event' && !previous ? { title: s.localAgentTask(agent), project: agent } : {}), ...(event === undefined ? {} : { activity: [...priorActivity, { event, state: String(status), updated: clock }].slice(-16) }) }
       // A replay can skip writes only after a board completion reached the cache too.
       const repaired = reporterTail(bytes)
       if (repaired.fragment === null && mode !== '--codex-report' && previous === original && previous !== null && previous.state === report.state && previous.turn === report.turn && JSON.stringify(previous.steps) === JSON.stringify(report.steps) && (event === undefined || priorActivity.at(-1)?.event === event)) return
@@ -353,3 +358,5 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
   output({ ...plan, applied: true })
   return true
 }
+
+const isPromptEvent = (payload: Json): boolean => PROMPT_EVENTS.test(String(payload.hook_event_name ?? payload.hookEventName))
