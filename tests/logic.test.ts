@@ -52,6 +52,22 @@ test('TaskCreate, TaskUpdate and metadata build the mirror', () => {
   expect(stateOf(mirror, true)).toBe('done')
 })
 
+test('background work uses the existing twelve hour stale rule and outlives a completed Task list', () => {
+  const mirror = { ...sampleMirror(), backgroundJobs: 1 }
+  expect(stateOf(mirror, false)).toBe('working')
+  const file = upsertAutoBlock('', { ...mirror, state: stateOf(mirror, false) })
+  expect(buildView(parseProgress(file), [], null, NOW + 12 * HOUR).stopped).toEqual([])
+  expect(buildView(parseProgress(file), [], null, NOW + 12 * HOUR + 1).stopped.map(row => row.title)).toEqual(['進度面板'])
+  const completed = { ...mirror, tasks: mirror.tasks.map(task => ({ ...task, status: 'completed' as const })) }
+  expect(stateOf(completed, false)).toBe('working')
+  expect(buildView([], [], completed, NOW).current?.status).toBe(ZH_TW.backgroundRunning)
+  expect(buildView([], [], { ...completed, isTurnRunning: true }, NOW).current?.status).toBe(ZH_TW.claudeWorking)
+  const asking = applyTaskUpdate(mirror, { taskId: '2', metadata: { waiting: 'you', why: 'Review it?' } }, NOW)
+  expect(stateOf(asking, false)).toBe('waiting')
+  expect(stateOf(asking, true)).toBe('working')
+  expect(stateOf({ ...completed, backgroundJobs: 0 }, false)).toBe('done')
+})
+
 test('TodoWrite replaces the list; TaskList keeps what the mirror knew', () => {
   const mirror = applyTodoWrite(sampleMirror(), [{ content: '一', status: 'pending', activeForm: '做一' }], NOW)
   expect(mirror.tasks).toHaveLength(1)
@@ -521,16 +537,16 @@ test("an ended or stale session's task moves to the Stopped shelf and leaves the
   expect(view.recent.map(row => row.title)).toEqual(['Finished'])
 })
 
-test('a stopped task with a question shows once under Waiting on you and is not also counted as In progress', () => {
+test('a stopped task keeps its question on the Stopped shelf and is not counted as In progress', () => {
   const file = '## demo\n<!-- auto session=a1b2c3d4 agent=codex state=ended updated=2026-10-16T11:00:00Z resume=codex-session-123 dir=%2Fw -->\n### Release\n- [?] Publish, OK?\n- [ ] Finish\n<!-- /auto session=a1b2c3d4 -->'
   const view = buildView(parseProgress(file), [], null, NOW)
-  expect(view.waiting.map(item => item.text)).toEqual(['Publish, OK?'])
-  expect(view.overview.waiting).toBe(1)
+  expect(view.waiting).toEqual([])
+  expect(view.overview.waiting).toBe(0)
   expect(view.overview.active).toBe(0)
   expect(view.active).toEqual([])
   expect(view.groups).toEqual([])
   expect(view.stopped[0]).toMatchObject({ question: 'Publish, OK?', resume: "cd '/w' && codex resume codex-session-123" })
-  const hidden = buildView(parseProgress(file), [], null, NOW, 0, {}, ZH_TW, [view.waiting[0]?.hideKey ?? ''])
+  const hidden = buildView(parseProgress(file), [], null, NOW, 0, {}, ZH_TW, [view.stopped[0]?.questions?.[0]?.hideKey ?? ''])
   expect(hidden.waiting).toEqual([])
   expect(hidden.hidden).toHaveLength(1)
   expect(hidden.stopped).toHaveLength(1)
