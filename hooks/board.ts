@@ -160,8 +160,10 @@ const asksOf = (view: View, pending: readonly PendingTurn[], s: Strings, named: 
 export const boardText = (view: View, pending: readonly PendingTurn[], s: Strings = ZH_TW, o: BoardOptions = { width: 80, isColor: false }): string => {
   const c = paint(o.isColor)
   const lines: string[] = [countLine(view, pending, s, c), '']
+  if (view.warning) lines.push(c('alert', view.warning), '')
 
   const asks = asksOf(view, pending, s)
+  const recentQuestions = view.recent.filter(item => (item.questions?.length ?? 0) > 0)
   for (const [title, items] of [[s.sectionQuestionReminders, view.reminder ?? []], [s.sectionOlderQuestions, view.older ?? []]] as const) {
     if (items.length === 0) continue
     lines.push(`${title} (${items.length}) · --all`)
@@ -203,6 +205,14 @@ export const boardText = (view: View, pending: readonly PendingTurn[], s: String
     lines.push('')
   }
 
+  if (recentQuestions.length > 0) {
+    lines.push(c('done', s.sectionRecent))
+    for (const item of recentQuestions) {
+      lines.push(`  ${fit(`${item.project} › ${item.title} · ${item.when}`, o.width - 4)}`)
+      for (const question of item.questions ?? []) lines.push(`    ${fit(`${question.text}${question.note ? ` — ${question.note}` : ''}`, o.width - 6)}`)
+    }
+    lines.push('')
+  }
   const news = pending.filter(turn => !turn.isQuestion)
   if (news.length > 0) {
     lines.push(c('accent', `◐ ${s.boardInbox}`))
@@ -210,7 +220,7 @@ export const boardText = (view: View, pending: readonly PendingTurn[], s: String
     lines.push('')
   }
 
-  if (view.groups.every(group => group.rows.length === 0) && asks.length === 0 && news.length === 0 && view.idle.length === 0 && view.stopped.length === 0 && view.due.length === 0) lines.push(c('quiet', s.empty), '')
+  if (view.groups.every(group => group.rows.length === 0) && asks.length === 0 && news.length === 0 && view.idle.length === 0 && view.stopped.length === 0 && view.due.length === 0 && recentQuestions.length === 0) lines.push(c('quiet', s.empty), '')
 
   return `${lines.join('\n').replace(/\n+$/, '')}\n`
 }
@@ -360,6 +370,7 @@ export const chatText = (
   const rows = [...view.due.map(row => ({ row, mark: '⚑' })), ...view.groups.flatMap(group => group.rows.map(row => ({ row, mark: '▸' })))]
   // Each item is cut whole, never in the middle. A heading belongs to its first item.
   const items: string[] = [chatLine(countLine(view, pending, s, paint(false)), 0, home, isWindows)]
+  if (view.warning) items[0] += `\n${view.warning}`
   // Questions marked answered are left out and counted, as on the terminal board.
   const hidden = view.hidden.length === 0 ? null : s.hiddenCount(view.hidden.length)
   if (asks.length === 0) items.push(`\n${s.nothingForYou}${hidden === null ? '' : `\n${hidden}`}`)
@@ -380,6 +391,18 @@ export const chatText = (
   }
   if (view.idle.length > 0) items.push(line(s.idleCount(view.idle.length)))
   if (view.stopped.length > 0) items.push(line(s.stoppedCount(view.stopped.length)))
+  for (const row of view.stopped.filter(row => (row.questions?.length ?? 0) > 0)) {
+    items.push(line(`${named(row.project)} › ${row.title} · ${row.when}`, 2))
+    for (const question of row.questions ?? []) items.push(line(`${question.text}${question.note ? ` — ${question.note}` : ''}`, 4))
+  }
+  const recentQuestions = view.recent.filter(item => (item.questions?.length ?? 0) > 0)
+  if (recentQuestions.length > 0) {
+    items.push(`\n${s.sectionRecent}`)
+    for (const item of recentQuestions) {
+      items.push(line(`${named(item.project)} › ${item.title} · ${item.when}`, 2))
+      for (const question of item.questions ?? []) items.push(line(`${question.text}${question.note ? ` — ${question.note}` : ''}`, 4))
+    }
+  }
   // A question is told above, answered or not: it is never the "next step" of its task.
   const isNext = (step: ViewStep): boolean => step.number !== null && !['done', 'cancelled', 'waiting'].includes(step.status)
   rows.forEach(({ row, mark }, index) => {
@@ -387,7 +410,7 @@ export const chatText = (
     const words = `${mark} ${named(row.project)} › ${row.title}${row.due === null ? '' : ` · ${row.due.left}`}${next === undefined ? '' : ` — ${s.reportNext(next)}`}`
     items.push(`${index === 0 ? '\n' : ''}${line(words)}`)
   })
-  if (asks.length === 0 && rows.length === 0 && news.length === 0 && view.idle.length === 0 && view.stopped.length === 0) items.push(s.empty)
+  if (asks.length === 0 && rows.length === 0 && news.length === 0 && view.idle.length === 0 && view.stopped.length === 0 && recentQuestions.length === 0) items.push(s.empty)
   // Each starts with its project (`project · task: step`).
   const doneWords = (words: string): string => {
     const [project = '', ...rest] = words.split(' · ')
@@ -598,6 +621,7 @@ export const boardScreen = (view: View, pending: readonly PendingTurn[], state: 
   const waiting = view.overview.waiting + remainingInbox(view, pending).filter(turn => turn.isQuestion).length
   const lines: string[] = [
     `${c('bold', s.paneTitle)}  ${c('waiting', `● ${waiting} ${s.countWaiting}`)}  ${c('accent', `▸ ${active} ${s.countActive}`)}  ${c('alert', `⚑ ${due} ${s.countDue}`)}  ${c('done', `✓ ${today} ${s.countToday}`)}`,
+    ...(view.warning ? [c('alert', view.warning)] : []),
     ...(view.hidden.length === 0 ? [] : [c('quiet', `${s.hiddenCount(view.hidden.length)} · ${s.boardKeyShowHidden}`)]),
     ...((view.reminder?.length ?? 0) + (view.older?.length ?? 0) === 0 ? [] : [c('quiet', `${s.sectionQuestionReminders}: ${view.reminder?.length ?? 0} · ${s.sectionOlderQuestions}: ${view.older?.length ?? 0} · ${s.boardKeyOlder}`)]),
     ...(view.idle.length + view.stopped.length === 0 ? [] : [c('quiet', [
@@ -674,7 +698,15 @@ export const boardScreen = (view: View, pending: readonly PendingTurn[], state: 
     lines.push('', `  ${fit(result.label, o.width - 4)}`)
     resultLines('    ')
   }
-  if (items.length === 0 && view.idle.length === 0 && view.stopped.length === 0) lines.push(c('quiet', s.empty))
+  const recentQuestions = view.recent.filter(item => (item.questions?.length ?? 0) > 0)
+  if (recentQuestions.length > 0) {
+    lines.push('', c('done', s.sectionRecent))
+    for (const item of recentQuestions) {
+      lines.push(`  ${fit(`${item.project} › ${item.title} · ${item.when}`, o.width - 4)}`)
+      for (const question of item.questions ?? []) lines.push(`    ${fit(`${question.text}${question.note ? ` — ${question.note}` : ''}`, o.width - 6)}`)
+    }
+  }
+  if (items.length === 0 && view.idle.length === 0 && view.stopped.length === 0 && recentQuestions.length === 0) lines.push(c('quiet', s.empty))
   lines.push('', c('quiet', fit([...keysFor(items[at], s), s.boardKeysMove].join(' · '), o.width)))
   if (result === undefined) resultLines('')
 

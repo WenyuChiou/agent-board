@@ -1,12 +1,12 @@
 import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readdirSync, realpathSync, renameSync, rmdirSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
 import { createHash, randomBytes } from 'node:crypto'
 import { delimiter, dirname, isAbsolute, join, resolve } from 'node:path'
-import type { Lang } from '../hooks/i18n'
-import { agentHooks, isNodeSupported, isSetupState, nodeVersionOf, setupSeed, withoutSection } from '../hooks/connect-pure'
+import type { Lang, Strings } from '../hooks/i18n'
+import { BOARD_FOR, agentHooks, connectDataRoots, connectPath, isNodeSupported, isSetupState, nodeVersionOf, setupSeed, setupProblemText, withoutSection } from '../hooks/connect-pure'
 import { inspectCodexHooks } from './codex-host'
 import type { CodexTrustObservation } from './codex-host'
-import type { SetupState } from '../hooks/connect-pure'
-import { langOf } from '../hooks/strings'
+import type { ConnectContext, SetupState } from '../hooks/connect-pure'
+import { langOf, STRINGS } from '../hooks/strings'
 import { installControlRoot, withInstallLock } from './install-control'
 import { connectLegacy } from './legacy-connect'
 
@@ -33,6 +33,7 @@ export type ConnectState = {
   notified: string[]
   boardLang?: Lang
   setup?: SetupState
+  connectedProgress?: string
   pending?: Pending
 }
 const hash = (text: string): string => createHash('sha256').update(text).digest('hex')
@@ -67,6 +68,7 @@ export class ConnectTransaction {
     if (existsSync(authority) && !existsSync(this.file)) throw new Error('MISSING_CONNECT_STATE')
     if (existsSync(this.file)) {
       const state = JSON.parse(readLocal(this.file)) as ConnectState
+      if (state.connectedProgress !== undefined && (typeof state.connectedProgress !== 'string' || !isAbsolute(state.connectedProgress))) throw new Error('INVALID_CONNECT_STATE')
       if (state.version !== 1 || !Number.isSafeInteger(state.revision) || state.revision < 0 || typeof state.disabled !== 'boolean' || state.owned === null || typeof state.owned !== 'object' || Array.isArray(state.owned) || Object.entries(state.owned).some(([file, value]) => !isAbsolute(file) || typeof value !== 'string' || !/^[a-f0-9]{64}$/.test(value)) || !Array.isArray(state.notified) || state.notified.some(value => typeof value !== 'string') || state.boardLang !== undefined && langOf(state.boardLang) !== state.boardLang || state.setup !== undefined && !isSetupState(state.setup)) throw new Error('INVALID_CONNECT_STATE')
       if (state.pending !== undefined) {
         if (state.pending === null || typeof state.pending !== 'object' || typeof state.pending.bundle !== 'string' || !/^[a-f0-9]{64}$/.test(state.pending.bundle)) throw new Error('INVALID_CONNECT_STATE')
@@ -191,6 +193,76 @@ const codexObservation = async (request: LegacyConnectRequest): Promise<CodexTru
   } catch { return undefined }
 }
 
+export const connectContext = (request: LegacyConnectRequest): ConnectContext => {
+  const isWindows = process.platform === 'win32'
+  const folder = dirname(request.progress)
+  return {
+    home: request.home,
+    sep: isWindows ? '\\' : '/',
+    isWindows,
+    script: join(folder, isWindows ? 'progress-report.ps1' : 'progress-report.sh'),
+    inbox: join(folder, 'progress-inbox'),
+    board: join(folder, 'agent-board.mjs'),
+    codexHome: request.dirs?.codex ?? join(request.home, '.codex'),
+    grokHome: request.dirs?.grok ?? join(request.home, '.grok'),
+    hermesHome: request.dirs?.hermes ?? join(request.home, '.hermes'),
+    openclawHome: request.dirs?.openclaw ?? join(request.home, '.openclaw'),
+    opencodeHome: request.dirs?.opencode ?? join(request.home, '.config', 'opencode'),
+  }
+}
+
+export const unreadableProblem = (label: string): SetupState['problems'][number] => ({
+  key: `checkUnreadable:${label}`, message: 'connectCheckUnreadable', args: [label],
+})
+
+export const foreignHostCheck = (transaction: ConnectTransaction, context: ConnectContext, folder: string, s: Strings = STRINGS.en) => {
+  const hooks = agentHooks(context)
+  const labels = new Map(hooks.filter(hook => hook.label !== '').map(hook => [hook.agent, hook.label]))
+  labels.set('antigravity', 'Antigravity')
+  const skillLabels = [...new Set(hooks
+    .filter(hook => BOARD_FOR.skills!.includes(hook.agent) && hook.label !== ''
+      && (hook.dirs ?? [hook.dir]).some(dir => existsSync(dir)))
+    .map(hook => hook.label))]
+  const checks = hooks.filter(hook => (hook.dirs ?? [hook.dir]).some(dir => existsSync(dir))).flatMap(hook => {
+    const names = hook.agent === 'skills'
+      ? skillLabels.length > 0 ? skillLabels : ['Codex']
+      : [labels.get(hook.agent) ?? s.setupAgentUnknown]
+    return [hook.file, ...(hook.old === undefined ? [] : [hook.old])]
+      .flatMap(file => names.map(label => ({ file, label })))
+  })
+  if (existsSync(context.codexHome)) {
+    checks.push(...['AGENTS.md', 'AGENTS.override.md'].map(name => ({
+      file: join(context.codexHome, name), label: labels.get('codex') ?? 'Codex',
+    })))
+  }
+  const unreadable = new Set<string>()
+  const other = checks.flatMap(({ file, label }) => {
+    const text = transaction.maybe(file)
+    if (text === null) unreadable.add(label)
+    return connectDataRoots(text ?? '')
+      .filter(root => connectPath(root, context.isWindows) !== connectPath(folder, context.isWindows))
+      .map(root => ({ root, label }))
+  })
+  const mayExist = (file: string): boolean => {
+    try { statSync(file); return true } catch (error) {
+      return !['ENOENT', 'ENOTDIR', 'ENAMETOOLONG', 'EINVAL'].includes((error as { code?: string }).code ?? '')
+    }
+  }
+  const live = other.filter(one => mayExist(join(one.root, 'progress-report.ps1')) || mayExist(join(one.root, 'progress-report.sh')))
+  const state = transaction.state
+  const hasForeignRecovery = state.pending !== undefined
+    && connectPath(dirname(state.pending.request.progress), context.isWindows) !== connectPath(folder, context.isWindows)
+  const hasLiveRecovery = hasForeignRecovery && mayExist(dirname(state.pending!.request.progress))
+  const problems: SetupState['problems'] = [
+    ...[...new Set(live.map(one => one.label))].map(label => ({
+      key: `otherData:${label}`, message: 'connectOtherData' as const, args: [label] as [string],
+    })),
+    ...(hasLiveRecovery ? [{ key: 'otherData:recovery', message: 'connectOtherRecovery' as const, args: [] as [] }] : []),
+    ...[...unreadable].map(unreadableProblem),
+  ]
+  return { live, unreadable, problems, hasForeignRecovery, hasLiveRecovery }
+}
+
 export const legacyConnect = async (value: unknown, bundle: string): Promise<{ state: ConnectState; result: ReturnType<typeof connectLegacy> | null }> => {
   const request = checkedRequest(value)
   if (request.node === null || nodeVersionOf(request.node) === null || !isNodeSupported(request.node) || !isNodeSupported(`v${process.versions.node}`)) throw new Error('NODE_REQUIRED')
@@ -198,6 +270,42 @@ export const legacyConnect = async (value: unknown, bundle: string): Promise<{ s
   return withInstallLock(request.home, () => {
     const transaction = new ConnectTransaction(request.home, request.seed)
     const state = transaction.state
+    // Check the host's current path before creating authority, staging writes, or
+    // replaying a journal from another data folder. A skipped auto is read-only.
+    const folder = dirname(request.progress)
+    const context = connectContext(request)
+    const { isWindows } = context
+    const { problems, hasForeignRecovery, hasLiveRecovery } = foreignHostCheck(transaction, context, folder, STRINGS[request.lang])
+    const checkedSetup = (stored: SetupState | undefined): SetupState => {
+      const source = join(context.codexHome, 'hooks.json')
+      const trusted = request.mode === 'ack' ? stored?.codexTrusted === true
+        : observation?.trusted === true && observation.source === resolve(source)
+          && observation.sourceHash === hash(transaction.read(source))
+      const setup: SetupState = {
+        ...(stored ?? { agents: [], node: request.node }),
+        codexTrusted: trusted,
+        problems: [
+          ...(stored?.problems ?? []).filter(one => one.key !== 'codex:approval'
+            && !/^(?:otherData|checkUnreadable):/.test(one.key)
+            && !problems.some(problem => problem.key === one.key)),
+          ...problems,
+        ],
+      }
+      if (setup.agents.some(one => one.agent === 'codex') && !trusted) {
+        setup.problems.push({ key: 'codex:approval', message: 'setupCodexApproval', args: [] })
+      }
+      return setup
+    }
+    // A blocked automatic run does not save; acknowledgement reuses the last saved Codex result.
+    const setup = checkedSetup(state.setup)
+    const hasBlockedAuto = problems.length > 0
+    if (['auto', 'status'].includes(request.mode) && hasBlockedAuto) {
+      const lines = setup.problems.map(problem => setupProblemText(problem, STRINGS[request.lang]))
+      const result = request.mode === 'auto'
+        ? { text: lines.join('\n'), lines, problems: setup.problems, done: [] }
+        : null
+      return { state: { ...state, setup }, result }
+    }
     // A new remove supersedes an unfinished connect before recovery can write
     // anything. This durable bit also fences a later auto after this process dies.
     if (request.mode === 'remove') {
@@ -207,21 +315,34 @@ export const legacyConnect = async (value: unknown, bundle: string): Promise<{ s
     const authority = join(installControlRoot(request.home), 'legacy-connect-authority')
     if (!existsSync(authority)) writeFileSync(authority, '1\n', { flag: 'wx', mode: 0o600 })
     if (request.mode === 'status') {
-      const source = join(request.dirs?.codex ?? join(request.home, '.codex'), 'hooks.json')
-      const trusted = observation?.trusted === true && observation.source === resolve(source) && observation.sourceHash === hash(transaction.read(source))
-      const setup = state.setup === undefined ? undefined : { ...state.setup, codexTrusted: trusted, problems: state.setup.problems.filter(one => one.key !== 'codex:approval') }
-      if (setup?.agents.some(one => one.agent === 'codex') && !trusted) setup.problems.push({ key: 'codex:approval', message: 'setupCodexApproval', args: [] })
-      return { state: { ...state, ...(setup === undefined ? {} : { setup }) }, result: null }
+      const hasSetup = state.setup !== undefined || setup.problems.length > 0
+      return { state: { ...state, ...(hasSetup ? { setup } : {}) }, result: null }
     }
     if (request.mode === 'ack') {
-      if (state.pending === undefined && request.acknowledgement?.revision === state.revision) {
+      if (request.acknowledgement?.revision === state.revision) {
+        if (state.setup !== undefined || setup.problems.length > 0) state.setup = setup
         const current = new Set(state.setup?.problems.map(problem => problem.key) ?? [])
         state.notified = request.acknowledgement.keys.filter(key => current.has(key))
         transaction.save()
       }
       return { state, result: null }
     }
+    if (request.mode === 'language') {
+      if (request.boardLang === undefined) throw new Error('INVALID_CONNECT_REQUEST')
+      state.boardLang = request.boardLang
+      state.revision += 1
+      transaction.save()
+      return { state, result: null }
+    }
     const run = (one: LegacyConnectRequest): ReturnType<typeof connectLegacy> => {
+      // Previous local scripts remain in place for in-flight hooks, but a new
+      // scope must not claim them as its own or later remove them.
+      const hosts = new Set(agentHooks(context).map(hook => connectPath(hook.file, isWindows)))
+      for (const file of Object.keys(state.owned)) {
+        const isOtherFolder = connectPath(dirname(file), isWindows) !== connectPath(dirname(one.progress), isWindows)
+        const isReporter = /^(?:agent-board\.mjs|progress-report\.(?:sh|ps1))$/.test(file.split(/[\\/]/).at(-1) ?? '')
+        if (!hosts.has(connectPath(file, isWindows)) && isOtherFolder && isReporter) delete state.owned[file]
+      }
       state.disabled = one.mode === 'remove' ? true : one.mode === 'connect' ? false : state.disabled
       if (one.boardLang !== undefined) state.boardLang = one.boardLang
       const { seed: _seed, ...metadata } = one
@@ -234,6 +355,29 @@ export const legacyConnect = async (value: unknown, bundle: string): Promise<{ s
       return result
     }
     if (state.pending !== undefined) {
+      const step = state.pending.step
+      let hasConflict = false
+      if (hasForeignRecovery && state.disabled && hasLiveRecovery && state.pending.bundle === hash(bundle) && step !== undefined) {
+        try {
+          const current = fingerprint(step.file)
+          hasConflict = current !== step.before && current !== step.after
+        } catch (error) {
+          const code = (error as { code?: string }).code ?? ''
+          // A busy or locked file may be read later: keep the journal and name the error.
+          if (/^E[A-Z]{2,15}$/.test(code) && !['EISDIR', 'ENOTDIR'].includes(code)) throw new Error(`RECOVERY_UNREADABLE_${code}`)
+          if (!['EISDIR', 'ENOTDIR'].includes(code)) throw error
+          // A path that changed its file kind cannot be replayed into this connection.
+          hasConflict = true
+        }
+      }
+      if (hasForeignRecovery && (!state.disabled || !hasLiveRecovery || state.pending.bundle !== hash(bundle) || hasConflict)) {
+        // Superseding a different folder never replays or validates its discarded
+        // file step: that file may have changed or disappeared with the folder.
+        delete state.pending
+        transaction.save()
+      }
+    }
+    if (state.pending !== undefined) {
       if (state.pending.bundle !== hash(bundle)) throw new Error('RECOVERY_BUNDLE_CHANGED')
       const previous = state.pending.request
       transaction.recoverStep()
@@ -243,13 +387,6 @@ export const legacyConnect = async (value: unknown, bundle: string): Promise<{ s
       const result = run(recovery)
       const scope = (one: LegacyConnectRequest): string => JSON.stringify([one.home, one.progress, ...(['codex', 'grok', 'hermes', 'openclaw', 'opencode'] as const).map(agent => one.dirs?.[agent] ?? null)])
       if (request.mode === 'remove' && recovery.mode === 'remove' && scope(request) === scope(recovery)) return { state, result }
-    }
-    if (request.mode === 'language') {
-      if (request.boardLang === undefined) throw new Error('INVALID_CONNECT_REQUEST')
-      state.boardLang = request.boardLang
-      state.revision += 1
-      transaction.save()
-      return { state, result: null }
     }
     if (request.mode === 'auto' && state.disabled) return { state, result: null }
     return { state, result: run(request) }

@@ -163,6 +163,7 @@ export type ServeRetained = { project: string; agent: string; task: string; text
 export type ServeTurn = { key: string; project: string; agent: string; text: string; isQuestion: boolean; info: string }
 
 export type ServeModel = {
+  warning?: string
   counts: { waiting: number; active: number; due: number; today: number }
   asks: ServeAsk[]
   hidden: ServeHidden[]
@@ -173,7 +174,7 @@ export type ServeModel = {
   groups: Array<{ project: string; rows: ServeRow[] }>
   turns: ServeTurn[]
   // Finished in the last day, until it goes to the archive.
-  recent: Array<{ project: string; title: string; when: string }>
+  recent: Array<{ project: string; title: string; when: string; questions?: string[] }>
 }
 
 // `task` and `session` name the Claude Code session to answer in, the way the pane does.
@@ -299,6 +300,7 @@ export const serveModel = (view: View, pending: readonly PendingTurn[], s: Strin
 
   return {
     counts: { ...view.overview, waiting: view.overview.waiting + remainingInbox(view, pending).filter(turn => turn.isQuestion).length },
+    warning: view.warning,
     asks,
     idle,
     stopped,
@@ -307,7 +309,7 @@ export const serveModel = (view: View, pending: readonly PendingTurn[], s: Strin
     older: (view.older ?? []).map(({ project, agent, task, text, note, context, when }) => ({ project, agent, task, text, note, context, when })),
     groups: [...groups].map(([project, rows]) => ({ project, rows })),
     turns,
-    recent: view.recent.map(item => ({ project: item.project, title: item.title, when: item.when })),
+    recent: view.recent.map(item => ({ project: item.project, title: item.title, when: item.when, questions: item.questions?.map(question => [question.text, question.note].filter(Boolean).join(' — ')) })),
   }
 }
 
@@ -502,6 +504,7 @@ const PAGE_WORDS = [
   'serveSend',
   'serveSending',
   'serveRelay',
+  'servePasteTitle',
   'pasteReview',
   'boardCopied',
   'boardCopyFailed',
@@ -588,6 +591,8 @@ details[open]>summary::before{content:"▾"}
 .t-running,.s-running,.k-review{color:var(--running)}
 .t-soon,.k-do,.n-due{color:var(--soon)}
 .t-quiet,.s-todo,.s-cancelled,.k-wait{color:var(--muted)}
+#offline{position:sticky;top:0;background:var(--ground);color:var(--alert);overflow-wrap:anywhere;padding:8px 0;border-bottom:1px solid var(--line)}
+#offline:empty{display:none}
 #note{position:sticky;bottom:0;padding:10px 0;background:var(--ground);border-top:1px solid var(--line);overflow-wrap:anywhere}
 #note:empty{display:none}
 #note.done{color:var(--done)}
@@ -600,19 +605,20 @@ details[open]>summary::before{content:"▾"}
 </head>
 <body>
 <main>
-<header><h1>${esc(s.paneTitle)}</h1><button type="button" id="close">${esc(s.serveClose)}</button></header>
+<header><h1>${esc(s.paneTitle)}</h1><button type="button" id="close" data-static>${esc(s.serveClose)}</button></header>
+<div id="offline" role="status" aria-live="polite"></div>
 <section class="counts" id="counts"></section>
 <div id="board"></div>
 <details class="card paste"><summary>${esc(s.servePasteTitle)}</summary>
 <p class="quiet small">${esc(s.servePasteHint)}</p>
 <textarea id="paste" spellcheck="false"></textarea>
-<div class="actions"><button type="button" class="primary" id="paste-go">${esc(s.servePaste)}</button><button type="button" id="relay">${esc(s.serveRelay)}</button></div>
+<div class="actions"><button type="button" class="primary" id="paste-go" data-static>${esc(s.servePaste)}</button><button type="button" id="relay" data-local>${esc(s.serveRelay)}</button></div>
 <p class="quiet small">${esc(s.serveRelayHint)}</p>
 </details>
 <p class="quiet small">${esc(isLan ? s.serveLanIdle : idleMs > 0 ? s.serveIdleTimed(idleMs / 60_000) : s.serveIdle)}</p>
 <div id="note" role="status" aria-live="polite"></div>
 </main>
-<script type="application/json" id="words">${JSON.stringify(pageWords(s)).replace(/</g, '\\u003c')}</script>
+<script type="application/json" id="words">${JSON.stringify(pageWords(isLan ? { ...s, serveOffline: s.serveOfflineLan } : s)).replace(/</g, '\\u003c')}</script>
 <script nonce="${nonce}">${PAGE_SCRIPT}</script>
 </body>
 </html>
@@ -628,12 +634,15 @@ const PAGE_SCRIPT = String.raw`
   var board = document.getElementById('board');
   var counts = document.getElementById('counts');
   var note = document.getElementById('note');
+  var offline = document.getElementById('offline');
   var presence = null;
   var GLYPH = { done: '✓', doing: '▸', todo: '○', waiting: '●', running: '◐', blocked: '!', cancelled: '–' };
   var last = '';
   var opened = {};
   var timer = null;
   var isClosed = false;
+  var isUnreachable = false;
+  var offlineButtons = [];
   var since = null;
   var messageAttempts = {};
 
@@ -707,12 +716,31 @@ const PAGE_SCRIPT = String.raw`
     note.textContent = text || '';
     note.className = tone || '';
   }
+  function unreachable() {
+    if (!isUnreachable) offlineButtons = Array.from(document.querySelectorAll('button:not([data-local])')).filter(function (node) { return !node.disabled; });
+    isUnreachable = true;
+    if (offline.textContent !== w('serveOffline')) offline.textContent = w('serveOffline');
+    document.querySelectorAll('button:not([data-local])').forEach(function (node) { node.disabled = true; });
+  }
+  function reachable() {
+    if (!isUnreachable) return;
+    isUnreachable = false;
+    offline.textContent = '';
+    document.querySelectorAll('button[data-static]').forEach(function (node) { node.disabled = false; });
+    offlineButtons.forEach(function (node) { node.disabled = false; });
+    offlineButtons = [];
+    // A press that met the offline server keeps its failure, no longer the offline advice.
+    Object.keys(results).forEach(function (key) { if (results[key].text === w('serveOffline')) { results[key].text = w('pressFailed'); paintResult(key); } });
+    // Redraw even an unchanged model to restore each action's own sending state.
+    last = '';
+  }
   function call(path, body) {
+    if (isUnreachable && body !== undefined) return Promise.reject();
     var headers = { 'x-board-token': token };
     if (body !== undefined) headers['content-type'] = 'application/json';
     return fetch(path, { method: body === undefined ? 'GET' : 'POST', headers: headers, body: body === undefined ? undefined : JSON.stringify(body), cache: 'no-store' }).then(function (res) {
       return res.json().catch(function () { return {}; }).then(function (data) { data.ok = res.ok && data.ok !== false; return data; });
-    });
+    }).catch(function (error) { unreachable(); throw error; });
   }
   function copy(text, shown, key) {
     say(w('pressPending'), '', key);
@@ -732,22 +760,28 @@ const PAGE_SCRIPT = String.raw`
     if (navigator.clipboard && window.isSecureContext) navigator.clipboard.writeText(text).then(function () { say(w('copied'), 'done', key); }, fallback);
     else fallback();
   }
-  function button(label, onPress, cls) {
+  function button(label, onPress, cls, isLocal) {
     var node = el('button', cls || '', label);
     node.type = 'button';
-    node.addEventListener('click', function () { beginPress(); onPress(); });
+    if (isLocal) node.setAttribute('data-local', '');
+    node.addEventListener('click', function () { if (!isLocal && isUnreachable) return; beginPress(); onPress(); });
     return node;
   }
   // fp: the fingerprint the line was drawn with, which the server checks before it writes.
   function act(key, type, text, waiting, session, asked, fp) {
+    if (isUnreachable) return Promise.resolve();
     say(waiting || w('pressPending'), '', key);
     return call('/api/act', { key: key, type: type, text: text || '', session: session || '', asked: asked || '', fp: fp || '' }).then(function (data) {
       say(data.note || w(data.ok ? 'pressDone' : 'pressFailed'), data.ok ? 'done' : 'alert', key);
+      return data.ok;
     }, function () {
       say(w('serveOffline'), 'alert', key);
-    }).then(function () { refresh(); });
+      unreachable();
+      return false;
+    }).then(function (ok) { refresh(); return ok; });
   }
   function nativeAct(key, text, delivery, session, asked, fp, go) {
+    if (isUnreachable) return Promise.resolve(false);
     var slot = JSON.stringify([key, delivery.id, delivery.turn, session, asked, fp]);
     var attempt = messageAttempts[slot];
     if (!attempt || attempt.text !== text) attempt = messageAttempts[slot] = { id: 'AB-' + crypto.randomUUID(), text: text };
@@ -755,9 +789,9 @@ const PAGE_SCRIPT = String.raw`
     say(w('serveSending', agentName(delivery.agent)), '', key);
     return call('/api/act', { key: key, type: 'message', id: attempt.id, text: text, connection: delivery.id, turn: delivery.turn, session: session, asked: asked || '', fp: fp }).then(function (data) {
       say(data.note || w(data.ok ? 'messagesQueued' : 'messagesFailed'), data.ok ? 'done' : 'alert', key);
-      if (!data.ok) go.disabled = false;
+      if (!data.ok) go.disabled = isUnreachable;
       return data.ok;
-    }, function () { say(w('messagesFailed'), 'alert', key); go.disabled = false; return false; }).then(function (ok) { refresh(); return ok; });
+    }, function () { say(w('messagesFailed'), 'alert', key); unreachable(); return false; }).then(function (ok) { refresh(); return ok; });
   }
   function agentName(agent) { return agent || 'claude'; }
   function receiptLine(receipt) {
@@ -782,14 +816,13 @@ const PAGE_SCRIPT = String.raw`
           nativeAct(key, text, delivery, session, asked, fp, go).then(function (ok) { if (ok) input.value = ''; });
           return;
         }
-        input.value = '';
-        act(key, 'send', text, w('serveSending', agent), session, asked, fp);
+        act(key, 'send', text, w('serveSending', agent), session, asked, fp).then(function (ok) { if (ok) input.value = ''; });
       }, 'primary')
       : button(w('serveCopy'), function () {
         var text = input.value.trim();
         if (text) copy(text, undefined, key);
         else say(w('pressEmpty'), 'alert', key);
-      });
+      }, '', true);
     go.disabled = isSending === true;
     input.addEventListener('keydown', function (e) {
       if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); go.click(); }
@@ -824,12 +857,12 @@ const PAGE_SCRIPT = String.raw`
         if (ask.send === 'connected') nativeAct(ask.key, answer, ask.delivery, ask.session, ask.text, ask.fp, node);
         else if (send) act(ask.key, 'send', answer, w('serveSending', ask.agent), ask.session, ask.text, ask.fp);
         else copy(answer, undefined, ask.key);
-      }, index === 0 ? 'primary' : '');
+      }, index === 0 ? 'primary' : '', !send);
       node.disabled = send && ask.isSending;
       actions.appendChild(node);
     });
-    if (ask.command) actions.appendChild(button(w('serveCopyCommand'), function () { copy(ask.command, undefined, ask.key); }));
-    if (ask.reopen) actions.appendChild(button(w('serveCopyResume'), function () { copy(ask.reopen, undefined, ask.key); }));
+    if (ask.command) actions.appendChild(button(w('serveCopyCommand'), function () { copy(ask.command, undefined, ask.key); }, '', true));
+    if (ask.reopen) actions.appendChild(button(w('serveCopyResume'), function () { copy(ask.reopen, undefined, ask.key); }, '', true));
     if (ask.canHide) actions.appendChild(button(w('answeredHide'), function () { act(ask.key, 'hide'); }));
     if (ask.link && /^https:\/\//i.test(ask.link)) {
       var link = el('a', 'btn', w('serveOpenLink'));
@@ -868,7 +901,7 @@ const PAGE_SCRIPT = String.raw`
     if (row.next) actions.appendChild(button(w('serveTickNext', row.next), function () { act(row.key, 'tick', row.next, '', '', '', row.fp); }, 'primary'));
     if (row.canArchive) actions.appendChild(button(w('serveArchive'), function () { act(row.key, 'archive', '', '', '', '', row.fp); }));
     if (row.canConfirm) actions.appendChild(button(w('confirmDone'), function () { act(row.key, 'done', '', '', '', '', row.fp); }));
-    if (row.resume) actions.appendChild(button(w('serveCopyResume'), function () { copy(row.resume, undefined, row.key); }));
+    if (row.resume) actions.appendChild(button(w('serveCopyResume'), function () { copy(row.resume, undefined, row.key); }, '', true));
     if (actions.childNodes.length) add(body, actions);
     if (row.send === 'send' || row.send === 'connected') add(body, replyBox(row.key, w('serveMessagePlaceholder', agentName(row.agent)), row.send, row.agent, row.where, row.isSending, row.session, asked, row.fp, row.delivery));
     else if (row.hasCopyBox) add(body, replyBox(row.key, w('serveReplyPlaceholder'), 'copy', row.agent, '', false, row.session, asked));
@@ -904,6 +937,7 @@ const PAGE_SCRIPT = String.raw`
     var closeSlot = resultSlots.close;
     resultSlots = pasteSlot ? { paste: pasteSlot } : {};
     if (closeSlot) resultSlots.close = closeSlot;
+    if (model.warning) add(board, el('p', 'n-due', model.warning));
     add(board, el('h2', 'n-waiting', '● ' + w('sectionWaiting')));
     if (model.asks.length === 0) add(board, el('div', 'n-today', w('nothingForYou')));
     model.asks.forEach(function (ask) { board.appendChild(askCard(ask)); });
@@ -964,10 +998,11 @@ const PAGE_SCRIPT = String.raw`
       var done = el('ul', 'steps');
       model.recent.forEach(function (item) {
         add(done, add(el('li'), el('span', 's-done', '✓'), el('span', 't-quiet', [item.project, item.title, item.when].filter(Boolean).join(' · '))));
+        (item.questions || []).forEach(function (question) { add(done, add(el('li'), el('span'), el('span', 't-quiet', question))); });
       });
       var recent = add(el('div', 'card'), done, add(el('div', 'actions'), button(w('archiveNow'), function () {
         say(w('pressPending'), '', 'recent');
-        call('/api/tidy', {}).then(function (data) { say(data.note || w(data.ok ? 'pressDone' : 'pressFailed'), data.ok ? 'done' : 'alert', 'recent'); refresh(); }, function () { say(w('serveOffline'), 'alert', 'recent'); });
+        call('/api/tidy', {}).then(function (data) { say(data.note || w(data.ok ? 'pressDone' : 'pressFailed'), data.ok ? 'done' : 'alert', 'recent'); refresh(); }, function () { say(w('serveOffline'), 'alert', 'recent'); unreachable(); });
       })));
       resultSlot(recent, 'recent', '', w('sectionRecent'));
       add(board, recent);
@@ -1010,7 +1045,12 @@ const PAGE_SCRIPT = String.raw`
     if (isClosed) return;
     clearTimeout(timer);
     call('/api/board').then(function (data) {
-      if (!data.ok || !data.model) { say(data.note || w('serveOffline'), 'alert'); return; }
+      if (!data.ok || !data.model) {
+        if (data.note) { reachable(); say(data.note, 'alert'); }
+        else unreachable();
+        return;
+      }
+      reachable();
       var text = JSON.stringify([data.model, data.messaging && data.messaging.sessions]);
       if (text !== last) {
         last = text; render(data.model);
@@ -1034,12 +1074,13 @@ const PAGE_SCRIPT = String.raw`
         if (reply.at > seenAt) { since = Math.max(since, reply.at); say(reply.note, reply.ok ? 'done' : 'alert', reply.key); }
       });
     }, function () {
-      say(w('serveOffline'), 'alert');
+      unreachable();
     }).then(function () {
       if (!isClosed) timer = setTimeout(refresh, 3000);
     });
   }
   document.getElementById('close').addEventListener('click', function () {
+    if (isUnreachable) return;
     beginPress();
     say(w('pressPending'), '', 'close');
     var shut = function () {
@@ -1051,10 +1092,15 @@ const PAGE_SCRIPT = String.raw`
     };
     call('/api/close', {}).then(function (data) {
       if (data.ok) shut();
-      else say(data.note || w('pressFailed'), 'alert', 'close');
-    }, function () { say(w('serveOffline'), 'alert', 'close'); });
+      else {
+        say(data.note || w('serveOffline'), 'alert', 'close');
+        if (!data.note) unreachable();
+        refresh();
+      }
+    }, function () { say(w('serveOffline'), 'alert', 'close'); unreachable(); });
   });
   document.getElementById('paste-go').addEventListener('click', function () {
+    if (isUnreachable) return;
     beginPress();
     var box = document.getElementById('paste');
     if (!box.value.trim()) { say(w('pressEmpty'), 'alert', 'paste'); return; }
@@ -1069,7 +1115,7 @@ const PAGE_SCRIPT = String.raw`
       say(data.note || w(data.ok ? 'pressDone' : 'pressFailed'), data.ok ? 'done' : 'alert', 'paste');
       if (data.ok && box.value === pasted) box.value = '';
       refresh();
-    }, function () { say(w('serveOffline'), 'alert', 'paste'); });
+    }, function () { say(w('serveOffline'), 'alert', 'paste'); unreachable(); });
   });
   document.getElementById('relay').addEventListener('click', function () { beginPress(); copy(W.relayPrompt, w('serveRelay'), 'paste'); });
   resultSlot(document.querySelector('.paste'), 'paste', '', w('servePasteTitle'));

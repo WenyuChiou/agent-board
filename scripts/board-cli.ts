@@ -8,9 +8,9 @@
 // progress file and language the Claude Code session uses set on its first line. `--keys
 // "down x"` plays keys without a terminal and prints the board after them, for tests and checks.
 import { spawn, spawnSync } from 'node:child_process'
-import { runCodexLocal } from './codex-local'
+import { localProgressPath, runCodexLocal } from './codex-local'
 import { legacyConnect } from './connect-transaction'
-import { chmodSync, closeSync, existsSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
+import { chmodSync, closeSync, existsSync, fstatSync, fsyncSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
 import { createHash, randomUUID } from 'node:crypto'
 import { homedir, tmpdir } from 'node:os'
 import { basename, dirname, join, resolve } from 'node:path'
@@ -23,11 +23,11 @@ import type { BoardAction, BoardState } from '../hooks/board'
 import { LOG_TAIL, isInboxFile } from '../hooks/inbox'
 import { dashboardHtml } from '../hooks/dashboard'
 import { appendJournal, archivePath, countDay, hasArchiveEntry, journalLine, journalPath } from '../hooks/journal'
-import { parseProgress } from '../hooks/parse'
+import { parseProgress, progressTail } from '../hooks/parse'
 import { qrModules, qrText } from '../hooks/qr'
 import { langOf, STRINGS } from '../hooks/strings'
 import { answeredJson, answeredPath, buildView, manualDoneSeen, parseAnswered, parseSeen, seenJson, seenPath, withAnswered, withSeen } from '../hooks/view'
-import { acknowledgementKeys, archiveQuestionsKept, captureHashOf, captureJson, capturePath, emptyQuestions, parseCapture, withCaptures, isQuestionProof, isQuestionSnapshot, migratedAnswered, observeQuestions, parseQuestions, questionProofJson, questionProofOf, questionProofPath, questionsJson, questionsPath } from '../hooks/questions'
+import { acknowledgementKeys, archiveQuestionsKept, captureHashOf, captureJson, capturePath, emptyQuestions, parseCapture, withCaptures, isQuestionProof, isQuestionSnapshot, isTornLedger, migratedAnswered, observeQuestions, parseQuestions, questionProofJson, questionProofOf, questionProofPath, questionsJson, questionsPath, resolvedQuestionsToRetire } from '../hooks/questions'
 import type { QuestionCapture, QuestionProofs, QuestionRecord } from '../hooks/questions'
 import { sha256 } from '../hooks/sha256'
 
@@ -46,12 +46,9 @@ const idleMs = (): number => {
 }
 
 const progressFile = (): string => {
-  const explicit = process.env.CLAUDE_PROGRESS_FILE
-  if (explicit) return explicit
-  if (BAKED.path) return BAKED.path
   const config = process.env.CLAUDE_CONFIG_DIR
 
-  return join(config || join(homedir(), '.claude'), 'progress.md')
+  return localProgressPath(flag('--progress-file'), BAKED.path || join(config || join(homedir(), '.claude'), 'progress.md'))
 }
 
 const path = progressFile()
@@ -138,7 +135,39 @@ let lastStat = { stat: '', at: 0 }
 let lastQuestions = emptyQuestions()
 const questionWriter = randomUUID()
 let questionWrite = 0
-const readQuestions = (file: string, text = read(file)) => {
+const isQuestionWriter = !args.includes('--chat') && args.some(arg => ['--watch', '--serve', '--serve-child', '--keys'].includes(arg))
+
+// Neither a quarantine nor a missing ledger may replace another session's complete file.
+// mv -n also returns zero when it skips a destination, so check that the source is gone.
+const placeQuestionFile = (from: string, to: string): boolean => {
+  const source = resolve(from)
+  const target = resolve(to)
+  const quote = (text: string): string => `'${text.replaceAll("'", "''")}'`
+  const [tool, argv] = process.platform === 'win32'
+    // Move-Item, as the pane uses: a .NET method call is refused under Constrained Language Mode.
+    ? [system32('WindowsPowerShell/v1.0/powershell.exe'), ['-NoProfile', '-NonInteractive', '-Command', `Move-Item -LiteralPath ${quote(source)} -Destination ${quote(target)} -ErrorAction Stop`]] as const
+    : ['mv', ['-n', '--', source, target]] as const
+  const ran = spawnSync(tool, [...argv], { cwd: dirname(path), stdio: 'ignore', timeout: 10000, windowsHide: true })
+  return ran.status === 0 && !existsSync(source)
+}
+
+const quarantineQuestions = (file: string): boolean => {
+  const aside = `${file}.torn-${Date.now()}-${process.pid}`
+  if (!placeQuestionFile(file, aside)) return false
+  if (isTornLedger(read(aside))) return true
+  // A good write raced the initial read. Restore it only if no newer ledger took its place.
+  placeQuestionFile(aside, file)
+  return false
+}
+
+const readQuestions = (file: string, text?: string) => {
+  if (text === undefined) {
+    text = read(file)
+    if (isQuestionWriter && isTornLedger(text)) {
+      if (!quarantineQuestions(file)) return null
+      text = read(file)
+    }
+  }
   let isMissing = false
   try {
     statSync(file)
@@ -249,7 +278,7 @@ const view = (source = read(path), now = Date.now()) => {
   const observed = observeQuestions(lastQuestions, projects, null, answered, now, isSettled, 'preview', proofs ?? undefined, turns)
   let questions = observed.ledger
   // Chat and a one-shot read never write. Interactive readers persist before accepting hides.
-  if (record !== null && proofs !== null && isQuestionSnapshot(source) && !args.includes('--chat') && args.some(arg => ['--watch', '--serve', '--serve-child', '--keys'].includes(arg))) {
+  if (record !== null && proofs !== null && isQuestionSnapshot(source) && isQuestionWriter) {
     const incarnation = `${questionWriter}:${questionWrite++}`
     const wrote = rewrite(file, before => {
       if (read(path) !== source) return null
@@ -263,8 +292,9 @@ const view = (source = read(path), now = Date.now()) => {
         if (record.isUnresolved && !captures.some(capture => captureJson(capture.record, capture.disposition) === captureJson(record, 'unresolved'))) keepQuestionCapture(record, 'unresolved')
         if (record.isUnresolved === false && current.records.some(old => old.id === record.id && old.isUnresolved === true)) keepQuestionCapture(record, 'resolved')
       }
+      const retiredResolutions = resolvedQuestionsToRetire(current, projects, null, turns)
       for (const old of current.records) {
-        if (old.isPresent && !next.records.some(record => record.id === old.id && record.isPresent && record.isWaiting)) keepQuestionProof('retired', sha256(old.id))
+        if ((old.isPresent && !next.records.some(record => record.id === old.id && ((record.isPresent && record.isWaiting) || record.resolvedAt !== undefined))) || retiredResolutions.includes(old.id)) keepQuestionProof('retired', sha256(old.id))
       }
       proofs = readQuestionProofs()
       if (proofs === null) return null
@@ -292,7 +322,8 @@ const view = (source = read(path), now = Date.now()) => {
     }
   }
   // A question marked answered in a pane on this machine is kept off the board too.
-  return buildView(projects, [basename(process.cwd())], null, now, countDay(read(journalPath(path, now)), now), manualDoneSeen(projects, seen, now, s), s, answered, seen, questions, readQuestionProofs(), turns)
+  const tail = progressTail(source)
+  return { ...buildView(projects, [basename(process.cwd())], null, now, countDay(read(journalPath(path, now)), now), manualDoneSeen(projects, seen, now, s), s, answered, seen, questions, readQuestionProofs(), turns), ...(tail === null ? {} : { warning: s.progressIncomplete(tail.tasks) }) }
 }
 
 const pad = (n: number): string => String(n).padStart(2, '0')
@@ -312,6 +343,12 @@ const rewrite = (file: string, change: (text: string) => string | null): string 
   let failure: unknown = { code: 'EAGAIN' }
   for (let attempt = 0; attempt < 3; attempt += 1) {
     const before = read(file)
+    const isLedger = file === questionsPath(path)
+    if (isLedger && isTornLedger(before)) {
+      if (!quarantineQuestions(file)) return null
+      continue
+    }
+    const wasMissing = isLedger && before === '' && !existsSync(file)
     const after = change(before)
     if (after === null) return null
     if (after === before) return after
@@ -331,7 +368,27 @@ const rewrite = (file: string, change: (text: string) => string | null): string 
       closeSync(fd)
       writeFileSync(temp, after)
       if (mode !== undefined) chmodSync(temp, mode)
-      renameSync(temp, file)
+      if (wasMissing) {
+        if (!placeQuestionFile(temp, file)) {
+          if (!existsSync(file)) {
+            // A failed move must not delete the only complete copy.
+            isOwned = false
+            throw { code: 'EAGAIN' }
+          }
+          unlinkSync(temp)
+          continue
+        }
+      } else {
+        try {
+          renameSync(temp, file)
+        } catch (error) {
+          if (!isLedger || existsSync(file)) throw error
+          if (!placeQuestionFile(temp, file)) {
+            if (!existsSync(file)) isOwned = false
+            throw error
+          }
+        }
+      }
     } catch (error) {
       failure = error
       try {
@@ -596,7 +653,8 @@ const paste = (text: string, reviewToken = '') => {
   })
   const found = latest as ReturnType<typeof mergeBlock> | null
   if (found !== null && 'problem' in found) {
-    const why = { noBlock: s.pasteNoBlock, mixed: s.pasteMixed, badBlock: s.pasteBadBlock, noProject: s.pasteNoProject, notYours: s.pasteNotYours, badTime: s.pasteBadTime, futureTime: s.pasteFutureTime, older: s.pasteOlder, conflict: s.pasteConflict, unknownOrder: s.pasteUnknownOrder }[found.problem]
+    const why = found.problem === 'oldTime' ? s.pasteOldTime(found.daysBehind)
+      : { noBlock: s.pasteNoBlock, mixed: s.pasteMixed, badBlock: s.pasteBadBlock, noProject: s.pasteNoProject, notYours: s.pasteNotYours, badTime: s.pasteBadTime, futureTime: s.pasteFutureTime, older: s.pasteOlder, conflict: s.pasteConflict, unknownOrder: s.pasteUnknownOrder }[found.problem]
     return { isAdded: false, note: s.servePasteRefused(why), review: found.review }
   }
   if (wrote === null || found === null) return { isAdded: false, note: s.boardWriteFailed }
@@ -853,7 +911,7 @@ const serveBoard = async (): Promise<void> => {
     // page stopped then, and that one is the page to show.
     const other = await runningPage()
     if (other !== null) return show(other.page.url, other.isKept, other.idleMs)
-    process.stdout.write(`\n${s.serveFailed(s.serveOffline)}\n`)
+    process.stdout.write(`\n${s.serveFailed(s.serveNotStarted)}\n`)
     return
   }
   await show(url)
@@ -998,5 +1056,10 @@ try {
 } catch (error) {
   // The verified worker wrapper bounds data-URL errors and owns stage cleanup.
   if (flag('--legacy-connect-request') !== undefined && typeof (globalThis as { AGENT_BOARD_WORKER_SOURCE?: unknown }).AGENT_BOARD_WORKER_SOURCE === 'string') throw error
-  failureNote(error)
+  if (args.some(arg => ['--codex-event', '--agent-status', '--codex-report'].includes(arg))) {
+    process.exitCode = 1
+    const raw = String((error as { code?: string })?.code ?? (error instanceof Error ? error.message : 'UNKNOWN'))
+    const reason = /^[A-Z][A-Z0-9_]{0,63}$/.test(raw) ? raw : 'UNKNOWN'
+    process.stderr.write(`${reason === 'INCOMPLETE_PROGRESS_TAIL' ? s.tailRepairFailed : s.reporterFailed(reason)}\n`)
+  } else failureNote(error)
 }

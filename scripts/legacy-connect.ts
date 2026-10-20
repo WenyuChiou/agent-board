@@ -1,4 +1,4 @@
-import { reporterPs1, reporterSh, agentHooks, boardLangOf, boardScriptFor, COLLISION, DELETE, generatedFile, hasOurHook, isNodeSupported, isReleased, isReleasedBoard, NODE_MIN, OPENCLAW_MIN, openclawSavedBy, openclawTooOld, setupAgents, setupLines, setupProblemText, worseHook } from '../hooks/connect-pure'
+import { reporterPs1, reporterSh, agentHooks, boardLangOf, boardScriptFor, connectDataRoots, connectPath, COLLISION, DELETE, generatedFile, hasOurHook, isNodeSupported, isReleased, isReleasedBoard, NODE_MIN, OPENCLAW_MIN, openclawSavedBy, openclawTooOld, setupAgents, setupLines, setupProblemText, worseHook } from '../hooks/connect-pure'
 import type { AgentSetup, HookState, SetupNotice, SetupProblem, SetupState } from '../hooks/connect-pure'
 import { langOf, STRINGS } from '../hooks/strings'
 import type { ConnectTransaction, LegacyConnectRequest } from './connect-transaction'
@@ -33,6 +33,7 @@ export const connectLegacy = (transaction: ConnectTransaction, request: LegacyCo
   const inboxPath = (_: string): string => folder + sep + 'progress-inbox'
   const boardScript = (path: string, lang: string): string => boardScriptFor(path, lang, bundle)
   const done: string[] = []
+  let hasMovedData = false
   // What needs the person, each under a key of its own (its kind and path), so a session start
   // tells of it once, whatever the language.
   const problems: SetupProblem[] = []
@@ -115,8 +116,8 @@ export const connectLegacy = (transaction: ConnectTransaction, request: LegacyCo
     // Taking the hooks out goes by our own files, so one an earlier connect left where the
     // agent is not (or is no longer) found comes out too, and so does a skill folder an earlier
     // remove could not take away.
-    const folder = skillFolder(hook.file)
-    if (remove) for (const file of [hook.file, ...(hook.old === undefined ? [] : [hook.old]), ...(folder === null ? [] : [folder])]) isInstalled = isInstalled || (existsSync(file))
+    const skillDir = skillFolder(hook.file)
+    if (remove) for (const file of [hook.file, ...(hook.old === undefined ? [] : [hook.old]), ...(skillDir === null ? [] : [skillDir])]) isInstalled = isInstalled || (existsSync(file))
     if (!isInstalled) continue
     // Found, but its reporter or the board script is not ours to run: the problem with that
     // file is named above, and the agent is named as not set up.
@@ -163,7 +164,21 @@ export const connectLegacy = (transaction: ConnectTransaction, request: LegacyCo
         }
         continue
       }
-      const previous = previousOutput(hook.file)
+      let previous = previousOutput(hook.file)
+      const otherRoots = connectDataRoots(before, true).filter(root => connectPath(root, isWin) !== connectPath(folder, isWin))
+      if (!remove && otherRoots.length > 0) {
+        // Only exact generated templates from the old path qualify for takeover;
+        // an edited skill or plugin still follows the ordinary preservation rule.
+        if (hook.generated && previous === undefined) for (const root of otherRoots) for (const words of Object.values(STRINGS)) {
+          const oldHook = agentHooks({
+            home, sep, isWindows: isWin,
+            script: root + sep + 'progress-report.' + (isWin ? 'ps1' : 'sh'),
+            inbox: root + sep + 'progress-inbox', board: root + sep + 'agent-board.mjs',
+            codexHome, grokHome, hermesHome, openclawHome, opencodeHome, s: words,
+          }).find(one => one.file === hook.file)
+          if (oldHook?.edit(before, true) === DELETE) previous = before
+        }
+      }
       const after = hook.edit(before, remove || (hook.agent === 'openclaw' && openclawOld !== null), previous)
       if ((hook.generated && exists && before === '') || after === COLLISION) {
         preserve(hook.file)
@@ -184,7 +199,7 @@ export const connectLegacy = (transaction: ConnectTransaction, request: LegacyCo
       }
       if (remove && before.trim() === '') {
         if (hadOld) done.push(hook.label)
-        if (!exists) tidyFolder(folder, hook.label)
+        if (!exists) tidyFolder(skillDir, hook.label)
         continue
       }
       if (after === null) {
@@ -199,12 +214,18 @@ export const connectLegacy = (transaction: ConnectTransaction, request: LegacyCo
       }
       if (after === DELETE) {
         removeFile(hook.file)
-        tidyFolder(folder, hook.label)
+        tidyFolder(skillDir, hook.label)
       } else if (after !== before) {
         writeFile(hook.file, after, hook.generated)
       } else if (!remove && hook.generated) {
         transaction.own(hook.file, after)
       }
+      const hasMovedHook = !remove && typeof after === 'string' && after !== before
+        && (hook.generated || /progress-report\.(?:ps1|sh)/.test(before))
+        && otherRoots.some(root =>
+          !connectDataRoots(after, true).some(one => connectPath(one, isWin) === connectPath(root, isWin)),
+        )
+      if (hasMovedHook) hasMovedData = true
       mark(hook, 'configured')
       if ((remove || isAuto) && after === before && !hadOld) continue
       // A session that only brings our own hook up to date (a new timeout, say) does not
@@ -213,7 +234,7 @@ export const connectLegacy = (transaction: ConnectTransaction, request: LegacyCo
       // nothing; the reporter's name in the file does.
       // Codex and Hermes ask the person to approve a changed hook again, so those still say so.
       // A file of ours from an earlier version, by its record, is not news either.
-      if (isAuto && hook.agent !== 'codex' && hook.agent !== 'hermes' && (hook.edit(before, true, previous) === DELETE || hasOurHook(before))) continue
+      if (isAuto && !hasMovedHook && hook.agent !== 'codex' && hook.agent !== 'hermes' && (hook.edit(before, true, previous) === DELETE || hasOurHook(before))) continue
       // OpenClaw takes two files, a plugin and the config entry that loads it.
       if (hook.label === '' || done.includes(hook.label)) continue
       done.push(hook.label)
@@ -274,6 +295,7 @@ export const connectLegacy = (transaction: ConnectTransaction, request: LegacyCo
   if (hasBoardCommand && node === null) warn('node:missing', { message: 'setupNodeMissing', args: [NODE_MIN] })
   else if (hasBoardCommand && node !== null && !isNodeReady) warn(`node:old:${node}`, { message: 'setupNodeOld', args: [node, NODE_MIN] })
   const state: SetupState = { agents: setupAgents([...hookStates.values()], boardFiles, isNodeReady), problems, node, codexTrusted }
+  if (request.mode === 'connect') transaction.state.connectedProgress = path
   // Kept for `/progress connect status`; taking the hooks out leaves nothing to show, unless
   // the removal could not finish, whose problems stay to be shown.
   if (remove) {
@@ -292,6 +314,10 @@ export const connectLegacy = (transaction: ConnectTransaction, request: LegacyCo
       : completed.length === 0
         ? [...none, ...(hasBoard ? [s.boardEverywhere(board)] : [])]
         : [s.connectDone(completed.join(s.listSep)), ...(hasBoard ? [s.boardEverywhere(board)] : [])]
+  if (hasMovedData && completed.length > 0) {
+    if (isAuto) lines.splice(lines.length - 1, 0, s.connectRepairedData)
+    else lines.push(s.connectMovedData)
+  }
 
   // Connecting by hand also shows where each agent stands, with the problems below it.
   const status = mode === 'connect' && state.agents.length > 0 ? setupLines(state, s) : problems.map(one => setupProblemText(one, s))

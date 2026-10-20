@@ -2,8 +2,10 @@ import { emptyQuestions, observeQuestions } from '../hooks/questions'
 import { expect, test } from 'claude-code/testing'
 
 import type { ProgressMirror } from '../types'
-import { extractAutoBlock, removeAutoBlock, renderAutoBlock, scanBlocks, setManualStep, takeArchivable, upsertAutoBlock } from '../hooks/blocks'
+import { extractAutoBlock, removeAutoBlock, renderAutoBlock, scanBlocks, setManualStep, stateWords, takeArchivable, upsertAutoBlock } from '../hooks/blocks'
 import { ZH_TW } from '../hooks/i18n'
+import { STRINGS } from '../hooks/strings'
+import { answerAgentPrompt } from '../hooks/inbox'
 import {
   applyTaskCreate,
   applyTaskUpdate,
@@ -50,6 +52,22 @@ test('TaskCreate, TaskUpdate and metadata build the mirror', () => {
   expect(stateOf(mirror, true)).toBe('done')
 })
 
+test('background work uses the existing twelve hour stale rule and outlives a completed Task list', () => {
+  const mirror = { ...sampleMirror(), backgroundJobs: 1 }
+  expect(stateOf(mirror, false)).toBe('working')
+  const file = upsertAutoBlock('', { ...mirror, state: stateOf(mirror, false) })
+  expect(buildView(parseProgress(file), [], null, NOW + 12 * HOUR).stopped).toEqual([])
+  expect(buildView(parseProgress(file), [], null, NOW + 12 * HOUR + 1).stopped.map(row => row.title)).toEqual(['進度面板'])
+  const completed = { ...mirror, tasks: mirror.tasks.map(task => ({ ...task, status: 'completed' as const })) }
+  expect(stateOf(completed, false)).toBe('working')
+  expect(buildView([], [], completed, NOW).current?.status).toBe(ZH_TW.backgroundRunning)
+  expect(buildView([], [], { ...completed, isTurnRunning: true }, NOW).current?.status).toBe(ZH_TW.claudeWorking)
+  const asking = applyTaskUpdate(mirror, { taskId: '2', metadata: { waiting: 'you', why: 'Review it?' } }, NOW)
+  expect(stateOf(asking, false)).toBe('waiting')
+  expect(stateOf(asking, true)).toBe('working')
+  expect(stateOf({ ...completed, backgroundJobs: 0 }, false)).toBe('done')
+})
+
 test('TodoWrite replaces the list; TaskList keeps what the mirror knew', () => {
   const mirror = applyTodoWrite(sampleMirror(), [{ content: '一', status: 'pending', activeForm: '做一' }], NOW)
   expect(mirror.tasks).toHaveLength(1)
@@ -85,6 +103,57 @@ test('the block lands under its project, is replaced in place, and comes out cle
   const fresh = upsertAutoBlock('', sampleMirror())
   expect(fresh.startsWith('# 專案進度\n\n## persona_framework\n\n<!-- auto')).toBe(true)
   expect(removeAutoBlock(fresh, '2be48af2-6193-5040')).toBe('# 專案進度\n')
+})
+
+test('a Codex block set to working says Codex is working, not Claude', () => {
+  const s = STRINGS.en
+  const mirror = { ...sampleMirror(), agent: 'codex', state: 'waiting' as const, resume: 'codex-session-123', turnOrder: NOW * 2 }
+  const old = upsertAutoBlock('', { ...mirror, state: 'working' }, s).replace('> Codex is working', '> Claude is working')
+  const prompt = { agent: 'codex', event: 'prompt' as const, id: mirror.sessionId, session: mirror.resume, cwd: '', project: mirror.project, prompt: '', answer: '', transcript: '', at: NOW + 1000 }
+  const next = answerAgentPrompt(mirror, prompt, NOW + 1000)!
+  const before = `## Other\n### Leave this alone\n- [ ] Another task\n\n${old}`
+  const after = upsertAutoBlock(before, next, s)
+  expect(after).toContain('> Codex is working')
+  expect(after).not.toContain('Claude is working')
+  expect(removeAutoBlock(after, mirror.sessionId)).toBe(removeAutoBlock(before, mirror.sessionId))
+  const task = parseProgress(after).find(project => project.name === mirror.project)?.tasks[0]
+  expect(task?.auto?.agent).toBe('codex')
+  expect(task?.auto?.state).toBe('working')
+  expect(task?.steps.map(step => step.status)).toEqual(['done', 'doing', 'todo'])
+})
+
+test('every agent\'s working block names that agent', () => {
+  const agents = { codex: 'Codex', gemini: 'Gemini CLI', cursor: 'Cursor', grok: 'Grok Build', muse: 'Muse Code', dot: 'dot', hermes: 'Hermes Agent', openclaw: 'OpenClaw', opencode: 'OpenCode', antigravity: 'Antigravity', deepseek: 'DeepSeek', 'custom-agent': 'custom-agent', constructor: 'constructor' }
+  for (const s of Object.values(STRINGS)) {
+    for (const [agent, name] of Object.entries(agents)) {
+      const block = renderAutoBlock({ ...sampleMirror(), agent }, s)
+      expect(block[2]).toBe(`> ${s.agentWorking(name)}`)
+      expect(block[2]).not.toContain('Claude')
+      expect(stateWords('done', agent, s)).toBe(s.stateDone)
+      expect(stateWords('ended', agent, s)).toBe(s.stateEnded)
+    }
+  }
+})
+
+test('a Claude block keeps its working and waiting words', () => {
+  const working = { en: 'Claude is working', 'zh-TW': 'Claude 正在做', 'zh-CN': 'Claude 正在做' }
+  const waiting = { en: 'Waiting for your next message', 'zh-TW': '等你回覆', 'zh-CN': '等你回复' }
+  for (const s of Object.values(STRINGS)) {
+    for (const agent of ['claude', '']) {
+      expect(renderAutoBlock({ ...sampleMirror(), agent }, s)[2]).toBe(`> ${working[s.lang]}`)
+      expect(renderAutoBlock({ ...sampleMirror(), agent, state: 'waiting' }, s)[2]).toBe(`> ${waiting[s.lang]}`)
+    }
+  }
+})
+
+test('the waiting line names no agent', () => {
+  for (const s of Object.values(STRINGS)) {
+    for (const agent of ['claude', ...Object.keys(s.agentNames), 'custom-agent']) {
+      const block = renderAutoBlock({ ...sampleMirror(), agent, state: 'waiting' }, s)
+      expect(block[2]).toBe(`> ${s.stateWaiting}`)
+      for (const name of ['Claude', ...Object.values(s.agentNames), 'custom-agent']) expect(block[2]).not.toContain(name)
+    }
+  }
 })
 
 test('Windows line endings survive a rewrite, and the parser reads the block back', () => {
@@ -468,16 +537,16 @@ test("an ended or stale session's task moves to the Stopped shelf and leaves the
   expect(view.recent.map(row => row.title)).toEqual(['Finished'])
 })
 
-test('a stopped task with a question shows once under Waiting on you and is not also counted as In progress', () => {
+test('a stopped task keeps its question on the Stopped shelf and is not counted as In progress', () => {
   const file = '## demo\n<!-- auto session=a1b2c3d4 agent=codex state=ended updated=2026-10-16T11:00:00Z resume=codex-session-123 dir=%2Fw -->\n### Release\n- [?] Publish, OK?\n- [ ] Finish\n<!-- /auto session=a1b2c3d4 -->'
   const view = buildView(parseProgress(file), [], null, NOW)
-  expect(view.waiting.map(item => item.text)).toEqual(['Publish, OK?'])
-  expect(view.overview.waiting).toBe(1)
+  expect(view.waiting).toEqual([])
+  expect(view.overview.waiting).toBe(0)
   expect(view.overview.active).toBe(0)
   expect(view.active).toEqual([])
   expect(view.groups).toEqual([])
   expect(view.stopped[0]).toMatchObject({ question: 'Publish, OK?', resume: "cd '/w' && codex resume codex-session-123" })
-  const hidden = buildView(parseProgress(file), [], null, NOW, 0, {}, ZH_TW, [view.waiting[0]?.hideKey ?? ''])
+  const hidden = buildView(parseProgress(file), [], null, NOW, 0, {}, ZH_TW, [view.stopped[0]?.questions?.[0]?.hideKey ?? ''])
   expect(hidden.waiting).toEqual([])
   expect(hidden.hidden).toHaveLength(1)
   expect(hidden.stopped).toHaveLength(1)

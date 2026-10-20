@@ -69,7 +69,9 @@ test('a large verified module reports a bounded failure without embedding its da
 test('the full generated worker bundle runs through verified staging without recursive bundle growth', () => {
   const source = readFileSync(new URL('../hooks/board-script.ts', import.meta.url), 'utf8')
   const code = JSON.parse(source.slice(source.indexOf('export const BOARD_SCRIPT = ') + 'export const BOARD_SCRIPT = '.length))
-  assert.ok(code.length < 500000)
+  // A bundle that embedded an earlier copy of itself would roughly double; ordinary growth stays well under.
+  assert.ok(code.length < 750000)
+  assert.ok(!code.includes('BOARD_SCRIPT'), 'the worker bundle embeds no earlier board bundle')
   const { digest, value } = stage(code)
   try {
     writeFileSync(value.file, code)

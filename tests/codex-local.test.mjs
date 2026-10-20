@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { pathToFileURL } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 
 const setup = resolve('scripts/setup-codex.mjs')
 const session = 'test-codex-session-123'
@@ -17,7 +17,61 @@ const isolatedEnv = home => ({
   XDG_CONFIG_HOME: join(home, '.config'), OPENCODE_CONFIG_DIR: join(home, '.config', 'opencode'),
   OPENCLAW_STATE_DIR: join(home, '.openclaw'), DSH_HOME: join(home, '.dsh'),
 })
-const fixture = fn => {
+// A synchronous timeout kills cmd alone on Windows, leaving PowerShell/Node writing into
+// the fixture during cleanup. Wait for closed stdio and terminate only this owned tree.
+const stopNativeTree = child => {
+  if (process.platform === 'win32') {
+    const killed = spawnSync(join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'taskkill.exe'), ['/PID', String(child.pid), '/T', '/F'], { encoding: 'utf8', windowsHide: true, timeout: 10000 })
+    return { status: killed.status, code: killed.error?.code, stderr: killed.stderr }
+  }
+  try { process.kill(-child.pid, 'SIGKILL'); return { status: 0 } } catch (error) {
+    return { status: error.code === 'ESRCH' ? 0 : 1, code: error.code }
+  }
+}
+
+const nativeHook = (command, env, input, after = setTimeout, stop = stopNativeTree) => new Promise((resolve, reject) => {
+  const isWin = process.platform === 'win32'
+  const child = spawn(isWin ? process.env.ComSpec || 'cmd.exe' : '/bin/sh', [isWin ? '/c' : '-c', command], {
+    env, stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true, detached: !isWin,
+  })
+  let stdout = '', stderr = '', error, termination
+  let isClosed = false, isTimedOut = false
+  let grace, notifyClosed
+  const whenClosed = new Promise(done => { notifyClosed = done })
+  child.stdout.setEncoding('utf8').on('data', chunk => { stdout += chunk })
+  child.stderr.setEncoding('utf8').on('data', chunk => { stderr += chunk })
+  child.on('error', failure => { error ??= failure })
+  child.stdin.on('error', failure => { error ??= failure })
+  const timer = after(() => {
+    if (isClosed || isTimedOut || child.pid === undefined) return
+    isTimedOut = true
+    error = Object.assign(new Error('native hook exceeded 30000ms'), { code: 'ETIMEDOUT' })
+    try { termination = stop(child) } catch (failure) { termination = { status: null, code: failure.code, message: failure.message } }
+    grace = setTimeout(() => {
+      if (isClosed) return
+      // An OS refusal cannot prove the descendants exited. Keep their fixture and
+      // report the owned PID rather than hanging or deleting files they may use.
+      const failure = Object.assign(new Error(`Native hook tree ${child.pid} did not close; fixture retained; ${JSON.stringify(termination)}`), { code: 'NATIVE_HOOK_UNREAPED', keepFixture: true, pid: child.pid, termination, whenClosed })
+      child.stdin.destroy()
+      child.stdout.destroy()
+      child.stderr.destroy()
+      child.unref()
+      reject(failure)
+    }, 2000)
+  }, 30000)
+  child.once('close', (status, signal) => {
+    isClosed = true
+    clearTimeout(timer)
+    clearTimeout(grace)
+    notifyClosed({ status, signal })
+    resolve({ status, signal, error, termination, stdout, stderr })
+  })
+  child.stdin.end(JSON.stringify(input))
+})
+
+const hookFailure = result => JSON.stringify({ status: result.status, signal: result.signal, error: result.error && { code: result.error.code, message: result.error.message }, termination: result.termination, stdout: result.stdout, stderr: result.stderr })
+
+const fixture = async fn => {
   const home = mkdtempSync(join(tmpdir(), 'codex local-'))
   const root = join(home, '.agent-board')
   const script = join(root, 'agent-board.mjs')
@@ -32,11 +86,26 @@ const fixture = fn => {
   const save = (file, text) => { mkdirSync(dirname(file), { recursive: true }); writeFileSync(file, text) }
   const report = (state = 'working', steps = ['- [~] Real task']) => command(['--codex-report'], { title: 'Task', state, steps })
   const event = (name, turn = 'turn-1', extra = {}) => command(['--codex-event'], { session_id: session, hook_event_name: name, turn_id: turn, ...extra })
-  try { return fn({ home, root, script, progress, hooks, skill, env, install, command, save, report, event }) }
+  let isSafeToRemove = true
+  try { return await fn({ home, root, script, progress, hooks, skill, env, install, command, save, report, event }) }
+  catch (error) {
+    if (error.keepFixture) {
+      isSafeToRemove = false
+      error.message += ` (${home})`
+      process.stderr.write(`${error.message}\n`)
+      if (process.platform === 'win32' && error.code === 'NATIVE_HOOK_UNREAPED') {
+        // Destroyed Windows pipes can still keep node:test alive. Report the retained
+        // fixture, then fail this test process even when those handles never close.
+        process.exitCode = 1
+        setTimeout(() => process.exit(1), 250).unref()
+      }
+    }
+    throw error
+  }
   // Native hook assertions have finished, but Windows scanners can briefly hold
   // the fixture's files. Retry only removal of this exact mkdtemp directory;
   // persistent cleanup failures still fail the test.
-  finally { rmSync(home, { recursive: true, force: true, maxRetries: 8, retryDelay: 50 }) }
+  finally { if (isSafeToRemove) rmSync(home, { recursive: true, force: true, maxRetries: 8, retryDelay: 50 }) }
 }
 
 test('local setup leaves an openclaw.json holding an id past 2^53 untouched and reports the conflict', () => fixture(f => {
@@ -141,6 +210,34 @@ test('independent prompt metadata answers questions while ordinary activity and 
   assert.match(readFileSync(f.progress, 'utf8'), /- \[x\] Grok decision/)
   const record = join(f.root, 'sessions', createHash('sha256').update(`grok:${owner}`).digest('hex') + '.json')
   assert.ok(!readFileSync(record, 'utf8').includes('PRIVATE_NEW_INPUT'))
+}))
+
+test('native board prompt commands preserve the waiting question and store no incoming words', () => fixture(f => {
+  assert.equal(f.install('--apply').status, 0)
+  assert.equal(f.event('UserPromptSubmit', 'initial-turn').status, 0)
+  assert.equal(f.report('waiting', ['- [?] Choose database', '- [ ] Continue']).status, 0)
+  for (const prompt of ['$agent-board', '/board', '/agent-board', ' \n/board\n ']) {
+    assert.equal(f.event('UserPromptSubmit', 'board-turn', { prompt }).status, 0)
+    assert.match(readFileSync(f.progress, 'utf8'), /state=waiting/)
+    assert.match(readFileSync(f.progress, 'utf8'), /- \[\?\] Choose database/)
+  }
+  assert.equal(f.event('Stop', 'board-turn').status, 0)
+  assert.equal(f.event('UserPromptSubmit', 'real-turn', { prompt: 'PRIVATE_REAL_ANSWER' }).status, 0)
+  assert.match(readFileSync(f.progress, 'utf8'), /- \[x\] Choose database/)
+  assert.ok(!readFileSync(f.progress, 'utf8').includes('PRIVATE_REAL_ANSWER'))
+  for (const agent of ['cursor', 'grok', 'muse', 'gemini']) {
+    assert.equal(f.install('--agent', agent, '--apply').status, 0)
+    const owner = `board-${agent}-session-123`
+    assert.equal(f.command(['--codex-report', '--agent', agent, '--session', owner], { title: 'Native task', state: 'waiting', steps: ['- [?] Native decision', '- [ ] Continue'] }).status, 0)
+    const prompt = agent === 'gemini' ? 'Show me the Agent Board below exactly as it is, in a code block, with the link to the board you can click from its last line. Then tell me in one sentence what needs me first. Do not change any file.\n\nProgress  ● 1 waiting  ▸ 0 in progress  ⚑ 0 due soon  ✓ 0 done today' : '$agent-board'
+    const payload = agent === 'cursor' ? { conversation_id: owner, generation_id: 'board-turn', hook_event_name: 'beforeSubmitPrompt', prompt: '/board' } : { session_id: owner, hook_event_name: agent === 'gemini' ? 'BeforeAgent' : 'UserPromptSubmit', prompt }
+    const args = agent === 'cursor' ? ['--codex-event', '--agent', agent] : ['--agent-status', '--agent', agent, '--state', 'working']
+    assert.equal(f.command(args, payload).status, 0, agent)
+    assert.match(readFileSync(f.progress, 'utf8'), /- \[\?\] Native decision/, agent)
+    const blocks = readFileSync(f.progress, 'utf8').split('<!-- auto ').filter(block => block.includes(`resume=${owner}`))
+    assert.equal(blocks.length, 1)
+    assert.match(blocks[0], /state=waiting/, agent)
+  }
 }))
 
 test('Codex-only setup previews every persistent change without writing', () => fixture(f => {
@@ -744,17 +841,161 @@ test('Antigravity setup merges its named native hooks and removes only the owned
   assert.deepEqual(JSON.parse(readFileSync(file, 'utf8')), foreign)
 }))
 
-test('native Antigravity hook commands bind conversationId, record metadata only and keep Stop resumable', () => fixture(f => {
+const nativeTreeFixture = f => {
+  const ready = join(f.home, 'descendant-ready.json')
+  const pulse = join(f.home, 'descendant-pulse.txt')
+  const descendant = join(f.home, 'descendant.mjs')
+  f.save(descendant, `import { writeFileSync } from 'node:fs'; writeFileSync(${JSON.stringify(ready)}, JSON.stringify({ pid: process.pid })); setInterval(() => writeFileSync(${JSON.stringify(pulse)}, String(Date.now())), 20)`)
+  const parent = join(f.home, 'parent.mjs')
+  const parentReady = join(f.home, 'parent-ready.json')
+  f.save(parent, `import { spawn } from 'node:child_process'; import { writeFileSync } from 'node:fs'; writeFileSync(${JSON.stringify(parentReady)}, JSON.stringify({ pid: process.pid, ppid: process.ppid })); spawn(process.execPath, [${JSON.stringify(descendant)}], { stdio: 'inherit' }); setInterval(() => {}, 1000)`)
+  const argv = [process.execPath, parent]
+  const command = process.platform === 'win32'
+    ? `powershell.exe -NoLogo -NoProfile -NonInteractive -EncodedCommand ${Buffer.from(`& ${argv.map(value => `'${value.replaceAll("'", "''")}'`).join(' ')}; exit $LASTEXITCODE`, 'utf16le').toString('base64')}`
+    : argv.map(value => `'${value.replaceAll("'", "'\\''")}'`).join(' ')
+  return { command, ready, pulse, parentReady }
+}
+
+const waitForNativeTree = async ({ ready, pulse, parentReady }) => {
+  const until = Date.now() + 30000
+  while ((!existsSync(pulse) || !existsSync(parentReady)) && Date.now() < until) await new Promise(done => setTimeout(done, 25))
+  assert.ok(existsSync(ready) && existsSync(pulse) && existsSync(parentReady), 'the synthetic parent and descendant must start before testing timeout cleanup')
+}
+
+test('native hook timeouts close their owned descendant tree before fixture cleanup', { timeout: 60000 }, () => fixture(async f => {
+  const tree = nativeTreeFixture(f)
+  let expire
+  const result = nativeHook(tree.command, f.env, {}, callback => { expire = callback })
+  let closed, descendantPid
+  try {
+    await waitForNativeTree(tree)
+    descendantPid = JSON.parse(readFileSync(tree.ready, 'utf8')).pid
+    assert.ok(Number.isInteger(descendantPid) && descendantPid > 0)
+  } finally {
+    expire()
+    closed = await result
+  }
+  assert.equal(closed.error?.code, 'ETIMEDOUT', hookFailure(closed))
+  assert.notEqual(closed.status, 0, hookFailure(closed))
+  // taskkill can report a vanished child after it killed that tree. Check the
+  // recorded descendant itself as well as closed pipes and stopped writes.
+  if (process.platform === 'win32') assert.throws(() => process.kill(descendantPid, 0), { code: 'ESRCH' }, hookFailure(closed))
+  else assert.equal(closed.signal, 'SIGKILL', hookFailure(closed))
+  const last = readFileSync(tree.pulse, 'utf8')
+  await new Promise(done => setTimeout(done, 100))
+  assert.equal(readFileSync(tree.pulse, 'utf8'), last, 'a descendant must not keep writing after the helper closes')
+}))
+
+const nativeExitProbe = process.env.AGENT_BOARD_NATIVE_EXIT_PROBE
+if (nativeExitProbe) test('native unreaped-tree subprocess probe', { timeout: 60000 }, async () => {
+  let failure, home, tree, isStarted = false, isVerified = false
+  const keep = () => {
+    const parent = tree && existsSync(tree.parentReady) ? JSON.parse(readFileSync(tree.parentReady, 'utf8')) : undefined
+    const descendant = tree && existsSync(tree.ready) ? JSON.parse(readFileSync(tree.ready, 'utf8')) : undefined
+    writeFileSync(nativeExitProbe, JSON.stringify({ probePid: process.pid, pid: failure?.pid, parentPid: parent?.pid, parentParentPid: parent?.ppid, descendantPid: descendant?.pid, home, isStarted, isVerified, code: failure?.code, keepFixture: failure?.keepFixture }))
+  }
+  keep()
+  await assert.rejects(fixture(async f => {
+    home = f.home
+    keep()
+    tree = nativeTreeFixture(f)
+    let expire
+    const result = nativeHook(tree.command, f.env, {}, callback => { expire = callback }, () => ({ status: 1, code: 'SYNTHETIC_DENIED' }))
+    try {
+      await waitForNativeTree(tree)
+      isStarted = true
+    } finally {
+      keep()
+      expire()
+      await result
+    }
+  }), error => {
+    failure = error
+    keep()
+    return error.code === 'NATIVE_HOOK_UNREAPED' && error.keepFixture === true && error.termination.code === 'SYNTHETIC_DENIED'
+  })
+  assert.ok(isStarted)
+  assert.ok(existsSync(home), 'unconfirmed termination must not remove the fixture')
+  isVerified = true
+  keep()
+  process.exitCode = 1
+})
+
+// The watchdog plus up to five ten-second cleanup calls must fit the test bound.
+test('failed native tree termination reports a bounded error and retains its fixture', { timeout: 120000 }, async () => {
+  const control = mkdtempSync(join(tmpdir(), 'native-exit-'))
+  const marker = join(control, 'owned.json')
+  let owned
+  try {
+    const started = Date.now()
+    const env = { ...isolatedEnv(control), AGENT_BOARD_NATIVE_EXIT_PROBE: marker }
+    delete env.NODE_TEST_CONTEXT
+    const result = spawnSync(process.execPath, ['--test', '--test-name-pattern=^native unreaped-tree subprocess probe$', fileURLToPath(import.meta.url)], {
+      env, encoding: 'utf8', windowsHide: true, timeout: 45000,
+    })
+    owned = existsSync(marker) ? JSON.parse(readFileSync(marker, 'utf8')) : null
+    assert.equal(result.error, undefined, result.stderr)
+    assert.equal(result.status, 1, result.stdout + result.stderr)
+    assert.ok(Date.now() - started < 45000, 'the isolated test process must actually exit before the watchdog')
+    assert.equal(owned?.code, 'NATIVE_HOOK_UNREAPED', JSON.stringify(owned))
+    assert.equal(owned.keepFixture, true)
+    assert.equal(owned.isStarted, true)
+    assert.equal(owned.isVerified, true, 'a probe assertion failure must not masquerade as the expected exit')
+    for (const key of ['pid', 'probePid', 'parentPid', 'parentParentPid', 'descendantPid']) assert.ok(Number.isInteger(owned[key]) && owned[key] > 0, `the probe must record ${key}`)
+    assert.ok(existsSync(owned.home), 'the failed process must leave its fixture for owned cleanup')
+    assert.ok(result.stderr.includes('did not close') || result.stdout.includes('did not close'), result.stdout + result.stderr)
+  } finally {
+    owned ??= existsSync(marker) ? JSON.parse(readFileSync(marker, 'utf8')) : null
+    // Observe the probe's exit first: rescuing its descendant earlier would hide
+    // the Windows socket leak. Only this probe's recorded processes are stopped.
+    const pids = [...new Set([owned?.pid, owned?.parentPid, owned?.parentParentPid, owned?.descendantPid, owned?.probePid].filter(pid => Number.isInteger(pid) && pid > 0))]
+    assert.ok(!pids.includes(process.pid), 'cleanup must not target the current test runner')
+    const notOurs = new Set(), stopped = []
+    const isAlive = pid => {
+      try { process.kill(pid, 0); return true } catch (error) {
+        if (error.code === 'EPERM') notOurs.add(pid)
+        else if (error.code !== 'ESRCH') throw error
+        return false
+      }
+    }
+    // A POSIX group can outlive its leader. Windows needs each recorded child:
+    // cmd may already be gone while PowerShell and parent.mjs are still alive.
+    if (process.platform !== 'win32' && Number.isInteger(owned?.pid)) stopped.push({ pid: owned.pid, ...stopNativeTree({ pid: owned.pid }) })
+    for (const pid of pids) if (isAlive(pid)) {
+      if (process.platform === 'win32') stopped.push({ pid, ...stopNativeTree({ pid }) })
+      else {
+        try { process.kill(pid, 'SIGKILL'); stopped.push({ pid, status: 0 }) } catch (error) {
+          if (error.code === 'EPERM') notOurs.add(pid)
+          else if (error.code !== 'ESRCH') throw error
+        }
+      }
+    }
+    const until = Date.now() + 5000
+    while (pids.some(isAlive) && Date.now() < until) await new Promise(done => setTimeout(done, 25))
+    for (const pid of pids) if (!notOurs.has(pid)) assert.throws(() => process.kill(pid, 0), { code: 'ESRCH' }, `Owned cleanup failed; fixture retained: ${JSON.stringify({ pid, stopped, home: owned?.home, control })}`)
+    const remove = (directory, prefix) => {
+      const target = resolve(directory), temporary = resolve(tmpdir())
+      assert.equal(dirname(target), temporary)
+      assert.ok(target.startsWith(join(temporary, prefix)), 'remove only this owned synthetic fixture')
+      rmSync(target, { recursive: true, force: true, maxRetries: 8, retryDelay: 50 })
+    }
+    if (owned?.home) remove(owned.home, 'codex local-')
+    remove(control, 'native-exit-')
+  }
+})
+
+test('native Antigravity hook commands bind conversationId, record metadata only and keep Stop resumable', { timeout: 240000 }, () => fixture(async f => {
   assert.equal(f.install('--agent', 'antigravity', '--apply').status, 0)
   const hooks = JSON.parse(readFileSync(join(f.home, '.gemini', 'config', 'hooks.json'), 'utf8'))['agent-board-local']
   const conversationId = '11111111-2222-4333-8444-555555555555'
   const record = join(f.root, 'sessions', createHash('sha256').update('antigravity:' + conversationId).digest('hex') + '.json')
   // Match the native Windows executor's cmd /c + CreateProcess argument escaping,
   // not Node's shell:true workaround. The installation path deliberately has spaces.
-  const fire = event => spawnSync(process.platform === 'win32' ? process.env.ComSpec || 'cmd.exe' : '/bin/sh', [process.platform === 'win32' ? '/c' : '-c', hooks[event][0].command], { env: f.env, input: JSON.stringify({ conversationId, session_id: 'foreign-id-must-not-bind', transcriptPath: 'PRIVATE_TRANSCRIPT_DO_NOT_OPEN', workspacePaths: ['PRIVATE_WORKSPACE'], prompt: 'PRIVATE_PROMPT', toolCall: { args: 'PRIVATE_TOOL' } }), encoding: 'utf8', windowsHide: true, timeout: 10000 })
+  const fire = event => nativeHook(hooks[event][0].command, f.env, { conversationId, session_id: 'foreign-id-must-not-bind', transcriptPath: 'PRIVATE_TRANSCRIPT_DO_NOT_OPEN', workspacePaths: ['PRIVATE_WORKSPACE'], prompt: 'PRIVATE_PROMPT', toolCall: { args: 'PRIVATE_TOOL' } })
   for (const event of Object.keys(hooks)) {
-    const result = fire(event)
-    assert.equal(result.status, 0, result.stderr); assert.deepEqual(JSON.parse(result.stdout), {})
+    const result = await fire(event)
+    assert.equal(result.error, undefined, hookFailure(result))
+    assert.equal(result.status, 0, hookFailure(result)); assert.deepEqual(JSON.parse(result.stdout), {})
     const saved = JSON.parse(readFileSync(record, 'utf8'))
     assert.equal(saved.session, conversationId)
     assert.equal(saved.activity.at(-1).event, event)
@@ -769,7 +1010,9 @@ test('native Antigravity hook commands bind conversationId, record metadata only
   const board = f.command([])
   assert.equal(board.status, 0, board.stderr)
   assert.ok(!board.stdout.includes('running:') && !board.stdout.includes('session ended'), board.stdout)
-  assert.equal(fire('PreInvocation').status, 0)
+  const resumed = await fire('PreInvocation')
+  assert.equal(resumed.error, undefined, hookFailure(resumed))
+  assert.equal(resumed.status, 0, hookFailure(resumed))
   assert.equal(JSON.parse(readFileSync(record, 'utf8')).state, 'working')
   assert.notEqual(f.command(['--agent-status', '--agent', 'antigravity', '--state', 'ended', '--event', 'Stop'], { conversationId }).status, 0)
 }))

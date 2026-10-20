@@ -1,6 +1,8 @@
 import type { ProgressMirror, ProgressMirrorTask } from '../types'
 import { cleanContext, cleanTitle, clip, renewQuestion, waitsOnYou, withoutMarks } from './mirror'
 import { answeredStep } from './step-words'
+import { ZH_TW } from './i18n'
+import type { Strings } from './i18n'
 
 // A session's progress without its Task list: what each turn finished, the next step and
 // the question it ended on, as the model sums the turn up. Also the question a turn ends
@@ -108,10 +110,16 @@ const KEEP_DONE = 6
 
 // A turn summed up, folded into a session that keeps no Task list: what it finished joins
 // the done steps, and the open steps become this turn's next step and question.
-export const applyDigest = (mirror: ProgressMirror, given: Digest, now: number): ProgressMirror => {
+export const applyDigest = (mirror: ProgressMirror, given: Digest, now: number, s: Strings = ZH_TW, hasRunningTurnBackgroundJob = false): ProgressMirror => {
   // The question may come straight from a reply rather than through parseDigest: kept to the
   // same size either way.
-  const digest = { ...given, ask: clip(given.ask, 48), why: clip(given.why, 120) }
+  const hasBackgroundJob = (mirror.backgroundJobs ?? 0) > 0
+  const digest = {
+    ...given,
+    next: given.next || (hasBackgroundJob ? s.backgroundRunning : ''),
+    ask: hasRunningTurnBackgroundJob ? '' : clip(given.ask, 48),
+    why: hasRunningTurnBackgroundJob ? '' : clip(given.why, 120),
+  }
   const done = mirror.source === 'turns' ? mirror.tasks.filter(one => one.status === 'completed') : []
   let seq = Math.max(0, ...mirror.tasks.map(one => Number(one.id.replace(/^t/, '')) || 0))
   const id = (): string => {
@@ -121,7 +129,7 @@ export const applyDigest = (mirror: ProgressMirror, given: Digest, now: number):
   const finished = digest.done === '' ? done : [...done, task(id(), digest.done, 'completed', null)]
   const open = [
     ...(digest.ask === '' ? [] : [task(id(), digest.ask, 'in_progress', digest.why || digest.ask)]),
-    ...(digest.next === '' || digest.next === digest.ask ? [] : [{ ...task(id(), digest.next, digest.handoffTo ? 'completed' : 'pending', null), ...(digest.handoffTo ? { handoffTo: digest.handoffTo } : {}) }]),
+    ...(digest.next === '' || digest.next === digest.ask ? [] : [{ ...task(hasBackgroundJob && given.next === '' ? 'background' : id(), digest.next, digest.handoffTo ? 'completed' : 'pending', null), ...(digest.handoffTo ? { handoffTo: digest.handoffTo } : {}) }]),
   ]
 
   return {
@@ -139,7 +147,8 @@ export const applyDigest = (mirror: ProgressMirror, given: Digest, now: number):
 // A turn that ended on a question, in a session whose list says nothing waits on the
 // person: the step in progress (else the next one) waits on them, with the question as its
 // note, until they answer.
-export const markAsked = (mirror: ProgressMirror, question: string): ProgressMirror => {
+export const markAsked = (mirror: ProgressMirror, question: string, hasRunningTurnBackgroundJob = false): ProgressMirror => {
+  if (hasRunningTurnBackgroundJob) return mirror
   const waiting = mirror.tasks.filter(one => waitsOnYou(mirror, one))
   if (waiting.length > 0) {
     const words = question.replace(/\s+/g, ' ').trim()
@@ -233,13 +242,72 @@ export const cleanHandoff = (answer: string): string =>
 
 type TurnMessage = { role: 'user' | 'assistant'; text: string; toolUses: ReadonlyArray<{ tool: string }>; toolResults?: readonly unknown[] }
 
+const taskNotifications = (prompt: string, isNotification = false): string[] => {
+  let text = prompt
+  while (REMINDER.test(text)) text = text.replace(REMINDER, '')
+  if (!isNotification && !/^\s*<task-notification>/.test(text)) return []
+  return [...text.matchAll(/<task-notification>([\s\S]*?)<\/task-notification>/g)].map(match => match[1] ?? '')
+}
+
+// A restart cannot keep jobs from the old host or the step generated for them.
+export const clearBackgroundJobs = (mirror: ProgressMirror): ProgressMirror => ({
+  ...mirror,
+  backgroundJobs: 0,
+  backgroundJobIds: [],
+  backgroundReleases: [],
+  backgroundReleaseCount: 0,
+  tasks: mirror.source === 'turns' ? mirror.tasks.filter(one => one.id !== 'background') : mirror.tasks,
+})
+
+// A notification can reach the running turn before the launching call returns.
+// Match that release when the call succeeds, falling back only when an id is absent.
+export const startBackgroundJob = (mirror: ProgressMirror, id?: string): ProgressMirror => {
+  if (mirror.state === 'ended') return mirror
+  const ids = mirror.backgroundJobIds ?? []
+  if (id !== undefined && ids.includes(id)) return mirror
+  const releases = mirror.backgroundReleases ?? []
+  const index = id === undefined ? (releases.length > 0 ? 0 : -1) : releases.indexOf(id)
+  if (index >= 0) return { ...mirror, backgroundReleases: releases.filter((_, at) => at !== index) }
+  if ((mirror.backgroundReleaseCount ?? 0) > 0) return { ...mirror, backgroundReleaseCount: (mirror.backgroundReleaseCount ?? 0) - 1 }
+  return { ...mirror, backgroundJobs: (mirror.backgroundJobs ?? 0) + 1, backgroundJobIds: id === undefined ? ids : [...ids, id] }
+}
+
+// The structured origin establishes that a task ended, regardless of its status word.
+// Text establishes it only on hosts/events without an origin; callers enforce that boundary.
+export const finishBackgroundJob = (mirror: ProgressMirror, prompt: string, isNotification = false, isDuringTurn = false): ProgressMirror => {
+  const notifications = taskNotifications(prompt, isNotification)
+  if (mirror.state === 'ended' || (!isNotification && notifications.length === 0)) return mirror
+  return (notifications.length === 0 ? [''] : notifications).reduce((current, notification) => releaseBackgroundJob(current, notification, isDuringTurn), mirror)
+}
+
+const releaseBackgroundJob = (mirror: ProgressMirror, notification: string, isDuringTurn: boolean): ProgressMirror => {
+  const id = /<tool-use-id>\s*([^<>\s]+)\s*<\/tool-use-id>/.exec(notification)?.[1]
+  const ids = mirror.backgroundJobIds ?? []
+  const count = mirror.backgroundJobs ?? 0
+  if (id === undefined && ids.length > 0) return mirror
+  const index = id === undefined ? -1 : ids.indexOf(id)
+  if (count > 0 && (index >= 0 || count > ids.length)) {
+    return {
+      ...mirror,
+      backgroundJobs: count - 1,
+      backgroundJobIds: ids.filter((_, at) => at !== index),
+      // Only the generated placeholder goes away; a real next step keeps its words.
+      tasks: count === 1 && mirror.source === 'turns' ? mirror.tasks.filter(one => one.id !== 'background') : mirror.tasks,
+    }
+  }
+  if (!isDuringTurn) return mirror
+  if (id === undefined) return { ...mirror, backgroundReleaseCount: (mirror.backgroundReleaseCount ?? 0) + 1 }
+  const releases = mirror.backgroundReleases ?? []
+  return releases.includes(id) ? mirror : { ...mirror, backgroundReleases: [...releases, id] }
+}
+
 // The tools the last turn called: assistant messages back to the person's prompt.
 export const turnTools = (messages: readonly TurnMessage[]): string[] => {
   const tools: string[] = []
   for (let index = messages.length - 1; index >= 0; index -= 1) {
     const message = messages[index]
     if (message === undefined) continue
-    if (message.role === 'user' && message.text.trim() !== '' && (message.toolResults ?? []).length === 0) break
+    if (message.role === 'user' && message.text.trim() !== '' && (message.toolResults ?? []).length === 0 && taskNotifications(message.text).length === 0) break
     for (const use of message.toolUses) tools.push(use.tool)
   }
 

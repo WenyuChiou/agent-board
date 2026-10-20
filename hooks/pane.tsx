@@ -9,7 +9,7 @@ import type {
   TextProps,
 } from 'claude-code'
 
-import type { PressOutcome, ProgressAnswer, ProgressPressResult, ProgressStepStatus } from '../types'
+import type { PressOutcome, ProgressAnswer, ProgressPressResult, ProgressStepStatus, ResolveResult } from '../types'
 import type { Strings } from './i18n'
 import { ZH_TW } from './i18n'
 import { askColor, stepColor, toneColor } from './palette'
@@ -57,6 +57,7 @@ export type PaneActions = {
   copyAskedResume: (item: WaitingItem, surface: RenderSurface) => PressOutcome | Promise<PressOutcome>
   // Hides a question answered in its own session, on this machine only; sends nothing.
   hide: (item: WaitingItem) => PressOutcome | Promise<PressOutcome>
+  resolve: (item: WaitingItem) => void
   unhide: (item: WaitingItem) => PressOutcome | Promise<PressOutcome>
   // Opens the reply box under a review, for what should change; sends nothing.
   revise: (item: WaitingItem) => PressOutcome | Promise<PressOutcome>
@@ -80,12 +81,14 @@ export type PaneModel = {
   revising: string
   opened: readonly string[]
   answer: ProgressAnswer | null
+  resolveResult?: ResolveResult | null
   path: string
   width: number
   hasTaskTools: boolean
   isNotifyOn: boolean
   isLegendOpen: boolean
   hasQuestionsProblem?: boolean
+  hasPendingQuestionsProblem?: boolean
   palette: Palette
   s: Strings
 }
@@ -168,6 +171,29 @@ export const drawPane = (ui: PaneUi, model: PaneModel, actions: PaneActions): Re
   }
   const color = (tone: Tone): string => toneColor(palette, tone)
   const isOpen = (id: string): boolean => model.opened.includes(id)
+  const resultTask = model.resolveResult?.key.replace(/::[^:]*$/, '') ?? ''
+  const hasDetachedResult = resultTask !== '' && !view.stopped.some(row => row.key === resultTask) && !view.recent.some(item => item.key === resultTask)
+  const hasResult = (item: WaitingItem): boolean => {
+    const result = model.resolveResult
+    return result !== null && result !== undefined && (result.kind === 'changed' ? item.key === result.key : item.questionId !== undefined && result.questionId === item.questionId)
+  }
+
+  const shelfQuestions = (items: readonly WaitingItem[], key: string) => (
+    <Box flexDirection="column">
+      {items.map(item => (
+        <Box key={`${item.key}::question`} flexDirection="column">
+          <Text color={palette.muted}>{[item.text, item.note].filter(Boolean).join(' — ')}</Text>
+          {item.questionId !== undefined && <Button key={`${item.key}::resolve`} plain onPress={() => actions.resolve(item)}>{s.resolveQuestion}</Button>}
+          {hasResult(item) && <Text color={palette.muted}>{model.resolveResult?.text}</Text>}
+        </Box>
+      ))}
+      {model.resolveResult?.key.startsWith(`${key}::`) && !items.some(item => item.key === model.resolveResult?.key || item.questionId === model.resolveResult?.questionId) && (
+        <Box key={`${model.resolveResult.key}::question`} flexDirection="column">
+          <Text color={palette.muted}>{model.resolveResult.text}</Text>
+        </Box>
+      )}
+    </Box>
+  )
 
   const spacer = () => <Box flexGrow={1} />
   const muted = (text: string, wrap: 'wrap' | 'truncate-end' = 'wrap') => (
@@ -683,6 +709,8 @@ export const drawPane = (ui: PaneUi, model: PaneModel, actions: PaneActions): Re
   return (
     <Box flexDirection="column">
       <Text bold>{s.paneTitle}</Text>
+      {view.warning && <Text color={palette.alert}>{view.warning}</Text>}
+      {model.hasPendingQuestionsProblem && <Text color={palette.alert}>{s.inboxQuestionNotKept}</Text>}
       {model.hasQuestionsProblem && <Text color={palette.alert}>{s.questionsUnreadable(questionsPath(model.path))}</Text>}
       {overview()}
 
@@ -760,9 +788,15 @@ export const drawPane = (ui: PaneUi, model: PaneModel, actions: PaneActions): Re
       {isOpen('stopped') && view.stopped.map(row => (
         <Box key={`stopped::${row.key}`} flexDirection="column" marginTop={1} paddingLeft={1}>
           {taskRow(row, true)}
-          {row.question !== null && muted(row.question)}
+          {shelfQuestions(row.questions ?? [], row.key)}
         </Box>
       ))}
+      {hasDetachedResult && (
+        <Box key={`stopped::${resultTask}`} flexDirection="column" marginTop={1} paddingLeft={1}>
+          {muted([model.resolveResult?.project, model.resolveResult?.title].filter(Boolean).join(' · '))}
+          {shelfQuestions([], resultTask)}
+        </Box>
+      )}
 
       {view.due.length > 0 &&
         fold('due', s.sectionDue, view.due.length, 'soon', nearest === undefined ? '' : s.nearestDue(nearest.title, nearest.due?.left ?? ''))}
@@ -802,11 +836,14 @@ export const drawPane = (ui: PaneUi, model: PaneModel, actions: PaneActions): Re
       {isOpen('recent') && (
         <Box flexDirection="column" paddingLeft={1}>
           {view.recent.map(item => (
-            <Box flexDirection="row">
-              <Text color={palette.done}>✓ </Text>
-              <Text color={palette.muted} wrap="truncate-end">
-                {[item.project, item.title, item.when].filter(part => part !== '').join(' · ')}
-              </Text>
+            <Box key={item.key} flexDirection="column">
+              <Box flexDirection="row">
+                <Text color={palette.done}>✓ </Text>
+                <Text color={palette.muted} wrap="truncate-end">
+                  {[item.project, item.title, item.when].filter(part => part !== '').join(' · ')}
+                </Text>
+              </Box>
+              {shelfQuestions(item.questions ?? [], item.key)}
             </Box>
           ))}
           <Box>
