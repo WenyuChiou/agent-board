@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- **Local setup preserves Cursor and Muse config key order (#171).** An existing `version` or `schema_version` after `hooks` was moved to the front, so preview reported a change and applying setup reformatted an otherwise unchanged config. Defaults are now added only when the key is missing; existing values, order and file bytes stay intact. Tests: `local setup preserves Cursor and Muse key order and bytes when version keys follow hooks`, `local setup adds missing Cursor and Muse version defaults once`.
+
 ## 0.23.5 — 2026-10-19
 
 - **A second `--serve` with another `--idle-minutes` keeps the open page (#166).** It used to stop the running page and start a new one, so the open tab stopped working and a reply typed there but not yet sent was lost. It now reuses the running page and, when that page's idle time differs from the one asked for, prints the one in effect. Tests: `--serve with a different idle preference reuses the running page and reports its effective timeout`, `--serve with an idle time that is not a number starts no page`.
