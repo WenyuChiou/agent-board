@@ -2258,10 +2258,12 @@ test('the serve page and the terminal board answer every action with a visible l
       button.click()
       await dom.flush()
       await dom.flush()
+      const isCopy = /Copy|Yes|No/.test(label)
+      // Read the board again at once so the offline advice becomes the plain failure.
+      if (!isCopy) await dom.redraw(model)
       const results = pageCardResults(dom, key).filter(node => node.textContent)
       assert.ok(results.length, `no result beside ${label}`)
-      const isCopy = /Copy|Yes|No/.test(label)
-      assert.ok(results.some(node => node.textContent.includes(isCopy ? words.pressCopyFallback : words.serveOffline)), label)
+      assert.ok(results.some(node => node.textContent.includes(isCopy ? words.pressCopyFallback : words.pressFailed)), label)
       if (isCopy) assert.ok(results.some(node => node.childNodes.some(child => child.tag === 'textarea' && child.isSelected)), label)
     }
     for (const response of [
@@ -2793,7 +2795,7 @@ test('the board script prints an unexpected error instead of exiting silently', 
   } finally { rmSync(dir, { recursive: true, force: true }) }
 })
 
-test("a refusal caused by another agent's change stays next to the card after the redraw", async () => {
+test("a refusal caused by another agent's change stays next to the page card after the redraw", async () => {
   const board = await page()
   try {
     const html = (await board.call('GET', `/?t=${board.token}`)).body
@@ -3031,9 +3033,14 @@ test('a paste on the page shows its result next to the paste box', async () => {
     const html = (await board.call('GET', `/?t=${board.token}`)).body
     const words = JSON.parse(html.match(/<script[^>]*id="words"[^>]*>([\s\S]*?)<\/script>/)[1])
     const model = (await board.call('GET', '/api/board')).json().model
-    for (const outcome of ['empty', 'merged', 'refused', 'offline']) {
-      const dom = await pageDom(html, model, { copyAllowed: true, post: async () => {
-        if (outcome === 'offline') throw new Error('synthetic offline')
+    for (const outcome of ['empty', 'merged', 'refused', 'offline', 'gone']) {
+      let isReachable = true
+      const dom = await pageDom(html, model, { copyAllowed: true, getBoard: async () => {
+        if (!isReachable) throw new Error('synthetic offline')
+        return { ok: true, json: async () => ({ model, now: 1 }) }
+      }, post: async () => {
+        if (outcome === 'gone') isReachable = false
+        if (outcome === 'offline' || outcome === 'gone') throw new Error('synthetic offline')
         return { ok: outcome === 'merged', json: async () => ({ note: outcome === 'merged' ? 'Synthetic merge saved' : 'Synthetic merge refused' }) }
       } })
       dom.node('note').textContent = 'Stale paste feedback'
@@ -3041,7 +3048,9 @@ test('a paste on the page shows its result next to the paste box', async () => {
       dom.node('paste-go').click()
       if (outcome !== 'empty') assert.equal(dom.node('.paste').childNodes.find(node => node.className?.includes('press-result')).textContent, words.pressPending)
       await dom.flush(); await dom.flush()
-      const expected = outcome === 'empty' ? words.pressEmpty : outcome === 'offline' ? words.serveOffline : outcome === 'merged' ? 'Synthetic merge saved' : 'Synthetic merge refused'
+      // Read the board again at once so the offline advice becomes the plain failure.
+      if (outcome === 'offline') await dom.redraw(model)
+      const expected = outcome === 'empty' ? words.pressEmpty : outcome === 'gone' ? words.serveOffline : outcome === 'offline' ? words.pressFailed : outcome === 'merged' ? 'Synthetic merge saved' : 'Synthetic merge refused'
       const slots = dom.node('.paste').childNodes.filter(node => node.className?.includes('press-result'))
       assert.equal(slots.length, 1)
       assert.equal(slots[0].textContent, expected)

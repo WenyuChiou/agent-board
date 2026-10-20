@@ -2529,7 +2529,7 @@ const ENGINE_MATRIX: readonly EngineMatrixCase[] = [...ENGINE_GROUPS.values()].f
 const NORMAL_MATRIX_TITLE = 'every button on every card kind from every agent, in this session or another, does its job or shows a reason'
 const FAILING_MATRIX_TITLE = 'every button still shows a reason when the engine refuses copy, writes or the session is gone'
 
-for (const { cell, button, isFailing, title } of ENGINE_MATRIX) test(title ?? `${isFailing ? FAILING_MATRIX_TITLE : NORMAL_MATRIX_TITLE} [${cell.name} / ${button}]`, { options: { language: 'en' } }, async ($, on) => {
+const engineMatrixTest = ({ cell, button, isFailing }: EngineMatrixCase) => async ($: Engine, on: On) => {
   const fixture = paneEngineFixture(cell)
   const { world } = fixture
   const clock = engineBeneath(on, world)
@@ -2587,9 +2587,24 @@ for (const { cell, button, isFailing, title } of ENGINE_MATRIX) test(title ?? `$
       expect(besideButton(nodes, button, false).includes(expected) || besideLabel(nodes, cell.name, expected)).toBe(true)
     }
   } finally { await ui.unmount() }
-})
+}
 
-for (const isFailing of [false, true]) test(isFailing ? FAILING_MATRIX_TITLE : NORMAL_MATRIX_TITLE, () => {
+for (const one of ENGINE_MATRIX.filter(one => one.title === undefined)) test(`${one.isFailing ? FAILING_MATRIX_TITLE : NORMAL_MATRIX_TITLE} [${one.cell.name} / ${one.button}]`, { options: { language: 'en' } }, engineMatrixTest(one))
+
+const namedEngineMatrixTest = (title: string) => {
+  const one = ENGINE_MATRIX.find(one => one.title === title)
+  if (one === undefined) throw new Error(`The engine matrix does not contain ${title}`)
+  return engineMatrixTest(one)
+}
+
+test('handing a task to this session shows its result next to its row', { options: { language: 'en' } }, namedEngineMatrixTest('handing a task to this session shows its result next to its row'))
+test('completing a hand-kept row shows its result next to that row', { options: { language: 'en' } }, namedEngineMatrixTest('completing a hand-kept row shows its result next to that row'))
+test('did it sends the answer from its own pane card', { options: { language: 'en' } }, namedEngineMatrixTest('did it sends the answer from its own pane card'))
+test('no sends the answer from its own pane card', { options: { language: 'en' } }, namedEngineMatrixTest('no sends the answer from its own pane card'))
+test('the second choice sends the answer from its own pane card', { options: { language: 'en' } }, namedEngineMatrixTest('the second choice sends the answer from its own pane card'))
+test('needs changes opens the reply box on its own pane card', { options: { language: 'en' } }, namedEngineMatrixTest('needs changes opens the reply box on its own pane card'))
+
+const engineMatrixSummary = (isFailing: boolean) => () => {
   const started = performance.now()
   expect(ENGINE_GROUPS.size).toBe(40)
   expect(ENGINE_MATRIX.length).toBe(86)
@@ -2612,7 +2627,11 @@ for (const isFailing of [false, true]) test(isFailing ? FAILING_MATRIX_TITLE : N
   }
   expect([...agents].sort()).toEqual([...MATRIX_AGENTS].sort())
   console.log(`pane fixture matrix: ${ENGINE_CELLS.length} cells, ${ENGINE_GROUPS.size} engine groups, ${(performance.now() - started).toFixed(1)} ms`)
-})
+}
+
+// Written out so the changelog check can find them; keep them equal to NORMAL_MATRIX_TITLE and FAILING_MATRIX_TITLE.
+test('every button on every card kind from every agent, in this session or another, does its job or shows a reason', engineMatrixSummary(false))
+test('every button still shows a reason when the engine refuses copy, writes or the session is gone', engineMatrixSummary(true))
 
 test('pane press targets keep titles containing double colons separate', () => {
   const fixture = paneEngineFixture({ agent: 'claude', source: 'another-session', kind: 'hand-kept', name: 'Task' })
