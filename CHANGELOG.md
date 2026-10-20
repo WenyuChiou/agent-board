@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.23.5 — 2026-10-19
+
 - **A second `--serve` with another `--idle-minutes` keeps the open page (#166).** It used to stop the running page and start a new one, so the open tab stopped working and a reply typed there but not yet sent was lost. It now reuses the running page and, when that page's idle time differs from the one asked for, prints the one in effect. Tests: `--serve with a different idle preference reuses the running page and reports its effective timeout`, `--serve with an idle time that is not a number starts no page`.
 
 - **A hand-kept task finished days ago no longer shows as done just now in `--html` or on the `--serve` page (#165).** The board script built its view with no completion times, so every finished hand-kept task counted as finished at the moment of reading. It now reads the times recorded in `progress-seen.json`, which the pane, `--watch` and `--serve` write; a task with no recorded time, or one in the future, gets no age and is left out of the recent list instead of being shown as new. So a one-shot `--html` lists a task finished just now only once one of those has seen it. Text, `--chat` and `--keys` output is unchanged, since they do not list recent completions. Tests: `manual completion observations map sidecar fingerprints to view keys without inventing times`, `manual completion observations preserve translated fallback keys and conservative repeated titles`, `the CLI view ages manual completions from sidecar fingerprints without renewing old or unknown times`.
