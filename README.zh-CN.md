@@ -28,6 +28,18 @@ git clone https://github.com/WenyuChiou/agent-board.git
 cd agent-board
 ```
 
+### 用 npm 安装
+
+从第一个 npm 版本起（预计 0.24.0），安装程序和看板也放在 npm 上，不用 clone，需要 Node.js 22 以上：
+
+```sh
+npx @wenyuchiou/agent-board setup
+npx @wenyuchiou/agent-board setup --apply
+npx @wenyuchiou/agent-board --serve
+```
+
+第一行列出设置会改什么，不写入任何东西；第二行应用；第三行打开看板网页。`npx @wenyuchiou/agent-board setup` 接受和下面 `setup-agent.mjs` 一样的选项，例如 `--agent codex`；`--watch`、`--chat`、`--html` 打开其他画面。详见[安装指南](docs/SETUP.md#install-with-npm)（英文）。
+
 ## 选你的 agent
 
 | | Agent | 怎么接入 | 打开看板 |

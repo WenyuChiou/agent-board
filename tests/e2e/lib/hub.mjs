@@ -189,9 +189,9 @@ export const receiptBudget = async hub => {
 
 export const withHub = async (specs, fn) => {
   const world = makeWorld()
-  // Messaging leases and latency use real clocks in both parent and server.
+  // Messaging leases and latency use real clocks in both parent and server; with no jump,
+  // world.now is the real time too.
   world.env.NODE_OPTIONS = world.env.NODE_OPTIONS.split(' ').filter(one => !one.includes('clock-preload')).join(' ')
-  world.now = Date.now()
   let server
   try {
     const actors = specs.map((spec, index) => ({ ...spec, session: `${String(index + 1).padStart(8, '0')}-2222-4333-8444-555555555555`, block: (0xa1000001 + index).toString(16), title: spec.title ?? `Prepare ${spec.agent} ${index + 1}`, received: [], errors: [] }))

@@ -1,0 +1,55 @@
+# Long runs of the board script: resident memory and file operations while the data grows to the
+# scale budget (100 live sessions, 300 blocks, 1,000 question records). Too slow for every pull
+# request, so it runs weekly and on demand; the report is kept as a run artifact.
+name: soak
+
+on:
+  workflow_dispatch:
+    inputs:
+      minutes:
+        description: Minutes the soak lasts (the terminal board and the page run side by side)
+        required: false
+        type: number
+        default: 30
+  schedule:
+    - cron: '17 6 * * 1'
+
+permissions:
+  contents: read
+
+# One soak at a time per branch: a running soak is never cut short; a later request waits, and only the newest waiting one is kept.
+concurrency:
+  group: soak-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  soak:
+    name: soak (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+      # A missing soak script fails the run, so it cannot be skipped by deleting it.
+      - name: Soak the terminal board and the serve page
+        shell: bash
+        env:
+          # Passed through the environment, never pasted into the script.
+          MINUTES: ${{ inputs.minutes || '30' }}
+        run: node tests/e2e/soak.mjs --minutes "$MINUTES" --out soak-report
+      - name: Keep the report
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: soak-report-${{ matrix.os }}
+          path: soak-report
+          if-no-files-found: warn
+          retention-days: 14

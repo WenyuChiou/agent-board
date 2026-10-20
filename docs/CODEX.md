@@ -27,7 +27,8 @@ Codex-only installation defaults to `~/.agent-board/progress.md`; `.claude` is n
 an explicitly configured `CODEX_HOME`. Installation is repeatable. Edited files are named
 as conflicts and not overwritten. An exact old generated board skill at the standard path
 can be upgraded. Invalid or unreadable JSON aborts setup. Bootstrap uses the committed
-bundle and does not download executable code.
+bundle, from a checkout or the npm package, and downloads no executable code itself; with
+`npx`, npm downloads that package when you run it.
 
 ## Open and report
 
