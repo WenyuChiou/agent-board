@@ -806,14 +806,12 @@ test('封存 of one of two blocks that share a session id takes the chosen row a
   const secondRef = { project: 'Second project', title: 'Second task', line: text.split('\n').indexOf('### Second task'), session: 'cccccccc' }
   const archivedSecond = takeTask(text, secondRef, NOW)
   expect(archivedSecond?.entries).toEqual(['## Second project · 2026-10-16\n### Second task\n- [ ] Second step'])
-  expect(archivedSecond?.text).not.toContain(second)
-  expect(archivedSecond?.text).toContain(first)
+  expect(archivedSecond?.text).toBe(`## First project\n${first}\n`)
   expect(takeTask(text, { ...secondRef, line: 0 }, NOW)).toEqual(archivedSecond)
 
   const archivedFirst = takeTask(text, { project: 'First project', title: 'First task', line: text.split('\n').indexOf('### First task'), session: 'cccccccc' }, NOW)
   expect(archivedFirst?.entries).toEqual(['## First project · 2026-10-16\n### First task\n- [ ] First step'])
-  expect(archivedFirst?.text).not.toContain(first)
-  expect(archivedFirst?.text).toContain(second)
+  expect(archivedFirst?.text).toBe(`## Second project\n${second}\n`)
 })
 
 test('封存 refuses when two blocks share a session id and the chosen row cannot be told apart', () => {
@@ -835,8 +833,7 @@ test('封存 refuses when two blocks share a session id and the chosen row canno
 
   const archived = takeTask(text, { ...ref, line: text.split('\n').lastIndexOf('### Same task') }, NOW)
   expect(archived?.entries).toEqual(['## Project · 2026-10-16\n### Same task\n- [ ] Second step'])
-  expect(archived?.text).not.toContain(second)
-  expect(archived?.text).toContain(first)
+  expect(archived?.text).toBe(`## Project\n${first}\n`)
 })
 
 test('封存 of an ended block takes it when a working block shares its session id, and refuses the working one', () => {
@@ -856,9 +853,57 @@ test('封存 of an ended block takes it when a working block shares its session 
   const lines = text.split('\n')
   const archived = takeTask(text, { project: 'Project', title: 'Ended task', line: lines.indexOf('### Ended task'), session: 'cccccccc' }, NOW)
   expect(archived?.entries).toEqual(['## Project · 2026-10-16\n### Ended task\n- [x] Ended step'])
-  expect(archived?.text).not.toContain(ended)
-  expect(archived?.text).toContain(working)
+  expect(archived?.text).toBe(`## Project\n${working}\n`)
   expect(takeTask(text, { project: 'Project', title: 'Working task', line: lines.indexOf('### Working task'), session: 'cccccccc' }, NOW)).toBeNull()
+})
+
+test('封存 matches a shared session id by each block\'s first heading, so a second heading in another block is never taken for the row', () => {
+  const first = [
+    '<!-- auto session=cccccccc state=ended updated=2026-10-16T09:00:00.000Z -->',
+    '### X',
+    '- [ ] First step',
+    '### Y',
+    '<!-- /auto session=cccccccc -->',
+  ].join('\n')
+  const second = [
+    '<!-- auto session=cccccccc state=ended updated=2026-10-16T10:00:00.000Z -->',
+    '### Y',
+    '- [ ] Second step',
+    '<!-- /auto session=cccccccc -->',
+  ].join('\n')
+  const third = [
+    '<!-- auto session=cccccccc state=ended updated=2026-10-16T11:00:00.000Z -->',
+    '### Z',
+    '- [ ] Third step',
+    '<!-- /auto session=cccccccc -->',
+  ].join('\n')
+  const text = `## Project\n${first}\n\n${second}\n\n${third}\n`
+  const lines = text.split('\n')
+  const secondRef = { project: 'Project', title: 'Y', line: lines.lastIndexOf('### Y'), session: 'cccccccc' }
+  const archivedSecond = takeTask(text, secondRef, NOW)
+  expect(archivedSecond?.entries).toEqual(['## Project · 2026-10-16\n### Y\n- [ ] Second step'])
+  expect(archivedSecond?.text).toBe(`## Project\n${first}\n\n${third}\n`)
+
+  const withoutSecond = `## Project\n${first}\n\n${third}\n`
+  expect(takeTask(withoutSecond, secondRef, NOW)).toBeNull()
+
+  const archivedFirst = takeTask(text, { project: 'Project', title: 'X', line: lines.indexOf('### X'), session: 'cccccccc' }, NOW)
+  expect(archivedFirst?.entries).toEqual(['## Project · 2026-10-16\n### X\n- [ ] First step\n### Y'])
+  expect(archivedFirst?.text).toBe(`## Project\n\n${second}\n\n${third}\n`)
+
+  const stepFirst = [
+    '<!-- auto session=cccccccc state=ended updated=2026-10-16T09:00:00.000Z -->',
+    '- [ ] Stray step',
+    '### Y',
+    '- [ ] A step',
+    '<!-- /auto session=cccccccc -->',
+  ].join('\n')
+  const withStepFirst = `## Project\n${stepFirst}\n\n${second}\n\n${third}\n`
+  const stepFirstRef = { ...secondRef, line: withStepFirst.split('\n').lastIndexOf('### Y') }
+  const archivedWithStepFirst = takeTask(withStepFirst, stepFirstRef, NOW)
+  expect(archivedWithStepFirst?.entries).toEqual(['## Project · 2026-10-16\n### Y\n- [ ] Second step'])
+  expect(archivedWithStepFirst?.text).toBe(`## Project\n${stepFirst}\n\n${third}\n`)
+  expect(takeTask(`## Project\n${stepFirst}\n\n${third}\n`, stepFirstRef, NOW)).toBeNull()
 })
 
 test('reminders: another session’s question once, and work due today or late once a day', () => {
