@@ -2,8 +2,10 @@ import { emptyQuestions, observeQuestions } from '../hooks/questions'
 import { expect, test } from 'claude-code/testing'
 
 import type { ProgressMirror } from '../types'
-import { extractAutoBlock, removeAutoBlock, renderAutoBlock, scanBlocks, setManualStep, takeArchivable, upsertAutoBlock } from '../hooks/blocks'
+import { extractAutoBlock, removeAutoBlock, renderAutoBlock, scanBlocks, setManualStep, stateWords, takeArchivable, upsertAutoBlock } from '../hooks/blocks'
 import { ZH_TW } from '../hooks/i18n'
+import { STRINGS } from '../hooks/strings'
+import { answerAgentPrompt } from '../hooks/inbox'
 import {
   applyTaskCreate,
   applyTaskUpdate,
@@ -85,6 +87,57 @@ test('the block lands under its project, is replaced in place, and comes out cle
   const fresh = upsertAutoBlock('', sampleMirror())
   expect(fresh.startsWith('# 專案進度\n\n## persona_framework\n\n<!-- auto')).toBe(true)
   expect(removeAutoBlock(fresh, '2be48af2-6193-5040')).toBe('# 專案進度\n')
+})
+
+test('a Codex block set to working says Codex is working, not Claude', () => {
+  const s = STRINGS.en
+  const mirror = { ...sampleMirror(), agent: 'codex', state: 'waiting' as const, resume: 'codex-session-123', turnOrder: NOW * 2 }
+  const old = upsertAutoBlock('', { ...mirror, state: 'working' }, s).replace('> Codex is working', '> Claude is working')
+  const prompt = { agent: 'codex', event: 'prompt' as const, id: mirror.sessionId, session: mirror.resume, cwd: '', project: mirror.project, prompt: '', answer: '', transcript: '', at: NOW + 1000 }
+  const next = answerAgentPrompt(mirror, prompt, NOW + 1000)!
+  const before = `## Other\n### Leave this alone\n- [ ] Another task\n\n${old}`
+  const after = upsertAutoBlock(before, next, s)
+  expect(after).toContain('> Codex is working')
+  expect(after).not.toContain('Claude is working')
+  expect(removeAutoBlock(after, mirror.sessionId)).toBe(removeAutoBlock(before, mirror.sessionId))
+  const task = parseProgress(after).find(project => project.name === mirror.project)?.tasks[0]
+  expect(task?.auto?.agent).toBe('codex')
+  expect(task?.auto?.state).toBe('working')
+  expect(task?.steps.map(step => step.status)).toEqual(['done', 'doing', 'todo'])
+})
+
+test('every agent\'s working block names that agent', () => {
+  const agents = { codex: 'Codex', gemini: 'Gemini CLI', cursor: 'Cursor', grok: 'Grok Build', muse: 'Muse Code', dot: 'dot', hermes: 'Hermes Agent', openclaw: 'OpenClaw', opencode: 'OpenCode', antigravity: 'Antigravity', deepseek: 'DeepSeek', 'custom-agent': 'custom-agent', constructor: 'constructor' }
+  for (const s of Object.values(STRINGS)) {
+    for (const [agent, name] of Object.entries(agents)) {
+      const block = renderAutoBlock({ ...sampleMirror(), agent }, s)
+      expect(block[2]).toBe(`> ${s.agentWorking(name)}`)
+      expect(block[2]).not.toContain('Claude')
+      expect(stateWords('done', agent, s)).toBe(s.stateDone)
+      expect(stateWords('ended', agent, s)).toBe(s.stateEnded)
+    }
+  }
+})
+
+test('a Claude block keeps its working and waiting words', () => {
+  const working = { en: 'Claude is working', 'zh-TW': 'Claude 正在做', 'zh-CN': 'Claude 正在做' }
+  const waiting = { en: 'Waiting for your next message', 'zh-TW': '等你回覆', 'zh-CN': '等你回复' }
+  for (const s of Object.values(STRINGS)) {
+    for (const agent of ['claude', '']) {
+      expect(renderAutoBlock({ ...sampleMirror(), agent }, s)[2]).toBe(`> ${working[s.lang]}`)
+      expect(renderAutoBlock({ ...sampleMirror(), agent, state: 'waiting' }, s)[2]).toBe(`> ${waiting[s.lang]}`)
+    }
+  }
+})
+
+test('the waiting line names no agent', () => {
+  for (const s of Object.values(STRINGS)) {
+    for (const agent of ['claude', ...Object.keys(s.agentNames), 'custom-agent']) {
+      const block = renderAutoBlock({ ...sampleMirror(), agent, state: 'waiting' }, s)
+      expect(block[2]).toBe(`> ${s.stateWaiting}`)
+      for (const name of ['Claude', ...Object.values(s.agentNames), 'custom-agent']) expect(block[2]).not.toContain(name)
+    }
+  }
 })
 
 test('Windows line endings survive a rewrite, and the parser reads the block back', () => {

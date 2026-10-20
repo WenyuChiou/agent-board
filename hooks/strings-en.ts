@@ -62,6 +62,19 @@ export const EN: Strings = {
   allDone: 'all done',
   claudeWorking: 'Claude is working',
   agentWorking: (agent: string): string => `${agent} is working`,
+  agentNames: {
+    codex: 'Codex',
+    gemini: 'Gemini CLI',
+    cursor: 'Cursor',
+    grok: 'Grok Build',
+    muse: 'Muse Code',
+    dot: 'dot',
+    hermes: 'Hermes Agent',
+    openclaw: 'OpenClaw',
+    opencode: 'OpenCode',
+    antigravity: 'Antigravity',
+    deepseek: 'DeepSeek',
+  },
   sessionStopped: (when: string): string => `session stopped, last active ${when}`,
   sessionEnded: 'session ended, can be taken over',
   uncategorized: '(uncategorized)',
@@ -110,7 +123,7 @@ export const EN: Strings = {
 
   // Words written into progress.md and its archive and journal
   stateWorking: 'Claude is working',
-  stateWaiting: 'waiting on your reply',
+  stateWaiting: 'Waiting for your next message',
   stateDone: 'done',
   stateEnded: 'session ended, can be taken over',
   fileTitle: '# Project progress',
