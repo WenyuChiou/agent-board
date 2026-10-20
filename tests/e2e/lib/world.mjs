@@ -34,11 +34,6 @@ export const makeWorld = ({ lang = 'en' } = {}) => {
     const value = process.env[key]
     if (value !== undefined) env[key] = value
   }
-  // With PSModulePath unset, Windows PowerShell searches the machine's module path too. A CI
-  // image lists large module folders there, and a world's empty LOCALAPPDATA holds no module
-  // cache, so the board's first Move-Item spent its 10 s limit finding the cmdlet. Real users
-  // have both set; pin the search to the modules that ship with Windows.
-  if (process.platform === 'win32' && env.SystemRoot) env.PSModulePath = join(env.SystemRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'Modules')
   Object.assign(env, directories, { CLAUDE_PROGRESS_FILE: path, NO_COLOR: '1' })
   const inside = file => {
     const rel = relative(root, resolve(file))
