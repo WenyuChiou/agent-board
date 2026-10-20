@@ -1,8 +1,9 @@
 import { describe, test } from 'node:test'
 import assert from 'node:assert/strict'
 import { existsSync, readFileSync, statSync } from 'node:fs'
-import { join } from 'node:path'
-import { makeWorld } from './lib/world.mjs'
+import { userInfo } from 'node:os'
+import { dirname, join, resolve } from 'node:path'
+import { makeWorld, modulePath } from './lib/world.mjs'
 import { spawnIsolated } from './lib/spawn.mjs'
 import { block, turn, hook, hookHosts } from './lib/writers.mjs'
 import { terminal, chat, seenPageWithin, serve, html, run } from './lib/surfaces.mjs'
@@ -19,6 +20,26 @@ describe('scenario runner', () => {
       assert.notEqual(a.root, b.root)
       assert.equal(a.env.HERMES_HOME, join(a.home, '.hermes'))
       assert.equal(a.env.AGENT_BOARD_CODEX, undefined)
+      // Machine-wide Windows variables pass through, and the PowerShell module path keeps only folders
+      // under the Windows and Program Files folders (without it the board's first PowerShell move
+      // took 12-40 s on a CI runner); no user or computer name passes.
+      for (const key of ['SystemDrive', 'ProgramData', 'ProgramFiles']) assert.equal(a.env[key], process.env[key], key)
+      for (const key of ['USERNAME', 'COMPUTERNAME']) assert.equal(a.env[key], undefined, key)
+      if (process.platform === 'win32') {
+        // userInfo() reads the account, so it names the real profiles folder even when HOME is isolated.
+        const profiles = dirname(userInfo().homedir).toLowerCase() + '\\'
+        const machine = [process.env.SystemRoot, process.env.ProgramFiles, process.env['ProgramFiles(x86)'], process.env.ProgramW6432].filter(Boolean).map(dir => dir.toLowerCase() + '\\')
+        for (const dir of (a.env.PSModulePath ?? '').split(';').filter(Boolean)) {
+          assert.ok(machine.some(root => resolve(dir).toLowerCase().startsWith(root)), dir)
+          assert.ok(!resolve(dir).toLowerCase().startsWith(profiles), dir)
+        }
+        const kept = join(process.env.ProgramFiles, 'WindowsPowerShell', 'Modules')
+        const shouted = kept.toUpperCase().replaceAll('\\', '/')
+        const profile = join(dirname(userInfo().homedir), 'someone', 'Documents', 'WindowsPowerShell', 'Modules')
+        const leaks = [profile, 'D:\\OneDrive\\Documents\\WindowsPowerShell\\Modules', 'Modules', '%USERPROFILE%\\Documents\\WindowsPowerShell\\Modules', '\\\\?\\' + profile, '\\\\server\\share\\Modules', '']
+        assert.equal(modulePath([kept, ...leaks, shouted].join(';')), [kept, shouted].join(';'))
+        if (modulePath()) assert.equal(a.env.PSModulePath, modulePath())
+      }
       assert.equal((a.read('agent-board.mjs').match(/\(\(target, done\) => done\(false\)\)\((?:html|url),/g) ?? []).length, 2)
       assert.doesNotMatch(a.read('agent-board.mjs'), /\bopenInBrowser\(/)
       assert.throws(() => a.write('../../../escaped', 'no'), /Outside world/)
