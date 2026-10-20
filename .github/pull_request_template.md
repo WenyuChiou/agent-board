@@ -37,4 +37,4 @@ Author: <agent>, <branch>
 
 ## Not covered
 
-<!-- What this pull request leaves out, with links to the follow-up issues. Write "Nothing." if nothing. -->
+<!-- What this pull request leaves out, with links to the issue or comment that tracks each part (CONTRIBUTING rule 2). Write "Nothing." if nothing. -->
