@@ -27,7 +27,7 @@ import { parseProgress } from '../hooks/parse'
 import { qrModules, qrText } from '../hooks/qr'
 import { langOf, STRINGS } from '../hooks/strings'
 import { answeredJson, answeredPath, buildView, parseAnswered, parseSeen, seenJson, seenPath, withAnswered, withSeen } from '../hooks/view'
-import { acknowledgementKeys, archiveQuestionsKept, captureHashOf, captureJson, capturePath, emptyQuestions, parseCapture, withCaptures, isQuestionProof, isQuestionSnapshot, migratedAnswered, observeQuestions, parseQuestions, questionProofJson, questionProofOf, questionProofPath, questionsJson, questionsPath } from '../hooks/questions'
+import { acknowledgementKeys, archiveQuestionsKept, captureHashOf, captureJson, capturePath, emptyQuestions, parseCapture, withCaptures, isQuestionProof, isQuestionSnapshot, isTornLedger, migratedAnswered, observeQuestions, parseQuestions, questionProofJson, questionProofOf, questionProofPath, questionsJson, questionsPath } from '../hooks/questions'
 import type { QuestionCapture, QuestionProofs, QuestionRecord } from '../hooks/questions'
 import { sha256 } from '../hooks/sha256'
 
@@ -138,7 +138,38 @@ let lastStat = { stat: '', at: 0 }
 let lastQuestions = emptyQuestions()
 const questionWriter = randomUUID()
 let questionWrite = 0
-const readQuestions = (file: string, text = read(file)) => {
+const isQuestionWriter = !args.includes('--chat') && args.some(arg => ['--watch', '--serve', '--serve-child', '--keys'].includes(arg))
+
+// Neither a quarantine nor a missing ledger may replace another session's complete file.
+// mv -n also returns zero when it skips a destination, so check that the source is gone.
+const placeQuestionFile = (from: string, to: string): boolean => {
+  const source = resolve(from)
+  const target = resolve(to)
+  const quote = (text: string): string => `'${text.replaceAll("'", "''")}'`
+  const [tool, argv] = process.platform === 'win32'
+    ? [system32('WindowsPowerShell/v1.0/powershell.exe'), ['-NoProfile', '-NonInteractive', '-Command', `[System.IO.File]::Move(${quote(source)}, ${quote(target)})`]] as const
+    : ['mv', ['-n', '--', source, target]] as const
+  const ran = spawnSync(tool, [...argv], { cwd: dirname(path), stdio: 'ignore', timeout: 10000, windowsHide: true })
+  return ran.status === 0 && !existsSync(source)
+}
+
+const quarantineQuestions = (file: string): boolean => {
+  const aside = `${file}.torn-${Date.now()}-${process.pid}`
+  if (!placeQuestionFile(file, aside)) return false
+  if (isTornLedger(read(aside))) return true
+  // A good write raced the initial read. Restore it only if no newer ledger took its place.
+  placeQuestionFile(aside, file)
+  return false
+}
+
+const readQuestions = (file: string, text?: string) => {
+  if (text === undefined) {
+    text = read(file)
+    if (isQuestionWriter && isTornLedger(text)) {
+      if (!quarantineQuestions(file)) return null
+      text = read(file)
+    }
+  }
   let isMissing = false
   try {
     statSync(file)
@@ -249,7 +280,7 @@ const view = (source = read(path), now = Date.now()) => {
   const observed = observeQuestions(lastQuestions, projects, null, answered, now, isSettled, 'preview', proofs ?? undefined, turns)
   let questions = observed.ledger
   // Chat and a one-shot read never write. Interactive readers persist before accepting hides.
-  if (record !== null && proofs !== null && isQuestionSnapshot(source) && !args.includes('--chat') && args.some(arg => ['--watch', '--serve', '--serve-child', '--keys'].includes(arg))) {
+  if (record !== null && proofs !== null && isQuestionSnapshot(source) && isQuestionWriter) {
     const incarnation = `${questionWriter}:${questionWrite++}`
     const wrote = rewrite(file, before => {
       if (read(path) !== source) return null
@@ -312,6 +343,12 @@ const rewrite = (file: string, change: (text: string) => string | null): string 
   let failure: unknown = { code: 'EAGAIN' }
   for (let attempt = 0; attempt < 3; attempt += 1) {
     const before = read(file)
+    const isLedger = file === questionsPath(path)
+    if (isLedger && isTornLedger(before)) {
+      if (!quarantineQuestions(file)) return null
+      continue
+    }
+    const wasMissing = isLedger && before === '' && !existsSync(file)
     const after = change(before)
     if (after === null) return null
     if (after === before) return after
@@ -331,7 +368,27 @@ const rewrite = (file: string, change: (text: string) => string | null): string 
       closeSync(fd)
       writeFileSync(temp, after)
       if (mode !== undefined) chmodSync(temp, mode)
-      renameSync(temp, file)
+      if (wasMissing) {
+        if (!placeQuestionFile(temp, file)) {
+          if (!existsSync(file)) {
+            // A failed move must not delete the only complete copy.
+            isOwned = false
+            throw { code: 'EAGAIN' }
+          }
+          unlinkSync(temp)
+          continue
+        }
+      } else {
+        try {
+          renameSync(temp, file)
+        } catch (error) {
+          if (!isLedger || existsSync(file)) throw error
+          if (!placeQuestionFile(temp, file)) {
+            if (!existsSync(file)) isOwned = false
+            throw error
+          }
+        }
+      }
     } catch (error) {
       failure = error
       try {
