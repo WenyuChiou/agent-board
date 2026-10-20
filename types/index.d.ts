@@ -178,6 +178,10 @@ export type ProgressMirror = {
 // wrote, or a report. `copied` says the text is also on the clipboard.
 export type ProgressAnswer = { question: string; text: string; isAsking: boolean; copied?: boolean }
 
+export type PressOutcome = string | { text: string; copyText?: string; tone?: 'alert' }
+
+export type ProgressPressResult = { button: string; revision: string; label: string; text: string; copyText?: string; sequence?: number; tone?: 'alert'; isPending?: boolean }
+
 declare module 'claude-code' {
   interface PluginState {
     'agent-board': {
@@ -187,6 +191,7 @@ declare module 'claude-code' {
       now: number
       hasTaskTools: boolean
       expanded: string
+      pressResults: Record<string, ProgressPressResult>
       answer: ProgressAnswer | null
       isNotifyOn: boolean
       theme: string

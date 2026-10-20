@@ -2265,6 +2265,134 @@ const fpIn = (items: ReturnType<typeof boardItems>, key: string): string => {
   return item === undefined ? '' : fingerprint(item, items)
 }
 
+const MATRIX_HOSTS = ['claude', 'codex', 'antigravity', 'hermes', 'openclaw', 'grok', 'opencode', 'cursor'] as const
+const MATRIX_SOURCES = ['own', 'other'] as const
+const MATRIX_KINDS = ['needs-you', 'live-ask', 'stopped', 'unknown-session', 'blocked', 'done', 'hidden', 'own-block', 'ended', 'hand-kept', 'retained', 'inbox'] as const
+const matrixTitle = (kind: typeof MATRIX_KINDS[number], host: typeof MATRIX_HOSTS[number], source: typeof MATRIX_SOURCES[number]): string => `${kind} ${host} ${source}`
+
+const serveMatrix = () => {
+  let sequence = 1
+  const blocks: string[] = ['# Progress', '', '## Matrix']
+  const pending: Array<{ id: string; agent: string; project: string; text: string; isQuestion: boolean; at: number }> = []
+  const records: Array<{ id: string; scope: string; words: string; occurrence: number; copies: number; isWaiting: boolean; isPresent: boolean; isUnresolved: boolean; isArchived: boolean; firstObserved: number; incarnation: string; source: { kind: 'block' | 'own'; project: string; task: string; context: string; text: string; agent: string; session: string; data: string } }> = []
+  for (const host of MATRIX_HOSTS) for (const source of MATRIX_SOURCES) for (const kind of MATRIX_KINDS) {
+    const title = matrixTitle(kind, host, source)
+    const session = sequence.toString(16).padStart(8, '0')
+    sequence += 1
+    if (kind === 'retained') {
+      records.push({ id: `retained-${session}`, scope: `matrix:${session}`, words: title, occurrence: 1, copies: 1, isWaiting: true, isPresent: false, isUnresolved: true, isArchived: true, firstObserved: SERVE_NOW - 10 * 86400000, incarnation: `matrix-${session}`, source: { kind: source === 'own' ? 'own' : 'block', project: 'Matrix', task: title, context: '', text: `${title}, OK?`, agent: host, session, data: title } })
+      continue
+    }
+    if (kind === 'inbox') {
+      pending.push({ id: session, agent: host, project: 'Matrix', text: `${title}, OK?`, isQuestion: true, at: SERVE_NOW })
+      continue
+    }
+    if (kind === 'hand-kept') {
+      blocks.push(`### ${title}`, `- [?] ${title}, OK?`, '')
+      continue
+    }
+    const state = kind === 'done' ? 'done' : ['stopped', 'unknown-session', 'ended'].includes(kind) ? 'ended' : kind === 'live-ask' || kind === 'own-block' ? 'working' : 'waiting'
+    const resume = kind === 'unknown-session' ? '' : ` resume=${session}`
+    const step = ['needs-you', 'live-ask', 'hidden'].includes(kind) ? `- [?] ${title}, OK?` : kind === 'blocked' ? `- [!] ${title} is blocked` : kind === 'done' ? `- [x] ${title} finished` : kind === 'own-block' ? `- [~] ${title} underway` : `- [ ] ${title} next`
+    blocks.push(`<!-- auto session=${session} agent=${host} state=${state} updated=2026-10-17T08:44:00Z${resume} dir=%2Fsynthetic -->`, `### ${title}`, step, `<!-- /auto session=${session} -->`, '')
+  }
+  const projects = parseProgress(blocks.join('\n'))
+  const ledger = { version: 1 as const, next: records.length + 1, records, legacy: {} }
+  const preview = buildView(projects, [], null, SERVE_NOW, 0, {}, STRINGS.en, [], {}, ledger, { retired: [], consumed: [] }, pending)
+  const answered = preview.waiting.filter(item => item.task.startsWith('hidden ')).map(item => item.hideKey)
+  const built = buildView(projects, [], null, SERVE_NOW, 0, {}, STRINGS.en, answered, {}, ledger, null, pending)
+  const newlyHidden = built.waiting.filter(item => item.task.startsWith('hidden '))
+  const view = { ...built, waiting: built.waiting.filter(item => !item.task.startsWith('hidden ')), hidden: [...built.hidden, ...newlyHidden] }
+  return { view, pending }
+}
+
+test('the serve action contract covers every card kind from every agent and source', () => {
+  const { view, pending } = serveMatrix()
+  const model = serveModel(view, pending, STRINGS.en)
+  const items = boardItems(view, pending, true, true)
+  const cells = new Set<string>()
+  let offered = 0
+  for (const host of MATRIX_HOSTS) for (const source of MATRIX_SOURCES) for (const kind of MATRIX_KINDS) {
+    const title = matrixTitle(kind, host, source)
+    cells.add(title)
+    const ask = model.asks.find(one => one.task === title || one.text.startsWith(title))
+    const row = [...model.groups.flatMap(group => group.rows), ...model.idle, ...model.stopped].find(one => one.title === title)
+    const hidden = model.hidden.find(one => one.task === title)
+    const retained = [...model.reminder, ...model.older].find(one => one.task === title)
+    const card = kind === 'done' ? true : ['needs-you', 'live-ask', 'hand-kept', 'inbox'].includes(kind) ? ask : ['stopped', 'unknown-session', 'blocked', 'own-block', 'ended'].includes(kind) ? row : kind === 'hidden' ? hidden : retained
+    if (card === undefined) throw new Error(`Missing serve matrix card: ${title}`)
+    if (['needs-you', 'live-ask', 'hand-kept', 'inbox'].includes(kind) && ask !== undefined) {
+      const actionItem = items.find(one => one.key === ask.key)
+      expect(actionItem === undefined ? '' : fingerprint(actionItem, items)).toBe(ask.fp)
+      if (ask.canTick) {
+        offered += 1
+        expect(serveAction(items, { key: ask.key, type: 'tick', text: '', session: '', fp: ask.fp }, STRINGS.en).type).toBe('tick')
+      }
+      if (ask.canHide) {
+        offered += 1
+        expect(serveAction(items, { key: ask.key, type: 'hide', text: '', session: '' }, STRINGS.en).type).toBe('hide')
+      }
+      for (const answer of ask.answers) {
+        offered += 1
+        const acted = serveAction(items, { key: ask.key, type: 'send', text: answer, session: ask.session, asked: ask.text, fp: ask.fp }, STRINGS.en)
+        expect(acted.type === 'refuse' ? acted.note !== '' : ['send', 'message'].includes(acted.type)).toBe(true)
+      }
+      offered += Number(ask.command !== null) + Number(ask.reopen !== null) + Number(ask.link !== null) + Number(!ask.canTick)
+      expect(serveAction(items, { key: ask.key, type: 'send', text: '', session: ask.session, asked: ask.text, fp: ask.fp }, STRINGS.en)).toEqual({ type: 'refuse', note: STRINGS.en.pressEmpty })
+    } else if (['stopped', 'unknown-session', 'blocked', 'own-block', 'ended'].includes(kind) && row !== undefined) {
+      for (const [isOffered, type, text] of [[row.next !== null, 'tick', row.next ?? ''], [row.canArchive, 'archive', ''], [row.canConfirm, 'done', '']] as const) if (isOffered) {
+        offered += 1
+        expect(serveAction(items, { key: row.key, type, text, session: row.session, asked: row.question, fp: row.fp }, STRINGS.en).type).toBe(type)
+      }
+      offered += Number(row.resume !== null) + Number(row.send === 'send' || row.send === 'connected' || row.hasCopyBox)
+    } else if (kind === 'hidden' && hidden !== undefined) {
+      offered += 1
+      expect(serveAction(items, { key: hidden.key, type: 'unhide', text: '', session: '' }, STRINGS.en)).toEqual({ type: 'unhide', key: hidden.key.slice('hidden:'.length) })
+    }
+  }
+  expect(cells.size).toBe(192)
+  expect(offered).toBe(440)
+})
+
+test('the terminal key contract covers every card kind from every agent and source', () => {
+  const { view, pending } = serveMatrix()
+  const items = boardItems(view, pending, true, true)
+  const cells = new Set<string>()
+  let offered = 0
+  for (const host of MATRIX_HOSTS) for (const source of MATRIX_SOURCES) for (const kind of MATRIX_KINDS) {
+    const title = matrixTitle(kind, host, source)
+    cells.add(title)
+    const at = items.findIndex(item => item.type === 'ask' ? item.ask.task === title || item.ask.text.startsWith(title) : item.type === 'row' ? item.row.title === title : item.turn.text.startsWith(title))
+    if (kind === 'done') {
+      expect(at).toBe(-1)
+      continue
+    }
+    if (kind === 'hidden') {
+      const pressed = boardKey(emptyBoardState, 'u', items, STRINGS.en)
+      expect(pressed.action?.type).toBe('unhide')
+      offered += 1
+      continue
+    }
+    if (at < 0) throw new Error(`Missing terminal matrix card: ${title}`)
+    const item = items[at]
+    if (item === undefined) throw new Error(`Missing matrix item ${title}`)
+    const keys = item.type === 'ask'
+      ? [...(item.ask.step === null ? [] : ['x']), ...(item.ask.hideKey === '' || item.ask.canHide === false ? [] : ['h']), ...((item.ask.command ?? item.ask.link) !== null || item.ask.reopen !== null ? ['c'] : []), ...(item.ask.kind === 'confirm' ? ['y', 'n'] : item.ask.options.map((_, index) => String(index + 1)))]
+      : item.type === 'row'
+        ? [...(item.row.next === null ? [] : ['x']), ...(item.row.archive === null ? [] : ['a']), ...(item.row.confirm == null ? [] : ['d']), ...(item.row.resume === null ? [] : ['c'])]
+        : []
+    for (const key of keys) {
+      offered += 1
+      const selected = pinned({ ...emptyBoardState, selected: at }, items)
+      const pressed = boardKey(selected, key, items, STRINGS.en)
+      expect(pressed.action?.type ?? pressed.state.note).not.toBe('')
+      if (pressed.action === null) expect(pressed.state.note).not.toBe('')
+    }
+  }
+  expect(cells.size).toBe(192)
+  expect(offered).toBe(376)
+})
+
 test('with explicit legacy opt-in the page offers a send only into a Grok or Codex session that has closed; an open one, Claude and a hand-kept task each get their own way', () => {
   const model = resumeModel(serveView(), [], STRINGS.en)
   const row = (title: string) => [...model.groups.flatMap(group => group.rows), ...model.stopped].find(one => one.title === title)
@@ -2327,7 +2455,7 @@ test('a press on the page is worked out from the file as it is now: a line that 
   const sent = resumeAction(items, { key: grok, type: 'send', text: '  Redis\u0007, it is already in the stack \r\n', session: 'b2c3d4e5', asked, fp: fpIn(items, grok) }, STRINGS.en)
   // The task goes with it, so the page can say which of two sessions answered.
   expect(sent).toEqual({ type: 'send', target: GROK, text: STRINGS.en.answerText('Redis or Memcached?', 'Redis, it is already in the stack'), title: 'Pick the cache' })
-  expect(resumeAction(items, { key: grok, type: 'send', text: ' \u0000 ', session: 'b2c3d4e5', asked }, STRINGS.en)).toEqual({ type: 'refuse', note: '' })
+  expect(resumeAction(items, { key: grok, type: 'send', text: ' \u0000 ', session: 'b2c3d4e5', asked }, STRINGS.en)).toEqual({ type: 'refuse', note: STRINGS.en.pressEmpty })
   // The line now belongs to another session than the one the page drew: refused, not sent there.
   expect(resumeAction(items, { key: grok, type: 'send', text: 'Redis', session: 'c0ffee12', asked }, STRINGS.en)).toEqual({ type: 'refuse', note: STRINGS.en.boardLineChanged })
   // The task asks something else now, or nothing: a reply written under the old question is
@@ -2340,12 +2468,12 @@ test('a press on the page is worked out from the file as it is now: a line that 
   expect(resumeAction(items, { key: codex, type: 'send', text: '300', session: 'a1b2c3d4' }, STRINGS.en)).toEqual({ type: 'refuse', note: STRINGS.en.serveSendOpen('codex') })
   const manual = keyOf(item => item.type === 'ask' && item.ask.project === 'docs-site')
   expect(resumeAction(items, { key: manual, type: 'tick', text: '', session: '', fp: fpIn(items, manual) }, STRINGS.en).type).toBe('tick')
-  expect(resumeAction(items, { key: manual, type: 'send', text: 'yes', session: '' }, STRINGS.en)).toEqual({ type: 'refuse', note: '' })
+  expect(resumeAction(items, { key: manual, type: 'send', text: 'yes', session: '' }, STRINGS.en)).toEqual({ type: 'refuse', note: STRINGS.en.serveManualReply })
   // An ended block can go to the archive; a working one cannot yet.
   expect(resumeAction(items, { key: grok, type: 'archive', text: '', session: '', fp: fpIn(items, grok) }, STRINGS.en)).toMatchObject({ type: 'archive', title: 'Pick the cache' })
   const working = keyOf(item => item.type === 'row' && item.row.title === 'Dark mode for the settings page')
   expect(resumeAction(items, { key: working, type: 'archive', text: '', session: '' }, STRINGS.en)).toEqual({ type: 'refuse', note: STRINGS.en.archiveLive })
-  expect(resumeAction(items, { key: grok, type: 'delete', text: '', session: '' }, STRINGS.en)).toEqual({ type: 'refuse', note: '' })
+  expect(resumeAction(items, { key: grok, type: 'delete', text: '', session: '' }, STRINGS.en)).toEqual({ type: 'refuse', note: STRINGS.en.pressNothing })
   expect(replyText('x'.repeat(5000)).length).toBe(4000)
 })
 
@@ -2984,7 +3112,7 @@ test('every agent keeps exact resume bindings without showing session identifier
   expect(html).not.toContain('對話 ID')
   // The web card keeps the actionable resume command without another id-only button.
   expect(servePage(STRINGS.en, 'n')).not.toContain("copy(ask.sessionId)")
-  expect(servePage(STRINGS.en, 'n')).toContain("copy(ask.reopen)")
+  expect(servePage(STRINGS.en, 'n')).toContain("copy(ask.reopen, undefined, ask.key)")
 
   // Ended, a session whose agent reopens one by id offers that command, in its own folder.
   const ended = buildView(parseProgress(file.replaceAll('state=waiting', 'state=ended')), [], null, now, 0, {}, STRINGS.en).stopped
@@ -3268,7 +3396,7 @@ test("the terminal board and the board page mark any agent's question answered w
   expect(hidden.asks.some(ask => ask.agent === 'codex')).toBe(false)
   expect(hidden.hidden).toEqual([{ key: `hidden:${key}`, project: 'api-gateway', agent: 'codex', task: 'Rate-limit the public endpoints', text: 'Per-key limit' }])
   expect(press('unhide', `hidden:${key}`)).toEqual({ type: 'unhide', key })
-  expect(press('unhide', codexKey)).toEqual({ type: 'refuse', note: '' })
+  expect(press('unhide', codexKey)).toEqual({ type: 'refuse', note: STRINGS.en.pressNothing })
   // The page's script and words carry the buttons.
   const page = servePage(STRINGS.en, 'n')
   expect(page).toContain("act(ask.key, 'hide')")
@@ -3512,4 +3640,13 @@ test('an ordinary board never resumes a closed session even without messaging en
   const hub = { connections: [], messages: [] }
   expect(resumeModel(serveView(), [], STRINGS.en, new Set(), false, hub).stopped.find(one => one.title === 'Pick the cache')?.send).toBe('open')
   expect(resumeAction(items, { key: row?.key ?? '', type: 'send', text: 'Redis', session: GROK.session, asked: 'Redis or Memcached?', fp: row?.fp }, STRINGS.en, false, [], true).type).toBe('refuse')
+})
+
+
+test('a reply to a hand-kept question explains that there is no agent to send to', () => {
+  for (const s of Object.values(STRINGS)) {
+    const items = boardItems(serveView(), [])
+    const item = items.find(one => one.type === 'ask' && one.ask.where === 'manual')!
+    expect(serveAction(items, { key: item.key, type: 'send', text: 'Ready', session: '' }, s)).toEqual({ type: 'refuse', note: s.serveManualReply })
+  }
 })

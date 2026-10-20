@@ -342,6 +342,7 @@ export const replyText = (raw: string): string =>
 // the computer, and the network's page is plain HTTP that others on the network could read.
 export const serveAction = (items: readonly BoardItem[], request: ServeRequest, s: Strings = ZH_TW, isLan = false, connections: readonly Connection[] = [], isMessaging = false, allowResume = false): ServeAction => {
   const action = actionOf(items, request, s, isLan, connections, isMessaging, allowResume)
+  if (action.type === 'refuse' && action.note === '') return { type: 'refuse', note: s.pressNothing }
   if (action.type !== 'tick' && action.type !== 'archive' && action.type !== 'done' && action.type !== 'send' && action.type !== 'message') return action
   // The key is a project and a title, which another session's block can take over, and a step
   // can be reworded under it: the press goes through only on the block and words the page drew.
@@ -373,10 +374,11 @@ const actionOf = (items: readonly BoardItem[], request: ServeRequest, s: Strings
   }
   if (request.type !== 'send' && request.type !== 'message') return { type: 'refuse', note: '' }
   const text = replyText(request.text)
+  if (text === '') return { type: 'refuse', note: s.pressEmpty }
   if (item.type === 'turn') return { type: 'refuse', note: infoOf(SENDERS.has(item.turn.agent) ? 'open' : 'none', item.turn.agent, '', '', s) }
   const { agent, target } = item.type === 'ask' ? item.ask : item.row
   // A hand-kept question is answered by ticking it: there is no one to send to.
-  if (item.type === 'ask' && item.ask.where === 'manual') return { type: 'refuse', note: '' }
+  if (item.type === 'ask' && item.ask.where === 'manual') return { type: 'refuse', note: s.serveManualReply }
   const mode = target === null ? (agent === '' ? 'claude' : 'none') : sendMode(agent, target)
   const title = item.type === 'ask' ? item.ask.task : item.row.title
   if (request.type === 'message') {
@@ -399,8 +401,6 @@ const actionOf = (items: readonly BoardItem[], request: ServeRequest, s: Strings
   // is answered, reworded, replaced by another or marked answered here.
   const question = item.type === 'ask' ? item.ask.text : (item.row.question ?? undefined)
   if ((request.asked ?? '') !== (question ?? '')) return { type: 'refuse', note: s.boardLineChanged }
-  if (text === '') return { type: 'refuse', note: '' }
-
   return { type: 'send', target, text: question === undefined ? text : s.answerText(question, text), title }
 }
 
@@ -483,6 +483,7 @@ const PAGE_WORDS = [
   'sectionRecent',
   'archiveNow',
   'serveClosed',
+  'serveClose',
   'serveOffline',
   'serveTickNext',
   'serveArchive',
@@ -504,6 +505,13 @@ const PAGE_WORDS = [
   'pasteReview',
   'boardCopied',
   'boardCopyFailed',
+  'copied',
+  'pressDone',
+  'pressFailed',
+  'pressCopyFallback',
+  'pressNothing',
+  'pressEmpty',
+  'pressPending',
 ] as const satisfies ReadonlyArray<keyof Strings>
 
 // The chat prompt goes as it is in every language: the chat reads it, not the person.
@@ -584,6 +592,9 @@ details[open]>summary::before{content:"▾"}
 #note:empty{display:none}
 #note.done{color:var(--done)}
 #note.alert{color:var(--alert)}
+.press-result.done{color:var(--done)}
+.press-result.alert{color:var(--alert)}
+.press-result:empty{display:none}
 .paste textarea{min-height:7em;font-family:ui-monospace,Consolas,monospace;font-size:14px}
 </style>
 </head>
@@ -639,7 +650,60 @@ const PAGE_SCRIPT = String.raw`
     for (var i = 1; i < arguments.length; i += 1) if (arguments[i]) parent.appendChild(arguments[i]);
     return parent;
   }
-  function say(text, tone) {
+  var results = {};
+  var resultSlots = {};
+  var lostResults = [];
+  resultSlot(document.querySelector('header'), 'close', '', w('serveClose'));
+  function resultSlot(card, key, revision, label) {
+    card.setAttribute('data-card-key', key);
+    var previous = results[key];
+    if (previous && previous.awaitingRefresh) { previous.revision = revision; previous.awaitingRefresh = false; }
+    else if (previous && !previous.pending && previous.tone !== 'alert' && previous.revision && revision && previous.revision !== revision) delete results[key];
+    var slot = el('div', 'small press-result');
+    slot.setAttribute('role', 'status');
+    resultSlots[key] = { node: slot, revision: revision, label: label };
+    card.appendChild(slot);
+    if (results[key]) paintResult(key);
+  }
+  function paintResult(key) {
+    var slot = resultSlots[key];
+    var result = results[key];
+    if (!slot || !result) return;
+    slot.node.textContent = result.text;
+    slot.node.className = 'small press-result ' + result.tone;
+    if (result.copyText) {
+      var area = el('textarea');
+      area.value = result.copyText;
+      area.setAttribute('readonly', '');
+      slot.node.appendChild(area);
+      if (!result.focused) {
+        area.focus();
+        area.select();
+        result.focused = true;
+      }
+    }
+  }
+  function beginPress() {
+    note.textContent = '';
+    note.className = '';
+    lostResults.forEach(function (card) { card.remove(); });
+    lostResults = [];
+    Object.keys(results).forEach(function (key) {
+      if (results[key].pending) return;
+      delete results[key];
+      var slot = resultSlots[key];
+      if (slot) slot.node.textContent = '';
+    });
+  }
+  function say(text, tone, key, copyText) {
+    if (key) {
+      var slot = resultSlots[key];
+      var previous = results[key];
+      results[key] = { text: text || w('pressFailed'), tone: tone || '', copyText: copyText, pending: tone !== 'done' && tone !== 'alert', awaitingRefresh: tone === 'done', revision: previous ? previous.revision : slot ? slot.revision : '', label: previous ? previous.label : slot ? slot.label : '' };
+      paintResult(key);
+      if (!slot) drawLostResults();
+      return;
+    }
     note.textContent = text || '';
     note.className = tone || '';
   }
@@ -647,11 +711,11 @@ const PAGE_SCRIPT = String.raw`
     var headers = { 'x-board-token': token };
     if (body !== undefined) headers['content-type'] = 'application/json';
     return fetch(path, { method: body === undefined ? 'GET' : 'POST', headers: headers, body: body === undefined ? undefined : JSON.stringify(body), cache: 'no-store' }).then(function (res) {
-      return res.json().catch(function () { return {}; }).then(function (data) { data.ok = res.ok; return data; });
+      return res.json().catch(function () { return {}; }).then(function (data) { data.ok = res.ok && data.ok !== false; return data; });
     });
   }
-  function copy(text, shown) {
-    var told = shown === undefined ? text : shown;
+  function copy(text, shown, key) {
+    say(w('pressPending'), '', key);
     function fallback() {
       var area = el('textarea');
       area.value = text;
@@ -663,24 +727,24 @@ const PAGE_SCRIPT = String.raw`
       var isCopied = false;
       try { isCopied = document.execCommand('copy'); } catch (e) {}
       document.body.removeChild(area);
-      say(isCopied ? w('boardCopied', told) : w('boardCopyFailed', text), isCopied ? 'done' : 'alert');
+      say(isCopied ? w('copied') : w('pressCopyFallback'), isCopied ? 'done' : 'alert', key, isCopied ? undefined : text);
     }
-    if (navigator.clipboard && window.isSecureContext) navigator.clipboard.writeText(text).then(function () { say(w('boardCopied', told), 'done'); }, fallback);
+    if (navigator.clipboard && window.isSecureContext) navigator.clipboard.writeText(text).then(function () { say(w('copied'), 'done', key); }, fallback);
     else fallback();
   }
   function button(label, onPress, cls) {
     var node = el('button', cls || '', label);
     node.type = 'button';
-    node.addEventListener('click', onPress);
+    node.addEventListener('click', function () { beginPress(); onPress(); });
     return node;
   }
   // fp: the fingerprint the line was drawn with, which the server checks before it writes.
   function act(key, type, text, waiting, session, asked, fp) {
-    say(waiting || '…');
+    say(waiting || w('pressPending'), '', key);
     return call('/api/act', { key: key, type: type, text: text || '', session: session || '', asked: asked || '', fp: fp || '' }).then(function (data) {
-      say(data.note || '', data.ok ? 'done' : 'alert');
+      say(data.note || w(data.ok ? 'pressDone' : 'pressFailed'), data.ok ? 'done' : 'alert', key);
     }, function () {
-      say(w('serveOffline'), 'alert');
+      say(w('serveOffline'), 'alert', key);
     }).then(function () { refresh(); });
   }
   function nativeAct(key, text, delivery, session, asked, fp, go) {
@@ -688,12 +752,12 @@ const PAGE_SCRIPT = String.raw`
     var attempt = messageAttempts[slot];
     if (!attempt || attempt.text !== text) attempt = messageAttempts[slot] = { id: 'AB-' + crypto.randomUUID(), text: text };
     go.disabled = true;
-    say(w('serveSending', agentName(delivery.agent)));
+    say(w('serveSending', agentName(delivery.agent)), '', key);
     return call('/api/act', { key: key, type: 'message', id: attempt.id, text: text, connection: delivery.id, turn: delivery.turn, session: session, asked: asked || '', fp: fp }).then(function (data) {
-      say(data.ok ? '' : data.note || '', data.ok ? 'done' : 'alert');
+      say(data.note || w(data.ok ? 'messagesQueued' : 'messagesFailed'), data.ok ? 'done' : 'alert', key);
       if (!data.ok) go.disabled = false;
       return data.ok;
-    }, function () { say(w('messagesFailed'), 'alert'); go.disabled = false; return false; }).then(function (ok) { refresh(); return ok; });
+    }, function () { say(w('messagesFailed'), 'alert', key); go.disabled = false; return false; }).then(function (ok) { refresh(); return ok; });
   }
   function agentName(agent) { return agent || 'claude'; }
   function receiptLine(receipt) {
@@ -713,7 +777,7 @@ const PAGE_SCRIPT = String.raw`
     var go = mode === 'send' || mode === 'connected'
       ? button(w('serveSend', agentName(agent)), function () {
         var text = input.value.trim();
-        if (!text) return;
+        if (!text) { say(w('pressEmpty'), 'alert', key); return; }
         if (mode === 'connected') {
           nativeAct(key, text, delivery, session, asked, fp, go).then(function (ok) { if (ok) input.value = ''; });
           return;
@@ -723,7 +787,8 @@ const PAGE_SCRIPT = String.raw`
       }, 'primary')
       : button(w('serveCopy'), function () {
         var text = input.value.trim();
-        if (text) copy(text);
+        if (text) copy(text, undefined, key);
+        else say(w('pressEmpty'), 'alert', key);
       });
     go.disabled = isSending === true;
     input.addEventListener('keydown', function (e) {
@@ -758,13 +823,13 @@ const PAGE_SCRIPT = String.raw`
       var node = button(answer, function () {
         if (ask.send === 'connected') nativeAct(ask.key, answer, ask.delivery, ask.session, ask.text, ask.fp, node);
         else if (send) act(ask.key, 'send', answer, w('serveSending', ask.agent), ask.session, ask.text, ask.fp);
-        else copy(answer);
+        else copy(answer, undefined, ask.key);
       }, index === 0 ? 'primary' : '');
       node.disabled = send && ask.isSending;
       actions.appendChild(node);
     });
-    if (ask.command) actions.appendChild(button(w('serveCopyCommand'), function () { copy(ask.command); }));
-    if (ask.reopen) actions.appendChild(button(w('serveCopyResume'), function () { copy(ask.reopen); }));
+    if (ask.command) actions.appendChild(button(w('serveCopyCommand'), function () { copy(ask.command, undefined, ask.key); }));
+    if (ask.reopen) actions.appendChild(button(w('serveCopyResume'), function () { copy(ask.reopen, undefined, ask.key); }));
     if (ask.canHide) actions.appendChild(button(w('answeredHide'), function () { act(ask.key, 'hide'); }));
     if (ask.link && /^https:\/\//i.test(ask.link)) {
       var link = el('a', 'btn', w('serveOpenLink'));
@@ -778,6 +843,7 @@ const PAGE_SCRIPT = String.raw`
     if (ask.receipt) add(card, receiptLine(ask.receipt));
     if (ask.archiveNote) add(card, el('div', 'quiet small', ask.archiveNote));
     if (ask.info) add(card, el('div', 'quiet small', ask.info));
+    resultSlot(card, ask.key, ask.fp, ask.task);
     return card;
   }
   function rowCard(row) {
@@ -802,12 +868,13 @@ const PAGE_SCRIPT = String.raw`
     if (row.next) actions.appendChild(button(w('serveTickNext', row.next), function () { act(row.key, 'tick', row.next, '', '', '', row.fp); }, 'primary'));
     if (row.canArchive) actions.appendChild(button(w('serveArchive'), function () { act(row.key, 'archive', '', '', '', '', row.fp); }));
     if (row.canConfirm) actions.appendChild(button(w('confirmDone'), function () { act(row.key, 'done', '', '', '', '', row.fp); }));
-    if (row.resume) actions.appendChild(button(w('serveCopyResume'), function () { copy(row.resume); }));
+    if (row.resume) actions.appendChild(button(w('serveCopyResume'), function () { copy(row.resume, undefined, row.key); }));
     if (actions.childNodes.length) add(body, actions);
     if (row.send === 'send' || row.send === 'connected') add(body, replyBox(row.key, w('serveMessagePlaceholder', agentName(row.agent)), row.send, row.agent, row.where, row.isSending, row.session, asked, row.fp, row.delivery));
     else if (row.hasCopyBox) add(body, replyBox(row.key, w('serveReplyPlaceholder'), 'copy', row.agent, '', false, row.session, asked));
     if (row.receipt) add(body, receiptLine(row.receipt));
     if (row.info) add(body, el('div', 'quiet small', row.info));
+    resultSlot(body, row.key, row.fp, row.title);
     card.appendChild(body);
     return card;
   }
@@ -817,6 +884,7 @@ const PAGE_SCRIPT = String.raw`
     add(card, el('div', turn.isQuestion ? 'q' : '', turn.text));
     if (turn.isQuestion) add(card, replyBox(turn.key, w('serveReplyPlaceholder'), 'copy', turn.agent, '', false));
     if (turn.info) add(card, el('div', 'quiet small', turn.info));
+    resultSlot(card, turn.key, turn.text, turn.project);
     return card;
   }
   function render(model) {
@@ -831,6 +899,11 @@ const PAGE_SCRIPT = String.raw`
       add(counts, add(el('span'), el('span', one[1] > 0 ? one[3] : 'quiet', one[0] + ' ' + one[1]), document.createTextNode(' ' + w(one[2]))));
     });
     board.textContent = '';
+    // Header and paste controls keep their slots across board redraws.
+    var pasteSlot = resultSlots.paste;
+    var closeSlot = resultSlots.close;
+    resultSlots = pasteSlot ? { paste: pasteSlot } : {};
+    if (closeSlot) resultSlots.close = closeSlot;
     add(board, el('h2', 'n-waiting', '● ' + w('sectionWaiting')));
     if (model.asks.length === 0) add(board, el('div', 'n-today', w('nothingForYou')));
     model.asks.forEach(function (ask) { board.appendChild(askCard(ask)); });
@@ -852,7 +925,9 @@ const PAGE_SCRIPT = String.raw`
       shelf.addEventListener('toggle', function () { opened['hidden:'] = shelf.open; });
       add(shelf, add(el('summary'), el('span', 'quiet', w('hiddenCount', model.hidden.length))));
       model.hidden.forEach(function (one) {
-        add(shelf, add(el('div'), el('div', 'where', [one.project, one.agent].filter(Boolean).join(' · ') + (one.task ? ' › ' + one.task : '')), el('div', 'q', one.text), add(el('div', 'actions'), button(w('showAgain'), function () { act(one.key, 'unhide'); }))));
+        var hiddenCard = add(el('div'), el('div', 'where', [one.project, one.agent].filter(Boolean).join(' · ') + (one.task ? ' › ' + one.task : '')), el('div', 'q', one.text), add(el('div', 'actions'), button(w('showAgain'), function () { act(one.key, 'unhide'); })));
+        resultSlot(hiddenCard, one.key, one.text, one.task);
+        add(shelf, hiddenCard);
       });
       board.appendChild(shelf);
     }
@@ -890,12 +965,15 @@ const PAGE_SCRIPT = String.raw`
       model.recent.forEach(function (item) {
         add(done, add(el('li'), el('span', 's-done', '✓'), el('span', 't-quiet', [item.project, item.title, item.when].filter(Boolean).join(' · '))));
       });
-      add(board, add(el('div', 'card'), done, add(el('div', 'actions'), button(w('archiveNow'), function () {
-        say('…');
-        call('/api/tidy', {}).then(function (data) { say(data.note || '', data.ok ? 'done' : 'alert'); refresh(); }, function () { say(w('serveOffline'), 'alert'); });
-      }))));
+      var recent = add(el('div', 'card'), done, add(el('div', 'actions'), button(w('archiveNow'), function () {
+        say(w('pressPending'), '', 'recent');
+        call('/api/tidy', {}).then(function (data) { say(data.note || w(data.ok ? 'pressDone' : 'pressFailed'), data.ok ? 'done' : 'alert', 'recent'); refresh(); }, function () { say(w('serveOffline'), 'alert', 'recent'); });
+      })));
+      resultSlot(recent, 'recent', '', w('sectionRecent'));
+      add(board, recent);
     }
     if (model.groups.length === 0 && model.asks.length === 0 && model.hidden.length === 0 && model.idle.length === 0 && model.stopped.length === 0 && model.turns.length === 0 && model.recent.length === 0) add(board, el('div', 'quiet', w('empty')));
+    drawLostResults();
     board.querySelectorAll('textarea[data-key]').forEach(function (box) {
       var key = box.getAttribute('data-key');
       if (key in kept) box.value = kept[key];
@@ -903,6 +981,29 @@ const PAGE_SCRIPT = String.raw`
         box.focus();
         if (caret) box.setSelectionRange(caret[0], caret[1]);
       }
+    });
+  }
+  function drawLostResults() {
+    lostResults.forEach(function (card) { card.remove(); });
+    lostResults = [];
+    Object.keys(results).reverse().forEach(function (key) {
+      if (resultSlots[key]) return;
+      var result = results[key];
+      if (!result.pending && result.tone !== 'alert' && result.tone !== 'done') { delete results[key]; return; }
+      var card = add(el('article', 'card'), el('div', 'where', result.label));
+      var slot = el('div', 'small press-result');
+      slot.setAttribute('role', 'status');
+      slot.textContent = result.text;
+      slot.className += ' ' + result.tone;
+      add(card, slot);
+      if (result.copyText) {
+        var area = el('textarea');
+        area.value = result.copyText;
+        area.setAttribute('readonly', '');
+        add(slot, area);
+      }
+      board.insertBefore(card, board.firstChild);
+      lostResults.push(card);
     });
   }
   function refresh() {
@@ -928,8 +1029,9 @@ const PAGE_SCRIPT = String.raw`
       }
       // A reply runs in the background; its answer comes with the board once the agent is done.
       if (since === null) since = data.now;
+      var seenAt = since;
       (data.replies || []).forEach(function (reply) {
-        if (reply.at > since) { since = reply.at; say(reply.note, reply.ok ? 'done' : 'alert'); }
+        if (reply.at > seenAt) { since = Math.max(since, reply.at); say(reply.note, reply.ok ? 'done' : 'alert', reply.key); }
       });
     }, function () {
       say(w('serveOffline'), 'alert');
@@ -938,6 +1040,8 @@ const PAGE_SCRIPT = String.raw`
     });
   }
   document.getElementById('close').addEventListener('click', function () {
+    beginPress();
+    say(w('pressPending'), '', 'close');
     var shut = function () {
       isClosed = true;
       clearTimeout(timer);
@@ -947,25 +1051,28 @@ const PAGE_SCRIPT = String.raw`
     };
     call('/api/close', {}).then(function (data) {
       if (data.ok) shut();
-      else say(data.note || '', 'alert');
-    }, shut);
+      else say(data.note || w('pressFailed'), 'alert', 'close');
+    }, function () { say(w('serveOffline'), 'alert', 'close'); });
   });
   document.getElementById('paste-go').addEventListener('click', function () {
+    beginPress();
     var box = document.getElementById('paste');
-    if (!box.value.trim()) return;
+    if (!box.value.trim()) { say(w('pressEmpty'), 'alert', 'paste'); return; }
     var pasted = box.value;
+    say(w('pressPending'), '', 'paste');
     call('/api/paste', { text: pasted }).then(function (data) {
       if (data.review && window.confirm(w('pasteReview', data.review.current, data.review.incoming))) {
         return call('/api/paste', { text: pasted, reviewToken: data.review.token });
       }
       return data;
     }).then(function (data) {
-      say(data.note || '', data.ok ? 'done' : 'alert');
+      say(data.note || w(data.ok ? 'pressDone' : 'pressFailed'), data.ok ? 'done' : 'alert', 'paste');
       if (data.ok && box.value === pasted) box.value = '';
       refresh();
-    }, function () { say(w('serveOffline'), 'alert'); });
+    }, function () { say(w('serveOffline'), 'alert', 'paste'); });
   });
-  document.getElementById('relay').addEventListener('click', function () { copy(W.relayPrompt, w('serveRelay')); });
+  document.getElementById('relay').addEventListener('click', function () { beginPress(); copy(W.relayPrompt, w('serveRelay'), 'paste'); });
+  resultSlot(document.querySelector('.paste'), 'paste', '', w('servePasteTitle'));
   refresh();
 })();
 `

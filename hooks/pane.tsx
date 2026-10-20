@@ -9,8 +9,9 @@ import type {
   TextProps,
 } from 'claude-code'
 
-import type { ProgressAnswer, ProgressStepStatus } from '../types'
+import type { PressOutcome, ProgressAnswer, ProgressPressResult, ProgressStepStatus } from '../types'
 import type { Strings } from './i18n'
+import { ZH_TW } from './i18n'
 import { askColor, stepColor, toneColor } from './palette'
 import type { Palette } from './palette'
 import { questionsPath } from './questions'
@@ -40,36 +41,39 @@ export type PaneUi = {
 }
 
 export type PaneActions = {
-  toggle: (key: string) => void
+  press: (key: string, run: () => PressOutcome | Promise<PressOutcome>) => void
+  forget: (key: string) => void | Promise<unknown>
+  toggle: (key: string) => PressOutcome | Promise<PressOutcome>
   // Opens or folds a section: waiting, due, others, recent, steps, hidden, idle.
-  toggleSection: (id: string) => void
-  continueHere: () => void
-  archive: () => void
-  takeOver: (row: TaskRow) => void
-  handOver: (row: TaskRow) => void
-  tick: (ref: StepRef) => void
+  toggleSection: (id: string) => PressOutcome | Promise<PressOutcome>
+  continueHere: () => PressOutcome | Promise<PressOutcome>
+  archive: () => PressOutcome | Promise<PressOutcome>
+  takeOver: (row: TaskRow) => PressOutcome | Promise<PressOutcome>
+  handOver: (row: TaskRow) => PressOutcome | Promise<PressOutcome>
+  tick: (ref: StepRef) => PressOutcome | Promise<PressOutcome>
   // An answer to one of this session's own questions, sent to Claude.
-  answer: (item: WaitingItem, text: string) => void
-  copyCommand: (item: WaitingItem, surface: RenderSurface) => void
-  copyAskedResume: (item: WaitingItem, surface: RenderSurface) => void
+  answer: (item: WaitingItem, text: string) => PressOutcome | Promise<PressOutcome>
+  copyCommand: (item: WaitingItem, surface: RenderSurface) => PressOutcome | Promise<PressOutcome>
+  copyAskedResume: (item: WaitingItem, surface: RenderSurface) => PressOutcome | Promise<PressOutcome>
   // Hides a question answered in its own session, on this machine only; sends nothing.
-  hide: (item: WaitingItem) => void
-  unhide: (item: WaitingItem) => void
+  hide: (item: WaitingItem) => PressOutcome | Promise<PressOutcome>
+  unhide: (item: WaitingItem) => PressOutcome | Promise<PressOutcome>
   // Opens the reply box under a review, for what should change; sends nothing.
-  revise: (item: WaitingItem) => void
+  revise: (item: WaitingItem) => PressOutcome | Promise<PressOutcome>
   // A question for the side model, or a line starting with + to add a task.
-  ask: (question: string) => void
-  clearAnswer: () => void
-  copyResume: (row: TaskRow, surface: RenderSurface) => void
+  ask: (question: string) => PressOutcome | Promise<PressOutcome>
+  clearAnswer: () => PressOutcome | Promise<PressOutcome>
+  copyResume: (row: TaskRow, surface: RenderSurface) => PressOutcome | Promise<PressOutcome>
   // Moves one task to the archive file now: an ended session's block or a hand-kept task.
-  archiveRow: (row: TaskRow) => void
-  confirmRow: (row: TaskRow) => void
-  report: (surface: RenderSurface) => void
-  toggleNotify: () => void
-  toggleLegend: () => void
+  archiveRow: (row: TaskRow) => PressOutcome | Promise<PressOutcome>
+  confirmRow: (row: TaskRow) => PressOutcome | Promise<PressOutcome>
+  report: (surface: RenderSurface) => PressOutcome | Promise<PressOutcome>
+  toggleNotify: () => PressOutcome | Promise<PressOutcome>
+  toggleLegend: () => PressOutcome | Promise<PressOutcome>
 }
 
 export type PaneModel = {
+  results?: Record<string, PressResult>
   view: View
   expanded: string
   // The review whose reply box is open, by item key.
@@ -84,6 +88,33 @@ export type PaneModel = {
   hasQuestionsProblem?: boolean
   palette: Palette
   s: Strings
+}
+
+export type PressResult = ProgressPressResult
+
+// Action keys use `${card.key}::verb`, so results follow a card through redraws.
+export const pressTarget = (view: View, button: string, s: Strings = ZH_TW): { key: string; revision: string; label: string } => {
+  if (button === 'section::hidden') return { key: button, revision: '', label: s.hiddenCount(view.hidden.length) }
+  if (button === 'section::idle') return { key: button, revision: '', label: s.idleCount(view.idle.length) }
+  if (button === 'section::stopped') return { key: button, revision: '', label: s.stoppedCount(view.stopped.length) }
+  if (button === 'section::steps') return { key: button, revision: '', label: view.current?.title ?? '' }
+  if (button === 'section::waiting') return { key: button, revision: '', label: s.sectionWaiting }
+  if (button === 'section::due') return { key: button, revision: '', label: s.sectionDue }
+  if (button === 'section::recent') return { key: button, revision: '', label: s.sectionRecent }
+  if (button === 'section::reminder') return { key: button, revision: '', label: s.sectionQuestionReminders }
+  if (button === 'section::older') return { key: button, revision: '', label: s.sectionOlderQuestions }
+  if (button === 'section::others') return { key: button, revision: '', label: view.current === null ? s.sectionActive : s.sectionOther }
+  if (button === 'focus::more') return { key: button, revision: '', label: s.moreWaiting(view.waiting.length - (view.focus?.type === 'ask' ? 1 : 0)) }
+  if (button === 'continue' && view.current !== null) return { key: button, revision: JSON.stringify([view.current.title, view.current.steps]), label: view.current.title }
+  if (button === 'archive') return { key: button, revision: '', label: view.recent.map(item => item.title).join(', ') }
+  const asks = [...view.waiting, ...view.hidden, ...(view.reminder ?? []), ...(view.older ?? [])]
+  const ask = asks.sort((a, b) => b.key.length - a.key.length).find(item => button === `ask::${item.key}` || button.startsWith(`${item.key}::`))
+  if (ask !== undefined) return { key: ask.key, revision: JSON.stringify([ask.questionId, ask.text, ask.note]), label: ask.task }
+  const rows = [...view.due, ...view.active, ...view.idle, ...view.stopped, ...view.groups.flatMap(group => group.rows)]
+  const row = rows.find(item => button === item.key)
+    ?? rows.sort((a, b) => b.key.length - a.key.length).find(item => button.startsWith(`${item.key}::`))
+  if (row !== undefined) return { key: row.key, revision: JSON.stringify([row.title, row.steps]), label: row.title }
+  return { key: button, revision: '', label: '' }
 }
 
 export const GLYPH: Record<ProgressStepStatus, string> = {
@@ -106,6 +137,35 @@ const LEGEND: readonly ProgressStepStatus[] = ['done', 'doing', 'todo', 'waiting
 export const drawPane = (ui: PaneUi, model: PaneModel, actions: PaneActions): RenderElement => {
   const { Box, Text, Button, Input, Link } = ui
   const { view, palette, s } = model
+  const shown = new Set<string>()
+  const resultLine = (key: string, result: PressResult) => (
+    <Box flexDirection="column">
+      <Text key={`${key}::result`} wrap="wrap" color={result.tone === 'alert' ? palette.alert : palette.accent}>{result.text}</Text>
+      {result.copyText !== undefined && (Input === null
+        ? <Text wrap="wrap">{result.copyText}</Text>
+        : <Input
+            key={`${key}::copy-text`}
+            value={result.copyText}
+            autoFocus
+            onSubmit={() => actions.press(key === 'report' ? key : `${key}::copy-text`, () => ({ text: result.text, tone: result.tone, copyText: result.copyText }))}
+          />)}
+    </Box>
+  )
+  const buttonPress = (
+    key: string,
+    run: (event: Parameters<NonNullable<ButtonProps['onPress']>>[0]) => PressOutcome | Promise<PressOutcome>,
+    isDisplay = false,
+  ): NonNullable<ButtonProps['onPress']> => event => {
+    if (isDisplay) return Promise.resolve().then(() => run(event)).then(() => actions.forget(key), () => actions.press(key, () => ({ text: s.settingSaveFailed, tone: 'alert' })))
+    return actions.press(key, () => run(event))
+  }
+  const cardResult = (key: string) => {
+    const result = model.results?.[key]
+    const current = result === undefined ? undefined : pressTarget(view, result.button, s)
+    if (result === undefined || shown.has(key) || result.tone !== 'alert' && current?.revision !== result.revision) return null
+    shown.add(key)
+    return resultLine(key, result)
+  }
   const color = (tone: Tone): string => toneColor(palette, tone)
   const isOpen = (id: string): boolean => model.opened.includes(id)
 
@@ -118,12 +178,15 @@ export const drawPane = (ui: PaneUi, model: PaneModel, actions: PaneActions): Re
 
   // A section folded to one line: its name, its count, a word on what is inside, and ▸ / ▾.
   const fold = (id: string, title: string, count: number, tone: Tone, hint: string) => (
-    <Box flexDirection="row" marginTop={1}>
-      <Button key={`section::${id}`} plain onPress={() => actions.toggleSection(id)}>
-        {`${isOpen(id) ? '▾' : '▸'} ${title}`}
-      </Button>
-      <Text color={color(tone)}>{` ${count}`}</Text>
-      {hint !== '' && <Text color={palette.muted} wrap="truncate-end">{`  ${hint}`}</Text>}
+    <Box flexDirection="column">
+      <Box flexDirection="row" marginTop={1}>
+        <Button key={`section::${id}`} plain onPress={buttonPress(`section::${id}`, () => actions.toggleSection(id), true)}>
+          {`${isOpen(id) ? '▾' : '▸'} ${title}`}
+        </Button>
+        <Text color={color(tone)}>{` ${count}`}</Text>
+        {hint !== '' && <Text color={palette.muted} wrap="truncate-end">{`  ${hint}`}</Text>}
+      </Box>
+      {cardResult(`section::${id}`)}
     </Box>
   )
 
@@ -197,7 +260,7 @@ export const drawPane = (ui: PaneUi, model: PaneModel, actions: PaneActions): Re
           {run !== null && <Text color={palette.accent} wrap="wrap">{`$ ${run}`}</Text>}
           {run !== null && (
             <Box marginTop={1}>
-              <Button key={`${item.key}::copy`} onPress={press => actions.copyCommand(item, press.surface)}>
+              <Button key={`${item.key}::copy`} onPress={buttonPress(`${item.key}::copy`, press => actions.copyCommand(item, press.surface))}>
                 {s.copyCommand}
               </Button>
             </Box>
@@ -206,7 +269,7 @@ export const drawPane = (ui: PaneUi, model: PaneModel, actions: PaneActions): Re
           {muted(hint.where)}
           {hint.reopen !== null && (
             <Box marginTop={1}>
-              <Button key={`${item.key}::resume`} onPress={press => actions.copyAskedResume(item, press.surface)}>
+              <Button key={`${item.key}::resume`} onPress={buttonPress(`${item.key}::resume`, press => actions.copyAskedResume(item, press.surface))}>
                 {s.copyResume}
               </Button>
             </Box>
@@ -218,7 +281,7 @@ export const drawPane = (ui: PaneUi, model: PaneModel, actions: PaneActions): Re
     if (item.where === 'manual') {
       return step === null ? null : (
         <Box flexDirection="row" marginTop={1}>
-          <Button key={`${item.key}::done`} variant="primary" onPress={() => actions.tick(step)}>
+          <Button key={`${item.key}::done`} variant="primary" onPress={buttonPress(`${item.key}::done`, () => actions.tick(step))}>
             {item.kind === 'wait' ? s.arrivedDone : s.done}
           </Button>
         </Box>
@@ -232,7 +295,7 @@ export const drawPane = (ui: PaneUi, model: PaneModel, actions: PaneActions): Re
             placeholder={placeholder}
             submitLabel={s.reply}
             onSubmit={text => {
-              if (text.trim() !== '') actions.answer(item, text.trim())
+              actions.press(`${item.key}::reply`, () => text.trim() === '' ? { text: s.pressEmpty, tone: 'alert' } : actions.answer(item, text.trim()))
             }}
           />
         </Box>
@@ -241,11 +304,11 @@ export const drawPane = (ui: PaneUi, model: PaneModel, actions: PaneActions): Re
       <Box flexDirection="row" flexWrap="wrap" gap={1} marginTop={1}>
         {pairs.map(([label, answer, isPrimary]) =>
           isPrimary ? (
-            <Button key={`${item.key}::${label}`} variant="primary" onPress={() => actions.answer(item, answer)}>
+            <Button key={`${item.key}::${label}`} variant="primary" onPress={buttonPress(`${item.key}::${label}`, () => actions.answer(item, answer))}>
               {label}
             </Button>
           ) : (
-            <Button key={`${item.key}::${label}`} onPress={() => actions.answer(item, answer)}>
+            <Button key={`${item.key}::${label}`} onPress={buttonPress(`${item.key}::${label}`, () => actions.answer(item, answer))}>
               {label}
             </Button>
           ),
@@ -274,11 +337,11 @@ export const drawPane = (ui: PaneUi, model: PaneModel, actions: PaneActions): Re
           {command !== null && <Text color={palette.accent} wrap="wrap">{`$ ${command}`}</Text>}
           <Box flexDirection="row" gap={1} marginTop={1}>
             {command !== null && (
-              <Button key={`${item.key}::copy`} onPress={press => actions.copyCommand(item, press.surface)}>
+              <Button key={`${item.key}::copy`} onPress={buttonPress(`${item.key}::copy`, press => actions.copyCommand(item, press.surface))}>
                 {s.copyCommand}
               </Button>
             )}
-            <Button key={`${item.key}::did`} variant="primary" onPress={() => actions.answer(item, s.didIt)}>
+            <Button key={`${item.key}::did`} variant="primary" onPress={buttonPress(`${item.key}::did`, () => actions.answer(item, s.didIt))}>
               {s.didIt}
             </Button>
           </Box>
@@ -293,10 +356,10 @@ export const drawPane = (ui: PaneUi, model: PaneModel, actions: PaneActions): Re
         <Box flexDirection="column">
           {link !== null && Link !== null && <Link href={link} label={s.openLink} />}
           <Box flexDirection="row" flexWrap="wrap" gap={1} marginTop={1}>
-            <Button key={`${item.key}::${s.looksGood}`} variant="primary" onPress={() => actions.answer(item, s.looksGoodAnswer)}>
+            <Button key={`${item.key}::${s.looksGood}`} variant="primary" onPress={buttonPress(`${item.key}::${s.looksGood}`, () => actions.answer(item, s.looksGoodAnswer))}>
               {s.looksGood}
             </Button>
-            <Button key={`${item.key}::revise`} onPress={() => actions.revise(item)}>
+            <Button key={`${item.key}::revise`} onPress={buttonPress(`${item.key}::revise`, () => actions.revise(item), true)}>
               {s.needsChanges}
             </Button>
           </Box>
@@ -324,20 +387,21 @@ export const drawPane = (ui: PaneUi, model: PaneModel, actions: PaneActions): Re
       {askActions(item)}
       {item.hideKey !== '' && item.canHide !== false && (
         <Box marginTop={1}>
-          <Button key={`${item.key}::hide`} onPress={() => actions.hide(item)}>
+          <Button key={`${item.key}::hide`} onPress={buttonPress(`${item.key}::hide`, () => actions.hide(item))}>
             {s.answeredHide}
           </Button>
         </Box>
       )}
+      {cardResult(item.key)}
     </Box>
   )
 
   // What a row offers once opened: take it over here, reopen the session that left it, tick
   // its step, hand it to Claude, or put it in the archive now instead of waiting for cleanup.
   const rowActions = (row: TaskRow) => {
-    const confirm = row.confirm == null ? null : <Button key={`${row.key}::done`} onPress={() => actions.confirmRow(row)}>{s.confirmDone}</Button>
+    const confirm = row.confirm == null ? null : <Button key={`${row.key}::done`} onPress={buttonPress(`${row.key}::done`, () => actions.confirmRow(row))}>{s.confirmDone}</Button>
     const archive = row.archive === null ? null : (
-      <Button key={`${row.key}::archive`} onPress={() => actions.archiveRow(row)}>
+      <Button key={`${row.key}::archive`} onPress={buttonPress(`${row.key}::archive`, () => actions.archiveRow(row))}>
         {s.archiveThis}
       </Button>
     )
@@ -356,12 +420,12 @@ export const drawPane = (ui: PaneUi, model: PaneModel, actions: PaneActions): Re
       return (
         <Box flexDirection="row" marginTop={1} gap={1}>
           {row.isHere && (
-            <Button key={`${row.key}::take`} variant="primary" onPress={() => actions.takeOver(row)}>
+            <Button key={`${row.key}::take`} variant="primary" onPress={buttonPress(`${row.key}::take`, () => actions.takeOver(row))}>
               {s.takeOver}
             </Button>
           )}
           {resume !== null && (
-            <Button key={`${row.key}::resume`} onPress={press => actions.copyResume(row, press.surface)}>
+            <Button key={`${row.key}::resume`} onPress={buttonPress(`${row.key}::resume`, press => actions.copyResume(row, press.surface))}>
               {s.copyResume}
             </Button>
           )}
@@ -378,10 +442,10 @@ export const drawPane = (ui: PaneUi, model: PaneModel, actions: PaneActions): Re
 
     return (
       <Box flexDirection="row" marginTop={1} gap={1}>
-        <Button key={`${row.key}::tick`} variant="primary" onPress={() => actions.tick(next)}>
+        <Button key={`${row.key}::tick`} variant="primary" onPress={buttonPress(`${row.key}::tick`, () => actions.tick(next))}>
           {s.tickStep}
         </Button>
-        <Button key={`${row.key}::hand`} onPress={() => actions.handOver(row)}>
+        <Button key={`${row.key}::hand`} onPress={buttonPress(`${row.key}::hand`, () => actions.handOver(row))}>
           {s.handOver}
         </Button>
         {archive}
@@ -405,6 +469,7 @@ export const drawPane = (ui: PaneUi, model: PaneModel, actions: PaneActions): Re
       {row.context !== '' && muted(s.contextLine(row.context))}
       {row.handoff !== '' && muted(s.handoffLine(row.handoff))}
       {rowActions(row)}
+      {cardResult(row.key)}
     </Box>
   )
 
@@ -432,16 +497,21 @@ export const drawPane = (ui: PaneUi, model: PaneModel, actions: PaneActions): Re
                 {it.item.text}
               </Text>
             </Box>
-            {askDetail(it.item)}
+            {!(model.expanded === it.item.key && (
+              isOpen('waiting') && view.waiting.some(item => item.key === it.item.key) ||
+              isOpen('reminder') && (view.reminder ?? []).some(item => item.key === it.item.key) ||
+              isOpen('older') && (view.older ?? []).some(item => item.key === it.item.key)
+            )) && askDetail(it.item)}
           </Box>
         )}
         {it.type === 'due' && rowFocus(it.row, `⚑ ${it.row.due?.left ?? ''}`, 'alert')}
         {it.type === 'blocked' && rowFocus(it.row, s.stuckLead, 'alert')}
         {more > 0 && !isOpen('waiting') && (
-          <Box marginTop={1}>
-            <Button key="focus::more" plain onPress={() => actions.toggleSection('waiting')}>
+          <Box flexDirection="column" marginTop={1}>
+            <Button key="focus::more" plain onPress={buttonPress('focus::more', () => actions.toggleSection('waiting'), true)}>
               {s.moreWaiting(more)}
             </Button>
+            {cardResult('focus::more')}
           </Box>
         )}
       </Box>
@@ -460,7 +530,7 @@ export const drawPane = (ui: PaneUi, model: PaneModel, actions: PaneActions): Re
     return (
       <Box flexDirection="column">
         <Box flexDirection="row">
-          <Button key={row.key} plain onPress={() => actions.toggle(row.key)}>
+          <Button key={row.key} plain onPress={buttonPress(row.key, () => actions.toggle(row.key), true)}>
             {`${isRowOpen ? '▾' : '▸'} ${row.title}`}
           </Button>
           {spacer()}
@@ -471,6 +541,7 @@ export const drawPane = (ui: PaneUi, model: PaneModel, actions: PaneActions): Re
             {meta.join(' · ')}
           </Text>
         </Box>
+        {!isRowOpen && cardResult(row.key)}
         {isRowOpen && (
           <Box paddingLeft={2} flexDirection="column" marginTop={1}>
             {bar(row.done, row.total, 12, true)}
@@ -478,23 +549,26 @@ export const drawPane = (ui: PaneUi, model: PaneModel, actions: PaneActions): Re
             {row.handoff !== '' && muted(s.handoffLine(row.handoff))}
             {steps(row.steps)}
             {rowActions(row)}
+            {cardResult(row.key)}
           </Box>
         )}
       </Box>
     )
   }
 
-  // A waiting step folded to a line; opened, the same detail the focus shows.
+  // A waiting step folded to a line; opened, the same detail the focus shows. Folded, a failed
+  // fold says why beside its line, since there is no open card to hold it.
   const waitingRow = (item: WaitingItem) => (
     <Box flexDirection="column" marginTop={1}>
       <Box flexDirection="row">
         {chip(item)}
-        <Button key={`ask::${item.key}`} plain onPress={() => actions.toggle(item.key)}>
+        <Button key={`ask::${item.key}`} plain onPress={buttonPress(`ask::${item.key}`, () => actions.toggle(item.key), true)}>
           {item.text}
         </Button>
         {spacer()}
         <Text color={palette.muted} wrap="truncate-end">{` ${item.project}`}</Text>
       </Box>
+      {model.expanded !== item.key && cardResult(item.key)}
       {model.expanded === item.key && <Box paddingLeft={2}>{askDetail(item)}</Box>}
     </Box>
   )
@@ -505,10 +579,11 @@ export const drawPane = (ui: PaneUi, model: PaneModel, actions: PaneActions): Re
       {muted(item.text)}
       {muted(`${item.project} › ${item.task}`)}
       <Box marginTop={1}>
-        <Button key={`${item.key}::unhide`} onPress={() => actions.unhide(item)}>
+        <Button key={`${item.key}::unhide`} onPress={buttonPress(`${item.key}::unhide`, () => actions.unhide(item))}>
           {s.showAgain}
         </Button>
       </Box>
+      {cardResult(item.key)}
     </Box>
   )
 
@@ -518,18 +593,21 @@ export const drawPane = (ui: PaneUi, model: PaneModel, actions: PaneActions): Re
     const count = (id: string, glyph: string, n: number, word: string, hue: string) => (
       <Box flexDirection="row">
         <Text color={n > 0 ? hue : palette.muted}>{`${glyph} ${n}`}</Text>
-        <Button key={`count::${id}`} plain onPress={() => actions.toggleSection(id)}>
+        <Button key={`count::${id}`} plain onPress={buttonPress(`count::${id}`, () => actions.toggleSection(id), true)}>
           {` ${word}`}
         </Button>
       </Box>
     )
 
     return (
-      <Box flexDirection="row" flexWrap="wrap" columnGap={2} marginTop={1}>
-        {count('waiting', '●', waiting, s.countWaiting, palette.waiting)}
-        {count('others', '▸', active, s.countActive, palette.accent)}
-        {count('due', '⚑', due, s.countDue, palette.soon)}
-        {count('recent', '✓', today, s.countToday, palette.done)}
+      <Box flexDirection="column">
+        <Box flexDirection="row" flexWrap="wrap" columnGap={2} marginTop={1}>
+          {count('waiting', '●', waiting, s.countWaiting, palette.waiting)}
+          {count('others', '▸', active, s.countActive, palette.accent)}
+          {count('due', '⚑', due, s.countDue, palette.soon)}
+          {count('recent', '✓', today, s.countToday, palette.done)}
+        </Box>
+        {['waiting', 'others', 'due', 'recent'].map(id => cardResult(`count::${id}`))}
       </Box>
     )
   }
@@ -577,15 +655,17 @@ export const drawPane = (ui: PaneUi, model: PaneModel, actions: PaneActions): Re
         )}
         {view.pr !== null && prLine(view.pr)}
         <Box flexDirection="row" gap={2} marginTop={1}>
-          <Button key="section::steps" plain onPress={() => actions.toggleSection('steps')}>
+          <Button key="section::steps" plain onPress={buttonPress('section::steps', () => actions.toggleSection('steps'), true)}>
             {showAll ? s.foldSteps : s.allSteps(current.total)}
           </Button>
           {current.state === 'waiting' && (
-            <Button key="continue" variant="primary" onPress={actions.continueHere}>
+            <Button key="continue" variant="primary" onPress={buttonPress('continue', actions.continueHere)}>
               {s.continueText}
             </Button>
           )}
         </Box>
+        {cardResult('section::steps')}
+        {cardResult('continue')}
       </Box>
     )
   }
@@ -623,6 +703,17 @@ export const drawPane = (ui: PaneUi, model: PaneModel, actions: PaneActions): Re
         focus(view.focus)
       )}
 
+      {Object.entries(model.results ?? {}).filter(([key, result]) => {
+        const current = pressTarget(view, result.button, s)
+        return result.label !== '' && (current.key !== key || view.hidden.some(item => item.key === key) && result.button.endsWith('::hide'))
+      }).map(([key, result]) => {
+        shown.add(key)
+        return <Box flexDirection="column" marginTop={1}>
+          {muted(result.label)}
+          {resultLine(key, result)}
+        </Box>
+      })}
+
       {card()}
       {view.current === null && view.pr !== null && <Box marginTop={1}>{prLine(view.pr)}</Box>}
 
@@ -636,18 +727,20 @@ export const drawPane = (ui: PaneUi, model: PaneModel, actions: PaneActions): Re
         </Box>
       })}
       {view.hidden.length > 0 && (
-        <Box marginTop={1}>
-          <Button key="section::hidden" plain onPress={() => actions.toggleSection('hidden')}>
+        <Box flexDirection="column" marginTop={1}>
+          <Button key="section::hidden" plain onPress={buttonPress('section::hidden', () => actions.toggleSection('hidden'), true)}>
             {`${isOpen('hidden') ? '▾' : '▸'} ${s.hiddenCount(view.hidden.length)}`}
           </Button>
+          {cardResult('section::hidden')}
         </Box>
       )}
       {isOpen('hidden') && view.hidden.map(hiddenRow)}
       {view.idle.length > 0 && (
-        <Box marginTop={1}>
-          <Button key="section::idle" plain onPress={() => actions.toggleSection('idle')}>
+        <Box flexDirection="column" marginTop={1}>
+          <Button key="section::idle" plain onPress={buttonPress('section::idle', () => actions.toggleSection('idle'), true)}>
             {`${isOpen('idle') ? '▾' : '▸'} ${s.idleCount(view.idle.length)}`}
           </Button>
+          {cardResult('section::idle')}
         </Box>
       )}
       {isOpen('idle') && view.idle.map(row => (
@@ -657,10 +750,11 @@ export const drawPane = (ui: PaneUi, model: PaneModel, actions: PaneActions): Re
         </Box>
       ))}
       {view.stopped.length > 0 && (
-        <Box marginTop={1}>
-          <Button key="section::stopped" plain onPress={() => actions.toggleSection('stopped')}>
+        <Box flexDirection="column" marginTop={1}>
+          <Button key="section::stopped" plain onPress={buttonPress('section::stopped', () => actions.toggleSection('stopped'), true)}>
             {`${isOpen('stopped') ? '▾' : '▸'} ${s.stoppedCount(view.stopped.length)}`}
           </Button>
+          {cardResult('section::stopped')}
         </Box>
       )}
       {isOpen('stopped') && view.stopped.map(row => (
@@ -716,16 +810,18 @@ export const drawPane = (ui: PaneUi, model: PaneModel, actions: PaneActions): Re
             </Box>
           ))}
           <Box>
-            <Button key="archive" plain onPress={actions.archive}>
+            <Button key="archive" plain onPress={buttonPress('archive', actions.archive)}>
               {s.archiveNow}
             </Button>
           </Box>
+          {cardResult('archive')}
         </Box>
       )}
 
       {Input !== null && (
         <Box flexDirection="column" marginTop={1}>
-          <Input key="ask" placeholder={s.askPlaceholder} submitLabel={s.send} onSubmit={actions.ask} />
+          <Input key="ask" placeholder={s.askPlaceholder} submitLabel={s.send} onSubmit={text => actions.press('ask', () => actions.ask(text))} />
+          {cardResult('ask')}
         </Box>
       )}
       {model.answer !== null && (
@@ -735,25 +831,29 @@ export const drawPane = (ui: PaneUi, model: PaneModel, actions: PaneActions): Re
           {!model.answer.isAsking && (
             <Box flexDirection="row" gap={1}>
               {model.answer.copied === true && <Text color={palette.accent}>{s.copied}</Text>}
-              <Button key="clear-answer" plain onPress={actions.clearAnswer}>
+              <Button key="clear-answer" plain onPress={buttonPress('clear-answer', actions.clearAnswer)}>
                 {s.clear}
               </Button>
             </Box>
           )}
         </Box>
       )}
+      {cardResult('clear-answer')}
 
       <Box flexDirection="row" marginTop={1} gap={2}>
-        <Button key="report" plain onPress={press => actions.report(press.surface)}>
+        <Button key="report" plain onPress={buttonPress('report', press => actions.report(press.surface))}>
           {s.report}
         </Button>
-        <Button key="notify" plain onPress={actions.toggleNotify}>
+        <Button key="notify" plain onPress={buttonPress('notify', actions.toggleNotify, true)}>
           {model.isNotifyOn ? s.notifyOnButton : s.notifyOffButton}
         </Button>
-        <Button key="legend" plain onPress={actions.toggleLegend}>
+        <Button key="legend" plain onPress={buttonPress('legend', actions.toggleLegend, true)}>
           {model.isLegendOpen ? s.legendClose : s.legend}
         </Button>
       </Box>
+      {cardResult('report')}
+      {cardResult('notify')}
+      {cardResult('legend')}
       {model.isLegendOpen && (
         <Box flexDirection="column">
           <Box flexDirection="row" flexWrap="wrap" columnGap={2}>
@@ -769,6 +869,13 @@ export const drawPane = (ui: PaneUi, model: PaneModel, actions: PaneActions): Re
           {muted(s.legendCleanup)}
         </Box>
       )}
+      {Object.entries(model.results ?? {}).filter(([key, result]) => {
+        const current = pressTarget(view, result.button, s)
+        return !shown.has(key) && (result.tone === 'alert' || current.key !== key || current.revision === result.revision)
+      }).map(([key, result]) => <Box flexDirection="column" marginTop={1}>
+        {result.label !== '' && muted(result.label)}
+        {resultLine(key, result)}
+      </Box>)}
       <Text color={palette.muted} wrap="truncate-start">
         {model.path}
       </Text>
