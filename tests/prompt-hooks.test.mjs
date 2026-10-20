@@ -9,6 +9,8 @@ import { spawnSync } from 'node:child_process'
 import { join, sep } from 'node:path'
 import { tmpdir } from 'node:os'
 import { classifierDiagnostic, observeClassifier } from './fixtures/classifier-diagnostic.mjs'
+import { assertPromptReceiptCount, promptReceiptDiagnostic } from './fixtures/prompt-receipt-diagnostic.mjs'
+import { inspect } from 'node:util'
 
 // Node loads standalone TypeScript directly; pure plugin modules use the host's
 // extensionless imports, so resolve only those local paths for these tests.
@@ -213,6 +215,47 @@ const fixture = async fn => {
 }
 const receipts = home => existsSync(join(home, 'progress-inbox')) ? readdirSync(join(home, 'progress-inbox')).map(file => ({ file, body: readFileSync(join(home, 'progress-inbox', file), 'utf8') })) : []
 
+test('prompt receipt diagnostics distinguish fixed failure codes without exposing fixture data', () => fixture(async home => {
+  const log = join(home, '.agent-board', 'hook-errors.log')
+  mkdirSync(join(home, '.agent-board'))
+  const result = { status: 0, signal: null, stdout: 'PRIVATE_STDOUT', stderr: 'PRIVATE_STDERR', error: Object.assign(new Error('PRIVATE_ERROR'), { code: 'PRIVATE_CODE', path: '/PRIVATE_PATH' }) }
+  const context = { program: 'sh', mode: 'stdin', classifier: 'missing', isBoardCommand: true, elapsedMs: 2345.4, budgetMs: 2000, actualReceipts: 0, expectedReceipts: 1 }
+  for (const code of ['INPUT_TIMEOUT', 'REPORTER_TIMEOUT', 'INCOMPLETE_INPUT', 'REPORTER_FAILED']) {
+    writeFileSync(log, `2026-10-20T00:00:00.0000000Z gemini prompt ${code}\n`)
+    assert.throws(() => assertPromptReceiptCount(result, context, home), failure => {
+      assert.equal(failure.code, 'ERR_ASSERTION')
+      assert.equal(failure.actual, 0)
+      assert.equal(failure.expected, 1)
+      assert.ok(failure.message.includes(`"fixtureHistoryCodes":["${code}"]`))
+      assert.match(failure.message, /"launchToReturnMs":2345,"reporterBudgetMs":2000/)
+      assert.match(failure.message, /"status":0,"signal":null,"errorCode":"OTHER"/)
+      assert.ok(!/PRIVATE_|board-prompt-144b/.test(inspect(failure)))
+      assert.ok(failure.message.length < 1024)
+      return true
+    })
+  }
+}))
+
+test('prompt receipt diagnostics leave a passing count untouched without reading a log', () => {
+  let reads = 0
+  const result = { get status() { reads += 1; return 0 } }
+  assertPromptReceiptCount(result, { actualReceipts: 1, expectedReceipts: 1 }, Symbol('not a path'))
+  assert.equal(reads, 0, 'a passing count must not construct the diagnostic')
+})
+
+test('prompt receipt diagnostics bound and allowlist fixture log history', () => fixture(async home => {
+  const context = { program: 'PRIVATE_PROGRAM', mode: 'PRIVATE_MODE', classifier: 'PRIVATE_FAILURE', elapsedMs: Infinity, budgetMs: -1 }
+  assert.match(promptReceiptDiagnostic({}, context, home), /"logState":"absent"/)
+  mkdirSync(join(home, '.agent-board'))
+  const log = join(home, '.agent-board', 'hook-errors.log')
+  writeFileSync(log, 'PRIVATE_PAYLOAD'.repeat(10000) + '\n2026-10-20T00:00:00Z gemini prompt PRIVATE_CODE\n' + '2026-10-20T00:00:00Z codex prompt REPORTER_TIMEOUT\n'.repeat(8))
+  const diagnostic = promptReceiptDiagnostic({ status: 999, signal: 'PRIVATE_SIGNAL' }, context, home)
+  assert.ok(!/PRIVATE_|board-prompt-144b/.test(diagnostic))
+  assert.equal((diagnostic.match(/REPORTER_TIMEOUT/g) ?? []).length, 4)
+  assert.match(diagnostic, /"launchToReturnMs":null,"reporterBudgetMs":0/)
+  assert.ok(diagnostic.length < 1024)
+}))
+
 test('classifier diagnostics keep only bounded phase and numeric evidence', () => fixture(async home => {
   const { reporterPs1 } = await import('../hooks/connect-pure.ts')
   const diagnostic = join(home, "classifier's-$&-probe.txt")
@@ -285,6 +328,7 @@ test('the PowerShell reporter writes a prompt receipt with no prompt words', { s
 test('a reporter that cannot run node still writes the receipt and the board drops its words', () => fixture(async home => {
   const { reporterPs1, reporterSh, shellQuote } = await import('../hooks/connect-pure.ts')
   const { readTurn } = await import('../hooks/inbox.ts')
+  const { HOOK_INPUT_TIMEOUT } = await import('../hooks/hook-safety.ts')
   const seen = new Set()
   const tools = join(home, 'tools')
   mkdirSync(tools)
@@ -309,7 +353,9 @@ test('a reporter that cannot run node still writes the receipt and the board dro
   }
   for (const prompt of ['/board', 'PRIVATE_REAL_ANSWER']) for (const mode of ['stdin', 'argument']) {
     const raw = JSON.stringify({ session_id: 'synthetic-fallback', cwd: '/synthetic/中文', prompt, transcript_path: 'PRIVATE_TRANSCRIPT' })
-    const env = { ...process.env, PATH: shellPath(tools) }
+    // Keep diagnostics in this owned fixture, not a developer or CI profile.
+    // PSModulePath remains inherited; this is isolation, not a timing repair.
+    const env = { ...process.env, HOME: home, USERPROFILE: home, PATH: shellPath(tools) }
     // Both hosts must retain a receipt when Node is missing, fails, or returns nothing.
     for (const failure of ['missing', 'failed', 'empty']) {
       const node = join(tools, 'node')
@@ -331,11 +377,15 @@ test('a reporter that cannot run node still writes the receipt and the board dro
       if (powershell) runs.push([powershell, ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', ps, 'codex', 'prompt', ...(mode === 'argument' ? [raw] : [])]])
       for (const [program, args] of runs) {
         const before = receipts(home).length
+        const started = performance.now()
         const result = spawnSync(program, args, { env, input: mode === 'stdin' ? raw : undefined, encoding: 'utf8', windowsHide: true })
-        assert.equal(result.status, 0, `${program} ${failure}: ${result.stderr}`)
-        assert.equal(result.stderr, '', `${program} ${failure}`)
+        const context = { program: program === sh ? 'sh' : 'powershell', mode, classifier: failure, isBoardCommand: prompt === '/board', elapsedMs: performance.now() - started, budgetMs: HOOK_INPUT_TIMEOUT, expectedReceipts: before + 1, actualReceipts: null }
+        // Only failed assertions read the bounded fixture log, after return.
+        assert.equal(result.status, 0, result.status === 0 ? undefined : promptReceiptDiagnostic(result, context, home))
+        assert.equal(result.stderr === '', true, result.stderr === '' ? undefined : promptReceiptDiagnostic(result, context, home))
         const saved = receipts(home)
-        assert.equal(saved.length, before + 1, `${program} ${failure}`)
+        context.actualReceipts = saved.length
+        assertPromptReceiptCount(result, context, home)
         const receipt = saved.find(one => !seen.has(one.file))
         seen.add(receipt.file)
         assert.deepEqual(JSON.parse(receipt.body), JSON.parse(raw))
