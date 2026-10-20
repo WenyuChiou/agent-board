@@ -597,6 +597,7 @@ export const drawPane = (ui: PaneUi, model: PaneModel, actions: PaneActions): Re
     view.due.length === 0 &&
     view.active.length === 0 &&
     view.idle.length === 0 &&
+    view.stopped.length === 0 &&
     view.recent.length === 0
 
   return (
@@ -651,6 +652,19 @@ export const drawPane = (ui: PaneUi, model: PaneModel, actions: PaneActions): Re
       )}
       {isOpen('idle') && view.idle.map(row => (
         <Box key={`idle::${row.key}`} flexDirection="column" marginTop={1} paddingLeft={1}>
+          {taskRow(row, true)}
+          {row.question !== null && muted(row.question)}
+        </Box>
+      ))}
+      {view.stopped.length > 0 && (
+        <Box marginTop={1}>
+          <Button key="section::stopped" plain onPress={() => actions.toggleSection('stopped')}>
+            {`${isOpen('stopped') ? '▾' : '▸'} ${s.stoppedCount(view.stopped.length)}`}
+          </Button>
+        </Box>
+      )}
+      {isOpen('stopped') && view.stopped.map(row => (
+        <Box key={`stopped::${row.key}`} flexDirection="column" marginTop={1} paddingLeft={1}>
           {taskRow(row, true)}
           {row.question !== null && muted(row.question)}
         </Box>

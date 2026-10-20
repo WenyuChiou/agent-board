@@ -156,7 +156,7 @@ test('Confirm done preserves canceled and hidden steps and guards every agent at
     expect(item.row.confirm != null).toBe(!live)
     const action = boardKey(pinned({ ...emptyBoardState, selected: at }, items), 'd', items, s).action
     expect(action?.type ?? null).toBe(live ? null : 'done')
-    expect(serveModel(view, [], s).groups.flatMap(group => group.rows)[0]?.canConfirm).toBe(!live)
+    expect([...serveModel(view, [], s).groups.flatMap(group => group.rows), ...serveModel(view, [], s).stopped][0]?.canConfirm).toBe(!live)
     if (item.row.confirm == null) continue
     const ref = item.row.confirm
     const result = confirmTask(file, ref, now, s)
@@ -190,10 +190,11 @@ test('every agent keeps live blocks safe across terminal and page at the twelve-
       expect(item?.type).toBe('row')
       if (item?.type !== 'row') throw new Error('Missing synthetic row')
       expect(item.row.archive === null).toBe(live)
-      const drawn = pinned(emptyBoardState, items)
+      const drawn = pinned({ ...emptyBoardState, isIdleOpen: true }, items)
       expect(boardKey(drawn, 'a', items, s).action?.type ?? null).toBe(live ? null : 'archive')
       expect(boardScreen(view, [], drawn, s, { width: 160, isColor: false }).includes(s.archiveLive)).toBe(live)
-      const page = serveModel(view, [], s).groups.flatMap(group => group.rows)[0]
+      const model = serveModel(view, [], s)
+      const page = [...model.groups.flatMap(group => group.rows), ...model.stopped][0]
       expect(page?.canArchive).toBe(!live)
       expect(page?.archiveNote === s.archiveLive).toBe(live)
       const forged = serveAction(items, { key: item.key, type: 'archive', text: '', session: '', fp: fingerprint(item, items) }, s)
@@ -395,7 +396,7 @@ test('an ended session offers the command that reopens it where it ran', () => {
 - [ ] 跑 100 次
 <!-- /auto session=dddddddd -->
 `
-  const [row] = buildView(parseProgress(file), ['persona_framework'], null, NOW).active
+  const [row] = buildView(parseProgress(file), ['persona_framework'], null, NOW).stopped
   expect(row?.resume).toBe("cd '/work/FLOODABM' && claude --resume dddddddd-1111")
   expect(row?.pr).toBe('PR #3 · CI 通過')
 })
@@ -425,9 +426,8 @@ test('other work is grouped by project, this one first, with numbered steps, not
 - [?] 推薦信 — 等教授回覆
 
 ## persona_framework
-<!-- auto session=cccccccc state=ended updated=2026-10-16T11:00:00.000Z -->
+<!-- auto session=cccccccc state=working updated=2026-10-16T11:00:00.000Z -->
 ### 修 CI
-> 對話已結束，可接手
 > 背景：PR #12 的 e2e 測試在 Windows 上會逾時
 - [x] 看 log
 - [ ] 修
@@ -438,6 +438,7 @@ test('other work is grouped by project, this one first, with numbered steps, not
     ['persona_framework', true, ['修 CI']],
     ['求職', false, ['Google 暑期實習']],
   ])
+  expect(view.groups.map(group => group.summary)).toEqual(['1 件 · 1 在做', '1 件 · 1 等你'])
   const [ci] = view.groups[0]?.rows ?? []
   expect(ci?.context).toBe('PR #12 的 e2e 測試在 Windows 上會逾時')
   expect(ci?.steps.map(step => [step.number, step.text])).toEqual([
@@ -447,7 +448,7 @@ test('other work is grouped by project, this one first, with numbered steps, not
   const google = view.groups[1]?.rows[0]
   expect(google?.context).toBe('寫推薦信的是王教授')
   expect(google?.steps[1]).toMatchObject({ number: 2, text: '推薦信', note: '等教授回覆' })
-  expect(view.overview).toEqual({ waiting: 1, active: 2, due: 0, today: 4, idle: 0 })
+  expect(view.overview).toEqual({ waiting: 1, active: 2, due: 0, today: 4, idle: 0, stopped: 0 })
 })
 
 test('the model answer becomes a title and a line of background', () => {
@@ -543,8 +544,8 @@ test('a stopped session retains unresolved questions independently of its connec
   const stopped = buildView(parseProgress(file(NOW - 13 * 60 * 60 * 1000)), [], null, NOW)
   expect(stopped.waiting).toHaveLength(1)
   expect(stopped.overview.waiting).toBe(1)
-  expect(stopped.active[0]).toMatchObject({ auto: 'ended', status: '對話已停，13 小時前沒動靜', resume: "cd '/w' && claude --resume dddddddd-1" })
-  expect(stopped.groups[0]?.summary).toBe('1 件 · 1 已停')
+  expect(stopped.stopped[0]).toMatchObject({ auto: 'ended', status: '對話已停，13 小時前沒動靜', resume: "cd '/w' && claude --resume dddddddd-1" })
+  expect(stopped.groups).toEqual([])
 })
 
 test('finished hand-kept tasks leave a day after they were first seen done, whole, and nothing else moves', () => {
@@ -754,7 +755,7 @@ test('封存 takes out one task now: an ended block by its session, a hand-kept 
 <!-- /auto session=dddddddd -->
 `
   const view = buildView(parseProgress(text), [], null, NOW)
-  const rows = [...view.due, ...view.active, ...view.groups.flatMap(group => group.rows)]
+  const rows = [...view.due, ...view.active, ...view.stopped]
   const google = rows.find(row => row.title === 'Google 暑期實習')
   const flood = rows.find(row => row.title === '跑實驗')
   expect(google?.archive).toEqual({ project: '求職', title: 'Google 暑期實習', line: 3, session: null })
@@ -1268,7 +1269,8 @@ test('a resume id that is not a plain session id gives no resume command, nor do
     '<!-- /auto session=a81d0c42 -->',
   ].join('\n')
   const view = buildView(parseProgress(file), [], null, NOW, 0, {}, ZH_TW)
-  expect(view.active.every(row => row.resume === null)).toBe(true)
+  expect(view.stopped.map(row => row.resume)).toEqual([null])
+  expect(view.stopped.every(row => row.resume === null)).toBe(true)
 })
 
 test('an over-long ASK is clipped to a short label and question, and the reply is fenced as data in every language', () => {
@@ -2233,7 +2235,7 @@ const fpIn = (items: ReturnType<typeof boardItems>, key: string): string => {
 
 test('with explicit legacy opt-in the page offers a send only into a Grok or Codex session that has closed; an open one, Claude and a hand-kept task each get their own way', () => {
   const model = resumeModel(serveView(), [], STRINGS.en)
-  const row = (title: string) => model.groups.flatMap(group => group.rows).find(one => one.title === title)
+  const row = (title: string) => [...model.groups.flatMap(group => group.rows), ...model.stopped].find(one => one.title === title)
   expect(row('Pick the cache')).toMatchObject({ send: 'send', where: '/w/api-gateway', info: '', isSending: false })
   const codex = model.asks.find(ask => ask.agent === 'codex')
   expect(codex).toMatchObject({ send: 'open', info: STRINGS.en.serveSendOpen('codex'), where: '' })
@@ -2243,7 +2245,7 @@ test('with explicit legacy opt-in the page offers a send only into a Grok or Cod
   expect(row('Dark mode for the settings page')?.send).toBe('claude')
   // A reply on its way shows on its line until the agent answers.
   const busy = resumeModel(serveView(), [], STRINGS.en, new Set([sendKey(GROK)]))
-  expect(busy.groups.flatMap(group => group.rows).find(one => one.title === 'Pick the cache')?.isSending).toBe(true)
+  expect(busy.stopped.find(one => one.title === 'Pick the cache')?.isSending).toBe(true)
   // Agents with no way in take a copied answer; a session with no folder or id has no way in.
   expect(sendMode('gemini', { ...GROK, agent: 'gemini' })).toBe('none')
   expect(sendMode('grok', { ...GROK, dir: null })).toBe('none')
@@ -2464,10 +2466,10 @@ test('on the local network the page answers only its own address, with its own t
 
 test('from the local network a reply to an agent is offered as a copy, and refused if sent, since it would run a program on the computer', () => {
   const model = resumeModel(serveView(), [], STRINGS.en, new Set(), true)
-  const rows = model.groups.flatMap(group => group.rows)
+  const rows = [...model.groups.flatMap(group => group.rows), ...model.stopped]
   // The row keeps a box to write the answer in and copy it, as the note says.
   expect(rows.find(one => one.title === 'Pick the cache')).toMatchObject({ send: 'open', where: '', info: STRINGS.en.serveLanSend('grok'), hasCopyBox: true })
-  expect(resumeModel(serveView(), [], STRINGS.en).groups.flatMap(group => group.rows).find(one => one.title === 'Pick the cache')).toMatchObject({ send: 'send', hasCopyBox: false })
+  expect(resumeModel(serveView(), [], STRINGS.en).stopped.find(one => one.title === 'Pick the cache')).toMatchObject({ send: 'send', hasCopyBox: false })
   // Nor is a command to resume a session shown there: it names the session's folder.
   const ended = buildView(
     parseProgress(`## FLOODABM
@@ -2483,7 +2485,7 @@ test('from the local network a reply to an agent is offered as a copy, and refus
     {},
     STRINGS.en,
   )
-  const resumeOf = (isLan: boolean): string | null | undefined => resumeModel(ended, [], STRINGS.en, new Set(), isLan).groups.flatMap(group => group.rows)[0]?.resume
+  const resumeOf = (isLan: boolean): string | null | undefined => resumeModel(ended, [], STRINGS.en, new Set(), isLan).stopped[0]?.resume
   expect(resumeOf(false)).toContain('claude --resume dddddddd-1111')
   expect(resumeOf(true)).toBe(null)
   // What was not a send stays as it was.
@@ -2512,7 +2514,7 @@ test("on the local network every agent's task shows as on the computer, except t
     )
     .join('\n')
   const view = buildView(parseProgress(file), [], null, SERVE_NOW, 0, {}, STRINGS.en)
-  const rowsOf = (isLan: boolean) => resumeModel(view, [], STRINGS.en, new Set(), isLan).groups.flatMap(group => group.rows)
+  const rowsOf = (isLan: boolean) => resumeModel(view, [], STRINGS.en, new Set(), isLan).stopped
   const computer = rowsOf(false)
   const lan = rowsOf(true)
   // Claude's own rows carry no agent name.
@@ -2584,7 +2586,7 @@ test('a block pasted from a web chat keeps its source time and only a newer repo
   expect(posedText).not.toContain('dir=%2Fw%2Fevil')
   // Sanitizing a binding is independent of hiding a report whose source time is six years old.
   const posedNow = Date.parse('2020-01-01T00:01:00Z')
-  const posedRow = serveModel(buildView(parseProgress(posedText), [], null, posedNow, 0, {}, STRINGS.en), [], STRINGS.en).groups.flatMap(group => group.rows).find(row => row.title === 'Draft the launch post')
+  const posedRow = serveModel(buildView(parseProgress(posedText), [], null, posedNow, 0, {}, STRINGS.en), [], STRINGS.en).stopped.find(row => row.title === 'Draft the launch post')
   expect(posedRow?.send).toBe('none')
   // A marker with no time never acquires a fake event time from the paste.
   const bare = pasted('c0ffee12', 'muse').replace(' updated=2020-01-01T00:00:00Z', '')
@@ -2953,7 +2955,7 @@ test('every agent keeps exact resume bindings without showing session identifier
   expect(servePage(STRINGS.en, 'n')).toContain("copy(ask.reopen)")
 
   // Ended, a session whose agent reopens one by id offers that command, in its own folder.
-  const ended = buildView(parseProgress(file.replaceAll('state=waiting', 'state=ended')), [], null, now, 0, {}, STRINGS.en).active
+  const ended = buildView(parseProgress(file.replaceAll('state=waiting', 'state=ended')), [], null, now, 0, {}, STRINGS.en).stopped
   for (const [agent, id, , via] of ids) {
     expect([agent, ended.find(row => row.title === `${agent} work`)?.resume]).toEqual([agent, via === null ? null : `cd '/w/api' && ${via} ${id}`])
   }
@@ -3263,7 +3265,7 @@ test('a reply on the line of a task whose question was marked answered goes as i
   const items = boardItems(view, [])
   const grok = items.find(item => item.type === 'row' && item.row.title === 'Pick the cache')?.key ?? ''
   expect(resumeAction(items, { key: grok, type: 'send', text: 'Use Redis', session: 'b2c3d4e5', fp: fpIn(items, grok) }, STRINGS.en)).toEqual({ type: 'send', target: GROK, text: 'Use Redis', title: 'Pick the cache' })
-  const row = (model: ReturnType<typeof serveModel>) => model.groups.flatMap(group => group.rows).find(one => one.title === 'Pick the cache')
+  const row = (model: ReturnType<typeof serveModel>) => model.stopped.find(one => one.title === 'Pick the cache')
   expect(row(resumeModel(view, [], STRINGS.en))?.isAsking).toBe(false)
   // The page names no question for it, and a reply written while the page still showed the
   // question is refused: it would answer one that is off the board.
@@ -3336,6 +3338,48 @@ test('a project whose name starts with a bracket is matched whole, so the uncate
 })
 
 
+test('progress.html and the serve page show stopped tasks in a closed shelf', () => {
+  const projects = parseProgress('## demo\n<!-- auto session=a1b2c3d4 agent=codex state=ended updated=2026-10-16T11:00:00Z resume=codex-session-123 dir=%2Fw -->\n### Stopped <plan>\n- [ ] Finish\n<!-- /auto session=a1b2c3d4 -->')
+  const view = buildView(projects, [], null, NOW, 0, {}, STRINGS.en)
+  const html = dashboardHtml(view, STRINGS.en, '/tmp/progress.md', 'now')
+  expect(html).toContain('<details class="section" data-key="section:stopped">')
+  expect(html).not.toContain('data-key="section:stopped" open')
+  expect(html).toContain('1 stopped')
+  expect(html).toContain('Stopped &lt;plan&gt;')
+  expect(html).not.toContain('data-key="section:others"')
+  const model = serveModel(view, [], STRINGS.en)
+  expect(model.groups).toEqual([])
+  expect(model.counts.active).toBe(0)
+  const row = model.stopped[0]
+  expect(model.stopped).toHaveLength(1)
+  expect(row).toMatchObject({ canArchive: true, canConfirm: true, resume: "cd '/w' && codex resume codex-session-123" })
+  const items = boardItems(view, [])
+  for (const type of ['archive', 'done']) {
+    expect(serveAction(items, { key: row?.key ?? '', type, text: '', session: '', fp: row?.fp }, STRINGS.en).type).toBe(type)
+  }
+  expect(boardItems(view, [], false)).toEqual([])
+  const toggled = boardKey(emptyBoardState, 'i', [], STRINGS.en).state
+  expect(boardScreen(view, [], toggled, STRINGS.en)).toContain('Stopped <plan>')
+  expect(boardScreen(view, [], emptyBoardState, STRINGS.en)).not.toContain('Stopped <plan>')
+  expect(boardScreen(view, [], emptyBoardState, STRINGS.en)).not.toContain(STRINGS.en.empty)
+  const page = servePage(STRINGS.en, 'nonce')
+  expect(page).toContain("opened['stopped:'] === true")
+  expect(page).toContain("w('stoppedCount', model.stopped.length)")
+  expect(page).toContain('rowCard(row)')
+})
+
+test('every language has the stopped count words', () => {
+  expect(STRINGS.en.stoppedCount(2)).toBe('2 stopped')
+  expect(STRINGS['zh-TW'].stoppedCount(2)).toBe('2 項已停止')
+  expect(STRINGS['zh-CN'].stoppedCount(2)).toBe('2 项已停止')
+  expect(STRINGS.en.boardKeyIdle).toBe('i show/hide idle and stopped')
+  expect(STRINGS['zh-TW'].boardKeyIdle).toBe('i 顯示／收起閒置和已停止項目')
+  expect(STRINGS['zh-CN'].boardKeyIdle).toBe('i 显示／收起闲置和已停止项目')
+  for (const words of Object.values(STRINGS)) {
+    expect(pageWords(words).stoppedCount).toBe(words.stoppedCount(1).replace('1', '\u0001'))
+  }
+})
+
 test('progress.html lists idle tasks in a closed shelf with their count', () => {
   const projects = parseProgress('## demo\n### Old <plan>\n- [?] Publish, OK?\n- [ ] Finish\n')
   const seen = withSeen({}, projects, NOW - 9 * 24 * 60 * 60 * 1000)
@@ -3396,12 +3440,12 @@ test('the idle shelf keeps terminal and page row actions without putting its que
 
 test('an ordinary board never resumes a closed session even without messaging enabled', () => {
   const model = serveModel(serveView(), [], STRINGS.en)
-  const row = model.groups.flatMap(group => group.rows).find(one => one.title === 'Pick the cache')
+  const row = model.stopped.find(one => one.title === 'Pick the cache')
   expect(row).toMatchObject({ send: 'open', hasCopyBox: true })
   const items = boardItems(serveView(), [])
   expect(serveAction(items, { key: row?.key ?? '', type: 'send', text: 'Redis', session: GROK.session, asked: 'Redis or Memcached?', fp: row?.fp }, STRINGS.en)).toEqual({ type: 'refuse', note: STRINGS.en.messagesFailed })
   // An explicit legacy opt-in still cannot become fallback for an enabled message hub.
   const hub = { connections: [], messages: [] }
-  expect(resumeModel(serveView(), [], STRINGS.en, new Set(), false, hub).groups.flatMap(group => group.rows).find(one => one.title === 'Pick the cache')?.send).toBe('open')
+  expect(resumeModel(serveView(), [], STRINGS.en, new Set(), false, hub).stopped.find(one => one.title === 'Pick the cache')?.send).toBe('open')
   expect(resumeAction(items, { key: row?.key ?? '', type: 'send', text: 'Redis', session: GROK.session, asked: 'Redis or Memcached?', fp: row?.fp }, STRINGS.en, false, [], true).type).toBe('refuse')
 })

@@ -164,7 +164,7 @@ export type RowGroup = { project: string; isHere: boolean; rows: TaskRow[]; summ
 
 // The line of counts at the top: what waits on you (here and elsewhere), what is open,
 // what is due within two weeks (the 快到期 list), and the steps finished today.
-export type Overview = { waiting: number; active: number; due: number; today: number; idle: number }
+export type Overview = { waiting: number; active: number; due: number; today: number; idle: number; stopped: number }
 
 export type View = {
   current: CurrentView | null
@@ -178,6 +178,7 @@ export type View = {
   older?: WaitingItem[]
   hasPendingQuestions?: boolean
   idle: TaskRow[]
+  stopped: TaskRow[]
   due: TaskRow[]
   active: TaskRow[]
   groups: RowGroup[]
@@ -662,6 +663,7 @@ export const buildView = (
   const active: Array<TaskRow & { rank: number; order: number }> = []
   const recent: Array<DoneItem & { at: number }> = []
   const idle: TaskRow[] = []
+  const stopped: Array<{ row: TaskRow; updated: number }> = []
   let order = 0
   const repeats = new Map<string, number>()
 
@@ -686,8 +688,8 @@ export const buildView = (
       const isDue = task.due !== null && days !== null && days <= 14
       const isIdle = !isComplete && !isDue && hasTime(lastActive) && now - lastActive > IDLE_MS
       const context = contextOf(task)
-      // A session that stopped writing is treated as ended: its questions wait in its row,
-      // not in 等你處理, where nobody could answer them.
+      // A session that stopped writing is treated as ended: its row goes to the Stopped shelf,
+      // and its questions stay in 等你處理.
       const stale = isStale(task.auto, now)
       const keys = task.auto === null || observed === null
         ? blockKeys(task)
@@ -800,6 +802,10 @@ export const buildView = (
         idle.push(row)
         continue
       }
+      if (auto === 'ended') {
+        stopped.push({ row, updated })
+        continue
+      }
       active.push({ ...row, rank: isHere ? 0 : 1, order })
     }
   }
@@ -807,6 +813,7 @@ export const buildView = (
   due.sort((a, b) => a.days - b.days)
   active.sort((a, b) => a.rank - b.rank || a.order - b.order)
   recent.sort((a, b) => b.at - a.at)
+  stopped.sort((a, b) => b.updated - a.updated)
 
   const rows = active.map(({ rank: _rank, order: _order, ...row }) => row)
   const groups: RowGroup[] = []
@@ -822,9 +829,8 @@ export const buildView = (
     }
     group.summary = [
       s.groupCount(group.rows.length),
-      count(row => row.tone === 'warn' && row.auto !== 'ended', s.groupWaiting),
+      count(row => row.tone === 'warn', s.groupWaiting),
       count(row => row.tone === 'alert', s.groupStuck),
-      count(row => row.auto === 'ended', s.groupStopped),
       count(row => row.auto === 'working', s.groupWorking),
     ]
       .filter(part => part !== '')
@@ -889,7 +895,7 @@ export const buildView = (
   return {
     current,
     pr: prView(mine, s),
-    overview: { waiting: asks.length, active: rows.length + due.length, due: due.length, today, idle: idle.length },
+    overview: { waiting: asks.length, active: rows.length + due.length, due: due.length, today, idle: idle.length, stopped: stopped.length },
     focus,
     waiting: asks,
     hidden,
@@ -897,6 +903,7 @@ export const buildView = (
     older,
     hasPendingQuestions: questions !== undefined,
     idle,
+    stopped: stopped.map(item => item.row),
     due: dueRows,
     active: rows,
     groups,
