@@ -81,7 +81,7 @@ The installer detects configuration targets; it does not prove those agents are 
 
 Requires Claude Code 2.1.287+; offline CI uses 2.1.301. Install its plugin, then open Claude Code and use `/progress`. Other hosts can use the independent interactive board.
 
-The Claude desktop app shows the footer status; `/progress` opens the read-only board page in your browser. The Claude Code CLI shows the pane.
+The Claude desktop app shows the footer status; `/progress` offers the board page, where you can answer questions and archive work, and opens a read-only page if the live page cannot start. The live page needs the board script installed by `/progress connect`, or updated at the next session start. Sessions and agents using the same installed board script reuse the running page. The Claude Code CLI shows the pane.
 
 ```sh
 claude plugin marketplace add WenyuChiou/agent-board

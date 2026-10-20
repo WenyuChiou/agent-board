@@ -79,7 +79,7 @@ import { RULE_ID, RULES } from './rule'
 import { chosenLang, langOf, resolveLang, STRINGS } from './strings'
 import { answerTurns, applyDigest, clearAsked, clearBackgroundJobs, cleanHandoff, finishBackgroundJob, isAskingYou, isPersonsAnswer, isWork, lastQuestion, markAsked, needsRefresh, parseDigest, replyData, requestData, startBackgroundJob, turnTools } from './digest'
 import type { Digest } from './digest'
-import { isNodeSupported, isSetupState, isWindowsHost, nodeVersionOf, openclawPrinted, openclawSavedBy, openclawTooOld, psQuote, setupLines, setupProblemText, setupSeed } from './connect'
+import { boardScript, isNodeSupported, isSetupState, isWindowsHost, nodeVersionOf, openclawPrinted, openclawSavedBy, openclawTooOld, psQuote, setupLines, setupProblemText, setupSeed } from './connect'
 import type { SetupProblem } from './connect'
 import {
   ANSWER_KEEP,
@@ -772,6 +772,28 @@ const openDashboard = async ($: EngineInterface): Promise<boolean> => {
   const ran = await $.process.run(argv, { timeoutMs: 10000 }).catch(() => null)
 
   return ran !== null && ran.exitCode === 0
+}
+
+const openLiveBoard = async ($: EngineInterface, path: string, s: Strings): Promise<{ url: string | null; needsInstall: boolean }> => {
+  // Use the connector's installed file so sessions and agents share the same script
+  // and the CLI's existing running-page check.
+  const script = path.replace(/[^\\/]*$/, 'agent-board.mjs')
+  const installed = await readText($, script).catch(() => '')
+  if (!Object.values(STRINGS).some(words => installed === boardScript(path, words.lang))) return { url: null, needsInstall: true }
+  try {
+    // Worst case: 2 s for the 0.19.0 address check + 8.5 s of checks + 10 s child
+    // wait + 8.5 s of checks = 29 s, plus Node start. Going over is safe: the
+    // read-only page opens, and a late child is reused next time.
+    const ran = await $.process.run(['node', script, '--serve', '--no-open', '--quiet-board', '--lang', s.lang], { timeoutMs: 35000 })
+    if (ran.exitCode !== 0 || ran.isStdoutTruncated) return { url: null, needsInstall: false }
+    // Only the final, localized address line is a reply; other output is data.
+    const line = ran.stdout.trimEnd().split(/\r?\n/).at(-1) ?? ''
+    const match = /http:\/\/127\.0\.0\.1:([1-9]\d{0,4})\/\?t=[A-Za-z0-9_-]+$/.exec(line)
+    const url = match?.[0]
+    return { url: url !== undefined && Number(match?.[1]) <= 65535 && line === s.serveAt(url) ? url : null, needsInstall: false }
+  } catch {
+    return { url: null, needsInstall: false }
+  }
 }
 
 // Hand-kept tasks seen done for the first time get a timestamp, so they leave a day later.
@@ -2416,8 +2438,11 @@ export const register: Register = (on, options) => {
 
     if (opened.isPlaced) return { text: s.paneOpened(path) }
     if (!hasNoPaneSurface) return { text: s.paneNotOpened(opened.reason) }
-    const page = dashboardPath(path || (await progressPath($)))
-    return { text: `${s.paneAsPage}\n${(await openDashboard($)) ? s.windowOpened(page) : s.windowFailed(page)}` }
+    const progress = path || (await progressPath($))
+    const { url, needsInstall } = await openLiveBoard($, progress, s)
+    if (url !== null) return { text: `${s.livePageOpened}\n<${url}>` }
+    const page = dashboardPath(progress)
+    return { text: `${s.livePageFallback}\n${needsInstall ? `${s.livePageNeedsInstall}\n` : ''}${(await openDashboard($)) ? s.windowOpened(page) : s.windowFailed(page)}` }
   })
 
   // Who wrote a prompt is known here, not at turn.start: only the person's own message answers

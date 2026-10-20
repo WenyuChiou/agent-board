@@ -109,7 +109,7 @@ claude plugin install agent-board@agent-board
 
 Open a new Claude Code session; `/progress` opens the pane. It mirrors Task tools and can summarize turns through its model. Questions and decisions appear above the task cards. The pane follows Claude's theme; the browser follows the system theme.
 
-The Claude desktop app shows the footer status; `/progress` opens the read-only board page in your browser. The Claude Code CLI shows the pane.
+The Claude desktop app shows the footer status; `/progress` offers the board page, where you can answer questions and archive work, and opens a read-only page if the live page cannot start. The live page needs the board script installed by `/progress connect`, or updated at the next session start. Sessions and agents using the same installed board script reuse the running page. The Claude Code CLI shows the pane.
 
 | Command / input | Action |
 | --- | --- |

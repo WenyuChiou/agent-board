@@ -81,7 +81,7 @@ node scripts/setup-agent.mjs --apply
 
 需要 Claude Code 2.1.287 以上；離線 CI 使用 2.1.301。安裝外掛後開啟 Claude Code，輸入 `/progress`；其他 host 可獨立使用互動看板。
 
-Claude 桌面應用程式會顯示底部狀態列；`/progress` 會在瀏覽器開啟唯讀看板網頁。Claude Code CLI 則顯示側欄。
+Claude 桌面應用程式會顯示底部狀態列；`/progress` 會提供可回覆問題、封存工作的看板網頁，互動網頁無法啟動時則開啟唯讀網頁。互動網頁需要由 `/progress connect` 安裝看板腳本，或在下次工作階段開始時更新。使用同一份已安裝的看板腳本的工作階段與代理會共用執行中的網頁。Claude Code CLI 則顯示側欄。
 
 ```sh
 claude plugin marketplace add WenyuChiou/agent-board

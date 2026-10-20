@@ -2160,6 +2160,29 @@ test('a reply typed for one session is dropped when the box is redrawn for anoth
   }
 })
 
+test('--serve --quiet-board prints only the page address lines', { timeout: 40_000 }, async () => {
+  const board = serveIn()
+  let url = null
+  try {
+    // A board larger than the host's output cap must not precede the address.
+    writeFileSync(board.path, '## Synthetic project\n' + '### Synthetic large task\n- [ ] Work\n'.repeat(5000))
+    const first = await board.serve(['--quiet-board', '--idle-minutes', '10'])
+    url = board.urlOf(first)
+    assert.ok(url, first)
+    const address = `The board you can click (tick, archive, answer): ${url}`
+    assert.equal(first.trim(), address)
+    const again = await board.serve(['--quiet-board', '--idle-minutes', '20'])
+    assert.deepEqual(again.trim().split('\n'), [
+      'This board is configured to close after 10 minutes unused. Reopen with --serve.',
+      address,
+    ])
+    writeFileSync(board.path, FILE)
+    const ordinary = await board.serve()
+    assert.ok(ordinary.startsWith('Progress'), ordinary.slice(0, 200))
+    assert.ok(ordinary.includes('Rate-limit the public endpoints'))
+  } finally { await board.end([url]) }
+})
+
 test('--serve starts the page in the background once, and the next --serve brings back the same page', { timeout: 40_000 }, async () => {
   const dir = mkdtempSync(join(tmpdir(), 'board-serve-'))
   const path = join(dir, 'progress.md')

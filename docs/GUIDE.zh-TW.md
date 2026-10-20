@@ -109,7 +109,7 @@ claude plugin install agent-board@agent-board
 
 開啟新 Claude Code session，使用 `/progress`。側欄鏡像 Task 工具，也可透過它的模型整理回合。問題與決策顯示於任務上方；側欄跟隨 Claude 主題，瀏覽器跟隨系統主題。
 
-Claude 桌面應用程式會顯示底部狀態列；`/progress` 會在瀏覽器開啟唯讀看板網頁。Claude Code CLI 則顯示側欄。
+Claude 桌面應用程式會顯示底部狀態列；`/progress` 會提供可回覆問題、封存工作的看板網頁，互動網頁無法啟動時則開啟唯讀網頁。互動網頁需要由 `/progress connect` 安裝看板腳本，或在下次工作階段開始時更新。使用同一份已安裝的看板腳本的工作階段與代理會共用執行中的網頁。Claude Code CLI 則顯示側欄。
 
 | 指令／輸入 | 操作 |
 | --- | --- |
