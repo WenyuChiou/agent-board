@@ -74,9 +74,9 @@ test('explicit producer renewal refreshes only that question age while another u
   expect(shelves.older.map(row => row.words)).toEqual(['Keep docs?'])
 })
 
-test('own, stopped external, manual and inbox questions share exact age shelves and actionable counts on every reader', () => {
+test('own, live external, manual and inbox questions share exact age shelves and actionable counts on every reader', () => {
   const manual = '\n## Personal\n### Letter\n> Full context\n- [?] Ask Prof Lee?\n'
-  const projects = parseProgress(board('- [?] Publish?').replace('state=waiting', 'state=ended') + manual)
+  const projects = parseProgress(board('- [?] Publish?') + manual)
   const mine = applyTaskCreate(emptyMirror('11223344-native', 'mine', START), { subject: 'Keep docs?', metadata: { waiting: 'you' } }, '1', START)
   const pending = [{ id: '99aabbcc', agent: 'cursor', project: 'inbox', text: 'Use the full option '.repeat(100) + '?', fullText: 'Complete original source', isQuestion: true, at: START + 100 * QUESTION_DAY }]
   const first = observeQuestions(emptyQuestions(), projects, mine, [], START, true, 'writer:1', undefined, pending).ledger
@@ -86,7 +86,8 @@ test('own, stopped external, manual and inbox questions share exact age shelves 
   for (const s of Object.values(STRINGS)) {
     for (const [gap, shelf] of [[3 * QUESTION_DAY, 'waiting'], [3 * QUESTION_DAY + 1, 'reminder'], [7 * QUESTION_DAY, 'reminder'], [7 * QUESTION_DAY + 1, 'older']] as const) {
       const now = START + gap
-      const view = buildView(projects, [], mine, now, 0, {}, s, [], {}, saved, undefined, pending)
+      const live = parseProgress(board('- [?] Publish?', now) + manual)
+      const view = buildView(live, [], mine, now, 0, {}, s, [], {}, saved, undefined, pending)
       expect(view[shelf]?.length).toBe(4)
       expect(view.overview.waiting).toBe(shelf === 'waiting' ? 4 : 0)
       expect(view.focus?.type === 'ask').toBe(shelf === 'waiting')
@@ -292,20 +293,21 @@ test('aged shelf hide actions keep identity and stale fingerprints while retaine
   const first = observeQuestions(emptyQuestions(), projects, null, [], START, true, 'writer:1').ledger
   for (const s of Object.values(STRINGS)) for (const days of [4, 8]) {
     const now = START + days * QUESTION_DAY
-    const view = buildView(projects, [], null, now, 0, {}, s, [], {}, first)
+    const live = parseProgress(board('- [?] Publish?', now))
+    const view = buildView(live, [], null, now, 0, {}, s, [], {}, first)
     const items = boardItems(view, [], false, true)
     const state = pinned({ ...emptyBoardState, isOlderOpen: true }, items)
     expect(boardKey(state, 'h', items, s).action).toEqual({ type: 'hide', key: first.records[0]!.id, text: 'Publish?' })
     const changed = items.map(item => item.type === 'ask' ? { ...item, ask: { ...item.ask, note: 'Changed context' } } : item)
     expect(boardKey(state, 'h', changed, s).state.note).toBe(s.boardLineChanged)
     expect(boardKey(state, 'h', changed, s).action).toBe(null)
-    const renewedProjects = parseProgress(board('- [?] Publish to production?'))
+    const renewedProjects = parseProgress(board('- [?] Publish to production?', now))
     const renewed = observeQuestions(first, renewedProjects, null, [], now, true, 'writer:2').ledger
     const newItems = boardItems(buildView(renewedProjects, [], null, now, 0, {}, s, [], {}, renewed), [], false, true)
     expect(boardKey(state, 'h', newItems, s).action).toBe(null)
     const retired = observeQuestions(first, parseProgress(board('- [x] Publish?')), null, [], now, true, 'writer:3').ledger
     const repeated = observeQuestions(retired, projects, null, [], now + 1, true, 'writer:4').ledger
-    const repeatedItems = boardItems(buildView(projects, [], null, now + 1, 0, {}, s, [], {}, repeated), [], false, true)
+    const repeatedItems = boardItems(buildView(live, [], null, now + 1, 0, {}, s, [], {}, repeated), [], false, true)
     expect(boardKey(state, 'h', repeatedItems, s).action).toBe(null)
     expect(repeated.records.find(row => row.isWaiting && row.isPresent)?.id === first.records[0]!.id).toBe(false)
     const captured = withCaptures(emptyQuestions(), [{ version: 1, disposition: 'archived', record: first.records[0]! }])

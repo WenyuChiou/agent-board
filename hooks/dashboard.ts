@@ -201,7 +201,7 @@ ${section(
   view.recent.length,
   'done',
   '',
-  `<ul class="steps">${view.recent.map(item => `<li><span></span><span style="color:var(--done)">✓</span><span class="quiet">${esc([item.project, item.title, item.when].filter(part => part !== '').join(' · '))}</span></li>`).join('')}</ul>`,
+  `<ul class="steps">${view.recent.map(item => `<li><span></span><span style="color:var(--done)">✓</span><span class="quiet">${esc([item.project, item.title, item.when].filter(part => part !== '').join(' · '))}${(item.questions ?? []).map(question => `<br>${esc([question.text, question.note].filter(Boolean).join(' — '))}`).join('')}</span></li>`).join('')}</ul>`,
   false,
 )}
 <footer><div class="legend">${LEGEND.map((status, index) => `<span><span style="color:var(--${roleOf(status)})">${GLYPH[status]}</span> ${esc(s.legendWords[index] ?? status)}</span>`).join('')}<span>${esc(s.legendDue)}</span></div>
