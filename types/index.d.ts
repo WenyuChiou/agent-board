@@ -197,6 +197,7 @@ declare module 'claude-code' {
       hiddenAsks: string[]
       questionLedger: QuestionLedger
       hasQuestionsProblem: boolean
+      hasPendingQuestionsProblem: boolean
       firstSeen: Record<string, number>
       revising: string
       lang: string
