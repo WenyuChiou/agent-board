@@ -399,6 +399,7 @@ test('--chat does not duplicate a claimed digest or mistake a fresh heartbeat fo
     const ran = chatRun(['--chat'], {
       file: () => `## export\n<!-- auto session=12345678 agent=codex resume=chat-progress-1 state=working updated=${new Date(source + 1000).toISOString()} -->\n### Export package\n- [~] Package next\n<!-- /auto session=12345678 -->\n`,
       inbox: { [name]: body },
+      change: script => `Date.now = () => ${source + 2000}\n${script}`,
     })
     assert.equal(ran.status, 0, ran.stderr)
     assert.equal(ran.stdout.includes('Validation finished; package next.'), !isClaimed, ran.stdout)
@@ -547,7 +548,7 @@ test('keys played on the board tick a hand-kept step, archive a stopped block, a
     assert.ok(readFileSync(path, 'utf8').includes('- [x] Ask two referees'))
     const journal = readdirSync(dir).find(name => name.includes('-journal-'))
     assert.ok(journal && readFileSync(join(dir, journal), 'utf8').includes('Job search · Fabrikam fellowship · Ask two referees'))
-    const archived = play('down a')
+    const archived = play('i down a')
     assert.ok(archived.includes('Archived “Fix the broken links”.'), archived)
     assert.ok(!readFileSync(path, 'utf8').includes('b2c3d4e5'))
     const archive = readdirSync(dir).find(name => name.includes('-archive-'))
@@ -602,7 +603,7 @@ syncBuiltinESMExports()
     const journal = readdirSync(dir).find(name => name.includes('-journal-'))
     assert.ok(journal && readFileSync(join(dir, journal), 'utf8').includes('Ask two referees'))
     writeFileSync(path, file)
-    const archived = play('down down a')
+    const archived = play('i down down a')
     assert.ok(archived.includes('Archived “Fix the broken links”.'), archived)
     assert.ok(!readFileSync(path, 'utf8').includes('b2c3d4e5'))
     const archive = readdirSync(dir).find(name => name.includes('-archive-'))
@@ -617,7 +618,7 @@ syncBuiltinESMExports()
 // The real --watch key handler on a pretend terminal: the file is changed (or not) right after
 // the first screen is drawn, and the keys arrive before the next 2-second redraw, the way a press
 // does when an agent writes between a draw and a key.
-const watchPress = (initial, replacement, keys) => {
+const watchPress = (initial, replacement, keys, args = []) => {
   const dir = mkdtempSync(join(tmpdir(), 'board-watch-'))
   try {
     const path = join(dir, 'progress.md')
@@ -643,7 +644,7 @@ process.stdout.write = function (text, ...rest) {
   return result
 }
 `)
-    const out = execFileSync(process.execPath, ['--import', pathToFileURL(preload).href, script, '--watch'], { env: { ...process.env, CLAUDE_PROGRESS_FILE: '', NO_COLOR: '1' }, encoding: 'utf8', timeout: 10_000 })
+    const out = execFileSync(process.execPath, ['--import', pathToFileURL(preload).href, script, '--watch', ...args], { env: { ...process.env, CLAUDE_PROGRESS_FILE: '', NO_COLOR: '1' }, encoding: 'utf8', timeout: 10_000 })
     return { out, after: readFileSync(path, 'utf8'), dir }
   } finally {
     rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 })
@@ -667,12 +668,12 @@ test('the terminal board archives with a only the block it drew: another session
   const updated = ago(20 * 60 * 60 * 1000)
   const initial = `# Progress\n\n## synthetic\n<!-- auto session=a1b2c3d4 agent=codex state=ended updated=${updated} -->\n### Synthetic same-title task\n- [ ] Keep this task\n<!-- /auto session=a1b2c3d4 -->\n`
   const replacement = initial.replaceAll('a1b2c3d4', 'd4e5f6a7')
-  const refused = watchPress(initial, replacement, ['a'])
+  const refused = watchPress(initial, replacement, ['a'], ['--all'])
   assert.equal(refused.after, replacement)
   assert.ok(refused.out.includes(LINE_CHANGED), refused.out)
   assert.ok(!refused.out.includes('Archived'), refused.out)
   // The block that was drawn, still there, goes to the archive as before.
-  const archived = watchPress(initial, initial, ['a'])
+  const archived = watchPress(initial, initial, ['a'], ['--all'])
   assert.ok(archived.out.includes('Archived “Synthetic same-title task”.'), archived.out)
   assert.ok(!archived.after.includes('a1b2c3d4'))
 })
@@ -778,7 +779,10 @@ setTimeout(() => process.stdout.write('Redis it is; wiring it up now.\\n'), 1000
       req.on('error', fail)
       req.end(body === undefined ? undefined : JSON.stringify(body))
     })
-  const rows = async () => (await call('GET', '/api/board')).json().model.groups.flatMap(group => group.rows)
+  const rows = async () => {
+    const model = (await call('GET', '/api/board')).json().model
+    return [...model.groups.flatMap(group => group.rows), ...model.stopped]
+  }
   const rowOf = async title => (await rows()).find(row => row.title === title)
   const keyOf = async title => (await rowOf(title))?.key
   const close = async () => {
@@ -806,7 +810,7 @@ test('live blocks of every agent refuse forged web archives without writes and t
     writeFileSync(board.path, file)
     const files = readdirSync(board.dir).sort()
     const model = (await board.call('GET', '/api/board')).json().model
-    const rows = model.groups.flatMap(group => group.rows)
+    const rows = [...model.groups.flatMap(group => group.rows), ...model.stopped]
     assert.equal(rows.length, 24)
     const html = (await board.call('GET', `/?t=${board.token}`)).body
     const dom = await pageDom(html, model)
@@ -839,7 +843,7 @@ test('page Confirm done buttons act once with exact fingerprints and journal all
       const file = `## Synthetic\n### Manual\n${steps}\n<!-- auto session=11223344 agent=claude state=ended updated=${ago(3600000)} -->\n### Ended Claude\n${steps}<!-- /auto session=11223344 -->\n<!-- auto session=22334455 agent=codex state=waiting updated=${ago(13 * 3600000)} -->\n### Stopped Codex\n${steps}<!-- /auto session=22334455 -->\n<!-- auto session=33445566 agent=codex state=working updated=${ago(60000)} -->\n### Live task\n- [ ] Leave open\n<!-- /auto session=33445566 -->\n`
       writeFileSync(board.path, file)
       const model = (await board.call('GET', '/api/board')).json().model
-      const rows = model.groups.flatMap(group => group.rows)
+      const rows = [...model.stopped, ...model.groups.flatMap(group => group.rows)]
       assert.equal(rows.filter(row => row.canConfirm).length, 3)
       const html = (await board.call('GET', `/?t=${board.token}`)).body
       const dom = await pageDom(html, model, { post: async request => {
@@ -1586,7 +1590,7 @@ const pageDom = async (html, first, { post, confirm, messaging } = {}) => {
 }
 
 test('the page keeps actionable progress delays without connection inventory or native identifiers', async () => {
-  const model = { counts: { waiting: 0, active: 0, due: 0, today: 0 }, asks: [], hidden: [], idle: [], groups: [], turns: [], recent: [] }
+  const model = { counts: { waiting: 0, active: 0, due: 0, today: 0 }, asks: [], hidden: [], idle: [], stopped: [], groups: [], turns: [], recent: [] }
   for (const lang of ['en', 'zh-TW', 'zh-CN']) {
     const board = await page('', {}, ['--lang', lang])
     try {
@@ -2086,7 +2090,7 @@ test('with --lan the page also opens on the local network, with a token of its o
     assert.equal((await fetchAt(host, lanPort, 'GET', '/api/ping', { 'x-board-token': phone })).status, 404)
     assert.equal((await call('GET', '/api/ping')).status, 200)
     const seen = (await fetchAt(host, lanPort, 'GET', '/api/board', { 'x-board-token': phone })).json()
-    assert.equal(seen.model.groups.flatMap(group => group.rows).find(row => row.title === 'Pick the cache')?.send, 'open')
+    assert.equal(seen.model.stopped.find(row => row.title === 'Pick the cache')?.send, 'open')
     const key = await keyOf('Pick the cache')
     const sent = await fetchAt(host, lanPort, 'POST', '/api/act', { 'x-board-token': phone }, { key, type: 'send', text: 'Redis', session: 'b2c3d4e5' })
     assert.equal(sent.status, 409)
@@ -2179,6 +2183,23 @@ test('Mark read on reminder and older terminal shelves saves the exact identity 
     assert.deepEqual(JSON.parse(restored.answered).answered, [])
     assert.ok(restored.stdout.includes('Publish, OK?'), restored.stdout)
     assert.ok(!restored.modified.includes('progress.md'), restored.modified.join(','))
+  }
+})
+
+test('the board script lists stopped tasks only with --all and names how many', () => {
+  const fixture = {
+    file: () => '## demo\n<!-- auto session=a1b2c3d4 agent=codex state=ended updated=2026-10-17T11:00:00Z -->\n### Stopped plan\n- [ ] Finish\n<!-- /auto session=a1b2c3d4 -->',
+    change: script => `Date.now = () => ${IDLE_NOW}\n${script}`,
+  }
+  for (const args of [[], ['--all'], ['--keys', 'i'], ['--keys', 'i i'], ['--chat']]) {
+    const ran = chatRun(args, fixture)
+    assert.equal(ran.status, 0, ran.stderr)
+    assert.ok(ran.stdout.includes('1 stopped'), ran.stdout)
+    assert.ok(ran.stdout.includes('▸ 0 in progress'), ran.stdout)
+    assert.equal(ran.stdout.includes('Stopped plan'), args.includes('--all') || args.includes('i'), ran.stdout)
+    assert.deepEqual(ran.wrote, [])
+    assert.deepEqual(ran.modified, [])
+    assert.deepEqual(ran.served, [])
   }
 })
 

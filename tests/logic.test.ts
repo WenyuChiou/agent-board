@@ -189,8 +189,8 @@ test('the view sorts work into this session, waiting on you, due soon, other and
   // Listed under 快到期, so not again under 其他進行中.
   expect(view.active.map(a => [a.project, a.status])).toEqual([
     ['persona_framework', '下一步：修'],
-    ['FLOODABM', '對話已結束，可接手'],
   ])
+  expect(view.stopped.map(row => [row.project, row.status])).toEqual([['FLOODABM', '對話已結束，可接手']])
   expect(view.recent.map(r => r.title)).toEqual(['發佈 1.7.3'])
 })
 
@@ -345,7 +345,7 @@ test("the person's own store settings are never aged out", () => {
 test('a task row keeps every open step for the take-over prompt, past the fold', () => {
   const steps = Array.from({ length: 9 }, (_, i) => `- [${i < 2 ? 'x' : ' '}] 步驟 ${i + 1}`).join('\n')
   const text = `## FLOODABM\n<!-- auto session=dddddddd state=ended updated=2026-10-16T10:00:00.000Z -->\n### 跑實驗\n${steps}\n<!-- /auto session=dddddddd -->\n`
-  const [row] = buildView(parseProgress(text), ['FLOODABM'], null, NOW).active
+  const [row] = buildView(parseProgress(text), ['FLOODABM'], null, NOW).stopped
   expect(row?.steps.some(s => s.text.startsWith('還有'))).toBe(true)
   expect(row?.left).toEqual(['步驟 3', '步驟 4', '步驟 5', '步驟 6', '步驟 7', '步驟 8', '步驟 9'])
 })
@@ -444,6 +444,45 @@ test('a question from every agent that writes a block can be marked answered', (
 })
 
 
+test("an ended or stale session's task moves to the Stopped shelf and leaves the In progress count", () => {
+  const block = (id: string, title: string, state: string, age: number, extra = '', steps = '- [ ] Finish'): string =>
+    `<!-- auto session=${id} state=${state} updated=${new Date(NOW - age).toISOString()} -->\n### ${title}\n${extra}${steps}\n<!-- /auto session=${id} -->`
+  const file = ['## demo',
+    block('11111111', 'Earlier ended', 'ended', 2 * HOUR),
+    block('22222222', 'Fresh ended', 'ended', HOUR),
+    block('33333333', 'Stale working', 'working', 13 * HOUR),
+    block('44444444', 'Due soon', 'ended', 13 * HOUR, '> due 2026-10-30\n'),
+    block('55555555', 'Idle ended', 'ended', 8 * 24 * HOUR),
+    block('66666666', 'Running', 'working', HOUR),
+    block('77777777', 'Finished', 'ended', HOUR, '', '- [x] Finished'),
+  ].join('\n')
+  const view = buildView(parseProgress(file), [], null, NOW)
+  expect(view.stopped.map(row => row.title)).toEqual(['Fresh ended', 'Earlier ended', 'Stale working'])
+  expect(view.stopped.every(row => row.auto === 'ended' && row.tone === 'warn' && row.confirm !== null && row.archive !== null)).toBe(true)
+  expect(view.due.map(row => row.title)).toEqual(['Due soon'])
+  expect(view.idle.map(row => row.title)).toEqual(['Idle ended'])
+  expect(view.active.map(row => row.title)).toEqual(['Running'])
+  expect(view.groups.flatMap(group => group.rows).map(row => row.title)).toEqual(['Running'])
+  expect(view.overview.active).toBe(2)
+  expect(view.overview.stopped).toBe(3)
+  expect(view.recent.map(row => row.title)).toEqual(['Finished'])
+})
+
+test('a stopped task with a question shows once under Waiting on you and is not also counted as In progress', () => {
+  const file = '## demo\n<!-- auto session=a1b2c3d4 agent=codex state=ended updated=2026-10-16T11:00:00Z resume=codex-session-123 dir=%2Fw -->\n### Release\n- [?] Publish, OK?\n- [ ] Finish\n<!-- /auto session=a1b2c3d4 -->'
+  const view = buildView(parseProgress(file), [], null, NOW)
+  expect(view.waiting.map(item => item.text)).toEqual(['Publish, OK?'])
+  expect(view.overview.waiting).toBe(1)
+  expect(view.overview.active).toBe(0)
+  expect(view.active).toEqual([])
+  expect(view.groups).toEqual([])
+  expect(view.stopped[0]).toMatchObject({ question: 'Publish, OK?', resume: "cd '/w' && codex resume codex-session-123" })
+  const hidden = buildView(parseProgress(file), [], null, NOW, 0, {}, ZH_TW, [view.waiting[0]?.hideKey ?? ''])
+  expect(hidden.waiting).toEqual([])
+  expect(hidden.hidden).toHaveLength(1)
+  expect(hidden.stopped).toHaveLength(1)
+})
+
 test('a task idle exactly seven days stays on the board and one idle a millisecond longer is hidden', () => {
   const file = (at: number): string => `## demo
 <!-- auto session=a1b2c3d4 state=ended updated=${new Date(at).toISOString()} -->
@@ -451,7 +490,7 @@ test('a task idle exactly seven days stays on the board and one idle a milliseco
 - [ ] Finish
 <!-- /auto session=a1b2c3d4 -->`
   const boundary = buildView(parseProgress(file(NOW - IDLE_MS)), [], null, NOW)
-  expect(boundary.active).toHaveLength(1)
+  expect(boundary.stopped).toHaveLength(1)
   expect(boundary.idle).toEqual([])
   const older = buildView(parseProgress(file(NOW - IDLE_MS - 1)), [], null, NOW)
   expect(older.active).toEqual([])
@@ -497,7 +536,7 @@ test("an old unanswered question leaves actionable counts and remains recoverabl
   const view = buildView(projects, [], null, NOW, 0, {}, ZH_TW, [], seen, ledger)
   expect(view.waiting).toEqual([])
   expect(view.hidden).toEqual([])
-  expect(view.overview).toEqual({ waiting: 0, active: 0, due: 0, today: 0, idle: 1 })
+  expect(view.overview).toEqual({ waiting: 0, active: 0, due: 0, today: 0, idle: 1, stopped: 0 })
   expect(view.focus).toBe(null)
   expect(view.idle[0]?.question).toBe(null)
   expect(view.idle[0]?.when).toBe(relativeTime(NOW - 9 * 24 * HOUR, NOW))

@@ -298,7 +298,8 @@ test('native lifecycle events retain a board-confirmed completion in session JSO
     const id = `native-confirm-${agent}-123`
     const report = (state, steps) => f.command(['--codex-report', '--agent', agent, '--session', id], { title: `${agent} task`, state, steps })
     assert.equal(report('ended', ['- [ ] Old task', '- [-] Canceled']).status, 0)
-    const confirmed = f.command(['--keys', 'd'])
+    // An ended block sits on the Stopped shelf, which i opens.
+    const confirmed = f.command(['--keys', 'i d'])
     assert.equal(confirmed.status, 0, confirmed.stderr)
     const idle = () => agent === 'codex' || agent === 'cursor'
       ? f.command(['--codex-event', '--agent', agent], { session_id: id, hook_event_name: agent === 'cursor' ? 'stop' : 'Stop', generation_id: 'turn-1', turn_id: 'turn-1' })

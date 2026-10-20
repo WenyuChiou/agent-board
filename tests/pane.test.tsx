@@ -75,7 +75,7 @@ for (const lang of ['en', 'zh-TW', 'zh-CN'] as const) test(`pane archive control
   const agents = ['claude', 'codex', 'gemini', 'cursor', 'grok', 'muse', 'hermes', 'openclaw', 'opencode', 'antigravity', 'deepseek', 'custom-agent']
   const cases = agents.flatMap((agent, index) => ['working', 'waiting', 'stopped', 'ended'].map((kind, n) => ({ agent, kind, id: (10000000 + index * 4 + n).toString(), title: `${agent} ${kind}` })))
   const file = '# Progress\n\n## Demo\n' + cases.map(({ agent, kind, id, title }) => `<!-- auto session=${id} agent=${agent} state=${kind === 'stopped' ? 'waiting' : kind} updated=${kind === 'stopped' ? '2026-10-15T23:59:59Z' : '2026-10-16T12:00:00Z'} -->\n### ${title}\n- [ ] Next step\n<!-- /auto session=${id} -->\n`).join('\n')
-  const world: World = { files: new Map([[FILE, file]]), mtime: 1, hasTasks: true, store: { lang, autoConnectOff: true, opened: ['others'] } }
+  const world: World = { files: new Map([[FILE, file]]), mtime: 1, hasTasks: true, store: { lang, autoConnectOff: true, opened: ['others', 'stopped'] } }
   engineBeneath(on, world)
   await $.session.start({ cwd: '/work/persona_framework', surface: 'desktop', isInteractive: true })
   const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
@@ -479,7 +479,7 @@ for (const lang of ['en', 'zh-TW', 'zh-CN'] as const) test(`Confirm done on the 
   const steps = '- [ ] Todo\n- [~] Doing\n- [?] Ask?\n- [>] Running\n- [!] Blocked\n- [-] Canceled\n- [x] Already done\n'
   const file = `## Demo\n### Manual\n${steps}\n<!-- auto session=11223344 agent=claude state=ended updated=2026-10-16T11:00:00Z -->\n### Ended Claude\n${steps}<!-- /auto session=11223344 -->\n<!-- auto session=${id} agent=codex state=waiting updated=2026-10-15T23:00:00Z -->\n### Stopped Codex\n${steps}<!-- /auto session=${id} -->\n<!-- auto session=55667788 agent=codex state=working updated=2026-10-16T12:00:00Z -->\n### Live task\n- [ ] Leave this open\n<!-- /auto session=55667788 -->\n`
   const stored = { ...emptyMirror(id, 'Demo', at - 13 * 3600000, '', 'codex'), title: 'Stopped Codex', source: 'turns', tasks: [confirmStep('Todo'), { ...confirmStep('Doing', '2'), status: 'in_progress' }, { ...confirmStep('Ask?', '3'), waiting: 'you' }, { ...confirmStep('Running', '4'), waiting: 'run' }, { ...confirmStep('Blocked', '5'), blocked: '' }, { ...confirmStep('Already done', '6'), status: 'completed' }] }
-  const world: World = { files: new Map([[FILE, file]]), mtime: 1, hasTasks: true, asked: [], store: { inboxDone: {}, autoConnectOff: true, opened: ['others'], [`agent:${id}`]: stored } }
+  const world: World = { files: new Map([[FILE, file]]), mtime: 1, hasTasks: true, asked: [], store: { inboxDone: {}, autoConnectOff: true, opened: ['others', 'stopped'], [`agent:${id}`]: stored } }
   const clock = engineBeneath(on, world)
   await probeStart($)
   const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
@@ -511,7 +511,7 @@ test('Confirm done fences the first delayed legacy delivery even when the owner 
   const at = Date.parse('2026-10-16T12:00:00Z')
   const id = blockId('codex', 'first-cache-session')
   const file = `## Demo\n<!-- auto session=${id} agent=codex state=ended updated=2026-10-16T11:00:00Z -->\n### External task\n- [ ] Old step\n<!-- /auto session=${id} -->\n`
-  const world: World = { files: new Map([[FILE, file]]), mtime: 1, hasTasks: true, asked: [], store: { inboxDone: {}, autoConnectOff: true, opened: ['others'] }, reply: () => 'TITLE: External task\nCONTEXT: Synthetic\nDONE: -\nNEXT: Reopened old step\nASK: -' }
+  const world: World = { files: new Map([[FILE, file]]), mtime: 1, hasTasks: true, asked: [], store: { inboxDone: {}, autoConnectOff: true, opened: ['others', 'stopped'] }, reply: () => 'TITLE: External task\nCONTEXT: Synthetic\nDONE: -\nNEXT: Reopened old step\nASK: -' }
   const clock = engineBeneath(on, world)
   await probeStart($)
   const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
@@ -541,7 +541,7 @@ for (const [when, delta] of [['older', -1000], ['equal', 0], ['newer', 1000]] as
   const id = blockId('codex', session)
   const canceled = '- [-] Transfer API — Transferred to Gemini\n- [-] Deferred without a recipient'
   const file = `## Demo\n<!-- auto session=${id} agent=codex state=ended updated=2026-10-16T11:00:00Z resume=${session} -->\n### External task\n- [ ] Old step\n${canceled}\n<!-- /auto session=${id} -->\n`
-  const world: World = { files: new Map([[FILE, file]]), mtime: 1, hasTasks: true, asked: [], reads: [], store: { inboxDone: {}, autoConnectOff: true, opened: ['others'] } }
+  const world: World = { files: new Map([[FILE, file]]), mtime: 1, hasTasks: true, asked: [], reads: [], store: { inboxDone: {}, autoConnectOff: true, opened: ['others', 'stopped'] } }
   const clock = engineBeneath(on, world)
   await probeStart($)
   const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
@@ -574,7 +574,7 @@ test('an absent owner becoming fresh during completion storage is preserved with
   const id = blockId('codex', 'missing-owner-race')
   const file = `## Demo\n<!-- auto session=${id} agent=codex state=ended updated=2026-10-16T11:00:00Z -->\n### External task\n- [ ] Old step\n<!-- /auto session=${id} -->\n`
   const newer = { ...emptyMirror(id, 'Demo', at + 1, '', 'codex'), turnOrder: (at + 1) * 2, title: 'Fresh accepted work' }
-  const world: World = { files: new Map([[FILE, file]]), mtime: 1, hasTasks: true, store: { inboxDone: {}, autoConnectOff: true, opened: ['others'] } }
+  const world: World = { files: new Map([[FILE, file]]), mtime: 1, hasTasks: true, store: { inboxDone: {}, autoConnectOff: true, opened: ['others', 'stopped'] } }
   engineBeneath(on, world)
   await probeStart($)
   const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
@@ -646,7 +646,7 @@ test('Confirm done preserves a failed journal notice and retries every new entry
 test('Confirm done still journals its saved ticks and reports a completion overlay write failure', async ($, on) => {
   const id = blockId('codex', 'confirm-store-failure')
   const file = `## Demo\n<!-- auto session=${id} agent=codex state=ended updated=2026-10-16T11:00:00Z -->\n### Target\n- [ ] First\n<!-- /auto session=${id} -->\n`
-  const world: World = { files: new Map([[FILE, file]]), mtime: 1, hasTasks: true, store: { inboxDone: {}, autoConnectOff: true, opened: ['others'], [`agent:${id}`]: { ...emptyMirror(id, 'Demo', Date.parse('2026-10-15T23:00:00Z'), '', 'codex'), title: 'Target', tasks: [confirmStep('First')] } }, failStore: (operation, key) => operation === 'set' && key.startsWith('completion:') }
+  const world: World = { files: new Map([[FILE, file]]), mtime: 1, hasTasks: true, store: { inboxDone: {}, autoConnectOff: true, opened: ['others', 'stopped'], [`agent:${id}`]: { ...emptyMirror(id, 'Demo', Date.parse('2026-10-15T23:00:00Z'), '', 'codex'), title: 'Target', tasks: [confirmStep('First')] } }, failStore: (operation, key) => operation === 'set' && key.startsWith('completion:') }
   engineBeneath(on, world)
   await probeStart($)
   const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
@@ -665,7 +665,7 @@ for (const phase of ['before press', 'during write', 'between final get and set'
   const file = `## Demo\n<!-- auto session=${id} agent=codex state=ended updated=2026-10-15T23:00:00Z -->\n### Target\n- [ ] First\n<!-- /auto session=${id} -->\n`
   const original = { ...emptyMirror(id, 'Demo', at - 13 * 3600000, '', 'codex'), state: 'ended', title: 'Target', tasks: [confirmStep('First')] }
   const newer = { ...original, state: 'working', title: 'New work accepted', updated: at }
-  const world: World = { files: new Map([[FILE, file]]), mtime: 1, hasTasks: true, store: { inboxDone: {}, autoConnectOff: true, opened: ['others'], [`agent:${id}`]: original } }
+  const world: World = { files: new Map([[FILE, file]]), mtime: 1, hasTasks: true, store: { inboxDone: {}, autoConnectOff: true, opened: ['others', 'stopped'], [`agent:${id}`]: original } }
   engineBeneath(on, world)
   await probeStart($)
   const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
@@ -688,7 +688,7 @@ for (const state of ['ended', 'done'] as const) for (const change of ['newer clo
   const id = blockId('codex', 'stale-selection-session')
   const file = `## Demo\n<!-- auto session=${id} agent=codex state=ended updated=2026-10-16T11:00:00Z -->\n### Target\n- [ ] First\n<!-- /auto session=${id} -->\n`
   const stored = { ...emptyMirror(id, 'Demo', change === 'newer clock' ? at : at - 3600000, '', 'codex'), title: 'Target', state, tasks: [confirmStep('Different newer task')] }
-  const world: World = { files: new Map([[FILE, file]]), mtime: 1, hasTasks: true, store: { inboxDone: {}, autoConnectOff: true, opened: ['others'], [`agent:${id}`]: stored } }
+  const world: World = { files: new Map([[FILE, file]]), mtime: 1, hasTasks: true, store: { inboxDone: {}, autoConnectOff: true, opened: ['others', 'stopped'], [`agent:${id}`]: stored } }
   engineBeneath(on, world)
   await probeStart($)
   const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
@@ -704,7 +704,7 @@ for (const state of ['ended', 'done'] as const) for (const change of ['newer clo
 
 test('a pane Confirm done rechecks changed words and resumed sessions before writing', async ($, on) => {
   const file = '## Demo\n<!-- auto session=11223344 agent=codex state=ended updated=2026-10-16T11:00:00Z -->\n### Target\n- [ ] First\n- [ ] Later\n<!-- /auto session=11223344 -->\n'
-  const world: World = { files: new Map([[FILE, file]]), mtime: 1, hasTasks: true, store: { inboxDone: {}, autoConnectOff: true, opened: ['others'] } }
+  const world: World = { files: new Map([[FILE, file]]), mtime: 1, hasTasks: true, store: { inboxDone: {}, autoConnectOff: true, opened: ['others', 'stopped'] } }
   engineBeneath(on, world)
   await probeStart($)
   const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
@@ -761,7 +761,7 @@ test('a held older model summary cannot stand over a pane confirmation on its ra
   const { world, mirror } = questionWorld()
   const ended = { ...mirror, state: 'ended' as const }
   world.store![`agent:${PROMPT_ID}`] = ended
-  world.store!.opened = ['others']
+  world.store!.opened = ['others', 'stopped']
   world.files.set(FILE, upsertAutoBlock(world.files.get(FILE)!, ended, ZH_TW))
   let reached!: () => void, release!: () => void
   const entered = new Promise<void>(resolve => { reached = resolve })
@@ -1420,6 +1420,7 @@ test('the pane acts: tick a step, hand a task to Claude, take over, ask aside', 
   expect(submitted.at(-1)).toContain('下一步是「投遞」')
 
   // An ended session in this project can be taken over here.
+  await ui.press({ key: 'section::stopped' })
   await ui.press({ key: 'persona_framework::修 CI' })
   await ui.press({ key: 'persona_framework::修 CI::take' })
   expect(submitted.at(-1)).toContain('接手「修 CI」')
@@ -2069,7 +2070,7 @@ test('an ended session elsewhere offers its resume command, copied for the termi
   const seen = outside(on, world)
   await $.session.start({ cwd: '/work/persona_framework', surface: 'desktop', isInteractive: true })
   const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
-  await ui.press({ key: 'section::others' })
+  await ui.press({ key: 'section::stopped' })
   await ui.press({ key: 'FLOODABM::跑實驗' })
   expect(await ui.find({ type: 'Button', key: 'FLOODABM::跑實驗::take' })).toBeUndefined()
   await ui.press({ key: 'FLOODABM::跑實驗::resume' })
@@ -3163,6 +3164,7 @@ test('封存 on a row takes that task out of the file now and into this month’
 
   // A session of this project that stopped.
   await ui.press({ key: 'section::others' })
+  await ui.press({ key: 'section::stopped' })
   await ui.press({ key: 'persona_framework::修 CI' })
   await ui.press({ key: 'persona_framework::修 CI::archive' })
   expect(world.files.get(FILE)).not.toContain('修 CI')
@@ -3183,7 +3185,7 @@ test('封存 of a task someone changed meanwhile says so and leaves the file alo
   engineBeneath(on, world)
   await $.session.start({ cwd: '/work/persona_framework', surface: 'desktop', isInteractive: true })
   const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
-  await ui.press({ key: 'section::others' })
+  await ui.press({ key: 'section::stopped' })
   await ui.press({ key: 'persona_framework::修 CI' })
   // Another session reopened the block before the press: it has no end marker now.
   const changed = JOBS.replace('<!-- /auto session=a81d0c42 -->\n', '')
@@ -3567,7 +3569,7 @@ test('a stopped session’s handoff line shows on its row and goes with 接手�
   })
   await $.session.start({ cwd: '/work/persona_framework', surface: 'desktop', isInteractive: true })
   const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
-  await ui.press({ key: 'section::others' })
+  await ui.press({ key: 'section::stopped' })
   await ui.press({ key: 'persona_framework::修 CI' })
   expect(await ui.find({ type: 'Text', text: '交接：log 看完了；卡在 flaky 測試；下一步重跑三次' })).toBeDefined()
   await ui.press({ key: 'persona_framework::修 CI::take' })
@@ -5473,6 +5475,29 @@ test('question retention failure refuses explicit archive and preserves the orig
   await ui.press({ key: 'demo::Plan::archive' })
   expect(world.files.get(FILE)).toBe(board)
   expect(await ui.find({ type: 'Text', text: ZH_TW.questionRetentionFailed })).toBeDefined()
+  await ui.unmount()
+})
+
+test('the pane keeps stopped tasks behind one toggle and shows their actions when opened', async ($, on) => {
+  const board = '## persona_framework\n<!-- auto session=a1b2c3d4 agent=claude state=ended updated=2026-10-16T11:00:00Z resume=stopped-session-123 -->\n### Stopped plan\n- [ ] Finish\n<!-- /auto session=a1b2c3d4 -->'
+  const world: World = { files: new Map([[FILE, board]]), mtime: 1, hasTasks: true }
+  engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/persona_framework', surface: 'desktop', isInteractive: true })
+  await settledSetup($, world)
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
+  expect(await ui.find({ type: 'Button', key: 'persona_framework::Stopped plan' })).toBeUndefined()
+  expect(await ui.find({ type: 'Button', key: 'section::stopped', text: '▸ 1 項已停止' })).toBeDefined()
+  expect(await ui.find({ type: 'Button', key: 'section::others' })).toBeUndefined()
+  expect(await ui.find({ type: 'Text', text: ZH_TW.empty })).toBeUndefined()
+  await ui.press({ key: 'section::stopped' })
+  expect(await ui.find({ type: 'Button', key: 'section::stopped', text: '▾ 1 項已停止' })).toBeDefined()
+  await ui.press({ key: 'persona_framework::Stopped plan' })
+  for (const action of ['resume', 'take', 'done', 'archive']) {
+    expect(await ui.find({ type: 'Button', key: `persona_framework::Stopped plan::${action}` })).toBeDefined()
+  }
+  await ui.press({ key: 'section::stopped' })
+  expect(await ui.find({ type: 'Button', key: 'persona_framework::Stopped plan' })).toBeUndefined()
+  expect(world.files.get(FILE)).toBe(board)
   await ui.unmount()
 })
 
