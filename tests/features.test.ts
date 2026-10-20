@@ -542,8 +542,9 @@ test('a stopped session retains unresolved questions independently of its connec
   expect(live.waiting).toHaveLength(1)
 
   const stopped = buildView(parseProgress(file(NOW - 13 * 60 * 60 * 1000)), [], null, NOW)
-  expect(stopped.waiting).toHaveLength(1)
-  expect(stopped.overview.waiting).toBe(1)
+  expect(stopped.waiting).toHaveLength(0)
+  expect(stopped.overview.waiting).toBe(0)
+  expect(stopped.stopped[0]?.questions?.map(item => item.text)).toEqual(['要不要重跑'])
   expect(stopped.stopped[0]).toMatchObject({ auto: 'ended', status: '對話已停，13 小時前沒動靜', resume: "cd '/w' && claude --resume dddddddd-1" })
   expect(stopped.groups).toEqual([])
 })
