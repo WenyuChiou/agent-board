@@ -19,3 +19,10 @@ body:
       label: File format
       options:
         - label: This would need a change to progress.md (docs/FORMAT.md). Additions go on the marker as optional attributes; a new mark or state is a breaking change.
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: How we would know it is done
+      description: Optional. One behaviour a test could check, in a sentence. When triaging, the maintainer turns it into acceptance tests and adds the executor and milestone.
+    validations:
+      required: false

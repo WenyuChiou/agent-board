@@ -1,13 +1,17 @@
 import { test, expect } from 'claude-code/testing'
 import { parseProgress } from '../hooks/parse'
 import { buildView } from '../hooks/view'
-import { acknowledgementKeys, emptyQuestions, isQuestionSnapshot, isTornLedger, migratedAnswered, migrationKey, observeQuestions, parseQuestions, questionsJson } from '../hooks/questions'
+import { acknowledgementKeys, archiveQuestionsKept, captureJson, emptyQuestions, isQuestionSnapshot, isTornLedger, migratedAnswered, migrationKey, observeQuestions, parseCapture, parseQuestions, questionsJson, resolveQuestion, resolvedQuestionsToRetire, withCaptures } from '../hooks/questions'
 import type { QuestionLedger } from '../hooks/questions'
 import { STRINGS } from '../hooks/strings'
 import { sha256 } from '../hooks/sha256'
 import { applyTaskCreate, applyTaskUpdate, emptyMirror, fromTaskList, questionToken } from '../hooks/mirror'
 import { markAsked } from '../hooks/digest'
 import { renderAutoBlock } from '../hooks/blocks'
+import { remindersOf } from '../hooks/remind'
+import { peekInbox } from '../hooks/board'
+import { answerAgentPrompt, blockId } from '../hooks/inbox'
+import type { AgentTurn } from '../hooks/inbox'
 
 const NOW = Date.parse('2026-10-16T12:00:00Z')
 const file = (steps: string, project = 'demo', session = 'a1b2c3d4'): string =>
@@ -16,6 +20,354 @@ const observe = (ledger: QuestionLedger, text: string, answered: string[] = [], 
   observeQuestions(ledger, parseProgress(text), null, answered, at, settled)
 const view = (ledger: QuestionLedger, text: string, answered: string[] = []) =>
   buildView(parseProgress(text), [], null, NOW, 0, {}, STRINGS.en, answered, {}, ledger)
+
+test("your own session's question stays under Waiting on you after 12 quiet hours while the session runs", () => {
+  const quiet = NOW - 13 * 60 * 60 * 1000
+  const mirror = applyTaskCreate(emptyMirror('11223344-native', 'demo', quiet), { subject: 'Publish?', metadata: { waiting: 'you' } }, '1', quiet)
+  const ledger = observeQuestions(emptyQuestions(), [], mirror, [], quiet, true).ledger
+  for (const s of Object.values(STRINGS)) for (const state of ['working', 'waiting'] as const) {
+    const result = buildView([], [], { ...mirror, state }, NOW, 0, {}, s, [], {}, ledger)
+    expect(result.waiting.map(item => item.text)).toEqual(['Publish?'])
+    expect(result.overview.waiting).toBe(1)
+    expect(result.focus?.type).toBe('ask')
+    expect(result.stopped).toEqual([])
+    expect(result.reminder).toEqual([])
+    expect(result.older).toEqual([])
+  }
+})
+
+test("a woken session's new inbox question shows under Waiting on you while its block is stale", () => {
+  const updated = NOW - 13 * 60 * 60 * 1000
+  for (const text of ['Publish?', 'Choose a date?']) for (const offset of [-1, 0, 1]) {
+    const projects = parseProgress(file('- [?] Publish?').replace(new Date(NOW).toISOString(), new Date(updated).toISOString()))
+    const pending = [{ id: 'a1b2c3d4', agent: 'codex', project: 'demo', text, isQuestion: true, at: updated + offset }]
+    const ledger = observeQuestions(emptyQuestions(), projects, null, [], NOW, true, 'fixture', undefined, pending).ledger
+    const result = buildView(projects, [], null, NOW, 0, {}, STRINGS.en, [], {}, ledger, undefined, pending)
+    expect(result.waiting.map(item => item.text)).toEqual(offset > 0 ? [text] : [])
+    expect(result.overview.waiting).toBe(offset > 0 ? 1 : 0)
+    const shelf = result.stopped.flatMap(row => row.questions ?? [])
+    expect(shelf.map(item => item.text)).toEqual(offset > 0 && text === 'Publish?' ? [] : ['Publish?'])
+    expect(shelf.some(item => result.waiting.some(live => live.questionId === item.questionId))).toBe(false)
+    expect(result.older.map(item => item.text)).toEqual(offset <= 0 && text === 'Choose a date?' ? [text] : [])
+  }
+})
+
+test('a reworded question of a stopped session stays reviewable under Older', () => {
+  for (const state of ['ended', 'done', 'waiting']) for (const replacement of ['- [?] Choose a date?', '- [ ] Finish']) {
+    const text = file('- [?] Publish?').replace('state=waiting', `state=${state}`).replace(new Date(NOW).toISOString(), new Date(NOW - 13 * 60 * 60 * 1000).toISOString())
+    const ledger = observe(emptyQuestions(), text).ledger
+    const changed = text.replace('- [?] Publish?', replacement)
+    const next = observe(ledger, changed).ledger
+    const result = view(next, changed)
+    expect(result.waiting).toEqual([])
+    expect(result.reminder).toEqual([])
+    expect(result.older.map(item => item.text)).toEqual(['Publish?'])
+    expect(result.older[0]?.questionId).toBe(ledger.records[0]!.id)
+    expect(result.older[0]?.canHide).toBe(false)
+    expect([...result.stopped, ...result.recent].flatMap(row => row.questions ?? []).map(item => item.text)).toEqual(replacement.includes('[?]') ? ['Choose a date?'] : [])
+  }
+})
+
+test("a done task's question stays on the Stopped shelf after it leaves Recent", () => {
+  const text = Array.from({ length: 4 }, (_, i) => file('- [?] Deploy?', 'demo', `a1b2c3d${i}`).replace('state=waiting', 'state=done').replace('### Ship', `### Ship ${i}`).replace(new Date(NOW).toISOString(), new Date(NOW - i * 1000).toISOString())).join('\n')
+  const projects = parseProgress(text)
+  const ledger = observeQuestions(emptyQuestions(), projects, null, [], NOW, true).ledger
+  for (const at of [NOW, NOW + 86400000]) {
+    const result = buildView(projects, [], null, at, 0, {}, STRINGS.en, [], {}, ledger)
+    expect(result.recent.length).toBe(at === NOW ? 3 : 0)
+    expect(result.stopped.length).toBe(at === NOW ? 1 : 4)
+    expect(result.stopped[0]?.title).toBe(at === NOW ? 'Ship 3' : 'Ship 0')
+    const questions = [...result.recent.flatMap(row => row.questions ?? []), ...result.stopped.flatMap(row => row.questions ?? [])]
+    expect(questions.map(item => item.questionId).sort()).toEqual(ledger.records.map(record => record.id).sort())
+    expect(result.stopped.every(row => row.archive !== null)).toBe(true)
+    expect(result.waiting).toEqual([])
+    expect(result.older).toEqual([])
+  }
+})
+
+test('a stopped task whose question was resolved can still be archived', () => {
+  const text = file('- [?] Publish?').replace('state=waiting', 'state=ended')
+  const projects = parseProgress(text)
+  const initial = observeQuestions(emptyQuestions(), projects, null, [], NOW, true).ledger
+  const resolved = resolveQuestion(initial, initial.records[0]!.id, NOW)
+  const receipt = captureJson(resolved.records[0]!, 'resolved')
+  const restored = withCaptures(initial, [parseCapture(receipt, sha256(receipt))!])
+  const ref = { project: 'demo', title: 'Ship', session: 'a1b2c3d4', line: 2 }
+  expect(archiveQuestionsKept(projects, ref, restored)).toBe(true)
+  expect(archiveQuestionsKept(parseProgress(text.replace('Publish?', 'Another ask?')), ref, restored)).toBe(false)
+  expect(view(restored, text).stopped[0]?.questions).toEqual([])
+})
+
+test('a resolution does not hide the same words in a later task of that session', () => {
+  const stopped = file('- [?] Push to main, OK?').replace('state=waiting', 'state=ended')
+  const first = observe(emptyQuestions(), stopped).ledger
+  const resolved = resolveQuestion(first, first.records[0]!.id, NOW)
+  const later = file('- [?] Push to main, OK?').replace('### Ship', '### Ship again')
+  const next = observe(resolved, later).ledger
+  for (const s of Object.values(STRINGS)) {
+    const result = buildView(parseProgress(later), [], null, NOW, 0, {}, s, [], {}, next)
+    expect(result.waiting.map(item => item.text)).toEqual(['Push to main, OK?'])
+    expect(result.overview.waiting).toBe(1)
+    expect(result.focus?.type).toBe('ask')
+    expect(result.waiting[0]?.questionId).not.toBe(first.records[0]!.id)
+  }
+})
+
+test('a retired resolution survives stale ledger replay without hiding a renewed question', () => {
+  const text = file('- [?] Publish?')
+  const first = observe(emptyQuestions(), text).ledger
+  const id = first.records[0]!.id
+  const resolved = resolveQuestion(first, id, NOW)
+  expect(resolvedQuestionsToRetire(resolved, parseProgress(text), null, [])).toEqual([])
+  expect(resolvedQuestionsToRetire(resolved, [], null, [])).toEqual([])
+  for (const changed of [text.replace('[?]', '[x]'), text.replace('- [?] Publish?', '')]) {
+    expect(resolvedQuestionsToRetire(resolved, parseProgress(changed), null, [])).toEqual([id])
+  }
+  const proofs = { retired: [sha256(id)], consumed: [] }
+  const next = observeQuestions(resolved, parseProgress(text), null, [], NOW + 1000, true, 'renewed', proofs).ledger
+  const result = buildView(parseProgress(text), [], null, NOW + 1000, 0, {}, STRINGS.en, [], {}, next, proofs)
+  expect(result.overview.waiting).toBe(1)
+  expect(result.waiting[0]?.questionId).not.toBe(id)
+})
+
+test('a done task with a resolved or hidden question stays available to archive after a day', () => {
+  const text = file('- [?] Publish?').replace('state=waiting', 'state=done')
+  const projects = parseProgress(text)
+  const initial = observe(emptyQuestions(), text).ledger
+  const id = initial.records[0]!.id
+  for (const isResolved of [false, true]) for (const s of Object.values(STRINGS)) {
+    const ledger = isResolved ? resolveQuestion(initial, id, NOW) : initial
+    const result = buildView(projects, [], null, NOW + 86400000, 0, {}, s, isResolved ? [] : [id], {}, ledger)
+    expect(result.recent).toEqual([])
+    expect(result.stopped.length).toBe(1)
+    expect(result.stopped[0]?.questions).toEqual([])
+    expect(result.stopped[0]?.archive?.title).toBe('Ship')
+  }
+})
+
+test('a stopped question marked answered stays out of its task in the view', () => {
+  const text = file('- [?] Publish?').replace('state=waiting', 'state=ended')
+  const initial = observe(emptyQuestions(), text).ledger
+  const result = view(initial, text, [initial.records[0]!.id])
+  expect(result.stopped[0]?.questions).toEqual([])
+  expect(result.stopped[0]?.question).toBe(null)
+  expect(result.waiting).toEqual([])
+})
+
+test("archive still works after a resolved question's block is rewritten", () => {
+  const text = file('- [?] Publish?').replace('state=waiting', 'state=ended')
+  const projects = parseProgress(text)
+  const initial = observeQuestions(emptyQuestions(), projects, null, [], NOW, true).ledger
+  const resolved = resolveQuestion(initial, initial.records[0]!.id, NOW)
+  const rewritten = text.replace(new Date(NOW).toISOString(), new Date(NOW + 60_000).toISOString())
+  const ref = { project: 'demo', title: 'Ship', session: 'a1b2c3d4', line: 2 }
+  expect(archiveQuestionsKept(parseProgress(rewritten), ref, resolved)).toBe(true)
+  expect(archiveQuestionsKept(parseProgress(rewritten), ref, initial)).toBe(false)
+  expect(archiveQuestionsKept(parseProgress(rewritten.replace('Publish?', 'Another ask?')), ref, resolved)).toBe(false)
+  expect(archiveQuestionsKept(parseProgress(rewritten.replaceAll('a1b2c3d4', '11223344')), { ...ref, session: '11223344' }, resolved)).toBe(false)
+})
+
+test('a stopped question marked answered can be shown again', () => {
+  for (const state of ['ended', 'done']) {
+    const text = file('- [?] Publish?').replace('state=waiting', `state=${state}`)
+    const ledger = observe(emptyQuestions(), text).ledger
+    const id = ledger.records[0]!.id
+    const hidden = view(ledger, text, [id])
+    expect(hidden.hidden.map(item => item.hideKey)).toEqual([id])
+    expect([...hidden.stopped, ...hidden.recent].flatMap(row => row.questions ?? [])).toEqual([])
+    const restored = view(ledger, text)
+    expect(restored.hidden).toEqual([])
+    expect([...restored.stopped, ...restored.recent].flatMap(row => row.questions ?? []).map(item => item.hideKey)).toEqual([id])
+  }
+})
+
+test('an older resolution of the same words does not let a renewed question be archived', () => {
+  const token = `<!-- question=${'a'.repeat(64)}:1 -->`
+  const text = file(`- [?] Publish?\n${token}`).replace('state=waiting', 'state=ended')
+  const initial = observe(emptyQuestions(), text).ledger
+  const resolved = resolveQuestion(initial, initial.records[0]!.id, NOW)
+  const ref = { project: 'demo', title: 'Ship', session: 'a1b2c3d4', line: 2 }
+  const renewed = text.replace(':1 -->', ':2 -->')
+  expect(archiveQuestionsKept(parseProgress(renewed), ref, resolved)).toBe(false)
+  const renewedLedger = observe(resolved, renewed).ledger
+  const rewritten = renewed.replace(new Date(NOW).toISOString(), new Date(NOW + 1000).toISOString())
+  expect(archiveQuestionsKept(parseProgress(rewritten), ref, renewedLedger)).toBe(false)
+  expect(archiveQuestionsKept(parseProgress(renewed), ref, renewedLedger)).toBe(true)
+  const twins = file('- [?] Publish?\n- [?] Publish?').replace('state=waiting', 'state=ended')
+  const twinLedger = observe(emptyQuestions(), twins).ledger
+  const oneResolved = resolveQuestion(twinLedger, twinLedger.records[0]!.id, NOW)
+  const changedTwins = twins.replace(new Date(NOW).toISOString(), new Date(NOW + 1000).toISOString())
+  expect(archiveQuestionsKept(parseProgress(changedTwins), ref, oneResolved)).toBe(false)
+  const bothResolved = resolveQuestion(oneResolved, twinLedger.records[1]!.id, NOW)
+  expect(archiveQuestionsKept(parseProgress(changedTwins), ref, bothResolved)).toBe(true)
+})
+
+test('a question from an ended session is not counted in Waiting on you', () => {
+  const text = file('- [?] Publish?').replace('state=waiting', 'state=ended')
+  const result = view(observe(emptyQuestions(), text).ledger, text)
+  expect(result.waiting).toEqual([])
+  expect(result.overview.waiting).toBe(0)
+  expect(result.focus).toBe(null)
+  expect(result.stopped[0]?.question).toBe('Publish?')
+})
+
+test('a question of a working session still counts', () => {
+  for (const state of ['working', 'waiting']) {
+    const text = file('- [?] Publish?').replace('state=waiting', `state=${state}`)
+    const result = view(observe(emptyQuestions(), text).ledger, text)
+    expect(result.overview.waiting).toBe(1)
+    expect(result.waiting[0]?.text).toBe('Publish?')
+    expect(result.focus?.type).toBe('ask')
+  }
+})
+
+test("a resolved question does not come back when its session wakes up, and a new question still counts", () => {
+  for (const producer of ['', `<!-- question=${'a'.repeat(64)}:1 -->\n`]) {
+    const stopped = file(`- [?] Publish?\n${producer}`).replace('state=waiting', 'state=ended')
+    const first = observe(emptyQuestions(), stopped).ledger
+    const id = first.records[0]!.id
+    const resolved = resolveQuestion(first, id, NOW)
+    const capture = captureJson(resolved.records[0]!, 'resolved')
+    const restored = withCaptures(first, [parseCapture(capture, sha256(capture))!])
+    const awake = stopped.replace('state=ended', 'state=working')
+    expect(view(observe(restored, awake).ledger, awake).waiting).toEqual([])
+    const changed = awake.replace('Publish?', 'Choose a date?')
+    expect(view(observe(restored, changed).ledger, changed).overview.waiting).toBe(1)
+    if (producer !== '') {
+      const renewed = awake.replace(':1 -->', ':2 -->')
+      expect(view(observe(restored, renewed).ledger, renewed).overview.waiting).toBe(1)
+    }
+    expect(restored.records.find(record => record.id === id)?.source).toEqual(first.records[0]?.source)
+    expect(first.records[0]?.isUnresolved).toBe(true)
+  }
+})
+
+test('resolving one of two identical stopped questions leaves the other identity open', () => {
+  const text = file('- [?] Publish?\n- [?] Publish?').replace('state=waiting', 'state=ended')
+  const initial = observe(emptyQuestions(), text).ledger
+  const resolved = resolveQuestion(initial, initial.records[0]!.id, NOW)
+  const next = observe(resolved, text).ledger
+  expect(view(next, text).waiting).toEqual([])
+  expect(view(next, text).stopped[0]?.questions?.map(item => item.hideKey)).toEqual([initial.records[1]!.id])
+})
+
+test('a retained question from a replaced stopped session stays out of Waiting on you', () => {
+  const stopped = file('- [?] Publish?').replace('state=waiting', 'state=ended')
+  const ledger = observe(emptyQuestions(), stopped).ledger
+  const replacement = stopped.replaceAll('a1b2c3d4', '11223344').replace('- [?] Publish?', '- [ ] Finish')
+  const result = view(observe(ledger, replacement).ledger, replacement)
+  expect(result.waiting).toEqual([])
+  expect(result.overview.waiting).toBe(0)
+  expect(result.older?.map(item => item.text)).toEqual(['Publish?'])
+})
+
+test('stopped and done questions bypass aging, due dates, focus and notifications in every language', () => {
+  for (const s of Object.values(STRINGS)) for (const state of ['working', 'waiting', 'ended', 'done']) for (const gap of [13 * 60 * 60 * 1000, 8 * 86400000]) for (const isDue of [true, false]) {
+    const text = file('- [?] Publish?\n- [ ] Finish').replace('state=waiting', `state=${state}`).replace(new Date(NOW).toISOString(), new Date(NOW - gap).toISOString()).replace('### Ship', isDue ? '### Ship\n> due 2026-10-17' : '### Ship')
+    const projects = parseProgress(text)
+    const ledger = observeQuestions(emptyQuestions(), projects, null, [], NOW - 8 * 86400000, true).ledger
+    const result = buildView(projects, [], null, NOW, 0, {}, s, [], {}, ledger)
+    expect(result.waiting).toEqual([])
+    expect(result.reminder).toEqual([])
+    expect(result.older).toEqual([])
+    expect(result.overview.waiting).toBe(0)
+    expect(result.focus).toBe(null)
+    expect(remindersOf(result, {}, NOW, '2026-10-16', s)).toEqual([])
+    if (state === 'done' && gap < 86400000) expect(result.recent[0]?.questions?.[0]?.text).toBe('Publish?')
+    else expect(result.stopped[0]?.questions?.[0]?.text).toBe('Publish?')
+  }
+})
+
+test('a new raw producer revision renews a resolved stopped question and survives inbox consumption', () => {
+  const text = file('- [?] Publish?').replace('state=waiting', 'state=ended')
+  const pending = (revision: string) => [{ id: 'a1b2c3d4', agent: 'codex', project: 'demo', text: 'Publish?', isQuestion: true, at: NOW, sourceRevisions: [revision.repeat(64)] }]
+  const first = observeQuestions(emptyQuestions(), parseProgress(text), null, [], NOW, true, 'first', undefined, pending('a')).ledger
+  const resolved = resolveQuestion(first, first.records[0]!.id, NOW)
+  const projects = parseProgress(text.replace('state=ended', 'state=working'))
+  const next = observeQuestions(resolved, projects, null, [], NOW, true, 'second', undefined, pending('b')).ledger
+  const renewed = buildView(projects, [], null, NOW, 0, {}, STRINGS.en, [], {}, next, undefined, pending('b'))
+  expect(renewed.overview.waiting).toBe(1)
+  expect(renewed.waiting[0]?.questionId === first.records[0]?.id).toBe(false)
+  const consumed = observeQuestions(next, projects, null, [], NOW, true, 'third').ledger
+  expect(buildView(projects, [], null, NOW, 0, {}, STRINGS.en, [], {}, consumed).overview.waiting).toBe(1)
+})
+
+const inboxSession = 'inbox-question-session'
+const inboxTurn = (at = NOW, event: AgentTurn['event'] = 'turn'): AgentTurn => ({
+  id: blockId('codex', inboxSession), session: inboxSession, agent: 'codex', project: 'demo',
+  cwd: '/demo', event, at, prompt: '', answer: 'Use staging?', transcript: '',
+})
+const inboxQuestion = () => peekInbox([{
+  name: `codex-turn-${NOW}-1.json`,
+  body: JSON.stringify({ session_id: inboxSession, cwd: '/demo', last_assistant_message: 'Use staging?' }),
+  at: NOW,
+}])
+
+test('an inbox question is resolved by the next turn of the same session', () => {
+  const pending = inboxQuestion()
+  const initial = observeQuestions(emptyQuestions(), [], null, [], NOW, true, 'first', undefined, pending).ledger
+  expect(initial.records.map(row => row.source?.kind)).toEqual(['inbox'])
+  const next = { ...inboxTurn(NOW + 1000), answer: 'Using staging.' }
+  const resolved = observeQuestions(initial, [], null, [], NOW + 2000, true, 'second', undefined, pending, [next]).ledger
+  expect(resolved.records.map(row => [row.isUnresolved, row.isWaiting, row.isPresent])).toEqual([[false, false, false]])
+  expect(initial.records[0]?.isUnresolved).toBe(true)
+  const replay = observeQuestions(resolved, [], null, [], NOW + 3000, true, 'replay', undefined, pending).ledger
+  expect(replay.records).toEqual(resolved.records)
+})
+
+test("an inbox question is resolved by the person's prompt to that session", () => {
+  const pending = inboxQuestion()
+  const initial = observeQuestions(emptyQuestions(), [], null, [], NOW, true, 'first', undefined, pending).ledger
+  const prompt = inboxTurn(NOW + 1000, 'prompt')
+  const mirror = { ...emptyMirror(prompt.id, 'demo', NOW, '/demo', 'codex'), resume: inboxSession, turnOrder: NOW * 2 }
+  const asked = markAsked(applyTaskCreate(mirror, { subject: 'Deploy' }, '1', NOW), 'Use staging?')
+  expect(answerAgentPrompt(asked, prompt, NOW + 2000)?.tasks.some(task => task.waiting === 'you')).toBe(false)
+  const resolved = observeQuestions(initial, [], null, [], NOW + 2000, true, 'prompt', undefined, [], [prompt]).ledger
+  expect(resolved.records.map(row => [row.isUnresolved, row.isWaiting, row.isPresent])).toEqual([[false, false, false]])
+})
+
+test("an end, a cleanup or another session's turn does not resolve an inbox question", () => {
+  const pending = inboxQuestion()
+  const initial = observeQuestions(emptyQuestions(), [], null, [], NOW, true, 'first', undefined, pending).ledger
+  for (const turns of [[], [inboxTurn(NOW + 1000, 'end')], [inboxTurn()], [{ ...inboxTurn(NOW + 1000), id: 'ffffffff', session: 'other' }], [{ ...inboxTurn(NOW + 1000), agent: 'cursor' }], [{ ...inboxTurn(NOW + 1000), answer: '' }]]) {
+    const next = observeQuestions(initial, [], null, [], NOW + 2000, true, 'unchanged', undefined, [], turns).ledger
+    expect(next.records).toEqual(initial.records)
+  }
+})
+
+test('a duplicate delivery of the asking turn leaves the question open', () => {
+  for (const agent of ['grok', 'opencode']) {
+    const body = JSON.stringify({ session_id: inboxSession, cwd: '/demo', last_assistant_message: 'Use staging?' })
+    const first = { name: `${agent}-turn-${NOW}-1.json`, body, at: NOW }
+    const duplicate = { name: `${agent}-turn-${NOW + 1000}-2.json`, body: agent === 'grok' ? JSON.stringify({ session_id: inboxSession, cwd: '/demo', lastAssistantMessage: 'Use staging?' }) : body, at: NOW + 1000 }
+    const initial = observeQuestions(emptyQuestions(), [], null, [], NOW, false, 'first', undefined, peekInbox([first])).ledger
+    const captured = observeQuestions(initial, [], null, [], NOW + 1000, false, 'duplicate', undefined, peekInbox([first, duplicate])).ledger
+    const delivery = { ...inboxTurn(NOW + 1000), agent, id: blockId(agent, inboxSession) }
+    const next = observeQuestions(captured, [], null, [], NOW + 2000, true, 'settle', undefined, [], [delivery]).ledger
+    expect(next.records.map(row => [row.id, row.isUnresolved])).toEqual(initial.records.map(row => [row.id, true]))
+    expect(JSON.parse(next.records[0]!.source!.data).sourceAt).toBe(NOW + 1000)
+    const answered = observeQuestions(next, [], null, [], NOW + 3000, true, 'answer', undefined, [], [{ ...delivery, at: NOW + 2000, answer: 'Using staging.' }]).ledger
+    expect(answered.records.map(row => row.isUnresolved)).toEqual([false])
+  }
+})
+
+test("a question asked without a working folder is settled by the same session's next turn", () => {
+  const pending = peekInbox([{
+    name: `codex-turn-${NOW}-1.json`,
+    body: JSON.stringify({ session_id: inboxSession, last_assistant_message: 'Use staging?' }),
+    at: NOW,
+  }])
+  const initial = observeQuestions(emptyQuestions(), [], null, [], NOW, true, 'first', undefined, pending).ledger
+  expect(initial.records[0]?.source?.project).toBe('')
+  for (const project of [STRINGS.en.uncategorized, 'other']) {
+    const next = { ...inboxTurn(NOW + 1000), project, answer: 'Using staging.' }
+    const resolved = observeQuestions(initial, [], null, [], NOW, true, 'answer', undefined, pending, [next]).ledger
+    expect(resolved.records.map(row => row.isUnresolved)).toEqual([false])
+  }
+  const moved = observeQuestions(emptyQuestions(), [], null, [], NOW, true, 'first', undefined, inboxQuestion()).ledger
+  const resolved = observeQuestions(moved, [], null, [], NOW, true, 'answer', undefined, [], [{ ...inboxTurn(NOW + 1000), project: 'other' }]).ledger
+  expect(resolved.records.map(row => row.isUnresolved)).toEqual([false])
+})
 
 test('an explicit same-word producer renewal resurfaces only its own question without an intermediate observation', () => {
   let mirror = emptyMirror('a1b2c3d4-native', 'demo', NOW)

@@ -1,11 +1,13 @@
-// Draws the README images from the pane's own code: drawPane's tree, laid out like a terminal
-// (terminal.ts), written as SVG. One set per language and per light / dark theme.
+// Draws the README images from the board's own code: drawPane's tree and boardScreen's lines,
+// laid out like a terminal (terminal.ts), written as SVG. One set per language.
 //   bun docs/preview/render.ts          (run `claude --plugin-dir .` once first, for the JSX setup)
-// Writes docs/images/{tour,hero,flow}-<lang>-<theme>.svg, and docs/preview/out/dashboard-<lang>.html
-// for docs/preview/png.mjs, which takes the progress.html screenshots and the social preview.
+// Writes docs/images/{tour,flow,promo}-<lang>.svg, docs/images/board/<agent>-<lang>-<light|dark>.svg,
+// docs/images/agents/<agent>.svg, and docs/preview/out/dashboard-<lang>.html for
+// docs/preview/png.mjs, which takes the progress.html screenshots and the social preview.
 import { mkdirSync, readdirSync, writeFileSync } from 'fs'
 import { join } from 'path'
 import { upsertAutoBlock } from '../../hooks/blocks'
+import { boardItems, boardScreen, emptyBoardState } from '../../hooks/board'
 import { dashboardHtml } from '../../hooks/dashboard'
 import { countDay, journalLine } from '../../hooks/journal'
 import { applyTaskCreate, applyTaskUpdate, emptyMirror } from '../../hooks/mirror'
@@ -14,10 +16,10 @@ import type { Palette } from '../../hooks/palette'
 import { parseProgress } from '../../hooks/parse'
 import { STRINGS } from '../../hooks/strings'
 import { buildView } from '../../hooks/view'
-import { NOW, SAMPLES, SESSION, MIN } from './samples'
+import { CLI_FILES, NOW, SAMPLES, SESSION, MIN } from './samples'
 import { AGENT_ICONS, TESTED_ICONS } from './icons'
 import type { AgentIcon } from './icons'
-import { CELL, LINE, gridSvg, keyBox, layout, rowOf, toNode } from './terminal'
+import { CELL, LINE, gridSvg, keyBox, layout, rowOf, toNode, widthCells } from './terminal'
 import type { Theme } from './terminal'
 
 // The JSX in pane.tsx compiles to h(type, props, ...children).
@@ -184,15 +186,16 @@ const paneGrid = (lang: Lang, mode: Mode, frame: Frame) => {
 const PAD = 22
 const BAR = 34
 const windowWidth = WIDTH * CELL + PAD * 2
-const terminal = (mode: Mode, mono: string, title: string, body: string, rows: number, x: number, y: number): string => {
+const terminal = (mode: Mode, mono: string, title: string, body: string, rows: number, x: number, y: number, cols = WIDTH): string => {
   const t = TERMINAL[mode]
+  const w = cols * CELL + PAD * 2
   const h = BAR + PAD + rows * LINE + PAD
   return `<g transform="translate(${x} ${y})">
-<rect width="${windowWidth}" height="${h}" rx="12" fill="${t.ground}" stroke="${t.edge}"/>
-<path d="M12 0.5h${windowWidth - 24}a11.5 11.5 0 0 1 11.5 11.5v${BAR - 12}h-${windowWidth - 1}v-${BAR - 12}a11.5 11.5 0 0 1 11.5-11.5z" fill="${t.bar}"/>
-<line x1="0.5" y1="${BAR}" x2="${windowWidth - 0.5}" y2="${BAR}" stroke="${t.edge}"/>
+<rect width="${w}" height="${h}" rx="12" fill="${t.ground}" stroke="${t.edge}"/>
+<path d="M12 0.5h${w - 24}a11.5 11.5 0 0 1 11.5 11.5v${BAR - 12}h-${w - 1}v-${BAR - 12}a11.5 11.5 0 0 1 11.5-11.5z" fill="${t.bar}"/>
+<line x1="0.5" y1="${BAR}" x2="${w - 0.5}" y2="${BAR}" stroke="${t.edge}"/>
 <g fill="${t.palette.frame}"><circle cx="20" cy="17" r="5"/><circle cx="38" cy="17" r="5"/><circle cx="56" cy="17" r="5"/></g>
-<text x="${windowWidth / 2}" y="22" text-anchor="middle" font-family="${mono}" font-size="12" fill="${t.palette.muted}">${esc(title)}</text>
+<text x="${w / 2}" y="22" text-anchor="middle" font-family="${mono}" font-size="12" fill="${t.palette.muted}">${esc(title)}</text>
 <g font-family="${mono}" font-size="14" style="white-space:pre" xml:space="preserve">${body}</g>
 </g>`
 }
@@ -808,6 +811,83 @@ ${glyph(icon, 0, 0, 48)}
 </svg>
 `
 
+// The terminal board (`--watch`) as it runs beside a CLI agent, with that agent's question
+// open: boardScreen's own lines, coloured as a terminal shows its ANSI codes, so the picture
+// is the board the person gets, not a drawing of it. One per CLI, language and theme.
+const CLI_AGENTS = ['codex', 'antigravity'] as const
+type CliAgent = (typeof CLI_AGENTS)[number]
+// boardScreen's colour codes (CODES in hooks/board.ts) and the palette colour each one takes;
+// 0 ends a run and 1 is bold. A code missing here stops the render rather than drawing it plain.
+const ANSI: Record<string, keyof Palette> = { '31': 'alert', '32': 'done', '33': 'waiting', '35': 'project', '36': 'accent', '2': 'muted' }
+type Grid = Parameters<typeof gridSvg>[0]
+const ansiGrid = (text: string, palette: Palette): Grid =>
+  text.replace(/\n$/, '').split('\n').map(line => {
+    const cells: Grid[number] = []
+    let style: Grid[number][number]['style'] = {}
+    for (const part of line.split(/(\u001b\[\d+m)/)) {
+      const code = /^\u001b\[(\d+)m$/.exec(part)?.[1]
+      if (code !== undefined) {
+        const tone = ANSI[code]
+        if (tone === undefined && code !== '0' && code !== '1') throw new Error(`boardScreen paints with ANSI code ${code}, which render.ts has no colour for`)
+        style = code === '1' ? { bold: true } : tone === undefined ? {} : { fg: palette[tone] }
+        continue
+      }
+      for (const ch of [...part]) cells.push(...(widthCells(ch) === 2 ? [{ ch, style }, { ch: '', style }] : [{ ch, style }]))
+    }
+    return cells
+  })
+
+const cliBoard = (lang: Lang, mode: Mode, agent: CliAgent): string => {
+  const s = STRINGS[lang]
+  const t = TERMINAL[mode]
+  const mono = monoOf(lang)
+  const file = CLI_FILES[lang]
+  if (file === undefined) throw new Error(`there is no CLI sample for ${lang}`)
+  // Every step the sample ticks was ticked this morning, so they are what "done today" counts.
+  const view = buildView(parseProgress(file), [], null, NOW, (file.match(/^- \[x\] /gm) ?? []).length, {}, s)
+  const items = boardItems(view, [], false, false)
+  const at = items.findIndex(item => item.type === 'ask' && item.ask.agent === agent)
+  if (at < 0) throw new Error(`the CLI sample for ${lang} has no question from ${agent}`)
+  const key = items[at]?.key ?? null
+  const state = { ...emptyBoardState, selected: at, key, open: key }
+  // The window is as narrow as it can be while every line still shows whole: the board cuts an
+  // indented line a little before the window's edge, so the widest line alone is not enough.
+  const whole = boardScreen(view, [], state, s, { width: 400, isColor: false })
+  let cols = Math.max(...whole.split('\n').map(widthCells))
+  while (boardScreen(view, [], state, s, { width: cols, isColor: false }) !== whole) cols++
+  const grid = ansiGrid(boardScreen(view, [], state, s, { width: cols, isColor: true }), t.palette)
+  const theme: Theme = { ground: t.ground, ink: t.ink, edge: t.edge, muted: t.palette.muted, accent: t.palette.accent, frame: t.palette.frame }
+  const title = 'agent-board --watch'
+  // Half a unit in from the edge, so the window's outline is not cut by the picture's own edge.
+  const W = cols * CELL + PAD * 2 + 1
+  const H = BAR + PAD + grid.length * LINE + PAD + 1
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}" role="img" aria-label="${esc(title)}" font-family="${sansOf(lang)}">
+<title>${esc(title)}</title>
+${terminal(mode, mono, title, gridSvg(grid, PAD, BAR + PAD, theme), grid.length, 0.5, 0.5, cols)}
+</svg>
+`
+}
+
+// The top of the pane as it first opens, for the top of the README: the same sample and
+// drawPane as the tour, without the motion, in a light and a dark version so GitHub can show the
+// one that matches its theme. It stops at the line that counts the other questions waiting, so
+// the first screen of the README shows what needs you rather than the whole pane.
+const pane = (lang: Lang, mode: Mode): string => {
+  const whole = paneGrid(lang, mode, { opened: [], isAnswered: false })
+  const more = keyBox(whole.grid, 'focus::more')
+  if (more === null) throw new Error(`the ${lang} pane sample has no "more waiting" line to stop at`)
+  const grid = whole.grid.slice(0, more.row + 1)
+  const theme = whole.theme
+  const title = WORDS[lang].window
+  const W = windowWidth + 1
+  const H = BAR + PAD + grid.length * LINE + PAD + 1
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}" role="img" aria-label="${esc(title)}" font-family="${sansOf(lang)}">
+<title>${esc(title)}</title>
+${terminal(mode, monoOf(lang), title, gridSvg(grid, PAD, BAR + PAD, theme), grid.length, 0.5, 0.5)}
+</svg>
+`
+}
+
 // fonts.py, run at the end, needs Python with fontTools 4.60 or newer and brotli; it is found
 // before anything is written, so without it the images stay as they were. Another fontTools
 // version cuts the fonts into slightly different bytes, so every image would show as changed.
@@ -830,7 +910,10 @@ mkdirSync(join(OUT, 'agents'), { recursive: true })
 for (const icon of AGENT_ICONS) writeFileSync(join(OUT, 'agents', `${icon.file}.svg`), agentIcon(icon))
 for (const lang of LANGS) writeFileSync(join(OUT, `promo-${lang}.svg`), promo(lang))
 
+mkdirSync(join(OUT, 'board'), { recursive: true })
 for (const lang of LANGS) {
+  for (const agent of CLI_AGENTS) for (const mode of ['light', 'dark'] as const) writeFileSync(join(OUT, 'board', `${agent}-${lang}-${mode}.svg`), cliBoard(lang, mode, agent))
+  for (const mode of ['light', 'dark'] as const) writeFileSync(join(OUT, `pane-${lang}-${mode}.svg`), pane(lang, mode))
   writeFileSync(join(OUT, `tour-${lang}.svg`), tour(lang))
   writeFileSync(join(OUT, `flow-${lang}.svg`), flow(lang))
   writeFileSync(join(PAGES, `dashboard-${lang}.html`), dashboard(lang))
@@ -840,7 +923,8 @@ for (const lang of LANGS) {
 const svgs = [
   ...readdirSync(OUT).filter(name => name.endsWith('.svg')).map(name => join(OUT, name)),
   ...AGENT_ICONS.map(icon => join(OUT, 'agents', `${icon.file}.svg`)),
+  ...readdirSync(join(OUT, 'board')).filter(name => name.endsWith('.svg')).map(name => join(OUT, 'board', name)),
 ]
 const fonts = Bun.spawnSync([python, join(import.meta.dir, 'fonts.py'), ...svgs], { stdout: 'inherit', stderr: 'inherit' })
 if (fonts.exitCode !== 0) throw new Error(`fonts.py stopped with exit code ${fonts.exitCode}`)
-console.log(`wrote the tour, flow and promotional card in ${LANGS.length} languages and ${AGENT_ICONS.length} agent icons to ${OUT}, and ${LANGS.length} progress.html pages to ${PAGES}`)
+console.log(`wrote the pane top, tour, flow, promotional card and CLI boards in ${LANGS.length} languages and ${AGENT_ICONS.length} agent icons to ${OUT}, and ${LANGS.length} progress.html pages to ${PAGES}`)

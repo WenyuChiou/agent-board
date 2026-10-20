@@ -1,14 +1,18 @@
+import { boardPromptHelper, boardRequestWords, boardRun, geminiBoardCommand, normalizeCommandPath, opencodeBoardCommand, promptReceiptScript } from './board-commands'
 import { LANGS, ZH_TW } from './i18n'
 import type { Strings } from './i18n'
 import { RELEASED } from './released'
 import type { ReleasedKind } from './released'
 import { sha256 } from './sha256'
 import { STRINGS } from './strings'
-import { boardRun, geminiBoardCommand, normalizeCommandPath, opencodeBoardCommand } from './board-commands'
+
+const BOARD_WORDS = boardRequestWords(Object.values(STRINGS))
+const BOARD_PROMPT_HELPER = boardPromptHelper(BOARD_WORDS)
+const PROMPT_RECEIPT_SCRIPT = promptReceiptScript(BOARD_WORDS)
 
 // The reporter script an agent's hook runs, written beside progress.md by `/progress
 // connect`: it saves what the hook hands over into the inbox and clears files older than two
-// days. No dependencies: POSIX sh on macOS and Linux, Windows PowerShell 5.1 on Windows.
+// days. POSIX sh or Windows PowerShell 5.1 suffices; Node strips prompt prose when available.
 
 // Arguments: the agent's name, `prompt`, `turn` or `end`, then optionally the JSON itself (as Codex's
 // legacy notify passes it) instead of on stdin.
@@ -23,7 +27,19 @@ event="\${2:-turn}"
 dir=${shellQuote(inbox)}
 mkdir -p "$dir" 2>/dev/null
 file="$dir/$agent-$event-$(date +%s)-$$"
-if [ $# -gt 0 ]; then
+raw=''
+if [ "$event" = prompt ]; then
+  if [ $# -gt 0 ]; then
+    raw="$1"
+  elif [ ! -t 0 ]; then
+    raw="$(cat)"
+  fi
+  if [ -n "$raw" ]; then
+    receipt=$(printf '%s' "$raw" | node -e ${shellQuote(PROMPT_RECEIPT_SCRIPT)})
+    if [ $? -ne 0 ] || [ -z "$receipt" ]; then receipt="$raw"; fi
+    printf '%s' "$receipt" > "$file.tmp"
+  fi
+elif [ $# -gt 0 ]; then
   printf '%s' "$1" > "$file.tmp"
 elif [ ! -t 0 ]; then
   cat > "$file.tmp"
@@ -50,6 +66,13 @@ New-Item -ItemType Directory -Force -Path $dir | Out-Null
 if ($Payload -eq '' -and [Console]::IsInputRedirected) {
   [Console]::InputEncoding = [Text.Encoding]::UTF8
   $Payload = [Console]::In.ReadToEnd()
+}
+if ($Event -eq 'prompt') {
+  $raw = $Payload
+  $Payload = ''
+  $OutputEncoding = New-Object Text.UTF8Encoding $false
+  try { $Payload = ($raw | node -e ${psQuote(PROMPT_RECEIPT_SCRIPT)} 2>$null | Out-String).Trim() } catch {}
+  if ($LASTEXITCODE -ne 0 -or $Payload -eq '') { $Payload = $raw }
 }
 if ($Payload.Trim() -ne '') {
   $name = '{0}-{1}-{2}-{3}' -f $Agent, $Event, [DateTimeOffset]::Now.ToUnixTimeMilliseconds(), $PID
@@ -453,7 +476,7 @@ export const agentHooks = (ctx: ConnectContext): AgentHook[] => {
       dir: ctx.openclawHome,
       file: [ctx.openclawHome, OPENCLAW_FILE].join(ctx.sep),
       generated: true,
-      edit: generatedFile(openclawPlugin(ctx), [openclawPlugin(ctx, false)]),
+      edit: generatedFile(openclawPlugin(ctx), [openclawPlugin(ctx, false), openclawPlugin(ctx, true, false)]),
     },
     {
       agent: 'openclaw',
@@ -476,7 +499,7 @@ export const agentHooks = (ctx: ConnectContext): AgentHook[] => {
       file: [opencodeHome, 'plugin', 'agent-board.js'].join(ctx.sep),
       old: [opencodeHome, 'plugin', 'progress-pane.js'].join(ctx.sep),
       generated: true,
-      edit: generatedFile(opencodePlugin(ctx), [opencodePlugin(ctx, false)]),
+      edit: generatedFile(opencodePlugin(ctx), [opencodePlugin(ctx, false), opencodePlugin(ctx, true, false)]),
     },
     ...boardCommands(ctx),
   ]
@@ -485,12 +508,12 @@ export const agentHooks = (ctx: ConnectContext): AgentHook[] => {
 // OpenCode takes plugins, not commands: this one writes the session's last exchange into the
 // inbox when the session goes idle (a subagent's session aside), and an end when it is
 // deleted. Every export of a plugin file must be a function.
-export const opencodePlugin = (ctx: ConnectContext, withPrompt = true): string => `// Written by the Agent Board plugin (/progress connect): reports each finished turn to the Agent Board
+export const opencodePlugin = (ctx: ConnectContext, withPrompt = true, flagsBoardRequests = true): string => `// Written by the Agent Board plugin (/progress connect): reports each finished turn to the Agent Board
 // pane.
 import { mkdirSync, renameSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 
-const INBOX = ${JSON.stringify(ctx.inbox)}
+${withPrompt && flagsBoardRequests ? BOARD_PROMPT_HELPER + '\n' : ''}const INBOX = ${JSON.stringify(ctx.inbox)}
 
 const save = (event, payload) => {
   try {
@@ -508,11 +531,11 @@ const textOf = message =>
     .join('\\n')
 
 export const AgentBoard = async ({ client, directory }) => ({
-${withPrompt ? `  'chat.message': async ({ sessionID }) => {
+${withPrompt ? `  'chat.message': async ({ sessionID }${flagsBoardRequests ? ', output' : ''}) => {
     try {
       const session = await client.session.get({ path: { id: sessionID } })
       if (!session.data || session.data.id !== sessionID || session.data.parentID) return
-      save('prompt', { session_id: sessionID, cwd: directory })
+      save('prompt', { session_id: sessionID, cwd: directory${flagsBoardRequests ? ', ...(isBoardRequest(output) ? { board_request: true } : {})' : ''} })
     } catch {}
   },
 ` : ''}\
@@ -636,12 +659,12 @@ export const withoutOpenclawPlugin = (config: Json, file: string): Json => {
 // Writes each finished turn into the inbox itself, as the OpenCode plugin does, so it needs
 // no shell. Heartbeat and memory runs are OpenClaw talking to itself, not the person's work;
 // a compaction or a restart does not end the session.
-export const openclawPlugin = (ctx: ConnectContext, withPrompt = true): string => `// Written by the Agent Board plugin (/progress connect): reports each finished turn to the Agent Board
+export const openclawPlugin = (ctx: ConnectContext, withPrompt = true, flagsBoardRequests = true): string => `// Written by the Agent Board plugin (/progress connect): reports each finished turn to the Agent Board
 // pane.
 import { mkdirSync, renameSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 
-const INBOX = ${JSON.stringify(ctx.inbox)}
+${withPrompt && flagsBoardRequests ? BOARD_PROMPT_HELPER + '\n' : ''}const INBOX = ${JSON.stringify(ctx.inbox)}
 
 const save = (event, payload) => {
   try {
@@ -666,7 +689,7 @@ export default {
 ${withPrompt ? `    api.on('before_prompt_build', (_event, ctx) => {
       try {
         if (!ctx?.sessionId || ctx.inputProvenance?.kind !== 'external_user') return
-        save('prompt', { session_id: ctx.sessionId, cwd: ctx.workspaceDir ?? '' })
+        save('prompt', { session_id: ctx.sessionId, cwd: ctx.workspaceDir ?? ''${flagsBoardRequests ? ', ...(isBoardRequest(_event) ? { board_request: true } : {})' : ''} })
       } catch {}
     })
 ` : ''}\

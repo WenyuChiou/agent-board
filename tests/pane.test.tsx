@@ -1,7 +1,7 @@
 import type { On, PromptOrigin, RenderPropsOf } from 'claude-code'
 import { expect, mock, test } from 'claude-code/testing'
 import type { Engine, MockClock } from 'claude-code/testing'
-import type { ProgressMirrorTask } from '../types'
+import type { ProgressMirror, ProgressMirrorTask } from '../types'
 import { agentHooks, boardScript, isNodeSupported, isSetupState, NODE_MIN, openclawPlugin, RELEASE_PATHS } from '../hooks/connect'
 import { STRINGS } from '../hooks/strings'
 
@@ -12,9 +12,9 @@ import { dashboardHtml } from '../hooks/dashboard'
 import { buildView, IDLE_MS, parseSeen, seenJson, seenPath, withSeen } from '../hooks/view'
 import { parseProgress } from '../hooks/parse'
 import { chatText, peekInbox } from '../hooks/board'
-import { answerAgentPrompt, blockId, isInboxFile, withAgentPrompts } from '../hooks/inbox'
+import { answerAgentPrompt, blockId, CLAIM_MS, isInboxFile, takenName, withAgentPrompts } from '../hooks/inbox'
 import { completionKey, completionOverlay, emptyMirror } from '../hooks/mirror'
-import { applyDigest } from '../hooks/digest'
+import { applyDigest, startBackgroundJob } from '../hooks/digest'
 import { upsertAutoBlock } from '../hooks/blocks'
 
 import { emptyQuestions, migrationKey, observeQuestions, questionProofPath, questionsJson } from '../hooks/questions'
@@ -39,6 +39,20 @@ const PROPS: RenderPropsOf['Pane'] = {
   scroll: { offset: 0, bodyRows: 40 },
   view: {},
 }
+
+test('the pane and its HTML warn once about a torn tail without losing complete tasks', async ($, on) => {
+  const source = '## Synthetic day\n### Hand kept\n- [ ] Keep\n' + Array.from({ length: 7 }, (_, i) => `<!-- auto session=${10000000 + i} agent=codex state=working updated=2026-10-16T12:00:00Z -->\n### Day task ${i}\n- [ ] Next\n${i === 6 ? '<!-- /auto se' : `<!-- /auto session=${10000000 + i} -->\n`}`).join('\n')
+  const world: World = { files: new Map([[FILE, source]]), mtime: 1, hasTasks: true, store: { lang: 'en', autoConnectOff: true, opened: ['others'] } }
+  engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/other-project', surface: 'desktop', isInteractive: true })
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
+  const warning = EN.progressIncomplete(1)
+  expect(await ui.find({ type: 'Text', text: warning })).toBeDefined()
+  for (let i = 0; i < 7; i++) expect(await ui.find({ type: 'Button', key: `Synthetic day::Day task ${i}` })).toBeDefined()
+  expect(world.files.get(FILE)).toBe(source)
+  expect((world.files.get(FILE.replace('.md', '.html')) ?? '').split(warning).length - 1).toBe(1)
+  await ui.unmount()
+})
 
 test('a task handoff removes Continue while retaining the recipient in the pane and file', async ($, on) => {
   const world: World = { files: new Map(), mtime: 1, hasTasks: true }
@@ -127,6 +141,8 @@ type World = {
   reply?: (prompt: string) => string | undefined
   // The transcript $.session.messages() returns.
   messages?: Array<{ role: 'user' | 'assistant'; text: string; toolUses: Array<{ tool_use_id: string; tool: string; input: Record<string, unknown> }> }>
+  messageReads?: number
+  holdBackground?: { reached: () => void; release: Promise<void> }
   // Answers `gh`; other commands (git) answer the branch.
   gh?: () => { exitCode: number; stdout: string; stderr: string }
   // A move of this file fails, as when another session renamed it first.
@@ -158,7 +174,7 @@ type World = {
   unwritable?: Set<string>
   ignoreQuestionWrites?: boolean
   failQuestionCapture?: 'read' | 'write'
-  failStore?: (operation: 'get' | 'set', key: string) => boolean
+  failStore?: (operation: 'get' | 'set' | 'delete', key: string) => boolean
   beforeStoreSet?: (key: string) => void
   ignoreStore?: (key: string) => boolean
   afterMove?: (from: string, to: string) => boolean
@@ -172,6 +188,14 @@ type World = {
 // handlers; map it back so the in-memory files are found on every host.
 const posix = (path: string): string => path.replace(/^[A-Za-z]:\\/, '/').replace(/\\/g, '/')
 const settledSetup = async ($: Engine, world: World): Promise<void> => { await world.setupDone; await $.command.run({ ...TIDY, args: 'connect status' }) }
+
+const beneathButton = (node: unknown, key: string, text: string): boolean => {
+  if (typeof node !== 'object' || node === null) return false
+  const element = node as { props?: { key?: string }; children?: Array<{ props?: { key?: string }; children?: unknown[] }> }
+  const children = element.children ?? []
+  const index = children.findIndex(child => child?.props?.key === `${key}::resolve`)
+  return (element.props?.key === `${key}::question` && index >= 0 && children[index + 1]?.children?.includes(text) === true) || children.some(child => beneathButton(child, key, text))
+}
 const controlFile = '/home/me/.agent-board/legacy-connect.json'
 const nativeState = (world: World): ConnectState => JSON.parse(world.files.get(controlFile) ?? '{"version":1,"revision":0,"disabled":false,"owned":{},"notified":[]}') as ConnectState
 let workerStageSequence = 0
@@ -213,7 +237,11 @@ const engineBeneath = (on: On, world: World): MockClock => {
       store[e.key] = e.value
       return { value: undefined }
     })
-    on('store.delete', ($, e) => { delete store[e.key]; return { value: undefined } })
+    on('store.delete', ($, e) => {
+      if (world.failStore?.('delete', e.key)) return { deny: 'EIO' }
+      delete store[e.key]
+      return { value: undefined }
+    })
     on('store.keys', () => ({ value: Object.keys(store) }))
   } else {
     on('store.get', ($, e) => ({ value: structuredClone(shared[e.key]) }))
@@ -324,7 +352,10 @@ const engineBeneath = (on: On, world: World): MockClock => {
     world.ran?.push([...e.argv])
     return { value: { ...ran, isStdoutTruncated: false, isStderrTruncated: false } }
   })
-  on('session.messages', () => ({ value: world.messages ?? [] }))
+  on('session.messages', () => {
+    world.messageReads = (world.messageReads ?? 0) + 1
+    return { value: world.messages ?? [] }
+  })
   on('session.append', ($, e, next) => {
     world.appended?.push(e)
     return next(e)
@@ -407,6 +438,15 @@ const engineBeneath = (on: On, world: World): MockClock => {
   })
   on('turn.start', ($, e) => ({ turnId: e.turnId }))
   on('turn.complete', () => ({ text: '' }))
+  on('tool.call', { tool: 'SyntheticBackground' }, async () => {
+    const held = world.holdBackground
+    world.holdBackground = undefined
+    if (held !== undefined) {
+      held.reached()
+      await held.release
+    }
+    return { result: {} }
+  })
   let nextId = 0
   on('tool.call', { tool: 'TaskCreate' }, ($, e) => {
     nextId += 1
@@ -736,6 +776,197 @@ const addPrompt = (world: World, at: number, session = PROMPT_SESSION): string =
 
 const effectivePromptMirror = (world: World) => withAgentPrompts(world.store![`agent:${PROMPT_ID}`] as ReturnType<typeof emptyMirror>, Object.entries(world.store!).filter(([key]) => key.startsWith(`agentPrompt:${PROMPT_ID}:`)).map(([, value]) => value), Date.parse('2026-10-16T13:00:00Z'))!
 
+test('the board command sent to a session leaves its question waiting on you', async ($, on) => {
+  const { world, mirror } = questionWorld()
+  const before = world.files.get(FILE)
+  world.files.set(`${INBOX}/codex-prompt-${PROMPT_AT + 1000}-77.json`, JSON.stringify({ session_id: PROMPT_SESSION, board_request: true }))
+  const clock = engineBeneath(on, world)
+  await probeStart($)
+  await clock.advance(5000)
+  expect(world.files.get(FILE)).toBe(before)
+  expect(effectivePromptMirror(world)).toEqual(mirror)
+  expect(world.asked).toEqual([])
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
+  expect(JSON.stringify(await ui.drawn())).toContain('Use staging?')
+  await ui.unmount()
+})
+
+test('a free-words board request followed by a board-only reply puts the question back once', async ($, on) => {
+  const { world } = questionWorld()
+  const clock = engineBeneath(on, world)
+  await probeStart($)
+  addPrompt(world, PROMPT_AT + 1000)
+  await clock.advance(5000)
+  expect(world.files.get(FILE)).toContain('- [x] Database — Use staging?')
+  const name = `${INBOX}/codex-turn-${PROMPT_AT + 2000}-77.json`
+  const body = JSON.stringify({ session_id: PROMPT_SESSION, prompt: 'where do things stand?', last_assistant_message: 'Progress  ● 1 waiting  ▸ 0 in progress  ⚑ 0 due soon  ✓ 0 done today' })
+  world.files.set(name, body)
+  await clock.advance(5000)
+  expect(world.files.get(FILE)).toContain('- [?] Database — Use staging?')
+  expect(effectivePromptMirror(world).state).toBe('waiting')
+  expect(world.asked).toEqual([])
+  const restored = world.files.get(FILE)
+  world.files.set(name, body)
+  await clock.advance(5000)
+  expect(world.files.get(FILE)).toBe(restored)
+  const ledger = JSON.parse(world.files.get(FILE.replace('.md', '-questions.json'))!).records
+  expect(ledger.filter((row: { isUnresolved?: boolean }) => row.isUnresolved)).toHaveLength(1)
+})
+
+test('a real answer after a board request still answers the question', async ($, on) => {
+  const { world } = questionWorld()
+  const clock = engineBeneath(on, world)
+  await probeStart($)
+  addPrompt(world, PROMPT_AT + 1000)
+  await clock.advance(5000)
+  addPrompt(world, PROMPT_AT + 3000)
+  await clock.advance(5000)
+  world.files.set(`${INBOX}/codex-turn-${PROMPT_AT + 2000}-77.json`, JSON.stringify({ session_id: PROMPT_SESSION, prompt: '/board', last_assistant_message: 'Board' }))
+  await clock.advance(5000)
+  expect(world.files.get(FILE)).toContain('- [x] Database — Use staging?')
+  expect(effectivePromptMirror(world).state).toBe('working')
+  expect(effectivePromptMirror(world).tasks.some(one => one.waiting === 'you')).toBe(false)
+})
+
+test('a board reply in the same second as a real answer leaves the question answered', async ($, on) => {
+  const { world } = questionWorld()
+  const clock = engineBeneath(on, world)
+  await probeStart($)
+  addPrompt(world, PROMPT_AT + 1000)
+  world.files.set(`${INBOX}/codex-turn-${(PROMPT_AT + 1000) / 1000}-77.json`, JSON.stringify({ session_id: PROMPT_SESSION, prompt: '/board', last_assistant_message: 'Board' }))
+  await clock.advance(5000)
+  expect(world.files.get(FILE)).toContain('- [x] Database — Use staging?')
+  expect(effectivePromptMirror(world).state).toBe('working')
+  expect(effectivePromptMirror(world).tasks.some(one => one.waiting === 'you')).toBe(false)
+  expect(world.asked).toEqual([])
+})
+
+test('a board request, its restoring reply, then a real answer answers the question again', async ($, on) => {
+  const { world } = questionWorld()
+  const clock = engineBeneath(on, world)
+  await probeStart($)
+  addPrompt(world, PROMPT_AT + 1000)
+  await clock.advance(5000)
+  world.files.set(`${INBOX}/codex-turn-${PROMPT_AT + 2000}-77.json`, JSON.stringify({ session_id: PROMPT_SESSION, prompt: 'where do things stand?', last_assistant_message: 'Progress  ● 1 waiting  ▸ 0 in progress  ⚑ 0 due soon  ✓ 0 done today' }))
+  await clock.advance(5000)
+  expect(world.files.get(FILE)).toContain('- [?] Database — Use staging?')
+  expect(effectivePromptMirror(world).state).toBe('waiting')
+  addPrompt(world, PROMPT_AT + 3000)
+  await clock.advance(5000)
+  expect(world.files.get(FILE)).toContain('- [x] Database — Use staging?')
+  expect(effectivePromptMirror(world).state).toBe('working')
+  expect(effectivePromptMirror(world).tasks.some(one => one.waiting === 'you')).toBe(false)
+  const ledger = JSON.parse(world.files.get(FILE.replace('.md', '-questions.json'))!).records
+  expect(ledger.filter((row: { isUnresolved?: boolean }) => row.isUnresolved)).toHaveLength(0)
+  expect(world.asked).toEqual([])
+})
+
+test('a question followed by a board turn in one drain keeps the session waiting', async ($, on) => {
+  const { world } = questionWorld()
+  const clock = engineBeneath(on, world)
+  await probeStart($)
+  world.files.set(`${INBOX}/codex-turn-${PROMPT_AT + 1000}-77.json`, JSON.stringify({ session_id: PROMPT_SESSION, prompt: 'Plan migration', last_assistant_message: 'Use staging?' }))
+  world.files.set(`${INBOX}/codex-turn-${PROMPT_AT + 2000}-77.json`, JSON.stringify({ session_id: PROMPT_SESSION, prompt: '/board', last_assistant_message: 'Board' }))
+  await clock.advance(5000)
+  expect(effectivePromptMirror(world).state).toBe('waiting')
+  expect(effectivePromptMirror(world).tasks.some(one => one.waiting === 'you')).toBe(true)
+  expect(world.asked).toHaveLength(1)
+})
+
+// A later turn with text settles an agent's inbox question (#149), but a board look is not an answer.
+test('a board turn after an inbox question in one drain does not settle that question', async ($, on) => {
+  const { world } = questionWorld()
+  const clock = engineBeneath(on, world)
+  await probeStart($)
+  world.files.set(`${INBOX}/codex-turn-${PROMPT_AT + 1000}-77.json`, JSON.stringify({ session_id: PROMPT_SESSION, prompt: 'Plan migration', last_assistant_message: 'Should the new column be nullable?' }))
+  world.files.set(`${INBOX}/codex-turn-${PROMPT_AT + 2000}-77.json`, JSON.stringify({ session_id: PROMPT_SESSION, prompt: '/board', last_assistant_message: 'Board' }))
+  await clock.advance(5000)
+  await clock.advance(2000)
+  const records = JSON.parse(world.files.get(FILE.replace('.md', '-questions.json')) ?? '{"records":[]}').records as Array<{ isUnresolved?: boolean; source?: { kind: string } }>
+  expect(records.filter(row => row.source?.kind === 'inbox').map(row => row.isUnresolved)).toEqual([true])
+  expect(effectivePromptMirror(world).state).toBe('waiting')
+})
+
+test('a board command prompt after an inbox question does not settle that question', async ($, on) => {
+  const { world } = questionWorld()
+  const clock = engineBeneath(on, world)
+  await probeStart($)
+  world.files.set(`${INBOX}/codex-turn-${PROMPT_AT + 1000}-77.json`, JSON.stringify({ session_id: PROMPT_SESSION, prompt: 'Plan migration', last_assistant_message: 'Should the new column be nullable?' }))
+  await clock.advance(5000)
+  world.files.set(`${INBOX}/codex-prompt-${PROMPT_AT + 2000}-77.json`, JSON.stringify({ session_id: PROMPT_SESSION, board_request: true }))
+  world.mtime += 1
+  await clock.advance(5000)
+  await clock.advance(2000)
+  const records = JSON.parse(world.files.get(FILE.replace('.md', '-questions.json')) ?? '{"records":[]}').records as Array<{ isUnresolved?: boolean; source?: { kind: string } }>
+  expect(records.filter(row => row.source?.kind === 'inbox').map(row => row.isUnresolved)).toEqual([true])
+})
+
+test('a work turn followed by two board looks in one drain is still summed up', async ($, on) => {
+  const { world } = questionWorld()
+  world.reply = () => 'TITLE: Migration\nCONTEXT: fixture\nDONE: Updated schema\nNEXT: Run migration\nASK: -'
+  const clock = engineBeneath(on, world)
+  await probeStart($)
+  for (const [delta, prompt, answer] of [
+    [1000, 'Plan migration', 'Updated schema; run migration next.'],
+    [2000, '/board', 'Board'],
+    [3000, '/board', 'Board'],
+  ] as const) world.files.set(`${INBOX}/codex-turn-${PROMPT_AT + delta}-77.json`, JSON.stringify({ session_id: PROMPT_SESSION, prompt, last_assistant_message: answer }))
+  await clock.advance(5000)
+  expect(world.asked).toHaveLength(1)
+  expect(world.files.get(FILE)).toContain('Updated schema')
+  expect(world.files.get(FILE)).toContain('Run migration')
+})
+
+test('a board look whose block was undone after it was stored restores its question on the retry', async ($, on) => {
+  const { world } = questionWorld()
+  const clock = engineBeneath(on, world)
+  await probeStart($)
+  addPrompt(world, PROMPT_AT + 1000)
+  await clock.advance(5000)
+  const answered = world.files.get(FILE)!
+  const name = `codex-turn-${PROMPT_AT + 2000}-77.json`
+  let undid = 0
+  const undo = (): string => {
+    undid += 1
+    world.afterWrite = undo
+    return answered
+  }
+  world.afterWrite = undo
+  world.files.set(`${INBOX}/${name}`, JSON.stringify({ session_id: PROMPT_SESSION, prompt: 'where do things stand?', last_assistant_message: 'Progress  ● 1 waiting  ▸ 0 in progress  ⚑ 0 due soon  ✓ 0 done today' }))
+  await clock.advance(5000)
+  expect(undid).toBe(3)
+  expect(world.files.get(FILE)).toBe(answered)
+  expect(effectivePromptMirror(world).state).toBe('waiting')
+  expect((world.store!.inboxFailed as Record<string, string>)[name]).toContain('the block was not on the board when read back')
+  world.afterWrite = undefined
+  const claimed = [...world.files.keys()].find(path => path.startsWith(`${INBOX}/${name}.`) && path.endsWith('.taking'))!
+  const body = world.files.get(claimed)!
+  world.files.delete(claimed)
+  // Expire this claim without running fifteen minutes of unrelated mock polls.
+  world.files.set(`${INBOX}/${takenName(name, SESSION.slice(0, 8), PROMPT_AT - CLAIM_MS)}`, body)
+  world.mtime += 1
+  await clock.advance(5000)
+  expect(world.files.get(FILE)).toContain('- [?] Database — Use staging?')
+  expect(effectivePromptMirror(world).state).toBe('waiting')
+  expect(world.asked).toEqual([])
+  expect(Object.hasOwn(world.store!.inboxDone as object, name)).toBe(true)
+})
+
+test('a session end clears a provisional question before a later board turn', async ($, on) => {
+  const { world } = questionWorld()
+  const clock = engineBeneath(on, world)
+  await probeStart($)
+  addPrompt(world, PROMPT_AT + 1000)
+  await clock.advance(5000)
+  world.files.set(`${INBOX}/codex-end-${PROMPT_AT + 2000}-77.json`, JSON.stringify({ session_id: PROMPT_SESSION }))
+  world.files.set(`${INBOX}/codex-turn-${PROMPT_AT + 3000}-77.json`, JSON.stringify({ session_id: PROMPT_SESSION, prompt: '/board', last_assistant_message: 'Board' }))
+  await clock.advance(5000)
+  expect(effectivePromptMirror(world).promptQuestion).toBe(null)
+  expect(effectivePromptMirror(world).state).toBe('ended')
+  expect(effectivePromptMirror(world).tasks.some(one => one.waiting === 'you')).toBe(false)
+  expect(world.asked).toEqual([])
+})
+
 for (const [when, delta] of [['older', -1000], ['equal', 0], ['newer', 1000]] as const) test(`raw-owner completion and ${when} prompts compose without restoring prior questions`, async ($, on) => {
   const { world, mirror } = questionWorld()
   const confirmedAt = PROMPT_AT + 5000
@@ -811,11 +1042,14 @@ test('another agent prompt immediately answers its visible question without a mo
 
 test("a prompt that answers another agent's question takes it off Waiting on you and closes its question record", async ($, on) => {
   const { world } = questionWorld()
+  const pending = peekInbox([{ name: `codex-turn-${PROMPT_AT}-1.json`, body: JSON.stringify({ session_id: PROMPT_SESSION, cwd: '/demo', last_assistant_message: 'Use staging?' }), at: PROMPT_AT }])
+  const initial = observeQuestions(emptyQuestions(), parseProgress(world.files.get(FILE)!), null, [], PROMPT_AT, true, 'fixture', undefined, pending).ledger
+  world.files.set(FILE.replace('.md', '-questions.json'), questionsJson(initial))
   const ledger = () => (JSON.parse(world.files.get(FILE.replace('.md', '-questions.json')) ?? '{"records":[]}').records as Array<{ words: string; isUnresolved?: boolean }>).filter(row => row.isUnresolved)
   const clock = engineBeneath(on, world)
   await probeStart($)
   await clock.advance(5000)
-  expect(ledger().map(row => row.words)).toEqual(['Database — Use staging?'])
+  expect(ledger().map(row => row.words)).toEqual(['Database — Use staging?', 'Use staging?'])
   addPrompt(world, PROMPT_AT + 1000)
   await clock.advance(5000)
   expect(world.files.get(FILE)).toContain('- [x] Database — Use staging?')
@@ -1315,6 +1549,39 @@ test('after a compaction the conversation gets the progress note', async ($, on)
   expect(last).toContain('[進度面板] 對話剛壓縮過')
   expect(last).toContain('正在做：寫 Mod')
   expect(last).toContain('完成 1/2')
+})
+
+test("after a resume the pane's own question still counts under Waiting on you", async ($, on) => {
+  const at = Date.parse('2026-10-16T12:00:00Z')
+  const mirror = {
+    ...emptyMirror(SESSION, 'persona_framework', at - 1000, '/work/persona_framework'),
+    state: 'ended' as const,
+    title: 'Check the release',
+    tasks: [{ ...confirmStep('Publish'), waiting: 'you' as const, why: 'Ready to publish?' }],
+  }
+  const world: World = { files: new Map(), mtime: 1, hasTasks: true, store: { lang: 'en', autoConnectOff: true, [`mirror:${SESSION}`]: mirror } }
+  engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/persona_framework', surface: 'desktop', isInteractive: true })
+  await settledSetup($, world)
+  for (const surface of ['terminal', 'desktop'] as const) {
+    const ui = await $.ui.mount({ ...PANE, surface, props: PROPS })
+    expect(await ui.find({ type: 'Button', key: 'section::waiting' })).toBeDefined()
+    expect(await ui.find({ type: 'Button', key: 'mine::1::hide' })).toBeDefined()
+    await ui.unmount()
+  }
+  for (const state of ['ended', 'done'] as const) {
+    const view = buildView([], ['persona_framework'], { ...mirror, state }, at, 0, {}, EN)
+    expect(view.overview.waiting).toBe(1)
+    expect(view.waiting[0]?.where).toBe('here')
+    expect(view.older).toEqual([])
+  }
+})
+
+test('the Simplified Chinese Resolve wording marks a question as handled', () => {
+  expect(ZH_CN.resolveQuestion).toBe('标为已处理')
+  expect(ZH_CN.resolveFailed).toBe('无法保存处理结果，这个问题仍未处理。')
+  expect(ZH_CN.resolveSucceeded).toBe('已处理')
+  expect(ZH_TW.resolveQuestion).toBe('結案')
 })
 
 test('a session that ends with open steps is marked for someone to pick up', async ($, on) => {
@@ -2324,7 +2591,7 @@ test('explicit Claude ask events renew the hidden question immediately while ano
 
 for (const lang of ['en', 'zh-TW', 'zh-CN'] as const) for (const days of [4, 8]) test(`aged pane questions hide and restore their exact identity in ${lang} at ${days} days`, async ($, on) => {
   const firstAt = Date.parse('2026-10-01T12:00:00Z')
-  const board = '## demo\n<!-- auto session=a1b2c3d4 agent=codex state=waiting updated=2026-10-01T12:00:00Z -->\n### Release\n- [?] Publish, OK?\n<!-- /auto session=a1b2c3d4 -->\n'
+  const board = `## demo\n<!-- auto session=a1b2c3d4 agent=codex state=waiting updated=${new Date(firstAt + days * 86400000).toISOString()} -->\n### Release\n- [?] Publish, OK?\n<!-- /auto session=a1b2c3d4 -->\n`
   const ledger = observeQuestions(emptyQuestions(), parseProgress(board), null, [], firstAt, true, 'pane-aged:1').ledger
   const world: World = { files: new Map([[FILE, board], [QUESTIONS, questionsJson(ledger)]]), mtime: 1, hasTasks: true, at: firstAt + days * 86400000, store: { lang, inboxDone: {}, opened: ['reminder', 'older', 'hidden'] } }
   engineBeneath(on, world)
@@ -3274,6 +3541,7 @@ test('without a Task list, a turn that changed something is summed up into steps
   await start($, '幫我把限流加到 API')
   await $.turn.complete({ answer: '加好了。每把金鑰一分鐘要 100 還是 300？', durationMs: 1, isAborted: false, turnId: 't1', reason: 'answer' })
   await clock.advance(10)
+  expect(world.messageReads).toBe(1)
 
   const written = world.files.get(FILE) ?? ''
   expect(written).toContain('source=turns')
@@ -3292,6 +3560,7 @@ test('without a Task list, a turn that changed something is summed up into steps
   const after = world.files.get(FILE) ?? ''
   expect(after).toContain('state=done')
   expect(after).toContain('- [x] 加好限流中介層\n- [x] 每把金鑰的上限 — 一分鐘 100 還是 300？\n- [x] 寫好限流測試\n')
+  expect(world.messageReads).toBe(1)
 
   // Claude starting a real list replaces the summed-up steps.
   await $.turn.start({ text: '再加上 IP 限流', turnId: 't3' })
@@ -3309,6 +3578,728 @@ test('a turn that only answered a question leaves no block behind', async ($, on
   await $.turn.complete({ answer: '它在解析設定檔。還有別的嗎？', durationMs: 1, isAborted: false, turnId: 't1', reason: 'answer' })
   await clock.advance(10)
   expect(world.files.get(FILE) ?? '').not.toContain('<!-- auto')
+})
+
+const BACKGROUND_MESSAGES: NonNullable<World['messages']> = [
+  { role: 'user', text: 'Run the tests', toolUses: [] },
+  { role: 'assistant', text: '', toolUses: [{ tool_use_id: 'background-1', tool: 'Bash', input: { command: 'synthetic-tests', run_in_background: true } }] },
+]
+
+const launchBackground = ($: Engine, id = 'background-1') =>
+  $.tool.call({ tool: 'SyntheticBackground', tool_use_id: id, run_in_background: true })
+
+test('a prompt turn and poll do no background bookkeeping before a job is launched', async ($, on) => {
+  const saved: string[] = []
+  const world: World = { files: new Map(), mtime: 1, hasTasks: true, beforeStoreSet: key => saved.push(key) }
+  const clock = engineBeneath(on, world)
+  on('tool.call', { tool: 'Read' }, () => ({ result: 'Synthetic result' }))
+  await start($, 'Read the result')
+  await clock.advance(10)
+  saved.length = 0
+  await $.turn.start({ text: 'Read the result again', turnId: 't2' })
+  await $.tool.call({ tool: 'Read', file_path: '/synthetic/result', run_in_background: false })
+  await $.turn.complete({ answer: '', durationMs: 1, isAborted: true, turnId: 't2', reason: 'answer' })
+  await clock.advance(2000)
+  expect(saved.filter(key => key === `mirror:${SESSION}`)).toEqual([])
+})
+
+test('a background tool with an empty id can finish without leaving a job running', async ($, on) => {
+  const shared: Record<string, unknown> = {}
+  const world: World = { files: new Map(), mtime: 1, hasTasks: true, shared }
+  engineBeneath(on, world)
+  outside(on, world)
+  on('prompt.submit', ($, e) => ({ text: e.text }))
+  await start($, 'Run the tests')
+  await launchBackground($, '')
+  await $.prompt.submit({ text: '<task-notification></task-notification>', origin: { kind: 'task-notification' }, turnId: 't1', wait: false })
+  expect(shared[`mirror:${SESSION}`]).toMatchObject({ backgroundJobs: 0, backgroundJobIds: [] })
+})
+
+test('a turn after the last background completion does not save an empty release', async ($, on) => {
+  const saved: string[] = []
+  const world: World = { files: new Map(), mtime: 1, hasTasks: true, store: { autoConnectOff: true, inboxDone: {} }, beforeStoreSet: key => saved.push(key) }
+  engineBeneath(on, world)
+  outside(on, world)
+  on('prompt.submit', ($, e) => ({ text: e.text }))
+  await start($, 'Run the tests')
+  await launchBackground($)
+  await $.prompt.submit({ text: '<task-notification><tool-use-id>background-1</tool-use-id></task-notification>', origin: { kind: 'task-notification' }, turnId: 't1', wait: false })
+  await $.turn.complete({ answer: '', durationMs: 1, isAborted: true, turnId: 't1', reason: 'answer' })
+  expect(world.store?.[`mirror:${SESSION}`]).toMatchObject({ backgroundJobs: 0 })
+  saved.length = 0
+  await $.turn.start({ text: 'Check the result', turnId: 't2' })
+  expect(saved.filter(key => key === `mirror:${SESSION}`)).toEqual([])
+})
+
+for (const hasTasks of [true, false]) test("a question after this turn's job finished still waits on you while an older background job runs" + (hasTasks ? '' : ' without a Task list'), async ($, on) => {
+  const shared: Record<string, unknown> = {}
+  const world: World = { files: new Map(), mtime: 1, hasTasks, shared, reply: () => '' }
+  const clock = engineBeneath(on, world)
+  outside(on, world)
+  on('prompt.submit', ($, e) => ({ text: e.text }))
+  await start($, 'Run the long tests')
+  if (hasTasks) await $.tool.call({ tool: 'TaskCreate', subject: 'Deploy to staging', description: '' })
+  await launchBackground($, 'older-job')
+  await $.turn.complete({ answer: 'Tests are running.', durationMs: 1, isAborted: false, turnId: 't1', reason: 'answer' })
+  await clock.advance(10)
+  await $.turn.start({ text: 'Build the app', turnId: 't2' })
+  await launchBackground($, 'this-turn-job')
+  await $.prompt.submit({ text: '<task-notification><tool-use-id>this-turn-job</tool-use-id></task-notification>', origin: { kind: 'task-notification' }, turnId: 't2', wait: false })
+  await $.turn.complete({ answer: 'Build passed. Deploy to staging, OK?', durationMs: 1, isAborted: false, turnId: 't2', reason: 'answer' })
+  await clock.advance(10)
+  expect(shared[`mirror:${SESSION}`]).toMatchObject({ backgroundJobs: 1, backgroundJobIds: ['older-job'] })
+  expect(world.files.get(FILE) ?? '').toContain('state=waiting')
+  expect(world.files.get(FILE) ?? '').toContain('- [?] Deploy to staging')
+})
+
+test('a teammate or workflow agent the turn starts is not counted as a background job', async ($, on) => {
+  const shared: Record<string, unknown> = {}
+  const world: World = { files: new Map(), mtime: 1, hasTasks: true, shared }
+  engineBeneath(on, world)
+  outside(on, world)
+  on('agent.spawn', () => ({ model: 'synthetic', agentId: 'synthetic-child' }))
+  await start($, 'Check the build')
+  await $.tool.call({ tool: 'TaskCreate', subject: 'Deploy to staging', description: '' })
+  for (const kind of [{ isTeammate: true }, { workflow: { runId: 'wf_synthetic' } }]) {
+    await $.agent.spawn({ prompt: 'Check the build', background: true, tool_use_id: 'team-or-workflow', ...kind } as never)
+    await $.turn.complete({ answer: 'Deploy to staging, OK?', durationMs: 1, isAborted: false, turnId: 't1', reason: 'answer' })
+    expect((shared[`mirror:${SESSION}`] as ProgressMirror).backgroundJobs ?? 0).toBe(0)
+    expect(world.files.get(FILE) ?? '').toContain('- [?] Deploy to staging')
+    await $.turn.start({ text: 'Check again', turnId: 't2' })
+  }
+})
+
+test('a failed save of early background releases still records the question', async ($, on) => {
+  let hasFailed = false
+  const world: World = { files: new Map(), mtime: 1, hasTasks: true }
+  engineBeneath(on, world)
+  outside(on, world)
+  on('prompt.submit', ($, e) => ({ text: e.text }))
+  await start($, 'Check the build')
+  await $.tool.call({ tool: 'TaskCreate', subject: 'Deploy to staging', description: '' })
+  await $.prompt.submit({ text: '<task-notification><tool-use-id>early-job</tool-use-id></task-notification>', origin: { kind: 'task-notification' }, turnId: 't1', wait: false })
+  world.failStore = (op, key) => {
+    if (hasFailed || op !== 'set' || key !== `mirror:${SESSION}`) return false
+    hasFailed = true
+    return true
+  }
+  await $.turn.complete({ answer: 'Deploy to staging, OK?', durationMs: 1, isAborted: false, turnId: 't1', reason: 'answer' })
+  expect(hasFailed).toBe(true)
+  expect(world.files.get(FILE) ?? '').toContain('- [?] Deploy to staging')
+})
+
+for (const hasTasks of [true, false]) test('a question after a background job that finished in its own turn still waits on you' + (hasTasks ? '' : ' without a Task list'), async ($, on) => {
+  const world: World = { files: new Map(), mtime: 1, hasTasks, reply: () => '' }
+  const clock = engineBeneath(on, world)
+  outside(on, world)
+  on('prompt.submit', ($, e) => ({ text: e.text }))
+  await start($, 'Run the build')
+  if (hasTasks) await $.tool.call({ tool: 'TaskCreate', subject: 'Deploy to staging', description: '' })
+  await launchBackground($)
+  await $.prompt.submit({ text: '<task-notification><tool-use-id>background-1</tool-use-id></task-notification>', origin: { kind: 'task-notification' }, turnId: 't1', wait: false })
+  await $.turn.complete({ answer: 'Build passed. Deploy to staging, OK?', durationMs: 1, isAborted: false, turnId: 't1', reason: 'answer' })
+  await clock.advance(10)
+  expect(world.files.get(FILE) ?? '').toContain('state=waiting')
+  expect(world.files.get(FILE) ?? '').toContain('- [?] Deploy to staging')
+})
+
+test('a session that ends with a background job running leaves no placeholder step behind', async ($, on) => {
+  const shared: Record<string, unknown> = {}
+  const world: World = { files: new Map(), mtime: 1, hasTasks: false, shared, reply: () => 'TITLE: Build\nDONE: Started build\nNEXT: -\nASK: -' }
+  const clock = engineBeneath(on, world)
+  outside(on, world)
+  await start($, 'Run the build')
+  await launchBackground($)
+  await $.turn.complete({ answer: 'Running.', durationMs: 1, isAborted: false, turnId: 't1', reason: 'answer' })
+  await clock.advance(10)
+  expect(world.files.get(FILE) ?? '').toContain('背景工作執行中')
+  await $.session.end({ reason: 'other', sessionId: SESSION, resume: { id: SESSION } as never })
+  expect(world.files.get(FILE) ?? '').not.toContain('背景工作執行中')
+  expect(shared[`mirror:${SESSION}`]).toMatchObject({ state: 'done', backgroundJobs: 0, backgroundJobIds: [], backgroundReleases: [], backgroundReleaseCount: 0 })
+  expect((shared[`mirror:${SESSION}`] as ProgressMirror).tasks.map(task => task.subject)).toEqual(['Started build'])
+})
+
+test('an agent defined to run in the background is counted even when the call does not ask for it', async ($, on) => {
+  const shared: Record<string, unknown> = {}
+  const world: World = { files: new Map(), mtime: 1, hasTasks: true, shared }
+  engineBeneath(on, world)
+  outside(on, world)
+  on('agent.spawn', () => ({ model: 'synthetic', agentId: 'synthetic-child' }))
+  on('tool.call', { tool: 'Agent' }, async () => ({ result: await $.agent.spawn({ prompt: 'Check tests', background: true, tool_use_id: 'agent-job' } as never) }))
+  on('prompt.submit', ($, e) => ({ text: e.text }))
+  await start($, 'Run the tests')
+  await $.tool.call({ tool: 'TaskCreate', subject: 'Check tests', description: '' })
+  await $.tool.call({ tool: 'Agent', prompt: 'Check tests', tool_use_id: 'agent-job' })
+  await $.turn.complete({ answer: 'Running.', durationMs: 1, isAborted: false, turnId: 't1', reason: 'answer' })
+  expect(shared[`mirror:${SESSION}`]).toMatchObject({ backgroundJobs: 1, backgroundJobIds: ['agent-job'] })
+  expect(world.files.get(FILE) ?? '').toContain('state=working')
+  await $.turn.start({ text: '<task-notification><tool-use-id>agent-job</tool-use-id></task-notification>', turnId: 't2' })
+  await $.turn.complete({ answer: 'Finished.', durationMs: 1, isAborted: false, turnId: 't2', reason: 'answer' })
+  expect(shared[`mirror:${SESSION}`]).toMatchObject({ backgroundJobs: 0, backgroundJobIds: [] })
+})
+
+test('an agent asked to run in the background while background tasks are off is not counted', async ($, on) => {
+  const shared: Record<string, unknown> = {}
+  const world: World = { files: new Map(), mtime: 1, hasTasks: true, shared }
+  engineBeneath(on, world)
+  outside(on, world)
+  on('agent.spawn', () => ({ model: 'synthetic', agentId: 'synthetic-child' }))
+  on('tool.call', { tool: 'Agent' }, async () => ({ result: await $.agent.spawn({ prompt: 'Check tests', background: false, tool_use_id: 'foreground-agent' } as never) }))
+  await start($, 'Run the tests')
+  await $.tool.call({ tool: 'TaskCreate', subject: 'Check tests', description: '' })
+  await $.tool.call({ tool: 'Agent', prompt: 'Check tests', tool_use_id: 'foreground-agent', run_in_background: true })
+  await $.turn.complete({ answer: 'Review the tests?', durationMs: 1, isAborted: false, turnId: 't1', reason: 'answer' })
+  expect((shared[`mirror:${SESSION}`] as ProgressMirror).backgroundJobs ?? 0).toBe(0)
+  expect(world.files.get(FILE) ?? '').toContain('state=waiting')
+  expect(world.files.get(FILE) ?? '').toContain('- [?] Check tests — Review the tests?')
+})
+
+test('a resumed session forgets background jobs its old process started', async ($, on) => {
+  const old = { ...emptyMirror(SESSION, 'persona_framework', Date.parse('2026-10-16T11:00:00Z')), backgroundJobs: 1, backgroundJobIds: ['old-job'], backgroundReleases: ['old-release'], backgroundReleaseCount: 1 }
+  const shared: Record<string, unknown> = { [`mirror:${SESSION}`]: old }
+  const world: World = { files: new Map(), mtime: 1, hasTasks: true, shared }
+  const clock = engineBeneath(on, world)
+  outside(on, world)
+  await start($, 'Resume work')
+  await $.tool.call({ tool: 'TaskCreate', subject: 'Check the tests', description: '' })
+  await $.turn.complete({ answer: 'Review the result?', durationMs: 1, isAborted: false, turnId: 't1', reason: 'answer' })
+  await clock.advance(10)
+  expect(shared[`mirror:${SESSION}`]).toMatchObject({ backgroundJobs: 0, backgroundJobIds: [], backgroundReleases: [], backgroundReleaseCount: 0 })
+  expect(world.files.get(FILE) ?? '').toContain('- [?] Check the tests — Review the result?')
+  expect(world.files.get(FILE) ?? '').toContain('state=waiting')
+})
+
+test('a resumed session drops its old background placeholder before an aborted turn', async ($, on) => {
+  const old = applyDigest({ ...emptyMirror(SESSION, 'persona_framework', Date.parse('2026-10-16T11:00:00Z')), backgroundJobs: 1 }, { title: 'Build', context: '', done: 'Started build', next: '', ask: '', why: '' }, Date.parse('2026-10-16T11:00:00Z'))
+  const shared: Record<string, unknown> = { [`mirror:${SESSION}`]: old }
+  const world: World = { files: new Map(), mtime: 1, hasTasks: false, shared }
+  engineBeneath(on, world)
+  outside(on, world)
+  await start($, 'Resume work')
+  await $.turn.complete({ answer: '', durationMs: 1, isAborted: true, turnId: 't1', reason: 'answer' })
+  expect(shared[`mirror:${SESSION}`]).toMatchObject({ state: 'done', backgroundJobs: 0 })
+  expect((shared[`mirror:${SESSION}`] as ProgressMirror).tasks.map(task => task.subject)).toEqual(['Started build'])
+  expect(world.files.get(FILE) ?? '').not.toContain('背景工作執行中')
+})
+
+test('a save with nothing to change does not undo a task step or launch written while it waited', async ($, on) => {
+  const shared: Record<string, unknown> = {}
+  const world: World = { files: new Map(), mtime: 1, hasTasks: true, shared }
+  const clock = engineBeneath(on, world)
+  outside(on, world)
+  let reached!: () => void, release!: () => void
+  const entered = new Promise<void>(resolve => { reached = resolve })
+  const held = new Promise<void>(resolve => { release = resolve })
+  let isArmed = false, hasHeld = false
+  on('state.set', { plugin: 'agent-board', key: 'mine' }, async ($, e, next) => {
+    const value = e.value as ProgressMirror | null
+    if (isArmed && !hasHeld && value !== null && value.tasks.length === 0 && !value.backgroundJobs) {
+      hasHeld = true
+      reached()
+      await held
+    }
+    return next(e)
+  })
+  await start($, 'Keep new work')
+  isArmed = true
+  const saving = $.tool.call({ tool: 'TaskUpdate', taskId: 'missing', status: 'in_progress' })
+  await entered
+  try {
+    await $.tool.call({ tool: 'TaskCreate', subject: 'Keep this step', description: '' })
+    await launchBackground($)
+    await clock.advance(1)
+    expect(shared[`mirror:${SESSION}`]).toMatchObject({ backgroundJobs: 1 })
+  } finally {
+    release()
+  }
+  await saving
+  expect(shared[`mirror:${SESSION}`]).toMatchObject({ backgroundJobs: 1, backgroundJobIds: ['background-1'] })
+  expect((shared[`mirror:${SESSION}`] as ProgressMirror).tasks.map(task => task.subject)).toEqual(['Keep this step'])
+})
+
+test('a background job launched before a reload is released when its completion notice starts a turn', async ($, on) => {
+  const shared: Record<string, unknown> = {}
+  const world: World = { files: new Map(), mtime: 1, hasTasks: true, shared }
+  const clock = engineBeneath(on, world)
+  on('prompt.submit', ($, e) => ({ text: e.text }))
+  let hasRestored = false
+  on('state.set', { plugin: 'agent-board', key: 'mine' }, ($, e, next) => {
+    const value = e.value as ProgressMirror | null
+    if (!hasRestored && value !== null) {
+      hasRestored = true
+      // A reload keeps the engine's mirror but resets the module's launch flag.
+      return next({ ...e, value: startBackgroundJob({ ...value, firstPrompt: 'Run tests' }, 'before-reload') })
+    }
+    return next(e)
+  })
+  await $.session.start({ cwd: '/work/persona_framework', surface: 'terminal', isInteractive: true })
+  await $.tool.call({ tool: 'TaskCreate', subject: 'Check the result', description: '' })
+  expect(shared[`mirror:${SESSION}`]).toMatchObject({ backgroundJobs: 1, backgroundJobIds: ['before-reload'] })
+  const text = '<task-notification><tool-use-id>before-reload</tool-use-id></task-notification>'
+  await $.prompt.submit({ text, origin: { kind: 'task-notification' }, wait: false })
+  await $.turn.start({ text, turnId: 'completion' })
+  await $.turn.complete({ answer: 'Finished.', durationMs: 1, isAborted: false, turnId: 'completion', reason: 'answer' })
+  await clock.advance(10)
+  expect(shared[`mirror:${SESSION}`]).toMatchObject({ backgroundJobs: 0, backgroundJobIds: [] })
+  expect(world.files.get(FILE) ?? '').toContain('state=waiting')
+  expect(world.files.get(FILE) ?? '').not.toContain('背景工作執行中')
+})
+
+test('concurrent first task saves keep both steps', async ($, on) => {
+  const shared: Record<string, unknown> = {}
+  const world: World = { files: new Map(), mtime: 1, hasTasks: true, shared }
+  engineBeneath(on, world)
+  let reached!: () => void, release!: () => void
+  const entered = new Promise<void>(resolve => { reached = resolve })
+  const held = new Promise<void>(resolve => { release = resolve })
+  let hasHeld = false
+  on('state.set', { plugin: 'agent-board', key: 'mine' }, async ($, e, next) => {
+    if (!hasHeld && (e.value as ProgressMirror | null)?.tasks.some(task => task.subject === 'First step')) {
+      hasHeld = true
+      reached()
+      await held
+    }
+    return next(e)
+  })
+  await start($, 'Keep both steps')
+  const first = $.tool.call({ tool: 'TaskCreate', subject: 'First step', description: '' })
+  await entered
+  try {
+    await $.tool.call({ tool: 'TaskCreate', subject: 'Second step', description: '' })
+  } finally {
+    release()
+  }
+  await first
+  expect((shared[`mirror:${SESSION}`] as ProgressMirror).tasks.map(task => task.subject).sort()).toEqual(['First step', 'Second step'])
+})
+
+test('a retried background save journals a concurrently completed step only once', async ($, on) => {
+  const world: World = { files: new Map(), mtime: 1, hasTasks: true }
+  engineBeneath(on, world)
+  const seen = outside(on, world)
+  let reached!: () => void, release!: () => void
+  const entered = new Promise<void>(resolve => { reached = resolve })
+  const held = new Promise<void>(resolve => { release = resolve })
+  let hasHeld = false
+  on('state.set', { plugin: 'agent-board', key: 'mine' }, async ($, e, next) => {
+    if (!hasHeld && (e.value as ProgressMirror | null)?.tasks[0]?.status === 'completed') {
+      hasHeld = true
+      reached()
+      await held
+    }
+    return next(e)
+  })
+  await start($, 'Run tests')
+  await $.tool.call({ tool: 'TaskCreate', subject: 'Check tests', description: '' })
+  const completing = $.tool.call({ tool: 'TaskUpdate', taskId: '1', status: 'completed' })
+  await entered
+  await $.tool.call({ tool: 'TaskUpdate', taskId: '1', status: 'completed' })
+  release()
+  await completing
+  const journal = [...world.files].filter(([path]) => path.includes('-journal-')).map(([, text]) => text).join('\n')
+  expect(journal.split('\n').filter(line => line.includes('Check tests'))).toHaveLength(1)
+  expect(seen.notified).toHaveLength(1)
+})
+
+test('a background release racing a task update is not overwritten', async ($, on) => {
+  const shared: Record<string, unknown> = {}
+  const world: World = { files: new Map(), mtime: 1, hasTasks: true, shared }
+  engineBeneath(on, world)
+  outside(on, world)
+  on('prompt.submit', ($, e) => ({ text: e.text }))
+  let reached!: () => void, release!: () => void
+  const entered = new Promise<void>(resolve => { reached = resolve })
+  const held = new Promise<void>(resolve => { release = resolve })
+  let hasHeld = false
+  on('state.set', { plugin: 'agent-board', key: 'mine' }, async ($, e, next) => {
+    const value = e.value as ProgressMirror | null
+    if (!hasHeld && value?.tasks.some(task => task.subject === 'Updated tests') && value.backgroundJobs === 1) {
+      hasHeld = true
+      reached()
+      await held
+    }
+    return next(e)
+  })
+  await start($, 'Run the tests')
+  await $.tool.call({ tool: 'TaskCreate', subject: 'Check the tests', description: '' })
+  await launchBackground($, 'racing-job')
+  await $.turn.complete({ answer: 'Running.', durationMs: 1, isAborted: false, turnId: 't1', reason: 'answer' })
+  await $.turn.start({ text: 'Update the step', turnId: 't2' })
+  const updating = $.tool.call({ tool: 'TaskUpdate', taskId: '1', subject: 'Updated tests' })
+  await entered
+  await $.prompt.submit({ text: '<task-notification><tool-use-id>racing-job</tool-use-id></task-notification>', origin: { kind: 'task-notification' }, turnId: 't2', wait: false })
+  expect(shared[`mirror:${SESSION}`]).toMatchObject({ backgroundJobs: 0 })
+  release()
+  await updating
+  await $.turn.complete({ answer: 'Updated.', durationMs: 1, isAborted: false, turnId: 't2', reason: 'answer' })
+  expect(shared[`mirror:${SESSION}`]).toMatchObject({ backgroundJobs: 0, backgroundJobIds: [], tasks: [{ subject: 'Updated tests' }] })
+  expect(world.files.get(FILE) ?? '').toContain('state=waiting')
+})
+
+test('a background tool result returns before its mirror save finishes', async ($, on) => {
+  const shared: Record<string, unknown> = {}
+  const world: World = { files: new Map(), mtime: 1, hasTasks: true, shared }
+  engineBeneath(on, world)
+  outside(on, world)
+  let reached!: () => void, release!: () => void
+  const entered = new Promise<void>(resolve => { reached = resolve })
+  const held = new Promise<void>(resolve => { release = resolve })
+  let hasHeld = false
+  on('state.set', { plugin: 'agent-board', key: 'mine' }, async ($, e, next) => {
+    if (!hasHeld && (e.value as ProgressMirror | null)?.backgroundJobs === 1) {
+      hasHeld = true
+      reached()
+      await held
+    }
+    return next(e)
+  })
+  await start($, 'Run the tests')
+  await $.tool.call({ tool: 'TaskCreate', subject: 'Check the tests', description: '' })
+  const launching = launchBackground($)
+  await entered
+  try {
+    expect((await launching).result).toEqual({})
+    expect((shared[`mirror:${SESSION}`] as ProgressMirror).backgroundJobs ?? 0).toBe(0)
+  } finally {
+    release()
+  }
+  await $.turn.complete({ answer: 'Running.', durationMs: 1, isAborted: false, turnId: 't1', reason: 'answer' })
+  expect(shared[`mirror:${SESSION}`]).toMatchObject({ backgroundJobs: 1 })
+})
+
+test('a completion turn waits for a queued background launch before releasing it', async ($, on) => {
+  const shared: Record<string, unknown> = {}
+  const world: World = { files: new Map(), mtime: 1, hasTasks: true, shared }
+  const clock = engineBeneath(on, world)
+  outside(on, world)
+  on('prompt.submit', ($, e) => ({ text: e.text }))
+  let reached!: () => void, release!: () => void
+  const entered = new Promise<void>(resolve => { reached = resolve })
+  const held = new Promise<void>(resolve => { release = resolve })
+  let hasHeld = false
+  on('state.set', { plugin: 'agent-board', key: 'mine' }, async ($, e, next) => {
+    if (!hasHeld && (e.value as ProgressMirror | null)?.backgroundJobs === 1) {
+      hasHeld = true
+      reached()
+      await held
+    }
+    return next(e)
+  })
+  await start($, 'Run tests')
+  await $.tool.call({ tool: 'TaskCreate', subject: 'Check tests', description: '' })
+  await launchBackground($)
+  await entered
+  const notice = '<task-notification><tool-use-id>background-1</tool-use-id></task-notification>'
+  await $.prompt.submit({ text: notice, origin: { kind: 'task-notification' }, wait: false })
+  let hasStarted = false
+  const starting = $.turn.start({ text: notice, turnId: 't2' }).then(() => { hasStarted = true })
+  try {
+    await clock.advance(1)
+    expect(hasStarted).toBe(false)
+  } finally {
+    release()
+  }
+  await starting
+  await $.turn.complete({ answer: 'Finished.', durationMs: 1, isAborted: true, turnId: 't2', reason: 'answer' })
+  expect(shared[`mirror:${SESSION}`]).toMatchObject({ backgroundJobs: 0, backgroundJobIds: [] })
+  expect(world.files.get(FILE) ?? '').toContain('state=waiting')
+})
+
+test('a question asked in a later turn while a background job runs still waits on you', async ($, on) => {
+  const world: World = { files: new Map(), mtime: 1, hasTasks: true }
+  const clock = engineBeneath(on, world)
+  outside(on, world)
+  await start($, 'Run the tests')
+  await $.tool.call({ tool: 'TaskCreate', subject: 'Check the tests', description: '' })
+  await launchBackground($)
+  await $.turn.complete({ answer: 'Running.', durationMs: 1, isAborted: false, turnId: 't1', reason: 'answer' })
+  await $.turn.start({ text: 'Check progress', turnId: 't2' })
+  await $.turn.complete({ answer: 'Should I also test Windows?', durationMs: 1, isAborted: false, turnId: 't2', reason: 'answer' })
+  await clock.advance(10)
+  expect(world.files.get(FILE) ?? '').toContain('state=waiting')
+  expect(world.files.get(FILE) ?? '').toContain('- [?] Check the tests — Should I also test Windows?')
+})
+
+test('a later turn without a Task list can ask a question while a background job runs', async ($, on) => {
+  const world: World = { files: new Map(), mtime: 1, hasTasks: false, reply: DIGEST }
+  const clock = engineBeneath(on, world)
+  outside(on, world)
+  await start($, 'Run the tests')
+  await launchBackground($)
+  await $.turn.complete({ answer: 'Running.', durationMs: 1, isAborted: false, turnId: 't1', reason: 'answer' })
+  await clock.advance(10)
+  await $.turn.start({ text: 'Check progress', turnId: 't2' })
+  await $.turn.complete({ answer: 'Should I also test Windows?', durationMs: 1, isAborted: false, turnId: 't2', reason: 'answer' })
+  await clock.advance(10)
+  expect(world.files.get(FILE) ?? '').toContain('state=waiting')
+  expect(world.files.get(FILE) ?? '').toContain('- [?]')
+})
+
+test('a session resumed after it ended with a background job running is tracked again', async ($, on) => {
+  const world: World = { files: new Map(), mtime: 1, hasTasks: false, reply: DIGEST }
+  const clock = engineBeneath(on, world)
+  outside(on, world)
+  await start($, 'Run the tests')
+  await launchBackground($)
+  await $.turn.complete({ answer: 'Running.', durationMs: 1, isAborted: true, turnId: 't1', reason: 'answer' })
+  await $.session.end({ reason: 'other', sessionId: SESSION, resume: { id: SESSION } as never })
+  await $.session.start({ cwd: '/work/persona_framework', surface: 'terminal', isInteractive: true })
+  await $.turn.start({ text: 'Run more tests', turnId: 't2' })
+  await launchBackground($, 'resumed-job')
+  await $.turn.complete({ answer: 'Running again.', durationMs: 1, isAborted: false, turnId: 't2', reason: 'answer' })
+  await clock.advance(10)
+  expect(world.files.get(FILE) ?? '').toContain('state=working')
+  expect(world.files.get(FILE) ?? '').toContain('- [x] 加好限流中介層')
+})
+
+test('an aborted turn started by a finished job removes the placeholder step', async ($, on) => {
+  const world: World = { files: new Map(), mtime: 1, hasTasks: false, reply: () => '' }
+  const clock = engineBeneath(on, world)
+  outside(on, world)
+  await start($, 'Run the tests')
+  await launchBackground($)
+  await $.turn.complete({ answer: 'Running.', durationMs: 1, isAborted: false, turnId: 't1', reason: 'answer' })
+  await clock.advance(10)
+  expect(world.files.get(FILE) ?? '').toContain('背景工作執行中')
+  await $.turn.start({ text: '<task-notification><tool-use-id>background-1</tool-use-id></task-notification>', turnId: 't2' })
+  await $.turn.complete({ answer: '', durationMs: 1, isAborted: true, turnId: 't2', reason: 'answer' })
+  await clock.advance(10)
+  expect(world.files.get(FILE) ?? '').not.toContain('背景工作執行中')
+  expect(world.files.get(FILE) ?? '').not.toContain('state=working')
+})
+
+test('a turn that starts a background job leaves the block working, not waiting', async ($, on) => {
+  const world: World = { files: new Map(), mtime: 1, hasTasks: true, messages: BACKGROUND_MESSAGES }
+  const clock = engineBeneath(on, world)
+  outside(on, world)
+  await start($, 'Run the tests')
+  await $.tool.call({ tool: 'TaskCreate', subject: 'Check the tests', description: '' })
+  await launchBackground($)
+  await $.turn.complete({ answer: 'The tests are running.', durationMs: 1, isAborted: false, turnId: 't1', reason: 'answer' })
+  await clock.advance(10)
+  expect(world.files.get(FILE) ?? '').toContain('state=working')
+  expect(world.files.get(FILE) ?? '').not.toContain('state=waiting')
+})
+
+test("a reply ending on a question does not mark a step asked while the turn's background job runs", async ($, on) => {
+  const world: World = { files: new Map(), mtime: 1, hasTasks: true, messages: BACKGROUND_MESSAGES }
+  const clock = engineBeneath(on, world)
+  const seen = outside(on, world)
+  await start($, 'Run the tests')
+  await $.tool.call({ tool: 'TaskCreate', subject: 'Check the tests', description: '' })
+  await launchBackground($)
+  await $.turn.complete({ answer: 'Waiting for the tests?', durationMs: 1, isAborted: false, turnId: 't1', reason: 'answer' })
+  await clock.advance(10)
+  expect(world.files.get(FILE) ?? '').toContain('state=working')
+  expect(world.files.get(FILE) ?? '').not.toContain('- [?]')
+  expect(seen.notified).toEqual([])
+  expect(buildView(parseProgress(world.files.get(FILE) ?? ''), ['persona_framework'], null, Date.parse('2026-10-16T12:00:00.000Z')).waiting).toEqual([])
+})
+
+test("the background job's completion notice lets the next turn end as waiting again", async ($, on) => {
+  const world: World = { files: new Map(), mtime: 1, hasTasks: true, messages: BACKGROUND_MESSAGES }
+  const clock = engineBeneath(on, world)
+  outside(on, world)
+  await start($, 'Run the tests')
+  await $.tool.call({ tool: 'TaskCreate', subject: 'Check the tests', description: '' })
+  await launchBackground($)
+  await $.turn.complete({ answer: 'The tests are running.', durationMs: 1, isAborted: false, turnId: 't1', reason: 'answer' })
+  const notice = '<task-notification>\n<tool-use-id>background-1</tool-use-id>\n<status>completed</status>\n</task-notification>'
+  world.messages = [...BACKGROUND_MESSAGES, { role: 'user', text: 'Check progress', toolUses: [] }]
+  await $.turn.start({ text: 'Check progress', turnId: 't2' })
+  await $.turn.complete({ answer: 'Still running.', durationMs: 1, isAborted: false, turnId: 't2', reason: 'answer' })
+  expect(world.files.get(FILE) ?? '').toContain('state=working')
+  world.messages.push({ role: 'user', text: notice, toolUses: [] })
+  await $.turn.start({ text: notice, turnId: 't3' })
+  await $.turn.complete({ answer: 'Review the result?', durationMs: 1, isAborted: false, turnId: 't3', reason: 'answer' })
+  await clock.advance(10)
+  expect(world.files.get(FILE) ?? '').toContain('state=waiting')
+  expect(world.files.get(FILE) ?? '').toContain('- [?] Check the tests — Review the result?')
+})
+
+test('a turn without a background job still ends as waiting and still marks its question', async ($, on) => {
+  const world: World = { files: new Map(), mtime: 1, hasTasks: true, messages: [{ role: 'assistant', text: '', toolUses: [{ tool_use_id: 'foreground-1', tool: 'Bash', input: { run_in_background: false } }] }] }
+  const clock = engineBeneath(on, world)
+  outside(on, world)
+  await start($, 'Run the tests')
+  await $.tool.call({ tool: 'TaskCreate', subject: 'Check the tests', description: '' })
+  await $.turn.complete({ answer: 'Review the result?', durationMs: 1, isAborted: false, turnId: 't1', reason: 'answer' })
+  await clock.advance(10)
+  expect(world.files.get(FILE) ?? '').toContain('state=waiting')
+  expect(world.files.get(FILE) ?? '').toContain('- [?] Check the tests — Review the result?')
+})
+
+test('a background session without a Task list keeps a placeholder step instead of a summarized question', async ($, on) => {
+  const world: World = { files: new Map(), mtime: 1, hasTasks: false, messages: BACKGROUND_MESSAGES, reply: DIGEST }
+  const clock = engineBeneath(on, world)
+  outside(on, world)
+  await start($, 'Run the tests')
+  await launchBackground($)
+  await $.turn.complete({ answer: 'Waiting for the tests?', durationMs: 1, isAborted: false, turnId: 't1', reason: 'answer' })
+  await clock.advance(10)
+  expect(world.files.get(FILE) ?? '').toContain('state=working')
+  expect(world.files.get(FILE) ?? '').not.toContain('- [?]')
+  expect(world.files.get(FILE) ?? '').toContain('- [ ] 寫限流測試')
+})
+
+test('a background session without a summary still writes a working block with a placeholder step', async ($, on) => {
+  const world: World = { files: new Map(), mtime: 1, hasTasks: false, messages: BACKGROUND_MESSAGES, reply: () => '' }
+  const clock = engineBeneath(on, world)
+  outside(on, world)
+  await start($, 'Run the tests')
+  await launchBackground($)
+  await $.turn.complete({ answer: 'Tests are running.', durationMs: 1, isAborted: false, turnId: 't1', reason: 'answer' })
+  await clock.advance(10)
+  expect(world.files.get(FILE) ?? '').toContain('state=working')
+  expect(world.files.get(FILE) ?? '').toContain('- [ ] 背景工作執行中')
+  expect(world.files.get(FILE) ?? '').not.toContain('- [?]')
+})
+
+test('a background completion received during a turn restores waiting and session end clears remaining jobs', async ($, on) => {
+  const world: World = { files: new Map(), mtime: 1, hasTasks: true, messages: BACKGROUND_MESSAGES }
+  const clock = engineBeneath(on, world)
+  outside(on, world)
+  on('prompt.submit', ($, e) => ({ text: e.text }))
+  await start($, 'Run the tests')
+  await $.tool.call({ tool: 'TaskCreate', subject: 'Check the tests', description: '' })
+  await launchBackground($)
+  await $.turn.complete({ answer: 'The tests are running.', durationMs: 1, isAborted: false, turnId: 't1', reason: 'answer' })
+  await $.turn.start({ text: 'Check the result', turnId: 't2' })
+  const notice = '<task-notification>\n<tool-use-id>background-1</tool-use-id>\n<status>completed</status>\n</task-notification>'
+  world.messages = [{ role: 'user', text: notice, toolUses: [] }]
+  await $.prompt.submit({ text: notice, origin: { kind: 'task-notification' }, turnId: 't2', wait: false })
+  await $.turn.complete({ answer: 'Review the result?', durationMs: 1, isAborted: false, turnId: 't2', reason: 'answer' })
+  await clock.advance(10)
+  expect(world.files.get(FILE) ?? '').toContain('state=waiting')
+  world.messages = BACKGROUND_MESSAGES
+  await $.turn.start({ text: 'Run the tests again', turnId: 't3' })
+  await launchBackground($, 'background-2')
+  await $.turn.complete({ answer: 'The tests are running.', durationMs: 1, isAborted: false, turnId: 't3', reason: 'answer' })
+  await $.session.end({ reason: 'other', sessionId: SESSION, resume: { id: SESSION } as never })
+  expect(world.files.get(FILE) ?? '').toContain('state=ended')
+})
+
+test('a background summary that finishes after session end cannot restart work', async ($, on) => {
+  let reached!: () => void, release!: () => void
+  const entered = new Promise<void>(resolve => { reached = resolve })
+  const held = new Promise<void>(resolve => { release = resolve })
+  const shared: Record<string, unknown> = {}
+  const world: World = { files: new Map(), mtime: 1, hasTasks: false, messages: BACKGROUND_MESSAGES, reply: DIGEST, shared, holdComplete: { reached, release: held } }
+  const clock = engineBeneath(on, world)
+  outside(on, world)
+  await start($, 'Run the tests')
+  await launchBackground($)
+  await $.turn.complete({ answer: 'The tests are running.', durationMs: 1, isAborted: false, turnId: 't1', reason: 'answer' })
+  await clock.advance(10)
+  await entered
+  await $.session.end({ reason: 'other', sessionId: SESSION, resume: { id: SESSION } as never })
+  release()
+  await clock.advance(1000)
+  expect(shared[`mirror:${SESSION}`]).toMatchObject({ state: 'ended', backgroundJobs: 0 })
+  expect(world.files.get(FILE) ?? '').toContain('- [x] 加好限流中介層')
+  expect(world.files.get(FILE) ?? '').not.toContain('state=working')
+})
+
+test('a background job that finishes inside the turn that started it leaves the block waiting, not working', async ($, on) => {
+  const shared: Record<string, unknown> = {}
+  const world: World = { files: new Map(), mtime: 1, hasTasks: true, shared }
+  const clock = engineBeneath(on, world)
+  outside(on, world)
+  on('prompt.submit', ($, e) => ({ text: e.text }))
+  let reached!: () => void, release!: () => void
+  const entered = new Promise<void>(resolve => { reached = resolve })
+  const held = new Promise<void>(resolve => { release = resolve })
+  world.holdBackground = { reached, release: held }
+  await start($, 'Run the tests')
+  await $.tool.call({ tool: 'TaskCreate', subject: 'Check the tests', description: '' })
+  const launching = launchBackground($, 'toolu_early')
+  await entered
+  const notice = '<task-notification><tool-use-id>toolu_early</tool-use-id><status>completed</status></task-notification>'
+  await $.prompt.submit({ text: notice, origin: { kind: 'task-notification' }, turnId: 't1', wait: false })
+  release()
+  await launching
+  await launchBackground($, 'toolu_late')
+  await $.prompt.submit({ text: notice.replace('toolu_early', 'toolu_late'), origin: { kind: 'task-notification' }, turnId: 't1', wait: false })
+  await Promise.all([launchBackground($, 'toolu_parallel_a'), launchBackground($, 'toolu_parallel_b')])
+  // Tool results return before their mirror writes; notices drain those writes in order.
+  await Promise.all(['toolu_parallel_a', 'toolu_parallel_b'].map(id => $.prompt.submit({ text: notice.replace('toolu_early', id), origin: { kind: 'task-notification' }, turnId: 't1', wait: false })))
+  expect(shared[`mirror:${SESSION}`]).toMatchObject({ backgroundJobs: 0, backgroundJobIds: [], backgroundReleases: [] })
+  await $.turn.complete({ answer: 'The tests ended.', durationMs: 1, isAborted: false, turnId: 't1', reason: 'answer' })
+  await clock.advance(10)
+  expect(world.files.get(FILE) ?? '').toContain('state=waiting')
+  expect(world.files.get(FILE) ?? '').not.toContain('state=working')
+  expect(world.messageReads ?? 0).toBe(0)
+})
+
+test("a person's prompt that quotes a task notification releases no background job", async ($, on) => {
+  const shared: Record<string, unknown> = {}
+  const world: World = { files: new Map(), mtime: 1, hasTasks: true, shared }
+  const clock = engineBeneath(on, world)
+  outside(on, world)
+  on('prompt.submit', ($, e) => ({ text: e.text }))
+  await start($, 'Run the tests')
+  await $.tool.call({ tool: 'TaskCreate', subject: 'Check the tests', description: '' })
+  await launchBackground($, 'toolu_quoted')
+  await $.turn.complete({ answer: 'Running.', durationMs: 1, isAborted: false, turnId: 't1', reason: 'answer' })
+  const text = '<task-notification><tool-use-id>toolu_quoted</tool-use-id><status>completed</status></task-notification>'
+  await $.prompt.submit({ text, origin: { kind: 'composer' }, wait: false })
+  await $.turn.start({ text, turnId: 't2' })
+  await $.prompt.submit({ text, origin: { kind: 'composer' }, turnId: 't2', wait: false })
+  await $.turn.complete({ answer: 'Explained the example.', durationMs: 1, isAborted: false, turnId: 't2', reason: 'answer' })
+  await clock.advance(10)
+  expect(shared[`mirror:${SESSION}`]).toMatchObject({ backgroundJobs: 1 })
+  expect(world.files.get(FILE) ?? '').toContain('state=working')
+  // An id-less notice cannot identify a job whose id is known.
+  await $.prompt.submit({ text: 'The job failed.', origin: { kind: 'task-notification' }, wait: false })
+  await $.turn.start({ text: 'The job failed.', turnId: 't3' })
+  await $.turn.complete({ answer: 'Ended.', durationMs: 1, isAborted: false, turnId: 't3', reason: 'answer' })
+  expect(shared[`mirror:${SESSION}`]).toMatchObject({ backgroundJobs: 1, backgroundJobIds: ['toolu_quoted'] })
+  await $.prompt.submit({ text, origin: { kind: 'task-notification' }, wait: false })
+  await $.turn.start({ text, turnId: 't4' })
+  await $.turn.complete({ answer: 'Ended.', durationMs: 1, isAborted: false, turnId: 't4', reason: 'answer' })
+  expect(shared[`mirror:${SESSION}`]).toMatchObject({ backgroundJobs: 0, backgroundJobIds: [] })
+  expect(world.files.get(FILE) ?? '').toContain('state=waiting')
+})
+
+test("a background summary that lands after a completion keeps that turn's finished steps", async ($, on) => {
+  let reached!: () => void, release!: () => void
+  const entered = new Promise<void>(resolve => { reached = resolve })
+  const held = new Promise<void>(resolve => { release = resolve })
+  const shared: Record<string, unknown> = {}
+  const world: World = { files: new Map(), mtime: 1, hasTasks: false, reply: DIGEST, shared, holdComplete: { reached, release: held } }
+  const clock = engineBeneath(on, world)
+  outside(on, world)
+  on('prompt.submit', ($, e) => ({ text: e.text }))
+  await start($, 'Run the tests')
+  await launchBackground($, 'toolu_summary')
+  await $.turn.complete({ answer: 'Started tests.', durationMs: 1, isAborted: false, turnId: 't1', reason: 'answer' })
+  await clock.advance(10)
+  await entered
+  await $.prompt.submit({ text: '<task-notification><tool-use-id>toolu_summary</tool-use-id><status>failed</status></task-notification>', origin: { kind: 'task-notification' }, turnId: 't1', wait: false })
+  release()
+  await clock.advance(1000)
+  expect(shared[`mirror:${SESSION}`]).toMatchObject({ backgroundJobs: 0 })
+  expect(world.files.get(FILE) ?? '').toContain('- [x] 加好限流中介層')
+  expect(world.files.get(FILE) ?? '').not.toContain('state=working')
+  expect(world.messageReads ?? 0).toBe(0)
+})
+
+test('refused, errored and foreground tool calls create no background work or extra transcript read', async ($, on) => {
+  const world: World = { files: new Map(), mtime: 1, hasTasks: true }
+  engineBeneath(on, world)
+  outside(on, world)
+  on('tool.call', { tool: 'SyntheticRefused' }, () => ({ deny: 'Synthetic refusal' }))
+  on('tool.call', { tool: 'SyntheticErrored' }, () => ({ result: 'Synthetic error', text: 'Synthetic error', isError: true }))
+  await start($, 'Check work')
+  await $.tool.call({ tool: 'TaskCreate', subject: 'Check the tests', description: '' })
+  await $.tool.call({ tool: 'SyntheticRefused', run_in_background: true })
+  await $.tool.call({ tool: 'SyntheticErrored', run_in_background: true })
+  await $.tool.call({ tool: 'SyntheticBackground', run_in_background: false })
+  await $.tool.call({ tool: 'SyntheticBackground', run_in_background: 'true' })
+  await $.tool.call({ tool: 'SyntheticBackground', run_in_background: true, agentId: 'synthetic-child' })
+  await $.turn.complete({ answer: 'Checked.', durationMs: 1, isAborted: false, turnId: 't1', reason: 'answer' })
+  expect(world.files.get(FILE) ?? '').toContain('state=waiting')
+  expect(world.messageReads ?? 0).toBe(0)
 })
 
 test('a turn that ends on a question waits on you even when Claude did not mark it, until you answer', async ($, on) => {
@@ -3581,6 +4572,335 @@ test('a stopped session’s handoff line shows on its row and goes with 接手�
 
 const INBOX = '/home/me/.claude/progress-inbox'
 
+const QUESTION_TURN = 'codex-turn-1792152000-213.json'
+const QUESTION_TEXT = 'Added the middleware. Keep the complete question, OK?'
+const pendingQuestionWorld = (): World => ({
+  files: new Map([[FILE, '# Progress\n'], [`${INBOX}/${QUESTION_TURN}`, JSON.stringify({ session_id: 'demo-question', cwd: '/work/api-gateway', last_assistant_message: QUESTION_TEXT })]]),
+  mtime: 1,
+  hasTasks: true,
+  store: { inboxDone: {}, autoConnectOff: true, lang: 'en' },
+  reply: prompt => prompt.includes('TITLE:') ? 'TITLE: Add the limiter\nDONE: Added the middleware\nNEXT: Write the tests\nASK: Keep the complete question, OK?' : undefined,
+})
+const breakQuestionFile = (world: World): void => {
+  world.files.set(QUESTIONS, (world.files.get(QUESTIONS) ?? '') + '\0'.repeat(32))
+  world.isMoveRefused = path => path === QUESTIONS
+}
+const pendingQuestionEntries = (world: World): unknown[] => Object.entries(world.store ?? {}).filter(([key]) => key.startsWith('pendingInboxQuestion:')).map(([, value]) => value)
+
+test('another agent\'s turn that ends on a question is written to the board even when the question file cannot be read', async ($, on) => {
+  const world = pendingQuestionWorld()
+  const clock = engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/demo', surface: 'desktop', isInteractive: true })
+  breakQuestionFile(world)
+  await clock.advance(5000)
+  const board = world.files.get(FILE) ?? ''
+  expect(board).toContain('agent=codex state=waiting')
+  expect(board).toContain('- [x] Added the middleware')
+  expect(board).toContain('- [?] Keep the complete question, OK?')
+  expect(board).toContain('- [ ] Write the tests')
+  expect(takenOf(world)).toEqual([])
+  expect((world.store!.inboxDone as Record<string, string>)[QUESTION_TURN]).toBeDefined()
+  expect(pendingQuestionEntries(world)).toHaveLength(1)
+})
+
+test('a question that could not be kept is kept on a later poll once the question file reads again', async ($, on) => {
+  const world = pendingQuestionWorld()
+  const clock = engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/demo', surface: 'desktop', isInteractive: true })
+  breakQuestionFile(world)
+  await clock.advance(5000)
+  expect(pendingQuestionEntries(world)).toHaveLength(1)
+  world.isMoveRefused = undefined
+  await clock.advance(2000)
+  expect(storedQuestion(world, 'Keep the complete question, OK?')).not.toBe('')
+  expect(pendingQuestionEntries(world)).toEqual([])
+  const captures = [...world.files].filter(([path]) => path.includes('-questions-source-')).map(([, text]) => text)
+  expect(captures.some(text => text.includes(QUESTION_TEXT))).toBe(true)
+  expect((world.files.get(FILE) ?? '').match(/- \[x\] Added the middleware/g)).toHaveLength(1)
+})
+
+test('a question file that cannot be read shows one line at once instead of retrying the turn for hours', async ($, on) => {
+  const world = pendingQuestionWorld()
+  const clock = engineBeneath(on, world)
+  const seen = outside(on, world)
+  await $.session.start({ cwd: '/work/demo', surface: 'desktop', isInteractive: true })
+  // Start the failure in the digest, after the ordinary 2-second polls have run.
+  world.reply = prompt => {
+    if (!prompt.includes('TITLE:')) return undefined
+    breakQuestionFile(world)
+    return 'TITLE: Add the limiter\nDONE: Added the middleware\nNEXT: Write the tests\nASK: Keep the complete question, OK?'
+  }
+  await clock.advance(5000)
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
+  const line = EN.inboxQuestionNotKept
+  expect(await ui.find({ type: 'Text', text: line })).toBeDefined()
+  const status = await $.command.run({ ...TIDY, args: 'connect status' })
+  expect(status.text).toContain(line)
+  const notifications = [...seen.notified]
+  await clock.advance(4000)
+  expect(seen.notified).toEqual(notifications)
+  expect(await ui.find({ type: 'Text', text: line })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: EN.questionsUnreadable(QUESTIONS) })).toBeDefined()
+  world.isMoveRefused = undefined
+  await clock.advance(2000)
+  expect(await ui.find({ type: 'Text', text: line })).toBeUndefined()
+  await ui.unmount()
+})
+
+test('a race while keeping an agent\'s question retries on the next poll instead of fifteen minutes later', async ($, on) => {
+  const world = pendingQuestionWorld()
+  const clock = engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/demo', surface: 'desktop', isInteractive: true })
+  let isRacing = true
+  let changes = 0
+  world.beforeRead = path => {
+    if (isRacing && path === FILE) {
+      world.files.set(FILE, (world.files.get(FILE) ?? '') + `\n<!-- concurrent write ${++changes} -->\n`)
+      world.mtime += 1
+    }
+  }
+  await clock.advance(5000)
+  expect(changes > 1).toBe(true)
+  expect(takenOf(world)).toEqual([])
+  expect(pendingQuestionEntries(world)).toHaveLength(1)
+  expect((world.store!.inboxFailed as Record<string, string> | undefined)?.[QUESTION_TURN]).toBeUndefined()
+  isRacing = false
+  await clock.advance(2000)
+  expect(storedQuestion(world, 'Keep the complete question, OK?')).not.toBe('')
+  expect(pendingQuestionEntries(world)).toEqual([])
+})
+
+const seedPendingQuestion = (world: World, age = 0): string => {
+  const turn = peekInbox([{ name: QUESTION_TURN, body: world.files.get(`${INBOX}/${QUESTION_TURN}`)!, at: Date.parse('2026-10-16T12:00:00Z') }])[0]!
+  turn.sourceAt = Date.parse('2026-10-16T12:00:00Z') - age
+  turn.at = turn.sourceAt
+  const key = `pendingInboxQuestion:${sha256(FILE)}:${sha256(JSON.stringify([turn.id, turn.sourceRevisions]))}`
+  world.store![key] = turn
+  world.files.delete(`${INBOX}/${QUESTION_TURN}`)
+  return key
+}
+
+test('a session that starts while progress.md is locked still polls and takes turns', async ($, on) => {
+  const world = pendingQuestionWorld()
+  seedPendingQuestion(world)
+  world.unreadable = new Set([FILE])
+  const clock = engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/demo', surface: 'desktop', isInteractive: true })
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
+  expect(await ui.find({ type: 'Text', text: EN.inboxQuestionNotKept })).toBeDefined()
+  world.unreadable.clear()
+  world.files.set(`${INBOX}/${QUESTION_TURN}`, JSON.stringify({ session_id: 'another-owner', cwd: '/work/api-gateway', last_assistant_message: QUESTION_TEXT }))
+  world.mtime += 1
+  await clock.advance(6000)
+  expect(world.files.get(FILE) ?? '').toContain('- [x] Added the middleware')
+  expect(takenOf(world)).toEqual([])
+  expect(pendingQuestionEntries(world)).toEqual([])
+  await ui.unmount()
+})
+
+test('one damaged pending question does not hold other agents\' turns', async ($, on) => {
+  const world = pendingQuestionWorld()
+  const key = `pendingInboxQuestion:${sha256(FILE)}:damaged`
+  world.store![key] = { isQuestion: true, text: 'Broken' }
+  const clock = engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/demo', surface: 'desktop', isInteractive: true })
+  breakQuestionFile(world)
+  await clock.advance(5000)
+  expect(world.files.get(FILE) ?? '').toContain('- [x] Added the middleware')
+  expect(takenOf(world)).toEqual([])
+  expect((world.store!.inboxDone as Record<string, string>)[QUESTION_TURN]).toBeDefined()
+  expect(world.store![key]).toBeUndefined()
+  expect(pendingQuestionEntries(world)).toHaveLength(1)
+})
+
+test('a pending question that cannot be loaded at startup retries without stopping polling', async ($, on) => {
+  const world = pendingQuestionWorld()
+  seedPendingQuestion(world)
+  world.failStore = (operation, key) => operation === 'get' && key.startsWith('pendingInboxQuestion:')
+  const clock = engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/demo', surface: 'desktop', isInteractive: true })
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
+  expect(await ui.find({ type: 'Text', text: EN.inboxQuestionNotKept })).toBeDefined()
+  world.failStore = undefined
+  await clock.advance(2000)
+  expect(pendingQuestionEntries(world)).toEqual([])
+  expect(storedQuestion(world, 'Keep the complete question, OK?')).not.toBe('')
+  expect(await ui.find({ type: 'Text', text: EN.inboxQuestionNotKept })).toBeUndefined()
+  await ui.unmount()
+})
+
+test('a pending question older than three days is dropped', async ($, on) => {
+  const world = pendingQuestionWorld()
+  const key = seedPendingQuestion(world, 3 * 24 * 60 * 60 * 1000 + 1)
+  engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/demo', surface: 'desktop', isInteractive: true })
+  expect(world.store![key]).toBeUndefined()
+  expect(storedQuestion(world, 'Keep the complete question, OK?')).toBe('')
+})
+
+test('a pending question that cannot be saved does not hold another agent\'s turn', async ($, on) => {
+  const world = pendingQuestionWorld()
+  const key = seedPendingQuestion(world)
+  breakQuestionFile(world)
+  const clock = engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/demo', surface: 'desktop', isInteractive: true })
+  delete world.store![key]
+  world.failStore = (operation, one) => one === key && (operation === 'get' || operation === 'set')
+  world.files.set(`${INBOX}/${QUESTION_TURN}`, JSON.stringify({ session_id: 'another-owner', cwd: '/work/api-gateway', last_assistant_message: QUESTION_TEXT }))
+  world.mtime += 1
+  await clock.advance(5000)
+  expect(world.files.get(FILE) ?? '').toContain('- [x] Added the middleware')
+  expect(takenOf(world)).toEqual([])
+  expect((world.store!.inboxDone as Record<string, string>)[QUESTION_TURN]).toBeDefined()
+  expect(pendingQuestionEntries(world)).toHaveLength(1)
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
+  expect(await ui.find({ type: 'Text', text: EN.inboxQuestionNotKept })).toBeDefined()
+  world.failStore = undefined
+  world.isMoveRefused = undefined
+  await clock.advance(2000)
+  expect(pendingQuestionEntries(world)).toEqual([])
+  expect(await ui.find({ type: 'Text', text: EN.inboxQuestionNotKept })).toBeUndefined()
+  await ui.unmount()
+})
+
+test('a saved question whose removal failed is removed on a later poll and the warning goes away', async ($, on) => {
+  const world = pendingQuestionWorld()
+  const key = seedPendingQuestion(world, 3 * 24 * 60 * 60 * 1000 + 1)
+  world.failStore = (operation, one) => operation === 'delete' && one === key
+  const clock = engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/demo', surface: 'desktop', isInteractive: true })
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
+  expect(world.store![key]).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: EN.inboxQuestionNotKept })).toBeDefined()
+  world.failStore = undefined
+  await clock.advance(2000)
+  expect(world.store![key]).toBeUndefined()
+  expect(await ui.find({ type: 'Text', text: EN.inboxQuestionNotKept })).toBeUndefined()
+  expect(storedQuestion(world, 'Keep the complete question, OK?')).toBe('')
+  await ui.unmount()
+})
+
+test('a captured question with an old source clock still gets its first save', async ($, on) => {
+  const world = pendingQuestionWorld()
+  const key = seedPendingQuestion(world, 4 * 24 * 60 * 60 * 1000)
+  const turn = world.store![key] as { at: number; sourceAt: number }
+  turn.at = Date.parse('2026-10-16T12:00:00Z')
+  engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/demo', surface: 'desktop', isInteractive: true })
+  expect(world.store![key]).toBeUndefined()
+  const records = JSON.parse(world.files.get(QUESTIONS) ?? '{}').records as Array<{ words: string; firstObserved: number }>
+  expect(records.find(row => row.words === 'Keep the complete question, OK?')?.firstObserved).toBe(turn.sourceAt)
+})
+
+test('expired pending questions from another progress path are pruned at startup', async ($, on) => {
+  const world = pendingQuestionWorld()
+  const key = seedPendingQuestion(world, 3 * 24 * 60 * 60 * 1000 + 1)
+  const old = `pendingInboxQuestion:${sha256('/other/progress.md')}:old`
+  const recent = `pendingInboxQuestion:${sha256('/other/progress.md')}:recent`
+  world.store![old] = world.store![key]
+  world.store![recent] = { ...(world.store![key] as object), at: Date.parse('2026-10-16T12:00:00Z') }
+  engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/demo', surface: 'desktop', isInteractive: true })
+  expect(world.store![old]).toBeUndefined()
+  expect(world.store![recent]).toBeDefined()
+})
+
+test('a failed startup prune still registers polling and takes turns', async ($, on) => {
+  const world = pendingQuestionWorld()
+  world.store!.unrelated = 'keep'
+  world.failStore = (operation, key) => operation === 'get' && key === 'unrelated'
+  const clock = engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/demo', surface: 'desktop', isInteractive: true })
+  await clock.advance(5000)
+  expect(world.files.get(FILE) ?? '').toContain('- [x] Added the middleware')
+  expect(takenOf(world)).toEqual([])
+  expect((world.store!.inboxDone as Record<string, string>)[QUESTION_TURN]).toBeDefined()
+})
+
+test('a pending question whose step is already done is not kept', async ($, on) => {
+  const world = pendingQuestionWorld()
+  breakQuestionFile(world)
+  const clock = engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/demo', surface: 'desktop', isInteractive: true })
+  await clock.advance(5000)
+  expect(pendingQuestionEntries(world)).toHaveLength(1)
+  world.files.set(FILE, world.files.get(FILE)!.replace('- [?] Keep the complete question, OK?', '- [x] Keep the complete question, OK?'))
+  world.mtime += 1
+  world.isMoveRefused = undefined
+  await clock.advance(2000)
+  expect(pendingQuestionEntries(world)).toEqual([])
+  const records = (JSON.parse(world.files.get(QUESTIONS) ?? '{}').records ?? []) as Array<{ words: string; isUnresolved?: boolean; source?: { kind: string } }>
+  expect(records.filter(row => row.words === 'Keep the complete question, OK?' && row.isUnresolved)).toEqual([])
+  expect([...world.files].some(([path, text]) => path.includes('-questions-source-') && text.includes(QUESTION_TEXT))).toBe(false)
+})
+
+test('a failed pending question deletion does not hold a processed turn', async ($, on) => {
+  const world = pendingQuestionWorld()
+  world.failStore = (operation, key) => operation === 'delete' && key.startsWith('pendingInboxQuestion:')
+  const clock = engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/demo', surface: 'desktop', isInteractive: true })
+  await clock.advance(5000)
+  expect(world.files.get(FILE) ?? '').toContain('- [x] Added the middleware')
+  expect(takenOf(world)).toEqual([])
+  expect((world.store!.inboxDone as Record<string, string>)[QUESTION_TURN]).toBeDefined()
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
+  expect(await ui.find({ type: 'Text', text: EN.inboxQuestionNotKept })).toBeDefined()
+  world.failStore = undefined
+  await clock.advance(2000)
+  expect(pendingQuestionEntries(world)).toEqual([])
+  expect(await ui.find({ type: 'Text', text: EN.inboxQuestionNotKept })).toBeUndefined()
+  await ui.unmount()
+})
+
+test('pending questions keep their turn time and unchanged retries do not rewrite them', async ($, on) => {
+  const world = pendingQuestionWorld()
+  const firstAt = Date.parse('2026-10-16T11:00:00Z')
+  seedPendingQuestion(world, 60 * 60 * 1000)
+  breakQuestionFile(world)
+  const clock = engineBeneath(on, world)
+  let writes = 0
+  world.beforeStoreSet = key => { if (key.startsWith('pendingInboxQuestion:')) writes += 1 }
+  await $.session.start({ cwd: '/work/demo', surface: 'desktop', isInteractive: true })
+  await clock.advance(4000)
+  expect(writes).toBe(0)
+  world.isMoveRefused = undefined
+  await clock.advance(2000)
+  const records = JSON.parse(world.files.get(QUESTIONS) ?? '{}').records as Array<{ words: string; firstObserved: number }>
+  expect(records.find(row => row.words === 'Keep the complete question, OK?')?.firstObserved).toBe(firstAt)
+  expect(pendingQuestionEntries(world)).toEqual([])
+})
+
+test('pending questions keep only the newest fifty while the question file is unreadable', async ($, on) => {
+  const world = pendingQuestionWorld()
+  const key = seedPendingQuestion(world)
+  const turn = world.store![key] as Record<string, unknown>
+  delete world.store![key]
+  const firstAt = Date.parse('2026-10-16T12:00:00Z')
+  for (let n = 0; n < 51; n += 1) world.store![`${key}-${n}`] = { ...turn, sourceAt: firstAt - n * 1000, text: `Question ${n}, OK?` }
+  breakQuestionFile(world)
+  const clock = engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/demo', surface: 'desktop', isInteractive: true })
+  expect(pendingQuestionEntries(world)).toHaveLength(50)
+  expect(world.store![`${key}-50`]).toBeUndefined()
+  expect(world.store![`${key}-0`]).toBeDefined()
+  await clock.advance(2000)
+  expect(pendingQuestionEntries(world)).toHaveLength(50)
+})
+
+test('a fresh session keeps a pending inbox question from the store without its turn file', async ($, on) => {
+  const world = pendingQuestionWorld()
+  const turn = peekInbox([{ name: QUESTION_TURN, body: world.files.get(`${INBOX}/${QUESTION_TURN}`)!, at: Date.parse('2026-10-16T12:00:00Z') }])[0]!
+  world.files.delete(`${INBOX}/${QUESTION_TURN}`)
+  const key = `pendingInboxQuestion:${sha256(FILE)}:${sha256(JSON.stringify([turn.id, turn.sourceRevisions]))}`
+  world.store![key] = turn
+  const clock = engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/demo', surface: 'desktop', isInteractive: true })
+  expect(storedQuestion(world, 'Keep the complete question, OK?')).not.toBe('')
+  expect(pendingQuestionEntries(world)).toEqual([])
+  await clock.advance(2000)
+  expect(storedQuestion(world, 'Keep the complete question, OK?')).not.toBe('')
+})
+
 test('another agent’s turn, left in the inbox by its hook, becomes its block once, read by one session', async ($, on) => {
   const payload = JSON.stringify({
     type: 'agent-turn-complete',
@@ -3831,6 +5151,217 @@ const AGENT_TURNS = [
   ['opencode', OPENCODE_TURN],
 ] as const
 
+for (const event of ['turn', 'prompt'] as const) test(event === 'turn'
+  ? 'an answer whose ledger write races is settled by the next poll, not lost'
+  : 'a prompt whose ledger write races is settled by the next poll without replaying its receipt', async ($, on) => {
+  const world: World = {
+    files: new Map([[FILE, '# Progress\n'], [`${INBOX}/codex-turn-1792216380-1.json`, CODEX_STOP]]),
+    mtime: 1, at: Date.parse('2026-10-17T12:00:00Z'), hasTasks: true, store: { autoConnectOff: true, inboxDone: {} },
+    reply: prompt => !prompt.includes('TITLE:') ? undefined : prompt.includes('Set the per-key limit to 300') ? SETTLED : RATE_LIMIT,
+  }
+  const clock = engineBeneath(on, world)
+  const seen = outside(on)
+  await $.session.start({ cwd: '/work/demo', surface: 'desktop', isInteractive: true })
+  await clock.advance(5000)
+  const records = () => (JSON.parse(world.files.get(QUESTIONS) ?? '{"records":[]}').records as Array<{ isUnresolved?: boolean; source?: { kind: string } }>).filter(row => row.source?.kind === 'inbox')
+  expect(records().map(row => row.isUnresolved)).toEqual([true])
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
+  world.afterWrite = () => {
+    // Progress moves during the ledger pass, before it can save resolution copies.
+    world.beforeRead = path => {
+      if (path === FILE) {
+        world.files.set(FILE, `${world.files.get(FILE)}\n`)
+        world.mtime += 1
+      }
+    }
+    return world.files.get(FILE) ?? ''
+  }
+  if (event === 'turn') {
+    world.files.set(`${INBOX}/codex-turn-1792216390-2.json`, NEXT_TURN(CODEX_STOP))
+    world.files.set(`${INBOX}/codex-end-1792216391-3.json`, CODEX_END)
+  } else world.files.set(`${INBOX}/codex-prompt-1792216390-2.json`, JSON.stringify({ session_id: JSON.parse(CODEX_STOP).session_id, cwd: '/home/me/work/api-gateway' }))
+  world.mtime += 1
+  await clock.advance(5000)
+  expect(records().map(row => row.isUnresolved)).toEqual([true])
+  expect(world.files.get(FILE)).not.toContain('- [?]')
+  expect([...world.files.keys()].filter(path => path.startsWith(`${INBOX}/`))).toEqual([])
+  expect(seen.notified.filter(text => /QUESTION_|INBOX_|NOT_KEPT/.test(text))).toEqual([])
+  expect(await ui.find({ type: 'Text', text: ZH_TW.question(ZH_TW.inboxTitle) })).toBeUndefined()
+  world.beforeRead = undefined
+  await clock.advance(2000)
+  expect(records().map(row => row.isUnresolved)).toEqual([false])
+  expect(seen.notified.filter(text => /QUESTION_|INBOX_|NOT_KEPT/.test(text))).toEqual([])
+  expect(await ui.find({ type: 'Text', text: ZH_TW.question(ZH_TW.inboxTitle) })).toBeUndefined()
+  if (event === 'prompt') expect(Object.keys(world.store!).filter(key => key.startsWith('agentPrompt:'))).toHaveLength(1)
+  await ui.unmount()
+})
+
+test('a ledger this version cannot read leaves taken turns and prompts on the board without notices', async ($, on) => {
+  const world: World = {
+    files: new Map([[FILE, '# Progress\n'], [`${INBOX}/codex-turn-1792216380-1.json`, CODEX_STOP]]),
+    mtime: 1, at: Date.parse('2026-10-17T12:00:00Z'), hasTasks: true, store: { autoConnectOff: true, inboxDone: {} },
+    reply: prompt => !prompt.includes('TITLE:') ? undefined : prompt.includes('Set the per-key limit to 300') ? SETTLED : RATE_LIMIT,
+  }
+  const clock = engineBeneath(on, world)
+  const seen = outside(on)
+  await $.session.start({ cwd: '/work/demo', surface: 'desktop', isInteractive: true })
+  await clock.advance(5000)
+  const unknown = '{"version":999,"futureRecords":["keep these bytes"]}\n'
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
+  world.files.set(QUESTIONS, unknown)
+  world.files.set(`${INBOX}/codex-turn-1792216390-2.json`, NEXT_TURN(CODEX_STOP))
+  world.mtime += 1
+  await clock.advance(5000)
+  expect(world.files.get(FILE)).toContain('Set the per-key limit to 300 a minute')
+  world.files.set(`${INBOX}/codex-prompt-1792216400-3.json`, JSON.stringify({ session_id: JSON.parse(CODEX_STOP).session_id, cwd: '/home/me/work/api-gateway' }))
+  world.mtime += 1
+  await clock.advance(5000)
+  expect(world.files.get(FILE)).toContain('agent=codex state=working')
+  expect(world.files.get(QUESTIONS)).toBe(unknown)
+  expect([...world.files.keys()].filter(path => path.startsWith(`${INBOX}/`))).toEqual([])
+  expect(seen.notified.filter(text => /QUESTION_|INBOX_|NOT_KEPT/.test(text))).toEqual([])
+  expect(await ui.find({ type: 'Text', text: ZH_TW.question(ZH_TW.inboxTitle) })).toBeUndefined()
+  await ui.unmount()
+})
+
+test('a turn whose block is undone after it was stored still settles its question on the next poll', async ($, on) => {
+  const world: World = {
+    files: new Map([[FILE, '# Progress\n'], [`${INBOX}/codex-turn-1792216380-1.json`, CODEX_STOP]]),
+    mtime: 1, at: Date.parse('2026-10-17T12:00:00Z'), hasTasks: true, store: { autoConnectOff: true, inboxDone: {} },
+    reply: prompt => !prompt.includes('TITLE:') ? undefined : prompt.includes('Set the per-key limit to 300') ? SETTLED : RATE_LIMIT,
+  }
+  const clock = engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/demo', surface: 'desktop', isInteractive: true })
+  await clock.advance(5000)
+  const previous = world.files.get(FILE)!
+  const undo = (): string => { world.afterWrite = undo; return previous }
+  world.afterWrite = undo
+  world.files.set(`${INBOX}/codex-turn-1792216390-2.json`, NEXT_TURN(CODEX_STOP))
+  world.files.set(`${INBOX}/codex-end-1792216391-3.json`, CODEX_END)
+  world.mtime += 1
+  await clock.advance(5000)
+  expect(world.files.get(FILE)).toBe(previous)
+  expect(Object.values(world.store!.inboxFailed as Record<string, string>).some(reason => reason.includes('the block was not on the board'))).toBe(true)
+  world.afterWrite = undefined
+  await clock.advance(2000)
+  const records = JSON.parse(world.files.get(QUESTIONS)!).records as Array<{ isUnresolved?: boolean; source?: { kind: string } }>
+  expect(records.filter(row => row.source?.kind === 'inbox').map(row => row.isUnresolved)).toEqual([false])
+})
+
+test('a session with no steps whose summary stays silent still settles its question', async ($, on) => {
+  const at = Date.parse('2026-10-17T12:00:00Z')
+  const pending = peekInbox([{ name: 'codex-turn-1792216380-1.json', body: CODEX_STOP, at }])
+  const ledger = observeQuestions(emptyQuestions(), [], null, [], at, false, 'asking', undefined, pending).ledger
+  const id = blockId('codex', JSON.parse(CODEX_STOP).session_id)
+  const world: World = {
+    files: new Map([[FILE, '# Progress\n'], [QUESTIONS, questionsJson(ledger)],
+      [`${INBOX}/${takenName('codex-turn-1792216390-2.json', 'previous', at - 20 * 60 * 1000, 7)}`, NEXT_TURN(CODEX_STOP)]]),
+    mtime: 1, at, hasTasks: true, asked: [],
+    store: { autoConnectOff: true, inboxDone: {}, [`agent:${id}`]: { ...emptyMirror(id, 'api-gateway', at, '/home/me/work/api-gateway', 'codex'), resume: JSON.parse(CODEX_STOP).session_id } },
+    reply: () => '',
+  }
+  const clock = engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/demo', surface: 'desktop', isInteractive: true })
+  await clock.advance(5000)
+  expect(world.asked!.some(prompt => prompt.includes('TITLE:'))).toBe(true)
+  expect([...world.files.keys()].filter(path => path.startsWith(`${INBOX}/`))).toEqual([])
+  expect(world.files.get(FILE)).toBe('# Progress\n')
+  await clock.advance(2000)
+  expect(JSON.parse(world.files.get(QUESTIONS)!).records.filter((row: { source?: { kind: string } }) => row.source?.kind === 'inbox').map((row: { isUnresolved: boolean }) => row.isUnresolved)).toEqual([false])
+})
+
+test('an answer seen while this session did not yet know the question settles it once the ledger has it', async ($, on) => {
+  const world: World = {
+    files: new Map([[FILE, '# Progress\n'], [`${INBOX}/codex-turn-1792216380-1.json`, CODEX_STOP]]),
+    mtime: 1, at: Date.parse('2026-10-17T12:00:00Z'), hasTasks: true, store: { autoConnectOff: true, inboxDone: {} },
+    reply: prompt => !prompt.includes('TITLE:') ? undefined : prompt.includes('Set the per-key limit to 300') ? SETTLED : RATE_LIMIT,
+  }
+  const clock = engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/demo', surface: 'desktop', isInteractive: true })
+  await clock.advance(5000)
+  const ledger = world.files.get(QUESTIONS)!
+  for (const path of world.files.keys()) if (path.includes('-questions-source-')) world.files.delete(path)
+  world.files.set(QUESTIONS, questionsJson(emptyQuestions()))
+  world.files.set(`${INBOX}/codex-turn-1792216390-2.json`, NEXT_TURN(CODEX_STOP))
+  world.mtime += 1
+  await clock.advance(7000)
+  expect(JSON.parse(world.files.get(QUESTIONS)!).records.filter((row: { source?: { kind: string } }) => row.source?.kind === 'inbox')).toEqual([])
+  expect([...world.files.keys()].filter(path => path.startsWith(`${INBOX}/`))).toEqual([])
+  world.files.set(QUESTIONS, ledger)
+  await clock.advance(2000)
+  expect(JSON.parse(world.files.get(QUESTIONS)!).records.filter((row: { source?: { kind: string } }) => row.source?.kind === 'inbox').map((row: { isUnresolved: boolean }) => row.isUnresolved)).toEqual([false])
+})
+
+for (const event of ['turn', 'prompt'] as const) test(`a committed ${event} keeps its answer evidence when the board read fails`, async ($, on) => {
+  const world: World = {
+    files: new Map([[FILE, '# Progress\n'], [`${INBOX}/codex-turn-1792216380-1.json`, CODEX_STOP]]),
+    mtime: 1, at: Date.parse('2026-10-17T12:00:00Z'), hasTasks: true, store: { autoConnectOff: true, inboxDone: {} },
+    reply: prompt => !prompt.includes('TITLE:') ? undefined : prompt.includes('Set the per-key limit to 300') ? SETTLED : RATE_LIMIT,
+  }
+  const clock = engineBeneath(on, world)
+  const seen = outside(on)
+  await $.session.start({ cwd: '/work/demo', surface: 'desktop', isInteractive: true })
+  await clock.advance(5000)
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
+  let hasFailed = false
+  world.afterWrite = () => {
+    let reads = 0
+    world.beforeRead = path => {
+      if (path !== FILE) return
+      // The block passed both read-backs; the extra settlement read alone fails.
+      world.unreadable = ++reads === 3 ? new Set([FILE]) : undefined
+      if (reads === 3) hasFailed = true
+    }
+    return world.files.get(FILE)!
+  }
+  world.files.set(`${INBOX}/codex-${event}-1792216390-2.json`, event === 'turn' ? NEXT_TURN(CODEX_STOP) : JSON.stringify({ session_id: JSON.parse(CODEX_STOP).session_id, cwd: '/home/me/work/api-gateway' }))
+  world.mtime += 1
+  await clock.advance(7000)
+  expect(hasFailed).toBe(true)
+  expect([...world.files.keys()].filter(path => path.startsWith(`${INBOX}/`))).toEqual([])
+  expect(JSON.parse(world.files.get(QUESTIONS)!).records.filter((row: { source?: { kind: string } }) => row.source?.kind === 'inbox').map((row: { isUnresolved: boolean }) => row.isUnresolved)).toEqual([false])
+  expect(seen.notified.filter(text => /QUESTION_|INBOX_|NOT_KEPT|EFBIG/.test(text))).toEqual([])
+  expect(await ui.find({ type: 'Text', text: ZH_TW.question(ZH_TW.inboxTitle) })).toBeUndefined()
+  await ui.unmount()
+})
+
+test('a cursor stop file from the asking turn leaves the question open', async ($, on) => {
+  const world: World = {
+    files: new Map([[FILE, '# Progress\n'], [`${INBOX}/cursor-turn-1792216380-1.json`, CURSOR_TURN]]),
+    mtime: 1, hasTasks: true, store: { autoConnectOff: true, inboxDone: {}, notifyOff: true },
+    reply: RATE_LIMIT_REPLY,
+  }
+  const clock = engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/demo', surface: 'desktop', isInteractive: true })
+  await clock.advance(5000)
+  const { text, ...stop } = JSON.parse(CURSOR_TURN)
+  world.files.set(`${INBOX}/cursor-turn-1792216381-2.json`, JSON.stringify({ ...stop, hook_event_name: 'stop' }))
+  world.mtime += 1
+  await clock.advance(5000)
+  const records = JSON.parse(world.files.get(QUESTIONS) ?? '{"records":[]}').records as Array<{ isUnresolved?: boolean; source?: { kind: string } }>
+  expect(records.filter(row => row.source?.kind === 'inbox').map(row => row.isUnresolved)).toEqual([true])
+  expect(world.files.get(FILE)).toContain('- [?] Per-key limit — 100 or 300 a minute?\n')
+})
+
+test('a question and its answer taken in the same inbox look settle the question', async ($, on) => {
+  const world: World = {
+    files: new Map([[FILE, '# Progress\n']]),
+    mtime: 1, hasTasks: true, store: { autoConnectOff: true, inboxDone: {}, notifyOff: true },
+    reply: prompt => !prompt.includes('TITLE:') ? undefined : prompt.includes('Set the per-key limit to 300') ? SETTLED : RATE_LIMIT,
+  }
+  const clock = engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/demo', surface: 'desktop', isInteractive: true })
+  await clock.advance(4900)
+  world.files.set(`${INBOX}/codex-turn-1792216380-1.json`, CODEX_STOP)
+  world.files.set(`${INBOX}/codex-turn-1792216390-2.json`, NEXT_TURN(CODEX_STOP))
+  world.mtime += 1
+  await clock.advance(100)
+  const records = JSON.parse(world.files.get(QUESTIONS) ?? '{"records":[]}').records as Array<{ isUnresolved?: boolean; source?: { kind: string } }>
+  expect(records.filter(row => row.source?.kind === 'inbox').map(row => row.isUnresolved)).toEqual([false])
+  expect(world.files.get(FILE)).toContain('Set the per-key limit to 300 a minute')
+  expect(world.files.get(FILE)).not.toContain('- [?]')
+})
+
 // None of these agents tells the board when the person writes, only when a turn ends: the
 // question waits until the turn that answers it ends, then counts as answered.
 for (const [agent, turn] of AGENT_TURNS) {
@@ -3845,6 +5376,8 @@ for (const [agent, turn] of AGENT_TURNS) {
     await $.session.start({ cwd: '/work/persona_framework', surface: 'desktop', isInteractive: true })
     await clock.advance(5000)
     expect(world.files.get(FILE) ?? '').toContain('- [?] Per-key limit — 100 or 300 a minute?\n')
+    const initial = JSON.parse(world.files.get(QUESTIONS) ?? '{"records":[]}').records as Array<{ isUnresolved?: boolean; source?: { kind: string } }>
+    expect(initial.filter(row => row.source?.kind === 'inbox').map(row => row.isUnresolved)).toEqual([true])
 
     world.files.set(`${INBOX}/${agent}-turn-1792216390-2.json`, NEXT_TURN(turn))
     world.mtime += 1
@@ -3854,8 +5387,9 @@ for (const [agent, turn] of AGENT_TURNS) {
     expect(text).toContain('- [x] Per-key limit — 100 or 300 a minute?\n')
     expect(text).not.toContain('- [?]')
     expect(text.match(/<!-- auto session=/g)?.length).toBe(1)
-    const records = JSON.parse(world.files.get(FILE.replace('.md', '-questions.json')) ?? '{"records":[]}').records as Array<{ words: string; isUnresolved?: boolean }>
+    const records = JSON.parse(world.files.get(FILE.replace('.md', '-questions.json')) ?? '{"records":[]}').records as Array<{ words: string; isUnresolved?: boolean; source?: { kind: string } }>
     expect(records.filter(row => row.words === 'Per-key limit — 100 or 300 a minute?').map(row => row.isUnresolved)).toEqual([false])
+    expect(records.filter(row => row.source?.kind === 'inbox').map(row => row.isUnresolved)).toEqual([false])
   })
 }
 
@@ -5679,7 +7213,7 @@ test('an exact pre-ownership board and command from a release upgrade in the lan
 
 
 for (const failure of ['read', 'write'] as const) {
-  test(`immutable question capture ${failure} failure keeps unseen same-batch end sources unprocessed`, async ($, on) => {
+  test(`immutable question capture ${failure} failure marks same-batch end sources processed with the question pending`, async ($, on) => {
     const first = `${INBOX}/codex-turn-1792152000-1.json`
     const end = `${INBOX}/codex-end-1792152000-2.json`
     const body = (question: string) => JSON.stringify({ session_id: 'one-owner', cwd: '/work/demo', last_assistant_message: question })
@@ -5687,16 +7221,17 @@ for (const failure of ['read', 'write'] as const) {
     const clock = engineBeneath(on, world)
     await $.session.start({ cwd: '/work/persona_framework', surface: 'terminal', isInteractive: true })
     await clock.advance(5000)
-    expect(Object.keys(world.store?.inboxDone ?? {})).toEqual([])
-    expect([...world.files.values()].some(text => text === body('Keep the first full original?'))).toBe(true)
-    expect([...world.files.values()].some(text => text === body('Keep the end-only full original?'))).toBe(true)
+    expect(Object.keys(world.store?.inboxDone ?? {})).toHaveLength(2)
+    expect(world.files.get(FILE) ?? '').toContain('Keep the end-only full original?')
+    expect(pendingQuestionEntries(world)).toHaveLength(2)
+    expect(takenOf(world)).toEqual([])
     world.failQuestionCapture = undefined
-    expireTaken(world)
     world.mtime += 1
-    await clock.advance(5000)
+    await clock.advance(2000)
     const captures = [...world.files].filter(([path]) => path.includes('-questions-source-')).map(([, text]) => JSON.parse(text))
     expect(captures.some(capture => capture.record.source.text === 'Keep the first full original?')).toBe(true)
     expect(captures.some(capture => capture.record.source.text === 'Keep the end-only full original?')).toBe(true)
+    expect(pendingQuestionEntries(world)).toEqual([])
   })
 }
 
@@ -5732,6 +7267,264 @@ test('the pane keeps stopped tasks behind one toggle and shows their actions whe
   }
   await ui.press({ key: 'section::stopped' })
   expect(await ui.find({ type: 'Button', key: 'persona_framework::Stopped plan' })).toBeUndefined()
+  expect(world.files.get(FILE)).toBe(board)
+  await ui.unmount()
+})
+
+test('a question from a stopped session shows on the Stopped shelf with Resolve', async ($, on) => {
+  const board = '## persona_framework\n<!-- auto session=a1b2c3d4 agent=codex state=waiting updated=2026-10-15T23:00:00Z -->\n### Stopped plan\n- [?] Publish?\n- [?] Keep the docs?\n<!-- /auto session=a1b2c3d4 -->'
+  const world: World = { files: new Map([[FILE, board]]), mtime: 1, hasTasks: true, store: { lang: 'en', autoConnectOff: true } }
+  engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/persona_framework', surface: 'desktop', isInteractive: true })
+  await settledSetup($, world)
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
+  expect(await ui.find({ type: 'Button', key: 'section::waiting' })).toBeUndefined()
+  await ui.press({ key: 'section::stopped' })
+  for (const index of [0, 1]) expect(await ui.find({ type: 'Button', key: `persona_framework::Stopped plan::${index}::resolve`, text: EN.resolveQuestion })).toBeDefined()
+  expect(world.files.get(FILE)).toBe(board)
+  await ui.unmount()
+})
+
+test("resolving a stopped session's question closes its ledger record and keeps the copy", async ($, on) => {
+  const board = '## persona_framework\n<!-- auto session=a1b2c3d4 agent=codex state=ended updated=2026-10-16T11:00:00Z -->\n### Stopped plan\n- [?] Publish?\n- [?] Keep the docs?\n<!-- /auto session=a1b2c3d4 -->'
+  const world: World = { files: new Map([[FILE, board]]), mtime: 1, hasTasks: true, store: { lang: 'en', autoConnectOff: true, opened: ['stopped'] } }
+  const clock = engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/persona_framework', surface: 'desktop', isInteractive: true })
+  await settledSetup($, world)
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
+  const before = JSON.parse(world.files.get(QUESTIONS)!)
+  const record = before.records.find((row: { words: string }) => row.words === 'Publish?')
+  await ui.press({ key: 'persona_framework::Stopped plan::0::resolve' })
+  await clock.advance(2_000)
+  const after = JSON.parse(world.files.get(QUESTIONS)!)
+  expect(after.records.find((row: { id: string }) => row.id === record.id)?.isUnresolved).toBe(false)
+  expect(after.records.find((row: { id: string }) => row.id === record.id)?.source).toEqual(record.source)
+  expect(after.records.find((row: { words: string }) => row.words === 'Keep the docs?')?.isUnresolved).toBe(true)
+  expect([...world.files].some(([path, text]) => path.includes('-questions-source-') && JSON.parse(text).disposition === 'resolved' && JSON.parse(text).record.id === record.id)).toBe(true)
+  expect(world.files.get(FILE)).toBe(board)
+  expect(await ui.find({ type: 'Button', key: 'persona_framework::Stopped plan::0::resolve' })).toBeUndefined()
+  expect(await ui.find({ type: 'Text', text: EN.resolveSucceeded })).toBeDefined()
+  await ui.unmount()
+})
+
+test('a failed Resolve shows its reason under the pressed question', async ($, on) => {
+  const board = '## persona_framework\n<!-- auto session=a1b2c3d4 agent=codex state=ended updated=2026-10-16T11:00:00Z -->\n### Stopped plan\n- [?] Publish?\n- [?] Keep the docs?\n<!-- /auto session=a1b2c3d4 -->'
+  const world: World = { files: new Map([[FILE, board]]), mtime: 1, hasTasks: true, store: { lang: 'en', autoConnectOff: true, opened: ['stopped'] } }
+  const clock = engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/persona_framework', surface: 'desktop', isInteractive: true })
+  await settledSetup($, world)
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
+  world.failQuestionCapture = 'write'
+  const key = 'persona_framework::Stopped plan::0'
+  await ui.press({ key: `${key}::resolve` })
+  await clock.advance(2000)
+  expect(await ui.find({ type: 'Text', text: EN.resolveFailed })).toBeDefined()
+  expect(beneathButton(await ui.drawn(), key, EN.resolveFailed)).toBe(true)
+  expect(world.files.get(FILE)).toBe(board)
+  await ui.unmount()
+})
+
+test('a question asked again after its resolved step was ticked counts under Waiting on you', async ($, on) => {
+  const board = '## persona_framework\n<!-- auto session=a1b2c3d4 agent=codex state=ended updated=2026-10-16T11:00:00Z -->\n### Stopped plan\n- [?] Push to main, OK?\n<!-- /auto session=a1b2c3d4 -->'
+  const world: World = { files: new Map([[FILE, board]]), mtime: 1, hasTasks: true, store: { lang: 'en', autoConnectOff: true, opened: ['stopped'] } }
+  const clock = engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/persona_framework', surface: 'desktop', isInteractive: true })
+  await settledSetup($, world)
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
+  const id = JSON.parse(world.files.get(QUESTIONS)!).records[0].id
+  await ui.press({ key: 'persona_framework::Stopped plan::0::resolve' })
+  await clock.advance(2000)
+  world.files.set(FILE, board.replace('[?]', '[x]'))
+  world.mtime += 1
+  await clock.advance(2000)
+  expect(world.files.get(questionProofPath(FILE, 'retired', sha256(id)))).toBeDefined()
+  world.files.set(FILE, board.replace('state=ended', 'state=waiting').replace('11:00:00Z', '12:00:00Z'))
+  world.mtime += 1
+  await clock.advance(2000)
+  const pane = await ui.drawn()
+  expect(JSON.stringify(pane)).toContain('Push to main')
+  expect(await ui.find({ type: 'Button', key: 'section::waiting' })).toBeDefined()
+  const ledger = JSON.parse(world.files.get(QUESTIONS)!)
+  expect(ledger.records.some((record: { id: string; words: string; isUnresolved: boolean }) => record.id !== id && record.words === 'Push to main, OK?' && record.isUnresolved)).toBe(true)
+  await ui.unmount()
+})
+
+test('a resolved done question keeps its result beside the task after the task leaves the shelf', async ($, on) => {
+  const board = '## persona_framework\n<!-- auto session=a1b2c3d4 agent=codex state=done updated=2026-10-15T11:00:00Z -->\n### Finished plan\n- [?] Publish?\n<!-- /auto session=a1b2c3d4 -->'
+  const world: World = { files: new Map([[FILE, board]]), mtime: 1, hasTasks: true, store: { lang: 'en', autoConnectOff: true, opened: ['stopped'] } }
+  const clock = engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/persona_framework', surface: 'desktop', isInteractive: true })
+  await settledSetup($, world)
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
+  await ui.press({ key: 'persona_framework::Finished plan::0::resolve' })
+  await clock.advance(2000)
+  expect(await ui.find({ type: 'Button', key: 'persona_framework::Finished plan', text: '▸ Finished plan' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: EN.resolveSucceeded })).toBeDefined()
+  expect(await ui.find({ type: 'Button', key: 'section::stopped', text: `▾ ${EN.stoppedCount(1)}` })).toBeDefined()
+  await ui.press({ key: 'persona_framework::Finished plan' })
+  expect(await ui.find({ type: 'Button', key: 'persona_framework::Finished plan::archive' })).toBeDefined()
+  expect(await ui.find({ type: 'Button', key: 'persona_framework::Finished plan::0::resolve' })).toBeUndefined()
+  expect(world.files.get(FILE)).toBe(board)
+  await ui.unmount()
+})
+
+test('a changed question explains a refused Resolve beside its button', async ($, on) => {
+  const board = '## persona_framework\n<!-- auto session=a1b2c3d4 agent=codex state=ended updated=2026-10-16T11:00:00Z -->\n### Stopped plan\n- [?] Publish?\n<!-- /auto session=a1b2c3d4 -->'
+  const world: World = { files: new Map([[FILE, board]]), mtime: 1, hasTasks: true, store: { lang: 'en', autoConnectOff: true, opened: ['stopped'] } }
+  const clock = engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/persona_framework', surface: 'desktop', isInteractive: true })
+  await settledSetup($, world)
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
+  world.files.set(FILE, board.replace('Publish?', 'Choose a date?'))
+  await ui.press({ key: 'persona_framework::Stopped plan::0::resolve' })
+  await settledSetup($, world)
+  expect(await ui.find({ type: 'Text', text: EN.resolveChanged })).toBeDefined()
+  expect(beneathButton(await ui.drawn(), 'persona_framework::Stopped plan::0', EN.resolveChanged)).toBe(true)
+  const ledger = JSON.parse(world.files.get(QUESTIONS)!)
+  expect(ledger.records.some((record: { words: string; isUnresolved: boolean }) => record.words === 'Choose a date?' && record.isUnresolved)).toBe(true)
+  await clock.advance(2000)
+  expect(await ui.find({ type: 'Text', text: EN.resolveChanged })).toBeDefined()
+  expect(beneathButton(await ui.drawn(), 'persona_framework::Stopped plan::0', EN.resolveChanged)).toBe(true)
+  world.files.set(FILE, `${world.files.get(FILE)}\n## another-project\n### Unrelated task\n- [~] Continue\n`)
+  await clock.advance(2000)
+  expect(beneathButton(await ui.drawn(), 'persona_framework::Stopped plan::0', EN.resolveChanged)).toBe(true)
+  await ui.unmount()
+})
+
+test('a resolve result line never shows under a different question', async ($, on) => {
+  const board = '## persona_framework\n<!-- auto session=a1b2c3d4 agent=codex state=ended updated=2026-10-16T11:00:00Z -->\n### Stopped plan\n- [?] Publish?\n<!-- /auto session=a1b2c3d4 -->'
+  const world: World = { files: new Map([[FILE, board]]), mtime: 1, hasTasks: true, store: { lang: 'en', autoConnectOff: true, opened: ['stopped'] } }
+  const clock = engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/persona_framework', surface: 'desktop', isInteractive: true })
+  await settledSetup($, world)
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
+  world.failQuestionCapture = 'write'
+  const key = 'persona_framework::Stopped plan::0'
+  await ui.press({ key: `${key}::resolve` })
+  await clock.advance(2000)
+  expect(beneathButton(await ui.drawn(), key, EN.resolveFailed)).toBe(true)
+  world.failQuestionCapture = undefined
+  world.files.set(FILE, board.replace('Publish?', 'Choose a date?').replaceAll('a1b2c3d4', '11223344'))
+  await clock.advance(2000)
+  expect(await ui.find({ type: 'Button', key: `${key}::resolve` })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: EN.resolveFailed })).toBeUndefined()
+  expect(beneathButton(await ui.drawn(), key, EN.resolveFailed)).toBe(false)
+  await ui.unmount()
+})
+
+test('a saved resolution succeeds even when the question index cannot be replaced', async ($, on) => {
+  const board = '## persona_framework\n<!-- auto session=a1b2c3d4 agent=codex state=ended updated=2026-10-16T11:00:00Z -->\n### Stopped plan\n- [?] Publish?\n<!-- /auto session=a1b2c3d4 -->'
+  const world: World = { files: new Map([[FILE, board]]), mtime: 1, hasTasks: true, store: { lang: 'en', autoConnectOff: true, opened: ['stopped'] } }
+  const clock = engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/persona_framework', surface: 'desktop', isInteractive: true })
+  await settledSetup($, world)
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
+  const id = JSON.parse(world.files.get(QUESTIONS)!).records[0].id
+  world.unwritable = new Set([QUESTIONS])
+  await ui.press({ key: 'persona_framework::Stopped plan::0::resolve' })
+  await clock.advance(2000)
+  expect([...world.files].some(([path, text]) => path.includes('-questions-source-') && JSON.parse(text).disposition === 'resolved' && JSON.parse(text).record.id === id)).toBe(true)
+  expect(await ui.find({ type: 'Text', text: EN.resolveSucceeded })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: EN.resolveFailed })).toBeUndefined()
+  expect(await ui.find({ type: 'Button', key: 'persona_framework::Stopped plan::0::resolve' })).toBeUndefined()
+  expect(world.files.get(FILE)).toBe(board)
+  await ui.unmount()
+})
+
+test('a failed Resolve stays beside its question through unrelated report changes', async ($, on) => {
+  const board = '## persona_framework\n<!-- auto session=a1b2c3d4 agent=codex state=ended updated=2026-10-16T11:00:00Z -->\n### Stopped plan\n- [?] Publish?\n<!-- /auto session=a1b2c3d4 -->'
+  const world: World = { files: new Map([[FILE, board]]), mtime: 1, hasTasks: true, store: { lang: 'en', autoConnectOff: true, opened: ['stopped'] } }
+  const clock = engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/persona_framework', surface: 'desktop', isInteractive: true })
+  await settledSetup($, world)
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
+  world.failQuestionCapture = 'write'
+  const key = 'persona_framework::Stopped plan::0'
+  await ui.press({ key: `${key}::resolve` })
+  await clock.advance(2000)
+  expect(beneathButton(await ui.drawn(), key, EN.resolveFailed)).toBe(true)
+  world.files.set(FILE, `${board}\n## Other\n### Another task\n- [~] Work\n`)
+  world.mtime += 1
+  await clock.advance(2000)
+  expect(beneathButton(await ui.drawn(), key, EN.resolveFailed)).toBe(true)
+  world.files.set(FILE, board.replace('Publish?', 'Choose a date?'))
+  world.mtime += 1
+  await clock.advance(2000)
+  expect(await ui.find({ type: 'Text', text: EN.resolveFailed })).toBeUndefined()
+  await ui.unmount()
+})
+
+test('Resolve feedback stays with the matching Done recently row when titles repeat', async ($, on) => {
+  const block = (session: string, question: string) => `<!-- auto session=${session} agent=codex state=done updated=2026-10-16T11:00:00Z -->\n### Finished plan\n- [?] ${question}\n<!-- /auto session=${session} -->`
+  const board = `## persona_framework\n${block('a1b2c3d4', 'Publish?')}\n${block('11223344', 'Keep the docs?')}`
+  const world: World = { files: new Map([[FILE, board]]), mtime: 1, hasTasks: true, store: { lang: 'en', autoConnectOff: true, opened: ['recent'] } }
+  const clock = engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/persona_framework', surface: 'desktop', isInteractive: true })
+  await settledSetup($, world)
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
+  world.failQuestionCapture = 'write'
+  const key = 'persona_framework::Finished plan#2::0'
+  await ui.press({ key: `${key}::resolve` })
+  await clock.advance(2000)
+  expect(beneathButton(await ui.drawn(), key, EN.resolveFailed)).toBe(true)
+  expect(JSON.stringify(await ui.drawn()).split(EN.resolveFailed).length - 1).toBe(1)
+  expect(await ui.find({ type: 'Text', text: 'persona_framework · Finished plan#2' })).toBeUndefined()
+  await ui.unmount()
+})
+
+test('a detached Resolve result names its project and task without the repeated-title key', async ($, on) => {
+  const block = (session: string) => `<!-- auto session=${session} agent=codex state=ended updated=2026-10-16T11:00:00Z -->\n### Finished plan\n> due 2026-10-17\n- [?] Publish?\n- [ ] Finish\n<!-- /auto session=${session} -->`
+  const board = `## persona_framework\n${block('a1b2c3d4')}\n${block('11223344')}`
+  const world: World = { files: new Map([[FILE, board]]), mtime: 1, hasTasks: true, store: { lang: 'en', autoConnectOff: true, opened: ['stopped'] } }
+  const clock = engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/persona_framework', surface: 'desktop', isInteractive: true })
+  await settledSetup($, world)
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
+  await ui.press({ key: 'persona_framework::Finished plan#2::0::resolve' })
+  await clock.advance(2000)
+  expect(await ui.find({ type: 'Text', text: EN.resolveSucceeded })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: 'persona_framework · Finished plan' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: 'persona_framework · Finished plan#2' })).toBeUndefined()
+  await ui.unmount()
+})
+
+test('Resolve refuses a stopped question that a newer pending inbox turn makes live', async ($, on) => {
+  const session = 'synthetic-woken-session'
+  const id = blockId('codex', session)
+  const board = `## persona_framework\n<!-- auto session=${id} agent=codex state=waiting updated=2026-10-15T23:00:00Z -->\n### Stopped plan\n- [?] Publish?\n<!-- /auto session=${id} -->`
+  const world: World = { files: new Map([[FILE, board]]), mtime: 1, hasTasks: true, store: { lang: 'en', autoConnectOff: true, opened: ['stopped'] } }
+  const clock = engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/persona_framework', surface: 'desktop', isInteractive: true })
+  await settledSetup($, world)
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
+  world.files.set(`${INBOX}/codex-turn-1792152000-1.json`, JSON.stringify({ session_id: session, cwd: '/work/persona_framework', last_assistant_message: 'Publish?' }))
+  world.mtimes![`${INBOX}/codex-turn-1792152000-1.json`] = Date.parse('2026-10-16T12:00:00Z')
+  await clock.advance(1)
+  await ui.press({ key: 'persona_framework::Stopped plan::0::resolve' })
+  await settledSetup($, world)
+  expect(await ui.find({ type: 'Text', text: EN.resolveChanged })).toBeDefined()
+  expect(JSON.parse(world.files.get(QUESTIONS)!).records.some((record: { words: string; isUnresolved: boolean }) => record.words === 'Publish?' && record.isUnresolved)).toBe(true)
+  expect([...world.files].some(([path, text]) => path.includes('-questions-source-') && JSON.parse(text).disposition === 'resolved')).toBe(false)
+  await ui.unmount()
+})
+
+test('resolving the last question does not add a phantom stopped task when it moves to Due or Idle', async ($, on) => {
+  const block = (session: string, title: string, notes: string) => `<!-- auto session=${session} agent=codex state=ended updated=2026-10-07T11:00:00Z -->\n### ${title}\n${notes}- [?] Publish?\n- [ ] Finish\n<!-- /auto session=${session} -->`
+  const board = `## persona_framework\n${block('a1b2c3d4', 'Due plan', '> due 2026-10-17\n')}\n${block('11223344', 'Idle plan', '')}`
+  const world: World = { files: new Map([[FILE, board]]), mtime: 1, hasTasks: true, store: { lang: 'en', autoConnectOff: true, opened: ['stopped'] } }
+  const clock = engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/persona_framework', surface: 'desktop', isInteractive: true })
+  await settledSetup($, world)
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
+  expect(await ui.find({ type: 'Button', key: 'section::stopped', text: `▾ ${EN.stoppedCount(2)}` })).toBeDefined()
+  await ui.press({ key: 'persona_framework::Due plan::0::resolve' })
+  await clock.advance(2000)
+  expect(await ui.find({ type: 'Button', key: 'section::stopped', text: `▾ ${EN.stoppedCount(1)}` })).toBeDefined()
+  await ui.press({ key: 'persona_framework::Idle plan::0::resolve' })
+  await clock.advance(2000)
+  expect(await ui.find({ type: 'Button', key: 'section::stopped' })).toBeUndefined()
+  expect(await ui.find({ type: 'Button', key: 'section::due' })).toBeDefined()
+  expect(await ui.find({ type: 'Button', key: 'section::idle' })).toBeDefined()
   expect(world.files.get(FILE)).toBe(board)
   await ui.unmount()
 })
