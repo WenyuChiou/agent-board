@@ -93,7 +93,7 @@ const FILE = `# Progress
 <!-- /auto session=a1b2c3d4 -->
 `
 
-const run = (lang, args = [], beside = {}) => {
+const run = (lang, args = [], beside = {}, source = BOARD_SCRIPT) => {
   const dir = mkdtempSync(join(tmpdir(), 'board-'))
   try {
     const path = join(dir, 'progress.md')
@@ -102,7 +102,7 @@ const run = (lang, args = [], beside = {}) => {
     mkdirSync(join(dir, 'progress-inbox'))
     writeFileSync(join(dir, 'progress-inbox', 'gemini-turn-1-1.json'), JSON.stringify({ session_id: 'g1', cwd: join(dir, 'docs-site'), prompt_response: 'Fixed 12 broken links.' }))
     const script = join(dir, 'agent-board.mjs')
-    writeFileSync(script, `globalThis.AGENT_BOARD = ${JSON.stringify({ path, lang })}\n${BOARD_SCRIPT}`)
+    writeFileSync(script, `globalThis.AGENT_BOARD = ${JSON.stringify({ path, lang })}\n${source}`)
     const env = { ...process.env, CLAUDE_PROGRESS_FILE: '', NO_COLOR: '1' }
     return execFileSync(process.execPath, [script, ...args], { env, encoding: 'utf8' })
   } finally {
@@ -117,6 +117,20 @@ test('the board script prints the board from the file it was written for, in its
   assert.ok(text.includes('docs-site · gemini: Fixed 12 broken links.'), text)
   assert.ok(run('zh-TW').startsWith('進度  ● 1 等你'))
   assert.ok(run('en', ['--lang', 'zh-CN']).startsWith('进度'))
+})
+
+test('a --serve whose server cannot start says so without mentioning a page', () => {
+  const lines = {
+    en: "Couldn't open the board page: its server did not start.",
+    'zh-TW': '開不了看板網頁：伺服器沒有啟動。',
+    'zh-CN': '打不开看板网页：服务器没有启动。',
+  }
+  for (const [lang, line] of Object.entries(lines)) {
+    const text = run(lang, ['--serve', '--no-open', '--port', '65536'])
+    assert.equal(text.trim().split('\n').at(-1), line)
+    assert.ok(!text.includes('--serve'), 'startup failure gives no instructions for an existing page')
+    assert.ok(!text.includes('http://127.0.0.1:'), 'no page address was created')
+  }
 })
 
 test('the board script leaves out a question a pane on this machine marked answered', () => {
@@ -1498,7 +1512,10 @@ syncBuiltinESMExports()
     assert.match(seen.json().note, /^Could not safely read or update .*-journal-.*\(EACCES\)/)
     // The page says that note, and "offline" only when the board sent none.
     const home = await board.call('GET', `/?t=${board.token}`, { headers: { 'x-board-token': '' } })
-    assert.ok(home.body.includes("say(data.note || w('serveOffline'), 'alert')"))
+    const dom = await pageDom(home.body, null, { getBoard: async () => ({ ok: false, json: async () => seen.json() }) })
+    assert.equal(dom.node('note').textContent, seen.json().note)
+    assert.equal(dom.node('offline').textContent, '')
+    assert.ok(dom.allButtons().some(button => !button.disabled))
     // A phone on the network is told the file's name, not the folder it is in, which names the
     // person's account.
     const opened = await board.call('POST', '/api/lan', { body: {} })
@@ -1702,7 +1719,7 @@ test('a second press on the page for the first of two hand-kept tasks with the s
 
 // The page's own script run against a minimal DOM, to see what it keeps across a redraw and what
 // it sends. `redraw` hands it the next board, as the page's next poll would get it.
-const pageDom = async (html, first, { post, confirm, messaging } = {}) => {
+const pageDom = async (html, first, { post, confirm, messaging, getBoard, clipboard = false } = {}) => {
   const nodes = new Map()
   class Element {
     constructor(tag) {
@@ -1713,8 +1730,10 @@ const pageDom = async (html, first, { post, confirm, messaging } = {}) => {
       this.value = ''
       this.text = ''
       this.style = {}
+      this.textWrites = 0
     }
     set textContent(value) {
+      this.textWrites += 1
       this.text = value
       this.childNodes = []
     }
@@ -1744,8 +1763,11 @@ const pageDom = async (html, first, { post, confirm, messaging } = {}) => {
     addEventListener(name, run) {
       this.events[name] = run
     }
-    querySelectorAll() {
-      return this.childNodes.flatMap(child => [...(child.tag === 'textarea' && child.getAttribute('data-key') !== null ? [child] : []), ...child.querySelectorAll()])
+    querySelectorAll(selector = 'textarea[data-key]') {
+      return this.childNodes.flatMap(child => {
+        const isMatch = matches(child, selector)
+        return [...(isMatch ? [child] : []), ...child.querySelectorAll(selector)]
+      })
     }
     click() {
       if (!this.disabled) this.events.click?.()
@@ -1758,6 +1780,19 @@ const pageDom = async (html, first, { post, confirm, messaging } = {}) => {
     return nodes.get(id)
   }
   get('words').textContent = html.match(/<script[^>]*id="words"[^>]*>([\s\S]*?)<\/script>/)[1]
+  for (const id of ['close', 'paste-go', 'relay']) get(id).tag = 'button'
+  const matches = (node, selector) => {
+    if (selector === 'button') return node.tag === 'button'
+    if (selector === 'button:not([data-local])') return node.tag === 'button' && node.getAttribute('data-local') === null
+    if (selector === 'button[data-static]') return node.tag === 'button' && node.getAttribute('data-static') !== null
+    return node.tag === 'textarea' && node.getAttribute('data-key') !== null
+  }
+  for (const found of html.matchAll(/<button\b([^>]*)>/g)) {
+    const id = found[1].match(/id="([^"]+)"/)?.[1]
+    if (!id) continue
+    for (const attr of ['data-local', 'data-static']) if (found[1].includes(attr)) get(id).setAttribute(attr, '')
+  }
+  const copied = []
   const document = {
     getElementById: get,
     createElement: tag => new Element(tag),
@@ -1767,39 +1802,56 @@ const pageDom = async (html, first, { post, confirm, messaging } = {}) => {
       return node
     },
     querySelector: get,
+    querySelectorAll: selector => [...nodes.values()].flatMap(node => [...(matches(node, selector) ? [node] : []), ...node.querySelectorAll(selector)]),
     activeElement: null,
   }
   let model = first
   let scheduled
   const requests = []
+  const pending = new Set()
   const script = [...html.matchAll(/<script[^>]*>([\s\S]*?)<\/script>/g)].map(found => found[1]).find(code => code.includes('(function ()'))
   runInNewContext(script, {
     document,
     location: { search: '?t=x' },
     URLSearchParams,
-    navigator: {},
-    window: { confirm },
+    navigator: clipboard ? { clipboard: { writeText: async text => { copied.push(text) } } } : {},
+    window: { confirm, isSecureContext: !!clipboard },
+    crypto: { randomUUID: () => 'synthetic-offline-attempt' },
     setTimeout: run => {
       scheduled = run
       return 1
     },
     clearTimeout: () => {},
-    fetch: async (target, options) => {
-      if (target === '/api/board') return { ok: true, json: async () => ({ model, now: 1, messaging }) }
-      requests.push({ path: target, body: JSON.parse(options.body) })
-      if (post) return post(requests.at(-1))
-      return { ok: true, json: async () => ({ note: '' }) }
+    fetch: (target, options) => {
+      const response = (async () => {
+        if (target === '/api/board') return getBoard ? getBoard() : { ok: true, json: async () => ({ model, now: 1, messaging }) }
+        requests.push({ path: target, body: JSON.parse(options.body) })
+        if (post) return post(requests.at(-1))
+        return { ok: true, json: async () => ({ note: '' }) }
+      })()
+      pending.add(response)
+      response.then(() => pending.delete(response), () => pending.delete(response))
+      return response
     },
   }, { timeout: 1000 })
   const flush = () => new Promise(done => setImmediate(done))
+  const settle = async () => {
+    do {
+      await Promise.allSettled([...pending])
+      await new Promise(done => setImmediate(done))
+    } while (pending.size)
+  }
   await flush()
   const buttons = node => node.childNodes.flatMap(child => [...(child.tag === 'button' ? [child] : []), ...buttons(child)])
   return {
     boxes: () => get('board').querySelectorAll(),
     send: () => buttons(get('board')).find(button => button.textContent === 'Send to grok'),
     requests,
+    copied,
+    allButtons: () => document.querySelectorAll('button'),
     node: get,
     flush,
+    settle,
     redraw: async next => {
       model = next
       scheduled()
@@ -1807,6 +1859,288 @@ const pageDom = async (html, first, { post, confirm, messaging } = {}) => {
     },
   }
 }
+
+test('the phone page explains how to open a new address in every language without LAN access', async () => {
+  const lines = {
+    en: "Can't reach the board. On the computer, run the board with --serve --lan again and open the new address.",
+    'zh-TW': '連不上看板。請在電腦上用 --serve --lan 重新啟動看板，再開啟新的網址。',
+    'zh-CN': '连不上看板。请在电脑上用 --serve --lan 重新启动看板，再打开新地址。',
+  }
+  for (const [lang, line] of Object.entries(lines)) {
+    const source = `${BOARD_SCRIPT}\nprocess.stdout.write(servePage(STRINGS[${JSON.stringify(lang)}], 'synthetic', true))\n`
+    const html = run(lang, ['--chat'], {}, source)
+    const dom = await pageDom(html, null, { getBoard: async () => { throw new Error('Synthetic connection refused') } })
+    await dom.settle()
+    assert.equal(dom.node('offline').textContent, line)
+  }
+})
+
+test('an old page rejected by a restarted server shows the offline line', async () => {
+  const source = `${BOARD_SCRIPT}\nprocess.stdout.write(servePage(STRINGS.en, 'synthetic'))\n`
+  const html = run('en', ['--chat'], {}, source)
+  const dom = await pageDom(html, null, { getBoard: async () => ({ ok: false, json: async () => ({}) }) })
+  await dom.settle()
+  assert.equal(dom.node('offline').textContent, JSON.parse(dom.node('words').textContent).serveOffline)
+  assert.ok(dom.allButtons().filter(button => button.getAttribute('data-local') === null).every(button => button.disabled))
+})
+
+test('every press on a page whose server restarted with a new key shows the offline line at once', async () => {
+  const board = await page()
+  try {
+    const model = (await board.call('GET', '/api/board')).json().model
+    const html = (await board.call('GET', `/?t=${board.token}`)).body
+    for (const action of ['close', 'tick', 'paste', 'tidy']) {
+      let isRestarted = false
+      let refreshes = 0
+      const rejected = () => ({ ok: false, json: async () => ({}) })
+      const dom = await pageDom(html, model, {
+        getBoard: async () => {
+          if (isRestarted) { refreshes += 1; return rejected() }
+          return { ok: true, json: async () => ({ model, now: 1 }) }
+        },
+        post: async () => { isRestarted = true; return rejected() },
+      })
+      await dom.settle()
+      const words = JSON.parse(dom.node('words').textContent)
+      assert.equal(dom.node('offline').textContent, '', action)
+      dom.node('paste').value = '## Synthetic\n### Rejected paste\n- [ ] Keep this draft\n'
+      const button = action === 'close' ? dom.node('close') : action === 'paste' ? dom.node('paste-go') : dom.allButtons().find(button => action === 'tidy' ? button.textContent === words.archiveNow : button.textContent.includes('Ask two referees'))
+      assert.ok(button && !button.disabled, action)
+      button.click()
+      await dom.settle()
+      assert.equal(dom.node('offline').textContent, words.serveOffline, action)
+      assert.notEqual(dom.node('note').textContent, '…', action)
+      assert.equal(dom.requests.length, 1, action)
+      assert.equal(refreshes, 1, `${action}: refreshes without waiting for a poll`)
+      assert.ok(dom.allButtons().filter(button => button.getAttribute('data-local') === null).every(button => button.disabled), action)
+    }
+  } finally { await board.close() }
+})
+
+test('the page helper flush leaves a pending press available to resolve', async () => {
+  const source = `${BOARD_SCRIPT}\nprocess.stdout.write(servePage(STRINGS.en, 'synthetic'))\n`
+  const html = run('en', ['--chat'], {}, source)
+  const model = { counts: { waiting: 0, active: 0, due: 0, today: 0 }, asks: [], hidden: [], idle: [], stopped: [], groups: [], turns: [], recent: [] }
+  let finish
+  const pending = new Promise(done => { finish = done })
+  const dom = await pageDom(html, model, { post: async () => pending })
+  dom.node('paste').value = '## Synthetic\n### Pending paste\n- [ ] Wait\n'
+  dom.node('paste-go').click()
+  await dom.flush()
+  assert.equal(dom.requests.length, 1)
+  finish({ ok: true, json: async () => ({ note: 'Synthetic finished' }) })
+  await dom.settle()
+  assert.equal(dom.node('note').textContent, 'Synthetic finished')
+})
+
+test('L5 restarted server: an old page tab disables its buttons and says how to reconnect', { timeout: 30_000 }, async () => {
+  const lines = {
+    en: "Can't reach the board. Run the board with --serve again; it opens a new page, and you can close this one.",
+    'zh-TW': '連不上看板。請用 --serve 重新啟動看板；新的頁面會自動開啟，這個分頁可以關閉。',
+    'zh-CN': '连不上看板。请用 --serve 重新启动看板；新页面会自动打开，这个标签页可以关闭。',
+  }
+  const phoneLines = {
+    en: "Can't reach the board. On the computer, run the board with --serve --lan again and open the new address.",
+    'zh-TW': '連不上看板。請在電腦上用 --serve --lan 重新啟動看板，再開啟新的網址。',
+    'zh-CN': '连不上看板。请在电脑上用 --serve --lan 重新启动看板，再打开新地址。',
+  }
+  for (const [lang, line] of Object.entries(lines)) {
+    for (const failure of lang === 'en' ? ['poll', 'paste', 'close', 'tick', 'tidy'] : ['poll']) {
+      const board = await page('', {}, ['--lang', lang])
+      try {
+        const model = (await board.call('GET', '/api/board')).json().model
+        const html = (await board.call('GET', `/?t=${board.token}`)).body
+        const response = reply => ({ ok: reply.status === 200, json: async () => reply.json() })
+        const dom = await pageDom(html, model, {
+          getBoard: async () => response(await board.call('GET', '/api/board')),
+          post: async request => response(await board.call('POST', request.path, { body: request.body })),
+        })
+        await dom.settle()
+        let phone
+        if (failure === 'poll') {
+          const opened = await board.call('POST', '/api/lan', { body: {} })
+          if (opened.status === 200) {
+            const url = new URL(opened.json().url)
+            const home = await fetchAt(url.hostname, Number(url.port), 'GET', url.pathname + url.search)
+            phone = await pageDom(home.body, model, { getBoard: async () => response(await board.call('GET', '/api/board')) })
+            await phone.settle()
+          }
+        }
+        assert.ok(dom.allButtons().length > 3)
+        await board.call('POST', '/api/close', { body: {} })
+        await board.exited
+        if (failure === 'poll') {
+          await dom.redraw(model)
+          await dom.settle()
+        } else if (failure === 'paste') {
+          dom.node('paste').value = '## Synthetic\n### Offline paste\n- [ ] Keep this draft\n'
+          dom.node('paste-go').click()
+          await dom.settle()
+        } else {
+          const words = JSON.parse(dom.node('words').textContent)
+          const button = failure === 'close' ? dom.node('close') : dom.allButtons().find(button => failure === 'tidy' ? button.textContent === words.archiveNow : button.textContent.includes('Ask two referees'))
+          assert.ok(button, failure)
+          button.click()
+          await dom.settle()
+        }
+        assert.ok(dom.allButtons().filter(button => button.getAttribute('data-local') === null).every(button => button.disabled), `${lang}: ${failure}`)
+        assert.ok(dom.allButtons().filter(button => button.getAttribute('data-local') !== null).every(button => !button.disabled))
+        assert.equal(dom.node('offline').textContent, line)
+        assert.match(html, /#offline\{[^}]*position:sticky;top:0;background:var\(--ground\)/)
+        assert.match(html, /#offline\{[^}]*padding:8px 0;border-bottom:1px solid var\(--line\)/)
+        if (phone) {
+          await phone.redraw(model)
+          await phone.settle()
+          assert.equal(phone.node('offline').textContent, phoneLines[lang])
+        }
+        if (failure === 'tick' || failure === 'tidy') assert.notEqual(dom.node('note').textContent, '…')
+        const writes = dom.node('offline').textWrites
+        const requests = dom.requests.length
+        for (const button of dom.allButtons().filter(button => button.getAttribute('data-local') === null)) {
+          button.click()
+          button.events.click?.()
+        }
+        await dom.redraw(model)
+        await dom.settle()
+        assert.equal(dom.node('offline').textWrites, writes, 'repeated failures do not announce the same notice again')
+        assert.equal(dom.requests.length, requests, 'offline presses send and queue nothing')
+        assert.equal(dom.node('offline').textContent, line)
+        assert.ok(!existsSync(join(board.dir, 'grok-ran.json')))
+      } finally { await board.close() }
+    }
+  }
+})
+
+test('a page that reaches its server again enables its buttons and clears the line', { timeout: 30_000 }, async () => {
+  const board = await page()
+  try {
+    const model = (await board.call('GET', '/api/board')).json().model
+    model.asks[0].send = 'send'
+    model.asks[0].isSending = true
+    const html = (await board.call('GET', `/?t=${board.token}`)).body
+    let isReachable = true
+    const dom = await pageDom(html, model, { getBoard: async () => {
+      if (!isReachable) throw new Error('Synthetic connection refused')
+      return { ok: true, json: async () => ({ model, now: 1 }) }
+    } })
+    const enabled = dom.allButtons().filter(button => !button.disabled).map(button => button.textContent)
+    const draft = 'Keep my unsent reply'
+    dom.boxes()[0].value = draft
+    isReachable = false
+    await dom.redraw(model)
+    await dom.settle()
+    assert.ok(dom.allButtons().filter(button => button.getAttribute('data-local') === null).every(button => button.disabled))
+    for (const button of dom.allButtons().filter(button => button.getAttribute('data-local') === null)) button.click()
+    isReachable = true
+    await dom.redraw(model)
+    await dom.settle()
+    assert.equal(dom.node('offline').textContent, '')
+    assert.deepEqual(dom.allButtons().filter(button => !button.disabled).map(button => button.textContent), enabled)
+    assert.equal(dom.boxes()[0].value, draft)
+    assert.deepEqual(dom.requests, [], 'recovery never replays offline presses')
+  } finally { await board.close() }
+})
+
+test('an old page tab keeps its copy buttons working while the board is unreachable', async () => {
+  const board = await page()
+  try {
+    const model = (await board.call('GET', '/api/board')).json().model
+    const ask = model.asks[0]
+    ask.send = 'copy'
+    ask.command = 'synthetic command'
+    ask.reopen = 'synthetic resume'
+    model.stopped[0].resume = 'synthetic row resume'
+    const html = (await board.call('GET', `/?t=${board.token}`)).body
+    let isReachable = true
+    const dom = await pageDom(html, model, { clipboard: true, getBoard: async () => {
+      if (!isReachable) throw new Error('Synthetic connection refused')
+      return { ok: true, json: async () => ({ model, now: 1 }) }
+    } })
+    dom.boxes()[0].value = 'Synthetic copied reply'
+    isReachable = false
+    await dom.redraw(model)
+    await dom.settle()
+    const local = dom.allButtons().filter(button => button.getAttribute('data-local') !== null)
+    assert.ok(local.length >= 6, 'reply, answers, command, both resume buttons and relay are local')
+    assert.ok(local.every(button => !button.disabled), 'copy buttons enabled')
+    assert.ok(dom.allButtons().filter(button => !local.includes(button)).every(button => button.disabled), 'server buttons disabled')
+    for (const button of local) button.click()
+    await dom.settle()
+    for (const text of ['Synthetic copied reply', 'synthetic command', 'synthetic resume', 'synthetic row resume', ...ask.answers]) assert.ok(dom.copied.includes(text), text)
+    assert.ok(dom.copied.some(text => text.includes('<!-- auto')))
+    assert.deepEqual(dom.requests, [])
+  } finally { await board.close() }
+})
+
+test('a press that finds the board gone keeps the typed reply', async () => {
+  const board = await page()
+  try {
+    const model = (await board.call('GET', '/api/board')).json().model
+    const html = (await board.call('GET', `/?t=${board.token}`)).body
+    for (const mode of ['send', 'connected']) {
+      model.asks[0].send = mode
+      model.asks[0].delivery = { id: 'synthetic-connection', turn: 'synthetic-turn', agent: 'grok' }
+      let isReachable = true
+      const dom = await pageDom(html, model, {
+        getBoard: async () => {
+          if (!isReachable) throw new Error('Synthetic connection refused')
+          return { ok: true, json: async () => ({ model, now: 1 }) }
+        },
+        post: async () => { isReachable = false; throw new Error('Synthetic connection refused') },
+      })
+      const draft = 'Keep this typed reply'
+      dom.boxes()[0].value = draft
+      dom.send().click()
+      await dom.settle()
+      assert.equal(dom.boxes()[0].value, draft, mode)
+      assert.equal(dom.node('note').textContent, '', mode)
+      assert.ok(dom.node('offline').textContent.includes('--serve'))
+      assert.equal(dom.requests.length, 1)
+      isReachable = true
+      await dom.redraw(model)
+      await dom.settle()
+      assert.equal(dom.boxes()[0].value, draft)
+      assert.equal(dom.requests.length, 1, 'recovery never replays the failed reply')
+      dom.send().click()
+      await dom.settle()
+      assert.equal(dom.requests.length, 2, 'an explicit retry is allowed')
+    }
+    for (const ok of [false, true]) {
+      model.asks[0].send = 'send'
+      const dom = await pageDom(html, model, { post: async () => ({ ok, json: async () => ({ note: 'Synthetic result' }) }) })
+      dom.boxes()[0].value = 'Only clear an accepted reply'
+      dom.send().click()
+      await dom.settle()
+      assert.equal(dom.boxes()[0].value, ok ? '' : 'Only clear an accepted reply')
+    }
+  } finally { await board.close() }
+})
+
+test('a reachable file error replaces the offline line and restores the previous button states', async () => {
+  const board = await page()
+  try {
+    const model = (await board.call('GET', '/api/board')).json().model
+    model.asks[0].send = 'send'
+    model.asks[0].isSending = true
+    const html = (await board.call('GET', `/?t=${board.token}`)).body
+    let state = 'ok'
+    const dom = await pageDom(html, model, { getBoard: async () => {
+      if (state === 'offline') throw new Error('Synthetic connection refused')
+      return { ok: state === 'ok', json: async () => state === 'ok' ? { model, now: 1 } : { note: 'Synthetic file error (EACCES)' } }
+    } })
+    const enabled = dom.allButtons().filter(button => !button.disabled).map(button => button.textContent)
+    state = 'offline'
+    await dom.redraw(model)
+    await dom.settle()
+    state = 'error'
+    await dom.redraw(model)
+    await dom.settle()
+    assert.equal(dom.node('offline').textContent, '')
+    assert.equal(dom.node('note').textContent, 'Synthetic file error (EACCES)')
+    assert.deepEqual(dom.allButtons().filter(button => !button.disabled).map(button => button.textContent), enabled)
+  } finally { await board.close() }
+})
+
 
 test('the page keeps actionable progress delays without connection inventory or native identifiers', async () => {
   const model = { counts: { waiting: 0, active: 0, due: 0, today: 0 }, asks: [], hidden: [], idle: [], stopped: [], groups: [], turns: [], recent: [] }
