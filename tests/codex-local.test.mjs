@@ -7,6 +7,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { reporterPs1, reporterSh } from '../hooks/hook-reporters.ts'
+import { classifierDiagnostic, observeClassifier } from './fixtures/classifier-diagnostic.mjs'
 
 const setup = resolve('scripts/setup-codex.mjs')
 const session = 'test-codex-session-123'
@@ -609,7 +610,8 @@ test('legacy prompt classifiers time out and reap their process without promotin
   const isWindows = process.platform === 'win32'
   const inbox = join(f.root, 'progress-inbox'), script = join(f.root, isWindows ? 'progress-report.ps1' : 'progress-report.sh')
   const pidFile = join(f.home, 'classifier.pid'), preload = join(f.home, 'hang-classifier.cjs')
-  f.save(script, isWindows ? reporterPs1() : reporterSh(inbox))
+  const diagnostic = join(f.home, 'classifier-probe.txt')
+  f.save(script, isWindows ? observeClassifier(reporterPs1(), diagnostic) : reporterSh(inbox))
   f.save(preload, `const fs = require('node:fs')\nfs.writeFileSync(${JSON.stringify(pidFile)}, String(process.pid))\nsetInterval(() => {}, 1000)\n`)
   const env = { ...f.env, NODE_OPTIONS: `--require ${JSON.stringify(preload.replaceAll('\\', '/'))}` }
   const args = isWindows ? ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', script, 'cursor', 'prompt'] : [script, 'cursor', 'prompt']
@@ -620,7 +622,7 @@ test('legacy prompt classifiers time out and reap their process without promotin
     assert.equal(out.error, undefined, hookFailure(out))
     assert.equal(out.status, 0, hookFailure(out))
     assert.equal(out.stdout.trim(), '{}')
-    assert.equal(existsSync(pidFile), true, 'exercise the real classifier process')
+    assert.equal(existsSync(pidFile), true, `exercise the real classifier process${isWindows ? ': ' + classifierDiagnostic(diagnostic) : ''}`)
     assert.equal(isReporterAlive(Number(readFileSync(pidFile, 'utf8'))), false)
     assert.deepEqual(readdirSync(inbox), [])
     const log = readFileSync(join(f.root, 'hook-errors.log'), 'utf8')

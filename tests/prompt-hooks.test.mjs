@@ -8,6 +8,7 @@ import { createHash } from 'node:crypto'
 import { spawnSync } from 'node:child_process'
 import { join, sep } from 'node:path'
 import { tmpdir } from 'node:os'
+import { classifierDiagnostic, observeClassifier } from './fixtures/classifier-diagnostic.mjs'
 
 // Node loads standalone TypeScript directly; pure plugin modules use the host's
 // extensionless imports, so resolve only those local paths for these tests.
@@ -212,6 +213,24 @@ const fixture = async fn => {
 }
 const receipts = home => existsSync(join(home, 'progress-inbox')) ? readdirSync(join(home, 'progress-inbox')).map(file => ({ file, body: readFileSync(join(home, 'progress-inbox', file), 'utf8') })) : []
 
+test('classifier diagnostics keep only bounded phase and numeric evidence', () => fixture(async home => {
+  const { reporterPs1 } = await import('../hooks/connect-pure.ts')
+  const diagnostic = join(home, "classifier's-$&-probe.txt")
+  const original = reporterPs1(), observed = observeClassifier(original, diagnostic)
+  assert.equal(classifierDiagnostic(diagnostic), 'classifier diagnostic unavailable')
+  assert.ok(observed.includes(diagnostic.replaceAll("'", "''")))
+  assert.equal(observed.match(/REPORTER_TIMEOUT/g).length, original.match(/REPORTER_TIMEOUT/g).length)
+  for (const line of original.split('\n').filter(line => /Wait\(|WaitForExit\(|ElapsedMilliseconds|\.Kill\(|\.Dispose\(/.test(line))) assert.ok(observed.includes(line))
+  assert.ok(observed.indexOf('[IO.File]::WriteAllText(') > observed.lastIndexOf('if ($ownsReceipt)'))
+  assert.throws(() => observeClassifier(original + original, diagnostic), /anchor must be unique/)
+  writeFileSync(diagnostic, '\uFEFFstart|0|MethodInvocationException|-2146233087|Win32Exception|-2147467259|2|-1|-1|-1|34')
+  assert.equal(classifierDiagnostic(diagnostic), 'classifier phase=start started=0 type=MethodInvocationException hresult=-2146233087 innerType=Win32Exception innerHresult=-2147467259 nativeCode=2 exit=-1 stdoutChars=-1 stderrChars=-1 elapsedMs=34')
+  for (const body of ['PRIVATE_PATH', 'start|0|PRIVATE/path|1||0|0|-1|-1|-1|34', 'start|0||0||0|0|-1|-1|-1|' + '1'.repeat(100), 'start|0||0||0|0|-1|-1|-1|34|PRIVATE_PAYLOAD']) {
+    writeFileSync(diagnostic, body)
+    assert.equal(classifierDiagnostic(diagnostic), 'classifier diagnostic invalid')
+  }
+}))
+
 test('the sh reporter writes a prompt receipt with no prompt words from stdin or an argument', () => fixture(async home => {
   const { reporterSh } = await import('../hooks/connect-pure.ts')
   const file = join(home, 'progress-report.sh')
@@ -234,16 +253,20 @@ test('the sh reporter writes a prompt receipt with no prompt words from stdin or
 test('the PowerShell reporter writes a prompt receipt with no prompt words', { skip: process.platform !== 'win32' }, () => fixture(async home => {
   const { reporterPs1 } = await import('../hooks/connect-pure.ts')
   const file = join(home, 'progress-report.ps1')
-  writeFileSync(file, reporterPs1())
+  const diagnostic = join(home, 'classifier-probe.txt')
+  const diagnostics = []
+  writeFileSync(file, observeClassifier(reporterPs1(), diagnostic))
   assert.ok(!reporterPs1().includes('[Console]::OutputEncoding'))
   for (const prompt of ['/board', '$agent-board', '/agent-board', 'PRIVATE_REAL_ANSWER']) {
+    rmSync(diagnostic, { force: true })
     const result = spawnSync('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', file, 'codex', 'prompt'], { input: JSON.stringify({ session_id: 'synthetic-owner', cwd: '/synthetic/中文', prompt, transcript_path: 'PRIVATE_TRANSCRIPT' }), encoding: 'utf8', windowsHide: true })
+    diagnostics.push(classifierDiagnostic(diagnostic))
     assert.equal(result.status, 0, result.stderr)
   }
   const saved = receipts(home)
-  assert.equal(saved.length, 4)
+  assert.equal(saved.length, 4, diagnostics.join('; '))
   const values = saved.map(one => JSON.parse(one.body))
-  assert.equal(values.filter(one => one.board_request === true).length, 3)
+  assert.equal(values.filter(one => one.board_request === true).length, 3, diagnostics.join('; '))
   assert.ok(values.every(one => one.cwd === '/synthetic/中文'))
   assert.ok(saved.every(one => !/[^\x20-\x7e]/.test(one.body)))
   assert.ok(saved.every(one => !one.body.includes('PRIVATE_') && !one.body.includes('/board') && !one.body.includes('$agent-board')))
@@ -266,13 +289,28 @@ test('a reporter that cannot run node still writes the receipt and the board dro
   writeFileSync(ps, reporterPs1())
   writeFileSync(shell, reporterSh(shellPath(join(home, 'progress-inbox'))))
   const powershell = process.platform === 'win32' ? join(process.env.SystemRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe') : null
+  if (powershell) {
+    // MSYS delegates to the official Windows shell. Retain that dependency,
+    // not its containing PATH entries, so Node is still genuinely missing.
+    assert.ok(existsSync(powershell))
+    const file = join(tools, 'powershell.exe')
+    writeFileSync(file, `#!/bin/sh\nexec ${shellQuote(shellPath(powershell))} "$@"\n`)
+    chmodSync(file, 0o755)
+  }
   for (const prompt of ['/board', 'PRIVATE_REAL_ANSWER']) for (const mode of ['stdin', 'argument']) {
     const raw = JSON.stringify({ session_id: 'synthetic-fallback', cwd: '/synthetic/中文', prompt, transcript_path: 'PRIVATE_TRANSCRIPT' })
     const env = { ...process.env, PATH: shellPath(tools) }
     // Both hosts must retain a receipt when Node is missing, fails, or returns nothing.
     for (const failure of ['missing', 'failed', 'empty']) {
       const node = join(tools, 'node')
-      if (failure === 'missing') { rmSync(node, { force: true }); rmSync(`${node}.cmd`, { force: true }) }
+      if (failure === 'missing') {
+        rmSync(node, { force: true }); rmSync(`${node}.cmd`, { force: true })
+        const absent = spawnSync(sh, ['-c', 'command -v node'], { env, encoding: 'utf8', windowsHide: true })
+        assert.equal(absent.error, undefined)
+        assert.notEqual(absent.status, null)
+        assert.notEqual(absent.status, 0, 'the fixture must not restore Node through the PowerShell dependency')
+        assert.equal(absent.stdout, '')
+      }
       else {
         const status = failure === 'failed' ? 17 : 0
         writeFileSync(node, `#!/bin/sh\nprintf 'synthetic node error' >&2\nexit ${status}\n`)
