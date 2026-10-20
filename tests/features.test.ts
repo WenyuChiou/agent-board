@@ -15,7 +15,7 @@ import { ciFinished, prFromGh, prWords } from '../hooks/github'
 import { appendJournal, countDay, journalLine, parseJournal, progressReport } from '../hooks/journal'
 import { applyTaskCreate, applyTaskUpdate, asData, cleanContext, cleanTitle, clip, completedSince, dataBlock, emptyMirror, fromTaskList, markAnswered, noticesOf, resumeNote, waitsOnYou } from '../hooks/mirror'
 import { DARK, LIGHT, paletteFor } from '../hooks/palette'
-import { autoOf, parseProgress } from '../hooks/parse'
+import { autoOf, doneKey, parseProgress } from '../hooks/parse'
 import { LANGS, RELAY, ZH_TW } from '../hooks/i18n'
 import { resolveLang, STRINGS } from '../hooks/strings'
 import { parseQuickAdd } from '../hooks/quick'
@@ -28,7 +28,7 @@ import { applyCompletionOverlay, completionKey, completionOfBlock, completionOve
 import { RELEASED } from '../hooks/released'
 import { sha256 } from '../hooks/sha256'
 import { RELEASE_0_18_1, RELEASE_0_20_5 } from './fixtures/released'
-import { agentName, buildView, contextOf, handoffOf, mirrorMatchesTask, replyHint, resumeCommand, resumeVia, statusLine, wayBackText, withSeen, IDLE_MS } from '../hooks/view'
+import { agentName, buildView, contextOf, handoffOf, manualDoneSeen, mirrorMatchesTask, replyHint, resumeCommand, resumeVia, statusLine, taskFingerprint, wayBackText, withSeen, IDLE_MS } from '../hooks/view'
 
 const ARCHIVE_AGENTS = ['claude', 'codex', 'gemini', 'cursor', 'grok', 'muse', 'hermes', 'openclaw', 'opencode', 'antigravity', 'deepseek', 'custom-agent']
 
@@ -3378,6 +3378,38 @@ test('every language has the stopped count words', () => {
   for (const words of Object.values(STRINGS)) {
     expect(pageWords(words).stoppedCount).toBe(words.stoppedCount(1).replace('1', '\u0001'))
   }
+})
+
+test('manual completion observations map sidecar fingerprints to view keys without inventing times', () => {
+  const projects = parseProgress('## demo\n### Old\n- [x] Finished old\n### Fresh\n- [x] Finished fresh\n### Unknown\n- [x] Finished unknown\n### Future\n- [x] Finished future\n### Open\n- [ ] Continue\n')
+  const tasks = projects[0]!.tasks
+  const old = NOW - 2 * 86400000
+  const fresh = NOW - 10 * 60000
+  const seen = {
+    [taskFingerprint('demo', tasks[0]!)]: old,
+    [taskFingerprint('demo', tasks[1]!)]: fresh,
+    [taskFingerprint('demo', tasks[3]!)]: NOW + 86400000,
+  }
+  const done = manualDoneSeen(projects, seen, NOW, STRINGS.en)
+  expect(done).toEqual({ [doneKey('demo', 'Old')]: old, [doneKey('demo', 'Fresh')]: fresh, [doneKey('demo', 'Unknown')]: null, [doneKey('demo', 'Future')]: null })
+  expect(buildView(projects, [], null, NOW, 0, done, STRINGS.en).recent.map(item => item.title)).toEqual(['Fresh'])
+  expect(buildView(projects, [], null, NOW, 0, manualDoneSeen(projects, {}, NOW, STRINGS.en), STRINGS.en).recent).toEqual([])
+})
+
+test('manual completion observations preserve translated fallback keys and conservative repeated titles', () => {
+  const unnamed = parseProgress('- [x] Finished\n')
+  for (const s of Object.values(STRINGS)) {
+    const seen = withSeen({}, unnamed, NOW - 600000)
+    const done = manualDoneSeen(unnamed, seen, NOW, s)
+    expect(done[doneKey(s.uncategorized, s.unnamed)]).toBe(NOW - 600000)
+    expect(buildView(unnamed, [], null, NOW, 0, done, s).recent).toHaveLength(1)
+  }
+  const twins = parseProgress('## demo\n### Same\n- [x] First\n### Same\n- [x] Second\n')
+  const tasks = twins[0]!.tasks
+  const seen = { [taskFingerprint('demo', tasks[0]!)]: NOW - 2 * 86400000, [taskFingerprint('demo', tasks[1]!)]: NOW - 600000 }
+  expect(buildView(twins, [], null, NOW, 0, manualDoneSeen(twins, seen, NOW, STRINGS.en), STRINGS.en).recent).toEqual([])
+  delete seen[taskFingerprint('demo', tasks[0]!)]
+  expect(manualDoneSeen(twins, seen, NOW, STRINGS.en)[doneKey('demo', 'Same')]).toBe(null)
 })
 
 test('progress.html lists idle tasks in a closed shelf with their count', () => {

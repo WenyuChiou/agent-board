@@ -635,6 +635,21 @@ export const withSeen = (
 
 export const seenJson = (seen: Readonly<Record<string, number>>): string => `${JSON.stringify({ seen }, null, 2)}\n`
 
+// The sidecar remembers task fingerprints; the completion view uses legacy title keys.
+// Missing times stay unknown, and a shared title keeps the oldest possible observation.
+export const manualDoneSeen = (projects: readonly ProgressProject[], seen: Readonly<Record<string, number>>, now: number, s: Strings = ZH_TW): Record<string, number | null> => {
+  const done: Record<string, number | null> = {}
+  for (const project of projects) for (const task of project.tasks) {
+    if (task.auto !== null || !isTaskComplete(task)) continue
+    const key = doneKey(project.name || s.uncategorized, task.title || s.unnamed)
+    const held = seen[taskFingerprint(project.name, task)]
+    const at = hasTime(held) && held <= now ? held : null
+    const previous = done[key]
+    done[key] = previous === null || at === null ? null : Math.min(previous ?? at, at)
+  }
+  return done
+}
+
 const whereRank = (item: WaitingItem): number => (item.where === 'here' ? 0 : 1)
 
 export const buildView = (
@@ -644,8 +659,8 @@ export const buildView = (
   now: number,
   today = 0,
   // When the pane first saw each hand-kept task done (by doneKey); one it has not seen counts
-  // as done just now.
-  doneSeen: Readonly<Record<string, number>> = {},
+  // as done just now. An explicit null means its completion time is unknown.
+  doneSeen: Readonly<Record<string, number | null>> = {},
   s: Strings = ZH_TW,
   // Questions the person marked answered on this machine (by answeredKey): kept out of Waiting
   // on you, its count and the focus, and listed under `hidden` instead.
@@ -732,8 +747,9 @@ export const buildView = (
       })
 
       if (isComplete) {
-        const seen = isManual ? (doneSeen[doneKey(name, title)] ?? now) : updated
-        if (now - seen < DAY) recent.push({ project: name, title, when: relativeTime(seen, now, s), at: seen })
+        const observed = doneSeen[doneKey(name, title)]
+        const seen = isManual ? observed === null ? null : observed ?? now : updated
+        if (seen !== null && now - seen < DAY) recent.push({ project: name, title, when: relativeTime(seen, now, s), at: seen })
         continue
       }
 
