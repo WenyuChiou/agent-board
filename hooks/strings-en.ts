@@ -386,7 +386,7 @@ export const EN: Strings = {
   boardKeyHide: 'h already answered, hide',
   boardKeyShowHidden: 'u show them again',
   boardKeyIdle: 'i show/hide idle and stopped',
-  boardUsage: 'Usage: node agent-board.mjs [--watch] [--serve] [--html] [--chat] [--all] [--lang en|zh-TW|zh-CN] · --all lists idle and stopped tasks',
+  boardUsage: 'Usage: node agent-board.mjs [--watch] [--serve] [--html] [--chat] [--tidy] [--all] [--lang en|zh-TW|zh-CN] · --all lists idle and stopped tasks',
   boardHidden: (text: string): string => `Hidden: “${text}”; it comes back when the question changes.`,
   boardShown: 'The hidden questions are shown again.',
   hideFailed: "Couldn't save that it was answered; it stays on the list.",

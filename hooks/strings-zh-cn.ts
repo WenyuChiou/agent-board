@@ -382,7 +382,7 @@ export const ZH_CN: Strings = {
   boardKeyHide: 'h 已回复，先隐藏',
   boardKeyShowHidden: 'u 全部重新显示',
   boardKeyIdle: 'i 显示／收起闲置和已停止项目',
-  boardUsage: '用法：node agent-board.mjs [--watch] [--serve] [--html] [--chat] [--all] [--lang en|zh-TW|zh-CN] · --all 列出闲置和已停止项目',
+  boardUsage: '用法：node agent-board.mjs [--watch] [--serve] [--html] [--chat] [--tidy] [--all] [--lang en|zh-TW|zh-CN] · --all 列出闲置和已停止项目',
   boardHidden: (text: string): string => `已隐藏「${text}」；问题一改就会再出现。`,
   boardShown: '隐藏的问题都重新显示了。',
   hideFailed: '记不下「已回复」，这一项还留在清单上。',

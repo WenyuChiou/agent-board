@@ -24,10 +24,10 @@ const fixture = run => {
     for (const [kind, path] of Object.entries(paths)) writeFileSync(path, kind === 'board' ? FILE : HISTORY)
     const script = join(dir, 'agent-board.mjs')
     writeFileSync(script, `globalThis.AGENT_BOARD = ${JSON.stringify({ path: paths.board, lang: 'en' })}\n${BOARD_SCRIPT}`)
-    const play = (key, fault = '', lang = 'en', isWatch = false) => {
+    const play = (key, fault = '', lang = 'en', isWatch = false, args = []) => {
       const preload = join(dir, 'fault.cjs')
       writeFileSync(preload, `const fs = require('node:fs')\nconst { syncBuiltinESMExports } = require('node:module')\nDate.now = () => ${NOW}\n${fault}\nsyncBuiltinESMExports()\n`)
-      return spawnSync(process.execPath, ['-r', preload, script, '--lang', lang, ...(isWatch ? ['--watch'] : ['--keys', key])], {
+      return spawnSync(process.execPath, ['-r', preload, script, '--lang', lang, ...(args.length ? args : isWatch ? ['--watch'] : ['--keys', key])], {
         cwd: dir, encoding: 'utf8', timeout: 10000,
         env: { ...process.env, HOME: dir, USERPROFILE: dir, CLAUDE_CONFIG_DIR: dir, CODEX_HOME: join(dir, '.codex'), CLAUDE_PROGRESS_FILE: paths.board, NO_COLOR: '1' },
       })
@@ -47,6 +47,20 @@ const failed = (result, path, code) => {
   assert.ok(!(result.stdout + result.stderr).includes('Archived “'))
   assert.ok(!(result.stdout + result.stderr).includes('nothing changed'))
 }
+
+test('--tidy reports failed persistence and retries an archive-first sweep without duplicate entries', () => fixture(({ paths, play }) => {
+  const file = `## Synthetic\n<!-- auto session=a1b2c312 agent=codex state=done updated=${new Date(NOW - 13 * 3600000).toISOString()} -->\n### Old done\n- [x] Finished\n<!-- /auto session=a1b2c312 -->\n`
+  writeFileSync(paths.board, file)
+  const fault = `const original = fs.renameSync\nfs.renameSync = (from, to) => { if (String(to) === ${JSON.stringify(paths.board)}) throw Object.assign(new Error('injected rename failure'), { code: 'EIO' }); return original(from, to) }`
+  failed(play('', fault, 'en', false, ['--tidy']), paths.board, 'EIO')
+  assert.equal(readFileSync(paths.board, 'utf8'), file)
+  assert.ok(readFileSync(paths.archive, 'utf8').includes('### Old done'))
+  assert.equal(readFileSync(paths.journal, 'utf8'), HISTORY)
+  const retried = play('', '', 'en', false, ['--tidy'])
+  assert.equal(retried.status, 0, retried.stdout + retried.stderr)
+  assert.ok(!readFileSync(paths.board, 'utf8').includes('### Old done'))
+  assert.equal(readFileSync(paths.archive, 'utf8').split('### Old done').length - 1, 1)
+}))
 
 test('Confirm done leaves every step open when its journal cannot be replaced and retries without duplicate ticks', () => fixture(({ paths, play }) => {
   const file = FILE + '- [~] Second new step\n- [-] Canceled\n- [x] Already done\n'

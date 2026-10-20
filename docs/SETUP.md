@@ -36,6 +36,24 @@ On Windows use the exact Node and script paths printed by setup. Closing a brows
 leaves the local service running. Close the board stops it; `--idle-minutes 30` opts into
 idle shutdown. No startup service is installed.
 
+To run the normal archive sweep without a Claude session:
+
+```sh
+node ~/.agent-board/agent-board.mjs --tidy
+```
+
+Use the exact installed Node and script paths for a scheduler, including on Windows.
+The flag performs one sweep and exits; it installs no schedule or service and opens no
+page. Choosing this command authorizes the normal sweep: done agent blocks older than
+12 hours and stopped blocks older than 3 days move to the monthly archive beside the
+selected progress file. Unanswered questions, incomplete blocks and missing/future
+timestamps stay. Completed hand-kept tasks use their recorded first-observation times
+and the plugin's one-day threshold; unknown times stay, and this command invents none.
+Archive entries are saved before removing work from the board, and repeated runs do
+not duplicate them. A failed persistence operation exits nonzero; retain the files and
+retry after fixing its reported problem. `--chat` remains read-only even with `--tidy`.
+The explicit interactive tidy still archives finished work immediately.
+
 For maintenance, the installed program retains the compatibility flags
 `--codex-doctor --agent <name>` and `--codex-remove --agent <name>`; removal previews
 before `--apply`. Close that board first. Progress/history/session records remain, and
