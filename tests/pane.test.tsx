@@ -187,6 +187,14 @@ type World = {
 // handlers; map it back so the in-memory files are found on every host.
 const posix = (path: string): string => path.replace(/^[A-Za-z]:\\/, '/').replace(/\\/g, '/')
 const settledSetup = async ($: Engine, world: World): Promise<void> => { await world.setupDone; await $.command.run({ ...TIDY, args: 'connect status' }) }
+
+const beneathButton = (node: unknown, key: string, text: string): boolean => {
+  if (typeof node !== 'object' || node === null) return false
+  const element = node as { props?: { key?: string }; children?: Array<{ props?: { key?: string }; children?: unknown[] }> }
+  const children = element.children ?? []
+  const index = children.findIndex(child => child?.props?.key === `${key}::resolve`)
+  return (element.props?.key === `${key}::question` && index >= 0 && children[index + 1]?.children?.includes(text) === true) || children.some(child => beneathButton(child, key, text))
+}
 const controlFile = '/home/me/.agent-board/legacy-connect.json'
 const nativeState = (world: World): ConnectState => JSON.parse(world.files.get(controlFile) ?? '{"version":1,"revision":0,"disabled":false,"owned":{},"notified":[]}') as ConnectState
 let workerStageSequence = 0
@@ -1542,6 +1550,39 @@ test('after a compaction the conversation gets the progress note', async ($, on)
   expect(last).toContain('完成 1/2')
 })
 
+test("after a resume the pane's own question still counts under Waiting on you", async ($, on) => {
+  const at = Date.parse('2026-10-16T12:00:00Z')
+  const mirror = {
+    ...emptyMirror(SESSION, 'persona_framework', at - 1000, '/work/persona_framework'),
+    state: 'ended' as const,
+    title: 'Check the release',
+    tasks: [{ ...confirmStep('Publish'), waiting: 'you' as const, why: 'Ready to publish?' }],
+  }
+  const world: World = { files: new Map(), mtime: 1, hasTasks: true, store: { lang: 'en', autoConnectOff: true, [`mirror:${SESSION}`]: mirror } }
+  engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/persona_framework', surface: 'desktop', isInteractive: true })
+  await settledSetup($, world)
+  for (const surface of ['terminal', 'desktop'] as const) {
+    const ui = await $.ui.mount({ ...PANE, surface, props: PROPS })
+    expect(await ui.find({ type: 'Button', key: 'section::waiting' })).toBeDefined()
+    expect(await ui.find({ type: 'Button', key: 'mine::1::hide' })).toBeDefined()
+    await ui.unmount()
+  }
+  for (const state of ['ended', 'done'] as const) {
+    const view = buildView([], ['persona_framework'], { ...mirror, state }, at, 0, {}, EN)
+    expect(view.overview.waiting).toBe(1)
+    expect(view.waiting[0]?.where).toBe('here')
+    expect(view.older).toEqual([])
+  }
+})
+
+test('the Simplified Chinese Resolve wording marks a question as handled', () => {
+  expect(ZH_CN.resolveQuestion).toBe('标为已处理')
+  expect(ZH_CN.resolveFailed).toBe('无法保存处理结果，这个问题仍未处理。')
+  expect(ZH_CN.resolveSucceeded).toBe('已处理')
+  expect(ZH_TW.resolveQuestion).toBe('結案')
+})
+
 test('a session that ends with open steps is marked for someone to pick up', async ($, on) => {
   const world: World = { files: new Map(), mtime: 1, hasTasks: true }
   engineBeneath(on, world)
@@ -2549,7 +2590,7 @@ test('explicit Claude ask events renew the hidden question immediately while ano
 
 for (const lang of ['en', 'zh-TW', 'zh-CN'] as const) for (const days of [4, 8]) test(`aged pane questions hide and restore their exact identity in ${lang} at ${days} days`, async ($, on) => {
   const firstAt = Date.parse('2026-10-01T12:00:00Z')
-  const board = '## demo\n<!-- auto session=a1b2c3d4 agent=codex state=waiting updated=2026-10-01T12:00:00Z -->\n### Release\n- [?] Publish, OK?\n<!-- /auto session=a1b2c3d4 -->\n'
+  const board = `## demo\n<!-- auto session=a1b2c3d4 agent=codex state=waiting updated=${new Date(firstAt + days * 86400000).toISOString()} -->\n### Release\n- [?] Publish, OK?\n<!-- /auto session=a1b2c3d4 -->\n`
   const ledger = observeQuestions(emptyQuestions(), parseProgress(board), null, [], firstAt, true, 'pane-aged:1').ledger
   const world: World = { files: new Map([[FILE, board], [QUESTIONS, questionsJson(ledger)]]), mtime: 1, hasTasks: true, at: firstAt + days * 86400000, store: { lang, inboxDone: {}, opened: ['reminder', 'older', 'hidden'] } }
   engineBeneath(on, world)
@@ -6991,6 +7032,264 @@ test('the pane keeps stopped tasks behind one toggle and shows their actions whe
   }
   await ui.press({ key: 'section::stopped' })
   expect(await ui.find({ type: 'Button', key: 'persona_framework::Stopped plan' })).toBeUndefined()
+  expect(world.files.get(FILE)).toBe(board)
+  await ui.unmount()
+})
+
+test('a question from a stopped session shows on the Stopped shelf with Resolve', async ($, on) => {
+  const board = '## persona_framework\n<!-- auto session=a1b2c3d4 agent=codex state=waiting updated=2026-10-15T23:00:00Z -->\n### Stopped plan\n- [?] Publish?\n- [?] Keep the docs?\n<!-- /auto session=a1b2c3d4 -->'
+  const world: World = { files: new Map([[FILE, board]]), mtime: 1, hasTasks: true, store: { lang: 'en', autoConnectOff: true } }
+  engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/persona_framework', surface: 'desktop', isInteractive: true })
+  await settledSetup($, world)
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
+  expect(await ui.find({ type: 'Button', key: 'section::waiting' })).toBeUndefined()
+  await ui.press({ key: 'section::stopped' })
+  for (const index of [0, 1]) expect(await ui.find({ type: 'Button', key: `persona_framework::Stopped plan::${index}::resolve`, text: EN.resolveQuestion })).toBeDefined()
+  expect(world.files.get(FILE)).toBe(board)
+  await ui.unmount()
+})
+
+test("resolving a stopped session's question closes its ledger record and keeps the copy", async ($, on) => {
+  const board = '## persona_framework\n<!-- auto session=a1b2c3d4 agent=codex state=ended updated=2026-10-16T11:00:00Z -->\n### Stopped plan\n- [?] Publish?\n- [?] Keep the docs?\n<!-- /auto session=a1b2c3d4 -->'
+  const world: World = { files: new Map([[FILE, board]]), mtime: 1, hasTasks: true, store: { lang: 'en', autoConnectOff: true, opened: ['stopped'] } }
+  const clock = engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/persona_framework', surface: 'desktop', isInteractive: true })
+  await settledSetup($, world)
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
+  const before = JSON.parse(world.files.get(QUESTIONS)!)
+  const record = before.records.find((row: { words: string }) => row.words === 'Publish?')
+  await ui.press({ key: 'persona_framework::Stopped plan::0::resolve' })
+  await clock.advance(2_000)
+  const after = JSON.parse(world.files.get(QUESTIONS)!)
+  expect(after.records.find((row: { id: string }) => row.id === record.id)?.isUnresolved).toBe(false)
+  expect(after.records.find((row: { id: string }) => row.id === record.id)?.source).toEqual(record.source)
+  expect(after.records.find((row: { words: string }) => row.words === 'Keep the docs?')?.isUnresolved).toBe(true)
+  expect([...world.files].some(([path, text]) => path.includes('-questions-source-') && JSON.parse(text).disposition === 'resolved' && JSON.parse(text).record.id === record.id)).toBe(true)
+  expect(world.files.get(FILE)).toBe(board)
+  expect(await ui.find({ type: 'Button', key: 'persona_framework::Stopped plan::0::resolve' })).toBeUndefined()
+  expect(await ui.find({ type: 'Text', text: EN.resolveSucceeded })).toBeDefined()
+  await ui.unmount()
+})
+
+test('a failed Resolve shows its reason under the pressed question', async ($, on) => {
+  const board = '## persona_framework\n<!-- auto session=a1b2c3d4 agent=codex state=ended updated=2026-10-16T11:00:00Z -->\n### Stopped plan\n- [?] Publish?\n- [?] Keep the docs?\n<!-- /auto session=a1b2c3d4 -->'
+  const world: World = { files: new Map([[FILE, board]]), mtime: 1, hasTasks: true, store: { lang: 'en', autoConnectOff: true, opened: ['stopped'] } }
+  const clock = engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/persona_framework', surface: 'desktop', isInteractive: true })
+  await settledSetup($, world)
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
+  world.failQuestionCapture = 'write'
+  const key = 'persona_framework::Stopped plan::0'
+  await ui.press({ key: `${key}::resolve` })
+  await clock.advance(2000)
+  expect(await ui.find({ type: 'Text', text: EN.resolveFailed })).toBeDefined()
+  expect(beneathButton(await ui.drawn(), key, EN.resolveFailed)).toBe(true)
+  expect(world.files.get(FILE)).toBe(board)
+  await ui.unmount()
+})
+
+test('a question asked again after its resolved step was ticked counts under Waiting on you', async ($, on) => {
+  const board = '## persona_framework\n<!-- auto session=a1b2c3d4 agent=codex state=ended updated=2026-10-16T11:00:00Z -->\n### Stopped plan\n- [?] Push to main, OK?\n<!-- /auto session=a1b2c3d4 -->'
+  const world: World = { files: new Map([[FILE, board]]), mtime: 1, hasTasks: true, store: { lang: 'en', autoConnectOff: true, opened: ['stopped'] } }
+  const clock = engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/persona_framework', surface: 'desktop', isInteractive: true })
+  await settledSetup($, world)
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
+  const id = JSON.parse(world.files.get(QUESTIONS)!).records[0].id
+  await ui.press({ key: 'persona_framework::Stopped plan::0::resolve' })
+  await clock.advance(2000)
+  world.files.set(FILE, board.replace('[?]', '[x]'))
+  world.mtime += 1
+  await clock.advance(2000)
+  expect(world.files.get(questionProofPath(FILE, 'retired', sha256(id)))).toBeDefined()
+  world.files.set(FILE, board.replace('state=ended', 'state=waiting').replace('11:00:00Z', '12:00:00Z'))
+  world.mtime += 1
+  await clock.advance(2000)
+  const pane = await ui.drawn()
+  expect(JSON.stringify(pane)).toContain('Push to main')
+  expect(await ui.find({ type: 'Button', key: 'section::waiting' })).toBeDefined()
+  const ledger = JSON.parse(world.files.get(QUESTIONS)!)
+  expect(ledger.records.some((record: { id: string; words: string; isUnresolved: boolean }) => record.id !== id && record.words === 'Push to main, OK?' && record.isUnresolved)).toBe(true)
+  await ui.unmount()
+})
+
+test('a resolved done question keeps its result beside the task after the task leaves the shelf', async ($, on) => {
+  const board = '## persona_framework\n<!-- auto session=a1b2c3d4 agent=codex state=done updated=2026-10-15T11:00:00Z -->\n### Finished plan\n- [?] Publish?\n<!-- /auto session=a1b2c3d4 -->'
+  const world: World = { files: new Map([[FILE, board]]), mtime: 1, hasTasks: true, store: { lang: 'en', autoConnectOff: true, opened: ['stopped'] } }
+  const clock = engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/persona_framework', surface: 'desktop', isInteractive: true })
+  await settledSetup($, world)
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
+  await ui.press({ key: 'persona_framework::Finished plan::0::resolve' })
+  await clock.advance(2000)
+  expect(await ui.find({ type: 'Button', key: 'persona_framework::Finished plan', text: '▸ Finished plan' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: EN.resolveSucceeded })).toBeDefined()
+  expect(await ui.find({ type: 'Button', key: 'section::stopped', text: `▾ ${EN.stoppedCount(1)}` })).toBeDefined()
+  await ui.press({ key: 'persona_framework::Finished plan' })
+  expect(await ui.find({ type: 'Button', key: 'persona_framework::Finished plan::archive' })).toBeDefined()
+  expect(await ui.find({ type: 'Button', key: 'persona_framework::Finished plan::0::resolve' })).toBeUndefined()
+  expect(world.files.get(FILE)).toBe(board)
+  await ui.unmount()
+})
+
+test('a changed question explains a refused Resolve beside its button', async ($, on) => {
+  const board = '## persona_framework\n<!-- auto session=a1b2c3d4 agent=codex state=ended updated=2026-10-16T11:00:00Z -->\n### Stopped plan\n- [?] Publish?\n<!-- /auto session=a1b2c3d4 -->'
+  const world: World = { files: new Map([[FILE, board]]), mtime: 1, hasTasks: true, store: { lang: 'en', autoConnectOff: true, opened: ['stopped'] } }
+  const clock = engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/persona_framework', surface: 'desktop', isInteractive: true })
+  await settledSetup($, world)
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
+  world.files.set(FILE, board.replace('Publish?', 'Choose a date?'))
+  await ui.press({ key: 'persona_framework::Stopped plan::0::resolve' })
+  await settledSetup($, world)
+  expect(await ui.find({ type: 'Text', text: EN.resolveChanged })).toBeDefined()
+  expect(beneathButton(await ui.drawn(), 'persona_framework::Stopped plan::0', EN.resolveChanged)).toBe(true)
+  const ledger = JSON.parse(world.files.get(QUESTIONS)!)
+  expect(ledger.records.some((record: { words: string; isUnresolved: boolean }) => record.words === 'Choose a date?' && record.isUnresolved)).toBe(true)
+  await clock.advance(2000)
+  expect(await ui.find({ type: 'Text', text: EN.resolveChanged })).toBeDefined()
+  expect(beneathButton(await ui.drawn(), 'persona_framework::Stopped plan::0', EN.resolveChanged)).toBe(true)
+  world.files.set(FILE, `${world.files.get(FILE)}\n## another-project\n### Unrelated task\n- [~] Continue\n`)
+  await clock.advance(2000)
+  expect(beneathButton(await ui.drawn(), 'persona_framework::Stopped plan::0', EN.resolveChanged)).toBe(true)
+  await ui.unmount()
+})
+
+test('a resolve result line never shows under a different question', async ($, on) => {
+  const board = '## persona_framework\n<!-- auto session=a1b2c3d4 agent=codex state=ended updated=2026-10-16T11:00:00Z -->\n### Stopped plan\n- [?] Publish?\n<!-- /auto session=a1b2c3d4 -->'
+  const world: World = { files: new Map([[FILE, board]]), mtime: 1, hasTasks: true, store: { lang: 'en', autoConnectOff: true, opened: ['stopped'] } }
+  const clock = engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/persona_framework', surface: 'desktop', isInteractive: true })
+  await settledSetup($, world)
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
+  world.failQuestionCapture = 'write'
+  const key = 'persona_framework::Stopped plan::0'
+  await ui.press({ key: `${key}::resolve` })
+  await clock.advance(2000)
+  expect(beneathButton(await ui.drawn(), key, EN.resolveFailed)).toBe(true)
+  world.failQuestionCapture = undefined
+  world.files.set(FILE, board.replace('Publish?', 'Choose a date?').replaceAll('a1b2c3d4', '11223344'))
+  await clock.advance(2000)
+  expect(await ui.find({ type: 'Button', key: `${key}::resolve` })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: EN.resolveFailed })).toBeUndefined()
+  expect(beneathButton(await ui.drawn(), key, EN.resolveFailed)).toBe(false)
+  await ui.unmount()
+})
+
+test('a saved resolution succeeds even when the question index cannot be replaced', async ($, on) => {
+  const board = '## persona_framework\n<!-- auto session=a1b2c3d4 agent=codex state=ended updated=2026-10-16T11:00:00Z -->\n### Stopped plan\n- [?] Publish?\n<!-- /auto session=a1b2c3d4 -->'
+  const world: World = { files: new Map([[FILE, board]]), mtime: 1, hasTasks: true, store: { lang: 'en', autoConnectOff: true, opened: ['stopped'] } }
+  const clock = engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/persona_framework', surface: 'desktop', isInteractive: true })
+  await settledSetup($, world)
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
+  const id = JSON.parse(world.files.get(QUESTIONS)!).records[0].id
+  world.unwritable = new Set([QUESTIONS])
+  await ui.press({ key: 'persona_framework::Stopped plan::0::resolve' })
+  await clock.advance(2000)
+  expect([...world.files].some(([path, text]) => path.includes('-questions-source-') && JSON.parse(text).disposition === 'resolved' && JSON.parse(text).record.id === id)).toBe(true)
+  expect(await ui.find({ type: 'Text', text: EN.resolveSucceeded })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: EN.resolveFailed })).toBeUndefined()
+  expect(await ui.find({ type: 'Button', key: 'persona_framework::Stopped plan::0::resolve' })).toBeUndefined()
+  expect(world.files.get(FILE)).toBe(board)
+  await ui.unmount()
+})
+
+test('a failed Resolve stays beside its question through unrelated report changes', async ($, on) => {
+  const board = '## persona_framework\n<!-- auto session=a1b2c3d4 agent=codex state=ended updated=2026-10-16T11:00:00Z -->\n### Stopped plan\n- [?] Publish?\n<!-- /auto session=a1b2c3d4 -->'
+  const world: World = { files: new Map([[FILE, board]]), mtime: 1, hasTasks: true, store: { lang: 'en', autoConnectOff: true, opened: ['stopped'] } }
+  const clock = engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/persona_framework', surface: 'desktop', isInteractive: true })
+  await settledSetup($, world)
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
+  world.failQuestionCapture = 'write'
+  const key = 'persona_framework::Stopped plan::0'
+  await ui.press({ key: `${key}::resolve` })
+  await clock.advance(2000)
+  expect(beneathButton(await ui.drawn(), key, EN.resolveFailed)).toBe(true)
+  world.files.set(FILE, `${board}\n## Other\n### Another task\n- [~] Work\n`)
+  world.mtime += 1
+  await clock.advance(2000)
+  expect(beneathButton(await ui.drawn(), key, EN.resolveFailed)).toBe(true)
+  world.files.set(FILE, board.replace('Publish?', 'Choose a date?'))
+  world.mtime += 1
+  await clock.advance(2000)
+  expect(await ui.find({ type: 'Text', text: EN.resolveFailed })).toBeUndefined()
+  await ui.unmount()
+})
+
+test('Resolve feedback stays with the matching Done recently row when titles repeat', async ($, on) => {
+  const block = (session: string, question: string) => `<!-- auto session=${session} agent=codex state=done updated=2026-10-16T11:00:00Z -->\n### Finished plan\n- [?] ${question}\n<!-- /auto session=${session} -->`
+  const board = `## persona_framework\n${block('a1b2c3d4', 'Publish?')}\n${block('11223344', 'Keep the docs?')}`
+  const world: World = { files: new Map([[FILE, board]]), mtime: 1, hasTasks: true, store: { lang: 'en', autoConnectOff: true, opened: ['recent'] } }
+  const clock = engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/persona_framework', surface: 'desktop', isInteractive: true })
+  await settledSetup($, world)
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
+  world.failQuestionCapture = 'write'
+  const key = 'persona_framework::Finished plan#2::0'
+  await ui.press({ key: `${key}::resolve` })
+  await clock.advance(2000)
+  expect(beneathButton(await ui.drawn(), key, EN.resolveFailed)).toBe(true)
+  expect(JSON.stringify(await ui.drawn()).split(EN.resolveFailed).length - 1).toBe(1)
+  expect(await ui.find({ type: 'Text', text: 'persona_framework · Finished plan#2' })).toBeUndefined()
+  await ui.unmount()
+})
+
+test('a detached Resolve result names its project and task without the repeated-title key', async ($, on) => {
+  const block = (session: string) => `<!-- auto session=${session} agent=codex state=ended updated=2026-10-16T11:00:00Z -->\n### Finished plan\n> due 2026-10-17\n- [?] Publish?\n- [ ] Finish\n<!-- /auto session=${session} -->`
+  const board = `## persona_framework\n${block('a1b2c3d4')}\n${block('11223344')}`
+  const world: World = { files: new Map([[FILE, board]]), mtime: 1, hasTasks: true, store: { lang: 'en', autoConnectOff: true, opened: ['stopped'] } }
+  const clock = engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/persona_framework', surface: 'desktop', isInteractive: true })
+  await settledSetup($, world)
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
+  await ui.press({ key: 'persona_framework::Finished plan#2::0::resolve' })
+  await clock.advance(2000)
+  expect(await ui.find({ type: 'Text', text: EN.resolveSucceeded })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: 'persona_framework · Finished plan' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: 'persona_framework · Finished plan#2' })).toBeUndefined()
+  await ui.unmount()
+})
+
+test('Resolve refuses a stopped question that a newer pending inbox turn makes live', async ($, on) => {
+  const session = 'synthetic-woken-session'
+  const id = blockId('codex', session)
+  const board = `## persona_framework\n<!-- auto session=${id} agent=codex state=waiting updated=2026-10-15T23:00:00Z -->\n### Stopped plan\n- [?] Publish?\n<!-- /auto session=${id} -->`
+  const world: World = { files: new Map([[FILE, board]]), mtime: 1, hasTasks: true, store: { lang: 'en', autoConnectOff: true, opened: ['stopped'] } }
+  const clock = engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/persona_framework', surface: 'desktop', isInteractive: true })
+  await settledSetup($, world)
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
+  world.files.set(`${INBOX}/codex-turn-1792152000-1.json`, JSON.stringify({ session_id: session, cwd: '/work/persona_framework', last_assistant_message: 'Publish?' }))
+  world.mtimes![`${INBOX}/codex-turn-1792152000-1.json`] = Date.parse('2026-10-16T12:00:00Z')
+  await clock.advance(1)
+  await ui.press({ key: 'persona_framework::Stopped plan::0::resolve' })
+  await settledSetup($, world)
+  expect(await ui.find({ type: 'Text', text: EN.resolveChanged })).toBeDefined()
+  expect(JSON.parse(world.files.get(QUESTIONS)!).records.some((record: { words: string; isUnresolved: boolean }) => record.words === 'Publish?' && record.isUnresolved)).toBe(true)
+  expect([...world.files].some(([path, text]) => path.includes('-questions-source-') && JSON.parse(text).disposition === 'resolved')).toBe(false)
+  await ui.unmount()
+})
+
+test('resolving the last question does not add a phantom stopped task when it moves to Due or Idle', async ($, on) => {
+  const block = (session: string, title: string, notes: string) => `<!-- auto session=${session} agent=codex state=ended updated=2026-10-07T11:00:00Z -->\n### ${title}\n${notes}- [?] Publish?\n- [ ] Finish\n<!-- /auto session=${session} -->`
+  const board = `## persona_framework\n${block('a1b2c3d4', 'Due plan', '> due 2026-10-17\n')}\n${block('11223344', 'Idle plan', '')}`
+  const world: World = { files: new Map([[FILE, board]]), mtime: 1, hasTasks: true, store: { lang: 'en', autoConnectOff: true, opened: ['stopped'] } }
+  const clock = engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/persona_framework', surface: 'desktop', isInteractive: true })
+  await settledSetup($, world)
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
+  expect(await ui.find({ type: 'Button', key: 'section::stopped', text: `▾ ${EN.stoppedCount(2)}` })).toBeDefined()
+  await ui.press({ key: 'persona_framework::Due plan::0::resolve' })
+  await clock.advance(2000)
+  expect(await ui.find({ type: 'Button', key: 'section::stopped', text: `▾ ${EN.stoppedCount(1)}` })).toBeDefined()
+  await ui.press({ key: 'persona_framework::Idle plan::0::resolve' })
+  await clock.advance(2000)
+  expect(await ui.find({ type: 'Button', key: 'section::stopped' })).toBeUndefined()
+  expect(await ui.find({ type: 'Button', key: 'section::due' })).toBeDefined()
+  expect(await ui.find({ type: 'Button', key: 'section::idle' })).toBeDefined()
   expect(world.files.get(FILE)).toBe(board)
   await ui.unmount()
 })

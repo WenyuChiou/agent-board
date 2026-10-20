@@ -333,11 +333,11 @@ const FILE = `# Progress
 <!-- /auto session=a1b2c3d4 -->
 `
 
-const run = (lang, args = [], beside = {}) => {
+const run = (lang, args = [], beside = {}, source = FILE) => {
   const dir = mkdtempSync(join(tmpdir(), 'board-'))
   try {
     const path = join(dir, 'progress.md')
-    writeFileSync(path, FILE)
+    writeFileSync(path, source)
     for (const [name, text] of Object.entries(beside)) writeFileSync(join(dir, name), text)
     mkdirSync(join(dir, 'progress-inbox'))
     writeFileSync(join(dir, 'progress-inbox', 'gemini-turn-1-1.json'), JSON.stringify({ session_id: 'g1', cwd: join(dir, 'docs-site'), prompt_response: 'Fixed 12 broken links.' }))
@@ -357,6 +357,30 @@ test('the board script prints the board from the file it was written for, in its
   assert.ok(text.includes('docs-site · gemini: Fixed 12 broken links.'), text)
   assert.ok(run('zh-TW').startsWith('進度  ● 1 等你'))
   assert.ok(run('en', ['--lang', 'zh-CN']).startsWith('进度'))
+})
+
+test("the board script does not count a stopped session's question", () => {
+  for (const lang of ['en', 'zh-TW', 'zh-CN']) for (const source of [FILE.replace(WAITING_AT, ENDED_AT), FILE.replace('state=waiting', 'state=ended'), FILE.replace('state=waiting', 'state=done')]) {
+    const text = run(lang, ['--all'], {}, source)
+    assert.ok(text.startsWith(({ en: 'Progress  ● 0 waiting', 'zh-TW': '進度  ● 0 等你', 'zh-CN': '进度  ● 0 等你' })[lang]), text)
+    if (!source.includes('state=done')) {
+      assert.ok(text.includes(({ en: '1 stopped', 'zh-TW': '1 項已停止', 'zh-CN': '1 项已停止' })[lang]), text)
+    }
+    assert.ok(text.includes('Per-key limit'), text)
+    const chat = run(lang, ['--chat'], {}, source)
+    assert.ok(chat.includes('100 or 300 a minute?'), chat)
+  }
+})
+
+test("a done session's open question shows on the terminal board", () => {
+  const source = FILE.replace('state=waiting', 'state=done')
+  for (const lang of ['en', 'zh-TW', 'zh-CN']) for (const args of [[], ['--all'], ['--chat'], ['--keys', '']]) {
+    const text = run(lang, args, {}, source)
+    assert.ok(text.includes('Per-key limit'), text)
+    assert.ok(text.includes('100 or 300 a minute?'), text)
+    assert.ok(!text.includes('a1b2c3d4'), text)
+    assert.ok(!text.includes('::'), text)
+  }
 })
 
 test('the board script leaves out a question a pane on this machine marked answered', () => {
@@ -1396,7 +1420,7 @@ test('marking a question answered on the page or with h on the board writes only
     // The terminal board's h writes the same list, and u lists everything hidden again.
     const script = join(dir, 'agent-board.mjs')
     const play = keys => execFileSync(process.execPath, [script, '--keys', keys], { env: { ...process.env, CLAUDE_PROGRESS_FILE: '', NO_COLOR: '1' }, encoding: 'utf8' })
-    const marked = play('down h')
+    const marked = play('h')
     assert.ok(marked.includes('Hidden: “PDF or HTML?”'), marked)
     assert.ok(marked.includes('1 answered, hidden · u show them again'), marked)
     assert.deepEqual(hidden(), [question()])
@@ -1408,14 +1432,14 @@ test('marking a question answered on the page or with h on the board writes only
     // leaves it and says so. Left broken for a while, it is written anew by the next press.
     const list = join(dir, 'progress-answered.json')
     writeFileSync(list, '{"answered": ["x"')
-    const kept = play('down h')
+    const kept = play('h')
     assert.ok(kept.includes("Couldn't save that it was answered"), kept)
     const refused = await call('POST', '/api/act', { body: { key: ask.key, type: 'hide' } })
     assert.deepEqual([refused.status, refused.json().note], [409, "Couldn't save that it was answered; it stays on the list."])
     assert.equal(readFileSync(list, 'utf8'), '{"answered": ["x"')
     const old = new Date(Date.now() - 60_000)
     utimesSync(list, old, old)
-    play('down h')
+    play('h')
     assert.deepEqual(hidden(), [question()])
     // Nothing went to any agent, and every block is as its session wrote it.
     assert.equal(readFileSync(path, 'utf8'), before)
@@ -1426,13 +1450,16 @@ test('marking a question answered on the page or with h on the board writes only
 })
 
 test('the serve page repairs a torn ledger and hides its captured question without changing the report', { timeout: 30_000 }, async () => {
-  const board = await page()
+  // A live session's question: a stopped session's question no longer waits on you (#185).
+  const board = await page(`\n## billing\n<!-- auto session=d4e5f6a7 agent=codex state=waiting updated=RECENT -->\n### Pick invoice format\n- [x] Read\n- [?] PDF or HTML?\n<!-- /auto session=d4e5f6a7 -->\n`)
   try {
     const report = readFileSync(board.path, 'utf8')
     const model = async () => (await board.call('GET', '/api/board')).json().model
-    const before = (await model()).asks[0]
+    const asks = (await model()).asks
+    assert.equal(asks.length, 1)
+    const before = asks[0]
     const ledger = join(board.dir, 'progress-questions.json')
-    const identity = JSON.parse(readFileSync(ledger, 'utf8')).records.find(row => row.isWaiting).id
+    const identity = JSON.parse(readFileSync(ledger, 'utf8')).records.find(row => row.words === 'PDF or HTML?' && row.isWaiting).id
     writeFileSync(ledger, '{"version":1,')
     const restored = (await model()).asks.find(row => row.text === before.text)
     assert.ok(restored?.canHide)
@@ -1478,7 +1505,7 @@ test('served questions keep hidden identities across reordered reports and a fre
       const waiting = html.match(/data-key="section:waiting"[\s\S]*?<\/details>/)?.[0] ?? ''
       assert.ok(!waiting.includes('PDF or HTML?') && !waiting.includes('PDF  or'), html)
       assert.ok(html.includes('PDF  or') || html.includes('PDF or HTML?'), html)
-      assert.match(html, /● 1<\/span>/)
+      assert.match(html, /● 0<\/span>/)
       assert.equal(readFileSync(join(board.dir, 'progress-answered.json'), 'utf8'), saved['progress-answered.json'])
       assert.equal(readFileSync(join(board.dir, 'progress-questions.json'), 'utf8'), saved['progress-questions.json'])
     }
@@ -1488,6 +1515,49 @@ test('served questions keep hidden identities across reordered reports and a fre
     assert.equal((await model()).asks.some(one => one.agent === 'codex'), true)
   } finally {
     await board.close()
+  }
+})
+
+test('the terminal board and the page retire a resolution once the agent ticks its step', { timeout: 30_000 }, async () => {
+  for (const surface of ['terminal', 'page']) {
+    const dir = surface === 'terminal' ? mkdtempSync(join(tmpdir(), 'board-resolve-')) : null
+    const board = dir === null ? await page() : { dir, path: join(dir, 'progress.md'), close: async () => rmSync(dir, { recursive: true, force: true }) }
+    try {
+      const script = join(board.dir, 'agent-board.mjs')
+      if (surface === 'terminal') writeFileSync(script, `globalThis.AGENT_BOARD = ${JSON.stringify({ path: board.path, lang: 'en' })}\n${BOARD_SCRIPT}`)
+      const observe = async () => surface === 'terminal'
+        ? execFileSync(process.execPath, [script, '--keys', ''], { env: { ...process.env, CLAUDE_PROGRESS_FILE: '', NO_COLOR: '1' }, encoding: 'utf8' })
+        : (await board.call('GET', '/api/board')).json().model
+      writeFileSync(board.path, FILE)
+      await observe()
+      const file = join(board.dir, 'progress-questions.json')
+      const ledger = JSON.parse(readFileSync(file, 'utf8'))
+      const original = ledger.records.find(record => record.words === 'Per-key limit — 100 or 300 a minute?')
+      assert.ok(original, surface)
+      const resolved = { ...original, isUnresolved: false, isWaiting: false, isPresent: false, resolvedAt: Date.now() }
+      const capture = JSON.stringify({ version: 1, disposition: 'resolved', record: resolved }) + '\n'
+      const hash = createHash('sha256').update(capture).digest('hex')
+      writeFileSync(join(board.dir, `progress-questions-source-${hash}.json`), capture)
+      const retired = join(board.dir, `progress-questions-retired-${createHash('sha256').update(original.id).digest('hex')}.json`)
+      for (let poll = 0; poll < 2; poll += 1) {
+        await observe()
+        assert.equal(existsSync(retired), false, `${surface}: Resolve lasts while the question remains`)
+      }
+      const saved = readFileSync(file, 'utf8')
+      writeFileSync(board.path, FILE.replace('- [?]', '- [x]'))
+      await observe()
+      assert.equal(existsSync(retired), true, `${surface}: completing the step retires its resolution`)
+      writeFileSync(file, saved)
+      writeFileSync(board.path, FILE)
+      const shown = await observe()
+      const renewed = JSON.parse(readFileSync(file, 'utf8')).records.find(record => record.words === original.words && record.isUnresolved && record.isWaiting)
+      assert.ok(renewed, `${surface}: stale ledger replay cannot hide the renewed question`)
+      assert.notEqual(renewed.id, original.id)
+      if (surface === 'terminal') assert.ok(shown.includes('1 waiting'), shown)
+      else assert.ok(shown.asks.some(ask => ask.text === 'Per-key limit'))
+    } finally {
+      await board.close()
+    }
   }
 })
 
@@ -2149,7 +2219,7 @@ test('a reply typed for one session is dropped when the box is redrawn for anoth
     await dom.flush()
     const row = await rowOf('Pick the cache')
     assert.equal(dom.requests.length, 1)
-    assert.deepEqual([dom.requests[0].path, dom.requests[0].body.session, dom.requests[0].body.fp], ['/api/act', 'd4e5f6a7', second.asks.find(one => one.task === 'Pick the cache').fp])
+    assert.deepEqual([dom.requests[0].path, dom.requests[0].body.session, dom.requests[0].body.fp], ['/api/act', 'd4e5f6a7', second.stopped.find(one => one.title === 'Pick the cache').fp])
     const sent = await call('POST', '/api/act', { body: dom.requests[0].body })
     assert.equal(sent.status, 202, sent.body)
     // The agent stand-in answers after a second; the page is not closed while it is on its way.
