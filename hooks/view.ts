@@ -747,8 +747,8 @@ export const buildView = (
       })
 
       if (isComplete) {
-        const observed = doneSeen[doneKey(name, title)]
-        const seen = isManual ? observed === null ? null : observed ?? now : updated
+        const doneAt = doneSeen[doneKey(name, title)]
+        const seen = isManual ? doneAt === null ? null : doneAt ?? now : updated
         if (seen !== null && now - seen < DAY) recent.push({ project: name, title, when: relativeTime(seen, now, s), at: seen })
         continue
       }
