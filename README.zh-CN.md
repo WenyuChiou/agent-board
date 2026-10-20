@@ -1,6 +1,8 @@
 <h1 align="center">
-<img alt="导览动画：五个 agent 里哪个在等你；在面板上回答；各家用自己的 hook 汇报；什么都不会丢；在哪里能用；深浅两组和色配色。" src="docs/images/tour-zh-CN.svg" width="100%">
+<img alt="导览动画：五个 agent 里哪个在等你；在面板上回答；各家用自己的 hook 汇报；什么都不会丢；在哪里能用；深浅两组和色配色。合成数据。" src="docs/images/tour-zh-CN.svg" width="100%">
 </h1>
+
+<p align="center"><sub>简短导览，由看板自己的代码用合成数据画出。</sub></p>
 
 <p align="center">
 <b>每个 AI coding agent 在做什么，一个面板看完；等你的事，永远排第一个。</b><br>
@@ -39,7 +41,9 @@
 
 ## 怎么运作
 
-<img alt="Claude Code 对话、通过 hook 的其他 agent、和你，都写进同一个 Markdown 文件 progress.md；面板、progress.html、归档与状态栏都读它。" src="docs/images/flow-zh-CN.svg" width="100%">
+<img alt="Claude Code 对话、通过 hook 的其他 agent、和你，都写进同一个 Markdown 文件 progress.md；面板、progress.html、归档与状态栏都读它。文件内容是合成示例。" src="docs/images/flow-zh-CN.svg" width="100%">
+
+<sub>图中的文件内容是合成的示例。</sub>
 
 独立 reporter 将原生 session 活动与明确任务摘要写到同一个本地 `progress.md`，每个 session 只更新自己的区块；网页看板不需要另一个模型。上图是可选 Claude 插件的 inbox 与摘要流程。格式见 [docs/FORMAT.md](docs/FORMAT.md)。
 
@@ -110,15 +114,6 @@ Google 已于 2026 年 6 月 18 日停止 Gemini CLI 的免费个人版及 Googl
 
 </details>
 
-<details>
-<summary>可选 Claude connector 的历史截图</summary>
-
-这张历史图片含旧 Gemini CLI；当前一般用户入口改为 Antigravity CLI，图片不算 Antigravity 验收证据。
-
-<img alt="看板列出 6 家 agent 各自问的问题：Codex、Gemini CLI、OpenClaw、OpenCode、Grok Build、Hermes Agent" src="docs/images/live/hooks-zh-TW.png" width="620">
-
-</details>
-
 ## 每个 agent 里都看得到看板
 
 接上时，每个 agent 也会拿到一个看看板的命令。不管你在哪一个里面，都看得到全部 agent 在做什么：
@@ -150,38 +145,26 @@ Google 已于 2026 年 6 月 18 日停止 Gemini CLI 的免费个人版及 Googl
 
 做完的工作会自己离开看板。看板写 `progress.md` 跟面板一样小心；别的对话的区块不会动，除非你归档一个已经停掉的。
 
-<img alt="左边是 Codex；右边是看板，刚按 x 勾掉一步，按键说明下面写着已完成" src="docs/images/live/work-zh-TW.png" width="100%">
-
 <table>
 <tr><th width="50%">Codex CLI</th><th width="50%">Antigravity CLI</th></tr>
 <tr>
-<td><img alt="Codex progress in the interactive board" src="docs/images/live/codex-board-en.jpg" width="100%"></td>
-<td><img alt="Antigravity progress in the interactive board" src="docs/images/live/antigravity-board-en.jpg" width="100%"></td>
+<td><picture><source media="(prefers-color-scheme: dark)" srcset="docs/images/board/codex-zh-CN-dark.svg"><img alt="终端看板，打开了 Codex CLI 的问题；按 y 或 n 复制回答。合成数据。" src="docs/images/board/codex-zh-CN-light.svg" width="100%"></picture></td>
+<td><picture><source media="(prefers-color-scheme: dark)" srcset="docs/images/board/antigravity-zh-CN-dark.svg"><img alt="终端看板，打开了 Antigravity CLI 的问题；按 1 或 2 复制回答。合成数据。" src="docs/images/board/antigravity-zh-CN-light.svg" width="100%"></picture></td>
 </tr>
 </table>
 
-使用合成数据的交互看板示例；原生 CLI hooks 与实机 ACK 的证据见[独立验收记录](docs/validation/2026-10-19-native-hooks.md)。
+终端看板，由看板自己的代码用合成数据画出。原生 hooks 的验收证据另有[记录](docs/validation/2026-10-19-native-hooks.md)。
 
 ### 看板的网页
 
-上面的看板命令和技能通常会运行 `--serve`：打印看板、启动后台服务器、写入地址文件、在浏览器打开网页，并把带 token 的链接打印到 agent 的对话中。在任何终端运行 `node ~/.agent-board/agent-board.mjs --serve` 也一样（加 `--no-open` 只打印网址）。再运行一次 `--serve` 会叫回已经开着的那一页。在聊天 app 中，技能会改用 `--chat`，不会打印链接。在网页上可以：
+上面的看板命令会在浏览器打开看板网页（在聊天软件里则只打印纯文本，没有链接）。在任何终端运行 `node ~/.agent-board/agent-board.mjs --serve` 也一样，再运行一次就把网页叫回来。在网页上可以：
 
-- **勾掉**自己工作的下一步、**归档**一件工作，或点**现在归档**把做完的全部收走。
-- **复制**回复、续接命令或步骤中的命令。
-- **已回复，先隐藏**：已经在它自己的对话里回过的问题。只在这台电脑上隐藏，网页、面板和终端看板都一样，不会发出任何话。那个对话问新的问题时会再出现；点**重新显示**可以提早叫回来。
-- **发送**到确切在线的对话。离线 session 保留复制；旧版启动进程功能须明确加上 `--allow-resume`。[界面支持](docs/MESSAGING.md)。
-- **贴入区块**：保留来源时间，重复不变更，拒绝过时或冲突的内容；旧数据时间不明时先比较两份内容。[修复方式](docs/REMOTE_REPORTERS.md)。
+- **回复**问题：对方的对话在线就直接**发送**，否则**复制**回复。
+- **勾掉**下一步、**归档**一件工作，或点**现在归档**收走所有做完的。
+- **已回复，先隐藏**：已在原来对话里回过的问题，只在这台电脑上隐藏，直到那个对话问新的问题；不会发出任何内容。
+- **贴入区块**：把 Muse、dot 这类网页聊天的进度贴进来。
 
-网页只在 127.0.0.1 上监听（除非加上 `--lan`，见下文），网址里带一把随机钥匙。这台电脑上的任何程序只要有链接就能使用。关闭标签页后本地服务会继续运行，使用 $agent-board 或 --serve 可重开；点击**关闭看板**才停止。可用 --idle-minutes 30 选择闲置关闭，0 代表停用；LAN 仍保留 10 分钟限制。传信进行中不会关闭。
-
-**在手机上。** 网页的布局适合手机。要从和电脑连同一个 Wi-Fi 的手机打开，运行 `node ~/.agent-board/agent-board.mjs --serve --lan`：除了电脑本机的网址，它还会打印网页在你网络上的网址和它的二维码，用手机相机对着扫就好。电脑有不止一个网络地址时，用 `--lan 192.168.1.23` 指定一个。Windows 可能会问要不要让 Node.js 使用网络：在专用网络上允许，并确认 Windows 把你的 Wi-Fi 算作专用网络（刚连上的网络它会先当成公用网络），不然手机连不到网页。跨网络访问须另行设置远程连接。
-
-网络上的网页有这些限制：
-
-- 只有加了 `--lan` 才开，只开在电脑的私有地址上（开头是 192.168、10，或 172.16 到 172.31 的地址，绝不是公网地址），也只响应发到那个地址的请求。
-- 它的网址带着自己的一把钥匙，不是电脑本机网页那把。拿到这个网址或拍到二维码的人，在它关掉之前都能用这个网页，所以只在信得过的网络上用，比如家里的 Wi-Fi，不要在咖啡店的。
-- 在网络上，网页走的是没有加密的 HTTP，同一个 Wi-Fi 上的其他设备可能读到传过去的内容，包括 agent 的回答。所以手机可以勾步骤、归档、标成已回复（和重新显示）、复制、贴上区块和关闭看板，但不能回复 agent：回复会在电脑上运行一个程序，所以手机只显示答案让你复制，再从电脑本机的网页发出。
-- 10 分钟没有手机来看就会关，电脑本机的网页关掉时也跟着关。开着的时候再运行一次 `--serve --lan`，拿到的是同一个网址。
+网页只在 127.0.0.1 上监听，网址带一把随机钥匙：这台电脑上拿到链接的程序都能用。关掉标签页它还在运行，点**关闭看板**才停止。加上 `--lan` 就能用同一个 Wi-Fi 的手机打开：那条链接走没加密的 HTTP，拿到的人都能用这个网页，所以只在信得过的网络上用。细节和限制见[使用指南](docs/GUIDE.zh-CN.md#看板的网页)。
 
 ## 命令
 

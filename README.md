@@ -1,6 +1,8 @@
 <h1 align="center">
-<img alt="A short tour: five agents, and the one that needs you; answering from the pane; every agent reporting through its own hooks; nothing lost; where it runs; its light and dark colours." src="docs/images/tour-en.svg" width="100%">
+<img alt="A short tour: five agents, and the one that needs you; answering from the pane; every agent reporting through its own hooks; nothing lost; where it runs; its light and dark colours. Synthetic data." src="docs/images/tour-en.svg" width="100%">
 </h1>
+
+<p align="center"><sub>A short tour, drawn by the board's own code from synthetic data.</sub></p>
 
 <p align="center">
 <b>See what every AI coding agent is doing, with whatever is waiting on you at the top.</b><br>
@@ -39,7 +41,9 @@ You have Claude Code on one project, Codex on another, Antigravity on a third. T
 
 ## How it works
 
-<img alt="Claude Code sessions, other agents through their hooks, and you all write one Markdown file, progress.md; the pane, progress.html, the archive and the status line read it." src="docs/images/flow-en.svg" width="100%">
+<img alt="Claude Code sessions, other agents through their hooks, and you all write one Markdown file, progress.md; the pane, progress.html, the archive and the status line read it. The file lines are a synthetic example." src="docs/images/flow-en.svg" width="100%">
+
+<sub>The file lines in the diagram are a synthetic example.</sub>
 
 Independent reporters write native session activity and explicit task summaries into separate blocks in one local `progress.md`. The web board reads it without another model. The diagram above shows the optional Claude plugin's inbox-and-summary flow. See [the file format](docs/FORMAT.md).
 
@@ -110,15 +114,6 @@ Google ended free individual and Google AI Pro/Ultra Gemini CLI service on June 
 
 </details>
 
-<details>
-<summary>Historical optional Claude connector screenshot</summary>
-
-This historical image includes legacy Gemini CLI; current consumer setup uses Antigravity CLI. It is not Antigravity acceptance evidence.
-
-<img alt="The board listing a question from each of six agents: Codex, Gemini CLI, OpenClaw, OpenCode, Grok Build, Hermes Agent" src="docs/images/live/hooks-en.png" width="620">
-
-</details>
-
 ## The board in every agent
 
 Connecting also gives each agent a way to show the board, so whichever one you are in, you see what all of them are doing:
@@ -150,38 +145,26 @@ Connecting also gives each agent a way to show the board, so whichever one you a
 
 Finished work leaves the board by itself. The board writes `progress.md` as carefully as the pane does, and leaves other sessions' blocks alone unless you archive one that has stopped.
 
-<img alt="Codex on the left; on the right the board, where x just ticked a step and the line under the keys says so" src="docs/images/live/work-zh-TW.png" width="100%">
-
 <table>
 <tr><th width="50%">Codex CLI</th><th width="50%">Antigravity CLI</th></tr>
 <tr>
-<td><img alt="Codex progress in the interactive board" src="docs/images/live/codex-board-en.jpg" width="100%"></td>
-<td><img alt="Antigravity progress in the interactive board" src="docs/images/live/antigravity-board-en.jpg" width="100%"></td>
+<td><picture><source media="(prefers-color-scheme: dark)" srcset="docs/images/board/codex-en-dark.svg"><img alt="The terminal board with a Codex CLI question open; y or n copies the answer. Synthetic data." src="docs/images/board/codex-en-light.svg" width="100%"></picture></td>
+<td><picture><source media="(prefers-color-scheme: dark)" srcset="docs/images/board/antigravity-en-dark.svg"><img alt="The terminal board with an Antigravity CLI question open; 1 or 2 copies the answer. Synthetic data." src="docs/images/board/antigravity-en-light.svg" width="100%"></picture></td>
 </tr>
 </table>
 
-Interactive board examples with synthetic data. Native CLI hooks and real ACK evidence are recorded [separately](docs/validation/2026-10-19-native-hooks.md).
+The terminal board, drawn by the board's own code from synthetic data. Native hook evidence is [recorded separately](docs/validation/2026-10-19-native-hooks.md).
 
 ### The board's page
 
-The board commands and skills above normally run `--serve`: they print the board, start a background server, write its address file, open its page in the browser and print the token link into the agent's conversation. `node ~/.agent-board/agent-board.mjs --serve` does the same from any terminal (`--no-open` only prints the address). A second `--serve` brings back the page that is already open. In a chat app, the skill uses `--chat`, which prints no link. On the page you can:
+The board commands above open the board as a page in your browser (in a chat app they print plain text instead, with no link). From any terminal, `node ~/.agent-board/agent-board.mjs --serve` does the same; run it again to bring the page back. On the page you can:
 
-- **Tick** the next step of your own task, **archive** a task, or press **Archive now** to put away everything finished.
-- **Copy** a reply, resume command or command in a step.
-- **Already answered, hide** a question you answered in its own session. It is hidden on this computer, on the page, the pane and the terminal board alike, and nothing is sent. It comes back when that session asks something new; **Show again** brings it back sooner.
-- **Send** to the exact online session. Offline sessions keep Copy; legacy process launch requires explicit `--allow-resume`. [Session support](docs/MESSAGING.md).
-- **Paste a block** from a web chat. Source time is preserved; repeats do nothing, older or conflicting reports are refused, and unknown historical clocks require comparison. [Recovery](docs/REMOTE_REPORTERS.md).
+- **Answer** a question: **Send** to a session that is online, or **Copy** the reply.
+- **Tick** your next step, **archive** a task, or **Archive now** to clear everything finished.
+- **Already answered, hide** a question you answered in its own chat: hidden on this computer until that session asks something new; nothing is sent.
+- **Paste a block** from a web chat such as Muse or dot.
 
-The page listens on 127.0.0.1 only (unless you add `--lan`, below), and its address carries a random key. Any program on this computer that has the link can use it. The local service stays running when you close its browser tab; `$agent-board` or `node agent-board.mjs --serve` reopens the same running board. **Close the board** stops it, but not while a reply is still on its way to an agent. To opt into automatic shutdown, use `--serve --idle-minutes 30` (zero disables it). This is a runtime option, not a startup service. The separate LAN listener still closes after 10 minutes unused.
-
-**On a phone.** The page fits a phone's screen. To open it from a phone on the same Wi-Fi as the computer, run `node ~/.agent-board/agent-board.mjs --serve --lan`. Besides the computer's address, it prints the page's address on your network and a QR code of it: point the phone's camera at the code. When the computer has more than one network address, `--lan 192.168.1.23` picks one. Windows may ask whether Node.js may use the network: allow it on private networks, and check that Windows counts your Wi-Fi as a private one (it calls a network it has just joined public), or the phone can't reach the page. Access from another network requires a separately configured remote connection.
-
-The page on your network comes with these limits:
-
-- It opens only when you add `--lan`, only at a private address of the computer (one starting with 192.168, 10, or 172.16 to 172.31, never a public one), and it answers only requests sent to that address.
-- Its address carries a key of its own, not the key of the computer's page. Anyone who has that address, or photographs the QR code, can use the page until it closes, so use it on a network you trust, such as your home Wi-Fi, not a café's.
-- On the network the page uses plain HTTP, which is not encrypted, so another device on the same Wi-Fi could read what passes, agents' answers included. That is why a phone can tick, archive, mark a question answered (and show it again), copy, paste a block and close the board, but not answer an agent: a reply runs a program on the computer, so the phone shows the answer for you to copy, and you send it from the computer's page.
-- It closes after 10 minutes in which no phone looks at it, and whenever the computer's page closes. A second `--serve --lan` while it is open gives the same address.
+The page listens on 127.0.0.1 only, and its address carries a random key: anything on this computer that has the link can use it. It keeps running after you close the tab; **Close the board** stops it. Add `--lan` to open it on a phone on the same Wi-Fi: that link is plain HTTP and anyone who has it can use the page, so use it only on a network you trust. Details and limits are in [the guide](docs/GUIDE.md#the-boards-page).
 
 ## Commands
 
