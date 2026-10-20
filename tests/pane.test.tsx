@@ -22,6 +22,7 @@ import { sha256 } from '../hooks/sha256'
 import { RELEASE_0_18_1, RELEASE_0_20_5 } from './fixtures/released'
 import { memoryConnect } from './fixtures/connect-memory'
 import { CONNECT_BOOTSTRAP, CONNECT_EXECUTE } from '../hooks/connect-worker'
+import { hasOwnConnectData, connectDataRoots } from '../hooks/connect-pure'
 import type { ConnectState, LegacyConnectRequest } from '../scripts/connect-transaction'
 
 const FILE = '/home/me/.claude/progress.md'
@@ -6613,6 +6614,240 @@ test('with the autoConnect option off, a session hooks nothing in', { options: {
   expect(world.files.has('/home/me/.codex/hooks.json')).toBe(false)
 })
 
+test('automatic connect compares normalized data paths and reads escaped host path data', async () => {
+  expect(hasOwnConnectData('C:\\Users\\Me', 'c:/users/me/.claude/', 'C:\\USERS\\ME\\.claude\\progress.md', true)).toBe(false)
+  expect(hasOwnConnectData('/home/me', '/home/me/.claude/', '/home/me/.claude/../other/progress.md', false)).toBe(true)
+  expect(hasOwnConnectData('/home/me', '', '/home/me/.claude-other/progress.md', false)).toBe(true)
+  expect(hasOwnConnectData('/home/me', '/home/me/Other', '/home/me/.claude/progress.md', false)).toBe(true)
+  expect(connectDataRoots(JSON.stringify({ command: 'powershell -File "C:\\Other Home\\progress-report.ps1" codex turn' }))).toContain('C:\\Other Home')
+  expect(connectDataRoots(JSON.stringify({ command: 'powershell -File "C:\\O\'Brien\\progress-report.ps1" codex turn' }))).toContain("C:\\O'Brien")
+  expect(connectDataRoots("sh '/home/O'\\''Brien/.claude/progress-report.sh' codex turn")).toContain("/home/O'Brien/.claude")
+  const board = '/scratch/資料/agent-board.mjs'
+  expect(connectDataRoots(`String.fromCodePoint(${Array.from(board, char => char.codePointAt(0)).join(',')})`)).toContain('/scratch/資料')
+  const escaped = String.raw`"powershell -File C:\\Users\\Jos\xE9\\data\\progress-report.ps1 hermes turn"`
+  expect(connectDataRoots(escaped)).toContain('C:\\Users\\José\\data')
+  expect(connectDataRoots(String.raw`"sh '/Users/Jos\xE9/\u8CC7\U0001F600/progress-report.sh' hermes turn"`)).toContain('/Users/José/資😀')
+  expect(hasOwnConnectData('/home/me', '', '/home/me/synced/progress.md', false, '/home/me/synced/progress.md')).toBe(false)
+  expect(hasOwnConnectData('/home/me', '/home/me/other-root', '/home/me/synced/progress.md', false, '/home/me/synced/progress.md')).toBe(true)
+  expect(hasOwnConnectData('/home/me', '', '/home/me/synced/another.md', false, '/home/me/synced/progress.md')).toBe(true)
+  expect(hasOwnConnectData('C:\\Users\\Me', 'c:/users/me/.claude/', 'C:\\Synced\\progress.md', true, 'c:/synced/progress.md')).toBe(false)
+})
+
+test("a session with its own Claude data folder does not connect the machine's agents automatically", async ($, on) => {
+  const config = '/scratch/home/.gemini/settings.json'
+  const world: World = { files: new Map([[config, '{}']]), mtime: 1, hasTasks: true, ran: [], written: [], env: { USERPROFILE: '/scratch/home', HOME: '/scratch/home', CLAUDE_CONFIG_DIR: '/scratch/home/other-root', LANG: 'en' } }
+  engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/project', surface: 'terminal', isInteractive: true })
+  const status = await $.command.run({ ...TIDY, args: 'connect status' })
+  expect(status.text).toBe(EN.setupOwnData)
+  expect(world.ran?.some(argv => argv.includes(CONNECT_BOOTSTRAP) || argv.includes(CONNECT_EXECUTE))).toBe(false)
+  expect(world.files.get(config)).toBe('{}')
+  expect(world.written?.some(path => !path.startsWith('/scratch/home/other-root/'))).toBe(false)
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal', props: PROPS })
+  expect(await ui.find({ type: 'Text', text: EN.setupProgressAutoOff })).toBeUndefined()
+  await ui.unmount()
+})
+
+test('a progress file in a subfolder of the Claude folder is its own data folder', async ($, on) => {
+  expect(hasOwnConnectData('/home/me', '', '/home/me/.claude/sub/progress.md', false)).toBe(true)
+  expect(hasOwnConnectData('C:\\Users\\Me', '', 'c:/users/me/.claude/sub/progress.md', true)).toBe(true)
+  const config = '/scratch/home/.gemini/settings.json'
+  const world: World = {
+    files: new Map([[config, '{}']]), mtime: 1, hasTasks: true, ran: [],
+    env: { HOME: '/scratch/home', CLAUDE_PROGRESS_FILE: '/scratch/home/.claude/sub/progress.md', LANG: 'en' },
+  }
+  engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/project', surface: 'terminal', isInteractive: true })
+  expect((await $.command.run({ ...TIDY, args: 'connect status' })).text).toBe(EN.setupProgressAutoOff)
+  expect(world.ran?.some(argv => argv.includes(CONNECT_BOOTSTRAP) || argv.includes(CONNECT_EXECUTE))).toBe(false)
+  expect(world.files.get(config)).toBe('{}')
+})
+
+test('a progress file in a synced folder that was connected by hand still connects automatically', async ($, on) => {
+  const progress = '/home/me/synced/progress.md'
+  const config = '/home/me/.gemini/settings.json'
+  const world: World = {
+    files: new Map([[config, '{}']]), mtime: 1, hasTasks: true, ran: [], store: { inboxDone: {} },
+    env: { HOME: '/home/me', CLAUDE_PROGRESS_FILE: progress, LANG: 'en' },
+  }
+  engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/project', surface: 'terminal', isInteractive: true })
+  await $.command.run({ ...TIDY, args: 'connect status' })
+  expect(world.ran?.some(argv => argv.includes(CONNECT_EXECUTE))).toBe(false)
+  await $.command.run({ ...TIDY, args: 'connect' })
+  expect(nativeState(world).connectedProgress).toBe(progress)
+  world.files.set(config, '{}')
+  world.ran = []
+  await $.session.start({ cwd: '/work/project', surface: 'terminal', isInteractive: true })
+  await settledSetup($, world)
+  expect(world.ran?.some(argv => argv.includes(CONNECT_EXECUTE) && JSON.parse(argv[6] ?? '{}').mode === 'auto')).toBe(true)
+  expect(world.files.get(config)).toContain('/home/me/synced/')
+  await $.command.run({ ...TIDY, args: 'lang zh-TW' })
+  expect(world.store?.lang).toBe('zh-TW')
+  expect(nativeState(world).boardLang).toBe('zh-TW')
+})
+
+test('a progress file elsewhere that was never connected by hand does not connect automatically', async ($, on) => {
+  const config = '/home/me/.gemini/settings.json'
+  const world: World = {
+    files: new Map([[config, '{}'], [controlFile, JSON.stringify({
+      version: 1, revision: 1, disabled: false, owned: {}, notified: [], connectedProgress: '/home/me/synced/progress.md',
+    })]]),
+    mtime: 1, hasTasks: true, ran: [], written: [],
+    env: { HOME: '/home/me', CLAUDE_PROGRESS_FILE: '/home/me/elsewhere/progress.md', LANG: 'en' },
+  }
+  engineBeneath(on, world)
+  const before = world.files.get(controlFile)
+  await $.session.start({ cwd: '/work/project', surface: 'terminal', isInteractive: true })
+  expect((await $.command.run({ ...TIDY, args: 'connect status' })).text).toBe(EN.setupProgressAutoOff)
+  expect(world.ran?.some(argv => argv.includes(CONNECT_EXECUTE))).toBe(false)
+  expect(world.files.get(config)).toBe('{}')
+  expect(world.files.get(controlFile)).toBe(before)
+  expect(world.written?.some(file => !file.startsWith('/home/me/elsewhere/'))).toBe(false)
+})
+
+test('automatic connect waits for its result before the gate is checked', async ($, on) => {
+  let reached!: () => void
+  let release!: () => void
+  const waiting = new Promise<void>(done => { reached = done })
+  const held = new Promise<void>(done => { release = done })
+  const world: World = { files: new Map([['/home/me/.gemini/settings.json', '{}']]), mtime: 1, hasTasks: true, ran: [], nodeGate: { reached, release: held } }
+  const clock = engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/project', surface: 'terminal', isInteractive: true })
+  await waiting
+  let isSettled = false
+  const status = $.command.run({ ...TIDY, args: 'connect status' }).then(result => { isSettled = true; return result })
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal', props: PROPS })
+  // Drain status while the startup version probe remains held.
+  await clock.advance(2000)
+  expect(isSettled).toBe(false)
+  expect(world.ran?.some(argv => argv.includes(CONNECT_EXECUTE))).toBe(false)
+  release()
+  await status
+  expect(world.ran?.some(argv => argv.includes(CONNECT_EXECUTE) && JSON.parse(argv[6] ?? '{}').mode === 'auto')).toBe(true)
+  expect(world.files.get('/home/me/.gemini/settings.json')).toContain('/home/me/.claude/')
+  await ui.unmount()
+})
+
+for (const lang of ['en', 'zh-TW', 'zh-CN'] as const) test(`a synced progress file that was connected before this update says once how to turn automatic connect on in ${lang}`, { options: { language: lang } }, async ($, on) => {
+  const config = '/home/me/.gemini/settings.json'
+  const world: World = {
+    files: new Map([[config, '{}'], [controlFile, JSON.stringify({ version: 1, revision: 1, disabled: false, owned: {}, notified: [] })]]),
+    mtime: 1, hasTasks: true, ran: [], env: { HOME: '/home/me', CLAUDE_PROGRESS_FILE: '/home/me/synced/progress.md' },
+  }
+  engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/project', surface: 'terminal', isInteractive: true })
+  await $.command.run({ ...TIDY, args: 'connect status' })
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal', props: PROPS })
+  const text = STRINGS[lang].setupProgressAutoOff
+  expect((await ui.findAll({ type: 'Text', text })).length).toBe(1)
+  await $.command.run({ ...TIDY, args: 'connect status' })
+  expect((await ui.findAll({ type: 'Text', text })).length).toBe(1)
+  expect(world.ran?.some(argv => argv.includes(CONNECT_EXECUTE))).toBe(false)
+  expect(world.files.get(config)).toBe('{}')
+  await ui.unmount()
+})
+
+test('a disabled automatic connect shows no progress file opt-in notice', { options: { autoConnect: false } }, async ($, on) => {
+  const world: World = { files: new Map(), mtime: 1, hasTasks: true, env: { HOME: '/home/me', CLAUDE_PROGRESS_FILE: '/home/me/synced/progress.md', LANG: 'en' } }
+  engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/project', surface: 'terminal', isInteractive: true })
+  await $.command.run({ ...TIDY, args: 'connect status' })
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal', props: PROPS })
+  expect(await ui.find({ type: 'Text', text: EN.setupProgressAutoOff })).toBeUndefined()
+  await ui.unmount()
+})
+
+test('a progress file whose connections were removed by hand gets no automatic connect notice', async ($, on) => {
+  const world: World = {
+    files: new Map([[controlFile, JSON.stringify({ version: 1, revision: 1, disabled: true, owned: {}, notified: [] })]]),
+    mtime: 1, hasTasks: true, ran: [], env: { HOME: '/home/me', CLAUDE_PROGRESS_FILE: '/home/me/synced/progress.md', LANG: 'en' },
+  }
+  engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/project', surface: 'terminal', isInteractive: true })
+  await $.command.run({ ...TIDY, args: 'connect status' })
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal', props: PROPS })
+  expect(await ui.find({ type: 'Text', text: EN.setupProgressAutoOff })).toBeUndefined()
+  expect(world.ran?.some(argv => argv.includes(CONNECT_EXECUTE))).toBe(false)
+  expect((await $.command.run({ ...TIDY, args: 'connect status' })).text).toBe(EN.setupRemoved)
+  await ui.unmount()
+})
+
+test('a stored automatic connect removal gets no progress file opt-in notice', async ($, on) => {
+  const world: World = { files: new Map(), mtime: 1, hasTasks: true, store: { autoConnectOff: true }, env: { HOME: '/home/me', CLAUDE_PROGRESS_FILE: '/home/me/synced/progress.md', LANG: 'en' } }
+  engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/project', surface: 'terminal', isInteractive: true })
+  await $.command.run({ ...TIDY, args: 'connect status' })
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal', props: PROPS })
+  expect(await ui.find({ type: 'Text', text: EN.setupProgressAutoOff })).toBeUndefined()
+  await ui.unmount()
+})
+
+test('connect status for a synced progress file explains how to turn automatic connect on', async ($, on) => {
+  const world: World = { files: new Map(), mtime: 1, hasTasks: true, env: { HOME: '/home/me', CLAUDE_PROGRESS_FILE: '/home/me/synced/progress.md', LANG: 'en' } }
+  engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/project', surface: 'terminal', isInteractive: true })
+  expect((await $.command.run({ ...TIDY, args: 'connect status' })).text).toBe(EN.setupProgressAutoOff)
+})
+
+test('a dismissed automatic connect notice stays dismissed after connect status', async ($, on) => {
+  const world: World = { files: new Map(), mtime: 1, hasTasks: true, env: { HOME: '/home/me', CLAUDE_PROGRESS_FILE: '/home/me/synced/progress.md', LANG: 'en' } }
+  engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/project', surface: 'terminal', isInteractive: true })
+  await $.command.run({ ...TIDY, args: 'connect status' })
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal', props: PROPS })
+  expect((await ui.findAll({ type: 'Text', text: EN.setupProgressAutoOff })).length).toBe(1)
+  await ui.press({ key: 'clear-answer' })
+  await $.command.run({ ...TIDY, args: 'connect status' })
+  expect(await ui.find({ type: 'Text', text: EN.setupProgressAutoOff })).toBeUndefined()
+  await ui.unmount()
+})
+
+for (const [suffix, env] of [
+  ['CLAUDE_CONFIG_DIR', { CLAUDE_CONFIG_DIR: '/home/me/other-root' }],
+  ['CLAUDE_PROGRESS_FILE', { CLAUDE_PROGRESS_FILE: '/home/me/other-root/progress.md' }],
+] as const) test(`choosing a language in a session with its own data folder changes no shared file: ${suffix}`, async ($, on) => {
+  const world: World = {
+    files: new Map([['/home/me/.gemini/settings.json', '{}'], [controlFile, JSON.stringify({
+      version: 1, revision: 4, disabled: false, owned: {}, notified: [], boardLang: 'en',
+      pending: { request: { mode: 'connect', progress: '/home/me/.claude/progress.md' } },
+    })]]),
+    mtime: 1, hasTasks: true, ran: [], written: [], store: { inboxDone: {}, lang: 'en' },
+    env: { HOME: '/home/me', ...env, LANG: 'en' },
+  }
+  if ('CLAUDE_CONFIG_DIR' in env) {
+    const state = JSON.parse(world.files.get(controlFile) ?? '{}') as ConnectState
+    state.connectedProgress = '/home/me/other-root/progress.md'
+    world.files.set(controlFile, JSON.stringify(state))
+  }
+  engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/project', surface: 'terminal', isInteractive: true })
+  const before = new Map([...world.files].filter(([file]) => !file.startsWith('/home/me/other-root/')))
+  for (const lang of ['zh-TW', 'zh-CN', 'auto']) {
+    const result = await $.command.run({ ...TIDY, args: `lang ${lang}` })
+    expect(result.text).toBe(STRINGS[lang === 'auto' ? 'en' : lang as 'zh-TW' | 'zh-CN'].langSet)
+  }
+  expect(new Map([...world.files].filter(([file]) => !file.startsWith('/home/me/other-root/')))).toEqual(before)
+  expect(world.store?.lang).toBe('en')
+  expect(world.ran?.some(argv => argv.includes(CONNECT_BOOTSTRAP) || argv.includes(CONNECT_EXECUTE))).toBe(false)
+  expect(world.written?.some(file => !file.startsWith('/home/me/other-root/'))).toBe(false)
+})
+
+test('connect status in a separate data folder keeps the result of a manual connection', async ($, on) => {
+  const world: World = {
+    files: new Map([['/home/me/.gemini/settings.json', '{}']]), mtime: 1, hasTasks: true, ran: [],
+    env: { HOME: '/home/me', CLAUDE_CONFIG_DIR: '/home/me/other-root', LANG: 'en' },
+  }
+  engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/project', surface: 'terminal', isInteractive: true })
+  await $.command.run({ ...TIDY, args: 'connect' })
+  const before = world.ran?.length
+  const status = await $.command.run({ ...TIDY, args: 'connect status' })
+  expect(status.text.startsWith(EN.setupOwnData + '\n')).toBe(true)
+  expect(status.text).toContain('Gemini CLI')
+  expect(world.ran?.length).toBe(before)
+})
+
 test('automatic connection and removal preserve personal commands and skills, including edits after installation', async ($, on) => {
   const files = ['/home/me/.gemini/commands/board.toml', '/home/me/.config/opencode/commands/board.md', '/home/me/.agents/skills/agent-board/SKILL.md', '/home/me/.hermes/skills/agent-board/SKILL.md', '/home/me/.gemini/config/skills/agent-board/SKILL.md']
   const world: World = {
@@ -7386,4 +7621,22 @@ test("one empty read of progress.md does not reset a task's first-seen time", as
   const kept = parseSeen(world.files.get(seenPath(FILE)) ?? '') ?? {}
   expect(Object.keys(kept)).toEqual(Object.keys(withSeen({}, parseProgress(world.files.get(FILE) ?? ''), 1)))
   await ui.unmount()
+})
+
+test('a YAML escaped backslash before a folded line break stays a backslash', () => {
+  const scalar = 'command: "powershell -File C:\\\\scratch\\\\\n      folder\\\\progress-report.ps1 hermes turn"'
+  expect(connectDataRoots(scalar)).toContain('C:\\scratch\\ folder')
+  expect(connectDataRoots(scalar)).not.toContain('C:\\scratchfolder')
+  expect(connectDataRoots(scalar)).not.toContain('C:\\scratch\folder')
+})
+
+test('an unmatched quote in a plain YAML value does not hide a later escaped command', () => {
+  const yaml = 'note: unmatched"quote\ncommand: "sh \'/scratch/Jos\\xE9/progress-report.sh\' hermes turn"'
+  expect(connectDataRoots(yaml)).toContain('/scratch/José')
+})
+
+test('YAML named escapes decode every PyYAML character in path data', () => {
+  for (const [escape, value] of Object.entries({ a: '\x07', b: '\b', e: '\x1b', f: '\f', v: '\v', N: '\x85', _: '\xa0', L: '\u2028', P: '\u2029' })) {
+    expect(connectDataRoots(`command: "sh '/scratch/a\\${escape}b/progress-report.sh' hermes turn"`)).toContain(`/scratch/a${value}b`)
+  }
 })
