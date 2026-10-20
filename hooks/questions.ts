@@ -1,11 +1,15 @@
 import type { ProgressMirror, ProgressProject, QuestionLedger, QuestionProofs, QuestionRecord, QuestionSource } from '../types'
 import type { PendingTurn } from './board'
+import type { AgentTurn } from './inbox'
 import { scanBlocks, shortId, stepWords } from './blocks'
 import { questionToken, waitsOnYou } from './mirror'
 import { sha256 } from './sha256'
 import type { TaskRef } from './view'
 
 export type { QuestionLedger, QuestionProofs, QuestionRecord } from '../types'
+
+// Accepted continuation evidence retains its binding and clock without conversation text.
+export type QuestionAnswerEvidence = Pick<AgentTurn, 'agent' | 'id'> & { event: 'prompt' | 'turn'; at: number }
 
 export const emptyQuestions = (): QuestionLedger => ({ version: 1, next: 1, records: [], legacy: {} })
 export const questionsPath = (path: string): string => `${path.replace(/\.md$/i, '')}-questions.json`
@@ -170,16 +174,29 @@ export const observeQuestions = (
   incarnation = 'preview',
   proofs: QuestionProofs = { retired: [], consumed: [] },
   pending: readonly PendingTurn[] = [],
+  answeredTurns: readonly (AgentTurn | QuestionAnswerEvidence)[] = [],
 ): { ledger: QuestionLedger; keys: Record<string, string>; marked: string[] } => {
+  const records = ledger.records.map(row => ({ ...row }))
+  for (const record of records) {
+    if (record.source?.kind !== 'inbox' || !record.isUnresolved) continue
+    let source: PendingTurn
+    try { source = JSON.parse(record.source.data) as PendingTurn } catch { continue }
+    const at = source?.sourceAt ?? source?.at
+    // Cursor and Grok emit an empty stop for the asking turn. Only a later text-bearing
+    // response or an accepted prompt proves continuation, even if the session moved folders.
+    if (!Number.isFinite(at) || !answeredTurns.some(turn => (turn.event === 'prompt' || (turn.event === 'turn' && (!('answer' in turn) || turn.answer.trim() !== ''))) && turn.at !== undefined && Number.isFinite(turn.at) && turn.at > at && turn.agent === record.source?.agent && turn.id === record.source?.session)) continue
+    record.isUnresolved = false
+    record.isWaiting = false
+    record.isPresent = false
+  }
   // Only an exact producer revision receipt suppresses replay. Equal words and connection
   // clocks do not prove resolution, and a new file/content revision can be a fresh ask.
   const seen = observations(projects, mine, pending)
   const resolved = seen.flatMap(row => {
-    const record = row.isWaiting && row.producer !== '' ? ledger.records.find(record => record.scope === row.scope && record.producer === row.producer && record.words === questionWords(row.text) && record.isUnresolved === false) : undefined
+    const record = row.isWaiting && row.producer !== '' ? records.find(record => record.scope === row.scope && record.producer === row.producer && record.words === questionWords(row.text) && record.isUnresolved === false) : undefined
     return record === undefined ? [] : [{ row, record }]
   })
-  const rows = seen.filter(row => !resolved.some(item => item.row === row) && (row.source.kind !== 'inbox' || row.producerRevisions === undefined || row.producerRevisions.length === 0 || !row.producerRevisions.every(revision => ledger.records.some(record => record.scope === row.scope && record.isUnresolved === false && record.producerRevisions?.includes(revision)))))
-  const records = ledger.records.map(row => ({ ...row }))
+  const rows = seen.filter(row => !resolved.some(item => item.row === row) && (row.source.kind !== 'inbox' || row.producerRevisions === undefined || row.producerRevisions.length === 0 || !row.producerRevisions.every(revision => records.some(record => record.scope === row.scope && record.isUnresolved === false && record.producerRevisions?.includes(revision)))))
   for (const record of records) {
     if (proofs.retired.includes(sha256(record.id))) {
       record.isPresent = false
