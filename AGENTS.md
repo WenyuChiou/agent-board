@@ -9,7 +9,7 @@ This file has two parts:
 
 ## Working on this repository
 
-Before you open a pull request, read [CONTRIBUTING.md, Pull requests](CONTRIBUTING.md#pull-requests) (the rules every agent follows: one issue per pull request, claiming, the `Author:` line, the CHANGELOG entry, who merges) and [docs/CONTRIBUTOR-PATH.md](docs/CONTRIBUTOR-PATH.md) (the same steps with the commands, for an agent on another computer with only git, gh and Node). Ask questions on the issue, starting `Question:`; answers come there.
+Before you open a pull request, read [CONTRIBUTING.md, Pull requests](CONTRIBUTING.md#pull-requests) (the rules every agent follows: one issue per pull request, claiming, the `Author:` line, the CHANGELOG entry, who merges) and [docs/CONTRIBUTOR-PATH.md](docs/CONTRIBUTOR-PATH.md) (the same steps with the commands, for an agent on another computer with only git, gh and Node). [docs/dev/team-process.md](docs/dev/team-process.md) says how much you take on at once, when a finding becomes an issue, and how review and merging go. Ask questions on the issue, starting `Question:`; answers come there.
 
 ### Checks
 
@@ -22,7 +22,7 @@ claude plugin test .                   # runs tests/*.test.ts and tests/*.test.t
 tsc -p .                               # type check; needs .claude-plugin/types/ from the first command
 bash tests/setup.check.sh              # installer checks for scripts/setup.sh (CI: Linux); needs bash and python3
 powershell -NoProfile -ExecutionPolicy Bypass -File tests/setup.check.ps1   # installer checks for scripts/setup.ps1 (CI: Windows)
-node --test tests/exchange.test.mjs tests/messaging.test.mjs tests/pr-check.test.mjs tests/preflight.test.mjs tests/changelog-fold.test.mjs   # exchange, connected-session API, PR check, preflight, CHANGELOG fold; plain Node, no model calls
+node --test tests/exchange.test.mjs tests/messaging.test.mjs tests/pr-check.test.mjs tests/preflight.test.mjs tests/changelog-fold.test.mjs tests/team-stats.test.mjs   # exchange, connected-session API, PR check, preflight, CHANGELOG fold, team stats; plain Node, no model calls
 python3 -B scripts/remote-reporter/test_pipeline.py   # remote reporter tests; stdlib Python, runs in a temp folder
 node --test tests/board.test.mjs tests/board-storage.test.mjs tests/codex-local.test.mjs tests/local-lock.test.mjs tests/prompt-hooks.test.mjs tests/codex-host.test.mjs tests/codex-fallback.test.mjs tests/legacy-connect.test.mjs tests/connect-worker.test.mjs   # the board script and local setup on plain Node, as CI runs them
 node --test tests/npm-package.test.mjs   # the npm package: what npm pack would publish, and the launcher in a scratch home; needs npm
