@@ -32,7 +32,7 @@ npm dist-tag add @wenyuchiou/agent-board@X.Y.Z latest --otp <code>
 2. **CHANGELOG.** Run `node scripts/changelog-fold.mjs X.Y.Z` to preview, then add `--write`. It folds every `changelog.d/` fragment, and any entry left under `## Unreleased`, into `## X.Y.Z — YYYY-MM-DD`.
 3. **Generated files.** Rebuild as in [CONTRIBUTING.md, Releases](../CONTRIBUTING.md#releases) step 3: the board bundle and the released-files table, and both `--check` commands pass.
 4. **Checks.** Run everything in [CONTRIBUTING.md, Run the checks](../CONTRIBUTING.md#run-the-checks). The npm test also checks that `npm pack` would publish only the files `package.json` lists.
-5. **Pull request.** Review it, then squash-merge the exact tested head.
+5. **Pull request.** Title it `chore(release): Agent Board X.Y.Z`, review it, then squash-merge the exact tested head.
 6. **Tag.** On the merged commit, run `claude plugin tag . --dry-run`, then `claude plugin tag .`. Push only the new tag.
 7. **Gate.** Check the release gate above, and decide stable or pre-release.
 8. **GitHub release.** Write it from the version's CHANGELOG section. A pre-release's notes open with: "Pre-release: this version did not pass the release gate (docs/RELEASING.md)."
