@@ -139,6 +139,7 @@ const asksOf = (view: View, pending: readonly PendingTurn[], s: Strings, named: 
 export const boardText = (view: View, pending: readonly PendingTurn[], s: Strings = ZH_TW, o: BoardOptions = { width: 80, isColor: false }): string => {
   const c = paint(o.isColor)
   const lines: string[] = [countLine(view, pending, s, c), '']
+  if (view.warning) lines.push(c('alert', view.warning), '')
 
   const asks = asksOf(view, pending, s)
   const recentQuestions = view.recent.filter(item => (item.questions?.length ?? 0) > 0)
@@ -348,6 +349,7 @@ export const chatText = (
   const rows = [...view.due.map(row => ({ row, mark: '⚑' })), ...view.groups.flatMap(group => group.rows.map(row => ({ row, mark: '▸' })))]
   // Each item is cut whole, never in the middle. A heading belongs to its first item.
   const items: string[] = [chatLine(countLine(view, pending, s, paint(false)), 0, home, isWindows)]
+  if (view.warning) items[0] += `\n${view.warning}`
   // Questions marked answered are left out and counted, as on the terminal board.
   const hidden = view.hidden.length === 0 ? null : s.hiddenCount(view.hidden.length)
   if (asks.length === 0) items.push(`\n${s.nothingForYou}${hidden === null ? '' : `\n${hidden}`}`)
@@ -590,6 +592,7 @@ export const boardScreen = (view: View, pending: readonly PendingTurn[], state: 
   const waiting = view.overview.waiting + remainingInbox(view, pending).filter(turn => turn.isQuestion).length
   const lines: string[] = [
     `${c('bold', s.paneTitle)}  ${c('waiting', `● ${waiting} ${s.countWaiting}`)}  ${c('accent', `▸ ${active} ${s.countActive}`)}  ${c('alert', `⚑ ${due} ${s.countDue}`)}  ${c('done', `✓ ${today} ${s.countToday}`)}`,
+    ...(view.warning ? [c('alert', view.warning)] : []),
     ...(view.hidden.length === 0 ? [] : [c('quiet', `${s.hiddenCount(view.hidden.length)} · ${s.boardKeyShowHidden}`)]),
     ...((view.reminder?.length ?? 0) + (view.older?.length ?? 0) === 0 ? [] : [c('quiet', `${s.sectionQuestionReminders}: ${view.reminder?.length ?? 0} · ${s.sectionOlderQuestions}: ${view.older?.length ?? 0} · ${s.boardKeyOlder}`)]),
     ...(view.idle.length + view.stopped.length === 0 ? [] : [c('quiet', [

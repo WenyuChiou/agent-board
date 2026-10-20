@@ -19,11 +19,16 @@ const PROJECT = /^##\s+(.+?)\s*#*\s*$/
 const TASK = /^###\s+(.+?)\s*#*\s*$/
 const STEP = /^([ \t]*[-*+]\s+\[)([ xX~?>!-])(\]\s+)(.*)$/
 const DAY = 24 * 60 * 60 * 1000
+const STOPPED_ARCHIVE_MS = 3 * DAY
 
 export const shortId = (sessionId: string): string => sessionId.slice(0, 8)
 
-export const stateWords = (state: ProgressSessionState, s: Strings = ZH_TW): string => {
-  if (state === 'working') return s.stateWorking
+export const stateWords = (state: ProgressSessionState, agent: string, s: Strings = ZH_TW): string => {
+  if (state === 'working') {
+    if (agent === '' || agent === 'claude') return s.stateWorking
+    const name = Object.hasOwn(s.agentNames, agent) ? s.agentNames[agent] ?? agent : agent
+    return s.agentWorking(name)
+  }
   if (state === 'waiting') return s.stateWaiting
   if (state === 'done') return s.stateDone
 
@@ -88,7 +93,7 @@ export const stepWords = (task: ProgressMirrorTask, s: Strings = ZH_TW): string 
 export const renderAutoBlock = (mirror: ProgressMirror, s: Strings = ZH_TW): string[] => {
   const id = shortId(mirror.sessionId)
   const pr = mirror.pr ?? null
-  const meta = [stateWords(mirror.state, s), mirror.branch, pr === null ? '' : prWords(pr, s)].filter(part => part !== '').join(' · ')
+  const meta = [stateWords(mirror.state, mirror.agent, s), mirror.branch, pr === null ? '' : prWords(pr, s)].filter(part => part !== '').join(' · ')
 
   return [
     markerOf(mirror),
@@ -299,7 +304,7 @@ export const isArchivable = (span: BlockSpan, now: number, isNow = false): boole
   const age = now - span.updated
   if (span.state === 'done') return isNow || age > DAY / 2
 
-  return age > 3 * DAY
+  return age > STOPPED_ARCHIVE_MS
 }
 
 export type Archived = { text: string; entries: string[] }
@@ -507,9 +512,11 @@ export const setManualStep = (text: string, ref: StepRef, mark: string): string 
 // place of the earlier block with its id, or under its `## project` when new. It never takes
 // the place of a Claude block, another agent's block or one whose end marker is missing.
 // Arrival time cannot make a delayed report fresh or give it precedence over newer work.
-export type PasteProblem = 'noBlock' | 'mixed' | 'badBlock' | 'noProject' | 'notYours' | 'badTime' | 'futureTime' | 'older' | 'conflict' | 'unknownOrder'
+export type PasteProblem = 'noBlock' | 'mixed' | 'badBlock' | 'noProject' | 'notYours' | 'badTime' | 'futureTime' | 'oldTime' | 'older' | 'conflict' | 'unknownOrder'
 export type PasteReview = { token: string; current: string; incoming: string }
-export type PasteResult = { text: string; title: string; isUnchanged: boolean } | { problem: PasteProblem; review?: PasteReview }
+export type PasteResult = { text: string; title: string; isUnchanged: boolean }
+  | { problem: Exclude<PasteProblem, 'oldTime'>; review?: PasteReview }
+  | { problem: 'oldTime'; daysBehind: number; review?: PasteReview }
 
 const HEX8 = /^[0-9a-f]{8}$/
 const AGENT_NAME = /^[a-z0-9][a-z0-9_.-]{0,31}$/
@@ -550,6 +557,10 @@ export const mergeBlock = (text: string, pasted: string, now: number, s: Strings
   if (matching.length > 1) return { problem: 'notYours' }
   const existing = matching[0]
   const time = sourceTime(incomingAttrs.updated)
+  // A live report must not arrive already old enough for the stopped-block sweep.
+  if (time !== null && (auto.state === 'working' || auto.state === 'waiting') && now - time > STOPPED_ARCHIVE_MS) {
+    return { problem: 'oldTime', daysBehind: Math.floor((now - time) / DAY) }
+  }
   if (existing !== undefined) {
     const owner = autoOf(startAttrs(seenOf(lines)[existing.start]))
     const attrs = parseAttrs(startAttrs(seenOf(lines)[existing.start]))

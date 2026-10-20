@@ -397,6 +397,7 @@ export const noticesOf = (before: ProgressMirror, after: ProgressMirror, s: Stri
 }
 
 export const stateOf = (mirror: ProgressMirror, isTurnRunning: boolean): ProgressSessionState => {
+  if ((mirror.backgroundJobs ?? 0) > 0) return !isTurnRunning && mirror.tasks.some(task => waitsOnYou(mirror, task)) ? 'waiting' : 'working'
   if (isAllDone(mirror)) return 'done'
 
   return isTurnRunning ? 'working' : 'waiting'

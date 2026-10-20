@@ -6,6 +6,7 @@ import type {
   ProgressStep,
   ProgressStepStatus,
   ProgressTask,
+  ProgressTail,
 } from '../types'
 
 // `## project` / `### task` / `> note` / `- [x] step`, plus the auto markers a session's
@@ -16,6 +17,16 @@ const TASK = /^###\s+(.+?)\s*#*\s*$/
 const NOTE = /^\s*>\s?(.*)$/
 const STEP = /^([ \t]*)[-*+]\s+\[([ xX~?>!-])\]\s+(.*)$/
 const FENCE = /^\s*(```|~~~)/
+const MARKER_PREFIXES = ['auto session=', '/auto session=', 'question=']
+export const isCutMarker = (line: string): boolean => {
+  if (!line.startsWith('<!--') || line.includes('-->')) return false
+  // A loop, not a trailing-whitespace regex: a long run of spaces would make the regex quadratic.
+  let end = line.length
+  while (end > 0 && (line[end - 1] === ' ' || line[end - 1] === '\t' || line[end - 1] === '\r')) end--
+  const marker = line.slice(0, end).replace(/^<!--[ \t]*/, '')
+  // A bare comment opening is still how people hide examples.
+  return marker !== '' && MARKER_PREFIXES.some(prefix => prefix.startsWith(marker) || marker.startsWith(prefix))
+}
 export const AUTO_START = /^<!--\s*auto\s+(.*?)\s*-->\s*$/
 export const AUTO_END = /^<!--\s*\/auto\b.*?-->\s*$/
 export const QUESTION = /^<!--\s*question=([a-f0-9]{64}:[1-9]\d*)\s*-->\s*$/
@@ -110,7 +121,7 @@ export const readable = (lines: readonly string[]): Array<string | null> => {
   let isFenced = false
   let isComment = false
 
-  return lines.map(raw => {
+  return lines.map((raw, index) => {
     if (FENCE.test(raw)) {
       isFenced = !isFenced
       return null
@@ -125,6 +136,20 @@ export const readable = (lines: readonly string[]): Array<string | null> => {
     } else if (AUTO_START.test(raw) || AUTO_END.test(raw) || QUESTION.test(raw)) {
       return raw
     }
+    if (isCutMarker(raw)) {
+      // A later board boundary before the comment close belongs to the next writer.
+      let hasBoundary = false
+      let hasClose = false
+      for (let nextIndex = index + 1; nextIndex < lines.length; nextIndex++) {
+        const next = lines[nextIndex] ?? ''
+        if (AUTO_START.test(next) || AUTO_END.test(next) || PROJECT.test(next)) hasBoundary = true
+        if (next.includes('-->')) {
+          hasClose = true
+          break
+        }
+      }
+      if (hasBoundary || !hasClose) return raw
+    }
     line = line.replace(/<!--.*?-->/g, '')
     const open = line.indexOf('<!--')
     if (open >= 0) {
@@ -134,6 +159,34 @@ export const readable = (lines: readonly string[]): Array<string | null> => {
 
     return line
   })
+}
+
+// A cut marker is damage, not a comment around the next writer's complete blocks.
+// Keep its boundary in the original string; writers must preserve the prefix exactly.
+export const progressTail = (markdown: string): ProgressTail | null => {
+  const raws = markdown.split('\n')
+  const lines = readable(raws)
+  let offset = 0
+  let open: { session: string; tasks: number } | null = null
+  let torn: ProgressTail | null = null
+  lines.forEach((line, index) => {
+    if (line !== null) {
+      const start = AUTO_START.exec(line)
+      const auto = start?.[1] === undefined ? null : autoOf(start[1])
+      if (auto !== null) open = { session: auto.session, tasks: 0 }
+      else if (AUTO_END.test(line)) {
+        const ends = parseAttrs(line).session
+        if (ends === undefined || ends === open?.session) open = null
+      } else if (PROJECT.test(line)) open = null
+      else if (TASK.test(line) && open !== null) open.tasks += 1
+      else if (isCutMarker(line) && torn === null) {
+        const close = open !== null && `<!-- /auto session=${open.session} -->`.startsWith(line.replace(/\r$/, '')) ? open.session : null
+        torn = { offset, tasks: Math.max(1, open?.tasks ?? 0), close }
+      }
+    }
+    offset += (raws[index]?.length ?? 0) + 1
+  })
+  return torn
 }
 
 export const parseProgress = (markdown: string): ProgressProject[] => {

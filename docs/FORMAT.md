@@ -46,9 +46,11 @@ A step that comes before any `###` goes into a task with no title. A step or tas
 **Ignored regions.**
 
 - Fenced code. A line that starts (after optional spaces) with three backticks or three tildes toggles the fence, whichever character opens or closes it. Everything between, and the fence lines themselves, are skipped. An unclosed fence hides the rest of the file.
-- HTML comments. `<!-- … -->` is removed from a line, and a comment that opens without closing hides lines until `-->`. Block markers and the optional question revision annotation below are read first as whole lines.
+- HTML comments. `<!-- … -->` is removed from a line, and a comment that opens without closing hides lines until `-->`, except for the cut-marker rule below. Block markers and the optional question revision annotation below are read first as whole lines.
 
 A tool that rewrites the file skips the same regions: a marker or heading inside a fence or a comment (a block pasted as an example) is never replaced, moved or archived.
+
+A line beginning with `<!--`, with no `-->`, is checked for a cut marker after removing trailing spaces, tabs and carriage returns, then removing `<!--` and any number of spaces or tabs, or none, immediately after it. The remaining text must be nonempty and either a strict prefix of `auto session=`, `/auto session=` or `question=`, or begin with one of those complete starts. Thus `<!-- aut`, `<!-- auto`, `<!-- auto se` and `<!-- /auto session=ab` count; `<!-- auto archive of old work` does not. A bare `<!--` remains an ordinary comment opening. U+0085 after `<!--`, and U+FEFF or U+001F after `auto`, remain ordinary comment text. Outside a fence or an already open comment, a cut marker is read as a plain text line and does not open a comment when no later `-->` exists, or a whole-line block start, block end or `##` project heading appears before or on the first later line containing `-->`. This look-ahead also counts whole-line block starts, block ends, `##` project headings and `-->` inside a code fence. Following tasks and blocks then remain visible, and every board surface warns with an estimated count of potentially hidden tasks (at least one). Otherwise it remains an ordinary comment. Removing only a start marker's ` -->` therefore exposes its task if its end marker supplies that boundary. A complete start marker without an end marker is valid and causes no warning or saved fragment. Native reporters repair only a cut marker followed by whitespace alone: inside the report lock, after validating the report, they save the exact cut-off end in `progress.md.torn-<date>-<unique id>`, remove the cut line and the blank lines after it, and write the full `<!-- /auto session=ID -->` only when the cut text is the start of the open block's own end marker. They replace the board once with that text and the new report, preserving earlier bytes. When text follows the cut, reporters skip the repair, save no fragment, and keep the existing bytes while adding the new report; the board continues to warn and shows later tasks and reports. A refused repair or failed save leaves the board intact and returns a one-line error and a nonzero status. A fragment created by a failed write, sync, read-back or board replacement is removed if possible.
 
 **Names.** A project name is its heading text. The pane puts the current session's project first. A heading belongs to a session's project when the heading's first word (up to the first space, `(`, `（`, `·` or `—`, compared without case) equals the repository name, the repository folder name, or the session folder name. `## persona_framework (PFC)` belongs to a session in the repository `persona_framework`. Name your project heading after the repository.
 
@@ -275,8 +277,8 @@ What the pane's writer puts in the file, by language:
 | | `en` | `zh-TW` | `zh-CN` |
 |---|---|---|---|
 | Title of a file the pane creates | `# Project progress` | `# 專案進度` | `# 项目进度` |
-| First `>` line of a block, by `state`: `working` | `Claude is working` | `Claude 正在做` | `Claude 正在做` |
-| `waiting` | `waiting on your reply` | `等你回覆` | `等你回复` |
+| First `>` line of a block, by `state`: `working` | `Claude is working` (another agent's block: its name, e.g. `Codex is working`) | `Claude 正在做` (另一個 agent：它的名字，例如 `Codex 正在做`) | `Claude 正在做` (另一个 agent：它的名字，例如 `Codex 正在做`) |
+| `waiting` | `Waiting for your next message` | `等你回覆` | `等你回复` |
 | `done` | `done` | `完成` | `完成` |
 | `ended` | `session ended, can be taken over` | `對話已結束，可接手` | `对话已结束，可接手` |
 | Pull request in that line | `PR #482 · CI running` | `PR #482 · CI 跑中` | `PR #482 · CI 运行中` |
@@ -374,7 +376,7 @@ Two projects, two agent blocks and a hand-kept task. The Claude block has a pull
 
 <!-- auto session=2be48af2 agent=claude state=waiting updated=2026-10-16T14:32:05.123Z resume=2be48af2-6193-5040-aacc-e0546d6784f1 dir=%2Fhome%2Fana%2Fcheckout-service pr=482 ci=pending -->
 ### Make the payment webhook idempotent
-> waiting on your reply · fix/webhook-retry · PR #482 · CI running
+> Waiting for your next message · fix/webhook-retry · PR #482 · CI running
 > Context: Duplicate charges happen when the provider retries a webhook; one delivery must charge once.
 - [x] Reproduce the duplicate charge
 - [x] Add the idempotency key table
@@ -415,7 +417,7 @@ How the pane reads it:
 - `checkout-service (payments)` is the project of a session in the repository `checkout-service`. The Claude block is `waiting`, so the pane lists its `[?]` step under "Waiting on you". That step is a `choose` with the options "24 hours" and "7 days". The block's `pr=482 ci=pending` is the pull request and the state of its checks. Its background is the `Context:` line.
 - The Codex block is `working`, so the pane words it `codex is working` and shows the label `codex` beside it. Its 7 steps are counted flat, 2 of them done; the three nested steps count like any other. Its `[?]` step is an `input` (the words hold `key`). The pane lists it as a question to answer in the Codex session.
 - The job-search task is hand-kept. It is due `2026-10-31`, so it moves to "due soon" once that is 14 days away. Its `[?]` step is a `wait`: the pane offers one button, and pressing it changes the line to `[x]`. The other note, "Referral from Priya. Recruiter is Sam.", is its background.
-- The Claude block's first note (`waiting on your reply · …`) is for people reading the file. The pane's own writer puts the state, branch and pull request there, in the pane's language (this is the English form). The pane does not read it.
+- The Claude block's first note (`Waiting for your next message · …`) is for people reading the file. The pane's own writer puts the state, branch and pull request there, in the pane's language (this is the English form). The pane does not read it.
 
 ## Writing a block from another agent
 

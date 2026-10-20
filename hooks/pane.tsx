@@ -84,6 +84,7 @@ export type PaneModel = {
   isNotifyOn: boolean
   isLegendOpen: boolean
   hasQuestionsProblem?: boolean
+  hasPendingQuestionsProblem?: boolean
   palette: Palette
   s: Strings
 }
@@ -628,6 +629,8 @@ export const drawPane = (ui: PaneUi, model: PaneModel, actions: PaneActions): Re
   return (
     <Box flexDirection="column">
       <Text bold>{s.paneTitle}</Text>
+      {view.warning && <Text color={palette.alert}>{view.warning}</Text>}
+      {model.hasPendingQuestionsProblem && <Text color={palette.alert}>{s.inboxQuestionNotKept}</Text>}
       {model.hasQuestionsProblem && <Text color={palette.alert}>{s.questionsUnreadable(questionsPath(model.path))}</Text>}
       {overview()}
 

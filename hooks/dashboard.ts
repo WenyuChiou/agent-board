@@ -160,6 +160,7 @@ footer{color:var(--muted);font-size:.85rem;display:grid;gap:4px;border-top:1px s
 <body>
 <main>
 <header><h1>${esc(s.paneTitle)}</h1><span class="meta">${esc(stamp)}</span></header>
+${view.warning ? `<p role="status" style="color:var(--alert)">${esc(view.warning)}</p>` : ''}
 <section class="counts">${counts
     .map(([glyph, n, word, role]) => `<span><span style="color:var(--${n > 0 ? role : 'muted'})">${glyph} ${n}</span> ${esc(word)}</span>`)
     .join('')}</section>

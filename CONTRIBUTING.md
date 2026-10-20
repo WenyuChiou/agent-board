@@ -75,7 +75,7 @@ Several agents (Claude Code sessions, Codex and others) work in this repository 
 
 ## Images
 
-Keep the original README tour/flow SVGs and dark terminal illustration. The bottom pair uses English Codex/Antigravity board screenshots labelled synthetic. Do not add a gallery to the guides. Historical assets remain in `docs/images/`. Generated SVGs come from `bun docs/preview/render.ts`; never hand-edit them. `node docs/preview/png.mjs` renders social previews; its fonts/tool requirements are documented in the preview sources. A synthetic render is not native acceptance evidence. Keep bearer URLs, conversations and private identifiers out of public images.
+README pictures are SVGs that `bun docs/preview/render.ts` draws from synthetic data with the board's own code, in the README's own language, with alt text that says synthetic; a picture that has a light and a dark version is shown through `<picture>`. Never hand-edit a generated SVG. Do not add a gallery to the guides. Historical assets remain in `docs/images/`. `node docs/preview/png.mjs` renders social previews; its fonts/tool requirements are documented in the preview sources. A synthetic render is not native acceptance evidence. Keep bearer URLs, conversations and private identifiers out of public images.
 
 ## Releases
 
