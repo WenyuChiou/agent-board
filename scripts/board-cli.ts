@@ -26,7 +26,7 @@ import { appendJournal, archivePath, countDay, hasArchiveEntry, journalLine, jou
 import { parseProgress, progressTail } from '../hooks/parse'
 import { qrModules, qrText } from '../hooks/qr'
 import { langOf, STRINGS } from '../hooks/strings'
-import { answeredJson, answeredPath, buildView, manualDoneSeen, parseAnswered, parseSeen, seenJson, seenPath, withAnswered, withSeen } from '../hooks/view'
+import { answeredJson, answeredPath, buildView, manualDoneSeen, parseAnswered, parseSeen, seenJson, seenPath, taskFingerprint, withAnswered, withSeen } from '../hooks/view'
 import { acknowledgementKeys, archiveQuestionsKept, captureHashOf, captureJson, capturePath, emptyQuestions, parseCapture, withCaptures, isQuestionProof, isQuestionSnapshot, isTornLedger, migratedAnswered, observeQuestions, parseQuestions, questionProofJson, questionProofOf, questionProofPath, questionsJson, questionsPath, resolvedQuestionsToRetire } from '../hooks/questions'
 import type { QuestionCapture, QuestionProofs, QuestionRecord } from '../hooks/questions'
 import { sha256 } from '../hooks/sha256'
@@ -592,19 +592,32 @@ const act = (action: BoardAction): string => {
   return ''
 }
 
-// Every finished task out now, the way `/progress tidy` and the pane's 現在封存 do it: done
-// blocks and finished hand-kept tasks at once, a stopped session's block after its three days.
-const tidy = (): string => {
+// Scheduled sweeps keep the plugin's age rules. An explicit interactive tidy may move
+// finished work at once; neither mode discards a stopped session before its three days.
+const tidy = (isNow = true): string => {
   const now = Date.now()
+  let seen: Record<string, number> = {}
+  if (!isNow) {
+    try {
+      seen = parseSeen(read(seenPath(path)), answeredAge(seenPath(path))) ?? {}
+    } catch {
+      // Unknown manual ages stay; an unreadable hint need not block dated agent blocks.
+    }
+  }
   const count = archiveOut(text => {
-    const blocks = takeArchivable(text, now, undefined, s, true)
-    // This script keeps no record of when a task was seen done: asked for now, it is today's.
-    const manual = takeManualDone(blocks.text, now, () => undefined, s, true)
+    const blocks = takeArchivable(text, now, undefined, s, isNow)
+    const manual = takeManualDone(blocks.text, now, (_key, project, task) => {
+      const at = seen[taskFingerprint(project, task)]
+      return at !== undefined && at <= now ? at : undefined
+    }, s, isNow)
     const entries = [...blocks.entries, ...manual.entries]
     return entries.length === 0 ? null : { text: manual.text, entries }
   }, now)
-  if (count === null) return s.boardWriteFailed
-  return count === 0 ? s.tidyNothing : s.tidyMoved(count)
+  if (count === null) {
+    if (!isNow) process.exitCode = 1
+    return s.boardWriteFailed
+  }
+  return count === 0 ? (isNow ? s.tidyNothing : s.tidyScheduledNothing) : s.tidyMoved(count)
 }
 
 // Keys as the terminal sends them, named the way boardKey reads them. One read can hold more
@@ -976,6 +989,8 @@ const run = async (): Promise<void> => {
   } else if (args.includes('--chat')) {
     // Before the flags that serve, open or write: a chat reply never starts a page.
     chat()
+  } else if (args.includes('--tidy')) {
+    process.stdout.write(`${tidy(false)}\n`)
   } else if (args.includes('--serve')) {
     await serveBoard()
   } else if (args.includes('--html')) {

@@ -305,7 +305,10 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
     } else if (kept.length) nextHooks[event] = kept
     else delete nextHooks[event]
   }
-  let nextConfig: Json = { ...(agent === 'cursor' ? { version: 1 } : agent === 'muse' ? { schema_version: 1 } : {}), ...hookConfig, hooks: nextHooks }
+  let nextConfig: Json = {
+    ...(agent === 'cursor' && !('version' in hookConfig) ? { version: 1 } : agent === 'muse' && !('schema_version' in hookConfig) ? { schema_version: 1 } : {}),
+    ...hookConfig, hooks: nextHooks,
+  }
   if (agent === 'antigravity') {
     const name = 'agent-board-local'
     const desired = antigravityHooks((event, state) => {
