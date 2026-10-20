@@ -1,7 +1,7 @@
 import type { On, PromptOrigin, RenderPropsOf } from 'claude-code'
 import { expect, mock, test } from 'claude-code/testing'
 import type { Engine, MockClock } from 'claude-code/testing'
-import type { ProgressMirrorTask } from '../types'
+import type { ProgressMirror, ProgressMirrorTask } from '../types'
 import { agentHooks, boardScript, isNodeSupported, isSetupState, NODE_MIN, openclawPlugin, RELEASE_PATHS } from '../hooks/connect'
 import { STRINGS } from '../hooks/strings'
 
@@ -14,7 +14,7 @@ import { parseProgress } from '../hooks/parse'
 import { chatText, peekInbox } from '../hooks/board'
 import { answerAgentPrompt, blockId, isInboxFile, withAgentPrompts } from '../hooks/inbox'
 import { completionKey, completionOverlay, emptyMirror } from '../hooks/mirror'
-import { applyDigest } from '../hooks/digest'
+import { applyDigest, startBackgroundJob } from '../hooks/digest'
 import { upsertAutoBlock } from '../hooks/blocks'
 
 import { emptyQuestions, migrationKey, observeQuestions, questionProofPath, questionsJson } from '../hooks/questions'
@@ -38,6 +38,20 @@ const PROPS: RenderPropsOf['Pane'] = {
   scroll: { offset: 0, bodyRows: 40 },
   view: {},
 }
+
+test('the pane and its HTML warn once about a torn tail without losing complete tasks', async ($, on) => {
+  const source = '## Synthetic day\n### Hand kept\n- [ ] Keep\n' + Array.from({ length: 7 }, (_, i) => `<!-- auto session=${10000000 + i} agent=codex state=working updated=2026-10-16T12:00:00Z -->\n### Day task ${i}\n- [ ] Next\n${i === 6 ? '<!-- /auto se' : `<!-- /auto session=${10000000 + i} -->\n`}`).join('\n')
+  const world: World = { files: new Map([[FILE, source]]), mtime: 1, hasTasks: true, store: { lang: 'en', autoConnectOff: true, opened: ['others'] } }
+  engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/other-project', surface: 'desktop', isInteractive: true })
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
+  const warning = EN.progressIncomplete(1)
+  expect(await ui.find({ type: 'Text', text: warning })).toBeDefined()
+  for (let i = 0; i < 7; i++) expect(await ui.find({ type: 'Button', key: `Synthetic day::Day task ${i}` })).toBeDefined()
+  expect(world.files.get(FILE)).toBe(source)
+  expect((world.files.get(FILE.replace('.md', '.html')) ?? '').split(warning).length - 1).toBe(1)
+  await ui.unmount()
+})
 
 test('a task handoff removes Continue while retaining the recipient in the pane and file', async ($, on) => {
   const world: World = { files: new Map(), mtime: 1, hasTasks: true }
@@ -132,6 +146,8 @@ type World = {
   reply?: (prompt: string) => string | undefined
   // The transcript $.session.messages() returns.
   messages?: Array<{ role: 'user' | 'assistant'; text: string; toolUses: Array<{ tool_use_id: string; tool: string; input: Record<string, unknown> }> }>
+  messageReads?: number
+  holdBackground?: { reached: () => void; release: Promise<void> }
   // Answers `gh`; other commands (git) answer the branch.
   gh?: () => { exitCode: number; stdout: string; stderr: string }
   // A move of this file fails, as when another session renamed it first.
@@ -341,7 +357,10 @@ const engineBeneath = (on: On, world: World): MockClock => {
     world.ran?.push([...e.argv])
     return { value: { ...ran, isStdoutTruncated: false, isStderrTruncated: false } }
   })
-  on('session.messages', () => ({ value: world.messages ?? [] }))
+  on('session.messages', () => {
+    world.messageReads = (world.messageReads ?? 0) + 1
+    return { value: world.messages ?? [] }
+  })
   on('session.append', ($, e, next) => {
     world.appended?.push(e)
     return next(e)
@@ -424,6 +443,15 @@ const engineBeneath = (on: On, world: World): MockClock => {
   })
   on('turn.start', ($, e) => ({ turnId: e.turnId }))
   on('turn.complete', () => ({ text: '' }))
+  on('tool.call', { tool: 'SyntheticBackground' }, async () => {
+    const held = world.holdBackground
+    world.holdBackground = undefined
+    if (held !== undefined) {
+      held.reached()
+      await held.release
+    }
+    return { result: {} }
+  })
   let nextId = 0
   on('tool.call', { tool: 'TaskCreate' }, ($, e) => {
     nextId += 1
@@ -3428,6 +3456,7 @@ test('without a Task list, a turn that changed something is summed up into steps
   await start($, '幫我把限流加到 API')
   await $.turn.complete({ answer: '加好了。每把金鑰一分鐘要 100 還是 300？', durationMs: 1, isAborted: false, turnId: 't1', reason: 'answer' })
   await clock.advance(10)
+  expect(world.messageReads).toBe(1)
 
   const written = world.files.get(FILE) ?? ''
   expect(written).toContain('source=turns')
@@ -3446,6 +3475,7 @@ test('without a Task list, a turn that changed something is summed up into steps
   const after = world.files.get(FILE) ?? ''
   expect(after).toContain('state=done')
   expect(after).toContain('- [x] 加好限流中介層\n- [x] 每把金鑰的上限 — 一分鐘 100 還是 300？\n- [x] 寫好限流測試\n')
+  expect(world.messageReads).toBe(1)
 
   // Claude starting a real list replaces the summed-up steps.
   await $.turn.start({ text: '再加上 IP 限流', turnId: 't3' })
@@ -3463,6 +3493,728 @@ test('a turn that only answered a question leaves no block behind', async ($, on
   await $.turn.complete({ answer: '它在解析設定檔。還有別的嗎？', durationMs: 1, isAborted: false, turnId: 't1', reason: 'answer' })
   await clock.advance(10)
   expect(world.files.get(FILE) ?? '').not.toContain('<!-- auto')
+})
+
+const BACKGROUND_MESSAGES: NonNullable<World['messages']> = [
+  { role: 'user', text: 'Run the tests', toolUses: [] },
+  { role: 'assistant', text: '', toolUses: [{ tool_use_id: 'background-1', tool: 'Bash', input: { command: 'synthetic-tests', run_in_background: true } }] },
+]
+
+const launchBackground = ($: Engine, id = 'background-1') =>
+  $.tool.call({ tool: 'SyntheticBackground', tool_use_id: id, run_in_background: true })
+
+test('a prompt turn and poll do no background bookkeeping before a job is launched', async ($, on) => {
+  const saved: string[] = []
+  const world: World = { files: new Map(), mtime: 1, hasTasks: true, beforeStoreSet: key => saved.push(key) }
+  const clock = engineBeneath(on, world)
+  on('tool.call', { tool: 'Read' }, () => ({ result: 'Synthetic result' }))
+  await start($, 'Read the result')
+  await clock.advance(10)
+  saved.length = 0
+  await $.turn.start({ text: 'Read the result again', turnId: 't2' })
+  await $.tool.call({ tool: 'Read', file_path: '/synthetic/result', run_in_background: false })
+  await $.turn.complete({ answer: '', durationMs: 1, isAborted: true, turnId: 't2', reason: 'answer' })
+  await clock.advance(2000)
+  expect(saved.filter(key => key === `mirror:${SESSION}`)).toEqual([])
+})
+
+test('a background tool with an empty id can finish without leaving a job running', async ($, on) => {
+  const shared: Record<string, unknown> = {}
+  const world: World = { files: new Map(), mtime: 1, hasTasks: true, shared }
+  engineBeneath(on, world)
+  outside(on, world)
+  on('prompt.submit', ($, e) => ({ text: e.text }))
+  await start($, 'Run the tests')
+  await launchBackground($, '')
+  await $.prompt.submit({ text: '<task-notification></task-notification>', origin: { kind: 'task-notification' }, turnId: 't1', wait: false })
+  expect(shared[`mirror:${SESSION}`]).toMatchObject({ backgroundJobs: 0, backgroundJobIds: [] })
+})
+
+test('a turn after the last background completion does not save an empty release', async ($, on) => {
+  const saved: string[] = []
+  const world: World = { files: new Map(), mtime: 1, hasTasks: true, store: { autoConnectOff: true, inboxDone: {} }, beforeStoreSet: key => saved.push(key) }
+  engineBeneath(on, world)
+  outside(on, world)
+  on('prompt.submit', ($, e) => ({ text: e.text }))
+  await start($, 'Run the tests')
+  await launchBackground($)
+  await $.prompt.submit({ text: '<task-notification><tool-use-id>background-1</tool-use-id></task-notification>', origin: { kind: 'task-notification' }, turnId: 't1', wait: false })
+  await $.turn.complete({ answer: '', durationMs: 1, isAborted: true, turnId: 't1', reason: 'answer' })
+  expect(world.store?.[`mirror:${SESSION}`]).toMatchObject({ backgroundJobs: 0 })
+  saved.length = 0
+  await $.turn.start({ text: 'Check the result', turnId: 't2' })
+  expect(saved.filter(key => key === `mirror:${SESSION}`)).toEqual([])
+})
+
+for (const hasTasks of [true, false]) test("a question after this turn's job finished still waits on you while an older background job runs" + (hasTasks ? '' : ' without a Task list'), async ($, on) => {
+  const shared: Record<string, unknown> = {}
+  const world: World = { files: new Map(), mtime: 1, hasTasks, shared, reply: () => '' }
+  const clock = engineBeneath(on, world)
+  outside(on, world)
+  on('prompt.submit', ($, e) => ({ text: e.text }))
+  await start($, 'Run the long tests')
+  if (hasTasks) await $.tool.call({ tool: 'TaskCreate', subject: 'Deploy to staging', description: '' })
+  await launchBackground($, 'older-job')
+  await $.turn.complete({ answer: 'Tests are running.', durationMs: 1, isAborted: false, turnId: 't1', reason: 'answer' })
+  await clock.advance(10)
+  await $.turn.start({ text: 'Build the app', turnId: 't2' })
+  await launchBackground($, 'this-turn-job')
+  await $.prompt.submit({ text: '<task-notification><tool-use-id>this-turn-job</tool-use-id></task-notification>', origin: { kind: 'task-notification' }, turnId: 't2', wait: false })
+  await $.turn.complete({ answer: 'Build passed. Deploy to staging, OK?', durationMs: 1, isAborted: false, turnId: 't2', reason: 'answer' })
+  await clock.advance(10)
+  expect(shared[`mirror:${SESSION}`]).toMatchObject({ backgroundJobs: 1, backgroundJobIds: ['older-job'] })
+  expect(world.files.get(FILE) ?? '').toContain('state=waiting')
+  expect(world.files.get(FILE) ?? '').toContain('- [?] Deploy to staging')
+})
+
+test('a teammate or workflow agent the turn starts is not counted as a background job', async ($, on) => {
+  const shared: Record<string, unknown> = {}
+  const world: World = { files: new Map(), mtime: 1, hasTasks: true, shared }
+  engineBeneath(on, world)
+  outside(on, world)
+  on('agent.spawn', () => ({ model: 'synthetic', agentId: 'synthetic-child' }))
+  await start($, 'Check the build')
+  await $.tool.call({ tool: 'TaskCreate', subject: 'Deploy to staging', description: '' })
+  for (const kind of [{ isTeammate: true }, { workflow: { runId: 'wf_synthetic' } }]) {
+    await $.agent.spawn({ prompt: 'Check the build', background: true, tool_use_id: 'team-or-workflow', ...kind } as never)
+    await $.turn.complete({ answer: 'Deploy to staging, OK?', durationMs: 1, isAborted: false, turnId: 't1', reason: 'answer' })
+    expect((shared[`mirror:${SESSION}`] as ProgressMirror).backgroundJobs ?? 0).toBe(0)
+    expect(world.files.get(FILE) ?? '').toContain('- [?] Deploy to staging')
+    await $.turn.start({ text: 'Check again', turnId: 't2' })
+  }
+})
+
+test('a failed save of early background releases still records the question', async ($, on) => {
+  let hasFailed = false
+  const world: World = { files: new Map(), mtime: 1, hasTasks: true }
+  engineBeneath(on, world)
+  outside(on, world)
+  on('prompt.submit', ($, e) => ({ text: e.text }))
+  await start($, 'Check the build')
+  await $.tool.call({ tool: 'TaskCreate', subject: 'Deploy to staging', description: '' })
+  await $.prompt.submit({ text: '<task-notification><tool-use-id>early-job</tool-use-id></task-notification>', origin: { kind: 'task-notification' }, turnId: 't1', wait: false })
+  world.failStore = (op, key) => {
+    if (hasFailed || op !== 'set' || key !== `mirror:${SESSION}`) return false
+    hasFailed = true
+    return true
+  }
+  await $.turn.complete({ answer: 'Deploy to staging, OK?', durationMs: 1, isAborted: false, turnId: 't1', reason: 'answer' })
+  expect(hasFailed).toBe(true)
+  expect(world.files.get(FILE) ?? '').toContain('- [?] Deploy to staging')
+})
+
+for (const hasTasks of [true, false]) test('a question after a background job that finished in its own turn still waits on you' + (hasTasks ? '' : ' without a Task list'), async ($, on) => {
+  const world: World = { files: new Map(), mtime: 1, hasTasks, reply: () => '' }
+  const clock = engineBeneath(on, world)
+  outside(on, world)
+  on('prompt.submit', ($, e) => ({ text: e.text }))
+  await start($, 'Run the build')
+  if (hasTasks) await $.tool.call({ tool: 'TaskCreate', subject: 'Deploy to staging', description: '' })
+  await launchBackground($)
+  await $.prompt.submit({ text: '<task-notification><tool-use-id>background-1</tool-use-id></task-notification>', origin: { kind: 'task-notification' }, turnId: 't1', wait: false })
+  await $.turn.complete({ answer: 'Build passed. Deploy to staging, OK?', durationMs: 1, isAborted: false, turnId: 't1', reason: 'answer' })
+  await clock.advance(10)
+  expect(world.files.get(FILE) ?? '').toContain('state=waiting')
+  expect(world.files.get(FILE) ?? '').toContain('- [?] Deploy to staging')
+})
+
+test('a session that ends with a background job running leaves no placeholder step behind', async ($, on) => {
+  const shared: Record<string, unknown> = {}
+  const world: World = { files: new Map(), mtime: 1, hasTasks: false, shared, reply: () => 'TITLE: Build\nDONE: Started build\nNEXT: -\nASK: -' }
+  const clock = engineBeneath(on, world)
+  outside(on, world)
+  await start($, 'Run the build')
+  await launchBackground($)
+  await $.turn.complete({ answer: 'Running.', durationMs: 1, isAborted: false, turnId: 't1', reason: 'answer' })
+  await clock.advance(10)
+  expect(world.files.get(FILE) ?? '').toContain('背景工作執行中')
+  await $.session.end({ reason: 'other', sessionId: SESSION, resume: { id: SESSION } as never })
+  expect(world.files.get(FILE) ?? '').not.toContain('背景工作執行中')
+  expect(shared[`mirror:${SESSION}`]).toMatchObject({ state: 'done', backgroundJobs: 0, backgroundJobIds: [], backgroundReleases: [], backgroundReleaseCount: 0 })
+  expect((shared[`mirror:${SESSION}`] as ProgressMirror).tasks.map(task => task.subject)).toEqual(['Started build'])
+})
+
+test('an agent defined to run in the background is counted even when the call does not ask for it', async ($, on) => {
+  const shared: Record<string, unknown> = {}
+  const world: World = { files: new Map(), mtime: 1, hasTasks: true, shared }
+  engineBeneath(on, world)
+  outside(on, world)
+  on('agent.spawn', () => ({ model: 'synthetic', agentId: 'synthetic-child' }))
+  on('tool.call', { tool: 'Agent' }, async () => ({ result: await $.agent.spawn({ prompt: 'Check tests', background: true, tool_use_id: 'agent-job' } as never) }))
+  on('prompt.submit', ($, e) => ({ text: e.text }))
+  await start($, 'Run the tests')
+  await $.tool.call({ tool: 'TaskCreate', subject: 'Check tests', description: '' })
+  await $.tool.call({ tool: 'Agent', prompt: 'Check tests', tool_use_id: 'agent-job' })
+  await $.turn.complete({ answer: 'Running.', durationMs: 1, isAborted: false, turnId: 't1', reason: 'answer' })
+  expect(shared[`mirror:${SESSION}`]).toMatchObject({ backgroundJobs: 1, backgroundJobIds: ['agent-job'] })
+  expect(world.files.get(FILE) ?? '').toContain('state=working')
+  await $.turn.start({ text: '<task-notification><tool-use-id>agent-job</tool-use-id></task-notification>', turnId: 't2' })
+  await $.turn.complete({ answer: 'Finished.', durationMs: 1, isAborted: false, turnId: 't2', reason: 'answer' })
+  expect(shared[`mirror:${SESSION}`]).toMatchObject({ backgroundJobs: 0, backgroundJobIds: [] })
+})
+
+test('an agent asked to run in the background while background tasks are off is not counted', async ($, on) => {
+  const shared: Record<string, unknown> = {}
+  const world: World = { files: new Map(), mtime: 1, hasTasks: true, shared }
+  engineBeneath(on, world)
+  outside(on, world)
+  on('agent.spawn', () => ({ model: 'synthetic', agentId: 'synthetic-child' }))
+  on('tool.call', { tool: 'Agent' }, async () => ({ result: await $.agent.spawn({ prompt: 'Check tests', background: false, tool_use_id: 'foreground-agent' } as never) }))
+  await start($, 'Run the tests')
+  await $.tool.call({ tool: 'TaskCreate', subject: 'Check tests', description: '' })
+  await $.tool.call({ tool: 'Agent', prompt: 'Check tests', tool_use_id: 'foreground-agent', run_in_background: true })
+  await $.turn.complete({ answer: 'Review the tests?', durationMs: 1, isAborted: false, turnId: 't1', reason: 'answer' })
+  expect((shared[`mirror:${SESSION}`] as ProgressMirror).backgroundJobs ?? 0).toBe(0)
+  expect(world.files.get(FILE) ?? '').toContain('state=waiting')
+  expect(world.files.get(FILE) ?? '').toContain('- [?] Check tests — Review the tests?')
+})
+
+test('a resumed session forgets background jobs its old process started', async ($, on) => {
+  const old = { ...emptyMirror(SESSION, 'persona_framework', Date.parse('2026-10-16T11:00:00Z')), backgroundJobs: 1, backgroundJobIds: ['old-job'], backgroundReleases: ['old-release'], backgroundReleaseCount: 1 }
+  const shared: Record<string, unknown> = { [`mirror:${SESSION}`]: old }
+  const world: World = { files: new Map(), mtime: 1, hasTasks: true, shared }
+  const clock = engineBeneath(on, world)
+  outside(on, world)
+  await start($, 'Resume work')
+  await $.tool.call({ tool: 'TaskCreate', subject: 'Check the tests', description: '' })
+  await $.turn.complete({ answer: 'Review the result?', durationMs: 1, isAborted: false, turnId: 't1', reason: 'answer' })
+  await clock.advance(10)
+  expect(shared[`mirror:${SESSION}`]).toMatchObject({ backgroundJobs: 0, backgroundJobIds: [], backgroundReleases: [], backgroundReleaseCount: 0 })
+  expect(world.files.get(FILE) ?? '').toContain('- [?] Check the tests — Review the result?')
+  expect(world.files.get(FILE) ?? '').toContain('state=waiting')
+})
+
+test('a resumed session drops its old background placeholder before an aborted turn', async ($, on) => {
+  const old = applyDigest({ ...emptyMirror(SESSION, 'persona_framework', Date.parse('2026-10-16T11:00:00Z')), backgroundJobs: 1 }, { title: 'Build', context: '', done: 'Started build', next: '', ask: '', why: '' }, Date.parse('2026-10-16T11:00:00Z'))
+  const shared: Record<string, unknown> = { [`mirror:${SESSION}`]: old }
+  const world: World = { files: new Map(), mtime: 1, hasTasks: false, shared }
+  engineBeneath(on, world)
+  outside(on, world)
+  await start($, 'Resume work')
+  await $.turn.complete({ answer: '', durationMs: 1, isAborted: true, turnId: 't1', reason: 'answer' })
+  expect(shared[`mirror:${SESSION}`]).toMatchObject({ state: 'done', backgroundJobs: 0 })
+  expect((shared[`mirror:${SESSION}`] as ProgressMirror).tasks.map(task => task.subject)).toEqual(['Started build'])
+  expect(world.files.get(FILE) ?? '').not.toContain('背景工作執行中')
+})
+
+test('a save with nothing to change does not undo a task step or launch written while it waited', async ($, on) => {
+  const shared: Record<string, unknown> = {}
+  const world: World = { files: new Map(), mtime: 1, hasTasks: true, shared }
+  const clock = engineBeneath(on, world)
+  outside(on, world)
+  let reached!: () => void, release!: () => void
+  const entered = new Promise<void>(resolve => { reached = resolve })
+  const held = new Promise<void>(resolve => { release = resolve })
+  let isArmed = false, hasHeld = false
+  on('state.set', { plugin: 'agent-board', key: 'mine' }, async ($, e, next) => {
+    const value = e.value as ProgressMirror | null
+    if (isArmed && !hasHeld && value !== null && value.tasks.length === 0 && !value.backgroundJobs) {
+      hasHeld = true
+      reached()
+      await held
+    }
+    return next(e)
+  })
+  await start($, 'Keep new work')
+  isArmed = true
+  const saving = $.tool.call({ tool: 'TaskUpdate', taskId: 'missing', status: 'in_progress' })
+  await entered
+  try {
+    await $.tool.call({ tool: 'TaskCreate', subject: 'Keep this step', description: '' })
+    await launchBackground($)
+    await clock.advance(1)
+    expect(shared[`mirror:${SESSION}`]).toMatchObject({ backgroundJobs: 1 })
+  } finally {
+    release()
+  }
+  await saving
+  expect(shared[`mirror:${SESSION}`]).toMatchObject({ backgroundJobs: 1, backgroundJobIds: ['background-1'] })
+  expect((shared[`mirror:${SESSION}`] as ProgressMirror).tasks.map(task => task.subject)).toEqual(['Keep this step'])
+})
+
+test('a background job launched before a reload is released when its completion notice starts a turn', async ($, on) => {
+  const shared: Record<string, unknown> = {}
+  const world: World = { files: new Map(), mtime: 1, hasTasks: true, shared }
+  const clock = engineBeneath(on, world)
+  on('prompt.submit', ($, e) => ({ text: e.text }))
+  let hasRestored = false
+  on('state.set', { plugin: 'agent-board', key: 'mine' }, ($, e, next) => {
+    const value = e.value as ProgressMirror | null
+    if (!hasRestored && value !== null) {
+      hasRestored = true
+      // A reload keeps the engine's mirror but resets the module's launch flag.
+      return next({ ...e, value: startBackgroundJob({ ...value, firstPrompt: 'Run tests' }, 'before-reload') })
+    }
+    return next(e)
+  })
+  await $.session.start({ cwd: '/work/persona_framework', surface: 'terminal', isInteractive: true })
+  await $.tool.call({ tool: 'TaskCreate', subject: 'Check the result', description: '' })
+  expect(shared[`mirror:${SESSION}`]).toMatchObject({ backgroundJobs: 1, backgroundJobIds: ['before-reload'] })
+  const text = '<task-notification><tool-use-id>before-reload</tool-use-id></task-notification>'
+  await $.prompt.submit({ text, origin: { kind: 'task-notification' }, wait: false })
+  await $.turn.start({ text, turnId: 'completion' })
+  await $.turn.complete({ answer: 'Finished.', durationMs: 1, isAborted: false, turnId: 'completion', reason: 'answer' })
+  await clock.advance(10)
+  expect(shared[`mirror:${SESSION}`]).toMatchObject({ backgroundJobs: 0, backgroundJobIds: [] })
+  expect(world.files.get(FILE) ?? '').toContain('state=waiting')
+  expect(world.files.get(FILE) ?? '').not.toContain('背景工作執行中')
+})
+
+test('concurrent first task saves keep both steps', async ($, on) => {
+  const shared: Record<string, unknown> = {}
+  const world: World = { files: new Map(), mtime: 1, hasTasks: true, shared }
+  engineBeneath(on, world)
+  let reached!: () => void, release!: () => void
+  const entered = new Promise<void>(resolve => { reached = resolve })
+  const held = new Promise<void>(resolve => { release = resolve })
+  let hasHeld = false
+  on('state.set', { plugin: 'agent-board', key: 'mine' }, async ($, e, next) => {
+    if (!hasHeld && (e.value as ProgressMirror | null)?.tasks.some(task => task.subject === 'First step')) {
+      hasHeld = true
+      reached()
+      await held
+    }
+    return next(e)
+  })
+  await start($, 'Keep both steps')
+  const first = $.tool.call({ tool: 'TaskCreate', subject: 'First step', description: '' })
+  await entered
+  try {
+    await $.tool.call({ tool: 'TaskCreate', subject: 'Second step', description: '' })
+  } finally {
+    release()
+  }
+  await first
+  expect((shared[`mirror:${SESSION}`] as ProgressMirror).tasks.map(task => task.subject).sort()).toEqual(['First step', 'Second step'])
+})
+
+test('a retried background save journals a concurrently completed step only once', async ($, on) => {
+  const world: World = { files: new Map(), mtime: 1, hasTasks: true }
+  engineBeneath(on, world)
+  const seen = outside(on, world)
+  let reached!: () => void, release!: () => void
+  const entered = new Promise<void>(resolve => { reached = resolve })
+  const held = new Promise<void>(resolve => { release = resolve })
+  let hasHeld = false
+  on('state.set', { plugin: 'agent-board', key: 'mine' }, async ($, e, next) => {
+    if (!hasHeld && (e.value as ProgressMirror | null)?.tasks[0]?.status === 'completed') {
+      hasHeld = true
+      reached()
+      await held
+    }
+    return next(e)
+  })
+  await start($, 'Run tests')
+  await $.tool.call({ tool: 'TaskCreate', subject: 'Check tests', description: '' })
+  const completing = $.tool.call({ tool: 'TaskUpdate', taskId: '1', status: 'completed' })
+  await entered
+  await $.tool.call({ tool: 'TaskUpdate', taskId: '1', status: 'completed' })
+  release()
+  await completing
+  const journal = [...world.files].filter(([path]) => path.includes('-journal-')).map(([, text]) => text).join('\n')
+  expect(journal.split('\n').filter(line => line.includes('Check tests'))).toHaveLength(1)
+  expect(seen.notified).toHaveLength(1)
+})
+
+test('a background release racing a task update is not overwritten', async ($, on) => {
+  const shared: Record<string, unknown> = {}
+  const world: World = { files: new Map(), mtime: 1, hasTasks: true, shared }
+  engineBeneath(on, world)
+  outside(on, world)
+  on('prompt.submit', ($, e) => ({ text: e.text }))
+  let reached!: () => void, release!: () => void
+  const entered = new Promise<void>(resolve => { reached = resolve })
+  const held = new Promise<void>(resolve => { release = resolve })
+  let hasHeld = false
+  on('state.set', { plugin: 'agent-board', key: 'mine' }, async ($, e, next) => {
+    const value = e.value as ProgressMirror | null
+    if (!hasHeld && value?.tasks.some(task => task.subject === 'Updated tests') && value.backgroundJobs === 1) {
+      hasHeld = true
+      reached()
+      await held
+    }
+    return next(e)
+  })
+  await start($, 'Run the tests')
+  await $.tool.call({ tool: 'TaskCreate', subject: 'Check the tests', description: '' })
+  await launchBackground($, 'racing-job')
+  await $.turn.complete({ answer: 'Running.', durationMs: 1, isAborted: false, turnId: 't1', reason: 'answer' })
+  await $.turn.start({ text: 'Update the step', turnId: 't2' })
+  const updating = $.tool.call({ tool: 'TaskUpdate', taskId: '1', subject: 'Updated tests' })
+  await entered
+  await $.prompt.submit({ text: '<task-notification><tool-use-id>racing-job</tool-use-id></task-notification>', origin: { kind: 'task-notification' }, turnId: 't2', wait: false })
+  expect(shared[`mirror:${SESSION}`]).toMatchObject({ backgroundJobs: 0 })
+  release()
+  await updating
+  await $.turn.complete({ answer: 'Updated.', durationMs: 1, isAborted: false, turnId: 't2', reason: 'answer' })
+  expect(shared[`mirror:${SESSION}`]).toMatchObject({ backgroundJobs: 0, backgroundJobIds: [], tasks: [{ subject: 'Updated tests' }] })
+  expect(world.files.get(FILE) ?? '').toContain('state=waiting')
+})
+
+test('a background tool result returns before its mirror save finishes', async ($, on) => {
+  const shared: Record<string, unknown> = {}
+  const world: World = { files: new Map(), mtime: 1, hasTasks: true, shared }
+  engineBeneath(on, world)
+  outside(on, world)
+  let reached!: () => void, release!: () => void
+  const entered = new Promise<void>(resolve => { reached = resolve })
+  const held = new Promise<void>(resolve => { release = resolve })
+  let hasHeld = false
+  on('state.set', { plugin: 'agent-board', key: 'mine' }, async ($, e, next) => {
+    if (!hasHeld && (e.value as ProgressMirror | null)?.backgroundJobs === 1) {
+      hasHeld = true
+      reached()
+      await held
+    }
+    return next(e)
+  })
+  await start($, 'Run the tests')
+  await $.tool.call({ tool: 'TaskCreate', subject: 'Check the tests', description: '' })
+  const launching = launchBackground($)
+  await entered
+  try {
+    expect((await launching).result).toEqual({})
+    expect((shared[`mirror:${SESSION}`] as ProgressMirror).backgroundJobs ?? 0).toBe(0)
+  } finally {
+    release()
+  }
+  await $.turn.complete({ answer: 'Running.', durationMs: 1, isAborted: false, turnId: 't1', reason: 'answer' })
+  expect(shared[`mirror:${SESSION}`]).toMatchObject({ backgroundJobs: 1 })
+})
+
+test('a completion turn waits for a queued background launch before releasing it', async ($, on) => {
+  const shared: Record<string, unknown> = {}
+  const world: World = { files: new Map(), mtime: 1, hasTasks: true, shared }
+  const clock = engineBeneath(on, world)
+  outside(on, world)
+  on('prompt.submit', ($, e) => ({ text: e.text }))
+  let reached!: () => void, release!: () => void
+  const entered = new Promise<void>(resolve => { reached = resolve })
+  const held = new Promise<void>(resolve => { release = resolve })
+  let hasHeld = false
+  on('state.set', { plugin: 'agent-board', key: 'mine' }, async ($, e, next) => {
+    if (!hasHeld && (e.value as ProgressMirror | null)?.backgroundJobs === 1) {
+      hasHeld = true
+      reached()
+      await held
+    }
+    return next(e)
+  })
+  await start($, 'Run tests')
+  await $.tool.call({ tool: 'TaskCreate', subject: 'Check tests', description: '' })
+  await launchBackground($)
+  await entered
+  const notice = '<task-notification><tool-use-id>background-1</tool-use-id></task-notification>'
+  await $.prompt.submit({ text: notice, origin: { kind: 'task-notification' }, wait: false })
+  let hasStarted = false
+  const starting = $.turn.start({ text: notice, turnId: 't2' }).then(() => { hasStarted = true })
+  try {
+    await clock.advance(1)
+    expect(hasStarted).toBe(false)
+  } finally {
+    release()
+  }
+  await starting
+  await $.turn.complete({ answer: 'Finished.', durationMs: 1, isAborted: true, turnId: 't2', reason: 'answer' })
+  expect(shared[`mirror:${SESSION}`]).toMatchObject({ backgroundJobs: 0, backgroundJobIds: [] })
+  expect(world.files.get(FILE) ?? '').toContain('state=waiting')
+})
+
+test('a question asked in a later turn while a background job runs still waits on you', async ($, on) => {
+  const world: World = { files: new Map(), mtime: 1, hasTasks: true }
+  const clock = engineBeneath(on, world)
+  outside(on, world)
+  await start($, 'Run the tests')
+  await $.tool.call({ tool: 'TaskCreate', subject: 'Check the tests', description: '' })
+  await launchBackground($)
+  await $.turn.complete({ answer: 'Running.', durationMs: 1, isAborted: false, turnId: 't1', reason: 'answer' })
+  await $.turn.start({ text: 'Check progress', turnId: 't2' })
+  await $.turn.complete({ answer: 'Should I also test Windows?', durationMs: 1, isAborted: false, turnId: 't2', reason: 'answer' })
+  await clock.advance(10)
+  expect(world.files.get(FILE) ?? '').toContain('state=waiting')
+  expect(world.files.get(FILE) ?? '').toContain('- [?] Check the tests — Should I also test Windows?')
+})
+
+test('a later turn without a Task list can ask a question while a background job runs', async ($, on) => {
+  const world: World = { files: new Map(), mtime: 1, hasTasks: false, reply: DIGEST }
+  const clock = engineBeneath(on, world)
+  outside(on, world)
+  await start($, 'Run the tests')
+  await launchBackground($)
+  await $.turn.complete({ answer: 'Running.', durationMs: 1, isAborted: false, turnId: 't1', reason: 'answer' })
+  await clock.advance(10)
+  await $.turn.start({ text: 'Check progress', turnId: 't2' })
+  await $.turn.complete({ answer: 'Should I also test Windows?', durationMs: 1, isAborted: false, turnId: 't2', reason: 'answer' })
+  await clock.advance(10)
+  expect(world.files.get(FILE) ?? '').toContain('state=waiting')
+  expect(world.files.get(FILE) ?? '').toContain('- [?]')
+})
+
+test('a session resumed after it ended with a background job running is tracked again', async ($, on) => {
+  const world: World = { files: new Map(), mtime: 1, hasTasks: false, reply: DIGEST }
+  const clock = engineBeneath(on, world)
+  outside(on, world)
+  await start($, 'Run the tests')
+  await launchBackground($)
+  await $.turn.complete({ answer: 'Running.', durationMs: 1, isAborted: true, turnId: 't1', reason: 'answer' })
+  await $.session.end({ reason: 'other', sessionId: SESSION, resume: { id: SESSION } as never })
+  await $.session.start({ cwd: '/work/persona_framework', surface: 'terminal', isInteractive: true })
+  await $.turn.start({ text: 'Run more tests', turnId: 't2' })
+  await launchBackground($, 'resumed-job')
+  await $.turn.complete({ answer: 'Running again.', durationMs: 1, isAborted: false, turnId: 't2', reason: 'answer' })
+  await clock.advance(10)
+  expect(world.files.get(FILE) ?? '').toContain('state=working')
+  expect(world.files.get(FILE) ?? '').toContain('- [x] 加好限流中介層')
+})
+
+test('an aborted turn started by a finished job removes the placeholder step', async ($, on) => {
+  const world: World = { files: new Map(), mtime: 1, hasTasks: false, reply: () => '' }
+  const clock = engineBeneath(on, world)
+  outside(on, world)
+  await start($, 'Run the tests')
+  await launchBackground($)
+  await $.turn.complete({ answer: 'Running.', durationMs: 1, isAborted: false, turnId: 't1', reason: 'answer' })
+  await clock.advance(10)
+  expect(world.files.get(FILE) ?? '').toContain('背景工作執行中')
+  await $.turn.start({ text: '<task-notification><tool-use-id>background-1</tool-use-id></task-notification>', turnId: 't2' })
+  await $.turn.complete({ answer: '', durationMs: 1, isAborted: true, turnId: 't2', reason: 'answer' })
+  await clock.advance(10)
+  expect(world.files.get(FILE) ?? '').not.toContain('背景工作執行中')
+  expect(world.files.get(FILE) ?? '').not.toContain('state=working')
+})
+
+test('a turn that starts a background job leaves the block working, not waiting', async ($, on) => {
+  const world: World = { files: new Map(), mtime: 1, hasTasks: true, messages: BACKGROUND_MESSAGES }
+  const clock = engineBeneath(on, world)
+  outside(on, world)
+  await start($, 'Run the tests')
+  await $.tool.call({ tool: 'TaskCreate', subject: 'Check the tests', description: '' })
+  await launchBackground($)
+  await $.turn.complete({ answer: 'The tests are running.', durationMs: 1, isAborted: false, turnId: 't1', reason: 'answer' })
+  await clock.advance(10)
+  expect(world.files.get(FILE) ?? '').toContain('state=working')
+  expect(world.files.get(FILE) ?? '').not.toContain('state=waiting')
+})
+
+test("a reply ending on a question does not mark a step asked while the turn's background job runs", async ($, on) => {
+  const world: World = { files: new Map(), mtime: 1, hasTasks: true, messages: BACKGROUND_MESSAGES }
+  const clock = engineBeneath(on, world)
+  const seen = outside(on, world)
+  await start($, 'Run the tests')
+  await $.tool.call({ tool: 'TaskCreate', subject: 'Check the tests', description: '' })
+  await launchBackground($)
+  await $.turn.complete({ answer: 'Waiting for the tests?', durationMs: 1, isAborted: false, turnId: 't1', reason: 'answer' })
+  await clock.advance(10)
+  expect(world.files.get(FILE) ?? '').toContain('state=working')
+  expect(world.files.get(FILE) ?? '').not.toContain('- [?]')
+  expect(seen.notified).toEqual([])
+  expect(buildView(parseProgress(world.files.get(FILE) ?? ''), ['persona_framework'], null, Date.parse('2026-10-16T12:00:00.000Z')).waiting).toEqual([])
+})
+
+test("the background job's completion notice lets the next turn end as waiting again", async ($, on) => {
+  const world: World = { files: new Map(), mtime: 1, hasTasks: true, messages: BACKGROUND_MESSAGES }
+  const clock = engineBeneath(on, world)
+  outside(on, world)
+  await start($, 'Run the tests')
+  await $.tool.call({ tool: 'TaskCreate', subject: 'Check the tests', description: '' })
+  await launchBackground($)
+  await $.turn.complete({ answer: 'The tests are running.', durationMs: 1, isAborted: false, turnId: 't1', reason: 'answer' })
+  const notice = '<task-notification>\n<tool-use-id>background-1</tool-use-id>\n<status>completed</status>\n</task-notification>'
+  world.messages = [...BACKGROUND_MESSAGES, { role: 'user', text: 'Check progress', toolUses: [] }]
+  await $.turn.start({ text: 'Check progress', turnId: 't2' })
+  await $.turn.complete({ answer: 'Still running.', durationMs: 1, isAborted: false, turnId: 't2', reason: 'answer' })
+  expect(world.files.get(FILE) ?? '').toContain('state=working')
+  world.messages.push({ role: 'user', text: notice, toolUses: [] })
+  await $.turn.start({ text: notice, turnId: 't3' })
+  await $.turn.complete({ answer: 'Review the result?', durationMs: 1, isAborted: false, turnId: 't3', reason: 'answer' })
+  await clock.advance(10)
+  expect(world.files.get(FILE) ?? '').toContain('state=waiting')
+  expect(world.files.get(FILE) ?? '').toContain('- [?] Check the tests — Review the result?')
+})
+
+test('a turn without a background job still ends as waiting and still marks its question', async ($, on) => {
+  const world: World = { files: new Map(), mtime: 1, hasTasks: true, messages: [{ role: 'assistant', text: '', toolUses: [{ tool_use_id: 'foreground-1', tool: 'Bash', input: { run_in_background: false } }] }] }
+  const clock = engineBeneath(on, world)
+  outside(on, world)
+  await start($, 'Run the tests')
+  await $.tool.call({ tool: 'TaskCreate', subject: 'Check the tests', description: '' })
+  await $.turn.complete({ answer: 'Review the result?', durationMs: 1, isAborted: false, turnId: 't1', reason: 'answer' })
+  await clock.advance(10)
+  expect(world.files.get(FILE) ?? '').toContain('state=waiting')
+  expect(world.files.get(FILE) ?? '').toContain('- [?] Check the tests — Review the result?')
+})
+
+test('a background session without a Task list keeps a placeholder step instead of a summarized question', async ($, on) => {
+  const world: World = { files: new Map(), mtime: 1, hasTasks: false, messages: BACKGROUND_MESSAGES, reply: DIGEST }
+  const clock = engineBeneath(on, world)
+  outside(on, world)
+  await start($, 'Run the tests')
+  await launchBackground($)
+  await $.turn.complete({ answer: 'Waiting for the tests?', durationMs: 1, isAborted: false, turnId: 't1', reason: 'answer' })
+  await clock.advance(10)
+  expect(world.files.get(FILE) ?? '').toContain('state=working')
+  expect(world.files.get(FILE) ?? '').not.toContain('- [?]')
+  expect(world.files.get(FILE) ?? '').toContain('- [ ] 寫限流測試')
+})
+
+test('a background session without a summary still writes a working block with a placeholder step', async ($, on) => {
+  const world: World = { files: new Map(), mtime: 1, hasTasks: false, messages: BACKGROUND_MESSAGES, reply: () => '' }
+  const clock = engineBeneath(on, world)
+  outside(on, world)
+  await start($, 'Run the tests')
+  await launchBackground($)
+  await $.turn.complete({ answer: 'Tests are running.', durationMs: 1, isAborted: false, turnId: 't1', reason: 'answer' })
+  await clock.advance(10)
+  expect(world.files.get(FILE) ?? '').toContain('state=working')
+  expect(world.files.get(FILE) ?? '').toContain('- [ ] 背景工作執行中')
+  expect(world.files.get(FILE) ?? '').not.toContain('- [?]')
+})
+
+test('a background completion received during a turn restores waiting and session end clears remaining jobs', async ($, on) => {
+  const world: World = { files: new Map(), mtime: 1, hasTasks: true, messages: BACKGROUND_MESSAGES }
+  const clock = engineBeneath(on, world)
+  outside(on, world)
+  on('prompt.submit', ($, e) => ({ text: e.text }))
+  await start($, 'Run the tests')
+  await $.tool.call({ tool: 'TaskCreate', subject: 'Check the tests', description: '' })
+  await launchBackground($)
+  await $.turn.complete({ answer: 'The tests are running.', durationMs: 1, isAborted: false, turnId: 't1', reason: 'answer' })
+  await $.turn.start({ text: 'Check the result', turnId: 't2' })
+  const notice = '<task-notification>\n<tool-use-id>background-1</tool-use-id>\n<status>completed</status>\n</task-notification>'
+  world.messages = [{ role: 'user', text: notice, toolUses: [] }]
+  await $.prompt.submit({ text: notice, origin: { kind: 'task-notification' }, turnId: 't2', wait: false })
+  await $.turn.complete({ answer: 'Review the result?', durationMs: 1, isAborted: false, turnId: 't2', reason: 'answer' })
+  await clock.advance(10)
+  expect(world.files.get(FILE) ?? '').toContain('state=waiting')
+  world.messages = BACKGROUND_MESSAGES
+  await $.turn.start({ text: 'Run the tests again', turnId: 't3' })
+  await launchBackground($, 'background-2')
+  await $.turn.complete({ answer: 'The tests are running.', durationMs: 1, isAborted: false, turnId: 't3', reason: 'answer' })
+  await $.session.end({ reason: 'other', sessionId: SESSION, resume: { id: SESSION } as never })
+  expect(world.files.get(FILE) ?? '').toContain('state=ended')
+})
+
+test('a background summary that finishes after session end cannot restart work', async ($, on) => {
+  let reached!: () => void, release!: () => void
+  const entered = new Promise<void>(resolve => { reached = resolve })
+  const held = new Promise<void>(resolve => { release = resolve })
+  const shared: Record<string, unknown> = {}
+  const world: World = { files: new Map(), mtime: 1, hasTasks: false, messages: BACKGROUND_MESSAGES, reply: DIGEST, shared, holdComplete: { reached, release: held } }
+  const clock = engineBeneath(on, world)
+  outside(on, world)
+  await start($, 'Run the tests')
+  await launchBackground($)
+  await $.turn.complete({ answer: 'The tests are running.', durationMs: 1, isAborted: false, turnId: 't1', reason: 'answer' })
+  await clock.advance(10)
+  await entered
+  await $.session.end({ reason: 'other', sessionId: SESSION, resume: { id: SESSION } as never })
+  release()
+  await clock.advance(1000)
+  expect(shared[`mirror:${SESSION}`]).toMatchObject({ state: 'ended', backgroundJobs: 0 })
+  expect(world.files.get(FILE) ?? '').toContain('- [x] 加好限流中介層')
+  expect(world.files.get(FILE) ?? '').not.toContain('state=working')
+})
+
+test('a background job that finishes inside the turn that started it leaves the block waiting, not working', async ($, on) => {
+  const shared: Record<string, unknown> = {}
+  const world: World = { files: new Map(), mtime: 1, hasTasks: true, shared }
+  const clock = engineBeneath(on, world)
+  outside(on, world)
+  on('prompt.submit', ($, e) => ({ text: e.text }))
+  let reached!: () => void, release!: () => void
+  const entered = new Promise<void>(resolve => { reached = resolve })
+  const held = new Promise<void>(resolve => { release = resolve })
+  world.holdBackground = { reached, release: held }
+  await start($, 'Run the tests')
+  await $.tool.call({ tool: 'TaskCreate', subject: 'Check the tests', description: '' })
+  const launching = launchBackground($, 'toolu_early')
+  await entered
+  const notice = '<task-notification><tool-use-id>toolu_early</tool-use-id><status>completed</status></task-notification>'
+  await $.prompt.submit({ text: notice, origin: { kind: 'task-notification' }, turnId: 't1', wait: false })
+  release()
+  await launching
+  await launchBackground($, 'toolu_late')
+  await $.prompt.submit({ text: notice.replace('toolu_early', 'toolu_late'), origin: { kind: 'task-notification' }, turnId: 't1', wait: false })
+  await Promise.all([launchBackground($, 'toolu_parallel_a'), launchBackground($, 'toolu_parallel_b')])
+  // Tool results return before their mirror writes; notices drain those writes in order.
+  await Promise.all(['toolu_parallel_a', 'toolu_parallel_b'].map(id => $.prompt.submit({ text: notice.replace('toolu_early', id), origin: { kind: 'task-notification' }, turnId: 't1', wait: false })))
+  expect(shared[`mirror:${SESSION}`]).toMatchObject({ backgroundJobs: 0, backgroundJobIds: [], backgroundReleases: [] })
+  await $.turn.complete({ answer: 'The tests ended.', durationMs: 1, isAborted: false, turnId: 't1', reason: 'answer' })
+  await clock.advance(10)
+  expect(world.files.get(FILE) ?? '').toContain('state=waiting')
+  expect(world.files.get(FILE) ?? '').not.toContain('state=working')
+  expect(world.messageReads ?? 0).toBe(0)
+})
+
+test("a person's prompt that quotes a task notification releases no background job", async ($, on) => {
+  const shared: Record<string, unknown> = {}
+  const world: World = { files: new Map(), mtime: 1, hasTasks: true, shared }
+  const clock = engineBeneath(on, world)
+  outside(on, world)
+  on('prompt.submit', ($, e) => ({ text: e.text }))
+  await start($, 'Run the tests')
+  await $.tool.call({ tool: 'TaskCreate', subject: 'Check the tests', description: '' })
+  await launchBackground($, 'toolu_quoted')
+  await $.turn.complete({ answer: 'Running.', durationMs: 1, isAborted: false, turnId: 't1', reason: 'answer' })
+  const text = '<task-notification><tool-use-id>toolu_quoted</tool-use-id><status>completed</status></task-notification>'
+  await $.prompt.submit({ text, origin: { kind: 'composer' }, wait: false })
+  await $.turn.start({ text, turnId: 't2' })
+  await $.prompt.submit({ text, origin: { kind: 'composer' }, turnId: 't2', wait: false })
+  await $.turn.complete({ answer: 'Explained the example.', durationMs: 1, isAborted: false, turnId: 't2', reason: 'answer' })
+  await clock.advance(10)
+  expect(shared[`mirror:${SESSION}`]).toMatchObject({ backgroundJobs: 1 })
+  expect(world.files.get(FILE) ?? '').toContain('state=working')
+  // An id-less notice cannot identify a job whose id is known.
+  await $.prompt.submit({ text: 'The job failed.', origin: { kind: 'task-notification' }, wait: false })
+  await $.turn.start({ text: 'The job failed.', turnId: 't3' })
+  await $.turn.complete({ answer: 'Ended.', durationMs: 1, isAborted: false, turnId: 't3', reason: 'answer' })
+  expect(shared[`mirror:${SESSION}`]).toMatchObject({ backgroundJobs: 1, backgroundJobIds: ['toolu_quoted'] })
+  await $.prompt.submit({ text, origin: { kind: 'task-notification' }, wait: false })
+  await $.turn.start({ text, turnId: 't4' })
+  await $.turn.complete({ answer: 'Ended.', durationMs: 1, isAborted: false, turnId: 't4', reason: 'answer' })
+  expect(shared[`mirror:${SESSION}`]).toMatchObject({ backgroundJobs: 0, backgroundJobIds: [] })
+  expect(world.files.get(FILE) ?? '').toContain('state=waiting')
+})
+
+test("a background summary that lands after a completion keeps that turn's finished steps", async ($, on) => {
+  let reached!: () => void, release!: () => void
+  const entered = new Promise<void>(resolve => { reached = resolve })
+  const held = new Promise<void>(resolve => { release = resolve })
+  const shared: Record<string, unknown> = {}
+  const world: World = { files: new Map(), mtime: 1, hasTasks: false, reply: DIGEST, shared, holdComplete: { reached, release: held } }
+  const clock = engineBeneath(on, world)
+  outside(on, world)
+  on('prompt.submit', ($, e) => ({ text: e.text }))
+  await start($, 'Run the tests')
+  await launchBackground($, 'toolu_summary')
+  await $.turn.complete({ answer: 'Started tests.', durationMs: 1, isAborted: false, turnId: 't1', reason: 'answer' })
+  await clock.advance(10)
+  await entered
+  await $.prompt.submit({ text: '<task-notification><tool-use-id>toolu_summary</tool-use-id><status>failed</status></task-notification>', origin: { kind: 'task-notification' }, turnId: 't1', wait: false })
+  release()
+  await clock.advance(1000)
+  expect(shared[`mirror:${SESSION}`]).toMatchObject({ backgroundJobs: 0 })
+  expect(world.files.get(FILE) ?? '').toContain('- [x] 加好限流中介層')
+  expect(world.files.get(FILE) ?? '').not.toContain('state=working')
+  expect(world.messageReads ?? 0).toBe(0)
+})
+
+test('refused, errored and foreground tool calls create no background work or extra transcript read', async ($, on) => {
+  const world: World = { files: new Map(), mtime: 1, hasTasks: true }
+  engineBeneath(on, world)
+  outside(on, world)
+  on('tool.call', { tool: 'SyntheticRefused' }, () => ({ deny: 'Synthetic refusal' }))
+  on('tool.call', { tool: 'SyntheticErrored' }, () => ({ result: 'Synthetic error', text: 'Synthetic error', isError: true }))
+  await start($, 'Check work')
+  await $.tool.call({ tool: 'TaskCreate', subject: 'Check the tests', description: '' })
+  await $.tool.call({ tool: 'SyntheticRefused', run_in_background: true })
+  await $.tool.call({ tool: 'SyntheticErrored', run_in_background: true })
+  await $.tool.call({ tool: 'SyntheticBackground', run_in_background: false })
+  await $.tool.call({ tool: 'SyntheticBackground', run_in_background: 'true' })
+  await $.tool.call({ tool: 'SyntheticBackground', run_in_background: true, agentId: 'synthetic-child' })
+  await $.turn.complete({ answer: 'Checked.', durationMs: 1, isAborted: false, turnId: 't1', reason: 'answer' })
+  expect(world.files.get(FILE) ?? '').toContain('state=waiting')
+  expect(world.messageReads ?? 0).toBe(0)
 })
 
 test('a turn that ends on a question waits on you even when Claude did not mark it, until you answer', async ($, on) => {
