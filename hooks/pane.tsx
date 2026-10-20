@@ -13,6 +13,7 @@ import type { ProgressAnswer, ProgressStepStatus } from '../types'
 import type { Strings } from './i18n'
 import { askColor, stepColor, toneColor } from './palette'
 import type { Palette } from './palette'
+import { questionsPath } from './questions'
 import { progressBar, replyHint } from './view'
 import type { Focus, PrView, StepRef, TaskRow, Tone, View, ViewStep, WaitingItem } from './view'
 
@@ -80,6 +81,7 @@ export type PaneModel = {
   hasTaskTools: boolean
   isNotifyOn: boolean
   isLegendOpen: boolean
+  hasQuestionsProblem?: boolean
   palette: Palette
   s: Strings
 }
@@ -600,6 +602,7 @@ export const drawPane = (ui: PaneUi, model: PaneModel, actions: PaneActions): Re
   return (
     <Box flexDirection="column">
       <Text bold>{s.paneTitle}</Text>
+      {model.hasQuestionsProblem && <Text color={palette.alert}>{s.questionsUnreadable(questionsPath(model.path))}</Text>}
       {overview()}
 
       {!model.hasTaskTools && view.current === null && (

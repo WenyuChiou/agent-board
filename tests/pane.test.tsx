@@ -105,6 +105,8 @@ type World = {
   env?: Record<string, string>
   stats?: string[]
   reads?: string[]
+  written?: string[]
+  beforeRead?: (path: string) => void
   mtimes?: Record<string, number>
   // Paths that exist but refuse to be read (too big, locked).
   unreadable?: Set<string>
@@ -284,11 +286,15 @@ const engineBeneath = (on: On, world: World): MockClock => {
       world.ran?.push([...e.argv])
       let exitCode = 0
       if (e.argv[0] === 'mv') {
-        const rest = e.argv.slice(e.argv[1] === '-n' ? 2 : 1)
+        const rest = e.argv.slice(e.argv[1] === '-n' || e.argv[1] === '-f' ? 2 : 1)
         const from = posix(rest[0] ?? '')
         const to = posix(rest[1] ?? '')
         const text = world.files.get(from)
-        if (text === undefined || world.isMoveRefused?.(from) === true || e.argv[1] === '-n' && world.files.has(to)) exitCode = 1
+        // A move onto a file that refuses writes fails as the write itself would.
+        if (text === undefined || world.isMoveRefused?.(from) === true || world.unwritable?.has(to) === true) exitCode = 1
+        // GNU and BSD `mv -n` skip a move onto a file that is already there and still answer 0.
+        else if (e.argv[1] === '-n' && world.files.has(to)) exitCode = 0
+        else if (world.ignoreQuestionWrites && to.endsWith('-questions.json')) world.files.delete(from)
         else {
           world.files.delete(from)
           world.files.set(to, text)
@@ -363,6 +369,7 @@ const engineBeneath = (on: On, world: World): MockClock => {
   on('fs.read', async ($, e) => {
     const path = posix(e.path)
     world.reads?.push(path)
+    world.beforeRead?.(path)
     const hold = world.holdJournalRead
     if (path.includes('-journal-') && hold !== undefined) {
       world.holdJournalRead = undefined
@@ -376,6 +383,7 @@ const engineBeneath = (on: On, world: World): MockClock => {
   })
   on('fs.write', async ($, e) => {
     const path = posix(e.path)
+    world.written?.push(path)
     if (world.unwritable?.has(path) || (world.failQuestionCapture === 'write' && path.includes('-questions-source-'))) return { deny: 'EACCES' }
     if (world.ignoreQuestionWrites && path.endsWith('-questions.json')) return { value: undefined }
     const hold = world.hold
@@ -2183,6 +2191,111 @@ const QUESTIONS = '/home/me/.claude/progress-questions.json'
 const storedQuestion = (world: World, words: string): string =>
   (JSON.parse(world.files.get(QUESTIONS) ?? '{"records":[]}').records as Array<{ id: string; words: string; isWaiting: boolean }>).find(row => row.words === words && row.isWaiting)?.id ?? ''
 
+test('a torn question ledger is moved aside and rebuilt from its source copies, so hiding a question works again', async ($, on) => {
+  const board = '## demo\n<!-- auto session=a1b2c3d4 agent=codex state=waiting updated=2026-10-16T12:00:00Z -->\n### Release\n- [?] Publish, OK?\n<!-- /auto session=a1b2c3d4 -->\n'
+  const world: World = { files: new Map([[FILE, board]]), mtime: 1, hasTasks: true, ran: [], store: { autoConnectOff: true, inboxDone: {}, opened: ['waiting', 'hidden'] } }
+  const clock = engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/demo', surface: 'desktop', isInteractive: true })
+  const id = storedQuestion(world, 'Publish, OK?')
+  expect(id.startsWith('question:')).toBe(true)
+  const captures = [...world.files].filter(([path]) => path.includes('-questions-source-'))
+  expect(captures.length > 0).toBe(true)
+  const torn = '{"version":1,"records":[' + '\0'.repeat(1446)
+  world.files.set(QUESTIONS, torn)
+  world.isMoveRefused = path => path === QUESTIONS
+  await clock.advance(2100)
+  expect(world.files.get(QUESTIONS)).toBe(torn)
+  expect([...world.files.keys()].some(path => path.startsWith(`${QUESTIONS}.torn-`))).toBe(false)
+  world.isMoveRefused = undefined
+  await clock.advance(2100)
+  expect([...world.files].filter(([path]) => path.startsWith(`${QUESTIONS}.torn-`)).map(([, text]) => text)).toEqual([torn])
+  expect(storedQuestion(world, 'Publish, OK?')).toBe(id)
+  for (const [path, text] of captures) expect(world.files.get(path)).toBe(text)
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
+  await ui.press({ key: 'demo::Release::0::hide' })
+  expect(JSON.parse(world.files.get(ANSWERED) ?? '{}').answered).toEqual([id])
+  expect(await ui.find({ type: 'Button', key: 'demo::Release::0::unhide' })).toBeDefined()
+  expect(world.files.get(FILE)).toBe(board)
+  let ledgerReads = 0
+  world.beforeRead = path => {
+    if (path === QUESTIONS && ++ledgerReads === 2) world.files.set(QUESTIONS, '{"records":[')
+  }
+  await clock.advance(2100)
+  expect([...world.files].filter(([path]) => path.startsWith(`${QUESTIONS}.torn-`)).map(([, text]) => text)).toEqual([torn, '{"records":['])
+  expect(storedQuestion(world, 'Publish, OK?')).toBe(id)
+  expect(await ui.find({ type: 'Button', key: 'demo::Release::0::unhide' })).toBeDefined()
+  await ui.unmount()
+})
+
+test('a question ledger that is valid JSON in an unknown shape is left alone and never written over', async ($, on) => {
+  const unknown = '{"version":999,"futureRecords":["keep these bytes"]}\n'
+  const world: World = { files: new Map([[FILE, '## demo\n### Release\n- [?] Publish, OK?\n'], [QUESTIONS, unknown]]), mtime: 1, hasTasks: true, ran: [], written: [], store: { autoConnectOff: true, inboxDone: {} } }
+  const clock = engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/demo', surface: 'desktop', isInteractive: true })
+  await clock.advance(6100)
+  expect(world.files.get(QUESTIONS)).toBe(unknown)
+  expect(world.written?.some(path => path.startsWith(QUESTIONS))).toBe(false)
+  expect(world.ran?.some(argv => argv.some(arg => arg.startsWith(QUESTIONS)))).toBe(false)
+  expect([...world.files.keys()].some(path => path.startsWith(`${QUESTIONS}.torn-`))).toBe(false)
+})
+
+test('the question ledger is written to a temp file and moved into place, never truncated in place', async ($, on) => {
+  const world: World = { files: new Map([[FILE, '## demo\n### Release\n- [?] Publish, OK?\n']]), mtime: 1, hasTasks: true, ran: [], written: [], store: { autoConnectOff: true, inboxDone: {} } }
+  const clock = engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/demo', surface: 'desktop', isInteractive: true })
+  const first = world.files.get(QUESTIONS)
+  expect(JSON.parse(first ?? '{}').version).toBe(1)
+  expect(world.written).not.toContain(QUESTIONS)
+  const temps = world.written?.filter(path => path.startsWith(`${QUESTIONS}.tmp-${SESSION}-`)) ?? []
+  expect(temps.length > 0).toBe(true)
+  // The first one is put in place without overwriting, in case another session wrote one meanwhile.
+  expect(world.ran?.some(argv => JSON.stringify(argv) === JSON.stringify(['mv', '-n', temps[0], QUESTIONS]))).toBe(true)
+  for (const temp of temps) {
+    expect(world.ran?.some(argv => argv[0] === 'mv' && argv[2] === temp && argv[3] === QUESTIONS)).toBe(true)
+    expect(world.files.has(temp)).toBe(false)
+  }
+  world.files.set(FILE, '## demo\n### Release\n- [?] Publish tomorrow, OK?\n')
+  world.mtime += 1
+  world.isMoveRefused = path => path.startsWith(`${QUESTIONS}.tmp-`)
+  await clock.advance(2100)
+  expect(world.files.get(QUESTIONS)).toBe(first)
+  expect([...world.files.keys()].some(path => path.startsWith(`${QUESTIONS}.tmp-`))).toBe(false)
+  expect(world.ran?.some(argv => argv[0] === 'rm' && argv.some(arg => arg.startsWith(`${QUESTIONS}.tmp-`)))).toBe(true)
+  world.isMoveRefused = undefined
+  await clock.advance(2100)
+  expect(storedQuestion(world, 'Publish tomorrow, OK?').startsWith('question:')).toBe(true)
+  expect(world.ran?.some(argv => argv[0] === 'mv' && argv[1] === '-f' && argv[3] === QUESTIONS)).toBe(true)
+  expect(world.written).not.toContain(QUESTIONS)
+  expect(new Set(world.written?.filter(path => path.startsWith(`${QUESTIONS}.tmp-`))).size).toBe(world.written?.filter(path => path.startsWith(`${QUESTIONS}.tmp-`)).length)
+})
+
+test('the pane says when the question ledger cannot be read', async ($, on) => {
+  const world: World = { files: new Map([[FILE, '## demo\n### Release\n- [?] Publish, OK?\n']]), mtime: 1, hasTasks: true, store: { lang: 'en', autoConnectOff: true, inboxDone: {}, opened: ['waiting'] } }
+  const clock = engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/demo', surface: 'desktop', isInteractive: true })
+  await clock.advance(2100)
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
+  world.files.set(QUESTIONS, '{"version":999}')
+  expect(await ui.find({ type: 'Text', text: EN.questionsUnreadable(QUESTIONS) })).toBeUndefined()
+  await clock.advance(2100)
+  expect(await ui.find({ type: 'Text', text: EN.questionsUnreadable(QUESTIONS) })).toBeUndefined()
+  await clock.advance(2100)
+  expect(await ui.find({ type: 'Text', text: EN.questionsUnreadable(QUESTIONS) })).toBeUndefined()
+  await clock.advance(2100)
+  expect({ stage: 'three failures', visible: await ui.find({ type: 'Text', text: EN.questionsUnreadable(QUESTIONS) }) !== undefined }).toEqual({ stage: 'three failures', visible: true })
+  world.files.delete(QUESTIONS)
+  await clock.advance(2100)
+  expect(await ui.find({ type: 'Text', text: EN.questionsUnreadable(QUESTIONS) })).toBeUndefined()
+  world.files.set(QUESTIONS, '{')
+  world.isMoveRefused = path => path.startsWith(`${QUESTIONS}.tmp-`)
+  await clock.advance(2100)
+  expect({ stage: 'quarantined but replacement failed', visible: await ui.find({ type: 'Text', text: EN.questionsUnreadable(QUESTIONS) }) !== undefined }).toEqual({ stage: 'quarantined but replacement failed', visible: true })
+  world.isMoveRefused = undefined
+  await clock.advance(2100)
+  expect(await ui.find({ type: 'Text', text: EN.questionsUnreadable(QUESTIONS) })).toBeUndefined()
+  await ui.unmount()
+})
+
 test('explicit Claude ask events renew the hidden question immediately while another hidden question stays hidden', async ($, on) => {
   const world: World = { files: new Map(), mtime: 1, hasTasks: true, store: { opened: ['waiting', 'hidden'] } }
   engineBeneath(on, world)
@@ -2241,11 +2354,11 @@ test('a pane hide survives step movement and whitespace and a corrupt identity f
   expect(await ui.find({ type: 'Button', key: 'data-pipeline::Ship::0::unhide' })).toBeDefined()
   expect(world.files.get(ANSWERED)).toBe(hidden)
   await ui.press({ key: 'data-pipeline::Ship::0::unhide' })
-  world.files.set(QUESTIONS, '{')
+  world.files.set(QUESTIONS, '{"version":999}')
   world.mtime += 1
   await clock.advance(2100)
   await ui.press({ key: 'data-pipeline::Ship::0::hide' })
-  expect(world.files.get(QUESTIONS)).toBe('{')
+  expect(world.files.get(QUESTIONS)).toBe('{"version":999}')
   expect(JSON.parse(world.files.get(ANSWERED) ?? '{}')).toEqual({ answered: [] })
   expect(await ui.find({ type: 'Text', text: ZH_TW.hideFailed })).toBeDefined()
   world.files.set(QUESTIONS, '')
@@ -2891,7 +3004,7 @@ test('progress.html reads only the newest thirty unprocessed inbox files', async
   expect(page).not.toContain('Use limit 34?')
 })
 
-test('progress.html shows pending questions without reading transcripts or starting a process', async ($, on) => {
+test('progress.html shows pending questions without reading transcripts or starting an agent', async ($, on) => {
   const transcript = '/home/me/.codex/sessions/demo.jsonl'
   const body = JSON.stringify({ session_id: 'demo-1', cwd: '/work/api-gateway', transcript_path: transcript, last_assistant_message: 'Use 100 or 300 a minute?' })
   const world: World = {
@@ -2906,7 +3019,10 @@ test('progress.html shows pending questions without reading transcripts or start
   await $.session.start({ cwd: '/work/persona_framework', surface: 'terminal', isInteractive: true })
   expect(world.files.get('/home/me/.claude/progress.html')).toContain('Use 100 or 300 a minute?')
   expect(world.reads).not.toContain(transcript)
-  expect(world.ran).toEqual([])
+  expect(world.ran?.length).toBe(1)
+  expect(world.ran?.[0]?.slice(0, 2)).toEqual(['mv', '-n'])
+  expect(world.ran?.[0]?.[2]?.startsWith(`${QUESTIONS}.tmp-${SESSION}-`)).toBe(true)
+  expect(world.ran?.[0]?.[3]).toBe(QUESTIONS)
 })
 
 test('progress.html starts no process for a pending turn whose transcript path is a Node option', async ($, on) => {

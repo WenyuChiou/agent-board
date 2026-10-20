@@ -390,6 +390,7 @@ export const EN: Strings = {
   boardHidden: (text: string): string => `Hidden: “${text}”; it comes back when the question changes.`,
   boardShown: 'The hidden questions are shown again.',
   hideFailed: "Couldn't save that it was answered; it stays on the list.",
+  questionsUnreadable: (file: string): string => `The question list ${file} could not be read or saved, so hiding and archiving may fail. A list cut off mid-write is rebuilt by itself. If this message stays, restart this session; if it still stays, move that file aside.`,
   boardTicked: (step: string): string => `Done: “${step}”.`,
   boardTickGone: 'That step is not there any more; it may have changed.',
   boardLineChanged: 'That line just changed; check the one chosen now and press again.',

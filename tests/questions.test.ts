@@ -1,7 +1,7 @@
 import { test, expect } from 'claude-code/testing'
 import { parseProgress } from '../hooks/parse'
 import { buildView } from '../hooks/view'
-import { acknowledgementKeys, emptyQuestions, isQuestionSnapshot, migratedAnswered, migrationKey, observeQuestions, parseQuestions, questionsJson } from '../hooks/questions'
+import { acknowledgementKeys, emptyQuestions, isQuestionSnapshot, isTornLedger, migratedAnswered, migrationKey, observeQuestions, parseQuestions, questionsJson } from '../hooks/questions'
 import type { QuestionLedger } from '../hooks/questions'
 import { STRINGS } from '../hooks/strings'
 import { sha256 } from '../hooks/sha256'
@@ -169,6 +169,11 @@ test('interleaved stale writers cannot reuse a hidden identity for another scope
   const foreign = observeQuestions(old, parseProgress(file('- [?] Ship?', 'foreign')), null, [], NOW + 2, true, 'writer-a:3').ledger
   expect(view(foreign, file('- [?] Ship?', 'foreign'), [bId]).waiting.length).toBe(1)
   expect(staleA.records.at(-1)?.id === bId).toBe(false)
+})
+
+test('a torn question ledger is told apart from one in an unknown shape', () => {
+  for (const text of ['\0', '{"records":[', '{"version":1}\0\0', 'not JSON']) expect(isTornLedger(text)).toBe(true)
+  for (const text of ['', ' \n\t', '{}', '[]', 'null', 'true', '42', '"text"', '{"version":999}', JSON.stringify(emptyQuestions())]) expect(isTornLedger(text)).toBe(false)
 })
 
 test('a durable legacy migration marker prevents a stale ledger from transferring the historical hide', () => {

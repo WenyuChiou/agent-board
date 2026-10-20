@@ -31,6 +31,17 @@ export const questionProofOf = (path: string, name: string): { kind: keyof Quest
 export const questionProofJson = (kind: keyof QuestionProofs, hash: string): string => `${JSON.stringify({ version: 1, kind, hash })}\n`
 export const isQuestionProof = (text: string, kind: keyof QuestionProofs, hash: string): boolean => text === questionProofJson(kind, hash)
 
+export const isTornLedger = (text: string): boolean => {
+  if (text.includes('\0')) return true
+  if (text.trim() === '') return false
+  try {
+    JSON.parse(text)
+    return false
+  } catch {
+    return true
+  }
+}
+
 // Invalid data stays on disk: unlike an acknowledgement, a lost identity could attach an old
 // hide to a renewed question. A caller must preserve its last good record and refuse writes.
 export const parseQuestions = (text: string, isMissing = false): QuestionLedger | null => {

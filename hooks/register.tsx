@@ -109,7 +109,7 @@ import type { AgentTurn } from './inbox'
 import { keepRecent, remindersOf } from './remind'
 import { agentName, answeredJson, answeredPath, buildView, mirrorMatchesTask, parseAnswered, parseSeen, seenJson, seenPath, statusLine, withAnswered, withSeen } from './view'
 import type { StepRef, TaskRef, TaskRow, WaitingItem } from './view'
-import { acknowledgementKeys, archiveQuestionsKept, captureHashOf, captureJson, capturePath, emptyQuestions, parseCapture, withCaptures, isQuestionProof, isQuestionSnapshot, migratedAnswered, observeQuestions, parseQuestions, questionProofJson, questionProofOf, questionProofPath, questionsJson, questionsPath } from './questions'
+import { acknowledgementKeys, archiveQuestionsKept, captureHashOf, captureJson, capturePath, emptyQuestions, parseCapture, withCaptures, isQuestionProof, isQuestionSnapshot, isTornLedger, migratedAnswered, observeQuestions, parseQuestions, questionProofJson, questionProofOf, questionProofPath, questionsJson, questionsPath } from './questions'
 import type { QuestionCapture, QuestionProofs, QuestionRecord } from './questions'
 
 const PANE = 'agent-board'
@@ -155,6 +155,7 @@ const doneSeen = atom({ plugin: 'agent-board', key: 'doneSeen' } as const, {} as
 // beside progress.md, which every session on this machine and the board script share.
 const hiddenAsks = atom({ plugin: 'agent-board', key: 'hiddenAsks' } as const, [] as string[])
 const questionLedger = atom({ plugin: 'agent-board', key: 'questionLedger' } as const, emptyQuestions())
+const hasQuestionsProblem = atom({ plugin: 'agent-board', key: 'hasQuestionsProblem' } as const, false)
 const firstSeen = atom({ plugin: 'agent-board', key: 'firstSeen' } as const, {} as Record<string, number>)
 // The review whose reply box Needs changes opened.
 const revising = atom({ plugin: 'agent-board', key: 'revising' } as const, '')
@@ -262,6 +263,28 @@ const moveFile = async ($: EngineInterface, from: string, to: string, isWin: boo
   return ran !== null && ran.exitCode === 0
 }
 
+// A rename that never replaces a file already there. `mv -n` answers 0 when it skips one, so
+// the move happened only if the source is gone.
+const placeFile = async ($: EngineInterface, from: string, to: string, isWin: boolean): Promise<boolean> => {
+  const argv = isWin
+    ? ['powershell', '-NoProfile', '-Command', `Move-Item -LiteralPath ${psQuote(from)} -Destination ${psQuote(to)} -ErrorAction Stop`]
+    : ['mv', '-n', from, to]
+  const ran = await $.process.run(argv, { timeoutMs: 10000 }).catch(() => null)
+
+  return ran !== null && ran.exitCode === 0 && !(await $.fs.exists(from))
+}
+
+// The temp file is complete before it replaces the ledger, so readers never see half a write. On
+// Windows a reader can still find no ledger for a moment while the replace runs.
+const replaceFile = async ($: EngineInterface, from: string, to: string, isWin: boolean): Promise<boolean> => {
+  const argv = isWin
+    ? ['powershell', '-NoProfile', '-Command', `Move-Item -Force -LiteralPath ${psQuote(from)} -Destination ${psQuote(to)} -ErrorAction Stop`]
+    : ['mv', '-f', from, to]
+  const ran = await $.process.run(argv, { timeoutMs: 10000 }).catch(() => null)
+
+  return ran !== null && ran.exitCode === 0
+}
+
 type Completion = Awaited<ReturnType<EngineInterface['model']['complete']>>
 
 // A model call that gives up after MODEL_MS, answering undefined as a failed call does.
@@ -299,6 +322,8 @@ const pollAnswered = async ($: EngineInterface, path: string): Promise<void> => 
 // file another session or the board changed meanwhile waits for its own turn.
 let isPrunePending = false
 let questionWrite = 0
+let questionFailures = 0
+let questionRaces = 0
 const pendingQuestionProofs = new Map<string, { path: string; kind: keyof QuestionProofs; hash: string }>()
 const questionCapturesFor = async ($: EngineInterface, path: string): Promise<QuestionCapture[] | null> => {
   try {
@@ -360,23 +385,59 @@ const pruneAnswered = async ($: EngineInterface, path: string, projects: readonl
 
 const pollQuestions = async ($: EngineInterface, path: string, projects: readonly ProgressProject[], isSettled = false, captured: readonly PendingTurn[] = []): Promise<boolean> => {
   const file = questionsPath(path)
-  const at = await $.clock.now()
-  const mirror = await read($, mine)
-  const answered = await read($, hiddenAsks)
-  const pending = [...(await pendingTurns($)), ...captured]
-  const incarnation = `${await $.session.id()}:${at}:${questionWrite++}`
+  let outcome: 'ok' | 'race' | 'fault' = 'fault'
   try {
+    const at = await $.clock.now()
+    const mirror = await read($, mine)
+    const answered = await read($, hiddenAsks)
+    const pending = [...(await pendingTurns($)), ...captured]
+    const session = await $.session.id()
+    const incarnation = `${session}:${at}:${questionWrite++}`
+    const isWin = await isWindows($, file)
+    // A ledger that is not JSON at all was cut off by a write that never finished: moved aside,
+    // it is rebuilt from the source copies as a missing one is. JSON in a shape this version does
+    // not know may be a newer version's, so parseQuestions leaves that alone.
+    const quarantine = async (): Promise<boolean> => {
+      const aside = `${file}.torn-${at}-${session}`
+      if (!(await moveFile($, file, aside, isWin))) {
+        // Another session moved it aside first or wrote a good one: that is a race, not a fault.
+        if (!isTornLedger(await readText($, file))) outcome = 'race'
+        return false
+      }
+      if (isTornLedger(await readText($, aside))) {
+        await update($, hasQuestionsProblem, () => true)
+        return true
+      }
+      // A good ledger another session wrote between the read and the move goes back, unless a
+      // rebuild already took its place; the rebuild comes from the same source copies.
+      await placeFile($, aside, file, isWin)
+      outcome = 'race'
+      return false
+    }
+    if (isTornLedger(await readText($, file)) && !(await quarantine())) return false
     for (const proof of [...pendingQuestionProofs.values()]) {
       if (proof.path === path) await keepQuestionProof($, path, proof.kind, proof.hash)
     }
     let proofs = await questionProofsFor($, path)
-    if (proofs === null) return false
+    if (proofs === null) {
+      outcome = 'race'
+      return false
+    }
     const source = await readText($, path)
-    if (!isQuestionSnapshot(source) || JSON.stringify(parseProgress(source)) !== JSON.stringify(projects)) return false
+    if (!isQuestionSnapshot(source) || JSON.stringify(parseProgress(source)) !== JSON.stringify(projects)) {
+      outcome = 'race'
+      return false
+    }
     let expected = ''
+    let wasMissing = false
     await rewrite($, file, async before => {
       if (await readText($, path) !== source) return AGAIN
-      const parsed = parseQuestions(before, before.trim() === '' && !(await $.fs.exists(file)))
+      wasMissing = before.trim() === '' && !(await $.fs.exists(file))
+      const parsed = parseQuestions(before, wasMissing)
+      if (parsed === null && isTornLedger(before)) {
+        if (!(await quarantine())) throw new Error('QUESTION_LEDGER_MOVE_FAILED')
+        return AGAIN
+      }
       const captures = await questionCapturesFor($, path)
       if (parsed === null || captures === null) return AGAIN
       const current = withCaptures(parsed, captures)
@@ -394,11 +455,29 @@ const pollQuestions = async ($: EngineInterface, path: string, projects: readonl
       observed = observeQuestions(current, projects, mirror, answered, at, isSettled, incarnation, proofs, pending).ledger
       expected = questionsJson(observed)
       return questionsJson(observed) === questionsJson(parsed) ? null : questionsJson(observed)
+    }, undefined, async (target, text) => {
+      const temporary = `${target}.tmp-${session}-${questionWrite++}`
+      await $.fs.write(temporary, text)
+      // A ledger rebuilt because none was there never replaces one another session put in place
+      // meanwhile (on Windows the ledger is also missing for a moment while a replace runs): the
+      // read back then sees theirs, and the change is made again on top of it.
+      if (wasMissing ? await placeFile($, temporary, target, isWin) : await replaceFile($, temporary, target, isWin)) return
+      // A failed replace on Windows may already have deleted the old ledger: the new one takes its place.
+      const isGone = !(await $.fs.exists(target))
+      if (isGone && await placeFile($, temporary, target, isWin)) return
+      // With no ledger left, the temp file is the only complete copy, so it stays.
+      if (isGone) throw new Error('QUESTION_LEDGER_WRITE_FAILED')
+      await removeFiles($, [temporary], isWin)
+      if (!wasMissing) throw new Error('QUESTION_LEDGER_WRITE_FAILED')
     })
     const parsed = parseQuestions(await readText($, file), !(await $.fs.exists(file)))
     const captures = await questionCapturesFor($, path)
     const kept = parsed === null || captures === null ? null : withCaptures(parsed, captures)
-    if (parsed === null || kept === null || expected !== questionsJson(parsed)) return false
+    if (parsed === null || kept === null) return false
+    if (expected !== questionsJson(parsed)) {
+      outcome = 'race'
+      return false
+    }
     await update($, questionLedger, () => kept)
     if (isSettled) {
       await rewrite($, answeredPath(path), async before => {
@@ -416,9 +495,23 @@ const pollQuestions = async ($: EngineInterface, path: string, projects: readonl
       const current = parseAnswered(await readText($, answeredPath(path)))
       if (current !== null) await update($, hiddenAsks, () => current)
     }
+    outcome = 'ok'
     return true
   } catch {
     return false
+  } finally {
+    // Another session's write landing between two reads is not a fault: only a ledger that stays
+    // unreadable or unwritable for three polls in a row is worth telling the person about. A
+    // race that never ends (a damaged proof file) is one too, after half a minute.
+    if (outcome === 'ok') {
+      questionFailures = 0
+      questionRaces = 0
+    } else if (outcome === 'race') questionRaces += 1
+    else questionFailures += 1
+    // Written only when it changes, so a quiet poll does not redraw every pane.
+    const wasProblem = await read($, hasQuestionsProblem)
+    const isProblem = outcome !== 'ok' && (wasProblem || questionFailures >= 3 || questionRaces >= 15)
+    if (isProblem !== wasProblem) await update($, hasQuestionsProblem, () => isProblem)
   }
 }
 
@@ -732,6 +825,7 @@ const rewrite = async (
   path: string,
   change: (before: string) => Promise<string | null | typeof AGAIN> | string | null | typeof AGAIN,
   isKept: (check: string, after: string) => boolean = (check, after) => check === after,
+  writer: (path: string, text: string) => Promise<void> = (path, text) => $.fs.write(path, text),
 ): Promise<string | null> => {
   let wrote: string | null = null
   for (let attempt = 0; attempt < 3; attempt += 1) {
@@ -739,7 +833,7 @@ const rewrite = async (
     const after = await change(before)
     if (after === AGAIN) continue
     if (after === null || after === before) break
-    await $.fs.write(path, after)
+    await writer(path, after)
     wrote = after
     if (isKept(await readText($, path), after)) break
   }
@@ -2356,6 +2450,7 @@ export const register: Register = (on, options) => {
       return (
         <Box flexDirection="column">
           <Text color={palette.alert}>{s.fileUnreadable}</Text>
+          {await read($, hasQuestionsProblem) && <Text color={palette.alert}>{s.questionsUnreadable(questionsPath(snap.path))}</Text>}
           <Text color={palette.muted}>{snap.error}</Text>
           <Text color={palette.muted} wrap="truncate-start">
             {snap.path}
@@ -2374,6 +2469,7 @@ export const register: Register = (on, options) => {
       hasTaskTools: await read($, hasTaskTools),
       isNotifyOn: await read($, isNotifyOn),
       isLegendOpen: await read($, isLegendOpen),
+      hasQuestionsProblem: await read($, hasQuestionsProblem),
       palette,
       s,
     }

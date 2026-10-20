@@ -427,6 +427,7 @@ export const ZH_TW = {
   boardHidden: (text: string): string => `已隱藏「${text}」；問題一改就會再出現。`,
   boardShown: '隱藏的問題都重新顯示了。',
   hideFailed: '記不下「已回覆」，這一項還留在清單上。',
+  questionsUnreadable: (file: string): string => `問題清單 ${file} 讀不到或存不進去，隱藏和封存可能失敗。寫到一半被切斷的清單會自動重建。這則訊息一直在的話，先重開這個 session；還在的話，再把那個檔案移到別處。`,
   boardTicked: (step: string): string => `已完成「${step}」。`,
   boardTickGone: '找不到那一步，可能已經改過了。',
   boardLineChanged: '這一行剛換成別的了；看清楚現在選到的，再按一次。',
