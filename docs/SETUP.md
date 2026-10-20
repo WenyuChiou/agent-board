@@ -96,6 +96,8 @@ host; installation cannot enumerate every previously open session.
 DeepSeek uses `agent/created`, `agent/status` (running/idle) and `agent/disposed`, retaining
 its own agent identity. Its owned entry is appended to a plain root YAML patch sequence;
 complex/edited YAML is a conflict requiring review. Existing entries remain untouched.
+A JSON config that is not a JSON object, or holds a number JSON cannot keep exactly (such as
+an id past 2^53), is a conflict too, and is left untouched.
 Native skill roots are used as well as the shared skill. Restart profiles without
 configuration HMR. No credential, telemetry or provider setting is changed.
 

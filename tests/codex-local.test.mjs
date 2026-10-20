@@ -39,6 +39,89 @@ const fixture = fn => {
   finally { rmSync(home, { recursive: true, force: true, maxRetries: 8, retryDelay: 50 }) }
 }
 
+test('local setup leaves an openclaw.json holding an id past 2^53 untouched and reports the conflict', () => fixture(f => {
+  const file = join(f.home, '.openclaw', 'openclaw.json')
+  const original = '{"channels":{"telegram":{"id":1234567890123456789}}}\n'
+  f.save(file, original)
+  const result = f.install('--agent', 'openclaw', '--apply')
+  assert.notEqual(result.status, 0, result.stderr)
+  assert.deepEqual(readFileSync(file), Buffer.from(original))
+  assert.ok(JSON.parse(result.stdout).conflicts.includes(file), result.stdout)
+  assert.equal(existsSync(f.root), false)
+  assert.equal(existsSync(f.skill), false)
+}))
+
+test('local setup leaves a hooks.json holding an id past 2^53 untouched and reports the conflict', () => fixture(f => {
+  const original = '{"id":1234567890123456789,"hooks":{}}\n'
+  f.save(f.hooks, original)
+  const result = f.install('--apply')
+  assert.notEqual(result.status, 0, result.stderr)
+  assert.deepEqual(readFileSync(f.hooks), Buffer.from(original))
+  assert.ok(JSON.parse(result.stdout).conflicts.includes(f.hooks), result.stdout)
+  assert.equal(existsSync(f.root), false)
+  assert.equal(existsSync(f.skill), false)
+}))
+
+test('local removal leaves native configs holding ids past 2^53 untouched and reports conflicts', () => fixture(f => {
+  for (const [agent, relative] of [
+    ['codex', ['.codex', 'hooks.json']],
+    ['cursor', ['.cursor', 'hooks.json']],
+    ['gemini', ['.gemini', 'settings.json']],
+    ['grok', ['.grok', 'hooks', 'agent-board-local.json']],
+    ['muse', ['.config', 'muse', 'settings.json']],
+    ['antigravity', ['.gemini', 'config', 'hooks.json']],
+    ['openclaw', ['.openclaw', 'openclaw.json']],
+  ]) {
+    const file = join(f.home, ...relative)
+    const original = '{"id":1234567890123456789}\n'
+    f.save(file, original)
+    const setup = f.install('--agent', agent, '--apply')
+    assert.notEqual(setup.status, 0, agent)
+    assert.ok(JSON.parse(setup.stdout).conflicts.includes(file), setup.stdout)
+    assert.deepEqual(readFileSync(file), Buffer.from(original), agent)
+
+    f.save(file, '{}')
+    const installed = f.install('--agent', agent, '--apply')
+    assert.equal(installed.status, 0, installed.stderr)
+    const unsafe = readFileSync(file, 'utf8').replace('{', '{"id":1234567890123456789,')
+    f.save(file, unsafe)
+    const manifest = join(f.root, `install-${agent}.json`)
+    const before = [file, manifest, f.script, f.skill, f.progress].map(path => [path, readFileSync(path)])
+    const removed = f.command(['--codex-remove', '--agent', agent, '--apply'])
+    assert.notEqual(removed.status, 0, agent)
+    assert.ok(JSON.parse(removed.stdout).conflicts.includes(file), removed.stdout)
+    // The unreadable config is one conflict; its owned groups are not also reported as edited.
+    assert.deepEqual(JSON.parse(removed.stdout).conflicts.filter(one => one.startsWith(file)), [file], agent)
+    for (const [path, bytes] of before) assert.deepEqual(readFileSync(path), bytes, path)
+  }
+}))
+
+test('local setup reports a config that is not valid JSON as one conflict and leaves it untouched', () => fixture(f => {
+  const file = join(f.home, '.openclaw', 'openclaw.json')
+  const original = '{"hooks":'
+  f.save(file, original)
+  const preview = f.install('--agent', 'openclaw')
+  assert.equal(preview.status, 0, preview.stderr)
+  assert.deepEqual(JSON.parse(preview.stdout).conflicts.filter(one => one.startsWith(file)), [file], preview.stdout)
+  const result = f.install('--agent', 'openclaw', '--apply')
+  assert.notEqual(result.status, 0, result.stderr)
+  assert.deepEqual(readFileSync(file), Buffer.from(original))
+  assert.equal(existsSync(f.root), false)
+}))
+
+test('local setup preserves native config formatting when its content does not change', () => fixture(f => {
+  for (const [agent, file] of [['codex', f.hooks], ['openclaw', join(f.home, '.openclaw', 'openclaw.json')]]) {
+    const installed = f.install('--agent', agent, '--apply')
+    assert.equal(installed.status, 0, installed.stderr)
+    const original = ` \n${JSON.stringify(JSON.parse(readFileSync(file)), null, '\t')}\n\n`
+    f.save(file, original)
+    const result = f.install('--agent', agent, '--apply')
+    assert.equal(result.status, 0, result.stderr)
+    assert.equal(JSON.parse(result.stdout).changes.some(change => change.file === file), false, result.stdout)
+    assert.deepEqual(readFileSync(file), Buffer.from(original))
+  }
+}))
+
 test('independent prompt metadata answers questions while ordinary activity and replay preserve newer questions', () => fixture(f => {
   assert.equal(f.install('--apply').status, 0)
   assert.equal(f.event('UserPromptSubmit', 'turn-prompt-1').status, 0)
