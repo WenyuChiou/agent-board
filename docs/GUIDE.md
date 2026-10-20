@@ -164,7 +164,7 @@ Yes, when those sessions report to the same local progress file. Independent rep
 
 Nothing is lost, but nothing moves by itself either: `progress.md`, the inbox and the hooks live on each computer. On the new one, use the common installer and restart your agents. To bring your history along, copy your selected `progress.md` and the `progress-archive-*.md` and `progress-journal-*.md` files beside it.
 
-To share one board between two computers, set `CLAUDE_PROGRESS_FILE` on both to the same file in a synced folder (OneDrive, Dropbox, iCloud). This works best when you use one computer at a time: two computers writing at once can leave your sync app with a conflicted copy.
+To share one board between two computers, set `CLAUDE_PROGRESS_FILE` on both to the same file in a synced folder (OneDrive, Dropbox, iCloud), then run `/progress connect` once on each computer: automatic connect follows only the default progress file or the one you last connected by hand. This works best when you use one computer at a time: two computers writing at once can leave your sync app with a conflicted copy.
 
 ### An agent doesn't show up.
 
