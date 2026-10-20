@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
-import { homedir, tmpdir } from 'node:os'
+import { tmpdir } from 'node:os'
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { rm } from 'node:fs/promises'
@@ -9,14 +9,17 @@ import { clockPreload, clockText, jump } from './clock.mjs'
 
 // Machine-wide Windows variables every real session has; none names a user's own folder.
 const MACHINE_VARIABLES = ['SystemDrive', 'ProgramData', 'ProgramFiles', 'ProgramFiles(x86)', 'ProgramW6432', 'CommonProgramFiles', 'CommonProgramFiles(x86)', 'CommonProgramW6432', 'ALLUSERSPROFILE', 'PUBLIC', 'PROCESSOR_ARCHITECTURE', 'PROCESSOR_IDENTIFIER', 'PROCESSOR_LEVEL', 'PROCESSOR_REVISION', 'NUMBER_OF_PROCESSORS', 'OS', 'DriverData']
-// The session's PowerShell module path, without folders inside any user profile. On a CI runner
-// the board's first Move-Item took 12-40 s in a world without it (0.23 s with it), past the
-// board's own 10 s limit for that move.
-// PUBLIC (C:\Users\Public) names the profiles folder even when this process's home is isolated.
-export const modulePath = (value = process.env.PSModulePath) => {
-  const roots = [process.env.PUBLIC && dirname(process.env.PUBLIC), dirname(homedir())].filter(Boolean).map(root => resolve(root).toLowerCase() + sep)
-  return (value ?? '').split(';').filter(dir => dir && !roots.some(root => resolve(dir).toLowerCase().startsWith(root))).join(';')
-}
+// Folders Windows installs for every user. A module folder outside them (a profile's Documents, a
+// redirected OneDrive, a share, a relative or unexpanded path) stays out of the world.
+const machineFolders = () => ['SystemRoot', 'ProgramFiles', 'ProgramFiles(x86)', 'ProgramW6432']
+  .map(key => process.env[key]).filter(Boolean)
+  .map(dir => { const folder = resolve(dir).toLowerCase(); return folder.endsWith(sep) ? folder : folder + sep })
+// The session's PowerShell module path, keeping only folders inside the machine folders. On a CI
+// runner the board's first Move-Item took 12-40 s in a world without it (under half a second with
+// it), past the board's own 10 s limit for that move.
+export const modulePath = (value = process.env.PSModulePath) => (value ?? '').split(';')
+  .filter(dir => isAbsolute(dir) && machineFolders().some(folder => resolve(dir).toLowerCase().startsWith(folder)))
+  .join(';')
 
 export const makeWorld = ({ lang = 'en' } = {}) => {
   const root = mkdtempSync(join(tmpdir(), 'agent-board-e2e-'))
@@ -40,7 +43,8 @@ export const makeWorld = ({ lang = 'en' } = {}) => {
     const value = process.env[key]
     if (value !== undefined) env[key] = value
   }
-  if (process.platform === 'win32' && modulePath()) env.PSModulePath = modulePath()
+  const modules = process.platform === 'win32' && modulePath()
+  if (modules) env.PSModulePath = modules
   Object.assign(env, directories, { CLAUDE_PROGRESS_FILE: path, NO_COLOR: '1' })
   const inside = file => {
     const rel = relative(root, resolve(file))
