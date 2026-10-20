@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- **Pasting a live report whose clock is more than three days behind now refuses it and says that nothing was written (#161).** The message shows how many days behind it is, in every language. A `working` or `waiting` block can no longer arrive already old enough to be archived by tidy or the sweep; older `done` and `ended` blocks still merge as history. Tests: `a pasted working block whose clock is three weeks old is refused and nothing is written`, `a pasted done block with an old clock is still merged`, `a pasted working block is merged up to exactly three days old and refused a millisecond later`, `the board script refuses a pasted working block with a weeks-old clock in every language and writes nothing`. Two existing source-time tests keep their ordering and ownership checks: one moves its test clock to its 2020 fixture's date, the other now pastes a report a minute old.
+
 ## 0.23.5 — 2026-10-19
 
 - **A second `--serve` with another `--idle-minutes` keeps the open page (#166).** It used to stop the running page and start a new one, so the open tab stopped working and a reply typed there but not yet sent was lost. It now reuses the running page and, when that page's idle time differs from the one asked for, prints the one in effect. Tests: `--serve with a different idle preference reuses the running page and reports its effective timeout`, `--serve with an idle time that is not a number starts no page`.
