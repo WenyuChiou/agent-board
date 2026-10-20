@@ -322,7 +322,7 @@ const currentOf = (mirror: ProgressMirror, s: Strings): CurrentView | null => {
     status = s.stuck(blocked.blocked || blocked.subject)
     tone = 'alert'
   } else if (mirror.state === 'working') {
-    status = doing === undefined ? s.claudeWorking : s.doingStep(doing.activeForm || doing.subject)
+    status = doing === undefined ? ((mirror.backgroundJobs ?? 0) > 0 && !mirror.isTurnRunning ? s.backgroundRunning : s.claudeWorking) : s.doingStep(doing.activeForm || doing.subject)
     tone = 'accent'
   }
   const steps = mirror.tasks.map((task, index) => {

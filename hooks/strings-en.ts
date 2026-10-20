@@ -58,6 +58,7 @@ export const EN: Strings = {
   foldedDone: (n: number): string => `${n} ${n === 1 ? 'step' : 'steps'} done`,
   foldedRest: (n: number): string => `${n} ${n === 1 ? 'step' : 'steps'} left`,
   waitingReply: 'waiting on your reply',
+  backgroundRunning: 'background job running',
   answeredNote: 'answered, waiting on Claude',
   allDone: 'all done',
   claudeWorking: 'Claude is working',

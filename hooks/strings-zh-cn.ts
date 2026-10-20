@@ -58,6 +58,7 @@ export const ZH_CN: Strings = {
   foldedDone: (n: number): string => `已完成 ${n} 步`,
   foldedRest: (n: number): string => `还有 ${n} 步`,
   waitingReply: '等你回复',
+  backgroundRunning: '后台任务运行中',
   answeredNote: '你已回复，等 Claude 处理',
   allDone: '全部完成',
   claudeWorking: 'Claude 正在做',
