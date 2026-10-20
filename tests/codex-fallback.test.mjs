@@ -12,32 +12,80 @@ const bundle = JSON.parse(source.slice(source.indexOf('export const BOARD_SCRIPT
 const fixture = async action => {
   const home = mkdtempSync(join(tmpdir(), 'codex-fallback-'))
   const root = join(home, '.codex'), config = join(root, 'hooks.json'), instructions = join(root, 'AGENTS.md'), override = join(root, 'AGENTS.override.md')
-  const script = join(home, 'worker.mjs'), executable = join(home, 'control.mjs'), options = join(home, 'scenario.json'), log = join(home, 'methods.jsonl'), control = join(home, '.agent-board', 'legacy-connect.json')
+  const script = join(home, 'worker.mjs'), executable = join(home, 'control.mjs'), options = join(home, 'scenario.json'), log = join(home, 'methods.jsonl'), replies = join(home, 'replies.jsonl'), control = join(home, '.agent-board', 'legacy-connect.json')
   mkdirSync(root)
   writeFileSync(config, '{"personal":"keep","hooks":{"Stop":[{"hooks":[{"type":"command","command":"personal-before"}]}]}}\n')
   writeFileSync(instructions, '# Personal rules\r\nKeep these bytes.\r\n')
   writeFileSync(options, JSON.stringify({ trust: 'untrusted' }))
   writeFileSync(script, bundle)
+  // These cases exercise fallback ownership, not cold Node startup within the
+  // product's one-second observation. Real subprocess RPC stays in codex-host.
   writeFileSync(executable, `
-import { createInterface } from 'node:readline'
+import childProcess from 'node:child_process'
+import { EventEmitter } from 'node:events'
 import { appendFileSync, readFileSync } from 'node:fs'
-createInterface({input:process.stdin}).on('line', line => {
-  const req=JSON.parse(line);appendFileSync(${JSON.stringify(log)},req.method+'\\n');if(req.id===undefined)return
-  if(req.method==='initialize'){process.stdout.write(JSON.stringify({id:req.id,result:{}})+'\\n');return}
-  if(req.method!=='hooks/list')throw Error('FORBIDDEN_METHOD')
-  const options=JSON.parse(readFileSync(${JSON.stringify(options)},'utf8'))
-  if(options.rejected){process.stdout.write(JSON.stringify({id:req.id,error:{message:'unsupported'}})+'\\n');return}
-  const data=JSON.parse(readFileSync(${JSON.stringify(config)},'utf8'));let n=0
-  const hooks=Object.entries(data.hooks??{}).flatMap(([event,groups])=>groups.flatMap(group=>(group.hooks??[]).map(hook=>({key:'key-'+(++n),currentHash:'sha256:'+'1'.repeat(64),sourcePath:${JSON.stringify(config)},eventName:event[0].toLowerCase()+event.slice(1),command:hook.command,enabled:!options.disabled,trustStatus:options.trust}))))
-  process.stdout.write(JSON.stringify({id:req.id,result:{data:[{hooks,errors:[]}]}})+'\\n')
-})`)
+import { syncBuiltinESMExports } from 'node:module'
+import { PassThrough, Writable } from 'node:stream'
+const spawn = childProcess.spawn
+childProcess.spawn = (file, args, ...rest) => {
+  if (file !== process.execPath || args?.length !== 3 || args[0] !== ${JSON.stringify(executable)} || args[1] !== 'app-server' || args[2] !== '--stdio') return spawn(file, args, ...rest)
+  const child = new EventEmitter()
+  child.stdout = new PassThrough()
+  child.stderr = new PassThrough()
+  const timers = new Set()
+  let buffer = '', isClosed = false
+  const answer = (req, value) => {
+    if (isClosed) return
+    appendFileSync(${JSON.stringify(replies)}, req.method + '\\n')
+    child.stdout.write(JSON.stringify({ id: req.id, ...value }) + '\\n')
+  }
+  const receive = req => {
+    appendFileSync(${JSON.stringify(log)}, req.method + '\\n')
+    if (req.id === undefined) return
+    if (req.method === 'initialize') return answer(req, { result: {} })
+    if (req.method !== 'hooks/list') throw Error('FORBIDDEN_METHOD')
+    const options = JSON.parse(readFileSync(${JSON.stringify(options)}, 'utf8'))
+    const respond = () => {
+      if (options.rejected) return answer(req, { error: { message: 'unsupported' } })
+      const data = JSON.parse(readFileSync(${JSON.stringify(config)}, 'utf8'))
+      let n = 0
+      const hooks = Object.entries(data.hooks ?? {}).flatMap(([event, groups]) => groups.flatMap(group => (group.hooks ?? []).map(hook => ({ key: 'key-' + (++n), currentHash: 'sha256:' + '1'.repeat(64), sourcePath: ${JSON.stringify(config)}, eventName: event[0].toLowerCase() + event.slice(1), command: hook.command, enabled: !options.disabled, trustStatus: options.trust }))))
+      answer(req, { result: { data: [{ hooks, errors: [] }] } })
+    }
+    if (options.delayMs) timers.add(setTimeout(respond, options.delayMs))
+    else respond()
+  }
+  child.stdin = new Writable({ write(chunk, encoding, done) {
+    try {
+      buffer += String(chunk)
+      let end
+      while ((end = buffer.indexOf('\\n')) >= 0) {
+        const line = buffer.slice(0, end)
+        buffer = buffer.slice(end + 1)
+        receive(JSON.parse(line))
+      }
+      done()
+    } catch (error) { done(error) }
+  } })
+  child.kill = () => {
+    isClosed = true
+    for (const timer of timers) clearTimeout(timer)
+    child.stdin.destroy()
+    child.stdout.end()
+    child.stderr.end()
+    child.emit('exit', null, 'SIGTERM')
+    return true
+  }
+  return child
+}
+syncBuiltinESMExports()`)
   const request = (mode, extra = {}) => ({ mode, home, progress: join(home, 'data', 'progress.md'), lang: 'en', node: process.version, codexExecutable: executable, ...extra })
   const run = (mode, extra = {}, env) => {
-    const result = spawnSync(process.execPath, [script, '--legacy-connect-request', JSON.stringify(request(mode, extra))], { encoding: 'utf8', windowsHide: true, timeout: 10000, ...(env ? { env: { ...process.env, ...env } } : {}) })
+    const result = spawnSync(process.execPath, ['--import', pathToFileURL(executable).href, script, '--legacy-connect-request', JSON.stringify(request(mode, extra))], { encoding: 'utf8', windowsHide: true, timeout: 10000, ...(env ? { env: { ...process.env, ...env } } : {}) })
     assert.equal(result.status, 0, result.stderr + result.stdout)
     return JSON.parse(result.stdout)
   }
-  try { await action({ home, root, config, instructions, override, options, log, control, request, run }) }
+  try { await action({ home, root, config, instructions, override, options, log, replies, control, request, run }) }
   finally { rmSync(home, { recursive: true, maxRetries: 5, retryDelay: 100 }) }
 }
 
@@ -72,6 +120,24 @@ for (const lang of ['en', 'zh-TW', 'zh-CN']) test(`new or untrusted Codex hooks 
   assert.equal(renewed.state.setup.codexTrusted, false)
   assert.match(readFileSync(f.instructions, 'utf8'), /agent-board:start/)
   assert.deepEqual([...new Set(readFileSync(f.log, 'utf8').trim().split('\n'))].sort(), ['hooks/list', 'initialize', 'initialized'])
+}))
+
+test('the Codex trust check keeps the fallback and says why when the host answers too slowly', () => fixture(async f => {
+  f.run('connect')
+  const before = readFileSync(f.instructions, 'utf8'), config = readFileSync(f.config, 'utf8')
+  writeFileSync(f.options, JSON.stringify({ trust: 'trusted', delayMs: 1500 }))
+  writeFileSync(f.log, '')
+  writeFileSync(f.replies, '')
+  const result = f.run('connect')
+  assert.equal(result.state.setup.codexTrusted, false)
+  assert.equal(readFileSync(f.instructions, 'utf8'), before)
+  assert.match(before, /agent-board:start/)
+  assert.equal(readFileSync(f.config, 'utf8'), config)
+  assert.ok(result.result.problems.some(one => one.key === 'codex:approval'))
+  assert.match(result.result.text, /Current Codex hook approval is unconfirmed/)
+  assert.match(result.result.text, /reporting instructions are retained/)
+  assert.deepEqual(readFileSync(f.log, 'utf8').trim().split('\n'), ['initialize', 'initialized', 'hooks/list'])
+  assert.deepEqual(readFileSync(f.replies, 'utf8').trim().split('\n'), ['initialize'])
 }))
 
 test('lost or unsupported Codex trust restores effective override fallback while status writes no instructions', () => fixture(async f => {

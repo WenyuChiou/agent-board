@@ -278,6 +278,42 @@ def placement():
 def parser_parity():
     frag = at_time(block("12345678", title="new"), "2026-10-17T08:00:00Z")
     old = block("12345678", title="old")
+    for cut in ("<!-- /auto se", "<!-- /au", "<!-- aut", "<!-- question=ab"):
+        board = os.path.join(T, "cut-marker.md")
+        incoming = os.path.join(T, "cut-marker-fragment.md")
+        prefix = "## a\n" + old + cut + "\n"
+        w(board, prefix)
+        w(incoming, frag.replace("12345678", "abcdef12"))
+        rv = py("merge.py", "--under", "a", board, incoming)
+        check(f"a remote report after a cut marker stays visible ({cut})",
+              rv.returncode == 0 and "abcdef12" in validate_mod.extract_blocks(r(board))
+              and r(board).startswith(prefix), rv.stderr)
+    arrow = "## a\n<!-- auto session=cut\n## later\n### Keep\n- [ ] map a --> b\n"
+    check("a cut marker followed by an arrow in a task line hides nothing",
+          validate_mod.classify(arrow.splitlines()) == ["project", "text", "project", "task", "text"])
+    check("an ordinary comment opening still hides example blocks",
+          "start" not in validate_mod.classify(("<!--\n" + old + "-->\n").splitlines()))
+    check("cut markers accept spaces and tabs after the comment opening but U+0085 opens an ordinary comment",
+          all(validate_mod.is_cut_marker(cut) for cut in ("<!--auto", "<!-- \tauto", "<!--\tauto"))
+          and not validate_mod.is_cut_marker("<!--\u0085auto")
+          and validate_mod.classify(["<!--\u0085auto", "## Hidden", "-->"]) == ["blank", "hidden", "blank"])
+    check("cut markers trim only trailing spaces tabs and carriage returns",
+          all(validate_mod.is_cut_marker("<!-- auto" + ending) for ending in (" ", "\t", "\r", " \t\r"))
+          and all(not validate_mod.is_cut_marker("<!-- auto" + ending)
+                  and validate_mod.classify(["<!-- auto" + ending, "## Hidden", "-->"]) == ["blank", "hidden", "blank"]
+                  for ending in ("\uFEFF", "\x1f")))
+    ordinary = "## P\n### Keep me\n<!-- auto archive of old work\n## Old\n### Old task\n-->\n"
+    check("an ordinary comment that starts with the word auto hides its lines as before and shows no warning",
+          validate_mod.classify(ordinary.splitlines()) == ["project", "task", "blank", "hidden", "hidden", "blank"]
+          and all(validate_mod.is_cut_marker(cut) for cut in ("<!-- aut", "<!-- auto", "<!-- auto se", "<!-- /auto session=ab", "<!-- question=ab"))
+          and all(not validate_mod.is_cut_marker(comment) for comment in ("<!--", "<!-- auto archive of old work", "<!-- auto sessions=", "<!-- /auto archive", "<!-- questions=")))
+    check("cut-marker look-ahead counts project headings and block markers inside a code fence",
+          all(validate_mod.classify(["<!-- auto se", "```", boundary, "```", "### Visible", "-->"])
+              == ["text", "hidden", "hidden", "hidden", "task", "text"]
+              for boundary in ("## Example", "<!-- auto session=example -->", "<!-- /auto session=example -->")))
+    check("cut-marker look-ahead counts comment closes inside a code fence",
+          validate_mod.classify(["<!-- auto se", "```", "-->", "```", "### Visible"])
+          == ["blank", "hidden", "hidden", "hidden", "hidden"])
     token = "a" * 64 + ":2"
     marked = frag.replace("<!-- /auto", f"<!-- question={token} -->\n<!-- /auto")
     check("producer question revision metadata stays inside a complete visible block",

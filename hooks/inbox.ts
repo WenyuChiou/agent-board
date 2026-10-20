@@ -1,7 +1,10 @@
 import { baseName } from './parse'
-import { answeredStep } from './step-words'
+import { answeredStep, renewQuestion } from './step-words'
 import { STRINGS } from './strings'
 import type { ProgressMirror } from '../types'
+import { boardRequestWords, isBoardRequest } from './board-commands'
+
+const BOARD_WORDS = boardRequestWords(Object.values(STRINGS))
 
 // What another agent's hook handed over at the end of a turn or a session, saved by the
 // reporter script as one file in the inbox (`<agent>-<prompt|turn|end>-<time>-<pid>.json`). Every
@@ -18,6 +21,7 @@ export type AgentTurn = {
   prompt: string
   answer: string
   transcript: string
+  isBoardRequest?: boolean
   // When the turn ended, normalized to milliseconds from the reporter's file name.
   at?: number
 }
@@ -88,7 +92,7 @@ export const blockId = (agent: string, session: string): string => {
 
 // Hermes Agent's on_session_end comes after every turn; its on_session_finalize is the end.
 const END_EVENTS = /^(?:session[-_]?end|sessionend|session\.deleted|on_session_finalize)$/i
-const PROMPT_EVENTS = /^(?:UserPromptSubmit|user_prompt_submit|beforeSubmitPrompt|BeforeAgent|pre_llm_call)$/i
+export const PROMPT_EVENTS = /^(?:UserPromptSubmit|user_prompt_submit|beforeSubmitPrompt|BeforeAgent|pre_llm_call)$/i
 
 const OPENCLAW_WORKSPACE = /[\\/]\.openclaw[\\/]workspace(?:-[^\\/]*)?[\\/]*$/
 
@@ -135,6 +139,7 @@ export const readTurn = (fileName: string, body: string): AgentTurn | null => {
     answer: event === 'prompt' || answer === '[no response text]' ? '' : answer,
     transcript: event === 'prompt' ? '' : first(record, ['transcript_path', 'transcriptPath']),
     at: inboxTime(fileName),
+    ...(event === 'prompt' && (record.board_request === true || isBoardRequest(record, BOARD_WORDS)) ? { isBoardRequest: true } : {}),
   }
 }
 
@@ -165,7 +170,7 @@ export const turnOrder = (turn: Pick<AgentTurn, 'at' | 'event'>): number | undef
 // question was answered after it was asked, and a foreign binding is never adopted.
 export const answerAgentPrompt = (mirror: (ProgressMirror & { confirmedAt?: number }) | undefined, prompt: AgentTurn, now: number): ProgressMirror | null => {
   const order = turnOrder(prompt)
-  if (prompt.event !== 'prompt' || mirror === undefined || order === undefined || !Number.isSafeInteger(order) || order <= 0 || !Number.isSafeInteger(now) || order > now * 2 || mirror.sessionId !== prompt.id || mirror.agent !== prompt.agent || mirror.resume !== prompt.session || !Array.isArray(mirror.tasks) || mirror.tasks.length === 0) return null
+  if (prompt.event !== 'prompt' || prompt.isBoardRequest === true || mirror === undefined || order === undefined || !Number.isSafeInteger(order) || order <= 0 || !Number.isSafeInteger(now) || order > now * 2 || mirror.sessionId !== prompt.id || mirror.agent !== prompt.agent || mirror.resume !== prompt.session || !Array.isArray(mirror.tasks) || mirror.tasks.length === 0) return null
   // Completion overlays are resolved from the raw owner before prompt receipts.
   // A delayed pre-confirmation prompt must not resume work the person just ended.
   const confirmedAt = mirror.confirmedAt
@@ -181,7 +186,29 @@ export const answerAgentPrompt = (mirror: (ProgressMirror & { confirmedAt?: numb
   if (barrier < 0 || order <= barrier) return null
   return {
     ...mirror, state: 'working', updated: now, promptOrder: order, autoAsk: null,
+    promptQuestion: mirror.tasks.some(one => one.waiting === 'you') ? { order, state: mirror.state, autoAsk: mirror.autoAsk, tasks: mirror.tasks.filter(one => one.waiting === 'you') } : null,
     tasks: mirror.tasks.map(one => one.waiting === 'you' ? answeredStep(one) : one),
+  }
+}
+
+// Restore only the latest prompt's unchanged question. A later prompt or owner
+// turn invalidates this snapshot, so a delayed board reply cannot undo an answer.
+export const restoreAgentBoardQuestion = (mirror: ProgressMirror, turn: AgentTurn, now: number): ProgressMirror | null => {
+  const question = mirror.promptQuestion
+  const order = turnOrder(turn)
+  if (!isBoardTurn(turn) || question == null || mirror.sessionId !== turn.id || mirror.agent !== turn.agent || mirror.resume !== turn.session || question.order !== normalizeTurnOrder(mirror.promptOrder) || order === undefined || !Number.isSafeInteger(order) || order > now * 2 || order <= question.order || order <= (normalizeTurnOrder(mirror.turnOrder) ?? -1) || order <= (mirror.confirmedAt ?? 0) * 2) return null
+  if (!question.tasks.every(old => mirror.tasks.some(one => JSON.stringify(one) === JSON.stringify(answeredStep(old))))) return null
+  // The provisional answer may already have closed its ledger revision.
+  let floor = mirror.questionSequence
+  const restored = question.tasks.map(one => {
+    const task = renewQuestion(one, floor)
+    floor = task.questionRevision
+    return task
+  })
+  return {
+    ...mirror, state: question.state, autoAsk: question.autoAsk, updated: now, turnOrder: order, promptQuestion: null,
+    questionSequence: restored.at(-1)?.questionRevision ?? mirror.questionSequence,
+    tasks: mirror.tasks.map(one => restored.find(old => one.id === old.id) ?? one),
   }
 }
 
@@ -348,19 +375,6 @@ export const keepInboxFailed = (failed: Readonly<Record<string, string>>, max = 
   return Object.fromEntries(Object.entries(failed).sort((a, b) => at(b[1]) - at(a[1])).slice(0, max))
 }
 
-// A turn that only showed the person the board (Gemini CLI's and OpenCode's /board, the
-// agent-board skill): looking at the board is not work, so it gets no block of its own.
-const BOARD_ASKS = /^\s*(?:\/board|[$/]agent-board)\s*$/
-
-// The words of each language's board command and skill, around the command they name; a
-// request that only mentions the script (someone working on this repository) is real work.
-// The skill names its command twice (chat app first, then the page): the words after each, so
-// the last ones are the sentence every earlier release wrote and a skill installed by one is
-// still known.
-const BOARD_WORDS = Object.values(STRINGS).flatMap(s =>
-  [s.boardCommandPrompt, ...s.boardSkillPrompt('\u0000').split('\u0000').slice(1), ...s.boardChatSkillPrompt('\u0000').split('\u0000').slice(1)].filter(words => words.trim() !== ''),
-)
-
 // An agent can pick the board skill from plain words ("where do things stand?"), and then only
 // the reply tells. The skill asks for the board first and one sentence on what needs the
 // person after it; work done in the same turn is told before the board, or as more than a
@@ -427,4 +441,4 @@ export const isBoardAnswer = (answer: string): boolean => {
 
 export const isBoardTurn = (turn: AgentTurn): boolean =>
   turn.event === 'turn' &&
-  (BOARD_ASKS.test(turn.prompt) || /<name>agent-board<\/name>/.test(turn.prompt) || BOARD_WORDS.some(words => turn.prompt.includes(words)) || isBoardAnswer(turn.answer))
+  (isBoardRequest(turn.prompt, BOARD_WORDS) || isBoardAnswer(turn.answer))
