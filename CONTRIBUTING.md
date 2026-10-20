@@ -101,7 +101,7 @@ README pictures are SVGs that `bun docs/preview/render.ts` draws from synthetic 
 3. Fetch tags (`git fetch --tags origin`), then run `bun scripts/build-released.ts` with Bun 1.4.2. It records this version's generated-file ownership; do not edit its output manually.
    Run `bun scripts/build-board.ts`, then regenerate the released table once more. Both `--check` commands must pass together. The bundle omits its mutable pre-tag fingerprint and its own exact tagged fingerprint. Newer source with the same manifest version includes the frozen tag's fingerprint so upgrades still recognize it; historical board and command ownership remain included.
 4. Run applicable checks and generated-file checks. State any unavailable full SDK typecheck.
-5. Open a regular PR. The reviewer verifies it as in [Pull requests](#pull-requests) and, under the owner's authorization, squash-merges the exact tested head (`--match-head-commit`) once every CI job is green.
+5. Open a regular PR titled `chore(release): Agent Board x.y.z` (pr-check treats a title starting `chore(release):` as a release). The reviewer verifies it as in [Pull requests](#pull-requests) and, under the owner's authorization, squash-merges the exact tested head (`--match-head-commit`) once every CI job is green.
 6. On the merged release commit, run `claude plugin tag . --dry-run`, then `claude plugin tag .`. Push only the new exact tag, for example `git push origin agent-board--v0.23.0`. Never replace an existing release tag or push unrelated local tags.
 
 ## Support matrix
