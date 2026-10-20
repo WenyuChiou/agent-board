@@ -315,3 +315,49 @@ export const SAMPLES: Record<string, Sample> = {
     quickAdd: '+ 求职：Fabrikam 研究资助 截止 11-20；改简历；投递',
   },
 }
+
+// The terminal board (`--watch`) for the README's pair of CLI pictures: a Codex CLI session
+// and an Antigravity CLI session each waiting on the person, beside Claude Code still at work.
+// No resume id or folder: a picture shows nothing a person would have to blank out.
+type CliTask = { title: string; done: string[]; ask: string; context?: string; next?: string }
+const cliFile = (w: { codex: CliTask; antigravity: CliTask; claude: { title: string; done: string[]; doing: string } }): string => `# Project progress
+
+## api-gateway
+<!-- auto session=3c9e5a71 agent=codex state=waiting updated=${iso(NOW - 4 * MIN)} -->
+### ${w.codex.title}
+${w.codex.context === undefined ? '' : `> Context: ${w.codex.context}\n`}${w.codex.done.map(step => `- [x] ${step}`).join('\n')}
+- [?] ${w.codex.ask}
+<!-- /auto session=3c9e5a71 -->
+
+## data-pipeline
+<!-- auto session=8d21f0b4 agent=antigravity state=waiting updated=${iso(NOW - 9 * MIN)} -->
+### ${w.antigravity.title}
+${w.antigravity.done.map(step => `- [x] ${step}`).join('\n')}
+- [?] ${w.antigravity.ask}
+${w.antigravity.next === undefined ? '' : `- [ ] ${w.antigravity.next}\n`}<!-- /auto session=8d21f0b4 -->
+
+## acme-web
+<!-- auto session=b72e4d19 agent=claude state=working updated=${iso(NOW - 2 * MIN)} -->
+### ${w.claude.title}
+${w.claude.done.map(step => `- [x] ${step}`).join('\n')}
+- [~] ${w.claude.doing}
+<!-- /auto session=b72e4d19 -->
+`
+
+export const CLI_FILES: Record<string, string> = {
+  en: cliFile({
+    codex: { title: 'Fix the CSV export', context: 'exports over 10 MB time out', done: ['Reproduce the timeout', 'Stream the rows'], ask: 'Open the pull request, OK?' },
+    antigravity: { title: 'Check the clean install', done: ['Install on a fresh machine'], ask: 'Keep the logs — 24 hours or 7 days?', next: 'Run the final checks' },
+    claude: { title: 'Add a dark mode', done: ['Add colour tokens'], doing: 'Fix contrast on charts' },
+  }),
+  'zh-TW': cliFile({
+    codex: { title: '修好 CSV 匯出', context: '超過 10 MB 的匯出會逾時', done: ['重現逾時', '改成分批輸出'], ask: '可以開 pull request 嗎？' },
+    antigravity: { title: '驗證乾淨安裝', done: ['在新電腦上安裝'], ask: '日誌保留 — 24 小時還是 7 天？', next: '跑最後的檢查' },
+    claude: { title: '設定頁加上深色模式', done: ['加深色的顏色 token'], doing: '修圖表對比' },
+  }),
+  'zh-CN': cliFile({
+    codex: { title: '修好 CSV 导出', context: '超过 10 MB 的导出会超时', done: ['复现超时', '改成分批输出'], ask: '可以开 pull request 吗？' },
+    antigravity: { title: '验证干净安装', done: ['在新电脑上安装'], ask: '日志保留 — 24 小时还是 7 天？', next: '跑最后的检查' },
+    claude: { title: '设置页加上深色模式', done: ['加深色的颜色 token'], doing: '修图表对比度' },
+  }),
+}
