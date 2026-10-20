@@ -130,11 +130,12 @@ test('the board script leaves out a question a pane on this machine marked answe
   assert.ok(run('en', [], { 'progress-answered.json': '{' }).includes('Per-key limit'))
 })
 
-const htmlRun = ({ file = '', inbox = {}, age = 0, lang = 'en', home = dir => dir } = {}) => {
+const htmlRun = ({ file = '', inbox = {}, age = 0, lang = 'en', home = dir => dir, beside = {}, now } = {}) => {
   const dir = mkdtempSync(join(tmpdir(), 'board-html-'))
   try {
     const path = join(dir, 'progress.md')
     writeFileSync(path, file)
+    for (const [name, text] of Object.entries(beside)) writeFileSync(join(dir, name), text)
     mkdirSync(join(dir, 'progress-inbox'))
     for (const [name, body] of Object.entries(typeof inbox === 'function' ? inbox(dir) : inbox)) {
       const target = join(dir, 'progress-inbox', name)
@@ -145,7 +146,7 @@ const htmlRun = ({ file = '', inbox = {}, age = 0, lang = 'en', home = dir => di
     // A static page is inspected from disk; the test never opens a browser.
     assert.ok(BOARD_SCRIPT.includes('openInBrowser(html,'))
     const script = join(dir, 'agent-board.mjs')
-    writeFileSync(script, `globalThis.AGENT_BOARD = ${JSON.stringify({ path, lang })}\n${BOARD_SCRIPT.replace('openInBrowser(html,', '((target, done) => done(false))(html,')}`)
+    writeFileSync(script, `globalThis.AGENT_BOARD = ${JSON.stringify({ path, lang })}\n${now === undefined ? '' : `Date.now = () => ${now}\n`}${BOARD_SCRIPT.replace('openInBrowser(html,', '((target, done) => done(false))(html,')}`)
     execFileSync(process.execPath, [script, '--html'], {
       env: { ...process.env, CLAUDE_PROGRESS_FILE: path, HOME: home(dir), USERPROFILE: home(dir) },
       encoding: 'utf8',
@@ -2412,6 +2413,34 @@ test('the board script leaves idle tasks off the board, names how many, and list
   const broken = idleRun([], { 'progress-seen.json': '{' })
   assert.equal(broken.status, 0, broken.stderr)
   assert.ok(broken.stdout.includes('Quiet plan'), broken.stdout)
+})
+
+test('the CLI view ages manual completions from sidecar fingerprints without renewing old or unknown times', () => {
+  const file = '## demo\n### Old completion\n- [x] Old step\n### Fresh completion\n- [x] Fresh step\n### Unknown completion\n- [x] Unknown step\n### Future completion\n- [x] Future step\n'
+  const key = (title, step) => createHash('sha256').update(JSON.stringify(['demo', title, [['done', step]]])).digest('hex')
+  const record = JSON.stringify({ seen: {
+    [key('Old completion', 'Old step')]: IDLE_NOW - 2 * 86400000,
+    [key('Fresh completion', 'Fresh step')]: IDLE_NOW - 10 * 60000,
+    [key('Future completion', 'Future step')]: IDLE_NOW + 86400000,
+  } })
+  for (const held of [record, '{', JSON.stringify({ seen: {} })]) {
+    const html = htmlRun({ file, beside: { 'progress-seen.json': held }, now: IDLE_NOW })
+    assert.ok(!/Old completion|Unknown completion|Future completion|just now/.test(html), html)
+    assert.equal(html.includes('Fresh completion'), held === record, html)
+  }
+  // These surfaces currently omit recent completions; keep their existing output and
+  // ensure chat never persists a new observation while constructing the shared view.
+  for (const args of [[], ['--chat'], ['--keys', '']]) {
+    const held = record
+    const ran = chatRun(args, { file: () => file, beside: { 'progress-seen.json': held }, change: script => `Date.now = () => ${IDLE_NOW}\n${script}` })
+    assert.equal(ran.status, 0, ran.stderr)
+    assert.ok(!/Old completion|Unknown completion|Future completion|just now/.test(ran.stdout), ran.stdout)
+    assert.deepEqual(ran.modified, [])
+    if (args.includes('--chat')) {
+      assert.deepEqual(ran.wrote, [])
+      assert.deepEqual(ran.served, [])
+    }
+  }
 })
 
 test("the board script's --chat run reads the seen record and writes nothing", () => {

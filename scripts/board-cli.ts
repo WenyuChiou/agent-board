@@ -26,7 +26,7 @@ import { appendJournal, archivePath, countDay, hasArchiveEntry, journalLine, jou
 import { parseProgress } from '../hooks/parse'
 import { qrModules, qrText } from '../hooks/qr'
 import { langOf, STRINGS } from '../hooks/strings'
-import { answeredJson, answeredPath, buildView, parseAnswered, parseSeen, seenJson, seenPath, withAnswered, withSeen } from '../hooks/view'
+import { answeredJson, answeredPath, buildView, manualDoneSeen, parseAnswered, parseSeen, seenJson, seenPath, withAnswered, withSeen } from '../hooks/view'
 import { acknowledgementKeys, archiveQuestionsKept, captureHashOf, captureJson, capturePath, emptyQuestions, parseCapture, withCaptures, isQuestionProof, isQuestionSnapshot, isTornLedger, migratedAnswered, observeQuestions, parseQuestions, questionProofJson, questionProofOf, questionProofPath, questionsJson, questionsPath } from '../hooks/questions'
 import type { QuestionCapture, QuestionProofs, QuestionRecord } from '../hooks/questions'
 import { sha256 } from '../hooks/sha256'
@@ -324,7 +324,7 @@ const view = (source = read(path), now = Date.now()) => {
     }
   }
   // A question marked answered in a pane on this machine is kept off the board too.
-  return buildView(projects, [basename(process.cwd())], null, now, countDay(read(journalPath(path, now)), now), {}, s, answered, seen, questions, readQuestionProofs(), turns)
+  return buildView(projects, [basename(process.cwd())], null, now, countDay(read(journalPath(path, now)), now), manualDoneSeen(projects, seen, now, s), s, answered, seen, questions, readQuestionProofs(), turns)
 }
 
 const pad = (n: number): string => String(n).padStart(2, '0')
