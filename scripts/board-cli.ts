@@ -27,7 +27,7 @@ import { parseProgress, progressTail } from '../hooks/parse'
 import { qrModules, qrText } from '../hooks/qr'
 import { langOf, STRINGS } from '../hooks/strings'
 import { answeredJson, answeredPath, buildView, manualDoneSeen, parseAnswered, parseSeen, seenJson, seenPath, withAnswered, withSeen } from '../hooks/view'
-import { acknowledgementKeys, archiveQuestionsKept, captureHashOf, captureJson, capturePath, emptyQuestions, parseCapture, withCaptures, isQuestionProof, isQuestionSnapshot, isTornLedger, migratedAnswered, observeQuestions, parseQuestions, questionProofJson, questionProofOf, questionProofPath, questionsJson, questionsPath } from '../hooks/questions'
+import { acknowledgementKeys, archiveQuestionsKept, captureHashOf, captureJson, capturePath, emptyQuestions, parseCapture, withCaptures, isQuestionProof, isQuestionSnapshot, isTornLedger, migratedAnswered, observeQuestions, parseQuestions, questionProofJson, questionProofOf, questionProofPath, questionsJson, questionsPath, resolvedQuestionsToRetire } from '../hooks/questions'
 import type { QuestionCapture, QuestionProofs, QuestionRecord } from '../hooks/questions'
 import { sha256 } from '../hooks/sha256'
 
@@ -292,8 +292,9 @@ const view = (source = read(path), now = Date.now()) => {
         if (record.isUnresolved && !captures.some(capture => captureJson(capture.record, capture.disposition) === captureJson(record, 'unresolved'))) keepQuestionCapture(record, 'unresolved')
         if (record.isUnresolved === false && current.records.some(old => old.id === record.id && old.isUnresolved === true)) keepQuestionCapture(record, 'resolved')
       }
+      const retiredResolutions = resolvedQuestionsToRetire(current, projects, null, turns)
       for (const old of current.records) {
-        if (old.isPresent && !next.records.some(record => record.id === old.id && record.isPresent && record.isWaiting)) keepQuestionProof('retired', sha256(old.id))
+        if ((old.isPresent && !next.records.some(record => record.id === old.id && ((record.isPresent && record.isWaiting) || record.resolvedAt !== undefined))) || retiredResolutions.includes(old.id)) keepQuestionProof('retired', sha256(old.id))
       }
       proofs = readQuestionProofs()
       if (proofs === null) return null
@@ -900,7 +901,7 @@ const serveBoard = async (): Promise<void> => {
     // page stopped then, and that one is the page to show.
     const other = await runningPage()
     if (other !== null) return show(other.page.url, other.isKept, other.idleMs)
-    process.stdout.write(`\n${s.serveFailed(s.serveOffline)}\n`)
+    process.stdout.write(`\n${s.serveFailed(s.serveNotStarted)}\n`)
     return
   }
   await show(url)
