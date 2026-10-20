@@ -6,8 +6,49 @@ import { delimiter, dirname, join, resolve } from 'node:path'
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { fileURLToPath, pathToFileURL } from 'node:url'
+import { inspect } from 'node:util'
 import { reporterPs1, reporterSh } from '../hooks/hook-reporters.ts'
 import { classifierDiagnostic, observeClassifier } from './fixtures/classifier-diagnostic.mjs'
+import { assertNativeProbeReturned, nativeProbeDiagnostic } from './fixtures/native-probe-diagnostic.mjs'
+
+test('native cleanup diagnostics keep watchdog failures bounded and private', () => {
+  const error = Object.assign(new Error('PRIVATE_ERROR'), { code: 'ETIMEDOUT', path: '/PRIVATE_EXECUTABLE', spawnargs: ['PRIVATE_ARGUMENT'] })
+  const result = { error, status: null, signal: 'SIGTERM', stdout: 'PRIVATE_STDOUT', stderr: 'PRIVATE_STDERR' }
+  const marker = { isStarted: true, isVerified: true, keepFixture: true, code: 'NATIVE_HOOK_UNREAPED', home: '/PRIVATE_HOME', pid: 123456789 }
+  assert.throws(() => assertNativeProbeReturned(result, marker, 45001.4, 45000), failure => {
+    assert.equal(failure.code, 'ERR_ASSERTION')
+    assert.match(failure.message, /"errorCode":"ETIMEDOUT"/)
+    assert.match(failure.message, /"isVerified":true/)
+    assert.match(failure.message, /"elapsedMs":45001,"budgetMs":45000/)
+    assert.equal(failure.actual, false)
+    assert.equal(failure.expected, true)
+    assert.ok(!/PRIVATE_|123456789/.test(inspect(failure)))
+    assert.ok(failure.message.length < 512)
+    return true
+  })
+  for (const error of [null, false, '']) assert.throws(() => assertNativeProbeReturned({ error }, null, 1, 45000), { code: 'ERR_ASSERTION' })
+})
+
+test('native cleanup diagnostics preserve a normal returned probe result', () => {
+  const result = { status: 1, signal: null, stdout: 'PRIVATE_STDOUT', stderr: 'PRIVATE_STDERR' }
+  const marker = { isStarted: true, isVerified: true, keepFixture: true, code: 'NATIVE_HOOK_UNREAPED' }
+  const before = structuredClone({ result, marker })
+  const diagnostic = assertNativeProbeReturned(result, marker, 2500, 45000)
+  assert.deepEqual({ result, marker }, before)
+  assert.match(diagnostic, /"status":1,"signal":null,"errorPresent":false,"errorCode":null/)
+  assert.match(diagnostic, /"markerPresent":true,"isStarted":true,"isVerified":true/)
+  assert.ok(!diagnostic.includes('PRIVATE_'))
+})
+
+test('native cleanup diagnostics allowlist unknown fields and missing markers', () => {
+  const privateValue = 'PRIVATE_'.repeat(1000)
+  const diagnostic = nativeProbeDiagnostic({ status: privateValue, signal: privateValue, error: { code: privateValue } }, { isStarted: privateValue, isVerified: privateValue, code: privateValue }, Infinity, -1)
+  assert.ok(diagnostic.length < 512)
+  assert.ok(!diagnostic.includes('PRIVATE_'))
+  assert.match(diagnostic, /"elapsedMs":null,"budgetMs":0,"status":null,"signal":"OTHER"/)
+  assert.match(diagnostic, /"isStarted":null,"isVerified":null,"keepFixture":null,"code":"OTHER"/)
+  assert.match(nativeProbeDiagnostic({}, null, 0, 45000), /"markerPresent":false/)
+})
 
 const setup = resolve('scripts/setup-codex.mjs')
 const session = 'test-codex-session-123'
@@ -1374,16 +1415,16 @@ test('failed native tree termination reports a bounded error and retains its fix
       env, encoding: 'utf8', windowsHide: true, timeout: 45000,
     })
     owned = existsSync(marker) ? JSON.parse(readFileSync(marker, 'utf8')) : null
-    assert.equal(result.error, undefined, result.stderr)
-    assert.equal(result.status, 1, result.stdout + result.stderr)
+    const diagnostic = assertNativeProbeReturned(result, owned, Date.now() - started, 45000)
+    assert.equal(result.status, 1, diagnostic)
     assert.ok(Date.now() - started < 45000, 'the isolated test process must actually exit before the watchdog')
-    assert.equal(owned?.code, 'NATIVE_HOOK_UNREAPED', JSON.stringify(owned))
+    assert.equal(owned?.code, 'NATIVE_HOOK_UNREAPED', diagnostic)
     assert.equal(owned.keepFixture, true)
     assert.equal(owned.isStarted, true)
     assert.equal(owned.isVerified, true, 'a probe assertion failure must not masquerade as the expected exit')
     for (const key of ['pid', 'probePid', 'parentPid', 'parentParentPid', 'descendantPid']) assert.ok(Number.isInteger(owned[key]) && owned[key] > 0, `the probe must record ${key}`)
     assert.ok(existsSync(owned.home), 'the failed process must leave its fixture for owned cleanup')
-    assert.ok(result.stderr.includes('did not close') || result.stdout.includes('did not close'), result.stdout + result.stderr)
+    assert.ok(result.stderr.includes('did not close') || result.stdout.includes('did not close'), diagnostic)
   } finally {
     owned ??= existsSync(marker) ? JSON.parse(readFileSync(marker, 'utf8')) : null
     // Observe the probe's exit first: rescuing its descendant earlier would hide
