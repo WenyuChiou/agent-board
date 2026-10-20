@@ -143,6 +143,7 @@ export type TaskRow = {
   // The question its session still asks the person, as Waiting on you words it; null when none
   // does or the person marked it answered. A reply to the session is framed as its answer.
   question: string | null
+  questions?: WaitingItem[]
   // The line its session left at its last compaction for whoever takes over.
   handoff: string
   // Set when the person may take the row out now: a hand-kept task, or a block whose session
@@ -156,7 +157,7 @@ export type TaskRow = {
 // This session's pull request, for the card.
 export type PrView = { text: string; url: string; tone: Tone }
 
-export type DoneItem = { project: string; title: string; when: string }
+export type DoneItem = { key: string; project: string; title: string; when: string; questions?: WaitingItem[] }
 
 // Other work, one group per project, this session's project first; `summary` says it in a
 // line (`3 件 · 1 等你 · 1 已停`) for while the list is folded.
@@ -675,11 +676,15 @@ export const buildView = (
   const marked = new Set(proofs === null ? [] : observed?.marked ?? answered)
   const ownId = mine === null ? '' : shortId(mine.sessionId)
   const waiting: WaitingItem[] = []
+  const inactiveHidden: WaitingItem[] = []
   const due: Array<TaskRow & { days: number }> = []
   const active: Array<TaskRow & { rank: number; order: number }> = []
   const recent: Array<DoneItem & { at: number }> = []
   const idle: TaskRow[] = []
   const stopped: Array<{ row: TaskRow; updated: number }> = []
+  const completed: Array<{ row: TaskRow; updated: number; recent: DoneItem & { at: number } | null }> = []
+  const inactiveScopes = new Map<string, number>()
+  const liveScopes = new Set<string>()
   let order = 0
   const repeats = new Map<string, number>()
 
@@ -704,9 +709,12 @@ export const buildView = (
       const isDue = task.due !== null && days !== null && days <= 14
       const isIdle = !isComplete && !isDue && hasTime(lastActive) && now - lastActive > IDLE_MS
       const context = contextOf(task)
-      // A session that stopped writing is treated as ended: its row goes to the Stopped shelf,
-      // and its questions stay in 等你處理.
+      // Questions travel with an inactive session rather than asking for a live reply.
       const stale = isStale(task.auto, now)
+      const isInactive = !isManual && (isComplete || stale || task.auto?.state === 'ended')
+      if (isInactive) inactiveScopes.set(questionScope(project.name, task.auto?.agent ?? '', task.auto?.session ?? ''), updated)
+      else if (!isManual) liveScopes.add(questionScope(project.name, task.auto?.agent ?? '', task.auto?.session ?? ''))
+      const taskQuestions: WaitingItem[] = []
       const keys = task.auto === null || observed === null
         ? blockKeys(task)
         : task.steps.map((step, index) => step.status === 'waiting' ? observed.keys[questionSlot(questionScope(project.name, task.auto?.agent ?? '', task.auto?.session ?? ''), index)] ?? '' : '')
@@ -720,7 +728,7 @@ export const buildView = (
       task.steps.forEach((step, index) => {
         if (step.status !== 'waiting') return
         const parts = splitNote(step.text)
-        waiting.push({
+        taskQuestions.push({
           key: `${key}::${index}`,
           project: name,
           task: title,
@@ -746,15 +754,22 @@ export const buildView = (
           ...(task.auto === null ? {} : { nativeSession: task.auto.resume ?? task.auto.session }),
         })
       })
+      const unresolved = taskQuestions.filter(item => !marked.has(item.hideKey) && observed?.ledger.records.find(record => record.id === item.questionId)?.isUnresolved !== false)
+      if (isInactive) inactiveHidden.push(...taskQuestions.filter(item => marked.has(item.hideKey) && observed?.ledger.records.find(record => record.id === item.questionId)?.isUnresolved !== false))
+      if (!isInactive) waiting.push(...taskQuestions)
 
+      let completion: DoneItem & { at: number } | null = null
       if (isComplete) {
         const doneAt = doneSeen[doneKey(name, title)]
         const seen = isManual ? doneAt === null ? null : doneAt ?? now : updated
-        if (seen !== null && now - seen < DAY) recent.push({ project: name, title, when: relativeTime(seen, now, s), at: seen })
-        continue
+        if (seen !== null && now - seen < DAY) {
+          completion = { key, project: name, title, when: relativeTime(seen, now, s), at: seen, questions: isInactive ? unresolved : [] }
+          recent.push(completion)
+        }
+        if (!isInactive || (unresolved.length === 0 && !task.steps.some(step => step.status === 'waiting'))) continue
       }
 
-      const auto = task.auto === null || task.auto.state === 'done' ? null : stale ? 'ended' : task.auto.state
+      const auto = task.auto === null ? null : isComplete || stale ? 'ended' : task.auto.state
       // A session whose turn ended on a question is in 等你處理 by its [?] steps. One whose
       // turn simply ended (`state=waiting` is written at every turn's end), or that waits on
       // CI or another agent, asks the person nothing: it stays with the work in progress.
@@ -784,7 +799,8 @@ export const buildView = (
         auto,
         steps: rowSteps(task, s),
         left: task.steps.filter(step => step.status !== 'done' && step.status !== 'cancelled').map(step => step.text),
-        question: ((asked: ProgressStep | undefined) => (asked === undefined ? null : splitNote(asked.text).text))(
+        questions: isInactive ? unresolved : [],
+        question: isInactive ? unresolved.find(item => !marked.has(item.hideKey))?.text ?? null : ((asked: ProgressStep | undefined) => (asked === undefined ? null : splitNote(asked.text).text))(
           task.steps.find((step, index) => step.status === 'waiting' && isPrompt(index)),
         ),
         next:
@@ -810,6 +826,14 @@ export const buildView = (
         ...(task.auto === null ? {} : { nativeSession: task.auto.resume ?? task.auto.session }),
       }
 
+      if (isComplete) {
+        completed.push({ row, updated, recent: completion })
+        continue
+      }
+      if (auto === 'ended' && unresolved.length > 0) {
+        stopped.push({ row, updated })
+        continue
+      }
       // Work with a date close by is listed once, under 快到期.
       if (task.due !== null && days !== null && days <= 14) {
         due.push({ ...row, due: { date: task.due, ...dueLabel(days, s) }, days })
@@ -830,6 +854,10 @@ export const buildView = (
   due.sort((a, b) => a.days - b.days)
   active.sort((a, b) => a.rank - b.rank || a.order - b.order)
   recent.sort((a, b) => b.at - a.at)
+  const shownRecent = recent.slice(0, 3)
+  for (const item of completed) {
+    if (item.recent === null || !shownRecent.includes(item.recent)) stopped.push({ row: item.row, updated: item.updated })
+  }
   stopped.sort((a, b) => b.updated - a.updated)
 
   const rows = active.map(({ rank: _rank, order: _order, ...row }) => row)
@@ -855,7 +883,10 @@ export const buildView = (
   }
 
   const inbox = pending.filter(turn => turn.isQuestion && turn.id !== undefined).flatMap(turn => {
-    const id = observed?.keys[pendingQuestionSlot(questionScope(turn.project, turn.agent, turn.id ?? ''), turn.text)]
+    const updated = inactiveScopes.get(questionScope(turn.project, turn.agent, turn.id ?? ''))
+    if (updated !== undefined && turn.at <= updated) return []
+    const scope = questionScope(turn.project, turn.agent, turn.id ?? '')
+    const id = observed?.keys[pendingQuestionSlot(scope, turn.text)] ?? observed?.ledger.records.find(record => record.scope === scope && record.isUnresolved && record.producerSources?.includes(JSON.stringify(turn)))?.id
     if (id === undefined || waiting.some(item => item.questionId === id)) return []
     const parts = splitNote(turn.text)
     return [{ key: `inbox::${id}`, questionId: id, project: turn.project, task: '', context: '', ...parts, when: '', ...askOf(parts.text, parts.note), where: 'other' as const, agent: turn.agent, session: turn.id ?? '', sessionId: null, resumeVia: null, reopen: null, hideKey: id, step: null, target: null }]
@@ -872,13 +903,31 @@ export const buildView = (
   const asks: WaitingItem[] = all.filter(item => item.ageStage === 'pending' && (item.hideKey === '' || !marked.has(item.hideKey)))
   const reminder: WaitingItem[] = all.filter(item => item.ageStage === 'reminder' && (item.hideKey === '' || !marked.has(item.hideKey)))
   const older: WaitingItem[] = all.filter(item => item.ageStage === 'older' && (item.hideKey === '' || !marked.has(item.hideKey)))
-  const hidden: WaitingItem[] = all.filter(item => item.hideKey !== '' && marked.has(item.hideKey))
+  const hidden: WaitingItem[] = [...all.filter(item => item.hideKey !== '' && marked.has(item.hideKey)), ...inactiveHidden]
+  const liveQuestions = new Set(all.flatMap(item => item.questionId === undefined ? [] : [item.questionId]))
+  for (const { row } of stopped) {
+    row.questions = row.questions?.filter(item => item.questionId === undefined || !liveQuestions.has(item.questionId))
+    row.question = row.questions?.[0]?.text ?? null
+  }
+  for (const item of shownRecent) item.questions = item.questions?.filter(question => question.questionId === undefined || !liveQuestions.has(question.questionId))
+  const onShelf = new Set([...stopped.flatMap(({ row }) => row.questions ?? []), ...shownRecent.flatMap(item => item.questions ?? [])].flatMap(item => item.questionId === undefined ? [] : [item.questionId]))
   for (const record of observed?.ledger.records ?? []) {
-    if (!record.isUnresolved || record.source === undefined || all.some(item => item.questionId === record.id)) continue
+    if (!record.isUnresolved || record.source === undefined || onShelf.has(record.id) || [...all, ...hidden].some(item => item.questionId === record.id)) continue
     const source = record.source
     const parts = splitNote(source.text)
     const age = questionAge(record.firstObserved, now)
-    const stage = record.isArchived ? 'older' : age.stage
+    // A source copy still knows a stopped session after its block was removed or replaced.
+    // Keep that orphaned copy for review without offering it as a live question again.
+    let isInactiveSource = false
+    if (source.kind === 'block' && !liveScopes.has(record.scope)) {
+      try {
+        const saved = JSON.parse(source.data) as ProgressTask
+        isInactiveSource = saved.auto !== null && (saved.auto.state === 'ended' || saved.auto.state === 'done' || isStale(saved.auto, now) || isTaskComplete(saved))
+      } catch {
+        // Unknown historical source shapes retain the existing review behavior.
+      }
+    }
+    const stage = record.isArchived || isInactiveSource || inactiveScopes.has(record.scope) ? 'older' : age.stage
     const item: WaitingItem = { key: `retained::${record.id}`, questionId: record.id, ageStage: stage, project: source.project, task: source.task, context: source.context, ...parts, when: age.age === null ? s.questionAgeUnknown : relativeTime(record.firstObserved, now, s), ...askOf(parts.text, parts.note), where: 'other', agent: source.agent === 'claude' ? '' : source.agent, session: source.session, sessionId: null, resumeVia: null, reopen: null, hideKey: record.id, canHide: false, step: null, target: null }
     if (marked.has(record.id)) hidden.push(item)
     else if (stage === 'pending') asks.push(item)
@@ -924,7 +973,7 @@ export const buildView = (
     due: dueRows,
     active: rows,
     groups,
-    recent: recent.slice(0, 3).map(({ at: _at, ...item }) => item),
+    recent: shownRecent.map(({ at: _at, ...item }) => item),
   }
 }
 

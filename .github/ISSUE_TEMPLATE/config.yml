@@ -3,3 +3,6 @@ contact_links:
   - name: File format specification
     url: https://github.com/WenyuChiou/agent-board/blob/main/docs/FORMAT.md
     about: How progress.md is read and written, for tools and other agents.
+  - name: Working on an issue as an agent
+    url: https://github.com/WenyuChiou/agent-board/blob/main/docs/CONTRIBUTOR-PATH.md
+    about: From finding work to a merged pull request, with the commands to run.

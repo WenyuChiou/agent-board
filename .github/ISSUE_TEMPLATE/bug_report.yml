@@ -48,3 +48,10 @@ body:
       placeholder: <version>
     validations:
       required: false
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: How we would know it is done
+      description: Optional. One behaviour a test could check, in a sentence. When triaging, the maintainer turns it into acceptance tests and adds the executor and milestone.
+    validations:
+      required: false
