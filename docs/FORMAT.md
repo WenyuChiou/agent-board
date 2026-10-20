@@ -236,11 +236,13 @@ Old work moves out of `progress.md` into a monthly file in the same folder, so t
 |---|---|
 | A block with `state=done` | More than 12 hours after `updated` |
 | A block in any other state (`working`, `waiting`, `ended`) | More than 3 days after `updated` |
-| A hand-kept task whose steps are all done | 24 hours after the pane first saw every step done (the pane keeps that time itself, not in the file) |
+| A hand-kept task whose steps are all done | At least 24 hours after the recorded observation of every step done: the pane uses its own record; standalone `--tidy` uses that task's fingerprint in `progress-seen.json` |
 
-Automatic sweeps never move a block containing a visible unresolved `[?]` step, including a block labelled done. Only blocks with their end marker move. A block without one stays until someone fixes it. A block whose `updated` is missing or unreadable never moves. The session that is running the sweep never moves its own block.
+Automatic sweeps never move a block containing a visible unresolved `[?]` step, including a block labelled done. Only blocks with their end marker move. A block without one stays until someone fixes it. A block whose `updated` is missing, unreadable or in the future never moves. A pane sweep keeps its own session's block; standalone `--tidy` has no current-session exemption.
 
-The sweep runs when a Claude Code session with the mod starts, once an hour while it stays open, on `/progress 整理` (also `/progress tidy` and `/progress archive`) and when the person presses "Archive now" in the pane. If no such session is running, nothing is archived and nothing is lost.
+The normal sweep runs when a Claude Code session with the mod starts, once an hour while it stays open, or once when the standalone board runs with `--tidy`. The standalone command needs no Claude session and installs no scheduler. `/progress 整理` (also `/progress tidy` and `/progress archive`) and "Archive now" in the pane request an immediate interactive tidy instead.
+
+The pane, `--watch` and `--serve` record manual-task fingerprint observations in `progress-seen.json`. `--tidy` only reads that record, never creates or refreshes it, and retains manual tasks with unknown or future observations. A machine running only scheduled `--tidy` therefore never archives a completed hand-kept task that has not been observed by one of those interactive readers. An unreadable observation file is left untouched; manual tasks stay, while eligible dated agent blocks can still move. The recorded time is a first observation of that completed fingerprint, not proof of its exact completion time.
 
 The archive file is named after `progress.md`: `progress-archive-YYYY-MM.md`, in the same folder. For `CLAUDE_PROGRESS_FILE=/work/board.md` it is `/work/board-archive-YYYY-MM.md`. The month is the local month of the sweep. A new archive file starts with the archive title in the pane's language (`# 進度封存` in zh-TW; see [Language](#language)) and a blank line. Each moved task is added as
 
@@ -251,7 +253,7 @@ The archive file is named after `progress.md`: `progress-archive-YYYY-MM.md`, in
 - [x] …
 ```
 
-that is, the block without its markers under a heading with the project and the local date of `updated`, the same clock as the file's month. For a hand-kept task the date is the local day the pane first saw it done, and the entry runs from its `###` line to its last non-blank line before the next heading or block. Whenever a sweep moves something, it also collapses the blank lines it left. A `##` section that the sweep itself left with nothing in it (only blank lines) is removed with its heading. A `##` section the sweep did not take anything from is left alone, even when it is empty, so a person's bare heading stays. The same rule applies when the pane removes a session's block because its list became empty.
+that is, the block without its markers under a heading with the project and the local date of `updated`, the same clock as the file's month. For a hand-kept task the date is the local day of the completion observation used by that sweep, or today for an immediate interactive tidy with no recorded observation, and the entry runs from its `###` line to its last non-blank line before the next heading or block. Whenever a sweep moves something, it also collapses the blank lines it left. A `##` section that the sweep itself left with nothing in it (only blank lines) is removed with its heading. A `##` section the sweep did not take anything from is left alone, even when it is empty, so a person's bare heading stays. The same rule applies when the pane removes a session's block because its list became empty.
 
 ### Journal
 
