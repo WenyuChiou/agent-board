@@ -1,8 +1,11 @@
 import { describe, test } from 'node:test'
 import assert from 'node:assert/strict'
+import { renameSync, statSync } from 'node:fs'
+import { join } from 'node:path'
+import { EN } from '../../hooks/strings-en.ts'
 import { makeWorld } from './lib/world.mjs'
 import { block } from './lib/writers.mjs'
-import { inspectSurfaces, terminal, seenPageWithin, chat, serve, html } from './lib/surfaces.mjs'
+import { inspectSurfaces, terminal, seenPageWithin, chat, serve, html, pageDom } from './lib/surfaces.mjs'
 import { seenWithin, noSilentPress, noMachineIds } from './lib/expect.mjs'
 import { knownFailure } from './lib/known.mjs'
 import { PANE_MS, PAGE_MS } from './lib/budget.mjs'
@@ -21,6 +24,232 @@ const seed = world => {
 }
 
 describe('L2 a working day', { concurrency: 2 }, () => {
+  test('L2 day: an A-or-B question is offered as Choose with both options, not Yes/No', async () => {
+    const world = makeWorld()
+    try {
+      const question = 'Merge FAQ into Troubleshooting or keep separate?'
+      ask(world)
+      block(world, { state: 'waiting', title: 'Organize the FAQ', steps: [`- [?] ${question}`] })
+      const server = await serve.start(world)
+      for (const [surface, text] of Object.entries({ terminal: await terminal.screen(world), page: await server.page() })) {
+        assert.ok(text.includes(question), surface)
+        noMachineIds(text, world)
+        await knownFailure('hold:question-choice-options', () => {
+          assert.match(text, /Choose/, surface)
+          assert.match(text, /Merge FAQ into Troubleshooting/, surface)
+          assert.match(text, /keep separate/, surface)
+          assert.doesNotMatch(text, /Yes\s+No|\[Confirm\]/, surface)
+        })
+      }
+      const model = (await server.get('/api/board')).json().model
+      assert.equal(model.asks.length, 1)
+      await knownFailure('hold:question-choice-options', () => {
+        assert.equal(model.asks[0].kind, 'choose')
+        assert.deepEqual(model.asks[0].options, ['Merge FAQ into Troubleshooting', 'keep separate'])
+      })
+    } finally { await world.close() }
+  })
+
+  test('L2 day: work finished by Codex, Antigravity and Hermes counts in done today on every surface', async () => {
+    const world = makeWorld()
+    try {
+      const agents = ['codex', 'antigravity', 'hermes']
+      for (const [index, agent] of agents.entries()) block(world, { agent, session: `b100000${index}`, title: `Finish ${agent} report` })
+      const server = await serve.start(world)
+      await server.page()
+      for (const [index, agent] of agents.entries()) block(world, { agent, session: `b100000${index}`, title: `Finish ${agent} report`, state: 'done', steps: ['- [x] Check routes'] })
+      const screens = await inspectSurfaces(world, server)
+      for (const [surface, text] of Object.entries(screens)) {
+        await knownFailure('hold:all-agent-done-today', () => assert.match(text, /(?:3\s+done today|done today\s*3)/i, surface))
+        if (surface === 'page' || surface === 'html') for (const agent of agents) assert.ok(text.includes(`Finish ${agent} report`), surface)
+      }
+    } finally { await world.close() }
+  })
+
+  test('L2 day: a block reaching done writes one journal line for any agent', async () => {
+    const world = makeWorld()
+    try {
+      const agents = ['claude', 'codex', 'antigravity', 'hermes', 'grok', 'gemini', 'cursor', 'openclaw', 'opencode', 'muse', 'deepseek']
+      for (const [index, agent] of agents.entries()) block(world, { agent, session: (0xb2000000 + index).toString(16), title: `Journal ${agent} report` })
+      const server = await serve.start(world)
+      await server.page()
+      for (const [index, agent] of agents.entries()) block(world, { agent, session: (0xb2000000 + index).toString(16), title: `Journal ${agent} report`, state: 'done', steps: ['- [x] Check routes'] })
+      const first = await inspectSurfaces(world, server)
+      assert.match(first.page, /Done recently/)
+      assert.match(first.page, /Journal deepseek report/)
+      assert.equal((world.read('progress.md').match(/state=done /g) ?? []).length, agents.length)
+      const lines = () => world.files().filter(name => /progress-journal-.*\.md$/.test(name)).flatMap(name => world.read(name).split('\n').filter(Boolean))
+      for (const agent of agents) await knownFailure('hold:all-agent-done-journal', () => assert.equal(lines().filter(line => line.includes(`Journal ${agent} report`)).length, 1, `${agent}: ${lines().join('\n')}`))
+      await server.page()
+      await terminal.screen(world)
+      for (const agent of agents) await knownFailure('hold:all-agent-done-journal', () => assert.equal(lines().filter(line => line.includes(`Journal ${agent} report`)).length, 1, `${agent}: completion must be journaled exactly once after repeated reads`))
+    } finally { await world.close() }
+  })
+
+  test('L2 terminal: every key on every row kind changes the screen or prints a reason', async () => {
+    const world = makeWorld()
+    try {
+      const failures = []
+      const rows = [
+        { kind: 'working', state: 'working', steps: ['- [~] Check routes'] },
+        { kind: 'waiting', state: 'waiting', steps: ['- [?] Publish routes, OK?'] },
+        { kind: 'stopped', state: 'ended', steps: ['- [ ] Check routes'] },
+        { kind: 'idle', state: 'waiting', steps: ['- [ ] Check routes'] },
+        { kind: 'blocked', state: 'working', steps: ['- [!] Check routes'] },
+        { kind: 'choice', state: 'waiting', steps: ['- [?] Rollout — Canary or Everyone?'] },
+        { kind: 'manual', steps: ['- [ ] Check routes'] },
+        { kind: 'stopped-ask', state: 'ended', steps: ['- [?] Publish routes, OK?'] },
+      ]
+      // Number keys past the last row take one path; 3 and 9 stand for 3 to 9 and keep the matrix short.
+      const keys = ['enter', 'x', 'a', 'd', 'c', 'h', 'y', 'n', '1', '2', '3', '9']
+      for (const [index, row] of rows.entries()) for (const [keyIndex, key] of keys.entries()) {
+        // Old unanswered questions become reminders; each pair needs its own ledger as well as its row.
+        for (const name of world.files().filter(name => name.startsWith('progress-') && statSync(join(world.claudeDir, name)).isFile())) {
+          renameSync(join(world.claudeDir, name), world.write(`matrix-aside/${index}-${keyIndex}/${name}`, ''))
+        }
+        world.write('progress.md', '')
+        if (row.kind === 'manual') world.write('progress.md', `## api-gateway\n### manual gateway\n${row.steps.join('\n')}\n`)
+        else block(world, { session: (0xc0000000 + index * 32 + keyIndex).toString(16), title: `${row.kind} gateway`, state: row.state, steps: row.steps, resume: `synthetic-${row.kind}-owner`, dir: world.root })
+        const prefix = row.state === 'ended' || row.kind === 'idle' ? 'i' : ''
+        const before = await terminal.keys(world, prefix)
+        assert.ok(before.includes(`${row.kind} gateway`), `${row.kind} must be selectable`)
+        const after = await terminal.keys(world, `${prefix} ${key}`.trim())
+        const check = () => noSilentPress({ surface: 'terminal', card: row.kind, button: key, before, after })
+        try {
+          check()
+          if (key === 'c' && ['waiting', 'choice', 'stopped', 'stopped-ask'].includes(row.kind)) await knownFailure(250, () => noMachineIds(after, world))
+          else noMachineIds(after, world)
+        } catch (error) { failures.push(new Error(`${row.kind}/${key}: ${error.message}`)) }
+      }
+      if (failures.length) throw new AggregateError(failures, 'Unexpected terminal key results')
+    } finally { await world.close() }
+  })
+
+  test('L2 page: every button changes the page or writes a reason, including Copy with an empty box', async () => {
+    const world = makeWorld()
+    try {
+      block(world, { state: 'waiting', resume: 'synthetic-page-owner', dir: world.root, title: 'Publish page report', steps: ['- [?] Publish routes, OK?'] })
+      world.write('progress.md', world.read('progress.md') + '\n## docs-site\n### Publish docs\n- [ ] Check links\n')
+      const server = await serve.start(world)
+      const source = (await server.get(new URL(server.url).pathname + new URL(server.url).search)).body
+      const model = (await server.get('/api/board')).json().model
+      const createPage = () => pageDom(source, model, async request => {
+        const result = await server.post(request.path, request.body)
+        return { ok: result.status < 400, json: async () => result.json() }
+      })
+      const initial = await createPage()
+      const labels = initial.cards().flatMap(card => initial.buttons(card).map(button => ({ card: card.textContent.includes('Publish page report') ? 'Publish page report' : 'Publish docs', label: button.textContent })))
+      assert.ok(labels.length > 0)
+      for (const { card: title, label } of labels) {
+        const page = await createPage()
+        const card = page.cards().find(one => one.textContent.includes(title) && page.buttons(one).some(button => button.textContent === label))
+        assert.ok(card, `${title}: ${label}`)
+        const button = page.buttons(card).find(one => one.textContent === label)
+        const before = page.text()
+        button.click()
+        await page.flush()
+        const after = page.text()
+        const check = () => noSilentPress({ surface: 'page', card: title, button: label, before, after })
+        check()
+        noMachineIds(after, world)
+      }
+      const page = await createPage()
+      const card = page.cards().find(one => page.buttons(one).some(button => button.textContent === 'Copy'))
+      assert.ok(card, 'The fallback must expose a Copy action')
+      page.inputs(card)[0].value = 'Publish the synthetic routes'
+      const before = page.text()
+      page.buttons(card).find(button => button.textContent === 'Copy').click()
+      await page.flush()
+      assert.equal(page.copied.at(-1), 'Publish the synthetic routes')
+      noSilentPress({ surface: 'page', card: 'nonempty reply', button: 'Copy', before, after: page.text() })
+      for (const id of ['relay', 'paste-go']) {
+        const controls = await createPage()
+        const before = controls.node('.paste').textContent
+        controls.node(id).click()
+        await controls.flush()
+        assert.ok(!controls.node('.paste').textContent.includes(EN.pressPending), `${id} is still pending after flush()`)
+        const check = () => noSilentPress({ surface: 'page', card: 'board controls', button: id, before, after: controls.node('.paste').textContent })
+        check()
+        noMachineIds(controls.text() + controls.node('.paste').textContent, world)
+      }
+      const paste = await createPage()
+      paste.node('paste').value = 'Synthetic invalid paste'
+      const beforePaste = paste.node('.paste').textContent
+      paste.node('paste-go').click()
+      await paste.flush()
+      assert.ok(!paste.node('.paste').textContent.includes(EN.pressPending), 'paste-go with invalid paste is still pending after flush()')
+      noSilentPress({ surface: 'page', card: 'board controls', button: 'paste-go', before: beforePaste, after: paste.node('.paste').textContent })
+      const closing = await createPage()
+      const beforeClose = closing.text()
+      closing.node('close').click()
+      await closing.flush()
+      noSilentPress({ surface: 'page', card: 'board controls', button: 'close', before: beforeClose, after: closing.text() })
+      assert.match(closing.text(), /closed/i)
+    } finally { await world.close() }
+  })
+
+  test('L2 page: a stopped task without a question shows no answer box', async () => {
+    const world = makeWorld()
+    try {
+      block(world, { state: 'ended', title: 'Stopped route review', steps: ['- [ ] Check routes'] })
+      const server = await serve.start(world)
+      const model = (await server.get('/api/board')).json().model
+      assert.equal(model.asks.length, 0)
+      assert.equal(model.stopped.length, 1)
+      const page = await pageDom((await server.get(new URL(server.url).pathname + new URL(server.url).search)).body, model, async () => { assert.fail('Rendering must not post an action') })
+      const card = page.cards().find(one => one.textContent.includes('Stopped route review'))
+      assert.ok(card)
+      noMachineIds(page.text(), world)
+      await knownFailure('hold:stopped-answer-box', () => assert.equal(page.inputs(card).length, 0, card.textContent))
+    } finally { await world.close() }
+  })
+
+  test('L2 page: the status line never shows a session id or a file path', async () => {
+    const world = makeWorld()
+    try {
+      block(world, { state: 'ended', title: 'Resume route review', resume: 'synthetic-status-owner', dir: world.root, steps: ['- [ ] Check routes'] })
+      const server = await serve.start(world)
+      const page = await pageDom((await server.get(new URL(server.url).pathname + new URL(server.url).search)).body, (await server.get('/api/board')).json().model, async request => {
+        const result = await server.post(request.path, request.body)
+        return { ok: result.status < 400, json: async () => result.json() }
+      })
+      noMachineIds(page.text(), world)
+      const card = page.cards().find(one => one.className?.split(' ').includes('row') && one.textContent.includes('Resume route review'))
+      const button = page.buttons(card).find(one => /Copy resume/.test(one.textContent))
+      assert.ok(button)
+      const before = page.text()
+      button.click()
+      await page.flush()
+      noMachineIds(page.text(), world)
+      assert.ok(page.copied.at(-1).includes('codex resume synthetic-status-owner'))
+      noSilentPress({ surface: 'page', card: 'Resume route review', button: button.textContent, before, after: page.text() })
+      const result = card.childNodes.flatMap(node => [node, ...node.childNodes]).find(node => node.className?.split(' ').includes('press-result'))
+      assert.ok(result)
+      const status = result.textContent
+      assert.ok(status.length > 0)
+      noMachineIds(status, world)
+    } finally { await world.close() }
+  })
+
+  test('L2 chat: --chat shows stuck steps and done recently like the terminal board', async () => {
+    const world = makeWorld()
+    try {
+      block(world, { title: 'Review stuck route', steps: ['- [!] Waiting for synthetic credentials'] })
+      block(world, { session: 'd1000001', title: 'Finished route review', state: 'done', steps: ['- [x] Check routes'] })
+      const terminalText = await terminal.screen(world, ['--all'])
+      const result = await chat(world)
+      assert.equal(result.status, 0, result.stderr)
+      noMachineIds(terminalText, world)
+      noMachineIds(result.stdout, world)
+      assert.match(terminalText, /Waiting for synthetic credentials/)
+      assert.match(result.stdout, /Waiting for synthetic credentials/)
+      for (const [surface, text] of Object.entries({ terminal: terminalText, chat: result.stdout })) await knownFailure('hold:done-recently-summary', () => {
+        assert.match(text, /Done recently/, surface)
+        assert.match(text, /Finished route review/, surface)
+      })
+    } finally { await world.close() }
+  })
+
   test('a working day: each session shows one row with agent, project, task and state', async () => {
     const world = makeWorld()
     let server
