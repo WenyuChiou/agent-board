@@ -387,11 +387,16 @@ export const binaryImages = paths => {
   return output
 }
 
+export const reviewOf = body => {
+  const match = (body ?? '').match(/^Review:\s*(APPROVE|REQUEST CHANGES)\s+`?([0-9a-fA-F]{7,40})\b/m)
+  return match ? { kind: match[1], sha: match[2].toLowerCase() } : null
+}
+
 export const verdict = (comments, head) => {
   const output = result()
-  const last = comments.map(comment => comment.body.match(/^Review:\s*(APPROVE|REQUEST CHANGES)\s+([0-9a-f]{7,40})\b/m)).filter(Boolean).at(-1)
+  const last = comments.map(comment => reviewOf(comment.body)).filter(Boolean).at(-1)
   if (!last) output.info.push('review: no review verdict yet.')
-  else output.info.push(`review: ${last[1]} for ${last[2].slice(0, 7)}, ${head.startsWith(last[2]) ? 'the current head.' : 'an older head; the current head has no verdict yet.'}`)
+  else output.info.push(`review: ${last.kind} for ${last.sha.slice(0, 7)}, ${head.startsWith(last.sha) ? 'the current head.' : 'an older head; the current head has no verdict yet.'}`)
   return output
 }
 
