@@ -163,6 +163,7 @@ export type ServeRetained = { project: string; agent: string; task: string; text
 export type ServeTurn = { key: string; project: string; agent: string; text: string; isQuestion: boolean; info: string }
 
 export type ServeModel = {
+  warning?: string
   counts: { waiting: number; active: number; due: number; today: number }
   asks: ServeAsk[]
   hidden: ServeHidden[]
@@ -299,6 +300,7 @@ export const serveModel = (view: View, pending: readonly PendingTurn[], s: Strin
 
   return {
     counts: { ...view.overview, waiting: view.overview.waiting + remainingInbox(view, pending).filter(turn => turn.isQuestion).length },
+    warning: view.warning,
     asks,
     idle,
     stopped,
@@ -831,6 +833,7 @@ const PAGE_SCRIPT = String.raw`
       add(counts, add(el('span'), el('span', one[1] > 0 ? one[3] : 'quiet', one[0] + ' ' + one[1]), document.createTextNode(' ' + w(one[2]))));
     });
     board.textContent = '';
+    if (model.warning) add(board, el('p', 'n-due', model.warning));
     add(board, el('h2', 'n-waiting', '● ' + w('sectionWaiting')));
     if (model.asks.length === 0) add(board, el('div', 'n-today', w('nothingForYou')));
     model.asks.forEach(function (ask) { board.appendChild(askCard(ask)); });

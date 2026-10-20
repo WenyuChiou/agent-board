@@ -15,6 +15,246 @@ import { BOARD_SCRIPT } from '../hooks/board-script.ts'
 import { boardRun, geminiBoardCommand, normalizeCommandPath, opencodeBoardCommand } from '../hooks/board-commands.ts'
 import { RELEASED } from '../hooks/released.ts'
 
+const TORN_NOW = Date.parse('2026-10-20T12:00:00Z')
+const tornDay = () => '# Progress\r\n\r\n## Synthetic day\r\n### Hand task alpha\r\n- [ ] Plan\r\n\r\n### Hand task beta\r\n- [ ] Review\r\n\r\n' +
+  ['codex', 'cursor', 'gemini', 'grok', 'opencode', 'hermes', 'claude'].map((agent, i) =>
+    `<!-- auto session=${10000000 + i} agent=${agent} state=working updated=2026-10-20T12:00:00Z -->\r\n### Day task ${i + 1}\r\n- [ ] Next step\r\n${i === 6 ? '<!-- /auto se' : `<!-- /auto session=${10000000 + i} -->\r\n`}`,
+  ).join('\r\n')
+const tornFiles = dir => ({ files: Object.fromEntries(readdirSync(dir).filter(name => name === 'progress.md' || name.startsWith('progress.md.torn-')).map(name => [name, readFileSync(join(dir, name))])) })
+const tornChange = text => `Date.now = () => ${TORN_NOW}\n${text}`
+
+test('L5 torn tail: the board warns in one line and still shows every complete block', async () => {
+  const file = tornDay()
+  const warning = 'progress.md has a cut-off marker line; 1 task may be hidden'
+  for (const args of [[], ['--chat'], ['--keys', '']]) {
+    const ran = chatRun(args, { file: () => file, change: tornChange })
+    assert.equal(ran.status, 0, ran.stderr)
+    assert.equal(ran.stdout.split(warning).length - 1, 1, ran.stdout)
+    for (const title of ['Hand task alpha', 'Hand task beta', ...Array.from({ length: 7 }, (_, i) => `Day task ${i + 1}`)]) assert.ok(ran.stdout.includes(title), ran.stdout)
+  }
+  for (const [lang, words] of [['en', warning], ['zh-TW', 'progress.md 有一行標記未寫完，可能有 1 項工作未顯示'], ['zh-CN', 'progress.md 有一行标记未写完，可能有 1 项工作未显示']]) {
+    const ran = chatRun(['--chat'], { file: () => file, lang, change: tornChange })
+    assert.equal(ran.stdout.split(words).length - 1, 1, ran.stdout)
+  }
+  const watched = chatRun(['--watch'], { file: () => file, change: tornChange, preload: `const write = process.stdout.write.bind(process.stdout)
+process.stdout.write = (chunk, ...rest) => { const result = write(chunk, ...rest); if (String(chunk).includes('task may be hidden')) process.exit(0); return result }` })
+  assert.equal(watched.status, 0, watched.stderr)
+  assert.equal(watched.stdout.split(warning).length - 1, 1)
+  const html = htmlRun({ file, now: TORN_NOW })
+  assert.equal(html.split(warning).length - 1, 1)
+  for (let i = 1; i <= 7; i++) assert.ok(html.includes(`Day task ${i}`))
+  const board = await page(file, {}, [], TORN_NOW)
+  try {
+    const model = (await board.call('GET', '/api/board')).json().model
+    assert.equal(model.warning, warning)
+    for (let i = 1; i <= 7; i++) assert.ok([...model.groups.flatMap(group => group.rows), ...model.stopped].some(row => row.title === `Day task ${i}`))
+    const html = (await board.call('GET', `/?t=${board.token}`)).body
+    const dom = await pageDom(html, model)
+    assert.equal(dom.node('board').textContent.split(warning).length - 1, 1)
+  } finally { await board.close() }
+})
+
+test('an ordinary comment that starts with the word auto hides its lines as before and shows no warning', () => {
+  const file = '## P\n### Keep me\n<!-- auto archive of old work\n## Old\n### Old task\n-->\n'
+  for (const args of [[], ['--chat'], ['--keys', '']]) {
+    const board = chatRun(args, { file: () => file, change: tornChange })
+    assert.equal(board.status, 0, board.stderr)
+    assert.ok(board.stdout.includes('Keep me'), board.stdout)
+    assert.ok(!board.stdout.includes('Old task') && !board.stdout.includes('may be hidden'), board.stdout)
+  }
+  for (const [args, input] of [
+    [['--codex-event'], { session_id: 'synthetic-ordinary-239', hook_event_name: 'SessionStart' }],
+    [['--agent-status', '--agent', 'gemini'], { session_id: 'synthetic-ordinary-239', state: 'working' }],
+    [['--codex-report', '--session', 'synthetic-ordinary-239'], { project: 'P', title: 'New report', state: 'working', steps: ['- [ ] Next'] }],
+  ]) {
+    const ran = chatRun(args, { file: () => file, input: JSON.stringify(input), inspect: tornFiles })
+    assert.equal(ran.status, 0, ran.stderr)
+    assert.deepEqual(ran.files['progress.md'].subarray(0, Buffer.byteLength(file)), Buffer.from(file))
+    assert.deepEqual(Object.keys(ran.files), ['progress.md'])
+    const board = chatRun([], { file: () => ran.files['progress.md'], change: tornChange })
+    assert.equal(board.status, 0, board.stderr)
+    assert.ok(board.stdout.includes('Keep me'), board.stdout)
+    assert.ok(!board.stdout.includes('Old task') && !board.stdout.includes('may be hidden'), board.stdout)
+  }
+})
+
+test('a cut marker in the middle of the file is named without saying the end is cut', () => {
+  const file = '## P\n### Earlier task\n<!-- auto se\n## Later\n### Later task\n- [ ] Next\n'
+  for (const [lang, warning] of [
+    ['en', 'progress.md has a cut-off marker line; 1 task may be hidden'],
+    ['zh-TW', 'progress.md 有一行標記未寫完，可能有 1 項工作未顯示'],
+    ['zh-CN', 'progress.md 有一行标记未写完，可能有 1 项工作未显示'],
+  ]) {
+    const board = chatRun(['--chat'], { file: () => file, lang, change: tornChange })
+    assert.equal(board.status, 0, board.stderr)
+    assert.equal(board.stdout.split(warning).length - 1, 1, board.stdout)
+    assert.ok(board.stdout.includes('Earlier task') && board.stdout.includes('Later task'), board.stdout)
+    assert.doesNotMatch(board.stdout, /The end|結尾|结尾/)
+  }
+})
+
+test('L5 torn tail: a reporter append repairs the tail or reports why, never fails silently', () => {
+  for (const [args, payload] of [
+    [['--codex-event'], { session_id: 'synthetic-codex-239', hook_event_name: 'SessionStart' }],
+    [['--agent-status', '--agent', 'gemini'], { session_id: 'synthetic-gemini-239', state: 'working' }],
+  ]) {
+    const file = tornDay()
+    const ran = chatRun(args, { file: () => file, input: JSON.stringify(payload), inspect: tornFiles })
+    assert.equal(ran.status, 0, ran.stderr)
+    const repaired = ran.files['progress.md'].toString('utf8')
+    assert.ok(repaired.startsWith(file.slice(0, -'<!-- /auto se'.length)))
+    assert.ok(repaired.includes('<!-- /auto session=10000006 -->'))
+    assert.ok(repaired.includes('source='))
+    const failed = chatRun(args, { file: () => file, input: JSON.stringify(payload), inspect: tornFiles, preload: questionFault(`const open = fs.openSync
+fs.openSync = (file, ...rest) => { if (String(file).includes('.torn-')) throw Object.assign(new Error('denied'), { code: 'EACCES' }); return open(file, ...rest) }`) })
+    assert.equal(failed.status, 1)
+    assert.equal(failed.stderr.trim().split('\n').length, 1, failed.stderr)
+    assert.match(failed.stderr, /report could not be saved.*EACCES/i)
+    assert.equal(failed.files['progress.md'].toString('utf8'), file)
+  }
+})
+
+test('a cut end marker with later blocks after it still lets reporters write and keeps the file\'s bytes', () => {
+  const file = tornDay() + '\r\n\r\n## Later project\r\n<!-- auto session=abcdef12 agent=cursor state=working -->\r\n### Later complete task\r\n- [ ] Preserve\r\n<!-- /auto session=abcdef12 -->\r\n### Later hand task\r\n- [ ] Preserve too\r\n'
+  for (const [args, payload] of [
+    [['--codex-event'], { session_id: 'synthetic-later-239', hook_event_name: 'SessionStart' }],
+    [['--agent-status', '--agent', 'gemini'], { session_id: 'synthetic-later-239', state: 'working' }],
+    [['--codex-report', '--session', 'synthetic-later-239'], { project: 'Later report', title: 'New report', state: 'working', steps: ['- [ ] Next'] }],
+  ]) {
+    const ran = chatRun(args, { file: () => file, input: JSON.stringify(payload), inspect: tornFiles })
+    assert.equal(ran.status, 0, ran.stderr)
+    assert.equal(ran.stderr, '')
+    assert.deepEqual(ran.files['progress.md'].subarray(0, Buffer.byteLength(file)), Buffer.from(file))
+    assert.ok(ran.files['progress.md'].length > Buffer.byteLength(file))
+    assert.deepEqual(Object.keys(ran.files), ['progress.md'])
+    const board = chatRun([], { file: () => ran.files['progress.md'], change: tornChange })
+    assert.equal(board.status, 0, board.stderr)
+    assert.ok(board.stdout.includes('Later complete task') && board.stdout.includes('Later hand task'), board.stdout)
+    assert.match(board.stdout, /cut-off marker line/)
+  }
+})
+
+test('an old-style comment that starts like an auto marker still lets reporters write', () => {
+  for (const comment of ['<!-- auto archive of old work\n## Old\n-->\n', '<!-- auto session=abcdef12 agent=aider\n### Open task\n- [ ] Keep\n<!-- /auto session=abcdef12 -->\n']) {
+    const file = `## P\n### Earlier task\n- [ ] Next\n${comment}`
+    for (const [args, payload] of [
+      [['--codex-event'], { session_id: 'synthetic-comment-239', hook_event_name: 'SessionStart' }],
+      [['--agent-status', '--agent', 'gemini'], { session_id: 'synthetic-comment-239', state: 'working' }],
+    ]) {
+      const ran = chatRun(args, { file: () => file, input: JSON.stringify(payload), inspect: tornFiles })
+      assert.equal(ran.status, 0, ran.stderr)
+      assert.deepEqual(ran.files['progress.md'].subarray(0, Buffer.byteLength(file)), Buffer.from(file))
+      assert.ok(ran.files['progress.md'].toString('utf8').includes('source='))
+      assert.deepEqual(Object.keys(ran.files), ['progress.md'])
+      const board = chatRun([], { file: () => ran.files['progress.md'], change: tornChange })
+      assert.equal(board.status, 0, board.stderr)
+      assert.ok(board.stdout.includes('Earlier task'), board.stdout)
+      if (comment.includes('Open task')) assert.ok(board.stdout.includes('Open task'), board.stdout)
+    }
+  }
+})
+
+test('a failed fragment save leaves no extra file next to the board', () => {
+  for (const fault of [
+    `const open = fs.openSync
+const fragments = new Set()
+fs.openSync = (file, ...args) => { const fd = open(file, ...args); if (String(file).includes('.torn-')) fragments.add(fd); return fd }
+const write = fs.writeFileSync
+fs.writeFileSync = (file, data, ...args) => { if (fragments.has(file)) { write(file, data.subarray(0, 1)); throw Object.assign(new Error('disk full'), { code: 'ENOSPC' }) }; return write(file, data, ...args) }`,
+    `fs.fsyncSync = () => { throw Object.assign(new Error('sync failed'), { code: 'EIO' }) }`,
+    `const read = fs.readFileSync
+fs.readFileSync = (file, ...args) => { if (String(file).includes('.torn-')) throw Object.assign(new Error('read failed'), { code: 'EIO' }); return read(file, ...args) }`,
+    `const read = fs.readFileSync
+fs.readFileSync = (file, ...args) => String(file).includes('.torn-') ? Buffer.from('wrong bytes') : read(file, ...args)`,
+    `const rename = fs.renameSync
+fs.renameSync = (from, to) => { if (String(to).endsWith('progress.md')) throw Object.assign(new Error('rename failed'), { code: 'EACCES' }); return rename(from, to) }`,
+  ]) {
+    const file = tornDay()
+    const ran = chatRun(['--codex-event'], { file: () => file, input: JSON.stringify({ session_id: 'synthetic-cleanup-239', hook_event_name: 'SessionStart' }), inspect: tornFiles, preload: questionFault(fault) })
+    assert.equal(ran.status, 1, ran.stderr)
+    assert.equal(ran.stderr.trim().split('\n').length, 1, ran.stderr)
+    assert.deepEqual(ran.files['progress.md'], Buffer.from(file))
+    assert.deepEqual(Object.keys(ran.files), ['progress.md'])
+    assert.ok(!ran.wrote.some(name => name.startsWith('progress.md.')), ran.wrote.join('\n'))
+  }
+})
+
+test('a refused fragment save says nothing changed in every language', () => {
+  for (const [lang, message] of [['en', 'nothing changed'], ['zh-TW', '沒有改任何東西'], ['zh-CN', '没有改动任何内容']]) {
+    const file = tornDay()
+    const ran = chatRun(['--codex-event'], { lang, file: () => file, input: JSON.stringify({ session_id: 'synthetic-refusal-239', hook_event_name: 'SessionStart' }), inspect: tornFiles, preload: questionFault(`const read = fs.readFileSync
+fs.readFileSync = (file, ...args) => String(file).includes('.torn-') ? Buffer.from('wrong bytes') : read(file, ...args)`) })
+    assert.equal(ran.status, 1)
+    assert.ok(ran.stderr.includes(message), ran.stderr)
+    assert.deepEqual(ran.files['progress.md'], Buffer.from(file))
+    assert.deepEqual(Object.keys(ran.files), ['progress.md'])
+  }
+})
+
+test('an empty baked progress path uses the usual progress file', () => {
+  const ran = chatRun([], { change: text => `globalThis.AGENT_BOARD.path = ''\n${text}` })
+  assert.equal(ran.status, 0, ran.stderr)
+  assert.ok(ran.stdout.includes('Rate-limit the public endpoints'), ran.stdout)
+})
+
+test('a torn tail keeps every byte of the torn fragment in a file beside progress.md', () => {
+  for (const fragment of [Buffer.from('<!-- /auto se'), Buffer.from('<!-- auto session=partial agent=codex -->\r\n### 還沒寫完\r\n- [ ] Keep this\r\n'), Buffer.concat([Buffer.from('<!-- auto session=partial agent=codex -->\n### Cut UTF-8 '), Buffer.from([0xe4, 0xb8])])]) {
+    const prefix = tornDay().slice(0, -'<!-- /auto se'.length) + '<!-- /auto session=10000006 -->\r\n\r\n'
+    const file = Buffer.concat([Buffer.from(prefix), fragment])
+    const ran = chatRun(['--codex-event'], { file: () => file, input: JSON.stringify({ session_id: 'synthetic-bytes-239', hook_event_name: 'SessionStart' }), inspect: tornFiles })
+    assert.equal(ran.status, 0, ran.stderr)
+    const saved = Object.entries(ran.files).filter(([name]) => name.startsWith('progress.md.torn-'))
+    const isCompleteStart = fragment.toString('latin1').split('\n')[0].includes('-->')
+    assert.equal(saved.length, isCompleteStart ? 0 : 1)
+    if (isCompleteStart) assert.deepEqual(ran.files['progress.md'].subarray(0, file.length), file)
+    else assert.deepEqual(saved[0][1], fragment)
+    assert.deepEqual(ran.files['progress.md'].subarray(0, Buffer.byteLength(prefix)), Buffer.from(prefix))
+  }
+})
+
+test('a block without an end marker at the end of the file stays on the board and is not set aside', () => {
+  for (const ending of ['', '\n']) {
+    const file = `## P\n### Hand\n- [ ] Plan\n<!-- auto session=abcdef12 agent=aider state=working -->\n### Aider task\n- [ ] Keep${ending}`
+    const ran = chatRun(['--codex-event'], { file: () => file, input: JSON.stringify({ session_id: 'synthetic-valid-239', hook_event_name: 'SessionStart' }), inspect: tornFiles })
+    assert.equal(ran.status, 0, ran.stderr)
+    assert.ok(ran.files['progress.md'].toString('utf8').startsWith(file))
+    assert.deepEqual(Object.keys(ran.files), ['progress.md'])
+    const board = chatRun([], { file: () => ran.files['progress.md'], change: tornChange })
+    assert.ok(board.stdout.includes('Aider task') && board.stdout.includes('Hand'), board.stdout)
+    assert.ok(!board.stdout.includes('may be hidden'), board.stdout)
+  }
+})
+
+test('an invalid report leaves the cut marker untouched and creates no saved fragment', () => {
+  for (const [args, payload] of [[['--codex-event'], { session_id: 'bad' }], [['--codex-report', '--session', 'synthetic-invalid-239'], { title: '', steps: [] }]]) {
+    const file = tornDay()
+    const ran = chatRun(args, { file: () => file, input: JSON.stringify(payload), inspect: tornFiles })
+    assert.equal(ran.status, 1, ran.stderr)
+    assert.deepEqual(ran.files['progress.md'], Buffer.from(file))
+    assert.deepEqual(Object.keys(ran.files), ['progress.md'])
+  }
+})
+
+test('restoring a cut end marker preserves non-ASCII session bytes and report text', () => {
+  const file = '## P\n<!-- auto session=工作 agent=aider -->\n### Keep\n- [ ] Next\n<!-- /auto session='
+  const ran = chatRun(['--codex-report', '--session', 'synthetic-unicode-239'], { file: () => file, input: JSON.stringify({ project: '專案', title: '進度', state: 'working', steps: ['- [ ] 繼續'] }), inspect: tornFiles })
+  assert.equal(ran.status, 0, ran.stderr)
+  const saved = ran.files['progress.md'].toString('utf8')
+  assert.ok(saved.startsWith(file.slice(0, file.lastIndexOf('<!--')) + '<!-- /auto session=工作 -->\n'), saved)
+  assert.ok(saved.includes('## 專案') && saved.includes('### 進度') && saved.includes('- [ ] 繼續'), saved)
+})
+
+test('a reporter repairs the cut-off end and adds its report by replacing the board once', () => {
+  const ran = chatRun(['--codex-event'], { file: tornDay, input: JSON.stringify({ session_id: 'synthetic-atomic-239', hook_event_name: 'SessionStart' }), inspect: tornFiles, preload: questionFault(`const open = fs.openSync
+fs.openSync = (file, flags, ...rest) => { if (String(file).endsWith('progress.md') && flags !== 'r') throw new Error('IN_PLACE_WRITE'); return open(file, flags, ...rest) }
+const rename = fs.renameSync
+let replacements = 0
+fs.renameSync = (from, to) => { if (String(to).endsWith('progress.md') && ++replacements !== 1) throw new Error('SECOND_BOARD_WRITE'); return rename(from, to) }`) })
+  assert.equal(ran.status, 0, ran.stderr)
+  assert.ok(ran.files['progress.md'].toString('utf8').includes('source=codex-local'))
+  assert.equal(Object.keys(ran.files).filter(name => name.startsWith('progress.md.torn-')).length, 1)
+})
+
 test('the bundled release table excludes its current board fingerprint and retains historical ownership', () => {
   const version = JSON.parse(readFileSync(new URL('../.claude-plugin/plugin.json', import.meta.url))).version
   const current = RELEASED.find(release => release.version === version)
@@ -253,7 +493,7 @@ test('the HTML board shows only the agent and project for a pending turn without
 // `--chat` in a folder of its own, with the home folder, the temp folders and every XDG folder
 // inside it, so no run can read or write the real ones. `home` is a path inside it. `change`
 // edits the script's text first, to make it fail the way a bug in it would.
-const chatRun = (args, { file = () => FILE, beside = {}, lang = 'en', isFolder = false, change = text => text, inbox = {}, inboxTimes = {}, preload = '', inspect = () => ({}), isRelativePath = false, homeName = 'Jane Doe' } = {}) => {
+const chatRun = (args, { file = () => FILE, beside = {}, lang = 'en', isFolder = false, change = text => text, inbox = {}, inboxTimes = {}, preload = '', inspect = () => ({}), isRelativePath = false, homeName = 'Jane Doe', input = '' } = {}) => {
   const root = mkdtempSync(join(tmpdir(), 'board-chat-'))
   try {
     const home = join(root, homeName)
@@ -286,7 +526,7 @@ const chatRun = (args, { file = () => FILE, beside = {}, lang = 'en', isFolder =
     }
     const prelude = join(dirs['.claude'], 'fault.cjs')
     if (preload) writeFileSync(prelude, preload)
-    const ran = spawnSync(process.execPath, [...(preload ? ['--require', prelude] : []), script, ...args], { env, cwd: isRelativePath ? home : undefined, encoding: 'utf8', timeout: 20000 })
+    const ran = spawnSync(process.execPath, [...(preload ? ['--require', prelude] : []), script, ...args], { env, cwd: isRelativePath ? home : undefined, encoding: 'utf8', timeout: 20000, input })
     const modified = [...unchanged].filter(([name, old]) => !existsSync(join(dirs['.claude'], name)) || !readFileSync(join(dirs['.claude'], name)).equals(old.bytes) || statSync(join(dirs['.claude'], name)).mtimeMs !== old.mtime).map(([name]) => name)
     return { ...ran, home, path, modified, answered: existsSync(join(dirs['.claude'], 'progress-answered.json')) ? readFileSync(join(dirs['.claude'], 'progress-answered.json'), 'utf8') : null, wrote: readdirSync(dirs['.claude']).filter(name => !before.includes(name)), served: readdirSync(dirs.run), ...inspect(dirs['.claude']) }
   } finally {
@@ -898,14 +1138,14 @@ const GROK_ID = '01a14a94-0dee-7543-8208-991a4266a1da'
 // (XDG_RUNTIME_DIR, here one of the test's own), named for the progress.md it serves.
 const servedAt = (run, path) => join(run, `agent-board-${createHash('sha256').update(path).digest('hex').slice(0, 16)}.json`)
 
-const page = async (more = '', env = {}, serveArgs = []) => {
+const page = async (more = '', env = {}, serveArgs = [], now) => {
   const dir = mkdtempSync(join(tmpdir(), 'board-serve-'))
   const work = join(dir, 'api-gateway')
   mkdirSync(work)
   const run = join(dir, 'run')
   mkdirSync(run, { mode: 0o700 })
   const path = join(dir, 'progress.md')
-  const recent = new Date(Date.now() - 10 * 60 * 1000).toISOString().replace(/\.\d{3}Z$/, 'Z')
+  const recent = new Date((now ?? Date.now()) - 10 * 60 * 1000).toISOString().replace(/\.\d{3}Z$/, 'Z')
   writeFileSync(path, `# Progress
 
 ## api-gateway
@@ -933,7 +1173,7 @@ writeFileSync(${JSON.stringify(join(dir, 'grok-ran.json'))}, JSON.stringify({ ar
 setTimeout(() => process.stdout.write('Redis it is; wiring it up now.\\n'), 1000)
 `)
   const script = join(dir, 'agent-board.mjs')
-  writeFileSync(script, `globalThis.AGENT_BOARD = ${JSON.stringify({ path, lang: 'en' })}\n${BOARD_SCRIPT}`)
+  writeFileSync(script, `globalThis.AGENT_BOARD = ${JSON.stringify({ path, lang: 'en' })}\n${now === undefined ? '' : `Date.now = () => ${now}\n`}${BOARD_SCRIPT}`)
   const child = spawn(process.execPath, [script, '--serve-child', ...serveArgs], {
     env: { ...process.env, CLAUDE_PROGRESS_FILE: '', NO_COLOR: '1', AGENT_BOARD_GROK: stand, AGENT_BOARD_CODEX: stand, XDG_RUNTIME_DIR: run, ...env },
     stdio: ['ignore', 'pipe', 'pipe'],

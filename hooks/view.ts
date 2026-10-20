@@ -167,6 +167,7 @@ export type RowGroup = { project: string; isHere: boolean; rows: TaskRow[]; summ
 export type Overview = { waiting: number; active: number; due: number; today: number; idle: number; stopped: number }
 
 export type View = {
+  warning?: string
   current: CurrentView | null
   pr: PrView | null
   overview: Overview

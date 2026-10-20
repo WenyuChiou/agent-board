@@ -89,6 +89,8 @@ export type ProgressTask = {
 
 export type ProgressProject = { name: string; tasks: ProgressTask[] }
 
+export type ProgressTail = { offset: number; tasks: number; close: string | null }
+
 export type ProgressSnapshot = {
   path: string
   isMissing: boolean
@@ -96,6 +98,7 @@ export type ProgressSnapshot = {
   mtimeMs: number
   size: number
   projects: ProgressProject[]
+  tornTail?: ProgressTail | null
 }
 
 // One task of Claude's own list (TaskCreate / TaskUpdate / TodoWrite), as the mod mirrors it.

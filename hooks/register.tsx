@@ -65,7 +65,7 @@ import {
   stateOf,
 } from './mirror'
 import type { ListedTask } from './mirror'
-import { baseName, countSteps, doneKey, isHereProject, isTaskComplete, parseProgress, STALE_MS } from './parse'
+import { baseName, countSteps, doneKey, isHereProject, isTaskComplete, parseProgress, progressTail, STALE_MS } from './parse'
 import type { ProgressProject } from '../types'
 import { dashboardHtml } from './dashboard'
 import { peekInbox, redact } from './board'
@@ -720,7 +720,8 @@ const poll = async ($: EngineInterface): Promise<void> => {
       return
     }
     try {
-      const projects = parseProgress(await $.fs.read(path))
+      const source = await $.fs.read(path)
+      const projects = parseProgress(source)
       await update($, snapshot, () => ({
         path,
         isMissing: false,
@@ -728,6 +729,7 @@ const poll = async ($: EngineInterface): Promise<void> => {
         mtimeMs: stat.mtimeMs,
         size: stat.size,
         projects,
+        tornTail: progressTail(source),
       }))
       await pollSeen($, path, projects, true)
       await pollAnsweredQuestions($, path, projects)
@@ -784,7 +786,10 @@ const writeDashboard = async ($: EngineInterface, force = false): Promise<string
   const path = dashboardPath(snap.path || (await progressPath($)))
   if (!force && at - dashboardAt < 60 * 1000) return path
   const s = await wordsOf($)
-  const view = buildView(snap.projects, [], null, at, await read($, today), await read($, doneSeen), s, await read($, hiddenAsks), await read($, firstSeen), await read($, questionLedger), await questionProofsFor($, snap.path || (await progressPath($))), await pendingTurns($))
+  const view = {
+    ...buildView(snap.projects, [], null, at, await read($, today), await read($, doneSeen), s, await read($, hiddenAsks), await read($, firstSeen), await read($, questionLedger), await questionProofsFor($, snap.path || (await progressPath($))), await pendingTurns($)),
+    ...(snap.tornTail ? { warning: s.progressIncomplete(snap.tornTail.tasks) } : {}),
+  }
   const pending = await pendingTurns($)
   const date = new Date(at)
   const html = dashboardHtml(view, s, snap.path, s.dashStamp(`${localDay(at)} ${pad2(date.getHours())}:${pad2(date.getMinutes())}`), pending)
@@ -2717,7 +2722,10 @@ export const register: Register = (on, options) => {
     const at = (await read($, now)) || (await $.clock.now())
     const s = await wordsOf($)
     const palette = paletteFor(await read($, theme))
-    const view = buildView(snap.projects, await read($, here), await read($, mine), at, await read($, today), await read($, doneSeen), s, await read($, hiddenAsks), await read($, firstSeen), await read($, questionLedger), await questionProofsFor($, snap.path || (await progressPath($))), await pendingTurns($))
+    const view = {
+      ...buildView(snap.projects, await read($, here), await read($, mine), at, await read($, today), await read($, doneSeen), s, await read($, hiddenAsks), await read($, firstSeen), await read($, questionLedger), await questionProofsFor($, snap.path || (await progressPath($))), await pendingTurns($)),
+      ...(snap.tornTail ? { warning: s.progressIncomplete(snap.tornTail.tasks) } : {}),
+    }
     const ui: PaneUi = {
       Box: table.Box,
       Text: table.Text,
