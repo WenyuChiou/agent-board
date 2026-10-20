@@ -143,6 +143,34 @@ test('independent prompt metadata answers questions while ordinary activity and 
   assert.ok(!readFileSync(record, 'utf8').includes('PRIVATE_NEW_INPUT'))
 }))
 
+test('native board prompt commands preserve the waiting question and store no incoming words', () => fixture(f => {
+  assert.equal(f.install('--apply').status, 0)
+  assert.equal(f.event('UserPromptSubmit', 'initial-turn').status, 0)
+  assert.equal(f.report('waiting', ['- [?] Choose database', '- [ ] Continue']).status, 0)
+  for (const prompt of ['$agent-board', '/board', '/agent-board', ' \n/board\n ']) {
+    assert.equal(f.event('UserPromptSubmit', 'board-turn', { prompt }).status, 0)
+    assert.match(readFileSync(f.progress, 'utf8'), /state=waiting/)
+    assert.match(readFileSync(f.progress, 'utf8'), /- \[\?\] Choose database/)
+  }
+  assert.equal(f.event('Stop', 'board-turn').status, 0)
+  assert.equal(f.event('UserPromptSubmit', 'real-turn', { prompt: 'PRIVATE_REAL_ANSWER' }).status, 0)
+  assert.match(readFileSync(f.progress, 'utf8'), /- \[x\] Choose database/)
+  assert.ok(!readFileSync(f.progress, 'utf8').includes('PRIVATE_REAL_ANSWER'))
+  for (const agent of ['cursor', 'grok', 'muse', 'gemini']) {
+    assert.equal(f.install('--agent', agent, '--apply').status, 0)
+    const owner = `board-${agent}-session-123`
+    assert.equal(f.command(['--codex-report', '--agent', agent, '--session', owner], { title: 'Native task', state: 'waiting', steps: ['- [?] Native decision', '- [ ] Continue'] }).status, 0)
+    const prompt = agent === 'gemini' ? 'Show me the Agent Board below exactly as it is, in a code block, with the link to the board you can click from its last line. Then tell me in one sentence what needs me first. Do not change any file.\n\nProgress  ● 1 waiting  ▸ 0 in progress  ⚑ 0 due soon  ✓ 0 done today' : '$agent-board'
+    const payload = agent === 'cursor' ? { conversation_id: owner, generation_id: 'board-turn', hook_event_name: 'beforeSubmitPrompt', prompt: '/board' } : { session_id: owner, hook_event_name: agent === 'gemini' ? 'BeforeAgent' : 'UserPromptSubmit', prompt }
+    const args = agent === 'cursor' ? ['--codex-event', '--agent', agent] : ['--agent-status', '--agent', agent, '--state', 'working']
+    assert.equal(f.command(args, payload).status, 0, agent)
+    assert.match(readFileSync(f.progress, 'utf8'), /- \[\?\] Native decision/, agent)
+    const blocks = readFileSync(f.progress, 'utf8').split('<!-- auto ').filter(block => block.includes(`resume=${owner}`))
+    assert.equal(blocks.length, 1)
+    assert.match(blocks[0], /state=waiting/, agent)
+  }
+}))
+
 test('Codex-only setup previews every persistent change without writing', () => fixture(f => {
   const plan = f.install()
   assert.equal(plan.status, 0, plan.stderr)

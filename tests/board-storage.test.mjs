@@ -1,6 +1,7 @@
 // Real bundled CLI subprocesses in disposable homes; only the requested filesystem calls
 // are fault-injected. These are not live agent sessions or actual disk/permission failures.
 import { spawnSync } from 'node:child_process'
+import { createHash } from 'node:crypto'
 import { chmodSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -61,6 +62,36 @@ test('--tidy reports failed persistence and retries an archive-first sweep witho
   assert.ok(!readFileSync(paths.board, 'utf8').includes('### Old done'))
   assert.equal(readFileSync(paths.archive, 'utf8').split('### Old done').length - 1, 1)
 }))
+
+test('--tidy archives eligible blocks when completion observations cannot be read and preserves manual tasks', () => {
+  for (const code of ['EACCES', 'EIO', null]) fixture(({ dir, paths, play }) => {
+    const manual = '### Completed manual\n- [x] Finished\n'
+    const block = `<!-- auto session=a1b2c315 agent=codex state=done updated=${new Date(NOW - 13 * 3600000).toISOString()} -->\n### Old done\n- [x] Finished\n<!-- /auto session=a1b2c315 -->\n`
+    writeFileSync(paths.board, `## Synthetic\n${manual}${block}`)
+    const seen = join(dir, 'progress-seen.json')
+    const key = createHash('sha256').update(JSON.stringify(['Synthetic', 'Completed manual', [['done', 'Finished']]])).digest('hex')
+    const record = JSON.stringify({ seen: { [key]: NOW - 25 * 3600000 } })
+    writeFileSync(seen, record)
+    const fault = `const original = fs.readFileSync\nfs.readFileSync = (file, ...args) => { if (String(file) === ${JSON.stringify(seen)}) throw Object.assign(new Error('injected observation read failure'), ${JSON.stringify(code === null ? {} : { code })}); return original(file, ...args) }`
+    const result = play('', fault, 'en', false, ['--tidy'])
+    assert.equal(result.error, undefined)
+    assert.equal(result.status, 0, result.stdout + result.stderr)
+    assert.equal(result.stderr, '')
+    const after = readFileSync(paths.board, 'utf8')
+    assert.ok(after.includes(manual), after)
+    assert.ok(!after.includes('### Old done'), after)
+    const archive = readFileSync(paths.archive, 'utf8')
+    assert.ok(archive.includes('### Old done'), archive)
+    assert.ok(!archive.includes('### Completed manual'), archive)
+    assert.equal(readFileSync(seen, 'utf8'), record)
+    assert.equal(readFileSync(paths.journal, 'utf8'), HISTORY)
+    const again = play('', fault, 'en', false, ['--tidy'])
+    assert.equal(again.status, 0, again.stdout + again.stderr)
+    assert.equal(readFileSync(paths.board, 'utf8'), after)
+    assert.equal(readFileSync(paths.archive, 'utf8'), archive)
+    assert.equal(readFileSync(seen, 'utf8'), record)
+  })
+})
 
 test('Confirm done leaves every step open when its journal cannot be replaced and retries without duplicate ticks', () => fixture(({ paths, play }) => {
   const file = FILE + '- [~] Second new step\n- [-] Canceled\n- [x] Already done\n'

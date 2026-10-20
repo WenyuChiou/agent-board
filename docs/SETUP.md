@@ -48,11 +48,18 @@ page. Choosing this command authorizes the normal sweep: done agent blocks older
 12 hours and stopped blocks older than 3 days move to the monthly archive beside the
 selected progress file. Unanswered questions, incomplete blocks and missing/future
 timestamps stay. Completed hand-kept tasks use their recorded first-observation times
-and the plugin's one-day threshold; unknown times stay, and this command invents none.
+and the plugin's one-day threshold; this is an observation, not the exact completion time.
+The pane, `--watch` or `--serve` must first observe the completed task and save its fingerprint
+in `progress-seen.json`. A machine that runs only scheduled `--tidy` never records that
+observation, so unobserved hand-kept tasks stay even after repeated sweeps. The command
+does not create or update the observation file. Unknown, future or unreadable observations
+keep manual tasks; an unreadable observation file stays untouched and does not prevent
+eligible agent blocks from being archived.
 Archive entries are saved before removing work from the board, and repeated runs do
 not duplicate them. A failed persistence operation exits nonzero; retain the files and
 retry after fixing its reported problem. `--chat` remains read-only even with `--tidy`.
-The explicit interactive tidy still archives finished work immediately.
+`--tidy` takes precedence over `--serve`, `--watch` and `--html`, so those combinations
+run only the sweep. The explicit interactive tidy still archives finished work immediately.
 
 For maintenance, the installed program retains the compatibility flags
 `--codex-doctor --agent <name>` and `--codex-remove --agent <name>`; removal previews

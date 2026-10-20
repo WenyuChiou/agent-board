@@ -63,6 +63,27 @@ jobs:
         if: runner.os != 'Windows' && matrix.node == 24
         run: npx --yes bun@1.4.2 scripts/build-released.ts --check
 
+  # The tests of scripts/pr-check.mjs, in a job of their own: the exchange job on Windows
+  # already uses most of its five minutes.
+  pr-check-tests:
+    name: pr-check tests (${{ matrix.os }}, Node ${{ matrix.node }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        node: [22, 24]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: ${{ matrix.node }}
+      - name: PR check tests
+        run: node --test tests/pr-check.test.mjs
+
   plugin:
     name: plugin (${{ matrix.os }})
     strategy:

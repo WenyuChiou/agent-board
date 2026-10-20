@@ -160,8 +160,10 @@ and LAN pages. `tests/board.test.mjs`
 checks the prompt above and the page's copy match word for word.
 
 The page requires a real UTC source time ending in `Z`. Missing, invalid,
-timezone-free or future times are refused: check both clocks and ask the reporter
-for a corrected current report. Do not use paste time as event time. If the
+timezone-free or future times are refused, and so is a `working` or `waiting`
+block more than three days behind the board (it would arrive already old enough
+to archive); `done` and `ended` blocks still merge as history. Check both clocks
+and ask the reporter for a corrected current report. Do not use paste time as event time. If the
 existing board copy has an unknown or future clock, the page shows both reports
 for explicit comparison before replacement. That confirmation applies only to
 the exact pair reviewed; changing either report requires a new comparison. It
@@ -178,7 +180,7 @@ fallback for incomparable historical timestamps above.
 | A concurrent write drops a merged block | The merge reads, changes only its blocks, writes, reads back and retries up to 3 times. A pane write that lands *after* the read-back can still drop the merged block; it comes back on the next merge, because merges are idempotent. There is no lock | Mitigated, not prevented |
 | Two writers on the *same* block | Must not happen: one writer owns one session. Different blocks never conflict, since each writer replaces only its own | By construction |
 | A merge rewriting something that only looks like a block | The scanner reads like `hooks/parse.ts`: blocks in code fences or HTML comments are skipped; CRLF, `<!--auto` and any attribute order are read | Implemented and tested |
-| Clock skew across machines | `updated=` must be UTC; clock skew can decide which block wins, so a clock ahead can cause later work to be skipped as older. A skip still exits 0: read the `session <id>: ...` lines. The reporter advances each timestamp by at least one second from its previous fragment to avoid same-second ties; bursts of updates can put it ahead of the clock | Documented |
+| Clock skew across machines | `updated=` must be UTC; clock skew can decide which block wins, so a clock ahead can cause later work to be skipped as older, and a clock more than three days behind makes the board refuse a live paste. A skip still exits 0: read the `session <id>: ...` lines. The reporter advances each timestamp by at least one second from its previous fragment to avoid same-second ties; bursts of updates can put it ahead of the clock | Documented |
 | Truncated or malformed fragment | Validated before merge; an invalid fragment is refused outright, never partly applied. Text with newlines, control characters or comment markers is refused when the fragment is built | Implemented and tested |
 | Replay (same fragment delivered twice) | Idempotent merge | Implemented and tested |
 | Stale session looking live | The pane already shows a `working`/`waiting` block untouched for 12 hours as stopped; reporters must not fake heartbeats | Format rule |

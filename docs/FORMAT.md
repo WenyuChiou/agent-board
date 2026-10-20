@@ -46,9 +46,11 @@ A step that comes before any `###` goes into a task with no title. A step or tas
 **Ignored regions.**
 
 - Fenced code. A line that starts (after optional spaces) with three backticks or three tildes toggles the fence, whichever character opens or closes it. Everything between, and the fence lines themselves, are skipped. An unclosed fence hides the rest of the file.
-- HTML comments. `<!-- … -->` is removed from a line, and a comment that opens without closing hides lines until `-->`. Block markers and the optional question revision annotation below are read first as whole lines.
+- HTML comments. `<!-- … -->` is removed from a line, and a comment that opens without closing hides lines until `-->`, except for the cut-marker rule below. Block markers and the optional question revision annotation below are read first as whole lines.
 
 A tool that rewrites the file skips the same regions: a marker or heading inside a fence or a comment (a block pasted as an example) is never replaced, moved or archived.
+
+A line beginning with `<!--`, with no `-->`, is checked for a cut marker after removing trailing spaces, tabs and carriage returns, then removing `<!--` and any number of spaces or tabs, or none, immediately after it. The remaining text must be nonempty and either a strict prefix of `auto session=`, `/auto session=` or `question=`, or begin with one of those complete starts. Thus `<!-- aut`, `<!-- auto`, `<!-- auto se` and `<!-- /auto session=ab` count; `<!-- auto archive of old work` does not. A bare `<!--` remains an ordinary comment opening. U+0085 after `<!--`, and U+FEFF or U+001F after `auto`, remain ordinary comment text. Outside a fence or an already open comment, a cut marker is read as a plain text line and does not open a comment when no later `-->` exists, or a whole-line block start, block end or `##` project heading appears before or on the first later line containing `-->`. This look-ahead also counts whole-line block starts, block ends, `##` project headings and `-->` inside a code fence. Following tasks and blocks then remain visible, and every board surface warns with an estimated count of potentially hidden tasks (at least one). Otherwise it remains an ordinary comment. Removing only a start marker's ` -->` therefore exposes its task if its end marker supplies that boundary. A complete start marker without an end marker is valid and causes no warning or saved fragment. Native reporters repair only a cut marker followed by whitespace alone: inside the report lock, after validating the report, they save the exact cut-off end in `progress.md.torn-<date>-<unique id>`, remove the cut line and the blank lines after it, and write the full `<!-- /auto session=ID -->` only when the cut text is the start of the open block's own end marker. They replace the board once with that text and the new report, preserving earlier bytes. When text follows the cut, reporters skip the repair, save no fragment, and keep the existing bytes while adding the new report; the board continues to warn and shows later tasks and reports. A refused repair or failed save leaves the board intact and returns a one-line error and a nonzero status. A fragment created by a failed write, sync, read-back or board replacement is removed if possible.
 
 **Names.** A project name is its heading text. The pane puts the current session's project first. A heading belongs to a session's project when the heading's first word (up to the first space, `(`, `（`, `·` or `—`, compared without case) equals the repository name, the repository folder name, or the session folder name. `## persona_framework (PFC)` belongs to a session in the repository `persona_framework`. Name your project heading after the repository.
 
@@ -203,20 +205,20 @@ Put the block under the `## project` heading of its repository, after what is al
 |---|---|---|
 | `working` | The agent is running now. | Shows the task as being worked on (`Claude is working`, or `<agent> is working`). `[?]` steps are still listed as questions. |
 | `waiting` | The agent stopped and steps remain. It is the person's turn. | Lists the block's `[?]` steps under "Waiting on you". With none, the task stays with the work in progress, showing its next, running or current step. |
-| `done` | Every step is finished. | Lists the task as recently finished for up to a day after `updated`, and archives it. |
+| `done` | The agent reports that its work is finished; questions may remain in the report. | Lists the task as recently finished for up to a day after `updated`. Tasks that still report questions then stay under Stopped with Archive available, including resolved or hidden questions. |
 | `ended` | The session closed with steps left. | Shows the task as left behind and open to take over, with its open steps. |
 
-A task with all steps done is shown as finished whatever its `state` says, but only `state=done` makes the block leave after 12 hours.
+A task with all steps done is shown as finished whatever its `state` says, but only `state=done` makes the block leave after 12 hours, unless it still has a `[?]` step.
 
 ## Lifecycle
 
 ### Stopped sessions
 
-A block in state `working` or `waiting` whose `updated` is more than 12 hours old is treated as `ended`: the pane says the session stopped. Its unresolved `[?]` steps follow their own observation age rather than connection freshness. Nothing in the file changes. Writing the block again (new `updated`) brings it back. This covers agents that crash or whose terminal closes before they can write `state=ended`.
+A block in state `working` or `waiting` whose `updated` is more than 12 hours old is treated as `ended`: the pane says the session stopped. Its unresolved `[?]` steps leave Waiting on you and stay with the task under Stopped. The pane's own session stays live, including immediately after a resume. Questions from another ended or done session do the same; a done task keeps them in its recent-completion entry while shown there. Resolve on the pane closes one question. Nothing in the file changes. Writing the block again (new `updated`) brings it back. This covers agents that crash or whose terminal closes before they can write `state=ended`.
 
 ### Unanswered question visibility
 
-Question identities and full source snapshots live in the additive `progress-questions.json` sidecar. Through exactly 3 days after durable first observation, unresolved questions stay prominent; after 3 days through exactly 7 days they move to a grouped reminder; after 7 days they leave main actionable counts and remain discoverable in the older unanswered shelf. Opening that shelf never resets age. Own, external/cloud, manual and pending inbox sources share this policy. Heartbeats, duplicate imports, reconnects, whitespace and unrelated updates never refresh the baseline. Explicit producer renewal or a substantively new ask gets a fresh incarnation. An unknown/future observation clock stays conservatively visible; block `updated` and inbox file time never stand in for ask age. Manual hidden state remains separate from automatic aging. No visibility change answers, approves, completes, cancels or sends anything.
+Question identities and full source snapshots live in the additive `progress-questions.json` sidecar. Through exactly 3 days after durable first observation, unresolved questions stay prominent; after 3 days through exactly 7 days they move to a grouped reminder; after 7 days they leave main actionable counts and remain discoverable in the older unanswered shelf. Opening that shelf never resets age. Own running sessions, live external/cloud sessions, manual tasks and pending inbox questions share this policy. Stopped, ended and done sessions keep their questions with the task instead. Heartbeats, duplicate imports, reconnects, whitespace and unrelated updates never refresh the baseline. Explicit producer renewal or a substantively new ask gets a fresh incarnation. An unknown/future observation clock stays conservatively visible; block `updated` and inbox file time never stand in for ask age. Manual hidden state remains separate from automatic aging. No visibility change answers, approves, completes, cancels or sends anything.
 
 Complete source snapshots and immutable retired/consumed proof files are retained without age pruning. Read-only readers do not create baselines. Duplicate manual task titles without producer identities remain ambiguous and visible. Explicit archival requires a complete durable source copy; failed storage leaves the source intact. Archived unresolved questions remain recoverable with their original age.
 
@@ -234,11 +236,13 @@ Old work moves out of `progress.md` into a monthly file in the same folder, so t
 |---|---|
 | A block with `state=done` | More than 12 hours after `updated` |
 | A block in any other state (`working`, `waiting`, `ended`) | More than 3 days after `updated` |
-| A hand-kept task whose steps are all done | 24 hours after the pane first saw every step done (the pane keeps that time itself, not in the file) |
+| A hand-kept task whose steps are all done | At least 24 hours after the recorded observation of every step done: the pane uses its own record; standalone `--tidy` uses that task's fingerprint in `progress-seen.json` |
 
-Automatic sweeps never move a block containing a visible unresolved `[?]` step, including a block labelled done. Only blocks with their end marker move. A block without one stays until someone fixes it. A block whose `updated` is missing or unreadable never moves. The session that is running the sweep never moves its own block.
+Automatic sweeps never move a block containing a visible unresolved `[?]` step, including a block labelled done. Only blocks with their end marker move. A block without one stays until someone fixes it. A block whose `updated` is missing, unreadable or in the future never moves. A pane sweep keeps its own session's block; standalone `--tidy` has no current-session exemption.
 
-The sweep runs when a Claude Code session with the mod starts, once an hour while it stays open, on `/progress 整理` (also `/progress tidy` and `/progress archive`) and when the person presses "Archive now" in the pane. If no such session is running, nothing is archived and nothing is lost.
+The normal sweep runs when a Claude Code session with the mod starts, once an hour while it stays open, or once when the standalone board runs with `--tidy`. The standalone command needs no Claude session and installs no scheduler. `/progress 整理` (also `/progress tidy` and `/progress archive`) and "Archive now" in the pane request an immediate interactive tidy instead.
+
+The pane, `--watch` and `--serve` record manual-task fingerprint observations in `progress-seen.json`. `--tidy` only reads that record, never creates or refreshes it, and retains manual tasks with unknown or future observations. A machine running only scheduled `--tidy` therefore never archives a completed hand-kept task that has not been observed by one of those interactive readers. An unreadable observation file is left untouched; manual tasks stay, while eligible dated agent blocks can still move. The recorded time is a first observation of that completed fingerprint, not proof of its exact completion time.
 
 The archive file is named after `progress.md`: `progress-archive-YYYY-MM.md`, in the same folder. For `CLAUDE_PROGRESS_FILE=/work/board.md` it is `/work/board-archive-YYYY-MM.md`. The month is the local month of the sweep. A new archive file starts with the archive title in the pane's language (`# 進度封存` in zh-TW; see [Language](#language)) and a blank line. Each moved task is added as
 
@@ -249,7 +253,7 @@ The archive file is named after `progress.md`: `progress-archive-YYYY-MM.md`, in
 - [x] …
 ```
 
-that is, the block without its markers under a heading with the project and the local date of `updated`, the same clock as the file's month. For a hand-kept task the date is the local day the pane first saw it done, and the entry runs from its `###` line to its last non-blank line before the next heading or block. Whenever a sweep moves something, it also collapses the blank lines it left. A `##` section that the sweep itself left with nothing in it (only blank lines) is removed with its heading. A `##` section the sweep did not take anything from is left alone, even when it is empty, so a person's bare heading stays. The same rule applies when the pane removes a session's block because its list became empty.
+that is, the block without its markers under a heading with the project and the local date of `updated`, the same clock as the file's month. For a hand-kept task the date is the local day of the completion observation used by that sweep, or today for an immediate interactive tidy with no recorded observation, and the entry runs from its `###` line to its last non-blank line before the next heading or block. Whenever a sweep moves something, it also collapses the blank lines it left. A `##` section that the sweep itself left with nothing in it (only blank lines) is removed with its heading. A `##` section the sweep did not take anything from is left alone, even when it is empty, so a person's bare heading stays. The same rule applies when the pane removes a session's block because its list became empty.
 
 ### Journal
 
@@ -275,8 +279,8 @@ What the pane's writer puts in the file, by language:
 | | `en` | `zh-TW` | `zh-CN` |
 |---|---|---|---|
 | Title of a file the pane creates | `# Project progress` | `# 專案進度` | `# 项目进度` |
-| First `>` line of a block, by `state`: `working` | `Claude is working` | `Claude 正在做` | `Claude 正在做` |
-| `waiting` | `waiting on your reply` | `等你回覆` | `等你回复` |
+| First `>` line of a block, by `state`: `working` | `Claude is working` (another agent's block: its name, e.g. `Codex is working`) | `Claude 正在做` (另一個 agent：它的名字，例如 `Codex 正在做`) | `Claude 正在做` (另一个 agent：它的名字，例如 `Codex 正在做`) |
+| `waiting` | `Waiting for your next message` | `等你回覆` | `等你回复` |
 | `done` | `done` | `完成` | `完成` |
 | `ended` | `session ended, can be taken over` | `對話已結束，可接手` | `对话已结束，可接手` |
 | Pull request in that line | `PR #482 · CI running` | `PR #482 · CI 跑中` | `PR #482 · CI 运行中` |
@@ -374,7 +378,7 @@ Two projects, two agent blocks and a hand-kept task. The Claude block has a pull
 
 <!-- auto session=2be48af2 agent=claude state=waiting updated=2026-10-16T14:32:05.123Z resume=2be48af2-6193-5040-aacc-e0546d6784f1 dir=%2Fhome%2Fana%2Fcheckout-service pr=482 ci=pending -->
 ### Make the payment webhook idempotent
-> waiting on your reply · fix/webhook-retry · PR #482 · CI running
+> Waiting for your next message · fix/webhook-retry · PR #482 · CI running
 > Context: Duplicate charges happen when the provider retries a webhook; one delivery must charge once.
 - [x] Reproduce the duplicate charge
 - [x] Add the idempotency key table
@@ -415,7 +419,7 @@ How the pane reads it:
 - `checkout-service (payments)` is the project of a session in the repository `checkout-service`. The Claude block is `waiting`, so the pane lists its `[?]` step under "Waiting on you". That step is a `choose` with the options "24 hours" and "7 days". The block's `pr=482 ci=pending` is the pull request and the state of its checks. Its background is the `Context:` line.
 - The Codex block is `working`, so the pane words it `codex is working` and shows the label `codex` beside it. Its 7 steps are counted flat, 2 of them done; the three nested steps count like any other. Its `[?]` step is an `input` (the words hold `key`). The pane lists it as a question to answer in the Codex session.
 - The job-search task is hand-kept. It is due `2026-10-31`, so it moves to "due soon" once that is 14 days away. Its `[?]` step is a `wait`: the pane offers one button, and pressing it changes the line to `[x]`. The other note, "Referral from Priya. Recruiter is Sam.", is its background.
-- The Claude block's first note (`waiting on your reply · …`) is for people reading the file. The pane's own writer puts the state, branch and pull request there, in the pane's language (this is the English form). The pane does not read it.
+- The Claude block's first note (`Waiting for your next message · …`) is for people reading the file. The pane's own writer puts the state, branch and pull request there, in the pane's language (this is the English form). The pane does not read it.
 
 ## Writing a block from another agent
 
@@ -439,7 +443,7 @@ This is version 1. The file carries no version field. What the version means is 
 
 A change to this page must keep every file that is valid today valid and read the same way. New metadata goes on the start marker or in an optional standalone hidden comment, where readers that do not know it ignore it. New visible marks, states and line shapes are not backward-compatible and need a new version. Contributors: see [CONTRIBUTING.md](../CONTRIBUTING.md).
 
-Full-source evidence is additive companion storage: progress-questions-source-<SHA-256-of-exact-bytes>.json contains version 1, an unresolved/resolved/archived disposition and the full scoped question incarnation/source record. Resolved receipts apply only to that exact ID. Writers keep and read back the immutable content-addressed copy before inbox cleanup or explicit archive; readers enumerate the full family without completeness caching and merge captures with the mutable index. End events are connection evidence, never answer evidence, including same-batch/end-only questions and multiple asks per owner. Keep this entire family with identity, acknowledgement and retired/consumed proofs in backups; never age-prune it. Corrupt/unreadable captures refuse cleanup and new hides. FORMAT v1 progress.md is unchanged.
+Full-source evidence is additive companion storage: progress-questions-source-<SHA-256-of-exact-bytes>.json contains version 1, an unresolved/resolved/archived disposition and the full scoped question incarnation/source record. Resolved receipts apply only to that exact ID; receipts written by Resolve include `resolvedAt`, the UTC resolution time in milliseconds since the Unix epoch. Writers keep and read back the immutable content-addressed copy before inbox cleanup or explicit archive; readers enumerate the full family without completeness caching and merge captures with the mutable index. End events are connection evidence, never answer evidence, including same-batch/end-only questions and multiple asks per owner. Keep this entire family with identity, acknowledgement and retired/consumed proofs in backups; never age-prune it. Corrupt/unreadable captures refuse cleanup and new hides. FORMAT v1 progress.md is unchanged.
 Exact producer provenance uses opaque SHA-256 hashes of the original filename plus exact input bytes, with complete redacted producer payload retained separately in the record. Resolution receipts keep these revisions through projection; replaying an already resolved raw revision cannot create a new question. A new file/content revision remains observable independently of heartbeat time.
-An immutable archived disposition records explicit user intent to move the retained source aside; unexpected source loss retains its normal age partition, including prominent unknown/future clocks. Neither disposition resolves the question.
-A known producer token and normalized question words bind a resolved incarnation. Replaying that exact token/content cannot create another unanswered incarnation or a current waiting action. An explicit renewed producer revision or substantively changed question remains observable; unknown producers are never resolved by text alone.
+An immutable archived disposition records explicit user intent to move the retained source aside. Retained questions from stopped, ended or done sessions that are not displayed with their task stay under Older unanswered questions; other unexpected source loss retains its normal age partition, including prominent unknown/future clocks. Neither disposition resolves the question.
+A known producer token and normalized question words bind a resolved incarnation. Replaying that exact token/content cannot create another unanswered incarnation or a current waiting action. An explicit renewed producer revision or substantively changed question remains observable. A question with no producer token is resolved only by an explicit Resolve, which binds its normalized words to its task: the resolution ends when the agent ticks or removes that step or the task is renamed, and the same words can then ask again. Renaming the task brings its resolved no-token question back.

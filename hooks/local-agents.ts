@@ -1,3 +1,8 @@
+import { boardPromptHelper, boardRequestWords } from './board-commands'
+import { STRINGS } from './strings'
+
+const BOARD_PROMPT_HELPER = boardPromptHelper(boardRequestWords(Object.values(STRINGS)))
+
 export type LocalAgent = 'codex' | 'cursor' | 'opencode' | 'gemini' | 'grok' | 'muse' | 'hermes' | 'openclaw' | 'antigravity' | 'deepseek'
 export const localAgents: LocalAgent[] = ['codex', 'cursor', 'opencode', 'gemini', 'grok', 'muse', 'hermes', 'openclaw', 'antigravity', 'deepseek']
 export const statusEvents: Partial<Record<LocalAgent, Record<string, string>>> = {
@@ -31,6 +36,7 @@ export const cursorEvent = (input: Record<string, unknown>): Record<string, unkn
 export const opencodePlugin = (node: string, script: string, progress: string, description: string): string => `import { spawnSync } from 'node:child_process'
 import { tool } from '@opencode-ai/plugin'
 
+${BOARD_PROMPT_HELPER}
 const run = (mode, payload, session) => {
   const args = [${JSON.stringify(script)}, mode, '--agent', 'opencode', '--progress-file', ${JSON.stringify(progress)}]
   if (session) args.push('--session', session)
@@ -40,11 +46,11 @@ const run = (mode, payload, session) => {
 }
 
 export const AgentBoardLocal = async ({ client }) => ({
-  'chat.message': async ({ sessionID }) => {
+  'chat.message': async ({ sessionID }, output) => {
     try {
       const info = await client.session.get({ path: { id: sessionID } })
       if (!info.data || info.error || info.data.id !== sessionID || info.data.parentID) return
-      run('--agent-status', { session_id: sessionID, state: 'working', prompt_submitted: true })
+      run('--agent-status', { session_id: sessionID, state: 'working', prompt_submitted: true, ...(isBoardRequest(output) ? { board_request: true } : {}) })
     } catch {}
   },
   event: async ({ event }) => {
