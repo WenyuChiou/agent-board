@@ -32,6 +32,13 @@ const syntheticPr = () => ({
   open: [], prComments: [], labels: [], isDraft: false,
 })
 
+const fragmentPr = (path = 'changelog.d/42-synthetic-check.md', text = entry) => ({
+  ...syntheticPr(),
+  changelogText: '', paths: [path, 'tests/x.test.mjs'], changedPaths: [path, 'tests/x.test.mjs'],
+  addedPaths: [path], headPaths: [path, 'tests/x.test.mjs'],
+  added: text.split('\n').map((text, i) => ({ path, line: i + 1, text })),
+})
+
 const fixture = (t, testTitle = coveringTitle) => {
   const directory = mkdtempSync(join(tmpdir(), 'synthetic-pr-check-'))
   t.after(() => rmSync(directory, { recursive: true, force: true }))
@@ -93,6 +100,140 @@ test('pr-check accepts a conforming pull request body and a CHANGELOG entry whos
   assert.equal(execution.status, 0, execution.stderr || execution.stdout)
   assert.match(execution.stdout, /all checks passed/)
   for (const check of ['issue status', 'claim', 'cap', 'review']) assert.ok(execution.stdout.includes(`${check}: skipped (offline)`))
+})
+
+test('pr-check accepts a fix whose entry is a new changelog fragment', async t => {
+  assert.deepEqual(checkPr(fragmentPr()).problems, [])
+  const f = fixture(t)
+  f.put('CHANGELOG.md', f.git('show', `${f.base}:CHANGELOG.md`) + '\n')
+  f.put('changelog.d/42-synthetic-check.md', entry + '\n')
+  f.git('add', '--', 'CHANGELOG.md', 'changelog.d/42-synthetic-check.md')
+  f.git('-c', 'user.name=Synthetic', '-c', 'user.email=synthetic@example.invalid', '-c', 'commit.gpgsign=false', 'commit', '-m', 'test: synthetic fragment')
+  f.put('changelog.d/42-synthetic-check.md', 'dirty text must not be read')
+  const checked = await f.run()
+  assert.equal(checked.status, 0, checked.stdout + checked.stderr)
+})
+
+test('pr-check refuses an entry added both as a fragment and under Unreleased', () => {
+  const data = fragmentPr()
+  data.changelogText = changelogData().text
+  data.added.push(...changelogData().added)
+  const checked = checkPr(data)
+  assert.ok(checked.problems.some(item => item.message === 'the entry is both in changelog.d/ and under Unreleased; keep only the fragment.'))
+  data.changelogText = '# Changelog\n\n## Unreleased\n\n## 1.0.0\n\n' + entry + '\n'
+  data.added = [...fragmentPr().added, { path: 'CHANGELOG.md', line: 7, text: entry }]
+  assert.deepEqual(checkPr(data).problems, [])
+})
+
+test('pr-check accepts a fragment for a pull request that is part of an issue', () => {
+  assert.deepEqual(checkPr({ ...fragmentPr(), body: body.replace('Fixes #42', 'Part of #42') }).problems, [])
+})
+
+test('pr-check refuses a fragment whose issue number has a leading zero', () => {
+  assert.ok(checkPr(fragmentPr('changelog.d/0042-synthetic-check.md')).problems.some(item => /invalid fragment name/.test(item.message)))
+})
+
+test('pr-check gives only the edited fragment problem for another issue\'s fragment', () => {
+  for (const path of ['changelog.d/229-old.md', 'changelog.d/229-Bad.md']) {
+    for (const isRemoved of [false, true]) {
+      const data = syntheticPr()
+      data.paths.push(path)
+      if (!isRemoved) data.added.push({ path, line: 1, text: entry })
+      const problems = checkPr(data).problems.filter(item => item.check === 'changelog')
+      assert.equal(problems.length, 1)
+      assert.match(problems[0].message, /existing fragment was edited or removed/)
+      assert.match(problems[0].fix, /restore that fragment/)
+    }
+  }
+})
+
+test('pr-check reports a fragment problem without crashing on a huge issue number', async t => {
+  const digits = '9'.repeat(400)
+  const hugeBody = body.replace('Fixes #42', `Fixes #${digits}`)
+  for (const path of ['changelog.d/42-synthetic.md', `changelog.d/${digits}-synthetic.md`]) {
+    const checked = checkPr({ ...fragmentPr(path), body: hugeBody })
+    assert.ok(checked.problems.some(item => item.check === 'changelog'))
+  }
+  const f = fixture(t)
+  f.put('body.txt', hugeBody)
+  f.put('changelog.d/42-synthetic.md', entry + '\n')
+  f.git('add', '--', 'changelog.d/42-synthetic.md')
+  f.git('-c', 'user.name=Synthetic', '-c', 'user.email=synthetic@example.invalid', '-c', 'commit.gpgsign=false', 'commit', '-m', 'test: synthetic huge issue')
+  const checked = await f.run()
+  assert.equal(checked.status, 1, checked.stdout + checked.stderr)
+  assert.match(checked.stdout, /FAIL changelog/)
+  assert.equal(checked.stderr, '')
+})
+
+test('pr-check still accepts an entry under Unreleased and points to changelog.d', () => {
+  const checked = checkPr(syntheticPr())
+  assert.deepEqual(checked.problems, [])
+  assert.ok(checked.info.some(line => /new pull requests use changelog.d\//.test(line)))
+})
+
+test('pr-check does not call an invalid legacy entry accepted', () => {
+  const data = syntheticPr()
+  data.added = data.added.map(item => ({ ...item, text: item.text.replace(coveringTitle, 'an unknown synthetic title') }))
+  const checked = checkPr(data)
+  assert.ok(checked.problems.some(item => item.check === 'changelog'))
+  assert.equal(checked.info.some(line => /legacy Unreleased entry accepted/.test(line)), false)
+})
+
+test('pr-check refuses a fragment named for a different issue', () => {
+  const checked = checkPr(fragmentPr('changelog.d/43-synthetic-check.md'))
+  assert.ok(checked.problems.some(item => /different issue/.test(item.message) && /42-/.test(item.fix)))
+})
+
+test('pr-check refuses a fragment whose name breaks the naming rule', () => {
+  for (const name of ['42-Bad.md', '42-two--hyphens.md', '42-trailing-.md', '42_under.md', '42-missing.txt', 'nested/42-entry.md']) {
+    assert.ok(checkPr(fragmentPr(`changelog.d/${name}`)).problems.some(item => /invalid fragment name/.test(item.message)), name)
+  }
+  assert.deepEqual(checkPr({ ...syntheticPr(), paths: ['changelog.d/README.md'], addedPaths: ['changelog.d/README.md'], added: [], title: 'docs: explain fragments' }).problems, [])
+})
+
+test('pr-check refuses two fragments in one pull request', () => {
+  const data = fragmentPr()
+  data.paths.push('changelog.d/42-second.md')
+  data.addedPaths.push('changelog.d/42-second.md')
+  data.added.push({ path: 'changelog.d/42-second.md', line: 1, text: entry })
+  assert.ok(checkPr(data).problems.some(item => /more than one fragment/.test(item.message)))
+})
+
+test('pr-check refuses a fix that edits an existing fragment', () => {
+  const data = fragmentPr()
+  data.addedPaths = []
+  assert.ok(checkPr(data).problems.some(item => /existing fragment was edited or removed/.test(item.message)))
+  data.added = []
+  data.changedPaths = []
+  assert.ok(checkPr(data).problems.some(item => /existing fragment was edited or removed/.test(item.message)))
+})
+
+test('pr-check refuses a fragment that names an unknown test title', () => {
+  const checked = checkPr(fragmentPr(undefined, '- **Synthetic change (#42).**\n  Tests: `an unknown synthetic title`.'))
+  assert.ok(checked.problems.some(item => /is not the title/.test(item.message)))
+  assert.ok(checkPr(fragmentPr(undefined, '- A change (#42).')).problems.some(item => /does not name its covering tests/.test(item.message)))
+  const none = fragmentPr(undefined, '- A change (#42). Tests: none (documentation only).')
+  assert.ok(checkPr(none).problems.some(item => /only allowed for documentation/.test(item.message)))
+  none.paths = [none.addedPaths[0]]
+  assert.deepEqual(checkPr(none).problems, [])
+})
+
+test('pr-check refuses a release that leaves fragments unfolded', async t => {
+  const data = { ...syntheticPr(), title: 'chore(release): 1.1.0', headPaths: ['changelog.d/README.md', 'changelog.d/42-synthetic.md'] }
+  assert.ok(checkPr(data).problems.some(item => /leaves fragments unfolded/.test(item.message)))
+  data.headPaths = ['changelog.d/README.md']
+  data.paths.push('changelog.d/42-folded.md')
+  assert.deepEqual(checkPr(data).problems, [])
+  const f = fixture(t)
+  f.put('changelog.d/42-synthetic.md', entry + '\n')
+  f.git('add', '--', 'changelog.d/42-synthetic.md')
+  f.git('-c', 'user.name=Synthetic', '-c', 'user.email=synthetic@example.invalid', '-c', 'commit.gpgsign=false', 'commit', '-m', 'test: synthetic unfolded release')
+  const head = f.git('rev-parse', 'HEAD')
+  f.put('event.json', JSON.stringify({ repository: { full_name: 'synthetic/example' }, pull_request: { number: 17, title: 'chore(release): 1.1.0', body, draft: false, labels: [], head: { ref: branch, sha: head }, base: { sha: f.base } } }))
+  f.git('switch', 'main')
+  const checked = await runMain(['--event', join(f.directory, 'event.json'), '--repo-dir', f.directory, '--offline'])
+  assert.equal(checked.status, 1, checked.stdout + checked.stderr)
+  assert.match(checked.stdout, /leaves fragments unfolded/)
 })
 
 test('pr-check fails a body without a Fixes or Part of line and says how to add it', () => {

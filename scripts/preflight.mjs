@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os'
 import { dirname, join, relative, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { addedLines, testTitles, titleKnown } from './pr-check.mjs'
+import { fragmentIssue, isFragmentPath } from './changelog-fold.mjs'
 
 const tables = [['hooks/i18n.ts', 'ZH_TW'], ['hooks/strings-en.ts', 'EN'], ['hooks/strings-zh-cn.ts', 'ZH_CN']]
 const homeNames = ['HOME', 'USERPROFILE', 'APPDATA', 'LOCALAPPDATA', 'XDG_CONFIG_HOME', 'CLAUDE_CONFIG_DIR', 'CLAUDE_PROGRESS_FILE']
@@ -209,6 +210,7 @@ export const runPreflight = async ({ cwd = process.cwd(), base = 'origin/main', 
   let changed
   let added
   let mergeBase
+  let newPaths
   try {
     let hasFetchFailed = false
     if (!isNoFetch) {
@@ -225,13 +227,14 @@ export const runPreflight = async ({ cwd = process.cwd(), base = 'origin/main', 
     }
     mergeBase = git('merge-base', base, 'HEAD').trim()
     const untracked = splitPaths(git('ls-files', '--others', '--exclude-standard', '-z'))
+    newPaths = new Set([...splitPaths(git('diff', '--name-only', '--no-renames', '--diff-filter=A', '-z', mergeBase)), ...untracked])
     changed = new Set([
       ...splitPaths(git('diff', '--name-only', '--no-renames', '-z', `${base}...HEAD`)),
       ...splitPaths(git('diff', '--name-only', '--no-renames', '-z', 'HEAD')), ...untracked,
       ...splitPaths(git('diff', '--cached', '--name-only', '--no-renames', '-z', 'HEAD')),
     ])
     added = addedLines(git('diff', '--no-ext-diff', '--no-textconv', '--no-color', '--no-renames', '--unified=0', mergeBase))
-    for (const path of untracked.filter(path => path.startsWith('tests/') || path === 'CHANGELOG.md')) {
+    for (const path of untracked.filter(path => path.startsWith('tests/') || path === 'CHANGELOG.md' || fragmentIssue(path) !== null)) {
       read(join(cwd, path)).split(/\r?\n/).forEach((text, i) => added.push({ path, line: i + 1, text }))
     }
   } catch {
@@ -335,14 +338,21 @@ export const runPreflight = async ({ cwd = process.cwd(), base = 'origin/main', 
   } else add('PASS', 'PR body check skipped; supply --body-file and --title to include it.')
 
   await check('CHANGELOG test titles', () => {
-    if (!changed.has('CHANGELOG.md') && [...changed].some(path => !path.endsWith('.md') && !path.startsWith('docs/'))) add('WARN', 'add the entry under ## Unreleased')
-    else add('PASS', 'CHANGELOG is included or only documentation changed.')
+    const fragmentPaths = [...newPaths].filter(isFragmentPath)
+    const fragments = fragmentPaths.filter(path => fragmentIssue(path) !== null)
+    const invalid = fragmentPaths.filter(path => fragmentIssue(path) === null)
+    for (const path of invalid) add('FAIL', `${path}: invalid fragment name; use changelog.d/<issue>-<lowercase-slug>.md with a positive issue number without leading zeros (see changelog.d/README.md).`)
+    if (!invalid.length) {
+      if (!changed.has('CHANGELOG.md') && !fragments.length && [...changed].some(path => !path.endsWith('.md') && !path.startsWith('docs/'))) add('WARN', 'add a fragment in changelog.d/ (see changelog.d/README.md)')
+      else add('PASS', 'CHANGELOG is included or only documentation changed.')
+    }
     const lines = existsSync(join(cwd, 'CHANGELOG.md')) ? read(join(cwd, 'CHANGELOG.md')).split(/\r?\n/) : []
     const start = lines.findIndex(line => /^## Unreleased\s*$/.test(line))
     const next = lines.findIndex((line, i) => i > start && /^## /.test(line))
     const touched = new Set(added.filter(item => item.path === 'CHANGELOG.md').map(item => item.line))
     const titles = testDeclarations(cwd)
     const problems = []
+    const entries = fragments.map(path => added.filter(item => item.path === path).map(item => item.text).join('\n'))
     if (start !== -1) {
       let at = start + 1
       while (at < (next === -1 ? lines.length : next)) {
@@ -350,14 +360,17 @@ export const runPreflight = async ({ cwd = process.cwd(), base = 'origin/main', 
         while (at < (next === -1 ? lines.length : next) && lines[at].trim()) at++
         const entry = lines.slice(begin, at).join('\n')
         if (Array.from({ length: at - begin }, (_, i) => begin + i + 1).some(line => touched.has(line))) {
-          const tail = entry.match(/\bTests:\s*([\s\S]*)/)?.[1] ?? ''
-          for (const match of tail.matchAll(/`([^`\n]+)`/g)) {
-            if (/\.test\.(mjs|ts|tsx)$/.test(match[1])) continue
-            const count = titles.filter(declaration => titleKnown(match[1], declaration)).length
-            if (count !== 1) problems.push(`${match[1]} (${count} test declarations)`)
-          }
+          entries.push(entry)
         }
         at++
+      }
+    }
+    for (const entry of entries) {
+      const tail = entry.match(/\bTests:\s*([\s\S]*)/)?.[1] ?? ''
+      for (const match of tail.matchAll(/`([^`\n]+)`/g)) {
+        if (/\.test\.(mjs|ts|tsx)$/.test(match[1])) continue
+        const count = titles.filter(declaration => titleKnown(match[1], declaration)).length
+        if (count !== 1) problems.push(`${match[1]} (${count} test declarations)`)
       }
     }
     add(problems.length ? 'FAIL' : 'PASS', problems.length ? `CHANGELOG must name each test exactly once in tests/: ${problems.join(', ')}.` : 'new CHANGELOG test titles each name exactly one test, or none were listed.')

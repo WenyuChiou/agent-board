@@ -364,7 +364,42 @@ test('preflight passes the PR body result through and hides private diagnostics'
 test('preflight warns when code changes without a CHANGELOG entry', async t => {
   const f = fixture(t)
   f.write('scripts/new.mjs', 'export const value = 1\n')
-  assert.ok(has(await f.check(), 'WARN', 'add the entry under ## Unreleased'))
+  assert.ok(has(await f.check(), 'WARN', 'add a fragment in changelog.d/ (see changelog.d/README.md)'))
+})
+
+test('preflight names a misnamed changelog fragment', async t => {
+  const f = fixture(t)
+  f.write('scripts/synthetic.mjs', 'export const value = 1\n')
+  f.write('changelog.d/README.md', 'Synthetic instructions.\n')
+  const path = 'changelog.d/0042-Bad.md'
+  f.write(path, '- Synthetic entry (#42). Tests: none (documentation only).\n')
+  for (const state of ['untracked', 'staged', 'committed']) {
+    if (state === 'staged') f.git('add', '--', path)
+    if (state === 'committed') f.commit()
+    const checks = await f.check()
+    assert.ok(has(checks, 'FAIL', `${path}: invalid fragment name; use changelog.d/<issue>-<lowercase-slug>.md`), state)
+    assert.equal(has(checks, 'WARN', 'add a fragment'), false, state)
+    assert.equal(checks.some(item => item.state === 'FAIL' && item.message.startsWith('changelog.d/README.md:')), false, state)
+  }
+})
+
+test('preflight accepts a changelog fragment as the entry', async t => {
+  const f = fixture(t)
+  f.write('scripts/synthetic.mjs', 'export const value = 1\n')
+  f.write('tests/covering.test.ts', "test('a synthetic fragment has coverage', () => {})\n")
+  const path = 'changelog.d/42-synthetic.md'
+  const entry = '- **A synthetic fragment (#42).** It names its tests.\n  Tests: `a synthetic fragment has coverage` (`tests/covering.test.ts`).\n'
+  f.write(path, entry)
+  for (const state of ['untracked', 'staged', 'committed']) {
+    if (state === 'staged') f.git('add', '--', path)
+    if (state === 'committed') f.commit()
+    const checks = await f.check()
+    assert.equal(has(checks, 'WARN', 'add a fragment'), false, state)
+    assert.ok(has(checks, 'PASS', 'new CHANGELOG test titles each name exactly one test'), state)
+    assert.equal(checks.some(item => item.state === 'FAIL'), false, state)
+  }
+  f.write(path, entry.replace('a synthetic fragment has coverage', 'an unknown fragment title'))
+  assert.ok(has(await f.check(), 'FAIL', 'an unknown fragment title (0 test declarations)'))
 })
 
 test('preflight fails missing or duplicate CHANGELOG test titles and accepts an exact title', async t => {
