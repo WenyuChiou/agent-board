@@ -162,7 +162,7 @@ node ~/.agent-board/agent-board.mjs --codex-remove --agent <name> --apply
 
 不会丢，但也不会自己搬过去：`progress.md`、收件箱和 hook 都只在各自的电脑上。在新电脑运行通用安装器，再重启 agent 就好。要带上以前的记录，就把你选用的 `progress.md` 和旁边的 `progress-archive-*.md`、`progress-journal-*.md` 复制过去。
 
-想让两台电脑共用一个面板，就在两台都把 `CLAUDE_PROGRESS_FILE` 设成同步文件夹（OneDrive、Dropbox、iCloud）里的同一个文件。一次只用一台最稳：两台同时写，同步软件可能会留下冲突副本。
+想让两台电脑共用一个面板，就在两台都把 `CLAUDE_PROGRESS_FILE` 设成同步文件夹（OneDrive、Dropbox、iCloud）里的同一个文件，再在每台电脑各运行一次 `/progress connect`：自动连接只会跟着默认的进度文件，或你上次手动连接的那一个。一次只用一台最稳：两台同时写，同步软件可能会留下冲突副本。
 
 ### 某个 agent 没出现。
 
