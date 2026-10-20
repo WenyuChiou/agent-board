@@ -6,33 +6,13 @@ Below, `<agent>` is your name in lower case (`codex`, `dot`, `muse`, `cursor`). 
 
 ## How a pull request moves
 
-This is how a pull request has moved since 2026-10-20. It adds to CONTRIBUTING.md and does not replace it.
-
-Work on one issue at a time, with at most one pull request of yours waiting in review or CI. Claim the next issue only after that pull request has merged.
-
-Each step leaves a mark on GitHub; every step but Draft is a comment:
-
-| Step | Who | Where, and what |
-|---|---|---|
-| Claim | you | On the issue: `Claim: <agent>, <branch>, until <time> UTC` (step 2). |
-| Draft | you | The draft pull request itself; its `Fixes #N` or `Part of #N` line links it on the issue (step 6). |
-| Ready | you | On the pull request: `Ready for review <full head sha>`, once the preflight output is under Checks (step 7). There is no review without it. |
-| Review | maintainer | On the pull request, within 4 hours of Ready: `Review: APPROVE <sha>` or `Review: REQUEST CHANGES <sha>`. The first round has two reviewers. |
-| Changes | you | On the pull request: which commit fixed which finding, then `Ready for review <new sha>` (step 8). |
-| Approve | maintainer | On the pull request: `Review: APPROVE <sha>`. |
-| Merge | maintainer | On the issue: the merge commit and the evidence (step 10). |
-
-After two `REQUEST CHANGES`, the maintainer lists the changes by file and line. The third round is the last: if it is still not approved, the maintainer takes over the branch, and the pull request then gets its verdict from a separate review of the diff (rule 8).
-
-Merge order: pull requests that change neither `hooks/board-script.ts` nor the string tables (`hooks/i18n.ts`, `hooks/strings-en.ts`, `hooks/strings-zh-cn.ts`) merge first, smallest first. Pull requests that change the bundle or the string tables then merge one at a time, the one that was Ready first going first; the maintainer merges `main` into each and rebuilds the bundle.
-
-dot takes only issues labelled both `for-dot` and `ready`: pure modules with plain Node tests, docs in all three languages, and the Python reporter. dot does not take host hooks, tests that start processes, `hooks/pane.tsx`, `hooks/register.tsx` or the connect code.
+[docs/dev/team-process.md](dev/team-process.md) gives the rules for each step from claim to merge: the comment each step leaves on GitHub, how many pull requests you may have waiting, when the review verdict comes, how many review rounds there are, the order pull requests merge in, and which issues dot takes. This page gives the commands you run at each step.
 
 ## 1. Find work
 
 ```sh
 gh issue list -R WenyuChiou/agent-board --state open --label ready --label for-agent
-gh issue list -R WenyuChiou/agent-board --state open --label ready --label for-dot     # dot
+gh issue list -R WenyuChiou/agent-board --state open --label ready --label for-dot     # dot or Muse (rule 3)
 ```
 
 Take one without `claimed` or `blocked`. Its body says what to change and what is out of scope, the **Acceptance tests** (the test titles your pull request adds), the **Executor** and what it is **Blocked by**. The body is the current scope. If a comment seems to change it, ask (step 8).
@@ -44,7 +24,7 @@ gh pr list -R WenyuChiou/agent-board --state open
 gh issue view <N> -R WenyuChiou/agent-board --comments
 ```
 
-Go on only if nobody has an open pull request for the issue or a `Claim:` whose time has not passed, you have no other pull request waiting in review or CI ([How a pull request moves](#how-a-pull-request-moves)), and you have a free slot. A slot is rule 10: at most two open pull requests per author and eight in all. Drafts count; release pull requests, governance pull requests and those labelled `cap-exempt` do not. Then claim it, at most two days ahead:
+Go on only if nobody has an open pull request for the issue or a `Claim:` whose time has not passed, you have no other pull request waiting in review or CI ([docs/dev/team-process.md](dev/team-process.md)), and you have a free slot. A slot is rule 10: at most two open pull requests per author and eight in all. Drafts count; release pull requests, governance pull requests and those labelled `cap-exempt` do not. Then claim it, at most two days ahead:
 
 ```sh
 until=$(date -u -d '+1 day' '+%Y-%m-%d %H:%M')
