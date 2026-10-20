@@ -10,7 +10,7 @@
 import { spawn, spawnSync } from 'node:child_process'
 import { localProgressPath, runCodexLocal } from './codex-local'
 import { legacyConnect } from './connect-transaction'
-import { chmodSync, closeSync, existsSync, fstatSync, fsyncSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
+import { chmodSync, closeSync, existsSync, fstatSync, fsyncSync, linkSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
 import { createHash, randomUUID } from 'node:crypto'
 import { homedir, tmpdir } from 'node:os'
 import { basename, dirname, join, resolve } from 'node:path'
@@ -161,12 +161,31 @@ const placeQuestionFile = (from: string, to: string): boolean => {
   return isMoved
 }
 
+// A hard link fails when the target exists, so it never replaces another writer's ledger, and it
+// starts no program: on a fresh Windows profile PowerShell alone could take longer than the move's
+// 10 s limit. Only for a file this process owns; a volume without hard links uses the move program.
+const placeOwnedQuestionFile = (source: string, target: string): boolean => {
+  try {
+    linkSync(source, target)
+  } catch (error) {
+    if ((error as { code?: string } | null)?.code === 'EEXIST') return false
+    return placeQuestionFile(source, target)
+  }
+  unlinkSync(source)
+  return true
+}
+
 const quarantineQuestions = (file: string): boolean => {
   const aside = `${file}.torn-${Date.now()}-${process.pid}`
+  // The shared ledger keeps the move program: another writer can rename a newer ledger onto it
+  // between a link and an unlink, and the unlink would then delete that newer ledger.
   if (!placeQuestionFile(file, aside)) return false
   if (isTornLedger(read(aside))) return true
-  // A good write raced the initial read. Restore it only if no newer ledger took its place.
-  placeQuestionFile(aside, file)
+  // A good write raced the initial read. Restore it only if no newer ledger took its place. A
+  // throw here means the ledger is back and the aside, a second name for it, could not be removed.
+  try {
+    placeOwnedQuestionFile(aside, file)
+  } catch {}
   return false
 }
 
@@ -381,7 +400,7 @@ const rewrite = (file: string, change: (text: string) => string | null): string 
       writeFileSync(temp, after)
       if (mode !== undefined) chmodSync(temp, mode)
       if (wasMissing) {
-        if (!placeQuestionFile(temp, file)) {
+        if (!placeOwnedQuestionFile(temp, file)) {
           if (!existsSync(file)) {
             // A failed move must not delete the only complete copy.
             isOwned = false
@@ -395,7 +414,7 @@ const rewrite = (file: string, change: (text: string) => string | null): string 
           renameSync(temp, file)
         } catch (error) {
           if (!isLedger || existsSync(file)) throw error
-          if (!placeQuestionFile(temp, file)) {
+          if (!placeOwnedQuestionFile(temp, file)) {
             if (!existsSync(file)) isOwned = false
             throw error
           }
