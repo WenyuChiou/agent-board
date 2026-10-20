@@ -1,7 +1,7 @@
 Fixes #
 Author: <agent>, <branch>
 
-<!-- One issue per pull request (CONTRIBUTING.md, Pull requests). Other findings go into new issues. Release pull request: delete the Fixes line. -->
+<!-- First line: `Fixes #N`, or `Part of #N` for one step of an issue split into steps. One issue per pull request (CONTRIBUTING.md, Pull requests). Release pull request: delete the Fixes line. Run `node scripts/pr-check.mjs --pr <N>` after opening; CI runs it too. -->
 
 ## What and why
 
@@ -9,22 +9,31 @@ Author: <agent>, <branch>
 
 ## Tests
 
-<!-- The tests that cover the change, by exact title. -->
+<!-- The tests that cover the change, by exact title, as in the CHANGELOG entry. -->
+
+## Evidence
+
+<!-- The full head sha this evidence is for; each command you ran with its pass/fail/skip counts; the CI run link once it has run. A result from an earlier head names that head. A failure stays reported as a failure, with its rerun. -->
 
 ## Checks
 
-<!-- Tick what you ran and give its result. For a check you could not run, say why. -->
+<!-- Tick what you ran and add its result after a dash. For a check you did not run, leave it unticked and add `not run:` and why, or `n/a:` and why it does not apply. -->
 
-- [ ] Applicable Node board, storage, local reporter and messaging/exchange tests
-- [ ] Bundle/released files current, if generated output changed
+- [ ] Node suites CI runs (`.github/workflows/test.yml`)
+- [ ] Bundle/released files current (`npx --yes bun@1.4.2 scripts/build-board.ts --check`; `scripts/build-released.ts --check`)
 - [ ] `claude plugin validate --strict .`
 - [ ] `claude plugin test .`
-- [ ] Applicable strict standalone typechecks; report if full `tsc -p .` SDK types are unavailable
+- [ ] Applicable strict standalone typechecks; full `tsc -p .` reported unrun if the SDK types are unavailable
 - [ ] `bash tests/setup.check.sh` / `tests/setup.check.ps1`, if a setup script changed
 - [ ] `docs/FORMAT.md` updated, if the file format changed (backward compatible)
-- [ ] `CHANGELOG.md` entry under `## Unreleased` naming the tests that cover the change (release pull request: rename `## Unreleased` to the version and date instead)
-- [ ] Native/model evidence and CLI/App/IDE limits stated separately; no private data or board tokens attached
+- [ ] `CHANGELOG.md` entry under `## Unreleased` naming the issue and the tests that cover the change (release pull request: rename `## Unreleased` to the version and date instead)
+- [ ] `node scripts/pr-check.mjs` passes
+- [ ] Native/model evidence and CLI/App/IDE limits stated separately; no private data, session ids, home-folder paths or board links attached
+
+## Screenshots
+
+<!-- Synthetic only: drawn from made-up data, never a real board. Alt text starts with "Synthetic". Write "None." if there are none. -->
 
 ## Not covered
 
-<!-- What this pull request leaves out, with links to the follow-up issues. -->
+<!-- What this pull request leaves out, with links to the follow-up issues. Write "Nothing." if nothing. -->

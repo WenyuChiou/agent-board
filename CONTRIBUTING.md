@@ -10,16 +10,17 @@ Independent development and installation do not require Claude Code. Optional pa
 
 ## Run the checks
 
-From the repository root:
+From the repository root, with Node 22.18+ or 24 and npm (for `npx`), the checks CI runs on every pull request:
 
 ```sh
-node --test tests/board.test.mjs tests/board-storage.test.mjs tests/codex-local.test.mjs
-node --test tests/exchange.test.mjs tests/messaging.test.mjs
-bun scripts/build-board.ts --check
-bun scripts/build-released.ts --check
+node --test tests/exchange.test.mjs tests/messaging.test.mjs tests/pr-check.test.mjs
+node --test tests/board.test.mjs tests/board-storage.test.mjs tests/codex-local.test.mjs tests/local-lock.test.mjs tests/prompt-hooks.test.mjs tests/codex-host.test.mjs tests/codex-fallback.test.mjs tests/legacy-connect.test.mjs tests/connect-worker.test.mjs
+npx --yes bun@1.4.2 scripts/build-board.ts --check
+npx --yes bun@1.4.2 scripts/build-released.ts --check
+node scripts/pr-check.mjs --pr <N>
 ```
 
-Fetch release tags before the released-files check. Rebuild changed bundle sources with `bun scripts/build-board.ts`; never hand-edit `hooks/board-script.ts`.
+These lists are the ones in `.github/workflows/test.yml`; if they ever differ, the workflow is right. Fetch release tags (`git fetch --tags origin`) before the released-files check. Rebuild changed bundle sources with `npx --yes bun@1.4.2 scripts/build-board.ts`; never hand-edit `hooks/board-script.ts`. `pr-check.mjs` says what a pull request still lacks under [Pull requests](#pull-requests); before opening one, run it with `--body-file <file> --title "<title>"`.
 
 For the optional plugin and legacy installers:
 
@@ -31,11 +32,11 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tests/setup.check.ps1
 python3 -B scripts/remote-reporter/test_pipeline.py
 ```
 
-Run the installer check matching the changed script/OS; each uses temporary fixtures. Windows CI uses `python` for the stdlib reporter tests. None of these checks sends model prompts.
+`claude` comes from npm (`npm install -g @anthropic-ai/claude-code@2.1.301`, the version CI pins); `plugin validate` and `plugin test` are offline and need no login. Run the installer check matching the changed script/OS; each uses temporary fixtures. Windows CI uses `python` for the stdlib reporter tests. None of these checks sends model prompts.
 
 Run strict TypeScript for changed standalone modules with Node typings from your development environment. Full `tsc -p .` additionally needs the host-generated `.claude-plugin/types/` SDK, written when Claude Code loads the local plugin (`claude --plugin-dir .`). It is gitignored and must not be invented or edited. If unavailable, report full typechecking as unrun; passing standalone checks does not replace it. Do not start model work merely to claim an offline check passed.
 
-CI runs six jobs: plugin/installer/reporter checks on Linux and Windows, and Node 22/24 exchange, messaging and board checks on both systems. It checks generated bundles/releases, but not full `tsc -p .`.
+CI runs plugin/installer/reporter checks on Linux and Windows; Node 22/24 exchange, messaging and board checks on both systems; the Node 22/24 PR-check tests on both systems, in jobs of their own; and the PR check (`.github/workflows/pr-check.yml`). It checks generated bundles/releases, but not full `tsc -p .`.
 
 ## Changes and evidence
 
@@ -47,27 +48,43 @@ For optional OpenCode SDK/DeepSeek loader checks, use the pinned packages and di
 
 ## Pull requests
 
-Several agents (Claude Code sessions, Codex and others) work in this repository at the same time. These rules keep their work from overlapping. They apply to every agent and person.
+Several agents (Claude Code sessions, Codex, Antigravity, cloud agents such as dot and Muse, and agents on other computers) work in this repository at the same time. These rules keep their work from overlapping. They apply to every agent and person. [docs/CONTRIBUTOR-PATH.md](docs/CONTRIBUTOR-PATH.md) walks through them with the exact commands; where the two disagree, this section wins. `node scripts/pr-check.mjs` checks most of them, on your computer and on every pull request.
 
-1. **Nothing reaches `main` except through a pull request.** Never push to `main`, and never force-push a branch someone else pushed to.
-2. **One issue, one pull request.** Start from an issue; open one if none fits. A pull request fixes one issue, and its body opens with `Fixes #N`. Anything else you find goes into a new issue, not into the same pull request. A release pull request needs no issue and has no `Fixes` line.
-3. **Claim before you start.** Before you branch, check the open pull requests (`gh pr list`) and the issue's comments. If someone already has an open pull request or a claim on the issue, do not start a competing one: comment on theirs. To claim an issue, comment with your agent name and branch. If an earlier claim turns up after yours, withdraw yours. A claim with no pull request after 2 days may be taken over, after a comment saying so; a claim waiting for a free slot (rule 10) says so and does not expire.
-4. **Branch from current `main`**, named `<type>/<short-slug>` (`fix/question-ledger-write`). If `main` moves before the merge, the reviewer asks the author to bring the branch up to date, then reviews the new head.
+1. **Nothing reaches `main` except through a pull request.** Never push to `main`. Never force-push a branch: bring it up to date by merging (rule 4).
+2. **One issue, one pull request.** Start from an issue; open one if none fits. A pull request fixes one issue, and its body opens with `Fixes #N`. When an issue is split into steps, each step's pull request opens with `Part of #N` and the last one with `Fixes #N`. Anything else you find goes into a new issue, not into the same pull request. A release pull request needs no issue and has no `Fixes` line.
+3. **Find work, then claim it.** Work ready to start carries the label `ready`; `for-agent` means any agent may take it and `for-dot` means dot or Muse. The issue body says who it is planned for (`Executor`), what must pass (`Acceptance tests`) and what must land first (`Blocked by`); the body is the current scope. Leave issues labelled `claimed` or `blocked` alone. Before you branch, check the open pull requests (`gh pr list --state open`) and the issue's comments. To claim, comment on the issue
+
+   `Claim: <agent>, <branch>, until <YYYY-MM-DD HH:MM> UTC`
+
+   at most two days ahead, and add the `claimed` label. Renew it with a new `Claim:` comment before it runs out. A claim past its time with no pull request may be taken over after a `Claim taken over: <agent>, <branch>` comment. A claim waiting for a free slot (rule 10) says `waiting for a slot` in place of a time and does not run out. If someone has an open pull request or a live claim, do not start a competing one: comment on theirs. If an earlier claim turns up after yours, withdraw yours.
+4. **Branch from current `main`**, named `<type>/<short-slug>` (`fix/question-ledger-write`). When `main` moves, merge it into your branch (`git fetch origin`, `git merge origin/main`) and push; never rebase a pushed branch. The reviewer may do this merge for you, so run `git pull --ff-only` before you commit again. If `main` moved before the merge, the reviewer reviews the new head.
 5. **Commits** use `<type>: <summary>` or `<type>(<scope>): <summary>` (for example `feat`, `fix`, `docs`, `test`, `refactor`, `chore`), with a body that says why. The pull request title uses the same form. Commit regenerated files (`hooks/board-script.ts`, `hooks/released.ts`) together with the source change that needs them.
-6. **CHANGELOG.** A fix or feature pull request adds its entry under `## Unreleased` and names its covering tests by their exact titles. Only a release pull request ([Releases](#releases)) raises the version and turns `Unreleased` into a dated section.
-7. **The pull request body** names its author (`Author: <agent>, <branch>`) and fills in every section of the template, including the checks you could not run and why. When it is ready, the author comments `Ready for review` and changes it only when the reviewer asks.
-8. **Authors never merge.** Any agent or person may open issues and pull requests, but only the reviewer merges: the owner, or the Claude Code session the owner has named maintainer of this repository (except governance files, rule 12). No author decides that its own pull request is done. A pull request the maintainer wrote gets its verdict from a separate review of the diff (a code-review subagent the maintainer runs, or the owner), never from the maintainer alone; the maintainer posts the subagent's verdict as given.
+6. **CHANGELOG.** A fix or feature pull request adds its entry under `## Unreleased`, names its issue (`#N`) and names its covering tests by their exact titles, each in backticks after `Tests:`. A pull request that changes only documentation writes `Tests: none (documentation only).` Only a release pull request ([Releases](#releases)) raises the version and turns `Unreleased` into a dated section.
+7. **The pull request body** names its author (`Author: <agent>, <branch>`) and fills in every section of the template: the evidence and the head it is for, each check with its result, each check you did not run with `not run:` and why, and what it leaves out. Pictures are synthetic and their alt text says so. Open it as a draft. When the PR check and CI pass, mark it ready (`gh pr ready <N>`) and comment `Ready for review <full head sha>`. After that, change it only when the reviewer asks: answer each finding in a comment, push the fix, and comment `Ready for review <new head sha>`.
+8. **Authors never merge.** Any agent or person may open issues and pull requests, but only the reviewer merges: the owner, or the Claude Code session the owner has named maintainer of this repository (governance files also need the owner's approval, rule 12). No author decides that its own pull request is done. A pull request the maintainer wrote gets its verdict from a separate review of the diff (a code-review subagent the maintainer runs, or the owner), never from the maintainer alone; the maintainer posts the subagent's verdict as given.
 9. **The reviewer verifies before merging.** The reviewer:
    - reads the whole diff against its issue: one issue, nothing extra;
    - reruns the checks that cover the change on its own copy, rather than trusting the reported results;
    - comments on the pull request `Review: APPROVE <full head sha>` with what was verified, or `Review: REQUEST CHANGES <full head sha>` with the findings, naming the reviewer (`by owner`, `by maintainer` or `by code-review subagent`); any later push needs a new verdict;
-   - merges only the head named in `Review: APPROVE <head sha>`, once every CI job in `.github/workflows/test.yml` is green, not only the ones GitHub marks as required. The merge is a squash merge of that head: `gh pr merge <N> --squash --match-head-commit <head sha>`.
+   - merges only the head named in `Review: APPROVE <head sha>`, once every CI job in `.github/workflows/` is green, not only the ones GitHub marks as required. The merge is a squash merge of that head: `gh pr merge <N> --squash --match-head-commit <head sha>`.
    - then deletes the branch, and comments on the closed issue with the merge commit and the evidence.
 
    A pull request that reports a check it did not run is not ready to merge. A merge with no `Review: APPROVE` for the merged head breaks this rule: the reviewer opens an issue (rule 11) and reviews it after the fact.
-10. **At most five open pull requests at a time**, counting all authors together. Split large work into step pull requests: each covers one issue and can be merged on its own. Drafts count. Check `gh pr list --state open` first; open the next step only while fewer than five are open. If yours makes six, close it and reopen it later. The owner may allow a sixth for a release or an urgent fix.
+10. **At most two open pull requests per author, and eight in all.** The author is the agent named on the `Author:` line, the words before its first comma, ignoring case and backticks. An agent that a coordinating session dispatches names that session's lane in brackets (`Author: codex (phase1), fix/x`), and each agent and lane together counts as one author, so two sessions that both send work to Codex do not share its two slots. Drafts count. Release pull requests, governance pull requests (rule 12) and pull requests the owner labels `cap-exempt` do not count. Older pull requests keep their slots: the PR check fails the newest one over a limit. Check `gh pr list --state open` first, split large work into step pull requests (rule 2), and open the next step when one of yours has merged. If yours does not fit, close it and later open a new pull request from the same branch (a reopened one keeps its old place in line), or keep your claim `waiting for a slot`.
 11. **Undoing what a merged pull request did** needs an issue that names that pull request. A revert also goes through a pull request.
-12. **Governance files** (`AGENTS.md`, `CONTRIBUTING.md`, `.github/`) change only in a pull request the owner merges. An agent's comment is not approval.
+12. **Governance files** (`AGENTS.md`, `CONTRIBUTING.md`, `.github/`) change only with the owner's written approval of the content, file by file: in a comment the owner writes on the issue or the pull request, or in a chat with the maintainer. The pull request body quotes that approval with its date and where it was given. The maintainer then reviews and merges it as in rule 9, as for any other pull request. A change to the text after the approval needs a new one. An agent's comment is not approval, and while agents post from the owner's GitHub account, a comment counts only when the owner confirms to the maintainer that it is theirs.
+13. **The PR check.** `scripts/pr-check.mjs` runs on every pull request (`.github/workflows/pr-check.yml`), using the copy on `main`, and says in words what is missing and how to fix it. A pull request whose PR check fails is not ready for review. If you think the check is wrong about your pull request, say so in a comment; change the check only in its own pull request.
+14. **Handing over.** If you stop before the work is done, push your branch and comment on the issue `Handover: <branch>, done: …, left: …, checks run: …`, then remove `claimed`. Your claim ends there. The next agent claims the issue as in rule 3 and may continue on your branch.
+
+### How the maintainer organizes the work
+
+The owner names one Claude Code session maintainer of this repository. It plans and reviews; implementation goes to other agents.
+
+- **Triage.** The maintainer reads each new issue, sets its milestone and labels, and writes `Executor`, `Acceptance tests` and `Blocked by` into the issue body (the Task form has these fields). It adds `ready` when an agent can start, and `blocked` while something must land first. A change of scope is an edit to the issue body with a dated `Updated:` line, not only a comment.
+- **Review.** Every pull request gets a separate review of its diff (code-review subagents the maintainer runs, or the owner), posted as in rule 9.
+- **Merge.** The maintainer merges; a governance pull request only once the owner has approved its content (rule 12).
+- **Questions.** Ask on the issue, in a comment starting `Question:`, and add the `question` label. The maintainer answers in the same issue, in a comment starting `Answer:`, and removes the label. Only an answer on GitHub counts: a chat, a log or a notes file the asking agent cannot read is not an answer. While you wait, keep working on what the question does not touch, or hand over (rule 14).
+- **The owner.** A question only the owner can decide gets the `needs-owner` label; the maintainer asks the owner and writes the answer in the issue.
 
 ## The file format is versioned
 
