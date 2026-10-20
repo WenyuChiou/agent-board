@@ -430,14 +430,22 @@ export const takeManualDone = (
 // One task out now, at the person's word (a row's 封存): an ended session's block, or a
 // hand-kept task from its heading to its last line, in the entry form takeArchivable uses.
 // null when it cannot be found for sure: a block without its end marker, a heading that is
-// gone or has a twin, or a heading inside some session's block.
+// gone or has a twin, a heading inside some session's block, or a session id two blocks
+// share when the row's project, title and line cannot tell them apart.
 export const takeTask = (text: string, ref: TaskRef, now: number, s: Strings = ZH_TW): Archived | null => {
   const lines = linesOf(text)
   const seen = seenOf(lines)
   const spans = scanBlocks(lines)
   const heading = `## ${ref.project || s.uncategorized} · ${localDay(now)}`
   if (ref.session !== null) {
-    const span = spans.find(one => one.session === ref.session)
+    // Two blocks can carry one id (a resumed session, two machines): take only the drawn row's.
+    const same = spans.filter(one => one.session === ref.session)
+    const matches = same.length === 1 ? same : same.filter(one =>
+      (one.project || s.uncategorized) === ref.project &&
+      seen.slice(one.start + 1, one.end + 1).some(line => TASK.exec(line)?.[1] === ref.title),
+    )
+    const span = matches.find(one => ref.line > one.start && ref.line <= one.end && TASK.exec(seen[ref.line] ?? '')?.[1] === ref.title)
+      ?? (matches.length === 1 ? matches[0] : undefined)
     if (span === undefined || !span.isClosed) return null
     // Recheck ownership at the write boundary: a stopped row may have resumed since it
     // was drawn. Unknown clocks cannot prove that a working/waiting session stopped.
