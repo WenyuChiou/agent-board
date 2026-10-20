@@ -389,10 +389,12 @@ export const takeArchivable = (text: string, now: number, keep?: string, s: Stri
 // (`seen`, by doneKey): moved out whole, heading to last step, like a session's block.
 // `isNow`: the person asked, so every finished one goes at once, under the day it was seen
 // done, or today when it never was.
+// The task context lets a standalone writer use fingerprint observations while the plugin
+// keeps its existing title-key observations.
 export const takeManualDone = (
   text: string,
   now: number,
-  seenAt: (key: string) => number | undefined,
+  seenAt: (key: string, project: string, task: ProgressTask) => number | undefined,
   s: Strings = ZH_TW,
   isNow = false,
 ): Archived & { keys: string[] } => {
@@ -405,7 +407,7 @@ export const takeManualDone = (
     for (const task of project.tasks) {
       if (task.auto !== null || task.line < 0 || !isTaskComplete(task)) continue
       const key = doneKey(project.name, task.title)
-      const at = seenAt(key) ?? (isNow ? now : undefined)
+      const at = seenAt(key, project.name, task) ?? (isNow ? now : undefined)
       if (at === undefined || (!isNow && now - at < DAY)) continue
       let end = task.line
       for (let index = task.line + 1; index < lines.length; index += 1) {
