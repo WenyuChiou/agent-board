@@ -150,6 +150,75 @@ For the optional plugin, run `/progress connect remove` while it is still instal
 
 Before 0.10 the optional plugin was `project-progress@claude-progress-pane`. Remove that plugin/marketplace, install the current names above, then run `/progress connect` inside Claude Code if you use its connector. Preserve the existing progress file. Independent installations need no Claude migration.
 
+## FAQ
+
+### Can I start from only one agent?
+
+Start from any supported agent with the common installer. No second AI product is required. Native hook availability varies by host; the board and explicit own-progress reporter are shared.
+
+### I installed it from Codex (or another agent). Can that agent see Claude Code's work?
+
+Yes, when those sessions report to the same local progress file. Independent reporters write their own blocks without Claude Code; the optional Claude pane reads that file too. Opening a board is separate from enabling direct messages.
+
+### I switched to a new computer. Do I lose everything?
+
+Nothing is lost, but nothing moves by itself either: `progress.md`, the inbox and the hooks live on each computer. On the new one, use the common installer and restart your agents. To bring your history along, copy your selected `progress.md` and the `progress-archive-*.md` and `progress-journal-*.md` files beside it.
+
+To share one board between two computers, set `CLAUDE_PROGRESS_FILE` on both to the same file in a synced folder (OneDrive, Dropbox, iCloud). This works best when you use one computer at a time: two computers writing at once can leave your sync app with a conflicted copy.
+
+### An agent doesn't show up.
+
+1. Run `node scripts/setup-agent.mjs` to preview the current host and read any conflict or `adapter-pending` result.
+2. Reload the host as required, complete only its scoped native hook trust/enablement, and read that state back.
+3. Have that session report its own proven native id; check its exact block and timestamp. Never invent a task for another session.
+4. Observe a new native lifecycle event separately from the explicit report. A progress record does not imply direct messaging; see [connection checks](MESSAGING.md#connecting-a-session-that-was-already-open).
+
+The optional Claude plugin has a separate inbox flow; use `/progress connect status` for that installation. Independent status hooks do not need a running Claude session.
+
+For a public bug report, include:
+
+- Board, Node.js (`node --version`) and affected agent versions; include Claude Code/plugin versions only for that optional integration.
+- Your OS, which agent, what you did, what you expected and what happened.
+- Relevant setup/doctor output, after removing private details.
+
+Do not upload raw inbox, progress or session-log files. Remove prompts, replies, private paths, tokens (including board links/QR codes), and personal or project names from any output or screenshot. Use a small example written from scratch. `--chat` only hides home paths and common credential forms in its own output; it is best-effort and does not clean diagnostic files.
+
+Synthetic example (fill in versions; no real conversation needed):
+
+```text
+OS: demo OS; board/Node.js/agent versions: <versions>
+Action: finished a turn in demo-1. Expected: a board row. Actual: no row.
+Setup/doctor: <reviewed status, with private details removed>
+```
+
+Send private or security-sensitive reports through GitHub's [Report a vulnerability](https://github.com/WenyuChiou/agent-board/security/advisories/new). See [SECURITY.md](../SECURITY.md) for details.
+
+### Does anything leave my machine? What does it cost?
+
+Independent reporters retain selected session metadata locally and do not call a summarization model. Sending a message to an online agent uses the target agent’s model and allowance. The following model and conversation access applies to the optional Claude plugin flow: Board files are stored locally. Through your own Claude Code login/model access, turn summaries send prompt and reply text to Claude Haiku; titles send the session's first request plus step names; and handoff lines send up to 6,000 characters of a compaction summary. The pane's side-question box also sends your question to the model over the session's transcript through that same login. These calls use that account's allowance or billing. The pane runs `git branch --show-current` and, if GitHub's `gh` is installed, uses it to check your pull request and CI state. By default, replies require an exact online session. Legacy Codex/Grok process resumption requires explicit `--allow-resume` and uses that agent’s permissions and network. The independent OpenClaw plugin disables conversation access; the optional Claude connector instead sets `allowConversationAccess: true`.
+
+`--serve` listens on loopback (`127.0.0.1`) by default; any program on this computer that has the link can use it. `--serve --lan` shares the page on your private network through an HTTP link with a token. The token is an access key, not encryption: anyone on that network with the LAN link can read the board, change board files (including importing blocks) and stop the server. The LAN page refuses replies that would start an agent and omits resume commands. A private network address does not make a café or hotel network trusted. Do not share the link or QR code. Use the page's **Close the board** button to stop serving; if a reply is running, wait and try again. Closing the tab alone leaves the local service running; idle shutdown is opt-in. A new token is issued each time the board server or its LAN listener restarts, so stopping it makes its old link useless. See [SECURITY.md](../SECURITY.md) for file changes, processes, network access and the limits of `--chat` redaction.
+
+### Does it work on Windows?
+
+The local board runs on macOS, Linux and Windows. Native hooks and messaging depend on the host and surface; see the README's [supported agents](../README.md#supported-agents). Independent Windows hooks use Node without `sh`.
+
+### I used it as `claude-progress-pane` before.
+
+The plugin was renamed in 0.10.0 and doesn't move over by itself. Run the steps in [Coming from the old name](#coming-from-the-old-name). Your `progress.md` stays as it is.
+
+### How do I uninstall it?
+
+Independent setup: close the board, preview `node ~/.agent-board/agent-board.mjs --codex-remove --agent <name>`, then add `--apply` after review. Progress and history remain. For the optional Claude plugin:
+
+```sh
+claude -p "/progress connect remove"
+claude plugin uninstall agent-board@agent-board
+claude plugin marketplace remove agent-board
+```
+
+The first line disconnects the other agents; finish any reported cleanup before uninstalling. Your history, reporter scripts and inbox stay. See [Update and uninstall](#update-and-uninstall) for retries, recovery if you already uninstalled, and the retained files and their locations.
+
 ## Troubleshooting
 
 - **No card:** check the selected progress path, installed adapter, trust and reload status. Observe a real event and read back that exact session's block. Do not fabricate success with a manual event.
