@@ -1,0 +1,48 @@
+{
+  "name": "@wenyuchiou/agent-board",
+  "version": "0.23.5",
+  "description": "A local board for coding agents: shared progress, persistent questions and live replies. Optional Claude Code pane.",
+  "type": "module",
+  "bin": {
+    "agent-board": "bin/agent-board.mjs"
+  },
+  "files": [
+    "bin/agent-board.mjs",
+    "scripts/setup-agent.mjs",
+    "scripts/setup-codex.mjs",
+    "hooks/board-script.ts",
+    "hooks/released.ts"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "publishConfig": {
+    "access": "public",
+    "tag": "next"
+  },
+  "license": "MIT",
+  "author": "Wenyu Chiou",
+  "homepage": "https://github.com/WenyuChiou/agent-board#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/WenyuChiou/agent-board.git"
+  },
+  "bugs": {
+    "url": "https://github.com/WenyuChiou/agent-board/issues"
+  },
+  "keywords": [
+    "agent-board",
+    "progress",
+    "agents",
+    "multi-agent",
+    "dashboard",
+    "pane",
+    "codex",
+    "gemini",
+    "cursor",
+    "opencode",
+    "antigravity",
+    "claude-code",
+    "cli"
+  ]
+}

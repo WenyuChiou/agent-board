@@ -1,0 +1,2 @@
+- **Docs: findings go to your issue, and preflight comes before review (#229).** CONTRIBUTING rule 2 now says that anything else you find goes in a comment on your issue, and the maintainer files it if it qualifies, so one pull request no longer turns into several new issues. The pull request template asks for the `node scripts/preflight.mjs` output under Checks before Ready.
+  Tests: none (documentation only).

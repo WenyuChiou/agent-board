@@ -1,6 +1,7 @@
 # Set up the local board from any agent
 
-Use Node.js 18+ and a checkout of this repository. The same entry point previews every
+Use Node.js 18+ and a checkout of this repository, or the npm package (Node.js 22+,
+[below](#install-with-npm)). The same entry point previews every
 applicable target before applying any change:
 
 ```sh
@@ -36,6 +37,31 @@ On Windows use the exact Node and script paths printed by setup. Closing a brows
 leaves the local service running. Close the board stops it; `--idle-minutes 30` opts into
 idle shutdown. No startup service is installed.
 
+To run the normal archive sweep without a Claude session:
+
+```sh
+node ~/.agent-board/agent-board.mjs --tidy
+```
+
+Use the exact installed Node and script paths for a scheduler, including on Windows.
+The flag performs one sweep and exits; it installs no schedule or service and opens no
+page. Choosing this command authorizes the normal sweep: done agent blocks older than
+12 hours and stopped blocks older than 3 days move to the monthly archive beside the
+selected progress file. Unanswered questions, incomplete blocks and missing/future
+timestamps stay. Completed hand-kept tasks use their recorded first-observation times
+and the plugin's one-day threshold; this is an observation, not the exact completion time.
+The pane, `--watch` or `--serve` must first observe the completed task and save its fingerprint
+in `progress-seen.json`. A machine that runs only scheduled `--tidy` never records that
+observation, so unobserved hand-kept tasks stay even after repeated sweeps. The command
+does not create or update the observation file. Unknown, future or unreadable observations
+keep manual tasks; an unreadable observation file stays untouched and does not prevent
+eligible agent blocks from being archived.
+Archive entries are saved before removing work from the board, and repeated runs do
+not duplicate them. A failed persistence operation exits nonzero; retain the files and
+retry after fixing its reported problem. `--chat` remains read-only even with `--tidy`.
+`--tidy` takes precedence over `--serve`, `--watch` and `--html`, so those combinations
+run only the sweep. The explicit interactive tidy still archives finished work immediately.
+
 For maintenance, the installed program retains the compatibility flags
 `--codex-doctor --agent <name>` and `--codex-remove --agent <name>`; removal previews
 before `--apply`. Close that board first. Progress/history/session records remain, and
@@ -62,6 +88,35 @@ Removal records disable intent before cleanup, fencing delayed automatic setup.
 Damaged authority or recovery records are retained and reported rather than reset.
 Status may initialize recognized legacy display metadata; it does not change host
 configuration or prove native execution.
+
+## Install with npm
+
+From its first npm release (planned for 0.24.0), the same installer is on npm as `@wenyuchiou/agent-board`. With Node.js 22+ (what the
+package's `engines` field asks for) and no checkout:
+
+```sh
+npx @wenyuchiou/agent-board setup
+npx @wenyuchiou/agent-board setup --apply
+npx @wenyuchiou/agent-board --serve
+```
+
+`npx @wenyuchiou/agent-board setup` runs this same `setup-agent.mjs` from the package and takes the
+same options (`--agent`, `--home`, `--data-dir`, `--progress-file`). It writes the same
+files: the board script lands at `~/.agent-board/agent-board.mjs`, and no hook points into
+npm's cache, so clearing that cache breaks nothing. `npm install -g @wenyuchiou/agent-board` gives a
+lasting `agent-board` command in place of `npx`.
+
+Every other call (`--serve`, `--watch`, `--chat`, `--html`, or none to print the board)
+runs the board script setup installed: the one beside `$CLAUDE_PROGRESS_FILE`, else
+`~/.agent-board/agent-board.mjs`, else the Claude Code plugin's beside
+`~/.claude/progress.md`. It never runs a second copy from the package, which would restart
+the page the installed copy serves. When the installed copy comes from another release,
+`agent-board` says so on stderr and names the command that updates it. For an independent
+install, that is a setup preview for the same agents and data folder; add `--apply` to update
+it, which still leaves files you edited alone. For the Claude Code plugin's copy, it is
+updating the plugin, then `/progress connect`. Installing runs nothing: the package has no
+dependencies and no install scripts. Pre-releases are on the `next` tag
+(`npx @wenyuchiou/agent-board@next setup`); what makes a release stable is in [RELEASING.md](RELEASING.md).
 
 ## Native status adapters
 
