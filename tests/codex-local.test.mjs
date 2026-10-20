@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { pathToFileURL } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 
 const setup = resolve('scripts/setup-codex.mjs')
 const session = 'test-codex-session-123'
@@ -92,6 +92,13 @@ const fixture = async fn => {
     if (error.keepFixture) {
       isSafeToRemove = false
       error.message += ` (${home})`
+      process.stderr.write(`${error.message}\n`)
+      if (process.platform === 'win32' && error.code === 'NATIVE_HOOK_UNREAPED') {
+        // Destroyed Windows pipes can still keep node:test alive. Report the retained
+        // fixture, then fail this test process even when those handles never close.
+        process.exitCode = 1
+        setTimeout(() => process.exit(1), 250).unref()
+      }
     }
     throw error
   }
@@ -830,54 +837,95 @@ test('native hook timeouts close their owned descendant tree before fixture clea
   const tree = nativeTreeFixture(f)
   let expire
   const result = nativeHook(tree.command, f.env, {}, callback => { expire = callback })
-  let closed
+  let closed, descendantPid
   try {
     await waitForNativeTree(tree)
+    descendantPid = JSON.parse(readFileSync(tree.ready, 'utf8')).pid
+    assert.ok(Number.isInteger(descendantPid) && descendantPid > 0)
   } finally {
     expire()
     closed = await result
   }
   assert.equal(closed.error?.code, 'ETIMEDOUT', hookFailure(closed))
   assert.notEqual(closed.status, 0, hookFailure(closed))
-  if (process.platform === 'win32') assert.equal(closed.termination?.status, 0, hookFailure(closed))
+  // taskkill can report a vanished child after it killed that tree. Check the
+  // recorded descendant itself as well as closed pipes and stopped writes.
+  if (process.platform === 'win32') assert.throws(() => process.kill(descendantPid, 0), { code: 'ESRCH' }, hookFailure(closed))
+  else assert.equal(closed.signal, 'SIGKILL', hookFailure(closed))
   const last = readFileSync(tree.pulse, 'utf8')
   await new Promise(done => setTimeout(done, 100))
   assert.equal(readFileSync(tree.pulse, 'utf8'), last, 'a descendant must not keep writing after the helper closes')
 }))
 
-test('failed native tree termination reports a bounded error and retains its fixture', { timeout: 60000 }, async () => {
-  let failure, home, isStarted = false
-  try {
-    await assert.rejects(fixture(async f => {
-      home = f.home
-      const tree = nativeTreeFixture(f)
-      let expire
-      const result = nativeHook(tree.command, f.env, {}, callback => { expire = callback }, () => ({ status: 1, code: 'SYNTHETIC_DENIED' }))
-      try {
-        await waitForNativeTree(tree)
-        isStarted = true
-      } finally {
-        expire()
-        await result
-      }
-    }), error => {
-      failure = error
-      return error.code === 'NATIVE_HOOK_UNREAPED' && error.keepFixture === true && error.termination.code === 'SYNTHETIC_DENIED'
-    })
-    assert.ok(isStarted)
-    assert.ok(existsSync(home), 'unconfirmed termination must not remove the fixture')
-  } finally {
-    // The deliberate refusal above leaves an owned tree alive. The real OS stop
-    // is used now, and its close is confirmed before removing this test's home.
-    if (failure?.pid) {
-      const stopped = stopNativeTree({ pid: failure.pid })
-      assert.equal(stopped.status, 0, JSON.stringify({ ...stopped, pid: failure.pid, home }))
-      let guard
-      try {
-        await Promise.race([failure.whenClosed, new Promise((_, fail) => { guard = setTimeout(() => fail(new Error(`Owned tree ${failure.pid} did not close; fixture retained: ${home}`)), 2000) })])
-      } finally { clearTimeout(guard) }
+const nativeExitProbe = process.env.AGENT_BOARD_NATIVE_EXIT_PROBE
+if (nativeExitProbe) test('native unreaped-tree subprocess probe', { timeout: 60000 }, async () => {
+  let failure, home, isStarted = false, isVerified = false
+  const keep = () => writeFileSync(nativeExitProbe, JSON.stringify({ probePid: process.pid, pid: failure?.pid, home, isStarted, isVerified, code: failure?.code, keepFixture: failure?.keepFixture }))
+  keep()
+  await assert.rejects(fixture(async f => {
+    home = f.home
+    keep()
+    const tree = nativeTreeFixture(f)
+    let expire
+    const result = nativeHook(tree.command, f.env, {}, callback => { expire = callback }, () => ({ status: 1, code: 'SYNTHETIC_DENIED' }))
+    try {
+      await waitForNativeTree(tree)
+      isStarted = true
+    } finally {
+      expire()
+      await result
     }
-    if (home) rmSync(home, { recursive: true, force: true, maxRetries: 8, retryDelay: 50 })
+  }), error => {
+    failure = error
+    keep()
+    return error.code === 'NATIVE_HOOK_UNREAPED' && error.keepFixture === true && error.termination.code === 'SYNTHETIC_DENIED'
+  })
+  assert.ok(isStarted)
+  assert.ok(existsSync(home), 'unconfirmed termination must not remove the fixture')
+  isVerified = true
+  keep()
+  process.exitCode = 1
+})
+
+test('failed native tree termination reports a bounded error and retains its fixture', { timeout: 60000 }, async () => {
+  const control = mkdtempSync(join(tmpdir(), 'native-exit-'))
+  const marker = join(control, 'owned.json')
+  let owned
+  try {
+    const started = Date.now()
+    const env = { ...isolatedEnv(control), AGENT_BOARD_NATIVE_EXIT_PROBE: marker }
+    delete env.NODE_TEST_CONTEXT
+    const result = spawnSync(process.execPath, ['--test', '--test-name-pattern=^native unreaped-tree subprocess probe$', fileURLToPath(import.meta.url)], {
+      env, encoding: 'utf8', windowsHide: true, timeout: 45000,
+    })
+    owned = existsSync(marker) ? JSON.parse(readFileSync(marker, 'utf8')) : null
+    assert.equal(result.error, undefined, result.stderr)
+    assert.equal(result.status, 1, result.stdout + result.stderr)
+    assert.ok(Date.now() - started < 45000, 'the isolated test process must actually exit before the watchdog')
+    assert.equal(owned?.code, 'NATIVE_HOOK_UNREAPED', JSON.stringify(owned))
+    assert.equal(owned.keepFixture, true)
+    assert.equal(owned.isStarted, true)
+    assert.equal(owned.isVerified, true, 'a probe assertion failure must not masquerade as the expected exit')
+    assert.ok(existsSync(owned.home), 'the failed process must leave its fixture for owned cleanup')
+    assert.ok(result.stderr.includes('did not close') || result.stdout.includes('did not close'), result.stdout + result.stderr)
+  } finally {
+    owned ??= existsSync(marker) ? JSON.parse(readFileSync(marker, 'utf8')) : null
+    // Observe the probe's exit first: rescuing its descendant earlier would hide
+    // the Windows socket leak. Only this probe's recorded processes are stopped.
+    for (const pid of [owned?.pid, owned?.probePid].filter(Number.isInteger)) {
+      let isAlive = true
+      try { process.kill(pid, 0) } catch (error) { if (error.code === 'ESRCH') isAlive = false; else throw error }
+      if (isAlive) {
+        let stopped
+        if (pid === owned.probePid && process.platform !== 'win32') {
+          process.kill(pid, 'SIGKILL')
+          stopped = { status: 0 }
+        } else stopped = stopNativeTree({ pid })
+        assert.equal(stopped.status, 0, `Owned cleanup failed; fixture retained: ${JSON.stringify({ ...stopped, pid, home: owned.home, control })}`)
+      }
+    }
+    if (owned?.home) rmSync(owned.home, { recursive: true, force: true, maxRetries: 8, retryDelay: 50 })
+    rmSync(control, { recursive: true, force: true, maxRetries: 8, retryDelay: 50 })
   }
 })
 

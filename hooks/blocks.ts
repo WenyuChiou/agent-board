@@ -22,8 +22,12 @@ const DAY = 24 * 60 * 60 * 1000
 
 export const shortId = (sessionId: string): string => sessionId.slice(0, 8)
 
-export const stateWords = (state: ProgressSessionState, s: Strings = ZH_TW): string => {
-  if (state === 'working') return s.stateWorking
+export const stateWords = (state: ProgressSessionState, agent: string, s: Strings = ZH_TW): string => {
+  if (state === 'working') {
+    if (agent === '' || agent === 'claude') return s.stateWorking
+    const name = Object.hasOwn(s.agentNames, agent) ? s.agentNames[agent] ?? agent : agent
+    return s.agentWorking(name)
+  }
   if (state === 'waiting') return s.stateWaiting
   if (state === 'done') return s.stateDone
 
@@ -88,7 +92,7 @@ export const stepWords = (task: ProgressMirrorTask, s: Strings = ZH_TW): string 
 export const renderAutoBlock = (mirror: ProgressMirror, s: Strings = ZH_TW): string[] => {
   const id = shortId(mirror.sessionId)
   const pr = mirror.pr ?? null
-  const meta = [stateWords(mirror.state, s), mirror.branch, pr === null ? '' : prWords(pr, s)].filter(part => part !== '').join(' · ')
+  const meta = [stateWords(mirror.state, mirror.agent, s), mirror.branch, pr === null ? '' : prWords(pr, s)].filter(part => part !== '').join(' · ')
 
   return [
     markerOf(mirror),
