@@ -27,6 +27,15 @@ TASK_RE = re.compile(r"^###\s+(.+?)\s*#*\s*$")
 ATTR_RE = re.compile(r"([\w-]+)=(\S+)")
 HEX8_RE = re.compile(r"^[0-9a-f]{8}$")
 STEP_RE = re.compile(r"^- \[( |x|~|\?|>|!|-)\] .+")
+MARKER_PREFIXES = ("auto session=", "/auto session=", "question=")
+
+
+def is_cut_marker(line):
+    if not line.startswith("<!--") or "-->" in line:
+        return False
+    marker = re.sub(r"^<!--[ \t]*", "", line.rstrip(" \t\r"))
+    return marker != "" and any(prefix.startswith(marker) or marker.startswith(prefix)
+                                     for prefix in MARKER_PREFIXES)
 
 
 def split_lines(text):
@@ -67,7 +76,7 @@ def classify(lines):
     kinds = []
     fenced = False
     in_comment = False
-    for raw in lines:
+    for index, raw in enumerate(lines):
         if FENCE_RE.match(raw):
             fenced = not fenced
             kinds.append("hidden")
@@ -92,6 +101,19 @@ def classify(lines):
                 continue
             in_comment = False
             line = line[close + 3:]
+        if is_cut_marker(raw):
+            has_boundary = False
+            has_close = False
+            for following_index in range(index + 1, len(lines)):
+                following = lines[following_index]
+                if START_RE.match(following) or END_RE.match(following) or PROJECT_RE.match(following):
+                    has_boundary = True
+                if "-->" in following:
+                    has_close = True
+                    break
+            if has_boundary or not has_close:
+                kinds.append("text")
+                continue
         line = re.sub(r"<!--.*?-->", "", line)
         opened = line.find("<!--")
         if opened >= 0:
