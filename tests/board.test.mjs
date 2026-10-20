@@ -3020,6 +3020,138 @@ test("--serve --lan prints the page's network address and a QR code of it, and a
 })
 
 
+const TIDY_NOW = Date.UTC(2026, 9, 17, 12)
+const tidyFixture = fn => {
+  const dir = mkdtempSync(join(tmpdir(), 'board-tidy-'))
+  try {
+    const path = join(dir, 'progress.md')
+    const script = join(dir, 'agent-board.mjs')
+    writeFileSync(script, `globalThis.AGENT_BOARD = ${JSON.stringify({ path, lang: 'en' })}\nDate.now = () => ${TIDY_NOW}\n${BOARD_SCRIPT}`)
+    const command = (args = ['--tidy'], preload = '') => spawnSync(process.execPath, [...(preload ? ['-r', preload] : []), script, ...args], {
+      cwd: dir, encoding: 'utf8', timeout: 10000,
+      env: { ...process.env, HOME: dir, USERPROFILE: dir, CLAUDE_CONFIG_DIR: dir, CLAUDE_PROGRESS_FILE: path, NO_COLOR: '1' },
+    })
+    const snapshot = () => Object.fromEntries(readdirSync(dir).map(name => [name, readFileSync(join(dir, name))]))
+    const block = (session, title, state, hours, step = '- [x] Finished') => `<!-- auto session=${session} agent=codex state=${state}${hours === null ? '' : ` updated=${new Date(TIDY_NOW - hours * 3600000).toISOString()}`} -->\n### ${title}\n${step}\n<!-- /auto session=${session} -->\n`
+    fn({ dir, path, command, snapshot, block })
+  } finally { rmSync(dir, { recursive: true, force: true, maxRetries: 8, retryDelay: 50 }) }
+}
+
+test('--tidy archives done blocks older than 12 hours and stopped ones older than 3 days', () => {
+  for (const lang of ['en', 'zh-TW', 'zh-CN']) tidyFixture(f => {
+    const removed = [
+      f.block('a1b2c301', 'Old done', 'done', 13),
+      f.block('a1b2c302', 'Old ended', 'ended', 73, '- [ ] Unfinished'),
+      f.block('a1b2c303', 'Old silent', 'working', 73, '- [~] Paused'),
+    ]
+    const kept = [
+      f.block('a1b2c304', 'Fresh done', 'done', 11),
+      f.block('a1b2c305', 'Fresh stopped', 'ended', 71, '- [ ] Unfinished'),
+      f.block('a1b2c306', 'Active', 'working', 1, '- [~] Working'),
+      f.block('a1b2c307', 'Unanswered', 'ended', 100, '- [?] Publish, OK?'),
+      f.block('a1b2c308', 'Unknown clock', 'done', null),
+      f.block('a1b2c309', 'Future clock', 'done', -24),
+      f.block('a1b2c310', 'Incomplete block', 'done', 100).replace('<!-- /auto session=a1b2c310 -->\n', ''),
+    ]
+    writeFileSync(f.path, `## Synthetic\n${removed.join('\n')}\n${kept.join('\n')}`)
+    const help = f.command(['--help', '--lang', lang])
+    assert.equal(help.status, 0, help.stderr)
+    assert.ok(help.stdout.includes('--tidy'), help.stdout)
+    const result = f.command(['--tidy', '--lang', lang])
+    assert.equal(result.status, 0, result.stderr)
+    const after = readFileSync(f.path, 'utf8')
+    for (const text of kept) assert.ok(after.includes(text), text)
+    const archive = readdirSync(f.dir).filter(name => name.startsWith('progress-archive-'))
+    assert.equal(archive.length, 1)
+    const history = readFileSync(join(f.dir, archive[0]), 'utf8')
+    for (const title of ['Old done', 'Old ended', 'Old silent']) {
+      assert.ok(!after.includes(title), after)
+      assert.equal(history.split(`### ${title}`).length - 1, 1, history)
+    }
+    assert.ok(history.includes('- [ ] Unfinished') && history.includes('- [~] Paused'), history)
+    const beforeRetry = f.snapshot()
+    assert.equal(f.command().status, 0)
+    assert.deepEqual(f.snapshot(), beforeRetry)
+  })
+})
+
+test('--tidy reports scheduled ages in every language and takes precedence over interactive modes', () => {
+  const expected = {
+    en: 'Nothing is ready to archive. Agent blocks need more than 12 hours since their last update when done, or more than 3 days otherwise; completed hand-kept tasks need a completion observation at least 24 hours old. Unanswered questions stay.',
+    'zh-TW': '目前沒有可封存的項目。代理區塊最後更新後，已完成需超過 12 小時，其他需超過 3 天；手動完成項目需有至少 24 小時前的完成觀察紀錄。未答覆的問題會保留。',
+    'zh-CN': '当前没有可归档的项目。代理区块最后更新后，已完成需超过 12 小时，其他需超过 3 天；手动完成项目需有至少 24 小时前的完成观察记录。未答复的问题会保留。',
+  }
+  for (const lang of ['en', 'zh-TW', 'zh-CN']) tidyFixture(f => {
+    writeFileSync(f.path, `## Synthetic\n${f.block('a1b2c313', 'Done at the boundary', 'done', 12)}${f.block('a1b2c314', 'Stopped at the boundary', 'ended', 72)}### Unobserved manual\n- [x] Finished\n`)
+    const guard = join(f.dir, 'no-interactive.cjs')
+    // A precedence regression must fail without starting a server, browser or watch timer.
+    writeFileSync(guard, "const cp = require('node:child_process'); const fail = () => { throw Error('UNEXPECTED_INTERACTIVE_PROCESS') }; for (const key of ['spawn', 'spawnSync', 'exec', 'execSync', 'execFile', 'execFileSync', 'fork']) cp[key] = fail; require('node:module').syncBuiltinESMExports(); global.setInterval = fail;\n")
+    const before = f.snapshot()
+    for (const mode of [[], ['--serve'], ['--watch'], ['--html']]) {
+      const result = f.command(['--tidy', '--lang', lang, ...mode], guard)
+      assert.equal(result.error, undefined)
+      assert.equal(result.status, 0, result.stderr)
+      assert.equal(result.stdout, `${expected[lang]}\n`)
+      assert.equal(result.stderr, '')
+      assert.deepEqual(f.snapshot(), before)
+    }
+  })
+})
+
+test('--tidy uses recorded manual completion ages and preserves unknown or future observations', () => tidyFixture(f => {
+  const titles = ['Old manual', 'Fresh manual', 'Unknown manual', 'Future manual']
+  writeFileSync(f.path, `## Synthetic\n${titles.map(title => `### ${title}\n- [x] Finished\n`).join('')}`)
+  const key = title => createHash('sha256').update(JSON.stringify(['Synthetic', title, [['done', 'Finished']]])).digest('hex')
+  const record = JSON.stringify({ seen: {
+    [key('Old manual')]: TIDY_NOW - 25 * 3600000,
+    [key('Fresh manual')]: TIDY_NOW - 13 * 3600000,
+    [key('Future manual')]: TIDY_NOW + 3600000,
+  } })
+  const seen = join(f.dir, 'progress-seen.json')
+  writeFileSync(seen, record)
+  const result = f.command()
+  assert.equal(result.status, 0, result.stderr)
+  const after = readFileSync(f.path, 'utf8')
+  assert.ok(!after.includes('Old manual'), after)
+  for (const title of titles.slice(1)) assert.ok(after.includes(title), after)
+  assert.equal(readFileSync(seen, 'utf8'), record)
+}))
+
+test('--tidy ages each manual task by its own fingerprint with no project or a repeated title', () => tidyFixture(f => {
+  writeFileSync(f.path, '### Outside project\n- [x] Outside step\n## Synthetic\n### Shared title\n- [x] Old step\n### Shared title\n- [x] Fresh step\n')
+  const key = (project, title, step) => createHash('sha256').update(JSON.stringify([project, title, [['done', step]]])).digest('hex')
+  const record = JSON.stringify({ seen: {
+    [key('', 'Outside project', 'Outside step')]: TIDY_NOW - 25 * 3600000,
+    [key('Synthetic', 'Shared title', 'Old step')]: TIDY_NOW - 25 * 3600000,
+    [key('Synthetic', 'Shared title', 'Fresh step')]: TIDY_NOW - 3600000,
+  } })
+  const seen = join(f.dir, 'progress-seen.json')
+  writeFileSync(seen, record)
+  const result = f.command()
+  assert.equal(result.status, 0, result.stderr)
+  const after = readFileSync(f.path, 'utf8')
+  assert.ok(!after.includes('Outside project'), after)
+  assert.ok(!after.includes('Old step'), after)
+  assert.ok(after.includes('### Shared title\n- [x] Fresh step'), after)
+  const archive = readdirSync(f.dir).find(name => name.startsWith('progress-archive-'))
+  const history = readFileSync(join(f.dir, archive), 'utf8')
+  assert.ok(history.includes('Outside step') && history.includes('Old step'), history)
+  assert.ok(!history.includes('Fresh step'), history)
+  assert.equal(readFileSync(seen, 'utf8'), record)
+}))
+
+test('--chat stays read-only when combined with --tidy and a missing board creates no files', () => tidyFixture(f => {
+  writeFileSync(f.path, `## Synthetic\n${f.block('a1b2c311', 'Old done', 'done', 24)}`)
+  const before = f.snapshot()
+  const result = f.command(['--chat', '--tidy', '--serve', '--html'])
+  assert.equal(result.status, 0, result.stderr)
+  assert.deepEqual(f.snapshot(), before)
+  rmSync(f.path)
+  const absent = f.snapshot()
+  assert.equal(f.command().status, 0)
+  assert.deepEqual(f.snapshot(), absent)
+}))
+
 const IDLE_NOW = Date.parse('2026-10-17T12:00:00Z')
 const IDLE_FILE = `## demo
 ### Quiet plan
