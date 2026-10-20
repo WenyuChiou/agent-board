@@ -21,7 +21,7 @@ Contents: [File](#file) · [Structure](#structure) · [Steps](#steps-and-marks) 
 
 The pane checks the file's modification time and size every 2 seconds and parses it again when either changed.
 
-**progress.html.** Beside the file the pane keeps `progress.html` (`board.html` for `board.md`; `.html` is added to the whole name if it does not end in `.md`). It is a standalone page that lists the work of every session in the file, reloads itself every 30 seconds and follows the system's light or dark setting. A session with the mod rewrites it at most once a minute, and `/progress open` (also `window`, `html`) writes it at once and opens it in the default browser. Do not edit it; it is overwritten.
+**progress.html.** Beside the file the pane keeps `progress.html` (`board.html` for `board.md`; `.html` is added to the whole name if it does not end in `.md`). It is a standalone page that lists the work of every session in the file, reloads itself every 30 seconds and follows the system's light or dark setting until Light or Dark is picked in its switch; the browser keeps that pick through the reload. A session with the mod rewrites it at most once a minute, and `/progress open` (also `window`, `html`) writes it at once and opens it in the default browser. Do not edit it; it is overwritten.
 
 **Line endings when writing.** Keep the style the file already has. When the pane rewrites the file it uses CRLF for every line if the file contains any CRLF, and LF otherwise, and it ends the file with a line break.
 

@@ -450,7 +450,9 @@ test('the HTML board shows pending questions with an empty progress file and can
     assert.ok(page.includes('api-gateway') && page.includes('codex'), page)
     assert.equal(page.split(HTML_QUESTION).length - 1, 2)
     assert.ok(page.includes('data-key="section:waiting" open'), page)
-    assert.ok(!/Nothing needs you right now|<form|<textarea|<button|fetch\(/.test(page), page)
+    assert.ok(!/Nothing needs you right now|<form|<textarea|fetch\(/.test(page), page)
+    // Its only buttons pick the theme or open a section; none sends a reply.
+    assert.ok([...page.matchAll(/<button[ >][^>]*>/g)].every(([tag]) => /data-theme-pick=|data-section=/.test(tag)), page)
     assert.ok(/● 1<\/span>/.test(page), page)
   }
 })
@@ -2138,6 +2140,8 @@ const pageDom = async (html, first, { post, confirm, messaging, getBoard, clipbo
     querySelector: get,
     querySelectorAll: selector => [...nodes.values()].flatMap(node => [...(matches(node, selector) ? [node] : []), ...node.querySelectorAll(selector)]),
     activeElement: null,
+    events: {},
+    addEventListener(name, run) { this.events[name] = run },
   }
   let model = first
   let scheduled
@@ -2184,6 +2188,7 @@ const pageDom = async (html, first, { post, confirm, messaging, getBoard, clipbo
     copied,
     allButtons: () => document.querySelectorAll('button'),
     node: get,
+    key: event => document.events.keydown?.(event),
     flush,
     settle,
     redraw: async next => {
@@ -3322,4 +3327,293 @@ test('reopening a board replaces an explicit resume opt-in when that flag is rem
       assert.equal(ping.json().allowResume, allow)
     }
   } finally { await board.end(urls) }
+})
+
+const redesignPage = () => run('en', ['--chat'], {}, FILE, `${BOARD_SCRIPT}\nprocess.stdout.write(servePage(STRINGS.en, 'synthetic'))\n`)
+const redesignSnapshot = () => htmlRun({ file: '## Synthetic\n### Plan\n- [ ] Continue\n' })
+const themeScript = html => html.match(/<head>[\s\S]*?<script[^>]*>([\s\S]*?)<\/script>/)[1]
+const themeDom = (html, storage = new Map(), isBlocked = false, jar = { value: '' }) => {
+  const attributes = {}
+  const classes = new Set()
+  const root = {
+    setAttribute: (name, value) => { attributes[name] = value },
+    removeAttribute: name => { delete attributes[name] },
+    classList: { add: name => classes.add(name), remove: name => classes.delete(name) },
+  }
+  const buttons = [...html.matchAll(/<button\b([^>]*data-theme-pick="([^"]+)"[^>]*)>/g)].map(found => {
+    assert.match(found[1], /data-local/)
+    const attrs = { 'data-theme-pick': found[2] }
+    return { getAttribute: name => attrs[name], setAttribute: (name, value) => { attrs[name] = value } }
+  })
+  assert.equal(buttons.length, 3)
+  const events = {}
+  let finish
+  runInNewContext(themeScript(html), {
+    document: {
+      documentElement: root, querySelectorAll: () => buttons, addEventListener: (name, run) => { events[name] = run },
+      get cookie() { return jar.value },
+      set cookie(line) {
+        const pair = line.split(';')[0]
+        const kept = jar.value.split('; ').filter(one => one !== '' && !one.startsWith(`${pair.split('=')[0]}=`))
+        jar.value = [...kept, ...(/max-age=0\b/i.test(line) ? [] : [pair])].join('; ')
+      },
+    },
+    localStorage: {
+      getItem: key => { if (isBlocked) throw Error('blocked'); return storage.get(key) },
+      setItem: (key, value) => { if (isBlocked) throw Error('blocked'); storage.set(key, value) },
+      removeItem: key => { if (isBlocked) throw Error('blocked'); storage.delete(key) },
+    },
+    setTimeout: run => { finish = run }, clearTimeout: () => {},
+  }, { timeout: 1000 })
+  events.DOMContentLoaded()
+  return {
+    attributes, classes, buttons,
+    pick: name => events.click({ target: { parentNode: buttons.find(button => button.getAttribute('data-theme-pick') === name) } }),
+    finish: () => finish(),
+  }
+}
+
+test('the serve page offers a light, dark and system theme and remembers the choice', () => {
+  const html = redesignPage()
+  const storage = new Map()
+  const jar = { value: '' }
+  const dom = themeDom(html, storage, false, jar)
+  dom.pick('dark')
+  assert.equal(storage.get('agent-board.theme'), 'dark')
+  assert.equal(dom.attributes['data-theme'], 'dark')
+  assert.deepEqual(dom.buttons.map(button => button.getAttribute('aria-pressed')), ['false', 'false', 'true'])
+  assert.ok(dom.classes.has('theming'))
+  dom.finish()
+  assert.ok(!dom.classes.has('theming'))
+  // The live page starts on a new port each time, with empty storage; the cookie keeps the pick.
+  assert.equal(themeDom(html, new Map(), false, jar).attributes['data-theme'], 'dark')
+  const reload = themeDom(html, storage, false, jar)
+  assert.equal(reload.attributes['data-theme'], 'dark')
+  reload.pick('light')
+  assert.equal(storage.get('agent-board.theme'), 'light')
+  reload.pick('system')
+  assert.equal(storage.has('agent-board.theme'), false)
+  assert.equal(jar.value, '')
+  assert.equal(reload.attributes['data-theme'], undefined)
+  assert.equal(reload.buttons[0].getAttribute('aria-pressed'), 'true')
+  assert.match(html, /<script nonce="synthetic">[\s\S]*agent-board.theme/)
+  assert.match(html, /prefers-reduced-motion:reduce/)
+})
+
+test('progress.html keeps the chosen theme through its 30-second reload', () => {
+  const html = redesignSnapshot()
+  const storage = new Map([['agent-board.theme', 'light']])
+  const dom = themeDom(html, storage)
+  assert.equal(dom.attributes['data-theme'], 'light')
+  let reloads = 0
+  let tick
+  const kept = new Map([['progress-open', '{"section:others":false}']])
+  const events = {}
+  const section = { id: '', open: true, getAttribute: () => 'section:others', addEventListener: (name, run) => { events[name] = run }, scrollIntoView: () => { section.scrolled = true } }
+  let jump
+  const button = { getAttribute: () => 'dash-others', addEventListener: (_, run) => { jump = run } }
+  const script = [...html.matchAll(/<script[^>]*>([\s\S]*?)<\/script>/g)].at(-1)[1]
+  runInNewContext(script, {
+    document: {
+      querySelectorAll: selector => selector === 'details[data-key]' ? [section] : [button],
+      getElementById: id => id === 'dash-others' ? section : null,
+    },
+    localStorage: { getItem: key => kept.get(key), setItem: (key, value) => kept.set(key, value) },
+    sessionStorage: { getItem: () => '28', setItem: (_, value) => assert.equal(value, '42') },
+    window: { scrollY: 42, scrollTo: (x, y) => assert.equal(y, 28) },
+    setTimeout: (fn, delay) => { assert.equal(delay, 30000); tick = fn },
+    location: { reload: () => { reloads += 1 } },
+  }, { timeout: 1000 })
+  assert.equal(section.id, 'dash-others')
+  assert.equal(section.open, false)
+  jump()
+  assert.equal(section.open, true)
+  assert.equal(section.scrolled, true)
+  events.toggle()
+  assert.equal(JSON.parse(kept.get('progress-open'))['section:others'], true)
+  tick()
+  assert.equal(reloads, 1)
+  assert.equal(themeDom(html, storage).attributes['data-theme'], 'light')
+})
+
+test('the theme is applied before the page paints and survives blocked browser storage', () => {
+  for (const html of [redesignPage(), redesignSnapshot()]) {
+    const head = html.slice(html.indexOf('<head>'), html.indexOf('</head>'))
+    assert.ok(head.indexOf('<script') < head.indexOf('<style'))
+    assert.ok(!themeScript(html).includes('(function ()'))
+    const dom = themeDom(html, new Map(), true)
+    assert.equal(dom.attributes['data-theme'], undefined)
+    dom.pick('dark')
+    assert.equal(dom.attributes['data-theme'], 'dark')
+    assert.equal(dom.buttons[2].getAttribute('aria-pressed'), 'true')
+    assert.equal(themeDom(html, new Map([['agent-board.theme', 'unknown']])).attributes['data-theme'], undefined)
+    assert.match(html, /:root:not\(\[data-theme="light"\]\)/)
+    assert.match(html, /:root\[data-theme="dark"\]/)
+  }
+})
+
+const redesignModel = () => {
+  const row = (project, agent, title, due = '') => ({ key: title, project, agent, title, due, steps: [], total: 1, done: 0, status: 'Working', tone: 'accent', send: 'open' })
+  const ask = (project, agent, text) => ({ key: text, project, agent, text, task: 'Plan', answers: [], kind: 'choose', chip: 'Choose', send: 'copy' })
+  return {
+    counts: { waiting: 2, active: 1, due: 1, today: 1 },
+    asks: [ask('Alpha', 'codex', 'Alpha question'), ask('Beta', 'gemini', 'Beta question')],
+    hidden: [], idle: [], stopped: [row('Beta', 'gemini', 'Stopped plan')],
+    groups: [{ project: 'Alpha', rows: [row('Alpha', 'codex', 'Due plan', 'Tomorrow')] }],
+    turns: [], recent: [{ project: 'Alpha', agent: 'codex', title: 'Finished plan', when: 'Today', questions: [] }],
+  }
+}
+const descendants = root => [root, ...root.childNodes.flatMap(descendants)]
+const visibleWords = root => root.hidden ? '' : root.text + root.childNodes.map(visibleWords).join('')
+const sideButton = (dom, label) => descendants(dom.node('side-groups')).find(node => node.tag === 'button' && node.getAttribute('aria-label') === label)
+
+test('the serve page sidebar sorts the board by view, project and agent with counts', async () => {
+  const model = redesignModel()
+  const dom = await pageDom(redesignPage(), model)
+  for (const label of ['Everything 5', 'Waiting on you 2', 'In progress 1', 'Due soon 1', 'Stopped 1', 'Done recently 1', 'Alpha 3', 'Beta 2', 'codex 3', 'gemini 2']) assert.ok(sideButton(dom, label), label)
+  assert.equal(descendants(dom.node('board')).find(node => node.className?.includes('ag-codex')).getAttribute('aria-hidden'), 'true')
+  dom.boxes()[0].value = 'Synthetic draft'
+  sideButton(dom, 'Alpha 3').click()
+  assert.ok(visibleWords(dom.node('board')).includes('Alpha question'))
+  assert.ok(!visibleWords(dom.node('board')).includes('Beta question'))
+  assert.ok(dom.node('scope').textContent.includes('3 items'))
+  assert.equal(sideButton(dom, 'Everything 5').getAttribute('aria-pressed'), 'true')
+  await dom.redraw({ ...model, warning: 'Synthetic warning' })
+  assert.equal(sideButton(dom, 'Alpha 3').getAttribute('aria-pressed'), 'true')
+  assert.ok(dom.boxes().some(box => box.value === 'Synthetic draft'))
+  sideButton(dom, 'Done recently 1').click()
+  const shown = visibleWords(dom.node('board'))
+  assert.ok(shown.includes('Finished plan'))
+  assert.ok(shown.includes('Synthetic warning'))
+  for (const text of ['Alpha question', 'Beta question', 'Due plan', 'Stopped plan']) assert.ok(!shown.includes(text), text)
+  assert.ok(dom.node('scope').textContent.includes('1 item'))
+  dom.node('side-open').click()
+  assert.equal(dom.node('side-open').getAttribute('aria-expanded'), 'true')
+  dom.key({ key: 'Escape' })
+  assert.equal(dom.node('side-open').getAttribute('aria-expanded'), 'false')
+  const own = redesignModel()
+  // A hand-kept task is the person's own; a Claude Code block has the same '' agent without isOwn.
+  own.groups[0].rows[0] = { ...own.groups[0].rows[0], agent: '', isOwn: true }
+  own.groups[0].rows.push({ ...own.groups[0].rows[0], key: 'Claude plan', title: 'Claude plan', isOwn: undefined })
+  // The model carries no agent for a finished item; it is counted under no agent.
+  delete own.recent[0].agent
+  await dom.redraw(own)
+  assert.ok(sideButton(dom, 'Your own tasks 1'))
+  assert.ok(sideButton(dom, 'claude 1'))
+  for (const mark of ['ag ag-own', 'ag ag-claude-code']) assert.ok(descendants(dom.node('board')).some(node => node.className === mark), mark)
+  const full = redesignModel()
+  full.reminder = [{ project: 'Alpha', agent: 'codex', task: 'Retained', text: 'Reminder question' }]
+  full.older = [{ project: 'Beta', agent: 'gemini', task: 'Retained', text: 'Older question' }]
+  full.hidden = [{ key: 'hidden', project: 'Beta', agent: 'gemini', text: 'Hidden question' }]
+  full.idle = [{ ...full.groups[0].rows[0], key: 'idle', project: 'Beta', agent: 'gemini', title: 'Idle plan', due: '' }]
+  full.turns = [{ key: 'question', project: 'Alpha', agent: 'codex', text: 'Inbox question', isQuestion: true }, { key: 'turn', project: 'Beta', agent: 'constructor', text: 'Inbox update', isQuestion: false }]
+  await dom.redraw(full)
+  // Shelf entries (reminders, older and hidden questions, the idle task) filter but are not
+  // counted, as the counts above the board leave them out.
+  for (const label of ['Everything 7', 'Waiting on you 3', 'In progress 3', 'Due soon 1']) assert.ok(sideButton(dom, label), label)
+  descendants(dom.node('scope')).find(node => node.getAttribute('aria-label') === 'Remove the Alpha filter').click()
+  sideButton(dom, 'Waiting on you 3').click()
+  for (const text of ['Reminder question', 'Older question', 'Hidden question', 'Inbox question']) assert.ok(visibleWords(dom.node('board')).includes(text), text)
+  assert.ok(!visibleWords(dom.node('board')).includes('Inbox update'))
+  sideButton(dom, 'Due soon 1').click()
+  assert.ok(visibleWords(dom.node('board')).includes('Due plan'))
+  for (const text of ['Idle plan', 'Reminder question', 'Older question', 'Hidden question', 'Inbox question']) assert.ok(!visibleWords(dom.node('board')).includes(text), text)
+  sideButton(dom, 'In progress 3').click()
+  assert.ok(visibleWords(dom.node('board')).includes('Idle plan'))
+  const unknown = descendants(dom.node('board')).find(node => node.className === 'ag ag-other' && node.textContent === 'C')
+  assert.ok(unknown)
+})
+
+test("a sidebar filter that matches nothing shows that view's empty state and a way to clear it", async () => {
+  const dom = await pageDom(redesignPage(), redesignModel())
+  sideButton(dom, 'Stopped 1').click()
+  sideButton(dom, 'codex 3').click()
+  assert.ok(visibleWords(dom.node('board')).includes('Nothing here for codex.'))
+  assert.ok(!visibleWords(dom.node('board')).includes('Stopped plan'))
+  const clear = dom.allButtons().find(button => button.textContent === 'Clear filters')
+  assert.ok(clear && !clear.hidden)
+  clear.click()
+  assert.ok(visibleWords(dom.node('board')).includes('Stopped plan'))
+  assert.ok(!visibleWords(dom.node('board')).includes('Nothing here for codex.'))
+  sideButton(dom, 'gemini 2').click()
+  const chip = descendants(dom.node('scope')).find(node => node.getAttribute('aria-label') === 'Remove the gemini filter')
+  assert.ok(chip)
+  chip.click()
+  assert.equal(sideButton(dom, 'gemini 2').getAttribute('aria-pressed'), 'false')
+  const blank = { counts: { waiting: 0, active: 0, due: 0, today: 0 }, asks: [], hidden: [], idle: [], stopped: [], groups: [], turns: [], recent: [] }
+  await dom.redraw(blank)
+  assert.ok(visibleWords(dom.node('board')).includes('Nothing has stopped'))
+  sideButton(dom, 'Due soon 0').click()
+  assert.ok(visibleWords(dom.node('board')).includes('Nothing due soon'))
+  sideButton(dom, 'Done recently 0').click()
+  assert.ok(visibleWords(dom.node('board')).includes('Nothing finished recently'))
+  sideButton(dom, 'Everything 0').click()
+  // With no questions the waiting heading says nothing needs you, once.
+  assert.ok(visibleWords(dom.node('board')).includes('Waiting on you'))
+  assert.equal(visibleWords(dom.node('board')).split('Nothing needs you right now').length, 2)
+})
+
+test('the theme switch and the sidebar keep working while the board is unreachable', async () => {
+  const html = redesignPage()
+  const model = redesignModel()
+  let isOffline = false
+  const dom = await pageDom(html, model, { getBoard: async () => {
+    if (isOffline) throw Error('Synthetic offline')
+    return { ok: true, json: async () => ({ model, now: 1 }) }
+  } })
+  isOffline = true
+  await dom.redraw(model)
+  await dom.settle()
+  assert.ok(dom.node('offline').textContent.includes("Can't reach the board"))
+  for (const node of descendants(dom.node('side-groups')).filter(node => node.tag === 'button')) assert.ok(!node.disabled && node.getAttribute('data-local') !== null)
+  sideButton(dom, 'Beta 2').click()
+  assert.ok(visibleWords(dom.node('board')).includes('Beta question'))
+  assert.ok(!visibleWords(dom.node('board')).includes('Alpha question'))
+  assert.equal(dom.requests.length, 0)
+  const theme = themeDom(html)
+  theme.pick('dark')
+  assert.equal(theme.attributes['data-theme'], 'dark')
+})
+
+test('L2 page: a step circle either ticks the step or does not look clickable', async () => {
+  const html = redesignPage()
+  const model = redesignModel()
+  const row = model.groups[0].rows[0]
+  row.steps = ['done', 'doing', 'todo'].map(status => ({ status, text: `Synthetic ${status}`, note: '', isCurrent: status === 'doing' }))
+  row.total = 3
+  row.done = 1
+  const dom = await pageDom(html, model)
+  const marks = descendants(dom.node('board')).filter(node => node.className?.startsWith('mk '))
+  assert.equal(marks.length, 3)
+  for (const mark of marks) {
+    assert.equal(mark.tag, 'span')
+    assert.equal(mark.getAttribute('role'), null)
+    assert.equal(mark.getAttribute('tabindex'), null)
+    assert.equal(mark.events.click, undefined)
+    assert.equal(mark.onclick, undefined)
+    assert.notEqual(mark.textContent, '\u25cb')
+  }
+  assert.deepEqual(marks.map(mark => mark.textContent), ['\u2713', '\u25b8', '\u2022'])
+  const snapshot = htmlRun({ file: '## Synthetic\n### Plan\n- [x] Synthetic done\n- [~] Synthetic doing\n- [ ] Synthetic todo\n' })
+  for (const [page, selector] of [[html, /\.steps \.mk\s*\{([^}]*)\}/g], [snapshot, /\.steps \.g\s*\{([^}]*)\}/g]]) {
+    const rules = [...page.matchAll(selector)].map(match => match[1])
+    assert.ok(rules.length > 0)
+    for (const rule of rules) {
+      assert.doesNotMatch(rule, /(?:^|;)\s*border(?:-[\w-]+)?\s*:/i)
+      assert.doesNotMatch(rule, /cursor\s*:\s*pointer/i)
+      assert.doesNotMatch(rule, /(?:^|;)\s*background(?:-[\w-]+)?\s*:/i)
+    }
+    assert.ok(rules.some(rule => /width\s*:\s*22px/.test(rule)))
+    assert.ok(rules.some(rule => /cursor\s*:\s*default/.test(rule)))
+    assert.ok(rules.some(rule => /user-select\s*:\s*none/.test(rule)))
+  }
+  const stepMarks = [...snapshot.matchAll(/<span class="g"[^>]*>([^<]*)<\/span>/g)].map(match => match[1])
+  assert.ok(stepMarks.includes('\u2713'))
+  assert.ok(stepMarks.includes('\u25b8'))
+  assert.ok(stepMarks.includes('\u2022'))
+  assert.ok(!stepMarks.includes('\u25cb'))
+  assert.match(snapshot, /<span class="g"[^>]*>\u2022<\/span><span class="t">Synthetic todo<\/span>/)
+  const legend = snapshot.match(/<div class="legend">([\s\S]*?)<\/div>/)[1]
+  assert.match(legend, /<span[^>]*>\u2022<\/span> To do/)
+  assert.doesNotMatch(legend, /\u25cb/)
 })

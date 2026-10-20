@@ -153,13 +153,13 @@ The page listens on 127.0.0.1 only, and its address carries a random key: anythi
 
 ## Colours and marks
 
-The pane follows Claude Code's theme (`/config`, then **Theme**); the page and `progress.html` follow your computer's light or dark mode. Every mark has its own shape, so it reads without colour:
+The pane follows Claude Code's theme (`/config`, then **Theme**); the page and `progress.html` follow your computer's light or dark mode until you pick Light or Dark at the top right of the page. Every mark has its own shape, so it reads without colour; the pages draw a step still to do as a small dot rather than a ring, so it does not look like a button:
 
 | Mark | Means | | Mark | Means |
 |:-:|---|---|:-:|---|
 | ● | Waiting on you | | ◐ | Running, or waiting on someone else |
 | ▸ | Doing now | | ! | Stuck |
-| ○ | To do | | ⚑ | Due within two weeks |
+| ○ • | To do (a ring in the pane, a small dot on the pages) | | ⚑ | Due within two weeks |
 | ✓ | Done | | – | Cancelled |
 
 ## Troubleshooting

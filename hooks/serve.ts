@@ -1,10 +1,10 @@
 import type { AskKind } from './ask'
 import { answersOf, boardItems, fingerprint, remainingInbox } from './board'
 import type { BoardItem, PendingTurn } from './board'
-import { htmlLang, vars } from './dashboard'
+import { htmlLang } from './dashboard'
+import { AGENT_ALIASES, agentMarkCss, boardMark, pageBaseCss, pageTokens, themeHead, themeSwitch } from './page-look'
 import { RELAY, ZH_TW } from './i18n'
 import type { Strings } from './i18n'
-import { DARK, LIGHT } from './palette'
 import type { Tone } from './palette'
 import { RESUME } from './parse'
 import { replyHint, wayBackText } from './view'
@@ -96,6 +96,8 @@ export type ServeAsk = {
   answers: string[]
   command: string | null
   link: string | null
+  // A hand-kept question, the person's own (its agent is '', as Claude Code's is); absent otherwise.
+  isOwn?: true
   canTick: boolean
   // Another session's question can be marked answered: kept off the board until it changes.
   canHide: boolean
@@ -137,6 +139,8 @@ export type ServeRow = {
   pr: string
   steps: ServeStep[]
   next: string | null
+  // A hand-kept task, the person's own (its agent is '', as Claude Code's is); absent otherwise.
+  isOwn?: true
   canArchive: boolean
   canConfirm: boolean
   archiveNote: string
@@ -157,8 +161,8 @@ export type ServeRow = {
 }
 
 // A question marked answered, listed so it can be shown again.
-export type ServeHidden = { key: string; project: string; agent: string; task: string; text: string }
-export type ServeRetained = { project: string; agent: string; task: string; text: string; note: string; context: string; when: string }
+export type ServeHidden = { key: string; project: string; agent: string; isOwn?: true; task: string; text: string }
+export type ServeRetained = { project: string; agent: string; isOwn?: true; task: string; text: string; note: string; context: string; when: string }
 
 export type ServeTurn = { key: string; project: string; agent: string; text: string; isQuestion: boolean; info: string }
 
@@ -217,6 +221,7 @@ export const serveModel = (view: View, pending: readonly PendingTurn[], s: Strin
         key: item.key,
         project: ask.project,
         agent: ask.agent,
+        ...(isManual ? { isOwn: true as const } : {}),
         task: ask.task,
         text: ask.text,
         note: ask.note,
@@ -261,6 +266,7 @@ export const serveModel = (view: View, pending: readonly PendingTurn[], s: Strin
         tone: row.tone,
         when: row.when,
         agent: row.agent,
+        ...(row.auto === null ? { isOwn: true as const } : {}),
         done: row.done,
         total: row.total,
         due: row.due?.left ?? null,
@@ -304,9 +310,9 @@ export const serveModel = (view: View, pending: readonly PendingTurn[], s: Strin
     asks,
     idle,
     stopped,
-    hidden: view.hidden.map(item => ({ key: `hidden:${item.hideKey}`, project: item.project, agent: item.agent, task: item.task, text: item.text })),
-    reminder: (view.reminder ?? []).map(({ project, agent, task, text, note, context, when }) => ({ project, agent, task, text, note, context, when })),
-    older: (view.older ?? []).map(({ project, agent, task, text, note, context, when }) => ({ project, agent, task, text, note, context, when })),
+    hidden: view.hidden.map(item => ({ key: `hidden:${item.hideKey}`, project: item.project, agent: item.agent, ...(item.where === 'manual' ? { isOwn: true as const } : {}), task: item.task, text: item.text })),
+    reminder: (view.reminder ?? []).map(({ project, agent, where, task, text, note, context, when }) => ({ project, agent, ...(where === 'manual' ? { isOwn: true as const } : {}), task, text, note, context, when })),
+    older: (view.older ?? []).map(({ project, agent, where, task, text, note, context, when }) => ({ project, agent, ...(where === 'manual' ? { isOwn: true as const } : {}), task, text, note, context, when })),
     groups: [...groups].map(([project, rows]) => ({ project, rows })),
     turns,
     recent: view.recent.map(item => ({ project: item.project, title: item.title, when: item.when, questions: item.questions?.map(question => [question.text, question.note].filter(Boolean).join(' — ')) })),
@@ -467,6 +473,9 @@ export const requestProblem = (request: PageRequest, hosts: readonly string[], t
 
 // The words the page's script fills in itself, each with its blanks as \u0001 and \u0002.
 const PAGE_WORDS = [
+  'viewAll', 'viewStopped', 'viewCount', 'sideViews', 'sideProjects', 'sideAgents', 'sideOwnTasks',
+  'viewEmptyDue', 'viewEmptyStopped', 'viewEmptyRecent', 'viewEmptyFiltered', 'clearFilters', 'removeFilter',
+  'sectionActive', 'sectionDue',
   'messagesPlaceholder', 'messagesSend', 'messagesQueued', 'messagesUncertain',
   'messagesAccepted', 'messagesAcknowledged', 'messagesRejected', 'messagesConflict', 'messagesTimeout',
   'sessionsTitle', 'sessionsWaiting', 'sessionsTimedOut',
@@ -536,18 +545,18 @@ export const servePage = (s: Strings, nonce: string, isLan = false, idleMs = 0):
 <meta name="referrer" content="no-referrer">
 <title>${esc(s.paneTitle)} · Agent Board</title>
 <link rel="icon" href="data:,">
+<script nonce="${nonce}">${themeHead}</script>
 <style nonce="${nonce}">
-:root{${vars(LIGHT)};--ground:#fbfaf5;--ink:#2b2b2b;--line:#e3e1d7;--card:#ffffff;color-scheme:light}
-@media (prefers-color-scheme:dark){:root{${vars(DARK)};--ground:#1e2022;--ink:#e6e4dc;--line:#34373a;--card:#25282b;color-scheme:dark}}
-*{box-sizing:border-box}
-body{margin:0;background:var(--ground);color:var(--ink);font:15px/1.6 "Hiragino Sans","Noto Sans TC","Noto Sans SC","Microsoft JhengHei","Microsoft YaHei",system-ui,sans-serif}
-main{max-width:760px;margin:0 auto;padding:16px max(16px,env(safe-area-inset-right)) 32px max(16px,env(safe-area-inset-left));display:grid;gap:12px}
-header{display:flex;align-items:center;flex-wrap:wrap;gap:6px 12px}
-h1{font-size:1.35rem;margin:0;flex:1;letter-spacing:.04em}
-h2{font-size:1rem;margin:10px 0 0;display:flex;gap:8px;align-items:baseline}
-.counts{display:flex;flex-wrap:wrap;gap:4px 16px;font-variant-numeric:tabular-nums}
+${pageTokens()}
+${pageBaseCss}
+${agentMarkCss()}
+:root{--shadow:0 1px 2px rgba(0,0,0,.05),0 2px 8px -4px rgba(0,0,0,.08);--card:var(--surface)}
+.shell{display:grid;grid-template-columns:236px minmax(0,1fr);column-gap:36px;align-items:start}
+body:not(:has(#board)) :is(#side,#side-open,#side-scrim,.live){display:none}.shell:not(:has(#board)){grid-template-columns:minmax(0,1fr)}
+main{min-width:0;max-width:780px;display:grid;gap:22px;padding-block:18px 40px}
 #board{display:grid;gap:10px;min-width:0}
-.card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:10px 12px;display:grid;gap:8px;min-width:0}
+#board>h2{position:sticky;top:var(--head-h,54px);z-index:3;background:var(--ground);font-size:1rem;margin:8px 0 0;padding:8px 0;display:flex;gap:8px;align-items:baseline}
+.card{background:var(--surface);border:1px solid var(--line);border-radius:14px;padding:14px 16px;display:grid;gap:10px;min-width:0;box-shadow:var(--shadow)}
 .where{color:var(--project);font-size:.9rem;overflow-wrap:anywhere}
 .q{overflow-wrap:anywhere}
 .chip{margin-right:4px}
@@ -589,13 +598,48 @@ details[open]>summary::before{content:"▾"}
 #note.done{color:var(--done)}
 #note.alert{color:var(--alert)}
 .paste textarea{min-height:7em;font-family:ui-monospace,Consolas,monospace;font-size:14px}
+
+button.primary{color:var(--on-accent)}
+button:hover,.btn:hover{background:var(--inset);border-color:var(--line-strong)}
+button.primary:hover{background:var(--accent);filter:brightness(.94)}
+.live{display:inline-flex;align-items:center;gap:6px;font-size:12px;color:var(--muted);padding:2px 9px;border:1px solid var(--line);border-radius:999px;background:var(--surface)}
+.live i{width:7px;height:7px;border-radius:50%;background:var(--done)}
+body:has(#offline:not(:empty)) .live{display:none}
+#offline:not(:empty){top:var(--head-h,54px);z-index:5;padding:10px max(16px,calc((100vw - 1148px)/2));border-color:color-mix(in srgb,var(--alert) 35%,var(--line));background:color-mix(in srgb,var(--alert) 9%,var(--surface))}
+#offline:not(:empty)::before{content:'!';display:inline-grid;place-items:center;width:18px;height:18px;border:1px solid currentColor;border-radius:50%;margin-right:10px;font-weight:700}
+#side{position:sticky;top:var(--head-h,54px);max-height:calc(100dvh - var(--head-h,54px));overflow:auto;padding:20px 0 28px;display:grid;gap:22px;align-content:start}
+.side-head,#side-open,.scrim{display:none}
+.grp{display:grid;gap:2px}.grp h3{margin:0 0 6px;padding:0 10px;font-size:11.5px;text-transform:uppercase;letter-spacing:.07em;color:var(--muted)}
+#side-groups{display:grid;gap:22px}
+button.nav{display:grid;grid-template-columns:24px minmax(0,1fr) auto;gap:10px;width:100%;min-height:34px;padding:6px 10px;border:1px solid transparent;border-radius:9px;background:transparent;font-size:14px}
+button.nav:hover{background:var(--surface);border-color:var(--line)}
+button.nav[aria-pressed="true"]{background:var(--surface);border-color:var(--line-strong);font-weight:600;box-shadow:var(--shadow)}
+.nav .ct{font-size:12px;font-variant-numeric:tabular-nums;color:var(--muted)}
+.pd{width:8px;height:8px;justify-self:center;border-radius:50%;background:var(--accent)}.pd.waiting{background:var(--waiting)}.pd.soon{background:var(--soon)}.pd.muted{background:var(--muted)}.pd.done{background:var(--done)}.pd.ink{background:var(--ink)}
+#counts{display:none;grid-template-columns:repeat(4,1fr);border:1px solid var(--line);border-radius:14px;overflow:hidden;background:var(--surface)}
+#counts>button{border:0;border-radius:0;border-left:1px solid var(--line);display:grid;gap:2px;min-width:0;padding:12px;font-size:13px}#counts>button:first-child{border-left:0}#counts>button>span:first-child{font-size:24px;font-weight:650}
+.scope{display:flex;align-items:center;flex-wrap:wrap;gap:6px 10px}.scope h2{margin:0;font-size:1.25rem}.scope .n{font-size:13.5px;color:var(--muted)}
+button.fchip{min-height:28px;padding:0 10px;border-radius:999px;background:var(--surface);border-color:var(--line-strong);font-size:12.5px}
+.empty{padding:28px 20px;justify-items:center;text-align:center}.empty p{margin:0;color:var(--muted)}
+.composer{border:1px solid var(--line-strong);border-radius:12px;background:var(--inset);overflow:hidden}.composer:focus-within{border-color:var(--accent);box-shadow:0 0 0 3px color-mix(in srgb,var(--accent) 20%,transparent)}
+.composer textarea{display:block;border:0;background:transparent;min-height:52px;padding:10px 12px 2px;outline:none}.composer .cf{display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:6px}.composer .where{flex:1;padding-left:6px;color:var(--muted);font-size:12.5px}.composer button{margin-left:auto;min-height:32px;font-size:13px}
+.ask .where,.turn .where{display:flex;align-items:flex-start;gap:7px}.ask .where>span:last-child,.turn .where>span:last-child{min-width:0}.where .ag{margin-top:1px}.q{display:flex;align-items:baseline;flex-wrap:wrap;gap:8px}.q b{font-size:1.08rem;font-weight:600}.chip{font-size:12px;border:1px solid currentColor;padding:3px 8px;border-radius:999px}
+.meta .ag{width:22px;height:22px;margin-right:6px;vertical-align:middle}.archive-note{font-size:12px}
+.steps li{grid-template-columns:22px minmax(0,1fr);gap:5px 10px;padding:5px 8px;border-radius:8px}.steps li.now{background:var(--inset)}.steps .mk{width:22px;height:22px;display:grid;place-items:center;font-size:14px;cursor:default;user-select:none}
+.history>div{padding:10px 0;border-bottom:1px solid var(--line);display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+.pfoot{display:flex;align-items:center;gap:10px 16px;flex-wrap:wrap;border-top:1px solid var(--line);padding-top:14px;font-size:12.5px;color:var(--muted)}.pfoot p{margin:0;flex:1 1 22em}.pfoot button{font-size:13px;min-height:32px}
+@media (max-width:760px){.shell{grid-template-columns:minmax(0,1fr)}#counts{display:grid}#side-open{display:inline-flex;min-height:32px;padding:0 8px}.side-head{display:flex;justify-content:space-between;align-items:center;padding:0 10px;font-weight:600}#side{position:fixed;z-index:30;inset:0 auto 0 0;width:min(304px,86vw);max-height:100dvh;padding:14px 12px 28px;background:var(--surface);border-right:1px solid var(--line);transform:translateX(-105%);visibility:hidden;transition:transform .2s,visibility 0s linear .2s}body.drawer-open #side{transform:none;visibility:visible;transition:transform .2s}body.drawer-open .scrim{display:block;position:fixed;inset:0;z-index:25;background:rgba(10,12,13,.38);border:0;border-radius:0;width:100%;height:100%}}
+@media (max-width:600px){#counts{grid-template-columns:repeat(2,1fr)}#counts>button:nth-child(3){border-left:0}#counts>button:nth-child(n+3){border-top:1px solid var(--line)}.live{font-size:11px}.card{padding:14px}.scope h2{font-size:1.1rem}}
 </style>
 </head>
 <body>
-<main>
-<header><h1>${esc(s.paneTitle)}</h1><button type="button" id="close" data-static>${esc(s.serveClose)}</button></header>
+<header class="head" id="head"><div class="wide topbar"><button type="button" id="side-open" data-local aria-controls="side" aria-expanded="false" aria-label="${esc(s.sideTitle)}">☰</button><div class="brand">${boardMark}<h1>${esc(s.paneTitle)}</h1><span class="live" title="${esc(s.serveLiveHint)}"><i></i>${esc(s.serveLive)}</span></div>${themeSwitch(s)}</div></header>
 <div id="offline" role="status" aria-live="polite"></div>
+<button type="button" class="scrim" id="side-scrim" data-local aria-label="${esc(s.sideClose)}" tabindex="-1"></button>
+<div class="wide shell"><aside id="side" aria-label="${esc(s.sideTitle)}"><div class="side-head">${esc(s.sideTitle)}<button type="button" id="side-close" data-local>${esc(s.sideClose)}</button></div><div id="side-groups"></div></aside>
+<main>
 <section class="counts" id="counts"></section>
+<div id="scope" class="scope"></div>
 <div id="board"></div>
 <details class="card paste"><summary>${esc(s.servePasteTitle)}</summary>
 <p class="quiet small">${esc(s.servePasteHint)}</p>
@@ -603,9 +647,9 @@ details[open]>summary::before{content:"▾"}
 <div class="actions"><button type="button" class="primary" id="paste-go" data-static>${esc(s.servePaste)}</button><button type="button" id="relay" data-local>${esc(s.serveRelay)}</button></div>
 <p class="quiet small">${esc(s.serveRelayHint)}</p>
 </details>
-<p class="quiet small">${esc(isLan ? s.serveLanIdle : idleMs > 0 ? s.serveIdleTimed(idleMs / 60_000) : s.serveIdle)}</p>
+<footer class="pfoot"><p>${esc(isLan ? s.serveLanIdle : idleMs > 0 ? s.serveIdleTimed(idleMs / 60_000) : s.serveIdle)}</p><button type="button" id="close" data-static>${esc(s.serveClose)}</button></footer>
 <div id="note" role="status" aria-live="polite"></div>
-</main>
+</main></div>
 <script type="application/json" id="words">${JSON.stringify(pageWords(isLan ? { ...s, serveOffline: s.serveOfflineLan } : s)).replace(/</g, '\\u003c')}</script>
 <script nonce="${nonce}">${PAGE_SCRIPT}</script>
 </body>
@@ -624,7 +668,7 @@ const PAGE_SCRIPT = String.raw`
   var note = document.getElementById('note');
   var offline = document.getElementById('offline');
   var presence = null;
-  var GLYPH = { done: '✓', doing: '▸', todo: '○', waiting: '●', running: '◐', blocked: '!', cancelled: '–' };
+  var GLYPH = { done: '✓', doing: '▸', todo: '•', waiting: '●', running: '◐', blocked: '!', cancelled: '–' };
   var last = '';
   var opened = {};
   var timer = null;
@@ -635,7 +679,10 @@ const PAGE_SCRIPT = String.raw`
   var messageAttempts = {};
 
   function w(key, a, b) {
-    return String(W[key]).split('\u0001').join(a === undefined ? '' : String(a)).split('\u0002').join(b === undefined ? '' : String(b));
+    var template = String(W[key]);
+    // Only English adds a final s to the serialized plural count template.
+    if (key === 'viewCount' && a === 1) template = template.replace(/s$/, '');
+    return template.split('\u0001').join(a === undefined ? '' : String(a)).split('\u0002').join(b === undefined ? '' : String(b));
   }
   function el(tag, cls, text) {
     var node = document.createElement(tag);
@@ -734,7 +781,7 @@ const PAGE_SCRIPT = String.raw`
     return el('p', 'quiet small', w(receipt.status === 'uncertain' && /TIMEOUT/.test(receipt.error) ? 'messagesTimeout' : labels[receipt.status]) + (receipt.reply ? ' · ' + receipt.reply : ''));
   }
   function replyBox(key, placeholder, mode, agent, where, isSending, session, asked, fp, delivery) {
-    var box = el('div', 'reply');
+    var box = el('div', 'composer');
     var input = el('textarea');
     input.rows = 2;
     input.placeholder = placeholder;
@@ -759,16 +806,16 @@ const PAGE_SCRIPT = String.raw`
     input.addEventListener('keydown', function (e) {
       if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); go.click(); }
     });
-    var wrap = el('div');
-    add(wrap, add(box, input, go));
-    if (where) add(wrap, el('div', 'quiet small', where));
-    return wrap;
+    var footer = el('div', 'cf');
+    if (where) add(footer, el('div', 'where', where));
+    add(box, input, add(footer, go));
+    return box;
   }
   function stepsList(steps) {
     var list = el('ol', 'steps');
     steps.forEach(function (step) {
       var item = el('li', step.isCurrent ? 'now' : '');
-      add(item, el('span', 's-' + step.status, GLYPH[step.status] || '○'), el('span', 't' + (step.status === 'done' || step.status === 'cancelled' ? ' t-quiet' : ''), step.text));
+      add(item, el('span', 'mk s-' + step.status, GLYPH[step.status] || '•'), el('span', 't' + (step.status === 'done' || step.status === 'cancelled' ? ' t-quiet' : ''), step.text));
       if (step.note) add(item, el('span', 'sn s-' + step.status, step.note));
       list.appendChild(item);
     });
@@ -776,8 +823,9 @@ const PAGE_SCRIPT = String.raw`
   }
   function askCard(ask) {
     var card = el('article', 'card ask');
-    add(card, el('div', 'where', [ask.project, ask.agent].filter(Boolean).join(' · ') + (ask.task ? ' › ' + ask.task : '')));
-    add(card, add(el('div', 'q'), el('span', 'chip k-' + ask.kind, ask.chip), el('b', '', ask.text)));
+    add(card, add(el('div', 'where'), agentMark(who(ask)), el('span', '', [ask.project, ask.agent].filter(Boolean).join(' · ') + (ask.task ? ' › ' + ask.task : ''))));
+    // The chip is a pill on the page, so the brackets the terminal needs are left off.
+    add(card, add(el('div', 'q'), el('span', 'chip k-' + ask.kind, String(ask.chip).replace(/^\s*[\[〔]\s*|\s*[\]〕]\s*$/g, '')), el('b', '', ask.text)));
     if (ask.note) add(card, el('div', '', ask.note));
     else if (ask.context) add(card, el('div', 'quiet', ask.context));
     if (ask.command) add(card, el('code', '', '$ ' + ask.command));
@@ -806,7 +854,7 @@ const PAGE_SCRIPT = String.raw`
     if (actions.childNodes.length) add(card, actions);
     if (!ask.canTick) add(card, replyBox(ask.key, w('serveReplyPlaceholder'), ask.send, ask.agent, ask.where, ask.isSending, ask.session, ask.text, ask.fp, ask.delivery));
     if (ask.receipt) add(card, receiptLine(ask.receipt));
-    if (ask.archiveNote) add(card, el('div', 'quiet small', ask.archiveNote));
+    if (ask.archiveNote) add(card, el('div', 'quiet small archive-note', ask.archiveNote));
     if (ask.info) add(card, el('div', 'quiet small', ask.info));
     return card;
   }
@@ -820,10 +868,10 @@ const PAGE_SCRIPT = String.raw`
     var summary = el('summary');
     add(summary, el('span', 'title', row.title));
     if (row.due) add(summary, el('span', 'due', '⚑ ' + row.due));
-    add(summary, el('span', 'meta t-' + row.tone, (row.total > 0 ? row.done + '/' + row.total + ' ' : '') + row.status + (row.agent ? ' · ' + row.agent : '') + (row.when ? ' · ' + row.when : '')));
+    add(summary, add(el('span', 'meta t-' + row.tone), agentMark(who(row)), el('span', '', (row.total > 0 ? row.done + '/' + row.total + ' ' : '') + row.status + (row.agent ? ' · ' + row.agent : '') + (row.when ? ' · ' + row.when : ''))));
     card.appendChild(summary);
     var body = el('div', 'body');
-    if (row.archiveNote) add(body, el('div', 'quiet small', row.archiveNote));
+    if (row.archiveNote) add(body, el('div', 'quiet small archive-note', row.archiveNote));
     if (row.context) add(body, el('div', 'quiet', row.context));
     if (row.pr) add(body, el('div', 'quiet', row.pr));
     if (row.steps.length) add(body, stepsList(row.steps));
@@ -843,95 +891,230 @@ const PAGE_SCRIPT = String.raw`
   }
   function turnCard(turn) {
     var card = el('article', 'card turn');
-    add(card, el('div', 'where', [turn.project, turn.agent].filter(Boolean).join(' · ')));
+    add(card, add(el('div', 'where'), agentMark(who(turn)), el('span', '', [turn.project, turn.agent].filter(Boolean).join(' · '))));
     add(card, el('div', turn.isQuestion ? 'q' : '', turn.text));
     if (turn.isQuestion) add(card, replyBox(turn.key, w('serveReplyPlaceholder'), 'copy', turn.agent, '', false));
     if (turn.info) add(card, el('div', 'quiet small', turn.info));
     return card;
   }
+  var pick = { view: 'all', project: '', agent: null };
+  var filterNodes = [];
+  var filterGroups = [];
+  var navNodes = [];
+  var emptyCard;
+  var waitingHead;
+  var nothing = null;
+  var side = document.getElementById('side-groups');
+  var scope = document.getElementById('scope');
+  var viewKeys = [['all', 'viewAll'], ['waiting', 'sectionWaiting'], ['progress', 'sectionActive'], ['due', 'sectionDue'], ['stopped', 'viewStopped'], ['recent', 'sectionRecent']];
+  // The model gives Claude Code's blocks and hand-kept tasks the agent ''; isOwn marks the
+  // hand-kept ones, the person's own.
+  function who(item) {
+    return item.isOwn ? '' : item.agent || 'claude';
+  }
+  function agentMark(agent) {
+    var first = String(agent || '').toLowerCase().split(/\s+/)[0];
+    var aliases = ${JSON.stringify(AGENT_ALIASES)};
+    var hasIcon = Object.prototype.hasOwnProperty.call(aliases, first);
+    var key = hasIcon ? aliases[first] : first ? 'other' : 'own';
+    var node = el('span', 'ag ag-' + key, !hasIcon && first ? Array.from(first)[0].toUpperCase() : '');
+    node.setAttribute('aria-hidden', 'true');
+    return node;
+  }
+  // isShelf: an entry on a closed shelf (reminders, older and hidden questions, idle tasks). It
+  // filters like the rest but is left out of the counts, as the counts above the board leave it out.
+  function tracked(node, views, item, project, isShelf) {
+    // A finished item carries no agent in the model: it is left out of the agent filters.
+    filterNodes.push({ node: node, views: views, project: project || item.project || '', agent: item.agent === undefined ? null : who(item), isShelf: !!isShelf });
+    return node;
+  }
+  function groupVisibility(node, from) {
+    filterGroups.push({ node: node, entries: filterNodes.slice(from) });
+  }
+  function drawer(isOpen) {
+    var isExpanded = document.getElementById('side-open').getAttribute('aria-expanded') === 'true';
+    if (document.body) document.body.className = isOpen ? 'drawer-open' : '';
+    document.getElementById('side-open').setAttribute('aria-expanded', String(isOpen));
+    var target = document.getElementById(isOpen ? 'side-close' : 'side-open');
+    if ((isOpen || isExpanded) && target && typeof target.focus === 'function') target.focus();
+  }
+  document.getElementById('side-open').addEventListener('click', function () { drawer(document.getElementById('side-open').getAttribute('aria-expanded') !== 'true'); });
+  document.getElementById('side-close').addEventListener('click', function () { drawer(false); });
+  document.getElementById('side-scrim').addEventListener('click', function () { drawer(false); });
+  if (typeof document.addEventListener === 'function') document.addEventListener('keydown', function (event) { if (event.key === 'Escape' && document.getElementById('side-open').getAttribute('aria-expanded') === 'true') drawer(false); });
+  if (typeof ResizeObserver === 'function' && document.documentElement) {
+    var head = document.getElementById('head');
+    new ResizeObserver(function () { document.documentElement.style.setProperty('--head-h', head.offsetHeight + 'px'); }).observe(head);
+  }
+  function applyPick() {
+    var visible = 0;
+    var counted = 0;
+    filterNodes.forEach(function (one) {
+      one.node.hidden = !(pick.view === 'all' || one.views.indexOf(pick.view) !== -1) || !!pick.project && one.project !== pick.project || pick.agent !== null && one.agent !== pick.agent;
+      if (!one.node.hidden) visible += 1;
+      if (!one.node.hidden && !one.isShelf) counted += 1;
+    });
+    filterGroups.forEach(function (one) { one.node.hidden = !one.entries.some(function (entry) { return !entry.node.hidden; }); });
+    // With no questions the waiting heading says so, as it always has, unless a filter is on.
+    if (nothing) {
+      nothing.hidden = !(pick.view === 'all' || pick.view === 'waiting') || !!pick.project || pick.agent !== null;
+      if (!nothing.hidden) waitingHead.hidden = false;
+    }
+    navNodes.forEach(function (one) { one.node.setAttribute('aria-pressed', String(pick[one.kind] === one.value)); });
+    scope.textContent = '';
+    var view = viewKeys.filter(function (one) { return one[0] === pick.view; })[0];
+    add(scope, el('h2', '', w(view[1])), el('span', 'n', w('viewCount', counted)));
+    ['project', 'agent'].forEach(function (kind) {
+      if (kind === 'project' ? !pick.project : pick.agent === null) return;
+      var label = pick[kind] || w('sideOwnTasks');
+      var chip = button(label + ' ×', function () { pick[kind] = kind === 'agent' ? null : ''; applyPick(); }, 'fchip', true);
+      chip.setAttribute('aria-label', w('removeFilter', label));
+      add(scope, chip);
+    });
+    emptyCard.textContent = '';
+    emptyCard.hidden = visible !== 0 || !!nothing && !nothing.hidden;
+    var name = [pick.project, pick.agent === null ? '' : pick.agent || w('sideOwnTasks')].filter(Boolean).join(' · ');
+    var key = { all: 'empty', waiting: 'nothingForYou', progress: 'empty', due: 'viewEmptyDue', stopped: 'viewEmptyStopped', recent: 'viewEmptyRecent' }[pick.view];
+    add(emptyCard, el('p', '', name ? w('viewEmptyFiltered', name) : w(key)));
+    if (name) add(emptyCard, button(w('clearFilters'), function () { pick.project = ''; pick.agent = null; applyPick(); }, '', true));
+  }
+  function drawSide() {
+    // The board redraws as it changes; a sidebar button that had focus keeps it.
+    var active = document.activeElement;
+    var had = navNodes.filter(function (one) { return one.node === active; })[0];
+    side.textContent = '';
+    navNodes = [];
+    function group(title, entries, kind) {
+      if (!entries.length) return;
+      var box = add(el('section', 'grp'), el('h3', '', w(title)));
+      entries.forEach(function (one) {
+        var node = button('', function () { pick[kind] = one.value; applyPick(); drawer(false); }, 'nav', true);
+        node.setAttribute('aria-label', one.label + ' ' + one.count);
+        add(node, kind === 'agent' ? agentMark(one.value) : el('span', 'pd ' + (one.tone || '')), el('span', 'nm', one.label), el('span', 'ct', one.count));
+        navNodes.push({ node: node, kind: kind, value: one.value });
+        add(box, node);
+      });
+      add(side, box);
+    }
+    group('sideViews', viewKeys.map(function (view) { return { value: view[0], label: w(view[1]), tone: { all: 'ink', waiting: 'waiting', due: 'soon', stopped: 'muted', recent: 'done' }[view[0]] || '', count: filterNodes.filter(function (one) { return !one.isShelf && (view[0] === 'all' || one.views.indexOf(view[0]) !== -1); }).length }; }), 'view');
+    ['project', 'agent'].forEach(function (kind) {
+      var values = [];
+      filterNodes.forEach(function (one) { if ((kind === 'project' ? !!one.project : one.agent !== null) && values.indexOf(one[kind]) === -1) values.push(one[kind]); });
+      group(kind === 'project' ? 'sideProjects' : 'sideAgents', values.map(function (value) {
+        var items = filterNodes.filter(function (one) { return one[kind] === value; });
+        var tone = items.some(function (one) { return one.views.indexOf('waiting') !== -1; }) ? 'waiting' : items.some(function (one) { return one.views.indexOf('due') !== -1; }) ? 'soon' : items.every(function (one) { return one.views.indexOf('stopped') !== -1 || one.views.indexOf('recent') !== -1; }) ? 'muted' : '';
+        return { value: value, label: value || w('sideOwnTasks'), count: items.filter(function (one) { return !one.isShelf; }).length, tone: tone };
+      }), kind);
+    });
+    if (had) navNodes.forEach(function (one) { if (one.kind === had.kind && one.value === had.value && typeof one.node.focus === 'function') one.node.focus(); });
+  }
   function render(model) {
-    // What is typed, and where the cursor is, outlast a redraw.
+    // Draft identity and cursor positions survive filters and server redraws.
     var kept = {};
     board.querySelectorAll('textarea[data-key]').forEach(function (box) { kept[box.getAttribute('data-key')] = box.value; });
     var active = document.activeElement;
     var focus = active && active.getAttribute ? active.getAttribute('data-key') : null;
     var caret = focus ? [active.selectionStart, active.selectionEnd] : null;
     counts.textContent = '';
-    [['●', model.counts.waiting, 'countWaiting', 'n-waiting'], ['▸', model.counts.active, 'countActive', 'n-active'], ['⚑', model.counts.due, 'countDue', 'n-due'], ['✓', model.counts.today, 'countToday', 'n-today']].forEach(function (one) {
-      add(counts, add(el('span'), el('span', one[1] > 0 ? one[3] : 'quiet', one[0] + ' ' + one[1]), document.createTextNode(' ' + w(one[2]))));
+    [['●', model.counts.waiting, 'countWaiting', 'n-waiting', 'waiting'], ['▸', model.counts.active, 'countActive', 'n-active', 'progress'], ['⚑', model.counts.due, 'countDue', 'n-due', 'due'], ['✓', model.counts.today, 'countToday', 'n-today', 'recent']].forEach(function (one) {
+      add(counts, add(button('', function () { pick.view = one[4]; applyPick(); }, '', true), el('span', one[1] > 0 ? one[3] : 'quiet', one[0] + ' ' + one[1]), el('span', '', w(one[2]))));
     });
     board.textContent = '';
+    filterNodes = [];
+    filterGroups = [];
     if (model.warning) add(board, el('p', 'n-due', model.warning));
-    add(board, el('h2', 'n-waiting', '● ' + w('sectionWaiting')));
-    if (model.asks.length === 0) add(board, el('div', 'n-today', w('nothingForYou')));
-    model.asks.forEach(function (ask) { board.appendChild(askCard(ask)); });
+    waitingHead = el('h2', 'n-waiting', '● ' + w('sectionWaiting'));
+    nothing = model.asks.length === 0 ? el('div', 'n-today', w('nothingForYou')) : null;
+    add(board, waitingHead, nothing);
+    model.asks.forEach(function (ask) { add(board, tracked(askCard(ask), ['waiting'], ask)); });
     [['reminder', 'sectionQuestionReminders'], ['older', 'sectionOlderQuestions']].forEach(function (pair) {
       var questions = model[pair[0]] || [];
       if (!questions.length) return;
-      var retained = el('details', 'card');
+      var from = filterNodes.length;
+      var retained = el('details', 'card shelf');
       retained.open = opened[pair[0] + ':'] === true;
       retained.addEventListener('toggle', function () { opened[pair[0] + ':'] = retained.open; });
       add(retained, add(el('summary'), el('span', 'quiet', w(pair[1]) + ' (' + questions.length + ')')), el('p', 'quiet', w('questionAgingHint')), el('p', 'quiet', w('questionReviewOnly')));
       questions.forEach(function (one) {
-        add(retained, add(el('div'), el('div', 'where', [one.project, one.agent, one.task, one.when].filter(Boolean).join(' · ')), el('div', 'q', one.text), el('div', '', one.note), el('div', 'quiet', one.context)));
+        add(retained, tracked(add(el('div'), add(el('div', 'where'), agentMark(who(one)), el('span', '', [one.project, one.agent, one.task, one.when].filter(Boolean).join(' · '))), el('div', 'q', one.text), el('div', '', one.note), el('div', 'quiet', one.context)), ['waiting'], one, '', true));
       });
-      board.appendChild(retained);
+      groupVisibility(retained, from);
+      add(board, retained);
     });
     if (model.hidden.length) {
-      var shelf = el('details', 'card');
+      var from = filterNodes.length;
+      var shelf = el('details', 'card shelf');
       shelf.open = opened['hidden:'] === true;
       shelf.addEventListener('toggle', function () { opened['hidden:'] = shelf.open; });
       add(shelf, add(el('summary'), el('span', 'quiet', w('hiddenCount', model.hidden.length))));
       model.hidden.forEach(function (one) {
-        add(shelf, add(el('div'), el('div', 'where', [one.project, one.agent].filter(Boolean).join(' · ') + (one.task ? ' › ' + one.task : '')), el('div', 'q', one.text), add(el('div', 'actions'), button(w('showAgain'), function () { act(one.key, 'unhide'); }))));
+        add(shelf, tracked(add(el('div'), add(el('div', 'where'), agentMark(who(one)), el('span', '', [one.project, one.agent].filter(Boolean).join(' · ') + (one.task ? ' › ' + one.task : ''))), el('div', 'q', one.text), add(el('div', 'actions'), button(w('showAgain'), function () { act(one.key, 'unhide'); }))), ['waiting'], one, '', true));
       });
-      board.appendChild(shelf);
+      groupVisibility(shelf, from);
+      add(board, shelf);
     }
+    // The heading stands over the questions and their shelves.
+    groupVisibility(waitingHead, 0);
     if (model.idle.length) {
-      var idleShelf = el('details', 'card');
+      var from = filterNodes.length;
+      var idleShelf = el('details', 'card shelf');
       idleShelf.open = opened['idle:'] === true;
       idleShelf.addEventListener('toggle', function () { opened['idle:'] = idleShelf.open; });
       add(idleShelf, add(el('summary'), el('span', 'quiet', w('idleCount', model.idle.length))));
-      model.idle.forEach(function (row) {
-        add(idleShelf, el('div', 'where', row.project), rowCard(row));
-      });
-      board.appendChild(idleShelf);
+      model.idle.forEach(function (row) { add(idleShelf, tracked(add(el('div'), el('div', 'where', row.project), rowCard(row)), ['progress'], row, '', true)); });
+      groupVisibility(idleShelf, from);
+      add(board, idleShelf);
     }
     if (model.stopped.length) {
-      var stoppedShelf = el('details', 'card');
+      var from = filterNodes.length;
+      var stoppedShelf = el('details', 'card shelf');
       stoppedShelf.open = opened['stopped:'] === true;
       stoppedShelf.addEventListener('toggle', function () { opened['stopped:'] = stoppedShelf.open; });
       add(stoppedShelf, add(el('summary'), el('span', 'quiet', w('stoppedCount', model.stopped.length))));
-      model.stopped.forEach(function (row) {
-        add(stoppedShelf, el('div', 'where', row.project), rowCard(row));
-      });
-      board.appendChild(stoppedShelf);
+      model.stopped.forEach(function (row) { add(stoppedShelf, tracked(add(el('div'), el('div', 'where', row.project), rowCard(row)), ['stopped'], row)); });
+      groupVisibility(stoppedShelf, from);
+      add(board, stoppedShelf);
     }
     model.groups.forEach(function (group) {
-      add(board, el('h2', 'where', '▸ ' + group.project));
-      group.rows.forEach(function (row) { board.appendChild(rowCard(row)); });
+      var from = filterNodes.length;
+      var heading = el('h2', 'where', '▸ ' + group.project);
+      add(board, heading);
+      group.rows.forEach(function (row) { add(board, tracked(rowCard(row), row.due ? ['progress', 'due'] : ['progress'], row, group.project)); });
+      groupVisibility(heading, from);
     });
     if (model.turns.length) {
-      add(board, el('h2', 'n-active', '◐ ' + w('boardInbox')));
-      model.turns.forEach(function (turn) { board.appendChild(turnCard(turn)); });
+      var from = filterNodes.length;
+      var heading = el('h2', 'n-active', '◐ ' + w('boardInbox'));
+      add(board, heading);
+      model.turns.forEach(function (turn) { add(board, tracked(turnCard(turn), turn.isQuestion ? ['progress', 'waiting'] : ['progress'], turn)); });
+      groupVisibility(heading, from);
     }
     if (model.recent.length) {
-      add(board, el('h2', 'n-today', '✓ ' + w('sectionRecent')));
-      var done = el('ul', 'steps');
+      var from = filterNodes.length;
+      var heading = el('h2', 'n-today', '✓ ' + w('sectionRecent'));
+      add(board, heading);
+      var done = el('div', 'card history');
       model.recent.forEach(function (item) {
-        add(done, add(el('li'), el('span', 's-done', '✓'), el('span', 't-quiet', [item.project, item.title, item.when].filter(Boolean).join(' · '))));
-        (item.questions || []).forEach(function (question) { add(done, add(el('li'), el('span'), el('span', 't-quiet', question))); });
+        var line = add(el('div'), el('span', 's-done', '✓'), el('span', 't-quiet', [item.project, item.title, item.when].filter(Boolean).join(' · ')));
+        (item.questions || []).forEach(function (question) { add(line, el('p', 't-quiet', question)); });
+        add(done, tracked(line, ['recent'], item));
       });
-      add(board, add(el('div', 'card'), done, add(el('div', 'actions'), button(w('archiveNow'), function () {
+      add(done, add(el('div', 'actions'), button(w('archiveNow'), function () {
         say('…');
         call('/api/tidy', {}).then(function (data) { say(data.note || '', data.ok ? 'done' : 'alert'); refresh(); }, function () { say(''); unreachable(); });
-      }))));
+      })));
+      groupVisibility(heading, from);
+      groupVisibility(done, from);
+      add(board, done);
     }
-    if (model.groups.length === 0 && model.asks.length === 0 && model.hidden.length === 0 && model.idle.length === 0 && model.stopped.length === 0 && model.turns.length === 0 && model.recent.length === 0) add(board, el('div', 'quiet', w('empty')));
+    emptyCard = el('div', 'card empty');
+    add(board, emptyCard);
+    drawSide();
+    applyPick();
     board.querySelectorAll('textarea[data-key]').forEach(function (box) {
       var key = box.getAttribute('data-key');
       if (key in kept) box.value = kept[key];
-      if (key === focus) {
+      if (key === focus && !filterNodes.some(function (one) { return one.node.hidden && Array.from(one.node.querySelectorAll('textarea[data-key]')).indexOf(box) !== -1; })) {
         box.focus();
         if (caret) box.setSelectionRange(caret[0], caret[1]);
       }

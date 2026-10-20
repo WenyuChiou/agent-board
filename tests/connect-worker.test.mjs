@@ -69,7 +69,9 @@ test('a large verified module reports a bounded failure without embedding its da
 test('the full generated worker bundle runs through verified staging without recursive bundle growth', () => {
   const source = readFileSync(new URL('../hooks/board-script.ts', import.meta.url), 'utf8')
   const code = JSON.parse(source.slice(source.indexOf('export const BOARD_SCRIPT = ') + 'export const BOARD_SCRIPT = '.length))
-  assert.ok(code.length < 500000)
+  // A bundle that held a copy of itself would double (to over a million characters); this bound
+  // catches that and leaves room for the pages, which brought the bundle to about 557,000.
+  assert.ok(code.length < 700000, `bundle is ${code.length} characters`)
   const { digest, value } = stage(code)
   try {
     writeFileSync(value.file, code)
