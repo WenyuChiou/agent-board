@@ -117,8 +117,7 @@ describe('L2 a working day', { concurrency: 2 }, () => {
         try {
           if (row.silent.includes(key) || /^[3-9]$/.test(key)) await knownFailure(211, check)
           else check()
-          if (key === 'c' && ['waiting', 'choice', 'stopped', 'stopped-ask'].includes(row.kind)) await knownFailure(250, () => noMachineIds(after, world))
-          else noMachineIds(after, world)
+          noMachineIds(after, world)
         } catch (error) { failures.push(new Error(`${row.kind}/${key}: ${error.message}`)) }
       }
       if (failures.length) throw new AggregateError(failures, 'Unexpected terminal key results')
@@ -152,8 +151,7 @@ describe('L2 a working day', { concurrency: 2 }, () => {
         const check = () => noSilentPress({ surface: 'page', card: title, button: label, before, after })
         if (label === 'Copy') await knownFailure(211, check)
         else check()
-        if (label === 'Copy resume command') await knownFailure(250, () => noMachineIds(after, world))
-        else noMachineIds(after, world)
+        noMachineIds(after, world)
       }
       const page = await createPage()
       const card = page.cards().find(one => page.buttons(one).some(button => button.textContent === 'Copy'))
@@ -225,7 +223,7 @@ describe('L2 a working day', { concurrency: 2 }, () => {
       noSilentPress({ surface: 'page', card: 'Resume route review', button: button.textContent, before, after: page.text() })
       const status = page.node('note').textContent
       assert.ok(status.length > 0)
-      await knownFailure(250, () => noMachineIds(status, world))
+      noMachineIds(status, world)
     } finally { await world.close() }
   })
 

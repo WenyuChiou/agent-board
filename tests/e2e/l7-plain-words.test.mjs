@@ -41,7 +41,7 @@ test('L7 words: no session id, hash or file path on the default pane, terminal, 
   }
 })
 
-test('L2 page: the status line never shows a session id or a file path', async () => {
+test('L7 page: the copy status never shows a session id, and a refused copy leaves the text in a selected field', async () => {
   for (const s of locales) {
     const world = makeWorld({ lang: s.lang })
     try {
