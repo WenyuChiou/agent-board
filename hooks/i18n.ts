@@ -108,7 +108,6 @@ export const ZH_TW = {
   groupCount: (n: number): string => `${n} 件`,
   groupWaiting: (n: number): string => `${n} 等你`,
   groupStuck: (n: number): string => `${n} 卡住`,
-  groupStopped: (n: number): string => `${n} 已停`,
   groupWorking: (n: number): string => `${n} 在做`,
 
   // The line under the prompt
@@ -332,6 +331,7 @@ export const ZH_TW = {
   showAgain: '重新顯示',
   hiddenCount: (n: number): string => `已回覆、隱藏的 ${n} 項`,
   idleCount: (n: number): string => `${n} 項超過 7 天沒動`,
+  stoppedCount: (n: number): string => `${n} 項已停止`,
   tickStep: '完成這步',
   handOver: '交給 Claude',
   nothingForYou: '✓ 現在沒有要你做的事',
@@ -422,8 +422,8 @@ export const ZH_TW = {
   boardKeyOptions: (n: number): string => `1–${n} 複製答案`,
   boardKeyHide: 'h 已回覆，先隱藏',
   boardKeyShowHidden: 'u 全部重新顯示',
-  boardKeyIdle: 'i 顯示／收起閒置項目',
-  boardUsage: '用法：node agent-board.mjs [--watch] [--serve] [--html] [--chat] [--all] [--lang en|zh-TW|zh-CN] · --all 列出閒置項目',
+  boardKeyIdle: 'i 顯示／收起閒置和已停止項目',
+  boardUsage: '用法：node agent-board.mjs [--watch] [--serve] [--html] [--chat] [--all] [--lang en|zh-TW|zh-CN] · --all 列出閒置和已停止項目',
   boardHidden: (text: string): string => `已隱藏「${text}」；問題一改就會再出現。`,
   boardShown: '隱藏的問題都重新顯示了。',
   hideFailed: '記不下「已回覆」，這一項還留在清單上。',

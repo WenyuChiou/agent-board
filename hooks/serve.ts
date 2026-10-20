@@ -169,6 +169,7 @@ export type ServeModel = {
   reminder: ServeRetained[]
   older: ServeRetained[]
   idle: ServeRow[]
+  stopped: ServeRow[]
   groups: Array<{ project: string; rows: ServeRow[] }>
   turns: ServeTurn[]
   // Finished in the last day, until it goes to the archive.
@@ -195,6 +196,8 @@ export const serveModel = (view: View, pending: readonly PendingTurn[], s: Strin
   const groups = new Map<string, ServeRow[]>()
   const idle: ServeRow[] = []
   const idleKeys = new Set(view.idle.map(row => row.key))
+  const stopped: ServeRow[] = []
+  const stoppedKeys = new Set(view.stopped.map(row => row.key))
   const turns: ServeTurn[] = []
   const items = boardItems(view, pending)
   for (const item of items) {
@@ -244,8 +247,8 @@ export const serveModel = (view: View, pending: readonly PendingTurn[], s: Strin
       const baseMode = row.target === null ? (row.auto === null ? 'none' : 'claude') : sendMode(row.agent, row.target)
       const mode = connection ? 'connected' : (messaging || !allowResume) && baseMode === 'send' ? 'open' : baseMode
       const send = onLan(mode)
-      const rows = idleKeys.has(row.key) ? idle : (groups.get(row.project) ?? [])
-      if (!idleKeys.has(row.key)) groups.set(row.project, rows)
+      const rows = idleKeys.has(row.key) ? idle : stoppedKeys.has(row.key) ? stopped : (groups.get(row.project) ?? [])
+      if (!idleKeys.has(row.key) && !stoppedKeys.has(row.key)) groups.set(row.project, rows)
       rows.push({
         ...(connection === undefined ? {} : { delivery: { id: connection.id, turn: connection.turn, agent: connection.agent } }),
         ...(isLan ? {} : rowReceipt(row.agent, row.nativeSession, messaging?.messages ?? [])),
@@ -298,6 +301,7 @@ export const serveModel = (view: View, pending: readonly PendingTurn[], s: Strin
     counts: { ...view.overview, waiting: view.overview.waiting + remainingInbox(view, pending).filter(turn => turn.isQuestion).length },
     asks,
     idle,
+    stopped,
     hidden: view.hidden.map(item => ({ key: `hidden:${item.hideKey}`, project: item.project, agent: item.agent, task: item.task, text: item.text })),
     reminder: (view.reminder ?? []).map(({ project, agent, task, text, note, context, when }) => ({ project, agent, task, text, note, context, when })),
     older: (view.older ?? []).map(({ project, agent, task, text, note, context, when }) => ({ project, agent, task, text, note, context, when })),
@@ -491,6 +495,7 @@ const PAGE_WORDS = [
   'showAgain',
   'hiddenCount',
   'idleCount',
+  'stoppedCount',
   'serveReplyPlaceholder',
   'serveMessagePlaceholder',
   'serveSend',
@@ -861,6 +866,16 @@ const PAGE_SCRIPT = String.raw`
       });
       board.appendChild(idleShelf);
     }
+    if (model.stopped.length) {
+      var stoppedShelf = el('details', 'card');
+      stoppedShelf.open = opened['stopped:'] === true;
+      stoppedShelf.addEventListener('toggle', function () { opened['stopped:'] = stoppedShelf.open; });
+      add(stoppedShelf, add(el('summary'), el('span', 'quiet', w('stoppedCount', model.stopped.length))));
+      model.stopped.forEach(function (row) {
+        add(stoppedShelf, el('div', 'where', row.project), rowCard(row));
+      });
+      board.appendChild(stoppedShelf);
+    }
     model.groups.forEach(function (group) {
       add(board, el('h2', 'where', '▸ ' + group.project));
       group.rows.forEach(function (row) { board.appendChild(rowCard(row)); });
@@ -880,7 +895,7 @@ const PAGE_SCRIPT = String.raw`
         call('/api/tidy', {}).then(function (data) { say(data.note || '', data.ok ? 'done' : 'alert'); refresh(); }, function () { say(w('serveOffline'), 'alert'); });
       }))));
     }
-    if (model.groups.length === 0 && model.asks.length === 0 && model.hidden.length === 0 && model.idle.length === 0 && model.turns.length === 0 && model.recent.length === 0) add(board, el('div', 'quiet', w('empty')));
+    if (model.groups.length === 0 && model.asks.length === 0 && model.hidden.length === 0 && model.idle.length === 0 && model.stopped.length === 0 && model.turns.length === 0 && model.recent.length === 0) add(board, el('div', 'quiet', w('empty')));
     board.querySelectorAll('textarea[data-key]').forEach(function (box) {
       var key = box.getAttribute('data-key');
       if (key in kept) box.value = kept[key];

@@ -753,7 +753,7 @@ const stays = async (running: Running, file: string): Promise<boolean> => {
 // The running page of this copy for this file, or null. Any other page found in the file (one
 // that no longer answers, or an older copy's) is let go, so a new one can write the file; but an
 // older copy's page that will not close (a reply is on its way) is kept, and `isKept` says so.
-const runningPage = async (): Promise<{ page: Running; isKept: boolean } | null> => {
+const runningPage = async (): Promise<{ page: Running; isKept: boolean; idleMs?: number | undefined } | null> => {
   const running = readRunning()
   if (running === null) {
     // A file that has not read for ten seconds (either way, should the clock have been set
@@ -765,7 +765,8 @@ const runningPage = async (): Promise<{ page: Running; isKept: boolean } | null>
   // as gone and a second one starts.
   const first = await ping(running)
   const answer = first !== null && first !== 'silent' ? first : isRunning(running.pid) ? await ping(running, 5000) : first
-  if (answer !== null && answer !== 'silent' && typeof answer.path === 'string' && board(answer.path) === board(path) && answer.built === built && answer.idleMs === idleMs() && answer.allowResume === args.includes('--allow-resume') && (flag('--messages-dir') === undefined || answer.messagesDirectory === resolve(flag('--messages-dir')!))) return { page: running, isKept: false }
+  // An idle preference must not close a page that may hold an unsent reply.
+  if (answer !== null && answer !== 'silent' && typeof answer.path === 'string' && board(answer.path) === board(path) && answer.built === built && answer.allowResume === args.includes('--allow-resume') && (flag('--messages-dir') === undefined || answer.messagesDirectory === resolve(flag('--messages-dir')!))) return { page: running, isKept: false, idleMs: typeof answer.idleMs === 'number' && Number.isFinite(answer.idleMs) && answer.idleMs >= 0 ? answer.idleMs : undefined }
   return (await stays(running, serveFile())) ? { page: running, isKept: true } : null
 }
 
@@ -795,10 +796,12 @@ const showLan = async (url: string): Promise<void> => {
 // copy is running yet (and opened in the browser then, unless --no-open). It returns at once, so
 // an agent's command tool is not left waiting on the server.
 const serveBoard = async (): Promise<void> => {
+  const requestedIdle = idleMs()
   process.stdout.write(boardText(view(), pending(), s, options()))
   // The note goes above the address, so the address stays the last line an agent shows.
-  const show = async (url: string, isKept = false): Promise<void> => {
-    process.stdout.write(`\n${isKept ? `${s.serveKept}\n` : ''}${s.serveAt(url)}\n`)
+  const show = async (url: string, isKept = false, actualIdle?: number): Promise<void> => {
+    const idleNote = actualIdle !== undefined && actualIdle !== requestedIdle ? `${actualIdle === 0 ? s.serveIdle : s.serveIdleTimed(actualIdle / 60_000)}\n` : ''
+    process.stdout.write(`\n${isKept ? `${s.serveKept}\n` : ''}${idleNote}${s.serveAt(url)}\n`)
     // The address comes from a file and goes to a shell on Windows: only the shape this server
     // writes is opened.
     if (!args.includes('--no-open') && /^http:\/\/127\.0\.0\.1:\d+\/\?t=[\w-]+$/.test(url)) await new Promise<void>(done => openInBrowser(url, () => done()))
@@ -808,8 +811,7 @@ const serveBoard = async (): Promise<void> => {
   const old = readRunning(oldServeFile)
   if (old !== null && (await stays(old, oldServeFile))) return show(old.url, true)
   const found = await runningPage()
-  if (found !== null) return show(found.page.url, found.isKept)
-  idleMs()
+  if (found !== null) return show(found.page.url, found.isKept, found.idleMs)
   const rest = ['--lang', '--port', '--messages-dir', '--idle-minutes'].flatMap(name => {
     const value = flag(name)
     return value === undefined ? [] : [name, value]
@@ -840,7 +842,7 @@ const serveBoard = async (): Promise<void> => {
     // Another `--serve` started at the same moment may have written its address first: this
     // page stopped then, and that one is the page to show.
     const other = await runningPage()
-    if (other !== null) return show(other.page.url, other.isKept)
+    if (other !== null) return show(other.page.url, other.isKept, other.idleMs)
     process.stdout.write(`\n${s.serveFailed(s.serveOffline)}\n`)
     return
   }

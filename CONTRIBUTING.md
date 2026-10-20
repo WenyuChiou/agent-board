@@ -39,11 +39,35 @@ CI runs six jobs: plugin/installer/reporter checks on Linux and Windows, and Nod
 
 ## Changes and evidence
 
-Put logic in pure `hooks/` modules; engine calls stay in `hooks/register.tsx`. User-visible strings belong in all three tables. Use meaningful behavioral tests for messaging, state, storage and ownership changes. CHANGELOG entries name their covering tests. Commit subjects start with `feat:`, `fix:`, `docs:` or another appropriate type.
+Put logic in pure `hooks/` modules; engine calls stay in `hooks/register.tsx`. User-visible strings belong in all three tables. Use meaningful behavioral tests for messaging, state, storage and ownership changes. CHANGELOG entries name their covering tests. Commits and pull requests follow [Pull requests](#pull-requests).
 
 Record progress, native hook execution, UI controls, transport acceptance and actual model ACKs separately. Identify the native host and surface; an owned app-server is not a CLI TTY or a desktop chat. A mock, tagged file or accepted RPC cannot prove live delivery. Never use a normal reply as tool/merge approval. Real model tests require an authorized disposable binding and a bounded prompt budget; stop only your own test processes afterward.
 
 For optional OpenCode SDK/DeepSeek loader checks, use the pinned packages and disposable prefix in the [portable acceptance record](docs/validation/2026-10-19-portable-hosts.md). `scripts/check-host-contracts.mjs --runtime-dir <prefix>` uses the actual packages with synthetic host objects; it is not native model acceptance. Normal installation adds no npm dependencies.
+
+## Pull requests
+
+Several agents (Claude Code sessions, Codex and others) work in this repository at the same time. These rules keep their work from overlapping. They apply to every agent and person.
+
+1. **Nothing reaches `main` except through a pull request.** Never push to `main`, and never force-push a branch someone else pushed to.
+2. **One issue, one pull request.** Start from an issue; open one if none fits. A pull request fixes one issue, and its body opens with `Fixes #N`. Anything else you find goes into a new issue, not into the same pull request. A release pull request needs no issue and has no `Fixes` line.
+3. **Claim before you start.** Before you branch, check the open pull requests (`gh pr list`) and the issue's comments. If someone already has an open pull request or a claim on the issue, do not start a competing one: comment on theirs. To claim an issue, comment with your agent name and branch. If an earlier claim turns up after yours, withdraw yours. A claim with no pull request after 2 days may be taken over, after a comment saying so; a claim waiting for a free slot (rule 10) says so and does not expire.
+4. **Branch from current `main`**, named `<type>/<short-slug>` (`fix/question-ledger-write`). If `main` moves before the merge, the reviewer asks the author to bring the branch up to date, then reviews the new head.
+5. **Commits** use `<type>: <summary>` or `<type>(<scope>): <summary>` (for example `feat`, `fix`, `docs`, `test`, `refactor`, `chore`), with a body that says why. The pull request title uses the same form. Commit regenerated files (`hooks/board-script.ts`, `hooks/released.ts`) together with the source change that needs them.
+6. **CHANGELOG.** A fix or feature pull request adds its entry under `## Unreleased` and names its covering tests by their exact titles. Only a release pull request ([Releases](#releases)) raises the version and turns `Unreleased` into a dated section.
+7. **The pull request body** names its author (`Author: <agent>, <branch>`) and fills in every section of the template, including the checks you could not run and why. When it is ready, the author comments `Ready for review` and changes it only when the reviewer asks.
+8. **Authors never merge.** Any agent or person may open issues and pull requests, but only the reviewer merges: the owner, or the Claude Code session the owner has named maintainer of this repository (except governance files, rule 12). No author decides that its own pull request is done. A pull request the maintainer wrote gets its verdict from a separate review of the diff (a code-review subagent the maintainer runs, or the owner), never from the maintainer alone; the maintainer posts the subagent's verdict as given.
+9. **The reviewer verifies before merging.** The reviewer:
+   - reads the whole diff against its issue: one issue, nothing extra;
+   - reruns the checks that cover the change on its own copy, rather than trusting the reported results;
+   - comments on the pull request `Review: APPROVE <full head sha>` with what was verified, or `Review: REQUEST CHANGES <full head sha>` with the findings, naming the reviewer (`by owner`, `by maintainer` or `by code-review subagent`); any later push needs a new verdict;
+   - merges only the head named in `Review: APPROVE <head sha>`, once every CI job in `.github/workflows/test.yml` is green, not only the ones GitHub marks as required. The merge is a squash merge of that head: `gh pr merge <N> --squash --match-head-commit <head sha>`.
+   - then deletes the branch, and comments on the closed issue with the merge commit and the evidence.
+
+   A pull request that reports a check it did not run is not ready to merge. A merge with no `Review: APPROVE` for the merged head breaks this rule: the reviewer opens an issue (rule 11) and reviews it after the fact.
+10. **At most five open pull requests at a time**, counting all authors together. Split large work into step pull requests: each covers one issue and can be merged on its own. Drafts count. Check `gh pr list --state open` first; open the next step only while fewer than five are open. If yours makes six, close it and reopen it later. The owner may allow a sixth for a release or an urgent fix.
+11. **Undoing what a merged pull request did** needs an issue that names that pull request. A revert also goes through a pull request.
+12. **Governance files** (`AGENTS.md`, `CONTRIBUTING.md`, `.github/`) change only in a pull request the owner merges. An agent's comment is not approval.
 
 ## The file format is versioned
 
@@ -56,11 +80,11 @@ Keep the original README tour/flow SVGs and dark terminal illustration. The bott
 ## Releases
 
 1. Update `.claude-plugin/plugin.json`, the three README badges and concise marketplace descriptions. Keep support claims aligned with evidence.
-2. Add a dated `## x.y.z — YYYY-MM-DD` CHANGELOG entry, naming covering tests.
+2. Rename `## Unreleased` in the CHANGELOG to `## x.y.z — YYYY-MM-DD`, naming covering tests.
 3. Fetch tags (`git fetch --tags origin`), then run `bun scripts/build-released.ts` with Bun 1.4.2. It records this version's generated-file ownership; do not edit its output manually.
    Run `bun scripts/build-board.ts`, then regenerate the released table once more. Both `--check` commands must pass together. The bundle omits its mutable pre-tag fingerprint and its own exact tagged fingerprint. Newer source with the same manifest version includes the frozen tag's fingerprint so upgrades still recognize it; historical board and command ownership remain included.
 4. Run applicable checks and generated-file checks. State any unavailable full SDK typecheck.
-5. Open a regular PR, wait for all required CI checks, and merge the exact tested head under the owner's authorization.
+5. Open a regular PR. The reviewer verifies it as in [Pull requests](#pull-requests) and, under the owner's authorization, squash-merges the exact tested head (`--match-head-commit`) once every CI job is green.
 6. On the merged release commit, run `claude plugin tag . --dry-run`, then `claude plugin tag .`. Push only the new exact tag, for example `git push origin agent-board--v0.23.0`. Never replace an existing release tag or push unrelated local tags.
 
 ## Support matrix

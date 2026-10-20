@@ -171,10 +171,11 @@ export const boardText = (view: View, pending: readonly PendingTurn[], s: String
     lines.push('')
   }
 
-  if (view.idle.length > 0) {
-    lines.push(c('quiet', o.isIdleOpen ? s.idleCount(view.idle.length) : `${s.idleCount(view.idle.length)} · --all`))
+  for (const [rows, count] of [[view.idle, s.idleCount], [view.stopped, s.stoppedCount]] as const) {
+    if (rows.length === 0) continue
+    lines.push(c('quiet', o.isIdleOpen ? count(rows.length) : `${count(rows.length)} · --all`))
     if (o.isIdleOpen) {
-      for (const row of view.idle) {
+      for (const row of rows) {
         lines.push(`  ${c('project', fit(row.project, o.width - 4))}`, ...rowLines(row, s, o))
       }
     }
@@ -188,7 +189,7 @@ export const boardText = (view: View, pending: readonly PendingTurn[], s: String
     lines.push('')
   }
 
-  if (view.groups.every(group => group.rows.length === 0) && asks.length === 0 && news.length === 0 && view.idle.length === 0 && view.due.length === 0) lines.push(c('quiet', s.empty), '')
+  if (view.groups.every(group => group.rows.length === 0) && asks.length === 0 && news.length === 0 && view.idle.length === 0 && view.stopped.length === 0 && view.due.length === 0) lines.push(c('quiet', s.empty), '')
 
   return `${lines.join('\n').replace(/\n+$/, '')}\n`
 }
@@ -258,10 +259,13 @@ export const redact = (text: string, home: string, isWindows = false): string =>
     .replace(FLAG, `$1${MASK}`)
     .replace(BEARER, `$1 ${MASK}`)
     .replace(BASIC, `$1 ${MASK}`)
-    .replace(ASSIGNED, (assignment, head: string, value: string) => {
-      // A bare key/token label can describe a quota or other ordinary work. Explicit
-      // assignments, quoted values and long tokens stay private; known prefixes go below.
-      const isDescription = /^(?:key|token)[ \t]*:[ \t]*$/i.test(head) && value.length < 20 && !/[=:'"]/.test(value)
+    .replace(ASSIGNED, (assignment, head: string, value: string, at: number, whole: string) => {
+      // A bare key/token label can describe a quota or other ordinary work ("key: 100",
+      // "token: budget"). Only a number of up to five digits or one plain word stays, and only
+      // when the label stands alone ("api.key:", "$key:" are names). A one-time code, a value
+      // mixing letters and digits ("hunter2"), a code in capitals, an assignment, a quoted
+      // value or a long token is masked.
+      const isDescription = /^(?:key|token)[ \t]*:[ \t]*$/i.test(head) && (at === 0 || /\s/.test(whole[at - 1] ?? '')) && /^(?:\d{1,5}|[A-Za-z][a-z]{0,18})$/.test(value)
       return isDescription ? assignment : `${head}${MASK}`
     })
     .replace(PREFIXED, MASK)
@@ -354,6 +358,7 @@ export const chatText = (
     for (const item of shelf) items.push(line(`${named(item.project)} › ${item.task} · ${item.when}`, 2), line(`${item.text}${item.note ? ` — ${item.note}` : ''}`, 4))
   }
   if (view.idle.length > 0) items.push(line(s.idleCount(view.idle.length)))
+  if (view.stopped.length > 0) items.push(line(s.stoppedCount(view.stopped.length)))
   // A question is told above, answered or not: it is never the "next step" of its task.
   const isNext = (step: ViewStep): boolean => step.number !== null && !['done', 'cancelled', 'waiting'].includes(step.status)
   rows.forEach(({ row, mark }, index) => {
@@ -361,7 +366,7 @@ export const chatText = (
     const words = `${mark} ${named(row.project)} › ${row.title}${row.due === null ? '' : ` · ${row.due.left}`}${next === undefined ? '' : ` — ${s.reportNext(next)}`}`
     items.push(`${index === 0 ? '\n' : ''}${line(words)}`)
   })
-  if (asks.length === 0 && rows.length === 0 && news.length === 0 && view.idle.length === 0) items.push(s.empty)
+  if (asks.length === 0 && rows.length === 0 && news.length === 0 && view.idle.length === 0 && view.stopped.length === 0) items.push(s.empty)
   // Each starts with its project (`project · task: step`).
   const doneWords = (words: string): string => {
     const [project = '', ...rest] = words.split(' · ')
@@ -424,7 +429,7 @@ const chosen = (state: BoardState, items: readonly BoardItem[]): number => {
 // their shelf state so only rows the person can see are selectable.
 export const boardItems = (view: View, pending: readonly PendingTurn[], isIdleOpen = true, isOlderOpen = false): BoardItem[] => {
   // Work due soon first, then each project's; a row is listed once.
-  const rows = [...view.due, ...view.groups.flatMap(group => group.rows), ...(isIdleOpen ? view.idle : [])].filter((row, index, all) => all.findIndex(one => one.key === row.key) === index)
+  const rows = [...view.due, ...view.groups.flatMap(group => group.rows), ...(isIdleOpen ? [...view.idle, ...view.stopped] : [])].filter((row, index, all) => all.findIndex(one => one.key === row.key) === index)
 
   return [
     // A question's key holds its words, so a press made while it showed one question is refused
@@ -566,7 +571,11 @@ export const boardScreen = (view: View, pending: readonly PendingTurn[], state: 
     `${c('bold', s.paneTitle)}  ${c('waiting', `● ${waiting} ${s.countWaiting}`)}  ${c('accent', `▸ ${active} ${s.countActive}`)}  ${c('alert', `⚑ ${due} ${s.countDue}`)}  ${c('done', `✓ ${today} ${s.countToday}`)}`,
     ...(view.hidden.length === 0 ? [] : [c('quiet', `${s.hiddenCount(view.hidden.length)} · ${s.boardKeyShowHidden}`)]),
     ...((view.reminder?.length ?? 0) + (view.older?.length ?? 0) === 0 ? [] : [c('quiet', `${s.sectionQuestionReminders}: ${view.reminder?.length ?? 0} · ${s.sectionOlderQuestions}: ${view.older?.length ?? 0} · ${s.boardKeyOlder}`)]),
-    ...(view.idle.length === 0 ? [] : [c('quiet', `${s.idleCount(view.idle.length)} · ${s.boardKeyIdle}`)]),
+    ...(view.idle.length + view.stopped.length === 0 ? [] : [c('quiet', [
+      view.idle.length === 0 ? '' : s.idleCount(view.idle.length),
+      view.stopped.length === 0 ? '' : s.stoppedCount(view.stopped.length),
+      s.boardKeyIdle,
+    ].filter(part => part !== '').join(' · '))]),
     '',
   ]
   let section = ''
@@ -618,7 +627,7 @@ export const boardScreen = (view: View, pending: readonly PendingTurn[], state: 
     const { turn } = item
     lines.push(`${mark} ${line(fit(`${[turn.project, turn.agent].filter(part => part !== '').join(' · ')}: ${turn.text}`, o.width - 4))}`)
   })
-  if (items.length === 0) lines.push(c('quiet', s.empty))
+  if (items.length === 0 && view.idle.length === 0 && view.stopped.length === 0) lines.push(c('quiet', s.empty))
   lines.push('', c('quiet', fit([...keysFor(items[at], s), s.boardKeysMove].join(' · '), o.width)))
   if (state.note !== '') lines.push(c('done', fit(state.note, o.width)))
 

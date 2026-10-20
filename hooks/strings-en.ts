@@ -69,7 +69,6 @@ export const EN: Strings = {
   groupCount: (n: number): string => `${n} ${n === 1 ? 'item' : 'items'}`,
   groupWaiting: (n: number): string => `${n} waiting`,
   groupStuck: (n: number): string => `${n} stuck`,
-  groupStopped: (n: number): string => `${n} stopped`,
   groupWorking: (n: number): string => `${n} working`,
 
   // The line under the prompt
@@ -292,6 +291,7 @@ export const EN: Strings = {
   showAgain: 'Show again',
   hiddenCount: (n: number): string => `${n} answered, hidden`,
   idleCount: (n: number): string => `${n} idle 7+ days`,
+  stoppedCount: (n: number): string => `${n} stopped`,
   tickStep: 'Mark step done',
   handOver: 'Hand to Claude',
   nothingForYou: '✓ Nothing needs you right now',
@@ -385,8 +385,8 @@ export const EN: Strings = {
   boardKeyOptions: (n: number): string => `1–${n} copy answer`,
   boardKeyHide: 'h already answered, hide',
   boardKeyShowHidden: 'u show them again',
-  boardKeyIdle: 'i show/hide idle',
-  boardUsage: 'Usage: node agent-board.mjs [--watch] [--serve] [--html] [--chat] [--all] [--lang en|zh-TW|zh-CN] · --all lists idle tasks',
+  boardKeyIdle: 'i show/hide idle and stopped',
+  boardUsage: 'Usage: node agent-board.mjs [--watch] [--serve] [--html] [--chat] [--all] [--lang en|zh-TW|zh-CN] · --all lists idle and stopped tasks',
   boardHidden: (text: string): string => `Hidden: “${text}”; it comes back when the question changes.`,
   boardShown: 'The hidden questions are shown again.',
   hideFailed: "Couldn't save that it was answered; it stays on the list.",

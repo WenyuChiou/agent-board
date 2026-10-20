@@ -116,7 +116,7 @@ The optional `scripts/setup.sh` / `scripts/setup.ps1` manages Claude-specific Ta
 
 The optional pane sweeps on session start and hourly: done blocks after 12 hours, other stopped/stale blocks after three days, completed manual tasks after 24 hours observed done. Explicit tidy skips the wait for finished work. A working or waiting agent block stays live for 12 hours after its last write: the pane, terminal and page explain why Archive is unavailable, and tidy keeps it. Once stopped or ended, open the row to archive it immediately. Unresolved `[?]` blocks are retained by automatic sweeps. Explicit archive also requires a durable complete question snapshot, preserving recovery after the source moves; storage failure leaves the source in place.
 
-After 12 hours without a report, a card can look stopped; that is record staleness, not a native process check. A real new hook/report refreshes it. Work idle more than seven days folds away without changing its block; `--all` or the idle toggle shows it. Near-due work stays visible.
+After 12 hours without a report, a card can look stopped; that is record staleness, not a native process check. A real new hook/report refreshes it. Work idle more than seven days folds away without changing its block; `--all` or the idle toggle shows it. Near-due work stays visible. Ended or stale sessions move to a separate Stopped shelf and leave the In progress count; their unanswered questions stay under Waiting on you, and `--all` or `i` shows both idle and stopped tasks.
 
 ## Update and uninstall
 
