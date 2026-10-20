@@ -7,6 +7,11 @@ import { rm } from 'node:fs/promises'
 import { BOARD_SCRIPT } from '../../../hooks/board-script.ts'
 import { clockPreload, clockText, jump } from './clock.mjs'
 
+// Machine-wide Windows variables every real session has; none names a user's own folder. On a
+// CI runner, Windows PowerShell without them took about 40 s for the board's first Move-Item
+// (0.35 s with them), past the board's own 10 s limit.
+const MACHINE_VARIABLES = ['SystemDrive', 'ProgramData', 'ProgramFiles', 'ProgramFiles(x86)', 'ProgramW6432', 'CommonProgramFiles', 'CommonProgramFiles(x86)', 'CommonProgramW6432', 'ALLUSERSPROFILE', 'PUBLIC', 'PROCESSOR_ARCHITECTURE', 'PROCESSOR_IDENTIFIER', 'PROCESSOR_LEVEL', 'PROCESSOR_REVISION', 'NUMBER_OF_PROCESSORS', 'OS', 'DriverData']
+
 export const makeWorld = ({ lang = 'en' } = {}) => {
   const root = mkdtempSync(join(tmpdir(), 'agent-board-e2e-'))
   const home = join(root, 'home')
@@ -25,7 +30,7 @@ export const makeWorld = ({ lang = 'en' } = {}) => {
     CLAUDE_CONFIG_DIR: claudeDir,
   }
   const env = {}
-  for (const key of ['PATH', 'SystemRoot', 'ComSpec', 'PATHEXT', 'windir']) {
+  for (const key of ['PATH', 'SystemRoot', 'ComSpec', 'PATHEXT', 'windir', ...MACHINE_VARIABLES]) {
     const value = process.env[key]
     if (value !== undefined) env[key] = value
   }
