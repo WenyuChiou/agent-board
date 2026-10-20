@@ -147,7 +147,8 @@ const placeQuestionFile = (from: string, to: string): boolean => {
   const target = resolve(to)
   const quote = (text: string): string => `'${text.replaceAll("'", "''")}'`
   const [tool, argv] = process.platform === 'win32'
-    ? [system32('WindowsPowerShell/v1.0/powershell.exe'), ['-NoProfile', '-NonInteractive', '-Command', `[System.IO.File]::Move(${quote(source)}, ${quote(target)})`]] as const
+    // Move-Item, as the pane uses: a .NET method call is refused under Constrained Language Mode.
+    ? [system32('WindowsPowerShell/v1.0/powershell.exe'), ['-NoProfile', '-NonInteractive', '-Command', `Move-Item -LiteralPath ${quote(source)} -Destination ${quote(target)} -ErrorAction Stop`]] as const
     : ['mv', ['-n', '--', source, target]] as const
   const ran = spawnSync(tool, [...argv], { cwd: dirname(path), stdio: 'ignore', timeout: 10000, windowsHide: true })
   return ran.status === 0 && !existsSync(source)
