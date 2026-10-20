@@ -1,8 +1,9 @@
 import { describe, test } from 'node:test'
 import assert from 'node:assert/strict'
 import { existsSync, readFileSync, statSync } from 'node:fs'
-import { join } from 'node:path'
-import { makeWorld } from './lib/world.mjs'
+import { homedir } from 'node:os'
+import { dirname, join } from 'node:path'
+import { makeWorld, modulePath } from './lib/world.mjs'
 import { spawnIsolated } from './lib/spawn.mjs'
 import { block, turn, hook, hookHosts } from './lib/writers.mjs'
 import { terminal, chat, seenPageWithin, serve, html, run } from './lib/surfaces.mjs'
@@ -19,6 +20,15 @@ describe('scenario runner', () => {
       assert.notEqual(a.root, b.root)
       assert.equal(a.env.HERMES_HOME, join(a.home, '.hermes'))
       assert.equal(a.env.AGENT_BOARD_CODEX, undefined)
+      // Machine-wide Windows variables and the PowerShell module path pass through (without the
+      // module path the board's first PowerShell move took 12-40 s on a CI runner), but no module
+      // folder inside a user profile and no user or computer name.
+      for (const key of ['SystemDrive', 'ProgramData', 'ProgramFiles']) assert.equal(a.env[key], process.env[key], key)
+      for (const key of ['USERNAME', 'COMPUTERNAME']) assert.equal(a.env[key], undefined, key)
+      const profiles = [process.env.PUBLIC && dirname(process.env.PUBLIC), dirname(homedir())].filter(Boolean).map(root => root.toLowerCase())
+      for (const dir of (a.env.PSModulePath ?? '').split(';')) assert.ok(!profiles.some(root => dir.toLowerCase().startsWith(root)), dir)
+      if (process.platform === 'win32') assert.equal(modulePath(['C:\\Program Files\\WindowsPowerShell\\Modules', join(homedir(), 'Documents', 'WindowsPowerShell', 'Modules'), join(dirname(process.env.PUBLIC), 'someone', 'Documents', 'WindowsPowerShell', 'Modules')].join(';')), 'C:\\Program Files\\WindowsPowerShell\\Modules')
+      if (process.platform === 'win32' && modulePath()) assert.equal(a.env.PSModulePath, modulePath())
       assert.equal((a.read('agent-board.mjs').match(/\(\(target, done\) => done\(false\)\)\((?:html|url),/g) ?? []).length, 2)
       assert.doesNotMatch(a.read('agent-board.mjs'), /\bopenInBrowser\(/)
       assert.throws(() => a.write('../../../escaped', 'no'), /Outside world/)
