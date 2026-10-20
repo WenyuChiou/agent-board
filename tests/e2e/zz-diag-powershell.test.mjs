@@ -1,26 +1,38 @@
-// Diagnostic only (draft pull request, never merged): which variable beyond the machine-wide ones the board's
-// PowerShell Move-Item needs to stay fast in a fresh journey world. Each variant has its own world.
+// Diagnostic only (draft pull request, never merged): which PowerShell module path entries the board's
+// Move-Item needs to stay fast in a fresh journey world. Each variant has its own world.
 import { test } from 'node:test'
 import { writeFileSync, existsSync } from 'node:fs'
-import { join } from 'node:path'
-import { makeWorld } from './lib/world.mjs'
+import { homedir } from 'node:os'
+import { dirname, isAbsolute, join, resolve, sep } from 'node:path'
+import { makeWorld, modulePath } from './lib/world.mjs'
 import { spawnIsolated } from './lib/spawn.mjs'
 
 const quote = text => `'${text.replaceAll("'", "''")}'`
-const MACHINE = ['SystemDrive', 'ProgramData', 'ProgramFiles', 'ProgramFiles(x86)', 'ProgramW6432', 'CommonProgramFiles', 'CommonProgramFiles(x86)', 'CommonProgramW6432', 'ALLUSERSPROFILE', 'PUBLIC', 'PROCESSOR_ARCHITECTURE', 'PROCESSOR_IDENTIFIER', 'PROCESSOR_LEVEL', 'PROCESSOR_REVISION', 'NUMBER_OF_PROCESSORS', 'OS', 'DriverData']
-const stripped = world => { const env = { ...world.env }; for (const key of MACHINE) delete env[key]; return env }
-const added = keys => world => ({ ...world.env, ...Object.fromEntries(keys.map(key => [key, process.env[key]])) })
+const roots = () => ['SystemRoot', 'ProgramFiles', 'ProgramFiles(x86)', 'ProgramW6432']
+  .map(key => process.env[key]).filter(Boolean)
+  .map(root => { const value = resolve(root).toLowerCase(); return value.endsWith(sep) ? value : value + sep })
+const allowed = (value = process.env.PSModulePath) => (value ?? '').split(';')
+  .filter(dir => dir && isAbsolute(dir) && !dir.startsWith('\\\\') && roots().some(root => resolve(dir).toLowerCase().startsWith(root)))
+  .join(';')
+const profiles = dirname(homedir())
+const shown = dir => dir.toLowerCase().startsWith(profiles.toLowerCase()) ? `<profiles>${dir.slice(profiles.length)}` : dir
+const entries = (process.env.PSModulePath ?? '').split(';').filter(Boolean)
 const variants = {
-  'world as built': world => world.env,
-  ...Object.fromEntries(['USERNAME', 'USERDOMAIN', 'COMPUTERNAME', 'PSModulePath'].map(key => [`world + ${key}`, added([key])])),
-  'world + USERNAME USERDOMAIN COMPUTERNAME': added(['USERNAME', 'USERDOMAIN', 'COMPUTERNAME']),
+  'world as built (profile filter)': () => modulePath(),
+  'machine-folder allowlist': () => allowed(),
+  ...Object.fromEntries(entries.map((dir, index) => [`entry ${index} only: ${shown(dir)}`, () => dir])),
+  'only what the profile filter keeps beyond the allowlist': () => modulePath().split(';').filter(dir => !allowed().split(';').includes(dir)).join(';'),
 }
 
-test('diag: Move-Item in fresh journey worlds with each identity variable added', { skip: process.platform !== 'win32', timeout: 600000 }, async () => {
+test('diag: Move-Item in fresh journey worlds with each module path variant', { skip: process.platform !== 'win32', timeout: 900000 }, async () => {
+  console.log(`entries: ${entries.map(shown).join(' | ')}`)
+  console.log(`profile filter keeps: ${modulePath().split(';').map(shown).join(' | ')}`)
+  console.log(`allowlist keeps: ${allowed().split(';').map(shown).join(' | ')}`)
   for (const [label, make] of Object.entries(variants)) {
     const world = makeWorld()
     try {
-      const env = make(world)
+      const env = { ...world.env, PSModulePath: make() }
+      if (!env.PSModulePath) delete env.PSModulePath
       const ps = join(process.env.SystemRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe')
       const from = join(world.root, 'probe.tmp')
       const to = join(world.root, 'probe.json')
