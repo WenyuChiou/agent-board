@@ -39,6 +39,26 @@ const block = ({
   `## ${project}\n<!-- auto session=${session} agent=${agent} state=${state} updated=2026-10-16T12:00:00Z${resume === undefined ? '' : ` resume=${resume}`} -->\n### ${title}\n> Context: Synthetic journey data.\n${steps}\n<!-- /auto session=${session} -->\n`
 
 describe('L1 first run', () => {
+  test('L1 latency: a new ask is visible within 3 s on the pane', async ($, on) => {
+    const world = makeWorld()
+    world.env = english
+    const clock = engineBeneath(on, world)
+    await $.session.start({ cwd: '/work/persona_framework', surface: 'desktop', isInteractive: true })
+    const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
+    try {
+      expect(visiblePaneText(await ui.drawn())).toContain('No work in progress right now.')
+      const started = clock.now()
+      world.files.set(FILE, block({ state: 'waiting', steps: '- [?] Publish gateway routes, OK?' }))
+      world.mtime += 1
+      await clock.advance(2000)
+      const text = visiblePaneText(await ui.drawn())
+      expect(text).toContain('Publish gateway routes, OK?')
+      expect(text).toContain('● 1')
+      expect(clock.now() - started).toBeLessThanOrEqual(PANE_MS)
+      await noPaneMachineIds(text, world)
+    } finally { await ui.unmount() }
+  })
+
   test('first run: the pane opens on an empty board with words, then shows the first block within one poll', async ($, on) => {
     const world = makeWorld()
     world.env = english

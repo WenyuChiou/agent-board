@@ -1,10 +1,11 @@
 import { describe, test } from 'node:test'
 import assert from 'node:assert/strict'
-import { existsSync, readFileSync, statSync } from 'node:fs'
-import { userInfo } from 'node:os'
-import { dirname, join, resolve } from 'node:path'
+import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs'
+import { dirname, isAbsolute, join, resolve } from 'node:path'
+import { homedir, userInfo } from 'node:os'
+import { fileURLToPath } from 'node:url'
 import { makeWorld, modulePath } from './lib/world.mjs'
-import { spawnIsolated } from './lib/spawn.mjs'
+import { ISOLATED_VARIABLES, spawnIsolated, within, worldOf } from './lib/spawn.mjs'
 import { block, turn, hook, hookHosts } from './lib/writers.mjs'
 import { terminal, chat, seenPageWithin, serve, html, run } from './lib/surfaces.mjs'
 import { seenWithin, noSilentPress, noMachineIds } from './lib/expect.mjs'
@@ -13,6 +14,87 @@ import { killMidWrite, tear, lockFile, twoWriters, readOnly, diskFull, skew, upd
 import { PANE_MS, PAGE_MS } from './lib/budget.mjs'
 
 describe('scenario runner', () => {
+  test('L0 safety: every journey world points every home and config variable into its own temp folder', async () => {
+    const world = makeWorld()
+    try {
+      // The world is a fresh folder of its own in the temp folder, and spawnIsolated recognises it.
+      const found = worldOf(world.root)
+      assert.ok(found && within(found, world.root) && within(world.root, found), world.root)
+      // userInfo() names the account's real home even when this run's HOME is a stand-in.
+      const homes = [homedir(), userInfo().homedir]
+      for (const name of ISOLATED_VARIABLES) {
+        const value = world.env[name]
+        assert.ok(value && isAbsolute(value), name)
+        assert.ok(within(world.root, value), `${name}: outside the world`)
+        assert.ok(!homes.some(home => within(value, home)), `${name}: a home or a folder holding it`)
+        assert.notEqual(value, process.env[name], `${name}: this process's own value`)
+      }
+    } finally { await world.close() }
+  })
+
+  test('L0 safety: a world that leaves any one home variable at the real home refuses to start', async () => {
+    const world = makeWorld()
+    try {
+      const marker = world.write('refused-child-marker-path', '') + '.started'
+      const args = ['--input-type=module', '-e', `import { writeFileSync } from 'node:fs'; writeFileSync(${JSON.stringify(marker)}, 'unsafe child started')`]
+      const refuse = async options => {
+        let child
+        try {
+          assert.throws(() => { child = spawnIsolated(process.execPath, args, options) }, /journey|world|machine/)
+        } finally {
+          // A regression must not leave the marker child running after the assertion fails.
+          if (child) {
+            child.on('error', () => {})
+            const closed = new Promise(done => child.once('close', done))
+            child.kill()
+            await closed
+          }
+        }
+        assert.equal(existsSync(marker), false)
+      }
+      for (const name of ISOLATED_VARIABLES) await refuse({ env: { ...world.env, [name]: process.env[name] || homedir() }, cwd: world.root })
+      await refuse({ env: process.env, cwd: world.root })
+      await refuse({ cwd: world.root })
+      // A caller cannot vouch for a folder that is not a world: the temp folder, a home or this checkout.
+      for (const cwd of [dirname(world.root), homedir(), userInfo().homedir, process.cwd(), undefined]) await refuse({ env: world.env, cwd })
+      for (const name of ISOLATED_VARIABLES) {
+        await refuse({ env: { ...world.env, [name]: 'relative-home' }, cwd: world.root })
+        await refuse({ env: { ...world.env, [name]: join(world.root, '..', 'outside-home') }, cwd: world.root })
+      }
+    } finally { await world.close() }
+  })
+
+  test('L0 safety: no journey helper spawns a process outside the isolated spawn helper', async () => {
+    const root = fileURLToPath(new URL('./', import.meta.url))
+    const files = readdirSync(root, { recursive: true }).map(String).filter(name => /\.(?:[cm]?js|[cm]?ts|tsx)$/.test(name))
+    assert.ok(files.includes(join('lib', 'spawn.mjs')))
+    for (const name of files) {
+      if (name === join('lib', 'spawn.mjs')) continue
+      let source = readFileSync(join(root, name), 'utf8')
+      if (name === join('lib', 'world.mjs')) {
+        // Only the clipboard preload template patches the child's own process module.
+        const start = source.indexOf("const clipboard = world.write('clipboard-preload.mjs', `")
+        const end = source.indexOf('\n`)', start)
+        assert.ok(start >= 0 && end > start)
+        const preload = source.slice(start, end + 3)
+        assert.ok(preload.includes("import cp from 'node:" + 'child' + "_process'"))
+        assert.match(preload, /cp\.spawnSync =/)
+        source = source.slice(0, start) + source.slice(end + 3)
+      }
+      // Any mention of the module, any other way to load a built-in, and any computed dynamic import
+      // could reach it without the literal name.
+      // Split so this file's own pattern text does not match itself.
+      const processModule = new RegExp(['child' + '_process', 'getBuiltin' + 'Module', 'create' + 'Require', 'process\\.binding', 'process\\.dlopen'].join('|'))
+      const computedImport = /\bimport\s*\(\s*(?!(['"])[^'"`+]*\1\s*\))/
+      const processCall = new RegExp('\\b(?:spawn|spawnSync|exec|execFile|execSync|execFileSync|fork)\\s*\\(')
+      assert.doesNotMatch(source, processModule, name)
+      assert.doesNotMatch(source, computedImport, name)
+      // RegExp literal .exec calls are matches, never child-process execution.
+      const calls = source.replace(/\/(?:\\.|[^/\r\n])+\/[dgimsuvy]*\.exec\s*\(/g, 'regexMatch(')
+      assert.doesNotMatch(calls, processCall, name)
+    }
+  })
+
   test('worlds isolate every host path, reject escapes and remove their roots', async () => {
     const a = makeWorld(), b = makeWorld()
     try {

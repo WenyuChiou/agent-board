@@ -221,7 +221,7 @@ export const pageDom = async (source, first, post, { clipboard = true, legacyCop
       scheduled()
       await flush()
     },
-    text: () => ['summary', 'status', 'board', 'note', 'main'].map(id => get(id).textContent).join('\n'),
+    text: () => ['summary', 'counts', 'status', 'board', 'note', 'main'].map(id => get(id).textContent).join('\n'),
   }
 }
 

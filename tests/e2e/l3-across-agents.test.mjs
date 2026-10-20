@@ -1,14 +1,80 @@
 import { describe, test } from 'node:test'
 import assert from 'node:assert/strict'
 import { makeWorld } from './lib/world.mjs'
-import { block } from './lib/writers.mjs'
-import { inspectSurfaces, terminal, seenPageWithin, serve } from './lib/surfaces.mjs'
-import { seenWithin, noSilentPress } from './lib/expect.mjs'
+import { block, hook } from './lib/writers.mjs'
+import { inspectSurfaces, terminal, seenPageWithin, serve, run } from './lib/surfaces.mjs'
+import { seenWithin, noSilentPress, noMachineIds } from './lib/expect.mjs'
+import { knownFailure } from './lib/known.mjs'
 import { PANE_MS, PAGE_MS } from './lib/budget.mjs'
 
 const seedAsk = (world, agent, extra = {}) => block(world, { agent, state: 'waiting', title: `Publish ${agent} report`, steps: ['- [?] Publish the synthetic report, OK?'], ...extra })
 
 describe('L3 across agents and sessions', () => {
+  test('L3 Codex: a new prompt leaves the open ask as [?] until it is answered', async () => {
+    const world = makeWorld()
+    try {
+      const session = 'synthetic-open-ask-owner'
+      assert.equal((await hook(world, 'codex', 'UserPromptSubmit', { session_id: session, prompt: 'Review routes' })).status, 0)
+      const report = await run(world, ['--codex-report'], { input: JSON.stringify({ project: 'api-gateway', title: 'Review routes', state: 'waiting', steps: ['- [?] Publish the gateway, OK?', '- [ ] Check monitoring'] }) })
+      assert.equal(report.status, 0, report.stderr)
+      assert.match(world.read('progress.md'), /\[\?\] Publish the gateway, OK\?/)
+      const result = await hook(world, 'codex', 'UserPromptSubmit', { session_id: session, turn_id: 'unrelated-turn', prompt: 'Also review the route metrics' })
+      assert.equal(result.status, 0, result.stderr)
+      assert.equal((world.read('progress.md').match(/<!-- auto /g) ?? []).length, 1)
+      assert.match(world.read('progress.md'), /Check monitoring/)
+      await knownFailure('hold:codex-open-ask', () => assert.match(world.read('progress.md'), /- \[\?\] Publish the gateway, OK\?/))
+      const server = await serve.start(world)
+      for (const text of [await terminal.screen(world), await server.page()]) {
+        noMachineIds(text, world)
+        await knownFailure('hold:codex-open-ask', () => assert.match(text, /1\s+waiting/))
+      }
+    } finally { await world.close() }
+  })
+
+  test('L3 archive then resume returns the task under its own project', async () => {
+    const world = makeWorld()
+    try {
+      const session = 'synthetic-archive-owner'
+      world.env.CODEX_THREAD_ID = session
+      const payload = { project: 'api-gateway', title: 'Resume archived routes', state: 'ended', steps: ['- [ ] Check routes'] }
+      assert.equal((await run(world, ['--codex-report'], { input: JSON.stringify(payload) })).status, 0)
+      const before = await terminal.keys(world, 'i')
+      const after = await terminal.keys(world, 'i a')
+      noSilentPress({ surface: 'terminal', card: payload.title, button: 'a', before, after })
+      assert.ok(!world.read('progress.md').includes(payload.title))
+      const archives = world.files().filter(name => /progress-archive-.*\.md$/.test(name))
+      assert.equal(archives.length, 1)
+      assert.ok(world.read(archives[0]).includes(payload.title))
+      assert.equal((await hook(world, 'codex', 'UserPromptSubmit', { session_id: session, cwd: world.root, prompt: 'Continue reviewing the archived routes' })).status, 0)
+      const server = await serve.start(world)
+      const rows = (await server.get('/api/board')).json().model.groups.flatMap(group => group.rows)
+      assert.equal(rows.length, 1)
+      assert.equal(rows[0].project, 'api-gateway')
+      noMachineIds(await terminal.screen(world), world)
+      noMachineIds(await server.page(), world)
+    } finally { await world.close() }
+  })
+
+  test('L3 serve: starting --serve twice reuses the open tab', async () => {
+    const world = makeWorld()
+    try {
+      block(world)
+      // Observe both browser requests at the world's existing launch seam; never open a real tab.
+      const before = world.read('agent-board.mjs')
+      const seam = '((target, done) => done(false))('
+      assert.equal(before.split(seam).length - 1, 2)
+      world.write('agent-board.mjs', before.split(seam).join('((target, done) => { process.stdout.write("E2E_BROWSER_REQUEST\\n"); done(true) })('))
+      const server = await serve.start(world)
+      const outputs = []
+      for (let index = 0; index < 2; index++) outputs.push(await terminal.screen(world, ['--serve', '--idle-minutes', '1']))
+      for (const output of outputs) assert.ok(output.includes(server.url), 'The same isolated server address must be reused')
+      assert.equal((await server.get('/api/board')).status, 200)
+      assert.equal((outputs[0].match(/E2E_BROWSER_REQUEST/g) ?? []).length, 1)
+      await knownFailure('hold:serve-tab-reuse', () => assert.equal((outputs[1].match(/E2E_BROWSER_REQUEST/g) ?? []).length, 0, outputs[1]))
+      noMachineIds(await server.page(), world)
+    } finally { await world.close() }
+  })
+
   test('across agents: an Antigravity ask answered from the terminal board leaves the page and --chat', async () => {
     const world = makeWorld()
     let server
