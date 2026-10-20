@@ -34,7 +34,9 @@ jobs:
         # 22.18 and in 24. Both lines run so an import Node cannot load fails here.
         node: [22, 24]
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 5
+    # Windows runners take 4.5 to 5 minutes for checkout, setup and the two suites;
+    # 10 leaves room for the runner's cleanup (#304).
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -63,8 +65,8 @@ jobs:
         if: runner.os != 'Windows' && matrix.node == 24
         run: npx --yes bun@1.4.2 scripts/build-released.ts --check
 
-  # The tests of scripts/pr-check.mjs, in a job of their own: the exchange job on Windows
-  # already uses most of its five minutes.
+  # The tests of scripts/pr-check.mjs, scripts/preflight.mjs and scripts/changelog-fold.mjs, in a job of their own: the exchange job on Windows
+  # already uses most of its time limit (#304).
   pr-check-tests:
     name: pr-check tests (${{ matrix.os }}, Node ${{ matrix.node }})
     strategy:
@@ -82,7 +84,7 @@ jobs:
         with:
           node-version: ${{ matrix.node }}
       - name: PR check tests
-        run: node --test tests/pr-check.test.mjs
+        run: node --test tests/pr-check.test.mjs tests/preflight.test.mjs tests/changelog-fold.test.mjs
 
   plugin:
     name: plugin (${{ matrix.os }})
