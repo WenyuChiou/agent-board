@@ -13,7 +13,7 @@ Independent development and installation do not require Claude Code. Optional pa
 From the repository root, with Node 22.18+ or 24 and npm (for `npx`), the checks CI runs on every pull request:
 
 ```sh
-node --test tests/exchange.test.mjs tests/messaging.test.mjs tests/pr-check.test.mjs tests/preflight.test.mjs tests/changelog-fold.test.mjs
+node --test tests/exchange.test.mjs tests/messaging.test.mjs tests/pr-check.test.mjs tests/preflight.test.mjs tests/changelog-fold.test.mjs tests/team-stats.test.mjs
 node --test tests/board.test.mjs tests/board-storage.test.mjs tests/codex-local.test.mjs tests/local-lock.test.mjs tests/prompt-hooks.test.mjs tests/codex-host.test.mjs tests/codex-fallback.test.mjs tests/legacy-connect.test.mjs tests/connect-worker.test.mjs
 node --test tests/npm-package.test.mjs
 npx --yes bun@1.4.2 scripts/build-board.ts --check
@@ -49,7 +49,7 @@ For optional OpenCode SDK/DeepSeek loader checks, use the pinned packages and di
 
 ## Pull requests
 
-Several agents (Claude Code sessions, Codex, Antigravity, cloud agents such as dot and Muse, and agents on other computers) work in this repository at the same time. These rules keep their work from overlapping. They apply to every agent and person. [docs/CONTRIBUTOR-PATH.md](docs/CONTRIBUTOR-PATH.md) walks through them with the exact commands; where the two disagree, this section wins. `node scripts/pr-check.mjs` checks rules 2, 6 and 10; the `Author:` line, the template sections and pictures' alt text (rule 7); the branch and title names (rules 4 and 5); that a claim names you and your branch (rule 3, not yet its end time: #303); private data in the body and added docs; and, when you run it yourself, the board bundle (rule 5). It runs on your computer and on every pull request; the rest is the reviewer's to check.
+Several agents (Claude Code sessions, Codex, Antigravity, cloud agents such as dot and Muse, and agents on other computers) work in this repository at the same time. These rules keep their work from overlapping. They apply to every agent and person. [docs/CONTRIBUTOR-PATH.md](docs/CONTRIBUTOR-PATH.md) walks through them with the exact commands; where the two disagree, this section wins. [docs/dev/team-process.md](docs/dev/team-process.md) sets how much work is open at once, when a finding becomes an issue, and how a pull request moves from claim to merge. `node scripts/pr-check.mjs` checks rules 2, 6 and 10; the `Author:` line, the template sections and pictures' alt text (rule 7); the branch and title names (rules 4 and 5); that a claim names you and your branch (rule 3, not yet its end time: #303); private data in the body and added docs; and, when you run it yourself, the board bundle (rule 5). It runs on your computer and on every pull request; the rest is the reviewer's to check.
 
 1. **Nothing reaches `main` except through a pull request.** Never push to `main`. Never force-push a branch: bring it up to date by merging (rule 4).
 2. **One issue, one pull request.** Start from an issue; open one if none fits. A pull request fixes one issue, and its body opens with `Fixes #N`. When an issue is split into steps, each step's pull request opens with `Part of #N` and the last one with `Fixes #N`. Anything else you find goes in a comment on your issue, not into the same pull request; the maintainer files it if it qualifies. A release pull request needs no issue and has no `Fixes` line.

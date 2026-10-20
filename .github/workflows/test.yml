@@ -84,7 +84,7 @@ jobs:
         with:
           node-version: ${{ matrix.node }}
       - name: PR check tests
-        run: node --test tests/pr-check.test.mjs tests/preflight.test.mjs tests/changelog-fold.test.mjs
+        run: node --test tests/pr-check.test.mjs tests/preflight.test.mjs tests/changelog-fold.test.mjs tests/team-stats.test.mjs
 
   # The npm package in a job of its own: what `npm pack` would publish, the version in step
   # with plugin.json, and the launcher (setup, help, the installed board script) in a scratch home.
