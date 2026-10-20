@@ -884,7 +884,7 @@ test('--chat names what was done today from the journal, and keeps to one messag
 
 // Only the named filesystem calls fail, injected before the bundled script loads; not a real
 // permission or disk failure.
-test('a press on the board names an answered list it cannot read or replace, with its error, and never writes over it', () => {
+for (const isSettled of [false, true]) test(isSettled ? 'a press failure redraws the board after the question snapshot settles' : 'a press on the board names an answered list it cannot read or replace, with its error, and never writes over it', () => {
   const dir = mkdtempSync(join(tmpdir(), 'board-'))
   try {
     const path = join(dir, 'progress.md')
@@ -896,15 +896,32 @@ test('a press on the board names an answered list it cannot read or replace, wit
     const script = join(dir, 'agent-board.mjs')
     writeFileSync(script, `globalThis.AGENT_BOARD = ${JSON.stringify({ path, lang: 'en' })}\n${BOARD_SCRIPT}`)
     const preload = join(dir, 'fault.cjs')
+    const events = join(dir, 'fault-events.txt')
+    let clock = Date.now()
     const play = fault => {
-      writeFileSync(preload, `const fs = require('node:fs')\nconst { syncBuiltinESMExports } = require('node:module')\n${fault}\nsyncBuiltinESMExports()\n`)
+      clock += 10000
+      writeFileSync(events, '')
+      writeFileSync(preload, `const fs = require('node:fs')
+const { syncBuiltinESMExports } = require('node:module')
+let now = ${clock}
+Date.now = () => now
+const clockRead = fs.readFileSync
+fs.readFileSync = (file, ...rest) => {
+  const value = clockRead(file, ...rest)
+  if (String(file) === ${JSON.stringify(list)}) now = ${clock} + ${isSettled ? 2000 : 0}
+  return value
+}
+const inPress = () => new Error().stack?.split('\\n').some(line => /^\\s+at act \\(/.test(line))
+const record = code => fs.appendFileSync(${JSON.stringify(events)}, code + '\\n')
+${fault}
+syncBuiltinESMExports()`)
       return spawnSync(process.execPath, ['-r', preload, script, '--keys', 'h'], { encoding: 'utf8', timeout: 10000, env: { ...process.env, CLAUDE_PROGRESS_FILE: '', NO_COLOR: '1' } })
     }
-    // `--keys h` reads the list twice to draw and choose the line, then once more to change it:
-    // only that third read fails, so the press itself meets the error.
+    // A settled view can migrate this list before the press. Scope the fault to
+    // the action's stack instead of a read count, and exercise both clock phases.
     const faults = [
-      [`const original = fs.readFileSync\nlet reads = 0\nfs.readFileSync = (file, ...rest) => { if (String(file) === ${JSON.stringify(list)} && ++reads === 3) throw Object.assign(new Error('injected read failure'), { code: 'EACCES' }); return original(file, ...rest) }`, 'EACCES'],
-      [`const original = fs.renameSync\nfs.renameSync = (from, to) => { if (String(to) === ${JSON.stringify(list)}) throw Object.assign(new Error('injected rename failure'), { code: 'EIO' }); return original(from, to) }`, 'EIO'],
+      [`const original = fs.readFileSync\nlet isFailed = false\nfs.readFileSync = (file, ...rest) => { if (!isFailed && String(file) === ${JSON.stringify(list)} && inPress()) { isFailed = true; record('EACCES'); throw Object.assign(new Error('injected read failure'), { code: 'EACCES' }) } return original(file, ...rest) }`, 'EACCES'],
+      [`const original = fs.renameSync\nfs.renameSync = (from, to) => { if (String(to) === ${JSON.stringify(list)} && inPress()) { record('EIO'); throw Object.assign(new Error('injected rename failure'), { code: 'EIO' }) } return original(from, to) }`, 'EIO'],
     ]
     for (const [fault, code] of faults) {
       const out = play(fault)
@@ -914,12 +931,15 @@ test('a press on the board names an answered list it cannot read or replace, wit
       assert.ok(!said.includes('Hidden:'), said)
       // The board is drawn after the press, with the question still on it.
       assert.ok(out.stdout.includes('Per-key limit'), said)
+      const injected = readFileSync(events, 'utf8').trim().split('\n')
+      assert.ok(injected.length > 0 && injected.every(event => event === code), said)
       assert.equal(readFileSync(list, 'utf8'), held)
       assert.ok(!readdirSync(dir).some(name => name.endsWith('.board-tmp')))
     }
     // Once it can be read and replaced, the same press hides the question and keeps the old mark.
     const out = play('')
     assert.equal(out.status, 0, out.stdout + out.stderr)
+    assert.equal(readFileSync(events, 'utf8'), '')
     const answered = JSON.parse(readFileSync(list, 'utf8')).answered
     assert.deepEqual([answered.length, answered[0], /^question:[a-f0-9]{64}:\d+$/.test(answered[1])], [2, 'c0ffee12 1 Ship it, OK?', true])
   } finally {

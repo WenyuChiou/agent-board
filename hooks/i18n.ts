@@ -96,6 +96,7 @@ export const ZH_TW = {
   foldedDone: (n: number): string => `已完成 ${n} 步`,
   foldedRest: (n: number): string => `還有 ${n} 步`,
   waitingReply: '等你回覆',
+  backgroundRunning: '背景工作執行中',
   // A step of this session the person answered in chat, until Claude asks again.
   answeredNote: '你已回覆，等 Claude 處理',
   allDone: '全部完成',
@@ -440,6 +441,7 @@ export const ZH_TW = {
   boardHidden: (text: string): string => `已隱藏「${text}」；問題一改就會再出現。`,
   boardShown: '隱藏的問題都重新顯示了。',
   hideFailed: '記不下「已回覆」，這一項還留在清單上。',
+  inboxQuestionNotKept: '有個 agent 的問題還在儲存或清理中，會自動重試。',
   questionsUnreadable: (file: string): string => `問題清單 ${file} 讀不到或存不進去，隱藏和封存可能失敗。寫到一半被切斷的清單會自動重建。這則訊息一直在的話，先重開這個 session；還在的話，再把那個檔案移到別處。`,
   boardTicked: (step: string): string => `已完成「${step}」。`,
   boardTickGone: '找不到那一步，可能已經改過了。',
