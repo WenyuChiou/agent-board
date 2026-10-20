@@ -155,7 +155,9 @@ function Read-PromptReceipt([string]$File, [Diagnostics.Stopwatch]$Clock) {
   try {
     if ($Clock.ElapsedMilliseconds -ge ${HOOK_INPUT_TIMEOUT}) { throw 'REPORTER_TIMEOUT' }
     $start = New-Object Diagnostics.ProcessStartInfo
-    $start.FileName = (Get-Command node -CommandType Application -ErrorAction Stop).Source
+    # Explicit CommandType can return several applications even without -All.
+    # FileName needs one path, never the string conversion of a path array.
+    $start.FileName = (Get-Command node -CommandType Application -TotalCount 1 -ErrorAction Stop).Source
     $start.Arguments = ${psQuote('-e ' + windowsQuote(PROMPT_FILE_SCRIPT))}
     $start.UseShellExecute = $false
     $start.CreateNoWindow = $true

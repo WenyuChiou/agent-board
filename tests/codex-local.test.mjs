@@ -606,6 +606,43 @@ test('a completed prompt survives watchdog cancellation before its trap is ready
   }
 }))
 
+test('the PowerShell classifier uses the first Node path when several applications match', { skip: process.platform !== 'win32' }, () => fixture(async f => {
+  const later = join(f.home, 'later node'), inbox = join(f.root, 'progress-inbox')
+  mkdirSync(later)
+  // A later lookup entry is deliberately not executable: it must never run.
+  writeFileSync(join(later, 'node.exe'), 'synthetic later application must not run')
+  const env = { ...f.env }
+  for (const key of Object.keys(env)) if (key.toLowerCase() === 'path') delete env[key]
+  env.PATH = [dirname(process.execPath), later].join(delimiter)
+  const powershell = join(process.env.SystemRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe')
+  const lookup = spawnSync(powershell, ['-NoProfile', '-Command', '$c = @(Get-Command node -CommandType Application -ErrorAction Stop); $c.Count'], { env, encoding: 'utf8', windowsHide: true, timeout: 10000 })
+  assert.equal(lookup.error, undefined)
+  assert.equal(lookup.status, 0, 'the controlled application lookup must succeed')
+  assert.equal(lookup.stdout.trim(), '2', 'exercise two real ApplicationInfo results, not a mocked lookup')
+  const file = join(f.root, 'progress-report.ps1'), diagnostic = join(f.home, 'classifier-probe.txt')
+  const raw = JSON.stringify({ session_id: 'synthetic-multiple-node', cwd: '/synthetic/中文', prompt: '/board' })
+  const source = reporterPs1()
+  assert.ok(source.includes(' -TotalCount 1'))
+  for (const isCapped of [false, true]) {
+    rmSync(inbox, { recursive: true, force: true })
+    rmSync(diagnostic, { force: true })
+    f.save(file, observeClassifier(isCapped ? source : source.replace(' -TotalCount 1', ''), diagnostic))
+    const result = await nativeProcess(powershell, ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', file, 'codex', 'prompt'], env, raw, callback => setTimeout(callback, 10000))
+    assert.equal(result.error, undefined)
+    assert.equal(result.status, 0, classifierDiagnostic(diagnostic))
+    const saved = existsSync(inbox) ? readdirSync(inbox).filter(name => name.endsWith('.json')).map(name => ({ body: readFileSync(join(inbox, name), 'utf8') })) : []
+    assert.equal(saved.length, 1, classifierDiagnostic(diagnostic))
+    if (isCapped) {
+      assert.match(classifierDiagnostic(diagnostic), /phase=complete started=1/)
+      assert.deepEqual(JSON.parse(saved[0].body), { session_id: 'synthetic-multiple-node', cwd: '/synthetic/中文', board_request: true })
+      assert.ok(!/[^\x20-\x7e]/.test(saved[0].body))
+    } else {
+      assert.match(classifierDiagnostic(diagnostic), /phase=start started=0 .*nativeCode=2 /)
+      assert.deepEqual(JSON.parse(saved[0].body), JSON.parse(raw), 'uncapped control demonstrates the existing non-timeout fallback')
+    }
+  }
+}))
+
 test('legacy prompt classifiers time out and reap their process without promoting raw receipts', () => fixture(async f => {
   const isWindows = process.platform === 'win32'
   const inbox = join(f.root, 'progress-inbox'), script = join(f.root, isWindows ? 'progress-report.ps1' : 'progress-report.sh')

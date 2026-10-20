@@ -231,6 +231,16 @@ test('classifier diagnostics keep only bounded phase and numeric evidence', () =
   }
 }))
 
+test('generated PowerShell bounds application lookup to one executable', async () => {
+  const { reporterPs1, reporterSh } = await import('../hooks/connect-pure.ts')
+  // An explicit CommandType keeps Get-Command enumerating, even without -All.
+  // TotalCount is supported by Windows PowerShell 5.1; do not let an array
+  // of Source paths become one space-joined ProcessStartInfo.FileName.
+  for (const source of [reporterPs1(), reporterSh('/synthetic/inbox')]) {
+    assert.match(source, /Get-Command node -CommandType Application -TotalCount 1 -ErrorAction Stop/)
+  }
+})
+
 test('the sh reporter writes a prompt receipt with no prompt words from stdin or an argument', () => fixture(async home => {
   const { reporterSh } = await import('../hooks/connect-pure.ts')
   const file = join(home, 'progress-report.sh')
