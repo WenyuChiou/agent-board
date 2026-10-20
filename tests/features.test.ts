@@ -2076,12 +2076,14 @@ test('a file an earlier release wrote is known by its exact bytes with this mach
   // The board commands from before --serve were the same from 0.17.1, before 0.18.0, to 0.18.1.
   const first = RELEASED.find(release => release.version === '0.17.1')
   for (const text of RELEASE_0_18_1.gemini) expect(first?.gemini).toContain(sha256(text))
-  // The reporter has not changed since, so today's is a released one too.
+  // An older owned reporter is still replaceable when today's template changes.
   const inbox = '/h/.claude/progress-inbox'
-  expect(reporterSh(inbox)).toBe(RELEASE_0_20_5.reporterSh.split(RELEASE_PATHS.inbox).join(inbox))
-  expect(isReleased('reporterSh', reporterSh(inbox), { inbox })).toBe(true)
-  expect(isReleased('reporterPs1', reporterPs1())).toBe(true)
-  expect(isReleased('reporterSh', `${reporterSh(inbox)}# mine\n`, { inbox })).toBe(false)
+  const oldReporter = RELEASE_0_20_5.reporterSh.split(RELEASE_PATHS.inbox).join(inbox)
+  expect(isReleased('reporterSh', oldReporter, { inbox })).toBe(true)
+  expect(oldReporter).not.toBe(reporterSh(inbox))
+  expect(isReleased('reporterPs1', RELEASE_0_20_5.reporterPs1)).toBe(true)
+  expect(RELEASE_0_20_5.reporterPs1).not.toBe(reporterPs1())
+  expect(isReleased('reporterSh', `${oldReporter}# mine\n`, { inbox })).toBe(false)
   // On Windows the board's path has backslashes, and a board command holds it as it is.
   const windows = 'C:\\Users\\synthetic\\.claude\\agent-board.mjs'
   for (const text of RELEASE_0_20_5.gemini) {

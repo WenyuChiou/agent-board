@@ -85,6 +85,7 @@ import {
   ANSWER_KEEP,
   answerKey,
   answerAgentPrompt,
+  restoreAgentBoardQuestion,
   withAgentPrompts,
   claimAction,
   failedName,
@@ -452,7 +453,10 @@ const pollQuestions = async ($: EngineInterface, path: string, projects: readonl
       }
       proofs = await questionProofsFor($, path)
       if (proofs === null) return AGAIN
-      observed = observeQuestions(current, projects, mirror, answered, at, isSettled, incarnation, proofs, pending).ledger
+      const keptCaptures = await questionCapturesFor($, path)
+      if (keptCaptures === null) return AGAIN
+      // The retirement proof must not outrun the resolution just captured above.
+      observed = observeQuestions(withCaptures(current, keptCaptures), projects, mirror, answered, at, isSettled, incarnation, proofs, pending).ledger
       expected = questionsJson(observed)
       return questionsJson(observed) === questionsJson(parsed) ? null : questionsJson(observed)
     }, undefined, async (target, text) => {
@@ -1254,25 +1258,42 @@ const takeAgentTurns = async ($: EngineInterface, turns: readonly AgentTurn[], a
   const seen = JSON.stringify(raw ?? null)
   const completedSeen = JSON.stringify(completion)
   const fresh = emptyMirror(last.id, last.project || (await wordsOf($)).uncategorized, at, last.cwd, last.agent)
-  const firstPrompt = promptKey(stored?.firstPrompt || turns.find(one => one.prompt !== '')?.prompt || '')
+  const firstPrompt = promptKey(stored?.firstPrompt || turns.find(one => one.prompt !== '' && !isBoardTurn(one))?.prompt || '')
   let mirror: ProgressMirror = { ...fresh, ...stored, firstPrompt, lastAnswer: answerKey(stored?.lastAnswer ?? ''), resume: last.session }
   const newest = normalizeTurnOrder(stored?.turnOrder) ?? -1
   const promptBarrier = normalizeTurnOrder(stored?.promptOrder) ?? -1
   const barrier = Math.max(stored?.confirmedAt ?? 0, completion.barrier)
   const isNewer = (turn: AgentTurn): boolean => (turnOrder(turn) ?? newest) >= newest && (promptBarrier < 0 || (turnOrder(turn) ?? -1) >= promptBarrier) && (barrier === 0 || (turnOrder(turn) ?? -1) > barrier * 2 + 1)
-  const digested = turnsToDigest(turns.map(turn => turn.event === 'end' && lastQuestion(turn.answer, true) !== null ? { ...turn, event: 'turn' as const } : turn))
+  const digested = turnsToDigest(turns.map(turn => isBoardTurn(turn) ? { ...turn, event: 'end' as const } : turn.event === 'end' && lastQuestion(turn.answer, true) !== null ? { ...turn, event: 'turn' as const } : turn))
+  const boardTurns = new Set<AgentTurn>()
+  let hasRestoredQuestion = false
   for (const [index, turn] of turns.entries()) {
-    if ((turn.event !== 'turn' && lastQuestion(turn.answer, true) === null) || !isNewer(turn)) continue
+    if (!isNewer(turn)) continue
+    if (turn.event === 'end') {
+      mirror = { ...mirror, promptQuestion: null }
+      hasRestoredQuestion = false
+    }
+    if (turn.event !== 'turn' && lastQuestion(turn.answer, true) === null) continue
     let { prompt, answer } = turn
     // Codex's Stop carries the reply but not the request; the session log has both.
-    if ((answer === '' || prompt === '') && isTranscriptPath(turn.transcript) && (digested.has(index) || mirror.firstPrompt === '')) {
+    if (!isBoardTurn(turn) && (answer === '' || prompt === '') && isTranscriptPath(turn.transcript) && (digested.has(index) || mirror.firstPrompt === '')) {
       const log = await $.fs.read(turn.transcript).catch(() => '')
       const tail = transcriptTail(typeof log === 'string' ? log : '', ANSWER_KEEP, isTextLog(turn.transcript))
       answer = answer || tail.answer
       prompt = prompt || tail.prompt
     }
     // Known only now for Codex, whose Stop leaves the request out.
-    if (isBoardTurn({ ...turn, prompt, answer })) continue
+    if (isBoardTurn({ ...turn, prompt, answer })) {
+      boardTurns.add(turn)
+      const restored = restoreAgentBoardQuestion(mirror, { ...turn, prompt, answer }, at)
+      if (restored !== null) {
+        mirror = restored
+        hasRestoredQuestion = true
+      }
+      continue
+    }
+    mirror = { ...mirror, promptQuestion: null }
+    hasRestoredQuestion = false
     if (mirror.firstPrompt === '' && prompt !== '') mirror = { ...mirror, firstPrompt: promptKey(prompt) }
     if (answer === '' || answerKey(answer) === mirror.lastAnswer) continue
     if (digested.has(index)) {
@@ -1285,7 +1306,11 @@ const takeAgentTurns = async ($: EngineInterface, turns: readonly AgentTurn[], a
   // Only older turns: the block already says more than they do, and writing it again would
   // bring back one archived since.
   if (mirror.tasks.length === 0 || latest === undefined) return
-  const state = isAllDone(mirror) ? 'done' : latest.event === 'end' ? 'ended' : 'waiting'
+  const isReplay = turns.some(turn => boardTurns.has(turn) && turnOrder(turn) === newest)
+  if (turns.filter(isNewer).every(turn => boardTurns.has(turn)) && !hasRestoredQuestion && !isReplay) return
+  const latestWork = turns.filter(turn => isNewer(turn) && !boardTurns.has(turn)).at(-1)
+  const state = boardTurns.has(latest) && hasRestoredQuestion ? 'waiting'
+    : latestWork === undefined ? mirror.state : isAllDone(mirror) ? 'done' : latestWork.event === 'end' ? 'ended' : 'waiting'
   mirror = { ...mirror, state, updated: at, turnOrder: Math.max(newest, ...turns.map(one => turnOrder(one) ?? -1)) }
   const s = await wordsOf($)
   const written = mirror
@@ -1629,14 +1654,14 @@ const drainInbox = async ($: EngineInterface): Promise<void> => {
   if (regular.length === 0) return
   const job = digests.then(async () => {
     const invalid = regular.filter(one => one.turn === null)
-    const settled = regular.filter(one => one.turn !== null && one.turn !== undefined && isBoardTurn(one.turn))
+    const settled: Taken[] = []
     const failed: Record<string, string> = Object.fromEntries([
       ...invalid.map(one => [one.name, `${one.attempt}:${at}:INVALID_INPUT`]),
       ...regular.filter(one => one.error !== undefined).map(one => [one.name, `${one.attempt}:${at}:${one.error}`]),
     ])
     const bySession = new Map<string, Taken[]>()
     for (const one of [...regular].sort((a, b) => inboxOrder(a.name, b.name))) {
-      if (one.turn === null || one.turn === undefined || isBoardTurn(one.turn)) continue
+      if (one.turn === null || one.turn === undefined) continue
       bySession.set(one.turn.id, [...(bySession.get(one.turn.id) ?? []), one])
     }
     for (const all of bySession.values()) {
