@@ -86,6 +86,27 @@ jobs:
       - name: PR check tests
         run: node --test tests/pr-check.test.mjs tests/preflight.test.mjs tests/changelog-fold.test.mjs
 
+  # The npm package in a job of its own: what `npm pack` would publish, the version in step
+  # with plugin.json, and the launcher (setup, help, the installed board script) in a scratch home.
+  npm-package:
+    name: npm package (${{ matrix.os }}, Node ${{ matrix.node }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        node: [22, 24]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: ${{ matrix.node }}
+      - name: npm package tests
+        run: node --test tests/npm-package.test.mjs
+
   plugin:
     name: plugin (${{ matrix.os }})
     strategy:
