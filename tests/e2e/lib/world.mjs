@@ -5,7 +5,7 @@ import { dirname, isAbsolute, join, relative, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { rm } from 'node:fs/promises'
 import { BOARD_SCRIPT } from '../../../hooks/board-script.ts'
-import { clockPreload, jump } from './clock.mjs'
+import { clockPreload, clockText, jump } from './clock.mjs'
 
 export const makeWorld = ({ lang = 'en' } = {}) => {
   const root = mkdtempSync(join(tmpdir(), 'agent-board-e2e-'))
@@ -29,6 +29,11 @@ export const makeWorld = ({ lang = 'en' } = {}) => {
     const value = process.env[key]
     if (value !== undefined) env[key] = value
   }
+  // With PSModulePath unset, Windows PowerShell searches the machine's module path too. A CI
+  // image lists large module folders there, and a world's empty LOCALAPPDATA holds no module
+  // cache, so the board's first Move-Item spent its 10 s limit finding the cmdlet. Real users
+  // have both set; pin the search to the modules that ship with Windows.
+  if (process.platform === 'win32' && env.SystemRoot) env.PSModulePath = join(env.SystemRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'Modules')
   Object.assign(env, directories, { CLAUDE_PROGRESS_FILE: path, NO_COLOR: '1' })
   const inside = file => {
     const rel = relative(root, resolve(file))
@@ -42,9 +47,12 @@ export const makeWorld = ({ lang = 'en' } = {}) => {
     const cleanups = []
     let isClosed = false
     const target = name => inside(join(claudeDir, name))
+    const started = Date.now()
     const world = {
       root, home, claudeDir, path, inbox, script, env, lang,
-      now: Date.now(),
+      // The time every process in this world sees: the clock's base plus real time since it was set.
+      clock: { base: started, at: started },
+      get now() { return this.clock.base + (Date.now() - this.clock.at) },
       cleanups,
       write: (name, text) => {
         const file = target(name)
@@ -71,11 +79,12 @@ export const makeWorld = ({ lang = 'en' } = {}) => {
         if (errors.length) throw new AggregateError(errors, 'World cleanup failed')
       },
     }
-    env.E2E_NOW = String(world.now)
+    env.E2E_NOW = String(world.clock.base)
+    env.E2E_CLOCK_AT = String(world.clock.at)
     env.E2E_BOARD_PATH = path
     env.E2E_BOARD_LANG = lang
     env.E2E_CLOCK_FILE = join(root, 'now')
-    writeFileSync(env.E2E_CLOCK_FILE, env.E2E_NOW)
+    writeFileSync(env.E2E_CLOCK_FILE, clockText(world.clock))
     const preload = clockPreload(world)
     env.E2E_CLIPBOARD = join(root, 'clipboard.txt')
     const clipboard = world.write('clipboard-preload.mjs', `import cp from 'node:child_process'
