@@ -6729,7 +6729,7 @@ test('automatic connect waits for its result before the gate is checked', async 
   await ui.unmount()
 })
 
-for (const lang of ['en', 'zh-TW', 'zh-CN'] as const) test(`a synced progress file that was connected before this update says once how to turn automatic connect on${lang === 'en' ? '' : `: ${lang}`}`, { options: { language: lang } }, async ($, on) => {
+for (const lang of ['en', 'zh-TW', 'zh-CN'] as const) test(`a synced progress file that was connected before this update says once how to turn automatic connect on in ${lang}`, { options: { language: lang } }, async ($, on) => {
   const config = '/home/me/.gemini/settings.json'
   const world: World = {
     files: new Map([[config, '{}'], [controlFile, JSON.stringify({ version: 1, revision: 1, disabled: false, owned: {}, notified: [] })]]),
