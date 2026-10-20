@@ -3,6 +3,7 @@ import { randomBytes } from 'node:crypto'
 import { appendFileSync, existsSync, readFileSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { fragmentIssue, isFragmentPath } from './changelog-fold.mjs'
 
 // The open pull request cap the owner approved for CONTRIBUTING.md rule 10 (#229): per author, and in all.
 export const AUTHOR_CAP = 2
@@ -194,38 +195,31 @@ export const testTitles = files => {
 export const titleKnown = (span, titles) => titles.exact.has(span)
   || (span.match(spanPlaceholder) ? titles.shapes.has(span.replace(spanPlaceholder, '\0')) : titles.templates.some(parts => fitsTemplate(span, parts)))
 
-// Rule 6 asks an entry of fix and feature pull requests; any other entry is checked when there is one.
-export const changelog = ({ text, added, issue, titles, isRelease, isDocsOnly, isRequired = true }) => {
+export const fragmentChanges = ({ paths = [], addedPaths = [], headPaths, issue, isRelease }) => {
   const output = result()
+  const fragments = paths.filter(isFragmentPath)
+  const fresh = addedPaths.filter(isFragmentPath)
   if (isRelease) {
-    output.info.push('changelog: skipped for a release pull request.')
+    if (headPaths === undefined || headPaths === null) output.info.push('changelog: unfolded fragment check skipped; head tree listing is unavailable.')
+    else if ([...headPaths].some(isFragmentPath)) output.problems.push(problem('changelog', 'the release leaves fragments unfolded in changelog.d/.', 'run node scripts/changelog-fold.mjs <version> --write and include the fragment removals.'))
     return output
   }
-  const notNeeded = () => output.info.push('changelog: no entry needed; rule 6 asks one of fix and feature pull requests.')
-  const lines = linesOf(text)
-  const start = lines.findIndex(line => /^## Unreleased\s*$/.test(line))
-  if (start === -1) {
-    if (isRequired) output.problems.push(problem('changelog', 'CHANGELOG.md has no Unreleased section.', 'add "## Unreleased" above the newest version heading and put the entry under it.'))
-    else notNeeded()
-    return output
+  for (const path of fresh) {
+    const number = fragmentIssue(path)
+    if (number === null) output.problems.push(problem('changelog', `invalid fragment name: ${path}.`, 'use changelog.d/<issue>-<lowercase-slug>.md; see changelog.d/README.md.'))
+    else if (issue !== null && issue !== undefined && Number(number) !== issue) output.problems.push(problem('changelog', `the fragment ${path} is named for a different issue than #${issue}.`, `rename it to changelog.d/${issue}-<slug>.md.`))
   }
-  const next = lines.findIndex((line, index) => index > start && /^## /.test(line))
-  const end = next === -1 ? lines.length : next
-  const nonblank = added.filter(line => line.path === 'CHANGELOG.md' && line.text.trim())
-  const inside = nonblank.filter(line => line.line > start + 1 && line.line <= end && !/^## /.test(line.text))
-  if (!inside.length && !isRequired) {
-    notNeeded()
-    return output
+  for (const path of fragments.filter(path => !fresh.includes(path))) {
+    output.problems.push(problem('changelog', `an existing fragment was edited or removed: ${path}.`, 'restore that fragment and add a new file with a different slug; only chore(release): pull requests fold existing fragments.'))
   }
-  if (!inside.length) {
-    const outside = nonblank.filter(line => line.line < start + 1 || line.line > end)
-    const headings = [...new Set(outside.map(item => lines.slice(0, item.line).filter(line => /^## /.test(line)).at(-1) ?? 'the preamble'))]
-    output.problems.push(problem('changelog', outside.length ? `the added entry landed under ${headings.join(', ')} instead of Unreleased.` : 'no entry was added under Unreleased.', outside.length ? 'move the entry under a new "## Unreleased" at the top.' : 'add an entry under "## Unreleased" naming the issue and covering tests.'))
-    return output
-  }
-  const entry = inside.map(line => line.text).join('\n')
+  if (fresh.length > 1) output.problems.push(problem('changelog', 'more than one fragment was added.', 'combine this pull request entry into exactly one new changelog.d/<issue>-<slug>.md file.'))
+  return output
+}
+
+export const changelogEntry = ({ entry, issue, titles, isDocsOnly, location = 'Unreleased entry' }) => {
+  const output = result()
   if (issue !== null && issue !== undefined && !new RegExp(`#${issue}(?!\\d)`).test(entry)) {
-    output.problems.push(problem('changelog', `the new entry does not name #${issue}.`, `add #${issue} to the Unreleased entry.`))
+    output.problems.push(problem('changelog', `the new entry does not name #${issue}.`, `add #${issue} to the ${location}.`))
   }
   const marker = /\bTests?:/.exec(entry)
   if (!marker) {
@@ -244,6 +238,48 @@ export const changelog = ({ text, added, issue, titles, isRelease, isDocsOnly, i
     else output.problems.push(problem('changelog', `"${match[1]}" is not the title of any test in tests/.`, 'copy the exact title from its test(\'…\') call, or add the test; use <name> where a template title varies.'))
   }
   if (!hasKnown && !hasNone) output.problems.push(problem('changelog', 'the entry contains no known covering test title.', 'include at least one exact test title in backticks after "Tests:".'))
+  return output
+}
+
+// Rule 6 asks an entry of fix and feature pull requests; any other entry is checked when there is one.
+export const changelog = ({ text, added, issue, titles, isRelease, isDocsOnly, isRequired = true, paths = [], addedPaths = [], headPaths }) => {
+  const output = fragmentChanges({ paths, addedPaths, headPaths, issue, isRelease })
+  if (isRelease) {
+    output.info.push('changelog: skipped for a release pull request.')
+    return output
+  }
+  const fresh = addedPaths.filter(isFragmentPath)
+  const lines = linesOf(text)
+  const start = lines.findIndex(line => /^## Unreleased\s*$/.test(line))
+  const next = lines.findIndex((line, index) => index > start && /^## /.test(line))
+  const end = next === -1 ? lines.length : next
+  const nonblank = added.filter(line => line.path === 'CHANGELOG.md' && line.text.trim())
+  const inside = start === -1 ? [] : nonblank.filter(line => line.line > start + 1 && line.line <= end && !/^## /.test(line.text))
+  if (fresh.length) {
+    if (inside.length) output.problems.push(problem('changelog', 'the entry is both in changelog.d/ and under Unreleased; keep only the fragment.', 'remove the added Unreleased entry from CHANGELOG.md.'))
+    for (const path of fresh) output.problems.push(...changelogEntry({ entry: added.filter(item => item.path === path).map(item => item.text).join('\n'), issue, titles, isDocsOnly, location: 'fragment' }).problems)
+    return output
+  }
+  const notNeeded = () => output.info.push('changelog: no entry needed; rule 6 asks one of fix and feature pull requests.')
+  if (start === -1) {
+    if (isRequired) output.problems.push(problem('changelog', 'CHANGELOG.md has no Unreleased section.', 'add a fragment in changelog.d/ (see changelog.d/README.md), or add "## Unreleased" above the newest version heading and put the entry under it.'))
+    else notNeeded()
+    return output
+  }
+  if (!inside.length && !isRequired) {
+    notNeeded()
+    return output
+  }
+  if (!inside.length) {
+    const outside = nonblank.filter(line => line.line < start + 1 || line.line > end)
+    const headings = [...new Set(outside.map(item => lines.slice(0, item.line).filter(line => /^## /.test(line)).at(-1) ?? 'the preamble'))]
+    output.problems.push(problem('changelog', outside.length ? `the added entry landed under ${headings.join(', ')} instead of Unreleased.` : 'no entry was added under Unreleased.', outside.length ? 'move the entry under a new "## Unreleased" at the top, or add a fragment in changelog.d/.' : 'add a fragment in changelog.d/ naming the issue and covering tests (see changelog.d/README.md).'))
+    return output
+  }
+  const entry = inside.map(line => line.text).join('\n')
+  const checked = changelogEntry({ entry, issue, titles, isDocsOnly })
+  output.problems.push(...checked.problems)
+  if (!checked.problems.length) output.info.push('changelog: legacy Unreleased entry accepted; new pull requests use changelog.d/ (see changelog.d/README.md).')
   return output
 }
 
@@ -372,7 +408,7 @@ export const checkPr = data => {
   add(author)
   add(naming(data.title, data.branch))
   add(sections(data.body, data.template))
-  add(changelog({ text: data.changelogText, added: data.added, issue: issue.issue, titles: testTitles(data.testFiles), isRelease, isDocsOnly: data.paths.every(path => path.endsWith('.md') || /^(docs|\.github)\//.test(path)), isRequired: /^(feat|fix)[(!:]/.test(data.title) }))
+  add(changelog({ text: data.changelogText, added: data.added, paths: data.paths, addedPaths: data.addedPaths, headPaths: data.headPaths, issue: issue.issue, titles: testTitles(data.testFiles), isRelease, isDocsOnly: data.paths.every(path => path.endsWith('.md') || /^(docs|\.github)\//.test(path)), isRequired: /^(feat|fix)[(!:]/.test(data.title) }))
   add(privateData({ added: data.added, body: data.body }))
   add(binaryImages(data.changedPaths))
   if (issue.issue !== null) {
@@ -593,8 +629,10 @@ export const main = async (argv = process.argv.slice(2)) => {
     data.added = addedLines(git(cwd, 'diff', '--no-ext-diff', '--no-textconv', '--no-color', '--no-renames', '--unified=0', range))
     data.paths = linesOf(git(cwd, 'diff', '--name-only', '--no-renames', range)).filter(Boolean).map(diffPath)
     data.changedPaths = linesOf(git(cwd, 'diff', '--name-only', '--no-renames', '--diff-filter=ACMRT', range)).filter(Boolean).map(diffPath)
+    data.addedPaths = linesOf(git(cwd, 'diff', '--name-only', '--no-renames', '--diff-filter=A', range)).filter(Boolean).map(diffPath)
     data.template = git(cwd, 'show', `${base}:.github/pull_request_template.md`)
     const headPaths = new Set(linesOf(git(cwd, 'ls-tree', '-r', '--name-only', data.head)).filter(Boolean).map(diffPath))
+    data.headPaths = headPaths
     data.changelogText = headPaths.has('CHANGELOG.md') ? git(cwd, 'show', `${data.head}:CHANGELOG.md`) : ''
     data.testFiles = linesOf(git(cwd, 'ls-tree', '-r', '--name-only', data.head, '--', 'tests')).filter(path => /\.test\.(mjs|ts|tsx)"?$/.test(path)).map(diffPath).map(path => ({ path, text: git(cwd, 'show', `${data.head}:${path}`) }))
     data.issueData = null

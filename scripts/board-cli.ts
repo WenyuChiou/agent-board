@@ -901,7 +901,7 @@ const serveBoard = async (): Promise<void> => {
     // page stopped then, and that one is the page to show.
     const other = await runningPage()
     if (other !== null) return show(other.page.url, other.isKept, other.idleMs)
-    process.stdout.write(`\n${s.serveFailed(s.serveOffline)}\n`)
+    process.stdout.write(`\n${s.serveFailed(s.serveNotStarted)}\n`)
     return
   }
   await show(url)
