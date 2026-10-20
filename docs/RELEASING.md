@@ -16,7 +16,7 @@ The release gate, checked on the exact tagged commit:
 
 1. **CI.** Every job of `.github/workflows/test.yml` is green on that commit, on Ubuntu and on Windows.
 2. **Parity.** `docs/validation/<date>-parity-<version>.md` exists, run as [PARITY-CHECKLIST.md](validation/PARITY-CHECKLIST.md) says. Every FAIL in it names an open issue outside this release's must-ship set.
-3. **Journeys.** The L1–L3 user-journey tests (`tests/e2e/`, #222) pass on that commit. While they are not on `main` yet, no release can be stable.
+3. **Journeys.** The L1–L3 user-journey tests (`tests/e2e/`, #222) pass on that commit. While #222 is open, no release can be stable.
 4. **Must-ship.** No issue in the release's must-ship set is open. The set is the issues the milestone description names as must-ship.
 
 A pre-release that passes the gate later is promoted in place, never re-tagged or published again:
@@ -29,7 +29,7 @@ npm dist-tag add @wenyuchiou/agent-board@X.Y.Z latest --otp <code>
 ## Checklist
 
 1. **Version.** Put the same `X.Y.Z` in `.claude-plugin/plugin.json` and `package.json`, the three README badges and the marketplace descriptions. `node --test tests/npm-package.test.mjs` fails when `package.json` and `plugin.json` disagree.
-2. **CHANGELOG.** Rename `## Unreleased` to `## X.Y.Z — YYYY-MM-DD`.
+2. **CHANGELOG.** Run `node scripts/changelog-fold.mjs X.Y.Z` to preview, then add `--write`. It folds every `changelog.d/` fragment, and any entry left under `## Unreleased`, into `## X.Y.Z — YYYY-MM-DD`.
 3. **Generated files.** Rebuild as in [CONTRIBUTING.md, Releases](../CONTRIBUTING.md#releases) step 3: the board bundle and the released-files table, and both `--check` commands pass.
 4. **Checks.** Run everything in [CONTRIBUTING.md, Run the checks](../CONTRIBUTING.md#run-the-checks). The npm test also checks that `npm pack` would publish only the files `package.json` lists.
 5. **Pull request.** Review it, then squash-merge the exact tested head.

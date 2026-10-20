@@ -37,6 +37,31 @@ On Windows use the exact Node and script paths printed by setup. Closing a brows
 leaves the local service running. Close the board stops it; `--idle-minutes 30` opts into
 idle shutdown. No startup service is installed.
 
+To run the normal archive sweep without a Claude session:
+
+```sh
+node ~/.agent-board/agent-board.mjs --tidy
+```
+
+Use the exact installed Node and script paths for a scheduler, including on Windows.
+The flag performs one sweep and exits; it installs no schedule or service and opens no
+page. Choosing this command authorizes the normal sweep: done agent blocks older than
+12 hours and stopped blocks older than 3 days move to the monthly archive beside the
+selected progress file. Unanswered questions, incomplete blocks and missing/future
+timestamps stay. Completed hand-kept tasks use their recorded first-observation times
+and the plugin's one-day threshold; this is an observation, not the exact completion time.
+The pane, `--watch` or `--serve` must first observe the completed task and save its fingerprint
+in `progress-seen.json`. A machine that runs only scheduled `--tidy` never records that
+observation, so unobserved hand-kept tasks stay even after repeated sweeps. The command
+does not create or update the observation file. Unknown, future or unreadable observations
+keep manual tasks; an unreadable observation file stays untouched and does not prevent
+eligible agent blocks from being archived.
+Archive entries are saved before removing work from the board, and repeated runs do
+not duplicate them. A failed persistence operation exits nonzero; retain the files and
+retry after fixing its reported problem. `--chat` remains read-only even with `--tidy`.
+`--tidy` takes precedence over `--serve`, `--watch` and `--html`, so those combinations
+run only the sweep. The explicit interactive tidy still archives finished work immediately.
+
 For maintenance, the installed program retains the compatibility flags
 `--codex-doctor --agent <name>` and `--codex-remove --agent <name>`; removal previews
 before `--apply`. Close that board first. Progress/history/session records remain, and
@@ -55,7 +80,10 @@ removal fail closed without it. Ownership, disable intent and last setup status
 live in `~/.agent-board/legacy-connect.json`, shared across Claude data roots and
 protected by the independent installer's home-level lock. Reload older plugin
 sessions before migration: writers that ignore the lock are not coordinated.
-Automatic probes run after pane/polling startup and outside the mutation lock.
+Automatic probes run after pane/polling startup and outside the mutation lock,
+and only for the default Claude data folder (`CLAUDE_CONFIG_DIR` unset or `~/.claude`) with the
+default progress file or the one last connected by hand; any other session
+connects only when you run `/progress connect` in it.
 Removal records disable intent before cleanup, fencing delayed automatic setup.
 Damaged authority or recovery records are retained and reported rather than reset.
 Status may initialize recognized legacy display metadata; it does not change host

@@ -125,7 +125,9 @@ The optional `scripts/setup.sh` / `scripts/setup.ps1` manages Claude-specific Ta
 
 ## How it keeps itself tidy
 
-The optional pane sweeps on session start and hourly: done blocks after 12 hours, other stopped/stale blocks after three days, completed manual tasks after 24 hours observed done. Explicit tidy skips the wait for finished work. A working or waiting agent block stays live for 12 hours after its last write: the pane, terminal and page explain why Archive is unavailable, and tidy keeps it. Once stopped or ended, open the row to archive it immediately. Unresolved `[?]` blocks are retained by automatic sweeps. Explicit archive also requires a durable complete question snapshot, preserving recovery after the source moves; storage failure leaves the source in place.
+The optional pane sweeps on session start and hourly: done blocks after 12 hours, other stopped/stale blocks after three days, completed manual tasks after 24 hours observed done. Explicit interactive tidy skips the wait for finished work. A working or waiting agent block stays live for 12 hours after its last write: the pane, terminal and page explain why Archive is unavailable, and tidy keeps it. Once stopped or ended, open the row to archive it immediately. Unresolved `[?]` blocks are retained by automatic sweeps. Explicit archive also requires a durable complete question snapshot, preserving recovery after the source moves; storage failure leaves the source in place.
+
+Run `node ~/.agent-board/agent-board.mjs --tidy` for one normal age-based sweep without a Claude session or page. It installs no scheduler and does not write `progress-seen.json`: the pane, `--watch` or `--serve` must first observe a completed hand-kept task. A machine running only scheduled `--tidy` leaves unobserved manual tasks indefinitely; a recorded completed fingerprint must be at least 24 hours old. Unknown, future or unreadable observations retain manual tasks, while eligible dated agent blocks can still archive.
 
 After 12 hours without a report, a card can look stopped; that is record staleness, not a native process check. A real new hook/report refreshes it. Work idle more than seven days folds away without changing its block; `--all` or the idle toggle shows it. Near-due work stays visible. Ended or stale sessions move to a separate Stopped shelf and leave the In progress count. Their unanswered questions leave Waiting on you and stay with the task, even when due or idle. Done sessions keep questions in their Done recently entry, then under Stopped when that entry leaves Done recently. Resolve on the pane closes one question; `--all` or `i` shows both idle and stopped tasks.
 
@@ -162,7 +164,7 @@ Yes, when those sessions report to the same local progress file. Independent rep
 
 Nothing is lost, but nothing moves by itself either: `progress.md`, the inbox and the hooks live on each computer. On the new one, use the common installer and restart your agents. To bring your history along, copy your selected `progress.md` and the `progress-archive-*.md` and `progress-journal-*.md` files beside it.
 
-To share one board between two computers, set `CLAUDE_PROGRESS_FILE` on both to the same file in a synced folder (OneDrive, Dropbox, iCloud). This works best when you use one computer at a time: two computers writing at once can leave your sync app with a conflicted copy.
+To share one board between two computers, set `CLAUDE_PROGRESS_FILE` on both to the same file in a synced folder (OneDrive, Dropbox, iCloud), then run `/progress connect` once on each computer: automatic connect follows only the default progress file or the one you last connected by hand. This works best when you use one computer at a time: two computers writing at once can leave your sync app with a conflicted copy.
 
 ### An agent doesn't show up.
 
