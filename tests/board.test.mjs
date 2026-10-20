@@ -1760,6 +1760,31 @@ const freePort = () =>
 
 // The two runs may or may not meet halfway (one can find the other's page already written); the
 // server started by hand always meets a page that is there.
+test('--serve with a different idle preference reuses the running page and reports its effective timeout', { timeout: 60_000 }, async () => {
+  for (const [initial, next, expected, note] of [
+    [[], ['--idle-minutes', '30'], 0, 'The local board stays running.'],
+    [['--idle-minutes', '30'], [], 1_800_000, 'close after 30 minutes unused'],
+  ]) {
+    const board = serveIn()
+    const urls = []
+    try {
+      const first = board.urlOf(await board.serve(initial))
+      urls.push(first)
+      assert.ok(first)
+      const before = readFileSync(board.served, 'utf8')
+      const again = await board.serve(next)
+      const second = board.urlOf(again)
+      urls.push(second)
+      assert.equal(second, first, again)
+      assert.equal(readFileSync(board.served, 'utf8'), before)
+      const url = new URL(first)
+      const ping = await fetch(new URL('/api/ping', url), { headers: { 'x-board-token': url.searchParams.get('t') }, signal: AbortSignal.timeout(5000) })
+      assert.equal((await ping.json()).idleMs, expected)
+      assert.ok(again.includes(note), again)
+    } finally { await board.end(urls) }
+  }
+})
+
 test('two --serve run at the same moment open one page between them, and a server started while it runs stops at once', { timeout: 60_000 }, async () => {
   const board = serveIn()
   const urls = []
