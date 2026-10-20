@@ -621,6 +621,9 @@ export const main = async (argv = process.argv.slice(2)) => {
       if (options['--event']) checked.info.push('bundle: checked by test.yml ("Board bundle up to date").')
       else if (options['--no-bundle']) checked.info.push('bundle: skipped (--no-bundle).')
       else if (git(cwd, 'rev-parse', 'HEAD').trim() !== data.head) checked.info.push('bundle not checked: check out the pull request\'s head.')
+      // A checkout that converts line endings (core.autocrlf, eol=crlf) writes the bundle with CRLF,
+      // and the bundle check would fail on a current bundle; so the file itself is looked at.
+      else if (existsSync(join(cwd, 'hooks', 'board-script.ts')) && readFileSync(join(cwd, 'hooks', 'board-script.ts'), 'utf8').includes('\r\n')) checked.info.push('bundle not checked: hooks/board-script.ts has CRLF line endings in this checkout; CI checks the bundle, or clone with -c core.autocrlf=false.')
       else if (bundleIsCurrent(cwd)) checked.info.push('bundle: board bundle is current.')
       else checked.problems.push(problem('bundle', 'hooks/board-script.ts is out of date.', 'run "npx --yes bun@1.4.2 scripts/build-board.ts" and commit hooks/board-script.ts with the source change.'))
     }

@@ -368,6 +368,18 @@ test('pr-check checks CI event commits even when another branch is checked out a
   assert.match(execution.stdout, /^::stop-commands::([0-9a-f]{32})\r?\n[\s\S]*\r?\n::\1::\r?\n$/)
 })
 
+test('pr-check leaves the bundle to CI in a checkout that converts line endings', async t => {
+  const setup = fixture(t)
+  setup.put('scripts/synthetic.mjs', 'export const synthetic = true\n')
+  setup.git('add', '--', 'scripts/synthetic.mjs')
+  setup.git('-c', 'user.name=Synthetic', '-c', 'user.email=synthetic@example.invalid', '-c', 'commit.gpgsign=false', 'commit', '-m', 'fix: synthetic script')
+  // What a checkout with core.autocrlf=true leaves on disk.
+  setup.put('hooks/board-script.ts', ['// Synthetic bundle', 'export const BOARD_SCRIPT = ""', ''].join('\r\n'))
+  const execution = await runMain(['--body-file', join(setup.directory, 'body.txt'), '--title', 'fix: synthetic check', '--base', setup.base, '--repo-dir', setup.directory, '--offline'])
+  assert.equal(execution.status, 0, execution.stdout + execution.stderr)
+  assert.match(execution.stdout, /info bundle not checked: hooks\/board-script\.ts has CRLF line endings/)
+})
+
 test('pr-check reads gh API lists line by line and reports a missing issue as missing, not as a network error', async () => {
   const calls = []
   const answers = {
