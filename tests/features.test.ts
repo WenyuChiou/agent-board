@@ -6,6 +6,7 @@ import { askOf } from '../hooks/ask'
 import { boardItems, boardKey, boardScreen, boardText, CHAT_MAX, chatText, doneToday, emptyBoardState, fingerprint, fit, peekInbox, pinned, redact } from '../hooks/board'
 import { addManualTask, isArchivable, manualTaskCount, mergeBlock, renderAutoBlock, scanBlocks, setManualStep, takeArchivable, takeManualDone, takeTask, upsertAutoBlock } from '../hooks/blocks'
 import { agentHooks, boardCommands, boardScript, COLLISION, DELETE, generatedFile, isNodeSupported, isReleased, isReleasedBoard, isSetupState, isWindowsHost, NODE_MIN, nodeVersionOf, openclawPlugin, openclawPrinted, openclawSavedBy, openclawTooOld, PROBLEM_ARGS, readConfig, RELEASE_PATHS, reportCommand, reporterPs1, reporterSh, setupAgents, setupLines, withFlatHook, withGroupedHook, withHermesHooks, withoutHermesHooks, withoutOurHooks, withoutSection } from '../hooks/connect'
+import { connectDataRoots, connectRecordPath, recoveryUnreadableCode } from '../hooks/connect-pure'
 import { boardRun } from '../hooks/board-commands'
 import { dashboardHtml } from '../hooks/dashboard'
 import { codexReport, putCodexBlock } from '../hooks/codex'
@@ -3748,4 +3749,26 @@ test('an ordinary board never resumes a closed session even without messaging en
   const hub = { connections: [], messages: [] }
   expect(resumeModel(serveView(), [], STRINGS.en, new Set(), false, hub).stopped.find(one => one.title === 'Pick the cache')?.send).toBe('open')
   expect(resumeAction(items, { key: row?.key ?? '', type: 'send', text: 'Redis', session: GROK.session, asked: 'Redis or Memcached?', fp: row?.fp }, STRINGS.en, false, [], true).type).toBe('refuse')
+})
+
+test('the connection record path keeps the home separators', () => {
+  expect(connectRecordPath('C:\\Users\\Me')).toBe('C:\\Users\\Me\\.agent-board\\legacy-connect.json')
+  expect(connectRecordPath('/home/me')).toBe('/home/me/.agent-board/legacy-connect.json')
+})
+
+test("another data folder's unreadable unfinished connection says which error and how to retry", () => {
+  expect(recoveryUnreadableCode('RECOVERY_UNREADABLE_EBUSY')).toBe('EBUSY')
+  expect(recoveryUnreadableCode('RECOVERY_CONFLICT')).toBeUndefined()
+  for (const lang of ['en', 'zh-TW', 'zh-CN'] as const) {
+    const text = STRINGS[lang].connectRecoveryUnreadable('EBUSY')
+    expect(text).toContain('EBUSY')
+    expect(text).toContain('/progress connect')
+    expect(text).not.toMatch(/[\\/]\.agent-board|legacy-connect/)
+  }
+})
+
+test('quoted connection paths after equals and opening parentheses decode their escapes', () => {
+  for (const prefix of ['key=', 'command(']) {
+    expect(connectDataRoots(prefix + JSON.stringify('C:\\Users\\Me\\data\\progress-report.ps1'))).toContain('C:\\Users\\Me\\data')
+  }
 })
