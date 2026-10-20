@@ -10,10 +10,10 @@ import { boardRun } from '../hooks/board-commands'
 import { dashboardHtml } from '../hooks/dashboard'
 import { codexReport, putCodexBlock } from '../hooks/codex'
 import { answerKey, blockId, CLAIM_MS, claimAction, isBoardAnswer, isBoardTurn, isInboxFile, isTakenFile, isTextLog, isTranscriptPath, keepInboxDone, keepInboxFailed, MAX_TRIES, promptKey, readClaim, readTurn, takenName, transcriptTail, turnsToDigest } from '../hooks/inbox'
-import { applyDigest, clearAsked, isAskingYou, isPersonsAnswer, isWork, lastQuestion, markAsked, parseDigest, replyData, requestData, turnTools } from '../hooks/digest'
+import { applyDigest, clearAsked, clearBackgroundJobs, finishBackgroundJob, isAskingYou, isPersonsAnswer, isWork, lastQuestion, markAsked, parseDigest, replyData, requestData, startBackgroundJob, turnTools } from '../hooks/digest'
 import { ciFinished, prFromGh, prWords } from '../hooks/github'
 import { appendJournal, countDay, journalLine, parseJournal, progressReport } from '../hooks/journal'
-import { applyTaskCreate, applyTaskUpdate, asData, cleanContext, cleanTitle, clip, completedSince, dataBlock, emptyMirror, fromTaskList, markAnswered, noticesOf, resumeNote, waitsOnYou } from '../hooks/mirror'
+import { applyTaskCreate, applyTaskUpdate, asData, cleanContext, cleanTitle, clip, completedSince, dataBlock, emptyMirror, fromTaskList, markAnswered, noticesOf, resumeNote, stateOf, waitsOnYou } from '../hooks/mirror'
 import { DARK, LIGHT, paletteFor } from '../hooks/palette'
 import { autoOf, doneKey, parseProgress } from '../hooks/parse'
 import { LANGS, RELAY, ZH_TW } from '../hooks/i18n'
@@ -849,6 +849,126 @@ test('a turn counts as work when it edited a file or ran a command', () => {
   expect(turnTools(turn)).toEqual(['Read', 'Grep'])
   expect(isWork(turnTools(turn))).toBe(false)
   expect(isWork(['Read', 'Bash'])).toBe(true)
+})
+
+test('turn tools include Bash before a task notification in the same turn', () => {
+  const messages = [
+    { role: 'assistant' as const, text: '', toolUses: [{ tool: 'Bash', input: { run_in_background: true } }] },
+    { role: 'user' as const, text: 'Current request', toolUses: [] },
+    { role: 'assistant' as const, text: '', toolUses: [
+      { tool: 'Bash', input: { run_in_background: true } },
+      { tool: 'Task', input: { run_in_background: true } },
+      { tool: 'Bash', input: { run_in_background: 'true' } },
+      { tool: 'Bash', input: { run_in_background: false } },
+    ] },
+    { role: 'user' as const, text: 'Tool output', toolUses: [], toolResults: [{}] },
+    { role: 'user' as const, text: '<task-notification><status>failed</status></task-notification>', toolUses: [] },
+    { role: 'assistant' as const, text: '', toolUses: [{ tool: 'Read', input: {} }] },
+  ]
+  expect(turnTools(messages)).toContain('Bash')
+})
+
+test('one completion notice clears only one background job and unrelated prompts clear none', () => {
+  const mirror = { ...emptyMirror('s', 'p', NOW), backgroundJobs: 2 }
+  const notice = '<task-notification>\n<status>completed</status>\n</task-notification>'
+  expect(finishBackgroundJob(mirror, 'completed')).toBe(mirror)
+  expect(finishBackgroundJob(mirror, '<side-sessions-event><status>completed</status></side-sessions-event>')).toBe(mirror)
+  const once = finishBackgroundJob(mirror, `<system-reminder>Context</system-reminder>\n${notice}`)
+  expect(once.backgroundJobs).toBe(1)
+  expect(mirror.backgroundJobs).toBe(2)
+  const twice = finishBackgroundJob(once, notice)
+  expect(twice.backgroundJobs).toBe(0)
+  expect(finishBackgroundJob(twice, notice)).toBe(twice)
+})
+
+test('a failed or stopped background job releases the session like a completed one', () => {
+  for (const status of ['completed', 'failed', 'killed', 'another-ended-status', '']) {
+    const mirror = startBackgroundJob(emptyMirror('s', 'p', NOW), 'toolu_synthetic')
+    const ended = finishBackgroundJob(mirror, `<task-notification><tool-use-id>toolu_synthetic</tool-use-id><status>${status}</status></task-notification>`)
+    expect(ended.backgroundJobs).toBe(0)
+    expect(ended.backgroundJobIds).toEqual([])
+  }
+})
+
+test('two background jobs released in either order leave the block working until both end', () => {
+  const notice = (id: string) => `<task-notification><tool-use-id>${id}</tool-use-id><status>killed</status></task-notification>`
+  for (const order of [['toolu_a', 'toolu_b'], ['toolu_b', 'toolu_a']]) {
+    let mirror = startBackgroundJob(startBackgroundJob(emptyMirror('s', 'p', NOW), 'toolu_a'), 'toolu_b')
+    expect(finishBackgroundJob(mirror, notice('toolu_other'))).toBe(mirror)
+    mirror = finishBackgroundJob(mirror, notice(order[0]!))
+    expect(mirror.backgroundJobs).toBe(1)
+    expect(stateOf(mirror, false)).toBe('working')
+    expect(finishBackgroundJob(mirror, notice(order[0]!))).toBe(mirror)
+    mirror = finishBackgroundJob(mirror, notice(order[1]!))
+    expect(mirror.backgroundJobs).toBe(0)
+    expect(stateOf(mirror, false)).toBe('waiting')
+  }
+  let mixed = startBackgroundJob(startBackgroundJob(emptyMirror('s', 'p', NOW), 'toolu_a'))
+  mixed = finishBackgroundJob(mixed, notice('toolu_a'), true)
+  expect(mixed.backgroundJobs).toBe(1)
+  mixed = finishBackgroundJob(mixed, '', true)
+  expect(mixed.backgroundJobs).toBe(0)
+  // Releases arriving before the launching tool returns match without stealing another job.
+  let mirror = startBackgroundJob(emptyMirror('s', 'p', NOW), 'toolu_a')
+  mirror = finishBackgroundJob(mirror, notice('toolu_b'), true, true)
+  expect(mirror.backgroundJobs).toBe(1)
+  mirror = startBackgroundJob(mirror, 'toolu_b')
+  expect(mirror.backgroundJobs).toBe(1)
+  expect(mirror.backgroundReleases).toEqual([])
+  // Older producers can omit either side's id, including a release before a launch.
+  expect(finishBackgroundJob(startBackgroundJob(emptyMirror('s', 'p', NOW)), notice('toolu_a')).backgroundJobs).toBe(0)
+  expect(finishBackgroundJob(mirror, '<task-notification/>', true)).toBe(mirror)
+  const early = finishBackgroundJob(emptyMirror('s', 'p', NOW), '', true, true)
+  expect(startBackgroundJob(early, 'toolu_a').backgroundJobs ?? 0).toBe(0)
+  const keyed = finishBackgroundJob(emptyMirror('s', 'p', NOW), notice('toolu_a'), true, true)
+  expect(startBackgroundJob(keyed).backgroundJobs ?? 0).toBe(0)
+})
+
+test('a turn with a running background job keeps a placeholder step and suppresses inferred and summarized questions in every language', () => {
+  for (const s of Object.values(STRINGS)) {
+    const mirror = { ...emptyMirror('s', 'p', NOW), backgroundJobs: 1 }
+    expect(markAsked(mirror, 'Waiting for tests?', true)).toBe(mirror)
+    const summed = applyDigest(mirror, { title: 'Tests', context: '', done: 'Started tests', next: '', ask: 'Wait for tests', why: 'Still running?' }, NOW, s, true)
+    expect(summed.tasks.map(task => task.waiting)).toEqual([null, null])
+    expect(summed.tasks.at(-1)?.subject).toBe(s.backgroundRunning)
+    expect(summed.tasks.at(-1)?.status).toBe('pending')
+  }
+})
+
+test('every background notification in one prompt releases its job', () => {
+  const notice = (id: string) => `<task-notification><tool-use-id>${id}</tool-use-id><status>completed</status></task-notification>`
+  const mirror = startBackgroundJob(startBackgroundJob(emptyMirror('s', 'p', NOW), 'job-a'), 'job-b')
+  const prompt = `<system-reminder>Context</system-reminder>\nThe following jobs ended:\n${notice('job-a')}\n${notice('job-b')}`
+  expect(finishBackgroundJob(mirror, prompt)).toBe(mirror)
+  const finished = finishBackgroundJob(mirror, prompt, true)
+  expect(finished.backgroundJobs).toBe(0)
+  expect(finished.backgroundJobIds).toEqual([])
+  const early = finishBackgroundJob(emptyMirror('s', 'p', NOW), prompt, true, true)
+  expect(startBackgroundJob(startBackgroundJob(early, 'job-b'), 'job-a').backgroundJobs ?? 0).toBe(0)
+  expect(mirror.backgroundJobs).toBe(2)
+})
+
+test('a completion without an id releases a job only when no job ids are tracked', () => {
+  const tracked = startBackgroundJob(emptyMirror('s', 'p', NOW), 'tracked-job')
+  for (const prompt of ['', '<task-notification><status>completed</status></task-notification>']) {
+    expect(finishBackgroundJob(tracked, prompt, true)).toBe(tracked)
+    const mixed = startBackgroundJob(tracked)
+    expect(finishBackgroundJob(mixed, prompt, true)).toBe(mixed)
+    const untracked = startBackgroundJob(emptyMirror('s', 'p', NOW))
+    expect(finishBackgroundJob(untracked, prompt, true).backgroundJobs).toBe(0)
+  }
+})
+
+test('clearing background jobs removes only the generated turn step and keeps the original mirror', () => {
+  const base = startBackgroundJob(emptyMirror('s', 'p', NOW), 'job')
+  const mirror = applyDigest(base, { title: 'Build', context: '', done: 'Started build', next: '', ask: '', why: '' }, NOW)
+  const cleared = clearBackgroundJobs({ ...mirror, backgroundReleases: ['early'], backgroundReleaseCount: 1 })
+  expect(cleared).toMatchObject({ backgroundJobs: 0, backgroundJobIds: [], backgroundReleases: [], backgroundReleaseCount: 0 })
+  expect(cleared.tasks.map(task => task.subject)).toEqual(['Started build'])
+  expect(mirror.tasks.at(-1)?.id).toBe('background')
+  expect(mirror.backgroundJobs).toBe(1)
+  const listed = { ...mirror, source: 'tasks' as const }
+  expect(clearBackgroundJobs(listed).tasks).toBe(listed.tasks)
 })
 
 test('a summed-up list keeps the last six finished turns and puts the question before the next step', () => {

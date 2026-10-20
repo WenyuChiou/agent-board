@@ -89,6 +89,8 @@ export type ProgressTask = {
 
 export type ProgressProject = { name: string; tasks: ProgressTask[] }
 
+export type ProgressTail = { offset: number; tasks: number; close: string | null }
+
 export type ProgressSnapshot = {
   path: string
   isMissing: boolean
@@ -96,6 +98,7 @@ export type ProgressSnapshot = {
   mtimeMs: number
   size: number
   projects: ProgressProject[]
+  tornTail?: ProgressTail | null
 }
 
 // One task of Claude's own list (TaskCreate / TaskUpdate / TodoWrite), as the mod mirrors it.
@@ -136,6 +139,13 @@ export type ProgressMirror = {
   isTitleFinal: boolean
   firstPrompt: string
   state: ProgressSessionState
+  // Distinguishes an active turn from work continuing between turns.
+  isTurnRunning?: boolean
+  // Only ids and counts survive a turn; notification and command words do not.
+  backgroundJobs?: number
+  backgroundJobIds?: string[]
+  backgroundReleases?: string[]
+  backgroundReleaseCount?: number
   tasks: ProgressMirrorTask[]
   // Exact canceled text from an uncached completed block, outside completed-work counts.
   // A fresh producer mirror can supersede this snapshot without guessing a recipient.
@@ -199,6 +209,7 @@ declare module 'claude-code' {
       hiddenAsks: string[]
       questionLedger: QuestionLedger
       hasQuestionsProblem: boolean
+      hasPendingQuestionsProblem: boolean
       firstSeen: Record<string, number>
       revising: string
       lang: string

@@ -1,5 +1,5 @@
-import { createHash } from 'node:crypto'
-import { closeSync, existsSync, mkdirSync, openSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs'
+import { createHash, randomUUID } from 'node:crypto'
+import { closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
@@ -8,6 +8,7 @@ import type { CodexReport } from '../hooks/codex'
 import { readConfig } from '../hooks/connect-pure'
 import type { Strings } from '../hooks/i18n'
 import { STRINGS } from '../hooks/strings'
+import { progressTail } from '../hooks/parse'
 import { antigravityHooks, cursorEvent, cursorEvents, lifecycleCapability, localAgents, opencodePlugin, statusEvents } from '../hooks/local-agents'
 import type { LocalAgent } from '../hooks/local-agents'
 import { deepseekLocalPlugin, deepseekPatch, openclawLocalPlugin } from '../hooks/portable-agents'
@@ -21,17 +22,18 @@ type Json = Record<string, unknown>
 type Manifest = { files: Record<string, string>; groups: Record<string, unknown> }
 
 const hash = (text: string): string => createHash('sha256').update(text).digest('hex')
-const readLocal = (file: string): string | null => {
-  try { return readFileSync(file, 'utf8') } catch (error) {
+const readBytes = (file: string): Buffer | null => {
+  try { return readFileSync(file) } catch (error) {
     if ((error as { code?: string }).code === 'ENOENT') return null
     throw error
   }
 }
+const readLocal = (file: string): string | null => readBytes(file)?.toString('utf8') ?? null
 const object = (value: unknown): Json => {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('INVALID_JSON_OBJECT')
   return value as Json
 }
-const atomic = (file: string, text: string): void => {
+const atomic = (file: string, text: string | Buffer): void => {
   mkdirSync(dirname(file), { recursive: true })
   const temporary = `${file}.${process.pid}.tmp`
   const fd = openSync(temporary, 'wx', 0o600)
@@ -59,6 +61,39 @@ const quote = (path: string): string => {
   return `"${path}"`
 }
 
+export const localProgressPath = (explicit: string | undefined, fallback: string, stored?: unknown): string =>
+  resolve(explicit ?? (process.env.CLAUDE_PROGRESS_FILE || (typeof stored === 'string' ? stored : fallback)))
+
+const reporterTail = (original: Buffer): { bytes: Buffer; fragment: Buffer | null } => {
+  // Latin-1 keeps offsets in bytes, even when the last UTF-8 character was interrupted.
+  const tail = progressTail(original.toString('latin1'))
+  if (tail === null) return { bytes: original, fragment: null }
+  const fragment = original.subarray(tail.offset)
+  const lines = fragment.toString('latin1').split('\n')
+  if (/\S/.test(lines.slice(1).join('\n'))) return { bytes: original, fragment: null }
+  const eol = original.includes(Buffer.from('\r\n')) ? '\r\n' : '\n'
+  const replacement = Buffer.from(tail.close === null ? '' : `<!-- /auto session=${tail.close} -->${eol}`, 'latin1')
+  const bytes = Buffer.concat([original.subarray(0, tail.offset), replacement])
+  if (progressTail(bytes.toString('latin1')) !== null) throw new Error('INCOMPLETE_PROGRESS_TAIL')
+  return { bytes, fragment }
+}
+
+const saveReporterTail = (progress: string, fragment: Buffer): string => {
+  const aside = `${progress}.torn-${new Date().toISOString().replace(/[:.]/g, '-')}-${randomUUID()}`
+  const fd = openSync(aside, 'wx', 0o600)
+  try {
+    try {
+      writeFileSync(fd, fragment)
+      fsyncSync(fd)
+    } finally { closeSync(fd) }
+    if (!readFileSync(aside).equals(fragment)) throw new Error('INCOMPLETE_PROGRESS_TAIL')
+    return aside
+  } catch (error) {
+    try { unlinkSync(aside) } catch {}
+    throw error
+  }
+}
+
 export const runCodexLocal = async (args: string[], boardPath: string, s: Strings): Promise<boolean> => {
   const mode = ['--codex-setup', '--codex-doctor', '--codex-remove', '--codex-trust', '--codex-report', '--codex-event', '--agent-status'].find(one => args.includes(one))
   if (!mode) return false
@@ -84,7 +119,7 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
   const loaded = jsonInitial(manifestFile)
   const otherManifests = localAgents.filter(one => one !== agent).map(one => jsonInitial(join(root, `install-${one}.json`)))
   const storedProgress = loaded.progress ?? otherManifests.find(one => typeof one.progress === 'string')?.progress
-  const progress = resolve(flag('--progress-file') ?? (process.env.CLAUDE_PROGRESS_FILE || (typeof storedProgress === 'string' ? storedProgress : mode === '--codex-setup' ? join(root, 'progress.md') : boardPath)))
+  const progress = localProgressPath(flag('--progress-file'), mode === '--codex-setup' ? join(root, 'progress.md') : boardPath, storedProgress)
   if (mode === '--codex-setup' && otherManifests.some(one => typeof one.progress === 'string' && resolve(one.progress) !== progress)) throw new Error('SHARED_BOARD_PATH_CONFLICT')
   const configs: Partial<Record<LocalAgent, string>> = {
     codex: resolve(flag('--codex-dir') ?? (process.env.CODEX_HOME || join(home, '.codex')), 'hooks.json'),
@@ -127,7 +162,8 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
       const saved = readLocal(recordFile)
       const original = saved === null ? null : JSON.parse(saved) as CodexReport
       if (original?.agent && original.agent !== agent) throw new Error('SESSION_CONFLICT')
-      const text = readLocal(progress) ?? ''
+      const bytes = readBytes(progress) ?? Buffer.alloc(0)
+      const text = bytes.toString('utf8')
       const previous = original === null || mode === '--codex-report' ? original : boardConfirmedReport(text, original, owner)
       const clock = previous === null ? now : new Date(Math.max(Date.parse(now), Date.parse(previous.updated))).toISOString()
       const base = mode === '--codex-event' ? codexEvent(previous, isBoardPrompt ? { ...payload, prompt_submitted: false } : payload, clock, s) : codexReport(previous, session, mode === '--agent-status' ? {
@@ -138,9 +174,20 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
       const priorActivity = previous?.activity ?? []
       report = { ...base, ...(isBoardPrompt && previous ? { state: previous.state, steps: previous.steps } : {}), agent, ...(mode === '--codex-event' && !previous ? { title: s.localAgentTask(agent), project: agent } : {}), ...(event === undefined ? {} : { activity: [...priorActivity, { event, state: String(status), updated: clock }].slice(-16) }) }
       // A replay can skip writes only after a board completion reached the cache too.
-      if (mode !== '--codex-report' && previous === original && previous !== null && previous.state === report.state && previous.turn === report.turn && JSON.stringify(previous.steps) === JSON.stringify(report.steps) && (event === undefined || priorActivity.at(-1)?.event === event)) return
-      const next = putCodexBlock(text, report, owner)
-      atomic(progress, next)
+      const repaired = reporterTail(bytes)
+      if (repaired.fragment === null && mode !== '--codex-report' && previous === original && previous !== null && previous.state === report.state && previous.turn === report.turn && JSON.stringify(previous.steps) === JSON.stringify(report.steps) && (event === undefined || priorActivity.at(-1)?.event === event)) return
+      // Encode only the new report; existing bytes, including partial UTF-8, pass through unchanged.
+      const encoded = (value: string): string => Buffer.from(value, 'utf8').toString('latin1')
+      const next = Buffer.from(putCodexBlock(repaired.bytes.toString('latin1'), {
+        ...report, title: encoded(report.title), project: encoded(report.project), steps: report.steps.map(encoded),
+      }, owner), 'latin1')
+      const aside = repaired.fragment === null ? null : saveReporterTail(progress, repaired.fragment)
+      try { atomic(progress, next) } catch (error) {
+        if (aside !== null) {
+          try { unlinkSync(aside) } catch {}
+        }
+        throw error
+      }
       atomic(recordFile, `${JSON.stringify(report, null, 2)}\n`)
     })
     if (mode === '--codex-report') output({ session, block: owner.slice(0, 8), state: report.state, updated: report.updated, progress })

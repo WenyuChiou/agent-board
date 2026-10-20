@@ -8,6 +8,9 @@ import { sha256 } from '../hooks/sha256'
 import { applyTaskCreate, applyTaskUpdate, emptyMirror, fromTaskList, questionToken } from '../hooks/mirror'
 import { markAsked } from '../hooks/digest'
 import { renderAutoBlock } from '../hooks/blocks'
+import { peekInbox } from '../hooks/board'
+import { answerAgentPrompt, blockId } from '../hooks/inbox'
+import type { AgentTurn } from '../hooks/inbox'
 
 const NOW = Date.parse('2026-10-16T12:00:00Z')
 const file = (steps: string, project = 'demo', session = 'a1b2c3d4'): string =>
@@ -16,6 +19,83 @@ const observe = (ledger: QuestionLedger, text: string, answered: string[] = [], 
   observeQuestions(ledger, parseProgress(text), null, answered, at, settled)
 const view = (ledger: QuestionLedger, text: string, answered: string[] = []) =>
   buildView(parseProgress(text), [], null, NOW, 0, {}, STRINGS.en, answered, {}, ledger)
+
+const inboxSession = 'inbox-question-session'
+const inboxTurn = (at = NOW, event: AgentTurn['event'] = 'turn'): AgentTurn => ({
+  id: blockId('codex', inboxSession), session: inboxSession, agent: 'codex', project: 'demo',
+  cwd: '/demo', event, at, prompt: '', answer: 'Use staging?', transcript: '',
+})
+const inboxQuestion = () => peekInbox([{
+  name: `codex-turn-${NOW}-1.json`,
+  body: JSON.stringify({ session_id: inboxSession, cwd: '/demo', last_assistant_message: 'Use staging?' }),
+  at: NOW,
+}])
+
+test('an inbox question is resolved by the next turn of the same session', () => {
+  const pending = inboxQuestion()
+  const initial = observeQuestions(emptyQuestions(), [], null, [], NOW, true, 'first', undefined, pending).ledger
+  expect(initial.records.map(row => row.source?.kind)).toEqual(['inbox'])
+  const next = { ...inboxTurn(NOW + 1000), answer: 'Using staging.' }
+  const resolved = observeQuestions(initial, [], null, [], NOW + 2000, true, 'second', undefined, pending, [next]).ledger
+  expect(resolved.records.map(row => [row.isUnresolved, row.isWaiting, row.isPresent])).toEqual([[false, false, false]])
+  expect(initial.records[0]?.isUnresolved).toBe(true)
+  const replay = observeQuestions(resolved, [], null, [], NOW + 3000, true, 'replay', undefined, pending).ledger
+  expect(replay.records).toEqual(resolved.records)
+})
+
+test("an inbox question is resolved by the person's prompt to that session", () => {
+  const pending = inboxQuestion()
+  const initial = observeQuestions(emptyQuestions(), [], null, [], NOW, true, 'first', undefined, pending).ledger
+  const prompt = inboxTurn(NOW + 1000, 'prompt')
+  const mirror = { ...emptyMirror(prompt.id, 'demo', NOW, '/demo', 'codex'), resume: inboxSession, turnOrder: NOW * 2 }
+  const asked = markAsked(applyTaskCreate(mirror, { subject: 'Deploy' }, '1', NOW), 'Use staging?')
+  expect(answerAgentPrompt(asked, prompt, NOW + 2000)?.tasks.some(task => task.waiting === 'you')).toBe(false)
+  const resolved = observeQuestions(initial, [], null, [], NOW + 2000, true, 'prompt', undefined, [], [prompt]).ledger
+  expect(resolved.records.map(row => [row.isUnresolved, row.isWaiting, row.isPresent])).toEqual([[false, false, false]])
+})
+
+test("an end, a cleanup or another session's turn does not resolve an inbox question", () => {
+  const pending = inboxQuestion()
+  const initial = observeQuestions(emptyQuestions(), [], null, [], NOW, true, 'first', undefined, pending).ledger
+  for (const turns of [[], [inboxTurn(NOW + 1000, 'end')], [inboxTurn()], [{ ...inboxTurn(NOW + 1000), id: 'ffffffff', session: 'other' }], [{ ...inboxTurn(NOW + 1000), agent: 'cursor' }], [{ ...inboxTurn(NOW + 1000), answer: '' }]]) {
+    const next = observeQuestions(initial, [], null, [], NOW + 2000, true, 'unchanged', undefined, [], turns).ledger
+    expect(next.records).toEqual(initial.records)
+  }
+})
+
+test('a duplicate delivery of the asking turn leaves the question open', () => {
+  for (const agent of ['grok', 'opencode']) {
+    const body = JSON.stringify({ session_id: inboxSession, cwd: '/demo', last_assistant_message: 'Use staging?' })
+    const first = { name: `${agent}-turn-${NOW}-1.json`, body, at: NOW }
+    const duplicate = { name: `${agent}-turn-${NOW + 1000}-2.json`, body: agent === 'grok' ? JSON.stringify({ session_id: inboxSession, cwd: '/demo', lastAssistantMessage: 'Use staging?' }) : body, at: NOW + 1000 }
+    const initial = observeQuestions(emptyQuestions(), [], null, [], NOW, false, 'first', undefined, peekInbox([first])).ledger
+    const captured = observeQuestions(initial, [], null, [], NOW + 1000, false, 'duplicate', undefined, peekInbox([first, duplicate])).ledger
+    const delivery = { ...inboxTurn(NOW + 1000), agent, id: blockId(agent, inboxSession) }
+    const next = observeQuestions(captured, [], null, [], NOW + 2000, true, 'settle', undefined, [], [delivery]).ledger
+    expect(next.records.map(row => [row.id, row.isUnresolved])).toEqual(initial.records.map(row => [row.id, true]))
+    expect(JSON.parse(next.records[0]!.source!.data).sourceAt).toBe(NOW + 1000)
+    const answered = observeQuestions(next, [], null, [], NOW + 3000, true, 'answer', undefined, [], [{ ...delivery, at: NOW + 2000, answer: 'Using staging.' }]).ledger
+    expect(answered.records.map(row => row.isUnresolved)).toEqual([false])
+  }
+})
+
+test("a question asked without a working folder is settled by the same session's next turn", () => {
+  const pending = peekInbox([{
+    name: `codex-turn-${NOW}-1.json`,
+    body: JSON.stringify({ session_id: inboxSession, last_assistant_message: 'Use staging?' }),
+    at: NOW,
+  }])
+  const initial = observeQuestions(emptyQuestions(), [], null, [], NOW, true, 'first', undefined, pending).ledger
+  expect(initial.records[0]?.source?.project).toBe('')
+  for (const project of [STRINGS.en.uncategorized, 'other']) {
+    const next = { ...inboxTurn(NOW + 1000), project, answer: 'Using staging.' }
+    const resolved = observeQuestions(initial, [], null, [], NOW, true, 'answer', undefined, pending, [next]).ledger
+    expect(resolved.records.map(row => row.isUnresolved)).toEqual([false])
+  }
+  const moved = observeQuestions(emptyQuestions(), [], null, [], NOW, true, 'first', undefined, inboxQuestion()).ledger
+  const resolved = observeQuestions(moved, [], null, [], NOW, true, 'answer', undefined, [], [{ ...inboxTurn(NOW + 1000), project: 'other' }]).ledger
+  expect(resolved.records.map(row => row.isUnresolved)).toEqual([false])
+})
 
 test('an explicit same-word producer renewal resurfaces only its own question without an intermediate observation', () => {
   let mirror = emptyMirror('a1b2c3d4-native', 'demo', NOW)

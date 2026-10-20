@@ -52,6 +52,22 @@ test('TaskCreate, TaskUpdate and metadata build the mirror', () => {
   expect(stateOf(mirror, true)).toBe('done')
 })
 
+test('background work uses the existing twelve hour stale rule and outlives a completed Task list', () => {
+  const mirror = { ...sampleMirror(), backgroundJobs: 1 }
+  expect(stateOf(mirror, false)).toBe('working')
+  const file = upsertAutoBlock('', { ...mirror, state: stateOf(mirror, false) })
+  expect(buildView(parseProgress(file), [], null, NOW + 12 * HOUR).stopped).toEqual([])
+  expect(buildView(parseProgress(file), [], null, NOW + 12 * HOUR + 1).stopped.map(row => row.title)).toEqual(['進度面板'])
+  const completed = { ...mirror, tasks: mirror.tasks.map(task => ({ ...task, status: 'completed' as const })) }
+  expect(stateOf(completed, false)).toBe('working')
+  expect(buildView([], [], completed, NOW).current?.status).toBe(ZH_TW.backgroundRunning)
+  expect(buildView([], [], { ...completed, isTurnRunning: true }, NOW).current?.status).toBe(ZH_TW.claudeWorking)
+  const asking = applyTaskUpdate(mirror, { taskId: '2', metadata: { waiting: 'you', why: 'Review it?' } }, NOW)
+  expect(stateOf(asking, false)).toBe('waiting')
+  expect(stateOf(asking, true)).toBe('working')
+  expect(stateOf({ ...completed, backgroundJobs: 0 }, false)).toBe('done')
+})
+
 test('TodoWrite replaces the list; TaskList keeps what the mirror knew', () => {
   const mirror = applyTodoWrite(sampleMirror(), [{ content: '一', status: 'pending', activeForm: '做一' }], NOW)
   expect(mirror.tasks).toHaveLength(1)

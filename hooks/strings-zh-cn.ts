@@ -58,6 +58,7 @@ export const ZH_CN: Strings = {
   foldedDone: (n: number): string => `已完成 ${n} 步`,
   foldedRest: (n: number): string => `还有 ${n} 步`,
   waitingReply: '等你回复',
+  backgroundRunning: '后台任务运行中',
   answeredNote: '你已回复，等 Claude 处理',
   allDone: '全部完成',
   claudeWorking: 'Claude 正在做',
@@ -399,6 +400,7 @@ export const ZH_CN: Strings = {
   boardHidden: (text: string): string => `已隐藏「${text}」；问题一改就会再出现。`,
   boardShown: '隐藏的问题都重新显示了。',
   hideFailed: '记不下「已回复」，这一项还留在清单上。',
+  inboxQuestionNotKept: '有个 agent 的问题还在保存或清理中，系统会自动重试。',
   questionsUnreadable: (file: string): string => `问题清单 ${file} 读不到或存不进去，隐藏和归档可能失败。写到一半被切断的清单会自动重建。这条消息一直在的话，先重开这个 session；还在的话，再把那个文件移到别处。`,
   boardTicked: (step: string): string => `已完成“${step}”。`,
   boardTickGone: '找不到那一步，可能已经改过了。',
@@ -406,6 +408,9 @@ export const ZH_CN: Strings = {
   boardCopied: (text: string): string => `已复制：${text}`,
   boardCopyFailed: (text: string): string => `没办法放进剪贴板，请自己复制：${text}`,
   boardWriteFailed: '写不进进度文件，没有改任何东西。',
+  progressIncomplete: (n: number): string => `progress.md 有一行标记未写完，可能有 ${n} 项工作未显示`,
+  reporterFailed: (reason: string): string => `进度报告未能保存（${reason}），请检查进度文件后重试。`,
+  tailRepairFailed: '无法安全修复不完整的结尾，没有改动任何内容。请检查进度文件后重新报告。',
   boardStorageFailed: (file: string, code: string): string => `无法安全读取或更新 ${file}（${code}）。部分文件可能已经改动。请检查进度与历史记录，排除文件访问或磁盘问题后重试。`,
   // The board's page in the browser (`agent-board.mjs --serve`). The chat-relay prompt stays
   // in English in every language: it is the one tested live, and its markers are literal.
