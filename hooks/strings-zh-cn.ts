@@ -399,6 +399,7 @@ export const ZH_CN: Strings = {
   boardHidden: (text: string): string => `已隐藏「${text}」；问题一改就会再出现。`,
   boardShown: '隐藏的问题都重新显示了。',
   hideFailed: '记不下「已回复」，这一项还留在清单上。',
+  inboxQuestionNotKept: '有个 agent 的问题还在保存或清理中，系统会自动重试。',
   questionsUnreadable: (file: string): string => `问题清单 ${file} 读不到或存不进去，隐藏和归档可能失败。写到一半被切断的清单会自动重建。这条消息一直在的话，先重开这个 session；还在的话，再把那个文件移到别处。`,
   boardTicked: (step: string): string => `已完成“${step}”。`,
   boardTickGone: '找不到那一步，可能已经改过了。',
