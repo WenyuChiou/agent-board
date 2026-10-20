@@ -69,7 +69,15 @@ test('a large verified module reports a bounded failure without embedding its da
 test('the full generated worker bundle runs through verified staging without recursive bundle growth', () => {
   const source = readFileSync(new URL('../hooks/board-script.ts', import.meta.url), 'utf8')
   const code = JSON.parse(source.slice(source.indexOf('export const BOARD_SCRIPT = ') + 'export const BOARD_SCRIPT = '.length))
-  assert.ok(code.length < 500000)
+  assert.ok(code.includes('// hooks/connect-pure.ts'))
+  assert.ok(code.includes('// scripts/legacy-connect.ts'))
+  assert.ok(!code.includes('// hooks/board-script.ts'))
+  assert.ok(!code.includes('// hooks/connect.ts'))
+  assert.ok(!/\b(?:var|let|const) BOARD_SCRIPT\b/.test(code))
+  assert.equal(code.split('globalThis.AGENT_BOARD_WORKER_SOURCE').length - 1, 1)
+  // Staged code has no argv size limit. This is only a coarse growth alarm;
+  // the structural checks above catch an embedded generated predecessor.
+  assert.ok(Buffer.byteLength(code) < 1024 * 1024)
   const { digest, value } = stage(code)
   try {
     writeFileSync(value.file, code)

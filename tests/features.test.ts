@@ -2198,14 +2198,22 @@ test('a file an earlier release wrote is known by its exact bytes with this mach
   // The board commands from before --serve were the same from 0.17.1, before 0.18.0, to 0.18.1.
   const first = RELEASED.find(release => release.version === '0.17.1')
   for (const text of RELEASE_0_18_1.gemini) expect(first?.gemini).toContain(sha256(text))
-  // An older owned reporter is still replaceable when today's template changes.
+  // Safety guards changed the current reporters; historical exact bytes still upgrade.
   const inbox = '/h/.claude/progress-inbox'
-  const oldReporter = RELEASE_0_20_5.reporterSh.split(RELEASE_PATHS.inbox).join(inbox)
-  expect(isReleased('reporterSh', oldReporter, { inbox })).toBe(true)
-  expect(oldReporter).not.toBe(reporterSh(inbox))
-  expect(isReleased('reporterPs1', RELEASE_0_20_5.reporterPs1)).toBe(true)
-  expect(RELEASE_0_20_5.reporterPs1).not.toBe(reporterPs1())
-  expect(isReleased('reporterSh', `${oldReporter}# mine\n`, { inbox })).toBe(false)
+  for (const [kind, previous, current] of [
+    ['reporterSh', RELEASE_0_20_5.reporterSh.split(RELEASE_PATHS.inbox).join(inbox), reporterSh(inbox)],
+    ['reporterPs1', RELEASE_0_20_5.reporterPs1, reporterPs1()],
+  ] as const) {
+    const known = (text: string) => isReleased(kind, text, { inbox })
+    const edit = generatedFile(current, known)
+    expect(known(previous)).toBe(true)
+    expect(previous).not.toBe(current)
+    expect(known(`${previous}# mine\n`)).toBe(false)
+    expect(edit(previous, false)).toBe(current)
+    expect(edit(current, false)).toBe(current)
+    expect(edit(`${previous}# mine\n`, false)).toBe(COLLISION)
+    expect(edit(`${current}# mine\n`, false)).toBe(COLLISION)
+  }
   // On Windows the board's path has backslashes, and a board command holds it as it is.
   const windows = 'C:\\Users\\synthetic\\.claude\\agent-board.mjs'
   for (const text of RELEASE_0_20_5.gemini) {

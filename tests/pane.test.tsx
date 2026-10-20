@@ -4980,9 +4980,9 @@ test('/progress connect hooks the installed agents into the pane once, keeps the
   // Again: nothing doubles.
   await $.command.run({ ...TIDY, args: 'connect' })
   const cursor = JSON.parse(world.files.get('/home/me/.cursor/hooks.json') ?? '{}')
-  expect(cursor.hooks.stop).toEqual([{ command: 'say done' }, { command: "sh '/home/me/.claude/progress-report.sh' cursor turn || true" }])
+  expect(cursor.hooks.stop).toEqual([{ command: 'say done' }, { command: "sh '/home/me/.claude/progress-report.sh' cursor turn || true", timeout: 3 }])
   expect(cursor.hooks.afterAgentResponse).toHaveLength(1)
-  expect(cursor.hooks.sessionEnd).toEqual([{ command: "sh '/home/me/.claude/progress-report.sh' cursor end || true" }])
+  expect(cursor.hooks.sessionEnd).toEqual([{ command: "sh '/home/me/.claude/progress-report.sh' cursor end || true", timeout: 3 }])
 
   const removed = await $.command.run({ ...TIDY, args: 'connect remove' })
   expect(removed.text).toContain('已拿掉：Codex、Cursor、Grok Build。')

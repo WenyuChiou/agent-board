@@ -1,10 +1,12 @@
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
-import { registerHooks, stripTypeScriptTypes } from 'node:module'
+import * as fs from 'node:fs'
+import { createRequire, registerHooks, syncBuiltinESMExports } from 'node:module'
+import { pathToFileURL } from 'node:url'
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { createHash } from 'node:crypto'
 import { spawnSync } from 'node:child_process'
-import { join } from 'node:path'
+import { join, sep } from 'node:path'
 import { tmpdir } from 'node:os'
 
 // Node loads standalone TypeScript directly; pure plugin modules use the host's
@@ -18,6 +20,8 @@ registerHooks({ resolve(specifier, context, next) {
 
 const { boardPromptHelper, boardRequestWords, BOARD_REQUEST, boardPromptText, isBoardRequest, promptReceiptScript } = await import('../hooks/board-commands.ts')
 const { STRINGS } = await import('../hooks/strings.ts')
+const { legacyOpenClawPlugin, legacyOpenCodePlugin } = await import('../hooks/legacy-hook-plugins.ts')
+const { opencodePlugin, openclawPlugin } = await import('../hooks/connect-pure.ts')
 const BOARD_WORDS = boardRequestWords(Object.values(STRINGS))
 const BOARD_PROMPT_HELPER = boardPromptHelper(BOARD_WORDS)
 const PROMPT_RECEIPT_SCRIPT = promptReceiptScript(BOARD_WORDS)
@@ -95,8 +99,8 @@ test('a board-only reply restores an existing question on every board surface an
 test('the native OpenCode prompt callback flags exact board commands without retaining their text', async () => {
   const { opencodePlugin } = await import('../hooks/local-agents.ts')
   const saved = []
-  const source = opencodePlugin('node', '/synthetic/board.mjs', '/synthetic/progress.md', 'Progress')
-  const factory = new Function('spawnSync', 'tool', `${source.replace(/^import .*\n/gm, '').replace('export const AgentBoardLocal', 'const AgentBoardLocal')}\nreturn AgentBoardLocal`)((_node, _args, options) => { saved.push(JSON.parse(options.input)); return { status: 0, stdout: '' } }, Object.assign(value => value, { schema: { string: () => ({}), enum: () => ({}), array: () => ({}) } }))
+  const source = opencodePlugin('node', '/synthetic/board.mjs', '/synthetic/progress.md', 'Progress', process.env.HOME)
+  const factory = new Function('createRequire', 'spawnSync', 'tool', `${source.replace(/^import .*\n/gm, '').replaceAll('import.meta.url', JSON.stringify(import.meta.url)).replace('export const AgentBoardLocal', 'const AgentBoardLocal')}\nreturn AgentBoardLocal`)(createRequire, (_node, _args, options) => { saved.push(JSON.parse(options.input)); return { status: 0, stdout: '' } }, Object.assign(value => value, { schema: { string: () => ({}), enum: () => ({}), array: () => ({}) } }))
   const hooks = await factory({ client: { session: { get: async ({ path }) => ({ data: { id: path.id } }) } } })
   await hooks['chat.message']({ sessionID: 'synthetic-owner' }, { parts: [{ type: 'text', text: '/board' }] })
   assert.equal(saved[0].board_request, true)
@@ -110,21 +114,16 @@ test('the native OpenCode prompt callback flags exact board commands without ret
   assert.ok(!JSON.stringify(saved[2]).includes(EN.boardCommandPrompt))
 })
 
-const source = readFileSync(new URL('../hooks/connect-pure.ts', import.meta.url), 'utf8')
-const ctx = { inbox: '/synthetic/progress-inbox' }
-const template = (name, end, withPrompt = true, flagsBoardRequests = true) => {
-  const start = source.indexOf(`export const ${name} =`)
-  assert.ok(start >= 0)
-  const code = stripTypeScriptTypes(source.slice(start, source.indexOf(end, start)), { mode: 'strip' }).replace('export const', 'const')
-  return new Function('BOARD_PROMPT_HELPER', `const OPENCLAW_ID = 'agent-board'; ${code}; return ${name}`)(BOARD_PROMPT_HELPER)(ctx, withPrompt, flagsBoardRequests)
-}
+const ctx = { home: '/synthetic', inbox: '/synthetic/progress-inbox' }
+const template = (name, _end, withPrompt = true, context = ctx) =>
+  ({ opencodePlugin, openclawPlugin })[name](context, withPrompt)
 
 test('pre-prompt plugin templates retain the exact bytes released in 0.20.5 and 0.23.1', () => {
   const legacy = [
-    ['opencodePlugin', '\nconst OPENCLAW_ID', '20b3fd9ec5b02ee9c2090490a0853dfe47fca270392c57de92f55dad2069e645'],
-    ['openclawPlugin', '\n// The standalone board', 'feb2b8ff0af006c582ab0de7165f18fa3fa107fb49e24b0dec414c19cfcf413f'],
+    [legacyOpenCodePlugin, '20b3fd9ec5b02ee9c2090490a0853dfe47fca270392c57de92f55dad2069e645'],
+    [legacyOpenClawPlugin, 'feb2b8ff0af006c582ab0de7165f18fa3fa107fb49e24b0dec414c19cfcf413f'],
   ]
-  for (const [name, end, hash] of legacy) assert.equal(createHash('sha256').update(template(name, end, false)).digest('hex'), hash)
+  for (const [generate, hash] of legacy) assert.equal(createHash('sha256').update(generate(ctx, false)).digest('hex'), hash)
 })
 
 test('prompt plugin templates released before the board-request flag are still recognised as ours', async () => {
@@ -136,7 +135,7 @@ test('prompt plugin templates released before the board-request flag are still r
     ['openclaw', 'openclawPlugin', '\n// The standalone board', '56ac9f27f891b21fe62c044976101d8a589d455e043d16038ab7e171165ce542'],
   ]
   for (const [agent, name, end, hash] of legacy) {
-    const old = template(name, end, true, false)
+    const old = (agent === 'opencode' ? legacyOpenCodePlugin : legacyOpenClawPlugin)(ctx, true, false)
     assert.equal(createHash('sha256').update(old).digest('hex'), hash)
     const hook = hooks.find(one => one.agent === agent && one.generated)
     assert.ok(hook)
@@ -145,9 +144,29 @@ test('prompt plugin templates released before the board-request flag are still r
   }
 })
 
+test('pre-safety board-request plugins upgrade by exact bytes and preserve personal edits', async () => {
+  const { agentHooks, COLLISION } = await import('../hooks/connect-pure.ts')
+  const hooks = agentHooks({ ...ctx, sep: '/', isWindows: false, script: '/synthetic/progress-report.sh', codexHome: '/synthetic/.codex', grokHome: '/synthetic/.grok', hermesHome: '/synthetic/.hermes', openclawHome: '/synthetic/.openclaw' })
+  // Hashes come from main f864aae's generated plugins before this safety wrapper.
+  for (const [agent, prior, current, hash] of [
+    ['opencode', legacyOpenCodePlugin, opencodePlugin, '78d56525458590086447cac30700f5102795ba2a1c88d3ba60c42e4e2f01faf2'],
+    ['openclaw', legacyOpenClawPlugin, openclawPlugin, '4b3126f741792fa08b5680f0d884f83e5159d86d885115294e84df7fd95d8d1a'],
+  ]) {
+    const old = prior(ctx)
+    assert.equal(createHash('sha256').update(old).digest('hex'), hash)
+    const hook = hooks.find(one => one.agent === agent && one.generated)
+    assert.equal(hook.edit(old, false), current(ctx))
+    assert.equal(hook.edit(old + '// personal edit\n', false), COLLISION)
+  }
+})
+
 test('generated OpenCode and OpenClaw prompt callbacks retain only verified binding metadata', async () => {
   const saved = []
-  const instantiate = (script, suffix) => new Function('mkdirSync', 'renameSync', 'writeFileSync', 'join', `${script.replace(/^import .*\n/gm, '').replace('export const AgentBoard', 'const AgentBoard').replace('export default', 'const plugin =')}\n${suffix}`)(() => {}, () => {}, (name, body) => saved.push({ name, body }), (...parts) => parts.join('/'))
+  const instantiate = (script, suffix) => {
+    const descriptors = new Map()
+    const open = name => { const fd = descriptors.size + 1; descriptors.set(fd, name); return fd }
+    return new Function('createRequire', 'closeSync', 'mkdirSync', 'openSync', 'renameSync', 'unlinkSync', 'writeFileSync', 'join', `${script.replace(/^import .*\n/gm, '').replaceAll('import.meta.url', JSON.stringify(import.meta.url)).replace('export const AgentBoard', 'const AgentBoard').replace('export default', 'const plugin =')}\n${suffix}`)(createRequire, fd => descriptors.delete(fd), () => {}, open, () => {}, () => {}, (fd, body) => saved.push({ name: descriptors.get(fd), body }), (...parts) => parts.join('/'))
+  }
   let hasMessages = false
   const factory = instantiate(template('opencodePlugin', '\nconst OPENCLAW_ID'), 'return AgentBoard')
   const hooks = await factory({ directory: '/demo', client: { session: { get: async ({ path }) => ({ data: { id: path.id, ...(path.id === 'subagent' ? { parentID: 'parent' } : {}) } }), messages: () => { hasMessages = true; throw new Error('prompt fetched messages') } } } })
@@ -158,9 +177,9 @@ test('generated OpenCode and OpenClaw prompt callbacks retain only verified bind
   assert.deepEqual(JSON.parse(saved[0].body), { session_id: 'prompt-owner', cwd: '/demo' })
   const callbacks = new Map()
   instantiate(template('openclawPlugin', '\n// The standalone board'), 'return plugin').register({ on: (name, fn) => callbacks.set(name, fn) })
-  for (const kind of ['inter_session', 'internal_system', undefined]) callbacks.get('before_prompt_build')({ prompt: 'PRIVATE_NEW_INPUT' }, { sessionId: 'prompt-owner', inputProvenance: { kind } })
+  for (const kind of ['inter_session', 'internal_system', undefined]) await callbacks.get('before_prompt_build')({ prompt: 'PRIVATE_NEW_INPUT' }, { sessionId: 'prompt-owner', inputProvenance: { kind } })
   assert.equal(saved.length, 1)
-  callbacks.get('before_prompt_build')({ prompt: 'PRIVATE_NEW_INPUT' }, { sessionId: 'prompt-owner', workspaceDir: '/demo', inputProvenance: { kind: 'external_user' } })
+  await callbacks.get('before_prompt_build')({ prompt: 'PRIVATE_NEW_INPUT' }, { sessionId: 'prompt-owner', workspaceDir: '/demo', inputProvenance: { kind: 'external_user' } })
   assert.equal(saved.length, 2)
   assert.deepEqual(JSON.parse(saved[1].body), { session_id: 'prompt-owner', cwd: '/demo' })
   assert.ok(saved.every(one => one.name.includes('-prompt-') && !one.body.includes('PRIVATE_NEW_INPUT')))
@@ -170,13 +189,17 @@ test('legacy prompt callbacks flag board commands without retaining their text',
   const { EN } = await import('../hooks/strings-en.ts')
   const prompts = ['/board', '$agent-board', '/agent-board', `${EN.boardCommandPrompt}\n\nProgress  ● 1  ▸ 0  ⚑ 0  ✓ 0`]
   const saved = []
-  const instantiate = (script, suffix) => new Function('mkdirSync', 'renameSync', 'writeFileSync', 'join', script.replace(/^import .*\n/gm, '').replace('export const AgentBoard', 'const AgentBoard').replace('export default', 'const plugin =') + '\n' + suffix)(() => {}, () => {}, (name, body) => saved.push({ name, body }), (...parts) => parts.join('/'))
+  const instantiate = (script, suffix) => {
+    const descriptors = new Map()
+    const open = name => { const fd = descriptors.size + 1; descriptors.set(fd, name); return fd }
+    return new Function('createRequire', 'closeSync', 'mkdirSync', 'openSync', 'renameSync', 'unlinkSync', 'writeFileSync', 'join', `${script.replace(/^import .*\n/gm, '').replaceAll('import.meta.url', JSON.stringify(import.meta.url)).replace('export const AgentBoard', 'const AgentBoard').replace('export default', 'const plugin =')}\n${suffix}`)(createRequire, fd => descriptors.delete(fd), () => {}, open, () => {}, () => {}, (fd, body) => saved.push({ name: descriptors.get(fd), body }), (...parts) => parts.join('/'))
+  }
   const factory = instantiate(template('opencodePlugin', '\nconst OPENCLAW_ID'), 'return AgentBoard')
   const hooks = await factory({ directory: '/synthetic', client: { session: { get: async ({ path }) => ({ data: { id: path.id } }) } } })
   for (const text of prompts) await hooks['chat.message']({ sessionID: 'synthetic-owner' }, { parts: [{ type: 'text', text }] })
   const callbacks = new Map()
   instantiate(template('openclawPlugin', '\n// The standalone board'), 'return plugin').register({ on: (name, callback) => callbacks.set(name, callback) })
-  for (const prompt of prompts) callbacks.get('before_prompt_build')({ prompt }, { sessionId: 'synthetic-owner', inputProvenance: { kind: 'external_user' } })
+  for (const prompt of prompts) await callbacks.get('before_prompt_build')({ prompt }, { sessionId: 'synthetic-owner', inputProvenance: { kind: 'external_user' } })
   assert.equal(saved.length, 8)
   for (const one of saved) assert.deepEqual(JSON.parse(one.body), { session_id: 'synthetic-owner', ...(one.name.includes('opencode-') ? { cwd: '/synthetic' } : { cwd: '' }), board_request: true })
 })
@@ -232,7 +255,7 @@ test('a reporter that cannot run node still writes the receipt and the board dro
   const seen = new Set()
   const tools = join(home, 'tools')
   mkdirSync(tools)
-  for (const name of ['mkdir', 'date', 'cat', 'mv', 'rm', 'find']) {
+  for (const name of ['mkdir', 'date', 'cat', 'mv', 'rm', 'find', 'uname', 'sleep', 'tail']) {
     const located = spawnSync(sh, ['-c', `command -v ${name}`], { encoding: 'utf8', windowsHide: true })
     assert.equal(located.status, 0, located.stderr)
     const file = join(tools, name)
@@ -308,4 +331,65 @@ test('restoring several questions advances each revision beyond the previous one
   const restored = restoreAgentBoardQuestion(answered, { ...turn, event: 'turn', prompt: '/board', at: at + 2000 }, at + 2000)
   assert.deepEqual(restored.tasks.map(one => one.questionRevision), ['3', '4'])
   assert.equal(restored.questionSequence, '4')
+})
+
+test('legacy SDK reporters remove their partial temporary files and preserve foreign collisions', async () => {
+  const home = fs.mkdtempSync(join(tmpdir(), 'legacy-sdk-write-'))
+  const original = { open: fs.openSync, close: fs.closeSync, write: fs.writeFileSync, now: Date.now }
+  // Patch the mutable built-in object, then refresh the generated ESM imports.
+  const mutable = createRequire(import.meta.url)('node:fs')
+  try {
+    for (const [agent, name, end] of [['opencode', 'opencodePlugin', '\nconst OPENCLAW_ID'], ['openclaw', 'openclawPlugin', '\n// The standalone board']]) {
+      for (const collision of [false, true]) {
+        const inbox = join(home, `${agent}-${collision}`), stamp = original.now()
+        fs.mkdirSync(inbox)
+        const temporary = join(inbox, `${agent}-prompt-${stamp}-${process.pid}.tmp`)
+        if (collision) original.write(temporary, 'FOREIGN_BYTES')
+        const file = join(home, `${agent}-${collision}.mjs`)
+        original.write(file, template(name, end, true, { home, inbox }))
+        const descriptors = new Set()
+        let injected = 0
+        const isInbox = path => typeof path === 'string' && path.startsWith(inbox + sep)
+        mutable.openSync = (path, ...args) => { const fd = original.open(path, ...args); if (isInbox(path)) descriptors.add(fd); return fd }
+        mutable.closeSync = fd => { try { return original.close(fd) } finally { descriptors.delete(fd) } }
+        mutable.writeFileSync = (path, body, ...args) => {
+          if (isInbox(path) || descriptors.has(path)) {
+            original.write(path, 'PARTIAL', ...args)
+            injected++
+            throw Object.assign(Error('PRIVATE_SYNTHETIC_WRITE_FAILURE'), { code: 'ENOSPC' })
+          }
+          return original.write(path, body, ...args)
+        }
+        Date.now = () => stamp
+        syncBuiltinESMExports()
+        try {
+          const plugin = await import(pathToFileURL(file).href)
+          if (agent === 'opencode') {
+            const hooks = await plugin.AgentBoard({ directory: '/synthetic-workspace', client: { session: { get: async ({ path }) => ({ data: { id: path.id } }) } } })
+            await hooks['chat.message']({ sessionID: 'synthetic-owner' })
+          } else {
+            const hooks = new Map()
+            plugin.default.register({ on: (event, callback) => hooks.set(event, callback) })
+            await hooks.get('before_prompt_build')({}, { sessionId: 'synthetic-owner', inputProvenance: { kind: 'external_user' } })
+          }
+        } finally {
+          mutable.openSync = original.open; mutable.closeSync = original.close; mutable.writeFileSync = original.write
+          Date.now = original.now
+          syncBuiltinESMExports()
+        }
+        assert.equal(descriptors.size, 0, 'owned file descriptors are closed')
+        assert.equal(injected, collision ? 0 : 1, 'exercise a partial write or an actual exclusive-open collision')
+        assert.deepEqual(fs.readdirSync(inbox), collision ? [temporary.slice(inbox.length + 1)] : [])
+        if (collision) assert.equal(readFileSync(temporary, 'utf8'), 'FOREIGN_BYTES')
+        const log = readFileSync(join(home, '.agent-board', 'hook-errors.log'), 'utf8')
+        assert.match(log, /REPORTER_FAILED/)
+        assert.ok(!log.includes('PRIVATE_') && !log.includes(home))
+      }
+    }
+  } finally {
+    mutable.openSync = original.open; mutable.closeSync = original.close; mutable.writeFileSync = original.write
+    Date.now = original.now
+    syncBuiltinESMExports()
+    fs.rmSync(home, { recursive: true, force: true, maxRetries: 8, retryDelay: 50 })
+  }
 })
