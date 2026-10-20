@@ -26,7 +26,7 @@ Author: <agent>, <branch>
 - [ ] Applicable strict standalone typechecks; full `tsc -p .` reported unrun if the SDK types are unavailable
 - [ ] `bash tests/setup.check.sh` / `tests/setup.check.ps1`, if a setup script changed
 - [ ] `docs/FORMAT.md` updated, if the file format changed (backward compatible)
-- [ ] `CHANGELOG.md` entry under `## Unreleased` naming the issue and the tests that cover the change (release pull request: rename `## Unreleased` to the version and date instead)
+- [ ] `CHANGELOG.md` entry under `## Unreleased` naming the issue and the tests that cover the change, for fix and feature pull requests (release pull request: rename `## Unreleased` to the version and date instead)
 - [ ] `node scripts/pr-check.mjs` passes
 - [ ] Native/model evidence and CLI/App/IDE limits stated separately; no private data, session ids, home-folder paths or board links attached
 
