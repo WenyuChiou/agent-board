@@ -171,6 +171,8 @@ let isTurnRunning = false
 let writes: Promise<unknown> = Promise.resolve()
 let askSeq = 0
 let isPaneOpen = false
+let hasNoPaneSurface = false
+let hasPaneOpenAnswer = false
 let lastStatus: string | undefined
 let isCheckingPr = false
 // gh is tried until it fails to start (not installed) or says it is signed out.
@@ -777,11 +779,27 @@ const noteDone = async ($: EngineInterface, projects: readonly ProgressProject[]
   for (const key of keys) await $.store.set(key, fresh[key])
 }
 
+const hasNoPaneSurfaceIn = (opened: { isPlaced: boolean; reason?: string }): boolean =>
+  !opened.isPlaced && /^(?:no-surface:|no attached surface places panes\b)/i.test(opened.reason ?? '')
+
+// Older engines may lack the roster or answer something else: null means unknown, never empty.
+const surfacesOf = async ($: EngineInterface): Promise<readonly unknown[] | null> =>
+  Promise.resolve()
+    .then(() => $.session.surfaces())
+    .then(surfaces => (Array.isArray(surfaces) ? surfaces : null))
+    .catch(() => null)
+
 // The line under the prompt, for when the pane is not on screen; written only when it
 // changes.
 const refreshStatus = async ($: EngineInterface): Promise<void> => {
+  // A terminal may bind after startup; a placement answer is more specific than its roster.
+  if (!isPaneOpen && hasNoPaneSurface && !hasPaneOpenAnswer) {
+    const surfaces = await surfacesOf($)
+    // An open that answered during the read keeps authority over the hint.
+    if (!hasPaneOpenAnswer && surfaces !== null) hasNoPaneSurface = surfaces.length === 0
+  }
   const s = await wordsOf($)
-  const text = isPaneOpen
+  let text = isPaneOpen
     ? undefined
     : statusLine(
         buildView(
@@ -800,6 +818,7 @@ const refreshStatus = async ($: EngineInterface): Promise<void> => {
         ),
         s,
       )
+  if (!isPaneOpen && hasNoPaneSurface) text = [text, s.statusBoardPage].filter(Boolean).join(' · ')
   if (text === lastStatus) return
   lastStatus = text
   $.ui.status(text)
@@ -2209,6 +2228,8 @@ export const register: Register = (on, options) => {
     const tools = await $.tool.list().catch(() => [])
     const hasTools = tools.length === 0 || tools.some(tool => tool.name === 'TaskCreate' || tool.name === 'TodoWrite')
     await update($, hasTaskTools, () => hasTools)
+    hasPaneOpenAnswer = false
+    hasNoPaneSurface = (await surfacesOf($))?.length === 0
     await poll($)
     await retainInboxQuestions($, [], true).catch(async () => pendingQuestionsProblem($, true)).catch(() => undefined)
     const startedAt = await $.clock.now()
@@ -2255,6 +2276,8 @@ export const register: Register = (on, options) => {
         .open({ id: PANE, title: words.paneTitle })
         .then(opened => {
           isPaneOpen = opened.isPlaced
+          hasNoPaneSurface = hasNoPaneSurfaceIn(opened)
+          hasPaneOpenAnswer = true
           return refreshStatus($)
         })
         .catch(() => undefined)
@@ -2341,10 +2364,15 @@ export const register: Register = (on, options) => {
     await $.store.delete('closedByPerson')
     const opened = await $.ui.open({ id: PANE, title: s.paneTitle, focus: true })
     isPaneOpen = opened.isPlaced
+    hasNoPaneSurface = hasNoPaneSurfaceIn(opened)
+    hasPaneOpenAnswer = true
     await refreshStatus($)
     const { path } = await read($, snapshot)
 
-    return { text: opened.isPlaced ? s.paneOpened(path) : s.paneNotOpened(opened.reason) }
+    if (opened.isPlaced) return { text: s.paneOpened(path) }
+    if (!hasNoPaneSurface) return { text: s.paneNotOpened(opened.reason) }
+    const page = dashboardPath(path || (await progressPath($)))
+    return { text: `${s.paneAsPage}\n${(await openDashboard($)) ? s.windowOpened(page) : s.windowFailed(page)}` }
   })
 
   // Who wrote a prompt is known here, not at turn.start: only the person's own message answers

@@ -88,6 +88,7 @@ export const EN: Strings = {
   statusPrefix: 'Progress',
   statusWaiting: (n: number): string => `${n} waiting on you`,
   statusDue: (n: number): string => `${n} due soon`,
+  statusBoardPage: '/progress opens the board page',
 
   // Pull requests
   ciPass: 'CI passed',
@@ -224,6 +225,7 @@ export const EN: Strings = {
   notifyOff: 'Desktop notifications off.',
   paneOpened: (path: string): string => `Progress pane opened: ${path}`,
   paneNotOpened: (reason: string): string => `Couldn't open the progress pane: ${reason}`,
+  paneAsPage: 'This app shows the board as a page instead of a pane.',
   connectDone: (list: string): string => `Connected: ${list}. After you restart them, every turn they finish reports to the pane.`,
   connectNone: 'No agent to connect was found (Codex, Gemini CLI, Cursor, OpenCode, Grok Build, Hermes Agent, Muse Code, OpenClaw).',
   setupCodexApproval: (): string => "Current Codex hook approval is unconfirmed. Check /hooks; existing managed reporting instructions are retained.",

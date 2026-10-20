@@ -127,6 +127,7 @@ export const ZH_TW = {
   statusPrefix: '進度',
   statusWaiting: (n: number): string => `${n} 件等你`,
   statusDue: (n: number): string => `${n} 件快到期`,
+  statusBoardPage: '/progress 開啟看板網頁',
 
   // Pull requests
   ciPass: 'CI 通過',
@@ -262,6 +263,7 @@ export const ZH_TW = {
   notifyOff: '桌面通知已關掉。',
   paneOpened: (path: string): string => `進度面板已開啟：${path}`,
   paneNotOpened: (reason: string): string => `進度面板開不了：${reason}`,
+  paneAsPage: '這個應用程式以網頁顯示看板，不使用面板。',
   connectDone: (list: string): string => `已接上：${list}。重開它們之後，每回合結束都會自動回報到面板。`,
   connectNone: '沒找到可以接的 agent（Codex、Gemini CLI、Cursor、OpenCode、Grok Build、Hermes Agent、Muse Code、OpenClaw）。',
   setupCodexApproval: (): string => "尚未確認目前 Codex hook 的核准狀態。請檢查 /hooks；已有的受管理回報指示會保留。",

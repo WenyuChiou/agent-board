@@ -88,6 +88,7 @@ export const ZH_CN: Strings = {
   statusPrefix: '进度',
   statusWaiting: (n: number): string => `${n} 件等你`,
   statusDue: (n: number): string => `${n} 件快到期`,
+  statusBoardPage: '/progress 打开看板网页',
 
   // Pull requests
   ciPass: 'CI 通过',
@@ -223,6 +224,7 @@ export const ZH_CN: Strings = {
   notifyOff: '桌面通知已关闭。',
   paneOpened: (path: string): string => `进度面板已打开：${path}`,
   paneNotOpened: (reason: string): string => `进度面板打不开：${reason}`,
+  paneAsPage: '这个应用以网页显示看板，不使用面板。',
   connectDone: (list: string): string => `已接上：${list}。重启它们之后，每回合结束都会自动汇报到面板。`,
   connectNone: '没找到可以接的 agent（Codex、Gemini CLI、Cursor、OpenCode、Grok Build、Hermes Agent、Muse Code、OpenClaw）。',
   setupCodexApproval: (): string => "尚未确认当前 Codex hook 的批准状态。请检查 /hooks；已有的受管理报告指示会保留。",

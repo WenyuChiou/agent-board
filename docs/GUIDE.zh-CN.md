@@ -109,6 +109,8 @@ claude plugin install agent-board@agent-board
 
 打开新 Claude Code session，使用 `/progress`。侧栏镜像 Task 工具，也可通过它的模型整理回合。问题与决策显示于任务上方；侧栏跟随 Claude 主题，浏览器跟随系统主题。
 
+Claude 桌面应用会显示底部状态栏；`/progress` 会在浏览器打开只读看板网页。Claude Code CLI 则显示侧栏。
+
 | 命令／输入 | 操作 |
 | --- | --- |
 | `/progress connect`、`connect status`、`connect remove` | 可选 plugin 连接、上次状态、移除 |

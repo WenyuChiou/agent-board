@@ -100,6 +100,12 @@ type World = {
   unlistable?: Set<string>
   mtime: number
   hasTasks: boolean
+  hasNoSurface?: boolean
+  hasBrokenSurfaces?: boolean
+  surfaceCalls?: number
+  paneReason?: string
+  paneOpenCalls?: number
+  browserExitCode?: number
   isArchiveClockOnly?: boolean
   at?: number
   env?: Record<string, string>
@@ -236,6 +242,11 @@ const engineBeneath = (on: On, world: World): MockClock => {
   })
   on('session.end', ($, e) => ({ sessionId: e.sessionId }))
   on('session.id', () => ({ value: SESSION }))
+  on('session.surfaces', () => {
+    world.surfaceCalls = (world.surfaceCalls ?? 0) + 1
+    if (world.hasBrokenSurfaces) throw new TypeError('session.surfaces is not a function')
+    return { value: world.hasNoSurface ? [] : ['terminal' as const] }
+  })
   on('session.root', () => ({ value: '/work/persona_framework' }))
   on('session.repo', () => ({
     value: {
@@ -246,7 +257,10 @@ const engineBeneath = (on: On, world: World): MockClock => {
     },
   }))
   on('command.register', ($, e) => ({ value: { command: e.name } }))
-  on('ui.open', () => ({ value: { isPlaced: true as const } }))
+  on('ui.open', () => {
+    world.paneOpenCalls = (world.paneOpenCalls ?? 0) + 1
+    return { value: world.paneReason === undefined ? { isPlaced: true as const } : { isPlaced: false as const, reason: world.paneReason } }
+  })
   on('tool.list', () => ({
     value: world.hasTasks ? [{ name: 'TaskCreate', description: '', mcp: false }] : [{ name: 'Read', description: '', mcp: false }],
   }))
@@ -323,7 +337,7 @@ const engineBeneath = (on: On, world: World): MockClock => {
             ? world.node === null
               ? { exitCode: 127, stdout: '', stderr: 'node: command not found' }
               : { exitCode: 0, stdout: world.node ?? 'v24.1.0\n', stderr: '' }
-          : { exitCode: e.argv[0] === 'gh' ? 1 : 0, stdout: e.argv[0] === 'gh' ? '' : 'claude/progress-mod\n', stderr: '' }
+          : { exitCode: e.argv[0] === 'gh' ? 1 : e.argv[0] === 'xdg-open' ? world.browserExitCode ?? 0 : 0, stdout: e.argv[0] === 'gh' ? '' : 'claude/progress-mod\n', stderr: '' }
     world.ran?.push([...e.argv])
     return { value: { ...ran, isStdoutTruncated: false, isStderrTruncated: false } }
   })
@@ -2043,6 +2057,143 @@ test('the pull request shows on the card and in the block, and a finished CI run
   expect(world.files.get(FILE)).toContain('PR #12 · CI 失敗 1 · 等審查')
   await clock.advance(2 * 60 * 1000)
   expect(seen.notified).toEqual(['PR #12 CI 失敗 1'])
+})
+
+test('/progress with no surface that places panes replies with the board page instead of the host reason', async ($, on) => {
+  const world: World = { files: new Map([[FILE, JOBS]]), mtime: 1, hasTasks: true, ran: [], store: { autoConnectOff: true } }
+  engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/demo', surface: 'desktop', isInteractive: true })
+  for (const lang of ['en', 'zh-TW', 'zh-CN'] as const) {
+    await $.command.run({ ...TIDY, args: `lang ${lang}` })
+    for (const reason of ['no-surface: no surface is attached ($.session.surfaces() is empty)', 'no attached surface places panes (desktop)']) {
+      world.paneReason = reason
+      const result = await $.command.run({ ...TIDY, args: '' })
+      const s = STRINGS[lang]
+      expect(result.text).toBe(`${s.paneAsPage}\n${s.windowOpened('/home/me/.claude/progress.html')}`)
+      expect(result.text).not.toContain(reason)
+      expect(result.text).not.toContain('surface')
+    }
+  }
+  expect(world.ran?.some(argv => argv.includes('--serve'))).toBe(false)
+})
+
+test('/progress keeps the host reason when the pane fails for another reason', async ($, on) => {
+  const world: World = { files: new Map([[FILE, JOBS]]), mtime: 1, hasTasks: true, ran: [], paneReason: 'placement unavailable', store: { autoConnectOff: true } }
+  engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/demo', surface: 'desktop', isInteractive: true })
+  for (const lang of ['en', 'zh-TW', 'zh-CN'] as const) {
+    await $.command.run({ ...TIDY, args: `lang ${lang}` })
+    const result = await $.command.run({ ...TIDY, args: '' })
+    expect(result.text).toBe(STRINGS[lang].paneNotOpened('placement unavailable'))
+  }
+  expect(world.ran?.some(argv => argv[0] === 'xdg-open')).toBe(false)
+})
+
+test('/progress opens the static board page when the pane cannot be placed', async ($, on) => {
+  const world: World = { files: new Map([[FILE, JOBS]]), mtime: 1, hasTasks: true, ran: [], paneReason: 'no attached surface places panes (desktop)', store: { autoConnectOff: true, lang: 'en' } }
+  engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/demo', surface: 'desktop', isInteractive: true })
+  expect(world.ran?.some(argv => argv[0] === 'xdg-open')).toBe(false)
+  for (const exitCode of [0, 1]) {
+    world.browserExitCode = exitCode
+    // Force a fresh page from the file even when an earlier page was already written.
+    const title = exitCode === 0 ? 'Demo task opened in the browser' : 'Demo task saved for manual opening'
+    world.files.set(FILE, JOBS.replace('Google 暑期實習', title))
+    world.mtime += 1
+    const result = await $.command.run({ ...TIDY, args: '' })
+    expect(world.files.get('/home/me/.claude/progress.html')).toContain(title)
+    expect(world.ran?.at(-1)).toEqual(['xdg-open', '/home/me/.claude/progress.html'])
+    expect(result.text).toBe(`${EN.paneAsPage}\n${exitCode === 0 ? EN.windowOpened('/home/me/.claude/progress.html') : EN.windowFailed('/home/me/.claude/progress.html')}`)
+  }
+  expect(world.ran?.some(argv => argv.includes('--serve'))).toBe(false)
+})
+
+test('the footer status names /progress when no surface places panes', async ($, on) => {
+  const world: World = { files: new Map(), mtime: 1, hasTasks: true, paneReason: 'no-surface: no surface is attached ($.session.surfaces() is empty)', store: { autoConnectOff: true, lang: 'en' } }
+  const clock = engineBeneath(on, world)
+  const seen = outside(on, world)
+  await $.session.start({ cwd: '/work/demo', surface: 'desktop', isInteractive: true })
+  await clock.advance(10)
+  expect(seen.status.at(-1)).toBe(EN.statusBoardPage)
+  const surfaceCalls = world.surfaceCalls
+  for (const lang of ['en', 'zh-TW', 'zh-CN'] as const) {
+    await $.command.run({ ...TIDY, args: `lang ${lang}` })
+    world.paneReason = 'no attached surface places panes (desktop)'
+    await $.command.run({ ...TIDY, args: '' })
+    expect(seen.status.at(-1)).toBe(STRINGS[lang].statusBoardPage)
+    expect(seen.status.at(-1)).not.toContain('surface')
+  }
+  world.files.set(FILE, JOBS)
+  world.mtime += 1
+  await clock.advance(2000)
+  expect(seen.status.at(-1)).toContain(' · ')
+  expect(seen.status.at(-1)).toContain(ZH_CN.statusBoardPage)
+  expect(world.surfaceCalls).toBe(surfaceCalls)
+})
+
+test('the footer status names /progress at session start when no surface is attached, even with the pane closed by hand', async ($, on) => {
+  const world: World = { files: new Map(), mtime: 1, hasTasks: true, hasNoSurface: true, store: { autoConnectOff: true, closedByPerson: true, lang: 'en' } }
+  engineBeneath(on, world)
+  const seen = outside(on, world)
+  await $.session.start({ cwd: '/work/demo', surface: 'desktop', isInteractive: true })
+  expect(seen.status.at(-1)).toBe(EN.statusBoardPage)
+  expect(world.paneOpenCalls ?? 0).toBe(0)
+  for (const lang of ['en', 'zh-TW', 'zh-CN'] as const) {
+    await $.command.run({ ...TIDY, args: `lang ${lang}` })
+    expect(seen.status.at(-1)).toBe(STRINGS[lang].statusBoardPage)
+  }
+  expect(world.paneOpenCalls ?? 0).toBe(0)
+})
+
+test('session start survives an engine without session surfaces and shows no board-page hint', async ($, on) => {
+  const world: World = { files: new Map([[FILE, JOBS]]), mtime: 1, hasTasks: true, hasBrokenSurfaces: true, paneReason: 'placement unavailable', store: { autoConnectOff: true, lang: 'en' } }
+  const clock = engineBeneath(on, world)
+  const seen = outside(on, world)
+  const started = await $.session.start({ cwd: '/work/demo', surface: 'terminal', isInteractive: true })
+  await clock.advance(10)
+  expect(started.cwd).toBe('/work/demo')
+  expect(world.paneOpenCalls).toBe(1)
+  expect(seen.status.at(-1)).toBe(`${EN.statusPrefix} · ${EN.statusWaiting(1)}`)
+})
+
+test('a terminal that binds after session start clears the board-page hint', async ($, on) => {
+  const world: World = { files: new Map([[FILE, JOBS]]), mtime: 1, hasTasks: true, hasNoSurface: true, store: { autoConnectOff: true, closedByPerson: true, lang: 'en' } }
+  const clock = engineBeneath(on, world)
+  const seen = outside(on, world)
+  await $.session.start({ cwd: '/work/demo', surface: 'terminal', isInteractive: true })
+  const normalStatus = `${EN.statusPrefix} · ${EN.statusWaiting(1)}`
+  expect(seen.status.at(-1)).toBe(`${normalStatus} · ${EN.statusBoardPage}`)
+  world.hasBrokenSurfaces = true
+  await clock.advance(30000)
+  expect(seen.status.at(-1)).toBe(`${normalStatus} · ${EN.statusBoardPage}`)
+  world.hasBrokenSurfaces = false
+  world.hasNoSurface = false
+  await clock.advance(30000)
+  expect(seen.status.at(-1)).toBe(normalStatus)
+  expect(world.paneOpenCalls ?? 0).toBe(0)
+  const surfaceCalls = world.surfaceCalls
+  await clock.advance(30000)
+  expect(world.surfaceCalls).toBe(surfaceCalls)
+})
+
+test('the footer status is unchanged when the pane is placed', async ($, on) => {
+  const world: World = { files: new Map([[FILE, JOBS]]), mtime: 1, hasTasks: true, store: { autoConnectOff: true, closedByPerson: true, lang: 'en' } }
+  engineBeneath(on, world)
+  const seen = outside(on, world)
+  await $.session.start({ cwd: '/work/demo', surface: 'terminal', isInteractive: true })
+  expect(seen.status.at(-1)).toBe(`${EN.statusPrefix} · ${EN.statusWaiting(1)}`)
+  const opened = await $.command.run({ ...TIDY, args: '' })
+  expect(opened.text).toBe(EN.paneOpened(FILE))
+  expect(seen.status.at(-1)).toBeUndefined()
+  const surfaceCalls = world.surfaceCalls
+  // A later successful placement clears a hint left by an unavailable pane.
+  world.paneReason = 'no-surface: no surface is attached'
+  await $.command.run({ ...TIDY, args: '' })
+  expect(seen.status.at(-1)).toContain(EN.statusBoardPage)
+  world.paneReason = undefined
+  await $.command.run({ ...TIDY, args: '' })
+  expect(seen.status.at(-1)).toBeUndefined()
+  expect(world.surfaceCalls).toBe(surfaceCalls)
 })
 
 test('with the pane closed, the line under the prompt carries the progress', async ($, on) => {
