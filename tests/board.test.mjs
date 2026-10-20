@@ -1338,11 +1338,12 @@ test('ticking and tidying from the page write progress.md the way the pane does,
     const today = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`
     assert.ok(kept.includes(`## Job search · ${today}\n### Fabrikam fellowship`), kept)
     // What a chat prints, fence and all, is merged under its project.
-    const block = '## launch\n<!-- auto session=c0ffee12 agent=muse state=waiting updated=2020-01-01T00:00:00Z -->\n### Draft the launch post\n- [x] Outline\n- [?] Ship it Friday, OK?\n<!-- /auto session=c0ffee12 -->'
+    const at = ago(60_000)
+    const block = `## launch\n<!-- auto session=c0ffee12 agent=muse state=waiting updated=${at} -->\n### Draft the launch post\n- [x] Outline\n- [?] Ship it Friday, OK?\n<!-- /auto session=c0ffee12 -->`
     const pasted = await call('POST', '/api/paste', { body: { text: `Here it is:\n\`\`\`\n${block}\n\`\`\`\n` } })
     assert.equal(pasted.status, 200, pasted.body)
     assert.ok(readFileSync(path, 'utf8').includes('## launch\n\n<!-- auto session=c0ffee12 agent=muse state=waiting updated='))
-    assert.ok(readFileSync(path, 'utf8').includes('updated=2020-01-01T00:00:00Z'))
+    assert.ok(readFileSync(path, 'utf8').includes(`updated=${at}`))
     const refused = await call('POST', '/api/paste', { body: { text: block.replaceAll('c0ffee12', 'b2c3d4e5') } })
     assert.equal(refused.status, 409)
     assert.ok(readFileSync(path, 'utf8').includes(`resume=${GROK_ID}`))
@@ -1357,6 +1358,36 @@ test('ticking and tidying from the page write progress.md the way the pane does,
 })
 
 const relayFragment = (at, state = 'waiting', step = '- [?] Ship it Friday, OK?') => `## launch\n<!-- auto session=c0ffee12 agent=muse state=${state} updated=${at} -->\n### Draft the launch post\n${step}\n<!-- /auto session=c0ffee12 -->`
+
+test('the board script refuses a pasted working block with a weeks-old clock in every language and writes nothing', { timeout: 30_000 }, async () => {
+  const notes = { en: /21 days behind.*nothing was written/i, 'zh-TW': /慢了 21 天.*未寫入/, 'zh-CN': /慢了 21 天.*未写入/ }
+  for (const [lang, note] of Object.entries(notes)) {
+    const board = await page('', {}, ['--lang', lang])
+    try {
+      const before = '# Progress\n\n## launch\n'
+      writeFileSync(board.path, before)
+      await board.call('GET', '/api/board')
+      const files = readdirSync(board.dir).sort()
+      const mtime = statSync(board.path).mtimeMs
+      for (const state of ['working', 'waiting']) {
+        const fragment = relayFragment(ago(21 * 24 * 60 * 60 * 1000), state, '- [~] Outline')
+        const result = await board.call('POST', '/api/paste', { body: { text: fragment } })
+        assert.equal(result.status, 409, result.body)
+        assert.match(result.json().note, note)
+        assert.doesNotMatch(result.json().note, /c0ffee12|progress\.md|launch/)
+        assert.equal(readFileSync(board.path, 'utf8'), before)
+        assert.equal(statSync(board.path).mtimeMs, mtime)
+        assert.deepEqual(readdirSync(board.dir).sort(), files)
+      }
+      // The board exposes tidy through its page, rather than a --tidy CLI flag.
+      const tidied = await board.call('POST', '/api/tidy', { body: {} })
+      assert.equal(tidied.status, 200, tidied.body)
+      assert.equal(readFileSync(board.path, 'utf8'), before)
+      assert.deepEqual(readdirSync(board.dir).sort(), files)
+      assert.equal(files.some(name => name.includes('-archive-')), false)
+    } finally { await board.close() }
+  }
+})
 
 test('chat relay keeps newer progress and refuses an older question on both local and LAN imports', { timeout: 30_000 }, async t => {
   const board = await page()
