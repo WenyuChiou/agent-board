@@ -660,11 +660,156 @@ cp.spawnSync = (tool, argv, options) => {
   }
 })
 
+test('a first ledger write places the file with a hard link and starts no move program', () => {
+  const ran = chatRun(['--keys', ''], {
+    inspect: questionFiles,
+    preload: questionFault(`const link = fs.linkSync
+const move = cp.spawnSync
+const probe = { links: 0, moves: [] }
+fs.linkSync = (from, to) => {
+  if (to === ledger && String(from).endsWith('.board-tmp')) probe.links += 1
+  return link(from, to)
+}
+cp.spawnSync = (tool, argv, options) => {
+  if (argv.some(arg => String(arg).includes('.board-tmp'))) probe.moves.push({ tool, argv })
+  return move(tool, argv, options)
+}
+process.on('exit', () => fs.writeFileSync(ledger + '.probe', JSON.stringify(probe)))`),
+  })
+  assert.equal(ran.status, 0, ran.stderr)
+  assert.ok(JSON.parse(ran.files['progress-questions.json']).records.length > 0)
+  const probe = JSON.parse(ran.files['progress-questions.json.probe'])
+  assert.ok(probe.links > 0)
+  assert.deepEqual(probe.moves, [])
+  assert.ok(!Object.keys(ran.files).some(name => name.endsWith('.board-tmp')))
+})
+
+test('a hard-link ledger move leaves both files untouched when another writer placed the ledger first', () => {
+  const other = '{"version":99,"writer":"concurrent hard link"}\n'
+  const ran = chatRun(['--keys', 'down h'], {
+    inspect: questionFiles,
+    preload: questionFault(`const link = fs.linkSync
+let hasRaced = false
+fs.linkSync = (from, to) => {
+  if (hasRaced || to !== ledger || !String(from).endsWith('.board-tmp')) return link(from, to)
+  hasRaced = true
+  const before = fs.readFileSync(from, 'utf8')
+  fs.writeFileSync(ledger, ${JSON.stringify(other)})
+  try {
+    return link(from, to)
+  } catch (error) {
+    fs.writeFileSync(ledger + '.probe', JSON.stringify({ code: error.code, before, after: fs.readFileSync(from, 'utf8'), target: fs.readFileSync(to, 'utf8') }))
+    throw error
+  }
+}`),
+  })
+  assert.equal(ran.status, 0, ran.stderr)
+  const probe = JSON.parse(ran.files['progress-questions.json.probe'])
+  assert.equal(probe.code, 'EEXIST')
+  assert.ok(JSON.parse(probe.before).records.length > 0)
+  assert.equal(probe.after, probe.before)
+  assert.equal(probe.target, other)
+  assert.equal(ran.files['progress-questions.json'], other)
+  assert.ok(!Object.keys(ran.files).some(name => name.endsWith('.board-tmp')))
+  assert.equal(ran.answered, null)
+})
+
+test('a ledger move falls back to the move program when the volume has no hard links', () => {
+  const ran = chatRun(['--keys', ''], {
+    inspect: questionFiles,
+    preload: questionFault(`const link = fs.linkSync
+const move = cp.spawnSync
+const moves = []
+fs.linkSync = (from, to) => {
+  if (to === ledger && String(from).endsWith('.board-tmp')) throw Object.assign(new Error('no hard links'), { code: 'EPERM' })
+  return link(from, to)
+}
+cp.spawnSync = (tool, argv, options) => {
+  if (argv.some(arg => String(arg).includes('.board-tmp'))) moves.push({ tool, argv })
+  return move(tool, argv, options)
+}
+process.on('exit', () => fs.writeFileSync(ledger + '.probe', JSON.stringify(moves)))`),
+  })
+  assert.equal(ran.status, 0, ran.stderr)
+  assert.ok(JSON.parse(ran.files['progress-questions.json']).records.length > 0)
+  const moves = JSON.parse(ran.files['progress-questions.json.probe'])
+  assert.ok(moves.length > 0)
+  for (const { tool, argv } of moves) {
+    assert.ok(process.platform === 'win32' ? /powershell\.exe$/i.test(tool) : tool === 'mv')
+    assert.ok(argv.some(arg => String(arg).includes('.board-tmp')))
+    assert.ok(process.platform === 'win32' ? argv.some(arg => String(arg).startsWith('Move-Item -LiteralPath ')) : argv.includes('-n'))
+  }
+  assert.ok(!Object.keys(ran.files).some(name => name.endsWith('.board-tmp')))
+})
+
+test('a ledger move removes its temp after a success, an existing ledger, the fallback and a temp that could not be removed at once', () => {
+  const other = '{"version":99,"writer":"concurrent cleanup"}\n'
+  const renames = {}
+  for (const mode of ['success', 'existing', 'fallback', 'busy']) {
+    const ran = chatRun(['--keys', 'down h'], {
+      inspect: questionFiles,
+      preload: questionFault(`const link = fs.linkSync
+const unlink = fs.unlinkSync
+const rename = fs.renameSync
+const move = cp.spawnSync
+const mode = ${JSON.stringify(mode)}
+const probe = { links: 0, moves: 0, unlinks: 0, renames: 0, hasBlocked: false }
+let temp
+fs.renameSync = (from, to) => {
+  if (to === ledger) probe.renames += 1
+  return rename(from, to)
+}
+fs.linkSync = (from, to) => {
+  if (to !== ledger || !String(from).endsWith('.board-tmp')) return link(from, to)
+  probe.links += 1
+  temp = from
+  if (mode === 'existing') fs.writeFileSync(ledger, ${JSON.stringify(other)})
+  if (mode === 'fallback') throw Object.assign(new Error('no hard links'), { code: 'EPERM' })
+  return link(from, to)
+}
+fs.unlinkSync = file => {
+  if (file === temp) {
+    probe.unlinks += 1
+    if (mode === 'busy' && !probe.hasBlocked) {
+      probe.hasBlocked = true
+      throw Object.assign(new Error('temp held open'), { code: 'EBUSY' })
+    }
+  }
+  return unlink(file)
+}
+cp.spawnSync = (tool, argv, options) => {
+  if (argv.some(arg => String(arg).includes('.board-tmp'))) probe.moves += 1
+  return move(tool, argv, options)
+}
+process.on('exit', () => fs.writeFileSync(ledger + '.probe', JSON.stringify(probe)))`),
+    })
+    assert.equal(ran.status, 0, mode + ': ' + ran.stderr)
+    if (mode === 'existing') {
+      assert.equal(ran.files['progress-questions.json'], other)
+      assert.equal(ran.answered, null)
+    } else assert.ok(JSON.parse(ran.files['progress-questions.json']).records.length > 0, mode)
+    const probe = JSON.parse(ran.files['progress-questions.json.probe'])
+    assert.ok(probe.links > 0, mode)
+    assert.equal(probe.moves > 0, mode === 'fallback', mode)
+    assert.equal(probe.hasBlocked, mode === 'busy', mode)
+    if (mode === 'busy') assert.ok(probe.unlinks >= 2)
+    assert.ok(!Object.keys(ran.files).some(name => name.endsWith('.board-tmp')), mode)
+    renames[mode] = probe.renames
+  }
+  // The retry after a temp that could not be removed finds its own ledger and writes it no second time.
+  assert.equal(renames.busy, renames.success)
+})
+
 test('a missing ledger install never replaces a concurrent writer or leaves its own skipped temp', () => {
   const other = '{"version":99,"writer":"concurrent"}\n'
   const ran = chatRun(['--keys', 'down h'], {
     inspect: questionFiles,
-    preload: questionFault(`const native = cp.spawnSync
+    preload: questionFault(`const link = fs.linkSync
+fs.linkSync = (from, to) => {
+  if (String(from).endsWith('.board-tmp')) throw Object.assign(new Error('no hard links'), { code: 'EPERM' })
+  return link(from, to)
+}
+const native = cp.spawnSync
 let raced = false
 cp.spawnSync = (tool, argv, options) => {
   if (!raced && argv.some(arg => String(arg).includes('.board-tmp'))) {
@@ -683,20 +828,30 @@ cp.spawnSync = (tool, argv, options) => {
 test('a failed ledger replace restores the complete temp or keeps it when every move fails', () => {
   const seed = chatRun(['--keys', ''], { inspect: questionFiles })
   assert.equal(seed.status, 0, seed.stderr)
-  for (const isMoveBlocked of [false, true]) {
+  for (const [hasLinks, isMoveBlocked] of [[true, false], [false, false], [false, true]]) {
     const ran = chatRun(['--keys', 'down h'], {
       file: () => FILE.replace('Per-key limit', 'Per-account limit'), beside: seed.files, inspect: questionFiles,
-      preload: questionFault(`const native = fs.renameSync
+      preload: questionFault(`const link = fs.linkSync
+fs.linkSync = (from, to) => {
+  if (!${hasLinks} && String(from).endsWith('.board-tmp')) throw Object.assign(new Error('no hard links'), { code: 'EPERM' })
+  return link(from, to)
+}
+const native = fs.renameSync
 fs.renameSync = (from, to) => {
   if (to !== ledger) return native(from, to)
   fs.unlinkSync(ledger)
   throw Object.assign(new Error('synthetic replace failure'), { code: 'EACCES' })
 }
-if (${isMoveBlocked}) {
-  const move = cp.spawnSync
-  cp.spawnSync = (tool, argv, options) => argv.some(arg => String(arg).includes('.board-tmp')) ? { status: 1 } : move(tool, argv, options)
-}`),
+const move = cp.spawnSync
+let moves = 0
+cp.spawnSync = (tool, argv, options) => {
+  if (!argv.some(arg => String(arg).includes('.board-tmp'))) return move(tool, argv, options)
+  moves += 1
+  return ${isMoveBlocked} ? { status: 1 } : move(tool, argv, options)
+}
+process.on('exit', () => fs.writeFileSync(ledger + '.probe', String(moves)))`),
     })
+    assert.equal(Number(ran.files['progress-questions.json.probe']) > 0, !hasLinks)
     if (isMoveBlocked) {
       assert.equal(ran.status, 1)
       assert.equal(ran.files['progress-questions.json'], undefined)
