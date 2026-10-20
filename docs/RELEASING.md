@@ -75,4 +75,4 @@ The package is published under the owner's npm scope as `@wenyuchiou/agent-board
 3. If 0.24.0 does not pass the gate, publish nothing to npm yet. Publish the first version that passes.
 4. Check it from a scratch folder: `npm view @wenyuchiou/agent-board dist-tags`, then `npx @wenyuchiou/agent-board@X.Y.Z --version`.
 
-Publishing from GitHub Actions with npm trusted publishing and `--provenance` is planned in #223. npm allows a trusted publisher only for a package that already exists, so it can only start after the first manual publish.
+Publishing from GitHub Actions with npm trusted publishing and `--provenance` is not set up yet; it is planned for 0.27.0. npm allows a trusted publisher only for a package that already exists, so it can only start after the first manual publish.
