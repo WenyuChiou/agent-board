@@ -191,6 +191,49 @@ test('local setup preserves native config formatting when its content does not c
   }
 }))
 
+test('local setup preserves Cursor and Muse key order and bytes when version keys follow hooks', () => fixture(f => {
+  for (const [agent, relative, key] of [
+    ['cursor', ['.cursor', 'hooks.json'], 'version'],
+    ['muse', ['.config', 'muse', 'settings.json'], 'schema_version'],
+  ]) {
+    const file = join(f.home, ...relative)
+    const installed = f.install('--agent', agent, '--apply')
+    assert.equal(installed.status, 0, installed.stderr)
+    const { [key]: version, ...config } = JSON.parse(readFileSync(file))
+    assert.equal(version, 1, agent)
+    for (const value of [version, 7]) {
+      const original = ` \r\n${JSON.stringify({ ...config, custom: 'keep', [key]: value }, null, '\t').replaceAll('\n', '\r\n')}\r\n\r\n`
+      f.save(file, original)
+      for (const args of [[], ['--apply'], ['--apply']]) {
+        const result = f.install('--agent', agent, ...args)
+        assert.equal(result.status, 0, result.stderr)
+        assert.equal(JSON.parse(result.stdout).changes.some(change => change.file === file), false, result.stdout)
+        assert.deepEqual(readFileSync(file), Buffer.from(original), agent)
+      }
+    }
+  }
+}))
+
+test('local setup adds missing Cursor and Muse version defaults once', () => fixture(f => {
+  for (const [agent, relative, key] of [
+    ['cursor', ['.cursor', 'hooks.json'], 'version'],
+    ['muse', ['.config', 'muse', 'settings.json'], 'schema_version'],
+  ]) {
+    const file = join(f.home, ...relative)
+    f.save(file, '{"hooks":{},"custom":"keep"}\n')
+    const installed = f.install('--agent', agent, '--apply')
+    assert.equal(installed.status, 0, installed.stderr)
+    const original = readFileSync(file)
+    const config = JSON.parse(original)
+    assert.equal(config[key], 1, agent)
+    assert.equal(config.custom, 'keep', agent)
+    const again = f.install('--agent', agent, '--apply')
+    assert.equal(again.status, 0, again.stderr)
+    assert.equal(JSON.parse(again.stdout).changes.some(change => change.file === file), false, again.stdout)
+    assert.deepEqual(readFileSync(file), original, agent)
+  }
+}))
+
 test('independent prompt metadata answers questions while ordinary activity and replay preserve newer questions', () => fixture(f => {
   assert.equal(f.install('--apply').status, 0)
   assert.equal(f.event('UserPromptSubmit', 'turn-prompt-1').status, 0)
