@@ -81,6 +81,7 @@ Then run what CI runs on plain Node, and the two generated-file checks:
 iso node --test tests/exchange.test.mjs tests/messaging.test.mjs
 iso node --test tests/board.test.mjs tests/board-storage.test.mjs tests/codex-local.test.mjs tests/local-lock.test.mjs tests/prompt-hooks.test.mjs tests/codex-host.test.mjs tests/codex-fallback.test.mjs tests/legacy-connect.test.mjs tests/connect-worker.test.mjs
 iso node --test tests/pr-check.test.mjs tests/preflight.test.mjs tests/changelog-fold.test.mjs
+iso node --test tests/npm-package.test.mjs
 npx --yes bun@1.4.2 scripts/build-board.ts --check
 git fetch --tags origin
 npx --yes bun@1.4.2 scripts/build-released.ts --check
