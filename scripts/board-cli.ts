@@ -753,7 +753,7 @@ const stays = async (running: Running, file: string): Promise<boolean> => {
 // The running page of this copy for this file, or null. Any other page found in the file (one
 // that no longer answers, or an older copy's) is let go, so a new one can write the file; but an
 // older copy's page that will not close (a reply is on its way) is kept, and `isKept` says so.
-const runningPage = async (): Promise<{ page: Running; isKept: boolean; idleMs?: number } | null> => {
+const runningPage = async (): Promise<{ page: Running; isKept: boolean; idleMs?: number | undefined } | null> => {
   const running = readRunning()
   if (running === null) {
     // A file that has not read for ten seconds (either way, should the clock have been set

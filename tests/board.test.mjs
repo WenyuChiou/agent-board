@@ -1758,8 +1758,6 @@ const freePort = () =>
     })
   })
 
-// The two runs may or may not meet halfway (one can find the other's page already written); the
-// server started by hand always meets a page that is there.
 test('--serve with a different idle preference reuses the running page and reports its effective timeout', { timeout: 60_000 }, async () => {
   for (const [initial, next, expected, note] of [
     [[], ['--idle-minutes', '30'], 0, 'The local board stays running.'],
@@ -1781,10 +1779,29 @@ test('--serve with a different idle preference reuses the running page and repor
       const ping = await fetch(new URL('/api/ping', url), { headers: { 'x-board-token': url.searchParams.get('t') }, signal: AbortSignal.timeout(5000) })
       assert.equal((await ping.json()).idleMs, expected)
       assert.ok(again.includes(note), again)
+      // The address stays the last line, and the same idle time asked again prints no note.
+      assert.ok(again.trimEnd().split(/\r?\n/).at(-1).includes(first), again)
+      const same = await board.serve(initial)
+      assert.equal(board.urlOf(same), first, same)
+      assert.ok(!/stays running|close after/.test(same), same)
     } finally { await board.end(urls) }
   }
 })
 
+test('--serve with an idle time that is not a number starts no page', { timeout: 60_000 }, async () => {
+  const board = serveIn()
+  try {
+    for (const extra of [['--idle-minutes', 'abc'], ['--idle-minutes']]) {
+      const ran = spawnSync(process.execPath, [board.script, '--serve', '--no-open', ...extra], { env: board.env, encoding: 'utf8', timeout: 20_000 })
+      assert.notEqual(ran.status, 0, extra.join(' '))
+      assert.match(ran.stderr, /INVALID_IDLE_MINUTES/)
+      assert.ok(!existsSync(board.served), extra.join(' '))
+    }
+  } finally { await board.end([]) }
+})
+
+// The two runs may or may not meet halfway (one can find the other's page already written); the
+// server started by hand always meets a page that is there.
 test('two --serve run at the same moment open one page between them, and a server started while it runs stops at once', { timeout: 60_000 }, async () => {
   const board = serveIn()
   const urls = []
