@@ -112,11 +112,11 @@ test('the native OpenCode prompt callback flags exact board commands without ret
 
 const source = readFileSync(new URL('../hooks/connect-pure.ts', import.meta.url), 'utf8')
 const ctx = { inbox: '/synthetic/progress-inbox' }
-const template = (name, end, withPrompt = true) => {
+const template = (name, end, withPrompt = true, flagsBoardRequests = true) => {
   const start = source.indexOf(`export const ${name} =`)
   assert.ok(start >= 0)
   const code = stripTypeScriptTypes(source.slice(start, source.indexOf(end, start)), { mode: 'strip' }).replace('export const', 'const')
-  return new Function('BOARD_PROMPT_HELPER', `const OPENCLAW_ID = 'agent-board'; ${code}; return ${name}`)(BOARD_PROMPT_HELPER)(ctx, withPrompt)
+  return new Function('BOARD_PROMPT_HELPER', `const OPENCLAW_ID = 'agent-board'; ${code}; return ${name}`)(BOARD_PROMPT_HELPER)(ctx, withPrompt, flagsBoardRequests)
 }
 
 test('pre-prompt plugin templates retain the exact bytes released in 0.20.5 and 0.23.1', () => {
@@ -125,6 +125,24 @@ test('pre-prompt plugin templates retain the exact bytes released in 0.20.5 and 
     ['openclawPlugin', '\n// The standalone board', 'feb2b8ff0af006c582ab0de7165f18fa3fa107fb49e24b0dec414c19cfcf413f'],
   ]
   for (const [name, end, hash] of legacy) assert.equal(createHash('sha256').update(template(name, end, false)).digest('hex'), hash)
+})
+
+test('prompt plugin templates released before the board-request flag are still recognised as ours', async () => {
+  const { agentHooks, COLLISION } = await import('../hooks/connect-pure.ts')
+  const hooks = agentHooks({ ...ctx, home: '/synthetic', sep: '/', isWindows: false, script: '/synthetic/progress-report.sh', codexHome: '/synthetic/.codex', grokHome: '/synthetic/.grok', hermesHome: '/synthetic/.hermes', openclawHome: '/synthetic/.openclaw' })
+  // Hashes come from the prompt templates in agent-board--v0.23.5:hooks/connect-pure.ts.
+  const legacy = [
+    ['opencode', 'opencodePlugin', '\nconst OPENCLAW_ID', 'd40d4a969cfa7c8dda1db8d15260cfe288e12ab4a277c048f9f9439023f8a367'],
+    ['openclaw', 'openclawPlugin', '\n// The standalone board', '56ac9f27f891b21fe62c044976101d8a589d455e043d16038ab7e171165ce542'],
+  ]
+  for (const [agent, name, end, hash] of legacy) {
+    const old = template(name, end, true, false)
+    assert.equal(createHash('sha256').update(old).digest('hex'), hash)
+    const hook = hooks.find(one => one.agent === agent && one.generated)
+    assert.ok(hook)
+    assert.equal(hook.edit(old, false), template(name, end))
+    assert.equal(hook.edit(old + '// personal edit\n', false), COLLISION)
+  }
 })
 
 test('generated OpenCode and OpenClaw prompt callbacks retain only verified binding metadata', async () => {

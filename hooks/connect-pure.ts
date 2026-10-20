@@ -476,7 +476,7 @@ export const agentHooks = (ctx: ConnectContext): AgentHook[] => {
       dir: ctx.openclawHome,
       file: [ctx.openclawHome, OPENCLAW_FILE].join(ctx.sep),
       generated: true,
-      edit: generatedFile(openclawPlugin(ctx), [openclawPlugin(ctx, false)]),
+      edit: generatedFile(openclawPlugin(ctx), [openclawPlugin(ctx, false), openclawPlugin(ctx, true, false)]),
     },
     {
       agent: 'openclaw',
@@ -499,7 +499,7 @@ export const agentHooks = (ctx: ConnectContext): AgentHook[] => {
       file: [opencodeHome, 'plugin', 'agent-board.js'].join(ctx.sep),
       old: [opencodeHome, 'plugin', 'progress-pane.js'].join(ctx.sep),
       generated: true,
-      edit: generatedFile(opencodePlugin(ctx), [opencodePlugin(ctx, false)]),
+      edit: generatedFile(opencodePlugin(ctx), [opencodePlugin(ctx, false), opencodePlugin(ctx, true, false)]),
     },
     ...boardCommands(ctx),
   ]
@@ -508,12 +508,12 @@ export const agentHooks = (ctx: ConnectContext): AgentHook[] => {
 // OpenCode takes plugins, not commands: this one writes the session's last exchange into the
 // inbox when the session goes idle (a subagent's session aside), and an end when it is
 // deleted. Every export of a plugin file must be a function.
-export const opencodePlugin = (ctx: ConnectContext, withPrompt = true): string => `// Written by the Agent Board plugin (/progress connect): reports each finished turn to the Agent Board
+export const opencodePlugin = (ctx: ConnectContext, withPrompt = true, flagsBoardRequests = true): string => `// Written by the Agent Board plugin (/progress connect): reports each finished turn to the Agent Board
 // pane.
 import { mkdirSync, renameSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 
-${withPrompt ? BOARD_PROMPT_HELPER + '\n' : ''}const INBOX = ${JSON.stringify(ctx.inbox)}
+${withPrompt && flagsBoardRequests ? BOARD_PROMPT_HELPER + '\n' : ''}const INBOX = ${JSON.stringify(ctx.inbox)}
 
 const save = (event, payload) => {
   try {
@@ -531,11 +531,11 @@ const textOf = message =>
     .join('\\n')
 
 export const AgentBoard = async ({ client, directory }) => ({
-${withPrompt ? `  'chat.message': async ({ sessionID }, output) => {
+${withPrompt ? `  'chat.message': async ({ sessionID }${flagsBoardRequests ? ', output' : ''}) => {
     try {
       const session = await client.session.get({ path: { id: sessionID } })
       if (!session.data || session.data.id !== sessionID || session.data.parentID) return
-      save('prompt', { session_id: sessionID, cwd: directory, ...(isBoardRequest(output) ? { board_request: true } : {}) })
+      save('prompt', { session_id: sessionID, cwd: directory${flagsBoardRequests ? ', ...(isBoardRequest(output) ? { board_request: true } : {})' : ''} })
     } catch {}
   },
 ` : ''}\
@@ -659,12 +659,12 @@ export const withoutOpenclawPlugin = (config: Json, file: string): Json => {
 // Writes each finished turn into the inbox itself, as the OpenCode plugin does, so it needs
 // no shell. Heartbeat and memory runs are OpenClaw talking to itself, not the person's work;
 // a compaction or a restart does not end the session.
-export const openclawPlugin = (ctx: ConnectContext, withPrompt = true): string => `// Written by the Agent Board plugin (/progress connect): reports each finished turn to the Agent Board
+export const openclawPlugin = (ctx: ConnectContext, withPrompt = true, flagsBoardRequests = true): string => `// Written by the Agent Board plugin (/progress connect): reports each finished turn to the Agent Board
 // pane.
 import { mkdirSync, renameSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 
-${withPrompt ? BOARD_PROMPT_HELPER + '\n' : ''}const INBOX = ${JSON.stringify(ctx.inbox)}
+${withPrompt && flagsBoardRequests ? BOARD_PROMPT_HELPER + '\n' : ''}const INBOX = ${JSON.stringify(ctx.inbox)}
 
 const save = (event, payload) => {
   try {
@@ -689,7 +689,7 @@ export default {
 ${withPrompt ? `    api.on('before_prompt_build', (_event, ctx) => {
       try {
         if (!ctx?.sessionId || ctx.inputProvenance?.kind !== 'external_user') return
-        save('prompt', { session_id: ctx.sessionId, cwd: ctx.workspaceDir ?? '', ...(isBoardRequest(_event) ? { board_request: true } : {}) })
+        save('prompt', { session_id: ctx.sessionId, cwd: ctx.workspaceDir ?? ''${flagsBoardRequests ? ', ...(isBoardRequest(_event) ? { board_request: true } : {})' : ''} })
       } catch {}
     })
 ` : ''}\
