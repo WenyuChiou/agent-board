@@ -110,3 +110,30 @@ jobs:
       - name: Remote reporter tests (Windows)
         if: runner.os == 'Windows'
         run: python -B scripts/remote-reporter/test_pipeline.py
+
+  # The user-journey tests: the board script on plain Node, driven the way a person uses it
+  # (terminal board, --chat, the --serve page over HTTP, --html) in isolated temp homes.
+  journeys:
+    name: journeys (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+
+      # `node --test` passes with zero tests when the pattern matches nothing, so a missing
+      # journey folder fails here instead of passing silently.
+      - name: Journey tests present
+        shell: bash
+        run: ls tests/e2e/*.test.mjs
+
+      - name: User-journey tests
+        run: node --test "tests/e2e/*.test.mjs"
