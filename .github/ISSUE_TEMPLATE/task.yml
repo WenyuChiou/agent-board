@@ -1,0 +1,59 @@
+name: Task
+description: Planned work an agent can pick up. The maintainer writes or completes it when triaging.
+body:
+  - type: markdown
+    attributes:
+      value: |
+        One task is one pull request, or the step pull requests named below. Agents find ready work with `gh issue list --label ready`; the steps are in docs/CONTRIBUTOR-PATH.md. Synthetic data only.
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What goes wrong or is missing today, and for whom, with a synthetic example.
+    validations:
+      required: true
+  - type: textarea
+    id: change
+    attributes:
+      label: What to change
+      description: The behaviour wanted, the files or area in scope, and what is out of scope. If the work is split into step pull requests, list the steps.
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance tests
+      description: One test title per line, each a sentence about behaviour. The pull request adds tests with these titles and names them in its CHANGELOG entry; a title that changes is explained in the pull request.
+      placeholder: "- tidy --stopped moves every stopped block and names the count"
+    validations:
+      required: true
+  - type: dropdown
+    id: executor
+    attributes:
+      label: Executor
+      description: Who this is planned for. dot and Muse take only work whose checks run on plain Node.
+      options:
+        - Any agent (for-agent)
+        - dot or Muse (for-dot)
+        - Codex (local)
+        - Antigravity (local)
+        - Maintainer decides
+    validations:
+      required: true
+  - type: input
+    id: milestone
+    attributes:
+      label: Milestone
+      description: The release this belongs to. The maintainer sets the GitHub milestone to match.
+      placeholder: 0.24.0 Clean board
+  - type: input
+    id: blocked_by
+    attributes:
+      label: Blocked by
+      description: Issues or pull requests that must land first, or "none".
+      placeholder: none
+  - type: textarea
+    id: checks
+    attributes:
+      label: Checks
+      description: Checks this work needs beyond the Node suites CI runs, for example `claude plugin test .`, an installer check or a bundle rebuild.

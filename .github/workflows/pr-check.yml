@@ -1,0 +1,50 @@
+# Checks the pull request itself against CONTRIBUTING.md, Pull requests: the Fixes/Part of and
+# Author lines, the template sections, the claim, the CHANGELOG entry and its test titles, the
+# open pull request cap, and private data in added docs and pictures. The bundle is test.yml's job.
+# The checker script comes from the base branch, so a pull request cannot loosen the script that
+# judges it. This workflow file itself is read from the pull request, so a pull request that edits
+# it is a governance change (CONTRIBUTING.md rule 12) and is reviewed as one.
+# The token is read-only; the body is read from the event file, never put into a shell command.
+name: pr-check
+
+on:
+  pull_request:
+    types: [opened, edited, reopened, synchronize, ready_for_review, converted_to_draft, labeled, unlabeled]
+
+permissions:
+  contents: read
+  pull-requests: read
+  issues: read
+
+concurrency:
+  group: pr-check-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  pr-check:
+    name: pr-check
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checker from the base branch
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          path: checker
+          persist-credentials: false
+      # The pull request's own head, with the whole history, so both the base and the head
+      # commit are present for the diff, also for a pull request from a fork.
+      - name: The pull request
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          path: pr
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+      - name: Check the pull request
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: node checker/scripts/pr-check.mjs --event "$GITHUB_EVENT_PATH" --repo-dir pr
