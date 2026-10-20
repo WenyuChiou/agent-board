@@ -67,26 +67,37 @@ describe('scenario runner', () => {
     } finally { await world.close() }
   })
 
-  test('clock preloads new Date, Date(), Date.now and follows jumps in a live child', async () => {
+  test('clock preloads new Date, Date(), Date.now, moves at real speed and follows jumps in a live child', async () => {
     const world = makeWorld()
+    // A child's reading lies between the world's time just before it started and just after it ended.
+    const between = (value, before, after, label) => assert.ok(value >= before && value <= after, `${label}: ${value} is not within ${before}..${after}`)
     try {
-      const first = (await run(world, [], { code: 'console.log(JSON.stringify([Date.now(), new Date().getTime(), Date(), new Date(0).getTime()]))' }))
+      const before = world.now
+      const first = (await run(world, [], { code: 'const at = Date.now(); setTimeout(() => console.log(JSON.stringify([at, Date.now(), new Date().getTime(), Date(), new Date(0).getTime()])), 20)' }))
+      const after = world.now
       assert.equal(first.status, 0, first.stderr)
       const values = JSON.parse(first.stdout)
-      assert.equal(values[0], world.now)
-      assert.equal(values[1], world.now)
-      assert.equal(values[2], new Date(world.now).toString())
-      assert.equal(values[3], 0)
+      between(values[0], before, after, 'Date.now()')
+      // A frozen clock would hand a product retry the same millisecond, and so the same temp name.
+      assert.ok(values[1] > values[0], 'The world clock does not move')
+      between(values[2], values[1], after, 'new Date()')
+      between(Date.parse(values[3]), Math.floor(before / 1000) * 1000, after, 'Date()')
+      assert.equal(values[4], 0)
       const file = turn(world, 'codex')
       const mtime = statSync(file).mtimeMs
       const watch = terminal.watch(world)
       try {
         await watch.next(text => text.includes('Progress'), 10000)
+        const real = Date.now()
         const prior = world.now
         for (const spec of ['90m', '12h', '3d', '1mo']) world.jump(spec)
-        assert.equal(statSync(file).mtimeMs, mtime - (world.now - prior))
+        const shift = (90 * 60 + 12 * 3600 + 33 * 86400) * 1000
+        assert.equal(statSync(file).mtimeMs, mtime - shift)
+        // A jump moves the clock by its span plus the real time it took, never more.
+        between(world.now - prior, shift, shift + Date.now() - real, 'four jumps')
+        const start = world.now
         const check = (await run(world, [], { code: 'console.log(Date.now())' }))
-        assert.equal(Number(check.stdout.trim()), world.now)
+        between(Number(check.stdout.trim()), start, world.now, 'Date.now() after four jumps')
       } finally { await watch.stop() }
       // A child reads the clock file after startup; its real interval keeps moving.
       const worker = spawnIsolated(process.execPath, ['--input-type=module', '-e', 'console.log(Date.now()); setTimeout(() => { console.log(Date.now()); process.exit(0) }, 450)'], { env: world.env, cwd: world.root, timeout: 20000 })
@@ -95,9 +106,9 @@ describe('scenario runner', () => {
       const done = new Promise(resolve => worker.once('close', resolve))
       try {
         await seenWithin(() => output, text => text.includes('\n'), PANE_MS)
-        world.jump('90m')
+        const jumped = world.jump('90m')
         assert.equal(await done, 0)
-        assert.equal(Number(output.trim().split('\n').at(-1)), world.now)
+        between(Number(output.trim().split('\n').at(-1)), jumped, world.now, 'Date.now() after a live jump')
       } finally {
         worker.kill()
         await done
@@ -172,8 +183,9 @@ describe('scenario runner', () => {
       block(world)
       block(world, { session: 'b2000002', title: 'Other task' })
       const other = world.read('progress.md').split('<!-- auto session=b2000002')[1]
+      const stamp = /<!-- auto session=a1000001 [^\n]*?updated=([^\s>]+)/.exec(world.read('progress.md'))[1]
       skew(world, 'a1000001', 60000)
-      assert.ok(world.read('progress.md').includes('updated=' + new Date(world.now + 60000).toISOString()))
+      assert.ok(world.read('progress.md').includes('updated=' + new Date(Date.parse(stamp) + 60000).toISOString()))
       assert.equal(world.read('progress.md').split('<!-- auto session=b2000002')[1], other)
       const before = world.read('agent-board.mjs')
       const update = updateMidSession(world)
