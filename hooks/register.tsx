@@ -1,4 +1,5 @@
 import { BOARD_SCRIPT } from './board-script'
+import { connectRecordPath, hasOwnConnectData, recoveryUnreadableCode } from './connect-pure'
 import { sha256 } from './sha256'
 import { CONNECT_BOOTSTRAP, CONNECT_EXECUTE, workerRequest, workerStage } from './connect-worker'
 import type { LegacyConnectRequest, ConnectState } from '../scripts/connect-transaction'
@@ -1371,6 +1372,10 @@ const setupFailures = new Set<string>()
 let backgroundConnect: Promise<void> | null = null
 
 const workerProblem = (error: unknown): string => /\b(?:E[A-Z]{2,15}|[A-Z]{3,}_[A-Z_]+)\b/.exec(messageOf(error))?.[0] ?? 'SETUP_FAILED'
+const workerFailure = (s: Strings, problem: string): string => {
+  const code = recoveryUnreadableCode(problem)
+  return code === undefined ? s.connectWorkerFailed(problem) : s.connectRecoveryUnreadable(code)
+}
 
 const connectAgents = async ($: EngineInterface, mode: ConnectMode, options: PluginOptions, change: Partial<LegacyConnectRequest> = {}, previous?: LegacyConnectRequest): Promise<ConnectReply> => {
   const s = await wordsOf($)
@@ -1435,8 +1440,45 @@ const nodeVersion = async ($: EngineInterface): Promise<string | null> => {
   return ran !== null && ran.exitCode === 0 ? nodeVersionOf(ran.stdout) : null
 }
 
+const connectRecord = async ($: EngineInterface): Promise<Partial<ConnectState> | null> => {
+  const home = (await $.env.get('USERPROFILE')) ?? (await $.env.get('HOME')) ?? ''
+  try {
+    const state = JSON.parse(await readText($, connectRecordPath(home))) as Partial<ConnectState> | null
+    return state?.version === 1 ? state : null
+  } catch {
+    // An unreadable record cannot authorize automatic connect.
+    return null
+  }
+}
+
+const ownConnectConfig = async ($: EngineInterface): Promise<boolean> => {
+  const home = (await $.env.get('USERPROFILE')) ?? (await $.env.get('HOME')) ?? ''
+  const config = (await $.env.get('CLAUDE_CONFIG_DIR')) ?? ''
+  return hasOwnConnectData(home, config, `${home}/.claude/progress.md`, await isWindows($, home))
+}
+
+const ownConnectData = async ($: EngineInterface): Promise<boolean> => {
+  const path = await progressPath($)
+  const home = (await $.env.get('USERPROFILE')) ?? (await $.env.get('HOME')) ?? ''
+  const config = (await $.env.get('CLAUDE_CONFIG_DIR')) ?? ''
+  const isWin = await isWindows($, path)
+  if (!hasOwnConnectData(home, config, path, isWin)) return false
+  // A synced progress file becomes this machine's board only after a manual connect.
+  const state = await connectRecord($)
+  const connectedProgress = typeof state?.connectedProgress === 'string' ? state.connectedProgress : undefined
+  return hasOwnConnectData(home, config, path, isWin, connectedProgress)
+}
+
 const autoConnect = async ($: EngineInterface, options: PluginOptions): Promise<void> => {
-  if (options.autoConnect === false) return
+  if (options.autoConnect === false || await ownConnectData($)) {
+    if (options.autoConnect !== false && await $.store.get('autoConnectOff') !== true && (await connectRecord($))?.disabled !== true) {
+      if (!await ownConnectConfig($)) {
+        const s = await wordsOf($)
+        await update($, answer, () => ({ question: s.connectAttention, text: s.setupProgressAutoOff, isAsking: false }))
+      }
+    }
+    return
+  }
   const reply = await connectAgents($, 'auto', options)
   setupFailures.clear()
   if (reply.result === null) return
@@ -1462,7 +1504,7 @@ const startAutoConnect = ($: EngineInterface, options: PluginOptions): void => {
     if (setupFailures.has(reason)) return
     setupFailures.add(reason)
     const s = await wordsOf($)
-    const text = s.connectWorkerFailed(reason)
+    const text = workerFailure(s, reason)
     await update($, answer, () => ({ question: s.connectAttention, text, isAsking: false }))
     await $.ui.notify(text, { title: s.connectAttention }).catch(() => undefined)
   }).finally(() => { backgroundConnect = null })
@@ -2021,9 +2063,9 @@ const showCopied = async ($: EngineInterface, question: string, text: string, su
 }
 
 // The language from the four places it can come from (strings.ts resolveLang).
-const settleLang = async ($: EngineInterface, options: PluginOptions): Promise<void> => {
+const settleLang = async ($: EngineInterface, options: PluginOptions, preference?: Lang | null): Promise<void> => {
   const settings = (await $.settings.read().catch(() => ({}))) as { language?: unknown }
-  const stored = await $.store.get('lang')
+  const stored = preference === undefined ? await $.store.get('lang') : preference
   const chosen = resolveLang(options.language, stored, settings.language, await $.env.get('LANG'))
   await update($, lang, () => chosen)
 }
@@ -2148,19 +2190,24 @@ export const register: Register = (on, options) => {
     const language = /^(?:lang|language|語言|语言)\s*(\S*)$/i.exec(arg)
     if (language !== null) {
       const wanted = language[1] ?? ''
-      if (wanted.toLowerCase() === 'auto') await $.store.delete('lang')
-      else if (langOf(wanted) !== null) await $.store.set('lang', langOf(wanted))
-      else return { text: (await wordsOf($)).langUnknown }
-      await settleLang($, options)
+      const preference = wanted.toLowerCase() === 'auto' ? null : langOf(wanted)
+      if (preference === null && wanted.toLowerCase() !== 'auto') return { text: (await wordsOf($)).langUnknown }
+      const hasOwnData = await ownConnectData($)
+      if (!hasOwnData) {
+        if (preference === null) await $.store.delete('lang')
+        else await $.store.set('lang', preference)
+      }
+      await settleLang($, options, hasOwnData ? preference : undefined)
       $.ui.invalidate('ui.render')
       await refreshStatus($)
       // The board script and the board commands take the language just settled, `auto`
       // included, at once and at every later connect, so a session in another language, or a
       // `/progress connect` run by hand with autoConnect off, leaves them so.
       try {
+        if (hasOwnData) return { text: (await wordsOf($)).langSet }
         await connectAgents($, 'language', options, { boardLang: (await wordsOf($)).lang })
         await autoConnect($, options)
-      } catch (error) { return { text: (await wordsOf($)).connectWorkerFailed(workerProblem(error)) } }
+      } catch (error) { return { text: workerFailure(await wordsOf($), workerProblem(error)) } }
 
       return { text: (await wordsOf($)).langSet }
     }
@@ -2187,10 +2234,21 @@ export const register: Register = (on, options) => {
     if (connect !== null) {
       try {
         const mode = /^(status|狀態|状态)$/i.test(connect[1] ?? '') ? 'status' : connect[1] !== undefined ? 'remove' : 'connect'
+        // Status describes the finished startup attempt, including a skipped gate.
+        if (mode === 'status') await backgroundConnect
+        const hasOwnData = await ownConnectData($)
+        if (mode === 'status' && hasOwnData) {
+          const setup = setupSeed(await $.store.get('ownSetupState'))
+          return { text: [await ownConnectConfig($) ? s.setupOwnData : await $.store.get('autoConnectOff') === true || (await connectRecord($))?.disabled === true ? s.setupRemoved : s.setupProgressAutoOff, ...(setup === undefined ? [] : setupLines(setup, s))].join('\n') }
+        }
         const reply = await connectAgents($, mode, options)
+        if (hasOwnData) {
+          if (reply.state.setup === undefined) await $.store.delete('ownSetupState')
+          else await $.store.set('ownSetupState', reply.state.setup)
+        }
         if (mode === 'status') return { text: reply.state.setup === undefined ? reply.state.disabled ? s.setupRemoved : s.setupNoState : setupLines(reply.state.setup, s).join('\n') }
         return { text: reply.result?.text ?? s.setupNoState }
-      } catch (error) { return { text: s.connectWorkerFailed(workerProblem(error)) } }
+      } catch (error) { return { text: workerFailure(s, workerProblem(error)) } }
     }
     const add = /^(?:加|新增|add|[+＋])\s*(.*)$/is.exec(arg)
     if (add !== null) return { text: await quickAdd($, add[1] ?? '') }

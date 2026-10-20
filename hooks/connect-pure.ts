@@ -745,6 +745,74 @@ export const nodeVersionOf = (printed: string): string | null => {
 }
 export const isNodeSupported = (version: string): boolean => Number(/^v(\d+)\./.exec(version)?.[1] ?? 0) >= NODE_MIN
 
+export const connectPath = (path: string, isWindows: boolean): string => {
+  const parts: string[] = []
+  for (const part of path.replace(/\\/g, '/').split('/')) {
+    if (part === '.' || part === '') continue
+    if (part === '..' && parts.length > 0 && parts.at(-1) !== '..') parts.pop()
+    else parts.push(part)
+  }
+  const normalized = (path.startsWith('/') || path.startsWith('\\') ? '/' : '') + parts.join('/')
+  return isWindows ? normalized.toLowerCase() : normalized
+}
+
+// Another folder's unfinished connection whose file stays unreadable names that file error.
+export const recoveryUnreadableCode = (problem: string): string | undefined => /^RECOVERY_UNREADABLE_(E[A-Z]{2,15})$/.exec(problem)?.[1]
+export const connectRecordPath = (home: string): string => [home.replace(/[\\/]+$/, ''), '.agent-board', 'legacy-connect.json'].join(home.includes('\\') ? '\\' : '/')
+
+export const hasOwnConnectData = (home: string, config: string, progress: string, isWindows: boolean, connectedProgress?: string): boolean => {
+  const folder = connectPath(`${home}/.claude`, isWindows)
+  const path = connectPath(progress, isWindows)
+  return (config !== '' && connectPath(config, isWindows) !== folder)
+    || path !== `${folder}/progress.md` && (connectedProgress === undefined || path !== connectPath(connectedProgress, isWindows))
+}
+
+// Hermes saves Unicode paths and wrapped commands with YAML escapes that JSON cannot read.
+const yamlDoubleQuoted = (quoted: string): string => quoted.slice(1, -1)
+  .replace(/\\(\r?\n[ \t]*|x[0-9A-Fa-f]{2}|u[0-9A-Fa-f]{4}|U[0-9A-Fa-f]{8}|[\s\S])|[ \t]*\r?\n[ \t]*/g, (_, escaped: string | undefined) => {
+    if (escaped === undefined) return ' '
+    if (/^\r?\n/.test(escaped)) return ''
+    if (escaped.length > 1) {
+      const point = parseInt(escaped.slice(1), 16)
+      return point <= 0x10ffff ? String.fromCodePoint(point) : ''
+    }
+    return ({ n: '\n', t: '\t', r: '\r', '0': '\0', a: '\x07', b: '\b', e: '\x1b', f: '\f', v: '\v', N: '\x85', _: '\xa0', L: '\u2028', P: '\u2029' } as Record<string, string>)[escaped] ?? escaped
+  })
+
+// Read path data in the formats we write, including JSON-escaped command strings and
+// the numeric literal paths used for board commands with shell-sensitive names.
+export const connectDataRoots = (text: string, isNearestOnly = false): string[] => {
+  const strings = [text, text.replace(/\r?\n[ \t]*/g, ' ')]
+  for (const source of [...strings]) for (const match of source.matchAll(/(?<=^|[\s:\-\[,{=(])"(?:\\[\s\S]|[^"\\])*"/g)) {
+    try { const value: unknown = JSON.parse(match[0]); if (typeof value === 'string') strings.push(value) }
+    catch { strings.push(yamlDoubleQuoted(match[0])) }
+  }
+  const roots = new Set<string>()
+  for (const value of [...strings]) {
+    for (const match of value.matchAll(/String\.fromCodePoint\((\d+(?:,\d+)*)\)/g)) {
+      const points = match[1]!.split(',').map(Number)
+      if (points.length < 32768 && points.every(point => point <= 0x10ffff)) strings.push(String.fromCodePoint(...points))
+    }
+  }
+  for (const source of strings) {
+    // POSIX commands escape an apostrophe by closing and reopening the quote;
+    // YAML single-quoted scalars double it instead.
+    for (const value of new Set([
+      source, source.replace(/'\\''/g, "'"), source.replace(/''/g, "'"),
+      source.replace(/''/g, "'").replace(/'\\''/g, "'"),
+    ])) {
+      for (const match of value.matchAll(/(?:[A-Za-z]:[\\/]|\/)[^"`\r\n]*?[\\/](?:progress-report\.(?:ps1|sh)|agent-board\.mjs|progress-inbox)(?=["'`\s,;)]|$)/g)) {
+        const found = match[0]
+        const starts = [...found.matchAll(/(?<=^|[\s'"=(])(?:[A-Za-z]:[\\/]|\/)/g)]
+        for (const start of isNearestOnly ? starts.slice(-1) : starts) {
+          roots.add(found.slice(start.index).replace(/[\\/][^\\/]+$/, ''))
+        }
+      }
+    }
+  }
+  return [...roots]
+}
+
 // What a session start found for each agent here, so a written hook is never taken for a
 // working board, and `/progress connect status` can say it again later.
 export type HookState = 'configured' | 'failed' | 'unreadable' | 'tooOld'
@@ -756,6 +824,9 @@ type ProblemArgs<T> = {
     : never
 }
 export const PROBLEM_ARGS = {
+  connectOtherData: ['string'],
+  connectOtherRecovery: [],
+  connectCheckUnreadable: ['string'],
   connectPreserved: ['string'],
   connectRemoveFailed: ['string'],
   connectBoardRetained: ['string'],
@@ -792,6 +863,7 @@ export const setupProblemText = (problem: SetupProblem, s: Strings = ZH_TW): str
   if ('text' in problem) return problem.text
   // The repeated branches exist only so the type checker sees each call's argument types.
   switch (problem.message) {
+    case 'connectOtherRecovery':
     case 'setupCodexApproval': return s[problem.message]()
     case 'setupNodeMissing': return s[problem.message](...problem.args)
     case 'setupNodeOld': return s[problem.message](...problem.args)
