@@ -1,6 +1,6 @@
 import { spawn, spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, unlinkSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, unlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { test } from 'node:test'
@@ -1165,6 +1165,8 @@ test('L5 locked file: the hook retries, exits 0, and the Stop event lands on the
   assert.doesNotMatch(text, /"(?:prompt|transcript(?:_path)?|tool_input|last_assistant_message)"\s*:|PRIVATE_/)
   const entry = JSON.parse(text)
   assert.equal(entry.version, 1)
+  assert.ok(Number.isFinite(entry.at))
+  assert.ok(files[0].startsWith(`${String(entry.at).padStart(15, '0')}-`))
   assert.equal(entry.progress, f.progress)
   assert.deepEqual(entry.payload, { session_id: session, hook_event_name: 'Stop', turn_id: 'turn-1' })
   unlinkSync(locked.marker)
@@ -1273,5 +1275,112 @@ test('a queued status event older than its session\'s last report is dropped ins
   }))
   assert.equal(f.event('UserPromptSubmit').status, 0)
   assert.match(readFileSync(f.progress, 'utf8'), new RegExp(`<!-- auto session=${owner} [^\n]*state=working`))
+  assert.deepEqual(pendingFiles(f), [])
+}))
+
+test('a read-only progress.md fails in one plain line without queuing the event', { skip: process.platform !== 'win32' }, () => fixture(f => {
+  assert.equal(f.install('--apply').status, 0)
+  assert.equal(f.event('UserPromptSubmit').status, 0)
+  const before = readFileSync(f.progress)
+  try {
+    chmodSync(f.progress, 0o444)
+    const result = f.event('Stop')
+    assert.equal(result.status, 1, result.stderr)
+    assert.equal(result.stderr.trim().split(/\r?\n/).length, 1, result.stderr)
+    assert.match(result.stderr, /EPERM/)
+    assert.ok(!result.stderr.includes(f.home), result.stderr)
+    assert.doesNotMatch(result.stderr, /\bat /)
+    assert.deepEqual(pendingFiles(f), [])
+    assert.deepEqual(readFileSync(f.progress), before)
+  } finally { chmodSync(f.progress, 0o666) }
+}))
+
+test('a queued event with a system error is kept and the hook fails in one plain line', () => fixture(f => {
+  assert.equal(f.install('--apply').status, 0)
+  assert.equal(f.event('UserPromptSubmit').status, 0)
+  const owner = createHash('sha256').update(`codex:${session}`).digest('hex')
+  const record = join(f.root, 'sessions', `${owner}.json`)
+  unlinkSync(record)
+  mkdirSync(record)
+  const file = join(f.root, 'pending', '001.json')
+  const queued = JSON.stringify({
+    version: 1, progress: f.progress, mode: '--codex-event', agent: 'codex', session,
+    now: new Date().toISOString(), isBoardPrompt: false, isPrompt: false,
+    payload: { session_id: session, hook_event_name: 'Stop', turn_id: 'turn-1' },
+  })
+  f.save(file, queued)
+  const before = readFileSync(f.progress)
+  const result = f.event('SessionStart', null, { session_id: 'test-codex-session-456' })
+  assert.equal(result.status, 1, result.stderr)
+  assert.equal(result.stderr.trim().split(/\r?\n/).length, 1, result.stderr)
+  assert.match(result.stderr, /EISDIR/)
+  assert.ok(!result.stderr.includes(f.home), result.stderr)
+  assert.doesNotMatch(result.stderr, /\bat /)
+  assert.deepEqual(pendingFiles(f), ['001.json'])
+  assert.equal(readFileSync(file, 'utf8'), queued)
+  assert.deepEqual(readFileSync(f.progress), before)
+}))
+
+test('hook replay yields at its deadline while an explicit report drains every queued entry', async () => {
+  for (const mode of ['--codex-event', '--codex-report']) await fixture(f => {
+    assert.equal(f.install('--apply').status, 0)
+    assert.equal(f.event('UserPromptSubmit').status, 0)
+    const queued = {
+      version: 1, progress: f.progress, mode: '--codex-event', agent: 'codex', session,
+      now: new Date().toISOString(), isBoardPrompt: false, isPrompt: false,
+      payload: { session_id: session, hook_event_name: 'Stop', turn_id: 'turn-1' },
+    }
+    f.save(join(f.root, 'pending', '001.json'), JSON.stringify(queued))
+    f.save(join(f.root, 'pending', '002.json'), JSON.stringify(queued))
+    const preload = join(f.home, 'replay-clock.cjs')
+    f.save(preload, `const fs = require('node:fs')
+const { performance } = require('node:perf_hooks')
+let now = 0
+Object.defineProperty(performance, 'now', { value: () => now })
+const read = fs.readFileSync
+fs.readFileSync = (file, ...args) => {
+  const text = read(file, ...args)
+  if (file === ${JSON.stringify(join(f.root, 'pending', '001.json'))}) now = 2500
+  return text
+}
+require('node:module').syncBuiltinESMExports()
+`)
+    const env = { NODE_OPTIONS: `--require ${JSON.stringify(preload)}` }
+    const result = f.command([mode], mode === '--codex-report'
+      ? { title: 'Explicit report', state: 'done', steps: ['- [x] Finished'] }
+      : { session_id: 'test-codex-session-456', hook_event_name: 'SessionStart' }, env)
+    assert.equal(result.status, 0, result.stderr)
+    assert.equal(result.stderr, '')
+    if (mode === '--codex-report') {
+      assert.deepEqual(pendingFiles(f), [])
+      assert.equal(JSON.parse(result.stdout).state, 'done')
+    } else {
+      assert.equal(result.stdout, '')
+      const files = pendingFiles(f)
+      assert.equal(files.length, 2)
+      assert.ok(files.includes('002.json'))
+      assert.ok(!files.includes('001.json'))
+      const current = JSON.parse(readFileSync(join(f.root, 'pending', files.find(name => name !== '002.json')), 'utf8'))
+      assert.equal(current.session, 'test-codex-session-456')
+      assert.ok(files.some(name => name.startsWith(`${String(current.at).padStart(15, '0')}-`)))
+      assert.doesNotMatch(readFileSync(f.progress, 'utf8'), new RegExp(createHash('sha256').update('codex:test-codex-session-456').digest('hex').slice(0, 8)))
+    }
+  })
+})
+
+test('queued status events use their start time and reject invalid timestamps', () => fixture(f => {
+  assert.equal(f.install('--apply').status, 0)
+  const grok = 'test-grok-session-123'
+  const result = f.command(['--agent-status', '--agent', 'grok', '--state', 'working'], { session_id: grok })
+  assert.equal(result.status, 0, result.stderr)
+  const owner = createHash('sha256').update(`grok:${grok}`).digest('hex')
+  const saved = JSON.parse(readFileSync(join(f.root, 'sessions', `${owner}.json`), 'utf8'))
+  const at = Date.parse(saved.updated) - 1
+  for (const [index, timestamp] of [at, null, 'invalid', 'overflow'].entries()) f.save(join(f.root, 'pending', `${index}.json`), JSON.stringify({
+    version: 1, progress: f.progress, mode: '--agent-status', agent: 'grok', session: grok, status: 'waiting', at: timestamp,
+    now: new Date(Date.parse(saved.updated) + 60000).toISOString(), isBoardPrompt: false, isPrompt: false, payload: {},
+  }).replace('"at":"overflow"', '"at":1e400'))
+  assert.equal(f.event('UserPromptSubmit').status, 0)
+  assert.match(readFileSync(f.progress, 'utf8'), new RegExp(`<!-- auto session=${owner.slice(0, 8)} [^\n]*state=working`))
   assert.deepEqual(pendingFiles(f), [])
 }))

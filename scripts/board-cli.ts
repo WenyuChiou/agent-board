@@ -56,8 +56,8 @@ const s = STRINGS[langOf(flag('--lang')) ?? langOf(BAKED.lang) ?? langOf(process
 
 // Files changed since the board last read progress.md in full. A read refused because another
 // program holds the file open can say that nothing was changed only while this is 0. It is
-// cleared only after a full read, so the refresh right after a press that wrote and then failed
-// still says files may have changed.
+// cleared only after a full read, keeping writes made by that view, so a refresh right after a
+// press or view that wrote and then failed still says files may have changed.
 let writes = 0
 
 class BoardFileError extends Error {
@@ -357,6 +357,13 @@ const view = (source = read(path), now = Date.now()) => {
   return { ...buildView(projects, [basename(process.cwd())], null, now, countDay(read(journalPath(path, now)), now), manualDoneSeen(projects, seen, now, s), s, answered, seen, questions, readQuestionProofs(), turns), ...(tail === null ? {} : { warning: s.progressIncomplete(tail.tasks) }) }
 }
 
+const freshView = () => {
+  const before = writes
+  const shown = view()
+  writes -= before
+  return shown
+}
+
 const pad = (n: number): string => String(n).padStart(2, '0')
 
 const options = () => ({
@@ -650,15 +657,14 @@ const failureNote = (error: unknown): string => {
   if (!(error instanceof BoardFileError)) throw error
   process.exitCode = 1
   const note = error.isLocked ? s.boardLocked(basename(error.file)) : s.boardStorageFailed(error.file, error.code)
-  // The board's one-line status is clipped to terminal width; keep the full path and
-  // recovery advice on stderr too, including for an agent using --keys.
+  // The board's one-line status is clipped to terminal width; stderr keeps the storage failure's
+  // full path and recovery advice too, including for an agent using --keys.
   process.stderr.write(`${note}\n`)
   return note
 }
 
 const press = (state: BoardState, key: string): { state: BoardState; isQuit: boolean; isHtml: boolean; isWrite: boolean } => {
-  const shown = view()
-  writes = 0
+  const shown = freshView()
   const items = boardItems(shown, pending(), state.isIdleOpen ?? false, state.isOlderOpen ?? false)
   const { state: next, action } = boardKey(state, key, items, s)
   if (action === null) return { state: next, isQuit: false, isHtml: false, isWrite: false }
@@ -800,11 +806,7 @@ const serveChild = (): void => {
     port: Number(flag('--port') ?? 0) || 0,
     ping: { path, built, idleMs: idleMs(), allowResume: args.includes('--allow-resume'), messagesDirectory: flag('--messages-dir') ? resolve(flag('--messages-dir')!) : null },
     // Every page request starts by reading the board.
-    view: () => {
-      const shown = view()
-      writes = 0
-      return shown
-    },
+    view: freshView,
     pending,
     act,
     tidy,
@@ -1028,8 +1030,7 @@ const run = async (): Promise<void> => {
     // The fingerprints kept are those of the very lines this screen shows: one read does both.
     const draw = (): void => {
       try {
-        const shown = view()
-        writes = 0
+        const shown = freshView()
         const turns = pending()
         state = pinned(state, boardItems(shown, turns, state.isIdleOpen ?? false, state.isOlderOpen ?? false))
         process.stdout.write(`\u001b[2J\u001b[H${boardScreen(shown, turns, state, s, options())}`)
@@ -1079,8 +1080,7 @@ const run = async (): Promise<void> => {
     // Not a terminal (piped, or an agent's tool): no keys to read, so it only redraws.
     const tick = () => {
       try {
-        const shown = view()
-        writes = 0
+        const shown = freshView()
         process.stdout.write(`\u001b[2J\u001b[H${boardText(shown, pending(), s, options())}\n${s.boardWatching}\n`)
       } catch (error) {
         process.stdout.write(`\u001b[2J\u001b[H${failureNote(error)}\n`)

@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto'
-import { closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, readdirSync, renameSync, unlinkSync, writeFileSync } from 'node:fs'
+import { closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, readdirSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { performance } from 'node:perf_hooks'
@@ -36,7 +36,7 @@ const object = (value: unknown): Json => {
 }
 const atomic = (file: string, text: string | Buffer): void => {
   mkdirSync(dirname(file), { recursive: true })
-  const temporary = `${file}.${process.pid}.tmp`
+  const temporary = `${file}.${process.pid}.${randomUUID()}.tmp`
   const fd = openSync(temporary, 'wx', 0o600)
   let isOpen = true
   try {
@@ -140,6 +140,7 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
   const output = (value: unknown): void => { process.stdout.write(`${JSON.stringify(value, null, 2)}\n`) }
 
   if (mode === '--codex-event' || mode === '--codex-report' || mode === '--agent-status') {
+    const started = Date.now()
     const raw = await input()
     const payload = agent === 'cursor' && mode === '--codex-event' ? cursorEvent(raw) : raw
     // Only metadata selected below is retained. Never open transcript_path or save prompts,
@@ -157,22 +158,27 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
     const isBoardPrompt = (isPromptEvent(raw) || raw.prompt_submitted === true) && (raw.board_request === true || isBoardRequest(raw, boardRequestWords(Object.values(STRINGS))))
     const isPrompt = !isBoardPrompt && mode === '--agent-status' && status === 'working' && (payload.prompt_submitted === true || /^(?:UserPromptSubmit|user_prompt_submit|BeforeAgent)$/.test(String(payload.hook_event_name ?? payload.hookEventName)))
     type Pending = {
-      version: number; progress: string; mode: string; agent: LocalAgent; session: string; now: string
+      version: number; progress: string; mode: string; agent: LocalAgent; session: string; now: string; at?: number
       status: unknown; event?: string; isBoardPrompt: boolean; isPrompt: boolean; payload: Json
     }
     // A queued event keeps metadata only: the host's own fields stay out, as they do above.
     const current: Pending = {
-      version: 1, progress, mode, agent, session, now, status: mode === '--agent-status' ? status : undefined, event, isBoardPrompt, isPrompt,
+      version: 1, progress, mode, agent, session, now, at: started, status: mode === '--agent-status' ? status : undefined, event, isBoardPrompt, isPrompt,
       payload: mode === '--codex-report' ? payload : mode === '--codex-event' ? {
         session_id: payload.session_id, hook_event_name: payload.hook_event_name,
         turn_id: payload.turn_id, prompt_submitted: payload.prompt_submitted,
       } : {},
     }
     // A program holding progress.md open makes Windows refuse its read (EBUSY) and the rename
-    // onto it (EPERM). Any other EPERM or EACCES is a real refusal and fails as before.
+    // onto it (EPERM). A read-only progress.md fails the rename with the same EPERM, so its
+    // read-only flag tells it apart and it fails. A refusal from the file's access list is
+    // not told apart and is treated as a lock.
+    const isWritable = (): boolean => {
+      try { return (statSync(progress).mode & 0o200) !== 0 } catch { return true }
+    }
     const isBusy = (error: unknown): boolean => {
       const failure = error as { code?: string; syscall?: string; dest?: string } | null
-      const isLockedRename = process.platform === 'win32' && failure?.code === 'EPERM' && failure.syscall === 'rename' && typeof failure.dest === 'string' && resolve(failure.dest) === progress
+      const isLockedRename = process.platform === 'win32' && failure?.code === 'EPERM' && failure.syscall === 'rename' && typeof failure.dest === 'string' && resolve(failure.dest) === progress && isWritable()
       return failure?.code === 'EBUSY' || failure?.code === 'EAGAIN' || isLockedRename || error instanceof Error && error.message === 'LOCK_BUSY'
     }
     const apply = ({ mode, agent, session, now, status, event, isBoardPrompt, isPrompt, payload }: Pending): CodexReport => {
@@ -217,26 +223,40 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
       (entry.mode === '--codex-event' || entry.mode === '--agent-status' && entry.agent !== 'codex' && entry.agent !== 'cursor' && ['working', 'waiting', 'ended'].includes(String(entry.status)))
       && localAgents.includes(entry.agent) && /^[a-zA-Z0-9][a-zA-Z0-9_-]{5,127}$/.test(String(entry.session))
       && typeof entry.now === 'string' && typeof entry.isPrompt === 'boolean' && typeof entry.isBoardPrompt === 'boolean'
+      && (!Object.hasOwn(entry, 'at') || typeof entry.at === 'number' && Number.isFinite(entry.at))
       && (entry.event === undefined || entry.agent === 'antigravity' && entry.mode === '--agent-status' && statusEvents.antigravity?.[entry.event] === entry.status)
       // A live event's own session_id is either missing or the session it is filed under.
       && (entry.mode !== '--codex-event' || [undefined, entry.session].includes(object(entry.payload).session_id as string | undefined))
     // A status event has no turn to order it by: one that lands behind a newer event of its
-    // session would move that session back, so it is dropped instead. `now` keeps whole seconds,
-    // so an older event from the same second as the session's last report is not caught and applies.
+    // session would move that session back, so it is dropped instead. `at` keeps the event's
+    // start time in milliseconds; older queued entries fall back to their whole-second `now`.
+    // The session's saved `updated` keeps whole seconds, so an older status event from the same
+    // second as the session's last report is still not caught and applies.
     const isOverdue = (entry: Pending): boolean => {
       if (entry.mode !== '--agent-status') return false
       const saved = readLocal(join(root, 'sessions', `${hash(`${entry.agent}:${entry.session}`)}.json`))
-      return saved !== null && Date.parse(entry.now) < Date.parse(String(object(JSON.parse(saved)).updated))
+      return saved !== null && (entry.at ?? Date.parse(entry.now)) < Date.parse(String(object(JSON.parse(saved)).updated))
     }
-    const deadline = performance.now() + 1800
+    // Only hooks have the 2.4 s cap to stay within their 3 s timeout.
+    const deadline = mode === '--codex-report' ? performance.now() + 1800 : Math.min(performance.now() + 1800, 2400)
+    const queue = (error: unknown): void => {
+      mkdirSync(pending, { recursive: true })
+      if (pendingFiles().length >= 64) throw error
+      atomic(join(pending, `${String(started).padStart(15, '0')}-${randomUUID()}.json`), `${JSON.stringify(current)}\n`)
+    }
     let delay = 50
     let report: CodexReport | undefined
     for (;;) {
       try {
         report = withLocalLock(`${progress}.agent-board-lock`, () => {
           // Queued events go first, oldest first, so every session's events land in the order
-          // they happened. One that can never apply is dropped rather than block the rest.
+          // they happened. Invalid or missing entries are dropped; system errors keep them for retry.
           for (const name of pendingFiles()) {
+            // Stay within the 3 s hook timeout: a killed lock holder leaves the stale-lock wait.
+            if (mode !== '--codex-report' && performance.now() >= deadline) {
+              queue(Object.assign(new Error('LOCK_BUSY'), { code: 'EBUSY' }))
+              return
+            }
             const file = join(pending, name)
             try {
               const entry = object(JSON.parse(readFileSync(file, 'utf8'))) as Pending
@@ -245,7 +265,8 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
                 if (!isOverdue(entry)) apply(entry)
               }
             } catch (error) {
-              if (isBusy(error)) throw error
+              const code = (error as { code?: unknown } | null)?.code
+              if (isBusy(error) || typeof code === 'string' && code !== 'ENOENT' || error instanceof Error && error.message === 'INCOMPLETE_PROGRESS_TAIL') throw error
             }
             // Two boards sharing one data folder can both drop the same entry.
             try { unlinkSync(file) } catch (error) {
@@ -260,9 +281,7 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
         const left = deadline - performance.now()
         if (left <= 0) {
           if (mode === '--codex-report') throw error
-          mkdirSync(pending, { recursive: true })
-          if (pendingFiles().length >= 64) throw error
-          atomic(join(pending, `${String(Date.now()).padStart(15, '0')}-${randomUUID()}.json`), `${JSON.stringify(current)}\n`)
+          queue(error)
           break
         }
         await new Promise(done => setTimeout(done, Math.min(delay, left)))

@@ -3575,3 +3575,28 @@ test('reopening a board replaces an explicit resume opt-in when that flag is rem
     }
   } finally { await board.end(urls) }
 })
+
+test('a watch view that captured a question before progress.md was locked says files may have changed', () => {
+  const ran = chatRun(['--watch'], {
+    inspect: questionFiles,
+    preload: questionFault(`let isHeld = false
+const read = fs.readFileSync
+fs.readFileSync = (file, ...args) => {
+  if (isHeld && file === path.join(__dirname, 'progress.md')) throw Object.assign(new Error('injected busy read'), { code: 'EBUSY' })
+  return read(file, ...args)
+}
+const write = process.stdout.write.bind(process.stdout)
+process.stdout.write = (chunk, ...args) => {
+  const result = write(chunk, ...args)
+  if (isHeld) process.exit(1)
+  isHeld = true
+  return result
+}
+global.setInterval = callback => { callback(); return { unref() {} } }
+`),
+  })
+  assert.equal(ran.status, 1, ran.stderr)
+  assert.ok(Object.keys(ran.files).some(name => name.startsWith('progress-questions-source-')), JSON.stringify(Object.keys(ran.files)))
+  assert.match(ran.stderr, /Some files may already have changed\./)
+  assert.doesNotMatch(ran.stderr, /nothing was changed|locked by another program/)
+})
