@@ -1654,7 +1654,8 @@ const keepInboxQuestions = async ($: EngineInterface, captured: readonly Pending
       if (steps.length > 0 && !steps.some(step => step.status === 'waiting')) await discard(key)
     }
     pending = pending.filter(([key]) => pendingInboxQuestions.has(key))
-    // #149: Thread the branch's answer evidence through this retry too.
+    // A record created here is settled by the next pollAnsweredQuestions pass, which carries the
+    // remembered answers.
     if (pending.length > 0 && !(await pollQuestions($, path, projects, false, pending.map(([, turn]) => turn)))) {
       await pendingQuestionsProblem($, true)
       return
@@ -1819,7 +1820,13 @@ const drainInbox = async ($: EngineInterface): Promise<void> => {
         const home = ((await $.env.get('USERPROFILE')) ?? (await $.env.get('HOME')) ?? '').replace(/[\\/]+$/, '')
         await takeAgentTurns($, group.flatMap(one => (one.turn === null || one.turn === undefined ? [] : [one.turn])), 0, isLastTry)
         const questions = peekInbox(group.flatMap(one => one.body === undefined ? [] : [{ name: one.name, body: one.body, at }]), () => '', text => redact(text, home, isWin)).filter(turn => turn.isQuestion)
-        if (questions.length > 0) await retainInboxQuestions($, questions)
+        if (questions.length > 0) {
+          await retainInboxQuestions($, questions)
+          // A question and its answer can arrive in one look: the answer was remembered before
+          // the question was kept, so it settles now instead of at the next poll.
+          const asked = new Set(questions.map(one => JSON.stringify([one.agent, one.id])))
+          if ([...answeredPending.keys()].some(key => asked.has(key))) await pollAnsweredQuestions($, await progressPath($), undefined)
+        }
         settled.push(...group)
       } catch (error) {
         const why = (error instanceof Error ? error.message : String(error)).replace(/\s+/g, ' ').slice(0, 200)
