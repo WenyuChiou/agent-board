@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- **Working notes name the agent doing the work (#154).** A Codex or other agent's block no longer says “Claude is working”, including after a prompt receipt. Existing notes correct themselves the next time their block is written. Waiting notes name no agent in all three languages, and the English waiting note now reads “Waiting for your next message” instead of “waiting on your reply”, since a waiting session is idle, not asking a question. `docs/FORMAT.md` shows the new words. Tests: `a Codex block set to working says Codex is working, not Claude`, `every agent's working block names that agent`, `a Claude block keeps its working and waiting words`, `the waiting line names no agent`.
+
 ## 0.23.5 — 2026-10-19
 
 - **A second `--serve` with another `--idle-minutes` keeps the open page (#166).** It used to stop the running page and start a new one, so the open tab stopped working and a reply typed there but not yet sent was lost. It now reuses the running page and, when that page's idle time differs from the one asked for, prints the one in effect. Tests: `--serve with a different idle preference reuses the running page and reports its effective timeout`, `--serve with an idle time that is not a number starts no page`.
