@@ -42,6 +42,9 @@ const dataRootHosts = f => {
   f.run(f.request('connect', { progress, openclawVersion: '2026.10.1' }))
   return progress
 }
+// A board path with characters such as `~` (a Windows short name, as on CI runners) is written
+// into skills and commands as code points; read those back before looking for a folder name.
+const decoded = text => text.replace(/String\.fromCodePoint\(([\d,]+)\)/g, (_, codes) => String.fromCodePoint(...codes.split(',').map(Number)))
 const snapshot = directory => Object.fromEntries(readdirSync(directory, { withFileTypes: true }).flatMap(entry => {
   const path = join(directory, entry.name)
   return entry.isDirectory() ? Object.entries(snapshot(path)) : [[path, readFileSync(path, 'utf8')]]
@@ -502,7 +505,7 @@ test('connecting by hand from a second data folder moves the hosts and says so',
   assert.match(output.result.text, /These agents now report to this board/)
   assert.equal(output.result.problems.some(problem => problem.message === 'connectOtherData' || problem.message === 'connectPreserved'), false)
   for (const path of [f.config, join(f.home, '.gemini/settings.json'), join(f.home, '.cursor/hooks.json'), join(f.home, '.hermes/config.yaml'), join(f.home, '.agents/skills/agent-board/SKILL.md'), join(f.home, '.gemini/commands/board.toml')]) {
-    assert.ok(readFileSync(path, 'utf8').includes('other-root'), path)
+    assert.ok(decoded(readFileSync(path, 'utf8')).includes('other-root'), path)
   }
 }))
 
