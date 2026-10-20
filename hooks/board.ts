@@ -225,7 +225,7 @@ const OTHER_HOMES = new RegExp(`(?<![\\w.-])(?:[A-Za-z]:[\\\\/]Users|\\/mnt\\/[A
 // that is never closed hides the rest of the line: where the value ends is not known. The name
 // before the keyword is kept short, so a long unbroken word is not tried from every letter.
 const VALUE = `"[^"\\n]*(?:"|$)|'[^'\\n]*(?:'|$)|\\S+`
-const ASSIGNED = new RegExp(`([\\w-]{0,40}(?:key|secret|token|pass(?:word|wd)?|pwd|credentials?)["']?[ \\t]*[:=][ \\t]*)(?:${VALUE})`, 'gim')
+const ASSIGNED = new RegExp(`([\\w-]{0,40}(?:key|secret|token|pass(?:word|wd)?|pwd|credentials?)["']?[ \\t]*[:=][ \\t]*)(${VALUE})`, 'gim')
 const FLAG = new RegExp(`(--(?:password|token|secret|api-key)[= ])(?:${VALUE})`, 'gim')
 const BEARER = /\b(Bearer)\s+\S+/gi
 // "Basic" is also a plain word ("Basic setup"): what follows must look like an encoded
@@ -258,7 +258,12 @@ export const redact = (text: string, home: string, isWindows = false): string =>
     .replace(FLAG, `$1${MASK}`)
     .replace(BEARER, `$1 ${MASK}`)
     .replace(BASIC, `$1 ${MASK}`)
-    .replace(ASSIGNED, `$1${MASK}`)
+    .replace(ASSIGNED, (assignment, head: string, value: string) => {
+      // A bare key/token label can describe a quota or other ordinary work. Explicit
+      // assignments, quoted values and long tokens stay private; known prefixes go below.
+      const isDescription = /^(?:key|token)[ \t]*:[ \t]*$/i.test(head) && value.length < 20 && !/[=:'"]/.test(value)
+      return isDescription ? assignment : `${head}${MASK}`
+    })
     .replace(PREFIXED, MASK)
 }
 

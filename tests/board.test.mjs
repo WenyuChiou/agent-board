@@ -339,6 +339,21 @@ test('--chat hides the home folder, with a space in its name, and the credential
   assert.ok(!unreadable.stdout.includes(unreadable.home) && !unreadable.stdout.includes('Jane Doe') && !unreadable.stderr.includes('Jane Doe'), unreadable.stdout + unreadable.stderr)
 })
 
+test('--chat keeps ordinary key and token budget text readable while hiding synthetic credentials', () => {
+  const long = 'abcdef0123456789abcdef0123456789'
+  const ran = chatRun(['--chat'], { file: () => `## synthetic
+### Per-key limit — key: 100
+- [~] token budget: 5
+### Private credentials
+- [~] key=short-value token: ghp_abc123 password: hunter2 key: ${long}
+` })
+  assert.equal(ran.status, 0, ran.stderr)
+  assert.ok(ran.stdout.includes('Per-key limit — key: 100') && ran.stdout.includes('token budget: 5'), ran.stdout)
+  assert.ok(ran.stdout.includes('key=••• token: ••• password: ••• key: •••'), ran.stdout)
+  for (const secret of ['short-value', 'ghp_abc123', 'hunter2', long]) assert.ok(!ran.stdout.includes(secret), ran.stdout)
+  assert.deepEqual([ran.wrote, ran.modified, ran.served], [[], [], []])
+})
+
 test('--chat that fails for a reason that is no file says so in one plain line with the home folder hidden, never as a stack trace', () => {
   // The journal call is made to throw an error that names the home folder, as a bug in it might.
   const call = 'doneToday(read('

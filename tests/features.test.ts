@@ -1716,6 +1716,27 @@ test('a chat board shows unprocessed reports with honest age instead of a false 
   }
 })
 
+test('chat redaction keeps ordinary bare key and token labels while masking explicit and recognizable credentials', () => {
+  for (const text of ['Per-key limit — key: 100', 'token budget: 5', 'key: left', 'token: budget']) {
+    expect(redact(text, '/home/synthetic')).toBe(text)
+  }
+  for (const [text, masked] of [
+    ['key=100', 'key=•••'],
+    ['token=short-value', 'token=•••'],
+    ['{"token":123456}', '{"token":•••'],
+    ["{'key':123456}", "{'key':•••"],
+    ['key: "short value"', 'key: •••'],
+    ["token: 'short value\nnext line", 'token: •••\nnext line'],
+    ['API_KEY: short-value', 'API_KEY: •••'],
+    ['password: hunter2', 'password: •••'],
+    ['key: sk-abc123', 'key: •••'],
+    ['token: ghp_abc123', 'token: •••'],
+    ['key: abcdef0123456789abcdef0123456789', 'key: •••'],
+    ['key: token=abc123', 'key: •••'],
+    ['token: password:hunter2', 'token: •••'],
+  ]) expect(redact(text!, '/home/synthetic')).toBe(masked!)
+})
+
 test('chat pending reports follow questions and share redaction and omission limits', () => {
   const secret = 'sk-' + 'a'.repeat(80)
   const updates = Array.from({ length: 80 }, (_, index) => ({ agent: 'codex', project: 'exports', text: `Update ${index}: /home/jane/private ${secret} ${'details '.repeat(100)}`, isQuestion: false, at: CHAT_NOW }))

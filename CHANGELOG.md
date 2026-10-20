@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Keep short ordinary values after bare `key:` and `token:` labels readable in chat output (#167). Explicit assignments, quotes, credential-specific names, long values and known token prefixes remain redacted, including nested assignments. Tests: `chat redaction keeps ordinary bare key and token labels while masking explicit and recognizable credentials`, `--chat keeps ordinary key and token budget text readable while hiding synthetic credentials`.
+
 ## 0.23.4 — 2026-10-19
 
 - **Local setup no longer rounds large ids in an agent's config (#160).** `--codex-setup` and `--codex-remove` read an agent's JSON config with a plain parse and wrote it back, so an id past 2^53 in `openclaw.json` or a `hooks.json` (a Telegram or Discord id) came back rounded, and the bot stopped answering that person. They now read it as the connect path does: a config that is not a JSON object, or holds a number a parse would change, is one conflict, and nothing is written. This also changes two cases that used to stop setup with a parse error: a config that is not valid JSON is now a listed conflict, and an existing empty config is read as `{}`. Tests: `local setup leaves an openclaw.json holding an id past 2^53 untouched and reports the conflict`, `local setup leaves a hooks.json holding an id past 2^53 untouched and reports the conflict`, `local removal leaves native configs holding ids past 2^53 untouched and reports conflicts`, `local setup reports a config that is not valid JSON as one conflict and leaves it untouched`; `local setup preserves native config formatting when its content does not change` covers the unchanged-file case that already held.
