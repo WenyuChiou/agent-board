@@ -13,6 +13,7 @@ import { progressTail } from '../hooks/parse'
 import { antigravityHooks, cursorEvent, cursorEvents, lifecycleCapability, localAgents, opencodePlugin, statusEvents } from '../hooks/local-agents'
 import type { LocalAgent } from '../hooks/local-agents'
 import { deepseekLocalPlugin, deepseekPatch, openclawLocalPlugin } from '../hooks/portable-agents'
+import { HOOK_VERSION, hookBootstrap, hookWorker, hostHookTimeout } from '../hooks/hook-safety'
 import { trustCodex } from './codex-host'
 import { withLocalLock } from './local-lock'
 import { withInstallLock } from './install-control'
@@ -34,7 +35,7 @@ const object = (value: unknown): Json => {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('INVALID_JSON_OBJECT')
   return value as Json
 }
-const atomic = (file: string, text: string | Buffer): void => {
+const atomic = (file: string, text: string | Buffer, current: () => void = () => {}): void => {
   mkdirSync(dirname(file), { recursive: true })
   const temporary = `${file}.${process.pid}.${randomUUID()}.tmp`
   const fd = openSync(temporary, 'wx', 0o600)
@@ -43,6 +44,7 @@ const atomic = (file: string, text: string | Buffer): void => {
     writeFileSync(fd, text)
     closeSync(fd)
     isOpen = false
+    current()
     renameSync(temporary, file)
   } finally {
     if (isOpen) closeSync(fd)
@@ -141,7 +143,13 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
 
   if (mode === '--codex-event' || mode === '--codex-report' || mode === '--agent-status') {
     const started = Date.now()
+    const value = flag('--hook-deadline')
+    const hookDeadline = value === undefined ? Infinity : Number(value)
+    if (value !== undefined && !Number.isSafeInteger(hookDeadline)) throw new Error('INVALID_HOOK_DEADLINE')
+    const checkDeadline = (): void => { if (Date.now() >= hookDeadline) throw new Error('HOOK_TIMEOUT') }
+    checkDeadline()
     const raw = await input()
+    checkDeadline()
     const payload = agent === 'cursor' && mode === '--codex-event' ? cursorEvent(raw) : raw
     // Only metadata selected below is retained. Never open transcript_path or save prompts,
     // tool inputs, last_assistant_message, or permission decisions from a hook payload.
@@ -207,12 +215,14 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
         ...report, title: encoded(report.title), project: encoded(report.project), steps: report.steps.map(encoded),
       }, owner), 'latin1')
       const aside = repaired.fragment === null ? null : saveReporterTail(progress, repaired.fragment)
-      try { atomic(progress, next) } catch (error) {
+      try { atomic(progress, next, checkDeadline) } catch (error) {
         if (aside !== null) {
           try { unlinkSync(aside) } catch {}
         }
         throw error
       }
+      // Once progress.md holds the event the session record follows it even past the
+      // deadline: a record left behind would make the next Stop fail as a stale turn.
       atomic(recordFile, `${JSON.stringify(report, null, 2)}\n`)
       return report
     }
@@ -238,17 +248,31 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
       return saved !== null && (entry.at ?? Date.parse(entry.now)) < Date.parse(String(object(JSON.parse(saved)).updated))
     }
     // Only hooks have the 2.4 s cap to stay within their 3 s timeout.
-    const deadline = mode === '--codex-report' ? performance.now() + 1800 : Math.min(performance.now() + 1800, 2400)
+    const retryDeadline = mode === '--codex-report' ? performance.now() + 1800 : Math.min(performance.now() + 1800, 2400)
+    const inheritedDeadline = performance.now() + (hookDeadline - Date.now())
+    // Stop 200 ms before the inherited deadline, when the hook worker kills this process:
+    // a process killed while holding the board lock blocks every hook until the lock goes stale.
+    const deadline = Math.min(retryDeadline, inheritedDeadline - 200)
+    let queuedFile: string | undefined
     const queue = (error: unknown): void => {
+      if (queuedFile !== undefined) return
       mkdirSync(pending, { recursive: true })
       if (pendingFiles().length >= 64) throw error
-      atomic(join(pending, `${String(started).padStart(15, '0')}-${randomUUID()}.json`), `${JSON.stringify(current)}\n`)
+      const file = join(pending, `${String(started).padStart(15, '0')}-${randomUUID()}.json`)
+      atomic(file, `${JSON.stringify(current)}\n`, checkDeadline)
+      queuedFile = file
     }
     let delay = 50
     let report: CodexReport | undefined
     for (;;) {
       try {
+        checkDeadline()
         report = withLocalLock(`${progress}.agent-board-lock`, () => {
+          checkDeadline()
+          // A hook with a backlog to replay saves its own event first: if the replay runs out
+          // of time, the queue write itself would be past the deadline and the event lost.
+          const backlog = pendingFiles().length
+          if (value !== undefined && mode !== '--codex-report' && backlog > 0 && backlog < 64) queue(Object.assign(new Error('LOCK_BUSY'), { code: 'EBUSY' }))
           // Queued events go first, oldest first, so every session's events land in the order
           // they happened. Invalid or missing entries are dropped; system errors keep them for retry.
           for (const name of pendingFiles()) {
@@ -258,6 +282,7 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
               return
             }
             const file = join(pending, name)
+            if (file === queuedFile) continue
             try {
               const entry = object(JSON.parse(readFileSync(file, 'utf8'))) as Pending
               if (entry.version === 1 && typeof entry.progress === 'string' && isHookEntry(entry)) {
@@ -266,18 +291,30 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
               }
             } catch (error) {
               const code = (error as { code?: unknown } | null)?.code
-              if (isBusy(error) || typeof code === 'string' && code !== 'ENOENT' || error instanceof Error && error.message === 'INCOMPLETE_PROGRESS_TAIL') throw error
+              if (isBusy(error) || typeof code === 'string' && code !== 'ENOENT' || error instanceof Error && ['INCOMPLETE_PROGRESS_TAIL', 'HOOK_TIMEOUT'].includes(error.message)) throw error
             }
             // Two boards sharing one data folder can both drop the same entry.
             try { unlinkSync(file) } catch (error) {
               if ((error as { code?: string }).code !== 'ENOENT') throw error
             }
           }
-          return apply(current)
-        }, { waitMs: Math.max(0, deadline - performance.now()) })
+          const applied = apply(current)
+          if (queuedFile !== undefined) {
+            try { unlinkSync(queuedFile) } catch (error) {
+              if ((error as { code?: string }).code !== 'ENOENT') throw error
+            }
+          }
+          return applied
+        }, { waitMs: value !== undefined && mode !== '--codex-report' && queuedFile === undefined ? 0 : Math.max(0, deadline - performance.now()) })
         break
       } catch (error) {
-        if (!isBusy(error)) throw error
+        if (!isBusy(error) && !(error instanceof Error && error.message === 'HOOK_TIMEOUT')) throw error
+        // Save before a bounded wait: Windows lock recovery and timer scheduling
+        // can consume the remaining budget, after which the write guard must close.
+        // A full queue does not fail yet: like a hook without a deadline, it waits and retries.
+        if (value !== undefined && mode !== '--codex-report') {
+          try { queue(error) } catch (failure) { if (failure !== error) throw failure }
+        }
         const left = deadline - performance.now()
         if (left <= 0) {
           if (mode === '--codex-report') throw error
@@ -301,7 +338,15 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
   // A config that cannot be read is one conflict of its own; its groups are not also reported as edited.
   const isReadable = parsedConfig !== null
   const hooks = object(hookConfig.hooks ?? {})
-  const command = `${quote(process.execPath)} ${quote(script)} --codex-event --agent ${agent} --progress-file ${quote(progress)}`
+  const worker = join(root, 'agent-board-hook.mjs')
+  const hookArgs = (event: string, state?: string): string[] => [
+    process.execPath, '--input-type=commonjs', '-e',
+    `eval(Buffer.from('${Buffer.from(hookBootstrap(home, agent)).toString('base64')}','base64').toString('utf8'))`,
+    worker, '--hook-version', String(HOOK_VERSION), '--hook-event', event,
+    state === undefined ? '--codex-event' : '--agent-status', '--agent', agent,
+    ...(state === undefined ? [] : ['--state', state]),
+    ...(agent === 'antigravity' ? ['--event', event] : []), '--progress-file', progress,
+  ]
   const isSame = (a: unknown, b: unknown): boolean => JSON.stringify(a) === JSON.stringify(b)
   const remove = mode === '--codex-remove'
   const conflicts: string[] = []
@@ -310,8 +355,8 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
   const groups: Json = {}
   for (const event of !hasHooks || agent === 'antigravity' ? [] : agent === 'cursor' ? Object.keys(cursorEvents) : agent === 'codex' ? codexEvents : Object.keys(statusEvents[agent] ?? {})) {
     const state = statusEvents[agent]?.[event]
-    const eventCommand = state === undefined ? command : `${quote(process.execPath)} ${quote(script)} --agent-status --agent ${agent} --state ${state} --progress-file ${quote(progress)}`
-    const group = agent === 'cursor' ? { command: eventCommand } : { hooks: [{ type: 'command', command: eventCommand, timeout: agent === 'gemini' ? 3000 : 3 }] }
+    const eventCommand = hookArgs(event, state).map(quote).join(' ')
+    const group = agent === 'cursor' ? { command: eventCommand, timeout: hostHookTimeout(agent, event) } : { hooks: [{ type: 'command', command: eventCommand, timeout: hostHookTimeout(agent, event) }] }
     if (hooks[event] !== undefined && !Array.isArray(hooks[event])) throw new Error('INVALID_HOOK_GROUP')
     const entries = (hooks[event] ?? []) as unknown[]
     const old = manifest.groups[event]
@@ -331,7 +376,7 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
   if (agent === 'antigravity') {
     const name = 'agent-board-local'
     const desired = antigravityHooks((event, state) => {
-      const argv = [process.execPath, script, '--agent-status', '--agent', 'antigravity', '--state', state, '--event', event, '--progress-file', progress]
+      const argv = hookArgs(event, state)
       if (process.platform !== 'win32') return argv.map(quote).join(' ')
       // Antigravity's Windows executor passes one quoted argument to cmd /c using
       // CreateProcess escaping. Embedded executable quotes become literal \" bytes.
@@ -381,17 +426,18 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
   const legacySkills = Object.values(STRINGS).map(words => `---\nname: agent-board\ndescription: ${JSON.stringify(words.boardCommandDescription)}\n---\n\n${words.boardSkillPrompt(`node "${join(home, '.claude', 'agent-board.mjs')}"`)}\n`)
   const original = readFileSync(process.argv[1] ?? '', 'utf8').replace(/^globalThis\.AGENT_BOARD[^\n]*\n/, '')
   const files: Record<string, string> = {
-    [script]: `globalThis.AGENT_BOARD = ${JSON.stringify({ path: progress, codexRoot: root, lang: Object.entries(STRINGS).find(([, words]) => words === s)?.[0] ?? 'en' })}\n${original}`,
+    [script]: `globalThis.AGENT_BOARD = ${JSON.stringify({ hookVersion: HOOK_VERSION, path: progress, codexRoot: root, lang: Object.entries(STRINGS).find(([, words]) => words === s)?.[0] ?? 'en' })}\n${original}`,
+    [worker]: hookWorker(home, script),
     [skill]: skillText,
   }
-  if (agent === 'opencode') files[join(opencodeDir, 'plugins', 'agent-board-local.js')] = opencodePlugin(process.execPath, script, progress, s.localAgentSkillDescription)
+  if (agent === 'opencode') files[join(opencodeDir, 'plugins', 'agent-board-local.js')] = opencodePlugin(process.execPath, worker, progress, s.localAgentSkillDescription, home)
   if (agent === 'openclaw') {
-    files[join(root, 'adapters', 'openclaw', 'agent-board-local.mjs')] = openclawLocalPlugin(process.execPath, script, progress)
+    files[join(root, 'adapters', 'openclaw', 'agent-board-local.mjs')] = openclawLocalPlugin(process.execPath, worker, progress, home)
     files[join(root, 'adapters', 'openclaw', 'openclaw.plugin.json')] = `${JSON.stringify({ id: 'agent-board-local', configSchema: { type: 'object', additionalProperties: false, properties: {} } }, null, 2)}\n`
     files[join(openclawDir, 'skills', 'agent-board', 'SKILL.md')] = skillText
   }
   if (agent === 'deepseek') {
-    files[join(root, 'adapters', 'deepseek.mjs')] = deepseekLocalPlugin(process.execPath, script, progress)
+    files[join(root, 'adapters', 'deepseek.mjs')] = deepseekLocalPlugin(process.execPath, worker, progress, home)
     files[join(deepseekDir, 'skills', 'agent-board', 'SKILL.md')] = skillText
   }
   if (agent === 'hermes') files[join(flag('--hermes-dir') ?? (process.env.HERMES_HOME || join(home, '.hermes')), 'skills', 'agent-board', 'SKILL.md')] = skillText
@@ -400,7 +446,7 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
   if (agent === 'opencode') files[join(opencodeDir, 'commands', 'board.md')] = `---\ndescription: ${JSON.stringify(s.boardCommandDescription)}\n---\n\n${s.boardCommandPrompt}\n\n!\`${quote(process.execPath)} ${quote(script)} --serve\`\n`
   for (const [file, desired] of Object.entries(files)) {
     const existing = initial(file)
-    const shared = file === script || file === skill
+    const shared = file === script || file === worker || file === skill
     if (remove && shared && otherManifests.some(one => one.files !== undefined)) continue
     const owned = existing !== null && (hash(existing) === manifest.files[file] || (!remove && (otherManifests.some(one => object(one.files ?? {})[file] === hash(existing)) || file === skill && legacySkills.includes(existing))))
     if (existing !== null && !owned && existing !== desired) conflicts.push(file)
