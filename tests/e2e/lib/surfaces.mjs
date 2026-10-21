@@ -7,7 +7,6 @@ import { pathToFileURL } from 'node:url'
 import { runInNewContext } from 'node:vm'
 import { randomUUID } from 'node:crypto'
 import { seenWithin, noMachineIds, noSilentPress } from './expect.mjs'
-import { knownFailure } from './known.mjs'
 import { PANE_MS } from './budget.mjs'
 
 const pause = ms => new Promise(done => setTimeout(done, ms))
@@ -64,7 +63,8 @@ export const terminal = {
       output += chunk
       if (!output.includes('\x1b[2J\x1b[H')) return
       const current = output.split('\x1b[2J\x1b[H').at(-1)
-      if (!current.includes('Progress')) return
+      const heading = world.lang === 'zh-TW' ? '進度' : world.lang === 'zh-CN' ? '进度' : 'Progress'
+      if (!current.includes(heading)) return
       frames.push({ sequence: ++sequence, text: plain(current), at: performance.now() })
     })
     child.stderr.setEncoding('utf8').on('data', chunk => { errors += chunk })
@@ -119,7 +119,7 @@ export const html = async world => {
 
 // The small DOM is copied from tests/board.test.mjs pageDom. The actual shipped
 // page script builds every card and performs every press; tests do not emulate actions.
-export const pageDom = async (source, first, post) => {
+export const pageDom = async (source, first, post, { clipboard = true, legacyCopy = false } = {}) => {
   const nodes = new Map()
   class Element {
     constructor(tag) {
@@ -159,9 +159,10 @@ export const pageDom = async (source, first, post) => {
     addEventListener(name, callback) { this.events[name] = callback }
     querySelectorAll() { return this.childNodes.flatMap(child => [...(child.tag === 'textarea' && child.getAttribute('data-key') !== null ? [child] : []), ...child.querySelectorAll()]) }
     click() { if (!this.disabled) this.events.click?.() }
-    focus() {}
-    select() {}
-    setSelectionRange() {}
+    focus(options) { this.focusOptions = options; document.activeElement = this }
+    scrollIntoView(options) { (this.scrollCalls ??= []).push(options) }
+    select() { this.setSelectionRange(0, this.value.length) }
+    setSelectionRange(start, end) { this.selectionStart = start; this.selectionEnd = end }
   }
   const get = id => {
     if (!nodes.has(id)) nodes.set(id, new Element(id))
@@ -172,7 +173,12 @@ export const pageDom = async (source, first, post) => {
   const requests = [], copied = []
   const pending = []
   const script = [...source.matchAll(/<script[^>]*>([\s\S]*?)<\/script>/g)].map(match => match[1]).find(code => code.includes('(function ()'))
+  const navigator = {}
+  const setClipboard = available => { navigator.clipboard = available ? { writeText: async text => { copied.push(text) } } : undefined }
+  setClipboard(clipboard)
   const document = {
+    body: get('body'),
+    execCommand: () => legacyCopy,
     getElementById: get,
     createElement: tag => new Element(tag),
     createTextNode: text => {
@@ -185,7 +191,7 @@ export const pageDom = async (source, first, post) => {
   }
   runInNewContext(script, {
     document, location: { search: '?t=synthetic' }, URLSearchParams,
-    navigator: { clipboard: { writeText: async text => { copied.push(text) } } },
+    navigator,
     crypto: { randomUUID }, window: { confirm: () => true, isSecureContext: true },
     setTimeout: (callback, ms) => {
       assert.ok(Number.isFinite(ms) && ms > 0, 'The shipped page must schedule a poll interval')
@@ -211,7 +217,8 @@ export const pageDom = async (source, first, post) => {
   await flush()
   const descendants = node => [node, ...node.childNodes.flatMap(descendants)]
   return {
-    node: get, requests, copied, flush,
+    node: get, requests, copied, flush, setClipboard,
+    get activeElement() { return document.activeElement },
     get pollMs() { return pollMs },
     inputs: node => descendants(node).filter(one => one.tag === 'textarea'),
     cards: () => descendants(get('board')).filter(node => node.className?.split(' ').includes('card')),
@@ -317,7 +324,7 @@ export const serve = {
         const after = dom.cards().find(one => matches(one.textContent, cardMatch) && dom.buttons(one).some(button => matches(button.textContent, buttonMatch)))?.textContent ?? ''
         return { before, after, card: String(cardMatch), button: button.textContent, surface: 'serve', requests: dom.requests }
       }
-      return { url: url.href, get, post, page, press, stop, pid, get pollMs() { return dom?.pollMs } }
+      return { url: url.href, get, post, page, press, stop, pid, get dom() { return dom }, get pollMs() { return dom?.pollMs } }
     } catch (error) {
       await stop()
       throw error
@@ -338,8 +345,7 @@ export const inspectSurfaces = async (world, server, { allow = [] } = {}) => {
       terminal.screen(world), server.page(), html(world), chat(world),
     ])
     const screens = { terminal: terminalText, watch: frame.text, page: pageText, html: htmlText.visible, chat: chatResult.stdout }
-    for (const [surface, text] of Object.entries(screens)) noMachineIds(text, world, { allow: surface === 'html' ? [...allow, world.path] : allow })
-    await knownFailure(250, () => assert.ok(!screens.html.includes(world.path), 'HTML footer exposes the full progress file path'))
+    for (const text of Object.values(screens)) noMachineIds(text, world, { allow })
     return screens
   } finally {
     await watch?.stop()

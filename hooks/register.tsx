@@ -78,7 +78,7 @@ import type { PressOutcome } from '../types'
 import { isQuickAdd, parseQuickAdd, quickAddWords } from './quick'
 import type { Lang, Strings } from './i18n'
 import { RULE_ID, RULES } from './rule'
-import { chosenLang, langOf, resolveLang, STRINGS } from './strings'
+import { chosenLang, langOf, plainReason, resolveLang, STRINGS } from './strings'
 import { answerTurns, applyDigest, clearAsked, clearBackgroundJobs, cleanHandoff, finishBackgroundJob, isAskingYou, isPersonsAnswer, isWork, lastQuestion, markAsked, needsRefresh, parseDigest, replyData, requestData, startBackgroundJob, turnTools } from './digest'
 import type { Digest } from './digest'
 import { isNodeSupported, isSetupState, isWindowsHost, nodeVersionOf, openclawPrinted, openclawSavedBy, openclawTooOld, psQuote, setupLines, setupProblemText, setupSeed } from './connect'
@@ -844,7 +844,9 @@ const writeDashboard = async ($: EngineInterface, force = false): Promise<{ path
     lastDashboard = html
     return { path }
   } catch (error) {
-    return { path, problem: s.boardStorageFailed(path.split(/[\\/]/).pop() ?? '', String((error as { code?: string } | null)?.code ?? 'UNKNOWN')) }
+    const failure = error as { code?: string; message?: string } | null
+    const code = failure?.code ?? /\b(EACCES|EPERM|EROFS|EBUSY|EAGAIN|ENOSPC|EISDIR|ENOENT|ENOTDIR|EIO|EFBIG|EMFILE|ENFILE|ENAMETOOLONG)\b/.exec(failure?.message ?? String(error))?.[1]
+    return { path, problem: s.boardStorageFailed(s.fileNamed(path.split(/[\\/]/).pop() ?? ''), plainReason(s, code ?? s.storageUnknown)) }
   }
 }
 
@@ -2890,16 +2892,14 @@ export const register: Register = (on, options) => {
     }
     if (snap.error !== null) {
       const { Box, Text } = table
+      const why = /\b(EACCES|EPERM|EROFS|EBUSY|EAGAIN|ENOSPC)\b/.exec(snap.error)?.[1]
 
       return (
         <Box flexDirection="column">
           <Text color={palette.alert}>{s.fileUnreadable}</Text>
           {await read($, hasPendingQuestionsProblem) && <Text color={palette.alert}>{s.inboxQuestionNotKept}</Text>}
-          {await read($, hasQuestionsProblem) && <Text color={palette.alert}>{s.questionsUnreadable(questionsPath(snap.path))}</Text>}
-          <Text color={palette.muted}>{snap.error}</Text>
-          <Text color={palette.muted} wrap="truncate-start">
-            {snap.path}
-          </Text>
+          {await read($, hasQuestionsProblem) && <Text color={palette.alert}>{s.questionsUnreadable()}</Text>}
+          {why !== undefined && <Text color={palette.muted}>{plainReason(s, why)}</Text>}
         </Box>
       )
     }

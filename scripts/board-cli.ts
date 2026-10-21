@@ -25,7 +25,7 @@ import { dashboardHtml } from '../hooks/dashboard'
 import { appendJournal, archivePath, countDay, hasArchiveEntry, journalLine, journalPath } from '../hooks/journal'
 import { parseProgress, progressTail } from '../hooks/parse'
 import { qrModules, qrText } from '../hooks/qr'
-import { langOf, STRINGS } from '../hooks/strings'
+import { langOf, plainReason, STRINGS } from '../hooks/strings'
 import { answeredJson, answeredPath, buildView, manualDoneSeen, parseAnswered, parseSeen, seenJson, seenPath, taskFingerprint, withAnswered, withSeen } from '../hooks/view'
 import { acknowledgementKeys, archiveQuestionsKept, captureHashOf, captureJson, capturePath, emptyQuestions, parseCapture, withCaptures, isQuestionProof, isQuestionSnapshot, isTornLedger, migratedAnswered, observeQuestions, parseQuestions, questionProofJson, questionProofOf, questionProofPath, questionsJson, questionsPath, resolvedQuestionsToRetire } from '../hooks/questions'
 import type { QuestionCapture, QuestionProofs, QuestionRecord } from '../hooks/questions'
@@ -62,6 +62,12 @@ class BoardFileError extends Error {
 
 const fileError = (file: string, error: unknown): BoardFileError =>
   new BoardFileError(file, String((error as { code?: string } | null)?.code ?? 'UNKNOWN'))
+
+const plainFile = (file: string): string => {
+  const full = resolve(file)
+  return full === resolve(path) ? s.fileProgress
+    : full === resolve(questionsPath(path)) ? s.fileQuestions : s.fileNamed(basename(file))
+}
 
 const read = (file: string): string => {
   try {
@@ -513,7 +519,7 @@ const act = (action: BoardAction, fallback?: { copyText?: string; tone?: 'done' 
   }
   const now = Date.now()
   if (action.type === 'copy') {
-    if (copy(action.text)) return done(s.boardCopied(action.text))
+    if (copy(action.text)) return done(s.copied)
     if (fallback !== undefined) fallback.copyText = action.text
     return s.boardCopyFailed(action.text)
   }
@@ -646,10 +652,9 @@ const failureNote = (error: unknown): string => {
     process.stderr.write(`${error instanceof Error ? error.stack : String(error)}\n`)
     return s.pressFailed
   }
-  // The board's one-line status is clipped to terminal width; keep the full path and
-  // recovery advice on stderr too, including for an agent using --keys.
-  process.stderr.write(`${s.boardStorageFailed(error.file, error.code)}\n`)
-  return s.boardStorageFailed(basename(error.file), error.code)
+  const note = s.boardStorageFailed(plainFile(error.file), plainReason(s, error.code))
+  process.stderr.write(`${note}\n`)
+  return note
 }
 
 const press = (state: BoardState, key: string): { state: BoardState; isQuit: boolean; isHtml: boolean; isWrite: boolean } => {
@@ -799,9 +804,10 @@ const serveChild = (): void => {
     act,
     tidy,
     paste,
-    // Every page names only the file it could not read or write, for a press and for the board
-    // it shows. The folder can name the person's account. HTTP carries the failure response.
-    failure: error => (error instanceof BoardFileError ? s.boardStorageFailed(basename(error.file), error.code) : null),
+    // The page names a file it could not read or write the way the terminal board does, for a
+    // press and for the board it shows. The page is answered, so the exit code and stderr are
+    // left alone. File labels and reasons stay the same on local and network pages.
+    failure: error => (error instanceof BoardFileError ? s.boardStorageFailed(plainFile(error.file), plainReason(s, error.code)) : null),
     idleMs: idleMs(),
     onReady: (url, port) => {
       // Without its address file no later `--serve` finds this page, and each would start one
@@ -976,7 +982,7 @@ const chat = (): void => {
     const code = (error as { code?: unknown } | null)?.code
     const reason = typeof code === 'string' ? code : error instanceof Error ? error.message.split('\n')[0]?.slice(0, 160) || error.name : 'UNKNOWN'
     // Nothing here writes, so the board's own advice (files "may already have changed") is not told.
-    const told = error instanceof BoardFileError ? s.chatReadFailed(error.file, error.code) : s.chatFailed(reason)
+    const told = error instanceof BoardFileError ? s.chatReadFailed(plainFile(error.file), plainReason(s, error.code)) : s.chatFailed(reason)
     process.stdout.write(`${redact(told, homeOrNone(), isWin)}\n`)
   }
 }

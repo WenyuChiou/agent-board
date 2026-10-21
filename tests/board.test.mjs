@@ -17,6 +17,9 @@ import assert from 'node:assert/strict'
 import { BOARD_SCRIPT } from '../hooks/board-script.ts'
 import { boardRun, geminiBoardCommand, normalizeCommandPath, opencodeBoardCommand } from '../hooks/board-commands.ts'
 import { RELEASED } from '../hooks/released.ts'
+import { EN } from '../hooks/strings-en.ts'
+import { ZH_TW } from '../hooks/i18n.ts'
+import { ZH_CN } from '../hooks/strings-zh-cn.ts'
 
 const TORN_NOW = Date.parse('2026-10-20T12:00:00Z')
 const tornDay = () => '# Progress\r\n\r\n## Synthetic day\r\n### Hand task alpha\r\n- [ ] Plan\r\n\r\n### Hand task beta\r\n- [ ] Review\r\n\r\n' +
@@ -918,9 +921,9 @@ test('--chat hides the home folder, with a space in its name, and the credential
   // The file it cannot read is told in the same plain text, with its path hidden as well.
   const unreadable = chatRun(['--chat'], { isFolder: true })
   assert.equal(unreadable.status, 1)
-  assert.ok(unreadable.stdout.includes('~') && unreadable.stdout.includes('progress.md') && unreadable.stdout.includes('EISDIR'), unreadable.stdout)
+  assert.ok(unreadable.stdout.includes('your progress file') && unreadable.stdout.includes('EISDIR') && !unreadable.stdout.includes('progress.md'), unreadable.stdout)
   // It only reads: it does not say, as the board does after a write, that files may already have changed.
-  assert.ok(unreadable.stdout.includes('Nothing was changed') && !/may already have changed/.test(unreadable.stdout), unreadable.stdout)
+  assert.ok(unreadable.stdout.includes('nothing was changed') && !/may already have changed/.test(unreadable.stdout), unreadable.stdout)
   assert.ok(!unreadable.stdout.includes(unreadable.home) && !unreadable.stdout.includes('Jane Doe') && !unreadable.stderr.includes('Jane Doe'), unreadable.stdout + unreadable.stderr)
 })
 
@@ -1123,7 +1126,7 @@ syncBuiltinESMExports()`)
       const out = play(fault)
       const said = out.stdout + out.stderr
       assert.equal(out.status, 1, said)
-      assert.ok(said.includes(list) && said.includes(code), said)
+      assert.ok(said.includes('progress-answered.json') && said.includes(code === 'EACCES' ? 'it is read-only or locked' : code) && !said.includes(list), said)
       assert.ok(!said.includes('Hidden:'), said)
       // The board is drawn after the press, with the question still on it.
       assert.ok(out.stdout.includes('Per-key limit'), said)
@@ -2004,7 +2007,7 @@ syncBuiltinESMExports()
   try {
     const seen = await board.call('GET', '/api/board')
     assert.equal(seen.status, 409, seen.body)
-    assert.match(seen.json().note, /^Could not safely read or update .*-journal-.*\(EACCES\)/)
+    assert.match(seen.json().note, /^Couldn't safely read or update .*-journal-.*\(it is read-only or locked\)/)
     // The page says that note, and "offline" only when the board sent none.
     const home = await board.call('GET', `/?t=${board.token}`, { headers: { 'x-board-token': '' } })
     const dom = await pageDom(home.body, null, { getBoard: async () => ({ ok: false, json: async () => seen.json() }) })
@@ -2018,7 +2021,7 @@ syncBuiltinESMExports()
       const lan = new URL(opened.json().url)
       const far = await fetchAt(lan.hostname, Number(lan.port), 'GET', '/api/board', { 'x-board-token': lan.searchParams.get('t') })
       assert.equal(far.status, 409, far.body)
-      assert.match(far.json().note, /^Could not safely read or update progress-journal-\d{4}-\d{2}\.md \(EACCES\)/)
+      assert.match(far.json().note, /^Couldn't safely read or update progress-journal-\d{4}-\d{2}\.md \(it is read-only or locked\)/)
       assert.ok(!far.json().note.includes(board.dir), far.json().note)
     }
   } finally {
@@ -2043,7 +2046,7 @@ syncBuiltinESMExports()
     const before = readFileSync(path, 'utf8')
     const ticked = await call('POST', '/api/act', { body: { key: await keyOf('Fabrikam fellowship'), type: 'tick', text: 'Ask two referees', fp: (await rowOf('Fabrikam fellowship')).fp } })
     assert.equal(ticked.status, 409, ticked.body)
-    assert.match(ticked.json().note, /^Could not safely read or update .*-journal-.*\(EIO\)/)
+    assert.match(ticked.json().note, /^Couldn't safely read or update .*-journal-.*\(EIO\)/)
     assert.equal(readFileSync(path, 'utf8'), before)
     // The page runs on, with the step still there to tick again.
     assert.equal((await call('GET', '/api/board')).status, 200)
@@ -2075,7 +2078,7 @@ syncBuiltinESMExports()
     const ask = (await call('GET', '/api/board')).json().model.asks.find(one => one.agent === 'codex')
     const hid = await call('POST', '/api/act', { body: { key: ask.key, type: 'hide' } })
     assert.equal(hid.status, 409, hid.body)
-    assert.match(hid.json().note, /^Could not safely read or update .*progress-answered\.json \(EIO\)/)
+    assert.match(hid.json().note, /^Couldn't safely read or update .*progress-answered\.json \(EIO\)/)
     assert.ok(!existsSync(join(dir, 'progress-answered.json')))
     assert.ok(!readdirSync(dir).some(name => name.endsWith('.board-tmp')))
     // The question is still asked on the page.
@@ -2418,7 +2421,7 @@ test('the serve page and the terminal board answer every action with a visible l
       if (!isCopy) await dom.redraw(model)
       const results = pageCardResults(dom, key).filter(node => node.textContent)
       assert.ok(results.length, `no result beside ${label}`)
-      assert.ok(results.some(node => node.textContent.includes(isCopy ? words.pressCopyFallback : words.pressFailed)), label)
+      assert.ok(results.some(node => node.textContent.includes(isCopy ? words.boardCopyFailedBelow : words.pressFailed)), label)
       if (isCopy) assert.ok(results.some(node => node.childNodes.some(child => child.tag === 'textarea' && child.isSelected)), label)
     }
     for (const response of [
@@ -2624,7 +2627,7 @@ const pressItemFor = (items, title) => items.find(item => item.type === 'ask' ? 
 const pressKeysFor = item => item.type === 'ask'
   ? ['enter', ...(item.ask.step === null ? [] : ['x']), ...(item.ask.hideKey === '' || item.ask.canHide === false ? [] : ['h']), ...((item.ask.command ?? item.ask.link) !== null || item.ask.reopen !== null ? ['c'] : []), ...(item.ask.kind === 'confirm' ? ['y', 'n'] : item.ask.options.map((_, index) => String(index + 1)))]
   : item.type === 'row' ? ['enter', ...(item.row.next === null ? [] : ['x']), ...(item.row.archive === null ? [] : ['a']), ...(item.row.confirm == null ? [] : ['d']), ...(item.row.resume === null ? [] : ['c'])] : ['enter']
-const pressExpected = (runtime, action) => action.type === 'copy' ? runtime.s.boardCopied(action.text)
+const pressExpected = (runtime, action) => action.type === 'copy' ? runtime.s.copied
   : action.type === 'tick' ? runtime.s.boardTicked(action.ref.step)
     : action.type === 'archive' ? runtime.s.archivedOne(action.title)
       : action.type === 'done' ? runtime.s.confirmedDone(action.title)
@@ -2690,13 +2693,17 @@ test('every terminal board key on every card kind from every agent answers with 
         const pressed = runtime.press(state, key)
         fixture.disable()
         const note = pressed.state.note
-        const screen = runtime.boardScreen(view, pending, pressed.state, runtime.s, { width: 160, isColor: false })
+        const width = Math.max(160, note.length + 4)
+        const screen = runtime.boardScreen(view, pending, pressed.state, runtime.s, { width, isColor: false })
         const context = `${cell.title} / ${key} / ${failing ? 'refused' : 'normal'}`
+        const failedFile = offered.action?.type === 'hide' || offered.action?.type === 'unhide' ? 'progress-answered.json'
+          : offered.action?.type === 'archive' ? 'progress-archive-2026-10.md' : 'progress-journal-2026-10.md'
+        const expected = runtime.s.boardStorageFailed(runtime.s.fileNamed(failedFile), runtime.s.storageReadOnly)
         if (key === 'enter') assert.equal(note, runtime.s.pressOpened, context)
         else if (failing && offered.action?.type === 'copy') assert.equal(note, runtime.s.boardCopyFailed(offered.action.text), context)
-        else if (failing) { assert.match(note, /EACCES/, context); assert.ok(note.includes('Could not safely read or update'), context) }
+        else if (failing) assert.equal(note, expected, context)
         else { assert.ok(offered.action, context); assert.equal(note, pressExpected(runtime, offered.action), context) }
-        if (failing && offered.action !== null && offered.action.type !== 'copy') { assert.ok(screen.includes('Could not safely read or update'), context); assert.ok(screen.includes('(EACCES)'), context) }
+        if (failing && offered.action !== null && offered.action.type !== 'copy') assert.ok(screen.replace(/\s+/gu, ' ').includes(expected.replace(/\s+/gu, ' ')), context)
         else if (failing && offered.action?.type === 'copy') {
           assert.ok(screen.includes(runtime.s.boardCopyFailed('').trim()), context)
           assert.ok(screen.includes(offered.action.text), `${context}: complete copy fallback`)
@@ -2706,7 +2713,7 @@ test('every terminal board key on every card kind from every agent answers with 
           const row = lines.findIndex(line => line.startsWith('› '))
           assert.ok(row >= 0, context)
           const expected = failing && offered.action?.type === 'copy' ? runtime.s.boardCopyFailed('') : note
-          assert.equal(lines[row + 1].trim(), runtime.fit(expected, 156).trim(), `${context}: result directly under the pressed row`)
+          assert.equal(lines[row + 1].trim(), runtime.fit(expected, width - 4).trim(), `${context}: result directly under the pressed row`)
         }
         if (offered.action?.type === 'copy' || (!failing && offered.action !== null)) pressChanged(fixture, offered.action, context)
         actions += 1
@@ -2791,10 +2798,10 @@ test('every serve page action on every card kind from every agent answers with a
         const context = `${cell.title} / ${button.textContent} / ${failing ? 'refused' : 'normal'}`
         if (serverNote !== undefined) {
           assert.ok(results.some(node => node.textContent === serverNote), context)
-          if (failing) assert.match(serverNote, /EACCES/, context)
+          if (failing) assert.ok(serverNote.includes(runtime.s.storageReadOnly), context)
           else { assert.ok(serverExpected, context); assert.equal(serverNote, serverExpected, context) }
         } else {
-          const expected = failing ? runtime.s.pressCopyFallback : runtime.s.copied
+          const expected = failing ? runtime.s.boardCopyFailedBelow : runtime.s.copied
           assert.ok(results.some(node => node.textContent === expected), context)
           {
             const text = button.textContent === runtime.s.serveCopyResume ? projected.ask?.reopen ?? projected.row?.resume
@@ -3026,9 +3033,12 @@ test('a failed page write on the keys board names the file without its folder', 
       writeFileSync(script, `globalThis.AGENT_BOARD = ${JSON.stringify({ path, lang })}\n${BOARD_SCRIPT}`)
       const result = spawnSync(process.execPath, [script, '--keys', 'o'], { encoding: 'utf8', timeout: 10000, windowsHide: true, env: { ...process.env, CLAUDE_PROGRESS_FILE: '', NO_COLOR: '1' } })
       assert.equal(result.status, 1, result.stderr)
-      assert.ok(result.stdout.includes('progress.html'), result.stdout)
+      const words = { en: EN, 'zh-TW': ZH_TW, 'zh-CN': ZH_CN }[lang]
+      assert.ok(result.stdout.includes(words.fileNamed('progress.html')), result.stdout)
       assert.ok(!result.stdout.includes(root), result.stdout)
-      assert.ok(result.stderr.includes(html), result.stderr)
+      assert.ok(!result.stderr.includes(root), result.stderr)
+      assert.ok(result.stdout.replace(/\s/g, '').includes(result.stderr.replace(/\s/g, '')), result.stdout)
+      assert.ok(['EISDIR', words.storageReadOnly].some(reason => result.stderr.trim() === words.boardStorageFailed(words.fileNamed('progress.html'), reason)), result.stderr)
     }
   } finally { assert.ok(resolve(root).startsWith(resolve(tmpdir()) + sep)); rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 }) }
 })
@@ -3060,9 +3070,11 @@ process.stdout.write = function (text, ...rest) {
 `)
     const result = spawnSync(process.execPath, ['--import', pathToFileURL(preload).href, script, '--watch'], { encoding: 'utf8', timeout: 10000, windowsHide: true, env: { ...process.env, CLAUDE_PROGRESS_FILE: '', NO_COLOR: '1' } })
     assert.equal(result.status, 1, result.stderr)
-    assert.match(result.stdout, /Could not safely read or update progress\.html \((EISDIR|EACCES|EPERM)\)/)
+    assert.ok(result.stdout.includes(EN.fileNamed('progress.html')), result.stdout)
     assert.ok(!result.stdout.includes(root), result.stdout)
-    assert.ok(result.stderr.includes(join(root, 'progress.html')), result.stderr)
+    assert.ok(!result.stderr.includes(root), result.stderr)
+    assert.ok(result.stdout.replace(/\s/g, '').includes(result.stderr.replace(/\s/g, '')), result.stdout)
+    assert.ok(['EISDIR', EN.storageReadOnly].some(reason => result.stderr.trim() === EN.boardStorageFailed(EN.fileNamed('progress.html'), reason)), result.stderr)
   } finally { assert.ok(resolve(root).startsWith(resolve(tmpdir()) + sep)); rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 }) }
 })
 
@@ -3122,16 +3134,18 @@ syncBuiltinESMExports()
   const board = await page('', { NODE_OPTIONS: `--require ${JSON.stringify(preload)}` })
   try {
     const before = readFileSync(board.path, 'utf8')
+    const now = new Date()
+    const journal = `progress-journal-${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}.md`
     const row = await board.rowOf('Fabrikam fellowship')
     const written = await board.call('POST', '/api/act', { body: { key: row.key, type: 'tick', text: 'Ask two referees', fp: row.fp } })
     assert.equal(written.status, 409, written.body)
-    assert.match(written.json().note, /^Could not safely read or update progress-journal-\d{4}-\d{2}\.md \(EIO\)/)
+    assert.equal(written.json().note, EN.boardStorageFailed(EN.fileNamed(journal), 'EIO'))
     assert.ok(!written.json().note.includes(board.dir), written.body)
     assert.equal(readFileSync(board.path, 'utf8'), before)
     writeFileSync(flag, '')
     const read = await board.call('GET', '/api/board')
     assert.equal(read.status, 409, read.body)
-    assert.match(read.json().note, /^Could not safely read or update progress-journal-\d{4}-\d{2}\.md \(EACCES\)/)
+    assert.equal(read.json().note, EN.boardStorageFailed(EN.fileNamed(journal), EN.storageReadOnly))
     assert.ok(!read.json().note.includes(board.dir), read.body)
   } finally {
     await board.close()
@@ -3623,6 +3637,34 @@ test('the page keeps actionable progress delays without connection inventory or 
       sessions.splice(0)
       await dom.redraw(model)
       assert.equal(dom.node('main').textContent, '')
+      const id = 'AB-11111111-2222-4333-8444-555555555555'
+      for (const [reply, expected] of [
+        ['ACK ' + id, ''],
+        ['ACK ' + id + '  \n  ', ''],
+        ['ACK ' + id + '  Review ready.  ', 'Review ready.'],
+        ['ACK ' + id + '\n  Review ready.\nKeep both lines.  ', 'Review ready.\nKeep both lines.'],
+        ['ACK ' + id + '\r\nreal reply', 'real reply'],
+        ['ACKNOWLEDGED x', 'ACKNOWLEDGED x'],
+        ['ACK ' + id + 'x', 'ACK ' + id + 'x'],
+        ['Review ready.', 'Review ready.'],
+      ]) {
+        const receipt = { id, status: 'acknowledged', reply, error: '' }
+        await dom.redraw({
+          ...model,
+          asks: [{ key: 'question', project: 'Synthetic', agent: 'codex', text: 'Review the route?', answers: [], canTick: true, receipt }],
+          stopped: [{ key: 'task', title: 'Review the route', status: '', steps: [], receipt }],
+        })
+        const lines = []
+        const collect = node => {
+          if (node.tag === 'p' && node.textContent.startsWith(s.messagesAcknowledged)) lines.push(node.textContent)
+          node.childNodes.forEach(collect)
+        }
+        collect(dom.node('board'))
+        assert.deepEqual(lines, Array(2).fill(s.messagesAcknowledged + (expected ? ' · ' + expected : '')))
+        if (!expected.includes(id)) assert.ok(!dom.node('board').textContent.includes(id), dom.node('board').textContent)
+        if (reply.startsWith('ACK ' + id) && !expected.startsWith('ACK ')) assert.ok(!dom.node('board').textContent.includes('ACK'), dom.node('board').textContent)
+        assert.equal(receipt.reply, reply)
+      }
     } finally { await board.close() }
   }
 })

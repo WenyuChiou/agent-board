@@ -117,8 +117,7 @@ describe('L2 a working day', { concurrency: 2 }, () => {
         const check = () => noSilentPress({ surface: 'terminal', card: row.kind, button: key, before, after })
         try {
           check()
-          if (key === 'c' && ['waiting', 'choice', 'stopped', 'stopped-ask'].includes(row.kind)) await knownFailure(250, () => noMachineIds(after, world))
-          else noMachineIds(after, world)
+          noMachineIds(after, world)
         } catch (error) { failures.push(new Error(`${row.kind}/${key}: ${error.message}`)) }
       }
       if (failures.length) throw new AggregateError(failures, 'Unexpected terminal key results')
@@ -418,8 +417,7 @@ describe('L2 a working day', { concurrency: 2 }, () => {
         // strict assertion, independently of the allowed copied command.
         noMachineIds((await terminal.screen(world, ['--all'])), world)
         const visible = (await html(world)).visible
-        noMachineIds(visible, world, { allow: [world.path] })
-        await knownFailure(250, () => assert.ok(!visible.includes(world.path), 'HTML footer exposes the full progress file path'))
+        noMachineIds(visible, world)
       }
       await inspectSurfaces(world)
     } finally { await world.close() }

@@ -467,8 +467,8 @@ export const requestProblem = (request: PageRequest, hosts: readonly string[], t
 
 // The words the page's script fills in itself, each with its blanks as \u0001 and \u0002.
 const PAGE_WORDS = [
-  'messagesPlaceholder', 'messagesSend', 'messagesQueued', 'messagesUncertain',
-  'messagesAccepted', 'messagesAcknowledged', 'messagesRejected', 'messagesFailed', 'messagesConflict', 'messagesTimeout',
+  'messagesQueued', 'messagesUncertain',
+  'messagesAccepted', 'messagesAcknowledged', 'messagesRejected', 'messagesFailed', 'messagesTimeout',
   'sessionsTitle', 'sessionsWaiting', 'sessionsTimedOut',
   'countWaiting',
   'countActive',
@@ -503,18 +503,14 @@ const PAGE_WORDS = [
   'serveMessagePlaceholder',
   'serveSend',
   'serveSending',
-  'serveRelay',
   'servePasteTitle',
   'pasteReview',
-  'boardCopied',
-  'boardCopyFailed',
   'copied',
   'pressDone',
   'pressFailed',
-  'pressCopyFallback',
-  'pressNothing',
   'pressEmpty',
   'pressPending',
+  'boardCopyFailedBelow',
 ] as const satisfies ReadonlyArray<keyof Strings>
 
 // The chat prompt goes as it is in every language: the chat reads it, not the person.
@@ -685,9 +681,11 @@ const PAGE_SCRIPT = String.raw`
       area.value = result.copyText;
       area.setAttribute('readonly', '');
       slot.node.appendChild(area);
+      result.area = area;
       if (!result.focused) {
-        area.focus();
+        area.focus({ preventScroll: true });
         area.select();
+        if (area.scrollIntoView) area.scrollIntoView({ block: 'nearest' });
         result.focused = true;
       }
     }
@@ -710,7 +708,7 @@ const PAGE_SCRIPT = String.raw`
       var previous = results[key];
       results[key] = { text: text || w('pressFailed'), tone: tone || '', copyText: copyText, pending: tone !== 'done' && tone !== 'alert', awaitingRefresh: tone === 'done', revision: previous ? previous.revision : slot ? slot.revision : '', label: previous ? previous.label : slot ? slot.label : '' };
       paintResult(key);
-      if (!slot) drawLostResults();
+      if (!slot) keepCopyFocus(drawLostResults);
       return;
     }
     note.textContent = text || '';
@@ -742,7 +740,7 @@ const PAGE_SCRIPT = String.raw`
       return res.json().catch(function () { return {}; }).then(function (data) { data.ok = res.ok && data.ok !== false; return data; });
     }).catch(function (error) { unreachable(); throw error; });
   }
-  function copy(text, shown, key) {
+  function copy(text, key) {
     say(w('pressPending'), '', key);
     function fallback() {
       var area = el('textarea');
@@ -751,11 +749,12 @@ const PAGE_SCRIPT = String.raw`
       area.style.position = 'fixed';
       area.style.opacity = '0';
       document.body.appendChild(area);
+      area.focus({ preventScroll: true });
       area.select();
       var isCopied = false;
       try { isCopied = document.execCommand('copy'); } catch (e) {}
       document.body.removeChild(area);
-      say(isCopied ? w('copied') : w('pressCopyFallback'), isCopied ? 'done' : 'alert', key, isCopied ? undefined : text);
+      say(isCopied ? w('copied') : w('boardCopyFailedBelow'), isCopied ? 'done' : 'alert', key, isCopied ? undefined : text);
     }
     if (navigator.clipboard && window.isSecureContext) navigator.clipboard.writeText(text).then(function () { say(w('copied'), 'done', key); }, fallback);
     else fallback();
@@ -798,7 +797,10 @@ const PAGE_SCRIPT = String.raw`
     if (!receipt) return null;
     var labels = { queued: 'messagesQueued', uncertain: 'messagesUncertain', accepted: 'messagesAccepted', acknowledged: 'messagesAcknowledged', rejected: 'messagesRejected' };
     if (receipt.status === 'acknowledged' || receipt.status === 'rejected') Object.keys(messageAttempts).forEach(function (slot) { if (messageAttempts[slot].id === receipt.id) delete messageAttempts[slot]; });
-    return el('p', 'quiet small', w(receipt.status === 'uncertain' && /TIMEOUT/.test(receipt.error) ? 'messagesTimeout' : labels[receipt.status]) + (receipt.reply ? ' · ' + receipt.reply : ''));
+    var reply = receipt.reply || '';
+    var ack = 'ACK ' + receipt.id;
+    if (reply.indexOf(ack) === 0 && (reply.length === ack.length || /\s/.test(reply.charAt(ack.length)))) reply = reply.slice(ack.length).trim();
+    return el('p', 'quiet small', w(receipt.status === 'uncertain' && /TIMEOUT/.test(receipt.error) ? 'messagesTimeout' : labels[receipt.status]) + (reply ? ' · ' + reply : ''));
   }
   function replyBox(key, placeholder, mode, agent, where, isSending, session, asked, fp, delivery) {
     var box = el('div', 'reply');
@@ -820,7 +822,7 @@ const PAGE_SCRIPT = String.raw`
       }, 'primary')
       : button(w('serveCopy'), function () {
         var text = input.value.trim();
-        if (text) copy(text, undefined, key);
+        if (text) copy(text, key);
         else say(w('pressEmpty'), 'alert', key);
       }, '', true);
     go.disabled = isSending === true;
@@ -856,13 +858,13 @@ const PAGE_SCRIPT = String.raw`
       var node = button(answer, function () {
         if (ask.send === 'connected') nativeAct(ask.key, answer, ask.delivery, ask.session, ask.text, ask.fp, node);
         else if (send) act(ask.key, 'send', answer, w('serveSending', ask.agent), ask.session, ask.text, ask.fp);
-        else copy(answer, undefined, ask.key);
+        else copy(answer, ask.key);
       }, index === 0 ? 'primary' : '', !send);
       node.disabled = send && ask.isSending;
       actions.appendChild(node);
     });
-    if (ask.command) actions.appendChild(button(w('serveCopyCommand'), function () { copy(ask.command, undefined, ask.key); }, '', true));
-    if (ask.reopen) actions.appendChild(button(w('serveCopyResume'), function () { copy(ask.reopen, undefined, ask.key); }, '', true));
+    if (ask.command) actions.appendChild(button(w('serveCopyCommand'), function () { copy(ask.command, ask.key); }, '', true));
+    if (ask.reopen) actions.appendChild(button(w('serveCopyResume'), function () { copy(ask.reopen, ask.key); }, '', true));
     if (ask.canHide) actions.appendChild(button(w('answeredHide'), function () { act(ask.key, 'hide'); }));
     if (ask.link && /^https:\/\//i.test(ask.link)) {
       var link = el('a', 'btn', w('serveOpenLink'));
@@ -901,7 +903,7 @@ const PAGE_SCRIPT = String.raw`
     if (row.next) actions.appendChild(button(w('serveTickNext', row.next), function () { act(row.key, 'tick', row.next, '', '', '', row.fp); }, 'primary'));
     if (row.canArchive) actions.appendChild(button(w('serveArchive'), function () { act(row.key, 'archive', '', '', '', '', row.fp); }));
     if (row.canConfirm) actions.appendChild(button(w('confirmDone'), function () { act(row.key, 'done', '', '', '', '', row.fp); }));
-    if (row.resume) actions.appendChild(button(w('serveCopyResume'), function () { copy(row.resume, undefined, row.key); }, '', true));
+    if (row.resume) actions.appendChild(button(w('serveCopyResume'), function () { copy(row.resume, row.key); }, '', true));
     if (actions.childNodes.length) add(body, actions);
     if (row.send === 'send' || row.send === 'connected') add(body, replyBox(row.key, w('serveMessagePlaceholder', agentName(row.agent)), row.send, row.agent, row.where, row.isSending, row.session, asked, row.fp, row.delivery));
     else if (row.hasCopyBox) add(body, replyBox(row.key, w('serveReplyPlaceholder'), 'copy', row.agent, '', false, row.session, asked));
@@ -920,7 +922,27 @@ const PAGE_SCRIPT = String.raw`
     resultSlot(card, turn.key, turn.text, turn.project);
     return card;
   }
+  function keepCopyFocus(redraw) {
+    var active = document.activeElement;
+    var copyFocus = null;
+    var copyCaret = null;
+    Object.keys(results).forEach(function (key) {
+      if (results[key].area === active) {
+        copyFocus = key;
+        copyCaret = [active.selectionStart, active.selectionEnd];
+      }
+    });
+    redraw();
+    if (copyFocus !== null && results[copyFocus] && results[copyFocus].area) {
+      var copyArea = results[copyFocus].area;
+      copyArea.setSelectionRange(copyCaret[0], copyCaret[1]);
+      copyArea.focus({ preventScroll: true });
+    }
+  }
   function render(model) {
+    keepCopyFocus(function () { renderBoard(model); });
+  }
+  function renderBoard(model) {
     // What is typed, and where the cursor is, outlast a redraw.
     var kept = {};
     board.querySelectorAll('textarea[data-key]').forEach(function (box) { kept[box.getAttribute('data-key')] = box.value; });
@@ -1036,6 +1058,7 @@ const PAGE_SCRIPT = String.raw`
         area.value = result.copyText;
         area.setAttribute('readonly', '');
         add(slot, area);
+        result.area = area;
       }
       board.insertBefore(card, board.firstChild);
       lostResults.push(card);
@@ -1117,7 +1140,7 @@ const PAGE_SCRIPT = String.raw`
       refresh();
     }, function () { say(w('serveOffline'), 'alert', 'paste'); unreachable(); });
   });
-  document.getElementById('relay').addEventListener('click', function () { beginPress(); copy(W.relayPrompt, w('serveRelay'), 'paste'); });
+  document.getElementById('relay').addEventListener('click', function () { beginPress(); copy(W.relayPrompt, 'paste'); });
   resultSlot(document.querySelector('.paste'), 'paste', '', w('servePasteTitle'));
   refresh();
 })();

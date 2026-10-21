@@ -14,7 +14,6 @@ import type { Strings } from './i18n'
 import { ZH_TW } from './i18n'
 import { askColor, stepColor, toneColor } from './palette'
 import type { Palette } from './palette'
-import { questionsPath } from './questions'
 import { progressBar, replyHint } from './view'
 import type { Focus, PrView, StepRef, TaskRow, Tone, View, ViewStep, WaitingItem } from './view'
 
@@ -711,7 +710,7 @@ export const drawPane = (ui: PaneUi, model: PaneModel, actions: PaneActions): Re
       <Text bold>{s.paneTitle}</Text>
       {view.warning && <Text color={palette.alert}>{view.warning}</Text>}
       {model.hasPendingQuestionsProblem && <Text color={palette.alert}>{s.inboxQuestionNotKept}</Text>}
-      {model.hasQuestionsProblem && <Text color={palette.alert}>{s.questionsUnreadable(questionsPath(model.path))}</Text>}
+      {model.hasQuestionsProblem && <Text color={palette.alert}>{s.questionsUnreadable()}</Text>}
       {overview()}
 
       {!model.hasTaskTools && view.current === null && (
@@ -913,8 +912,8 @@ export const drawPane = (ui: PaneUi, model: PaneModel, actions: PaneActions): Re
         {result.label !== '' && muted(result.label)}
         {resultLine(key, result)}
       </Box>)}
-      <Text color={palette.muted} wrap="truncate-start">
-        {model.path}
+      <Text color={palette.muted}>
+        {s.progressFileShown}
       </Text>
     </Box>
   )
