@@ -5,21 +5,20 @@ import { block } from './lib/writers.mjs'
 import { run, seenPageWithin, serve, terminal } from './lib/surfaces.mjs'
 import { noMachineIds, noSilentPress } from './lib/expect.mjs'
 import { PAGE_MS } from './lib/budget.mjs'
+import { liveBoardArgv, liveBoardPage } from '../../hooks/live-page.ts'
 import { ZH_TW } from '../../hooks/i18n.ts'
 import { EN } from '../../hooks/strings-en.ts'
 import { ZH_CN } from '../../hooks/strings-zh-cn.ts'
 
 // In the desktop app's Code tab no pane can be placed, so /progress runs the installed board
-// script with exactly these arguments (openLiveBoard in hooks/register.tsx).
-const progressArgs = lang => ['--serve', '--no-open', '--quiet-board', '--lang', lang]
-
-// The same rule /progress applies: only a last line that is the localized address line with a
-// local address becomes the link; anything else sends the person to the read-only page.
-const progressLink = (stdout, words) => {
-  const line = stdout.trimEnd().split(/\r?\n/).at(-1) ?? ''
-  const match = /http:\/\/127\.0\.0\.1:([1-9]\d{0,4})\/\?t=[A-Za-z0-9_-]+$/.exec(line)
-  return match && Number(match[1]) <= 65535 && line === words.serveAt(match[0]) ? match[0] : null
+// script with the arguments openLiveBoard in hooks/register.tsx uses, and reads its link by the
+// same rule.
+const progress = (world, lang) => {
+  const [node, script, ...args] = liveBoardArgv(world.script, lang)
+  assert.deepEqual([node, script], ['node', world.script])
+  return run(world, args)
 }
+const progressLink = (stdout, words) => liveBoardPage(stdout, words)?.url ?? null
 
 describe('L2 desktop app', () => {
   test('L2 desktop app: /progress starts the live page, hands every session the same link, and the person answers and archives there', async () => {
@@ -31,7 +30,7 @@ describe('L2 desktop app', () => {
       block(world, { agent: 'codex', state: 'waiting', title: 'Release the gateway', steps: ['- [x] Check routes', '- [?] Ship the gateway, OK?'] })
       block(world, { session: 'a1000002', agent: 'antigravity', project: 'docs-site', state: 'done', title: 'Publish the docs', steps: ['- [x] Upload docs'] })
 
-      const first = await run(world, progressArgs('en'))
+      const first = await progress(world, 'en')
       assert.equal(first.status, 0, first.stderr || first.stdout)
       const link = progressLink(first.stdout, EN)
       assert.ok(link, first.stdout)
@@ -44,7 +43,7 @@ describe('L2 desktop app', () => {
 
       // /progress again, from this or another session in any language, reuses the running page.
       for (const [lang, words] of [['en', EN], ['zh-TW', ZH_TW], ['zh-CN', ZH_CN]]) {
-        const again = await run(world, progressArgs(lang))
+        const again = await progress(world, lang)
         assert.equal(again.status, 0, again.stderr || again.stdout)
         assert.equal(progressLink(again.stdout, words), link, `${lang}: ${again.stdout}`)
       }

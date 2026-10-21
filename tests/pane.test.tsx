@@ -25,7 +25,6 @@ import { sha256 } from '../hooks/sha256'
 import { RELEASE_0_18_1, RELEASE_0_20_5 } from './fixtures/released'
 import { memoryConnect } from './fixtures/connect-memory'
 import { CONNECT_BOOTSTRAP, CONNECT_EXECUTE } from '../hooks/connect-worker'
-import { BOARD_SCRIPT } from '../hooks/board-script'
 import { LEDGER_LINK, LINK_EXISTS, LINK_KEPT_SOURCE, LINK_UNSUPPORTED } from '../hooks/ledger-move'
 import { hasOwnConnectData, connectDataRoots } from '../hooks/connect-pure'
 import type { ConnectState, LegacyConnectRequest } from '../scripts/connect-transaction'
@@ -34,7 +33,7 @@ const FILE = '/home/me/.claude/progress.md'
 const QUESTIONS = '/home/me/.claude/progress-questions.json'
 const INBOX = '/home/me/.claude/progress-inbox'
 const LIVE_SCRIPT = '/home/me/.claude/agent-board.mjs'
-const installedBoard = (path = FILE): string => `globalThis.AGENT_BOARD = ${JSON.stringify({ path, lang: 'en' })}\n${BOARD_SCRIPT}`
+const installedBoard = (path = FILE): string => boardScript(path, 'en')
 const SESSION = '2be48af2-6193-5040-aacc-e0546d6784f1'
 const PANE = { plugin: 'agent-board', component: 'Pane', requestId: 'agent-board' } as const
 const CONNECT = { home: '/home/me', sep: '/', isWindows: false, script: '/home/me/.claude/progress-report.sh', inbox: '/home/me/.claude/progress-inbox', codexHome: '/home/me/.codex', grokHome: '/home/me/.grok', hermesHome: '/home/me/.hermes', openclawHome: '/home/me/.openclaw', board: '/home/me/.claude/agent-board.mjs' }
@@ -131,7 +130,8 @@ type World = {
   paneOpenCalls?: number
   liveOutput?: string
   liveFailure?: 'exit' | 'timeout' | 'truncated'
-  liveCalls?: Array<{ argv: string[]; timeoutMs?: number; env?: Record<string, string | undefined> }>
+  liveCalls?: Array<{ argv: string[]; init: unknown }>
+  liveHold?: { reached: () => void; release: Promise<void> }
   isArchiveClockOnly?: boolean
   at?: number
   env?: Record<string, string>
@@ -317,8 +317,14 @@ const engineBeneath = (on: On, world: World): MockClock => {
     }
     if (e.argv[0] === 'node' && e.argv.includes('--serve')) {
       world.ran?.push([...e.argv])
-      const init = (e as typeof e & { init?: { timeoutMs?: number; env?: Record<string, string | undefined> } }).init
-      world.liveCalls?.push({ argv: [...e.argv], timeoutMs: init?.timeoutMs, env: init?.env })
+      // The whole options object, so a test proves no environment or other setting is passed.
+      world.liveCalls?.push({ argv: [...e.argv], init: (e as typeof e & { init?: unknown }).init })
+      if (world.liveHold !== undefined) {
+        const hold = world.liveHold
+        world.liveHold = undefined
+        hold.reached()
+        await hold.release
+      }
       if (world.node === null) return { deny: 'ENOENT' }
       if (world.liveFailure === 'timeout') return { deny: 'ETIMEDOUT' }
       return { value: { exitCode: world.liveFailure === 'exit' ? 1 : 0, stdout: world.liveOutput ?? '', stderr: 'SYNTHETIC_STARTUP_DETAIL', isStdoutTruncated: world.liveFailure === 'truncated', isStderrTruncated: false } }
@@ -3370,9 +3376,8 @@ test('/progress starts the live board page when the pane cannot be placed and re
     expect(result.text?.split('b'.repeat(32)).length).toBe(2)
     const call = world.liveCalls?.at(-1)
     expect(world.files.get(script)).toBe(installedBoard(progress))
-    expect(call?.argv).toEqual(['node', script, '--serve', '--no-open', '--quiet-board', '--lang', lang])
-    expect(call?.env).toBeUndefined()
-    expect(call?.timeoutMs).toBe(35000)
+    expect(call?.argv).toEqual(['node', script, '--serve', '--no-open', '--quiet-board', '--idle-minutes', '30', '--lang', lang])
+    expect(call?.init).toEqual({ timeoutMs: 35000 })
     expect(call?.argv).not.toContain(progress)
   }
   expect(world.ran?.some(argv => ['xdg-open', 'open', 'cmd'].includes(argv[0] ?? ''))).toBe(false)
@@ -3387,13 +3392,15 @@ test('/progress reuses a running live page and does not start a second one', asy
   const first = await $.command.run({ ...TIDY, args: '' })
   const ranBefore = world.ran?.length ?? 0
   const writtenBefore = world.written?.length ?? 0
-  world.liveOutput = `${EN.serveKept}\n${EN.serveAt(url)}\n`
+  // A page the person started with plain --serve is reused; the note that it keeps its own idle
+  // setting is not part of the reply.
+  world.liveOutput = `${EN.serveIdle}\n${EN.serveAt(url)}\n`
   const again = await $.command.run({ ...TIDY, args: '' })
   expect(again.text).toBe(first.text)
   expect(again.text).toBe(`${EN.livePageOpened}\n<${url}>`)
   // Both requests go through the CLI's existing reuse check, never straight to a child.
   expect(world.ran?.filter(argv => argv.includes('--serve')).length).toBe(2)
-  const argv = ['node', LIVE_SCRIPT, '--serve', '--no-open', '--quiet-board', '--lang', 'en']
+  const argv = ['node', LIVE_SCRIPT, '--serve', '--no-open', '--quiet-board', '--idle-minutes', '30', '--lang', 'en']
   expect(world.liveCalls?.map(call => call.argv)).toEqual([argv, argv])
   expect(world.ran?.slice(ranBefore)).toEqual([argv])
   expect(world.written?.slice(writtenBefore).filter(path => path.endsWith('.mjs'))).toEqual([])
@@ -3481,9 +3488,47 @@ test('/progress passes no environment to the board script and asks it for a quie
     await $.command.run({ ...TIDY, args: `lang ${lang}` })
     await $.command.run({ ...TIDY, args: '' })
     const call = world.liveCalls?.at(-1)
-    expect(call?.argv).toEqual(['node', LIVE_SCRIPT, '--serve', '--no-open', '--quiet-board', '--lang', lang])
-    expect(call?.env).toBeUndefined()
-    expect(call?.timeoutMs).toBe(35000)
+    expect(call?.argv).toEqual(['node', LIVE_SCRIPT, '--serve', '--no-open', '--quiet-board', '--idle-minutes', '30', '--lang', lang])
+    expect(call?.init).toEqual({ timeoutMs: 35000 })
+  }
+})
+
+test('/progress keeps the board page note in its reply when the page waits for a reply', async ($, on) => {
+  const url = `http://127.0.0.1:34567/?t=${'k'.repeat(32)}`
+  const world: World = { files: new Map([[FILE, JOBS], [LIVE_SCRIPT, installedBoard()]]), mtime: 1, hasTasks: true, ran: [], liveCalls: [], paneReason: 'no attached surface places panes (desktop)', store: { autoConnectOff: true } }
+  engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/demo', surface: 'desktop', isInteractive: true })
+  for (const lang of ['en', 'zh-TW', 'zh-CN'] as const) {
+    const s = STRINGS[lang]
+    await $.command.run({ ...TIDY, args: `lang ${lang}` })
+    world.liveOutput = `\n${s.serveKept}\n${s.serveAt(url)}\n`
+    const result = await $.command.run({ ...TIDY, args: '' })
+    expect(result.text).toBe(`${s.livePageOpened}\n<${url}>\n${s.serveKept}`)
+  }
+})
+
+test('the footer says the board page is starting while /progress waits for it', async ($, on) => {
+  const url = `http://127.0.0.1:34567/?t=${'s'.repeat(32)}`
+  const world: World = { files: new Map([[FILE, JOBS], [LIVE_SCRIPT, installedBoard()]]), mtime: 1, hasTasks: true, ran: [], liveCalls: [], paneReason: 'no attached surface places panes (desktop)', store: { autoConnectOff: true, closedByPerson: true } }
+  engineBeneath(on, world)
+  const seen = outside(on, world)
+  await $.session.start({ cwd: '/work/demo', surface: 'desktop', isInteractive: true })
+  for (const lang of ['en', 'zh-TW', 'zh-CN'] as const) {
+    const s = STRINGS[lang]
+    await $.command.run({ ...TIDY, args: `lang ${lang}` })
+    world.liveOutput = `${s.serveAt(url)}\n`
+    let release = (): void => undefined
+    const reached = new Promise<void>(done => {
+      world.liveHold = { reached: done, release: new Promise<void>(go => { release = go }) }
+    })
+    const running = $.command.run({ ...TIDY, args: '' })
+    await reached
+    expect(seen.status.at(-1)).toContain(s.livePageStarting)
+    expect(seen.status.at(-1)).not.toContain(s.statusBoardPage)
+    release()
+    expect((await running).text).toBe(`${s.livePageOpened}\n<${url}>`)
+    expect(seen.status.at(-1)).toContain(s.statusBoardPage)
+    expect(seen.status.at(-1)).not.toContain(s.livePageStarting)
   }
 })
 
@@ -3517,13 +3562,12 @@ test('/progress accepts only a local board page address from the board script', 
 })
 
 test('the footer status names /progress when no surface places panes', async ($, on) => {
-  const world: World = { files: new Map(), mtime: 1, hasTasks: true, paneReason: 'no-surface: no surface is attached ($.session.surfaces() is empty)', store: { autoConnectOff: true, lang: 'en' } }
+  const world: World = { files: new Map(), mtime: 1, hasTasks: true, hasNoSurface: true, paneReason: 'no-surface: no surface is attached ($.session.surfaces() is empty)', store: { autoConnectOff: true, lang: 'en' } }
   const clock = engineBeneath(on, world)
   const seen = outside(on, world)
   await $.session.start({ cwd: '/work/demo', surface: 'desktop', isInteractive: true })
   await clock.advance(10)
   expect(seen.status.at(-1)).toBe(EN.statusBoardPage)
-  const surfaceCalls = world.surfaceCalls
   for (const lang of ['en', 'zh-TW', 'zh-CN'] as const) {
     await $.command.run({ ...TIDY, args: `lang ${lang}` })
     world.paneReason = 'no attached surface places panes (desktop)'
@@ -3531,6 +3575,8 @@ test('the footer status names /progress when no surface places panes', async ($,
     expect(seen.status.at(-1)).toBe(STRINGS[lang].statusBoardPage)
     expect(seen.status.at(-1)).not.toContain('surface')
   }
+  // From here the attached surface's own answer decides; the roster is not read again.
+  const surfaceCalls = world.surfaceCalls
   world.files.set(FILE, JOBS)
   world.mtime += 1
   await clock.advance(2000)
@@ -3584,6 +3630,20 @@ test('a terminal that binds after session start clears the board-page hint', asy
   expect(world.surfaceCalls).toBe(surfaceCalls)
 })
 
+test('a terminal that binds after the pane found no surface at session start clears the board-page hint', async ($, on) => {
+  const world: World = { files: new Map([[FILE, JOBS]]), mtime: 1, hasTasks: true, hasNoSurface: true, paneReason: 'no-surface: no surface is attached ($.session.surfaces() is empty)', store: { autoConnectOff: true, lang: 'en' } }
+  const clock = engineBeneath(on, world)
+  const seen = outside(on, world)
+  await $.session.start({ cwd: '/work/demo', surface: 'terminal', isInteractive: true })
+  await clock.advance(10)
+  expect(world.paneOpenCalls).toBe(1)
+  const normalStatus = `${EN.statusPrefix} · ${EN.statusWaiting(1)}`
+  expect(seen.status.at(-1)).toBe(`${normalStatus} · ${EN.statusBoardPage}`)
+  world.hasNoSurface = false
+  await clock.advance(30000)
+  expect(seen.status.at(-1)).toBe(normalStatus)
+})
+
 test('the footer status is unchanged when the pane is placed', async ($, on) => {
   const world: World = { files: new Map([[FILE, JOBS]]), mtime: 1, hasTasks: true, store: { autoConnectOff: true, closedByPerson: true, lang: 'en' } }
   engineBeneath(on, world)
@@ -3595,7 +3655,7 @@ test('the footer status is unchanged when the pane is placed', async ($, on) => 
   expect(seen.status.at(-1)).toBeUndefined()
   const surfaceCalls = world.surfaceCalls
   // A later successful placement clears a hint left by an unavailable pane.
-  world.paneReason = 'no-surface: no surface is attached'
+  world.paneReason = 'no attached surface places panes (desktop)'
   await $.command.run({ ...TIDY, args: '' })
   expect(seen.status.at(-1)).toContain(EN.statusBoardPage)
   world.paneReason = undefined

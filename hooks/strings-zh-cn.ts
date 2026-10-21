@@ -229,6 +229,7 @@ export const ZH_CN: Strings = {
   livePageOpened: '这个应用无法显示面板。请打开看板网页，回答问题或归档工作：',
   livePageFallback: '交互看板网页无法启动，改用只读网页。',
   livePageNeedsInstall: '交互网页需要由 /progress connect 安装看板脚本，或在下次会话开始时更新。',
+  livePageStarting: '正在打开看板网页…',
   connectDone: (list: string): string => `已接上：${list}。重启它们之后，每回合结束都会自动汇报到面板。`,
   connectNone: '没找到可以接的 agent（Codex、Gemini CLI、Cursor、OpenCode、Grok Build、Hermes Agent、Muse Code、OpenClaw）。',
   setupCodexApproval: (): string => "尚未确认当前 Codex hook 的批准状态。请检查 /hooks；已有的受管理报告指示会保留。",

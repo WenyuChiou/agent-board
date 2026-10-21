@@ -109,7 +109,7 @@ claude plugin install agent-board@agent-board
 
 開啟新 Claude Code session，使用 `/progress`。側欄鏡像 Task 工具，也可透過它的模型整理回合。問題與決策顯示於任務上方；側欄跟隨 Claude 主題，網頁跟隨系統主題，除非你在網頁上選了亮色或暗色。
 
-Claude 桌面應用程式會顯示底部狀態列；`/progress` 會提供可回覆問題、封存工作的看板網頁，互動網頁無法啟動時則開啟唯讀網頁。互動網頁需要由 `/progress connect` 安裝看板腳本，或在下次工作階段開始時更新。使用同一份已安裝的看板腳本的工作階段與代理會共用執行中的網頁。Claude Code CLI 則顯示側欄。
+Claude 桌面 App 會顯示底部狀態列；`/progress` 會提供可回覆問題、封存工作的看板網頁，互動網頁無法啟動時則開啟唯讀網頁。網頁啟動最多約需半分鐘，期間底部狀態列會顯示正在開啟。互動網頁需要由 `/progress connect` 安裝看板腳本，或在下次工作階段開始時更新。使用同一份已安裝的看板腳本的工作階段與 agent 會共用執行中的網頁。`/progress` 開的網頁在最後一個分頁關掉 30 分鐘後關閉，再執行一次 `/progress` 就有新連結；你自己用 `--serve` 開的網頁照它自己的設定。`/progress` 會換掉用 `--allow-resume` 開的網頁，除非那裡還有回覆正在送出；需要接續回覆時，之後再執行一次 `--serve --allow-resume`。Claude Code CLI 則顯示側欄。
 
 | 指令／輸入 | 操作 |
 | --- | --- |

@@ -84,6 +84,7 @@ import { answerTurns, applyDigest, clearAsked, clearBackgroundJobs, cleanHandoff
 import type { Digest } from './digest'
 import { boardScript, isNodeSupported, isSetupState, isWindowsHost, nodeVersionOf, openclawPrinted, openclawSavedBy, openclawTooOld, psQuote, setupLines, setupProblemText, setupSeed } from './connect'
 import type { SetupProblem } from './connect'
+import { liveBoardArgv, liveBoardPage, liveBoardScript } from './live-page'
 import {
   ANSWER_KEEP,
   answerKey,
@@ -181,6 +182,8 @@ let pressSeq = 0
 let isPaneOpen = false
 let hasNoPaneSurface = false
 let hasPaneOpenAnswer = false
+// /progress runs still starting the board page; the footer says so until each one answers.
+let startingPages = 0
 let lastStatus: string | undefined
 let isCheckingPr = false
 // gh is tried until it fails to start (not installed) or says it is signed out.
@@ -880,25 +883,21 @@ const openDashboard = async ($: EngineInterface): Promise<string> => {
   return ran !== null && ran.exitCode === 0 ? s.windowOpened() : s.windowFailed(path.split(/[\\/]/).pop(), file.split(/[\\/]/).pop())
 }
 
-const openLiveBoard = async ($: EngineInterface, path: string, s: Strings): Promise<{ url: string | null; needsInstall: boolean }> => {
+const openLiveBoard = async ($: EngineInterface, path: string, s: Strings): Promise<{ page: { url: string; isKept: boolean } | null; needsInstall: boolean }> => {
   // Use the connector's installed file so sessions and agents share the same script
   // and the CLI's existing running-page check.
-  const script = path.replace(/[^\\/]*$/, 'agent-board.mjs')
+  const script = liveBoardScript(path)
   const installed = await readText($, script).catch(() => '')
-  if (!Object.values(STRINGS).some(words => installed === boardScript(path, words.lang))) return { url: null, needsInstall: true }
+  if (!Object.values(STRINGS).some(words => installed === boardScript(path, words.lang))) return { page: null, needsInstall: true }
   try {
     // Worst case: 2 s for the 0.19.0 address check + 8.5 s of checks + 10 s child
     // wait + 8.5 s of checks = 29 s, plus Node start. Going over is safe: the
     // read-only page opens, and a late child is reused next time.
-    const ran = await $.process.run(['node', script, '--serve', '--no-open', '--quiet-board', '--lang', s.lang], { timeoutMs: 35000 })
-    if (ran.exitCode !== 0 || ran.isStdoutTruncated) return { url: null, needsInstall: false }
-    // Only the final, localized address line is a reply; other output is data.
-    const line = ran.stdout.trimEnd().split(/\r?\n/).at(-1) ?? ''
-    const match = /http:\/\/127\.0\.0\.1:([1-9]\d{0,4})\/\?t=[A-Za-z0-9_-]+$/.exec(line)
-    const url = match?.[0]
-    return { url: url !== undefined && Number(match?.[1]) <= 65535 && line === s.serveAt(url) ? url : null, needsInstall: false }
+    const ran = await $.process.run(liveBoardArgv(script, s.lang), { timeoutMs: 35000 })
+    if (ran.exitCode !== 0 || ran.isStdoutTruncated) return { page: null, needsInstall: false }
+    return { page: liveBoardPage(ran.stdout, s), needsInstall: false }
   } catch {
-    return { url: null, needsInstall: false }
+    return { page: null, needsInstall: false }
   }
 }
 
@@ -922,6 +921,10 @@ const noteDone = async ($: EngineInterface, projects: readonly ProgressProject[]
 
 const hasNoPaneSurfaceIn = (opened: { isPlaced: boolean; reason?: string }): boolean =>
   !opened.isPlaced && /^(?:no-surface:|no attached surface places panes\b)/i.test(opened.reason ?? '')
+
+// "No surface is attached" is only as current as the roster, which a terminal can join later; an
+// answer from an attached surface that cannot place panes outranks the roster.
+const isPlacementAnswer = (opened: { isPlaced: boolean; reason?: string }): boolean => !/^no-surface:/i.test(opened.reason ?? '')
 
 // Older engines may lack the roster or answer something else: null means unknown, never empty.
 const surfacesOf = async ($: EngineInterface): Promise<readonly unknown[] | null> =>
@@ -959,7 +962,7 @@ const refreshStatus = async ($: EngineInterface): Promise<void> => {
         ),
         s,
       )
-  if (!isPaneOpen && hasNoPaneSurface) text = [text, s.statusBoardPage].filter(Boolean).join(' · ')
+  if (!isPaneOpen && hasNoPaneSurface) text = [text, startingPages > 0 ? s.livePageStarting : s.statusBoardPage].filter(Boolean).join(' · ')
   if (text === lastStatus) return
   lastStatus = text
   $.ui.status(text)
@@ -2574,7 +2577,7 @@ export const register: Register = (on, options) => {
         .then(opened => {
           isPaneOpen = opened.isPlaced
           hasNoPaneSurface = hasNoPaneSurfaceIn(opened)
-          hasPaneOpenAnswer = true
+          hasPaneOpenAnswer = isPlacementAnswer(opened)
           return refreshStatus($)
         })
         .catch(() => undefined)
@@ -2677,17 +2680,27 @@ export const register: Register = (on, options) => {
     const opened = await $.ui.open({ id: PANE, title: s.paneTitle, focus: true })
     isPaneOpen = opened.isPlaced
     hasNoPaneSurface = hasNoPaneSurfaceIn(opened)
-    hasPaneOpenAnswer = true
+    hasPaneOpenAnswer = isPlacementAnswer(opened)
     await refreshStatus($)
     const { path } = await read($, snapshot)
 
     if (opened.isPlaced) return { text: s.paneOpened(path) }
-    if (!hasNoPaneSurface) return { text: s.paneNotOpened(opened.reason) }
+    // This open's own answer decides; the footer's flag may already follow a newer roster.
+    if (!hasNoPaneSurfaceIn(opened)) return { text: s.paneNotOpened(opened.reason) }
     const progress = path || (await progressPath($))
-    const { url, needsInstall } = await openLiveBoard($, progress, s)
-    if (url !== null) return { text: `${s.livePageOpened}\n<${url}>` }
-    // openDashboard already words the result, with the file names when the browser fails.
-    return { text: `${s.livePageFallback}\n${needsInstall ? `${s.livePageNeedsInstall}\n` : ''}${await openDashboard($)}` }
+    // Starting the page can take half a minute; the footer says it is on its way meanwhile.
+    startingPages += 1
+    try {
+      await refreshStatus($)
+      const { page, needsInstall } = await openLiveBoard($, progress, s)
+      if (page !== null) return { text: `${s.livePageOpened}\n<${page.url}>${page.isKept ? `\n${s.serveKept}` : ''}` }
+      // openDashboard already words the result, with the file names when the browser fails.
+      return { text: `${s.livePageFallback}\n${needsInstall ? `${s.livePageNeedsInstall}\n` : ''}${await openDashboard($)}` }
+    } finally {
+      startingPages -= 1
+      // A footer that cannot be redrawn must not take away the link the person waited for.
+      await refreshStatus($).catch(() => undefined)
+    }
   })
 
   // Who wrote a prompt is known here, not at turn.start: only the person's own message answers

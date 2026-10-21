@@ -230,6 +230,7 @@ export const EN: Strings = {
   livePageOpened: 'This app cannot show the pane. Open the board page to answer questions and archive work:',
   livePageFallback: 'The live board page could not start. Using the read-only page instead.',
   livePageNeedsInstall: 'The live page needs the board script installed by /progress connect, or updated at the next session start.',
+  livePageStarting: 'Starting the board page…',
   connectDone: (list: string): string => `Connected: ${list}. After you restart them, every turn they finish reports to the pane.`,
   connectNone: 'No agent to connect was found (Codex, Gemini CLI, Cursor, OpenCode, Grok Build, Hermes Agent, Muse Code, OpenClaw).',
   setupCodexApproval: (): string => "Current Codex hook approval is unconfirmed. Check /hooks; existing managed reporting instructions are retained.",
