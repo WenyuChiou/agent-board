@@ -3,7 +3,7 @@ import { createHash } from 'node:crypto'
 import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, unlinkSync, utimesSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { delimiter, dirname, join, resolve } from 'node:path'
-import { test } from 'node:test'
+import { beforeEach, test } from 'node:test'
 import assert from 'node:assert/strict'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { inspect } from 'node:util'
@@ -129,17 +129,24 @@ const fireHook = (f, input, limit) => fireCommand(f, JSON.parse(readFileSync(f.h
 
 const hookFailure = result => JSON.stringify({ status: result.status, signal: result.signal, error: result.error && { code: result.error.code, message: result.error.message }, termination: result.termination, stdout: result.stdout, stderr: result.stderr })
 
+// Windows soon hands a freed pid to another process, so a pid this test has seen
+// exit is never stopped by number afterwards. Tests in this file run one at a time.
+const exitedPids = new Set()
+beforeEach(() => exitedPids.clear())
 // These synthetic reporters are grandchildren, so wait for their recorded PID
 // as well as the command's pipes before allowing fixture removal after a failure.
 const isReporterAlive = pid => {
   try { process.kill(pid, 0); return true } catch (error) {
-    if (error.code === 'ESRCH') return false
+    if (error.code === 'ESRCH') {
+      exitedPids.add(pid)
+      return false
+    }
     if (error.code === 'EPERM') return true
     throw error
   }
 }
 const stopReporter = async pid => {
-  if (!Number.isInteger(pid) || pid <= 0 || !isReporterAlive(pid)) return
+  if (!Number.isInteger(pid) || pid <= 0 || exitedPids.has(pid) || !isReporterAlive(pid)) return
   let termination
   if (process.platform === 'win32') termination = stopNativeTree({ pid })
   else {
@@ -1459,11 +1466,10 @@ const shell = spawn(nativeTreeCommand([process.execPath, ${JSON.stringify(tree.p
 writeFileSync(${JSON.stringify(shellReady)}, JSON.stringify({ pid: shell.pid }))
 setInterval(() => {}, 1000)
 `)
-  let intermediate, whenClosed
-  const gone = new Set()
+  let intermediate, whenClosed, hasClosed = false
   const stop = async pid => {
     // A process that already exited may have handed its pid to an unrelated one.
-    if (!Number.isInteger(pid) || pid <= 0 || gone.has(pid) || !isReporterAlive(pid)) return
+    if (!Number.isInteger(pid) || pid <= 0 || exitedPids.has(pid) || !isReporterAlive(pid)) return
     try { process.kill(pid) } catch (error) { if (error.code !== 'ESRCH') throw error }
     const until = Date.now() + 5000
     while (isReporterAlive(pid) && Date.now() < until) await new Promise(done => setTimeout(done, 25))
@@ -1472,7 +1478,10 @@ setInterval(() => {}, 1000)
   const recorded = (file, key = 'pid') => existsSync(file) ? JSON.parse(readFileSync(file, 'utf8'))[key] : undefined
   try {
     intermediate = spawn(process.execPath, [runner], { env: f.env, stdio: 'ignore', windowsHide: true })
-    whenClosed = new Promise(done => intermediate.once('close', done))
+    whenClosed = new Promise(done => intermediate.once('close', () => {
+      hasClosed = true
+      done()
+    }))
     await new Promise((done, reject) => {
       intermediate.once('spawn', done)
       intermediate.once('error', reject)
@@ -1484,20 +1493,21 @@ setInterval(() => {}, 1000)
     // they end only once the tree does.
     const chain = [...new Set([...pids, recorded(tree.parentReady, 'ppid'), recorded(shellReady)])].filter(pid => Number.isInteger(pid) && pid !== intermediate.pid)
     // Interrupt only the runner, so tree cleanup cannot mask a missing watchdog.
-    process.kill(intermediate.pid)
+    intermediate.kill()
     await whenClosed
     const until = Date.now() + 5000
     while (chain.some(isReporterAlive) && Date.now() < until) await new Promise(done => setTimeout(done, 25))
-    for (const pid of chain) {
-      assert.throws(() => process.kill(pid, 0), { code: 'ESRCH' }, 'the orphaned synthetic process must exit within five seconds')
-      gone.add(pid)
-    }
+    // Record every pid seen gone, even when another one in the chain failed.
+    for (const pid of chain) isReporterAlive(pid)
+    for (const pid of chain) assert.throws(() => process.kill(pid, 0), { code: 'ESRCH' }, 'the orphaned synthetic process must exit within five seconds')
     const last = readFileSync(tree.pulse, 'utf8')
     await new Promise(done => setTimeout(done, 250))
     assert.equal(readFileSync(tree.pulse, 'utf8'), last, 'an interrupted tree must stop writing its pulse')
   } finally {
     try {
-      if (intermediate?.pid) await stop(intermediate.pid)
+      // Stop the runner through its handle and only while it runs: once it has closed,
+      // its pid may already belong to an unrelated process.
+      if (intermediate && !hasClosed) intermediate.kill()
       if (whenClosed) await whenClosed
     } finally {
       // Read each PID after stopping its starter, including a late ready file.
@@ -1587,6 +1597,8 @@ test('failed native tree termination reports a bounded error and retains its fix
       env, encoding: 'utf8', windowsHide: true, timeout: 45000,
     })
     owned = existsSync(marker) ? JSON.parse(readFileSync(marker, 'utf8')) : null
+    // Record the probe's processes that are already gone before their pids can be reused.
+    for (const key of ['pid', 'probePid', 'parentPid', 'parentParentPid', 'descendantPid']) if (Number.isInteger(owned?.[key]) && owned[key] > 0) isReporterAlive(owned[key])
     const diagnostic = assertNativeProbeReturned(result, owned, Date.now() - started, 45000)
     assert.equal(result.status, 1, diagnostic)
     assert.ok(Date.now() - started < 45000, 'the isolated test process must actually exit before the watchdog')
@@ -1607,14 +1619,16 @@ test('failed native tree termination reports a bounded error and retains its fix
     const isAlive = pid => {
       try { process.kill(pid, 0); return true } catch (error) {
         if (error.code === 'EPERM') notOurs.add(pid)
-        else if (error.code !== 'ESRCH') throw error
+        else if (error.code === 'ESRCH') exitedPids.add(pid)
+        else throw error
         return false
       }
     }
+    const isOwnedAlive = pid => !exitedPids.has(pid) && isAlive(pid)
     // A POSIX group can outlive its leader. Windows needs each recorded child:
     // cmd may already be gone while PowerShell and parent.mjs are still alive.
     if (process.platform !== 'win32' && Number.isInteger(owned?.pid)) stopped.push({ pid: owned.pid, ...stopNativeTree({ pid: owned.pid }) })
-    for (const pid of pids) if (isAlive(pid)) {
+    for (const pid of pids) if (isOwnedAlive(pid)) {
       if (process.platform === 'win32') stopped.push({ pid, ...stopNativeTree({ pid }) })
       else {
         try { process.kill(pid, 'SIGKILL'); stopped.push({ pid, status: 0 }) } catch (error) {
@@ -1624,8 +1638,8 @@ test('failed native tree termination reports a bounded error and retains its fix
       }
     }
     const until = Date.now() + 5000
-    while (pids.some(isAlive) && Date.now() < until) await new Promise(done => setTimeout(done, 25))
-    for (const pid of pids) if (!notOurs.has(pid)) assert.throws(() => process.kill(pid, 0), { code: 'ESRCH' }, `Owned cleanup failed; fixture retained: ${JSON.stringify({ pid, stopped, home: owned?.home, control })}`)
+    while (pids.some(isOwnedAlive) && Date.now() < until) await new Promise(done => setTimeout(done, 25))
+    for (const pid of pids) if (!notOurs.has(pid) && !exitedPids.has(pid)) assert.throws(() => process.kill(pid, 0), { code: 'ESRCH' }, `Owned cleanup failed; fixture retained: ${JSON.stringify({ pid, stopped, home: owned?.home, control })}`)
     if (owned?.home) removeFixtureDirectory(owned.home, 'codex local-')
     removeFixtureDirectory(control, 'native-exit-')
   }
