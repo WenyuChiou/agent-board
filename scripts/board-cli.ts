@@ -54,14 +54,22 @@ const progressFile = (): string => {
 const path = progressFile()
 const s = STRINGS[langOf(flag('--lang')) ?? langOf(BAKED.lang) ?? langOf(process.env.LANG) ?? 'en']
 
+// Files changed since the board last read progress.md in full. A read refused because another
+// program holds the file open can say that nothing was changed only while this is 0. It is
+// cleared only after a full read, keeping writes made by that view, so a refresh right after a
+// press or view that wrote and then failed still says files may have changed.
+let writes = 0
+
 class BoardFileError extends Error {
-  constructor(readonly file: string, readonly code: string) {
+  readonly isLocked: boolean
+  constructor(readonly file: string, readonly code: string, isRead = false) {
     super(code)
+    this.isLocked = isRead && writes === 0 && (code === 'EBUSY' || code === 'EAGAIN')
   }
 }
 
-const fileError = (file: string, error: unknown): BoardFileError =>
-  new BoardFileError(file, String((error as { code?: string } | null)?.code ?? 'UNKNOWN'))
+const fileError = (file: string, error: unknown, isRead = false): BoardFileError =>
+  new BoardFileError(file, String((error as { code?: string } | null)?.code ?? 'UNKNOWN'), isRead)
 
 const plainFile = (file: string): string => {
   const full = resolve(file)
@@ -74,7 +82,7 @@ const read = (file: string): string => {
     return readFileSync(file, 'utf8')
   } catch (error) {
     if ((error as { code?: string } | null)?.code === 'ENOENT') return ''
-    throw fileError(file, error)
+    throw fileError(file, error, true)
   }
 }
 
@@ -154,7 +162,9 @@ const placeQuestionFile = (from: string, to: string): boolean => {
     ? [system32('WindowsPowerShell/v1.0/powershell.exe'), ['-NoProfile', '-NonInteractive', '-Command', `Move-Item -LiteralPath ${quote(source)} -Destination ${quote(target)} -ErrorAction Stop`]] as const
     : ['mv', ['-n', '--', source, target]] as const
   const ran = spawnSync(tool, [...argv], { cwd: dirname(path), stdio: 'ignore', timeout: 10000, windowsHide: true })
-  return ran.status === 0 && !existsSync(source)
+  const isMoved = ran.status === 0 && !existsSync(source)
+  if (isMoved) writes += 1
+  return isMoved
 }
 
 // A hard link fails when the target exists, so it never replaces another writer's ledger, and it
@@ -225,6 +235,7 @@ const keepQuestionCapture = (record: QuestionRecord, disposition: QuestionCaptur
   try {
     const fd = openSync(file, 'wx', 0o600)
     try { writeFileSync(fd, text) } finally { closeSync(fd) }
+    writes += 1
   } catch (error) {
     if ((error as { code?: string } | null)?.code !== 'EEXIST') throw fileError(file, error)
   }
@@ -253,6 +264,7 @@ const keepQuestionProof = (kind: keyof QuestionProofs, hash: string): void => {
   try {
     const fd = openSync(file, 'wx', 0o600)
     try { writeFileSync(fd, text) } finally { closeSync(fd) }
+    writes += 1
   } catch (error) {
     if ((error as { code?: string } | null)?.code !== 'EEXIST') throw fileError(file, error)
   }
@@ -351,6 +363,13 @@ const view = (source = read(path), now = Date.now()) => {
   return { ...buildView(projects, [basename(process.cwd())], null, now, countDay(read(journalPath(path, now)), now), manualDoneSeen(projects, seen, now, s), s, answered, seen, questions, readQuestionProofs(), turns), ...(tail === null ? {} : { warning: s.progressIncomplete(tail.tasks) }) }
 }
 
+const freshView = () => {
+  const before = writes
+  const shown = view()
+  writes -= before
+  return shown
+}
+
 const pad = (n: number): string => String(n).padStart(2, '0')
 
 const options = () => ({
@@ -421,6 +440,7 @@ const rewrite = (file: string, change: (text: string) => string | null): string 
       } catch {}
       continue
     }
+    writes += 1
     if (read(file) === after) return after
     failure = { code: 'EAGAIN' }
   }
@@ -470,6 +490,7 @@ const openHtml = (done: (note: string) => void): void => {
   // Named like any other file the board cannot write, so --watch reports it and runs on.
   try {
     writeFileSync(html, page)
+    writes += 1
   } catch (error) {
     throw fileError(html, error)
   }
@@ -641,13 +662,14 @@ const keysIn = (chunk: string): string[] => (chunk.replace(/\r\n/g, '\r').match(
 const failureNote = (error: unknown): string => {
   if (!(error instanceof BoardFileError)) throw error
   process.exitCode = 1
-  const note = s.boardStorageFailed(plainFile(error.file), plainReason(s, error.code))
+  const note = error.isLocked ? s.boardLocked(plainFile(error.file)) : s.boardStorageFailed(plainFile(error.file), plainReason(s, error.code))
   process.stderr.write(`${note}\n`)
   return note
 }
 
 const press = (state: BoardState, key: string): { state: BoardState; isQuit: boolean; isHtml: boolean; isWrite: boolean } => {
-  const items = boardItems(view(), pending(), state.isIdleOpen ?? false, state.isOlderOpen ?? false)
+  const shown = freshView()
+  const items = boardItems(shown, pending(), state.isIdleOpen ?? false, state.isOlderOpen ?? false)
   const { state: next, action } = boardKey(state, key, items, s)
   if (action === null) return { state: next, isQuit: false, isHtml: false, isWrite: false }
   if (action.type === 'quit') return { state: next, isQuit: true, isHtml: false, isWrite: false }
@@ -787,7 +809,8 @@ const serveChild = (): void => {
     s,
     port: Number(flag('--port') ?? 0) || 0,
     ping: { path, built, idleMs: idleMs(), allowResume: args.includes('--allow-resume'), messagesDirectory: flag('--messages-dir') ? resolve(flag('--messages-dir')!) : null },
-    view,
+    // Every page request starts by reading the board.
+    view: freshView,
     pending,
     act,
     tidy,
@@ -795,7 +818,7 @@ const serveChild = (): void => {
     // The page names a file it could not read or write the way the terminal board does, for a
     // press and for the board it shows. The page is answered, so the exit code and stderr are
     // left alone. File labels and reasons stay the same on local and network pages.
-    failure: error => (error instanceof BoardFileError ? s.boardStorageFailed(plainFile(error.file), plainReason(s, error.code)) : null),
+    failure: error => (error instanceof BoardFileError ? error.isLocked ? s.boardLocked(plainFile(error.file)) : s.boardStorageFailed(plainFile(error.file), plainReason(s, error.code)) : null),
     idleMs: idleMs(),
     onReady: (url, port) => {
       // Without its address file no later `--serve` finds this page, and each would start one
@@ -970,7 +993,7 @@ const chat = (): void => {
     const code = (error as { code?: unknown } | null)?.code
     const reason = typeof code === 'string' ? code : error instanceof Error ? error.message.split('\n')[0]?.slice(0, 160) || error.name : 'UNKNOWN'
     // Nothing here writes, so the board's own advice (files "may already have changed") is not told.
-    const told = error instanceof BoardFileError ? s.chatReadFailed(plainFile(error.file), plainReason(s, error.code)) : s.chatFailed(reason)
+    const told = error instanceof BoardFileError ? error.isLocked ? s.boardLocked(plainFile(error.file)) : s.chatReadFailed(plainFile(error.file), plainReason(s, error.code)) : s.chatFailed(reason)
     process.stdout.write(`${redact(told, homeOrNone(), isWin)}\n`)
   }
 }
@@ -1011,7 +1034,7 @@ const run = async (): Promise<void> => {
     // The fingerprints kept are those of the very lines this screen shows: one read does both.
     const draw = (): void => {
       try {
-        const shown = view()
+        const shown = freshView()
         const turns = pending()
         state = pinned(state, boardItems(shown, turns, state.isIdleOpen ?? false, state.isOlderOpen ?? false))
         process.stdout.write(`\u001b[2J\u001b[H${boardScreen(shown, turns, state, s, options())}`)
@@ -1061,7 +1084,8 @@ const run = async (): Promise<void> => {
     // Not a terminal (piped, or an agent's tool): no keys to read, so it only redraws.
     const tick = () => {
       try {
-        process.stdout.write(`\u001b[2J\u001b[H${boardText(view(), pending(), s, options())}\n${s.boardWatching}\n`)
+        const shown = freshView()
+        process.stdout.write(`\u001b[2J\u001b[H${boardText(shown, pending(), s, options())}\n${s.boardWatching}\n`)
       } catch (error) {
         process.stdout.write(`\u001b[2J\u001b[H${failureNote(error)}\n`)
       }

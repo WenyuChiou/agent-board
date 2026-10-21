@@ -437,6 +437,7 @@ export const EN: Strings = {
   storageBusy: 'another program is using it',
   storageFull: 'the disk is full',
   boardStorageFailed: (file: string, why: string): string => `Couldn't safely read or update ${file} (${why}), and some changes may already be saved; check the board and history, fix the file, then try again.`,
+  boardLocked: (file: string): string => `Another program has ${file} open; nothing was changed.`,
   // The board's page in the browser (`agent-board.mjs --serve`). The chat-relay prompt stays
   // in English in every language: it is the one tested live, and its markers are literal.
   serveAt: (url: string): string => `The board you can click (tick, archive, answer): ${url}`,

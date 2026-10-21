@@ -83,6 +83,15 @@ assistant messages and permission decisions, never read transcripts, and call no
 A permission event marks waiting; no output approves a tool or merge. `Stop` marks activity waiting, never conversation termination or task completion. Detailed steps and completion still come from explicit reports.
 Disconnected or untrusted hooks cannot update activity; existing stale-time rules apply.
 
+When another program holds `progress.md` locked, a lifecycle hook keeps trying for about
+two seconds, then saves the event's metadata under `pending/` in the data folder and exits 0.
+The next hook run on that board applies pending events first. An explicit report still
+fails and says it was not saved if the file stays locked. On Windows, a read-only
+`progress.md` is not a lock: the hook fails and says so. If a queued event meets a disk or
+permission error, it stays in `pending/` and every hook on that board fails with that error
+until it is fixed; to drop that event instead, remove the oldest file in `pending/` whose
+`progress` is this board's file.
+
 This feature does not send replies to an active desktop thread. A file, mock or accepted
 RPC is not proof of delivery. Test that separately with a disposable session and actual
 ACK after the user confirms the binding.

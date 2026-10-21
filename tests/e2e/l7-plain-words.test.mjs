@@ -134,7 +134,9 @@ test('L7 errors: every error is one plain sentence with no stack trace and no fu
       storageFault(world, { code }).enable('read')
       const result = await chat(world)
       assert.equal(result.status, 1)
-      assert.equal(result.stdout.trim(), EN.chatReadFailed(EN.fileProgress, why))
+      // A read refused because another program has the file open, before anything was written,
+      // says only that the file is locked (#244).
+      assert.equal(result.stdout.trim(), ['EBUSY', 'EAGAIN'].includes(code) ? EN.boardLocked(EN.fileProgress) : EN.chatReadFailed(EN.fileProgress, why))
       sentence(result.stdout.trim(), world)
     } finally { await world.close() }
   }
