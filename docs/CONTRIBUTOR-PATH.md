@@ -1,6 +1,6 @@
 # From an issue to a merged pull request
 
-This page is for an agent working on Agent Board from another computer, with `git`, `gh` (logged in to GitHub) and Node 22.18+ or 24. It gives the commands for [CONTRIBUTING.md, Pull requests](../CONTRIBUTING.md#pull-requests); where the two disagree, CONTRIBUTING.md wins. Every command runs as written in bash on Linux and in Git Bash on Windows. Nothing here needs Claude Code, files on the maintainer's computer or a chat: everything happens in the repository, its issues and its pull requests.
+This page is for an agent working on Agent Board from another computer, with `git`, `gh` (logged in to GitHub) and Node 22.18+ or 24. It gives the commands for [CONTRIBUTING.md, Pull requests](../CONTRIBUTING.md#pull-requests); where the two disagree, CONTRIBUTING.md wins. Every command runs as written in bash on Linux and in Git Bash on Windows. On macOS, the `date` in step 2 is the one command known to differ; it falls back to macOS's own form (`-v`). macOS has not been tried. Nothing here needs Claude Code, files on the maintainer's computer or a chat: everything happens in the repository, its issues and its pull requests.
 
 Below, `<agent>` is your name in lower case (`codex`, `dot`, `muse`, `cursor`). An agent that a coordinating session sent adds that session's lane in brackets (`codex (phase1)`). `<N>` is the issue, `<PR>` your pull request and `<branch>` your branch, named `<type>/<short-slug>` (`fix/question-ledger-write`).
 
@@ -24,10 +24,10 @@ gh pr list -R WenyuChiou/agent-board --state open
 gh issue view <N> -R WenyuChiou/agent-board --comments
 ```
 
-Go on only if nobody has an open pull request for the issue or a `Claim:` whose time has not passed, you have no other pull request waiting in review or CI ([docs/dev/team-process.md, One thing at a time](dev/team-process.md#one-thing-at-a-time)), and you have a free slot. A slot is rule 10: at most two open pull requests per author and eight in all. Drafts count; release pull requests, governance pull requests and those labelled `cap-exempt` do not. Then claim it, at most two days ahead:
+Go on only if nobody has an open pull request for the issue or a `Claim:` whose time has not passed, you have no other issue in progress (claim the next only after your last pull request merges), the issue is in the next milestone (later milestones are parked), and you have a free slot ([docs/dev/team-process.md, One thing at a time](dev/team-process.md#one-thing-at-a-time)). A slot is rule 10: at most two open pull requests per author and eight in all. Drafts count; release pull requests, governance pull requests and those labelled `cap-exempt` do not. Keep open pull requests at six or fewer; eight is the hard cap. Then claim it, at most two days ahead:
 
 ```sh
-until=$(date -u -d '+1 day' '+%Y-%m-%d %H:%M')
+until=$(date -u -d '+1 day' '+%Y-%m-%d %H:%M' 2>/dev/null || date -u -v+1d '+%Y-%m-%d %H:%M')
 gh issue comment <N> -R WenyuChiou/agent-board --body "Claim: <agent>, <branch>, until $until UTC"
 gh issue edit <N> -R WenyuChiou/agent-board --add-label claimed
 ```
@@ -82,6 +82,7 @@ iso node --test tests/exchange.test.mjs tests/messaging.test.mjs
 iso node --test tests/board.test.mjs tests/board-storage.test.mjs tests/codex-local.test.mjs tests/local-lock.test.mjs tests/prompt-hooks.test.mjs tests/codex-host.test.mjs tests/codex-fallback.test.mjs tests/legacy-connect.test.mjs tests/connect-worker.test.mjs
 iso node --test tests/pr-check.test.mjs tests/preflight.test.mjs tests/changelog-fold.test.mjs tests/team-stats.test.mjs
 iso node --test tests/npm-package.test.mjs
+iso node --test "tests/e2e/*.test.mjs"
 npx --yes bun@1.4.2 scripts/build-board.ts --check
 git fetch --tags origin
 npx --yes bun@1.4.2 scripts/build-released.ts --check
@@ -120,13 +121,13 @@ Copy each title exactly from its `test('…')` call. A change to documentation o
 
 ## 6. Open the pull request as a draft
 
-Commit as `<type>(<scope>): <summary>` with a body that says why. Copy the template to a file outside the checkout, so it is never committed, and fill in every section:
+Commit as `<type>: <summary>` or `<type>(<scope>): <summary>`, with a body that says why. Copy the template to a file outside the checkout, so it is never committed, and fill in every section:
 
 ```sh
 cp .github/pull_request_template.md ../pr-body.md
 ```
 
-The body opens with `Fixes #N` (or `Part of #N` for one step of a split issue), then `Author: <agent>, <branch>`. Under Evidence, name the full head sha your results are for. Under Checks, add each result after a dash, or `not run:` and why. Screenshots are drawn from made-up data, with alt text starting "Synthetic". Check the body, push and open the draft:
+The body opens with `Fixes #N` (or `Part of #N` for one step of a split issue), then `Author: <agent>, <branch>`. Under Evidence, name the full head sha your results are for. Under Checks, add each result after a dash; for a check you did not run, `not run:` and why; for one that does not apply, `n/a:` and why. Screenshots are drawn from made-up data, with alt text starting "Synthetic". Check the body, push and open the draft:
 
 ```sh
 node scripts/pr-check.mjs --body-file ../pr-body.md --title "fix(cli): <summary>"
@@ -164,7 +165,7 @@ gh pr view <PR> -R WenyuChiou/agent-board --comments
 node scripts/pr-check.mjs --pr <PR>      # also prints the latest Review: verdict and whether it is for your head
 ```
 
-`Review: REQUEST CHANGES <sha>` lists findings. Fix each, push, say in a comment which commit fixed which finding, and comment `Ready for review <new sha>`. How many review rounds there are, and what happens after the second REQUEST CHANGES, are in [docs/dev/team-process.md, From claim to merge](dev/team-process.md#from-claim-to-merge). After `Review: APPROVE <sha>`, push nothing unless asked: any push needs a new verdict.
+`Review: REQUEST CHANGES <sha>` lists findings. Fix each finding, merge `main` (step 9), run preflight again and update Checks, push, answer each finding in a comment that names the commit that fixed it, then comment `Ready for review <new full head sha>`. How many review rounds there are, and what happens after the second REQUEST CHANGES, are in [docs/dev/team-process.md, From claim to merge](dev/team-process.md#from-claim-to-merge). After `Review: APPROVE <sha>`, push nothing unless asked: any push needs a new verdict.
 
 A question goes on the issue, not on the pull request and not in a chat:
 
@@ -178,7 +179,7 @@ The answer comes in the same issue, starting `Answer:`. Read it with `gh issue v
 ## 9. Keep the branch current
 
 ```sh
-git pull --ff-only          # the reviewer may have merged main into your branch
+git pull --ff-only          # after step 6: the reviewer may have merged main into your branch
 git fetch origin
 git merge origin/main       # never rebase or force-push
 ```
@@ -192,11 +193,11 @@ git add hooks/board-script.ts
 git commit --no-edit
 ```
 
-Fragments in `changelog.d/` do not conflict, since each pull request adds its own file. Run the checks again, push, and if the pull request was ready, comment `Ready for review <new sha>`. After `Review: APPROVE`, leave merging `main` to the reviewer.
+Fragments in `changelog.d/` do not conflict, since each pull request adds its own file. Run the checks again and push. Once the pull request is Ready, merge `main` only while answering `Review: REQUEST CHANGES`, or when the maintainer comments that `main` moved ([docs/dev/team-process.md, Merge order](dev/team-process.md#merge-order)); after that push, comment `Ready for review <new full head sha>`. After `Review: APPROVE`, leave merging `main` to the reviewer.
 
 ## 10. After the merge, or handing over
 
-You never merge. The maintainer (the owner, or the Claude Code session the owner named maintainer) reviews and merges, deletes the branch, and comments on the issue with the merge commit and the evidence; your `Fixes #N` line closes it. There is nothing left for you to do, and the branch is not reused.
+You never merge. The maintainer (the owner, or the Claude Code session the owner named maintainer) reviews and merges, deletes the branch, and comments on the issue with the merge commit and the evidence; your `Fixes #N` line closes it, while a `Part of #N` pull request leaves it open for the next step. There is nothing left for you to do on this pull request, and its branch is not reused: the next step of a split issue is a new pull request ([CONTRIBUTING.md](../CONTRIBUTING.md#pull-requests) rule 2), from a new branch.
 
 If you stop before the work is done, push your branch, then:
 
