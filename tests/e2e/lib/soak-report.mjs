@@ -121,7 +121,7 @@ export const reportMarkdown = report => {
     lines.push(`- Polls: ${count(polls.count)} sent, ${count(polls.failed)} got no answer, ${count(polls.slow)} took longer than 15 seconds, ${count(polls.badStatus)} got an answer other than 200. A typical poll took ${polls.median ?? '?'} ms, one in 20 took longer than ${polls.p95 ?? '?'} ms, the slowest took ${polls.max ?? '?'} ms. The first answer was ${polls.firstSize === undefined ? '?' : kilobytes(polls.firstSize)} KB and the last was ${polls.lastSize === undefined ? '?' : kilobytes(polls.lastSize)} KB.`)
     const causes = Object.entries(polls.failedBy ?? {}).map(([cause, many]) => `${count(many)} ${cause}`)
     if (causes.length > 0) lines.push(`- Polls with no answer, by cause: ${causes.join('; ')}.`)
-    if (polls.retried > 0) lines.push(`- ${count(polls.retried)} polls were sent again once, after the connection closed before an answer.`)
+    if (polls.retried > 0) lines.push(`- ${count(polls.retried)} polls were sent again after the connection closed before an answer.`)
   }
   for (const phase of report.phases ?? []) lines.push(`- ${phase.name} began at ${clockOf(phase.startedAt)} UTC.`)
   for (const window of report.fileOps ?? []) lines.push(`- File operations per poll, ${window.name}: ${window.perPoll === undefined ? 'not measured' : window.perPoll.toFixed(1)}.`)
