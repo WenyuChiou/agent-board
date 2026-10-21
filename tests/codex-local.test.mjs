@@ -1745,6 +1745,159 @@ require('node:module').syncBuiltinESMExports()
 
 const pendingFiles = f => existsSync(join(f.root, 'pending')) ? readdirSync(join(f.root, 'pending')).filter(name => name.endsWith('.json')).sort() : []
 
+test('a first Codex event names its block and project after its working folder', () => fixture(f => {
+  assert.equal(f.install('--apply').status, 0)
+  const cwd = join(f.home, 'synthetic-work', 'gateway-web')
+  const locked = lockedProgress(f)
+  const queued = f.event('UserPromptSubmit', 'turn-1', { cwd, prompt: 'PRIVATE_PROMPT' }, locked.env)
+  assert.equal(queued.status, 0, queued.stderr)
+  const files = pendingFiles(f)
+  assert.equal(files.length, 1)
+  const text = readFileSync(join(f.root, 'pending', files[0]), 'utf8')
+  const entry = JSON.parse(text)
+  assert.equal(entry.folder, 'gateway-web')
+  assert.deepEqual(entry.payload, { session_id: session, hook_event_name: 'UserPromptSubmit', turn_id: 'turn-1' })
+  assert.ok(!text.includes(cwd) && !text.includes(JSON.stringify(cwd).slice(1, -1)))
+  assert.doesNotMatch(text, /PRIVATE_PROMPT|"cwd"|"prompt"/)
+  unlinkSync(locked.marker)
+  const result = f.command(['--codex-event'], { session_id: session, hook_event_name: 'SessionStart' })
+  assert.equal(result.status, 0, result.stderr)
+  assert.match(readFileSync(f.progress, 'utf8'), /^## gateway-web\r?\n<!-- auto [^\n]+\n### gateway-web\r?$/m)
+  assert.deepEqual(pendingFiles(f), [])
+  for (const file of [f.progress, ...readdirSync(join(f.root, 'sessions')).map(name => join(f.root, 'sessions', name))]) {
+    const saved = readFileSync(file, 'utf8')
+    assert.ok(!saved.includes(cwd) && !saved.includes(JSON.stringify(cwd).slice(1, -1)) && !saved.includes('PRIVATE_PROMPT'), file)
+  }
+}))
+
+test('a Codex working folder name is cleaned the way the inbox cleans it', () => fixture(f => {
+  assert.equal(f.install('--apply').status, 0)
+  const messy = f.event('UserPromptSubmit', 'turn-1', { cwd: join(f.home, 'synthetic  gateway<!--web-->') })
+  assert.equal(messy.status, 0, messy.stderr)
+  const openclaw = f.command(['--codex-event'], { session_id: 'synthetic-openclaw-session', hook_event_name: 'UserPromptSubmit', turn_id: 'turn-1', cwd: join(f.home, '.openclaw', 'workspace') })
+  assert.equal(openclaw.status, 0, openclaw.stderr)
+  const board = readFileSync(f.progress, 'utf8')
+  assert.match(board, /^## synthetic gateway web\r?\n<!-- auto [^\n]+\n### synthetic gateway web\r?$/m)
+  assert.match(board, /^## OpenClaw\r?\n<!-- auto [^\n]+\n### OpenClaw\r?$/m)
+  assert.ok(!board.includes(f.home))
+}))
+
+test('a Codex event without a working folder keeps the old title and project', () => fixture(f => {
+  assert.equal(f.install('--apply').status, 0)
+  const result = f.event('UserPromptSubmit')
+  assert.equal(result.status, 0, result.stderr)
+  assert.match(readFileSync(f.progress, 'utf8'), /^## codex\r?\n<!-- auto [^\n]+\n### Local codex task\r?$/m)
+}))
+
+test('a Cursor event names its block after its working folder', () => fixture(f => {
+  assert.equal(f.install('--apply').status, 0)
+  const root = join(f.home, 'synthetic-work', 'gateway-web')
+  const result = f.command(['--codex-event', '--agent', 'cursor'], {
+    conversation_id: 'synthetic-cursor-session', hook_event_name: 'beforeSubmitPrompt', generation_id: 'turn-1',
+    workspace_roots: [root],
+  })
+  assert.equal(result.status, 0, result.stderr)
+  assert.match(readFileSync(f.progress, 'utf8'), /^## gateway-web\r?\n<!-- auto [^\n]+agent=cursor [^\n]+\n### gateway-web\r?$/m)
+  for (const file of [f.progress, ...readdirSync(join(f.root, 'sessions')).map(name => join(f.root, 'sessions', name))]) {
+    const saved = readFileSync(file, 'utf8')
+    assert.ok(!saved.includes(root) && !saved.includes(JSON.stringify(root).slice(1, -1)), file)
+  }
+}))
+
+test('a later report with another project moves the block under that project', () => fixture(f => {
+  assert.equal(f.install('--apply').status, 0)
+  for (const project of ['alpha-web', 'beta-web']) {
+    const result = f.command(['--codex-report'], { project, title: 'Gateway task', state: 'working', steps: ['- [~] Check routes'] })
+    assert.equal(result.status, 0, result.stderr)
+  }
+  const board = readFileSync(f.progress, 'utf8')
+  assert.equal((board.match(/<!-- auto /g) ?? []).length, 1)
+  assert.match(board, /^## alpha-web\r?$/m)
+  assert.match(board, /^## beta-web\r?\n<!-- auto /m)
+  assert.ok(board.indexOf('<!-- auto ') > board.indexOf('## beta-web'))
+}))
+
+test('a report that keeps its project leaves a block someone moved where it is', () => fixture(f => {
+  assert.equal(f.install('--apply').status, 0)
+  const report = () => f.command(['--codex-report'], { project: 'alpha-web', title: 'Gateway task', state: 'working', steps: ['- [~] Check routes'] })
+  assert.equal(report().status, 0)
+  f.save(f.progress, readFileSync(f.progress, 'utf8').replace(/^## alpha-web(?=\r?$)/m, '## Moved by hand'))
+  const result = report()
+  assert.equal(result.status, 0, result.stderr)
+  const board = readFileSync(f.progress, 'utf8')
+  assert.equal((board.match(/^## /gm) ?? []).length, 1)
+  assert.match(board, /^## Moved by hand\r?\n<!-- auto [^\n]+\n### Gateway task\r?$/m)
+}))
+
+test('hook events keep a block in place under a renamed heading or a folder name ending in #', () => fixture(f => {
+  assert.equal(f.install('--apply').status, 0)
+  assert.equal(f.event('UserPromptSubmit', 'turn-1', { cwd: join(f.home, 'synthetic-work', 'notes#') }).status, 0)
+  assert.equal(f.event('Stop').status, 0)
+  const first = readFileSync(f.progress, 'utf8')
+  assert.equal((first.match(/^## /gm) ?? []).length, 1, first)
+  assert.match(first, /^## notes#\r?\n<!-- auto /m)
+  f.save(f.progress, first.replace(/^## notes#(?=\r?$)/m, '## Renamed by hand'))
+  const result = f.event('UserPromptSubmit', 'turn-2')
+  assert.equal(result.status, 0, result.stderr)
+  const board = readFileSync(f.progress, 'utf8')
+  assert.equal((board.match(/^## /gm) ?? []).length, 1, board)
+  assert.match(board, /^## Renamed by hand\r?\n<!-- auto /m)
+}))
+
+test('a report that changes the project moves a block from the end of a CRLF file with no final line break', () => fixture(f => {
+  assert.equal(f.install('--apply').status, 0)
+  const report = project => f.command(['--codex-report'], { project, title: 'Gateway task', state: 'working', steps: ['- [~] Check routes'] })
+  assert.equal(report('alpha-web').status, 0)
+  const crlf = readFileSync(f.progress, 'utf8').replace(/\r?\n/g, '\r\n').replace(/\r\n$/, '')
+  f.save(f.progress, crlf)
+  const result = report('beta-web')
+  assert.equal(result.status, 0, result.stderr)
+  const board = readFileSync(f.progress, 'utf8')
+  const kept = crlf.slice(0, crlf.indexOf('<!-- auto '))
+  assert.match(kept, /## alpha-web\r\n$/)
+  assert.ok(board.startsWith(`${kept}\r\n## beta-web\r\n<!-- auto `), JSON.stringify(board))
+  assert.match(board, /\r\n### Gateway task\r\n- \[~\] Check routes\r\n<!-- \/auto session=[^\r\n]+ -->\r\n$/)
+  assert.doesNotMatch(board, /(?<!\r)\n/)
+  assert.equal((board.match(/<!-- auto /g) ?? []).length, 1)
+}))
+
+test('a report that changes the project moves a block that sat before any heading', () => fixture(f => {
+  assert.equal(f.install('--apply').status, 0)
+  const report = project => f.command(['--codex-report'], { project, title: 'Gateway task', state: 'working', steps: ['- [~] Check routes'] })
+  assert.equal(report('alpha-web').status, 0)
+  const first = readFileSync(f.progress, 'utf8')
+  f.save(f.progress, `Notes by hand\n${first.slice(first.indexOf('<!-- auto '))}`)
+  const result = report('beta-web')
+  assert.equal(result.status, 0, result.stderr)
+  const board = readFileSync(f.progress, 'utf8')
+  assert.ok(board.startsWith('Notes by hand\n\n## beta-web\n<!-- auto '), JSON.stringify(board))
+  assert.equal((board.match(/<!-- auto /g) ?? []).length, 1)
+}))
+
+test('a hook event after a report keeps the reported project', () => fixture(f => {
+  assert.equal(f.install('--apply').status, 0)
+  const report = f.command(['--codex-report'], { project: 'beta-web', title: 'Gateway task', state: 'working', steps: ['- [~] Check routes'] })
+  assert.equal(report.status, 0, report.stderr)
+  const result = f.event('UserPromptSubmit', 'turn-1', { cwd: join(f.home, 'other-work') })
+  assert.equal(result.status, 0, result.stderr)
+  const board = readFileSync(f.progress, 'utf8')
+  assert.match(board, /^## beta-web\r?\n<!-- auto [^\n]+\n### Gateway task\r?$/m)
+  assert.equal((board.match(/^## /gm) ?? []).length, 1)
+}))
+
+test('a queued event from an older version without a folder still applies', () => fixture(f => {
+  assert.equal(f.install('--apply').status, 0)
+  f.save(join(f.root, 'pending', '001.json'), JSON.stringify({
+    version: 1, progress: f.progress, mode: '--codex-event', agent: 'codex', session,
+    now: new Date().toISOString(), isBoardPrompt: false, isPrompt: false,
+    payload: { session_id: session, hook_event_name: 'UserPromptSubmit', turn_id: 'turn-1' },
+  }))
+  const result = f.command(['--codex-event'], { session_id: session, hook_event_name: 'SessionStart' })
+  assert.equal(result.status, 0, result.stderr)
+  assert.match(readFileSync(f.progress, 'utf8'), /^## codex\r?\n<!-- auto [^\n]+\n### Local codex task\r?$/m)
+  assert.deepEqual(pendingFiles(f), [])
+}))
+
 const assertBusyFailure = (result, f) => {
   assert.equal(result.status, 1, result.stderr)
   assert.equal(result.stderr.trim().split(/\r?\n/).length, 1, result.stderr)
