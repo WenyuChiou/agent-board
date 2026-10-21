@@ -155,9 +155,26 @@ function Read-PromptReceipt([string]$File, [Diagnostics.Stopwatch]$Clock) {
   try {
     if ($Clock.ElapsedMilliseconds -ge ${HOOK_INPUT_TIMEOUT}) { throw 'REPORTER_TIMEOUT' }
     $start = New-Object Diagnostics.ProcessStartInfo
-    # Explicit CommandType can return several applications even without -All.
-    # FileName needs one path, never the string conversion of a path array.
-    $start.FileName = (Get-Command node -CommandType Application -TotalCount 1 -ErrorAction Stop).Source
+    # Get-Command searches every module before it reports a missing command, which can
+    # take more than a second of the budget; a plain walk of PATH and PATHEXT finds the
+    # same file. Only absolute folders count, so an empty or relative entry never makes
+    # the walk look in the project folder. FileName needs one path, never an array.
+    $node = $null
+    $extensions = ([string]$env:PATHEXT).Split([char]59) | Where-Object { $_ -ne '' }
+    if (-not $extensions) { $extensions = @('.COM', '.EXE', '.BAT', '.CMD') }
+    foreach ($folder in ([string]$env:PATH).Split([char]59)) {
+      if ($Clock.ElapsedMilliseconds -ge ${HOOK_INPUT_TIMEOUT}) { throw 'REPORTER_TIMEOUT' }
+      $folderPath = $folder.Trim().Trim([char]34)
+      if ($folderPath -eq '') { continue }
+      try { if (-not [IO.Path]::IsPathRooted($folderPath) -or -not [IO.Directory]::Exists($folderPath)) { continue } } catch { continue }
+      foreach ($extension in $extensions) {
+        try { $candidate = [IO.Path]::Combine($folderPath, 'node' + $extension) } catch { continue }
+        if ([IO.File]::Exists($candidate)) { $node = $candidate; break }
+      }
+      if ($null -ne $node) { break }
+    }
+    if ($null -eq $node) { return '' }
+    $start.FileName = $node
     $start.Arguments = ${psQuote('-e ' + windowsQuote(PROMPT_FILE_SCRIPT))}
     $start.UseShellExecute = $false
     $start.CreateNoWindow = $true

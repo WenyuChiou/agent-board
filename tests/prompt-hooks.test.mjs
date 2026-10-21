@@ -276,11 +276,15 @@ test('classifier diagnostics keep only bounded phase and numeric evidence', () =
 
 test('generated PowerShell bounds application lookup to one executable', async () => {
   const { reporterPs1, reporterSh } = await import('../hooks/connect-pure.ts')
-  // An explicit CommandType keeps Get-Command enumerating, even without -All.
-  // TotalCount is supported by Windows PowerShell 5.1; do not let an array
-  // of Source paths become one space-joined ProcessStartInfo.FileName.
+  // Get-Command searches every module before it reports a missing Node, which can spend
+  // more than a second of the reporter budget. The reporter walks PATH and PATHEXT
+  // itself and stops at the first match, so ProcessStartInfo.FileName gets one path,
+  // never a space-joined array of paths.
   for (const source of [reporterPs1(), reporterSh('/synthetic/inbox')]) {
-    assert.match(source, /Get-Command node -CommandType Application -TotalCount 1 -ErrorAction Stop/)
+    assert.doesNotMatch(source, /Get-Command node/)
+    assert.match(source, /\[IO\.File\]::Exists\(\$candidate\)\) \{ \$node = \$candidate; break \}/)
+    assert.match(source, /\$start\.FileName = \$node\b/)
+    assert.match(source, /\[IO\.Path\]::IsPathRooted\(\$folderPath\)/)
   }
 })
 

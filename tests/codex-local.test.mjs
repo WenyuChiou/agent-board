@@ -659,29 +659,42 @@ test('the PowerShell classifier uses the first Node path when several applicatio
   const lookup = spawnSync(powershell, ['-NoProfile', '-Command', '$c = @(Get-Command node -CommandType Application -ErrorAction Stop); $c.Count'], { env, encoding: 'utf8', windowsHide: true, timeout: 10000 })
   assert.equal(lookup.error, undefined)
   assert.equal(lookup.status, 0, 'the controlled application lookup must succeed')
-  assert.equal(lookup.stdout.trim(), '2', 'exercise two real ApplicationInfo results, not a mocked lookup')
+  assert.equal(lookup.stdout.trim(), '2', 'two real node.exe files on PATH, not a mocked lookup')
   const file = join(f.root, 'progress-report.ps1'), diagnostic = join(f.home, 'classifier-probe.txt')
   const raw = JSON.stringify({ session_id: 'synthetic-multiple-node', cwd: '/synthetic/中文', prompt: '/board' })
+  // The reporter walks PATH itself (Get-Command can spend over a second on a missing Node)
+  // and must start the first match: the later, non-executable node.exe never runs.
   const source = reporterPs1()
-  assert.ok(source.includes(' -TotalCount 1'))
-  for (const isCapped of [false, true]) {
-    rmSync(inbox, { recursive: true, force: true })
-    rmSync(diagnostic, { force: true })
-    f.save(file, observeClassifier(isCapped ? source : source.replace(' -TotalCount 1', ''), diagnostic))
-    const result = await nativeProcess(powershell, ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', file, 'codex', 'prompt'], env, raw, callback => setTimeout(callback, 10000))
-    assert.equal(result.error, undefined)
-    assert.equal(result.status, 0, classifierDiagnostic(diagnostic))
-    const saved = existsSync(inbox) ? readdirSync(inbox).filter(name => name.endsWith('.json')).map(name => ({ body: readFileSync(join(inbox, name), 'utf8') })) : []
-    assert.equal(saved.length, 1, classifierDiagnostic(diagnostic))
-    if (isCapped) {
-      assert.match(classifierDiagnostic(diagnostic), /phase=complete started=1/)
-      assert.deepEqual(JSON.parse(saved[0].body), { session_id: 'synthetic-multiple-node', cwd: '/synthetic/中文', board_request: true })
-      assert.ok(!/[^\x20-\x7e]/.test(saved[0].body))
-    } else {
-      assert.match(classifierDiagnostic(diagnostic), /phase=start started=0 .*nativeCode=2 /)
-      assert.deepEqual(JSON.parse(saved[0].body), JSON.parse(raw), 'uncapped control demonstrates the existing non-timeout fallback')
-    }
-  }
+  assert.doesNotMatch(source, /Get-Command node/)
+  f.save(file, observeClassifier(source, diagnostic))
+  const result = await nativeProcess(powershell, ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', file, 'codex', 'prompt'], env, raw, callback => setTimeout(callback, 10000))
+  assert.equal(result.error, undefined)
+  assert.equal(result.status, 0, classifierDiagnostic(diagnostic))
+  const saved = existsSync(inbox) ? readdirSync(inbox).filter(name => name.endsWith('.json')).map(name => ({ body: readFileSync(join(inbox, name), 'utf8') })) : []
+  assert.equal(saved.length, 1, classifierDiagnostic(diagnostic))
+  assert.match(classifierDiagnostic(diagnostic), /phase=complete started=1/)
+  assert.deepEqual(JSON.parse(saved[0].body), { session_id: 'synthetic-multiple-node', cwd: '/synthetic/中文', board_request: true })
+  assert.ok(!/[^\x20-\x7e]/.test(saved[0].body))
+}))
+
+test('the PowerShell reporter never looks for Node in its working folder through an empty or relative PATH entry', { skip: process.platform !== 'win32' }, () => fixture(async f => {
+  const work = join(f.home, 'project'), inbox = join(f.root, 'progress-inbox')
+  mkdirSync(work)
+  // A node.exe in the folder the hook runs in is not an application: starting it would fail.
+  writeFileSync(join(work, 'node.exe'), 'synthetic project file must not run')
+  const env = { ...f.env }
+  for (const key of Object.keys(env)) if (key.toLowerCase() === 'path') delete env[key]
+  env.PATH = ['""', '.', 'relative-folder', dirname(process.execPath)].join(delimiter)
+  const powershell = join(process.env.SystemRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe')
+  const file = join(f.root, 'progress-report.ps1'), diagnostic = join(f.home, 'classifier-probe.txt')
+  const raw = JSON.stringify({ session_id: 'synthetic-working-folder', cwd: '/synthetic/project', prompt: '/board' })
+  f.save(file, observeClassifier(reporterPs1(), diagnostic))
+  const result = await nativeProcess(powershell, ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', file, 'codex', 'prompt'], env, raw, callback => setTimeout(callback, 10000), undefined, { cwd: work })
+  assert.equal(result.error, undefined)
+  assert.equal(result.status, 0, classifierDiagnostic(diagnostic))
+  const saved = existsSync(inbox) ? readdirSync(inbox).filter(name => name.endsWith('.json')).map(name => readFileSync(join(inbox, name), 'utf8')) : []
+  assert.equal(saved.length, 1, classifierDiagnostic(diagnostic))
+  assert.deepEqual(JSON.parse(saved[0]), { session_id: 'synthetic-working-folder', cwd: '/synthetic/project', board_request: true })
 }))
 
 test('legacy prompt classifiers time out and reap their process without promoting raw receipts', () => fixture(async f => {
