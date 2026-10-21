@@ -298,6 +298,7 @@ export const ZH_TW = {
   setupBoardReady: '看板指令可以用',
   setupBoardNeedsNode: (min: number): string => `看板指令要 Node.js ${min} 以上才能跑`,
   setupBoardFailed: '看板指令沒寫好，原因在下面',
+  setupMissingBoardScript: (name: string): string => `${name}：看板指令指向的腳本已經不在了。執行 /progress connect 重寫指令。`,
   setupNodeMissing: (min: number): string => `看板指令和終端機看板要 Node.js ${min} 以上，Claude Code 在這裡跑 node --version 沒有結果。如果在你的終端機裡 node --version 能跑，可以不管這則；不然就裝好 Node.js 再開一個對話。回報用的 hook 不需要它。`,
   setupNodeOld: (version: string, min: number): string => `看板指令和終端機看板要 Node.js ${min} 以上，這台電腦的是 ${version}。更新 Node.js 再開一個對話；回報用的 hook 不需要它。`,
   setupStatusHint: '之後要再看：/progress connect status',
@@ -494,6 +495,7 @@ export const ZH_TW = {
   storageUnknown: '系統回報了意外的錯誤',
   boardStorageFailed: (file: string, why: string): string => `無法安全讀取或更新${file}（${why}），部分改動可能已經存進去；請檢查看板和歷史紀錄，處理好檔案後再試。`,
   boardLocked: (file: string): string => `其他程式正在使用${file}，沒有改動任何檔案。`,
+  boardSaveFailed: (file: string, why: string): string => `無法儲存${file}（${why}），沒有改動任何檔案。`,
   // The board's page in the browser (`agent-board.mjs --serve`). The chat-relay prompt stays
   // in English in every language: it is the one tested live, and its markers are literal.
   serveAt: (url: string): string => `可以點的看板（勾完成、封存、回答）：${url}`,

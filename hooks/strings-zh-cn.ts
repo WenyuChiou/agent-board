@@ -259,6 +259,7 @@ export const ZH_CN: Strings = {
   setupBoardReady: '看板命令可以用',
   setupBoardNeedsNode: (min: number): string => `看板命令要 Node.js ${min} 以上才能运行`,
   setupBoardFailed: '看板命令没写好，原因在下面',
+  setupMissingBoardScript: (name: string): string => `${name}：看板命令指向的脚本已经不在了。运行 /progress connect 重写命令。`,
   setupNodeMissing: (min: number): string => `看板命令和终端看板要 Node.js ${min} 以上，Claude Code 在这里运行 node --version 没有结果。如果在你的终端里 node --version 能运行，可以不管这条；不然就装好 Node.js 再开一个对话。汇报用的 hook 不需要它。`,
   setupNodeOld: (version: string, min: number): string => `看板命令和终端看板要 Node.js ${min} 以上，这台电脑的是 ${version}。更新 Node.js 再开一个对话；汇报用的 hook 不需要它。`,
   setupStatusHint: '之后要再看：/progress connect status',
@@ -453,6 +454,7 @@ export const ZH_CN: Strings = {
   storageUnknown: '系统报告了意外的错误',
   boardStorageFailed: (file: string, why: string): string => `无法安全读取或更新${file}（${why}），部分改动可能已经存进去；请检查看板和历史记录，处理好文件后重试。`,
   boardLocked: (file: string): string => `其他程序正在使用${file}，没有改动任何文件。`,
+  boardSaveFailed: (file: string, why: string): string => `无法保存${file}（${why}），没有改动任何文件。`,
   // The board's page in the browser (`agent-board.mjs --serve`). The chat-relay prompt stays
   // in English in every language: it is the one tested live, and its markers are literal.
   serveAt: (url: string): string => `可以点的看板（勾完成、归档、回答）：${url}`,

@@ -1347,6 +1347,7 @@ const summarize = async (
   prompt: string,
   answer: string,
   onSilence: 'sum' | 'keep' | 'retry' = 'sum',
+  isQuestionDropped = false,
 ): Promise<{ digest: Digest; now: number; s: Strings } | null> => {
   const s = await wordsOf($)
   const steps = mirror.tasks.map(task => `- [${task.status === 'completed' ? 'x' : ' '}] ${task.subject}`).join('\n')
@@ -1356,7 +1357,7 @@ const summarize = async (
     effort: 'low',
     prompt: s.digestPrompt(requestData(mirror.firstPrompt), requestData(prompt), replyData(answer), mirror.title, mirror.context, steps),
   })
-  const question = lastQuestion(answer)
+  const question = isQuestionDropped ? null : lastQuestion(answer)
   if (asked?.isAnswered !== true && question === null) {
     if (onSilence === 'retry') throw new Error(NO_SUMMARY)
     if (onSilence === 'keep') return null
@@ -1364,6 +1365,12 @@ const summarize = async (
   const parsed = asked?.isAnswered === true ? parseDigest(asked.text) : null
   const empty: Digest = { title: '', context: '', done: '', next: '', ask: '', why: '' }
   const digest: Digest = { ...empty, ...parsed }
+  if (isQuestionDropped) {
+    digest.ask = ''
+    digest.why = ''
+  }
+  // A late reply with only a question has no work to fold after the newer prompt answered it.
+  if (isQuestionDropped && digest.done === '' && digest.next === '') return null
   if (digest.ask === '' && question !== null) {
     digest.ask = clip(question, 48)
     digest.why = question
@@ -1403,6 +1410,7 @@ const digestTurn = async ($: EngineInterface, prompt: string, answer: string, ha
 // back, so what can be written without it is.
 // A turn older than one already folded in (a file taken again after a later turn of the same
 // session got through, its end included) changes nothing: its steps would stand over newer ones.
+// A turn older than the latest prompt but newer than the last folded turn brings its finished steps, never its question.
 // Completion hashes always refer to the raw owner, before prompt projection.
 const agentProjection = async ($: EngineInterface, id: string, raw: ProgressMirror | undefined): Promise<{ mirror: ProgressMirror | undefined; barrier: number }> => {
   const completion = await completedMirror($, `agent:${id}`, raw)
@@ -1432,13 +1440,20 @@ const takeAgentTurns = async ($: EngineInterface, turns: readonly AgentTurn[], a
   const newest = normalizeTurnOrder(stored?.turnOrder) ?? -1
   const promptBarrier = normalizeTurnOrder(stored?.promptOrder) ?? -1
   const barrier = Math.max(stored?.confirmedAt ?? 0, completion.barrier)
-  const isNewer = (turn: AgentTurn): boolean => (turnOrder(turn) ?? newest) >= newest && (promptBarrier < 0 || (turnOrder(turn) ?? -1) >= promptBarrier) && (barrier === 0 || (turnOrder(turn) ?? -1) > barrier * 2 + 1)
+  const isAfterLast = (turn: AgentTurn): boolean => (turnOrder(turn) ?? newest) >= newest && (barrier === 0 || (turnOrder(turn) ?? -1) > barrier * 2 + 1)
+  const isAfterPrompt = (turn: AgentTurn): boolean => promptBarrier < 0 || (turnOrder(turn) ?? -1) >= promptBarrier
+  const isNewer = (turn: AgentTurn): boolean => isAfterLast(turn) && isAfterPrompt(turn)
+  // A turn written before the person's latest prompt but read after it (#145) still brings its finished
+  // work; it may not reopen the question that prompt answered. A turn with no clock stays out.
+  const isLate = (turn: AgentTurn): boolean => turnOrder(turn) !== undefined && isAfterLast(turn) && !isAfterPrompt(turn)
   const digested = turnsToDigest(turns.map(turn => isBoardTurn(turn) ? { ...turn, event: 'end' as const } : turn.event === 'end' && lastQuestion(turn.answer, true) !== null ? { ...turn, event: 'turn' as const } : turn))
   const boardTurns = new Set<AgentTurn>()
   let hasRestoredQuestion = false
+  let hasLateWork = false
   for (const [index, turn] of turns.entries()) {
-    if (!isNewer(turn)) continue
-    if (turn.event === 'end') {
+    if (!isNewer(turn) && !isLate(turn)) continue
+    const isLateTurn = isLate(turn)
+    if (turn.event === 'end' && !isLateTurn) {
       mirror = { ...mirror, promptQuestion: null }
       hasRestoredQuestion = false
     }
@@ -1453,6 +1468,7 @@ const takeAgentTurns = async ($: EngineInterface, turns: readonly AgentTurn[], a
     }
     // Known only now for Codex, whose Stop leaves the request out.
     if (isBoardTurn({ ...turn, prompt, answer })) {
+      if (isLateTurn) continue
       boardTurns.add(turn)
       const restored = restoreAgentBoardQuestion(mirror, { ...turn, prompt, answer }, at)
       if (restored !== null) {
@@ -1461,13 +1477,16 @@ const takeAgentTurns = async ($: EngineInterface, turns: readonly AgentTurn[], a
       }
       continue
     }
-    mirror = { ...mirror, promptQuestion: null }
-    hasRestoredQuestion = false
+    if (!isLateTurn) {
+      mirror = { ...mirror, promptQuestion: null }
+      hasRestoredQuestion = false
+    }
     if (mirror.firstPrompt === '' && prompt !== '') mirror = { ...mirror, firstPrompt: promptKey(prompt) }
     if (answer === '' || answerKey(answer) === mirror.lastAnswer) continue
+    if (isLateTurn) hasLateWork = true
     if (digested.has(index)) {
       mirror = answerTurns(mirror)
-      const summed = await summarize($, mirror, prompt, answer, isLastTry ? 'keep' : 'retry')
+      const summed = await summarize($, mirror, prompt, answer, isLastTry ? 'keep' : 'retry', isLateTurn)
       if (summed !== null) mirror = applyDigest(mirror, summed.digest, summed.now, summed.s)
     }
     mirror = { ...mirror, lastAnswer: answerKey(answer) }
@@ -1475,7 +1494,10 @@ const takeAgentTurns = async ($: EngineInterface, turns: readonly AgentTurn[], a
   // A board look is not an answer: its question stays waiting (#144). Board-request prompts never
   // come here; takeAgentPrompt skips them.
   const evidence = turns.filter(turn => isNewer(turn) && !boardTurns.has(turn))
-  const latest = turns.filter(isNewer).at(-1)
+  // A late turn's question was answered by the prompt that came after it, whichever session took that
+  // prompt: the prompt's stored time stands in as the answer, so the ledger does not open it again (#145).
+  const answers = hasLateWork && promptBarrier >= 0 ? [...evidence, { ...last, event: 'prompt' as const, prompt: '', answer: '', at: Math.floor(promptBarrier / 2) }] : evidence
+  const latest = turns.filter(turn => isNewer(turn) || isLate(turn)).at(-1)
   // Only older turns: the block already says more than they do, and writing it again would
   // bring back one archived since.
   if (mirror.tasks.length === 0 || latest === undefined) {
@@ -1483,7 +1505,7 @@ const takeAgentTurns = async ($: EngineInterface, turns: readonly AgentTurn[], a
     return
   }
   const isReplay = turns.some(turn => boardTurns.has(turn) && turnOrder(turn) === newest)
-  if (turns.filter(isNewer).every(turn => boardTurns.has(turn)) && !hasRestoredQuestion && !isReplay) return
+  if (turns.filter(isNewer).every(turn => boardTurns.has(turn)) && !hasRestoredQuestion && !isReplay && !hasLateWork) return
   const latestWork = turns.filter(turn => isNewer(turn) && !boardTurns.has(turn)).at(-1)
   const state = boardTurns.has(latest) && hasRestoredQuestion ? 'waiting'
     : latestWork === undefined ? mirror.state : isAllDone(mirror) ? 'done' : latestWork.event === 'end' ? 'ended' : 'waiting'
@@ -1498,7 +1520,7 @@ const takeAgentTurns = async ($: EngineInterface, turns: readonly AgentTurn[], a
       return
     }
     await $.store.set(owner, written)
-    rememberAnswered(evidence)
+    rememberAnswered(answers)
     const path = await progressPath($)
     const isKept = (check: string): boolean =>
       extractAutoBlock(check, written.sessionId) === extractAutoBlock(upsertAutoBlock(check, written, s), written.sessionId)
@@ -1513,7 +1535,7 @@ const takeAgentTurns = async ($: EngineInterface, turns: readonly AgentTurn[], a
     if (hasMoved) return
     // Another session's write can undo it three times over; only a block read back counts.
     if (!isKept(await readText($, path))) throw new Error(NOT_KEPT)
-    await pollAnsweredQuestions($, path, undefined, evidence)
+    await pollAnsweredQuestions($, path, undefined, answers)
     await poll($)
   })
   if (hasMoved) {

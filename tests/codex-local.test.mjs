@@ -1,9 +1,9 @@
 import { spawn, spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, unlinkSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, unlinkSync, utimesSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { delimiter, dirname, join, resolve } from 'node:path'
-import { test } from 'node:test'
+import { beforeEach, test } from 'node:test'
 import assert from 'node:assert/strict'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { inspect } from 'node:util'
@@ -129,17 +129,24 @@ const fireHook = (f, input, limit) => fireCommand(f, JSON.parse(readFileSync(f.h
 
 const hookFailure = result => JSON.stringify({ status: result.status, signal: result.signal, error: result.error && { code: result.error.code, message: result.error.message }, termination: result.termination, stdout: result.stdout, stderr: result.stderr })
 
+// Windows soon hands a freed pid to another process, so a pid this test has seen
+// exit is never stopped by number afterwards. Tests in this file run one at a time.
+const exitedPids = new Set()
+beforeEach(() => exitedPids.clear())
 // These synthetic reporters are grandchildren, so wait for their recorded PID
 // as well as the command's pipes before allowing fixture removal after a failure.
 const isReporterAlive = pid => {
   try { process.kill(pid, 0); return true } catch (error) {
-    if (error.code === 'ESRCH') return false
+    if (error.code === 'ESRCH') {
+      exitedPids.add(pid)
+      return false
+    }
     if (error.code === 'EPERM') return true
     throw error
   }
 }
 const stopReporter = async pid => {
-  if (!Number.isInteger(pid) || pid <= 0 || !isReporterAlive(pid)) return
+  if (!Number.isInteger(pid) || pid <= 0 || exitedPids.has(pid) || !isReporterAlive(pid)) return
   let termination
   if (process.platform === 'win32') termination = stopNativeTree({ pid })
   else {
@@ -151,7 +158,37 @@ const stopReporter = async pid => {
   if (isReporterAlive(pid)) throw Object.assign(new Error(`Synthetic reporter ${pid} did not exit; fixture retained; ${JSON.stringify(termination)}`), { keepFixture: true, pid, termination })
 }
 
+const removeFixtureDirectory = (directory, prefix) => {
+  const target = resolve(directory), temporary = resolve(tmpdir())
+  assert.equal(dirname(target), temporary)
+  assert.ok(target.startsWith(join(temporary, prefix)), 'remove only this owned synthetic fixture')
+  rmSync(target, { recursive: true, force: true, maxRetries: 8, retryDelay: 50 })
+}
+
+// A folder Windows held open is skipped for the rest of the run, so one stuck
+// folder costs one retry and one line, not one per fixture.
+const keptFixtureDirectories = new Set()
+const sweepFixtureDirectories = () => {
+  const cutoff = Date.now() - 6 * 60 * 60 * 1000
+  for (const entry of readdirSync(tmpdir(), { withFileTypes: true })) {
+    if (!entry.name.startsWith('codex local-') || !entry.isDirectory() || keptFixtureDirectories.has(entry.name)) continue
+    const directory = join(tmpdir(), entry.name)
+    try {
+      const stat = lstatSync(directory)
+      if (stat.isDirectory() && stat.mtimeMs < cutoff) removeFixtureDirectory(directory, 'codex local-')
+    } catch (error) {
+      // Another fixture may finish between the directory listing and the sweep, and
+      // a folder Windows still holds open is left for a later run, not a failed test.
+      if (error.code === 'ENOENT') continue
+      if (!['EBUSY', 'EPERM', 'EACCES', 'ENOTEMPTY'].includes(error.code)) throw error
+      keptFixtureDirectories.add(entry.name)
+      process.stderr.write(`codex-local fixture: left an old temporary folder (${error.code})\n`)
+    }
+  }
+}
+
 const fixture = async fn => {
+  sweepFixtureDirectories()
   const home = mkdtempSync(join(tmpdir(), 'codex local-'))
   const root = join(home, '.agent-board')
   const script = join(root, 'agent-board.mjs')
@@ -187,6 +224,33 @@ const fixture = async fn => {
   // persistent cleanup failures still fail the test.
   finally { if (isSafeToRemove) rmSync(home, { recursive: true, force: true, maxRetries: 8, retryDelay: 50 }) }
 }
+
+test('the codex-local fixture removes its own prefix\'s folders older than six hours and keeps newer ones', async () => {
+  const older = mkdtempSync(join(tmpdir(), 'codex local-'))
+  const newer = mkdtempSync(join(tmpdir(), 'codex local-'))
+  const foreign = mkdtempSync(join(tmpdir(), 'foreign-local-'))
+  const file = join(tmpdir(), `codex local-file-${process.pid}`)
+  try {
+    writeFileSync(join(older, 'stale.txt'), 'interrupted fixture')
+    writeFileSync(join(newer, 'active.txt'), 'another run')
+    writeFileSync(file, 'not a directory')
+    const now = Date.now(), sixHours = 6 * 60 * 60 * 1000
+    const old = new Date(now - sixHours - 60000), recent = new Date(now - sixHours + 60000)
+    for (const path of [older, foreign, file]) utimesSync(path, old, old)
+    utimesSync(newer, recent, recent)
+    await fixture(f => {
+      assert.ok(existsSync(f.home))
+      assert.equal(existsSync(older), false)
+      assert.equal(readFileSync(join(newer, 'active.txt'), 'utf8'), 'another run')
+      assert.ok(existsSync(foreign))
+      assert.equal(readFileSync(file, 'utf8'), 'not a directory')
+    })
+  } finally {
+    for (const directory of [older, newer]) removeFixtureDirectory(directory, 'codex local-')
+    removeFixtureDirectory(foreign, 'foreign-local-')
+    if (existsSync(file)) unlinkSync(file)
+  }
+})
 
 test('local setup leaves an openclaw.json holding an id past 2^53 untouched and reports the conflict', () => fixture(f => {
   const file = join(f.home, '.openclaw', 'openclaw.json')
@@ -585,7 +649,8 @@ const legacyReporterProbe = (isPowerShell = process.platform === 'win32', shell 
   mkdirSync(root, { recursive: true })
   writeFileSync(script, isPowerShell ? reporterPs1() : reporterSh(inbox.replaceAll('\\', '/')))
   const payload = '{"session_id":"synthetic-legacy-session","id":1234567890123456789}'
-  const first = await nativeProcess(executable, args, env, payload, callback => setTimeout(callback, 10000))
+  // Only bounds a hung process on a slow Windows CI runner; the reporter's own deadline is not timed here.
+  const first = await nativeProcess(executable, args, env, payload, callback => setTimeout(callback, 30000))
   assert.equal(first.status, 0, first.stderr)
   assert.equal(first.stdout.trim(), '{}')
   const delivered = readdirSync(inbox).filter(name => name.endsWith('.json'))
@@ -595,7 +660,8 @@ const legacyReporterProbe = (isPowerShell = process.platform === 'win32', shell 
   mkdirSync(dirname(log), { recursive: true })
   writeFileSync(log, Array.from({ length: 250 }, (_, index) => `synthetic old error ${index}\n`).join(''))
   const unfinished = await nativeProcess(executable, args, env, '{"PRIVATE_UNFINISHED_INPUT":',
-    callback => setTimeout(callback, 10000), stopNativeTree, { isInputOpen: true })
+    // Only bounds a hung process on a slow Windows CI runner; the reporter's own deadline is not timed here.
+    callback => setTimeout(callback, 30000), stopNativeTree, { isInputOpen: true })
   assert.equal(unfinished.status, 0, hookFailure(unfinished))
   assert.equal(unfinished.stdout.trim(), '{}')
   assert.deepEqual(readdirSync(inbox).filter(name => name.endsWith('.json')), delivered)
@@ -656,7 +722,8 @@ test('the PowerShell classifier uses the first Node path when several applicatio
   for (const key of Object.keys(env)) if (key.toLowerCase() === 'path') delete env[key]
   env.PATH = [dirname(process.execPath), later].join(delimiter)
   const powershell = join(process.env.SystemRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe')
-  const lookup = spawnSync(powershell, ['-NoProfile', '-Command', '$c = @(Get-Command node -CommandType Application -ErrorAction Stop); $c.Count'], { env, encoding: 'utf8', windowsHide: true, timeout: 10000 })
+  // Only bounds a hung process on a slow Windows CI runner; the reporter's own deadline is not timed here.
+  const lookup = spawnSync(powershell, ['-NoProfile', '-Command', '$c = @(Get-Command node -CommandType Application -ErrorAction Stop); $c.Count'], { env, encoding: 'utf8', windowsHide: true, timeout: 30000 })
   assert.equal(lookup.error, undefined)
   assert.equal(lookup.status, 0, 'the controlled application lookup must succeed')
   assert.equal(lookup.stdout.trim(), '2', 'two real node.exe files on PATH, not a mocked lookup')
@@ -667,7 +734,8 @@ test('the PowerShell classifier uses the first Node path when several applicatio
   const source = reporterPs1()
   assert.doesNotMatch(source, /Get-Command node/)
   f.save(file, observeClassifier(source, diagnostic))
-  const result = await nativeProcess(powershell, ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', file, 'codex', 'prompt'], env, raw, callback => setTimeout(callback, 10000))
+  // Only bounds a hung process on a slow Windows CI runner; the reporter's own deadline is not timed here.
+  const result = await nativeProcess(powershell, ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', file, 'codex', 'prompt'], env, raw, callback => setTimeout(callback, 30000))
   assert.equal(result.error, undefined)
   assert.equal(result.status, 0, classifierDiagnostic(diagnostic))
   const saved = existsSync(inbox) ? readdirSync(inbox).filter(name => name.endsWith('.json')).map(name => ({ body: readFileSync(join(inbox, name), 'utf8') })) : []
@@ -689,7 +757,8 @@ test('the PowerShell reporter never looks for Node in its working folder through
   const file = join(f.root, 'progress-report.ps1'), diagnostic = join(f.home, 'classifier-probe.txt')
   const raw = JSON.stringify({ session_id: 'synthetic-working-folder', cwd: '/synthetic/project', prompt: '/board' })
   f.save(file, observeClassifier(reporterPs1(), diagnostic))
-  const result = await nativeProcess(powershell, ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', file, 'codex', 'prompt'], env, raw, callback => setTimeout(callback, 10000), undefined, { cwd: work })
+  // Only bounds a hung process on a slow Windows CI runner; the reporter's own deadline is not timed here.
+  const result = await nativeProcess(powershell, ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', file, 'codex', 'prompt'], env, raw, callback => setTimeout(callback, 30000), undefined, { cwd: work })
   assert.equal(result.error, undefined)
   assert.equal(result.status, 0, classifierDiagnostic(diagnostic))
   const saved = existsSync(inbox) ? readdirSync(inbox).filter(name => name.endsWith('.json')).map(name => readFileSync(join(inbox, name), 'utf8')) : []
@@ -709,7 +778,8 @@ test('legacy prompt classifiers time out and reap their process without promotin
   try {
     const out = await nativeProcess(isWindows ? 'powershell.exe' : '/bin/sh', args, env,
       JSON.stringify({ session_id: 'synthetic-classifier-timeout', prompt: 'PRIVATE_RAW_PROMPT' }),
-      callback => setTimeout(callback, 10000))
+      // Only bounds a hung process on a slow Windows CI runner; the reporter's own deadline is not timed here.
+      callback => setTimeout(callback, 30000))
     assert.equal(out.error, undefined, hookFailure(out))
     assert.equal(out.status, 0, hookFailure(out))
     assert.equal(out.stdout.trim(), '{}')
@@ -1335,19 +1405,50 @@ test('Antigravity setup merges its named native hooks and removes only the owned
   assert.deepEqual(JSON.parse(readFileSync(file, 'utf8')), foreign)
 }))
 
+// Capture the starter before orphaning: Windows retains its old ppid, while POSIX
+// may reparent it. The test runner's pid also comes in as an argument, because a
+// hook's shell or PowerShell stays alive while it waits on the tree, so watching
+// the starter alone never fires. The hard limit bounds a tree whose watched
+// processes stay hung.
+const nativeTreeWatchdog = `
+const watched = [process.ppid, Number(process.argv[2])].filter(pid => Number.isInteger(pid) && pid > 0)
+setInterval(() => {
+  for (const pid of watched) {
+    try { process.kill(pid, 0) } catch (error) {
+      if (error.code === 'ESRCH') process.exit(0)
+      else if (error.code !== 'EPERM') throw error
+    }
+  }
+}, 200)
+setTimeout(() => process.exit(0), 90000)
+`
+
+// The hook command the native timeout tests run; the interrupted-run test also
+// builds it inside its stand-in runner, so it uses only globals.
+const nativeTreeCommand = argv => process.platform === 'win32'
+  ? `powershell.exe -NoLogo -NoProfile -NonInteractive -EncodedCommand ${Buffer.from(`& ${argv.map(value => `'${value.replaceAll("'", "''")}'`).join(' ')}; exit $LASTEXITCODE`, 'utf16le').toString('base64')}`
+  : argv.map(value => `'${value.replaceAll("'", "'\\''")}'`).join(' ')
+
 const nativeTreeFixture = f => {
   const ready = join(f.home, 'descendant-ready.json')
   const pulse = join(f.home, 'descendant-pulse.txt')
   const descendant = join(f.home, 'descendant.mjs')
-  f.save(descendant, `import { writeFileSync } from 'node:fs'; writeFileSync(${JSON.stringify(ready)}, JSON.stringify({ pid: process.pid })); setInterval(() => writeFileSync(${JSON.stringify(pulse)}, String(Date.now())), 20)`)
+  f.save(descendant, `import { writeFileSync } from 'node:fs'
+${nativeTreeWatchdog}
+writeFileSync(${JSON.stringify(ready)}, JSON.stringify({ pid: process.pid }))
+setInterval(() => writeFileSync(${JSON.stringify(pulse)}, String(Date.now())), 20)
+`)
   const parent = join(f.home, 'parent.mjs')
   const parentReady = join(f.home, 'parent-ready.json')
-  f.save(parent, `import { spawn } from 'node:child_process'; import { writeFileSync } from 'node:fs'; writeFileSync(${JSON.stringify(parentReady)}, JSON.stringify({ pid: process.pid, ppid: process.ppid })); spawn(process.execPath, [${JSON.stringify(descendant)}], { stdio: 'inherit' }); setInterval(() => {}, 1000)`)
-  const argv = [process.execPath, parent]
-  const command = process.platform === 'win32'
-    ? `powershell.exe -NoLogo -NoProfile -NonInteractive -EncodedCommand ${Buffer.from(`& ${argv.map(value => `'${value.replaceAll("'", "''")}'`).join(' ')}; exit $LASTEXITCODE`, 'utf16le').toString('base64')}`
-    : argv.map(value => `'${value.replaceAll("'", "'\\''")}'`).join(' ')
-  return { command, ready, pulse, parentReady }
+  f.save(parent, `import { spawn } from 'node:child_process'
+import { writeFileSync } from 'node:fs'
+${nativeTreeWatchdog}
+writeFileSync(${JSON.stringify(parentReady)}, JSON.stringify({ pid: process.pid, ppid: process.ppid }))
+spawn(process.execPath, [${JSON.stringify(descendant)}, process.argv[2] ?? ''], { stdio: 'inherit' })
+setInterval(() => {}, 1000)
+`)
+  const command = nativeTreeCommand([process.execPath, parent, String(process.pid)])
+  return { command, ready, pulse, parentReady, parent }
 }
 
 const waitForNativeTree = async ({ ready, pulse, parentReady }) => {
@@ -1355,6 +1456,80 @@ const waitForNativeTree = async ({ ready, pulse, parentReady }) => {
   while ((!existsSync(pulse) || !existsSync(parentReady)) && Date.now() < until) await new Promise(done => setTimeout(done, 25))
   assert.ok(existsSync(ready) && existsSync(pulse) && existsSync(parentReady), 'the synthetic parent and descendant must start before testing timeout cleanup')
 }
+
+test('an interrupted codex-local run leaves no synthetic process tree behind', { timeout: 60000 }, () => fixture(async f => {
+  const tree = nativeTreeFixture(f)
+  const runner = join(f.home, 'intermediate.mjs')
+  const shellReady = join(f.home, 'shell-ready.json')
+  // The stand-in runner starts the same hook command through a shell, as a hook
+  // runner does (cmd and PowerShell on Windows), naming itself as the owner.
+  // Detached, because Node's Windows child job would otherwise reap the tree with it.
+  f.save(runner, `import { spawn } from 'node:child_process'
+import { writeFileSync } from 'node:fs'
+${nativeTreeWatchdog}
+const nativeTreeCommand = ${nativeTreeCommand}
+const shell = spawn(nativeTreeCommand([process.execPath, ${JSON.stringify(tree.parent)}, String(process.pid)]), { shell: true, stdio: 'ignore', detached: true, windowsHide: true })
+writeFileSync(${JSON.stringify(shellReady)}, JSON.stringify({ pid: shell.pid }))
+setInterval(() => {}, 1000)
+`)
+  let intermediate, whenClosed, hasClosed = false
+  const stop = async pid => {
+    // A process that already exited may have handed its pid to an unrelated one.
+    if (!Number.isInteger(pid) || pid <= 0 || exitedPids.has(pid) || !isReporterAlive(pid)) return
+    try { process.kill(pid) } catch (error) { if (error.code !== 'ESRCH') throw error }
+    const until = Date.now() + 5000
+    while (isReporterAlive(pid) && Date.now() < until) await new Promise(done => setTimeout(done, 25))
+    if (isReporterAlive(pid)) throw Object.assign(new Error(`Synthetic process ${pid} did not exit`), { keepFixture: true })
+  }
+  const recorded = (file, key = 'pid') => existsSync(file) ? JSON.parse(readFileSync(file, 'utf8'))[key] : undefined
+  try {
+    intermediate = spawn(process.execPath, [runner], { env: f.env, stdio: 'ignore', windowsHide: true })
+    whenClosed = new Promise(done => intermediate.once('close', () => {
+      hasClosed = true
+      done()
+    }))
+    await new Promise((done, reject) => {
+      intermediate.once('spawn', done)
+      intermediate.once('error', reject)
+    })
+    await waitForNativeTree(tree)
+    const pids = [recorded(tree.parentReady), recorded(tree.ready)]
+    for (const pid of pids) assert.ok(isReporterAlive(pid))
+    // The shell and the PowerShell between it and the parent wait on the tree, so
+    // they end only once the tree does.
+    const chain = [...new Set([...pids, recorded(tree.parentReady, 'ppid'), recorded(shellReady)])].filter(pid => Number.isInteger(pid) && pid !== intermediate.pid)
+    // Interrupt only the runner, so tree cleanup cannot mask a missing watchdog.
+    intermediate.kill()
+    await whenClosed
+    const until = Date.now() + 5000
+    while (chain.some(isReporterAlive) && Date.now() < until) await new Promise(done => setTimeout(done, 25))
+    // Record every pid seen gone, even when another one in the chain failed.
+    for (const pid of chain) isReporterAlive(pid)
+    for (const pid of chain) assert.throws(() => process.kill(pid, 0), { code: 'ESRCH' }, 'the orphaned synthetic process must exit within five seconds')
+    const last = readFileSync(tree.pulse, 'utf8')
+    await new Promise(done => setTimeout(done, 250))
+    assert.equal(readFileSync(tree.pulse, 'utf8'), last, 'an interrupted tree must stop writing its pulse')
+  } finally {
+    try {
+      // Stop the runner through its handle and only while it runs: once it has closed,
+      // its pid may already belong to an unrelated process.
+      if (intermediate && !hasClosed) intermediate.kill()
+      if (whenClosed) await whenClosed
+    } finally {
+      // Read each PID after stopping its starter, including a late ready file.
+      try {
+        await stop(recorded(tree.parentReady))
+      } finally {
+        try {
+          await stop(recorded(tree.ready))
+        } finally {
+          await stop(recorded(tree.parentReady, 'ppid'))
+          await stop(recorded(shellReady))
+        }
+      }
+    }
+  }
+}))
 
 test('native hook timeouts close their owned descendant tree before fixture cleanup', { timeout: 60000 }, () => fixture(async f => {
   const tree = nativeTreeFixture(f)
@@ -1428,6 +1603,8 @@ test('failed native tree termination reports a bounded error and retains its fix
       env, encoding: 'utf8', windowsHide: true, timeout: 45000,
     })
     owned = existsSync(marker) ? JSON.parse(readFileSync(marker, 'utf8')) : null
+    // Record the probe's processes that are already gone before their pids can be reused.
+    for (const key of ['pid', 'probePid', 'parentPid', 'parentParentPid', 'descendantPid']) if (Number.isInteger(owned?.[key]) && owned[key] > 0) isReporterAlive(owned[key])
     const diagnostic = assertNativeProbeReturned(result, owned, Date.now() - started, 45000)
     assert.equal(result.status, 1, diagnostic)
     assert.ok(Date.now() - started < 45000, 'the isolated test process must actually exit before the watchdog')
@@ -1448,14 +1625,16 @@ test('failed native tree termination reports a bounded error and retains its fix
     const isAlive = pid => {
       try { process.kill(pid, 0); return true } catch (error) {
         if (error.code === 'EPERM') notOurs.add(pid)
-        else if (error.code !== 'ESRCH') throw error
+        else if (error.code === 'ESRCH') exitedPids.add(pid)
+        else throw error
         return false
       }
     }
+    const isOwnedAlive = pid => !exitedPids.has(pid) && isAlive(pid)
     // A POSIX group can outlive its leader. Windows needs each recorded child:
     // cmd may already be gone while PowerShell and parent.mjs are still alive.
     if (process.platform !== 'win32' && Number.isInteger(owned?.pid)) stopped.push({ pid: owned.pid, ...stopNativeTree({ pid: owned.pid }) })
-    for (const pid of pids) if (isAlive(pid)) {
+    for (const pid of pids) if (isOwnedAlive(pid)) {
       if (process.platform === 'win32') stopped.push({ pid, ...stopNativeTree({ pid }) })
       else {
         try { process.kill(pid, 'SIGKILL'); stopped.push({ pid, status: 0 }) } catch (error) {
@@ -1465,16 +1644,10 @@ test('failed native tree termination reports a bounded error and retains its fix
       }
     }
     const until = Date.now() + 5000
-    while (pids.some(isAlive) && Date.now() < until) await new Promise(done => setTimeout(done, 25))
-    for (const pid of pids) if (!notOurs.has(pid)) assert.throws(() => process.kill(pid, 0), { code: 'ESRCH' }, `Owned cleanup failed; fixture retained: ${JSON.stringify({ pid, stopped, home: owned?.home, control })}`)
-    const remove = (directory, prefix) => {
-      const target = resolve(directory), temporary = resolve(tmpdir())
-      assert.equal(dirname(target), temporary)
-      assert.ok(target.startsWith(join(temporary, prefix)), 'remove only this owned synthetic fixture')
-      rmSync(target, { recursive: true, force: true, maxRetries: 8, retryDelay: 50 })
-    }
-    if (owned?.home) remove(owned.home, 'codex local-')
-    remove(control, 'native-exit-')
+    while (pids.some(isOwnedAlive) && Date.now() < until) await new Promise(done => setTimeout(done, 25))
+    for (const pid of pids) if (!notOurs.has(pid) && !exitedPids.has(pid)) assert.throws(() => process.kill(pid, 0), { code: 'ESRCH' }, `Owned cleanup failed; fixture retained: ${JSON.stringify({ pid, stopped, home: owned?.home, control })}`)
+    if (owned?.home) removeFixtureDirectory(owned.home, 'codex local-')
+    removeFixtureDirectory(control, 'native-exit-')
   }
 })
 
@@ -1591,6 +1764,159 @@ require('node:module').syncBuiltinESMExports()
 }
 
 const pendingFiles = f => existsSync(join(f.root, 'pending')) ? readdirSync(join(f.root, 'pending')).filter(name => name.endsWith('.json')).sort() : []
+
+test('a first Codex event names its block and project after its working folder', () => fixture(f => {
+  assert.equal(f.install('--apply').status, 0)
+  const cwd = join(f.home, 'synthetic-work', 'gateway-web')
+  const locked = lockedProgress(f)
+  const queued = f.event('UserPromptSubmit', 'turn-1', { cwd, prompt: 'PRIVATE_PROMPT' }, locked.env)
+  assert.equal(queued.status, 0, queued.stderr)
+  const files = pendingFiles(f)
+  assert.equal(files.length, 1)
+  const text = readFileSync(join(f.root, 'pending', files[0]), 'utf8')
+  const entry = JSON.parse(text)
+  assert.equal(entry.folder, 'gateway-web')
+  assert.deepEqual(entry.payload, { session_id: session, hook_event_name: 'UserPromptSubmit', turn_id: 'turn-1' })
+  assert.ok(!text.includes(cwd) && !text.includes(JSON.stringify(cwd).slice(1, -1)))
+  assert.doesNotMatch(text, /PRIVATE_PROMPT|"cwd"|"prompt"/)
+  unlinkSync(locked.marker)
+  const result = f.command(['--codex-event'], { session_id: session, hook_event_name: 'SessionStart' })
+  assert.equal(result.status, 0, result.stderr)
+  assert.match(readFileSync(f.progress, 'utf8'), /^## gateway-web\r?\n<!-- auto [^\n]+\n### gateway-web\r?$/m)
+  assert.deepEqual(pendingFiles(f), [])
+  for (const file of [f.progress, ...readdirSync(join(f.root, 'sessions')).map(name => join(f.root, 'sessions', name))]) {
+    const saved = readFileSync(file, 'utf8')
+    assert.ok(!saved.includes(cwd) && !saved.includes(JSON.stringify(cwd).slice(1, -1)) && !saved.includes('PRIVATE_PROMPT'), file)
+  }
+}))
+
+test('a Codex working folder name is cleaned the way the inbox cleans it', () => fixture(f => {
+  assert.equal(f.install('--apply').status, 0)
+  const messy = f.event('UserPromptSubmit', 'turn-1', { cwd: join(f.home, 'synthetic  gateway<!--web-->') })
+  assert.equal(messy.status, 0, messy.stderr)
+  const openclaw = f.command(['--codex-event'], { session_id: 'synthetic-openclaw-session', hook_event_name: 'UserPromptSubmit', turn_id: 'turn-1', cwd: join(f.home, '.openclaw', 'workspace') })
+  assert.equal(openclaw.status, 0, openclaw.stderr)
+  const board = readFileSync(f.progress, 'utf8')
+  assert.match(board, /^## synthetic gateway web\r?\n<!-- auto [^\n]+\n### synthetic gateway web\r?$/m)
+  assert.match(board, /^## OpenClaw\r?\n<!-- auto [^\n]+\n### OpenClaw\r?$/m)
+  assert.ok(!board.includes(f.home))
+}))
+
+test('a Codex event without a working folder keeps the old title and project', () => fixture(f => {
+  assert.equal(f.install('--apply').status, 0)
+  const result = f.event('UserPromptSubmit')
+  assert.equal(result.status, 0, result.stderr)
+  assert.match(readFileSync(f.progress, 'utf8'), /^## codex\r?\n<!-- auto [^\n]+\n### Local codex task\r?$/m)
+}))
+
+test('a Cursor event names its block after its working folder', () => fixture(f => {
+  assert.equal(f.install('--apply').status, 0)
+  const root = join(f.home, 'synthetic-work', 'gateway-web')
+  const result = f.command(['--codex-event', '--agent', 'cursor'], {
+    conversation_id: 'synthetic-cursor-session', hook_event_name: 'beforeSubmitPrompt', generation_id: 'turn-1',
+    workspace_roots: [root],
+  })
+  assert.equal(result.status, 0, result.stderr)
+  assert.match(readFileSync(f.progress, 'utf8'), /^## gateway-web\r?\n<!-- auto [^\n]+agent=cursor [^\n]+\n### gateway-web\r?$/m)
+  for (const file of [f.progress, ...readdirSync(join(f.root, 'sessions')).map(name => join(f.root, 'sessions', name))]) {
+    const saved = readFileSync(file, 'utf8')
+    assert.ok(!saved.includes(root) && !saved.includes(JSON.stringify(root).slice(1, -1)), file)
+  }
+}))
+
+test('a later report with another project moves the block under that project', () => fixture(f => {
+  assert.equal(f.install('--apply').status, 0)
+  for (const project of ['alpha-web', 'beta-web']) {
+    const result = f.command(['--codex-report'], { project, title: 'Gateway task', state: 'working', steps: ['- [~] Check routes'] })
+    assert.equal(result.status, 0, result.stderr)
+  }
+  const board = readFileSync(f.progress, 'utf8')
+  assert.equal((board.match(/<!-- auto /g) ?? []).length, 1)
+  assert.match(board, /^## alpha-web\r?$/m)
+  assert.match(board, /^## beta-web\r?\n<!-- auto /m)
+  assert.ok(board.indexOf('<!-- auto ') > board.indexOf('## beta-web'))
+}))
+
+test('a report that keeps its project leaves a block someone moved where it is', () => fixture(f => {
+  assert.equal(f.install('--apply').status, 0)
+  const report = () => f.command(['--codex-report'], { project: 'alpha-web', title: 'Gateway task', state: 'working', steps: ['- [~] Check routes'] })
+  assert.equal(report().status, 0)
+  f.save(f.progress, readFileSync(f.progress, 'utf8').replace(/^## alpha-web(?=\r?$)/m, '## Moved by hand'))
+  const result = report()
+  assert.equal(result.status, 0, result.stderr)
+  const board = readFileSync(f.progress, 'utf8')
+  assert.equal((board.match(/^## /gm) ?? []).length, 1)
+  assert.match(board, /^## Moved by hand\r?\n<!-- auto [^\n]+\n### Gateway task\r?$/m)
+}))
+
+test('hook events keep a block in place under a renamed heading or a folder name ending in #', () => fixture(f => {
+  assert.equal(f.install('--apply').status, 0)
+  assert.equal(f.event('UserPromptSubmit', 'turn-1', { cwd: join(f.home, 'synthetic-work', 'notes#') }).status, 0)
+  assert.equal(f.event('Stop').status, 0)
+  const first = readFileSync(f.progress, 'utf8')
+  assert.equal((first.match(/^## /gm) ?? []).length, 1, first)
+  assert.match(first, /^## notes#\r?\n<!-- auto /m)
+  f.save(f.progress, first.replace(/^## notes#(?=\r?$)/m, '## Renamed by hand'))
+  const result = f.event('UserPromptSubmit', 'turn-2')
+  assert.equal(result.status, 0, result.stderr)
+  const board = readFileSync(f.progress, 'utf8')
+  assert.equal((board.match(/^## /gm) ?? []).length, 1, board)
+  assert.match(board, /^## Renamed by hand\r?\n<!-- auto /m)
+}))
+
+test('a report that changes the project moves a block from the end of a CRLF file with no final line break', () => fixture(f => {
+  assert.equal(f.install('--apply').status, 0)
+  const report = project => f.command(['--codex-report'], { project, title: 'Gateway task', state: 'working', steps: ['- [~] Check routes'] })
+  assert.equal(report('alpha-web').status, 0)
+  const crlf = readFileSync(f.progress, 'utf8').replace(/\r?\n/g, '\r\n').replace(/\r\n$/, '')
+  f.save(f.progress, crlf)
+  const result = report('beta-web')
+  assert.equal(result.status, 0, result.stderr)
+  const board = readFileSync(f.progress, 'utf8')
+  const kept = crlf.slice(0, crlf.indexOf('<!-- auto '))
+  assert.match(kept, /## alpha-web\r\n$/)
+  assert.ok(board.startsWith(`${kept}\r\n## beta-web\r\n<!-- auto `), JSON.stringify(board))
+  assert.match(board, /\r\n### Gateway task\r\n- \[~\] Check routes\r\n<!-- \/auto session=[^\r\n]+ -->\r\n$/)
+  assert.doesNotMatch(board, /(?<!\r)\n/)
+  assert.equal((board.match(/<!-- auto /g) ?? []).length, 1)
+}))
+
+test('a report that changes the project moves a block that sat before any heading', () => fixture(f => {
+  assert.equal(f.install('--apply').status, 0)
+  const report = project => f.command(['--codex-report'], { project, title: 'Gateway task', state: 'working', steps: ['- [~] Check routes'] })
+  assert.equal(report('alpha-web').status, 0)
+  const first = readFileSync(f.progress, 'utf8')
+  f.save(f.progress, `Notes by hand\n${first.slice(first.indexOf('<!-- auto '))}`)
+  const result = report('beta-web')
+  assert.equal(result.status, 0, result.stderr)
+  const board = readFileSync(f.progress, 'utf8')
+  assert.ok(board.startsWith('Notes by hand\n\n## beta-web\n<!-- auto '), JSON.stringify(board))
+  assert.equal((board.match(/<!-- auto /g) ?? []).length, 1)
+}))
+
+test('a hook event after a report keeps the reported project', () => fixture(f => {
+  assert.equal(f.install('--apply').status, 0)
+  const report = f.command(['--codex-report'], { project: 'beta-web', title: 'Gateway task', state: 'working', steps: ['- [~] Check routes'] })
+  assert.equal(report.status, 0, report.stderr)
+  const result = f.event('UserPromptSubmit', 'turn-1', { cwd: join(f.home, 'other-work') })
+  assert.equal(result.status, 0, result.stderr)
+  const board = readFileSync(f.progress, 'utf8')
+  assert.match(board, /^## beta-web\r?\n<!-- auto [^\n]+\n### Gateway task\r?$/m)
+  assert.equal((board.match(/^## /gm) ?? []).length, 1)
+}))
+
+test('a queued event from an older version without a folder still applies', () => fixture(f => {
+  assert.equal(f.install('--apply').status, 0)
+  f.save(join(f.root, 'pending', '001.json'), JSON.stringify({
+    version: 1, progress: f.progress, mode: '--codex-event', agent: 'codex', session,
+    now: new Date().toISOString(), isBoardPrompt: false, isPrompt: false,
+    payload: { session_id: session, hook_event_name: 'UserPromptSubmit', turn_id: 'turn-1' },
+  }))
+  const result = f.command(['--codex-event'], { session_id: session, hook_event_name: 'SessionStart' })
+  assert.equal(result.status, 0, result.stderr)
+  assert.match(readFileSync(f.progress, 'utf8'), /^## codex\r?\n<!-- auto [^\n]+\n### Local codex task\r?$/m)
+  assert.deepEqual(pendingFiles(f), [])
+}))
 
 const assertBusyFailure = (result, f) => {
   assert.equal(result.status, 1, result.stderr)

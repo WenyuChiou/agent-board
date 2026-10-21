@@ -1,6 +1,6 @@
 import type { Strings } from './i18n'
 import type { LocalAgent } from './local-agents'
-import { parseAttrs, parseProgress, RESUME } from './parse'
+import { baseName, parseAttrs, parseProgress, RESUME } from './parse'
 import { scanBlocks } from './blocks'
 
 export type CodexReport = {
@@ -27,6 +27,21 @@ const line = (value: unknown): string => {
   if (!clean || clean.length > 500) throw new Error('INVALID_TEXT')
   return clean
 }
+
+const OPENCLAW_WORKSPACE = /[\\/]\.openclaw[\\/]workspace(?:-[^\\/]*)?[\\/]*$/
+
+// A local session's project from its working folder (#246). `readTurn` in inbox.ts and
+// blocks.ts clean a folder with the same rule, so every agent in one folder shares one heading;
+// only this copy also drops a name too long for a block title.
+export const folderProject = (cwd: unknown): string => {
+  if (typeof cwd !== 'string' || !cwd) return ''
+  const name = OPENCLAW_WORKSPACE.test(cwd) ? 'OpenClaw' : baseName(cwd).replace(/<!--|-->/g, ' ').replace(/\s+/g, ' ').trim()
+  // A name too long for a block title falls back to the agent's name instead of failing the hook.
+  return name.length > 500 ? '' : name
+}
+
+// This is the one place a new local session title comes from (#246).
+export const sessionTitle = (folder: string, fallback: string): string => line(folder || fallback)
 
 // Hooks describe lifecycle, not task completion. Only an explicit report can say done.
 export const codexEvent = (previous: CodexReport | null, input: Record<string, unknown>, now: string, s: Strings): CodexReport => {
@@ -94,7 +109,7 @@ export const boardConfirmedReport = (text: string, previous: CodexReport, owner:
 }
 
 // The full digest prevents an eight-character collision or a pasted block from acquiring ownership.
-export const putCodexBlock = (text: string, report: CodexReport, owner: string): string => {
+export const putCodexBlock = (text: string, report: CodexReport, owner: string, isProjectChanged = false): string => {
   if (!/^[a-f0-9]{64}$/.test(owner)) throw new Error('INVALID_OWNER')
   const id = owner.slice(0, 8)
   const agent = report.agent ?? 'codex'
@@ -110,16 +125,23 @@ export const putCodexBlock = (text: string, report: CodexReport, owner: string):
   const found = scanBlocks(lines).filter(span => span.session === id)
   if (found.length > 1) throw new Error('BLOCK_CONFLICT')
   const existing = found[0]
+  // Append a section rather than reformat another writer's bytes.
+  const append = (text: string): string => `${text}${text && !text.endsWith('\n') ? eol : ''}${eol}## ${report.project}${eol}${block}${eol}`
   let next: string
   if (existing) {
     const attrs = parseAttrs(lines[existing.start] ?? '')
     if (!existing.isClosed || attrs.owner !== owner || attrs.agent !== agent) throw new Error('BLOCK_CONFLICT')
     const offset = (index: number): number => lines.slice(0, index).reduce((total, line) => total + line.length + 1, 0)
     const end = offset(existing.end) + (lines[existing.end] ?? '').replace(/\r$/, '').length
-    next = text.slice(0, offset(existing.start)) + block + text.slice(end)
+    // Only a report that changes the project moves the block (#246). Any other write keeps
+    // its place, so a block someone moved, or a heading the parser reads differently, stays.
+    const project = isProjectChanged ? parseProgress(text).find(project => project.tasks.some(task => task.auto?.session === id)) : undefined
+    // Compare names as the parser reads them: it drops a heading's trailing `#`.
+    next = isProjectChanged && project?.name !== (parseProgress(`## ${report.project}`)[0]?.name ?? report.project)
+      ? append(text.slice(0, offset(existing.start)) + text.slice(offset(existing.end + 1)))
+      : text.slice(0, offset(existing.start)) + block + text.slice(end)
   } else {
-    // Append a section rather than reformat another writer's bytes.
-    next = `${text}${text && !text.endsWith('\n') ? eol : ''}${eol}## ${report.project}${eol}${block}${eol}`
+    next = append(text)
   }
   const visible = parseProgress(next).flatMap(project => project.tasks).filter(task => task.auto?.session === id && task.auto.agent === agent)
   if (visible.length !== 1) throw new Error('BLOCK_NOT_VISIBLE')
