@@ -20,6 +20,7 @@ You have Claude Code on one project, Codex on another, Antigravity on a third. O
 1. Find the agent you use in [Pick your agent](#pick-your-agent).
 2. Run its command, or paste the install prompt below the table into that agent.
 3. Open the board: `/progress` in Claude Code, `$agent-board` in Codex, `/board` in OpenCode, or `node ~/.agent-board/agent-board.mjs --serve` in any terminal.
+   In the Claude desktop app, which cannot show the pane, the footer shows the board's status and `/progress` gives you a link to the board page, where you can answer questions and archive work; if that page cannot start, it opens the read-only page. The board page needs the board script that `/progress connect` installs, or the next session start updates.
 
 Every agent except Claude Code connects through this repository, with Node.js 18+:
 
