@@ -55,8 +55,9 @@ describe('L2 desktop app', () => {
       assert.equal((await server.get('/api/board')).json().model.counts.waiting, 0)
       assert.match(await terminal.screen(world), /\b0 waiting\b/)
 
+      // The press redraws from the server's fresh model; the latency budget is checked on the answer above.
       noSilentPress(await server.press('Publish the docs', EN.serveArchive))
-      await seenPageWithin(server, text => !text.includes('Publish the docs'), PAGE_MS)
+      assert.ok(!(await server.page()).includes('Publish the docs'), 'Archived work leaves the page')
       assert.ok(!world.read('progress.md').includes('Publish the docs'), 'Archived work leaves progress.md')
       noMachineIds(await server.page(), world)
     } finally { await world.close() }
