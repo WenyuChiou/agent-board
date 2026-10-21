@@ -6,6 +6,7 @@ import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSy
 import { request } from 'node:http'
 import { createServer as createNetServer } from 'node:net'
 import { tmpdir } from 'node:os'
+import { registerHooks } from 'node:module'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { test } from 'node:test'
@@ -3649,6 +3650,69 @@ const redesignModel = () => {
 const descendants = root => [root, ...root.childNodes.flatMap(descendants)]
 const visibleWords = root => root.hidden ? '' : root.text + root.childNodes.map(visibleWords).join('')
 const sideButton = (dom, label) => descendants(dom.node('side-groups')).find(node => node.tag === 'button' && node.getAttribute('aria-label') === label)
+
+// Source regressions can run before the maintainer rebuilds the committed board bundle.
+const sourcePage = async (lang = 'en', words = {}) => {
+  const loader = registerHooks({
+    resolve(specifier, context, nextResolve) {
+      if (context.parentURL?.startsWith(new URL('../hooks/', import.meta.url).href) && /^\.\.?\//.test(specifier) && !/\.[a-z]+$/i.test(specifier)) return nextResolve(`${specifier}.ts`, context)
+      return nextResolve(specifier, context)
+    },
+  })
+  try {
+    const [{ servePage }, { STRINGS }] = await Promise.all([import('../hooks/serve.ts'), import('../hooks/strings.ts')])
+    return servePage({ ...STRINGS[lang], ...words }, 'synthetic')
+  } finally { loader.deregister() }
+}
+
+test('phone tiles and sidebar views count the same tasks, inbox updates and recent completions', async () => {
+  const model = redesignModel()
+  model.groups[0].rows.push({ ...model.groups[0].rows[0], key: 'Second plan', title: 'Second plan', due: '' })
+  model.counts.active = 2
+  model.turns = [{ key: 'turn', project: 'Alpha', agent: 'codex', text: 'Inbox update', isQuestion: false }]
+  model.recent.push({ ...model.recent[0], title: 'Earlier plan', when: 'Yesterday' })
+  model.reminder = [{ project: 'Alpha', agent: 'codex', text: 'Reminder question' }]
+  model.idle = [{ ...model.groups[0].rows[0], title: 'Idle plan' }]
+  const dom = await pageDom(await sourcePage(), model)
+  const check = expected => {
+    const tiles = dom.node('counts').childNodes
+    for (const [index, label, symbol, count] of expected) {
+      assert.ok(sideButton(dom, `${label} ${count}`), label)
+      assert.equal(tiles[index].childNodes[0].textContent, `${symbol} ${count}`, label)
+      assert.equal(tiles[index].childNodes[1].textContent, label)
+      tiles[index].click()
+      assert.equal(dom.node('scope').textContent, `${label}${count} ${count === 1 ? 'item' : 'items'}`)
+    }
+  }
+  check([[1, 'In progress', '▸', 3], [0, 'Waiting on you', '●', 2], [2, 'Due soon', '⚑', 1], [3, 'Done recently', '✓', 2]])
+  model.turns.push({ key: 'question', project: 'Beta', agent: 'gemini', text: 'Inbox question', isQuestion: true })
+  await dom.redraw(model)
+  check([[0, 'Waiting on you', '●', 3], [1, 'In progress', '▸', 4], [3, 'Done recently', '✓', 2]])
+})
+
+test('the serve page uses translated singular and plural item count templates', async () => {
+  for (const [lang, one, many] of [['en', '1 item', '2 items'], ['zh-TW', '1 項', '2 項'], ['zh-CN', '1 项', '2 项']]) {
+    const dom = await pageDom(await sourcePage(lang), redesignModel())
+    dom.node('counts').childNodes[2].click()
+    assert.equal(dom.node('scope').childNodes[1].textContent, one)
+    dom.node('counts').childNodes[0].click()
+    assert.equal(dom.node('scope').childNodes[1].textContent, many)
+  }
+  const dom = await pageDom(await sourcePage('en', { viewCountOne: n => `Only ${n} entry`, viewCount: n => `${n} entries` }), redesignModel())
+  dom.node('counts').childNodes[2].click()
+  assert.equal(dom.node('scope').childNodes[1].textContent, 'Only 1 entry')
+})
+
+test('offline notices and board warnings use the alert contrast colours', async () => {
+  const html = await sourcePage()
+  const model = { ...redesignModel(), warning: 'Synthetic warning' }
+  const dom = await pageDom(html, model)
+  assert.equal(descendants(dom.node('board')).find(node => node.textContent === model.warning).className, 't-alert')
+  const offline = html.match(/#offline:not\(:empty\)\{([^}]+)\}/)[1]
+  assert.ok(offline.includes('background:color-mix(in srgb,var(--alert) 9%,var(--ground))'))
+  assert.ok(offline.includes('border-color:color-mix(in srgb,var(--alert) 35%,var(--line))'))
+  assert.match(html, /\.t-alert,\.s-blocked\{color:var\(--alert\)\}/)
+})
 
 test('the serve page sidebar sorts the board by view, project and agent with counts', async () => {
   const model = redesignModel()

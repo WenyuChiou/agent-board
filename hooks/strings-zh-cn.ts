@@ -466,6 +466,7 @@ export const ZH_CN: Strings = {
   viewAll: '全部',
   viewStopped: '已停止',
   viewCount: (n: number): string => `${n} 项`,
+  viewCountOne: (n: number): string => `${n} 项`,
   viewEmptyDue: '没有快到期的工作',
   viewEmptyStopped: '没有停下来的工作',
   viewEmptyRecent: '最近没有完成的工作',

@@ -470,6 +470,7 @@ export const EN: Strings = {
   viewAll: 'Everything',
   viewStopped: 'Stopped',
   viewCount: (n: number): string => n === 1 ? `${n} item` : `${n} items`,
+  viewCountOne: (n: number): string => `${n} item`,
   viewEmptyDue: 'Nothing due soon',
   viewEmptyStopped: 'Nothing has stopped',
   viewEmptyRecent: 'Nothing finished recently',

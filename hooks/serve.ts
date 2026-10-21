@@ -473,16 +473,12 @@ export const requestProblem = (request: PageRequest, hosts: readonly string[], t
 
 // The words the page's script fills in itself, each with its blanks as \u0001 and \u0002.
 const PAGE_WORDS = [
-  'viewAll', 'viewStopped', 'viewCount', 'sideViews', 'sideProjects', 'sideAgents', 'sideOwnTasks',
+  'viewAll', 'viewStopped', 'viewCount', 'viewCountOne', 'sideViews', 'sideProjects', 'sideAgents', 'sideOwnTasks',
   'viewEmptyDue', 'viewEmptyStopped', 'viewEmptyRecent', 'viewEmptyFiltered', 'clearFilters', 'removeFilter',
   'sectionActive', 'sectionDue',
   'messagesPlaceholder', 'messagesSend', 'messagesQueued', 'messagesUncertain',
   'messagesAccepted', 'messagesAcknowledged', 'messagesRejected', 'messagesConflict', 'messagesTimeout',
   'sessionsTitle', 'sessionsWaiting', 'sessionsTimedOut',
-  'countWaiting',
-  'countActive',
-  'countDue',
-  'countToday',
   'sectionWaiting',
   'sectionQuestionReminders',
   'sectionOlderQuestions',
@@ -605,7 +601,7 @@ button.primary:hover{background:var(--accent);filter:brightness(.94)}
 .live{display:inline-flex;align-items:center;gap:6px;font-size:12px;color:var(--muted);padding:2px 9px;border:1px solid var(--line);border-radius:999px;background:var(--surface)}
 .live i{width:7px;height:7px;border-radius:50%;background:var(--done)}
 body:has(#offline:not(:empty)) .live{display:none}
-#offline:not(:empty){top:var(--head-h,54px);z-index:5;padding:10px max(16px,calc((100vw - 1148px)/2));border-color:color-mix(in srgb,var(--alert) 35%,var(--line));background:color-mix(in srgb,var(--alert) 9%,var(--surface))}
+#offline:not(:empty){top:var(--head-h,54px);z-index:5;padding:10px max(16px,calc((100vw - 1148px)/2));border-color:color-mix(in srgb,var(--alert) 35%,var(--line));background:color-mix(in srgb,var(--alert) 9%,var(--ground))}
 #offline:not(:empty)::before{content:'!';display:inline-grid;place-items:center;width:18px;height:18px;border:1px solid currentColor;border-radius:50%;margin-right:10px;font-weight:700}
 #side{position:sticky;top:var(--head-h,54px);max-height:calc(100dvh - var(--head-h,54px));overflow:auto;padding:20px 0 28px;display:grid;gap:22px;align-content:start}
 .side-head,#side-open,.scrim{display:none}
@@ -680,9 +676,7 @@ const PAGE_SCRIPT = String.raw`
   var messageAttempts = {};
 
   function w(key, a, b) {
-    var template = String(W[key]);
-    // Only English adds a final s to the serialized plural count template.
-    if (key === 'viewCount' && a === 1) template = template.replace(/s$/, '');
+    var template = String(W[key === 'viewCount' && a === 1 ? 'viewCountOne' : key]);
     return template.split('\u0001').join(a === undefined ? '' : String(a)).split('\u0002').join(b === undefined ? '' : String(b));
   }
   function el(tag, cls, text) {
@@ -1004,7 +998,13 @@ const PAGE_SCRIPT = String.raw`
       });
       add(side, box);
     }
-    group('sideViews', viewKeys.map(function (view) { return { value: view[0], label: w(view[1]), tone: { all: 'ink', waiting: 'waiting', due: 'soon', stopped: 'muted', recent: 'done' }[view[0]] || '', count: filterNodes.filter(function (one) { return !one.isShelf && (view[0] === 'all' || one.views.indexOf(view[0]) !== -1); }).length }; }), 'view');
+    var views = viewKeys.map(function (view) { return { value: view[0], label: w(view[1]), tone: { all: 'ink', waiting: 'waiting', due: 'soon', stopped: 'muted', recent: 'done' }[view[0]] || '', count: filterNodes.filter(function (one) { return !one.isShelf && (view[0] === 'all' || one.views.indexOf(view[0]) !== -1); }).length }; });
+    group('sideViews', views, 'view');
+    counts.textContent = '';
+    [['●', 'n-waiting', 'waiting'], ['▸', 'n-active', 'progress'], ['⚑', 'n-due', 'due'], ['✓', 'n-today', 'recent']].forEach(function (one) {
+      var view = views.filter(function (entry) { return entry.value === one[2]; })[0];
+      add(counts, add(button('', function () { pick.view = view.value; applyPick(); }, '', true), el('span', view.count > 0 ? one[1] : 'quiet', one[0] + ' ' + view.count), el('span', '', view.label)));
+    });
     ['project', 'agent'].forEach(function (kind) {
       var values = [];
       filterNodes.forEach(function (one) { if ((kind === 'project' ? !!one.project : one.agent !== null) && values.indexOf(one[kind]) === -1) values.push(one[kind]); });
@@ -1023,14 +1023,10 @@ const PAGE_SCRIPT = String.raw`
     var active = document.activeElement;
     var focus = active && active.getAttribute ? active.getAttribute('data-key') : null;
     var caret = focus ? [active.selectionStart, active.selectionEnd] : null;
-    counts.textContent = '';
-    [['●', model.counts.waiting, 'countWaiting', 'n-waiting', 'waiting'], ['▸', model.counts.active, 'countActive', 'n-active', 'progress'], ['⚑', model.counts.due, 'countDue', 'n-due', 'due'], ['✓', model.counts.today, 'countToday', 'n-today', 'recent']].forEach(function (one) {
-      add(counts, add(button('', function () { pick.view = one[4]; applyPick(); }, '', true), el('span', one[1] > 0 ? one[3] : 'quiet', one[0] + ' ' + one[1]), el('span', '', w(one[2]))));
-    });
     board.textContent = '';
     filterNodes = [];
     filterGroups = [];
-    if (model.warning) add(board, el('p', 'n-due', model.warning));
+    if (model.warning) add(board, el('p', 't-alert', model.warning));
     waitingHead = el('h2', 'n-waiting', '● ' + w('sectionWaiting'));
     nothing = model.asks.length === 0 ? el('div', 'n-today', w('nothingForYou')) : null;
     add(board, waitingHead, nothing);

@@ -507,6 +507,7 @@ export const ZH_TW = {
   viewAll: '全部',
   viewStopped: '已停止',
   viewCount: (n: number): string => `${n} 項`,
+  viewCountOne: (n: number): string => `${n} 項`,
   viewEmptyDue: '沒有快到期的工作',
   viewEmptyStopped: '沒有停下來的工作',
   viewEmptyRecent: '最近沒有完成的工作',
