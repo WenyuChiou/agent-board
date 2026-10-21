@@ -22,11 +22,11 @@ describe('L3 across agents and sessions', () => {
       assert.equal(result.status, 0, result.stderr)
       assert.equal((world.read('progress.md').match(/<!-- auto /g) ?? []).length, 1)
       assert.match(world.read('progress.md'), /Check monitoring/)
-      await knownFailure('hold:codex-open-ask', () => assert.match(world.read('progress.md'), /- \[\?\] Publish the gateway, OK\?/))
+      assert.match(world.read('progress.md'), /- \[\?\] Publish the gateway, OK\?/)
       const server = await serve.start(world)
       for (const text of [await terminal.screen(world), await server.page()]) {
         noMachineIds(text, world)
-        await knownFailure('hold:codex-open-ask', () => assert.match(text, /1\s+waiting/))
+        assert.match(text, /1\s+waiting/i)
       }
     } finally { await world.close() }
   })

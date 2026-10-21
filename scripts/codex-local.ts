@@ -4,7 +4,7 @@ import { homedir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { performance } from 'node:perf_hooks'
 import { pathToFileURL } from 'node:url'
-import { answerLocalQuestions, boardConfirmedReport, codexEvent, codexEvents, codexReport, folderProject, putCodexBlock, sessionTitle } from '../hooks/codex'
+import { boardConfirmedReport, codexEvent, codexEvents, codexReport, folderProject, putCodexBlock, sessionTitle } from '../hooks/codex'
 import type { CodexReport } from '../hooks/codex'
 import { readConfig } from '../hooks/connect-pure'
 import type { Strings } from '../hooks/i18n'
@@ -185,6 +185,7 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
       // Classify before Cursor's adapter drops prompt text; retain lifecycle
       // ordering without treating a board lookup as an answer to the question.
       const isBoardPrompt = (isPromptEvent(raw) || raw.prompt_submitted === true) && (raw.board_request === true || isBoardRequest(raw, boardRequestWords(Object.values(STRINGS))))
+      // No longer changes any step (#243); kept so events queued by an older version still validate.
       const isPrompt = !isBoardPrompt && mode === '--agent-status' && status === 'working' && (payload.prompt_submitted === true || /^(?:UserPromptSubmit|user_prompt_submit|BeforeAgent)$/.test(String(payload.hook_event_name ?? payload.hookEventName)))
       // A queued event keeps metadata only: the host's own fields stay out, as they do above.
       return {
@@ -238,7 +239,7 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
       const isLockedRename = process.platform === 'win32' && failure?.code === 'EPERM' && failure.syscall === 'rename' && typeof failure.dest === 'string' && resolve(failure.dest) === progress && isWritable()
       return failure?.code === 'EBUSY' || failure?.code === 'EAGAIN' || isLockedRename || error instanceof Error && error.message === 'LOCK_BUSY'
     }
-    const apply = ({ mode, agent, session, now, at, status, event, folder = '', isBoardPrompt, isPrompt, payload }: Pending): CodexReport => {
+    const apply = ({ mode, agent, session, now, at, status, event, folder = '', isBoardPrompt, payload }: Pending): CodexReport => {
       const owner = hash(`${agent}:${session}`)
       const recordFile = join(root, 'sessions', `${owner}.json`)
       const saved = readLocal(recordFile)
@@ -251,7 +252,7 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
       const base = mode === '--codex-event' ? codexEvent(previous, isBoardPrompt ? { ...payload, prompt_submitted: false } : payload, clock, s) : codexReport(previous, session, mode === '--agent-status' ? {
         title: previous?.title ?? s.localAgentTask(agent), project: previous?.project ?? agent,
         state: isBoardPrompt && previous ? previous.state : status === 'working' ? 'working' : previous?.state === 'done' ? 'done' : status,
-        steps: isPrompt && previous ? answerLocalQuestions(previous.steps) : previous?.steps ?? [`- [ ] ${s.localAgentLifecycle}`],
+        steps: previous?.steps ?? [`- [ ] ${s.localAgentLifecycle}`],
       } : payload, clock, s)
       // A queued folder is cleaned again: the queue file is not trusted to hold a clean name.
       const name = folderProject(folder)

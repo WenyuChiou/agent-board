@@ -378,13 +378,13 @@ test('local setup adds missing Cursor and Muse version defaults once', () => fix
   }
 }))
 
-test('independent prompt metadata answers questions while ordinary activity and replay preserve newer questions', () => fixture(f => {
+test('a new prompt leaves the open question waiting for Codex and the local agents while replay preserves newer questions', () => fixture(f => {
   assert.equal(f.install('--apply').status, 0)
   assert.equal(f.event('UserPromptSubmit', 'turn-prompt-1').status, 0)
   assert.equal(f.report('waiting', ['- [?] Choose database', '- [ ] Continue']).status, 0)
   assert.equal(f.event('UserPromptSubmit', 'turn-prompt-2', { prompt: 'PRIVATE_NEW_INPUT' }).status, 0)
   assert.match(readFileSync(f.progress, 'utf8'), /state=working/)
-  assert.match(readFileSync(f.progress, 'utf8'), /- \[x\] Choose database/)
+  assert.match(readFileSync(f.progress, 'utf8'), /- \[\?\] Choose database/)
   assert.equal(f.report('waiting', ['- [?] New question', '- [ ] Continue']).status, 0)
   assert.equal(f.event('UserPromptSubmit', 'turn-prompt-2').status, 0)
   assert.match(readFileSync(f.progress, 'utf8'), /- \[\?\] New question/)
@@ -394,7 +394,7 @@ test('independent prompt metadata answers questions while ordinary activity and 
   assert.equal(f.command(['--agent-status', '--agent', 'grok', '--state', 'working'], { session_id: owner }).status, 0)
   assert.match(readFileSync(f.progress, 'utf8'), /- \[\?\] Grok decision/)
   assert.equal(f.command(['--agent-status', '--agent', 'grok', '--state', 'working'], { session_id: owner, hook_event_name: 'UserPromptSubmit', prompt: 'PRIVATE_NEW_INPUT' }).status, 0)
-  assert.match(readFileSync(f.progress, 'utf8'), /- \[x\] Grok decision/)
+  assert.match(readFileSync(f.progress, 'utf8'), /- \[\?\] Grok decision/)
   const record = join(f.root, 'sessions', createHash('sha256').update(`grok:${owner}`).digest('hex') + '.json')
   assert.ok(!readFileSync(record, 'utf8').includes('PRIVATE_NEW_INPUT'))
 }))
@@ -410,7 +410,7 @@ test('native board prompt commands preserve the waiting question and store no in
   }
   assert.equal(f.event('Stop', 'board-turn').status, 0)
   assert.equal(f.event('UserPromptSubmit', 'real-turn', { prompt: 'PRIVATE_REAL_ANSWER' }).status, 0)
-  assert.match(readFileSync(f.progress, 'utf8'), /- \[x\] Choose database/)
+  assert.match(readFileSync(f.progress, 'utf8'), /- \[\?\] Choose database/)
   assert.ok(!readFileSync(f.progress, 'utf8').includes('PRIVATE_REAL_ANSWER'))
   for (const agent of ['cursor', 'grok', 'muse', 'gemini']) {
     assert.equal(f.install('--agent', agent, '--apply').status, 0)

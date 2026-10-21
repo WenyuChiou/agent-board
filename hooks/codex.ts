@@ -19,8 +19,6 @@ export type CodexReport = {
 
 export const codexEvents = ['SessionStart', 'UserPromptSubmit', 'PermissionRequest', 'Stop', 'Interrupt', 'SessionEnd'] as const
 
-export const answerLocalQuestions = (steps: readonly string[]): string[] => steps.map(step => step.replace(/^- \[\?\]/, '- [x]'))
-
 const line = (value: unknown): string => {
   if (typeof value !== 'string') throw new Error('INVALID_TEXT')
   const clean = value.replace(/<!--|-->/g, ' ').replace(/\s+/g, ' ').trim()
@@ -62,7 +60,8 @@ export const codexEvent = (previous: CodexReport | null, input: Record<string, u
     session, turn: turn ?? previous?.turn ?? null, state,
     title: previous?.title ?? s.codexTask,
     project: previous?.project ?? s.codexProject,
-    steps: working && input.prompt_submitted !== false && previous ? answerLocalQuestions(previous.steps) : previous?.steps ?? [`- [ ] ${s.codexLifecycle}`],
+    // The hook never reads the prompt, so only a report or the board can confirm an answer (#243).
+    steps: previous?.steps ?? [`- [ ] ${s.codexLifecycle}`],
     updated: now,
     events: [...(previous?.events ?? []), key].slice(-256),
     retiredTurns: [...(previous?.retiredTurns ?? []), ...(working && previous?.turn && previous.turn !== turn ? [previous.turn] : [])].slice(-128),

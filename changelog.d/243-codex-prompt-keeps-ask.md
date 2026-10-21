@@ -1,0 +1,2 @@
+- **A new prompt to Codex or another local agent leaves its open question waiting (#243).** The hooks never read the prompt, so the ask stays `[?]` and waiting until the agent reports again or the person marks it answered on the board, instead of reading as done.
+  Tests: `a new prompt leaves the open question waiting for Codex and the local agents while replay preserves newer questions`, `native board prompt commands preserve the waiting question and store no incoming words`, `L3 Codex: a new prompt leaves the open ask as [?] until it is answered`.
