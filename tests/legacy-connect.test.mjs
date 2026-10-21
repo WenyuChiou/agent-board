@@ -312,7 +312,10 @@ test('once the other data folder is gone its warning leaves the connect status',
   const before = snapshot(f.home)
   const status = f.run(f.request('status'))
   assert.deepEqual(snapshot(f.home), before)
-  assert.deepEqual(status.state.setup.agents, stored.setup.agents)
+  // Every host was connected from the folder that is now gone, so each board command names a
+  // missing script (#251): status says so per host instead of repeating the stored "ready".
+  assert.deepEqual(status.state.setup.agents, stored.setup.agents.map(agent => ({ ...agent, board: 'failed' })))
+  assert.ok(status.state.setup.problems.some(problem => problem.key === 'missingBoard:codex'))
   assert.ok(status.state.setup.problems.some(problem => problem.key === 'board:failed'))
   assert.ok(status.state.setup.problems.some(problem => problem.key === 'codex:approval'))
   assert.equal(status.state.setup.problems.some(problem => /^(?:otherData|checkUnreadable):/.test(problem.key)), false)

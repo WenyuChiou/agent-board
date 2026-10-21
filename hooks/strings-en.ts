@@ -260,6 +260,7 @@ export const EN: Strings = {
   setupBoardReady: 'board command ready',
   setupBoardNeedsNode: (min: number): string => `board command needs Node.js ${min} or newer`,
   setupBoardFailed: 'board command not written, see below',
+  setupMissingBoardScript: (name: string): string => `${name}: its board command points to a script that is no longer there. Run /progress connect to write the command again.`,
   setupNodeMissing: (min: number): string => `The board commands and the terminal board need Node.js ${min} or newer, and Claude Code could not run node --version here. If node --version works in your terminal, ignore this; otherwise install Node.js, then start a new session. The reporting hooks do not need it.`,
   setupNodeOld: (version: string, min: number): string => `The board commands and the terminal board need Node.js ${min} or newer, and this computer has ${version}. Update Node.js, then start a new session; the reporting hooks do not need it.`,
   setupStatusHint: 'To see this again: /progress connect status',
