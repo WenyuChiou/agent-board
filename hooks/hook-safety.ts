@@ -121,7 +121,10 @@ const run = async () => {
   if (inherited !== undefined && !Number.isSafeInteger(Number(inherited))) return fail('REPORTER_FAILED')
   const hostTimeout = policy.events?.[value('--hook-event')] ?? policy.timeout
   const deadline = Math.min(started + Math.min(3000, hostTimeout - 1000), inherited === undefined ? Infinity : Number(inherited))
-  const budget = (Date.now() < deadline ? deadline : started + hostTimeout - 300) - Date.now()
+  // Input may arrive until the last moment a queued copy can still be written, whether the
+  // worker starts before or after its deadline: one starting just before it must not give up sooner.
+  // A report is never queued, so it waits only until its deadline.
+  const budget = (isReport ? deadline : started + hostTimeout - 300) - Date.now()
   if (budget <= 0) return fail('REPORTER_TIMEOUT')
   let text = '', timer
   process.stdin.setEncoding('utf8')
@@ -163,7 +166,7 @@ const run = async () => {
       fs.renameSync(temporary, file)
       temporary = undefined
       return fail('REPORTER_QUEUED')
-    } catch { return fail('REPORTER_TIMEOUT') }
+    } catch { return fail('REPORTER_FAILED') }
     finally { if (temporary) { try { fs.unlinkSync(temporary) } catch {} } }
   }
   const remaining = deadline - Date.now()

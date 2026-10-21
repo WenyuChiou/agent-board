@@ -129,6 +129,8 @@ const fireCommand = (f, command, input, limit = 10000) => {
 }
 const fireHook = (f, input, limit) => fireCommand(f, JSON.parse(readFileSync(f.hooks, 'utf8')).hooks.UserPromptSubmit[0].hooks[0].command, input, limit)
 
+const hookLog = f => existsSync(join(f.root, 'hook-errors.log')) ? readFileSync(join(f.root, 'hook-errors.log'), 'utf8') : ''
+
 const hookFailure = result => JSON.stringify({ status: result.status, signal: result.signal, error: result.error && { code: result.error.code, message: result.error.message }, termination: result.termination, stdout: result.stdout, stderr: result.stderr })
 
 // Windows soon hands a freed pid to another process, so a pid this test has seen
@@ -513,14 +515,22 @@ test('L5 busy machine: Antigravity and Codex hooks apply or queue every event wi
     ]) {
       for (let index = 0; index < 3; index++) {
         const payload = payloadOf(index)
+        const before = hookLog(f)
+        const spawnedAt = Date.now()
         const result = await fireCommand(f, command, JSON.stringify(payload), 5000)
-        assert.equal(result.status, 0, hookFailure(result))
+        const log = hookLog(f)
+        assert.equal(result.status, 0, `${hookFailure(result)}\nhook log:\n${log}`)
         const id = payload.session_id ?? payload.conversationId
         const owner = createHash('sha256').update(`${agent}:${id}`).digest('hex')
         const record = join(f.root, 'sessions', `${owner}.json`)
         const saved = pendingFiles(f).some(name => readFileSync(join(f.root, 'pending', name), 'utf8').includes(id))
-        assert.ok(existsSync(record) || saved, `${agent} event ${index} must be applied or queued`)
-        records.push({ file: record, state: agent === 'codex' ? 'working' : 'waiting', turn: payload.turn_id })
+        // Both hosts stop the hook at 3 s, and the worker keeps its last 300 ms for the queue write: an event
+        // is lost without failing only when its one log line is REPORTER_TIMEOUT, written 2.7 s or more after the spawn.
+        const added = log.startsWith(before) ? log.slice(before.length).trim().split('\n').filter(Boolean) : []
+        const [loggedAt, loggedAgent, code] = added.length === 1 ? added[0].split(' ') : []
+        const isPastKill = loggedAgent === agent && code === 'REPORTER_TIMEOUT' && Date.parse(loggedAt) - spawnedAt >= 3000 - 300
+        assert.ok(existsSync(record) || saved || isPastKill, `${agent} event ${index} must be applied, queued, or past the host's 3 s stop; hook log:\n${log}`)
+        if (existsSync(record) || saved) records.push({ file: record, state: agent === 'codex' ? 'working' : 'waiting', turn: payload.turn_id })
       }
     }
   } finally {
@@ -760,6 +770,49 @@ test('the hook deadline counts from the process start, not from when the worker 
     assert.equal(JSON.parse(readFileSync(join(f.root, 'sessions', `${owner}.json`))).state, 'working')
     assert.deepEqual(pendingFiles(f), [])
   }
+}))
+
+test('a hook worker that starts just before its deadline still queues an event whose input arrives after it', () => fixture(async f => {
+  assert.equal(f.install('--agent', 'gemini', '--apply').status, 0)
+  const worker = join(f.root, 'agent-board-hook.mjs')
+  const stampFile = join(f.root, 'deadline-stamp.txt')
+  const preload = join(f.home, 'deadline-soon.cjs')
+  const readFile = join(f.root, 'read-stamp.txt')
+  // The deadline falls 1.5 s after the worker starts; its input arrives after that. The worker
+  // stamps when it starts reading, so a worker that only got there after the deadline fails the test.
+  f.save(preload, `if (process.argv[1] === ${JSON.stringify(worker)}) {
+  const fs = require('node:fs')
+  const deadline = Date.now() + 1500
+  process.argv.push('--hook-deadline', String(deadline))
+  const setEncoding = process.stdin.setEncoding.bind(process.stdin)
+  process.stdin.setEncoding = encoding => { fs.writeFileSync(${JSON.stringify(readFile)}, String(Date.now())); return setEncoding(encoding) }
+  fs.writeFileSync(${JSON.stringify(stampFile)}, String(deadline))
+}
+`)
+  const argv = ['--hook-version', '1', '--hook-event', 'BeforeAgent', '--agent-status', '--agent', 'gemini', '--state', 'working', '--progress-file', f.progress]
+  const child = spawn(process.execPath, [worker, ...argv], { env: { ...f.env, NODE_OPTIONS: `--require ${JSON.stringify(preload)}` }, windowsHide: true, stdio: ['pipe', 'ignore', 'ignore'] })
+  const closed = new Promise((done, reject) => { child.once('close', done); child.once('error', reject) })
+  closed.catch(() => {})
+  let status
+  try {
+    const waitUntil = Date.now() + 10000
+    while (!existsSync(stampFile) && Date.now() < waitUntil) await new Promise(done => setTimeout(done, 20))
+    const deadline = Number(readFileSync(stampFile, 'utf8'))
+    while (Date.now() < deadline + 200) await new Promise(done => setTimeout(done, 20))
+    child.stdin.end(JSON.stringify({ session_id: 'late-input-session' }))
+    status = await Promise.race([closed, new Promise(done => setTimeout(() => done('still running'), 10000))])
+  } finally {
+    if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL')
+    await closed
+  }
+  assert.equal(status, 0, hookLog(f))
+  assert.ok(Number(readFileSync(readFile, 'utf8')) < Number(readFileSync(stampFile, 'utf8')), 'the worker must start reading before its deadline')
+  assert.equal(readFileSync(f.progress, 'utf8').includes('agent=gemini'), false)
+  const files = pendingFiles(f)
+  assert.equal(files.length, 1, hookLog(f))
+  assert.match(readFileSync(join(f.root, 'pending', files[0]), 'utf8'), /late-input-session/)
+  assert.match(hookLog(f), /gemini REPORTER_QUEUED/)
+  assert.doesNotMatch(hookLog(f), /INPUT_TIMEOUT/)
 }))
 
 test('a raw entry with an unknown flag or environment variable is dropped, not applied', () => fixture(f => {
