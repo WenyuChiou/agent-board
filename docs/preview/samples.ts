@@ -362,64 +362,92 @@ export const CLI_FILES: Record<string, string> = {
   }),
 }
 
-// The README's animated cover: one short stretch of a morning. Claude Code (the pane's own
-// session), Codex and Antigravity each tick a step; then Claude asks the person something, the
-// person presses an answer in the pane, and Claude goes on; last, the person passes what Claude
-// chose on to the Codex session, which ticks its next step (the moments are COVER_MARKS). Each
-// agent reports through its own hooks, so the file holds Codex's and Antigravity's blocks;
-// Claude's is the pane's own. No resume id or folder, as in the CLI sample.
-type CoverTask<Steps extends string[]> = { project: string; title: string; steps: Steps }
+// The README's animated cover: half a minute of one morning on the terminal board
+// (`agent-board --watch`). Claude Code, Codex, Antigravity and OpenCode each report into one
+// file through their own hooks and tick their steps; Codex asks whether to open its pull
+// request and the person answers from the board; the person passes what Claude chose on to
+// Codex (a preview of sending, coming in 0.24.3) and Codex ticks that step; last, Antigravity
+// asks something new. The moments are COVER_MARKS. No resume id or folder, as in the CLI sample.
+export const COVER_AGENTS = ['claude', 'codex', 'antigravity', 'opencode'] as const
+export type CoverAgent = (typeof COVER_AGENTS)[number]
+// `asks` is how a step reads while it waits on the person, by its index.
+export type CoverTask = { project: string; title: string; steps: string[]; asks?: Record<number, string> }
 export type CoverSample = {
-  claude: { project: string; title: string; branch: string; steps: [string, string, string, string]; options: [string, string]; why: string }
-  // Codex has a fourth step so it is still working after the message makes it tick the third.
-  codex: CoverTask<[string, string, string, string]>
-  antigravity: CoverTask<[string, string, string]>
-  // What the person writes to Codex: the box shows it on two lines, the card on one.
-  message: { lines: [string, string]; text: string }
+  tasks: Record<CoverAgent, CoverTask>
+  // What the person writes to Codex, as the reply box shows it on two lines.
+  message: [string, string]
 }
 
 export const COVER: Record<string, CoverSample> = {
   en: {
-    claude: { project: 'acme-web', title: 'Add a dark mode', branch: 'feat/dark-mode', steps: ['Add colour tokens', 'Fix contrast on charts', 'Release plan', 'Open the pull request'], options: ['Behind a flag', 'Everyone'], why: 'Behind a flag first, or everyone at once?' },
-    codex: { project: 'api-gateway', title: 'Rate-limit the public API', steps: ['Measure traffic per key', 'Add the token bucket', 'Name the rollout flag', 'Load test on staging'] },
-    antigravity: { project: 'docs-site', title: 'Publish the release notes', steps: ['Write the English text', 'Build the Japanese page', 'Tag and deploy'] },
-    message: { lines: ['Use the flag name Claude', 'chose: dark-mode'], text: 'Use the flag name Claude chose: dark-mode' },
+    tasks: {
+      claude: { project: 'acme-web', title: 'Add a dark mode', steps: ['Add colour tokens', 'Fix contrast on charts', 'Write the release note', 'Open the pull request'] },
+      codex: { project: 'api-gateway', title: 'Add rate limits', steps: ['Add the token bucket', 'Load test on staging', 'Open the pull request', 'Name the rollout flag', 'Update the API docs'], asks: { 2: 'Open the pull request, OK?' } },
+      antigravity: { project: 'docs-site', title: 'Publish the release notes', steps: ['Write the English text', 'Build the Japanese page', 'Pick the release day', 'Tag and deploy'], asks: { 2: 'Release today, or Monday?' } },
+      opencode: { project: 'mobile-app', title: 'Fix the login crash', steps: ['Reproduce on Android', 'Patch the token refresh', 'Ship a beta build'] },
+    },
+    message: ['Call the rollout flag', 'dark-mode, please.'],
   },
   'zh-TW': {
-    claude: { project: 'acme-web', title: '設定頁加上深色模式', branch: 'feat/dark-mode', steps: ['加深色的顏色 token', '修圖表對比', '上線方式', '開 PR'], options: ['先開旗標', '全部開'], why: '先用旗標給部分人，還是直接全部開？' },
-    codex: { project: 'api-gateway', title: '公開 API 加流量限制', steps: ['統計每把金鑰的流量', '加上 token bucket', '幫上線旗標取名', '在 staging 壓測'] },
-    antigravity: { project: 'docs-site', title: '發布版本說明', steps: ['寫英文內容', '做日文頁面', '打 tag 並部署'] },
-    message: { lines: ['旗標名稱照 Claude 選的：', 'dark-mode'], text: '旗標名稱照 Claude 選的：dark-mode' },
+    tasks: {
+      claude: { project: 'acme-web', title: '設定頁加上深色模式', steps: ['加上深色配色 token', '修圖表對比度', '寫版本說明', '開 PR'] },
+      codex: { project: 'api-gateway', title: '加上流量限制', steps: ['加上 token bucket', '在 staging 壓測', '開 PR', '幫上線旗標取名', '更新 API 文件'], asks: { 2: '可以開 pull request 嗎？' } },
+      antigravity: { project: 'docs-site', title: '發布版本說明', steps: ['寫英文內容', '做日文頁面', '決定哪天發布', '打 tag 並部署'], asks: { 2: '今天發布，還是等週一？' } },
+      opencode: { project: 'mobile-app', title: '修好登入閃退', steps: ['在 Android 上重現', '修 token 更新', '出 beta 版'] },
+    },
+    message: ['上線旗標就叫', 'dark-mode 吧。'],
   },
   'zh-CN': {
-    claude: { project: 'acme-web', title: '设置页加上深色模式', branch: 'feat/dark-mode', steps: ['加深色的颜色 token', '修图表对比度', '上线方式', '提 PR'], options: ['先开开关', '全部开放'], why: '先用开关给部分用户，还是直接全部开放？' },
-    codex: { project: 'api-gateway', title: '公开 API 加限流', steps: ['统计每个密钥的流量', '加上 token bucket', '给上线开关取名', '在 staging 压测'] },
-    antigravity: { project: 'docs-site', title: '发布版本说明', steps: ['写英文内容', '做日文页面', '打 tag 并部署'] },
-    message: { lines: ['开关名称按 Claude 选的：', 'dark-mode'], text: '开关名称按 Claude 选的：dark-mode' },
+    tasks: {
+      claude: { project: 'acme-web', title: '设置页加上深色模式', steps: ['加上深色配色 token', '修图表对比度', '写版本说明', '提 PR'] },
+      codex: { project: 'api-gateway', title: '加上限流', steps: ['加上 token bucket', '在 staging 压测', '提 PR', '给上线开关取名', '更新 API 文档'], asks: { 2: '可以开 pull request 吗？' } },
+      antigravity: { project: 'docs-site', title: '发布版本说明', steps: ['写英文内容', '做日文页面', '决定哪天发布', '打 tag 并部署'], asks: { 2: '今天发布，还是等周一？' } },
+      opencode: { project: 'mobile-app', title: '修复登录闪退', steps: ['在 Android 上复现', '修 token 刷新', '出 beta 版'] },
+    },
+    message: ['上线开关就叫', 'dark-mode 吧。'],
   },
 }
 
-// Each step's mark at each of the cover's seven moments, in progress.md's own marks: Codex ticks
-// its second step, then Antigravity, then Claude; Claude asks its third, which the person
-// answers; then Codex, told what Claude chose, ticks its third.
-export const COVER_MARKS: Record<'claude' | 'codex' | 'antigravity', string[][]> = {
-  claude: [['x', '~', ' ', ' '], ['x', '~', ' ', ' '], ['x', '~', ' ', ' '], ['x', 'x', '~', ' '], ['x', 'x', '?', ' '], ['x', 'x', 'x', '~'], ['x', 'x', 'x', '~']],
-  codex: [['x', '~', ' ', ' '], ['x', 'x', '~', ' '], ['x', 'x', '~', ' '], ['x', 'x', '~', ' '], ['x', 'x', '~', ' '], ['x', 'x', '~', ' '], ['x', 'x', 'x', '~']],
-  antigravity: [['x', '~', ' '], ['x', '~', ' '], ['x', 'x', '~'], ['x', 'x', '~'], ['x', 'x', '~'], ['x', 'x', '~'], ['x', 'x', '~']],
+// Each agent's step marks at each of the cover's 15 moments, in progress.md's own marks; null
+// while the agent is not on the board yet. 0–3: the agents come in; 4–7: steps tick; 8: Claude's
+// task closes, nothing else changes; 9: Codex asks; 10–11: the person picks the question and
+// copies the answer; 12: Codex opened the pull request; 13: Codex named the flag it was told;
+// 14: Antigravity asks.
+const marks = (...runs: Array<[count: number, marks: string | null]>): Array<string | null> => runs.flatMap(([count, value]) => Array<string | null>(count).fill(value))
+export const COVER_MARKS: Record<CoverAgent, Array<string | null>> = {
+  claude: marks([5, 'x~  '], [10, 'xx~ ']),
+  codex: marks([1, null], [5, 'x~   '], [3, 'xx~  '], [3, 'xx?  '], [1, 'xxx~ '], [2, 'xxxx~']),
+  antigravity: marks([2, null], [5, 'x~  '], [7, 'xx~ '], [1, 'xx? ']),
+  opencode: marks([3, null], [12, 'x~ ']),
 }
+export const COVER_MOMENTS = 15
 
-// An agent that has just ticked a step reported just now; before that, a few minutes ago.
-const coverBlock = (session: string, agent: 'codex' | 'antigravity', task: CoverTask<string[]>, moment: number): string => {
-  const marks = COVER_MARKS[agent][moment] ?? []
-  const isFresh = marks.join('') !== (COVER_MARKS[agent][0] ?? []).join('')
-  return `## ${task.project}
-<!-- auto session=${session} agent=${agent} state=working updated=${iso(NOW - (isFresh ? 0 : agent === 'codex' ? 3 : 4) * MIN)} -->
+const COVER_SESSIONS: Record<CoverAgent, string> = { claude: 'b72e4d19', codex: '3c9e5a71', antigravity: '8d21f0b4', opencode: '5e0a9c37' }
+// How long ago each agent last reported, in minutes, until its first step on the cover; then
+// just now.
+const COVER_AGO: Record<CoverAgent, number> = { claude: 2, codex: 3, antigravity: 4, opencode: 6 }
+
+// progress.md at moment `moment`: one block per agent on the board by then, a step that waits
+// on the person worded as its question, and the block waiting while it asks.
+export const coverFile = (sample: CoverSample, moment: number): string => {
+  const blocks = COVER_AGENTS.flatMap(agent => {
+    const now = COVER_MARKS[agent][moment]
+    if (now === null || now === undefined) return []
+    const first = COVER_MARKS[agent].find(value => value !== null)
+    const hasMoved = COVER_MARKS[agent].slice(0, moment + 1).some(value => value !== null && value !== first)
+    const task = sample.tasks[agent]
+    const steps = task.steps.map((step, i) => {
+      const mark = now[i] ?? ' '
+      return `- [${mark}] ${mark === '?' ? (task.asks?.[i] ?? step) : step}`
+    })
+    const state = now.includes('?') ? 'waiting' : 'working'
+    const session = COVER_SESSIONS[agent]
+    return [`## ${task.project}
+<!-- auto session=${session} agent=${agent} state=${state} updated=${iso(NOW - (hasMoved ? 0 : COVER_AGO[agent]) * MIN)} -->
 ### ${task.title}
-${task.steps.map((step, i) => `- [${marks[i] ?? ' '}] ${step}`).join('\n')}
+${steps.join('\n')}
 <!-- /auto session=${session} -->
-`
+`]
+  })
+  return `# Project progress\n\n${blocks.join('\n')}`
 }
-
-// progress.md at a moment, without Claude's block, which the pane writes from its own session.
-export const coverFile = (sample: CoverSample, moment: number): string =>
-  `# Project progress\n\n${coverBlock('3c9e5a71', 'codex', sample.codex, moment)}\n${coverBlock('8d21f0b4', 'antigravity', sample.antigravity, moment)}`
