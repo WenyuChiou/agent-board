@@ -20,9 +20,10 @@ const TITLES = {
 }
 // A check that fails on main because of a known problem passes through knownFailure with its hold id:
 // the page server reads every ledger and capture file on every poll (audit P1-3), so its memory
-// climbs and its answers slow down until some polls get none; and the question ledger and capture
-// files of an archived task are never removed. A page server that is gone, answers with an error or
-// answers nothing after the archive is never held: slowness explains none of them.
+// climbs and its answers slow down to minutes; and the question ledger and capture files of an
+// archived task are never removed. Survival is held only for falling short of 1,000 polls: a page
+// server that is gone, answers with an error, drops a connection or leaves a poll unanswered for
+// 5 minutes is never held, since slowness explains none of them.
 const HOLDS = { ops: 'hold:serve-poll-file-ops', memory: 'hold:serve-poll-file-ops', prune: 'hold:question-ledger-prune', survive: 'hold:serve-poll-file-ops' }
 
 const ARCHIVE_SLACK_MS = 120000
@@ -30,14 +31,16 @@ const ARCHIVE_SLACK_MS = 120000
 // hard deadline still has a minute to spare.
 const TAIL_SLACK_MS = 240000
 // Growth lasts this share of the planned time, after the warm-up: on a slow server the archive
-// takes about a third of a 30-minute run, and the tail after it needs a few polls and memory lines.
-const GROWTH_SHARE = 0.6
+// takes about a third of a 30-minute run, and the tail after it needs a few polls and memory lines
+// while each answer takes a minute or more.
+const GROWTH_SHARE = 0.5
 const SETTLE_MS = 20000
 const SETTLED_LINES = 3
 const ENDED_EVERY = 12
 const POLL_GAP_MS = 500
 const POLL_LIMIT_MS = 15000
-const POLL_GIVE_UP_MS = 60000
+const POLL_GIVE_UP_MS = 300000
+const RESENDS = 2
 const SAMPLE_MS = 10000
 const PAGE_EVERY = 50
 const WARM_POLLS = 20
@@ -252,6 +255,8 @@ const soak = async ({ minutes, out }) => {
       const latencies = answered.map(one => one.ms)
       report.polls = {
         count: polls.length, failed: polls.filter(one => one.failed).length, slow: polls.filter(one => one.slow).length, badStatus: answered.filter(one => one.status !== 200).length,
+        retried: polls.filter(one => one.isRetried).length,
+        failedBy: polls.filter(one => one.failed).reduce((counts, one) => ({ ...counts, [one.cause]: (counts[one.cause] ?? 0) + 1 }), {}),
         median: median(latencies), p95: percentile(latencies, 0.95), max: latencies.length ? Math.max(...latencies) : undefined,
         firstSize: answered[0]?.size, lastSize: answered.at(-1)?.size,
       }
@@ -274,34 +279,61 @@ const soak = async ({ minutes, out }) => {
     }, SAMPLE_MS)
 
     // The polls: the page's own request, back to back with a gap after each answer. Like the page,
-    // a poll waits for its answer: one dropped at 15 s would leave the server working on it while
-    // the next one arrives, a pile-up the page never makes. An answer later than 15 s still counts
-    // as a slow one; a poll fails only when no answer comes at all.
+    // which never gives up on a poll, a poll waits for its answer: one dropped early would leave the
+    // server working on it while the next one arrives, a pile-up the page never makes. An answer
+    // later than 15 s still counts as a slow one; a poll fails when the connection fails or no answer
+    // comes in 5 minutes.
     const board = new URL('/api/board', server.url)
     const headers = { 'x-board-token': token }
     // The end of the tail cuts the poll under way short, so a slow answer cannot hold the run past it.
     const loopEnd = new AbortController()
     const pollSignal = () => AbortSignal.any([AbortSignal.timeout(POLL_GIVE_UP_MS), stopper.signal, loopEnd.signal])
+    // Why a request got no answer, in plain words for the report.
+    const causeOf = error => {
+      const code = error?.cause?.code ?? error?.code
+      if (error?.name === 'TimeoutError') return 'no answer in 5 minutes'
+      if (['ECONNRESET', 'EPIPE', 'UND_ERR_SOCKET', 'UND_ERR_CLOSED'].includes(code)) return 'connection closed'
+      if (code === 'ECONNREFUSED') return 'connection refused'
+      return 'other error'
+    }
+    // Browsers send a request again when a kept-alive connection closes before any answer comes back,
+    // which happens when a busy server times idle connections out just as the next request goes out.
+    // The soak allows two resends because it holds at most two connections (the polls and the
+    // archive's requests), so the third try is on a fresh one. A body cut off after the answer began
+    // is never sent again.
+    const getOnce = async (url, init) => {
+      let isRetried = false
+      for (let attempt = 1; ; attempt += 1) {
+        let response
+        try { response = await fetch(url, { ...init, signal: pollSignal() }) } catch (error) {
+          const cause = causeOf(error)
+          if (attempt <= RESENDS && cause === 'connection closed' && !stopper.signal.aborted && !loopEnd.signal.aborted) { isRetried = true; continue }
+          return { failed: true, cause, isRetried }
+        }
+        try { return { failed: false, status: response.status, size: (await response.arrayBuffer()).byteLength, isRetried } } catch (error) { return { failed: true, cause: causeOf(error), isRetried } }
+      }
+    }
     const pollLoop = async () => {
       while (!isLoopDone) {
         const number = polls.length + 1
         const during = phase
         const start = since()
-        let status = 0
-        let size = 0
-        let failed = false
-        try {
-          const response = await fetch(board, { headers, signal: pollSignal() })
-          size = (await response.arrayBuffer()).byteLength
-          status = response.status
-        } catch { failed = true }
+        const got = await getOnce(board, { headers })
+        const status = got.status ?? 0
+        const size = got.size ?? 0
+        let { failed, cause, isRetried } = got
         const ms = Math.round(since() - start)
         if (!failed && number % PAGE_EVERY === 0) {
-          try { await (await fetch(server.url, { signal: pollSignal() })).arrayBuffer() } catch { failed = true }
+          const page = await getOnce(server.url, {})
+          if (page.failed) { failed = true; cause = `${page.cause}, page` }
+          isRetried = isRetried || page.isRetried
         }
         // A poll the stop or the end of the tail cut short is not a poll.
-        if (stopper.signal.aborted || loopEnd.signal.aborted) break
-        polls.push({ number, start, end: since(), ms, status, size, failed, slow: !failed && ms > POLL_LIMIT_MS, phase: during })
+        if (stopper.signal.aborted || loopEnd.signal.aborted) {
+          if (!stopper.signal.aborted && since() - start > POLL_LIMIT_MS) problem(`The poll under way when the tail ended had waited ${Math.round((since() - start) / 1000)} s for its answer.`)
+          break
+        }
+        polls.push({ number, start, end: since(), ms, status, size, failed, cause: failed ? cause : undefined, isRetried, slow: !failed && ms > POLL_LIMIT_MS, phase: during })
         if (!isLoopDone) await sleep(POLL_GAP_MS)
       }
     }
@@ -509,10 +541,11 @@ const soak = async ({ minutes, out }) => {
     // Survival is about the server staying up and answering; slow answers are counted, and the
     // file-operation and memory checks are where slowness shows.
     const survived = `${polls.length} polls; the page server is ${isServerAlive ? 'still running' : 'gone'}; ${report.polls.failed} got no answer and ${report.polls.badStatus} got an answer other than 200 (${report.polls.slow} took longer than 15 seconds)`
-    const tail = tailPolls()
-    const isSilent = tail.length >= TAIL_POLLS && tail.every(one => one.failed)
-    if (!isServerAlive || report.polls.badStatus > 0 || isSilent) outcomes.survive = { ok: false, isUnheld: true, line: `${survived}${isSilent ? `; none of the ${tail.length} polls after the archive got an answer` : ''}.` }
-    else if (report.polls.failed > 0) outcomes.survive = { ok: false, line: `${survived}.` }
+    // A poll waits up to 5 minutes, longer than any slow answer seen, so a failed poll or 5 minutes
+    // with no answer at the end means a server that is stuck, not slow.
+    const lastAnswer = answered.at(-1)?.end ?? 0
+    const isStuck = endAt - lastAnswer > POLL_GIVE_UP_MS
+    if (!isServerAlive || report.polls.failed > 0 || report.polls.badStatus > 0 || isStuck) outcomes.survive = { ok: false, isUnheld: true, line: `${survived}${isStuck ? `; no answer came in the last ${Math.round((endAt - lastAnswer) / 1000)} s` : ''}.` }
     else if (polls.length < 1000 && minutes >= 30) outcomes.survive = { ok: false, line: `${survived}; a run of ${minutes} minutes should reach 1,000.` }
     else if (polls.length < 1000) outcomes.survive = { skipped: `${survived}; 1,000 polls are needed.` }
     else outcomes.survive = { ok: true, line: `${survived}.` }
