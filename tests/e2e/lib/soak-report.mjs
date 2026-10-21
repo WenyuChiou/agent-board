@@ -5,9 +5,10 @@ import { join } from 'node:path'
 export const MINUTES_LEAST = 1
 export const MINUTES_MOST = 45
 export const MINUTES_DEFAULT = 30
-// A local run without --out writes into the temp folder, never into the working copy; CI names
-// its own folder.
-export const OUT_DEFAULT = join(tmpdir(), 'agent-board-soak-report')
+// A local run without --out writes into the temp folder, never into the working copy, in a folder
+// named for its start time (UTC) and process, so two runs never share one; CI names its own folder.
+const startedAt = new Date().toISOString().slice(0, 19).replace(/[-:]/g, '').replace('T', '-')
+export const OUT_DEFAULT = join(tmpdir(), `agent-board-soak-report-${startedAt}-${process.pid}`)
 
 const shown = value => String(value).replace(/[^\x20-\x7e]/g, '?').slice(0, 40)
 

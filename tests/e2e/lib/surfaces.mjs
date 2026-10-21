@@ -233,9 +233,11 @@ export const pageDom = async (source, first, post, { clipboard = true, legacyCop
 }
 
 export const serve = {
-  // lifetimeMs: how long the kill check waits before it stops a server nobody stopped; idleMinutes:
-  // the page's own idle exit. A long run (the soak) raises both; the defaults serve every journey.
-  start: async (world, args = [], { lifetimeMs = 20000, idleMinutes = 5 } = {}) => {
+  // lifetimeMs: how long the kill check waits, from the server's start, before it stops a server
+  // nobody stopped; idleMinutes: the page's own idle exit. A long run (the soak) raises both. The
+  // default is well past the slowest journey on a slow Windows runner, so a healthy server is
+  // never lost mid-journey.
+  start: async (world, args = [], { lifetimeMs = 90000, idleMinutes = 5 } = {}) => {
     let pid, timer, url, recordPath, isStopped = false
     // The address file holds a `path` of its own (the progress.md it serves), so the file's own
     // place is kept as `file`, apart from what it holds.
@@ -269,7 +271,8 @@ export const serve = {
         headers: { 'x-board-token': url.searchParams.get('t') },
         signal: AbortSignal.timeout(1500),
       }).catch(() => undefined)
-      if (response?.ok && isRecorded() && alive()) process.kill(pid)
+      // A server that exits between the check and the kill is gone, which is what was wanted.
+      if (response?.ok && isRecorded() && alive()) { try { process.kill(pid) } catch {} }
     } }
     ownedServers.add(owner)
     const stop = async () => {
@@ -296,7 +299,7 @@ export const serve = {
       url = new URL(match[0])
       discover()
       assert.ok(pid && recordPath, 'The isolated runtime owns its server address file')
-      timer = setTimeout(() => { void owner.killRecorded() }, lifetimeMs)
+      timer = setTimeout(() => { void owner.killRecorded().catch(() => {}) }, lifetimeMs)
       const call = async (method, path, body) => {
         const response = await fetch(new URL(path, url), { method, headers: { 'x-board-token': url.searchParams.get('t'), ...(body === undefined ? {} : { 'content-type': 'application/json' }) }, body: body === undefined ? undefined : JSON.stringify(body), signal: AbortSignal.timeout(5000) })
         const text = await response.text()
@@ -328,8 +331,9 @@ export const serve = {
         const after = dom.cards().find(one => matches(one.textContent, cardMatch) && dom.buttons(one).some(button => matches(button.textContent, buttonMatch)))?.textContent ?? ''
         return { before, after, card: String(cardMatch), button: button.textContent, surface: 'serve', requests: dom.requests }
       }
-      // isOwned: the pid is alive and the world's address file still names it and this address, the
-      // same check killRecorded makes, for a caller that must end the server itself.
+      // isOwned: the pid is alive and the world's address file still names it and this address. It
+      // does not ask the server, so after a hard crash a leftover file and a reused pid would pass:
+      // a caller that ends the server itself first asks it (as killRecorded and the soak do).
       return { url: url.href, get, post, page, press, stop, pid, isOwned: () => isRecorded() && alive(), get dom() { return dom }, get pollMs() { return dom?.pollMs } }
     } catch (error) {
       await stop()

@@ -41,6 +41,7 @@ const ENDED_EVERY = 12
 const POLL_GAP_MS = 500
 const POLL_LIMIT_MS = 15000
 const POLL_GIVE_UP_MS = 300000
+const CUT_STUCK_MS = 60000
 const RESENDS = 2
 const SAMPLE_MS = 10000
 const PAGE_EVERY = 50
@@ -483,9 +484,14 @@ const soak = async ({ minutes, out }) => {
       let json = {}
       for (let attempt = 1; attempt <= 3 && isRunning() && json.model === undefined; attempt += 1) json = (await call('/api/board')).json
       const rows = json.model === undefined ? [] : [...json.model.groups.flatMap(group => group.rows), ...json.model.stopped, ...json.model.idle]
-      for (const number of ended) {
+      for (const [at, number] of ended.entries()) {
         if (!isRunning()) break
-        if (since() > total + ARCHIVE_SLACK_MS) { problem('The archive of stopped tasks was cut short because the planned time was long over.'); break }
+        // The stopped tasks not reached count as refused: the archive did not finish.
+        if (since() > total + ARCHIVE_SLACK_MS) {
+          problem('The archive of stopped tasks was cut short because the planned time was long over.')
+          refused += ended.length - at
+          break
+        }
         const title = specOf(number, 'ended').title
         const row = rows.find(one => one.title === title && one.canArchive)
         const answer = row === undefined ? { status: 0, json: {} } : await call('/api/act', { key: row.key, type: 'archive', text: '', session: '', asked: '', fp: row.fp })
@@ -613,7 +619,13 @@ const soak = async ({ minutes, out }) => {
     const isStuck = endAt - lastAnswer > POLL_GIVE_UP_MS
     // Too few polls is held only while the file-operation check fails, the slowness that explains it.
     const isOpsFailing = outcomes.ops.ok === false && outcomes.ops.isUnheld !== true
-    if (!isServerAlive || report.polls.failed > 0 || report.polls.badStatus > 0 || isStuck) outcomes.survive = { ok: false, isUnheld: true, line: `${survived}${isStuck ? `; no answer came in the last ${Math.round((endAt - lastAnswer) / 1000)} s` : ''}.` }
+    // The poll the end cut short, after waiting at least CUT_STUCK_MS and over twice the slowest
+    // answer, is a server that stopped answering in the last minutes, unless the known slowness is
+    // there to explain it or the run was too short to tell (ops skipped).
+    const slowestAnswer = report.polls.max ?? 0
+    const isCutStuck = cutPoll !== undefined && cutPoll.ms >= CUT_STUCK_MS && cutPoll.ms > 2 * slowestAnswer && !isOpsFailing && outcomes.ops.skipped === undefined
+    const stuckNote = isStuck ? `; no answer came in the last ${Math.round((endAt - lastAnswer) / 1000)} s` : isCutStuck ? `; the poll under way at the end had waited ${Math.round(cutPoll.ms / 1000)} s, over twice the slowest answer (${Math.round(slowestAnswer / 1000)} s)` : ''
+    if (!isServerAlive || report.polls.failed > 0 || report.polls.badStatus > 0 || isStuck || isCutStuck) outcomes.survive = { ok: false, isUnheld: true, line: `${survived}${stuckNote}.` }
     else if (polls.length < 1000 && minutes >= 30) outcomes.survive = { ok: false, isUnheld: !isOpsFailing, line: `${survived}; a run of ${minutes} minutes should reach 1,000${isOpsFailing ? '' : ', and the file-operation check does not fail, so its known slowness does not explain it'}.` }
     else if (polls.length < 1000) outcomes.survive = { skipped: `${survived}; 1,000 polls are needed.` }
     else outcomes.survive = { ok: true, isUnheld: true, line: `${survived}.` }
@@ -669,9 +681,13 @@ const soak = async ({ minutes, out }) => {
   save()
   // A busy page server cannot answer the world's short close request, so ask for longer, then end it.
   if (server?.isOwned()) {
-    try { await fetch(new URL('/api/close', server.url), { method: 'POST', headers: { 'x-board-token': token, 'content-type': 'application/json' }, body: '{}', signal: AbortSignal.timeout(control.stop === undefined ? 20000 : 8000) }) } catch {}
+    // The server is ended only when it took the request (answered, or too busy to answer in time):
+    // a refused connection means nothing listens at its address, so the pid may be another
+    // program's by now. The world's close ends the terminal board either way.
+    let isRefused = false
+    try { await fetch(new URL('/api/close', server.url), { method: 'POST', headers: { 'x-board-token': token, 'content-type': 'application/json' }, body: '{}', signal: AbortSignal.timeout(control.stop === undefined ? 20000 : 8000) }) } catch (error) { isRefused = error?.cause?.code === 'ECONNREFUSED' }
     for (let waited = 0; waited < 100 && server.isOwned(); waited += 1) await new Promise(done => setTimeout(done, 100))
-    endBoards()
+    if (!isRefused) endBoards()
   }
   let closeFailure
   try { await world?.close() } catch (error) {
