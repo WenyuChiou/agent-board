@@ -891,7 +891,8 @@ const legacyReporterProbe = (isPowerShell = process.platform === 'win32', shell 
   mkdirSync(root, { recursive: true })
   writeFileSync(script, isPowerShell ? reporterPs1() : reporterSh(inbox.replaceAll('\\', '/')))
   const payload = '{"session_id":"synthetic-legacy-session","id":1234567890123456789}'
-  const first = await nativeProcess(executable, args, env, payload, callback => setTimeout(callback, 10000))
+  // Only bounds a hung process on a slow Windows CI runner; the reporter's own deadline is not timed here.
+  const first = await nativeProcess(executable, args, env, payload, callback => setTimeout(callback, 30000))
   assert.equal(first.status, 0, first.stderr)
   assert.equal(first.stdout.trim(), '{}')
   const delivered = readdirSync(inbox).filter(name => name.endsWith('.json'))
@@ -901,7 +902,8 @@ const legacyReporterProbe = (isPowerShell = process.platform === 'win32', shell 
   mkdirSync(dirname(log), { recursive: true })
   writeFileSync(log, Array.from({ length: 250 }, (_, index) => `synthetic old error ${index}\n`).join(''))
   const unfinished = await nativeProcess(executable, args, env, '{"PRIVATE_UNFINISHED_INPUT":',
-    callback => setTimeout(callback, 10000), stopNativeTree, { isInputOpen: true })
+    // Only bounds a hung process on a slow Windows CI runner; the reporter's own deadline is not timed here.
+    callback => setTimeout(callback, 30000), stopNativeTree, { isInputOpen: true })
   assert.equal(unfinished.status, 0, hookFailure(unfinished))
   assert.equal(unfinished.stdout.trim(), '{}')
   assert.deepEqual(readdirSync(inbox).filter(name => name.endsWith('.json')), delivered)
@@ -962,7 +964,8 @@ test('the PowerShell classifier uses the first Node path when several applicatio
   for (const key of Object.keys(env)) if (key.toLowerCase() === 'path') delete env[key]
   env.PATH = [dirname(process.execPath), later].join(delimiter)
   const powershell = join(process.env.SystemRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe')
-  const lookup = spawnSync(powershell, ['-NoProfile', '-Command', '$c = @(Get-Command node -CommandType Application -ErrorAction Stop); $c.Count'], { env, encoding: 'utf8', windowsHide: true, timeout: 10000 })
+  // Only bounds a hung process on a slow Windows CI runner; the reporter's own deadline is not timed here.
+  const lookup = spawnSync(powershell, ['-NoProfile', '-Command', '$c = @(Get-Command node -CommandType Application -ErrorAction Stop); $c.Count'], { env, encoding: 'utf8', windowsHide: true, timeout: 30000 })
   assert.equal(lookup.error, undefined)
   assert.equal(lookup.status, 0, 'the controlled application lookup must succeed')
   assert.equal(lookup.stdout.trim(), '2', 'two real node.exe files on PATH, not a mocked lookup')
@@ -973,7 +976,8 @@ test('the PowerShell classifier uses the first Node path when several applicatio
   const source = reporterPs1()
   assert.doesNotMatch(source, /Get-Command node/)
   f.save(file, observeClassifier(source, diagnostic))
-  const result = await nativeProcess(powershell, ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', file, 'codex', 'prompt'], env, raw, callback => setTimeout(callback, 10000))
+  // Only bounds a hung process on a slow Windows CI runner; the reporter's own deadline is not timed here.
+  const result = await nativeProcess(powershell, ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', file, 'codex', 'prompt'], env, raw, callback => setTimeout(callback, 30000))
   assert.equal(result.error, undefined)
   assert.equal(result.status, 0, classifierDiagnostic(diagnostic))
   const saved = existsSync(inbox) ? readdirSync(inbox).filter(name => name.endsWith('.json')).map(name => ({ body: readFileSync(join(inbox, name), 'utf8') })) : []
@@ -995,7 +999,8 @@ test('the PowerShell reporter never looks for Node in its working folder through
   const file = join(f.root, 'progress-report.ps1'), diagnostic = join(f.home, 'classifier-probe.txt')
   const raw = JSON.stringify({ session_id: 'synthetic-working-folder', cwd: '/synthetic/project', prompt: '/board' })
   f.save(file, observeClassifier(reporterPs1(), diagnostic))
-  const result = await nativeProcess(powershell, ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', file, 'codex', 'prompt'], env, raw, callback => setTimeout(callback, 10000), undefined, { cwd: work })
+  // Only bounds a hung process on a slow Windows CI runner; the reporter's own deadline is not timed here.
+  const result = await nativeProcess(powershell, ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', file, 'codex', 'prompt'], env, raw, callback => setTimeout(callback, 30000), undefined, { cwd: work })
   assert.equal(result.error, undefined)
   assert.equal(result.status, 0, classifierDiagnostic(diagnostic))
   const saved = existsSync(inbox) ? readdirSync(inbox).filter(name => name.endsWith('.json')).map(name => readFileSync(join(inbox, name), 'utf8')) : []
@@ -1015,7 +1020,8 @@ test('legacy prompt classifiers time out and reap their process without promotin
   try {
     const out = await nativeProcess(isWindows ? 'powershell.exe' : '/bin/sh', args, env,
       JSON.stringify({ session_id: 'synthetic-classifier-timeout', prompt: 'PRIVATE_RAW_PROMPT' }),
-      callback => setTimeout(callback, 10000))
+      // Only bounds a hung process on a slow Windows CI runner; the reporter's own deadline is not timed here.
+      callback => setTimeout(callback, 30000))
     assert.equal(out.error, undefined, hookFailure(out))
     assert.equal(out.status, 0, hookFailure(out))
     assert.equal(out.stdout.trim(), '{}')
