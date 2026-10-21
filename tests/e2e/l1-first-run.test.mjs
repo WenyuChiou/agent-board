@@ -55,7 +55,7 @@ describe('L1 first run', () => {
       const model = (await server.get('/api/board')).json().model
       const rows = model.groups.flatMap(group => group.rows).filter(row => row.title === 'Move the gateway report')
       assert.equal(rows.length, 1)
-      await knownFailure('hold:codex-project-move', () => assert.equal(rows[0].project, 'beta-web'))
+      assert.equal(rows[0].project, 'beta-web')
       noMachineIds(await terminal.screen(world), world)
       noMachineIds(await server.page(), world)
     } finally { await world.close() }

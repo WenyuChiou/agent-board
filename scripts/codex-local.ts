@@ -4,7 +4,7 @@ import { homedir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { performance } from 'node:perf_hooks'
 import { pathToFileURL } from 'node:url'
-import { answerLocalQuestions, boardConfirmedReport, codexEvent, codexEvents, codexReport, putCodexBlock } from '../hooks/codex'
+import { answerLocalQuestions, boardConfirmedReport, codexEvent, codexEvents, codexReport, folderProject, putCodexBlock, sessionTitle } from '../hooks/codex'
 import type { CodexReport } from '../hooks/codex'
 import { readConfig } from '../hooks/connect-pure'
 import type { Strings } from '../hooks/i18n'
@@ -150,6 +150,7 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
     checkDeadline()
     const raw = await input()
     checkDeadline()
+    const folder = mode === '--codex-event' ? folderProject(raw.cwd || (agent === 'cursor' && Array.isArray(raw.workspace_roots) && raw.workspace_roots.every(root => typeof root === 'string') ? raw.workspace_roots[0] : undefined)) : ''
     const payload = agent === 'cursor' && mode === '--codex-event' ? cursorEvent(raw) : raw
     // Only metadata selected below is retained. Never open transcript_path or save prompts,
     // tool inputs, last_assistant_message, or permission decisions from a hook payload.
@@ -167,11 +168,12 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
     const isPrompt = !isBoardPrompt && mode === '--agent-status' && status === 'working' && (payload.prompt_submitted === true || /^(?:UserPromptSubmit|user_prompt_submit|BeforeAgent)$/.test(String(payload.hook_event_name ?? payload.hookEventName)))
     type Pending = {
       version: number; progress: string; mode: string; agent: LocalAgent; session: string; now: string; at?: number
-      status: unknown; event?: string; isBoardPrompt: boolean; isPrompt: boolean; payload: Json
+      status: unknown; event?: string; folder?: string; isBoardPrompt: boolean; isPrompt: boolean; payload: Json
     }
     // A queued event keeps metadata only: the host's own fields stay out, as they do above.
     const current: Pending = {
       version: 1, progress, mode, agent, session, now, at: started, status: mode === '--agent-status' ? status : undefined, event, isBoardPrompt, isPrompt,
+      ...(mode === '--codex-event' ? { folder } : {}),
       payload: mode === '--codex-report' ? payload : mode === '--codex-event' ? {
         session_id: payload.session_id, hook_event_name: payload.hook_event_name,
         turn_id: payload.turn_id, prompt_submitted: payload.prompt_submitted,
@@ -189,7 +191,7 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
       const isLockedRename = process.platform === 'win32' && failure?.code === 'EPERM' && failure.syscall === 'rename' && typeof failure.dest === 'string' && resolve(failure.dest) === progress && isWritable()
       return failure?.code === 'EBUSY' || failure?.code === 'EAGAIN' || isLockedRename || error instanceof Error && error.message === 'LOCK_BUSY'
     }
-    const apply = ({ mode, agent, session, now, status, event, isBoardPrompt, isPrompt, payload }: Pending): CodexReport => {
+    const apply = ({ mode, agent, session, now, status, event, folder = '', isBoardPrompt, isPrompt, payload }: Pending): CodexReport => {
       const owner = hash(`${agent}:${session}`)
       const recordFile = join(root, 'sessions', `${owner}.json`)
       const saved = readLocal(recordFile)
@@ -204,8 +206,13 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
         state: isBoardPrompt && previous ? previous.state : status === 'working' ? 'working' : previous?.state === 'done' ? 'done' : status,
         steps: isPrompt && previous ? answerLocalQuestions(previous.steps) : previous?.steps ?? [`- [ ] ${s.localAgentLifecycle}`],
       } : payload, clock, s)
+      // A queued folder is cleaned again: the queue file is not trusted to hold a clean name.
+      const name = folderProject(folder)
+      const initial = mode === '--codex-event' && !previous ? codexReport(base, session, {
+        ...base, title: sessionTitle(name, s.localAgentTask(agent)), project: name || agent,
+      }, clock, s) : base
       const priorActivity = previous?.activity ?? []
-      const report = { ...base, ...(isBoardPrompt && previous ? { state: previous.state, steps: previous.steps } : {}), agent, ...(mode === '--codex-event' && !previous ? { title: s.localAgentTask(agent), project: agent } : {}), ...(event === undefined ? {} : { activity: [...priorActivity, { event, state: String(status), updated: clock }].slice(-16) }) }
+      const report = { ...initial, ...(isBoardPrompt && previous ? { state: previous.state, steps: previous.steps } : {}), agent, ...(event === undefined ? {} : { activity: [...priorActivity, { event, state: String(status), updated: clock }].slice(-16) }) }
       // A replay can skip writes only after a board completion reached the cache too.
       const repaired = reporterTail(bytes)
       if (repaired.fragment === null && mode !== '--codex-report' && previous === original && previous !== null && previous.state === report.state && previous.turn === report.turn && JSON.stringify(previous.steps) === JSON.stringify(report.steps) && (event === undefined || priorActivity.at(-1)?.event === event)) return report
@@ -213,7 +220,7 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
       const encoded = (value: string): string => Buffer.from(value, 'utf8').toString('latin1')
       const next = Buffer.from(putCodexBlock(repaired.bytes.toString('latin1'), {
         ...report, title: encoded(report.title), project: encoded(report.project), steps: report.steps.map(encoded),
-      }, owner), 'latin1')
+      }, owner, mode === '--codex-report' && previous !== null && previous.project !== report.project), 'latin1')
       const aside = repaired.fragment === null ? null : saveReporterTail(progress, repaired.fragment)
       try { atomic(progress, next, checkDeadline) } catch (error) {
         if (aside !== null) {
@@ -233,6 +240,7 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
       (entry.mode === '--codex-event' || entry.mode === '--agent-status' && entry.agent !== 'codex' && entry.agent !== 'cursor' && ['working', 'waiting', 'ended'].includes(String(entry.status)))
       && localAgents.includes(entry.agent) && /^[a-zA-Z0-9][a-zA-Z0-9_-]{5,127}$/.test(String(entry.session))
       && typeof entry.now === 'string' && typeof entry.isPrompt === 'boolean' && typeof entry.isBoardPrompt === 'boolean'
+      && (entry.folder === undefined || typeof entry.folder === 'string')
       && (!Object.hasOwn(entry, 'at') || typeof entry.at === 'number' && Number.isFinite(entry.at))
       && (entry.event === undefined || entry.agent === 'antigravity' && entry.mode === '--agent-status' && statusEvents.antigravity?.[entry.event] === entry.status)
       // A live event's own session_id is either missing or the session it is filed under.

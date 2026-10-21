@@ -52,10 +52,12 @@ export const lockFile = async (world, name) => {
   const quoted = path.replace(/'/g, "''")
   const worker = childIn(world, 'powershell.exe', ['-NoProfile', '-Command', `$f = [IO.File]::Open('${quoted}', 'Open', 'ReadWrite', 'None'); try { [Console]::Out.WriteLine('LOCK_READY'); while ($true) { Start-Sleep -Milliseconds 50 } } finally { $f.Dispose() }`])
   try {
+    // PowerShell can take seconds to start on a slow Windows CI runner; this only
+    // waits for the lock holder to be ready and times nothing in the product.
     await seenWithin(() => {
       if (worker.failure()) throw worker.failure()
       return worker.output()
-    }, text => text.includes('LOCK_READY'), 5000)
+    }, text => text.includes('LOCK_READY'), 30000)
     return { release: worker.stop }
   } catch (error) {
     await worker.stop()
