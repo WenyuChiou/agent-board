@@ -8,7 +8,7 @@ import { fileURLToPath } from 'node:url'
 import {
   TOTAL_CAP, addedLines, apiReader, authorKey, authorLine, binaryImages, cap, changelog, checkPr, claimed,
   isGovernancePath, issueLine, main, naming, needsBundle, privateData, report, reportMarkdown,
-  sections, stripComments, testTitles, titleKnown, verdict,
+  reviewOf, sections, stripComments, testTitles, titleKnown, verdict,
 } from '../scripts/pr-check.mjs'
 
 const script = fileURLToPath(new URL('../scripts/pr-check.mjs', import.meta.url))
@@ -456,6 +456,10 @@ test('pr-check reports the last review verdict and distinguishes current and old
   assert.match(verdict(comments, head).info[0], /REQUEST CHANGES.*current head/)
   assert.match(verdict(comments.slice(0, 1), head).info[0], /older head/)
   assert.match(verdict([], head).info[0], /no review verdict/)
+  assert.deepEqual(reviewOf('Checks complete\nReview: APPROVE ABCDEF0\nReview: REQUEST CHANGES 1234567'), { kind: 'APPROVE', sha: 'abcdef0' })
+  assert.deepEqual(reviewOf('Review: REQUEST CHANGES `ABCDEF0`'), { kind: 'REQUEST CHANGES', sha: 'abcdef0' })
+  assert.equal(reviewOf('Checks complete without a verdict'), null)
+  assert.match(verdict([{ body: `Checks complete\nReview: REQUEST CHANGES \`${head}\`` }], head).info[0], /REQUEST CHANGES.*current head/)
 })
 
 test('pr-check combines issue state claims cap and draft information without mutating inputs', () => {

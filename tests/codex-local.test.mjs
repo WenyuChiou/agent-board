@@ -1,6 +1,6 @@
 import { spawn, spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, unlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { delimiter, dirname, join, resolve } from 'node:path'
 import { test } from 'node:test'
@@ -159,13 +159,13 @@ const fixture = async fn => {
   const hooks = join(home, '.codex', 'hooks.json')
   const skill = join(home, '.agents', 'skills', 'agent-board', 'SKILL.md')
   const env = { ...isolatedEnv(home), CODEX_THREAD_ID: session, NO_COLOR: '1' }
-  const run = (file, args, input) => spawnSync(process.execPath, [file, ...args], { env, input: input === undefined ? undefined : JSON.stringify(input), encoding: 'utf8', windowsHide: true, timeout: 15000 })
+  const run = (file, args, input, extraEnv = {}) => spawnSync(process.execPath, [file, ...args], { env: { ...env, ...extraEnv }, input: input === undefined ? undefined : JSON.stringify(input), encoding: 'utf8', windowsHide: true, timeout: 15000 })
   const isolated = ['--home', home, '--codex-dir', join(home, '.codex'), '--grok-dir', join(home, '.grok'), '--hermes-dir', join(home, '.hermes')]
   const install = (...args) => run(setup, [...isolated, ...args])
-  const command = (args, input) => run(script, [...isolated, ...args], input)
+  const command = (args, input, extraEnv = {}) => run(script, [...isolated, ...args], input, extraEnv)
   const save = (file, text) => { mkdirSync(dirname(file), { recursive: true }); writeFileSync(file, text) }
   const report = (state = 'working', steps = ['- [~] Real task']) => command(['--codex-report'], { title: 'Task', state, steps })
-  const event = (name, turn = 'turn-1', extra = {}) => command(['--codex-event'], { session_id: session, hook_event_name: name, turn_id: turn, ...extra })
+  const event = (name, turn = 'turn-1', extra = {}, extraEnv = {}) => command(['--codex-event'], { session_id: session, hook_event_name: name, turn_id: turn, ...extra }, extraEnv)
   let isSafeToRemove = true
   try { return await fn({ home, root, script, progress, hooks, skill, env, install, command, save, report, event }) }
   catch (error) {
@@ -1556,4 +1556,373 @@ test('resuming the same Codex session reactivates its existing block without say
   assert.match(text, /state=working/)
   assert.equal((text.match(/source=codex-local/g) ?? []).length, 1)
   assert.doesNotMatch(text, /state=ended/)
+}))
+
+const lockedProgress = (f, calls = 'Infinity') => {
+  const marker = join(f.home, 'progress-locked')
+  const preload = join(f.home, 'locked-progress.cjs')
+  f.save(marker, '')
+  f.save(preload, `const fs = require('node:fs')
+let calls = 0
+const isLocked = path => path === ${JSON.stringify(f.progress)} && fs.existsSync(${JSON.stringify(marker)}) && calls++ < ${calls}
+const busy = () => { throw Object.assign(new Error('EBUSY: resource busy or locked'), { code: 'EBUSY' }) }
+for (const method of ['readFileSync', 'openSync']) {
+  const original = fs[method]
+  fs[method] = (path, ...args) => { if (isLocked(path)) busy(); return original(path, ...args) }
+}
+const rename = fs.renameSync
+fs.renameSync = (from, to) => { if (isLocked(to)) busy(); return rename(from, to) }
+require('node:module').syncBuiltinESMExports()
+`)
+  return { marker, env: { NODE_OPTIONS: `--require ${JSON.stringify(preload)}` } }
+}
+
+const pendingFiles = f => existsSync(join(f.root, 'pending')) ? readdirSync(join(f.root, 'pending')).filter(name => name.endsWith('.json')).sort() : []
+
+const assertBusyFailure = (result, f) => {
+  assert.equal(result.status, 1, result.stderr)
+  assert.equal(result.stderr.trim().split(/\r?\n/).length, 1, result.stderr)
+  assert.match(result.stderr, /EBUSY/)
+  assert.ok(!result.stderr.includes(f.home), result.stderr)
+  assert.doesNotMatch(result.stderr, /\bat /)
+}
+
+test('L5 locked file: the hook retries, exits 0, and the Stop event lands on the next run', () => fixture(f => {
+  assert.equal(f.install('--apply').status, 0)
+  assert.equal(f.event('UserPromptSubmit').status, 0)
+  const before = readFileSync(f.progress)
+  const locked = lockedProgress(f)
+  const result = f.event('Stop', 'turn-1', { prompt: 'PRIVATE_PROMPT', transcript_path: 'PRIVATE_TRANSCRIPT', tool_input: 'PRIVATE_TOOL', last_assistant_message: 'PRIVATE_MESSAGE' }, locked.env)
+  assert.equal(result.status, 0, result.stderr)
+  assert.equal(result.stdout, '')
+  assert.equal(result.stderr, '')
+  assert.deepEqual(readFileSync(f.progress), before)
+  const files = pendingFiles(f)
+  assert.equal(files.length, 1)
+  const text = readFileSync(join(f.root, 'pending', files[0]), 'utf8')
+  assert.doesNotMatch(text, /"(?:prompt|transcript(?:_path)?|tool_input|last_assistant_message)"\s*:|PRIVATE_/)
+  const entry = JSON.parse(text)
+  assert.equal(entry.version, 1)
+  assert.ok(Number.isFinite(entry.at))
+  assert.ok(files[0].startsWith(`${String(entry.at).padStart(15, '0')}-`))
+  assert.equal(entry.progress, f.progress)
+  assert.deepEqual(entry.payload, { session_id: session, hook_event_name: 'Stop', turn_id: 'turn-1' })
+  unlinkSync(locked.marker)
+  const nextSession = 'test-codex-session-456'
+  const next = f.event('UserPromptSubmit', 'turn-2', { session_id: nextSession })
+  assert.equal(next.status, 0, next.stderr)
+  const board = readFileSync(f.progress, 'utf8')
+  const firstOwner = createHash('sha256').update(`codex:${session}`).digest('hex').slice(0, 8)
+  const nextOwner = createHash('sha256').update(`codex:${nextSession}`).digest('hex').slice(0, 8)
+  assert.match(board, new RegExp(`<!-- auto session=${firstOwner} [^\n]*state=waiting`))
+  assert.match(board, new RegExp(`<!-- auto session=${nextOwner} [^\n]*state=working`))
+  assert.deepEqual(pendingFiles(f), [])
+}))
+
+test('a hook whose progress.md is locked only briefly retries and lands the event at once', () => fixture(f => {
+  assert.equal(f.install('--apply').status, 0)
+  assert.equal(f.event('UserPromptSubmit').status, 0)
+  const locked = lockedProgress(f, 2)
+  const result = f.event('Stop', 'turn-1', {}, locked.env)
+  assert.equal(result.status, 0, result.stderr)
+  assert.equal(result.stdout, '')
+  assert.match(readFileSync(f.progress, 'utf8'), /state=waiting/)
+  assert.deepEqual(pendingFiles(f), [])
+}))
+
+test('an explicit report on a locked progress.md still says in one line that it was not saved', () => fixture(f => {
+  assert.equal(f.install('--apply').status, 0)
+  assert.equal(f.event('UserPromptSubmit').status, 0)
+  const before = readFileSync(f.progress)
+  const locked = lockedProgress(f)
+  const result = f.command(['--codex-report'], { title: 'Task', state: 'working', steps: ['- [~] Real task'] }, locked.env)
+  assertBusyFailure(result, f)
+  assert.deepEqual(pendingFiles(f), [])
+  assert.deepEqual(readFileSync(f.progress), before)
+}))
+
+test('an inherited hook deadline queues a locked lifecycle event before the guard closes and replays it next time', () => fixture(f => {
+  assert.equal(f.install('--apply').status, 0)
+  assert.equal(f.event('UserPromptSubmit').status, 0)
+  const before = readFileSync(f.progress)
+  const locked = lockedProgress(f)
+  const deadline = Date.now() + 1200
+  const result = f.command(['--codex-event', '--hook-deadline', String(deadline)], {
+    session_id: session, hook_event_name: 'Stop', turn_id: 'turn-1', prompt: 'PRIVATE_PROMPT',
+  }, locked.env)
+  assert.equal(result.status, 0, result.stderr)
+  assert.equal(result.stdout, '')
+  assert.equal(result.stderr, '')
+  assert.ok(Date.now() < deadline + 300, 'the inherited bound must shorten the 1.8 second retry budget')
+  assert.deepEqual(readFileSync(f.progress), before)
+  const files = pendingFiles(f)
+  assert.equal(files.length, 1)
+  const queued = readFileSync(join(f.root, 'pending', files[0]), 'utf8')
+  assert.doesNotMatch(queued, /PRIVATE_PROMPT/)
+  assert.equal(JSON.parse(queued).payload.hook_event_name, 'Stop')
+  unlinkSync(locked.marker)
+  assert.equal(f.event('SessionStart').status, 0)
+  assert.match(readFileSync(f.progress, 'utf8'), /state=waiting/)
+  assert.deepEqual(pendingFiles(f), [])
+}))
+
+test('an inherited deadline also bounds the board lock wait without losing the lifecycle event', () => fixture(f => {
+  assert.equal(f.install('--apply').status, 0)
+  assert.equal(f.event('UserPromptSubmit').status, 0)
+  const before = readFileSync(f.progress)
+  const lock = `${f.progress}.agent-board-lock`
+  f.save(lock, 'held by another process')
+  const deadline = Date.now() + 1200
+  const result = f.command(['--codex-event', '--hook-deadline', String(deadline)], {
+    session_id: session, hook_event_name: 'Stop', turn_id: 'turn-1',
+  })
+  assert.equal(result.status, 0, result.stderr)
+  assert.ok(Date.now() < deadline + 300, 'lock acquisition must share the inherited budget')
+  assert.deepEqual(readFileSync(f.progress), before)
+  assert.equal(pendingFiles(f).length, 1)
+  assert.equal(readFileSync(lock, 'utf8'), 'held by another process')
+  unlinkSync(lock)
+  assert.equal(f.event('SessionStart').status, 0)
+  assert.match(readFileSync(f.progress, 'utf8'), /state=waiting/)
+  assert.deepEqual(pendingFiles(f), [])
+}))
+
+test('a hook that replays a backlog past its inherited deadline keeps its own event queued', () => fixture(f => {
+  assert.equal(f.install('--apply').status, 0)
+  assert.equal(f.event('UserPromptSubmit').status, 0)
+  const backlog = { version: 1, progress: f.progress, mode: '--codex-event', agent: 'codex', session, now: new Date().toISOString(), isBoardPrompt: false, isPrompt: false, payload: { session_id: session, hook_event_name: 'Stop', turn_id: 'turn-1' } }
+  for (let index = 1; index <= 2; index++) f.save(join(f.root, 'pending', `${String(index).padStart(15, '0')}.json`), JSON.stringify(backlog))
+  // The lock is free, but each write of progress.md takes longer than the whole hook budget.
+  const preload = join(f.home, 'slow-progress.cjs')
+  f.save(preload, `const fs = require('node:fs')
+const rename = fs.renameSync
+fs.renameSync = (from, to) => {
+  if (to === ${JSON.stringify(f.progress)}) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 1500)
+  return rename(from, to)
+}
+require('node:module').syncBuiltinESMExports()
+`)
+  const nextSession = 'test-codex-session-789'
+  const result = f.command(['--codex-event', '--hook-deadline', String(Date.now() + 1200)], {
+    session_id: nextSession, hook_event_name: 'UserPromptSubmit', turn_id: 'turn-1',
+  }, { NODE_OPTIONS: `--require ${JSON.stringify(preload)}` })
+  assert.equal(result.status, 0, result.stderr)
+  assert.equal(result.stderr, '')
+  const queued = pendingFiles(f).map(name => JSON.parse(readFileSync(join(f.root, 'pending', name), 'utf8')))
+  assert.equal(queued.filter(entry => entry.session === nextSession).length, 1)
+  assert.equal(f.event('SessionStart').status, 0)
+  const nextOwner = createHash('sha256').update(`codex:${nextSession}`).digest('hex').slice(0, 8)
+  assert.match(readFileSync(f.progress, 'utf8'), new RegExp(`<!-- auto session=${nextOwner} [^\n]*state=working`))
+  assert.deepEqual(pendingFiles(f), [])
+}))
+
+test('an inherited deadline still fails an explicit report instead of queuing its payload', () => fixture(f => {
+  assert.equal(f.install('--apply').status, 0)
+  assert.equal(f.report().status, 0)
+  const before = readFileSync(f.progress)
+  const locked = lockedProgress(f)
+  const result = f.command(['--codex-report', '--hook-deadline', String(Date.now() + 700)], {
+    title: 'Unsaved explicit report', state: 'done', steps: ['- [x] Private report'],
+  }, locked.env)
+  assert.notEqual(result.status, 0)
+  assert.equal(result.stderr.trim().split(/\r?\n/).length, 1)
+  assert.match(result.stderr, /EBUSY|HOOK_TIMEOUT/)
+  assert.deepEqual(readFileSync(f.progress), before)
+  assert.deepEqual(pendingFiles(f), [])
+}))
+
+test('invalid and expired inherited deadlines fail before any lifecycle write', () => fixture(f => {
+  assert.equal(f.install('--apply').status, 0)
+  const before = readFileSync(f.progress)
+  for (const value of ['invalid', '1.5', 'Infinity', String(Date.now() - 1000)]) {
+    const result = f.command(['--codex-event', '--hook-deadline', value], {
+      session_id: session, hook_event_name: 'UserPromptSubmit',
+    })
+    assert.notEqual(result.status, 0)
+    assert.match(result.stderr, new RegExp(value === 'invalid' || value === '1.5' || value === 'Infinity' ? 'INVALID_HOOK_DEADLINE' : 'HOOK_TIMEOUT'))
+    assert.deepEqual(readFileSync(f.progress), before)
+    assert.deepEqual(pendingFiles(f), [])
+  }
+}))
+
+test('queued hook events stop at 64 and the next one fails in one plain line', () => fixture(f => {
+  assert.equal(f.install('--apply').status, 0)
+  assert.equal(f.event('UserPromptSubmit').status, 0)
+  const before = readFileSync(f.progress)
+  const queued = JSON.stringify({ version: 1, progress: f.progress, mode: '--codex-event', agent: 'codex', session, now: new Date().toISOString(), isBoardPrompt: false, isPrompt: false, payload: { session_id: session, hook_event_name: 'Stop', turn_id: 'turn-1' } })
+  for (let index = 0; index < 64; index++) f.save(join(f.root, 'pending', `${String(index).padStart(3, '0')}.json`), queued)
+  const locked = lockedProgress(f)
+  const result = f.event('Stop', 'turn-1', {}, locked.env)
+  assertBusyFailure(result, f)
+  assert.equal(pendingFiles(f).length, 64)
+  assert.deepEqual(readFileSync(f.progress), before)
+}))
+
+test('a queued event that can no longer apply is dropped without blocking the others', () => fixture(f => {
+  assert.equal(f.install('--apply').status, 0)
+  assert.equal(f.event('UserPromptSubmit').status, 0)
+  f.save(join(f.root, 'pending', '001.json'), 'not valid JSON')
+  f.save(join(f.root, 'pending', '002.json'), JSON.stringify({
+    version: 1, progress: f.progress, mode: '--codex-event', agent: 'codex', session,
+    now: new Date().toISOString(), isBoardPrompt: false, isPrompt: false,
+    payload: { session_id: session, hook_event_name: 'Stop', turn_id: 'turn-1' },
+  }))
+  const result = f.event('SessionStart', null, { session_id: 'test-codex-session-456' })
+  assert.equal(result.status, 0, result.stderr)
+  const owner = createHash('sha256').update(`codex:${session}`).digest('hex').slice(0, 8)
+  assert.match(readFileSync(f.progress, 'utf8'), new RegExp(`<!-- auto session=${owner} [^\n]*state=waiting`))
+  assert.deepEqual(pendingFiles(f), [])
+}))
+
+test('a refused rename onto progress.md is a lock on Windows and a failure elsewhere, and any other refusal still fails', () => fixture(f => {
+  assert.equal(f.install('--apply').status, 0)
+  assert.equal(f.event('UserPromptSubmit').status, 0)
+  const before = readFileSync(f.progress)
+  const preload = join(f.home, 'refused-rename.cjs')
+  f.save(preload, `const fs = require('node:fs')
+const code = process.env.REFUSED_CODE
+const rename = fs.renameSync
+fs.renameSync = (from, to) => { if (to === ${JSON.stringify(f.progress)}) throw Object.assign(new Error(code + ': operation not permitted, rename'), { code, syscall: 'rename', path: from, dest: to }); return rename(from, to) }
+require('node:module').syncBuiltinESMExports()
+`)
+  const refused = code => f.event('Stop', 'turn-1', {}, { NODE_OPTIONS: `--require ${JSON.stringify(preload)}`, REFUSED_CODE: code })
+  const locked = refused('EPERM')
+  if (process.platform === 'win32') {
+    assert.equal(locked.status, 0, locked.stderr)
+    assert.equal(pendingFiles(f).length, 1)
+    for (const name of pendingFiles(f)) unlinkSync(join(f.root, 'pending', name))
+  } else {
+    assert.equal(locked.status, 1, locked.stderr)
+    assert.equal(locked.stderr.trim().split(/\r?\n/).length, 1, locked.stderr)
+    assert.match(locked.stderr, /EPERM/)
+    assert.deepEqual(pendingFiles(f), [])
+  }
+  const denied = refused('EACCES')
+  assert.equal(denied.status, 1, denied.stderr)
+  assert.match(denied.stderr, /EACCES/)
+  assert.deepEqual(pendingFiles(f), [])
+  assert.deepEqual(readFileSync(f.progress), before)
+}))
+
+test('a queued status event older than its session\'s last report is dropped instead of moving the session back', () => fixture(f => {
+  assert.equal(f.install('--apply').status, 0)
+  const grok = 'test-grok-session-123'
+  const status = state => f.command(['--agent-status', '--agent', 'grok', '--state', state], { session_id: grok })
+  assert.equal(status('working').status, 0, status('working').stderr)
+  const owner = createHash('sha256').update(`grok:${grok}`).digest('hex').slice(0, 8)
+  assert.match(readFileSync(f.progress, 'utf8'), new RegExp(`<!-- auto session=${owner} [^\n]*state=working`))
+  f.save(join(f.root, 'pending', '001.json'), JSON.stringify({
+    version: 1, progress: f.progress, mode: '--agent-status', agent: 'grok', session: grok, status: 'waiting',
+    now: new Date(Date.now() - 60 * 60 * 1000).toISOString().replace(/\.\d{3}Z$/, 'Z'), isBoardPrompt: false, isPrompt: false, payload: {},
+  }))
+  assert.equal(f.event('UserPromptSubmit').status, 0)
+  assert.match(readFileSync(f.progress, 'utf8'), new RegExp(`<!-- auto session=${owner} [^\n]*state=working`))
+  assert.deepEqual(pendingFiles(f), [])
+}))
+
+test('a read-only progress.md fails in one plain line without queuing the event', { skip: process.platform !== 'win32' }, () => fixture(f => {
+  assert.equal(f.install('--apply').status, 0)
+  assert.equal(f.event('UserPromptSubmit').status, 0)
+  const before = readFileSync(f.progress)
+  try {
+    chmodSync(f.progress, 0o444)
+    const result = f.event('Stop')
+    assert.equal(result.status, 1, result.stderr)
+    assert.equal(result.stderr.trim().split(/\r?\n/).length, 1, result.stderr)
+    assert.match(result.stderr, /EPERM/)
+    assert.ok(!result.stderr.includes(f.home), result.stderr)
+    assert.doesNotMatch(result.stderr, /\bat /)
+    assert.deepEqual(pendingFiles(f), [])
+    assert.deepEqual(readFileSync(f.progress), before)
+  } finally { chmodSync(f.progress, 0o666) }
+}))
+
+test('a queued event with a system error is kept and the hook fails in one plain line', () => fixture(f => {
+  assert.equal(f.install('--apply').status, 0)
+  assert.equal(f.event('UserPromptSubmit').status, 0)
+  const owner = createHash('sha256').update(`codex:${session}`).digest('hex')
+  const record = join(f.root, 'sessions', `${owner}.json`)
+  unlinkSync(record)
+  mkdirSync(record)
+  const file = join(f.root, 'pending', '001.json')
+  const queued = JSON.stringify({
+    version: 1, progress: f.progress, mode: '--codex-event', agent: 'codex', session,
+    now: new Date().toISOString(), isBoardPrompt: false, isPrompt: false,
+    payload: { session_id: session, hook_event_name: 'Stop', turn_id: 'turn-1' },
+  })
+  f.save(file, queued)
+  const before = readFileSync(f.progress)
+  const result = f.event('SessionStart', null, { session_id: 'test-codex-session-456' })
+  assert.equal(result.status, 1, result.stderr)
+  assert.equal(result.stderr.trim().split(/\r?\n/).length, 1, result.stderr)
+  assert.match(result.stderr, /EISDIR/)
+  assert.ok(!result.stderr.includes(f.home), result.stderr)
+  assert.doesNotMatch(result.stderr, /\bat /)
+  assert.deepEqual(pendingFiles(f), ['001.json'])
+  assert.equal(readFileSync(file, 'utf8'), queued)
+  assert.deepEqual(readFileSync(f.progress), before)
+}))
+
+test('hook replay yields at its deadline while an explicit report drains every queued entry', async () => {
+  for (const mode of ['--codex-event', '--codex-report']) await fixture(f => {
+    assert.equal(f.install('--apply').status, 0)
+    assert.equal(f.event('UserPromptSubmit').status, 0)
+    const queued = {
+      version: 1, progress: f.progress, mode: '--codex-event', agent: 'codex', session,
+      now: new Date().toISOString(), isBoardPrompt: false, isPrompt: false,
+      payload: { session_id: session, hook_event_name: 'Stop', turn_id: 'turn-1' },
+    }
+    f.save(join(f.root, 'pending', '001.json'), JSON.stringify(queued))
+    f.save(join(f.root, 'pending', '002.json'), JSON.stringify(queued))
+    const preload = join(f.home, 'replay-clock.cjs')
+    f.save(preload, `const fs = require('node:fs')
+const { performance } = require('node:perf_hooks')
+let now = 0
+Object.defineProperty(performance, 'now', { value: () => now })
+const read = fs.readFileSync
+fs.readFileSync = (file, ...args) => {
+  const text = read(file, ...args)
+  if (file === ${JSON.stringify(join(f.root, 'pending', '001.json'))}) now = 2500
+  return text
+}
+require('node:module').syncBuiltinESMExports()
+`)
+    const env = { NODE_OPTIONS: `--require ${JSON.stringify(preload)}` }
+    const result = f.command([mode], mode === '--codex-report'
+      ? { title: 'Explicit report', state: 'done', steps: ['- [x] Finished'] }
+      : { session_id: 'test-codex-session-456', hook_event_name: 'SessionStart' }, env)
+    assert.equal(result.status, 0, result.stderr)
+    assert.equal(result.stderr, '')
+    if (mode === '--codex-report') {
+      assert.deepEqual(pendingFiles(f), [])
+      assert.equal(JSON.parse(result.stdout).state, 'done')
+    } else {
+      assert.equal(result.stdout, '')
+      const files = pendingFiles(f)
+      assert.equal(files.length, 2)
+      assert.ok(files.includes('002.json'))
+      assert.ok(!files.includes('001.json'))
+      const current = JSON.parse(readFileSync(join(f.root, 'pending', files.find(name => name !== '002.json')), 'utf8'))
+      assert.equal(current.session, 'test-codex-session-456')
+      assert.ok(files.some(name => name.startsWith(`${String(current.at).padStart(15, '0')}-`)))
+      assert.doesNotMatch(readFileSync(f.progress, 'utf8'), new RegExp(createHash('sha256').update('codex:test-codex-session-456').digest('hex').slice(0, 8)))
+    }
+  })
+})
+
+test('queued status events use their start time and reject invalid timestamps', () => fixture(f => {
+  assert.equal(f.install('--apply').status, 0)
+  const grok = 'test-grok-session-123'
+  const result = f.command(['--agent-status', '--agent', 'grok', '--state', 'working'], { session_id: grok })
+  assert.equal(result.status, 0, result.stderr)
+  const owner = createHash('sha256').update(`grok:${grok}`).digest('hex')
+  const saved = JSON.parse(readFileSync(join(f.root, 'sessions', `${owner}.json`), 'utf8'))
+  const at = Date.parse(saved.updated) - 1
+  for (const [index, timestamp] of [at, null, 'invalid', 'overflow'].entries()) f.save(join(f.root, 'pending', `${index}.json`), JSON.stringify({
+    version: 1, progress: f.progress, mode: '--agent-status', agent: 'grok', session: grok, status: 'waiting', at: timestamp,
+    now: new Date(Date.parse(saved.updated) + 60000).toISOString(), isBoardPrompt: false, isPrompt: false, payload: {},
+  }).replace('"at":"overflow"', '"at":1e400'))
+  assert.equal(f.event('UserPromptSubmit').status, 0)
+  assert.match(readFileSync(f.progress, 'utf8'), new RegExp(`<!-- auto session=${owner.slice(0, 8)} [^\n]*state=working`))
+  assert.deepEqual(pendingFiles(f), [])
 }))

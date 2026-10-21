@@ -205,7 +205,7 @@ ${section(
   false,
 )}
 <footer><div class="legend">${LEGEND.map((status, index) => `<span><span style="color:var(--${roleOf(status)})">${GLYPH[status]}</span> ${esc(s.legendWords[index] ?? status)}</span>`).join('')}<span>${esc(s.legendDue)}</span></div>
-<div>${esc(s.legendCleanup)}</div><div>${esc(path)}</div></footer>
+<div>${esc(s.legendCleanup)}</div><div>${esc(s.progressFileShown)}</div></footer>
 </main>
 <script>
 (function () {

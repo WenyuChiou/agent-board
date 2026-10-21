@@ -22,6 +22,7 @@ import { sha256 } from '../hooks/sha256'
 import { RELEASE_0_18_1, RELEASE_0_20_5 } from './fixtures/released'
 import { memoryConnect } from './fixtures/connect-memory'
 import { CONNECT_BOOTSTRAP, CONNECT_EXECUTE } from '../hooks/connect-worker'
+import { LEDGER_LINK, LINK_EXISTS, LINK_KEPT_SOURCE, LINK_UNSUPPORTED } from '../hooks/ledger-move'
 import { hasOwnConnectData, connectDataRoots } from '../hooks/connect-pure'
 import type { ConnectState, LegacyConnectRequest } from '../scripts/connect-transaction'
 
@@ -165,6 +166,7 @@ type World = {
   openclaw?: string
   // What `node --version` prints; null when there is no node to run. Unset, a supported one.
   node?: string | null
+  hasNoHardLinks?: boolean
   nodeGate?: { reached: () => void; release: Promise<void> }
   workerFailure?: string
   bootstrapFailure?: boolean
@@ -276,6 +278,27 @@ const engineBeneath = (on: On, world: World): MockClock => {
     value: world.hasTasks ? [{ name: 'TaskCreate', description: '', mcp: false }] : [{ name: 'Read', description: '', mcp: false }],
   }))
   on('process.run', async ($, e) => {
+    if (e.argv[0] === 'node' && e.argv[2] === LEDGER_LINK && e.argv[3] === '--') {
+      world.ran?.push([...e.argv])
+      const from = posix(e.argv[4] ?? '')
+      const to = posix(e.argv[5] ?? '')
+      const text = world.files.get(from)
+      let exitCode = 0
+      if (world.node === null) exitCode = 127
+      else if (world.hasNoHardLinks || text === undefined || world.isMoveRefused?.(from) === true || world.unwritable?.has(to) === true) exitCode = LINK_UNSUPPORTED
+      else if (world.files.has(to)) exitCode = LINK_EXISTS
+      else if (world.ignoreQuestionWrites && to.endsWith('-questions.json')) world.files.delete(from)
+      // The link is made but the source stays, as when another program holds it open.
+      else if (world.isRemoveRefused?.(from) === true) {
+        world.files.set(to, text)
+        exitCode = LINK_KEPT_SOURCE
+      } else {
+        world.files.delete(from)
+        world.files.set(to, text)
+        if (world.afterMove?.(from, to)) exitCode = 1
+      }
+      return { value: { exitCode, stdout: '', stderr: exitCode === 127 ? 'node: command not found' : '', isStdoutTruncated: false, isStderrTruncated: false } }
+    }
     if (e.argv[0] === 'node' && e.argv[1] === '--version' && world.nodeGate !== undefined) {
       const gate = world.nodeGate
       world.nodeGate = undefined
@@ -1595,13 +1618,14 @@ test('a session that ends with open steps is marked for someone to pick up', asy
   expect(world.files.get(FILE) ?? '').toContain('> 對話已結束，可接手')
 })
 
-test('with nothing tracked the pane says so, and where the file is', async ($, on) => {
+test('with nothing tracked the pane says so and names the progress file', async ($, on) => {
   const world: World = { files: new Map(), mtime: 1, hasTasks: true }
   engineBeneath(on, world)
   await $.session.start({ cwd: '/work/x', surface: 'terminal', isInteractive: true })
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal', props: PROPS })
   expect(await ui.find({ type: 'Text', text: '目前沒有進行中的工作。' })).toBeDefined()
-  expect(await ui.find({ type: 'Text', text: FILE })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: ZH_TW.progressFileShown })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: FILE })).toBeUndefined()
   await ui.unmount()
 })
 
@@ -2508,6 +2532,92 @@ test('a question ledger that is valid JSON in an unknown shape is left alone and
   expect([...world.files.keys()].some(path => path.startsWith(`${QUESTIONS}.torn-`))).toBe(false)
 })
 
+test('the pane places its first question ledger on Windows with a Node hard link, not a PowerShell move', async ($, on) => {
+  // OS alone marks the computer as Windows; the shared POSIX paths keep the test the same on every runner.
+  const world: World = {
+    files: new Map([[FILE, '## demo\n### Release\n- [?] Publish, OK?\n']]),
+    mtime: 1,
+    hasTasks: true,
+    ran: [],
+    written: [],
+    env: { OS: 'Windows_NT', HOME: '/home/me', LANG: 'en_US.UTF-8' },
+    store: { autoConnectOff: true, inboxDone: {} },
+  }
+  engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/demo', surface: 'desktop', isInteractive: true })
+  const temps = world.written?.filter(path => path.startsWith(`${QUESTIONS}.tmp-${SESSION}-`)) ?? []
+  expect(temps.length > 0).toBe(true)
+  expect(world.ran).toContainEqual(['node', '-e', LEDGER_LINK, '--', temps[0], QUESTIONS])
+  expect(world.ran?.some(argv => argv[0] === 'powershell' && argv.some(arg => arg.includes(`${QUESTIONS}.tmp-`)))).toBe(false)
+  expect(JSON.parse(world.files.get(QUESTIONS) ?? '{}').version).toBe(1)
+  expect(world.files.get(QUESTIONS)).toContain('Publish, OK?')
+  expect([...world.files.keys()].some(path => path.startsWith(`${QUESTIONS}.tmp-`))).toBe(false)
+})
+
+test('the pane\'s hard-link ledger move never replaces a ledger another session placed first', async ($, on) => {
+  const other = '{"version":999,"futureRecords":["keep the other session bytes"]}\n'
+  const world: World = { files: new Map([[FILE, '## demo\n### Release\n- [?] Publish, OK?\n']]), mtime: 1, hasTasks: true, ran: [], written: [], store: { autoConnectOff: true, inboxDone: {} } }
+  let hasPlacedOther = false
+  world.isMoveRefused = path => {
+    if (!hasPlacedOther && path.startsWith(QUESTIONS + '.tmp-')) {
+      hasPlacedOther = true
+      world.files.set(QUESTIONS, other)
+    }
+    return false
+  }
+  engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/demo', surface: 'desktop', isInteractive: true })
+  const temps = world.written?.filter(path => path.startsWith(QUESTIONS + '.tmp-' + SESSION + '-')) ?? []
+  expect(hasPlacedOther).toBe(true)
+  expect(temps.length > 0).toBe(true)
+  expect(world.ran).toContainEqual(['node', '-e', LEDGER_LINK, '--', temps[0], QUESTIONS])
+  expect(world.files.get(QUESTIONS)).toBe(other)
+  expect(world.ran?.some(argv => argv[0] === 'mv' && argv.at(-1) === QUESTIONS)).toBe(false)
+  expect([...world.files.keys()].some(path => path.startsWith(QUESTIONS + '.tmp-'))).toBe(false)
+})
+
+test('the pane falls back to its move command when Node or hard links are unavailable', async ($, on) => {
+  const world: World = { files: new Map([[FILE, '## demo\n### Release\n- [?] Publish, OK?\n']]), mtime: 1, hasTasks: true, hasNoHardLinks: true, ran: [], written: [], store: { autoConnectOff: true, inboxDone: {} } }
+  const clock = engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/demo', surface: 'desktop', isInteractive: true })
+  const first = world.written?.find(path => path.startsWith(QUESTIONS + '.tmp-' + SESSION + '-'))
+  expect(first).toBeDefined()
+  expect(world.ran).toContainEqual(['node', '-e', LEDGER_LINK, '--', first, QUESTIONS])
+  expect(world.ran).toContainEqual(['mv', '-n', first, QUESTIONS])
+  expect(storedQuestion(world, 'Publish, OK?').startsWith('question:')).toBe(true)
+  expect([...world.files.keys()].some(path => path.startsWith(QUESTIONS + '.tmp-'))).toBe(false)
+  world.hasNoHardLinks = false
+  world.node = null
+  world.ran = []
+  world.written = []
+  world.files.delete(QUESTIONS)
+  world.files.set(FILE, '## demo\n### Release\n- [?] Publish tomorrow, OK?\n')
+  world.mtime += 1
+  await clock.advance(2100)
+  const second = world.written?.find(path => path.startsWith(QUESTIONS + '.tmp-' + SESSION + '-'))
+  expect(second).toBeDefined()
+  expect(world.ran).toContainEqual(['node', '-e', LEDGER_LINK, '--', second, QUESTIONS])
+  expect(world.ran).toContainEqual(['mv', '-n', second, QUESTIONS])
+  expect(storedQuestion(world, 'Publish tomorrow, OK?').startsWith('question:')).toBe(true)
+  expect([...world.files.keys()].some(path => path.startsWith(QUESTIONS + '.tmp-'))).toBe(false)
+})
+
+test('the pane keeps its hard-linked ledger and removes its temp when the temp could not be removed at once', async ($, on) => {
+  const world: World = { files: new Map([[FILE, '## demo\n### Release\n- [?] Publish, OK?\n']]), mtime: 1, hasTasks: true, ran: [], written: [], store: { autoConnectOff: true, inboxDone: {} } }
+  let refusals = 0
+  world.isRemoveRefused = path => path.startsWith(`${QUESTIONS}.tmp-`) && refusals++ === 0
+  engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/demo', surface: 'desktop', isInteractive: true })
+  const first = world.written?.find(path => path.startsWith(`${QUESTIONS}.tmp-${SESSION}-`))
+  expect(first).toBeDefined()
+  expect(refusals > 1).toBe(true)
+  expect(world.ran).toContainEqual(['node', '-e', LEDGER_LINK, '--', first, QUESTIONS])
+  expect(world.ran).toContainEqual(['rm', '-f', first])
+  expect(world.ran?.some(argv => argv[0] === 'mv' && argv[2] === first)).toBe(false)
+  expect(storedQuestion(world, 'Publish, OK?').startsWith('question:')).toBe(true)
+  expect([...world.files.keys()].some(path => path.startsWith(`${QUESTIONS}.tmp-`))).toBe(false)
+})
+
 test('the question ledger is written to a temp file and moved into place, never truncated in place', async ($, on) => {
   const world: World = { files: new Map([[FILE, '## demo\n### Release\n- [?] Publish, OK?\n']]), mtime: 1, hasTasks: true, ran: [], written: [], store: { autoConnectOff: true, inboxDone: {} } }
   const clock = engineBeneath(on, world)
@@ -2518,9 +2628,9 @@ test('the question ledger is written to a temp file and moved into place, never 
   const temps = world.written?.filter(path => path.startsWith(`${QUESTIONS}.tmp-${SESSION}-`)) ?? []
   expect(temps.length > 0).toBe(true)
   // The first one is put in place without overwriting, in case another session wrote one meanwhile.
-  expect(world.ran?.some(argv => JSON.stringify(argv) === JSON.stringify(['mv', '-n', temps[0], QUESTIONS]))).toBe(true)
+  expect(world.ran).toContainEqual(['node', '-e', LEDGER_LINK, '--', temps[0], QUESTIONS])
   for (const temp of temps) {
-    expect(world.ran?.some(argv => argv[0] === 'mv' && argv[2] === temp && argv[3] === QUESTIONS)).toBe(true)
+    expect(world.ran?.some(argv => (argv[0] === 'node' && argv[2] === LEDGER_LINK && argv[3] === '--' && argv[4] === temp && argv[5] === QUESTIONS) || (argv[0] === 'mv' && argv[2] === temp && argv[3] === QUESTIONS))).toBe(true)
     expect(world.files.has(temp)).toBe(false)
   }
   world.files.set(FILE, '## demo\n### Release\n- [?] Publish tomorrow, OK?\n')
@@ -2545,23 +2655,23 @@ test('the pane says when the question ledger cannot be read', async ($, on) => {
   await clock.advance(2100)
   const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
   world.files.set(QUESTIONS, '{"version":999}')
-  expect(await ui.find({ type: 'Text', text: EN.questionsUnreadable(QUESTIONS) })).toBeUndefined()
+  expect(await ui.find({ type: 'Text', text: EN.questionsUnreadable() })).toBeUndefined()
   await clock.advance(2100)
-  expect(await ui.find({ type: 'Text', text: EN.questionsUnreadable(QUESTIONS) })).toBeUndefined()
+  expect(await ui.find({ type: 'Text', text: EN.questionsUnreadable() })).toBeUndefined()
   await clock.advance(2100)
-  expect(await ui.find({ type: 'Text', text: EN.questionsUnreadable(QUESTIONS) })).toBeUndefined()
+  expect(await ui.find({ type: 'Text', text: EN.questionsUnreadable() })).toBeUndefined()
   await clock.advance(2100)
-  expect({ stage: 'three failures', visible: await ui.find({ type: 'Text', text: EN.questionsUnreadable(QUESTIONS) }) !== undefined }).toEqual({ stage: 'three failures', visible: true })
+  expect({ stage: 'three failures', visible: await ui.find({ type: 'Text', text: EN.questionsUnreadable() }) !== undefined }).toEqual({ stage: 'three failures', visible: true })
   world.files.delete(QUESTIONS)
   await clock.advance(2100)
-  expect(await ui.find({ type: 'Text', text: EN.questionsUnreadable(QUESTIONS) })).toBeUndefined()
+  expect(await ui.find({ type: 'Text', text: EN.questionsUnreadable() })).toBeUndefined()
   world.files.set(QUESTIONS, '{')
   world.isMoveRefused = path => path.startsWith(`${QUESTIONS}.tmp-`)
   await clock.advance(2100)
-  expect({ stage: 'quarantined but replacement failed', visible: await ui.find({ type: 'Text', text: EN.questionsUnreadable(QUESTIONS) }) !== undefined }).toEqual({ stage: 'quarantined but replacement failed', visible: true })
+  expect({ stage: 'quarantined but replacement failed', visible: await ui.find({ type: 'Text', text: EN.questionsUnreadable() }) !== undefined }).toEqual({ stage: 'quarantined but replacement failed', visible: true })
   world.isMoveRefused = undefined
   await clock.advance(2100)
-  expect(await ui.find({ type: 'Text', text: EN.questionsUnreadable(QUESTIONS) })).toBeUndefined()
+  expect(await ui.find({ type: 'Text', text: EN.questionsUnreadable() })).toBeUndefined()
   await ui.unmount()
 })
 
@@ -3289,9 +3399,9 @@ test('progress.html shows pending questions without reading transcripts or start
   expect(world.files.get('/home/me/.claude/progress.html')).toContain('Use 100 or 300 a minute?')
   expect(world.reads).not.toContain(transcript)
   expect(world.ran?.length).toBe(1)
-  expect(world.ran?.[0]?.slice(0, 2)).toEqual(['mv', '-n'])
-  expect(world.ran?.[0]?.[2]?.startsWith(`${QUESTIONS}.tmp-${SESSION}-`)).toBe(true)
-  expect(world.ran?.[0]?.[3]).toBe(QUESTIONS)
+  expect(world.ran?.[0]?.slice(0, 4)).toEqual(['node', '-e', LEDGER_LINK, '--'])
+  expect(world.ran?.[0]?.[4]?.startsWith(`${QUESTIONS}.tmp-${SESSION}-`)).toBe(true)
+  expect(world.ran?.[0]?.[5]).toBe(QUESTIONS)
 })
 
 test('progress.html starts no process for a pending turn whose transcript path is a Node option', async ($, on) => {
@@ -4640,7 +4750,7 @@ test('a question file that cannot be read shows one line at once instead of retr
   await clock.advance(4000)
   expect(seen.notified).toEqual(notifications)
   expect(await ui.find({ type: 'Text', text: line })).toBeDefined()
-  expect(await ui.find({ type: 'Text', text: EN.questionsUnreadable(QUESTIONS) })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: EN.questionsUnreadable() })).toBeDefined()
   world.isMoveRefused = undefined
   await clock.advance(2000)
   expect(await ui.find({ type: 'Text', text: line })).toBeUndefined()
