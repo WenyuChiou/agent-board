@@ -991,7 +991,7 @@ const showLan = async (url: string): Promise<void> => {
 // an agent's command tool is not left waiting on the server.
 const serveBoard = async (): Promise<void> => {
   const requestedIdle = idleMs()
-  process.stdout.write(boardText(view(), pending(), s, options()))
+  if (!args.includes('--quiet-board')) process.stdout.write(boardText(view(), pending(), s, options()))
   // The note goes above the address, so the address stays the last line an agent shows.
   const show = async (url: string, isKept = false, actualIdle?: number): Promise<void> => {
     const idleNote = actualIdle !== undefined && actualIdle !== requestedIdle ? `${actualIdle === 0 ? s.serveIdle : s.serveIdleTimed(actualIdle / 60_000)}\n` : ''

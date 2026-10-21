@@ -128,6 +128,7 @@ export const ZH_TW = {
   statusPrefix: '進度',
   statusWaiting: (n: number): string => `${n} 件等你`,
   statusDue: (n: number): string => `${n} 件快到期`,
+  statusBoardPage: '/progress 開啟看板網頁',
 
   // Pull requests
   ciPass: 'CI 通過',
@@ -264,6 +265,10 @@ export const ZH_TW = {
   notifyOff: '桌面通知已關掉。',
   paneOpened: (path: string): string => `進度面板已開啟：${path}`,
   paneNotOpened: (reason: string): string => `進度面板開不了：${reason}`,
+  livePageOpened: '這個應用程式無法顯示面板。請開啟看板網頁，回覆問題或封存工作：',
+  livePageFallback: '互動看板網頁無法啟動，改用唯讀網頁。',
+  livePageNeedsInstall: '互動網頁需要由 /progress connect 安裝看板腳本，或在下次工作階段開始時更新。',
+  livePageStarting: '正在開啟看板網頁…',
   connectDone: (list: string): string => `已接上：${list}。重開它們之後，每回合結束都會自動回報到面板。`,
   connectNone: '沒找到可以接的 agent（Codex、Gemini CLI、Cursor、OpenCode、Grok Build、Hermes Agent、Muse Code、OpenClaw）。',
   setupCodexApproval: (): string => "尚未確認目前 Codex hook 的核准狀態。請檢查 /hooks；已有的受管理回報指示會保留。",
@@ -469,7 +474,7 @@ export const ZH_TW = {
   boardKeyHide: 'h 已回覆，先隱藏',
   boardKeyShowHidden: 'u 全部重新顯示',
   boardKeyIdle: 'i 顯示／收起閒置和已停止項目',
-  boardUsage: '用法：node agent-board.mjs [--watch] [--serve] [--html] [--chat] [--tidy] [--all] [--lang en|zh-TW|zh-CN] · --all 列出閒置和已停止項目',
+  boardUsage: '用法：node agent-board.mjs [--watch] [--serve] [--quiet-board] [--html] [--chat] [--tidy] [--all] [--lang en|zh-TW|zh-CN] · --all 列出閒置和已停止項目',
   boardHidden: (text: string): string => `已隱藏「${text}」；問題一改就會再出現。`,
   boardShown: '隱藏的問題都重新顯示了。',
   hideFailed: '記不下「已回覆」，這一項還留在清單上。',

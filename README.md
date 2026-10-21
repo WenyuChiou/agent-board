@@ -76,6 +76,8 @@ Tell me which existing sessions need reload and which adapters remain unsupporte
 
 **In a chat app,** `--chat` prints the board as plain text cut to fit one message, with no page or link. It shows your home folder as `~` and hides the credential forms it knows, such as `token=...`; a secret in another shape is not recognised, so keep secrets out of the board.
 
+**In the Claude desktop app,** which cannot show the pane, the footer shows the board's status and `/progress` gives you a link to [the board's page](#the-boards-page), where you can answer questions and archive work; if that page cannot start, it opens the read-only page. The board page needs the board script that `/progress connect` installs, or the next session start updates.
+
 <details>
 <summary><b>Keys on the terminal board</b></summary>
 
