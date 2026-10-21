@@ -233,7 +233,9 @@ export const pageDom = async (source, first, post, { clipboard = true, legacyCop
 }
 
 export const serve = {
-  start: async (world, args = []) => {
+  // lifetimeMs: how long the kill check waits before it stops a server nobody stopped; idleMinutes:
+  // the page's own idle exit. A long run (the soak) raises both; the defaults serve every journey.
+  start: async (world, args = [], { lifetimeMs = 20000, idleMinutes = 5 } = {}) => {
     let pid, timer, url, recordPath, isStopped = false
     const records = () => readdirSync(world.root, { recursive: true }).map(String)
       .filter(name => /agent-board-[a-f0-9]+\.json$/.test(name)).flatMap(name => {
@@ -286,13 +288,13 @@ export const serve = {
     }
     world.cleanups.push(stop)
     try {
-      const output = await terminal.screen(world, ['--serve', '--no-open', '--idle-minutes', '5', ...args])
+      const output = await terminal.screen(world, ['--serve', '--no-open', '--idle-minutes', String(idleMinutes), ...args])
       const match = output.match(/http:\/\/127\.0\.0\.1:\d+\/\?t=[\w-]+/)
       assert.ok(match, output)
       url = new URL(match[0])
       discover()
       assert.ok(pid && recordPath, 'The isolated runtime owns its server address file')
-      timer = setTimeout(() => { void owner.killRecorded() }, 20000)
+      timer = setTimeout(() => { void owner.killRecorded() }, lifetimeMs)
       const call = async (method, path, body) => {
         const response = await fetch(new URL(path, url), { method, headers: { 'x-board-token': url.searchParams.get('t'), ...(body === undefined ? {} : { 'content-type': 'application/json' }) }, body: body === undefined ? undefined : JSON.stringify(body), signal: AbortSignal.timeout(5000) })
         const text = await response.text()
