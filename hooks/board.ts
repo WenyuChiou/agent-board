@@ -638,7 +638,7 @@ export const boardScreen = (view: View, pending: readonly PendingTurn[], state: 
     if (!hasResult) return
     if (state.copyText !== undefined) lines.push(`${indent}${c('alert', fit(s.boardCopyFailed(''), o.width - indent.length))}`, plain(state.copyText))
     else if (state.note !== '') {
-      const notes = result === undefined ? wrapNote(state.note, o.width - indent.length) : [fit(state.note, o.width - indent.length)]
+      const notes = wrapNote(state.note, o.width - indent.length)
       lines.push(...notes.map(line => `${indent}${c(state.tone ?? 'done', line)}`))
     }
   }
