@@ -1,10 +1,13 @@
 import { mkdirSync, renameSync, unlinkSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 export const MINUTES_LEAST = 1
 export const MINUTES_MOST = 45
 export const MINUTES_DEFAULT = 30
-export const OUT_DEFAULT = 'soak-report'
+// A local run without --out writes into the temp folder, never into the working copy; CI names
+// its own folder.
+export const OUT_DEFAULT = join(tmpdir(), 'agent-board-soak-report')
 
 const shown = value => String(value).replace(/[^\x20-\x7e]/g, '?').slice(0, 40)
 
@@ -108,6 +111,12 @@ const kilobytes = bytes => (bytes / 1024).toFixed(bytes < 10240 ? 1 : 0)
 const count = value => (value === undefined ? '?' : Number(value).toLocaleString('en-US'))
 const clockOf = iso => (typeof iso === 'string' ? iso.slice(11, 19) : '?')
 
+// How many checks came out each way, in plain words: "3 passed, 2 known, 1 failed, 0 skipped".
+export const tallyOf = checks => {
+  const many = status => checks.filter(check => check.status === status).length
+  return `${many('pass')} passed, ${many('known')} known, ${many('fail')} failed, ${many('skipped')} skipped`
+}
+
 // Plain words, one table. Every figure comes from the report object, so a half-finished report
 // (a timeout, a crash) reads the same way with what it has.
 export const reportMarkdown = report => {
@@ -115,19 +124,23 @@ export const reportMarkdown = report => {
   lines.push(`Status: ${report.status}. The soak was set for ${report.minutes} minutes on ${report.os} with Node ${report.node}.`, '')
   lines.push('| Check | Result | What was measured |', '| --- | --- | --- |')
   for (const check of report.checks ?? []) lines.push(`| ${check.title} | ${check.status} | ${String(check.line).replace(/\|/g, '/')} |`)
+  if ((report.checks ?? []).length > 0) lines.push('', `Checks: ${tallyOf(report.checks)}.`)
   lines.push('', '## Numbers', '')
   const polls = report.polls
   if (polls) {
     lines.push(`- Polls: ${count(polls.count)} sent, ${count(polls.failed)} got no answer, ${count(polls.slow)} took longer than 15 seconds, ${count(polls.badStatus)} got an answer other than 200. A typical poll took ${polls.median ?? '?'} ms, one in 20 took longer than ${polls.p95 ?? '?'} ms, the slowest took ${polls.max ?? '?'} ms. The first answer was ${polls.firstSize === undefined ? '?' : kilobytes(polls.firstSize)} KB and the last was ${polls.lastSize === undefined ? '?' : kilobytes(polls.lastSize)} KB.`)
     const causes = Object.entries(polls.failedBy ?? {}).map(([cause, many]) => `${count(many)} ${cause}`)
     if (causes.length > 0) lines.push(`- Polls with no answer, by cause: ${causes.join('; ')}.`)
+    const statuses = Object.entries(polls.badBy ?? {}).map(([status, many]) => `${count(many)} with ${status}`)
+    if (statuses.length > 0) lines.push(`- Polls answered with a status other than 200: ${statuses.join('; ')}.`)
     if (polls.retried > 0) lines.push(`- ${count(polls.retried)} polls were sent again after the connection closed before an answer.`)
+    if (polls.cut) lines.push(`- One more poll was under way when the tail ended and was cut short after ${count(polls.cut.seconds)} s with no answer yet${polls.cut.isSlow ? '; it is counted as one that took longer than 15 seconds' : ''}.`)
   }
   for (const phase of report.phases ?? []) lines.push(`- ${phase.name} began at ${clockOf(phase.startedAt)} UTC.`)
   for (const window of report.fileOps ?? []) lines.push(`- File operations per poll, ${window.name}: ${window.perPoll === undefined ? 'not measured' : window.perPoll.toFixed(1)}.`)
   const serve = report.memory?.serve ?? []
   const watch = report.memory?.watch ?? []
-  if (serve.length > 0) lines.push(`- Page server memory: ${megabytes(Math.min(...serve.map(one => one.bytes)))} MB at the start, ${megabytes(Math.max(...serve.map(one => one.bytes)))} MB at the highest, ${megabytes(serve.at(-1).bytes)} MB at the end.`)
+  if (serve.length > 0) lines.push(`- Page server memory: ${megabytes(serve[0].bytes)} MB at the start, ${megabytes(Math.max(...serve.map(one => one.bytes)))} MB at the highest, ${megabytes(serve.at(-1).bytes)} MB at the end.`)
   if (watch.length > 0) lines.push(`- Terminal board memory: ${megabytes(Math.max(...watch.map(one => one.bytes)))} MB at the highest, ${megabytes(watch.at(-1).bytes)} MB at the end.`)
   const data = report.data
   if (data) lines.push(`- Data now: progress.md is ${kilobytes(data.progressBytes ?? 0)} KB, the question ledger is ${kilobytes(data.ledgerBytes ?? 0)} KB, there are ${count(data.captureFiles)} capture files, ${count(data.blocks)} blocks (${count(data.liveSessions)} live) and ${count(data.questionRecords)} question records.`)

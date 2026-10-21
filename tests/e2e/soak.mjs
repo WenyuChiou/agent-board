@@ -3,7 +3,7 @@ import { arch, homedir, release, tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { performance } from 'node:perf_hooks'
 import { fileURLToPath, pathToFileURL } from 'node:url'
-import { fileOpsPerPoll, makeRedact, median, parseArguments, peakRss, percentile, writeReport } from './lib/soak-report.mjs'
+import { OUT_DEFAULT, fileOpsPerPoll, makeRedact, median, parseArguments, peakRss, percentile, tallyOf, writeReport } from './lib/soak-report.mjs'
 
 // L6 soak: the terminal board (--watch) and the page server (--serve) run side by side on one
 // isolated world while data grows to the scale budget, tasks are archived and the polling goes on.
@@ -21,9 +21,10 @@ const TITLES = {
 // A check that fails on main because of a known problem passes through knownFailure with its hold id:
 // the page server reads every ledger and capture file on every poll (audit P1-3), so its memory
 // climbs and its answers slow down to minutes; and the question ledger and capture files of an
-// archived task are never removed. Survival is held only for falling short of 1,000 polls: a page
+// archived task are never removed. Survival is held only for falling short of 1,000 polls while
+// the file-operation check still fails, since that slowness is what keeps a run short: a page
 // server that is gone, answers with an error, drops a connection or leaves a poll unanswered for
-// 5 minutes is never held, since slowness explains none of them.
+// 5 minutes is never held, and neither is a run that reaches 1,000, which says nothing of the bug.
 const HOLDS = { ops: 'hold:serve-poll-file-ops', memory: 'hold:serve-poll-file-ops', prune: 'hold:question-ledger-prune', survive: 'hold:serve-poll-file-ops' }
 
 const ARCHIVE_SLACK_MS = 120000
@@ -58,9 +59,6 @@ const CAPTURE = /^progress-questions-source-[a-f0-9]{64}\.json$/
 const PROOF = /^progress-questions-(?:retired|consumed)-[a-f0-9]{64}\.json$/
 
 const wait = ms => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms)
-const isAlive = pid => {
-  try { process.kill(pid, 0); return true } catch { return false }
-}
 
 const soak = async ({ minutes, out }) => {
   const [{ makeWorld }, { LIVE_SESSIONS, BLOCKS, LEDGER_RECORDS }, { block, turn, hook }, { serve }, { knownFailure }, { spawnIsolated }] = await Promise.all([
@@ -77,6 +75,11 @@ const soak = async ({ minutes, out }) => {
     data: undefined, dataAtGrowthEnd: undefined, archive: undefined, terminalBoard: undefined, checks: [], notes: [],
   }
   const redactions = [['<tmp>', tmpdir()], ['<home>', homedir()], ['<repo>', process.cwd()]]
+  // On Windows tmpdir() and homedir() may give the short 8.3 form (RUNNER~1, as on GitHub's
+  // runners), while an error message can carry the long one, so that is hidden too.
+  for (const [name, path] of [['<tmp>', tmpdir()], ['<home>', homedir()]]) {
+    try { if (realpathSync.native(path) !== path) redactions.push([name, realpathSync.native(path)]) } catch {}
+  }
   const secrets = []
   // Only the last save decides the exit: one refused rename on Windows mid-run is retried by the next.
   const save = () => {
@@ -103,11 +106,16 @@ const soak = async ({ minutes, out }) => {
   const isRunning = () => control.stop === undefined
   let world, server, watch
   // A busy page server cannot answer a close request, so the last resort ends both board processes.
+  // The page server is a detached process: it is ended only while the world's address file still
+  // names its pid and address, so a pid the system gave to another program is never touched.
   const endBoards = () => {
-    try { if (server !== undefined && isAlive(server.pid)) process.kill(server.pid) } catch {}
+    try { if (server?.isOwned()) process.kill(server.pid) } catch {}
     try { watch?.child.kill() } catch {}
   }
+  let isGivingUp = false
   const giveUp = async note => {
+    if (isGivingUp) return
+    isGivingUp = true
     problem(note)
     save()
     endBoards()
@@ -127,6 +135,14 @@ const soak = async ({ minutes, out }) => {
   }
   process.on('SIGINT', () => stopNow('interrupted'))
   process.on('SIGTERM', () => stopNow('interrupted'))
+  // An error nothing caught still leaves a report and no board process behind.
+  const crashed = error => {
+    report.status = 'failed'
+    giveUp(`The soak stopped on an error nothing caught: ${String(error?.message ?? error).split('\n')[0]}`)
+  }
+  process.on('uncaughtException', crashed)
+  process.on('unhandledRejection', crashed)
+  process.on('exit', endBoards)
   const deadline = setTimeout(() => stopNow('timed out'), total + 5 * 60000)
 
   let phase = 'start'
@@ -138,8 +154,10 @@ const soak = async ({ minutes, out }) => {
   }
 
   const polls = []
+  // The poll the end of the tail cut short, kept apart from the polls that got an answer or failed.
+  let cutPoll
   const samples = { serve: [], watch: [] }
-  const state = { archiveEndPolls: undefined, archiveEndAt: undefined, archivedSessions: undefined, watchFramesAtArchive: undefined, growthEndAt: undefined }
+  const state = { archiveEndPolls: undefined, archiveEndAt: undefined, archivedSessions: undefined, heldBefore: undefined, watchFramesAtArchive: undefined, growthEndAt: undefined }
   // The polls sent after the archive was done: one sent before its last request does not count.
   const tailPolls = () => state.archiveEndAt === undefined ? [] : polls.filter(one => one.start >= state.archiveEndAt)
   let sampler
@@ -147,6 +165,12 @@ const soak = async ({ minutes, out }) => {
   let probeDir, token, sw
 
   save()
+  // A folder the report cannot be written to is found now, not after the whole run.
+  if (saveFailure !== undefined) {
+    clearTimeout(deadline)
+    say(`soak: the report cannot be written to ${out} (${saveFailure.code ?? saveFailure.message}).`)
+    return 1
+  }
   try {
     world = makeWorld()
     redactions.push(['<world>', world.root], ['<world>', realpathSync.native(world.root)])
@@ -250,12 +274,37 @@ const soak = async ({ minutes, out }) => {
       return { ...last }
     }
 
+    // The ledger records and capture files of each task, by the session in their scope.
+    const sessionOf = scope => { try { return JSON.parse(scope)[2] } catch { return '' } }
+    const holdings = () => {
+      const bySession = new Map()
+      const add = (session, key) => {
+        const one = bySession.get(session) ?? { records: 0, captures: 0 }
+        one[key] += 1
+        bySession.set(session, one)
+      }
+      const found = { bySession, ledgerTotal: 0, captureTotal: 0, error: undefined }
+      try {
+        const ledger = JSON.parse(readFileSync(join(world.claudeDir, 'progress-questions.json'), 'utf8')).records
+        found.ledgerTotal = ledger.length
+        for (const one of ledger) add(sessionOf(one.scope), 'records')
+      } catch (error) { found.error = error.code ?? error.message }
+      for (const name of readdirSync(world.claudeDir).filter(one => CAPTURE.test(one))) {
+        found.captureTotal += 1
+        try { add(sessionOf(JSON.parse(readFileSync(join(world.claudeDir, name), 'utf8')).record.scope), 'captures') } catch {}
+      }
+      return found
+    }
+    const sumOf = (held, sessions, key) => [...sessions].reduce((sum, session) => sum + (held.bySession.get(session)?.[key] ?? 0), 0)
+
     const summarize = () => {
       const answered = polls.filter(one => !one.failed)
       const latencies = answered.map(one => one.ms)
       report.polls = {
-        count: polls.length, failed: polls.filter(one => one.failed).length, slow: polls.filter(one => one.slow).length, badStatus: answered.filter(one => one.status !== 200).length,
+        count: polls.length, failed: polls.filter(one => one.failed).length, slow: polls.filter(one => one.slow).length + (cutPoll?.isSlow ? 1 : 0), badStatus: answered.filter(one => one.status !== 200).length,
+        badBy: answered.filter(one => one.status !== 200).reduce((counts, one) => ({ ...counts, [one.status]: (counts[one.status] ?? 0) + 1 }), {}),
         retried: polls.filter(one => one.isRetried).length,
+        cut: cutPoll === undefined ? undefined : { seconds: Math.round(cutPoll.ms / 1000), isSlow: cutPoll.isSlow, phase: cutPoll.phase },
         failedBy: polls.filter(one => one.failed).reduce((counts, one) => ({ ...counts, [one.cause]: (counts[one.cause] ?? 0) + 1 }), {}),
         median: median(latencies), p95: percentile(latencies, 0.95), max: latencies.length ? Math.max(...latencies) : undefined,
         firstSize: answered[0]?.size, lastSize: answered.at(-1)?.size,
@@ -328,9 +377,11 @@ const soak = async ({ minutes, out }) => {
           if (page.failed) { failed = true; cause = `${page.cause}, page` }
           isRetried = isRetried || page.isRetried
         }
-        // A poll the stop or the end of the tail cut short is not a poll.
-        if (stopper.signal.aborted || loopEnd.signal.aborted) {
-          if (!stopper.signal.aborted && since() - start > POLL_LIMIT_MS) problem(`The poll under way when the tail ended had waited ${Math.round((since() - start) / 1000)} s for its answer.`)
+        // A poll the stop or the end of the tail cut short got no answer only because the soak stopped
+        // waiting, so it is not a failed poll. The one the tail's end cut is kept apart, and counts as
+        // slow once it has waited longer than POLL_LIMIT_MS; one answered just before the end is a poll.
+        if (failed && (stopper.signal.aborted || loopEnd.signal.aborted)) {
+          if (!stopper.signal.aborted) cutPoll = { start, ms: Math.round(since() - start), isSlow: since() - start > POLL_LIMIT_MS, phase: during }
           break
         }
         polls.push({ number, start, end: since(), ms, status, size, failed, cause: failed ? cause : undefined, isRetried, slow: !failed && ms > POLL_LIMIT_MS, phase: during })
@@ -344,13 +395,18 @@ const soak = async ({ minutes, out }) => {
     }
     // A request that gets no answer (a busy page server, or the soak stopping) is status 0, not a crash.
     const call = async (path, body) => {
+      const start = since()
       try { return await send(path, body) } catch (error) {
-        if (isRunning()) problem(`A request to the page for ${path} got no answer: ${String(error?.message ?? error).split(/\r?\n/)[0]}`)
+        if (isRunning()) problem(`A request to the page for ${path} got no answer in ${Math.round((since() - start) / 1000)} s: ${String(error?.message ?? error).split(/\r?\n/)[0]}`)
         return { status: 0, json: {} }
       }
     }
+    // The archive's requests wait for their answer as a poll does, since one given up early is still
+    // carried out by the server after the soak has looked; but never past the time the archive may
+    // take (the planned time and ARCHIVE_SLACK_MS), so the tail still gets its polls.
+    const archiveWait = () => Math.max(1000, Math.floor(Math.min(POLL_GIVE_UP_MS, total + ARCHIVE_SLACK_MS - since())))
     const send = async (path, body) => {
-      const response = await fetch(new URL(path, server.url), { method: body === undefined ? 'GET' : 'POST', headers: body === undefined ? headers : { ...headers, 'content-type': 'application/json' }, body: body === undefined ? undefined : JSON.stringify(body), signal: AbortSignal.any([AbortSignal.timeout(60000), stopper.signal]) })
+      const response = await fetch(new URL(path, server.url), { method: body === undefined ? 'GET' : 'POST', headers: body === undefined ? headers : { ...headers, 'content-type': 'application/json' }, body: body === undefined ? undefined : JSON.stringify(body), signal: AbortSignal.any([AbortSignal.timeout(archiveWait()), stopper.signal]) })
       const text = await response.text()
       let json = {}
       try { json = JSON.parse(text) } catch {}
@@ -418,6 +474,8 @@ const soak = async ({ minutes, out }) => {
         try { block(sw, specOf(number, ended.includes(number) ? 'ended' : 'done')) } catch (error) { problem(`A writer failed: ${String(error.message).split('\n')[0]}`) }
       }
       await waitPolls(3)
+      // What the tasks hold just before the archive, so the prune check knows there was something to prune.
+      state.heldBefore = holdings()
       const tidy = await call('/api/tidy', {})
       let refused = tidy.status === 200 ? 0 : 1
       if (tidy.status !== 200) problem(`Archive now answered ${tidy.status}.`)
@@ -481,7 +539,7 @@ const soak = async ({ minutes, out }) => {
     readProbe()
     report.data = dataNow()
     summarize()
-    const isServerAlive = isAlive(server.pid)
+    const isServerAlive = server.isOwned()
     const board300 = polls[299]
     const answered = polls.filter(one => !one.failed)
     const growthPolls = polls.filter(one => one.phase === 'growth')
@@ -505,36 +563,44 @@ const soak = async ({ minutes, out }) => {
 
     // Each check says skipped, or gives a verdict and one line of numbers.
     const outcomes = {}
-    if (first50 === undefined || last50 === undefined) outcomes.ops = { skipped: `Too short to compare: ${growthPolls.length} growth polls, or no probe lines for them.` }
+    // Without the probe's lines nothing is known of file operations or memory: the soak's own
+    // instrument failed, which no hold explains.
+    const isProbeSilent = serveSamples.length === 0
+    const silentProbe = { ok: false, isUnheld: true, line: 'The probe wrote nothing for the page server, so this could not be measured.' }
+    if (isProbeSilent) outcomes.ops = silentProbe
+    else if (first50 === undefined || last50 === undefined) outcomes.ops = { skipped: `Too short to compare: ${growthPolls.length} growth polls, or no probe lines for them.` }
     else {
       const limit = 1.25 * first50.perPoll + 6
       outcomes.ops = { ok: last50.perPoll <= limit, line: `The page server did ${first50.perPoll.toFixed(1)} file operations per poll over the first 50 growth polls and ${last50.perPoll.toFixed(1)} over ${lastLabel}; the limit is ${limit.toFixed(1)}.` }
     }
     const afterPeak = board300 === undefined ? undefined : peakRss(serveSamples, board300.end, Infinity)
-    if (board300 === undefined) outcomes.memory = { skipped: `Only ${polls.length} polls were reached, 300 are needed.` }
+    if (isProbeSilent) outcomes.memory = silentProbe
+    else if (board300 === undefined) outcomes.memory = { skipped: `Only ${polls.length} polls were reached, 300 are needed.` }
     else if (afterPeak === undefined) outcomes.memory = { skipped: 'The page server wrote no memory line after poll 300.' }
     else outcomes.memory = { ok: afterPeak < 150 * MEGABYTE, line: `The page server's highest memory after poll 300 was ${megabytes(afterPeak)} MB (limit 150 MB).` }
 
     if (state.archivedSessions === undefined || state.archiveEndPolls === undefined) outcomes.prune = { skipped: 'The run ended before the archive phase was done.' }
     else {
-      const sessionOf = scope => { try { return JSON.parse(scope)[2] } catch { return '' } }
-      let records = 0
-      let ledgerTotal = 0
-      try {
-        const ledger = JSON.parse(readFileSync(join(world.claudeDir, 'progress-questions.json'), 'utf8')).records
-        ledgerTotal = ledger.length
-        records = ledger.filter(one => state.archivedSessions.has(sessionOf(one.scope))).length
-      } catch (error) { problem(`The question ledger could not be read at the end: ${error.code ?? error.message}`) }
-      let captures = 0
-      let captureTotal = 0
-      for (const name of readdirSync(world.claudeDir).filter(one => CAPTURE.test(one))) {
-        captureTotal += 1
-        try { if (state.archivedSessions.has(sessionOf(JSON.parse(readFileSync(join(world.claudeDir, name), 'utf8')).record.scope))) captures += 1 } catch {}
-      }
+      const archived = state.archivedSessions
+      const held = holdings()
+      const records = sumOf(held, archived, 'records')
+      const captures = sumOf(held, archived, 'captures')
+      const recordsBefore = sumOf(state.heldBefore, archived, 'records')
+      const capturesBefore = sumOf(state.heldBefore, archived, 'captures')
       const afterArchive = tailPolls().length
-      const counted = `${state.archivedSessions.size} tasks were archived; ${records} of ${ledgerTotal} ledger records and ${captures} of ${captureTotal} capture files that belong to them are still there`
-      if (afterArchive < TAIL_POLLS) outcomes.prune = { skipped: `Only ${afterArchive} polls came after the archive phase, ${TAIL_POLLS} are needed. At the end, ${counted}.` }
-      else if (state.archivedSessions.size === 0) outcomes.prune = { ok: false, isUnheld: true, line: `No task could be archived (${report.archive.refused} refused), so nothing could be pruned.` }
+      // The server may still be taking in questions when the archive starts, so the count at the
+      // end can be higher than the one before it.
+      const counted = `${archived.size} tasks were archived; they had ${recordsBefore} ledger records and ${capturesBefore} capture files just before the archive and ${records} and ${captures} at the end (${held.ledgerTotal} records and ${held.captureTotal} capture files in all)`
+      const unread = state.heldBefore.error !== undefined ? `just before the archive (${state.heldBefore.error})` : held.error !== undefined ? `at the end (${held.error})` : undefined
+      // An unread ledger counts no record, which would read as pruned or as nothing to prune.
+      if (unread !== undefined) outcomes.prune = { ok: false, isUnheld: true, line: `The question ledger could not be read ${unread}.` }
+      // A refused or unanswered archive request leaves stopped tasks with questions out, the one
+      // path that keeps them, so the check would no longer cover it.
+      else if (report.archive.refused > 0) outcomes.prune = { ok: false, isUnheld: true, line: `${report.archive.refused} archive requests were refused or got no answer, so the archive did not finish. At the end, ${counted}.` }
+      else if (afterArchive < TAIL_POLLS) outcomes.prune = { skipped: `Only ${afterArchive} polls came after the archive phase, ${TAIL_POLLS} are needed. At the end, ${counted}.` }
+      else if (archived.size === 0) outcomes.prune = { ok: false, isUnheld: true, line: 'No task left progress.md, so nothing could be pruned.' }
+      // With nothing there before, "none left" would prove nothing.
+      else if (recordsBefore === 0 || capturesBefore === 0) outcomes.prune = { ok: false, isUnheld: true, line: `The archived tasks had ${recordsBefore} ledger records and ${capturesBefore} capture files before the archive, so there was nothing to prune.` }
       else outcomes.prune = { ok: records === 0 && captures === 0, line: `${counted}, after ${afterArchive} polls.` }
     }
 
@@ -545,10 +611,12 @@ const soak = async ({ minutes, out }) => {
     // with no answer at the end means a server that is stuck, not slow.
     const lastAnswer = answered.at(-1)?.end ?? 0
     const isStuck = endAt - lastAnswer > POLL_GIVE_UP_MS
+    // Too few polls is held only while the file-operation check fails, the slowness that explains it.
+    const isOpsFailing = outcomes.ops.ok === false && outcomes.ops.isUnheld !== true
     if (!isServerAlive || report.polls.failed > 0 || report.polls.badStatus > 0 || isStuck) outcomes.survive = { ok: false, isUnheld: true, line: `${survived}${isStuck ? `; no answer came in the last ${Math.round((endAt - lastAnswer) / 1000)} s` : ''}.` }
-    else if (polls.length < 1000 && minutes >= 30) outcomes.survive = { ok: false, line: `${survived}; a run of ${minutes} minutes should reach 1,000.` }
+    else if (polls.length < 1000 && minutes >= 30) outcomes.survive = { ok: false, isUnheld: !isOpsFailing, line: `${survived}; a run of ${minutes} minutes should reach 1,000${isOpsFailing ? '' : ', and the file-operation check does not fail, so its known slowness does not explain it'}.` }
     else if (polls.length < 1000) outcomes.survive = { skipped: `${survived}; 1,000 polls are needed.` }
-    else outcomes.survive = { ok: true, line: `${survived}.` }
+    else outcomes.survive = { ok: true, isUnheld: true, line: `${survived}.` }
 
     if (state.watchFramesAtArchive === undefined) outcomes.watch = { skipped: 'The run ended before the archive phase was done.' }
     else {
@@ -562,14 +630,21 @@ const soak = async ({ minutes, out }) => {
     const before = state.archiveEndAt === undefined ? undefined : peakRss(serveSamples, 0, state.archiveEndAt)
     const after = settled.length === 0 ? undefined : Math.max(...settled.map(one => one.rss))
     const levelLimit = before === undefined ? undefined : 1.1 * before + 10 * MEGABYTE
-    if (state.archiveEndAt === undefined) outcomes.level = { skipped: 'The run ended before the archive phase was done.' }
+    if (isProbeSilent) outcomes.level = silentProbe
+    else if (state.archiveEndAt === undefined) outcomes.level = { skipped: 'The run ended before the archive phase was done.' }
     else if (before === undefined || settled.length < SETTLED_LINES) outcomes.level = { skipped: `Only ${settled.length} memory lines came from ${SETTLE_MS / 1000} s after the archive on, ${SETTLED_LINES} are needed.` }
     else outcomes.level = { ok: after <= levelLimit, line: `The page server's highest memory was ${megabytes(before)} MB up to the end of the archive and ${megabytes(after)} MB after it (limit ${megabytes(levelLimit)} MB).` }
 
+    // CI runs 30 minutes: a check such a run could not measure fails it, since the run then proved
+    // nothing about it. A shorter run, tried by hand, may skip.
+    const isFullRun = minutes >= 30
     const results = []
     for (const [key, title] of Object.entries(TITLES)) {
       const outcome = outcomes[key]
-      if (outcome.skipped !== undefined) { results.push({ title, status: 'skipped', line: outcome.skipped }); continue }
+      if (outcome.skipped !== undefined) {
+        results.push(isFullRun ? { title, status: 'fail', line: `Not measured in a ${minutes}-minute run: ${outcome.skipped}` } : { title, status: 'skipped', line: outcome.skipped })
+        continue
+      }
       const hold = HOLDS[key]
       if (hold === undefined || outcome.isUnheld) { results.push({ title, status: outcome.ok ? 'pass' : 'fail', line: outcome.line }); continue }
       try {
@@ -593,10 +668,10 @@ const soak = async ({ minutes, out }) => {
   report.finishedAt = new Date().toISOString()
   save()
   // A busy page server cannot answer the world's short close request, so ask for longer, then end it.
-  if (server !== undefined && isAlive(server.pid)) {
+  if (server?.isOwned()) {
     try { await fetch(new URL('/api/close', server.url), { method: 'POST', headers: { 'x-board-token': token, 'content-type': 'application/json' }, body: '{}', signal: AbortSignal.timeout(control.stop === undefined ? 20000 : 8000) }) } catch {}
-    for (let waited = 0; waited < 100 && isAlive(server.pid); waited += 1) await new Promise(done => setTimeout(done, 100))
-    if (isAlive(server.pid)) { try { process.kill(server.pid) } catch {} }
+    for (let waited = 0; waited < 100 && server.isOwned(); waited += 1) await new Promise(done => setTimeout(done, 100))
+    endBoards()
   }
   let closeFailure
   try { await world?.close() } catch (error) {
@@ -605,8 +680,11 @@ const soak = async ({ minutes, out }) => {
   }
   if (closeFailure !== undefined || saveFailure !== undefined) save()
   for (const check of report.checks) say(`${check.status}: ${check.title} - ${check.line}`)
+  if (report.checks.length > 0) say(`soak: ${tallyOf(report.checks)}`)
   if (saveFailure !== undefined) say(`soak: the report could not be written (${saveFailure.code ?? saveFailure.message}).`)
   say(`soak: ${report.status}`)
+  // The default folder is in the temp folder, so a local run is told where its report went.
+  if (out === OUT_DEFAULT) process.stdout.write(`soak: the report is in ${out}\n`)
   return report.status === 'finished' && closeFailure === undefined && saveFailure === undefined && !report.checks.some(check => check.status === 'fail') ? 0 : 1
 }
 

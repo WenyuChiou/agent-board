@@ -1,11 +1,11 @@
 import { describe, test } from 'node:test'
 import assert from 'node:assert/strict'
-import { existsSync, readFileSync, readdirSync } from 'node:fs'
+import { existsSync, readFileSync, readdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { makeWorld } from './lib/world.mjs'
 import { spawnIsolated } from './lib/spawn.mjs'
-import { fileOpsPerPoll, makeRedact, median, parseArguments, peakRss, percentile, redactDeep, writeReport } from './lib/soak-report.mjs'
+import { OUT_DEFAULT, fileOpsPerPoll, makeRedact, median, parseArguments, peakRss, percentile, redactDeep, tallyOf, writeReport } from './lib/soak-report.mjs'
 
 const soak = fileURLToPath(new URL('./soak.mjs', import.meta.url))
 
@@ -44,6 +44,22 @@ describe('L6 soak arguments', () => {
     } finally { await world.close() }
   })
 
+  test('L6 soak arguments: a report folder that cannot be written exits 1 at once with one plain line and starts no board', async () => {
+    const world = makeWorld()
+    try {
+      // A file where the folder's parent should be: no report can be written under it.
+      writeFileSync(join(world.root, 'blocker'), 'not a folder')
+      const before = readdirSync(world.root).sort()
+      const result = await attempt(world, ['--minutes', '1', '--out', join(world.root, 'blocker', 'report')])
+      assert.equal(result.status, 1, result.stdout + result.stderr)
+      const lines = result.stdout.trim().split(/\r?\n/)
+      assert.equal(lines.length, 1, result.stdout)
+      assert.match(lines[0], /^soak: the report cannot be written to .+ \([A-Z]+\)\.$/)
+      assert.doesNotMatch(result.stdout + result.stderr, /\n\s+at |node:internal|warm-up/)
+      assert.deepEqual(readdirSync(world.root).sort(), before)
+    } finally { await world.close() }
+  })
+
   test('L6 soak arguments: the redaction replaces the world, temp, home and working folders in both slash styles and any letter case', () => {
     const redact = makeRedact([
       ['<tmp>', 'C:\\Users\\Someone\\AppData\\Local\\Temp'], ['<world>', 'C:\\Users\\Someone\\AppData\\Local\\Temp\\agent-board-e2e-ab12'],
@@ -66,8 +82,8 @@ describe('L6 soak arguments', () => {
   })
 
   test('L6 soak arguments: whole minutes from 1 to 45 and an output folder are accepted', () => {
-    assert.deepEqual(parseArguments([]), { minutes: 30, out: 'soak-report' })
-    assert.deepEqual(parseArguments(['--minutes', '1']), { minutes: 1, out: 'soak-report' })
+    assert.deepEqual(parseArguments([]), { minutes: 30, out: OUT_DEFAULT })
+    assert.deepEqual(parseArguments(['--minutes', '1']), { minutes: 1, out: OUT_DEFAULT })
     assert.deepEqual(parseArguments(['--minutes', '45', '--out', 'report']), { minutes: 45, out: 'report' })
     assert.deepEqual(parseArguments(['--out', 'some folder', '--minutes', '7']), { minutes: 7, out: 'some folder' })
     for (const bad of ['0', '46', '1.5', '30m', '-1', '', ' 5', '05', '5m']) assert.match(parseArguments(['--minutes', bad]).error, /^--minutes needs a whole number from 1 to 45/, bad)
@@ -88,9 +104,10 @@ describe('L6 soak arguments', () => {
       const report = {
         status: 'finished', os: 'testos 1.0 x64', node: 'v24.0.0', minutes: 3, startedAt: '2026-10-21T12:00:00.000Z',
         phases: [{ name: 'warm-up', startedAt: '2026-10-21T12:00:00.000Z' }],
-        polls: { count: 250, failed: 0, slow: 0, badStatus: 0, median: 90, p95: 300, max: 1200, firstSize: 3000, lastSize: 210000 },
+        polls: { count: 250, failed: 0, slow: 1, badStatus: 2, badBy: { 503: 2 }, median: 90, p95: 300, max: 1200, firstSize: 3000, lastSize: 210000, cut: { seconds: 200, isSlow: true, phase: 'tail' } },
         fileOps: [{ name: 'first 50 growth polls', perPoll: 14 }, { name: 'tail', perPoll: undefined }],
-        memory: { serve: [{ seconds: 1, bytes: 70 * 1048576 }, { seconds: 20, bytes: 180 * 1048576 }], watch: [] },
+        // The first line is not the lowest: the start is the first line.
+        memory: { serve: [{ seconds: 1, bytes: 90 * 1048576 }, { seconds: 10, bytes: 70 * 1048576 }, { seconds: 20, bytes: 180 * 1048576 }], watch: [] },
         data: { progressBytes: 200000, ledgerBytes: 900000, captureFiles: 1900, blocks: 300, liveSessions: 100, questionRecords: 1000 },
         archive: { path: `the page at ${address}`, tried: 290, gone: 280, refused: 2 },
         checks: [{ title: 'L6 soak: a made-up check', status: 'pass', line: `Looked under ${join(world.root, 'home')} | with a bar` }],
@@ -113,6 +130,11 @@ describe('L6 soak arguments', () => {
       assert.match(text, /\| Check \| Result \| What was measured \|/)
       assert.equal((text.match(/^\| L6 soak: a made-up check \| pass \|/gm) ?? []).length, 1)
       assert.match(text, /Status: timed out/)
+      assert.match(text, /^Checks: 1 passed, 0 known, 0 failed, 0 skipped\.$/m)
+      assert.match(text, /Polls answered with a status other than 200: 2 with 503\./)
+      assert.match(text, /Page server memory: 90 MB at the start, 180 MB at the highest, 180 MB at the end\./)
+      assert.match(text, /cut short after 200 s with no answer yet; it is counted as one that took longer than 15 seconds\./)
+      assert.equal(tallyOf([{ status: 'pass' }, { status: 'known' }, { status: 'known' }, { status: 'fail' }, { status: 'skipped' }]), '1 passed, 2 known, 1 failed, 1 skipped')
     } finally { await world.close() }
   })
 

@@ -237,16 +237,18 @@ export const serve = {
   // the page's own idle exit. A long run (the soak) raises both; the defaults serve every journey.
   start: async (world, args = [], { lifetimeMs = 20000, idleMinutes = 5 } = {}) => {
     let pid, timer, url, recordPath, isStopped = false
+    // The address file holds a `path` of its own (the progress.md it serves), so the file's own
+    // place is kept as `file`, apart from what it holds.
     const records = () => readdirSync(world.root, { recursive: true }).map(String)
       .filter(name => /agent-board-[a-f0-9]+\.json$/.test(name)).flatMap(name => {
-        const path = join(world.root, name)
-        try { return [{ path, ...JSON.parse(readFileSync(path, 'utf8')) }] } catch { return [] }
+        const file = join(world.root, name)
+        try { return [{ ...JSON.parse(readFileSync(file, 'utf8')), file }] } catch { return [] }
       })
     const discover = () => {
       const record = records().find(one => url ? one.url === url.href : true)
       if (!record) return
       pid ??= record.pid
-      recordPath ??= record.path
+      recordPath ??= record.file
       url ??= new URL(record.url)
     }
     const alive = () => {
@@ -326,7 +328,9 @@ export const serve = {
         const after = dom.cards().find(one => matches(one.textContent, cardMatch) && dom.buttons(one).some(button => matches(button.textContent, buttonMatch)))?.textContent ?? ''
         return { before, after, card: String(cardMatch), button: button.textContent, surface: 'serve', requests: dom.requests }
       }
-      return { url: url.href, get, post, page, press, stop, pid, get dom() { return dom }, get pollMs() { return dom?.pollMs } }
+      // isOwned: the pid is alive and the world's address file still names it and this address, the
+      // same check killRecorded makes, for a caller that must end the server itself.
+      return { url: url.href, get, post, page, press, stop, pid, isOwned: () => isRecorded() && alive(), get dom() { return dom }, get pollMs() { return dom?.pollMs } }
     } catch (error) {
       await stop()
       throw error
