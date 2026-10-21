@@ -915,9 +915,9 @@ test('--chat hides the home folder, with a space in its name, and the credential
   // The file it cannot read is told in the same plain text, with its path hidden as well.
   const unreadable = chatRun(['--chat'], { isFolder: true })
   assert.equal(unreadable.status, 1)
-  assert.ok(unreadable.stdout.includes('~') && unreadable.stdout.includes('progress.md') && unreadable.stdout.includes('EISDIR'), unreadable.stdout)
+  assert.ok(unreadable.stdout.includes('your progress file') && unreadable.stdout.includes('EISDIR') && !unreadable.stdout.includes('progress.md'), unreadable.stdout)
   // It only reads: it does not say, as the board does after a write, that files may already have changed.
-  assert.ok(unreadable.stdout.includes('Nothing was changed') && !/may already have changed/.test(unreadable.stdout), unreadable.stdout)
+  assert.ok(unreadable.stdout.includes('nothing was changed') && !/may already have changed/.test(unreadable.stdout), unreadable.stdout)
   assert.ok(!unreadable.stdout.includes(unreadable.home) && !unreadable.stdout.includes('Jane Doe') && !unreadable.stderr.includes('Jane Doe'), unreadable.stdout + unreadable.stderr)
 })
 
@@ -1120,7 +1120,7 @@ syncBuiltinESMExports()`)
       const out = play(fault)
       const said = out.stdout + out.stderr
       assert.equal(out.status, 1, said)
-      assert.ok(said.includes(list) && said.includes(code), said)
+      assert.ok(said.includes('progress-answered.json') && said.includes(code === 'EACCES' ? 'it is read-only or locked' : code) && !said.includes(list), said)
       assert.ok(!said.includes('Hidden:'), said)
       // The board is drawn after the press, with the question still on it.
       assert.ok(out.stdout.includes('Per-key limit'), said)
@@ -1984,12 +1984,12 @@ test('chat relay reviews unknown historical clocks and rejects confirmations aft
   } finally { await board.close() }
 })
 
-test('L7 errors: every error is one plain sentence with no stack trace and no full path', { timeout: 90_000 }, async () => {
+test('L7 locked: a locked progress.md is one plain sentence saying nothing was changed, with no stack trace and no full path', { timeout: 90_000 }, async () => {
   for (const code of ['EBUSY', 'EAGAIN']) {
     for (const [lang, note] of [
-      ['en', 'progress.md is locked by another program; nothing was changed.'],
-      ['zh-TW', 'progress.md 被其他程式鎖住了，沒有改動任何檔案。'],
-      ['zh-CN', 'progress.md 被其他程序锁住了，没有改动任何文件。'],
+      ['en', 'Another program has your progress file open; nothing was changed.'],
+      ['zh-TW', '其他程式正在使用你的進度檔，沒有改動任何檔案。'],
+      ['zh-CN', '其他程序正在使用你的进度文件，没有改动任何文件。'],
     ]) {
       const preload = questionFault(`const original = fs.readFileSync
 fs.readFileSync = (file, ...args) => { if (file === path.join(__dirname, 'progress.md')) throw Object.assign(new Error('EBUSY: resource busy or locked'), { code: '${code}' }); return original(file, ...args) }`)
@@ -1998,7 +1998,7 @@ fs.readFileSync = (file, ...args) => { if (file === path.join(__dirname, 'progre
         assert.equal(ran.status, 1, ran.stderr)
         assert.equal(ran.stdout + ran.stderr, `${note}\n`)
         assert.equal(args.includes('--chat') ? ran.stderr : ran.stdout, '')
-        assert.doesNotMatch(ran.stdout + ran.stderr, /\bat |may already have changed/)
+        assert.doesNotMatch(ran.stdout + ran.stderr, /\bat |may already be saved/)
         assert.ok(!`${ran.stdout}${ran.stderr}`.includes(ran.home), ran.stdout + ran.stderr)
       }
       const watched = chatRun(['--watch'], { lang, preload: preload + `
@@ -2022,7 +2022,7 @@ require('node:module').syncBuiltinESMExports()
     let board
     try {
       board = await page('', { NODE_OPTIONS: `--require ${JSON.stringify(preload)}` })
-      const note = 'progress.md is locked by another program; nothing was changed.'
+      const note = 'Another program has your progress file open; nothing was changed.'
       const seen = await board.call('GET', '/api/board')
       assert.equal(seen.status, 409, seen.body)
       assert.equal(seen.json().note, note)
@@ -2062,7 +2062,7 @@ syncBuiltinESMExports()
   try {
     const seen = await board.call('GET', '/api/board')
     assert.equal(seen.status, 409, seen.body)
-    assert.match(seen.json().note, /^Could not safely read or update .*-journal-.*\(EACCES\)/)
+    assert.match(seen.json().note, /^Couldn't safely read or update .*-journal-.*\(it is read-only or locked\)/)
     // The page says that note, and "offline" only when the board sent none.
     const home = await board.call('GET', `/?t=${board.token}`, { headers: { 'x-board-token': '' } })
     const dom = await pageDom(home.body, null, { getBoard: async () => ({ ok: false, json: async () => seen.json() }) })
@@ -2076,7 +2076,7 @@ syncBuiltinESMExports()
       const lan = new URL(opened.json().url)
       const far = await fetchAt(lan.hostname, Number(lan.port), 'GET', '/api/board', { 'x-board-token': lan.searchParams.get('t') })
       assert.equal(far.status, 409, far.body)
-      assert.match(far.json().note, /^Could not safely read or update progress-journal-\d{4}-\d{2}\.md \(EACCES\)/)
+      assert.match(far.json().note, /^Couldn't safely read or update progress-journal-\d{4}-\d{2}\.md \(it is read-only or locked\)/)
       assert.ok(!far.json().note.includes(board.dir), far.json().note)
     }
   } finally {
@@ -2101,7 +2101,7 @@ syncBuiltinESMExports()
     const before = readFileSync(path, 'utf8')
     const ticked = await call('POST', '/api/act', { body: { key: await keyOf('Fabrikam fellowship'), type: 'tick', text: 'Ask two referees', fp: (await rowOf('Fabrikam fellowship')).fp } })
     assert.equal(ticked.status, 409, ticked.body)
-    assert.match(ticked.json().note, /^Could not safely read or update .*-journal-.*\(EIO\)/)
+    assert.match(ticked.json().note, /^Couldn't safely read or update .*-journal-.*\(EIO\)/)
     assert.equal(readFileSync(path, 'utf8'), before)
     // The page runs on, with the step still there to tick again.
     assert.equal((await call('GET', '/api/board')).status, 200)
@@ -2132,12 +2132,12 @@ syncBuiltinESMExports()
     const { call, keyOf, rowOf } = board
     const ticked = await call('POST', '/api/act', { body: { key: await keyOf('Fabrikam fellowship'), type: 'tick', text: 'Ask two referees', fp: (await rowOf('Fabrikam fellowship')).fp } })
     assert.equal(ticked.status, 409, ticked.body)
-    assert.match(ticked.json().note, /^Could not safely read or update .*progress\.md \(EBUSY\)\. Some files may already have changed\./)
-    assert.doesNotMatch(ticked.json().note, /locked by another program/)
+    assert.match(ticked.json().note, /^Couldn't safely read or update your progress file \(another program is using it\), and some changes may already be saved;/)
+    assert.doesNotMatch(ticked.json().note, /nothing was changed/)
     // The page reads the board again right after every press, and that note replaces the press's.
     const refreshed = await call('GET', '/api/board')
     assert.equal(refreshed.status, 409, refreshed.body)
-    assert.match(refreshed.json().note, /Some files may already have changed\./)
+    assert.match(refreshed.json().note, /some changes may already be saved/)
     assert.doesNotMatch(refreshed.json().note, /nothing was changed/)
   } finally {
     await board.close()
@@ -2166,7 +2166,7 @@ syncBuiltinESMExports()
     const ask = (await call('GET', '/api/board')).json().model.asks.find(one => one.agent === 'codex')
     const hid = await call('POST', '/api/act', { body: { key: ask.key, type: 'hide' } })
     assert.equal(hid.status, 409, hid.body)
-    assert.match(hid.json().note, /^Could not safely read or update .*progress-answered\.json \(EIO\)/)
+    assert.match(hid.json().note, /^Couldn't safely read or update .*progress-answered\.json \(EIO\)/)
     assert.ok(!existsSync(join(dir, 'progress-answered.json')))
     assert.ok(!readdirSync(dir).some(name => name.endsWith('.board-tmp')))
     // The question is still asked on the page.
@@ -2749,6 +2749,34 @@ test('the page keeps actionable progress delays without connection inventory or 
       sessions.splice(0)
       await dom.redraw(model)
       assert.equal(dom.node('main').textContent, '')
+      const id = 'AB-11111111-2222-4333-8444-555555555555'
+      for (const [reply, expected] of [
+        ['ACK ' + id, ''],
+        ['ACK ' + id + '  \n  ', ''],
+        ['ACK ' + id + '  Review ready.  ', 'Review ready.'],
+        ['ACK ' + id + '\n  Review ready.\nKeep both lines.  ', 'Review ready.\nKeep both lines.'],
+        ['ACK ' + id + '\r\nreal reply', 'real reply'],
+        ['ACKNOWLEDGED x', 'ACKNOWLEDGED x'],
+        ['ACK ' + id + 'x', 'ACK ' + id + 'x'],
+        ['Review ready.', 'Review ready.'],
+      ]) {
+        const receipt = { id, status: 'acknowledged', reply, error: '' }
+        await dom.redraw({
+          ...model,
+          asks: [{ key: 'question', project: 'Synthetic', agent: 'codex', text: 'Review the route?', answers: [], canTick: true, receipt }],
+          stopped: [{ key: 'task', title: 'Review the route', status: '', steps: [], receipt }],
+        })
+        const lines = []
+        const collect = node => {
+          if (node.tag === 'p' && node.textContent.startsWith(s.messagesAcknowledged)) lines.push(node.textContent)
+          node.childNodes.forEach(collect)
+        }
+        collect(dom.node('board'))
+        assert.deepEqual(lines, Array(2).fill(s.messagesAcknowledged + (expected ? ' · ' + expected : '')))
+        if (!expected.includes(id)) assert.ok(!dom.node('board').textContent.includes(id), dom.node('board').textContent)
+        if (reply.startsWith('ACK ' + id) && !expected.startsWith('ACK ')) assert.ok(!dom.node('board').textContent.includes('ACK'), dom.node('board').textContent)
+        assert.equal(receipt.reply, reply)
+      }
     } finally { await board.close() }
   }
 })
@@ -3597,6 +3625,6 @@ global.setInterval = callback => { callback(); return { unref() {} } }
   })
   assert.equal(ran.status, 1, ran.stderr)
   assert.ok(Object.keys(ran.files).some(name => name.startsWith('progress-questions-source-')), JSON.stringify(Object.keys(ran.files)))
-  assert.match(ran.stderr, /Some files may already have changed\./)
-  assert.doesNotMatch(ran.stderr, /nothing was changed|locked by another program/)
+  assert.match(ran.stderr, /some changes may already be saved/)
+  assert.doesNotMatch(ran.stderr, /nothing was changed/)
 })
