@@ -62,6 +62,8 @@ let writes = 0
 
 class BoardFileError extends Error {
   readonly isLocked: boolean
+  // Set once a press took back everything it wrote before this failure (#248).
+  isUnchanged = false
   constructor(readonly file: string, readonly code: string, isRead = false) {
     super(code)
     this.isLocked = isRead && writes === 0 && (code === 'EBUSY' || code === 'EAGAIN')
@@ -76,6 +78,12 @@ const plainFile = (file: string): string => {
   return full === resolve(path) ? s.fileProgress
     : full === resolve(questionsPath(path)) ? s.fileQuestions : s.fileNamed(basename(file))
 }
+
+// The terminal board and the page say the same about a file they could not read or write.
+const storageNote = (error: BoardFileError): string =>
+  error.isLocked ? s.boardLocked(plainFile(error.file))
+    : error.isUnchanged ? s.boardSaveFailed(plainFile(error.file), plainReason(s, error.code))
+    : s.boardStorageFailed(plainFile(error.file), plainReason(s, error.code))
 
 const read = (file: string): string => {
   try {
@@ -383,7 +391,7 @@ const options = () => ({
 // again from the new text when another write landed in between or the rename failed (on
 // Windows, a file another program holds open), as the pane's own writes are. A failed
 // read is never an empty file. `change` can run more than once, on newer text each time.
-const rewrite = (file: string, change: (text: string) => string | null): string | null => {
+const rewrite = (file: string, change: (text: string) => string | null, onReplaced?: () => void): string | null => {
   let failure: unknown = { code: 'EAGAIN' }
   for (let attempt = 0; attempt < 3; attempt += 1) {
     const before = read(file)
@@ -441,6 +449,8 @@ const rewrite = (file: string, change: (text: string) => string | null): string 
       continue
     }
     writes += 1
+    // The file is replaced now, even if reading it back fails below.
+    onReplaced?.()
     if (read(file) === after) return after
     failure = { code: 'EAGAIN' }
   }
@@ -532,6 +542,28 @@ const answeredAge = (file: string): number => {
   }
 }
 
+// A press whose board write never landed takes back only the journal lines it added: lines
+// that were there before, or that another writer added meanwhile, stay as they are. If that
+// fails too, the board's own error is the true one: some changes may already be saved.
+// Otherwise nothing of this press is left, so the count of writes goes back to before it.
+const undoJournal = (added: Map<string, number>, now: number, writesBefore: number, error?: unknown): void => {
+  try {
+    if (added.size > 0) rewrite(journalPath(path, now), past => {
+      const remaining = new Map(added)
+      return past.split(/(?<=\n)/).filter(line => {
+        const entry = line.replace(/\r?\n$/, '')
+        const count = remaining.get(entry) ?? 0
+        if (count === 0) return true
+        remaining.set(entry, count - 1)
+        return false
+      }).join('')
+    })
+  } catch (undoError) {
+    throw error ?? undoError
+  }
+  writes = writesBefore
+}
+
 // What a key's action does to the files, and the line the board shows after it.
 const act = (action: BoardAction, fallback?: { copyText?: string; tone?: 'done' | 'alert' }): string => {
   const done = (text: string): string => {
@@ -546,15 +578,33 @@ const act = (action: BoardAction, fallback?: { copyText?: string; tone?: 'done' 
   }
   if (action.type === 'done') {
     let confirmed: ConfirmedTask | null = null
-    const wrote = rewrite(path, text => {
-      if (confirmed !== null && confirmMatches(text, confirmed.ref, s)) return text
-      const next = confirmTask(text, action.ref, now, s)
-      if (next === null) return null
-      const lines = next.entries.map(entry => journalLine(entry, now, s))
-      rewrite(journalPath(path, now), past => appendJournal(past, lines.filter(line => !past.split(/\r?\n/).includes(line)), s))
-      confirmed = next
-      return next.text
-    })
+    const added = new Map<string, number>()
+    let isReplaced = false
+    const writesBefore = writes
+    let wrote: string | null
+    try {
+      wrote = rewrite(path, text => {
+        if (confirmed !== null && confirmMatches(text, confirmed.ref, s)) return text
+        const next = confirmTask(text, action.ref, now, s)
+        if (next === null) return null
+        const lines = next.entries.map(entry => journalLine(entry, now, s))
+        rewrite(journalPath(path, now), past => {
+          const missing = lines.filter(line => !past.split(/\r?\n/).includes(line))
+          for (const line of missing) added.set(line, Math.max(added.get(line) ?? 0, missing.filter(entry => entry === line).length))
+          return appendJournal(past, missing, s)
+        })
+        confirmed = next
+        return next.text
+      }, () => { isReplaced = true })
+    } catch (error) {
+      if (!(error instanceof BoardFileError) || error.file !== path || isReplaced) throw error
+      undoJournal(added, now, writesBefore, error)
+      error.isUnchanged = true
+      throw error
+    }
+    // A retry found the task changed by another writer. If no write of this press landed, its
+    // journal lines go too; the press says the line changed, as before.
+    if (wrote === null && !isReplaced) undoJournal(added, now, writesBefore)
     const found = confirmed as ConfirmedTask | null
     if (found === null || wrote === null || !confirmMatches(read(path), found.ref, s)) return s.boardLineChanged
     return done(s.confirmedDone(action.title))
@@ -563,17 +613,32 @@ const act = (action: BoardAction, fallback?: { copyText?: string; tone?: 'done' 
     // Found once is found: a retry after another session's write may meet the step already
     // ticked by this press.
     let isFound = false
+    let isReplaced = false
+    const writesBefore = writes
+    const added = new Map<string, number>()
     const line = journalLine({ project: action.ref.project, task: action.ref.title, step: action.ref.step }, now, s)
-    const wrote = rewrite(path, text => {
-      const after = setManualStep(text, action.ref, 'x')
-      if (after !== text) {
-        // Save history before ticking: a journal failure must leave the step available
-        // to retry. A later board failure can leave an extra journal line, and is reported.
-        rewrite(journalPath(path, now), past => (past.includes(line) ? past : appendJournal(past, [line], s)))
-        isFound = true
-      }
-      return after
-    })
+    let wrote: string | null
+    try {
+      wrote = rewrite(path, text => {
+        const after = setManualStep(text, action.ref, 'x')
+        if (after !== text) {
+          // Save history before ticking: a journal failure must leave the step available
+          // to retry. A failed board replacement removes only this press's journal line.
+          rewrite(journalPath(path, now), past => {
+            if (past.includes(line)) return past
+            added.set(line, 1)
+            return appendJournal(past, [line], s)
+          })
+          isFound = true
+        }
+        return after
+      }, () => { isReplaced = true })
+    } catch (error) {
+      if (!(error instanceof BoardFileError) || error.file !== path || isReplaced) throw error
+      undoJournal(added, now, writesBefore, error)
+      error.isUnchanged = true
+      throw error
+    }
     if (wrote === null) return s.boardWriteFailed
     if (!isFound) return s.boardTickGone
     return done(s.boardTicked(action.ref.step))
@@ -673,7 +738,7 @@ const failureNote = (error: unknown): string => {
     process.stderr.write(`${error instanceof Error ? error.stack : String(error)}\n`)
     return s.pressFailed
   }
-  const note = error.isLocked ? s.boardLocked(plainFile(error.file)) : s.boardStorageFailed(plainFile(error.file), plainReason(s, error.code))
+  const note = storageNote(error)
   process.stderr.write(`${note}\n`)
   return note
 }
@@ -830,7 +895,7 @@ const serveChild = (): void => {
     // The page names a file it could not read or write the way the terminal board does, for a
     // press and for the board it shows. The page is answered, so the exit code and stderr are
     // left alone. File labels and reasons stay the same on local and network pages.
-    failure: error => (error instanceof BoardFileError ? error.isLocked ? s.boardLocked(plainFile(error.file)) : s.boardStorageFailed(plainFile(error.file), plainReason(s, error.code)) : null),
+    failure: error => (error instanceof BoardFileError ? storageNote(error) : null),
     idleMs: idleMs(),
     onReady: (url, port) => {
       // Without its address file no later `--serve` finds this page, and each would start one

@@ -2126,16 +2126,22 @@ syncBuiltinESMExports()
 
 test('a press that wrote its history before progress.md was locked says files may have changed, not that nothing was', { timeout: 30_000 }, async () => {
   // The tick writes the journal first. Then another program holds progress.md: the rename onto
-  // it is refused, and every read of it after that is too.
+  // it is refused, and every read of it after that is too. The journal is held from then on
+  // as well, so the tick cannot take its line back (#248) and the history stays saved.
   const faults = mkdtempSync(join(tmpdir(), 'board-fault-'))
   const preload = join(faults, 'fault.cjs')
   writeFileSync(preload, `const fs = require('node:fs')
 const { syncBuiltinESMExports } = require('node:module')
 let isHeld = false
 const isBoard = file => String(file).endsWith('progress.md')
+const isJournal = file => /progress-journal-[0-9-]+[.]md$/.test(String(file))
 const rename = fs.renameSync
 const read = fs.readFileSync
-fs.renameSync = (from, to) => { if (isBoard(to)) { isHeld = true; throw Object.assign(new Error('injected rename refusal'), { code: 'EPERM' }) } return rename(from, to) }
+fs.renameSync = (from, to) => {
+  if (isBoard(to)) { isHeld = true; throw Object.assign(new Error('injected rename refusal'), { code: 'EPERM' }) }
+  if (isHeld && isJournal(to)) throw Object.assign(new Error('injected journal refusal'), { code: 'EPERM' })
+  return rename(from, to)
+}
 fs.readFileSync = (file, ...args) => { if (isHeld && isBoard(file)) throw Object.assign(new Error('injected busy read'), { code: 'EBUSY' }); return read(file, ...args) }
 syncBuiltinESMExports()
 `)
@@ -2813,7 +2819,7 @@ test('every terminal board key on every card kind from every agent answers with 
           const row = lines.findIndex(line => line.startsWith('› '))
           assert.ok(row >= 0, context)
           const expected = failing && offered.action?.type === 'copy' ? runtime.s.boardCopyFailed('') : note
-          assert.equal(lines[row + 1].trim(), runtime.fit(expected, width - 4).trim(), `${context}: result directly under the pressed row`)
+          assert.equal(lines[row + 1].trim(), expected.trim(), `${context}: complete result directly under the pressed row`)
         }
         if (offered.action?.type === 'copy' || (!failing && offered.action !== null)) pressChanged(fixture, offered.action, context)
         actions += 1
@@ -2950,6 +2956,32 @@ test('a press on the terminal board shows its result under the pressed card', as
     const footer = draw(view, { ...noCard, note: 'Page opened' }).trimEnd().split('\n')
     assert.equal(footer.at(-1), 'Page opened')
     assert.match(footer.at(-2), /[↑↓]/)
+  } finally { fixture.close() }
+})
+
+test('a long press result under a card wraps to the width instead of being cut', async () => {
+  const fixture = await pressRuntime()
+  const { runtime } = fixture
+  try {
+    const source = '## Demo\n### First card\n- [ ] First step\n### Second card\n- [ ] Second step\n'
+    const view = runtime.buildView(runtime.parseProgress(source), [], null, PRESS_NOW, 0, {}, runtime.s)
+    const items = runtime.boardItems(view, [])
+    const pressed = runtime.boardKey(runtime.pinned(runtime.emptyBoardState, items), 'x', items, runtime.s)
+    const note = 'The progress file could not be saved because another program is holding it open; close that program and try this step again.'
+    const state = { ...pressed.state, note, tone: 'alert' }
+    const width = 40
+    const lines = runtime.boardScreen(view, [], state, runtime.s, { width, isColor: false }).split('\n')
+    const first = lines.findIndex(line => line.includes('First card'))
+    const second = lines.findIndex(line => line.includes('Second card'))
+    const last = lines.findIndex((_, index) => index > first && lines.slice(first + 1, index + 1).map(line => line.trim()).join(' ') === note)
+    assert.ok(first >= 0 && last > first && last < second, lines.join('\n'))
+    const wrapped = lines.slice(first + 1, last + 1)
+    assert.ok(wrapped.length > 1)
+    assert.equal(wrapped.map(line => line.trim()).join(' '), note)
+    assert.ok(wrapped.every(line => line.startsWith('    ')))
+    assert.ok(wrapped.every(line => [...line].length <= width), lines.join('\n'))
+    const colored = runtime.boardScreen(view, [], state, runtime.s, { width, isColor: true })
+    for (const line of wrapped) assert.ok(colored.includes(`    \u001b[31m${line.trim()}\u001b[0m`))
   } finally { fixture.close() }
 })
 
