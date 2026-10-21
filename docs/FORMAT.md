@@ -25,7 +25,14 @@ The pane checks the file's modification time and size every 2 seconds and parses
 
 **Line endings when writing.** Keep the style the file already has. When the pane rewrites the file it uses CRLF for every line if the file contains any CRLF, and LF otherwise, and it ends the file with a line break.
 
-**Concurrent writers.** There is no lock. The pane reads the whole file, changes its own lines, writes the whole file, then reads it back and tries again (up to three times) if its block does not read back as it wrote it. Other writers should do the same: read right before you write, change only your lines, write, and read back. If you can, write a temporary file in the same folder and rename it over `progress.md`, so no reader sees a half-written file. (When the pane reads zero bytes from a file it saw with content a moment ago, it assumes a write is in progress and reads again. It has no such guard against a partial file.)
+**Concurrent writers.** Native reporters take a lock file named after the file, `<file>.agent-board-lock` (for `progress.md`, `progress.md.agent-board-lock`), around each write. The pane, the board script and `scripts/remote-reporter/merge.py` do not take it; they read back and retry. Other writers should hold the lock for the whole read, change only your lines, write, read back:
+
+- Take it by creating the lock file exclusively (Node `wx`, Python `O_CREAT | O_EXCL`). `EEXIST`, and on Windows an access-denied error (`EPERM` in Node, `PermissionError` in Python), means it is busy: try again every 10 ms. If it is still busy after 2 s, stop and report busy. Never write without the lock.
+- Right after creating it, write `{"version":1,"pid":<your pid>,"token":"<32 random lowercase hex>"}` and nothing else. If that write fails, close and remove the file you created, then stop: an empty or malformed lock is never removed by anyone and blocks every writer that takes the lock (native reporters queue their events, then fail).
+- Release it by closing it, then removing it only if it still holds exactly the text you wrote.
+- Never remove a lock you did not create, and never remove `<file>.agent-board-lock.recover`. Native reporters remove a lock that is 30 s old and whose process is gone, under that recovery file, so a lock left by a crashed writer clears on the next native write once it is 30 s old.
+
+While you hold the lock, write the new content to a temporary file with a unique name in the same folder, created exclusively, and rename it over the file (Node `renameSync`, Python `os.replace`, not `os.rename`), so no reader sees a half-written file. On Windows the rename is refused (`EPERM`, `EACCES` or `EBUSY` in Node, `PermissionError` in Python) while another process has the file open: wait 10 ms and try again, doubling the pause each time, up to 2 s in all. If it is still refused, remove your temporary file. Then read the file back; if your block does not read as you wrote it, read again and redo your change, up to three tries in all. The pane also reads back and tries again, up to three times. When it reads zero bytes from a file it saw with content a moment ago, it assumes a write is in progress and reads again. It has no such guard against a partial file.
 
 ## Structure
 
@@ -430,7 +437,7 @@ How the pane reads it:
 5. Write `### <title>` naming the outcome, then a one-line `> ` status, then `> Context: <why this work exists>`.
 6. Write the whole plan as steps, the one you are on as `[~]`. Mark any step that needs the person `[?]` and give it ` — <one line>` worded as in [Waiting steps and ask kinds](#waiting-steps-and-ask-kinds).
 7. Write the end marker with the same id.
-8. After each step, re-read the file, replace your block (start marker to end marker) with a new copy, set the step's mark, set `updated=` to now, and write the file. Touch nothing else.
+8. After each step, re-read the file, replace your block (start marker to end marker) with a new copy, set the step's mark, set `updated=` to now, and write the file as [Concurrent writers](#file) says. Touch nothing else.
 9. When you hand control back to the person with steps left, set `state=waiting`. When you start again, set `state=working`.
 10. When every step is `[x]` (or `[-]`), set `state=done` and update `updated=`.
 11. If you stop for good with steps left, set `state=ended`. If you cannot tell that a session ended, do nothing: after 12 hours without a write the pane shows the block as stopped.
