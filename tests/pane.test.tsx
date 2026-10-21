@@ -1618,13 +1618,14 @@ test('a session that ends with open steps is marked for someone to pick up', asy
   expect(world.files.get(FILE) ?? '').toContain('> 對話已結束，可接手')
 })
 
-test('with nothing tracked the pane says so, and where the file is', async ($, on) => {
+test('with nothing tracked the pane says so and names the progress file', async ($, on) => {
   const world: World = { files: new Map(), mtime: 1, hasTasks: true }
   engineBeneath(on, world)
   await $.session.start({ cwd: '/work/x', surface: 'terminal', isInteractive: true })
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal', props: PROPS })
   expect(await ui.find({ type: 'Text', text: '目前沒有進行中的工作。' })).toBeDefined()
-  expect(await ui.find({ type: 'Text', text: FILE })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: ZH_TW.progressFileShown })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: FILE })).toBeUndefined()
   await ui.unmount()
 })
 
@@ -2654,23 +2655,23 @@ test('the pane says when the question ledger cannot be read', async ($, on) => {
   await clock.advance(2100)
   const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
   world.files.set(QUESTIONS, '{"version":999}')
-  expect(await ui.find({ type: 'Text', text: EN.questionsUnreadable(QUESTIONS) })).toBeUndefined()
+  expect(await ui.find({ type: 'Text', text: EN.questionsUnreadable() })).toBeUndefined()
   await clock.advance(2100)
-  expect(await ui.find({ type: 'Text', text: EN.questionsUnreadable(QUESTIONS) })).toBeUndefined()
+  expect(await ui.find({ type: 'Text', text: EN.questionsUnreadable() })).toBeUndefined()
   await clock.advance(2100)
-  expect(await ui.find({ type: 'Text', text: EN.questionsUnreadable(QUESTIONS) })).toBeUndefined()
+  expect(await ui.find({ type: 'Text', text: EN.questionsUnreadable() })).toBeUndefined()
   await clock.advance(2100)
-  expect({ stage: 'three failures', visible: await ui.find({ type: 'Text', text: EN.questionsUnreadable(QUESTIONS) }) !== undefined }).toEqual({ stage: 'three failures', visible: true })
+  expect({ stage: 'three failures', visible: await ui.find({ type: 'Text', text: EN.questionsUnreadable() }) !== undefined }).toEqual({ stage: 'three failures', visible: true })
   world.files.delete(QUESTIONS)
   await clock.advance(2100)
-  expect(await ui.find({ type: 'Text', text: EN.questionsUnreadable(QUESTIONS) })).toBeUndefined()
+  expect(await ui.find({ type: 'Text', text: EN.questionsUnreadable() })).toBeUndefined()
   world.files.set(QUESTIONS, '{')
   world.isMoveRefused = path => path.startsWith(`${QUESTIONS}.tmp-`)
   await clock.advance(2100)
-  expect({ stage: 'quarantined but replacement failed', visible: await ui.find({ type: 'Text', text: EN.questionsUnreadable(QUESTIONS) }) !== undefined }).toEqual({ stage: 'quarantined but replacement failed', visible: true })
+  expect({ stage: 'quarantined but replacement failed', visible: await ui.find({ type: 'Text', text: EN.questionsUnreadable() }) !== undefined }).toEqual({ stage: 'quarantined but replacement failed', visible: true })
   world.isMoveRefused = undefined
   await clock.advance(2100)
-  expect(await ui.find({ type: 'Text', text: EN.questionsUnreadable(QUESTIONS) })).toBeUndefined()
+  expect(await ui.find({ type: 'Text', text: EN.questionsUnreadable() })).toBeUndefined()
   await ui.unmount()
 })
 
@@ -4749,7 +4750,7 @@ test('a question file that cannot be read shows one line at once instead of retr
   await clock.advance(4000)
   expect(seen.notified).toEqual(notifications)
   expect(await ui.find({ type: 'Text', text: line })).toBeDefined()
-  expect(await ui.find({ type: 'Text', text: EN.questionsUnreadable(QUESTIONS) })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: EN.questionsUnreadable() })).toBeDefined()
   world.isMoveRefused = undefined
   await clock.advance(2000)
   expect(await ui.find({ type: 'Text', text: line })).toBeUndefined()
