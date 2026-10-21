@@ -1,0 +1,2 @@
+- **A turn read after a newer prompt keeps its finished steps and does not reopen the answered question (#145).**
+  Tests: `a turn read after a newer prompt keeps its finished steps and its question stays answered`, `a session end read after a newer prompt keeps the session working`, `a board reply older than a newer prompt changes nothing`, `a turn read after a prompt another session took keeps its question answered`, `a late reply that only asks keeps the block's open steps`, `a late turn and a newer turn read in one look fold in order`.

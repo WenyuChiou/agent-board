@@ -196,7 +196,9 @@ test('L7 errors: every error is one plain sentence with no stack trace and no fu
       fault.enable('write')
       const result = await run(world, ['--keys', 'x'])
       assert.equal(result.status, 1, result.stdout + result.stderr)
-      const expected = s.boardStorageFailed(s.fileProgress, s.storageReadOnly)
+      // The tick takes back its own journal line when progress.md cannot be replaced, so
+      // nothing was changed (#248).
+      const expected = s.boardSaveFailed(s.fileProgress, s.storageReadOnly)
       assert.equal(result.stderr.trim(), expected)
       sentence(result.stderr.trim(), world)
       const status = result.stdout.split('\n').find(line => line.includes(expected.slice(0, 24)))
