@@ -143,13 +143,14 @@ const run = async () => {
       if (isReport || started + hostTimeout - Date.now() < 300) return fail('REPORTER_TIMEOUT')
       const pending = path.join(path.dirname(${JSON.stringify(script)}), 'pending')
       fs.mkdirSync(pending, { recursive: true, mode: 0o700 })
+      // Concurrent workers can pass 64 by a few because the count and write are separate.
       if (fs.readdirSync(pending).filter(name => name.endsWith('.json')).length >= 64) return fail('REPORTER_TIMEOUT')
       const env = Object.fromEntries((${JSON.stringify(HOOK_SESSION_ENV)}[agent] ?? []).filter(name => typeof process.env[name] === 'string').map(name => [name, process.env[name]]))
       // Replay reads only session_id, sessionId, sessionID, conversationId,
       // conversation_id, generation_id, turn_id, hook_event_name, hookEventName,
       // state, prompt_submitted, cwd and the first of workspace_roots (for the
       // session's folder name, #246). Classify the prompt before discarding its text.
-      const kept = Object.fromEntries(['session_id', 'sessionId', 'sessionID', 'conversationId', 'conversation_id', 'generation_id', 'turn_id', 'hook_event_name', 'hookEventName', 'state', 'prompt_submitted'].filter(name => Object.hasOwn(payload, name)).map(name => [name, payload[name]]))
+      const kept = Object.fromEntries(['session_id', 'sessionId', 'sessionID', 'conversationId', 'conversation_id', 'generation_id', 'turn_id', 'hook_event_name', 'hookEventName', 'state', 'prompt_submitted'].filter(name => typeof payload[name] === 'string' && payload[name].length <= 4096 || name === 'prompt_submitted' && typeof payload[name] === 'boolean').map(name => [name, payload[name]]))
       kept.board_request = payload.board_request === true || isBoardRequest(payload)
       // A bounded folder path: replay must not stall on an oversized one.
       if (typeof payload.cwd === 'string' && payload.cwd.length <= 4096) kept.cwd = payload.cwd
@@ -172,7 +173,7 @@ const run = async () => {
     input: JSON.stringify(payload), encoding: 'utf8', windowsHide: true,
     timeout: remaining, killSignal: 'SIGKILL', maxBuffer: 1048576,
   })
-  if (result.error?.code === 'ETIMEDOUT' || Date.now() >= deadline || result.status !== 0 && result.signal) return queue()
+  if (result.error?.code === 'ETIMEDOUT' || result.signal || (result.error || result.status !== 0) && Date.now() >= deadline) return queue()
   if (result.error || result.status !== 0) return fail('REPORTER_FAILED')
   process.stdout.write(result.stdout)
   return true

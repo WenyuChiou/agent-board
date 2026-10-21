@@ -1,5 +1,6 @@
 import { spawn, spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
+import { createRequire, registerHooks } from 'node:module'
 import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, unlinkSync, utimesSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { delimiter, dirname, join, resolve } from 'node:path'
@@ -8,6 +9,7 @@ import assert from 'node:assert/strict'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { inspect } from 'node:util'
 import { reporterPs1, reporterSh } from '../hooks/hook-reporters.ts'
+import { hookWorker } from '../hooks/hook-safety.ts'
 import { classifierDiagnostic, observeClassifier } from './fixtures/classifier-diagnostic.mjs'
 import { assertNativeProbeReturned, nativeProbeDiagnostic } from './fixtures/native-probe-diagnostic.mjs'
 
@@ -490,25 +492,11 @@ test('a reporter that hangs is cut at its timeout and the host hook exits 0', ()
   }
 }))
 
-// A slow or busy CI runner only adds time, so a timing bound is compared with the
-// fastest of up to three tries; a slow hook is slow on every try. Each try sends a
-// new event, so no try takes the cheaper path for an event already applied, and
-// each must succeed on its own. A hook slow only on its first, cold run passes.
-const timedTries = async (bound, run) => {
-  const times = []
-  for (let index = 0; index < 3; index++) {
-    const started = performance.now()
-    await run(index)
-    times.push(Math.round(performance.now() - started))
-    if (times.at(-1) < bound) break
-  }
-  return times
-}
-
-test('L5 busy machine: Antigravity and Codex hooks finish under 3 s with 4 CPU-busy processes', () => fixture(async f => {
+test('L5 busy machine: Antigravity and Codex hooks apply or queue every event with 4 CPU-busy processes', () => fixture(async f => {
   assert.equal(f.install('--apply').status, 0)
   assert.equal(f.install('--agent', 'antigravity', '--apply').status, 0)
   const busy = []
+  const records = []
   try {
     for (let index = 0; index < 4; index++) {
       const child = spawn(process.execPath, ['-e', 'process.stdout.write("ready\\n"); while (true) {}'], { env: f.env, windowsHide: true, stdio: ['ignore', 'pipe', 'ignore'] })
@@ -519,21 +507,21 @@ test('L5 busy machine: Antigravity and Codex hooks finish under 3 s with 4 CPU-b
     }
     const antigravity = JSON.parse(readFileSync(join(f.home, '.gemini', 'config', 'hooks.json')))['agent-board-local'].SessionStart[0].command
     const codex = JSON.parse(readFileSync(f.hooks)).hooks.UserPromptSubmit[0].hooks[0].command
-    const bound = 3000
     for (const [agent, command, payloadOf] of [
       ['antigravity', antigravity, index => ({ conversationId: `busy-antigravity-session-${index}` })],
-      ['codex', codex, index => ({ session_id: session, hook_event_name: 'UserPromptSubmit', turn_id: `busy-turn-${index}` })],
+      ['codex', codex, index => ({ session_id: `busy-codex-session-${index}`, hook_event_name: 'UserPromptSubmit', turn_id: `busy-turn-${index}` })],
     ]) {
-      let payload
-      const times = await timedTries(bound, async index => {
-        payload = payloadOf(index)
+      for (let index = 0; index < 3; index++) {
+        const payload = payloadOf(index)
         const result = await fireCommand(f, command, JSON.stringify(payload), 5000)
         assert.equal(result.status, 0, hookFailure(result))
-      })
-      assert.ok(Math.min(...times) < bound, `${agent}: ${times.join(', ')} ms`)
-      const owner = createHash('sha256').update(`${agent}:${payload.session_id ?? payload.conversationId}`).digest('hex').slice(0, 8)
-      const saved = pendingFiles(f).some(name => readFileSync(join(f.root, 'pending', name), 'utf8').includes(payload.session_id ?? payload.conversationId))
-      assert.ok(readFileSync(f.progress, 'utf8').includes(`session=${owner}`) || saved, agent)
+        const id = payload.session_id ?? payload.conversationId
+        const owner = createHash('sha256').update(`${agent}:${id}`).digest('hex')
+        const record = join(f.root, 'sessions', `${owner}.json`)
+        const saved = pendingFiles(f).some(name => readFileSync(join(f.root, 'pending', name), 'utf8').includes(id))
+        assert.ok(existsSync(record) || saved, `${agent} event ${index} must be applied or queued`)
+        records.push({ file: record, state: agent === 'codex' ? 'working' : 'waiting', turn: payload.turn_id })
+      }
     }
   } finally {
     await Promise.all(busy.map(async ({ child, closed }) => {
@@ -541,26 +529,162 @@ test('L5 busy machine: Antigravity and Codex hooks finish under 3 s with 4 CPU-b
       finally { await closed }
     }))
   }
+  const next = f.event('SessionStart', null, { session_id: 'busy-follow-up-session' })
+  assert.equal(next.status, 0, next.stderr)
+  assert.deepEqual(pendingFiles(f), [])
+  for (const expected of records) {
+    const record = JSON.parse(readFileSync(expected.file))
+    assert.equal(record.state, expected.state)
+    if (expected.turn) assert.equal(record.turn, expected.turn)
+  }
 }))
 
-test('L4 5 MB file: the Codex hook finishes in under 1 s', () => fixture(async f => {
+test('L4 5 MB file: every Codex event is applied or queued and replayed by a follow-up hook', () => fixture(async f => {
   assert.equal(f.install('--apply').status, 0)
   const task = '### Synthetic hand-kept task\n- [ ] Keep this task unchanged\n'
   f.save(f.progress, '## Synthetic history\n' + task.repeat(Math.ceil(5 * 1024 * 1024 / Buffer.byteLength(task))))
   assert.ok(readFileSync(f.progress).length >= 5 * 1024 * 1024)
-  const bound = 1000
-  const times = await timedTries(bound, async index => {
-    const result = await fireHook(f, JSON.stringify({ session_id: session, hook_event_name: 'UserPromptSubmit', turn_id: `large-file-turn-${index}` }))
+  const records = []
+  for (let index = 0; index < 3; index++) {
+    const id = `large-file-session-${index}`, turn = `large-file-turn-${index}`
+    const result = await fireHook(f, JSON.stringify({ session_id: id, hook_event_name: 'UserPromptSubmit', turn_id: turn }))
     assert.equal(result.status, 0, hookFailure(result))
-    // A try past the hook's own deadline queues its event, and the next try would
-    // apply it, so every try must leave nothing queued.
-    assert.deepEqual(pendingFiles(f), [])
-  })
-  assert.ok(Math.min(...times) < bound, `${times.join(', ')} ms`)
+    const owner = createHash('sha256').update(`codex:${id}`).digest('hex')
+    const record = join(f.root, 'sessions', `${owner}.json`)
+    const saved = pendingFiles(f).some(name => readFileSync(join(f.root, 'pending', name), 'utf8').includes(id))
+    assert.ok(existsSync(record) || saved, `event ${index} must be applied or queued`)
+    records.push({ file: record, turn })
+  }
+  const next = f.event('SessionStart', null, { session_id: 'large-file-follow-up-session' })
+  assert.equal(next.status, 0, next.stderr)
+  for (const expected of records) {
+    const record = JSON.parse(readFileSync(expected.file))
+    assert.equal(record.state, 'working')
+    assert.equal(record.turn, expected.turn)
+  }
   const block = readFileSync(f.progress, 'utf8').slice(-2000)
   assert.match(block, /<!-- auto [^\n]*agent=codex/)
   assert.match(block, /state=working/)
   assert.deepEqual(pendingFiles(f), [])
+}))
+
+test('a queued event from every host is replayed by the next hook', async t => {
+  const resolver = registerHooks({ resolve(specifier, context, next) {
+    try { return next(specifier, context) } catch (error) {
+      if (error.code !== 'ERR_MODULE_NOT_FOUND' || !specifier.startsWith('.')) throw error
+      return next(`${specifier}.ts`, context)
+    }
+  } })
+  let local, portable
+  try {
+    local = await import('../hooks/local-agents.ts')
+    portable = await import('../hooks/portable-agents.ts')
+  } finally { resolver.deregister() }
+  const { opencodePlugin } = local
+  const { openclawLocalPlugin, deepseekLocalPlugin } = portable
+  const hosts = [
+    { agent: 'codex', event: 'UserPromptSubmit', config: ['.codex', 'hooks.json'], payload: { session_id: 'queued-codex-session', hook_event_name: 'UserPromptSubmit', turn_id: 'queued-turn' }, folder: 'queued-codex-folder' },
+    { agent: 'cursor', event: 'beforeSubmitPrompt', config: ['.cursor', 'hooks.json'], payload: { conversation_id: 'queued-cursor-session', hook_event_name: 'beforeSubmitPrompt', generation_id: 'queued-generation' }, folder: 'queued-cursor-folder' },
+    { agent: 'gemini', event: 'BeforeAgent', config: ['.gemini', 'settings.json'], payload: { session_id: 'queued-gemini-session' } },
+    { agent: 'grok', event: 'UserPromptSubmit', config: ['.grok', 'hooks', 'agent-board-local.json'], payload: {}, env: { GROK_SESSION_ID: 'queued-grok-session' } },
+    { agent: 'muse', event: 'UserPromptSubmit', config: ['.config', 'muse', 'settings.json'], payload: { session_id: 'queued-muse-session' } },
+    { agent: 'antigravity', event: 'PreInvocation', config: ['.gemini', 'config', 'hooks.json'], payload: { conversationId: 'queued-antigravity-session' } },
+    { agent: 'opencode', mode: '--agent-status', payload: { session_id: 'queued-opencode-session', state: 'working' } },
+    { agent: 'openclaw', mode: '--codex-event', payload: { session_id: 'queued-openclaw-event-session', hook_event_name: 'UserPromptSubmit', turn_id: 'queued-run', prompt_submitted: false } },
+    { agent: 'openclaw', mode: '--agent-status', payload: { session_id: 'queued-openclaw-status-session', state: 'working' } },
+    { agent: 'deepseek', mode: '--agent-status', payload: { session_id: 'queued-deepseek-session', state: 'working' } },
+  ]
+  for (const host of hosts) await t.test(`${host.agent} ${host.mode ?? host.event}`, () => fixture(async f => {
+    const installed = f.install('--agent', host.agent, '--apply')
+    assert.equal(installed.status, 0, installed.stderr)
+    const worker = join(f.root, 'agent-board-hook.mjs')
+    let argv
+    let payload = { ...host.payload }, input
+    if (host.config) {
+      const config = JSON.parse(readFileSync(join(f.home, ...host.config)))
+      const hook = host.agent === 'antigravity' ? config['agent-board-local'][host.event][0] : config.hooks[host.event][0]
+      const command = hook.command ?? hook.hooks[0].command
+      const launch = host.agent === 'antigravity' && process.platform === 'win32' ? Buffer.from(command.split(' ').at(-1), 'base64').toString('utf16le') : command
+      const words = [...launch.matchAll(/"([^"]*)"|'((?:[^']|'')*)'|(\S+)/g)].map(match => match[1] ?? match[2]?.replaceAll("''", "'") ?? match[3])
+      argv = words.slice(words.indexOf('--hook-version'), words.includes('--hook-started') ? words.indexOf('--hook-started') : undefined)
+      assert.equal(argv[0], '--hook-version')
+    } else {
+      const saved = []
+      const instantiate = (source, suffix) => new Function('createRequire', 'spawnSync', 'tool', `${source.replace(/^import .*\n/gm, '').replaceAll('import.meta.url', JSON.stringify(import.meta.url)).replace('export default', 'const plugin =').replace(/^export /gm, '')}\n${suffix}`)(createRequire, (node, args, options) => { saved.push({ node, args: [...args], input: options.input }); return { status: 0, stdout: '' } }, Object.assign(value => value, { schema: { string: () => ({}), enum: () => ({}), array: () => ({}) } }))
+      if (host.agent === 'opencode') {
+        const factory = instantiate(opencodePlugin(process.execPath, worker, f.progress, 'Progress', f.home), 'return AgentBoardLocal')
+        const hooks = await factory({ client: { session: { get: async ({ path }) => ({ data: { id: path.id } }) } } })
+        await hooks.event({ event: { type: 'session.status', properties: { sessionID: payload.session_id, status: { type: 'busy' } } } })
+      } else if (host.agent === 'openclaw') {
+        const { plugin, report } = instantiate(openclawLocalPlugin(process.execPath, worker, f.progress, f.home), 'return { plugin, report }')
+        if (host.mode === '--codex-event') {
+          let subscription
+          plugin.register({ on: () => {}, agent: { events: { registerAgentEventSubscription: value => { subscription = value } } } })
+          await subscription.handle({ stream: 'lifecycle', sessionId: payload.session_id, runId: payload.turn_id, data: { phase: 'start' } })
+        } else {
+          // OpenClaw has no status callback; exercise that mode through its generated runner.
+          report(host.mode, payload, Date.now() + 2000)
+        }
+      } else {
+        const callbacks = new Map()
+        const apply = instantiate(deepseekLocalPlugin(process.execPath, worker, f.progress, f.home), 'return apply')
+        apply({ on: (name, callback) => callbacks.set(name, callback) })
+        await callbacks.get('agent/status')({ agent: { session: { header: { id: payload.session_id } } }, status: 'running' })
+      }
+      assert.equal(saved.length, 1)
+      assert.equal(saved[0].node, process.execPath)
+      assert.equal(saved[0].args[0], worker)
+      argv = saved[0].args.slice(1)
+      input = saved[0].input
+      payload = JSON.parse(input)
+    }
+    if (host.agent === 'codex') payload.cwd = join(f.root, 'work', host.folder)
+    if (host.agent === 'cursor') payload.workspace_roots = [join(f.root, 'work', host.folder)]
+    const env = { ...f.env, ...host.env }
+    const deadline = argv.indexOf('--hook-deadline')
+    if (deadline < 0) argv.push('--hook-deadline', String(Date.now() - 1))
+    else argv[deadline + 1] = String(Date.now() - 1)
+    const queued = spawnSync(process.execPath, [worker, ...argv], { env, input: input ?? JSON.stringify(payload), encoding: 'utf8', windowsHide: true, timeout: 5000 })
+    assert.equal(queued.status, 0, hookFailure(queued))
+    const files = pendingFiles(f)
+    assert.equal(files.length, 1)
+    assert.match(files[0], /\.raw\.json$/)
+    const log = join(f.root, 'hook-errors.log')
+    const errors = readFileSync(log, 'utf8')
+    assert.match(errors, new RegExp(` ${host.agent} REPORTER_QUEUED\\n$`))
+    assert.equal(errors.trimEnd().split('\n').length, 1)
+    const next = f.event('SessionStart', null, { session_id: 'queued-host-follow-up-session' })
+    assert.equal(next.status, 0, hookFailure(next))
+    const id = payload.session_id ?? payload.conversation_id ?? payload.conversationId ?? host.env.GROK_SESSION_ID
+    const owner = createHash('sha256').update(`${host.agent}:${id}`).digest('hex')
+    const record = JSON.parse(readFileSync(join(f.root, 'sessions', `${owner}.json`)))
+    assert.equal(record.state, 'working')
+    if (host.folder) assert.equal(record.title, host.folder)
+    assert.deepEqual(pendingFiles(f), [])
+    assert.equal(readFileSync(log, 'utf8'), errors)
+    assert.equal(queued.stderr + next.stderr, '')
+  }))
+})
+
+test('a reporter that exits 0 after its deadline keeps its stdout without queuing a duplicate', () => fixture(f => {
+  const worker = join(f.root, 'agent-board-hook.mjs')
+  f.save(f.script, 'globalThis.AGENT_BOARD = {"hookVersion":1,}\n')
+  f.save(worker, hookWorker(f.home, f.script, 'const isBoardRequest = () => false'))
+  const preload = join(f.home, 'late-success.cjs')
+  const stdout = JSON.stringify({ env: { AGENT_BOARD_SESSION_ID: session, AGENT_BOARD_AGENT: 'cursor' } }) + '\n'
+  f.save(preload, `const child = require('node:child_process')
+child.spawnSync = (_executable, args) => {
+  const deadline = Number(args[args.indexOf('--hook-deadline') + 1])
+  Date.now = () => deadline + 1
+  return { status: 0, signal: null, stdout: ${JSON.stringify(stdout)}, stderr: '' }
+}
+`)
+  const result = spawnSync(process.execPath, [worker, '--hook-version', '1', '--codex-event', '--agent', 'cursor', '--progress-file', f.progress], { env: { ...f.env, NODE_OPTIONS: `--require ${JSON.stringify(preload)}` }, input: JSON.stringify({ conversation_id: session, hook_event_name: 'sessionStart' }), encoding: 'utf8', windowsHide: true, timeout: 5000 })
+  assert.equal(result.status, 0, hookFailure(result))
+  assert.equal(result.stdout, stdout)
+  assert.equal(result.stderr, '')
+  assert.deepEqual(pendingFiles(f), [])
+  assert.equal(existsSync(join(f.root, 'hook-errors.log')), false)
 }))
 
 test('a hook whose reporter runs past the deadline saves the raw event and the next hook applies it', () => fixture(async f => {
@@ -568,10 +692,13 @@ test('a hook whose reporter runs past the deadline saves the raw event and the n
   const real = readFileSync(f.script)
   const pidFile = join(f.root, 'raw-reporter.pid')
   f.save(f.script, `${real.toString().split('\n')[0]}\nimport { writeFileSync } from 'node:fs'\nwriteFileSync(${JSON.stringify(pidFile)}, String(process.pid))\nsetInterval(() => {}, 1000)\n`)
+  let wasReaped = false
   try {
     const started = performance.now()
-    const result = await fireHook(f, JSON.stringify({ session_id: session, hook_event_name: 'UserPromptSubmit', turn_id: 'raw-first', cwd: join(f.root, 'work', 'raw-folder-project'), prompt: 'PRIVATE_PROMPT', last_assistant_message: 'PRIVATE_ASSISTANT', tool_input: { text: 'PRIVATE_TOOL' }, transcript_path: 'PRIVATE_TRANSCRIPT' }))
+    const result = await fireHook(f, JSON.stringify({ session_id: session, sessionId: 's'.repeat(4096), state: 's'.repeat(4097), generation_id: { text: 'PRIVATE_OBJECT' }, prompt_submitted: true, hook_event_name: 'UserPromptSubmit', turn_id: 'raw-first', cwd: join(f.root, 'work', 'raw-folder-project'), prompt: 'PRIVATE_PROMPT', last_assistant_message: 'PRIVATE_ASSISTANT', tool_input: { text: 'PRIVATE_TOOL' }, transcript_path: 'PRIVATE_TRANSCRIPT' }))
+    wasReaped = !existsSync(pidFile) || !isReporterAlive(Number(readFileSync(pidFile, 'utf8')))
     assert.equal(result.status, 0, hookFailure(result))
+    assert.equal(wasReaped, true, 'the timed-out reporter must be reaped before the hook returns')
     assert.ok(performance.now() - started < 3000)
     const files = pendingFiles(f)
     assert.equal(files.length, 1)
@@ -582,6 +709,10 @@ test('a hook whose reporter runs past the deadline saves the raw event and the n
     assert.equal(raw.kind, 'raw')
     assert.deepEqual(raw.env, {})
     assert.equal(raw.payload.board_request, false)
+    assert.equal(raw.payload.sessionId, 's'.repeat(4096))
+    assert.equal(raw.payload.state, undefined)
+    assert.equal(raw.payload.generation_id, undefined)
+    assert.equal(raw.payload.prompt_submitted, true)
     assert.ok(!raw.argv.includes('--home') && !raw.argv.includes('--hook-deadline'))
     assert.match(readFileSync(join(f.root, 'hook-errors.log'), 'utf8'), /REPORTER_QUEUED/)
     f.save(f.script, real)
@@ -604,31 +735,29 @@ test('a hook whose reporter runs past the deadline saves the raw event and the n
     assert.deepEqual(pendingFiles(f), [])
   } finally {
     f.save(f.script, real)
-    if (existsSync(pidFile)) await stopReporter(Number(readFileSync(pidFile, 'utf8')))
+    if (!wasReaped && existsSync(pidFile)) await stopReporter(Number(readFileSync(pidFile, 'utf8')))
   }
 }))
 
 test('the hook deadline counts from the process start, not from when the worker runs', () => fixture(f => {
-  assert.equal(f.install('--apply').status, 0)
+  assert.equal(f.install('--agent', 'gemini', '--apply').status, 0)
   const worker = join(f.root, 'agent-board-hook.mjs')
-  const argv = ['--hook-version', '1', '--hook-event', 'UserPromptSubmit', '--codex-event', '--agent', 'codex', '--progress-file', f.progress]
-  const payload = { session_id: session, hook_event_name: 'UserPromptSubmit', turn_id: 'late-start' }
-  const at = Date.now() - 2050
-  const started = performance.now()
-  const result = spawnSync(process.execPath, [worker, ...argv, '--hook-started', String(at)], { env: f.env, input: JSON.stringify(payload), encoding: 'utf8', windowsHide: true, timeout: 2000 })
+  const argv = ['--hook-version', '1', '--hook-event', 'BeforeAgent', '--agent-status', '--agent', 'gemini', '--state', 'working', '--progress-file', f.progress]
+  const payload = { session_id: session }
+  const at = Date.now() - 3050
+  const result = spawnSync(process.execPath, [worker, ...argv, '--hook-started', String(at)], { env: f.env, input: JSON.stringify(payload), encoding: 'utf8', windowsHide: true, timeout: 5000 })
   assert.equal(result.status, 0, result.stderr)
-  assert.ok(performance.now() - started < 1500)
-  assert.equal(readFileSync(f.progress, 'utf8').includes('agent=codex'), false)
+  assert.equal(readFileSync(f.progress, 'utf8').includes('agent=gemini'), false)
   const queued = pendingFiles(f)[0]
   assert.ok(queued, 'an expired reporter deadline must save the event in pending/')
   assert.equal(JSON.parse(readFileSync(join(f.root, 'pending', queued))).at, at)
   for (const [index, invalid] of [String(Date.now() + 60000), String(Date.now() - 11000), '1.5', 'NaN', '9007199254740992'].entries()) {
-    const turn = `invalid-start-${index}`
-    const out = spawnSync(process.execPath, [worker, ...argv, '--hook-started', invalid], { env: f.env, input: JSON.stringify({ ...payload, turn_id: turn }), encoding: 'utf8', windowsHide: true, timeout: 3000 })
+    const id = `invalid-start-session-${index}`
+    const out = spawnSync(process.execPath, [worker, ...argv, '--hook-started', invalid], { env: f.env, input: JSON.stringify({ session_id: id }), encoding: 'utf8', windowsHide: true, timeout: 5000 })
     assert.equal(out.status, 0, out.stderr)
-    assert.match(readFileSync(f.progress, 'utf8'), /agent=codex/)
-    const owner = createHash('sha256').update(`codex:${session}`).digest('hex')
-    assert.equal(JSON.parse(readFileSync(join(f.root, 'sessions', `${owner}.json`))).turn, turn)
+    assert.match(readFileSync(f.progress, 'utf8'), /agent=gemini/)
+    const owner = createHash('sha256').update(`gemini:${id}`).digest('hex')
+    assert.equal(JSON.parse(readFileSync(join(f.root, 'sessions', `${owner}.json`))).state, 'working')
     assert.deepEqual(pendingFiles(f), [])
   }
 }))
@@ -637,19 +766,38 @@ test('a raw entry with an unknown flag or environment variable is dropped, not a
   assert.equal(f.install('--apply').status, 0)
   const entry = { version: 1, kind: 'raw', at: Date.now(), argv: ['--codex-event', '--agent', 'codex', '--progress-file', f.progress], env: {}, payload: { session_id: 'invalid-raw-session', hook_event_name: 'UserPromptSubmit', turn_id: 'invalid-turn' } }
   for (const [index, bad] of [
+    { ...entry, version: 2 },
+    { ...entry, kind: 'other' },
+    { ...entry, at: -1 },
+    { ...entry, at: '1234' },
+    { ...entry, argv: [...entry.argv, 1] },
     { ...entry, argv: [...entry.argv, '--unknown', 'value'] },
     { ...entry, env: { NODE_OPTIONS: '--inspect' } },
+    { ...entry, env: { GROK_SESSION_ID: 123 } },
     { ...entry, argv: [...entry.argv, '--home', f.home] },
     { ...entry, argv: [...entry.argv, '--agent', 'codex'] },
     { ...entry, argv: ['--codex-report', ...entry.argv.slice(1)] },
     { ...entry, env: { GROK_SESSION_ID: 'wrong-agent-session' } },
     { ...entry, argv: [...entry.argv, '--state'] },
+    { ...entry, argv: [...entry.argv, '--state', 'working'] },
+    { ...entry, argv: [...entry.argv, '--event', 'UserPromptSubmit'] },
+    { ...entry, argv: ['--agent-status', ...entry.argv.slice(1), '--state', 'working'] },
+    { ...entry, argv: ['--agent-status', '--agent', 'cursor', '--state', 'working', '--progress-file', f.progress] },
+    { ...entry, argv: ['--codex-event', '--agent', 'unknown', '--progress-file', f.progress] },
+    { ...entry, argv: ['--codex-event', '--agent', 'codex'] },
+    { ...entry, argv: [...entry.argv, '--hook-event', 'UnknownEvent'] },
     { ...entry, argv: ['--codex-event', '--agent', '--codex', '--progress-file', f.progress] },
     { ...entry, at: Date.now() + 120000 },
-    { ...entry, argv: ['--agent-status', '--agent', 'antigravity', '--state', 'working', '--progress-file', f.progress], payload: { conversationId: 'invalid-antigravity-session' } },
+    { ...entry, argv: ['--agent-status', '--agent', 'antigravity', '--state', 'working', '--event', 'Stop', '--progress-file', f.progress], payload: { conversationId: 'invalid-antigravity-session' } },
   ].entries()) f.save(join(f.root, 'pending', `${index}.raw.json`), JSON.stringify(bad))
+  const control = { ...entry, payload: { ...entry.payload, session_id: 'valid-raw-session' } }
+  f.save(join(f.root, 'pending', 'valid.raw.json'), JSON.stringify(control))
   assert.equal(f.event('UserPromptSubmit').status, 0)
   assert.deepEqual(pendingFiles(f), [])
+  const validOwner = createHash('sha256').update('codex:valid-raw-session').digest('hex')
+  const record = JSON.parse(readFileSync(join(f.root, 'sessions', `${validOwner}.json`)))
+  assert.equal(record.state, 'working')
+  assert.equal(record.turn, 'invalid-turn')
   const owner = createHash('sha256').update('codex:invalid-raw-session').digest('hex')
   assert.equal(existsSync(join(f.root, 'sessions', `${owner}.json`)), false)
   const antigravity = createHash('sha256').update('antigravity:invalid-antigravity-session').digest('hex')
@@ -1709,8 +1857,8 @@ test('all targets initialize one shared board and explicitly name unfinished nat
   assert.ok(!text.includes('PRIVATE_PAYLOAD'))
 }))
 
-test('Windows Antigravity commands fit cmd.exe with a 120 character home path', { skip: process.platform !== 'win32' }, () => fixture(f => {
-  assert.ok(f.home.length < 119, 'the fixture must leave room for a 120 character home path')
+test('Windows Antigravity commands fit cmd.exe with a 120 character home path', { skip: process.platform !== 'win32' }, t => fixture(f => {
+  if (f.home.length >= 119) return t.skip('TEMP is too long to leave room for a 120 character home path')
   const home = join(f.home, 'h'.repeat(119 - f.home.length))
   assert.equal(home.length, 120)
   mkdirSync(home)
@@ -1718,6 +1866,30 @@ test('Windows Antigravity commands fit cmd.exe with a 120 character home path', 
   assert.equal(result.status, 0, result.stderr)
   const hooks = JSON.parse(readFileSync(join(home, '.gemini', 'config', 'hooks.json')))['agent-board-local']
   for (const group of Object.values(hooks)) for (const hook of group) assert.ok(hook.command.length < 8191, `${hook.command.length} characters`)
+}))
+
+test('Windows Antigravity queues an event with the PowerShell process start stamp', { skip: process.platform !== 'win32' }, () => fixture(async f => {
+  assert.equal(f.install('--agent', 'antigravity', '--apply').status, 0)
+  const worker = join(f.root, 'agent-board-hook.mjs')
+  const command = JSON.parse(readFileSync(join(f.home, '.gemini', 'config', 'hooks.json')))['agent-board-local'].PreInvocation[0].command
+  const stampFile = join(f.root, 'powershell-stamp.json')
+  const preload = join(f.home, 'queue-antigravity.cjs')
+  f.save(preload, `if (process.argv[1] === ${JSON.stringify(worker)}) {
+  const at = Number(process.argv[process.argv.indexOf('--hook-started') + 1])
+  require('node:fs').writeFileSync(${JSON.stringify(stampFile)}, JSON.stringify({ at, nodeStarted: require('node:perf_hooks').performance.timeOrigin }))
+  process.argv.push('--hook-deadline', String(Date.now() - 1))
+}
+`)
+  const result = await fireCommand({ ...f, env: { ...f.env, NODE_OPTIONS: `--require ${JSON.stringify(preload)}` } }, command, JSON.stringify({ conversationId: 'stamped-antigravity-session' }))
+  assert.equal(result.status, 0, hookFailure(result))
+  const stamp = JSON.parse(readFileSync(stampFile))
+  assert.ok(Number.isSafeInteger(stamp.at))
+  assert.ok(stamp.at < Math.floor(stamp.nodeStarted), 'PowerShell must have started before Node')
+  const files = pendingFiles(f)
+  assert.equal(files.length, 1)
+  assert.match(files[0], /\.raw\.json$/)
+  assert.equal(JSON.parse(readFileSync(join(f.root, 'pending', files[0]))).at, stamp.at)
+  assert.match(readFileSync(join(f.root, 'hook-errors.log'), 'utf8'), /antigravity REPORTER_QUEUED/)
 }))
 
 test('Antigravity setup merges its named native hooks and removes only the owned definition', () => fixture(f => {

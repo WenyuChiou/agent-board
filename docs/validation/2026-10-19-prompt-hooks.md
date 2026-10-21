@@ -80,8 +80,10 @@ completion store resolver and its raw-owner fingerprint; this branch does not
 change that independently developed resolver.
 
 Independent native reporters keep their established first-prompt initialization
-semantics. Where observed, a real prompt answers their prior explicit `[?]` steps; generic busy,
-retry or run-start activity does not. Native Codex replay/retired-turn guards
+semantics. Since #243, a real prompt no longer answers their prior explicit `[?]` steps: the
+hooks never read the prompt's words, so a step stays waiting until the agent reports again or
+the person marks it answered on the board. Generic busy, retry or run-start activity does not
+answer it either. Native Codex replay/retired-turn guards
 still protect newer questions. The no-create rule above applies to legacy inbox
 receipts, not native session initialization.
 

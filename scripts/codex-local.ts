@@ -214,14 +214,13 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
       }
       const entryAgent = flags.get('--agent') as LocalAgent
       if (!localAgents.includes(entryAgent) || !flags.has('--progress-file')) throw new Error('INVALID_RAW_ARGV')
-      const isCodexEvent = entryAgent === 'codex' || entryAgent === 'cursor'
-      if ((entryMode === '--codex-event') !== isCodexEvent || isCodexEvent && flags.has('--state')) throw new Error('INVALID_RAW_ARGV')
-      if (!isCodexEvent && !flags.has('--state')) throw new Error('INVALID_RAW_ARGV')
-      if (entryAgent === 'antigravity' ? !flags.has('--event') : flags.has('--event')) throw new Error('INVALID_RAW_ARGV')
+      const isCodexEvent = entryMode === '--codex-event'
+      if (!isCodexEvent && (entryAgent === 'codex' || entryAgent === 'cursor') || isCodexEvent && flags.has('--state')) throw new Error('INVALID_RAW_ARGV')
+      if (entryAgent !== 'antigravity' && flags.has('--event')) throw new Error('INVALID_RAW_ARGV')
       const hookEvent = flags.get('--hook-event')
       if (hookEvent !== undefined) {
         const events = entryAgent === 'codex' ? codexEvents : entryAgent === 'cursor' ? Object.keys(cursorEvents) : Object.keys(statusEvents[entryAgent] ?? {})
-        if (!events.some(event => event === hookEvent) || !isCodexEvent && statusEvents[entryAgent]?.[hookEvent] !== flags.get('--state') || entryAgent === 'antigravity' && hookEvent !== flags.get('--event')) throw new Error('INVALID_RAW_ARGV')
+        if (!events.some(event => event === hookEvent) || !isCodexEvent && statusEvents[entryAgent]?.[hookEvent] !== (flags.get('--state') ?? object(raw.payload).state) || flags.has('--event') && hookEvent !== flags.get('--event')) throw new Error('INVALID_RAW_ARGV')
       }
       const env = object(raw.env)
       if (Object.entries(env).some(([name, value]) => !(HOOK_SESSION_ENV[entryAgent] ?? []).includes(name) || typeof value !== 'string')) throw new Error('INVALID_RAW_ENV')
