@@ -1162,7 +1162,8 @@ test('a prompt clears a question during an older model summary and that summary 
   await clock.advance(1000)
   expect(world.files.get(FILE)).not.toContain('OLD_QUESTION')
   expect(effectivePromptMirror(world).state).toBe('working')
-  expect(world.asked).toHaveLength(1)
+  expect(world.asked).toHaveLength(2)
+  expect(world.files.get(FILE)).not.toContain('- [?]')
 })
 
 test('another session prompt barrier survives an older digest read-back retry', async ($, on) => {
@@ -1184,6 +1185,129 @@ test('another session prompt barrier survives an older digest read-back retry', 
   expect(world.files.get(FILE)).toContain('- [x] Old decision — OLD_QUESTION?')
   expect((world.store![`agent:${PROMPT_ID}`] as { state: string }).state).toBe('working')
   expect(world.asked).toHaveLength(1)
+})
+
+test('a turn read after a newer prompt keeps its finished steps and its question stays answered', async ($, on) => {
+  const { world } = questionWorld()
+  world.reply = () => 'TITLE: Migration\nCONTEXT: fixture\nDONE: Added the limiter\nNEXT: Continue\nASK: Limit — 100 or 300?'
+  addPrompt(world, PROMPT_AT + 3000)
+  const clock = engineBeneath(on, world)
+  await probeStart($)
+  await clock.advance(5000)
+  const name = `${INBOX}/codex-turn-${PROMPT_AT + 2000}-1.json`
+  world.files.set(name, JSON.stringify({ session_id: PROMPT_SESSION, cwd: '/demo', prompt: 'Add a limiter', last_assistant_message: 'Added the limiter. 100 or 300?' }))
+  world.mtime += 1
+  await clock.advance(5000)
+  await clock.advance(5000)
+  expect(world.files.get(FILE)).toContain('- [x] Added the limiter')
+  expect(parseProgress(world.files.get(FILE)!).flatMap(project => project.tasks).flatMap(task => task.steps).some(step => step.status === 'waiting')).toBe(false)
+  expect(world.files.get(FILE)).not.toContain('100 or 300')
+  expect(effectivePromptMirror(world).state).toBe('working')
+  expect(world.asked).toHaveLength(1)
+  expect(world.files.has(name)).toBe(false)
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
+  try {
+    expect(JSON.stringify(await ui.drawn())).not.toContain('100 or 300')
+  } finally {
+    await ui.unmount()
+  }
+})
+
+test('a session end read after a newer prompt keeps the session working', async ($, on) => {
+  const { world } = questionWorld()
+  world.reply = () => 'TITLE: Migration\nCONTEXT: fixture\nDONE: Added the limiter\nNEXT: Continue\nASK: Limit — 100 or 300?'
+  addPrompt(world, PROMPT_AT + 3000)
+  const clock = engineBeneath(on, world)
+  await probeStart($)
+  await clock.advance(5000)
+  world.files.set(`${INBOX}/codex-turn-${PROMPT_AT + 2000}-1.json`, JSON.stringify({ session_id: PROMPT_SESSION, cwd: '/demo', prompt: 'Add a limiter', last_assistant_message: 'Added the limiter. 100 or 300?' }))
+  world.files.set(`${INBOX}/codex-end-${PROMPT_AT + 2000}-1.json`, JSON.stringify({ session_id: PROMPT_SESSION }))
+  world.mtime += 1
+  await clock.advance(5000)
+  await clock.advance(5000)
+  expect(world.files.get(FILE)).toContain('- [x] Added the limiter')
+  expect(world.files.get(FILE)).toContain('state=working')
+  expect(effectivePromptMirror(world).state).toBe('working')
+})
+
+test('a board reply older than a newer prompt changes nothing', async ($, on) => {
+  const { world } = questionWorld()
+  addPrompt(world, PROMPT_AT + 3000)
+  const clock = engineBeneath(on, world)
+  await probeStart($)
+  await clock.advance(5000)
+  const before = world.files.get(FILE)
+  world.files.set(`${INBOX}/codex-turn-${PROMPT_AT + 2000}-77.json`, JSON.stringify({ session_id: PROMPT_SESSION, prompt: '/board', last_assistant_message: 'Board' }))
+  world.mtime += 1
+  await clock.advance(5000)
+  await clock.advance(5000)
+  expect(world.files.get(FILE)).toBe(before)
+  expect(parseProgress(world.files.get(FILE)!).flatMap(project => project.tasks).flatMap(task => task.steps).some(step => step.status === 'waiting')).toBe(false)
+  expect(effectivePromptMirror(world).state).toBe('working')
+  expect(world.asked).toEqual([])
+})
+
+test('a turn read after a prompt another session took keeps its question answered', async ($, on) => {
+  const { world } = questionWorld()
+  world.reply = () => 'TITLE: Migration\nCONTEXT: fixture\nDONE: Added the limiter\nNEXT: Continue\nASK: Limit — 100 or 300?'
+  world.store![`agentPrompt:${PROMPT_ID}:${(PROMPT_AT + 3000) * 2}:${PROMPT_AT + 3500}`] = { id: PROMPT_ID, agent: 'codex', session: PROMPT_SESSION, at: PROMPT_AT + 3000, updated: PROMPT_AT + 3500 }
+  world.files.set(FILE, upsertAutoBlock(world.files.get(FILE)!, effectivePromptMirror(world), ZH_TW))
+  const clock = engineBeneath(on, world)
+  await probeStart($)
+  await clock.advance(5000)
+  const name = `${INBOX}/codex-turn-${PROMPT_AT + 2000}-1.json`
+  world.files.set(name, JSON.stringify({ session_id: PROMPT_SESSION, cwd: '/demo', prompt: 'Add a limiter', last_assistant_message: 'Added the limiter. 100 or 300?' }))
+  world.mtime += 1
+  await clock.advance(5000)
+  await clock.advance(5000)
+  expect(world.files.get(FILE)).toContain('- [x] Added the limiter')
+  expect(parseProgress(world.files.get(FILE)!).flatMap(project => project.tasks).flatMap(task => task.steps).some(step => step.status === 'waiting')).toBe(false)
+  expect(effectivePromptMirror(world).state).toBe('working')
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
+  try {
+    expect(JSON.stringify(await ui.drawn())).not.toContain('100 or 300')
+  } finally {
+    await ui.unmount()
+  }
+})
+
+test('a late reply that only asks keeps the block\'s open steps', async ($, on) => {
+  const { world } = questionWorld()
+  world.reply = () => 'TITLE: Migration\nCONTEXT: fixture\nDONE: -\nNEXT: -\nASK: Limit — 100 or 300?'
+  addPrompt(world, PROMPT_AT + 3000)
+  const clock = engineBeneath(on, world)
+  await probeStart($)
+  await clock.advance(5000)
+  world.files.set(`${INBOX}/codex-turn-${PROMPT_AT + 2000}-1.json`, JSON.stringify({ session_id: PROMPT_SESSION, cwd: '/demo', prompt: 'Add a limiter', last_assistant_message: '100 or 300?' }))
+  world.mtime += 1
+  await clock.advance(5000)
+  await clock.advance(5000)
+  expect(world.files.get(FILE)).toContain('- [ ] Continue migration')
+  expect(parseProgress(world.files.get(FILE)!).flatMap(project => project.tasks).flatMap(task => task.steps).some(step => step.status === 'waiting')).toBe(false)
+  expect(effectivePromptMirror(world).state).toBe('working')
+})
+
+test('a late turn and a newer turn read in one look fold in order', async ($, on) => {
+  const { world } = questionWorld()
+  world.reply = prompt => prompt.includes('Deployed the limiter. Ship it?')
+    ? 'TITLE: Migration\nCONTEXT: fixture\nDONE: Deployed the limiter\nNEXT: -\nASK: Ship — Ship it?'
+    : 'TITLE: Migration\nCONTEXT: fixture\nDONE: Added the limiter\nNEXT: Continue\nASK: Limit — 100 or 300?'
+  addPrompt(world, PROMPT_AT + 3000)
+  const clock = engineBeneath(on, world)
+  await probeStart($)
+  await clock.advance(5000)
+  world.files.set(`${INBOX}/codex-turn-${PROMPT_AT + 2000}-1.json`, JSON.stringify({ session_id: PROMPT_SESSION, cwd: '/demo', prompt: 'Add a limiter', last_assistant_message: 'Added the limiter. 100 or 300?' }))
+  world.files.set(`${INBOX}/codex-turn-${PROMPT_AT + 4000}-1.json`, JSON.stringify({ session_id: PROMPT_SESSION, cwd: '/demo', prompt: 'Deploy the limiter', last_assistant_message: 'Deployed the limiter. Ship it?' }))
+  world.mtime += 1
+  await clock.advance(5000)
+  await clock.advance(5000)
+  expect(world.files.get(FILE)).toContain('- [x] Added the limiter')
+  expect(world.files.get(FILE)).toContain('- [x] Deployed the limiter')
+  expect(world.files.get(FILE)).not.toContain('100 or 300')
+  const waiting = parseProgress(world.files.get(FILE)!).flatMap(project => project.tasks).flatMap(task => task.steps).filter(step => step.status === 'waiting')
+  expect(waiting).toHaveLength(1)
+  expect(waiting[0]!.text).toContain('Ship it?')
+  expect(effectivePromptMirror(world).state).toBe('waiting')
 })
 
 test('a newer owner landing immediately before prompt persistence is never overwritten', async ($, on) => {
