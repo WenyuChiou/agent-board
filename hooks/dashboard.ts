@@ -1,20 +1,21 @@
 import type { ProgressStepStatus } from '../types'
 import type { PendingTurn } from './board'
 import { clip } from './mirror'
-import { askRole, DARK, LIGHT, stepRole, toneRole } from './palette'
+import { askRole, stepRole, toneRole } from './palette'
 import type { Palette } from './palette'
+import { agentMark, agentMarkCss, boardMark, pageBaseCss, pageTokens, themeHead, themeSwitch } from './page-look'
 import type { Strings } from './i18n'
 import type { Focus, TaskRow, View, ViewStep, WaitingItem } from './view'
 
 // progress.html: the same view as the pane, as a page any browser keeps open in a window of
 // its own, beside progress.md. Built from the file and pending inbox turns, without a session's
 // own card, so every agent's work is on it. It reloads itself every 30
-// seconds and keeps the sections the person opened, and follows the system's light or dark.
+// seconds and keeps the sections the person opened and their chosen page theme.
 
 const GLYPH: Record<ProgressStepStatus, string> = {
   done: '✓',
   doing: '▸',
-  todo: '○',
+  todo: '•',
   waiting: '●',
   running: '◐',
   blocked: '!',
@@ -56,9 +57,9 @@ const bar = (done: number, total: number): string => {
 }
 
 const waitingItem = (item: WaitingItem, s: Strings): string =>
-  `<div class="ask"><div><span class="chip" style="color:var(--${askVar(item.kind)})">${esc(s.chip(s.ask[item.kind]))}</span>` +
+  `<div class="ask"><div><span class="chip" style="color:var(--${askVar(item.kind)})">${esc(s.ask[item.kind])}</span>` +
   `<b>${esc(item.text)}</b></div>` +
-  `<div class="where">${esc(item.project)} › ${esc(item.task)}${item.agent === '' ? '' : ` · ${esc(item.agent)}`}</div>` +
+  `<div class="where">${agentMark(item.agent, item.where === 'manual')}${esc(item.project)} › ${esc(item.task)}${item.agent === '' ? '' : ` · ${esc(item.agent)}`}</div>` +
   (item.note === '' ? (item.context === '' ? '' : `<div class="quiet">${esc(s.contextLine(item.context))}</div>`) : `<div>${esc(item.note)}</div>`) +
   // A backticked word in another kind of question is a name, not something to run.
   (item.command === null || item.kind !== 'do' ? '' : `<code>${esc(item.command)}</code>`) +
@@ -73,7 +74,7 @@ const row = (it: TaskRow, s: Strings, showProject: boolean): string => {
   return (
     `<details class="row" data-key="${esc(it.key)}"><summary><span class="title">${esc(it.title)}</span>` +
     `<span class="tail" style="color:var(--${it.due === null ? 'muted' : toneVar(it.due.tone)})">${esc(it.due === null ? `${it.done}/${it.total}` : it.due.left)}</span>` +
-    `<span class="meta" style="color:var(--${toneVar(it.tone)})">${bar(it.done, it.total)} ${esc(meta.join(' · '))}</span></summary>` +
+    `<span class="meta" style="color:var(--${toneVar(it.tone)})">${agentMark(it.agent, it.auto === null)}${bar(it.done, it.total)} ${esc(meta.join(' · '))}</span></summary>` +
     (it.context === '' ? '' : `<p class="quiet">${esc(s.contextLine(it.context))}</p>`) +
     steps(it.steps) +
     '</details>'
@@ -109,15 +110,27 @@ export const dashboardHtml = (view: View, s: Strings, path: string, stamp: strin
     ['✓', today, s.countToday, 'done'],
   ] as const
 
+  const sections = [
+    ['inbox', s.boardInbox, pending.length],
+    ['waiting', s.sectionWaiting, view.waiting.length],
+    ['reminder', s.sectionQuestionReminders, view.reminder?.length ?? 0],
+    ['older', s.sectionOlderQuestions, view.older?.length ?? 0],
+    ['idle', s.idleCount(view.idle.length), view.idle.length],
+    ['stopped', s.viewStopped, view.stopped.length],
+    ['due', s.sectionDue, view.due.length],
+    ['others', s.sectionActive, view.active.length],
+    ['recent', s.sectionRecent, view.recent.length],
+  ] as const
+
   return `<!doctype html>
 <html lang="${htmlLang(s)}">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>${esc(s.paneTitle)} · Agent Board</title>
+<script>${themeHead}</script>
 <style>
-:root{${vars(LIGHT)};--ground:#fbfaf5;--ink:#2b2b2b;--line:#e3e1d7;color-scheme:light}
-@media (prefers-color-scheme:dark){:root{${vars(DARK)};--ground:#1e2022;--ink:#e6e4dc;--line:#34373a;color-scheme:dark}}
+${pageTokens()}
 *{box-sizing:border-box}
 body{margin:0;background:var(--ground);color:var(--ink);font:15px/1.6 "Hiragino Sans","Noto Sans TC","Noto Sans SC","Microsoft JhengHei","Microsoft YaHei",system-ui,sans-serif}
 main{max-width:760px;margin:0 auto;padding:20px max(16px,env(safe-area-inset-left)) 40px max(16px,env(safe-area-inset-right));display:grid;gap:14px}
@@ -155,11 +168,31 @@ details.row{margin:6px 0 0 8px}
 footer{color:var(--muted);font-size:.85rem;display:grid;gap:4px;border-top:1px solid var(--line);padding-top:10px}
 .legend{display:flex;flex-wrap:wrap;gap:2px 14px}
 @media (prefers-reduced-motion:reduce){*{scroll-behavior:auto}}
+${pageBaseCss}
+${agentMarkCss()}
+:root{--shadow:0 1px 2px rgba(0,0,0,.05),0 2px 8px -4px rgba(0,0,0,.08)}
+.dashboard-shell{display:grid;grid-template-columns:200px minmax(0,780px);column-gap:36px;align-items:start}
+main{max-width:780px;min-width:0;margin:0;padding:18px 0 40px;gap:18px}
+.dash-nav{position:sticky;top:var(--head-h,70px);display:grid;gap:4px;padding:20px 0;max-height:calc(100dvh - var(--head-h,70px));overflow:auto}
+.dash-nav h2{font-size:11.5px;text-transform:uppercase;letter-spacing:.07em;color:var(--muted);margin:0 0 6px;padding:0 10px}
+.dash-nav button{display:flex;align-items:center;justify-content:space-between;gap:10px;min-height:36px;padding:6px 10px;border:1px solid transparent;border-radius:9px;text-align:left;background:transparent;font-size:14px;cursor:pointer}
+.dash-nav button:hover{background:var(--surface);border-color:var(--line)}.dash-nav .ct{color:var(--muted);font-size:12px;font-variant-numeric:tabular-nums}
+.where .ag{margin-right:6px}.head .meta{font-size:12px}.head .brand{flex-wrap:wrap}.head .brand .meta{margin-left:auto}
+.counts{display:grid;grid-template-columns:repeat(4,1fr);gap:0;border:1px solid var(--line);border-radius:14px;background:var(--surface);overflow:hidden}.counts>span{padding:12px;border-left:1px solid var(--line)}.counts>span:first-child{border-left:0}
+.focus{border:1px solid var(--line);border-radius:14px;background:var(--surface);padding:16px;box-shadow:var(--shadow)}
+details.section{border:1px solid var(--line);padding:0;border-radius:14px;background:var(--surface);box-shadow:var(--shadow);overflow:clip;scroll-margin-top:calc(var(--head-h,70px) + 12px)}
+.section>summary{padding:12px 16px}.section>.ask,.section>.quiet,.section>.steps,.section>p{margin:12px 16px}.section>.group{margin:0;padding:12px 16px}.group h3{font-weight:650}
+details.row{margin:0;border-top:1px solid var(--line);padding:0}.row>summary{padding:11px 16px}.row>p,.row>.steps{margin:10px 16px 16px}.row .title{font-weight:600}.row .meta{flex-wrap:wrap;gap:6px}
+.ask{gap:8px;padding:8px 0}.chip{border:1px solid currentColor;border-radius:999px;padding:3px 8px;font-size:12px}.steps li{gap:4px 8px;padding:5px 8px;border-radius:8px}.steps .g{width:22px;height:22px;display:grid;place-items:center;font-size:inherit;cursor:default;user-select:none}.steps li{grid-template-columns:2ch 22px minmax(0,1fr)}.steps .now{background:var(--inset)}
+footer{font-size:12.5px;overflow-wrap:anywhere}code{background:var(--inset);border:1px solid var(--line);border-radius:8px}
+@media (max-width:760px){.dashboard-shell{grid-template-columns:minmax(0,1fr)}.dash-nav{position:static;display:flex;flex-wrap:wrap;gap:6px;padding:16px 0 0;max-height:none}.dash-nav h2{flex-basis:100%}.dash-nav button{background:var(--surface);border-color:var(--line)}main{padding-top:16px}}
+@media (max-width:600px){.counts{grid-template-columns:repeat(2,1fr)}.counts>span:nth-child(3){border-left:0}.counts>span:nth-child(n+3){border-top:1px solid var(--line)}.head .brand .meta{margin-left:0;flex-basis:100%}.head .brand{column-gap:8px}}
 </style>
 </head>
 <body>
+<header class="head" id="head"><div class="wide topbar"><div class="brand">${boardMark}<h1>${esc(s.paneTitle)}</h1><span class="meta">${esc(stamp)}</span></div>${themeSwitch(s)}</div></header>
+<div class="wide dashboard-shell"><nav class="dash-nav" aria-label="${esc(s.dashSections)}"><h2>${esc(s.dashSections)}</h2>${sections.filter(([, , count]) => count > 0).map(([id, title, count]) => `<button type="button" data-section="dash-${id}"><span>${esc(title)}</span>${id === 'idle' ? '' : `<span class="ct">${count}</span>`}</button>`).join('')}</nav>
 <main>
-<header><h1>${esc(s.paneTitle)}</h1><span class="meta">${esc(stamp)}</span></header>
 ${view.warning ? `<p role="status" style="color:var(--alert)">${esc(view.warning)}</p>` : ''}
 <section class="counts">${counts
     .map(([glyph, n, word, role]) => `<span><span style="color:var(--${n > 0 ? role : 'muted'})">${glyph} ${n}</span> ${esc(word)}</span>`)
@@ -172,7 +205,7 @@ ${section(
   'accent',
   '',
   `<p class="quiet">${esc(s.dashInboxHint)}</p>` + pending.map(turn =>
-    `<div class="ask"><div class="where">${esc([turn.project, turn.agent].filter(part => part !== '').join(' · '))}</div>` +
+    `<div class="ask"><div class="where">${agentMark(turn.agent)}${esc([turn.project, turn.agent].filter(part => part !== '').join(' · '))}</div>` +
     `<div><span style="color:var(--${turn.isQuestion ? 'waiting' : 'accent'})">${turn.isQuestion ? '●' : '◐'}</span> ${turn.isQuestion ? esc(clip(turn.text, 200)) : ''}</div></div>`,
   ).join(''),
   true,
@@ -206,7 +239,7 @@ ${section(
 )}
 <footer><div class="legend">${LEGEND.map((status, index) => `<span><span style="color:var(--${roleOf(status)})">${GLYPH[status]}</span> ${esc(s.legendWords[index] ?? status)}</span>`).join('')}<span>${esc(s.legendDue)}</span></div>
 <div>${esc(s.legendCleanup)}</div><div>${esc(s.progressFileShown)}</div></footer>
-</main>
+</main></div>
 <script>
 (function () {
   var key = 'progress-open';
@@ -214,12 +247,23 @@ ${section(
   try { open = JSON.parse(localStorage.getItem(key) || '{}'); } catch (e) {}
   document.querySelectorAll('details[data-key]').forEach(function (el) {
     var id = el.getAttribute('data-key');
+    if (id.indexOf('section:') === 0) el.id = 'dash-' + id.slice(8);
     if (id in open) el.open = open[id];
     el.addEventListener('toggle', function () {
       open[id] = el.open;
       try { localStorage.setItem(key, JSON.stringify(open)); } catch (e) {}
     });
   });
+  document.querySelectorAll('button[data-section]').forEach(function (button) {
+    button.addEventListener('click', function () {
+      var section = document.getElementById(button.getAttribute('data-section'));
+      if (section) { section.open = true; section.scrollIntoView({ block: 'start' }); }
+    });
+  });
+  if (typeof ResizeObserver === 'function') {
+    var head = document.getElementById('head');
+    new ResizeObserver(function () { document.documentElement.style.setProperty('--head-h', head.offsetHeight + 'px'); }).observe(head);
+  }
   try { var y = sessionStorage.getItem('progress-y'); if (y) window.scrollTo(0, +y); } catch (e) {}
   setTimeout(function () {
     try { sessionStorage.setItem('progress-y', String(window.scrollY)); } catch (e) {}

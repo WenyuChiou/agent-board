@@ -2,6 +2,25 @@
 
 This page sets how much work is open at once, when a finding becomes an issue, and how a pull request goes from claim to merge. It applies to every agent and person working in this repository: Claude Code sessions, Codex, dot and Muse, and agents on other computers. [CONTRIBUTING.md, Pull requests](../../CONTRIBUTING.md#pull-requests) has the rules each pull request must meet; where the two disagree, CONTRIBUTING.md wins.
 
+## Mode and settings
+
+This repository follows the multi-agent workflow standard that its maintainer keeps on the owner's computer. [Part B](#part-b--contributors-copied-into-each-repos-workflow-file), at the end of this page, is a copy of the steps that standard asks of every contributor. Where this page or CONTRIBUTING.md says something different, they win.
+
+- **Mode:** supervised. The coordinator is the maintainer: the Claude Code session on the owner's computer that the owner has named maintainer of this repository (CONTRIBUTING rule 8). Only the owner or the maintainer merges (rule 8); the maintainer tags releases and makes the GitHub release ([RELEASING.md](../RELEASING.md)). Supervised concerns the owner's computer only: sessions there push only when the owner says so. It is not a rule for other contributors, who push their own branches as [CONTRIBUTOR-PATH.md](../CONTRIBUTOR-PATH.md) says. This mode changes only after the owner turns on automatic pushes for this repository.
+- **Lanes and files:** lanes own no files. A `for-dot` issue names the files allowed ([Who takes which issue](#who-takes-which-issue)); any other issue says what to change. `hooks/board-script.ts` and `hooks/released.ts` are generated: never edit or merge them by hand; rebuild them with Bun 1.4.2, or write "maintainer rebuilds at merge" under Checks ([brief-rules.md](brief-rules.md) item 7). Everyone shares the string tables (`hooks/i18n.ts`, `hooks/strings-en.ts`, `hooks/strings-zh-cn.ts`). Host hooks, tests that start processes, `hooks/pane.tsx`, `hooks/register.tsx` and connect stay with agents that can run the plugin tests locally.
+- **Caps:** at most five lanes plus the maintainer, and at most two Codex runs at once on one computer. Pull requests: [One thing at a time](#one-thing-at-a-time).
+- **Releases:** the maintainer prepares, reviews and merges the release pull request under the owner's authorization; only the owner publishes to npm ([CONTRIBUTING.md, Releases](../../CONTRIBUTING.md#releases), [RELEASING.md](../RELEASING.md)).
+- **Agents on other computers** take issues labelled `for-agent` and `ready`; `for-dot` is for dot or Muse (CONTRIBUTING rule 3). No label names a computer.
+- **Hold list:** there is none in this repository. A finding that is not an issue goes in a comment on the issue you are working on (CONTRIBUTING rule 2), and the maintainer files the ones that qualify ([When a finding becomes an issue](#when-a-finding-becomes-an-issue)).
+- **Where Part B differs here, and why.** CONTRIBUTING.md is the rule here, so where Part B asks for something else, do this:
+  - Which issue (B1 step 1, B7): one labelled `ready` and `for-agent` (`for-dot` for dot or Muse), not `blocked`, and not `claimed` unless the claim has run out (rule 3). No issue is assigned or labelled by computer.
+  - Claim, Ready, review and Handover (B1 steps 1, 7 and 8, B6): [From claim to merge](#from-claim-to-merge) and rules 3, 7 and 14 ask for more: the claim's end time and the `claimed` label; `gh pr ready` and the preflight output with Ready; an answer to each finding in a comment and a merge of `main` before the new Ready; a push before a Handover, the checks run in it, and removing `claimed`.
+  - Files (B1 step 3, B4): lanes own no files, and the string tables have no lane sections, so a new key goes in the same place in all three tables (AGENTS.md, Conventions in the code).
+  - Findings (B2): nothing outside the issue goes into your pull request, not even a fix in the same files (rules 2 and 9); put it in a comment on your issue.
+  - Stacked pull requests (B5): none. Branch from current `main` (rule 4) and claim the next issue only after your pull request merges ([One thing at a time](#one-thing-at-a-time)).
+  - Blocked (B6): ask in a comment starting `Question:` and add the `question` label; while you wait, keep working on what the question does not touch, or hand over (CONTRIBUTING.md, Questions; rule 14). You need not end your session. Wenyu, named in B6, is the owner.
+  - The `Agent:` trailer (B1 step 6, B7) is not required yet. Until CONTRIBUTING.md asks for it, the `Author:` line (rule 10) is what tells agents apart.
+
 ## One thing at a time
 
 - Each author (an agent and its lane, CONTRIBUTING rule 10) works on one issue at a time and has at most one pull request waiting for review or CI. Claim the next issue after that pull request merges.
@@ -62,3 +81,44 @@ Every week the maintainer posts, for each agent (`node scripts/team-stats.mjs --
 The agent is the words before the first comma of the pull request's `Author:` line (CONTRIBUTING rule 10), so write them the same way every time; a pull request without the line counts as `unknown`.
 
 An agent below these aims two weeks running takes smaller issues for a while: one at a time, a single module with Node tests, and briefs whose Checks the maintainer writes. It goes back to normal after two first-review approvals in a row.
+
+<!-- part-b:start source=~/.claude/docs/PROJECT_WORKFLOW.md sha256=fe0a07d93fe212e8d4c4e88b6953a9088c826893e7b996131c51f75e831379db -->
+## Part B — contributors (copied into each repo's workflow file)
+
+### B1. The steps
+1. **Claim**: comment `Claim: <agent>, <branch>, until <UTC time>` on the issue and add the repo's claim label. Take only issues assigned to you or labelled for your computer.
+2. **Branch**: one branch per issue from current `main`, in your own worktree.
+3. **Fix**: change only the files the issue names, or your lane's files (B4).
+4. **Test**: run the tests that cover the files you changed; full suites run in CI. At most 2 full local suites at once on one computer; if CPU stays above 85 % for 5 minutes, start no new run. Stop every test process you started when you are done.
+5. **Changelog**: add one fragment file `changelog.d/<issue>-<slug>.md`; never edit `CHANGELOG.md`.
+6. **PR**: open it as a draft, with `Fixes #N` or `Part of #N`, an `Author: <agent>, <branch>` line, an `Agent: <name> (<lane>)` trailer line for the merge commit, and the evidence (command output, screenshot, or the test names that cover it).
+7. **Ready**: when CI is green, comment `Ready for review <sha>`.
+8. **Review**: answer every finding in one push, then comment `Ready for review <new sha>`.
+9. **Stop there.** The coordinator merges, tags and releases; you never do.
+
+### B2. Findings
+Open an issue only where the repo's rules tell you to (agent-board: when no issue fits the change you are about to make). Put any other finding on the hold list or as a comment on the issue you are working on; the coordinator files it if it qualifies. A finding in the same files that the same tests already cover may be fixed in your PR and named in its body. An audit or test run hands in one list, not a batch of issues.
+
+### B3. One thing at a time
+One issue, one branch, one PR. At most one PR of yours waiting for review or CI.
+
+### B4. Shared files
+- The repo file lists which files each lane owns. A PR that changes another lane's files needs its issue to name that lane.
+- Locale mirrors (the same text in several languages) change together in one PR. In string tables, add new keys at the end of your lane's section.
+- Bring your branch up to date by merging `main`; never rebase a pushed branch. The coordinator may merge `main` into your branch too: run `git pull --ff-only` before your next commit.
+- Regenerate generated files with the repo's build command; never resolve them by hand.
+
+### B5. Stacked PRs
+At most one level, same lane, and the upper PR stays draft until the lower one merges. When the lower PR merges and its branch is auto-deleted, GitHub points the upper PR at `main`. Then:
+1. check `gh pr view <N> --json baseRefName` says `main`; if not, `gh pr edit <N> --base main`;
+2. merge `main` into the upper branch (after a squash merge, expect conflicts where your commits re-edit the lower PR's lines; regenerate generated files rather than resolving them);
+3. push and comment `Ready for review <new sha>`.
+
+### B6. When you are blocked
+If you have waited on Wenyu for more than 30 minutes (waiting for CI, or for review while your PR is in the coordinator's queue, does not count), post on the issue either `Question: <one question>` or `Handover: <branch>, done: …, left: …`, and end your session. If you cannot push, add `worktree: <path>, head: <sha>` to the Handover. The coordinator brings the question to Wenyu and hands the work on. Never wait open-ended.
+
+### B7. Agents on other computers
+- If it is not on the issue or the PR, it did not happen. Local notes never hold a decision another computer needs.
+- Take only issues labelled for your computer; they touch pure modules, docs or scripts you can test yourself.
+- If you post from the coordinator's GitHub account, the `Author:` line and `Agent:` trailer are how your work is told apart.
+<!-- part-b:end -->

@@ -107,7 +107,7 @@ claude plugin marketplace add WenyuChiou/agent-board
 claude plugin install agent-board@agent-board
 ```
 
-打开新 Claude Code session，使用 `/progress`。侧栏镜像 Task 工具，也可通过它的模型整理回合。问题与决策显示于任务上方；侧栏跟随 Claude 主题，浏览器跟随系统主题。
+打开新 Claude Code session，使用 `/progress`。侧栏镜像 Task 工具，也可通过它的模型整理回合。问题与决策显示于任务上方；侧栏跟随 Claude 主题，网页跟随系统主题，除非你在网页上选了亮色或暗色。
 
 | 命令／输入 | 操作 |
 | --- | --- |

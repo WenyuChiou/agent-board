@@ -107,7 +107,7 @@ claude plugin marketplace add WenyuChiou/agent-board
 claude plugin install agent-board@agent-board
 ```
 
-Open a new Claude Code session; `/progress` opens the pane. It mirrors Task tools and can summarize turns through its model. Questions and decisions appear above the task cards. The pane follows Claude's theme; the browser follows the system theme.
+Open a new Claude Code session; `/progress` opens the pane. It mirrors Task tools and can summarize turns through its model. Questions and decisions appear above the task cards. The pane follows Claude's theme; the page follows the system theme until you pick Light or Dark on it.
 
 | Command / input | Action |
 | --- | --- |

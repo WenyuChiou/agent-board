@@ -1,18 +1,63 @@
 import { spawn, spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, unlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { dirname, join, resolve } from 'node:path'
+import { delimiter, dirname, join, resolve } from 'node:path'
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { fileURLToPath, pathToFileURL } from 'node:url'
+import { inspect } from 'node:util'
+import { reporterPs1, reporterSh } from '../hooks/hook-reporters.ts'
+import { classifierDiagnostic, observeClassifier } from './fixtures/classifier-diagnostic.mjs'
+import { assertNativeProbeReturned, nativeProbeDiagnostic } from './fixtures/native-probe-diagnostic.mjs'
+
+test('native cleanup diagnostics keep watchdog failures bounded and private', () => {
+  const error = Object.assign(new Error('PRIVATE_ERROR'), { code: 'ETIMEDOUT', path: '/PRIVATE_EXECUTABLE', spawnargs: ['PRIVATE_ARGUMENT'] })
+  const result = { error, status: null, signal: 'SIGTERM', stdout: 'PRIVATE_STDOUT', stderr: 'PRIVATE_STDERR' }
+  const marker = { isStarted: true, isVerified: true, keepFixture: true, code: 'NATIVE_HOOK_UNREAPED', home: '/PRIVATE_HOME', pid: 123456789 }
+  assert.throws(() => assertNativeProbeReturned(result, marker, 45001.4, 45000), failure => {
+    assert.equal(failure.code, 'ERR_ASSERTION')
+    assert.match(failure.message, /"errorCode":"ETIMEDOUT"/)
+    assert.match(failure.message, /"isVerified":true/)
+    assert.match(failure.message, /"elapsedMs":45001,"budgetMs":45000/)
+    assert.equal(failure.actual, false)
+    assert.equal(failure.expected, true)
+    assert.ok(!/PRIVATE_|123456789/.test(inspect(failure)))
+    assert.ok(failure.message.length < 512)
+    return true
+  })
+  for (const error of [null, false, '']) assert.throws(() => assertNativeProbeReturned({ error }, null, 1, 45000), { code: 'ERR_ASSERTION' })
+})
+
+test('native cleanup diagnostics preserve a normal returned probe result', () => {
+  const result = { status: 1, signal: null, stdout: 'PRIVATE_STDOUT', stderr: 'PRIVATE_STDERR' }
+  const marker = { isStarted: true, isVerified: true, keepFixture: true, code: 'NATIVE_HOOK_UNREAPED' }
+  const before = structuredClone({ result, marker })
+  const diagnostic = assertNativeProbeReturned(result, marker, 2500, 45000)
+  assert.deepEqual({ result, marker }, before)
+  assert.match(diagnostic, /"status":1,"signal":null,"errorPresent":false,"errorCode":null/)
+  assert.match(diagnostic, /"markerPresent":true,"isStarted":true,"isVerified":true/)
+  assert.ok(!diagnostic.includes('PRIVATE_'))
+})
+
+test('native cleanup diagnostics allowlist unknown fields and missing markers', () => {
+  const privateValue = 'PRIVATE_'.repeat(1000)
+  const diagnostic = nativeProbeDiagnostic({ status: privateValue, signal: privateValue, error: { code: privateValue } }, { isStarted: privateValue, isVerified: privateValue, code: privateValue }, Infinity, -1)
+  assert.ok(diagnostic.length < 512)
+  assert.ok(!diagnostic.includes('PRIVATE_'))
+  assert.match(diagnostic, /"elapsedMs":null,"budgetMs":0,"status":null,"signal":"OTHER"/)
+  assert.match(diagnostic, /"isStarted":null,"isVerified":null,"keepFixture":null,"code":"OTHER"/)
+  assert.match(nativeProbeDiagnostic({}, null, 0, 45000), /"markerPresent":false/)
+})
 
 const setup = resolve('scripts/setup-codex.mjs')
 const session = 'test-codex-session-123'
 // A runner may set XDG/host overrides. No synthetic home may inherit those and
 // write into another test or the account's actual native configuration.
 const isolatedEnv = home => ({
-  ...process.env, CLAUDE_PROGRESS_FILE: '',
+  ...process.env, HOME: home, USERPROFILE: home,
+  LOCALAPPDATA: join(home, 'AppData', 'Local'), APPDATA: join(home, 'AppData', 'Roaming'),
+  CLAUDE_PROGRESS_FILE: '', CLAUDE_CONFIG_DIR: join(home, '.claude'),
   CODEX_HOME: join(home, '.codex'), GROK_HOME: join(home, '.grok'), HERMES_HOME: join(home, '.hermes'),
   XDG_CONFIG_HOME: join(home, '.config'), OPENCODE_CONFIG_DIR: join(home, '.config', 'opencode'),
   OPENCLAW_STATE_DIR: join(home, '.openclaw'), DSH_HOME: join(home, '.dsh'),
@@ -29,10 +74,9 @@ const stopNativeTree = child => {
   }
 }
 
-const nativeHook = (command, env, input, after = setTimeout, stop = stopNativeTree) => new Promise((resolve, reject) => {
-  const isWin = process.platform === 'win32'
-  const child = spawn(isWin ? process.env.ComSpec || 'cmd.exe' : '/bin/sh', [isWin ? '/c' : '-c', command], {
-    env, stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true, detached: !isWin,
+const nativeProcess = (executable, args, env, input, after = setTimeout, stop = stopNativeTree, { isInputOpen = false, ...options } = {}) => new Promise((resolve, reject) => {
+  const child = spawn(executable, args, {
+    env, ...options, stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true, detached: process.platform !== 'win32',
   })
   let stdout = '', stderr = '', error, termination
   let isClosed = false, isTimedOut = false
@@ -45,7 +89,7 @@ const nativeHook = (command, env, input, after = setTimeout, stop = stopNativeTr
   const timer = after(() => {
     if (isClosed || isTimedOut || child.pid === undefined) return
     isTimedOut = true
-    error = Object.assign(new Error('native hook exceeded 30000ms'), { code: 'ETIMEDOUT' })
+    error = Object.assign(new Error('native hook exceeded its deadline'), { code: 'ETIMEDOUT' })
     try { termination = stop(child) } catch (failure) { termination = { status: null, code: failure.code, message: failure.message } }
     grace = setTimeout(() => {
       if (isClosed) return
@@ -63,13 +107,49 @@ const nativeHook = (command, env, input, after = setTimeout, stop = stopNativeTr
     isClosed = true
     clearTimeout(timer)
     clearTimeout(grace)
+    child.stdin.destroy()
     notifyClosed({ status, signal })
     resolve({ status, signal, error, termination, stdout, stderr })
   })
-  child.stdin.end(JSON.stringify(input))
+  if (isInputOpen) child.stdin.write(input)
+  else child.stdin.end(input)
 })
 
+const nativeHook = (command, env, input, after = setTimeout, stop = stopNativeTree) => {
+  const isWin = process.platform === 'win32'
+  return nativeProcess(isWin ? process.env.ComSpec || 'cmd.exe' : '/bin/sh', [isWin ? '/c' : '-c', command], env, JSON.stringify(input), after, stop)
+}
+
+const fireCommand = (f, command, input, limit = 10000) => {
+  const isWindows = process.platform === 'win32'
+  return nativeProcess(isWindows ? process.env.ComSpec || 'cmd.exe' : '/bin/sh', isWindows ? ['/d', '/s', '/c', `"${command}"`] : ['-c', command], f.env, input,
+    callback => setTimeout(callback, limit), stopNativeTree, { windowsVerbatimArguments: isWindows })
+}
+const fireHook = (f, input, limit) => fireCommand(f, JSON.parse(readFileSync(f.hooks, 'utf8')).hooks.UserPromptSubmit[0].hooks[0].command, input, limit)
+
 const hookFailure = result => JSON.stringify({ status: result.status, signal: result.signal, error: result.error && { code: result.error.code, message: result.error.message }, termination: result.termination, stdout: result.stdout, stderr: result.stderr })
+
+// These synthetic reporters are grandchildren, so wait for their recorded PID
+// as well as the command's pipes before allowing fixture removal after a failure.
+const isReporterAlive = pid => {
+  try { process.kill(pid, 0); return true } catch (error) {
+    if (error.code === 'ESRCH') return false
+    if (error.code === 'EPERM') return true
+    throw error
+  }
+}
+const stopReporter = async pid => {
+  if (!Number.isInteger(pid) || pid <= 0 || !isReporterAlive(pid)) return
+  let termination
+  if (process.platform === 'win32') termination = stopNativeTree({ pid })
+  else {
+    try { process.kill(pid, 'SIGKILL'); termination = { status: 0 } }
+    catch (error) { termination = { status: error.code === 'ESRCH' ? 0 : 1, code: error.code } }
+  }
+  const until = Date.now() + 5000
+  while (isReporterAlive(pid) && Date.now() < until) await new Promise(done => setTimeout(done, 25))
+  if (isReporterAlive(pid)) throw Object.assign(new Error(`Synthetic reporter ${pid} did not exit; fixture retained; ${JSON.stringify(termination)}`), { keepFixture: true, pid, termination })
+}
 
 const fixture = async fn => {
   const home = mkdtempSync(join(tmpdir(), 'codex local-'))
@@ -79,13 +159,13 @@ const fixture = async fn => {
   const hooks = join(home, '.codex', 'hooks.json')
   const skill = join(home, '.agents', 'skills', 'agent-board', 'SKILL.md')
   const env = { ...isolatedEnv(home), CODEX_THREAD_ID: session, NO_COLOR: '1' }
-  const run = (file, args, input) => spawnSync(process.execPath, [file, ...args], { env, input: input === undefined ? undefined : JSON.stringify(input), encoding: 'utf8', windowsHide: true, timeout: 15000 })
+  const run = (file, args, input, extraEnv = {}) => spawnSync(process.execPath, [file, ...args], { env: { ...env, ...extraEnv }, input: input === undefined ? undefined : JSON.stringify(input), encoding: 'utf8', windowsHide: true, timeout: 15000 })
   const isolated = ['--home', home, '--codex-dir', join(home, '.codex'), '--grok-dir', join(home, '.grok'), '--hermes-dir', join(home, '.hermes')]
   const install = (...args) => run(setup, [...isolated, ...args])
-  const command = (args, input) => run(script, [...isolated, ...args], input)
+  const command = (args, input, extraEnv = {}) => run(script, [...isolated, ...args], input, extraEnv)
   const save = (file, text) => { mkdirSync(dirname(file), { recursive: true }); writeFileSync(file, text) }
   const report = (state = 'working', steps = ['- [~] Real task']) => command(['--codex-report'], { title: 'Task', state, steps })
-  const event = (name, turn = 'turn-1', extra = {}) => command(['--codex-event'], { session_id: session, hook_event_name: name, turn_id: turn, ...extra })
+  const event = (name, turn = 'turn-1', extra = {}, extraEnv = {}) => command(['--codex-event'], { session_id: session, hook_event_name: name, turn_id: turn, ...extra }, extraEnv)
   let isSafeToRemove = true
   try { return await fn({ home, root, script, progress, hooks, skill, env, install, command, save, report, event }) }
   catch (error) {
@@ -286,7 +366,7 @@ test('native board prompt commands preserve the waiting question and store no in
 test('Codex-only setup previews every persistent change without writing', () => fixture(f => {
   const plan = f.install()
   assert.equal(plan.status, 0, plan.stderr)
-  assert.equal(JSON.parse(plan.stdout).changes.length, 5)
+  assert.deepEqual(JSON.parse(plan.stdout).changes.map(change => change.file).sort(), [f.hooks, f.script, join(f.root, 'agent-board-hook.mjs'), f.skill, f.progress, join(f.root, 'install-codex.json')].sort())
   assert.ok(!existsSync(f.root))
   assert.ok(!existsSync(f.hooks))
 }))
@@ -306,16 +386,10 @@ test('Codex-only setup initializes the board and skill without Claude and is ide
   assert.equal(JSON.parse(doctor.stdout).hooksTrusted, 'unknown')
 }))
 
-test('the generated Codex hook command runs through the platform shell with JSON on stdin', () => fixture(f => {
+test('the generated Codex hook command runs through the platform shell with JSON on stdin', () => fixture(async f => {
   assert.equal(f.install('--apply').status, 0)
   const command = JSON.parse(readFileSync(f.hooks)).hooks.UserPromptSubmit[0].hooks[0].command
-  const isWindows = process.platform === 'win32'
-  const shell = isWindows ? process.env.ComSpec || 'cmd.exe' : '/bin/sh'
-  const args = isWindows ? ['/d', '/s', '/c', `"${command}"`] : ['-c', command]
-  const result = spawnSync(shell, args, {
-    input: JSON.stringify({ session_id: session, hook_event_name: 'UserPromptSubmit', turn_id: 'native-shell-fixture' }),
-    encoding: 'utf8', windowsHide: true, windowsVerbatimArguments: isWindows,
-  })
+  const result = await fireCommand(f, command, JSON.stringify({ session_id: session, hook_event_name: 'UserPromptSubmit', turn_id: 'native-shell-fixture' }))
   assert.equal(result.status, 0, result.stderr)
   assert.match(readFileSync(f.progress, 'utf8'), /state=working/)
   const record = JSON.parse(readFileSync(join(f.root, 'sessions', createHash('sha256').update(`codex:${session}`).digest('hex') + '.json')))
@@ -325,6 +399,364 @@ test('the generated Codex hook command runs through the platform shell with JSON
   assert.equal(idle.status, 0, idle.stderr)
   assert.ok(!idle.stdout.includes('running:') && !idle.stdout.includes('session ended'), idle.stdout)
 }))
+
+test('a reporter that hangs is cut at its timeout and the host hook exits 0', () => fixture(async f => {
+  assert.equal(f.install('--apply').status, 0)
+  assert.equal(f.report().status, 0)
+  const held = readFileSync(f.progress)
+  const pidFile = join(f.root, 'synthetic-reporter.pid')
+  const head = readFileSync(f.script, 'utf8').split('\n')[0]
+  f.save(f.script, `${head}\nimport {writeFileSync} from 'node:fs'\nwriteFileSync(${JSON.stringify(pidFile)}, String(process.pid))\nsetInterval(() => {}, 1000)\n`)
+  let wasReaped = false
+  try {
+    const out = await fireHook(f, JSON.stringify({ session_id: session, hook_event_name: 'UserPromptSubmit', turn_id: 'hanging-turn' }))
+    assert.ok(existsSync(pidFile), out.stderr)
+    const pid = Number(readFileSync(pidFile, 'utf8'))
+    try { process.kill(pid, 0) } catch (error) { if (error.code === 'ESRCH') wasReaped = true; else throw error }
+    assert.equal(out.status, 0, out.stderr)
+    assert.equal(wasReaped, true, 'the timed-out reporter must be reaped before the hook returns')
+    assert.match(readFileSync(join(f.root, 'hook-errors.log'), 'utf8'), /codex REPORTER_TIMEOUT/)
+    assert.deepEqual(readFileSync(f.progress), held)
+  } finally {
+    // The outer test deadline is a backstop for a broken implementation, too.
+    if (!wasReaped && existsSync(pidFile)) {
+      const pid = Number(readFileSync(pidFile, 'utf8'))
+      await stopReporter(pid)
+    }
+  }
+}))
+
+test('a reporter error is logged and the previous block is kept', () => fixture(async f => {
+  assert.equal(f.install('--apply').status, 0)
+  assert.equal(f.report().status, 0)
+  const held = readFileSync(f.progress)
+  const log = join(f.root, 'hook-errors.log')
+  f.save(log, Array.from({ length: 250 }, (_, index) => `synthetic previous error ${index}\n`).join(''))
+  const preload = join(f.root, 'write-fault.cjs')
+  f.save(preload, `const fs = require('node:fs')\nconst original = fs.renameSync\nfs.renameSync = (from, to) => { if (String(to) === ${JSON.stringify(f.progress)}) throw Object.assign(Error('PRIVATE_PATH PRIVATE_TOKEN PRIVATE_INPUT'), { code: 'EIO' }); return original(from, to) }\nrequire('node:module').syncBuiltinESMExports()\n`)
+  f.env.NODE_OPTIONS = `${f.env.NODE_OPTIONS || ''} --require ${JSON.stringify(preload)}`
+  const out = await fireHook(f, JSON.stringify({ session_id: session, hook_event_name: 'UserPromptSubmit', turn_id: 'write-fault-turn', prompt: 'PRIVATE_INPUT' }))
+  assert.equal(out.status, 0, out.stderr)
+  assert.deepEqual(readFileSync(f.progress), held)
+  const errors = readFileSync(log, 'utf8')
+  assert.equal(errors.trimEnd().split('\n').length, 200)
+  assert.match(errors, /codex REPORTER_FAILED/)
+  assert.ok(!errors.includes('PRIVATE_') && !errors.includes(f.home) && !errors.includes(session), errors)
+  const partial = await fireHook(f, '{"session_id":')
+  assert.equal(partial.status, 0, partial.stderr)
+  assert.match(readFileSync(log, 'utf8'), /INCOMPLETE_INPUT/)
+  assert.deepEqual(readFileSync(f.progress), held)
+}))
+
+test('every host\'s generated hook carries a timeout at or above its minimum', () => fixture(f => {
+  const cases = [
+    ['codex', ['.codex', 'hooks.json'], 3, 10],
+    ['cursor', ['.cursor', 'hooks.json'], 3, 3],
+    ['gemini', ['.gemini', 'settings.json'], 5000, 5000],
+    ['grok', ['.grok', 'hooks', 'agent-board-local.json'], 5, 10],
+    ['muse', ['.config', 'muse', 'settings.json'], 5, 10],
+    ['antigravity', ['.gemini', 'config', 'hooks.json'], 3, 3],
+  ]
+  for (const [agent, relative, minimum, stop] of cases) {
+    const installed = f.install('--agent', agent, '--apply')
+    assert.equal(installed.status, 0, installed.stderr)
+    const config = JSON.parse(readFileSync(join(f.home, ...relative), 'utf8'))
+    const hooks = agent === 'antigravity' ? config['agent-board-local'] : config.hooks
+    for (const [event, groups] of Object.entries(hooks)) for (const group of groups) {
+      const handler = group.hooks?.[0] ?? group
+      assert.ok(handler.timeout >= (event === 'Stop' ? stop : minimum), `${agent}:${event}`)
+      assert.ok(!/failClosed/.test(JSON.stringify(handler)))
+    }
+  }
+}))
+
+test('a newer hook logs that its reporter needs an upgrade and exits zero', () => fixture(async f => {
+  assert.equal(f.install('--apply').status, 0)
+  const marker = join(f.root, 'old-reporter-ran')
+  // An older board has no hook-version marker; it must never run this command.
+  f.save(f.script, `import {writeFileSync} from 'node:fs'\nwriteFileSync(${JSON.stringify(marker)}, 'unexpected')\n`)
+  const out = await fireHook(f, '{}')
+  assert.equal(out.status, 0, out.stderr)
+  assert.equal(existsSync(marker), false)
+  assert.match(readFileSync(join(f.root, 'hook-errors.log'), 'utf8'), /REPORTER_UPGRADE_REQUIRED/)
+}))
+
+test('an expired hook cannot replace progress after synchronous preparation', () => fixture(f => {
+  assert.equal(f.install('--apply').status, 0)
+  assert.equal(f.report().status, 0)
+  const before = readFileSync(f.progress)
+  const marker = join(f.root, 'delay-was-injected')
+  const preload = join(f.root, 'delay-progress.cjs')
+  f.save(preload, `const fs = require('node:fs')
+const write = fs.writeFileSync
+fs.writeFileSync = (file, text, ...rest) => {
+  if (String(text).includes('Synthetic deadline sentinel')) {
+    write(${JSON.stringify(marker)}, 'injected')
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 3500)
+  }
+  return write(file, text, ...rest)
+}
+`)
+  const result = spawnSync(process.execPath, [f.script, '--codex-report', '--home', f.home, '--hook-deadline', String(Date.now() + 3000)], {
+    env: { ...f.env, NODE_OPTIONS: `--require ${JSON.stringify(preload.replaceAll('\\', '/'))}` },
+    input: JSON.stringify({ title: 'Synthetic deadline sentinel', state: 'working', steps: ['- [~] Delayed preparation'] }),
+    encoding: 'utf8', windowsHide: true, timeout: 15000,
+  })
+  assert.equal(existsSync(marker), true, 'exercise the delay before the guarded rename')
+  assert.notEqual(result.status, 0)
+  assert.match(result.stderr, /HOOK_TIMEOUT/)
+  assert.deepEqual(readFileSync(f.progress), before)
+  assert.ok(!readdirSync(f.root).some(name => name.endsWith('.tmp')))
+}))
+
+test('SDK metadata and reporter execution share one deadline without a late write', () => fixture(async f => {
+  const { home, env, root } = f
+  const marker = join(home, 'late-report'), pidFile = join(home, 'reporter.pid')
+  let childPid
+  try {
+    const installed = spawnSync(process.execPath, [setup, '--home', home, '--agent', 'opencode', '--apply'], { env, encoding: 'utf8', windowsHide: true, timeout: 15000 })
+    assert.equal(installed.status, 0, installed.stderr)
+    const source = readFileSync(join(home, '.config', 'opencode', 'plugins', 'agent-board-local.js'), 'utf8')
+    const stub = 'const tool = Object.assign(value => value, { schema: { string: () => ({}), enum: () => ({}), array: () => ({}) } })'
+    const plugin = join(home, 'synthetic-plugin.mjs')
+    writeFileSync(plugin, source.replace("import { tool } from '@opencode-ai/plugin'", stub))
+    writeFileSync(join(root, 'agent-board.mjs'), `globalThis.AGENT_BOARD = {"hookVersion":1,"synthetic":true}\nimport { writeFileSync } from 'node:fs'\nwriteFileSync(${JSON.stringify(pidFile)}, String(process.pid))\nsetTimeout(() => writeFileSync(${JSON.stringify(marker)}, 'late'), 1600)\n`)
+    const { AgentBoardLocal } = await import(pathToFileURL(plugin))
+    const adapter = await AgentBoardLocal({ client: { session: { get: async () => {
+      // Leave room to start the real child on Windows; 600 + 1600 still
+      // exceeds the same 2000 ms shared deadline without changing its policy.
+      await new Promise(resolve => setTimeout(resolve, 600))
+      return { data: { id: 'synthetic-deadline-session' } }
+    } } } })
+    await adapter.event({ event: { type: 'session.idle', properties: { sessionID: 'synthetic-deadline-session' } } })
+    assert.equal(existsSync(pidFile), true, 'exercise both metadata and a real reporter child')
+    childPid = Number(readFileSync(pidFile, 'utf8'))
+    assert.equal(isReporterAlive(childPid), false, 'the worker reaps its reporter before returning')
+    await new Promise(resolve => setTimeout(resolve, 1700))
+    assert.equal(existsSync(marker), false)
+    assert.match(readFileSync(join(root, 'hook-errors.log'), 'utf8'), /REPORTER_TIMEOUT/)
+  } finally {
+    if (childPid === undefined && existsSync(pidFile)) childPid = Number(readFileSync(pidFile, 'utf8'))
+    await stopReporter(childPid)
+  }
+}))
+
+test('an unavailable hook worker or log still returns without exposing reporter details', () => fixture(async f => {
+  assert.equal(f.install('--apply').status, 0)
+  rmSync(join(f.root, 'agent-board-hook.mjs'))
+  const missing = await fireHook(f, '{}')
+  assert.equal(missing.status, 0, missing.stderr)
+  const log = join(f.root, 'hook-errors.log')
+  assert.match(readFileSync(log, 'utf8'), /HOOK_WORKER_UNAVAILABLE/)
+  rmSync(log)
+  mkdirSync(log)
+  const unwritable = await fireHook(f, '{}')
+  assert.equal(unwritable.status, 0, unwritable.stderr)
+  assert.equal(unwritable.stderr.trim(), 'AGENT_BOARD_HOOK_LOG_FAILED')
+  assert.ok(!unwritable.stderr.includes(f.home))
+  // Cursor still needs its empty JSON response when its worker cannot load.
+  rmSync(log, { recursive: true })
+  assert.equal(f.install('--agent', 'cursor', '--apply').status, 0)
+  rmSync(join(f.root, 'agent-board-hook.mjs'))
+  const cursorConfig = JSON.parse(readFileSync(join(f.home, '.cursor', 'hooks.json'), 'utf8'))
+  const command = cursorConfig.hooks.sessionStart[0].command
+  const cursor = await fireCommand(f, command, '{}')
+  assert.equal(cursor.status, 0, cursor.stderr)
+  assert.equal(cursor.stdout.trim(), '{}')
+}))
+
+const legacyReporterProbe = (isPowerShell = process.platform === 'win32', shell = '/bin/sh') => fixture(async f => {
+  const home = f.home
+  const root = join(home, '.claude'), inbox = join(root, 'progress-inbox')
+  const isWindows = process.platform === 'win32'
+  const script = join(root, isPowerShell ? 'progress-report.ps1' : 'progress-report.sh')
+  const executable = isPowerShell ? 'powershell.exe' : shell
+  const args = isPowerShell ? ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', script, 'cursor', 'turn'] : [script.replaceAll('\\', '/'), 'cursor', 'turn']
+  const env = isolatedEnv(home)
+  if (isWindows && !isPowerShell) {
+    env.HOME = home.replaceAll('\\', '/')
+    // A spread Windows environment commonly has `Path`, not the `PATH` getter
+    // offered by process.env. Keep one key and preserve its complete value.
+    const pathKey = Object.keys(env).find(key => key.toLowerCase() === 'path')
+    const inheritedPath = pathKey === undefined ? '' : env[pathKey]
+    if (pathKey !== undefined) delete env[pathKey]
+    env.PATH = `${dirname(executable)}${delimiter}${inheritedPath}`
+  }
+  mkdirSync(root, { recursive: true })
+  writeFileSync(script, isPowerShell ? reporterPs1() : reporterSh(inbox.replaceAll('\\', '/')))
+  const payload = '{"session_id":"synthetic-legacy-session","id":1234567890123456789}'
+  const first = await nativeProcess(executable, args, env, payload, callback => setTimeout(callback, 10000))
+  assert.equal(first.status, 0, first.stderr)
+  assert.equal(first.stdout.trim(), '{}')
+  const delivered = readdirSync(inbox).filter(name => name.endsWith('.json'))
+  assert.equal(delivered.length, 1)
+  assert.equal(readFileSync(join(inbox, delivered[0]), 'utf8'), payload)
+  const log = join(home, '.agent-board', 'hook-errors.log')
+  mkdirSync(dirname(log), { recursive: true })
+  writeFileSync(log, Array.from({ length: 250 }, (_, index) => `synthetic old error ${index}\n`).join(''))
+  const unfinished = await nativeProcess(executable, args, env, '{"PRIVATE_UNFINISHED_INPUT":',
+    callback => setTimeout(callback, 10000), stopNativeTree, { isInputOpen: true })
+  assert.equal(unfinished.status, 0, hookFailure(unfinished))
+  assert.equal(unfinished.stdout.trim(), '{}')
+  assert.deepEqual(readdirSync(inbox).filter(name => name.endsWith('.json')), delivered)
+  assert.ok(!readdirSync(inbox).some(name => /\.tmp$|\.timeout$/.test(name)))
+  const errors = readFileSync(log, 'utf8')
+  assert.equal(errors.trimEnd().split('\n').length, 200)
+  assert.match(errors, /INPUT_TIMEOUT/)
+  assert.ok(!errors.includes('PRIVATE_') && !errors.includes(home), errors)
+})
+
+test('legacy reporters bound an unfinished input and keep Cursor responses and errors local', () => legacyReporterProbe())
+
+test('a completed prompt survives watchdog cancellation before its trap is ready', { skip: process.platform === 'win32' }, () => fixture(async f => {
+  const inbox = join(f.root, 'progress-inbox'), script = join(f.root, 'progress-report.sh')
+  const tools = join(f.home, 'tools'), ready = join(f.home, 'watcher-ready'), stopped = join(f.home, 'watcher-stopped')
+  const watcherPid = join(f.home, 'watcher.pid'), sleeperPid = join(f.home, 'sleeper.pid')
+  const shellQuote = value => `'${value.replaceAll("'", "'\\''")}'`
+  f.save(join(tools, 'node'), '#!/bin/sh\nexit 17\n')
+  chmodSync(join(tools, 'node'), 0o700)
+  // Force cancellation into the proven startup window. Only this synthetic
+  // copy ignores TERM; the real deadline and completion protocol stay intact.
+  const original = reporterSh(inbox)
+  const startup = "(\n  sleeper=''; stopped=''"
+  const stop = 'kill "$watcher"; wait "$watcher"; watcher=\'\''
+  assert.ok(original.includes(startup) && original.includes(stop))
+  const source = original
+    .replace(startup, `(\n  trap '' 15\n  : > ${shellQuote(ready)}\n  while [ ! -f ${shellQuote(stopped)} ]; do sleep 0.01; done\n  sleeper=''; stopped=''`)
+    .replace('watcher=$!', `watcher=$!\nprintf '%s' "$watcher" > ${shellQuote(watcherPid)}\nwhile [ ! -f ${shellQuote(ready)} ]; do sleep 0.01; done`)
+    .replace('  sleeper=$!', `  sleeper=$!\n  printf '%s' "$sleeper" > ${shellQuote(sleeperPid)}`)
+    .replace(stop, `kill "$watcher"; : > ${shellQuote(stopped)}; wait "$watcher"; watcher=''`)
+  f.save(script, source)
+  const payload = JSON.stringify({ session_id: 'synthetic-cancellation', prompt: 'PRIVATE_RAW_PROMPT' })
+  try {
+    const out = await nativeProcess('/bin/sh', [script, 'cursor', 'prompt', payload],
+      { ...f.env, PATH: `${tools}${delimiter}${f.env.PATH}` }, '', callback => setTimeout(callback, 10000))
+    assert.equal(out.error, undefined, hookFailure(out))
+    assert.equal(out.status, 0, hookFailure(out))
+    assert.equal(out.stdout.trim(), '{}')
+    assert.equal(existsSync(stopped), true, 'exercise cancellation before watchdog initialization')
+    assert.equal(existsSync(watcherPid), true)
+    for (const file of [watcherPid, sleeperPid]) if (existsSync(file)) assert.equal(isReporterAlive(Number(readFileSync(file, 'utf8'))), false)
+    const receipts = readdirSync(inbox)
+    assert.equal(receipts.length, 1, 'only the completed receipt remains, not owned temporary files')
+    assert.ok(receipts[0].endsWith('.json'))
+    assert.equal(readFileSync(join(inbox, receipts[0]), 'utf8'), payload)
+    assert.equal(existsSync(join(f.root, 'hook-errors.log')), false)
+  } finally {
+    for (const file of [watcherPid, sleeperPid]) if (existsSync(file)) await stopReporter(Number(readFileSync(file, 'utf8')))
+  }
+}))
+
+test('the PowerShell classifier uses the first Node path when several applications match', { skip: process.platform !== 'win32' }, () => fixture(async f => {
+  const later = join(f.home, 'later node'), inbox = join(f.root, 'progress-inbox')
+  mkdirSync(later)
+  // A later lookup entry is deliberately not executable: it must never run.
+  writeFileSync(join(later, 'node.exe'), 'synthetic later application must not run')
+  const env = { ...f.env }
+  for (const key of Object.keys(env)) if (key.toLowerCase() === 'path') delete env[key]
+  env.PATH = [dirname(process.execPath), later].join(delimiter)
+  const powershell = join(process.env.SystemRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe')
+  const lookup = spawnSync(powershell, ['-NoProfile', '-Command', '$c = @(Get-Command node -CommandType Application -ErrorAction Stop); $c.Count'], { env, encoding: 'utf8', windowsHide: true, timeout: 10000 })
+  assert.equal(lookup.error, undefined)
+  assert.equal(lookup.status, 0, 'the controlled application lookup must succeed')
+  assert.equal(lookup.stdout.trim(), '2', 'two real node.exe files on PATH, not a mocked lookup')
+  const file = join(f.root, 'progress-report.ps1'), diagnostic = join(f.home, 'classifier-probe.txt')
+  const raw = JSON.stringify({ session_id: 'synthetic-multiple-node', cwd: '/synthetic/中文', prompt: '/board' })
+  // The reporter walks PATH itself (Get-Command can spend over a second on a missing Node)
+  // and must start the first match: the later, non-executable node.exe never runs.
+  const source = reporterPs1()
+  assert.doesNotMatch(source, /Get-Command node/)
+  f.save(file, observeClassifier(source, diagnostic))
+  const result = await nativeProcess(powershell, ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', file, 'codex', 'prompt'], env, raw, callback => setTimeout(callback, 10000))
+  assert.equal(result.error, undefined)
+  assert.equal(result.status, 0, classifierDiagnostic(diagnostic))
+  const saved = existsSync(inbox) ? readdirSync(inbox).filter(name => name.endsWith('.json')).map(name => ({ body: readFileSync(join(inbox, name), 'utf8') })) : []
+  assert.equal(saved.length, 1, classifierDiagnostic(diagnostic))
+  assert.match(classifierDiagnostic(diagnostic), /phase=complete started=1/)
+  assert.deepEqual(JSON.parse(saved[0].body), { session_id: 'synthetic-multiple-node', cwd: '/synthetic/中文', board_request: true })
+  assert.ok(!/[^\x20-\x7e]/.test(saved[0].body))
+}))
+
+test('the PowerShell reporter never looks for Node in its working folder through an empty or relative PATH entry', { skip: process.platform !== 'win32' }, () => fixture(async f => {
+  const work = join(f.home, 'project'), inbox = join(f.root, 'progress-inbox')
+  mkdirSync(work)
+  // A node.exe in the folder the hook runs in is not an application: starting it would fail.
+  writeFileSync(join(work, 'node.exe'), 'synthetic project file must not run')
+  const env = { ...f.env }
+  for (const key of Object.keys(env)) if (key.toLowerCase() === 'path') delete env[key]
+  env.PATH = ['""', '.', 'relative-folder', dirname(process.execPath)].join(delimiter)
+  const powershell = join(process.env.SystemRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe')
+  const file = join(f.root, 'progress-report.ps1'), diagnostic = join(f.home, 'classifier-probe.txt')
+  const raw = JSON.stringify({ session_id: 'synthetic-working-folder', cwd: '/synthetic/project', prompt: '/board' })
+  f.save(file, observeClassifier(reporterPs1(), diagnostic))
+  const result = await nativeProcess(powershell, ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', file, 'codex', 'prompt'], env, raw, callback => setTimeout(callback, 10000), undefined, { cwd: work })
+  assert.equal(result.error, undefined)
+  assert.equal(result.status, 0, classifierDiagnostic(diagnostic))
+  const saved = existsSync(inbox) ? readdirSync(inbox).filter(name => name.endsWith('.json')).map(name => readFileSync(join(inbox, name), 'utf8')) : []
+  assert.equal(saved.length, 1, classifierDiagnostic(diagnostic))
+  assert.deepEqual(JSON.parse(saved[0]), { session_id: 'synthetic-working-folder', cwd: '/synthetic/project', board_request: true })
+}))
+
+test('legacy prompt classifiers time out and reap their process without promoting raw receipts', () => fixture(async f => {
+  const isWindows = process.platform === 'win32'
+  const inbox = join(f.root, 'progress-inbox'), script = join(f.root, isWindows ? 'progress-report.ps1' : 'progress-report.sh')
+  const pidFile = join(f.home, 'classifier.pid'), preload = join(f.home, 'hang-classifier.cjs')
+  const diagnostic = join(f.home, 'classifier-probe.txt')
+  f.save(script, isWindows ? observeClassifier(reporterPs1(), diagnostic) : reporterSh(inbox))
+  f.save(preload, `const fs = require('node:fs')\nfs.writeFileSync(${JSON.stringify(pidFile)}, String(process.pid))\nsetInterval(() => {}, 1000)\n`)
+  const env = { ...f.env, NODE_OPTIONS: `--require ${JSON.stringify(preload.replaceAll('\\', '/'))}` }
+  const args = isWindows ? ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', script, 'cursor', 'prompt'] : [script, 'cursor', 'prompt']
+  try {
+    const out = await nativeProcess(isWindows ? 'powershell.exe' : '/bin/sh', args, env,
+      JSON.stringify({ session_id: 'synthetic-classifier-timeout', prompt: 'PRIVATE_RAW_PROMPT' }),
+      callback => setTimeout(callback, 10000))
+    assert.equal(out.error, undefined, hookFailure(out))
+    assert.equal(out.status, 0, hookFailure(out))
+    assert.equal(out.stdout.trim(), '{}')
+    assert.equal(existsSync(pidFile), true, `exercise the real classifier process${isWindows ? ': ' + classifierDiagnostic(diagnostic) : ''}`)
+    assert.equal(isReporterAlive(Number(readFileSync(pidFile, 'utf8'))), false)
+    assert.deepEqual(readdirSync(inbox), [])
+    const log = readFileSync(join(f.root, 'hook-errors.log'), 'utf8')
+    assert.match(log, /REPORTER_TIMEOUT/)
+    assert.ok(!log.includes('PRIVATE_') && !log.includes(f.home))
+  } finally {
+    if (existsSync(pidFile)) await stopReporter(Number(readFileSync(pidFile, 'utf8')))
+  }
+}))
+
+test('a delayed input and hung prompt classifier share one deadline without promoting a raw receipt', { skip: process.platform === 'win32' }, () => fixture(async f => {
+  const inbox = join(f.root, 'progress-inbox'), script = join(f.root, 'progress-report.sh')
+  const tools = join(f.home, 'tools'), pidFile = join(f.home, 'classifier.pid'), late = join(f.home, 'late-classifier')
+  const cat = spawnSync('/bin/sh', ['-c', 'command -v cat'], { encoding: 'utf8' })
+  assert.equal(cat.status, 0, cat.stderr)
+  const shellQuote = value => `'${value.replaceAll("'", "'\\''")}'`
+  f.save(join(tools, 'cat'), `#!/bin/sh\nsleep 1\nexec ${shellQuote(cat.stdout.trim())} "$@"\n`)
+  chmodSync(join(tools, 'cat'), 0o700)
+  f.save(script, reporterSh(inbox))
+  const preload = join(f.home, 'hang-classifier.cjs')
+  f.save(preload, `const fs = require('node:fs')\nfs.writeFileSync(${JSON.stringify(pidFile)}, String(process.pid))\nsetTimeout(() => fs.writeFileSync(${JSON.stringify(late)}, 'late'), 1400)\nsetInterval(() => {}, 1000)\n`)
+  const env = { ...f.env, PATH: `${tools}${delimiter}${f.env.PATH}`, NODE_OPTIONS: `--require ${JSON.stringify(preload)}` }
+  try {
+    const out = await nativeProcess('/bin/sh', [script, 'cursor', 'prompt'], env,
+      JSON.stringify({ session_id: 'synthetic-timeout', prompt: 'PRIVATE_RAW_PROMPT' }),
+      callback => setTimeout(callback, 10000))
+    assert.equal(out.error, undefined, hookFailure(out))
+    assert.equal(out.status, 0, hookFailure(out))
+    assert.equal(out.stdout.trim(), '{}')
+    assert.equal(existsSync(pidFile), true, 'exercise the classifier after delayed input')
+    assert.equal(isReporterAlive(Number(readFileSync(pidFile, 'utf8'))), false)
+    assert.equal(existsSync(late), false, 'the classifier must not receive a fresh deadline after input')
+    assert.deepEqual(readdirSync(inbox), [])
+    const log = readFileSync(join(f.root, 'hook-errors.log'), 'utf8')
+    assert.match(log, /REPORTER_TIMEOUT/)
+    assert.ok(!log.includes('PRIVATE_') && !log.includes(f.home))
+  } finally {
+    if (existsSync(pidFile)) await stopReporter(Number(readFileSync(pidFile, 'utf8')))
+  }
+}))
+
+const gitSh = join(process.env.ProgramFiles || 'C:\\Program Files', 'Git', 'usr', 'bin', 'sh.exe')
+test('the POSIX reporter bounds a Git Bash reader while host stdin stays open', { skip: process.platform !== 'win32' || !existsSync(gitSh) }, () => legacyReporterProbe(false, gitSh))
 
 test('Codex trust requires an owned installation and an explicit host binary', () => fixture(f => {
   assert.notEqual(f.command(['--codex-trust']).status, 0)
@@ -571,13 +1003,15 @@ test('Codex setup retains all three interface languages on restart', () => fixtu
   assert.equal(JSON.parse(result.stdout).ready, true, result.stdout)
 }))
 
-test('Cursor initializes independently and binds conversation and generation metadata', () => fixture(f => {
+test('Cursor initializes independently and binds conversation and generation metadata', () => fixture(async f => {
   assert.equal(f.install('--agent', 'cursor', '--apply').status, 0)
   const hooks = JSON.parse(readFileSync(join(f.home, '.cursor', 'hooks.json')))
   assert.equal(hooks.version, 1)
-  assert.ok(hooks.hooks.sessionStart[0].command.includes('--agent cursor'))
+  assert.match(hooks.hooks.sessionStart[0].command, /--agent["']? ["']?cursor/)
   const send = (hook_event_name, generation_id = 'generation-1') => f.command(['--codex-event', '--agent', 'cursor'], { hook_event_name, conversation_id: 'cursor-conversation-123', generation_id, transcript_path: '/never/read', text: 'NEVER_STORE_CURSOR_TEXT' })
-  assert.deepEqual(JSON.parse(send('sessionStart').stdout).env, { AGENT_BOARD_SESSION_ID: 'cursor-conversation-123', AGENT_BOARD_AGENT: 'cursor' })
+  const start = await fireCommand(f, hooks.hooks.sessionStart[0].command, JSON.stringify({ hook_event_name: 'sessionStart', conversation_id: 'cursor-conversation-123', generation_id: 'generation-1' }))
+  assert.equal(start.status, 0, start.stderr)
+  assert.deepEqual(JSON.parse(start.stdout).env, { AGENT_BOARD_SESSION_ID: 'cursor-conversation-123', AGENT_BOARD_AGENT: 'cursor' })
   assert.equal(send('beforeSubmitPrompt').status, 0)
   assert.match(readFileSync(f.progress, 'utf8'), /agent=cursor .*state=working/)
   assert.equal(send('stop').status, 0)
@@ -588,14 +1022,18 @@ test('Cursor initializes independently and binds conversation and generation met
   assert.deepEqual(JSON.parse(f.install('--agent', 'cursor').stdout).changes, [])
 }))
 
-test('removing one agent preserves the shared board and skill used by another agent', () => fixture(f => {
+test('removing one agent preserves the shared board and skill used by another agent', () => fixture(async f => {
   f.install('--apply')
   assert.equal(f.install('--agent', 'cursor', '--apply').status, 0)
   assert.equal(f.command(['--codex-remove', '--agent', 'cursor', '--apply']).status, 0)
-  assert.ok(existsSync(f.script) && existsSync(f.skill))
+  assert.ok(existsSync(f.script) && existsSync(f.skill) && existsSync(join(f.root, 'agent-board-hook.mjs')))
   assert.equal(f.report().status, 0)
+  const remained = await fireHook(f, JSON.stringify({ session_id: session, hook_event_name: 'UserPromptSubmit', turn_id: 'retained-worker-turn' }))
+  assert.equal(remained.status, 0, remained.stderr)
+  const record = join(f.root, 'sessions', createHash('sha256').update(`codex:${session}`).digest('hex') + '.json')
+  assert.equal(JSON.parse(readFileSync(record, 'utf8')).turn, 'retained-worker-turn')
   assert.equal(f.command(['--codex-remove', '--apply']).status, 0)
-  assert.ok(!existsSync(f.script) && !existsSync(f.skill))
+  assert.ok(!existsSync(f.script) && !existsSync(f.skill) && !existsSync(join(f.root, 'agent-board-hook.mjs')))
 }))
 
 test('a shared installation retains its chosen progress path when another agent joins', () => fixture(f => {
@@ -638,6 +1076,17 @@ test('OpenCode metadata adapter and task tool work without reading messages or C
     await instance.event({ event: { type: 'session.idle', properties: { sessionID: 'opencode-session-123' } } })
     assert.match(readFileSync(progress, 'utf8'), /state=done/)
     assert.match(readFileSync(progress, 'utf8'), /Actual tool context/)
+    const held = readFileSync(progress)
+    let release, deadline
+    const slow = await AgentBoardLocal({ client: { session: { get: () => new Promise(resolve => { release = resolve }) } } })
+    try {
+      await Promise.race([slow.event(nativeEvent), new Promise((_, reject) => { deadline = setTimeout(() => reject(Error('SDK hook did not return')), 10000) })])
+      assert.deepEqual(readFileSync(progress), held)
+      assert.match(readFileSync(join(home, '.agent-board', 'hook-errors.log'), 'utf8'), /opencode REPORTER_TIMEOUT/)
+      release({ data: { id: 'opencode-session-123' } })
+      await new Promise(resolve => setImmediate(resolve))
+      assert.deepEqual(readFileSync(progress), held)
+    } finally { clearTimeout(deadline) }
   } finally { rmSync(home, { recursive: true, force: true }) }
 })
 
@@ -749,7 +1198,8 @@ test('OpenClaw native metadata callbacks fence stale runs and never request conv
     emit('end', 'native-run-1')
     assert.match(read(), /state=waiting/)
     emit('start', 'native-run-2')
-    assert.throws(() => emit('end', 'native-run-1'), /AGENT_BOARD_REPORT_FAILED/)
+    await emit('end', 'native-run-1')
+    assert.match(readFileSync(join(home, '.agent-board', 'hook-errors.log'), 'utf8'), /openclaw REPORTER_FAILED/)
     assert.match(read(), /state=working/)
     emit('error', 'native-run-2')
     assert.match(read(), /state=waiting/)
@@ -796,7 +1246,8 @@ test('DeepSeek native callbacks report their own identity and preserve task comp
     const hooks = new Map(), warnings = []
     apply({ on: (name, fn) => hooks.set(name, fn), logger: {warn: code => warnings.push(code)} })
     assert.doesNotThrow(() => hooks.get('agent/created')({agent: {session: {header: {id:'bad?'}}, status: 'idle'}}))
-    assert.deepEqual(warnings, ['AGENT_BOARD_REPORT_FAILED'])
+    assert.deepEqual(warnings, [])
+    assert.match(readFileSync(join(home, '.agent-board', 'hook-errors.log'), 'utf8'), /deepseek REPORTER_FAILED/)
     const agent = { session: { header: { id: 'deepseek-native-session-123' } }, status: 'idle', get messages() { throw Error('PRIVATE_DATA_READ') } }
     const read = () => readFileSync(join(home, '.agent-board', 'progress.md'), 'utf8')
     hooks.get('agent/created')({ agent })
@@ -846,7 +1297,7 @@ test('auto setup does not mistake an Antigravity profile or the shared gemini di
 test('all targets initialize one shared board and explicitly name unfinished native adapters', () => fixture(f => {
   const installer = resolve('scripts/setup-agent.mjs')
   const result = spawnSync(process.execPath, [installer, '--agent', 'all', '--home', f.home, '--codex-dir', join(f.home, '.codex'), '--grok-dir', join(f.home, '.grok'), '--hermes-dir', join(f.home, '.hermes'), '--apply'], { env: f.env, encoding: 'utf8', windowsHide: true, timeout: 30000 })
-  assert.equal(result.status, 0, result.stderr)
+  assert.equal(result.status, 0, `${JSON.stringify({ error: result.error?.code, signal: result.signal })}\n${result.stderr}`)
   const plans = JSON.parse(result.stdout).plans
   assert.equal(plans.length, 10)
   assert.equal(new Set(plans.map(plan => plan.progress)).size, 1)
@@ -977,16 +1428,16 @@ test('failed native tree termination reports a bounded error and retains its fix
       env, encoding: 'utf8', windowsHide: true, timeout: 45000,
     })
     owned = existsSync(marker) ? JSON.parse(readFileSync(marker, 'utf8')) : null
-    assert.equal(result.error, undefined, result.stderr)
-    assert.equal(result.status, 1, result.stdout + result.stderr)
+    const diagnostic = assertNativeProbeReturned(result, owned, Date.now() - started, 45000)
+    assert.equal(result.status, 1, diagnostic)
     assert.ok(Date.now() - started < 45000, 'the isolated test process must actually exit before the watchdog')
-    assert.equal(owned?.code, 'NATIVE_HOOK_UNREAPED', JSON.stringify(owned))
+    assert.equal(owned?.code, 'NATIVE_HOOK_UNREAPED', diagnostic)
     assert.equal(owned.keepFixture, true)
     assert.equal(owned.isStarted, true)
     assert.equal(owned.isVerified, true, 'a probe assertion failure must not masquerade as the expected exit')
     for (const key of ['pid', 'probePid', 'parentPid', 'parentParentPid', 'descendantPid']) assert.ok(Number.isInteger(owned[key]) && owned[key] > 0, `the probe must record ${key}`)
     assert.ok(existsSync(owned.home), 'the failed process must leave its fixture for owned cleanup')
-    assert.ok(result.stderr.includes('did not close') || result.stdout.includes('did not close'), result.stdout + result.stderr)
+    assert.ok(result.stderr.includes('did not close') || result.stdout.includes('did not close'), diagnostic)
   } finally {
     owned ??= existsSync(marker) ? JSON.parse(readFileSync(marker, 'utf8')) : null
     // Observe the probe's exit first: rescuing its descendant earlier would hide
@@ -1118,4 +1569,373 @@ test('resuming the same Codex session reactivates its existing block without say
   assert.match(text, /state=working/)
   assert.equal((text.match(/source=codex-local/g) ?? []).length, 1)
   assert.doesNotMatch(text, /state=ended/)
+}))
+
+const lockedProgress = (f, calls = 'Infinity') => {
+  const marker = join(f.home, 'progress-locked')
+  const preload = join(f.home, 'locked-progress.cjs')
+  f.save(marker, '')
+  f.save(preload, `const fs = require('node:fs')
+let calls = 0
+const isLocked = path => path === ${JSON.stringify(f.progress)} && fs.existsSync(${JSON.stringify(marker)}) && calls++ < ${calls}
+const busy = () => { throw Object.assign(new Error('EBUSY: resource busy or locked'), { code: 'EBUSY' }) }
+for (const method of ['readFileSync', 'openSync']) {
+  const original = fs[method]
+  fs[method] = (path, ...args) => { if (isLocked(path)) busy(); return original(path, ...args) }
+}
+const rename = fs.renameSync
+fs.renameSync = (from, to) => { if (isLocked(to)) busy(); return rename(from, to) }
+require('node:module').syncBuiltinESMExports()
+`)
+  return { marker, env: { NODE_OPTIONS: `--require ${JSON.stringify(preload)}` } }
+}
+
+const pendingFiles = f => existsSync(join(f.root, 'pending')) ? readdirSync(join(f.root, 'pending')).filter(name => name.endsWith('.json')).sort() : []
+
+const assertBusyFailure = (result, f) => {
+  assert.equal(result.status, 1, result.stderr)
+  assert.equal(result.stderr.trim().split(/\r?\n/).length, 1, result.stderr)
+  assert.match(result.stderr, /EBUSY/)
+  assert.ok(!result.stderr.includes(f.home), result.stderr)
+  assert.doesNotMatch(result.stderr, /\bat /)
+}
+
+test('L5 locked file: the hook retries, exits 0, and the Stop event lands on the next run', () => fixture(f => {
+  assert.equal(f.install('--apply').status, 0)
+  assert.equal(f.event('UserPromptSubmit').status, 0)
+  const before = readFileSync(f.progress)
+  const locked = lockedProgress(f)
+  const result = f.event('Stop', 'turn-1', { prompt: 'PRIVATE_PROMPT', transcript_path: 'PRIVATE_TRANSCRIPT', tool_input: 'PRIVATE_TOOL', last_assistant_message: 'PRIVATE_MESSAGE' }, locked.env)
+  assert.equal(result.status, 0, result.stderr)
+  assert.equal(result.stdout, '')
+  assert.equal(result.stderr, '')
+  assert.deepEqual(readFileSync(f.progress), before)
+  const files = pendingFiles(f)
+  assert.equal(files.length, 1)
+  const text = readFileSync(join(f.root, 'pending', files[0]), 'utf8')
+  assert.doesNotMatch(text, /"(?:prompt|transcript(?:_path)?|tool_input|last_assistant_message)"\s*:|PRIVATE_/)
+  const entry = JSON.parse(text)
+  assert.equal(entry.version, 1)
+  assert.ok(Number.isFinite(entry.at))
+  assert.ok(files[0].startsWith(`${String(entry.at).padStart(15, '0')}-`))
+  assert.equal(entry.progress, f.progress)
+  assert.deepEqual(entry.payload, { session_id: session, hook_event_name: 'Stop', turn_id: 'turn-1' })
+  unlinkSync(locked.marker)
+  const nextSession = 'test-codex-session-456'
+  const next = f.event('UserPromptSubmit', 'turn-2', { session_id: nextSession })
+  assert.equal(next.status, 0, next.stderr)
+  const board = readFileSync(f.progress, 'utf8')
+  const firstOwner = createHash('sha256').update(`codex:${session}`).digest('hex').slice(0, 8)
+  const nextOwner = createHash('sha256').update(`codex:${nextSession}`).digest('hex').slice(0, 8)
+  assert.match(board, new RegExp(`<!-- auto session=${firstOwner} [^\n]*state=waiting`))
+  assert.match(board, new RegExp(`<!-- auto session=${nextOwner} [^\n]*state=working`))
+  assert.deepEqual(pendingFiles(f), [])
+}))
+
+test('a hook whose progress.md is locked only briefly retries and lands the event at once', () => fixture(f => {
+  assert.equal(f.install('--apply').status, 0)
+  assert.equal(f.event('UserPromptSubmit').status, 0)
+  const locked = lockedProgress(f, 2)
+  const result = f.event('Stop', 'turn-1', {}, locked.env)
+  assert.equal(result.status, 0, result.stderr)
+  assert.equal(result.stdout, '')
+  assert.match(readFileSync(f.progress, 'utf8'), /state=waiting/)
+  assert.deepEqual(pendingFiles(f), [])
+}))
+
+test('an explicit report on a locked progress.md still says in one line that it was not saved', () => fixture(f => {
+  assert.equal(f.install('--apply').status, 0)
+  assert.equal(f.event('UserPromptSubmit').status, 0)
+  const before = readFileSync(f.progress)
+  const locked = lockedProgress(f)
+  const result = f.command(['--codex-report'], { title: 'Task', state: 'working', steps: ['- [~] Real task'] }, locked.env)
+  assertBusyFailure(result, f)
+  assert.deepEqual(pendingFiles(f), [])
+  assert.deepEqual(readFileSync(f.progress), before)
+}))
+
+test('an inherited hook deadline queues a locked lifecycle event before the guard closes and replays it next time', () => fixture(f => {
+  assert.equal(f.install('--apply').status, 0)
+  assert.equal(f.event('UserPromptSubmit').status, 0)
+  const before = readFileSync(f.progress)
+  const locked = lockedProgress(f)
+  const deadline = Date.now() + 1200
+  const result = f.command(['--codex-event', '--hook-deadline', String(deadline)], {
+    session_id: session, hook_event_name: 'Stop', turn_id: 'turn-1', prompt: 'PRIVATE_PROMPT',
+  }, locked.env)
+  assert.equal(result.status, 0, result.stderr)
+  assert.equal(result.stdout, '')
+  assert.equal(result.stderr, '')
+  assert.ok(Date.now() < deadline + 300, 'the inherited bound must shorten the 1.8 second retry budget')
+  assert.deepEqual(readFileSync(f.progress), before)
+  const files = pendingFiles(f)
+  assert.equal(files.length, 1)
+  const queued = readFileSync(join(f.root, 'pending', files[0]), 'utf8')
+  assert.doesNotMatch(queued, /PRIVATE_PROMPT/)
+  assert.equal(JSON.parse(queued).payload.hook_event_name, 'Stop')
+  unlinkSync(locked.marker)
+  assert.equal(f.event('SessionStart').status, 0)
+  assert.match(readFileSync(f.progress, 'utf8'), /state=waiting/)
+  assert.deepEqual(pendingFiles(f), [])
+}))
+
+test('an inherited deadline also bounds the board lock wait without losing the lifecycle event', () => fixture(f => {
+  assert.equal(f.install('--apply').status, 0)
+  assert.equal(f.event('UserPromptSubmit').status, 0)
+  const before = readFileSync(f.progress)
+  const lock = `${f.progress}.agent-board-lock`
+  f.save(lock, 'held by another process')
+  const deadline = Date.now() + 1200
+  const result = f.command(['--codex-event', '--hook-deadline', String(deadline)], {
+    session_id: session, hook_event_name: 'Stop', turn_id: 'turn-1',
+  })
+  assert.equal(result.status, 0, result.stderr)
+  assert.ok(Date.now() < deadline + 300, 'lock acquisition must share the inherited budget')
+  assert.deepEqual(readFileSync(f.progress), before)
+  assert.equal(pendingFiles(f).length, 1)
+  assert.equal(readFileSync(lock, 'utf8'), 'held by another process')
+  unlinkSync(lock)
+  assert.equal(f.event('SessionStart').status, 0)
+  assert.match(readFileSync(f.progress, 'utf8'), /state=waiting/)
+  assert.deepEqual(pendingFiles(f), [])
+}))
+
+test('a hook that replays a backlog past its inherited deadline keeps its own event queued', () => fixture(f => {
+  assert.equal(f.install('--apply').status, 0)
+  assert.equal(f.event('UserPromptSubmit').status, 0)
+  const backlog = { version: 1, progress: f.progress, mode: '--codex-event', agent: 'codex', session, now: new Date().toISOString(), isBoardPrompt: false, isPrompt: false, payload: { session_id: session, hook_event_name: 'Stop', turn_id: 'turn-1' } }
+  for (let index = 1; index <= 2; index++) f.save(join(f.root, 'pending', `${String(index).padStart(15, '0')}.json`), JSON.stringify(backlog))
+  // The lock is free, but each write of progress.md takes longer than the whole hook budget.
+  const preload = join(f.home, 'slow-progress.cjs')
+  f.save(preload, `const fs = require('node:fs')
+const rename = fs.renameSync
+fs.renameSync = (from, to) => {
+  if (to === ${JSON.stringify(f.progress)}) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 1500)
+  return rename(from, to)
+}
+require('node:module').syncBuiltinESMExports()
+`)
+  const nextSession = 'test-codex-session-789'
+  const result = f.command(['--codex-event', '--hook-deadline', String(Date.now() + 1200)], {
+    session_id: nextSession, hook_event_name: 'UserPromptSubmit', turn_id: 'turn-1',
+  }, { NODE_OPTIONS: `--require ${JSON.stringify(preload)}` })
+  assert.equal(result.status, 0, result.stderr)
+  assert.equal(result.stderr, '')
+  const queued = pendingFiles(f).map(name => JSON.parse(readFileSync(join(f.root, 'pending', name), 'utf8')))
+  assert.equal(queued.filter(entry => entry.session === nextSession).length, 1)
+  assert.equal(f.event('SessionStart').status, 0)
+  const nextOwner = createHash('sha256').update(`codex:${nextSession}`).digest('hex').slice(0, 8)
+  assert.match(readFileSync(f.progress, 'utf8'), new RegExp(`<!-- auto session=${nextOwner} [^\n]*state=working`))
+  assert.deepEqual(pendingFiles(f), [])
+}))
+
+test('an inherited deadline still fails an explicit report instead of queuing its payload', () => fixture(f => {
+  assert.equal(f.install('--apply').status, 0)
+  assert.equal(f.report().status, 0)
+  const before = readFileSync(f.progress)
+  const locked = lockedProgress(f)
+  const result = f.command(['--codex-report', '--hook-deadline', String(Date.now() + 700)], {
+    title: 'Unsaved explicit report', state: 'done', steps: ['- [x] Private report'],
+  }, locked.env)
+  assert.notEqual(result.status, 0)
+  assert.equal(result.stderr.trim().split(/\r?\n/).length, 1)
+  assert.match(result.stderr, /EBUSY|HOOK_TIMEOUT/)
+  assert.deepEqual(readFileSync(f.progress), before)
+  assert.deepEqual(pendingFiles(f), [])
+}))
+
+test('invalid and expired inherited deadlines fail before any lifecycle write', () => fixture(f => {
+  assert.equal(f.install('--apply').status, 0)
+  const before = readFileSync(f.progress)
+  for (const value of ['invalid', '1.5', 'Infinity', String(Date.now() - 1000)]) {
+    const result = f.command(['--codex-event', '--hook-deadline', value], {
+      session_id: session, hook_event_name: 'UserPromptSubmit',
+    })
+    assert.notEqual(result.status, 0)
+    assert.match(result.stderr, new RegExp(value === 'invalid' || value === '1.5' || value === 'Infinity' ? 'INVALID_HOOK_DEADLINE' : 'HOOK_TIMEOUT'))
+    assert.deepEqual(readFileSync(f.progress), before)
+    assert.deepEqual(pendingFiles(f), [])
+  }
+}))
+
+test('queued hook events stop at 64 and the next one fails in one plain line', () => fixture(f => {
+  assert.equal(f.install('--apply').status, 0)
+  assert.equal(f.event('UserPromptSubmit').status, 0)
+  const before = readFileSync(f.progress)
+  const queued = JSON.stringify({ version: 1, progress: f.progress, mode: '--codex-event', agent: 'codex', session, now: new Date().toISOString(), isBoardPrompt: false, isPrompt: false, payload: { session_id: session, hook_event_name: 'Stop', turn_id: 'turn-1' } })
+  for (let index = 0; index < 64; index++) f.save(join(f.root, 'pending', `${String(index).padStart(3, '0')}.json`), queued)
+  const locked = lockedProgress(f)
+  const result = f.event('Stop', 'turn-1', {}, locked.env)
+  assertBusyFailure(result, f)
+  assert.equal(pendingFiles(f).length, 64)
+  assert.deepEqual(readFileSync(f.progress), before)
+}))
+
+test('a queued event that can no longer apply is dropped without blocking the others', () => fixture(f => {
+  assert.equal(f.install('--apply').status, 0)
+  assert.equal(f.event('UserPromptSubmit').status, 0)
+  f.save(join(f.root, 'pending', '001.json'), 'not valid JSON')
+  f.save(join(f.root, 'pending', '002.json'), JSON.stringify({
+    version: 1, progress: f.progress, mode: '--codex-event', agent: 'codex', session,
+    now: new Date().toISOString(), isBoardPrompt: false, isPrompt: false,
+    payload: { session_id: session, hook_event_name: 'Stop', turn_id: 'turn-1' },
+  }))
+  const result = f.event('SessionStart', null, { session_id: 'test-codex-session-456' })
+  assert.equal(result.status, 0, result.stderr)
+  const owner = createHash('sha256').update(`codex:${session}`).digest('hex').slice(0, 8)
+  assert.match(readFileSync(f.progress, 'utf8'), new RegExp(`<!-- auto session=${owner} [^\n]*state=waiting`))
+  assert.deepEqual(pendingFiles(f), [])
+}))
+
+test('a refused rename onto progress.md is a lock on Windows and a failure elsewhere, and any other refusal still fails', () => fixture(f => {
+  assert.equal(f.install('--apply').status, 0)
+  assert.equal(f.event('UserPromptSubmit').status, 0)
+  const before = readFileSync(f.progress)
+  const preload = join(f.home, 'refused-rename.cjs')
+  f.save(preload, `const fs = require('node:fs')
+const code = process.env.REFUSED_CODE
+const rename = fs.renameSync
+fs.renameSync = (from, to) => { if (to === ${JSON.stringify(f.progress)}) throw Object.assign(new Error(code + ': operation not permitted, rename'), { code, syscall: 'rename', path: from, dest: to }); return rename(from, to) }
+require('node:module').syncBuiltinESMExports()
+`)
+  const refused = code => f.event('Stop', 'turn-1', {}, { NODE_OPTIONS: `--require ${JSON.stringify(preload)}`, REFUSED_CODE: code })
+  const locked = refused('EPERM')
+  if (process.platform === 'win32') {
+    assert.equal(locked.status, 0, locked.stderr)
+    assert.equal(pendingFiles(f).length, 1)
+    for (const name of pendingFiles(f)) unlinkSync(join(f.root, 'pending', name))
+  } else {
+    assert.equal(locked.status, 1, locked.stderr)
+    assert.equal(locked.stderr.trim().split(/\r?\n/).length, 1, locked.stderr)
+    assert.match(locked.stderr, /EPERM/)
+    assert.deepEqual(pendingFiles(f), [])
+  }
+  const denied = refused('EACCES')
+  assert.equal(denied.status, 1, denied.stderr)
+  assert.match(denied.stderr, /EACCES/)
+  assert.deepEqual(pendingFiles(f), [])
+  assert.deepEqual(readFileSync(f.progress), before)
+}))
+
+test('a queued status event older than its session\'s last report is dropped instead of moving the session back', () => fixture(f => {
+  assert.equal(f.install('--apply').status, 0)
+  const grok = 'test-grok-session-123'
+  const status = state => f.command(['--agent-status', '--agent', 'grok', '--state', state], { session_id: grok })
+  assert.equal(status('working').status, 0, status('working').stderr)
+  const owner = createHash('sha256').update(`grok:${grok}`).digest('hex').slice(0, 8)
+  assert.match(readFileSync(f.progress, 'utf8'), new RegExp(`<!-- auto session=${owner} [^\n]*state=working`))
+  f.save(join(f.root, 'pending', '001.json'), JSON.stringify({
+    version: 1, progress: f.progress, mode: '--agent-status', agent: 'grok', session: grok, status: 'waiting',
+    now: new Date(Date.now() - 60 * 60 * 1000).toISOString().replace(/\.\d{3}Z$/, 'Z'), isBoardPrompt: false, isPrompt: false, payload: {},
+  }))
+  assert.equal(f.event('UserPromptSubmit').status, 0)
+  assert.match(readFileSync(f.progress, 'utf8'), new RegExp(`<!-- auto session=${owner} [^\n]*state=working`))
+  assert.deepEqual(pendingFiles(f), [])
+}))
+
+test('a read-only progress.md fails in one plain line without queuing the event', { skip: process.platform !== 'win32' }, () => fixture(f => {
+  assert.equal(f.install('--apply').status, 0)
+  assert.equal(f.event('UserPromptSubmit').status, 0)
+  const before = readFileSync(f.progress)
+  try {
+    chmodSync(f.progress, 0o444)
+    const result = f.event('Stop')
+    assert.equal(result.status, 1, result.stderr)
+    assert.equal(result.stderr.trim().split(/\r?\n/).length, 1, result.stderr)
+    assert.match(result.stderr, /EPERM/)
+    assert.ok(!result.stderr.includes(f.home), result.stderr)
+    assert.doesNotMatch(result.stderr, /\bat /)
+    assert.deepEqual(pendingFiles(f), [])
+    assert.deepEqual(readFileSync(f.progress), before)
+  } finally { chmodSync(f.progress, 0o666) }
+}))
+
+test('a queued event with a system error is kept and the hook fails in one plain line', () => fixture(f => {
+  assert.equal(f.install('--apply').status, 0)
+  assert.equal(f.event('UserPromptSubmit').status, 0)
+  const owner = createHash('sha256').update(`codex:${session}`).digest('hex')
+  const record = join(f.root, 'sessions', `${owner}.json`)
+  unlinkSync(record)
+  mkdirSync(record)
+  const file = join(f.root, 'pending', '001.json')
+  const queued = JSON.stringify({
+    version: 1, progress: f.progress, mode: '--codex-event', agent: 'codex', session,
+    now: new Date().toISOString(), isBoardPrompt: false, isPrompt: false,
+    payload: { session_id: session, hook_event_name: 'Stop', turn_id: 'turn-1' },
+  })
+  f.save(file, queued)
+  const before = readFileSync(f.progress)
+  const result = f.event('SessionStart', null, { session_id: 'test-codex-session-456' })
+  assert.equal(result.status, 1, result.stderr)
+  assert.equal(result.stderr.trim().split(/\r?\n/).length, 1, result.stderr)
+  assert.match(result.stderr, /EISDIR/)
+  assert.ok(!result.stderr.includes(f.home), result.stderr)
+  assert.doesNotMatch(result.stderr, /\bat /)
+  assert.deepEqual(pendingFiles(f), ['001.json'])
+  assert.equal(readFileSync(file, 'utf8'), queued)
+  assert.deepEqual(readFileSync(f.progress), before)
+}))
+
+test('hook replay yields at its deadline while an explicit report drains every queued entry', async () => {
+  for (const mode of ['--codex-event', '--codex-report']) await fixture(f => {
+    assert.equal(f.install('--apply').status, 0)
+    assert.equal(f.event('UserPromptSubmit').status, 0)
+    const queued = {
+      version: 1, progress: f.progress, mode: '--codex-event', agent: 'codex', session,
+      now: new Date().toISOString(), isBoardPrompt: false, isPrompt: false,
+      payload: { session_id: session, hook_event_name: 'Stop', turn_id: 'turn-1' },
+    }
+    f.save(join(f.root, 'pending', '001.json'), JSON.stringify(queued))
+    f.save(join(f.root, 'pending', '002.json'), JSON.stringify(queued))
+    const preload = join(f.home, 'replay-clock.cjs')
+    f.save(preload, `const fs = require('node:fs')
+const { performance } = require('node:perf_hooks')
+let now = 0
+Object.defineProperty(performance, 'now', { value: () => now })
+const read = fs.readFileSync
+fs.readFileSync = (file, ...args) => {
+  const text = read(file, ...args)
+  if (file === ${JSON.stringify(join(f.root, 'pending', '001.json'))}) now = 2500
+  return text
+}
+require('node:module').syncBuiltinESMExports()
+`)
+    const env = { NODE_OPTIONS: `--require ${JSON.stringify(preload)}` }
+    const result = f.command([mode], mode === '--codex-report'
+      ? { title: 'Explicit report', state: 'done', steps: ['- [x] Finished'] }
+      : { session_id: 'test-codex-session-456', hook_event_name: 'SessionStart' }, env)
+    assert.equal(result.status, 0, result.stderr)
+    assert.equal(result.stderr, '')
+    if (mode === '--codex-report') {
+      assert.deepEqual(pendingFiles(f), [])
+      assert.equal(JSON.parse(result.stdout).state, 'done')
+    } else {
+      assert.equal(result.stdout, '')
+      const files = pendingFiles(f)
+      assert.equal(files.length, 2)
+      assert.ok(files.includes('002.json'))
+      assert.ok(!files.includes('001.json'))
+      const current = JSON.parse(readFileSync(join(f.root, 'pending', files.find(name => name !== '002.json')), 'utf8'))
+      assert.equal(current.session, 'test-codex-session-456')
+      assert.ok(files.some(name => name.startsWith(`${String(current.at).padStart(15, '0')}-`)))
+      assert.doesNotMatch(readFileSync(f.progress, 'utf8'), new RegExp(createHash('sha256').update('codex:test-codex-session-456').digest('hex').slice(0, 8)))
+    }
+  })
+})
+
+test('queued status events use their start time and reject invalid timestamps', () => fixture(f => {
+  assert.equal(f.install('--apply').status, 0)
+  const grok = 'test-grok-session-123'
+  const result = f.command(['--agent-status', '--agent', 'grok', '--state', 'working'], { session_id: grok })
+  assert.equal(result.status, 0, result.stderr)
+  const owner = createHash('sha256').update(`grok:${grok}`).digest('hex')
+  const saved = JSON.parse(readFileSync(join(f.root, 'sessions', `${owner}.json`), 'utf8'))
+  const at = Date.parse(saved.updated) - 1
+  for (const [index, timestamp] of [at, null, 'invalid', 'overflow'].entries()) f.save(join(f.root, 'pending', `${index}.json`), JSON.stringify({
+    version: 1, progress: f.progress, mode: '--agent-status', agent: 'grok', session: grok, status: 'waiting', at: timestamp,
+    now: new Date(Date.parse(saved.updated) + 60000).toISOString(), isBoardPrompt: false, isPrompt: false, payload: {},
+  }).replace('"at":"overflow"', '"at":1e400'))
+  assert.equal(f.event('UserPromptSubmit').status, 0)
+  assert.match(readFileSync(f.progress, 'utf8'), new RegExp(`<!-- auto session=${owner.slice(0, 8)} [^\n]*state=working`))
+  assert.deepEqual(pendingFiles(f), [])
 }))

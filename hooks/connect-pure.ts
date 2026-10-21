@@ -1,4 +1,6 @@
-import { boardPromptHelper, boardRequestWords, boardRun, geminiBoardCommand, normalizeCommandPath, opencodeBoardCommand, promptReceiptScript } from './board-commands'
+import { boardPromptHelper, boardRequestWords, boardRun, geminiBoardCommand, normalizeCommandPath, opencodeBoardCommand } from './board-commands'
+import { hookGuardSource, hostHookTimeout } from './hook-safety'
+import { legacyOpenClawPlugin, legacyOpenCodePlugin } from './legacy-hook-plugins'
 import { LANGS, ZH_TW } from './i18n'
 import type { Strings } from './i18n'
 import { RELEASED } from './released'
@@ -8,82 +10,8 @@ import { STRINGS } from './strings'
 
 const BOARD_WORDS = boardRequestWords(Object.values(STRINGS))
 const BOARD_PROMPT_HELPER = boardPromptHelper(BOARD_WORDS)
-const PROMPT_RECEIPT_SCRIPT = promptReceiptScript(BOARD_WORDS)
 
-// The reporter script an agent's hook runs, written beside progress.md by `/progress
-// connect`: it saves what the hook hands over into the inbox and clears files older than two
-// days. POSIX sh or Windows PowerShell 5.1 suffices; Node strips prompt prose when available.
-
-// Arguments: the agent's name, `prompt`, `turn` or `end`, then optionally the JSON itself (as Codex's
-// legacy notify passes it) instead of on stdin.
-export const reporterSh = (inbox: string): string => `#!/bin/sh
-# Written by the Agent Board plugin (/progress connect). An agent's hook runs it at the end of
-# a turn or a session; the Agent Board pane reads what it saves.
-exec 2>/dev/null
-agent="\${1:-agent}"
-event="\${2:-turn}"
-[ $# -gt 0 ] && shift
-[ $# -gt 0 ] && shift
-dir=${shellQuote(inbox)}
-mkdir -p "$dir" 2>/dev/null
-file="$dir/$agent-$event-$(date +%s)-$$"
-raw=''
-if [ "$event" = prompt ]; then
-  if [ $# -gt 0 ]; then
-    raw="$1"
-  elif [ ! -t 0 ]; then
-    raw="$(cat)"
-  fi
-  if [ -n "$raw" ]; then
-    receipt=$(printf '%s' "$raw" | node -e ${shellQuote(PROMPT_RECEIPT_SCRIPT)})
-    if [ $? -ne 0 ] || [ -z "$receipt" ]; then receipt="$raw"; fi
-    printf '%s' "$receipt" > "$file.tmp"
-  fi
-elif [ $# -gt 0 ]; then
-  printf '%s' "$1" > "$file.tmp"
-elif [ ! -t 0 ]; then
-  cat > "$file.tmp"
-fi
-[ -s "$file.tmp" ] && mv "$file.tmp" "$file.json"
-rm -f "$file.tmp"
-find "$dir" -name '*.json' -mtime +2 -exec rm -f {} +
-# Quiet for every agent but Cursor, which expects a JSON answer; Gemini CLI reads stderr
-# when stdout is empty, so that stays quiet too. Always exit 0: some agents read exit 2 as
-# "keep going".
-[ "$agent" = cursor ] && printf '{}\\n'
-exit 0
-`
-
-// The inbox is found from the script's own folder (both sit beside progress.md), so the
-// script holds no path: PowerShell 5.1 reads a file with no byte-order mark in the system's
-// code page, which would turn a home folder named in Chinese into a different folder.
-export const reporterPs1 = (): string => `# Written by the Agent Board plugin (/progress connect). An agent's hook runs it at the end of
-# a turn or a session; the Agent Board pane reads what it saves.
-param([string]$Agent = 'agent', [string]$Event = 'turn', [string]$Payload = '')
-$ErrorActionPreference = 'SilentlyContinue'
-$dir = Join-Path $PSScriptRoot 'progress-inbox'
-New-Item -ItemType Directory -Force -Path $dir | Out-Null
-if ($Payload -eq '' -and [Console]::IsInputRedirected) {
-  [Console]::InputEncoding = [Text.Encoding]::UTF8
-  $Payload = [Console]::In.ReadToEnd()
-}
-if ($Event -eq 'prompt') {
-  $raw = $Payload
-  $Payload = ''
-  $OutputEncoding = New-Object Text.UTF8Encoding $false
-  try { $Payload = ($raw | node -e ${psQuote(PROMPT_RECEIPT_SCRIPT)} 2>$null | Out-String).Trim() } catch {}
-  if ($LASTEXITCODE -ne 0 -or $Payload -eq '') { $Payload = $raw }
-}
-if ($Payload.Trim() -ne '') {
-  $name = '{0}-{1}-{2}-{3}' -f $Agent, $Event, [DateTimeOffset]::Now.ToUnixTimeMilliseconds(), $PID
-  $tmp = Join-Path $dir ($name + '.tmp')
-  [IO.File]::WriteAllText($tmp, $Payload, (New-Object Text.UTF8Encoding $false))
-  Move-Item -Force $tmp (Join-Path $dir ($name + '.json'))
-}
-Get-ChildItem -Path $dir -Filter '*.json' | Where-Object { $_.LastWriteTime -lt (Get-Date).AddDays(-2) } | Remove-Item -Force
-if ($Agent -eq 'cursor') { '{}' }
-exit 0
-`
+export { reporterSh, reporterPs1 } from './hook-reporters'
 
 export const shellQuote = (text: string): string => `'${text.replace(/'/g, `'\\''`)}'`
 
@@ -146,12 +74,12 @@ export const withGroupedHook = (config: Json, event: string, command: string, ex
 }
 
 // Cursor's shape: `{ version: 1, hooks: { <event>: [{ command }] } }`.
-export const withFlatHook = (config: Json, event: string, command: string): Json => {
+export const withFlatHook = (config: Json, event: string, command: string, extra: Json = {}): Json => {
   const hooks = isRecord(config.hooks) ? config.hooks : {}
   const list = Array.isArray(hooks[event]) ? (hooks[event] as unknown[]) : []
   const kept = list.filter(one => !OURS.test(commandOf(one)))
 
-  return { version: 1, ...config, hooks: { ...hooks, [event]: [...kept, { command }] } }
+  return { version: 1, ...config, hooks: { ...hooks, [event]: [...kept, { command, ...extra }] } }
 }
 
 // Every hook of ours taken out, in either shape; an event left empty goes too.
@@ -338,9 +266,10 @@ export const withHermesHooks = (text: string, events: Array<[string, string]>): 
   const flat = (one: string): string => one.replace(/\s+/g, ' ')
   const isItemOf = (item: string, command: string): boolean =>
     [command, JSON.stringify(command), `'${command.replace(/'/g, "''")}'`].some(form => flat(item).includes(flat(form)))
-  if (items.length === events.length && events.every(([, command]) => items.some(item => isItemOf(item, command)))) return text
+  const hasTimeout = (item: string): boolean => [...item.matchAll(/(?:^|[,{\n])\s*timeout\s*:\s*(\d+)/g)].some(match => Number(match[1]) >= hostHookTimeout('hermes'))
+  if (items.length === events.length && events.every(([, command]) => items.some(item => isItemOf(item, command) && hasTimeout(item)))) return text
   const base = stripHermesHooks(text, true)
-  const item = (command: string): string => `- {command: ${JSON.stringify(command)}, timeout: 10}`
+  const item = (command: string): string => `- {command: ${JSON.stringify(command)}, timeout: ${hostHookTimeout('hermes')}}`
   // Lines of ours end the way the file's own lines do.
   const eol = text.includes('\r\n') ? '\r' : ''
   // An empty `hooks: {}` becomes a bare `hooks:` that ours go under.
@@ -395,7 +324,7 @@ export const agentHooks = (ctx: ConnectContext): AgentHook[] => {
       dir: ctx.codexHome,
       file: [ctx.codexHome, 'hooks.json'].join(ctx.sep),
       edit: jsonEdit(config =>
-        withGroupedHook(withGroupedHook(withGroupedHook(config, 'Stop', turn('codex'), { timeout: 10 }), 'SessionEnd', end('codex'), { timeout: 3 }), 'UserPromptSubmit', prompt('codex'), { timeout: 3 }),
+        withGroupedHook(withGroupedHook(withGroupedHook(config, 'Stop', turn('codex'), { timeout: hostHookTimeout('codex', 'Stop') }), 'SessionEnd', end('codex'), { timeout: hostHookTimeout('codex', 'SessionEnd') }), 'UserPromptSubmit', prompt('codex'), { timeout: hostHookTimeout('codex', 'UserPromptSubmit') }),
         true,
       ),
     },
@@ -407,11 +336,11 @@ export const agentHooks = (ctx: ConnectContext): AgentHook[] => {
       file: join(ctx, '.gemini', 'settings.json'),
       edit: jsonEdit(config =>
         withGroupedHook(withGroupedHook(
-          withGroupedHook(config, 'AfterAgent', turn('gemini'), { name: 'agent-board', timeout: 5000 }),
+          withGroupedHook(config, 'AfterAgent', turn('gemini'), { name: 'agent-board', timeout: hostHookTimeout('gemini', 'AfterAgent') }),
           'SessionEnd',
           end('gemini'),
-          { name: 'agent-board-end', timeout: 5000 },
-        ), 'BeforeAgent', prompt('gemini'), { name: 'agent-board-prompt', timeout: 5000 }),
+          { name: 'agent-board-end', timeout: hostHookTimeout('gemini', 'SessionEnd') },
+        ), 'BeforeAgent', prompt('gemini'), { name: 'agent-board-prompt', timeout: hostHookTimeout('gemini', 'BeforeAgent') }),
       ),
     },
     {
@@ -422,7 +351,7 @@ export const agentHooks = (ctx: ConnectContext): AgentHook[] => {
       dir: join(ctx, '.cursor'),
       file: join(ctx, '.cursor', 'hooks.json'),
       edit: jsonEdit(config =>
-        withFlatHook(withFlatHook(withFlatHook(withFlatHook(config, 'afterAgentResponse', turn('cursor')), 'stop', turn('cursor')), 'sessionEnd', end('cursor')), 'beforeSubmitPrompt', prompt('cursor')),
+        withFlatHook(withFlatHook(withFlatHook(withFlatHook(config, 'afterAgentResponse', turn('cursor'), { timeout: hostHookTimeout('cursor') }), 'stop', turn('cursor'), { timeout: hostHookTimeout('cursor') }), 'sessionEnd', end('cursor'), { timeout: hostHookTimeout('cursor') }), 'beforeSubmitPrompt', prompt('cursor'), { timeout: hostHookTimeout('cursor') }),
       ),
     },
     {
@@ -436,7 +365,7 @@ export const agentHooks = (ctx: ConnectContext): AgentHook[] => {
       old: [ctx.grokHome, 'hooks', 'progress-pane.json'].join(ctx.sep),
       generated: true,
       edit: generatedFile(
-        writeConfig(withGroupedHook(withGroupedHook(withGroupedHook({}, 'Stop', turn('grok'), { timeout: 10 }), 'SessionEnd', end('grok'), { timeout: 5 }), 'UserPromptSubmit', prompt('grok'), { timeout: 5 })),
+        writeConfig(withGroupedHook(withGroupedHook(withGroupedHook({}, 'Stop', turn('grok'), { timeout: hostHookTimeout('grok', 'Stop') }), 'SessionEnd', end('grok'), { timeout: hostHookTimeout('grok', 'SessionEnd') }), 'UserPromptSubmit', prompt('grok'), { timeout: hostHookTimeout('grok', 'UserPromptSubmit') })),
         [1, 5].map(timeout => writeConfig(withGroupedHook(withGroupedHook({}, 'Stop', turn('grok'), { timeout: 10 }), 'SessionEnd', end('grok'), { timeout }))),
       ),
     },
@@ -448,7 +377,7 @@ export const agentHooks = (ctx: ConnectContext): AgentHook[] => {
       dir: join(ctx, '.config', 'muse'),
       file: join(ctx, '.config', 'muse', 'settings.json'),
       edit: jsonEdit(config =>
-        withGroupedHook(withGroupedHook(withGroupedHook({ schema_version: 1, ...config }, 'Stop', turn('muse'), { timeout: 10 }), 'SessionEnd', end('muse'), { timeout: 5 }), 'UserPromptSubmit', prompt('muse'), { timeout: 5 }),
+        withGroupedHook(withGroupedHook(withGroupedHook({ schema_version: 1, ...config }, 'Stop', turn('muse'), { timeout: hostHookTimeout('muse', 'Stop') }), 'SessionEnd', end('muse'), { timeout: hostHookTimeout('muse', 'SessionEnd') }), 'UserPromptSubmit', prompt('muse'), { timeout: hostHookTimeout('muse', 'UserPromptSubmit') }),
       ),
     },
     {
@@ -476,7 +405,7 @@ export const agentHooks = (ctx: ConnectContext): AgentHook[] => {
       dir: ctx.openclawHome,
       file: [ctx.openclawHome, OPENCLAW_FILE].join(ctx.sep),
       generated: true,
-      edit: generatedFile(openclawPlugin(ctx), [openclawPlugin(ctx, false), openclawPlugin(ctx, true, false)]),
+      edit: generatedFile(openclawPlugin(ctx), [openclawPlugin(ctx, false), legacyOpenClawPlugin(ctx), legacyOpenClawPlugin(ctx, false), legacyOpenClawPlugin(ctx, true, false)]),
     },
     {
       agent: 'openclaw',
@@ -499,7 +428,7 @@ export const agentHooks = (ctx: ConnectContext): AgentHook[] => {
       file: [opencodeHome, 'plugin', 'agent-board.js'].join(ctx.sep),
       old: [opencodeHome, 'plugin', 'progress-pane.js'].join(ctx.sep),
       generated: true,
-      edit: generatedFile(opencodePlugin(ctx), [opencodePlugin(ctx, false), opencodePlugin(ctx, true, false)]),
+      edit: generatedFile(opencodePlugin(ctx), [opencodePlugin(ctx, false), legacyOpenCodePlugin(ctx), legacyOpenCodePlugin(ctx, false), legacyOpenCodePlugin(ctx, true, false)]),
     },
     ...boardCommands(ctx),
   ]
@@ -510,18 +439,28 @@ export const agentHooks = (ctx: ConnectContext): AgentHook[] => {
 // deleted. Every export of a plugin file must be a function.
 export const opencodePlugin = (ctx: ConnectContext, withPrompt = true, flagsBoardRequests = true): string => `// Written by the Agent Board plugin (/progress connect): reports each finished turn to the Agent Board
 // pane.
-import { mkdirSync, renameSync, writeFileSync } from 'node:fs'
+import { closeSync, mkdirSync, openSync, renameSync, unlinkSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
+${hookGuardSource(ctx.home, 'opencode')}
 
 ${withPrompt && flagsBoardRequests ? BOARD_PROMPT_HELPER + '\n' : ''}const INBOX = ${JSON.stringify(ctx.inbox)}
 
-const save = (event, payload) => {
+const save = (event, payload, current) => {
+  let temporary, owned = false
   try {
+    current()
     mkdirSync(INBOX, { recursive: true })
     const name = \`opencode-\${event}-\${Date.now()}-\${process.pid}\`
-    writeFileSync(join(INBOX, name + '.tmp'), JSON.stringify(payload))
-    renameSync(join(INBOX, name + '.tmp'), join(INBOX, name + '.json'))
-  } catch {}
+    temporary = join(INBOX, name + '.tmp')
+    const output = openSync(temporary, 'wx', 0o600)
+    owned = true
+    try { writeFileSync(output, JSON.stringify(payload)) }
+    finally { closeSync(output) }
+    current()
+    renameSync(temporary, join(INBOX, name + '.json'))
+    owned = false
+  } catch (error) { hookError(error?.message === 'HOOK_TIMEOUT' ? 'REPORTER_TIMEOUT' : 'REPORTER_FAILED') }
+  finally { if (owned) { try { unlinkSync(temporary) } catch {} } }
 }
 
 const textOf = message =>
@@ -531,30 +470,29 @@ const textOf = message =>
     .join('\\n')
 
 export const AgentBoard = async ({ client, directory }) => ({
-${withPrompt ? `  'chat.message': async ({ sessionID }${flagsBoardRequests ? ', output' : ''}) => {
-    try {
-      const session = await client.session.get({ path: { id: sessionID } })
+${withPrompt ? `  'chat.message': async ({ sessionID }${flagsBoardRequests ? ', output' : ''}) => withHook(async current => {
+      const session = current(await client.session.get({ path: { id: sessionID } }))
+      if (session.error) throw Error('HOST_METADATA_FAILED')
       if (!session.data || session.data.id !== sessionID || session.data.parentID) return
-      save('prompt', { session_id: sessionID, cwd: directory${flagsBoardRequests ? ', ...(isBoardRequest(output) ? { board_request: true } : {})' : ''} })
-    } catch {}
-  },
+      save('prompt', { session_id: sessionID, cwd: directory${flagsBoardRequests ? ', ...(isBoardRequest(output) ? { board_request: true } : {})' : ''} }, current)
+  }),
 ` : ''}\
-  event: async ({ event }) => {
-    try {
+  event: async ({ event }) => withHook(async current => {
       if (event.type === 'session.idle') {
         const id = event.properties.sessionID
-        const session = await client.session.get({ path: { id } })
+        const session = current(await client.session.get({ path: { id } }))
+        if (session.error) throw Error('HOST_METADATA_FAILED')
         if (session.data?.parentID) return
-        const listed = await client.session.messages({ path: { id } })
+        const listed = current(await client.session.messages({ path: { id } }))
+        if (listed.error) throw Error('HOST_METADATA_FAILED')
         const messages = listed.data ?? []
         const last = role => [...messages].reverse().find(message => message.info?.role === role)
-        save('turn', { session_id: id, cwd: directory, prompt: textOf(last('user')), last_assistant_message: textOf(last('assistant')) })
+        save('turn', { session_id: id, cwd: directory, prompt: textOf(last('user')), last_assistant_message: textOf(last('assistant')) }, current)
       } else if (event.type === 'session.deleted') {
         const id = event.properties.info?.id
-        if (id) save('end', { session_id: id, cwd: directory })
+        if (id) save('end', { session_id: id, cwd: directory }, current)
       }
-    } catch {}
-  },
+  }),
 })
 `
 
@@ -661,18 +599,28 @@ export const withoutOpenclawPlugin = (config: Json, file: string): Json => {
 // a compaction or a restart does not end the session.
 export const openclawPlugin = (ctx: ConnectContext, withPrompt = true, flagsBoardRequests = true): string => `// Written by the Agent Board plugin (/progress connect): reports each finished turn to the Agent Board
 // pane.
-import { mkdirSync, renameSync, writeFileSync } from 'node:fs'
+import { closeSync, mkdirSync, openSync, renameSync, unlinkSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
+${hookGuardSource(ctx.home, 'openclaw')}
 
 ${withPrompt && flagsBoardRequests ? BOARD_PROMPT_HELPER + '\n' : ''}const INBOX = ${JSON.stringify(ctx.inbox)}
 
-const save = (event, payload) => {
+const save = (event, payload, current) => {
+  let temporary, owned = false
   try {
+    current()
     mkdirSync(INBOX, { recursive: true })
     const name = \`openclaw-\${event}-\${Date.now()}-\${process.pid}\`
-    writeFileSync(join(INBOX, name + '.tmp'), JSON.stringify(payload))
-    renameSync(join(INBOX, name + '.tmp'), join(INBOX, name + '.json'))
-  } catch {}
+    temporary = join(INBOX, name + '.tmp')
+    const output = openSync(temporary, 'wx', 0o600)
+    owned = true
+    try { writeFileSync(output, JSON.stringify(payload)) }
+    finally { closeSync(output) }
+    current()
+    renameSync(temporary, join(INBOX, name + '.json'))
+    owned = false
+  } catch (error) { hookError(error?.message === 'HOOK_TIMEOUT' ? 'REPORTER_TIMEOUT' : 'REPORTER_FAILED') }
+  finally { if (owned) { try { unlinkSync(temporary) } catch {} } }
 }
 
 const textOf = message =>
@@ -686,30 +634,30 @@ export default {
   id: '${OPENCLAW_ID}',
   name: 'Agent Board',
   register(api) {
-${withPrompt ? `    api.on('before_prompt_build', (_event, ctx) => {
+${withPrompt ? `    api.on('before_prompt_build', (_event, ctx) => withHook(current => {
       try {
         if (!ctx?.sessionId || ctx.inputProvenance?.kind !== 'external_user') return
-        save('prompt', { session_id: ctx.sessionId, cwd: ctx.workspaceDir ?? ''${flagsBoardRequests ? ', ...(isBoardRequest(_event) ? { board_request: true } : {})' : ''} })
-      } catch {}
-    })
+        save('prompt', { session_id: ctx.sessionId, cwd: ctx.workspaceDir ?? ''${flagsBoardRequests ? ', ...(isBoardRequest(_event) ? { board_request: true } : {})' : ''} }, current)
+      } catch { hookError('REPORTER_FAILED') }
+    }))
 ` : ''}\
-    api.on('agent_end', (event, ctx) => {
+    api.on('agent_end', (event, ctx) => withHook(current => {
       try {
         if (!ctx?.sessionId || ctx.trigger === 'heartbeat' || ctx.trigger === 'memory') return
         const messages = Array.isArray(event?.messages) ? event.messages : []
         const last = role => [...messages].reverse().find(message => message?.role === role)
         const answer = textOf(last('assistant'))
         if (answer.trim() === '') return
-        save('turn', { session_id: ctx.sessionId, cwd: ctx.workspaceDir ?? '', prompt: textOf(last('user')), last_assistant_message: answer })
-      } catch {}
-    })
-    api.on('session_end', (event, ctx) => {
+        save('turn', { session_id: ctx.sessionId, cwd: ctx.workspaceDir ?? '', prompt: textOf(last('user')), last_assistant_message: answer }, current)
+      } catch { hookError('REPORTER_FAILED') }
+    }))
+    api.on('session_end', (event, ctx) => withHook(current => {
       try {
         if (event?.reason === 'compaction' || event?.reason === 'restart') return
         const id = ctx?.sessionId ?? event?.sessionId
-        if (id) save('end', { session_id: id, cwd: ctx?.workspaceDir ?? '' })
-      } catch {}
-    })
+        if (id) save('end', { session_id: id, cwd: ctx?.workspaceDir ?? '' }, current)
+      } catch { hookError('REPORTER_FAILED') }
+    }))
   },
 }
 `

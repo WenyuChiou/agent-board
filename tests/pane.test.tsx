@@ -7,13 +7,16 @@ import { STRINGS } from '../hooks/strings'
 
 import { ZH_TW } from '../hooks/i18n'
 import { EN } from '../hooks/strings-en'
+import { paletteFor } from '../hooks/palette'
 import { ZH_CN } from '../hooks/strings-zh-cn'
+import { pressTarget } from '../hooks/pane'
 import { dashboardHtml } from '../hooks/dashboard'
 import { buildView, IDLE_MS, parseSeen, seenJson, seenPath, withSeen } from '../hooks/view'
+import type { TaskRow, View } from '../hooks/view'
 import { parseProgress } from '../hooks/parse'
 import { chatText, peekInbox } from '../hooks/board'
 import { answerAgentPrompt, blockId, CLAIM_MS, isInboxFile, takenName, withAgentPrompts } from '../hooks/inbox'
-import { completionKey, completionOverlay, emptyMirror } from '../hooks/mirror'
+import { applyTaskCreate, applyTaskUpdate, completionKey, completionOverlay, emptyMirror } from '../hooks/mirror'
 import { applyDigest, startBackgroundJob } from '../hooks/digest'
 import { upsertAutoBlock } from '../hooks/blocks'
 
@@ -22,10 +25,13 @@ import { sha256 } from '../hooks/sha256'
 import { RELEASE_0_18_1, RELEASE_0_20_5 } from './fixtures/released'
 import { memoryConnect } from './fixtures/connect-memory'
 import { CONNECT_BOOTSTRAP, CONNECT_EXECUTE } from '../hooks/connect-worker'
+import { LEDGER_LINK, LINK_EXISTS, LINK_KEPT_SOURCE, LINK_UNSUPPORTED } from '../hooks/ledger-move'
 import { hasOwnConnectData, connectDataRoots } from '../hooks/connect-pure'
 import type { ConnectState, LegacyConnectRequest } from '../scripts/connect-transaction'
 
 const FILE = '/home/me/.claude/progress.md'
+const QUESTIONS = '/home/me/.claude/progress-questions.json'
+const INBOX = '/home/me/.claude/progress-inbox'
 const SESSION = '2be48af2-6193-5040-aacc-e0546d6784f1'
 const PANE = { plugin: 'agent-board', component: 'Pane', requestId: 'agent-board' } as const
 const CONNECT = { home: '/home/me', sep: '/', isWindows: false, script: '/home/me/.claude/progress-report.sh', inbox: '/home/me/.claude/progress-inbox', codexHome: '/home/me/.codex', grokHome: '/home/me/.grok', hermesHome: '/home/me/.hermes', openclawHome: '/home/me/.openclaw', board: '/home/me/.claude/agent-board.mjs' }
@@ -165,6 +171,8 @@ type World = {
   openclaw?: string
   // What `node --version` prints; null when there is no node to run. Unset, a supported one.
   node?: string | null
+  browserExitCode?: number
+  hasNoHardLinks?: boolean
   nodeGate?: { reached: () => void; release: Promise<void> }
   workerFailure?: string
   bootstrapFailure?: boolean
@@ -172,9 +180,11 @@ type World = {
   finishSetup?: () => void
   // Paths a write to fails (a read-only file, a folder that is not there).
   unwritable?: Set<string>
+  writeDeny?: string
   ignoreQuestionWrites?: boolean
   failQuestionCapture?: 'read' | 'write'
   failStore?: (operation: 'get' | 'set' | 'delete', key: string) => boolean
+  holdStore?: { key: string; reached: () => void; release: Promise<void> }
   beforeStoreSet?: (key: string) => void
   ignoreStore?: (key: string) => boolean
   afterMove?: (from: string, to: string) => boolean
@@ -230,7 +240,13 @@ const engineBeneath = (on: On, world: World): MockClock => {
       world.storeReads?.push(e.key)
       return world.failStore?.('get', e.key) ? { deny: 'EIO' } : { value: store[e.key] }
     })
-    on('store.set', ($, e) => {
+    on('store.set', async ($, e) => {
+      const hold = world.holdStore
+      if (hold?.key === e.key) {
+        world.holdStore = undefined
+        hold.reached()
+        await hold.release
+      }
       world.beforeStoreSet?.(e.key)
       if (world.failStore?.('set', e.key)) return { deny: 'EIO' }
       if (world.ignoreStore?.(e.key)) return { value: undefined }
@@ -276,6 +292,28 @@ const engineBeneath = (on: On, world: World): MockClock => {
     value: world.hasTasks ? [{ name: 'TaskCreate', description: '', mcp: false }] : [{ name: 'Read', description: '', mcp: false }],
   }))
   on('process.run', async ($, e) => {
+    if (world.browserExitCode !== undefined && e.argv.some(arg => /\.html$/.test(arg))) return { value: { exitCode: world.browserExitCode, stdout: '', stderr: 'synthetic browser refusal', isStdoutTruncated: false, isStderrTruncated: false } }
+    if (e.argv[0] === 'node' && e.argv[2] === LEDGER_LINK && e.argv[3] === '--') {
+      world.ran?.push([...e.argv])
+      const from = posix(e.argv[4] ?? '')
+      const to = posix(e.argv[5] ?? '')
+      const text = world.files.get(from)
+      let exitCode = 0
+      if (world.node === null) exitCode = 127
+      else if (world.hasNoHardLinks || text === undefined || world.isMoveRefused?.(from) === true || world.unwritable?.has(to) === true) exitCode = LINK_UNSUPPORTED
+      else if (world.files.has(to)) exitCode = LINK_EXISTS
+      else if (world.ignoreQuestionWrites && to.endsWith('-questions.json')) world.files.delete(from)
+      // The link is made but the source stays, as when another program holds it open.
+      else if (world.isRemoveRefused?.(from) === true) {
+        world.files.set(to, text)
+        exitCode = LINK_KEPT_SOURCE
+      } else {
+        world.files.delete(from)
+        world.files.set(to, text)
+        if (world.afterMove?.(from, to)) exitCode = 1
+      }
+      return { value: { exitCode, stdout: '', stderr: exitCode === 127 ? 'node: command not found' : '', isStdoutTruncated: false, isStderrTruncated: false } }
+    }
     if (e.argv[0] === 'node' && e.argv[1] === '--version' && world.nodeGate !== undefined) {
       const gate = world.nodeGate
       world.nodeGate = undefined
@@ -416,7 +454,7 @@ const engineBeneath = (on: On, world: World): MockClock => {
   on('fs.write', async ($, e) => {
     const path = posix(e.path)
     world.written?.push(path)
-    if (world.unwritable?.has(path) || (world.failQuestionCapture === 'write' && path.includes('-questions-source-'))) return { deny: 'EACCES' }
+    if (world.unwritable?.has(path) || (world.failQuestionCapture === 'write' && path.includes('-questions-source-'))) return { deny: world.writeDeny ?? 'EACCES' }
     if (world.ignoreQuestionWrites && path.endsWith('-questions.json')) return { value: undefined }
     const hold = world.hold
     if (hold !== undefined && path === FILE) {
@@ -1923,7 +1961,9 @@ test('a synthetic journal failure leaves a loading aside in place', async ($, on
   await atGate
   world.unwritable = new Set([JOURNAL])
   await ui.press({ key: 'demo-1::Demo task::0::done' })
-  const loading = await ui.find({ type: 'Text', text: ZH_TW.thinking })
+  const loading = (await ui.findAll({ type: 'Box' }) as PressNode[]).find(node =>
+    !pressNodes(node).some(child => child.type === 'Input' || child.type === 'Button')
+    && pressTexts(node).includes(ZH_TW.question('Demo question')) && pressTexts(node).includes(ZH_TW.thinking))
   const notice = await ui.find({ type: 'Text', text: ZH_TW.journalFailed })
   release()
   await asking
@@ -2199,6 +2239,804 @@ const outside = (on: On, world?: World) => {
   return seen
 }
 
+const LIVE_PRESS = '# Progress\n\n## Demo\n<!-- auto session=a1b2c3d4 agent=claude state=working updated=2026-10-16T11:59:00Z resume=a1b2c3d4-1111-2222-3333 -->\n### Worktree removal\n- [?] Remove the old worktree, OK?\n<!-- /auto session=a1b2c3d4 -->\n'
+const LIVE_PRESS_KEY = 'Demo::Worktree removal::0'
+
+type PressNode = { type: string; key?: string; props?: { key?: string }; text?: string; children?: readonly (PressNode | string)[] }
+const pressChildren = (node: PressNode): readonly (PressNode | string)[] => node.children ?? []
+const pressNodes = (node: PressNode): PressNode[] => [node, ...pressChildren(node).flatMap(child => typeof child === 'string' ? [] : pressNodes(child))]
+const pressTexts = (node: PressNode): string[] => node.type === 'Text'
+  ? [node.text ?? pressChildren(node).filter(child => typeof child === 'string').join('')]
+  : pressChildren(node).flatMap(child => typeof child === 'string' ? [] : pressTexts(child))
+// The engine retains keys on controls, but strips them from Text and Box nodes.
+// Only a container whose controls all belong to this card can prove feedback placement.
+const besideButton = (nodes: readonly unknown[], key: string, needsButton = true): string[] => {
+  const controls = (nodes as readonly PressNode[]).flatMap(node => pressNodes(node).filter(child => child.type === 'Button' || child.type === 'Input').map(child => child.key ?? child.props?.key ?? ''))
+  const cards = controls.flatMap(control => control.startsWith('ask::') ? [control.slice(5)]
+    : /::(?:copy|resume|hide|unhide|reply|tick|hand|archive|done|did|revise)$/.test(control) ? [control.replace(/::[^:]+$/, '')]
+      : controls.some(other => other.startsWith(`${control}::`)) ? [control] : [])
+  const card = cards.sort((a, b) => b.length - a.length).find(card => key === card || key === `ask::${card}` || key.startsWith(`${card}::`))
+    ?? key
+  const belongs = (button: string) => button === card || button === `ask::${card}` || button.startsWith(`${card}::`) || card === 'continue' && button === 'section::steps'
+  const candidates = (nodes as readonly PressNode[]).filter(node => {
+    const keys = pressNodes(node).filter(child => child.type === 'Button').map(child => child.key ?? child.props?.key ?? '')
+    return keys.length > 0 && (!needsButton || keys.includes(key)) && keys.every(belongs)
+  })
+  return candidates.length === 0 ? [] : pressTexts(candidates.sort((a, b) => pressTexts(b).length - pressTexts(a).length)[0]!)
+}
+
+const besideLabel = (nodes: readonly unknown[], label: string, text: string): boolean => (nodes as readonly PressNode[]).some(node =>
+  !pressNodes(node).some(child => child.type === 'Button') && pressTexts(node).includes(label) && pressTexts(node).includes(text))
+
+const resultAfterControl = (nodes: readonly unknown[], key: string, text: string): boolean => (nodes as readonly PressNode[]).some(node => {
+  const children = pressChildren(node).filter((child): child is PressNode => typeof child !== 'string')
+  const at = children.findIndex(child => pressNodes(child).some(one => (one.type === 'Button' || one.type === 'Input') && (one.key ?? one.props?.key) === key))
+  return at >= 0 && children[at + 1] !== undefined && pressTexts(children[at + 1]!).includes(text)
+})
+
+test('pane feedback lookup uses the card containing the button and rejects the shared answer box', () => {
+  const card: PressNode = { type: 'Box', children: [{ type: 'Button', props: { key: 'mine::1::copy' } }] }
+  const shared: PressNode = { type: 'Box', children: [{ type: 'Text', children: [EN.copied] }, { type: 'Button', props: { key: 'clear-answer' } }] }
+  const other: PressNode = { type: 'Box', children: [{ type: 'Button', props: { key: 'mine::10::copy' } }, { type: 'Text', children: [EN.copied] }] }
+  const nodes = [card, shared, other, { type: 'Box', children: [card, shared, other] }]
+  expect(besideButton(nodes, 'mine::1::copy')).not.toContain(EN.copied)
+  card.children = [...(card.children ?? []), { type: 'Box', children: [{ type: 'Text', children: [EN.copied] }] }]
+  expect(besideButton(nodes, 'mine::1::copy')).toContain(EN.copied)
+  expect(besideLabel([shared], EN.copied, EN.copied)).toBe(false)
+})
+
+test('copy resume command on a live other-session ask shows Copied, or the text to copy when the clipboard fails', async ($, on) => {
+  const world: World = { files: new Map([[FILE, LIVE_PRESS]]), mtime: 1, hasTasks: true, store: { autoConnectOff: true } }
+  engineBeneath(on, world)
+  on('ui.status', () => ({ value: undefined }))
+  let mode = 'copied'
+  on('ui.copy', () => mode === 'reject' ? { deny: 'clipboard unavailable' } : mode === 'copied' ? { value: { isCopied: true as const } } : { value: { isCopied: false as const, reason: 'refused' as const } })
+  on('ui.notify', () => ({ deny: 'notifications unavailable' }))
+  await $.session.start({ cwd: '/work/persona_framework', surface: 'desktop', isInteractive: true })
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
+  for (const one of ['copied', 'unavailable', 'reject']) {
+    mode = one
+    await ui.press({ key: `${LIVE_PRESS_KEY}::resume` })
+    const result = besideButton(await ui.findAll({ type: 'Box' }), `${LIVE_PRESS_KEY}::resume`)
+    expect(result).toContain(one === 'copied' ? ZH_TW.copied : ZH_TW.pressCopyFallback)
+    if (one !== 'copied') expect((await ui.find({ type: 'Input', key: `${LIVE_PRESS_KEY}::copy-text` }))?.props.value).toBe('claude --resume a1b2c3d4-1111-2222-3333')
+  }
+  await ui.unmount()
+})
+
+test('already answered, hide on a live other-session ask hides it, or says why not', async ($, on) => {
+  const world: World = { files: new Map([[FILE, LIVE_PRESS]]), mtime: 1, hasTasks: true, store: { autoConnectOff: true, opened: ['hidden'] } }
+  engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/persona_framework', surface: 'desktop', isInteractive: true })
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
+  const saved = world.files.get(QUESTIONS)
+  world.files.set(QUESTIONS, '{"version":999}')
+  world.mtime += 1
+  await ui.press({ key: `${LIVE_PRESS_KEY}::hide` })
+  expect(besideButton(await ui.findAll({ type: 'Box' }), `${LIVE_PRESS_KEY}::hide`)).toContain(ZH_TW.pressLedgerFailed)
+  world.files.set(QUESTIONS, saved ?? '')
+  world.mtime += 1
+  world.beforeRead = path => { if (path === FILE) throw new Error('synthetic read failure') }
+  await ui.press({ key: `${LIVE_PRESS_KEY}::hide` })
+  expect(besideButton(await ui.findAll({ type: 'Box' }), `${LIVE_PRESS_KEY}::hide`)).toContain(ZH_TW.pressProgressUnreadable)
+  world.beforeRead = undefined
+  await ui.press({ key: `${LIVE_PRESS_KEY}::hide` })
+  expect(await ui.find({ type: 'Button', key: `${LIVE_PRESS_KEY}::hide` })).toBeUndefined()
+  expect(await ui.find({ type: 'Text', text: ZH_TW.pressHidden })).toBeDefined()
+  await ui.unmount()
+})
+
+test('a successful pane step keeps its feedback until the task changes', async ($, on) => {
+  const world: World = { files: new Map([[FILE, '# Progress\n\n## Demo\n### Checklist\n- [ ] First step\n- [ ] Last step\n']]), mtime: 1, hasTasks: true, store: { autoConnectOff: true, opened: ['others'] } }
+  const clock = engineBeneath(on, world)
+  outside(on, world)
+  await $.session.start({ cwd: '/work/persona_framework', surface: 'desktop', isInteractive: true })
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
+  await ui.press({ key: 'Demo::Checklist' })
+  await ui.press({ key: 'Demo::Checklist::tick' })
+  expect(besideButton(await ui.findAll({ type: 'Box' }), 'Demo::Checklist::tick')).toContain(ZH_TW.boardTicked('First step'))
+  world.files.set(FILE, (world.files.get(FILE) ?? '').replace('Last step', 'Changed next step'))
+  world.mtime += 1
+  await clock.advance(2100)
+  expect(await ui.find({ type: 'Text', text: ZH_TW.boardTicked('First step') })).toBeUndefined()
+  await ui.unmount()
+})
+
+test("a refusal caused by another agent's change stays next to the card after the redraw", async ($, on) => {
+  const world: World = { files: new Map([[FILE, '# Progress\n\n## Demo\n### Checklist\n- [ ] First step\n- [ ] Last step\n']]), mtime: 1, hasTasks: true, store: { autoConnectOff: true, opened: ['others'] } }
+  const clock = engineBeneath(on, world)
+  outside(on, world)
+  await $.session.start({ cwd: '/work/persona_framework', surface: 'desktop', isInteractive: true })
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
+  await ui.press({ key: 'Demo::Checklist' })
+  world.files.set(FILE, (world.files.get(FILE) ?? '').replace('First step', 'Changed by another agent'))
+  world.mtime += 1
+  await ui.press({ key: 'Demo::Checklist::tick' })
+  expect(await ui.find({ type: 'Text', text: ZH_TW.boardTickGone })).toBeDefined()
+  await clock.advance(2100)
+  expect(besideButton(await ui.findAll({ type: 'Box' }), 'Demo::Checklist::tick')).toContain(ZH_TW.boardTickGone)
+  await ui.unmount()
+})
+
+test("a second press elsewhere keeps the first card's pending result", async ($, on) => {
+  const world: World = { files: new Map(), mtime: 1, hasTasks: true, store: { autoConnectOff: true, opened: ['waiting'] } }
+  const clock = engineBeneath(on, world)
+  outside(on, world)
+  let release: () => void = () => undefined
+  let hasStarted = false
+  let pressError: unknown
+  const gate = new Promise<void>(done => { release = done })
+  on('prompt.submit', async ($, event) => { hasStarted = true; await gate; return { text: event.text } })
+  await start($, 'Pending matrix')
+  await $.tool.call({ tool: 'TaskCreate', subject: 'First pending question', description: '' })
+  await $.tool.call({ tool: 'TaskUpdate', taskId: '1', metadata: { waiting: 'you', ask: 'confirm', why: 'Synthetic pending result' } })
+  await $.tool.call({ tool: 'TaskCreate', subject: 'Run the second command', description: '' })
+  await $.tool.call({ tool: 'TaskUpdate', taskId: '2', metadata: { waiting: 'you', ask: 'do', command: 'echo second', why: 'Synthetic independent card' } })
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
+  const firstKey = `mine::1::${ZH_TW.yes}`
+  await ui.press({ key: 'ask::mine::2' })
+  const first = ui.press({ key: firstKey }).catch(error => { pressError = error })
+  try {
+    await clock.settle()
+    expect(pressError).toBeUndefined()
+    expect(hasStarted).toBe(true)
+    await ui.press({ key: 'mine::2::copy' })
+    expect(besideButton(await ui.findAll({ type: 'Box' }), firstKey)).toContain(ZH_TW.pressPending)
+    expect(besideButton(await ui.findAll({ type: 'Box' }), 'mine::2::copy')).toContain(ZH_TW.copied)
+  } finally {
+    release()
+    await first
+    await ui.unmount()
+  }
+})
+
+test('folding a question while its reply is sending keeps the pending result and its refusal', async ($, on) => {
+  const world: World = { files: new Map(), mtime: 1, hasTasks: true, store: { autoConnectOff: true, opened: ['waiting'] } }
+  const clock = engineBeneath(on, world)
+  outside(on, world)
+  let release: () => void = () => undefined
+  const gate = new Promise<void>(done => { release = done })
+  on('prompt.submit', async () => { await gate; return { drop: 'synthetic session gone' } })
+  await start($, 'Pending fold')
+  await $.tool.call({ tool: 'TaskCreate', subject: 'Keep this result, OK?', description: '' })
+  await $.tool.call({ tool: 'TaskUpdate', taskId: '1', metadata: { waiting: 'you', ask: 'confirm' } })
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
+  const button = `mine::1::${ZH_TW.yes}`
+  const sending = ui.press({ key: button })
+  try {
+    await clock.settle()
+    await ui.press({ key: 'ask::mine::1' })
+    expect(besideButton(await ui.findAll({ type: 'Box' }), button)).toContain(ZH_TW.pressPending)
+    release()
+    await sending
+    expect(besideButton(await ui.findAll({ type: 'Box' }), button)).toContain(ZH_TW.pressSessionGone)
+    await ui.press({ key: 'ask::mine::1' })
+    expect(besideButton(await ui.findAll({ type: 'Box' }), button)).toContain(ZH_TW.pressSessionGone)
+  } finally { release(); await sending; await ui.unmount() }
+})
+
+type MatrixKind = 'needs-you' | 'live-ask' | 'stopped' | 'unknown-session' | 'blocked' | 'done' | 'hidden' | 'own-block' | 'ended' | 'hand-kept' | 'retained' | 'inbox'
+type MatrixSource = 'this-session' | 'another-session'
+type MatrixCell = { agent: string; source: MatrixSource; kind: MatrixKind; name: string; askKind?: 'choose' | 'review' | 'wait' | 'text' }
+
+const MATRIX_AGENTS = ['claude', 'codex', 'antigravity', 'hermes', 'openclaw', 'grok', 'opencode', 'cursor'] as const
+const MATRIX_KINDS: readonly MatrixKind[] = ['needs-you', 'live-ask', 'stopped', 'unknown-session', 'blocked', 'done', 'hidden', 'own-block', 'ended', 'hand-kept', 'retained', 'inbox']
+const PANE_MATRIX: readonly MatrixCell[] = MATRIX_AGENTS.flatMap(agent => (['this-session', 'another-session'] as const).flatMap(source =>
+  MATRIX_KINDS.map(kind => ({ agent, source, kind, name: `${kind} / ${agent} / ${source}` }))))
+
+const MATRIX_AT = Date.parse('2026-10-16T12:00:00Z')
+const MATRIX_OPEN = ['waiting', 'others', 'recent', 'hidden', 'stopped', 'idle', 'steps', 'older', 'reminder']
+type MatrixFixture = { world: World; view: View; target: string; opener: string | null; buttons: string[]; resume: string | null; mirror: ProgressMirror | null }
+
+// Each action gets a fresh engine. A successful reply, hide or archive cannot remove the
+// control before another action is tested, and no loop walks a changing render tree.
+const paneEngineFixture = (cell: MatrixCell): MatrixFixture => {
+  const isOwn = cell.source === 'this-session'
+  const session = isOwn ? SESSION : 'a1b2c3d4-1111-2222-3333'
+  const isAsk = ['needs-you', 'live-ask', 'hidden', 'retained'].includes(cell.kind)
+  const subject = cell.askKind === 'choose' ? 'First or Second?' : cell.askKind === 'review' ? 'Review the synthetic result' : cell.askKind === 'wait' ? 'waiting for the synthetic result' : cell.askKind === 'text' ? 'What should happen next?' : cell.kind === 'live-ask' ? 'Run `echo matrix`' : isAsk ? 'Keep the synthetic result, OK?' : 'Synthetic next step'
+  let producer = { ...emptyMirror(session, 'persona_framework', MATRIX_AT, '/work/persona_framework', cell.agent), title: cell.name, isTitleFinal: true }
+  producer = applyTaskCreate(producer, { subject, metadata: isAsk ? { waiting: 'you', ask: cell.askKind ?? (cell.kind === 'live-ask' ? 'do' : 'confirm'), options: cell.askKind === 'choose' ? ['First', 'Second'] : undefined, command: cell.kind === 'live-ask' ? 'echo matrix' : undefined } : cell.kind === 'blocked' ? { blocked: 'Synthetic dependency' } : {} }, '1', MATRIX_AT)
+  producer = { ...producer, state: cell.kind === 'done' ? 'done' : cell.kind === 'ended' ? 'ended' : 'waiting' }
+  if (cell.kind === 'done') producer = applyTaskUpdate(producer, { taskId: '1', status: 'completed' }, MATRIX_AT)
+  if (cell.kind === 'stopped') producer = { ...producer, updated: MATRIX_AT - 86400000 }
+  let text = cell.kind === 'hand-kept'
+    ? `# Progress\n\n## persona_framework\n### ${cell.name}\n- [ ] Synthetic next step\n- [ ] Later step\n`
+    : upsertAutoBlock('# Progress\n', producer, EN)
+  if (cell.kind === 'unknown-session') text = text.replace(/ resume=[^\s>]+/g, '').replace(/ dir="[^"]*"/g, '')
+  let mirror = isOwn && cell.kind !== 'hand-kept' && cell.kind !== 'inbox' ? producer : null
+  const files = new Map([[FILE, text]])
+  const pendingFiles = cell.kind === 'inbox' ? [{ name: `${cell.agent}-turn-1792152000-211.json`, body: JSON.stringify({ session_id: session, cwd: '/work/persona_framework', last_assistant_message: 'Keep the inbox result, OK?' }), at: 1 }] : []
+  const pending = peekInbox(pendingFiles)
+  for (const file of pendingFiles) files.set(`${INBOX}/${file.name}`, file.body)
+  if (cell.kind === 'inbox') { text = '# Progress\n'; files.set(FILE, text) }
+  const projects = parseProgress(text)
+  const ledger = observeQuestions(emptyQuestions(), projects, mirror, [], MATRIX_AT, true, 'matrix', { retired: [], consumed: [] }, pending).ledger
+  if (cell.kind === 'retained') { text = '# Progress\n'; files.set(FILE, text); mirror = null }
+  let view = buildView(parseProgress(text), ['persona_framework'], mirror, MATRIX_AT, 0, {}, EN, [], {}, ledger, { retired: [], consumed: [] }, pending)
+  const hidden = cell.kind === 'hidden' ? view.waiting.map(ask => ask.hideKey) : []
+  if (hidden.length) files.set(FILE.replace('.md', '-answered.json'), JSON.stringify({ answered: hidden }))
+  files.set(QUESTIONS, questionsJson(ledger))
+  view = buildView(parseProgress(text), ['persona_framework'], mirror, MATRIX_AT, 0, {}, EN, hidden, {}, ledger, { retired: [], consumed: [] }, pending)
+  const store: Record<string, unknown> = { autoConnectOff: true, inboxDone: {}, lang: 'en', opened: MATRIX_OPEN }
+  if (mirror !== null) store[`mirror:${SESSION}`] = mirror
+  const world: World = { files, mtime: 1, hasTasks: true, store }
+  const ask = [...view.waiting, ...view.hidden, ...(view.reminder ?? []), ...(view.older ?? [])][0]
+  const rows = [...view.active, ...view.idle, ...view.stopped, ...view.groups.flatMap(group => group.rows)]
+  const row = rows.find(one => one.title === cell.name)
+  const buttons: string[] = []
+  let target = '', opener: string | null = null, resume: string | null = null
+  if (ask !== undefined) {
+    target = ask.key
+    if (cell.kind === 'hidden') buttons.push(`${target}::unhide`)
+    else {
+      opener = `ask::${target}`
+      buttons.push(opener)
+      if (ask.where === 'here') {
+        if (ask.kind === 'do') { if (ask.command !== null) buttons.push(`${target}::copy`); buttons.push(`${target}::did`) }
+        else if (ask.kind === 'choose') buttons.push(...ask.options.map(option => `${target}::${option}`))
+        else if (ask.kind === 'review') buttons.push(`${target}::${EN.looksGood}`, `${target}::revise`)
+        else if (ask.kind === 'wait') buttons.push(`${target}::${EN.ready}`)
+        else if (ask.kind === 'confirm') buttons.push(`${target}::${EN.yes}`, `${target}::${EN.no}`)
+      } else if (ask.where === 'manual') buttons.push(`${target}::done`)
+      else {
+        if (ask.kind === 'do' && ask.command !== null) buttons.push(`${target}::copy`)
+        if (ask.reopen !== null) { buttons.push(`${target}::resume`); resume = ask.reopen }
+      }
+      if (ask.hideKey !== '' && ask.canHide !== false) buttons.push(`${target}::hide`)
+    }
+  } else if (row !== undefined) {
+    target = row.key; opener = row.key; buttons.push(row.key)
+    if (row.auto === 'ended') {
+      if (row.isHere) buttons.push(`${target}::take`)
+      if (row.resume !== null) { buttons.push(`${target}::resume`); resume = row.resume }
+      if (row.archive !== null) buttons.push(`${target}::archive`)
+      if (row.confirm != null) buttons.push(`${target}::done`)
+    } else if (row.auto === null && row.next !== null) {
+      buttons.push(`${target}::tick`, `${target}::hand`)
+      if (row.archive !== null) buttons.push(`${target}::archive`)
+      if (row.confirm != null) buttons.push(`${target}::done`)
+    }
+  }
+  if (view.current !== null) {
+    buttons.push('section::steps')
+    if (view.current.state === 'waiting') buttons.push('continue')
+  }
+  if (cell.kind === 'done' && view.current === null) buttons.push('archive')
+  if (buttons.length === 0) throw new Error(`Matrix cell has no card or reason: ${cell.name}`)
+  return { world, view, target, opener, buttons: [...new Set(buttons)], resume, mirror }
+}
+
+type EngineMatrixCase = { cell: MatrixCell; button: string; isFailing: boolean; title?: string }
+const PANE_ASK_VARIANTS: readonly MatrixCell[] = MATRIX_AGENTS.flatMap(agent => (['this-session', 'another-session'] as const).flatMap(source => (['choose', 'review', 'wait', 'text'] as const).map(askKind => ({ agent, source, kind: 'needs-you' as const, askKind, name: `needs-you ${askKind} / ${agent} / ${source}` }))))
+const ENGINE_CELLS = [...PANE_MATRIX, ...PANE_ASK_VARIANTS]
+const paneMatrixGroup = (cell: MatrixCell, fixture: MatrixFixture): string => JSON.stringify([
+  cell.kind, cell.askKind, cell.source,
+  fixture.buttons.map(button => fixture.target === '' ? button : button.replace(fixture.target, '<card>')),
+  fixture.resume !== null,
+])
+const ENGINE_GROUPS = new Map<string, MatrixCell>()
+for (const cell of ENGINE_CELLS) {
+  const group = paneMatrixGroup(cell, paneEngineFixture(cell))
+  if (!ENGINE_GROUPS.has(group)) ENGINE_GROUPS.set(group, cell)
+}
+// Full control inventories stay in the pure matrices; the engine exercises one
+// representative press per behaviour group in both normal and refused modes.
+const ENGINE_MATRIX: readonly EngineMatrixCase[] = [...ENGINE_GROUPS.values()].flatMap(cell => {
+  const fixture = paneEngineFixture(cell)
+  let verb = 'hide'
+  if (cell.kind === 'hand-kept') verb = 'tick'
+  else if (cell.kind === 'hidden') verb = 'unhide'
+  else if (cell.kind === 'ended') verb = cell.source === 'this-session' ? 'take' : 'archive'
+  else if (cell.kind === 'live-ask') verb = cell.source === 'this-session' ? 'copy' : 'resume'
+  else if (cell.kind === 'needs-you' && cell.source === 'this-session') {
+    const answers = { choose: 'First', review: EN.looksGood, wait: EN.ready, text: 'hide', confirm: EN.yes }
+    verb = answers[cell.askKind ?? 'confirm']
+  }
+  const button = fixture.buttons.find(button => button.endsWith(`::${verb}`))
+    ?? fixture.buttons.find(button => button !== fixture.opener && button !== 'section::steps')
+    ?? fixture.buttons[0]!
+  return [false, true].map(isFailing => ({ cell, button, isFailing }))
+}).concat([
+  { kind: 'hand-kept', verb: 'hand', title: 'handing a task to this session shows its result next to its row' },
+  { kind: 'hand-kept', verb: 'done', title: 'completing a hand-kept row shows its result next to that row' },
+  { kind: 'live-ask', verb: 'did', title: 'did it sends the answer from its own pane card' },
+  { kind: 'needs-you', verb: EN.no, title: 'no sends the answer from its own pane card' },
+  { kind: 'needs-you', askKind: 'choose', verb: 'Second', title: 'the second choice sends the answer from its own pane card' },
+  { kind: 'needs-you', askKind: 'review', verb: 'revise', title: 'needs changes opens the reply box on its own pane card' },
+].map(({ kind, askKind, verb, title }) => {
+  const cell: MatrixCell = { agent: 'claude', source: 'this-session', kind: kind as MatrixKind, askKind: askKind as MatrixCell['askKind'], name: title }
+  const fixture = paneEngineFixture(cell)
+  const button = fixture.buttons.find(button => button.endsWith(`::${verb}`))
+  if (button === undefined) throw new Error(`The engine fixture does not offer ${verb}: ${title}`)
+  return { cell, button, isFailing: false, title }
+}))
+const NORMAL_MATRIX_TITLE = 'every button on every card kind from every agent, in this session or another, does its job or shows a reason'
+const FAILING_MATRIX_TITLE = 'every button still shows a reason when the engine refuses copy, writes or the session is gone'
+
+const engineMatrixTest = ({ cell, button, isFailing }: EngineMatrixCase) => async ($: Engine, on: On) => {
+  const fixture = paneEngineFixture(cell)
+  const { world } = fixture
+  const clock = engineBeneath(on, world)
+  on('ui.status', () => ({ value: undefined }))
+  on('ui.notify', () => ({ value: { isSent: true as const, channel: 'terminal_bell' as const } }))
+  on('ui.copy', () => isFailing ? { deny: 'synthetic clipboard refusal' } : { value: { isCopied: true as const } })
+  on('prompt.submit', ($, event) => isFailing ? { drop: 'synthetic session gone' } : { text: event.text })
+  await $.session.start({ cwd: '/work/persona_framework', surface: 'desktop', isInteractive: true })
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
+  try {
+    if (fixture.opener !== null && !fixture.opener.startsWith('ask::')) await ui.press({ key: fixture.opener })
+    else if (fixture.opener !== null && fixture.view.focus?.type !== 'ask') await ui.press({ key: fixture.opener })
+    const isCard = (key: string) => fixture.buttons.includes(key) || fixture.target !== '' && (key === fixture.target || key === `ask::${fixture.target}` || key.startsWith(`${fixture.target}::`))
+    const offered = (await ui.findAll({ type: 'Button' })).map(node => node.key ?? '').filter(isCard)
+    expect([...new Set(offered)].sort()).toEqual([...fixture.buttons].sort())
+    expect(await ui.find({ type: 'Button', key: button })).toBeDefined()
+    const before = JSON.stringify(await ui.findAll({ type: 'Text' }))
+    if (isFailing) world.unwritable = new Set([FILE, FILE.replace('.md', '-answered.json'), FILE.replace('.md', '-archive-2026-10.md')])
+    await ui.press({ key: button })
+    const isToggle = button === fixture.opener || button === 'section::steps'
+    if (button.endsWith('::revise')) {
+      expect(await ui.find({ type: 'Input', key: `${fixture.target}::reply` })).toBeDefined()
+      return
+    }
+    if (isToggle) {
+      const after = JSON.stringify(await ui.findAll({ type: 'Text' }))
+      expect(after).not.toBe(before)
+      expect(await ui.find({ type: 'Button', key: button })).toBeDefined()
+      return
+    }
+    let expected: string
+    if (button.endsWith('::copy') || button.endsWith('::resume')) expected = isFailing ? EN.pressCopyFallback : EN.copied
+    else if (button.endsWith('::hide')) expected = isFailing ? EN.hideFailed : EN.pressHidden
+    else if (button.endsWith('::unhide')) expected = isFailing ? EN.hideFailed : EN.pressShown
+    else if (button === 'continue' || button.endsWith('::take') || button.endsWith('::hand') || button.endsWith(`::${EN.yes}`) || button.endsWith(`::${EN.no}`) || button.endsWith('::did') || button.endsWith('::First') || button.endsWith('::Second') || button.endsWith(`::${EN.looksGood}`) || button.endsWith(`::${EN.ready}`)) expected = isFailing ? EN.pressSessionGone : EN.pressSent
+    else if (button.endsWith('::tick')) expected = isFailing ? EN.boardWriteFailed : EN.boardTicked('Synthetic next step')
+    else if (button.endsWith('::archive')) expected = isFailing ? EN.boardWriteFailed : EN.archivedOne(cell.name)
+    else if (button.endsWith('::done')) expected = isFailing ? EN.boardWriteFailed : EN.confirmedDone(cell.name)
+    else expected = isFailing ? EN.boardWriteFailed : EN.tidyMoved(1)
+    const hasButton = await ui.find({ type: 'Button', key: button })
+    if (hasButton !== undefined) expect(besideButton(await ui.findAll({ type: 'Box' }), button)).toContain(expected)
+    else {
+      const nodes = await ui.findAll({ type: 'Box' })
+      expect(besideButton(nodes, button, false).includes(expected) || besideLabel(nodes, cell.name, expected)).toBe(true)
+    }
+    expect(await ui.find({ type: 'Text', text: EN.pressPending })).toBeUndefined()
+    if (isFailing && (button.endsWith('::copy') || button.endsWith('::resume'))) {
+      const text = button.endsWith('::copy') ? 'echo matrix' : fixture.resume
+      expect((await ui.find({ type: 'Input', key: `${fixture.target}::copy-text` }))?.props.value).toBe(text)
+    }
+    await clock.advance(2100)
+    if (await ui.find({ type: 'Button', key: button }) !== undefined) expect(besideButton(await ui.findAll({ type: 'Box' }), button)).toContain(expected)
+    else {
+      const nodes = await ui.findAll({ type: 'Box' })
+      expect(besideButton(nodes, button, false).includes(expected) || besideLabel(nodes, cell.name, expected)).toBe(true)
+    }
+  } finally { await ui.unmount() }
+}
+
+for (const one of ENGINE_MATRIX.filter(one => one.title === undefined)) test(`${one.isFailing ? FAILING_MATRIX_TITLE : NORMAL_MATRIX_TITLE} [${one.cell.name} / ${one.button}]`, { options: { language: 'en' } }, engineMatrixTest(one))
+
+const namedEngineMatrixTest = (title: string) => {
+  const one = ENGINE_MATRIX.find(one => one.title === title)
+  if (one === undefined) throw new Error(`The engine matrix does not contain ${title}`)
+  return engineMatrixTest(one)
+}
+
+test('handing a task to this session shows its result next to its row', { options: { language: 'en' } }, namedEngineMatrixTest('handing a task to this session shows its result next to its row'))
+test('completing a hand-kept row shows its result next to that row', { options: { language: 'en' } }, namedEngineMatrixTest('completing a hand-kept row shows its result next to that row'))
+test('did it sends the answer from its own pane card', { options: { language: 'en' } }, namedEngineMatrixTest('did it sends the answer from its own pane card'))
+test('no sends the answer from its own pane card', { options: { language: 'en' } }, namedEngineMatrixTest('no sends the answer from its own pane card'))
+test('the second choice sends the answer from its own pane card', { options: { language: 'en' } }, namedEngineMatrixTest('the second choice sends the answer from its own pane card'))
+test('needs changes opens the reply box on its own pane card', { options: { language: 'en' } }, namedEngineMatrixTest('needs changes opens the reply box on its own pane card'))
+
+const engineMatrixSummary = (isFailing: boolean) => () => {
+  const started = performance.now()
+  expect(ENGINE_GROUPS.size).toBe(40)
+  expect(ENGINE_MATRIX.length).toBe(86)
+  const agents = new Set<string>()
+  for (const cell of ENGINE_CELLS) {
+    const fixture = paneEngineFixture(cell)
+    const group = paneMatrixGroup(cell, fixture)
+    const representative = ENGINE_GROUPS.get(group)
+    expect(representative).toBeDefined()
+    const expected = paneEngineFixture(representative!)
+    expect(paneMatrixGroup(cell, fixture)).toBe(paneMatrixGroup(representative!, expected))
+    expect(ENGINE_MATRIX.some(one => one.isFailing === isFailing && one.cell === representative)).toBe(true)
+    if (fixture.resume !== null) {
+      const ask = [...fixture.view.waiting, ...fixture.view.hidden, ...(fixture.view.older ?? [])].find(one => one.key === fixture.target)
+      const row = [...fixture.view.active, ...fixture.view.stopped, ...fixture.view.idle, ...fixture.view.groups.flatMap(group => group.rows)].find(one => one.key === fixture.target)
+      expect(fixture.resume).toBe(ask?.reopen ?? row?.resume)
+      expect(fixture.resume).toContain(cell.agent === 'claude' ? 'claude' : cell.agent)
+    }
+    agents.add(cell.agent)
+  }
+  expect([...agents].sort()).toEqual([...MATRIX_AGENTS].sort())
+  console.log(`pane fixture matrix: ${ENGINE_CELLS.length} cells, ${ENGINE_GROUPS.size} engine groups, ${(performance.now() - started).toFixed(1)} ms`)
+}
+
+// Written out so the changelog check can find them; keep them equal to NORMAL_MATRIX_TITLE and FAILING_MATRIX_TITLE.
+test('every button on every card kind from every agent, in this session or another, does its job or shows a reason', engineMatrixSummary(false))
+test('every button still shows a reason when the engine refuses copy, writes or the session is gone', engineMatrixSummary(true))
+
+test('pane press targets keep titles containing double colons separate', () => {
+  const fixture = paneEngineFixture({ agent: 'claude', source: 'another-session', kind: 'hand-kept', name: 'Task' })
+  const row = fixture.view.groups.flatMap(group => group.rows)[0]!
+  const shorter = { ...row, key: 'Demo::Task', title: 'Task' }
+  const longer = { ...row, key: 'Demo::Task::Part', title: 'Task::Part' }
+  const view = { ...fixture.view, active: [shorter, longer] }
+  expect(pressTarget(view, longer.key).key).toBe(longer.key)
+  expect(pressTarget(view, `${longer.key}::tick`).key).toBe(longer.key)
+  const askFixture = paneEngineFixture({ agent: 'claude', source: 'another-session', kind: 'needs-you', name: 'Question' })
+  const ask = askFixture.view.waiting[0]!
+  const shortAsk = { ...ask, key: 'Demo::Question::0' }
+  const longAsk = { ...ask, key: 'Demo::Question::0::Part::0', task: 'Question::Part', options: ['std::vector', 'std::list'] }
+  const asked = { ...askFixture.view, waiting: [shortAsk, longAsk] }
+  expect(pressTarget(asked, `${longAsk.key}::hide`).key).toBe(longAsk.key)
+  expect(pressTarget(asked, `ask::${longAsk.key}`).key).toBe(longAsk.key)
+  expect(pressTarget(asked, `${longAsk.key}::std::list`)).toEqual({ key: longAsk.key, revision: JSON.stringify([longAsk.questionId, longAsk.text, longAsk.note]), label: 'Question::Part' })
+  expect(pressTarget(view, `${longer.key}::std::list`).key).toBe(longer.key)
+})
+
+test('a choice answer containing double colons shows its result next to its own card', { options: { language: 'en' } }, async ($, on) => {
+  const world: World = { files: new Map(), mtime: 1, hasTasks: true, store: { autoConnectOff: true, lang: 'en' } }
+  const clock = engineBeneath(on, world)
+  on('prompt.submit', () => ({ drop: 'synthetic session refusal' }))
+  await start($, 'Choose a container')
+  await $.tool.call({ tool: 'TaskCreate', subject: 'Container::type', description: '' })
+  await $.tool.call({ tool: 'TaskUpdate', taskId: '1', metadata: { waiting: 'you', ask: 'choose', options: ['std::vector', 'std::list'], why: 'std::vector or std::list?' } })
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
+  try {
+    const key = 'mine::1::std::list'
+    await ui.press({ key })
+    expect(besideButton(await ui.findAll({ type: 'Box' }), key)).toContain(EN.pressSessionGone)
+    await clock.advance(2100)
+    expect(besideButton(await ui.findAll({ type: 'Box' }), key)).toContain(EN.pressSessionGone)
+  } finally { await ui.unmount() }
+})
+
+// An idle row: a hand-kept task first seen ten days before the test clock. An ended session's
+// block that old is set aside at session start, so it cannot stand in for one.
+const idleFiles = (board: string, idle: string): [string, string][] => [[FILE, board], [seenPath(FILE), seenJson(withSeen({}, parseProgress(idle), Date.parse('2026-10-06T12:00:00Z')))]]
+
+test('two quick section presses whose first save fails leave the pane matching what was saved', { options: { language: 'en' } }, async ($, on) => {
+  const world: World = { files: new Map(idleFiles('# Progress\n## Demo\n### Idle task\n- [ ] Keep the idle task\n', '## Demo\n### Idle task\n- [ ] Keep the idle task\n')), mtime: 1, hasTasks: true, store: { autoConnectOff: true, opened: [] } }
+  engineBeneath(on, world)
+  await start($, 'Save sections in order')
+  await $.tool.call({ tool: 'TaskCreate', subject: 'Current step', description: '' })
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
+  let release!: () => void
+  let reached!: () => void
+  const saving = new Promise<void>(done => { reached = done })
+  world.holdStore = { key: 'opened', reached, release: new Promise<void>(done => { release = done }) }
+  let attempts = 0
+  world.failStore = (operation, key) => operation === 'set' && key === 'opened' && ++attempts === 1
+  try {
+    const first = ui.press({ key: 'section::idle' })
+    await saving
+    expect(JSON.stringify(await ui.find({ type: 'Button', key: 'section::idle' }))).toContain('▸')
+    expect(world.store!.opened).toEqual([])
+    const second = ui.press({ key: 'section::steps' })
+    release()
+    await Promise.all([first, second])
+    expect(world.store!.opened).toEqual(['steps'])
+    for (const id of ['idle', 'steps']) {
+      const isOpen = JSON.stringify(await ui.find({ type: 'Button', key: `section::${id}` })).includes('▾')
+      expect(isOpen).toBe((world.store!.opened as string[]).includes(id))
+    }
+    const steps = await ui.find({ type: 'Button', key: 'section::steps' })
+    expect(JSON.stringify(steps)).toContain('▾')
+    expect(JSON.stringify(await ui.find({ type: 'Button', key: 'section::idle' }))).toContain('▸')
+    // The first press's failure stays beside its own control, and only there: not under the steps toggle.
+    expect(resultAfterControl(await ui.findAll({ type: 'Box' }), 'section::idle', EN.settingSaveFailed)).toBe(true)
+    expect(await ui.findAll({ type: 'Text', text: EN.settingSaveFailed })).toHaveLength(1)
+  } finally { release(); await ui.unmount() }
+})
+
+test('two quick notification presses whose first save fails leave the setting matching what was saved', { options: { language: 'en' } }, async ($, on) => {
+  const world: World = { files: new Map(), mtime: 1, hasTasks: true, store: { autoConnectOff: true } }
+  engineBeneath(on, world)
+  await start($, 'Save notifications in order')
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
+  let release!: () => void
+  let reached!: () => void
+  const saving = new Promise<void>(done => { reached = done })
+  world.holdStore = { key: 'notifyOff', reached, release: new Promise<void>(done => { release = done }) }
+  let attempts = 0
+  world.failStore = (operation, key) => operation === 'set' && key === 'notifyOff' && ++attempts === 1
+  try {
+    const first = ui.press({ key: 'notify' })
+    await saving
+    expect(JSON.stringify(await ui.find({ type: 'Button', key: 'notify' }))).toContain(EN.notifyOnButton)
+    expect(world.store!.notifyOff).toBeUndefined()
+    const second = ui.press({ key: 'notify' })
+    release()
+    await Promise.all([first, second])
+    expect(world.store!.notifyOff).toBe(true)
+    const isOff = JSON.stringify(await ui.find({ type: 'Button', key: 'notify' })).includes(EN.notifyOffButton)
+    expect(isOff).toBe(world.store!.notifyOff === true)
+  } finally { release(); await ui.unmount() }
+})
+
+test('a display control that saves after a failed try drops its old failure line', { options: { language: 'en' } }, async ($, on) => {
+  const world: World = { files: new Map(), mtime: 1, hasTasks: true, store: { autoConnectOff: true } }
+  engineBeneath(on, world)
+  await start($, 'Retry the setting')
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
+  try {
+    world.failStore = (operation, key) => operation === 'set' && key === 'notifyOff'
+    await ui.press({ key: 'notify' })
+    expect(resultAfterControl(await ui.findAll({ type: 'Box' }), 'notify', EN.settingSaveFailed)).toBe(true)
+    world.failStore = undefined
+    await ui.press({ key: 'notify' })
+    expect(resultAfterControl(await ui.findAll({ type: 'Box' }), 'notify', EN.settingSaveFailed)).toBe(false)
+    expect(await ui.find({ type: 'Text', text: EN.settingSaveFailed })).toBeUndefined()
+    expect(world.store!.notifyOff).toBe(true)
+  } finally { await ui.unmount() }
+})
+
+test('two quick presses of one section whose first save fails leave no failure line', { options: { language: 'en' } }, async ($, on) => {
+  const world: World = { files: new Map(idleFiles('# Progress\n## Demo\n### Idle task\n- [ ] Keep the idle task\n', '## Demo\n### Idle task\n- [ ] Keep the idle task\n')), mtime: 1, hasTasks: true, store: { autoConnectOff: true, opened: [] } }
+  engineBeneath(on, world)
+  await start($, 'Retry one section')
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
+  let release!: () => void
+  let reached!: () => void
+  const saving = new Promise<void>(done => { reached = done })
+  world.holdStore = { key: 'opened', reached, release: new Promise<void>(done => { release = done }) }
+  let attempts = 0
+  world.failStore = (operation, key) => operation === 'set' && key === 'opened' && ++attempts === 1
+  try {
+    const first = ui.press({ key: 'section::idle' })
+    await saving
+    const second = ui.press({ key: 'section::idle' })
+    release()
+    await Promise.all([first, second])
+    expect(world.store!.opened).toEqual(['idle'])
+    expect(JSON.stringify(await ui.find({ type: 'Button', key: 'section::idle' }))).toContain('▾')
+    expect(resultAfterControl(await ui.findAll({ type: 'Box' }), 'section::idle', EN.settingSaveFailed)).toBe(false)
+    expect(await ui.find({ type: 'Text', text: EN.settingSaveFailed })).toBeUndefined()
+  } finally { release(); await ui.unmount() }
+})
+
+test('a question fold that saves after a failed try drops its old failure line', { options: { language: 'en' } }, async ($, on) => {
+  const fixture = paneEngineFixture({ agent: 'claude', source: 'this-session', kind: 'needs-you', name: 'Retry question fold' })
+  const { world } = fixture
+  world.store!.opened = ['waiting']
+  engineBeneath(on, world)
+  let isFailing = false
+  on('state.set', ($, event, next) => event.plugin === 'agent-board' && event.key === 'expanded' && isFailing ? { deny: 'EIO' } : next(event))
+  await $.session.start({ cwd: '/work/persona_framework', surface: 'desktop', isInteractive: true })
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
+  try {
+    const button = `ask::${fixture.target}`
+    isFailing = true
+    await ui.press({ key: button })
+    expect(await ui.find({ type: 'Text', text: EN.settingSaveFailed })).toBeDefined()
+    isFailing = false
+    await ui.press({ key: button })
+    expect(besideButton(await ui.findAll({ type: 'Box' }), button)).not.toContain(EN.settingSaveFailed)
+    expect(await ui.find({ type: 'Text', text: EN.settingSaveFailed })).toBeUndefined()
+  } finally { await ui.unmount() }
+})
+
+// The second question is not the focus, so its folded line is the only place for the reason.
+test('a folded question whose fold fails says why right under its own line', { options: { language: 'en' } }, async ($, on) => {
+  const world: World = { files: new Map(), mtime: 1, hasTasks: true, store: { autoConnectOff: true, opened: ['waiting'] } }
+  engineBeneath(on, world)
+  let isFailing = false
+  on('state.set', ($, event, next) => event.plugin === 'agent-board' && event.key === 'expanded' && isFailing ? { deny: 'EIO' } : next(event))
+  await start($, 'Fold the second question')
+  await $.tool.call({ tool: 'TaskCreate', subject: 'First question', description: '' })
+  await $.tool.call({ tool: 'TaskUpdate', taskId: '1', metadata: { waiting: 'you', ask: 'confirm', why: 'Synthetic focus' } })
+  await $.tool.call({ tool: 'TaskCreate', subject: 'Second question', description: '' })
+  await $.tool.call({ tool: 'TaskUpdate', taskId: '2', metadata: { waiting: 'you', ask: 'confirm', why: 'Synthetic folded row' } })
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
+  try {
+    isFailing = true
+    await ui.press({ key: 'ask::mine::2' })
+    expect(resultAfterControl(await ui.findAll({ type: 'Box' }), 'ask::mine::2', EN.settingSaveFailed)).toBe(true)
+  } finally { await ui.unmount() }
+})
+
+test('a notification command whose save fails says the setting is unchanged', { options: { language: 'en' } }, async ($, on) => {
+  const world: World = { files: new Map(), mtime: 1, hasTasks: true, store: { autoConnectOff: true } }
+  engineBeneath(on, world)
+  await start($, 'Save notification command')
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
+  try {
+    world.failStore = (operation, key) => operation === 'set' && key === 'notifyOff'
+    expect((await $.command.run({ ...TIDY, args: 'notify off' })).text).toBe(EN.settingSaveFailed)
+    expect(world.store!.notifyOff).toBeUndefined()
+    expect(JSON.stringify(await ui.find({ type: 'Button', key: 'notify' }))).toContain(EN.notifyOnButton)
+    world.failStore = undefined
+    expect((await $.command.run({ ...TIDY, args: 'notify off' })).text).toBe(EN.notifyOff)
+    world.failStore = (operation, key) => operation === 'delete' && key === 'notifyOff'
+    expect((await $.command.run({ ...TIDY, args: 'notify on' })).text).toBe(EN.settingSaveFailed)
+    expect(world.store!.notifyOff).toBe(true)
+    expect(JSON.stringify(await ui.find({ type: 'Button', key: 'notify' }))).toContain(EN.notifyOffButton)
+  } finally { await ui.unmount() }
+})
+
+test('display failures keep their section names when the control disappears', () => {
+  const view = buildView([], [], null, 0)
+  for (const s of [EN, ZH_TW, ZH_CN]) {
+    expect(pressTarget(view, 'section::hidden', s).label).toBe(s.hiddenCount(0))
+    expect(pressTarget(view, 'section::idle', s).label).toBe(s.idleCount(0))
+    expect(pressTarget(view, 'section::stopped', s).label).toBe(s.stoppedCount(0))
+    expect(pressTarget({ ...view, current: { title: 'Current task' } as View['current'] }, 'section::steps', s).label).toBe('Current task')
+    expect(pressTarget(view, 'section::waiting', s).label).toBe(s.sectionWaiting)
+    expect(pressTarget(view, 'section::due', s).label).toBe(s.sectionDue)
+    expect(pressTarget(view, 'section::recent', s).label).toBe(s.sectionRecent)
+    expect(pressTarget(view, 'section::reminder', s).label).toBe(s.sectionQuestionReminders)
+    expect(pressTarget(view, 'section::older', s).label).toBe(s.sectionOlderQuestions)
+    expect(pressTarget(view, 'section::others', s).label).toBe(s.sectionActive)
+    expect(pressTarget({ ...view, current: { title: 'Current task' } as View['current'] }, 'section::others', s).label).toBe(s.sectionOther)
+    expect(pressTarget(view, 'focus::more', s).label).toBe(s.moreWaiting(0))
+  }
+})
+
+test('a failed browser open names the actual page without its folder', { options: { language: 'en' } }, async ($, on) => {
+  const world: World = { files: new Map(), mtime: 1, hasTasks: true, store: { autoConnectOff: true }, browserExitCode: 1, env: { HOME: '/home/me', LANG: 'en_US.UTF-8', CLAUDE_PROGRESS_FILE: '/home/me/private/board.md' } }
+  engineBeneath(on, world)
+  await start($, 'Open the board')
+  world.env!.CLAUDE_PROGRESS_FILE = '/home/me/elsewhere/other.md'
+  const result = await $.command.run({ ...TIDY, args: 'open' })
+  expect(result.text).toBe(EN.windowFailed('board.html', 'board.md'))
+  expect(result.text).not.toContain('/home/me')
+})
+
+test('opening the board page when it cannot be written says so instead of Opened', { options: { language: 'en' } }, async ($, on) => {
+  const page = '/home/me/private/board.html'
+  const ran: string[][] = []
+  const world: World = { files: new Map(), mtime: 1, hasTasks: true, store: { autoConnectOff: true }, ran, env: { HOME: '/home/me', LANG: 'en_US.UTF-8', CLAUDE_PROGRESS_FILE: '/home/me/private/board.md' } }
+  engineBeneath(on, world)
+  await start($, 'Write the board page')
+  world.unwritable = new Set([page])
+  ran.length = 0
+  const failed = await $.command.run({ ...TIDY, args: 'open' })
+  expect(failed.text).toContain('board.html')
+  expect(failed.text).not.toContain(EN.windowOpened())
+  expect(failed.text).not.toContain('/home/me')
+  expect(failed.text).toBe(EN.boardStorageFailed(EN.fileNamed('board.html'), EN.storageReadOnly))
+  expect(ran.some(argv => ['xdg-open', 'open', 'cmd'].includes(argv[0] ?? ''))).toBe(false)
+  world.writeDeny = 'refused'
+  const unknown = await $.command.run({ ...TIDY, args: 'open' })
+  expect(unknown.text).toBe(EN.boardStorageFailed(EN.fileNamed('board.html'), EN.storageUnknown))
+  expect(unknown.text).not.toContain('/home/me')
+  expect(ran.some(argv => ['xdg-open', 'open', 'cmd'].includes(argv[0] ?? ''))).toBe(false)
+  world.unwritable = undefined
+  world.writeDeny = undefined
+  expect((await $.command.run({ ...TIDY, args: 'open' })).text).toBe(EN.windowOpened())
+  expect(ran.at(-1)).toEqual(['xdg-open', page])
+})
+
+test('an empty reply is answered in the alert colour', { options: { language: 'en' } }, async ($, on) => {
+  const fixture = paneEngineFixture({ agent: 'claude', source: 'this-session', kind: 'needs-you', askKind: 'text', name: 'Empty reply' })
+  engineBeneath(on, fixture.world)
+  await $.session.start({ cwd: '/work/persona_framework', surface: 'desktop', isInteractive: true })
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
+  try {
+    await ui.input({ key: `${fixture.target}::reply`, text: '   ' })
+    expect((await ui.find({ type: 'Text', text: EN.pressEmpty }))?.props).toMatchObject({ color: paletteFor('dark').alert })
+    expect(besideButton(await ui.findAll({ type: 'Box' }), `${fixture.target}::reply`, false)).toContain(EN.pressEmpty)
+  } finally { await ui.unmount() }
+})
+
+test('a display control whose setting cannot be saved says so next to it and stays as it was', { timeoutMs: 5000, options: { language: 'en' } }, async ($, on) => {
+  const fixture = paneEngineFixture({ agent: 'claude', source: 'this-session', kind: 'needs-you', name: 'Display settings' })
+  const { world } = fixture
+  world.store!.opened = ['waiting']
+  world.files.set(FILE, world.files.get(FILE) + '\n## persona_framework\n### Another question\n- [?] Keep this too, OK?\n' +
+    '<!-- auto session=55556666 agent=codex state=waiting updated=2026-10-16T11:59:00Z -->\n### Hidden question\n- [?] Hide this, OK?\n<!-- /auto session=55556666 -->\n' +
+    '<!-- auto session=11112222 agent=codex state=ended updated=2026-10-16T11:59:00Z -->\n### Stopped display task\n- [ ] Stopped step\n<!-- /auto session=11112222 -->\n' +
+    '### Idle display task\n- [ ] Keep the idle task\n')
+  world.files.set(seenPath(FILE), idleFiles('', '## persona_framework\n### Idle display task\n- [ ] Keep the idle task\n')[1][1])
+  engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/persona_framework', surface: 'desktop', isInteractive: true })
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
+  try {
+    await ui.press({ key: 'ask::persona_framework::Hidden question::0' })
+    await ui.press({ key: 'persona_framework::Hidden question::0::hide' })
+    await ui.press({ key: 'section::waiting' })
+    const controls = async () => JSON.stringify(await ui.findAll({ type: 'Button' }))
+    for (const button of ['focus::more', 'section::idle', 'section::steps', 'section::hidden', 'section::stopped', 'section::others', 'count::waiting', 'count::others', 'count::due', 'count::recent', 'notify']) {
+      const key = button === 'notify' ? 'notifyOff' : 'opened'
+      for (const isChanged of [false, true]) {
+        const control = isChanged && button === 'focus::more' ? 'section::waiting' : button
+        expect(await ui.find({ type: 'Button', key: control })).toBeDefined()
+        const before = await controls()
+        const saved = JSON.stringify(world.store![key])
+        world.failStore = (operation, candidate) => operation === (isChanged && button === 'notify' ? 'delete' : 'set') && candidate === key
+        await ui.press({ key: control })
+        expect(resultAfterControl(await ui.findAll({ type: 'Box' }), control, EN.settingSaveFailed)).toBe(true)
+        expect(await controls()).toBe(before)
+        expect(JSON.stringify(world.store![key])).toBe(saved)
+        world.failStore = undefined
+        await ui.press({ key: control })
+        expect(resultAfterControl(await ui.findAll({ type: 'Box' }), control, EN.settingSaveFailed)).toBe(false)
+        if (!button.startsWith('count::')) expect(await controls()).not.toBe(before)
+        expect(JSON.stringify(world.store![key])).not.toBe(saved)
+      }
+    }
+    const before = await controls()
+    await ui.press({ key: 'legend' })
+    expect(await controls()).not.toBe(before)
+    await ui.press({ key: 'legend' })
+    expect(await controls()).toBe(before)
+  } finally { await ui.unmount() }
+})
+
+test('enter in the report copy box keeps the warning under the report controls', { options: { language: 'en' } }, async ($, on) => {
+  const world: World = { files: new Map([[FILE, '# Progress\n']]), mtime: 1, hasTasks: true, store: { autoConnectOff: true, lang: 'en' } }
+  engineBeneath(on, world)
+  on('ui.copy', () => ({ deny: 'synthetic clipboard refusal' }))
+  await $.session.start({ cwd: '/work/persona_framework', surface: 'desktop', isInteractive: true })
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
+  try {
+    await ui.press({ key: 'report' })
+    const value = (await ui.find({ type: 'Input', key: 'report::copy-text' }))?.props.value as string
+    expect(value.length > 0).toBe(true)
+    expect(resultAfterControl(await ui.findAll({ type: 'Box' }), 'report', EN.pressCopyFallback)).toBe(true)
+    await ui.input({ key: 'report::copy-text', text: value })
+    expect(resultAfterControl(await ui.findAll({ type: 'Box' }), 'report', EN.pressCopyFallback)).toBe(true)
+    expect((await ui.find({ type: 'Input', key: 'report::copy-text' }))?.props.value).toBe(value)
+    expect(resultAfterControl(await ui.findAll({ type: 'Box' }), 'report', value)).toBe(false)
+    expect(await ui.findAll({ type: 'Text', text: value })).toHaveLength(1)
+  } finally { await ui.unmount() }
+})
+
+test('shared pane controls show their results before the next row', async ($, on) => {
+  const world: World = { files: new Map([[FILE, '# Progress\n']]), mtime: 1, hasTasks: true, store: { autoConnectOff: true, lang: 'en' } }
+  engineBeneath(on, world)
+  outside(on, world)
+  await $.session.start({ cwd: '/work/persona_framework', surface: 'desktop', isInteractive: true })
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
+  const followsControl = async (key: string, text: string): Promise<boolean> => (await ui.findAll({ type: 'Box' }) as PressNode[]).some(node => {
+    const children = pressChildren(node).filter((child): child is PressNode => typeof child !== 'string')
+    const at = children.findIndex(child => pressNodes(child).some(one => (one.type === 'Button' || one.type === 'Input') && (one.key ?? one.props?.key) === key))
+    return at >= 0 && children[at + 1] !== undefined && pressTexts(children[at + 1]!).includes(text)
+  })
+  try {
+    await ui.input({ key: 'ask', text: '' })
+    expect(await followsControl('ask', EN.pressEmpty)).toBe(true)
+    await ui.press({ key: 'report' })
+    expect(await followsControl('report', EN.copied)).toBe(true)
+    await ui.press({ key: 'clear-answer' })
+    const boxes = await ui.findAll({ type: 'Box' }) as PressNode[]
+    const parent = boxes.find(node => pressChildren(node).some(child => typeof child !== 'string' && pressNodes(child).some(one => one.type === 'Button' && (one.key ?? one.props?.key) === 'report'))
+      && pressChildren(node).some(child => typeof child !== 'string' && pressTexts(child).includes(EN.pressDone)))
+    expect(parent).toBeDefined()
+    const children = pressChildren(parent!).filter((child): child is PressNode => typeof child !== 'string')
+    const resultAt = children.findIndex(child => pressTexts(child).includes(EN.pressDone))
+    const reportAt = children.findIndex(child => pressNodes(child).some(one => one.type === 'Button' && (one.key ?? one.props?.key) === 'report'))
+    expect(resultAt < reportAt).toBe(true)
+  } finally { await ui.unmount() }
+})
+
+test('every pane button shows a result or a reason next to its card when pressed', async ($, on) => {
+  const world: World = { files: new Map([[FILE, '# Progress\n\n## persona_framework\n### Finished card\n- [x] Finished step\n']]), mtime: 1, hasTasks: true, store: { autoConnectOff: true, lang: 'en' } }
+  engineBeneath(on, world)
+  outside(on, world)
+  await $.session.start({ cwd: '/work/persona_framework', surface: 'desktop', isInteractive: true })
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
+  try {
+    for (const [key, expected] of [['report', EN.copied], ['clear-answer', EN.pressDone], ['archive', EN.tidyMoved(1)]] as const) {
+      if (key === 'archive') await ui.press({ key: 'section::recent' })
+      expect(await ui.find({ type: 'Button', key })).toBeDefined()
+      await ui.press({ key })
+      expect(await ui.find({ type: 'Text', text: expected })).toBeDefined()
+    }
+    for (const key of ['notify', 'legend']) {
+      const before = JSON.stringify(await ui.findAll({ type: 'Text' })) + (await ui.find({ type: 'Button', key }))?.text
+      await ui.press({ key })
+      const after = JSON.stringify(await ui.findAll({ type: 'Text' })) + (await ui.find({ type: 'Button', key }))?.text
+      expect(after).not.toBe(before)
+    }
+    await ui.input({ key: 'ask', text: '' })
+    expect(await ui.find({ type: 'Text', text: EN.pressEmpty })).toBeDefined()
+  } finally { await ui.unmount() }
+})
+
 test('a + line in the pane adds a task to the file, under its project', async ($, on) => {
   const world: World = { files: new Map([[FILE, JOBS]]), mtime: 1, hasTasks: true }
   engineBeneath(on, world)
@@ -2457,7 +3295,6 @@ test('a question this session asks is answered from the pane, with the buttons i
 })
 
 const ANSWERED = '/home/me/.claude/progress-answered.json'
-const QUESTIONS = '/home/me/.claude/progress-questions.json'
 const storedQuestion = (world: World, words: string): string =>
   (JSON.parse(world.files.get(QUESTIONS) ?? '{"records":[]}').records as Array<{ id: string; words: string; isWaiting: boolean }>).find(row => row.words === words && row.isWaiting)?.id ?? ''
 
@@ -2509,6 +3346,92 @@ test('a question ledger that is valid JSON in an unknown shape is left alone and
   expect([...world.files.keys()].some(path => path.startsWith(`${QUESTIONS}.torn-`))).toBe(false)
 })
 
+test('the pane places its first question ledger on Windows with a Node hard link, not a PowerShell move', async ($, on) => {
+  // OS alone marks the computer as Windows; the shared POSIX paths keep the test the same on every runner.
+  const world: World = {
+    files: new Map([[FILE, '## demo\n### Release\n- [?] Publish, OK?\n']]),
+    mtime: 1,
+    hasTasks: true,
+    ran: [],
+    written: [],
+    env: { OS: 'Windows_NT', HOME: '/home/me', LANG: 'en_US.UTF-8' },
+    store: { autoConnectOff: true, inboxDone: {} },
+  }
+  engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/demo', surface: 'desktop', isInteractive: true })
+  const temps = world.written?.filter(path => path.startsWith(`${QUESTIONS}.tmp-${SESSION}-`)) ?? []
+  expect(temps.length > 0).toBe(true)
+  expect(world.ran).toContainEqual(['node', '-e', LEDGER_LINK, '--', temps[0], QUESTIONS])
+  expect(world.ran?.some(argv => argv[0] === 'powershell' && argv.some(arg => arg.includes(`${QUESTIONS}.tmp-`)))).toBe(false)
+  expect(JSON.parse(world.files.get(QUESTIONS) ?? '{}').version).toBe(1)
+  expect(world.files.get(QUESTIONS)).toContain('Publish, OK?')
+  expect([...world.files.keys()].some(path => path.startsWith(`${QUESTIONS}.tmp-`))).toBe(false)
+})
+
+test('the pane\'s hard-link ledger move never replaces a ledger another session placed first', async ($, on) => {
+  const other = '{"version":999,"futureRecords":["keep the other session bytes"]}\n'
+  const world: World = { files: new Map([[FILE, '## demo\n### Release\n- [?] Publish, OK?\n']]), mtime: 1, hasTasks: true, ran: [], written: [], store: { autoConnectOff: true, inboxDone: {} } }
+  let hasPlacedOther = false
+  world.isMoveRefused = path => {
+    if (!hasPlacedOther && path.startsWith(QUESTIONS + '.tmp-')) {
+      hasPlacedOther = true
+      world.files.set(QUESTIONS, other)
+    }
+    return false
+  }
+  engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/demo', surface: 'desktop', isInteractive: true })
+  const temps = world.written?.filter(path => path.startsWith(QUESTIONS + '.tmp-' + SESSION + '-')) ?? []
+  expect(hasPlacedOther).toBe(true)
+  expect(temps.length > 0).toBe(true)
+  expect(world.ran).toContainEqual(['node', '-e', LEDGER_LINK, '--', temps[0], QUESTIONS])
+  expect(world.files.get(QUESTIONS)).toBe(other)
+  expect(world.ran?.some(argv => argv[0] === 'mv' && argv.at(-1) === QUESTIONS)).toBe(false)
+  expect([...world.files.keys()].some(path => path.startsWith(QUESTIONS + '.tmp-'))).toBe(false)
+})
+
+test('the pane falls back to its move command when Node or hard links are unavailable', async ($, on) => {
+  const world: World = { files: new Map([[FILE, '## demo\n### Release\n- [?] Publish, OK?\n']]), mtime: 1, hasTasks: true, hasNoHardLinks: true, ran: [], written: [], store: { autoConnectOff: true, inboxDone: {} } }
+  const clock = engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/demo', surface: 'desktop', isInteractive: true })
+  const first = world.written?.find(path => path.startsWith(QUESTIONS + '.tmp-' + SESSION + '-'))
+  expect(first).toBeDefined()
+  expect(world.ran).toContainEqual(['node', '-e', LEDGER_LINK, '--', first, QUESTIONS])
+  expect(world.ran).toContainEqual(['mv', '-n', first, QUESTIONS])
+  expect(storedQuestion(world, 'Publish, OK?').startsWith('question:')).toBe(true)
+  expect([...world.files.keys()].some(path => path.startsWith(QUESTIONS + '.tmp-'))).toBe(false)
+  world.hasNoHardLinks = false
+  world.node = null
+  world.ran = []
+  world.written = []
+  world.files.delete(QUESTIONS)
+  world.files.set(FILE, '## demo\n### Release\n- [?] Publish tomorrow, OK?\n')
+  world.mtime += 1
+  await clock.advance(2100)
+  const second = world.written?.find(path => path.startsWith(QUESTIONS + '.tmp-' + SESSION + '-'))
+  expect(second).toBeDefined()
+  expect(world.ran).toContainEqual(['node', '-e', LEDGER_LINK, '--', second, QUESTIONS])
+  expect(world.ran).toContainEqual(['mv', '-n', second, QUESTIONS])
+  expect(storedQuestion(world, 'Publish tomorrow, OK?').startsWith('question:')).toBe(true)
+  expect([...world.files.keys()].some(path => path.startsWith(QUESTIONS + '.tmp-'))).toBe(false)
+})
+
+test('the pane keeps its hard-linked ledger and removes its temp when the temp could not be removed at once', async ($, on) => {
+  const world: World = { files: new Map([[FILE, '## demo\n### Release\n- [?] Publish, OK?\n']]), mtime: 1, hasTasks: true, ran: [], written: [], store: { autoConnectOff: true, inboxDone: {} } }
+  let refusals = 0
+  world.isRemoveRefused = path => path.startsWith(`${QUESTIONS}.tmp-`) && refusals++ === 0
+  engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/demo', surface: 'desktop', isInteractive: true })
+  const first = world.written?.find(path => path.startsWith(`${QUESTIONS}.tmp-${SESSION}-`))
+  expect(first).toBeDefined()
+  expect(refusals > 1).toBe(true)
+  expect(world.ran).toContainEqual(['node', '-e', LEDGER_LINK, '--', first, QUESTIONS])
+  expect(world.ran).toContainEqual(['rm', '-f', first])
+  expect(world.ran?.some(argv => argv[0] === 'mv' && argv[2] === first)).toBe(false)
+  expect(storedQuestion(world, 'Publish, OK?').startsWith('question:')).toBe(true)
+  expect([...world.files.keys()].some(path => path.startsWith(`${QUESTIONS}.tmp-`))).toBe(false)
+})
+
 test('the question ledger is written to a temp file and moved into place, never truncated in place', async ($, on) => {
   const world: World = { files: new Map([[FILE, '## demo\n### Release\n- [?] Publish, OK?\n']]), mtime: 1, hasTasks: true, ran: [], written: [], store: { autoConnectOff: true, inboxDone: {} } }
   const clock = engineBeneath(on, world)
@@ -2519,9 +3442,9 @@ test('the question ledger is written to a temp file and moved into place, never 
   const temps = world.written?.filter(path => path.startsWith(`${QUESTIONS}.tmp-${SESSION}-`)) ?? []
   expect(temps.length > 0).toBe(true)
   // The first one is put in place without overwriting, in case another session wrote one meanwhile.
-  expect(world.ran?.some(argv => JSON.stringify(argv) === JSON.stringify(['mv', '-n', temps[0], QUESTIONS]))).toBe(true)
+  expect(world.ran).toContainEqual(['node', '-e', LEDGER_LINK, '--', temps[0], QUESTIONS])
   for (const temp of temps) {
-    expect(world.ran?.some(argv => argv[0] === 'mv' && argv[2] === temp && argv[3] === QUESTIONS)).toBe(true)
+    expect(world.ran?.some(argv => (argv[0] === 'node' && argv[2] === LEDGER_LINK && argv[3] === '--' && argv[4] === temp && argv[5] === QUESTIONS) || (argv[0] === 'mv' && argv[2] === temp && argv[3] === QUESTIONS))).toBe(true)
     expect(world.files.has(temp)).toBe(false)
   }
   world.files.set(FILE, '## demo\n### Release\n- [?] Publish tomorrow, OK?\n')
@@ -2630,7 +3553,7 @@ test('a pane hide survives step movement and whitespace and a corrupt identity f
   await ui.press({ key: 'data-pipeline::Ship::0::hide' })
   expect(world.files.get(QUESTIONS)).toBe('{"version":999}')
   expect(JSON.parse(world.files.get(ANSWERED) ?? '{}')).toEqual({ answered: [] })
-  expect(await ui.find({ type: 'Text', text: ZH_TW.hideFailed })).toBeDefined()
+  expect(besideButton(await ui.findAll({ type: 'Box' }), 'data-pipeline::Ship::0::hide')).toContain(ZH_TW.pressLedgerFailed)
   world.files.set(QUESTIONS, '')
   world.mtime += 1
   await clock.advance(2100)
@@ -2662,7 +3585,7 @@ test('an incomplete report cannot commit legacy migration and a falsely successf
   await ui.press({ key: 'data-pipeline::Ship::1::hide' })
   expect(world.files.get(QUESTIONS)).toBeUndefined()
   expect(JSON.parse(world.files.get(ANSWERED) ?? '{}')).toEqual({ answered: [] })
-  expect(await ui.find({ type: 'Text', text: ZH_TW.hideFailed })).toBeDefined()
+  expect(besideButton(await ui.findAll({ type: 'Box' }), 'data-pipeline::Ship::1::hide')).toContain(ZH_TW.pressLedgerFailed)
   await ui.unmount()
 })
 
@@ -2702,7 +3625,7 @@ test('retirement proofs reject stale active replay and proof storage failures ke
   await clock.advance(2100)
   expect(await ui.find({ type: 'Button', key: `${key}::hide` })).toBeDefined()
   await ui.press({ key: `${key}::hide` })
-  expect(await ui.find({ type: 'Text', text: ZH_TW.hideFailed })).toBeDefined()
+  expect(besideButton(await ui.findAll({ type: 'Box' }), `${key}::hide`)).toContain(ZH_TW.pressLedgerFailed)
   world.unwritable.clear()
   await clock.advance(2100)
   world.files.set(firstProof, '{')
@@ -2710,7 +3633,7 @@ test('retirement proofs reject stale active replay and proof storage failures ke
   await clock.advance(2100)
   await ui.press({ key: `${key}::hide` })
   expect(world.files.get(firstProof)).toBe('{')
-  expect(await ui.find({ type: 'Text', text: ZH_TW.hideFailed })).toBeDefined()
+  expect(besideButton(await ui.findAll({ type: 'Box' }), `${key}::hide`)).toContain(ZH_TW.pressLedgerFailed)
   world.unlistable = new Set(['/home/me/.claude'])
   await clock.advance(2100)
   expect(await ui.find({ type: 'Button', key: `${key}::hide` })).toBeDefined()
@@ -3136,7 +4059,7 @@ test('progress.html is written beside progress.md, and /progress open opens it i
 
   const result = await $.command.run({ ...TIDY, args: 'open' })
   expect(ran.at(-1)).toEqual(['xdg-open', '/home/me/.claude/progress.html'])
-  expect(result.text).toBe('已在瀏覽器打開：/home/me/.claude/progress.html')
+  expect(result.text).toBe(ZH_TW.windowOpened())
 })
 
 test('progress.html shows unprocessed inbox questions before a digest and drops the pending copy afterwards', async ($, on) => {
@@ -3290,9 +4213,9 @@ test('progress.html shows pending questions without reading transcripts or start
   expect(world.files.get('/home/me/.claude/progress.html')).toContain('Use 100 or 300 a minute?')
   expect(world.reads).not.toContain(transcript)
   expect(world.ran?.length).toBe(1)
-  expect(world.ran?.[0]?.slice(0, 2)).toEqual(['mv', '-n'])
-  expect(world.ran?.[0]?.[2]?.startsWith(`${QUESTIONS}.tmp-${SESSION}-`)).toBe(true)
-  expect(world.ran?.[0]?.[3]).toBe(QUESTIONS)
+  expect(world.ran?.[0]?.slice(0, 4)).toEqual(['node', '-e', LEDGER_LINK, '--'])
+  expect(world.ran?.[0]?.[4]?.startsWith(`${QUESTIONS}.tmp-${SESSION}-`)).toBe(true)
+  expect(world.ran?.[0]?.[5]).toBe(QUESTIONS)
 })
 
 test('progress.html starts no process for a pending turn whose transcript path is a Node option', async ($, on) => {
@@ -4571,7 +5494,6 @@ test('a stopped session’s handoff line shows on its row and goes with 接手�
 })
 
 
-const INBOX = '/home/me/.claude/progress-inbox'
 
 const QUESTION_TURN = 'codex-turn-1792152000-213.json'
 const QUESTION_TEXT = 'Added the middleware. Keep the complete question, OK?'
@@ -4981,9 +5903,9 @@ test('/progress connect hooks the installed agents into the pane once, keeps the
   // Again: nothing doubles.
   await $.command.run({ ...TIDY, args: 'connect' })
   const cursor = JSON.parse(world.files.get('/home/me/.cursor/hooks.json') ?? '{}')
-  expect(cursor.hooks.stop).toEqual([{ command: 'say done' }, { command: "sh '/home/me/.claude/progress-report.sh' cursor turn || true" }])
+  expect(cursor.hooks.stop).toEqual([{ command: 'say done' }, { command: "sh '/home/me/.claude/progress-report.sh' cursor turn || true", timeout: 3 }])
   expect(cursor.hooks.afterAgentResponse).toHaveLength(1)
-  expect(cursor.hooks.sessionEnd).toEqual([{ command: "sh '/home/me/.claude/progress-report.sh' cursor end || true" }])
+  expect(cursor.hooks.sessionEnd).toEqual([{ command: "sh '/home/me/.claude/progress-report.sh' cursor end || true", timeout: 3 }])
 
   const removed = await $.command.run({ ...TIDY, args: 'connect remove' })
   expect(removed.text).toContain('已拿掉：Codex、Cursor、Grok Build。')
