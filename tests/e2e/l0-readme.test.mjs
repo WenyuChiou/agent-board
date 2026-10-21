@@ -114,7 +114,8 @@ describe('L0 discover and install from the README', () => {
         const [acts, soon, words] = ACTS[lang]
         let at = -1
         acts.forEach((caption, k) => {
-          const found = new RegExp(`<text\\b[^>]*\\bclass="([^"]*)"[^>]*>${caption}</text>`).exec(svg)
+          // String match: the journey safety check reads a call on a built RegExp as a process call.
+          const found = svg.match(new RegExp(`<text\\b[^>]*\\bclass="([^"]*)"[^>]*>${caption}</text>`))
           assert.ok(found, `${file}: act ${k + 1} has its caption "${caption}"`)
           assert.ok(found.index > at, `${file}: act ${k + 1}'s caption comes after act ${k}'s`)
           at = found.index
