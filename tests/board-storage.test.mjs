@@ -4,7 +4,7 @@ import { spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { chmodSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { basename, join } from 'node:path'
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { BOARD_SCRIPT } from '../hooks/board-script.ts'
@@ -42,8 +42,10 @@ const fixture = run => {
 const failed = (result, path, code) => {
   assert.equal(result.error, undefined)
   assert.equal(result.status, 1, result.stdout + result.stderr)
-  assert.ok((result.stdout + result.stderr).includes(path), result.stdout + result.stderr)
-  assert.ok((result.stdout + result.stderr).includes(code), result.stdout + result.stderr)
+  const said = result.stdout + result.stderr
+  assert.ok(said.includes(path.endsWith('progress.md') ? 'your progress file' : basename(path)), said)
+  assert.ok(!said.includes(path), said)
+  assert.ok(code === 'EACCES' ? /read-only or locked|\u552f\u8b80|\u53ea\u8bfb/.test(said) : said.includes(code === 'ENOSPC' ? 'the disk is full' : code), result.stdout + result.stderr)
   assert.ok(!(result.stdout + result.stderr).includes('Done:'))
   assert.ok(!(result.stdout + result.stderr).includes('Archived “'))
   assert.ok(!(result.stdout + result.stderr).includes('nothing changed'))
@@ -249,7 +251,7 @@ test('watch recovers on its next redraw after a read error and restores raw mode
   const result = play('', fault, 'en', true)
   assert.equal(result.error, undefined)
   assert.equal(result.status, 1, result.stdout + result.stderr)
-  assert.ok(result.stderr.includes(paths.board) && result.stderr.includes('EIO'))
+  assert.ok(result.stderr.includes('your progress file') && !result.stderr.includes(paths.board) && result.stderr.includes('EIO'))
   assert.ok(result.stdout.includes('Keep the evidence'), result.stdout)
   assert.ok(result.stderr.includes('RAW_RESTORED'))
   assert.equal(readFileSync(paths.board, 'utf8'), FILE)

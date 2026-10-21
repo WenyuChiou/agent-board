@@ -513,8 +513,8 @@ const PAGE_WORDS = [
   'serveSending',
   'serveRelay',
   'pasteReview',
-  'boardCopied',
-  'boardCopyFailed',
+  'copied',
+  'boardCopyFailedBelow',
 ] as const satisfies ReadonlyArray<keyof Strings>
 
 // The chat prompt goes as it is in every language: the chat reads it, not the person.
@@ -649,6 +649,7 @@ button.fchip{min-height:28px;padding:0 10px;border-radius:999px;background:var(-
 </details>
 <footer class="pfoot"><p>${esc(isLan ? s.serveLanIdle : idleMs > 0 ? s.serveIdleTimed(idleMs / 60_000) : s.serveIdle)}</p><button type="button" id="close" data-static>${esc(s.serveClose)}</button></footer>
 <div id="note" role="status" aria-live="polite"></div>
+<textarea id="copy-text" readonly hidden aria-label="${esc(s.serveCopy)}"></textarea>
 </main></div>
 <script type="application/json" id="words">${JSON.stringify(pageWords(isLan ? { ...s, serveOffline: s.serveOfflineLan } : s)).replace(/</g, '\\u003c')}</script>
 <script nonce="${nonce}">${PAGE_SCRIPT}</script>
@@ -694,9 +695,11 @@ const PAGE_SCRIPT = String.raw`
     for (var i = 1; i < arguments.length; i += 1) if (arguments[i]) parent.appendChild(arguments[i]);
     return parent;
   }
+  var area = document.getElementById('copy-text');
   function say(text, tone) {
     note.textContent = text || '';
     note.className = tone || '';
+    area.hidden = true;
   }
   function unreachable() {
     if (!isUnreachable) offlineButtons = Array.from(document.querySelectorAll('button:not([data-local])')).filter(function (node) { return !node.disabled; });
@@ -722,22 +725,24 @@ const PAGE_SCRIPT = String.raw`
       return res.json().catch(function () { return {}; }).then(function (data) { data.ok = res.ok; return data; });
     }).catch(function (error) { unreachable(); throw error; });
   }
-  function copy(text, shown) {
-    var told = shown === undefined ? text : shown;
+  function copy(text) {
     function fallback() {
-      var area = el('textarea');
       area.value = text;
-      area.setAttribute('readonly', '');
-      area.style.position = 'fixed';
-      area.style.opacity = '0';
-      document.body.appendChild(area);
+      area.hidden = false;
+      area.focus({ preventScroll: true });
       area.select();
       var isCopied = false;
       try { isCopied = document.execCommand('copy'); } catch (e) {}
-      document.body.removeChild(area);
-      say(isCopied ? w('boardCopied', told) : w('boardCopyFailed', text), isCopied ? 'done' : 'alert');
+      if (isCopied) {
+        area.hidden = true;
+        say(w('copied'), 'done');
+      } else {
+        say(w('boardCopyFailedBelow'), 'alert');
+        area.hidden = false;
+        if (area.scrollIntoView) area.scrollIntoView({ block: 'nearest' });
+      }
     }
-    if (navigator.clipboard && window.isSecureContext) navigator.clipboard.writeText(text).then(function () { say(w('boardCopied', told), 'done'); }, fallback);
+    if (navigator.clipboard && window.isSecureContext) navigator.clipboard.writeText(text).then(function () { say(w('copied'), 'done'); }, fallback);
     else fallback();
   }
   function button(label, onPress, cls, isLocal) {
@@ -778,7 +783,10 @@ const PAGE_SCRIPT = String.raw`
     if (!receipt) return null;
     var labels = { queued: 'messagesQueued', uncertain: 'messagesUncertain', accepted: 'messagesAccepted', acknowledged: 'messagesAcknowledged', rejected: 'messagesRejected' };
     if (receipt.status === 'acknowledged' || receipt.status === 'rejected') Object.keys(messageAttempts).forEach(function (slot) { if (messageAttempts[slot].id === receipt.id) delete messageAttempts[slot]; });
-    return el('p', 'quiet small', w(receipt.status === 'uncertain' && /TIMEOUT/.test(receipt.error) ? 'messagesTimeout' : labels[receipt.status]) + (receipt.reply ? ' · ' + receipt.reply : ''));
+    var reply = receipt.reply || '';
+    var ack = 'ACK ' + receipt.id;
+    if (reply.indexOf(ack) === 0 && (reply.length === ack.length || /\s/.test(reply.charAt(ack.length)))) reply = reply.slice(ack.length).trim();
+    return el('p', 'quiet small', w(receipt.status === 'uncertain' && /TIMEOUT/.test(receipt.error) ? 'messagesTimeout' : labels[receipt.status]) + (reply ? ' · ' + reply : ''));
   }
   function replyBox(key, placeholder, mode, agent, where, isSending, session, asked, fp, delivery) {
     var box = el('div', 'composer');
@@ -1191,7 +1199,7 @@ const PAGE_SCRIPT = String.raw`
       refresh();
     }, unreachable);
   });
-  document.getElementById('relay').addEventListener('click', function () { copy(W.relayPrompt, w('serveRelay')); });
+  document.getElementById('relay').addEventListener('click', function () { copy(W.relayPrompt); });
   refresh();
 })();
 `

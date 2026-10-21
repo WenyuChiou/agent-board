@@ -11,7 +11,7 @@ import { createServer } from 'node:http'
 import type { IncomingMessage, Server, ServerResponse } from 'node:http'
 import type { AddressInfo } from 'node:net'
 import { homedir, networkInterfaces } from 'node:os'
-import { delimiter, isAbsolute, join } from 'node:path'
+import { basename, delimiter, isAbsolute, join } from 'node:path'
 import { boardItems } from '../hooks/board'
 import type { BoardAction, PendingTurn } from '../hooks/board'
 import type { Strings } from '../hooks/i18n'
@@ -304,12 +304,12 @@ export const startServer = (o: ServeOptions): void => {
   const send = (target: AgentTarget, reply: string, title: string): { status: number; note: string } => {
     const plan = sendPlan(target, reply, isWindows)
     if (plan === null) return { status: 409, note: o.s.serveSendNone(target.agent) }
-    if (plan.cwd !== null && !isFolder(plan.cwd)) return { status: 409, note: o.s.serveSendFailed(target.agent, plan.cwd) }
+    const label = `${target.agent} · ${title}`
+    if (plan.cwd !== null && !isFolder(plan.cwd)) return { status: 409, note: o.s.serveSendFailed(label, o.s.serveFolderGone(basename(plan.cwd))) }
     const key = sendKey(target)
     if (sending.has(key)) return { status: 409, note: o.s.serveSendBusy(target.agent) }
     sending.add(key)
     replies.delete(key)
-    const label = `${target.agent} · ${title}`
     run(plan, o.s, label)
       .then(result => replies.set(key, { ...result, at: Date.now() }))
       .catch((error: unknown) => replies.set(key, { ok: false, note: o.s.serveSendFailed(label, String(error)), at: Date.now() }))
