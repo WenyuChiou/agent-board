@@ -8,7 +8,9 @@ export const STRINGS: Record<Lang, Strings> = { en: EN, 'zh-TW': ZH_TW, 'zh-CN':
 export const plainReason = (s: Strings, code: string): string =>
   /^(EACCES|EPERM|EROFS)$/.test(code) ? s.storageReadOnly
     : /^(EBUSY|EAGAIN)$/.test(code) ? s.storageBusy
-      : code === 'ENOSPC' ? s.storageFull : code
+      : code === 'ENOSPC' ? s.storageFull
+        : code === 'EISDIR' ? s.storageIsFolder
+          : /^(ENOENT|ENOTDIR)$/.test(code) ? s.storageMissing : s.storageUnknown
 
 // `zh-TW`, `zh_tw`, `繁體`, `Traditional Chinese` → zh-TW; `zh-CN`, `简体`, `Chinese` → zh-CN;
 // `en`, `English` → en; anything else → null.

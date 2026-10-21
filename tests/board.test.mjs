@@ -922,7 +922,7 @@ test('--chat hides the home folder, with a space in its name, and the credential
   // The file it cannot read is told in the same plain text, with its path hidden as well.
   const unreadable = chatRun(['--chat'], { isFolder: true })
   assert.equal(unreadable.status, 1)
-  assert.ok(unreadable.stdout.includes('your progress file') && unreadable.stdout.includes('EISDIR') && !unreadable.stdout.includes('progress.md'), unreadable.stdout)
+  assert.ok(unreadable.stdout.includes(EN.fileProgress) && unreadable.stdout.includes(EN.storageIsFolder) && !unreadable.stdout.includes('progress.md'), unreadable.stdout)
   // It only reads: it does not say, as the board does after a write, that files may already have changed.
   assert.ok(unreadable.stdout.includes('nothing was changed') && !/may already have changed/.test(unreadable.stdout), unreadable.stdout)
   assert.ok(!unreadable.stdout.includes(unreadable.home) && !unreadable.stdout.includes('Jane Doe') && !unreadable.stderr.includes('Jane Doe'), unreadable.stdout + unreadable.stderr)
@@ -1127,7 +1127,7 @@ syncBuiltinESMExports()`)
       const out = play(fault)
       const said = out.stdout + out.stderr
       assert.equal(out.status, 1, said)
-      assert.ok(said.includes('progress-answered.json') && said.includes(code === 'EACCES' ? 'it is read-only or locked' : code) && !said.includes(list), said)
+      assert.ok(said.includes('progress-answered.json') && said.includes(code === 'EACCES' ? EN.storageReadOnly : EN.storageUnknown) && !said.includes(list), said)
       assert.ok(!said.includes('Hidden:'), said)
       // The board is drawn after the press, with the question still on it.
       assert.ok(out.stdout.includes('Per-key limit'), said)
@@ -2111,7 +2111,9 @@ syncBuiltinESMExports()
     const before = readFileSync(path, 'utf8')
     const ticked = await call('POST', '/api/act', { body: { key: await keyOf('Fabrikam fellowship'), type: 'tick', text: 'Ask two referees', fp: (await rowOf('Fabrikam fellowship')).fp } })
     assert.equal(ticked.status, 409, ticked.body)
-    assert.match(ticked.json().note, /^Couldn't safely read or update .*-journal-.*\(EIO\)/)
+    const now = new Date()
+    const journal = `progress-journal-${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}.md`
+    assert.equal(ticked.json().note, EN.boardStorageFailed(EN.fileNamed(journal), EN.storageUnknown))
     assert.equal(readFileSync(path, 'utf8'), before)
     // The page runs on, with the step still there to tick again.
     assert.equal((await call('GET', '/api/board')).status, 200)
@@ -2176,7 +2178,7 @@ syncBuiltinESMExports()
     const ask = (await call('GET', '/api/board')).json().model.asks.find(one => one.agent === 'codex')
     const hid = await call('POST', '/api/act', { body: { key: ask.key, type: 'hide' } })
     assert.equal(hid.status, 409, hid.body)
-    assert.match(hid.json().note, /^Couldn't safely read or update .*progress-answered\.json \(EIO\)/)
+    assert.equal(hid.json().note, EN.boardStorageFailed(EN.fileNamed('progress-answered.json'), EN.storageUnknown))
     assert.ok(!existsSync(join(dir, 'progress-answered.json')))
     assert.ok(!readdirSync(dir).some(name => name.endsWith('.board-tmp')))
     // The question is still asked on the page.
@@ -3136,7 +3138,7 @@ test('a failed page write on the keys board names the file without its folder', 
       assert.ok(!result.stdout.includes(root), result.stdout)
       assert.ok(!result.stderr.includes(root), result.stderr)
       assert.ok(result.stdout.replace(/\s/g, '').includes(result.stderr.replace(/\s/g, '')), result.stdout)
-      assert.ok(['EISDIR', words.storageReadOnly].some(reason => result.stderr.trim() === words.boardStorageFailed(words.fileNamed('progress.html'), reason)), result.stderr)
+      assert.ok([words.storageIsFolder, words.storageReadOnly].some(reason => result.stderr.trim() === words.boardStorageFailed(words.fileNamed('progress.html'), reason)), result.stderr)
     }
   } finally { assert.ok(resolve(root).startsWith(resolve(tmpdir()) + sep)); rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 }) }
 })
@@ -3172,7 +3174,7 @@ process.stdout.write = function (text, ...rest) {
     assert.ok(!result.stdout.includes(root), result.stdout)
     assert.ok(!result.stderr.includes(root), result.stderr)
     assert.ok(result.stdout.replace(/\s/g, '').includes(result.stderr.replace(/\s/g, '')), result.stdout)
-    assert.ok(['EISDIR', EN.storageReadOnly].some(reason => result.stderr.trim() === EN.boardStorageFailed(EN.fileNamed('progress.html'), reason)), result.stderr)
+    assert.ok([EN.storageIsFolder, EN.storageReadOnly].some(reason => result.stderr.trim() === EN.boardStorageFailed(EN.fileNamed('progress.html'), reason)), result.stderr)
   } finally { assert.ok(resolve(root).startsWith(resolve(tmpdir()) + sep)); rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 }) }
 })
 
@@ -3237,7 +3239,7 @@ syncBuiltinESMExports()
     const row = await board.rowOf('Fabrikam fellowship')
     const written = await board.call('POST', '/api/act', { body: { key: row.key, type: 'tick', text: 'Ask two referees', fp: row.fp } })
     assert.equal(written.status, 409, written.body)
-    assert.equal(written.json().note, EN.boardStorageFailed(EN.fileNamed(journal), 'EIO'))
+    assert.equal(written.json().note, EN.boardStorageFailed(EN.fileNamed(journal), EN.storageUnknown))
     assert.ok(!written.json().note.includes(board.dir), written.body)
     assert.equal(readFileSync(board.path, 'utf8'), before)
     writeFileSync(flag, '')

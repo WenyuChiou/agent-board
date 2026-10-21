@@ -1,4 +1,5 @@
 import { test } from 'node:test'
+import { registerHooks } from 'node:module'
 import assert from 'node:assert/strict'
 import { join } from 'node:path'
 import { EN } from '../../hooks/strings-en.ts'
@@ -9,6 +10,16 @@ import { block } from './lib/writers.mjs'
 import { chat, inspectSurfaces, pageDom, run, serve, terminal } from './lib/surfaces.mjs'
 import { noMachineIds } from './lib/expect.mjs'
 import { storageFault } from './lib/faults.mjs'
+
+// Resolve the pure plugin module's extensionless imports as the host does.
+const resolver = registerHooks({ resolve(specifier, context, next) {
+  try { return next(specifier, context) } catch (error) {
+    if (error.code !== 'ERR_MODULE_NOT_FOUND' || !specifier.startsWith('.')) throw error
+    return next(`${specifier}.ts`, context)
+  }
+} })
+const { plainReason } = await import('../../hooks/strings.ts')
+resolver.deregister()
 
 const locales = [EN, ZH_TW, ZH_CN]
 const resume = '12345678-1234-4234-8234-123456789abc'
@@ -158,8 +169,15 @@ test('L7 page: the copy status never shows a session id, and a refused copy leav
 })
 
 test('L7 words: an unknown storage reason stays a short clause in every language', () => {
-  for (const [s, reason] of [[EN, 'the system gave no reason'], [ZH_TW, '系統沒有說明原因'], [ZH_CN, '系统没有说明原因']]) {
+  for (const [s, reason] of [[EN, 'the system reported an unexpected error'], [ZH_TW, '系統回報了意外的錯誤'], [ZH_CN, '系统报告了意外的错误']]) {
     assert.equal(s.storageUnknown, reason)
+    for (const [code, expected] of [
+      ['EISDIR', s.storageIsFolder], ['ENOENT', s.storageMissing], ['ENOTDIR', s.storageMissing],
+      ...['EIO', 'UNKNOWN', '', 'EFBIG', 'EMFILE', 'ENFILE', 'ENAMETOOLONG', 'EEXIST'].map(code => [code, s.storageUnknown]),
+    ]) {
+      assert.equal(plainReason(s, code), expected)
+      assert.notEqual(plainReason(s, code), code)
+    }
     assert.doesNotMatch(s.storageUnknown, /[.?!。？！]/u)
     const message = s.boardStorageFailed(s.fileNamed('board.html'), s.storageUnknown)
     assert.ok(message.includes(reason), message)
@@ -200,7 +218,7 @@ test('L7 errors: every error is one plain sentence with no stack trace and no fu
       sentence(unreadable.stdout.trim(), world)
     } finally { await world.close() }
   }
-  for (const [code, why] of [['EPERM', EN.storageReadOnly], ['EROFS', EN.storageReadOnly], ['EBUSY', EN.storageBusy], ['EAGAIN', EN.storageBusy], ['ENOSPC', EN.storageFull], ['EIO', 'EIO']]) {
+  for (const [code, why] of [['EPERM', EN.storageReadOnly], ['EROFS', EN.storageReadOnly], ['EBUSY', EN.storageBusy], ['EAGAIN', EN.storageBusy], ['ENOSPC', EN.storageFull], ['EIO', EN.storageUnknown]]) {
     const world = makeWorld()
     try {
       world.write('progress.md', '## Synthetic\n### Check routes\n- [ ] Review routes\n')

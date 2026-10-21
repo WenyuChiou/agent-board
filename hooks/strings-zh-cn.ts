@@ -448,7 +448,9 @@ export const ZH_CN: Strings = {
   storageReadOnly: '文件只读或被锁定',
   storageBusy: '有别的程序正在用',
   storageFull: '磁盘满了',
-  storageUnknown: '系统没有说明原因',
+  storageIsFolder: '那是文件夹，不是文件',
+  storageMissing: '文件或它所在的文件夹不见了',
+  storageUnknown: '系统报告了意外的错误',
   boardStorageFailed: (file: string, why: string): string => `无法安全读取或更新${file}（${why}），部分改动可能已经存进去；请检查看板和历史记录，处理好文件后重试。`,
   boardLocked: (file: string): string => `其他程序正在使用${file}，没有改动任何文件。`,
   // The board's page in the browser (`agent-board.mjs --serve`). The chat-relay prompt stays

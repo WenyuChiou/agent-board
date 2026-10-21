@@ -452,7 +452,9 @@ export const EN: Strings = {
   storageReadOnly: 'it is read-only or locked',
   storageBusy: 'another program is using it',
   storageFull: 'the disk is full',
-  storageUnknown: 'the system gave no reason',
+  storageIsFolder: 'it is a folder, not a file',
+  storageMissing: 'it or its folder is missing',
+  storageUnknown: 'the system reported an unexpected error',
   boardStorageFailed: (file: string, why: string): string => `Couldn't safely read or update ${file} (${why}), and some changes may already be saved; check the board and history, fix the file, then try again.`,
   boardLocked: (file: string): string => `Another program has ${file} open; nothing was changed.`,
   // The board's page in the browser (`agent-board.mjs --serve`). The chat-relay prompt stays
