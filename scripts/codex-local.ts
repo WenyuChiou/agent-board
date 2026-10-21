@@ -13,11 +13,11 @@ import { progressTail } from '../hooks/parse'
 import { antigravityHooks, cursorEvent, cursorEvents, lifecycleCapability, localAgents, opencodePlugin, statusEvents } from '../hooks/local-agents'
 import type { LocalAgent } from '../hooks/local-agents'
 import { deepseekLocalPlugin, deepseekPatch, openclawLocalPlugin } from '../hooks/portable-agents'
-import { HOOK_VERSION, hookBootstrap, hookWorker, hostHookTimeout } from '../hooks/hook-safety'
+import { HOOK_SESSION_ENV, HOOK_VERSION, hookBootstrap, hookWorker, hostHookTimeout } from '../hooks/hook-safety'
 import { trustCodex } from './codex-host'
 import { withLocalLock } from './local-lock'
 import { withInstallLock } from './install-control'
-import { boardRequestWords, isBoardRequest } from '../hooks/board-commands'
+import { boardPromptHelper, boardRequestWords, isBoardRequest } from '../hooks/board-commands'
 import { PROMPT_EVENTS } from '../hooks/inbox'
 
 type Json = Record<string, unknown>
@@ -35,7 +35,7 @@ const object = (value: unknown): Json => {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('INVALID_JSON_OBJECT')
   return value as Json
 }
-const atomic = (file: string, text: string | Buffer, current: () => void = () => {}): void => {
+const atomic = (file: string, text: string | Buffer, current: () => void = () => {}, retryRecord = false): void => {
   mkdirSync(dirname(file), { recursive: true })
   const temporary = `${file}.${process.pid}.${randomUUID()}.tmp`
   const fd = openSync(temporary, 'wx', 0o600)
@@ -44,8 +44,20 @@ const atomic = (file: string, text: string | Buffer, current: () => void = () =>
     writeFileSync(fd, text)
     closeSync(fd)
     isOpen = false
-    current()
-    renameSync(temporary, file)
+    let delay = 10, waited = 0
+    for (;;) {
+      current()
+      try {
+        renameSync(temporary, file)
+        break
+      } catch (error) {
+        if (!retryRecord || process.platform !== 'win32' || !['EPERM', 'EACCES', 'EBUSY'].includes(String((error as { code?: string }).code)) || waited >= 250) throw error
+        const wait = Math.min(delay, 250 - waited)
+        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, wait)
+        waited += wait
+        delay *= 2
+      }
+    }
   } finally {
     if (isOpen) closeSync(fd)
     if (existsSync(temporary)) unlinkSync(temporary)
@@ -142,7 +154,9 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
   const output = (value: unknown): void => { process.stdout.write(`${JSON.stringify(value, null, 2)}\n`) }
 
   if (mode === '--codex-event' || mode === '--codex-report' || mode === '--agent-status') {
-    const started = Date.now()
+    const now = Date.now(), supplied = Number(flag('--hook-started'))
+    // The worker sends its own past start; a future value would hold back this session's queued events.
+    const started = Number.isSafeInteger(supplied) && supplied <= now && supplied >= now - 10000 ? supplied : now
     const value = flag('--hook-deadline')
     const hookDeadline = value === undefined ? Infinity : Number(value)
     if (value !== undefined && !Number.isSafeInteger(hookDeadline)) throw new Error('INVALID_HOOK_DEADLINE')
@@ -150,34 +164,67 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
     checkDeadline()
     const raw = await input()
     checkDeadline()
-    const folder = mode === '--codex-event' ? folderProject(raw.cwd || (agent === 'cursor' && Array.isArray(raw.workspace_roots) && raw.workspace_roots.every(root => typeof root === 'string') ? raw.workspace_roots[0] : undefined)) : ''
-    const payload = agent === 'cursor' && mode === '--codex-event' ? cursorEvent(raw) : raw
-    // Only metadata selected below is retained. Never open transcript_path or save prompts,
-    // tool inputs, last_assistant_message, or permission decisions from a hook payload.
-    const session = mode !== '--codex-report' ? agent === 'antigravity' ? payload.conversationId : payload.session_id ?? payload.sessionId ?? payload.sessionID ?? (agent === 'grok' ? process.env.GROK_SESSION_ID : undefined) : flag('--session') ?? (agent === 'codex' ? process.env.CODEX_THREAD_ID : process.env.AGENT_BOARD_AGENT === agent ? process.env.AGENT_BOARD_SESSION_ID : undefined)
-    if (typeof session !== 'string' || !/^[a-zA-Z0-9][a-zA-Z0-9_-]{5,127}$/.test(session)) throw new Error('INVALID_SESSION')
-    const now = new Date().toISOString().replace(/\.\d{3}Z$/, 'Z')
-    if (mode === '--agent-status' && (agent === 'codex' || agent === 'cursor')) throw new Error('INVALID_EVENT')
-    const status = flag('--state') ?? payload.state
-    if (mode === '--agent-status' && !['working', 'waiting', 'ended'].includes(String(status))) throw new Error('INVALID_STATE')
-    const event = agent === 'antigravity' && mode === '--agent-status' ? flag('--event') : undefined
-    if (event !== undefined && statusEvents.antigravity?.[event] !== status) throw new Error('INVALID_EVENT_STATE')
-    // Classify before Cursor's adapter drops prompt text; retain lifecycle
-    // ordering without treating a board lookup as an answer to the question.
-    const isBoardPrompt = (isPromptEvent(raw) || raw.prompt_submitted === true) && (raw.board_request === true || isBoardRequest(raw, boardRequestWords(Object.values(STRINGS))))
-    const isPrompt = !isBoardPrompt && mode === '--agent-status' && status === 'working' && (payload.prompt_submitted === true || /^(?:UserPromptSubmit|user_prompt_submit|BeforeAgent)$/.test(String(payload.hook_event_name ?? payload.hookEventName)))
     type Pending = {
       version: number; progress: string; mode: string; agent: LocalAgent; session: string; now: string; at?: number
       status: unknown; event?: string; folder?: string; isBoardPrompt: boolean; isPrompt: boolean; payload: Json
     }
-    // A queued event keeps metadata only: the host's own fields stay out, as they do above.
-    const current: Pending = {
-      version: 1, progress, mode, agent, session, now, at: started, status: mode === '--agent-status' ? status : undefined, event, isBoardPrompt, isPrompt,
-      ...(mode === '--codex-event' ? { folder } : {}),
-      payload: mode === '--codex-report' ? payload : mode === '--codex-event' ? {
-        session_id: payload.session_id, hook_event_name: payload.hook_event_name,
-        turn_id: payload.turn_id, prompt_submitted: payload.prompt_submitted,
-      } : {},
+    const buildEntry = (mode: string, agent: LocalAgent, raw: Json, flag: (name: string) => string | undefined, env: NodeJS.ProcessEnv, progress: string, at: number): Pending => {
+      const payload = agent === 'cursor' && mode === '--codex-event' ? cursorEvent(raw) : raw
+      // Read before Cursor's adapter drops workspace_roots; a queued raw event keeps cwd and workspace_roots for this (#246).
+      const folder = mode === '--codex-event' ? folderProject(raw.cwd || (agent === 'cursor' && Array.isArray(raw.workspace_roots) && raw.workspace_roots.every(root => typeof root === 'string') ? raw.workspace_roots[0] : undefined)) : ''
+      // Only metadata selected below is retained. Never open transcript_path or save prompts,
+      // tool inputs, last_assistant_message, or permission decisions from a hook payload.
+      const session = mode !== '--codex-report' ? agent === 'antigravity' ? payload.conversationId : payload.session_id ?? payload.sessionId ?? payload.sessionID ?? (agent === 'grok' ? env.GROK_SESSION_ID : undefined) : flag('--session') ?? (agent === 'codex' ? env.CODEX_THREAD_ID : env.AGENT_BOARD_AGENT === agent ? env.AGENT_BOARD_SESSION_ID : undefined)
+      if (typeof session !== 'string' || !/^[a-zA-Z0-9][a-zA-Z0-9_-]{5,127}$/.test(session)) throw new Error('INVALID_SESSION')
+      const now = new Date(at).toISOString().replace(/\.\d{3}Z$/, 'Z')
+      if (mode === '--agent-status' && (agent === 'codex' || agent === 'cursor')) throw new Error('INVALID_EVENT')
+      const status = flag('--state') ?? payload.state
+      if (mode === '--agent-status' && !['working', 'waiting', 'ended'].includes(String(status))) throw new Error('INVALID_STATE')
+      const event = agent === 'antigravity' && mode === '--agent-status' ? flag('--event') : undefined
+      if (event !== undefined && statusEvents.antigravity?.[event] !== status) throw new Error('INVALID_EVENT_STATE')
+      // Classify before Cursor's adapter drops prompt text; retain lifecycle
+      // ordering without treating a board lookup as an answer to the question.
+      const isBoardPrompt = (isPromptEvent(raw) || raw.prompt_submitted === true) && (raw.board_request === true || isBoardRequest(raw, boardRequestWords(Object.values(STRINGS))))
+      const isPrompt = !isBoardPrompt && mode === '--agent-status' && status === 'working' && (payload.prompt_submitted === true || /^(?:UserPromptSubmit|user_prompt_submit|BeforeAgent)$/.test(String(payload.hook_event_name ?? payload.hookEventName)))
+      // A queued event keeps metadata only: the host's own fields stay out, as they do above.
+      return {
+        version: 1, progress, mode, agent, session, now, at, status: mode === '--agent-status' ? status : undefined, event, isBoardPrompt, isPrompt,
+        ...(mode === '--codex-event' ? { folder } : {}),
+        payload: mode === '--codex-report' ? payload : mode === '--codex-event' ? {
+          session_id: payload.session_id, hook_event_name: payload.hook_event_name,
+          turn_id: payload.turn_id, prompt_submitted: payload.prompt_submitted,
+        } : {},
+      }
+    }
+    const current = buildEntry(mode, agent, raw, flag, process.env, progress, started)
+    const { session } = current
+    const rawEntry = (raw: Json): Pending => {
+      if (raw.version !== 1 || raw.kind !== 'raw' || !Number.isSafeInteger(raw.at) || Number(raw.at) < 0 || Number(raw.at) > Date.now() + 60000) throw new Error('INVALID_RAW_ENTRY')
+      if (!Array.isArray(raw.argv) || !raw.argv.every(value => typeof value === 'string')) throw new Error('INVALID_RAW_ARGV')
+      const argv = raw.argv as string[]
+      const entryMode = argv[0]
+      if (entryMode !== '--codex-event' && entryMode !== '--agent-status') throw new Error('INVALID_RAW_MODE')
+      const flags = new Map<string, string>()
+      const allowed = ['--agent', '--state', '--event', '--hook-event', '--progress-file']
+      for (let index = 1; index < argv.length; index += 2) {
+        const name = argv[index]!, value = argv[index + 1]
+        if (!allowed.includes(name) || flags.has(name) || !value || value.startsWith('--')) throw new Error('INVALID_RAW_ARGV')
+        flags.set(name, value)
+      }
+      const entryAgent = flags.get('--agent') as LocalAgent
+      if (!localAgents.includes(entryAgent) || !flags.has('--progress-file')) throw new Error('INVALID_RAW_ARGV')
+      const isCodexEvent = entryAgent === 'codex' || entryAgent === 'cursor'
+      if ((entryMode === '--codex-event') !== isCodexEvent || isCodexEvent && flags.has('--state')) throw new Error('INVALID_RAW_ARGV')
+      if (!isCodexEvent && !flags.has('--state')) throw new Error('INVALID_RAW_ARGV')
+      if (entryAgent === 'antigravity' ? !flags.has('--event') : flags.has('--event')) throw new Error('INVALID_RAW_ARGV')
+      const hookEvent = flags.get('--hook-event')
+      if (hookEvent !== undefined) {
+        const events = entryAgent === 'codex' ? codexEvents : entryAgent === 'cursor' ? Object.keys(cursorEvents) : Object.keys(statusEvents[entryAgent] ?? {})
+        if (!events.some(event => event === hookEvent) || !isCodexEvent && statusEvents[entryAgent]?.[hookEvent] !== flags.get('--state') || entryAgent === 'antigravity' && hookEvent !== flags.get('--event')) throw new Error('INVALID_RAW_ARGV')
+      }
+      const env = object(raw.env)
+      if (Object.entries(env).some(([name, value]) => !(HOOK_SESSION_ENV[entryAgent] ?? []).includes(name) || typeof value !== 'string')) throw new Error('INVALID_RAW_ENV')
+      return buildEntry(entryMode, entryAgent, object(raw.payload), name => flags.get(name), env as NodeJS.ProcessEnv, resolve(flags.get('--progress-file')!), Number(raw.at))
     }
     // A program holding progress.md open makes Windows refuse its read (EBUSY) and the rename
     // onto it (EPERM). A read-only progress.md fails the rename with the same EPERM, so its
@@ -191,11 +238,11 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
       const isLockedRename = process.platform === 'win32' && failure?.code === 'EPERM' && failure.syscall === 'rename' && typeof failure.dest === 'string' && resolve(failure.dest) === progress && isWritable()
       return failure?.code === 'EBUSY' || failure?.code === 'EAGAIN' || isLockedRename || error instanceof Error && error.message === 'LOCK_BUSY'
     }
-    const apply = ({ mode, agent, session, now, status, event, folder = '', isBoardPrompt, isPrompt, payload }: Pending): CodexReport => {
+    const apply = ({ mode, agent, session, now, at, status, event, folder = '', isBoardPrompt, isPrompt, payload }: Pending): CodexReport => {
       const owner = hash(`${agent}:${session}`)
       const recordFile = join(root, 'sessions', `${owner}.json`)
       const saved = readLocal(recordFile)
-      const original = saved === null ? null : JSON.parse(saved) as CodexReport
+      const original = saved === null ? null : JSON.parse(saved) as CodexReport & { appliedAt?: number }
       if (original?.agent && original.agent !== agent) throw new Error('SESSION_CONFLICT')
       const bytes = readBytes(progress) ?? Buffer.alloc(0)
       const text = bytes.toString('utf8')
@@ -212,10 +259,13 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
         ...base, title: sessionTitle(name, s.localAgentTask(agent)), project: name || agent,
       }, clock, s) : base
       const priorActivity = previous?.activity ?? []
-      const report = { ...initial, ...(isBoardPrompt && previous ? { state: previous.state, steps: previous.steps } : {}), agent, ...(event === undefined ? {} : { activity: [...priorActivity, { event, state: String(status), updated: clock }].slice(-16) }) }
+      const report = { ...initial, appliedAt: Math.max(at ?? Date.parse(now), original?.appliedAt ?? Date.parse(original?.updated ?? now)), ...(isBoardPrompt && previous ? { state: previous.state, steps: previous.steps } : {}), agent, ...(event === undefined ? {} : { activity: [...priorActivity, { event, state: String(status), updated: clock }].slice(-16) }) }
       // A replay can skip writes only after a board completion reached the cache too.
       const repaired = reporterTail(bytes)
-      if (repaired.fragment === null && mode !== '--codex-report' && previous === original && previous !== null && previous.state === report.state && previous.turn === report.turn && JSON.stringify(previous.steps) === JSON.stringify(report.steps) && (event === undefined || priorActivity.at(-1)?.event === event)) return report
+      if (repaired.fragment === null && mode !== '--codex-report' && previous === original && previous !== null && previous.state === report.state && previous.turn === report.turn && JSON.stringify(previous.steps) === JSON.stringify(report.steps) && (event === undefined || priorActivity.at(-1)?.event === event)) {
+        if (report.appliedAt > (original.appliedAt ?? Date.parse(original.updated))) atomic(recordFile, `${JSON.stringify({ ...original, appliedAt: report.appliedAt }, null, 2)}\n`, checkDeadline, true)
+        return report
+      }
       // Encode only the new report; existing bytes, including partial UTF-8, pass through unchanged.
       const encoded = (value: string): string => Buffer.from(value, 'utf8').toString('latin1')
       const next = Buffer.from(putCodexBlock(repaired.bytes.toString('latin1'), {
@@ -230,7 +280,7 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
       }
       // Once progress.md holds the event the session record follows it even past the
       // deadline: a record left behind would make the next Stop fail as a stale turn.
-      atomic(recordFile, `${JSON.stringify(report, null, 2)}\n`)
+      atomic(recordFile, `${JSON.stringify(report, null, 2)}\n`, undefined, true)
       return report
     }
     const pending = join(root, 'pending')
@@ -245,15 +295,13 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
       && (entry.event === undefined || entry.agent === 'antigravity' && entry.mode === '--agent-status' && statusEvents.antigravity?.[entry.event] === entry.status)
       // A live event's own session_id is either missing or the session it is filed under.
       && (entry.mode !== '--codex-event' || [undefined, entry.session].includes(object(entry.payload).session_id as string | undefined))
-    // A status event has no turn to order it by: one that lands behind a newer event of its
-    // session would move that session back, so it is dropped instead. `at` keeps the event's
-    // start time in milliseconds; older queued entries fall back to their whole-second `now`.
-    // The session's saved `updated` keeps whole seconds, so an older status event from the same
-    // second as the session's last report is still not caught and applies.
+    // Raw Codex events can precede a newer turn too. Milliseconds settle events in
+    // the same second; older records and pending entries retain their timestamp fallback.
     const isOverdue = (entry: Pending): boolean => {
-      if (entry.mode !== '--agent-status') return false
       const saved = readLocal(join(root, 'sessions', `${hash(`${entry.agent}:${entry.session}`)}.json`))
-      return saved !== null && (entry.at ?? Date.parse(entry.now)) < Date.parse(String(object(JSON.parse(saved)).updated))
+      if (saved === null) return false
+      const record = object(JSON.parse(saved))
+      return (entry.at ?? Date.parse(entry.now)) < (typeof record.appliedAt === 'number' ? record.appliedAt : Date.parse(String(record.updated)))
     }
     // Only hooks have the 2.4 s cap to stay within their 3 s timeout.
     const retryDeadline = mode === '--codex-report' ? performance.now() + 1800 : Math.min(performance.now() + 1800, 2400)
@@ -277,6 +325,16 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
         checkDeadline()
         report = withLocalLock(`${progress}.agent-board-lock`, () => {
           checkDeadline()
+          // Interrupted queue writes are disposable only after active writers have had time to finish.
+          if (existsSync(pending)) for (const name of readdirSync(pending).filter(name => name.endsWith('.tmp'))) {
+            checkDeadline()
+            const file = join(pending, name)
+            // Best effort: a temporary file a scanner holds open must not fail the hook and lose its event.
+            try {
+              const info = statSync(file)
+              if (info.isFile() && info.mtimeMs < Date.now() - 60000) unlinkSync(file)
+            } catch {}
+          }
           // A hook with a backlog to replay saves its own event first: if the replay runs out
           // of time, the queue write itself would be past the deadline and the event lost.
           const backlog = pendingFiles().length
@@ -292,7 +350,8 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
             const file = join(pending, name)
             if (file === queuedFile) continue
             try {
-              const entry = object(JSON.parse(readFileSync(file, 'utf8'))) as Pending
+              const stored = object(JSON.parse(readFileSync(file, 'utf8')))
+              const entry = name.endsWith('.raw.json') ? rawEntry(stored) : stored as Pending
               if (entry.version === 1 && typeof entry.progress === 'string' && isHookEntry(entry)) {
                 if (entry.progress !== progress) continue
                 if (!isOverdue(entry)) apply(entry)
@@ -347,9 +406,10 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
   const isReadable = parsedConfig !== null
   const hooks = object(hookConfig.hooks ?? {})
   const worker = join(root, 'agent-board-hook.mjs')
+  // Two encoding layers amplify indentation enough to exceed cmd.exe's command limit.
   const hookArgs = (event: string, state?: string): string[] => [
     process.execPath, '--input-type=commonjs', '-e',
-    `eval(Buffer.from('${Buffer.from(hookBootstrap(home, agent)).toString('base64')}','base64').toString('utf8'))`,
+    `eval(Buffer.from('${Buffer.from(hookBootstrap(home, agent).split('\n').map(line => line.trim()).join('\n')).toString('base64')}','base64').toString('utf8'))`,
     worker, '--hook-version', String(HOOK_VERSION), '--hook-event', event,
     state === undefined ? '--codex-event' : '--agent-status', '--agent', agent,
     ...(state === undefined ? [] : ['--state', state]),
@@ -389,7 +449,7 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
       // Antigravity's Windows executor passes one quoted argument to cmd /c using
       // CreateProcess escaping. Embedded executable quotes become literal \" bytes.
       // Keep that command free of inner quotes; PowerShell forwards stdin to Node.
-      const launch = `& ${argv.map(value => `'${value.replaceAll("'", "''")}'`).join(' ')}; exit $LASTEXITCODE`
+      const launch = `& ${argv.map(value => `'${value.replaceAll("'", "''")}'`).join(' ')} --hook-started ([DateTimeOffset]::new([Diagnostics.Process]::GetCurrentProcess().StartTime).ToUnixTimeMilliseconds()); exit $LASTEXITCODE`
       return `powershell.exe -NoLogo -NoProfile -NonInteractive -EncodedCommand ${Buffer.from(launch, 'utf16le').toString('base64')}`
     })
     const existing = hookConfig[name], owned = manifest.groups[name]
@@ -435,7 +495,7 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
   const original = readFileSync(process.argv[1] ?? '', 'utf8').replace(/^globalThis\.AGENT_BOARD[^\n]*\n/, '')
   const files: Record<string, string> = {
     [script]: `globalThis.AGENT_BOARD = ${JSON.stringify({ hookVersion: HOOK_VERSION, path: progress, codexRoot: root, lang: Object.entries(STRINGS).find(([, words]) => words === s)?.[0] ?? 'en' })}\n${original}`,
-    [worker]: hookWorker(home, script),
+    [worker]: hookWorker(home, script, boardPromptHelper(boardRequestWords(Object.values(STRINGS)))),
     [skill]: skillText,
   }
   if (agent === 'opencode') files[join(opencodeDir, 'plugins', 'agent-board-local.js')] = opencodePlugin(process.execPath, worker, progress, s.localAgentSkillDescription, home)

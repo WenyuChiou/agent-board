@@ -1,6 +1,11 @@
 // Milliseconds internally; Gemini stores milliseconds, the other command hosts seconds.
 // Keep the existing per-event host floors until the host descriptors own this table.
 export const HOOK_VERSION = 1
+// Only GROK_SESSION_ID for Grok is read by replayed lifecycle events.
+// Other lifecycle identities come from stdin; configuration and credentials stay out.
+export const HOOK_SESSION_ENV: Record<string, string[]> = {
+  grok: ['GROK_SESSION_ID'],
+}
 // Let the worker reap its reporter before an SDK caller applies its outer backstop.
 export const HOOK_WORKER_GRACE = 500
 export const HOOK_TIMEOUTS: Record<string, { timeout: number; events?: Record<string, number> }> = {
@@ -85,9 +90,12 @@ const withHook = async action => {
 }
 `
 
-export const hookWorker = (home: string, script: string): string => `import { createRequire } from 'node:module'
+export const hookWorker = (home: string, script: string, boardPromptHelper: string): string => `import { createRequire } from 'node:module'
 const require = createRequire(import.meta.url)
 const { spawnSync } = require('node:child_process')
+const { randomUUID } = require('node:crypto')
+const { performance } = require('node:perf_hooks')
+${boardPromptHelper}
 const args = process.argv.slice(2)
 const value = name => { const at = args.indexOf(name); return at < 0 ? undefined : args[at + 1] }
 const agent = value('--agent')
@@ -97,7 +105,8 @@ ${hookLogSource(home, '__AGENT__').replace(JSON.stringify('__AGENT__'), 'safeAge
 const isReport = args.includes('--codex-report')
 const fail = code => { hookError(code); process.exitCode = isReport ? 1 : 0; if (!isReport && ['cursor', 'gemini', 'antigravity'].includes(agent)) process.stdout.write('{}\\n'); return false }
 const run = async () => {
-  const started = Date.now()
+  const now = Date.now(), supplied = Number(value('--hook-started'))
+  const started = Math.floor(Math.min(performance.timeOrigin, Number.isSafeInteger(supplied) && supplied <= now && supplied >= now - 10000 ? supplied : Infinity))
   if (safeAgent === 'unknown') return fail('UNSUPPORTED_AGENT')
   const required = Number(value('--hook-version'))
   if (!Number.isInteger(required) || required < 1 || required > ${HOOK_VERSION}) return fail('REPORTER_UPGRADE_REQUIRED')
@@ -110,8 +119,9 @@ const run = async () => {
   const policy = policies[agent]
   const inherited = value('--hook-deadline')
   if (inherited !== undefined && !Number.isSafeInteger(Number(inherited))) return fail('REPORTER_FAILED')
-  const deadline = Math.min(started + Math.min(3000, (policy.events?.[value('--hook-event')] ?? policy.timeout) - 1000), inherited === undefined ? Infinity : Number(inherited))
-  const budget = deadline - Date.now()
+  const hostTimeout = policy.events?.[value('--hook-event')] ?? policy.timeout
+  const deadline = Math.min(started + Math.min(3000, hostTimeout - 1000), inherited === undefined ? Infinity : Number(inherited))
+  const budget = (Date.now() < deadline ? deadline : started + hostTimeout - 300) - Date.now()
   if (budget <= 0) return fail('REPORTER_TIMEOUT')
   let text = '', timer
   process.stdin.setEncoding('utf8')
@@ -125,16 +135,44 @@ const run = async () => {
   let payload
   try { payload = JSON.parse(text.replace(/^\\uFEFF/, '')); if (!payload || typeof payload !== 'object' || Array.isArray(payload)) throw Error() }
   catch { return fail('INCOMPLETE_INPUT') }
+  const internal = ['--hook-version', '--hook-event', '--hook-deadline', '--hook-started', '--home']
+  const reporterArgs = args.filter((arg, index) => !internal.includes(arg) && !internal.includes(args[index - 1]))
+  const queue = () => {
+    let temporary
+    try {
+      if (isReport || started + hostTimeout - Date.now() < 300) return fail('REPORTER_TIMEOUT')
+      const pending = path.join(path.dirname(${JSON.stringify(script)}), 'pending')
+      fs.mkdirSync(pending, { recursive: true, mode: 0o700 })
+      if (fs.readdirSync(pending).filter(name => name.endsWith('.json')).length >= 64) return fail('REPORTER_TIMEOUT')
+      const env = Object.fromEntries((${JSON.stringify(HOOK_SESSION_ENV)}[agent] ?? []).filter(name => typeof process.env[name] === 'string').map(name => [name, process.env[name]]))
+      // Replay reads only session_id, sessionId, sessionID, conversationId,
+      // conversation_id, generation_id, turn_id, hook_event_name, hookEventName,
+      // state, prompt_submitted, cwd and the first of workspace_roots (for the
+      // session's folder name, #246). Classify the prompt before discarding its text.
+      const kept = Object.fromEntries(['session_id', 'sessionId', 'sessionID', 'conversationId', 'conversation_id', 'generation_id', 'turn_id', 'hook_event_name', 'hookEventName', 'state', 'prompt_submitted'].filter(name => Object.hasOwn(payload, name)).map(name => [name, payload[name]]))
+      kept.board_request = payload.board_request === true || isBoardRequest(payload)
+      // A bounded folder path: replay must not stall on an oversized one.
+      if (typeof payload.cwd === 'string' && payload.cwd.length <= 4096) kept.cwd = payload.cwd
+      const roots = payload.workspace_roots
+      if (Array.isArray(roots) && typeof roots[0] === 'string' && roots[0].length <= 4096) kept.workspace_roots = [roots[0]]
+      const file = path.join(pending, String(started).padStart(15, '0') + '-' + randomUUID() + '.raw.json')
+      if (started + hostTimeout - Date.now() < 300) return fail('REPORTER_TIMEOUT')
+      temporary = file + '.tmp'
+      fs.writeFileSync(temporary, JSON.stringify({ version: 1, kind: 'raw', at: started, argv: reporterArgs, env, payload: kept }), { flag: 'wx', mode: 0o600 })
+      fs.renameSync(temporary, file)
+      temporary = undefined
+      return fail('REPORTER_QUEUED')
+    } catch { return fail('REPORTER_TIMEOUT') }
+    finally { if (temporary) { try { fs.unlinkSync(temporary) } catch {} } }
+  }
   const remaining = deadline - Date.now()
-  if (remaining <= 0) return fail('REPORTER_TIMEOUT')
-  const internal = ['--hook-version', '--hook-event', '--hook-deadline']
-  const childArgs = [...args.filter((arg, index) => !internal.includes(arg) && !internal.includes(args[index - 1])), '--hook-deadline', String(deadline), '--home', ${JSON.stringify(home)}]
+  if (remaining <= 0) return queue()
+  const childArgs = [...reporterArgs, '--hook-deadline', String(deadline), '--hook-started', String(started), '--home', ${JSON.stringify(home)}]
   const result = spawnSync(process.execPath, [${JSON.stringify(script)}, ...childArgs], {
     input: JSON.stringify(payload), encoding: 'utf8', windowsHide: true,
     timeout: remaining, killSignal: 'SIGKILL', maxBuffer: 1048576,
   })
-  if (result.error?.code === 'ETIMEDOUT') return fail('REPORTER_TIMEOUT')
-  if (Date.now() >= deadline) return fail('REPORTER_TIMEOUT')
+  if (result.error?.code === 'ETIMEDOUT' || Date.now() >= deadline || result.status !== 0 && result.signal) return queue()
   if (result.error || result.status !== 0) return fail('REPORTER_FAILED')
   process.stdout.write(result.stdout)
   return true
