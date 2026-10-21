@@ -1396,6 +1396,88 @@ test('OpenCode metadata adapter and task tool work without reading messages or C
   } finally { rmSync(home, { recursive: true, force: true }) }
 })
 
+const opencodeSpawnFixture = async (standIn, check) => {
+  const home = mkdtempSync(join(tmpdir(), 'opencode-timeout-'))
+  const probe = { calls: [], run: standIn }
+  globalThis.agentBoardOpenCodeSpawn = probe
+  try {
+    const installed = spawnSync(process.execPath, [setup, '--home', home, '--agent', 'opencode', '--apply'], { env: isolatedEnv(home), encoding: 'utf8', windowsHide: true })
+    assert.equal(installed.status, 0, installed.stderr)
+    const source = readFileSync(join(home, '.config', 'opencode', 'plugins', 'agent-board-local.js'), 'utf8')
+    const stub = 'const tool = Object.assign(value => value, { schema: { string: () => ({}), enum: () => ({}), array: () => ({}) } })'
+    const spawnStub = `import { spawnSync as realSpawnSync } from 'node:child_process'
+const spawnSync = (file, args, options) => {
+  const probe = globalThis.agentBoardOpenCodeSpawn
+  probe.calls.push({ file, args: [...args], options: { ...options } })
+  return probe.run(file, args, options, realSpawnSync, probe.calls.length)
+}`
+    assert.ok(source.includes("import { spawnSync } from 'node:child_process'"))
+    const testPlugin = join(home, 'timeout-test.mjs')
+    writeFileSync(testPlugin, source.replace("import { tool } from '@opencode-ai/plugin'", stub).replace("import { spawnSync } from 'node:child_process'", spawnStub))
+    const { AgentBoardLocal } = await import(pathToFileURL(testPlugin))
+    const instance = await AgentBoardLocal({ client: { session: { get: async ({ path }) => ({ data: { id: path.id } }) } } })
+    const payload = { title: 'Synthetic timeout task', project: 'OpenCode fixture', state: 'working', steps: ['- [~] Synthetic timeout step'] }
+    const context = { sessionID: 'opencode-timeout-session' }
+    await check({ instance, payload, context, probe, progress: join(home, '.agent-board', 'progress.md'), log: join(home, '.agent-board', 'hook-errors.log') })
+  } finally {
+    delete globalThis.agentBoardOpenCodeSpawn
+    rmSync(home, { recursive: true, force: true })
+  }
+}
+
+const opencodeTimeoutResult = () => ({ error: { code: 'ETIMEDOUT' }, status: null, signal: 'SIGKILL' })
+
+test('an OpenCode report retries once when the runtime ends spawnSync early with ETIMEDOUT', async () => {
+  await opencodeSpawnFixture((file, args, options, realSpawnSync, count) => count === 1 ? opencodeTimeoutResult() : realSpawnSync(file, args, options), async f => {
+    f.payload.state = 'done'
+    f.payload.steps = ['- [x] Synthetic timeout step']
+    await f.instance.tool.agent_board_progress.execute(f.payload, f.context)
+    assert.match(readFileSync(f.progress, 'utf8'), /Synthetic timeout task/)
+    assert.equal(f.probe.calls.length, 2)
+    const [first, retry] = f.probe.calls
+    assert.equal(retry.file, first.file)
+    assert.deepEqual(retry.args, first.args)
+    assert.ok(first.args.includes('--hook-deadline'))
+    assert.deepEqual(retry.options, { ...first.options, timeout: retry.options.timeout })
+    assert.ok(retry.options.timeout > 100 && retry.options.timeout <= first.options.timeout)
+    const before = existsSync(f.log) ? readFileSync(f.log, 'utf8') : ''
+    f.probe.calls.length = 0
+    await f.instance.event({ event: { type: 'session.status', properties: { sessionID: 'opencode-timeout-lifecycle', status: { type: 'busy' } } } })
+    assert.match(readFileSync(f.progress, 'utf8'), /agent=opencode .*state=working/)
+    assert.equal(f.probe.calls.length, 2)
+    assert.equal(existsSync(f.log) ? readFileSync(f.log, 'utf8') : '', before)
+  })
+})
+
+test('an OpenCode report that really times out is not retried', async () => {
+  await opencodeSpawnFixture((_file, _args, options) => {
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, options.timeout)
+    return opencodeTimeoutResult()
+  }, async f => {
+    await assert.rejects(f.instance.tool.agent_board_progress.execute(f.payload, f.context), { message: 'HOOK_TIMEOUT' })
+    assert.equal(f.probe.calls.length, 1)
+    assert.match(readFileSync(f.log, 'utf8'), /opencode REPORTER_TIMEOUT/)
+  })
+})
+
+test('an OpenCode report that ends early twice is retried only once', async () => {
+  await opencodeSpawnFixture(() => opencodeTimeoutResult(), async f => {
+    await assert.rejects(f.instance.tool.agent_board_progress.execute(f.payload, f.context), { message: 'HOOK_TIMEOUT' })
+    assert.equal(f.probe.calls.length, 2)
+    assert.match(readFileSync(f.log, 'utf8'), /opencode REPORTER_TIMEOUT/)
+  })
+})
+
+test('a failed OpenCode progress tool logs its code without the payload', async () => {
+  await opencodeSpawnFixture(() => ({ status: 1, stderr: 'PRIVATE_STDERR' }), async f => {
+    await assert.rejects(f.instance.tool.agent_board_progress.execute(f.payload, f.context), { message: 'AGENT_BOARD_REPORT_FAILED' })
+    assert.equal(f.probe.calls.length, 1)
+    const log = readFileSync(f.log, 'utf8')
+    assert.match(log, /opencode REPORTER_FAILED/)
+    for (const privateValue of [f.payload.title, ...f.payload.steps, f.context.sessionID, 'PRIVATE_STDERR', f.progress]) assert.ok(!log.includes(privateValue))
+  })
+})
+
 test('an unsupported bootstrap target is refused without installing anything', () => fixture(f => {
   assert.notEqual(f.install('--agent', 'imaginary', '--apply').status, 0)
   assert.ok(!existsSync(f.root))
