@@ -20,6 +20,7 @@
 1. 在[選你的 agent](#選你的-agent) 找到你在用的 agent。
 2. 執行它那一行指令，或把表格下面的安裝提示貼給那個 agent。
 3. 打開看板：Claude Code 裡打 `/progress`，Codex 打 `$agent-board`，OpenCode 打 `/board`，任何終端機都可以跑 `node ~/.agent-board/agent-board.mjs --serve`。
+   Claude 桌面 App 無法顯示面板：底部狀態列會顯示看板狀態，`/progress` 會提供可回覆問題、封存工作的看板網頁連結；網頁無法啟動時改開唯讀網頁。看板網頁需要 `/progress connect` 安裝的看板腳本，或在下次工作階段開始時更新。
 
 除了 Claude Code，其他 agent 都透過這個 repository 接上，需要 Node.js 18 以上：
 

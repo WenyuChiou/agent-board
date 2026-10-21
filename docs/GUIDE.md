@@ -109,6 +109,8 @@ claude plugin install agent-board@agent-board
 
 Open a new Claude Code session; `/progress` opens the pane. It mirrors Task tools and can summarize turns through its model. Questions and decisions appear above the task cards. The pane follows Claude's theme; the page follows the system theme until you pick Light or Dark on it.
 
+The Claude desktop app shows the footer status; `/progress` offers the board page, where you can answer questions and archive work, and opens a read-only page if the live page cannot start. Starting the page can take up to half a minute; the footer says it is starting meanwhile. The live page needs the board script installed by `/progress connect`, or updated at the next session start. Sessions and agents using the same installed board script reuse the running page. A page `/progress` starts closes 30 minutes after its last tab is closed, and `/progress` again gives a new link; a page you started yourself with `--serve` keeps its own setting. `/progress` replaces a page started with `--allow-resume`, unless a reply there is still on its way; run `--serve --allow-resume` again afterwards when you need resumed replies. The Claude Code CLI shows the pane.
+
 | Command / input | Action |
 | --- | --- |
 | `/progress connect`, `connect status`, `connect remove` | Optional plugin connector setup, last status, removal |
