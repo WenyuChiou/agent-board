@@ -1,0 +1,2 @@
+- **The team process page names the maintainer as coordinator, says this repository runs supervised, and carries the steps every contributor follows (#339).** It lists the generated and shared files, the caps, who merges and publishes a release, which issues agents on other computers take, where findings go, and where this repository differs from the copied steps.
+  Tests: none (documentation only).

@@ -6,6 +6,7 @@ import { askOf } from '../hooks/ask'
 import { boardItems, boardKey, boardScreen, boardText, CHAT_MAX, chatText, doneToday, emptyBoardState, fingerprint, fit, peekInbox, pinned, redact } from '../hooks/board'
 import { addManualTask, isArchivable, manualTaskCount, mergeBlock, renderAutoBlock, scanBlocks, setManualStep, takeArchivable, takeManualDone, takeTask, upsertAutoBlock } from '../hooks/blocks'
 import { agentHooks, boardCommands, boardScript, COLLISION, DELETE, generatedFile, isNodeSupported, isReleased, isReleasedBoard, isSetupState, isWindowsHost, NODE_MIN, nodeVersionOf, openclawPlugin, openclawPrinted, openclawSavedBy, openclawTooOld, PROBLEM_ARGS, readConfig, RELEASE_PATHS, reportCommand, reporterPs1, reporterSh, setupAgents, setupLines, withFlatHook, withGroupedHook, withHermesHooks, withoutHermesHooks, withoutOurHooks, withoutSection } from '../hooks/connect'
+import { connectDataRoots, connectRecordPath, recoveryUnreadableCode } from '../hooks/connect-pure'
 import { boardRun } from '../hooks/board-commands'
 import { dashboardHtml } from '../hooks/dashboard'
 import { codexReport, putCodexBlock } from '../hooks/codex'
@@ -542,8 +543,9 @@ test('a stopped session retains unresolved questions independently of its connec
   expect(live.waiting).toHaveLength(1)
 
   const stopped = buildView(parseProgress(file(NOW - 13 * 60 * 60 * 1000)), [], null, NOW)
-  expect(stopped.waiting).toHaveLength(1)
-  expect(stopped.overview.waiting).toBe(1)
+  expect(stopped.waiting).toHaveLength(0)
+  expect(stopped.overview.waiting).toBe(0)
+  expect(stopped.stopped[0]?.questions?.map(item => item.text)).toEqual(['要不要重跑'])
   expect(stopped.stopped[0]).toMatchObject({ auto: 'ended', status: '對話已停，13 小時前沒動靜', resume: "cd '/w' && claude --resume dddddddd-1" })
   expect(stopped.groups).toEqual([])
 })
@@ -705,7 +707,8 @@ test('progress.html shows the whole file: counts, the focus, folded sections, st
   expect(html).toContain('● 2</span> 等你')
   expect(html).toContain('✓ 3</span> 今天完成')
   expect(html).toContain('<div class="label">現在最需要你</div>')
-  expect(html).toContain('〔選一個〕')
+  // Drawn as a pill, the chip shows the word without the terminal's brackets.
+  expect(html).toContain('>選一個</span>')
   expect(html).toContain('AutoResearchAgent › Stage 2 · codex')
   expect(html).toContain('data-key="section:waiting" open')
   expect(html).toContain('Google &lt;script&gt;alert(1)&lt;/script&gt;')
@@ -785,6 +788,123 @@ test('封存 leaves the file alone when it cannot be sure which task it means', 
   // A live session's row has no 封存: its block is that session's to change.
   const live = buildView(parseProgress(inside), [], null, NOW)
   expect(live.active.map(row => row.archive)).toEqual([null])
+})
+
+test('封存 of one of two blocks that share a session id takes the chosen row and leaves the other block byte for byte', () => {
+  const first = [
+    '<!-- auto session=cccccccc state=ended updated=2026-10-16T10:00:00.000Z -->',
+    '### First task',
+    '- [ ] First step',
+    '<!-- /auto session=cccccccc -->',
+  ].join('\n')
+  const second = [
+    '<!-- auto session=cccccccc state=ended updated=2026-10-16T11:00:00.000Z -->',
+    '### Second task',
+    '- [ ] Second step',
+    '<!-- /auto session=cccccccc -->',
+  ].join('\n')
+  const text = `## First project\n${first}\n\n## Second project\n${second}\n`
+  const secondRef = { project: 'Second project', title: 'Second task', line: text.split('\n').indexOf('### Second task'), session: 'cccccccc' }
+  const archivedSecond = takeTask(text, secondRef, NOW)
+  expect(archivedSecond?.entries).toEqual(['## Second project · 2026-10-16\n### Second task\n- [ ] Second step'])
+  expect(archivedSecond?.text).toBe(`## First project\n${first}\n`)
+  expect(takeTask(text, { ...secondRef, line: 0 }, NOW)).toEqual(archivedSecond)
+
+  const archivedFirst = takeTask(text, { project: 'First project', title: 'First task', line: text.split('\n').indexOf('### First task'), session: 'cccccccc' }, NOW)
+  expect(archivedFirst?.entries).toEqual(['## First project · 2026-10-16\n### First task\n- [ ] First step'])
+  expect(archivedFirst?.text).toBe(`## Second project\n${second}\n`)
+})
+
+test('封存 refuses when two blocks share a session id and the chosen row cannot be told apart', () => {
+  const first = [
+    '<!-- auto session=cccccccc state=ended updated=2026-10-16T10:00:00.000Z -->',
+    '### Same task',
+    '- [ ] First step',
+    '<!-- /auto session=cccccccc -->',
+  ].join('\n')
+  const second = [
+    '<!-- auto session=cccccccc state=ended updated=2026-10-16T11:00:00.000Z -->',
+    '### Same task',
+    '- [ ] Second step',
+    '<!-- /auto session=cccccccc -->',
+  ].join('\n')
+  const text = `## Project\n${first}\n\n${second}\n`
+  const ref = { project: 'Project', title: 'Same task', line: 0, session: 'cccccccc' }
+  expect(takeTask(text, ref, NOW)).toBeNull()
+
+  const archived = takeTask(text, { ...ref, line: text.split('\n').lastIndexOf('### Same task') }, NOW)
+  expect(archived?.entries).toEqual(['## Project · 2026-10-16\n### Same task\n- [ ] Second step'])
+  expect(archived?.text).toBe(`## Project\n${first}\n`)
+})
+
+test('封存 of an ended block takes it when a working block shares its session id, and refuses the working one', () => {
+  const working = [
+    '<!-- auto session=cccccccc state=working updated=2026-10-16T11:00:00.000Z -->',
+    '### Working task',
+    '- [~] Working step',
+    '<!-- /auto session=cccccccc -->',
+  ].join('\n')
+  const ended = [
+    '<!-- auto session=cccccccc state=ended updated=2026-10-16T10:00:00.000Z -->',
+    '### Ended task',
+    '- [x] Ended step',
+    '<!-- /auto session=cccccccc -->',
+  ].join('\n')
+  const text = `## Project\n${working}\n\n${ended}\n`
+  const lines = text.split('\n')
+  const archived = takeTask(text, { project: 'Project', title: 'Ended task', line: lines.indexOf('### Ended task'), session: 'cccccccc' }, NOW)
+  expect(archived?.entries).toEqual(['## Project · 2026-10-16\n### Ended task\n- [x] Ended step'])
+  expect(archived?.text).toBe(`## Project\n${working}\n`)
+  expect(takeTask(text, { project: 'Project', title: 'Working task', line: lines.indexOf('### Working task'), session: 'cccccccc' }, NOW)).toBeNull()
+})
+
+test('封存 matches a shared session id by each block\'s first heading, so a second heading in another block is never taken for the row', () => {
+  const first = [
+    '<!-- auto session=cccccccc state=ended updated=2026-10-16T09:00:00.000Z -->',
+    '### X',
+    '- [ ] First step',
+    '### Y',
+    '<!-- /auto session=cccccccc -->',
+  ].join('\n')
+  const second = [
+    '<!-- auto session=cccccccc state=ended updated=2026-10-16T10:00:00.000Z -->',
+    '### Y',
+    '- [ ] Second step',
+    '<!-- /auto session=cccccccc -->',
+  ].join('\n')
+  const third = [
+    '<!-- auto session=cccccccc state=ended updated=2026-10-16T11:00:00.000Z -->',
+    '### Z',
+    '- [ ] Third step',
+    '<!-- /auto session=cccccccc -->',
+  ].join('\n')
+  const text = `## Project\n${first}\n\n${second}\n\n${third}\n`
+  const lines = text.split('\n')
+  const secondRef = { project: 'Project', title: 'Y', line: lines.lastIndexOf('### Y'), session: 'cccccccc' }
+  const archivedSecond = takeTask(text, secondRef, NOW)
+  expect(archivedSecond?.entries).toEqual(['## Project · 2026-10-16\n### Y\n- [ ] Second step'])
+  expect(archivedSecond?.text).toBe(`## Project\n${first}\n\n${third}\n`)
+
+  const withoutSecond = `## Project\n${first}\n\n${third}\n`
+  expect(takeTask(withoutSecond, secondRef, NOW)).toBeNull()
+
+  const archivedFirst = takeTask(text, { project: 'Project', title: 'X', line: lines.indexOf('### X'), session: 'cccccccc' }, NOW)
+  expect(archivedFirst?.entries).toEqual(['## Project · 2026-10-16\n### X\n- [ ] First step\n### Y'])
+  expect(archivedFirst?.text).toBe(`## Project\n\n${second}\n\n${third}\n`)
+
+  const stepFirst = [
+    '<!-- auto session=cccccccc state=ended updated=2026-10-16T09:00:00.000Z -->',
+    '- [ ] Stray step',
+    '### Y',
+    '- [ ] A step',
+    '<!-- /auto session=cccccccc -->',
+  ].join('\n')
+  const withStepFirst = `## Project\n${stepFirst}\n\n${second}\n\n${third}\n`
+  const stepFirstRef = { ...secondRef, line: withStepFirst.split('\n').lastIndexOf('### Y') }
+  const archivedWithStepFirst = takeTask(withStepFirst, stepFirstRef, NOW)
+  expect(archivedWithStepFirst?.entries).toEqual(['## Project · 2026-10-16\n### Y\n- [ ] Second step'])
+  expect(archivedWithStepFirst?.text).toBe(`## Project\n${stepFirst}\n\n${third}\n`)
+  expect(takeTask(`## Project\n${stepFirst}\n\n${third}\n`, stepFirstRef, NOW)).toBeNull()
 })
 
 test('reminders: another session’s question once, and work due today or late once a day', () => {
@@ -2196,14 +2316,22 @@ test('a file an earlier release wrote is known by its exact bytes with this mach
   // The board commands from before --serve were the same from 0.17.1, before 0.18.0, to 0.18.1.
   const first = RELEASED.find(release => release.version === '0.17.1')
   for (const text of RELEASE_0_18_1.gemini) expect(first?.gemini).toContain(sha256(text))
-  // An older owned reporter is still replaceable when today's template changes.
+  // Safety guards changed the current reporters; historical exact bytes still upgrade.
   const inbox = '/h/.claude/progress-inbox'
-  const oldReporter = RELEASE_0_20_5.reporterSh.split(RELEASE_PATHS.inbox).join(inbox)
-  expect(isReleased('reporterSh', oldReporter, { inbox })).toBe(true)
-  expect(oldReporter).not.toBe(reporterSh(inbox))
-  expect(isReleased('reporterPs1', RELEASE_0_20_5.reporterPs1)).toBe(true)
-  expect(RELEASE_0_20_5.reporterPs1).not.toBe(reporterPs1())
-  expect(isReleased('reporterSh', `${oldReporter}# mine\n`, { inbox })).toBe(false)
+  for (const [kind, previous, current] of [
+    ['reporterSh', RELEASE_0_20_5.reporterSh.split(RELEASE_PATHS.inbox).join(inbox), reporterSh(inbox)],
+    ['reporterPs1', RELEASE_0_20_5.reporterPs1, reporterPs1()],
+  ] as const) {
+    const known = (text: string) => isReleased(kind, text, { inbox })
+    const edit = generatedFile(current, known)
+    expect(known(previous)).toBe(true)
+    expect(previous).not.toBe(current)
+    expect(known(`${previous}# mine\n`)).toBe(false)
+    expect(edit(previous, false)).toBe(current)
+    expect(edit(current, false)).toBe(current)
+    expect(edit(`${previous}# mine\n`, false)).toBe(COLLISION)
+    expect(edit(`${current}# mine\n`, false)).toBe(COLLISION)
+  }
   // On Windows the board's path has backslashes, and a board command holds it as it is.
   const windows = 'C:\\Users\\synthetic\\.claude\\agent-board.mjs'
   for (const text of RELEASE_0_20_5.gemini) {
@@ -2387,6 +2515,134 @@ const fpIn = (items: ReturnType<typeof boardItems>, key: string): string => {
   return item === undefined ? '' : fingerprint(item, items)
 }
 
+const MATRIX_HOSTS = ['claude', 'codex', 'antigravity', 'hermes', 'openclaw', 'grok', 'opencode', 'cursor'] as const
+const MATRIX_SOURCES = ['own', 'other'] as const
+const MATRIX_KINDS = ['needs-you', 'live-ask', 'stopped', 'unknown-session', 'blocked', 'done', 'hidden', 'own-block', 'ended', 'hand-kept', 'retained', 'inbox'] as const
+const matrixTitle = (kind: typeof MATRIX_KINDS[number], host: typeof MATRIX_HOSTS[number], source: typeof MATRIX_SOURCES[number]): string => `${kind} ${host} ${source}`
+
+const serveMatrix = () => {
+  let sequence = 1
+  const blocks: string[] = ['# Progress', '', '## Matrix']
+  const pending: Array<{ id: string; agent: string; project: string; text: string; isQuestion: boolean; at: number }> = []
+  const records: Array<{ id: string; scope: string; words: string; occurrence: number; copies: number; isWaiting: boolean; isPresent: boolean; isUnresolved: boolean; isArchived: boolean; firstObserved: number; incarnation: string; source: { kind: 'block' | 'own'; project: string; task: string; context: string; text: string; agent: string; session: string; data: string } }> = []
+  for (const host of MATRIX_HOSTS) for (const source of MATRIX_SOURCES) for (const kind of MATRIX_KINDS) {
+    const title = matrixTitle(kind, host, source)
+    const session = sequence.toString(16).padStart(8, '0')
+    sequence += 1
+    if (kind === 'retained') {
+      records.push({ id: `retained-${session}`, scope: `matrix:${session}`, words: title, occurrence: 1, copies: 1, isWaiting: true, isPresent: false, isUnresolved: true, isArchived: true, firstObserved: SERVE_NOW - 10 * 86400000, incarnation: `matrix-${session}`, source: { kind: source === 'own' ? 'own' : 'block', project: 'Matrix', task: title, context: '', text: `${title}, OK?`, agent: host, session, data: title } })
+      continue
+    }
+    if (kind === 'inbox') {
+      pending.push({ id: session, agent: host, project: 'Matrix', text: `${title}, OK?`, isQuestion: true, at: SERVE_NOW })
+      continue
+    }
+    if (kind === 'hand-kept') {
+      blocks.push(`### ${title}`, `- [?] ${title}, OK?`, '')
+      continue
+    }
+    const state = kind === 'done' ? 'done' : ['stopped', 'unknown-session', 'ended'].includes(kind) ? 'ended' : kind === 'live-ask' || kind === 'own-block' ? 'working' : 'waiting'
+    const resume = kind === 'unknown-session' ? '' : ` resume=${session}`
+    const step = ['needs-you', 'live-ask', 'hidden'].includes(kind) ? `- [?] ${title}, OK?` : kind === 'blocked' ? `- [!] ${title} is blocked` : kind === 'done' ? `- [x] ${title} finished` : kind === 'own-block' ? `- [~] ${title} underway` : `- [ ] ${title} next`
+    blocks.push(`<!-- auto session=${session} agent=${host} state=${state} updated=2026-10-17T08:44:00Z${resume} dir=%2Fsynthetic -->`, `### ${title}`, step, `<!-- /auto session=${session} -->`, '')
+  }
+  const projects = parseProgress(blocks.join('\n'))
+  const ledger = { version: 1 as const, next: records.length + 1, records, legacy: {} }
+  const preview = buildView(projects, [], null, SERVE_NOW, 0, {}, STRINGS.en, [], {}, ledger, { retired: [], consumed: [] }, pending)
+  const answered = preview.waiting.filter(item => item.task.startsWith('hidden ')).map(item => item.hideKey)
+  const built = buildView(projects, [], null, SERVE_NOW, 0, {}, STRINGS.en, answered, {}, ledger, null, pending)
+  const newlyHidden = built.waiting.filter(item => item.task.startsWith('hidden '))
+  const view = { ...built, waiting: built.waiting.filter(item => !item.task.startsWith('hidden ')), hidden: [...built.hidden, ...newlyHidden] }
+  return { view, pending }
+}
+
+test('the serve action contract covers every card kind from every agent and source', () => {
+  const { view, pending } = serveMatrix()
+  const model = serveModel(view, pending, STRINGS.en)
+  const items = boardItems(view, pending, true, true)
+  const cells = new Set<string>()
+  let offered = 0
+  for (const host of MATRIX_HOSTS) for (const source of MATRIX_SOURCES) for (const kind of MATRIX_KINDS) {
+    const title = matrixTitle(kind, host, source)
+    cells.add(title)
+    const ask = model.asks.find(one => one.task === title || one.text.startsWith(title))
+    const row = [...model.groups.flatMap(group => group.rows), ...model.idle, ...model.stopped].find(one => one.title === title)
+    const hidden = model.hidden.find(one => one.task === title)
+    const retained = [...model.reminder, ...model.older].find(one => one.task === title)
+    const card = kind === 'done' ? true : ['needs-you', 'live-ask', 'hand-kept', 'inbox'].includes(kind) ? ask : ['stopped', 'unknown-session', 'blocked', 'own-block', 'ended'].includes(kind) ? row : kind === 'hidden' ? hidden : retained
+    if (card === undefined) throw new Error(`Missing serve matrix card: ${title}`)
+    if (['needs-you', 'live-ask', 'hand-kept', 'inbox'].includes(kind) && ask !== undefined) {
+      const actionItem = items.find(one => one.key === ask.key)
+      expect(actionItem === undefined ? '' : fingerprint(actionItem, items)).toBe(ask.fp)
+      if (ask.canTick) {
+        offered += 1
+        expect(serveAction(items, { key: ask.key, type: 'tick', text: '', session: '', fp: ask.fp }, STRINGS.en).type).toBe('tick')
+      }
+      if (ask.canHide) {
+        offered += 1
+        expect(serveAction(items, { key: ask.key, type: 'hide', text: '', session: '' }, STRINGS.en).type).toBe('hide')
+      }
+      for (const answer of ask.answers) {
+        offered += 1
+        const acted = serveAction(items, { key: ask.key, type: 'send', text: answer, session: ask.session, asked: ask.text, fp: ask.fp }, STRINGS.en)
+        expect(acted.type === 'refuse' ? acted.note !== '' : ['send', 'message'].includes(acted.type)).toBe(true)
+      }
+      offered += Number(ask.command !== null) + Number(ask.reopen !== null) + Number(ask.link !== null) + Number(!ask.canTick)
+      expect(serveAction(items, { key: ask.key, type: 'send', text: '', session: ask.session, asked: ask.text, fp: ask.fp }, STRINGS.en)).toEqual({ type: 'refuse', note: STRINGS.en.pressEmpty })
+    } else if (['stopped', 'unknown-session', 'blocked', 'own-block', 'ended'].includes(kind) && row !== undefined) {
+      for (const [isOffered, type, text] of [[row.next !== null, 'tick', row.next ?? ''], [row.canArchive, 'archive', ''], [row.canConfirm, 'done', '']] as const) if (isOffered) {
+        offered += 1
+        expect(serveAction(items, { key: row.key, type, text, session: row.session, asked: row.question, fp: row.fp }, STRINGS.en).type).toBe(type)
+      }
+      offered += Number(row.resume !== null) + Number(row.send === 'send' || row.send === 'connected' || row.hasCopyBox)
+    } else if (kind === 'hidden' && hidden !== undefined) {
+      offered += 1
+      expect(serveAction(items, { key: hidden.key, type: 'unhide', text: '', session: '' }, STRINGS.en)).toEqual({ type: 'unhide', key: hidden.key.slice('hidden:'.length) })
+    }
+  }
+  expect(cells.size).toBe(192)
+  expect(offered).toBe(440)
+})
+
+test('the terminal key contract covers every card kind from every agent and source', () => {
+  const { view, pending } = serveMatrix()
+  const items = boardItems(view, pending, true, true)
+  const cells = new Set<string>()
+  let offered = 0
+  for (const host of MATRIX_HOSTS) for (const source of MATRIX_SOURCES) for (const kind of MATRIX_KINDS) {
+    const title = matrixTitle(kind, host, source)
+    cells.add(title)
+    const at = items.findIndex(item => item.type === 'ask' ? item.ask.task === title || item.ask.text.startsWith(title) : item.type === 'row' ? item.row.title === title : item.turn.text.startsWith(title))
+    if (kind === 'done') {
+      expect(at).toBe(-1)
+      continue
+    }
+    if (kind === 'hidden') {
+      const pressed = boardKey(emptyBoardState, 'u', items, STRINGS.en)
+      expect(pressed.action?.type).toBe('unhide')
+      offered += 1
+      continue
+    }
+    if (at < 0) throw new Error(`Missing terminal matrix card: ${title}`)
+    const item = items[at]
+    if (item === undefined) throw new Error(`Missing matrix item ${title}`)
+    const keys = item.type === 'ask'
+      ? [...(item.ask.step === null ? [] : ['x']), ...(item.ask.hideKey === '' || item.ask.canHide === false ? [] : ['h']), ...((item.ask.command ?? item.ask.link) !== null || item.ask.reopen !== null ? ['c'] : []), ...(item.ask.kind === 'confirm' ? ['y', 'n'] : item.ask.options.map((_, index) => String(index + 1)))]
+      : item.type === 'row'
+        ? [...(item.row.next === null ? [] : ['x']), ...(item.row.archive === null ? [] : ['a']), ...(item.row.confirm == null ? [] : ['d']), ...(item.row.resume === null ? [] : ['c'])]
+        : []
+    for (const key of keys) {
+      offered += 1
+      const selected = pinned({ ...emptyBoardState, selected: at }, items)
+      const pressed = boardKey(selected, key, items, STRINGS.en)
+      expect(pressed.action?.type ?? pressed.state.note).not.toBe('')
+      if (pressed.action === null) expect(pressed.state.note).not.toBe('')
+    }
+  }
+  expect(cells.size).toBe(192)
+  expect(offered).toBe(376)
+})
+
 test('with explicit legacy opt-in the page offers a send only into a Grok or Codex session that has closed; an open one, Claude and a hand-kept task each get their own way', () => {
   const model = resumeModel(serveView(), [], STRINGS.en)
   const row = (title: string) => [...model.groups.flatMap(group => group.rows), ...model.stopped].find(one => one.title === title)
@@ -2449,7 +2705,7 @@ test('a press on the page is worked out from the file as it is now: a line that 
   const sent = resumeAction(items, { key: grok, type: 'send', text: '  Redis\u0007, it is already in the stack \r\n', session: 'b2c3d4e5', asked, fp: fpIn(items, grok) }, STRINGS.en)
   // The task goes with it, so the page can say which of two sessions answered.
   expect(sent).toEqual({ type: 'send', target: GROK, text: STRINGS.en.answerText('Redis or Memcached?', 'Redis, it is already in the stack'), title: 'Pick the cache' })
-  expect(resumeAction(items, { key: grok, type: 'send', text: ' \u0000 ', session: 'b2c3d4e5', asked }, STRINGS.en)).toEqual({ type: 'refuse', note: '' })
+  expect(resumeAction(items, { key: grok, type: 'send', text: ' \u0000 ', session: 'b2c3d4e5', asked }, STRINGS.en)).toEqual({ type: 'refuse', note: STRINGS.en.pressEmpty })
   // The line now belongs to another session than the one the page drew: refused, not sent there.
   expect(resumeAction(items, { key: grok, type: 'send', text: 'Redis', session: 'c0ffee12', asked }, STRINGS.en)).toEqual({ type: 'refuse', note: STRINGS.en.boardLineChanged })
   // The task asks something else now, or nothing: a reply written under the old question is
@@ -2462,12 +2718,12 @@ test('a press on the page is worked out from the file as it is now: a line that 
   expect(resumeAction(items, { key: codex, type: 'send', text: '300', session: 'a1b2c3d4' }, STRINGS.en)).toEqual({ type: 'refuse', note: STRINGS.en.serveSendOpen('codex') })
   const manual = keyOf(item => item.type === 'ask' && item.ask.project === 'docs-site')
   expect(resumeAction(items, { key: manual, type: 'tick', text: '', session: '', fp: fpIn(items, manual) }, STRINGS.en).type).toBe('tick')
-  expect(resumeAction(items, { key: manual, type: 'send', text: 'yes', session: '' }, STRINGS.en)).toEqual({ type: 'refuse', note: '' })
+  expect(resumeAction(items, { key: manual, type: 'send', text: 'yes', session: '' }, STRINGS.en)).toEqual({ type: 'refuse', note: STRINGS.en.serveManualReply })
   // An ended block can go to the archive; a working one cannot yet.
   expect(resumeAction(items, { key: grok, type: 'archive', text: '', session: '', fp: fpIn(items, grok) }, STRINGS.en)).toMatchObject({ type: 'archive', title: 'Pick the cache' })
   const working = keyOf(item => item.type === 'row' && item.row.title === 'Dark mode for the settings page')
   expect(resumeAction(items, { key: working, type: 'archive', text: '', session: '' }, STRINGS.en)).toEqual({ type: 'refuse', note: STRINGS.en.archiveLive })
-  expect(resumeAction(items, { key: grok, type: 'delete', text: '', session: '' }, STRINGS.en)).toEqual({ type: 'refuse', note: '' })
+  expect(resumeAction(items, { key: grok, type: 'delete', text: '', session: '' }, STRINGS.en)).toEqual({ type: 'refuse', note: STRINGS.en.pressNothing })
   expect(replyText('x'.repeat(5000)).length).toBe(4000)
 })
 
@@ -2707,6 +2963,14 @@ test("the page runs only its own script, and the chat prompt in it cannot close 
   expect(page).not.toContain('<!-- auto')
   expect(pageWords(STRINGS.en).relayPrompt).toBe(RELAY)
   expect(Object.values(pageWords(STRINGS['zh-CN'])).every(word => typeof word === 'string' && word !== '')).toBe(true)
+})
+
+// A word the page script asks for but is not given would show as the text "undefined".
+test('every word the page script asks for is one the page is given', () => {
+  const words = pageWords(STRINGS.en)
+  const named = [...servePage(STRINGS.en, 'n').matchAll(/\bw\(([^)]*)\)/g)].flatMap(found => [...found[1].matchAll(/(?<!=== )'([A-Za-z]+)'/g)].map(key => key[1]))
+  expect(named.length).toBeGreaterThan(20)
+  expect(named.filter(key => !(key in words))).toEqual([])
 })
 
 const oldClockFragment = (at: number, state = 'working'): string =>
@@ -3147,7 +3411,7 @@ test('every agent keeps exact resume bindings without showing session identifier
   expect(html).not.toContain('對話 ID')
   // The web card keeps the actionable resume command without another id-only button.
   expect(servePage(STRINGS.en, 'n')).not.toContain("copy(ask.sessionId)")
-  expect(servePage(STRINGS.en, 'n')).toContain("copy(ask.reopen)")
+  expect(servePage(STRINGS.en, 'n')).toContain("copy(ask.reopen, ask.key)")
 
   // Ended, a session whose agent reopens one by id offers that command, in its own folder.
   const ended = buildView(parseProgress(file.replaceAll('state=waiting', 'state=ended')), [], null, now, 0, {}, STRINGS.en).stopped
@@ -3431,7 +3695,7 @@ test("the terminal board and the board page mark any agent's question answered w
   expect(hidden.asks.some(ask => ask.agent === 'codex')).toBe(false)
   expect(hidden.hidden).toEqual([{ key: `hidden:${key}`, project: 'api-gateway', agent: 'codex', task: 'Rate-limit the public endpoints', text: 'Per-key limit' }])
   expect(press('unhide', `hidden:${key}`)).toEqual({ type: 'unhide', key })
-  expect(press('unhide', codexKey)).toEqual({ type: 'refuse', note: '' })
+  expect(press('unhide', codexKey)).toEqual({ type: 'refuse', note: STRINGS.en.pressNothing })
   // The page's script and words carry the buttons.
   const page = servePage(STRINGS.en, 'n')
   expect(page).toContain("act(ask.key, 'hide')")
@@ -3675,4 +3939,80 @@ test('an ordinary board never resumes a closed session even without messaging en
   const hub = { connections: [], messages: [] }
   expect(resumeModel(serveView(), [], STRINGS.en, new Set(), false, hub).stopped.find(one => one.title === 'Pick the cache')?.send).toBe('open')
   expect(resumeAction(items, { key: row?.key ?? '', type: 'send', text: 'Redis', session: GROK.session, asked: 'Redis or Memcached?', fp: row?.fp }, STRINGS.en, false, [], true).type).toBe('refuse')
+})
+
+
+test('a reply to a hand-kept question explains that there is no agent to send to', () => {
+  for (const s of Object.values(STRINGS)) {
+    const items = boardItems(serveView(), [])
+    const item = items.find(one => one.type === 'ask' && one.ask.where === 'manual')!
+    expect(serveAction(items, { key: item.key, type: 'send', text: 'Ready', session: '' }, s)).toEqual({ type: 'refuse', note: s.serveManualReply })
+  }
+})
+
+test('the connection record path keeps the home separators', () => {
+  expect(connectRecordPath('C:\\Users\\Me')).toBe('C:\\Users\\Me\\.agent-board\\legacy-connect.json')
+  expect(connectRecordPath('/home/me')).toBe('/home/me/.agent-board/legacy-connect.json')
+})
+
+test("another data folder's unreadable unfinished connection says which error and how to retry", () => {
+  expect(recoveryUnreadableCode('RECOVERY_UNREADABLE_EBUSY')).toBe('EBUSY')
+  expect(recoveryUnreadableCode('RECOVERY_CONFLICT')).toBeUndefined()
+  for (const lang of ['en', 'zh-TW', 'zh-CN'] as const) {
+    const text = STRINGS[lang].connectRecoveryUnreadable('EBUSY')
+    expect(text).toContain('EBUSY')
+    expect(text).toContain('/progress connect')
+    expect(text).not.toMatch(/[\\/]\.agent-board|legacy-connect/)
+  }
+})
+
+test('quoted connection paths after equals and opening parentheses decode their escapes', () => {
+  for (const prefix of ['key=', 'command(']) {
+    expect(connectDataRoots(prefix + JSON.stringify('C:\\Users\\Me\\data\\progress-report.ps1'))).toContain('C:\\Users\\Me\\data')
+  }
+})
+
+
+test("the redesigned pages speak the page's language in every new word", () => {
+  const keys = ['viewAll', 'viewStopped', 'viewCount', 'sideViews', 'sideProjects', 'sideAgents', 'sideOwnTasks', 'viewEmptyDue', 'viewEmptyStopped', 'viewEmptyRecent', 'viewEmptyFiltered', 'clearFilters', 'removeFilter', 'sectionActive', 'sectionDue'] as const
+  for (const s of Object.values(STRINGS)) {
+    const view = buildView(parseProgress('## Synthetic\n### Plan\n- [ ] Continue\n'), [], null, NOW, 0, {}, s)
+    const live = servePage(s, 'synthetic')
+    const snapshot = dashboardHtml(view, s, 'synthetic', 'synthetic')
+    for (const page of [live, snapshot]) {
+      for (const label of [s.themeLabel, s.themeSystem, s.themeLight, s.themeDark]) expect(page).toContain(label)
+      expect(page).toContain('data-theme-pick="system"')
+      expect(page).toContain('data-theme-pick="light"')
+      expect(page).toContain('data-theme-pick="dark"')
+    }
+    expect(live).toContain(s.sideTitle)
+    expect(live).toContain(s.serveLive)
+    expect(live).toContain(s.serveLiveHint)
+    expect(live).toContain(s.sideClose)
+    expect(snapshot).toContain(s.dashSections)
+    expect(snapshot).toContain('data-section="dash-others"')
+    expect(snapshot).not.toContain('href="#')
+    const words = pageWords(s)
+    for (const key of keys) {
+      const value = s[key]
+      expect(words[key]).toBe(typeof value === 'function' ? String((value as (n: never) => string)('\u0001' as never)) : value)
+    }
+    expect(s.viewCount(1)).not.toBe(s.viewCount(2))
+    expect(live).not.toContain('innerHTML')
+    expect(live).not.toContain('insertAdjacentHTML')
+  }
+})
+
+test('the redesigned pages carry no run of digits or letters that reads as a machine id or a path', () => {
+  const pattern = /\b[\da-f]{8}\b|\b[\da-f]{40}\b|\b[\da-f]{64}\b|(?<![A-Za-z])[A-Za-z]:[\\/]|\/home\/|\/Users\//i
+  for (const s of Object.values(STRINGS)) {
+    const view = buildView(parseProgress('## Synthetic\n### Plan\n- [ ] Continue\n'), [], null, NOW, 0, {}, s)
+    const live = servePage(s, 'synthetic')
+    const snapshot = dashboardHtml(view, s, 'synthetic', 'synthetic')
+    for (const page of [live, snapshot]) {
+      const match = pattern.exec(page)
+      const context = match ? page.slice(Math.max(0, match.index - 40), match.index + match[0].length + 40) : null
+      expect(context).toBe(null)
+    }
+  }
 })

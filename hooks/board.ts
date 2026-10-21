@@ -99,6 +99,27 @@ export const fit = (raw: string, width: number): string => {
 
 const MARK: Record<string, string> = { done: '✓', doing: '▸', todo: '○', waiting: '●', running: '◐', blocked: '!', cancelled: '–' }
 
+// Recovery advice must stay readable even when it is longer than one terminal row.
+const wrapNote = (raw: string, width: number): string[] => {
+  const lines: string[] = []
+  const limit = Math.max(2, width)
+  let line = ''
+  let used = 0
+  for (const char of plain(raw)) {
+    if (used + columns(char) > limit) {
+      const space = line.lastIndexOf(' ')
+      lines.push(space > 0 ? line.slice(0, space) : line)
+      line = space > 0 ? line.slice(space + 1) : ''
+      used = [...line].reduce((sum, one) => sum + columns(one), 0)
+    }
+    if (char === ' ' && line === '') continue
+    line += char
+    used += columns(char)
+  }
+  if (line !== '') lines.push(line)
+  return lines
+}
+
 const stepLine = (step: ViewStep): string => `${MARK[step.status] ?? '○'} ${step.number === null ? '' : `${step.number} `}${step.text}${step.note ? ` — ${step.note}` : ''}`
 
 const rowLines = (row: TaskRow, s: Strings, o: BoardOptions): string[] => {
@@ -142,6 +163,7 @@ export const boardText = (view: View, pending: readonly PendingTurn[], s: String
   if (view.warning) lines.push(c('alert', view.warning), '')
 
   const asks = asksOf(view, pending, s)
+  const recentQuestions = view.recent.filter(item => (item.questions?.length ?? 0) > 0)
   for (const [title, items] of [[s.sectionQuestionReminders, view.reminder ?? []], [s.sectionOlderQuestions, view.older ?? []]] as const) {
     if (items.length === 0) continue
     lines.push(`${title} (${items.length}) · --all`)
@@ -183,6 +205,14 @@ export const boardText = (view: View, pending: readonly PendingTurn[], s: String
     lines.push('')
   }
 
+  if (recentQuestions.length > 0) {
+    lines.push(c('done', s.sectionRecent))
+    for (const item of recentQuestions) {
+      lines.push(`  ${fit(`${item.project} › ${item.title} · ${item.when}`, o.width - 4)}`)
+      for (const question of item.questions ?? []) lines.push(`    ${fit(`${question.text}${question.note ? ` — ${question.note}` : ''}`, o.width - 6)}`)
+    }
+    lines.push('')
+  }
   const news = pending.filter(turn => !turn.isQuestion)
   if (news.length > 0) {
     lines.push(c('accent', `◐ ${s.boardInbox}`))
@@ -190,7 +220,7 @@ export const boardText = (view: View, pending: readonly PendingTurn[], s: String
     lines.push('')
   }
 
-  if (view.groups.every(group => group.rows.length === 0) && asks.length === 0 && news.length === 0 && view.idle.length === 0 && view.stopped.length === 0 && view.due.length === 0) lines.push(c('quiet', s.empty), '')
+  if (view.groups.every(group => group.rows.length === 0) && asks.length === 0 && news.length === 0 && view.idle.length === 0 && view.stopped.length === 0 && view.due.length === 0 && recentQuestions.length === 0) lines.push(c('quiet', s.empty), '')
 
   return `${lines.join('\n').replace(/\n+$/, '')}\n`
 }
@@ -361,6 +391,18 @@ export const chatText = (
   }
   if (view.idle.length > 0) items.push(line(s.idleCount(view.idle.length)))
   if (view.stopped.length > 0) items.push(line(s.stoppedCount(view.stopped.length)))
+  for (const row of view.stopped.filter(row => (row.questions?.length ?? 0) > 0)) {
+    items.push(line(`${named(row.project)} › ${row.title} · ${row.when}`, 2))
+    for (const question of row.questions ?? []) items.push(line(`${question.text}${question.note ? ` — ${question.note}` : ''}`, 4))
+  }
+  const recentQuestions = view.recent.filter(item => (item.questions?.length ?? 0) > 0)
+  if (recentQuestions.length > 0) {
+    items.push(`\n${s.sectionRecent}`)
+    for (const item of recentQuestions) {
+      items.push(line(`${named(item.project)} › ${item.title} · ${item.when}`, 2))
+      for (const question of item.questions ?? []) items.push(line(`${question.text}${question.note ? ` — ${question.note}` : ''}`, 4))
+    }
+  }
   // A question is told above, answered or not: it is never the "next step" of its task.
   const isNext = (step: ViewStep): boolean => step.number !== null && !['done', 'cancelled', 'waiting'].includes(step.status)
   rows.forEach(({ row, mark }, index) => {
@@ -368,7 +410,7 @@ export const chatText = (
     const words = `${mark} ${named(row.project)} › ${row.title}${row.due === null ? '' : ` · ${row.due.left}`}${next === undefined ? '' : ` — ${s.reportNext(next)}`}`
     items.push(`${index === 0 ? '\n' : ''}${line(words)}`)
   })
-  if (asks.length === 0 && rows.length === 0 && news.length === 0 && view.idle.length === 0 && view.stopped.length === 0) items.push(s.empty)
+  if (asks.length === 0 && rows.length === 0 && news.length === 0 && view.idle.length === 0 && view.stopped.length === 0 && recentQuestions.length === 0) items.push(s.empty)
   // Each starts with its project (`project · task: step`).
   const doneWords = (words: string): string => {
     const [project = '', ...rest] = words.split(' · ')
@@ -402,7 +444,7 @@ export type BoardItem =
 
 // `key` is the chosen line's, so the choice stays on it when lines above it come or go. `seen`
 // holds each line's fingerprint as the last draw showed it (null before the first draw).
-export type BoardState = { selected: number; key: string | null; open: string | null; note: string; seen: Record<string, string> | null; isIdleOpen?: boolean; isOlderOpen?: boolean }
+export type BoardState = { selected: number; key: string | null; open: string | null; note: string; tone?: 'done' | 'alert' | 'quiet'; copyText?: string; result?: { key: string; revision: string | null; label: string }; seen: Record<string, string> | null; isIdleOpen?: boolean; isOlderOpen?: boolean }
 
 export type BoardAction =
   | { type: 'tick'; ref: StepRef }
@@ -487,6 +529,12 @@ export const answersOf = (ask: WaitingItem, s: Strings): string[] =>
 // on screen, or on nothing if that line has gone, and with every line's fingerprint as drawn.
 // The script calls it each time it draws, and only then.
 export const pinned = (state: BoardState, items: readonly BoardItem[]): BoardState => {
+  if (state.result !== undefined) {
+    const item = items.find(item => item.key === state.result?.key)
+    const revision = item === undefined ? '' : fingerprint(item, items)
+    if (state.result.revision === null) state = { ...state, result: { ...state.result, revision } }
+    else if (state.result.revision !== revision) state = { ...state, result: undefined, note: '', copyText: undefined }
+  }
   const at = chosen(state, items)
   if (state.key !== null && items[at]?.key !== state.key) return state
 
@@ -494,19 +542,21 @@ export const pinned = (state: BoardState, items: readonly BoardItem[]): BoardSta
 }
 
 export const boardKey = (state: BoardState, key: string, items: readonly BoardItem[], s: Strings = ZH_TW): { state: BoardState; action: BoardAction | null } => {
+  if (key === 'q' || key === '\u0003') return { state, action: { type: 'quit' } }
+  state = { ...state, note: '', tone: 'alert', copyText: undefined, result: undefined }
   const last = Math.max(0, items.length - 1)
   const at = chosen(state, items)
   const item = items[at]
   const isGone = state.key !== null && item?.key !== state.key
   const moved = (selected: number): { state: BoardState; action: null } => ({ state: { ...state, selected, key: items[selected]?.key ?? null, note: '' }, action: null })
-  if (key === 'q' || key === '\u0003') return { state, action: { type: 'quit' } }
   if (key === 'up' || key === 'k') return moved(Math.max(0, at - 1))
   if (key === 'down' || key === 'j') return moved(Math.min(last, at + 1))
   if (key === 'o') return { state, action: { type: 'html' } }
-  if (key === 'i') return { state: { ...state, isIdleOpen: !state.isIdleOpen, selected: 0, key: null, open: null, note: '', seen: {} }, action: null }
-  if (key === 'l') return { state: { ...state, isOlderOpen: !state.isOlderOpen, selected: 0, key: null, open: null, note: '', seen: {} }, action: null }
+  if (key === 'i') return { state: { ...state, isIdleOpen: !state.isIdleOpen, selected: 0, key: null, open: null, note: state.isIdleOpen ? s.pressClosed : s.pressOpened, tone: 'done', seen: {} }, action: null }
+  if (key === 'l') return { state: { ...state, isOlderOpen: !state.isOlderOpen, selected: 0, key: null, open: null, note: state.isOlderOpen ? s.pressClosed : s.pressOpened, tone: 'done', seen: {} }, action: null }
   if (key === 'u') return { state, action: { type: 'unhide', key: null } }
-  if (item === undefined) return { state, action: null }
+  if (item === undefined) return { state: { ...state, note: s.pressNothing }, action: null }
+  state = { ...state, result: { key: item.key, revision: fingerprint(item, items), label: item.type === 'ask' ? item.ask.task : item.type === 'row' ? item.row.title : item.turn.project } }
   // The line under the cursor changed since the screen was drawn: choose what is there now and
   // let the person look before a key acts on it.
   const changed = { state: { ...state, selected: at, key: item.key, note: s.boardLineChanged }, action: null }
@@ -514,7 +564,7 @@ export const boardKey = (state: BoardState, key: string, items: readonly BoardIt
   // A tick, an archive or a copy of what to say acts on the line as the last draw showed it: the
   // same key can now be another session's block, or the same step reworded.
   if ((key === 'x' || key === 'a' || key === 'd' || key === 'c' || key === 'h') && state.seen !== null && state.seen[item.key] !== fingerprint(item, items)) return changed
-  if (key === 'enter' || key === ' ') return { state: { ...state, selected: at, key: item.key, open: state.open === item.key ? null : item.key, note: '' }, action: null }
+  if (key === 'enter' || key === ' ') return { state: { ...state, selected: at, key: item.key, open: state.open === item.key ? null : item.key, note: state.open === item.key ? s.pressClosed : s.pressOpened, tone: 'done' }, action: null }
   if (item.type === 'ask') {
     const { ask } = item
     if (key === 'x' && ask.step !== null) return { state, action: { type: 'tick', ref: ask.step } }
@@ -536,7 +586,7 @@ export const boardKey = (state: BoardState, key: string, items: readonly BoardIt
     if (key === 'c' && row.resume !== null) return { state, action: { type: 'copy', text: plain(row.resume) } }
   }
 
-  return { state, action: null }
+  return { state: { ...state, note: s.pressNothing }, action: null }
 }
 
 const keysFor = (item: BoardItem | undefined, s: Strings): string[] => {
@@ -581,6 +631,17 @@ export const boardScreen = (view: View, pending: readonly PendingTurn[], state: 
     ].filter(part => part !== '').join(' · '))]),
     '',
   ]
+  const result = state.result
+  const resultItem = result === undefined ? undefined : items.find(item => item.key === result.key)
+  const hasResult = result === undefined || result.revision === null || result.revision === (resultItem === undefined ? '' : fingerprint(resultItem, items))
+  const resultLines = (indent: string): void => {
+    if (!hasResult) return
+    if (state.copyText !== undefined) lines.push(`${indent}${c('alert', fit(s.boardCopyFailed(''), o.width - indent.length))}`, plain(state.copyText))
+    else if (state.note !== '') {
+      const notes = wrapNote(state.note, o.width - indent.length)
+      lines.push(...notes.map(line => `${indent}${c(state.tone ?? 'done', line)}`))
+    }
+  }
   let section = ''
   items.forEach((item, index) => {
     const isHere = index === at
@@ -598,6 +659,7 @@ export const boardScreen = (view: View, pending: readonly PendingTurn[], state: 
       const { ask } = item
       const where = [ask.project, ask.agent].filter(part => part !== '').join(' · ')
       lines.push(`${mark} ${line(fit(`${s.chip(s.ask[ask.kind])}${ask.text}`, o.width - 4))}`)
+      if (result?.key === item.key) resultLines('    ')
       lines.push(`    ${c('project', fit(where + (ask.task ? ` › ${ask.task}` : ''), o.width - 6))}`)
       if (isOpen || isHere) {
         if (ask.canHide === false) lines.push(`    ${c('quiet', fit(s.questionReviewOnly, o.width - 6))}`)
@@ -617,6 +679,7 @@ export const boardScreen = (view: View, pending: readonly PendingTurn[], state: 
       const who = row.agent === '' ? '' : ` · ${row.agent}`
       const count = row.total > 0 ? `${row.done}/${row.total} ` : ''
       lines.push(`${mark} ${line(fit(row.title, o.width - 4))}`)
+      if (result?.key === item.key) resultLines('    ')
       lines.push(`    ${c('quiet', fit(`${count}${row.status}${who}${row.when ? ` · ${row.when}` : ''}`, o.width - 6))}${row.due ? `  ${c('alert', `⚑ ${row.due.left}`)}` : ''}`)
       if ((isOpen || isHere) && (row.auto === 'working' || row.auto === 'waiting')) lines.push(`    ${c('quiet', fit(s.archiveLive, o.width - 6))}`)
       if (isOpen) {
@@ -629,10 +692,23 @@ export const boardScreen = (view: View, pending: readonly PendingTurn[], state: 
     }
     const { turn } = item
     lines.push(`${mark} ${line(fit(`${[turn.project, turn.agent].filter(part => part !== '').join(' · ')}: ${turn.text}`, o.width - 4))}`)
+    if (result?.key === item.key) resultLines('    ')
   })
-  if (items.length === 0 && view.idle.length === 0 && view.stopped.length === 0) lines.push(c('quiet', s.empty))
+  if (result !== undefined && resultItem === undefined && hasResult && state.note !== '') {
+    lines.push('', `  ${fit(result.label, o.width - 4)}`)
+    resultLines('    ')
+  }
+  const recentQuestions = view.recent.filter(item => (item.questions?.length ?? 0) > 0)
+  if (recentQuestions.length > 0) {
+    lines.push('', c('done', s.sectionRecent))
+    for (const item of recentQuestions) {
+      lines.push(`  ${fit(`${item.project} › ${item.title} · ${item.when}`, o.width - 4)}`)
+      for (const question of item.questions ?? []) lines.push(`    ${fit(`${question.text}${question.note ? ` — ${question.note}` : ''}`, o.width - 6)}`)
+    }
+  }
+  if (items.length === 0 && view.idle.length === 0 && view.stopped.length === 0 && recentQuestions.length === 0) lines.push(c('quiet', s.empty))
   lines.push('', c('quiet', fit([...keysFor(items[at], s), s.boardKeysMove].join(' · '), o.width)))
-  if (state.note !== '') lines.push(c('done', fit(state.note, o.width)))
+  if (result === undefined) resultLines('')
 
   return `${lines.join('\n')}\n`
 }

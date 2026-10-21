@@ -23,7 +23,11 @@ export const archiveQuestionsKept = (projects: readonly ProgressProject[], ref: 
   const tasks = projects.filter(project => project.name === ref.project).flatMap(project => project.tasks).filter(task => ref.session === null ? task.title === ref.title : task.auto?.session === ref.session)
   if (tasks.length !== 1) return false
   const task = tasks[0]
-  return task !== undefined && task.steps.filter(step => step.status === 'waiting').every(step => ledger.records.some(record => record.isUnresolved && record.source?.project === ref.project && record.source.text === step.text && record.source.data === JSON.stringify(task)))
+  if (task === undefined) return false
+  const scope = questionScope(ref.project, task.auto?.agent ?? 'manual', task.auto?.session ?? task.title)
+  return task.steps.filter(step => step.status === 'waiting').every(step => ledger.records.some(record => record.isUnresolved
+    ? record.source?.project === ref.project && record.source.text === step.text && record.source.data === JSON.stringify(task)
+    : record.resolvedAt !== undefined && record.source !== undefined && record.scope === scope && record.words === questionWords(step.text) && (record.producer ?? '') === (step.questionToken ?? '') && !ledger.records.some(other => other.isUnresolved && other.scope === scope && other.words === questionWords(step.text))))
 }
 export const questionProofPath = (path: string, kind: keyof QuestionProofs, hash: string): string => `${path.replace(/\.md$/i, '')}-questions-${kind}-${hash}.json`
 export const questionProofOf = (path: string, name: string): { kind: keyof QuestionProofs; hash: string } | null => {
@@ -59,6 +63,7 @@ export const parseQuestions = (text: string, isMissing = false): QuestionLedger 
       if (row.id.split(':')[1] !== sha256(JSON.stringify([row.scope, row.words, row.occurrence, row.copies, row.incarnation]))) return null
       if (row.producer !== undefined && typeof row.producer !== 'string') return null
       if (row.isUnresolved !== undefined && typeof row.isUnresolved !== 'boolean') return null
+      if (row.resolvedAt !== undefined && (!Number.isFinite(row.resolvedAt) || row.resolvedAt < 0)) return null
       if (row.isArchived !== undefined && typeof row.isArchived !== 'boolean') return null
       if (row.producerRevisions !== undefined && (!Array.isArray(row.producerRevisions) || row.producerRevisions.some(revision => typeof revision !== 'string' || !/^[a-f0-9]{64}$/.test(revision)))) return null
       if (row.producerSources !== undefined && (!Array.isArray(row.producerSources) || row.producerSources.some(source => typeof source !== 'string'))) return null
@@ -73,6 +78,14 @@ export const parseQuestions = (text: string, isMissing = false): QuestionLedger 
 }
 
 export const questionsJson = (ledger: QuestionLedger): string => `${JSON.stringify(ledger, null, 2)}\n`
+
+// A resolution is permanent for this incarnation, while its source stays available.
+export const resolveQuestion = (ledger: QuestionLedger, id: string, now: number): QuestionLedger => ({
+  ...ledger,
+  records: ledger.records.map(record => record.id === id && record.isUnresolved
+    ? { ...record, isUnresolved: false, isWaiting: false, isPresent: false, resolvedAt: now }
+    : record),
+})
 
 export type QuestionCapture = { version: 1; disposition: 'unresolved' | 'resolved' | 'archived'; record: QuestionRecord }
 export const captureJson = (record: QuestionRecord, disposition: QuestionCapture['disposition']): string => `${JSON.stringify({ version: 1, disposition, record })}\n`
@@ -111,6 +124,7 @@ export const withCaptures = (ledger: QuestionLedger, captures: readonly Question
     if (record === undefined) continue
     if (capture.disposition === 'archived') record.isArchived = true
     if (capture.disposition === 'resolved') {
+      if (capture.record.resolvedAt !== undefined) record.resolvedAt = capture.record.resolvedAt
       record.isUnresolved = false
       record.isWaiting = false
       record.isPresent = false
@@ -161,6 +175,18 @@ const observations = (projects: readonly ProgressProject[], mine: ProgressMirror
   return rows.filter(row => !ambiguous.has(row.scope) && (row.producer === '' || tokens.get(JSON.stringify([row.scope, row.producer])) === 1))
 }
 
+// Seeing the source without its question ends a no-token resolution's lifetime.
+// A missing source alone cannot prove that an unchanged question was renewed.
+export const resolvedQuestionsToRetire = (ledger: QuestionLedger, projects: readonly ProgressProject[], mine: ProgressMirror | null, pending: readonly PendingTurn[]): string[] => {
+  const seen = observations(projects, mine, pending)
+  const scopes = new Set([
+    ...projects.flatMap(project => project.tasks.map(task => questionScope(project.name, task.auto?.agent ?? 'manual', task.auto?.session ?? task.title))),
+    ...(mine === null ? [] : [questionScope(mine.project, 'claude', shortId(mine.sessionId))]),
+    ...seen.map(row => row.scope),
+  ])
+  return ledger.records.filter(record => record.resolvedAt !== undefined && scopes.has(record.scope) && !seen.some(row => row.scope === record.scope && row.isWaiting && questionWords(row.text) === record.words)).map(record => record.id)
+}
+
 // Words identify candidates, not questions. A durable sequence identifies each incarnation;
 // observed resolution or absence starts a new one. Equal-word steps retain separate slots
 // across unrelated edits; changing their multiplicity is ambiguous and retires their hides.
@@ -189,11 +215,16 @@ export const observeQuestions = (
     record.isWaiting = false
     record.isPresent = false
   }
-  // Only an exact producer revision receipt suppresses replay. Equal words and connection
-  // clocks do not prove resolution, and a new file/content revision can be a fresh ask.
+  // Producer receipts and an explicit resolution suppress only the resolved incarnation.
+  // A new file/content revision can still prove a fresh ask without changing its words.
   const seen = observations(projects, mine, pending)
+  const copiesOf = (row: Observation): Observation[] => seen.filter(other => other.scope === row.scope && questionWords(other.text) === questionWords(row.text))
+  const hasNewRevision = (row: Observation, record: QuestionRecord): boolean =>
+    [row, ...records.filter(other => other.scope === row.scope && other.words === record.words && other.isPresent && other.isUnresolved)]
+      .some(other => other.producerRevisions?.some(revision => !record.producerRevisions?.includes(revision)))
   const resolved = seen.flatMap(row => {
-    const record = row.isWaiting && row.producer !== '' ? records.find(record => record.scope === row.scope && record.producer === row.producer && record.words === questionWords(row.text) && record.isUnresolved === false) : undefined
+    const copies = copiesOf(row)
+    const record = row.isWaiting ? records.find(record => record.scope === row.scope && (record.producer ?? '') === row.producer && record.words === questionWords(row.text) && record.isUnresolved === false && (row.producer !== '' || (record.resolvedAt !== undefined && record.source?.task === row.source.task && !proofs.retired.includes(sha256(record.id)) && record.occurrence === copies.indexOf(row) + 1 && record.copies === copies.length && !hasNewRevision(row, record)))) : undefined
     return record === undefined ? [] : [{ row, record }]
   })
   const rows = seen.filter(row => !resolved.some(item => item.row === row) && (row.source.kind !== 'inbox' || row.producerRevisions === undefined || row.producerRevisions.length === 0 || !row.producerRevisions.every(revision => records.some(record => record.scope === row.scope && record.isUnresolved === false && record.producerRevisions?.includes(revision)))))
@@ -220,13 +251,14 @@ export const observeQuestions = (
     if (first === undefined) continue
     const words = questionWords(first.text)
     const candidates = records.filter(row => row.scope === first.scope && row.words === words && row.isPresent)
-    const isAmbiguous = candidates.some(row => !row.producer && row.copies !== alike.length)
+    const copies = copiesOf(first)
+    const isAmbiguous = candidates.some(row => !row.producer && row.copies !== copies.length)
     if (isAmbiguous) for (const old of candidates.filter(record => !record.producer)) {
       old.isPresent = false
       old.isWaiting = false
     }
-    alike.forEach((row, index) => {
-      const occurrence = index + 1
+    alike.forEach(row => {
+      const occurrence = copies.indexOf(row) + 1
       if (row.producer !== '') {
         const owner = row.producer.split(':')[0]
         for (const old of records) {
@@ -247,8 +279,8 @@ export const observeQuestions = (
       }
       if (row.isWaiting && (record === undefined || !record.isWaiting)) {
         if (record !== undefined) record.isPresent = false
-        const binding = sha256(JSON.stringify([row.scope, words, occurrence, alike.length, incarnation]))
-        record = { id: `question:${binding}:${next++}`, scope: row.scope, words, occurrence, copies: alike.length, isWaiting: true, isPresent: true, firstObserved: Number.isFinite(now) && now > 0 ? now : 0, incarnation, producer: row.producer }
+        const binding = sha256(JSON.stringify([row.scope, words, occurrence, copies.length, incarnation]))
+        record = { id: `question:${binding}:${next++}`, scope: row.scope, words, occurrence, copies: copies.length, isWaiting: true, isPresent: true, firstObserved: Number.isFinite(now) && now > 0 ? now : 0, incarnation, producer: row.producer }
         records.push(record)
       }
       if (record === undefined) return

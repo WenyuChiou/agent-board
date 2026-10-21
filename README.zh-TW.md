@@ -29,6 +29,18 @@ git clone https://github.com/WenyuChiou/agent-board.git
 cd agent-board
 ```
 
+### 用 npm 安裝
+
+從第一個 npm 版本起（預計 0.24.0），安裝程式和看板也放在 npm 上，不用 clone，需要 Node.js 22 以上：
+
+```sh
+npx @wenyuchiou/agent-board setup
+npx @wenyuchiou/agent-board setup --apply
+npx @wenyuchiou/agent-board --serve
+```
+
+第一行列出設定會改什麼，不寫入任何東西；第二行套用；第三行打開看板網頁。`npx @wenyuchiou/agent-board setup` 接受和下面 `setup-agent.mjs` 一樣的選項，例如 `--agent codex`；`--watch`、`--chat`、`--html` 打開其他畫面。詳見[安裝指南](docs/SETUP.md#install-with-npm)（英文）。
+
 ## 選你的 agent
 
 | | Agent | 怎麼接上 | 打開看板 |
@@ -142,13 +154,13 @@ Hooks 只說對話在做事還是在等；步驟和什麼時候算完成，來�
 
 ## 顏色與符號
 
-面板跟著 Claude Code 的主題走（`/config`，再選 **Theme**）；網頁和 `progress.html` 跟著你電腦的淺色或深色模式。每個符號形狀都不一樣，不看顏色也分得出來：
+面板跟著 Claude Code 的主題走（`/config`，再選 **Theme**）；網頁和 `progress.html` 跟著你電腦的淺色或深色模式，直到你在頁面右上角選了亮色或暗色。每個符號形狀都不一樣，不看顏色也分得出來；網頁上還沒做的步驟畫成小圓點，不畫圓圈，免得看起來像能按的按鈕：
 
 | 符號 | 意思 | | 符號 | 意思 |
 |:-:|---|---|:-:|---|
 | ● | 等你 | | ◐ | 在跑，或在等別人 |
 | ▸ | 正在做 | | ! | 卡住 |
-| ○ | 還沒做 | | ⚑ | 兩週內到期 |
+| ○ • | 還沒做（面板是圓圈，網頁是小圓點） | | ⚑ | 兩週內到期 |
 | ✓ | 完成 | | – | 取消 |
 
 ## 疑難排解

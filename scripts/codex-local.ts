@@ -1,7 +1,8 @@
 import { createHash, randomUUID } from 'node:crypto'
-import { closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs'
+import { closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, readdirSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
+import { performance } from 'node:perf_hooks'
 import { pathToFileURL } from 'node:url'
 import { answerLocalQuestions, boardConfirmedReport, codexEvent, codexEvents, codexReport, putCodexBlock } from '../hooks/codex'
 import type { CodexReport } from '../hooks/codex'
@@ -12,6 +13,7 @@ import { progressTail } from '../hooks/parse'
 import { antigravityHooks, cursorEvent, cursorEvents, lifecycleCapability, localAgents, opencodePlugin, statusEvents } from '../hooks/local-agents'
 import type { LocalAgent } from '../hooks/local-agents'
 import { deepseekLocalPlugin, deepseekPatch, openclawLocalPlugin } from '../hooks/portable-agents'
+import { HOOK_VERSION, hookBootstrap, hookWorker, hostHookTimeout } from '../hooks/hook-safety'
 import { trustCodex } from './codex-host'
 import { withLocalLock } from './local-lock'
 import { withInstallLock } from './install-control'
@@ -33,15 +35,16 @@ const object = (value: unknown): Json => {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('INVALID_JSON_OBJECT')
   return value as Json
 }
-const atomic = (file: string, text: string | Buffer): void => {
+const atomic = (file: string, text: string | Buffer, current: () => void = () => {}): void => {
   mkdirSync(dirname(file), { recursive: true })
-  const temporary = `${file}.${process.pid}.tmp`
+  const temporary = `${file}.${process.pid}.${randomUUID()}.tmp`
   const fd = openSync(temporary, 'wx', 0o600)
   let isOpen = true
   try {
     writeFileSync(fd, text)
     closeSync(fd)
     isOpen = false
+    current()
     renameSync(temporary, file)
   } finally {
     if (isOpen) closeSync(fd)
@@ -139,14 +142,19 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
   const output = (value: unknown): void => { process.stdout.write(`${JSON.stringify(value, null, 2)}\n`) }
 
   if (mode === '--codex-event' || mode === '--codex-report' || mode === '--agent-status') {
+    const started = Date.now()
+    const value = flag('--hook-deadline')
+    const hookDeadline = value === undefined ? Infinity : Number(value)
+    if (value !== undefined && !Number.isSafeInteger(hookDeadline)) throw new Error('INVALID_HOOK_DEADLINE')
+    const checkDeadline = (): void => { if (Date.now() >= hookDeadline) throw new Error('HOOK_TIMEOUT') }
+    checkDeadline()
     const raw = await input()
+    checkDeadline()
     const payload = agent === 'cursor' && mode === '--codex-event' ? cursorEvent(raw) : raw
     // Only metadata selected below is retained. Never open transcript_path or save prompts,
     // tool inputs, last_assistant_message, or permission decisions from a hook payload.
     const session = mode !== '--codex-report' ? agent === 'antigravity' ? payload.conversationId : payload.session_id ?? payload.sessionId ?? payload.sessionID ?? (agent === 'grok' ? process.env.GROK_SESSION_ID : undefined) : flag('--session') ?? (agent === 'codex' ? process.env.CODEX_THREAD_ID : process.env.AGENT_BOARD_AGENT === agent ? process.env.AGENT_BOARD_SESSION_ID : undefined)
     if (typeof session !== 'string' || !/^[a-zA-Z0-9][a-zA-Z0-9_-]{5,127}$/.test(session)) throw new Error('INVALID_SESSION')
-    const owner = hash(`${agent}:${session}`)
-    const recordFile = join(root, 'sessions', `${owner}.json`)
     const now = new Date().toISOString().replace(/\.\d{3}Z$/, 'Z')
     if (mode === '--agent-status' && (agent === 'codex' || agent === 'cursor')) throw new Error('INVALID_EVENT')
     const status = flag('--state') ?? payload.state
@@ -157,8 +165,33 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
     // ordering without treating a board lookup as an answer to the question.
     const isBoardPrompt = (isPromptEvent(raw) || raw.prompt_submitted === true) && (raw.board_request === true || isBoardRequest(raw, boardRequestWords(Object.values(STRINGS))))
     const isPrompt = !isBoardPrompt && mode === '--agent-status' && status === 'working' && (payload.prompt_submitted === true || /^(?:UserPromptSubmit|user_prompt_submit|BeforeAgent)$/.test(String(payload.hook_event_name ?? payload.hookEventName)))
-    let report!: CodexReport
-    withLocalLock(`${progress}.agent-board-lock`, () => {
+    type Pending = {
+      version: number; progress: string; mode: string; agent: LocalAgent; session: string; now: string; at?: number
+      status: unknown; event?: string; isBoardPrompt: boolean; isPrompt: boolean; payload: Json
+    }
+    // A queued event keeps metadata only: the host's own fields stay out, as they do above.
+    const current: Pending = {
+      version: 1, progress, mode, agent, session, now, at: started, status: mode === '--agent-status' ? status : undefined, event, isBoardPrompt, isPrompt,
+      payload: mode === '--codex-report' ? payload : mode === '--codex-event' ? {
+        session_id: payload.session_id, hook_event_name: payload.hook_event_name,
+        turn_id: payload.turn_id, prompt_submitted: payload.prompt_submitted,
+      } : {},
+    }
+    // A program holding progress.md open makes Windows refuse its read (EBUSY) and the rename
+    // onto it (EPERM). A read-only progress.md fails the rename with the same EPERM, so its
+    // read-only flag tells it apart and it fails. A refusal from the file's access list is
+    // not told apart and is treated as a lock.
+    const isWritable = (): boolean => {
+      try { return (statSync(progress).mode & 0o200) !== 0 } catch { return true }
+    }
+    const isBusy = (error: unknown): boolean => {
+      const failure = error as { code?: string; syscall?: string; dest?: string } | null
+      const isLockedRename = process.platform === 'win32' && failure?.code === 'EPERM' && failure.syscall === 'rename' && typeof failure.dest === 'string' && resolve(failure.dest) === progress && isWritable()
+      return failure?.code === 'EBUSY' || failure?.code === 'EAGAIN' || isLockedRename || error instanceof Error && error.message === 'LOCK_BUSY'
+    }
+    const apply = ({ mode, agent, session, now, status, event, isBoardPrompt, isPrompt, payload }: Pending): CodexReport => {
+      const owner = hash(`${agent}:${session}`)
+      const recordFile = join(root, 'sessions', `${owner}.json`)
       const saved = readLocal(recordFile)
       const original = saved === null ? null : JSON.parse(saved) as CodexReport
       if (original?.agent && original.agent !== agent) throw new Error('SESSION_CONFLICT')
@@ -172,25 +205,127 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
         steps: isPrompt && previous ? answerLocalQuestions(previous.steps) : previous?.steps ?? [`- [ ] ${s.localAgentLifecycle}`],
       } : payload, clock, s)
       const priorActivity = previous?.activity ?? []
-      report = { ...base, ...(isBoardPrompt && previous ? { state: previous.state, steps: previous.steps } : {}), agent, ...(mode === '--codex-event' && !previous ? { title: s.localAgentTask(agent), project: agent } : {}), ...(event === undefined ? {} : { activity: [...priorActivity, { event, state: String(status), updated: clock }].slice(-16) }) }
+      const report = { ...base, ...(isBoardPrompt && previous ? { state: previous.state, steps: previous.steps } : {}), agent, ...(mode === '--codex-event' && !previous ? { title: s.localAgentTask(agent), project: agent } : {}), ...(event === undefined ? {} : { activity: [...priorActivity, { event, state: String(status), updated: clock }].slice(-16) }) }
       // A replay can skip writes only after a board completion reached the cache too.
       const repaired = reporterTail(bytes)
-      if (repaired.fragment === null && mode !== '--codex-report' && previous === original && previous !== null && previous.state === report.state && previous.turn === report.turn && JSON.stringify(previous.steps) === JSON.stringify(report.steps) && (event === undefined || priorActivity.at(-1)?.event === event)) return
+      if (repaired.fragment === null && mode !== '--codex-report' && previous === original && previous !== null && previous.state === report.state && previous.turn === report.turn && JSON.stringify(previous.steps) === JSON.stringify(report.steps) && (event === undefined || priorActivity.at(-1)?.event === event)) return report
       // Encode only the new report; existing bytes, including partial UTF-8, pass through unchanged.
       const encoded = (value: string): string => Buffer.from(value, 'utf8').toString('latin1')
       const next = Buffer.from(putCodexBlock(repaired.bytes.toString('latin1'), {
         ...report, title: encoded(report.title), project: encoded(report.project), steps: report.steps.map(encoded),
       }, owner), 'latin1')
       const aside = repaired.fragment === null ? null : saveReporterTail(progress, repaired.fragment)
-      try { atomic(progress, next) } catch (error) {
+      try { atomic(progress, next, checkDeadline) } catch (error) {
         if (aside !== null) {
           try { unlinkSync(aside) } catch {}
         }
         throw error
       }
+      // Once progress.md holds the event the session record follows it even past the
+      // deadline: a record left behind would make the next Stop fail as a stale turn.
       atomic(recordFile, `${JSON.stringify(report, null, 2)}\n`)
-    })
-    if (mode === '--codex-report') output({ session, block: owner.slice(0, 8), state: report.state, updated: report.updated, progress })
+      return report
+    }
+    const pending = join(root, 'pending')
+    const pendingFiles = (): string[] => existsSync(pending) ? readdirSync(pending).filter(name => name.endsWith('.json')).sort() : []
+    // A queued entry passes the same checks a live event passes above before it is applied.
+    const isHookEntry = (entry: Pending): boolean =>
+      (entry.mode === '--codex-event' || entry.mode === '--agent-status' && entry.agent !== 'codex' && entry.agent !== 'cursor' && ['working', 'waiting', 'ended'].includes(String(entry.status)))
+      && localAgents.includes(entry.agent) && /^[a-zA-Z0-9][a-zA-Z0-9_-]{5,127}$/.test(String(entry.session))
+      && typeof entry.now === 'string' && typeof entry.isPrompt === 'boolean' && typeof entry.isBoardPrompt === 'boolean'
+      && (!Object.hasOwn(entry, 'at') || typeof entry.at === 'number' && Number.isFinite(entry.at))
+      && (entry.event === undefined || entry.agent === 'antigravity' && entry.mode === '--agent-status' && statusEvents.antigravity?.[entry.event] === entry.status)
+      // A live event's own session_id is either missing or the session it is filed under.
+      && (entry.mode !== '--codex-event' || [undefined, entry.session].includes(object(entry.payload).session_id as string | undefined))
+    // A status event has no turn to order it by: one that lands behind a newer event of its
+    // session would move that session back, so it is dropped instead. `at` keeps the event's
+    // start time in milliseconds; older queued entries fall back to their whole-second `now`.
+    // The session's saved `updated` keeps whole seconds, so an older status event from the same
+    // second as the session's last report is still not caught and applies.
+    const isOverdue = (entry: Pending): boolean => {
+      if (entry.mode !== '--agent-status') return false
+      const saved = readLocal(join(root, 'sessions', `${hash(`${entry.agent}:${entry.session}`)}.json`))
+      return saved !== null && (entry.at ?? Date.parse(entry.now)) < Date.parse(String(object(JSON.parse(saved)).updated))
+    }
+    // Only hooks have the 2.4 s cap to stay within their 3 s timeout.
+    const retryDeadline = mode === '--codex-report' ? performance.now() + 1800 : Math.min(performance.now() + 1800, 2400)
+    const inheritedDeadline = performance.now() + (hookDeadline - Date.now())
+    // Stop 200 ms before the inherited deadline, when the hook worker kills this process:
+    // a process killed while holding the board lock blocks every hook until the lock goes stale.
+    const deadline = Math.min(retryDeadline, inheritedDeadline - 200)
+    let queuedFile: string | undefined
+    const queue = (error: unknown): void => {
+      if (queuedFile !== undefined) return
+      mkdirSync(pending, { recursive: true })
+      if (pendingFiles().length >= 64) throw error
+      const file = join(pending, `${String(started).padStart(15, '0')}-${randomUUID()}.json`)
+      atomic(file, `${JSON.stringify(current)}\n`, checkDeadline)
+      queuedFile = file
+    }
+    let delay = 50
+    let report: CodexReport | undefined
+    for (;;) {
+      try {
+        checkDeadline()
+        report = withLocalLock(`${progress}.agent-board-lock`, () => {
+          checkDeadline()
+          // A hook with a backlog to replay saves its own event first: if the replay runs out
+          // of time, the queue write itself would be past the deadline and the event lost.
+          const backlog = pendingFiles().length
+          if (value !== undefined && mode !== '--codex-report' && backlog > 0 && backlog < 64) queue(Object.assign(new Error('LOCK_BUSY'), { code: 'EBUSY' }))
+          // Queued events go first, oldest first, so every session's events land in the order
+          // they happened. Invalid or missing entries are dropped; system errors keep them for retry.
+          for (const name of pendingFiles()) {
+            // Stay within the 3 s hook timeout: a killed lock holder leaves the stale-lock wait.
+            if (mode !== '--codex-report' && performance.now() >= deadline) {
+              queue(Object.assign(new Error('LOCK_BUSY'), { code: 'EBUSY' }))
+              return
+            }
+            const file = join(pending, name)
+            if (file === queuedFile) continue
+            try {
+              const entry = object(JSON.parse(readFileSync(file, 'utf8'))) as Pending
+              if (entry.version === 1 && typeof entry.progress === 'string' && isHookEntry(entry)) {
+                if (entry.progress !== progress) continue
+                if (!isOverdue(entry)) apply(entry)
+              }
+            } catch (error) {
+              const code = (error as { code?: unknown } | null)?.code
+              if (isBusy(error) || typeof code === 'string' && code !== 'ENOENT' || error instanceof Error && ['INCOMPLETE_PROGRESS_TAIL', 'HOOK_TIMEOUT'].includes(error.message)) throw error
+            }
+            // Two boards sharing one data folder can both drop the same entry.
+            try { unlinkSync(file) } catch (error) {
+              if ((error as { code?: string }).code !== 'ENOENT') throw error
+            }
+          }
+          const applied = apply(current)
+          if (queuedFile !== undefined) {
+            try { unlinkSync(queuedFile) } catch (error) {
+              if ((error as { code?: string }).code !== 'ENOENT') throw error
+            }
+          }
+          return applied
+        }, { waitMs: value !== undefined && mode !== '--codex-report' && queuedFile === undefined ? 0 : Math.max(0, deadline - performance.now()) })
+        break
+      } catch (error) {
+        if (!isBusy(error) && !(error instanceof Error && error.message === 'HOOK_TIMEOUT')) throw error
+        // Save before a bounded wait: Windows lock recovery and timer scheduling
+        // can consume the remaining budget, after which the write guard must close.
+        // A full queue does not fail yet: like a hook without a deadline, it waits and retries.
+        if (value !== undefined && mode !== '--codex-report') {
+          try { queue(error) } catch (failure) { if (failure !== error) throw failure }
+        }
+        const left = deadline - performance.now()
+        if (left <= 0) {
+          if (mode === '--codex-report') throw error
+          queue(error)
+          break
+        }
+        await new Promise(done => setTimeout(done, Math.min(delay, left)))
+        delay = Math.min(delay * 2, 400)
+      }
+    }
+    if (mode === '--codex-report') output({ session, block: hash(`${agent}:${session}`).slice(0, 8), state: report!.state, updated: report!.updated, progress })
     else if (agent === 'cursor') output(raw.hook_event_name === 'sessionStart' ? { env: { AGENT_BOARD_SESSION_ID: session, AGENT_BOARD_AGENT: agent } } : {})
     else if (agent === 'gemini' || agent === 'antigravity') output({})
     return true
@@ -203,7 +338,15 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
   // A config that cannot be read is one conflict of its own; its groups are not also reported as edited.
   const isReadable = parsedConfig !== null
   const hooks = object(hookConfig.hooks ?? {})
-  const command = `${quote(process.execPath)} ${quote(script)} --codex-event --agent ${agent} --progress-file ${quote(progress)}`
+  const worker = join(root, 'agent-board-hook.mjs')
+  const hookArgs = (event: string, state?: string): string[] => [
+    process.execPath, '--input-type=commonjs', '-e',
+    `eval(Buffer.from('${Buffer.from(hookBootstrap(home, agent)).toString('base64')}','base64').toString('utf8'))`,
+    worker, '--hook-version', String(HOOK_VERSION), '--hook-event', event,
+    state === undefined ? '--codex-event' : '--agent-status', '--agent', agent,
+    ...(state === undefined ? [] : ['--state', state]),
+    ...(agent === 'antigravity' ? ['--event', event] : []), '--progress-file', progress,
+  ]
   const isSame = (a: unknown, b: unknown): boolean => JSON.stringify(a) === JSON.stringify(b)
   const remove = mode === '--codex-remove'
   const conflicts: string[] = []
@@ -212,8 +355,8 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
   const groups: Json = {}
   for (const event of !hasHooks || agent === 'antigravity' ? [] : agent === 'cursor' ? Object.keys(cursorEvents) : agent === 'codex' ? codexEvents : Object.keys(statusEvents[agent] ?? {})) {
     const state = statusEvents[agent]?.[event]
-    const eventCommand = state === undefined ? command : `${quote(process.execPath)} ${quote(script)} --agent-status --agent ${agent} --state ${state} --progress-file ${quote(progress)}`
-    const group = agent === 'cursor' ? { command: eventCommand } : { hooks: [{ type: 'command', command: eventCommand, timeout: agent === 'gemini' ? 3000 : 3 }] }
+    const eventCommand = hookArgs(event, state).map(quote).join(' ')
+    const group = agent === 'cursor' ? { command: eventCommand, timeout: hostHookTimeout(agent, event) } : { hooks: [{ type: 'command', command: eventCommand, timeout: hostHookTimeout(agent, event) }] }
     if (hooks[event] !== undefined && !Array.isArray(hooks[event])) throw new Error('INVALID_HOOK_GROUP')
     const entries = (hooks[event] ?? []) as unknown[]
     const old = manifest.groups[event]
@@ -226,11 +369,14 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
     } else if (kept.length) nextHooks[event] = kept
     else delete nextHooks[event]
   }
-  let nextConfig: Json = { ...(agent === 'cursor' ? { version: 1 } : agent === 'muse' ? { schema_version: 1 } : {}), ...hookConfig, hooks: nextHooks }
+  let nextConfig: Json = {
+    ...(agent === 'cursor' && !('version' in hookConfig) ? { version: 1 } : agent === 'muse' && !('schema_version' in hookConfig) ? { schema_version: 1 } : {}),
+    ...hookConfig, hooks: nextHooks,
+  }
   if (agent === 'antigravity') {
     const name = 'agent-board-local'
     const desired = antigravityHooks((event, state) => {
-      const argv = [process.execPath, script, '--agent-status', '--agent', 'antigravity', '--state', state, '--event', event, '--progress-file', progress]
+      const argv = hookArgs(event, state)
       if (process.platform !== 'win32') return argv.map(quote).join(' ')
       // Antigravity's Windows executor passes one quoted argument to cmd /c using
       // CreateProcess escaping. Embedded executable quotes become literal \" bytes.
@@ -280,17 +426,18 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
   const legacySkills = Object.values(STRINGS).map(words => `---\nname: agent-board\ndescription: ${JSON.stringify(words.boardCommandDescription)}\n---\n\n${words.boardSkillPrompt(`node "${join(home, '.claude', 'agent-board.mjs')}"`)}\n`)
   const original = readFileSync(process.argv[1] ?? '', 'utf8').replace(/^globalThis\.AGENT_BOARD[^\n]*\n/, '')
   const files: Record<string, string> = {
-    [script]: `globalThis.AGENT_BOARD = ${JSON.stringify({ path: progress, codexRoot: root, lang: Object.entries(STRINGS).find(([, words]) => words === s)?.[0] ?? 'en' })}\n${original}`,
+    [script]: `globalThis.AGENT_BOARD = ${JSON.stringify({ hookVersion: HOOK_VERSION, path: progress, codexRoot: root, lang: Object.entries(STRINGS).find(([, words]) => words === s)?.[0] ?? 'en' })}\n${original}`,
+    [worker]: hookWorker(home, script),
     [skill]: skillText,
   }
-  if (agent === 'opencode') files[join(opencodeDir, 'plugins', 'agent-board-local.js')] = opencodePlugin(process.execPath, script, progress, s.localAgentSkillDescription)
+  if (agent === 'opencode') files[join(opencodeDir, 'plugins', 'agent-board-local.js')] = opencodePlugin(process.execPath, worker, progress, s.localAgentSkillDescription, home)
   if (agent === 'openclaw') {
-    files[join(root, 'adapters', 'openclaw', 'agent-board-local.mjs')] = openclawLocalPlugin(process.execPath, script, progress)
+    files[join(root, 'adapters', 'openclaw', 'agent-board-local.mjs')] = openclawLocalPlugin(process.execPath, worker, progress, home)
     files[join(root, 'adapters', 'openclaw', 'openclaw.plugin.json')] = `${JSON.stringify({ id: 'agent-board-local', configSchema: { type: 'object', additionalProperties: false, properties: {} } }, null, 2)}\n`
     files[join(openclawDir, 'skills', 'agent-board', 'SKILL.md')] = skillText
   }
   if (agent === 'deepseek') {
-    files[join(root, 'adapters', 'deepseek.mjs')] = deepseekLocalPlugin(process.execPath, script, progress)
+    files[join(root, 'adapters', 'deepseek.mjs')] = deepseekLocalPlugin(process.execPath, worker, progress, home)
     files[join(deepseekDir, 'skills', 'agent-board', 'SKILL.md')] = skillText
   }
   if (agent === 'hermes') files[join(flag('--hermes-dir') ?? (process.env.HERMES_HOME || join(home, '.hermes')), 'skills', 'agent-board', 'SKILL.md')] = skillText
@@ -299,7 +446,7 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
   if (agent === 'opencode') files[join(opencodeDir, 'commands', 'board.md')] = `---\ndescription: ${JSON.stringify(s.boardCommandDescription)}\n---\n\n${s.boardCommandPrompt}\n\n!\`${quote(process.execPath)} ${quote(script)} --serve\`\n`
   for (const [file, desired] of Object.entries(files)) {
     const existing = initial(file)
-    const shared = file === script || file === skill
+    const shared = file === script || file === worker || file === skill
     if (remove && shared && otherManifests.some(one => one.files !== undefined)) continue
     const owned = existing !== null && (hash(existing) === manifest.files[file] || (!remove && (otherManifests.some(one => object(one.files ?? {})[file] === hash(existing)) || file === skill && legacySkills.includes(existing))))
     if (existing !== null && !owned && existing !== desired) conflicts.push(file)

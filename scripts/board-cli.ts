@@ -10,7 +10,7 @@
 import { spawn, spawnSync } from 'node:child_process'
 import { localProgressPath, runCodexLocal } from './codex-local'
 import { legacyConnect } from './connect-transaction'
-import { chmodSync, closeSync, existsSync, fstatSync, fsyncSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
+import { chmodSync, closeSync, existsSync, fstatSync, fsyncSync, linkSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
 import { createHash, randomUUID } from 'node:crypto'
 import { homedir, tmpdir } from 'node:os'
 import { basename, dirname, join, resolve } from 'node:path'
@@ -25,9 +25,9 @@ import { dashboardHtml } from '../hooks/dashboard'
 import { appendJournal, archivePath, countDay, hasArchiveEntry, journalLine, journalPath } from '../hooks/journal'
 import { parseProgress, progressTail } from '../hooks/parse'
 import { qrModules, qrText } from '../hooks/qr'
-import { langOf, STRINGS } from '../hooks/strings'
-import { answeredJson, answeredPath, buildView, manualDoneSeen, parseAnswered, parseSeen, seenJson, seenPath, withAnswered, withSeen } from '../hooks/view'
-import { acknowledgementKeys, archiveQuestionsKept, captureHashOf, captureJson, capturePath, emptyQuestions, parseCapture, withCaptures, isQuestionProof, isQuestionSnapshot, isTornLedger, migratedAnswered, observeQuestions, parseQuestions, questionProofJson, questionProofOf, questionProofPath, questionsJson, questionsPath } from '../hooks/questions'
+import { langOf, plainReason, STRINGS } from '../hooks/strings'
+import { answeredJson, answeredPath, buildView, manualDoneSeen, parseAnswered, parseSeen, seenJson, seenPath, taskFingerprint, withAnswered, withSeen } from '../hooks/view'
+import { acknowledgementKeys, archiveQuestionsKept, captureHashOf, captureJson, capturePath, emptyQuestions, parseCapture, withCaptures, isQuestionProof, isQuestionSnapshot, isTornLedger, migratedAnswered, observeQuestions, parseQuestions, questionProofJson, questionProofOf, questionProofPath, questionsJson, questionsPath, resolvedQuestionsToRetire } from '../hooks/questions'
 import type { QuestionCapture, QuestionProofs, QuestionRecord } from '../hooks/questions'
 import { sha256 } from '../hooks/sha256'
 
@@ -54,21 +54,43 @@ const progressFile = (): string => {
 const path = progressFile()
 const s = STRINGS[langOf(flag('--lang')) ?? langOf(BAKED.lang) ?? langOf(process.env.LANG) ?? 'en']
 
+// Files changed since the board last read progress.md in full. A read refused because another
+// program holds the file open can say that nothing was changed only while this is 0. It is
+// cleared only after a full read, keeping writes made by that view, so a refresh right after a
+// press or view that wrote and then failed still says files may have changed.
+let writes = 0
+
 class BoardFileError extends Error {
-  constructor(readonly file: string, readonly code: string) {
+  readonly isLocked: boolean
+  // Set once a press took back everything it wrote before this failure (#248).
+  isUnchanged = false
+  constructor(readonly file: string, readonly code: string, isRead = false) {
     super(code)
+    this.isLocked = isRead && writes === 0 && (code === 'EBUSY' || code === 'EAGAIN')
   }
 }
 
-const fileError = (file: string, error: unknown): BoardFileError =>
-  new BoardFileError(file, String((error as { code?: string } | null)?.code ?? 'UNKNOWN'))
+const fileError = (file: string, error: unknown, isRead = false): BoardFileError =>
+  new BoardFileError(file, String((error as { code?: string } | null)?.code ?? 'UNKNOWN'), isRead)
+
+const plainFile = (file: string): string => {
+  const full = resolve(file)
+  return full === resolve(path) ? s.fileProgress
+    : full === resolve(questionsPath(path)) ? s.fileQuestions : s.fileNamed(basename(file))
+}
+
+// The terminal board and the page say the same about a file they could not read or write.
+const storageNote = (error: BoardFileError): string =>
+  error.isLocked ? s.boardLocked(plainFile(error.file))
+    : error.isUnchanged ? s.boardSaveFailed(plainFile(error.file), plainReason(s, error.code))
+    : s.boardStorageFailed(plainFile(error.file), plainReason(s, error.code))
 
 const read = (file: string): string => {
   try {
     return readFileSync(file, 'utf8')
   } catch (error) {
     if ((error as { code?: string } | null)?.code === 'ENOENT') return ''
-    throw fileError(file, error)
+    throw fileError(file, error, true)
   }
 }
 
@@ -148,15 +170,36 @@ const placeQuestionFile = (from: string, to: string): boolean => {
     ? [system32('WindowsPowerShell/v1.0/powershell.exe'), ['-NoProfile', '-NonInteractive', '-Command', `Move-Item -LiteralPath ${quote(source)} -Destination ${quote(target)} -ErrorAction Stop`]] as const
     : ['mv', ['-n', '--', source, target]] as const
   const ran = spawnSync(tool, [...argv], { cwd: dirname(path), stdio: 'ignore', timeout: 10000, windowsHide: true })
-  return ran.status === 0 && !existsSync(source)
+  const isMoved = ran.status === 0 && !existsSync(source)
+  if (isMoved) writes += 1
+  return isMoved
+}
+
+// A hard link fails when the target exists, so it never replaces another writer's ledger, and it
+// starts no program: on a fresh Windows profile PowerShell alone could take longer than the move's
+// 10 s limit. Only for a file this process owns; a volume without hard links uses the move program.
+const placeOwnedQuestionFile = (source: string, target: string): boolean => {
+  try {
+    linkSync(source, target)
+  } catch (error) {
+    if ((error as { code?: string } | null)?.code === 'EEXIST') return false
+    return placeQuestionFile(source, target)
+  }
+  unlinkSync(source)
+  return true
 }
 
 const quarantineQuestions = (file: string): boolean => {
   const aside = `${file}.torn-${Date.now()}-${process.pid}`
+  // The shared ledger keeps the move program: another writer can rename a newer ledger onto it
+  // between a link and an unlink, and the unlink would then delete that newer ledger.
   if (!placeQuestionFile(file, aside)) return false
   if (isTornLedger(read(aside))) return true
-  // A good write raced the initial read. Restore it only if no newer ledger took its place.
-  placeQuestionFile(aside, file)
+  // A good write raced the initial read. Restore it only if no newer ledger took its place. A
+  // throw here means the ledger is back and the aside, a second name for it, could not be removed.
+  try {
+    placeOwnedQuestionFile(aside, file)
+  } catch {}
   return false
 }
 
@@ -200,6 +243,7 @@ const keepQuestionCapture = (record: QuestionRecord, disposition: QuestionCaptur
   try {
     const fd = openSync(file, 'wx', 0o600)
     try { writeFileSync(fd, text) } finally { closeSync(fd) }
+    writes += 1
   } catch (error) {
     if ((error as { code?: string } | null)?.code !== 'EEXIST') throw fileError(file, error)
   }
@@ -228,6 +272,7 @@ const keepQuestionProof = (kind: keyof QuestionProofs, hash: string): void => {
   try {
     const fd = openSync(file, 'wx', 0o600)
     try { writeFileSync(fd, text) } finally { closeSync(fd) }
+    writes += 1
   } catch (error) {
     if ((error as { code?: string } | null)?.code !== 'EEXIST') throw fileError(file, error)
   }
@@ -292,8 +337,9 @@ const view = (source = read(path), now = Date.now()) => {
         if (record.isUnresolved && !captures.some(capture => captureJson(capture.record, capture.disposition) === captureJson(record, 'unresolved'))) keepQuestionCapture(record, 'unresolved')
         if (record.isUnresolved === false && current.records.some(old => old.id === record.id && old.isUnresolved === true)) keepQuestionCapture(record, 'resolved')
       }
+      const retiredResolutions = resolvedQuestionsToRetire(current, projects, null, turns)
       for (const old of current.records) {
-        if (old.isPresent && !next.records.some(record => record.id === old.id && record.isPresent && record.isWaiting)) keepQuestionProof('retired', sha256(old.id))
+        if ((old.isPresent && !next.records.some(record => record.id === old.id && ((record.isPresent && record.isWaiting) || record.resolvedAt !== undefined))) || retiredResolutions.includes(old.id)) keepQuestionProof('retired', sha256(old.id))
       }
       proofs = readQuestionProofs()
       if (proofs === null) return null
@@ -325,6 +371,13 @@ const view = (source = read(path), now = Date.now()) => {
   return { ...buildView(projects, [basename(process.cwd())], null, now, countDay(read(journalPath(path, now)), now), manualDoneSeen(projects, seen, now, s), s, answered, seen, questions, readQuestionProofs(), turns), ...(tail === null ? {} : { warning: s.progressIncomplete(tail.tasks) }) }
 }
 
+const freshView = () => {
+  const before = writes
+  const shown = view()
+  writes -= before
+  return shown
+}
+
 const pad = (n: number): string => String(n).padStart(2, '0')
 
 const options = () => ({
@@ -338,7 +391,7 @@ const options = () => ({
 // again from the new text when another write landed in between or the rename failed (on
 // Windows, a file another program holds open), as the pane's own writes are. A failed
 // read is never an empty file. `change` can run more than once, on newer text each time.
-const rewrite = (file: string, change: (text: string) => string | null): string | null => {
+const rewrite = (file: string, change: (text: string) => string | null, onReplaced?: () => void): string | null => {
   let failure: unknown = { code: 'EAGAIN' }
   for (let attempt = 0; attempt < 3; attempt += 1) {
     const before = read(file)
@@ -368,7 +421,7 @@ const rewrite = (file: string, change: (text: string) => string | null): string 
       writeFileSync(temp, after)
       if (mode !== undefined) chmodSync(temp, mode)
       if (wasMissing) {
-        if (!placeQuestionFile(temp, file)) {
+        if (!placeOwnedQuestionFile(temp, file)) {
           if (!existsSync(file)) {
             // A failed move must not delete the only complete copy.
             isOwned = false
@@ -382,7 +435,7 @@ const rewrite = (file: string, change: (text: string) => string | null): string 
           renameSync(temp, file)
         } catch (error) {
           if (!isLedger || existsSync(file)) throw error
-          if (!placeQuestionFile(temp, file)) {
+          if (!placeOwnedQuestionFile(temp, file)) {
             if (!existsSync(file)) isOwned = false
             throw error
           }
@@ -395,6 +448,9 @@ const rewrite = (file: string, change: (text: string) => string | null): string 
       } catch {}
       continue
     }
+    writes += 1
+    // The file is replaced now, even if reading it back fails below.
+    onReplaced?.()
     if (read(file) === after) return after
     failure = { code: 'EAGAIN' }
   }
@@ -435,7 +491,7 @@ const openInBrowser = (target: string, done: (isOpen: boolean) => void): void =>
   }
 }
 
-const openHtml = (done: (note: string) => void): void => {
+const openHtml = (done: (note: string, isOpen: boolean) => void): void => {
   const now = new Date()
   const stamp = s.dashStamp(`${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())} ${pad(now.getHours())}:${pad(now.getMinutes())}`)
   const html = path.replace(/\.md$/i, '') + '.html'
@@ -444,10 +500,11 @@ const openHtml = (done: (note: string) => void): void => {
   // Named like any other file the board cannot write, so --watch reports it and runs on.
   try {
     writeFileSync(html, page)
+    writes += 1
   } catch (error) {
     throw fileError(html, error)
   }
-  openInBrowser(html, isOpen => done(isOpen ? s.windowOpened(html) : s.windowFailed(html)))
+  openInBrowser(html, isOpen => done(isOpen ? s.windowOpened() : s.windowFailed(basename(html), basename(path)), isOpen))
 }
 
 // Into the archive first, then out of the file, as the pane does: a crash between the two
@@ -485,43 +542,106 @@ const answeredAge = (file: string): number => {
   }
 }
 
+// A press whose board write never landed takes back only the journal lines it added: lines
+// that were there before, or that another writer added meanwhile, stay as they are. If that
+// fails too, the board's own error is the true one: some changes may already be saved.
+// Otherwise nothing of this press is left, so the count of writes goes back to before it.
+const undoJournal = (added: Map<string, number>, now: number, writesBefore: number, error?: unknown): void => {
+  try {
+    if (added.size > 0) rewrite(journalPath(path, now), past => {
+      const remaining = new Map(added)
+      return past.split(/(?<=\n)/).filter(line => {
+        const entry = line.replace(/\r?\n$/, '')
+        const count = remaining.get(entry) ?? 0
+        if (count === 0) return true
+        remaining.set(entry, count - 1)
+        return false
+      }).join('')
+    })
+  } catch (undoError) {
+    throw error ?? undoError
+  }
+  writes = writesBefore
+}
+
 // What a key's action does to the files, and the line the board shows after it.
-const act = (action: BoardAction): string => {
+const act = (action: BoardAction, fallback?: { copyText?: string; tone?: 'done' | 'alert' }): string => {
+  const done = (text: string): string => {
+    if (fallback !== undefined) fallback.tone = 'done'
+    return text
+  }
   const now = Date.now()
-  if (action.type === 'copy') return copy(action.text) ? s.boardCopied(action.text) : s.boardCopyFailed(action.text)
+  if (action.type === 'copy') {
+    if (copy(action.text)) return done(s.copied)
+    if (fallback !== undefined) fallback.copyText = action.text
+    return s.boardCopyFailed(action.text)
+  }
   if (action.type === 'done') {
     let confirmed: ConfirmedTask | null = null
-    const wrote = rewrite(path, text => {
-      if (confirmed !== null && confirmMatches(text, confirmed.ref, s)) return text
-      const next = confirmTask(text, action.ref, now, s)
-      if (next === null) return null
-      const lines = next.entries.map(entry => journalLine(entry, now, s))
-      rewrite(journalPath(path, now), past => appendJournal(past, lines.filter(line => !past.split(/\r?\n/).includes(line)), s))
-      confirmed = next
-      return next.text
-    })
+    const added = new Map<string, number>()
+    let isReplaced = false
+    const writesBefore = writes
+    let wrote: string | null
+    try {
+      wrote = rewrite(path, text => {
+        if (confirmed !== null && confirmMatches(text, confirmed.ref, s)) return text
+        const next = confirmTask(text, action.ref, now, s)
+        if (next === null) return null
+        const lines = next.entries.map(entry => journalLine(entry, now, s))
+        rewrite(journalPath(path, now), past => {
+          const missing = lines.filter(line => !past.split(/\r?\n/).includes(line))
+          for (const line of missing) added.set(line, Math.max(added.get(line) ?? 0, missing.filter(entry => entry === line).length))
+          return appendJournal(past, missing, s)
+        })
+        confirmed = next
+        return next.text
+      }, () => { isReplaced = true })
+    } catch (error) {
+      if (!(error instanceof BoardFileError) || error.file !== path || isReplaced) throw error
+      undoJournal(added, now, writesBefore, error)
+      error.isUnchanged = true
+      throw error
+    }
+    // A retry found the task changed by another writer. If no write of this press landed, its
+    // journal lines go too; the press says the line changed, as before.
+    if (wrote === null && !isReplaced) undoJournal(added, now, writesBefore)
     const found = confirmed as ConfirmedTask | null
     if (found === null || wrote === null || !confirmMatches(read(path), found.ref, s)) return s.boardLineChanged
-    return s.confirmedDone(action.title)
+    return done(s.confirmedDone(action.title))
   }
   if (action.type === 'tick') {
     // Found once is found: a retry after another session's write may meet the step already
     // ticked by this press.
     let isFound = false
+    let isReplaced = false
+    const writesBefore = writes
+    const added = new Map<string, number>()
     const line = journalLine({ project: action.ref.project, task: action.ref.title, step: action.ref.step }, now, s)
-    const wrote = rewrite(path, text => {
-      const after = setManualStep(text, action.ref, 'x')
-      if (after !== text) {
-        // Save history before ticking: a journal failure must leave the step available
-        // to retry. A later board failure can leave an extra journal line, and is reported.
-        rewrite(journalPath(path, now), past => (past.includes(line) ? past : appendJournal(past, [line], s)))
-        isFound = true
-      }
-      return after
-    })
+    let wrote: string | null
+    try {
+      wrote = rewrite(path, text => {
+        const after = setManualStep(text, action.ref, 'x')
+        if (after !== text) {
+          // Save history before ticking: a journal failure must leave the step available
+          // to retry. A failed board replacement removes only this press's journal line.
+          rewrite(journalPath(path, now), past => {
+            if (past.includes(line)) return past
+            added.set(line, 1)
+            return appendJournal(past, [line], s)
+          })
+          isFound = true
+        }
+        return after
+      }, () => { isReplaced = true })
+    } catch (error) {
+      if (!(error instanceof BoardFileError) || error.file !== path || isReplaced) throw error
+      undoJournal(added, now, writesBefore, error)
+      error.isUnchanged = true
+      throw error
+    }
     if (wrote === null) return s.boardWriteFailed
     if (!isFound) return s.boardTickGone
-    return s.boardTicked(action.ref.step)
+    return done(s.boardTicked(action.ref.step))
   }
   if (action.type === 'archive') {
     view()
@@ -546,14 +666,14 @@ const act = (action: BoardAction): string => {
     if (retentionFailed) return s.questionRetentionFailed
     if (count === null) return s.boardWriteFailed
     if (count === 0) return s.archiveGone
-    return s.archivedOne(action.title)
+    return done(s.archivedOne(action.title))
   }
   if (action.type === 'hide' || action.type === 'unhide') {
     // The list every pane on this machine reads too; nothing goes to the agent that asked.
     const current = view()
     if (readQuestions(questionsPath(path)) === null) return s.hideFailed
     const keys = action.type === 'hide' || action.key !== null ? [action.key ?? ''] : current.hidden.map(item => item.hideKey)
-    if (keys.length === 0) return ''
+    if (keys.length === 0) return s.pressNothing
     const isHidden = action.type === 'hide'
     const file = answeredPath(path)
     // A list the board cannot read or replace is named with its error, as its other files are.
@@ -571,25 +691,38 @@ const act = (action: BoardAction): string => {
       return answered === null ? null : answeredJson(withAnswered(answered, isHidden ? keys : keys.flatMap(key => acknowledgementKeys(aliases, key)), isHidden))
     })
     if (wrote === null) return s.hideFailed
-    return action.type === 'hide' ? s.boardHidden(action.text) : s.boardShown
+    return done(action.type === 'hide' ? s.boardHidden(action.text) : s.boardShown)
   }
 
-  return ''
+  return s.pressNothing
 }
 
-// Every finished task out now, the way `/progress tidy` and the pane's 現在封存 do it: done
-// blocks and finished hand-kept tasks at once, a stopped session's block after its three days.
-const tidy = (): string => {
+// Scheduled sweeps keep the plugin's age rules. An explicit interactive tidy may move
+// finished work at once; neither mode discards a stopped session before its three days.
+const tidy = (isNow = true): string => {
   const now = Date.now()
+  let seen: Record<string, number> = {}
+  if (!isNow) {
+    try {
+      seen = parseSeen(read(seenPath(path)), answeredAge(seenPath(path))) ?? {}
+    } catch {
+      // Unknown manual ages stay; an unreadable hint need not block dated agent blocks.
+    }
+  }
   const count = archiveOut(text => {
-    const blocks = takeArchivable(text, now, undefined, s, true)
-    // This script keeps no record of when a task was seen done: asked for now, it is today's.
-    const manual = takeManualDone(blocks.text, now, () => undefined, s, true)
+    const blocks = takeArchivable(text, now, undefined, s, isNow)
+    const manual = takeManualDone(blocks.text, now, (_key, project, task) => {
+      const at = seen[taskFingerprint(project, task)]
+      return at !== undefined && at <= now ? at : undefined
+    }, s, isNow)
     const entries = [...blocks.entries, ...manual.entries]
     return entries.length === 0 ? null : { text: manual.text, entries }
   }, now)
-  if (count === null) return s.boardWriteFailed
-  return count === 0 ? s.tidyNothing : s.tidyMoved(count)
+  if (count === null) {
+    if (!isNow) process.exitCode = 1
+    return s.boardWriteFailed
+  }
+  return count === 0 ? (isNow ? s.tidyNothing : s.tidyScheduledNothing) : s.tidyMoved(count)
 }
 
 // Keys as the terminal sends them, named the way boardKey reads them. One read can hold more
@@ -600,30 +733,33 @@ const keyName = (one: string): string =>
 const keysIn = (chunk: string): string[] => (chunk.replace(/\r\n/g, '\r').match(/\u001b[[O][0-9;]*[A-Za-z~]|\u001b[\s\S]?|[\s\S]/gu) ?? []).map(keyName)
 
 const failureNote = (error: unknown): string => {
-  if (!(error instanceof BoardFileError)) throw error
   process.exitCode = 1
-  const note = s.boardStorageFailed(error.file, error.code)
-  // The board's one-line status is clipped to terminal width; keep the full path and
-  // recovery advice on stderr too, including for an agent using --keys.
+  if (!(error instanceof BoardFileError)) {
+    process.stderr.write(`${error instanceof Error ? error.stack : String(error)}\n`)
+    return s.pressFailed
+  }
+  const note = storageNote(error)
   process.stderr.write(`${note}\n`)
   return note
 }
 
 const press = (state: BoardState, key: string): { state: BoardState; isQuit: boolean; isHtml: boolean; isWrite: boolean } => {
-  const items = boardItems(view(), pending(), state.isIdleOpen ?? false, state.isOlderOpen ?? false)
+  const shown = freshView()
+  const items = boardItems(shown, pending(), state.isIdleOpen ?? false, state.isOlderOpen ?? false)
   const { state: next, action } = boardKey(state, key, items, s)
   if (action === null) return { state: next, isQuit: false, isHtml: false, isWrite: false }
   if (action.type === 'quit') return { state: next, isQuit: true, isHtml: false, isWrite: false }
-  if (action.type === 'html') return { state: next, isQuit: false, isHtml: true, isWrite: false }
+  if (action.type === 'html') return { state: { ...next, note: s.pressPending, tone: 'quiet' }, isQuit: false, isHtml: true, isWrite: false }
 
   // After a write the lines move; the choice is made again from the screen drawn next.
   let note: string
+  const fallback: { copyText?: string; tone?: 'done' | 'alert' } = { tone: 'alert' }
   try {
-    note = act(action)
+    note = act(action, fallback)
   } catch (error) {
     note = failureNote(error)
   }
-  return { state: { ...next, key: null, note }, isQuit: false, isHtml: false, isWrite: action.type !== 'copy' }
+  return { state: { ...next, key: null, note, tone: fallback.tone, copyText: fallback.copyText, result: next.result === undefined ? undefined : { ...next.result, revision: null } }, isQuit: false, isHtml: false, isWrite: action.type !== 'copy' }
 }
 
 const screen = (state: BoardState): string => boardScreen(view(), pending(), state, s, options())
@@ -750,15 +886,16 @@ const serveChild = (): void => {
     s,
     port: Number(flag('--port') ?? 0) || 0,
     ping: { path, built, idleMs: idleMs(), allowResume: args.includes('--allow-resume'), messagesDirectory: flag('--messages-dir') ? resolve(flag('--messages-dir')!) : null },
-    view,
+    // Every page request starts by reading the board.
+    view: freshView,
     pending,
     act,
     tidy,
     paste,
     // The page names a file it could not read or write the way the terminal board does, for a
     // press and for the board it shows. The page is answered, so the exit code and stderr are
-    // left alone. A phone is told the file name only: the folder names the person's account.
-    failure: (error, isLan) => (error instanceof BoardFileError ? s.boardStorageFailed(isLan ? basename(error.file) : error.file, error.code) : null),
+    // left alone. File labels and reasons stay the same on local and network pages.
+    failure: error => (error instanceof BoardFileError ? storageNote(error) : null),
     idleMs: idleMs(),
     onReady: (url, port) => {
       // Without its address file no later `--serve` finds this page, and each would start one
@@ -900,7 +1037,7 @@ const serveBoard = async (): Promise<void> => {
     // page stopped then, and that one is the page to show.
     const other = await runningPage()
     if (other !== null) return show(other.page.url, other.isKept, other.idleMs)
-    process.stdout.write(`\n${s.serveFailed(s.serveOffline)}\n`)
+    process.stdout.write(`\n${s.serveFailed(s.serveNotStarted)}\n`)
     return
   }
   await show(url)
@@ -933,7 +1070,7 @@ const chat = (): void => {
     const code = (error as { code?: unknown } | null)?.code
     const reason = typeof code === 'string' ? code : error instanceof Error ? error.message.split('\n')[0]?.slice(0, 160) || error.name : 'UNKNOWN'
     // Nothing here writes, so the board's own advice (files "may already have changed") is not told.
-    const told = error instanceof BoardFileError ? s.chatReadFailed(error.file, error.code) : s.chatFailed(reason)
+    const told = error instanceof BoardFileError ? error.isLocked ? s.boardLocked(plainFile(error.file)) : s.chatReadFailed(plainFile(error.file), plainReason(s, error.code)) : s.chatFailed(reason)
     process.stdout.write(`${redact(told, homeOrNone(), isWin)}\n`)
   }
 }
@@ -954,6 +1091,8 @@ const run = async (): Promise<void> => {
   } else if (args.includes('--chat')) {
     // Before the flags that serve, open or write: a chat reply never starts a page.
     chat()
+  } else if (args.includes('--tidy')) {
+    process.stdout.write(`${tidy(false)}\n`)
   } else if (args.includes('--serve')) {
     await serveBoard()
   } else if (args.includes('--html')) {
@@ -964,15 +1103,21 @@ const run = async (): Promise<void> => {
       const pressed = press(pin(state), key)
       state = pressed.state
       if (pressed.isQuit) break
+      if (pressed.isHtml) {
+        await new Promise<void>(done => {
+          try { openHtml((note, isOpen) => { state = { ...state, note, tone: isOpen ? 'done' : 'alert' }; done() }) }
+          catch (error) { state = { ...state, note: failureNote(error), tone: 'alert' }; done() }
+        })
+      }
     }
-    process.stdout.write(screen(state))
+    process.stdout.write(screen(pin(state)))
   } else if (args.includes('--watch') && process.stdin.isTTY) {
     // No fingerprint is kept before the first draw succeeds, and x, a and c then refuse every line.
     let state: BoardState = { ...emptyBoardState, seen: {}, isIdleOpen: args.includes('--all') }
     // The fingerprints kept are those of the very lines this screen shows: one read does both.
     const draw = (): void => {
       try {
-        const shown = view()
+        const shown = freshView()
         const turns = pending()
         state = pinned(state, boardItems(shown, turns, state.isIdleOpen ?? false, state.isOlderOpen ?? false))
         process.stdout.write(`\u001b[2J\u001b[H${boardScreen(shown, turns, state, s, options())}`)
@@ -1003,8 +1148,8 @@ const run = async (): Promise<void> => {
           state = pressed.state
           if (pressed.isQuit) quit()
           if (pressed.isHtml) {
-            openHtml(note => {
-              state = { ...state, note }
+            openHtml((note, isOpen) => {
+              state = { ...state, note, tone: isOpen ? 'done' : 'alert', result: undefined }
               draw()
             })
           }
@@ -1012,7 +1157,7 @@ const run = async (): Promise<void> => {
         }
         draw()
       } catch (error) {
-        state = { ...state, note: failureNote(error) }
+        state = { ...state, note: failureNote(error), tone: 'alert' }
         draw()
       }
     })
@@ -1022,7 +1167,8 @@ const run = async (): Promise<void> => {
     // Not a terminal (piped, or an agent's tool): no keys to read, so it only redraws.
     const tick = () => {
       try {
-        process.stdout.write(`\u001b[2J\u001b[H${boardText(view(), pending(), s, options())}\n${s.boardWatching}\n`)
+        const shown = freshView()
+        process.stdout.write(`\u001b[2J\u001b[H${boardText(shown, pending(), s, options())}\n${s.boardWatching}\n`)
       } catch (error) {
         process.stdout.write(`\u001b[2J\u001b[H${failureNote(error)}\n`)
       }
@@ -1037,6 +1183,8 @@ const run = async (): Promise<void> => {
 try {
   await run()
 } catch (error) {
+  // The verified worker wrapper bounds data-URL errors and owns stage cleanup.
+  if (flag('--legacy-connect-request') !== undefined && typeof (globalThis as { AGENT_BOARD_WORKER_SOURCE?: unknown }).AGENT_BOARD_WORKER_SOURCE === 'string') throw error
   if (args.some(arg => ['--codex-event', '--agent-status', '--codex-report'].includes(arg))) {
     process.exitCode = 1
     const raw = String((error as { code?: string })?.code ?? (error instanceof Error ? error.message : 'UNKNOWN'))

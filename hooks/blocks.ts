@@ -389,10 +389,12 @@ export const takeArchivable = (text: string, now: number, keep?: string, s: Stri
 // (`seen`, by doneKey): moved out whole, heading to last step, like a session's block.
 // `isNow`: the person asked, so every finished one goes at once, under the day it was seen
 // done, or today when it never was.
+// The task context lets a standalone writer use fingerprint observations while the plugin
+// keeps its existing title-key observations.
 export const takeManualDone = (
   text: string,
   now: number,
-  seenAt: (key: string) => number | undefined,
+  seenAt: (key: string, project: string, task: ProgressTask) => number | undefined,
   s: Strings = ZH_TW,
   isNow = false,
 ): Archived & { keys: string[] } => {
@@ -405,7 +407,7 @@ export const takeManualDone = (
     for (const task of project.tasks) {
       if (task.auto !== null || task.line < 0 || !isTaskComplete(task)) continue
       const key = doneKey(project.name, task.title)
-      const at = seenAt(key) ?? (isNow ? now : undefined)
+      const at = seenAt(key, project.name, task) ?? (isNow ? now : undefined)
       if (at === undefined || (!isNow && now - at < DAY)) continue
       let end = task.line
       for (let index = task.line + 1; index < lines.length; index += 1) {
@@ -430,14 +432,33 @@ export const takeManualDone = (
 // One task out now, at the person's word (a row's 封存): an ended session's block, or a
 // hand-kept task from its heading to its last line, in the entry form takeArchivable uses.
 // null when it cannot be found for sure: a block without its end marker, a heading that is
-// gone or has a twin, or a heading inside some session's block.
+// gone or has a twin, a heading inside some session's block, or a session id two blocks
+// share when the row's project and each block's first heading cannot tell them apart.
 export const takeTask = (text: string, ref: TaskRef, now: number, s: Strings = ZH_TW): Archived | null => {
   const lines = linesOf(text)
   const seen = seenOf(lines)
   const spans = scanBlocks(lines)
   const heading = `## ${ref.project || s.uncategorized} · ${localDay(now)}`
   if (ref.session !== null) {
-    const span = spans.find(one => one.session === ref.session)
+    const ownHeading = (one: BlockSpan): number => {
+      for (let at = one.start + 1; at <= one.end; at += 1) {
+        if (TASK.test(seen[at] ?? '')) return at
+        if (STEP.test(seen[at] ?? '')) return -1
+      }
+      return -1
+    }
+    // Two blocks can carry one id (a resumed session, two machines). Only a block's first heading is its own row;
+    // a later ### is a hand-kept task (docs/FORMAT.md), so match that heading alone.
+    const same = spans.filter(one => one.session === ref.session).map(one => {
+      const first = ownHeading(one)
+      return { ...one, heading: first, title: TASK.exec(seen[first] ?? '')?.[1] }
+    })
+    const matches = same.length === 1 ? same : same.filter(one =>
+      (one.project || s.uncategorized) === ref.project &&
+      one.title === ref.title,
+    )
+    const span = matches.find(one => one.heading === ref.line)
+      ?? (matches.length === 1 ? matches[0] : undefined)
     if (span === undefined || !span.isClosed) return null
     // Recheck ownership at the write boundary: a stopped row may have resumed since it
     // was drawn. Unknown clocks cannot prove that a working/waiting session stopped.

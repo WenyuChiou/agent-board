@@ -29,6 +29,18 @@ git clone https://github.com/WenyuChiou/agent-board.git
 cd agent-board
 ```
 
+### Install with npm
+
+From its first npm release (planned for 0.24.0), the installer and the board are also on npm, so no checkout is needed. This needs Node.js 22+:
+
+```sh
+npx @wenyuchiou/agent-board setup
+npx @wenyuchiou/agent-board setup --apply
+npx @wenyuchiou/agent-board --serve
+```
+
+The first command shows what setup would change and writes nothing. The second makes the change, and the third opens the board's page. `npx @wenyuchiou/agent-board setup` takes the same options as the `setup-agent.mjs` lines below, such as `--agent codex`. `--watch`, `--chat` and `--html` open the other views. More in the [setup guide](docs/SETUP.md#install-with-npm).
+
 ## Pick your agent
 
 | | Agent | Connect it | Open the board |
@@ -142,13 +154,13 @@ The page listens on 127.0.0.1 only, and its address carries a random key: anythi
 
 ## Colours and marks
 
-The pane follows Claude Code's theme (`/config`, then **Theme**); the page and `progress.html` follow your computer's light or dark mode. Every mark has its own shape, so it reads without colour:
+The pane follows Claude Code's theme (`/config`, then **Theme**); the page and `progress.html` follow your computer's light or dark mode until you pick Light or Dark at the top right of the page. Every mark has its own shape, so it reads without colour; the pages draw a step still to do as a small dot rather than a ring, so it does not look like a button:
 
 | Mark | Means | | Mark | Means |
 |:-:|---|---|:-:|---|
 | ● | Waiting on you | | ◐ | Running, or waiting on someone else |
 | ▸ | Doing now | | ! | Stuck |
-| ○ | To do | | ⚑ | Due within two weeks |
+| ○ • | To do (a ring in the pane, a small dot on the pages) | | ⚑ | Due within two weeks |
 | ✓ | Done | | – | Cancelled |
 
 ## Troubleshooting

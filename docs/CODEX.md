@@ -27,7 +27,8 @@ Codex-only installation defaults to `~/.agent-board/progress.md`; `.claude` is n
 an explicitly configured `CODEX_HOME`. Installation is repeatable. Edited files are named
 as conflicts and not overwritten. An exact old generated board skill at the standard path
 can be upgraded. Invalid or unreadable JSON aborts setup. Bootstrap uses the committed
-bundle and does not download executable code.
+bundle, from a checkout or the npm package, and downloads no executable code itself; with
+`npx`, npm downloads that package when you run it.
 
 ## Open and report
 
@@ -81,6 +82,15 @@ Hooks keep only selected metadata. They ignore `transcript_path`, prompts, tool 
 assistant messages and permission decisions, never read transcripts, and call no model.
 A permission event marks waiting; no output approves a tool or merge. `Stop` marks activity waiting, never conversation termination or task completion. Detailed steps and completion still come from explicit reports.
 Disconnected or untrusted hooks cannot update activity; existing stale-time rules apply.
+
+When another program holds `progress.md` locked, a lifecycle hook keeps trying for about
+two seconds, then saves the event's metadata under `pending/` in the data folder and exits 0.
+The next hook run on that board applies pending events first. An explicit report still
+fails and says it was not saved if the file stays locked. On Windows, a read-only
+`progress.md` is not a lock: the hook fails and says so. If a queued event meets a disk or
+permission error, it stays in `pending/` and every hook on that board fails with that error
+until it is fixed; to drop that event instead, remove the oldest file in `pending/` whose
+`progress` is this board's file.
 
 This feature does not send replies to an active desktop thread. A file, mock or accepted
 RPC is not proof of delivery. Test that separately with a disposable session and actual

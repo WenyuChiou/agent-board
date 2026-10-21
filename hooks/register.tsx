@@ -1,13 +1,15 @@
 import { BOARD_SCRIPT } from './board-script'
+import { connectRecordPath, hasOwnConnectData, recoveryUnreadableCode } from './connect-pure'
 import { sha256 } from './sha256'
 import { CONNECT_BOOTSTRAP, CONNECT_EXECUTE, workerRequest, workerStage } from './connect-worker'
+import { LEDGER_LINK, LINK_EXISTS, LINK_KEPT_SOURCE } from './ledger-move'
 import type { LegacyConnectRequest, ConnectState } from '../scripts/connect-transaction'
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, PluginOptions, PromptSubmitResult, Register } from 'claude-code'
 
 import type { RenderSurface } from 'claude-code'
 
-import type { ProgressAnswer, ProgressMirror, ProgressPr, ProgressSnapshot } from '../types'
+import type { ProgressAnswer, ProgressMirror, ProgressPr, ProgressSnapshot, ResolveResult } from '../types'
 import {
   addManualTask,
   confirmMatches,
@@ -71,12 +73,13 @@ import { dashboardHtml } from './dashboard'
 import { peekInbox, redact } from './board'
 import type { PendingTurn } from './board'
 import { paletteFor } from './palette'
-import { drawPane, reviseKey } from './pane'
-import type { PaneActions, PaneModel, PaneUi } from './pane'
+import { drawPane, pressTarget, reviseKey } from './pane'
+import type { PaneActions, PaneModel, PaneUi, PressResult } from './pane'
+import type { PressOutcome } from '../types'
 import { isQuickAdd, parseQuickAdd, quickAddWords } from './quick'
 import type { Lang, Strings } from './i18n'
 import { RULE_ID, RULES } from './rule'
-import { chosenLang, langOf, resolveLang, STRINGS } from './strings'
+import { chosenLang, langOf, plainReason, resolveLang, STRINGS } from './strings'
 import { answerTurns, applyDigest, clearAsked, clearBackgroundJobs, cleanHandoff, finishBackgroundJob, isAskingYou, isPersonsAnswer, isWork, lastQuestion, markAsked, needsRefresh, parseDigest, replyData, requestData, startBackgroundJob, turnTools } from './digest'
 import type { Digest } from './digest'
 import { boardScript, isNodeSupported, isSetupState, isWindowsHost, nodeVersionOf, openclawPrinted, openclawSavedBy, openclawTooOld, psQuote, setupLines, setupProblemText, setupSeed } from './connect'
@@ -109,8 +112,8 @@ import {
 import type { AgentTurn } from './inbox'
 import { keepRecent, remindersOf } from './remind'
 import { agentName, answeredJson, answeredPath, buildView, mirrorMatchesTask, parseAnswered, parseSeen, seenJson, seenPath, statusLine, withAnswered, withSeen } from './view'
-import type { StepRef, TaskRef, TaskRow, WaitingItem } from './view'
-import { acknowledgementKeys, archiveQuestionsKept, captureHashOf, captureJson, capturePath, emptyQuestions, parseCapture, withCaptures, isQuestionProof, isQuestionSnapshot, isTornLedger, migratedAnswered, observeQuestions, parseQuestions, questionProofJson, questionProofOf, questionProofPath, questionWords, questionsJson, questionsPath } from './questions'
+import type { StepRef, TaskRef, TaskRow, View, WaitingItem } from './view'
+import { acknowledgementKeys, archiveQuestionsKept, captureHashOf, captureJson, capturePath, emptyQuestions, parseCapture, withCaptures, isQuestionProof, isQuestionSnapshot, isTornLedger, migratedAnswered, observeQuestions, parseQuestions, questionProofJson, questionProofOf, questionProofPath, questionWords, questionsJson, questionsPath, resolveQuestion, resolvedQuestionsToRetire } from './questions'
 import type { QuestionAnswerEvidence, QuestionCapture, QuestionProofs, QuestionRecord } from './questions'
 
 const PANE = 'agent-board'
@@ -139,7 +142,9 @@ const now = atom({ plugin: 'agent-board', key: 'now' } as const, 0)
 const hasTaskTools = atom({ plugin: 'agent-board', key: 'hasTaskTools' } as const, true)
 
 const expanded = atom({ plugin: 'agent-board', key: 'expanded' } as const, '')
+const pressResults = atom({ plugin: 'agent-board', key: 'pressResults' } as const, {} as Record<string, PressResult>)
 const answer = atom({ plugin: 'agent-board', key: 'answer' } as const, null as ProgressAnswer | null)
+const resolveResult = atom({ plugin: 'agent-board', key: 'resolveResult' } as const, null as ResolveResult | null)
 const isNotifyOn = atom({ plugin: 'agent-board', key: 'isNotifyOn' } as const, true)
 // The person's /config theme, which picks the dark or light 和色 set.
 const theme = atom({ plugin: 'agent-board', key: 'theme' } as const, 'dark')
@@ -170,7 +175,9 @@ const wordsOf = async ($: EngineInterface): Promise<Strings> => STRINGS[langOf(a
 let isPolling = false
 let isTurnRunning = false
 let writes: Promise<unknown> = Promise.resolve()
+let settingSaves: Promise<unknown> = Promise.resolve()
 let askSeq = 0
+let pressSeq = 0
 let isPaneOpen = false
 let hasNoPaneSurface = false
 let hasPaneOpenAnswer = false
@@ -279,9 +286,20 @@ const moveFile = async ($: EngineInterface, from: string, to: string, isWin: boo
   return ran !== null && ran.exitCode === 0
 }
 
-// A rename that never replaces a file already there. `mv -n` answers 0 when it skips one, so
-// the move happened only if the source is gone.
+// A short Node child avoids a cold PowerShell start on Windows. Linking this session's own file
+// refuses an existing target, so another session's ledger is never replaced. The move command
+// stays for volumes without hard links and computers without Node on their path. `mv -n` also
+// answers 0 when it skips a target, so success requires the source to be gone.
 const placeFile = async ($: EngineInterface, from: string, to: string, isWin: boolean): Promise<boolean> => {
+  const linked = await $.process.run(['node', '-e', LEDGER_LINK, '--', from, to], { timeoutMs: 10000 }).catch(() => null)
+  if (linked?.exitCode === 0) return !(await $.fs.exists(from))
+  // Codes 70 to 72 are also common exit codes of other programs, so a `node` wrapper failing on
+  // its own reaches the move command unless the ledger is really there.
+  if (linked?.exitCode === LINK_EXISTS && await $.fs.exists(to)) return false
+  // The ledger is in place but this session's temp could not be removed at once (another program
+  // held it open). It is only a second name for the same bytes, so removing it again is safe.
+  if (linked?.exitCode === LINK_KEPT_SOURCE && await $.fs.exists(to)) return await removeFiles($, [from], isWin)
+
   const argv = isWin
     ? ['powershell', '-NoProfile', '-Command', `Move-Item -LiteralPath ${psQuote(from)} -Destination ${psQuote(to)} -ErrorAction Stop`]
     : ['mv', '-n', from, to]
@@ -415,7 +433,7 @@ const pruneAnswered = async ($: EngineInterface, path: string, projects: readonl
   await pollQuestions($, path, projects, true)
 }
 
-const pollQuestions = async ($: EngineInterface, path: string, projects: readonly ProgressProject[], isSettled = false, captured: readonly PendingTurn[] = [], answeredTurns: readonly QuestionAnswerEvidence[] = []): Promise<boolean> => {
+const pollQuestions = async ($: EngineInterface, path: string, projects: readonly ProgressProject[], isSettled = false, captured: readonly PendingTurn[] = [], answeredTurns: readonly QuestionAnswerEvidence[] = [], resolveId?: string): Promise<boolean> => {
   const file = questionsPath(path)
   let outcome: 'ok' | 'race' | 'fault' = 'fault'
   try {
@@ -481,21 +499,24 @@ const pollQuestions = async ($: EngineInterface, path: string, projects: readonl
       const captures = await questionCapturesFor($, path)
       if (parsed === null || captures === null) return AGAIN
       const current = withCaptures(parsed, captures)
-      let observed = observe(current, proofs ?? undefined)
+      const baseline = resolveId === undefined ? current : resolveQuestion(current, resolveId, at)
+      let observed = observe(baseline, proofs ?? undefined)
       for (const record of observed.records) {
         if (record.source === undefined) continue
         if (record.isUnresolved && !captures.some(capture => captureJson(capture.record, capture.disposition) === captureJson(record, 'unresolved'))) await keepQuestionCapture($, path, record, 'unresolved')
         if (record.isUnresolved === false && current.records.some(old => old.id === record.id && old.isUnresolved === true)) await keepQuestionCapture($, path, record, 'resolved')
       }
+      const retiredResolutions = resolvedQuestionsToRetire(baseline, projects, mirror, pending)
       for (const old of current.records) {
-        if (old.isPresent && !observed.records.some(record => record.id === old.id && record.isPresent && record.isWaiting)) await keepQuestionProof($, path, 'retired', sha256(old.id))
+        if ((old.isPresent && !observed.records.some(record => record.id === old.id && ((record.isPresent && record.isWaiting) || record.resolvedAt !== undefined))) || retiredResolutions.includes(old.id)) await keepQuestionProof($, path, 'retired', sha256(old.id))
       }
       proofs = await questionProofsFor($, path)
       if (proofs === null) return AGAIN
       const keptCaptures = await questionCapturesFor($, path)
       if (keptCaptures === null) return AGAIN
       // The retirement proof must not outrun the resolution just captured above.
-      observed = observe(withCaptures(current, keptCaptures), proofs)
+      const kept = withCaptures(current, keptCaptures)
+      observed = observe(resolveId === undefined ? kept : resolveQuestion(kept, resolveId, at), proofs)
       expected = questionsJson(observed)
       return questionsJson(observed) === questionsJson(parsed) ? null : questionsJson(observed)
     }, undefined, async (target, text) => {
@@ -586,21 +607,36 @@ const pollAnsweredQuestions = async ($: EngineInterface, path: string, projects:
 
 // Marks one question answered, or lists it again: only progress-answered.json changes, never a
 // block, and nothing is sent to any session. Read, changed, written and read back in the write
-// queue, so a press in another session or the board script is kept. False when it did not stick.
-const setAnswered = async ($: EngineInterface, item: WaitingItem, isHidden: boolean): Promise<boolean> => {
-  if (item.hideKey === '') return false
+// queue, so a press in another session or the board script is kept. A failure says why it did not stick.
+const setAnswered = async ($: EngineInterface, item: WaitingItem, isHidden: boolean): Promise<{ isDone: true } | { isDone: false; reason: 'notFound' | 'progressUnreadable' | 'ledgerUnreadable' | 'writeFailed' }> => {
+  if (item.hideKey === '') return { isDone: false, reason: 'notFound' }
   const snap = await read($, snapshot)
-  if (!(await pollQuestions($, snap.path || (await progressPath($)), snap.projects))) return false
+  try {
+    await readText($, snap.path || (await progressPath($)))
+  } catch {
+    return { isDone: false, reason: 'progressUnreadable' }
+  }
+  if (!(await pollQuestions($, snap.path || (await progressPath($)), snap.projects))) return { isDone: false, reason: 'ledgerUnreadable' }
   const ledger = await read($, questionLedger)
   const currentView = buildView(snap.projects, [], await read($, mine), await $.clock.now(), 0, {}, await wordsOf($), await read($, hiddenAsks), {}, ledger, await questionProofsFor($, snap.path || (await progressPath($))), await pendingTurns($))
-  if (![...currentView.waiting, ...(currentView.reminder ?? []), ...(currentView.older ?? []), ...currentView.hidden].some(one => (!isHidden || one.canHide !== false) && one.hideKey === item.hideKey && one.project === item.project && one.text === item.text && one.note === item.note)) return false
+  if (![...currentView.waiting, ...(currentView.reminder ?? []), ...(currentView.older ?? []), ...currentView.hidden].some(one => (!isHidden || one.canHide !== false) && one.hideKey === item.hideKey && one.project === item.project && one.text === item.text && one.note === item.note)) return { isDone: false, reason: 'notFound' }
   const file = answeredPath(snap.path || (await progressPath($)))
+  let reason: 'notFound' | 'progressUnreadable' | 'ledgerUnreadable' | 'writeFailed' = 'writeFailed'
   const list = await enqueue(async () => {
-    const fresh = parseProgress(await readText($, snap.path || (await progressPath($))))
-    if (!(await pollQuestions($, snap.path || (await progressPath($)), fresh))) return null
+    let fresh: ProgressProject[]
+    try {
+      fresh = parseProgress(await readText($, snap.path || (await progressPath($))))
+    } catch {
+      reason = 'progressUnreadable'
+      return null
+    }
+    if (!(await pollQuestions($, snap.path || (await progressPath($)), fresh))) {
+      reason = 'ledgerUnreadable'
+      return null
+    }
     const latest = await read($, questionLedger)
     const current = buildView(fresh, [], await read($, mine), await $.clock.now(), 0, {}, await wordsOf($), await read($, hiddenAsks), {}, latest, await questionProofsFor($, snap.path || (await progressPath($))), await pendingTurns($))
-    if (![...current.waiting, ...(current.reminder ?? []), ...(current.older ?? []), ...current.hidden].some(one => (!isHidden || one.canHide !== false) && one.hideKey === item.hideKey && one.project === item.project && one.text === item.text && one.note === item.note)) return null
+    if (![...current.waiting, ...(current.reminder ?? []), ...(current.older ?? []), ...current.hidden].some(one => (!isHidden || one.canHide !== false) && one.hideKey === item.hideKey && one.project === item.project && one.text === item.text && one.note === item.note)) { reason = 'notFound'; return null }
     await rewrite(
       $,
       file,
@@ -615,11 +651,11 @@ const setAnswered = async ($: EngineInterface, item: WaitingItem, isHidden: bool
     )
     return parseAnswered(await readText($, file))
   }).catch(() => null)
-  if (list === null || list.includes(item.hideKey) !== isHidden) return false
+  if (list === null || list.includes(item.hideKey) !== isHidden) return { isDone: false, reason }
   await update($, hiddenAsks, () => list)
   await refreshStatus($)
   await writeDashboard($, true)
-  return true
+  return { isDone: true }
 }
 
 // A task with no time of its own is aged from when its words were first seen, kept in
@@ -711,7 +747,10 @@ const poll = async ($: EngineInterface): Promise<void> => {
     const stat = await $.fs.stat(path).catch(() => undefined)
     if (stat === undefined) {
       if (Object.keys(await read($, firstSeen)).length > 0) await update($, firstSeen, () => ({}))
-      if (!previous.isMissing || previous.path !== path) await update($, snapshot, () => ({ ...EMPTY, path }))
+      if (!previous.isMissing || previous.path !== path) {
+        await update($, resolveResult, () => null)
+        await update($, snapshot, () => ({ ...EMPTY, path }))
+      }
       return
     }
     const isSame = previous.path === path && previous.mtimeMs === stat.mtimeMs && previous.size === stat.size
@@ -739,12 +778,22 @@ const poll = async ($: EngineInterface): Promise<void> => {
       }))
       await pollSeen($, path, projects, true)
       await pollAnsweredQuestions($, path, projects)
+      const result = await read($, resolveResult)
+      if (result !== null) {
+        const view = buildView(projects, [], await read($, mine), await $.clock.now(), 0, {}, await wordsOf($), await read($, hiddenAsks), {}, await read($, questionLedger), await questionProofsFor($, path), await pendingTurns($))
+        const rows = [...view.stopped, ...view.recent]
+        const isDrawn = result.kind === 'changed'
+          ? rows.some(row => result.key.startsWith(`${row.key}::`))
+          : rows.flatMap(row => row.questions ?? []).some(question => question.questionId === result.questionId)
+        if (!isDrawn) await update($, resolveResult, () => null)
+      }
       await noteDone($, projects)
       isPrunePending = true
       await refreshStatus($)
       await writeDashboard($)
       await remind($)
     } catch (error) {
+      await update($, resolveResult, () => null)
       await update($, snapshot, () => ({ ...EMPTY, path, isMissing: false, error: messageOf(error) }))
     }
   } finally {
@@ -786,11 +835,11 @@ const pendingTurns = async ($: EngineInterface): Promise<PendingTurn[]> => {
 
 // progress.html beside progress.md: the file's view and pending turns, at most once a minute
 // and only when it changed.
-const writeDashboard = async ($: EngineInterface, force = false): Promise<string> => {
+const writeDashboard = async ($: EngineInterface, force = false): Promise<{ path: string; problem?: string }> => {
   const snap = await read($, snapshot)
   const at = await $.clock.now()
   const path = dashboardPath(snap.path || (await progressPath($)))
-  if (!force && at - dashboardAt < 60 * 1000) return path
+  if (!force && at - dashboardAt < 60 * 1000) return { path }
   const s = await wordsOf($)
   const view = {
     ...buildView(snap.projects, [], null, at, await read($, today), await read($, doneSeen), s, await read($, hiddenAsks), await read($, firstSeen), await read($, questionLedger), await questionProofsFor($, snap.path || (await progressPath($))), await pendingTurns($)),
@@ -799,17 +848,27 @@ const writeDashboard = async ($: EngineInterface, force = false): Promise<string
   const pending = await pendingTurns($)
   const date = new Date(at)
   const html = dashboardHtml(view, s, snap.path, s.dashStamp(`${localDay(at)} ${pad2(date.getHours())}:${pad2(date.getMinutes())}`), pending)
-  dashboardAt = at
-  if (html === lastDashboard) return path
-  lastDashboard = html
-  await $.fs.write(path, html).catch(() => undefined)
-
-  return path
+  if (!force && html === lastDashboard) {
+    dashboardAt = at
+    return { path }
+  }
+  try {
+    await $.fs.write(path, html)
+    dashboardAt = at
+    lastDashboard = html
+    return { path }
+  } catch (error) {
+    const failure = error as { code?: string; message?: string } | null
+    const code = failure?.code ?? /\b(EACCES|EPERM|EROFS|EBUSY|EAGAIN|ENOSPC|EISDIR|ENOENT|ENOTDIR|EIO|EFBIG|EMFILE|ENFILE|ENAMETOOLONG)\b/.exec(failure?.message ?? String(error))?.[1]
+    return { path, problem: s.boardStorageFailed(s.fileNamed(path.split(/[\\/]/).pop() ?? ''), plainReason(s, code ?? '')) }
+  }
 }
 
 // Opens progress.html in the default browser: a window of its own on the desktop.
-const openDashboard = async ($: EngineInterface): Promise<boolean> => {
-  const path = await writeDashboard($, true)
+const openDashboard = async ($: EngineInterface): Promise<string> => {
+  const s = await wordsOf($)
+  const { path, problem } = await writeDashboard($, true)
+  if (problem !== undefined) return problem
   const argv = (await isWindows($, path))
     ? ['cmd', '/c', 'start', '', path]
     : (await $.env.get('HOME'))?.startsWith('/Users/')
@@ -817,7 +876,8 @@ const openDashboard = async ($: EngineInterface): Promise<boolean> => {
       : ['xdg-open', path]
   const ran = await $.process.run(argv, { timeoutMs: 10000 }).catch(() => null)
 
-  return ran !== null && ran.exitCode === 0
+  const file = (await read($, snapshot)).path || (await progressPath($))
+  return ran !== null && ran.exitCode === 0 ? s.windowOpened() : s.windowFailed(path.split(/[\\/]/).pop(), file.split(/[\\/]/).pop())
 }
 
 const openLiveBoard = async ($: EngineInterface, path: string, s: Strings): Promise<{ url: string | null; needsInstall: boolean }> => {
@@ -997,7 +1057,7 @@ const countToday = async ($: EngineInterface): Promise<void> => {
 }
 
 // Keep the original month and timestamp across retries, including a module reload.
-const journal = ($: EngineInterface, entries: ReadonlyArray<Omit<JournalEntry, 'at'>> = [], storedKey?: string): Promise<void> => {
+const journal = ($: EngineInterface, entries: ReadonlyArray<Omit<JournalEntry, 'at'>> = [], storedKey?: string, outcome?: { isSaved: boolean; isDeferred?: boolean }): Promise<void> => {
   let hasPending = entries.length > 0
   let key = storedKey ?? ''
   return enqueue(async () => {
@@ -1076,6 +1136,9 @@ const journal = ($: EngineInterface, entries: ReadonlyArray<Omit<JournalEntry, '
     if (hasFailed) throw new Error('JOURNAL_NOT_VERIFIED')
     if (hasPending) {
       await countToday($)
+      if (key === `pendingJournal:${await $.session.id()}`) {
+        await update($, pressResults, results => Object.fromEntries(Object.entries(results).filter(([, result]) => !Object.values(STRINGS).some(words => result.text === words.journalFailed))))
+      }
       journalNoticesShown.delete(key)
       if (journalNoticeKey === key) {
         await update($, answer, current => Object.values(STRINGS).some(words => current?.text === words.journalFailed) ? null : current)
@@ -1083,12 +1146,20 @@ const journal = ($: EngineInterface, entries: ReadonlyArray<Omit<JournalEntry, '
       }
     }
   }).catch(async () => {
+    if (outcome !== undefined) outcome.isSaved = false
     try {
+      if (outcome !== undefined) {
+        const current = await read($, answer)
+        outcome.isDeferred = current?.isAsking === true || current?.copied !== undefined
+      }
       if (!hasPending || key !== `pendingJournal:${await $.session.id()}` || journalNoticesShown.has(key)) return
       const s = await wordsOf($)
       let isShown = false
       await update($, answer, current => {
-        if (current?.isAsking || current?.copied !== undefined) return current
+        if (current?.isAsking || current?.copied !== undefined) {
+          if (outcome !== undefined) outcome.isDeferred = true
+          return current
+        }
         isShown = true
         return { question: s.journalNoticeTitle, text: s.journalFailed, isAsking: false }
       })
@@ -1317,6 +1388,7 @@ const summarize = async (
   prompt: string,
   answer: string,
   onSilence: 'sum' | 'keep' | 'retry' = 'sum',
+  isQuestionDropped = false,
 ): Promise<{ digest: Digest; now: number; s: Strings } | null> => {
   const s = await wordsOf($)
   const steps = mirror.tasks.map(task => `- [${task.status === 'completed' ? 'x' : ' '}] ${task.subject}`).join('\n')
@@ -1326,7 +1398,7 @@ const summarize = async (
     effort: 'low',
     prompt: s.digestPrompt(requestData(mirror.firstPrompt), requestData(prompt), replyData(answer), mirror.title, mirror.context, steps),
   })
-  const question = lastQuestion(answer)
+  const question = isQuestionDropped ? null : lastQuestion(answer)
   if (asked?.isAnswered !== true && question === null) {
     if (onSilence === 'retry') throw new Error(NO_SUMMARY)
     if (onSilence === 'keep') return null
@@ -1334,6 +1406,12 @@ const summarize = async (
   const parsed = asked?.isAnswered === true ? parseDigest(asked.text) : null
   const empty: Digest = { title: '', context: '', done: '', next: '', ask: '', why: '' }
   const digest: Digest = { ...empty, ...parsed }
+  if (isQuestionDropped) {
+    digest.ask = ''
+    digest.why = ''
+  }
+  // A late reply with only a question has no work to fold after the newer prompt answered it.
+  if (isQuestionDropped && digest.done === '' && digest.next === '') return null
   if (digest.ask === '' && question !== null) {
     digest.ask = clip(question, 48)
     digest.why = question
@@ -1373,6 +1451,7 @@ const digestTurn = async ($: EngineInterface, prompt: string, answer: string, ha
 // back, so what can be written without it is.
 // A turn older than one already folded in (a file taken again after a later turn of the same
 // session got through, its end included) changes nothing: its steps would stand over newer ones.
+// A turn older than the latest prompt but newer than the last folded turn brings its finished steps, never its question.
 // Completion hashes always refer to the raw owner, before prompt projection.
 const agentProjection = async ($: EngineInterface, id: string, raw: ProgressMirror | undefined): Promise<{ mirror: ProgressMirror | undefined; barrier: number }> => {
   const completion = await completedMirror($, `agent:${id}`, raw)
@@ -1402,13 +1481,20 @@ const takeAgentTurns = async ($: EngineInterface, turns: readonly AgentTurn[], a
   const newest = normalizeTurnOrder(stored?.turnOrder) ?? -1
   const promptBarrier = normalizeTurnOrder(stored?.promptOrder) ?? -1
   const barrier = Math.max(stored?.confirmedAt ?? 0, completion.barrier)
-  const isNewer = (turn: AgentTurn): boolean => (turnOrder(turn) ?? newest) >= newest && (promptBarrier < 0 || (turnOrder(turn) ?? -1) >= promptBarrier) && (barrier === 0 || (turnOrder(turn) ?? -1) > barrier * 2 + 1)
+  const isAfterLast = (turn: AgentTurn): boolean => (turnOrder(turn) ?? newest) >= newest && (barrier === 0 || (turnOrder(turn) ?? -1) > barrier * 2 + 1)
+  const isAfterPrompt = (turn: AgentTurn): boolean => promptBarrier < 0 || (turnOrder(turn) ?? -1) >= promptBarrier
+  const isNewer = (turn: AgentTurn): boolean => isAfterLast(turn) && isAfterPrompt(turn)
+  // A turn written before the person's latest prompt but read after it (#145) still brings its finished
+  // work; it may not reopen the question that prompt answered. A turn with no clock stays out.
+  const isLate = (turn: AgentTurn): boolean => turnOrder(turn) !== undefined && isAfterLast(turn) && !isAfterPrompt(turn)
   const digested = turnsToDigest(turns.map(turn => isBoardTurn(turn) ? { ...turn, event: 'end' as const } : turn.event === 'end' && lastQuestion(turn.answer, true) !== null ? { ...turn, event: 'turn' as const } : turn))
   const boardTurns = new Set<AgentTurn>()
   let hasRestoredQuestion = false
+  let hasLateWork = false
   for (const [index, turn] of turns.entries()) {
-    if (!isNewer(turn)) continue
-    if (turn.event === 'end') {
+    if (!isNewer(turn) && !isLate(turn)) continue
+    const isLateTurn = isLate(turn)
+    if (turn.event === 'end' && !isLateTurn) {
       mirror = { ...mirror, promptQuestion: null }
       hasRestoredQuestion = false
     }
@@ -1423,6 +1509,7 @@ const takeAgentTurns = async ($: EngineInterface, turns: readonly AgentTurn[], a
     }
     // Known only now for Codex, whose Stop leaves the request out.
     if (isBoardTurn({ ...turn, prompt, answer })) {
+      if (isLateTurn) continue
       boardTurns.add(turn)
       const restored = restoreAgentBoardQuestion(mirror, { ...turn, prompt, answer }, at)
       if (restored !== null) {
@@ -1431,13 +1518,16 @@ const takeAgentTurns = async ($: EngineInterface, turns: readonly AgentTurn[], a
       }
       continue
     }
-    mirror = { ...mirror, promptQuestion: null }
-    hasRestoredQuestion = false
+    if (!isLateTurn) {
+      mirror = { ...mirror, promptQuestion: null }
+      hasRestoredQuestion = false
+    }
     if (mirror.firstPrompt === '' && prompt !== '') mirror = { ...mirror, firstPrompt: promptKey(prompt) }
     if (answer === '' || answerKey(answer) === mirror.lastAnswer) continue
+    if (isLateTurn) hasLateWork = true
     if (digested.has(index)) {
       mirror = answerTurns(mirror)
-      const summed = await summarize($, mirror, prompt, answer, isLastTry ? 'keep' : 'retry')
+      const summed = await summarize($, mirror, prompt, answer, isLastTry ? 'keep' : 'retry', isLateTurn)
       if (summed !== null) mirror = applyDigest(mirror, summed.digest, summed.now, summed.s)
     }
     mirror = { ...mirror, lastAnswer: answerKey(answer) }
@@ -1445,7 +1535,10 @@ const takeAgentTurns = async ($: EngineInterface, turns: readonly AgentTurn[], a
   // A board look is not an answer: its question stays waiting (#144). Board-request prompts never
   // come here; takeAgentPrompt skips them.
   const evidence = turns.filter(turn => isNewer(turn) && !boardTurns.has(turn))
-  const latest = turns.filter(isNewer).at(-1)
+  // A late turn's question was answered by the prompt that came after it, whichever session took that
+  // prompt: the prompt's stored time stands in as the answer, so the ledger does not open it again (#145).
+  const answers = hasLateWork && promptBarrier >= 0 ? [...evidence, { ...last, event: 'prompt' as const, prompt: '', answer: '', at: Math.floor(promptBarrier / 2) }] : evidence
+  const latest = turns.filter(turn => isNewer(turn) || isLate(turn)).at(-1)
   // Only older turns: the block already says more than they do, and writing it again would
   // bring back one archived since.
   if (mirror.tasks.length === 0 || latest === undefined) {
@@ -1453,7 +1546,7 @@ const takeAgentTurns = async ($: EngineInterface, turns: readonly AgentTurn[], a
     return
   }
   const isReplay = turns.some(turn => boardTurns.has(turn) && turnOrder(turn) === newest)
-  if (turns.filter(isNewer).every(turn => boardTurns.has(turn)) && !hasRestoredQuestion && !isReplay) return
+  if (turns.filter(isNewer).every(turn => boardTurns.has(turn)) && !hasRestoredQuestion && !isReplay && !hasLateWork) return
   const latestWork = turns.filter(turn => isNewer(turn) && !boardTurns.has(turn)).at(-1)
   const state = boardTurns.has(latest) && hasRestoredQuestion ? 'waiting'
     : latestWork === undefined ? mirror.state : isAllDone(mirror) ? 'done' : latestWork.event === 'end' ? 'ended' : 'waiting'
@@ -1468,7 +1561,7 @@ const takeAgentTurns = async ($: EngineInterface, turns: readonly AgentTurn[], a
       return
     }
     await $.store.set(owner, written)
-    rememberAnswered(evidence)
+    rememberAnswered(answers)
     const path = await progressPath($)
     const isKept = (check: string): boolean =>
       extractAutoBlock(check, written.sessionId) === extractAutoBlock(upsertAutoBlock(check, written, s), written.sessionId)
@@ -1483,7 +1576,7 @@ const takeAgentTurns = async ($: EngineInterface, turns: readonly AgentTurn[], a
     if (hasMoved) return
     // Another session's write can undo it three times over; only a block read back counts.
     if (!isKept(await readText($, path))) throw new Error(NOT_KEPT)
-    await pollAnsweredQuestions($, path, undefined, evidence)
+    await pollAnsweredQuestions($, path, undefined, answers)
     await poll($)
   })
   if (hasMoved) {
@@ -1547,6 +1640,10 @@ const setupFailures = new Set<string>()
 let backgroundConnect: Promise<void> | null = null
 
 const workerProblem = (error: unknown): string => /\b(?:E[A-Z]{2,15}|[A-Z]{3,}_[A-Z_]+)\b/.exec(messageOf(error))?.[0] ?? 'SETUP_FAILED'
+const workerFailure = (s: Strings, problem: string): string => {
+  const code = recoveryUnreadableCode(problem)
+  return code === undefined ? s.connectWorkerFailed(problem) : s.connectRecoveryUnreadable(code)
+}
 
 const connectAgents = async ($: EngineInterface, mode: ConnectMode, options: PluginOptions, change: Partial<LegacyConnectRequest> = {}, previous?: LegacyConnectRequest): Promise<ConnectReply> => {
   const s = await wordsOf($)
@@ -1611,8 +1708,45 @@ const nodeVersion = async ($: EngineInterface): Promise<string | null> => {
   return ran !== null && ran.exitCode === 0 ? nodeVersionOf(ran.stdout) : null
 }
 
+const connectRecord = async ($: EngineInterface): Promise<Partial<ConnectState> | null> => {
+  const home = (await $.env.get('USERPROFILE')) ?? (await $.env.get('HOME')) ?? ''
+  try {
+    const state = JSON.parse(await readText($, connectRecordPath(home))) as Partial<ConnectState> | null
+    return state?.version === 1 ? state : null
+  } catch {
+    // An unreadable record cannot authorize automatic connect.
+    return null
+  }
+}
+
+const ownConnectConfig = async ($: EngineInterface): Promise<boolean> => {
+  const home = (await $.env.get('USERPROFILE')) ?? (await $.env.get('HOME')) ?? ''
+  const config = (await $.env.get('CLAUDE_CONFIG_DIR')) ?? ''
+  return hasOwnConnectData(home, config, `${home}/.claude/progress.md`, await isWindows($, home))
+}
+
+const ownConnectData = async ($: EngineInterface): Promise<boolean> => {
+  const path = await progressPath($)
+  const home = (await $.env.get('USERPROFILE')) ?? (await $.env.get('HOME')) ?? ''
+  const config = (await $.env.get('CLAUDE_CONFIG_DIR')) ?? ''
+  const isWin = await isWindows($, path)
+  if (!hasOwnConnectData(home, config, path, isWin)) return false
+  // A synced progress file becomes this machine's board only after a manual connect.
+  const state = await connectRecord($)
+  const connectedProgress = typeof state?.connectedProgress === 'string' ? state.connectedProgress : undefined
+  return hasOwnConnectData(home, config, path, isWin, connectedProgress)
+}
+
 const autoConnect = async ($: EngineInterface, options: PluginOptions): Promise<void> => {
-  if (options.autoConnect === false) return
+  if (options.autoConnect === false || await ownConnectData($)) {
+    if (options.autoConnect !== false && await $.store.get('autoConnectOff') !== true && (await connectRecord($))?.disabled !== true) {
+      if (!await ownConnectConfig($)) {
+        const s = await wordsOf($)
+        await update($, answer, () => ({ question: s.connectAttention, text: s.setupProgressAutoOff, isAsking: false }))
+      }
+    }
+    return
+  }
   const reply = await connectAgents($, 'auto', options)
   setupFailures.clear()
   if (reply.result === null) return
@@ -1638,7 +1772,7 @@ const startAutoConnect = ($: EngineInterface, options: PluginOptions): void => {
     if (setupFailures.has(reason)) return
     setupFailures.add(reason)
     const s = await wordsOf($)
-    const text = s.connectWorkerFailed(reason)
+    const text = workerFailure(s, reason)
     await update($, answer, () => ({ question: s.connectAttention, text, isAsking: false }))
     await $.ui.notify(text, { title: s.connectAttention }).catch(() => undefined)
   }).finally(() => { backgroundConnect = null })
@@ -2304,27 +2438,38 @@ const buildReport = async ($: EngineInterface, days: number): Promise<string> =>
 }
 
 // Shows `text` under the pane's box, copied to the clipboard when the surface allows.
-const showCopied = async ($: EngineInterface, question: string, text: string, surface?: RenderSurface): Promise<void> => {
+const showCopied = async ($: EngineInterface, question: string, text: string, surface?: RenderSurface): Promise<PressOutcome> => {
   const copied = await $.ui
     .copy(surface === undefined ? { text } : { text, surface })
     .then(result => result.isCopied)
     .catch(() => false)
   await update($, answer, () => ({ question, text, isAsking: false, copied }))
+  const s = await wordsOf($)
+  return copied ? { text: s.copied } : { text: s.pressCopyFallback, copyText: text, tone: 'alert' }
 }
 
 // The language from the four places it can come from (strings.ts resolveLang).
-const settleLang = async ($: EngineInterface, options: PluginOptions): Promise<void> => {
+const settleLang = async ($: EngineInterface, options: PluginOptions, preference?: Lang | null): Promise<void> => {
   const settings = (await $.settings.read().catch(() => ({}))) as { language?: unknown }
-  const stored = await $.store.get('lang')
+  const stored = preference === undefined ? await $.store.get('lang') : preference
   const chosen = resolveLang(options.language, stored, settings.language, await $.env.get('LANG'))
   await update($, lang, () => chosen)
 }
 
-const setNotify = async ($: EngineInterface, isOn: boolean): Promise<void> => {
-  await update($, isNotifyOn, () => isOn)
+// Each press reads the last saved setting, even when an earlier save failed.
+const saveSetting = <T,>(job: () => Promise<T>): Promise<T> => {
+  const run = settingSaves.then(job, job)
+  settingSaves = run.catch(() => undefined)
+  return run
+}
+
+const setNotify = ($: EngineInterface, requested?: boolean): Promise<boolean> => saveSetting(async () => {
+  const isOn = requested ?? !(await read($, isNotifyOn))
   if (isOn) await $.store.delete('notifyOff')
   else await $.store.set('notifyOff', true)
-}
+  await update($, isNotifyOn, () => isOn)
+  return isOn
+})
 
 const settle = async ($: EngineInterface, isWriteBlocking = true): Promise<void> => {
   const at = await $.clock.now()
@@ -2446,19 +2591,24 @@ export const register: Register = (on, options) => {
     const language = /^(?:lang|language|語言|语言)\s*(\S*)$/i.exec(arg)
     if (language !== null) {
       const wanted = language[1] ?? ''
-      if (wanted.toLowerCase() === 'auto') await $.store.delete('lang')
-      else if (langOf(wanted) !== null) await $.store.set('lang', langOf(wanted))
-      else return { text: (await wordsOf($)).langUnknown }
-      await settleLang($, options)
+      const preference = wanted.toLowerCase() === 'auto' ? null : langOf(wanted)
+      if (preference === null && wanted.toLowerCase() !== 'auto') return { text: (await wordsOf($)).langUnknown }
+      const hasOwnData = await ownConnectData($)
+      if (!hasOwnData) {
+        if (preference === null) await $.store.delete('lang')
+        else await $.store.set('lang', preference)
+      }
+      await settleLang($, options, hasOwnData ? preference : undefined)
       $.ui.invalidate('ui.render')
       await refreshStatus($)
       // The board script and the board commands take the language just settled, `auto`
       // included, at once and at every later connect, so a session in another language, or a
       // `/progress connect` run by hand with autoConnect off, leaves them so.
       try {
+        if (hasOwnData) return { text: (await wordsOf($)).langSet }
         await connectAgents($, 'language', options, { boardLang: (await wordsOf($)).lang })
         await autoConnect($, options)
-      } catch (error) { return { text: (await wordsOf($)).connectWorkerFailed(workerProblem(error)) } }
+      } catch (error) { return { text: workerFailure(await wordsOf($), workerProblem(error)) } }
 
       return { text: (await wordsOf($)).langSet }
     }
@@ -2470,8 +2620,7 @@ export const register: Register = (on, options) => {
       return { text: moved === 0 ? s.tidyNothing : s.tidyMoved(moved) }
     }
     if (/^(open|window|html|視窗|窗口|網頁|网页)$/i.test(arg)) {
-      const path = dashboardPath((await read($, snapshot)).path || (await progressPath($)))
-      return { text: (await openDashboard($)) ? s.windowOpened(path) : s.windowFailed(path) }
+      return { text: await openDashboard($) }
     }
     if (/^(同步|sync)$/i.test(arg)) {
       await resync($)
@@ -2485,13 +2634,24 @@ export const register: Register = (on, options) => {
     if (connect !== null) {
       try {
         const mode = /^(status|狀態|状态)$/i.test(connect[1] ?? '') ? 'status' : connect[1] !== undefined ? 'remove' : 'connect'
+        // Status describes the finished startup attempt, including a skipped gate.
+        if (mode === 'status') await backgroundConnect
+        const hasOwnData = await ownConnectData($)
+        if (mode === 'status' && hasOwnData) {
+          const setup = setupSeed(await $.store.get('ownSetupState'))
+          return { text: [await ownConnectConfig($) ? s.setupOwnData : await $.store.get('autoConnectOff') === true || (await connectRecord($))?.disabled === true ? s.setupRemoved : s.setupProgressAutoOff, ...(setup === undefined ? [] : setupLines(setup, s))].join('\n') }
+        }
         const reply = await connectAgents($, mode, options)
+        if (hasOwnData) {
+          if (reply.state.setup === undefined) await $.store.delete('ownSetupState')
+          else await $.store.set('ownSetupState', reply.state.setup)
+        }
         if (mode === 'status') {
           const text = reply.state.setup === undefined ? reply.state.disabled ? s.setupRemoved : s.setupNoState : setupLines(reply.state.setup, s).join('\n')
           return { text: await read($, hasPendingQuestionsProblem) ? `${text}\n${s.inboxQuestionNotKept}` : text }
         }
         return { text: reply.result?.text ?? s.setupNoState }
-      } catch (error) { return { text: s.connectWorkerFailed(workerProblem(error)) } }
+      } catch (error) { return { text: workerFailure(s, workerProblem(error)) } }
     }
     const add = /^(?:加|新增|add|[+＋])\s*(.*)$/is.exec(arg)
     if (add !== null) return { text: await quickAdd($, add[1] ?? '') }
@@ -2507,10 +2667,10 @@ export const register: Register = (on, options) => {
     const toggle = /^(?:通知|notify|notifications)\s*(開|關|开|关|on|off)?$/i.exec(arg)
     if (toggle !== null) {
       const word = toggle[1]?.toLowerCase()
-      const isOn = word === undefined ? !(await read($, isNotifyOn)) : word === '開' || word === '开' || word === 'on'
-      await setNotify($, isOn)
-
-      return { text: isOn ? s.notifyOn : s.notifyOff }
+      try {
+        const isOn = await setNotify($, word === undefined ? undefined : word === '開' || word === '开' || word === 'on')
+        return { text: isOn ? s.notifyOn : s.notifyOff }
+      } catch { return { text: s.settingSaveFailed } }
     }
     await poll($)
     await $.store.delete('closedByPerson')
@@ -2526,8 +2686,8 @@ export const register: Register = (on, options) => {
     const progress = path || (await progressPath($))
     const { url, needsInstall } = await openLiveBoard($, progress, s)
     if (url !== null) return { text: `${s.livePageOpened}\n<${url}>` }
-    const page = dashboardPath(progress)
-    return { text: `${s.livePageFallback}\n${needsInstall ? `${s.livePageNeedsInstall}\n` : ''}${(await openDashboard($)) ? s.windowOpened(page) : s.windowFailed(page)}` }
+    // openDashboard already words the result, with the file names when the browser fails.
+    return { text: `${s.livePageFallback}\n${needsInstall ? `${s.livePageNeedsInstall}\n` : ''}${await openDashboard($)}` }
   })
 
   // Who wrote a prompt is known here, not at turn.start: only the person's own message answers
@@ -2799,13 +2959,17 @@ export const register: Register = (on, options) => {
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
     const table = $.ui.resolve(e)
     const snap = await read($, snapshot)
-    const at = (await read($, now)) || (await $.clock.now())
     const s = await wordsOf($)
     const palette = paletteFor(await read($, theme))
-    const view = {
-      ...buildView(snap.projects, await read($, here), await read($, mine), at, await read($, today), await read($, doneSeen), s, await read($, hiddenAsks), await read($, firstSeen), await read($, questionLedger), await questionProofsFor($, snap.path || (await progressPath($))), await pendingTurns($)),
-      ...(snap.tornTail ? { warning: s.progressIncomplete(snap.tornTail.tasks) } : {}),
+    const paneView = async (): Promise<View> => {
+      const latest = await read($, snapshot)
+      const currentAt = (await read($, now)) || (await $.clock.now())
+      return {
+        ...buildView(latest.projects, await read($, here), await read($, mine), currentAt, await read($, today), await read($, doneSeen), s, await read($, hiddenAsks), await read($, firstSeen), await read($, questionLedger), await questionProofsFor($, latest.path || (await progressPath($))), await pendingTurns($)),
+        ...(latest.tornTail ? { warning: s.progressIncomplete(latest.tornTail.tasks) } : {}),
+      }
     }
+    const view = await paneView()
     const ui: PaneUi = {
       Box: table.Box,
       Text: table.Text,
@@ -2815,25 +2979,25 @@ export const register: Register = (on, options) => {
     }
     if (snap.error !== null) {
       const { Box, Text } = table
+      const why = /\b(EACCES|EPERM|EROFS|EBUSY|EAGAIN|ENOSPC)\b/.exec(snap.error)?.[1]
 
       return (
         <Box flexDirection="column">
           <Text color={palette.alert}>{s.fileUnreadable}</Text>
           {await read($, hasPendingQuestionsProblem) && <Text color={palette.alert}>{s.inboxQuestionNotKept}</Text>}
-          {await read($, hasQuestionsProblem) && <Text color={palette.alert}>{s.questionsUnreadable(questionsPath(snap.path))}</Text>}
-          <Text color={palette.muted}>{snap.error}</Text>
-          <Text color={palette.muted} wrap="truncate-start">
-            {snap.path}
-          </Text>
+          {await read($, hasQuestionsProblem) && <Text color={palette.alert}>{s.questionsUnreadable()}</Text>}
+          {why !== undefined && <Text color={palette.muted}>{plainReason(s, why)}</Text>}
         </Box>
       )
     }
     const model: PaneModel = {
       view,
+      results: await read($, pressResults),
       expanded: await read($, expanded),
       revising: await read($, revising),
       opened: await read($, opened),
       answer: await read($, answer),
+      resolveResult: await read($, resolveResult),
       path: snap.path,
       width: Math.max(8, Math.min(28, e.props.bodyColumns - 4)),
       hasTaskTools: await read($, hasTaskTools),
@@ -2844,128 +3008,165 @@ export const register: Register = (on, options) => {
       palette,
       s,
     }
-    const actions: PaneActions = {
-      toggle: key => {
-        update($, expanded, open => (open === key ? '' : key)).catch(() => undefined)
-      },
-      continueHere: () => {
-        submitOwn($, s.continueText).catch(() => undefined)
-      },
-      archive: () => {
-        enqueue(() => archiveOld($, true)).catch(() => undefined)
-      },
-      archiveRow: row => {
-        const ref = row.archive
-        if (ref === null) return
-        enqueue(() => archiveOne($, ref))
-          .then(isTaken =>
-            update($, answer, () => ({ question: row.title, text: isTaken === true ? s.archivedOne(row.title) : s.archiveGone, isAsking: false })),
-          )
-          .then(() => update($, expanded, open => (open === row.key ? '' : open)))
-          .catch(error => update($, answer, () => ({ question: row.title, text: error instanceof Error && error.message === 'QUESTION_RETENTION_FAILED' ? s.questionRetentionFailed : s.boardWriteFailed, isAsking: false })))
-      },
-      confirmRow: row => {
-        if (row.confirm == null) return
-        enqueue(() => confirmOne($, row.confirm!))
-          .then(async confirmed => {
-            if (confirmed !== null) await journal($, confirmed.entries)
-            await update($, answer, current => current?.text === s.journalFailed ? current : ({ question: row.title, text: confirmed === null ? s.boardLineChanged : confirmed.isMirrorSaved ? s.confirmedDone(row.title) : s.boardWriteFailed, isAsking: false }))
-            if (confirmed !== null) await update($, expanded, open => open === row.key ? '' : open)
-          })
-          .catch(() => update($, answer, () => ({ question: row.title, text: s.boardWriteFailed, isAsking: false })))
-      },
-      takeOver: row => {
-        submitOwn($, takeOverPrompt(row, s)).catch(() => undefined)
-      },
-      handOver: row => {
-        submitOwn($, handOverPrompt(row, s)).catch(() => undefined)
-      },
-      tick: ref => {
-        enqueue(() => tickStep($, ref))
-          .then(ticked => (ticked ? journal($, [{ project: ref.project, task: ref.title, step: ref.step }]) : undefined))
-          .catch(() => undefined)
-      },
-      ask: input => {
-        if (!isQuickAdd(input)) {
-          askAside($, input).catch(() => undefined)
-          return
+    const failure = (text: string): PressOutcome => ({ text, tone: 'alert' })
+    const press = async (button: string, run: () => PressOutcome | Promise<PressOutcome>): Promise<void> => {
+      const target = pressTarget(view, button, s)
+      const initial: PressResult = { button, revision: target.revision, label: target.label, text: s.pressPending, sequence: ++pressSeq, isPending: true }
+      let revision = initial.revision
+      try {
+        // A press clears finished feedback, while other in-flight cards keep their own result.
+        await update($, pressResults, results => ({ ...Object.fromEntries(Object.entries(results).filter(([, result]) => result.isPending)), [target.key]: initial }))
+        let result: Exclude<PressOutcome, string>
+        try {
+          const value = await run()
+          result = typeof value === 'string' ? { text: value || s.pressNothing } : value
+        } catch (error) {
+          result = { text: error instanceof Error && error.message === 'QUESTION_RETENTION_FAILED' ? s.questionRetentionFailed : s.boardWriteFailed, tone: 'alert' }
         }
-        quickAdd($, input)
-          .then(text => update($, answer, () => ({ question: input.trim(), text, isAsking: false })))
-          .catch(() => undefined)
+        try {
+          const after = pressTarget(await paneView(), button, s)
+          if (after.key === target.key) revision = after.revision
+        } catch {
+          // A refresh failure must not change the outcome of an action that already finished.
+        }
+        await update($, pressResults, results => results[target.key]?.sequence === initial.sequence ? { ...results, [target.key]: { ...initial, revision, ...result, isPending: false } } : results)
+      } catch {
+        // A failed state update is also an action failure; retain a visible fallback if state recovers.
+        await update($, answer, () => ({ question: target.label, text: s.pressFailed, isAsking: false })).catch(() => undefined)
+      }
+    }
+    const submitted = async (text: string): Promise<PressOutcome> => {
+      try {
+        return (await submitOwn($, text)).drop === undefined ? s.pressSent : failure(s.pressSessionGone)
+      } catch {
+        return failure(s.pressSessionGone)
+      }
+    }
+    const hide = async (item: WaitingItem, isHidden: boolean): Promise<PressOutcome> => {
+      const result = await setAnswered($, item, isHidden)
+      if (result.isDone) return isHidden ? s.pressHidden : s.pressShown
+      const text = result.reason === 'ledgerUnreadable' ? s.pressLedgerFailed
+        : result.reason === 'progressUnreadable' ? s.pressProgressUnreadable
+          : result.reason === 'notFound' ? s.boardLineChanged : s.hideFailed
+      return failure(text)
+    }
+    const actions: PaneActions = {
+      press,
+      forget: key => update($, pressResults, results => {
+        const at = pressTarget(view, key, s).key
+        return results[at]?.button !== key ? results : Object.fromEntries(Object.entries(results).filter(([one]) => one !== at))
+      }),
+      toggle: async key => {
+        const isClosing = await read($, expanded) === key
+        await update($, expanded, open => open === key ? '' : key)
+        return isClosing ? s.pressClosed : s.pressOpened
       },
-      clearAnswer: () => {
-        update($, answer, () => null).catch(() => undefined)
+      continueHere: () => submitted(s.continueText),
+      archive: async () => {
+        const count = await enqueue(() => archiveOld($, true))
+        return count === 0 ? s.tidyNothing : s.tidyMoved(count)
       },
-      copyResume: (row, surface) => {
-        if (row.resume === null) return
-        showCopied($, s.resumeOf(row.title), row.resume, surface).catch(() => undefined)
+      archiveRow: async row => {
+        if (row.archive === null) return failure(s.archiveGone)
+        const isTaken = await enqueue(() => archiveOne($, row.archive!))
+        return isTaken ? s.archivedOne(row.title) : failure(s.archiveGone)
       },
-      report: surface => {
-        buildReport($, 7)
-          .then(text => showCopied($, s.report, text, surface))
-          .catch(() => undefined)
+      confirmRow: async row => {
+        if (row.confirm == null) return failure(s.boardLineChanged)
+        const confirmed = await enqueue(() => confirmOne($, row.confirm!))
+        if (confirmed === null) return failure(s.boardLineChanged)
+        const outcome = { isSaved: true, isDeferred: false }
+        await journal($, confirmed.entries, undefined, outcome)
+        return !outcome.isSaved && !outcome.isDeferred ? failure(s.journalFailed) : confirmed.isMirrorSaved ? s.confirmedDone(row.title) : failure(s.boardWriteFailed)
       },
-      toggleSection: id => {
-        update($, opened, list => (list.includes(id) ? list.filter(one => one !== id) : [...list, id]))
-          .then(async () => $.store.set('opened', await read($, opened)))
-          .catch(() => undefined)
+      takeOver: row => submitted(takeOverPrompt(row, s)),
+      handOver: row => submitted(handOverPrompt(row, s)),
+      tick: async ref => {
+        const ticked = await enqueue(() => tickStep($, ref))
+        if (!ticked) return failure(s.boardTickGone)
+        const outcome = { isSaved: true, isDeferred: false }
+        await journal($, [{ project: ref.project, task: ref.title, step: ref.step }], undefined, outcome)
+        return outcome.isSaved || outcome.isDeferred ? s.boardTicked(ref.step) : failure(s.journalFailed)
       },
-      answer: (item, text) => {
-        if (item.where !== 'here') return
+      ask: async input => {
+        if (input.trim() === '') return failure(s.pressEmpty)
+        if (!isQuickAdd(input)) {
+          await askAside($, input)
+          const text = (await read($, answer))?.text
+          return text === s.asideFailed || text === s.asideNotStarted ? failure(text) : s.pressAsideReady
+        }
+        const text = await quickAdd($, input)
+        await update($, answer, () => ({ question: input.trim(), text, isAsking: false }))
+        return text
+      },
+      clearAnswer: async () => { await update($, answer, () => null); return s.pressDone },
+      copyResume: (row, surface) => row.resume === null ? s.pressNothing : showCopied($, s.resumeOf(row.title), row.resume, surface),
+      report: async surface => showCopied($, s.report, await buildReport($, 7), surface),
+      toggleSection: id => saveSetting(async () => {
+        const previous = await read($, opened)
+        const isClosing = previous.includes(id)
+        const next = isClosing ? previous.filter(one => one !== id) : [...previous, id]
+        await $.store.set('opened', next)
+        await update($, opened, () => next)
+        return isClosing ? s.pressClosed : s.pressOpened
+      }),
+      answer: async (item, text) => {
+        if (item.where !== 'here') return s.pressNothing
         // A dropped or rejected submission is not resolution evidence. Keep the exact ask
         // until delivery succeeds, then recheck its producer revision and full source.
         const id = item.key.replace(/^mine::/, '')
-        const send = async (): Promise<void> => {
+        const send = async (): Promise<PressOutcome> => {
           const before = await read($, mine)
           const task = before?.tasks.find(one => one.id === id)
-          if (before === null || task === undefined || task.subject !== item.text || (task.why ?? '') !== item.note) return
+          if (before === null || task === undefined || task.subject !== item.text || (task.why ?? '') !== item.note) return failure(s.boardLineChanged)
           const source = JSON.stringify({ session: before.sessionId, project: before.project, title: before.title, context: before.context, task })
           const matches = (one: ProgressMirror): boolean => source === JSON.stringify({ session: one.sessionId, project: one.project, title: one.title, context: one.context, task: one.tasks.find(row => row.id === id) })
           const isSameAsk = async (one: ProgressMirror): Promise<boolean> => {
             const view = buildView([], [], one, await $.clock.now(), 0, {}, s, await read($, hiddenAsks), {}, await read($, questionLedger), await questionProofsFor($, await progressPath($)))
             return [...view.waiting, ...(view.reminder ?? []), ...(view.older ?? [])].some(ask => ask.key === item.key && ask.questionId === item.questionId && ask.text === item.text && ask.note === item.note)
           }
-          if (!(await isSameAsk(before))) return
-          const entered = await submitOwn($, s.answerText(item.text, text))
-          if (entered.drop !== undefined) return
+          if (!(await isSameAsk(before))) return failure(s.boardLineChanged)
+          const entered = await submitOwn($, s.answerText(item.text, text)).catch(() => ({ drop: s.pressSessionGone }))
+          if (entered.drop !== undefined) return failure(s.pressSessionGone)
           const latest = await read($, mine)
-          if (latest === null || !matches(latest) || !(await isSameAsk(latest))) return
+          if (latest === null || !matches(latest) || !(await isSameAsk(latest))) return failure(s.boardLineChanged)
           await saveMine($, one => matches(one) ? markAnswered(one, [id]) : one, true)
           await settle($)
           await update($, answer, () => ({ question: item.text, text: s.answered(text), isAsking: false }))
+          return s.pressSent
         }
-        send().catch(() => undefined)
+        return send()
       },
-      copyCommand: (item, surface) => {
-        if (item.command === null) return
-        showCopied($, s.commandOf(item.text), item.command, surface).catch(() => undefined)
+      resolve: item => {
+        const questionId = item.questionId
+        if (questionId === undefined) return
+        const result = (kind: ResolveResult['kind']): ResolveResult => ({ key: item.key, questionId, project: item.project, title: item.task, kind, text: kind === 'resolved' ? s.resolveSucceeded : kind === 'changed' ? s.resolveChanged : s.resolveFailed })
+        enqueue(async () => {
+          const snap = await read($, snapshot)
+          const path = snap.path || (await progressPath($))
+          const projects = parseProgress(await readText($, path))
+          const savedResolution = async (): Promise<boolean> => {
+            const captures = await questionCapturesFor($, path)
+            if (captures === null || !captures.some(capture => capture.disposition === 'resolved' && capture.record.id === questionId && capture.record.resolvedAt !== undefined)) return false
+            await update($, questionLedger, ledger => withCaptures(ledger, captures))
+            return true
+          }
+          if (!(await pollQuestions($, path, projects))) return result(await savedResolution() ? 'resolved' : 'failed')
+          const view = buildView(projects, [], await read($, mine), await $.clock.now(), 0, {}, s, await read($, hiddenAsks), {}, await read($, questionLedger), await questionProofsFor($, path), await pendingTurns($))
+          const items = [...view.stopped.flatMap(row => row.questions ?? []), ...view.recent.flatMap(row => row.questions ?? [])]
+          if (item.questionId === undefined || !items.some(question => question.questionId === item.questionId && question.text === item.text && question.note === item.note)) return result('changed')
+          if (!(await pollQuestions($, path, projects, false, [], [], questionId))) return result(await savedResolution() ? 'resolved' : 'failed')
+          return result((await read($, questionLedger)).records.some(record => record.id === item.questionId && record.isUnresolved === false) ? 'resolved' : 'failed')
+        }).then(value => update($, resolveResult, () => value))
+          .catch(() => update($, resolveResult, () => result('failed')))
       },
-      copyAskedResume: (item, surface) => {
-        if (item.reopen === null) return
-        showCopied($, s.resumeOf(item.task), item.reopen, surface).catch(() => undefined)
-      },
-      hide: item => {
-        setAnswered($, item, true)
-          .then(isDone => (isDone ? undefined : update($, answer, () => ({ question: item.text, text: s.hideFailed, isAsking: false }))))
-          .catch(() => undefined)
-      },
-      unhide: item => {
-        setAnswered($, item, false)
-          .then(isDone => (isDone ? undefined : update($, answer, () => ({ question: item.text, text: s.hideFailed, isAsking: false }))))
-          .catch(() => undefined)
-      },
-      revise: item => {
-        update($, revising, open => (open === reviseKey(item) ? '' : reviseKey(item))).catch(() => undefined)
-      },
-      toggleLegend: () => {
-        update($, isLegendOpen, open => !open).catch(() => undefined)
-      },
-      toggleNotify: () => {
-        read($, isNotifyOn)
-          .then(isOn => setNotify($, !isOn))
-          .catch(() => undefined)
-      },
+      copyCommand: (item, surface) => item.command === null ? s.pressNothing : showCopied($, s.commandOf(item.text), item.command, surface),
+      copyAskedResume: (item, surface) => item.reopen === null ? s.pressNothing : showCopied($, s.resumeOf(item.task), item.reopen, surface),
+      hide: item => hide(item, true),
+      unhide: item => hide(item, false),
+      revise: async item => { await update($, revising, open => open === reviseKey(item) ? '' : reviseKey(item)); return s.pressDone },
+      toggleLegend: async () => { await update($, isLegendOpen, open => !open); return s.pressDone },
+      toggleNotify: async () => { await setNotify($); return s.pressDone },
     }
 
     return drawPane(ui, model, actions)

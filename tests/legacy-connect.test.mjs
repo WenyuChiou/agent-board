@@ -1,13 +1,14 @@
 import { execFileSync, spawn, spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { once } from 'node:events'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, unlinkSync, utimesSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, unlinkSync, utimesSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { setTimeout as delay } from 'node:timers/promises'
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { pathToFileURL } from 'node:url'
+import { RELEASE_0_20_5 } from './fixtures/released.ts'
 
 const source = readFileSync(new URL('../hooks/board-script.ts', import.meta.url), 'utf8')
 const bundle = JSON.parse(source.slice(source.indexOf('export const BOARD_SCRIPT = ') + 'export const BOARD_SCRIPT = '.length))
@@ -34,6 +35,527 @@ const fixture = async fn => {
 }
 
 const taggedBoards = new Map()
+
+const dataRootHosts = f => {
+  for (const dir of ['.gemini/antigravity', '.cursor', '.hermes', '.grok', '.config/opencode', '.config/muse', '.openclaw']) mkdirSync(join(f.home, dir), { recursive: true })
+  const progress = join(f.home, '.claude', 'progress.md')
+  f.run(f.request('connect', { progress, openclawVersion: '2026.10.1' }))
+  return progress
+}
+// A board path with characters such as `~` (a Windows short name, as on CI runners) is written
+// into skills and commands as code points; read those back before looking for a folder name.
+const decoded = text => text.replace(/String\.fromCodePoint\(([\d,]+)\)/g, (_, codes) => String.fromCodePoint(...codes.split(',').map(Number)))
+const snapshot = directory => Object.fromEntries(readdirSync(directory, { withFileTypes: true }).flatMap(entry => {
+  const path = join(directory, entry.name)
+  return entry.isDirectory() ? Object.entries(snapshot(path)) : [[path, readFileSync(path, 'utf8')]]
+}))
+
+test("only a manual connect changes the machine's selected progress file", () => fixture(async f => {
+  const progress = join(f.home, 'synced', 'progress.md')
+  assert.equal(f.run(f.request('connect', { progress })).state.connectedProgress, progress)
+  assert.equal(f.run(f.request('auto', { progress })).state.connectedProgress, progress)
+  assert.equal(f.run(f.request('language', { boardLang: 'zh-TW' })).state.connectedProgress, progress)
+  assert.equal(f.run(f.request('status')).state.connectedProgress, progress)
+  const changed = f.run(f.request('connect'))
+  assert.equal(changed.state.connectedProgress, f.progress)
+  assert.equal(JSON.parse(readFileSync(f.control, 'utf8')).connectedProgress, f.progress)
+}))
+
+test('an automatic connect from a second data folder leaves hosts that report to another data folder alone and says so', () => fixture(async f => {
+  dataRootHosts(f)
+  const before = snapshot(f.home)
+  const output = f.run(f.request('auto', { progress: join(f.home, 'other-root', 'progress.md') }))
+  assert.deepEqual(snapshot(f.home), before)
+  assert.ok(output.result.problems.some(problem => problem.message === 'connectOtherData'))
+  assert.match(output.result.text, /connected to another Agent Board data folder/)
+  assert.ok(!output.result.text.includes(f.home))
+  assert.equal(output.result.done.length, 0)
+}))
+
+test('an automatic connect takes back hosts whose reporter was removed', () => fixture(async f => {
+  const previous = dataRootHosts(f)
+  const folder = join(f.home, '.claude')
+  const oldBoard = readFileSync(join(folder, 'agent-board.mjs'), 'utf8')
+  unlinkSync(join(folder, process.platform === 'win32' ? 'progress-report.ps1' : 'progress-report.sh'))
+  const progress = join(f.home, 'other-root', 'progress.md')
+  const output = f.run(f.request('auto', { progress, openclawVersion: '2026.10.1' }))
+  assert.match(output.result.text, /Repaired connections whose reporting script was removed/)
+  assert.ok(output.result.lines.findIndex(line => line.includes('Repaired connections')) < output.result.lines.length - 1)
+  assert.equal(output.result.problems.some(problem => problem.message === 'connectOtherData' || problem.message === 'connectPreserved'), false)
+  assert.ok(readFileSync(f.config, 'utf8').includes('other-root'))
+  assert.ok(!readFileSync(f.config, 'utf8').includes('.claude'))
+  assert.equal(readFileSync(join(folder, 'agent-board.mjs'), 'utf8'), oldBoard)
+  assert.equal(output.state.owned[join(folder, 'agent-board.mjs')], undefined)
+  assert.ok(Object.keys(output.state.owned).some(file => file.includes('other-root')))
+  assert.notEqual(previous, progress)
+}))
+
+test('an automatic repair names every agent it moved back, with or without Codex', async () => {
+  for (const hasCodex of [false, true]) await fixture(async f => {
+    if (!hasCodex) rmSync(join(f.home, '.codex'), { recursive: true })
+    for (const dir of ['.gemini', '.cursor']) mkdirSync(join(f.home, dir))
+    const progress = join(f.home, 'test-root', 'progress.md')
+    f.run(f.request('connect', { progress }))
+    unlinkSync(join(f.home, 'test-root', process.platform === 'win32' ? 'progress-report.ps1' : 'progress-report.sh'))
+    const output = f.run(f.request('auto', { progress: join(f.home, '.claude', 'progress.md') }))
+    assert.deepEqual(new Set(output.result.done), new Set(['Gemini CLI', 'Cursor', ...(hasCodex ? ['Codex'] : [])]))
+    assert.match(output.result.text, /Repaired connections/)
+  })
+})
+
+test("a Hermes config saved with wrapped lines still counts as another data folder's", () => fixture(async f => {
+  rmSync(join(f.home, '.codex'), { recursive: true })
+  mkdirSync(join(f.home, '.hermes'))
+  const progress = join(f.home, 'data home', 'progress.md')
+  f.run(f.request('connect', { progress }))
+  const config = join(f.home, '.hermes', 'config.yaml')
+  const original = readFileSync(config, 'utf8')
+  assert.ok(original.includes('data home'))
+  writeFileSync(config, original.replaceAll('data home', 'data\n        home'))
+  const before = snapshot(f.home)
+  const output = f.run(f.request('auto'))
+  assert.deepEqual(snapshot(f.home), before)
+  assert.ok(output.result.problems.some(problem => problem.message === 'connectOtherData' && problem.args[0] === 'Hermes Agent'))
+  assert.equal(output.result.done.length, 0)
+}))
+
+const plainHermes = root => `model: anthropic/claude-sonnet
+hooks:
+  post_llm_call:
+  - command: sh '${root.replaceAll('\\', '/')}/progress-report.sh' hermes turn
+`
+
+test("a Hermes config re-saved in plain style still counts as another data folder's", () => fixture(async f => {
+  rmSync(join(f.home, '.codex'), { recursive: true })
+  mkdirSync(join(f.home, '.hermes'))
+  const root = join(f.home, 'data home')
+  f.run(f.request('connect', { progress: join(root, 'progress.md') }))
+  rmSync(join(f.home, '.hermes', 'skills'), { recursive: true })
+  writeFileSync(join(f.home, '.hermes', 'config.yaml'), plainHermes(root).replaceAll('data home', 'data\n        home'))
+  const before = snapshot(f.home)
+  const output = f.run(f.request('auto'))
+  assert.deepEqual(snapshot(f.home), before)
+  assert.deepEqual(output.result.problems.map(problem => problem.args), [['Hermes Agent']])
+  assert.deepEqual(output.result.done, [])
+}))
+
+test("a Hermes config saved with escaped non-ASCII characters still counts as another data folder's", async () => {
+  for (const newline of ['\n', '\r\n']) for (const hasPosixPath of [false, true]) await fixture(async f => {
+    rmSync(join(f.home, '.codex'), { recursive: true })
+    mkdirSync(join(f.home, '.hermes'))
+    const root = join(f.home, 'José')
+    f.run(f.request('connect', { progress: join(root, 'progress.md') }))
+    rmSync(join(f.home, '.hermes', 'skills'), { recursive: true })
+    const command = hasPosixPath
+      ? `sh '${root.replaceAll('\\', '/')}/progress-report.sh' hermes turn`
+      : `powershell -File "${join(root, 'progress-report.ps1')}" hermes turn`
+    const scalar = JSON.stringify(command).replaceAll('é', '\\xE9').replace(' hermes', ` \\${newline}      hermes`)
+    writeFileSync(join(f.home, '.hermes', 'config.yaml'), `hooks:${newline}  post_llm_call:${newline}  - command: ${scalar}${newline}`)
+    const before = snapshot(f.home)
+    const output = f.run(f.request('auto'))
+    assert.deepEqual(snapshot(f.home), before)
+    assert.deepEqual(output.result.problems.map(problem => problem.args), [['Hermes Agent']])
+    assert.deepEqual(output.result.done, [])
+  })
+})
+
+test("a Hermes config with an escaped non-breaking space still counts as another data folder's", () => fixture(async f => {
+  rmSync(join(f.home, '.codex'), { recursive: true })
+  mkdirSync(join(f.home, '.hermes'))
+  const root = join(f.home, 'data\u00a0home')
+  f.run(f.request('connect', { progress: join(root, 'progress.md') }))
+  rmSync(join(f.home, '.hermes', 'skills'), { recursive: true })
+  const scalar = JSON.stringify(`sh '${root.replaceAll('\\', '/')}/progress-report.sh' hermes turn`).replaceAll('\u00a0', '\\_')
+  writeFileSync(join(f.home, '.hermes', 'config.yaml'), `hooks:\n  post_llm_call:\n  - command: ${scalar}\n`)
+  const before = snapshot(f.home)
+  const output = f.run(f.request('auto'))
+  assert.deepEqual(snapshot(f.home), before)
+  assert.deepEqual(output.result.problems.map(problem => problem.args), [['Hermes Agent']])
+  assert.deepEqual(output.result.done, [])
+}))
+
+test('connect drops a conflicting unfinished removal from another live folder with the same bundle', () => fixture(async f => {
+  const progress = dataRootHosts(f)
+  const state = JSON.parse(readFileSync(f.control, 'utf8'))
+  state.disabled = true
+  state.pending = {
+    request: f.request('remove', { progress }), bundle: createHash('sha256').update(bundle).digest('hex'),
+    step: { file: f.config, before: '0'.repeat(64), after: '1'.repeat(64), generated: false },
+  }
+  writeFileSync(f.control, JSON.stringify(state))
+  const other = snapshot(join(progress, '..'))
+  const output = f.run(f.request('connect', { openclawVersion: '2026.10.1' }))
+  assert.equal(output.state.pending, undefined)
+  assert.equal(output.state.disabled, false)
+  assert.deepEqual(snapshot(join(progress, '..')), other)
+  assert.ok(readFileSync(f.config, 'utf8').includes('data-a'))
+  assert.equal(f.run(f.request('connect')).state.pending, undefined)
+}))
+
+test("a busy file during recovery keeps another data folder's unfinished connection", () => fixture(async f => {
+  const progress = dataRootHosts(f)
+  const state = JSON.parse(readFileSync(f.control, 'utf8'))
+  const file = join(f.home, '.claude', 'agent-board.mjs')
+  state.disabled = true
+  state.pending = {
+    request: f.request('remove', { progress }), bundle: createHash('sha256').update(bundle).digest('hex'),
+    step: { file, before: createHash('sha256').update(readFileSync(file)).digest('hex'), after: null, generated: true },
+  }
+  writeFileSync(f.control, JSON.stringify(state))
+  const before = readFileSync(f.control, 'utf8')
+  const other = snapshot(join(progress, '..'))
+  for (const code of ['EBUSY', 'EPERM', 'EACCES']) {
+    const probe = join(f.home, `busy-${code}.cjs`)
+    writeFileSync(probe, `const fs = require('node:fs'); const read = fs.readFileSync; fs.readFileSync = (path, ...args) => { if (path === ${JSON.stringify(file)}) throw Object.assign(new Error('${code}'), { code: '${code}' }); return read(path, ...args) }; require('node:module').syncBuiltinESMExports()`)
+    const result = f.command(f.request('connect'), { env: { ...process.env, NODE_OPTIONS: `--require ${JSON.stringify(probe)}` } })
+    assert.notEqual(result.status, 0, code)
+    assert.ok((result.stderr + result.stdout).includes(`RECOVERY_UNREADABLE_${code}`), result.stderr)
+    assert.equal(readFileSync(f.control, 'utf8'), before, code)
+    assert.deepEqual(snapshot(join(progress, '..')), other)
+  }
+  assert.equal(f.run(f.request('connect')).state.pending, undefined)
+}))
+
+test("connection removal also drops another data folder's unfinished connection that cannot be replayed", () => fixture(async f => {
+  const progress = dataRootHosts(f)
+  const state = JSON.parse(readFileSync(f.control, 'utf8'))
+  state.disabled = true
+  state.pending = {
+    request: f.request('remove', { progress }), bundle: createHash('sha256').update(bundle).digest('hex'),
+    step: { file: f.config, before: '0'.repeat(64), after: '1'.repeat(64), generated: false },
+  }
+  writeFileSync(f.control, JSON.stringify(state))
+  const other = snapshot(join(progress, '..'))
+  const output = f.run(f.request('remove'))
+  assert.equal(output.state.pending, undefined)
+  assert.equal(output.state.disabled, true)
+  assert.deepEqual(snapshot(join(progress, '..')), other)
+  assert.deepEqual(JSON.parse(readFileSync(f.config, 'utf8')), f.foreign)
+}))
+
+test('acknowledgement preserves the checked Codex status without launching another probe', () => fixture(async f => {
+  const initial = f.run(f.request('connect'))
+  const state = JSON.parse(readFileSync(f.control, 'utf8'))
+  state.setup.codexTrusted = true
+  state.setup.problems = state.setup.problems.filter(problem => problem.key !== 'codex:approval')
+  writeFileSync(f.control, JSON.stringify(state))
+  const probe = join(f.home, 'probe.cjs')
+  const marker = join(f.home, 'probe-ran')
+  writeFileSync(probe, `const cp = require('node:child_process'); const original = cp.spawn; cp.spawn = (file, args, ...rest) => { if (file === process.execPath && args.includes('app-server')) require('node:fs').appendFileSync(${JSON.stringify(marker)}, 'called\\n'); return original(file, args, ...rest) }; require('node:module').syncBuiltinESMExports()`)
+  const env = { ...process.env, NODE_OPTIONS: `--require ${JSON.stringify(probe)}` }
+  const output = f.command(f.request('ack', { codexExecutable: process.execPath, acknowledgement: { revision: initial.state.revision, keys: [] } }), { env })
+  assert.equal(output.status, 0, output.stderr)
+  assert.equal(JSON.parse(output.stdout).state.setup.codexTrusted, true)
+  assert.equal(JSON.parse(output.stdout).state.setup.problems.some(problem => problem.key === 'codex:approval'), false)
+  assert.equal(existsSync(marker), false)
+  assert.equal(f.command(f.request('status', { codexExecutable: process.execPath }), { env }).status, 0)
+  assert.equal(readFileSync(marker, 'utf8'), 'called\n')
+}))
+
+test('a YAML command with combined apostrophe quoting or non-JSON escapes keeps its board', async () => {
+  for (const style of ['single', 'double']) await fixture(async f => {
+    rmSync(join(f.home, '.codex'), { recursive: true })
+    mkdirSync(join(f.home, '.hermes'))
+    const root = join(f.home, "O'Brien")
+    f.run(f.request('connect', { progress: join(root, 'progress.md') }))
+    rmSync(join(f.home, '.hermes', 'skills'), { recursive: true })
+    const command = `sh '${root.replaceAll('\\', '/').replaceAll("'", "'\\''")}/progress-report.sh' hermes turn`
+    const scalar = style === 'single'
+      ? `'${command.replaceAll("'", "''")}'`
+      : `"env NOTE=\\x41 OTHER=\\U00000042 ${command}"`
+    writeFileSync(join(f.home, '.hermes', 'config.yaml'), `hooks:\n  post_llm_call:\n  - command: ${scalar}\n`)
+    const before = snapshot(f.home)
+    const output = f.run(f.request('auto'))
+    assert.deepEqual(snapshot(f.home), before)
+    assert.deepEqual(output.result.problems.map(problem => problem.args), [['Hermes Agent']])
+    assert.deepEqual(output.result.done, [])
+  })
+})
+
+test('an ordinary update of our own Hermes hook does not claim a repair', () => fixture(async f => {
+  rmSync(join(f.home, '.codex'), { recursive: true })
+  mkdirSync(join(f.home, '.hermes'))
+  f.run(f.request('connect'))
+  writeFileSync(join(f.home, '.hermes', 'config.yaml'), plainHermes(join(f.home, 'data-a')))
+  const output = f.run(f.request('auto'))
+  assert.ok(output.result.done.includes('Hermes Agent'))
+  assert.ok(!output.result.text.includes('Repaired connections'))
+  assert.deepEqual(output.result.problems, [])
+}))
+
+test('a long setting line in a Hermes config does not block automatic connect', () => fixture(async f => {
+  rmSync(join(f.home, '.codex'), { recursive: true })
+  mkdirSync(join(f.home, '.hermes'))
+  const root = join(f.home, 'deleted-board')
+  f.run(f.request('connect', { progress: join(root, 'progress.md') }))
+  const config = join(f.home, '.hermes', 'config.yaml')
+  writeFileSync(config, `cwd: ${join(f.home, 'work').replaceAll('\\', '/')}\nsettings: ${'x'.repeat(300)}\n${plainHermes(root)}`)
+  rmSync(root, { recursive: true })
+  const output = f.run(f.request('auto'))
+  assert.deepEqual(output.result.problems, [])
+  assert.ok(output.result.done.includes('Hermes Agent'))
+  assert.ok(readFileSync(config, 'utf8').includes('data-a'))
+  assert.match(output.result.text, /Repaired connections/)
+}))
+
+test('once the other data folder is gone its warning leaves the connect status', () => fixture(async f => {
+  const progress = dataRootHosts(f)
+  const blocked = f.run(f.request('auto'))
+  const keys = blocked.state.setup.problems.map(problem => problem.key)
+  f.run(f.request('ack', { acknowledgement: { revision: blocked.state.revision, keys } }))
+  const stored = JSON.parse(readFileSync(f.control, 'utf8'))
+  assert.ok(stored.setup.problems.some(problem => problem.key.startsWith('otherData:')))
+  stored.setup.problems.push({ key: 'checkUnreadable:Hermes Agent', message: 'connectCheckUnreadable', args: ['Hermes Agent'] })
+  stored.setup.problems.push({ key: 'board:failed', message: 'connectBoardFailed', args: [] })
+  writeFileSync(f.control, JSON.stringify(stored))
+  rmSync(join(progress, '..'), { recursive: true })
+  const before = snapshot(f.home)
+  const status = f.run(f.request('status'))
+  assert.deepEqual(snapshot(f.home), before)
+  // Every host was connected from the folder that is now gone, so each board command names a
+  // missing script (#251): status says so per host instead of repeating the stored "ready".
+  assert.deepEqual(status.state.setup.agents, stored.setup.agents.map(agent => ({ ...agent, board: 'failed' })))
+  assert.ok(status.state.setup.problems.some(problem => problem.key === 'missingBoard:codex'))
+  assert.ok(status.state.setup.problems.some(problem => problem.key === 'board:failed'))
+  assert.ok(status.state.setup.problems.some(problem => problem.key === 'codex:approval'))
+  assert.equal(status.state.setup.problems.some(problem => /^(?:otherData|checkUnreadable):/.test(problem.key)), false)
+}))
+
+test("a blocked automatic connect still shows each agent's stored status", () => fixture(async f => {
+  dataRootHosts(f)
+  const stored = JSON.parse(readFileSync(f.control, 'utf8'))
+  stored.setup.problems.push({ key: 'board:failed', message: 'connectBoardFailed', args: [] })
+  writeFileSync(f.control, JSON.stringify(stored))
+  const before = snapshot(f.home)
+  const auto = f.run(f.request('auto'))
+  const status = f.run(f.request('status'))
+  assert.deepEqual(snapshot(f.home), before)
+  for (const output of [auto, status]) {
+    assert.deepEqual(output.state.setup.agents, stored.setup.agents)
+    assert.ok(output.state.setup.problems.some(problem => problem.key === 'board:failed'))
+    assert.ok(output.state.setup.problems.some(problem => problem.key === 'codex:approval'))
+    assert.ok(output.state.setup.problems.some(problem => problem.message === 'connectOtherData'))
+  }
+  const keys = auto.state.setup.problems.map(problem => problem.key)
+  f.run(f.request('ack', { acknowledgement: { revision: auto.state.revision, keys } }))
+  const saved = JSON.parse(readFileSync(f.control, 'utf8'))
+  assert.deepEqual(saved.setup.agents, stored.setup.agents)
+  assert.ok(saved.setup.problems.some(problem => problem.key === 'board:failed'))
+  assert.deepEqual(new Set(saved.notified), new Set(keys))
+}))
+
+test("choosing a language leaves another folder's unfinished connection alone", async () => {
+  for (const disabled of [false, true]) await fixture(async f => {
+    const progress = dataRootHosts(f)
+    const stored = JSON.parse(readFileSync(f.control, 'utf8'))
+    stored.disabled = disabled
+    stored.pending = {
+      request: f.request('connect', { progress }), bundle: createHash('sha256').update(bundle).digest('hex'),
+      step: { file: f.config, before: '0'.repeat(64), after: '1'.repeat(64), generated: false },
+    }
+    writeFileSync(f.control, JSON.stringify(stored))
+    const before = snapshot(f.home)
+    const output = f.run(f.request('language', { boardLang: 'zh-TW' }))
+    assert.deepEqual(output.state.pending, stored.pending)
+    assert.deepEqual(output.state.owned, stored.owned)
+    assert.equal(output.state.disabled, disabled)
+    assert.equal(output.state.boardLang, 'zh-TW')
+    assert.equal(output.state.revision, stored.revision + 1)
+    delete before[f.control]
+    const after = snapshot(f.home)
+    delete after[f.control]
+    assert.deepEqual(after, before)
+  })
+})
+
+test('automatic connect ignores unreadable config paths for agents without an installed folder', () => fixture(async f => {
+  writeFileSync(join(f.home, 'not-a-folder'), 'ordinary file')
+  const output = f.run(f.request('auto', { dirs: { hermes: join(f.home, 'not-a-folder', 'hermes') } }))
+  assert.ok(output.result.done.includes('Codex'))
+  assert.ok(!output.result.problems.some(problem => problem.message === 'connectCheckUnreadable'))
+}))
+
+test('a shared board skill names only the installed agents that read it', () => fixture(async f => {
+  mkdirSync(join(f.home, '.hermes'))
+  f.run(f.request('connect'))
+  const root = join(f.home, 'other-live')
+  mkdirSync(root)
+  writeFileSync(join(root, 'progress-report.sh'), 'synthetic reporter')
+  writeFileSync(join(f.home, '.agents', 'skills', 'agent-board', 'SKILL.md'), `node "${join(root, 'agent-board.mjs')}"`)
+  const before = snapshot(f.home)
+  const output = f.run(f.request('auto'))
+  assert.deepEqual(snapshot(f.home), before)
+  const names = output.result.problems.filter(problem => problem.message === 'connectOtherData').map(problem => problem.args[0])
+  assert.deepEqual(names, ['Codex'])
+}))
+
+test('an older released skill from a deleted data folder can be repaired without an ownership record', () => fixture(async f => {
+  const root = join(f.home, 'old-root')
+  f.run(f.request('connect', { progress: join(root, 'progress.md') }))
+  const skill = join(f.home, '.agents', 'skills', 'agent-board', 'SKILL.md')
+  const previous = RELEASE_0_20_5.skill[0].replaceAll('\0board\0', join(root, 'agent-board.mjs'))
+  writeFileSync(skill, previous)
+  unlinkSync(f.control)
+  unlinkSync(join(f.home, '.agent-board', 'legacy-connect-authority'))
+  unlinkSync(join(root, process.platform === 'win32' ? 'progress-report.ps1' : 'progress-report.sh'))
+  const output = f.run(f.request('auto'))
+  assert.ok(!output.result.problems.some(problem => problem.message === 'connectPreserved'))
+  assert.notEqual(readFileSync(skill, 'utf8'), previous)
+  assert.equal(output.state.owned[skill], createHash('sha256').update(readFileSync(skill)).digest('hex'))
+  assert.match(output.result.text, /Repaired connections/)
+}))
+
+test('connect notices are not repeated at the next session start once acknowledged', () => fixture(async f => {
+  dataRootHosts(f)
+  const first = f.run(f.request('auto'))
+  const keys = first.result.problems.map(problem => problem.key)
+  assert.ok(keys.length > 0)
+  f.run(f.request('ack', { acknowledgement: { revision: first.state.revision, keys } }))
+  assert.deepEqual(JSON.parse(readFileSync(f.control, 'utf8')).notified, keys)
+  const before = snapshot(f.home)
+  const next = f.run(f.request('auto'))
+  assert.deepEqual(next.result.problems.filter(problem => !next.state.notified.includes(problem.key)), [])
+  assert.deepEqual(snapshot(f.home), before)
+  assert.equal(next.result.lines.filter(line => line.startsWith('Gemini CLI ')).length, 1)
+  assert.equal(next.result.lines.some(line => /^(?:skills|gemini|hermes) /.test(line)), false)
+}))
+
+test('automatic connect checks both Codex instruction files before changing any connection', async () => {
+  for (const name of ['AGENTS.md', 'AGENTS.override.md']) await fixture(async f => {
+    const progress = join(f.home, 'other-root', 'progress.md')
+    f.run(f.request('connect', { progress }))
+    unlinkSync(f.config)
+    rmSync(join(f.home, '.agents'), { recursive: true })
+    const fallback = readFileSync(join(f.home, '.codex', 'AGENTS.md'), 'utf8')
+    writeFileSync(join(f.home, '.codex', name), fallback)
+    if (name !== 'AGENTS.md') unlinkSync(join(f.home, '.codex', 'AGENTS.md'))
+    const before = snapshot(f.home)
+    const output = f.run(f.request('auto'))
+    assert.deepEqual(snapshot(f.home), before)
+    assert.ok(output.result.problems.some(problem => problem.message === 'connectOtherData' && problem.args[0] === 'Codex'))
+  })
+})
+
+test('automatic connect leaves every connection alone when an existing config cannot be read', () => fixture(async f => {
+  mkdirSync(join(f.home, '.gemini'))
+  mkdirSync(join(f.home, '.gemini', 'settings.json'))
+  const before = snapshot(f.home)
+  const output = f.run(f.request('auto'))
+  assert.deepEqual(snapshot(f.home), before)
+  assert.ok(output.result.problems.some(problem => problem.message === 'connectCheckUnreadable' && problem.args[0] === 'Gemini CLI'))
+  assert.ok(!output.result.text.includes(f.home))
+}))
+
+test('a journal from a deleted data folder does not prevent automatic repair or replay a conflicting step', async () => {
+  for (const isDisabled of [false, true]) await fixture(async f => {
+    const progress = dataRootHosts(f)
+    const state = JSON.parse(readFileSync(f.control, 'utf8'))
+    state.disabled = isDisabled
+    state.pending = {
+      request: f.request('connect', { progress }), bundle: createHash('sha256').update(bundle).digest('hex'),
+      step: { file: f.config, before: '0'.repeat(64), after: '1'.repeat(64), generated: false },
+    }
+    writeFileSync(f.control, JSON.stringify(state))
+    rmSync(join(f.home, '.claude'), { recursive: true })
+    const output = f.run(f.request('auto', { openclawVersion: '2026.10.1' }))
+    assert.equal(output.state.pending, undefined)
+    if (isDisabled) assert.equal(output.result, null)
+    else assert.ok(output.result.done.includes('Gemini CLI'))
+    assert.equal(existsSync(join(f.home, '.claude')), false)
+  })
+})
+
+test('a pending connection in another live folder has one plain notice', () => fixture(async f => {
+  const progress = join(f.home, 'other-live', 'progress.md')
+  mkdirSync(join(f.home, 'other-live'))
+  f.run(f.request('language', { boardLang: 'en' }))
+  const state = JSON.parse(readFileSync(f.control, 'utf8'))
+  state.pending = { request: f.request('connect', { progress }), bundle: createHash('sha256').update(bundle).digest('hex') }
+  writeFileSync(f.control, JSON.stringify(state))
+  const before = snapshot(f.home)
+  const output = f.run(f.request('auto'))
+  assert.deepEqual(snapshot(f.home), before)
+  assert.deepEqual(output.result.problems.map(problem => problem.message), ['connectOtherRecovery'])
+  assert.match(output.result.text, /unfinished connection from another/)
+  f.run(f.request('ack', { acknowledgement: { revision: output.state.revision, keys: ['otherData:recovery'] } }))
+  assert.deepEqual(f.run(f.request('auto')).state.notified, ['otherData:recovery'])
+}))
+
+test('an independent board command left in a config does not announce a repair', () => fixture(async f => {
+  const board = join(f.home, '.agent-board', 'agent-board.mjs')
+  writeFileSync(f.config, JSON.stringify({ hooks: { Stop: [{ hooks: [{ type: 'command', command: `node "${board}"` }] }] } }))
+  const output = f.run(f.request('auto'))
+  assert.ok(output.result.done.includes('Codex'))
+  assert.ok(!output.result.text.includes('Repaired connections'))
+  assert.ok(readFileSync(f.config, 'utf8').includes('agent-board.mjs'))
+}))
+
+test('a generated connection from another language can move without an ownership record', () => fixture(async f => {
+  mkdirSync(join(f.home, '.grok'))
+  writeFileSync(join(f.home, '.grok', 'config.toml'), '')
+  const progress = join(f.home, 'other-root', 'progress.md')
+  f.run(f.request('connect', { progress, lang: 'zh-TW', boardLang: 'zh-TW' }))
+  unlinkSync(f.control)
+  unlinkSync(join(f.home, '.agent-board', 'legacy-connect-authority'))
+  const output = f.run(f.request('connect', { lang: 'en', boardLang: 'en' }))
+  assert.equal(output.result.problems.some(problem => problem.message === 'connectPreserved'), false)
+  assert.ok(readFileSync(join(f.home, '.grok', 'hooks', 'agent-board.json'), 'utf8').includes('data-a'))
+}))
+
+test('connecting by hand from a second data folder moves the hosts and says so', () => fixture(async f => {
+  dataRootHosts(f)
+  const output = f.run(f.request('connect', { progress: join(f.home, 'other-root', 'progress.md'), openclawVersion: '2026.10.1' }))
+  assert.match(output.result.text, /These agents now report to this board/)
+  assert.equal(output.result.problems.some(problem => problem.message === 'connectOtherData' || problem.message === 'connectPreserved'), false)
+  for (const path of [f.config, join(f.home, '.gemini/settings.json'), join(f.home, '.cursor/hooks.json'), join(f.home, '.hermes/config.yaml'), join(f.home, '.agents/skills/agent-board/SKILL.md'), join(f.home, '.gemini/commands/board.toml')]) {
+    assert.ok(decoded(readFileSync(path, 'utf8')).includes('other-root'), path)
+  }
+}))
+
+test('an automatic connect preserves a foreign encoded board command without a hook or ownership record', () => fixture(async f => {
+  f.run(f.request('connect', { progress: join(f.home, 'data $資料', 'progress.md') }))
+  unlinkSync(f.config)
+  unlinkSync(f.control)
+  unlinkSync(join(f.home, '.agent-board', 'legacy-connect-authority'))
+  const before = snapshot(f.home)
+  const output = f.run(f.request('auto'))
+  assert.deepEqual(snapshot(f.home), before)
+  assert.ok(output.result.problems.some(problem => problem.message === 'connectOtherData'))
+  assert.equal(existsSync(f.control), false)
+}))
+
+test('connecting by hand supersedes another data folder journal without rewriting that folder', () => fixture(async f => {
+  const progress = dataRootHosts(f)
+  unlinkSync(join(f.home, '.claude', process.platform === 'win32' ? 'progress-report.ps1' : 'progress-report.sh'))
+  const previous = snapshot(join(f.home, '.claude'))
+  const state = JSON.parse(readFileSync(f.control, 'utf8'))
+  state.pending = { request: f.request('connect', { progress }), bundle: createHash('sha256').update(bundle).digest('hex') }
+  writeFileSync(f.control, JSON.stringify(state))
+  const skipped = f.run(f.request('auto'))
+  assert.ok(skipped.state.pending)
+  assert.deepEqual(snapshot(join(f.home, '.claude')), previous)
+  const output = f.run(f.request('connect'))
+  assert.equal(output.state.pending, undefined)
+  assert.deepEqual(snapshot(join(f.home, '.claude')), previous)
+  assert.ok(readFileSync(f.config, 'utf8').includes('data-a'))
+}))
+
+test("connect from a crashed removal with another plugin version drops the other folder's unfinished connection", () => fixture(async f => {
+  const progress = dataRootHosts(f)
+  const previous = snapshot(join(f.home, '.claude'))
+  const state = JSON.parse(readFileSync(f.control, 'utf8'))
+  state.disabled = true
+  state.pending = {
+    request: f.request('remove', { progress }), bundle: '0'.repeat(64),
+    step: { file: join(f.home, '.claude', 'agent-board.mjs'), before: '0'.repeat(64), after: null, generated: true },
+  }
+  writeFileSync(f.control, JSON.stringify(state))
+  const output = f.run(f.request('connect', { openclawVersion: '2026.10.1' }))
+  assert.equal(output.state.pending, undefined)
+  assert.equal(output.state.disabled, false)
+  assert.deepEqual(snapshot(join(f.home, '.claude')), previous)
+  assert.ok(readFileSync(f.config, 'utf8').includes('data-a'))
+}))
 const taggedBoard = (version, commit) => {
   if (taggedBoards.has(version)) return taggedBoards.get(version)
   const cwd = new URL('..', import.meta.url)

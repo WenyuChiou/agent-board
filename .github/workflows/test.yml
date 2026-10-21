@@ -34,7 +34,9 @@ jobs:
         # 22.18 and in 24. Both lines run so an import Node cannot load fails here.
         node: [22, 24]
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 5
+    # Windows runners take 4.5 to 5 minutes for checkout, setup and the two suites;
+    # 10 leaves room for the runner's cleanup (#304).
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -62,6 +64,48 @@ jobs:
       - name: Released files table up to date
         if: runner.os != 'Windows' && matrix.node == 24
         run: npx --yes bun@1.4.2 scripts/build-released.ts --check
+
+  # The tests of scripts/pr-check.mjs, scripts/preflight.mjs and scripts/changelog-fold.mjs, in a job of their own: the exchange job on Windows
+  # already uses most of its time limit (#304).
+  pr-check-tests:
+    name: pr-check tests (${{ matrix.os }}, Node ${{ matrix.node }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        node: [22, 24]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: ${{ matrix.node }}
+      - name: PR check tests
+        run: node --test tests/pr-check.test.mjs tests/preflight.test.mjs tests/changelog-fold.test.mjs tests/team-stats.test.mjs
+
+  # The npm package in a job of its own: what `npm pack` would publish, the version in step
+  # with plugin.json, and the launcher (setup, help, the installed board script) in a scratch home.
+  npm-package:
+    name: npm package (${{ matrix.os }}, Node ${{ matrix.node }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        node: [22, 24]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: ${{ matrix.node }}
+      - name: npm package tests
+        run: node --test tests/npm-package.test.mjs
 
   plugin:
     name: plugin (${{ matrix.os }})
@@ -110,3 +154,30 @@ jobs:
       - name: Remote reporter tests (Windows)
         if: runner.os == 'Windows'
         run: python -B scripts/remote-reporter/test_pipeline.py
+
+  # The user-journey tests: the board script on plain Node, driven the way a person uses it
+  # (terminal board, --chat, the --serve page over HTTP, --html) in isolated temp homes.
+  journeys:
+    name: journeys (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+
+      # `node --test` passes with zero tests when the pattern matches nothing, so a missing
+      # journey folder fails here instead of passing silently.
+      - name: Journey tests present
+        shell: bash
+        run: ls tests/e2e/*.test.mjs
+
+      - name: User-journey tests
+        run: node --test "tests/e2e/*.test.mjs"
