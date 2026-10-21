@@ -24,7 +24,7 @@ gh pr list -R WenyuChiou/agent-board --state open
 gh issue view <N> -R WenyuChiou/agent-board --comments
 ```
 
-Go on only if nobody has an open pull request for the issue or a `Claim:` whose time has not passed, you have no other pull request waiting in review or CI ([docs/dev/team-process.md](dev/team-process.md)), and you have a free slot. A slot is rule 10: at most two open pull requests per author and eight in all. Drafts count; release pull requests, governance pull requests and those labelled `cap-exempt` do not. Then claim it, at most two days ahead:
+Go on only if nobody has an open pull request for the issue or a `Claim:` whose time has not passed, you have no other pull request waiting in review or CI ([docs/dev/team-process.md, One thing at a time](dev/team-process.md#one-thing-at-a-time)), and you have a free slot. A slot is rule 10: at most two open pull requests per author and eight in all. Drafts count; release pull requests, governance pull requests and those labelled `cap-exempt` do not. Then claim it, at most two days ahead:
 
 ```sh
 until=$(date -u -d '+1 day' '+%Y-%m-%d %H:%M')
@@ -64,7 +64,7 @@ Your fork is then `origin` and this repository `upstream`. From then on:
 
 GitHub may hold CI on a first pull request from a fork until the maintainer lets it run.
 
-Follow [AGENTS.md](../AGENTS.md), Working on this repository, for where code goes and how it is written. A change to `AGENTS.md`, `CONTRIBUTING.md` or anything under `.github/` needs the owner's written approval of its content, quoted in the pull request body, and only the owner merges a change to `.github/workflows/` (CONTRIBUTING.md rule 12). Use synthetic data only: made-up projects, sessions and paths.
+Follow [AGENTS.md](../AGENTS.md), Working on this repository, for where code goes and how it is written. A change to `AGENTS.md`, `CONTRIBUTING.md` or anything under `.github/` needs the owner's written approval of its content, quoted in the pull request body ([CONTRIBUTING.md](../CONTRIBUTING.md#pull-requests) rule 12). Use synthetic data only: made-up projects, sessions and paths.
 
 ## 4. Run the checks
 
@@ -80,7 +80,7 @@ Then run what CI runs on plain Node, and the two generated-file checks:
 ```sh
 iso node --test tests/exchange.test.mjs tests/messaging.test.mjs
 iso node --test tests/board.test.mjs tests/board-storage.test.mjs tests/codex-local.test.mjs tests/local-lock.test.mjs tests/prompt-hooks.test.mjs tests/codex-host.test.mjs tests/codex-fallback.test.mjs tests/legacy-connect.test.mjs tests/connect-worker.test.mjs
-iso node --test tests/pr-check.test.mjs tests/preflight.test.mjs tests/changelog-fold.test.mjs
+iso node --test tests/pr-check.test.mjs tests/preflight.test.mjs tests/changelog-fold.test.mjs tests/team-stats.test.mjs
 iso node --test tests/npm-package.test.mjs
 npx --yes bun@1.4.2 scripts/build-board.ts --check
 git fetch --tags origin
@@ -155,7 +155,7 @@ gh pr ready <PR> -R WenyuChiou/agent-board
 gh pr comment <PR> -R WenyuChiou/agent-board --body "Ready for review $(gh pr view <PR> -R WenyuChiou/agent-board --json headRefOid -q .headRefOid)"
 ```
 
-A draft is not reviewed. From now on, change the pull request only when the reviewer asks.
+A draft is not reviewed. From now on, change the pull request only when the reviewer asks. When the verdict comes and what a review may ask for are in [docs/dev/team-process.md, From claim to merge](dev/team-process.md#from-claim-to-merge).
 
 ## 8. Answer review, ask questions
 
@@ -164,7 +164,7 @@ gh pr view <PR> -R WenyuChiou/agent-board --comments
 node scripts/pr-check.mjs --pr <PR>      # also prints the latest Review: verdict and whether it is for your head
 ```
 
-`Review: REQUEST CHANGES <sha>` lists findings. Fix each, push, say in a comment which commit fixed which finding, and comment `Ready for review <new sha>`. After `Review: APPROVE <sha>`, push nothing unless asked: any push needs a new verdict.
+`Review: REQUEST CHANGES <sha>` lists findings. Fix each, push, say in a comment which commit fixed which finding, and comment `Ready for review <new sha>`. How many review rounds there are, and what happens after the second REQUEST CHANGES, are in [docs/dev/team-process.md, From claim to merge](dev/team-process.md#from-claim-to-merge). After `Review: APPROVE <sha>`, push nothing unless asked: any push needs a new verdict.
 
 A question goes on the issue, not on the pull request and not in a chat:
 
