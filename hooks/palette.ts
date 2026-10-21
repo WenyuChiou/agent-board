@@ -96,3 +96,14 @@ export const stepRole = (status: ProgressStepStatus): Role => {
 export const toneColor = (palette: Palette, tone: Tone): string => palette[toneRole(tone)]
 export const askColor = (palette: Palette, kind: AskKind): string => palette[askRole(kind)]
 export const stepColor = (palette: Palette, status: ProgressStepStatus): string => palette[stepRole(status)]
+
+// Page surfaces differ from terminal surfaces while sharing the same colour roles.
+export const PAGE_LIGHT = {
+  ground: '#f1f2ee', surface: '#ffffff', inset: '#fbfaf5', ink: '#1f2324',
+  line: '#e3e4de', 'line-strong': '#cbcec6', 'on-accent': '#ffffff',
+}
+
+export const PAGE_DARK = {
+  ground: '#141617', surface: '#1e2022', inset: '#25282b', ink: '#e6e4dc',
+  line: '#2e3134', 'line-strong': '#43474b', 'on-accent': '#141617',
+}

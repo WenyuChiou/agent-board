@@ -1,5 +1,6 @@
 import { boardPromptHelper, boardRequestWords } from './board-commands'
 import { STRINGS } from './strings'
+import { HOOK_VERSION, HOOK_WORKER_GRACE, hookGuardSource, hookTimeout, hostHookTimeout } from './hook-safety'
 
 const BOARD_PROMPT_HELPER = boardPromptHelper(boardRequestWords(Object.values(STRINGS)))
 
@@ -17,7 +18,7 @@ export const lifecycleCapability = (agent: LocalAgent): string =>
 // Antigravity groups events under a named definition, rather than hooks.<event>.
 // Stop ends an execution loop, not the conversation. No session-end event is invented.
 export const antigravityHooks = (command: (event: string, state: string) => string): Record<string, unknown> =>
-  Object.fromEntries(Object.entries(statusEvents.antigravity!).map(([event, state]) => [event, [{ type: 'command', command: command(event, state), timeout: 3 }]]))
+  Object.fromEntries(Object.entries(statusEvents.antigravity!).map(([event, state]) => [event, [{ type: 'command', command: command(event, state), timeout: hostHookTimeout('antigravity', event) }]]))
 
 export const cursorEvents: Record<string, string> = {
   sessionStart: 'SessionStart', beforeSubmitPrompt: 'UserPromptSubmit',
@@ -33,36 +34,41 @@ export const cursorEvent = (input: Record<string, unknown>): Record<string, unkn
 
 // OpenCode supplies session status but no stable turn id on those status events. Keep
 // that limit explicit instead of manufacturing a turn id or fetching conversation text.
-export const opencodePlugin = (node: string, script: string, progress: string, description: string): string => `import { spawnSync } from 'node:child_process'
+export const opencodePlugin = (node: string, script: string, progress: string, description: string, home: string): string => `import { spawnSync } from 'node:child_process'
 import { tool } from '@opencode-ai/plugin'
-
+${hookGuardSource(home, 'opencode')}
 ${BOARD_PROMPT_HELPER}
-const run = (mode, payload, session) => {
-  const args = [${JSON.stringify(script)}, mode, '--agent', 'opencode', '--progress-file', ${JSON.stringify(progress)}]
+
+const run = (mode, payload, session, deadline) => {
+  const args = [${JSON.stringify(script)}, '--hook-version', '${HOOK_VERSION}', mode, '--agent', 'opencode', '--progress-file', ${JSON.stringify(progress)}]
   if (session) args.push('--session', session)
-  const result = spawnSync(${JSON.stringify(node)}, args, { input: JSON.stringify(payload), encoding: 'utf8', windowsHide: true, timeout: 3000 })
+  if (deadline !== undefined) args.push('--hook-deadline', String(deadline))
+  const remaining = deadline === undefined ? ${hookTimeout('opencode') - 1000} : deadline - Date.now()
+  if (remaining <= 0) throw Error('HOOK_TIMEOUT')
+  const result = spawnSync(${JSON.stringify(node)}, args, { input: JSON.stringify(payload), encoding: 'utf8', windowsHide: true, timeout: remaining + ${HOOK_WORKER_GRACE}, killSignal: 'SIGKILL' })
+  if (result.error?.code === 'ETIMEDOUT') throw Error('HOOK_TIMEOUT')
   if (result.error || result.status !== 0) throw new Error('AGENT_BOARD_REPORT_FAILED')
   return result.stdout
 }
 
 export const AgentBoardLocal = async ({ client }) => ({
-  'chat.message': async ({ sessionID }, output) => {
-    try {
-      const info = await client.session.get({ path: { id: sessionID } })
-      if (!info.data || info.error || info.data.id !== sessionID || info.data.parentID) return
-      run('--agent-status', { session_id: sessionID, state: 'working', prompt_submitted: true, ...(isBoardRequest(output) ? { board_request: true } : {}) })
-    } catch {}
-  },
-  event: async ({ event }) => {
+  'chat.message': async ({ sessionID }, output) => withHook(async (current, deadline) => {
+      const info = current(await client.session.get({ path: { id: sessionID } }))
+      if (info.error) throw Error('HOST_METADATA_FAILED')
+      if (!info.data || info.data.id !== sessionID || info.data.parentID) return
+      run('--agent-status', { session_id: sessionID, state: 'working', prompt_submitted: true, ...(isBoardRequest(output) ? { board_request: true } : {}) }, undefined, deadline)
+  }),
+  event: async ({ event }) => withHook(async (current, deadline) => {
     const p = event.properties ?? {}
     const session = p.sessionID ?? p.info?.id
     if (!session || !['session.created', 'session.status', 'session.idle', 'session.deleted'].includes(event.type)) return
     if (event.type === 'session.status' && !['busy', 'retry', 'idle'].includes(p.status?.type)) return
-    const info = event.type === 'session.deleted' ? { data: p.info } : await client.session.get({ path: { id: session } })
-    if (!info.data || info.error || info.data.id !== session || info.data.parentID) return
+    const info = event.type === 'session.deleted' ? { data: p.info } : current(await client.session.get({ path: { id: session } }))
+    if (info.error) throw Error('HOST_METADATA_FAILED')
+    if (!info.data || info.data.id !== session || info.data.parentID) return
     const state = event.type === 'session.deleted' ? 'ended' : event.type === 'session.status' && p.status?.type !== 'idle' ? 'working' : 'waiting'
-    run('--agent-status', { session_id: session, state })
-  },
+    run('--agent-status', { session_id: session, state }, undefined, deadline)
+  }),
   tool: {
     agent_board_progress: tool({
       description: ${JSON.stringify(description)},

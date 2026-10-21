@@ -707,7 +707,8 @@ test('progress.html shows the whole file: counts, the focus, folded sections, st
   expect(html).toContain('● 2</span> 等你')
   expect(html).toContain('✓ 3</span> 今天完成')
   expect(html).toContain('<div class="label">現在最需要你</div>')
-  expect(html).toContain('〔選一個〕')
+  // Drawn as a pill, the chip shows the word without the terminal's brackets.
+  expect(html).toContain('>選一個</span>')
   expect(html).toContain('AutoResearchAgent › Stage 2 · codex')
   expect(html).toContain('data-key="section:waiting" open')
   expect(html).toContain('Google &lt;script&gt;alert(1)&lt;/script&gt;')
@@ -2315,14 +2316,22 @@ test('a file an earlier release wrote is known by its exact bytes with this mach
   // The board commands from before --serve were the same from 0.17.1, before 0.18.0, to 0.18.1.
   const first = RELEASED.find(release => release.version === '0.17.1')
   for (const text of RELEASE_0_18_1.gemini) expect(first?.gemini).toContain(sha256(text))
-  // An older owned reporter is still replaceable when today's template changes.
+  // Safety guards changed the current reporters; historical exact bytes still upgrade.
   const inbox = '/h/.claude/progress-inbox'
-  const oldReporter = RELEASE_0_20_5.reporterSh.split(RELEASE_PATHS.inbox).join(inbox)
-  expect(isReleased('reporterSh', oldReporter, { inbox })).toBe(true)
-  expect(oldReporter).not.toBe(reporterSh(inbox))
-  expect(isReleased('reporterPs1', RELEASE_0_20_5.reporterPs1)).toBe(true)
-  expect(RELEASE_0_20_5.reporterPs1).not.toBe(reporterPs1())
-  expect(isReleased('reporterSh', `${oldReporter}# mine\n`, { inbox })).toBe(false)
+  for (const [kind, previous, current] of [
+    ['reporterSh', RELEASE_0_20_5.reporterSh.split(RELEASE_PATHS.inbox).join(inbox), reporterSh(inbox)],
+    ['reporterPs1', RELEASE_0_20_5.reporterPs1, reporterPs1()],
+  ] as const) {
+    const known = (text: string) => isReleased(kind, text, { inbox })
+    const edit = generatedFile(current, known)
+    expect(known(previous)).toBe(true)
+    expect(previous).not.toBe(current)
+    expect(known(`${previous}# mine\n`)).toBe(false)
+    expect(edit(previous, false)).toBe(current)
+    expect(edit(current, false)).toBe(current)
+    expect(edit(`${previous}# mine\n`, false)).toBe(COLLISION)
+    expect(edit(`${current}# mine\n`, false)).toBe(COLLISION)
+  }
   // On Windows the board's path has backslashes, and a board command holds it as it is.
   const windows = 'C:\\Users\\synthetic\\.claude\\agent-board.mjs'
   for (const text of RELEASE_0_20_5.gemini) {
@@ -3960,5 +3969,50 @@ test("another data folder's unreadable unfinished connection says which error an
 test('quoted connection paths after equals and opening parentheses decode their escapes', () => {
   for (const prefix of ['key=', 'command(']) {
     expect(connectDataRoots(prefix + JSON.stringify('C:\\Users\\Me\\data\\progress-report.ps1'))).toContain('C:\\Users\\Me\\data')
+  }
+})
+
+
+test("the redesigned pages speak the page's language in every new word", () => {
+  const keys = ['viewAll', 'viewStopped', 'viewCount', 'sideViews', 'sideProjects', 'sideAgents', 'sideOwnTasks', 'viewEmptyDue', 'viewEmptyStopped', 'viewEmptyRecent', 'viewEmptyFiltered', 'clearFilters', 'removeFilter', 'sectionActive', 'sectionDue'] as const
+  for (const s of Object.values(STRINGS)) {
+    const view = buildView(parseProgress('## Synthetic\n### Plan\n- [ ] Continue\n'), [], null, NOW, 0, {}, s)
+    const live = servePage(s, 'synthetic')
+    const snapshot = dashboardHtml(view, s, 'synthetic', 'synthetic')
+    for (const page of [live, snapshot]) {
+      for (const label of [s.themeLabel, s.themeSystem, s.themeLight, s.themeDark]) expect(page).toContain(label)
+      expect(page).toContain('data-theme-pick="system"')
+      expect(page).toContain('data-theme-pick="light"')
+      expect(page).toContain('data-theme-pick="dark"')
+    }
+    expect(live).toContain(s.sideTitle)
+    expect(live).toContain(s.serveLive)
+    expect(live).toContain(s.serveLiveHint)
+    expect(live).toContain(s.sideClose)
+    expect(snapshot).toContain(s.dashSections)
+    expect(snapshot).toContain('data-section="dash-others"')
+    expect(snapshot).not.toContain('href="#')
+    const words = pageWords(s)
+    for (const key of keys) {
+      const value = s[key]
+      expect(words[key]).toBe(typeof value === 'function' ? String((value as (n: never) => string)('\u0001' as never)) : value)
+    }
+    expect(s.viewCount(1)).not.toBe(s.viewCount(2))
+    expect(live).not.toContain('innerHTML')
+    expect(live).not.toContain('insertAdjacentHTML')
+  }
+})
+
+test('the redesigned pages carry no run of digits or letters that reads as a machine id or a path', () => {
+  const pattern = /\b[\da-f]{8}\b|\b[\da-f]{40}\b|\b[\da-f]{64}\b|(?<![A-Za-z])[A-Za-z]:[\\/]|\/home\/|\/Users\//i
+  for (const s of Object.values(STRINGS)) {
+    const view = buildView(parseProgress('## Synthetic\n### Plan\n- [ ] Continue\n'), [], null, NOW, 0, {}, s)
+    const live = servePage(s, 'synthetic')
+    const snapshot = dashboardHtml(view, s, 'synthetic', 'synthetic')
+    for (const page of [live, snapshot]) {
+      const match = pattern.exec(page)
+      const context = match ? page.slice(Math.max(0, match.index - 40), match.index + match[0].length + 40) : null
+      expect(context).toBe(null)
+    }
   }
 })

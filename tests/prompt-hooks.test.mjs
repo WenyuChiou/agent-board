@@ -1,11 +1,16 @@
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
-import { registerHooks, stripTypeScriptTypes } from 'node:module'
+import * as fs from 'node:fs'
+import { createRequire, registerHooks, syncBuiltinESMExports } from 'node:module'
+import { pathToFileURL } from 'node:url'
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { createHash } from 'node:crypto'
 import { spawnSync } from 'node:child_process'
-import { join } from 'node:path'
+import { join, sep } from 'node:path'
 import { tmpdir } from 'node:os'
+import { classifierDiagnostic, observeClassifier } from './fixtures/classifier-diagnostic.mjs'
+import { assertPromptReceiptCount, promptReceiptDiagnostic } from './fixtures/prompt-receipt-diagnostic.mjs'
+import { inspect } from 'node:util'
 
 // Node loads standalone TypeScript directly; pure plugin modules use the host's
 // extensionless imports, so resolve only those local paths for these tests.
@@ -18,6 +23,8 @@ registerHooks({ resolve(specifier, context, next) {
 
 const { boardPromptHelper, boardRequestWords, BOARD_REQUEST, boardPromptText, isBoardRequest, promptReceiptScript } = await import('../hooks/board-commands.ts')
 const { STRINGS } = await import('../hooks/strings.ts')
+const { legacyOpenClawPlugin, legacyOpenCodePlugin } = await import('../hooks/legacy-hook-plugins.ts')
+const { opencodePlugin, openclawPlugin } = await import('../hooks/connect-pure.ts')
 const BOARD_WORDS = boardRequestWords(Object.values(STRINGS))
 const BOARD_PROMPT_HELPER = boardPromptHelper(BOARD_WORDS)
 const PROMPT_RECEIPT_SCRIPT = promptReceiptScript(BOARD_WORDS)
@@ -95,8 +102,8 @@ test('a board-only reply restores an existing question on every board surface an
 test('the native OpenCode prompt callback flags exact board commands without retaining their text', async () => {
   const { opencodePlugin } = await import('../hooks/local-agents.ts')
   const saved = []
-  const source = opencodePlugin('node', '/synthetic/board.mjs', '/synthetic/progress.md', 'Progress')
-  const factory = new Function('spawnSync', 'tool', `${source.replace(/^import .*\n/gm, '').replace('export const AgentBoardLocal', 'const AgentBoardLocal')}\nreturn AgentBoardLocal`)((_node, _args, options) => { saved.push(JSON.parse(options.input)); return { status: 0, stdout: '' } }, Object.assign(value => value, { schema: { string: () => ({}), enum: () => ({}), array: () => ({}) } }))
+  const source = opencodePlugin('node', '/synthetic/board.mjs', '/synthetic/progress.md', 'Progress', process.env.HOME)
+  const factory = new Function('createRequire', 'spawnSync', 'tool', `${source.replace(/^import .*\n/gm, '').replaceAll('import.meta.url', JSON.stringify(import.meta.url)).replace('export const AgentBoardLocal', 'const AgentBoardLocal')}\nreturn AgentBoardLocal`)(createRequire, (_node, _args, options) => { saved.push(JSON.parse(options.input)); return { status: 0, stdout: '' } }, Object.assign(value => value, { schema: { string: () => ({}), enum: () => ({}), array: () => ({}) } }))
   const hooks = await factory({ client: { session: { get: async ({ path }) => ({ data: { id: path.id } }) } } })
   await hooks['chat.message']({ sessionID: 'synthetic-owner' }, { parts: [{ type: 'text', text: '/board' }] })
   assert.equal(saved[0].board_request, true)
@@ -110,21 +117,16 @@ test('the native OpenCode prompt callback flags exact board commands without ret
   assert.ok(!JSON.stringify(saved[2]).includes(EN.boardCommandPrompt))
 })
 
-const source = readFileSync(new URL('../hooks/connect-pure.ts', import.meta.url), 'utf8')
-const ctx = { inbox: '/synthetic/progress-inbox' }
-const template = (name, end, withPrompt = true, flagsBoardRequests = true) => {
-  const start = source.indexOf(`export const ${name} =`)
-  assert.ok(start >= 0)
-  const code = stripTypeScriptTypes(source.slice(start, source.indexOf(end, start)), { mode: 'strip' }).replace('export const', 'const')
-  return new Function('BOARD_PROMPT_HELPER', `const OPENCLAW_ID = 'agent-board'; ${code}; return ${name}`)(BOARD_PROMPT_HELPER)(ctx, withPrompt, flagsBoardRequests)
-}
+const ctx = { home: '/synthetic', inbox: '/synthetic/progress-inbox' }
+const template = (name, _end, withPrompt = true, context = ctx) =>
+  ({ opencodePlugin, openclawPlugin })[name](context, withPrompt)
 
 test('pre-prompt plugin templates retain the exact bytes released in 0.20.5 and 0.23.1', () => {
   const legacy = [
-    ['opencodePlugin', '\nconst OPENCLAW_ID', '20b3fd9ec5b02ee9c2090490a0853dfe47fca270392c57de92f55dad2069e645'],
-    ['openclawPlugin', '\n// The standalone board', 'feb2b8ff0af006c582ab0de7165f18fa3fa107fb49e24b0dec414c19cfcf413f'],
+    [legacyOpenCodePlugin, '20b3fd9ec5b02ee9c2090490a0853dfe47fca270392c57de92f55dad2069e645'],
+    [legacyOpenClawPlugin, 'feb2b8ff0af006c582ab0de7165f18fa3fa107fb49e24b0dec414c19cfcf413f'],
   ]
-  for (const [name, end, hash] of legacy) assert.equal(createHash('sha256').update(template(name, end, false)).digest('hex'), hash)
+  for (const [generate, hash] of legacy) assert.equal(createHash('sha256').update(generate(ctx, false)).digest('hex'), hash)
 })
 
 test('prompt plugin templates released before the board-request flag are still recognised as ours', async () => {
@@ -136,7 +138,7 @@ test('prompt plugin templates released before the board-request flag are still r
     ['openclaw', 'openclawPlugin', '\n// The standalone board', '56ac9f27f891b21fe62c044976101d8a589d455e043d16038ab7e171165ce542'],
   ]
   for (const [agent, name, end, hash] of legacy) {
-    const old = template(name, end, true, false)
+    const old = (agent === 'opencode' ? legacyOpenCodePlugin : legacyOpenClawPlugin)(ctx, true, false)
     assert.equal(createHash('sha256').update(old).digest('hex'), hash)
     const hook = hooks.find(one => one.agent === agent && one.generated)
     assert.ok(hook)
@@ -145,9 +147,29 @@ test('prompt plugin templates released before the board-request flag are still r
   }
 })
 
+test('pre-safety board-request plugins upgrade by exact bytes and preserve personal edits', async () => {
+  const { agentHooks, COLLISION } = await import('../hooks/connect-pure.ts')
+  const hooks = agentHooks({ ...ctx, sep: '/', isWindows: false, script: '/synthetic/progress-report.sh', codexHome: '/synthetic/.codex', grokHome: '/synthetic/.grok', hermesHome: '/synthetic/.hermes', openclawHome: '/synthetic/.openclaw' })
+  // Hashes come from main f864aae's generated plugins before this safety wrapper.
+  for (const [agent, prior, current, hash] of [
+    ['opencode', legacyOpenCodePlugin, opencodePlugin, '78d56525458590086447cac30700f5102795ba2a1c88d3ba60c42e4e2f01faf2'],
+    ['openclaw', legacyOpenClawPlugin, openclawPlugin, '4b3126f741792fa08b5680f0d884f83e5159d86d885115294e84df7fd95d8d1a'],
+  ]) {
+    const old = prior(ctx)
+    assert.equal(createHash('sha256').update(old).digest('hex'), hash)
+    const hook = hooks.find(one => one.agent === agent && one.generated)
+    assert.equal(hook.edit(old, false), current(ctx))
+    assert.equal(hook.edit(old + '// personal edit\n', false), COLLISION)
+  }
+})
+
 test('generated OpenCode and OpenClaw prompt callbacks retain only verified binding metadata', async () => {
   const saved = []
-  const instantiate = (script, suffix) => new Function('mkdirSync', 'renameSync', 'writeFileSync', 'join', `${script.replace(/^import .*\n/gm, '').replace('export const AgentBoard', 'const AgentBoard').replace('export default', 'const plugin =')}\n${suffix}`)(() => {}, () => {}, (name, body) => saved.push({ name, body }), (...parts) => parts.join('/'))
+  const instantiate = (script, suffix) => {
+    const descriptors = new Map()
+    const open = name => { const fd = descriptors.size + 1; descriptors.set(fd, name); return fd }
+    return new Function('createRequire', 'closeSync', 'mkdirSync', 'openSync', 'renameSync', 'unlinkSync', 'writeFileSync', 'join', `${script.replace(/^import .*\n/gm, '').replaceAll('import.meta.url', JSON.stringify(import.meta.url)).replace('export const AgentBoard', 'const AgentBoard').replace('export default', 'const plugin =')}\n${suffix}`)(createRequire, fd => descriptors.delete(fd), () => {}, open, () => {}, () => {}, (fd, body) => saved.push({ name: descriptors.get(fd), body }), (...parts) => parts.join('/'))
+  }
   let hasMessages = false
   const factory = instantiate(template('opencodePlugin', '\nconst OPENCLAW_ID'), 'return AgentBoard')
   const hooks = await factory({ directory: '/demo', client: { session: { get: async ({ path }) => ({ data: { id: path.id, ...(path.id === 'subagent' ? { parentID: 'parent' } : {}) } }), messages: () => { hasMessages = true; throw new Error('prompt fetched messages') } } } })
@@ -158,9 +180,9 @@ test('generated OpenCode and OpenClaw prompt callbacks retain only verified bind
   assert.deepEqual(JSON.parse(saved[0].body), { session_id: 'prompt-owner', cwd: '/demo' })
   const callbacks = new Map()
   instantiate(template('openclawPlugin', '\n// The standalone board'), 'return plugin').register({ on: (name, fn) => callbacks.set(name, fn) })
-  for (const kind of ['inter_session', 'internal_system', undefined]) callbacks.get('before_prompt_build')({ prompt: 'PRIVATE_NEW_INPUT' }, { sessionId: 'prompt-owner', inputProvenance: { kind } })
+  for (const kind of ['inter_session', 'internal_system', undefined]) await callbacks.get('before_prompt_build')({ prompt: 'PRIVATE_NEW_INPUT' }, { sessionId: 'prompt-owner', inputProvenance: { kind } })
   assert.equal(saved.length, 1)
-  callbacks.get('before_prompt_build')({ prompt: 'PRIVATE_NEW_INPUT' }, { sessionId: 'prompt-owner', workspaceDir: '/demo', inputProvenance: { kind: 'external_user' } })
+  await callbacks.get('before_prompt_build')({ prompt: 'PRIVATE_NEW_INPUT' }, { sessionId: 'prompt-owner', workspaceDir: '/demo', inputProvenance: { kind: 'external_user' } })
   assert.equal(saved.length, 2)
   assert.deepEqual(JSON.parse(saved[1].body), { session_id: 'prompt-owner', cwd: '/demo' })
   assert.ok(saved.every(one => one.name.includes('-prompt-') && !one.body.includes('PRIVATE_NEW_INPUT')))
@@ -170,13 +192,17 @@ test('legacy prompt callbacks flag board commands without retaining their text',
   const { EN } = await import('../hooks/strings-en.ts')
   const prompts = ['/board', '$agent-board', '/agent-board', `${EN.boardCommandPrompt}\n\nProgress  ● 1  ▸ 0  ⚑ 0  ✓ 0`]
   const saved = []
-  const instantiate = (script, suffix) => new Function('mkdirSync', 'renameSync', 'writeFileSync', 'join', script.replace(/^import .*\n/gm, '').replace('export const AgentBoard', 'const AgentBoard').replace('export default', 'const plugin =') + '\n' + suffix)(() => {}, () => {}, (name, body) => saved.push({ name, body }), (...parts) => parts.join('/'))
+  const instantiate = (script, suffix) => {
+    const descriptors = new Map()
+    const open = name => { const fd = descriptors.size + 1; descriptors.set(fd, name); return fd }
+    return new Function('createRequire', 'closeSync', 'mkdirSync', 'openSync', 'renameSync', 'unlinkSync', 'writeFileSync', 'join', `${script.replace(/^import .*\n/gm, '').replaceAll('import.meta.url', JSON.stringify(import.meta.url)).replace('export const AgentBoard', 'const AgentBoard').replace('export default', 'const plugin =')}\n${suffix}`)(createRequire, fd => descriptors.delete(fd), () => {}, open, () => {}, () => {}, (fd, body) => saved.push({ name: descriptors.get(fd), body }), (...parts) => parts.join('/'))
+  }
   const factory = instantiate(template('opencodePlugin', '\nconst OPENCLAW_ID'), 'return AgentBoard')
   const hooks = await factory({ directory: '/synthetic', client: { session: { get: async ({ path }) => ({ data: { id: path.id } }) } } })
   for (const text of prompts) await hooks['chat.message']({ sessionID: 'synthetic-owner' }, { parts: [{ type: 'text', text }] })
   const callbacks = new Map()
   instantiate(template('openclawPlugin', '\n// The standalone board'), 'return plugin').register({ on: (name, callback) => callbacks.set(name, callback) })
-  for (const prompt of prompts) callbacks.get('before_prompt_build')({ prompt }, { sessionId: 'synthetic-owner', inputProvenance: { kind: 'external_user' } })
+  for (const prompt of prompts) await callbacks.get('before_prompt_build')({ prompt }, { sessionId: 'synthetic-owner', inputProvenance: { kind: 'external_user' } })
   assert.equal(saved.length, 8)
   for (const one of saved) assert.deepEqual(JSON.parse(one.body), { session_id: 'synthetic-owner', ...(one.name.includes('opencode-') ? { cwd: '/synthetic' } : { cwd: '' }), board_request: true })
 })
@@ -188,6 +214,79 @@ const fixture = async fn => {
   try { await fn(home) } finally { rmSync(home, { recursive: true, force: true, maxRetries: 8, retryDelay: 50 }) }
 }
 const receipts = home => existsSync(join(home, 'progress-inbox')) ? readdirSync(join(home, 'progress-inbox')).map(file => ({ file, body: readFileSync(join(home, 'progress-inbox', file), 'utf8') })) : []
+
+test('prompt receipt diagnostics distinguish fixed failure codes without exposing fixture data', () => fixture(async home => {
+  const log = join(home, '.agent-board', 'hook-errors.log')
+  mkdirSync(join(home, '.agent-board'))
+  const result = { status: 0, signal: null, stdout: 'PRIVATE_STDOUT', stderr: 'PRIVATE_STDERR', error: Object.assign(new Error('PRIVATE_ERROR'), { code: 'PRIVATE_CODE', path: '/PRIVATE_PATH' }) }
+  const context = { program: 'sh', mode: 'stdin', classifier: 'missing', isBoardCommand: true, elapsedMs: 2345.4, budgetMs: 2000, actualReceipts: 0, expectedReceipts: 1 }
+  for (const code of ['INPUT_TIMEOUT', 'REPORTER_TIMEOUT', 'INCOMPLETE_INPUT', 'REPORTER_FAILED']) {
+    writeFileSync(log, `2026-10-20T00:00:00.0000000Z gemini prompt ${code}\n`)
+    assert.throws(() => assertPromptReceiptCount(result, context, home), failure => {
+      assert.equal(failure.code, 'ERR_ASSERTION')
+      assert.equal(failure.actual, 0)
+      assert.equal(failure.expected, 1)
+      assert.ok(failure.message.includes(`"fixtureHistoryCodes":["${code}"]`))
+      assert.match(failure.message, /"launchToReturnMs":2345,"reporterBudgetMs":2000/)
+      assert.match(failure.message, /"status":0,"signal":null,"errorCode":"OTHER"/)
+      assert.ok(!/PRIVATE_|board-prompt-144b/.test(inspect(failure)))
+      assert.ok(failure.message.length < 1024)
+      return true
+    })
+  }
+}))
+
+test('prompt receipt diagnostics leave a passing count untouched without reading a log', () => {
+  let reads = 0
+  const result = { get status() { reads += 1; return 0 } }
+  assertPromptReceiptCount(result, { actualReceipts: 1, expectedReceipts: 1 }, Symbol('not a path'))
+  assert.equal(reads, 0, 'a passing count must not construct the diagnostic')
+})
+
+test('prompt receipt diagnostics bound and allowlist fixture log history', () => fixture(async home => {
+  const context = { program: 'PRIVATE_PROGRAM', mode: 'PRIVATE_MODE', classifier: 'PRIVATE_FAILURE', elapsedMs: Infinity, budgetMs: -1 }
+  assert.match(promptReceiptDiagnostic({}, context, home), /"logState":"absent"/)
+  mkdirSync(join(home, '.agent-board'))
+  const log = join(home, '.agent-board', 'hook-errors.log')
+  writeFileSync(log, 'PRIVATE_PAYLOAD'.repeat(10000) + '\n2026-10-20T00:00:00Z gemini prompt PRIVATE_CODE\n' + '2026-10-20T00:00:00Z codex prompt REPORTER_TIMEOUT\n'.repeat(8))
+  const diagnostic = promptReceiptDiagnostic({ status: 999, signal: 'PRIVATE_SIGNAL' }, context, home)
+  assert.ok(!/PRIVATE_|board-prompt-144b/.test(diagnostic))
+  assert.equal((diagnostic.match(/REPORTER_TIMEOUT/g) ?? []).length, 4)
+  assert.match(diagnostic, /"launchToReturnMs":null,"reporterBudgetMs":0/)
+  assert.ok(diagnostic.length < 1024)
+}))
+
+test('classifier diagnostics keep only bounded phase and numeric evidence', () => fixture(async home => {
+  const { reporterPs1 } = await import('../hooks/connect-pure.ts')
+  const diagnostic = join(home, "classifier's-$&-probe.txt")
+  const original = reporterPs1(), observed = observeClassifier(original, diagnostic)
+  assert.equal(classifierDiagnostic(diagnostic), 'classifier diagnostic unavailable')
+  assert.ok(observed.includes(diagnostic.replaceAll("'", "''")))
+  assert.equal(observed.match(/REPORTER_TIMEOUT/g).length, original.match(/REPORTER_TIMEOUT/g).length)
+  for (const line of original.split('\n').filter(line => /Wait\(|WaitForExit\(|ElapsedMilliseconds|\.Kill\(|\.Dispose\(/.test(line))) assert.ok(observed.includes(line))
+  assert.ok(observed.indexOf('[IO.File]::WriteAllText(') > observed.lastIndexOf('if ($ownsReceipt)'))
+  assert.throws(() => observeClassifier(original + original, diagnostic), /anchor must be unique/)
+  writeFileSync(diagnostic, '\uFEFFstart|0|MethodInvocationException|-2146233087|Win32Exception|-2147467259|2|-1|-1|-1|34')
+  assert.equal(classifierDiagnostic(diagnostic), 'classifier phase=start started=0 type=MethodInvocationException hresult=-2146233087 innerType=Win32Exception innerHresult=-2147467259 nativeCode=2 exit=-1 stdoutChars=-1 stderrChars=-1 elapsedMs=34')
+  for (const body of ['PRIVATE_PATH', 'start|0|PRIVATE/path|1||0|0|-1|-1|-1|34', 'start|0||0||0|0|-1|-1|-1|' + '1'.repeat(100), 'start|0||0||0|0|-1|-1|-1|34|PRIVATE_PAYLOAD']) {
+    writeFileSync(diagnostic, body)
+    assert.equal(classifierDiagnostic(diagnostic), 'classifier diagnostic invalid')
+  }
+}))
+
+test('generated PowerShell bounds application lookup to one executable', async () => {
+  const { reporterPs1, reporterSh } = await import('../hooks/connect-pure.ts')
+  // Get-Command searches every module before it reports a missing Node, which can spend
+  // more than a second of the reporter budget. The reporter walks PATH and PATHEXT
+  // itself and stops at the first match, so ProcessStartInfo.FileName gets one path,
+  // never a space-joined array of paths.
+  for (const source of [reporterPs1(), reporterSh('/synthetic/inbox')]) {
+    assert.doesNotMatch(source, /Get-Command node/)
+    assert.match(source, /\[IO\.File\]::Exists\(\$candidate\)\) \{ \$node = \$candidate; break \}/)
+    assert.match(source, /\$start\.FileName = \$node\b/)
+    assert.match(source, /\[IO\.Path\]::IsPathRooted\(\$folderPath\)/)
+  }
+})
 
 test('the sh reporter writes a prompt receipt with no prompt words from stdin or an argument', () => fixture(async home => {
   const { reporterSh } = await import('../hooks/connect-pure.ts')
@@ -211,16 +310,20 @@ test('the sh reporter writes a prompt receipt with no prompt words from stdin or
 test('the PowerShell reporter writes a prompt receipt with no prompt words', { skip: process.platform !== 'win32' }, () => fixture(async home => {
   const { reporterPs1 } = await import('../hooks/connect-pure.ts')
   const file = join(home, 'progress-report.ps1')
-  writeFileSync(file, reporterPs1())
+  const diagnostic = join(home, 'classifier-probe.txt')
+  const diagnostics = []
+  writeFileSync(file, observeClassifier(reporterPs1(), diagnostic))
   assert.ok(!reporterPs1().includes('[Console]::OutputEncoding'))
   for (const prompt of ['/board', '$agent-board', '/agent-board', 'PRIVATE_REAL_ANSWER']) {
+    rmSync(diagnostic, { force: true })
     const result = spawnSync('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', file, 'codex', 'prompt'], { input: JSON.stringify({ session_id: 'synthetic-owner', cwd: '/synthetic/中文', prompt, transcript_path: 'PRIVATE_TRANSCRIPT' }), encoding: 'utf8', windowsHide: true })
+    diagnostics.push(classifierDiagnostic(diagnostic))
     assert.equal(result.status, 0, result.stderr)
   }
   const saved = receipts(home)
-  assert.equal(saved.length, 4)
+  assert.equal(saved.length, 4, diagnostics.join('; '))
   const values = saved.map(one => JSON.parse(one.body))
-  assert.equal(values.filter(one => one.board_request === true).length, 3)
+  assert.equal(values.filter(one => one.board_request === true).length, 3, diagnostics.join('; '))
   assert.ok(values.every(one => one.cwd === '/synthetic/中文'))
   assert.ok(saved.every(one => !/[^\x20-\x7e]/.test(one.body)))
   assert.ok(saved.every(one => !one.body.includes('PRIVATE_') && !one.body.includes('/board') && !one.body.includes('$agent-board')))
@@ -229,10 +332,11 @@ test('the PowerShell reporter writes a prompt receipt with no prompt words', { s
 test('a reporter that cannot run node still writes the receipt and the board drops its words', () => fixture(async home => {
   const { reporterPs1, reporterSh, shellQuote } = await import('../hooks/connect-pure.ts')
   const { readTurn } = await import('../hooks/inbox.ts')
+  const { HOOK_INPUT_TIMEOUT } = await import('../hooks/hook-safety.ts')
   const seen = new Set()
   const tools = join(home, 'tools')
   mkdirSync(tools)
-  for (const name of ['mkdir', 'date', 'cat', 'mv', 'rm', 'find']) {
+  for (const name of ['mkdir', 'date', 'cat', 'mv', 'rm', 'find', 'uname', 'sleep', 'tail']) {
     const located = spawnSync(sh, ['-c', `command -v ${name}`], { encoding: 'utf8', windowsHide: true })
     assert.equal(located.status, 0, located.stderr)
     const file = join(tools, name)
@@ -243,13 +347,30 @@ test('a reporter that cannot run node still writes the receipt and the board dro
   writeFileSync(ps, reporterPs1())
   writeFileSync(shell, reporterSh(shellPath(join(home, 'progress-inbox'))))
   const powershell = process.platform === 'win32' ? join(process.env.SystemRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe') : null
+  if (powershell) {
+    // MSYS delegates to the official Windows shell. Retain that dependency,
+    // not its containing PATH entries, so Node is still genuinely missing.
+    assert.ok(existsSync(powershell))
+    const file = join(tools, 'powershell.exe')
+    writeFileSync(file, `#!/bin/sh\nexec ${shellQuote(shellPath(powershell))} "$@"\n`)
+    chmodSync(file, 0o755)
+  }
   for (const prompt of ['/board', 'PRIVATE_REAL_ANSWER']) for (const mode of ['stdin', 'argument']) {
     const raw = JSON.stringify({ session_id: 'synthetic-fallback', cwd: '/synthetic/中文', prompt, transcript_path: 'PRIVATE_TRANSCRIPT' })
-    const env = { ...process.env, PATH: shellPath(tools) }
+    // Keep diagnostics in this owned fixture, not a developer or CI profile.
+    // PSModulePath remains inherited; this is isolation, not a timing repair.
+    const env = { ...process.env, HOME: home, USERPROFILE: home, PATH: shellPath(tools) }
     // Both hosts must retain a receipt when Node is missing, fails, or returns nothing.
     for (const failure of ['missing', 'failed', 'empty']) {
       const node = join(tools, 'node')
-      if (failure === 'missing') { rmSync(node, { force: true }); rmSync(`${node}.cmd`, { force: true }) }
+      if (failure === 'missing') {
+        rmSync(node, { force: true }); rmSync(`${node}.cmd`, { force: true })
+        const absent = spawnSync(sh, ['-c', 'command -v node'], { env, encoding: 'utf8', windowsHide: true })
+        assert.equal(absent.error, undefined)
+        assert.notEqual(absent.status, null)
+        assert.notEqual(absent.status, 0, 'the fixture must not restore Node through the PowerShell dependency')
+        assert.equal(absent.stdout, '')
+      }
       else {
         const status = failure === 'failed' ? 17 : 0
         writeFileSync(node, `#!/bin/sh\nprintf 'synthetic node error' >&2\nexit ${status}\n`)
@@ -260,11 +381,15 @@ test('a reporter that cannot run node still writes the receipt and the board dro
       if (powershell) runs.push([powershell, ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', ps, 'codex', 'prompt', ...(mode === 'argument' ? [raw] : [])]])
       for (const [program, args] of runs) {
         const before = receipts(home).length
+        const started = performance.now()
         const result = spawnSync(program, args, { env, input: mode === 'stdin' ? raw : undefined, encoding: 'utf8', windowsHide: true })
-        assert.equal(result.status, 0, `${program} ${failure}: ${result.stderr}`)
-        assert.equal(result.stderr, '', `${program} ${failure}`)
+        const context = { program: program === sh ? 'sh' : 'powershell', mode, classifier: failure, isBoardCommand: prompt === '/board', elapsedMs: performance.now() - started, budgetMs: HOOK_INPUT_TIMEOUT, expectedReceipts: before + 1, actualReceipts: null }
+        // Only failed assertions read the bounded fixture log, after return.
+        assert.equal(result.status, 0, result.status === 0 ? undefined : promptReceiptDiagnostic(result, context, home))
+        assert.equal(result.stderr === '', true, result.stderr === '' ? undefined : promptReceiptDiagnostic(result, context, home))
         const saved = receipts(home)
-        assert.equal(saved.length, before + 1, `${program} ${failure}`)
+        context.actualReceipts = saved.length
+        assertPromptReceiptCount(result, context, home)
         const receipt = saved.find(one => !seen.has(one.file))
         seen.add(receipt.file)
         assert.deepEqual(JSON.parse(receipt.body), JSON.parse(raw))
@@ -308,4 +433,65 @@ test('restoring several questions advances each revision beyond the previous one
   const restored = restoreAgentBoardQuestion(answered, { ...turn, event: 'turn', prompt: '/board', at: at + 2000 }, at + 2000)
   assert.deepEqual(restored.tasks.map(one => one.questionRevision), ['3', '4'])
   assert.equal(restored.questionSequence, '4')
+})
+
+test('legacy SDK reporters remove their partial temporary files and preserve foreign collisions', async () => {
+  const home = fs.mkdtempSync(join(tmpdir(), 'legacy-sdk-write-'))
+  const original = { open: fs.openSync, close: fs.closeSync, write: fs.writeFileSync, now: Date.now }
+  // Patch the mutable built-in object, then refresh the generated ESM imports.
+  const mutable = createRequire(import.meta.url)('node:fs')
+  try {
+    for (const [agent, name, end] of [['opencode', 'opencodePlugin', '\nconst OPENCLAW_ID'], ['openclaw', 'openclawPlugin', '\n// The standalone board']]) {
+      for (const collision of [false, true]) {
+        const inbox = join(home, `${agent}-${collision}`), stamp = original.now()
+        fs.mkdirSync(inbox)
+        const temporary = join(inbox, `${agent}-prompt-${stamp}-${process.pid}.tmp`)
+        if (collision) original.write(temporary, 'FOREIGN_BYTES')
+        const file = join(home, `${agent}-${collision}.mjs`)
+        original.write(file, template(name, end, true, { home, inbox }))
+        const descriptors = new Set()
+        let injected = 0
+        const isInbox = path => typeof path === 'string' && path.startsWith(inbox + sep)
+        mutable.openSync = (path, ...args) => { const fd = original.open(path, ...args); if (isInbox(path)) descriptors.add(fd); return fd }
+        mutable.closeSync = fd => { try { return original.close(fd) } finally { descriptors.delete(fd) } }
+        mutable.writeFileSync = (path, body, ...args) => {
+          if (isInbox(path) || descriptors.has(path)) {
+            original.write(path, 'PARTIAL', ...args)
+            injected++
+            throw Object.assign(Error('PRIVATE_SYNTHETIC_WRITE_FAILURE'), { code: 'ENOSPC' })
+          }
+          return original.write(path, body, ...args)
+        }
+        Date.now = () => stamp
+        syncBuiltinESMExports()
+        try {
+          const plugin = await import(pathToFileURL(file).href)
+          if (agent === 'opencode') {
+            const hooks = await plugin.AgentBoard({ directory: '/synthetic-workspace', client: { session: { get: async ({ path }) => ({ data: { id: path.id } }) } } })
+            await hooks['chat.message']({ sessionID: 'synthetic-owner' })
+          } else {
+            const hooks = new Map()
+            plugin.default.register({ on: (event, callback) => hooks.set(event, callback) })
+            await hooks.get('before_prompt_build')({}, { sessionId: 'synthetic-owner', inputProvenance: { kind: 'external_user' } })
+          }
+        } finally {
+          mutable.openSync = original.open; mutable.closeSync = original.close; mutable.writeFileSync = original.write
+          Date.now = original.now
+          syncBuiltinESMExports()
+        }
+        assert.equal(descriptors.size, 0, 'owned file descriptors are closed')
+        assert.equal(injected, collision ? 0 : 1, 'exercise a partial write or an actual exclusive-open collision')
+        assert.deepEqual(fs.readdirSync(inbox), collision ? [temporary.slice(inbox.length + 1)] : [])
+        if (collision) assert.equal(readFileSync(temporary, 'utf8'), 'FOREIGN_BYTES')
+        const log = readFileSync(join(home, '.agent-board', 'hook-errors.log'), 'utf8')
+        assert.match(log, /REPORTER_FAILED/)
+        assert.ok(!log.includes('PRIVATE_') && !log.includes(home))
+      }
+    }
+  } finally {
+    mutable.openSync = original.open; mutable.closeSync = original.close; mutable.writeFileSync = original.write
+    Date.now = original.now
+    syncBuiltinESMExports()
+    fs.rmSync(home, { recursive: true, force: true, maxRetries: 8, retryDelay: 50 })
+  }
 })
