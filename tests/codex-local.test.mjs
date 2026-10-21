@@ -122,12 +122,12 @@ const nativeHook = (command, env, input, after = setTimeout, stop = stopNativeTr
   return nativeProcess(isWin ? process.env.ComSpec || 'cmd.exe' : '/bin/sh', [isWin ? '/c' : '-c', command], env, JSON.stringify(input), after, stop)
 }
 
-const fireCommand = (f, command, input, limit = 10000) => {
+const fireCommand = (f, command, input, limit = 10000, after = callback => setTimeout(callback, limit)) => {
   const isWindows = process.platform === 'win32'
   return nativeProcess(isWindows ? process.env.ComSpec || 'cmd.exe' : '/bin/sh', isWindows ? ['/d', '/s', '/c', `"${command}"`] : ['-c', command], f.env, input,
-    callback => setTimeout(callback, limit), stopNativeTree, { windowsVerbatimArguments: isWindows })
+    after, stopNativeTree, { windowsVerbatimArguments: isWindows })
 }
-const fireHook = (f, input, limit) => fireCommand(f, JSON.parse(readFileSync(f.hooks, 'utf8')).hooks.UserPromptSubmit[0].hooks[0].command, input, limit)
+const fireHook = (f, input, limit, after) => fireCommand(f, JSON.parse(readFileSync(f.hooks, 'utf8')).hooks.UserPromptSubmit[0].hooks[0].command, input, limit, after)
 
 const hookLog = f => existsSync(join(f.root, 'hook-errors.log')) ? readFileSync(join(f.root, 'hook-errors.log'), 'utf8') : ''
 
@@ -2587,6 +2587,146 @@ const assertBusyFailure = (result, f) => {
   assert.ok(!result.stderr.includes(f.home), result.stderr)
   assert.doesNotMatch(result.stderr, /\bat /)
 }
+
+test('L5 concurrent writers: 8 hooks and 4 FORMAT.md writers lose no block on Windows', t => fixture(async f => {
+  assert.equal(f.install('--apply').status, 0)
+  f.save(f.progress, '## FORMAT concurrency\n\nManual text must survive\n')
+  const gate = join(f.home, 'writers-start')
+  const barrier = join(f.home, 'writers-barrier.cjs')
+  const writer = join(f.home, 'format-writer.cjs')
+  f.save(barrier, `const fs = require('node:fs')
+const { performance } = require('node:perf_hooks')
+fs.writeFileSync(process.env.WRITER_READY, '')
+const until = performance.now() + 15000
+while (!fs.existsSync(process.env.WRITERS_START)) {
+  if (performance.now() >= until) throw new Error('START_TIMEOUT')
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 5)
+}
+`)
+  // Keep this writer independent of product helpers so the documented procedure is exercised.
+  f.save(writer, String.raw`const fs = require('node:fs')
+const { randomBytes } = require('node:crypto')
+const { performance } = require('node:perf_hooks')
+const [file, id] = process.argv.slice(2)
+const lock = file + '.agent-board-lock'
+const pause = ms => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms)
+const isRefusedRename = error => process.platform === 'win32' && ['EPERM', 'EACCES', 'EBUSY'].includes(error.code)
+const own = new RegExp('<!-- auto session=' + id + ' [^\\n]*-->\\r?\\n[\\s\\S]*?<!-- /auto session=' + id + ' -->\\r?\\n?')
+const write = round => {
+  const token = randomBytes(16).toString('hex')
+  const claim = JSON.stringify({ version: 1, pid: process.pid, token })
+  const block = '<!-- auto session=' + id + ' agent=format state=working updated=2026-01-31T09:30:00Z -->\n### FORMAT writer ' + id + '\n- [~] Round ' + round + '\n<!-- /auto session=' + id + ' -->\n'
+  const until = performance.now() + 2000
+  let fd
+  for (;;) {
+    try {
+      fd = fs.openSync(lock, 'wx', 0o600)
+      break
+    } catch (error) {
+      // FORMAT.md: an existing lock, or an access-denied create on Windows, means busy.
+      if (error.code !== 'EEXIST' && !(process.platform === 'win32' && error.code === 'EPERM')) throw error
+      if (performance.now() >= until) throw new Error('LOCK_BUSY')
+      pause(Math.min(10, until - performance.now()))
+    }
+  }
+  try {
+    fs.writeFileSync(fd, claim)
+  } catch (error) {
+    // An empty or partial lock is never recovered, so remove the file this writer created.
+    fs.closeSync(fd)
+    fs.unlinkSync(lock)
+    throw error
+  }
+  try {
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const temporary = file + '.' + token + '.' + attempt + '.format-tmp'
+      try {
+        const before = fs.readFileSync(file, 'utf8')
+        fs.writeFileSync(temporary, own.test(before) ? before.replace(own, block) : before + block, { flag: 'wx', mode: 0o600 })
+        const stop = performance.now() + 2000
+        for (let delay = 10; ; delay *= 2) {
+          try {
+            fs.renameSync(temporary, file)
+            break
+          } catch (error) {
+            if (!isRefusedRename(error) || performance.now() >= stop) throw error
+            pause(Math.max(0, Math.min(delay, stop - performance.now())))
+          }
+        }
+      } finally {
+        if (fs.existsSync(temporary)) fs.unlinkSync(temporary)
+      }
+      if (fs.readFileSync(file, 'utf8').includes(block)) return
+    }
+    throw new Error('WRITE_FAILED')
+  } finally {
+    fs.closeSync(fd)
+    // Compare the whole text: a lock that is not this writer's must stay where it is.
+    if (fs.readFileSync(lock, 'utf8') === claim) fs.unlinkSync(lock)
+  }
+}
+// The gate releases each hook's first process; the hook writes from a later one.
+// Ten rounds keep these writers writing while the hooks write.
+for (let round = 1; round <= 10; round += 1) {
+  write(round)
+  if (round < 10) pause(50)
+}
+`)
+  const hooks = Array.from({ length: 8 }, (_, i) => `format-concurrent-hook-${i}`)
+  const writers = Array.from({ length: 4 }, (_, i) => `f000000${i}`)
+  const owners = [...hooks.map(id => createHash('sha256').update(`codex:${id}`).digest('hex').slice(0, 8)), ...writers]
+  const ready = owners.map(id => join(f.home, `writer-ready-${id}`))
+  const runs = [], stops = []
+  // The helper's deadline callback stops its owned tree and waits for closed stdio.
+  const after = stop => {
+    stops.push(stop)
+    return setTimeout(stop, 20000)
+  }
+  const track = run => {
+    runs.push(run)
+    run.catch(() => {})
+  }
+  const environment = i => ({ ...f.env, NODE_OPTIONS: `--require ${JSON.stringify(barrier)}`, WRITER_READY: ready[i], WRITERS_START: gate })
+  try {
+    for (const [i, id] of hooks.entries()) {
+      track(fireHook({ ...f, env: { ...environment(i), CODEX_THREAD_ID: id } }, JSON.stringify({ session_id: id, hook_event_name: 'UserPromptSubmit', turn_id: 'turn-1' }), 20000, after))
+    }
+    for (const [i, id] of writers.entries()) {
+      track(nativeProcess(process.execPath, [writer, f.progress, id], environment(i + hooks.length), '', after))
+    }
+    const until = Date.now() + 15000
+    while (!ready.every(file => existsSync(file))) {
+      assert.ok(Date.now() < until, `all twelve children must reach the shared start gate: ${ready.map(file => existsSync(file))}`)
+      await new Promise(done => setTimeout(done, 5))
+    }
+    f.save(gate, '')
+    const results = await Promise.all(runs)
+    const text = readFileSync(f.progress, 'utf8')
+    const missing = owners.filter(id => !text.includes(`<!-- auto session=${id} `))
+    t.diagnostic(JSON.stringify({ exits: results.map(result => result.status), missing }))
+    for (const result of results) {
+      assert.equal(result.status, 0, hookFailure(result))
+      assert.equal(result.error, undefined, hookFailure(result))
+    }
+    assert.ok(text.includes('Manual text must survive\n'), text)
+    for (const id of owners) {
+      assert.equal(text.split(`<!-- auto session=${id} `).length - 1, 1, text)
+      assert.equal(text.split(`<!-- /auto session=${id} -->`).length - 1, 1, text)
+    }
+    for (const id of writers) assert.match(text, new RegExp(`### FORMAT writer ${id}\\r?\\n- \\[~\\] Round 10\\r?\\n`))
+    assert.deepEqual(pendingFiles(f), [])
+    const leftovers = readdirSync(f.root, { recursive: true }).filter(name => /\.agent-board-lock(?:\.recover)?$|\.(?:tmp|format-tmp|board-tmp)$/.test(name))
+    assert.deepEqual(leftovers, [])
+  } finally {
+    for (const stop of stops) stop()
+    const settled = await Promise.allSettled(runs)
+    for (const result of settled) {
+      if (result.status === 'fulfilled' && result.value.status !== 0) t.diagnostic(hookFailure(result.value))
+    }
+    const failure = settled.find(result => result.status === 'rejected')
+    if (failure) throw failure.reason
+  }
+}))
 
 test('L5 locked file: the hook retries, exits 0, and the Stop event lands on the next run', () => fixture(f => {
   assert.equal(f.install('--apply').status, 0)
