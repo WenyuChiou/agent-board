@@ -3,7 +3,7 @@
 <p align="center"><b>每个 AI coding agent 在做什么，一个看板看完；哪个在等你，就在那里回它。</b></p>
 
 <p align="center">
-<picture><source media="(prefers-color-scheme: dark)" srcset="docs/images/pane-zh-CN-dark.svg"><img alt="看板的面板：Claude Code 在问是先用开关给部分用户、还是直接全部开放，每个答案一个按钮，下面有回复框，还有 4 件在等你。合成数据。" src="docs/images/pane-zh-CN-light.svg" width="460"></picture>
+<picture><source media="(prefers-color-scheme: dark)" srcset="docs/images/cover-zh-CN-dark.svg"><img alt="会动的看板：Claude Code、Codex 和 Antigravity 把步骤汇报到同一个面板；Claude 问是先用开关给部分用户还是直接全部开放，在面板按下的答案回到 Claude，步骤接着往下走。合成数据。" src="docs/images/cover-zh-CN-light.svg" width="860"></picture>
 </p>
 
 <p align="center">

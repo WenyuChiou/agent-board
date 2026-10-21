@@ -1,0 +1,2 @@
+- **The README opens with an animated cover (#344).** In all three READMEs the first picture is now an animated SVG instead of the still pane. Claude Code, Codex and Antigravity report their steps to one pane, and Claude asks which way to release; the answer pressed in the pane goes back to it. The cover moves with CSS alone, loads nothing from the network, and stands still on its last frame when reduced motion is on. Synthetic data; drawn by `docs/preview/render.ts`.
+  Tests: `L0 README: the cover moves with CSS alone and stands still on its last frame for reduced motion`.

@@ -2,7 +2,8 @@
 // laid out like a terminal (terminal.ts), written as SVG. One set per language.
 //   bun docs/preview/render.ts          (run `claude --plugin-dir .` once first, for the JSX setup)
 // Writes docs/images/{tour,flow,promo}-<lang>.svg, docs/images/board/<agent>-<lang>-<light|dark>.svg,
-// docs/images/agents/<agent>.svg, and docs/preview/out/dashboard-<lang>.html for
+// docs/images/cover-<lang>-<light|dark>.svg (the README's animated cover), docs/images/agents/<agent>.svg,
+// and docs/preview/out/dashboard-<lang>.html for
 // docs/preview/png.mjs, which takes the progress.html screenshots and the social preview.
 import { mkdirSync, readdirSync, writeFileSync } from 'fs'
 import { join } from 'path'
@@ -14,9 +15,11 @@ import { applyTaskCreate, applyTaskUpdate, emptyMirror } from '../../hooks/mirro
 import { DARK, LIGHT } from '../../hooks/palette'
 import type { Palette } from '../../hooks/palette'
 import { parseProgress } from '../../hooks/parse'
+import { emptyQuestions } from '../../hooks/questions'
 import { STRINGS } from '../../hooks/strings'
 import { buildView } from '../../hooks/view'
-import { CLI_FILES, NOW, SAMPLES, SESSION, MIN } from './samples'
+import { CLI_FILES, COVER, COVER_MARKS, NOW, SAMPLES, SESSION, MIN, coverFile } from './samples'
+import type { CoverSample } from './samples'
 import { AGENT_ICONS, TESTED_ICONS } from './icons'
 import type { AgentIcon } from './icons'
 import { CELL, LINE, gridSvg, keyBox, layout, rowOf, toNode, widthCells } from './terminal'
@@ -888,6 +891,292 @@ ${terminal(mode, monoOf(lang), title, gridSvg(grid, PAD, BAR + PAD, theme), grid
 `
 }
 
+// The README's cover, a 10 s loop: Claude Code, Codex and Antigravity each tick a step and the
+// pane shows it; Claude asks which way to release, the person presses an answer in the pane, and
+// Claude gets it as its next prompt (submitOwn in register.tsx, worded by s.answerText). Left, a
+// card per agent; right, the pane as drawPane draws it at each moment (COVER in samples.ts). CSS
+// keyframes only, so GitHub plays it in an <img>; with reduced motion only the end shows, the
+// answer gone through.
+const COVER_LOOP = 10
+// When each thing happens, in seconds; a report takes TRAVEL to reach the pane, and a moment
+// fades in over FADE. The last moment holds until `back`, then the loop fades to the first.
+const COVER_T = { codex: 0.8, antigravity: 1.5, ask: 2.6, point: 3.9, press: 4.8, answer: 5.2, back: 9.4 }
+const TRAVEL = 0.5
+const FADE = 0.3
+// The pane shows this many rows; the last moment scrolls just far enough to show the answer.
+const COVER_ROWS = 28
+const CARD_W = 360
+const GAP = 76
+// Around the pane, the board page's own look: its pale ground, and white cards with a light line
+// and a soft shadow. The pane keeps the terminal's.
+const PAGE: Record<Mode, { ground: string; surface: string; line: string; shadow: string; depth: number }> = {
+  light: { ground: '#f1f2ee', surface: '#ffffff', line: '#e3e4de', shadow: '#1f2324', depth: 0.1 },
+  dark: { ground: '#141617', surface: '#1e2022', line: '#2e3134', shadow: '#000000', depth: 0.5 },
+}
+const MARGIN = 16
+const COVER_WORDS: Record<Lang, { label: string }> = {
+  en: { label: 'Claude Code, Codex and Antigravity report their steps to the board; Claude asks which way to release, and the answer pressed in the pane goes back to it' },
+  'zh-TW': { label: 'Claude Code、Codex、Antigravity 把每一步回報到看板；Claude 問要怎麼上線，在面板按下的答案直接回給它' },
+  'zh-CN': { label: 'Claude Code、Codex、Antigravity 把每一步汇报到看板；Claude 问要怎么上线，在面板点下的答案直接回给它' },
+}
+const COVER_STATUS: Record<string, 'completed' | 'in_progress'> = { x: 'completed', '~': 'in_progress' }
+type Row = Grid[number]
+
+// The pane at moment `m` (0 to 4, as COVER_MARKS), with "Other open work" open so Codex's and
+// Antigravity's steps show.
+const coverPane = (lang: Lang, mode: Mode, m: number) => {
+  const s = STRINGS[lang]
+  const c = COVER[lang] as CoverSample
+  const marks = COVER_MARKS.claude[m] ?? []
+  let mine = emptyMirror(SESSION, c.claude.project, NOW, '')
+  c.claude.steps.forEach((subject, i) => {
+    const metadata = marks[i] === '?' ? { waiting: 'you', ask: 'choose', options: c.claude.options, why: c.claude.why } : undefined
+    mine = applyTaskCreate(mine, { subject, activeForm: '', metadata } as never, String(i + 1), NOW)
+  })
+  marks.forEach((mark, i) => {
+    const status = COVER_STATUS[mark]
+    if (status !== undefined) mine = applyTaskUpdate(mine, { taskId: String(i + 1), status } as never, NOW)
+  })
+  const own = { ...mine, title: c.claude.title, context: '', state: 'working' as const, branch: c.claude.branch, updated: NOW }
+  const file = upsertAutoBlock(coverFile(c, m), own, s)
+  // Every step the sample ticks was ticked this morning.
+  const view = buildView(parseProgress(file), [c.claude.project], own, NOW, (file.match(/^- \[x\] /gm) ?? []).length, {}, s, [], {}, emptyQuestions())
+  const t = TERMINAL[mode]
+  const answer = marks[2] === 'x' ? { question: c.claude.steps[2], text: s.answered(c.claude.options[0]), isAsking: false } : null
+  const tree = drawPane(
+    { Box: 'Box', Text: 'Text', Button: 'Button', Input: 'Input', Link: 'Link' } as never,
+    { view, expanded: '', opened: ['others'], answer, path: '', width: 26, hasTaskTools: true, isNotifyOn: true, isLegendOpen: false, palette: t.palette, s } as never,
+    {} as never,
+  )
+  const theme: Theme = { ground: t.ground, ink: t.ink, edge: t.edge, muted: t.palette.muted, accent: t.palette.accent, frame: t.palette.frame }
+  const grid = layout(toNode(tree) ?? '', WIDTH, theme)
+  // The answer's note sits above its Clear button; scroll so it is the last row shown.
+  const clear = keyBox(grid, 'clear-answer')
+  const top = answer === null || clear === null ? 0 : Math.max(0, clear.row - COVER_ROWS)
+  return { grid, theme, top, rows: Array.from({ length: COVER_ROWS }, (_, i): Row | undefined => grid[top + i]) }
+}
+
+const rowKey = (row: Row | undefined): string =>
+  (row ?? []).map(cell => `${cell.ch}|${cell.style.fg ?? ''}|${cell.style.bold === true ? 1 : 0}|${cell.style.underline === true ? 1 : 0}`).join('/')
+
+const cover = (lang: Lang, mode: Mode): string => {
+  const s = STRINGS[lang]
+  const c = COVER[lang] as CoverSample
+  const w = COVER_WORDS[lang]
+  const t = TERMINAL[mode]
+  const page = PAGE[mode]
+  const pal = t.palette
+  const mono = monoOf(lang)
+  const panes = [0, 1, 2, 3, 4].map(m => coverPane(lang, mode, m))
+  const winX = CARD_W + GAP
+  const W = winX + windowWidth + 1
+  const H = BAR + PAD + COVER_ROWS * LINE + PAD + 1
+  const p = (sec: number): string => `${((Math.max(0, Math.min(COVER_LOOP, sec)) / COVER_LOOP) * 100).toFixed(2)}%`
+  const keyframes: string[] = []
+  const frames = (body: string): string => {
+    const name = `c${keyframes.length}`
+    keyframes.push(`@keyframes ${name} { ${body} }`)
+    return name
+  }
+  // On from `start`, fading in, until `end`, when the one laid over it has fully come in; the
+  // last one stays until the loop turns back, and fades out over the first.
+  const shown = (start: number, end: number | null): string =>
+    frames(`0%, ${p(start)} { opacity: 0 } ${p(start + FADE)} { opacity: 1 } ${end === null ? `${p(COVER_T.back)} { opacity: 1 } 100% { opacity: 0 }` : `${p(end)} { opacity: 1 } ${p(end + 0.02)}, 100% { opacity: 0 }`}`)
+  // A brief glow, on and off.
+  const glow = (start: number, length: number, peak: number): string =>
+    frames(`0%, ${p(start)} { opacity: 0 } ${p(start + 0.12)} { opacity: ${peak} } ${p(start + length)}, 100% { opacity: 0 }`)
+
+  // One surface's moments: the first drawn plainly, and each later one laid over it from its time,
+  // as the rows that differ from the first plus every row the one before drew, so nothing shows
+  // through when that one goes. Each row brings its own ground.
+  type Moment = { at: number; rows: Array<{ key: string; svg: string }> }
+  const layered = (moments: Moment[], ground: (i: number) => string): string => {
+    const base = moments[0]?.rows ?? []
+    const drawn = new Set<number>()
+    return [
+      base.map(row => row.svg).join(''),
+      ...moments.slice(1).map((moment, k) => {
+        moment.rows.forEach((row, i) => {
+          if (row.key !== base[i]?.key) drawn.add(i)
+        })
+        const next = moments[k + 2]
+        const name = shown(moment.at, next === undefined ? null : next.at + FADE)
+        const rows = [...drawn].sort((a, b) => a - b).map(i => `${ground(i)}${moment.rows[i]?.svg ?? ''}`).join('')
+        return `<g class="a ${name}${next === undefined ? ' last' : ''}">${rows}</g>`
+      }),
+    ].join('\n')
+  }
+
+  // The pane: each moment as it reaches the board.
+  const paneAt = [0, COVER_T.codex + TRAVEL, COVER_T.antigravity + TRAVEL, COVER_T.ask + TRAVEL, COVER_T.answer]
+  const rowY = (i: number): number => BAR + PAD + i * LINE
+  const paneBody = layered(
+    panes.map((pane, m) => ({ at: paneAt[m] ?? 0, rows: pane.rows.map((row, i) => ({ key: rowKey(row), svg: row === undefined ? '' : gridSvg([row], PAD, rowY(i), pane.theme) })) })),
+    i => `<rect x="1" y="${rowY(i)}" width="${num(windowWidth - 2)}" height="${LINE}" fill="${t.ground}"/>`,
+  )
+  // A soft band over the rows a report changed, as it lands.
+  const band = (m: number, from: number, to: number): string => {
+    const pane = panes[m]
+    if (from < 0 || pane === undefined) return ''
+    return `<rect class="a ${glow(paneAt[m] ?? 0, 1.1, 0.16)}" x="1" y="${rowY(from - pane.top) - 1}" width="${num(windowWidth - 2)}" height="${(to - from + 1) * LINE + 2}" fill="${pal.accent}"/>`
+  }
+  const rowIn = (m: number, text: string): number => rowOf(panes[m]?.grid ?? [], text)
+  const waitingRow = rowIn(3, s.mostNeeded)
+  const option = keyBox(panes[3]?.grid ?? [], `mine::3::${c.claude.options[0]}`)
+  const answerRow = rowIn(4, s.answered(c.claude.options[0]))
+  const bands = [
+    band(1, rowIn(1, c.codex.title), rowIn(1, c.codex.title) + 1),
+    band(2, rowIn(2, c.antigravity.title), rowIn(2, c.antigravity.title) + 1),
+    band(3, waitingRow, waitingRow + 3),
+    band(4, answerRow - 1, answerRow),
+  ].join('')
+  // The press: a ring round the first answer, then the button lighting up.
+  const press = option === null
+    ? ''
+    : `<rect class="a ${frames(`0%, ${p(COVER_T.point + 0.6)} { opacity: 0 } ${p(COVER_T.point + 0.9)} { opacity: 1 } ${p(COVER_T.answer)} { opacity: 1 } ${p(COVER_T.answer + 0.2)}, 100% { opacity: 0 }`)}" x="${num(PAD + option.col * CELL - 6)}" y="${rowY(option.row) - 3}" width="${num(option.span * CELL + 12)}" height="${LINE + 5}" rx="6" fill="none" stroke="${pal.accent}" stroke-width="2.4"/>` +
+      `<rect class="a ${glow(COVER_T.press, 0.45, 0.3)}" x="${num(PAD + option.col * CELL - 6)}" y="${rowY(option.row) - 3}" width="${num(option.span * CELL + 12)}" height="${LINE + 5}" rx="6" fill="${pal.accent}"/>`
+  const body = `<g clip-path="url(#pane)">${paneBody}\n${bands}${press}</g>`
+
+  // The agents, one card each: its tile, name and project, its task, its steps and what it is
+  // doing. A step's mark is the board's own: ✓ done, ▸ doing, ? waiting on you, a ring for to do.
+  const cardH = (steps: number): number => 86 + steps * 24 + 22
+  const gap = (H - 1 - cardH(4) - cardH(3) * 2) / 2
+  const cards: Array<{ key: 'claude' | 'codex' | 'antigravity'; name: string; project: string; title: string; steps: string[]; y: number }> = [
+    { key: 'claude', name: 'Claude Code', project: c.claude.project, title: c.claude.title, steps: c.claude.steps, y: 0.5 },
+    { key: 'codex', name: 'Codex', project: c.codex.project, title: c.codex.title, steps: c.codex.steps, y: 0.5 + cardH(4) + gap },
+    { key: 'antigravity', name: 'Antigravity', project: c.antigravity.project, title: c.antigravity.title, steps: c.antigravity.steps, y: 0.5 + cardH(4) + cardH(3) + gap * 2 },
+  ]
+  const stepLine = (x: number, y: number, mark: string, text: string): string => {
+    const tone = mark === 'x' ? pal.muted : mark === '?' ? pal.waiting : t.ink
+    const weight = mark === '~' || mark === '?' ? ' font-weight="600"' : ''
+    const sign = mark === 'x'
+      ? `<text x="${x}" y="${y}" font-size="15" font-weight="700" fill="${pal.done}">✓</text>`
+      : mark === '~'
+        ? `<text x="${x + 1}" y="${y}" font-size="14" fill="${pal.accent}">▸</text>`
+        : mark === '?'
+          ? `<text x="${x + 1}" y="${y}" font-size="15" font-weight="700" fill="${pal.waiting}">?</text>`
+          : `<circle cx="${x + 5}" cy="${y - 5}" r="3.6" fill="none" stroke="${pal.muted}" stroke-width="1.3"/>`
+    return `${sign}<text x="${x + 22}" y="${y}" font-size="14.5"${weight} fill="${tone}">${esc(text)}</text>`
+  }
+  // When each card changes: Codex's and Antigravity's ticks, Claude's question, and the answer
+  // reaching Claude once it has come back from the pane.
+  const cardAt = { claude: [0, -1, -1, COVER_T.ask, COVER_T.answer + TRAVEL], codex: [0, COVER_T.codex], antigravity: [0, -1, COVER_T.antigravity] }
+  const cardSvg = cards.map(card => {
+    const x = 0.5
+    const statusY = card.y + 86 + card.steps.length * 24 + 4
+    const moments = cardAt[card.key].flatMap((at, m) => {
+      if (at < 0) return []
+      const marks = COVER_MARKS[card.key][m] ?? []
+      const status = card.key === 'claude' && marks.includes('?')
+        ? `<text x="${x + 18}" y="${statusY}" font-size="14" font-weight="600" fill="${pal.waiting}">${esc(c.claude.why)}</text>`
+        : card.key === 'claude' && marks[2] === 'x'
+          ? `<text x="${x + 18}" y="${statusY}" font-family="${mono}" font-size="13" fill="${pal.accent}">› ${esc(s.answerText(c.claude.steps[2], c.claude.options[0]))}</text>`
+          : `<text x="${x + 18}" y="${statusY}" font-size="14" fill="${pal.muted}">${esc(TOUR[lang].working)}</text>`
+      const rows = [...card.steps.map((step, i) => stepLine(x + 18, card.y + 86 + i * 24, marks[i] ?? ' ', step)), status]
+      return [{ at, rows: rows.map(svg => ({ key: svg, svg })) }]
+    })
+    // Each row's own ground, reaching below its letters' tails; the status line sits 4 lower.
+    const ground = (i: number): string => `<rect x="${x + 1}" y="${num(card.y + 86 + i * 24 - 18 + (i === card.steps.length ? 4 : 0))}" width="${CARD_W - 2}" height="24" fill="${page.surface}"/>`
+    // While Claude waits on you, its card wears the board's own kind-of-question chip.
+    const label = s.ask.choose
+    const chipW = 30 + [...label].reduce((n, ch) => n + (ch.charCodeAt(0) > 0x2e80 ? 12 : 7), 0)
+    const chipX = x + CARD_W - 16 - chipW
+    const chip = card.key === 'claude'
+      ? `<g class="a ${shown(COVER_T.ask, COVER_T.answer + TRAVEL + FADE)}"><rect x="${num(chipX)}" y="${num(card.y + 15)}" width="${chipW}" height="22" rx="11" fill="${pal.waiting}" fill-opacity="0.08" stroke="${pal.waiting}" stroke-opacity="0.45"/><circle cx="${num(chipX + 12)}" cy="${num(card.y + 26)}" r="3" fill="${pal.waiting}"/><text x="${num(chipX + 21)}" y="${num(card.y + 30.5)}" font-size="12" font-weight="600" fill="${pal.waiting}">${esc(label)}</text></g>`
+      : ''
+    return `<rect x="${x}" y="${num(card.y)}" width="${CARD_W}" height="${cardH(card.steps.length)}" rx="12" fill="${page.surface}" stroke="${page.line}" filter="url(#lift)"/>
+${iconTile(card.name, x + 16, card.y + 10, 32)}
+<text x="${x + 58}" y="${num(card.y + 32)}" font-size="16" font-weight="600" fill="${t.ink}">${esc(card.name)}</text>
+${chip}
+<text x="${x + 18}" y="${num(card.y + 58)}" font-size="14"><tspan font-weight="600" fill="${pal.project}">${esc(card.project)}</tspan><tspan fill="${pal.muted}"> › ${esc(card.title)}</tspan></text>
+${layered(moments, ground)}`
+  }).join('\n')
+
+  // The question pushes other agents off screen and the answer scrolls the pane, so wires follow each moment.
+  const links = cards.flatMap(card => {
+    const segments: Array<{ row: number | null; first: number; last: number }> = []
+    panes.forEach((pane, m) => {
+      const text = card.key === 'claude'
+        ? m === 4 ? s.answered(c.claude.options[0]) : m === 3 ? s.mostNeeded : c.claude.branch
+        : card.title
+      const found = rowOf(pane.grid, text)
+      const row = found < 0 || found - pane.top < 0 || found - pane.top >= COVER_ROWS ? null : found - pane.top
+      const isRequired = card.key === 'claude' || m === 0 || m === 4 || m === (card.key === 'codex' ? 1 : 2)
+      if (row === null && isRequired) throw new Error(`Missing wire row for ${card.key}, moment ${m}, language ${lang}`)
+      const previous = segments[segments.length - 1]
+      if (previous !== undefined && previous.row === row) previous.last = m
+      else segments.push({ row, first: m, last: m })
+    })
+    const x1 = CARD_W + 0.5
+    const y1 = card.y + cardH(card.steps.length) / 2
+    const x2 = winX + 0.5
+    return segments.flatMap(segment => {
+      if (segment.row === null) return []
+      const y2 = 0.5 + rowY(segment.row) + LINE / 2
+      return [{ ...segment, key: card.key, d: `M${num(x1)} ${num(y1)}C${num(x1 + GAP * 0.55)} ${num(y1)} ${num(x2 - GAP * 0.55)} ${num(y2)} ${num(x2)} ${num(y2)}` }]
+    })
+  })
+  const dash = (key: string, m: number, start: number, colour: string, isBack = false): string => {
+    const link = links.find(link => link.key === key && link.first <= m && link.last >= m)
+    if (link === undefined) throw new Error(`Missing wire path for ${key}, moment ${m}, language ${lang}`)
+    const [from, to] = isBack ? [-100, 16] : [16, -100]
+    return `<path class="a ${frames(`0%, ${p(start)} { opacity: 0; stroke-dashoffset: ${from} } ${p(start + 0.02)} { opacity: 1; stroke-dashoffset: ${from} } ${p(start + TRAVEL)} { opacity: 1; stroke-dashoffset: ${to} } ${p(start + TRAVEL + 0.02)}, 100% { opacity: 0; stroke-dashoffset: ${to} }`)}" d="${link.d}" pathLength="100" fill="none" stroke="${colour}" stroke-width="3.2" stroke-linecap="round" stroke-dasharray="16 200"/>`
+  }
+  const wires = `<g fill="none" stroke="${pal.frame}" stroke-width="1.4" stroke-dasharray="1.5 4.5" stroke-linecap="round">
+${links.map(link => {
+    if (link.first === 0 && link.last === 4) return `<path d="${link.d}"/>`
+    const start = paneAt[link.first] ?? 0
+    const end = paneAt[link.last + 1] ?? COVER_T.back
+    const fadeIn = link.first === 0 ? '0% { opacity: 1 }' : `0%, ${p(start)} { opacity: 0 } ${p(start + FADE)} { opacity: 1 }`
+    const fadeOut = link.last === 4
+      ? `${p(COVER_T.back)} { opacity: 1 } 100% { opacity: 0 }`
+      : `${p(end)} { opacity: 1 } ${p(end + FADE)}, ${link.first === 0 ? `${p(COVER_T.back)} { opacity: 0 } 100% { opacity: 1 }` : '100% { opacity: 0 }'}`
+    return `<path class="a ${frames(`${fadeIn} ${fadeOut}`)}${link.last === 4 ? ' last' : ''}" d="${link.d}"/>`
+  }).join('\n')}
+</g>
+${dash('codex', 1, COVER_T.codex, pal.accent)}
+${dash('antigravity', 2, COVER_T.antigravity, pal.accent)}
+${dash('claude', 3, COVER_T.ask, pal.waiting)}
+${dash('claude', 4, COVER_T.answer, pal.done, true)}`
+
+  // The pointer: in from below, onto the first answer, a press, and away once it has gone through.
+  let pointer = ''
+  if (option !== null) {
+    const tipX = winX + 0.5 + PAD + (option.col + option.span * 0.45) * CELL
+    const tipY = 0.5 + rowY(option.row) + LINE * 0.62
+    const at = (x: number, y: number, k = 1): string => `transform: translate(${num(x)}px, ${num(y)}px) scale(${k})`
+    const move = 'animation-timing-function: cubic-bezier(0.3, 0.7, 0.2, 1)'
+    const name = frames(`0%, ${p(COVER_T.point)} { opacity: 0; ${at(tipX + 120, tipY + 150)}; ${move} } ${p(COVER_T.point + 0.25)} { opacity: 1 } ${p(COVER_T.point + 0.8)} { ${at(tipX, tipY)} } ${p(COVER_T.press)} { ${at(tipX, tipY)} } ${p(COVER_T.press + 0.1)} { ${at(tipX, tipY, 0.86)} } ${p(COVER_T.press + 0.25)} { ${at(tipX, tipY)} } ${p(COVER_T.answer + 0.5)} { opacity: 1 } ${p(COVER_T.answer + 0.8)}, 100% { opacity: 0; ${at(tipX, tipY)} }`)
+    const [fill, line] = mode === 'light' ? ['#1b1b1b', '#ffffff'] : ['#ffffff', '#1b1b1b']
+    pointer = `<g class="a ${name}"><path d="M0 0V18.5L4.6 14.2L7.7 21.2L10.9 19.8L7.9 13H14Z" fill="${fill}" stroke="${line}" stroke-width="1.3" stroke-linejoin="round"/></g>`
+  }
+
+  const outW = W + MARGIN * 2
+  const outH = H + MARGIN * 2
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="${num(outW)}" height="${outH}" viewBox="0 0 ${num(outW)} ${outH}" role="img" aria-label="${esc(w.label)}" font-family="${sansOf(lang)}">
+<title>Agent Board: ${esc(w.label)}</title>
+<defs><clipPath id="pane"><rect x="1" y="${BAR + 1}" width="${num(windowWidth - 2)}" height="${PAD + COVER_ROWS * LINE + PAD - 13}"/></clipPath>
+<filter id="lift" x="-10%" y="-10%" width="120%" height="130%"><feDropShadow dx="0" dy="2" stdDeviation="3" flood-color="${page.shadow}" flood-opacity="${page.depth}"/></filter></defs>
+<style>
+.a { opacity: 0; animation-duration: ${COVER_LOOP}s; animation-iteration-count: infinite; animation-timing-function: linear; }
+${keyframes.join('\n')}
+${keyframes.map((_, i) => `.c${i} { animation-name: c${i} }`).join('\n')}
+@media (prefers-reduced-motion: reduce) {
+  .a { animation: none; opacity: 0; }
+  .last { opacity: 1; }
+}
+</style>
+<rect width="${num(outW)}" height="${outH}" rx="16" fill="${page.ground}"/>
+<g transform="translate(${MARGIN} ${MARGIN})">
+${wires}
+${cardSvg}
+${terminal(mode, mono, WORDS[lang].window, body, COVER_ROWS, winX + 0.5, 0.5)}
+${pointer}
+</g>
+</svg>
+`
+}
+
 // fonts.py, run at the end, needs Python with fontTools 4.60 or newer and brotli; it is found
 // before anything is written, so without it the images stay as they were. Another fontTools
 // version cuts the fonts into slightly different bytes, so every image would show as changed.
@@ -914,6 +1203,7 @@ mkdirSync(join(OUT, 'board'), { recursive: true })
 for (const lang of LANGS) {
   for (const agent of CLI_AGENTS) for (const mode of ['light', 'dark'] as const) writeFileSync(join(OUT, 'board', `${agent}-${lang}-${mode}.svg`), cliBoard(lang, mode, agent))
   for (const mode of ['light', 'dark'] as const) writeFileSync(join(OUT, `pane-${lang}-${mode}.svg`), pane(lang, mode))
+  for (const mode of ['light', 'dark'] as const) writeFileSync(join(OUT, `cover-${lang}-${mode}.svg`), cover(lang, mode))
   writeFileSync(join(OUT, `tour-${lang}.svg`), tour(lang))
   writeFileSync(join(OUT, `flow-${lang}.svg`), flow(lang))
   writeFileSync(join(PAGES, `dashboard-${lang}.html`), dashboard(lang))
@@ -927,4 +1217,4 @@ const svgs = [
 ]
 const fonts = Bun.spawnSync([python, join(import.meta.dir, 'fonts.py'), ...svgs], { stdout: 'inherit', stderr: 'inherit' })
 if (fonts.exitCode !== 0) throw new Error(`fonts.py stopped with exit code ${fonts.exitCode}`)
-console.log(`wrote the pane top, tour, flow, promotional card and CLI boards in ${LANGS.length} languages and ${AGENT_ICONS.length} agent icons to ${OUT}, and ${LANGS.length} progress.html pages to ${PAGES}`)
+console.log(`wrote the pane top, tour, flow, promotional card, the README cover and CLI boards in ${LANGS.length} languages and ${AGENT_ICONS.length} agent icons to ${OUT}, and ${LANGS.length} progress.html pages to ${PAGES}`)
