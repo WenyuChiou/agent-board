@@ -2,6 +2,7 @@ import type { On, RenderPropsOf } from 'claude-code'
 import { mock } from 'claude-code/testing'
 import type { Engine, MockClock } from 'claude-code/testing'
 import { CONNECT_BOOTSTRAP, CONNECT_EXECUTE } from '../../hooks/connect-worker'
+import { LEDGER_LINK, LINK_EXISTS, LINK_KEPT_SOURCE, LINK_UNSUPPORTED } from '../../hooks/ledger-move'
 import { memoryConnect } from './connect-memory'
 import type { LegacyConnectRequest } from '../../scripts/connect-transaction'
 
@@ -156,6 +157,27 @@ export const engineBeneath = (on: On, world: World): MockClock => {
     value: world.hasTasks ? [{ name: 'TaskCreate', description: '', mcp: false }] : [{ name: 'Read', description: '', mcp: false }],
   }))
   on('process.run', async ($, e) => {
+    // The pane's hard-link ledger move acts on the files in memory as the real Node child would.
+    if (e.argv[0] === 'node' && e.argv[2] === LEDGER_LINK && e.argv[3] === '--') {
+      world.ran?.push([...e.argv])
+      const from = posix(e.argv[4] ?? '')
+      const to = posix(e.argv[5] ?? '')
+      const text = world.files.get(from)
+      let exitCode = 0
+      if (world.node === null) exitCode = 127
+      else if (text === undefined || world.isMoveRefused?.(from) === true || world.unwritable?.has(to) === true) exitCode = LINK_UNSUPPORTED
+      else if (world.files.has(to)) exitCode = LINK_EXISTS
+      else if (world.ignoreQuestionWrites && to.endsWith('-questions.json')) world.files.delete(from)
+      else if (world.isRemoveRefused?.(from) === true) {
+        world.files.set(to, text)
+        exitCode = LINK_KEPT_SOURCE
+      } else {
+        world.files.delete(from)
+        world.files.set(to, text)
+        if (world.afterMove?.(from, to)) exitCode = 1
+      }
+      return { value: { exitCode, stdout: '', stderr: exitCode === 127 ? 'node: command not found' : '', isStdoutTruncated: false, isStderrTruncated: false } }
+    }
     if (e.argv[0] === 'node' && e.argv[1] === '--version' && world.nodeGate !== undefined) {
       const gate = world.nodeGate
       world.nodeGate = undefined

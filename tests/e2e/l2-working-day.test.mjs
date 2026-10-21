@@ -2,6 +2,7 @@ import { describe, test } from 'node:test'
 import assert from 'node:assert/strict'
 import { renameSync, statSync } from 'node:fs'
 import { join } from 'node:path'
+import { EN } from '../../hooks/strings-en.ts'
 import { makeWorld } from './lib/world.mjs'
 import { block } from './lib/writers.mjs'
 import { inspectSurfaces, terminal, seenPageWithin, chat, serve, html, pageDom } from './lib/surfaces.mjs'
@@ -90,14 +91,14 @@ describe('L2 a working day', { concurrency: 2 }, () => {
     try {
       const failures = []
       const rows = [
-        { kind: 'working', state: 'working', steps: ['- [~] Check routes'], silent: ['x', 'a', 'd', 'c', 'h', 'y', 'n', '1', '2'] },
-        { kind: 'waiting', state: 'waiting', steps: ['- [?] Publish routes, OK?'], silent: ['enter', 'x', 'a', 'd', '1', '2'] },
-        { kind: 'stopped', state: 'ended', steps: ['- [ ] Check routes'], silent: ['x', 'h', 'y', 'n', '1', '2'] },
-        { kind: 'idle', state: 'waiting', steps: ['- [ ] Check routes'], silent: ['x', 'a', 'd', 'c', 'h', 'y', 'n', '1', '2'] },
-        { kind: 'blocked', state: 'working', steps: ['- [!] Check routes'], silent: ['x', 'a', 'd', 'c', 'h', 'y', 'n', '1', '2'] },
-        { kind: 'choice', state: 'waiting', steps: ['- [?] Rollout — Canary or Everyone?'], silent: ['enter', 'x', 'a', 'd', 'y', 'n'] },
-        { kind: 'manual', steps: ['- [ ] Check routes'], silent: ['c', 'h', 'y', 'n', '1', '2'] },
-        { kind: 'stopped-ask', state: 'ended', steps: ['- [?] Publish routes, OK?'], silent: ['x', 'h', 'y', 'n', '1', '2'] },
+        { kind: 'working', state: 'working', steps: ['- [~] Check routes'] },
+        { kind: 'waiting', state: 'waiting', steps: ['- [?] Publish routes, OK?'] },
+        { kind: 'stopped', state: 'ended', steps: ['- [ ] Check routes'] },
+        { kind: 'idle', state: 'waiting', steps: ['- [ ] Check routes'] },
+        { kind: 'blocked', state: 'working', steps: ['- [!] Check routes'] },
+        { kind: 'choice', state: 'waiting', steps: ['- [?] Rollout — Canary or Everyone?'] },
+        { kind: 'manual', steps: ['- [ ] Check routes'] },
+        { kind: 'stopped-ask', state: 'ended', steps: ['- [?] Publish routes, OK?'] },
       ]
       // Number keys past the last row take one path; 3 and 9 stand for 3 to 9 and keep the matrix short.
       const keys = ['enter', 'x', 'a', 'd', 'c', 'h', 'y', 'n', '1', '2', '3', '9']
@@ -115,8 +116,7 @@ describe('L2 a working day', { concurrency: 2 }, () => {
         const after = await terminal.keys(world, `${prefix} ${key}`.trim())
         const check = () => noSilentPress({ surface: 'terminal', card: row.kind, button: key, before, after })
         try {
-          if (row.silent.includes(key) || /^[3-9]$/.test(key)) await knownFailure(211, check)
-          else check()
+          check()
           noMachineIds(after, world)
         } catch (error) { failures.push(new Error(`${row.kind}/${key}: ${error.message}`)) }
       }
@@ -149,8 +149,7 @@ describe('L2 a working day', { concurrency: 2 }, () => {
         await page.flush()
         const after = page.text()
         const check = () => noSilentPress({ surface: 'page', card: title, button: label, before, after })
-        if (label === 'Copy') await knownFailure(211, check)
-        else check()
+        check()
         noMachineIds(after, world)
       }
       const page = await createPage()
@@ -164,20 +163,21 @@ describe('L2 a working day', { concurrency: 2 }, () => {
       noSilentPress({ surface: 'page', card: 'nonempty reply', button: 'Copy', before, after: page.text() })
       for (const id of ['relay', 'paste-go']) {
         const controls = await createPage()
-        const before = controls.text()
+        const before = controls.node('.paste').textContent
         controls.node(id).click()
         await controls.flush()
-        const check = () => noSilentPress({ surface: 'page', card: 'board controls', button: id, before, after: controls.text() })
-        if (id === 'paste-go') await knownFailure(211, check)
-        else check()
-        noMachineIds(controls.text(), world)
+        assert.ok(!controls.node('.paste').textContent.includes(EN.pressPending), `${id} is still pending after flush()`)
+        const check = () => noSilentPress({ surface: 'page', card: 'board controls', button: id, before, after: controls.node('.paste').textContent })
+        check()
+        noMachineIds(controls.text() + controls.node('.paste').textContent, world)
       }
       const paste = await createPage()
       paste.node('paste').value = 'Synthetic invalid paste'
-      const beforePaste = paste.text()
+      const beforePaste = paste.node('.paste').textContent
       paste.node('paste-go').click()
       await paste.flush()
-      noSilentPress({ surface: 'page', card: 'board controls', button: 'paste-go', before: beforePaste, after: paste.text() })
+      assert.ok(!paste.node('.paste').textContent.includes(EN.pressPending), 'paste-go with invalid paste is still pending after flush()')
+      noSilentPress({ surface: 'page', card: 'board controls', button: 'paste-go', before: beforePaste, after: paste.node('.paste').textContent })
       const closing = await createPage()
       const beforeClose = closing.text()
       closing.node('close').click()
@@ -213,15 +213,18 @@ describe('L2 a working day', { concurrency: 2 }, () => {
         return { ok: result.status < 400, json: async () => result.json() }
       })
       noMachineIds(page.text(), world)
-      const card = page.cards().find(one => one.textContent.includes('Resume route review'))
+      const card = page.cards().find(one => one.className?.split(' ').includes('row') && one.textContent.includes('Resume route review'))
       const button = page.buttons(card).find(one => /Copy resume/.test(one.textContent))
       assert.ok(button)
       const before = page.text()
       button.click()
       await page.flush()
+      noMachineIds(page.text(), world)
       assert.ok(page.copied.at(-1).includes('codex resume synthetic-status-owner'))
       noSilentPress({ surface: 'page', card: 'Resume route review', button: button.textContent, before, after: page.text() })
-      const status = page.node('note').textContent
+      const result = card.childNodes.flatMap(node => [node, ...node.childNodes]).find(node => node.className?.split(' ').includes('press-result'))
+      assert.ok(result)
+      const status = result.textContent
       assert.ok(status.length > 0)
       noMachineIds(status, world)
     } finally { await world.close() }
@@ -385,7 +388,7 @@ describe('L2 a working day', { concurrency: 2 }, () => {
       block(world, { state: 'done', title: 'Publish the gateway', steps: ['- [x] Publish routes', '- [?] Notify the team, OK?'] })
       const before = await terminal.keys(world, 'i down')
       const after = await terminal.keys(world, 'i down a')
-      await knownFailure(211, () => noSilentPress({ surface: 'terminal', card: 'Publish the gateway', button: 'a', before, after }))
+      noSilentPress({ surface: 'terminal', card: 'Publish the gateway', button: 'a', before, after })
       // The question is never lost, archived or not; only the archive itself is the known gap.
       const kept = [world.read('progress.md'), ...world.files().filter(name => /progress-(archive-.*\.md|questions.*\.json)$/.test(name)).map(name => world.read(name))].join('\n')
       assert.match(kept, /Notify the team, OK\?/)

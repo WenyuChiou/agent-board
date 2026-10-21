@@ -2,6 +2,7 @@ import { BOARD_SCRIPT } from './board-script'
 import { connectRecordPath, hasOwnConnectData, recoveryUnreadableCode } from './connect-pure'
 import { sha256 } from './sha256'
 import { CONNECT_BOOTSTRAP, CONNECT_EXECUTE, workerRequest, workerStage } from './connect-worker'
+import { LEDGER_LINK, LINK_EXISTS, LINK_KEPT_SOURCE } from './ledger-move'
 import type { LegacyConnectRequest, ConnectState } from '../scripts/connect-transaction'
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, PluginOptions, PromptSubmitResult, Register } from 'claude-code'
@@ -72,8 +73,9 @@ import { dashboardHtml } from './dashboard'
 import { peekInbox, redact } from './board'
 import type { PendingTurn } from './board'
 import { paletteFor } from './palette'
-import { drawPane, reviseKey } from './pane'
-import type { PaneActions, PaneModel, PaneUi } from './pane'
+import { drawPane, pressTarget, reviseKey } from './pane'
+import type { PaneActions, PaneModel, PaneUi, PressResult } from './pane'
+import type { PressOutcome } from '../types'
 import { isQuickAdd, parseQuickAdd, quickAddWords } from './quick'
 import type { Lang, Strings } from './i18n'
 import { RULE_ID, RULES } from './rule'
@@ -110,7 +112,7 @@ import {
 import type { AgentTurn } from './inbox'
 import { keepRecent, remindersOf } from './remind'
 import { agentName, answeredJson, answeredPath, buildView, mirrorMatchesTask, parseAnswered, parseSeen, seenJson, seenPath, statusLine, withAnswered, withSeen } from './view'
-import type { StepRef, TaskRef, TaskRow, WaitingItem } from './view'
+import type { StepRef, TaskRef, TaskRow, View, WaitingItem } from './view'
 import { acknowledgementKeys, archiveQuestionsKept, captureHashOf, captureJson, capturePath, emptyQuestions, parseCapture, withCaptures, isQuestionProof, isQuestionSnapshot, isTornLedger, migratedAnswered, observeQuestions, parseQuestions, questionProofJson, questionProofOf, questionProofPath, questionWords, questionsJson, questionsPath, resolveQuestion, resolvedQuestionsToRetire } from './questions'
 import type { QuestionAnswerEvidence, QuestionCapture, QuestionProofs, QuestionRecord } from './questions'
 
@@ -140,6 +142,7 @@ const now = atom({ plugin: 'agent-board', key: 'now' } as const, 0)
 const hasTaskTools = atom({ plugin: 'agent-board', key: 'hasTaskTools' } as const, true)
 
 const expanded = atom({ plugin: 'agent-board', key: 'expanded' } as const, '')
+const pressResults = atom({ plugin: 'agent-board', key: 'pressResults' } as const, {} as Record<string, PressResult>)
 const answer = atom({ plugin: 'agent-board', key: 'answer' } as const, null as ProgressAnswer | null)
 const resolveResult = atom({ plugin: 'agent-board', key: 'resolveResult' } as const, null as ResolveResult | null)
 const isNotifyOn = atom({ plugin: 'agent-board', key: 'isNotifyOn' } as const, true)
@@ -172,7 +175,9 @@ const wordsOf = async ($: EngineInterface): Promise<Strings> => STRINGS[langOf(a
 let isPolling = false
 let isTurnRunning = false
 let writes: Promise<unknown> = Promise.resolve()
+let settingSaves: Promise<unknown> = Promise.resolve()
 let askSeq = 0
+let pressSeq = 0
 let isPaneOpen = false
 let lastStatus: string | undefined
 let isCheckingPr = false
@@ -279,9 +284,20 @@ const moveFile = async ($: EngineInterface, from: string, to: string, isWin: boo
   return ran !== null && ran.exitCode === 0
 }
 
-// A rename that never replaces a file already there. `mv -n` answers 0 when it skips one, so
-// the move happened only if the source is gone.
+// A short Node child avoids a cold PowerShell start on Windows. Linking this session's own file
+// refuses an existing target, so another session's ledger is never replaced. The move command
+// stays for volumes without hard links and computers without Node on their path. `mv -n` also
+// answers 0 when it skips a target, so success requires the source to be gone.
 const placeFile = async ($: EngineInterface, from: string, to: string, isWin: boolean): Promise<boolean> => {
+  const linked = await $.process.run(['node', '-e', LEDGER_LINK, '--', from, to], { timeoutMs: 10000 }).catch(() => null)
+  if (linked?.exitCode === 0) return !(await $.fs.exists(from))
+  // Codes 70 to 72 are also common exit codes of other programs, so a `node` wrapper failing on
+  // its own reaches the move command unless the ledger is really there.
+  if (linked?.exitCode === LINK_EXISTS && await $.fs.exists(to)) return false
+  // The ledger is in place but this session's temp could not be removed at once (another program
+  // held it open). It is only a second name for the same bytes, so removing it again is safe.
+  if (linked?.exitCode === LINK_KEPT_SOURCE && await $.fs.exists(to)) return await removeFiles($, [from], isWin)
+
   const argv = isWin
     ? ['powershell', '-NoProfile', '-Command', `Move-Item -LiteralPath ${psQuote(from)} -Destination ${psQuote(to)} -ErrorAction Stop`]
     : ['mv', '-n', from, to]
@@ -589,21 +605,36 @@ const pollAnsweredQuestions = async ($: EngineInterface, path: string, projects:
 
 // Marks one question answered, or lists it again: only progress-answered.json changes, never a
 // block, and nothing is sent to any session. Read, changed, written and read back in the write
-// queue, so a press in another session or the board script is kept. False when it did not stick.
-const setAnswered = async ($: EngineInterface, item: WaitingItem, isHidden: boolean): Promise<boolean> => {
-  if (item.hideKey === '') return false
+// queue, so a press in another session or the board script is kept. A failure says why it did not stick.
+const setAnswered = async ($: EngineInterface, item: WaitingItem, isHidden: boolean): Promise<{ isDone: true } | { isDone: false; reason: 'notFound' | 'progressUnreadable' | 'ledgerUnreadable' | 'writeFailed' }> => {
+  if (item.hideKey === '') return { isDone: false, reason: 'notFound' }
   const snap = await read($, snapshot)
-  if (!(await pollQuestions($, snap.path || (await progressPath($)), snap.projects))) return false
+  try {
+    await readText($, snap.path || (await progressPath($)))
+  } catch {
+    return { isDone: false, reason: 'progressUnreadable' }
+  }
+  if (!(await pollQuestions($, snap.path || (await progressPath($)), snap.projects))) return { isDone: false, reason: 'ledgerUnreadable' }
   const ledger = await read($, questionLedger)
   const currentView = buildView(snap.projects, [], await read($, mine), await $.clock.now(), 0, {}, await wordsOf($), await read($, hiddenAsks), {}, ledger, await questionProofsFor($, snap.path || (await progressPath($))), await pendingTurns($))
-  if (![...currentView.waiting, ...(currentView.reminder ?? []), ...(currentView.older ?? []), ...currentView.hidden].some(one => (!isHidden || one.canHide !== false) && one.hideKey === item.hideKey && one.project === item.project && one.text === item.text && one.note === item.note)) return false
+  if (![...currentView.waiting, ...(currentView.reminder ?? []), ...(currentView.older ?? []), ...currentView.hidden].some(one => (!isHidden || one.canHide !== false) && one.hideKey === item.hideKey && one.project === item.project && one.text === item.text && one.note === item.note)) return { isDone: false, reason: 'notFound' }
   const file = answeredPath(snap.path || (await progressPath($)))
+  let reason: 'notFound' | 'progressUnreadable' | 'ledgerUnreadable' | 'writeFailed' = 'writeFailed'
   const list = await enqueue(async () => {
-    const fresh = parseProgress(await readText($, snap.path || (await progressPath($))))
-    if (!(await pollQuestions($, snap.path || (await progressPath($)), fresh))) return null
+    let fresh: ProgressProject[]
+    try {
+      fresh = parseProgress(await readText($, snap.path || (await progressPath($))))
+    } catch {
+      reason = 'progressUnreadable'
+      return null
+    }
+    if (!(await pollQuestions($, snap.path || (await progressPath($)), fresh))) {
+      reason = 'ledgerUnreadable'
+      return null
+    }
     const latest = await read($, questionLedger)
     const current = buildView(fresh, [], await read($, mine), await $.clock.now(), 0, {}, await wordsOf($), await read($, hiddenAsks), {}, latest, await questionProofsFor($, snap.path || (await progressPath($))), await pendingTurns($))
-    if (![...current.waiting, ...(current.reminder ?? []), ...(current.older ?? []), ...current.hidden].some(one => (!isHidden || one.canHide !== false) && one.hideKey === item.hideKey && one.project === item.project && one.text === item.text && one.note === item.note)) return null
+    if (![...current.waiting, ...(current.reminder ?? []), ...(current.older ?? []), ...current.hidden].some(one => (!isHidden || one.canHide !== false) && one.hideKey === item.hideKey && one.project === item.project && one.text === item.text && one.note === item.note)) { reason = 'notFound'; return null }
     await rewrite(
       $,
       file,
@@ -618,11 +649,11 @@ const setAnswered = async ($: EngineInterface, item: WaitingItem, isHidden: bool
     )
     return parseAnswered(await readText($, file))
   }).catch(() => null)
-  if (list === null || list.includes(item.hideKey) !== isHidden) return false
+  if (list === null || list.includes(item.hideKey) !== isHidden) return { isDone: false, reason }
   await update($, hiddenAsks, () => list)
   await refreshStatus($)
   await writeDashboard($, true)
-  return true
+  return { isDone: true }
 }
 
 // A task with no time of its own is aged from when its words were first seen, kept in
@@ -802,11 +833,11 @@ const pendingTurns = async ($: EngineInterface): Promise<PendingTurn[]> => {
 
 // progress.html beside progress.md: the file's view and pending turns, at most once a minute
 // and only when it changed.
-const writeDashboard = async ($: EngineInterface, force = false): Promise<string> => {
+const writeDashboard = async ($: EngineInterface, force = false): Promise<{ path: string; problem?: string }> => {
   const snap = await read($, snapshot)
   const at = await $.clock.now()
   const path = dashboardPath(snap.path || (await progressPath($)))
-  if (!force && at - dashboardAt < 60 * 1000) return path
+  if (!force && at - dashboardAt < 60 * 1000) return { path }
   const s = await wordsOf($)
   const view = {
     ...buildView(snap.projects, [], null, at, await read($, today), await read($, doneSeen), s, await read($, hiddenAsks), await read($, firstSeen), await read($, questionLedger), await questionProofsFor($, snap.path || (await progressPath($))), await pendingTurns($)),
@@ -815,17 +846,27 @@ const writeDashboard = async ($: EngineInterface, force = false): Promise<string
   const pending = await pendingTurns($)
   const date = new Date(at)
   const html = dashboardHtml(view, s, snap.path, s.dashStamp(`${localDay(at)} ${pad2(date.getHours())}:${pad2(date.getMinutes())}`), pending)
-  dashboardAt = at
-  if (html === lastDashboard) return path
-  lastDashboard = html
-  await $.fs.write(path, html).catch(() => undefined)
-
-  return path
+  if (!force && html === lastDashboard) {
+    dashboardAt = at
+    return { path }
+  }
+  try {
+    await $.fs.write(path, html)
+    dashboardAt = at
+    lastDashboard = html
+    return { path }
+  } catch (error) {
+    const failure = error as { code?: string; message?: string } | null
+    const code = failure?.code ?? /\b(EACCES|EPERM|EROFS|EBUSY|EAGAIN|ENOSPC|EISDIR|ENOENT|ENOTDIR|EIO|EFBIG|EMFILE|ENFILE|ENAMETOOLONG)\b/.exec(failure?.message ?? String(error))?.[1]
+    return { path, problem: s.boardStorageFailed(s.fileNamed(path.split(/[\\/]/).pop() ?? ''), plainReason(s, code ?? '')) }
+  }
 }
 
 // Opens progress.html in the default browser: a window of its own on the desktop.
-const openDashboard = async ($: EngineInterface): Promise<boolean> => {
-  const path = await writeDashboard($, true)
+const openDashboard = async ($: EngineInterface): Promise<string> => {
+  const s = await wordsOf($)
+  const { path, problem } = await writeDashboard($, true)
+  if (problem !== undefined) return problem
   const argv = (await isWindows($, path))
     ? ['cmd', '/c', 'start', '', path]
     : (await $.env.get('HOME'))?.startsWith('/Users/')
@@ -833,7 +874,8 @@ const openDashboard = async ($: EngineInterface): Promise<boolean> => {
       : ['xdg-open', path]
   const ran = await $.process.run(argv, { timeoutMs: 10000 }).catch(() => null)
 
-  return ran !== null && ran.exitCode === 0
+  const file = (await read($, snapshot)).path || (await progressPath($))
+  return ran !== null && ran.exitCode === 0 ? s.windowOpened() : s.windowFailed(path.split(/[\\/]/).pop(), file.split(/[\\/]/).pop())
 }
 
 // Hand-kept tasks seen done for the first time get a timestamp, so they leave a day later.
@@ -974,7 +1016,7 @@ const countToday = async ($: EngineInterface): Promise<void> => {
 }
 
 // Keep the original month and timestamp across retries, including a module reload.
-const journal = ($: EngineInterface, entries: ReadonlyArray<Omit<JournalEntry, 'at'>> = [], storedKey?: string): Promise<void> => {
+const journal = ($: EngineInterface, entries: ReadonlyArray<Omit<JournalEntry, 'at'>> = [], storedKey?: string, outcome?: { isSaved: boolean; isDeferred?: boolean }): Promise<void> => {
   let hasPending = entries.length > 0
   let key = storedKey ?? ''
   return enqueue(async () => {
@@ -1053,6 +1095,9 @@ const journal = ($: EngineInterface, entries: ReadonlyArray<Omit<JournalEntry, '
     if (hasFailed) throw new Error('JOURNAL_NOT_VERIFIED')
     if (hasPending) {
       await countToday($)
+      if (key === `pendingJournal:${await $.session.id()}`) {
+        await update($, pressResults, results => Object.fromEntries(Object.entries(results).filter(([, result]) => !Object.values(STRINGS).some(words => result.text === words.journalFailed))))
+      }
       journalNoticesShown.delete(key)
       if (journalNoticeKey === key) {
         await update($, answer, current => Object.values(STRINGS).some(words => current?.text === words.journalFailed) ? null : current)
@@ -1060,12 +1105,20 @@ const journal = ($: EngineInterface, entries: ReadonlyArray<Omit<JournalEntry, '
       }
     }
   }).catch(async () => {
+    if (outcome !== undefined) outcome.isSaved = false
     try {
+      if (outcome !== undefined) {
+        const current = await read($, answer)
+        outcome.isDeferred = current?.isAsking === true || current?.copied !== undefined
+      }
       if (!hasPending || key !== `pendingJournal:${await $.session.id()}` || journalNoticesShown.has(key)) return
       const s = await wordsOf($)
       let isShown = false
       await update($, answer, current => {
-        if (current?.isAsking || current?.copied !== undefined) return current
+        if (current?.isAsking || current?.copied !== undefined) {
+          if (outcome !== undefined) outcome.isDeferred = true
+          return current
+        }
         isShown = true
         return { question: s.journalNoticeTitle, text: s.journalFailed, isAsking: false }
       })
@@ -2322,12 +2375,14 @@ const buildReport = async ($: EngineInterface, days: number): Promise<string> =>
 }
 
 // Shows `text` under the pane's box, copied to the clipboard when the surface allows.
-const showCopied = async ($: EngineInterface, question: string, text: string, surface?: RenderSurface): Promise<void> => {
+const showCopied = async ($: EngineInterface, question: string, text: string, surface?: RenderSurface): Promise<PressOutcome> => {
   const copied = await $.ui
     .copy(surface === undefined ? { text } : { text, surface })
     .then(result => result.isCopied)
     .catch(() => false)
   await update($, answer, () => ({ question, text, isAsking: false, copied }))
+  const s = await wordsOf($)
+  return copied ? { text: s.copied } : { text: s.pressCopyFallback, copyText: text, tone: 'alert' }
 }
 
 // The language from the four places it can come from (strings.ts resolveLang).
@@ -2338,11 +2393,20 @@ const settleLang = async ($: EngineInterface, options: PluginOptions, preference
   await update($, lang, () => chosen)
 }
 
-const setNotify = async ($: EngineInterface, isOn: boolean): Promise<void> => {
-  await update($, isNotifyOn, () => isOn)
+// Each press reads the last saved setting, even when an earlier save failed.
+const saveSetting = <T,>(job: () => Promise<T>): Promise<T> => {
+  const run = settingSaves.then(job, job)
+  settingSaves = run.catch(() => undefined)
+  return run
+}
+
+const setNotify = ($: EngineInterface, requested?: boolean): Promise<boolean> => saveSetting(async () => {
+  const isOn = requested ?? !(await read($, isNotifyOn))
   if (isOn) await $.store.delete('notifyOff')
   else await $.store.set('notifyOff', true)
-}
+  await update($, isNotifyOn, () => isOn)
+  return isOn
+})
 
 const settle = async ($: EngineInterface, isWriteBlocking = true): Promise<void> => {
   const at = await $.clock.now()
@@ -2489,8 +2553,7 @@ export const register: Register = (on, options) => {
       return { text: moved === 0 ? s.tidyNothing : s.tidyMoved(moved) }
     }
     if (/^(open|window|html|視窗|窗口|網頁|网页)$/i.test(arg)) {
-      const path = dashboardPath((await read($, snapshot)).path || (await progressPath($)))
-      return { text: (await openDashboard($)) ? s.windowOpened(path) : s.windowFailed(path) }
+      return { text: await openDashboard($) }
     }
     if (/^(同步|sync)$/i.test(arg)) {
       await resync($)
@@ -2537,10 +2600,10 @@ export const register: Register = (on, options) => {
     const toggle = /^(?:通知|notify|notifications)\s*(開|關|开|关|on|off)?$/i.exec(arg)
     if (toggle !== null) {
       const word = toggle[1]?.toLowerCase()
-      const isOn = word === undefined ? !(await read($, isNotifyOn)) : word === '開' || word === '开' || word === 'on'
-      await setNotify($, isOn)
-
-      return { text: isOn ? s.notifyOn : s.notifyOff }
+      try {
+        const isOn = await setNotify($, word === undefined ? undefined : word === '開' || word === '开' || word === 'on')
+        return { text: isOn ? s.notifyOn : s.notifyOff }
+      } catch { return { text: s.settingSaveFailed } }
     }
     await poll($)
     await $.store.delete('closedByPerson')
@@ -2821,13 +2884,17 @@ export const register: Register = (on, options) => {
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
     const table = $.ui.resolve(e)
     const snap = await read($, snapshot)
-    const at = (await read($, now)) || (await $.clock.now())
     const s = await wordsOf($)
     const palette = paletteFor(await read($, theme))
-    const view = {
-      ...buildView(snap.projects, await read($, here), await read($, mine), at, await read($, today), await read($, doneSeen), s, await read($, hiddenAsks), await read($, firstSeen), await read($, questionLedger), await questionProofsFor($, snap.path || (await progressPath($))), await pendingTurns($)),
-      ...(snap.tornTail ? { warning: s.progressIncomplete(snap.tornTail.tasks) } : {}),
+    const paneView = async (): Promise<View> => {
+      const latest = await read($, snapshot)
+      const currentAt = (await read($, now)) || (await $.clock.now())
+      return {
+        ...buildView(latest.projects, await read($, here), await read($, mine), currentAt, await read($, today), await read($, doneSeen), s, await read($, hiddenAsks), await read($, firstSeen), await read($, questionLedger), await questionProofsFor($, latest.path || (await progressPath($))), await pendingTurns($)),
+        ...(latest.tornTail ? { warning: s.progressIncomplete(latest.tornTail.tasks) } : {}),
+      }
     }
+    const view = await paneView()
     const ui: PaneUi = {
       Box: table.Box,
       Text: table.Text,
@@ -2850,6 +2917,7 @@ export const register: Register = (on, options) => {
     }
     const model: PaneModel = {
       view,
+      results: await read($, pressResults),
       expanded: await read($, expanded),
       revising: await read($, revising),
       opened: await read($, opened),
@@ -2865,106 +2933,134 @@ export const register: Register = (on, options) => {
       palette,
       s,
     }
-    const actions: PaneActions = {
-      toggle: key => {
-        update($, expanded, open => (open === key ? '' : key)).catch(() => undefined)
-      },
-      continueHere: () => {
-        submitOwn($, s.continueText).catch(() => undefined)
-      },
-      archive: () => {
-        enqueue(() => archiveOld($, true)).catch(() => undefined)
-      },
-      archiveRow: row => {
-        const ref = row.archive
-        if (ref === null) return
-        enqueue(() => archiveOne($, ref))
-          .then(isTaken =>
-            update($, answer, () => ({ question: row.title, text: isTaken === true ? s.archivedOne(row.title) : s.archiveGone, isAsking: false })),
-          )
-          .then(() => update($, expanded, open => (open === row.key ? '' : open)))
-          .catch(error => update($, answer, () => ({ question: row.title, text: error instanceof Error && error.message === 'QUESTION_RETENTION_FAILED' ? s.questionRetentionFailed : s.boardWriteFailed, isAsking: false })))
-      },
-      confirmRow: row => {
-        if (row.confirm == null) return
-        enqueue(() => confirmOne($, row.confirm!))
-          .then(async confirmed => {
-            if (confirmed !== null) await journal($, confirmed.entries)
-            await update($, answer, current => current?.text === s.journalFailed ? current : ({ question: row.title, text: confirmed === null ? s.boardLineChanged : confirmed.isMirrorSaved ? s.confirmedDone(row.title) : s.boardWriteFailed, isAsking: false }))
-            if (confirmed !== null) await update($, expanded, open => open === row.key ? '' : open)
-          })
-          .catch(() => update($, answer, () => ({ question: row.title, text: s.boardWriteFailed, isAsking: false })))
-      },
-      takeOver: row => {
-        submitOwn($, takeOverPrompt(row, s)).catch(() => undefined)
-      },
-      handOver: row => {
-        submitOwn($, handOverPrompt(row, s)).catch(() => undefined)
-      },
-      tick: ref => {
-        enqueue(() => tickStep($, ref))
-          .then(ticked => (ticked ? journal($, [{ project: ref.project, task: ref.title, step: ref.step }]) : undefined))
-          .catch(() => undefined)
-      },
-      ask: input => {
-        if (!isQuickAdd(input)) {
-          askAside($, input).catch(() => undefined)
-          return
+    const failure = (text: string): PressOutcome => ({ text, tone: 'alert' })
+    const press = async (button: string, run: () => PressOutcome | Promise<PressOutcome>): Promise<void> => {
+      const target = pressTarget(view, button, s)
+      const initial: PressResult = { button, revision: target.revision, label: target.label, text: s.pressPending, sequence: ++pressSeq, isPending: true }
+      let revision = initial.revision
+      try {
+        // A press clears finished feedback, while other in-flight cards keep their own result.
+        await update($, pressResults, results => ({ ...Object.fromEntries(Object.entries(results).filter(([, result]) => result.isPending)), [target.key]: initial }))
+        let result: Exclude<PressOutcome, string>
+        try {
+          const value = await run()
+          result = typeof value === 'string' ? { text: value || s.pressNothing } : value
+        } catch (error) {
+          result = { text: error instanceof Error && error.message === 'QUESTION_RETENTION_FAILED' ? s.questionRetentionFailed : s.boardWriteFailed, tone: 'alert' }
         }
-        quickAdd($, input)
-          .then(text => update($, answer, () => ({ question: input.trim(), text, isAsking: false })))
-          .catch(() => undefined)
+        try {
+          const after = pressTarget(await paneView(), button, s)
+          if (after.key === target.key) revision = after.revision
+        } catch {
+          // A refresh failure must not change the outcome of an action that already finished.
+        }
+        await update($, pressResults, results => results[target.key]?.sequence === initial.sequence ? { ...results, [target.key]: { ...initial, revision, ...result, isPending: false } } : results)
+      } catch {
+        // A failed state update is also an action failure; retain a visible fallback if state recovers.
+        await update($, answer, () => ({ question: target.label, text: s.pressFailed, isAsking: false })).catch(() => undefined)
+      }
+    }
+    const submitted = async (text: string): Promise<PressOutcome> => {
+      try {
+        return (await submitOwn($, text)).drop === undefined ? s.pressSent : failure(s.pressSessionGone)
+      } catch {
+        return failure(s.pressSessionGone)
+      }
+    }
+    const hide = async (item: WaitingItem, isHidden: boolean): Promise<PressOutcome> => {
+      const result = await setAnswered($, item, isHidden)
+      if (result.isDone) return isHidden ? s.pressHidden : s.pressShown
+      const text = result.reason === 'ledgerUnreadable' ? s.pressLedgerFailed
+        : result.reason === 'progressUnreadable' ? s.pressProgressUnreadable
+          : result.reason === 'notFound' ? s.boardLineChanged : s.hideFailed
+      return failure(text)
+    }
+    const actions: PaneActions = {
+      press,
+      forget: key => update($, pressResults, results => {
+        const at = pressTarget(view, key, s).key
+        return results[at]?.button !== key ? results : Object.fromEntries(Object.entries(results).filter(([one]) => one !== at))
+      }),
+      toggle: async key => {
+        const isClosing = await read($, expanded) === key
+        await update($, expanded, open => open === key ? '' : key)
+        return isClosing ? s.pressClosed : s.pressOpened
       },
-      clearAnswer: () => {
-        update($, answer, () => null).catch(() => undefined)
+      continueHere: () => submitted(s.continueText),
+      archive: async () => {
+        const count = await enqueue(() => archiveOld($, true))
+        return count === 0 ? s.tidyNothing : s.tidyMoved(count)
       },
-      copyResume: (row, surface) => {
-        if (row.resume === null) return
-        showCopied($, s.resumeOf(row.title), row.resume, surface).catch(() => undefined)
+      archiveRow: async row => {
+        if (row.archive === null) return failure(s.archiveGone)
+        const isTaken = await enqueue(() => archiveOne($, row.archive!))
+        return isTaken ? s.archivedOne(row.title) : failure(s.archiveGone)
       },
-      report: surface => {
-        buildReport($, 7)
-          .then(text => showCopied($, s.report, text, surface))
-          .catch(() => undefined)
+      confirmRow: async row => {
+        if (row.confirm == null) return failure(s.boardLineChanged)
+        const confirmed = await enqueue(() => confirmOne($, row.confirm!))
+        if (confirmed === null) return failure(s.boardLineChanged)
+        const outcome = { isSaved: true, isDeferred: false }
+        await journal($, confirmed.entries, undefined, outcome)
+        return !outcome.isSaved && !outcome.isDeferred ? failure(s.journalFailed) : confirmed.isMirrorSaved ? s.confirmedDone(row.title) : failure(s.boardWriteFailed)
       },
-      toggleSection: id => {
-        update($, opened, list => (list.includes(id) ? list.filter(one => one !== id) : [...list, id]))
-          .then(async () => $.store.set('opened', await read($, opened)))
-          .catch(() => undefined)
+      takeOver: row => submitted(takeOverPrompt(row, s)),
+      handOver: row => submitted(handOverPrompt(row, s)),
+      tick: async ref => {
+        const ticked = await enqueue(() => tickStep($, ref))
+        if (!ticked) return failure(s.boardTickGone)
+        const outcome = { isSaved: true, isDeferred: false }
+        await journal($, [{ project: ref.project, task: ref.title, step: ref.step }], undefined, outcome)
+        return outcome.isSaved || outcome.isDeferred ? s.boardTicked(ref.step) : failure(s.journalFailed)
       },
-      answer: (item, text) => {
-        if (item.where !== 'here') return
+      ask: async input => {
+        if (input.trim() === '') return failure(s.pressEmpty)
+        if (!isQuickAdd(input)) {
+          await askAside($, input)
+          const text = (await read($, answer))?.text
+          return text === s.asideFailed || text === s.asideNotStarted ? failure(text) : s.pressAsideReady
+        }
+        const text = await quickAdd($, input)
+        await update($, answer, () => ({ question: input.trim(), text, isAsking: false }))
+        return text
+      },
+      clearAnswer: async () => { await update($, answer, () => null); return s.pressDone },
+      copyResume: (row, surface) => row.resume === null ? s.pressNothing : showCopied($, s.resumeOf(row.title), row.resume, surface),
+      report: async surface => showCopied($, s.report, await buildReport($, 7), surface),
+      toggleSection: id => saveSetting(async () => {
+        const previous = await read($, opened)
+        const isClosing = previous.includes(id)
+        const next = isClosing ? previous.filter(one => one !== id) : [...previous, id]
+        await $.store.set('opened', next)
+        await update($, opened, () => next)
+        return isClosing ? s.pressClosed : s.pressOpened
+      }),
+      answer: async (item, text) => {
+        if (item.where !== 'here') return s.pressNothing
         // A dropped or rejected submission is not resolution evidence. Keep the exact ask
         // until delivery succeeds, then recheck its producer revision and full source.
         const id = item.key.replace(/^mine::/, '')
-        const send = async (): Promise<void> => {
+        const send = async (): Promise<PressOutcome> => {
           const before = await read($, mine)
           const task = before?.tasks.find(one => one.id === id)
-          if (before === null || task === undefined || task.subject !== item.text || (task.why ?? '') !== item.note) return
+          if (before === null || task === undefined || task.subject !== item.text || (task.why ?? '') !== item.note) return failure(s.boardLineChanged)
           const source = JSON.stringify({ session: before.sessionId, project: before.project, title: before.title, context: before.context, task })
           const matches = (one: ProgressMirror): boolean => source === JSON.stringify({ session: one.sessionId, project: one.project, title: one.title, context: one.context, task: one.tasks.find(row => row.id === id) })
           const isSameAsk = async (one: ProgressMirror): Promise<boolean> => {
             const view = buildView([], [], one, await $.clock.now(), 0, {}, s, await read($, hiddenAsks), {}, await read($, questionLedger), await questionProofsFor($, await progressPath($)))
             return [...view.waiting, ...(view.reminder ?? []), ...(view.older ?? [])].some(ask => ask.key === item.key && ask.questionId === item.questionId && ask.text === item.text && ask.note === item.note)
           }
-          if (!(await isSameAsk(before))) return
-          const entered = await submitOwn($, s.answerText(item.text, text))
-          if (entered.drop !== undefined) return
+          if (!(await isSameAsk(before))) return failure(s.boardLineChanged)
+          const entered = await submitOwn($, s.answerText(item.text, text)).catch(() => ({ drop: s.pressSessionGone }))
+          if (entered.drop !== undefined) return failure(s.pressSessionGone)
           const latest = await read($, mine)
-          if (latest === null || !matches(latest) || !(await isSameAsk(latest))) return
+          if (latest === null || !matches(latest) || !(await isSameAsk(latest))) return failure(s.boardLineChanged)
           await saveMine($, one => matches(one) ? markAnswered(one, [id]) : one, true)
           await settle($)
           await update($, answer, () => ({ question: item.text, text: s.answered(text), isAsking: false }))
+          return s.pressSent
         }
-        send().catch(() => undefined)
-      },
-      copyCommand: (item, surface) => {
-        if (item.command === null) return
-        showCopied($, s.commandOf(item.text), item.command, surface).catch(() => undefined)
-      },
-      copyAskedResume: (item, surface) => {
-        if (item.reopen === null) return
-        showCopied($, s.resumeOf(item.task), item.reopen, surface).catch(() => undefined)
+        return send()
       },
       resolve: item => {
         const questionId = item.questionId
@@ -2989,27 +3085,13 @@ export const register: Register = (on, options) => {
         }).then(value => update($, resolveResult, () => value))
           .catch(() => update($, resolveResult, () => result('failed')))
       },
-      hide: item => {
-        setAnswered($, item, true)
-          .then(isDone => (isDone ? undefined : update($, answer, () => ({ question: item.text, text: s.hideFailed, isAsking: false }))))
-          .catch(() => undefined)
-      },
-      unhide: item => {
-        setAnswered($, item, false)
-          .then(isDone => (isDone ? undefined : update($, answer, () => ({ question: item.text, text: s.hideFailed, isAsking: false }))))
-          .catch(() => undefined)
-      },
-      revise: item => {
-        update($, revising, open => (open === reviseKey(item) ? '' : reviseKey(item))).catch(() => undefined)
-      },
-      toggleLegend: () => {
-        update($, isLegendOpen, open => !open).catch(() => undefined)
-      },
-      toggleNotify: () => {
-        read($, isNotifyOn)
-          .then(isOn => setNotify($, !isOn))
-          .catch(() => undefined)
-      },
+      copyCommand: (item, surface) => item.command === null ? s.pressNothing : showCopied($, s.commandOf(item.text), item.command, surface),
+      copyAskedResume: (item, surface) => item.reopen === null ? s.pressNothing : showCopied($, s.resumeOf(item.task), item.reopen, surface),
+      hide: item => hide(item, true),
+      unhide: item => hide(item, false),
+      revise: async item => { await update($, revising, open => open === reviseKey(item) ? '' : reviseKey(item)); return s.pressDone },
+      toggleLegend: async () => { await update($, isLegendOpen, open => !open); return s.pressDone },
+      toggleNotify: async () => { await setNotify($); return s.pressDone },
     }
 
     return drawPane(ui, model, actions)

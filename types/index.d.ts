@@ -192,6 +192,10 @@ export type ProgressMirror = {
 export type ProgressAnswer = { question: string; text: string; isAsking: boolean; copied?: boolean }
 export type ResolveResult = { key: string; questionId: string; project: string; title: string; kind: 'resolved' | 'failed' | 'changed'; text: string }
 
+export type PressOutcome = string | { text: string; copyText?: string; tone?: 'alert' }
+
+export type ProgressPressResult = { button: string; revision: string; label: string; text: string; copyText?: string; sequence?: number; tone?: 'alert'; isPending?: boolean }
+
 declare module 'claude-code' {
   interface PluginState {
     'agent-board': {
@@ -201,6 +205,7 @@ declare module 'claude-code' {
       now: number
       hasTaskTools: boolean
       expanded: string
+      pressResults: Record<string, ProgressPressResult>
       answer: ProgressAnswer | null
       resolveResult: ResolveResult | null
       isNotifyOn: boolean

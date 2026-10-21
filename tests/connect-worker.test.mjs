@@ -69,8 +69,11 @@ test('a large verified module reports a bounded failure without embedding its da
 test('the full generated worker bundle runs through verified staging without recursive bundle growth', () => {
   const source = readFileSync(new URL('../hooks/board-script.ts', import.meta.url), 'utf8')
   const code = JSON.parse(source.slice(source.indexOf('export const BOARD_SCRIPT = ') + 'export const BOARD_SCRIPT = '.length))
-  // Catch the bundle including itself (roughly doubling it), not a size budget.
-  assert.ok(code.length < 600000)
+  // The cap only guards against the bundle containing itself, which roughly doubles its size.
+  // A 750,000-character cap still catches that. Each board-cli pull request adds about 5 KB,
+  // so a tighter cap fails on ordinary growth.
+  assert.ok(code.length < 750000)
+  assert.ok(!code.includes('BOARD_SCRIPT'), 'the worker bundle embeds no earlier board bundle')
   const { digest, value } = stage(code)
   try {
     writeFileSync(value.file, code)

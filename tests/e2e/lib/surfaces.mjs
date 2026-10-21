@@ -137,6 +137,7 @@ export const pageDom = async (source, first, post, { clipboard = true, legacyCop
     }
     get textContent() { return this.text + this.childNodes.map(child => child.textContent).join(' ') }
     appendChild(child) {
+      child.parentNode = this
       this.childNodes.push(child)
       return child
     }
@@ -145,7 +146,14 @@ export const pageDom = async (source, first, post, { clipboard = true, legacyCop
       assert.equal(position, 'afterend')
       get('main').appendChild(child)
     }
-    remove() { get('main').removeChild(this) }
+    get firstChild() { return this.childNodes[0] ?? null }
+    insertBefore(child, before) {
+      child.parentNode = this
+      const index = this.childNodes.indexOf(before)
+      this.childNodes.splice(index < 0 ? this.childNodes.length : index, 0, child)
+      return child
+    }
+    remove() { this.parentNode?.removeChild(this) }
     setAttribute(name, value) { this.attributes[name] = value }
     getAttribute(name) { return this.attributes[name] ?? null }
     addEventListener(name, callback) { this.events[name] = callback }
@@ -168,9 +176,8 @@ export const pageDom = async (source, first, post, { clipboard = true, legacyCop
   const navigator = {}
   const setClipboard = available => { navigator.clipboard = available ? { writeText: async text => { copied.push(text) } } : undefined }
   setClipboard(clipboard)
-  get('copy-text').hidden = true
-  get('copy-text').setAttribute('readonly', '')
   const document = {
+    body: get('body'),
     execCommand: () => legacyCopy,
     getElementById: get,
     createElement: tag => new Element(tag),
