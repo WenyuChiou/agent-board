@@ -481,7 +481,7 @@ const openInBrowser = (target: string, done: (isOpen: boolean) => void): void =>
   }
 }
 
-const openHtml = (done: (note: string) => void): void => {
+const openHtml = (done: (note: string, isOpen: boolean) => void): void => {
   const now = new Date()
   const stamp = s.dashStamp(`${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())} ${pad(now.getHours())}:${pad(now.getMinutes())}`)
   const html = path.replace(/\.md$/i, '') + '.html'
@@ -494,7 +494,7 @@ const openHtml = (done: (note: string) => void): void => {
   } catch (error) {
     throw fileError(html, error)
   }
-  openInBrowser(html, isOpen => done(isOpen ? s.windowOpened(html) : s.windowFailed(html)))
+  openInBrowser(html, isOpen => done(isOpen ? s.windowOpened() : s.windowFailed(basename(html), basename(path)), isOpen))
 }
 
 // Into the archive first, then out of the file, as the pane does: a crash between the two
@@ -533,9 +533,17 @@ const answeredAge = (file: string): number => {
 }
 
 // What a key's action does to the files, and the line the board shows after it.
-const act = (action: BoardAction): string => {
+const act = (action: BoardAction, fallback?: { copyText?: string; tone?: 'done' | 'alert' }): string => {
+  const done = (text: string): string => {
+    if (fallback !== undefined) fallback.tone = 'done'
+    return text
+  }
   const now = Date.now()
-  if (action.type === 'copy') return copy(action.text) ? s.copied : s.boardCopyFailed(action.text)
+  if (action.type === 'copy') {
+    if (copy(action.text)) return done(s.copied)
+    if (fallback !== undefined) fallback.copyText = action.text
+    return s.boardCopyFailed(action.text)
+  }
   if (action.type === 'done') {
     let confirmed: ConfirmedTask | null = null
     const wrote = rewrite(path, text => {
@@ -549,7 +557,7 @@ const act = (action: BoardAction): string => {
     })
     const found = confirmed as ConfirmedTask | null
     if (found === null || wrote === null || !confirmMatches(read(path), found.ref, s)) return s.boardLineChanged
-    return s.confirmedDone(action.title)
+    return done(s.confirmedDone(action.title))
   }
   if (action.type === 'tick') {
     // Found once is found: a retry after another session's write may meet the step already
@@ -568,7 +576,7 @@ const act = (action: BoardAction): string => {
     })
     if (wrote === null) return s.boardWriteFailed
     if (!isFound) return s.boardTickGone
-    return s.boardTicked(action.ref.step)
+    return done(s.boardTicked(action.ref.step))
   }
   if (action.type === 'archive') {
     view()
@@ -593,14 +601,14 @@ const act = (action: BoardAction): string => {
     if (retentionFailed) return s.questionRetentionFailed
     if (count === null) return s.boardWriteFailed
     if (count === 0) return s.archiveGone
-    return s.archivedOne(action.title)
+    return done(s.archivedOne(action.title))
   }
   if (action.type === 'hide' || action.type === 'unhide') {
     // The list every pane on this machine reads too; nothing goes to the agent that asked.
     const current = view()
     if (readQuestions(questionsPath(path)) === null) return s.hideFailed
     const keys = action.type === 'hide' || action.key !== null ? [action.key ?? ''] : current.hidden.map(item => item.hideKey)
-    if (keys.length === 0) return ''
+    if (keys.length === 0) return s.pressNothing
     const isHidden = action.type === 'hide'
     const file = answeredPath(path)
     // A list the board cannot read or replace is named with its error, as its other files are.
@@ -618,10 +626,10 @@ const act = (action: BoardAction): string => {
       return answered === null ? null : answeredJson(withAnswered(answered, isHidden ? keys : keys.flatMap(key => acknowledgementKeys(aliases, key)), isHidden))
     })
     if (wrote === null) return s.hideFailed
-    return action.type === 'hide' ? s.boardHidden(action.text) : s.boardShown
+    return done(action.type === 'hide' ? s.boardHidden(action.text) : s.boardShown)
   }
 
-  return ''
+  return s.pressNothing
 }
 
 // Scheduled sweeps keep the plugin's age rules. An explicit interactive tidy may move
@@ -660,8 +668,11 @@ const keyName = (one: string): string =>
 const keysIn = (chunk: string): string[] => (chunk.replace(/\r\n/g, '\r').match(/\u001b[[O][0-9;]*[A-Za-z~]|\u001b[\s\S]?|[\s\S]/gu) ?? []).map(keyName)
 
 const failureNote = (error: unknown): string => {
-  if (!(error instanceof BoardFileError)) throw error
   process.exitCode = 1
+  if (!(error instanceof BoardFileError)) {
+    process.stderr.write(`${error instanceof Error ? error.stack : String(error)}\n`)
+    return s.pressFailed
+  }
   const note = error.isLocked ? s.boardLocked(plainFile(error.file)) : s.boardStorageFailed(plainFile(error.file), plainReason(s, error.code))
   process.stderr.write(`${note}\n`)
   return note
@@ -673,16 +684,17 @@ const press = (state: BoardState, key: string): { state: BoardState; isQuit: boo
   const { state: next, action } = boardKey(state, key, items, s)
   if (action === null) return { state: next, isQuit: false, isHtml: false, isWrite: false }
   if (action.type === 'quit') return { state: next, isQuit: true, isHtml: false, isWrite: false }
-  if (action.type === 'html') return { state: next, isQuit: false, isHtml: true, isWrite: false }
+  if (action.type === 'html') return { state: { ...next, note: s.pressPending, tone: 'quiet' }, isQuit: false, isHtml: true, isWrite: false }
 
   // After a write the lines move; the choice is made again from the screen drawn next.
   let note: string
+  const fallback: { copyText?: string; tone?: 'done' | 'alert' } = { tone: 'alert' }
   try {
-    note = act(action)
+    note = act(action, fallback)
   } catch (error) {
     note = failureNote(error)
   }
-  return { state: { ...next, key: null, note }, isQuit: false, isHtml: false, isWrite: action.type !== 'copy' }
+  return { state: { ...next, key: null, note, tone: fallback.tone, copyText: fallback.copyText, result: next.result === undefined ? undefined : { ...next.result, revision: null } }, isQuit: false, isHtml: false, isWrite: action.type !== 'copy' }
 }
 
 const screen = (state: BoardState): string => boardScreen(view(), pending(), state, s, options())
@@ -1026,8 +1038,14 @@ const run = async (): Promise<void> => {
       const pressed = press(pin(state), key)
       state = pressed.state
       if (pressed.isQuit) break
+      if (pressed.isHtml) {
+        await new Promise<void>(done => {
+          try { openHtml((note, isOpen) => { state = { ...state, note, tone: isOpen ? 'done' : 'alert' }; done() }) }
+          catch (error) { state = { ...state, note: failureNote(error), tone: 'alert' }; done() }
+        })
+      }
     }
-    process.stdout.write(screen(state))
+    process.stdout.write(screen(pin(state)))
   } else if (args.includes('--watch') && process.stdin.isTTY) {
     // No fingerprint is kept before the first draw succeeds, and x, a and c then refuse every line.
     let state: BoardState = { ...emptyBoardState, seen: {}, isIdleOpen: args.includes('--all') }
@@ -1065,8 +1083,8 @@ const run = async (): Promise<void> => {
           state = pressed.state
           if (pressed.isQuit) quit()
           if (pressed.isHtml) {
-            openHtml(note => {
-              state = { ...state, note }
+            openHtml((note, isOpen) => {
+              state = { ...state, note, tone: isOpen ? 'done' : 'alert', result: undefined }
               draw()
             })
           }
@@ -1074,7 +1092,7 @@ const run = async (): Promise<void> => {
         }
         draw()
       } catch (error) {
-        state = { ...state, note: failureNote(error) }
+        state = { ...state, note: failureNote(error), tone: 'alert' }
         draw()
       }
     })
@@ -1100,6 +1118,8 @@ const run = async (): Promise<void> => {
 try {
   await run()
 } catch (error) {
+  // The verified worker wrapper bounds data-URL errors and owns stage cleanup.
+  if (flag('--legacy-connect-request') !== undefined && typeof (globalThis as { AGENT_BOARD_WORKER_SOURCE?: unknown }).AGENT_BOARD_WORKER_SOURCE === 'string') throw error
   if (args.some(arg => ['--codex-event', '--agent-status', '--codex-report'].includes(arg))) {
     process.exitCode = 1
     const raw = String((error as { code?: string })?.code ?? (error instanceof Error ? error.message : 'UNKNOWN'))

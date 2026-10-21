@@ -8,6 +8,9 @@ import { basename, join } from 'node:path'
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { BOARD_SCRIPT } from '../hooks/board-script.ts'
+import { EN } from '../hooks/strings-en.ts'
+import { ZH_TW } from '../hooks/i18n.ts'
+import { ZH_CN } from '../hooks/strings-zh-cn.ts'
 
 const NOW = Date.UTC(2026, 9, 17, 12)
 const month = `${new Date(NOW).getFullYear()}-${String(new Date(NOW).getMonth() + 1).padStart(2, '0')}`
@@ -39,13 +42,15 @@ const fixture = run => {
   }
 }
 
-const failed = (result, path, code) => {
+const failed = (result, path, code, lang = 'en') => {
+  const s = { en: EN, 'zh-TW': ZH_TW, 'zh-CN': ZH_CN }[lang]
   assert.equal(result.error, undefined)
   assert.equal(result.status, 1, result.stdout + result.stderr)
   const said = result.stdout + result.stderr
   assert.ok(said.includes(path.endsWith('progress.md') ? 'your progress file' : basename(path)), said)
   assert.ok(!said.includes(path), said)
-  assert.ok(code === 'EACCES' ? /read-only or locked|\u552f\u8b80|\u53ea\u8bfb/.test(said) : said.includes(code === 'ENOSPC' ? 'the disk is full' : code), result.stdout + result.stderr)
+  assert.ok(said.includes(code === 'EACCES' ? s.storageReadOnly : code === 'ENOSPC' ? s.storageFull : s.storageUnknown), said)
+  assert.ok(!said.includes(code), said)
   assert.ok(!(result.stdout + result.stderr).includes('Done:'))
   assert.ok(!(result.stdout + result.stderr).includes('Archived “'))
   assert.ok(!(result.stdout + result.stderr).includes('nothing changed'))
@@ -206,7 +211,7 @@ test('replacing board and history retains their POSIX permission bits despite a 
 
 test('the error and recovery notice keeps the affected path and error code in every language', () => fixture(({ paths, play }) => {
   const fault = `const original = fs.renameSync\nfs.renameSync = (from, to) => { if (String(to) === ${JSON.stringify(paths.archive)}) throw Object.assign(new Error('injected failure'), { code: 'EACCES' }); return original(from, to) }`
-  for (const lang of ['en', 'zh-TW', 'zh-CN']) failed(play('a', fault, lang), paths.archive, 'EACCES')
+  for (const lang of ['en', 'zh-TW', 'zh-CN']) failed(play('a', fault, lang), paths.archive, 'EACCES', lang)
 }))
 
 for (const operation of ['statSync', 'chmodSync']) {
@@ -251,7 +256,7 @@ test('watch recovers on its next redraw after a read error and restores raw mode
   const result = play('', fault, 'en', true)
   assert.equal(result.error, undefined)
   assert.equal(result.status, 1, result.stdout + result.stderr)
-  assert.ok(result.stderr.includes('your progress file') && !result.stderr.includes(paths.board) && result.stderr.includes('EIO'))
+  assert.ok(result.stderr.includes(EN.fileProgress) && !result.stderr.includes(paths.board) && result.stderr.includes(EN.storageUnknown))
   assert.ok(result.stdout.includes('Keep the evidence'), result.stdout)
   assert.ok(result.stderr.includes('RAW_RESTORED'))
   assert.equal(readFileSync(paths.board, 'utf8'), FILE)

@@ -74,7 +74,8 @@ test('the full generated worker bundle runs through verified staging without rec
   assert.ok(!code.includes('// hooks/board-script.ts'))
   assert.ok(!code.includes('// hooks/connect.ts'))
   assert.ok(!/\b(?:var|let|const) BOARD_SCRIPT\b/.test(code))
-  assert.equal(code.split('globalThis.AGENT_BOARD_WORKER_SOURCE').length - 1, 1)
+  // One dispatch runs the trusted worker source; the run's error handler only checks that it is set.
+  assert.equal(code.split('const trusted = globalThis.AGENT_BOARD_WORKER_SOURCE').length - 1, 1)
   // Staged code has no argv size limit. This is only a coarse growth alarm;
   // the structural checks above catch an embedded generated predecessor.
   assert.ok(Buffer.byteLength(code) < 1024 * 1024)
@@ -82,6 +83,7 @@ test('the full generated worker bundle runs through verified staging without rec
   // A 750,000-character cap still catches that. Each board-cli pull request adds about 5 KB,
   // so a tighter cap fails on ordinary growth.
   assert.ok(code.length < 750000)
+  assert.ok(!code.includes('BOARD_SCRIPT'), 'the worker bundle embeds no earlier board bundle')
   const { digest, value } = stage(code)
   try {
     writeFileSync(value.file, code)

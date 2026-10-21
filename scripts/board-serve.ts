@@ -229,7 +229,7 @@ export const startServer = (o: ServeOptions): void => {
   const sending = new Set<string>()
   // The last answer of each session the page sent to, until the next send to that session. One
   // entry per session at most; the page shows those that came after it loaded.
-  const replies = new Map<string, Result & { at: number }>()
+  const replies = new Map<string, Result & { at: number; key: string }>()
   let port = 0
   let lastSeen = Date.now()
   let isStopping = false
@@ -301,7 +301,7 @@ export const startServer = (o: ServeOptions): void => {
 
   // One reply at a time per session, in the background: the page asks for the board every 3
   // seconds and the answer comes with it, however long the agent takes.
-  const send = (target: AgentTarget, reply: string, title: string): { status: number; note: string } => {
+  const send = (target: AgentTarget, reply: string, title: string, cardKey: string): { status: number; note: string } => {
     const plan = sendPlan(target, reply, isWindows)
     if (plan === null) return { status: 409, note: o.s.serveSendNone(target.agent) }
     const label = `${target.agent} · ${title}`
@@ -311,8 +311,8 @@ export const startServer = (o: ServeOptions): void => {
     sending.add(key)
     replies.delete(key)
     run(plan, o.s, label)
-      .then(result => replies.set(key, { ...result, at: Date.now() }))
-      .catch((error: unknown) => replies.set(key, { ok: false, note: o.s.serveSendFailed(label, String(error)), at: Date.now() }))
+      .then(result => replies.set(key, { ...result, at: Date.now(), key: cardKey }))
+      .catch((error: unknown) => replies.set(key, { ok: false, note: o.s.serveSendFailed(label, String(error)), at: Date.now(), key: cardKey }))
       .finally(() => sending.delete(key))
     return { status: 202, note: o.s.serveQueued(label) }
   }
@@ -351,7 +351,10 @@ export const startServer = (o: ServeOptions): void => {
           return json(res, 200, { model: serveModel(o.view(), o.pending(), o.s, sending, isLan, state, o.allowResume), replies: [...replies.values()], messaging: isLan ? undefined : state ?? { enabled: false, connections: [], messages: [] }, now: Date.now() })
         } catch (error) {
           const note = o.failure(error, isLan)
-          if (note === null) throw error
+          if (note === null) {
+            process.stderr.write(`${error instanceof Error ? error.stack : String(error)}\n`)
+            return json(res, 500, { note: o.s.pressFailed })
+          }
           return json(res, 409, { note })
         }
       }
@@ -381,7 +384,7 @@ export const startServer = (o: ServeOptions): void => {
       if (url.pathname === '/api/act') {
         const state = isLan ? undefined : messaging?.snapshot(Date.now())
         const action = serveAction(boardItems(o.view(), o.pending()), { key: text(body.key), type: text(body.type), text: text(body.text), session: text(body.session), asked: text(body.asked), fp: text(body.fp), connection: text(body.connection), turn: text(body.turn) }, o.s, isLan, state?.connections, messaging !== null, o.allowResume)
-        if (action.type === 'refuse') return json(res, 409, { note: action.note })
+        if (action.type === 'refuse') return json(res, 409, { note: action.note || o.s.pressNothing })
         if (action.type === 'message') {
           if (!messaging || isLan) return json(res, 403, {})
           try {
@@ -392,11 +395,11 @@ export const startServer = (o: ServeOptions): void => {
           } catch (error) { return json(res, 409, { note: error instanceof Error && error.message === 'ID_CONFLICT' ? o.s.messagesConflict : o.s.messagesFailed }) }
         }
         if (action.type === 'send') {
-          const sent = send(action.target, action.text, action.title)
+          const sent = send(action.target, action.text, action.title, text(body.key))
           return json(res, sent.status, { note: sent.note })
         }
-        const note = o.act(action)
-        const isDone = ![o.s.boardWriteFailed, o.s.boardTickGone, o.s.archiveGone, o.s.hideFailed, o.s.boardLineChanged].includes(note)
+        const note = o.act(action) || o.s.pressNothing
+        const isDone = ![o.s.boardWriteFailed, o.s.boardTickGone, o.s.archiveGone, o.s.hideFailed, o.s.boardLineChanged, o.s.questionRetentionFailed, o.s.pressFailed].includes(note)
         return json(res, isDone ? 200 : 409, { note })
       }
       if (url.pathname === '/api/tidy') {
@@ -409,7 +412,10 @@ export const startServer = (o: ServeOptions): void => {
       }
     } catch (error) {
       const note = o.failure(error, isLan)
-      if (note === null) throw error
+      if (note === null) {
+        process.stderr.write(`${error instanceof Error ? error.stack : String(error)}\n`)
+        return json(res, 500, { note: o.s.pressFailed })
+      }
       return json(res, 409, { note })
     }
     // Only the board script on the computer opens the page to the network: it asks with the
