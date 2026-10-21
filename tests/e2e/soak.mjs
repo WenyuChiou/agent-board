@@ -19,12 +19,21 @@ const TITLES = {
   level: 'L6 soak: server memory levels off',
 }
 // A check that fails on main because of a known problem passes through knownFailure with its hold id:
-// the page server reads every ledger and capture file on every poll (audit P1-3), and the question
-// ledger and capture files of an archived task are never removed.
-const HOLDS = { ops: 'hold:serve-poll-file-ops', memory: 'hold:serve-poll-file-ops', prune: 'hold:question-ledger-prune' }
+// the page server reads every ledger and capture file on every poll (audit P1-3), so its memory
+// climbs and its answers slow down until some polls get none; and the question ledger and capture
+// files of an archived task are never removed. A page server that is gone, answers with an error or
+// answers nothing after the archive is never held: slowness explains none of them.
+const HOLDS = { ops: 'hold:serve-poll-file-ops', memory: 'hold:serve-poll-file-ops', prune: 'hold:question-ledger-prune', survive: 'hold:serve-poll-file-ops' }
 
 const ARCHIVE_SLACK_MS = 120000
-const TAIL_SLACK_MS = 200000
+// The tail may run this far past the planned time. Its end cuts the poll under way short, so the
+// hard deadline still has a minute to spare.
+const TAIL_SLACK_MS = 240000
+// Growth lasts this share of the planned time, after the warm-up: on a slow server the archive
+// takes about a third of a 30-minute run, and the tail after it needs a few polls and memory lines.
+const GROWTH_SHARE = 0.6
+const SETTLE_MS = 20000
+const SETTLED_LINES = 3
 const ENDED_EVERY = 12
 const POLL_GAP_MS = 500
 const POLL_LIMIT_MS = 15000
@@ -32,7 +41,7 @@ const POLL_GIVE_UP_MS = 60000
 const SAMPLE_MS = 10000
 const PAGE_EVERY = 50
 const WARM_POLLS = 20
-const TAIL_POLLS = 5
+const TAIL_POLLS = 3
 const HOOKS = 10
 const TURNS = 30
 const QUESTION_TURNS = 20
@@ -128,6 +137,8 @@ const soak = async ({ minutes, out }) => {
   const polls = []
   const samples = { serve: [], watch: [] }
   const state = { archiveEndPolls: undefined, archiveEndAt: undefined, archivedSessions: undefined, watchFramesAtArchive: undefined, growthEndAt: undefined }
+  // The polls sent after the archive was done: one sent before its last request does not count.
+  const tailPolls = () => state.archiveEndAt === undefined ? [] : polls.filter(one => one.start >= state.archiveEndAt)
   let sampler
   let isLoopDone = false
   let probeDir, token, sw
@@ -268,6 +279,9 @@ const soak = async ({ minutes, out }) => {
     // as a slow one; a poll fails only when no answer comes at all.
     const board = new URL('/api/board', server.url)
     const headers = { 'x-board-token': token }
+    // The end of the tail cuts the poll under way short, so a slow answer cannot hold the run past it.
+    const loopEnd = new AbortController()
+    const pollSignal = () => AbortSignal.any([AbortSignal.timeout(POLL_GIVE_UP_MS), stopper.signal, loopEnd.signal])
     const pollLoop = async () => {
       while (!isLoopDone) {
         const number = polls.length + 1
@@ -277,16 +291,16 @@ const soak = async ({ minutes, out }) => {
         let size = 0
         let failed = false
         try {
-          const response = await fetch(board, { headers, signal: AbortSignal.any([AbortSignal.timeout(POLL_GIVE_UP_MS), stopper.signal]) })
+          const response = await fetch(board, { headers, signal: pollSignal() })
           size = (await response.arrayBuffer()).byteLength
           status = response.status
         } catch { failed = true }
         const ms = Math.round(since() - start)
         if (!failed && number % PAGE_EVERY === 0) {
-          try { await (await fetch(server.url, { signal: AbortSignal.any([AbortSignal.timeout(POLL_GIVE_UP_MS), stopper.signal]) })).arrayBuffer() } catch { failed = true }
+          try { await (await fetch(server.url, { signal: pollSignal() })).arrayBuffer() } catch { failed = true }
         }
-        // A poll the stop cut short is not a poll.
-        if (stopper.signal.aborted) break
+        // A poll the stop or the end of the tail cut short is not a poll.
+        if (stopper.signal.aborted || loopEnd.signal.aborted) break
         polls.push({ number, start, end: since(), ms, status, size, failed, slow: !failed && ms > POLL_LIMIT_MS, phase: during })
         if (!isLoopDone) await sleep(POLL_GAP_MS)
       }
@@ -402,7 +416,7 @@ const soak = async ({ minutes, out }) => {
       while (isRunning() && !(since() >= 0.05 * total && polls.length >= WARM_POLLS)) await sleep(200)
       if (!isRunning()) return
       setPhase('growth')
-      await growth(since(), 0.7 * total)
+      await growth(since(), GROWTH_SHARE * total)
       if (!isRunning()) return
       await waitPolls(3)
       state.growthEndAt = since()
@@ -415,12 +429,17 @@ const soak = async ({ minutes, out }) => {
       state.archiveEndAt = since()
       state.watchFramesAtArchive = watch.frames
       setPhase('tail')
-      while (isRunning() && !(since() >= total && (polls.length >= state.archiveEndPolls + TAIL_POLLS || since() >= total + TAIL_SLACK_MS))) await sleep(250)
+      // The tail lasts the planned time, and then until the prune check has its polls and the
+      // levels-off check its memory lines, but never past the slack.
+      const settledLines = () => samples.serve.filter(one => one.t >= state.archiveEndAt + SETTLE_MS).length
+      const isTailDone = () => since() >= total + TAIL_SLACK_MS || (since() >= total && tailPolls().length >= TAIL_POLLS && settledLines() >= SETTLED_LINES)
+      while (isRunning() && !isTailDone()) await sleep(250)
     }
 
     const polling = pollLoop()
     try { await conductor() } finally {
       isLoopDone = true
+      loopEnd.abort()
       for (const wake of [...wakers]) wake()
     }
     await polling
@@ -480,7 +499,7 @@ const soak = async ({ minutes, out }) => {
         captureTotal += 1
         try { if (state.archivedSessions.has(sessionOf(JSON.parse(readFileSync(join(world.claudeDir, name), 'utf8')).record.scope))) captures += 1 } catch {}
       }
-      const afterArchive = polls.length - state.archiveEndPolls
+      const afterArchive = tailPolls().length
       const counted = `${state.archivedSessions.size} tasks were archived; ${records} of ${ledgerTotal} ledger records and ${captures} of ${captureTotal} capture files that belong to them are still there`
       if (afterArchive < TAIL_POLLS) outcomes.prune = { skipped: `Only ${afterArchive} polls came after the archive phase, ${TAIL_POLLS} are needed. At the end, ${counted}.` }
       else if (state.archivedSessions.size === 0) outcomes.prune = { ok: false, isUnheld: true, line: `No task could be archived (${report.archive.refused} refused), so nothing could be pruned.` }
@@ -490,7 +509,10 @@ const soak = async ({ minutes, out }) => {
     // Survival is about the server staying up and answering; slow answers are counted, and the
     // file-operation and memory checks are where slowness shows.
     const survived = `${polls.length} polls; the page server is ${isServerAlive ? 'still running' : 'gone'}; ${report.polls.failed} got no answer and ${report.polls.badStatus} got an answer other than 200 (${report.polls.slow} took longer than 15 seconds)`
-    if (!isServerAlive || report.polls.failed > 0 || report.polls.badStatus > 0) outcomes.survive = { ok: false, line: `${survived}.` }
+    const tail = tailPolls()
+    const isSilent = tail.length >= TAIL_POLLS && tail.every(one => one.failed)
+    if (!isServerAlive || report.polls.badStatus > 0 || isSilent) outcomes.survive = { ok: false, isUnheld: true, line: `${survived}${isSilent ? `; none of the ${tail.length} polls after the archive got an answer` : ''}.` }
+    else if (report.polls.failed > 0) outcomes.survive = { ok: false, line: `${survived}.` }
     else if (polls.length < 1000 && minutes >= 30) outcomes.survive = { ok: false, line: `${survived}; a run of ${minutes} minutes should reach 1,000.` }
     else if (polls.length < 1000) outcomes.survive = { skipped: `${survived}; 1,000 polls are needed.` }
     else outcomes.survive = { ok: true, line: `${survived}.` }
@@ -502,13 +524,13 @@ const soak = async ({ minutes, out }) => {
       outcomes.watch = { ok: isWatchAlive && after >= 1 && watch.headed >= 1, line: `The terminal board is ${isWatchAlive ? 'still running' : 'gone'} and drew ${after} screens after the archive phase (${watch.frames} in all).${watch.errors ? ` It said: ${watch.errors.trim().split('\n').at(-1)}` : ''}` }
     }
 
-    // Nothing grows once the archive is done, so from 20 s after it the server should set no new high.
-    const settled = state.archiveEndAt === undefined ? [] : serveSamples.filter(one => one.t >= state.archiveEndAt + 20000)
+    // Nothing grows once the archive is done, so from SETTLE_MS after it the server should set no new high.
+    const settled = state.archiveEndAt === undefined ? [] : serveSamples.filter(one => one.t >= state.archiveEndAt + SETTLE_MS)
     const before = state.archiveEndAt === undefined ? undefined : peakRss(serveSamples, 0, state.archiveEndAt)
     const after = settled.length === 0 ? undefined : Math.max(...settled.map(one => one.rss))
     const levelLimit = before === undefined ? undefined : 1.1 * before + 10 * MEGABYTE
     if (state.archiveEndAt === undefined) outcomes.level = { skipped: 'The run ended before the archive phase was done.' }
-    else if (before === undefined || settled.length < 3) outcomes.level = { skipped: `Only ${settled.length} memory lines came from 20 s after the archive on, 3 are needed.` }
+    else if (before === undefined || settled.length < SETTLED_LINES) outcomes.level = { skipped: `Only ${settled.length} memory lines came from ${SETTLE_MS / 1000} s after the archive on, ${SETTLED_LINES} are needed.` }
     else outcomes.level = { ok: after <= levelLimit, line: `The page server's highest memory was ${megabytes(before)} MB up to the end of the archive and ${megabytes(after)} MB after it (limit ${megabytes(levelLimit)} MB).` }
 
     const results = []
