@@ -3402,7 +3402,7 @@ test('every agent keeps exact resume bindings without showing session identifier
   expect(html).not.toContain('對話 ID')
   // The web card keeps the actionable resume command without another id-only button.
   expect(servePage(STRINGS.en, 'n')).not.toContain("copy(ask.sessionId)")
-  expect(servePage(STRINGS.en, 'n')).toContain("copy(ask.reopen, undefined, ask.key)")
+  expect(servePage(STRINGS.en, 'n')).toContain("copy(ask.reopen, ask.key)")
 
   // Ended, a session whose agent reopens one by id offers that command, in its own folder.
   const ended = buildView(parseProgress(file.replaceAll('state=waiting', 'state=ended')), [], null, now, 0, {}, STRINGS.en).stopped
