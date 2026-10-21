@@ -891,19 +891,33 @@ ${terminal(mode, monoOf(lang), title, gridSvg(grid, PAD, BAR + PAD, theme), grid
 `
 }
 
-// The README's cover, a 10 s loop: Claude Code, Codex and Antigravity each tick a step and the
-// pane shows it; Claude asks which way to release, the person presses an answer in the pane, and
-// Claude gets it as its next prompt (submitOwn in register.tsx, worded by s.answerText). Left, a
-// card per agent; right, the pane as drawPane draws it at each moment (COVER in samples.ts). CSS
-// keyframes only, so GitHub plays it in an <img>; with reduced motion only the end shows, the
-// answer gone through.
-const COVER_LOOP = 10
-// When each thing happens, in seconds; a report takes TRAVEL to reach the pane, and a moment
-// fades in over FADE. The last moment holds until `back`, then the loop fades to the first.
-const COVER_T = { codex: 0.8, antigravity: 1.5, ask: 2.6, point: 3.9, press: 4.8, answer: 5.2, back: 9.4 }
+// The README's cover, a 45 s loop in three acts, each opened by a caption above the picture.
+// Act 1: Claude Code, Codex and Antigravity each tick a step and the pane shows it. Act 2: Claude
+// asks which way to release, the person presses an answer in the pane, and Claude gets it as its
+// next prompt (submitOwn in register.tsx, worded by s.answerText). Act 3, a preview: the person
+// writes to the Codex session, the board shows the message on its way and then its receipts, and
+// Codex goes on and ticks a step. The pane cannot message another agent, so the box and the
+// receipts sit on Codex's card, where the board page puts them, in the page's own words
+// (serveSend, serveSending and messages* in hooks/strings-en.ts). Left, a card per agent; right,
+// the pane as drawPane draws it at each moment (COVER in samples.ts). CSS keyframes only, so
+// GitHub plays it in an <img>; with reduced motion only the end of act 3 shows.
+const COVER_LOOP = 45
+const COVER_ACT = { one: 0, two: 14, three: 29 }
+// When each thing happens, in seconds, paced to be read. A report takes TRAVEL to reach the pane,
+// and a moment fades in over FADE. The last moment holds until `veil`, when the picture fades
+// through its own ground; by `back` it is hidden, the last frame gives way to the first, and the
+// veil lifts from the start of the next loop.
+const COVER_T = {
+  codex: 2.8, antigravity: 6.4, claude: 10,
+  ask: 15.2, point: 18.2, press: 21, answer: 21.4,
+  type: 30.8, aim: 33, tap: 35, send: 35.4, queued: 36.4, accepted: 37.8, replied: 39.6, tick: 40.8,
+  veil: 44, back: 44.5,
+}
 const TRAVEL = 0.5
 const FADE = 0.3
-// The pane shows this many rows; the last moment scrolls just far enough to show the answer.
+// How long the pointer takes to reach its target.
+const POINT_IN = 1.2
+// The pane shows this many rows; the answer's moment scrolls just far enough to show the answer.
 const COVER_ROWS = 28
 const CARD_W = 360
 const GAP = 76
@@ -914,15 +928,35 @@ const PAGE: Record<Mode, { ground: string; surface: string; line: string; shadow
   dark: { ground: '#141617', surface: '#1e2022', line: '#2e3134', shadow: '#000000', depth: 0.5 },
 }
 const MARGIN = 16
-const COVER_WORDS: Record<Lang, { label: string }> = {
-  en: { label: 'Claude Code, Codex and Antigravity report their steps to the board; Claude asks which way to release, and the answer pressed in the pane goes back to it' },
-  'zh-TW': { label: 'Claude Code、Codex、Antigravity 把每一步回報到看板；Claude 問要怎麼上線，在面板按下的答案直接回給它' },
-  'zh-CN': { label: 'Claude Code、Codex、Antigravity 把每一步汇报到看板；Claude 问要怎么上线，在面板点下的答案直接回给它' },
+// The caption above the picture: its baseline, and where the picture starts.
+const CAPTION_Y = 38
+const PICTURE_Y = 84
+// `soon` marks act 3 as a preview and says in which release it ships (the label goes after the
+// picture's own); delete it, here only, when sending is on by default.
+const COVER_WORDS: Record<Lang, { label: string; acts: [string, string, string]; soon?: { chip: string; label: string } }> = {
+  en: {
+    label: 'Claude Code, Codex and Antigravity report their steps to one board; Claude asks which way to release and the answer pressed in the pane goes back to it; then a message written on the board goes to the Codex session and its receipts show',
+    acts: ['Every agent on one board', 'Answer from the board', 'Sessions message each other'],
+    soon: { chip: 'Coming in 0.24.3', label: ', a preview of sending between sessions, coming in 0.24.3' },
+  },
+  'zh-TW': {
+    label: 'Claude Code、Codex、Antigravity 把每一步回報到同一塊看板；Claude 問要怎麼上線，在面板按下的答案直接回給它；接著在看板寫的訊息傳給 Codex session，並顯示傳送狀態',
+    acts: ['每個 agent 都在同一塊看板上', '在看板上直接回答', 'Session 之間互傳訊息'],
+    soon: { chip: '0.24.3 推出', label: '，預覽 session 之間互傳訊息，0.24.3 推出' },
+  },
+  'zh-CN': {
+    label: 'Claude Code、Codex、Antigravity 把每一步汇报到同一块看板；Claude 问要怎么上线，在面板点下的答案直接回给它；接着在看板写的消息发给 Codex session，并显示发送状态',
+    acts: ['每个 agent 都在同一块看板上', '在看板上直接回答', 'Session 之间互发消息'],
+    soon: { chip: '0.24.3 推出', label: '，预览 session 之间互发消息，0.24.3 推出' },
+  },
 }
 const COVER_STATUS: Record<string, 'completed' | 'in_progress'> = { x: 'completed', '~': 'in_progress' }
 type Row = Grid[number]
 
-// The pane at moment `m` (0 to 4, as COVER_MARKS), with "Other open work" open so Codex's and
+// A rough width of a line at `size`, to fit a box round it: the fonts are not measured here.
+const textW = (text: string, size: number): number => [...text].reduce((n, ch) => n + size * (ch.charCodeAt(0) > 0x2e80 ? 1 : 0.55), 0)
+
+// The pane at moment `m` (0 to 6, as COVER_MARKS), with "Other open work" open so Codex's and
 // Antigravity's steps show.
 const coverPane = (lang: Lang, mode: Mode, m: number) => {
   const s = STRINGS[lang]
@@ -967,7 +1001,8 @@ const cover = (lang: Lang, mode: Mode): string => {
   const page = PAGE[mode]
   const pal = t.palette
   const mono = monoOf(lang)
-  const panes = [0, 1, 2, 3, 4].map(m => coverPane(lang, mode, m))
+  const T = COVER_T
+  const panes = COVER_MARKS.claude.map((_, m) => coverPane(lang, mode, m))
   const winX = CARD_W + GAP
   const W = winX + windowWidth + 1
   const H = BAR + PAD + COVER_ROWS * LINE + PAD + 1
@@ -981,7 +1016,7 @@ const cover = (lang: Lang, mode: Mode): string => {
   // On from `start`, fading in, until `end`, when the one laid over it has fully come in; the
   // last one stays until the loop turns back, and fades out over the first.
   const shown = (start: number, end: number | null): string =>
-    frames(`0%, ${p(start)} { opacity: 0 } ${p(start + FADE)} { opacity: 1 } ${end === null ? `${p(COVER_T.back)} { opacity: 1 } 100% { opacity: 0 }` : `${p(end)} { opacity: 1 } ${p(end + 0.02)}, 100% { opacity: 0 }`}`)
+    frames(`0%, ${p(start)} { opacity: 0 } ${p(start + FADE)} { opacity: 1 } ${end === null ? `${p(T.back)} { opacity: 1 } 100% { opacity: 0 }` : `${p(end)} { opacity: 1 } ${p(end + 0.02)}, 100% { opacity: 0 }`}`)
   // A brief glow, on and off.
   const glow = (start: number, length: number, peak: number): string =>
     frames(`0%, ${p(start)} { opacity: 0 } ${p(start + 0.12)} { opacity: ${peak} } ${p(start + length)}, 100% { opacity: 0 }`)
@@ -1007,8 +1042,10 @@ const cover = (lang: Lang, mode: Mode): string => {
     ].join('\n')
   }
 
-  // The pane: each moment as it reaches the board.
-  const paneAt = [0, COVER_T.codex + TRAVEL, COVER_T.antigravity + TRAVEL, COVER_T.ask + TRAVEL, COVER_T.answer]
+  // The pane: each moment as it reaches the board. A report takes TRAVEL to arrive; the answer is
+  // pressed in the pane itself.
+  const paneAt = [0, T.codex + TRAVEL, T.antigravity + TRAVEL, T.claude + TRAVEL, T.ask + TRAVEL, T.answer, T.tick + TRAVEL]
+  if (paneAt.length !== panes.length) throw new Error(`The cover has ${paneAt.length} pane times for ${panes.length} moments`)
   const rowY = (i: number): number => BAR + PAD + i * LINE
   const paneBody = layered(
     panes.map((pane, m) => ({ at: paneAt[m] ?? 0, rows: pane.rows.map((row, i) => ({ key: rowKey(row), svg: row === undefined ? '' : gridSvg([row], PAD, rowY(i), pane.theme) })) })),
@@ -1021,31 +1058,38 @@ const cover = (lang: Lang, mode: Mode): string => {
     return `<rect class="a ${glow(paneAt[m] ?? 0, 1.1, 0.16)}" x="1" y="${rowY(from - pane.top) - 1}" width="${num(windowWidth - 2)}" height="${(to - from + 1) * LINE + 2}" fill="${pal.accent}"/>`
   }
   const rowIn = (m: number, text: string): number => rowOf(panes[m]?.grid ?? [], text)
-  const waitingRow = rowIn(3, s.mostNeeded)
-  const option = keyBox(panes[3]?.grid ?? [], `mine::3::${c.claude.options[0]}`)
-  const answerRow = rowIn(4, s.answered(c.claude.options[0]))
+  const waitingRow = rowIn(4, s.mostNeeded)
+  const option = keyBox(panes[4]?.grid ?? [], `mine::3::${c.claude.options[0]}`)
+  const answerRow = rowIn(5, s.answered(c.claude.options[0]))
   const bands = [
     band(1, rowIn(1, c.codex.title), rowIn(1, c.codex.title) + 1),
     band(2, rowIn(2, c.antigravity.title), rowIn(2, c.antigravity.title) + 1),
-    band(3, waitingRow, waitingRow + 3),
-    band(4, answerRow - 1, answerRow),
+    band(3, rowIn(3, c.claude.branch), rowIn(3, c.claude.branch) + 3),
+    band(4, waitingRow, waitingRow + 3),
+    band(5, answerRow - 1, answerRow),
+    band(6, rowIn(6, c.codex.title), rowIn(6, c.codex.title) + 1),
   ].join('')
   // The press: a ring round the first answer, then the button lighting up.
   const press = option === null
     ? ''
-    : `<rect class="a ${frames(`0%, ${p(COVER_T.point + 0.6)} { opacity: 0 } ${p(COVER_T.point + 0.9)} { opacity: 1 } ${p(COVER_T.answer)} { opacity: 1 } ${p(COVER_T.answer + 0.2)}, 100% { opacity: 0 }`)}" x="${num(PAD + option.col * CELL - 6)}" y="${rowY(option.row) - 3}" width="${num(option.span * CELL + 12)}" height="${LINE + 5}" rx="6" fill="none" stroke="${pal.accent}" stroke-width="2.4"/>` +
-      `<rect class="a ${glow(COVER_T.press, 0.45, 0.3)}" x="${num(PAD + option.col * CELL - 6)}" y="${rowY(option.row) - 3}" width="${num(option.span * CELL + 12)}" height="${LINE + 5}" rx="6" fill="${pal.accent}"/>`
+    : `<rect class="a ${frames(`0%, ${p(T.point + POINT_IN - 0.2)} { opacity: 0 } ${p(T.point + POINT_IN + 0.1)} { opacity: 1 } ${p(T.answer)} { opacity: 1 } ${p(T.answer + 0.2)}, 100% { opacity: 0 }`)}" x="${num(PAD + option.col * CELL - 6)}" y="${rowY(option.row) - 3}" width="${num(option.span * CELL + 12)}" height="${LINE + 5}" rx="6" fill="none" stroke="${pal.accent}" stroke-width="2.4"/>` +
+      `<rect class="a ${glow(T.press, 0.45, 0.3)}" x="${num(PAD + option.col * CELL - 6)}" y="${rowY(option.row) - 3}" width="${num(option.span * CELL + 12)}" height="${LINE + 5}" rx="6" fill="${pal.accent}"/>`
   const body = `<g clip-path="url(#pane)">${paneBody}\n${bands}${press}</g>`
 
   // The agents, one card each: its tile, name and project, its task, its steps and what it is
   // doing. A step's mark is the board's own: ✓ done, ▸ doing, ? waiting on you, a ring for to do.
   const cardH = (steps: number): number => 86 + steps * 24 + 22
-  const gap = (H - 1 - cardH(4) - cardH(3) * 2) / 2
-  const cards: Array<{ key: 'claude' | 'codex' | 'antigravity'; name: string; project: string; title: string; steps: string[]; y: number }> = [
-    { key: 'claude', name: 'Claude Code', project: c.claude.project, title: c.claude.title, steps: c.claude.steps, y: 0.5 },
-    { key: 'codex', name: 'Codex', project: c.codex.project, title: c.codex.title, steps: c.codex.steps, y: 0.5 + cardH(4) + gap },
-    { key: 'antigravity', name: 'Antigravity', project: c.antigravity.project, title: c.antigravity.title, steps: c.antigravity.steps, y: 0.5 + cardH(4) + cardH(3) + gap * 2 },
-  ]
+  // In act 3 Codex's card opens for the message: the box, then a line for the receipts.
+  const EXTRA = 76
+  const BOX_H = 44
+  const gap = (H - 1 - cardH(4) * 2 - cardH(3)) / 2
+  type CardKey = 'claude' | 'codex' | 'antigravity'
+  type Card = { key: CardKey; name: string; project: string; title: string; steps: string[]; y: number }
+  const claude: Card = { key: 'claude', name: 'Claude Code', project: c.claude.project, title: c.claude.title, steps: c.claude.steps, y: 0.5 }
+  const codex: Card = { key: 'codex', name: 'Codex', project: c.codex.project, title: c.codex.title, steps: c.codex.steps, y: 0.5 + cardH(4) + gap }
+  const antigravity: Card = { key: 'antigravity', name: 'Antigravity', project: c.antigravity.project, title: c.antigravity.title, steps: c.antigravity.steps, y: 0.5 + cardH(4) * 2 + gap * 2 }
+  const cards = [claude, codex, antigravity]
+  const x0 = 0.5
   const stepLine = (x: number, y: number, mark: string, text: string): string => {
     const tone = mark === 'x' ? pal.muted : mark === '?' ? pal.waiting : t.ink
     const weight = mark === '~' || mark === '?' ? ' font-weight="600"' : ''
@@ -1058,107 +1102,212 @@ const cover = (lang: Lang, mode: Mode): string => {
           : `<circle cx="${x + 5}" cy="${y - 5}" r="3.6" fill="none" stroke="${pal.muted}" stroke-width="1.3"/>`
     return `${sign}<text x="${x + 22}" y="${y}" font-size="14.5"${weight} fill="${tone}">${esc(text)}</text>`
   }
-  // When each card changes: Codex's and Antigravity's ticks, Claude's question, and the answer
-  // reaching Claude once it has come back from the pane.
-  const cardAt = { claude: [0, -1, -1, COVER_T.ask, COVER_T.answer + TRAVEL], codex: [0, COVER_T.codex], antigravity: [0, -1, COVER_T.antigravity] }
-  const cardSvg = cards.map(card => {
-    const x = 0.5
-    const statusY = card.y + 86 + card.steps.length * 24 + 4
-    const moments = cardAt[card.key].flatMap((at, m) => {
-      if (at < 0) return []
-      const marks = COVER_MARKS[card.key][m] ?? []
-      const status = card.key === 'claude' && marks.includes('?')
-        ? `<text x="${x + 18}" y="${statusY}" font-size="14" font-weight="600" fill="${pal.waiting}">${esc(c.claude.why)}</text>`
-        : card.key === 'claude' && marks[2] === 'x'
-          ? `<text x="${x + 18}" y="${statusY}" font-family="${mono}" font-size="13" fill="${pal.accent}">› ${esc(s.answerText(c.claude.steps[2], c.claude.options[0]))}</text>`
-          : `<text x="${x + 18}" y="${statusY}" font-size="14" fill="${pal.muted}">${esc(TOUR[lang].working)}</text>`
-      const rows = [...card.steps.map((step, i) => stepLine(x + 18, card.y + 86 + i * 24, marks[i] ?? ' ', step)), status]
-      return [{ at, rows: rows.map(svg => ({ key: svg, svg })) }]
-    })
-    // Each row's own ground, reaching below its letters' tails; the status line sits 4 lower.
-    const ground = (i: number): string => `<rect x="${x + 1}" y="${num(card.y + 86 + i * 24 - 18 + (i === card.steps.length ? 4 : 0))}" width="${CARD_W - 2}" height="24" fill="${page.surface}"/>`
-    // While Claude waits on you, its card wears the board's own kind-of-question chip.
-    const label = s.ask.choose
-    const chipW = 30 + [...label].reduce((n, ch) => n + (ch.charCodeAt(0) > 0x2e80 ? 12 : 7), 0)
-    const chipX = x + CARD_W - 16 - chipW
-    const chip = card.key === 'claude'
-      ? `<g class="a ${shown(COVER_T.ask, COVER_T.answer + TRAVEL + FADE)}"><rect x="${num(chipX)}" y="${num(card.y + 15)}" width="${chipW}" height="22" rx="11" fill="${pal.waiting}" fill-opacity="0.08" stroke="${pal.waiting}" stroke-opacity="0.45"/><circle cx="${num(chipX + 12)}" cy="${num(card.y + 26)}" r="3" fill="${pal.waiting}"/><text x="${num(chipX + 21)}" y="${num(card.y + 30.5)}" font-size="12" font-weight="600" fill="${pal.waiting}">${esc(label)}</text></g>`
-      : ''
-    return `<rect x="${x}" y="${num(card.y)}" width="${CARD_W}" height="${cardH(card.steps.length)}" rx="12" fill="${page.surface}" stroke="${page.line}" filter="url(#lift)"/>
-${iconTile(card.name, x + 16, card.y + 10, 32)}
-<text x="${x + 58}" y="${num(card.y + 32)}" font-size="16" font-weight="600" fill="${t.ink}">${esc(card.name)}</text>
-${chip}
-<text x="${x + 18}" y="${num(card.y + 58)}" font-size="14"><tspan font-weight="600" fill="${pal.project}">${esc(card.project)}</tspan><tspan fill="${pal.muted}"> › ${esc(card.title)}</tspan></text>
-${layered(moments, ground)}`
-  }).join('\n')
+  // The line under the steps: at work, Claude's question, the answer as Claude's next prompt, or
+  // the message as Codex's.
+  type Doing = 'working' | 'why' | 'answer' | 'message'
+  const doingLine = (y: number, kind: Doing): string => {
+    const x = x0 + 18
+    if (kind === 'why') return `<text x="${x}" y="${y}" font-size="14" font-weight="600" fill="${pal.waiting}">${esc(c.claude.why)}</text>`
+    if (kind === 'answer') return `<text x="${x}" y="${y}" font-family="${mono}" font-size="13" fill="${pal.accent}">› ${esc(s.answerText(c.claude.steps[2], c.claude.options[0]))}</text>`
+    if (kind === 'message') return `<text x="${x}" y="${y}" font-family="${mono}" font-size="12" fill="${pal.accent}">› ${esc(c.message.text)}</text>`
+    return `<text x="${x}" y="${y}" font-size="14" fill="${pal.muted}">${esc(TOUR[lang].working)}</text>`
+  }
+  // A card's rows at moment `m`, each with the ground it needs when laid over another: below its
+  // letters' tails, and the line under the steps sits 4 lower.
+  const cardMoments = (card: Card, list: Array<{ at: number; m: number; kind: Doing }>): string =>
+    layered(
+      list.map(({ at, m, kind }) => {
+        const marks = COVER_MARKS[card.key][m] ?? []
+        const rows = [...card.steps.map((step, i) => stepLine(x0 + 18, card.y + 86 + i * 24, marks[i] ?? ' ', step)), doingLine(card.y + 86 + card.steps.length * 24 + 4, kind)]
+        return { at, rows: rows.map(svg => ({ key: svg, svg })) }
+      }),
+      i => `<rect x="${x0 + 1}" y="${num(card.y + 86 + i * 24 - 18 + (i === card.steps.length ? 4 : 0))}" width="${CARD_W - 2}" height="24" fill="${page.surface}"/>`,
+    )
+  const frame = (card: Card, height: number): string =>
+    `<rect x="${x0}" y="${num(card.y)}" width="${CARD_W}" height="${height}" rx="12" fill="${page.surface}" stroke="${page.line}" filter="url(#lift)"/>
+${iconTile(card.name, x0 + 16, card.y + 10, 32)}
+<text x="${x0 + 58}" y="${num(card.y + 32)}" font-size="16" font-weight="600" fill="${t.ink}">${esc(card.name)}</text>
+<text x="${x0 + 18}" y="${num(card.y + 58)}" font-size="14"><tspan font-weight="600" fill="${pal.project}">${esc(card.project)}</tspan><tspan fill="${pal.muted}"> › ${esc(card.title)}</tspan></text>`
 
-  // The question pushes other agents off screen and the answer scrolls the pane, so wires follow each moment.
-  const links = cards.flatMap(card => {
-    const segments: Array<{ row: number | null; first: number; last: number }> = []
-    panes.forEach((pane, m) => {
-      const text = card.key === 'claude'
-        ? m === 4 ? s.answered(c.claude.options[0]) : m === 3 ? s.mostNeeded : c.claude.branch
-        : card.title
-      const found = rowOf(pane.grid, text)
-      const row = found < 0 || found - pane.top < 0 || found - pane.top >= COVER_ROWS ? null : found - pane.top
-      const isRequired = card.key === 'claude' || m === 0 || m === 4 || m === (card.key === 'codex' ? 1 : 2)
-      if (row === null && isRequired) throw new Error(`Missing wire row for ${card.key}, moment ${m}, language ${lang}`)
-      const previous = segments[segments.length - 1]
-      if (previous !== undefined && previous.row === row) previous.last = m
-      else segments.push({ row, first: m, last: m })
-    })
-    const x1 = CARD_W + 0.5
-    const y1 = card.y + cardH(card.steps.length) / 2
-    const x2 = winX + 0.5
-    return segments.flatMap(segment => {
-      if (segment.row === null) return []
-      const y2 = 0.5 + rowY(segment.row) + LINE / 2
-      return [{ ...segment, key: card.key, d: `M${num(x1)} ${num(y1)}C${num(x1 + GAP * 0.55)} ${num(y1)} ${num(x2 - GAP * 0.55)} ${num(y2)} ${num(x2)} ${num(y2)}` }]
-    })
+  // While Claude waits on you, its card wears the board's own kind-of-question chip.
+  const chipLabel = s.ask.choose
+  const chipW = 30 + [...chipLabel].reduce((n, ch) => n + (ch.charCodeAt(0) > 0x2e80 ? 12 : 7), 0)
+  const chipX = x0 + CARD_W - 16 - chipW
+  const chip = `<g class="a ${shown(T.ask, T.answer + TRAVEL + FADE)}"><rect x="${num(chipX)}" y="${num(claude.y + 15)}" width="${chipW}" height="22" rx="11" fill="${pal.waiting}" fill-opacity="0.08" stroke="${pal.waiting}" stroke-opacity="0.45"/><circle cx="${num(chipX + 12)}" cy="${num(claude.y + 26)}" r="3" fill="${pal.waiting}"/><text x="${num(chipX + 21)}" y="${num(claude.y + 30.5)}" font-size="12" font-weight="600" fill="${pal.waiting}">${esc(chipLabel)}</text></g>`
+  // Claude ticks (act 1), asks, and has the answer once it has come back from the pane.
+  const claudeSvg = `${frame(claude, cardH(4))}
+${chip}
+${cardMoments(claude, [{ at: 0, m: 0, kind: 'working' }, { at: T.claude, m: 3, kind: 'working' }, { at: T.ask, m: 4, kind: 'why' }, { at: T.answer + TRAVEL, m: 5, kind: 'answer' }])}`
+
+  // Codex and Antigravity as acts 1 and 2 show them; act 3 keeps only Claude's and Codex's, the
+  // two the message is about, and Codex's opens. Antigravity's goes just before act 3, so the
+  // opened card does not cross it; Codex's stays until the opened one, which covers it, is in.
+  const leavesFirst = frames(`0% { opacity: 1 } ${p(COVER_ACT.three - 0.3)} { opacity: 1 } ${p(COVER_ACT.three)}, ${p(T.back)} { opacity: 0 } 100% { opacity: 1 }`)
+  const leavesNext = frames(`0% { opacity: 1 } ${p(COVER_ACT.three + FADE)} { opacity: 1 } ${p(COVER_ACT.three + FADE + 0.02)}, ${p(T.back)} { opacity: 0 } 100% { opacity: 1 }`)
+  const codexSvg = `<g class="a ${leavesNext}">${frame(codex, cardH(4))}
+${cardMoments(codex, [{ at: 0, m: 0, kind: 'working' }, { at: T.codex, m: 1, kind: 'working' }])}</g>`
+  const antigravitySvg = `<g class="a ${leavesFirst}">${frame(antigravity, cardH(3))}
+${cardMoments(antigravity, [{ at: 0, m: 0, kind: 'working' }, { at: T.antigravity, m: 2, kind: 'working' }])}</g>`
+
+  // Codex's card in act 3: the board page's reply box with its Send button, and under it the
+  // receipt line. The person's text is typed in, sent (the box empties, as the page's does), and
+  // the receipt reads Queued, Waiting for a reply, then Replied.
+  const expandedH = cardH(4) + EXTRA
+  const boxX = x0 + 18
+  const boxY = codex.y + cardH(4) - 2
+  const sendLabel = s.serveSend('Codex')
+  const sendW = Math.round(textW(sendLabel, 13.5) + 28)
+  const boxW = CARD_W - 36 - sendW - 8
+  const sendX = boxX + boxW + 8
+  const sendH = 34
+  const sendY = boxY + BOX_H - sendH
+  const receiptY = boxY + BOX_H + 20
+  const composer = `<rect x="${boxX}" y="${num(boxY)}" width="${boxW}" height="${BOX_H}" rx="8" fill="${page.ground}" stroke="${pal.frame}" stroke-opacity="0.6"/>
+<text x="${boxX + 10}" y="${num(boxY + 21)}" font-size="13" fill="${pal.muted}">${esc(s.serveMessagePlaceholder('Codex'))}</text>
+<rect x="${num(sendX)}" y="${num(sendY)}" width="${sendW}" height="${sendH}" rx="8" fill="${pal.accent}"/>
+<text x="${num(sendX + sendW / 2)}" y="${num(sendY + 22)}" text-anchor="middle" font-size="13.5" font-weight="600" fill="${page.ground}">${esc(sendLabel)}</text>`
+  // Typed a line at a time, each uncovered from the left a letter at a time by a rect in the
+  // box's colour that shrinks to its right edge; the group covers the placeholder while it shows.
+  let typedAt = T.type
+  const lines = c.message.lines.map((line, j) => {
+    const letters = [...line].length
+    const start = typedAt
+    const length = Math.max(0.8, letters * 0.06)
+    typedAt += length
+    const x = boxX + 10
+    const y = boxY + 21 + j * 18
+    const mask = frames(`0%, ${p(start)} { opacity: 1; transform: scaleX(1); animation-timing-function: steps(${letters}, end) } ${p(start + length)}, 100% { opacity: 1; transform: scaleX(0) }`)
+    return `<text x="${x}" y="${num(y)}" font-size="13" fill="${t.ink}">${esc(line)}</text><rect class="a m ${mask}" x="${x - 2}" y="${num(y - 14)}" width="${num(textW(line, 13) + 6)}" height="18" fill="${page.ground}"/>`
   })
-  const dash = (key: string, m: number, start: number, colour: string, isBack = false): string => {
-    const link = links.find(link => link.key === key && link.first <= m && link.last >= m)
-    if (link === undefined) throw new Error(`Missing wire path for ${key}, moment ${m}, language ${lang}`)
+  const typed = `<g class="a ${frames(`0%, ${p(T.type)} { opacity: 0 } ${p(T.type + 0.05)} { opacity: 1 } ${p(T.send)} { opacity: 1 } ${p(T.send + 0.05)}, 100% { opacity: 0 }`)}"><rect x="${boxX + 1}" y="${num(boxY + 1)}" width="${boxW - 2}" height="${BOX_H - 2}" rx="7" fill="${page.ground}"/>${lines.join('')}</g>`
+  const tapped = `<rect class="a ${glow(T.tap, 0.5, 0.35)}" x="${num(sendX)}" y="${num(sendY)}" width="${sendW}" height="${sendH}" rx="8" fill="#ffffff"/>`
+  const receipt = (text: string, colour: string): string => `<text x="${x0 + 18}" y="${num(receiptY)}" font-size="13" fill="${colour}">${esc(text)}</text>`
+  const receipts = layered(
+    [
+      { at: 0, rows: [{ key: '', svg: '' }] },
+      { at: T.send, rows: [{ key: 'sending', svg: receipt(s.serveSending('Codex'), pal.accent) }] },
+      { at: T.queued, rows: [{ key: 'queued', svg: receipt(s.messagesQueued, pal.muted) }] },
+      { at: T.accepted, rows: [{ key: 'accepted', svg: receipt(s.messagesAccepted, pal.waiting) }] },
+      { at: T.replied, rows: [{ key: 'replied', svg: receipt(s.messagesAcknowledged, pal.done) }] },
+    ],
+    () => `<rect x="${x0 + 1}" y="${num(receiptY - 17)}" width="${CARD_W - 2}" height="24" fill="${page.surface}"/>`,
+  )
+  // Codex gets the message as its next prompt, answers, and ticks its third step.
+  const expandedSvg = `<g class="a ${shown(COVER_ACT.three, null)} last">${frame(codex, expandedH)}
+${cardMoments(codex, [{ at: COVER_ACT.three, m: 5, kind: 'working' }, { at: T.accepted, m: 5, kind: 'message' }, { at: T.tick, m: 6, kind: 'working' }])}
+${composer}
+${typed}${tapped}
+${receipts}</g>`
+  const cardSvg = [claudeSvg, codexSvg, antigravitySvg, expandedSvg].join('\n')
+
+  // The wires: from each card to the row it is on in the pane, which moves as the pane does. They
+  // are cut at act 3, where Antigravity's goes and Codex's starts from its opened card.
+  const anchor = (card: Card, sec: number): number => card.y + (card.key === 'codex' && sec >= COVER_ACT.three ? expandedH : cardH(card.steps.length)) / 2
+  type Piece = { key: CardKey; from: number; to: number; d: string }
+  const pieces: Piece[] = cards.flatMap(card => {
+    const found: Piece[] = []
+    panes.forEach((pane, m) => {
+      const text = card.key === 'claude' ? m >= 5 ? s.answered(c.claude.options[0]) : m === 4 ? s.mostNeeded : c.claude.branch : card.title
+      const at = rowOf(pane.grid, text)
+      const row = at < 0 || at - pane.top < 0 || at - pane.top >= COVER_ROWS ? null : at - pane.top
+      // The moments a wire must have: the rest may push its row out of the pane.
+      const isRequired = card.key === 'claude' || (card.key === 'codex' ? [0, 1, 5, 6] : [0, 2]).includes(m)
+      if (row === null) {
+        if (isRequired) throw new Error(`Missing wire row for ${card.key}, moment ${m}, language ${lang}`)
+        return
+      }
+      const from = paneAt[m] ?? 0
+      const to = paneAt[m + 1] ?? COVER_LOOP
+      const spans = from < COVER_ACT.three && COVER_ACT.three < to ? [[from, COVER_ACT.three], [COVER_ACT.three, to]] : [[from, to]]
+      for (const [a = 0, b = 0] of spans) {
+        if (card.key === 'antigravity' && a >= COVER_ACT.three) continue
+        const x1 = CARD_W + 0.5
+        const y1 = anchor(card, a)
+        const x2 = winX + 0.5
+        const y2 = 0.5 + rowY(row) + LINE / 2
+        const d = `M${num(x1)} ${num(y1)}C${num(x1 + GAP * 0.55)} ${num(y1)} ${num(x2 - GAP * 0.55)} ${num(y2)} ${num(x2)} ${num(y2)}`
+        const previous = found[found.length - 1]
+        if (previous !== undefined && previous.d === d && previous.to === a) previous.to = b
+        else found.push({ key: card.key, from: a, to: b, d })
+      }
+    })
+    return found
+  })
+  // A bright dash along the wire that is there at `at`: out to the pane for a report, back to the
+  // card for a reply to it.
+  const dash = (key: CardKey, at: number, start: number, colour: string, isBack = false): string => {
+    const piece = pieces.find(one => one.key === key && one.from <= at + 0.001 && at < one.to)
+    if (piece === undefined) throw new Error(`Missing wire path for ${key} at ${at} s, language ${lang}`)
     const [from, to] = isBack ? [-100, 16] : [16, -100]
-    return `<path class="a ${frames(`0%, ${p(start)} { opacity: 0; stroke-dashoffset: ${from} } ${p(start + 0.02)} { opacity: 1; stroke-dashoffset: ${from} } ${p(start + TRAVEL)} { opacity: 1; stroke-dashoffset: ${to} } ${p(start + TRAVEL + 0.02)}, 100% { opacity: 0; stroke-dashoffset: ${to} }`)}" d="${link.d}" pathLength="100" fill="none" stroke="${colour}" stroke-width="3.2" stroke-linecap="round" stroke-dasharray="16 200"/>`
+    return `<path class="a ${frames(`0%, ${p(start)} { opacity: 0; stroke-dashoffset: ${from} } ${p(start + 0.02)} { opacity: 1; stroke-dashoffset: ${from} } ${p(start + TRAVEL)} { opacity: 1; stroke-dashoffset: ${to} } ${p(start + TRAVEL + 0.02)}, 100% { opacity: 0; stroke-dashoffset: ${to} }`)}" d="${piece.d}" pathLength="100" fill="none" stroke="${colour}" stroke-width="3.2" stroke-linecap="round" stroke-dasharray="16 200"/>`
   }
   const wires = `<g fill="none" stroke="${pal.frame}" stroke-width="1.4" stroke-dasharray="1.5 4.5" stroke-linecap="round">
-${links.map(link => {
-    if (link.first === 0 && link.last === 4) return `<path d="${link.d}"/>`
-    const start = paneAt[link.first] ?? 0
-    const end = paneAt[link.last + 1] ?? COVER_T.back
-    const fadeIn = link.first === 0 ? '0% { opacity: 1 }' : `0%, ${p(start)} { opacity: 0 } ${p(start + FADE)} { opacity: 1 }`
-    const fadeOut = link.last === 4
-      ? `${p(COVER_T.back)} { opacity: 1 } 100% { opacity: 0 }`
-      : `${p(end)} { opacity: 1 } ${p(end + FADE)}, ${link.first === 0 ? `${p(COVER_T.back)} { opacity: 0 } 100% { opacity: 1 }` : '100% { opacity: 0 }'}`
-    return `<path class="a ${frames(`${fadeIn} ${fadeOut}`)}${link.last === 4 ? ' last' : ''}" d="${link.d}"/>`
+${pieces.map(piece => {
+    const isFirst = piece.from === 0
+    const isLast = piece.to >= COVER_LOOP
+    if (isFirst && isLast) return `<path d="${piece.d}"/>`
+    const fadeIn = isFirst ? '0% { opacity: 1 }' : `0%, ${p(piece.from)} { opacity: 0 } ${p(piece.from + FADE)} { opacity: 1 }`
+    const fadeOut = isLast
+      ? `${p(T.back)} { opacity: 1 } 100% { opacity: 0 }`
+      : `${p(piece.to)} { opacity: 1 } ${p(piece.to + FADE)}, ${isFirst ? `${p(T.back)} { opacity: 0 } 100% { opacity: 1 }` : '100% { opacity: 0 }'}`
+    return `<path class="a ${frames(`${fadeIn} ${fadeOut}`)}${isLast ? ' last' : ''}" d="${piece.d}"/>`
   }).join('\n')}
 </g>
-${dash('codex', 1, COVER_T.codex, pal.accent)}
-${dash('antigravity', 2, COVER_T.antigravity, pal.accent)}
-${dash('claude', 3, COVER_T.ask, pal.waiting)}
-${dash('claude', 4, COVER_T.answer, pal.done, true)}`
+${dash('codex', T.codex + TRAVEL, T.codex, pal.accent)}
+${dash('antigravity', T.antigravity + TRAVEL, T.antigravity, pal.accent)}
+${dash('claude', T.claude + TRAVEL, T.claude, pal.accent)}
+${dash('claude', T.ask + TRAVEL, T.ask, pal.waiting)}
+${dash('claude', T.answer, T.answer, pal.done, true)}
+${dash('codex', T.send, T.send, pal.done, true)}
+${dash('codex', T.tick + TRAVEL, T.tick, pal.accent)}`
 
-  // The pointer: in from below, onto the first answer, a press, and away once it has gone through.
-  let pointer = ''
-  if (option !== null) {
-    const tipX = winX + 0.5 + PAD + (option.col + option.span * 0.45) * CELL
-    const tipY = 0.5 + rowY(option.row) + LINE * 0.62
+  // The pointer: in from below onto its target, a press, and away once it has gone through.
+  const pointer = (tipX: number, tipY: number, start: number, arrive: number, pressAt: number, end: number): string => {
     const at = (x: number, y: number, k = 1): string => `transform: translate(${num(x)}px, ${num(y)}px) scale(${k})`
     const move = 'animation-timing-function: cubic-bezier(0.3, 0.7, 0.2, 1)'
-    const name = frames(`0%, ${p(COVER_T.point)} { opacity: 0; ${at(tipX + 120, tipY + 150)}; ${move} } ${p(COVER_T.point + 0.25)} { opacity: 1 } ${p(COVER_T.point + 0.8)} { ${at(tipX, tipY)} } ${p(COVER_T.press)} { ${at(tipX, tipY)} } ${p(COVER_T.press + 0.1)} { ${at(tipX, tipY, 0.86)} } ${p(COVER_T.press + 0.25)} { ${at(tipX, tipY)} } ${p(COVER_T.answer + 0.5)} { opacity: 1 } ${p(COVER_T.answer + 0.8)}, 100% { opacity: 0; ${at(tipX, tipY)} }`)
+    const name = frames(`0%, ${p(start)} { opacity: 0; ${at(tipX + 120, tipY + 150)}; ${move} } ${p(start + 0.25)} { opacity: 1 } ${p(arrive)} { ${at(tipX, tipY)} } ${p(pressAt)} { ${at(tipX, tipY)} } ${p(pressAt + 0.1)} { ${at(tipX, tipY, 0.86)} } ${p(pressAt + 0.25)} { ${at(tipX, tipY)} } ${p(end)} { opacity: 1 } ${p(end + 0.3)}, 100% { opacity: 0; ${at(tipX, tipY)} }`)
     const [fill, line] = mode === 'light' ? ['#1b1b1b', '#ffffff'] : ['#ffffff', '#1b1b1b']
-    pointer = `<g class="a ${name}"><path d="M0 0V18.5L4.6 14.2L7.7 21.2L10.9 19.8L7.9 13H14Z" fill="${fill}" stroke="${line}" stroke-width="1.3" stroke-linejoin="round"/></g>`
+    return `<g class="a ${name}"><path d="M0 0V18.5L4.6 14.2L7.7 21.2L10.9 19.8L7.9 13H14Z" fill="${fill}" stroke="${line}" stroke-width="1.3" stroke-linejoin="round"/></g>`
   }
+  const pointers = [
+    option === null ? '' : pointer(winX + 0.5 + PAD + (option.col + option.span * 0.45) * CELL, 0.5 + rowY(option.row) + LINE * 0.62, T.point, T.point + POINT_IN, T.press, T.answer + 0.5),
+    pointer(sendX + sendW / 2, sendY + sendH * 0.62, T.aim, T.aim + POINT_IN, T.tap, T.send + 0.6),
+  ].join('')
 
+  // The captions: each fades in once its act has begun and out just before the next, so two never
+  // overlap; the last holds until the veil comes down. Beside each, a pip lights. The first is
+  // already on when the loop starts, under the veil.
+  const starts = [COVER_ACT.one, COVER_ACT.two, COVER_ACT.three]
+  const lit = starts.map((start, k) => {
+    const end = starts[k + 1] ?? COVER_LOOP
+    if (k === 0) return frames(`0% { opacity: 1 } ${p(end - 0.4)} { opacity: 1 } ${p(end)}, 100% { opacity: 0 }`)
+    if (end >= COVER_LOOP) return frames(`0%, ${p(start)} { opacity: 0 } ${p(start + 0.4)} { opacity: 1 } ${p(T.back)} { opacity: 1 } 100% { opacity: 0 }`)
+    return frames(`0%, ${p(start)} { opacity: 0 } ${p(start + 0.4)} { opacity: 1 } ${p(end - 0.4)} { opacity: 1 } ${p(end)}, 100% { opacity: 0 }`)
+  })
+  // At the loop's turn the picture goes through its own ground, so words of the last frame and the
+  // first never show mixed: the veil comes down, the frames change behind it, and it lifts.
+  const veil = `<rect class="a ${frames(`0% { opacity: 1 } ${p(0.4)}, ${p(T.veil)} { opacity: 0 } ${p(T.back)}, 100% { opacity: 1 }`)}" width="${num(W + MARGIN * 2)}" height="${PICTURE_Y + H + MARGIN}" rx="16" fill="${page.ground}"/>`
   const outW = W + MARGIN * 2
-  const outH = H + MARGIN * 2
-  return `<svg xmlns="http://www.w3.org/2000/svg" width="${num(outW)}" height="${outH}" viewBox="0 0 ${num(outW)} ${outH}" role="img" aria-label="${esc(w.label)}" font-family="${sansOf(lang)}">
-<title>Agent Board: ${esc(w.label)}</title>
+  const outH = PICTURE_Y + H + MARGIN
+  const isLastAct = (k: number): string => (k === starts.length - 1 ? ' last' : '')
+  const captions = w.acts.map((text, k) => `<text class="a ${lit[k]}${isLastAct(k)}" x="${MARGIN + 4}" y="${CAPTION_Y}" font-size="26" font-weight="800" ${HEADLINE} fill="${t.ink}">${esc(text)}</text>`).join('\n')
+  const pipX = (k: number): number => outW - MARGIN - 4 - 22 * 3 - 8 * 2 + k * 30
+  const pips = starts.map((_, k) => `<rect x="${pipX(k)}" y="${CAPTION_Y - 14}" width="22" height="6" rx="3" fill="${pal.frame}" fill-opacity="0.45"/>`).join('') +
+    starts.map((_, k) => `<rect class="a ${lit[k]}${isLastAct(k)}" x="${pipX(k)}" y="${CAPTION_Y - 14}" width="22" height="6" rx="3" fill="${pal.accent}"/>`).join('')
+  // The preview mark under act 3's caption, in the colour of the board's own chips.
+  const soonW = w.soon === undefined ? 0 : 30 + [...w.soon.chip].reduce((n, ch) => n + (ch.charCodeAt(0) > 0x2e80 ? 12 : 7), 0)
+  const soon = w.soon === undefined
+    ? ''
+    : `<g class="a ${lit[2]} last"><rect x="${MARGIN + 4}" y="${CAPTION_Y + 9}" width="${soonW}" height="22" rx="11" fill="${pal.waiting}" fill-opacity="0.08" stroke="${pal.waiting}" stroke-opacity="0.45"/><circle cx="${MARGIN + 16}" cy="${CAPTION_Y + 20}" r="3" fill="${pal.waiting}"/><text x="${MARGIN + 25}" y="${CAPTION_Y + 24.5}" font-size="12" font-weight="600" fill="${pal.waiting}">${esc(w.soon.chip)}</text></g>`
+  const label = `${w.label}${w.soon?.label ?? ''}`
+
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="${num(outW)}" height="${outH}" viewBox="0 0 ${num(outW)} ${outH}" role="img" aria-label="${esc(label)}" font-family="${sansOf(lang)}">
+<title>Agent Board: ${esc(label)}</title>
 <defs><clipPath id="pane"><rect x="1" y="${BAR + 1}" width="${num(windowWidth - 2)}" height="${PAD + COVER_ROWS * LINE + PAD - 13}"/></clipPath>
 <filter id="lift" x="-10%" y="-10%" width="120%" height="130%"><feDropShadow dx="0" dy="2" stdDeviation="3" flood-color="${page.shadow}" flood-opacity="${page.depth}"/></filter></defs>
 <style>
 .a { opacity: 0; animation-duration: ${COVER_LOOP}s; animation-iteration-count: infinite; animation-timing-function: linear; }
+.m { transform-box: fill-box; transform-origin: 100% 50%; }
 ${keyframes.join('\n')}
 ${keyframes.map((_, i) => `.c${i} { animation-name: c${i} }`).join('\n')}
 @media (prefers-reduced-motion: reduce) {
@@ -1167,12 +1316,16 @@ ${keyframes.map((_, i) => `.c${i} { animation-name: c${i} }`).join('\n')}
 }
 </style>
 <rect width="${num(outW)}" height="${outH}" rx="16" fill="${page.ground}"/>
-<g transform="translate(${MARGIN} ${MARGIN})">
+${captions}
+${pips}
+${soon}
+<g transform="translate(${MARGIN} ${PICTURE_Y})">
 ${wires}
 ${cardSvg}
 ${terminal(mode, mono, WORDS[lang].window, body, COVER_ROWS, winX + 0.5, 0.5)}
-${pointer}
+${pointers}
 </g>
+${veil}
 </svg>
 `
 }

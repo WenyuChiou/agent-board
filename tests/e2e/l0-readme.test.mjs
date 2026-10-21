@@ -15,6 +15,15 @@ const READMES = [
   ['README.zh-CN.md', 'zh-CN', '合成数据。'],
 ]
 
+// Each cover's three act captions, the mark that act 3 is a preview, and the words act 3 shows in
+// the board's own language: the button, the sending line and the three receipts, the last of which
+// is the end frame.
+const ACTS = {
+  en: [['Every agent on one board', 'Answer from the board', 'Sessions message each other'], 'Coming in 0.24.3', ['Send to Codex', 'Sending to Codex; waiting for its reply…', 'Queued', 'Waiting for a reply', 'Replied']],
+  'zh-TW': [['每個 agent 都在同一塊看板上', '在看板上直接回答', 'Session 之間互傳訊息'], '0.24.3 推出', ['傳給 Codex', '正在傳給 Codex，等它回完…', '排隊中', '等候回覆', '已回覆']],
+  'zh-CN': [['每个 agent 都在同一块看板上', '在看板上直接回答', 'Session 之间互发消息'], '0.24.3 推出', ['发给 Codex', '正在发给 Codex，等它回完…', '排队中', '等候回复', '已回复']],
+}
+
 describe('L0 discover and install from the README', () => {
   test("L0 README: the README's first image has a light and a dark SVG source and a synthetic label", () => {
     for (const [name, lang, synthetic] of READMES) {
@@ -37,7 +46,7 @@ describe('L0 discover and install from the README', () => {
     }
   })
 
-  test('L0 README: the cover moves with CSS alone and stands still on its last frame for reduced motion', () => {
+  test('L0 README: the 45-second cover shows three captioned acts, moves with CSS alone and stands still on act 3 for reduced motion', () => {
     for (const [name, lang] of READMES) {
       const text = read(name)
       const first = [...text.matchAll(/<img\b[^>]*>/g)].find(match => !/img\.shields\.io/.test(match[0]))
@@ -52,7 +61,7 @@ describe('L0 discover and install from the README', () => {
 
       for (const file of [light[1], dark[1]]) {
         assert.ok(exists(file), `${file}: the cover exists`)
-        assert.ok(statSync(fileURLToPath(new URL(file, root))).size < 150_000, `${file}: the cover is under 150 000 bytes on disk`)
+        assert.ok(statSync(fileURLToPath(new URL(file, root))).size < 300_000, `${file}: the cover is under 300 000 bytes on disk`)
         const svg = read(file)
         assert.match(svg, /^<svg\b/, `${file}: the file starts with <svg`)
         const opening = /^<svg\b[^>]*>/.exec(svg)?.[0] ?? ''
@@ -84,6 +93,9 @@ describe('L0 discover and install from the README', () => {
         assert.match(svg, /@keyframes\s+[\w-]+\s*\{/i, `${file}: CSS defines keyframes`)
         const rules = [...svg.matchAll(/\{([^{}]*)\}/g)]
         assert.ok(rules.some(rule => /\banimation-duration\s*:\s*[^;}\s][^;}]*(?:;|$)/i.test(rule[1]) && /\banimation-iteration-count\s*:\s*infinite\s*(?:;|$)/i.test(rule[1])), `${file}: one rule sets animation duration and infinite iteration`)
+        // The loop is about 45 seconds: long enough for three acts to be read.
+        const loop = rules.map(rule => /\banimation-duration\s*:\s*(\d+(?:\.\d+)?)s\s*(?:;|$)/i.exec(rule[1])?.[1]).find(seconds => seconds !== undefined)
+        assert.ok(loop !== undefined && Math.abs(Number(loop) - 45) <= 5, `${file}: the loop lasts 45 seconds, give or take 5 (it lasts ${loop}s)`)
         const media = /@media\s*\(\s*prefers-reduced-motion\s*:\s*reduce\s*\)\s*\{/gi
         assert.equal([...svg.matchAll(media)].length, 1, `${file}: exactly one reduced-motion media block exists`)
         const reduced = /@media\s*\(\s*prefers-reduced-motion\s*:\s*reduce\s*\)\s*\{((?:[^{}]|\{[^{}]*\})*)\}/i.exec(svg)
@@ -97,6 +109,23 @@ describe('L0 discover and install from the README', () => {
         assert.ok(classes.some(words => words.includes('last')), `${file}: an element draws the last frame`)
         assert.ok(classes.some(words => words.includes('a')), `${file}: an element uses the animated class`)
         assert.doesNotMatch(svg, /\sstyle\s*=\s*(["'])(?:(?!\1)[\s\S])*\banimation\b/i, `${file}: animation names live in the stylesheet`)
+
+        // The three acts' captions, in order; reduced motion keeps only the third, with its preview mark and receipt.
+        const [acts, soon, words] = ACTS[lang]
+        let at = -1
+        acts.forEach((caption, k) => {
+          const found = new RegExp(`<text\\b[^>]*\\bclass="([^"]*)"[^>]*>${caption}</text>`).exec(svg)
+          assert.ok(found, `${file}: act ${k + 1} has its caption "${caption}"`)
+          assert.ok(found.index > at, `${file}: act ${k + 1}'s caption comes after act ${k}'s`)
+          at = found.index
+          assert.equal(found[1].split(/\s+/).includes('last'), k === acts.length - 1, `${file}: only act ${acts.length}'s caption stays for reduced motion`)
+        })
+        assert.match(svg, new RegExp(`<g class="[^"]*\\blast\\b[^"]*">(?:(?!</g>)[\\s\\S])*>${soon}</text>`), `${file}: the end frame says "${soon}"`)
+        // A receipt is text without textLength: the pane's own rows carry it, and in
+        // Chinese the pane's answered row reads the same as the last receipt.
+        const receipt = word => `<text(?![^>]*textLength)[^>]*>${word}</text>`
+        for (const word of words) assert.match(svg, new RegExp(receipt(word)), `${file}: act 3 shows "${word}"`)
+        assert.match(svg, new RegExp(`<g class="[^"]*\\blast\\b[^"]*">(?:(?!</g>)[\\s\\S])*${receipt(words.at(-1))}`), `${file}: the end frame shows the last receipt, "${words.at(-1)}"`)
       }
     }
   })

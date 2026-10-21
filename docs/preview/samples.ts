@@ -364,45 +364,52 @@ export const CLI_FILES: Record<string, string> = {
 
 // The README's animated cover: one short stretch of a morning. Claude Code (the pane's own
 // session), Codex and Antigravity each tick a step; then Claude asks the person something, the
-// person presses an answer in the pane, and Claude goes on (the moments are COVER_MARKS). Each agent
-// reports through its own hooks, so the file holds Codex's and Antigravity's blocks; Claude's
-// is the pane's own. No resume id or folder, as in the CLI sample.
-type CoverTask = { project: string; title: string; steps: [string, string, string] }
+// person presses an answer in the pane, and Claude goes on; last, the person passes what Claude
+// chose on to the Codex session, which ticks its next step (the moments are COVER_MARKS). Each
+// agent reports through its own hooks, so the file holds Codex's and Antigravity's blocks;
+// Claude's is the pane's own. No resume id or folder, as in the CLI sample.
+type CoverTask<Steps extends string[]> = { project: string; title: string; steps: Steps }
 export type CoverSample = {
   claude: { project: string; title: string; branch: string; steps: [string, string, string, string]; options: [string, string]; why: string }
-  codex: CoverTask
-  antigravity: CoverTask
+  // Codex has a fourth step so it is still working after the message makes it tick the third.
+  codex: CoverTask<[string, string, string, string]>
+  antigravity: CoverTask<[string, string, string]>
+  // What the person writes to Codex: the box shows it on two lines, the card on one.
+  message: { lines: [string, string]; text: string }
 }
 
 export const COVER: Record<string, CoverSample> = {
   en: {
     claude: { project: 'acme-web', title: 'Add a dark mode', branch: 'feat/dark-mode', steps: ['Add colour tokens', 'Fix contrast on charts', 'Release plan', 'Open the pull request'], options: ['Behind a flag', 'Everyone'], why: 'Behind a flag first, or everyone at once?' },
-    codex: { project: 'api-gateway', title: 'Rate-limit the public API', steps: ['Measure traffic per key', 'Add the token bucket', 'Load test on staging'] },
+    codex: { project: 'api-gateway', title: 'Rate-limit the public API', steps: ['Measure traffic per key', 'Add the token bucket', 'Name the rollout flag', 'Load test on staging'] },
     antigravity: { project: 'docs-site', title: 'Publish the release notes', steps: ['Write the English text', 'Build the Japanese page', 'Tag and deploy'] },
+    message: { lines: ['Use the flag name Claude', 'chose: dark-mode'], text: 'Use the flag name Claude chose: dark-mode' },
   },
   'zh-TW': {
     claude: { project: 'acme-web', title: '設定頁加上深色模式', branch: 'feat/dark-mode', steps: ['加深色的顏色 token', '修圖表對比', '上線方式', '開 PR'], options: ['先開旗標', '全部開'], why: '先用旗標給部分人，還是直接全部開？' },
-    codex: { project: 'api-gateway', title: '公開 API 加流量限制', steps: ['統計每把金鑰的流量', '加上 token bucket', '在 staging 壓測'] },
+    codex: { project: 'api-gateway', title: '公開 API 加流量限制', steps: ['統計每把金鑰的流量', '加上 token bucket', '幫上線旗標取名', '在 staging 壓測'] },
     antigravity: { project: 'docs-site', title: '發布版本說明', steps: ['寫英文內容', '做日文頁面', '打 tag 並部署'] },
+    message: { lines: ['旗標名稱照 Claude 選的：', 'dark-mode'], text: '旗標名稱照 Claude 選的：dark-mode' },
   },
   'zh-CN': {
     claude: { project: 'acme-web', title: '设置页加上深色模式', branch: 'feat/dark-mode', steps: ['加深色的颜色 token', '修图表对比度', '上线方式', '提 PR'], options: ['先开开关', '全部开放'], why: '先用开关给部分用户，还是直接全部开放？' },
-    codex: { project: 'api-gateway', title: '公开 API 加限流', steps: ['统计每个密钥的流量', '加上 token bucket', '在 staging 压测'] },
+    codex: { project: 'api-gateway', title: '公开 API 加限流', steps: ['统计每个密钥的流量', '加上 token bucket', '给上线开关取名', '在 staging 压测'] },
     antigravity: { project: 'docs-site', title: '发布版本说明', steps: ['写英文内容', '做日文页面', '打 tag 并部署'] },
+    message: { lines: ['开关名称按 Claude 选的：', 'dark-mode'], text: '开关名称按 Claude 选的：dark-mode' },
   },
 }
 
-// Each step's mark at each of the cover's five moments, in progress.md's own marks: Codex ticks
-// its second step, then Antigravity; Claude ticks its second and asks the third, which the
-// person answers.
+// Each step's mark at each of the cover's seven moments, in progress.md's own marks: Codex ticks
+// its second step, then Antigravity, then Claude; Claude asks its third, which the person
+// answers; then Codex, told what Claude chose, ticks its third.
 export const COVER_MARKS: Record<'claude' | 'codex' | 'antigravity', string[][]> = {
-  claude: [['x', '~', ' ', ' '], ['x', '~', ' ', ' '], ['x', '~', ' ', ' '], ['x', 'x', '?', ' '], ['x', 'x', 'x', '~']],
-  codex: [['x', '~', ' '], ['x', 'x', '~'], ['x', 'x', '~'], ['x', 'x', '~'], ['x', 'x', '~']],
-  antigravity: [['x', '~', ' '], ['x', '~', ' '], ['x', 'x', '~'], ['x', 'x', '~'], ['x', 'x', '~']],
+  claude: [['x', '~', ' ', ' '], ['x', '~', ' ', ' '], ['x', '~', ' ', ' '], ['x', 'x', '~', ' '], ['x', 'x', '?', ' '], ['x', 'x', 'x', '~'], ['x', 'x', 'x', '~']],
+  codex: [['x', '~', ' ', ' '], ['x', 'x', '~', ' '], ['x', 'x', '~', ' '], ['x', 'x', '~', ' '], ['x', 'x', '~', ' '], ['x', 'x', '~', ' '], ['x', 'x', 'x', '~']],
+  antigravity: [['x', '~', ' '], ['x', '~', ' '], ['x', 'x', '~'], ['x', 'x', '~'], ['x', 'x', '~'], ['x', 'x', '~'], ['x', 'x', '~']],
 }
 
 // An agent that has just ticked a step reported just now; before that, a few minutes ago.
-const coverBlock = (session: string, agent: 'codex' | 'antigravity', task: CoverTask, moment: number): string => {
+const coverBlock = (session: string, agent: 'codex' | 'antigravity', task: CoverTask<string[]>, moment: number): string => {
   const marks = COVER_MARKS[agent][moment] ?? []
   const isFresh = marks.join('') !== (COVER_MARKS[agent][0] ?? []).join('')
   return `## ${task.project}

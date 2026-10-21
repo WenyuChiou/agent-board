@@ -3,7 +3,7 @@
 <p align="center"><b>每個 AI coding agent 在做什麼，一個看板看完；哪個在等你，就在那裡回它。</b></p>
 
 <p align="center">
-<picture><source media="(prefers-color-scheme: dark)" srcset="docs/images/cover-zh-TW-dark.svg"><img alt="會動的看板：Claude Code、Codex 和 Antigravity 把步驟回報到同一個面板；Claude 問要先用旗標給部分人還是直接全部開，在面板按下的答案回到 Claude，步驟接著往下走。合成資料。" src="docs/images/cover-zh-TW-light.svg" width="860"></picture>
+<picture><source media="(prefers-color-scheme: dark)" srcset="docs/images/cover-zh-TW-dark.svg"><img alt="會動的看板，分三幕：Claude Code、Codex 和 Antigravity 把步驟回報到同一個面板；Claude 問要先用旗標給部分人還是直接全部開，在面板按下的答案回到 Claude；接著在看板寫的訊息傳給 Codex session，並顯示傳送狀態，預覽 session 之間互傳訊息，0.24.3 推出。合成資料。" src="docs/images/cover-zh-TW-light.svg" width="860"></picture>
 </p>
 
 <p align="center">

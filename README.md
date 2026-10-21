@@ -3,7 +3,7 @@
 <p align="center"><b>See what every AI coding agent is doing, and answer the one that needs you, from one board.</b></p>
 
 <p align="center">
-<picture><source media="(prefers-color-scheme: dark)" srcset="docs/images/cover-en-dark.svg"><img alt="An animated board: Claude Code, Codex and Antigravity report their steps to one pane; Claude asks whether to release behind a flag or to everyone, the answer pressed in the pane goes back to Claude, and the steps move on. Synthetic data." src="docs/images/cover-en-light.svg" width="860"></picture>
+<picture><source media="(prefers-color-scheme: dark)" srcset="docs/images/cover-en-dark.svg"><img alt="An animated board in three acts. Claude Code, Codex and Antigravity report their steps to one pane; Claude asks whether to release behind a flag or to everyone, and the answer pressed in the pane goes back to Claude; then a message written on the board goes to the Codex session and its receipts show, a preview of sending between sessions, coming in 0.24.3. Synthetic data." src="docs/images/cover-en-light.svg" width="860"></picture>
 </p>
 
 <p align="center">
