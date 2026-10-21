@@ -2,6 +2,7 @@ import { BOARD_SCRIPT } from './board-script'
 import { connectRecordPath, hasOwnConnectData, recoveryUnreadableCode } from './connect-pure'
 import { sha256 } from './sha256'
 import { CONNECT_BOOTSTRAP, CONNECT_EXECUTE, workerRequest, workerStage } from './connect-worker'
+import { LEDGER_LINK, LINK_EXISTS, LINK_KEPT_SOURCE } from './ledger-move'
 import type { LegacyConnectRequest, ConnectState } from '../scripts/connect-transaction'
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, PluginOptions, PromptSubmitResult, Register } from 'claude-code'
@@ -77,7 +78,7 @@ import type { PaneActions, PaneModel, PaneUi } from './pane'
 import { isQuickAdd, parseQuickAdd, quickAddWords } from './quick'
 import type { Lang, Strings } from './i18n'
 import { RULE_ID, RULES } from './rule'
-import { chosenLang, langOf, resolveLang, STRINGS } from './strings'
+import { chosenLang, langOf, plainReason, resolveLang, STRINGS } from './strings'
 import { answerTurns, applyDigest, clearAsked, clearBackgroundJobs, cleanHandoff, finishBackgroundJob, isAskingYou, isPersonsAnswer, isWork, lastQuestion, markAsked, needsRefresh, parseDigest, replyData, requestData, startBackgroundJob, turnTools } from './digest'
 import type { Digest } from './digest'
 import { isNodeSupported, isSetupState, isWindowsHost, nodeVersionOf, openclawPrinted, openclawSavedBy, openclawTooOld, psQuote, setupLines, setupProblemText, setupSeed } from './connect'
@@ -279,9 +280,20 @@ const moveFile = async ($: EngineInterface, from: string, to: string, isWin: boo
   return ran !== null && ran.exitCode === 0
 }
 
-// A rename that never replaces a file already there. `mv -n` answers 0 when it skips one, so
-// the move happened only if the source is gone.
+// A short Node child avoids a cold PowerShell start on Windows. Linking this session's own file
+// refuses an existing target, so another session's ledger is never replaced. The move command
+// stays for volumes without hard links and computers without Node on their path. `mv -n` also
+// answers 0 when it skips a target, so success requires the source to be gone.
 const placeFile = async ($: EngineInterface, from: string, to: string, isWin: boolean): Promise<boolean> => {
+  const linked = await $.process.run(['node', '-e', LEDGER_LINK, '--', from, to], { timeoutMs: 10000 }).catch(() => null)
+  if (linked?.exitCode === 0) return !(await $.fs.exists(from))
+  // Codes 70 to 72 are also common exit codes of other programs, so a `node` wrapper failing on
+  // its own reaches the move command unless the ledger is really there.
+  if (linked?.exitCode === LINK_EXISTS && await $.fs.exists(to)) return false
+  // The ledger is in place but this session's temp could not be removed at once (another program
+  // held it open). It is only a second name for the same bytes, so removing it again is safe.
+  if (linked?.exitCode === LINK_KEPT_SOURCE && await $.fs.exists(to)) return await removeFiles($, [from], isWin)
+
   const argv = isWin
     ? ['powershell', '-NoProfile', '-Command', `Move-Item -LiteralPath ${psQuote(from)} -Destination ${psQuote(to)} -ErrorAction Stop`]
     : ['mv', '-n', from, to]
@@ -2837,16 +2849,14 @@ export const register: Register = (on, options) => {
     }
     if (snap.error !== null) {
       const { Box, Text } = table
+      const why = /\b(EACCES|EPERM|EROFS|EBUSY|EAGAIN|ENOSPC)\b/.exec(snap.error)?.[1]
 
       return (
         <Box flexDirection="column">
           <Text color={palette.alert}>{s.fileUnreadable}</Text>
           {await read($, hasPendingQuestionsProblem) && <Text color={palette.alert}>{s.inboxQuestionNotKept}</Text>}
-          {await read($, hasQuestionsProblem) && <Text color={palette.alert}>{s.questionsUnreadable(questionsPath(snap.path))}</Text>}
-          <Text color={palette.muted}>{snap.error}</Text>
-          <Text color={palette.muted} wrap="truncate-start">
-            {snap.path}
-          </Text>
+          {await read($, hasQuestionsProblem) && <Text color={palette.alert}>{s.questionsUnreadable()}</Text>}
+          {why !== undefined && <Text color={palette.muted}>{plainReason(s, why)}</Text>}
         </Box>
       )
     }

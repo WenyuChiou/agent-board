@@ -1,0 +1,2 @@
+- **A step-by-step page for agents on other computers (#229).** `AGENTS.md` and `CONTRIBUTING.md` linked `docs/CONTRIBUTOR-PATH.md`, but the file did not exist. It now walks an agent with only git, gh and Node from a ready issue to a merged pull request: finding work by label, claiming with an end time, branching from `main` (or a fork), the checks with every home folder pointed at a scratch folder, the `changelog.d/` fragment, the draft pull request, the preflight and PR checks, the Ready comment, review, merging `main` and handing over.
+  Tests: none (documentation only).
