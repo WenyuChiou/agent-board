@@ -3,6 +3,7 @@ import { createHash, randomBytes } from 'node:crypto'
 import { delimiter, dirname, isAbsolute, join, resolve } from 'node:path'
 import type { Lang, Strings } from '../hooks/i18n'
 import { BOARD_FOR, agentHooks, connectDataRoots, connectPath, isNodeSupported, isSetupState, nodeVersionOf, setupSeed, setupProblemText, withoutSection } from '../hooks/connect-pure'
+import { managedCommandLines } from '../hooks/codex-fallback'
 import { inspectCodexHooks } from './codex-host'
 import type { CodexTrustObservation } from './codex-host'
 import type { ConnectContext, SetupState } from '../hooks/connect-pure'
@@ -215,6 +216,58 @@ export const unreadableProblem = (label: string): SetupState['problems'][number]
   key: `checkUnreadable:${label}`, message: 'connectCheckUnreadable', args: [label],
 })
 
+// Read command data without evaluating any of the host's JavaScript or shell.
+const boardCommandPaths = (text: string): string[] => {
+  const strings = [text]
+  const collect = (value: unknown): void => {
+    if (typeof value === 'string') strings.push(value)
+    else if (Array.isArray(value)) value.forEach(collect)
+    else if (value !== null && typeof value === 'object') Object.values(value).forEach(collect)
+  }
+  try { collect(JSON.parse(text)) } catch {}
+  // Gemini stores its command inside a JSON-quoted TOML prompt.
+  for (const match of text.matchAll(/^prompt\s*=\s*(".*")\s*$/gm)) {
+    try { collect(JSON.parse(match[1]!)) } catch {}
+  }
+  const paths = new Set<string>()
+  for (const value of strings) {
+    for (const match of value.matchAll(/(?:\bnode(?:\.exe)?|["'][^"'\r\n]*[\\/]node(?:\.exe)?["'])\s+(?:"([^"\r\n]+)"|'([^'\r\n]+)')/g)) {
+      const path = match[1] ?? match[2]!
+      // A relative, ~ or variable path depends on where the session started, and
+      // Agent Board never writes one, so only literal absolute paths are checked.
+      if (/[\\/]agent-board\.mjs$/.test(path) && isAbsolute(path) && !/[$%]|^~/.test(path)) paths.add(path)
+    }
+    for (const match of value.matchAll(/const p=String\.fromCodePoint\(([\d,]+)\);process\.argv\.splice\(1,0,p\)/g)) {
+      try {
+        const path = match[1]!.split(',').map(point => String.fromCodePoint(Number(point))).join('')
+        if (/[\\/]agent-board\.mjs$/.test(path) && isAbsolute(path)) paths.add(path)
+      } catch {}
+    }
+  }
+  return [...paths]
+}
+
+const missingBoardHosts = (transaction: ConnectTransaction, context: ConnectContext): string[] => {
+  const hooks = agentHooks(context)
+  const installed = [...new Set(hooks.filter(hook => BOARD_FOR.skills!.includes(hook.agent)
+    && (hook.dirs ?? [hook.dir]).some(dir => transaction.exists(dir))).map(hook => hook.agent))]
+  // Codex reads one instructions file (legacy-connect.ts picks it the same way), and a
+  // reconnect refreshes only the generated command lines in its managed block there,
+  // so nothing else in either file can raise a warning that reconnecting never clears.
+  const [main, override] = ['AGENTS.md', 'AGENTS.override.md'].map(name => join(context.codexHome, name))
+  const effective = transaction.exists(override!) && transaction.maybe(override!)?.trim() !== '' ? override! : main!
+  const texts = [
+    ...hooks.flatMap(hook => [hook.file, ...(hook.old === undefined ? [] : [hook.old])]
+      .map(file => ({ text: transaction.maybe(file) ?? '', agents: hook.agent === 'skills' ? installed : [hook.agent] }))),
+    { text: managedCommandLines(transaction.maybe(effective) ?? '').join('\n'), agents: ['codex'] },
+  ]
+  const missing = new Set<string>()
+  for (const { text, agents } of texts) {
+    if (boardCommandPaths(text).some(path => !transaction.exists(path))) agents.forEach(agent => missing.add(agent))
+  }
+  return [...missing].filter(agent => agent in STRINGS.en.agentNames)
+}
+
 export const foreignHostCheck = (transaction: ConnectTransaction, context: ConnectContext, folder: string, s: Strings = STRINGS.en) => {
   const hooks = agentHooks(context)
   const labels = new Map(hooks.filter(hook => hook.label !== '').map(hook => [hook.agent, hook.label]))
@@ -277,6 +330,8 @@ export const legacyConnect = async (value: unknown, bundle: string): Promise<{ s
     const { isWindows } = context
     const { problems, hasForeignRecovery, hasLiveRecovery } = foreignHostCheck(transaction, context, folder, STRINGS[request.lang])
     const checkedSetup = (stored: SetupState | undefined): SetupState => {
+      const missing = request.mode === 'status' ? missingBoardHosts(transaction, context) : []
+      const s = STRINGS[request.lang]
       const source = join(context.codexHome, 'hooks.json')
       const trusted = request.mode === 'ack' ? stored?.codexTrusted === true
         : observation?.trusted === true && observation.source === resolve(source)
@@ -285,12 +340,14 @@ export const legacyConnect = async (value: unknown, bundle: string): Promise<{ s
         ...(stored ?? { agents: [], node: request.node }),
         codexTrusted: trusted,
         problems: [
-          ...(stored?.problems ?? []).filter(one => one.key !== 'codex:approval'
+          ...(stored?.problems ?? []).filter(one => one.key !== 'codex:approval' && !one.key.startsWith('missingBoard:')
             && !/^(?:otherData|checkUnreadable):/.test(one.key)
             && !problems.some(problem => problem.key === one.key)),
           ...problems,
         ],
       }
+      for (const agent of missing) setup.problems.push({ key: `missingBoard:${agent}`, text: s.setupMissingBoardScript(s.agentNames[agent] ?? agent) })
+      setup.agents = setup.agents.map(one => missing.includes(one.agent) ? { ...one, board: 'failed' } : one)
       if (setup.agents.some(one => one.agent === 'codex') && !trusted) {
         setup.problems.push({ key: 'codex:approval', message: 'setupCodexApproval', args: [] })
       }

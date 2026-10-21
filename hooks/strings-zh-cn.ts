@@ -259,6 +259,7 @@ export const ZH_CN: Strings = {
   setupBoardReady: '看板命令可以用',
   setupBoardNeedsNode: (min: number): string => `看板命令要 Node.js ${min} 以上才能运行`,
   setupBoardFailed: '看板命令没写好，原因在下面',
+  setupMissingBoardScript: (name: string): string => `${name}：看板命令指向的脚本已经不在了。运行 /progress connect 重写命令。`,
   setupNodeMissing: (min: number): string => `看板命令和终端看板要 Node.js ${min} 以上，Claude Code 在这里运行 node --version 没有结果。如果在你的终端里 node --version 能运行，可以不管这条；不然就装好 Node.js 再开一个对话。汇报用的 hook 不需要它。`,
   setupNodeOld: (version: string, min: number): string => `看板命令和终端看板要 Node.js ${min} 以上，这台电脑的是 ${version}。更新 Node.js 再开一个对话；汇报用的 hook 不需要它。`,
   setupStatusHint: '之后要再看：/progress connect status',

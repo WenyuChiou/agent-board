@@ -1,11 +1,12 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, sep } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { codexFallbackCommand, managedFallback } from '../hooks/codex-fallback.ts'
+import { boardRun, geminiBoardCommand } from '../hooks/board-commands.ts'
 
 const source = readFileSync(new URL('../hooks/board-script.ts', import.meta.url), 'utf8')
 const bundle = JSON.parse(source.slice(source.indexOf('export const BOARD_SCRIPT = ') + 'export const BOARD_SCRIPT = '.length))
@@ -98,6 +99,116 @@ test('managed fallback edits preserve outside bytes and refuse ambiguous owned m
   assert.doesNotMatch(command, /\$bad|\$\(no\)|`path`/)
   assert.match(command, /--codex-report/)
 })
+
+test('codex fallback: re-applying with a new board path rewrites the managed block and keeps every byte outside it', () => fixture(async f => {
+  f.run('connect')
+  const old = codexFallbackCommand(join(f.home, 'removed scratch', 'agent-board.mjs'), join(f.home, 'removed scratch', 'progress.md'))
+  const current = codexFallbackCommand(join(f.home, 'data', 'agent-board.mjs'), join(f.home, 'data', 'progress.md'))
+  const before = '\ufeff# Personal rules\r\nKeep bytes.\n\r\n'
+  const after = '\r\nOutside notes.\nNo final newline'
+  for (const name of ['agent-board', 'claude-progress-pane']) {
+    const text = before + `<!-- ${name}:start -->\r\nMy edited introduction.\n\r\n${old}\r\n\nMy edited closing.\r\n<!-- ${name}:end -->` + after
+    writeFileSync(f.override, text)
+    const instructions = readFileSync(f.instructions)
+    assert.equal(managedFallback(text, current), text.replace(old, current))
+    f.run('connect')
+    assert.deepEqual(readFileSync(f.override), Buffer.from(text.replace(old, current)))
+    assert.deepEqual(readFileSync(f.instructions), instructions, 'the overridden file stays unchanged')
+    assert.equal(managedFallback(text, ''), text, 'the empty sentinel retains existing instructions')
+    assert.equal(managedFallback(text, null), before + after)
+  }
+}))
+
+test('codex fallback: re-applying with a new progress path rewrites the managed block', () => fixture(async f => {
+  f.run('connect')
+  const board = join(f.home, 'data', 'agent-board.mjs')
+  const oldProgress = join(f.home, 'data', 'progress.md')
+  const progress = join(f.home, 'data', 'renamed progress.md')
+  const old = codexFallbackCommand(board, oldProgress)
+  const current = codexFallbackCommand(board, progress)
+  const before = readFileSync(f.instructions, 'utf8')
+  assert.ok(before.includes(old))
+  const expected = before.replace(old, current)
+  assert.equal(managedFallback(before, current), expected)
+  f.run('connect', { progress })
+  assert.equal(readFileSync(f.instructions, 'utf8'), expected)
+  const time = new Date('2020-01-01T00:00:00Z')
+  utimesSync(f.instructions, time, time)
+  f.run('connect', { progress })
+  assert.equal(statSync(f.instructions).mtimeMs, time.getTime())
+}))
+
+test('codex fallback: re-applying with the same board path writes nothing', () => fixture(async f => {
+  f.run('connect')
+  const text = readFileSync(f.instructions)
+  const time = new Date('2020-01-01T00:00:00Z')
+  utimesSync(f.instructions, time, time)
+  const before = statSync(f.instructions).mtimeMs
+  f.run('connect')
+  assert.deepEqual(readFileSync(f.instructions), text)
+  assert.equal(statSync(f.instructions).mtimeMs, before)
+}))
+
+test('connect status: a host config that names a missing board script is reported by host name', () => fixture(async f => {
+  f.run('connect')
+  const missing = join(f.home, 'removed scratch $literal', 'agent-board.mjs')
+  const progress = join(f.home, 'removed scratch $literal', 'progress.md')
+  const plain = join(f.home, 'removed plain', 'agent-board.mjs')
+  const files = new Map([
+    [f.override, '<!-- agent-board:start -->\n' + codexFallbackCommand(missing, progress) + '\n<!-- agent-board:end -->\n'],
+    [join(f.home, '.gemini', 'commands', 'board.toml'), geminiBoardCommand('Synthetic board', 'Run the board', boardRun(missing))],
+    [join(f.home, '.cursor', 'hooks.json'), JSON.stringify({ hooks: { stop: [{ command: `"${process.execPath}" "${plain}" --codex-event` }] } })],
+    [join(f.home, '.hermes', 'skills', 'agent-board', 'SKILL.md'), `Run \`node "${plain}" --chat\`.\n`],
+  ])
+  for (const [file, text] of files) {
+    mkdirSync(join(file, '..'), { recursive: true })
+    writeFileSync(file, text)
+  }
+  const ledger = readFileSync(f.control)
+  for (const lang of ['en', 'zh-TW', 'zh-CN']) {
+    const status = f.run('status', { lang })
+    const problems = status.state.setup.problems.filter(one => one.key.startsWith('missingBoard:'))
+    assert.deepEqual(problems.map(one => one.key).sort(), ['missingBoard:codex', 'missingBoard:cursor', 'missingBoard:gemini', 'missingBoard:hermes'])
+    for (const [agent, label] of [['codex', 'Codex'], ['cursor', 'Cursor'], ['gemini', 'Gemini CLI'], ['hermes', 'Hermes Agent']]) {
+      const warning = problems.find(one => one.key === 'missingBoard:' + agent).text
+      assert.ok(warning.includes(label), warning)
+      assert.ok(!warning.includes(f.home), warning)
+      assert.doesNotMatch(warning, /agent-board\.mjs|[a-f0-9]{64}/)
+    }
+    for (const [file, text] of files) assert.equal(readFileSync(file, 'utf8'), text)
+    assert.deepEqual(readFileSync(f.control), ledger, 'status does not persist its observations')
+  }
+  for (const file of [missing, plain]) {
+    mkdirSync(join(file, '..'), { recursive: true })
+    writeFileSync(file, '// Synthetic script\n')
+  }
+  assert.ok(!f.run('status').state.setup.problems.some(one => one.key.startsWith('missingBoard:')))
+}))
+
+test('connect status: only command lines a reconnect refreshes raise the missing board warning', () => fixture(async f => {
+  f.run('connect')
+  const gone = join(f.home, 'removed scratch', 'agent-board.mjs')
+  const stale = codexFallbackCommand(gone, join(f.home, 'removed scratch', 'progress.md'))
+  const block = command => '<!-- agent-board:start -->\n' + command + '\n<!-- agent-board:end -->\n'
+  const warned = () => f.run('status').state.setup.problems.filter(one => one.key.startsWith('missingBoard:')).map(one => one.key).sort()
+  // Codex reads a non-empty override instead, and a reconnect never refreshes the file it shadows.
+  writeFileSync(f.override, 'Personal override rules.\n')
+  writeFileSync(f.instructions, block(stale))
+  assert.deepEqual(warned(), [])
+  // A reconnect leaves an edited command line and a copy outside the block alone.
+  writeFileSync(f.override, stale + '\n' + block(stale + ' --session x'))
+  assert.deepEqual(warned(), [])
+  writeFileSync(f.override, block(stale))
+  assert.deepEqual(warned(), ['missingBoard:codex'])
+  writeFileSync(f.override, 'Personal override rules.\n')
+  // Agent Board never writes a relative, ~ or variable path, and where one points depends on where the session started.
+  const skill = join(f.home, '.hermes', 'skills', 'agent-board', 'SKILL.md')
+  mkdirSync(join(skill, '..'), { recursive: true })
+  writeFileSync(skill, 'Run `node "scripts/agent-board.mjs" --chat`, `node "~/board/agent-board.mjs"`, `node "%USERPROFILE%\\board\\agent-board.mjs"` or `node "/tmp/$USER/agent-board.mjs"`.\n')
+  assert.deepEqual(warned(), [])
+  writeFileSync(skill, `Run \`node "${gone}" --chat\`.\n`)
+  assert.deepEqual(warned(), ['missingBoard:hermes'])
+}))
 
 for (const lang of ['en', 'zh-TW', 'zh-CN']) test(`new or untrusted Codex hooks keep fallback and exact approval retires it in ${lang}`, () => fixture(async f => {
   const personal = readFileSync(f.instructions, 'utf8')
