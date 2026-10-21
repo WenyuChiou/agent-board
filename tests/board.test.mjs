@@ -7,6 +7,7 @@ import { request } from 'node:http'
 import { createServer as createNetServer } from 'node:net'
 import { tmpdir } from 'node:os'
 import { join, resolve, sep } from 'node:path'
+import { setTimeout as delay } from 'node:timers/promises'
 import { pathToFileURL } from 'node:url'
 import { test } from 'node:test'
 import fs from 'node:fs'
@@ -4060,7 +4061,7 @@ const closeAt = async (url, served) => {
 
 // Hold the stand-in until explicit release. Its deadline fails rather than
 // manufacturing success while the test is still checking the busy state.
-const holdingPage = async () => {
+const holdingPage = async signal => {
   const hold = mkdtempSync(join(tmpdir(), 'board-hold-'))
   const stand = join(hold, 'grok-stand-in.mjs')
   const calls = join(hold, 'calls.jsonl')
@@ -4069,7 +4070,7 @@ const holdingPage = async () => {
 appendFileSync(${JSON.stringify(calls)}, JSON.stringify(process.argv.slice(2)) + '\\n')
 const end = Date.now() + 45000
 const timer = setInterval(() => {
-  if (existsSync(${JSON.stringify(gate)})) { clearInterval(timer); process.stdout.write('Redis it is.\\n'); process.exit(0) }
+  if (existsSync(${JSON.stringify(gate)})) { clearInterval(timer); process.stdout.write('Redis it is.\\n', () => process.exit(0)) }
   if (Date.now() > end) { clearInterval(timer); process.stderr.write('FIXTURE_RELEASE_TIMEOUT\\n'); process.exit(1) }
 }, 25)
 `)
@@ -4077,9 +4078,22 @@ const timer = setInterval(() => {
   const board = await page('', agents, ['--allow-resume'])
   const script = join(board.dir, 'agent-board.mjs')
   const env = { ...process.env, CLAUDE_PROGRESS_FILE: '', NO_COLOR: '1', XDG_RUNTIME_DIR: join(board.dir, 'run'), ...agents }
+  const ran = () => (existsSync(calls) ? readFileSync(calls, 'utf8').split('\n').filter(Boolean) : [])
+  // A condition, not a fixed number of sleeps, advances each phase. The test's existing
+  // deadline still bounds a missing signal; cancellation also releases the stand-in below.
+  const until = async condition => {
+    for (;;) {
+      signal.throwIfAborted()
+      if (await condition()) return
+      await delay(25, undefined, { signal })
+    }
+  }
+  let exit
+  board.exited.then(code => { exit = code })
   return {
     board,
-    ran: () => (existsSync(calls) ? readFileSync(calls, 'utf8').split('\n').filter(Boolean) : []),
+    ran,
+    started: () => until(() => ran().length > 0),
     // A new copy of the script, as after an update: another build time, so --serve means to replace the page.
     update: () => {
       const { atime, mtimeMs } = statSync(script)
@@ -4097,18 +4111,31 @@ const timer = setInterval(() => {
       await board.close()
       rmSync(hold, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })
     },
-    release: () => writeFileSync(gate, 'go'),
+    release: async () => {
+      writeFileSync(gate, 'go')
+      await until(async () => (await board.call('GET', '/api/ping')).json().sending === 0)
+      const replies = (await board.call('GET', '/api/board')).json().replies
+      assert.equal(replies.length, 1)
+      assert.equal(replies[0].ok, true, replies[0].note)
+      assert.match(replies[0].note, /Redis it is\./)
+    },
+    exited: async () => {
+      await until(() => exit !== undefined)
+      assert.equal(exit, 0)
+    },
   }
 }
 
-test('a newer --serve does not start a second page while the page it would replace is sending a reply, shows that page with a note, and replaces it once the reply is in', { timeout: 60_000 }, async () => {
-  const held = await holdingPage()
+test('a newer --serve does not start a second page while the page it would replace is sending a reply, shows that page with a note, and replaces it once the reply is in', { timeout: 60_000 }, async t => {
+  const held = await holdingPage(t.signal)
   const { board } = held
   const urls = []
   try {
     const drawn = await board.rowOf('Pick the cache')
     const reply = { key: drawn.key, type: 'send', text: 'Redis', session: 'b2c3d4e5', asked: 'Redis or Memcached?', fp: drawn.fp }
     assert.equal((await board.call('POST', '/api/act', { body: reply })).status, 202)
+    await held.started()
+    assert.equal((await board.call('GET', '/api/ping')).json().sending, 1)
     held.update()
     const out = await held.serve()
     // The page that is sending is the only address shown, with the note above it, and no second
@@ -4120,9 +4147,6 @@ test('a newer --serve does not start a second page while the page it would repla
     // Another reply to that session meets the one in flight; only one run of the agent started.
     const second = await board.call('POST', '/api/act', { body: { ...reply, text: 'Memcached' } })
     assert.equal(second.status, 409)
-    // Acceptance is asynchronous; a busy Windows host may not have started the mock
-    // child by the time the board has already rejected a duplicate reply.
-    for (let tries = 0; held.ran().length === 0 && tries < 100; tries++) await pause(50)
     assert.equal(held.ran().length, 1)
     // The address file 0.19.0 left beside progress.md is kept the same way while its page sends.
     const beside = join(board.dir, 'progress-serve.json')
@@ -4132,8 +4156,7 @@ test('a newer --serve does not start a second page while the page it would repla
     assert.ok(existsSync(beside) && !existsSync(board.served))
     renameSync(beside, board.served)
     // Once the reply is in, the page agrees to close and the newer copy starts its own.
-    held.release()
-    for (let tries = 0; (await board.call('GET', '/api/ping')).json().sending !== 0 && tries < 100; tries++) await pause(50)
+    await held.release()
     const next = await held.serve()
     const url = next.match(/answer\): (http:\/\/127\.0\.0\.1:\d+\/\?t=[\w-]+)/)?.[1]
     assert.ok(url, next)
@@ -4141,7 +4164,7 @@ test('a newer --serve does not start a second page while the page it would repla
     assert.notEqual(url, board.url.href)
     assert.ok(!next.includes('already open is kept'), next)
     assert.equal(JSON.parse(readFileSync(board.served, 'utf8')).url, url)
-    assert.equal(await Promise.race([board.exited, pause(5000).then(() => 'still running')]), 0)
+    await held.exited()
   } finally {
     for (const url of urls) await closeAt(url, board.served)
     await held.stop()
