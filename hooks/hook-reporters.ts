@@ -154,7 +154,7 @@ finish
 
 // Keep paths out of the source: Windows PowerShell5.1 can read a BOM-free script
 // using the system code page. The actual inbox is beside this installed script.
-const powershellReporter = (fromShell: boolean): string => `# Written by the Agent Board plugin (/progress connect).
+export const powershellReporter = (fromShell: boolean): string => `# Written by the Agent Board plugin (/progress connect).
 ${fromShell ? "$Agent = [string]$env:AGENT_BOARD_SH_AGENT; $Event = [string]$env:AGENT_BOARD_SH_EVENT; $Payload = [string]$env:AGENT_BOARD_SH_PAYLOAD" : "param([string]$Agent = 'agent', [string]$Event = 'turn', [string]$Payload = '')"}
 $ErrorActionPreference = 'Stop'
 if ($Agent -notin @('codex','cursor','gemini','grok','muse','hermes','openclaw','opencode','antigravity','deepseek')) { $Agent = 'unknown' }

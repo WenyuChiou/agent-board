@@ -308,16 +308,24 @@ test('generated PowerShell bounds application lookup to one executable', async (
 })
 
 test('the sh reporter writes a prompt receipt with no prompt words from stdin or an argument', () => fixture(async home => {
-  const { reporterSh } = await import('../hooks/connect-pure.ts')
+  const { reporterSh, shellQuote } = await import('../hooks/connect-pure.ts')
+  const { powershellReporter } = await import('../hooks/hook-reporters.ts')
   const file = join(home, 'progress-report.sh')
-  writeFileSync(file, reporterSh(shellPath(join(home, 'progress-inbox'))))
+  const diagnostic = join(home, 'classifier-probe.txt')
+  const diagnostics = []
+  // On Windows the sh reporter hands over to an embedded PowerShell reporter; observe its classifier as for ps1.
+  const source = reporterSh(shellPath(join(home, 'progress-inbox'))), embedded = shellQuote(powershellReporter(true))
+  assert.equal(source.split(embedded).length, 2)
+  writeFileSync(file, source.replace(embedded, () => shellQuote(observeClassifier(powershellReporter(true), diagnostic))))
   for (const mode of ['stdin', 'argument']) for (const prompt of ['/board', 'PRIVATE_REAL_ANSWER']) {
     const raw = JSON.stringify({ session_id: `synthetic-${mode}-${prompt === '/board'}`, cwd: '/synthetic/中文', prompt, transcript_path: 'PRIVATE_TRANSCRIPT' })
+    rmSync(diagnostic, { force: true })
     const result = spawnSync(sh, [shellPath(file), 'gemini', 'prompt', ...(mode === 'argument' ? [raw] : [])], { input: mode === 'stdin' ? raw : undefined, encoding: 'utf8', windowsHide: true })
+    diagnostics.push(`${mode} ${prompt === '/board' ? 'board' : 'answer'}: ${classifierDiagnostic(diagnostic)}`)
     assert.equal(result.status, 0, result.stderr)
   }
   const saved = receipts(home)
-  assert.equal(saved.length, 4)
+  assert.equal(saved.length, 4, diagnostics.join('; '))
   for (const { body } of saved) {
     assert.ok(!/[^\x20-\x7e]/.test(body))
     const { cwd, ...receipt } = JSON.parse(body)
