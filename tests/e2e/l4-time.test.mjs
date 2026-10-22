@@ -1,6 +1,9 @@
 import { describe, test } from 'node:test'
 import assert from 'node:assert/strict'
+import { mkdirSync, readFileSync, readdirSync } from 'node:fs'
+import { join } from 'node:path'
 import { performance } from 'node:perf_hooks'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import { EN } from '../../hooks/strings-en.ts'
 import { hookTimeout } from '../../hooks/hook-safety.ts'
 import { makeWorld } from './lib/world.mjs'
@@ -8,7 +11,8 @@ import { block, hook } from './lib/writers.mjs'
 import { chat, html, run, serve, terminal } from './lib/surfaces.mjs'
 import { keptHookEvents } from './lib/faults.mjs'
 import { knownFailure } from './lib/known.mjs'
-import { BIG_FILE_HOOK_MS, BLOCKS, HOOK_TIMEOUT_MS, LIVE_SESSIONS } from './lib/budget.mjs'
+import { fileOpsPerPoll } from './lib/soak-report.mjs'
+import { BIG_FILE_HOOK_MS, BLOCKS, HOOK_TIMEOUT_MS, IDLE_POLL_FILE_OPS, LIVE_SESSIONS } from './lib/budget.mjs'
 
 const HOUR = 3600000
 const DAY = 24 * HOUR
@@ -80,8 +84,145 @@ describe('L4 time and scale', () => {
     } finally { await world.close() }
   })
 
-  // "L4 D24 scale: the page server does at most 6 file operations per idle poll" comes with #222's
-  // final pull request, which counts the page server's file operations with lib/soak-probe.mjs.
+  test('L4 +7 d: the idle shelf and the reminder list a task untouched for 7 days and an ask waiting 5 days, with their ages', async () => {
+    const world = makeWorld()
+    try {
+      const quiet = 'Overnight job'
+      const task = 'Release gateway'
+      const ask = 'Ship the gateway, OK?'
+      // A session that is still connected and waiting keeps its block fresh. A stopped session's
+      // questions go to the older shelf at once, so only a live one can show as a reminder.
+      const asking = () => block(world, { session: 'a4000702', project: 'docs-site', title: task, state: 'waiting', steps: ['- [x] Check routes', `- [?] ${ask}`] })
+      // The first task is never touched again.
+      block(world, { session: 'a4000701', title: quiet, state: 'working', steps: ['- [x] Check routes', '- [~] Publish the report'] })
+      world.jump('2d')
+      asking()
+      // The board dates an ask from its first look, once the file has stood unchanged for a second
+      // (isSettled in board-cli.ts), so it looks twice.
+      await terminal.keys(world, 'down')
+      await new Promise(done => setTimeout(done, 1300))
+      await terminal.keys(world, 'down')
+
+      // +4 d: the ask is 2 days old, so it still waits on the person, and nothing is idle yet.
+      world.jump('2d')
+      asking()
+      const early = { terminal: await terminal.screen(world, ['--all']), chat: (await chat(world)).stdout }
+      for (const [surface, text] of Object.entries(early)) {
+        assert.ok(text.includes(ask) && text.includes(EN.sectionWaiting), `${surface} at +4 d must list the ask as waiting:\n${text}`)
+        assert.ok(!text.includes(EN.sectionQuestionReminders), `${surface} at +4 d has a reminder too soon:\n${text}`)
+        assert.ok(!text.includes(EN.idleCount(1)), `${surface} at +4 d has an idle task too soon:\n${text}`)
+      }
+
+      // +6 d: the first task has been quiet for 6 days, so it is not idle yet. An idle limit set
+      // anywhere under 7 days would already list it.
+      world.jump('2d')
+      asking()
+      const nearly = { terminal: await terminal.screen(world, ['--all']), chat: (await chat(world)).stdout }
+      for (const [surface, text] of Object.entries(nearly)) {
+        assert.ok(!text.includes(EN.idleCount(1)), `${surface} at +6 d has an idle task too soon:\n${text}`)
+      }
+
+      // +7 d: the first task has been quiet for 7 days and the ask is 5 days old.
+      world.jump('1d')
+      asking()
+      const server = await serve.start(world)
+      const screens = {
+        terminal: await terminal.screen(world),
+        'terminal --all': await terminal.screen(world, ['--all']),
+        chat: (await chat(world)).stdout,
+        page: await server.page(),
+        html: (await html(world)).visible,
+      }
+      const model = (await server.get('/api/board')).json().model
+      // An age phrase that does not start inside a longer number, so "5 days ago" does not pass for "15 days ago".
+      const escaped = phrase => phrase.replace(/[.*+?^$|()[\]{}\\]/g, '\\$&')
+      const ageOf = phrase => new RegExp(`(^|[^0-9])${escaped(phrase)}`)
+      // What a surface says about a task: the 250 characters after its title.
+      const around = (surface, text, title) => {
+        const at = text.indexOf(title)
+        assert.ok(at >= 0, `${surface} must show "${title}":\n${text}`)
+        return text.slice(at, at + 250)
+      }
+      for (const [surface, text] of Object.entries(screens)) {
+        // Both shelves are named on every surface. The plain terminal print only names them, and
+        // --all opens them.
+        assert.ok(text.includes(EN.idleCount(1)), `${surface} must count the idle task:\n${text}`)
+        assert.ok(text.includes(EN.sectionQuestionReminders), `${surface} must show the reminders:\n${text}`)
+        assert.ok(!text.includes(EN.sectionOlderQuestions), `${surface} puts a 5-day-old ask on the older shelf:\n${text}`)
+        if (surface === 'terminal') continue
+        const waiting = around(surface, text, task)
+        assert.match(waiting, ageOf(EN.daysAgo(5)), `${surface}: the ask must say it is 5 days old`)
+        assert.ok(text.includes(ask), `${surface} must show the ask:\n${text}`)
+        // Chat keeps the idle shelf to its count.
+        if (surface === 'chat') continue
+        const idle = around(surface, text, quiet)
+        assert.ok(idle.includes(EN.sessionStopped(EN.daysAgo(7))), `${surface}: the idle task must say when it was last active: ${idle}`)
+        assert.ok(!idle.includes(EN.justNow), `${surface} calls the idle task "just now": ${idle}`)
+      }
+      assert.deepEqual(model.idle.map(row => [row.title, row.status, row.when]), [[quiet, EN.sessionStopped(EN.daysAgo(7)), EN.daysAgo(7)]])
+      assert.deepEqual((model.reminder ?? []).map(item => [item.task, item.text, item.when]), [[task, ask, EN.daysAgo(5)]])
+      assert.deepEqual(model.older ?? [], [])
+      assert.deepEqual(model.asks, [], 'a reminder is not also in the waiting list')
+    } finally { await world.close() }
+  })
+
+  test('L4 D24 scale: the page server does at most 6 file operations per idle poll', async () => {
+    const world = makeWorld()
+    try {
+      // A small board, so the count is the cost of one poll itself and not of a large ledger:
+      // four working tasks and one open ask.
+      for (let n = 0; n < 4; n++) block(world, { session: `a400090${n}`, title: `Idle poll task ${n}`, steps: ['- [x] Check routes', '- [~] Publish the report'] })
+      block(world, { session: 'a4000999', state: 'waiting', title: 'Idle poll ask', steps: ['- [?] Ship the gateway, OK?'] })
+      // The probe counts the page server's file operations and requests. It leaves out the clock
+      // preload's own reads of the clock file.
+      const probeDir = join(world.root, 'probe')
+      mkdirSync(probeDir)
+      world.env.E2E_SOAK_PROBE_DIR = probeDir
+      world.env.NODE_OPTIONS += ` --import=${pathToFileURL(fileURLToPath(new URL('./lib/soak-probe.mjs', import.meta.url))).href}`
+      const server = await serve.start(world)
+      const lines = () => readdirSync(probeDir).filter(name => name.startsWith(`serve-${server.pid}.`)).flatMap(name => {
+        const rows = []
+        // A line the probe is still writing does not parse, and the next look reads it whole.
+        for (const line of readFileSync(join(probeDir, name), 'utf8').split('\n')) {
+          try { if (line !== '') rows.push(JSON.parse(line)) } catch {}
+        }
+        return rows
+      }).map(row => ({ t: row.at, ops: Object.values(row.ops).reduce((sum, count) => sum + count, 0), requests: row.requests })).sort((a, b) => a.t - b.t)
+      const pause = ms => new Promise(done => setTimeout(done, ms))
+      const poll = async () => {
+        const response = await server.get('/api/board')
+        assert.equal(response.status, 200)
+      }
+      // The probe writes a line at the start and then every 10 s. The first polls record the ask,
+      // which is not what an idle page costs, so they run until the second line is written. That
+      // line is where the idle stretch starts.
+      const began = Date.now()
+      while (lines().length < 2) {
+        assert.ok(Date.now() - began < 60000, `The probe wrote no second line in 60 s: ${JSON.stringify(lines())}`)
+        await poll()
+        await pause(250)
+      }
+      for (let n = 0; n < 20; n++) {
+        await poll()
+        await pause(200)
+      }
+      // The server writes its last line when it exits, and the close request is one more request.
+      await server.stop()
+      const samples = lines()
+      assert.ok(samples.length >= 3, `The probe wrote no line when the server exited: ${JSON.stringify(samples)}`)
+      const idle = fileOpsPerPoll(samples, samples[1].t, samples.at(-1).t)
+      assert.ok(idle !== undefined, JSON.stringify(samples))
+      assert.ok(samples.at(-1).requests - samples[1].requests >= 20, `Too few polls reached the idle stretch: ${JSON.stringify(samples)}`)
+      // The ceiling is outside the marker, so the cost cannot rise further while the budget is
+      // known to fail. It was 29.7 here, and a figure above 35 is a regression.
+      assert.ok(idle.perPoll <= 35, `idle poll cost rose past today's 29.7: ${idle.perPoll}`)
+      // The count does not depend on how busy the machine is, so a pass is a fix and the marker has
+      // no mayPass. Every poll reads the board's files again even when nothing changed, and each
+      // question adds to that. The budget of 6 is #254's, which was closed and folded into the
+      // open umbrella #346. It was 29.7 here against that budget.
+      await knownFailure(346, () => assert.ok(idle.perPoll <= IDLE_POLL_FILE_OPS, `${idle.perPoll} file operations per idle poll on a board of 5 tasks and 1 ask, the budget is ${IDLE_POLL_FILE_OPS}`))
+    } finally { await world.close() }
+  })
 
   // The pane is hooks/register.tsx running inside Claude Code. Plain Node cannot load it (it
   // refuses the .tsx extension, and the 'claude-code' module the file imports exists only inside
