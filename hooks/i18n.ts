@@ -257,7 +257,7 @@ export const ZH_TW = {
   commandHint: '[open|connect|整理|同步|加 …|週報|今天|通知 開/關|lang …]',
   tidyUnreadable: '讀不到進度檔或封存檔，沒有動任何檔案。',
   tidyNothing: '沒有可以封存的。做完的工作會馬上封存；停掉的對話要 3 天沒動靜才會；這個對話自己的區塊不會封存。',
-  tidyScheduledNothing: '目前沒有可封存的項目。代理區塊最後更新後，已完成需超過 12 小時，其他需超過 3 天；手動完成項目需有至少 24 小時前的完成觀察紀錄。未答覆的問題會保留。',
+  tidyScheduledNothing: '目前沒有可封存的項目。代理區塊最後更新後，已完成需超過 12 小時，其他需超過 3 天；手動完成項目需有至少 24 小時前的完成觀察紀錄。仍在提問的區塊，要等它已結束或已完成，且看板留存該問題後才會封存。',
   tidyMoved: (n: number): string => `封存了 ${n} 個任務。`,
   synced: '已從 Task 清單重新同步。',
   copiedSuffix: '（已複製到剪貼簿）',

@@ -2,7 +2,7 @@ import { emptyQuestions, observeQuestions } from '../hooks/questions'
 import { expect, test } from 'claude-code/testing'
 
 import type { ProgressMirror } from '../types'
-import { extractAutoBlock, removeAutoBlock, renderAutoBlock, scanBlocks, setManualStep, stateWords, takeArchivable, upsertAutoBlock } from '../hooks/blocks'
+import { archivableAsking, extractAutoBlock, removeAutoBlock, renderAutoBlock, scanBlocks, setManualStep, stateWords, takeArchivable, upsertAutoBlock } from '../hooks/blocks'
 import { ZH_TW } from '../hooks/i18n'
 import { STRINGS } from '../hooks/strings'
 import { answerAgentPrompt } from '../hooks/inbox'
@@ -190,6 +190,113 @@ test('asked to tidy, a block done a minute ago goes now, while a stopped one sti
   expect(entries).toHaveLength(1)
   expect(kept).not.toContain('session=aaaaaaaa')
   expect(kept).toContain('session=cccccccc')
+})
+
+// Made-up blocks for the automatic archive of a block that still asks (#174).
+const askingBlock = (session: string, state: string, hours: number, steps: string[]): string[] => [
+  `<!-- auto session=${session} agent=codex state=${state} updated=${new Date(NOW - hours * HOUR).toISOString()} -->`,
+  `### Plan ${session}`,
+  '> Context: Synthetic data.',
+  ...steps,
+  `<!-- /auto session=${session} -->`,
+  '',
+]
+const askingBoard = (): string => [
+  '## alpha',
+  ...askingBlock('aaaaaaaa', 'ended', 100, ['- [x] One', '- [?] Publish the plan, OK?']),
+  ...askingBlock('bbbbbbbb', 'done', 100, ['- [x] One', '- [?] Pick 24 hours or 7 days?']),
+  ...askingBlock('cccccccc', 'ended', 50, ['- [?] Still inside the grace, OK?']),
+  ...askingBlock('dddddddd', 'ended', 100, ['- [x] One', '- [-] Dropped']),
+  ...askingBlock('eeeeeeee', 'working', 100, ['- [~] Work', '- [?] Waiting on a stopped session, OK?']),
+  ...askingBlock('ffffffff', 'waiting', 100, ['- [?] Waiting for an answer, OK?']),
+].join('\n')
+
+test('a block that asks is listed for the question check only once its three days are over', () => {
+  const asking = archivableAsking(askingBoard(), NOW)
+  // The ended and the done block; not the one 50 hours old, nor the one that asks nothing, nor a
+  // working or waiting one, however long since its last write.
+  expect(asking.map(one => one.ref.session)).toEqual(['aaaaaaaa', 'bbbbbbbb'])
+  expect(asking.map(one => [one.ref.project, one.ref.title])).toEqual([['alpha', 'Plan aaaaaaaa'], ['alpha', 'Plan bbbbbbbb']])
+  // The session's own block is never listed.
+  expect(archivableAsking(askingBoard(), NOW, 'aaaaaaaa').map(one => one.ref.session)).toEqual(['bbbbbbbb'])
+})
+
+test('a block that asks is taken only when the check says its questions are kept', () => {
+  const text = askingBoard()
+  // With no verdict only the block that asks nothing goes, as before.
+  const none = takeArchivable(text, NOW, undefined, STRINGS.en)
+  expect(none.entries).toHaveLength(1)
+  expect(none.entries[0]).toContain('Plan dddddddd')
+  // One verdict of yes takes that block with the quiet one, and leaves the rest.
+  const one = takeArchivable(text, NOW, undefined, STRINGS.en, false, span => span.session === 'aaaaaaaa')
+  expect(one.entries).toHaveLength(2)
+  expect(one.text).not.toContain('session=aaaaaaaa')
+  expect(one.text).toContain('session=bbbbbbbb')
+  expect(one.text).toContain('session=eeeeeeee')
+  // Even a yes for every block does not take the one still inside its three days, or a working or waiting one.
+  const all = takeArchivable(text, NOW, undefined, STRINGS.en, false, () => true)
+  expect(all.entries).toHaveLength(3)
+  expect(all.text).toContain('session=cccccccc')
+  expect(all.text).toContain('session=eeeeeeee')
+  expect(all.text).toContain('session=ffffffff')
+  // Nor the session's own block.
+  const own = takeArchivable(text, NOW, 'aaaaaaaa', STRINGS.en, false, () => true)
+  expect(own.entries).toHaveLength(2)
+  expect(own.text).toContain('session=aaaaaaaa')
+})
+
+test('a working or waiting block that asks is never taken, however long since its last write', () => {
+  for (const state of ['working', 'waiting']) for (const hours of [100, 24 * 40]) {
+    const text = ['## alpha', ...askingBlock('jjjjjjjj', state, hours, ['- [?] Pick 24 hours or 7 days?'])].join('\n')
+    expect(archivableAsking(text, NOW)).toEqual([])
+    expect(takeArchivable(text, NOW, undefined, STRINGS.en, false, () => true).entries).toEqual([])
+  }
+  // The same block once it has ended or is done is taken.
+  for (const state of ['ended', 'done']) {
+    const text = ['## alpha', ...askingBlock('jjjjjjjj', state, 100, ['- [?] Pick 24 hours or 7 days?'])].join('\n')
+    expect(archivableAsking(text, NOW).map(one => one.ref.session)).toEqual(['jjjjjjjj'])
+    expect(takeArchivable(text, NOW, undefined, STRINGS.en, false, () => true).entries).toHaveLength(1)
+  }
+})
+
+test('the three days of a block that asks are over only after 72 hours since its last write', () => {
+  const at = (hours: number): string => ['## alpha', ...askingBlock('kkkkkkkk', 'ended', hours, ['- [?] Publish the plan, OK?'])].join('\n')
+  // Just under, and exactly at, the boundary the block stays; an hour past it, it is listed and taken.
+  for (const hours of [60, 71, 72]) {
+    expect(archivableAsking(at(hours), NOW)).toEqual([])
+    expect(takeArchivable(at(hours), NOW, undefined, STRINGS.en, false, () => true).entries).toEqual([])
+  }
+  for (const hours of [73, 90]) {
+    expect(archivableAsking(at(hours), NOW).map(one => one.ref.session)).toEqual(['kkkkkkkk'])
+    expect(takeArchivable(at(hours), NOW, undefined, STRINGS.en, false, () => true).entries).toHaveLength(1)
+  }
+})
+
+test('a session id shared by two blocks of one project names neither for the question check', () => {
+  const shared = ['## alpha', ...askingBlock('llllllll', 'ended', 100, ['- [?] First plan, OK?']), ...askingBlock('llllllll', 'ended', 100, ['- [?] Second plan, OK?'])].join('\n')
+  expect(archivableAsking(shared, NOW)).toEqual([])
+  // Told apart by their project, the same ids name each.
+  const apart = ['## alpha', ...askingBlock('llllllll', 'ended', 100, ['- [?] First plan, OK?']), '## beta', ...askingBlock('llllllll', 'ended', 100, ['- [?] Second plan, OK?'])].join('\n')
+  expect(archivableAsking(apart, NOW).map(one => [one.ref.project, one.ref.session])).toEqual([['alpha', 'llllllll'], ['beta', 'llllllll']])
+})
+
+test('a question that is only an example in a code fence, or a block never closed, does not hold the archive back or open it', () => {
+  const marker = (session: string): string => `<!-- auto session=${session} agent=codex state=ended updated=${new Date(NOW - 100 * HOUR).toISOString()} -->`
+  const fenced = ['## beta', marker('gggggggg'), '### Plan gggggggg', '> Context: A code example.', '```', '- [?] Not a real step', '```', '- [x] Done', '<!-- /auto session=gggggggg -->', ''].join('\n')
+  expect(archivableAsking(fenced, NOW)).toEqual([])
+  expect(takeArchivable(fenced, NOW, undefined, STRINGS.en).entries).toHaveLength(1)
+  const unclosed = ['## beta', marker('ffffffff'), '### Plan ffffffff', '- [?] Never closed, OK?', ''].join('\n')
+  expect(archivableAsking(unclosed, NOW)).toEqual([])
+  expect(takeArchivable(unclosed, NOW, undefined, STRINGS.en, false, () => true).entries).toHaveLength(0)
+})
+
+test('asking to tidy at once does not shorten the three days of a block that asks', () => {
+  const text = ['## alpha', ...askingBlock('hhhhhhhh', 'done', 14, ['- [?] Pick 24 hours or 7 days?']), ...askingBlock('iiiiiiii', 'ended', 100, ['- [?] Publish the plan, OK?'])].join('\n')
+  expect(archivableAsking(text, NOW).map(one => one.ref.session)).toEqual(['iiiiiiii'])
+  const { text: kept, entries } = takeArchivable(text, NOW, undefined, STRINGS.en, true, () => true)
+  expect(entries).toHaveLength(1)
+  expect(kept).toContain('session=hhhhhhhh')
+  expect(kept).not.toContain('session=iiiiiiii')
 })
 
 test('after a compaction the note says where things stand', () => {

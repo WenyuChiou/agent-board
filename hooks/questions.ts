@@ -29,6 +29,11 @@ export const archiveQuestionsKept = (projects: readonly ProgressProject[], ref: 
     ? record.source?.project === ref.project && record.source.text === step.text && record.source.data === JSON.stringify(task)
     : record.resolvedAt !== undefined && record.source !== undefined && record.scope === scope && record.words === questionWords(step.text) && (record.producer ?? '') === (step.questionToken ?? '') && !ledger.records.some(other => other.isUnresolved && other.scope === scope && other.words === questionWords(step.text))))
 }
+// The questions of one block in the ledger: its project and title and, for an agent's block, its
+// session, so a block of another session with the same title is not taken for it. A hand-kept
+// task has no session, so only a hand-kept task's questions match it, not an agent block's (#174).
+export const isAskedBy = (record: QuestionRecord, ref: TaskRef): boolean =>
+  record.source?.project === ref.project && record.source.task === ref.title && (ref.session === null ? record.source.kind === 'manual' : record.source.session === ref.session)
 export const questionProofPath = (path: string, kind: keyof QuestionProofs, hash: string): string => `${path.replace(/\.md$/i, '')}-questions-${kind}-${hash}.json`
 export const questionProofOf = (path: string, name: string): { kind: keyof QuestionProofs; hash: string } | null => {
   const prefix = `${path.replace(/\\/g, '/').split('/').at(-1)?.replace(/\.md$/i, '')}-questions-`
@@ -131,6 +136,77 @@ export const withCaptures = (ledger: QuestionLedger, captures: readonly Question
     }
   }
   return { ...ledger, next: records.reduce((next, record) => Math.max(next, Number(record.id.slice(record.id.lastIndexOf(':') + 1)) + 1), ledger.next), records }
+}
+
+// The folder keeps at least this many of each kind of question file (#156): the newest by
+// modified time, whatever they hold. Older ones go only when the rules below find nothing in
+// them that the ledger or a newer file does not already hold, so the number is a floor.
+export const QUESTION_FILES_KEPT = 16
+
+export type HeldCapture = { hash: string; mtimeMs: number; capture: QuestionCapture }
+export type HeldProof = { kind: keyof QuestionProofs; hash: string; mtimeMs: number }
+
+// Newest first. The name breaks a tie, so two sessions looking at the same folder pick the same files.
+const newestFirst = <T extends { hash: string; mtimeMs: number }>(files: readonly T[]): T[] =>
+  [...files].sort((a, b) => b.mtimeMs - a.mtimeMs || (a.hash < b.hash ? 1 : a.hash > b.hash ? -1 : 0))
+
+// What the ledger would hold of one record if the capture were the only copy left.
+const restored = (captures: readonly QuestionCapture[]): string => JSON.stringify(withCaptures(emptyQuestions(), captures).records)
+
+// True when reading the capture back into the ledger changes nothing in this record.
+const isCovered = (record: QuestionRecord, capture: QuestionCapture): boolean =>
+  JSON.stringify(withCaptures({ ...emptyQuestions(), records: [record] }, [capture]).records) === JSON.stringify([record])
+
+// Which capture files can go (their hashes). A capture of a question goes only when all of these hold:
+// - it is not among the newest `keep` captures;
+// - the ledger file itself holds that question, with everything the capture adds, so no
+//   unresolved question lives only in a copy that is removed;
+// - it is not the copy of the question's open state that every poll looks for (it would be
+//   written again at once);
+// - and either the question is resolved and retired, so nothing reads its copies any more, or
+//   a newer copy of the same kind for the same question already holds everything this one does,
+//   which leaves the newest copy of each kind in place, so a ledger lost later is rebuilt as before.
+// Anything else stays, even when that leaves more than `keep` files.
+export const prunableCaptures = (ledger: QuestionLedger, held: readonly HeldCapture[], retired: readonly string[], keep = QUESTION_FILES_KEPT): string[] => {
+  const ordered = newestFirst(held)
+  const candidates = ordered.slice(keep)
+  if (candidates.length === 0) return []
+  const records = new Map(ledger.records.map(record => [record.id, record]))
+  const retiredHashes = new Set(retired)
+  const rank = new Map(ordered.map((one, index) => [one.hash, index]))
+  const byQuestion = new Map<string, HeldCapture[]>()
+  for (const one of ordered) {
+    const same = byQuestion.get(one.capture.record.id)
+    if (same === undefined) byQuestion.set(one.capture.record.id, [one])
+    else same.push(one)
+  }
+  return candidates.filter(one => {
+    const record = records.get(one.capture.record.id)
+    if (record === undefined || !isCovered(record, one.capture)) return false
+    if (record.isUnresolved === false && record.resolvedAt !== undefined && retiredHashes.has(sha256(record.id))) return true
+    if (record.isUnresolved && captureJson(record, 'unresolved') === captureJson(one.capture.record, one.capture.disposition)) return false
+    const own = rank.get(one.hash) ?? 0
+
+    return (byQuestion.get(record.id) ?? []).some(other => (rank.get(other.hash) ?? 0) < own && other.capture.disposition === one.capture.disposition && restored([other.capture, one.capture]) === restored([other.capture]))
+  }).map(one => one.hash)
+}
+
+// Which proof files can go. Beyond the newest `keep` of its kind, a proof goes only when nothing
+// can still refer to it: a retired proof is the hash of a question id, a consumed proof the hash
+// of an old acknowledgement. A proof whose id is in the ledger or a capture, or whose key is in
+// the ledger's migration map or the acknowledgement list, stays: without it an old resolution
+// could swallow a renewed question, or a migrated hide could be applied a second time.
+export const prunableProofs = (ledger: QuestionLedger, captures: readonly QuestionCapture[], answered: readonly string[], held: readonly HeldProof[], keep = QUESTION_FILES_KEPT): HeldProof[] => {
+  const known = new Set<string>()
+  for (const record of ledger.records) known.add(sha256(record.id))
+  for (const capture of captures) known.add(sha256(capture.record.id))
+  for (const [key, id] of Object.entries(ledger.legacy)) {
+    known.add(sha256(key))
+    known.add(sha256(id))
+  }
+  for (const key of answered) known.add(sha256(key))
+
+  return (['retired', 'consumed'] as const).flatMap(kind => newestFirst(held.filter(one => one.kind === kind)).slice(keep).filter(one => !known.has(one.hash)))
 }
 
 type Observation = { scope: string; session: string; index: number | string; text: string; isWaiting: boolean; producer: string; producerRevisions?: string[]; producerSources?: string[]; source: QuestionSource }
@@ -319,6 +395,9 @@ export const observeQuestions = (
       }
     }
   }
+  // An 'archived' mark is for a question whose block has gone. One whose block is still there,
+  // because the archive stopped half way or the block was updated meanwhile, is a live question.
+  for (const record of records) if (record.isArchived && assigned.has(record.id)) delete record.isArchived
   // A historical position cannot tell equal-word duplicates apart after movement. Migrate
   // only one candidate in one scope; retain ambiguous marks without applying a future hide.
   for (const key of answered) {

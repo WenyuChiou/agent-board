@@ -27,11 +27,11 @@ export const normalizeCommandPath = (text: string, path: string, placeholder: st
 // Share the exact command names with generated prompt hooks and inbox readers.
 export const BOARD_REQUEST = /^\s*(?:\/board|[$/]agent-board)\s*$/
 
-// Timeout receipts conservatively keep board requests from answering a question.
 // The fields a prompt receipt keeps: who sent it and from which folder, never its words.
 export const RECEIPT_SESSION_KEYS = ['session_id', 'sessionId', 'sessionID', 'thread-id', 'thread_id', 'conversation_id', 'conversationId'] as const
 export const RECEIPT_FOLDER_KEYS = ['cwd', 'workspaceRoot', 'workspace', 'project_dir', 'directory'] as const
 export const RECEIPT_KEYS = [...RECEIPT_SESSION_KEYS, ...RECEIPT_FOLDER_KEYS, 'hook_event_name', 'hookEventName'] as const
+// Timeout receipts conservatively keep board requests from answering a question.
 export const BOARD_REQUEST_HINTS = ['board', '--chat', '--serve']
 
 // The skill names its command twice, for chat and the page. The words after

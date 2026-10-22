@@ -45,7 +45,7 @@ const successful = result => {
   assert.equal(result.status, 0, result.stderr || result.stdout)
   return result.stdout
 }
-const plain = text => text.replace(/\x1b\[[0-9;?]*[A-Za-z]/g, '')
+export const plain = text => text.replace(/\x1b\[[0-9;?]*[A-Za-z]/g, '')
 export const visibleHtml = source => source.replace(/<(script|style)\b[^>]*>[\s\S]*?<\/\1>/gi, '').replace(/<[^>]*>/g, ' ').replace(/&quot;/g, '"').replace(/&#39;|&apos;/g, "'").replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/\s+/g, ' ').trim()
 
 export const terminal = {

@@ -30,9 +30,25 @@ export const hookTimeout = (agent: string, event = ''): number => {
 export const hostHookTimeout = (agent: string, event = ''): number => hookTimeout(agent, event) / (agent === 'gemini' ? 1 : 1000)
 export const HOOK_INPUT_TIMEOUT = Math.min(...Object.values(HOOK_TIMEOUTS).map(policy => policy.timeout)) - 1000
 
+// A worker can run seconds past its host's stop, so a kill can leave its temporary log file.
+// The worker's own log writes remove stale ones; the bootstrap, which rides on a cmd.exe
+// command line, stays without this.
+const HOOK_LOG_SWEEP = `    try {
+      const folder = path.dirname(file), cutoff = Date.now() - 60000
+      for (const name of fs.readdirSync(folder)) {
+        if (!/^hook-errors\\.log\\.\\d+\\.tmp$/.test(name)) continue
+        // Another writer may remove the same file first.
+        try {
+          const stale = path.join(folder, name), stat = fs.lstatSync(stale)
+          if (stat.isFile() && stat.mtimeMs < cutoff) fs.unlinkSync(stale)
+        } catch {}
+      }
+    } catch {}
+`
+
 // Only fixed diagnostic codes reach this file, never a payload, stderr, session id or path.
 // Read a bounded tail and replace atomically; a failed log cannot block a host hook.
-export const hookLogSource = (home: string, agent: string): string => `const fs = require('node:fs'), path = require('node:path')
+export const hookLogSource = (home: string, agent: string, sweep = false): string => `const fs = require('node:fs'), path = require('node:path')
 const hookError = code => {
   let temporary, owned = false
   try {
@@ -60,7 +76,7 @@ const hookError = code => {
     finally { fs.closeSync(output) }
     fs.renameSync(temporary, file)
     owned = false
-  } catch { process.stderr.write('AGENT_BOARD_HOOK_LOG_FAILED\\n') }
+${sweep ? HOOK_LOG_SWEEP : ''}  } catch { process.stderr.write('AGENT_BOARD_HOOK_LOG_FAILED\\n') }
   finally { if (owned) { try { fs.unlinkSync(temporary) } catch {} } }
 }
 `
@@ -103,7 +119,7 @@ const value = name => { const at = args.indexOf(name); return at < 0 ? undefined
 const agent = value('--agent')
 const policies = ${JSON.stringify(HOOK_TIMEOUTS)}
 const safeAgent = Object.hasOwn(policies, agent) ? agent : 'unknown'
-${hookLogSource(home, '__AGENT__').replace(JSON.stringify('__AGENT__'), 'safeAgent')}
+${hookLogSource(home, '__AGENT__', true).replace(JSON.stringify('__AGENT__'), 'safeAgent')}
 const isReport = args.includes('--codex-report')
 const fail = code => { hookError(code); process.exitCode = isReport ? 1 : 0; if (!isReport && ['cursor', 'gemini', 'antigravity'].includes(agent)) process.stdout.write('{}\\n'); return false }
 const run = async () => {
