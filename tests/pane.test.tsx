@@ -1588,6 +1588,8 @@ test('quarantining invalid input preserves an earlier failed payload with the sa
   const world = probeWorld()
   world.files.set(`${INBOX}/${PROBE_NAME}`, '{new broken input')
   world.files.set(`${INBOX}/${PROBE_NAME}.failed`, 'older evidence')
+  // Quarantined a day ago: a file given up on is kept for a week (#373).
+  world.mtimes = { [`${INBOX}/${PROBE_NAME}.failed`]: Date.parse('2026-10-15T12:00:00.000Z') }
   const clock = engineBeneath(on, world)
   await probeStart($)
   await clock.advance(5000)

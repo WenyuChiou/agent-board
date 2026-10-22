@@ -22,7 +22,8 @@ import { boardKey, boardScreen, boardText, CHAT_MAX, chatText, doneToday, emptyB
 import type { BoardAction, BoardState } from '../hooks/board'
 import { LOG_TAIL, isInboxFile } from '../hooks/inbox'
 import { dashboardHtml } from '../hooks/dashboard'
-import { appendJournal, archivePath, countDay, hasArchiveEntry, journalLine, journalPath } from '../hooks/journal'
+import { appendJournal, archivePath, countDay, hasArchiveEntry, journalLine, journalPath, localDay, parseJournal } from '../hooks/journal'
+import { currentPart, monthParts, sizeWarnings } from '../hooks/retention'
 import { parseProgress, progressTail } from '../hooks/parse'
 import { qrModules, qrText } from '../hooks/qr'
 import { langOf, plainReason, STRINGS } from '../hooks/strings'
@@ -93,6 +94,27 @@ const read = (file: string): string => {
     if ((error as { code?: string } | null)?.code === 'ENOENT') return ''
     throw fileError(file, error, true)
   }
+}
+
+// The part of a month's journal or archive new lines go to: the month's file until it reaches
+// 1 MB, then `-2`, and so on (hooks/retention.ts, #373).
+const partOf = (base: string): string => currentPart(base, file => {
+  try {
+    return statSync(file).size
+  } catch {
+    return null
+  }
+})
+
+// This month's journal as far as today needs it: its last part, and the one before when the last
+// began today. The rest of a long month is not read (#373).
+const journalToday = (now: number): string => {
+  const base = journalPath(path, now)
+  const parts = monthParts(base, existsSync)
+  // A month with no journal yet is read as before, so a file the board cannot read is still named.
+  const text = read(parts.at(-1) ?? base)
+  const before = parts.at(-2)
+  return before !== undefined && !parseJournal(text).some(entry => entry.at < localDay(now)) ? `${read(before)}\n${text}` : text
 }
 
 // A session log's end only, kept while the file is unchanged: --watch looks again every
@@ -417,7 +439,8 @@ const view = (source = read(path), now = Date.now()) => {
   }
   // A question marked answered in a pane on this machine is kept off the board too.
   const tail = progressTail(source)
-  return { ...buildView(projects, [basename(process.cwd())], null, now, countDay(read(journalPath(path, now)), now), manualDoneSeen(projects, seen, now, s), s, answered, seen, questions, readQuestionProofs(), turns), ...(tail === null ? {} : { warning: s.progressIncomplete(tail.tasks) }) }
+  const warnings = [...(tail === null ? [] : [s.progressIncomplete(tail.tasks)]), ...sizeWarnings({ progress: Buffer.byteLength(source), store: 0 }, s)]
+  return { ...buildView(projects, [basename(process.cwd())], null, now, countDay(journalToday(now), now), manualDoneSeen(projects, seen, now, s), s, answered, seen, questions, readQuestionProofs(), turns), ...(warnings.length === 0 ? {} : { warning: warnings.join(' · ') }) }
 }
 
 const freshView = () => {
@@ -567,9 +590,13 @@ const archiveOut = (take: (text: string) => { text: string; entries: string[] } 
     if (taken === null) return text
     const fresh = taken.entries.filter(entry => !archived.has(entry))
     if (fresh.length > 0) {
-      const kept = rewrite(archivePath(path, now), past => {
+      const part = partOf(archivePath(path, now))
+      // A previous try may have saved to the part before, the one that then reached 1 MB.
+      const earlier = monthParts(archivePath(path, now), existsSync).filter(one => one !== part).at(-1)
+      const before = earlier === undefined ? '' : read(earlier)
+      const kept = rewrite(part, past => {
         // A previous process may have saved the archive but failed to remove the task.
-        const missing = fresh.filter(entry => !hasArchiveEntry(past, entry))
+        const missing = fresh.filter(entry => !hasArchiveEntry(past, entry) && !hasArchiveEntry(before, entry))
         return missing.length === 0 ? past : `${past.trim() === '' ? `${s.archiveTitle}\n\n` : past.replace(/\s*$/, '\n\n')}${missing.join('\n\n')}\n`
       })
       if (kept === null) return null
@@ -595,9 +622,9 @@ const answeredAge = (file: string): number => {
 // that were there before, or that another writer added meanwhile, stay as they are. If that
 // fails too, the board's own error is the true one: some changes may already be saved.
 // Otherwise nothing of this press is left, so the count of writes goes back to before it.
-const undoJournal = (added: Map<string, number>, now: number, writesBefore: number, error?: unknown): void => {
+const undoJournal = (added: Map<string, number>, journal: string, writesBefore: number, error?: unknown): void => {
   try {
-    if (added.size > 0) rewrite(journalPath(path, now), past => {
+    if (added.size > 0) rewrite(journal, past => {
       const remaining = new Map(added)
       return past.split(/(?<=\n)/).filter(line => {
         const entry = line.replace(/\r?\n$/, '')
@@ -620,6 +647,8 @@ const act = (action: BoardAction, fallback?: { copyText?: string; tone?: 'done' 
     return text
   }
   const now = Date.now()
+  // Chosen once, so lines a failed press takes back come out of the part they went to.
+  const journal = partOf(journalPath(path, now))
   if (action.type === 'copy') {
     if (copy(action.text)) return done(s.copied)
     if (fallback !== undefined) fallback.copyText = action.text
@@ -637,7 +666,7 @@ const act = (action: BoardAction, fallback?: { copyText?: string; tone?: 'done' 
         const next = confirmTask(text, action.ref, now, s)
         if (next === null) return null
         const lines = next.entries.map(entry => journalLine(entry, now, s))
-        rewrite(journalPath(path, now), past => {
+        rewrite(journal, past => {
           const missing = lines.filter(line => !past.split(/\r?\n/).includes(line))
           for (const line of missing) added.set(line, Math.max(added.get(line) ?? 0, missing.filter(entry => entry === line).length))
           return appendJournal(past, missing, s)
@@ -647,13 +676,13 @@ const act = (action: BoardAction, fallback?: { copyText?: string; tone?: 'done' 
       }, () => { isReplaced = true })
     } catch (error) {
       if (!(error instanceof BoardFileError) || error.file !== path || isReplaced) throw error
-      undoJournal(added, now, writesBefore, error)
+      undoJournal(added, journal, writesBefore, error)
       error.isUnchanged = true
       throw error
     }
     // A retry found the task changed by another writer. If no write of this press landed, its
     // journal lines go too; the press says the line changed, as before.
-    if (wrote === null && !isReplaced) undoJournal(added, now, writesBefore)
+    if (wrote === null && !isReplaced) undoJournal(added, journal, writesBefore)
     const found = confirmed as ConfirmedTask | null
     if (found === null || wrote === null || !confirmMatches(read(path), found.ref, s)) return s.boardLineChanged
     return done(s.confirmedDone(action.title))
@@ -673,7 +702,7 @@ const act = (action: BoardAction, fallback?: { copyText?: string; tone?: 'done' 
         if (after !== text) {
           // Save history before ticking: a journal failure must leave the step available
           // to retry. A failed board replacement removes only this press's journal line.
-          rewrite(journalPath(path, now), past => {
+          rewrite(journal, past => {
             if (past.includes(line)) return past
             added.set(line, 1)
             return appendJournal(past, [line], s)
@@ -684,7 +713,7 @@ const act = (action: BoardAction, fallback?: { copyText?: string; tone?: 'done' 
       }, () => { isReplaced = true })
     } catch (error) {
       if (!(error instanceof BoardFileError) || error.file !== path || isReplaced) throw error
-      undoJournal(added, now, writesBefore, error)
+      undoJournal(added, journal, writesBefore, error)
       error.isUnchanged = true
       throw error
     }
@@ -1119,7 +1148,7 @@ const chat = (): void => {
     // A reply is hidden whole, before its question is picked and cut to length.
     const source = read(path)
     const updates = pending(text => redact(text, home, isWin))
-    process.stdout.write(chatText(view(source, now), updates, doneToday(read(journalPath(path, now)), now, s), s, home, isWin, CHAT_MAX, now))
+    process.stdout.write(chatText(view(source, now), updates, doneToday(journalToday(now), now, s), s, home, isWin, CHAT_MAX, now))
   } catch (error) {
     process.exitCode = 1
     const code = (error as { code?: unknown } | null)?.code

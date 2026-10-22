@@ -487,6 +487,8 @@ export const ZH_TW = {
   boardCopyFailed: (text: string): string => `沒辦法放進剪貼簿，請自己複製：${text}`,
   boardWriteFailed: '寫不進進度檔，沒有改任何東西。',
   progressIncomplete: (n: number): string => `progress.md 有一行標記未寫完，可能有 ${n} 項工作未顯示`,
+  progressLarge: (kb: number, cap: number): string => `progress.md 已有 ${kb} KB，超過 ${cap} KB；手寫的工作與等你回覆的步驟都不會被刪，可封存已完成的工作`,
+  storeLarge: (mb: string, cap: string): string => `看板存的紀錄已有 ${mb} MB（上限 ${cap} MB），舊紀錄會陸續清掉`,
   reporterFailed: (reason: string): string => `進度回報未能儲存（${reason}），請檢查進度檔後再試。`,
   tailRepairFailed: '無法安全修復不完整的結尾，沒有改任何東西。請檢查進度檔後再重新回報。',
   fileProgress: '你的進度檔',
