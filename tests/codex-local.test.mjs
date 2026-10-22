@@ -1,13 +1,15 @@
 import { spawn, spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
+import { createRequire, registerHooks } from 'node:module'
 import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, unlinkSync, utimesSync, writeFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { availableParallelism, constants, setPriority, tmpdir } from 'node:os'
 import { delimiter, dirname, join, resolve } from 'node:path'
 import { beforeEach, test } from 'node:test'
 import assert from 'node:assert/strict'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { inspect } from 'node:util'
 import { reporterPs1, reporterSh } from '../hooks/hook-reporters.ts'
+import { hookWorker } from '../hooks/hook-safety.ts'
 import { classifierDiagnostic, observeClassifier } from './fixtures/classifier-diagnostic.mjs'
 import { assertNativeProbeReturned, nativeProbeDiagnostic } from './fixtures/native-probe-diagnostic.mjs'
 
@@ -126,6 +128,8 @@ const fireCommand = (f, command, input, limit = 10000) => {
     callback => setTimeout(callback, limit), stopNativeTree, { windowsVerbatimArguments: isWindows })
 }
 const fireHook = (f, input, limit) => fireCommand(f, JSON.parse(readFileSync(f.hooks, 'utf8')).hooks.UserPromptSubmit[0].hooks[0].command, input, limit)
+
+const hookLog = f => existsSync(join(f.root, 'hook-errors.log')) ? readFileSync(join(f.root, 'hook-errors.log'), 'utf8') : ''
 
 const hookFailure = result => JSON.stringify({ status: result.status, signal: result.signal, error: result.error && { code: result.error.code, message: result.error.message }, termination: result.termination, stdout: result.stdout, stderr: result.stderr })
 
@@ -378,13 +382,13 @@ test('local setup adds missing Cursor and Muse version defaults once', () => fix
   }
 }))
 
-test('independent prompt metadata answers questions while ordinary activity and replay preserve newer questions', () => fixture(f => {
+test('a new prompt leaves the open question waiting for Codex and the local agents while replay preserves newer questions', () => fixture(f => {
   assert.equal(f.install('--apply').status, 0)
   assert.equal(f.event('UserPromptSubmit', 'turn-prompt-1').status, 0)
   assert.equal(f.report('waiting', ['- [?] Choose database', '- [ ] Continue']).status, 0)
   assert.equal(f.event('UserPromptSubmit', 'turn-prompt-2', { prompt: 'PRIVATE_NEW_INPUT' }).status, 0)
   assert.match(readFileSync(f.progress, 'utf8'), /state=working/)
-  assert.match(readFileSync(f.progress, 'utf8'), /- \[x\] Choose database/)
+  assert.match(readFileSync(f.progress, 'utf8'), /- \[\?\] Choose database/)
   assert.equal(f.report('waiting', ['- [?] New question', '- [ ] Continue']).status, 0)
   assert.equal(f.event('UserPromptSubmit', 'turn-prompt-2').status, 0)
   assert.match(readFileSync(f.progress, 'utf8'), /- \[\?\] New question/)
@@ -394,7 +398,7 @@ test('independent prompt metadata answers questions while ordinary activity and 
   assert.equal(f.command(['--agent-status', '--agent', 'grok', '--state', 'working'], { session_id: owner }).status, 0)
   assert.match(readFileSync(f.progress, 'utf8'), /- \[\?\] Grok decision/)
   assert.equal(f.command(['--agent-status', '--agent', 'grok', '--state', 'working'], { session_id: owner, hook_event_name: 'UserPromptSubmit', prompt: 'PRIVATE_NEW_INPUT' }).status, 0)
-  assert.match(readFileSync(f.progress, 'utf8'), /- \[x\] Grok decision/)
+  assert.match(readFileSync(f.progress, 'utf8'), /- \[\?\] Grok decision/)
   const record = join(f.root, 'sessions', createHash('sha256').update(`grok:${owner}`).digest('hex') + '.json')
   assert.ok(!readFileSync(record, 'utf8').includes('PRIVATE_NEW_INPUT'))
 }))
@@ -410,7 +414,7 @@ test('native board prompt commands preserve the waiting question and store no in
   }
   assert.equal(f.event('Stop', 'board-turn').status, 0)
   assert.equal(f.event('UserPromptSubmit', 'real-turn', { prompt: 'PRIVATE_REAL_ANSWER' }).status, 0)
-  assert.match(readFileSync(f.progress, 'utf8'), /- \[x\] Choose database/)
+  assert.match(readFileSync(f.progress, 'utf8'), /- \[\?\] Choose database/)
   assert.ok(!readFileSync(f.progress, 'utf8').includes('PRIVATE_REAL_ANSWER'))
   for (const agent of ['cursor', 'grok', 'muse', 'gemini']) {
     assert.equal(f.install('--agent', agent, '--apply').status, 0)
@@ -479,7 +483,7 @@ test('a reporter that hangs is cut at its timeout and the host hook exits 0', ()
     try { process.kill(pid, 0) } catch (error) { if (error.code === 'ESRCH') wasReaped = true; else throw error }
     assert.equal(out.status, 0, out.stderr)
     assert.equal(wasReaped, true, 'the timed-out reporter must be reaped before the hook returns')
-    assert.match(readFileSync(join(f.root, 'hook-errors.log'), 'utf8'), /codex REPORTER_TIMEOUT/)
+    assert.match(readFileSync(join(f.root, 'hook-errors.log'), 'utf8'), /codex REPORTER_QUEUED/)
     assert.deepEqual(readFileSync(f.progress), held)
   } finally {
     // The outer test deadline is a backstop for a broken implementation, too.
@@ -488,6 +492,489 @@ test('a reporter that hangs is cut at its timeout and the host hook exits 0', ()
       await stopReporter(pid)
     }
   }
+}))
+
+test('L5 busy machine: Antigravity and Codex hooks apply or queue every event with all but one CPU busy', t => fixture(async f => {
+  assert.equal(f.install('--apply').status, 0)
+  assert.equal(f.install('--agent', 'antigravity', '--apply').status, 0)
+  // Records when each hook's worker started, and the PowerShell start that Antigravity's Windows wrapper
+  // passes, so a failure tells a hook that never got the CPU apart from one that missed its deadline.
+  const preload = join(f.home, 'worker-start.cjs')
+  f.save(preload, `const { basename } = require('node:path')
+if (basename(process.argv[1] || '') === 'agent-board-hook.mjs') {
+  const at = process.argv.indexOf('--hook-started')
+  try { require('node:fs').writeFileSync(process.env.L5_START_STAMP, Date.now() + ' ' + (at === -1 ? '' : process.argv[at + 1]), { flag: 'wx' }) } catch {}
+}
+`)
+  // One core stays free and the loops run below normal priority: the machine is busy, but neither the hook
+  // nor the other test files that `node --test` runs at the same time go without CPU before the host's 3 s stop.
+  const busyCount = Math.max(1, availableParallelism() - 1)
+  let priority = 'below normal priority'
+  const busy = []
+  const records = []
+  const antigravity = JSON.parse(readFileSync(join(f.home, '.gemini', 'config', 'hooks.json')))['agent-board-local'].SessionStart[0].command
+  const codex = JSON.parse(readFileSync(f.hooks)).hooks.UserPromptSubmit[0].hooks[0].command
+  const hooks = [
+    ['antigravity', antigravity, key => ({ conversationId: `busy-antigravity-session-${key}` })],
+    ['codex', codex, key => ({ session_id: `busy-codex-session-${key}`, hook_event_name: 'UserPromptSubmit', turn_id: `busy-turn-${key}` })],
+  ]
+  const fire = async (agent, command, payload, label, limit) => {
+    const stamp = join(f.home, `worker-start-${agent}-${label.replaceAll(' ', '-')}.txt`)
+    const env = { ...f.env, L5_START_STAMP: stamp, NODE_OPTIONS: [f.env.NODE_OPTIONS, `--require ${JSON.stringify(preload)}`].filter(Boolean).join(' ') }
+    const spawnedAt = Date.now()
+    const result = await fireCommand({ env }, command, JSON.stringify(payload), limit)
+    const tookMs = Date.now() - spawnedAt
+    const [workerAt, shellAt] = existsSync(stamp) ? readFileSync(stamp, 'utf8').split(' ').map(Number) : []
+    const load = busy.length ? `${busy.length} busy at ${priority}` : 'no load'
+    const timing = `${agent} ${label} (${load}): worker ${workerAt ? `started ${workerAt - spawnedAt} ms after the spawn` : 'never started'}`
+      + `${shellAt ? `, PowerShell ${shellAt - spawnedAt} ms` : ''}, hook ended after ${tookMs} ms`
+    t.diagnostic(timing)
+    const log = hookLog(f)
+    assert.equal(result.status, 0, `${timing}\n${hookFailure(result)}\nhook log:\n${log}`)
+    const id = payload.session_id ?? payload.conversationId
+    const owner = createHash('sha256').update(`${agent}:${id}`).digest('hex')
+    const record = join(f.root, 'sessions', `${owner}.json`)
+    const saved = pendingFiles(f).some(name => readFileSync(join(f.root, 'pending', name), 'utf8').includes(id))
+    assert.ok(existsSync(record) || saved, `${timing}: the event must be applied or queued; hook log:\n${log}`)
+    records.push({ file: record, state: agent === 'codex' ? 'working' : 'waiting', turn: payload.turn_id })
+  }
+  // A machine's first PowerShell and Node start is far slower than later ones (#241 keeps that case open), so
+  // one event per hook runs before the load, untimed (the test's 30 s limit only); it must still be applied or queued.
+  for (const [agent, command, payloadOf] of hooks) await fire(agent, command, payloadOf('warm-up'), 'warm-up', 30000)
+  try {
+    for (let index = 0; index < busyCount; index++) {
+      const child = spawn(process.execPath, ['-e', 'process.stdout.write("ready\\n"); while (true) {}'], { env: f.env, windowsHide: true, stdio: ['ignore', 'pipe', 'ignore'] })
+      const closed = new Promise((done, reject) => { child.once('close', done); child.once('error', reject) })
+      closed.catch(() => {})
+      busy.push({ child, closed })
+      try { setPriority(child.pid, constants.priority.PRIORITY_BELOW_NORMAL) } catch (error) { priority = `normal priority (setPriority ${error.info?.code ?? error.code ?? error.message})` }
+      await new Promise((done, reject) => { child.stdout.once('data', done); child.once('error', reject) })
+    }
+    for (const [agent, command, payloadOf] of hooks) {
+      for (let index = 0; index < 3; index++) await fire(agent, command, payloadOf(index), `event ${index}`, 5000)
+    }
+  } finally {
+    await Promise.all(busy.map(async ({ child, closed }) => {
+      try { if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL') }
+      finally { await closed }
+    }))
+  }
+  const next = f.event('SessionStart', null, { session_id: 'busy-follow-up-session' })
+  assert.equal(next.status, 0, next.stderr)
+  assert.deepEqual(pendingFiles(f), [])
+  for (const expected of records) {
+    const record = JSON.parse(readFileSync(expected.file))
+    assert.equal(record.state, expected.state)
+    if (expected.turn) assert.equal(record.turn, expected.turn)
+  }
+}))
+
+test('L4 5 MB file: every Codex event is applied or queued and replayed by a follow-up hook', () => fixture(async f => {
+  assert.equal(f.install('--apply').status, 0)
+  const task = '### Synthetic hand-kept task\n- [ ] Keep this task unchanged\n'
+  f.save(f.progress, '## Synthetic history\n' + task.repeat(Math.ceil(5 * 1024 * 1024 / Buffer.byteLength(task))))
+  assert.ok(readFileSync(f.progress).length >= 5 * 1024 * 1024)
+  const records = []
+  for (let index = 0; index < 3; index++) {
+    const id = `large-file-session-${index}`, turn = `large-file-turn-${index}`
+    const result = await fireHook(f, JSON.stringify({ session_id: id, hook_event_name: 'UserPromptSubmit', turn_id: turn }))
+    assert.equal(result.status, 0, hookFailure(result))
+    const owner = createHash('sha256').update(`codex:${id}`).digest('hex')
+    const record = join(f.root, 'sessions', `${owner}.json`)
+    const saved = pendingFiles(f).some(name => readFileSync(join(f.root, 'pending', name), 'utf8').includes(id))
+    assert.ok(existsSync(record) || saved, `event ${index} must be applied or queued`)
+    records.push({ file: record, turn })
+  }
+  const next = f.event('SessionStart', null, { session_id: 'large-file-follow-up-session' })
+  assert.equal(next.status, 0, next.stderr)
+  for (const expected of records) {
+    const record = JSON.parse(readFileSync(expected.file))
+    assert.equal(record.state, 'working')
+    assert.equal(record.turn, expected.turn)
+  }
+  const block = readFileSync(f.progress, 'utf8').slice(-2000)
+  assert.match(block, /<!-- auto [^\n]*agent=codex/)
+  assert.match(block, /state=working/)
+  assert.deepEqual(pendingFiles(f), [])
+}))
+
+test('a queued event from every host is replayed by the next hook', async t => {
+  const resolver = registerHooks({ resolve(specifier, context, next) {
+    try { return next(specifier, context) } catch (error) {
+      if (error.code !== 'ERR_MODULE_NOT_FOUND' || !specifier.startsWith('.')) throw error
+      return next(`${specifier}.ts`, context)
+    }
+  } })
+  let local, portable
+  try {
+    local = await import('../hooks/local-agents.ts')
+    portable = await import('../hooks/portable-agents.ts')
+  } finally { resolver.deregister() }
+  const { opencodePlugin } = local
+  const { openclawLocalPlugin, deepseekLocalPlugin } = portable
+  const hosts = [
+    { agent: 'codex', event: 'UserPromptSubmit', config: ['.codex', 'hooks.json'], payload: { session_id: 'queued-codex-session', hook_event_name: 'UserPromptSubmit', turn_id: 'queued-turn' }, folder: 'queued-codex-folder' },
+    { agent: 'cursor', event: 'beforeSubmitPrompt', config: ['.cursor', 'hooks.json'], payload: { conversation_id: 'queued-cursor-session', hook_event_name: 'beforeSubmitPrompt', generation_id: 'queued-generation' }, folder: 'queued-cursor-folder' },
+    { agent: 'gemini', event: 'BeforeAgent', config: ['.gemini', 'settings.json'], payload: { session_id: 'queued-gemini-session' } },
+    { agent: 'grok', event: 'UserPromptSubmit', config: ['.grok', 'hooks', 'agent-board-local.json'], payload: {}, env: { GROK_SESSION_ID: 'queued-grok-session' } },
+    { agent: 'muse', event: 'UserPromptSubmit', config: ['.config', 'muse', 'settings.json'], payload: { session_id: 'queued-muse-session' } },
+    { agent: 'antigravity', event: 'PreInvocation', config: ['.gemini', 'config', 'hooks.json'], payload: { conversationId: 'queued-antigravity-session' } },
+    { agent: 'opencode', mode: '--agent-status', payload: { session_id: 'queued-opencode-session', state: 'working' } },
+    { agent: 'openclaw', mode: '--codex-event', payload: { session_id: 'queued-openclaw-event-session', hook_event_name: 'UserPromptSubmit', turn_id: 'queued-run', prompt_submitted: false } },
+    { agent: 'openclaw', mode: '--agent-status', payload: { session_id: 'queued-openclaw-status-session', state: 'working' } },
+    { agent: 'deepseek', mode: '--agent-status', payload: { session_id: 'queued-deepseek-session', state: 'working' } },
+  ]
+  for (const host of hosts) await t.test(`${host.agent} ${host.mode ?? host.event}`, () => fixture(async f => {
+    const installed = f.install('--agent', host.agent, '--apply')
+    assert.equal(installed.status, 0, installed.stderr)
+    const worker = join(f.root, 'agent-board-hook.mjs')
+    let argv
+    let payload = { ...host.payload }, input
+    if (host.config) {
+      const config = JSON.parse(readFileSync(join(f.home, ...host.config)))
+      const hook = host.agent === 'antigravity' ? config['agent-board-local'][host.event][0] : config.hooks[host.event][0]
+      const command = hook.command ?? hook.hooks[0].command
+      const launch = host.agent === 'antigravity' && process.platform === 'win32' ? Buffer.from(command.split(' ').at(-1), 'base64').toString('utf16le') : command
+      const words = [...launch.matchAll(/"([^"]*)"|'((?:[^']|'')*)'|(\S+)/g)].map(match => match[1] ?? match[2]?.replaceAll("''", "'") ?? match[3])
+      argv = words.slice(words.indexOf('--hook-version'), words.includes('--hook-started') ? words.indexOf('--hook-started') : undefined)
+      assert.equal(argv[0], '--hook-version')
+    } else {
+      const saved = []
+      const instantiate = (source, suffix) => new Function('createRequire', 'spawnSync', 'tool', `${source.replace(/^import .*\n/gm, '').replaceAll('import.meta.url', JSON.stringify(import.meta.url)).replace('export default', 'const plugin =').replace(/^export /gm, '')}\n${suffix}`)(createRequire, (node, args, options) => { saved.push({ node, args: [...args], input: options.input }); return { status: 0, stdout: '' } }, Object.assign(value => value, { schema: { string: () => ({}), enum: () => ({}), array: () => ({}) } }))
+      if (host.agent === 'opencode') {
+        const factory = instantiate(opencodePlugin(process.execPath, worker, f.progress, 'Progress', f.home), 'return AgentBoardLocal')
+        const hooks = await factory({ client: { session: { get: async ({ path }) => ({ data: { id: path.id } }) } } })
+        await hooks.event({ event: { type: 'session.status', properties: { sessionID: payload.session_id, status: { type: 'busy' } } } })
+      } else if (host.agent === 'openclaw') {
+        const { plugin, report } = instantiate(openclawLocalPlugin(process.execPath, worker, f.progress, f.home), 'return { plugin, report }')
+        if (host.mode === '--codex-event') {
+          let subscription
+          plugin.register({ on: () => {}, agent: { events: { registerAgentEventSubscription: value => { subscription = value } } } })
+          await subscription.handle({ stream: 'lifecycle', sessionId: payload.session_id, runId: payload.turn_id, data: { phase: 'start' } })
+        } else {
+          // OpenClaw has no status callback; exercise that mode through its generated runner.
+          report(host.mode, payload, Date.now() + 2000)
+        }
+      } else {
+        const callbacks = new Map()
+        const apply = instantiate(deepseekLocalPlugin(process.execPath, worker, f.progress, f.home), 'return apply')
+        apply({ on: (name, callback) => callbacks.set(name, callback) })
+        await callbacks.get('agent/status')({ agent: { session: { header: { id: payload.session_id } } }, status: 'running' })
+      }
+      assert.equal(saved.length, 1)
+      assert.equal(saved[0].node, process.execPath)
+      assert.equal(saved[0].args[0], worker)
+      argv = saved[0].args.slice(1)
+      input = saved[0].input
+      payload = JSON.parse(input)
+    }
+    if (host.agent === 'codex') payload.cwd = join(f.root, 'work', host.folder)
+    if (host.agent === 'cursor') payload.workspace_roots = [join(f.root, 'work', host.folder)]
+    const env = { ...f.env, ...host.env }
+    const deadline = argv.indexOf('--hook-deadline')
+    if (deadline < 0) argv.push('--hook-deadline', String(Date.now() - 1))
+    else argv[deadline + 1] = String(Date.now() - 1)
+    const queued = spawnSync(process.execPath, [worker, ...argv], { env, input: input ?? JSON.stringify(payload), encoding: 'utf8', windowsHide: true, timeout: 5000 })
+    assert.equal(queued.status, 0, hookFailure(queued))
+    const files = pendingFiles(f)
+    assert.equal(files.length, 1)
+    assert.match(files[0], /\.raw\.json$/)
+    const log = join(f.root, 'hook-errors.log')
+    const errors = readFileSync(log, 'utf8')
+    assert.match(errors, new RegExp(` ${host.agent} REPORTER_QUEUED\\n$`))
+    assert.equal(errors.trimEnd().split('\n').length, 1)
+    const next = f.event('SessionStart', null, { session_id: 'queued-host-follow-up-session' })
+    assert.equal(next.status, 0, hookFailure(next))
+    const id = payload.session_id ?? payload.conversation_id ?? payload.conversationId ?? host.env.GROK_SESSION_ID
+    const owner = createHash('sha256').update(`${host.agent}:${id}`).digest('hex')
+    const record = JSON.parse(readFileSync(join(f.root, 'sessions', `${owner}.json`)))
+    assert.equal(record.state, 'working')
+    if (host.folder) assert.equal(record.title, host.folder)
+    assert.deepEqual(pendingFiles(f), [])
+    assert.equal(readFileSync(log, 'utf8'), errors)
+    assert.equal(queued.stderr + next.stderr, '')
+  }))
+})
+
+test('a reporter that exits 0 after its deadline keeps its stdout without queuing a duplicate', () => fixture(f => {
+  const worker = join(f.root, 'agent-board-hook.mjs')
+  f.save(f.script, 'globalThis.AGENT_BOARD = {"hookVersion":1,}\n')
+  f.save(worker, hookWorker(f.home, f.script, 'const isBoardRequest = () => false'))
+  const preload = join(f.home, 'late-success.cjs')
+  const stdout = JSON.stringify({ env: { AGENT_BOARD_SESSION_ID: session, AGENT_BOARD_AGENT: 'cursor' } }) + '\n'
+  f.save(preload, `const child = require('node:child_process')
+child.spawnSync = (_executable, args) => {
+  const deadline = Number(args[args.indexOf('--hook-deadline') + 1])
+  Date.now = () => deadline + 1
+  return { status: 0, signal: null, stdout: ${JSON.stringify(stdout)}, stderr: '' }
+}
+`)
+  const result = spawnSync(process.execPath, [worker, '--hook-version', '1', '--codex-event', '--agent', 'cursor', '--progress-file', f.progress], { env: { ...f.env, NODE_OPTIONS: `--require ${JSON.stringify(preload)}` }, input: JSON.stringify({ conversation_id: session, hook_event_name: 'sessionStart' }), encoding: 'utf8', windowsHide: true, timeout: 5000 })
+  assert.equal(result.status, 0, hookFailure(result))
+  assert.equal(result.stdout, stdout)
+  assert.equal(result.stderr, '')
+  assert.deepEqual(pendingFiles(f), [])
+  assert.equal(existsSync(join(f.root, 'hook-errors.log')), false)
+}))
+
+test('a hook whose reporter runs past the deadline saves the raw event and the next hook applies it', () => fixture(async f => {
+  assert.equal(f.install('--apply').status, 0)
+  const real = readFileSync(f.script)
+  const pidFile = join(f.root, 'raw-reporter.pid')
+  f.save(f.script, `${real.toString().split('\n')[0]}\nimport { writeFileSync } from 'node:fs'\nwriteFileSync(${JSON.stringify(pidFile)}, String(process.pid))\nsetInterval(() => {}, 1000)\n`)
+  let wasReaped = false
+  try {
+    const started = performance.now()
+    const result = await fireHook(f, JSON.stringify({ session_id: session, sessionId: 's'.repeat(4096), state: 's'.repeat(4097), generation_id: { text: 'PRIVATE_OBJECT' }, prompt_submitted: true, hook_event_name: 'UserPromptSubmit', turn_id: 'raw-first', cwd: join(f.root, 'work', 'raw-folder-project'), prompt: 'PRIVATE_PROMPT', last_assistant_message: 'PRIVATE_ASSISTANT', tool_input: { text: 'PRIVATE_TOOL' }, transcript_path: 'PRIVATE_TRANSCRIPT' }))
+    wasReaped = !existsSync(pidFile) || !isReporterAlive(Number(readFileSync(pidFile, 'utf8')))
+    assert.equal(result.status, 0, hookFailure(result))
+    assert.equal(wasReaped, true, 'the timed-out reporter must be reaped before the hook returns')
+    assert.ok(performance.now() - started < 3000)
+    const files = pendingFiles(f)
+    assert.equal(files.length, 1)
+    assert.match(files[0], /^\d{15}-[\da-f-]+\.raw\.json$/)
+    const saved = readFileSync(join(f.root, 'pending', files[0]), 'utf8')
+    assert.ok(!saved.includes('PRIVATE_'), 'raw events retain metadata only')
+    const raw = JSON.parse(saved)
+    assert.equal(raw.kind, 'raw')
+    assert.deepEqual(raw.env, {})
+    assert.equal(raw.payload.board_request, false)
+    assert.equal(raw.payload.sessionId, 's'.repeat(4096))
+    assert.equal(raw.payload.state, undefined)
+    assert.equal(raw.payload.generation_id, undefined)
+    assert.equal(raw.payload.prompt_submitted, true)
+    assert.ok(!raw.argv.includes('--home') && !raw.argv.includes('--hook-deadline'))
+    assert.match(readFileSync(join(f.root, 'hook-errors.log'), 'utf8'), /REPORTER_QUEUED/)
+    f.save(f.script, real)
+    const next = await fireHook(f, JSON.stringify({ session_id: session, hook_event_name: 'UserPromptSubmit', turn_id: 'raw-second' }))
+    assert.equal(next.status, 0, hookFailure(next))
+    const record = JSON.parse(readFileSync(join(f.root, 'sessions', `${createHash('sha256').update(`codex:${session}`).digest('hex')}.json`)))
+    assert.equal(record.turn, 'raw-second')
+    assert.equal(record.title, 'raw-folder-project')
+    assert.equal(record.project, 'raw-folder-project')
+    for (const text of [readFileSync(f.progress, 'utf8'), JSON.stringify(record)]) assert.ok(!text.includes(join(f.root, 'work')), 'only the folder name reaches the board')
+    assert.ok(record.events.indexOf('UserPromptSubmit:raw-first') < record.events.indexOf('UserPromptSubmit:raw-second'))
+    assert.ok(record.events.includes('UserPromptSubmit:raw-first'))
+    assert.deepEqual(pendingFiles(f), [])
+    // A late raw event from this very millisecond range cannot reopen an older turn.
+    raw.at = record.appliedAt - 1
+    raw.payload.turn_id = 'raw-stale'
+    f.save(join(f.root, 'pending', `${String(raw.at).padStart(15, '0')}-stale.raw.json`), JSON.stringify(raw))
+    assert.equal(f.event('SessionStart', null, { session_id: 'other-replay-session' }).status, 0)
+    assert.equal(JSON.parse(readFileSync(join(f.root, 'sessions', `${createHash('sha256').update(`codex:${session}`).digest('hex')}.json`))).turn, 'raw-second')
+    assert.deepEqual(pendingFiles(f), [])
+  } finally {
+    f.save(f.script, real)
+    if (!wasReaped && existsSync(pidFile)) await stopReporter(Number(readFileSync(pidFile, 'utf8')))
+  }
+}))
+
+test('the hook deadline counts from the process start, not from when the worker runs', () => fixture(f => {
+  assert.equal(f.install('--agent', 'gemini', '--apply').status, 0)
+  const worker = join(f.root, 'agent-board-hook.mjs')
+  const argv = ['--hook-version', '1', '--hook-event', 'BeforeAgent', '--agent-status', '--agent', 'gemini', '--state', 'working', '--progress-file', f.progress]
+  const payload = { session_id: session }
+  const at = Date.now() - 3050
+  const result = spawnSync(process.execPath, [worker, ...argv, '--hook-started', String(at)], { env: f.env, input: JSON.stringify(payload), encoding: 'utf8', windowsHide: true, timeout: 5000 })
+  assert.equal(result.status, 0, result.stderr)
+  assert.equal(readFileSync(f.progress, 'utf8').includes('agent=gemini'), false)
+  const queued = pendingFiles(f)[0]
+  assert.ok(queued, 'an expired reporter deadline must save the event in pending/')
+  assert.equal(JSON.parse(readFileSync(join(f.root, 'pending', queued))).at, at)
+  for (const [index, invalid] of [String(Date.now() + 60000), String(Date.now() - 11000), '1.5', 'NaN', '9007199254740992'].entries()) {
+    const id = `invalid-start-session-${index}`
+    const out = spawnSync(process.execPath, [worker, ...argv, '--hook-started', invalid], { env: f.env, input: JSON.stringify({ session_id: id }), encoding: 'utf8', windowsHide: true, timeout: 5000 })
+    assert.equal(out.status, 0, out.stderr)
+    assert.match(readFileSync(f.progress, 'utf8'), /agent=gemini/)
+    const owner = createHash('sha256').update(`gemini:${id}`).digest('hex')
+    assert.equal(JSON.parse(readFileSync(join(f.root, 'sessions', `${owner}.json`))).state, 'working')
+    assert.deepEqual(pendingFiles(f), [])
+  }
+}))
+
+test('a hook worker that starts after the host would stop it still reads its input and queues the event', () => fixture(f => {
+  // A cold Windows PowerShell start can delay Antigravity's worker past its 3 s host limit (#241).
+  assert.equal(f.install('--agent', 'antigravity', '--apply').status, 0)
+  const worker = join(f.root, 'agent-board-hook.mjs')
+  const conversationId = 'late-antigravity-session'
+  const argv = ['--hook-version', '1', '--hook-event', 'Stop', '--agent-status', '--agent', 'antigravity', '--state', 'waiting', '--event', 'Stop', '--progress-file', f.progress]
+  // 3 s back is past the 2.7 s input line and leaves 7 s for Node to start inside the 10 s --hook-started window.
+  const at = Date.now() - 3000
+  const result = spawnSync(process.execPath, [worker, ...argv, '--hook-started', String(at)], { env: f.env, input: JSON.stringify({ conversationId }), encoding: 'utf8', windowsHide: true, timeout: 20000 })
+  assert.equal(result.status, 0, hookFailure(result))
+  assert.equal(result.stdout, '{}\n')
+  const log = hookLog(f)
+  assert.match(log, /REPORTER_QUEUED/)
+  assert.doesNotMatch(log, /REPORTER_TIMEOUT/)
+  const queued = pendingFiles(f)
+  assert.equal(queued.length, 1, log)
+  assert.match(queued[0], /\.raw\.json$/)
+  assert.equal(JSON.parse(readFileSync(join(f.root, 'pending', queued[0]))).at, at)
+  assert.equal(f.event('SessionStart', null, { session_id: 'other-replay-session' }).status, 0)
+  const owner = createHash('sha256').update(`antigravity:${conversationId}`).digest('hex')
+  assert.equal(JSON.parse(readFileSync(join(f.root, 'sessions', `${owner}.json`))).state, 'waiting')
+  assert.deepEqual(pendingFiles(f), [])
+}))
+
+test('a hook worker that starts just before its deadline still queues an event whose input arrives after it', () => fixture(async f => {
+  assert.equal(f.install('--agent', 'gemini', '--apply').status, 0)
+  const worker = join(f.root, 'agent-board-hook.mjs')
+  const stampFile = join(f.root, 'deadline-stamp.txt')
+  const preload = join(f.home, 'deadline-soon.cjs')
+  const readFile = join(f.root, 'read-stamp.txt')
+  // The deadline falls 1.5 s after the worker starts; its input arrives after that. The worker
+  // stamps when it starts reading, so a worker that only got there after the deadline fails the test.
+  f.save(preload, `if (process.argv[1] === ${JSON.stringify(worker)}) {
+  const fs = require('node:fs')
+  const deadline = Date.now() + 1500
+  process.argv.push('--hook-deadline', String(deadline))
+  const setEncoding = process.stdin.setEncoding.bind(process.stdin)
+  process.stdin.setEncoding = encoding => { fs.writeFileSync(${JSON.stringify(readFile)}, String(Date.now())); return setEncoding(encoding) }
+  fs.writeFileSync(${JSON.stringify(stampFile)}, String(deadline))
+}
+`)
+  const argv = ['--hook-version', '1', '--hook-event', 'BeforeAgent', '--agent-status', '--agent', 'gemini', '--state', 'working', '--progress-file', f.progress]
+  const child = spawn(process.execPath, [worker, ...argv], { env: { ...f.env, NODE_OPTIONS: `--require ${JSON.stringify(preload)}` }, windowsHide: true, stdio: ['pipe', 'ignore', 'ignore'] })
+  const closed = new Promise((done, reject) => { child.once('close', done); child.once('error', reject) })
+  closed.catch(() => {})
+  let status
+  try {
+    const waitUntil = Date.now() + 10000
+    while (!existsSync(stampFile) && Date.now() < waitUntil) await new Promise(done => setTimeout(done, 20))
+    const deadline = Number(readFileSync(stampFile, 'utf8'))
+    while (Date.now() < deadline + 200) await new Promise(done => setTimeout(done, 20))
+    child.stdin.end(JSON.stringify({ session_id: 'late-input-session' }))
+    status = await Promise.race([closed, new Promise(done => setTimeout(() => done('still running'), 10000))])
+  } finally {
+    if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL')
+    await closed
+  }
+  assert.equal(status, 0, hookLog(f))
+  assert.ok(Number(readFileSync(readFile, 'utf8')) < Number(readFileSync(stampFile, 'utf8')), 'the worker must start reading before its deadline')
+  assert.equal(readFileSync(f.progress, 'utf8').includes('agent=gemini'), false)
+  const files = pendingFiles(f)
+  assert.equal(files.length, 1, hookLog(f))
+  assert.match(readFileSync(join(f.root, 'pending', files[0]), 'utf8'), /late-input-session/)
+  assert.match(hookLog(f), /gemini REPORTER_QUEUED/)
+  assert.doesNotMatch(hookLog(f), /INPUT_TIMEOUT/)
+}))
+
+test('a raw entry with an unknown flag or environment variable is dropped, not applied', () => fixture(f => {
+  assert.equal(f.install('--apply').status, 0)
+  const entry = { version: 1, kind: 'raw', at: Date.now(), argv: ['--codex-event', '--agent', 'codex', '--progress-file', f.progress], env: {}, payload: { session_id: 'invalid-raw-session', hook_event_name: 'UserPromptSubmit', turn_id: 'invalid-turn' } }
+  for (const [index, bad] of [
+    { ...entry, version: 2 },
+    { ...entry, kind: 'other' },
+    { ...entry, at: -1 },
+    { ...entry, at: '1234' },
+    { ...entry, argv: [...entry.argv, 1] },
+    { ...entry, argv: [...entry.argv, '--unknown', 'value'] },
+    { ...entry, env: { NODE_OPTIONS: '--inspect' } },
+    { ...entry, env: { GROK_SESSION_ID: 123 } },
+    { ...entry, argv: [...entry.argv, '--home', f.home] },
+    { ...entry, argv: [...entry.argv, '--agent', 'codex'] },
+    { ...entry, argv: ['--codex-report', ...entry.argv.slice(1)] },
+    { ...entry, env: { GROK_SESSION_ID: 'wrong-agent-session' } },
+    { ...entry, argv: [...entry.argv, '--state'] },
+    { ...entry, argv: [...entry.argv, '--state', 'working'] },
+    { ...entry, argv: [...entry.argv, '--event', 'UserPromptSubmit'] },
+    { ...entry, argv: ['--agent-status', ...entry.argv.slice(1), '--state', 'working'] },
+    { ...entry, argv: ['--agent-status', '--agent', 'cursor', '--state', 'working', '--progress-file', f.progress] },
+    { ...entry, argv: ['--codex-event', '--agent', 'unknown', '--progress-file', f.progress] },
+    { ...entry, argv: ['--codex-event', '--agent', 'codex'] },
+    { ...entry, argv: [...entry.argv, '--hook-event', 'UnknownEvent'] },
+    { ...entry, argv: ['--codex-event', '--agent', '--codex', '--progress-file', f.progress] },
+    { ...entry, at: Date.now() + 120000 },
+    { ...entry, argv: ['--agent-status', '--agent', 'antigravity', '--state', 'working', '--event', 'Stop', '--progress-file', f.progress], payload: { conversationId: 'invalid-antigravity-session' } },
+  ].entries()) f.save(join(f.root, 'pending', `${index}.raw.json`), JSON.stringify(bad))
+  const control = { ...entry, payload: { ...entry.payload, session_id: 'valid-raw-session' } }
+  f.save(join(f.root, 'pending', 'valid.raw.json'), JSON.stringify(control))
+  assert.equal(f.event('UserPromptSubmit').status, 0)
+  assert.deepEqual(pendingFiles(f), [])
+  const validOwner = createHash('sha256').update('codex:valid-raw-session').digest('hex')
+  const record = JSON.parse(readFileSync(join(f.root, 'sessions', `${validOwner}.json`)))
+  assert.equal(record.state, 'working')
+  assert.equal(record.turn, 'invalid-turn')
+  const owner = createHash('sha256').update('codex:invalid-raw-session').digest('hex')
+  assert.equal(existsSync(join(f.root, 'sessions', `${owner}.json`)), false)
+  const antigravity = createHash('sha256').update('antigravity:invalid-antigravity-session').digest('hex')
+  assert.equal(existsSync(join(f.root, 'sessions', `${antigravity}.json`)), false)
+  assert.ok(!readFileSync(f.progress, 'utf8').includes('agent=antigravity'))
+}))
+
+test('raw replay classifies board requests and ordinary prompts like live events', () => fixture(f => {
+  assert.equal(f.install('--agent', 'gemini', '--apply').status, 0)
+  const worker = join(f.root, 'agent-board-hook.mjs')
+  for (const [index, prompt] of ['/agent-board', 'Continue the task'].entries()) {
+    const at = Date.now() - 3050
+    const sessions = [`live-prompt-session-${index}`, `raw-prompt-session-${index}`]
+    for (const session_id of sessions) {
+      const report = f.command(['--codex-report', '--agent', 'gemini', '--session', session_id, '--hook-started', String(at - 1000)], { title: 'Question', state: 'waiting', steps: ['- [?] Choose a path'] })
+      assert.equal(report.status, 0, report.stderr)
+    }
+    const args = ['--agent-status', '--agent', 'gemini', '--state', 'working', '--progress-file', f.progress]
+    const payload = { session_id: sessions[1], hook_event_name: 'BeforeAgent', prompt }
+    const queued = spawnSync(process.execPath, [worker, ...args, '--hook-version', '1', '--hook-event', 'BeforeAgent', '--hook-started', String(at)], { env: f.env, input: JSON.stringify(payload), encoding: 'utf8', windowsHide: true, timeout: 2000 })
+    assert.equal(queued.status, 0, queued.stderr)
+    const files = pendingFiles(f)
+    assert.equal(files.length, 1)
+    const raw = JSON.parse(readFileSync(join(f.root, 'pending', files[0])))
+    assert.equal(raw.payload.board_request, index === 0)
+    assert.equal(raw.payload.prompt, undefined)
+    const live = f.command(args, { ...payload, session_id: sessions[0] })
+    assert.equal(live.status, 0, live.stderr)
+    const records = sessions.map(id => JSON.parse(readFileSync(join(f.root, 'sessions', `${createHash('sha256').update(`gemini:${id}`).digest('hex')}.json`))))
+    assert.deepEqual(records[0].steps, records[1].steps)
+    assert.equal(records[0].state, records[1].state)
+    assert.equal(records[1].state, index === 0 ? 'waiting' : 'working')
+    assert.deepEqual(pendingFiles(f), [])
+  }
+}))
+
+test('raw replay accepts clock skew and removes only old pending temporary files', () => fixture(f => {
+  assert.equal(f.install('--apply').status, 0)
+  const pending = join(f.root, 'pending'), at = Date.now() + 50000
+  const raw = { version: 1, kind: 'raw', at, argv: ['--codex-event', '--agent', 'codex', '--progress-file', f.progress], env: {}, payload: { session_id: 'skewed-raw-session', hook_event_name: 'UserPromptSubmit', turn_id: 'skewed-turn', board_request: false } }
+  f.save(join(pending, `${at}.raw.json`), JSON.stringify(raw))
+  for (const name of ['old.tmp', 'recent.tmp', 'foreign.txt']) f.save(join(pending, name), name)
+  mkdirSync(join(pending, 'directory.tmp'))
+  const old = new Date(Date.now() - 120000)
+  for (const name of ['old.tmp', 'foreign.txt', 'directory.tmp']) utimesSync(join(pending, name), old, old)
+  assert.equal(f.event('UserPromptSubmit').status, 0)
+  const owner = createHash('sha256').update('codex:skewed-raw-session').digest('hex')
+  assert.equal(JSON.parse(readFileSync(join(f.root, 'sessions', `${owner}.json`))).appliedAt, at)
+  assert.deepEqual(readdirSync(pending).sort(), ['directory.tmp', 'foreign.txt', 'recent.tmp'])
+  // A raw entry whose cwd is not a string still applies, with the agent's own title.
+  const numeric = { ...raw, at: Date.now(), payload: { session_id: 'numeric-cwd-session', hook_event_name: 'UserPromptSubmit', turn_id: 'numeric-turn', board_request: false, cwd: 42 } }
+  f.save(join(pending, `${numeric.at}.raw.json`), JSON.stringify(numeric))
+  assert.equal(f.event('UserPromptSubmit').status, 0)
+  const numericRecord = JSON.parse(readFileSync(join(f.root, 'sessions', `${createHash('sha256').update('codex:numeric-cwd-session').digest('hex')}.json`)))
+  assert.equal(numericRecord.title, 'Local codex task')
+}))
+
+test('unchanged status keeps its board timestamp and retries refused session record renames', () => fixture(f => {
+  assert.equal(f.install('--apply').status, 0)
+  const owner = createHash('sha256').update(`gemini:${session}`).digest('hex')
+  const recordFile = join(f.root, 'sessions', `${owner}.json`)
+  const calls = join(f.root, 'rename-calls.json'), preload = join(f.root, 'record-fault.cjs')
+  f.save(preload, `const fs = require('node:fs')\nconst rename = fs.renameSync\nlet count = 0\nfs.renameSync = (from, to) => { if (String(to) === ${JSON.stringify(recordFile)}) { fs.writeFileSync(${JSON.stringify(calls)}, JSON.stringify(++count)); if (count <= 3) throw Object.assign(Error('busy record'), { code: ['EPERM', 'EACCES', 'EBUSY'][count - 1] }) }; return rename(from, to) }\nrequire('node:module').syncBuiltinESMExports()\n`)
+  const env = process.platform === 'win32' ? { NODE_OPTIONS: `${f.env.NODE_OPTIONS || ''} --require ${JSON.stringify(preload)}` } : {}
+  const at = Date.now() - 2000
+  const status = time => f.command(['--agent-status', '--agent', 'gemini', '--state', 'waiting', '--hook-started', String(time)], { session_id: session }, env)
+  const first = status(at)
+  assert.equal(first.status, 0, first.stderr)
+  if (process.platform === 'win32') assert.equal(JSON.parse(readFileSync(calls)), 4)
+  const original = JSON.parse(readFileSync(recordFile)), block = readFileSync(f.progress)
+  const next = status(at + 500)
+  assert.equal(next.status, 0, next.stderr)
+  if (process.platform === 'win32') assert.equal(JSON.parse(readFileSync(calls)), 4)
+  assert.deepEqual(JSON.parse(readFileSync(recordFile)), { ...original, appliedAt: at + 500 })
+  assert.deepEqual(readFileSync(f.progress), block)
+  // A repeat with the same ordering time must not reach even the first rename attempt.
+  f.save(calls, '0')
+  const repeated = status(at + 500)
+  assert.equal(repeated.status, 0, repeated.stderr)
+  assert.equal(readFileSync(calls, 'utf8'), '0')
 }))
 
 test('a reporter error is logged and the previous block is kept', () => fixture(async f => {
@@ -785,12 +1272,65 @@ test('legacy prompt classifiers time out and reap their process without promotin
     assert.equal(out.stdout.trim(), '{}')
     assert.equal(existsSync(pidFile), true, `exercise the real classifier process${isWindows ? ': ' + classifierDiagnostic(diagnostic) : ''}`)
     assert.equal(isReporterAlive(Number(readFileSync(pidFile, 'utf8'))), false)
-    assert.deepEqual(readdirSync(inbox), [])
+    const files = readdirSync(inbox)
+    assert.equal(files.length, 1)
+    assert.ok(files[0].endsWith('.json'))
+    const body = readFileSync(join(inbox, files[0]), 'utf8')
+    assert.deepEqual(JSON.parse(body), { session_id: 'synthetic-classifier-timeout' })
+    assert.ok(!body.includes('PRIVATE_'))
     const log = readFileSync(join(f.root, 'hook-errors.log'), 'utf8')
     assert.match(log, /REPORTER_TIMEOUT/)
     assert.ok(!log.includes('PRIVATE_') && !log.includes(f.home))
   } finally {
     if (existsSync(pidFile)) await stopReporter(Number(readFileSync(pidFile, 'utf8')))
+  }
+}))
+
+test('a timed-out prompt classifier saves a metadata receipt that marks a board request but not a folder named agent-board', () => fixture(async f => {
+  const isWindows = process.platform === 'win32'
+  const inbox = join(f.root, 'progress-inbox'), script = join(f.root, isWindows ? 'progress-report.ps1' : 'progress-report.sh')
+  const pidFile = join(f.home, 'classifier.pid'), preload = join(f.home, 'hang-classifier.cjs')
+  f.save(script, isWindows ? reporterPs1() : reporterSh(inbox))
+  f.save(preload, `const fs = require('node:fs')\nfs.writeFileSync(${JSON.stringify(pidFile)}, String(process.pid))\nsetInterval(() => {}, 1000)\n`)
+  const env = { ...f.env, NODE_OPTIONS: `--require ${JSON.stringify(preload.replaceAll('\\', '/'))}` }
+  const args = isWindows ? ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', script, 'cursor', 'prompt'] : [script, 'cursor', 'prompt']
+  // Only the words outside the folder paths count: a project folder named agent-board is no board request.
+  // The sh reporter keeps only plain ASCII values; PowerShell keeps every value.
+  const grok = { hookEventName: 'UserPromptSubmit' }
+  const cases = [
+    { payload: { cwd: '/synthetic/中文', prompt: '/board', transcript_path: '/synthetic/中文/PRIVATE_TRANSCRIPT.jsonl' }, kept: isWindows ? { cwd: '/synthetic/中文' } : {}, isBoard: true },
+    { payload: { cwd: '/synthetic/中文', prompt: 'PRIVATE_RAW_PROMPT', transcript_path: '/synthetic/中文/PRIVATE_TRANSCRIPT.jsonl' }, kept: isWindows ? { cwd: '/synthetic/中文' } : {} },
+    { payload: { cwd: '/synthetic/agent-board', prompt: 'PRIVATE_RAW_PROMPT', transcript_path: '/synthetic/agent-board/PRIVATE_TRANSCRIPT.jsonl' }, kept: { cwd: '/synthetic/agent-board' } },
+    { payload: { cwd: 'C:\\synthetic\\agent-board', prompt: 'PRIVATE_RAW_PROMPT', transcript_path: 'C:\\synthetic\\agent-board\\PRIVATE_TRANSCRIPT.jsonl' }, kept: isWindows ? { cwd: 'C:\\synthetic\\agent-board' } : {} },
+    // Grok Build sends camelCase fields, and the inbox knows it by its workspaceRoot field.
+    { key: 'sessionId', payload: { ...grok, workspaceRoot: '/synthetic/agent-board', transcriptPath: '/synthetic/agent-board/PRIVATE_TRANSCRIPT.jsonl', prompt: 'PRIVATE_RAW_PROMPT' }, kept: { ...grok, workspaceRoot: '/synthetic/agent-board' } },
+    { key: 'sessionId', payload: { ...grok, workspaceRoot: '/synthetic/中文', prompt: 'PRIVATE_RAW_PROMPT' }, kept: { ...grok, workspaceRoot: isWindows ? '/synthetic/中文' : '' } },
+  ]
+  for (const [index, { key = 'session_id', payload, kept, isBoard = false }] of cases.entries()) {
+    const session = `synthetic-timeout-${index}`
+    rmSync(pidFile, { force: true })
+    let isGone = false
+    try {
+      const out = await nativeProcess(isWindows ? 'powershell.exe' : '/bin/sh', args, env,
+        JSON.stringify({ [key]: session, ...payload }),
+        callback => setTimeout(callback, 30000))
+      assert.equal(out.error, undefined, hookFailure(out))
+      assert.equal(out.status, 0, hookFailure(out))
+      assert.equal(out.stdout.trim(), '{}')
+      assert.equal(existsSync(pidFile), true, 'exercise the real classifier process')
+      assert.equal(isReporterAlive(Number(readFileSync(pidFile, 'utf8'))), false)
+      isGone = true
+      const files = readdirSync(inbox)
+      assert.equal(files.length, 1)
+      assert.ok(files[0].endsWith('.json'))
+      const body = readFileSync(join(inbox, files[0]), 'utf8')
+      assert.doesNotMatch(body, /[^\x20-\x7e]|PRIVATE_|\/board|transcript_path|transcriptPath/)
+      assert.deepEqual(JSON.parse(body), { [key]: session, ...kept, ...(isBoard ? { board_request: true } : {}) }, `case ${index}`)
+      assert.match(readFileSync(join(f.root, 'hook-errors.log'), 'utf8'), /REPORTER_TIMEOUT/)
+      rmSync(join(inbox, files[0]))
+    } finally {
+      if (!isGone && existsSync(pidFile)) await stopReporter(Number(readFileSync(pidFile, 'utf8')))
+    }
   }
 }))
 
@@ -816,7 +1356,12 @@ test('a delayed input and hung prompt classifier share one deadline without prom
     assert.equal(existsSync(pidFile), true, 'exercise the classifier after delayed input')
     assert.equal(isReporterAlive(Number(readFileSync(pidFile, 'utf8'))), false)
     assert.equal(existsSync(late), false, 'the classifier must not receive a fresh deadline after input')
-    assert.deepEqual(readdirSync(inbox), [])
+    const files = readdirSync(inbox)
+    assert.equal(files.length, 1)
+    assert.ok(files[0].endsWith('.json'))
+    const body = readFileSync(join(inbox, files[0]), 'utf8')
+    assert.deepEqual(JSON.parse(body), { session_id: 'synthetic-timeout' })
+    assert.ok(!body.includes('PRIVATE_'))
     const log = readFileSync(join(f.root, 'hook-errors.log'), 'utf8')
     assert.match(log, /REPORTER_TIMEOUT/)
     assert.ok(!log.includes('PRIVATE_') && !log.includes(f.home))
@@ -1160,6 +1705,88 @@ test('OpenCode metadata adapter and task tool work without reading messages or C
   } finally { rmSync(home, { recursive: true, force: true }) }
 })
 
+const opencodeSpawnFixture = async (standIn, check) => {
+  const home = mkdtempSync(join(tmpdir(), 'opencode-timeout-'))
+  const probe = { calls: [], run: standIn }
+  globalThis.agentBoardOpenCodeSpawn = probe
+  try {
+    const installed = spawnSync(process.execPath, [setup, '--home', home, '--agent', 'opencode', '--apply'], { env: isolatedEnv(home), encoding: 'utf8', windowsHide: true })
+    assert.equal(installed.status, 0, installed.stderr)
+    const source = readFileSync(join(home, '.config', 'opencode', 'plugins', 'agent-board-local.js'), 'utf8')
+    const stub = 'const tool = Object.assign(value => value, { schema: { string: () => ({}), enum: () => ({}), array: () => ({}) } })'
+    const spawnStub = `import { spawnSync as realSpawnSync } from 'node:child_process'
+const spawnSync = (file, args, options) => {
+  const probe = globalThis.agentBoardOpenCodeSpawn
+  probe.calls.push({ file, args: [...args], options: { ...options } })
+  return probe.run(file, args, options, realSpawnSync, probe.calls.length)
+}`
+    assert.ok(source.includes("import { spawnSync } from 'node:child_process'"))
+    const testPlugin = join(home, 'timeout-test.mjs')
+    writeFileSync(testPlugin, source.replace("import { tool } from '@opencode-ai/plugin'", stub).replace("import { spawnSync } from 'node:child_process'", spawnStub))
+    const { AgentBoardLocal } = await import(pathToFileURL(testPlugin))
+    const instance = await AgentBoardLocal({ client: { session: { get: async ({ path }) => ({ data: { id: path.id } }) } } })
+    const payload = { title: 'Synthetic timeout task', project: 'OpenCode fixture', state: 'working', steps: ['- [~] Synthetic timeout step'] }
+    const context = { sessionID: 'opencode-timeout-session' }
+    await check({ instance, payload, context, probe, progress: join(home, '.agent-board', 'progress.md'), log: join(home, '.agent-board', 'hook-errors.log') })
+  } finally {
+    delete globalThis.agentBoardOpenCodeSpawn
+    rmSync(home, { recursive: true, force: true })
+  }
+}
+
+const opencodeTimeoutResult = () => ({ error: { code: 'ETIMEDOUT' }, status: null, signal: 'SIGKILL' })
+
+test('an OpenCode report retries once when the runtime ends spawnSync early with ETIMEDOUT', async () => {
+  await opencodeSpawnFixture((file, args, options, realSpawnSync, count) => count === 1 ? opencodeTimeoutResult() : realSpawnSync(file, args, options), async f => {
+    f.payload.state = 'done'
+    f.payload.steps = ['- [x] Synthetic timeout step']
+    await f.instance.tool.agent_board_progress.execute(f.payload, f.context)
+    assert.match(readFileSync(f.progress, 'utf8'), /Synthetic timeout task/)
+    assert.equal(f.probe.calls.length, 2)
+    const [first, retry] = f.probe.calls
+    assert.equal(retry.file, first.file)
+    assert.deepEqual(retry.args, first.args)
+    assert.ok(first.args.includes('--hook-deadline'))
+    assert.deepEqual(retry.options, { ...first.options, timeout: retry.options.timeout })
+    assert.ok(retry.options.timeout > 100 && retry.options.timeout <= first.options.timeout)
+    const before = existsSync(f.log) ? readFileSync(f.log, 'utf8') : ''
+    f.probe.calls.length = 0
+    await f.instance.event({ event: { type: 'session.status', properties: { sessionID: 'opencode-timeout-lifecycle', status: { type: 'busy' } } } })
+    assert.match(readFileSync(f.progress, 'utf8'), /agent=opencode .*state=working/)
+    assert.equal(f.probe.calls.length, 2)
+    assert.equal(existsSync(f.log) ? readFileSync(f.log, 'utf8') : '', before)
+  })
+})
+
+test('an OpenCode report that really times out is not retried', async () => {
+  await opencodeSpawnFixture((_file, _args, options) => {
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, options.timeout)
+    return opencodeTimeoutResult()
+  }, async f => {
+    await assert.rejects(f.instance.tool.agent_board_progress.execute(f.payload, f.context), { message: 'HOOK_TIMEOUT' })
+    assert.equal(f.probe.calls.length, 1)
+    assert.match(readFileSync(f.log, 'utf8'), /opencode REPORTER_TIMEOUT/)
+  })
+})
+
+test('an OpenCode report that ends early twice is retried only once', async () => {
+  await opencodeSpawnFixture(() => opencodeTimeoutResult(), async f => {
+    await assert.rejects(f.instance.tool.agent_board_progress.execute(f.payload, f.context), { message: 'HOOK_TIMEOUT' })
+    assert.equal(f.probe.calls.length, 2)
+    assert.match(readFileSync(f.log, 'utf8'), /opencode REPORTER_TIMEOUT/)
+  })
+})
+
+test('a failed OpenCode progress tool logs its code without the payload', async () => {
+  await opencodeSpawnFixture(() => ({ status: 1, stderr: 'PRIVATE_STDERR' }), async f => {
+    await assert.rejects(f.instance.tool.agent_board_progress.execute(f.payload, f.context), { message: 'AGENT_BOARD_REPORT_FAILED' })
+    assert.equal(f.probe.calls.length, 1)
+    const log = readFileSync(f.log, 'utf8')
+    assert.match(log, /opencode REPORTER_FAILED/)
+    for (const privateValue of [f.payload.title, ...f.payload.steps, f.context.sessionID, 'PRIVATE_STDERR', f.progress]) assert.ok(!log.includes(privateValue))
+  })
+})
+
 test('an unsupported bootstrap target is refused without installing anything', () => fixture(f => {
   assert.notEqual(f.install('--agent', 'imaginary', '--apply').status, 0)
   assert.ok(!existsSync(f.root))
@@ -1383,6 +2010,41 @@ test('all targets initialize one shared board and explicitly name unfinished nat
   const text = readFileSync(f.progress, 'utf8')
   for (const agent of ['gemini', 'grok', 'muse']) assert.ok(text.includes(`agent=${agent} `))
   assert.ok(!text.includes('PRIVATE_PAYLOAD'))
+}))
+
+test('Windows Antigravity commands fit cmd.exe with a 120 character home path', { skip: process.platform !== 'win32' }, t => fixture(f => {
+  if (f.home.length >= 119) return t.skip('TEMP is too long to leave room for a 120 character home path')
+  const home = join(f.home, 'h'.repeat(119 - f.home.length))
+  assert.equal(home.length, 120)
+  mkdirSync(home)
+  const result = spawnSync(process.execPath, [setup, '--home', home, '--agent', 'antigravity', '--apply'], { env: isolatedEnv(home), encoding: 'utf8', windowsHide: true, timeout: 15000 })
+  assert.equal(result.status, 0, result.stderr)
+  const hooks = JSON.parse(readFileSync(join(home, '.gemini', 'config', 'hooks.json')))['agent-board-local']
+  for (const group of Object.values(hooks)) for (const hook of group) assert.ok(hook.command.length < 8191, `${hook.command.length} characters`)
+}))
+
+test('Windows Antigravity queues an event with the PowerShell process start stamp', { skip: process.platform !== 'win32' }, () => fixture(async f => {
+  assert.equal(f.install('--agent', 'antigravity', '--apply').status, 0)
+  const worker = join(f.root, 'agent-board-hook.mjs')
+  const command = JSON.parse(readFileSync(join(f.home, '.gemini', 'config', 'hooks.json')))['agent-board-local'].PreInvocation[0].command
+  const stampFile = join(f.root, 'powershell-stamp.json')
+  const preload = join(f.home, 'queue-antigravity.cjs')
+  f.save(preload, `if (process.argv[1] === ${JSON.stringify(worker)}) {
+  const at = Number(process.argv[process.argv.indexOf('--hook-started') + 1])
+  require('node:fs').writeFileSync(${JSON.stringify(stampFile)}, JSON.stringify({ at, nodeStarted: require('node:perf_hooks').performance.timeOrigin }))
+  process.argv.push('--hook-deadline', String(Date.now() - 1))
+}
+`)
+  const result = await fireCommand({ ...f, env: { ...f.env, NODE_OPTIONS: `--require ${JSON.stringify(preload)}` } }, command, JSON.stringify({ conversationId: 'stamped-antigravity-session' }))
+  assert.equal(result.status, 0, hookFailure(result))
+  const stamp = JSON.parse(readFileSync(stampFile))
+  assert.ok(Number.isSafeInteger(stamp.at))
+  assert.ok(stamp.at < Math.floor(stamp.nodeStarted), 'PowerShell must have started before Node')
+  const files = pendingFiles(f)
+  assert.equal(files.length, 1)
+  assert.match(files[0], /\.raw\.json$/)
+  assert.equal(JSON.parse(readFileSync(join(f.root, 'pending', files[0]))).at, stamp.at)
+  assert.match(readFileSync(join(f.root, 'hook-errors.log'), 'utf8'), /antigravity REPORTER_QUEUED/)
 }))
 
 test('Antigravity setup merges its named native hooks and removes only the owned definition', () => fixture(f => {

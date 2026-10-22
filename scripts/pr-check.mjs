@@ -8,11 +8,15 @@ import { fragmentIssue, isFragmentPath } from './changelog-fold.mjs'
 // The open pull request cap the owner approved for CONTRIBUTING.md rule 10 (#229): per author, and in all.
 export const AUTHOR_CAP = 2
 export const TOTAL_CAP = 8
+// The most issues a fix pull request may name (CONTRIBUTING.md rule 2); a feature pull request has no limit.
+export const FIX_ISSUE_CAP = 3
 
 const escapeRegex = text => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 const result = () => ({ problems: [], info: [] })
 const problem = (check, message, fix) => ({ check, message, fix })
 const isReleaseTitle = title => /^chore\(release\):/.test(title)
+// The type is read as rule 6 reads it for the CHANGELOG: the word before "(", "!" or ":".
+const isFixTitle = title => /^fix[(!:]/.test(title)
 const linesOf = text => text.split(/\r?\n/)
 
 export const stripComments = body => body.replace(/<!--[\s\S]*?(?:-->|$)/g, '')
@@ -68,23 +72,35 @@ export const addedLines = unifiedDiff => {
 }
 
 export const issueLine = (body, title) => {
-  const output = { issue: null, kind: null, ...result() }
+  const output = { issue: null, kind: null, issues: [], ...result() }
   if (isReleaseTitle(title)) {
     output.info.push('issue: release pull requests need no issue line.')
     return output
   }
   const clean = stripComments(body)
-  const first = linesOf(clean).find(line => line.trim())?.trim() ?? ''
-  const match = first.match(/^(Fixes|Part of)\s+#(\d+)\b/i)
-  if (!match) {
+  // The list is the run of issue lines that opens the body; the first other line ends it.
+  const listed = []
+  for (const line of linesOf(clean).map(text => text.trim()).filter(Boolean)) {
+    const match = line.match(/^(Fixes|Part of)\s+#(\d+)\b/i)
+    if (!match) break
+    listed.push({ number: Number(match[2]), kind: match[1].toLowerCase() })
+  }
+  if (!listed.length) {
     output.problems.push(problem('issue', 'the first non-empty body line must name one issue.', 'add "Fixes #N" or "Part of #N" as the first line.'))
     return output
   }
-  output.issue = Number(match[2])
-  output.kind = match[1].toLowerCase()
+  output.issue = listed[0].number
+  output.kind = listed[0].kind
+  output.issues = listed.map(item => item.number)
+  for (const number of new Set(output.issues.filter((item, index) => output.issues.indexOf(item) !== index))) {
+    output.problems.push(problem('issue', `#${number} is listed more than once.`, 'give each issue one "Fixes #N" or "Part of #N" line.'))
+  }
+  if (listed.length > FIX_ISSUE_CAP && isFixTitle(title)) {
+    output.problems.push(problem('issue', `a fix pull request names ${listed.length} issues; the most is ${FIX_ISSUE_CAP}.`, `keep ${FIX_ISSUE_CAP} or fewer issue lines and move the other bug fixes to another pull request (CONTRIBUTING.md, Pull requests, rule 2).`))
+  }
   for (const closing of clean.matchAll(/\b(close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s*:?\s+#(\d+)/gi)) {
-    if (Number(closing[2]) !== output.issue) {
-      output.problems.push(problem('issue', `a closing keyword also names #${closing[2]}.`, 'remove the other closing reference so this pull request covers only its first issue.'))
+    if (!output.issues.includes(Number(closing[2]))) {
+      output.problems.push(problem('issue', `a closing keyword also names #${closing[2]}.`, output.issues.length === 1 ? 'remove the other closing reference so this pull request covers only its first issue.' : 'remove the other closing reference so this pull request closes only the issues on its first lines.'))
     }
   }
   return output
@@ -140,11 +156,14 @@ export const sections = (body, template) => {
   return output
 }
 
-export const claimed = (comments, agent, branch) => {
+// A pull request that names several issues passes each number, so the message names the issue that lacks the claim.
+export const claimed = (comments, agent, branch, issue = null) => {
   const output = result()
   const agentPattern = agent ? new RegExp(`\\b${escapeRegex(agent)}\\b`, 'i') : null
   if (!comments.some(comment => comment.body.includes(branch) && agentPattern?.test(comment.body))) {
-    output.problems.push(problem('claim', 'no issue comment claims this branch for this agent.', 'comment on the issue with "Claim: <agent>, <branch>" before starting work.'))
+    output.problems.push(issue === null
+      ? problem('claim', 'no issue comment claims this branch for this agent.', 'comment on the issue with "Claim: <agent>, <branch>" before starting work.')
+      : problem('claim', `no comment on #${issue} claims this branch for this agent.`, `comment on #${issue} with "Claim: <agent>, <branch>" before starting work; each issue of the pull request needs its own claim.`))
   }
   return output
 }
@@ -195,8 +214,12 @@ export const testTitles = files => {
 export const titleKnown = (span, titles) => titles.exact.has(span)
   || (span.match(spanPlaceholder) ? titles.shapes.has(span.replace(spanPlaceholder, '\0')) : titles.templates.some(parts => fitsTemplate(span, parts)))
 
-export const fragmentChanges = ({ paths = [], addedPaths = [], headPaths, issue, isRelease }) => {
+const listedIssues = (issue, issues) => [...new Set(issues?.length ? issues : issue === null || issue === undefined ? [] : [issue])]
+
+// issues: every issue on the body's first lines; a fragment may be named for any of them, once each.
+export const fragmentChanges = ({ paths = [], addedPaths = [], headPaths, issue, issues, isRelease }) => {
   const output = result()
+  const listed = listedIssues(issue, issues)
   const fragments = paths.filter(isFragmentPath)
   const fresh = addedPaths.filter(isFragmentPath)
   if (isRelease) {
@@ -207,12 +230,23 @@ export const fragmentChanges = ({ paths = [], addedPaths = [], headPaths, issue,
   for (const path of fresh) {
     const number = fragmentIssue(path)
     if (number === null) output.problems.push(problem('changelog', `invalid fragment name: ${path}.`, 'use changelog.d/<issue>-<lowercase-slug>.md; see changelog.d/README.md.'))
-    else if (issue !== null && issue !== undefined && Number(number) !== issue) output.problems.push(problem('changelog', `the fragment ${path} is named for a different issue than #${issue}.`, `rename it to changelog.d/${issue}-<slug>.md.`))
+    else if (listed.length && !listed.includes(Number(number))) {
+      const names = listed.map(item => `#${item}`).join(', ')
+      output.problems.push(problem('changelog', `the fragment ${path} is named for a different issue than ${names}.`, listed.length === 1 ? `rename it to changelog.d/${listed[0]}-<slug>.md.` : `rename it to changelog.d/<issue>-<slug>.md, with <issue> one of ${names}.`))
+    }
   }
   for (const path of fragments.filter(path => !fresh.includes(path))) {
     output.problems.push(problem('changelog', `an existing fragment was edited or removed: ${path}.`, 'restore that fragment and add a new file with a different slug; only chore(release): pull requests fold existing fragments.'))
   }
-  if (fresh.length > 1) output.problems.push(problem('changelog', 'more than one fragment was added.', 'combine this pull request entry into exactly one new changelog.d/<issue>-<slug>.md file.'))
+  if (listed.length < 2) {
+    if (fresh.length > 1) output.problems.push(problem('changelog', 'more than one fragment was added.', 'combine this pull request entry into exactly one new changelog.d/<issue>-<slug>.md file.'))
+  } else {
+    // One fragment for each issue the body lists, so two for the same number still say too much.
+    const numbers = fresh.map(fragmentIssue).filter(number => number !== null)
+    for (const number of new Set(numbers.filter((item, index) => numbers.indexOf(item) !== index))) {
+      output.problems.push(problem('changelog', `more than one fragment was added for #${number}.`, `combine them into exactly one new changelog.d/${number}-<slug>.md file.`))
+    }
+  }
   return output
 }
 
@@ -242,8 +276,8 @@ export const changelogEntry = ({ entry, issue, titles, isDocsOnly, location = 'U
 }
 
 // Rule 6 asks an entry of fix and feature pull requests; any other entry is checked when there is one.
-export const changelog = ({ text, added, issue, titles, isRelease, isDocsOnly, isRequired = true, paths = [], addedPaths = [], headPaths }) => {
-  const output = fragmentChanges({ paths, addedPaths, headPaths, issue, isRelease })
+export const changelog = ({ text, added, issue, issues, titles, isRelease, isDocsOnly, isRequired = true, paths = [], addedPaths = [], headPaths }) => {
+  const output = fragmentChanges({ paths, addedPaths, headPaths, issue, issues, isRelease })
   if (isRelease) {
     output.info.push('changelog: skipped for a release pull request.')
     return output
@@ -257,7 +291,23 @@ export const changelog = ({ text, added, issue, titles, isRelease, isDocsOnly, i
   const inside = start === -1 ? [] : nonblank.filter(line => line.line > start + 1 && line.line <= end && !/^## /.test(line.text))
   if (fresh.length) {
     if (inside.length) output.problems.push(problem('changelog', 'the entry is both in changelog.d/ and under Unreleased; keep only the fragment.', 'remove the added Unreleased entry from CHANGELOG.md.'))
-    for (const path of fresh) output.problems.push(...changelogEntry({ entry: added.filter(item => item.path === path).map(item => item.text).join('\n'), issue, titles, isDocsOnly, location: 'fragment' }).problems)
+    // Each fragment names the issue in its own file name; one named for no listed issue is judged against the first.
+    const ownIssue = path => (issues ?? []).find(item => item === Number(fragmentIssue(path))) ?? issue
+    // A fix or feature pull request that names several issues needs a fragment for each (rule 6).
+    const listed = listedIssues(issue, issues)
+    if (isRequired && listed.length > 1) {
+      const named = new Set(fresh.map(path => Number(fragmentIssue(path))))
+      for (const number of listed.filter(item => !named.has(item))) {
+        output.problems.push(problem('changelog', `no fragment was added for #${number}.`, `add changelog.d/${number}-<slug>.md (rule 6: one fragment for each issue).`))
+      }
+    }
+    for (const path of fresh) output.problems.push(...changelogEntry({ entry: added.filter(item => item.path === path).map(item => item.text).join('\n'), issue: ownIssue(path), titles, isDocsOnly, location: 'fragment' }).problems)
+    return output
+  }
+  // An Unreleased entry names one issue, so several issues can only be covered by fragments.
+  const several = listedIssues(issue, issues)
+  if (isRequired && several.length > 1) {
+    output.problems.push(problem('changelog', 'a pull request that names several issues adds a fragment for each; an Unreleased entry covers one issue.', `add changelog.d/<issue>-<slug>.md for each listed issue (${several.map(item => `#${item}`).join(', ')}).`))
     return output
   }
   const notNeeded = () => output.info.push('changelog: no entry needed; rule 6 asks one of fix and feature pull requests.')
@@ -413,19 +463,28 @@ export const checkPr = data => {
   add(author)
   add(naming(data.title, data.branch))
   add(sections(data.body, data.template))
-  add(changelog({ text: data.changelogText, added: data.added, paths: data.paths, addedPaths: data.addedPaths, headPaths: data.headPaths, issue: issue.issue, titles: testTitles(data.testFiles), isRelease, isDocsOnly: data.paths.every(path => path.endsWith('.md') || /^(docs|\.github)\//.test(path)), isRequired: /^(feat|fix)[(!:]/.test(data.title) }))
+  add(changelog({ text: data.changelogText, added: data.added, paths: data.paths, addedPaths: data.addedPaths, headPaths: data.headPaths, issue: issue.issue, issues: issue.issues, titles: testTitles(data.testFiles), isRelease, isDocsOnly: data.paths.every(path => path.endsWith('.md') || /^(docs|\.github)\//.test(path)), isRequired: /^(feat|fix)[(!:]/.test(data.title) }))
   add(privateData({ added: data.added, body: data.body }))
   add(binaryImages(data.changedPaths))
   if (issue.issue !== null) {
-    // false: GitHub answered that the issue does not exist; null: not looked up (offline).
-    if (data.issueData === null) output.info.push('issue status: skipped (offline).')
-    else if (data.issueData === false) {
-      output.problems.push(problem('issue', `issue #${issue.issue} does not exist in this repository.`, 'use the number of an open issue covering this change.'))
-    } else if ('pull_request' in data.issueData || data.issueData.state !== 'open') {
-      output.problems.push(problem('issue', `#${issue.issue} must be an open issue, not a pull request or a closed issue.`, 'use the number of an open issue covering this change.'))
+    // The first issue is read from issueData and issueComments; each further one from moreIssues[number].
+    const lookups = [...new Set(issue.issues)].map((number, index) => {
+      const found = index === 0 ? data : data.moreIssues?.[number]
+      return { number, issueData: found?.issueData, issueComments: found?.issueComments }
+    })
+    // false: GitHub answered that the issue does not exist; null (or no lookup): not looked up (offline).
+    if (lookups.some(item => (item.issueData ?? null) === null)) output.info.push('issue status: skipped (offline).')
+    for (const { number, issueData } of lookups) {
+      if (issueData === false) {
+        output.problems.push(problem('issue', `issue #${number} does not exist in this repository.`, 'use the number of an open issue covering this change.'))
+      } else if (issueData && ('pull_request' in issueData || issueData.state !== 'open')) {
+        output.problems.push(problem('issue', `#${number} must be an open issue, not a pull request or a closed issue.`, 'use the number of an open issue covering this change.'))
+      }
     }
-    if (data.issueComments === null) output.info.push('claim: skipped (offline).')
-    else if (data.issueData !== false) add(claimed(data.issueComments, author.agent, data.branch))
+    if (lookups.some(item => (item.issueComments ?? null) === null)) output.info.push('claim: skipped (offline).')
+    for (const { number, issueData, issueComments } of lookups) {
+      if (issueComments && issueData !== false) add(claimed(issueComments, author.agent, data.branch, lookups.length > 1 ? number : null))
+    }
   }
   if (data.open === null) output.info.push('cap: skipped (offline).')
   else if (isRelease || data.paths.some(isGovernancePath) || data.labels?.some(label => labelName(label) === 'cap-exempt')) output.info.push('cap: this pull request is exempt.')
@@ -646,10 +705,15 @@ export const main = async (argv = process.argv.slice(2)) => {
     data.prComments = null
     if (!options['--offline']) {
       const api = apiReader(options, repo, cwd)
-      const issue = issueLine(data.body, data.title).issue
-      if (issue !== null) {
-        data.issueData = await api(`issues/${issue}`, { isMissingAllowed: true })
-        data.issueComments = data.issueData === false ? [] : await api(`issues/${issue}/comments`, { isList: true })
+      const [first, ...more] = [...new Set(issueLine(data.body, data.title).issues)]
+      const lookup = async number => {
+        const issueData = await api(`issues/${number}`, { isMissingAllowed: true })
+        return { issueData, issueComments: issueData === false ? [] : await api(`issues/${number}/comments`, { isList: true }) }
+      }
+      if (first !== undefined) {
+        Object.assign(data, await lookup(first))
+        data.moreIssues = {}
+        for (const number of more) data.moreIssues[number] = await lookup(number)
       }
       const open = []
       for (const pr of await api('pulls?state=open', { isList: true })) {

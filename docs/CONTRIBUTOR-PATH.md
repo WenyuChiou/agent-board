@@ -2,7 +2,7 @@
 
 This page is for an agent working on Agent Board from another computer, with `git`, `gh` (logged in to GitHub) and Node 22.18+ or 24. It gives the commands for [CONTRIBUTING.md, Pull requests](../CONTRIBUTING.md#pull-requests); where the two disagree, CONTRIBUTING.md wins. Every command runs as written in bash on Linux and in Git Bash on Windows. On macOS, the `date` in step 2 is the one command known to differ; it falls back to macOS's own form (`-v`). macOS has not been tried. Nothing here needs Claude Code, files on the maintainer's computer or a chat: everything happens in the repository, its issues and its pull requests.
 
-Below, `<agent>` is your name in lower case (`codex`, `dot`, `muse`, `cursor`). An agent that a coordinating session sent adds that session's lane in brackets (`codex (phase1)`). `<N>` is the issue, `<PR>` your pull request and `<branch>` your branch, named `<type>/<short-slug>` (`fix/question-ledger-write`).
+Below, `<agent>` is your name in lower case (`codex`, `dot`, `muse`, `cursor`). An agent that a coordinating session sent adds that session's lane in brackets (`codex (phase1)`). `<N>` is the issue (each issue, when your pull request names several), `<PR>` your pull request and `<branch>` your branch, named `<type>/<short-slug>` (`fix/question-ledger-write`).
 
 ## How a pull request moves
 
@@ -24,7 +24,7 @@ gh pr list -R WenyuChiou/agent-board --state open
 gh issue view <N> -R WenyuChiou/agent-board --comments
 ```
 
-Go on only if nobody has an open pull request for the issue or a `Claim:` whose time has not passed, you have no other issue in progress (claim the next only after your last pull request merges), the issue is in the next milestone (later milestones are parked), and you have a free slot ([docs/dev/team-process.md, One thing at a time](dev/team-process.md#one-thing-at-a-time)). A slot is rule 10: at most two open pull requests per author and eight in all. Drafts count; release pull requests, governance pull requests and those labelled `cap-exempt` do not. Keep open pull requests at six or fewer; eight is the hard cap. Then claim it, at most two days ahead:
+Go on only if nobody has an open pull request for the issue or a `Claim:` whose time has not passed, you have no issue in progress outside this pull request (claim the next only after your last pull request merges), the issue is in the next milestone (later milestones are parked), and you have a free slot ([docs/dev/team-process.md, One thing at a time](dev/team-process.md#one-thing-at-a-time)). A slot is rule 10: at most two open pull requests per author and eight in all. Drafts count; release pull requests, governance pull requests and those labelled `cap-exempt` do not. Keep open pull requests at six or fewer; eight is the hard cap. One pull request covers one feature (even when it spans several issues) or two or three bug fixes, never more than three; claim every issue it will name, with the same branch ([CONTRIBUTING.md](../CONTRIBUTING.md#pull-requests) rules 2 and 3). Then claim each one, at most two days ahead:
 
 ```sh
 until=$(date -u -d '+1 day' '+%Y-%m-%d %H:%M' 2>/dev/null || date -u -v+1d '+%Y-%m-%d %H:%M')
@@ -110,7 +110,7 @@ A test that fails once and passes on its own rerun is reported as both, never as
 
 ## 5. Write the CHANGELOG fragment
 
-A fix or feature pull request adds one new file, `changelog.d/<N>-<slug>.md`, holding its entry exactly as it will read in `CHANGELOG.md` ([changelog.d/README.md](../changelog.d/README.md)). Do not edit `CHANGELOG.md` or another pull request's fragment. The slug uses lowercase letters, digits and single hyphens; if the issue already has a fragment from another pull request, pick a different slug.
+A fix or feature pull request adds one new file for each issue it names, `changelog.d/<N>-<slug>.md` (three bug fixes add three files), holding that issue's entry exactly as it will read in `CHANGELOG.md` ([changelog.d/README.md](../changelog.d/README.md)). Do not edit `CHANGELOG.md` or another pull request's fragment. The slug uses lowercase letters, digits and single hyphens; if the issue already has a fragment from another pull request, pick a different slug.
 
 ```markdown
 - **What changed, in plain words (#N).** What went wrong and what it does now.
@@ -127,7 +127,7 @@ Commit as `<type>: <summary>` or `<type>(<scope>): <summary>`, with a body that 
 cp .github/pull_request_template.md ../pr-body.md
 ```
 
-The body opens with `Fixes #N` (or `Part of #N` for one step of a split issue), then `Author: <agent>, <branch>`. Under Evidence, name the full head sha your results are for. Under Checks, add each result after a dash; for a check you did not run, `not run:` and why; for one that does not apply, `n/a:` and why. Screenshots are drawn from made-up data, with alt text starting "Synthetic". Check the body, push and open the draft:
+The body opens with one `Fixes #N` line for each issue (`Part of #N` for one step of a split issue), one right after the other, then `Author: <agent>, <branch>`. The PR check reads the run of those lines at the top, fails a `fix` title that lists more than three, and looks for your claim on each issue. Never put a bug fix in a feature pull request. Under Evidence, name the full head sha your results are for. Under Checks, add each result after a dash; for a check you did not run, `not run:` and why; for one that does not apply, `n/a:` and why. Screenshots are drawn from made-up data, with alt text starting "Synthetic". Check the body, push and open the draft:
 
 ```sh
 node scripts/pr-check.mjs --body-file ../pr-body.md --title "fix(cli): <summary>"
@@ -197,7 +197,7 @@ Fragments in `changelog.d/` do not conflict, since each pull request adds its ow
 
 ## 10. After the merge, or handing over
 
-You never merge. The maintainer (the owner, or the Claude Code session the owner named maintainer) reviews and merges, deletes the branch, and comments on the issue with the merge commit and the evidence; your `Fixes #N` line closes it, while a `Part of #N` pull request leaves it open for the next step. There is nothing left for you to do on this pull request, and its branch is not reused: the next step of a split issue is a new pull request ([CONTRIBUTING.md](../CONTRIBUTING.md#pull-requests) rule 2), from a new branch.
+You never merge. The maintainer (the owner, or the Claude Code session the owner named maintainer) reviews and merges, deletes the branch, and comments on each issue with the merge commit and the evidence; each `Fixes #N` line closes its issue, while a `Part of #N` line leaves its issue open for the next step. There is nothing left for you to do on this pull request, and its branch is not reused: the next step of a split issue is a new pull request ([CONTRIBUTING.md](../CONTRIBUTING.md#pull-requests) rule 2), from a new branch.
 
 If you stop before the work is done, push your branch, then:
 
