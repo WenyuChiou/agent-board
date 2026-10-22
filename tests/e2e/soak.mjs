@@ -1,9 +1,10 @@
+import assert from 'node:assert/strict'
 import { mkdirSync, readFileSync, readdirSync, realpathSync, renameSync } from 'node:fs'
 import { arch, homedir, release, tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { performance } from 'node:perf_hooks'
 import { fileURLToPath, pathToFileURL } from 'node:url'
-import { OUT_DEFAULT, fileOpsPerPoll, makeRedact, median, parseArguments, peakRss, percentile, tallyOf, writeReport } from './lib/soak-report.mjs'
+import { OUT_DEFAULT, archiveIntegrity, archiveProblems, fileOpsPerPoll, levelOutcome, makeRedact, median, parseArguments, peakRss, percentile, pruneRefusal, tallyOf, writeReport } from './lib/soak-report.mjs'
 
 // L6 soak: the terminal board (--watch) and the page server (--serve) run side by side on one
 // isolated world while data grows to the scale budget, tasks are archived and the polling goes on.
@@ -25,6 +26,8 @@ const TITLES = {
 // the file-operation check still fails, since that slowness is what keeps a run short: a page
 // server that is gone, answers with an error, drops a connection or leaves a poll unanswered for
 // 5 minutes is never held, and neither is a run that reaches 1,000, which says nothing of the bug.
+// While the file-operation check fails and is held, the same slowness also explains an archive that
+// got no answer in time and too few memory lines after it (see pruneRefusal and levelOutcome).
 const HOLDS = { ops: 'hold:serve-poll-file-ops', memory: 'hold:serve-poll-file-ops', prune: 'hold:question-ledger-prune', survive: 'hold:serve-poll-file-ops' }
 
 const ARCHIVE_SLACK_MS = 120000
@@ -158,7 +161,7 @@ const soak = async ({ minutes, out }) => {
   // The poll the end of the tail cut short, kept apart from the polls that got an answer or failed.
   let cutPoll
   const samples = { serve: [], watch: [] }
-  const state = { archiveEndPolls: undefined, archiveEndAt: undefined, archivedSessions: undefined, heldBefore: undefined, watchFramesAtArchive: undefined, growthEndAt: undefined }
+  const state = { archiveStartAt: undefined, archiveEndPolls: undefined, archiveEndAt: undefined, archivedSessions: undefined, heldBefore: undefined, watchFramesAtArchive: undefined, growthEndAt: undefined }
   // The polls sent after the archive was done: one sent before its last request does not count.
   const tailPolls = () => state.archiveEndAt === undefined ? [] : polls.filter(one => one.start >= state.archiveEndAt)
   let sampler
@@ -341,7 +344,8 @@ const soak = async ({ minutes, out }) => {
     // Why a request got no answer, in plain words for the report.
     const causeOf = error => {
       const code = error?.cause?.code ?? error?.code
-      if (error?.name === 'TimeoutError') return 'no answer in 5 minutes'
+      // undici's own header and body timers are 300 s too, and may run out first.
+      if (error?.name === 'TimeoutError' || ['UND_ERR_HEADERS_TIMEOUT', 'UND_ERR_BODY_TIMEOUT'].includes(code)) return 'no answer in 5 minutes'
       if (['ECONNRESET', 'EPIPE', 'UND_ERR_SOCKET', 'UND_ERR_CLOSED'].includes(code)) return 'connection closed'
       if (code === 'ECONNREFUSED') return 'connection refused'
       return 'other error'
@@ -394,25 +398,40 @@ const soak = async ({ minutes, out }) => {
       const until = since() + limitMs
       while (isRunning() && polls.length < goal && since() < until) await sleep(100)
     }
-    // A request that gets no answer (a busy page server, or the soak stopping) is status 0, not a crash.
-    const call = async (path, body) => {
-      const start = since()
-      try { return await send(path, body) } catch (error) {
-        if (isRunning()) problem(`A request to the page for ${path} got no answer in ${Math.round((since() - start) / 1000)} s: ${String(error?.message ?? error).split(/\r?\n/)[0]}`)
-        return { status: 0, json: {} }
-      }
-    }
     // The archive's requests wait for their answer as a poll does, since one given up early is still
     // carried out by the server after the soak has looked; but never past the time the archive may
     // take (the planned time and ARCHIVE_SLACK_MS), so the tail still gets its polls.
     const archiveWait = () => Math.max(1000, Math.floor(Math.min(POLL_GIVE_UP_MS, total + ARCHIVE_SLACK_MS - since())))
-    const send = async (path, body) => {
-      const response = await fetch(new URL(path, server.url), { method: body === undefined ? 'GET' : 'POST', headers: body === undefined ? headers : { ...headers, 'content-type': 'application/json' }, body: body === undefined ? undefined : JSON.stringify(body), signal: AbortSignal.any([AbortSignal.timeout(archiveWait()), stopper.signal]) })
-      const text = await response.text()
+    // A request that gets no answer (a busy page server, or the soak stopping) is status 0, not a crash.
+    // Its cause tells a wait that ran out ('timeout') from a refused or lost connection. A kept-alive
+    // connection that closes before any answer is the same race the polls resend for, so the
+    // request is sent once more, and counted: the server never had it. Once an answer has begun
+    // nothing is sent again, and an answer cut off keeps its status.
+    const CALL_CAUSES = { 'no answer in 5 minutes': 'timeout', 'connection closed': 'closed', 'connection refused': 'refused' }
+    let resent = 0
+    const call = async (path, body) => {
+      const start = since()
+      const failed = (error, words, status = 0) => {
+        if (isRunning()) problem(`A request to the page for ${path} ${words} after ${Math.round((since() - start) / 1000)} s: ${String(error?.message ?? error).split(/\r?\n/)[0]}`)
+        return { status, json: {}, cause: CALL_CAUSES[causeOf(error)] ?? 'other' }
+      }
+      let response
+      for (let attempt = 1; response === undefined; attempt += 1) {
+        try {
+          response = await fetch(new URL(path, server.url), { method: body === undefined ? 'GET' : 'POST', headers: body === undefined ? headers : { ...headers, 'content-type': 'application/json' }, body: body === undefined ? undefined : JSON.stringify(body), signal: AbortSignal.any([AbortSignal.timeout(archiveWait()), stopper.signal]) })
+        } catch (error) {
+          if (CALL_CAUSES[causeOf(error)] === 'closed' && attempt === 1 && isRunning()) { resent += 1; continue }
+          return failed(error, 'got no answer')
+        }
+      }
+      let text
+      try { text = await response.text() } catch (error) { return failed(error, 'had its answer cut off', response.status) }
       let json = {}
       try { json = JSON.parse(text) } catch {}
       return { status: response.status, json }
     }
+    // A 408 is the server's own wait running out, the same as no answer in time.
+    const refusalOf = answer => answer.status === 408 ? { cause: 'timeout', count: 1 } : answer.status === 0 ? { cause: answer.cause ?? 'other', count: 1 } : { cause: 'status', status: answer.status, count: 1 }
 
     // The data. 290 blocks come from block(), 10 from the Codex hook; 200 of the block() ones are
     // finished during growth, so growth ends with 100 live sessions and 300 blocks; the questions
@@ -477,34 +496,62 @@ const soak = async ({ minutes, out }) => {
       await waitPolls(3)
       // What the tasks hold just before the archive, so the prune check knows there was something to prune.
       state.heldBefore = holdings()
+      const sessionsIn = () => new Set([...readFileSync(world.path, 'utf8').matchAll(/^<!-- auto session=([a-f0-9]+) /gm)].map(one => one[1]))
+      // The blocks the archive is not to touch (the Codex hook's), to tell later that none was lost.
+      const others = [...sessionsIn()].filter(session => !createdSessions.has(session))
+      const stoppedSessions = new Set(ended.map(number => specOf(number, 'ended').session))
+      const refusals = []
+      const answered = new Set()
+      const unpressed = new Set()
       const tidy = await call('/api/tidy', {})
-      let refused = tidy.status === 200 ? 0 : 1
-      if (tidy.status !== 200) problem(`Archive now answered ${tidy.status}.`)
+      if (tidy.status === 200) for (const session of createdSessions) { if (!stoppedSessions.has(session)) answered.add(session) }
+      else {
+        refusals.push(refusalOf(tidy))
+        problem(`Archive now answered ${tidy.status}.`)
+      }
       // One look at the board gives every stopped card's key and fingerprint; none of them changes meanwhile.
-      let json = {}
-      for (let attempt = 1; attempt <= 3 && isRunning() && json.model === undefined; attempt += 1) json = (await call('/api/board')).json
-      const rows = json.model === undefined ? [] : [...json.model.groups.flatMap(group => group.rows), ...json.model.stopped, ...json.model.idle]
+      let look = { status: 0, json: {} }
+      for (let attempt = 1; attempt <= 3 && isRunning() && look.json.model === undefined; attempt += 1) look = await call('/api/board')
+      const rows = look.json.model === undefined ? [] : [...look.json.model.groups.flatMap(group => group.rows), ...look.json.model.stopped, ...look.json.model.idle]
       for (const [at, number] of ended.entries()) {
         if (!isRunning()) break
         // The stopped tasks not reached count as refused: the archive did not finish.
         if (since() > total + ARCHIVE_SLACK_MS) {
           problem('The archive of stopped tasks was cut short because the planned time was long over.')
-          refused += ended.length - at
+          refusals.push({ cause: 'cut', count: ended.length - at })
+          for (const left of ended.slice(at)) unpressed.add(specOf(left, 'ended').session)
           break
         }
-        const title = specOf(number, 'ended').title
+        const { title, session } = specOf(number, 'ended')
         const row = rows.find(one => one.title === title && one.canArchive)
-        const answer = row === undefined ? { status: 0, json: {} } : await call('/api/act', { key: row.key, type: 'archive', text: '', session: '', asked: '', fp: row.fp })
-        if (answer.status !== 200) {
-          refused += 1
-          problem(row === undefined ? 'A stopped task with a question had no Archive button.' : `Archiving a stopped task with a question answered ${answer.status}.`)
+        // With no board to read, the card's button could not be pressed: its cause is the board's
+        // (a board answered 200 that could not be read is its own cause).
+        if (row === undefined) {
+          const isNoBoard = look.json.model === undefined
+          if (isNoBoard) unpressed.add(session)
+          refusals.push(!isNoBoard ? { cause: 'button', count: 1 } : look.status === 200 ? { cause: 'unreadable', count: 1 } : refusalOf(look))
+          problem(!isNoBoard ? 'A stopped task with a question had no Archive button.' : look.status === 200 ? 'The board for the stopped tasks could not be read.' : 'The board for the stopped tasks got no answer.')
+          continue
+        }
+        const answer = await call('/api/act', { key: row.key, type: 'archive', text: '', session: '', asked: '', fp: row.fp })
+        if (answer.status === 200) answered.add(session)
+        else {
+          refusals.push(refusalOf(answer))
+          problem(`Archiving a stopped task with a question answered ${answer.status}.`)
         }
       }
       await waitPolls(2)
-      const present = new Set([...readFileSync(world.path, 'utf8').matchAll(/^<!-- auto session=([a-f0-9]+) /gm)].map(one => one[1]))
+      const present = sessionsIn()
       const tried = [...createdSessions]
       state.archivedSessions = new Set(tried.filter(session => !present.has(session)))
-      report.archive = { path: 'the page\'s own requests: Archive now for finished tasks, and the card\'s Archive button for stopped tasks that still ask something.', tried: tried.length, gone: state.archivedSessions.size, refused }
+      // A task that left progress.md is archived only when its title is in a month archive file.
+      const folder = dirname(world.path)
+      const archivedTitles = new Set(readdirSync(folder).filter(name => /-archive-\d{4}-\d{2}\.md$/.test(name))
+        .flatMap(name => readFileSync(join(folder, name), 'utf8').split(/\r?\n/).filter(line => line.startsWith('### ')).map(line => line.slice(4))))
+      const planned = Array.from({ length: made }, (_, number) => ({ session: specOf(number, 'open').session, title: specOf(number, 'open').title, isStopped: stoppedSessions.has(specOf(number, 'open').session) }))
+      const integrity = archiveIntegrity({ planned, answered, unpressed, present, archivedTitles, others })
+      const refused = refusals.reduce((sum, one) => sum + one.count, 0)
+      report.archive = { path: 'the page\'s own requests: Archive now for finished tasks, and the card\'s Archive button for stopped tasks that still ask something.', tried: tried.length, gone: state.archivedSessions.size, refused, refusals, integrity, resent }
     }
 
     const conductor = async () => {
@@ -519,6 +566,7 @@ const soak = async ({ minutes, out }) => {
       readProbe()
       report.dataAtGrowthEnd = dataNow()
       setPhase('archive')
+      state.archiveStartAt = since()
       await archive()
       if (!isRunning()) return
       state.archiveEndPolls = polls.length
@@ -584,6 +632,9 @@ const soak = async ({ minutes, out }) => {
     else if (board300 === undefined) outcomes.memory = { skipped: `Only ${polls.length} polls were reached, 300 are needed.` }
     else if (afterPeak === undefined) outcomes.memory = { skipped: 'The page server wrote no memory line after poll 300.' }
     else outcomes.memory = { ok: afterPeak < 150 * MEGABYTE, line: `The page server's highest memory after poll 300 was ${megabytes(afterPeak)} MB (limit 150 MB).` }
+    // The file-operation check fails and is held: the known slowness that can explain a short run,
+    // an archive with no answer in time and too few memory lines after it.
+    const isOpsHeld = outcomes.ops.ok === false && outcomes.ops.isUnheld !== true
 
     if (state.archivedSessions === undefined || state.archiveEndPolls === undefined) outcomes.prune = { skipped: 'The run ended before the archive phase was done.' }
     else {
@@ -601,8 +652,10 @@ const soak = async ({ minutes, out }) => {
       // An unread ledger counts no record, which would read as pruned or as nothing to prune.
       if (unread !== undefined) outcomes.prune = { ok: false, isUnheld: true, line: `The question ledger could not be read ${unread}.` }
       // A refused or unanswered archive request leaves stopped tasks with questions out, the one
-      // path that keeps them, so the check would no longer cover it.
-      else if (report.archive.refused > 0) outcomes.prune = { ok: false, isUnheld: true, line: `${report.archive.refused} archive requests were refused or got no answer, so the archive did not finish. At the end, ${counted}.` }
+      // path that keeps them, so pruning cannot be judged: it fails, or is the known slowness.
+      // Work the archive lost or did not move fails whatever its requests answered.
+      else if (archiveProblems(report.archive.integrity).length > 0) outcomes.prune = { ok: false, isUnheld: true, line: `The archive went wrong: ${archiveProblems(report.archive.integrity).join('; ')}. At the end, ${counted}.` }
+      else if (report.archive.refused > 0) outcomes.prune = pruneRefusal({ refusals: report.archive.refusals, integrity: report.archive.integrity, isOpsHeld, hold: HOLDS.ops, counted })
       else if (afterArchive < TAIL_POLLS) outcomes.prune = { skipped: `Only ${afterArchive} polls came after the archive phase, ${TAIL_POLLS} are needed. At the end, ${counted}.` }
       else if (archived.size === 0) outcomes.prune = { ok: false, isUnheld: true, line: 'No task left progress.md, so nothing could be pruned.' }
       // With nothing there before, "none left" would prove nothing.
@@ -618,15 +671,14 @@ const soak = async ({ minutes, out }) => {
     const lastAnswer = answered.at(-1)?.end ?? 0
     const isStuck = endAt - lastAnswer > POLL_GIVE_UP_MS
     // Too few polls is held only while the file-operation check fails, the slowness that explains it.
-    const isOpsFailing = outcomes.ops.ok === false && outcomes.ops.isUnheld !== true
     // The poll the end cut short, after waiting at least CUT_STUCK_MS and over twice the slowest
     // answer, is a server that stopped answering in the last minutes, unless the known slowness is
     // there to explain it or the run was too short to tell (ops skipped).
     const slowestAnswer = report.polls.max ?? 0
-    const isCutStuck = cutPoll !== undefined && cutPoll.ms >= CUT_STUCK_MS && cutPoll.ms > 2 * slowestAnswer && !isOpsFailing && outcomes.ops.skipped === undefined
+    const isCutStuck = cutPoll !== undefined && cutPoll.ms >= CUT_STUCK_MS && cutPoll.ms > 2 * slowestAnswer && !isOpsHeld && outcomes.ops.skipped === undefined
     const stuckNote = isStuck ? `; no answer came in the last ${Math.round((endAt - lastAnswer) / 1000)} s` : isCutStuck ? `; the poll under way at the end had waited ${Math.round(cutPoll.ms / 1000)} s, over twice the slowest answer (${Math.round(slowestAnswer / 1000)} s)` : ''
     if (!isServerAlive || report.polls.failed > 0 || report.polls.badStatus > 0 || isStuck || isCutStuck) outcomes.survive = { ok: false, isUnheld: true, line: `${survived}${stuckNote}.` }
-    else if (polls.length < 1000 && minutes >= 30) outcomes.survive = { ok: false, isUnheld: !isOpsFailing, line: `${survived}; a run of ${minutes} minutes should reach 1,000${isOpsFailing ? '' : ', and the file-operation check does not fail, so its known slowness does not explain it'}.` }
+    else if (polls.length < 1000 && minutes >= 30) outcomes.survive = { ok: false, isUnheld: !isOpsHeld, line: `${survived}; a run of ${minutes} minutes should reach 1,000${isOpsHeld ? '' : ', and the file-operation check does not fail, so its known slowness does not explain it'}.` }
     else if (polls.length < 1000) outcomes.survive = { skipped: `${survived}; 1,000 polls are needed.` }
     else outcomes.survive = { ok: true, isUnheld: true, line: `${survived}.` }
 
@@ -641,11 +693,9 @@ const soak = async ({ minutes, out }) => {
     const settled = state.archiveEndAt === undefined ? [] : serveSamples.filter(one => one.t >= state.archiveEndAt + SETTLE_MS)
     const before = state.archiveEndAt === undefined ? undefined : peakRss(serveSamples, 0, state.archiveEndAt)
     const after = settled.length === 0 ? undefined : Math.max(...settled.map(one => one.rss))
-    const levelLimit = before === undefined ? undefined : 1.1 * before + 10 * MEGABYTE
     if (isProbeSilent) outcomes.level = silentProbe
     else if (state.archiveEndAt === undefined) outcomes.level = { skipped: 'The run ended before the archive phase was done.' }
-    else if (before === undefined || settled.length < SETTLED_LINES) outcomes.level = { skipped: `Only ${settled.length} memory lines came from ${SETTLE_MS / 1000} s after the archive on, ${SETTLED_LINES} are needed.` }
-    else outcomes.level = { ok: after <= levelLimit, line: `The page server's highest memory was ${megabytes(before)} MB up to the end of the archive and ${megabytes(after)} MB after it (limit ${megabytes(levelLimit)} MB).` }
+    else outcomes.level = levelOutcome({ before, after, settled: settled.length, needed: SETTLED_LINES, settleSeconds: SETTLE_MS / 1000, archiveMinutes: Math.round((state.archiveEndAt - state.archiveStartAt) / 6000) / 10, isOpsHeld, hold: HOLDS.ops })
 
     // CI runs 30 minutes: a check such a run could not measure fails it, since the run then proved
     // nothing about it. A shorter run, tried by hand, may skip.
@@ -657,10 +707,13 @@ const soak = async ({ minutes, out }) => {
         results.push(isFullRun ? { title, status: 'fail', line: `Not measured in a ${minutes}-minute run: ${outcome.skipped}` } : { title, status: 'skipped', line: outcome.skipped })
         continue
       }
-      const hold = HOLDS[key]
+      // An outcome the known slowness explains names that hold itself (pruneRefusal, levelOutcome).
+      const hold = outcome.hold ?? HOLDS[key]
       if (hold === undefined || outcome.isUnheld) { results.push({ title, status: outcome.ok ? 'pass' : 'fail', line: outcome.line }); continue }
       try {
-        await knownFailure(hold, () => { if (!outcome.ok) throw new Error(outcome.line) })
+        // An assertion error, so the known failure still counts once knownFailure accepts only
+        // assertion errors (#376).
+        await knownFailure(hold, () => { if (!outcome.ok) assert.fail(outcome.line) })
         results.push({ title, status: 'known', line: `${outcome.line} Known problem (${hold}).` })
       } catch (error) { results.push({ title, status: 'fail', line: `${error.message} ${outcome.line}` }) }
     }

@@ -118,6 +118,92 @@ export const tallyOf = checks => {
   return `${many('pass')} passed, ${many('known')} known, ${many('fail')} failed, ${many('skipped')} skipped`
 }
 
+// Where each task the archive phase planned ended up. `planned` is [{ session, title, isStopped }];
+// `answered` holds the sessions whose archive request was answered 200; `unpressed` the stopped
+// tasks whose card was never pressed (the time limit, or no board to read); `present` the sessions
+// still in progress.md; `archivedTitles` the `### ` titles in the month archive files; `others` the
+// sessions of blocks the archive was not to touch, as they stood just before it. A task that left
+// progress.md is archived only when its title is in the archive file; otherwise it was lost.
+export const archiveIntegrity = ({ planned, answered, unpressed, present, archivedTitles, others }) => {
+  const isKept = task => present.has(task.session)
+  const stopped = planned.filter(task => task.isStopped)
+  return {
+    archived: planned.filter(task => !isKept(task) && archivedTitles.has(task.title)).length,
+    lost: planned.filter(task => !isKept(task) && !archivedTitles.has(task.title)).length,
+    unarchived: planned.filter(task => isKept(task) && answered.has(task.session)).length,
+    othersLost: others.filter(session => !present.has(session)).length,
+    unpressedGone: stopped.filter(task => unpressed.has(task.session) && !isKept(task)).length,
+    stopped: stopped.length,
+    stoppedLeft: stopped.filter(isKept).length,
+    stoppedUnanswered: stopped.filter(task => !answered.has(task.session)).length,
+  }
+}
+
+// What the archive got wrong, whatever its requests answered: each problem in words. The stopped
+// tasks left in progress.md must be no more than those whose archive was not answered; that count
+// is a cross-check, since an answered task still there is also counted as unarchived.
+export const archiveProblems = integrity => {
+  const problems = []
+  if (integrity.unarchived > 0) problems.push(`${integrity.unarchived} tasks whose archive was answered are still in progress.md`)
+  if (integrity.lost > 0) problems.push(`${integrity.lost} tasks left progress.md but are not in the archive file`)
+  if (integrity.othersLost > 0) problems.push(`${integrity.othersLost} blocks the archive was not to touch left progress.md`)
+  if (integrity.unpressedGone > 0) problems.push(`${integrity.unpressedGone} stopped tasks whose card was never pressed left progress.md`)
+  if (integrity.stoppedLeft > integrity.stoppedUnanswered) problems.push(`${integrity.stoppedLeft} stopped tasks are still in progress.md, more than the ${integrity.stoppedUnanswered} whose archive was not answered`)
+  return problems
+}
+
+const CAUSES = {
+  timeout: many => `${many} got no answer in time`,
+  cut: many => `${many} stopped tasks were not reached before the time limit`,
+  refused: many => `${many} could not connect`,
+  closed: many => `${many} lost the connection twice before an answer`,
+  other: many => `${many} failed with another error`,
+  unreadable: many => `${many} stopped tasks could not be pressed because the board could not be read`,
+  button: many => `${many} stopped tasks had no Archive button`,
+}
+const causesOf = refusals => {
+  const words = []
+  for (const cause of Object.keys(CAUSES)) {
+    const many = refusals.filter(one => one.cause === cause).reduce((sum, one) => sum + one.count, 0)
+    if (many > 0) words.push(CAUSES[cause](many))
+  }
+  const statuses = refusals.filter(one => one.cause === 'status').map(one => one.status)
+  if (statuses.length > 0) words.push(`${statuses.length} answered ${[...new Set(statuses)].join(', ')}`)
+  return words.join(', ')
+}
+
+// The prune check when the archive did not finish: undefined when nothing was refused. The page
+// server's known slowness (`hold`) explains only a timeout (a 408, or no answer within the wait) and
+// tasks the time limit left unreached, and only while the file-operation check fails and is held
+// (`isOpsHeld`) and the archive lost nothing (`integrity`). Any other refusal fails plainly.
+export const pruneRefusal = ({ refusals, integrity, isOpsHeld, hold, counted }) => {
+  const total = refusals.reduce((sum, one) => sum + one.count, 0)
+  if (total === 0) return undefined
+  const causes = causesOf(refusals)
+  const problems = archiveProblems(integrity)
+  const isSlowOnly = refusals.every(one => one.cause === 'timeout' || one.cause === 'cut')
+  const left = `${integrity.archived} tasks are in the archive file and ${integrity.stoppedLeft} of the ${integrity.stopped} stopped tasks are still in progress.md`
+  if (isOpsHeld && isSlowOnly && problems.length === 0) {
+    return { ok: false, hold, line: `The archive did not finish (${causes}), so pruning was not judged: the page server's known slowness explains it, since the file-operation check fails; nothing was lost (${left}). At the end, ${counted}.` }
+  }
+  const why = !isSlowOnly ? 'an answer other than a timeout is not the known slowness'
+    : !isOpsHeld ? 'the file-operation check does not fail, so its known slowness does not explain it'
+      : problems.join('; ')
+  return { ok: false, isUnheld: true, line: `The archive did not finish (${causes}); ${why}. At the end, ${counted}.` }
+}
+
+// The levels-off check. Memory after the archive is measured only with `needed` lines from
+// `settleSeconds` after it; a long archive can leave too few. That gap is the known slowness
+// (`hold`) only while the file-operation check fails and is held; a measured rise always fails.
+export const levelOutcome = ({ before, after, settled, needed, settleSeconds, archiveMinutes, isOpsHeld, hold }) => {
+  if (before === undefined || settled < needed) {
+    if (isOpsHeld) return { ok: false, hold, line: `Not measured: the archive ran ${archiveMinutes} min, so ${settled} memory lines came after it and ${needed} are needed; the page server's known slowness explains it, since the file-operation check fails.` }
+    return { skipped: `Only ${settled} memory lines came from ${settleSeconds} s after the archive on, ${needed} are needed.` }
+  }
+  const limit = 1.1 * before + 10 * 1048576
+  return { ok: after <= limit, line: `The page server's highest memory was ${megabytes(before)} MB up to the end of the archive and ${megabytes(after)} MB after it (limit ${megabytes(limit)} MB).` }
+}
+
 // Plain words, one table. Every figure comes from the report object, so a half-finished report
 // (a timeout, a crash) reads the same way with what it has.
 export const reportMarkdown = report => {
@@ -148,6 +234,7 @@ export const reportMarkdown = report => {
   const grown = report.dataAtGrowthEnd
   if (grown) lines.push(`- Data when growth ended: ${count(grown.blocks)} blocks (${count(grown.liveSessions)} live), ${count(grown.questionRecords)} question records, ${count(grown.captureFiles)} capture files.`)
   if (report.archive) lines.push(`- Archive: ${report.archive.path} ${count(report.archive.gone)} of ${count(report.archive.tried)} finished or stopped tasks left progress.md.`)
+  if (report.archive?.resent > 0) lines.push(`- ${count(report.archive.resent)} archive requests were sent again after the connection closed before an answer.`)
   if (report.terminalBoard) lines.push(`- Terminal board: ${count(report.terminalBoard.frames)} screens drawn, ${count(report.terminalBoard.framesAfterArchive)} after the archive phase.`)
   for (const note of report.notes ?? []) lines.push(`- Note: ${note}`)
   lines.push('')

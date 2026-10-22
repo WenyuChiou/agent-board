@@ -5,7 +5,7 @@ import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { makeWorld } from './lib/world.mjs'
 import { spawnIsolated } from './lib/spawn.mjs'
-import { OUT_DEFAULT, fileOpsPerPoll, makeRedact, median, parseArguments, peakRss, percentile, redactDeep, tallyOf, writeReport } from './lib/soak-report.mjs'
+import { OUT_DEFAULT, archiveIntegrity, archiveProblems, fileOpsPerPoll, levelOutcome, makeRedact, median, parseArguments, peakRss, percentile, pruneRefusal, redactDeep, tallyOf, writeReport } from './lib/soak-report.mjs'
 
 const soak = fileURLToPath(new URL('./soak.mjs', import.meta.url))
 
@@ -109,7 +109,7 @@ describe('L6 soak arguments', () => {
         // The first line is not the lowest: the start is the first line.
         memory: { serve: [{ seconds: 1, bytes: 90 * 1048576 }, { seconds: 10, bytes: 70 * 1048576 }, { seconds: 20, bytes: 180 * 1048576 }], watch: [] },
         data: { progressBytes: 200000, ledgerBytes: 900000, captureFiles: 1900, blocks: 300, liveSessions: 100, questionRecords: 1000 },
-        archive: { path: `the page at ${address}`, tried: 290, gone: 280, refused: 2 },
+        archive: { path: `the page at ${address}`, tried: 290, gone: 280, refused: 2, resent: 1 },
         checks: [{ title: 'L6 soak: a made-up check', status: 'pass', line: `Looked under ${join(world.root, 'home')} | with a bar` }],
         notes: [`A note naming ${world.root}`],
       }
@@ -134,6 +134,7 @@ describe('L6 soak arguments', () => {
       assert.match(text, /Polls answered with a status other than 200: 2 with 503\./)
       assert.match(text, /Page server memory: 90 MB at the start, 180 MB at the highest, 180 MB at the end\./)
       assert.match(text, /cut short after 200 s with no answer yet; it is counted as one that took longer than 15 seconds\./)
+      assert.match(text, /^- 1 archive requests were sent again after the connection closed before an answer\.$/m)
       assert.equal(tallyOf([{ status: 'pass' }, { status: 'known' }, { status: 'known' }, { status: 'fail' }, { status: 'skipped' }]), '1 passed, 2 known, 1 failed, 1 skipped')
     } finally { await world.close() }
   })
@@ -153,5 +154,85 @@ describe('L6 soak arguments', () => {
     assert.equal(percentile([1, 2, 3, 4, 5, 6, 7, 8, 9, 10], 0.5), 5)
     assert.equal(peakRss([{ t: 1, rss: 5 }, { t: 2, rss: 9 }, { t: 3, rss: 7 }], 2, 3), 9)
     assert.equal(peakRss([{ t: 1, rss: 5 }], 2, 3), undefined)
+  })
+
+  // Six planned tasks: four finished (a1 to a4) and two stopped (b1, b2); c1 is a block the archive is not to touch.
+  const planned = [...['a1', 'a2', 'a3', 'a4'].map(session => ({ session, title: `Task ${session}`, isStopped: false })), ...['b1', 'b2'].map(session => ({ session, title: `Task ${session}`, isStopped: true }))]
+  const hold = 'hold:serve-poll-file-ops'
+  const counted = '5 tasks were archived'
+
+  test('L6 soak arguments: where each planned task ended up after the archive: archived, still there, or lost', () => {
+    const titles = names => new Set(names.map(name => `Task ${name}`))
+    // Everything answered and archived except b2, which the time limit left in progress.md unpressed.
+    const fine = archiveIntegrity({ planned, answered: new Set(['a1', 'a2', 'a3', 'a4', 'b1']), unpressed: new Set(['b2']), present: new Set(['b2', 'c1']), archivedTitles: titles(['a1', 'a2', 'a3', 'a4', 'b1']), others: ['c1'] })
+    assert.deepEqual(fine, { archived: 5, lost: 0, unarchived: 0, othersLost: 0, unpressedGone: 0, stopped: 2, stoppedLeft: 1, stoppedUnanswered: 1 })
+    assert.deepEqual(archiveProblems(fine), [])
+    // a4 left progress.md but is not in the archive file; b1 was answered yet is still there; c1 is
+    // gone; b2 was never pressed yet left progress.md.
+    const wrong = archiveIntegrity({ planned, answered: new Set(['a1', 'a2', 'a3', 'a4', 'b1']), unpressed: new Set(['b2']), present: new Set(['b1']), archivedTitles: titles(['a1', 'a2', 'a3', 'b2']), others: ['c1'] })
+    assert.deepEqual(wrong, { archived: 4, lost: 1, unarchived: 1, othersLost: 1, unpressedGone: 1, stopped: 2, stoppedLeft: 1, stoppedUnanswered: 1 })
+    assert.deepEqual(archiveProblems(wrong), [
+      '1 tasks whose archive was answered are still in progress.md',
+      '1 tasks left progress.md but are not in the archive file',
+      '1 blocks the archive was not to touch left progress.md',
+      '1 stopped tasks whose card was never pressed left progress.md',
+    ])
+    // Both stopped tasks answered, yet both still there: more left than were not answered.
+    const kept = archiveIntegrity({ planned, answered: new Set(['b1', 'b2']), unpressed: new Set(), present: new Set(['b1', 'b2']), archivedTitles: titles(['a1', 'a2', 'a3', 'a4']), others: [] })
+    assert.ok(archiveProblems(kept).includes('2 stopped tasks are still in progress.md, more than the 0 whose archive was not answered'))
+  })
+
+  test('L6 soak arguments: an archive with no answer in time, a 408 or one cut short is the known slowness only while file operations fail and nothing was lost', () => {
+    const clean = { archived: 5, lost: 0, unarchived: 0, othersLost: 0, unpressedGone: 0, stopped: 2, stoppedLeft: 1, stoppedUnanswered: 1 }
+    assert.equal(pruneRefusal({ refusals: [], integrity: clean, isOpsHeld: true, hold, counted }), undefined)
+    // A wait that ran out and a 408 from the server's own wait.
+    const timeout = pruneRefusal({ refusals: [{ cause: 'timeout', count: 1 }, { cause: 'timeout', count: 1 }], integrity: clean, isOpsHeld: true, hold, counted })
+    assert.equal(timeout.ok, false)
+    assert.equal(timeout.hold, hold)
+    assert.equal(timeout.isUnheld, undefined)
+    assert.match(timeout.line, /^The archive did not finish \(2 got no answer in time\), so pruning was not judged: the page server's known slowness explains it, since the file-operation check fails; nothing was lost \(5 tasks are in the archive file and 1 of the 2 stopped tasks are still in progress\.md\)\. At the end, 5 tasks were archived\.$/)
+    // Stopped tasks the time limit left unreached.
+    const cut = pruneRefusal({ refusals: [{ cause: 'cut', count: 1 }], integrity: clean, isOpsHeld: true, hold, counted })
+    assert.equal(cut.hold, hold)
+    assert.match(cut.line, /1 stopped tasks were not reached before the time limit/)
+    // The same, with a task lost, an answered task still there, or another block gone: never held.
+    for (const [change, words] of [[{ lost: 1 }, /1 tasks left progress\.md but are not in the archive file/], [{ unarchived: 1 }, /1 tasks whose archive was answered are still in progress\.md/], [{ othersLost: 1 }, /1 blocks the archive was not to touch left progress\.md/]]) {
+      const outcome = pruneRefusal({ refusals: [{ cause: 'cut', count: 1 }], integrity: { ...clean, ...change }, isOpsHeld: true, hold, counted })
+      assert.equal(outcome.isUnheld, true)
+      assert.equal(outcome.hold, undefined)
+      assert.match(outcome.line, words)
+    }
+    // With the file-operation check passing or skipped there is no known slowness to explain it.
+    const unheld = pruneRefusal({ refusals: [{ cause: 'timeout', count: 1 }], integrity: clean, isOpsHeld: false, hold, counted })
+    assert.equal(unheld.isUnheld, true)
+    assert.match(unheld.line, /the file-operation check does not fail, so its known slowness does not explain it/)
+  })
+
+  test('L6 soak arguments: an archive refused with an error status or a failed connection fails pruning even while the slowness is held', () => {
+    const clean = { archived: 5, lost: 0, unarchived: 0, othersLost: 0, unpressedGone: 0, stopped: 2, stoppedLeft: 1, stoppedUnanswered: 1 }
+    for (const [refusals, words] of [[[{ cause: 'status', status: 503, count: 1 }], /1 answered 503/], [[{ cause: 'timeout', count: 1 }, { cause: 'status', status: 500, count: 1 }], /1 got no answer in time, 1 answered 500/], [[{ cause: 'refused', count: 1 }], /1 could not connect/], [[{ cause: 'closed', count: 1 }], /1 lost the connection twice before an answer/], [[{ cause: 'unreadable', count: 1 }], /1 stopped tasks could not be pressed because the board could not be read/], [[{ cause: 'button', count: 1 }], /1 stopped tasks had no Archive button/]]) {
+      const outcome = pruneRefusal({ refusals, integrity: clean, isOpsHeld: true, hold, counted })
+      assert.equal(outcome.ok, false)
+      assert.equal(outcome.isUnheld, true)
+      assert.equal(outcome.hold, undefined)
+      assert.match(outcome.line, words)
+      assert.match(outcome.line, /an answer other than a timeout is not the known slowness/)
+    }
+  })
+
+  test('L6 soak arguments: memory after a long archive that was not measured is the known slowness only while file operations fail, and a measured rise still fails', () => {
+    const megabyte = 1048576
+    const unmeasured = { before: 390 * megabyte, after: undefined, settled: 1, needed: 3, settleSeconds: 20, archiveMinutes: 15.5, hold }
+    const known = levelOutcome({ ...unmeasured, isOpsHeld: true })
+    assert.equal(known.ok, false)
+    assert.equal(known.hold, hold)
+    assert.match(known.line, /^Not measured: the archive ran 15\.5 min, so 1 memory lines came after it and 3 are needed; the page server's known slowness explains it, since the file-operation check fails\.$/)
+    assert.deepEqual(levelOutcome({ ...unmeasured, isOpsHeld: false }), { skipped: 'Only 1 memory lines came from 20 s after the archive on, 3 are needed.' })
+    // Measured: a rise past the limit fails whatever the file-operation check says, and a level line passes.
+    const rise = levelOutcome({ ...unmeasured, after: 500 * megabyte, settled: 3, isOpsHeld: true })
+    assert.equal(rise.ok, false)
+    assert.equal(rise.hold, undefined)
+    assert.match(rise.line, /^The page server's highest memory was 390 MB up to the end of the archive and 500 MB after it \(limit 439 MB\)\.$/)
+    assert.equal(levelOutcome({ ...unmeasured, after: 379 * megabyte, settled: 3, isOpsHeld: true }).ok, true)
   })
 })
