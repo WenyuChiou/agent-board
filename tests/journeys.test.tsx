@@ -12,6 +12,7 @@ import { EN } from '../hooks/strings-en'
 import { answeredJson, answeredPath, buildView } from '../hooks/view'
 import { engineBeneath, FILE, INBOX, knownFailure, makeWorld, noMachineIds, noSilentPress, PANE, PANE_MS, PROPS, start, visiblePaneText } from './fixtures/pane-world'
 import type { World } from './fixtures/pane-world'
+import { bigBoard, bigWorld, timeStretches, untilQuiet } from './fixtures/big-board'
 
 const english = { HOME: '/home/me', LANG: 'en_US.UTF-8' }
 
@@ -84,6 +85,70 @@ describe('L1 first run', () => {
     expect(await ui.find({ type: 'Text', text: 'No work in progress right now.' })).toBeUndefined()
     await noPaneMachineIds(afterPress, world)
     await ui.unmount()
+  })
+})
+
+// A busy machine's board (#371). Claude Code unloads a mod whose hooks worker goes 5 s without
+// a trip to the host, and on a board this size a session start used to go many seconds without
+// one: then /progress was gone from every session. The budget is half the host's 5 s, so a slow or
+// busy machine does not fail it while main's 14 to 23 s here still does. On an idle machine main's
+// archiving alone took 3.4 s, only 1.3 times this budget, so the test that cannot be passed by a
+// fast machine is the length comparison in logic.test.ts. A stretch reads as `within` or names
+// where it ran.
+const BUDGET_MS = 2500
+const within = (ms: number | null, budget: number, at = ''): string => ms !== null && ms < budget ? 'within' : `${Math.round(ms ?? -1)} ms ${at}`
+const ARCHIVE = '/home/me/.claude/progress-archive-2026-10.md'
+
+describe('L2 a busy board', () => {
+  test('L2 busy board: a session start registers /progress before it reads the board, and neither the start nor the work it leaves running goes 2.5 s without a trip to the host', { timeoutMs: 240000 }, async ($, on) => {
+    const board = bigBoard()
+    const world = bigWorld()
+    const statuses: Array<string | undefined> = []
+    on('ui.status', ($, e) => {
+      statuses.push(e.text)
+      return { value: undefined }
+    })
+    const timing = timeStretches(on)
+    engineBeneath(timing.on, world)
+    timing.begin()
+    await $.session.start({ cwd: '/work/project-3', surface: 'desktop', isInteractive: true })
+    // What the start leaves running (archiving the old blocks, connecting the agents) counts too.
+    await untilQuiet(timing.stretches)
+    timing.stop()
+    const { longest, at, trace } = timing.stretches
+    const names = trace.map(([, name]) => name)
+    // The listing does not wait on the board: in the test kit /progress is there at once, so the
+    // seconds a real host took to list it are not reproduced here.
+    expect(names.indexOf('command.register')).toBeGreaterThan(-1)
+    expect(names.indexOf('command.register')).toBeLessThan(names.indexOf('fs.read progress.md'))
+    // The heavy work ran: the old blocks went to the archive, and the line under the prompt counts
+    // the questions of the sessions still going (23 of the 63; the rest are stopped sessions').
+    expect(world.files.get(ARCHIVE)?.match(/^## /gm)?.length).toBe(board.archivable)
+    expect(board.waitingNow).toBe(23)
+    expect(statuses).toContain(`${EN.statusPrefix} · ${EN.statusWaiting(board.waitingNow)}`)
+    expect(within(longest, BUDGET_MS, at)).toBe('within')
+  })
+
+  // The test kit drops a mock clock's timers ten seconds of real time after they were set, and on
+  // this board a poll takes most of a second in the kit, so the poll after the start stands in
+  // for the minute after it.
+  test('L2 busy board: after the start and the poll that follows, /progress still answers and no stretch reaches 2.5 s', { timeoutMs: 240000 }, async ($, on) => {
+    const board = bigBoard()
+    const world = bigWorld()
+    const timing = timeStretches(on)
+    const clock = engineBeneath(timing.on, world)
+    timing.begin()
+    await $.session.start({ cwd: '/work/project-3', surface: 'desktop', isInteractive: true })
+    // The poll comes while the start's archiving and connecting still run, as it does in a session.
+    await clock.advance(2000)
+    await untilQuiet(timing.stretches)
+    timing.stop()
+    timing.begin()
+    const ran = await $.command.run({ command: 'progress', args: '', origin: { kind: 'composer' }, presentation: { isFullscreen: true, columns: 160 } })
+    timing.stop()
+    expect(ran.text).toBe(EN.paneOpened(FILE))
+    expect(world.files.get(ARCHIVE)?.match(/^## /gm)?.length).toBe(board.archivable)
+    expect(within(timing.stretches.longest, BUDGET_MS, timing.stretches.at)).toBe('within')
   })
 })
 

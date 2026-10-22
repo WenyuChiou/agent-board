@@ -687,6 +687,14 @@ export const buildView = (
   const liveScopes = new Set<string>()
   let order = 0
   const repeats = new Map<string, number>()
+  // How many tasks share each project and title, counted once rather than for every row (#371).
+  const twins = new Map<string, number>()
+  for (const project of projects) {
+    for (const task of project.tasks) {
+      const twin = JSON.stringify([project.name || s.uncategorized, task.title])
+      twins.set(twin, (twins.get(twin) ?? 0) + 1)
+    }
+  }
 
   for (const project of projects) {
     const name = project.name || s.uncategorized
@@ -814,7 +822,7 @@ export const buildView = (
         resume: auto === 'ended' && task.auto?.resume ? resumeCommand(task.auto.resume, task.auto.dir, task.auto.agent) : null,
         handoff: handoffOf(task),
         confirm: (isManual && task.line >= 0 || auto === 'ended')
-          ? { project: name, title: task.title, line: task.line, session: task.auto?.session ?? null, expected: confirmKey(name, task, projects.filter(one => (one.name || s.uncategorized) === name).flatMap(one => one.tasks).filter(one => one.title === task.title).length) }
+          ? { project: name, title: task.title, line: task.line, session: task.auto?.session ?? null, expected: confirmKey(name, task, twins.get(JSON.stringify([name, task.title])) ?? 0) }
           : null,
         archive:
           isManual && task.line >= 0
