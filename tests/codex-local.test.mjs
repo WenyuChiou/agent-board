@@ -2,7 +2,7 @@ import { spawn, spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { createRequire, registerHooks } from 'node:module'
 import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, unlinkSync, utimesSync, writeFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { availableParallelism, tmpdir } from 'node:os'
 import { delimiter, dirname, join, resolve } from 'node:path'
 import { beforeEach, test } from 'node:test'
 import assert from 'node:assert/strict'
@@ -494,13 +494,24 @@ test('a reporter that hangs is cut at its timeout and the host hook exits 0', ()
   }
 }))
 
-test('L5 busy machine: Antigravity and Codex hooks apply or queue every event with 4 CPU-busy processes', () => fixture(async f => {
+test('L5 busy machine: Antigravity and Codex hooks apply or queue every event with all but one CPU busy', t => fixture(async f => {
   assert.equal(f.install('--apply').status, 0)
   assert.equal(f.install('--agent', 'antigravity', '--apply').status, 0)
+  // Records when each hook's worker started, and the PowerShell start that Antigravity's Windows wrapper
+  // passes, so a failure tells a hook that never got the CPU apart from one that missed its deadline.
+  const preload = join(f.home, 'worker-start.cjs')
+  f.save(preload, `const { basename } = require('node:path')
+if (basename(process.argv[1] || '') === 'agent-board-hook.mjs') {
+  const at = process.argv.indexOf('--hook-started')
+  try { require('node:fs').writeFileSync(process.env.L5_START_STAMP, Date.now() + ' ' + (at === -1 ? '' : process.argv[at + 1]), { flag: 'wx' }) } catch {}
+}
+`)
+  // One core stays free: a busy machine, not one where the hook gets no CPU before the host's 3 s stop.
+  const busyCount = Math.max(1, availableParallelism() - 1)
   const busy = []
   const records = []
   try {
-    for (let index = 0; index < 4; index++) {
+    for (let index = 0; index < busyCount; index++) {
       const child = spawn(process.execPath, ['-e', 'process.stdout.write("ready\\n"); while (true) {}'], { env: f.env, windowsHide: true, stdio: ['ignore', 'pipe', 'ignore'] })
       const closed = new Promise((done, reject) => { child.once('close', done); child.once('error', reject) })
       closed.catch(() => {})
@@ -515,22 +526,23 @@ test('L5 busy machine: Antigravity and Codex hooks apply or queue every event wi
     ]) {
       for (let index = 0; index < 3; index++) {
         const payload = payloadOf(index)
-        const before = hookLog(f)
+        const stamp = join(f.home, `worker-start-${agent}-${index}.txt`)
+        const env = { ...f.env, L5_START_STAMP: stamp, NODE_OPTIONS: [f.env.NODE_OPTIONS, `--require ${JSON.stringify(preload)}`].filter(Boolean).join(' ') }
         const spawnedAt = Date.now()
-        const result = await fireCommand(f, command, JSON.stringify(payload), 5000)
+        const result = await fireCommand({ env }, command, JSON.stringify(payload), 5000)
+        const tookMs = Date.now() - spawnedAt
+        const [workerAt, shellAt] = existsSync(stamp) ? readFileSync(stamp, 'utf8').split(' ').map(Number) : []
+        const timing = `${agent} event ${index} (${busyCount} busy): worker ${workerAt ? `started ${workerAt - spawnedAt} ms after the spawn` : 'never started'}`
+          + `${shellAt ? `, PowerShell ${shellAt - spawnedAt} ms` : ''}, hook ended after ${tookMs} ms`
+        t.diagnostic(timing)
         const log = hookLog(f)
-        assert.equal(result.status, 0, `${hookFailure(result)}\nhook log:\n${log}`)
+        assert.equal(result.status, 0, `${timing}\n${hookFailure(result)}\nhook log:\n${log}`)
         const id = payload.session_id ?? payload.conversationId
         const owner = createHash('sha256').update(`${agent}:${id}`).digest('hex')
         const record = join(f.root, 'sessions', `${owner}.json`)
         const saved = pendingFiles(f).some(name => readFileSync(join(f.root, 'pending', name), 'utf8').includes(id))
-        // Both hosts stop the hook at 3 s, and the worker keeps its last 300 ms for the queue write: an event
-        // is lost without failing only when its one log line is REPORTER_TIMEOUT, written 2.7 s or more after the spawn.
-        const added = log.startsWith(before) ? log.slice(before.length).trim().split('\n').filter(Boolean) : []
-        const [loggedAt, loggedAgent, code] = added.length === 1 ? added[0].split(' ') : []
-        const isPastKill = loggedAgent === agent && code === 'REPORTER_TIMEOUT' && Date.parse(loggedAt) - spawnedAt >= 3000 - 300
-        assert.ok(existsSync(record) || saved || isPastKill, `${agent} event ${index} must be applied, queued, or past the host's 3 s stop; hook log:\n${log}`)
-        if (existsSync(record) || saved) records.push({ file: record, state: agent === 'codex' ? 'working' : 'waiting', turn: payload.turn_id })
+        assert.ok(existsSync(record) || saved, `${timing}: the event must be applied or queued; hook log:\n${log}`)
+        records.push({ file: record, state: agent === 'codex' ? 'working' : 'waiting', turn: payload.turn_id })
       }
     }
   } finally {
