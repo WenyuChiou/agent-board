@@ -518,7 +518,11 @@ const pruneQuestionFiles = async ($: EngineInterface, path: string): Promise<voi
 // ledger itself reads. A torn file is read first: when putting a moved-aside ledger back failed,
 // a whole ledger keeps the torn name.
 const sweepLedgerLeftovers = async ($: EngineInterface, path: string, dir: string, entries: ReadonlyArray<{ name: string; mtimeMs: number }>): Promise<void> => {
-  const { torn, temps } = ledgerLeftovers(path, entries, await $.clock.now())
+  // As many to a sweep as captures and proofs, so thousands of leftovers neither hold the write
+  // queue nor are all read at once; the rest goes at the next sweep.
+  const leftovers = ledgerLeftovers(path, entries, await $.clock.now())
+  const torn = leftovers.torn.slice(0, PRUNED_PER_SWEEP)
+  const temps = leftovers.temps.slice(0, PRUNED_PER_SWEEP - torn.length)
   const fileOf = (name: string): string => `${dir}${sepOf(dir)}${name}`
   const isLedgerRead = temps.length > 0 && await readText($, questionsPath(path)).then(text => parseQuestions(text) !== null, () => false)
   const tornText = await Promise.all(torn.map(name => readText($, fileOf(name)).then(text => isTornLedger(text), () => false)))

@@ -612,6 +612,29 @@ test('the archive sweep keeps the newest three torn ledgers and removes day-old 
   expect(world.files.has(LEDGER)).toBe(true)
 })
 
+test('one archive sweep removes at most 200 torn ledgers and temporary copies, and the next sweep takes the rest', async ($, on) => {
+  const board = `## demo\n${block('a1b2c301', 'working', 1, '- [~] Work')}`
+  const world = makeWorld([[FILE, board]])
+  world.env = english
+  world.ran = []
+  const clock = engineBeneath(on, world)
+  await $.session.start(START)
+  await clock.advance(2000)
+  // 253 torn ledgers, of which the newest three stay, and ten day-old temporary copies.
+  const torn = Array.from({ length: 253 }, (_, n) => `${LEDGER}.torn-${NOW - (n + 1) * 60_000}-${4000 + n}`)
+  torn.forEach(path => put(world, path, '{"version":1,"rec', 1))
+  const ledger = questionsJson(emptyQuestions())
+  put(world, LEDGER, ledger, NOW - HOUR)
+  const temps = Array.from({ length: 10 }, (_, n) => `${LEDGER}.tmp-synthetic-session-${n}`)
+  temps.forEach(path => put(world, path, ledger, NOW - 2 * 24 * HOUR))
+  const left = (): number => [...torn, ...temps].filter(path => world.files.has(path)).length
+  await $.command.run(TIDY)
+  expect(left()).toBe(253 + 10 - 200)
+  await $.command.run(TIDY)
+  expect(torn.filter(path => world.files.has(path))).toEqual(torn.slice(0, 3))
+  expect(temps.filter(path => world.files.has(path))).toEqual([])
+})
+
 test('the archive sweep keeps a day-old temporary copy while the ledger does not read, and a torn name that holds a whole ledger', async ($, on) => {
   const board = `## demo\n${block('a1b2c301', 'working', 1, '- [~] Work')}`
   const world = makeWorld([[FILE, board]])
