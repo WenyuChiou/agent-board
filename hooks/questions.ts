@@ -208,6 +208,48 @@ export const prunableProofs = (ledger: QuestionLedger, captures: readonly Questi
   return (['retired', 'consumed'] as const).flatMap(kind => newestFirst(held.filter(one => one.kind === kind)).slice(keep).filter(one => !known.has(one.hash)))
 }
 
+// What a torn ledger or a cut-off write leaves beside the ledger, and nothing else removes
+// (#156): a torn ledger moved aside (`.torn-<time>-<who>`), kept to look into, and a temporary
+// copy of a write that a crash or a failed clean-up left (`.tmp-<session>-<n>` from the pane,
+// `.<pid>.<time>.board-tmp` from the board script). The torn files past the newest `keepTorn`, by
+// the time in their names, and the temporary copies over a day old. The caller removes a torn
+// file only when it still holds torn text, and a temporary copy only while the ledger itself
+// reads: with no ledger, a temporary copy may be the only complete one.
+export const LEDGER_TORN_KEPT = 3
+export const LEDGER_TEMP_MS = 24 * 60 * 60 * 1000
+export const ledgerLeftovers = (path: string, entries: ReadonlyArray<{ name: string; mtimeMs: number }>, now: number, keepTorn = LEDGER_TORN_KEPT): { torn: string[]; temps: string[] } => {
+  const ledger = questionsPath(path).replace(/^.*[\\/]/, '')
+  const tornAt = (entry: { name: string; mtimeMs: number }): number => Number(/^\.torn-(\d+)-/.exec(entry.name.slice(ledger.length))?.[1] ?? entry.mtimeMs)
+  const torn = entries
+    .filter(entry => entry.name.startsWith(`${ledger}.torn-`))
+    .sort((a, b) => tornAt(b) - tornAt(a) || (a.name < b.name ? -1 : 1))
+    .slice(keepTorn)
+  const isTemp = (name: string): boolean => name.startsWith(`${ledger}.tmp-`) || (name.startsWith(`${ledger}.`) && name.endsWith('.board-tmp'))
+  const temps = entries.filter(entry => isTemp(entry.name) && now - entry.mtimeMs > LEDGER_TEMP_MS)
+
+  return { torn: torn.map(entry => entry.name), temps: temps.map(entry => entry.name) }
+}
+
+// What an idle question pass reads from the folder beside progress.md (#156): progress.md, the
+// ledger, the answered file, the copies and the proofs, by name, size and time, in name order.
+// Null while one of them is younger than `freshMs`: a second write in the same second can keep
+// both its size and a whole-second time, so it would look unchanged.
+export const questionFilesKey = (
+  path: string,
+  answered: string,
+  entries: ReadonlyArray<{ name: string; size: number; mtimeMs: number }>,
+  now: number,
+  freshMs: number,
+): Array<readonly [string, number, number]> | null => {
+  const names = [path, questionsPath(path), answered].map(file => file.replace(/^.*[\\/]/, ''))
+  const files = entries
+    .filter(entry => names.includes(entry.name) || captureHashOf(path, entry.name) !== null || questionProofOf(path, entry.name) !== null)
+    .map(entry => [entry.name, entry.size, entry.mtimeMs] as const)
+    .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+
+  return files.some(([, , mtimeMs]) => now - mtimeMs < freshMs) ? null : files
+}
+
 type Observation = { scope: string; session: string; index: number | string; text: string; isWaiting: boolean; producer: string; producerRevisions?: string[]; producerSources?: string[]; source: QuestionSource }
 
 const observations = (projects: readonly ProgressProject[], mine: ProgressMirror | null, pending: readonly PendingTurn[]): Observation[] => {

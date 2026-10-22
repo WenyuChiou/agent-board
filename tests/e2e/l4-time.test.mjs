@@ -83,12 +83,11 @@ describe('L4 time and scale', () => {
   // "L4 D24 scale: the page server does at most 6 file operations per idle poll" comes with #222's
   // final pull request, which counts the page server's file operations with lib/soak-probe.mjs.
 
-  // The pane is hooks/register.tsx running inside Claude Code. Plain Node cannot load it (it
-  // refuses the .tsx extension, and the 'claude-code' module the file imports exists only inside
-  // Claude Code), and the pane reads every file through the engine's $.fs. Its mock-engine tests
-  // (tests/pane.test.tsx) run under `claude plugin test`, which these journeys do not use. The
-  // reason is the skip option's text, so that `node --test` prints it beside the SKIP.
-  test('L4 D24 scale: the pane does at most 6 file operations per idle poll', { skip: 'the pane runs only inside Claude Code; plain Node cannot load hooks/register.tsx' }, () => {})
+  // "L4 D24 scale: the pane does at most 6 file operations per idle poll" is in
+  // tests/ledger-reads.test.tsx (#156). The pane is hooks/register.tsx running inside Claude Code:
+  // plain Node cannot load it (it refuses the .tsx extension, and the 'claude-code' module the
+  // file imports exists only inside Claude Code), and it reads every file through the engine's
+  // $.fs, so it is counted against the mock engine under `claude plugin test`.
 
   test('L4 D24 scale: the terminal lists waiting asks newest first with ages, capped with "show all"', async () => {
     const world = makeWorld()

@@ -1,7 +1,7 @@
 import { test, expect } from 'claude-code/testing'
 import { parseProgress } from '../hooks/parse'
 import { buildView } from '../hooks/view'
-import { acknowledgementKeys, archiveQuestionsKept, captureJson, emptyQuestions, isAskedBy, isQuestionSnapshot, isTornLedger, migratedAnswered, migrationKey, observeQuestions, parseCapture, parseQuestions, prunableCaptures, prunableProofs, questionsJson, resolveQuestion, resolvedQuestionsToRetire, withCaptures } from '../hooks/questions'
+import { acknowledgementKeys, archiveQuestionsKept, captureJson, emptyQuestions, isAskedBy, isQuestionSnapshot, isTornLedger, ledgerLeftovers, LEDGER_TEMP_MS, migratedAnswered, migrationKey, observeQuestions, parseCapture, parseQuestions, prunableCaptures, prunableProofs, questionFilesKey, questionsJson, resolveQuestion, resolvedQuestionsToRetire, withCaptures } from '../hooks/questions'
 import type { QuestionLedger } from '../hooks/questions'
 import { edited, finished, held, ledgerOf, named, proof, question, reopened } from './fixtures/question-files'
 import { STRINGS } from '../hooks/strings'
@@ -661,4 +661,61 @@ test("an archived mark counts only while the question's block is gone", () => {
   const gone = observe(marked, '## demo\n').ledger.records[0]
   expect(gone?.isArchived).toBe(true)
   expect(gone?.isUnresolved).toBe(true)
+})
+
+test('torn ledgers past the newest three go by the time in their names, and temporary copies of the ledger once a day old', () => {
+  const path = '/home/me/.claude/progress.md'
+  const ledger = 'progress-questions.json'
+  const now = Date.parse('2026-10-16T12:00:00Z')
+  const entries = [
+    // Moved aside by the pane (session) and by the board script (process id); the names, not
+    // the files' own times, say which is newest.
+    { name: `${ledger}.torn-${now - 5_000}-synthetic-session`, mtimeMs: 1 },
+    { name: `${ledger}.torn-${now - 1_000}-4242`, mtimeMs: 1 },
+    { name: `${ledger}.torn-${now - 4_000}-4243`, mtimeMs: 9 },
+    { name: `${ledger}.torn-${now - 2_000}-synthetic-session`, mtimeMs: 1 },
+    { name: `${ledger}.torn-${now - 3_000}-synthetic-session`, mtimeMs: 1 },
+    { name: `${ledger}.tmp-synthetic-session-1`, mtimeMs: now - LEDGER_TEMP_MS - 1 },
+    { name: `${ledger}.tmp-synthetic-session-2`, mtimeMs: now - LEDGER_TEMP_MS + 1 },
+    { name: `${ledger}.4242.mf3x9k.board-tmp`, mtimeMs: now - LEDGER_TEMP_MS - 1 },
+    // Not the ledger's: another file's temporary copy and the ledger itself stay.
+    { name: 'progress-answered.json.tmp-synthetic-session-3', mtimeMs: 1 },
+    { name: 'progress.md.4242.mf3x9k.board-tmp', mtimeMs: 1 },
+    { name: ledger, mtimeMs: 1 },
+  ]
+  const { torn, temps } = ledgerLeftovers(path, entries, now)
+  expect(torn.sort()).toEqual([
+    `${ledger}.torn-${now - 5_000}-synthetic-session`,
+    `${ledger}.torn-${now - 4_000}-4243`,
+  ])
+  expect(temps.sort()).toEqual([
+    `${ledger}.4242.mf3x9k.board-tmp`,
+    `${ledger}.tmp-synthetic-session-1`,
+  ])
+})
+
+test('the question files key lists the question files in name order, and is null while one was just written', () => {
+  const path = '/home/me/.claude/progress.md'
+  const now = Date.parse('2026-10-16T12:00:00Z')
+  const hash = 'a'.repeat(64)
+  const entries = [
+    { name: 'progress-questions.json', size: 30, mtimeMs: 5 },
+    { name: 'progress.md', size: 20, mtimeMs: 4 },
+    { name: 'progress-answered.json', size: 10, mtimeMs: 3 },
+    { name: `progress-questions-source-${hash}.json`, size: 40, mtimeMs: 2 },
+    { name: `progress-questions-retired-${hash}.json`, size: 50, mtimeMs: 1 },
+    // Not read by a question pass: another file family and leftovers of a ledger write.
+    { name: 'progress-seen.json', size: 60, mtimeMs: now },
+    { name: 'progress-questions.json.tmp-synthetic-session-1', size: 30, mtimeMs: now },
+    { name: 'progress-archive-2026-10.md', size: 70, mtimeMs: now },
+  ]
+  expect(questionFilesKey(path, '/home/me/.claude/progress-answered.json', entries, now, 2_000)).toEqual([
+    ['progress-answered.json', 10, 3],
+    [`progress-questions-retired-${hash}.json`, 50, 1],
+    [`progress-questions-source-${hash}.json`, 40, 2],
+    ['progress-questions.json', 30, 5],
+    ['progress.md', 20, 4],
+  ])
+  const fresh = entries.map(entry => (entry.name === 'progress-questions.json' ? { ...entry, mtimeMs: now - 1_999 } : entry))
+  expect(questionFilesKey(path, '/home/me/.claude/progress-answered.json', fresh, now, 2_000)).toBeNull()
 })

@@ -6,6 +6,7 @@ import { sha256 } from '../hooks/sha256'
 import { finished, ledgerOf, reopened } from './fixtures/question-files'
 import { engineBeneath, FILE, INBOX, makeWorld, PANE, PROPS, visiblePaneText } from './fixtures/pane-world'
 import type { World } from './fixtures/pane-world'
+import { BLOCKS, IDLE_POLL_FILE_OPS, LEDGER_RECORDS, LIVE_SESSIONS } from './e2e/lib/budget'
 
 // The files the pane keeps beside progress.md for its questions (#156), and the automatic archive
 // of a block that still asks (#174), against the mock engine. All data is made up.
@@ -368,4 +369,243 @@ test('pruning reads the files afresh, so a copy damaged on disk since the polls 
   await $.command.run(TIDY)
   expect(removals(world)).toBe(1)
   expect(filesOf(world, CAPTURES)).toHaveLength(16)
+})
+
+// A session id for block `n`, eight hex characters.
+const sessionOf = (n: number): string => (0xa0000000 + n).toString(16)
+
+test('L4 D24 scale: the pane does at most 6 file operations per idle poll', async ($, on) => {
+  // D24's scale, all made up: 300 blocks in ten projects, 100 of them live sessions (two in three
+  // asking the person), a ledger of 1,000 questions with their copies and proofs, and thirty
+  // turns other agents left in the inbox.
+  const blocks = Array.from({ length: BLOCKS }, (_, n) => n < LIVE_SESSIONS
+    ? block(sessionOf(n), n % 3 === 2 ? 'working' : 'waiting', 1, n % 3 === 2 ? '- [~] Check routes' : `- [?] Publish report ${n}, OK?`)
+    : block(sessionOf(n), n % 2 === 0 ? 'done' : 'ended', 1, n % 2 === 0 ? '- [x] Check routes\n- [x] Publish the report' : '- [x] Check routes\n- [ ] Publish the report'))
+  const board = Array.from({ length: 10 }, (_, p) => `## project-${p}\n${blocks.slice(p * 30, p * 30 + 30).join('')}`).join('\n')
+  const world = makeWorld([[FILE, board]])
+  world.env = english
+  seedAsked(world, board)
+  const asked = ledgerRecords(world)
+  const answered = Array.from({ length: LEDGER_RECORDS - asked.length }, (_, n) => finished(n + 1))
+  put(world, LEDGER, questionsJson({ ...ledgerOf(...asked, ...answered), next: 2 * LEDGER_RECORDS }), 1)
+  answered.forEach((record, n) => {
+    putProof(world, 'retired', record.id, 10 + n)
+    if (n < 100) putCapture(world, record, 'resolved', 10 + n)
+  })
+  for (let n = 0; n < 30; n++) put(world, `${INBOX}/codex-turn-${1_760_000_000 + n}-1.json`, JSON.stringify({ session_id: `synthetic-session-${n}`, cwd: '/work/demo', prompt: 'Synthetic request', last_assistant_message: 'Synthetic work is done.' }), 1_000 + n)
+  expect(ledgerRecords(world)).toHaveLength(LEDGER_RECORDS)
+  const clock = engineBeneath(on, world)
+  await $.session.start(START)
+  // The first polls read everything once, the start's archive and sweeps run, and a pass after
+  // the pane's own writes finds nothing more to do.
+  for (let n = 0; n < 6; n++) await clock.advance(2000)
+  world.fileOps = []
+  world.ran = []
+  // From the 12th second to the 14th only the 2 s poll runs: the inbox look comes every 5 s.
+  await clock.advance(2000)
+  // The poll ran: it looked at progress.md and listed the folder beside it.
+  expect(world.fileOps).toContain(`stat ${FILE}`)
+  expect(world.fileOps).toContain(`list ${FILE.replace(/\/[^/]*$/, '')}`)
+  expect(world.fileOps.length).toBeLessThanOrEqual(IDLE_POLL_FILE_OPS)
+  expect(world.fileOps.filter(op => op.startsWith('read ') || op.startsWith('write '))).toEqual([])
+  expect(world.ran).toEqual([])
+})
+
+test('an idle poll reads the questions again once another session changes the ledger, and not before', async ($, on) => {
+  const board = `## demo\n${block('a1b2c301', 'waiting', 1, '- [?] Publish the first plan, OK?')}`
+  const world = makeWorld([[FILE, board]])
+  world.env = english
+  const clock = engineBeneath(on, world)
+  await $.session.start(START)
+  for (let n = 0; n < 3; n++) await clock.advance(2000)
+  world.reads = []
+  await clock.advance(2000)
+  await clock.advance(2000)
+  expect(world.reads).not.toContain(LEDGER)
+  // Another session writes the same ledger again: its time moves, so it is read.
+  put(world, LEDGER, world.files.get(LEDGER)!, 5)
+  await clock.advance(2000)
+  expect(world.reads).toContain(LEDGER)
+})
+
+test('a question file written within the last poll is read again at the next poll, whatever its time and size say', async ($, on) => {
+  const board = `## demo\n${block('a1b2c301', 'waiting', 1, '- [?] Publish the first plan, OK?')}`
+  const world = makeWorld([[FILE, board]])
+  world.env = english
+  const clock = engineBeneath(on, world)
+  await $.session.start(START)
+  for (let n = 0; n < 3; n++) await clock.advance(2000)
+  // Written half a second before the poll at the 8th second.
+  put(world, LEDGER, world.files.get(LEDGER)!, NOW + 7_500)
+  const ledgerReads = (): number => (world.reads ?? []).filter(path => path === LEDGER).length
+  world.reads = []
+  await clock.advance(2000)
+  expect(ledgerReads()).toBeGreaterThan(0)
+  // Too fresh to be taken as unchanged at the 8th second, so the 10th reads it again; the 12th does not.
+  world.reads = []
+  await clock.advance(2000)
+  expect(ledgerReads()).toBeGreaterThan(0)
+  world.reads = []
+  await clock.advance(2000)
+  expect(ledgerReads()).toBe(0)
+})
+
+test('a question file whose read never answers does not keep the line under the prompt from being drawn', async ($, on) => {
+  const board = `## demo\n${block('a1b2c301', 'waiting', 1, '- [?] Publish the first plan, OK?')}`
+  const world = makeWorld([[FILE, board]])
+  world.env = english
+  // With the pane closed, the line under the prompt holds the board's counts.
+  world.store = { ...world.store, closedByPerson: true }
+  const clock = engineBeneath(on, world)
+  const status: Array<string | undefined> = []
+  on('ui.status', ($, e) => {
+    status.push(e.text)
+    return { value: undefined }
+  })
+  await $.session.start(START)
+  for (let n = 0; n < 3; n++) await clock.advance(2000)
+  const before = status.at(-1)
+  expect(before).toBeDefined()
+  world.holdRead = path => (path === LEDGER ? new Promise(() => undefined) : undefined)
+  world.files.set(FILE, `${board}${block('a1b2c302', 'waiting', 1, '- [?] Publish the second plan, OK?')}`)
+  world.mtime += 1
+  // The poll that sees the change waits one poll for the question pass, then draws without it.
+  await clock.advance(2000)
+  await clock.advance(2000)
+  expect(status.at(-1)).not.toBe(before)
+})
+
+test('a poll held by a read of progress.md gives way to a new one after 15 seconds, and what the held read brings back late is dropped', async ($, on) => {
+  const board = `## demo\n${block('a1b2c301', 'working', 1, '- [~] Work')}`
+  const world = makeWorld([[FILE, board]])
+  world.env = english
+  const clock = engineBeneath(on, world)
+  await $.session.start(START)
+  for (let n = 0; n < 3; n++) await clock.advance(2000)
+  let release = (): void => undefined
+  const held = new Promise<void>(resolve => { release = resolve })
+  world.holdRead = path => (path === FILE ? held : undefined)
+  world.files.set(FILE, `${board}${block('a1b2c302', 'working', 1, '- [~] Held work')}`)
+  world.mtime += 1
+  await clock.advance(2000)
+  // The drive answers again and the file changes once more, while the first read is still held.
+  world.holdRead = undefined
+  world.files.set(FILE, `${board}${block('a1b2c302', 'working', 1, '- [~] Held work')}${block('a1b2c303', 'working', 1, '- [~] Later work')}`)
+  world.mtime += 1
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
+  try {
+    // The pane counts the work in progress: one session before the later read, three after it.
+    await clock.advance(10_000)
+    expect(visiblePaneText(await ui.drawn())).toMatch(/▸\s+1\s+in progress/)
+    await clock.advance(6_000)
+    expect(visiblePaneText(await ui.drawn())).toMatch(/▸\s+3\s+in progress/)
+    // The held read answers with the two sessions it was asked about; the pane keeps three.
+    release()
+    await clock.advance(1)
+    expect(visiblePaneText(await ui.drawn())).toMatch(/▸\s+3\s+in progress/)
+  } finally { await ui.unmount() }
+})
+
+test('a write made while a poll is held still lands, without waiting on the held read', async ($, on) => {
+  const board = `## demo\n${block('a1b2c301', 'working', 1, '- [~] Work')}`
+  const world = makeWorld([[FILE, board]])
+  world.env = english
+  const clock = engineBeneath(on, world)
+  await $.session.start(START)
+  for (let n = 0; n < 3; n++) await clock.advance(2000)
+  // The answered list changes and its read never answers, so each poll from now on is held.
+  const answered = FILE.replace(/\.md$/, '-answered.json')
+  put(world, answered, '{}\n', NOW + 6_000)
+  world.holdRead = path => (path === answered ? new Promise(() => undefined) : undefined)
+  const add = (title: string) => $.command.run({ ...TIDY, args: `add demo: ${title}` })
+  // Each add comes when the held poll is past 15 seconds and before the 2 s timer looks again, so
+  // only the add's own poll could take the held one's place.
+  await clock.advance(2000)
+  await clock.advance(14_000)
+  await clock.advance(1_500)
+  await add('Synthetic quick task')
+  await clock.advance(500)
+  await clock.advance(14_000)
+  await clock.advance(1_500)
+  await add('Synthetic second quick task')
+  expect(world.files.get(FILE)).toContain('Synthetic quick task')
+  expect(world.files.get(FILE)).toContain('Synthetic second quick task')
+})
+
+test('a poll held for a minute leaves at most two reads of the held file waiting', async ($, on) => {
+  const board = `## demo\n${block('a1b2c301', 'working', 1, '- [~] Work')}`
+  const world = makeWorld([[FILE, board]])
+  world.env = english
+  const clock = engineBeneath(on, world)
+  await $.session.start(START)
+  for (let n = 0; n < 3; n++) await clock.advance(2000)
+  const answered = FILE.replace(/\.md$/, '-answered.json')
+  put(world, answered, '{}\n', NOW + 6_000)
+  world.holdRead = path => (path === answered ? new Promise(() => undefined) : undefined)
+  world.reads = []
+  for (let n = 0; n < 30; n++) await clock.advance(2000)
+  // The held poll and the one that took its place; no third while both are held.
+  expect(world.reads.filter(path => path === answered)).toHaveLength(2)
+})
+
+test('a question pass held for a minute leaves at most two reads of the ledger waiting', async ($, on) => {
+  const board = `## demo\n${block('a1b2c301', 'waiting', 1, '- [?] Publish the first plan, OK?')}`
+  const world = makeWorld([[FILE, board]])
+  world.env = english
+  const clock = engineBeneath(on, world)
+  await $.session.start(START)
+  for (let n = 0; n < 3; n++) await clock.advance(2000)
+  // Another session writes the ledger again, so the next pass reads it, and that read is held.
+  put(world, LEDGER, world.files.get(LEDGER)!, NOW)
+  world.holdRead = path => (path === LEDGER ? new Promise(() => undefined) : undefined)
+  world.reads = []
+  for (let n = 0; n < 30; n++) await clock.advance(2000)
+  expect(world.reads.filter(path => path === LEDGER)).toHaveLength(2)
+})
+
+test('the archive sweep keeps the newest three torn ledgers and removes day-old temporary copies of the ledger', async ($, on) => {
+  const board = `## demo\n${block('a1b2c301', 'working', 1, '- [~] Work')}`
+  const world = makeWorld([[FILE, board]])
+  world.env = english
+  world.ran = []
+  const clock = engineBeneath(on, world)
+  await $.session.start(START)
+  await clock.advance(2000)
+  // Five torn ledgers, from the pane and from the board script, and three temporary copies.
+  const torn = [1, 2, 3, 4, 5].map(n => `${LEDGER}.torn-${NOW - n * HOUR}-${n % 2 === 0 ? 'synthetic-session' : String(4000 + n)}`)
+  torn.forEach(path => put(world, path, '{"version":1,"rec', 1))
+  const ledger = questionsJson(emptyQuestions())
+  put(world, LEDGER, ledger, NOW - HOUR)
+  const oldTemp = `${LEDGER}.tmp-synthetic-session-7`
+  const freshTemp = `${LEDGER}.tmp-synthetic-session-8`
+  const oldBoardTemp = `${LEDGER}.4242.mf3x9k.board-tmp`
+  put(world, oldTemp, ledger, NOW - 2 * 24 * HOUR)
+  put(world, freshTemp, ledger, NOW - HOUR)
+  put(world, oldBoardTemp, ledger, NOW - 2 * 24 * HOUR)
+  await $.command.run(TIDY)
+  expect(torn.filter(path => world.files.has(path))).toEqual(torn.slice(0, 3))
+  expect(world.files.has(oldTemp)).toBe(false)
+  expect(world.files.has(oldBoardTemp)).toBe(false)
+  expect(world.files.has(freshTemp)).toBe(true)
+  expect(world.files.has(LEDGER)).toBe(true)
+})
+
+test('the archive sweep keeps a day-old temporary copy while the ledger does not read, and a torn name that holds a whole ledger', async ($, on) => {
+  const board = `## demo\n${block('a1b2c301', 'working', 1, '- [~] Work')}`
+  const world = makeWorld([[FILE, board]])
+  world.env = english
+  world.ran = []
+  const clock = engineBeneath(on, world)
+  await $.session.start(START)
+  await clock.advance(2000)
+  const ledger = questionsJson(emptyQuestions())
+  // Five torn names: the fourth holds a whole ledger, left when putting one back failed.
+  const torn = [1, 2, 3, 4, 5].map(n => `${LEDGER}.torn-${NOW - n * HOUR}-synthetic-session`)
+  torn.forEach((path, n) => put(world, path, n === 3 ? ledger : '{"version":1,"rec', 1))
+  const oldTemp = `${LEDGER}.tmp-synthetic-session-7`
+  put(world, oldTemp, ledger, NOW - 2 * 24 * HOUR)
+  world.unreadable = new Set([LEDGER])
+  await $.command.run(TIDY)
+  expect(torn.filter(path => world.files.has(path))).toEqual(torn.slice(0, 4))
+  expect(world.files.has(oldTemp)).toBe(true)
 })
