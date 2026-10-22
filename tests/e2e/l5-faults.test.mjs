@@ -187,7 +187,7 @@ syncBuiltinESMExports()
 const occurrences = (text, part) => text.split(part).length - 1
 const pause = ms => new Promise(done => setTimeout(done, ms))
 
-test('L5 torn tail: the board warns in one line and still shows every complete block', async () => {
+test('L5 torn tail: the terminal, --chat, html view and page each warn once and still show every complete block', async () => {
   // Two ways a write is cut off: in the middle of a new block's start marker, and in the middle of
   // the end marker of the last block. The blocks before the cut are complete in both.
   const cutOff = EN.progressIncomplete(1)
@@ -218,7 +218,7 @@ test('L5 torn tail: the board warns in one line and still shows every complete b
   }
 })
 
-test('L5 torn tail: a reporter append repairs the tail or reports why, never fails silently', async () => {
+test('L5 torn tail: an append by the Codex hook repairs the tail or reports why, never fails silently', async () => {
   const world = makeWorld()
   try {
     const fragments = () => world.files().filter(name => name.startsWith('progress.md.torn-'))
@@ -287,7 +287,7 @@ test('L5 torn tail: a reporter append repairs the tail or reports why, never fai
   } finally { await world.close() }
 })
 
-test('L5 locked file: the hook retries, exits 0, and the Stop event lands on the next run', async t => {
+test('L5 locked file: the Codex hook keeps a locked Stop event, exits 0, and the next run applies it', async t => {
   const world = makeWorld()
   try {
     const session = 'codex-locked-session'
@@ -502,7 +502,7 @@ const reachableTab = source => source.replace("'use strict';", () => `'use stric
   var send = fetch
   fetch = function (target, options) { return target === '/api/board' ? send('/api/poll', { method: 'POST', body: '{}' }) : send(target, options) }`)
 
-test('L5 restarted server: an old page tab disables its buttons and says how to reconnect', async () => {
+test('L5 restarted server: after a real restart an old page tab disables every button, sends nothing on a press, and says how to reconnect', async () => {
   const world = makeWorld()
   try {
     block(world, { state: 'waiting', title: 'Publish the gateway', steps: ['- [?] Ship the gateway, OK?'] })
