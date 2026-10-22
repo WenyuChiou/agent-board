@@ -256,6 +256,7 @@ export const ZH_CN: Strings = {
   setupAgent: (label: string, parts: string[]): string => `${label}：${parts.join('；')}`,
   setupHookConfigured: '汇报 hook 已接上',
   setupHookFailed: '汇报 hook 没接上，原因在下面',
+  setupSkillOnly: '只有 skill，没有汇报 hook',
   setupHookUnreadable: '配置文件读不懂，没有接',
   setupHookTooOld: '版本太旧，没有接',
   setupCodexTrust: '第一次要在 Codex 的 /hooks 里批准',

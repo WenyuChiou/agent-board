@@ -464,6 +464,30 @@ test('L5 restarted server: after a real restart an old page tab disables every b
   } finally { await world.close() }
 })
 
+test('L5 OpenCode exit: a row whose end report missed the hook limit reads as stopped after the stale time', async () => {
+  const world = makeWorld()
+  try {
+    const title = 'Synthetic OpenCode exit card'
+    block(world, { project: 'synthetic-project', agent: 'opencode', session: 'a1000002', resume: 'synthetic-opencode-exit', state: 'waiting', title, steps: ['- [ ] Synthetic next step'] })
+    const server = await serve.start(world)
+    const rows = async () => ({ terminal: (await run(world, ['--all'])).stdout, page: await server.page() })
+    for (const [surface, text] of Object.entries(await rows())) {
+      const at = text.indexOf(title)
+      assert.ok(at >= 0, `${surface} lost the row:\n${text}`)
+      assert.doesNotMatch(text.slice(at, at + 300), /is working/, `${surface} calls an idle agent working`)
+    }
+    world.jump(`${STALE_MS / 60000 + 1}m`)
+    const saysWhy = EN.sessionStopped(EN.hoursAgo(STALE_MS / 3600000))
+    for (const [surface, text] of Object.entries(await rows())) {
+      const at = text.indexOf(title)
+      assert.ok(at >= 0, `${surface} lost the row:\n${text}`)
+      const row = text.slice(at, at + 300)
+      assert.doesNotMatch(row, /is working/, `${surface} still calls a silent agent working`)
+      assert.ok(row.includes(saysWhy), `${surface} never says "${saysWhy}": ${row}`)
+    }
+  } finally { await world.close() }
+})
+
 test('L5 crashed agent: a working row with no event for the stale time of its host says why it looks stale', async () => {
   const world = makeWorld()
   try {

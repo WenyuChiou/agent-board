@@ -1,8 +1,40 @@
 import { boardPromptHelper, boardRequestWords } from './board-commands'
 import { STRINGS } from './strings'
-import { HOOK_VERSION, HOOK_WORKER_GRACE, hookGuardSource, hookTimeout, hostHookTimeout } from './hook-safety'
+import { HOOK_VERSION, HOOK_WORKER_GRACE, hookBootstrap, hookGuardSource, hookTimeout, hostHookTimeout } from './hook-safety'
 
 const BOARD_PROMPT_HELPER = boardPromptHelper(boardRequestWords(Object.values(STRINGS)))
+
+// Base64 without Buffer or btoa: /progress connect also builds these commands where neither
+// exists (#285).
+const BASE64 = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/'
+const base64 = (bytes: Uint8Array): string => {
+  let text = ''
+  for (let i = 0; i < bytes.length; i += 3) {
+    const n = bytes[i]! << 16 | (bytes[i + 1] ?? 0) << 8 | (bytes[i + 2] ?? 0)
+    text += BASE64[n >> 18 & 63]! + BASE64[n >> 12 & 63]! + (i + 1 < bytes.length ? BASE64[n >> 6 & 63]! : '=') + (i + 2 < bytes.length ? BASE64[n & 63]! : '=')
+  }
+  return text
+}
+const fromBase64 = (text: string): Uint8Array => {
+  const digits = text.replace(/=+$/, '')
+  const bytes = new Uint8Array(digits.length * 3 >> 2)
+  for (let i = 0, value = 0, bits = 0, at = 0; i < digits.length; i++) {
+    const digit = BASE64.indexOf(digits[i]!)
+    if (digit < 0) throw new Error('INVALID_BASE64')
+    value = (value << 6 | digit) & 0xffff
+    bits += 6
+    if (bits >= 8) { bits -= 8; bytes[at++] = value >> bits & 255 }
+  }
+  return bytes
+}
+// PowerShell's -EncodedCommand is base64 of the command's UTF-16LE bytes.
+const utf16le = (text: string): Uint8Array => Uint8Array.from({ length: text.length * 2 }, (_, i) => i % 2 ? text.charCodeAt(i >> 1) >> 8 : text.charCodeAt(i >> 1) & 255)
+export const encodedCommandText = (encoded: string): string => {
+  const bytes = fromBase64(encoded)
+  let text = ''
+  for (let i = 0; i + 1 < bytes.length; i += 2) text += String.fromCharCode(bytes[i]! | bytes[i + 1]! << 8)
+  return text
+}
 
 export type LocalAgent = 'codex' | 'cursor' | 'opencode' | 'gemini' | 'grok' | 'muse' | 'hermes' | 'openclaw' | 'antigravity' | 'deepseek'
 export const localAgents: LocalAgent[] = ['codex', 'cursor', 'opencode', 'gemini', 'grok', 'muse', 'hermes', 'openclaw', 'antigravity', 'deepseek']
@@ -19,6 +51,28 @@ export const lifecycleCapability = (agent: LocalAgent): string =>
 // Stop ends an execution loop, not the conversation. No session-end event is invented.
 export const antigravityHooks = (command: (event: string, state: string) => string): Record<string, unknown> =>
   Object.fromEntries(Object.entries(statusEvents.antigravity!).map(([event, state]) => [event, [{ type: 'command', command: command(event, state), timeout: hostHookTimeout('antigravity', event) }]]))
+
+// One installed hook: Node runs a bootstrap that fails open and loads the worker, which runs
+// the board script within the host's limit (#241). The installer and /progress connect write
+// the same commands (#285). Two encoding layers amplify indentation enough to exceed cmd.exe's
+// command limit.
+export const hookCommandArgs = (node: string, home: string, agent: LocalAgent, worker: string, progress: string, event: string, state?: string): string[] => [
+  node, '--input-type=commonjs', '-e',
+  `eval(Buffer.from('${base64(new TextEncoder().encode(hookBootstrap(home, agent).split('\n').map(line => line.trim()).join('\n')))}','base64').toString('utf8'))`,
+  worker, '--hook-version', String(HOOK_VERSION), '--hook-event', event,
+  state === undefined ? '--codex-event' : '--agent-status', '--agent', agent,
+  ...(state === undefined ? [] : ['--state', state]),
+  ...(agent === 'antigravity' ? ['--event', event] : []), '--progress-file', progress,
+]
+
+// Antigravity's Windows executor passes one quoted argument to cmd /c using CreateProcess
+// escaping. Embedded executable quotes become literal \" bytes. Keep that command free of
+// inner quotes; PowerShell forwards stdin to Node.
+export const antigravityCommand = (argv: string[], isWindows: boolean, quote: (value: string) => string): string => {
+  if (!isWindows) return argv.map(quote).join(' ')
+  const launch = `& ${argv.map(value => `'${value.replaceAll("'", "''")}'`).join(' ')} --hook-started ([DateTimeOffset]::new([Diagnostics.Process]::GetCurrentProcess().StartTime).ToUnixTimeMilliseconds()); exit $LASTEXITCODE`
+  return `powershell.exe -NoLogo -NoProfile -NonInteractive -EncodedCommand ${base64(utf16le(launch))}`
+}
 
 export const cursorEvents: Record<string, string> = {
   sessionStart: 'SessionStart', beforeSubmitPrompt: 'UserPromptSubmit',
@@ -51,32 +105,68 @@ const run = (mode, payload, session, deadline) => {
   // Bun 1.3 in OpenCode ends spawnSync early after an idle event loop (#217).
   if (result.error?.code === 'ETIMEDOUT' && end - Date.now() > 100) result = spawnSync(${JSON.stringify(node)}, args, { ...options, timeout: end - Date.now() + ${HOOK_WORKER_GRACE} })
   if (result.error?.code === 'ETIMEDOUT') throw Error('HOOK_TIMEOUT')
-  if (result.error || result.status !== 0) throw new Error('AGENT_BOARD_REPORT_FAILED')
+  // A refused report names the board's reason (INVALID_STEP, say), so the model can correct it (#217).
+  const reason = result.error ? undefined : /^AGENT_BOARD_REASON ([A-Z][A-Z0-9_]{2,63})$/m.exec(result.stderr ?? '')?.[1]
+  if (result.error || result.status !== 0) throw new Error(reason ? 'AGENT_BOARD_REPORT_FAILED: ' + reason : 'AGENT_BOARD_REPORT_FAILED')
   return result.stdout
 }
 
-export const AgentBoardLocal = async ({ client }) => ({
+// A one-shot \`opencode run\` exits without session.deleted (#217). As OpenCode exits, the
+// top-level sessions reported here and not seen to end are ended, all within one hook limit;
+// a board that is too slow gets them queued or logged, and OpenCode's exit never waits longer.
+// Each one keeps its folder and whether a reply was still being written at its last report:
+// such a session is left as it is, and its row goes stale by age instead.
+const open = new Map()
+process.once('exit', () => {
+  try {
+    const deadline = Date.now() + ${hookTimeout('opencode') - 1000}
+    for (const [session, { isReplying, where }] of open) {
+      if (isReplying) continue
+      try { run('--agent-status', { session_id: session, state: 'ended', ...where }, undefined, deadline) }
+      catch (error) { hookError(error?.message === 'HOOK_TIMEOUT' ? 'REPORTER_TIMEOUT' : 'REPORTER_FAILED') }
+    }
+  } catch {}
+})
+
+// The session's folder, else the plugin's own, files a new block under it (#217); only its name is kept.
+const folderOf = (info, directory) => {
+  const folder = typeof info.directory === 'string' ? info.directory : directory
+  return typeof folder === 'string' ? { cwd: folder } : {}
+}
+
+export const AgentBoardLocal = async ({ client, directory }) => ({
   'chat.message': async ({ sessionID }, output) => withHook(async (current, deadline) => {
       const info = current(await client.session.get({ path: { id: sessionID } }))
       if (info.error) throw Error('HOST_METADATA_FAILED')
       if (!info.data || info.data.id !== sessionID || info.data.parentID) return
-      run('--agent-status', { session_id: sessionID, state: 'working', prompt_submitted: true, ...(isBoardRequest(output) ? { board_request: true } : {}) }, undefined, deadline)
+      const where = folderOf(info.data, directory)
+      open.set(sessionID, { isReplying: true, where })
+      run('--agent-status', { session_id: sessionID, state: 'working', prompt_submitted: true, ...where, ...(isBoardRequest(output) ? { board_request: true } : {}) }, undefined, deadline)
   }),
   event: async ({ event }) => withHook(async (current, deadline) => {
     const p = event.properties ?? {}
     const session = p.sessionID ?? p.info?.id
     if (!session || !['session.created', 'session.status', 'session.idle', 'session.deleted'].includes(event.type)) return
     if (event.type === 'session.status' && !['busy', 'retry', 'idle'].includes(p.status?.type)) return
+    const state = event.type === 'session.deleted' ? 'ended' : event.type === 'session.status' && p.status?.type !== 'idle' ? 'working' : 'waiting'
+    // A known session notes a finished reply at once: OpenCode may exit before the lookup returns.
+    if (open.has(session) && state !== 'ended') open.get(session).isReplying = state === 'working'
     const info = event.type === 'session.deleted' ? { data: p.info } : current(await client.session.get({ path: { id: session } }))
     if (info.error) throw Error('HOST_METADATA_FAILED')
     if (!info.data || info.data.id !== session || info.data.parentID) return
-    const state = event.type === 'session.deleted' ? 'ended' : event.type === 'session.status' && p.status?.type !== 'idle' ? 'working' : 'waiting'
-    run('--agent-status', { session_id: session, state }, undefined, deadline)
+    const where = folderOf(info.data, directory)
+    // A known session keeps the state its latest event noted: an earlier lookup may return last.
+    const known = open.get(session)
+    if (state === 'ended') open.delete(session)
+    else if (known) known.where = where
+    else open.set(session, { isReplying: state === 'working', where })
+    run('--agent-status', { session_id: session, state, ...where }, undefined, deadline)
   }),
   tool: {
     agent_board_progress: tool({
       description: ${JSON.stringify(description)},
-      args: { title: tool.schema.string(), project: tool.schema.string(), state: tool.schema.enum(['working', 'waiting', 'done', 'ended']), steps: tool.schema.array(tool.schema.string()) },
+      // The board takes each step as one Markdown task line (#217).
+      args: { title: tool.schema.string(), project: tool.schema.string(), state: tool.schema.enum(['working', 'waiting', 'done', 'ended']), steps: tool.schema.array(tool.schema.string().describe('One Markdown task line: "- [x] finished", "- [~] current", "- [ ] next", "- [?] waiting on the user", "- [!] blocked"')) },
       execute: async (args, context) => {
         try { return run('--codex-report', args, context.sessionID) }
         catch (error) {

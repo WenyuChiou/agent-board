@@ -162,6 +162,13 @@ configuration HMR. No credential, telemetry or provider setting is changed.
 OpenCode's metadata lookup must return the exact session before it reports; missing or
 foreign responses are ignored. Changing an installed host directory requires removing
 the old scoped installation first, so an orphan plugin cannot continue reporting.
+OpenCode sends no session end for a one-shot `opencode run`, so as OpenCode exits the
+plugin ends the top-level sessions it reported that had finished their reply, within 2 s
+plus the worker's 500 ms grace.
+A session still replying is left as it is and goes stale by age. Quitting OpenCode ends
+its rows too; a resumed session reopens its row. New OpenCode blocks are filed under the
+folder the session ran in. The progress tool takes each step as one Markdown task line
+(`- [~] Current step`); a refused report names the board's reason, such as `INVALID_STEP`.
 
 All these hooks report activity only. Semantic steps need a host-proven own-session
 report; only OpenCode's generated tool supplies that context directly. This setup does
@@ -180,6 +187,16 @@ The [official native schema](https://antigravity.google/docs/hooks) puts events 
 named definition, with command handlers directly under non-tool events. Edited or disabled
 owned definitions become conflicts instead of being overwritten or silently enabled.
 Removal preserves unrelated named definitions.
+
+The Claude plugin's `/progress connect` writes the same four commands under its own
+`agent-board` definition, next to the board skill, and runs them through `progress-hook.mjs`
+beside its progress file. Where this installer's `agent-board-local` definition is there,
+the connect writes none and takes out one it wrote before. When this installer runs after
+the connect, both definitions report until the connect next runs (the next Claude Code
+session, or `/progress connect`). This installer takes over the skill file the connect
+wrote, and the connect then leaves this installer's skill as it is. While a host has the
+skill but neither definition,
+`--codex-doctor --agent antigravity` says `skill only, no report hook`.
 
 On Windows the generated command uses Windows PowerShell's encoded-command mode to
 forward stdin to the exact Node executable and reporter paths. This avoids Antigravity's

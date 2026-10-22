@@ -257,6 +257,7 @@ export const EN: Strings = {
   setupAgent: (label: string, parts: string[]): string => `${label}: ${parts.join('; ')}`,
   setupHookConfigured: 'reporting hook configured',
   setupHookFailed: 'reporting hook not configured, see below',
+  setupSkillOnly: 'skill only, no report hook',
   setupHookUnreadable: 'config not understood, left out',
   setupHookTooOld: 'too old, left out',
   setupCodexTrust: "approve it once in Codex's /hooks",

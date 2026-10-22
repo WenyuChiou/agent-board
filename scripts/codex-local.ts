@@ -6,18 +6,18 @@ import { performance } from 'node:perf_hooks'
 import { pathToFileURL } from 'node:url'
 import { boardConfirmedReport, codexEvent, codexEvents, codexReport, folderProject, putCodexBlock, sessionTitle } from '../hooks/codex'
 import type { CodexReport } from '../hooks/codex'
-import { readConfig } from '../hooks/connect-pure'
+import { agentHooks, BOARD_FOR, readConfig } from '../hooks/connect-pure'
 import type { Strings } from '../hooks/i18n'
 import { STRINGS } from '../hooks/strings'
 import { progressTail } from '../hooks/parse'
-import { antigravityHooks, cursorEvent, cursorEvents, lifecycleCapability, localAgents, opencodePlugin, statusEvents } from '../hooks/local-agents'
+import { antigravityCommand, antigravityHooks, cursorEvent, cursorEvents, hookCommandArgs, lifecycleCapability, localAgents, opencodePlugin, statusEvents } from '../hooks/local-agents'
 import type { LocalAgent } from '../hooks/local-agents'
 import { deepseekLocalPlugin, deepseekPatch, openclawLocalPlugin } from '../hooks/portable-agents'
-import { HOOK_SESSION_ENV, HOOK_VERSION, hookBootstrap, hookWorker, hostHookTimeout } from '../hooks/hook-safety'
+import { HOOK_SESSION_ENV, HOOK_VERSION, hookWorker, hostHookTimeout } from '../hooks/hook-safety'
 import { trustCodex } from './codex-host'
 import { withLocalLock } from './local-lock'
 import { withInstallLock } from './install-control'
-import { boardPromptHelper, boardRequestWords, isBoardRequest } from '../hooks/board-commands'
+import { boardPromptHelper, boardRequestWords, boardRun, isBoardRequest } from '../hooks/board-commands'
 import { PROMPT_EVENTS } from '../hooks/inbox'
 
 type Json = Record<string, unknown>
@@ -109,6 +109,10 @@ const saveReporterTail = (progress: string, fragment: Buffer): string => {
   }
 }
 
+// Codex and Cursor events name the session's folder. Of the status hooks, only OpenCode's plugin
+// sends one for that (#217); the others keep their agent's heading.
+const filesByFolder = (mode: string, agent: string): boolean => mode === '--codex-event' || mode === '--agent-status' && agent === 'opencode'
+
 export const runCodexLocal = async (args: string[], boardPath: string, s: Strings): Promise<boolean> => {
   const mode = ['--codex-setup', '--codex-doctor', '--codex-remove', '--codex-trust', '--codex-report', '--codex-event', '--agent-status'].find(one => args.includes(one))
   if (!mode) return false
@@ -171,7 +175,7 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
     const buildEntry = (mode: string, agent: LocalAgent, raw: Json, flag: (name: string) => string | undefined, env: NodeJS.ProcessEnv, progress: string, at: number): Pending => {
       const payload = agent === 'cursor' && mode === '--codex-event' ? cursorEvent(raw) : raw
       // Read before Cursor's adapter drops workspace_roots; a queued raw event keeps cwd and workspace_roots for this (#246).
-      const folder = mode === '--codex-event' ? folderProject(raw.cwd || (agent === 'cursor' && Array.isArray(raw.workspace_roots) && raw.workspace_roots.every(root => typeof root === 'string') ? raw.workspace_roots[0] : undefined)) : ''
+      const folder = filesByFolder(mode, agent) ? folderProject(raw.cwd || (agent === 'cursor' && Array.isArray(raw.workspace_roots) && raw.workspace_roots.every(root => typeof root === 'string') ? raw.workspace_roots[0] : undefined)) : ''
       // Only metadata selected below is retained. Never open transcript_path or save prompts,
       // tool inputs, last_assistant_message, or permission decisions from a hook payload.
       const session = mode !== '--codex-report' ? agent === 'antigravity' ? payload.conversationId : payload.session_id ?? payload.sessionId ?? payload.sessionID ?? (agent === 'grok' ? env.GROK_SESSION_ID : undefined) : flag('--session') ?? (agent === 'codex' ? env.CODEX_THREAD_ID : env.AGENT_BOARD_AGENT === agent ? env.AGENT_BOARD_SESSION_ID : undefined)
@@ -190,7 +194,7 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
       // A queued event keeps metadata only: the host's own fields stay out, as they do above.
       return {
         version: 1, progress, mode, agent, session, now, at, status: mode === '--agent-status' ? status : undefined, event, isBoardPrompt, isPrompt,
-        ...(mode === '--codex-event' ? { folder } : {}),
+        ...(filesByFolder(mode, agent) ? { folder } : {}),
         payload: mode === '--codex-report' ? payload : mode === '--codex-event' ? {
           session_id: payload.session_id, hook_event_name: payload.hook_event_name,
           turn_id: payload.turn_id, prompt_submitted: payload.prompt_submitted,
@@ -255,7 +259,7 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
       } : payload, clock, s)
       // A queued folder is cleaned again: the queue file is not trusted to hold a clean name.
       const name = folderProject(folder)
-      const initial = mode === '--codex-event' && !previous ? codexReport(base, session, {
+      const initial = filesByFolder(mode, agent) && !previous ? codexReport(base, session, {
         ...base, title: sessionTitle(name, s.localAgentTask(agent)), project: name || agent,
       }, clock, s) : base
       const priorActivity = previous?.activity ?? []
@@ -406,15 +410,7 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
   const isReadable = parsedConfig !== null
   const hooks = object(hookConfig.hooks ?? {})
   const worker = join(root, 'agent-board-hook.mjs')
-  // Two encoding layers amplify indentation enough to exceed cmd.exe's command limit.
-  const hookArgs = (event: string, state?: string): string[] => [
-    process.execPath, '--input-type=commonjs', '-e',
-    `eval(Buffer.from('${Buffer.from(hookBootstrap(home, agent).split('\n').map(line => line.trim()).join('\n')).toString('base64')}','base64').toString('utf8'))`,
-    worker, '--hook-version', String(HOOK_VERSION), '--hook-event', event,
-    state === undefined ? '--codex-event' : '--agent-status', '--agent', agent,
-    ...(state === undefined ? [] : ['--state', state]),
-    ...(agent === 'antigravity' ? ['--event', event] : []), '--progress-file', progress,
-  ]
+  const hookArgs = (event: string, state?: string): string[] => hookCommandArgs(process.execPath, home, agent, worker, progress, event, state)
   const isSame = (a: unknown, b: unknown): boolean => JSON.stringify(a) === JSON.stringify(b)
   const remove = mode === '--codex-remove'
   const conflicts: string[] = []
@@ -443,15 +439,7 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
   }
   if (agent === 'antigravity') {
     const name = 'agent-board-local'
-    const desired = antigravityHooks((event, state) => {
-      const argv = hookArgs(event, state)
-      if (process.platform !== 'win32') return argv.map(quote).join(' ')
-      // Antigravity's Windows executor passes one quoted argument to cmd /c using
-      // CreateProcess escaping. Embedded executable quotes become literal \" bytes.
-      // Keep that command free of inner quotes; PowerShell forwards stdin to Node.
-      const launch = `& ${argv.map(value => `'${value.replaceAll("'", "''")}'`).join(' ')} --hook-started ([DateTimeOffset]::new([Diagnostics.Process]::GetCurrentProcess().StartTime).ToUnixTimeMilliseconds()); exit $LASTEXITCODE`
-      return `powershell.exe -NoLogo -NoProfile -NonInteractive -EncodedCommand ${Buffer.from(launch, 'utf16le').toString('base64')}`
-    })
+    const desired = antigravityHooks((event, state) => antigravityCommand(hookArgs(event, state), process.platform === 'win32', quote))
     const existing = hookConfig[name], owned = manifest.groups[name]
     if (isReadable && existing !== undefined && !(owned !== undefined && isSame(existing, owned)) && !(!remove && isSame(existing, desired))) conflicts.push(`${config}:${name}`)
     if (isReadable && owned !== undefined && existing === undefined) conflicts.push(`${config}:${name}`)
@@ -491,7 +479,11 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
     if (patch.group) groups.patch = patch.group
   }
   const skillText = `---\nname: agent-board\ndescription: ${JSON.stringify(s.localAgentSkillDescription)}\n---\n\n${s.localAgentSkill(`${quote(process.execPath)} ${quote(script)}`)}\n\n${s.localAgentHandoff}\n\n${s.codexTrust}\n\nCodex: ${configs.codex}\n${codexEvents.join(', ')}\n`
-  const legacySkills = Object.values(STRINGS).map(words => `---\nname: agent-board\ndescription: ${JSON.stringify(words.boardCommandDescription)}\n---\n\n${words.boardSkillPrompt(`node "${join(home, '.claude', 'agent-board.mjs')}"`)}\n`)
+  // Releases before de40dde wrote the command as node "<path>" for any path; later ones use boardRun.
+  const legacyBoard = join(home, '.claude', 'agent-board.mjs')
+  const legacySkills = Object.values(STRINGS).flatMap(words => [...new Set([boardRun(legacyBoard), `node "${legacyBoard}"`])].map(run => `---\nname: agent-board\ndescription: ${JSON.stringify(words.boardCommandDescription)}\n---\n\n${words.boardSkillPrompt(run)}\n`))
+  // /progress connect writes Antigravity's skill too; that one is taken over like the shared one (#285).
+  const antigravitySkill = join(home, '.gemini', 'config', 'skills', 'agent-board', 'SKILL.md')
   const original = readFileSync(process.argv[1] ?? '', 'utf8').replace(/^globalThis\.AGENT_BOARD[^\n]*\n/, '')
   const files: Record<string, string> = {
     [script]: `globalThis.AGENT_BOARD = ${JSON.stringify({ hookVersion: HOOK_VERSION, path: progress, codexRoot: root, lang: Object.entries(STRINGS).find(([, words]) => words === s)?.[0] ?? 'en' })}\n${original}`,
@@ -509,14 +501,14 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
     files[join(deepseekDir, 'skills', 'agent-board', 'SKILL.md')] = skillText
   }
   if (agent === 'hermes') files[join(flag('--hermes-dir') ?? (process.env.HERMES_HOME || join(home, '.hermes')), 'skills', 'agent-board', 'SKILL.md')] = skillText
-  if (agent === 'antigravity') files[join(home, '.gemini', 'config', 'skills', 'agent-board', 'SKILL.md')] = skillText
+  if (agent === 'antigravity') files[antigravitySkill] = skillText
   if (agent === 'gemini') files[join(home, '.gemini', 'commands', 'board.toml')] = `description = ${JSON.stringify(s.boardCommandDescription)}\nprompt = '''${s.boardCommandPrompt}\n\n!{${quote(process.execPath)} ${quote(script)} --serve}\n'''\n`
   if (agent === 'opencode') files[join(opencodeDir, 'commands', 'board.md')] = `---\ndescription: ${JSON.stringify(s.boardCommandDescription)}\n---\n\n${s.boardCommandPrompt}\n\n!\`${quote(process.execPath)} ${quote(script)} --serve\`\n`
   for (const [file, desired] of Object.entries(files)) {
     const existing = initial(file)
     const shared = file === script || file === worker || file === skill
     if (remove && shared && otherManifests.some(one => one.files !== undefined)) continue
-    const owned = existing !== null && (hash(existing) === manifest.files[file] || (!remove && (otherManifests.some(one => object(one.files ?? {})[file] === hash(existing)) || file === skill && legacySkills.includes(existing))))
+    const owned = existing !== null && (hash(existing) === manifest.files[file] || (!remove && (otherManifests.some(one => object(one.files ?? {})[file] === hash(existing)) || (file === skill || file === antigravitySkill) && legacySkills.includes(existing))))
     if (existing !== null && !owned && existing !== desired) conflicts.push(file)
     else if (remove ? owned : existing !== desired) changes.push({ file, action: remove ? 'remove' : existing === null ? 'create' : 'update' })
   }
@@ -547,7 +539,25 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
   if (mode === '--codex-doctor') {
     const installed = conflicts.length === 0 && changes.length === 0 && readLocal(manifestFile) !== null
     const host = installed && agent === 'codex' && flag('--codex-bin') ? await trustCodex(flag('--codex-bin')!, config, manifest.groups, false) : null
-    output({ ...plan, installed, ready: installed && lifecycleCapability(agent) !== 'adapter-pending', connected: 'unverified', hooksTrusted: host ? host.hooks.every(hook => hook.trust === 'trusted') : 'unknown', notice: s.codexDoctor })
+    // /progress connect may have hooked the host instead, or left only its skill (#285).
+    const connected = agentHooks({
+      home, sep: process.platform === 'win32' ? '\\' : '/', isWindows: process.platform === 'win32', script: '', inbox: '',
+      codexHome: dirname(configs.codex!), grokHome: dirname(dirname(configs.grok!)), hermesHome: flag('--hermes-dir') ?? (process.env.HERMES_HOME || join(home, '.hermes')),
+      openclawHome: openclawDir, opencodeHome: opencodeDir, board: script,
+    })
+    const hasConnectHook = connected.some(one => {
+      if (one.agent !== agent || one.label === '') return false
+      const text = readLocal(one.file)
+      if (text === null) return false
+      if (one.generated) return text !== ''
+      const removed = one.edit(text, true)
+      return typeof removed === 'string' && removed !== text
+    })
+    // The board files this host reads: the shared skill only where it reads that one.
+    const skills = [...Object.keys(files).filter(file => file.endsWith('SKILL.md') && (file !== skill || BOARD_FOR.skills!.includes(agent))), ...connected.filter(one => one.label === '' && BOARD_FOR[one.agent]?.includes(agent)).map(one => one.file)]
+    const reportHook = installed ? 'installer' : hasConnectHook ? 'connect' : 'none'
+    const isSkillOnly = reportHook === 'none' && skills.some(file => readLocal(file) !== null)
+    output({ ...plan, installed, ready: installed && lifecycleCapability(agent) !== 'adapter-pending', connected: 'unverified', hooksTrusted: host ? host.hooks.every(hook => hook.trust === 'trusted') : 'unknown', reportHook, ...(isSkillOnly ? { problem: s.setupAgent(s.agentNames[agent] ?? agent, [s.setupSkillOnly]) } : {}), notice: s.codexDoctor })
     return true
   }
   if (!args.includes('--apply')) { output(plan); return true }

@@ -295,6 +295,7 @@ export const ZH_TW = {
   setupAgent: (label: string, parts: string[]): string => `${label}：${parts.join('；')}`,
   setupHookConfigured: '回報 hook 已接上',
   setupHookFailed: '回報 hook 沒接上，原因在下面',
+  setupSkillOnly: '只有 skill，沒有回報 hook',
   setupHookUnreadable: '設定檔讀不懂，沒有接',
   setupHookTooOld: '版本太舊，沒有接',
   setupCodexTrust: '第一次要在 Codex 的 /hooks 核准',
