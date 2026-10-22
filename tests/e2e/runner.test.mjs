@@ -10,7 +10,7 @@ import { block, turn, hook, hookHosts } from './lib/writers.mjs'
 import { terminal, chat, seenPageWithin, serve, html, run } from './lib/surfaces.mjs'
 import { seenWithin, noSilentPress, noMachineIds } from './lib/expect.mjs'
 import { knownFailure } from './lib/known.mjs'
-import { killMidWrite, tear, lockFile, twoWriters, readOnly, diskFull, skew, updateMidSession, uninstall, reinstall } from './lib/faults.mjs'
+import { killMidWrite, tear, lockFile, twoWriters, formatWriters, readOnly, diskFull, skew, updateMidSession, uninstall, reinstall } from './lib/faults.mjs'
 import { PANE_MS, PAGE_MS } from './lib/budget.mjs'
 
 describe('scenario runner', () => {
@@ -251,6 +251,19 @@ describe('scenario runner', () => {
     } finally { await world.close() }
   })
 
+  test('formatWriters stop waiting for a start signal that never comes and say so', async () => {
+    const world = makeWorld()
+    try {
+      // Nobody opens the gate, as after a hard kill of the driver: the writers give up at their
+      // deadline (shortened here) instead of polling for ever.
+      const writers = await formatWriters(world, ['f1000001', 'f1000002'], { isSequential: true, gateMs: 300 })
+      for (const result of await writers.finished()) {
+        assert.equal(result.status, 2)
+        assert.match(result.stdout, /WRITE_FAILED the start gate stayed closed for 300 ms/)
+      }
+    } finally { await world.close() }
+  })
+
   test('twoWriters releases two live children against the same file', async () => {
     const world = makeWorld()
     try {
@@ -352,8 +365,30 @@ describe('scenario runner', () => {
       noMachineIds('synthetic-resume-session', world, { allow: ['synthetic-resume-session'] })
       await knownFailure(222, () => assert.fail('intentional assertion'))
       await assert.rejects(knownFailure(222, () => {}), /looks fixed/)
-      await knownFailure(222, () => { throw new Error('intentional thrown error') })
+      // Only a failed assertion is a known failure: a crash in the test itself must stay visible.
+      await assert.rejects(knownFailure(222, () => { throw new Error('intentional thrown error') }), /intentional thrown error/)
     } finally { await world.close() }
+  })
+
+  test('a load-dependent known failure may pass and says so, while an error that is not a failed assertion is rethrown', async t => {
+    const lines = []
+    t.mock.method(console, 'log', (...parts) => { lines.push(parts.join(' ')) })
+    const crash = Object.assign(new Error('intentional timeout'), { code: 'ETIMEDOUT' })
+    // Rethrown as it came, with or without mayPass, and for a rejected promise as for a throw.
+    await assert.rejects(knownFailure(222, () => { throw crash }), error => error === crash)
+    await assert.rejects(knownFailure('hold:load-dependent', () => { throw crash }, { mayPass: true }), error => error === crash)
+    await assert.rejects(knownFailure(222, async () => { throw crash }, { mayPass: true }), error => error === crash)
+    assert.deepEqual(lines, [], 'a rethrown error is not logged as a known failure')
+    // A pass under mayPass is logged and is not "looks fixed".
+    await knownFailure('hold:load-dependent', () => {}, { mayPass: true })
+    assert.deepEqual(lines, ['known failure hold:load-dependent: passed; load-dependent, not a fix'])
+    // A failed assertion under mayPass is still the known failure.
+    await knownFailure(249, () => assert.fail('intentional assertion'), { mayPass: true })
+    assert.equal(lines.length, 2)
+    assert.match(lines[1], /^known failure #249: \[.*\] intentional assertion$/)
+    // Without mayPass a pass still means the bug looks fixed.
+    await assert.rejects(knownFailure(222, () => {}), /looks fixed/)
+    await assert.rejects(knownFailure('hold:load-dependent', () => {}, {}), /looks fixed/)
   })
 
   test('hook executes generated Codex, Grok and Antigravity commands in the isolated home', async () => {

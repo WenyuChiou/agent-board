@@ -5,14 +5,15 @@ import { join } from 'node:path'
 import { RELEASE_0_20_5 } from '../../fixtures/released.ts'
 import { seenWithin } from './expect.mjs'
 
-const childIn = (world, file, args) => {
+// lifetimeMs is how long a helper may live before it is killed: a crashed test must not leave one running.
+const childIn = (world, file, args, { lifetimeMs = 20000 } = {}) => {
   const child = spawnIsolated(file, args, { env: world.env, cwd: world.root, stdio: ['ignore', 'pipe', 'pipe'] })
   let stdout = '', stderr = '', error
   child.stdout.setEncoding('utf8').on('data', text => { stdout += text })
   child.stderr.setEncoding('utf8').on('data', text => { stderr += text })
   child.on('error', failure => { error = failure })
   const done = new Promise(resolve => child.once('close', status => resolve({ status, stdout, stderr, error })))
-  const timer = setTimeout(() => child.kill(), 20000)
+  const timer = setTimeout(() => child.kill(), lifetimeMs)
   let isStopped = false
   const stop = async () => {
     if (isStopped) return
@@ -46,18 +47,21 @@ export const tear = (world, name, at) => {
   writeFileSync(file, bytes.subarray(0, at))
 }
 
+const LOCK_READY_MS = 30000
 export const lockFile = async (world, name) => {
   if (process.platform !== 'win32') return { skip: 'Exclusive Windows sharing locks are unavailable', release: async () => {} }
   const path = join(world.claudeDir, name)
   const quoted = path.replace(/'/g, "''")
-  const worker = childIn(world, 'powershell.exe', ['-NoProfile', '-Command', `$f = [IO.File]::Open('${quoted}', 'Open', 'ReadWrite', 'None'); try { [Console]::Out.WriteLine('LOCK_READY'); while ($true) { Start-Sleep -Milliseconds 50 } } finally { $f.Dispose() }`])
+  // The holder must outlive its own ready-wait, or it could be killed just as it is ready: it
+  // lives 20 s beyond that, which is the time the journey has to use the lock.
+  const worker = childIn(world, 'powershell.exe', ['-NoProfile', '-Command', `$f = [IO.File]::Open('${quoted}', 'Open', 'ReadWrite', 'None'); try { [Console]::Out.WriteLine('LOCK_READY'); while ($true) { Start-Sleep -Milliseconds 50 } } finally { $f.Dispose() }`], { lifetimeMs: LOCK_READY_MS + 20000 })
   try {
     // PowerShell can take seconds to start on a slow Windows CI runner; this only
     // waits for the lock holder to be ready and times nothing in the product.
     await seenWithin(() => {
       if (worker.failure()) throw worker.failure()
       return worker.output()
-    }, text => text.includes('LOCK_READY'), 30000)
+    }, text => text.includes('LOCK_READY'), LOCK_READY_MS)
     return { release: worker.stop }
   } catch (error) {
     await worker.stop()
@@ -167,51 +171,28 @@ syncBuiltinESMExports()
   return { enable: operation => world.write('storage-fault-state', operation), restore }
 }
 
-// Added for the L5 busy-machine journey: processes that keep a CPU core spinning, so a hook
-// has to compete with them the way it does on a laptop running other sessions. They stop with
-// the world. The self-cap on their lifetime is short (15 s) because this machine-wide load slows
-// every other test file that runs at the same time, so a crashed test must not leave it on for
-// long. A journey starts them only around the one hook it times, and stop() waits for each
-// process to exit (up to 3 s each, in parallel) so the next measurement starts on an idle machine.
-// Each process prints a line once it runs, and this waits for all of them (up to 5 s each): on a
-// loaded Windows machine a Node start can take longer than any fixed pause, and a hook timed
-// before the load is real would not meet it. A process that never starts fails the journey.
-export const busyProcesses = async (world, count) => {
-  const children = Array.from({ length: count }, () => spawnIsolated(process.execPath, ['-e', "process.stdout.write('SPIN\\n'); const end = Date.now() + 15000; while (Date.now() < end) {}"], { env: world.env, cwd: world.root, stdio: ['ignore', 'pipe', 'ignore'] }))
-  // A failed start is reported by the wait below, not as an unhandled error.
-  for (const child of children) child.once('error', () => {})
-  const stop = async () => {
-    await Promise.all(children.map(child => new Promise(done => {
-      if (child.exitCode !== null || child.signalCode !== null) return done()
-      const timer = setTimeout(done, 3000)
-      child.once('exit', () => { clearTimeout(timer); done() })
-      child.kill()
-    })))
-  }
-  world.cleanups.push(stop)
-  const ready = await Promise.all(children.map(child => new Promise(done => {
-    const timer = setTimeout(() => done(false), 5000)
-    child.stdout.once('data', () => { clearTimeout(timer); done(true) })
-  })))
-  if (ready.includes(false)) {
-    await stop()
-    assert.fail(`${ready.filter(isReady => !isReady).length} of ${count} busy processes never started`)
-  }
-  return { count, stop }
-}
-
 // Added for the L5 concurrent-writers journey: the write procedure docs/FORMAT.md gives other
 // writers ("Concurrent writers"), run as separate processes. Each one reads the file right before
 // it writes, changes only its own block, writes a temp file beside progress.md, renames it over,
 // reads back, and tries again up to three times at once when its block did not read back. A read
 // of zero bytes from a file seen with content is read again (the doc says the pane does this).
 // Prints WRITER_OK, or WRITE_FAILED with the error codes it met, and returns whether it wrote.
+// The two gates (the start signal, and the writer before it) are waited for at most gateMs: after
+// a hard kill of the driver nobody opens them, and without a deadline this process would poll for ever.
 const formatWriter = async (fs, config) => {
-  const { file, session, rounds, spacingMs, gate, after } = config
+  const { file, session, rounds, spacingMs, gate, after, gateMs } = config
   const pause = ms => new Promise(done => setTimeout(done, ms))
   process.stdout.write('WRITER_READY\n')
-  while (!fs.existsSync(gate)) await pause(2)
-  while (after && !fs.existsSync(after)) await pause(2)
+  const deadline = performance.now() + gateMs
+  for (const waitingFor of [gate, after]) {
+    while (waitingFor && !fs.existsSync(waitingFor)) {
+      if (performance.now() > deadline) {
+        process.stdout.write(`WRITE_FAILED the start gate stayed closed for ${gateMs} ms\n`)
+        return false
+      }
+      await pause(2)
+    }
+  }
   const codes = []
   let hasSeenContent = false
   const end = `<!-- /auto session=${session} -->`
@@ -252,13 +233,14 @@ const formatWriter = async (fs, config) => {
   return true
 }
 
+const WRITER_GATE_MS = 20000
 // One process per session id, all waiting on a gate file so they start together. With
-// isSequential each waits for the one before it to finish instead, so no two overlap; rounds
+// isSequential each waits for the one before it to finish instead, so no two overlap. rounds
 // and spacingMs repeat the whole procedure to keep writers busy while other writers are active.
-export const formatWriters = async (world, sessions, { rounds = 1, spacingMs = 0, isSequential = false } = {}) => {
+export const formatWriters = async (world, sessions, { rounds = 1, spacingMs = 0, isSequential = false, gateMs = WRITER_GATE_MS } = {}) => {
   const gate = join(world.root, 'format-writers-go')
   const workers = sessions.map((session, index) => {
-    const config = { file: world.path, session, rounds, spacingMs, gate, after: isSequential && index > 0 ? join(world.root, `format-writer-done-${index - 1}`) : undefined }
+    const config = { file: world.path, session, rounds, spacingMs, gate, gateMs, after: isSequential && index > 0 ? join(world.root, `format-writer-done-${index - 1}`) : undefined }
     return childIn(world, process.execPath, ['--input-type=module', '-e', `import * as fs from 'node:fs'
 const main = ${formatWriter.toString()}
 process.exitCode = await main(fs, ${JSON.stringify(config)}) ? 0 : 2

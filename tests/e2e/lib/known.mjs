@@ -1,12 +1,21 @@
 import { basename } from 'node:path'
 
-export const knownFailure = async (issue, fn) => {
+// mayPass is for a marker whose failure depends on load or timing: a lucky run may pass, and that
+// is not a fix, so it is logged instead of failing the test as "looks fixed".
+export const knownFailure = async (issue, fn, { mayPass = false } = {}) => {
   assertIssue(issue)
   const label = typeof issue === 'number' ? `#${issue}` : issue
   try {
     await fn()
   } catch (error) {
-    console.log(`known failure ${label}: [${basename(process.argv[1] ?? 'scenario')}] ${error instanceof Error ? error.message : String(error)}`)
+    // Only a failed assertion is the known failure. A crash, a timeout or a mistake in the test
+    // itself must fail the test, never pass for the marker.
+    if (error?.code !== 'ERR_ASSERTION') throw error
+    console.log(`known failure ${label}: [${basename(process.argv[1] ?? 'scenario')}] ${error.message}`)
+    return
+  }
+  if (mayPass) {
+    console.log(`known failure ${label}: passed; load-dependent, not a fix`)
     return
   }
   throw new Error(`${label} looks fixed: remove knownFailure(${typeof issue === 'number' ? issue : `'${issue}'`}) from this test`)

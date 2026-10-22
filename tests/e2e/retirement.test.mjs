@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { readdirSync, statSync } from 'node:fs'
+import { readdirSync } from 'node:fs'
 import { join } from 'node:path'
 // hook-reporters.ts and what it imports use `.ts` suffixes, so plain Node loads it without a resolve hook.
 import { reporterPs1, reporterSh } from '../../hooks/hook-reporters.ts'
@@ -8,28 +8,22 @@ import { EN } from '../../hooks/strings-en.ts'
 import { makeWorld } from './lib/world.mjs'
 import { block, turn } from './lib/writers.mjs'
 import { run, runProcess, terminal } from './lib/surfaces.mjs'
-import { knownFailure } from './lib/known.mjs'
 import {
-  RETIREMENT_DAYS, RETIREMENT_QUESTIONS_PER_DAY, RETIREMENT_LIVE_BLOCKS, RETIREMENT_PROGRESS_BYTES, RETIREMENT_LEDGER_BYTES,
-  RETIREMENT_CAPTURE_FILES, RETIREMENT_INBOX_FILES,
+  LEDGER_RECORDS, RETIREMENT_DAYS, RETIREMENT_QUESTIONS_PER_DAY, RETIREMENT_LIVE_BLOCKS, RETIREMENT_PROGRESS_BYTES, RETIREMENT_INBOX_FILES,
 } from './lib/budget.mjs'
 
 // Session ids are 8 hex characters; a day and a slot give each of a day's six sessions its own.
 const sessionOf = (day, slot) => (0xd0000000 + day * 16 + slot).toString(16)
 const two = day => String(day).padStart(2, '0')
-const sizeOf = (world, name) => statSync(join(world.claudeDir, name)).size
 const titlesIn = text => [...text.matchAll(/^### (.+?)\r?$/gm)].map(match => match[1])
 const archiveText = world => world.files().filter(name => /^progress-archive-.*\.md$/.test(name)).map(name => world.read(name)).join('\n')
 
-// Everything the board leaves beside progress.md, named as docs/FORMAT.md names it.
+// What the live file and the inbox hold, as docs/FORMAT.md names them.
 const measure = world => {
-  const names = readdirSync(world.claudeDir)
   const live = world.read('progress.md')
   return {
     progress: Buffer.byteLength(live),
     blocks: (live.match(/^<!-- auto /gm) ?? []).length,
-    ledger: names.includes('progress-questions.json') ? sizeOf(world, 'progress-questions.json') : 0,
-    captures: names.filter(name => /^progress-questions-source-[a-f0-9]{64}\.json$/.test(name)).length,
     inbox: readdirSync(world.inbox).length,
   }
 }
@@ -56,11 +50,13 @@ const reportTurn = async (world, session) => {
 // Alone on Windows this takes 7 to 8 s warm and 15 s on a cold first run while other tests ran
 // (15 board sweeps, 5 board looks and 3 PowerShell reporter runs, each a process start). The limit is
 // 2 times the slower figure, the 30 s a single journey may take, so a hang shows in 30 s, not 2.5 minutes.
-test('Retirement: after 30 simulated days of daily churn, progress.md, the question ledger, the capture files and the inbox stay bounded', { timeout: 30000 }, async () => {
+test('Retirement: after 30 simulated days of daily churn, progress.md and the inbox stay bounded and the question ledger still holds the first day', { timeout: 30000 }, async () => {
   const world = makeWorld()
   try {
     const titles = []
     const samples = []
+    // The questions that were open while the person looked, by day: the board records those.
+    const looked = []
     for (let day = 0; day < RETIREMENT_DAYS; day++) {
       const label = two(day)
       // Four sessions ask a question and finish; two start work that stays stopped.
@@ -79,9 +75,12 @@ test('Retirement: after 30 simulated days of daily churn, progress.md, the quest
       for (const one of asking) block(world, { ...one, state: 'waiting', steps: ['- [x] Check the routes', `- [?] ${one.ask}`] })
       block(world, { ...papers, state: 'working', steps: ['- [~] Fetch the paper list'] })
       // The person opens the board once a week, while the day's four questions are open. A board
-      // run reads every question file there is (the known gap below), so five looks are enough to
-      // see the files pile up without making the late runs slow.
-      if (day % 7 === 0) await terminal.keys(world, '')
+      // run reads every question file there is, so five looks are enough to record questions
+      // across the month without making the late runs slow.
+      if (day % 7 === 0) {
+        await terminal.keys(world, '')
+        looked.push(...asking.map(one => ({ day, ask: one.ask })))
+      }
       // Afternoon: the person answers each agent in its own chat, and each agent ticks its step and
       // finishes. The sixth session ends with a step left.
       for (const one of asking) block(world, { ...one, state: 'done', steps: ['- [x] Check the routes', `- [x] ${one.ask.replace(/, OK\?$/, '')}`] })
@@ -115,9 +114,14 @@ test('Retirement: after 30 simulated days of daily churn, progress.md, the quest
     }
     const last = samples.at(-1)
     assert.ok(last.inbox <= RETIREMENT_INBOX_FILES, `${last.inbox} inbox files after ${RETIREMENT_DAYS} days, cap ${RETIREMENT_INBOX_FILES}`)
-    // Every question asked while someone looked is kept for ever, so these grow with the weeks.
-    await knownFailure('hold:question-ledger-prune', () => assert.ok(last.ledger <= RETIREMENT_LEDGER_BYTES, `question ledger is ${last.ledger} bytes after ${RETIREMENT_DAYS} days, cap ${RETIREMENT_LEDGER_BYTES}`))
-    await knownFailure('hold:question-ledger-prune', () => assert.ok(last.captures <= RETIREMENT_CAPTURE_FILES, `${last.captures} capture files after ${RETIREMENT_DAYS} days, cap ${RETIREMENT_CAPTURE_FILES}`))
+    // FORMAT.md (Versioning, full-source evidence) says never to age-prune the question evidence,
+    // so every question asked while someone looked, the first day's included, is still in the
+    // ledger after 30 days. The scale budget (D24) holds 1,000 records: this month makes about 20,
+    // far under it, so that line only states the rule. How fast the ledger and the capture files
+    // grow is the storage work (#373).
+    const records = JSON.parse(world.read('progress-questions.json')).records
+    assert.ok(records.length <= LEDGER_RECORDS, `${records.length} question records after ${RETIREMENT_DAYS} days, cap ${LEDGER_RECORDS}`)
+    for (const one of looked) assert.ok(records.some(record => record.words === one.ask), `the question of day ${one.day} is missing from the ledger: ${one.ask}`)
   } finally { await world.close() }
 })
 
