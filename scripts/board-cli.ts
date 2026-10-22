@@ -480,6 +480,14 @@ const rewrite = (file: string, change: (text: string) => string | null, onReplac
           continue
         }
       } else {
+        // `change` can take long (a sweep reads and writes question files for each block that
+        // asks), and a rename over a file another agent wrote meanwhile would undo that write:
+        // look at the file once more and make the change again from what it holds now.
+        if (read(file) !== before) {
+          unlinkSync(temp)
+          isOwned = false
+          continue
+        }
         try {
           renameSync(temp, file)
         } catch (error) {

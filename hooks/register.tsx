@@ -476,6 +476,7 @@ const keepQuestionProof = async ($: EngineInterface, path: string, kind: keyof Q
   if (await $.fs.read(file) !== text) throw new Error('QUESTION_PROOF_NOT_KEPT')
   pendingQuestionProofs.delete(file)
 }
+const PRUNED_PER_SWEEP = 200
 // The capture and proof files grow with every question, so the archive sweep (session start,
 // hourly, tidy; never the poll) trims them to the newest 16 of each kind (#156). Which of the
 // older ones can go is decided in `prunableCaptures` and `prunableProofs`: only what the ledger
@@ -504,8 +505,11 @@ const pruneQuestionFiles = async ($: EngineInterface, path: string): Promise<voi
   ]
   if (doomed.length === 0 || await readText($, file) !== text) return
   const isWin = await isWindows($, file)
+  // The first sweep of a board with thousands of files would hold the write queue for tens of
+  // seconds, one process after another; the rest goes at the next sweep.
+  const sweep = doomed.slice(0, PRUNED_PER_SWEEP)
   // A few dozen paths to a process keeps one command line far below the system's limit.
-  for (let from = 0; from < doomed.length; from += 50) if (!(await removeFiles($, doomed.slice(from, from + 50), isWin))) return
+  for (let from = 0; from < sweep.length; from += 50) if (!(await removeFiles($, sweep.slice(from, from + 50), isWin))) return
 }
 const pruneAnswered = async ($: EngineInterface, path: string, projects: readonly ProgressProject[], mtimeMs: number, size: number): Promise<void> => {
   // The ledger retires identities; old acknowledgement bytes remain available for migration.
@@ -1083,6 +1087,8 @@ const enqueue = <T,>(job: () => Promise<T>): Promise<T> => {
 
 // What a change answers to have the file read again before it is made: a write caught half-way.
 const AGAIN = Symbol('again')
+// How many times `rewrite` makes a change; a change that counts its calls knows its last.
+const REWRITE_TRIES = 3
 
 // Read, change, write, read back. When another session's write lands in between, the change
 // is made again over what that session wrote, so neither undoes the other; `change` must be
@@ -1097,7 +1103,7 @@ const rewrite = async (
   writer: (path: string, text: string) => Promise<void> = (path, text) => $.fs.write(path, text),
 ): Promise<string | null> => {
   let wrote: string | null = null
-  for (let attempt = 0; attempt < 3; attempt += 1) {
+  for (let attempt = 0; attempt < REWRITE_TRIES; attempt += 1) {
     const before = await readText($, path)
     const after = await change(before)
     if (after === AGAIN) continue
@@ -2258,11 +2264,15 @@ const archiveOld = async ($: EngineInterface, isNow = false): Promise<number> =>
   const seen = await read($, doneSeen)
   const archived = new Set<string>()
   const keys = new Set<string>()
+  let tries = 0
   await rewrite($, path, async text => {
     // A block that still asks goes only when the explicit archive's own check passes for it (#174).
     // The ledger is settled once for all of them. Another agent's write meanwhile (a new `[?]`
     // step) must not be written over with a result made from the older text: start again from it.
-    const asking = archivableAsking(text, at, keep)
+    // A board busy enough to change it on every try would skip the whole sweep, so on the last try
+    // the blocks that ask stay and the rest (done blocks, hand-kept tasks) goes ahead.
+    tries += 1
+    const asking = tries < REWRITE_TRIES ? archivableAsking(text, at, keep) : []
     const kept = new Set<number>()
     if (asking.length > 0) {
       const projects = parseProgress(text)
