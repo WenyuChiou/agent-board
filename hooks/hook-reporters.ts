@@ -164,7 +164,8 @@ if [ -s "$ready" ]; then
   mv "$ready" "$file.json" || { log_error REPORTER_FAILED; finish; }
 else log_error INCOMPLETE_INPUT
 fi
-find "$dir/." ! -name . -prune -type f \\( \\( -name '*.json' -mtime +2 \\) -o \\( \\( -name '*.tmp' -o -name '*.receipt' -o -name '*.fallback' -o -name '*.timeout' -o -name '*.complete' \\) -mmin +1 \\) \\) -exec rm -f {} + || log_error CLEANUP_FAILED
+# Names first, so GNU find need not look at a taken file that another session renames mid-scan.
+find "$dir/." ! -name . -prune \\( \\( -name '*.json' -type f -mtime +2 \\) -o \\( \\( -name '*.tmp' -o -name '*.receipt' -o -name '*.fallback' -o -name '*.timeout' -o -name '*.complete' \\) -type f -mmin +1 \\) \\) -exec rm -f {} + || log_error CLEANUP_FAILED
 finish
 `
 
@@ -342,13 +343,14 @@ try {
   }
   Move-Item -LiteralPath $ready -Destination (Join-Path $dir ($name + '.json'))
   if ($ready -eq $tmp) { $ownsTemp = $false } else { $ownsReceipt = $false }
-  # The receipt is saved: a file another reporter removes first, or a locked one, is only a cleanup failure.
+  # The receipt is saved: a file that cannot be removed is only a cleanup failure, and one another reporter removed first is none.
   try {
     $receiptCutoff = (Get-Date).AddDays(-2); $scratchCutoff = (Get-Date).AddMinutes(-1)
     Get-ChildItem -LiteralPath $dir -File | Where-Object {
       ($_.Extension -eq '.json' -and $_.LastWriteTime -lt $receiptCutoff) -or
       ($_.Extension -in @('.tmp', '.receipt', '.fallback', '.timeout', '.complete') -and $_.LastWriteTime -lt $scratchCutoff)
-    } | Remove-Item -Force -ErrorAction SilentlyContinue
+    } | Remove-Item -Force -ErrorAction SilentlyContinue -ErrorVariable cleanupErrors
+    if (@($cleanupErrors | Where-Object { $_.CategoryInfo.Category -ne 'ObjectNotFound' }).Count -gt 0) { Write-HookError 'CLEANUP_FAILED' }
   } catch { Write-HookError 'CLEANUP_FAILED' }
 } catch {
   $code = switch ($_.Exception.Message) { 'INPUT_TIMEOUT' { 'INPUT_TIMEOUT' }; 'REPORTER_TIMEOUT' { 'REPORTER_TIMEOUT' }; 'INPUT_TOO_LARGE' { 'INPUT_TOO_LARGE' }; 'INCOMPLETE_INPUT' { 'INCOMPLETE_INPUT' }; default { 'REPORTER_FAILED' } }

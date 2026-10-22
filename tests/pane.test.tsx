@@ -7394,6 +7394,123 @@ test('held turns still waiting from an earlier look count toward the five', asyn
   expect(names.filter(name => world.files.has(`${INBOX}/${name}.failed`))).toHaveLength(2)
 })
 
+test('held turns of one session are taken once more oldest first, ends and turns alike', async ($, on) => {
+  const at = Date.parse('2026-10-16T12:00:00Z')
+  // A listing puts every end before every turn; here the two newest turns are ends.
+  const names = Array.from({ length: 7 }, (_, index) => `codex-${index >= 5 ? 'end' : 'turn'}-${at - 60000 + index * 1000}-${index}.json`)
+  const store: Record<string, unknown> = { inboxDone: {}, autoConnectOff: true, inboxFailed: Object.fromEntries(names.map(name => [name, `8:${at}:QUESTION_RETENTION_FAILED`])) }
+  const world: World = {
+    files: new Map([[FILE, '# Progress\n'], ...[...names].sort().map((name): [string, string] => [`${INBOX}/${name}.failed`, JSON.stringify({ session_id: 'ordered-retake', cwd: '/work/api-gateway', last_assistant_message: `Wrapped up item-${names.indexOf(name)}.` })])]),
+    mtime: 1, hasTasks: true, store, asked: [],
+    reply: prompt => {
+      const item = /item-(\d)/.exec(prompt)?.[1]
+      return prompt.includes('TITLE:') && item !== undefined ? `TITLE: Add the middleware\nCONTEXT: Synthetic\nDONE: Finished step ${item}\nNEXT: -\nASK: -` : undefined
+    },
+  }
+  const clock = engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/persona_framework', surface: 'desktop', isInteractive: true })
+  await clock.advance(5000)
+  world.mtime += 1
+  await clock.advance(5000)
+  // The first look sums its last two turns, items 3 and 4; ends taken first would have left them older than the block.
+  expect(world.asked?.filter(prompt => prompt.includes('TITLE:')).map(prompt => /item-(\d)/.exec(prompt)?.[1])).toEqual(['3', '4'])
+  expect(world.files.get(FILE) ?? '').toContain('Finished step 4')
+  for (const name of names) {
+    expect(world.files.has(`${INBOX}/${name}.failed`)).toBe(false)
+    expect((store.inboxDone as Record<string, string>)[name]).toBeDefined()
+  }
+  expect(takenOf(world)).toEqual([])
+})
+
+test('a fresh turn beside a held turn\'s last try is tried again when the model gives no summary', async ($, on) => {
+  const at = Date.parse('2026-10-16T12:00:00Z')
+  const held = `codex-turn-${at - 120000}-1.json`, fresh = `codex-turn-${at - 60000}-2.json`
+  const body = (answer: string): string => JSON.stringify({ session_id: 'mixed-retake', cwd: '/work/api-gateway', last_assistant_message: answer })
+  const store: Record<string, unknown> = { inboxDone: {}, autoConnectOff: true, inboxFailed: { [held]: `8:${at}:QUESTION_RETENTION_FAILED` } }
+  const world: World = {
+    files: new Map([[FILE, '# Progress\n'], [`${INBOX}/${fresh}`, body('SILENT tidied the logs.')], [`${INBOX}/${held}.failed`, body('Added the middleware.')]]),
+    mtime: 1, hasTasks: true, store,
+    hang: prompt => prompt.includes('SILENT'),
+    reply: prompt => (prompt.includes('TITLE:') ? 'TITLE: Add the middleware\nCONTEXT: Synthetic\nDONE: Added the middleware\nNEXT: -\nASK: -' : undefined),
+  }
+  const clock = engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/persona_framework', surface: 'desktop', isInteractive: true })
+  await clock.advance(5000)
+  await clock.advance(30000)
+  expect(world.files.get(FILE) ?? '').toContain('- [x] Added the middleware')
+  expect((store.inboxDone as Record<string, string>)[held]).toBeDefined()
+  expect((store.inboxDone as Record<string, string>)[fresh]).toBeUndefined()
+  expect((store.inboxFailed as Record<string, string>)[fresh]).toMatch(/^1:/)
+  expect(takenOf(world)).toHaveLength(1)
+  expect(takenOf(world)[0]).toContain(`${fresh}.`)
+  expect(takenOf(world)[0]).toEndWith('-1.taking')
+})
+
+test('a newer held turn still reaches the board when an older fresh turn of its session gets no summary', async ($, on) => {
+  const at = Date.parse('2026-10-16T12:00:00Z')
+  const fresh = `codex-turn-${at - 120000}-1.json`, held = `codex-turn-${at - 60000}-2.json`
+  const body = (answer: string): string => JSON.stringify({ session_id: 'held-after-silence', cwd: '/work/api-gateway', last_assistant_message: answer })
+  const store: Record<string, unknown> = { inboxDone: {}, autoConnectOff: true, inboxFailed: { [held]: `8:${at}:QUESTION_RETENTION_FAILED` } }
+  const world: World = {
+    files: new Map([[FILE, '# Progress\n'], [`${INBOX}/${fresh}`, body('SILENT tidied the logs.')], [`${INBOX}/${held}.failed`, body('Added the middleware.')]]),
+    mtime: 1, hasTasks: true, store,
+    hang: prompt => prompt.includes('SILENT'),
+    reply: prompt => (prompt.includes('TITLE:') ? 'TITLE: Add the middleware\nCONTEXT: Synthetic\nDONE: Added the middleware\nNEXT: -\nASK: -' : undefined),
+  }
+  const clock = engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/persona_framework', surface: 'desktop', isInteractive: true })
+  await clock.advance(5000)
+  await clock.advance(30000)
+  // The held turn's retake is its last try: the silent turn before it does not hold it back.
+  expect(world.files.get(FILE) ?? '').toContain('- [x] Added the middleware')
+  expect((store.inboxDone as Record<string, string>)[held]).toBeDefined()
+  expect((store.inboxFailed as Record<string, string>)[fresh]).toMatch(/^1:/)
+  expect(takenOf(world)).toHaveLength(1)
+  expect(takenOf(world)[0]).toContain(`${fresh}.`)
+})
+
+test('a newer fresh turn waits when an older held turn of its session is not kept on the board', async ($, on) => {
+  const at = Date.parse('2026-10-16T12:00:00Z')
+  const held = `codex-turn-${at - 120000}-1.json`, fresh = `codex-turn-${at - 60000}-2.json`
+  const body = (answer: string): string => JSON.stringify({ session_id: 'fresh-after-held', cwd: '/work/api-gateway', last_assistant_message: answer })
+  const store: Record<string, unknown> = { inboxDone: {}, autoConnectOff: true, inboxFailed: { [held]: `8:${at}:QUESTION_RETENTION_FAILED` } }
+  const world: World = {
+    files: new Map([[FILE, '# Progress\n'], [`${INBOX}/${fresh}`, body('Wrapped up fresh-item.')], [`${INBOX}/${held}.failed`, body('Wrapped up held-item.')]]),
+    mtime: 1, hasTasks: true, store, asked: [],
+    reply: prompt => (prompt.includes('TITLE:') ? 'TITLE: Add the middleware\nCONTEXT: Synthetic\nDONE: Added the middleware\nNEXT: -\nASK: -' : undefined),
+  }
+  // Another writer keeps taking this project's block out, so the held turn's block is never read back.
+  const withoutBlock = (): string => {
+    world.afterWrite = withoutBlock
+    return (world.files.get(FILE) ?? '').replace(/## api-gateway\n[\s\S]*/, '')
+  }
+  world.afterWrite = withoutBlock
+  const clock = engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/persona_framework', surface: 'desktop', isInteractive: true })
+  await clock.advance(5000)
+  expect((store.inboxFailed as Record<string, string>)[held]).toMatch(/^9:/)
+  expect((store.inboxFailed as Record<string, string>)[fresh]).toMatch(/^1:/)
+  expect(world.asked?.some(prompt => prompt.includes('fresh-item'))).toBe(false)
+  expect(takenOf(world).some(path => path.includes(`${fresh}.`) && path.endsWith('-1.taking'))).toBe(true)
+  expect((store.inboxDone as Record<string, string>)[fresh]).toBeUndefined()
+})
+
+test('a held turn the board already took is not taken once more', async ($, on) => {
+  const at = Date.parse('2026-10-16T12:00:00Z')
+  const name = `codex-turn-${at - 60000}-1.json`
+  const store: Record<string, unknown> = { inboxDone: { [name]: `elsewhere:${at}` }, autoConnectOff: true, inboxFailed: { [name]: `8:${at}:QUESTION_RETENTION_FAILED` } }
+  const world: World = {
+    files: new Map([[FILE, '# Progress\n'], [`${INBOX}/${name}.failed`, JSON.stringify({ session_id: 'done-elsewhere', cwd: '/work/api-gateway', last_assistant_message: 'Added the middleware.' })]]),
+    mtime: 1, hasTasks: true, store, reply: RATE_LIMIT_REPLY,
+  }
+  const clock = engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/persona_framework', surface: 'desktop', isInteractive: true })
+  await clock.advance(5000)
+  expect(takenOf(world)).toEqual([])
+  expect(world.files.has(`${INBOX}/${name}.failed`)).toBe(true)
+  expect(world.files.get(FILE)).toBe('# Progress\n')
+})
+
 test('a held turn that cannot be moved is tried again only after the claim time', async ($, on) => {
   const at = Date.parse('2026-10-16T12:00:00Z')
   const name = 'codex-turn-1792216380-1.json'

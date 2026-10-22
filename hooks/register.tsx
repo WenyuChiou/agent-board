@@ -2044,7 +2044,10 @@ const drainInbox = async ($: EngineInterface): Promise<void> => {
     }
     // 0.23.x's question hold set these turns aside; the claim's attempt guards one last try.
     // Fresh turns keep their slots, and held turns use only those left over.
+    // Oldest first, as fresh turns are: a listing puts every end before every turn, and a newer
+    // turn taken first would leave a session's older held turns changing nothing.
     const setAside = entries.filter(entry => entry.kind === 'file' && setAsideOf(entry.name) !== null)
+      .sort((a, b) => inboxOrder(setAsideOf(a.name)!, setAsideOf(b.name)!))
     const heldNames = new Set(setAside.map(entry => setAsideOf(entry.name)!))
     if (isListed) for (const name of inboxRetakeRefused.keys()) if (!heldNames.has(name)) inboxRetakeRefused.delete(name)
     if (setAside.length > 0) {
@@ -2141,31 +2144,43 @@ const drainInbox = async ($: EngineInterface): Promise<void> => {
     for (const all of bySession.values()) {
       // The queue can run longer than a claim holds: a file another look took again while
       // this job waited is that look's to finish.
-      const group: Taken[] = []
-      for (const one of all) if (await $.fs.exists(one.path)) group.push(one)
-      if (group.length === 0) continue
-      const isLastTry = group.some(one => one.attempt >= MAX_TRIES)
-      try {
-        const home = ((await $.env.get('USERPROFILE')) ?? (await $.env.get('HOME')) ?? '').replace(/[\\/]+$/, '')
-        // Older turns never replace newer work, and old questions must not return to the ledger.
-        const questionless = new Set(group.flatMap(one => one.attempt > MAX_TRIES && one.turn != null && isQuestionStale(one.name, at) ? [one.turn] : []))
-        const newer = await takeAgentTurns($, group.flatMap(one => (one.turn === null || one.turn === undefined ? [] : [one.turn])), 0, isLastTry, questionless)
-        const questions = peekInbox(group.flatMap(one => one.body === undefined || one.attempt > MAX_TRIES && (one.turn == null || !newer.includes(one.turn) || isQuestionStale(one.name, at)) ? [] : [{ name: one.name, body: one.body, at }]), () => '', text => redact(text, home, isWin)).filter(turn => turn.isQuestion)
-        if (questions.length > 0) {
-          await retainInboxQuestions($, questions)
-          // A question and its answer can arrive in one look: the answer was remembered before
-          // the question was kept, so it settles now instead of at the next poll.
-          const asked = new Set(questions.map(one => JSON.stringify([one.agent, one.id])))
-          if ([...answeredPending.keys()].some(key => asked.has(key))) await pollAnsweredQuestions($, await progressPath($), undefined)
+      const present: Taken[] = []
+      for (const one of all) if (await $.fs.exists(one.path)) present.push(one)
+      // A held turn's retake is its last try, a fresh turn beside it is not: each run of retakes
+      // or of other turns is taken on its own, oldest first. A run that fails holds back newer ones,
+      // unless a retake is among them: holding that back would use up its last try.
+      const runs: Taken[][] = []
+      for (const one of present) {
+        const run = runs.at(-1)
+        if (run !== undefined && (run[0]!.attempt > MAX_TRIES) === (one.attempt > MAX_TRIES)) run.push(one)
+        else runs.push([one])
+      }
+      for (const [index, group] of runs.entries()) {
+        const isLastTry = group.some(one => one.attempt >= MAX_TRIES)
+        try {
+          const home = ((await $.env.get('USERPROFILE')) ?? (await $.env.get('HOME')) ?? '').replace(/[\\/]+$/, '')
+          // Older turns never replace newer work, and old questions must not return to the ledger.
+          const questionless = new Set(group.flatMap(one => one.attempt > MAX_TRIES && one.turn != null && isQuestionStale(one.name, at) ? [one.turn] : []))
+          const newer = await takeAgentTurns($, group.flatMap(one => (one.turn === null || one.turn === undefined ? [] : [one.turn])), 0, isLastTry, questionless)
+          const questions = peekInbox(group.flatMap(one => one.body === undefined || one.attempt > MAX_TRIES && (one.turn == null || !newer.includes(one.turn) || isQuestionStale(one.name, at)) ? [] : [{ name: one.name, body: one.body, at }]), () => '', text => redact(text, home, isWin)).filter(turn => turn.isQuestion)
+          if (questions.length > 0) {
+            await retainInboxQuestions($, questions)
+            // A question and its answer can arrive in one look: the answer was remembered before
+            // the question was kept, so it settles now instead of at the next poll.
+            const asked = new Set(questions.map(one => JSON.stringify([one.agent, one.id])))
+            if ([...answeredPending.keys()].some(key => asked.has(key))) await pollAnsweredQuestions($, await progressPath($), undefined)
+          }
+          settled.push(...group)
+        } catch (error) {
+          const why = (error instanceof Error ? error.message : String(error)).replace(/\s+/g, ' ').slice(0, 200)
+          const isRetakeAhead = runs.slice(index + 1).some(run => run[0]!.attempt > MAX_TRIES)
+          for (const one of isRetakeAhead ? group : runs.slice(index).flat()) failed[one.name] = `${one.attempt}:${at}:${why}`
+          // A file error is named now. The model's silence, or a block not yet read back, is
+          // tried again quietly, as before; the last try sets the file aside, which is named.
+          const reason = inboxFailure(error)
+          if (reason !== 'INBOX_FAILED') await inboxNotice($, group[0]!.path, reason)
+          if (!isRetakeAhead) break
         }
-        settled.push(...group)
-      } catch (error) {
-        const why = (error instanceof Error ? error.message : String(error)).replace(/\s+/g, ' ').slice(0, 200)
-        for (const one of group) failed[one.name] = `${one.attempt}:${at}:${why}`
-        // A file error is named now. The model's silence, or a block not yet read back, is
-        // tried again quietly, as before; the last try sets the file aside, which is named.
-        const reason = inboxFailure(error)
-        if (reason !== 'INBOX_FAILED') await inboxNotice($, group[0]!.path, reason)
       }
     }
     await recordInbox($, settled.map(one => one.name), failed, at)
