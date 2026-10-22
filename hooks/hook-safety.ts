@@ -8,6 +8,8 @@ export const HOOK_SESSION_ENV: Record<string, string[]> = {
 }
 // Let the worker reap its reporter before an SDK caller applies its outer backstop.
 export const HOOK_WORKER_GRACE = 500
+// A worker that starts after its host's stop line still reads its input this long, then queues it.
+export const HOOK_LATE_INPUT_GRACE = 500
 export const HOOK_TIMEOUTS: Record<string, { timeout: number; events?: Record<string, number> }> = {
   codex: { timeout: 3000, events: { Stop: 10000 } },
   cursor: { timeout: 3000 },
@@ -121,10 +123,12 @@ const run = async () => {
   if (inherited !== undefined && !Number.isSafeInteger(Number(inherited))) return fail('REPORTER_FAILED')
   const hostTimeout = policy.events?.[value('--hook-event')] ?? policy.timeout
   const deadline = Math.min(started + Math.min(3000, hostTimeout - 1000), inherited === undefined ? Infinity : Number(inherited))
-  // Input may arrive until the last moment a queued copy can still be written, whether the
-  // worker starts before or after its deadline: one starting just before it must not give up sooner.
+  // Input may arrive until 300 ms before the host's limit, whether the worker starts before or
+  // after its deadline: one starting just before it must not give up sooner. A worker that starts
+  // even later, after a slow Windows PowerShell start (#241), still reads its input for a short
+  // grace and queues the event, unless the host stops it first.
   // A report is never queued, so it waits only until its deadline.
-  const budget = (isReport ? deadline : started + hostTimeout - 300) - Date.now()
+  const budget = isReport ? deadline - Date.now() : Math.max(started + hostTimeout - 300 - Date.now(), ${HOOK_LATE_INPUT_GRACE})
   if (budget <= 0) return fail('REPORTER_TIMEOUT')
   let text = '', timer
   process.stdin.setEncoding('utf8')
@@ -143,7 +147,9 @@ const run = async () => {
   const queue = () => {
     let temporary
     try {
-      if (isReport || started + hostTimeout - Date.now() < 300) return fail('REPORTER_TIMEOUT')
+      // A late copy is still written: it holds the worker's start time, and replay drops it once a
+      // newer event was applied. A host that stops the worker mid-write leaves a .tmp file that is swept.
+      if (isReport) return fail('REPORTER_TIMEOUT')
       const pending = path.join(path.dirname(${JSON.stringify(script)}), 'pending')
       fs.mkdirSync(pending, { recursive: true, mode: 0o700 })
       // Concurrent workers can pass 64 by a few because the count and write are separate.
@@ -160,7 +166,6 @@ const run = async () => {
       const roots = payload.workspace_roots
       if (Array.isArray(roots) && typeof roots[0] === 'string' && roots[0].length <= 4096) kept.workspace_roots = [roots[0]]
       const file = path.join(pending, String(started).padStart(15, '0') + '-' + randomUUID() + '.raw.json')
-      if (started + hostTimeout - Date.now() < 300) return fail('REPORTER_TIMEOUT')
       temporary = file + '.tmp'
       fs.writeFileSync(temporary, JSON.stringify({ version: 1, kind: 'raw', at: started, argv: reporterArgs, env, payload: kept }), { flag: 'wx', mode: 0o600 })
       fs.renameSync(temporary, file)
