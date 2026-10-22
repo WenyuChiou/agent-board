@@ -19,6 +19,7 @@ import assert from 'node:assert/strict'
 import { BOARD_SCRIPT } from '../hooks/board-script.ts'
 import { boardRun, geminiBoardCommand, normalizeCommandPath, opencodeBoardCommand } from '../hooks/board-commands.ts'
 import { RELEASED } from '../hooks/released.ts'
+import { liveBoardScript } from '../hooks/live-page.ts'
 import { EN } from '../hooks/strings-en.ts'
 import { ZH_TW } from '../hooks/i18n.ts'
 import { ZH_CN } from '../hooks/strings-zh-cn.ts'
@@ -3874,6 +3875,29 @@ test('a reply typed for one session is dropped when the box is redrawn for anoth
   }
 })
 
+test('--serve --quiet-board prints only the page address lines', { timeout: 40_000 }, async () => {
+  const board = serveIn()
+  let url = null
+  try {
+    // A board larger than the host's output cap must not precede the address.
+    writeFileSync(board.path, '## Synthetic project\n' + '### Synthetic large task\n- [ ] Work\n'.repeat(5000))
+    const first = await board.serve(['--quiet-board', '--idle-minutes', '10'])
+    url = board.urlOf(first)
+    assert.ok(url, first)
+    const address = `The board you can click (tick, archive, answer): ${url}`
+    assert.equal(first.trim(), address)
+    const again = await board.serve(['--quiet-board', '--idle-minutes', '20'])
+    assert.deepEqual(again.trim().split('\n'), [
+      'This board is configured to close after 10 minutes unused. Reopen with --serve.',
+      address,
+    ])
+    writeFileSync(board.path, FILE)
+    const ordinary = await board.serve()
+    assert.ok(ordinary.startsWith('Progress'), ordinary.slice(0, 200))
+    assert.ok(ordinary.includes('Rate-limit the public endpoints'))
+  } finally { await board.end([url]) }
+})
+
 test('--serve starts the page in the background once, and the next --serve brings back the same page', { timeout: 40_000 }, async () => {
   const dir = mkdtempSync(join(tmpdir(), 'board-serve-'))
   const path = join(dir, 'progress.md')
@@ -3908,6 +3932,13 @@ test('--serve starts the page in the background once, and the next --serve bring
   }
 })
 
+test('/progress looks for the board script beside a Windows or a POSIX progress path', () => {
+  assert.equal(liveBoardScript('C:\\Users\\me\\.claude\\progress.md'), 'C:\\Users\\me\\.claude\\agent-board.mjs')
+  assert.equal(liveBoardScript('C:\\Users\\me\\board $sample.md'), 'C:\\Users\\me\\agent-board.mjs')
+  assert.equal(liveBoardScript('/home/me/.claude/progress.md'), '/home/me/.claude/agent-board.mjs')
+  assert.equal(liveBoardScript('C:/Users/me/.agent-board/progress.md'), 'C:/Users/me/.agent-board/agent-board.mjs')
+})
+
 // A synthetic board for --serve runs, with its own folder for running programs.
 const serveIn = () => {
   const dir = mkdtempSync(join(tmpdir(), 'board-serve-'))
@@ -3917,15 +3948,30 @@ const serveIn = () => {
   writeFileSync(path, FILE)
   const script = join(dir, 'agent-board.mjs')
   writeFileSync(script, `globalThis.AGENT_BOARD = ${JSON.stringify({ path, lang: 'en' })}\n${BOARD_SCRIPT}`)
-  const env = { ...process.env, CLAUDE_PROGRESS_FILE: '', NO_COLOR: '1', XDG_RUNTIME_DIR: run }
+  // Only what Node needs to run on this computer; the home, settings and temp folders are the
+  // fixture's own, so a page started here never reads this account's agents or files.
+  const home = join(dir, 'home')
+  const temp = join(dir, 'tmp')
+  mkdirSync(home)
+  mkdirSync(temp)
+  const machine = ['PATH', 'Path', 'PATHEXT', 'SystemRoot', 'SystemDrive', 'windir', 'ComSpec']
+  const env = {
+    ...Object.fromEntries(machine.filter(key => process.env[key] !== undefined).map(key => [key, process.env[key]])),
+    HOME: home, USERPROFILE: home, APPDATA: join(home, 'AppData', 'Roaming'), LOCALAPPDATA: join(home, 'AppData', 'Local'),
+    XDG_CONFIG_HOME: join(home, '.config'), XDG_DATA_HOME: join(home, '.local', 'share'), XDG_CACHE_HOME: join(home, '.cache'),
+    TEMP: temp, TMP: temp, TMPDIR: temp,
+    CLAUDE_PROGRESS_FILE: '', NO_COLOR: '1', XDG_RUNTIME_DIR: run,
+  }
   const serve = (extra = []) =>
     new Promise((done, fail) => execFile(process.execPath, [script, '--serve', '--no-open', ...extra], { env, encoding: 'utf8', timeout: 20_000 }, (error, out) => (error ? fail(error) : done(out))))
   const urlOf = out => out.match(/answer\): (http:\/\/127\.0\.0\.1:\d+\/\?t=[\w-]+)/)?.[1] ?? null
   const served = servedAt(run, path)
-  // Closes every page it was given and waits for each to take its address file away.
+  // Closes every page it was given, and the one its address file names when a test could not read
+  // the address, and waits for each to take its address file away.
   const end = async urls => {
-    const pid = existsSync(served) ? JSON.parse(readFileSync(served, 'utf8')).pid : null
-    for (const url of new Set(urls.filter(Boolean))) {
+    const record = existsSync(served) ? JSON.parse(readFileSync(served, 'utf8')) : null
+    const pid = record?.pid ?? null
+    for (const url of new Set([...urls, record?.url].filter(Boolean))) {
       const { port, searchParams } = new URL(url)
       await new Promise(done => {
         const req = request({ host: '127.0.0.1', port, method: 'POST', path: '/api/close', headers: { host: `127.0.0.1:${port}`, 'x-board-token': searchParams.get('t'), 'content-type': 'application/json' } }, res => res.resume().on('end', done))

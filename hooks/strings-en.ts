@@ -89,6 +89,7 @@ export const EN: Strings = {
   statusPrefix: 'Progress',
   statusWaiting: (n: number): string => `${n} waiting on you`,
   statusDue: (n: number): string => `${n} due soon`,
+  statusBoardPage: '/progress opens the board page',
 
   // Pull requests
   ciPass: 'CI passed',
@@ -226,6 +227,10 @@ export const EN: Strings = {
   notifyOff: 'Desktop notifications off.',
   paneOpened: (path: string): string => `Progress pane opened: ${path}`,
   paneNotOpened: (reason: string): string => `Couldn't open the progress pane: ${reason}`,
+  livePageOpened: 'This app cannot show the pane. Open the board page to answer questions and archive work:',
+  livePageFallback: 'The live board page could not start. Using the read-only page instead.',
+  livePageNeedsInstall: 'The live page needs the board script installed by /progress connect, or updated at the next session start.',
+  livePageStarting: 'Starting the board page…',
   connectDone: (list: string): string => `Connected: ${list}. After you restart them, every turn they finish reports to the pane.`,
   connectNone: 'No agent to connect was found (Codex, Gemini CLI, Cursor, OpenCode, Grok Build, Hermes Agent, Muse Code, OpenClaw).',
   setupCodexApproval: (): string => "Current Codex hook approval is unconfirmed. Check /hooks; existing managed reporting instructions are retained.",
@@ -432,7 +437,7 @@ export const EN: Strings = {
   boardKeyHide: 'h already answered, hide',
   boardKeyShowHidden: 'u show them again',
   boardKeyIdle: 'i show/hide idle and stopped',
-  boardUsage: 'Usage: node agent-board.mjs [--watch] [--serve] [--html] [--chat] [--tidy] [--all] [--lang en|zh-TW|zh-CN] · --all lists idle and stopped tasks',
+  boardUsage: 'Usage: node agent-board.mjs [--watch] [--serve] [--quiet-board] [--html] [--chat] [--tidy] [--all] [--lang en|zh-TW|zh-CN] · --all lists idle and stopped tasks',
   boardHidden: (text: string): string => `Hidden: “${text}”; it comes back when the question changes.`,
   boardShown: 'The hidden questions are shown again.',
   hideFailed: "Couldn't save that it was answered; it stays on the list.",
