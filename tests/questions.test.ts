@@ -643,11 +643,28 @@ test('the questions of a block are told from those of another session with the s
   const record = question(1)
   const ref = { project: 'demo', title: 'Plan 1', line: 0, session: 'syn1' }
   expect(isAskedBy(record, ref)).toBe(true)
-  // A hand-kept task has no session to tell apart.
-  expect(isAskedBy(record, { ...ref, session: null })).toBe(true)
   expect(isAskedBy(record, { ...ref, session: 'syn2' })).toBe(false)
   expect(isAskedBy(record, { ...ref, title: 'Plan 2' })).toBe(false)
   expect(isAskedBy(record, { ...ref, project: 'other' })).toBe(false)
+  // A hand-kept task has no session to tell apart, so only a hand-kept task's questions match it:
+  // an agent block with the same project and title is not taken for it.
+  const manual = { ...record, source: { ...record.source!, kind: 'manual' as const, session: '' } }
+  expect(isAskedBy(manual, { ...ref, session: null })).toBe(true)
+  expect(isAskedBy(record, { ...ref, session: null })).toBe(false)
+  expect(isAskedBy(manual, ref)).toBe(false)
+})
+
+test('a copy that holds more than the ledger stays even when its question is answered and retired, and a plain copy goes', () => {
+  const answered = finished(30)
+  const fillers = Array.from({ length: 16 }, (_, n) => held(question(n + 40), 'unresolved', 100 + n))
+  const ledger = ledgerOf(answered, ...fillers.map(one => one.capture.record))
+  const retired = [sha256(answered.id)]
+  // A producer revision the ledger has not seen: reading this copy back would add something, so it is the only record of it.
+  const richer = held({ ...reopened(answered), producerRevisions: ['a'.repeat(64)] }, 'unresolved', 1)
+  expect(prunableCaptures(ledger, [richer, ...fillers], retired)).toEqual([])
+  // The same copy without the extra goes: the ledger holds all of it and the question is retired.
+  const plain = held(reopened(answered), 'unresolved', 1)
+  expect(prunableCaptures(ledger, [plain, ...fillers], retired)).toEqual([plain.hash])
 })
 
 test("an archived mark counts only while the question's block is gone", () => {

@@ -30,9 +30,10 @@ export const archiveQuestionsKept = (projects: readonly ProgressProject[], ref: 
     : record.resolvedAt !== undefined && record.source !== undefined && record.scope === scope && record.words === questionWords(step.text) && (record.producer ?? '') === (step.questionToken ?? '') && !ledger.records.some(other => other.isUnresolved && other.scope === scope && other.words === questionWords(step.text))))
 }
 // The questions of one block in the ledger: its project and title and, for an agent's block, its
-// session, so a block of another session with the same title is not taken for it (#174).
+// session, so a block of another session with the same title is not taken for it. A hand-kept
+// task has no session, so only a hand-kept task's questions match it, not an agent block's (#174).
 export const isAskedBy = (record: QuestionRecord, ref: TaskRef): boolean =>
-  record.source?.project === ref.project && record.source.task === ref.title && (ref.session === null || record.source.session === ref.session)
+  record.source?.project === ref.project && record.source.task === ref.title && (ref.session === null ? record.source.kind === 'manual' : record.source.session === ref.session)
 export const questionProofPath = (path: string, kind: keyof QuestionProofs, hash: string): string => `${path.replace(/\.md$/i, '')}-questions-${kind}-${hash}.json`
 export const questionProofOf = (path: string, name: string): { kind: keyof QuestionProofs; hash: string } | null => {
   const prefix = `${path.replace(/\\/g, '/').split('/').at(-1)?.replace(/\.md$/i, '')}-questions-`

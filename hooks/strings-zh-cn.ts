@@ -218,7 +218,7 @@ export const ZH_CN: Strings = {
   commandHint: '[open|connect|整理|同步|加 …|周报|今天|通知 开/关|lang …]',
   tidyUnreadable: '读不到进度文件或归档文件，没有动任何文件。',
   tidyNothing: '没有可以归档的。做完的工作会马上归档；停掉的对话要 3 天没动静才会；这个对话自己的区块不会归档。',
-  tidyScheduledNothing: '当前没有可归档的项目。代理区块最后更新后，已完成需超过 12 小时，其他需超过 3 天；手动完成项目需有至少 24 小时前的完成观察记录。仍在提问的区块，要等看板留存该问题后才会归档。',
+  tidyScheduledNothing: '当前没有可归档的项目。代理区块最后更新后，已完成需超过 12 小时，其他需超过 3 天；手动完成项目需有至少 24 小时前的完成观察记录。仍在提问的区块，要等它已结束或已完成，且看板留存该问题后才会归档。',
   tidyMoved: (n: number): string => `归档了 ${n} 个任务。`,
   synced: '已从 Task 清单重新同步。',
   copiedSuffix: '（已复制到剪贴板）',

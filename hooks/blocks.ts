@@ -377,14 +377,20 @@ export const confirmTask = (text: string, ref: ConfirmRef, now: number, s: Strin
 const isAsking = (visible: readonly string[], span: BlockSpan): boolean =>
   visible.slice(span.start, span.end + 1).some(line => STEP.exec(line ?? '')?.[2] === '?')
 
-// A block that asks goes only after the three days a stopped one is given, whatever its state, and
-// only when the caller has checked that its questions are kept outside the block (#174).
+// An automatic sweep takes a block that asks only when it has stopped (`ended` or `done`) and has
+// been quiet for the three days a stopped block is given. A `waiting` or `working` block may still
+// get its answer, and its question is a live one that a later poll would have to make again (#174).
+const isStoppedAsking = (span: BlockSpan, now: number): boolean =>
+  (span.state === 'ended' || span.state === 'done') && now - span.updated > STOPPED_ARCHIVE_MS
+
+// The blocks that ask which a sweep may take once the caller has checked that their questions are
+// kept outside the block (#174).
 export type AskingBlock = { span: BlockSpan; ref: TaskRef }
 export const archivableAsking = (text: string, now: number, keep?: string): AskingBlock[] => {
   if (!text.includes('[?]')) return []
   const lines = linesOf(text)
   const visible = readable(lines)
-  const spans = scanBlocks(lines).filter(span => span.isClosed && span.session !== keep && span.updated > 0 && now - span.updated > STOPPED_ARCHIVE_MS && isAsking(visible, span))
+  const spans = scanBlocks(lines).filter(span => span.isClosed && span.session !== keep && span.updated > 0 && isStoppedAsking(span, now) && isAsking(visible, span))
   if (spans.length === 0) return []
   const projects = parseProgress(text)
 
@@ -398,12 +404,13 @@ export const archivableAsking = (text: string, now: number, keep?: string): Aski
 }
 
 // Moves old blocks out; each entry is the block without its markers, under a dated heading,
-// ready to append to progress-archive.md. A block with a visible `[?]` step stays unless
-// `mayTake` says its questions are kept (`archivableAsking` lists the ones to ask about).
+// ready to append to progress-archive.md. A block with a visible `[?]` step stays unless it has
+// stopped (`ended` or `done`, three days quiet) and `mayTake` says its questions are kept
+// (`archivableAsking` lists the ones to ask about).
 export const takeArchivable = (text: string, now: number, keep?: string, s: Strings = ZH_TW, isNow = false, mayTake?: (span: BlockSpan) => boolean): Archived => {
   const lines = linesOf(text)
   const visible = readable(lines)
-  const spans = scanBlocks(lines).filter(span => span.isClosed && span.session !== keep && isArchivable(span, now, isNow) && (!isAsking(visible, span) || (now - span.updated > STOPPED_ARCHIVE_MS && mayTake?.(span) === true)))
+  const spans = scanBlocks(lines).filter(span => span.isClosed && span.session !== keep && isArchivable(span, now, isNow) && (!isAsking(visible, span) || (isStoppedAsking(span, now) && mayTake?.(span) === true)))
   if (spans.length === 0) return { text, entries: [] }
   const entries = spans.map(span => {
     const body = lines.slice(span.start + 1, span.end)
