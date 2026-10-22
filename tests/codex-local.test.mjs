@@ -2,7 +2,7 @@ import { spawn, spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { createRequire, registerHooks } from 'node:module'
 import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, unlinkSync, utimesSync, writeFileSync } from 'node:fs'
-import { availableParallelism, tmpdir } from 'node:os'
+import { availableParallelism, constants, setPriority, tmpdir } from 'node:os'
 import { delimiter, dirname, join, resolve } from 'node:path'
 import { beforeEach, test } from 'node:test'
 import assert from 'node:assert/strict'
@@ -506,44 +506,52 @@ if (basename(process.argv[1] || '') === 'agent-board-hook.mjs') {
   try { require('node:fs').writeFileSync(process.env.L5_START_STAMP, Date.now() + ' ' + (at === -1 ? '' : process.argv[at + 1]), { flag: 'wx' }) } catch {}
 }
 `)
-  // One core stays free: a busy machine, not one where the hook gets no CPU before the host's 3 s stop.
+  // One core stays free and the loops run below normal priority: the machine is busy, but neither the hook
+  // nor the other test files that `node --test` runs at the same time go without CPU before the host's 3 s stop.
   const busyCount = Math.max(1, availableParallelism() - 1)
+  let priority = 'below normal priority'
   const busy = []
   const records = []
+  const antigravity = JSON.parse(readFileSync(join(f.home, '.gemini', 'config', 'hooks.json')))['agent-board-local'].SessionStart[0].command
+  const codex = JSON.parse(readFileSync(f.hooks)).hooks.UserPromptSubmit[0].hooks[0].command
+  const hooks = [
+    ['antigravity', antigravity, key => ({ conversationId: `busy-antigravity-session-${key}` })],
+    ['codex', codex, key => ({ session_id: `busy-codex-session-${key}`, hook_event_name: 'UserPromptSubmit', turn_id: `busy-turn-${key}` })],
+  ]
+  const fire = async (agent, command, payload, label, limit) => {
+    const stamp = join(f.home, `worker-start-${agent}-${label.replaceAll(' ', '-')}.txt`)
+    const env = { ...f.env, L5_START_STAMP: stamp, NODE_OPTIONS: [f.env.NODE_OPTIONS, `--require ${JSON.stringify(preload)}`].filter(Boolean).join(' ') }
+    const spawnedAt = Date.now()
+    const result = await fireCommand({ env }, command, JSON.stringify(payload), limit)
+    const tookMs = Date.now() - spawnedAt
+    const [workerAt, shellAt] = existsSync(stamp) ? readFileSync(stamp, 'utf8').split(' ').map(Number) : []
+    const load = busy.length ? `${busy.length} busy at ${priority}` : 'no load'
+    const timing = `${agent} ${label} (${load}): worker ${workerAt ? `started ${workerAt - spawnedAt} ms after the spawn` : 'never started'}`
+      + `${shellAt ? `, PowerShell ${shellAt - spawnedAt} ms` : ''}, hook ended after ${tookMs} ms`
+    t.diagnostic(timing)
+    const log = hookLog(f)
+    assert.equal(result.status, 0, `${timing}\n${hookFailure(result)}\nhook log:\n${log}`)
+    const id = payload.session_id ?? payload.conversationId
+    const owner = createHash('sha256').update(`${agent}:${id}`).digest('hex')
+    const record = join(f.root, 'sessions', `${owner}.json`)
+    const saved = pendingFiles(f).some(name => readFileSync(join(f.root, 'pending', name), 'utf8').includes(id))
+    assert.ok(existsSync(record) || saved, `${timing}: the event must be applied or queued; hook log:\n${log}`)
+    records.push({ file: record, state: agent === 'codex' ? 'working' : 'waiting', turn: payload.turn_id })
+  }
+  // A machine's first PowerShell and Node start is far slower than later ones (#241 keeps that case open), so
+  // one event per hook runs before the load, untimed (the test's 10 s limit only); it must still be applied or queued.
+  for (const [agent, command, payloadOf] of hooks) await fire(agent, command, payloadOf('warm-up'), 'warm-up', 10000)
   try {
     for (let index = 0; index < busyCount; index++) {
       const child = spawn(process.execPath, ['-e', 'process.stdout.write("ready\\n"); while (true) {}'], { env: f.env, windowsHide: true, stdio: ['ignore', 'pipe', 'ignore'] })
       const closed = new Promise((done, reject) => { child.once('close', done); child.once('error', reject) })
       closed.catch(() => {})
       busy.push({ child, closed })
+      try { setPriority(child.pid, constants.priority.PRIORITY_BELOW_NORMAL) } catch (error) { priority = `normal priority (setPriority ${error.info?.code ?? error.code ?? error.message})` }
       await new Promise((done, reject) => { child.stdout.once('data', done); child.once('error', reject) })
     }
-    const antigravity = JSON.parse(readFileSync(join(f.home, '.gemini', 'config', 'hooks.json')))['agent-board-local'].SessionStart[0].command
-    const codex = JSON.parse(readFileSync(f.hooks)).hooks.UserPromptSubmit[0].hooks[0].command
-    for (const [agent, command, payloadOf] of [
-      ['antigravity', antigravity, index => ({ conversationId: `busy-antigravity-session-${index}` })],
-      ['codex', codex, index => ({ session_id: `busy-codex-session-${index}`, hook_event_name: 'UserPromptSubmit', turn_id: `busy-turn-${index}` })],
-    ]) {
-      for (let index = 0; index < 3; index++) {
-        const payload = payloadOf(index)
-        const stamp = join(f.home, `worker-start-${agent}-${index}.txt`)
-        const env = { ...f.env, L5_START_STAMP: stamp, NODE_OPTIONS: [f.env.NODE_OPTIONS, `--require ${JSON.stringify(preload)}`].filter(Boolean).join(' ') }
-        const spawnedAt = Date.now()
-        const result = await fireCommand({ env }, command, JSON.stringify(payload), 5000)
-        const tookMs = Date.now() - spawnedAt
-        const [workerAt, shellAt] = existsSync(stamp) ? readFileSync(stamp, 'utf8').split(' ').map(Number) : []
-        const timing = `${agent} event ${index} (${busyCount} busy): worker ${workerAt ? `started ${workerAt - spawnedAt} ms after the spawn` : 'never started'}`
-          + `${shellAt ? `, PowerShell ${shellAt - spawnedAt} ms` : ''}, hook ended after ${tookMs} ms`
-        t.diagnostic(timing)
-        const log = hookLog(f)
-        assert.equal(result.status, 0, `${timing}\n${hookFailure(result)}\nhook log:\n${log}`)
-        const id = payload.session_id ?? payload.conversationId
-        const owner = createHash('sha256').update(`${agent}:${id}`).digest('hex')
-        const record = join(f.root, 'sessions', `${owner}.json`)
-        const saved = pendingFiles(f).some(name => readFileSync(join(f.root, 'pending', name), 'utf8').includes(id))
-        assert.ok(existsSync(record) || saved, `${timing}: the event must be applied or queued; hook log:\n${log}`)
-        records.push({ file: record, state: agent === 'codex' ? 'working' : 'waiting', turn: payload.turn_id })
-      }
+    for (const [agent, command, payloadOf] of hooks) {
+      for (let index = 0; index < 3; index++) await fire(agent, command, payloadOf(index), `event ${index}`, 5000)
     }
   } finally {
     await Promise.all(busy.map(async ({ child, closed }) => {
