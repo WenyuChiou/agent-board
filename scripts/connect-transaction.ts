@@ -1,10 +1,12 @@
-import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readdirSync, realpathSync, renameSync, rmdirSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
+import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readdirSync, renameSync, rmdirSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
 import { createHash, randomBytes } from 'node:crypto'
-import { delimiter, dirname, isAbsolute, join, resolve } from 'node:path'
+import { dirname, isAbsolute, join, resolve } from 'node:path'
 import type { Lang, Strings } from '../hooks/i18n'
 import { BOARD_FOR, agentHooks, connectDataRoots, connectPath, isNodeSupported, isSetupState, nodeVersionOf, setupSeed, setupProblemText, withoutSection } from '../hooks/connect-pure'
 import { managedCommandLines } from '../hooks/codex-fallback'
-import { inspectCodexHooks } from './codex-host'
+import { findCodexExecutable, inspectCodexHooks } from './codex-host'
+import { codexApproval } from './codex-approval'
+import type { CodexApproval } from './codex-approval'
 import type { CodexTrustObservation } from './codex-host'
 import type { ConnectContext, SetupState } from '../hooks/connect-pure'
 import { langOf, STRINGS } from '../hooks/strings'
@@ -34,6 +36,7 @@ export type ConnectState = {
   notified: string[]
   boardLang?: Lang
   setup?: SetupState
+  codexApproval?: CodexApproval
   connectedProgress?: string
   pending?: Pending
 }
@@ -69,6 +72,7 @@ export class ConnectTransaction {
     if (existsSync(authority) && !existsSync(this.file)) throw new Error('MISSING_CONNECT_STATE')
     if (existsSync(this.file)) {
       const state = JSON.parse(readLocal(this.file)) as ConnectState
+      if (state.codexApproval !== undefined && (state.codexApproval === null || typeof state.codexApproval !== 'object' || Array.isArray(state.codexApproval) || typeof state.codexApproval.source !== 'string' || !isAbsolute(state.codexApproval.source) || typeof state.codexApproval.sourceHash !== 'string' || !/^[a-f0-9]{64}$/.test(state.codexApproval.sourceHash))) throw new Error('INVALID_CONNECT_STATE')
       if (state.connectedProgress !== undefined && (typeof state.connectedProgress !== 'string' || !isAbsolute(state.connectedProgress))) throw new Error('INVALID_CONNECT_STATE')
       if (state.version !== 1 || !Number.isSafeInteger(state.revision) || state.revision < 0 || typeof state.disabled !== 'boolean' || state.owned === null || typeof state.owned !== 'object' || Array.isArray(state.owned) || Object.entries(state.owned).some(([file, value]) => !isAbsolute(file) || typeof value !== 'string' || !/^[a-f0-9]{64}$/.test(value)) || !Array.isArray(state.notified) || state.notified.some(value => typeof value !== 'string') || state.boardLang !== undefined && langOf(state.boardLang) !== state.boardLang || state.setup !== undefined && !isSetupState(state.setup)) throw new Error('INVALID_CONNECT_STATE')
       if (state.pending !== undefined) {
@@ -169,29 +173,36 @@ const checkedRequest = (value: unknown): LegacyConnectRequest => {
   return { mode: request.mode, home: resolve(request.home), progress: resolve(request.progress), lang: request.lang, node: request.node, ...(request.codexExecutable === undefined ? {} : { codexExecutable: request.codexExecutable }), ...(request.openclawVersion === undefined ? {} : { openclawVersion: request.openclawVersion }), ...(request.boardLang === undefined ? {} : { boardLang: request.boardLang }), ...(request.dirs === undefined ? {} : { dirs: request.dirs }), ...(request.seed === undefined ? {} : { seed: request.seed }), ...(request.acknowledgement === undefined ? {} : { acknowledgement: request.acknowledgement }) }
 }
 
-const codexBinary = (): string | undefined => {
-  for (const directory of (process.env.PATH ?? '').split(delimiter)) {
-    if (!isAbsolute(directory)) continue
-    try {
-      const file = realpathSync(join(directory, process.platform === 'win32' ? 'codex.exe' : 'codex'))
-      const stat = statSync(file)
-      if (stat.isFile() && (process.platform === 'win32' ? /\.exe$/i.test(file) : (stat.mode & 0o111) !== 0)) return file
-    } catch {}
-  }
-  return undefined
-}
+const codexBinary = (): string | undefined => findCodexExecutable(process.env.PATH ?? '', process.platform, process.arch)
+
+// The connect worker has a 10 s process.run limit in register.tsx. On Windows,
+// other connect work takes 0.4–1.1 s and app-server startup takes 0.25 s to over 1 s.
+const CODEX_CHECK_BUDGET_MS = 5000
+const CODEX_CHECK_REQUEST_MS = 2000
 
 const codexObservation = async (request: LegacyConnectRequest): Promise<CodexTrustObservation | undefined> => {
   if (!['connect', 'auto', 'status'].includes(request.mode)) return undefined
   const executable = request.codexExecutable ?? codexBinary()
   if (executable === undefined) return undefined
+  const deadline = performance.now() + CODEX_CHECK_BUDGET_MS
   const home = request.home, folder = dirname(request.progress), codexHome = request.dirs?.codex ?? join(home, '.codex')
   const hook = agentHooks({ home, sep: process.platform === 'win32' ? '\\' : '/', isWindows: process.platform === 'win32', script: join(folder, process.platform === 'win32' ? 'progress-report.ps1' : 'progress-report.sh'), inbox: join(folder, 'progress-inbox'), codexHome, grokHome: '', hermesHome: '', openclawHome: '' }).find(one => one.agent === 'codex' && one.label !== '')!
   try {
     const config = JSON.parse(hook.edit('{}', false) as string) as { hooks: Record<string, { hooks: { command: string }[] }[]> }
     const expected = Object.entries(config.hooks).map(([event, groups]) => ({ event: event[0]!.toLowerCase() + event.slice(1), command: groups[0]!.hooks[0]!.command }))
-    return await inspectCodexHooks(executable, hook.file, expected, 1000)
+    const before = readFileSync(hook.file)
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try { return await inspectCodexHooks(executable, hook.file, expected, CODEX_CHECK_REQUEST_MS, deadline) } catch (error) {
+        // Codex answered, but our hooks are turned off in /hooks or are not the ones it lists:
+        // that is a no, not a failed look, so a remembered approval must not outlive it.
+        if (error instanceof Error && ['HOOK_DISABLED_OR_HASH_UNSUPPORTED', 'OWNED_HOOKS_NOT_FOUND'].includes(error.message)) {
+          return before.equals(readFileSync(hook.file)) ? { source: resolve(hook.file), sourceHash: createHash('sha256').update(before).digest('hex'), trusted: false, hooks: [] } : undefined
+        }
+        if (!(error instanceof Error) || !['CODEX_CONTROL_TIMEOUT', 'CODEX_CONTROL_UNAVAILABLE'].includes(error.message) || deadline - performance.now() < 1000) return undefined
+      }
+    }
   } catch { return undefined }
+  return undefined
 }
 
 export const connectContext = (request: LegacyConnectRequest): ConnectContext => {
@@ -333,9 +344,10 @@ export const legacyConnect = async (value: unknown, bundle: string): Promise<{ s
       const missing = request.mode === 'status' ? missingBoardHosts(transaction, context) : []
       const s = STRINGS[request.lang]
       const source = join(context.codexHome, 'hooks.json')
+      const text = transaction.maybe(source)
+      const sourceHash = text === null ? null : hash(text)
       const trusted = request.mode === 'ack' ? stored?.codexTrusted === true
-        : observation?.trusted === true && observation.source === resolve(source)
-          && observation.sourceHash === hash(transaction.read(source))
+        : codexApproval(observation, resolve(source), sourceHash, state.codexApproval, stored?.codexTrusted, sourceHash).trusted
       const setup: SetupState = {
         ...(stored ?? { agents: [], node: request.node }),
         codexTrusted: trusted,
@@ -367,6 +379,7 @@ export const legacyConnect = async (value: unknown, bundle: string): Promise<{ s
     // anything. This durable bit also fences a later auto after this process dies.
     if (request.mode === 'remove') {
       state.disabled = true
+      delete state.codexApproval
       transaction.save()
     } else if (!existsSync(transaction.file)) transaction.save()
     const authority = join(installControlRoot(request.home), 'legacy-connect-authority')

@@ -1,15 +1,31 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
+import { createHash } from 'node:crypto'
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, sep } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { codexFallbackCommand, managedFallback } from '../hooks/codex-fallback.ts'
 import { boardRun, geminiBoardCommand } from '../hooks/board-commands.ts'
+import { codexApproval } from '../scripts/codex-approval.ts'
 
 const source = readFileSync(new URL('../hooks/board-script.ts', import.meta.url), 'utf8')
 const bundle = JSON.parse(source.slice(source.indexOf('export const BOARD_SCRIPT = ') + 'export const BOARD_SCRIPT = '.length))
+const approvedConnect = f => {
+  f.run('connect')
+  writeFileSync(f.options, JSON.stringify({ trust: 'trusted' }))
+  const result = f.run('connect')
+  assert.equal(result.state.setup.codexTrusted, true)
+  assert.doesNotMatch(readFileSync(f.instructions, 'utf8'), /agent-board:start/)
+  return result
+}
+const assertApproved = (f, result) => {
+  assert.equal(result.state.setup.codexTrusted, true, JSON.stringify({ problems: result.result.problems, methods: readFileSync(f.log, 'utf8') }))
+  assert.ok(!result.result.problems.some(one => one.key === 'codex:approval'))
+  assert.doesNotMatch(readFileSync(f.instructions, 'utf8'), /agent-board:start/)
+  assert.deepEqual(result.state.codexApproval, { source: f.config, sourceHash: createHash('sha256').update(readFileSync(f.config)).digest('hex') })
+}
 const fixture = async action => {
   const home = mkdtempSync(join(tmpdir(), 'codex-fallback-'))
   const root = join(home, '.codex'), config = join(root, 'hooks.json'), instructions = join(root, 'AGENTS.md'), override = join(root, 'AGENTS.override.md')
@@ -20,7 +36,7 @@ const fixture = async action => {
   writeFileSync(options, JSON.stringify({ trust: 'untrusted' }))
   writeFileSync(script, bundle)
   // These cases exercise fallback ownership, not cold Node startup within the
-  // product's one-second observation. Real subprocess RPC stays in codex-host.
+  // product's bounded observation. Real subprocess RPC stays in codex-host.
   writeFileSync(executable, `
 import childProcess from 'node:child_process'
 import { EventEmitter } from 'node:events'
@@ -28,9 +44,11 @@ import { appendFileSync, readFileSync } from 'node:fs'
 import { syncBuiltinESMExports } from 'node:module'
 import { PassThrough, Writable } from 'node:stream'
 const spawn = childProcess.spawn
+let attempts = 0
 childProcess.spawn = (file, args, ...rest) => {
   if (file !== process.execPath || args?.length !== 3 || args[0] !== ${JSON.stringify(executable)} || args[1] !== 'app-server' || args[2] !== '--stdio') return spawn(file, args, ...rest)
   const child = new EventEmitter()
+  const attempt = ++attempts
   child.stdout = new PassThrough()
   child.stderr = new PassThrough()
   const timers = new Set()
@@ -43,17 +61,18 @@ childProcess.spawn = (file, args, ...rest) => {
   const receive = req => {
     appendFileSync(${JSON.stringify(log)}, req.method + '\\n')
     if (req.id === undefined) return
-    if (req.method === 'initialize') return answer(req, { result: {} })
-    if (req.method !== 'hooks/list') throw Error('FORBIDDEN_METHOD')
     const options = JSON.parse(readFileSync(${JSON.stringify(options)}, 'utf8'))
     const respond = () => {
       if (options.rejected) return answer(req, { error: { message: 'unsupported' } })
+      if (req.method === 'initialize') return answer(req, { result: {} })
+      if (req.method !== 'hooks/list') throw Error('FORBIDDEN_METHOD')
       const data = JSON.parse(readFileSync(${JSON.stringify(config)}, 'utf8'))
       let n = 0
-      const hooks = Object.entries(data.hooks ?? {}).flatMap(([event, groups]) => groups.flatMap(group => (group.hooks ?? []).map(hook => ({ key: 'key-' + (++n), currentHash: 'sha256:' + '1'.repeat(64), sourcePath: ${JSON.stringify(config)}, eventName: event[0].toLowerCase() + event.slice(1), command: hook.command, enabled: !options.disabled, trustStatus: options.trust }))))
+      const hooks = options.unlisted ? [] : Object.entries(data.hooks ?? {}).flatMap(([event, groups]) => groups.flatMap(group => (group.hooks ?? []).map(hook => ({ key: 'key-' + (++n), currentHash: 'sha256:' + '1'.repeat(64), sourcePath: ${JSON.stringify(config)}, eventName: event[0].toLowerCase() + event.slice(1), command: hook.command, enabled: !options.disabled, trustStatus: options.trust }))))
       answer(req, { result: { data: [{ hooks, errors: [] }] } })
     }
-    if (options.delayMs) timers.add(setTimeout(respond, options.delayMs))
+    const delayMs = options.delays?.[req.method] ?? (req.method === 'hooks/list' ? options.attemptDelays?.[attempt - 1] ?? options.delayMs : 0)
+    if (delayMs) timers.add(setTimeout(respond, delayMs))
     else respond()
   }
   child.stdin = new Writable({ write(chunk, encoding, done) {
@@ -236,7 +255,7 @@ for (const lang of ['en', 'zh-TW', 'zh-CN']) test(`new or untrusted Codex hooks 
 test('the Codex trust check keeps the fallback and says why when the host answers too slowly', () => fixture(async f => {
   f.run('connect')
   const before = readFileSync(f.instructions, 'utf8'), config = readFileSync(f.config, 'utf8')
-  writeFileSync(f.options, JSON.stringify({ trust: 'trusted', delayMs: 1500 }))
+  writeFileSync(f.options, JSON.stringify({ trust: 'trusted', delayMs: 6000 }))
   writeFileSync(f.log, '')
   writeFileSync(f.replies, '')
   const result = f.run('connect')
@@ -247,8 +266,8 @@ test('the Codex trust check keeps the fallback and says why when the host answer
   assert.ok(result.result.problems.some(one => one.key === 'codex:approval'))
   assert.match(result.result.text, /Current Codex hook approval is unconfirmed/)
   assert.match(result.result.text, /reporting instructions are retained/)
-  assert.deepEqual(readFileSync(f.log, 'utf8').trim().split('\n'), ['initialize', 'initialized', 'hooks/list'])
-  assert.deepEqual(readFileSync(f.replies, 'utf8').trim().split('\n'), ['initialize'])
+  assert.deepEqual(readFileSync(f.log, 'utf8').trim().split('\n'), ['initialize', 'initialized', 'hooks/list', 'initialize', 'initialized', 'hooks/list'])
+  assert.deepEqual(readFileSync(f.replies, 'utf8').trim().split('\n'), ['initialize', 'initialize'])
 }))
 
 test('lost or unsupported Codex trust restores effective override fallback while status writes no instructions', () => fixture(async f => {
@@ -335,3 +354,145 @@ test('a hook source change while reading instructions cannot retire an existing 
   assert.equal(readFileSync(f.instructions, 'utf8'), before)
   assert.equal(result.state.setup.codexTrusted, false)
 }))
+
+test('an approved Codex whose check cannot run keeps no fallback while hooks.json is unchanged', () => fixture(async f => {
+  approvedConnect(f)
+  for (const mode of ['connect', 'auto']) {
+    assertApproved(f, f.run(mode, { codexExecutable: undefined }, { PATH: '' }))
+    assertApproved(f, f.run(mode, { codexExecutable: join(f.home, 'missing-control.exe') }))
+    writeFileSync(f.options, JSON.stringify({ rejected: true }))
+    writeFileSync(f.log, '')
+    assertApproved(f, f.run(mode))
+    assert.deepEqual(readFileSync(f.log, 'utf8').trim().split('\n'), ['initialize'])
+  }
+}))
+
+test('an approved Codex whose check answers too slowly keeps no fallback', () => fixture(async f => {
+  approvedConnect(f)
+  writeFileSync(f.options, JSON.stringify({ trust: 'trusted', delayMs: 6000 }))
+  writeFileSync(f.log, '')
+  const start = Date.now()
+  assertApproved(f, f.run('connect'))
+  assert.ok(Date.now() - start < 8000)
+  assert.equal(readFileSync(f.log, 'utf8').trim().split('\n').filter(one => one === 'initialize').length, 2)
+}))
+
+for (const answer of ['disabled', 'unlisted']) test(`an approved Codex whose hooks Codex reports as ${answer} gets the fallback back`, () => fixture(async f => {
+  approvedConnect(f)
+  writeFileSync(f.options, JSON.stringify({ trust: 'trusted', [answer]: true }))
+  const result = f.run('auto')
+  assert.equal(result.state.setup.codexTrusted, false)
+  assert.ok(result.result.problems.some(one => one.key === 'codex:approval'))
+  assert.equal(JSON.parse(readFileSync(f.control, 'utf8')).codexApproval, undefined)
+  assert.match(readFileSync(f.instructions, 'utf8'), /agent-board:start/)
+  // Once Codex has said no, a later check that cannot run does not bring the old approval back.
+  const unavailable = f.run('connect', { codexExecutable: join(f.home, 'missing-control.exe') })
+  assert.equal(unavailable.state.setup.codexTrusted, false)
+  assert.match(readFileSync(f.instructions, 'utf8'), /agent-board:start/)
+}))
+
+test('a Codex that is really untrusted gets the fallback', () => fixture(async f => {
+  const result = f.run('connect')
+  assert.equal(result.state.setup.codexTrusted, false)
+  assert.ok(result.result.problems.some(one => one.key === 'codex:approval'))
+  assert.match(readFileSync(f.instructions, 'utf8'), /agent-board:start/)
+  assert.equal(result.state.codexApproval, undefined)
+}))
+
+test('an approval revoked later brings the fallback back when the check says untrusted', () => fixture(async f => {
+  approvedConnect(f)
+  writeFileSync(f.options, JSON.stringify({ trust: 'untrusted' }))
+  writeFileSync(f.log, '')
+  const result = f.run('connect')
+  assert.equal(result.state.setup.codexTrusted, false)
+  assert.ok(result.result.problems.some(one => one.key === 'codex:approval'))
+  assert.equal(JSON.parse(readFileSync(f.control, 'utf8')).codexApproval, undefined)
+  assert.match(readFileSync(f.instructions, 'utf8'), /agent-board:start/)
+  assert.equal(readFileSync(f.log, 'utf8').trim().split('\n').filter(one => one === 'initialize').length, 1)
+  const unavailable = f.run('connect', { codexExecutable: join(f.home, 'missing-control.exe') })
+  assert.equal(unavailable.state.setup.codexTrusted, false)
+  assert.match(readFileSync(f.instructions, 'utf8'), /agent-board:start/)
+}))
+
+test('a home that already has the fallback while Codex is approved has it retired by a successful check', () => fixture(async f => {
+  approvedConnect(f)
+  const personal = readFileSync(f.instructions, 'utf8')
+  writeFileSync(f.instructions, personal + '\n<!-- agent-board:start -->\nRetained fallback\n<!-- agent-board:end -->\n')
+  assertApproved(f, f.run('connect'))
+  assert.ok(readFileSync(f.instructions, 'utf8').startsWith(personal))
+}))
+
+test('a changed hooks.json makes a remembered approval count for nothing', () => fixture(async f => {
+  const previous = approvedConnect(f).state.codexApproval
+  const config = JSON.parse(readFileSync(f.config, 'utf8'))
+  config.hooks.Stop.push({ hooks: [{ type: 'command', command: 'synthetic personal hook' }] })
+  writeFileSync(f.config, JSON.stringify(config))
+  const result = f.run('connect', { codexExecutable: join(f.home, 'missing-control.exe') })
+  assert.equal(result.state.setup.codexTrusted, false)
+  assert.deepEqual(result.state.codexApproval, previous)
+  assert.ok(result.result.problems.some(one => one.key === 'codex:approval'))
+  assert.match(readFileSync(f.instructions, 'utf8'), /agent-board:start/)
+}))
+
+test('a home approved under 0.23 keeps no fallback when its first check after the upgrade cannot run', () => fixture(async f => {
+  approvedConnect(f)
+  const state = JSON.parse(readFileSync(f.control, 'utf8'))
+  delete state.codexApproval
+  writeFileSync(f.control, JSON.stringify(state))
+  const unavailable = { codexExecutable: join(f.home, 'missing-control.exe') }
+  const before = readFileSync(f.control, 'utf8')
+  assert.equal(f.run('status', unavailable).state.setup.codexTrusted, true)
+  assert.equal(readFileSync(f.control, 'utf8'), before)
+  const result = f.run('connect', unavailable)
+  assertApproved(f, result)
+  assert.deepEqual(JSON.parse(readFileSync(f.control, 'utf8')).codexApproval, result.state.codexApproval)
+  f.run('remove')
+  assert.equal(JSON.parse(readFileSync(f.control, 'utf8')).codexApproval, undefined)
+}))
+
+test('a Codex check that times out once is tried again and the second answer counts', () => fixture(async f => {
+  f.run('connect')
+  writeFileSync(f.options, JSON.stringify({ trust: 'trusted', attemptDelays: [2500, 0] }))
+  writeFileSync(f.log, '')
+  assertApproved(f, f.run('connect'))
+  assert.deepEqual(readFileSync(f.log, 'utf8').trim().split('\n'), ['initialize', 'initialized', 'hooks/list', 'initialize', 'initialized', 'hooks/list'])
+}))
+
+test('a shared Codex check deadline bounds delayed requests across both attempts', () => fixture(async f => {
+  approvedConnect(f)
+  writeFileSync(f.options, JSON.stringify({ trust: 'trusted', delays: { initialize: 1500, 'hooks/list': 6000 } }))
+  writeFileSync(f.log, '')
+  const start = Date.now()
+  assertApproved(f, f.run('connect'))
+  assert.ok(Date.now() - start < 8000)
+  assert.equal(readFileSync(f.log, 'utf8').trim().split('\n').filter(one => one === 'initialize').length, 2)
+}))
+
+test('an upgrade cannot seed approval if this connect rewrites hooks.json', () => fixture(async f => {
+  approvedConnect(f)
+  const state = JSON.parse(readFileSync(f.control, 'utf8'))
+  delete state.codexApproval
+  writeFileSync(f.control, JSON.stringify(state))
+  const config = JSON.parse(readFileSync(f.config, 'utf8'))
+  config.hooks.Stop.at(-1).hooks[0].command += ' changed'
+  writeFileSync(f.config, JSON.stringify(config))
+  const result = f.run('connect', { codexExecutable: join(f.home, 'missing-control.exe') })
+  assert.equal(result.state.setup.codexTrusted, false)
+  assert.equal(result.state.codexApproval, undefined)
+  assert.match(readFileSync(f.instructions, 'utf8'), /agent-board:start/)
+}))
+
+test('the shared Codex approval decision requires the exact current source and hash', () => {
+  const source = join(tmpdir(), 'synthetic-codex', 'hooks.json')
+  const sourceHash = 'a'.repeat(64), otherHash = 'b'.repeat(64)
+  const approval = { source, sourceHash }
+  const observation = { ...approval, trusted: true, hooks: [] }
+  for (const stale of [{ ...observation, source: source + '.other' }, { ...observation, sourceHash: otherHash }]) {
+    assert.deepEqual(codexApproval(stale, source, sourceHash, approval, true, sourceHash), { trusted: false, approval })
+  }
+  assert.deepEqual(codexApproval({ ...observation, trusted: false }, source, sourceHash, approval, true, sourceHash), { trusted: false, approval: undefined })
+  assert.deepEqual(codexApproval(undefined, source, sourceHash, approval, false, otherHash), { trusted: true, approval })
+  assert.deepEqual(codexApproval(undefined, source, otherHash, approval, true, sourceHash), { trusted: false, approval })
+  assert.deepEqual(codexApproval(undefined, source, null, approval, true, null), { trusted: false, approval })
+  assert.deepEqual(codexApproval(undefined, source, sourceHash, undefined, true, otherHash), { trusted: false, approval: undefined })
+})

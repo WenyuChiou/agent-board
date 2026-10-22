@@ -1,12 +1,109 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { createHash } from 'node:crypto'
-import { inspectCodexHooks } from '../scripts/codex-host.ts'
+import { findCodexExecutable, inspectCodexHooks } from '../scripts/codex-host.ts'
 
 const identities = ['stop', 'sessionEnd', 'userPromptSubmit'].map(event => ({event, command:`report-${event}`}))
+const npmShim = target => `@ECHO off
+GOTO start
+:find_dp0
+SET dp0=%~dp0
+EXIT /b
+:start
+SETLOCAL
+CALL :find_dp0
+IF EXIST "%dp0%\\node.exe" (
+  SET "_prog=%dp0%\\node.exe"
+) ELSE (
+  SET "_prog=node"
+  SET PATHEXT=%PATHEXT:;.JS;=;%
+)
+endLocal & goto #_undefined_# 2>NUL || title %COMSPEC% & "%_prog%" "%dp0%\\${target}" %*
+`
+const npmFixture = action => {
+  const prefix = mkdtempSync(join(tmpdir(), 'codex-npm-shim-'))
+  const root = join(prefix, 'node_modules', '@openai', 'codex')
+  const target = 'node_modules\\@openai\\codex\\bin\\codex.js'
+  mkdirSync(join(root, 'bin'), { recursive: true })
+  writeFileSync(join(root, 'package.json'), JSON.stringify({ name: '@openai/codex' }))
+  writeFileSync(join(root, 'bin', 'codex.js'), '// Synthetic launcher, never executed\n')
+  writeFileSync(join(prefix, 'codex.cmd'), npmShim(target))
+  const vendor = (arch, bundled = false) => {
+    const triple = arch === 'x64' ? 'x86_64-pc-windows-msvc' : 'aarch64-pc-windows-msvc'
+    const base = bundled ? root : join(root, 'node_modules', '@openai', `codex-win32-${arch}`)
+    const file = join(base, 'vendor', triple, 'bin', 'codex.exe')
+    mkdirSync(join(file, '..'), { recursive: true })
+    writeFileSync(file, '')
+    return realpathSync(file)
+  }
+  try { action({ prefix, root, target, vendor }) }
+  finally { rmSync(prefix, { recursive: true, force: true }) }
+}
+
+test('the Codex binary is found behind an npm shim as the vendor codex.exe inside its package', () => {
+  for (const arch of ['x64', 'arm64']) for (const bundled of [false, true]) npmFixture(f => {
+    const file = f.vendor(arch, bundled)
+    assert.equal(findCodexExecutable(f.prefix, 'win32', arch), file)
+    assert.equal(findCodexExecutable('relative;' + f.prefix, 'win32', arch), file)
+    const earlier = join(f.prefix, 'earlier')
+    mkdirSync(earlier)
+    const direct = join(earlier, 'codex.exe')
+    writeFileSync(direct, '')
+    assert.equal(findCodexExecutable(earlier + ';' + f.prefix, 'win32', arch), realpathSync(direct))
+    const local = join(f.prefix, 'codex.exe')
+    writeFileSync(local, '')
+    assert.equal(findCodexExecutable(f.prefix, 'win32', arch), realpathSync(local))
+  })
+})
+
+test('an npm shim that points outside its package, or a vendor binary that resolves outside it, is refused', () => {
+  const cases = [
+    f => writeFileSync(join(f.prefix, 'codex.cmd'), npmShim('..\\elsewhere\\codex.js')),
+    f => writeFileSync(join(f.prefix, 'codex.cmd'), npmShim('C:\\elsewhere\\codex.js')),
+    f => writeFileSync(join(f.prefix, 'codex.cmd'), npmShim(f.target) + `"%_prog%" "%dp0%\\${f.target}"\n`),
+    f => writeFileSync(join(f.root, 'package.json'), JSON.stringify({ name: '@elsewhere/codex' })),
+    f => {
+      const outside = join(f.prefix, 'outside')
+      mkdirSync(join(outside, 'vendor', 'x86_64-pc-windows-msvc', 'bin'), { recursive: true })
+      writeFileSync(join(outside, 'vendor', 'x86_64-pc-windows-msvc', 'bin', 'codex.exe'), '')
+      const platform = join(f.root, 'node_modules', '@openai', 'codex-win32-x64')
+      rmSync(platform, { recursive: true })
+      symlinkSync(outside, platform, process.platform === 'win32' ? 'junction' : 'dir')
+    },
+    f => {
+      const outside = join(f.prefix, 'outside-bin')
+      mkdirSync(outside)
+      writeFileSync(join(outside, 'codex.js'), '')
+      rmSync(join(f.root, 'bin'), { recursive: true })
+      symlinkSync(outside, join(f.root, 'bin'), process.platform === 'win32' ? 'junction' : 'dir')
+    },
+    f => writeFileSync(join(f.prefix, 'codex.cmd'), npmShim(f.target) + ' '.repeat(64 * 1024)),
+  ]
+  for (const change of cases) npmFixture(f => {
+    f.vendor('x64')
+    change(f)
+    assert.equal(findCodexExecutable(f.prefix, 'win32', 'x64'), undefined)
+  })
+  npmFixture(f => {
+    f.vendor('x64')
+    assert.equal(findCodexExecutable(f.prefix, 'win32', 'ia32'), undefined)
+  })
+})
+
+test('native Codex discovery preserves executable permission checks outside Windows', () => {
+  if (process.platform === 'win32') return
+  npmFixture(f => {
+    const file = join(f.prefix, 'codex')
+    writeFileSync(file, '')
+    chmodSync(file, 0o600)
+    assert.equal(findCodexExecutable(f.prefix, 'linux', 'x64'), undefined)
+    chmodSync(file, 0o700)
+    assert.equal(findCodexExecutable('relative:' + f.prefix, 'linux', 'x64'), realpathSync(file))
+  })
+})
 const fixture = async (options, action) => {
   const dir = mkdtempSync(join(tmpdir(), 'board-trust-observation-'))
   const config = join(dir, 'hooks.json'), log = join(dir, 'methods.jsonl'), executable = join(dir, 'host.mjs')
@@ -82,4 +179,9 @@ test('an unsupported host API fails closed without a trust write', async () => f
 test('an empty or duplicate identity request cannot use vacuous trust', async () => fixture({}, async f => {
   await assert.rejects(inspectCodexHooks(f.executable, f.config, []), /OWNED_HOOK_IDENTITIES_REQUIRED/)
   await assert.rejects(inspectCodexHooks(f.executable, f.config, [identities[0],identities[0]]), /OWNED_HOOK_IDENTITIES_REQUIRED/)
+}))
+
+test('a Codex control request whose shared deadline has expired times out immediately', async () => fixture({}, async f => {
+  await assert.rejects(inspectCodexHooks(f.executable, f.config, identities, 2000, performance.now() - 1), /CODEX_CONTROL_TIMEOUT/)
+  assert.equal(readFileSync(f.config, 'utf8'), f.contents)
 }))

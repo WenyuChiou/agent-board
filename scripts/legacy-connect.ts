@@ -3,6 +3,7 @@ import type { AgentSetup, HookState, SetupNotice, SetupProblem, SetupState } fro
 import { langOf, STRINGS } from '../hooks/strings'
 import type { ConnectTransaction, LegacyConnectRequest } from './connect-transaction'
 import type { CodexTrustObservation } from './codex-host'
+import { codexApproval } from './codex-approval'
 import { codexFallbackCommand, managedFallback } from '../hooks/codex-fallback'
 import { sha256 } from '../hooks/sha256'
 
@@ -20,6 +21,9 @@ export const connectLegacy = (transaction: ConnectTransaction, request: LegacyCo
   const existsSync = (file: string): boolean => transaction.exists(file)
   const sep = isWin ? '\\' : '/'
   const codexHome = request.dirs?.codex ?? [home, '.codex'].join(sep)
+  const codexSource = [codexHome, 'hooks.json'].join(sep)
+  const codexBefore = readMaybe(codexSource)
+  const beforeHash = codexBefore === null ? null : sha256(codexBefore)
   const grokHome = request.dirs?.grok ?? [home, '.grok'].join(sep)
   const hermesHome = request.dirs?.hermes ?? [home, '.hermes'].join(sep)
   const openclawHome = request.dirs?.openclaw ?? [home, '.openclaw'].join(sep)
@@ -253,9 +257,11 @@ export const connectLegacy = (transaction: ConnectTransaction, request: LegacyCo
       else warn(`writeFailed:${activeFile}`, hook.label === '' ? { message: 'connectBoardFailed', args: [activeFile] } : { message: 'connectFailed', args: [hook.label, activeFile] })
     }
   }
-  const codexSource = [codexHome, 'hooks.json'].join(sep)
-  const normalized = (value: string): string => value.replace(/\\/g, '/')
-  let codexTrusted = observation?.trusted === true && normalized(observation.source) === normalized(codexSource) && observation.sourceHash === sha256(readLocal(codexSource))
+  const codexCurrent = readMaybe(codexSource)
+  const decision = codexApproval(observation, codexSource, codexCurrent === null ? null : sha256(codexCurrent), transaction.state.codexApproval, transaction.state.setup?.codexTrusted, beforeHash)
+  let codexTrusted = decision.trusted
+  if (remove || decision.approval === undefined) delete transaction.state.codexApproval
+  else transaction.state.codexApproval = decision.approval
   if (existsSync(codexHome)) {
     const instructions = [[codexHome, 'AGENTS.md'].join(sep), [codexHome, 'AGENTS.override.md'].join(sep)]
     const effective = existsSync(instructions[1]!) && readMaybe(instructions[1]!)?.trim() !== '' ? instructions[1]! : instructions[0]!
@@ -265,7 +271,7 @@ export const connectLegacy = (transaction: ConnectTransaction, request: LegacyCo
         const before = readLocal(file)
         // Instruction reads can yield to an external editor. Recheck source and
         // owned executables at each retirement, not only when the lock was taken.
-        if (codexTrusted && observation!.sourceHash !== sha256(readLocal(codexSource))) {
+        if (codexTrusted && decision.approval?.sourceHash !== sha256(readLocal(codexSource))) {
           codexTrusted = false
           warn('codex:approval', { message: 'setupCodexApproval', args: [] })
         }

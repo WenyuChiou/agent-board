@@ -1,13 +1,59 @@
 import { spawn } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { readFileSync } from 'node:fs'
+import { closeSync, fstatSync, openSync, readFileSync, readSync, realpathSync, statSync } from 'node:fs'
 import { homedir } from 'node:os'
-import { isAbsolute, join, resolve } from 'node:path'
+import { isAbsolute, join, relative, resolve } from 'node:path'
 
 type Json = Record<string, unknown>
 type Hook = { key: string; currentHash: string; sourcePath: string; eventName: string; command: string; enabled: boolean; trustStatus: string }
 export type CodexHookIdentity = { event: string; command: string }
 export type CodexTrustObservation = { source: string; sourceHash: string; trusted: boolean; hooks: { event: string; key: string; hash: string; trust: string }[] }
+
+// npm installs on Windows put only shims on PATH; run the package's own native
+// binary directly and never a .cmd through a shell.
+export const findCodexExecutable = (pathValue: string, platform: string, arch: string): string | undefined => {
+  for (const entry of pathValue.split(platform === 'win32' ? ';' : ':')) {
+    // Windows allows a PATH entry in quotes.
+    const directory = platform === 'win32' ? entry.replace(/^"(.*)"$/, '$1') : entry
+    if (!isAbsolute(directory)) continue
+    try {
+      const file = realpathSync(join(directory, platform === 'win32' ? 'codex.exe' : 'codex'))
+      const stat = statSync(file)
+      if (stat.isFile() && (platform === 'win32' ? /\.exe$/i.test(file) : (stat.mode & 0o111) !== 0)) return file
+    } catch {}
+    if (platform !== 'win32') continue
+    try {
+      const fd = openSync(join(directory, 'codex.cmd'), 'r')
+      let text: string
+      try {
+        const stat = fstatSync(fd)
+        if (!stat.isFile() || stat.size > 64 * 1024) continue
+        const buffer = Buffer.alloc(64 * 1024)
+        text = buffer.subarray(0, readSync(fd, buffer, 0, buffer.length, 0)).toString('utf8')
+      } finally { closeSync(fd) }
+      // npm probes for a sibling node.exe before its one package launcher target.
+      const launcher = text.replace(/^\s*IF EXIST "%dp0%\\node\.exe" \(\s*$/gim, '')
+      const targets = [...launcher.matchAll(/"%dp0%\\([^"\r\n]*)"/gi)]
+      if (targets.length !== 1 || !/^node_modules\\@openai\\codex\\bin\\codex\.js$/i.test(targets[0]![1]!)) continue
+      const root = realpathSync(join(directory, 'node_modules', '@openai', 'codex'))
+      if ((JSON.parse(readFileSync(join(root, 'package.json'), 'utf8')) as Json).name !== '@openai/codex') continue
+      const inside = (file: string): string | undefined => {
+        const real = realpathSync(file), path = relative(root, real)
+        return path !== '' && !path.startsWith('..') && !isAbsolute(path) && statSync(real).isFile() ? real : undefined
+      }
+      if (inside(join(root, 'bin', 'codex.js')) === undefined) continue
+      const triple = arch === 'x64' ? 'x86_64-pc-windows-msvc' : arch === 'arm64' ? 'aarch64-pc-windows-msvc' : undefined
+      if (triple === undefined) continue
+      for (const base of [join(root, 'node_modules', '@openai', `codex-win32-${arch}`), root]) {
+        try {
+          const file = inside(join(base, 'vendor', triple, 'bin', 'codex.exe'))
+          if (file !== undefined) return file
+        } catch {}
+      }
+    } catch {}
+  }
+  return undefined
+}
 
 const matchingHooks = (response: Json, config: string, expected: readonly CodexHookIdentity[]): Hook[] => {
   const data = response.data
@@ -23,7 +69,8 @@ const matchingHooks = (response: Json, config: string, expected: readonly CodexH
 }
 
 // A control-only app-server process: no thread/read, resume, model call or transcript access.
-const client = (executable: string, timeoutMs = 5000) => {
+// A deadline is on the performance.now() clock, which a change of the wall clock cannot move.
+const client = (executable: string, timeoutMs = 5000, deadline?: number) => {
   if (!isAbsolute(executable)) throw new Error('ABSOLUTE_CODEX_BINARY_REQUIRED')
   const child = /\.m?js$/i.test(executable) ? spawn(process.execPath, [executable, 'app-server', '--stdio'], { windowsHide: true }) : spawn(executable, ['app-server', '--stdio'], { windowsHide: true })
   let next = 0, buffer = ''
@@ -52,8 +99,10 @@ const client = (executable: string, timeoutMs = 5000) => {
     }
   })
   const request = (method: string, params: Json): Promise<Json> => new Promise((done, reject) => {
+    const remaining = deadline === undefined ? timeoutMs : Math.min(timeoutMs, deadline - performance.now())
+    if (remaining <= 0) { reject(new Error('CODEX_CONTROL_TIMEOUT')); return }
     const id = ++next
-    const timer = setTimeout(() => { pending.delete(id); reject(new Error('CODEX_CONTROL_TIMEOUT')) }, timeoutMs)
+    const timer = setTimeout(() => { pending.delete(id); reject(new Error('CODEX_CONTROL_TIMEOUT')) }, remaining)
     pending.set(id, { resolve: done, reject, timer })
     child.stdin.write(`${JSON.stringify({ id, method, params })}\n`)
   })
@@ -63,7 +112,8 @@ const client = (executable: string, timeoutMs = 5000) => {
       await request('initialize', { clientInfo: { name: 'agent-board-hook-trust', version: '1' }, capabilities: { experimentalApi: true } })
       child.stdin.write(`${JSON.stringify({ method: 'initialized', params: {} })}\n`)
     },
-    close: () => { child.kill(); fail() },
+    // A grandchild holding the pipes must not keep the connect worker alive after it answered.
+    close: () => { child.kill(); fail(); child.stdin.destroy(); child.stdout.destroy(); child.stderr.destroy() },
   }
 }
 
@@ -71,11 +121,11 @@ const client = (executable: string, timeoutMs = 5000) => {
 // installations. Only Codex can report its current hashes/trust; never reproduce
 // its hash algorithm or infer approval from a written hooks.json. The caller must
 // recheck sourceHash before retiring its managed fallback instructions.
-export const inspectCodexHooks = async (executable: string, config: string, expected: readonly CodexHookIdentity[], timeoutMs = 5000): Promise<CodexTrustObservation> => {
+export const inspectCodexHooks = async (executable: string, config: string, expected: readonly CodexHookIdentity[], timeoutMs = 5000, deadline?: number): Promise<CodexTrustObservation> => {
   if (expected.length === 0 || expected.length > 16 || expected.some(one => !/^[a-z][A-Za-z]+$/.test(one.event) || typeof one.command !== 'string' || one.command.trim() === '') || new Set(expected.map(one => JSON.stringify(one))).size !== expected.length) throw new Error('OWNED_HOOK_IDENTITIES_REQUIRED')
   const before = readFileSync(config)
   if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 5000) throw new Error('INVALID_CONTROL_TIMEOUT')
-  const control = client(executable, timeoutMs)
+  const control = client(executable, timeoutMs, deadline)
   try {
     await control.initialize()
     const hooks = matchingHooks(await control.request('hooks/list', { cwds: [process.cwd()] }), config, expected)
