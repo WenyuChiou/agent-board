@@ -21,12 +21,12 @@ export const remindersOf = (
   const out: Reminder[] = []
   for (const item of view.waiting) {
     if (item.where !== 'other') continue
-    // Keyed by where it was asked and its words, so a session that asks something new in the same
-    // place pings again; the same words asked again there are not said again while the key is
-    // kept (3 days). Not by the ledger's question id: that changes when the ledger is rebuilt,
-    // and the same question was kept under a new key each time (#373). The old key still counts
-    // as told, so the first run after an update does not say every waiting question again.
-    const key = toldKey(item.project, item.agent, item.task, item.text)
+    // Keyed by the question and its words, so a session that asks something new in the same place
+    // pings again, and so does the same question asked again after it was answered (a new
+    // question in the ledger). The key is a short hash of those, not the words themselves: the
+    // list held whole questions, one per id (#373). The old key still counts as told, so the
+    // first run after an update does not say every waiting question again.
+    const key = toldKey(item.questionId ?? item.key, item.text)
     if (told[key] === undefined && told[`ask:${item.questionId ?? item.key}:${item.text}`] === undefined) out.push({ key, kind: 'ask', project: item.project, text: s.noticeAsked(item.agent || item.project, item.text) })
   }
   for (const row of view.due) {
@@ -42,7 +42,7 @@ export const remindersOf = (
 
 export const TOLD_MAX = 500
 
-export const toldKey = (project: string, agent: string, task: string, text: string): string => `ask:${sha256(JSON.stringify([project, agent, task, text])).slice(0, 16)}`
+export const toldKey = (question: string, text: string): string => `ask:${sha256(JSON.stringify([question, text])).slice(0, 16)}`
 
 // Keys older than three days are dropped, and past 500 the oldest, so the list stays short. The
 // keys in `live` (the questions waiting now) go last, so a waiting question is not said again
@@ -57,4 +57,4 @@ export const keepRecent = (told: Readonly<Record<string, number>>, now: number, 
 
 // The told keys of the questions waiting now, in both shapes.
 export const liveToldKeys = (view: View): Set<string> =>
-  new Set(view.waiting.filter(item => item.where === 'other').flatMap(item => [toldKey(item.project, item.agent, item.task, item.text), `ask:${item.questionId ?? item.key}:${item.text}`]))
+  new Set(view.waiting.filter(item => item.where === 'other').flatMap(item => [toldKey(item.questionId ?? item.key, item.text), `ask:${item.questionId ?? item.key}:${item.text}`]))

@@ -91,11 +91,12 @@ test('a pass over the store reads at most 20 values, and the next pass starts wh
   expect(pruneBatch(['lang', 'told'], '')).toEqual({ batch: [], next: '' })
 })
 
-test('reminders told are keyed by where and what was asked, kept 3 days and at most 500', () => {
-  const key = toldKey('synthetic-project', 'codex', 'Synthetic task', 'Publish the synthetic page, OK?')
+test('reminders told are keyed by a short hash of the question and its words, kept 3 days and at most 500', () => {
+  const key = toldKey('synthetic-question-1', 'Publish the synthetic page, OK?')
   expect(key).toMatch(/^ask:[0-9a-f]{16}$/)
-  expect(toldKey('synthetic-project', 'codex', 'Synthetic task', 'Publish the synthetic page, OK?')).toBe(key)
-  expect(toldKey('other-project', 'codex', 'Synthetic task', 'Publish the synthetic page, OK?')).not.toBe(key)
+  expect(toldKey('synthetic-question-1', 'Publish the synthetic page, OK?')).toBe(key)
+  expect(toldKey('synthetic-question-2', 'Publish the synthetic page, OK?')).not.toBe(key)
+  expect(toldKey('synthetic-question-1', 'Publish the other synthetic page, OK?')).not.toBe(key)
   const told: Record<string, number> = {}
   for (let n = 0; n < 900; n++) told[`ask:${String(n).padStart(16, '0')}`] = NOW - n * 60 * 1000
   told['ask:old'] = NOW - 3 * DAY - 1
@@ -109,7 +110,7 @@ test('reminders told are keyed by where and what was asked, kept 3 days and at m
   expect(Object.keys(keepRecent(told, NOW, new Set(['ask:0000000000000899'])))).toHaveLength(TOLD_MAX)
 })
 
-test('a question keeps one reminder key when the ledger is rebuilt, and an old key still counts as told', () => {
+test('a waiting question is told once under its short key, and the key an earlier release kept still counts as told', () => {
   const text = [
     '## synthetic-project',
     '<!-- auto session=0a1b2c3d agent=codex state=waiting updated=2026-10-16T11:30:00.000Z -->',
@@ -123,9 +124,8 @@ test('a question keeps one reminder key when the ledger is rebuilt, and an old k
   expect(first).toHaveLength(1)
   const item = view.waiting[0]
   expect(item).toBeDefined()
-  // The same words asked again after a rebuild (a new question id) are not said again.
-  const rebuilt = { ...view, waiting: view.waiting.map(one => ({ ...one, questionId: 'synthetic-rebuilt-id' })) }
-  expect(remindersOf(rebuilt, { [first[0]?.key ?? '']: NOW }, NOW, '2026-10-16')).toEqual([])
+  expect(first[0]?.key).toMatch(/^ask:[0-9a-f]{16}$/)
+  expect(remindersOf(view, { [first[0]?.key ?? '']: NOW }, NOW, '2026-10-16')).toEqual([])
   // What an earlier release kept still counts, so an update does not say every question again.
   const legacy = `ask:${item?.questionId ?? item?.key}:${item?.text}`
   expect(remindersOf(view, { [legacy]: NOW }, NOW, '2026-10-16')).toEqual([])
