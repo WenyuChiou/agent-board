@@ -1,6 +1,6 @@
 import { describe, test } from 'node:test'
 import assert from 'node:assert/strict'
-import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs'
+import { existsSync, readFileSync, readdirSync, statSync, utimesSync, writeFileSync } from 'node:fs'
 import { dirname, isAbsolute, join, resolve } from 'node:path'
 import { homedir, userInfo } from 'node:os'
 import { fileURLToPath } from 'node:url'
@@ -195,7 +195,9 @@ describe('scenario runner', () => {
         const prior = world.now
         for (const spec of ['90m', '12h', '3d', '1mo']) world.jump(spec)
         const shift = (90 * 60 + 12 * 3600 + 33 * 86400) * 1000
-        assert.equal(statSync(file).mtimeMs, mtime - shift)
+        // Filesystems keep file times to different precision, so the moved time is compared within 1 ms.
+        const moved = statSync(file).mtimeMs
+        assert.ok(Math.abs(moved - (mtime - shift)) < 1, `the jumped file time ${moved} is not within 1 ms of ${mtime - shift}`)
         // A jump moves the clock by its span plus the real time it took, never more.
         between(world.now - prior, shift, shift + Date.now() - real, 'four jumps')
         const start = world.now
@@ -216,6 +218,23 @@ describe('scenario runner', () => {
         worker.kill()
         await done
       }
+    } finally { await world.close() }
+  })
+
+  test('a clock jump moves an inbox file time with a part below a millisecond by exactly its span', async t => {
+    const world = makeWorld()
+    try {
+      const file = join(world.inbox, 'codex-turn-1-1.json')
+      writeFileSync(file, '{}')
+      // Half a millisecond past a whole one, which a Date would drop.
+      const seconds = (Date.now() - 60000 + 0.5) / 1000
+      utimesSync(file, seconds, seconds)
+      const before = statSync(file).mtimeMs
+      if (Number.isInteger(before)) return t.skip('this filesystem keeps file times to whole milliseconds')
+      world.jump('90m')
+      const moved = statSync(file).mtimeMs
+      // Seconds held as a number round to about a microsecond on the way to the filesystem.
+      assert.ok(Math.abs(moved - (before - 90 * 60000)) < 0.01, `the jumped file time ${moved} is not ${before - 90 * 60000}`)
     } finally { await world.close() }
   })
 
