@@ -2748,7 +2748,7 @@ const assertBusyFailure = (result, f) => {
   assert.doesNotMatch(result.stderr, /\bat /)
 }
 
-test('L5 concurrent writers: 8 hooks and 4 FORMAT.md writers lose no block on Windows', t => fixture(async f => {
+test('writers taking the native lock: 8 Codex hooks and 4 FORMAT.md writers lose no block on Windows', t => fixture(async f => {
   assert.equal(f.install('--apply').status, 0)
   f.save(f.progress, '## FORMAT concurrency\n\nManual text must survive\n')
   const gate = join(f.home, 'writers-start')
