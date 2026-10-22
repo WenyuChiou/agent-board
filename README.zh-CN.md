@@ -3,7 +3,7 @@
 <p align="center"><b>每个 AI coding agent 在做什么，一个看板看完；哪个在等你，就在那里回它。</b></p>
 
 <p align="center">
-<picture><source media="(prefers-color-scheme: dark)" srcset="docs/images/cover-zh-CN-dark.svg"><img alt="会动的看板，分六幕：Claude Code、Codex、Antigravity 和 OpenCode 汇报到同一个终端看板；每一步实时打勾；Codex 的问题跳到最上面；按一个键就复制好回答；在看板网页上给 Codex 发的消息送达后，能看到它回复（预览，0.24.2 起提供）；一行 npx 命令接上每个 agent，0.24.0 起上架 npm。合成数据。" src="docs/images/cover-zh-CN-light.svg" width="860"></picture>
+<picture><source media="(prefers-color-scheme: dark)" srcset="docs/images/cover-zh-CN-dark.svg"><img alt="会动的看板，分六幕：Claude Code、Codex、Antigravity 和 OpenCode 汇报到同一个终端看板；每一步实时打勾；Codex 的问题跳到最上面；按一个键就复制好回答；在看板网页上给 Codex 发的消息送达后，能看到它回复（预览，0.24.1 起提供）；一行 npx 命令接上每个 agent，0.24.0 起上架 npm。合成数据。" src="docs/images/cover-zh-CN-light.svg" width="860"></picture>
 </p>
 
 <p align="center">
