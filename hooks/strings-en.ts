@@ -219,7 +219,7 @@ export const EN: Strings = {
   commandHint: '[open|connect|tidy|sync|add …|report|today|notify on|off|lang …]',
   tidyUnreadable: "Can't read the progress or archive file. No files were changed.",
   tidyNothing: 'Nothing to archive. Finished work goes at once; a stopped session goes after 3 days without a word; this session\'s own block stays.',
-  tidyScheduledNothing: 'Nothing is ready to archive. Agent blocks need more than 12 hours since their last update when done, or more than 3 days otherwise; completed hand-kept tasks need a completion observation at least 24 hours old. Unanswered questions stay.',
+  tidyScheduledNothing: 'Nothing is ready to archive. Agent blocks need more than 12 hours since their last update when done, or more than 3 days otherwise; completed hand-kept tasks need a completion observation at least 24 hours old. A block that still asks a question is archived only once the board has kept the question.',
   tidyMoved: (n: number): string => `Archived ${n} ${n === 1 ? 'task' : 'tasks'}.`,
   synced: 'Re-synced from the Task list.',
   copiedSuffix: ' (copied to clipboard)',

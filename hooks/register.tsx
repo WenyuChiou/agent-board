@@ -22,6 +22,7 @@ import {
   shortId,
   scanBlocks,
   takeArchivable,
+  archivableAsking,
   takeManualDone,
   takeTask,
   upsertAutoBlock,
@@ -115,8 +116,8 @@ import type { AgentTurn } from './inbox'
 import { keepRecent, remindersOf } from './remind'
 import { agentName, answeredJson, answeredPath, buildView, mirrorMatchesTask, parseAnswered, parseSeen, seenJson, seenPath, statusLine, withAnswered, withSeen } from './view'
 import type { StepRef, TaskRef, TaskRow, View, WaitingItem } from './view'
-import { acknowledgementKeys, archiveQuestionsKept, captureHashOf, captureJson, capturePath, emptyQuestions, parseCapture, withCaptures, isQuestionProof, isQuestionSnapshot, isTornLedger, migratedAnswered, observeQuestions, parseQuestions, questionProofJson, questionProofOf, questionProofPath, questionWords, questionsJson, questionsPath, resolveQuestion, resolvedQuestionsToRetire } from './questions'
-import type { QuestionAnswerEvidence, QuestionCapture, QuestionProofs, QuestionRecord } from './questions'
+import { acknowledgementKeys, archiveQuestionsKept, captureHashOf, captureJson, capturePath, emptyQuestions, parseCapture, withCaptures, isAskedBy, isQuestionProof, isQuestionSnapshot, isTornLedger, migratedAnswered, observeQuestions, parseQuestions, prunableCaptures, prunableProofs, questionProofJson, questionProofOf, questionProofPath, questionWords, questionsJson, questionsPath, resolveQuestion, resolvedQuestionsToRetire, QUESTION_FILES_KEPT } from './questions'
+import type { HeldCapture, HeldProof, QuestionAnswerEvidence, QuestionCapture, QuestionProofs, QuestionRecord } from './questions'
 
 const PANE = 'agent-board'
 const POLL_MS = 2000
@@ -387,43 +388,80 @@ const rememberAnswered = (turns: readonly AgentTurn[]): void => {
   }
 }
 const pendingQuestionProofs = new Map<string, { path: string; kind: keyof QuestionProofs; hash: string }>()
-const questionCapturesFor = async ($: EngineInterface, path: string): Promise<QuestionCapture[] | null> => {
+// A capture or proof file is named by the hash of what it holds, so a name never changes
+// meaning: each is read and checked the first time it is listed, and again only if its size or
+// time moves (#156). A file that fails the check is not remembered, so it fails as it always has
+// and a write caught half-way is looked at again.
+const capturesRead = new Map<string, { stamp: string; capture: QuestionCapture }>()
+const proofsRead = new Map<string, string>()
+const stampOf = (entry: { size: number; mtimeMs: number }): string => `${entry.size}:${entry.mtimeMs}`
+// What the listing did not show is forgotten, so the memory follows the folder.
+const forgetUnlisted = (known: Map<string, unknown>, family: string, listed: ReadonlySet<string>): void => {
+  for (const file of known.keys()) if (file.startsWith(family) && !listed.has(file)) known.delete(file)
+}
+// `isFresh` reads every file again instead of trusting what was remembered, for a choice that
+// removes files.
+const heldCaptures = async ($: EngineInterface, path: string, isFresh = false): Promise<HeldCapture[] | null> => {
   try {
-    const captures: QuestionCapture[] = []
+    const held: HeldCapture[] = []
+    const listed = new Set<string>()
     for (const entry of await $.fs.list(path.replace(/[\\/][^\\/]*$/, ''))) {
       const hash = captureHashOf(path, entry.name)
       if (hash === null) continue
-      const capture = entry.kind === 'file' ? parseCapture(await $.fs.read(capturePath(path, hash)), hash) : null
-      if (capture === null) return null
-      captures.push(capture)
+      const file = capturePath(path, hash)
+      listed.add(file)
+      const remembered = isFresh ? undefined : capturesRead.get(file)
+      let capture = entry.kind === 'file' && remembered?.stamp === stampOf(entry) ? remembered.capture : null
+      if (capture === null) {
+        capture = entry.kind === 'file' ? parseCapture(await $.fs.read(file), hash) : null
+        if (capture === null) return null
+        capturesRead.set(file, { stamp: stampOf(entry), capture })
+      }
+      held.push({ hash, mtimeMs: entry.mtimeMs, capture })
     }
-    return captures
+    forgetUnlisted(capturesRead, `${path.replace(/\.md$/i, '')}-questions-source-`, listed)
+    return held
   } catch {
     return null
   }
 }
+const questionCapturesFor = async ($: EngineInterface, path: string): Promise<QuestionCapture[] | null> => (await heldCaptures($, path))?.map(one => one.capture) ?? null
 const keepQuestionCapture = async ($: EngineInterface, path: string, record: QuestionRecord, disposition: QuestionCapture['disposition']): Promise<void> => {
   const text = captureJson(record, disposition)
   const file = capturePath(path, sha256(text))
   if (!(await $.fs.exists(file))) await $.fs.write(file, text)
   if (await $.fs.read(file) !== text) throw new Error('QUESTION_RETENTION_FAILED')
 }
-const questionProofsFor = async ($: EngineInterface, path: string): Promise<QuestionProofs | null> => {
+const heldProofs = async ($: EngineInterface, path: string, isFresh = false): Promise<HeldProof[] | null> => {
   try {
-    if ([...pendingQuestionProofs.values()].some(proof => proof.path === path)) return null
-    const proofs: QuestionProofs = { retired: [], consumed: [] }
-    const parent = path.replace(/[\\/][^\\/]*$/, '')
-    for (const entry of await $.fs.list(parent)) {
+    const held: HeldProof[] = []
+    const listed = new Set<string>()
+    for (const entry of await $.fs.list(path.replace(/[\\/][^\\/]*$/, ''))) {
       const proof = questionProofOf(path, entry.name)
       if (proof === null) continue
       const file = questionProofPath(path, proof.kind, proof.hash)
-      if (entry.kind !== 'file' || !isQuestionProof(await $.fs.read(file), proof.kind, proof.hash)) return null
-      proofs[proof.kind].push(proof.hash)
+      listed.add(file)
+      if (entry.kind !== 'file') return null
+      if (isFresh || proofsRead.get(file) !== stampOf(entry)) {
+        if (!isQuestionProof(await $.fs.read(file), proof.kind, proof.hash)) return null
+        proofsRead.set(file, stampOf(entry))
+      }
+      held.push({ ...proof, mtimeMs: entry.mtimeMs })
     }
-    return proofs
+    forgetUnlisted(proofsRead, `${path.replace(/\.md$/i, '')}-questions-`, listed)
+    return held
   } catch {
     return null
   }
+}
+const questionProofsFor = async ($: EngineInterface, path: string): Promise<QuestionProofs | null> => {
+  if ([...pendingQuestionProofs.values()].some(proof => proof.path === path)) return null
+  const held = await heldProofs($, path)
+  if (held === null) return null
+  const proofs: QuestionProofs = { retired: [], consumed: [] }
+  for (const one of held) proofs[one.kind].push(one.hash)
+
+  return proofs
 }
 
 const keepQuestionProof = async ($: EngineInterface, path: string, kind: keyof QuestionProofs, hash: string): Promise<void> => {
@@ -437,6 +475,37 @@ const keepQuestionProof = async ($: EngineInterface, path: string, kind: keyof Q
   }
   if (await $.fs.read(file) !== text) throw new Error('QUESTION_PROOF_NOT_KEPT')
   pendingQuestionProofs.delete(file)
+}
+// The capture and proof files grow with every question, so the archive sweep (session start,
+// hourly, tidy; never the poll) trims them to the newest 16 of each kind (#156). Which of the
+// older ones can go is decided in `prunableCaptures` and `prunableProofs`: only what the ledger
+// file or a newer file already holds. Nothing is removed unless the ledger, the captures, the
+// proofs and the acknowledgement list all read cleanly and the ledger is still the one the choice
+// was made from. The listing alone says whether there is anything to trim, so an hour with
+// nothing over the floor reads no file; otherwise every file is read afresh, never from what the
+// polls remember, so a copy damaged since they looked cannot be the newer copy that lets an older
+// one go.
+const pruneQuestionFiles = async ($: EngineInterface, path: string): Promise<void> => {
+  if ([...pendingQuestionProofs.values()].some(proof => proof.path === path)) return
+  const names = (await $.fs.list(path.replace(/[\\/][^\\/]*$/, ''))).map(entry => entry.name)
+  const proofsOf = (kind: keyof QuestionProofs): number => names.filter(name => questionProofOf(path, name)?.kind === kind).length
+  if (names.filter(name => captureHashOf(path, name) !== null).length <= QUESTION_FILES_KEPT && proofsOf('retired') <= QUESTION_FILES_KEPT && proofsOf('consumed') <= QUESTION_FILES_KEPT) return
+  const captures = await heldCaptures($, path, true)
+  const proofs = await heldProofs($, path, true)
+  if (captures === null || proofs === null) return
+  const file = questionsPath(path)
+  const text = await readText($, file)
+  const ledger = parseQuestions(text)
+  const answered = parseAnswered(await readText($, answeredPath(path)))
+  if (ledger === null || answered === null) return
+  const doomed = [
+    ...prunableCaptures(ledger, captures, proofs.filter(one => one.kind === 'retired').map(one => one.hash)).map(hash => capturePath(path, hash)),
+    ...prunableProofs(ledger, captures.map(one => one.capture), answered, proofs).map(one => questionProofPath(path, one.kind, one.hash)),
+  ]
+  if (doomed.length === 0 || await readText($, file) !== text) return
+  const isWin = await isWindows($, file)
+  // A few dozen paths to a process keeps one command line far below the system's limit.
+  for (let from = 0; from < doomed.length; from += 50) if (!(await removeFiles($, doomed.slice(from, from + 50), isWin))) return
 }
 const pruneAnswered = async ($: EngineInterface, path: string, projects: readonly ProgressProject[], mtimeMs: number, size: number): Promise<void> => {
   // The ledger retires identities; old acknowledgement bytes remain available for migration.
@@ -826,21 +895,28 @@ const pendingTurns = async ($: EngineInterface): Promise<PendingTurn[]> => {
     const path = await progressPath($)
     const dir = inboxPath(path)
     const done = await readInboxRecord($, 'inboxDone').catch(() => ({} as Record<string, string>))
-    const cacheKey = JSON.stringify([path, await $.clock.now(), done])
-    if (pendingCache?.key === cacheKey) return pendingCache.turns
     const entries = (await $.fs.list(dir))
       .filter(entry => entry.kind === 'file' && isInboxFile(entry.name) && done[entry.name] === undefined)
       .sort((a, b) => b.mtimeMs - a.mtimeMs)
       .slice(0, 30)
+    // What the turns are made from: the listing (names, times, sizes) and which files are taken
+    // already. The time of day is not part of it, so an inbox that did not change reads no file (#156).
+    const cacheKey = JSON.stringify([path, entries.map(entry => [entry.name, entry.mtimeMs, entry.size]), done])
+    if (pendingCache?.key === cacheKey) return pendingCache.turns
     const files: Array<{ name: string; body: string; at: number }> = []
+    let isComplete = true
     for (const entry of entries) {
-      const body = await $.fs.read(`${dir}${sepOf(dir)}${entry.name}`).catch(() => '')
+      const body = await $.fs.read(`${dir}${sepOf(dir)}${entry.name}`).catch(() => {
+        isComplete = false
+        return ''
+      })
       files.push({ name: entry.name, body, at: entry.mtimeMs })
     }
     const home = ((await $.env.get('USERPROFILE')) ?? (await $.env.get('HOME')) ?? '').replace(/[\\/]+$/, '')
     const isWin = await isWindows($, path)
     const turns = peekInbox(files, () => '', text => redact(text, home, isWin))
-    pendingCache = { key: cacheKey, turns }
+    // A file that could not be read is tried again at the next look.
+    if (isComplete) pendingCache = { key: cacheKey, turns }
     return turns
   } catch {
     return []
@@ -2183,7 +2259,23 @@ const archiveOld = async ($: EngineInterface, isNow = false): Promise<number> =>
   const archived = new Set<string>()
   const keys = new Set<string>()
   await rewrite($, path, async text => {
-    const blocks = takeArchivable(text, at, keep, s, isNow)
+    // A block that still asks goes only when the explicit archive's own check passes for it (#174).
+    // The ledger is settled once for all of them. Another agent's write meanwhile (a new `[?]`
+    // step) must not be written over with a result made from the older text: start again from it.
+    const asking = archivableAsking(text, at, keep)
+    const kept = new Set<number>()
+    if (asking.length > 0) {
+      const projects = parseProgress(text)
+      const isSettled = await pollQuestions($, path, projects, true)
+      if (await readText($, path) !== text) return AGAIN
+      if (isSettled) {
+        for (const { span, ref } of asking) {
+          if (await keepAskedQuestions($, path, projects, ref, true).catch(() => false)) kept.add(span.start)
+        }
+        if (kept.size > 0 && await readText($, path) !== text) return AGAIN
+      }
+    }
+    const blocks = takeArchivable(text, at, keep, s, isNow, span => kept.has(span.start))
     const manual = takeManualDone(blocks.text, at, key => seen[key], s, isNow)
     const entries = [...blocks.entries, ...manual.entries]
     if (entries.length === 0) return null
@@ -2197,9 +2289,25 @@ const archiveOld = async ($: EngineInterface, isNow = false): Promise<number> =>
     await update($, doneSeen, old => Object.fromEntries(Object.entries(old).filter(([key]) => !keys.has(key))))
     for (const key of keys) await $.store.delete(key)
   }
+  await pruneQuestionFiles($, path).catch(() => undefined)
   await poll($)
 
   return archived.size
+}
+
+// What the explicit archive checks before it takes a block that asks (#174): the ledger settled
+// against this text, every question of the block kept in it, and a durable 'archived' copy of each
+// one still open. False leaves the block where it is; a copy that cannot be written throws.
+// `isSettled`: the caller settled the ledger already, once for all the blocks it looks at.
+const keepAskedQuestions = async ($: EngineInterface, path: string, projects: readonly ProgressProject[], ref: TaskRef, isSettled = false): Promise<boolean> => {
+  if (!isSettled && !(await pollQuestions($, path, projects, true))) return false
+  const ledger = await read($, questionLedger)
+  if (!archiveQuestionsKept(projects, ref, ledger)) return false
+  for (const record of ledger.records) {
+    if (record.isUnresolved && isAskedBy(record, ref)) await keepQuestionCapture($, path, record, 'archived')
+  }
+
+  return true
 }
 
 // Entries added at the end of a month's archive file, after what it holds.
@@ -2220,9 +2328,10 @@ const archiveOne = async ($: EngineInterface, ref: TaskRef): Promise<boolean> =>
   const wrote = await rewrite($, path, async text => {
     const projects = parseProgress(text)
     const hasQuestions = projects.some(project => project.name === ref.project && project.tasks.some(task => (ref.session === null ? task.title === ref.title : task.auto?.session === ref.session) && task.steps.some(step => step.status === 'waiting')))
-    if (hasQuestions && (!(await pollQuestions($, path, projects, true)) || !archiveQuestionsKept(projects, ref, await read($, questionLedger)))) throw new Error('QUESTION_RETENTION_FAILED')
-    if (hasQuestions) for (const record of (await read($, questionLedger)).records) {
-      if (record.isUnresolved && record.source?.project === ref.project && record.source.task === ref.title) await keepQuestionCapture($, path, record, 'archived')
+    if (hasQuestions) {
+      if (!(await keepAskedQuestions($, path, projects, ref))) throw new Error('QUESTION_RETENTION_FAILED')
+      // Another agent's write while the question check ran is not written over with the older text.
+      if (await readText($, path) !== text) return AGAIN
     }
     const taken = takeTask(text, ref, at, s)
     if (taken === null) return null

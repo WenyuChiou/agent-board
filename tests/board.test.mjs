@@ -4449,11 +4449,124 @@ test('--tidy archives done blocks older than 12 hours and stopped ones older tha
   })
 })
 
+// The scheduled sweep records no question of its own: a board that is open has seen the file first
+// (`--keys ''` does the same), and the sweep then runs beside the files that left.
+const askingBoard = () => {
+  const at = Date.now()
+  const block = (session, title, hours) => `<!-- auto session=${session} agent=codex state=ended updated=${new Date(at - hours * 3600000).toISOString()} -->\n### ${title}\n- [x] Draft\n- [?] Publish ${title}, OK?\n<!-- /auto session=${session} -->\n`
+
+  return `## Synthetic\n${block('a1b2c321', 'Old plan', 100)}${block('a1b2c322', 'Young plan', 50)}`
+}
+const sweepFiles = dir => ({
+  ...questionFiles(dir),
+  board: readFileSync(join(dir, 'progress.md'), 'utf8'),
+  archive: readdirSync(dir).filter(name => name.startsWith('progress-archive-')).map(name => readFileSync(join(dir, name), 'utf8')).join(''),
+})
+const archivedCopies = files => Object.entries(files).filter(([name]) => name.startsWith('progress-questions-source-')).map(([, text]) => JSON.parse(text)).filter(copy => copy.disposition === 'archived')
+
+test('--tidy archives a block that asks once its three days are over and its question is kept, and leaves the rest', () => {
+  const board = askingBoard()
+  // No board has seen the question yet, so nothing keeps it and the block stays.
+  const cold = chatRun(['--tidy'], { file: () => board, inspect: sweepFiles })
+  assert.equal(cold.status, 0, cold.stderr)
+  assert.equal(cold.board, board)
+  assert.equal(cold.archive, '')
+  const seed = chatRun(['--keys', ''], { file: () => board, inspect: sweepFiles })
+  assert.equal(seed.status, 0, seed.stderr)
+  assert.equal(JSON.parse(seed.files['progress-questions.json']).records.length, 2)
+  const swept = chatRun(['--tidy'], { file: () => board, beside: seed.files, inspect: sweepFiles })
+  assert.equal(swept.status, 0, swept.stderr)
+  assert.equal(swept.stdout, 'Archived 1 task.\n')
+  assert.ok(!swept.board.includes('Old plan'), swept.board)
+  assert.ok(swept.board.includes('Young plan'), swept.board)
+  assert.ok(swept.archive.includes('Publish Old plan, OK?'), swept.archive)
+  // Both questions are still in the ledger, and the archived block left a copy of its question beside it.
+  const open = JSON.parse(swept.files['progress-questions.json']).records.filter(record => record.isUnresolved).map(record => record.words).sort()
+  assert.deepEqual(open, ['Publish Old plan, OK?', 'Publish Young plan, OK?'])
+  assert.deepEqual(archivedCopies(swept.files).map(copy => copy.record.words), ['Publish Old plan, OK?'])
+  // A second sweep finds nothing more and writes nothing.
+  const again = chatRun(['--tidy'], { file: () => swept.board, beside: swept.files, inspect: sweepFiles })
+  assert.equal(again.status, 0, again.stderr)
+  assert.equal(again.board, swept.board)
+  assert.equal(again.archive, '')
+  assert.deepEqual(again.files, swept.files)
+})
+
+test('--tidy keeps a block that asks when the copy of its question for the archive cannot be written', () => {
+  const board = askingBoard()
+  const seed = chatRun(['--keys', ''], { file: () => board, inspect: sweepFiles })
+  assert.equal(seed.status, 0, seed.stderr)
+  const refused = chatRun(['--tidy'], {
+    file: () => board, beside: seed.files, inspect: sweepFiles,
+    preload: questionFault(`const open = fs.openSync
+fs.openSync = (file, ...rest) => { if (rest[0] === 'wx' && String(file).includes('-questions-source-')) throw Object.assign(new Error('denied'), { code: 'EACCES' }); return open(file, ...rest) }`),
+  })
+  assert.equal(refused.status, 0, refused.stderr)
+  assert.equal(refused.board, board)
+  assert.equal(refused.archive, '')
+  assert.deepEqual(archivedCopies(refused.files), [])
+  assert.deepEqual(refused.files, seed.files)
+})
+
+const sha = body => createHash('sha256').update(body).digest('hex')
+const proofJson = (kind, hash) => `${JSON.stringify({ version: 1, kind, hash })}\n`
+
+test('--tidy keeps a block that asks again in the words of an answered question whose retirement was recorded, and takes it while the answer stands', () => {
+  const board = askingBoard()
+  const seed = chatRun(['--keys', ''], { file: () => board, inspect: sweepFiles })
+  assert.equal(seed.status, 0, seed.stderr)
+  const ledger = JSON.parse(seed.files['progress-questions.json'])
+  const old = ledger.records.find(record => record.words === 'Publish Old plan, OK?')
+  // Answered long ago, as a pane would have recorded it.
+  const answered = { ...old, isUnresolved: false, isWaiting: false, isPresent: false, resolvedAt: Date.now() - 200 * 3600000 }
+  const receipt = `${JSON.stringify({ version: 1, disposition: 'resolved', record: answered })}\n`
+  const files = {
+    ...seed.files,
+    'progress-questions.json': `${JSON.stringify({ ...ledger, records: ledger.records.map(record => record.id === old.id ? answered : record) }, null, 2)}\n`,
+    [`progress-questions-source-${sha(receipt)}.json`]: receipt,
+  }
+  // The answer still stands: the block asks what was answered, nothing is new, and the block goes.
+  const standing = chatRun(['--tidy'], { file: () => board, beside: files, inspect: sweepFiles })
+  assert.equal(standing.status, 0, standing.stderr)
+  assert.equal(standing.stdout, 'Archived 1 task.\n')
+  assert.ok(!standing.board.includes('Old plan'), standing.board)
+  // The answer was retired and the agent asked the same words again before any board ran: that ask is not in the ledger, so the block stays.
+  const again = chatRun(['--tidy'], { file: () => board, beside: { ...files, [`progress-questions-retired-${sha(old.id)}.json`]: proofJson('retired', sha(old.id)) }, inspect: sweepFiles })
+  assert.equal(again.status, 0, again.stderr)
+  assert.equal(again.board, board)
+  assert.equal(again.archive, '')
+  assert.deepEqual(archivedCopies(again.files), [])
+})
+
+test('the terminal board reads each question copy and proof once, however often it draws', () => {
+  const board = askingBoard()
+  const seed = chatRun(['--keys', ''], { file: () => board, inspect: sweepFiles })
+  assert.equal(seed.status, 0, seed.stderr)
+  const files = {
+    ...seed.files,
+    [`progress-questions-retired-${sha('an old question')}.json`]: proofJson('retired', sha('an old question')),
+    [`progress-questions-consumed-${sha('an old acknowledgement')}.json`]: proofJson('consumed', sha('an old acknowledgement')),
+  }
+  const counted = chatRun(['--keys', 'down up down up down up'], {
+    file: () => board, beside: files, inspect: sweepFiles,
+    preload: questionFault(`const counts = {}
+const readFile = fs.readFileSync
+fs.readFileSync = (file, ...rest) => { const name = String(file); if (/-questions-(source|retired|consumed)-/.test(name)) counts[name] = (counts[name] ?? 0) + 1; return readFile(file, ...rest) }
+process.on('exit', () => process.stderr.write('READS ' + JSON.stringify(counts) + '\\n'))`),
+  })
+  assert.equal(counted.status, 0, counted.stderr)
+  const counts = Object.values(JSON.parse(/READS (.*)/.exec(counted.stderr)[1]))
+  // Two copies of open questions and two proofs, each read when first listed and not again at the draws after.
+  assert.equal(counts.length, 4, counted.stderr)
+  assert.ok(counts.every(count => count === 1), counted.stderr)
+  assert.deepEqual(counted.files, files)
+})
+
 test('--tidy reports scheduled ages in every language and takes precedence over interactive modes', () => {
   const expected = {
-    en: 'Nothing is ready to archive. Agent blocks need more than 12 hours since their last update when done, or more than 3 days otherwise; completed hand-kept tasks need a completion observation at least 24 hours old. Unanswered questions stay.',
-    'zh-TW': '目前沒有可封存的項目。代理區塊最後更新後，已完成需超過 12 小時，其他需超過 3 天；手動完成項目需有至少 24 小時前的完成觀察紀錄。未答覆的問題會保留。',
-    'zh-CN': '当前没有可归档的项目。代理区块最后更新后，已完成需超过 12 小时，其他需超过 3 天；手动完成项目需有至少 24 小时前的完成观察记录。未答复的问题会保留。',
+    en: 'Nothing is ready to archive. Agent blocks need more than 12 hours since their last update when done, or more than 3 days otherwise; completed hand-kept tasks need a completion observation at least 24 hours old. A block that still asks a question is archived only once the board has kept the question.',
+    'zh-TW': '目前沒有可封存的項目。代理區塊最後更新後，已完成需超過 12 小時，其他需超過 3 天；手動完成項目需有至少 24 小時前的完成觀察紀錄。仍在提問的區塊，要等看板留存該問題後才會封存。',
+    'zh-CN': '当前没有可归档的项目。代理区块最后更新后，已完成需超过 12 小时，其他需超过 3 天；手动完成项目需有至少 24 小时前的完成观察记录。仍在提问的区块，要等看板留存该问题后才会归档。',
   }
   for (const lang of ['en', 'zh-TW', 'zh-CN']) tidyFixture(f => {
     writeFileSync(f.path, `## Synthetic\n${f.block('a1b2c313', 'Done at the boundary', 'done', 12)}${f.block('a1b2c314', 'Stopped at the boundary', 'ended', 72)}### Unobserved manual\n- [x] Finished\n`)

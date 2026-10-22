@@ -1,8 +1,9 @@
 import { test, expect } from 'claude-code/testing'
 import { parseProgress } from '../hooks/parse'
 import { buildView } from '../hooks/view'
-import { acknowledgementKeys, archiveQuestionsKept, captureJson, emptyQuestions, isQuestionSnapshot, isTornLedger, migratedAnswered, migrationKey, observeQuestions, parseCapture, parseQuestions, questionsJson, resolveQuestion, resolvedQuestionsToRetire, withCaptures } from '../hooks/questions'
+import { acknowledgementKeys, archiveQuestionsKept, captureJson, emptyQuestions, isAskedBy, isQuestionSnapshot, isTornLedger, migratedAnswered, migrationKey, observeQuestions, parseCapture, parseQuestions, prunableCaptures, prunableProofs, questionsJson, resolveQuestion, resolvedQuestionsToRetire, withCaptures } from '../hooks/questions'
 import type { QuestionLedger } from '../hooks/questions'
+import { edited, finished, held, ledgerOf, named, proof, question, reopened } from './fixtures/question-files'
 import { STRINGS } from '../hooks/strings'
 import { sha256 } from '../hooks/sha256'
 import { applyTaskCreate, applyTaskUpdate, emptyMirror, fromTaskList, questionToken } from '../hooks/mirror'
@@ -569,4 +570,95 @@ test('immutable retirement and legacy consumption survive stale active ledger an
   expect(lostMarker.ledger.legacy[raw]).toBeUndefined()
   expect(migratedAnswered([raw], { ...first, legacy: { [raw]: id1 } }, consumed.consumed)).toEqual([raw])
   expect(buildView(parseProgress(asked), [], null, NOW, 0, {}, STRINGS.en, [id1], {}, first, null).waiting.length).toBe(1)
+})
+
+test('question captures beyond the newest 16 are pruned once the ledger and a newer copy hold what they hold', () => {
+  // Three answered and retired questions with a copy from when each was open and one from when
+  // it was answered, and one open question whose block changed 20 times.
+  const answered = [1, 2, 3].map(finished)
+  const old = answered.flatMap((record, index) => [
+    held(reopened(record), 'unresolved', 1 + index * 2),
+    held(record, 'resolved', 2 + index * 2),
+  ])
+  const snapshots = Array.from({ length: 20 }, (_, version) => held(edited(9, version), 'unresolved', 100 + version))
+  const ledger = ledgerOf(...answered, edited(9, 19))
+  const retired = answered.map(record => sha256(record.id))
+  // The ten oldest files go: the six of the answered questions and the four oldest snapshots.
+  expect(new Set(prunableCaptures(ledger, [...old, ...snapshots], retired))).toEqual(named([...old, ...snapshots.slice(0, 4)]))
+  // Without the retirement proofs the answered questions' copies stay, since nothing newer holds them.
+  expect(new Set(prunableCaptures(ledger, [...old, ...snapshots], []))).toEqual(named(snapshots.slice(0, 4)))
+})
+
+test('the newest copy of an open question and the copy the ledger matches exactly are never pruned', () => {
+  const snapshots = Array.from({ length: 20 }, (_, version) => held(edited(9, version), 'unresolved', 100 + version))
+  // Keeping one file leaves the newest copy alone, and the 19 older ones are covered by it.
+  expect(new Set(prunableCaptures(ledgerOf(edited(9, 19)), snapshots, [], 1))).toEqual(named(snapshots.slice(0, 19)))
+  // A ledger that still holds the oldest version keeps that one copy, since the next poll would write it again.
+  expect(new Set(prunableCaptures(ledgerOf(edited(9, 0)), snapshots, []))).toEqual(named(snapshots.slice(1, 4)))
+})
+
+test('a capture stays when it may be the only copy of an unresolved question or holds what the ledger lacks', () => {
+  const open = Array.from({ length: 20 }, (_, n) => question(n + 1))
+  const copies = open.map((record, index) => held(record, 'unresolved', 10 + index))
+  // No ledger record: the files are the only copy, so none goes, however many there are.
+  expect(prunableCaptures(ledgerOf(), copies, [])).toEqual([])
+  // The ledger has them all, but each is the only copy of its question in the open state.
+  expect(prunableCaptures(ledgerOf(...open), copies, [])).toEqual([])
+  // An older copy that names a producer revision the ledger has not seen is not covered.
+  const revised = held({ ...open[0]!, producerRevisions: ['a'.repeat(64)] }, 'unresolved', 1)
+  expect(prunableCaptures(ledgerOf(...open), [revised, ...copies], [])).toEqual([])
+  // A resolved receipt the ledger has not applied yet is kept as well.
+  const receipt = held(finished(1), 'resolved', 2)
+  expect(prunableCaptures(ledgerOf(...open), [receipt, ...copies], [])).toEqual([])
+})
+
+test('an answered question keeps its copies until its retirement proof exists', () => {
+  const answered = finished(1)
+  const fillers = Array.from({ length: 16 }, (_, n) => held(question(n + 10), 'unresolved', 100 + n))
+  const copies = [held(reopened(answered), 'unresolved', 1), held(answered, 'resolved', 2)]
+  const ledger = ledgerOf(answered, ...fillers.map(one => one.capture.record))
+  expect(prunableCaptures(ledger, [...copies, ...fillers], [])).toEqual([])
+  expect(new Set(prunableCaptures(ledger, [...copies, ...fillers], [sha256(answered.id)]))).toEqual(named(copies))
+})
+
+test('question proofs beyond the newest 16 go only when no ledger record, capture or acknowledgement refers to them', () => {
+  const records = [finished(1), finished(2), question(3)]
+  const ledger: QuestionLedger = { ...ledgerOf(...records), legacy: { 'a1b2c3d4 1 Old ask?': records[0]!.id } }
+  // Twenty retirement proofs of questions no file holds any more, three of questions still in the ledger.
+  const orphans = Array.from({ length: 20 }, (_, n) => proof('retired', `question:${'0'.repeat(63)}${n % 10}:${n + 50}`, 10 + n))
+  const retained = records.map((record, index) => proof('retired', record.id, 1 + index))
+  const stale = Array.from({ length: 20 }, (_, n) => proof('consumed', `gone ${n} Ask?`, 10 + n))
+  const referred = [proof('consumed', 'a1b2c3d4 1 Old ask?', 1), proof('consumed', 'a1b2c3d4 2 Marked ask?', 2)]
+  const doomed = prunableProofs(ledger, [], ['a1b2c3d4 2 Marked ask?'], [...orphans, ...retained, ...stale, ...referred])
+  expect(new Set(doomed.map(one => `${one.kind}:${one.hash}`))).toEqual(new Set([...orphans.slice(0, 4), ...stale.slice(0, 4)].map(one => `${one.kind}:${one.hash}`)))
+  // A capture of a question the ledger lost still refers to its retirement proof.
+  const lost = held(question(77), 'unresolved', 5)
+  const newest = Array.from({ length: 16 }, (_, n) => proof('retired', `question:${'1'.repeat(64)}:${n + 200}`, 10 + n))
+  expect(prunableProofs(ledgerOf(), [lost.capture], [], [proof('retired', question(77).id, 1), ...newest])).toEqual([])
+  // Sixteen or fewer of a kind always stay.
+  expect(prunableProofs(ledger, [], [], orphans.slice(0, 16))).toEqual([])
+})
+
+test('the questions of a block are told from those of another session with the same title', () => {
+  const record = question(1)
+  const ref = { project: 'demo', title: 'Plan 1', line: 0, session: 'syn1' }
+  expect(isAskedBy(record, ref)).toBe(true)
+  // A hand-kept task has no session to tell apart.
+  expect(isAskedBy(record, { ...ref, session: null })).toBe(true)
+  expect(isAskedBy(record, { ...ref, session: 'syn2' })).toBe(false)
+  expect(isAskedBy(record, { ...ref, title: 'Plan 2' })).toBe(false)
+  expect(isAskedBy(record, { ...ref, project: 'other' })).toBe(false)
+})
+
+test("an archived mark counts only while the question's block is gone", () => {
+  const asking = file('- [?] Publish the plan, OK?')
+  const record = observe(emptyQuestions(), asking).ledger.records[0]!
+  const marked: QuestionLedger = { ...ledgerOf(), next: 2, records: [{ ...record, isArchived: true }] }
+  // The block is still there, as when the archive stopped half way: the question is live.
+  expect(observe(marked, asking).ledger.records[0]?.isArchived).toBeUndefined()
+  expect(observe(marked, asking, [], NOW, false).ledger.records[0]?.isArchived).toBeUndefined()
+  // The block is gone: the mark stays, and the question is kept as an older one.
+  const gone = observe(marked, '## demo\n').ledger.records[0]
+  expect(gone?.isArchived).toBe(true)
+  expect(gone?.isUnresolved).toBe(true)
 })

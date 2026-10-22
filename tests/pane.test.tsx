@@ -8948,9 +8948,10 @@ test('Resolve refuses a stopped question that a newer pending inbox turn makes l
 })
 
 test('resolving the last question does not add a phantom stopped task when it moves to Due or Idle', async ($, on) => {
-  const block = (session: string, title: string, notes: string) => `<!-- auto session=${session} agent=codex state=ended updated=2026-10-07T11:00:00Z -->\n### ${title}\n${notes}- [?] Publish?\n- [ ] Finish\n<!-- /auto session=${session} -->`
+  // Blocks with no time are never aged out by the archive, which takes a stopped block that asks after three days; the seen record makes the idle one old.
+  const block = (session: string, title: string, notes: string) => `<!-- auto session=${session} agent=codex state=ended -->\n### ${title}\n${notes}- [?] Publish?\n- [ ] Finish\n<!-- /auto session=${session} -->`
   const board = `## persona_framework\n${block('a1b2c3d4', 'Due plan', '> due 2026-10-17\n')}\n${block('11223344', 'Idle plan', '')}`
-  const world: World = { files: new Map([[FILE, board]]), mtime: 1, hasTasks: true, store: { lang: 'en', autoConnectOff: true, opened: ['stopped'] } }
+  const world: World = { files: new Map(idleFiles(board, board)), mtime: 1, hasTasks: true, store: { lang: 'en', autoConnectOff: true, opened: ['stopped'] } }
   const clock = engineBeneath(on, world)
   await $.session.start({ cwd: '/work/persona_framework', surface: 'desktop', isInteractive: true })
   await settledSetup($, world)
