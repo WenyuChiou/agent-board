@@ -64,7 +64,8 @@ export const jump = (world, spec) => {
   for (const name of readdirSync(world.inbox)) {
     const file = join(world.inbox, name)
     const stat = statSync(file)
-    if (stat.isFile()) utimesSync(file, stat.atime, new Date(stat.mtimeMs - ms))
+    // Seconds as a number keep the part below a millisecond, which a Date would drop.
+    if (stat.isFile()) utimesSync(file, stat.atime, (stat.mtimeMs - ms) / 1000)
   }
   return world.clock.base
 }
