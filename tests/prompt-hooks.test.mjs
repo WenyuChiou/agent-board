@@ -21,13 +21,32 @@ registerHooks({ resolve(specifier, context, next) {
   }
 } })
 
-const { boardPromptHelper, boardRequestWords, BOARD_REQUEST, boardPromptText, isBoardRequest, promptReceiptScript } = await import('../hooks/board-commands.ts')
+const { boardPromptHelper, boardRequestWords, BOARD_REQUEST, BOARD_REQUEST_HINTS, boardPromptText, isBoardRequest, promptReceiptScript } = await import('../hooks/board-commands.ts')
 const { STRINGS } = await import('../hooks/strings.ts')
 const { legacyOpenClawPlugin, legacyOpenCodePlugin } = await import('../hooks/legacy-hook-plugins.ts')
 const { opencodePlugin, openclawPlugin } = await import('../hooks/connect-pure.ts')
 const BOARD_WORDS = boardRequestWords(Object.values(STRINGS))
 const BOARD_PROMPT_HELPER = boardPromptHelper(BOARD_WORDS)
 const PROMPT_RECEIPT_SCRIPT = promptReceiptScript(BOARD_WORDS)
+
+test('every board request contains a word the reporters\' timeout fallback looks for', () => {
+  // The sh fallback copies each hint into a case pattern, so a hint holds only letters, digits and hyphens.
+  for (const hint of BOARD_REQUEST_HINTS) assert.match(hint, /^[A-Za-z0-9-]+$/)
+  const commands = ['/board', '$agent-board', '/agent-board']
+  // The command list follows BOARD_REQUEST: a command it no longer matches fails here.
+  for (const command of commands) assert.ok(BOARD_REQUEST.test(command), command)
+  for (const prompt of [...BOARD_WORDS, ...commands, '<name>agent-board</name>']) {
+    assert.ok(BOARD_REQUEST_HINTS.some(hint => prompt.toLowerCase().includes(hint.toLowerCase())), prompt)
+  }
+})
+
+test('the legacy reporters read and classify within 2000 ms, under the hosts\' 3 s hook timeout', async () => {
+  const { HOOK_INPUT_TIMEOUT } = await import('../hooks/hook-safety.ts')
+  const { reporterPs1, reporterSh } = await import('../hooks/connect-pure.ts')
+  assert.equal(HOOK_INPUT_TIMEOUT, 2000)
+  assert.ok(reporterSh('/synthetic/inbox').includes('sleep 2 &'))
+  assert.ok(reporterPs1().includes('-ge 2000'))
+})
 
 test('a board request receipt stores no prompt words', async () => {
   const { readTurn, answerAgentPrompt } = await import('../hooks/inbox.ts')
@@ -301,8 +320,10 @@ test('the sh reporter writes a prompt receipt with no prompt words from stdin or
   assert.equal(saved.length, 4)
   for (const { body } of saved) {
     assert.ok(!/[^\x20-\x7e]/.test(body))
-    const receipt = JSON.parse(body)
-    assert.deepEqual(receipt, { session_id: receipt.session_id, cwd: '/synthetic/中文', ...(receipt.session_id.endsWith('true') ? { board_request: true } : {}) })
+    const { cwd, ...receipt } = JSON.parse(body)
+    // Under a classifier timeout the POSIX sh fallback leaves a non-ASCII folder out (#351); PowerShell keeps it.
+    assert.ok(cwd === '/synthetic/中文' || (cwd === undefined && process.platform !== 'win32'), body)
+    assert.deepEqual(receipt, { session_id: receipt.session_id, ...(receipt.session_id.endsWith('true') ? { board_request: true } : {}) })
     assert.ok(!body.includes('PRIVATE_') && !body.includes('/board'))
   }
 }))

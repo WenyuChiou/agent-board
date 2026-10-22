@@ -2,7 +2,7 @@ import { baseName } from './parse'
 import { answeredStep, renewQuestion } from './step-words'
 import { STRINGS } from './strings'
 import type { ProgressMirror } from '../types'
-import { boardRequestWords, isBoardRequest } from './board-commands'
+import { boardRequestWords, isBoardRequest, RECEIPT_FOLDER_KEYS, RECEIPT_SESSION_KEYS } from './board-commands'
 
 const BOARD_WORDS = boardRequestWords(Object.values(STRINGS))
 
@@ -113,10 +113,10 @@ export const readTurn = (fileName: string, body: string): AgentTurn | null => {
   const record = { ...(extra !== null && typeof extra === 'object' && !Array.isArray(extra) ? (extra as Record<string, unknown>) : {}), ...(parsed as Record<string, unknown>) }
   // Grok Build also runs Cursor's hooks; its camelCase fields say whose turn it really is.
   const agent = typeof record.hookEventName === 'string' && 'workspaceRoot' in record ? 'grok' : (name[1] ?? 'agent')
-  const session = first(record, ['session_id', 'sessionId', 'sessionID', 'thread-id', 'thread_id', 'conversation_id', 'conversationId'])
+  const session = first(record, RECEIPT_SESSION_KEYS)
   if (session === '') return null
   const roots = record.workspace_roots
-  const cwd = first(record, ['cwd', 'workspaceRoot', 'workspace', 'project_dir', 'directory']) || (Array.isArray(roots) ? text(roots[0]) : '')
+  const cwd = first(record, RECEIPT_FOLDER_KEYS) || (Array.isArray(roots) ? text(roots[0]) : '')
   const hookEvent = first(record, ['hook_event_name', 'hookEventName', 'event', 'type'])
   // Grok Build sends one more Stop as a session closes; it ends the session, it is no turn.
   const closing = typeof record.reason === 'string' && /^(?:channel_closed|shutdown)$/.test(record.reason)

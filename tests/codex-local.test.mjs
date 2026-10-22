@@ -1248,12 +1248,65 @@ test('legacy prompt classifiers time out and reap their process without promotin
     assert.equal(out.stdout.trim(), '{}')
     assert.equal(existsSync(pidFile), true, `exercise the real classifier process${isWindows ? ': ' + classifierDiagnostic(diagnostic) : ''}`)
     assert.equal(isReporterAlive(Number(readFileSync(pidFile, 'utf8'))), false)
-    assert.deepEqual(readdirSync(inbox), [])
+    const files = readdirSync(inbox)
+    assert.equal(files.length, 1)
+    assert.ok(files[0].endsWith('.json'))
+    const body = readFileSync(join(inbox, files[0]), 'utf8')
+    assert.deepEqual(JSON.parse(body), { session_id: 'synthetic-classifier-timeout' })
+    assert.ok(!body.includes('PRIVATE_'))
     const log = readFileSync(join(f.root, 'hook-errors.log'), 'utf8')
     assert.match(log, /REPORTER_TIMEOUT/)
     assert.ok(!log.includes('PRIVATE_') && !log.includes(f.home))
   } finally {
     if (existsSync(pidFile)) await stopReporter(Number(readFileSync(pidFile, 'utf8')))
+  }
+}))
+
+test('a timed-out prompt classifier saves a metadata receipt that marks a board request but not a folder named agent-board', () => fixture(async f => {
+  const isWindows = process.platform === 'win32'
+  const inbox = join(f.root, 'progress-inbox'), script = join(f.root, isWindows ? 'progress-report.ps1' : 'progress-report.sh')
+  const pidFile = join(f.home, 'classifier.pid'), preload = join(f.home, 'hang-classifier.cjs')
+  f.save(script, isWindows ? reporterPs1() : reporterSh(inbox))
+  f.save(preload, `const fs = require('node:fs')\nfs.writeFileSync(${JSON.stringify(pidFile)}, String(process.pid))\nsetInterval(() => {}, 1000)\n`)
+  const env = { ...f.env, NODE_OPTIONS: `--require ${JSON.stringify(preload.replaceAll('\\', '/'))}` }
+  const args = isWindows ? ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', script, 'cursor', 'prompt'] : [script, 'cursor', 'prompt']
+  // Only the words outside the folder paths count: a project folder named agent-board is no board request.
+  // The sh reporter keeps only plain ASCII values; PowerShell keeps every value.
+  const grok = { hookEventName: 'UserPromptSubmit' }
+  const cases = [
+    { payload: { cwd: '/synthetic/中文', prompt: '/board', transcript_path: '/synthetic/中文/PRIVATE_TRANSCRIPT.jsonl' }, kept: isWindows ? { cwd: '/synthetic/中文' } : {}, isBoard: true },
+    { payload: { cwd: '/synthetic/中文', prompt: 'PRIVATE_RAW_PROMPT', transcript_path: '/synthetic/中文/PRIVATE_TRANSCRIPT.jsonl' }, kept: isWindows ? { cwd: '/synthetic/中文' } : {} },
+    { payload: { cwd: '/synthetic/agent-board', prompt: 'PRIVATE_RAW_PROMPT', transcript_path: '/synthetic/agent-board/PRIVATE_TRANSCRIPT.jsonl' }, kept: { cwd: '/synthetic/agent-board' } },
+    { payload: { cwd: 'C:\\synthetic\\agent-board', prompt: 'PRIVATE_RAW_PROMPT', transcript_path: 'C:\\synthetic\\agent-board\\PRIVATE_TRANSCRIPT.jsonl' }, kept: isWindows ? { cwd: 'C:\\synthetic\\agent-board' } : {} },
+    // Grok Build sends camelCase fields, and the inbox knows it by its workspaceRoot field.
+    { key: 'sessionId', payload: { ...grok, workspaceRoot: '/synthetic/agent-board', transcriptPath: '/synthetic/agent-board/PRIVATE_TRANSCRIPT.jsonl', prompt: 'PRIVATE_RAW_PROMPT' }, kept: { ...grok, workspaceRoot: '/synthetic/agent-board' } },
+    { key: 'sessionId', payload: { ...grok, workspaceRoot: '/synthetic/中文', prompt: 'PRIVATE_RAW_PROMPT' }, kept: { ...grok, workspaceRoot: isWindows ? '/synthetic/中文' : '' } },
+  ]
+  for (const [index, { key = 'session_id', payload, kept, isBoard = false }] of cases.entries()) {
+    const session = `synthetic-timeout-${index}`
+    rmSync(pidFile, { force: true })
+    let isGone = false
+    try {
+      const out = await nativeProcess(isWindows ? 'powershell.exe' : '/bin/sh', args, env,
+        JSON.stringify({ [key]: session, ...payload }),
+        callback => setTimeout(callback, 30000))
+      assert.equal(out.error, undefined, hookFailure(out))
+      assert.equal(out.status, 0, hookFailure(out))
+      assert.equal(out.stdout.trim(), '{}')
+      assert.equal(existsSync(pidFile), true, 'exercise the real classifier process')
+      assert.equal(isReporterAlive(Number(readFileSync(pidFile, 'utf8'))), false)
+      isGone = true
+      const files = readdirSync(inbox)
+      assert.equal(files.length, 1)
+      assert.ok(files[0].endsWith('.json'))
+      const body = readFileSync(join(inbox, files[0]), 'utf8')
+      assert.doesNotMatch(body, /[^\x20-\x7e]|PRIVATE_|\/board|transcript_path|transcriptPath/)
+      assert.deepEqual(JSON.parse(body), { [key]: session, ...kept, ...(isBoard ? { board_request: true } : {}) }, `case ${index}`)
+      assert.match(readFileSync(join(f.root, 'hook-errors.log'), 'utf8'), /REPORTER_TIMEOUT/)
+      rmSync(join(inbox, files[0]))
+    } finally {
+      if (!isGone && existsSync(pidFile)) await stopReporter(Number(readFileSync(pidFile, 'utf8')))
+    }
   }
 }))
 
@@ -1279,7 +1332,12 @@ test('a delayed input and hung prompt classifier share one deadline without prom
     assert.equal(existsSync(pidFile), true, 'exercise the classifier after delayed input')
     assert.equal(isReporterAlive(Number(readFileSync(pidFile, 'utf8'))), false)
     assert.equal(existsSync(late), false, 'the classifier must not receive a fresh deadline after input')
-    assert.deepEqual(readdirSync(inbox), [])
+    const files = readdirSync(inbox)
+    assert.equal(files.length, 1)
+    assert.ok(files[0].endsWith('.json'))
+    const body = readFileSync(join(inbox, files[0]), 'utf8')
+    assert.deepEqual(JSON.parse(body), { session_id: 'synthetic-timeout' })
+    assert.ok(!body.includes('PRIVATE_'))
     const log = readFileSync(join(f.root, 'hook-errors.log'), 'utf8')
     assert.match(log, /REPORTER_TIMEOUT/)
     assert.ok(!log.includes('PRIVATE_') && !log.includes(f.home))

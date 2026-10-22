@@ -1,4 +1,4 @@
-import { boardRequestWords, promptReceiptScript } from './board-commands.ts'
+import { BOARD_REQUEST_HINTS, boardRequestWords, promptReceiptScript, RECEIPT_FOLDER_KEYS, RECEIPT_KEYS, RECEIPT_SESSION_KEYS } from './board-commands.ts'
 import { HOOK_INPUT_TIMEOUT } from './hook-safety.ts'
 import { ZH_TW } from './i18n.ts'
 import { EN } from './strings-en.ts'
@@ -10,6 +10,15 @@ const shellQuote = (text: string): string => `'${text.replace(/'/g, `'\\''`)}'`
 const psQuote = (text: string): string => `'${text.replace(/'/g, "''")}'`
 const windowsQuote = (text: string): string => `"${text.replace(/(\\*)"/g, '$1$1\\"').replace(/(\\+)$/, '$1$1')}"`
 const PROMPT_FILE_SCRIPT = `process.argv[1] = require('node:fs').readFileSync(process.env.AGENT_BOARD_PROMPT_INPUT, 'utf8')\n${PROMPT_RECEIPT_SCRIPT}`
+const SESSION_KEYS = RECEIPT_SESSION_KEYS
+// A timed-out prompt is scanned for board words without its folder paths: a project
+// folder named agent-board or dashboard is not a board request.
+const PATH_KEYS = [...RECEIPT_FOLDER_KEYS, 'transcript_path', 'transcriptPath']
+const SH_PATH_STRIP = String.raw`s/"(${PATH_KEYS.join('|')})"[[:space:]]*:[[:space:]]*"([^"\\]|\\.)*"//g; s/"workspace_roots"[[:space:]]*:[[:space:]]*\[[^]]*]//g`
+const PS_PATH_STRIP = String.raw`"(?:${PATH_KEYS.join('|')})"\s*:\s*"(?:[^"\\]|\\.)*"|"workspace_roots"\s*:\s*\[[^\]]*\]`
+
+// Each board word as a case pattern in any letter case, e.g. *[Bb][Oo][Aa][Rr][Dd]*.
+const SH_HINT_PATTERNS = BOARD_REQUEST_HINTS.map(hint => `*${[...hint].map(char => /[a-z]/i.test(char) ? `[${char.toUpperCase()}${char.toLowerCase()}]` : char).join('')}*`).join('|')
 
 // POSIX hosts need only sh. MSYS uses the existing bounded Windows reporter:
 // forking a watchdog after a native-pipe reader can itself stall before it runs.
@@ -24,7 +33,7 @@ case "$agent" in codex|cursor|gemini|grok|muse|hermes|openclaw|opencode|antigrav
 case "$event" in prompt|turn|end) ;; *) event=unknown ;; esac
 dir=${shellQuote(inbox)}
 file="$dir/$agent-$event-$(date +%s)-$$"
-reader=''; watcher=''; owned=''; timeout_owned=''; completion_owned=''; receipt_owned=''; phase=INPUT_TIMEOUT
+reader=''; watcher=''; owned=''; timeout_owned=''; completion_owned=''; receipt_owned=''; fallback_owned=''; phase=INPUT_TIMEOUT
 log_error() {
   logdir="$HOME/.agent-board"; log="$logdir/hook-errors.log"; temp="$log.$$.tmp"
   if mkdir -p "$logdir" && [ ! -L "$log" ] && { [ ! -e "$log" ] || [ -f "$log" ]; }; then
@@ -43,11 +52,41 @@ cleanup() {
   [ -z "$timeout_owned" ] || rm -f "$file.timeout"
   [ -z "$completion_owned" ] || rm -f "$file.complete"
   [ -z "$receipt_owned" ] || rm -f "$file.receipt"
+  [ -z "$fallback_owned" ] || rm -f "$file.fallback"
 }
 finish() { [ "$agent" != cursor ] || printf '{}\\n'; exit 0; }
+write_fallback() {
+  receipt='{'; separator=''; has_session=''
+  # Escaped and non-ASCII values are omitted here; PowerShell preserves them. The first match
+  # in the text is taken wherever it sits, so a key under extra can win over a top-level one.
+  for key in ${RECEIPT_KEYS.join(' ')}; do
+    pair=$(LC_ALL=C grep -o '"'"$key"'"[[:space:]]*:[[:space:]]*"[][ !#-Z^-~]*"' "$file.tmp" | head -n 1)
+    if [ -z "$pair" ]; then
+      # The inbox tells Grok from Cursor by a workspaceRoot field, so keep the field without its value.
+      if [ "$key" = workspaceRoot ] && LC_ALL=C grep -q '"workspaceRoot"[[:space:]]*:[[:space:]]*"' "$file.tmp"; then receipt="$receipt$separator\\"workspaceRoot\\":\\"\\""; separator=','; fi
+      continue
+    fi
+    value=$(printf '%s' "$pair" | sed 's/^[^:]*:[[:space:]]*//')
+    receipt="$receipt$separator\\"$key\\":$value"; separator=','
+    case "$key" in ${SESSION_KEYS.join('|')}) has_session=yes ;; esac
+  done
+  [ -n "$has_session" ] || return
+  scan=$(LC_ALL=C sed -E ${shellQuote(SH_PATH_STRIP)} "$file.tmp") || scan=$(cat "$file.tmp")
+  # An empty scan (sed and cat both failed) counts as a board request: a wrong mark only leaves a question waiting.
+  case "$scan" in ''|${SH_HINT_PATTERNS}) receipt="$receipt$separator\\"board_request\\":true" ;; esac
+  if (set -C; : > "$file.fallback"); then
+    fallback_owned=yes
+    printf '%s}' "$receipt" > "$file.fallback" && mv "$file.fallback" "$file.json"
+  fi
+}
+timed_out() {
+  trap '' ALRM
+  if [ "$phase" = REPORTER_TIMEOUT ]; then write_fallback; fi
+  log_error "$phase"; finish
+}
 trap cleanup 0
 trap 'log_error REPORTER_INTERRUPTED; finish' 1 2 15
-trap 'log_error "$phase"; finish' ALRM
+trap timed_out ALRM
 case "$(uname -s)" in
   MINGW*|MSYS*|CYGWIN*)
     AGENT_BOARD_SH_AGENT="$agent" AGENT_BOARD_SH_EVENT="$event" AGENT_BOARD_SH_PAYLOAD="\${1-}" AGENT_BOARD_SH_INBOX="$dir" powershell.exe -NoLogo -NoProfile -NonInteractive -Command ${shellQuote(powershellReporter(true))}
@@ -85,7 +124,7 @@ elif [ ! -t 0 ]; then
   reader=$!
   exec 3<&-
   wait "$reader"; status=$?; reader=''
-  if [ -s "$file.timeout" ]; then log_error INPUT_TIMEOUT; finish; fi
+  if [ -s "$file.timeout" ]; then timed_out; fi
   if [ "$status" != 0 ]; then log_error REPORTER_FAILED; finish; fi
 fi
 ready="$file.tmp"
@@ -96,15 +135,15 @@ if [ -s "$file.tmp" ] && [ "$event" = prompt ]; then
   node -e ${shellQuote(PROMPT_RECEIPT_SCRIPT)} < "$file.tmp" > "$file.receipt" &
   reader=$!
   wait "$reader"; status=$?; reader=''
-  if [ -s "$file.timeout" ]; then log_error REPORTER_TIMEOUT; finish; fi
+  if [ -s "$file.timeout" ]; then timed_out; fi
   # Missing, failed or empty classifiers keep the compatibility receipt. A
   # timed-out classifier must never turn its unfinished input into a receipt.
   if [ "$status" = 0 ] && [ -n "$(cat "$file.receipt")" ]; then ready="$file.receipt"; fi
 fi
-if [ -s "$file.timeout" ]; then log_error "$phase"; finish; fi
+if [ -s "$file.timeout" ]; then timed_out; fi
 printf '1' > "$file.complete" || { log_error REPORTER_FAILED; finish; }
 kill "$watcher"; wait "$watcher"; watcher=''
-if [ -s "$file.timeout" ]; then log_error "$phase"; finish; fi
+if [ -s "$file.timeout" ]; then timed_out; fi
 if [ -s "$ready" ]; then
   mv "$ready" "$file.json" || { log_error REPORTER_FAILED; finish; }
 else log_error INCOMPLETE_INPUT
@@ -210,6 +249,7 @@ function Read-PromptReceipt([string]$File, [Diagnostics.Stopwatch]$Clock) {
   }
 }
 $tmp = ''; $ownsTemp = $false; $receiptTmp = ''; $ownsReceipt = $false
+$fallback = ''; $fallbackTmp = ''; $ownsFallback = $false
 $clock = [Diagnostics.Stopwatch]::StartNew()
 try {
   if ($Payload -eq '' -and [Console]::IsInputRedirected) {
@@ -230,7 +270,36 @@ try {
   }
   if ($Payload.Trim() -eq '') { throw 'INCOMPLETE_INPUT' }
   if ([Text.Encoding]::UTF8.GetByteCount($Payload) -gt 1048576) { throw 'INPUT_TOO_LARGE' }
-  try { $null = ConvertFrom-Json -InputObject $Payload } catch { throw 'INCOMPLETE_INPUT' }
+  try { $raw = ConvertFrom-Json -InputObject $Payload } catch { throw 'INCOMPLETE_INPUT' }
+  if ($Event -eq 'prompt') {
+    # Only the timeout fallback reads this; a failure here must not lose a prompt the classifier would handle.
+    try {
+      $metadata = New-Object Collections.Specialized.OrderedDictionary ([StringComparer]::Ordinal)
+      $extra = $raw.PSObject.Properties['extra']
+      if ($null -ne $extra -and -not ($extra.Name -ceq 'extra')) { $extra = $null }
+      foreach ($key in @(${RECEIPT_KEYS.map(psQuote).join(',')},'workspace_roots')) {
+        $property = $raw.PSObject.Properties[$key]
+        if ($null -ne $property -and -not ($property.Name -ceq $key)) { $property = $null }
+        if ($null -eq $property -and $null -ne $extra -and $null -ne $extra.Value) {
+          $property = $extra.Value.PSObject.Properties[$key]
+          if ($null -ne $property -and -not ($property.Name -ceq $key)) { $property = $null }
+        }
+        if ($null -eq $property) { continue }
+        $value = $property.Value
+        if ($key -ceq 'workspace_roots') {
+          if ($value -is [array]) { $metadata[$key] = @($value | Where-Object { $_ -is [string] }) }
+        } elseif ($value -is [string]) { $metadata[$key] = $value }
+      }
+      $hasSession = $false
+      foreach ($key in @(${SESSION_KEYS.map(psQuote).join(',')})) { if ($metadata.Contains($key)) { $hasSession = $true } }
+      if ($hasSession) {
+        $scan = [regex]::Replace($Payload, ${psQuote(PS_PATH_STRIP)}, '')
+        if (${BOARD_REQUEST_HINTS.map(hint => `$scan.IndexOf(${psQuote(hint)}, [StringComparison]::OrdinalIgnoreCase) -ge 0`).join(' -or ')}) { $metadata['board_request'] = $true }
+        $json = ConvertTo-Json -InputObject $metadata -Compress -Depth 4
+        $fallback = [regex]::Replace($json, '[^\\x20-\\x7e]', { param($match) '\\u' + ([int][char]$match.Value).ToString('x4') })
+      }
+    } catch { $fallback = '' }
+  }
   $dir = ${fromShell ? '$env:AGENT_BOARD_SH_INBOX' : "Join-Path $PSScriptRoot 'progress-inbox'"}
   New-Item -ItemType Directory -Force -Path $dir | Out-Null
   $name = '{0}-{1}-{2}-{3}' -f $Agent, $Event, [DateTimeOffset]::Now.ToUnixTimeMilliseconds(), $PID
@@ -253,10 +322,22 @@ try {
   Get-ChildItem -LiteralPath $dir -Filter '*.json' | Where-Object { $_.LastWriteTime -lt (Get-Date).AddDays(-2) } | Remove-Item -Force
 } catch {
   $code = switch ($_.Exception.Message) { 'INPUT_TIMEOUT' { 'INPUT_TIMEOUT' }; 'REPORTER_TIMEOUT' { 'REPORTER_TIMEOUT' }; 'INPUT_TOO_LARGE' { 'INPUT_TOO_LARGE' }; 'INCOMPLETE_INPUT' { 'INCOMPLETE_INPUT' }; default { 'REPORTER_FAILED' } }
+  if ($code -eq 'REPORTER_TIMEOUT' -and $fallback -ne '') {
+    try {
+      $fallbackTmp = Join-Path $dir ($name + '.fallback')
+      Write-Exclusive $fallbackTmp $fallback
+      $ownsFallback = $true
+      Move-Item -LiteralPath $fallbackTmp -Destination (Join-Path $dir ($name + '.json'))
+      $ownsFallback = $false
+    } catch {
+      if ($ownsFallback) { Remove-Item -LiteralPath $fallbackTmp -Force -ErrorAction SilentlyContinue; $ownsFallback = $false }
+    }
+  }
   Write-HookError $code
 } finally {
   if ($ownsTemp) { Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue }
   if ($ownsReceipt) { Remove-Item -LiteralPath $receiptTmp -Force -ErrorAction SilentlyContinue }
+  if ($ownsFallback) { Remove-Item -LiteralPath $fallbackTmp -Force -ErrorAction SilentlyContinue }
 }
 if ($Agent -eq 'cursor') { '{}' }
 exit 0
