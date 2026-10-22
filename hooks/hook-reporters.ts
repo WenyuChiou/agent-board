@@ -165,7 +165,12 @@ if [ -s "$ready" ]; then
 else log_error INCOMPLETE_INPUT
 fi
 # Names first, so GNU find need not look at a taken file that another session renames mid-scan.
-find "$dir/." ! -name . -prune \\( \\( -name '*.json' -type f -mtime +2 \\) -o \\( \\( -name '*.tmp' -o -name '*.receipt' -o -name '*.fallback' -o -name '*.timeout' -o -name '*.complete' \\) -type f -mmin +1 \\) \\) -exec rm -f {} + || log_error CLEANUP_FAILED
+# One that still goes between the listing and find's look at it (BSD find looks at every entry)
+# gives "No such file or directory", which is no failure. Any other complaint is logged, and so is
+# a failure with none.
+sweep_errors=$(LC_ALL=C find "$dir/." ! -name . -prune \\( \\( -name '*.json' -type f -mtime +2 \\) -o \\( \\( -name '*.tmp' -o -name '*.receipt' -o -name '*.fallback' -o -name '*.timeout' -o -name '*.complete' \\) -type f -mmin +1 \\) \\) -exec rm -f {} + 2>&1 >/dev/null)
+sweep_status=$?
+if [ "$sweep_status" -ne 0 ] && { [ -z "$sweep_errors" ] || printf '%s\\n' "$sweep_errors" | grep -qv 'No such file or directory'; }; then log_error CLEANUP_FAILED; fi
 finish
 `
 

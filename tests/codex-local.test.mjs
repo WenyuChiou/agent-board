@@ -830,6 +830,7 @@ test('a hook log write sweeps stale hook-errors.log temp files but keeps fresh o
   f.save(target, 'target'); utimesSync(target, old, old)
   let hasLink = true
   try { symlinkSync(target, link, 'file'); lutimesSync(link, old, old) } catch { hasLink = false }
+  assert.ok(hasLink || process.platform === 'win32', 'symlink setup failed')
   const out = spawnSync(process.execPath, [join(f.root, 'agent-board-hook.mjs'), '--hook-version', '1', '--agent-status', '--agent', 'antigravity', '--hook-started', String(Date.now() - 3000)], {
     env: f.env, input: JSON.stringify({ conversationId: 'synthetic-log-sweep' }), encoding: 'utf8', windowsHide: true, timeout: 20000,
   })
@@ -872,7 +873,11 @@ test('a report hook whose reporter runs past its deadline is never queued', () =
     assert.equal(out.stdout, '1', 'the host wrapper must observe the report failure')
   } finally {
     // The hung reporter child outlives its worker; stop it by its own pid.
-    try { if (existsSync(marker)) await stopReporter(Number(readFileSync(marker, 'utf8'))) } catch (error) { process.stderr.write(`report-deadline child not stopped: ${error}\n`) }
+    try { if (existsSync(marker)) await stopReporter(Number(readFileSync(marker, 'utf8'))) } catch (error) {
+      // A child that survives its kill keeps the fixture for a look, and fails the test.
+      if (error?.keepFixture) throw error
+      process.stderr.write(`report-deadline child not stopped: ${error}\n`)
+    }
   }
 }))
 
@@ -1433,6 +1438,27 @@ test('a reporter sweeps scratch files older than a minute from the inbox and kee
   assert.equal(files.includes('codex-prompt-1-3.tmp'), isWindows)
   if (isWindows) assert.match(hookLog(f), /CLEANUP_FAILED/)
   else assert.doesNotMatch(hookLog(f), /CLEANUP_FAILED/)
+}))
+
+test('the sh reporter logs CLEANUP_FAILED when its sweep fails, but not for a file that went mid-scan', { skip: process.platform === 'win32' }, () => fixture(async f => {
+  const inbox = join(f.root, 'progress-inbox'), script = join(f.root, 'progress-report.sh'), tools = join(f.home, 'sweep-tools')
+  f.save(script, reporterSh(inbox))
+  mkdirSync(tools, { recursive: true })
+  // A stand-in find on PATH says what a real one would, and fails.
+  const sweep = async (complaint, session) => {
+    f.save(join(tools, 'find'), `#!/bin/sh\n${complaint ? `echo '${complaint}' >&2\n` : ''}exit 1\n`)
+    chmodSync(join(tools, 'find'), 0o700)
+    const out = await nativeProcess('/bin/sh', [script, 'codex', 'prompt'], { ...f.env, PATH: `${tools}${delimiter}${f.env.PATH}` }, JSON.stringify({ session_id: session, prompt: 'PRIVATE_RAW_PROMPT' }))
+    assert.equal(out.error, undefined, hookFailure(out))
+    assert.equal(out.status, 0, hookFailure(out))
+    return hookLog(f).match(/CLEANUP_FAILED/g)?.length ?? 0
+  }
+  // GNU and BSD find say this for an entry another session removed or renamed after the listing.
+  assert.equal(await sweep('find: /inbox/codex-turn-1-1.json.taking: No such file or directory', 'synthetic-sweep-gone'), 0)
+  assert.equal(await sweep('find: /inbox: Permission denied', 'synthetic-sweep-denied'), 1)
+  assert.equal(await sweep('', 'synthetic-sweep-silent'), 2)
+  // Each run still saved its receipt.
+  assert.equal(readdirSync(inbox).filter(name => name.endsWith('.json')).length, 3)
 }))
 
 test('a timed-out prompt classifier saves a metadata receipt that marks a board request but not a folder named agent-board', () => fixture(async f => {

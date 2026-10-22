@@ -7501,12 +7501,13 @@ test('a held turn the board already took is not taken once more', async ($, on) 
   const store: Record<string, unknown> = { inboxDone: { [name]: `elsewhere:${at}` }, autoConnectOff: true, inboxFailed: { [name]: `8:${at}:QUESTION_RETENTION_FAILED` } }
   const world: World = {
     files: new Map([[FILE, '# Progress\n'], [`${INBOX}/${name}.failed`, JSON.stringify({ session_id: 'done-elsewhere', cwd: '/work/api-gateway', last_assistant_message: 'Added the middleware.' })]]),
-    mtime: 1, hasTasks: true, store, reply: RATE_LIMIT_REPLY,
+    mtime: 1, hasTasks: true, store, reply: RATE_LIMIT_REPLY, asked: [],
   }
   const clock = engineBeneath(on, world)
   await $.session.start({ cwd: '/work/persona_framework', surface: 'desktop', isInteractive: true })
   await clock.advance(5000)
   expect(takenOf(world)).toEqual([])
+  expect(world.asked?.some(prompt => prompt.includes('Added the middleware'))).toBe(false)
   expect(world.files.has(`${INBOX}/${name}.failed`)).toBe(true)
   expect(world.files.get(FILE)).toBe('# Progress\n')
 })

@@ -2173,6 +2173,9 @@ const drainInbox = async ($: EngineInterface): Promise<void> => {
           settled.push(...group)
         } catch (error) {
           const why = (error instanceof Error ? error.message : String(error)).replace(/\s+/g, ' ').slice(0, 200)
+          // With a retake ahead the loop goes on, and the retake's newer turn lands first: this
+          // older turn's retry then changes nothing, and its summary is lost, as for any turn older
+          // than its block. Holding the retake back instead would use up its last try.
           const isRetakeAhead = runs.slice(index + 1).some(run => run[0]!.attempt > MAX_TRIES)
           for (const one of isRetakeAhead ? group : runs.slice(index).flat()) failed[one.name] = `${one.attempt}:${at}:${why}`
           // A file error is named now. The model's silence, or a block not yet read back, is
