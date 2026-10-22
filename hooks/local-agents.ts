@@ -42,10 +42,14 @@ ${BOARD_PROMPT_HELPER}
 const run = (mode, payload, session, deadline) => {
   const args = [${JSON.stringify(script)}, '--hook-version', '${HOOK_VERSION}', mode, '--agent', 'opencode', '--progress-file', ${JSON.stringify(progress)}]
   if (session) args.push('--session', session)
-  if (deadline !== undefined) args.push('--hook-deadline', String(deadline))
-  const remaining = deadline === undefined ? ${hookTimeout('opencode') - 1000} : deadline - Date.now()
-  if (remaining <= 0) throw Error('HOOK_TIMEOUT')
-  const result = spawnSync(${JSON.stringify(node)}, args, { input: JSON.stringify(payload), encoding: 'utf8', windowsHide: true, timeout: remaining + ${HOOK_WORKER_GRACE}, killSignal: 'SIGKILL' })
+  // The worker always gets the end time, so a retried worker never outlives this call's limit.
+  const end = deadline ?? Date.now() + ${hookTimeout('opencode') - 1000}
+  args.push('--hook-deadline', String(end))
+  if (end - Date.now() <= 0) throw Error('HOOK_TIMEOUT')
+  const options = { input: JSON.stringify(payload), encoding: 'utf8', windowsHide: true, timeout: end - Date.now() + ${HOOK_WORKER_GRACE}, killSignal: 'SIGKILL' }
+  let result = spawnSync(${JSON.stringify(node)}, args, options)
+  // Bun 1.3 in OpenCode ends spawnSync early after an idle event loop (#217).
+  if (result.error?.code === 'ETIMEDOUT' && end - Date.now() > 100) result = spawnSync(${JSON.stringify(node)}, args, { ...options, timeout: end - Date.now() + ${HOOK_WORKER_GRACE} })
   if (result.error?.code === 'ETIMEDOUT') throw Error('HOOK_TIMEOUT')
   if (result.error || result.status !== 0) throw new Error('AGENT_BOARD_REPORT_FAILED')
   return result.stdout
@@ -73,7 +77,13 @@ export const AgentBoardLocal = async ({ client }) => ({
     agent_board_progress: tool({
       description: ${JSON.stringify(description)},
       args: { title: tool.schema.string(), project: tool.schema.string(), state: tool.schema.enum(['working', 'waiting', 'done', 'ended']), steps: tool.schema.array(tool.schema.string()) },
-      execute: async (args, context) => run('--codex-report', args, context.sessionID),
+      execute: async (args, context) => {
+        try { return run('--codex-report', args, context.sessionID) }
+        catch (error) {
+          hookError(error?.message === 'HOOK_TIMEOUT' ? 'REPORTER_TIMEOUT' : 'REPORTER_FAILED')
+          throw error
+        }
+      },
     }),
   },
 })
