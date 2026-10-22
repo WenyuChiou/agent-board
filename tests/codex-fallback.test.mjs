@@ -349,7 +349,9 @@ test('a hook source change while reading instructions cannot retire an existing 
   const before = readFileSync(f.instructions, 'utf8')
   writeFileSync(f.options, JSON.stringify({ trust: 'trusted' }))
   const preload = join(f.home, 'instruction-drift.mjs')
-  writeFileSync(preload, `import fs from 'node:fs';import{syncBuiltinESMExports}from'node:module';const read=fs.readFileSync;let changed=false;fs.readFileSync=(file,...args)=>{if(!changed&&file===${JSON.stringify(f.instructions)}){changed=true;fs.appendFileSync(${JSON.stringify(f.config)},' ')}return read(file,...args)};syncBuiltinESMExports()`)
+  // The first read of AGENTS.md comes before the approval decision; the second is
+  // the one just before the fallback is retired, after the decision is made.
+  writeFileSync(preload, `import fs from 'node:fs';import{syncBuiltinESMExports}from'node:module';const read=fs.readFileSync;let reads=0;fs.readFileSync=(file,...args)=>{if(file===${JSON.stringify(f.instructions)}&&reads++===1)fs.appendFileSync(${JSON.stringify(f.config)},' ');return read(file,...args)};syncBuiltinESMExports()`)
   const result = f.run('connect', {}, { NODE_OPTIONS: '--import=' + pathToFileURL(preload).href })
   assert.equal(readFileSync(f.instructions, 'utf8'), before)
   assert.equal(result.state.setup.codexTrusted, false)
@@ -458,13 +460,26 @@ test('a Codex check that times out once is tried again and the second answer cou
   assert.deepEqual(readFileSync(f.log, 'utf8').trim().split('\n'), ['initialize', 'initialized', 'hooks/list', 'initialize', 'initialized', 'hooks/list'])
 }))
 
+test('a Codex answer that takes 1.5 s counts on the first attempt', () => fixture(async f => {
+  f.run('connect')
+  writeFileSync(f.options, JSON.stringify({ trust: 'trusted', delays: { 'hooks/list': 1500 } }))
+  writeFileSync(f.log, '')
+  assertApproved(f, f.run('connect'))
+  assert.equal(readFileSync(f.log, 'utf8').trim().split('\n').filter(one => one === 'initialize').length, 1)
+}))
+
 test('a shared Codex check deadline bounds delayed requests across both attempts', () => fixture(async f => {
   approvedConnect(f)
+  // A connect with an instant answer measures this machine's start-up time.
+  let start = Date.now()
+  assertApproved(f, f.run('connect'))
+  const startup = Date.now() - start
   writeFileSync(f.options, JSON.stringify({ trust: 'trusted', delays: { initialize: 1500, 'hooks/list': 6000 } }))
   writeFileSync(f.log, '')
-  const start = Date.now()
+  start = Date.now()
   assertApproved(f, f.run('connect'))
-  assert.ok(Date.now() - start < 8000)
+  // The check stops at its 5 s budget; without the shared deadline the second attempt runs about 7 s in all.
+  assert.ok(Date.now() - start - startup < 6000, String(Date.now() - start - startup))
   assert.equal(readFileSync(f.log, 'utf8').trim().split('\n').filter(one => one === 'initialize').length, 2)
 }))
 
@@ -492,6 +507,8 @@ test('the shared Codex approval decision requires the exact current source and h
   }
   assert.deepEqual(codexApproval({ ...observation, trusted: false }, source, sourceHash, approval, true, sourceHash), { trusted: false, approval: undefined })
   assert.deepEqual(codexApproval(undefined, source, sourceHash, approval, false, otherHash), { trusted: true, approval })
+  const elsewhere = { source: source + '.other', sourceHash }
+  assert.deepEqual(codexApproval(undefined, source, sourceHash, elsewhere, true, sourceHash), { trusted: false, approval: elsewhere })
   assert.deepEqual(codexApproval(undefined, source, otherHash, approval, true, sourceHash), { trusted: false, approval })
   assert.deepEqual(codexApproval(undefined, source, null, approval, true, null), { trusted: false, approval })
   assert.deepEqual(codexApproval(undefined, source, sourceHash, undefined, true, otherHash), { trusted: false, approval: undefined })

@@ -47,7 +47,13 @@ test('the Codex binary is found behind an npm shim as the vendor codex.exe insid
   for (const arch of ['x64', 'arm64']) for (const bundled of [false, true]) npmFixture(f => {
     const file = f.vendor(arch, bundled)
     assert.equal(findCodexExecutable(f.prefix, 'win32', arch), file)
-    assert.equal(findCodexExecutable('relative;' + f.prefix, 'win32', arch), file)
+    // A relative PATH entry depends on the current folder, so it is skipped even when it holds a codex.exe.
+    mkdirSync(join(f.prefix, 'relative'))
+    writeFileSync(join(f.prefix, 'relative', 'codex.exe'), '')
+    const cwd = process.cwd()
+    process.chdir(f.prefix)
+    try { assert.equal(findCodexExecutable('relative;' + f.prefix, 'win32', arch), file) }
+    finally { process.chdir(cwd) }
     const earlier = join(f.prefix, 'earlier')
     mkdirSync(earlier)
     const direct = join(earlier, 'codex.exe')
@@ -63,6 +69,8 @@ test('an npm shim that points outside its package, or a vendor binary that resol
   const cases = [
     f => writeFileSync(join(f.prefix, 'codex.cmd'), npmShim('..\\elsewhere\\codex.js')),
     f => writeFileSync(join(f.prefix, 'codex.cmd'), npmShim('C:\\elsewhere\\codex.js')),
+    f => writeFileSync(join(f.prefix, 'codex.cmd'), npmShim(f.target + '.evil')),
+    f => writeFileSync(join(f.prefix, 'codex.cmd'), npmShim('..\\' + f.target)),
     f => writeFileSync(join(f.prefix, 'codex.cmd'), npmShim(f.target) + `"%_prog%" "%dp0%\\${f.target}"\n`),
     f => writeFileSync(join(f.root, 'package.json'), JSON.stringify({ name: '@elsewhere/codex' })),
     f => {
@@ -93,8 +101,7 @@ test('an npm shim that points outside its package, or a vendor binary that resol
   })
 })
 
-test('native Codex discovery preserves executable permission checks outside Windows', () => {
-  if (process.platform === 'win32') return
+test('native Codex discovery preserves executable permission checks outside Windows', { skip: process.platform === 'win32' && 'Windows files have no executable bit to clear; the Ubuntu CI jobs run this' }, () => {
   npmFixture(f => {
     const file = join(f.prefix, 'codex')
     writeFileSync(file, '')
