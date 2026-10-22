@@ -134,6 +134,7 @@ type World = {
   liveHold?: { reached: () => void; release: Promise<void> }
   isArchiveClockOnly?: boolean
   at?: number
+  clockOffset?: number
   env?: Record<string, string>
   stats?: string[]
   reads?: string[]
@@ -234,10 +235,15 @@ const engineBeneath = (on: On, world: World): MockClock => {
   // Exercise the hourly archive without thousands of unrelated polls consuming
   // the mock hook's budget. Other tests retain every timer; the archive keeps its
   // native callback and exact interval.
-  const clockOn = world.isArchiveClockOnly ? ((...args: Parameters<On>) => {
-    if (args[0] !== 'clock.every') return Reflect.apply(on, undefined, args)
+  const clockOn = world.isArchiveClockOnly || world.clockOffset !== undefined ? ((...args: Parameters<On>) => {
     const callback = args.at(-1)
     if (typeof callback !== 'function') throw new Error('Invalid clock fixture')
+    // Move the claim clock without replaying hundreds of unrelated polling callbacks.
+    if (args[0] === 'clock.now' && world.clockOffset !== undefined) return on('clock.now', async ($, event, next) => {
+      const result = await Reflect.apply(callback, undefined, [$, event, next])
+      return { ...result, value: result.value + world.clockOffset! }
+    })
+    if (args[0] !== 'clock.every' || !world.isArchiveClockOnly) return Reflect.apply(on, undefined, args)
     return on('clock.every', ($, event, next) => Reflect.apply(callback, undefined, [$, { ...event, ms: event.ms === 3600000 ? event.ms : 7200000 }, next]))
   }) as On : on
   const clock = mock.clock(clockOn, { now: world.at ?? Date.parse('2026-10-16T12:00:00.000Z') })
@@ -7130,6 +7136,557 @@ test('a file left taken past its last try is kept as a .failed file, not deleted
   expect(world.files.get(`${INBOX}/${name}.failed`)).toBe(body)
   expect(takenOf(world)).toEqual([])
   expect(world.files.get(FILE)).toBe('# Progress\n')
+})
+
+test('turn files set aside by the old question hold are taken once after the upgrade and never twice', async ($, on) => {
+  const at = Date.parse('2026-10-16T12:00:00Z')
+  const good = 'codex-turn-1792216380-1.json'
+  const held = 'codex-turn-1792216381-2.json'
+  const invalid = 'codex-turn-1792216382-3.json'
+  const evidence = `${INBOX}/${good}.failed.1`
+  const body = (session: string, cwd: string): string => JSON.stringify({ session_id: session, cwd, last_assistant_message: 'Added the middleware. 100 or 300 a minute?' })
+  const store: Record<string, unknown> = {
+    inboxDone: {}, autoConnectOff: true,
+    inboxFailed: { [good]: `8:${at}:QUESTION_RETENTION_FAILED`, [held]: `8:${at}:QUESTION_RETENTION_FAILED`, [invalid]: `1:${at}:INVALID_INPUT` },
+  }
+  const world: World = {
+    files: new Map([[FILE, '# Progress\n'], [`${INBOX}/${good}.failed`, body('recovered', '/work/api-gateway')], [`${INBOX}/${held}.failed`, body('still-held', '/work/web-app')], [`${INBOX}/${invalid}.failed`, 'broken'], [evidence, 'evidence']]),
+    mtime: 1, hasTasks: true, store, ran: [], asked: [], reply: RATE_LIMIT_REPLY,
+  }
+  const withoutHeld = (): string => {
+    world.afterWrite = withoutHeld
+    return (world.files.get(FILE) ?? '').replace(/## web-app\n[\s\S]*/, '')
+  }
+  world.afterWrite = withoutHeld
+  const clock = engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/persona_framework', surface: 'desktop', isInteractive: true })
+  await clock.advance(5000)
+  expect(world.files.get(FILE) ?? '').toContain('## api-gateway\n')
+  expect(world.files.has(`${INBOX}/${good}.failed`)).toBe(false)
+  expect((store.inboxDone as Record<string, string>)[good]).toBeDefined()
+  expect((store.inboxFailed as Record<string, string>)[good]).toBeUndefined()
+  expect(world.files.get(`${INBOX}/${invalid}.failed`)).toBe('broken')
+  expect(world.files.get(evidence)).toBe('evidence')
+  expect(takenOf(world)).toHaveLength(1)
+  const claim = takenOf(world)[0]!
+  expect(claim).toContain('-9.taking')
+  const expired = `${INBOX}/${held}.deadbeef-${(at - CLAIM_MS - 1).toString(36)}-9.taking`
+  world.files.set(expired, world.files.get(claim)!)
+  world.files.delete(claim)
+  world.mtime += 1
+  await clock.advance(5000)
+  expect(world.files.has(`${INBOX}/${held}.retaken.failed`)).toBe(true)
+  expect(takenOf(world)).toEqual([])
+  store.inboxFailed = { ...(store.inboxFailed as Record<string, string>), [held]: `8:${at}:QUESTION_RETENTION_FAILED` }
+  const asks = world.asked?.length
+  for (let look = 0; look < 3; look += 1) {
+    world.mtime += 1
+    await clock.advance(5000)
+    expect(takenOf(world)).toEqual([])
+    expect(world.files.has(`${INBOX}/${held}.retaken.failed`)).toBe(true)
+    expect(world.files.has(`${INBOX}/${held}.failed`)).toBe(false)
+  }
+  expect(world.asked?.length).toBe(asks)
+})
+
+test('a set-aside turn older than the block\'s current turn changes nothing', async ($, on) => {
+  const at = Date.parse('2026-10-16T12:00:00Z')
+  const name = `codex-turn-${at - 60000}-1.json`
+  const id = blockId('codex', 'already-newer')
+  const mirror = { ...emptyMirror(id, 'api-gateway', at, '/work/api-gateway', 'codex'), title: 'Keep the newer work', turnOrder: at * 2, tasks: [{ ...confirmStep('Newer finished work'), status: 'completed' as const }] }
+  const before = upsertAutoBlock('# Progress\n', mirror, ZH_TW)
+  const store: Record<string, unknown> = { inboxDone: {}, autoConnectOff: true, inboxFailed: { [name]: `8:${at}:QUESTION_RETENTION_FAILED` }, [`agent:${id}`]: mirror }
+  const world: World = {
+    files: new Map([[FILE, before], [`${INBOX}/${name}.failed`, JSON.stringify({ session_id: 'already-newer', cwd: '/work/api-gateway', last_assistant_message: 'Added old middleware. Restore the old limit?' })]]),
+    mtime: 1, hasTasks: true, store, asked: [], reply: RATE_LIMIT_REPLY,
+  }
+  const clock = engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/persona_framework', surface: 'desktop', isInteractive: true })
+  await clock.advance(5000)
+  expect(world.files.get(FILE)).toBe(before)
+  expect(Object.keys(store).filter(key => key.startsWith('pendingInboxQuestion:'))).toEqual([])
+  expect(JSON.parse(world.files.get(QUESTIONS) ?? '{"records":[]}').records).toEqual([])
+  expect((store.inboxDone as Record<string, string>)[name]).toBeDefined()
+  expect((store.inboxFailed as Record<string, string>)[name]).toBeUndefined()
+  expect(world.files.has(`${INBOX}/${name}.failed`)).toBe(false)
+  expect(takenOf(world)).toEqual([])
+  expect(world.asked?.some(prompt => prompt.includes('Restore the old limit?'))).toBe(false)
+})
+
+test('a set-aside turn whose question is older than three days adds its steps but no question', async ($, on) => {
+  const at = Date.parse('2026-10-16T12:00:00Z')
+  const name = `codex-turn-${at - 4 * 86400000}-1.json`
+  const store: Record<string, unknown> = { inboxDone: {}, autoConnectOff: true, inboxFailed: { [name]: `8:${at}:QUESTION_RETENTION_FAILED` } }
+  const world: World = {
+    files: new Map([[FILE, '# Progress\n'], [`${INBOX}/${name}.failed`, JSON.stringify({ session_id: 'stale-question', cwd: '/work/api-gateway', last_assistant_message: 'Added the middleware. Restore the old limit?' })]]),
+    mtime: 1, hasTasks: true, store,
+    reply: () => 'TITLE: Add the middleware\nCONTEXT: Synthetic work\nDONE: Added the middleware\nNEXT: -\nASK: Restore the old limit\nWHY: Restore the old limit?',
+  }
+  const clock = engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/persona_framework', surface: 'desktop', isInteractive: true })
+  await clock.advance(5000)
+  const text = world.files.get(FILE) ?? ''
+  expect(text).toContain('- [x] Added the middleware')
+  expect(text).not.toContain('[?]')
+  expect(text).not.toContain('Restore the old limit')
+  expect(Object.keys(store).filter(key => key.startsWith('pendingInboxQuestion:'))).toEqual([])
+  expect(JSON.parse(world.files.get(QUESTIONS) ?? '{"records":[]}').records).toEqual([])
+  expect((store.inboxDone as Record<string, string>)[name]).toBeDefined()
+  expect(world.files.has(`${INBOX}/${name}.failed`)).toBe(false)
+  expect(takenOf(world)).toEqual([])
+})
+
+test('a held turn written before a newer prompt adds its steps but does not reopen its question', async ($, on) => {
+  const { world } = questionWorld()
+  world.reply = () => 'TITLE: Migration\nCONTEXT: fixture\nDONE: Added the limiter\nNEXT: Continue\nASK: Limit — 100 or 300?'
+  addPrompt(world, PROMPT_AT + 3000)
+  const clock = engineBeneath(on, world)
+  await probeStart($)
+  await clock.advance(5000)
+  const name = `codex-turn-${PROMPT_AT + 2000}-1.json`
+  const store = world.store!
+  store.inboxFailed = { [name]: `8:${PROMPT_AT + 2500}:QUESTION_RETENTION_FAILED` }
+  world.files.set(`${INBOX}/${name}.failed`, JSON.stringify({ session_id: PROMPT_SESSION, cwd: '/demo', prompt: 'Add a limiter', last_assistant_message: 'Added the limiter. 100 or 300?' }))
+  world.mtime += 1
+  await clock.advance(5000)
+  await clock.advance(5000)
+  expect(world.files.get(FILE)).toContain('- [x] Added the limiter')
+  expect(world.files.get(FILE)).not.toContain('100 or 300')
+  expect(parseProgress(world.files.get(FILE)!).flatMap(project => project.tasks).flatMap(task => task.steps).some(step => step.status === 'waiting')).toBe(false)
+  expect(effectivePromptMirror(world).state).toBe('working')
+  expect(Object.keys(store).filter(key => key.startsWith('pendingInboxQuestion:'))).toEqual([])
+  expect((store.inboxDone as Record<string, string>)[name]).toBeDefined()
+  expect((store.inboxFailed as Record<string, string>)[name]).toBeUndefined()
+  expect(world.files.has(`${INBOX}/${name}.failed`)).toBe(false)
+  expect(takenOf(world)).toEqual([])
+})
+
+for (const fault of ['read', 'rename'] as const) test(`fresh turn files still reach the board when a held turn's retake fails at ${fault}`, async ($, on) => {
+  const at = Date.parse('2026-10-16T12:00:00Z')
+  const held = 'codex-turn-1792216380-1.json'
+  const fresh = 'codex-turn-1792216381-2.json'
+  const store: Record<string, unknown> = { inboxDone: {}, autoConnectOff: true, inboxFailed: { [held]: `8:${at}:QUESTION_RETENTION_FAILED` } }
+  const body = (session: string, project: string): string => JSON.stringify({ session_id: session, cwd: `/work/${project}`, last_assistant_message: 'Added the middleware. 100 or 300 a minute?' })
+  let hasReadFailed = false
+  const world: World = {
+    files: new Map([[FILE, '# Progress\n'], [`${INBOX}/${held}.failed`, body('held-error', 'held-project')], [`${INBOX}/${fresh}`, body('fresh-after-error', 'fresh-project')]]),
+    mtime: 1, hasTasks: true, store, reply: RATE_LIMIT_REPLY, ran: [],
+    failStore: (operation, key) => {
+      // Startup also reads this record; fail the retake pass after the fresh file is claimed.
+      if (fault !== 'read' || key !== 'inboxFailed' || operation !== 'get' || hasReadFailed || world.files.has(`${INBOX}/${fresh}`)) return false
+      hasReadFailed = true
+      return true
+    },
+    isMoveRefused: path => fault === 'rename' && path === `${INBOX}/${held}.failed`,
+  }
+  const clock = engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/persona_framework', surface: 'desktop', isInteractive: true })
+  await clock.advance(5000)
+  expect(world.files.get(FILE) ?? '').toContain('## fresh-project\n')
+  expect(world.files.get(FILE) ?? '').not.toContain('## held-project\n')
+  expect(world.files.has(`${INBOX}/${held}.failed`)).toBe(true)
+  expect((store.inboxDone as Record<string, string>)[fresh]).toBeDefined()
+  expect(takenOf(world)).toEqual([])
+  if (fault !== 'rename') expect(world.ran?.some(argv => argv[0] === 'mv' && argv[1] === `${INBOX}/${held}.failed`)).toBe(false)
+})
+
+test('a held turn whose retake rename fails is taken at a later look', async ($, on) => {
+  const at = Date.parse('2026-10-16T12:00:00Z')
+  const name = 'codex-turn-1792216380-1.json'
+  const path = `${INBOX}/${name}.failed`
+  const store: Record<string, unknown> = { inboxDone: {}, autoConnectOff: true, inboxFailed: { [name]: `8:${at}:QUESTION_RETENTION_FAILED` } }
+  const world: World = {
+    files: new Map([[FILE, '# Progress\n'], [path, JSON.stringify({ session_id: 'retry-rename', cwd: '/work/api-gateway', last_assistant_message: 'Added the middleware. 100 or 300 a minute?' })]]),
+    mtime: 1, hasTasks: true, store, clockOffset: 0, reply: RATE_LIMIT_REPLY,
+    isMoveRefused: from => from === path,
+  }
+  const clock = engineBeneath(on, world)
+  const seen = outside(on, world)
+  await $.session.start({ cwd: '/work/persona_framework', surface: 'desktop', isInteractive: true })
+  await clock.advance(5000)
+  expect(world.files.get(FILE)).toBe('# Progress\n')
+  expect(world.files.has(path)).toBe(true)
+  expect(seen.notified).toContain(ZH_TW.inboxHeld(path, 'INBOX_RETAKE_MOVE_FAILED'))
+  expect(takenOf(world)).toEqual([])
+
+  world.isMoveRefused = () => false
+  world.mtime += 1
+  world.clockOffset = CLAIM_MS
+  await clock.advance(5000)
+  expect(world.files.get(FILE) ?? '').toContain('## api-gateway\n')
+  expect(world.files.get(FILE) ?? '').toContain('- [x] Added the token bucket middleware')
+  expect(world.files.has(path)).toBe(false)
+  expect((store.inboxDone as Record<string, string>)[name]).toBeDefined()
+  expect(takenOf(world)).toEqual([])
+})
+
+test('a held turn an older session puts back after its retake is not taken again', async ($, on) => {
+  const at = Date.parse('2026-10-16T12:00:00Z')
+  const name = 'codex-turn-1792216380-1.json'
+  const path = `${INBOX}/${name}.failed`
+  const store: Record<string, unknown> = { inboxDone: {}, autoConnectOff: true, inboxFailed: { [name]: `8:${at}:QUESTION_RETENTION_FAILED` } }
+  const world: World = {
+    files: new Map([[FILE, '# Progress\n'], [path, JSON.stringify({ session_id: 'older-session-retake', cwd: '/work/api-gateway', last_assistant_message: 'Added the middleware.' })]]),
+    mtime: 1, hasTasks: true, store, hang: () => true,
+  }
+  const clock = engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/persona_framework', surface: 'desktop', isInteractive: true })
+  await clock.advance(5000)
+  expect(takenOf(world)).toHaveLength(1)
+  const claim = takenOf(world)[0]!
+  expect(claim).toContain('-9.taking')
+  const note = (store.inboxFailed as Record<string, string>)[name]
+  expect(note).toBe(`9:${at + 5000}:INBOX_RETAKEN`)
+
+  // An older session keeps the stored note while returning this claim to .failed.
+  world.files.set(path, world.files.get(claim)!)
+  world.files.delete(claim)
+  for (let look = 0; look < 3; look += 1) {
+    world.mtime += 1
+    await clock.advance(5000)
+    expect(takenOf(world)).toEqual([])
+    expect(world.files.has(path)).toBe(true)
+    expect((store.inboxFailed as Record<string, string>)[name]).toBe(note)
+  }
+})
+
+test('at most five held turns are taken once more in one look', async ($, on) => {
+  const at = Date.parse('2026-10-16T12:00:00Z')
+  const names = Array.from({ length: 7 }, (_, index) => `codex-turn-${at - 60000 + index * 1000}-${index}.json`)
+  const store: Record<string, unknown> = { inboxDone: {}, autoConnectOff: true, inboxFailed: Object.fromEntries(names.map(name => [name, `8:${at}:QUESTION_RETENTION_FAILED`])) }
+  const world: World = {
+    files: new Map([[FILE, '# Progress\n'], ...names.map((name, index): [string, string] => [`${INBOX}/${name}.failed`, JSON.stringify({ session_id: `capped-retake-${index}`, cwd: '/work/api-gateway', last_assistant_message: 'Added the middleware.' })])]),
+    mtime: 1, hasTasks: true, store, reply: RATE_LIMIT_REPLY,
+  }
+  const clock = engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/persona_framework', surface: 'desktop', isInteractive: true })
+  await clock.advance(5000)
+  expect(takenOf(world).length + Object.keys(store.inboxDone as Record<string, string>).length).toBe(5)
+  for (const name of names.slice(0, 5)) expect(world.files.has(`${INBOX}/${name}.failed`)).toBe(false)
+  for (const name of names.slice(5)) expect(world.files.has(`${INBOX}/${name}.failed`)).toBe(true)
+
+  world.mtime += 1
+  await clock.advance(5000)
+  for (const name of names) {
+    expect(world.files.has(`${INBOX}/${name}.failed`)).toBe(false)
+    expect((store.inboxDone as Record<string, string>)[name]).toBeDefined()
+  }
+  expect(takenOf(world)).toEqual([])
+})
+
+test('held turns still waiting from an earlier look count toward the five', async ($, on) => {
+  const at = Date.parse('2026-10-16T12:00:00Z')
+  const names = Array.from({ length: 7 }, (_, index) => `codex-turn-${at - 60000 + index * 1000}-${index}.json`)
+  const store: Record<string, unknown> = { inboxDone: {}, autoConnectOff: true, inboxFailed: Object.fromEntries(names.map(name => [name, `8:${at}:QUESTION_RETENTION_FAILED`])) }
+  const world: World = {
+    files: new Map([[FILE, '# Progress\n'], ...names.map((name, index): [string, string] => [`${INBOX}/${name}.failed`, JSON.stringify({ session_id: `waiting-retake-${index}`, cwd: '/work/api-gateway', last_assistant_message: 'Added the middleware.' })])]),
+    mtime: 1, hasTasks: true, store, hang: () => true,
+  }
+  const clock = engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/persona_framework', surface: 'desktop', isInteractive: true })
+  await clock.advance(5000)
+  expect(takenOf(world).filter(path => path.endsWith('-9.taking'))).toHaveLength(5)
+
+  world.mtime += 1
+  await clock.advance(5000)
+  expect(takenOf(world)).toHaveLength(5)
+  expect(takenOf(world).filter(path => path.endsWith('-9.taking'))).toHaveLength(5)
+  expect(names.filter(name => world.files.has(`${INBOX}/${name}.failed`))).toHaveLength(2)
+})
+
+test('held turns of one session are taken once more oldest first, ends and turns alike', async ($, on) => {
+  const at = Date.parse('2026-10-16T12:00:00Z')
+  // A listing puts every end before every turn; here the two newest turns are ends.
+  const names = Array.from({ length: 7 }, (_, index) => `codex-${index >= 5 ? 'end' : 'turn'}-${at - 60000 + index * 1000}-${index}.json`)
+  const store: Record<string, unknown> = { inboxDone: {}, autoConnectOff: true, inboxFailed: Object.fromEntries(names.map(name => [name, `8:${at}:QUESTION_RETENTION_FAILED`])) }
+  const world: World = {
+    files: new Map([[FILE, '# Progress\n'], ...[...names].sort().map((name): [string, string] => [`${INBOX}/${name}.failed`, JSON.stringify({ session_id: 'ordered-retake', cwd: '/work/api-gateway', last_assistant_message: `Wrapped up item-${names.indexOf(name)}.` })])]),
+    mtime: 1, hasTasks: true, store, asked: [],
+    reply: prompt => {
+      const item = /item-(\d)/.exec(prompt)?.[1]
+      return prompt.includes('TITLE:') && item !== undefined ? `TITLE: Add the middleware\nCONTEXT: Synthetic\nDONE: Finished step ${item}\nNEXT: -\nASK: -` : undefined
+    },
+  }
+  const clock = engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/persona_framework', surface: 'desktop', isInteractive: true })
+  await clock.advance(5000)
+  world.mtime += 1
+  await clock.advance(5000)
+  // The first look sums its last two turns, items 3 and 4; ends taken first would have left them older than the block.
+  expect(world.asked?.filter(prompt => prompt.includes('TITLE:')).map(prompt => /item-(\d)/.exec(prompt)?.[1])).toEqual(['3', '4'])
+  expect(world.files.get(FILE) ?? '').toContain('Finished step 4')
+  for (const name of names) {
+    expect(world.files.has(`${INBOX}/${name}.failed`)).toBe(false)
+    expect((store.inboxDone as Record<string, string>)[name]).toBeDefined()
+  }
+  expect(takenOf(world)).toEqual([])
+})
+
+test('a fresh turn beside a held turn\'s last try is tried again when the model gives no summary', async ($, on) => {
+  const at = Date.parse('2026-10-16T12:00:00Z')
+  const held = `codex-turn-${at - 120000}-1.json`, fresh = `codex-turn-${at - 60000}-2.json`
+  const body = (answer: string): string => JSON.stringify({ session_id: 'mixed-retake', cwd: '/work/api-gateway', last_assistant_message: answer })
+  const store: Record<string, unknown> = { inboxDone: {}, autoConnectOff: true, inboxFailed: { [held]: `8:${at}:QUESTION_RETENTION_FAILED` } }
+  const world: World = {
+    files: new Map([[FILE, '# Progress\n'], [`${INBOX}/${fresh}`, body('SILENT tidied the logs.')], [`${INBOX}/${held}.failed`, body('Added the middleware.')]]),
+    mtime: 1, hasTasks: true, store,
+    hang: prompt => prompt.includes('SILENT'),
+    reply: prompt => (prompt.includes('TITLE:') ? 'TITLE: Add the middleware\nCONTEXT: Synthetic\nDONE: Added the middleware\nNEXT: -\nASK: -' : undefined),
+  }
+  const clock = engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/persona_framework', surface: 'desktop', isInteractive: true })
+  await clock.advance(5000)
+  await clock.advance(30000)
+  expect(world.files.get(FILE) ?? '').toContain('- [x] Added the middleware')
+  expect((store.inboxDone as Record<string, string>)[held]).toBeDefined()
+  expect((store.inboxDone as Record<string, string>)[fresh]).toBeUndefined()
+  expect((store.inboxFailed as Record<string, string>)[fresh]).toMatch(/^1:/)
+  expect(takenOf(world)).toHaveLength(1)
+  expect(takenOf(world)[0]).toContain(`${fresh}.`)
+  expect(takenOf(world)[0]).toEndWith('-1.taking')
+})
+
+test('a newer held turn still reaches the board when an older fresh turn of its session gets no summary', async ($, on) => {
+  const at = Date.parse('2026-10-16T12:00:00Z')
+  const fresh = `codex-turn-${at - 120000}-1.json`, held = `codex-turn-${at - 60000}-2.json`
+  const body = (answer: string): string => JSON.stringify({ session_id: 'held-after-silence', cwd: '/work/api-gateway', last_assistant_message: answer })
+  const store: Record<string, unknown> = { inboxDone: {}, autoConnectOff: true, inboxFailed: { [held]: `8:${at}:QUESTION_RETENTION_FAILED` } }
+  const world: World = {
+    files: new Map([[FILE, '# Progress\n'], [`${INBOX}/${fresh}`, body('SILENT tidied the logs.')], [`${INBOX}/${held}.failed`, body('Added the middleware.')]]),
+    mtime: 1, hasTasks: true, store,
+    hang: prompt => prompt.includes('SILENT'),
+    reply: prompt => (prompt.includes('TITLE:') ? 'TITLE: Add the middleware\nCONTEXT: Synthetic\nDONE: Added the middleware\nNEXT: -\nASK: -' : undefined),
+  }
+  const clock = engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/persona_framework', surface: 'desktop', isInteractive: true })
+  await clock.advance(5000)
+  await clock.advance(30000)
+  // The held turn's retake is its last try: the silent turn before it does not hold it back.
+  expect(world.files.get(FILE) ?? '').toContain('- [x] Added the middleware')
+  expect((store.inboxDone as Record<string, string>)[held]).toBeDefined()
+  expect((store.inboxFailed as Record<string, string>)[fresh]).toMatch(/^1:/)
+  expect(takenOf(world)).toHaveLength(1)
+  expect(takenOf(world)[0]).toContain(`${fresh}.`)
+})
+
+test('a newer fresh turn waits when an older held turn of its session is not kept on the board', async ($, on) => {
+  const at = Date.parse('2026-10-16T12:00:00Z')
+  const held = `codex-turn-${at - 120000}-1.json`, fresh = `codex-turn-${at - 60000}-2.json`
+  const body = (answer: string): string => JSON.stringify({ session_id: 'fresh-after-held', cwd: '/work/api-gateway', last_assistant_message: answer })
+  const store: Record<string, unknown> = { inboxDone: {}, autoConnectOff: true, inboxFailed: { [held]: `8:${at}:QUESTION_RETENTION_FAILED` } }
+  const world: World = {
+    files: new Map([[FILE, '# Progress\n'], [`${INBOX}/${fresh}`, body('Wrapped up fresh-item.')], [`${INBOX}/${held}.failed`, body('Wrapped up held-item.')]]),
+    mtime: 1, hasTasks: true, store, asked: [],
+    reply: prompt => (prompt.includes('TITLE:') ? 'TITLE: Add the middleware\nCONTEXT: Synthetic\nDONE: Added the middleware\nNEXT: -\nASK: -' : undefined),
+  }
+  // Another writer keeps taking this project's block out, so the held turn's block is never read back.
+  const withoutBlock = (): string => {
+    world.afterWrite = withoutBlock
+    return (world.files.get(FILE) ?? '').replace(/## api-gateway\n[\s\S]*/, '')
+  }
+  world.afterWrite = withoutBlock
+  const clock = engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/persona_framework', surface: 'desktop', isInteractive: true })
+  await clock.advance(5000)
+  expect((store.inboxFailed as Record<string, string>)[held]).toMatch(/^9:/)
+  expect((store.inboxFailed as Record<string, string>)[fresh]).toMatch(/^1:/)
+  expect(world.asked?.some(prompt => prompt.includes('fresh-item'))).toBe(false)
+  expect(takenOf(world).some(path => path.includes(`${fresh}.`) && path.endsWith('-1.taking'))).toBe(true)
+  expect((store.inboxDone as Record<string, string>)[fresh]).toBeUndefined()
+})
+
+test('a held turn the board already took is not taken once more', async ($, on) => {
+  const at = Date.parse('2026-10-16T12:00:00Z')
+  const name = `codex-turn-${at - 60000}-1.json`
+  const store: Record<string, unknown> = { inboxDone: { [name]: `elsewhere:${at}` }, autoConnectOff: true, inboxFailed: { [name]: `8:${at}:QUESTION_RETENTION_FAILED` } }
+  const world: World = {
+    files: new Map([[FILE, '# Progress\n'], [`${INBOX}/${name}.failed`, JSON.stringify({ session_id: 'done-elsewhere', cwd: '/work/api-gateway', last_assistant_message: 'Added the middleware.' })]]),
+    mtime: 1, hasTasks: true, store, reply: RATE_LIMIT_REPLY, asked: [],
+  }
+  const clock = engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/persona_framework', surface: 'desktop', isInteractive: true })
+  await clock.advance(5000)
+  expect(takenOf(world)).toEqual([])
+  expect(world.asked?.some(prompt => prompt.includes('Added the middleware'))).toBe(false)
+  expect(world.files.has(`${INBOX}/${name}.failed`)).toBe(true)
+  expect(world.files.get(FILE)).toBe('# Progress\n')
+})
+
+test('a held turn that cannot be moved is tried again only after the claim time', async ($, on) => {
+  const at = Date.parse('2026-10-16T12:00:00Z')
+  const name = 'codex-turn-1792216380-1.json'
+  const path = `${INBOX}/${name}.failed`
+  const store: Record<string, unknown> = { inboxDone: {}, autoConnectOff: true, inboxFailed: { [name]: `8:${at}:QUESTION_RETENTION_FAILED` } }
+  const world: World = {
+    files: new Map([[FILE, '# Progress\n'], [path, JSON.stringify({ session_id: 'refused-retake-delay', cwd: '/work/api-gateway', last_assistant_message: 'Added the middleware.' })]]),
+    mtime: 1, hasTasks: true, store, clockOffset: 0, reply: RATE_LIMIT_REPLY, ran: [], isMoveRefused: from => from === path,
+  }
+  const clock = engineBeneath(on, world)
+  const seen = outside(on, world)
+  const moves = (): number => world.ran!.filter(argv => argv[0] === 'mv' && argv.includes(path) || argv.some(arg => arg.includes('Move-Item') && arg.includes(path))).length
+  await $.session.start({ cwd: '/work/persona_framework', surface: 'desktop', isInteractive: true })
+  await clock.advance(5000)
+  expect(moves()).toBe(1)
+  for (let look = 0; look < 3; look += 1) {
+    world.mtime += 1
+    world.clockOffset! += 60000
+    await clock.advance(5000)
+    expect(moves()).toBe(1)
+    expect(world.files.has(path)).toBe(true)
+  }
+  expect(seen.notified.filter(text => text === ZH_TW.inboxHeld(path, 'INBOX_RETAKE_MOVE_FAILED'))).toHaveLength(1)
+  // A look whose listing fails keeps the wait; the next look still waits out CLAIM_MS.
+  world.unlistable = new Set([INBOX])
+  world.mtime += 1
+  world.clockOffset! += 60000
+  await clock.advance(5000)
+  world.unlistable = undefined
+  world.isMoveRefused = () => false
+  world.mtime += 1
+  world.clockOffset! += 60000
+  await clock.advance(5000)
+  expect(moves()).toBe(1)
+  expect(world.files.has(path)).toBe(true)
+
+  world.isMoveRefused = () => false
+  world.mtime += 1
+  world.clockOffset = CLAIM_MS
+  await clock.advance(5000)
+  expect(moves()).toBe(2)
+  expect(world.files.has(path)).toBe(false)
+  expect((store.inboxDone as Record<string, string>)[name]).toBeDefined()
+  expect(takenOf(world)).toEqual([])
+})
+
+test('a held turn another session took first is skipped without a notice', async ($, on) => {
+  const at = Date.parse('2026-10-16T12:00:00Z')
+  const name = 'codex-turn-1792216380-1.json'
+  const path = `${INBOX}/${name}.failed`
+  const note = `8:${at}:QUESTION_RETENTION_FAILED`
+  const store: Record<string, unknown> = { inboxDone: {}, autoConnectOff: true, inboxFailed: { [name]: note } }
+  const world: World = {
+    files: new Map([[FILE, '# Progress\n'], [path, JSON.stringify({ session_id: 'rename-race', cwd: '/work/api-gateway', last_assistant_message: 'Added the middleware. 100 or 300 a minute?' })]]),
+    mtime: 1, hasTasks: true, store, asked: [], reply: RATE_LIMIT_REPLY,
+    isMoveRefused: from => {
+      if (from !== path) return false
+      world.files.delete(path)
+      return true
+    },
+  }
+  const clock = engineBeneath(on, world)
+  const seen = outside(on, world)
+  await $.session.start({ cwd: '/work/persona_framework', surface: 'desktop', isInteractive: true })
+  await clock.advance(5000)
+  expect(seen.notified).toEqual([])
+  expect(world.files.get(FILE)).toBe('# Progress\n')
+  expect(world.files.has(path)).toBe(false)
+  expect(store.inboxDone).toEqual({})
+  expect(store.inboxFailed).toEqual({ [name]: note })
+  expect(Object.keys(store).filter(key => key.startsWith('pendingInboxQuestion:'))).toEqual([])
+  expect(JSON.parse(world.files.get(QUESTIONS) ?? '{"records":[]}').records).toEqual([])
+  expect(world.asked).toEqual([])
+  expect(takenOf(world)).toEqual([])
+})
+
+test('a held turn whose rename lands although the move reports failure is still taken', async ($, on) => {
+  const at = Date.parse('2026-10-16T12:00:00Z')
+  const name = 'codex-turn-1792216380-1.json'
+  const path = `${INBOX}/${name}.failed`
+  const store: Record<string, unknown> = { inboxDone: {}, autoConnectOff: true, inboxFailed: { [name]: `8:${at}:QUESTION_RETENTION_FAILED` } }
+  const world: World = {
+    files: new Map([[FILE, '# Progress\n'], [path, JSON.stringify({ session_id: 'rename-landed', cwd: '/work/api-gateway', last_assistant_message: 'Added the middleware. 100 or 300 a minute?' })]]),
+    mtime: 1, hasTasks: true, store, reply: RATE_LIMIT_REPLY,
+    afterMove: from => from === path,
+  }
+  const clock = engineBeneath(on, world)
+  const seen = outside(on, world)
+  await $.session.start({ cwd: '/work/persona_framework', surface: 'desktop', isInteractive: true })
+  await clock.advance(5000)
+  expect(world.files.get(FILE) ?? '').toContain('- [x] Added the token bucket middleware')
+  expect(world.files.has(path)).toBe(false)
+  expect((store.inboxDone as Record<string, string>)[name]).toBeDefined()
+  expect((store.inboxFailed as Record<string, string>)[name]).toBeUndefined()
+  expect(takenOf(world)).toEqual([])
+  expect(seen.notified.some(text => text.includes('INBOX_RETAKE_MOVE_FAILED'))).toBe(false)
+})
+
+test('a board-only reply taken again after three days does not put its question back', async ($, on) => {
+  const { world } = questionWorld()
+  world.at = PROMPT_AT + 4 * 86400000
+  const clock = engineBeneath(on, world)
+  await probeStart($)
+  addPrompt(world, PROMPT_AT + 1000)
+  await clock.advance(5000)
+  expect(world.files.get(FILE)).toContain('- [x] Database — Use staging?')
+  const before = world.files.get(FILE)
+  const name = `codex-turn-${PROMPT_AT + 2000}-77.json`
+  world.store!.inboxFailed = { [name]: `8:${world.at}:QUESTION_RETENTION_FAILED` }
+  world.files.set(`${INBOX}/${name}.failed`, JSON.stringify({ session_id: PROMPT_SESSION, prompt: 'where do things stand?', last_assistant_message: 'Progress  ● 1 waiting  ▸ 0 in progress  ⚑ 0 due soon  ✓ 0 done today' }))
+  world.mtime += 1
+  await clock.advance(5000)
+  expect(world.files.get(FILE)).toBe(before)
+  expect(world.files.get(FILE)).not.toContain('- [?] Database')
+  expect((world.store!.inboxDone as Record<string, string>)[name]).toBeDefined()
+  expect(world.files.has(`${INBOX}/${name}.failed`)).toBe(false)
+  expect(takenOf(world)).toEqual([])
+  expect(world.asked).toEqual([])
+  const ledger = JSON.parse(world.files.get(QUESTIONS) ?? '{"records":[]}').records as Array<{ isUnresolved?: boolean }>
+  expect(ledger.some(one => one.isUnresolved)).toBe(false)
+})
+
+test('fresh turn files are taken before held turns when the look is full', async ($, on) => {
+  const at = Date.parse('2026-10-16T12:00:00Z')
+  const fresh = Array.from({ length: 21 }, (_, index) => `codex-turn-${at - 60000 + index * 1000}-${index}.json`)
+  const held = ['codex-turn-1792216300-1.json', 'codex-turn-1792216301-2.json']
+  const body = (session: string): string => JSON.stringify({ session_id: session, cwd: '/work/api-gateway', last_assistant_message: 'Added the middleware.' })
+  const store: Record<string, unknown> = { inboxDone: {}, autoConnectOff: true, inboxFailed: Object.fromEntries(held.map(name => [name, `8:${at}:QUESTION_RETENTION_FAILED`])) }
+  const world: World = {
+    files: new Map([[FILE, '# Progress\n'], ...held.map((name, index): [string, string] => [`${INBOX}/${name}.failed`, body(`held-full-${index}`)]), ...fresh.map((name): [string, string] => [`${INBOX}/${name}`, body('fresh-full')])]),
+    mtime: 1, hasTasks: true, store, ran: [], reply: RATE_LIMIT_REPLY,
+  }
+  const clock = engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/persona_framework', surface: 'desktop', isInteractive: true })
+  await clock.advance(5000)
+  const moves = (): string[] => world.ran!.filter(argv => argv[0] === 'mv' && argv[1]?.startsWith(`${INBOX}/`)).map(argv => argv[1]!)
+  expect(moves()).toEqual(fresh.slice(0, 20).map(name => `${INBOX}/${name}`))
+  for (const name of fresh.slice(0, 20)) expect((store.inboxDone as Record<string, string>)[name]).toBeDefined()
+  expect(world.files.has(`${INBOX}/${fresh[20]}`)).toBe(true)
+  for (const name of held) expect(world.files.has(`${INBOX}/${name}.failed`)).toBe(true)
+  expect(takenOf(world)).toEqual([])
+
+  world.mtime += 1
+  await clock.advance(5000)
+  expect(moves().slice(20)).toEqual([`${INBOX}/${fresh[20]}`, ...held.map(name => `${INBOX}/${name}.failed`)])
+  for (const name of [...fresh, ...held]) expect((store.inboxDone as Record<string, string>)[name]).toBeDefined()
+  for (const name of held) expect(world.files.has(`${INBOX}/${name}.failed`)).toBe(false)
+  expect(takenOf(world)).toEqual([])
+})
+
+test('a newer turn saved during a held turn\'s summary keeps its old question out', async ($, on) => {
+  const at = Date.parse('2026-10-16T12:00:00Z')
+  const name = `codex-turn-${at - 60000}-1.json`
+  const id = blockId('codex', 'newer-during-summary')
+  const mirror = { ...emptyMirror(id, 'api-gateway', at, '/work/api-gateway', 'codex'), title: 'Newer work', turnOrder: at * 2, tasks: [confirmStep('Keep the current step')] }
+  const current = upsertAutoBlock('# Progress\n', mirror, ZH_TW)
+  const store: Record<string, unknown> = { inboxDone: {}, autoConnectOff: true, inboxFailed: { [name]: `8:${at}:QUESTION_RETENTION_FAILED` } }
+  const world: World = {
+    files: new Map([[FILE, '# Progress\n'], [`${INBOX}/${name}.failed`, JSON.stringify({ session_id: 'newer-during-summary', cwd: '/work/api-gateway', last_assistant_message: 'Added old middleware. Restore the old limit?' })]]),
+    mtime: 1, hasTasks: true, store,
+    reply: prompt => {
+      if (!prompt.includes('Restore the old limit?')) return undefined
+      store[`agent:${id}`] = mirror
+      world.files.set(FILE, current)
+      return 'TITLE: Old work\nDONE: Old middleware\nNEXT: -\nASK: Restore the old limit?'
+    },
+  }
+  const clock = engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/persona_framework', surface: 'desktop', isInteractive: true })
+  await clock.advance(5000)
+  expect(world.files.get(FILE)).toBe(current)
+  expect(Object.keys(store).filter(key => key.startsWith('pendingInboxQuestion:'))).toEqual([])
+  expect(JSON.parse(world.files.get(QUESTIONS) ?? '{"records":[]}').records).toEqual([])
+  expect((store.inboxDone as Record<string, string>)[name]).toBeDefined()
+  expect(world.files.has(`${INBOX}/${name}.failed`)).toBe(false)
 })
 
 test('on its last try, a turn the model gives no summary for keeps the block’s open steps', async ($, on) => {
