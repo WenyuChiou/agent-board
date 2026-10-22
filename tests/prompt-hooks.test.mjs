@@ -529,3 +529,50 @@ test('legacy SDK reporters remove their partial temporary files and preserve for
     fs.rmSync(home, { recursive: true, force: true, maxRetries: 8, retryDelay: 50 })
   }
 })
+
+test('the sh timeout receipt reads every key with one grep', async () => {
+  const { reporterSh } = await import('../hooks/hook-reporters.ts')
+  const fallback = reporterSh('/x').split('write_fallback() {')[1].split('\ntimed_out() {')[0]
+  assert.equal((fallback.match(/\bgrep\b/g) || []).length, 1)
+  assert.doesNotMatch(fallback, /for key in/)
+})
+
+test('the sh timeout receipt preserves ordered plain metadata and the session gate', () => fixture(async home => {
+  const { reporterSh } = await import('../hooks/hook-reporters.ts')
+  const source = reporterSh('/x')
+  const fallback = source.slice(source.indexOf('write_fallback() {'), source.indexOf('\ntimed_out() {'))
+  const file = shellPath(join(home, 'receipt')), script = join(home, 'fallback.sh')
+  const quote = value => `'${value.replaceAll("'", "'\\''")}'`
+  writeFileSync(script, `file=${quote(file)}\nlog_error() { printf '%s\\n' "$1" >&2; }\n${fallback}\nwrite_fallback\nexit 0\n`)
+  const cases = [
+    [{ extra: { cwd: 'a"b' }, session_id: 'synthetic', cwd: '/later plain *', workspaceRoot: '/中文', prompt: 'PRIVATE_RAW_PROMPT' }, { session_id: 'synthetic', cwd: '/later plain *', workspaceRoot: '' }],
+    [{ directory: '/dir *', conversationId: 'conversation', sessionId: 'camel', session_id: 'synthetic', cwd: '', prompt: '/board' }, { session_id: 'synthetic', sessionId: 'camel', conversationId: 'conversation', cwd: '', directory: '/dir *', board_request: true }],
+    [{ cwd: '/synthetic', prompt: 'PRIVATE_RAW_PROMPT' }, null],
+  ]
+  // A value is never read as a file pattern: with globbing on, this file's name would replace the line.
+  // Windows cannot name a file this way, so only POSIX runs check it.
+  if (process.platform !== 'win32') {
+    writeFileSync(join(home, '"cwd":"x-glob"'), '')
+    cases.push([{ session_id: 'synthetic', cwd: 'x*' }, { session_id: 'synthetic', cwd: 'x*' }])
+  }
+  const run = () => spawnSync(sh, [shellPath(script)], { cwd: home, env: { ...process.env, HOME: home, USERPROFILE: home }, encoding: 'utf8', windowsHide: true, timeout: 10000 })
+  for (const [payload, expected] of cases) {
+    rmSync(file + '.json', { force: true })
+    writeFileSync(file + '.tmp', JSON.stringify(payload))
+    const out = run()
+    assert.equal(out.status, 0, out.stderr)
+    assert.equal(out.stderr, '')
+    if (expected === null) assert.equal(existsSync(file + '.json'), false)
+    else assert.equal(readFileSync(file + '.json', 'utf8'), JSON.stringify(expected))
+  }
+  // A receipt whose temporary file cannot be created is reported, and another's file is left alone.
+  rmSync(file + '.json', { force: true })
+  writeFileSync(file + '.fallback', 'other')
+  writeFileSync(file + '.tmp', JSON.stringify({ session_id: 'synthetic' }))
+  const out = run()
+  assert.equal(out.status, 0, out.stderr)
+  // The reporter sends the shell's own message to /dev/null; this harness does not.
+  assert.match(out.stderr, /(^|\n)REPORTER_FAILED\n$/)
+  assert.equal(existsSync(file + '.json'), false)
+  assert.equal(readFileSync(file + '.fallback', 'utf8'), 'other')
+}))

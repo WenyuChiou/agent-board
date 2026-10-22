@@ -816,6 +816,46 @@ test('a hook worker that starts after the host would stop it still reads its inp
   assert.deepEqual(pendingFiles(f), [])
 }))
 
+test('a hook log write sweeps stale hook-errors.log temp files but keeps fresh ones', () => fixture(f => {
+  assert.equal(f.install('--agent', 'antigravity', '--apply').status, 0)
+  f.save(join(f.root, 'agent-board-hook.mjs'), hookWorker(f.home, f.script, 'const isBoardRequest = () => false'))
+  const stale = join(f.root, 'hook-errors.log.111.tmp'), fresh = join(f.root, 'hook-errors.log.222.tmp')
+  const directory = join(f.root, 'hook-errors.log.333.tmp'), foreign = join(f.root, 'hook-errors.log.other.tmp')
+  f.save(stale, 'stale'); f.save(fresh, 'fresh'); f.save(foreign, 'foreign')
+  mkdirSync(directory)
+  const old = new Date(Date.now() - 300000)
+  for (const file of [stale, directory, foreign]) utimesSync(file, old, old)
+  const out = spawnSync(process.execPath, [join(f.root, 'agent-board-hook.mjs'), '--hook-version', '1', '--agent-status', '--agent', 'antigravity', '--hook-started', String(Date.now() - 3000)], {
+    env: f.env, input: JSON.stringify({ conversationId: 'synthetic-log-sweep' }), encoding: 'utf8', windowsHide: true, timeout: 20000,
+  })
+  assert.equal(out.status, 0, hookFailure(out))
+  assert.match(hookLog(f), /REPORTER_QUEUED/)
+  assert.equal(existsSync(stale), false)
+  assert.equal(existsSync(fresh), true)
+  assert.equal(existsSync(directory), true)
+  assert.equal(existsSync(foreign), true)
+}))
+
+test('a report hook whose reporter runs past its deadline is never queued', () => fixture(async f => {
+  assert.equal(f.install('--agent', 'cursor', '--apply').status, 0)
+  f.save(join(f.root, 'agent-board-hook.mjs'), hookWorker(f.home, f.script, 'const isBoardRequest = () => false'))
+  const preload = join(f.home, 'hang-report.cjs'), marker = join(f.home, 'report-child-started')
+  f.save(preload, `if (process.argv.includes('--hook-deadline')) { require('node:fs').writeFileSync(${JSON.stringify(marker)}, 'started'); setInterval(() => {}, 1000) }\n`)
+  const worker = join(f.root, 'agent-board-hook.mjs')
+  const args = [worker, '--hook-version', '1', '--codex-report', '--agent', 'codex']
+  // Host command hooks fail open even though an explicit report worker returns a failure status.
+  const env = { ...f.env, NODE_OPTIONS: `--require ${JSON.stringify(preload.replaceAll('\\', '/'))}` }
+  const launcher = `const { spawnSync } = require('node:child_process'); const out = spawnSync(process.execPath, ${JSON.stringify(args)}, { input: require('node:fs').readFileSync(0), encoding: 'utf8', windowsHide: true }); if (out.error) throw out.error; process.stdout.write(String(out.status)); process.stderr.write(out.stderr)`
+  const out = await nativeProcess(process.execPath, ['-e', launcher], env, JSON.stringify({ session_id: 'synthetic-report-deadline', title: 'Synthetic report' }))
+  assert.equal(out.error, undefined, hookFailure(out))
+  assert.equal(out.status, 0, hookFailure(out))
+  assert.equal(existsSync(marker), true, `the reporter child must start and hang: ${hookFailure(out)} ${hookLog(f)}`)
+  assert.match(hookLog(f), /REPORTER_TIMEOUT/)
+  assert.doesNotMatch(hookLog(f), /REPORTER_QUEUED/)
+  assert.deepEqual(existsSync(join(f.root, 'pending')) ? readdirSync(join(f.root, 'pending')) : [], [])
+  assert.equal(out.stdout, '1', 'the host wrapper must observe the report failure')
+}))
+
 test('a hook worker that starts just before its deadline still queues an event whose input arrives after it', () => fixture(async f => {
   assert.equal(f.install('--agent', 'gemini', '--apply').status, 0)
   const worker = join(f.root, 'agent-board-hook.mjs')
@@ -1286,6 +1326,82 @@ test('legacy prompt classifiers time out and reap their process without promotin
   }
 }))
 
+for (const isWindows of [false, true]) test(`the ${isWindows ? 'PowerShell' : 'sh'} reporter logs REPORTER_FAILED when its timeout receipt cannot be saved`, { skip: isWindows !== (process.platform === 'win32') }, () => fixture(async f => {
+  const inbox = join(f.root, 'progress-inbox'), script = join(f.root, isWindows ? 'progress-report.ps1' : 'progress-report.sh')
+  const pidFile = join(f.home, 'classifier.pid'), preload = join(f.home, 'hang-classifier.cjs')
+  let source = isWindows ? reporterPs1() : reporterSh(inbox)
+  const env = { ...f.env, NODE_OPTIONS: `--require ${JSON.stringify(preload.replaceAll('\\', '/'))}` }
+  const stale = join(f.root, 'hook-errors.log.111.tmp'), fresh = join(f.root, 'hook-errors.log.222.tmp')
+  if (isWindows) {
+    const anchor = '      Move-Item -LiteralPath $fallbackTmp'
+    assert.equal(source.split(anchor).length, 2, 'fallback move anchor must be unique')
+    source = source.replace(anchor, () => "      throw 'SYNTHETIC_FALLBACK_FAILURE'\n" + anchor)
+    f.save(stale, 'stale'); f.save(fresh, 'fresh')
+    const old = new Date(Date.now() - 300000)
+    utimesSync(stale, old, old)
+  } else {
+    const mv = spawnSync('/bin/sh', ['-c', 'command -v mv'], { encoding: 'utf8' })
+    assert.equal(mv.status, 0, mv.stderr)
+    const tools = join(f.home, 'tools'), shim = join(tools, 'mv')
+    const quote = value => `'${value.replaceAll("'", "'\\''")}'`
+    f.save(shim, `#!/bin/sh\nfor arg do case "$arg" in *.fallback) exit 1 ;; esac; done\nexec ${quote(mv.stdout.trim())} "$@"\n`)
+    chmodSync(shim, 0o700)
+    env.PATH = `${tools}${delimiter}${env.PATH}`
+  }
+  f.save(script, source)
+  f.save(preload, `require('node:fs').writeFileSync(${JSON.stringify(pidFile)}, String(process.pid))\nsetInterval(() => {}, 1000)\n`)
+  try {
+    const args = isWindows ? ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', script, 'codex', 'prompt'] : [script, 'codex', 'prompt']
+    const out = await nativeProcess(isWindows ? 'powershell.exe' : '/bin/sh', args, env, JSON.stringify({ session_id: 'synthetic-failed-fallback', prompt: 'PRIVATE_RAW_PROMPT' }))
+    assert.equal(out.error, undefined, hookFailure(out))
+    assert.equal(out.status, 0, hookFailure(out))
+    assert.equal(existsSync(pidFile), true, 'exercise the hung classifier')
+    assert.equal(isReporterAlive(Number(readFileSync(pidFile, 'utf8'))), false)
+    assert.deepEqual(readdirSync(inbox), [])
+    const log = hookLog(f)
+    assert.match(log, /REPORTER_FAILED[\s\S]*REPORTER_TIMEOUT/)
+    assert.doesNotMatch(log, /PRIVATE_/)
+    if (isWindows) {
+      assert.equal(existsSync(stale), false)
+      assert.equal(existsSync(fresh), true)
+      rmSync(join(f.root, 'hook-errors.log'))
+      rmSync(pidFile)
+      const anchor = '      $metadata = New-Object Collections.Specialized.OrderedDictionary'
+      const source = reporterPs1()
+      assert.equal(source.split(anchor).length, 2, 'metadata build anchor must be unique')
+      f.save(script, source.replace(anchor, () => "      throw 'SYNTHETIC_METADATA_FAILURE'\n" + anchor))
+      const out = await nativeProcess('powershell.exe', args, env, JSON.stringify({ session_id: 'synthetic-metadata-failure', prompt: 'PRIVATE_RAW_PROMPT' }))
+      assert.equal(out.error, undefined, hookFailure(out))
+      assert.equal(out.status, 0, hookFailure(out))
+      assert.equal(existsSync(pidFile), true, 'exercise the classifier after a metadata failure')
+      assert.equal(isReporterAlive(Number(readFileSync(pidFile, 'utf8'))), false)
+      assert.deepEqual(readdirSync(inbox), [])
+      assert.match(hookLog(f), /REPORTER_FAILED[\s\S]*REPORTER_TIMEOUT/)
+    }
+  } finally {
+    if (existsSync(pidFile)) await stopReporter(Number(readFileSync(pidFile, 'utf8')))
+  }
+}))
+
+test('a reporter sweeps scratch files older than a minute from the inbox and keeps fresh ones', () => fixture(async f => {
+  const isWindows = process.platform === 'win32'
+  const inbox = join(f.root, 'progress-inbox'), script = join(f.root, isWindows ? 'progress-report.ps1' : 'progress-report.sh')
+  const old = new Date(Date.now() - 300000)
+  const names = ['tmp', 'receipt', 'fallback', 'timeout', 'complete'].map(suffix => `codex-prompt-1-1.${suffix}`)
+  for (const name of [...names, 'notes.txt']) { const file = join(inbox, name); f.save(file, 'stale'); utimesSync(file, old, old) }
+  f.save(join(inbox, 'codex-prompt-1-2.tmp'), 'fresh')
+  f.save(script, isWindows ? reporterPs1() : reporterSh(inbox))
+  const args = isWindows ? ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', script, 'codex', 'prompt'] : [script, 'codex', 'prompt']
+  const out = await nativeProcess(isWindows ? 'powershell.exe' : '/bin/sh', args, f.env, JSON.stringify({ session_id: 'synthetic-scratch-sweep', prompt: 'PRIVATE_RAW_PROMPT' }))
+  assert.equal(out.error, undefined, hookFailure(out))
+  assert.equal(out.status, 0, hookFailure(out))
+  const files = readdirSync(inbox)
+  for (const name of names) assert.equal(files.includes(name), false, name)
+  assert.equal(files.includes('codex-prompt-1-2.tmp'), true)
+  assert.equal(files.includes('notes.txt'), true)
+  assert.equal(files.filter(name => name.endsWith('.json')).length, 1)
+}))
+
 test('a timed-out prompt classifier saves a metadata receipt that marks a board request but not a folder named agent-board', () => fixture(async f => {
   const isWindows = process.platform === 'win32'
   const inbox = join(f.root, 'progress-inbox'), script = join(f.root, isWindows ? 'progress-report.ps1' : 'progress-report.sh')
@@ -1305,28 +1421,36 @@ test('a timed-out prompt classifier saves a metadata receipt that marks a board 
     // Grok Build sends camelCase fields, and the inbox knows it by its workspaceRoot field.
     { key: 'sessionId', payload: { ...grok, workspaceRoot: '/synthetic/agent-board', transcriptPath: '/synthetic/agent-board/PRIVATE_TRANSCRIPT.jsonl', prompt: 'PRIVATE_RAW_PROMPT' }, kept: { ...grok, workspaceRoot: '/synthetic/agent-board' } },
     { key: 'sessionId', payload: { ...grok, workspaceRoot: '/synthetic/中文', prompt: 'PRIVATE_RAW_PROMPT' }, kept: { ...grok, workspaceRoot: isWindows ? '/synthetic/中文' : '' } },
+    { payload: { extra: { cwd: 'a"b' }, cwd: '/synthetic/later plain *', prompt: 'PRIVATE_RAW_PROMPT' }, kept: { cwd: '/synthetic/later plain *' } },
+    { payload: { hookEventName: 'UserPromptSubmit', hook_event_name: 'UserPromptSubmit', directory: '/synthetic/dir *', project_dir: '/synthetic/project', workspace: '/synthetic/work', workspaceRoot: '/synthetic/root', cwd: '/synthetic/cwd', conversationId: 'synthetic-conversation', conversation_id: 'synthetic-conversation-underscore', 'thread-id': 'synthetic-thread-dash', thread_id: 'synthetic-thread', extra: { sessionID: 'synthetic-upper' }, sessionId: 'synthetic-camel', prompt: 'PRIVATE_RAW_PROMPT' }, kept: { sessionId: 'synthetic-camel', sessionID: 'synthetic-upper', 'thread-id': 'synthetic-thread-dash', thread_id: 'synthetic-thread', conversation_id: 'synthetic-conversation-underscore', conversationId: 'synthetic-conversation', cwd: '/synthetic/cwd', workspaceRoot: '/synthetic/root', workspace: '/synthetic/work', project_dir: '/synthetic/project', directory: '/synthetic/dir *', hook_event_name: 'UserPromptSubmit', hookEventName: 'UserPromptSubmit' } },
+    { key: null, payload: { cwd: '/synthetic/project', prompt: 'PRIVATE_RAW_PROMPT' } },
   ]
   for (const [index, { key = 'session_id', payload, kept, isBoard = false }] of cases.entries()) {
     const session = `synthetic-timeout-${index}`
     rmSync(pidFile, { force: true })
+    rmSync(join(f.root, 'hook-errors.log'), { force: true })
     let isGone = false
     try {
       const out = await nativeProcess(isWindows ? 'powershell.exe' : '/bin/sh', args, env,
-        JSON.stringify({ [key]: session, ...payload }),
+        JSON.stringify({ ...(key === null ? {} : { [key]: session }), ...payload }),
         callback => setTimeout(callback, 30000))
       assert.equal(out.error, undefined, hookFailure(out))
       assert.equal(out.status, 0, hookFailure(out))
       assert.equal(out.stdout.trim(), '{}')
-      assert.equal(existsSync(pidFile), true, 'exercise the real classifier process')
+      assert.equal(existsSync(pidFile), true, `exercise the real classifier process, case ${index}: ${hookLog(f)}`)
       assert.equal(isReporterAlive(Number(readFileSync(pidFile, 'utf8'))), false)
       isGone = true
       const files = readdirSync(inbox)
+      const log = hookLog(f)
+      assert.match(log, /REPORTER_TIMEOUT/)
+      assert.doesNotMatch(log, /REPORTER_FAILED/)
+      if (key === null) { assert.deepEqual(files, []); continue }
       assert.equal(files.length, 1)
       assert.ok(files[0].endsWith('.json'))
       const body = readFileSync(join(inbox, files[0]), 'utf8')
       assert.doesNotMatch(body, /[^\x20-\x7e]|PRIVATE_|\/board|transcript_path|transcriptPath/)
       assert.deepEqual(JSON.parse(body), { [key]: session, ...kept, ...(isBoard ? { board_request: true } : {}) }, `case ${index}`)
-      assert.match(readFileSync(join(f.root, 'hook-errors.log'), 'utf8'), /REPORTER_TIMEOUT/)
+      if (!isWindows) assert.equal(body, JSON.stringify({ [key]: session, ...kept, ...(isBoard ? { board_request: true } : {}) }), `raw case ${index}`)
       rmSync(join(inbox, files[0]))
     } finally {
       if (!isGone && existsSync(pidFile)) await stopReporter(Number(readFileSync(pidFile, 'utf8')))
