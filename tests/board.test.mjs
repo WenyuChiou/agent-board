@@ -949,9 +949,9 @@ test('--chat keeps ordinary key and token budget text readable while hiding synt
 
 test('--chat that fails for a reason that is no file says so in one plain line with the home folder hidden, never as a stack trace', () => {
   // The journal call is made to throw an error that names the home folder, as a bug in it might.
-  const call = 'doneToday(read('
+  const call = 'doneToday(journalToday('
   assert.ok(BOARD_SCRIPT.includes(call), 'the call this test breaks is no longer in the script')
-  const broken = script => script.replace(call, '((...rest) => { throw new TypeError("cannot go on in " + process.env.HOME + "/notes.md") })(read(')
+  const broken = script => script.replace(call, '((...rest) => { throw new TypeError("cannot go on in " + process.env.HOME + "/notes.md") })(journalToday(')
   for (const [lang, start] of [['en', 'The board could not be shown (cannot go on in ~/notes.md).'], ['zh-TW', '看板顯示不出來（cannot go on in ~/notes.md）。']]) {
     const ran = chatRun(['--chat', '--lang', lang], { file: CHAT_PROGRESS, change: broken })
     assert.equal(ran.status, 1, ran.stderr)

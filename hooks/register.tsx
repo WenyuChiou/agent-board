@@ -60,8 +60,6 @@ import {
   fallbackTitle,
   isAllDone,
   fromTaskList,
-  isAgingStoreKey,
-  isStaleStoreKey,
   markAnswered,
   noticesOf,
   resumeNote,
@@ -112,8 +110,9 @@ import {
   turnsToDigest,
 } from './inbox'
 import type { AgentTurn } from './inbox'
-import { keepRecent, remindersOf } from './remind'
-import { agentName, answeredJson, answeredPath, buildView, mirrorMatchesTask, parseAnswered, parseSeen, seenJson, seenPath, statusLine, withAnswered, withSeen } from './view'
+import { keepRecent, liveToldKeys, remindersOf } from './remind'
+import { boardRecords, doneRecord, isExpiredRecord, monthPart, pruneBatch, RETENTION, sizeWarnings, staleFailedInbox, staleStoreTemps, storeBytes } from './retention'
+import { agentName, answeredJson, answeredPath, buildView, mirrorMatchesTask, parseAnswered, parseSeen, seenJson, seenPath, statusLine, viewCache, withAnswered, withSeen } from './view'
 import type { StepRef, TaskRef, TaskRow, View, WaitingItem } from './view'
 import { acknowledgementKeys, archiveQuestionsKept, captureHashOf, captureJson, capturePath, emptyQuestions, parseCapture, withCaptures, isQuestionProof, isQuestionSnapshot, isTornLedger, migratedAnswered, observeQuestions, parseQuestions, questionProofJson, questionProofOf, questionProofPath, questionWords, questionsJson, questionsPath, resolveQuestion, resolvedQuestionsToRetire } from './questions'
 import type { QuestionAnswerEvidence, QuestionCapture, QuestionProofs, QuestionRecord } from './questions'
@@ -781,6 +780,10 @@ const poll = async ($: EngineInterface): Promise<void> => {
     try {
       const source = await $.fs.read(path)
       const projects = parseProgress(source)
+      // Every view of this change (the pane, the line under the prompt, the reminders) is built
+      // for the same moment, so it is built once (viewCache).
+      const changedAt = await $.clock.now()
+      await update($, now, () => changedAt)
       await update($, snapshot, () => ({
         path,
         isMissing: false,
@@ -801,7 +804,7 @@ const poll = async ($: EngineInterface): Promise<void> => {
           : rows.flatMap(row => row.questions ?? []).some(question => question.questionId === result.questionId)
         if (!isDrawn) await update($, resolveResult, () => null)
       }
-      await noteDone($, projects)
+      await noteDone($, projects, progressTail(source) === null)
       isPrunePending = true
       await refreshStatus($)
       await writeDashboard($)
@@ -847,6 +850,19 @@ const pendingTurns = async ($: EngineInterface): Promise<PendingTurn[]> => {
   }
 }
 
+const views = viewCache()
+// The store file's size at the last sweep (sweepFiles), for the warning above the board.
+let measuredStore = 0
+
+// The moment a view is built for: the pane's, which the 30 s tick and each change of the file move.
+const viewTime = async ($: EngineInterface): Promise<number> => (await read($, now)) || (await $.clock.now())
+
+// What the pane and the page say above the board when the file is cut off or too big.
+const warningOf = (snap: { size: number; tornTail?: { tasks: number } | null }, s: Strings): { warning?: string } => {
+  const lines = [...(snap.tornTail ? [s.progressIncomplete(snap.tornTail.tasks)] : []), ...sizeWarnings({ progress: snap.size, store: measuredStore }, s)]
+  return lines.length === 0 ? {} : { warning: lines.join(' · ') }
+}
+
 // progress.html beside progress.md: the file's view and pending turns, at most once a minute
 // and only when it changed.
 const writeDashboard = async ($: EngineInterface, force = false): Promise<{ path: string; problem?: string }> => {
@@ -856,8 +872,8 @@ const writeDashboard = async ($: EngineInterface, force = false): Promise<{ path
   if (!force && at - dashboardAt < 60 * 1000) return { path }
   const s = await wordsOf($)
   const view = {
-    ...buildView(snap.projects, [], null, at, await read($, today), await read($, doneSeen), s, await read($, hiddenAsks), await read($, firstSeen), await read($, questionLedger), await questionProofsFor($, snap.path || (await progressPath($))), await pendingTurns($)),
-    ...(snap.tornTail ? { warning: s.progressIncomplete(snap.tornTail.tasks) } : {}),
+    ...views.view(snap.projects, [], null, await viewTime($), await read($, today), await read($, doneSeen), s, await read($, hiddenAsks), await read($, firstSeen), await read($, questionLedger), await questionProofsFor($, snap.path || (await progressPath($))), await pendingTurns($)),
+    ...warningOf(snap, s),
   }
   await breathe($)
   const pending = await pendingTurns($)
@@ -913,22 +929,62 @@ const openLiveBoard = async ($: EngineInterface, path: string, s: Strings): Prom
   }
 }
 
-// Hand-kept tasks seen done for the first time get a timestamp, so they leave a day later.
-const noteDone = async ($: EngineInterface, projects: readonly ProgressProject[]): Promise<void> => {
+// Hand-kept tasks seen done for the first time get a timestamp, so they leave a day later. A
+// time kept for a task that is no longer done in the whole file (archived, or ticked open again)
+// is let go, so a later task of the same name starts its own day. Every save keeps only the tasks
+// done now, so a time another session brought back goes too; a file read cut short says nothing
+// about the tasks after the cut, so nothing is let go then.
+const noteDone = async ($: EngineInterface, projects: readonly ProgressProject[], isWhole: boolean): Promise<void> => {
   const seen = await read($, doneSeen)
   const fresh: Record<string, number> = {}
+  const done = new Set<string>()
   const at = await $.clock.now()
   for (const project of projects) {
     for (const task of project.tasks) {
       if (task.auto !== null || task.line < 0 || !isTaskComplete(task)) continue
       const key = doneKey(project.name, task.title)
+      done.add(key)
       if (seen[key] === undefined) fresh[key] = at
     }
   }
-  const keys = Object.keys(fresh)
-  if (keys.length === 0) return
-  await update($, doneSeen, old => ({ ...old, ...fresh }))
-  for (const key of keys) await $.store.set(key, fresh[key])
+  const isClean = isWhole && projects.length > 0
+  const hasGone = isClean && Object.keys(seen).some(key => !done.has(key))
+  if (Object.keys(fresh).length === 0 && !hasGone) return
+  const without = (times: Record<string, number>): Record<string, number> => (isClean ? Object.fromEntries(Object.entries(times).filter(([key]) => done.has(key))) : times)
+  await update($, doneSeen, old => without({ ...old, ...fresh }))
+  await saveDoneSeen($, at, kept => without({ ...fresh, ...kept }))
+}
+
+// When each hand-kept task was first seen done, in one store value `doneSeen` (#373). It was a
+// key per task, read one by one at every session start: a start's reads grew with the tasks
+// waiting to be archived. Keys an earlier release kept are moved in once and removed. This
+// session's saves go one after another. Two sessions saving at once can lose one's change: a
+// lost new time is seen done again later, so that task is archived later, never early; a removed
+// time that comes back is let go at the next look at the file (noteDone), where its task is no
+// longer done. Times older than 30 days go, as the keys did.
+const DONE_SEEN = 'doneSeen'
+const loadDoneSeen = async ($: EngineInterface, keys: readonly string[], at: number): Promise<Record<string, number>> => {
+  const legacy = keys.filter(key => key.startsWith('done:'))
+  if (legacy.length === 0) return doneRecord(await $.store.get(DONE_SEEN), at)
+  const moved: Record<string, number> = {}
+  for (const key of legacy) {
+    const value = await $.store.get(key)
+    if (typeof value === 'number') moved[key] = value
+  }
+  const seen = await saveDoneSeen($, at, kept => ({ ...moved, ...kept }))
+  for (const key of legacy) await $.store.delete(key)
+  return seen
+}
+
+let doneSeenSaves: Promise<unknown> = Promise.resolve()
+const saveDoneSeen = ($: EngineInterface, at: number, change: (seen: Record<string, number>) => Record<string, number>): Promise<Record<string, number>> => {
+  const saved = doneSeenSaves.then(async () => {
+    const next = doneRecord(change(doneRecord(await $.store.get(DONE_SEEN), at)), at)
+    await $.store.set(DONE_SEEN, next)
+    return next
+  })
+  doneSeenSaves = saved.catch(() => undefined)
+  return saved
 }
 
 const hasNoPaneSurfaceIn = (opened: { isPlaced: boolean; reason?: string }): boolean =>
@@ -958,11 +1014,11 @@ const refreshStatus = async ($: EngineInterface): Promise<void> => {
   let text = isPaneOpen
     ? undefined
     : statusLine(
-        buildView(
+        views.view(
           (await read($, snapshot)).projects,
           await read($, here),
           await read($, mine),
-          await $.clock.now(),
+          await viewTime($),
           await read($, today),
           await read($, doneSeen),
           s,
@@ -1064,10 +1120,33 @@ const notify = async ($: EngineInterface, text: string, project: string): Promis
   await $.ui.notify(text, { title: (await wordsOf($)).notifyTitle(project) }).catch(() => undefined)
 }
 
-// Recounts today's finished steps from this month's journal.
+// The part of a month's journal or archive that new lines go to: the month's file until it reaches
+// 1 MB, then `-2`, and so on (retention.ts, #373). A stat per part; a second part is rare.
+const partFor = async ($: EngineInterface, base: string): Promise<string> => {
+  for (let part = 1; ; part += 1) {
+    const path = monthPart(base, part)
+    const stat = await $.fs.stat(path).catch(() => undefined)
+    if (stat === undefined || stat.size < RETENTION.monthPartBytes) return path
+  }
+}
+
+// Every part of a month that is there, oldest first.
+const partsOf = async ($: EngineInterface, base: string): Promise<string[]> => {
+  const parts: string[] = []
+  for (let part = 1; await $.fs.exists(monthPart(base, part)).catch(() => false); part += 1) parts.push(monthPart(base, part))
+  return parts
+}
+
+// Recounts today's finished steps from this month's journal, from its last part only, so the
+// count costs at most one part's read however long the month (#373).
 const countToday = async ($: EngineInterface): Promise<void> => {
   const at = await $.clock.now()
-  const text = await readText($, journalPath(await progressPath($), at)).catch(() => null)
+  const parts = await partsOf($, journalPath(await progressPath($), at))
+  const last = parts.at(-1)
+  let text = last === undefined ? '' : await readText($, last).catch(() => null)
+  // A part that began today leaves the start of today in the part before it.
+  const before = parts.at(-2)
+  if (text !== null && before !== undefined && !parseJournal(text).some(entry => entry.at < localDay(at))) text = `${await readText($, before).catch(() => '')}\n${text}`
   if (text === null) {
     if (localDay(at) !== countedDay) await update($, today, () => 0)
     return
@@ -1106,7 +1185,7 @@ const journal = ($: EngineInterface, entries: ReadonlyArray<Omit<JournalEntry, '
       }
     }
     if (entries.length > 0) {
-      const path = journalPath(await progressPath($), at)
+      const path = await partFor($, journalPath(await progressPath($), at))
       pending[path] = [...new Set([...(pending[path] ?? []), ...entries.map(entry => journalLine(entry, at, s))])]
     }
     hasPending ||= Object.values(pending).some(lines => lines.length > 0)
@@ -1840,6 +1919,10 @@ const quarantineInbox = async ($: EngineInterface, from: string, to: string, rea
     : ['mv', '-n', from, target]
   const ran = await $.process.run(argv, { timeoutMs: 10000 })
   if (ran.exitCode !== 0 || await $.fs.exists(from) || !(await $.fs.exists(target)) || (body !== undefined && await $.fs.read(target) !== body)) throw new Error('QUARANTINE_NOT_VERIFIED')
+  // The sweep keeps it a week from now, not from the file's own time (#373).
+  const at = await $.clock.now()
+  const name = target.replace(/^.*[\\/]/, '')
+  await $.store.set(SET_ASIDE, { ...setAsideRecord(await $.store.get(SET_ASIDE).catch(() => undefined)), [name]: at }).catch(() => undefined)
   await inboxNotice($, target, reason)
 }
 
@@ -2195,7 +2278,7 @@ const archiveOld = async ($: EngineInterface, isNow = false): Promise<number> =>
   })
   if (keys.size > 0) {
     await update($, doneSeen, old => Object.fromEntries(Object.entries(old).filter(([key]) => !keys.has(key))))
-    for (const key of keys) await $.store.delete(key)
+    await saveDoneSeen($, at, kept => Object.fromEntries(Object.entries(kept).filter(([key]) => !keys.has(key))))
   }
   await poll($)
 
@@ -2203,8 +2286,9 @@ const archiveOld = async ($: EngineInterface, isNow = false): Promise<number> =>
 }
 
 // Entries added at the end of a month's archive file, after what it holds.
-const appendArchive = async ($: EngineInterface, archive: string, entries: readonly string[], s: Strings): Promise<void> => {
+const appendArchive = async ($: EngineInterface, month: string, entries: readonly string[], s: Strings): Promise<void> => {
   if (entries.length === 0) return
+  const archive = await partFor($, month)
   const past = await readText($, archive)
   const head = past.trim() === '' ? `${s.archiveTitle}\n\n` : past.replace(/\s*$/, '\n\n')
   await $.fs.write(archive, head + entries.join('\n\n') + '\n')
@@ -2234,7 +2318,7 @@ const archiveOne = async ($: EngineInterface, ref: TaskRef): Promise<boolean> =>
   if (ref.session === null) {
     const key = doneKey(ref.project, ref.title)
     await update($, doneSeen, old => Object.fromEntries(Object.entries(old).filter(([one]) => one !== key)))
-    await $.store.delete(key)
+    await saveDoneSeen($, at, kept => Object.fromEntries(Object.entries(kept).filter(([one]) => one !== key)))
   }
   await poll($)
 
@@ -2307,11 +2391,11 @@ const remind = async ($: EngineInterface): Promise<void> => {
 const remindNow = async ($: EngineInterface): Promise<void> => {
   const at = await $.clock.now()
   const s = await wordsOf($)
-  const view = buildView(
+  const view = views.view(
     (await read($, snapshot)).projects,
     await read($, here),
     await read($, mine),
-    at,
+    await viewTime($),
     await read($, today),
     await read($, doneSeen),
     s,
@@ -2328,8 +2412,7 @@ const remindNow = async ($: EngineInterface): Promise<void> => {
   const isSeeding = !isReminderSeeded
   isReminderSeeded = true
   if (fresh.length === 0) return
-  const next = keepRecent(told, at)
-  for (const one of fresh) next[one.key] = at
+  const next = keepRecent({ ...told, ...Object.fromEntries(fresh.map(one => [one.key, at])) }, at, liveToldKeys(view))
   await $.store.set('told', next)
   if (isSeeding && Object.keys(told).length === 0) return
   for (const one of fresh) {
@@ -2365,24 +2448,90 @@ const othersNote = async ($: EngineInterface): Promise<string | null> => {
   return [s.othersHead, ...dataBlock(lines, s), s.othersTail].join('\n')
 }
 
-// Keeps the store to the last month of sessions.
-const pruneStore = async ($: EngineInterface, at: number): Promise<void> => {
-  let count = 0
-  for (const key of await $.store.keys()) {
-    // Hundreds of values in a row are read without a trip to the host otherwise.
-    if (++count % 50 === 0) await breathe($)
-    // Journal retries remove verified keys; failed lines and quarantined values stay.
-    if (key.startsWith('pendingJournal:') || key.startsWith('pendingJournalBad:')) continue
-    if (key.startsWith('pendingInboxQuestion:')) {
-      const value = await $.store.get(key) as { at?: number } | null | undefined
-      if (typeof value?.at !== 'number' || at - value.at > 3 * DAY) await $.store.delete(key)
-      continue
+// Keeps the store to what the board still needs (retention.ts, #373). A pass reads at most
+// RETENTION.pruneReads values, the next ones in name order after where the last pass stopped, so
+// a session start costs the same on a store of any size; the walk point is in the store, so every
+// session moves the same walk on. Only a key that can age is read: the large values (the board
+// script's copy, the reminders told) were read in full at every start for nothing (#371).
+// `passes`: the hourly sweep goes further along the walk than a start does. A record whose block
+// is still on the board is kept (boardRecords); with no whole board read (missing, unreadable, or
+// cut short, which hides the blocks after the cut), no record is looked at.
+const pruneStore = async ($: EngineInterface, at: number, passes = 1): Promise<void> => {
+  const keys = await $.store.keys()
+  await dropGeneratedSeed($, keys)
+  const board = await read($, snapshot)
+  if (board.isMissing || board.error !== null || (board.tornTail ?? null) !== null) return
+  const isOnBoard = boardRecords(board.projects)
+  const stored = await $.store.get(PRUNE_AFTER)
+  let after = typeof stored === 'string' ? stored : ''
+  for (let pass = 0; pass < passes; pass += 1) {
+    const { batch, next } = pruneBatch(keys, after)
+    for (const key of batch) {
+      if (!isOnBoard(key) && isExpiredRecord(key, await $.store.get(key), at)) await $.store.delete(key)
     }
-    // Only a key that can age is read: the large values (the board script's copy, the reminders
-    // told) were read in full at every start for nothing (#371).
-    if (!isAgingStoreKey(key)) continue
-    if (isStaleStoreKey(key, await $.store.get(key), at, 30 * DAY)) await $.store.delete(key)
+    after = next
+    if (next === '') break
+    if (pass + 1 < passes) await breathe($)
   }
+  await $.store.set(PRUNE_AFTER, after)
+}
+
+const PRUNE_AFTER = 'pruneAfter'
+
+// The copies `generated:<file>` were what earlier releases wrote into other agents' files; no
+// release writes them any more. They only seed a connect record that does not exist yet, so they
+// go once the connect worker keeps its own record, which holds the same hashes (#373).
+const dropGeneratedSeed = async ($: EngineInterface, keys: readonly string[]): Promise<void> => {
+  const generated = keys.filter(key => key.startsWith('generated:'))
+  if (generated.length === 0 || (await connectRecord($)) === null) return
+  for (const key of generated) await $.store.delete(key)
+}
+
+// Files that the board's own writes leave behind and nothing else removes: the store's cut-off
+// temporary copies after a day, and inbox files the drain gave up on a week after it did (#373).
+// The same listing measures the store, for the warning on the board. One listing per folder, and
+// removals of up to 50 files at a time, which keeps a Windows command line short.
+const sweepFiles = async ($: EngineInterface): Promise<void> => {
+  const at = await $.clock.now()
+  const path = await progressPath($)
+  const isWin = await isWindows($, path)
+  const store = await storeDir($)
+  const kept = await $.fs.list(store).catch(() => [])
+  measuredStore = storeBytes(kept)
+  const inbox = inboxPath(path)
+  // The record is read before the listing, so every name in it was set aside before the look.
+  const setAside = setAsideRecord(await $.store.get(SET_ASIDE).catch(() => undefined))
+  const failed = await $.fs.list(inbox).catch(() => null)
+  const swept = staleFailedInbox(failed ?? [], at, setAside)
+  const stale = [
+    ...staleStoreTemps(kept, at).map(name => `${store}${sepOf(store)}${name}`),
+    ...swept.map(name => `${inbox}${sepOf(inbox)}${name}`),
+  ]
+  for (let from = 0; from < stale.length; from += 50) {
+    await removeFiles($, stale.slice(from, from + 50), isWin)
+    await breathe($)
+  }
+  // A name no longer in the inbox, or swept now, needs no time. Only those go, from the record as
+  // it is now: a file set aside while the removals ran keeps its time. With no listing, none go.
+  if (failed === null) return
+  const listed = new Set(failed.map(entry => entry.name))
+  const drop = new Set([...Object.keys(setAside).filter(name => !listed.has(name)), ...swept])
+  if (![...drop].some(name => setAside[name] !== undefined)) return
+  const current = setAsideRecord(await $.store.get(SET_ASIDE).catch(() => undefined))
+  await $.store.set(SET_ASIDE, Object.fromEntries(Object.entries(current).filter(([name]) => !drop.has(name)))).catch(() => undefined)
+}
+
+// When each inbox file was set aside as `.failed`, by name: a rename keeps the file's own time.
+const SET_ASIDE = 'inboxSetAside'
+const setAsideRecord = (value: unknown): Record<string, number> =>
+  value === null || typeof value !== 'object' || Array.isArray(value) ? {} : Object.fromEntries(Object.entries(value).filter((entry): entry is [string, number] => typeof entry[1] === 'number'))
+
+// Where Claude Code keeps plugin stores: under its config folder, as progress.md's default is.
+const storeDir = async ($: EngineInterface): Promise<string> => {
+  const config = (await $.env.get('CLAUDE_CONFIG_DIR'))?.replace(/[\\/]+$/, '')
+  const home = ((await $.env.get('USERPROFILE')) ?? (await $.env.get('HOME')) ?? '').replace(/[\\/]+$/, '')
+  const root = config !== undefined && config !== '' ? config : [home, '.claude'].join(sepOf(home))
+  return [root, 'plugins', 'store'].join(sepOf(root))
 }
 
 // The row's words were written by another session or agent: they go to Claude fenced as data.
@@ -2465,7 +2614,8 @@ const buildReport = async ($: EngineInterface, days: number): Promise<string> =>
   const at = await $.clock.now()
   const path = await progressPath($)
   const months = [...new Set([journalPath(path, previousMonth(at)), journalPath(path, at)])]
-  const texts = await Promise.all(months.map(one => readText($, one).catch(() => '')))
+  const parts = (await Promise.all(months.map(one => partsOf($, one)))).flat()
+  const texts = await Promise.all(parts.map(one => readText($, one).catch(() => '')))
 
   return progressReport(texts.flatMap(parseJournal), (await read($, snapshot)).projects, await read($, mine), at, days, await wordsOf($))
 }
@@ -2548,12 +2698,7 @@ export const register: Register = (on, options) => {
     await countToday($)
     const storedOpen = await $.store.get('opened')
     await update($, opened, () => (Array.isArray(storedOpen) ? storedOpen.filter((one): one is string => typeof one === 'string') : []))
-    const seen: Record<string, number> = {}
-    for (const key of await $.store.keys()) {
-      if (!key.startsWith('done:')) continue
-      const value = await $.store.get(key)
-      if (typeof value === 'number') seen[key] = value
-    }
+    const seen = await loadDoneSeen($, await $.store.keys(), await $.clock.now())
     await update($, doneSeen, () => seen)
     const tools = await $.tool.list().catch(() => [])
     const hasTools = tools.length === 0 || tools.some(tool => tool.name === 'TaskCreate' || tool.name === 'TodoWrite')
@@ -2597,9 +2742,12 @@ export const register: Register = (on, options) => {
       refreshPr($).catch(() => undefined)
     })
     enqueue(() => archiveOld($)).catch(() => undefined)
+    sweepFiles($).catch(() => undefined)
     // A session left open for days still clears out old work.
     $.clock.every(ARCHIVE_MS, () => {
       enqueue(() => archiveOld($)).catch(() => undefined)
+      sweepFiles($).catch(() => undefined)
+      $.clock.now().then(at => pruneStore($, at, 10)).catch(() => undefined)
     })
     if ((await $.store.get('closedByPerson')) !== true) {
       $.ui
@@ -3008,8 +3156,8 @@ export const register: Register = (on, options) => {
       const latest = await read($, snapshot)
       const currentAt = (await read($, now)) || (await $.clock.now())
       return {
-        ...buildView(latest.projects, await read($, here), await read($, mine), currentAt, await read($, today), await read($, doneSeen), s, await read($, hiddenAsks), await read($, firstSeen), await read($, questionLedger), await questionProofsFor($, latest.path || (await progressPath($))), await pendingTurns($)),
-        ...(latest.tornTail ? { warning: s.progressIncomplete(latest.tornTail.tasks) } : {}),
+        ...views.view(latest.projects, await read($, here), await read($, mine), currentAt, await read($, today), await read($, doneSeen), s, await read($, hiddenAsks), await read($, firstSeen), await read($, questionLedger), await questionProofsFor($, latest.path || (await progressPath($))), await pendingTurns($)),
+        ...warningOf(latest, s),
       }
     }
     const view = await paneView()

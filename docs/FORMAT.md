@@ -244,7 +244,7 @@ The normal sweep runs when a Claude Code session with the mod starts, once an ho
 
 The pane, `--watch` and `--serve` record manual-task fingerprint observations in `progress-seen.json`. `--tidy` only reads that record, never creates or refreshes it, and retains manual tasks with unknown or future observations. A machine running only scheduled `--tidy` therefore never archives a completed hand-kept task that has not been observed by one of those interactive readers. An unreadable observation file is left untouched; manual tasks stay, while eligible dated agent blocks can still move. The recorded time is a first observation of that completed fingerprint, not proof of its exact completion time.
 
-The archive file is named after `progress.md`: `progress-archive-YYYY-MM.md`, in the same folder. For `CLAUDE_PROGRESS_FILE=/work/board.md` it is `/work/board-archive-YYYY-MM.md`. The month is the local month of the sweep. A new archive file starts with the archive title in the pane's language (`# 進度封存` in zh-TW; see [Language](#language)) and a blank line. Each moved task is added as
+The archive file is named after `progress.md`: `progress-archive-YYYY-MM.md`, in the same folder. For `CLAUDE_PROGRESS_FILE=/work/board.md` it is `/work/board-archive-YYYY-MM.md`. The month is the local month of the sweep. Once a month's file holds 1 MB, the month goes on in `progress-archive-YYYY-MM-2.md`, then `-3`, and so on; each part is a file of its own as described here. A new archive file starts with the archive title in the pane's language (`# 進度封存` in zh-TW; see [Language](#language)) and a blank line. Each moved task is added as
 
 ```
 ## <project> · <YYYY-MM-DD>
@@ -257,7 +257,7 @@ that is, the block without its markers under a heading with the project and the 
 
 ### Journal
 
-`progress-journal-YYYY-MM.md`, in the same folder (for `board.md`, `board-journal-YYYY-MM.md`). The month is the local month. One line per finished step:
+`progress-journal-YYYY-MM.md`, in the same folder (for `board.md`, `board-journal-YYYY-MM.md`). The month is the local month. Once a month's file holds 1 MB, new lines go to `progress-journal-YYYY-MM-2.md`, then `-3`, and so on; a reader of the whole month reads every part in order. One line per finished step:
 
 ```
 # Work log

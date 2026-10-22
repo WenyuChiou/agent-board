@@ -450,6 +450,8 @@ export const EN: Strings = {
   boardCopyFailed: (text: string): string => `Couldn't reach the clipboard; copy it yourself: ${text}`,
   boardWriteFailed: "Couldn't write the progress file; nothing changed.",
   progressIncomplete: (n: number): string => `progress.md has a cut-off marker line; ${n} ${n === 1 ? 'task' : 'tasks'} may be hidden`,
+  progressLarge: (kb: number, cap: number): string => `progress.md is ${kb} KB, over ${cap} KB; hand-kept tasks and steps waiting on you are never removed, so archive finished work to shrink it`,
+  storeLarge: (mb: string, cap: string): string => `The board's saved records are ${mb} MB (limit ${cap} MB); old records are being cleared`,
   reporterFailed: (reason: string): string => `The report could not be saved (${reason}); check the progress file and retry.`,
   tailRepairFailed: 'The incomplete end could not be safely repaired; nothing changed. Check the progress file before retrying.',
   fileProgress: 'your progress file',

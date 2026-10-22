@@ -446,6 +446,8 @@ export const ZH_CN: Strings = {
   boardCopyFailed: (text: string): string => `没办法放进剪贴板，请自己复制：${text}`,
   boardWriteFailed: '写不进进度文件，没有改任何东西。',
   progressIncomplete: (n: number): string => `progress.md 有一行标记未写完，可能有 ${n} 项工作未显示`,
+  progressLarge: (kb: number, cap: number): string => `progress.md 已有 ${kb} KB，超过 ${cap} KB；手写的工作与等你回复的步骤都不会被删，可归档已完成的工作`,
+  storeLarge: (mb: string, cap: string): string => `看板存的记录已有 ${mb} MB（上限 ${cap} MB），旧记录会陆续清掉`,
   reporterFailed: (reason: string): string => `进度报告未能保存（${reason}），请检查进度文件后重试。`,
   tailRepairFailed: '无法安全修复不完整的结尾，没有改动任何内容。请检查进度文件后重新报告。',
   fileProgress: '你的进度文件',
