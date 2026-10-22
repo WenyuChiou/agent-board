@@ -539,8 +539,8 @@ if (basename(process.argv[1] || '') === 'agent-board-hook.mjs') {
     records.push({ file: record, state: agent === 'codex' ? 'working' : 'waiting', turn: payload.turn_id })
   }
   // A machine's first PowerShell and Node start is far slower than later ones (#241 keeps that case open), so
-  // one event per hook runs before the load, untimed (the test's 10 s limit only); it must still be applied or queued.
-  for (const [agent, command, payloadOf] of hooks) await fire(agent, command, payloadOf('warm-up'), 'warm-up', 10000)
+  // one event per hook runs before the load, untimed (the test's 30 s limit only); it must still be applied or queued.
+  for (const [agent, command, payloadOf] of hooks) await fire(agent, command, payloadOf('warm-up'), 'warm-up', 30000)
   try {
     for (let index = 0; index < busyCount; index++) {
       const child = spawn(process.execPath, ['-e', 'process.stdout.write("ready\\n"); while (true) {}'], { env: f.env, windowsHide: true, stdio: ['ignore', 'pipe', 'ignore'] })
@@ -790,6 +790,29 @@ test('the hook deadline counts from the process start, not from when the worker 
     assert.equal(JSON.parse(readFileSync(join(f.root, 'sessions', `${owner}.json`))).state, 'working')
     assert.deepEqual(pendingFiles(f), [])
   }
+}))
+
+test('a hook worker that starts after the host would stop it still reads its input and queues the event', () => fixture(f => {
+  // A cold Windows PowerShell start can delay Antigravity's worker past its 3 s host limit (#241).
+  assert.equal(f.install('--agent', 'antigravity', '--apply').status, 0)
+  const worker = join(f.root, 'agent-board-hook.mjs')
+  const conversationId = 'late-antigravity-session'
+  const argv = ['--hook-version', '1', '--hook-event', 'Stop', '--agent-status', '--agent', 'antigravity', '--state', 'waiting', '--event', 'Stop', '--progress-file', f.progress]
+  const at = Date.now() - 4000
+  const result = spawnSync(process.execPath, [worker, ...argv, '--hook-started', String(at)], { env: f.env, input: JSON.stringify({ conversationId }), encoding: 'utf8', windowsHide: true, timeout: 20000 })
+  assert.equal(result.status, 0, hookFailure(result))
+  assert.equal(result.stdout, '{}\n')
+  const log = hookLog(f)
+  assert.match(log, /REPORTER_QUEUED/)
+  assert.doesNotMatch(log, /REPORTER_TIMEOUT/)
+  const queued = pendingFiles(f)
+  assert.equal(queued.length, 1, log)
+  assert.match(queued[0], /\.raw\.json$/)
+  assert.equal(JSON.parse(readFileSync(join(f.root, 'pending', queued[0]))).at, at)
+  assert.equal(f.event('SessionStart', null, { session_id: 'other-replay-session' }).status, 0)
+  const owner = createHash('sha256').update(`antigravity:${conversationId}`).digest('hex')
+  assert.equal(JSON.parse(readFileSync(join(f.root, 'sessions', `${owner}.json`))).state, 'waiting')
+  assert.deepEqual(pendingFiles(f), [])
 }))
 
 test('a hook worker that starts just before its deadline still queues an event whose input arrives after it', () => fixture(async f => {
