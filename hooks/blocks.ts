@@ -256,14 +256,19 @@ export const upsertAutoBlock = (text: string, mirror: ProgressMirror, s: Strings
 // Drops `##` sections left with nothing in them, only among `touched` (the projects whose
 // blocks or tasks were just removed): an empty section someone keeps on purpose stays.
 const dropEmptySections = (lines: string[], touched: ReadonlySet<string>): void => {
+  // The lines as read change only when a section goes, so they are read again only then: read
+  // again for every line, archiving on a board of a few thousand lines took seconds (#371).
+  let seen = seenOf(lines)
   for (let index = lines.length - 1; index >= 0; index -= 1) {
-    const seen = seenOf(lines)
     const heading = PROJECT.exec(seen[index] ?? '')
     if (heading?.[1] === undefined || !touched.has(heading[1])) continue
-    const next = seen.findIndex((line, at) => at > index && PROJECT.test(line))
-    const end = next < 0 ? lines.length : next
+    let end = index + 1
+    while (end < lines.length && !PROJECT.test(seen[end] ?? '')) end += 1
     const body = lines.slice(index + 1, end)
-    if (body.every(line => line.trim() === '')) lines.splice(index, end - index)
+    if (body.every(line => line.trim() === '')) {
+      lines.splice(index, end - index)
+      seen = seenOf(lines)
+    }
   }
 }
 

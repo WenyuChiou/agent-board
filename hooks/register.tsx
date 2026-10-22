@@ -60,6 +60,7 @@ import {
   fallbackTitle,
   isAllDone,
   fromTaskList,
+  isAgingStoreKey,
   isStaleStoreKey,
   markAnswered,
   noticesOf,
@@ -244,6 +245,14 @@ const progressPath = async ($: EngineInterface): Promise<string> => {
   if (knownPath === null) knownPath = await findProgressPath($)
 
   return knownPath
+}
+
+// One cheap trip to the host and back. The hooks worker answers Claude Code's heartbeat only
+// while it waits on the host, and Claude Code unloads a mod whose worker has not answered for
+// 5 s (#371), so a long run of the board's own work (a big board's view, many store reads)
+// stops here between its parts. A failed look changes nothing.
+const breathe = async ($: EngineInterface): Promise<void> => {
+  await $.fs.exists(await progressPath($)).catch(() => false)
 }
 
 const findProgressPath = async ($: EngineInterface): Promise<string> => {
@@ -512,6 +521,7 @@ const pollQuestions = async ($: EngineInterface, path: string, projects: readonl
       const current = withCaptures(parsed, captures)
       const baseline = resolveId === undefined ? current : resolveQuestion(current, resolveId, at)
       let observed = observe(baseline, proofs ?? undefined)
+      await breathe($)
       for (const record of observed.records) {
         if (record.source === undefined) continue
         if (record.isUnresolved && !captures.some(capture => captureJson(capture.record, capture.disposition) === captureJson(record, 'unresolved'))) await keepQuestionCapture($, path, record, 'unresolved')
@@ -528,6 +538,7 @@ const pollQuestions = async ($: EngineInterface, path: string, projects: readonl
       // The retirement proof must not outrun the resolution just captured above.
       const kept = withCaptures(current, keptCaptures)
       observed = observe(resolveId === undefined ? kept : resolveQuestion(kept, resolveId, at), proofs)
+      await breathe($)
       expected = questionsJson(observed)
       return questionsJson(observed) === questionsJson(parsed) ? null : questionsJson(observed)
     }, undefined, async (target, text) => {
@@ -856,6 +867,7 @@ const writeDashboard = async ($: EngineInterface, force = false): Promise<{ path
     ...buildView(snap.projects, [], null, at, await read($, today), await read($, doneSeen), s, await read($, hiddenAsks), await read($, firstSeen), await read($, questionLedger), await questionProofsFor($, snap.path || (await progressPath($))), await pendingTurns($)),
     ...(snap.tornTail ? { warning: s.progressIncomplete(snap.tornTail.tasks) } : {}),
   }
+  await breathe($)
   const pending = await pendingTurns($)
   const date = new Date(at)
   const html = dashboardHtml(view, s, snap.path, s.dashStamp(`${localDay(at)} ${pad2(date.getHours())}:${pad2(date.getMinutes())}`), pending)
@@ -970,6 +982,11 @@ const refreshStatus = async ($: EngineInterface): Promise<void> => {
         ),
         s,
       )
+  if (!isPaneOpen) {
+    await breathe($)
+    // The pane opened during that trip: its own refresh clears the line, so this one is stale.
+    if (isPaneOpen) return
+  }
   if (!isPaneOpen && hasNoPaneSurface) text = [text, startingPages > 0 ? s.livePageStarting : s.statusBoardPage].filter(Boolean).join(' · ')
   if (text === lastStatus) return
   lastStatus = text
@@ -1691,6 +1708,8 @@ const connectAgents = async ($: EngineInterface, mode: ConnectMode, options: Plu
       const value = await $.store.get(key)
       if (typeof value === 'string') owned[key.slice('generated:'.length)] = sha256(value)
     }
+    // Hashing the copies (one is the whole board script) is the longest part of this.
+    await breathe($)
     const notified = await $.store.get('setupNotified')
     const boardLang = chosenLang(options.language, await $.store.get('lang')) ?? langOf(await $.store.get('boardLang')) ?? undefined
     const setup = setupSeed(await $.store.get('setupState'))
@@ -1700,7 +1719,7 @@ const connectAgents = async ($: EngineInterface, mode: ConnectMode, options: Plu
   request = { ...request, ...change, mode, lang: s.lang }
   const argument = workerRequest(request)
   if (argument === null) throw new Error('INVALID_WORKER_REQUEST')
-  const digest = sha256(BOARD_SCRIPT)
+  const digest = boardDigest()
   const created = await $.process.run(['node', '-e', CONNECT_BOOTSTRAP, digest], { timeoutMs: 10000 })
   if (created.exitCode !== 0 || created.isStdoutTruncated) throw new Error(workerProblem(created.stderr))
   const stage = workerStage(JSON.parse(created.stdout), digest)
@@ -1715,6 +1734,10 @@ const connectAgents = async ($: EngineInterface, mode: ConnectMode, options: Plu
   if (state === undefined || state.version !== 1 || !Number.isSafeInteger(state.revision) || state.revision < 0 || typeof state.disabled !== 'boolean' || !Array.isArray(state.notified) || state.notified.some(key => typeof key !== 'string') || state.setup !== undefined && !isSetupState(state.setup) || result === undefined || result !== null && (typeof result.text !== 'string' || !Array.isArray(result.lines) || result.lines.some(line => typeof line !== 'string') || !Array.isArray(result.done) || result.done.some(line => typeof line !== 'string') || !isSetupState({ agents: [], problems: result.problems, node: null }))) throw new Error('INVALID_WORKER_REPLY')
   return { state, result, request }
 }
+
+// The board script never changes while the module is loaded: hashed once, not at every connect.
+let boardHash: string | null = null
+const boardDigest = (): string => (boardHash ??= sha256(BOARD_SCRIPT))
 
 const nodeVersion = async ($: EngineInterface): Promise<string | null> => {
   const ran = await $.process.run(['node', '--version'], { timeoutMs: 10000 }).catch(() => null)
@@ -2357,6 +2380,7 @@ const remindNow = async ($: EngineInterface): Promise<void> => {
     await questionProofsFor($, await progressPath($)),
     await pendingTurns($),
   )
+  await breathe($)
   const stored = await $.store.get('told')
   const told = stored !== null && typeof stored === 'object' ? (stored as Record<string, number>) : {}
   const fresh = remindersOf(view, told, at, localDay(at), s)
@@ -2402,7 +2426,10 @@ const othersNote = async ($: EngineInterface): Promise<string | null> => {
 
 // Keeps the store to the last month of sessions.
 const pruneStore = async ($: EngineInterface, at: number): Promise<void> => {
+  let count = 0
   for (const key of await $.store.keys()) {
+    // Hundreds of values in a row are read without a trip to the host otherwise.
+    if (++count % 50 === 0) await breathe($)
     // Journal retries remove verified keys; failed lines and quarantined values stay.
     if (key.startsWith('pendingJournal:') || key.startsWith('pendingJournalBad:')) continue
     if (key.startsWith('pendingInboxQuestion:')) {
@@ -2410,6 +2437,9 @@ const pruneStore = async ($: EngineInterface, at: number): Promise<void> => {
       if (typeof value?.at !== 'number' || at - value.at > 3 * DAY) await $.store.delete(key)
       continue
     }
+    // Only a key that can age is read: the large values (the board script's copy, the reminders
+    // told) were read in full at every start for nothing (#371).
+    if (!isAgingStoreKey(key)) continue
     if (isStaleStoreKey(key, await $.store.get(key), at, 30 * DAY)) await $.store.delete(key)
   }
 }

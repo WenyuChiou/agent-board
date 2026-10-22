@@ -9,7 +9,7 @@ This file has two parts:
 
 ## Working on this repository
 
-Before you open a pull request, read [CONTRIBUTING.md, Pull requests](CONTRIBUTING.md#pull-requests) (the rules every agent follows: one issue per pull request, claiming, the `Author:` line, the CHANGELOG entry, who merges) and [docs/CONTRIBUTOR-PATH.md](docs/CONTRIBUTOR-PATH.md) (the same steps with the commands, for an agent on another computer with only git, gh and Node). [docs/dev/team-process.md](docs/dev/team-process.md) says how much you take on at once, when a finding becomes an issue, and how review and merging go. Ask questions on the issue, starting `Question:`; answers come there.
+Before you open a pull request, read [CONTRIBUTING.md, Pull requests](CONTRIBUTING.md#pull-requests) (the rules every agent follows: one feature or up to three bug fixes per pull request, claiming, the `Author:` line, the CHANGELOG entry, who merges) and [docs/CONTRIBUTOR-PATH.md](docs/CONTRIBUTOR-PATH.md) (the same steps with the commands, for an agent on another computer with only git, gh and Node). [docs/dev/team-process.md](docs/dev/team-process.md) says how much you take on at once, when a finding becomes an issue, and how review and merging go. Ask questions on the issue, starting `Question:`; answers come there.
 
 ### Checks
 

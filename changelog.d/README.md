@@ -1,11 +1,11 @@
 # Changelog fragments
 
-Each fix or feature pull request adds one new fragment containing its complete
-CHANGELOG entry. Separate files let pull requests merge without editing the same
-Unreleased section.
+Each fix or feature pull request adds one new fragment for each issue it lists,
+containing that issue's complete CHANGELOG entry. Separate files let pull
+requests merge without editing the same Unreleased section.
 
-Name the file `<issue>-<slug>.md`, where `<issue>` is the number on the pull
-request's `Fixes #N` or `Part of #N` line. The slug uses lowercase letters, digits
+Name the file `<issue>-<slug>.md`, where `<issue>` is the number on one of the
+pull request's `Fixes #N` or `Part of #N` lines. The slug uses lowercase letters, digits
 and single hyphens between words. Pull requests for the same issue use different
 slugs. For example, `changelog.d/42-synthetic-summary.md` could contain:
 
