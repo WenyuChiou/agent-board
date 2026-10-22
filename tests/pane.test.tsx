@@ -7236,6 +7236,31 @@ test('a set-aside turn whose question is older than three days adds its steps bu
   expect(takenOf(world)).toEqual([])
 })
 
+test('a held turn written before a newer prompt adds its steps but does not reopen its question', async ($, on) => {
+  const { world } = questionWorld()
+  world.reply = () => 'TITLE: Migration\nCONTEXT: fixture\nDONE: Added the limiter\nNEXT: Continue\nASK: Limit — 100 or 300?'
+  addPrompt(world, PROMPT_AT + 3000)
+  const clock = engineBeneath(on, world)
+  await probeStart($)
+  await clock.advance(5000)
+  const name = `codex-turn-${PROMPT_AT + 2000}-1.json`
+  const store = world.store!
+  store.inboxFailed = { [name]: `8:${PROMPT_AT + 2500}:QUESTION_RETENTION_FAILED` }
+  world.files.set(`${INBOX}/${name}.failed`, JSON.stringify({ session_id: PROMPT_SESSION, cwd: '/demo', prompt: 'Add a limiter', last_assistant_message: 'Added the limiter. 100 or 300?' }))
+  world.mtime += 1
+  await clock.advance(5000)
+  await clock.advance(5000)
+  expect(world.files.get(FILE)).toContain('- [x] Added the limiter')
+  expect(world.files.get(FILE)).not.toContain('100 or 300')
+  expect(parseProgress(world.files.get(FILE)!).flatMap(project => project.tasks).flatMap(task => task.steps).some(step => step.status === 'waiting')).toBe(false)
+  expect(effectivePromptMirror(world).state).toBe('working')
+  expect(Object.keys(store).filter(key => key.startsWith('pendingInboxQuestion:'))).toEqual([])
+  expect((store.inboxDone as Record<string, string>)[name]).toBeDefined()
+  expect((store.inboxFailed as Record<string, string>)[name]).toBeUndefined()
+  expect(world.files.has(`${INBOX}/${name}.failed`)).toBe(false)
+  expect(takenOf(world)).toEqual([])
+})
+
 for (const fault of ['read', 'rename'] as const) test(`fresh turn files still reach the board when a held turn's retake fails at ${fault}`, async ($, on) => {
   const at = Date.parse('2026-10-16T12:00:00Z')
   const held = 'codex-turn-1792216380-1.json'
