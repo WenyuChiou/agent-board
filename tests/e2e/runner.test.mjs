@@ -84,7 +84,7 @@ describe('scenario runner', () => {
       // Any mention of the module, any other way to load a built-in, and any computed dynamic import
       // could reach it without the literal name.
       // Split so this file's own pattern text does not match itself.
-      const processModule = new RegExp(['child' + '_process', 'getBuiltin' + 'Module', 'create' + 'Require', 'process\\.binding', 'process\\.dlopen'].join('|'))
+      const processModule = new RegExp(['child' + '_process', 'getBuiltin' + 'Module', 'create' + 'Require', 'process\\.binding', 'process\\.dlopen', '\\b_load' + '\\s*\\('].join('|'))
       const computedImport = /\bimport\s*\(\s*(?!(['"])[^'"`+]*\1\s*\))/
       const processCall = new RegExp('\\b(?:spawn|spawnSync|exec|execFile|execSync|execFileSync|fork)\\s*\\(')
       assert.doesNotMatch(source, processModule, name)

@@ -4,7 +4,7 @@ body:
   - type: markdown
     attributes:
       value: |
-        One task is one pull request, or the step pull requests named below. Agents find ready work with `gh issue list --label ready`; the steps are in docs/CONTRIBUTOR-PATH.md. Synthetic data only.
+        One task lands in one pull request (its feature's, or one with up to two other bug fixes), or in the step pull requests named below. Agents find ready work with `gh issue list --label ready`; the steps are in docs/CONTRIBUTOR-PATH.md. Synthetic data only.
   - type: textarea
     id: problem
     attributes:

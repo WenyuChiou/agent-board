@@ -245,6 +245,58 @@ test('pr-check fails a body without a Fixes or Part of line and says how to add 
   assert.equal(issueLine('Fixes #42\n<!-- Closes #43 -->', 'fix: example').problems.length, 0)
 })
 
+test('pr-check accepts a body that names one issue on its first line', () => {
+  const checked = issueLine('Fixes #42\nAuthor: codex, fix/example', 'fix: example')
+  assert.equal(checked.issue, 42)
+  assert.equal(checked.kind, 'fixes')
+  assert.deepEqual(checked.issues, [42])
+  assert.deepEqual(checked.problems, [])
+})
+
+test('pr-check accepts three Fixes or Part of lines on a fix title', () => {
+  const checked = issueLine('Fixes #42\nFixes #43\nPart of #44\nAuthor: codex, fix/example', 'fix(cli): example')
+  assert.equal(checked.issue, 42)
+  assert.deepEqual(checked.issues, [42, 43, 44])
+  assert.deepEqual(checked.problems, [])
+})
+
+test('pr-check refuses four issue lines on a fix title and accepts them on a feature title', () => {
+  const four = 'Fixes #1\nFixes #2\nFixes #3\nFixes #4\nAuthor: codex, fix/example'
+  for (const title of ['fix: example', 'fix(cli): example', 'fix!: example']) {
+    const checked = issueLine(four, title)
+    assert.equal(checked.problems.length, 1, title)
+    assert.match(checked.problems[0].message, /names 4 issues; the most is 3/)
+    assert.match(checked.problems[0].fix, /3 or fewer.*another pull request/)
+  }
+  assert.deepEqual(issueLine(four, 'feat(board): example').problems, [])
+  assert.deepEqual(issueLine('Part of #1\nPart of #2\nPart of #3\nPart of #4\nPart of #5\nPart of #6', 'feat: example').issues, [1, 2, 3, 4, 5, 6])
+})
+
+test('pr-check refuses an issue listed twice', () => {
+  const checked = issueLine('Fixes #42\nFixes #43\nPart of #42\nAuthor: codex, fix/example', 'fix: example')
+  assert.equal(checked.problems.length, 1)
+  assert.match(checked.problems[0].message, /#42 is listed more than once/)
+  assert.match(checked.problems[0].fix, /one "Fixes #N" or "Part of #N" line/)
+})
+
+test('pr-check ends the list of issues at the first line that is not an issue line', () => {
+  const afterAuthor = issueLine('Fixes #42\nAuthor: codex, fix/example\nFixes #43', 'fix: example')
+  assert.deepEqual(afterAuthor.issues, [42])
+  assert.equal(afterAuthor.problems.length, 1)
+  assert.match(afterAuthor.problems[0].message, /closing keyword also names #43/)
+  assert.match(afterAuthor.problems[0].fix, /covers only its first issue/)
+  const afterTwo = issueLine('Fixes #42\nFixes #43\nCloses #44', 'fix: example')
+  assert.equal(afterTwo.problems.length, 1)
+  assert.match(afterTwo.problems[0].fix, /closes only the issues on its first lines/)
+  const afterClosing = issueLine('Fixes #42\nCloses #43\nFixes #44', 'fix: example')
+  assert.deepEqual(afterClosing.issues, [42])
+  assert.equal(afterClosing.problems.length, 2)
+  const afterProse = issueLine('Fixes #42\nThis explains it.\nPart of #43', 'fix: example')
+  assert.deepEqual(afterProse.issues, [42])
+  assert.equal(afterProse.problems.length, 0)
+  assert.deepEqual(issueLine('This explains it.\nFixes #42', 'fix: example').issues, [])
+})
+
 test('pr-check fails an Author line that names another branch', () => {
   assert.ok(authorLine('Author: codex, fix/other', branch).problems.length)
   assert.ok(authorLine(`Author: codex, ${branch}-extra`, branch).problems.length)
@@ -473,6 +525,105 @@ test('pr-check combines issue state claims cap and draft information without mut
   assert.ok(checkPr({ ...data, isDraft: true }).info.some(line => /gh pr ready 17/.test(line)))
 })
 
+// What a pull request that lists #42 and #43 reads from GitHub; the second issue's lookup can be overridden.
+const twoIssueLookups = (second = {}) => ({
+  body: body.replace('Fixes #42', 'Fixes #42\nFixes #43'),
+  moreIssues: { 43: { issueData: { state: 'open' }, issueComments: [{ body: `Claim: codex, ${branch}, until 2030-01-01 00:00 UTC` }], ...second } },
+})
+
+const fragmentFile = (issue, slug, text) => ({ path: `changelog.d/${issue}-${slug}.md`, text: text ?? `- A synthetic change (#${issue}). Tests: \`${coveringTitle}\`.` })
+
+// The pull request, with the fragment for #42 that fragmentPr adds and then these.
+const withFragments = (base, ...extra) => {
+  const data = { ...fragmentPr(), body: base.body, moreIssues: base.moreIssues }
+  for (const { path, text } of extra) {
+    data.paths = [...data.paths, path]
+    data.addedPaths = [...data.addedPaths, path]
+    data.headPaths = [...data.headPaths, path]
+    data.added = [...data.added, { path, line: 1, text }]
+  }
+  return data
+}
+
+// Both fragments in place, so only the claim and the state of the issues are in question.
+const twoIssuePr = (second = {}) => withFragments(twoIssueLookups(second), fragmentFile(43, 'second-check'))
+
+test('pr-check checks the claim on every listed issue and names the issue that has none', () => {
+  assert.deepEqual(checkPr(twoIssuePr()).problems, [])
+  const checked = checkPr(twoIssuePr({ issueComments: [{ body: `Claim: dot, ${branch}, until 2030-01-01 00:00 UTC` }] }))
+  assert.equal(checked.problems.length, 1)
+  assert.equal(checked.problems[0].check, 'claim')
+  assert.match(checked.problems[0].message, /comment on #43 claims/)
+  assert.match(checked.problems[0].fix, /comment on #43 with "Claim: <agent>, <branch>"/)
+  const first = checkPr({ ...twoIssuePr(), issueComments: [] })
+  assert.match(first.problems.find(item => item.check === 'claim').message, /comment on #42 claims/)
+})
+
+test('pr-check checks the state of every listed issue', () => {
+  const closed = checkPr(twoIssuePr({ issueData: { state: 'closed' } }))
+  assert.equal(closed.problems.length, 1)
+  assert.match(closed.problems[0].message, /^#43 must be an open issue/)
+  const missing = checkPr(twoIssuePr({ issueData: false, issueComments: [] }))
+  assert.equal(missing.problems.length, 1)
+  assert.match(missing.problems[0].message, /^issue #43 does not exist/)
+  const offline = checkPr({ ...twoIssuePr(), moreIssues: undefined })
+  assert.deepEqual(offline.problems, [])
+  assert.ok(offline.info.includes('claim: skipped (offline).'))
+})
+
+const threeIssuePr = () => {
+  const two = twoIssueLookups()
+  return { body: body.replace('Fixes #42', 'Fixes #42\nFixes #43\nFixes #44'), moreIssues: { ...two.moreIssues, 44: two.moreIssues[43] } }
+}
+
+test('pr-check accepts one fragment for each listed issue and refuses a stray, a repeated or a mismatched one', () => {
+  assert.deepEqual(checkPr(withFragments(twoIssueLookups(), fragmentFile(43, 'second-check'))).problems, [])
+  const repeated = checkPr(withFragments(twoIssueLookups(), fragmentFile(43, 'second-check'), fragmentFile(43, 'third-check')))
+  assert.equal(repeated.problems.length, 1)
+  assert.match(repeated.problems[0].message, /more than one fragment was added for #43/)
+  const stray = checkPr(withFragments(twoIssueLookups(), fragmentFile(44, 'other-check', entry)))
+  assert.equal(stray.problems.filter(item => /different issue/.test(item.message)).length, 1)
+  assert.match(stray.problems[0].message, /different issue than #42, #43/)
+  assert.match(stray.problems[0].fix, /one of #42, #43/)
+  const mismatched = checkPr(withFragments(twoIssueLookups(), fragmentFile(43, 'second-check', entry)))
+  assert.equal(mismatched.problems.length, 1)
+  assert.match(mismatched.problems[0].message, /does not name #43/)
+})
+
+test('pr-check asks a fix or feature pull request for a fragment for each of its listed issues', () => {
+  const refused = checkPr(withFragments(threeIssuePr()))
+  assert.deepEqual(refused.problems.map(item => item.message), ['no fragment was added for #43.', 'no fragment was added for #44.'])
+  assert.match(refused.problems[0].fix, /changelog\.d\/43-<slug>\.md.*one fragment for each issue/)
+  assert.deepEqual(checkPr(withFragments(threeIssuePr(), fragmentFile(43, 'second-check'), fragmentFile(44, 'third-check'))).problems, [])
+  assert.equal(checkPr({ ...withFragments(threeIssuePr()), title: 'feat: explain fragments' }).problems.length, 2)
+  assert.deepEqual(checkPr({ ...withFragments(threeIssuePr()), title: 'docs: explain fragments' }).problems, [])
+  // A pull request for one issue is judged as before: its single fragment is enough.
+  assert.deepEqual(checkPr(fragmentPr()).problems, [])
+})
+
+test('pr-check asks a pull request that names several issues for a fragment each, not for one Unreleased entry', () => {
+  const message = 'a pull request that names several issues adds a fragment for each; an Unreleased entry covers one issue.'
+  const emptyChangelog = '# Changelog\n\n## Unreleased\n\n## 1.0.0\n'
+  // The Unreleased entry of syntheticPr names #42 only.
+  const oneEntry = checkPr({ ...syntheticPr(), ...twoIssueLookups() })
+  assert.deepEqual(oneEntry.problems.map(item => item.message), [message])
+  assert.equal(oneEntry.problems[0].fix, 'add changelog.d/<issue>-<slug>.md for each listed issue (#42, #43).')
+  // With no entry at all the same message comes once, in place of the generic one.
+  const none = checkPr({ ...syntheticPr(), ...twoIssueLookups(), changelogText: emptyChangelog, added: [] })
+  assert.deepEqual(none.problems.map(item => item.message), [message])
+  // A title that asks no entry is left alone, and a single issue keeps the generic message.
+  assert.deepEqual(checkPr({ ...syntheticPr(), ...twoIssueLookups(), title: 'docs: explain fragments' }).problems, [])
+  assert.deepEqual(checkPr({ ...syntheticPr(), changelogText: emptyChangelog, added: [] }).problems.map(item => item.message), ['no entry was added under Unreleased.'])
+})
+
+test('pr-check gives one issue with a fragment named for another issue the two problems it always gave', () => {
+  const checked = checkPr(fragmentPr('changelog.d/43-synthetic-check.md', `- A synthetic change (#43). Tests: \`${coveringTitle}\`.`))
+  assert.deepEqual(checked.problems.map(item => item.message), [
+    'the fragment changelog.d/43-synthetic-check.md is named for a different issue than #42.',
+    'the new entry does not name #42.',
+  ])
+})
+
 test('pr-check reads committed files rather than dirty working files and appends a safe Markdown summary', async t => {
   const setup = fixture(t)
   setup.put('CHANGELOG.md', 'not the committed changelog')
@@ -621,4 +772,51 @@ test('pr-check paginates CI API data and fails closed on network errors', async 
   }
   assert.equal((await runMain(args, env)).status, 2)
   assert.equal(calls.some(call => call.host === 'untrusted.invalid'), false)
+})
+
+test('pr-check looks up each further issue with the token and names the issue that has no claim', async t => {
+  const setup = fixture(t)
+  // Two issues need two fragments, so the branch drops the Unreleased entry for one fragment each.
+  setup.put('CHANGELOG.md', '# Changelog\n\n## Unreleased\n\n## 1.0.0\n')
+  setup.put('changelog.d/42-synthetic-check.md', `${entry}\n`)
+  setup.put('changelog.d/43-second-check.md', `- A second synthetic change (#43). Tests: \`${coveringTitle}\`.\n`)
+  setup.git('add', '--', 'CHANGELOG.md', 'changelog.d/42-synthetic-check.md', 'changelog.d/43-second-check.md')
+  setup.git('-c', 'user.name=Synthetic', '-c', 'user.email=synthetic@example.invalid', '-c', 'commit.gpgsign=false', 'commit', '-m', 'test: synthetic fragments')
+  const head = setup.git('rev-parse', 'HEAD')
+  const eventFor = text => {
+    setup.put('event.json', JSON.stringify({ repository: { full_name: 'synthetic/example' }, pull_request: { number: 17, title: 'fix: synthetic check', body: text, draft: false, created_at: '2030-01-01T00:00:00Z', labels: [], head: { ref: branch, sha: head }, base: { sha: setup.base } } }))
+    return ['--event', join(setup.directory, 'event.json'), '--repo-dir', setup.directory]
+  }
+  const originalFetch = globalThis.fetch
+  t.after(() => { globalThis.fetch = originalFetch })
+  const env = { GITHUB_API_URL: 'https://api.example.invalid', GITHUB_TOKEN: 'synthetic-token-value' }
+  const calls = []
+  const answer = claimedIssues => async (url, options) => {
+    calls.push({ path: url.pathname, authorization: options.headers.Authorization })
+    const issue = url.pathname.match(/\/issues\/(\d+)(\/comments)?$/)
+    const payload = !issue ? [] : !issue[2] ? { state: 'open' } : claimedIssues.includes(issue[1]) ? [{ body: `Claim: codex, ${branch}` }] : []
+    return { ok: true, status: 200, json: async () => payload, headers: new Headers() }
+  }
+  const listed = body.replace('Fixes #42', 'Fixes #42\nFixes #43')
+  globalThis.fetch = answer(['42'])
+  const failed = await runMain(eventFor(listed), env)
+  assert.equal(failed.status, 1, failed.stdout + failed.stderr)
+  assert.match(failed.stdout, /no comment on #43 claims this branch/)
+  assert.equal(failed.stdout.includes('comment on #42 claims'), false)
+  for (const path of ['/issues/42', '/issues/42/comments', '/issues/43', '/issues/43/comments']) {
+    assert.ok(calls.some(call => call.path.endsWith(path)), path)
+  }
+  assert.ok(calls.every(call => call.authorization === 'Bearer synthetic-token-value'))
+  calls.length = 0
+  globalThis.fetch = answer(['42', '43'])
+  const passed = await runMain(eventFor(listed), env)
+  assert.equal(passed.status, 0, passed.stdout + passed.stderr)
+  // An issue listed twice is read once and its missing claim is reported once, with the repeat itself.
+  calls.length = 0
+  globalThis.fetch = answer(['42'])
+  const repeated = await runMain(eventFor(listed.replace('Fixes #43', 'Fixes #43\nFixes #43')), env)
+  assert.equal(repeated.status, 1)
+  assert.equal(calls.filter(call => call.path.endsWith('/issues/43')).length, 1)
+  assert.equal(repeated.stdout.split('no comment on #43 claims').length - 1, 1)
+  assert.match(repeated.stdout, /#43 is listed more than once/)
 })

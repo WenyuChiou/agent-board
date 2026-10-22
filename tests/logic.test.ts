@@ -18,6 +18,7 @@ import {
   stateOf,
 } from '../hooks/mirror'
 import { parseProgress } from '../hooks/parse'
+import { BIG_AT, bigBoard } from './fixtures/big-board'
 import { answeredJson, answeredPath, buildView, dueDays, foldSteps, IDLE_MS, keptAnswered, parseAnswered, parseSeen, relativeTime, seenJson, seenPath, taskFingerprint, withAnswered, withSeen } from '../hooks/view'
 
 const NOW = Date.parse('2026-10-16T12:00:00.000Z')
@@ -378,6 +379,55 @@ test('archive moves a closed block whole and leaves an unclosed one where it is'
   expect(kept).toContain('session=bbbbbbbb')
   expect(kept).toContain('### 手寫的\n- [ ] 別刪我')
   expect(kept).not.toContain('session=aaaaaaaa')
+})
+
+// Dropping the sections a removal empties read the whole file again for each of its lines
+// (#371): seconds on a board of a few thousand lines, in each session start's archiving and in
+// each removal. Done once per removed section, it is a few milliseconds.
+const timed = <T,>(work: () => T): [T, number] => {
+  const started = performance.now()
+  const result = work()
+  return [result, performance.now() - started]
+}
+
+test('archiving and removing blocks on a board of thousands of lines each take under half the 5 s the host waits', { timeoutMs: 120000 }, () => {
+  const board = bigBoard()
+  const id = scanBlocks(board.source.split('\n'))[100]?.session ?? ''
+  const [taken, archiving] = timed(() => takeArchivable(board.source, BIG_AT, undefined, STRINGS.en))
+  const [removed, removing] = timed(() => removeAutoBlock(board.source, id))
+  expect(taken.entries).toHaveLength(board.archivable)
+  expect(removed).not.toContain(`session=${id}`)
+  expect(removed.length).toBeLessThan(board.source.length)
+  // A month on, every closed block without a question goes, and with them the sections left empty.
+  const later = takeArchivable(board.source, BIG_AT + 30 * 24 * HOUR, undefined, STRINGS.en)
+  expect(later.text.match(/^## /gm)?.length).toBeLessThan(board.source.match(/^## /gm)?.length ?? 0)
+  // Half the 5 s the host waits: a busy machine stays under it. On an idle machine the old way took
+  // 3.4 and 4.3 s, only 1.3 to 1.7 times these budgets, so a fast machine could let it through:
+  // the test below, which compares lengths, is the real guard.
+  expect(archiving).toBeLessThan(2500)
+  expect(removing).toBeLessThan(2500)
+})
+
+// A quarter of the busy board, then that quarter four times over (projects and sessions renamed
+// per copy): the longer file takes about four times as long; the old way took about sixteen.
+// Each operation runs once untimed first, since a first run is slower, then the best of five
+// counts, so a pause elsewhere does not. This ratio does not depend on how fast the machine is.
+// The old way is slow here too: on main this test runs for over a minute, then fails.
+test('archiving and removing a block grow with the length of the file, not with its square', { timeoutMs: 240000 }, () => {
+  const one = bigBoard().source.split(/^(?=## )/m).slice(0, 13).join('')
+  const copy = (k: number): string => one.replace(/^# Progress\n/, '').replace(/^## project-/gm, `## copy-${k}-project-`).replace(/session=([0-9a-f])([0-9a-f]{7})/g, (_, first: string, rest: string) => `session=${((parseInt(first, 16) + k) % 16).toString(16)}${rest}`)
+  const four = [one, copy(1), copy(2), copy(3)].join('\n')
+  expect(four.split('\n').length).toBeGreaterThan(4 * one.split('\n').length - 8)
+  const id = scanBlocks(one.split('\n'))[20]?.session ?? ''
+  expect(id).not.toBe('')
+  const best = (work: () => unknown): number => Math.min(...[0, 1, 2, 3, 4].map(() => timed(work)[1]))
+  // The short file is timed four times over, so a millisecond of noise does not decide the ratio.
+  const ratio = (work: (text: string) => unknown): number => {
+    work(one)
+    return best(() => work(four)) / Math.max(best(() => { for (let k = 0; k < 4; k++) work(one) }) / 4, 0.01)
+  }
+  expect(ratio(text => takeArchivable(text, BIG_AT, undefined, STRINGS.en))).toBeLessThan(10)
+  expect(ratio(text => removeAutoBlock(text, id))).toBeLessThan(10)
 })
 
 test('an end marker closes only its own block, and an unclosed block stops before hand-kept tasks', () => {

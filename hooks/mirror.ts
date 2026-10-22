@@ -495,10 +495,12 @@ export const resumeNote = (mirror: ProgressMirror, s: Strings = ZH_TW): string |
 
 // Only the mod's own per-session records age out of the store; a setting the person made
 // (closing the pane by hand) stays until they change it.
+// Prompt and completion fences outlive paused writers. Age alone cannot prove
+// that an old mirror will never return; new ordered work supersedes them on read.
+export const isAgingStoreKey = (key: string): boolean => ['mirror:', 'hinted:', 'done:', 'agent:'].some(prefix => key.startsWith(prefix))
+
 export const isStaleStoreKey = (key: string, value: unknown, now: number, maxAge: number): boolean => {
-  // Prompt and completion fences outlive paused writers. Age alone cannot prove
-  // that an old mirror will never return; new ordered work supersedes them on read.
-  if (!['mirror:', 'hinted:', 'done:', 'agent:'].some(prefix => key.startsWith(prefix))) return false
+  if (!isAgingStoreKey(key)) return false
   const stamp = typeof value === 'number' ? value : ((value as { updated?: number } | undefined)?.updated ?? 0)
 
   return now - stamp > maxAge

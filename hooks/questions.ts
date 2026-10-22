@@ -146,7 +146,11 @@ const observations = (projects: readonly ProgressProject[], mine: ProgressMirror
       const scope = questionScope(project.name, task.auto?.agent ?? 'manual', task.auto?.session ?? task.title)
       if (scopes.has(scope)) ambiguous.add(scope)
       scopes.add(scope)
-      task.steps.forEach((step, index) => rows.push({ scope, session: task.auto?.session ?? '', index, text: step.text, isWaiting: step.status === 'waiting', producer: step.questionToken ?? '', source: { kind: task.auto === null ? 'manual' : 'block', project: project.name, task: task.title, context: task.notes.find(note => /^(?:背景|Context|Background)\s*[:：]/i.test(note))?.replace(/^(?:背景|Context|Background)\s*[:：]\s*/i, '') ?? (task.auto === null ? task.notes.join('\n') : ''), text: step.text, agent: task.auto?.agent ?? '', session: task.auto?.session ?? '', data: JSON.stringify(task) } }))
+      // The task's background and its copy as data are the same for each of its steps, so they
+      // are worked out once per task rather than once per step (#371).
+      const context = task.notes.find(note => /^(?:背景|Context|Background)\s*[:：]/i.test(note))?.replace(/^(?:背景|Context|Background)\s*[:：]\s*/i, '') ?? (task.auto === null ? task.notes.join('\n') : '')
+      const data = JSON.stringify(task)
+      task.steps.forEach((step, index) => rows.push({ scope, session: task.auto?.session ?? '', index, text: step.text, isWaiting: step.status === 'waiting', producer: step.questionToken ?? '', source: { kind: task.auto === null ? 'manual' : 'block', project: project.name, task: task.title, context, text: step.text, agent: task.auto?.agent ?? '', session: task.auto?.session ?? '', data } }))
     }
   }
   if (mine !== null) {
@@ -218,7 +222,19 @@ export const observeQuestions = (
   // Producer receipts and an explicit resolution suppress only the resolved incarnation.
   // A new file/content revision can still prove a fresh ask without changing its words.
   const seen = observations(projects, mine, pending)
-  const copiesOf = (row: Observation): Observation[] => seen.filter(other => other.scope === row.scope && questionWords(other.text) === questionWords(row.text))
+  // Each row's copies (the rows of its scope with the same words, in order), indexed once:
+  // comparing every row with every other took seconds on a board of a few thousand steps (#371).
+  const copyKey = (row: Observation): string => JSON.stringify([row.scope, questionWords(row.text)])
+  const copyIndex = new Map<string, Observation[]>()
+  for (const row of seen) {
+    const key = copyKey(row)
+    const copies = copyIndex.get(key)
+    if (copies === undefined) copyIndex.set(key, [row])
+    else copies.push(row)
+  }
+  // Every row asked about is one of `seen`, so it is always in the index. The lists are shared
+  // between the rows of a group, so they are read only.
+  const copiesOf = (row: Observation): readonly Observation[] => copyIndex.get(copyKey(row)) ?? []
   const hasNewRevision = (row: Observation, record: QuestionRecord): boolean =>
     [row, ...records.filter(other => other.scope === row.scope && other.words === record.words && other.isPresent && other.isUnresolved)]
       .some(other => other.producerRevisions?.some(revision => !record.producerRevisions?.includes(revision)))

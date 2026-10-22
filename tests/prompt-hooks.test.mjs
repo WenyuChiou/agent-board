@@ -21,13 +21,32 @@ registerHooks({ resolve(specifier, context, next) {
   }
 } })
 
-const { boardPromptHelper, boardRequestWords, BOARD_REQUEST, boardPromptText, isBoardRequest, promptReceiptScript } = await import('../hooks/board-commands.ts')
+const { boardPromptHelper, boardRequestWords, BOARD_REQUEST, BOARD_REQUEST_HINTS, boardPromptText, isBoardRequest, promptReceiptScript } = await import('../hooks/board-commands.ts')
 const { STRINGS } = await import('../hooks/strings.ts')
 const { legacyOpenClawPlugin, legacyOpenCodePlugin } = await import('../hooks/legacy-hook-plugins.ts')
 const { opencodePlugin, openclawPlugin } = await import('../hooks/connect-pure.ts')
 const BOARD_WORDS = boardRequestWords(Object.values(STRINGS))
 const BOARD_PROMPT_HELPER = boardPromptHelper(BOARD_WORDS)
 const PROMPT_RECEIPT_SCRIPT = promptReceiptScript(BOARD_WORDS)
+
+test('every board request contains a word the reporters\' timeout fallback looks for', () => {
+  // The sh fallback copies each hint into a case pattern, so a hint holds only letters, digits and hyphens.
+  for (const hint of BOARD_REQUEST_HINTS) assert.match(hint, /^[A-Za-z0-9-]+$/)
+  const commands = ['/board', '$agent-board', '/agent-board']
+  // The command list follows BOARD_REQUEST: a command it no longer matches fails here.
+  for (const command of commands) assert.ok(BOARD_REQUEST.test(command), command)
+  for (const prompt of [...BOARD_WORDS, ...commands, '<name>agent-board</name>']) {
+    assert.ok(BOARD_REQUEST_HINTS.some(hint => prompt.toLowerCase().includes(hint.toLowerCase())), prompt)
+  }
+})
+
+test('the legacy reporters read and classify within 2000 ms, under the hosts\' 3 s hook timeout', async () => {
+  const { HOOK_INPUT_TIMEOUT } = await import('../hooks/hook-safety.ts')
+  const { reporterPs1, reporterSh } = await import('../hooks/connect-pure.ts')
+  assert.equal(HOOK_INPUT_TIMEOUT, 2000)
+  assert.ok(reporterSh('/synthetic/inbox').includes('sleep 2 &'))
+  assert.ok(reporterPs1().includes('-ge 2000'))
+})
 
 test('a board request receipt stores no prompt words', async () => {
   const { readTurn, answerAgentPrompt } = await import('../hooks/inbox.ts')
@@ -289,20 +308,35 @@ test('generated PowerShell bounds application lookup to one executable', async (
 })
 
 test('the sh reporter writes a prompt receipt with no prompt words from stdin or an argument', () => fixture(async home => {
-  const { reporterSh } = await import('../hooks/connect-pure.ts')
+  const { reporterSh, shellQuote } = await import('../hooks/connect-pure.ts')
+  const { powershellReporter } = await import('../hooks/hook-reporters.ts')
   const file = join(home, 'progress-report.sh')
-  writeFileSync(file, reporterSh(shellPath(join(home, 'progress-inbox'))))
+  const diagnostic = join(home, 'classifier-probe.txt')
+  const diagnostics = []
+  // The reporter logs here, so each run can tell whether it timed out.
+  const env = { ...process.env, HOME: home, USERPROFILE: home }, log = join(home, '.agent-board', 'hook-errors.log'), timedOut = new Set()
+  // On Windows the sh reporter hands over to an embedded PowerShell reporter; observe its classifier as for ps1.
+  const source = reporterSh(shellPath(join(home, 'progress-inbox'))), embedded = shellQuote(powershellReporter(true))
+  assert.equal(source.split(embedded).length, 2)
+  writeFileSync(file, source.replace(embedded, () => shellQuote(observeClassifier(powershellReporter(true), diagnostic))))
   for (const mode of ['stdin', 'argument']) for (const prompt of ['/board', 'PRIVATE_REAL_ANSWER']) {
     const raw = JSON.stringify({ session_id: `synthetic-${mode}-${prompt === '/board'}`, cwd: '/synthetic/中文', prompt, transcript_path: 'PRIVATE_TRANSCRIPT' })
-    const result = spawnSync(sh, [shellPath(file), 'gemini', 'prompt', ...(mode === 'argument' ? [raw] : [])], { input: mode === 'stdin' ? raw : undefined, encoding: 'utf8', windowsHide: true })
+    rmSync(diagnostic, { force: true })
+    const logged = existsSync(log) ? readFileSync(log, 'utf8').length : 0
+    const result = spawnSync(sh, [shellPath(file), 'gemini', 'prompt', ...(mode === 'argument' ? [raw] : [])], { env, input: mode === 'stdin' ? raw : undefined, encoding: 'utf8', windowsHide: true })
+    if (existsSync(log) && readFileSync(log, 'utf8').slice(logged).includes('REPORTER_TIMEOUT')) timedOut.add(`synthetic-${mode}-${prompt === '/board'}`)
+    diagnostics.push(`${mode} ${prompt === '/board' ? 'board' : 'answer'}: ${classifierDiagnostic(diagnostic)}`)
     assert.equal(result.status, 0, result.stderr)
   }
   const saved = receipts(home)
-  assert.equal(saved.length, 4)
+  assert.equal(saved.length, 4, diagnostics.join('; '))
   for (const { body } of saved) {
     assert.ok(!/[^\x20-\x7e]/.test(body))
-    const receipt = JSON.parse(body)
-    assert.deepEqual(receipt, { session_id: receipt.session_id, cwd: '/synthetic/中文', ...(receipt.session_id.endsWith('true') ? { board_request: true } : {}) })
+    const { cwd, ...receipt } = JSON.parse(body)
+    // The POSIX sh timeout fallback leaves a non-ASCII folder out (#351), so only a run that logged
+    // REPORTER_TIMEOUT may miss it; the classifier keeps it.
+    assert.ok(cwd === '/synthetic/中文' || (cwd === undefined && timedOut.has(receipt.session_id)), body)
+    assert.deepEqual(receipt, { session_id: receipt.session_id, ...(receipt.session_id.endsWith('true') ? { board_request: true } : {}) })
     assert.ok(!body.includes('PRIVATE_') && !body.includes('/board'))
   }
 }))
