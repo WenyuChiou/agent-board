@@ -313,6 +313,8 @@ test('the sh reporter writes a prompt receipt with no prompt words from stdin or
   const file = join(home, 'progress-report.sh')
   const diagnostic = join(home, 'classifier-probe.txt')
   const diagnostics = []
+  // The reporter logs here, so each run can tell whether it timed out.
+  const env = { ...process.env, HOME: home, USERPROFILE: home }, log = join(home, '.agent-board', 'hook-errors.log'), timedOut = new Set()
   // On Windows the sh reporter hands over to an embedded PowerShell reporter; observe its classifier as for ps1.
   const source = reporterSh(shellPath(join(home, 'progress-inbox'))), embedded = shellQuote(powershellReporter(true))
   assert.equal(source.split(embedded).length, 2)
@@ -320,7 +322,9 @@ test('the sh reporter writes a prompt receipt with no prompt words from stdin or
   for (const mode of ['stdin', 'argument']) for (const prompt of ['/board', 'PRIVATE_REAL_ANSWER']) {
     const raw = JSON.stringify({ session_id: `synthetic-${mode}-${prompt === '/board'}`, cwd: '/synthetic/中文', prompt, transcript_path: 'PRIVATE_TRANSCRIPT' })
     rmSync(diagnostic, { force: true })
-    const result = spawnSync(sh, [shellPath(file), 'gemini', 'prompt', ...(mode === 'argument' ? [raw] : [])], { input: mode === 'stdin' ? raw : undefined, encoding: 'utf8', windowsHide: true })
+    const logged = existsSync(log) ? readFileSync(log, 'utf8').length : 0
+    const result = spawnSync(sh, [shellPath(file), 'gemini', 'prompt', ...(mode === 'argument' ? [raw] : [])], { env, input: mode === 'stdin' ? raw : undefined, encoding: 'utf8', windowsHide: true })
+    if (existsSync(log) && readFileSync(log, 'utf8').slice(logged).includes('REPORTER_TIMEOUT')) timedOut.add(`synthetic-${mode}-${prompt === '/board'}`)
     diagnostics.push(`${mode} ${prompt === '/board' ? 'board' : 'answer'}: ${classifierDiagnostic(diagnostic)}`)
     assert.equal(result.status, 0, result.stderr)
   }
@@ -329,8 +333,9 @@ test('the sh reporter writes a prompt receipt with no prompt words from stdin or
   for (const { body } of saved) {
     assert.ok(!/[^\x20-\x7e]/.test(body))
     const { cwd, ...receipt } = JSON.parse(body)
-    // Under a classifier timeout the POSIX sh fallback leaves a non-ASCII folder out (#351); PowerShell keeps it.
-    assert.ok(cwd === '/synthetic/中文' || (cwd === undefined && process.platform !== 'win32'), body)
+    // The POSIX sh timeout fallback leaves a non-ASCII folder out (#351), so only a run that logged
+    // REPORTER_TIMEOUT may miss it; the classifier keeps it.
+    assert.ok(cwd === '/synthetic/中文' || (cwd === undefined && timedOut.has(receipt.session_id)), body)
     assert.deepEqual(receipt, { session_id: receipt.session_id, ...(receipt.session_id.endsWith('true') ? { board_request: true } : {}) })
     assert.ok(!body.includes('PRIVATE_') && !body.includes('/board'))
   }

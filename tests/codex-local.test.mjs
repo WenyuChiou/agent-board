@@ -798,7 +798,8 @@ test('a hook worker that starts after the host would stop it still reads its inp
   const worker = join(f.root, 'agent-board-hook.mjs')
   const conversationId = 'late-antigravity-session'
   const argv = ['--hook-version', '1', '--hook-event', 'Stop', '--agent-status', '--agent', 'antigravity', '--state', 'waiting', '--event', 'Stop', '--progress-file', f.progress]
-  const at = Date.now() - 4000
+  // 3 s back is past the 2.7 s input line and leaves 7 s for Node to start inside the 10 s --hook-started window.
+  const at = Date.now() - 3000
   const result = spawnSync(process.execPath, [worker, ...argv, '--hook-started', String(at)], { env: f.env, input: JSON.stringify({ conversationId }), encoding: 'utf8', windowsHide: true, timeout: 20000 })
   assert.equal(result.status, 0, hookFailure(result))
   assert.equal(result.stdout, '{}\n')
