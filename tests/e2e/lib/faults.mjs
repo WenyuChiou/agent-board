@@ -1,18 +1,19 @@
 import assert from 'node:assert/strict'
 import { spawnIsolated } from './spawn.mjs'
-import { chmodSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs'
+import { chmodSync, readdirSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { RELEASE_0_20_5 } from '../../fixtures/released.ts'
 import { seenWithin } from './expect.mjs'
 
-const childIn = (world, file, args) => {
+// lifetimeMs is how long a helper may live before it is killed: a crashed test must not leave one running.
+const childIn = (world, file, args, { lifetimeMs = 20000 } = {}) => {
   const child = spawnIsolated(file, args, { env: world.env, cwd: world.root, stdio: ['ignore', 'pipe', 'pipe'] })
   let stdout = '', stderr = '', error
   child.stdout.setEncoding('utf8').on('data', text => { stdout += text })
   child.stderr.setEncoding('utf8').on('data', text => { stderr += text })
   child.on('error', failure => { error = failure })
   const done = new Promise(resolve => child.once('close', status => resolve({ status, stdout, stderr, error })))
-  const timer = setTimeout(() => child.kill(), 20000)
+  const timer = setTimeout(() => child.kill(), lifetimeMs)
   let isStopped = false
   const stop = async () => {
     if (isStopped) return
@@ -46,18 +47,21 @@ export const tear = (world, name, at) => {
   writeFileSync(file, bytes.subarray(0, at))
 }
 
+const LOCK_READY_MS = 30000
 export const lockFile = async (world, name) => {
   if (process.platform !== 'win32') return { skip: 'Exclusive Windows sharing locks are unavailable', release: async () => {} }
   const path = join(world.claudeDir, name)
   const quoted = path.replace(/'/g, "''")
-  const worker = childIn(world, 'powershell.exe', ['-NoProfile', '-Command', `$f = [IO.File]::Open('${quoted}', 'Open', 'ReadWrite', 'None'); try { [Console]::Out.WriteLine('LOCK_READY'); while ($true) { Start-Sleep -Milliseconds 50 } } finally { $f.Dispose() }`])
+  // The holder must outlive its own ready-wait, or it could be killed just as it is ready: it
+  // lives 20 s beyond that, which is the time the journey has to use the lock.
+  const worker = childIn(world, 'powershell.exe', ['-NoProfile', '-Command', `$f = [IO.File]::Open('${quoted}', 'Open', 'ReadWrite', 'None'); try { [Console]::Out.WriteLine('LOCK_READY'); while ($true) { Start-Sleep -Milliseconds 50 } } finally { $f.Dispose() }`], { lifetimeMs: LOCK_READY_MS + 20000 })
   try {
     // PowerShell can take seconds to start on a slow Windows CI runner; this only
     // waits for the lock holder to be ready and times nothing in the product.
     await seenWithin(() => {
       if (worker.failure()) throw worker.failure()
       return worker.output()
-    }, text => text.includes('LOCK_READY'), 30000)
+    }, text => text.includes('LOCK_READY'), LOCK_READY_MS)
     return { release: worker.stop }
   } catch (error) {
     await worker.stop()
@@ -165,4 +169,105 @@ syncBuiltinESMExports()
   const restore = () => { world.env.NODE_OPTIONS = before }
   world.cleanups.push(restore)
   return { enable: operation => world.write('storage-fault-state', operation), restore }
+}
+
+// Added for the L5 concurrent-writers journey: the write procedure docs/FORMAT.md gives other
+// writers ("Concurrent writers"), run as separate processes. Each one reads the file right before
+// it writes, changes only its own block, writes a temp file beside progress.md, renames it over,
+// reads back, and tries again up to three times at once when its block did not read back. A read
+// of zero bytes from a file seen with content is read again (the doc says the pane does this).
+// Prints WRITER_OK, or WRITE_FAILED with the error codes it met, and returns whether it wrote.
+// The two gates (the start signal, and the writer before it) are waited for at most gateMs: after
+// a hard kill of the driver nobody opens them, and without a deadline this process would poll for ever.
+const formatWriter = async (fs, config) => {
+  const { file, session, rounds, spacingMs, gate, after, gateMs } = config
+  const pause = ms => new Promise(done => setTimeout(done, ms))
+  process.stdout.write('WRITER_READY\n')
+  const deadline = performance.now() + gateMs
+  for (const waitingFor of [gate, after]) {
+    while (waitingFor && !fs.existsSync(waitingFor)) {
+      if (performance.now() > deadline) {
+        process.stdout.write(`WRITE_FAILED the start gate stayed closed for ${gateMs} ms\n`)
+        return false
+      }
+      await pause(2)
+    }
+  }
+  const codes = []
+  let hasSeenContent = false
+  const end = `<!-- /auto session=${session} -->`
+  for (let round = 0; round < rounds; round++) {
+    const own = [`<!-- auto session=${session} agent=format-writer state=working updated=${new Date().toISOString()} -->`, `### Format writer ${session}`, '> Context: Synthetic FORMAT.md writer', `- [~] Round ${round + 1}`, end].join('\n')
+    let isWritten = false
+    for (let attempt = 1; attempt <= 3 && !isWritten; attempt++) {
+      const temp = `${file}.format-writer-${session}.tmp`
+      try {
+        let source = ''
+        for (let again = 0; again < 20; again++) {
+          source = fs.readFileSync(file, 'utf8')
+          if (source !== '' || !hasSeenContent) break
+          await pause(5)
+        }
+        if (source !== '') hasSeenContent = true
+        const start = source.indexOf(`<!-- auto session=${session} `)
+        const finish = source.indexOf(end, start)
+        const next = start >= 0 && finish > start
+          ? source.slice(0, start) + own + source.slice(finish + end.length)
+          : source + (source === '' || source.endsWith('\n') ? '' : '\n') + `## format-writer-${session}\n${own}\n`
+        fs.writeFileSync(temp, next)
+        fs.renameSync(temp, file)
+        if (fs.readFileSync(file, 'utf8').includes(own)) isWritten = true
+        else codes.push('LOST')
+      } catch (error) {
+        codes.push(error.code ?? error.message)
+        try { fs.unlinkSync(temp) } catch {}
+      }
+    }
+    if (!isWritten) {
+      process.stdout.write(`WRITE_FAILED round ${round + 1} ${codes.join(',')}\n`)
+      return false
+    }
+    if (spacingMs) await pause(spacingMs)
+  }
+  process.stdout.write(`WRITER_OK${codes.length ? ` after ${codes.join(',')}` : ''}\n`)
+  return true
+}
+
+const WRITER_GATE_MS = 20000
+// One process per session id, all waiting on a gate file so they start together. With
+// isSequential each waits for the one before it to finish instead, so no two overlap. rounds
+// and spacingMs repeat the whole procedure to keep writers busy while other writers are active.
+export const formatWriters = async (world, sessions, { rounds = 1, spacingMs = 0, isSequential = false, gateMs = WRITER_GATE_MS } = {}) => {
+  const gate = join(world.root, 'format-writers-go')
+  const workers = sessions.map((session, index) => {
+    const config = { file: world.path, session, rounds, spacingMs, gate, gateMs, after: isSequential && index > 0 ? join(world.root, `format-writer-done-${index - 1}`) : undefined }
+    return childIn(world, process.execPath, ['--input-type=module', '-e', `import * as fs from 'node:fs'
+const main = ${formatWriter.toString()}
+process.exitCode = await main(fs, ${JSON.stringify(config)}) ? 0 : 2
+fs.writeFileSync(${JSON.stringify(join(world.root, `format-writer-done-${index}`))}, '')
+`])
+  })
+  try {
+    await Promise.all(workers.map(worker => seenWithin(worker.output, text => text.includes('WRITER_READY'), 8000)))
+  } catch (error) {
+    await Promise.all(workers.map(worker => worker.stop()))
+    throw error
+  }
+  return {
+    go: () => writeFileSync(gate, 'go'),
+    finished: async () => Promise.all(workers.map(worker => worker.done)),
+    stop: () => Promise.all(workers.map(worker => worker.stop())),
+  }
+}
+
+// Added for the L5 concurrent-writers journey: the sessions whose hook events the local reporter
+// keeps in its pending folder for its next run. A block waiting there has not landed yet, but it
+// is not lost either.
+export const keptHookEvents = world => {
+  const folder = join(world.home, '.agent-board', 'pending')
+  let names = []
+  try { names = readdirSync(folder) } catch { return [] }
+  return names.filter(name => name.endsWith('.json')).flatMap(name => {
+    try { return [JSON.parse(readFileSync(join(folder, name), 'utf8')).session] } catch { return [] }
+  })
 }
