@@ -897,7 +897,7 @@ ${terminal(mode, monoOf(lang), title, gridSvg(grid, PAD, BAR + PAD, theme), grid
 // The README's cover, a 29 s loop in six scenes, each named by a caption at the left: what Agent
 // Board is (four agents come onto one board), steps ticking live, a question jumping to the top,
 // answering it with one key, messaging an agent from the board (a preview of Send to Codex, #318,
-// whose milestone is 0.24.3) and connecting every agent with one command. The screen is the terminal board
+// whose milestone is 0.24.2) and connecting every agent with one command. The screen is the terminal board
 // (`--watch`) as boardScreen draws it at each moment (COVER and COVER_MARKS in samples.ts), each
 // agent's tile on the window's edge beside its line. The page's reply box in scene 5 is drawn in
 // the page's own words (serveSend, serveSending and messagesAcknowledged in hooks/strings-en.ts),
@@ -951,7 +951,7 @@ type CoverScene = { caption: [string, string]; sub: string[] }
 // agents the command sets up, not a claim that each was checked: the README says how each was.
 const COVER_WORDS: Record<Lang, { label: string; scenes: CoverScene[]; legend: [string, string, string]; pick: string; works: string; soon: { send: string; npm: string } }> = {
   en: {
-    label: 'Claude Code, Codex, Antigravity and OpenCode report to one board and their steps tick live; Codex asks whether to open its pull request and one key copies the answer; a message written on the board’s page reaches Codex and its reply shows, a preview coming in 0.24.3; one npx command connects every agent, on npm from 0.24.0',
+    label: 'Claude Code, Codex, Antigravity and OpenCode report to one board and their steps tick live; Codex asks whether to open its pull request and one key copies the answer; a message written on the board’s page reaches Codex and its reply shows, a preview coming in 0.24.2; one npx command connects every agent, on npm from 0.24.0',
     scenes: [
       { caption: ['Every agent,', 'one board.'], sub: ['Each one reports in by itself,', 'so you stop checking each window.'] },
       { caption: ['Watch steps', 'tick off live.'], sub: ['Each step shows up the moment', 'the agent finishes it.'] },
@@ -963,11 +963,11 @@ const COVER_WORDS: Record<Lang, { label: string; scenes: CoverScene[]; legend: [
     legend: ['done', 'doing', 'to do'],
     pick: 'Pick it',
     works: 'SET UP BY THE SAME COMMAND',
-    soon: { send: 'Coming in 0.24.3', npm: 'On npm from 0.24.0' },
+    soon: { send: 'Coming in 0.24.2', npm: 'On npm from 0.24.0' },
   },
   // Chinese headlines leave out the punctuation at the end of a line, as Chinese display type does.
   'zh-TW': {
-    label: 'Claude Code、Codex、Antigravity、OpenCode 都回報到同一塊看板，每一步即時打勾；Codex 問能不能開 pull request，按一個鍵就複製好答案；在看板網頁寫給 Codex 的訊息，看得到它送達和回覆（0.24.3 起提供的預覽）；一行 npx 指令接上每個 agent（0.24.0 起上架 npm）',
+    label: 'Claude Code、Codex、Antigravity、OpenCode 都回報到同一塊看板，每一步即時打勾；Codex 問能不能開 pull request，按一個鍵就複製好答案；在看板網頁寫給 Codex 的訊息，看得到它送達和回覆（0.24.2 起提供的預覽）；一行 npx 指令接上每個 agent（0.24.0 起上架 npm）',
     scenes: [
       { caption: ['每個 agent', '同一塊看板'], sub: ['每個 agent 都會自動回報，', '不用一個個視窗切過去。'] },
       { caption: ['每一步', '即時打勾'], sub: ['agent 做完一步，', '看板馬上就顯示。'] },
@@ -979,10 +979,10 @@ const COVER_WORDS: Record<Lang, { label: string; scenes: CoverScene[]; legend: [
     legend: ['完成', '進行中', '待辦'],
     pick: '選它',
     works: '同一行指令就能設定',
-    soon: { send: '0.24.3 起提供', npm: '0.24.0 起上架 npm' },
+    soon: { send: '0.24.2 起提供', npm: '0.24.0 起上架 npm' },
   },
   'zh-CN': {
-    label: 'Claude Code、Codex、Antigravity、OpenCode 都汇报到同一块看板，每一步实时打勾；Codex 问能不能开 pull request，按一个键就复制好答案；在看板网页上给 Codex 发的消息，能看到它送达和回复（0.24.3 起提供的预览）；一行 npx 命令接上每个 agent（0.24.0 起上架 npm）',
+    label: 'Claude Code、Codex、Antigravity、OpenCode 都汇报到同一块看板，每一步实时打勾；Codex 问能不能开 pull request，按一个键就复制好答案；在看板网页上给 Codex 发的消息，能看到它送达和回复（0.24.2 起提供的预览）；一行 npx 命令接上每个 agent（0.24.0 起上架 npm）',
     scenes: [
       { caption: ['每个 agent', '同一块看板'], sub: ['每个 agent 都会自动汇报，', '不用一个个窗口切过去。'] },
       { caption: ['每一步', '实时打勾'], sub: ['agent 做完一步，', '看板马上就显示。'] },
@@ -994,7 +994,7 @@ const COVER_WORDS: Record<Lang, { label: string; scenes: CoverScene[]; legend: [
     legend: ['完成', '进行中', '待办'],
     pick: '选中它',
     works: '同一行命令就能设置',
-    soon: { send: '0.24.3 起提供', npm: '0.24.0 起上架 npm' },
+    soon: { send: '0.24.2 起提供', npm: '0.24.0 起上架 npm' },
   },
 }
 // The setup command scene 6 shows, and the agents it shows under it: the README's supported list.

@@ -3,7 +3,7 @@
 <p align="center"><b>每個 AI coding agent 在做什麼，一個看板看完；哪個在等你，就在那裡回它。</b></p>
 
 <p align="center">
-<picture><source media="(prefers-color-scheme: dark)" srcset="docs/images/cover-zh-TW-dark.svg"><img alt="會動的看板，分六幕：Claude Code、Codex、Antigravity 和 OpenCode 回報到同一個終端機看板；每一步即時打勾；Codex 的問題跳到最上面；按一個鍵就複製好答案；在看板網頁寫給 Codex 的訊息送達後，看得到它回覆（預覽，0.24.3 起提供）；一行 npx 指令接上每個 agent，0.24.0 起上架 npm。合成資料。" src="docs/images/cover-zh-TW-light.svg" width="860"></picture>
+<picture><source media="(prefers-color-scheme: dark)" srcset="docs/images/cover-zh-TW-dark.svg"><img alt="會動的看板，分六幕：Claude Code、Codex、Antigravity 和 OpenCode 回報到同一個終端機看板；每一步即時打勾；Codex 的問題跳到最上面；按一個鍵就複製好答案；在看板網頁寫給 Codex 的訊息送達後，看得到它回覆（預覽，0.24.2 起提供）；一行 npx 指令接上每個 agent，0.24.0 起上架 npm。合成資料。" src="docs/images/cover-zh-TW-light.svg" width="860"></picture>
 </p>
 
 <p align="center">
