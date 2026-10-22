@@ -91,7 +91,7 @@ configuration or prove native execution.
 
 ## Install with npm
 
-From its first npm release (planned for 0.24.0), the same installer is on npm as `@wenyuchiou/agent-board`. With Node.js 22+ (what the
+From 0.24.0, the same installer is on npm as `@wenyuchiou/agent-board`. With Node.js 22+ (what the
 package's `engines` field asks for) and no checkout:
 
 ```sh

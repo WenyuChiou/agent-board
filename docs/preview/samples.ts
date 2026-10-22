@@ -366,7 +366,7 @@ export const CLI_FILES: Record<string, string> = {
 // (`agent-board --watch`). Claude Code, Codex, Antigravity and OpenCode each report into one
 // file through their own hooks and tick their steps; Codex asks whether to open its pull
 // request and the person answers from the board; the person passes what Claude chose on to
-// Codex (a preview of sending, coming in 0.24.3) and Codex ticks that step; last, Antigravity
+// Codex (a preview of Send to Codex, #318, milestone 0.24.3) and Codex ticks that step; last, Antigravity
 // asks something new. The moments are COVER_MARKS. No resume id or folder, as in the CLI sample.
 export const COVER_AGENTS = ['claude', 'codex', 'antigravity', 'opencode'] as const
 export type CoverAgent = (typeof COVER_AGENTS)[number]

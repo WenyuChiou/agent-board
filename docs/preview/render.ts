@@ -244,10 +244,11 @@ const glyph = (icon: AgentIcon, x: number, y: number, size: number): string => {
 // A near-black tile gets a faint rim, or it sinks into a dark page; a coloured one needs none.
 const isDark = (tile: string): boolean => parseInt(tile.slice(1, 3), 16) + parseInt(tile.slice(3, 5), 16) + parseInt(tile.slice(5, 7), 16) < 120
 
-// An agent's tile, `size` square, from its name; nothing for a name without one.
+// An agent's tile, `size` square, from its name. A name without a tile throws: a renamed agent
+// would otherwise drop out of a picture without a word.
 const iconTile = (name: string, x: number, y: number, size: number): string => {
   const icon = AGENT_ICONS.find(one => one.name === name)
-  if (icon === undefined) return ''
+  if (icon === undefined) throw new Error(`No tile for the agent "${name}" in AGENT_ICONS`)
   const rim = isDark(icon.tile) ? `<rect x="${x + 0.5}" y="${y + 0.5}" width="${size - 1}" height="${size - 1}" rx="${size * 0.23 - 0.5}" fill="none" stroke="#fff" stroke-opacity="0.22"/>` : ''
   return `<rect x="${x}" y="${y}" width="${size}" height="${size}" rx="${size * 0.23}" fill="${icon.tile}"/>${rim}${glyph(icon, x, y, size)}`
 }
@@ -895,8 +896,8 @@ ${terminal(mode, monoOf(lang), title, gridSvg(grid, PAD, BAR + PAD, theme), grid
 
 // The README's cover, a 29 s loop in six scenes, each named by a caption at the left: what Agent
 // Board is (four agents come onto one board), steps ticking live, a question jumping to the top,
-// answering it with one key, messaging an agent from the board (a preview of sending, coming in
-// 0.24.3) and connecting every agent with one command. The screen is the terminal board
+// answering it with one key, messaging an agent from the board (a preview of Send to Codex, #318,
+// whose milestone is 0.24.3) and connecting every agent with one command. The screen is the terminal board
 // (`--watch`) as boardScreen draws it at each moment (COVER and COVER_MARKS in samples.ts), each
 // agent's tile on the window's edge beside its line. The page's reply box in scene 5 is drawn in
 // the page's own words (serveSend, serveSending and messagesAcknowledged in hooks/strings-en.ts),
@@ -944,8 +945,10 @@ const COVER_LOOK: Record<Mode, { sky: [string, string, string]; dot: string; dot
   light: { sky: ['#fdfcf8', '#f6f5f0', '#eceee8'], dot: '#1f2324', dots: 0.06, glow: 0.12, ink: '#1f2324', muted: LIGHT.muted, accent: '#00757e', card: '#ffffff', line: '#e3e4de', shadow: '#1f2324', depth: 0.16 },
 }
 type CoverScene = { caption: [string, string]; sub: string[] }
-// Each scene's caption (its second line in the accent colour) and the line under it; the chips
-// mark what is not out yet and say in which release it ships: delete one, here only, once it is.
+// Each scene's caption (its second line in the accent colour) and the line under it. The chips say
+// from which release a thing is there: scene 5's follows #318's milestone, so change it here only
+// if that milestone moves, and delete it once Send to Codex has shipped. Scene 6's row is the
+// agents the command sets up, not a claim that each was checked: the README says how each was.
 const COVER_WORDS: Record<Lang, { label: string; scenes: CoverScene[]; legend: [string, string, string]; pick: string; works: string; soon: { send: string; npm: string } }> = {
   en: {
     label: 'Claude Code, Codex, Antigravity and OpenCode report to one board and their steps tick live; Codex asks whether to open its pull request and one key copies the answer; a message written on the board’s page reaches Codex and its reply shows, a preview coming in 0.24.3; one npx command connects every agent, on npm from 0.24.0',
@@ -959,7 +962,7 @@ const COVER_WORDS: Record<Lang, { label: string; scenes: CoverScene[]; legend: [
     ],
     legend: ['done', 'doing', 'to do'],
     pick: 'Pick it',
-    works: 'WORKS WITH',
+    works: 'SET UP BY THE SAME COMMAND',
     soon: { send: 'Coming in 0.24.3', npm: 'On npm from 0.24.0' },
   },
   // Chinese headlines leave out the punctuation at the end of a line, as Chinese display type does.
@@ -975,7 +978,7 @@ const COVER_WORDS: Record<Lang, { label: string; scenes: CoverScene[]; legend: [
     ],
     legend: ['完成', '進行中', '待辦'],
     pick: '選它',
-    works: '支援',
+    works: '同一行指令就能設定',
     soon: { send: '0.24.3 起提供', npm: '0.24.0 起上架 npm' },
   },
   'zh-CN': {
@@ -990,7 +993,7 @@ const COVER_WORDS: Record<Lang, { label: string; scenes: CoverScene[]; legend: [
     ],
     legend: ['完成', '进行中', '待办'],
     pick: '选中它',
-    works: '支持',
+    works: '同一行命令就能设置',
     soon: { send: '0.24.3 起提供', npm: '0.24.0 起上架 npm' },
   },
 }
@@ -1164,7 +1167,10 @@ const cover = (lang: Lang, mode: Mode): string => {
   const codexAt = boards[MOMENT.opened]?.findIndex(row => lineText(row).replace(/^[›\s]+/, '').trimEnd() === c.tasks.codex.title) ?? -1
   if (codexAt < 0) throw new Error(`Codex has no line on the board when the message is sent, language ${lang}`)
   const reached = [[T.arrive, pal.accent], [T.replied, pal.done]].map(([at, colour]) => `<rect class="a ${glow(at as number, 1, 0.22)}" x="1" y="${rowY(codexAt) - 1}" width="${num(winW - 2)}" height="${2 * LINE + 2}" fill="${colour}"/>`).join('')
-  const windowSvg = `<g filter="url(#lift)">${terminal(mode, mono, 'agent-board --watch', `<g clip-path="url(#board)">${boardSvg}${bands}${reached}</g>`, rows, winX, winY, cols)}</g>`
+  // The shadow is cast by a still rect the window's size under it, not by the window, so a change
+  // on the board does not make the viewer work the shadow out again.
+  const winH = BAR + PAD + rows * LINE + PAD
+  const windowSvg = `<rect x="${winX}" y="${winY}" width="${num(winW)}" height="${winH}" rx="12" fill="${t.ground}" filter="url(#lift)"/>${terminal(mode, mono, 'agent-board --watch', `<g clip-path="url(#board)">${boardSvg}${bands}${reached}</g>`, rows, winX, winY, cols)}`
 
   // Each agent's tile on the window's left edge, beside its line, and the asking agent's beside
   // its question too. A tile stays while its line does, and moves with it.
@@ -1378,6 +1384,8 @@ ${chip(COVER_LEFT, y + boxH + 12, w.soon.npm)}</g>
 <style>
 .a, .k { animation-duration: ${COVER_LOOP}s; animation-iteration-count: infinite; animation-timing-function: linear; }
 .a { opacity: 0; }
+/* A viewer that does not play CSS animation shows the last scene still; a playing one follows its keyframes. */
+.a.last { opacity: 1; }
 .m { transform-box: fill-box; transform-origin: 100% 50%; }
 ${keyframes.join('\n')}
 ${keyframes.map((_, i) => `.c${i} { animation-name: c${i} }`).join('\n')}

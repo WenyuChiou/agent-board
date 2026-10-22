@@ -14,6 +14,12 @@ const READMES = [
   ['README.zh-TW.md', 'zh-TW', '合成資料。'],
   ['README.zh-CN.md', 'zh-CN', '合成数据。'],
 ]
+// Each README's sections in the order a newcomer reads them, the same eight in every language.
+const SECTIONS = {
+  en: ['Quick start', 'Key commands', 'Supported agents', 'What you see', 'How it works', 'Troubleshooting', 'Documentation', 'License'],
+  'zh-TW': ['快速開始', '常用指令', '支援的 agent', '你會看到什麼', '怎麼運作', '疑難排解', '文件', '授權'],
+  'zh-CN': ['快速开始', '常用命令', '支持的 agent', '你会看到什么', '怎么运作', '问题排查', '文档', '许可证'],
+}
 
 // Each cover's six scenes: the two lines of every caption as COVER_WORDS in docs/preview/render.ts
 // has them (none holds a character the SVG escapes, so they are written as they appear), the chip
@@ -93,6 +99,7 @@ describe('L0 discover and install from the README', () => {
           }
         }
         assert.doesNotMatch(svg, /<foreignObject\b/i, `${file}: the cover has no foreignObject`)
+        assert.doesNotMatch(svg, /<image\b/i, `${file}: the cover embeds no bitmap`)
         assert.doesNotMatch(svg, /\s(?:xlink:href|href|src)\s*=\s*['"](?!#|data:)/i, `${file}: attributes reference only local fragments or embedded data`)
         assert.doesNotMatch(svg, /@import\b/i, `${file}: the cover has no stylesheet imports`)
         assert.doesNotMatch(svg, /url\(\s*['"]?\s*(?:https?:|\/\/)/i, `${file}: CSS loads nothing from the network`)
@@ -134,6 +141,20 @@ describe('L0 discover and install from the README', () => {
         assert.ok(classes.some(words => words.includes('last')), `${file}: an element draws the last frame`)
         assert.ok(classes.some(words => words.includes('a')), `${file}: an element uses the animated class`)
         assert.doesNotMatch(svg, /\sstyle\s*=\s*(["'])(?:(?!\1)[\s\S])*\banimation\b/i, `${file}: animation names live in the stylesheet`)
+        // Every keyframe moves something and everything that names one has it: a rule binds class cN
+        // to @keyframes cN, an element carries that class, and no cN class lacks its keyframes.
+        // Without the rules nothing moves and the caption column stays blank. The rules are read
+        // outside the reduced-motion block, where they apply while the cover plays; there too a
+        // viewer that plays no CSS animation is shown the last scene.
+        const playing = svg.replace(reduced[0], '')
+        assert.match(playing, /(?:^|\}|\*\/)\s*\.a\.last\s*\{[^{}]*\bopacity\s*:\s*1\s*(?:;|\})/, `${file}: outside reduced motion, .a.last has opacity 1`)
+        const named = new Set([...svg.matchAll(/@keyframes\s+([\w-]+)\s*\{/g)].map(match => match[1]))
+        const bound = new Set(classes.flat().filter(word => /^c\d+$/.test(word)))
+        for (const name of named) {
+          assert.match(playing, new RegExp(`\\.${literal(name)}\\s*\\{\\s*animation-name\\s*:\\s*${literal(name)}\\s*;?\\s*\\}`), `${file}: .${name} plays @keyframes ${name}`)
+          assert.ok(bound.has(name), `${file}: an element carries .${name}`)
+        }
+        for (const name of bound) assert.ok(named.has(name), `${file}: .${name} has its @keyframes`)
 
         // The six captions, in order. Each is one <text> of two <tspan> lines inside an animated group;
         // reduced motion keeps only the last scene's group.
@@ -164,5 +185,17 @@ describe('L0 discover and install from the README', () => {
         assert.ok(commands.some(command => isKept(groupsAround(svg, command.index))), `${file}: the end frame shows "${COMMAND.join(' ')}"`)
       }
     }
+  })
+
+  test('L0 README: each README shows the cover before its first section, then the same eight sections in the same order', () => {
+    for (const [name, lang] of READMES) {
+      const text = read(name)
+      const cover = text.indexOf(`docs/images/cover-${lang}-light.svg`)
+      const firstSection = text.indexOf('\n## ')
+      assert.ok(cover >= 0 && firstSection >= 0 && cover < firstSection, `${name}: the cover comes before the first section`)
+      const sections = [...text.matchAll(/^## (.+)$/gm)].map(match => match[1].trim())
+      assert.deepEqual(sections, SECTIONS[lang], `${name}: the sections are in the README's order`)
+    }
+    assert.equal(new Set(Object.values(SECTIONS).map(list => list.length)).size, 1, 'every language has the same number of sections')
   })
 })

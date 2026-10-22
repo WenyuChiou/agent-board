@@ -7,7 +7,7 @@
 </p>
 
 <p align="center">
-<a href="#快速開始"><img alt="Node.js 22+" src="https://img.shields.io/badge/Node.js-%E2%89%A5%2022-339933"></a>
+<a href="#快速開始"><img alt="Node.js 18+ from a checkout, 22+ for the npm package" src="https://img.shields.io/badge/Node.js-18%2B%20checkout%20%C2%B7%2022%2B%20npm-339933"></a>
 <a href="LICENSE"><img alt="MIT 授權" src="https://img.shields.io/badge/license-MIT-green"></a>
 </p>
 
@@ -28,9 +28,9 @@ npx @wenyuchiou/agent-board --serve
 第一行會找出這台電腦上裝了哪些 agent，列出設定會改什麼，不會寫入任何東西。第二行才真的寫入，第三行打開看板網頁。接著為每個 agent 開一個新對話：原本就開著的對話不會接上。只想設定其中一個 agent，就加上 `--agent` 和它的名字，例如 `--agent codex`；Claude Code 則改用它的外掛接上（見[常用指令](#常用指令)）。更多細節見[安裝指南](docs/SETUP.md#install-with-npm)（英文）。
 
 <details>
-<summary><b>0.24.0 上架 npm 之前：用 git clone 安裝</b></summary>
+<summary><b>不用 npm：用 git clone 安裝</b></summary>
 
-npm 套件預計在 0.24.0 推出。在那之前，請先 clone 這個 repository，需要 Node.js 18 以上：
+也可以 clone 這個 repository 來安裝，需要 Node.js 18 以上：
 
 ```sh
 git clone https://github.com/WenyuChiou/agent-board.git
@@ -142,10 +142,10 @@ Hooks 只說對話在做事還是在等；步驟和什麼時候算完成，來�
 
 ## 你會看到什麼
 
-- **回覆在等你的那一個。** 任何 agent 的問題都排在最上面，每個答案一個按鈕。對方的對話有即時連線，按**傳送**就送到；沒有的話，按**複製**再貼回它的對話。
+- **回覆在等你的那一個。** 任何 agent 的問題都排在最上面，每個答案一個按鈕。開了訊息功能（[`--messages-dir`](docs/MESSAGING.md#enable-locally)，英文說明）、對方的對話又有即時連線，按**傳送**就送到；沒有的話，按**複製**再貼回它的對話。
 - **確認其他的還在動。** 每個 agent 的工作都顯示現在做到哪一步、多久前回報過。超過一週沒人動的工作收進一行 **N 項超過 7 天沒動**。
 - **收掉做完的和停掉的。** 做完的工作會自己移到每月封存檔。做到一半停掉的對話，可以封存、確認完成，或接手繼續做。
-- **不用切過去也能交代事情。** 在看板上打回覆：對方有連線就直接送過去，沒有的話看板幫你複製好，你再貼上。
+- **不用切過去也能交代事情。** 在看板上打回覆：開了訊息功能、對方又有連線，就直接送過去；沒有的話看板幫你複製好，你再貼上。
 
 **終端機看板**（`--watch`），打開了 Codex 的問題：按 `y` 或 `n` 複製回答。
 
@@ -161,7 +161,7 @@ Hooks 只說對話在做事還是在等；步驟和什麼時候算完成，來�
 
 上面的看板指令會在瀏覽器打開看板網頁（在聊天軟體裡則只印出純文字，沒有連結）。在任何終端機跑 `node ~/.agent-board/agent-board.mjs --serve` 也一樣，再跑一次就會重新打開網頁。在網頁上可以：
 
-- **回覆**問題：對方的對話在線就直接**傳送**，否則**複製**回覆。
+- **回覆**問題：開了訊息功能、對方的對話又在線，就直接**傳送**，否則**複製**回覆。
 - **勾掉**下一步、**封存**一件工作，或按**現在封存**收走所有做完的。
 - **已回覆，先隱藏**：已在原本對話回過的問題，只在這台電腦上隱藏，直到那個對話問新的問題；不會送出任何東西。
 - **貼入區塊**：把 Muse、dot 這類網頁聊天的進度貼進來。
@@ -187,9 +187,9 @@ node ~/.agent-board/agent-board.mjs --codex-doctor --agent codex
 | 你看到 | 試試 |
 |---|---|
 | 某個 agent 沒出現在看板上 | 開一個它的新對話；原本就開著的不會接上。Codex 還要先在 `/hooks` 信任它的 hooks。 |
-| 裝完之後什麼都沒變 | 不加 `--apply` 再跑一次 `setup-agent.mjs`，看它列出的衝突和 `adapter-pending`；你改過的檔案不會被覆蓋，會列在那裡。 |
+| 裝完之後什麼都沒變 | 不加 `--apply` 再跑一次 `npx @wenyuchiou/agent-board setup`（用 git clone 的話是 `node scripts/setup-agent.mjs`），看它列出的衝突和 `adapter-pending`；你改過的檔案不會被覆蓋，會列在那裡。 |
 | 還在跑舊版 | 跑著的對話會一直用它載入時的版本：開一個新的。更新方式見[使用指南](docs/GUIDE.zh-TW.md#更新與移除)。 |
-| 同一個 agent 出現兩次 | 可能兩種方式都接上了：Claude 外掛的 `/progress connect` 和 `setup-agent.mjs`。`/progress connect status` 會列出外掛接了哪些；用 `/progress connect remove` 或 `--codex-remove --agent <name>` 拿掉其中一個。 |
+| 同一個 agent 出現兩次 | 可能兩種方式都接上了：Claude 外掛的 `/progress connect` 和安裝程式（setup）。`/progress connect status` 會列出外掛接了哪些；用 `/progress connect remove` 或 `--codex-remove --agent <name>` 拿掉其中一個。 |
 | 有個問題一直不消失 | 在它自己的對話裡回答，再按**已回覆，先隱藏**（`h`）。3 天後它會移到**較早的未答問題**，7 天後移到**更早、尚未回答的問題**。 |
 
 更多答案在使用指南的[常見問題](docs/GUIDE.zh-TW.md#常見問題)和[疑難排解](docs/GUIDE.zh-TW.md#疑難排解)。發現 bug 的話，用 [bug 表單](https://github.com/WenyuChiou/agent-board/issues/new?template=bug_report.yml)開一個 issue，貼上 doctor 的輸出，並照使用指南的[安全回報步驟](docs/GUIDE.zh-TW.md#安全地回報問題)做：不要放 session id、家目錄路徑或 token。

@@ -7,7 +7,7 @@
 </p>
 
 <p align="center">
-<a href="#quick-start"><img alt="Node.js 22+" src="https://img.shields.io/badge/Node.js-%E2%89%A5%2022-339933"></a>
+<a href="#quick-start"><img alt="Node.js 18+ from a checkout, 22+ for the npm package" src="https://img.shields.io/badge/Node.js-18%2B%20checkout%20%C2%B7%2022%2B%20npm-339933"></a>
 <a href="LICENSE"><img alt="MIT license" src="https://img.shields.io/badge/license-MIT-green"></a>
 </p>
 
@@ -28,9 +28,9 @@ npx @wenyuchiou/agent-board --serve
 The first command finds the agents on this computer and shows what setup would change, writing nothing. The second makes the change, and the third opens the board's page. Then start a new session of each agent: a session that was already open is not connected. To set up one agent only, add `--agent` and its name, such as `--agent codex`; Claude Code connects through its plugin instead (see [Key commands](#key-commands)). More in the [setup guide](docs/SETUP.md#install-with-npm).
 
 <details>
-<summary><b>Until 0.24.0 is on npm: install from a checkout</b></summary>
+<summary><b>Without npm: install from a checkout</b></summary>
 
-The npm package is planned for 0.24.0. Until it is published, use a checkout, with Node.js 18+:
+To install from a clone of this repository instead, with Node.js 18+:
 
 ```sh
 git clone https://github.com/WenyuChiou/agent-board.git
@@ -153,10 +153,10 @@ Hooks say whether a session is working or waiting; its steps and when it is done
 
 ## What you see
 
-- **Answer the one that is waiting.** A question from any agent sits at the top, with a button for each answer. **Send** reaches a session that has a live connection; otherwise **Copy** gives you the reply to paste into its chat.
+- **Answer the one that is waiting.** A question from any agent sits at the top, with a button for each answer. Once you turn messaging on ([`--messages-dir`](docs/MESSAGING.md#enable-locally)), **Send** reaches a session that has a live connection; otherwise **Copy** gives you the reply to paste into its chat.
 - **Check the others are still moving.** Each agent's task shows its current step and when it last reported. Work nobody has touched for a week folds into one **N idle 7+ days** line.
 - **Clear what is finished or dead.** Finished work moves to a monthly archive by itself. A session that stopped halfway can be archived, confirmed done or taken over.
-- **Tell an agent something without going there.** Type a reply on the board: it goes straight to that session if it is connected, and otherwise the board copies it for you to paste.
+- **Tell an agent something without going there.** Type a reply on the board: with messaging on, it goes straight to that session if it is connected; otherwise the board copies it for you to paste.
 
 **The terminal board** (`--watch`), with Codex's question open: `y` or `n` copies the answer.
 
@@ -172,7 +172,7 @@ Both pictures are drawn by the board's own code from synthetic data. Native hook
 
 The board commands above open the board as a page in your browser (in a chat app they print plain text instead, with no link). From any terminal, `node ~/.agent-board/agent-board.mjs --serve` does the same; run it again to reopen the page. On the page you can:
 
-- **Answer** a question: **Send** to a session that is online, or **Copy** the reply.
+- **Answer** a question: **Send** to a session that is online (with messaging on), or **Copy** the reply.
 - **Tick** your next step, **archive** a task, or **Archive now** to clear everything finished.
 - **Already answered, hide** a question you answered in its own chat: hidden on this computer until that session asks something new; nothing is sent.
 - **Paste a block** from a web chat such as Muse or dot.
@@ -198,9 +198,9 @@ Use the agent's own name after `--agent` (the doctor keeps its old name for ever
 | You see | Try |
 |---|---|
 | An agent is not on the board | Start a new session of it; one that was already open is not connected. Codex also needs its hooks trusted in `/hooks`. |
-| Nothing changed after installing | Run `setup-agent.mjs` again without `--apply` and read its conflicts and `adapter-pending` lines; edited files are left alone and listed there. |
+| Nothing changed after installing | Run `npx @wenyuchiou/agent-board setup` again without `--apply` (from a checkout: `node scripts/setup-agent.mjs`) and read its conflicts and `adapter-pending` lines; edited files are left alone and listed there. |
 | An old version is still running | A running session keeps the version it loaded: start a new one. To update, see [the guide](docs/GUIDE.md#update-and-uninstall). |
-| An agent shows up twice | It may be connected both ways: by the Claude plugin's `/progress connect` and by `setup-agent.mjs`. `/progress connect status` lists what the plugin connected; remove one with `/progress connect remove` or `--codex-remove --agent <name>`. |
+| An agent shows up twice | It may be connected both ways: by the Claude plugin's `/progress connect` and by setup. `/progress connect status` lists what the plugin connected; remove one with `/progress connect remove` or `--codex-remove --agent <name>`. |
 | A question will not go away | Answer it in its own chat, then press **Already answered, hide** (`h`). After 3 days it moves into **Earlier unanswered questions**, and after 7 days into **Older unanswered questions**. |
 
 More answers are in the guide's [FAQ](docs/GUIDE.md#faq) and [Troubleshooting](docs/GUIDE.md#troubleshooting). Found a bug? Open an issue with the [bug form](https://github.com/WenyuChiou/agent-board/issues/new?template=bug_report.yml), paste the doctor's output, and follow the guide's [safe-report steps](docs/GUIDE.md#reporting-a-problem-safely): no session ids, home-folder paths or tokens.
