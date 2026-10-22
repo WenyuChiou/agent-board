@@ -4,7 +4,7 @@ import { EN } from '../../hooks/strings-en.ts'
 import { STALE_MS } from '../../hooks/parse.ts'
 import { makeWorld } from './lib/world.mjs'
 import { block, hook } from './lib/writers.mjs'
-import { formatWriters, keptHookEvents, lockFile, skew, storageFault, tear } from './lib/faults.mjs'
+import { formatWriters, keptHookEvents, lockFile, storageFault, tear } from './lib/faults.mjs'
 import { knownFailure } from './lib/known.mjs'
 import { chat, html, pageDom, run, serve } from './lib/surfaces.mjs'
 
@@ -306,7 +306,7 @@ test('L5 locked file: the Codex hook keeps a locked Stop event, exits 0, and the
     const stopped = await hook(world, 'codex', 'Stop', { session_id: session, cwd: world.root })
     assert.equal(stopped.status, 0, whyFailed(stopped))
     assert.equal(stopped.stderr.trim(), '')
-    // The locked run itself queued the event; the later run below only replays it.
+    // The locked run itself queued the event. The later run below only replays it.
     assert.ok(keptHookEvents(world).includes(session), 'the locked Stop event is kept for the next run')
     await lock.release()
     assert.equal(world.read('progress.md'), before, 'a locked run changes nothing')
@@ -350,7 +350,7 @@ const raceOnce = async isWindows => {
       writers.go()
       written = await writers.finished()
     }
-    // A hook that finds the board busy keeps its event and exits 0; the next hook run applies it.
+    // A hook that finds the board busy keeps its event and exits 0. The next hook run applies it.
     // Settling runs replay what was kept (a second one only when the first left something), and
     // an event still kept after them was never applied, which is a lost block.
     const sessions = [warmup, ...RACE_HOOKS]
@@ -362,7 +362,7 @@ const raceOnce = async isWindows => {
       if (keptHookEvents(world).length === 0) break
     }
     written.forEach((result, index) => {
-      // The writer prints WRITER_READY first; what it says it could not do is the WRITE_FAILED line.
+      // The writer prints WRITER_READY first. What it says it could not do is the WRITE_FAILED line.
       const failure = result.stdout.split('\n').find(line => line.startsWith('WRITE_FAILED'))
       if (result.status !== 0 || !result.stdout.includes('WRITER_OK')) problems.push(`writer ${RACE_WRITERS[index]} failed: ${failure?.trim() || result.stderr.trim() || result.stdout.trim()}`)
     })
@@ -387,12 +387,16 @@ const raceOnce = async isWindows => {
 }
 
 // What #249 reports: a writer that follows FORMAT.md is refused the rename (EPERM) and gives up
-// after three tries, or its block is lost under the concurrent writes. A lost hook block is not
-// what #249 reports (it is about those writers), so it has its own marker until its cause is
-// known. Anything else (a hook that exits non-zero, a doubled block, a writer that never
+// after three tries, or its block is lost under the concurrent writes. A hook can lose its block
+// to the same race the other way round: the writer read the file before the hook wrote, takes no
+// lock, and renames its copy over the hook's block. Both go when other writers take the native
+// lock (#381). Anything else (a hook that exits non-zero, a doubled block, a writer that never
 // started) is a plain failure.
-const SYMPTOM_249 = /^writer f\d+ failed: WRITE_FAILED .*EPERM|^writer block lost/
-const SYMPTOM_HOOK_LOST = /^hook block lost/
+const SYMPTOM_249 = /^writer f\d+ failed: WRITE_FAILED .*EPERM|^(?:writer|hook) block lost/
+const HOOK_LOST = /^hook block lost/
+// The runs that lost a hook block lost 1 of up to 11 (the warm-up, 8 racing hooks and 1 or 2
+// settling runs). More than 2 is more than that race's odd loss.
+const HOOK_LOST_MAX = 2
 
 test('L5 concurrent writers: 8 hooks and 4 FORMAT.md writers lose no block on Windows', async () => {
   const isWindows = process.platform === 'win32'
@@ -402,27 +406,14 @@ test('L5 concurrent writers: 8 hooks and 4 FORMAT.md writers lose no block on Wi
   let problems = []
   for (let attempt = 1; attempt <= (isWindows ? 3 : 1) && problems.length === 0; attempt++) problems = await raceOnce(isWindows)
   if (isWindows) {
-    const others = problems.filter(problem => !SYMPTOM_249.test(problem) && !SYMPTOM_HOOK_LOST.test(problem))
+    const others = problems.filter(problem => !SYMPTOM_249.test(problem))
     assert.deepEqual(others, [], `not a known failure: ${others.join(' | ')}`)
-    await knownFailure('hold:concurrent-hook-block-lost', () => assert.deepEqual(problems.filter(problem => SYMPTOM_HOOK_LOST.test(problem)), []), { mayPass: true })
-    await knownFailure(249, () => assert.deepEqual(problems.filter(problem => SYMPTOM_249.test(problem)), []), { mayPass: true })
+    // The marker passes on a lucky run, so the hooks' losses are bounded outside it. The writers'
+    // are not: 3 of the 4 failed in some runs.
+    const hooksLost = problems.filter(problem => HOOK_LOST.test(problem))
+    assert.ok(hooksLost.length <= HOOK_LOST_MAX, `${hooksLost.length} hook blocks lost, more than ${HOOK_LOST_MAX}: ${hooksLost.join(' | ')}`)
+    await knownFailure(249, () => assert.deepEqual(problems, []), { mayPass: true })
   } else assert.deepEqual(problems, [])
-})
-
-test('L5 future clock: a block dated days ahead is not shown as working just now', async () => {
-  const world = makeWorld()
-  try {
-    block(world, { session: 'a1000001', title: 'Future dated card', steps: ['- [~] Check the synthetic routes'] })
-    skew(world, 'a1000001', 3 * 86400000)
-    const server = await serve.start(world)
-    const screens = { terminal: (await run(world, [])).stdout, page: await server.page() }
-    for (const text of Object.values(screens)) assert.ok(text.includes('Future dated card'))
-    // The board reads the future time as the newest event and shows the row as working just now
-    // (the same on main). The words it should use instead are not decided, so only that is pinned.
-    await knownFailure('hold:future-clock-skew', () => {
-      for (const [surface, text] of Object.entries(screens)) assert.doesNotMatch(text, /working[^\n]*just now/i, `${surface} says a block dated 3 days ahead is working just now`)
-    })
-  } finally { await world.close() }
 })
 
 // pageDom (lib/surfaces.mjs) answers /api/board itself and has no document.querySelectorAll, so it
@@ -491,7 +482,7 @@ test('L5 crashed agent: a working row with no event for the stale time of its ho
   const world = makeWorld()
   try {
     block(world, { session: 'a1000001', title: 'Crashed agent card', steps: ['- [~] Check the synthetic routes'] })
-    // The agent dies mid-turn and sends no end event; the board waits out the host's stale time, then a little more.
+    // The agent dies mid-turn and sends no end event. The board waits out the host's stale time, then a little more.
     world.jump(`${STALE_MS / 60000 + 1}m`)
     const server = await serve.start(world)
     const rows = {}

@@ -4,6 +4,8 @@ export const PANE_MS = 3000
 export const PAGE_MS = 4000
 // Receipt slack on top of the connector and page polls: covers one delivery round trip on a loaded CI runner.
 export const RECEIPT_SLACK_MS = 2000
+// D24: file operations per idle poll. The page server's check comes with #222's final pull
+// request. The pane's is skipped in l4-time.test.mjs, since plain Node cannot load the pane.
 export const IDLE_POLL_FILE_OPS = 6
 // D24, the plan's scale budget: 100 live sessions, 300 blocks, 1,000 question records.
 export const LIVE_SESSIONS = 100

@@ -13,7 +13,7 @@ import { BIG_FILE_HOOK_MS, BLOCKS, HOOK_TIMEOUT_MS, LIVE_SESSIONS } from './lib/
 const HOUR = 3600000
 const DAY = 24 * HOUR
 // The most asks the terminal should print under "Waiting on you" before it says how to see the
-// rest. #269 found 66 asks filling 134 lines of an 805-line print; ten is a list the eye takes in
+// rest. #269 found 66 asks filling 134 lines of an 805-line print. Ten is a list the eye takes in
 // at once, and the line that follows says how many more there are.
 const ASK_LIST_CAP = 10
 const FIVE_MB = 5 * 1024 * 1024
@@ -54,7 +54,7 @@ describe('L4 time and scale', () => {
     try {
       const task = 'Old gateway'
       const ask = 'Ship the gateway, OK?'
-      // The board sees this block for the first time today; only its own updated= says how old it is.
+      // The board sees this block for the first time today. Only its own updated= says how old it is.
       block(world, { session: 'a4000001', state: 'waiting', updated: new Date(world.now - 30 * DAY).toISOString(), title: task, steps: ['- [x] Check routes', `- [?] ${ask}`] })
       const server = await serve.start(world)
       const screens = {
@@ -80,8 +80,8 @@ describe('L4 time and scale', () => {
     } finally { await world.close() }
   })
 
-  // DEFERRED to PR #366: "L4 D24 scale: the page server does at most 6 file operations per idle
-  // poll" needs tests/e2e/lib/soak-probe.mjs, the file-operation counter that lands with that PR.
+  // "L4 D24 scale: the page server does at most 6 file operations per idle poll" comes with #222's
+  // final pull request, which counts the page server's file operations with lib/soak-probe.mjs.
 
   // The pane is hooks/register.tsx running inside Claude Code. Plain Node cannot load it (it
   // refuses the .tsx extension, and the 'claude-code' module the file imports exists only inside
@@ -123,7 +123,7 @@ describe('L4 time and scale', () => {
       for (const [round, size] of batches.entries()) {
         if (round > 0) {
           world.jump('2h')
-          // The server child re-reads the clock file every 100 ms; observing before it has would
+          // The server child re-reads the clock file every 100 ms. Observing before it has would
           // date this batch two hours early. Polling the unchanged file is harmless.
           for (let attempt = 0; Math.abs((await poll()).now - world.now) > 2000; attempt++) {
             assert.ok(attempt < 50, 'The page server never took the clock jump')
@@ -150,7 +150,7 @@ describe('L4 time and scale', () => {
       // sessions. The order, the ages and the cap below are checked in full, but the record count
       // is only about a fifteenth of the budget: every poll reads each record's capture file
       // (hold:serve-poll-file-ops), so each record added slows every later poll, and this journey
-      // is already near the 30 s it gets at 66. The record cap itself is checked in retirement.test.mjs.
+      // is already near the 30 s it gets at 66. Neither journey reaches the 1,000-record cap.
       assert.equal(new Set(ledger.records.map(record => record.firstObserved)).size, batches.length, 'each batch must have its own first-seen time')
 
       // The page server has done its part. Stopping it now, while its board is small and idle,
@@ -168,7 +168,7 @@ describe('L4 time and scale', () => {
       const shown = await terminal.screen(world)
       const everything = await terminal.screen(world, ['--all'])
       for (const text of [shown, everything]) assert.match(text, new RegExp(`${waitingAsks} ${EN.countWaiting}`))
-      // Every ask is on the board; the cap may hide some of them from the plain print.
+      // Every ask is on the board. The cap may hide some of them from the plain print.
       for (const ask of asks) assert.ok(everything.includes(ask.text), `${ask.text} is missing from the --all print`)
 
       // The "Waiting on you" section: its heading down to the first blank line.
@@ -184,7 +184,9 @@ describe('L4 time and scale', () => {
       const everyone = section(everything)
       const listed = asksIn(everyone)
       assert.equal(listed.length, waitingAsks)
-      // #269 (closed, folded into #347) expected all three; they share one hold until it is built.
+      // The plain print, read before the holds: a missing "Waiting on you" fails plainly.
+      const capped = section(shown)
+      // #269 (closed, folded into #347) expected all of these. They share one hold until it is built.
       await knownFailure('hold:ask-list-at-scale', () => {
         const ages = everyone.join('\n').match(AGE) ?? []
         assert.ok(ages.length >= waitingAsks, `the waiting list shows ${ages.length} ages for ${waitingAsks} asks`)
@@ -197,12 +199,9 @@ describe('L4 time and scale', () => {
         const minutes = (everyone.join('\n').match(AGE) ?? []).map(minutesOf)
         assert.ok(minutes.every((one, at) => at === 0 || minutes[at - 1] <= one), `ages do not run from newest to oldest: ${minutes.join(' ')}`)
       })
-      await knownFailure('hold:ask-list-at-scale', () => {
-        // The plain print stops at the cap and says how to see the rest.
-        const capped = section(shown)
-        assert.ok(asksIn(capped).length <= ASK_LIST_CAP, `${asksIn(capped).length} asks printed under "${EN.sectionWaiting}", the cap is ${ASK_LIST_CAP}`)
-        assert.match(capped.join('\n'), /--all|show all/i, 'no "show all" in the waiting list')
-      })
+      // The plain print stops at the cap, and says how to see the rest.
+      await knownFailure('hold:ask-list-at-scale', () => assert.ok(asksIn(capped).length <= ASK_LIST_CAP, `${asksIn(capped).length} asks printed under "${EN.sectionWaiting}", the cap is ${ASK_LIST_CAP}`))
+      await knownFailure('hold:ask-list-at-scale', () => assert.match(capped.join('\n'), /--all|show all/i, 'no "show all" in the waiting list'))
     } finally { await world.close() }
   })
 
@@ -257,11 +256,12 @@ describe('L4 time and scale', () => {
       assert.equal(HOOK_TIMEOUT_MS, hookTimeout('antigravity'))
       assert.equal(HOOK_TIMEOUT_MS, hookTimeout('codex', 'UserPromptSubmit'))
       const call = (world, event, payload) => hook(world, 'codex', event, { session_id: 'l4-big-file-session', cwd: world.root, ...payload })
-      // The first call installs the hooks into the isolated home; it is not what is timed.
+      // The first call installs the hooks into the isolated home. It is not what is timed.
       for (const world of [small, big]) {
         const warm = await call(world, 'UserPromptSubmit', { prompt: 'Warm up the hook', turn_id: 'warm-up' })
         assert.equal(warm.status, 0, warm.stderr || warm.stdout)
-        assert.equal((await call(world, 'Stop', { turn_id: 'warm-up', last_assistant_message: 'Warmed up.' })).status, 0)
+        const warmStop = await call(world, 'Stop', { turn_id: 'warm-up', last_assistant_message: 'Warmed up.' })
+        assert.equal(warmStop.status, 0, warmStop.stderr || warmStop.stdout)
       }
 
       // 300 blocks (the D24 count), long enough to pass 5 MB: 100 working, 100 ended, 100 done.
@@ -285,7 +285,7 @@ describe('L4 time and scale', () => {
       assert.ok(marker, 'the warm-up wrote no block for the Codex session')
 
       // The wall time of several turns, each a prompt and its end. A loaded machine only ever adds
-      // time, so the fastest run is the hook's own cost plus the least delay; a hook slow on this
+      // time, so the fastest run is the hook's own cost plus the least delay. A hook slow on this
       // file is slow in all of them.
       const spans = { small: { prompt: [], stop: [] }, big: { prompt: [], stop: [] } }
       const outcomes = []

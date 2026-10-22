@@ -381,11 +381,14 @@ describe('scenario runner', () => {
     assert.deepEqual(lines, [], 'a rethrown error is not logged as a known failure')
     // A pass under mayPass is logged and is not "looks fixed".
     await knownFailure('hold:load-dependent', () => {}, { mayPass: true })
-    assert.deepEqual(lines, ['known failure hold:load-dependent: passed; load-dependent, not a fix'])
+    assert.deepEqual(lines, ['known failure hold:load-dependent: passed this time, which depends on load and is not a fix. Remove the marker when hold:load-dependent is lifted.'])
     // A failed assertion under mayPass is still the known failure.
     await knownFailure(249, () => assert.fail('intentional assertion'), { mayPass: true })
     assert.equal(lines.length, 2)
     assert.match(lines[1], /^known failure #249: \[.*\] intentional assertion$/)
+    // An issue number says the issue whose closing lifts the marker.
+    await knownFailure(249, () => {}, { mayPass: true })
+    assert.equal(lines[2], 'known failure #249: passed this time, which depends on load and is not a fix. Remove the marker when #249 closes.')
     // Without mayPass a pass still means the bug looks fixed.
     await assert.rejects(knownFailure(222, () => {}), /looks fixed/)
     await assert.rejects(knownFailure('hold:load-dependent', () => {}, {}), /looks fixed/)

@@ -9,10 +9,10 @@ import { makeWorld } from './lib/world.mjs'
 import { block, turn } from './lib/writers.mjs'
 import { run, runProcess, terminal } from './lib/surfaces.mjs'
 import {
-  LEDGER_RECORDS, RETIREMENT_DAYS, RETIREMENT_QUESTIONS_PER_DAY, RETIREMENT_LIVE_BLOCKS, RETIREMENT_PROGRESS_BYTES, RETIREMENT_INBOX_FILES,
+  RETIREMENT_DAYS, RETIREMENT_QUESTIONS_PER_DAY, RETIREMENT_LIVE_BLOCKS, RETIREMENT_PROGRESS_BYTES, RETIREMENT_INBOX_FILES,
 } from './lib/budget.mjs'
 
-// Session ids are 8 hex characters; a day and a slot give each of a day's six sessions its own.
+// Session ids are 8 hex characters. A day and a slot give each of a day's six sessions its own.
 const sessionOf = (day, slot) => (0xd0000000 + day * 16 + slot).toString(16)
 const two = day => String(day).padStart(2, '0')
 const titlesIn = text => [...text.matchAll(/^### (.+?)\r?$/gm)].map(match => match[1])
@@ -32,7 +32,7 @@ const measure = world => {
 // the installer writes (PowerShell on Windows, sh elsewhere). Each run deletes the inbox files
 // that are past its age limit, which is the only thing that trims the inbox without a Claude session.
 // On a busy machine a reporter can give up at its own time limit before it writes its file, and
-// exits 0 without having cleaned up (the host-timeout problem #241 describes); the next turn of
+// exits 0 without having cleaned up (the host-timeout problem #241 describes). The next turn of
 // the agent would run it again, so this does too, up to three times.
 const reportTurn = async (world, session) => {
   const payload = JSON.stringify({ session_id: session, cwd: world.root, last_assistant_message: 'Synced the list.' })
@@ -48,9 +48,10 @@ const reportTurn = async (world, session) => {
 }
 
 // Alone on Windows this takes 7 to 8 s warm and 15 s on a cold first run while other tests ran
-// (15 board sweeps, 5 board looks and 3 PowerShell reporter runs, each a process start). The limit is
-// 2 times the slower figure, the 30 s a single journey may take, so a hang shows in 30 s, not 2.5 minutes.
-test('Retirement: after 30 simulated days of daily churn, progress.md and the inbox stay bounded and the question ledger still holds the first day', { timeout: 30000 }, async () => {
+// (15 board sweeps, 5 board looks and 3 PowerShell reporter runs, each a process start). On a
+// machine other sessions held at 99% CPU it took 32 s, so the limit is 60 s: a hang still shows in
+// a minute, not 2.5 minutes.
+test('Retirement: after 30 simulated days of daily churn, progress.md and the inbox stay bounded and the question ledger still holds the first day', { timeout: 60000 }, async () => {
   const world = makeWorld()
   try {
     const titles = []
@@ -59,7 +60,7 @@ test('Retirement: after 30 simulated days of daily churn, progress.md and the in
     const looked = []
     for (let day = 0; day < RETIREMENT_DAYS; day++) {
       const label = two(day)
-      // Four sessions ask a question and finish; two start work that stays stopped.
+      // Four sessions ask a question and finish. Two start work that stays stopped.
       const asking = [
         { agent: 'codex', project: 'api-gateway', title: `Build ${label} release`, ask: `Ship build ${label}, OK?` },
         { agent: 'antigravity', project: 'docs-site', title: `Notes ${label} review`, ask: `Publish notes ${label}, OK?` },
@@ -107,21 +108,22 @@ test('Retirement: after 30 simulated days of daily churn, progress.md and the in
     // Nothing is lost: every title is on the board or in the archive.
     const everything = titlesIn(world.read('progress.md')).concat(titlesIn(archiveText(world)))
     for (const title of titles) assert.ok(everything.includes(title), `${title} is neither on the board nor in the archive`)
-    // The archive limits apply from the fifth day on; from then on the live file stays under its caps.
+    // The archive limits apply from the fifth day on. From then on the live file stays under its caps.
     for (const sample of samples.filter(one => one.day >= 5)) {
       assert.ok(sample.blocks <= RETIREMENT_LIVE_BLOCKS, `day ${sample.day}: ${sample.blocks} blocks on the board, cap ${RETIREMENT_LIVE_BLOCKS}`)
       assert.ok(sample.progress <= RETIREMENT_PROGRESS_BYTES, `day ${sample.day}: progress.md is ${sample.progress} bytes, cap ${RETIREMENT_PROGRESS_BYTES}`)
     }
     const last = samples.at(-1)
     assert.ok(last.inbox <= RETIREMENT_INBOX_FILES, `${last.inbox} inbox files after ${RETIREMENT_DAYS} days, cap ${RETIREMENT_INBOX_FILES}`)
-    // FORMAT.md (Versioning, full-source evidence) says never to age-prune the question evidence,
-    // so every question asked while someone looked, the first day's included, is still in the
-    // ledger after 30 days. The scale budget (D24) holds 1,000 records: this month makes about 20,
-    // far under it, so that line only states the rule. How fast the ledger and the capture files
-    // grow is the storage work (#373).
+    // FORMAT.md (Versioning, full-source evidence) says never to age-prune the question evidence:
+    // the ledger and its capture files. So after 30 days the ledger holds exactly the questions
+    // asked while someone looked, the first day's included, with at least as many capture files. How
+    // fast they grow is the storage work (#373).
     const records = JSON.parse(world.read('progress-questions.json')).records
-    assert.ok(records.length <= LEDGER_RECORDS, `${records.length} question records after ${RETIREMENT_DAYS} days, cap ${LEDGER_RECORDS}`)
     for (const one of looked) assert.ok(records.some(record => record.words === one.ask), `the question of day ${one.day} is missing from the ledger: ${one.ask}`)
+    assert.equal(records.length, looked.length, `${records.length} question records for the ${looked.length} questions asked while someone looked`)
+    const captures = readdirSync(world.claudeDir).filter(name => /^progress-questions-source-[a-f0-9]{64}\.json$/.test(name))
+    assert.ok(captures.length >= looked.length, `${captures.length} capture files for ${looked.length} recorded questions`)
   } finally { await world.close() }
 })
 
@@ -164,7 +166,7 @@ test('Retirement: old sessions leave the live file the way FORMAT.md says (done 
     assert.equal(await sweep(), EN.tidyMoved(3))
     assert.deepEqual(live(), ['Finished with a question'])
     assert.deepEqual(archived().sort(), ['Ended session', 'Finished report', 'Waiting session', 'Working session'])
-    // The stopped shelf is closed on the plain screen; --all opens it.
+    // The stopped shelf is closed on the plain screen, and --all opens it.
     const screen = await terminal.screen(world, ['--all'])
     assert.ok(screen.includes('Finished with a question'), screen)
     for (const title of ['Finished report', 'Working session', 'Waiting session', 'Ended session']) assert.ok(!screen.includes(title), `${title} is still on the board:\n${screen}`)
