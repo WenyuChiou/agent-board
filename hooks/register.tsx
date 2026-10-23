@@ -139,6 +139,9 @@ const DAY = 24 * 60 * 60 * 1000
 // How long a model call may take before it counts as no answer: one that never comes back
 // must not hold the inbox, or a task's name, for good.
 const MODEL_MS = 30 * 1000
+// takeAgentTurns can ask three times when the block moves under it:
+// ten files at three 30-second calls just fit CLAIM_MS.
+const QUEUE_MAX = 10
 // Why an inbox file is still there, kept in the store's `inboxFailed`.
 const NO_SUMMARY = 'the model gave no summary and the reply asks nothing'
 const NOT_KEPT = 'the block was not on the board when read back'
@@ -219,6 +222,7 @@ let isDraining = false
 // Other agents' turns are summed up one session's files at a time, after the drain that took
 // them has let go of the inbox.
 let digests: Promise<unknown> = Promise.resolve()
+const inboxQueued = new Set<string>()
 // Set once this session has made sure the store has a record of the inbox (see drainInbox).
 let hasInboxRecord = false
 let inboxSeen = -1
@@ -226,6 +230,7 @@ let inboxListed = 0
 // Each retained file and reason is named once, so two stuck files cannot take turns notifying.
 const inboxNoticesShown = new Set<string>()
 const inboxRetakeRefused = new Map<string, number>()
+const inboxHoldMissing = new Map<string, number>()
 const pendingJournals = new Map<string, Record<string, string[]>>()
 const pendingInboxQuestions = new Map<string, PendingTurn>()
 const droppingInboxQuestions = new Set<string>()
@@ -1602,46 +1607,52 @@ const takeAgentTurns = async ($: EngineInterface, turns: readonly AgentTurn[], a
   const boardTurns = new Set<AgentTurn>()
   let hasRestoredQuestion = false
   let hasLateWork = false
+  const moved: AgentTurn[] = []
   for (const [index, turn] of turns.entries()) {
     if (!isNewer(turn) && !isLate(turn)) continue
+    const before = JSON.stringify(mirror)
     const isLateTurn = isLate(turn)
-    if (turn.event === 'end' && !isLateTurn) {
-      mirror = { ...mirror, promptQuestion: null }
-      hasRestoredQuestion = false
-    }
-    if (turn.event !== 'turn' && lastQuestion(turn.answer, true) === null) continue
-    let { prompt, answer } = turn
-    // Codex's Stop carries the reply but not the request; the session log has both.
-    if (!isBoardTurn(turn) && (answer === '' || prompt === '') && isTranscriptPath(turn.transcript) && (digested.has(index) || mirror.firstPrompt === '')) {
-      const log = await $.fs.read(turn.transcript).catch(() => '')
-      const tail = transcriptTail(typeof log === 'string' ? log : '', ANSWER_KEEP, isTextLog(turn.transcript))
-      answer = answer || tail.answer
-      prompt = prompt || tail.prompt
-    }
-    // Known only now for Codex, whose Stop leaves the request out.
-    if (isBoardTurn({ ...turn, prompt, answer })) {
-      if (isLateTurn) continue
-      boardTurns.add(turn)
-      const restored = restoreAgentBoardQuestion(mirror, { ...turn, prompt, answer }, at)
-      if (restored !== null && !questionless.has(turn)) {
-        mirror = restored
-        hasRestoredQuestion = true
+    try {
+      if (turn.event === 'end' && !isLateTurn) {
+        mirror = { ...mirror, promptQuestion: null }
+        hasRestoredQuestion = false
       }
-      continue
+      if (turn.event !== 'turn' && lastQuestion(turn.answer, true) === null) continue
+      let { prompt, answer } = turn
+      // Codex's Stop carries the reply but not the request; the session log has both.
+      if (!isBoardTurn(turn) && (answer === '' || prompt === '') && isTranscriptPath(turn.transcript) && (digested.has(index) || mirror.firstPrompt === '')) {
+        const log = await $.fs.read(turn.transcript).catch(() => '')
+        const tail = transcriptTail(typeof log === 'string' ? log : '', ANSWER_KEEP, isTextLog(turn.transcript))
+        answer = answer || tail.answer
+        prompt = prompt || tail.prompt
+      }
+      // Known only now for Codex, whose Stop leaves the request out.
+      if (isBoardTurn({ ...turn, prompt, answer })) {
+        if (isLateTurn) continue
+        boardTurns.add(turn)
+        const restored = restoreAgentBoardQuestion(mirror, { ...turn, prompt, answer }, at)
+        if (restored !== null && !questionless.has(turn)) {
+          mirror = restored
+          hasRestoredQuestion = true
+        }
+        continue
+      }
+      if (!isLateTurn) {
+        mirror = { ...mirror, promptQuestion: null }
+        hasRestoredQuestion = false
+      }
+      if (mirror.firstPrompt === '' && prompt !== '') mirror = { ...mirror, firstPrompt: promptKey(prompt) }
+      if (answer === '' || answerKey(answer) === mirror.lastAnswer) continue
+      if (isLateTurn) hasLateWork = true
+      if (digested.has(index)) {
+        mirror = answerTurns(mirror)
+        const summed = await summarize($, mirror, prompt, answer, isLastTry ? 'keep' : 'retry', isLateTurn || questionless.has(turn))
+        if (summed !== null) mirror = applyDigest(mirror, summed.digest, summed.now, summed.s)
+      }
+      mirror = { ...mirror, lastAnswer: answerKey(answer) }
+    } finally {
+      if (JSON.stringify(mirror) !== before || turn.event === 'end' && !isLateTurn && mirror.state !== (isAllDone(mirror) ? 'done' : 'ended')) moved.push(turn)
     }
-    if (!isLateTurn) {
-      mirror = { ...mirror, promptQuestion: null }
-      hasRestoredQuestion = false
-    }
-    if (mirror.firstPrompt === '' && prompt !== '') mirror = { ...mirror, firstPrompt: promptKey(prompt) }
-    if (answer === '' || answerKey(answer) === mirror.lastAnswer) continue
-    if (isLateTurn) hasLateWork = true
-    if (digested.has(index)) {
-      mirror = answerTurns(mirror)
-      const summed = await summarize($, mirror, prompt, answer, isLastTry ? 'keep' : 'retry', isLateTurn || questionless.has(turn))
-      if (summed !== null) mirror = applyDigest(mirror, summed.digest, summed.now, summed.s)
-    }
-    mirror = { ...mirror, lastAnswer: answerKey(answer) }
   }
   // A board look is not an answer: its question stays waiting (#144). Board-request prompts never
   // come here; takeAgentPrompt skips them.
@@ -1661,7 +1672,9 @@ const takeAgentTurns = async ($: EngineInterface, turns: readonly AgentTurn[], a
   const latestWork = turns.filter(turn => isNewer(turn) && !boardTurns.has(turn)).at(-1)
   const state = boardTurns.has(latest) && hasRestoredQuestion ? 'waiting'
     : latestWork === undefined ? mirror.state : isAllDone(mirror) ? 'done' : latestWork.event === 'end' ? 'ended' : 'waiting'
-  mirror = { ...mirror, state, updated: at, turnOrder: Math.max(newest, ...turns.map(one => turnOrder(one) ?? -1)) }
+  const promptAt = promptBarrier >= 0 ? Math.min(Math.floor(promptBarrier / 2), at) : -Infinity
+  const updated = moved.length === 0 ? Math.min(stored?.updated ?? at, at) : Math.max(...moved.map(turn => Math.min(turn.at ?? at, at)), promptAt)
+  mirror = { ...mirror, state, updated, turnOrder: Math.max(newest, ...turns.map(one => turnOrder(one) ?? -1)) }
   const s = await wordsOf($)
   const written = mirror
   let hasMoved = false
@@ -1702,9 +1715,11 @@ const takeAgentTurns = async ($: EngineInterface, turns: readonly AgentTurn[], a
 const takeAgentPrompt = async ($: EngineInterface, prompt: AgentTurn): Promise<void> => {
   await enqueue(async () => {
     const stored = await agentMirror($, prompt.id)
-    const updated = await $.clock.now()
-    const next = answerAgentPrompt(stored, prompt, updated)
-    if (next === null) return
+    const at = await $.clock.now()
+    const answered = answerAgentPrompt(stored, prompt, at)
+    if (answered === null) return
+    const updated = Math.min(prompt.at ?? at, at)
+    const next = { ...answered, updated }
     const path = await progressPath($)
     const s = await wordsOf($)
     let written: string | null = null
@@ -1906,7 +1921,47 @@ const startAutoConnect = ($: EngineInterface, options: PluginOptions): void => {
 // than two days that no session took.
 type Taken = { path: string; name: string; attempt: number; turn: AgentTurn | null | undefined; body?: string; error?: string }
 
+// A delivered turn needs cleanup, not another summary or a notice to the person.
+const removeInboxFiles = async ($: EngineInterface, files: readonly Pick<Taken, 'path' | 'name'>[], isWin: boolean, listed?: ReadonlySet<string>): Promise<void> => {
+  if (files.length === 0 && listed === undefined) return
+  const isRemoved = await removeFiles($, files.map(one => one.path), isWin)
+  try {
+    await enqueue(async () => {
+      const failed = await readInboxRecord($, 'inboxDeleteFailed')
+      const before = { ...failed }
+      const at = await $.clock.now()
+      if (listed !== undefined) for (const name of Object.keys(failed)) if (!listed.has(name)) delete failed[name]
+      for (const name of new Set(files.map(one => one.name))) {
+        let isPresent = false
+        for (const one of files.filter(one => one.name === name)) if (await $.fs.exists(one.path)) isPresent = true
+        if (!isPresent) delete failed[name]
+        else if (!isRemoved) failed[name] = `${Number(failed[name]?.split(':')[0] ?? 0) + 1}:${at}:INBOX_DELETE_FAILED`
+      }
+      const kept = keepInboxFailed(failed)
+      if (Object.keys(before).length !== Object.keys(kept).length || Object.entries(kept).some(([name, note]) => before[name] !== note)) await writeInboxRecord($, 'inboxDeleteFailed', kept)
+    })
+  } catch {
+    // Delivered claims retry deletion at every look, even when diagnostics cannot be saved.
+  }
+}
+
 const inboxFailure = (error: unknown): string => /\b(?:E[A-Z]{2,15}|[A-Z]{3,}_[A-Z_]+)\b/.exec(messageOf(error))?.[0] ?? 'INBOX_FAILED'
+
+// A claim can expire while its job is still waiting to start.
+const wasInboxTried = (note: string | undefined, attempt: number): boolean => {
+  const [count, , ...why] = note?.split(':') ?? []
+  return /^-?\d+$/.test(count ?? '') && Number(count) >= attempt && why.join(':') !== 'INBOX_RETAKEN'
+}
+
+const isUntriedHold = (note: string | undefined): boolean =>
+  /^-?\d+:-?\d+:MAX_TRIES$/.test(note ?? '') && Number(note?.split(':')[0]) <= MAX_TRIES
+
+// Keep recovery evidence while reserving room for current tries and failures.
+const keepInboxFailures = (failed: Readonly<Record<string, string>>): Record<string, string> => {
+  const isHeld = (note: string): boolean => isUntriedHold(note) || isQuestionHold(note)
+  const held = keepInboxFailed(Object.fromEntries(Object.entries(failed).filter(([, note]) => isHeld(note))), 200)
+  return { ...held, ...keepInboxFailed(Object.fromEntries(Object.entries(failed).filter(([, note]) => !isHeld(note))), 250 - Object.keys(held).length) }
+}
 const inboxNotice = async ($: EngineInterface, path: string, reason: string): Promise<void> => {
   const s = await wordsOf($)
   const text = s.inboxHeld(path, reason)
@@ -2087,44 +2142,75 @@ const drainInbox = async ($: EngineInterface): Promise<void> => {
     const done = hasRecord ? (stored as Record<string, string>) : {}
     at = await $.clock.now()
     const session = (await read($, mine))?.sessionId.slice(0, 8) ?? '-'
+    const notes = await enqueue(async () => {
+      const failed = await readInboxRecord($, 'inboxFailed')
+      if (isListed) {
+        const names = new Set(entries.filter(entry => entry.kind === 'file').map(entry => setAsideOf(entry.name) ?? readClaim(entry.name)?.name ?? entry.name))
+        for (const name of inboxHoldMissing.keys()) {
+          if (names.has(name) || !isUntriedHold(failed[name]) && !isQuestionHold(failed[name])) inboxHoldMissing.delete(name)
+        }
+        // A rename can hide a file from one listing; confirm its absence on a later look.
+        const kept = Object.fromEntries(Object.entries(failed).filter(([name, note]) => {
+          if (!isUntriedHold(note) && !isQuestionHold(note) || names.has(name)) return true
+          const missingAt = inboxHoldMissing.get(name)
+          if (missingAt !== undefined && now > missingAt) return false
+          inboxHoldMissing.set(name, now)
+          return true
+        }))
+        if (Object.keys(kept).length !== Object.keys(failed).length) await writeInboxRecord($, 'inboxFailed', kept)
+        for (const name of inboxHoldMissing.keys()) if (kept[name] === undefined) inboxHoldMissing.delete(name)
+        return kept
+      }
+      return failed
+    })
     // Files left taken. One whose turn reached the board, and only its delete failed, goes
     // now; one whose session closed half-way, or whose turn failed, is taken again once its
     // time is up, or set aside after its last try.
-    const delivered: string[] = []
+    const delivered: Array<Pick<Taken, 'path' | 'name'>> = []
     for (const entry of entries) {
       const claim = entry.kind === 'file' ? readClaim(entry.name) : null
-      if (claim === null || taken.length >= 20) continue
+      if (claim === null) continue
       const from = `${dir}${sep}${entry.name}`
       if (done[claim.name] !== undefined) {
-        delivered.push(from)
+        delivered.push({ path: from, name: claim.name })
         continue
       }
+      if (inboxQueued.has(from)) continue
       const action = claimAction(claim, entry.mtimeMs, at)
-      if (action === 'setAside') {
+      if (action === 'leave') continue
+      const isTried = wasInboxTried(notes[claim.name], claim.attempt)
+      if (action === 'setAside' && isTried) {
         const target = claim.attempt > MAX_TRIES ? retakenFailedName(claim.name) : failedName(claim.name)
         try {
-          const notes = await readInboxRecord($, 'inboxFailed')
           await recordInbox($, [], { [claim.name]: notes[claim.name] ?? `${claim.attempt}:${at}:MAX_TRIES` }, at)
           await quarantineInbox($, from, `${dir}${sep}${target}`, 'MAX_TRIES', isWin)
         } catch (error) {
           await inboxNotice($, await $.fs.exists(from) ? from : `${dir}${sep}${target}`, inboxFailure(error))
         }
+        continue
       }
-      if (action !== 'retake') continue
-      const to = `${dir}${sep}${takenName(claim.name, session, at, claim.attempt + 1)}`
-      if (await moveFile($, from, to, isWin)) taken.push({ path: to, name: claim.name, attempt: claim.attempt + 1, turn: undefined })
+      if (inboxQueued.size >= QUEUE_MAX) continue
+      const attempt = claim.attempt + (isTried ? 1 : 0)
+      const to = `${dir}${sep}${takenName(claim.name, session, at, attempt)}`
+      if (await moveFile($, from, to, isWin)) {
+        inboxQueued.add(to)
+        taken.push({ path: to, name: claim.name, attempt, turn: undefined })
+      }
     }
-    await removeFiles($, delivered, isWin)
+    await removeInboxFiles($, delivered, isWin, isListed ? new Set(entries.map(entry => readClaim(entry.name)?.name ?? entry.name)) : undefined)
     const fresh = entries
       .filter(entry => entry.kind === 'file' && isInboxFile(entry.name) && done[entry.name] === undefined)
       .map(entry => entry.name)
       .sort(inboxOrder)
-      .slice(0, Math.max(0, 20 - taken.length))
+      .slice(0, Math.max(0, QUEUE_MAX - inboxQueued.size))
     for (const name of fresh) {
       const to = `${dir}${sep}${takenName(name, session, at)}`
-      if (await moveFile($, `${dir}${sep}${name}`, to, isWin)) taken.push({ path: to, name, attempt: 1, turn: undefined })
+      if (await moveFile($, `${dir}${sep}${name}`, to, isWin)) {
+        inboxQueued.add(to)
+        taken.push({ path: to, name, attempt: 1, turn: undefined })
+      }
     }
-    // 0.23.x's question hold set these turns aside; the claim's attempt guards one last try.
+    // Old question holds and exhausted queues get one last try after upgrading.
     // Fresh turns keep their slots, and held turns use only those left over.
     // Oldest first, as fresh turns are: a listing puts every end before every turn, and a newer
     // turn taken first would leave a session's older held turns changing nothing.
@@ -2137,9 +2223,9 @@ const drainInbox = async ($: EngineInterface): Promise<void> => {
         const failed = await readInboxRecord($, 'inboxFailed')
         let retakes = entries.filter(entry => entry.kind === 'file' && readClaim(entry.name)?.attempt === RETAKE_TRY).length
         for (const entry of setAside) {
-          if (taken.length >= 20 || retakes >= RETAKE_PER_LOOK) break
+          if (inboxQueued.size >= QUEUE_MAX || retakes >= RETAKE_PER_LOOK) break
           const name = setAsideOf(entry.name)!
-          if (done[name] !== undefined || !isQuestionHold(failed[name])) continue
+          if (done[name] !== undefined || !isQuestionHold(failed[name]) && !isUntriedHold(failed[name])) continue
           const refusedAt = inboxRetakeRefused.get(name)
           if (refusedAt !== undefined && at - refusedAt < CLAIM_MS) continue
           const from = `${dir}${sep}${entry.name}`
@@ -2155,6 +2241,7 @@ const drainInbox = async ($: EngineInterface): Promise<void> => {
               throw new Error('INBOX_RETAKE_MOVE_FAILED')
             }
             inboxRetakeRefused.delete(name)
+            inboxQueued.add(to)
             taken.push({ path: to, name, attempt: RETAKE_TRY, turn: undefined })
             retakes += 1
           } catch (error) {
@@ -2178,7 +2265,13 @@ const drainInbox = async ($: EngineInterface): Promise<void> => {
         await inboxNotice($, one.path, one.error)
         return undefined
       })
-      if (typeof body !== 'string') continue
+      if (typeof body !== 'string') {
+        if (one.error === undefined) {
+          one.error = 'INVALID_INPUT'
+          await inboxNotice($, one.path, one.error)
+        }
+        continue
+      }
       one.body = body
       try {
         one.turn = readTurn(one.name, body)
@@ -2187,6 +2280,7 @@ const drainInbox = async ($: EngineInterface): Promise<void> => {
       }
     }
   } catch (error) {
+    for (const one of taken) inboxQueued.delete(one.path)
     await inboxNotice($, inboxPath(await progressPath($)), inboxFailure(error))
     throw error
   } finally {
@@ -2196,18 +2290,28 @@ const drainInbox = async ($: EngineInterface): Promise<void> => {
   // Prompt intake bypasses the digest promise, which may be waiting on a model.
   const prompts = taken.filter(one => one.turn?.event === 'prompt')
   if (prompts.length > 0) {
-    const settled: Taken[] = []
-    const failed: Record<string, string> = {}
-    for (const one of prompts.sort((a, b) => inboxOrder(a.name, b.name))) {
-      if (one.turn === null || one.turn === undefined || !(await $.fs.exists(one.path))) continue
-      try { await takeAgentPrompt($, one.turn); settled.push(one) } catch (error) {
-        const reason = inboxFailure(error)
-        failed[one.name] = `${one.attempt}:${at}:${reason}`
-        await inboxNotice($, one.path, reason)
+    try {
+      const settled: Taken[] = []
+      const failed: Record<string, string> = {}
+      for (const one of prompts.sort((a, b) => inboxOrder(a.name, b.name))) {
+        try {
+          if (one.turn === null || one.turn === undefined || !(await $.fs.exists(one.path))) continue
+          await takeAgentPrompt($, one.turn)
+          settled.push(one)
+        } catch (error) {
+          const reason = inboxFailure(error)
+          failed[one.name] = `${one.attempt}:${at}:${reason}`
+          await inboxNotice($, one.path, reason)
+        }
       }
+      await recordInbox($, settled.map(one => one.name), failed, at)
+      await removeInboxFiles($, settled, isWin)
+    } catch (error) {
+      for (const one of taken) inboxQueued.delete(one.path)
+      throw error
+    } finally {
+      for (const one of prompts) inboxQueued.delete(one.path)
     }
-    await recordInbox($, settled.map(one => one.name), failed, at)
-    await removeFiles($, settled.map(one => one.path), isWin)
   }
   const regular = taken.filter(one => one.turn?.event !== 'prompt')
   if (regular.length === 0) return
@@ -2224,8 +2328,7 @@ const drainInbox = async ($: EngineInterface): Promise<void> => {
       bySession.set(one.turn.id, [...(bySession.get(one.turn.id) ?? []), one])
     }
     for (const all of bySession.values()) {
-      // The queue can run longer than a claim holds: a file another look took again while
-      // this job waited is that look's to finish.
+      // A different session may have taken the file while this job waited.
       const present: Taken[] = []
       for (const one of all) if (await $.fs.exists(one.path)) present.push(one)
       // A held turn's retake is its last try, a fresh turn beside it is not: each run of retakes
@@ -2243,6 +2346,9 @@ const drainInbox = async ($: EngineInterface): Promise<void> => {
           const home = ((await $.env.get('USERPROFILE')) ?? (await $.env.get('HOME')) ?? '').replace(/[\\/]+$/, '')
           // Older turns never replace newer work, and old questions must not return to the ledger.
           const questionless = new Set(group.flatMap(one => one.attempt > MAX_TRIES && one.turn != null && isQuestionStale(one.name, at) ? [one.turn] : []))
+          const tryingAt = await $.clock.now()
+          // The note only counts tries; a refused write must not stop the turn reaching the board.
+          await recordInbox($, [], Object.fromEntries(group.map(one => [one.name, `${one.attempt}:${tryingAt}:TRYING`])), tryingAt).catch(() => undefined)
           const newer = await takeAgentTurns($, group.flatMap(one => (one.turn === null || one.turn === undefined ? [] : [one.turn])), 0, isLastTry, questionless)
           const questions = peekInbox(group.flatMap(one => one.body === undefined || one.attempt > MAX_TRIES && (one.turn == null || !newer.includes(one.turn) || isQuestionStale(one.name, at)) ? [] : [{ name: one.name, body: one.body, at }]), () => '', text => redact(text, home, isWin)).filter(turn => turn.isQuestion)
           if (questions.length > 0) {
@@ -2259,7 +2365,7 @@ const drainInbox = async ($: EngineInterface): Promise<void> => {
           // older turn's retry then changes nothing, and its summary is lost, as for any turn older
           // than its block. Holding the retake back instead would use up its last try.
           const isRetakeAhead = runs.slice(index + 1).some(run => run[0]!.attempt > MAX_TRIES)
-          for (const one of isRetakeAhead ? group : runs.slice(index).flat()) failed[one.name] = `${one.attempt}:${at}:${why}`
+          for (const one of group) failed[one.name] = `${one.attempt}:${at}:${why}`
           // A file error is named now. The model's silence, or a block not yet read back, is
           // tried again quietly, as before; the last try sets the file aside, which is named.
           const reason = inboxFailure(error)
@@ -2273,10 +2379,17 @@ const drainInbox = async ($: EngineInterface): Promise<void> => {
       const to = one.path.replace(/[^\\/]+$/, () => failedName(one.name))
       await quarantineInbox($, one.path, to, 'INVALID_INPUT', isWin).catch(async error => inboxNotice($, await $.fs.exists(one.path) ? one.path : to, inboxFailure(error)))
     }
-    await removeFiles($, settled.map(one => one.path), isWin)
+    await removeInboxFiles($, settled, isWin)
   }).catch(async error => {
+    await (async () => {
+      const notes = await readInboxRecord($, 'inboxFailed')
+      const failed = Object.fromEntries(regular.filter(one => !wasInboxTried(notes[one.name], one.attempt)).map(one => [one.name, `${one.attempt}:${at}:${inboxFailure(error)}`]))
+      await recordInbox($, [], failed, at)
+    })().catch(() => undefined)
     await inboxNotice($, taken[0]!.path, inboxFailure(error))
     throw error
+  }).finally(() => {
+    for (const one of regular) inboxQueued.delete(one.path)
   })
   digests = job.catch(() => undefined)
   await job
@@ -2290,11 +2403,11 @@ const recordInbox = async ($: EngineInterface, settled: readonly string[], faile
     const stamp = `${(await read($, mine))?.sessionId.slice(0, 8) ?? '-'}:${at}`
     // Read both maps before replacing either. A read error must not become an
     // empty map, and cleanup must wait for the required records to read back.
-    const before = await readInboxRecord($, 'inboxDone')
+    const before = settled.length > 0 ? await readInboxRecord($, 'inboxDone') : {}
     const held = await readInboxRecord($, 'inboxFailed')
     const notes = Object.entries(held).filter(([name]) => !settled.includes(name))
-    await writeInboxRecord($, 'inboxFailed', keepInboxFailed({ ...Object.fromEntries(notes), ...failed }))
-    await writeInboxRecord($, 'inboxDone', keepInboxDone({ ...before, ...Object.fromEntries(settled.map(name => [name, stamp])) }, at))
+    await writeInboxRecord($, 'inboxFailed', keepInboxFailures({ ...Object.fromEntries(notes), ...failed }))
+    if (settled.length > 0) await writeInboxRecord($, 'inboxDone', keepInboxDone({ ...before, ...Object.fromEntries(settled.map(name => [name, stamp])) }, at))
   })
 }
 
