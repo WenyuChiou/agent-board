@@ -3584,8 +3584,8 @@ const legacyConnect = (f, progress, mode = 'connect', lang = 'en') => {
   assert.equal(result.status, 0, result.stderr + result.stdout)
   return runner
 }
-// A board path with characters such as `~` or `_` (as on CI runners) is written into skills as code
-// points; read those back before looking for a folder name (as tests/legacy-connect.test.mjs does).
+// A board path with characters such as `~` (a Windows short name, as on CI runners) is written into
+// skills as code points; read those back before looking for a folder name (as legacy-connect tests do).
 const decoded = text => text.replace(/String\.fromCodePoint\(([\d,]+)\)/g, (_, codes) => String.fromCodePoint(...codes.split(',').map(Number)))
 
 test('connection data roots distinguish POSIX apostrophes from encoded PowerShell quoting', async () => {
