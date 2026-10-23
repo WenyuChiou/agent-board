@@ -4,7 +4,7 @@ import { mkdirSync, readFileSync, readdirSync, realpathSync, renameSync, statSyn
 import { homedir, tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { performance } from 'node:perf_hooks'
-import { leftoverProcesses, makeRedact, percentile, redactDeep, tallyOf } from './lib/soak-report.mjs'
+import { hookLoadMarker, leftoverProcesses, makeRedact, percentile, redactDeep, tallyOf } from './lib/soak-report.mjs'
 
 process.stdout.on('error', () => {})
 process.stderr.on('error', () => {})
@@ -18,6 +18,9 @@ process.stderr.on('error', () => {})
 // --stop-on-stdin: a line "stop" on stdin, or stdin closing, stops the run as a signal does. soak.mjs
 // passes it, so a soak that stops or dies never leaves this run going.
 
+// A check that fails on main because of an open issue goes through knownFailure, but only while the
+// failure fits that issue's pattern (hookLoadMarker); any other failure stays a failure. Every check
+// here depends on load, so a lucky pass is allowed.
 const TITLES = {
   leftovers: 'L6 hook load: no process the check started is alive 30 s after it ends',
   hooks: 'L6 hook load: each hook run ends within 3 s',
@@ -25,9 +28,6 @@ const TITLES = {
   page: 'L6 hook load: the page shows each report within one poll',
   inbox: 'L6 hook load: the inbox is empty at the end, with no .taking or .tmp left',
 }
-// A check that fails on main because of an open issue is entered here (its key and the issue number)
-// and goes through knownFailure. Every check here depends on load, so a lucky pass is allowed.
-const KNOWN = {}
 
 const FULL = { sessions: 30, seconds: 600 }
 const SMOKE = { sessions: 3, seconds: 20 }
@@ -188,6 +188,7 @@ const hookLoad = async ({ out, isStdinStop }) => {
     roots = [world.root, realpathSync.native(world.root)]
     redactions.push(['<world>', world.root], ['<world>', realpathSync.native(world.root)])
     const pendingFolder = join(world.home, '.agent-board', 'pending')
+    const queuedNow = () => { try { return readdirSync(pendingFolder).filter(name => name.endsWith('.json')).length } catch { return 0 } }
     const server = await serve.start(world, [], { lifetimeMs: size.seconds * 1000 + 6 * 60000, idleMinutes: Math.ceil(size.seconds / 60) + 10 })
     const token = new URL(server.url).searchParams.get('t')
     secrets.push(server.url, new URL(server.url).search, token)
@@ -305,7 +306,9 @@ const hookLoad = async ({ out, isStdinStop }) => {
             if (!isOk) problem(`A ${host} ${event} hook exited ${result.status}: ${(result.stderr || result.stdout).trim().split(/\r?\n/)[0]}`)
           } catch (error) { problem(`A ${host} ${event} hook failed: ${firstLine(error)}`) }
           runs.push({ host, event, ms: Math.round(performance.now() - start), isOk })
-          if (isOk) seen.push(await shown(id, host, isWorking, since()))
+          // Whether any hook event sat in the queue when this one returned: a queued event reaches
+          // the page only when a later hook applies it.
+          if (isOk) { const isQueued = queuedNow() > 0; seen.push({ ...await shown(id, host, isWorking, since()), isQueued }) }
           if (since() < endAt) await sleep(between(random, gap))
         }
       }
@@ -323,7 +326,7 @@ const hookLoad = async ({ out, isStdinStop }) => {
     sample()
 
     // The end state, before the world closes: what is still queued, and any temporary file left.
-    const queuedLeft = (() => { try { return readdirSync(pendingFolder).filter(name => name.endsWith('.json')).length } catch { return 0 } })()
+    const queuedLeft = queuedNow()
     const inboxLeft = (() => { try { return readdirSync(world.inbox).length } catch { return 0 } })()
     let temporaries = 0
     try { temporaries = readdirSync(world.home, { recursive: true }).map(String).filter(name => /\.(?:taking|tmp)$/.test(name)).length } catch (error) { problem(`The home folder could not be listed: ${firstLine(error)}`) }
@@ -347,21 +350,31 @@ const hookLoad = async ({ out, isStdinStop }) => {
     const overBy = hookHosts.map(host => `${host} ${over.filter(one => one.host === host).length}`).join(', ')
     outcomes.hooks = {
       ok: runs.length > 0 && over.length === 0 && failedRuns.length === 0,
+      over: over.length,
+      failedRuns: failedRuns.length,
+      maxMs: times.length ? Math.max(...times) : 0,
       line: `${runs.length} hook runs: p50 ${percentile(times, 0.5) ?? '?'} ms, p95 ${percentile(times, 0.95) ?? '?'} ms, max ${times.length ? Math.max(...times) : '?'} ms; over ${HOOK_TIMEOUT_MS} ms: ${over.length} (${overBy}); ${failedRuns.length} did not exit 0.`,
     }
     const shownMs = seen.filter(one => one.ms !== undefined).map(one => one.ms)
     const late = shownMs.filter(ms => ms > PAGE_MS).length
     const missed = seen.filter(one => one.isMissed).length
+    const slow = seen.filter(one => one.isMissed || one.ms > PAGE_MS)
+    const slowNotQueued = slow.filter(one => !one.isQueued).length
+    const slowBy = hookHosts.map(host => `${host} ${slow.filter(one => one.host === host).length}`).join(', ')
     outcomes.page = {
       ok: shownMs.length > 0 && late === 0 && missed === 0,
-      line: `${seen.length} reports: shown after p50 ${percentile(shownMs, 0.5) ?? '?'} ms, p95 ${percentile(shownMs, 0.95) ?? '?'} ms, max ${shownMs.length ? Math.max(...shownMs) : '?'} ms; ${late} later than ${PAGE_MS} ms (the page polls every ${pollMs} ms), ${missed} not shown within ${SEEN_GIVE_UP_MS / 1000} s.`,
+      shown: shownMs.length,
+      slow: slow.length,
+      slowNotQueued,
+      failedAnswers: answers.failed,
+      line: `${seen.length} reports: shown after p50 ${percentile(shownMs, 0.5) ?? '?'} ms, p95 ${percentile(shownMs, 0.95) ?? '?'} ms, max ${shownMs.length ? Math.max(...shownMs) : '?'} ms; ${late} later than ${PAGE_MS} ms (the page polls every ${pollMs} ms), ${missed} not shown within ${SEEN_GIVE_UP_MS / 1000} s.${slow.length ? ` Of the late and missed ${slow.length} (${slowBy}), ${slow.length - slowNotQueued} came back while hook events were queued.` : ''}`,
     }
     const isUnderCaps = !hasSampleError && peaks.progressBytes > 0 && peaks.progressBytes <= CAPS.progressBytes && peaks.inboxFiles <= CAPS.inboxFiles && peaks.inboxBytes <= CAPS.inboxBytes && peaks.captures <= CAPS.captures && peaks.monthBytes <= CAPS.monthBytes
     outcomes.caps = {
       ok: isUnderCaps,
       line: `At most: progress.md ${kilobytes(peaks.progressBytes)} (cap 512 KB), progress-inbox ${peaks.inboxFiles} files and ${kilobytes(peaks.inboxBytes)} (caps 1,000 files and 1.5 MB), ${peaks.captures} question capture files (cap 16), the largest month file ${kilobytes(peaks.monthBytes)} (cap 1 MB); all the board's other files beside progress.md ${kilobytes(peaks.companionBytes)}, ${peaks.queued} queued hook events.${peaks.progressBytes === 0 ? ' No progress.md data was measured.' : ''}${hasSampleError ? ' A storage sample could not be read.' : ''}`,
     }
-    report.stats = { runs: runs.length, turns: Math.floor(runs.length / 2), hooks: { p50: percentile(times, 0.5), p95: percentile(times, 0.95), max: times.length ? Math.max(...times) : undefined, byHost }, page: { reports: seen.length, p50: percentile(shownMs, 0.5), p95: percentile(shownMs, 0.95), max: shownMs.length ? Math.max(...shownMs) : undefined, late, missed, pollMs }, answers: { count: answers.count, failed: answers.failed, p50: percentile(answers.ms, 0.5), p95: percentile(answers.ms, 0.95), max: answers.ms.length ? Math.max(...answers.ms) : undefined }, peaks, hookErrors: codes }
+    report.stats = { runs: runs.length, turns: Math.floor(runs.length / 2), hooks: { p50: percentile(times, 0.5), p95: percentile(times, 0.95), max: times.length ? Math.max(...times) : undefined, byHost }, page: { reports: seen.length, p50: percentile(shownMs, 0.5), p95: percentile(shownMs, 0.95), max: shownMs.length ? Math.max(...shownMs) : undefined, late, missed, slow: slow.length, slowNotQueued, pollMs }, answers: { count: answers.count, failed: answers.failed, p50: percentile(answers.ms, 0.5), p95: percentile(answers.ms, 0.95), max: answers.ms.length ? Math.max(...answers.ms) : undefined }, peaks, hookErrors: codes }
   } catch (error) {
     report.status = 'failed'
     problem(`The run stopped on an error: ${firstLine(error)}`)
@@ -397,8 +410,12 @@ const hookLoad = async ({ out, isStdinStop }) => {
   for (const [key, title] of Object.entries(TITLES)) {
     const outcome = outcomes[key]
     if (outcome === undefined) { report.checks.push({ title, status: 'fail', line: 'Not measured: the run ended before this check.' }); continue }
-    const issue = KNOWN[key]
-    if (issue === undefined) { report.checks.push({ title, status: outcome.ok ? 'pass' : 'fail', line: outcome.line }); continue }
+    const marker = hookLoadMarker({ key, outcome, platform: process.platform, budgetMs: HOOK_TIMEOUT_MS })
+    if (marker === undefined || (!outcome.ok && !marker.explains)) {
+      report.checks.push({ title, status: outcome.ok ? 'pass' : 'fail', line: `${outcome.line}${marker ? ` Not the pattern of #${marker.issue}.` : ''}` })
+      continue
+    }
+    const { issue } = marker
     try {
       await knownFailure(issue, () => { if (!outcome.ok) assert.fail(outcome.line) }, { mayPass: true })
       report.checks.push(outcome.ok ? { title, status: 'pass', line: outcome.line } : { title, status: 'known', line: `${outcome.line} Known problem (#${issue}).` })

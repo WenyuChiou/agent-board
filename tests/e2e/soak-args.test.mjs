@@ -5,7 +5,7 @@ import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { makeWorld } from './lib/world.mjs'
 import { spawnIsolated } from './lib/spawn.mjs'
-import { OUT_DEFAULT, archiveIntegrity, archiveProblems, fileOpsPerPoll, leftoverProcesses, levelOutcome, makeRedact, median, parseArguments, peakRss, percentile, pruneRefusal, redactDeep, tallyOf, writeReport } from './lib/soak-report.mjs'
+import { OUT_DEFAULT, archiveIntegrity, archiveProblems, fileOpsPerPoll, hookLoadMarker, leftoverProcesses, levelOutcome, makeRedact, median, parseArguments, peakRss, percentile, pruneRefusal, redactDeep, tallyOf, writeReport } from './lib/soak-report.mjs'
 
 const soak = fileURLToPath(new URL('./soak.mjs', import.meta.url))
 
@@ -261,5 +261,27 @@ describe('L6 soak arguments', () => {
     assert.deepEqual(leftoverProcesses({ list: list.filter(one => one.pid !== 104).map(({ started, ...one }) => one), self: 100, roots: [world], exclude: [400] }).map(one => one.pid), [101, 102, 103, 200])
     // A parent chain that loops ends without hanging.
     assert.deepEqual(leftoverProcesses({ list: [{ pid: 7, ppid: 8, name: 'a', command: '' }, { pid: 8, ppid: 7, name: 'b', command: '' }], self: 100, roots: [] }), [])
+  })
+  test('L6 soak arguments: a failed hook load check is known for #241 only on Windows, when no hook exited non-zero or ran past twice the 3 s budget, every poll was answered, some report was shown and every late or missed report came back while an event was queued', () => {
+    const marker = (key, outcome, platform = 'win32') => hookLoadMarker({ key, outcome, platform, budgetMs: 3000 })
+    const slowHooks = { ok: false, over: 1, failedRuns: 0, maxMs: 3126 }
+    const latePage = { ok: false, shown: 2182, slow: 30, slowNotQueued: 0, failedAnswers: 0 }
+    assert.deepEqual(marker('hooks', slowHooks), { issue: 241, explains: true })
+    assert.deepEqual(marker('page', latePage), { issue: 241, explains: true })
+    // A lucky pass on Windows still carries the marker; other systems and other checks carry none.
+    assert.deepEqual(marker('hooks', { ok: true }), { issue: 241, explains: true })
+    assert.equal(marker('hooks', slowHooks, 'linux'), undefined)
+    assert.equal(marker('page', latePage, 'darwin'), undefined)
+    assert.equal(marker('caps', { ok: false }), undefined)
+    // Outside the pattern: a hook that exited non-zero, one that ran past 6 s, a failure with no slow
+    // run, a late report while nothing was queued, an unanswered poll, no report shown, or nothing slow.
+    assert.equal(marker('hooks', { ...slowHooks, failedRuns: 1 }).explains, false)
+    assert.equal(marker('hooks', { ...slowHooks, maxMs: 6001 }).explains, false)
+    assert.equal(marker('hooks', { ok: false, over: 0, failedRuns: 0, maxMs: 0 }).explains, false)
+    assert.equal(marker('page', { ...latePage, slowNotQueued: 1 }).explains, false)
+    assert.equal(marker('page', { ...latePage, failedAnswers: 1 }).explains, false)
+    assert.equal(marker('page', { ...latePage, shown: 0 }).explains, false)
+    assert.equal(marker('page', { ...latePage, slow: 0 }).explains, false)
+    assert.equal(marker('page', {}).explains, false)
   })
 })
