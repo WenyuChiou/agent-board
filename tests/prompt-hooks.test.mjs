@@ -568,6 +568,21 @@ const runCapReporter = (kind, home) => {
 
 const droppedLog = inbox => readFileSync(join(inbox, 'dropped.log'), 'utf8')
 
+// Runs the sh reporter's own cleanup on Windows too: Git Bash normally hands the hook to
+// PowerShell, so a stand-in `uname` in `tools` says Linux. Git's bin/bash.exe puts /usr/bin ahead
+// of the PATH it is given; its usr/bin/bash.exe keeps it.
+const runPosixSh = (home, tools) => {
+  mkdirSync(tools, { recursive: true })
+  const uname = join(tools, 'uname')
+  writeFileSync(uname, '#!/bin/sh\nprintf "%s\\n" Linux\n')
+  chmodSync(uname, 0o755)
+  const [shell, args] = capCommand('sh', home)
+  const program = process.platform === 'win32' && existsSync('C:/Program Files/Git/usr/bin/bash.exe') ? 'C:/Program Files/Git/usr/bin/bash.exe' : shell
+  const env = { ...process.env, HOME: home, USERPROFILE: home, PATH: tools + (process.platform === 'win32' ? ';' : ':') + process.env.PATH }
+  const result = spawnSync(program, args, { env, input: CAP_PAYLOAD, encoding: 'utf8', windowsHide: true })
+  assert.equal(result.status, 0, result.stderr)
+}
+
 const capOldestOfFiles = kind => fixture(async home => {
   const inbox = join(home, 'progress-inbox')
   // The oldest turn file is index 0. The taken and failed files are older than all of them and the
@@ -626,19 +641,10 @@ const capRemovalError = message => fixture(async home => {
   const standIn = join(tools, 'rm')
   writeFileSync(standIn, `#!/bin/sh\ncase "$1" in *codex-turn-0-1.json) printf '%s\\n' ${shellQuote(message)} >&2; exit 1 ;; esac\nexec ${shellQuote(located.stdout.trim())} "$@"\n`)
   chmodSync(standIn, 0o755)
-  // Git Bash normally hands the hook to PowerShell; exercise the sh cleanup on Windows too.
-  const uname = join(tools, 'uname')
-  writeFileSync(uname, '#!/bin/sh\nprintf "%s\\n" Linux\n')
-  chmodSync(uname, 0o755)
   const inbox = join(home, 'progress-inbox')
   seedFile(inbox, 'codex-turn-0-1.json', 20, 5 * CAP_DAY)
   seedFile(inbox, 'codex-turn-1-1.json', 20, 5 * CAP_DAY)
-  const [shell, args] = capCommand('sh', home)
-  // Git's bin/bash.exe puts /usr/bin ahead of the PATH it is given; its usr/bin/bash.exe keeps it.
-  const program = process.platform === 'win32' && existsSync('C:/Program Files/Git/usr/bin/bash.exe') ? 'C:/Program Files/Git/usr/bin/bash.exe' : shell
-  const env = { ...process.env, HOME: home, USERPROFILE: home, PATH: tools + (process.platform === 'win32' ? ';' : ':') + process.env.PATH }
-  const result = spawnSync(program, args, { env, input: CAP_PAYLOAD, encoding: 'utf8', windowsHide: true })
-  assert.equal(result.status, 0, result.stderr)
+  runPosixSh(home, tools)
   assert.ok(existsSync(join(inbox, 'codex-turn-0-1.json')), 'the failed removal is not counted')
   assert.ok(!existsSync(join(inbox, 'codex-turn-1-1.json')), 'the successful removal is counted')
   assert.deepEqual(inboxDropped(droppedLog(inbox), 0), { age: 1, cap: 0 })
@@ -730,6 +736,19 @@ test('the PowerShell reporter removes the oldest turn file once the inbox passes
 test('the sh reporter removes the oldest turn files until the inbox is under 1572864 bytes and counts them', () => capOldestOfBytes('sh'))
 test('the PowerShell reporter removes the oldest turn files until the inbox is under 1572864 bytes and counts them', { skip: isNotWindows }, () => capOldestOfBytes('ps1'))
 test('the sh reporter counts the turn files its 2-day cleanup removes and leaves taken and failed files', () => capCountsAge('sh'))
+test("the sh reporter's age cleanup leaves only the turns under 3 days, its own new turn and dropped.log in the inbox", () => fixture(async home => {
+  const inbox = join(home, 'progress-inbox')
+  seedFile(inbox, 'codex-turn-0-1.json', 20, CAP_DAY)
+  seedFile(inbox, 'codex-turn-1-1.json', 20, 2.5 * CAP_DAY)
+  seedFile(inbox, 'codex-turn-2-1.json', 20, 3.5 * CAP_DAY)
+  seedFile(inbox, 'codex-turn-3-1.json', 20, 5 * CAP_DAY)
+  runPosixSh(home, join(home, 'tools'))
+  const names = readdirSync(inbox).sort()
+  const written = names.filter(name => /^codex-turn-\d{10,}-\d+\.json$/.test(name))
+  assert.equal(written.length, 1, JSON.stringify(names))
+  assert.deepEqual(names, ['codex-turn-0-1.json', 'codex-turn-1-1.json', written[0], 'dropped.log'].sort())
+  assert.match(droppedLog(inbox), /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ 2 age\n$/)
+}))
 test('the PowerShell reporter counts the turn files its 2-day cleanup removes and leaves taken and failed files', { skip: isNotWindows }, () => capCountsAge('ps1'))
 test('the sh reporter logs CLEANUP_FAILED once and does not count a turn it cannot remove', () => capRemovalError("rm: cannot remove 'x': Permission denied"))
 test('the sh reporter does not log CLEANUP_FAILED for a turn another reporter already removed', () => capRemovalError('No such file or directory'))
