@@ -236,7 +236,7 @@ const inboxHoldMissing = new Map<string, number>()
 const pendingJournals = new Map<string, Record<string, string[]>>()
 const pendingInboxQuestions = new Map<string, PendingTurn>()
 const droppingInboxQuestions = new Set<string>()
-let pendingQuestionRetry: Promise<void> | null = null
+let pendingQuestionRetry: Promise<PendingTurn[]> | null = null
 let hasRestoredInboxQuestions = false
 const journalNoticesShown = new Set<string>()
 let journalNoticeKey = ''
@@ -2134,12 +2134,14 @@ const pendingQuestionsProblem = async ($: EngineInterface, hasProblem: boolean):
 
 // Keep only the ledger's source preview, never the original inbox payload. Each source has its
 // own store key so another session can recover it without replacing this session's pending list.
-const keepInboxQuestions = async ($: EngineInterface, captured: readonly PendingTurn[], isRestoring: boolean): Promise<void> => {
+// What it gives back are the turns of `captured` it could not keep: their preview did not save,
+// so they were left out of the pass, and the runs they came in are tried again.
+const keepInboxQuestions = async ($: EngineInterface, captured: readonly PendingTurn[], isRestoring: boolean): Promise<PendingTurn[]> => {
   const path = await progressPath($)
   const prefix = `pendingInboxQuestion:${sha256(path)}:`
   const own = new Set(captured.map(turn => `${prefix}${sha256(JSON.stringify([turn.id, turn.sourceRevisions]))}`))
   for (const turn of captured) pendingInboxQuestions.set(`${prefix}${sha256(JSON.stringify([turn.id, turn.sourceRevisions]))}`, turn)
-  await enqueue(async () => {
+  return enqueue(async (): Promise<PendingTurn[]> => {
     let hasCleanupProblem = false
     const discard = async (key: string): Promise<void> => {
       let isRemoved = false
@@ -2180,29 +2182,32 @@ const keepInboxQuestions = async ($: EngineInterface, captured: readonly Pending
       if (at - turn.at > 3 * DAY || index >= 50) await discard(key)
     }
     pending = pending.filter(([key]) => pendingInboxQuestions.has(key))
-    // An older failed save cannot hold the turn files this drain owns.
+    // An older failed save cannot hold the turn files this drain owns. A turn of its own whose
+    // preview did not save is left out of the pass, and holds back only the run it came in, not
+    // the other runs of the look (#416).
     const unkept = new Set<string>()
+    const unsaved = new Map<string, PendingTurn>()
     for (const [key, turn] of pending) {
       const isKept = await $.store.get(key).then(value => JSON.stringify(value) === JSON.stringify(turn)).catch(() => false)
         || await $.store.set(key, turn).then(async () => JSON.stringify(await $.store.get(key)) === JSON.stringify(turn)).catch(() => false)
       if (isKept) continue
-      if (!own.has(key)) {
-        unkept.add(key)
-        continue
-      }
-      for (const one of own) pendingInboxQuestions.delete(one)
-      await pendingQuestionsProblem($, true)
-      throw new Error('PENDING_QUESTION_NOT_KEPT')
+      if (own.has(key)) unsaved.set(key, turn)
+      else unkept.add(key)
     }
-    pending = pending.filter(([key]) => !unkept.has(key))
+    const lost = [...unsaved.values()]
+    if (unsaved.size > 0) {
+      for (const key of unsaved.keys()) pendingInboxQuestions.delete(key)
+      await pendingQuestionsProblem($, true)
+    }
+    pending = pending.filter(([key]) => !unkept.has(key) && !unsaved.has(key))
     if (pending.length === 0) {
-      await pendingQuestionsProblem($, hasCleanupProblem || hasRestoreProblem || unkept.size > 0)
-      return
+      await pendingQuestionsProblem($, hasCleanupProblem || hasRestoreProblem || unkept.size > 0 || unsaved.size > 0)
+      return lost
     }
     const text = await readText($, path).catch(() => null)
     if (text === null || !isQuestionSnapshot(text)) {
       await pendingQuestionsProblem($, true)
-      return
+      return lost
     }
     const projects = parseProgress(text)
     for (const [key, turn] of pending) {
@@ -2215,20 +2220,21 @@ const keepInboxQuestions = async ($: EngineInterface, captured: readonly Pending
     // remembered answers.
     if (pending.length > 0 && !(await pollQuestions($, path, projects, false, pending.map(([, turn]) => turn)))) {
       await pendingQuestionsProblem($, true)
-      return
+      return lost
     }
     for (const [key] of pending) await discard(key)
-    await pendingQuestionsProblem($, hasCleanupProblem || hasRestoreProblem || unkept.size > 0)
+    await pendingQuestionsProblem($, hasCleanupProblem || hasRestoreProblem || unkept.size > 0 || unsaved.size > 0)
+    return lost
   })
 }
 
-const retainInboxQuestions = async ($: EngineInterface, captured: readonly PendingTurn[] = [], isRestoring = false): Promise<void> => {
-  if (captured.length === 0 && (pendingQuestionRetry !== null || !isRestoring && hasRestoredInboxQuestions && pendingInboxQuestions.size === 0 && droppingInboxQuestions.size === 0)) return
+const retainInboxQuestions = async ($: EngineInterface, captured: readonly PendingTurn[] = [], isRestoring = false): Promise<PendingTurn[]> => {
+  if (captured.length === 0 && (pendingQuestionRetry !== null || !isRestoring && hasRestoredInboxQuestions && pendingInboxQuestions.size === 0 && droppingInboxQuestions.size === 0)) return []
   const job = keepInboxQuestions($, captured, isRestoring)
   if (captured.length > 0) return job
   pendingQuestionRetry = job
   try {
-    await job
+    return await job
   } finally {
     pendingQuestionRetry = null
   }
@@ -2526,23 +2532,30 @@ const drainInbox = async ($: EngineInterface): Promise<void> => {
     // A question pass takes seconds in the write queue on a big board, so the questions of a look
     // are kept in one pass, not one for each run of each session (#416). A look takes at most
     // QUEUE_MAX files, far below the 50 questions a pass keeps. The questions are checked against
-    // the board with every run's turns on it. If keeping fails, every run that asked is tried
-    // again; its turns are on the board already, so only the questions are new.
+    // the board with every run's turns on it. A run is tried again when a question of its own was
+    // not kept; if the pass itself fails, every run that asked is. Its turns are on the board
+    // already, so only the questions are new.
+    const holdBack = async (runs: typeof asking, error: unknown): Promise<void> => {
+      const why = (error instanceof Error ? error.message : String(error)).replace(/\s+/g, ' ').slice(0, 200)
+      const held = new Set(runs.flatMap(one => one.group))
+      settled.splice(0, settled.length, ...settled.filter(one => !held.has(one)))
+      for (const one of held) failed[one.name] = `${one.attempt}:${at}:${why}`
+      const reason = inboxFailure(error)
+      if (reason !== 'INBOX_FAILED') await inboxNotice($, runs[0]!.group[0]!.path, reason)
+    }
     if (asking.length > 0) {
       try {
         const questions = asking.flatMap(one => one.questions)
-        await retainInboxQuestions($, questions)
+        const lost = new Set((await retainInboxQuestions($, questions)).map(one => JSON.stringify(one)))
+        const unkept = asking.filter(one => one.questions.some(turn => lost.has(JSON.stringify(turn))))
+        if (unkept.length > 0) await holdBack(unkept, new Error('PENDING_QUESTION_NOT_KEPT'))
         // A question and its answer can arrive in one look: the answer was remembered before
         // the question was kept, so it settles now instead of at the next poll.
         const asked = new Set(questions.map(one => JSON.stringify([one.agent, one.id])))
-        if ([...answeredPending.keys()].some(key => asked.has(key))) await pollAnsweredQuestions($, await progressPath($), undefined)
+        // Its failure is made good at the next poll, so it sends back no run.
+        if ([...answeredPending.keys()].some(key => asked.has(key))) await progressPath($).then(path => pollAnsweredQuestions($, path, undefined)).catch(() => undefined)
       } catch (error) {
-        const why = (error instanceof Error ? error.message : String(error)).replace(/\s+/g, ' ').slice(0, 200)
-        const held = new Set(asking.flatMap(one => one.group))
-        settled.splice(0, settled.length, ...settled.filter(one => !held.has(one)))
-        for (const one of held) failed[one.name] = `${one.attempt}:${at}:${why}`
-        const reason = inboxFailure(error)
-        if (reason !== 'INBOX_FAILED') await inboxNotice($, asking[0]!.group[0]!.path, reason)
+        await holdBack(asking, error)
       }
     }
     await recordInbox($, settled.map(one => one.name), failed, at)
