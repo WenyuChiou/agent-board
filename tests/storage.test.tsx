@@ -503,7 +503,7 @@ test("a store cap pass leaves this board's records when only another copy's stor
   const store = world.store as Record<string, unknown>
   store.storeId = '0123456789abcdef'
   world.files.delete(STORE_FILE)
-  world.files.set(`${STORE_DIR}/agent-board_inline-111111111111.json`, 'x'.repeat(1_600_000))
+  world.files.set(`${STORE_DIR}/agent-board_inline-111111111111.json`, '{}' + ' '.repeat(1_600_000 - 2))
   world.files.set(`${STORE_DIR}/agent-board_agent-board-222222222222.json`, JSON.stringify({ storeId: store.storeId }))
   const clock = engineBeneath(on, world)
   await $.session.start({ cwd: '/work/other-project', surface: 'desktop', isInteractive: true })
@@ -548,7 +548,7 @@ test("the first start after the upgrade waits for the store id to reach the disk
   const other = `${STORE_DIR}/agent-board_agent-board-555555555555.json`
   const own = `${STORE_DIR}/agent-board_inline-666666666666.json`
   world.files.delete(STORE_FILE)
-  world.files.set(other, 'x'.repeat(size))
+  world.files.set(other, '{}' + ' '.repeat(size - 2))
   world.files.set(own, 'x'.repeat(size))
   const clock = engineBeneath(on, world)
   await $.session.start({ cwd: '/work/other-project', surface: 'desktop', isInteractive: true })
@@ -561,6 +561,290 @@ test("the first start after the upgrade waits for the store id to reach the disk
   const text = JSON.stringify({ storeId: store.storeId })
   world.files.set(own, text + ' '.repeat(size - text.length))
   await clock.advance(HOUR + 60_000)
+  for (const key of [OLD_MIRROR, 'agent:0d0d0d02', 'agent:0d0d0d03']) expect(store[key]).toBeUndefined()
+  expect(store['agent:0d0d0d04']).toBeDefined()
+  expect(store.prunedCounts).toEqual({ '2026-10-16': { agent: 2, mirror: 1 } })
+})
+
+test('the store cap and size warning wait when another store file is not JSON', async ($, on) => {
+  const size = 1_600_000
+  const world = capWorld(100_000)
+  world.isArchiveClockOnly = true
+  world.reads = []
+  const store = world.store as Record<string, unknown>
+  store.storeId = '445566778899aabb'
+  const own = `${STORE_DIR}/agent-board_inline-f11111111111.json`
+  const other = `${STORE_DIR}/agent-board_agent-board-f22222222222.json`
+  world.files.delete(STORE_FILE)
+  world.files.set(own, JSON.stringify({ storeId: store.storeId }).padEnd(size))
+  world.files.set(other, 'x'.repeat(size))
+  const clock = engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/other-project', surface: 'desktop', isInteractive: true })
+  await clock.advance(1)
+  expect(world.reads.filter(path => path.startsWith(`${STORE_DIR}/`))).toEqual([own, other])
+  const candidates = [OLD_MIRROR, 'agent:0d0d0d02', 'agent:0d0d0d03', 'agent:0d0d0d04']
+  for (const key of candidates) expect(store[key]).toBeDefined()
+  expect(store.storeCapHeld).toBeUndefined()
+  world.reads.length = 0
+  await clock.advance(HOUR + 60_000)
+  // A match cannot be remembered while another file's identity is unknown.
+  expect(world.reads.filter(path => path.startsWith(`${STORE_DIR}/`))).toEqual([own, other])
+  for (const key of candidates) expect(store[key]).toBeDefined()
+  expect(store.storeCapHeld).toBeUndefined()
+  expect(store.prunedCounts).toBeUndefined()
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
+  expect(await ui.find({ type: 'Text', text: EN.storeLarge('1.5', '1.5') })).toBeUndefined()
+  await ui.unmount()
+})
+
+test('the store cap and size warning wait when another store file cannot be read', async ($, on) => {
+  const size = 1_600_000
+  const world = capWorld(100_000)
+  world.isArchiveClockOnly = true
+  world.reads = []
+  const store = world.store as Record<string, unknown>
+  store.storeId = '5566778899aabbcc'
+  const own = `${STORE_DIR}/agent-board_inline-f33333333333.json`
+  const other = `${STORE_DIR}/agent-board_agent-board-f44444444444.json`
+  world.files.delete(STORE_FILE)
+  world.files.set(own, JSON.stringify({ storeId: store.storeId }).padEnd(size))
+  world.files.set(other, '{}' + ' '.repeat(size - 2))
+  world.unreadable = new Set([other])
+  const clock = engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/other-project', surface: 'desktop', isInteractive: true })
+  await clock.advance(1)
+  expect(world.reads.filter(path => path.startsWith(`${STORE_DIR}/`))).toEqual([own, other])
+  const candidates = [OLD_MIRROR, 'agent:0d0d0d02', 'agent:0d0d0d03', 'agent:0d0d0d04']
+  for (const key of candidates) expect(store[key]).toBeDefined()
+  expect(store.storeCapHeld).toBeUndefined()
+  world.reads.length = 0
+  await clock.advance(HOUR + 60_000)
+  expect(world.reads.filter(path => path.startsWith(`${STORE_DIR}/`))).toEqual([own, other])
+  for (const key of candidates) expect(store[key]).toBeDefined()
+  expect(store.storeCapHeld).toBeUndefined()
+  expect(store.prunedCounts).toBeUndefined()
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
+  expect(await ui.find({ type: 'Text', text: EN.storeLarge('1.5', '1.5') })).toBeUndefined()
+  await ui.unmount()
+})
+
+// Distinct file names keep each ownership scenario explicit; session start resets its caches.
+test('the store cap and size warning wait when two store files carry the same store id', async ($, on) => {
+  const size = 1_600_000
+  const world = capWorld(100_000)
+  world.isArchiveClockOnly = true
+  const store = world.store as Record<string, unknown>
+  store.storeId = '0011223344556677'
+  const own = JSON.stringify({ storeId: store.storeId })
+  world.files.delete(STORE_FILE)
+  world.files.set(`${STORE_DIR}/agent-board_agent-board-888888888888.json`, own + ' '.repeat(size - own.length))
+  world.files.set(`${STORE_DIR}/agent-board_inline-777777777777.json`, own + ' '.repeat(size - own.length))
+  const clock = engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/other-project', surface: 'desktop', isInteractive: true })
+  await clock.advance(1)
+  const candidates = [OLD_MIRROR, 'agent:0d0d0d02', 'agent:0d0d0d03', 'agent:0d0d0d04']
+  for (const key of candidates) expect(store[key]).toBeDefined()
+  expect(store.storeCapHeld).toBeUndefined()
+  await clock.advance(HOUR)
+  for (const key of candidates) expect(store[key]).toBeDefined()
+  expect(store.prunedCounts).toBeUndefined()
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
+  expect(await ui.find({ type: 'Text', text: EN.storeLarge('1.5', '1.5') })).toBeUndefined()
+  await ui.unmount()
+})
+
+test("a store cap pass ignores this copy's id in another store's record text", async ($, on) => {
+  const size = 1_600_000
+  const world = capWorld(100_000)
+  const store = world.store as Record<string, unknown>
+  store.storeId = '1122334455667788'
+  const other = JSON.stringify({ storeId: '8877665544332211', step: `Synthetic step containing ${store.storeId}` })
+  world.files.delete(STORE_FILE)
+  world.files.set(`${STORE_DIR}/agent-board_inline-999999999999.json`, other + ' '.repeat(size - other.length))
+  world.files.set(`${STORE_DIR}/agent-board_agent-board-aaaaaaaaaaaa.json`, JSON.stringify({ storeId: store.storeId }))
+  await capStart($, on, world)
+  const candidates = [OLD_MIRROR, 'agent:0d0d0d02', 'agent:0d0d0d03', 'agent:0d0d0d04']
+  for (const key of candidates) expect(store[key]).toBeDefined()
+  expect(store.storeCapHeld).toBeUndefined()
+  expect(store.prunedCounts).toBeUndefined()
+})
+
+test("the store cap and size warning wait when this copy's identified file disappears", async ($, on) => {
+  const size = 1_600_000
+  const world = capWorld(100_000)
+  world.isArchiveClockOnly = true
+  world.reads = []
+  const store = world.store as Record<string, unknown>
+  store.storeId = '2233445566778899'
+  const own = `${STORE_DIR}/agent-board_inline-bbbbbbbbbbbb.json`
+  const other = `${STORE_DIR}/agent-board_agent-board-cccccccccccc.json`
+  const text = JSON.stringify({ storeId: '9988776655443322' })
+  world.files.delete(STORE_FILE)
+  world.files.set(own, JSON.stringify({ storeId: store.storeId }))
+  world.files.set(other, text + ' '.repeat(size - text.length))
+  const clock = engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/other-project', surface: 'desktop', isInteractive: true })
+  await clock.advance(1)
+  expect(world.reads).toContain(own)
+  const candidates = [OLD_MIRROR, 'agent:0d0d0d02', 'agent:0d0d0d03', 'agent:0d0d0d04']
+  for (const key of candidates) expect(store[key]).toBeDefined()
+  world.files.delete(own)
+  world.reads.length = 0
+  await clock.advance(HOUR + 60_000)
+  expect(world.reads).toContain(other)
+  for (const key of candidates) expect(store[key]).toBeDefined()
+  expect(store.storeCapHeld).toBeUndefined()
+  expect(store.prunedCounts).toBeUndefined()
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
+  expect(await ui.find({ type: 'Text', text: EN.storeLarge('1.5', '1.5') })).toBeUndefined()
+  await ui.unmount()
+})
+
+test("the store cap and size warning wait when identification fails and this copy's file disappears", async ($, on) => {
+  const size = 1_600_000
+  const world = capWorld(100_000)
+  world.isArchiveClockOnly = true
+  world.reads = []
+  const store = world.store as Record<string, unknown>
+  store.storeId = '33445566778899aa'
+  const own = `${STORE_DIR}/agent-board_inline-dddddddddddd.json`
+  const other = `${STORE_DIR}/agent-board_agent-board-eeeeeeeeeeee.json`
+  const text = JSON.stringify({ storeId: 'aabb998877665544' })
+  world.files.delete(STORE_FILE)
+  world.files.set(own, '{}')
+  world.files.set(other, text + ' '.repeat(size - text.length))
+  const clock = engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/other-project', surface: 'desktop', isInteractive: true })
+  await clock.advance(1)
+  expect(world.reads).toContain(own)
+  expect(world.reads).toContain(other)
+  const candidates = [OLD_MIRROR, 'agent:0d0d0d02', 'agent:0d0d0d03', 'agent:0d0d0d04']
+  for (const key of candidates) expect(store[key]).toBeDefined()
+  expect(store.storeCapHeld).toBeUndefined()
+  expect(store.prunedCounts).toBeUndefined()
+  world.files.delete(own)
+  world.reads.length = 0
+  await clock.advance(HOUR + 60_000)
+  expect(world.reads).toContain(other)
+  for (const key of candidates) expect(store[key]).toBeDefined()
+  expect(store.storeCapHeld).toBeUndefined()
+  expect(store.prunedCounts).toBeUndefined()
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
+  expect(await ui.find({ type: 'Text', text: EN.storeLarge('1.5', '1.5') })).toBeUndefined()
+  await ui.unmount()
+})
+
+test('a remaining store file is checked as soon as it grows after the identified file leaves', async ($, on) => {
+  const size = 1_600_000
+  const world = capWorld(100_000)
+  world.isArchiveClockOnly = true
+  world.clockOffset = 0
+  world.reads = []
+  const store = world.store as Record<string, unknown>
+  store.storeId = '66778899aabbccdd'
+  const own = `${STORE_DIR}/agent-board_inline-f55555555555.json`
+  const other = `${STORE_DIR}/agent-board_agent-board-f66666666666.json`
+  const text = JSON.stringify({ storeId: 'ddccbbaa99887766' })
+  world.files.delete(STORE_FILE)
+  world.files.set(own, JSON.stringify({ storeId: store.storeId }))
+  world.files.set(other, text + ' '.repeat(size - text.length))
+  const clock = engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/other-project', surface: 'desktop', isInteractive: true })
+  await clock.advance(1)
+  expect(world.reads.filter(path => path.startsWith(`${STORE_DIR}/`))).toEqual([own, other])
+  world.files.delete(own)
+  world.files.set(other, text + ' '.repeat(1_200_000 - text.length))
+  world.reads.length = 0
+  world.storeReads = []
+  await clock.advance(HOUR + 60_000)
+  // The prune reads its place on every pass, so a pass ran and read no store file.
+  expect(world.storeReads).toContain('pruneAfter')
+  expect(world.reads.filter(path => path.startsWith(`${STORE_DIR}/`))).toEqual([])
+  world.files.set(other, text + ' '.repeat(size - text.length))
+  // Only half an hour passes on the observed clock, so a timed miss would still hide this check.
+  world.clockOffset = -HOUR / 2
+  world.reads.length = 0
+  await clock.advance(HOUR)
+  expect(world.reads.filter(path => path.startsWith(`${STORE_DIR}/`))).toEqual([other])
+  const candidates = [OLD_MIRROR, 'agent:0d0d0d02', 'agent:0d0d0d03', 'agent:0d0d0d04']
+  for (const key of candidates) expect(store[key]).toBeDefined()
+  expect(store.storeCapHeld).toBeUndefined()
+  expect(store.prunedCounts).toBeUndefined()
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
+  expect(await ui.find({ type: 'Text', text: EN.storeLarge('1.5', '1.5') })).toBeUndefined()
+  await ui.unmount()
+})
+
+test('a failed store listing keeps the identified file for the next pass', async ($, on) => {
+  const size = 1_600_000
+  const world = capWorld(100_000)
+  world.isArchiveClockOnly = true
+  world.reads = []
+  const store = world.store as Record<string, unknown>
+  store.storeId = '778899aabbccddee'
+  const own = `${STORE_DIR}/agent-board_inline-f77777777777.json`
+  const other = `${STORE_DIR}/agent-board_agent-board-f88888888888.json`
+  const ownText = JSON.stringify({ storeId: store.storeId })
+  world.files.delete(STORE_FILE)
+  world.files.set(own, ownText)
+  world.files.set(other, '{}' + ' '.repeat(size - 2))
+  const clock = engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/other-project', surface: 'desktop', isInteractive: true })
+  await clock.advance(1)
+  expect(world.reads.filter(path => path.startsWith(`${STORE_DIR}/`))).toEqual([own, other])
+  world.unlistable = new Set([STORE_DIR])
+  // This copy's file is away while the folder cannot be listed: a listing that went through
+  // would miss it and read the other file.
+  world.files.delete(own)
+  world.reads.length = 0
+  world.storeReads = []
+  await clock.advance(HOUR)
+  expect(world.storeReads).toContain('pruneAfter')
+  expect(world.reads.filter(path => path.startsWith(`${STORE_DIR}/`))).toEqual([])
+  const candidates = [OLD_MIRROR, 'agent:0d0d0d02', 'agent:0d0d0d03', 'agent:0d0d0d04']
+  for (const key of candidates) expect(store[key]).toBeDefined()
+  expect(store.storeCapHeld).toBeUndefined()
+  expect(store.prunedCounts).toBeUndefined()
+  world.unlistable.clear()
+  world.files.set(own, ownText)
+  world.reads.length = 0
+  world.storeReads = []
+  await clock.advance(HOUR)
+  expect(world.storeReads).toContain('pruneAfter')
+  expect(world.reads.filter(path => path.startsWith(`${STORE_DIR}/`))).toEqual([])
+  for (const key of candidates) expect(store[key]).toBeDefined()
+  expect(store.storeCapHeld).toBeUndefined()
+  expect(store.prunedCounts).toBeUndefined()
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
+  expect(await ui.find({ type: 'Text', text: EN.storeLarge('1.5', '1.5') })).toBeUndefined()
+  await ui.unmount()
+})
+
+test('a new session caps its lone store file after another session identified a different file', async ($, on) => {
+  const size = 1_600_000
+  const world = capWorld(100_000)
+  world.isArchiveClockOnly = true
+  world.reads = []
+  const store = world.store as Record<string, unknown>
+  store.storeId = '8899aabbccddeeff'
+  const own = `${STORE_DIR}/agent-board_inline-f99999999999.json`
+  const other = `${STORE_DIR}/agent-board_agent-board-faaaaaaaaaaa.json`
+  world.files.delete(STORE_FILE)
+  world.files.set(own, JSON.stringify({ storeId: store.storeId }))
+  world.files.set(other, '{}' + ' '.repeat(size - 2))
+  const clock = engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/other-project', surface: 'desktop', isInteractive: true })
+  await clock.advance(1)
+  expect(world.reads.filter(path => path.startsWith(`${STORE_DIR}/`))).toEqual([own, other])
+  expect(store[OLD_MIRROR]).toBeDefined()
+  expect(store.prunedCounts).toBeUndefined()
+  world.files.delete(own)
+  world.files.delete(other)
+  world.files.set(STORE_FILE, 'x'.repeat(size))
+  world.reads.length = 0
+  await $.session.start({ cwd: '/work/other-project', surface: 'desktop', isInteractive: true })
+  await clock.advance(1)
+  expect(world.reads.filter(path => path.startsWith(`${STORE_DIR}/`))).toEqual([])
   for (const key of [OLD_MIRROR, 'agent:0d0d0d02', 'agent:0d0d0d03']) expect(store[key]).toBeUndefined()
   expect(store['agent:0d0d0d04']).toBeDefined()
   expect(store.prunedCounts).toEqual({ '2026-10-16': { agent: 2, mirror: 1 } })
@@ -1158,7 +1442,8 @@ test('overlapping sweep and drain saves keep both set-aside changes through the 
     files: new Map([[FILE, BOARD], [`${INBOX}/${old}`, '{}']]),
     mtime: 1,
     hasTasks: true,
-    store: { inboxDone: {}, autoConnectOff: true, inboxSetAside: { [old]: AT - 8 * DAY } },
+    // The note says its last try started, so the expired claim is set aside, not taken again.
+    store: { inboxDone: {}, autoConnectOff: true, inboxSetAside: { [old]: AT - 8 * DAY }, inboxFailed: { [name]: `8:${AT - HOUR}:TRYING` } },
     ran: [],
   }
   let release = () => {}

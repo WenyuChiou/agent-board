@@ -2852,26 +2852,45 @@ const STORE_CAP_HELD = 'storeCapHeld'
 // A development copy has its own store beside the installed copy. Only read the files when a
 // large one makes their identity matter; a saved id identifies our plain JSON file thereafter.
 let ownStoreFile: string | null = null
-let ownStoreMiss: { names: string; at: number } | null = null
+let ownStoreMiss: { names: string; at: number | null } | null = null
 const ownStoreBytes = async ($: EngineInterface, listing?: readonly ListedFile[]): Promise<number | null> => {
   const directory = await storeDir($)
-  const entries = listing ?? await $.fs.list(directory).catch(() => [])
+  const entries = listing ?? await $.fs.list(directory).catch(() => null)
+  if (entries === null) return null
   const files = entries.filter(entry => entry.kind === 'file' && STORE_FILE.test(entry.name))
-  if (files.length <= 1 || files.every(entry => entry.size <= RETENTION.storeWarnBytes)) return storeBytes(files)
-  const cached = files.find(entry => entry.name === ownStoreFile)
-  if (cached !== undefined) return cached.size
   const names = files.map(entry => entry.name).sort().join('\n')
+  const cached = files.find(entry => entry.name === ownStoreFile)
+  if (ownStoreFile !== null && cached === undefined) {
+    ownStoreFile = null
+    // This listing still needs verification if a small remaining file grows later.
+    ownStoreMiss = { names, at: null }
+  }
+  // Without a failed identification or a remembered file leaving, trust a lone file without
+  // reading: it could belong to another copy only if ours was never written, or left before it
+  // was identified.
+  const isLoneOwn = files.length <= 1 && !(ownStoreMiss?.names.split('\n').includes(files[0]?.name ?? '') ?? false)
+  if (files.every(entry => entry.size <= RETENTION.storeWarnBytes) || isLoneOwn) return storeBytes(files)
+  if (cached !== undefined) return cached.size
   const at = await $.clock.now()
-  if (ownStoreMiss?.names === names && at >= ownStoreMiss.at && at - ownStoreMiss.at < 60 * 60 * 1000) return null
+  if (ownStoreMiss?.names === names && ownStoreMiss.at !== null && at >= ownStoreMiss.at && at - ownStoreMiss.at < 60 * 60 * 1000) return null
   const saved = await $.store.get('storeId').catch(() => undefined)
   const id = typeof saved === 'string' && /^[0-9a-f]{16}$/.test(saved) ? saved : Array.from({ length: 16 }, () => Math.floor(Math.random() * 16).toString(16)).join('')
   if (id !== saved) await $.store.set('storeId', id).catch(() => undefined)
+  const matches: ListedFile[] = []
+  let hasUnreadable = false
   for (const entry of files) {
-    const text = await $.fs.read(`${directory}${sepOf(directory)}${entry.name}`).catch(() => '')
-    if (!text.includes(id)) continue
-    ownStoreFile = entry.name
+    try {
+      const value: unknown = JSON.parse(await $.fs.read(`${directory}${sepOf(directory)}${entry.name}`))
+      if (value !== null && typeof value === 'object' && 'storeId' in value && value.storeId === id) matches.push(entry)
+    } catch {
+      hasUnreadable = true
+    }
+  }
+  const match = matches.length === 1 && !hasUnreadable ? matches[0] : undefined
+  if (match !== undefined) {
+    ownStoreFile = match.name
     ownStoreMiss = null
-    return entry.size
+    return match.size
   }
   ownStoreMiss = { names, at: await $.clock.now() }
 
@@ -2984,8 +3003,8 @@ const sweepFiles = async ($: EngineInterface): Promise<void> => {
   const path = await progressPath($)
   const isWin = await isWindows($, path)
   const store = await storeDir($)
-  const kept = await $.fs.list(store).catch(() => [])
-  measuredStore = (await ownStoreBytes($, kept)) ?? 0
+  const kept = await $.fs.list(store).catch(() => null)
+  measuredStore = kept === null ? 0 : (await ownStoreBytes($, kept)) ?? 0
   await refreshPruned($, at)
   const inbox = inboxPath(path)
   // The record is read before the listing, so every name in it was set aside before the look.
@@ -2994,7 +3013,7 @@ const sweepFiles = async ($: EngineInterface): Promise<void> => {
   const swept = staleFailedInbox(failed ?? [], at, setAside)
   const unseen = unseenFailedInbox(failed ?? [], setAside)
   const stale = [
-    ...staleStoreTemps(kept, at).map(name => `${store}${sepOf(store)}${name}`),
+    ...staleStoreTemps(kept ?? [], at).map(name => `${store}${sepOf(store)}${name}`),
     ...swept.map(name => `${inbox}${sepOf(inbox)}${name}`),
     ...staleInboxTemps(failed ?? [], at).map(name => `${inbox}${sepOf(inbox)}${name}`),
   ]
@@ -3189,6 +3208,9 @@ const answerHere = async ($: EngineInterface): Promise<void> => {
 export const register: Register = (on, options) => {
   on('session.start', async ($, e, next) => {
     pendingCache = null
+    // A store identity belongs to the session that found it.
+    ownStoreFile = null
+    ownStoreMiss = null
     knownPath = await findProgressPath($)
     await settleLang($, options)
     const words = await wordsOf($)
