@@ -58,6 +58,7 @@ export const ZH_TW = {
   messagesConflict: '相同訊息編號已有不同內容，已拒絕重送。',
   localAgentTask: (agent: string): string => `${agent} 本機任務`,
   localAgentSkillDescription: '開啟本機互動看板，追蹤目前已接線 session 的實際任務進度。',
+  localAgentStepFormat: '一行 Markdown 任務：「- [x] 完成」、「- [~] 進行中」、「- [ ] 下一步」、「- [?] 等使用者回答」、「- [!] 卡住」、「- [>] 在別處執行或已交棒」、「- [-] 取消」',
   localAgentLifecycle: "等待下一個工作指令",
   localHostReview: '安裝檔案後仍須在原生 host 核對 hooks／plugin 是否啟用，並分開驗收 CLI、App、IDE 的實際事件；既有 session 可能需要重新載入。此安裝不繞過信任、不讀對話、不啟用遠端控制，也不代表已建立傳訊連線。',
   localAgentSkill: (command: string): string => `執行 \`${command} --serve\`，顯示最後一行的互動看板連結；桌面有開啟網址工具時就在面板開啟。這是網頁 UI，不是原生 pane。CLI 也可在另一個終端執行 \`${command} --watch\`。\n\n使用者要求追蹤目前工作時，在每個實際步驟或狀態改變後自行回報最少任務摘要，不傳原始對話或機密。OpenCode 使用 agent_board_progress 工具，由工具 context 綁定目前 session；Codex 用目前 CODEX_THREAD_ID，執行 \`${command} --codex-report\`；Cursor 只有在 hooks 注入 AGENT_BOARD_AGENT=cursor 和 AGENT_BOARD_SESSION_ID 後才執行 \`${command} --codex-report --agent cursor\`。沒有可證明的綁定就明示未接通，不掃描對話或猜 session，也不指定其他 session。命令以 stdin 接受 JSON：{\"title\":\"任務摘要\",\"project\":\"專案\",\"state\":\"working\",\"steps\":[\"- [x] 已完成\",\"- [~] 目前步驟\"]}。等使用者用 waiting 與 [?]；阻擋用 [!]；所有步驟完成才用 done。hooks 只更新活動狀態，語意步驟由你明確回報。不要以寫檔、mock 或 RPC 接受宣稱自動 hooks 或反向送達已驗收。一般回覆不批准工具或 PR 合併。`,

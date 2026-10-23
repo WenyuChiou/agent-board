@@ -88,7 +88,7 @@ export const cursorEvent = (input: Record<string, unknown>): Record<string, unkn
 
 // OpenCode supplies session status but no stable turn id on those status events. Keep
 // that limit explicit instead of manufacturing a turn id or fetching conversation text.
-export const opencodePlugin = (node: string, script: string, progress: string, description: string, home: string): string => `import { spawnSync } from 'node:child_process'
+export const opencodePlugin = (node: string, script: string, progress: string, description: string, home: string, stepFormat = STRINGS.en.localAgentStepFormat): string => `import { spawnSync } from 'node:child_process'
 import { tool } from '@opencode-ai/plugin'
 ${hookGuardSource(home, 'opencode')}
 ${BOARD_PROMPT_HELPER}
@@ -115,9 +115,12 @@ const run = (mode, payload, session, deadline) => {
 // top-level sessions reported here and not seen to end are ended, all within one hook limit;
 // a board that is too slow gets them queued or logged, and OpenCode's exit never waits longer.
 // Each one keeps its folder and whether a reply was still being written at its last report:
-// such a session is left as it is, and its row goes stale by age instead.
-const open = new Map()
-process.once('exit', () => {
+// such a session is left as it is, and its row goes stale by age instead. One list and one exit
+// listener serve the process, however many times OpenCode loads this plugin.
+const OPEN_SESSIONS = Symbol.for('agent-board.opencode-open-sessions')
+const isFirstLoad = globalThis[OPEN_SESSIONS] === undefined
+const open = globalThis[OPEN_SESSIONS] ??= new Map()
+if (isFirstLoad) process.once('exit', () => {
   try {
     const deadline = Date.now() + ${hookTimeout('opencode') - 1000}
     for (const [session, { isReplying, where }] of open) {
@@ -136,11 +139,16 @@ const folderOf = (info, directory) => {
 
 export const AgentBoardLocal = async ({ client, directory }) => ({
   'chat.message': async ({ sessionID }, output) => withHook(async (current, deadline) => {
+      // A known session notes the new reply at once, as events do before their lookup.
+      if (open.has(sessionID)) open.get(sessionID).isReplying = true
       const info = current(await client.session.get({ path: { id: sessionID } }))
       if (info.error) throw Error('HOST_METADATA_FAILED')
       if (!info.data || info.data.id !== sessionID || info.data.parentID) return
       const where = folderOf(info.data, directory)
-      open.set(sessionID, { isReplying: true, where })
+      // The reply may have ended while the lookup ran: a known session keeps what was noted since.
+      const known = open.get(sessionID)
+      if (known) known.where = where
+      else open.set(sessionID, { isReplying: true, where })
       run('--agent-status', { session_id: sessionID, state: 'working', prompt_submitted: true, ...where, ...(isBoardRequest(output) ? { board_request: true } : {}) }, undefined, deadline)
   }),
   event: async ({ event }) => withHook(async (current, deadline) => {
@@ -166,7 +174,7 @@ export const AgentBoardLocal = async ({ client, directory }) => ({
     agent_board_progress: tool({
       description: ${JSON.stringify(description)},
       // The board takes each step as one Markdown task line (#217).
-      args: { title: tool.schema.string(), project: tool.schema.string(), state: tool.schema.enum(['working', 'waiting', 'done', 'ended']), steps: tool.schema.array(tool.schema.string().describe('One Markdown task line: "- [x] finished", "- [~] current", "- [ ] next", "- [?] waiting on the user", "- [!] blocked"')) },
+      args: { title: tool.schema.string(), project: tool.schema.string(), state: tool.schema.enum(['working', 'waiting', 'done', 'ended']), steps: tool.schema.array(tool.schema.string().describe(${JSON.stringify(stepFormat)})) },
       execute: async (args, context) => {
         try { return run('--codex-report', args, context.sessionID) }
         catch (error) {

@@ -16,7 +16,7 @@ import { deepseekLocalPlugin, deepseekPatch, openclawLocalPlugin } from '../hook
 import { HOOK_SESSION_ENV, HOOK_VERSION, hookWorker, hostHookTimeout } from '../hooks/hook-safety'
 import { trustCodex } from './codex-host'
 import { withLocalLock } from './local-lock'
-import { withInstallLock } from './install-control'
+import { installControlRoot, withInstallLock } from './install-control'
 import { boardPromptHelper, boardRequestWords, boardRun, isBoardRequest } from '../hooks/board-commands'
 import { PROMPT_EVENTS } from '../hooks/inbox'
 
@@ -479,9 +479,15 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
     if (patch.group) groups.patch = patch.group
   }
   const skillText = `---\nname: agent-board\ndescription: ${JSON.stringify(s.localAgentSkillDescription)}\n---\n\n${s.localAgentSkill(`${quote(process.execPath)} ${quote(script)}`)}\n\n${s.localAgentHandoff}\n\n${s.codexTrust}\n\nCodex: ${configs.codex}\n${codexEvents.join(', ')}\n`
+  // The connect writes its board beside the progress file it connected: the default one, one a
+  // CLAUDE_CONFIG_DIR or CLAUDE_PROGRESS_FILE names, or the one its own record keeps (#285).
   // Releases before de40dde wrote the command as node "<path>" for any path; later ones use boardRun.
-  const legacyBoard = join(home, '.claude', 'agent-board.mjs')
-  const legacySkills = Object.values(STRINGS).flatMap(words => [...new Set([boardRun(legacyBoard), `node "${legacyBoard}"`])].map(run => `---\nname: agent-board\ndescription: ${JSON.stringify(words.boardCommandDescription)}\n---\n\n${words.boardSkillPrompt(run)}\n`))
+  const connected = ((): unknown => {
+    try { return object(JSON.parse(readFileSync(join(installControlRoot(home), 'legacy-connect.json'), 'utf8'))).connectedProgress } catch { return undefined }
+  })()
+  const legacyProgress = [join(home, '.claude', 'progress.md'), process.env.CLAUDE_CONFIG_DIR ? join(process.env.CLAUDE_CONFIG_DIR, 'progress.md') : '', process.env.CLAUDE_PROGRESS_FILE ?? '', typeof connected === 'string' ? connected : '']
+  const legacyBoards = legacyProgress.filter(path => path !== '').flatMap(path => [path.replace(/[\\/][^\\/]*$/, '') + (process.platform === 'win32' ? '\\' : '/') + 'agent-board.mjs', join(dirname(path), 'agent-board.mjs')])
+  const legacySkills = Object.values(STRINGS).flatMap(words => [...new Set(legacyBoards.flatMap(board => [boardRun(board), `node "${board}"`]))].map(run => `---\nname: agent-board\ndescription: ${JSON.stringify(words.boardCommandDescription)}\n---\n\n${words.boardSkillPrompt(run)}\n`))
   // /progress connect writes Antigravity's skill too; that one is taken over like the shared one (#285).
   const antigravitySkill = join(home, '.gemini', 'config', 'skills', 'agent-board', 'SKILL.md')
   const original = readFileSync(process.argv[1] ?? '', 'utf8').replace(/^globalThis\.AGENT_BOARD[^\n]*\n/, '')
@@ -490,7 +496,7 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
     [worker]: hookWorker(home, script, boardPromptHelper(boardRequestWords(Object.values(STRINGS)))),
     [skill]: skillText,
   }
-  if (agent === 'opencode') files[join(opencodeDir, 'plugins', 'agent-board-local.js')] = opencodePlugin(process.execPath, worker, progress, s.localAgentSkillDescription, home)
+  if (agent === 'opencode') files[join(opencodeDir, 'plugins', 'agent-board-local.js')] = opencodePlugin(process.execPath, worker, progress, s.localAgentSkillDescription, home, s.localAgentStepFormat)
   if (agent === 'openclaw') {
     files[join(root, 'adapters', 'openclaw', 'agent-board-local.mjs')] = openclawLocalPlugin(process.execPath, worker, progress, home)
     files[join(root, 'adapters', 'openclaw', 'openclaw.plugin.json')] = `${JSON.stringify({ id: 'agent-board-local', configSchema: { type: 'object', additionalProperties: false, properties: {} } }, null, 2)}\n`

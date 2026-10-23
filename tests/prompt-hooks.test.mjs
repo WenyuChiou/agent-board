@@ -120,7 +120,10 @@ test('a board-only reply restores an existing question on every board surface an
 
 test('the native OpenCode prompt callback flags exact board commands without retaining their text', async t => {
   const exitListeners = process.listeners('exit')
-  t.after(() => { for (const listener of process.listeners('exit')) if (!exitListeners.includes(listener)) process.removeListener('exit', listener) })
+  t.after(() => {
+    for (const listener of process.listeners('exit')) if (!exitListeners.includes(listener)) process.removeListener('exit', listener)
+    delete globalThis[Symbol.for('agent-board.opencode-open-sessions')]
+  })
   const { opencodePlugin } = await import('../hooks/local-agents.ts')
   const saved = []
   const source = opencodePlugin('node', '/synthetic/board.mjs', '/synthetic/progress.md', 'Progress', process.env.HOME)

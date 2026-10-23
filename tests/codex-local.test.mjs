@@ -1130,7 +1130,10 @@ fs.writeFileSync = (file, text, ...rest) => {
 
 // The OpenCode plugin ends its open sessions as its process exits (#217). A test that loads it
 // into this process drops that listener, so the runner's own exit reports nothing.
-const dropExitReports = before => { for (const listener of process.listeners('exit')) if (!before.includes(listener)) process.removeListener('exit', listener) }
+const dropExitReports = before => {
+  for (const listener of process.listeners('exit')) if (!before.includes(listener)) process.removeListener('exit', listener)
+  delete globalThis[Symbol.for('agent-board.opencode-open-sessions')]
+}
 
 test('SDK metadata and reporter execution share one deadline without a late write', () => fixture(async f => {
   const { home, env, root } = f
@@ -1988,6 +1991,19 @@ test('a status hook other than OpenCode keeps its agent heading when its payload
 // session goes idle, no session.deleted comes, and the process exits. Each board call is logged
 // with the session and state it reports, and each report made while exiting with its folder;
 // `hang` makes the calls made while exiting hang.
+// Applies what the worker queued (REPORTER_QUEUED): each board run replays the queue first (#241),
+// and a run that itself runs out of time queues its own event, so it runs until the queue is
+// empty, five times at most.
+const settleQueue = home => {
+  const root = join(home, '.agent-board'), pending = join(root, 'pending')
+  for (let count = 0; count < 5 && existsSync(pending) && readdirSync(pending).some(name => name.endsWith('.json')); count++) {
+    const result = spawnSync(process.execPath, [join(root, 'agent-board.mjs'), '--agent-status', '--agent', 'opencode', '--progress-file', join(root, 'progress.md'), '--home', home], { env: isolatedEnv(home), input: JSON.stringify({ session_id: 'synthetic-settle', state: 'waiting' }), encoding: 'utf8', windowsHide: true, timeout: 30000 })
+    assert.equal(result.status, 0, result.stderr)
+  }
+  assert.ok(!existsSync(pending) || !readdirSync(pending).some(name => name.endsWith('.json')), 'queued events were not all applied')
+}
+// Every event reached the board: nothing failed or was given up on, and what was queued was applied.
+const assertNothingLost = log => assert.deepEqual((existsSync(log) ? readFileSync(log, 'utf8') : '').split(/\r?\n/).filter(line => line !== '' && !/ opencode REPORTER_QUEUED$/.test(line)), [])
 const opencodeOneShot = (home, mode, scenario = 'default') => {
   const source = readFileSync(join(home, '.config', 'opencode', 'plugins', 'agent-board-local.js'), 'utf8')
   const stub = 'const tool = Object.assign(value => value, { schema: { string: () => ({ describe: () => ({}) }), enum: () => ({}), array: () => ({}) } })'
@@ -2009,17 +2025,27 @@ const spawnSync = (file, args, options) => {
   return realSpawnSync(file, args, options)
 }`
   const plugin = join(home, `one-shot-plugin-${mode}-${scenario}.mjs`), main = join(home, `one-shot-${mode}-${scenario}.mjs`)
+  const copy = join(home, `one-shot-plugin-${mode}-${scenario}-copy.mjs`)
   writeFileSync(plugin, source.replace("import { tool } from '@opencode-ai/plugin'", stub).replace("import { spawnSync } from 'node:child_process'", spawnStub))
+  writeFileSync(copy, readFileSync(plugin))
   // Exit listeners run in order, so the ones around the plugin's own time its exit work.
   writeFileSync(main, `import { writeFileSync } from 'node:fs'
 const marks = {}
 process.on('exit', () => { marks.start = Date.now(); globalThis.isExiting = true })
 const { AgentBoardLocal } = await import(${JSON.stringify(pathToFileURL(plugin).href)})
 process.on('exit', () => { marks.end = Date.now(); writeFileSync(${JSON.stringify(marks)}, JSON.stringify(marks)) })
-let gets = 0
+let gets = 0, release = () => {}
 const isStalled = ${JSON.stringify(scenario)} === 'stalled'
-const get = ({ path }) => isStalled && gets++ > 0 ? new Promise(() => {}) : Promise.resolve({ data: { id: path.id, ...(path.id === 'synthetic-subagent' ? { parentID: 'synthetic-one-shot' } : {}) } })
-const hooks = await AgentBoardLocal({ directory: ${JSON.stringify(join(tmpdir(), 'synthetic-one-shot-folder'))}, client: { session: { get } } })
+const holdAt = { 'late-chat': 0, 'second-chat': 2 }[${JSON.stringify(scenario)}] ?? -1
+const held = holdAt >= 0 ? new Promise(resolve => { release = resolve }) : null
+const data = path => ({ data: { id: path.id, ...(path.id === 'synthetic-subagent' ? { parentID: 'synthetic-one-shot' } : {}) } })
+const get = ({ path }) => {
+  const call = gets++
+  if (isStalled && call > 0) return new Promise(() => {})
+  return held && call === holdAt ? held.then(() => data(path)) : Promise.resolve(data(path))
+}
+const directory = ${JSON.stringify(join(tmpdir(), 'synthetic-one-shot-folder'))}
+const hooks = await AgentBoardLocal({ directory, client: { session: { get } } })
 if (${JSON.stringify(scenario)} === 'chat') {
   await hooks['chat.message']({ sessionID: 'synthetic-one-shot' }, { parts: [{ type: 'text', text: 'Synthetic prompt' }] })
 } else if (${JSON.stringify(scenario)} === 'busy') {
@@ -2028,6 +2054,23 @@ if (${JSON.stringify(scenario)} === 'chat') {
   await hooks['chat.message']({ sessionID: 'synthetic-one-shot' }, { parts: [{ type: 'text', text: 'Synthetic prompt' }] })
   // The reply ends, and OpenCode exits while this event's lookup has not returned.
   hooks.event({ event: { type: 'session.idle', properties: { sessionID: 'synthetic-one-shot' } } })
+} else if (${JSON.stringify(scenario)} === 'second-chat') {
+  // A reply ends, the next prompt starts another, and OpenCode exits before that prompt's lookup returns.
+  await hooks['chat.message']({ sessionID: 'synthetic-one-shot' }, { parts: [{ type: 'text', text: 'Synthetic prompt' }] })
+  await hooks.event({ event: { type: 'session.idle', properties: { sessionID: 'synthetic-one-shot' } } })
+  hooks['chat.message']({ sessionID: 'synthetic-one-shot' }, { parts: [{ type: 'text', text: 'Synthetic prompt' }] })
+} else if (${JSON.stringify(scenario)} === 'late-chat') {
+  // The reply ends, and its idle event is reported, before the prompt's own lookup returns.
+  const chat = hooks['chat.message']({ sessionID: 'synthetic-one-shot' }, { parts: [{ type: 'text', text: 'Synthetic prompt' }] })
+  await hooks.event({ event: { type: 'session.idle', properties: { sessionID: 'synthetic-one-shot' } } })
+  release()
+  await chat
+} else if (${JSON.stringify(scenario)} === 'twice') {
+  // OpenCode loads the plugin a second time in the same process; both copies see the session.
+  const again = await (await import(${JSON.stringify(pathToFileURL(copy).href)})).AgentBoardLocal({ directory, client: { session: { get } } })
+  await hooks['chat.message']({ sessionID: 'synthetic-one-shot' }, { parts: [{ type: 'text', text: 'Synthetic prompt' }] })
+  await hooks.event({ event: { type: 'session.idle', properties: { sessionID: 'synthetic-one-shot' } } })
+  await again.event({ event: { type: 'session.idle', properties: { sessionID: 'synthetic-one-shot' } } })
 } else {
 await hooks['chat.message']({ sessionID: 'synthetic-one-shot' }, { parts: [{ type: 'text', text: 'Synthetic prompt' }] })
 await hooks.event({ event: { type: 'session.idle', properties: { sessionID: 'synthetic-one-shot' } } })
@@ -2043,13 +2086,17 @@ await hooks.event({ event: { type: 'session.deleted', properties: { info: { id: 
 `)
   const result = spawnSync(process.execPath, [main], { env: isolatedEnv(home), encoding: 'utf8', windowsHide: true, timeout: 30000 })
   assert.equal(result.status, 0, result.stderr)
+  if (mode === 'real') settleQueue(home)
   const lines = file => readFileSync(file, 'utf8').split('\n').filter(Boolean).map(line => JSON.parse(line))
   return { calls: lines(calls), exitFolders: lines(exits), marks: JSON.parse(readFileSync(marks, 'utf8')) }
 }
-// A loaded machine can push a report past the 2 s hook limit, where the worker queues or logs it
-// by design (#241). A check that fails after such a report runs again in a fresh home, up to three
-// times in all; any other failure fails at once.
-const opencodeOneShotHome = async (t, check) => {
+// A loaded machine can push a report past the worker's 2 s limit (#241). An event the worker queued
+// is applied by settleQueue before a real-mode check reads the board. A report given up on
+// (REPORTER_TIMEOUT) is lost: a check that fails after one runs again in a fresh home, three times
+// in all, and each retry is named. `retry` says which log shows such a loss; the hang and fail
+// scenarios log theirs by design and never retry.
+const LOST = text => /opencode REPORTER_TIMEOUT/.test(text)
+const opencodeOneShotHome = async (t, check, { retry = LOST } = {}) => {
   for (let attempt = 1; ; attempt++) {
     const home = mkdtempSync(join(tmpdir(), 'opencode-one-shot-'))
     const log = join(home, '.agent-board', 'hook-errors.log')
@@ -2058,7 +2105,7 @@ const opencodeOneShotHome = async (t, check) => {
       assert.equal(installed.status, 0, installed.stderr)
       return await check(home, join(home, '.agent-board', 'progress.md'), log)
     } catch (error) {
-      if (attempt === 3 || !existsSync(log) || !/opencode REPORTER_(?:TIMEOUT|QUEUED)/.test(readFileSync(log, 'utf8'))) throw error
+      if (!retry || attempt === 3 || !existsSync(log) || !retry(readFileSync(log, 'utf8'))) throw error
       // Each retry is named in the test output, so a regression that only sometimes misses the
       // limit still shows.
       t.diagnostic(`one-shot retry ${attempt}: ${String(error?.message).split('\n')[0]}`)
@@ -2084,7 +2131,7 @@ test('opencode: a one-shot run ends its session when OpenCode exits', t => openc
   assert.equal(oneShotState(text, 'synthetic-closed'), 'ended', text)
   assert.match(text, /^## synthetic-one-shot-folder\r?$/m)
   assert.ok(!text.includes('synthetic-subagent') && !text.includes('Synthetic prompt'), text)
-  assert.equal(existsSync(log) ? readFileSync(log, 'utf8') : '', '')
+  assertNothingLost(log)
 }))
 
 test('opencode: ending sessions at exit stops at the hook limit when the board hangs', t => opencodeOneShotHome(t, async (home, progress, log) => {
@@ -2095,7 +2142,7 @@ test('opencode: ending sessions at exit stops at the hook limit when the board h
   assert.ok(spent >= 2000 && spent < 3500, `exit took ${spent} ms`)
   assert.equal(oneShotState(readFileSync(progress, 'utf8'), 'synthetic-one-shot'), 'waiting')
   assert.match(readFileSync(log, 'utf8'), /opencode REPORTER_TIMEOUT/)
-}))
+}, { retry: false }))
 
 test('opencode: two sessions in one process both end within one shared deadline', async t => {
   for (const mode of ['real', 'hang']) await opencodeOneShotHome(t, async (home, progress, log) => {
@@ -2105,7 +2152,7 @@ test('opencode: two sessions in one process both end within one shared deadline'
     if (mode === 'real') {
       assert.deepEqual(exiting, ['synthetic-one-shot', 'synthetic-second'].map(session => ({ session, state: 'ended', isExiting: true })))
       for (const session of ['synthetic-one-shot', 'synthetic-second']) assert.equal(oneShotState(text, session), 'ended', text)
-      assert.equal(existsSync(log) ? readFileSync(log, 'utf8') : '', '')
+      assertNothingLost(log)
     } else {
       assert.deepEqual(exiting, [{ session: 'synthetic-one-shot', state: 'ended', isExiting: true }])
       assert.equal(readFileSync(log, 'utf8').match(/opencode REPORTER_TIMEOUT/g)?.length, 2)
@@ -2113,7 +2160,7 @@ test('opencode: two sessions in one process both end within one shared deadline'
       assert.ok(spent >= 2000 && spent < 3500, `exit took ${spent} ms`)
       for (const session of ['synthetic-one-shot', 'synthetic-second']) assert.equal(oneShotState(text, session), 'waiting', text)
     }
-  })
+  }, { retry: mode === 'real' && LOST })
 })
 
 test('opencode: a reporter that fails while OpenCode exits is logged and does not hold the exit', t => opencodeOneShotHome(t, async (home, progress, log) => {
@@ -2123,7 +2170,7 @@ test('opencode: a reporter that fails while OpenCode exits is logged and does no
   const spent = run.marks.end - run.marks.start
   assert.ok(spent < 1000, `exit took ${spent} ms`)
   for (const session of ['synthetic-one-shot', 'synthetic-second']) assert.equal(oneShotState(readFileSync(progress, 'utf8'), session), 'waiting')
-}))
+}, { retry: false }))
 
 test('opencode: a session still replying when OpenCode exits is not ended', t => opencodeOneShotHome(t, async (home, progress, log) => {
   const run = opencodeOneShot(home, 'real', 'replying')
@@ -2131,15 +2178,39 @@ test('opencode: a session still replying when OpenCode exits is not ended', t =>
   const text = readFileSync(progress, 'utf8')
   assert.equal(oneShotState(text, 'synthetic-one-shot'), 'ended', text)
   assert.equal(oneShotState(text, 'synthetic-second'), 'working', text)
-  assert.equal(existsSync(log) ? readFileSync(log, 'utf8') : '', '')
+  assertNothingLost(log)
 }))
 
 test('opencode: a session whose reply ended while its lookup was pending is ended at exit', t => opencodeOneShotHome(t, async (home, progress, log) => {
   const run = opencodeOneShot(home, 'real', 'stalled')
   assert.deepEqual(run.calls, [{ session: 'synthetic-one-shot', state: 'working', isExiting: false }, { session: 'synthetic-one-shot', state: 'ended', isExiting: true }])
   assert.equal(oneShotState(readFileSync(progress, 'utf8'), 'synthetic-one-shot'), 'ended')
-  // Only the lookup that never returned is logged.
+  // Only the lookup that never returned is given up on.
   assert.equal(readFileSync(log, 'utf8').match(/opencode REPORTER_TIMEOUT/g)?.length, 1)
+}, { retry: text => (text.match(/opencode REPORTER_TIMEOUT/g) ?? []).length > 1 }))
+
+test('opencode: a prompt whose lookup returns after its reply ended is still ended at exit', t => opencodeOneShotHome(t, async (home, progress, log) => {
+  const run = opencodeOneShot(home, 'real', 'late-chat')
+  assert.deepEqual(run.calls, [{ session: 'synthetic-one-shot', state: 'waiting', isExiting: false }, { session: 'synthetic-one-shot', state: 'working', isExiting: false }, { session: 'synthetic-one-shot', state: 'ended', isExiting: true }])
+  assert.equal(oneShotState(readFileSync(progress, 'utf8'), 'synthetic-one-shot'), 'ended')
+  assertNothingLost(log)
+}))
+
+test('opencode: a session whose next prompt is still being looked up at exit is not ended', t => opencodeOneShotHome(t, async (home, progress, log) => {
+  const run = opencodeOneShot(home, 'real', 'second-chat')
+  assert.deepEqual(run.calls.filter(call => call.isExiting), [])
+  assert.equal(oneShotState(readFileSync(progress, 'utf8'), 'synthetic-one-shot'), 'waiting')
+  // Only the prompt whose lookup never returned is given up on.
+  const lines = readFileSync(log, 'utf8').split(/\r?\n/).filter(line => line !== '' && !/ opencode REPORTER_QUEUED$/.test(line))
+  assert.equal(lines.length, 1, lines.join('\n'))
+  assert.match(lines[0], / opencode REPORTER_TIMEOUT$/)
+}, { retry: text => (text.match(/opencode REPORTER_TIMEOUT/g) ?? []).length > 1 }))
+
+test('opencode: a plugin loaded twice in one process ends each session once at exit', t => opencodeOneShotHome(t, async (home, progress, log) => {
+  const run = opencodeOneShot(home, 'real', 'twice')
+  assert.deepEqual(run.calls.filter(call => call.isExiting), [{ session: 'synthetic-one-shot', state: 'ended', isExiting: true }])
+  assert.equal(oneShotState(readFileSync(progress, 'utf8'), 'synthetic-one-shot'), 'ended')
+  assertNothingLost(log)
 }))
 
 test('opencode: a later report for an ended session reopens its row', t => opencodeOneShotHome(t, async (home, progress, log) => {
@@ -2150,13 +2221,17 @@ test('opencode: a later report for an ended session reopens its row', t => openc
     assert.deepEqual(run.calls, [{ session: 'synthetic-one-shot', state: 'working', isExiting: false }])
     assert.equal(oneShotState(readFileSync(progress, 'utf8'), 'synthetic-one-shot'), 'working')
   }
-  assert.equal(existsSync(log) ? readFileSync(log, 'utf8') : '', '')
+  assertNothingLost(log)
 }))
 
 test('opencode: a refused progress report tells the model why', async () => {
   // A Chinese board brackets the code in full-width parentheses; the same code comes through.
   for (const lang of ['en', 'zh-TW', 'zh-CN']) await opencodeSpawnFixture(opencodeRealSpawn, async f => {
     assert.ok(readFileSync(join(dirname(f.progress), 'agent-board.mjs'), 'utf8').split('\n', 1)[0].includes(`"lang":"${lang}"`), lang)
+    // The step format the model reads is in the board's language and names every mark.
+    const plugin = readFileSync(join(dirname(dirname(f.progress)), '.config', 'opencode', 'plugins', 'agent-board-local.js'), 'utf8')
+    const format = plugin.slice(plugin.indexOf({ en: 'One Markdown task line', 'zh-TW': '一行 Markdown 任務', 'zh-CN': '一行 Markdown 任务' }[lang])).split(')', 1)[0]
+    for (const mark of ['x', '~', ' ', '?', '!', '>', '-']) assert.ok(format.includes(`- [${mark}]`), `${lang} ${mark}`)
     await assert.rejects(f.instance.tool.agent_board_progress.execute({ ...f.payload, title: 'Synthetic refused task', steps: ['Synthetic plain step'] }, f.context), { message: 'AGENT_BOARD_REPORT_FAILED: INVALID_STEP' })
     assert.ok(!readFileSync(f.progress, 'utf8').includes('Synthetic refused task'))
     assert.match(readFileSync(f.log, 'utf8'), /opencode REPORTER_FAILED INVALID_STEP\r?\n/)
@@ -3576,6 +3651,19 @@ test('antigravity connect: where setup-agent hooked Antigravity first, the conne
   const agent = JSON.parse(status.stdout).state.setup.agents.find(one => one.agent === 'antigravity')
   assert.ok(agent)
   assert.notEqual(agent.hook, 'failed')
+}))
+
+test("antigravity: setup-agent takes over the connect's skill for a progress file outside the default folder", () => fixture(async f => {
+  mkdirSync(join(f.home, '.gemini', 'antigravity'), { recursive: true })
+  const progress = join(f.home, 'synthetic-progress-folder', 'progress.md')
+  mkdirSync(dirname(progress), { recursive: true })
+  legacyConnect(f, progress)
+  const skill = join(f.home, '.gemini', 'config', 'skills', 'agent-board', 'SKILL.md')
+  assert.ok(readFileSync(skill, 'utf8').includes('synthetic-progress-folder'))
+  const installed = f.install('--agent', 'antigravity', '--apply')
+  assert.equal(installed.status, 0, installed.stderr + installed.stdout)
+  assert.ok(!(installed.stderr + installed.stdout).includes('INSTALL_CONFLICT'))
+  assert.equal(readFileSync(skill, 'utf8'), readFileSync(f.skill, 'utf8'))
 }))
 
 test('antigravity: setup-agent preserves third-party hook bytes through install and removal', () => fixture(async f => {
