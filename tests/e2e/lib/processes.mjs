@@ -54,13 +54,14 @@ export const processList = async ({ spawnIsolated, world, timeoutMs = 60000 }) =
   return { list, lister: pid }
 }
 
+// A target that exits by itself between lookup and Terminate is skipped; stopTree's second list still reports survivors.
 export const killChecked = async ({ spawnIsolated, world, targets, timeoutMs = 20000 }) => {
   const sent = []
   const deadline = Date.now() + timeoutMs
   if (process.platform === 'win32') {
     const pairs = targets.filter(one => Number.isSafeInteger(one.pid) && Number.isSafeInteger(one.started)).map(one => [one.pid, one.started])
     if (pairs.length > 0) {
-      const command = `[Console]::OutputEncoding = [Text.Encoding]::UTF8; $ErrorActionPreference = "Stop"; $targets = ConvertFrom-Json '${JSON.stringify({ pairs })}'; $stopped = @(foreach ($pair in $targets.pairs) { Get-CimInstance Win32_Process -Filter ("ProcessId=" + $pair[0]) | ForEach-Object { if ($null -ne $_.CreationDate -and ([DateTimeOffset]$_.CreationDate).ToUnixTimeMilliseconds() -eq $pair[1]) { $result = Invoke-CimMethod -InputObject $_ -MethodName Terminate; if ($result.ReturnValue -eq 0) { $pair[0] } } } }); ConvertTo-Json -InputObject $stopped -Compress`
+      const command = `[Console]::OutputEncoding = [Text.Encoding]::UTF8; $ErrorActionPreference = "Stop"; $targets = ConvertFrom-Json '${JSON.stringify({ pairs })}'; $stopped = @(foreach ($pair in $targets.pairs) { Get-CimInstance Win32_Process -Filter ("ProcessId=" + $pair[0]) | ForEach-Object { if ($null -ne $_.CreationDate -and ([DateTimeOffset]$_.CreationDate).ToUnixTimeMilliseconds() -eq $pair[1]) { try { $result = Invoke-CimMethod -InputObject $_ -MethodName Terminate; if ($result.ReturnValue -eq 0) { $pair[0] } } catch { } } } }); ConvertTo-Json -InputObject $stopped -Compress`
       const { stdout } = await processOutput({ spawnIsolated, world, file: 'powershell.exe', args: ['-NoProfile', '-NonInteractive', '-Command', command], timeoutMs: Math.max(1, deadline - Date.now()), problem: 'the process tree could not be stopped' })
       const killed = JSON.parse(stdout)
       if (!Array.isArray(killed) || !killed.every(pid => pairs.some(pair => pair[0] === pid))) throw new Error('the process tree returned invalid killed pids')
