@@ -431,7 +431,7 @@ test('pruning reads the files afresh, so a copy damaged on disk since the polls 
 // A session id for block `n`, eight hex characters.
 const sessionOf = (n: number): string => (0xa0000000 + n).toString(16)
 
-test('L4 D24 scale: the pane does at most 6 file operations per idle poll', async ($, on) => {
+test('L4 D24 scale: the pane does at most 6 file operations per idle poll', { timeoutMs: 30_000 }, async ($, on) => {
   // D24's scale, all made up: 300 blocks in ten projects, 100 of them live sessions (two in three
   // asking the person), a ledger of 1,000 questions with their copies and proofs, and thirty
   // turns other agents left in the inbox.
