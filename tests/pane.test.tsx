@@ -3994,7 +3994,7 @@ test('the question ledger is written to a temp file and moved into place, never 
 })
 
 test('the pane says when the question ledger cannot be read', async ($, on) => {
-  const world: World = { files: new Map([[FILE, '## demo\n### Release\n- [?] Publish, OK?\n']]), mtime: 1, hasTasks: true, store: { lang: 'en', autoConnectOff: true, inboxDone: {}, opened: ['waiting'] } }
+  const world: World = { files: new Map([[FILE, '## demo\n### Release\n- [?] Publish, OK?\n']]), mtime: 1, clockOffset: 0, hasTasks: true, store: { lang: 'en', autoConnectOff: true, inboxDone: {}, opened: ['waiting'] } }
   const clock = engineBeneath(on, world)
   await $.session.start({ cwd: '/work/demo', surface: 'desktop', isInteractive: true })
   await clock.advance(2100)
@@ -4005,6 +4005,7 @@ test('the pane says when the question ledger cannot be read', async ($, on) => {
   expect(await ui.find({ type: 'Text', text: EN.questionsUnreadable() })).toBeUndefined()
   await clock.advance(2100)
   expect(await ui.find({ type: 'Text', text: EN.questionsUnreadable() })).toBeUndefined()
+  world.clockOffset = 10 * 60 * 1000
   await clock.advance(2100)
   expect({ stage: 'three failures', visible: await ui.find({ type: 'Text', text: EN.questionsUnreadable() }) !== undefined }).toEqual({ stage: 'three failures', visible: true })
   world.files.delete(QUESTIONS)
@@ -4012,6 +4013,10 @@ test('the pane says when the question ledger cannot be read', async ($, on) => {
   expect(await ui.find({ type: 'Text', text: EN.questionsUnreadable() })).toBeUndefined()
   world.files.set(QUESTIONS, '{')
   world.isMoveRefused = path => path.startsWith(`${QUESTIONS}.tmp-`)
+  await clock.advance(2100)
+  expect(await ui.find({ type: 'Text', text: EN.questionsUnreadable() })).toBeUndefined()
+  await clock.advance(2100)
+  world.clockOffset += 10 * 60 * 1000
   await clock.advance(2100)
   expect({ stage: 'quarantined but replacement failed', visible: await ui.find({ type: 'Text', text: EN.questionsUnreadable() }) !== undefined }).toEqual({ stage: 'quarantined but replacement failed', visible: true })
   world.isMoveRefused = undefined
@@ -6126,7 +6131,7 @@ test('a question that could not be kept is kept on a later poll once the questio
 })
 
 test('a question file that cannot be read shows one line at once instead of retrying the turn for hours', async ($, on) => {
-  const world = pendingQuestionWorld()
+  const world = { ...pendingQuestionWorld(), clockOffset: 0 }
   const clock = engineBeneath(on, world)
   const seen = outside(on, world)
   await $.session.start({ cwd: '/work/demo', surface: 'desktop', isInteractive: true })
@@ -6146,8 +6151,12 @@ test('a question file that cannot be read shows one line at once instead of retr
   await clock.advance(4000)
   expect(seen.notified).toEqual(notifications)
   expect(await ui.find({ type: 'Text', text: line })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: EN.questionsUnreadable() })).toBeUndefined()
+  world.clockOffset = 10 * 60 * 1000
+  await clock.advance(2000)
   expect(await ui.find({ type: 'Text', text: EN.questionsUnreadable() })).toBeDefined()
   world.isMoveRefused = undefined
+  world.clockOffset = 0
   await clock.advance(2000)
   expect(await ui.find({ type: 'Text', text: line })).toBeUndefined()
   await ui.unmount()

@@ -91,6 +91,9 @@ export type ProgressTask = {
 export type ProgressProject = { name: string; tasks: ProgressTask[] }
 
 export type ProgressTail = { offset: number; tasks: number; close: string | null }
+// A block with no end marker in progress.md: its first line (counted from 1), its project, session, and
+// its start marker's `agent=` (or '') and `updated=` (epoch ms, or null), for the health line.
+export type CutBlock = { line: number; project: string; session: string; agent: string; updated: number | null }
 
 export type ProgressSnapshot = {
   path: string
@@ -100,6 +103,8 @@ export type ProgressSnapshot = {
   size: number
   projects: ProgressProject[]
   tornTail?: ProgressTail | null
+  cutBlocks?: CutBlock[]
+  cutSpans?: CutBlock[]
 }
 
 // One task of Claude's own list (TaskCreate / TaskUpdate / TodoWrite), as the mod mirrors it.

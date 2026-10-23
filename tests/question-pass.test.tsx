@@ -42,6 +42,9 @@ test('a question pass over 1,000 open questions and 5,600 copies works out the c
   const ids = (disposition: QuestionCapture['disposition']): string[] => copies.filter(copy => copy.disposition === disposition).map(copy => copy.record.id)
   expect(ids('unresolved')).toEqual(open.filter((_, n) => n % 2 === 0 && (n >= 200 || n % 10 === 0)).map(record => record.id))
   expect(ids('resolved')).toEqual(open.filter((_, n) => n % 2 === 1).map(record => record.id))
+  // An answered copy already among the files is not written again (#414).
+  const onDisk = copies.filter(copy => copy.disposition === 'resolved').slice(0, 10).map(copy => ({ version: 1 as const, disposition: 'resolved' as const, record: copy.record }))
+  expect(copiesToKeep(current, observed, [...captures, ...onDisk]).filter(copy => copy.disposition === 'resolved').map(copy => copy.record.id)).toEqual(ids('resolved').slice(10))
   expect(retired).toEqual(open.filter((_, n) => n % 10 === 0).map(record => record.id))
   // A question whose retirement proof is already kept is left out.
   const proven = retired.slice(0, 40).map(id => sha256(id))

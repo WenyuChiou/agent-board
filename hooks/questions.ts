@@ -1,7 +1,7 @@
-import type { ProgressMirror, ProgressProject, QuestionLedger, QuestionProofs, QuestionRecord, QuestionSource } from '../types'
+import type { CutBlock, ProgressMirror, ProgressProject, QuestionLedger, QuestionProofs, QuestionRecord, QuestionSource } from '../types'
 import type { PendingTurn } from './board'
 import type { AgentTurn } from './inbox'
-import { scanBlocks, shortId, stepWords } from './blocks'
+import { cutOffTest, scanBlocks, shortId, stepWords } from './blocks'
 import { questionToken, waitsOnYou } from './mirror'
 import { sha256 } from './sha256'
 import type { TaskRef } from './view'
@@ -18,7 +18,26 @@ export const questionScope = (project: string, agent: string, session: string): 
 export const questionSlot = (scope: string, index: number | string): string => JSON.stringify([scope, index])
 export const pendingQuestionSlot = (scope: string, text: string): string => questionSlot(scope, `inbox:${questionWords(text)}`)
 export const migrationKey = (legacy: string): string => `question-migrated:${sha256(legacy)}`
-export const isQuestionSnapshot = (text: string): boolean => scanBlocks(text.split(/\r?\n/)).every(span => span.isClosed)
+// A board read halfway through a write ends in a block with no end marker. One cut off in the
+// middle of the file is not being written, so it does not hold the questions back (`cutOffTest`).
+export const isQuestionSnapshot = (text: string, isSettled = false): boolean => {
+  const lines = text.split(/\r?\n/)
+  const isCutOff = cutOffTest(lines, isSettled)
+
+  return scanBlocks(lines).every(span => span.isClosed || isCutOff(span))
+}
+// The question scopes of blocks cut off in the middle of the file. What a write left half done is
+// neither read as questions nor taken as their removal or answer: their records stay as they were
+// until the block has its end marker again, so a question cut out of it is not asked anew.
+// A block cut right after its marker has no parsed task, so its scope comes from the cut span.
+export const cutOffScopes = (projects: readonly ProgressProject[], cut: readonly CutBlock[]): Set<string> => {
+  const sessions = new Set(cut.map(one => one.session))
+
+  return new Set([
+    ...cut.map(one => questionScope(one.project, one.agent.toLowerCase(), one.session)),
+    ...projects.flatMap(project => project.tasks.flatMap(task => task.auto !== null && sessions.has(task.auto.session) ? [questionScope(project.name, task.auto.agent, task.auto.session)] : [])),
+  ])
+}
 export const archiveQuestionsKept = (projects: readonly ProgressProject[], ref: TaskRef, ledger: QuestionLedger): boolean => {
   const tasks = projects.filter(project => project.name === ref.project).flatMap(project => project.tasks).filter(task => ref.session === null ? task.title === ref.title : task.auto?.session === ref.session)
   if (tasks.length !== 1) return false
@@ -156,7 +175,7 @@ export const copiesToKeep = (current: QuestionLedger, observed: QuestionLedger, 
     if (record.source === undefined) return []
     const kept: { record: QuestionRecord; disposition: 'unresolved' | 'resolved' }[] = []
     if (record.isUnresolved && !held.has(captureJson(record, 'unresolved'))) kept.push({ record, disposition: 'unresolved' })
-    if (record.isUnresolved === false && openIds.has(record.id)) kept.push({ record, disposition: 'resolved' })
+    if (record.isUnresolved === false && openIds.has(record.id) && !held.has(captureJson(record, 'resolved'))) kept.push({ record, disposition: 'resolved' })
     return kept
   })
 }
@@ -259,9 +278,55 @@ export const prunableProofs = (ledger: QuestionLedger, captures: readonly Questi
   return (['retired', 'consumed'] as const).flatMap(kind => newestFirst(held.filter(one => one.kind === kind)).slice(keep).filter(one => !known.has(one.hash)))
 }
 
+// What a torn ledger or a cut-off write leaves beside the ledger, and nothing else removes
+// (#156): a torn ledger moved aside (`.torn-<time>-<who>`), kept to look into, and a temporary
+// copy of a write that a crash or a failed clean-up left (`.tmp-<session>-<n>` from the pane,
+// `.<pid>.<time>.board-tmp` from the board script). The torn files past the newest `keepTorn`, by
+// the time in their names (in milliseconds; a name moved aside by hand, such as `.torn-2026-10-19`,
+// by the file's own time), and
+// any over a week old, so a few left from one bad day do not stay for good; and the temporary
+// copies over a day old. The caller removes a torn file only when it still holds torn text, and a
+// temporary copy only while the ledger itself reads: with no ledger, a temporary copy may be the
+// only complete one.
+export const LEDGER_TORN_KEPT = 3
+export const LEDGER_TORN_MS = 7 * 24 * 60 * 60 * 1000
+export const LEDGER_TEMP_MS = 24 * 60 * 60 * 1000
+export const ledgerLeftovers = (path: string, entries: ReadonlyArray<{ name: string; mtimeMs: number }>, now: number, keepTorn = LEDGER_TORN_KEPT): { torn: string[]; temps: string[] } => {
+  const ledger = questionsPath(path).replace(/^.*[\\/]/, '')
+  const tornAt = (entry: { name: string; mtimeMs: number }): number => Number(/^\.torn-(\d{12,})-/.exec(entry.name.slice(ledger.length))?.[1] ?? entry.mtimeMs)
+  const torn = entries
+    .filter(entry => entry.name.startsWith(`${ledger}.torn-`))
+    .sort((a, b) => tornAt(b) - tornAt(a) || (a.name < b.name ? -1 : 1))
+    .filter((entry, index) => index >= keepTorn || now - tornAt(entry) > LEDGER_TORN_MS)
+  const isTemp = (name: string): boolean => name.startsWith(`${ledger}.tmp-`) || (name.startsWith(`${ledger}.`) && name.endsWith('.board-tmp'))
+  const temps = entries.filter(entry => isTemp(entry.name) && now - entry.mtimeMs > LEDGER_TEMP_MS)
+
+  return { torn: torn.map(entry => entry.name), temps: temps.map(entry => entry.name) }
+}
+
+// What an idle question pass reads from the folder beside progress.md (#156): progress.md, the
+// ledger, the answered file, the copies and the proofs, by name, size and time, in name order.
+// Null while one of them is younger than `freshMs`: a second write in the same second can keep
+// both its size and a whole-second time, so it would look unchanged.
+export const questionFilesKey = (
+  path: string,
+  answered: string,
+  entries: ReadonlyArray<{ name: string; size: number; mtimeMs: number }>,
+  now: number,
+  freshMs: number,
+): Array<readonly [string, number, number]> | null => {
+  const names = [path, questionsPath(path), answered].map(file => file.replace(/^.*[\\/]/, ''))
+  const files = entries
+    .filter(entry => names.includes(entry.name) || captureHashOf(path, entry.name) !== null || questionProofOf(path, entry.name) !== null)
+    .map(entry => [entry.name, entry.size, entry.mtimeMs] as const)
+    .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+
+  return files.some(([, , mtimeMs]) => now - mtimeMs < freshMs) ? null : files
+}
+
 type Observation = { scope: string; session: string; index: number | string; text: string; isWaiting: boolean; producer: string; producerRevisions?: string[]; producerSources?: string[]; source: QuestionSource }
 
-const observations = (projects: readonly ProgressProject[], mine: ProgressMirror | null, pending: readonly PendingTurn[]): Observation[] => {
+const observations = (projects: readonly ProgressProject[], mine: ProgressMirror | null, pending: readonly PendingTurn[], frozen: ReadonlySet<string> = new Set()): Observation[] => {
   const own = mine === null ? '' : shortId(mine.sessionId)
   const rows: Observation[] = []
   const scopes = new Set<string>()
@@ -270,6 +335,7 @@ const observations = (projects: readonly ProgressProject[], mine: ProgressMirror
     for (const task of project.tasks) {
       if (mine !== null && task.auto?.session === own) continue
       const scope = questionScope(project.name, task.auto?.agent ?? 'manual', task.auto?.session ?? task.title)
+      if (frozen.has(scope)) continue
       if (scopes.has(scope)) ambiguous.add(scope)
       scopes.add(scope)
       // The task's background and its copy as data are the same for each of its steps, so they
@@ -286,6 +352,7 @@ const observations = (projects: readonly ProgressProject[], mine: ProgressMirror
   for (const turn of pending) {
     if (!turn.isQuestion || turn.id === undefined) continue
     const scope = questionScope(turn.project, turn.agent, turn.id)
+    if (frozen.has(scope)) continue
     const matching = rows.filter(row => row.isWaiting && row.scope === scope && questionWords(row.text) === questionWords(turn.text))
     if (matching.length === 1 && matching[0] !== undefined) {
       const row = matching[0]
@@ -307,14 +374,14 @@ const observations = (projects: readonly ProgressProject[], mine: ProgressMirror
 
 // Seeing the source without its question ends a no-token resolution's lifetime.
 // A missing source alone cannot prove that an unchanged question was renewed.
-export const resolvedQuestionsToRetire = (ledger: QuestionLedger, projects: readonly ProgressProject[], mine: ProgressMirror | null, pending: readonly PendingTurn[]): string[] => {
-  const seen = observations(projects, mine, pending)
+export const resolvedQuestionsToRetire = (ledger: QuestionLedger, projects: readonly ProgressProject[], mine: ProgressMirror | null, pending: readonly PendingTurn[], frozen: ReadonlySet<string> = new Set()): string[] => {
+  const seen = observations(projects, mine, pending, frozen)
   const scopes = new Set([
     ...projects.flatMap(project => project.tasks.map(task => questionScope(project.name, task.auto?.agent ?? 'manual', task.auto?.session ?? task.title))),
     ...(mine === null ? [] : [questionScope(mine.project, 'claude', shortId(mine.sessionId))]),
     ...seen.map(row => row.scope),
   ])
-  return ledger.records.filter(record => record.resolvedAt !== undefined && scopes.has(record.scope) && !seen.some(row => row.scope === record.scope && row.isWaiting && questionWords(row.text) === record.words)).map(record => record.id)
+  return ledger.records.filter(record => record.resolvedAt !== undefined && scopes.has(record.scope) && !frozen.has(record.scope) && !seen.some(row => row.scope === record.scope && row.isWaiting && questionWords(row.text) === record.words)).map(record => record.id)
 }
 
 // Words identify candidates, not questions. A durable sequence identifies each incarnation;
@@ -331,6 +398,7 @@ export const observeQuestions = (
   proofs: QuestionProofs = { retired: [], consumed: [] },
   pending: readonly PendingTurn[] = [],
   answeredTurns: readonly (AgentTurn | QuestionAnswerEvidence)[] = [],
+  frozen: ReadonlySet<string> = new Set(),
 ): { ledger: QuestionLedger; keys: Record<string, string>; marked: string[] } => {
   const records = ledger.records.map(row => ({ ...row }))
   for (const record of records) {
@@ -347,7 +415,7 @@ export const observeQuestions = (
   }
   // Producer receipts and an explicit resolution suppress only the resolved incarnation.
   // A new file/content revision can still prove a fresh ask without changing its words.
-  const seen = observations(projects, mine, pending)
+  const seen = observations(projects, mine, pending, frozen)
   // Each row's copies (the rows of its scope with the same words, in order), indexed once:
   // comparing every row with every other took seconds on a board of a few thousand steps (#371).
   const copyKey = (row: Observation): string => JSON.stringify([row.scope, questionWords(row.text)])
@@ -451,7 +519,7 @@ export const observeQuestions = (
   }
   if (isSettled) {
     for (const record of records) {
-      if (!assigned.has(record.id)) {
+      if (!assigned.has(record.id) && !frozen.has(record.scope)) {
         // End, cleanup and disconnection are not evidence that this exact ask was answered.
         if (record.source?.kind === 'inbox' && record.isUnresolved) continue
         record.isPresent = false
