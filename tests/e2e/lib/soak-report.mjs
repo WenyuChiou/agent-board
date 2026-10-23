@@ -116,6 +116,19 @@ export const leftoverProcesses = ({ list, self, roots, exclude = [] }) => {
   return list.filter(one => one.pid !== self && !isExcluded(one) && (descends(one.pid, self) || patterns.some(pattern => commandText(one.command).search(pattern) !== -1)))
 }
 
+export const leftoverPlan = ({ list, self, since, roots, exclude = [] }) => {
+  const left = leftoverProcesses({ list, self, roots, exclude })
+  const descendants = new Set(leftoverProcesses({ list, self, roots: [], exclude }).map(one => one.pid))
+  // Path-only matches must start at or after self, or since when self has no start time, in this same list.
+  const started = list.find(one => one.pid === self)?.started ?? list.find(one => one.pid === since)?.started
+  const kill = [], keep = []
+  for (const one of left) {
+    if (descendants.has(one.pid) || started !== undefined && one.started !== undefined && one.started >= started) kill.push(one)
+    else keep.push(one)
+  }
+  return { kill, keep }
+}
+
 // The open issue marked on a hook load check, and whether it explains this outcome (#395). #241: on
 // a busy Windows machine a hook can run longer than the 3 s budget, and an event whose reporter runs
 // out of time is queued until a later hook applies it, so the page shows it late or never. Only that

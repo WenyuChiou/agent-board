@@ -5,7 +5,7 @@ import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { makeWorld } from './lib/world.mjs'
 import { spawnIsolated } from './lib/spawn.mjs'
-import { OUT_DEFAULT, archiveIntegrity, archiveProblems, fileOpsPerPoll, hookLoadMarker, leftoverProcesses, levelOutcome, makeRedact, median, parseArguments, peakRss, percentile, pruneRefusal, queuedSessions, redactDeep, tallyOf, writeReport } from './lib/soak-report.mjs'
+import { OUT_DEFAULT, archiveIntegrity, archiveProblems, fileOpsPerPoll, hookLoadMarker, leftoverPlan, leftoverProcesses, levelOutcome, makeRedact, median, parseArguments, peakRss, percentile, pruneRefusal, queuedSessions, redactDeep, tallyOf, writeReport } from './lib/soak-report.mjs'
 
 const soak = fileURLToPath(new URL('./soak.mjs', import.meta.url))
 
@@ -261,6 +261,32 @@ describe('L6 soak arguments', () => {
     assert.deepEqual(leftoverProcesses({ list: list.filter(one => one.pid !== 104).map(({ started, ...one }) => one), self: 100, roots: [world], exclude: [400] }).map(one => one.pid), [101, 102, 103, 200])
     // A parent chain that loops ends without hanging.
     assert.deepEqual(leftoverProcesses({ list: [{ pid: 7, ppid: 8, name: 'a', command: '' }, { pid: 8, ppid: 7, name: 'b', command: '' }], self: 100, roots: [] }), [])
+  })
+  test("L6 soak arguments: the leftover plan kills this run's descendants and its later path matches, and only reports a path match that started before the run", () => {
+    const world = '/tmp/agent-board-e2e-this-run'
+    const list = [
+      { pid: 100, ppid: 1, started: 1000, name: 'node', command: 'node hook-load.mjs' },
+      { pid: 101, ppid: 100, name: 'node', command: 'node child' },
+      { pid: 102, ppid: 101, started: 1002, name: 'node', command: 'node grandchild' },
+      { pid: 200, ppid: 4, started: 2000, name: 'node', command: `node ${world}/worker` },
+      { pid: 201, ppid: 4, started: 500, name: 'node', command: `node ${world}/worker` },
+      { pid: 202, ppid: 4, name: 'node', command: `node ${world}/worker` },
+      { pid: 300, ppid: 4, started: 2000, name: 'node', command: 'node /tmp/agent-board-e2e-another-run/worker' },
+    ]
+    const plan = leftoverPlan({ list, self: 100, roots: [world] })
+    assert.deepEqual(plan.kill, [list[1], list[2], list[3]])
+    assert.deepEqual(plan.keep, [list[4], list[5]])
+    const orphaned = leftoverPlan({ list, self: undefined, since: 100, roots: [world] })
+    assert.deepEqual(orphaned.kill, [list[3]])
+    assert.deepEqual(orphaned.keep, [list[4], list[5]])
+    const noStart = list.map(one => one.pid === 100 ? { ...one, started: undefined } : one)
+    assert.deepEqual(leftoverPlan({ list: noStart, self: 100, roots: [world] }), { kill: [noStart[1], noStart[2]], keep: [noStart[3], noStart[4], noStart[5]] })
+    assert.deepEqual(leftoverPlan({ list: [{ ...list[0], pid: 99 }, ...noStart], self: 100, since: 99, roots: [world] }), plan)
+    assert.deepEqual(leftoverPlan({ list: [{ ...list[0], pid: 99, started: 500 }, ...list], self: 100, since: 99, roots: [world] }), plan)
+    assert.deepEqual(leftoverPlan({ list, self: 999, since: 100, roots: [world] }), orphaned)
+    assert.deepEqual(leftoverPlan({ list, self: 100, roots: [world], exclude: [101, 200] }), { kill: [], keep: [list[4], list[5]] })
+    const sameStart = { ...list[3], started: 1000 }
+    assert.deepEqual(leftoverPlan({ list: [list[0], sameStart], self: 100, roots: [world] }), { kill: [sameStart], keep: [] })
   })
   test('L6 soak arguments: an orphaned PowerShell hook counts only when its encoded command names this world', () => {
     const world = String.raw`C:\Users\RUNNER~1\AppData\Local\Temp\agent-board-e2e-AbC123`

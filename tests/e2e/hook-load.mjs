@@ -4,8 +4,8 @@ import { homedir, tmpdir, userInfo } from 'node:os'
 import { join } from 'node:path'
 import { performance } from 'node:perf_hooks'
 import { fileURLToPath } from 'node:url'
-import { hookLoadMarker, leftoverProcesses, makeRedact, percentile, queuedSessions, redactDeep, tallyOf } from './lib/soak-report.mjs'
-import { processList, stopTree } from './lib/processes.mjs'
+import { hookLoadMarker, makeRedact, percentile, queuedSessions, redactDeep, tallyOf } from './lib/soak-report.mjs'
+import { stopTree } from './lib/processes.mjs'
 
 process.stdout.on('error', () => {})
 process.stderr.on('error', () => {})
@@ -391,24 +391,13 @@ const hookLoad = async ({ out, isStdinStop }) => {
     const leftoverWaitMs = stopper.signal.aborted || report.status === 'failed' ? 10000 : LEFTOVER_WAIT_MS
     const waitNote = leftoverWaitMs < LEFTOVER_WAIT_MS ? ' The wait was shortened because the run was stopped.' : ''
     await new Promise(done => setTimeout(done, leftoverWaitMs))
-    let listerWorld
     try {
-      if (process.platform !== 'linux') listerWorld = makeWorld()
-      const { list, lister } = await processList({ spawnIsolated, world: listerWorld })
-      if (!list.some(one => one.pid === process.pid)) throw new Error('the process list did not include this run')
-      const left = leftoverProcesses({ list, self: process.pid, roots, exclude: lister === undefined ? [] : [lister] })
-      for (const one of left) { try { process.kill(one.pid, 'SIGKILL') } catch {} }
-      let stopping = ''
-      if (left.length > 0) {
-        const after = (await processList({ spawnIsolated, world: listerWorld })).list
-        if (!after.some(one => one.pid === process.pid)) throw new Error('the process list did not include this run')
-        const remaining = left.filter(one => after.some(next => next.pid === one.pid && (one.started === undefined || next.started === undefined || next.started === one.started))).length
-        stopping = remaining === 0 ? 'They were stopped.' : `${remaining} could not be stopped.`
-      }
-      const names = Object.entries(left.reduce((counts, one) => ({ ...counts, [one.name]: (counts[one.name] ?? 0) + 1 }), {})).map(([name, count]) => `${name} ${count}`).join(', ')
-      outcomes.leftovers = { ok: left.length === 0, line: (left.length === 0 ? `None of ${list.length} processes running ${leftoverWaitMs / 1000} s after the end (${closedAt.slice(11, 19)}) came from this check.` : `${left.length} processes from this check were still running ${leftoverWaitMs / 1000} s after the end: ${names}. ${stopping}`) + waitNote }
+      const { found, foundNames, kept, keptNames, listed, remaining, unchecked } = await stopTree({ spawnIsolated, makeWorld, rootPid: process.pid, roots, timeoutMs: 120000 })
+      const names = counts => Object.entries(counts).map(([name, count]) => `${name} ${count}`).join(', ')
+      const stopping = remaining === undefined ? `Whether they stopped is unknown: ${unchecked}.` : remaining === 0 ? 'They were stopped.' : `${remaining} could not be stopped.`
+      const keptNote = kept > 0 ? ` ${kept} more name this world's folder but started before this run or have no start time, so they were left running: ${names(keptNames)}.` : ''
+      outcomes.leftovers = { ok: found === 0, line: (found === 0 ? `None of ${listed} processes running ${leftoverWaitMs / 1000} s after the end (${closedAt.slice(11, 19)}) came from this check.` : `${found} processes from this check were still running ${leftoverWaitMs / 1000} s after the end: ${names(foundNames)}. ${stopping}`) + keptNote + waitNote }
     } catch (error) { outcomes.leftovers = { ok: false, line: `The processes could not be counted: ${firstLine(error)}` } }
-    try { await listerWorld?.close() } catch (error) { problem(`The lister's world did not close cleanly: ${firstLine(error?.errors?.[0] ?? error)}`) }
   }
 
   for (const [key, title] of Object.entries(TITLES)) {

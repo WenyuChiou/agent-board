@@ -3,7 +3,7 @@ import { realpathSync } from 'node:fs'
 import { createInterface } from 'node:readline'
 import { test } from 'node:test'
 import { fileURLToPath } from 'node:url'
-import { stopTree } from './lib/processes.mjs'
+import { killChecked, processList, stopTree } from './lib/processes.mjs'
 import { spawnIsolated } from './lib/spawn.mjs'
 import { makeWorld } from './lib/world.mjs'
 
@@ -28,7 +28,7 @@ const gone = async pid => {
   assert.throws(() => process.kill(pid, 0), { code: 'ESRCH' })
 }
 
-test("L6 soak processes: stopping a tree kills its root, the root's child and a process naming the world folder, spares another world and a root that already exited, and finds none remaining", { timeout: 240000 }, async () => {
+test("L6 soak processes: stopping a tree kills its root, the root's child and a process naming the world folder, spares another world and a root that already exited, and finds none remaining", { timeout: 240000, skip: process.platform === 'darwin' ? 'macOS process lists have no start times, so a path-only match is kept, not killed' : false }, async () => {
   const worlds = [], children = []
   let grandchild, isGrandchildGone = false
   const start = async (world, args, stdio = 'ignore') => {
@@ -94,6 +94,42 @@ test("L6 soak processes: stopping a tree kills its root, the root's child and a 
       try { await gone(grandchild) } catch (error) { errors.push(error) }
     }
     // Windows keeps a world's working folder open until its processes have closed.
+    for (const world of worlds.reverse()) {
+      try { await world.close() } catch (error) { errors.push(error) }
+    }
+    if (errors.length > 0) throw new AggregateError(errors, 'Process test cleanup failed')
+  }
+})
+
+test('L6 soak processes: a process whose start time no longer matches its listed one is not killed', { timeout: 120000, skip: process.platform === 'darwin' ? 'macOS process lists have no start times to check' : false }, async () => {
+  const worlds = []
+  let child, closed
+  try {
+    const world = makeWorld()
+    worlds.push(world)
+    const listerWorld = makeWorld()
+    worlds.push(listerWorld)
+    const env = Object.fromEntries(Object.entries(world.env).filter(([name]) => name !== 'NODE_OPTIONS' && !name.startsWith('E2E_')))
+    child = spawnIsolated(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { env, cwd: world.root, stdio: 'ignore' })
+    closed = new Promise(done => child.once('close', done))
+    await within(new Promise((done, reject) => {
+      child.once('spawn', done)
+      child.once('error', reject)
+    }), 10000, 'The isolated process did not start')
+    assert.deepEqual(await killChecked({ spawnIsolated, world: listerWorld, targets: [{ pid: child.pid, started: 1, name: 'node' }], timeoutMs: 30000 }), [])
+    assert.doesNotThrow(() => process.kill(child.pid, 0))
+    assert.equal(child.exitCode, null)
+    const { list } = await processList({ spawnIsolated, world: listerWorld, timeoutMs: 30000 })
+    const target = list.find(one => one.pid === child.pid)
+    assert.notEqual(target, undefined)
+    assert.deepEqual(await killChecked({ spawnIsolated, world: listerWorld, targets: [target], timeoutMs: 30000 }), [target])
+    await within(closed, 5000, 'The identity-checked process did not close')
+  } finally {
+    const errors = []
+    try { child?.kill('SIGKILL') } catch (error) { errors.push(error) }
+    if (closed !== undefined) {
+      try { await within(closed, 5000, 'The test process did not close during cleanup') } catch (error) { errors.push(error) }
+    }
     for (const world of worlds.reverse()) {
       try { await world.close() } catch (error) { errors.push(error) }
     }

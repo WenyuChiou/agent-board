@@ -1,5 +1,5 @@
 import { readFileSync, readdirSync } from 'node:fs'
-import { leftoverProcesses } from './soak-report.mjs'
+import { leftoverPlan } from './soak-report.mjs'
 
 const processOutput = async ({ spawnIsolated, world, file, args, timeoutMs, problem }) => {
   const child = spawnIsolated(file, args, { env: world.env, cwd: world.root, stdio: ['ignore', 'pipe', 'pipe'] })
@@ -54,6 +54,37 @@ export const processList = async ({ spawnIsolated, world, timeoutMs = 60000 }) =
   return { list, lister: pid }
 }
 
+export const killChecked = async ({ spawnIsolated, world, targets, timeoutMs = 20000 }) => {
+  const sent = []
+  const deadline = Date.now() + timeoutMs
+  if (process.platform === 'win32') {
+    const pairs = targets.filter(one => Number.isSafeInteger(one.pid) && Number.isSafeInteger(one.started)).map(one => [one.pid, one.started])
+    if (pairs.length > 0) {
+      const command = `[Console]::OutputEncoding = [Text.Encoding]::UTF8; $ErrorActionPreference = "Stop"; $targets = ConvertFrom-Json '${JSON.stringify({ pairs })}'; $stopped = @(foreach ($pair in $targets.pairs) { Get-CimInstance Win32_Process -Filter ("ProcessId=" + $pair[0]) | ForEach-Object { if ($null -ne $_.CreationDate -and ([DateTimeOffset]$_.CreationDate).ToUnixTimeMilliseconds() -eq $pair[1]) { $result = Invoke-CimMethod -InputObject $_ -MethodName Terminate; if ($result.ReturnValue -eq 0) { $pair[0] } } } }); ConvertTo-Json -InputObject $stopped -Compress`
+      const { stdout } = await processOutput({ spawnIsolated, world, file: 'powershell.exe', args: ['-NoProfile', '-NonInteractive', '-Command', command], timeoutMs: Math.max(1, deadline - Date.now()), problem: 'the process tree could not be stopped' })
+      const killed = JSON.parse(stdout)
+      if (!Array.isArray(killed) || !killed.every(pid => pairs.some(pair => pair[0] === pid))) throw new Error('the process tree returned invalid killed pids')
+      sent.push(...targets.filter(one => killed.includes(one.pid)))
+    }
+  } else {
+    for (const one of targets) {
+      if (Date.now() >= deadline) break
+      try {
+        if (process.platform === 'linux') {
+          if (one.started === undefined) continue
+          const stat = readFileSync(`/proc/${one.pid}/stat`, 'utf8')
+          const fields = stat.slice(stat.lastIndexOf(')') + 2).split(' ')
+          if (fields[0] === 'Z' || Number(fields[19]) !== one.started) continue
+        }
+        // macOS ps has no start times, so it keeps the plain pid kill.
+        process.kill(one.pid, 'SIGKILL')
+        sent.push(one)
+      } catch {}
+    }
+  }
+  return sent
+}
+
 // Kill descendants and orphaned workers before the root, except when the caller is that root.
 // Creation times are checked before killing, and distinguish survivors from reused pids afterwards.
 export const stopTree = async ({ spawnIsolated, makeWorld, rootPid, isRootAlive = () => true, roots, exclude = [], timeoutMs = 20000 }) => {
@@ -65,44 +96,22 @@ export const stopTree = async ({ spawnIsolated, makeWorld, rootPid, isRootAlive 
     const liveRoot = rootPid !== undefined && isRootAlive() ? rootPid : undefined
     if (!list.some(one => one.pid === process.pid)) throw new Error('the process list did not include this run')
     const excluded = lister === undefined ? exclude : [...exclude, lister]
-    const left = leftoverProcesses({ list, self: liveRoot, roots, exclude: excluded })
+    const plan = leftoverPlan({ list, self: liveRoot, since: process.pid, roots, exclude: excluded })
     const root = list.find(one => one.pid === liveRoot)
-    const targets = [...left, ...(root === undefined || excluded.includes(root.pid) ? [] : [root])].filter(one => one.pid > 0 && one.pid !== process.pid)
+    const targets = [...plan.kill, ...(root === undefined || excluded.includes(root.pid) ? [] : [root])].filter(one => one.pid > 0 && one.pid !== process.pid)
     const countNames = processes => processes.reduce((counts, one) => {
       const name = one.name.split(/[\\/]/).at(-1)
       counts[name] = (counts[name] ?? 0) + 1
       return counts
     }, {})
-    const sent = []
+    const found = { found: targets.length, foundNames: countNames(targets), kept: plan.keep.length, keptNames: countNames(plan.keep), listed: list.length }
+    if (targets.length === 0) return { ...found, stopped: 0, remaining: 0, names: {} }
     const killDeadline = Math.min(deadline - Math.ceil(timeoutMs / 4), Date.now() + Math.floor(timeoutMs / 4))
-    if (process.platform === 'win32') {
-      const pairs = targets.filter(one => Number.isSafeInteger(one.pid) && Number.isSafeInteger(one.started)).map(one => [one.pid, one.started])
-      try {
-        if (pairs.length > 0) {
-          const command = `[Console]::OutputEncoding = [Text.Encoding]::UTF8; $ErrorActionPreference = "Stop"; $targets = ConvertFrom-Json '${JSON.stringify({ pairs })}'; $stopped = @(foreach ($pair in $targets.pairs) { Get-CimInstance Win32_Process -Filter ("ProcessId=" + $pair[0]) | ForEach-Object { if ($null -ne $_.CreationDate -and ([DateTimeOffset]$_.CreationDate).ToUnixTimeMilliseconds() -eq $pair[1]) { $result = Invoke-CimMethod -InputObject $_ -MethodName Terminate; if ($result.ReturnValue -eq 0) { $pair[0] } } } }); ConvertTo-Json -InputObject $stopped -Compress`
-          const { stdout } = await processOutput({ spawnIsolated, world, file: 'powershell.exe', args: ['-NoProfile', '-NonInteractive', '-Command', command], timeoutMs: Math.max(1, killDeadline - Date.now()), problem: 'the process tree could not be stopped' })
-          const killed = JSON.parse(stdout)
-          if (!Array.isArray(killed) || !killed.every(pid => pairs.some(pair => pair[0] === pid))) throw new Error('the process tree returned invalid killed pids')
-          sent.push(...targets.filter(one => killed.includes(one.pid)))
-        }
-      } catch (error) {
-        return { stopped: 0, remaining: undefined, names: {}, unchecked: String(error?.message ?? error).split('\n')[0] }
-      }
-    } else {
-      for (const one of targets) {
-        if (Date.now() >= killDeadline) break
-        try {
-          if (process.platform === 'linux') {
-            if (one.started === undefined) continue
-            const stat = readFileSync(`/proc/${one.pid}/stat`, 'utf8')
-            const fields = stat.slice(stat.lastIndexOf(')') + 2).split(' ')
-            if (fields[0] === 'Z' || Number(fields[19]) !== one.started) continue
-          }
-          // macOS ps has no start times, so it keeps the plain pid kill.
-          process.kill(one.pid, 'SIGKILL')
-          sent.push(one)
-        } catch {}
-      }
+    let sent
+    try {
+      sent = await killChecked({ spawnIsolated, world, targets, timeoutMs: Math.max(0, killDeadline - Date.now()) })
+    } catch (error) {
+      return { ...found, stopped: 0, remaining: undefined, names: {}, unchecked: String(error?.message ?? error).split('\n')[0] }
     }
     await new Promise(done => setTimeout(done, Math.min(300, Math.max(0, deadline - Date.now()))))
     let after
@@ -110,16 +119,16 @@ export const stopTree = async ({ spawnIsolated, makeWorld, rootPid, isRootAlive 
       after = await processList({ spawnIsolated, world, timeoutMs: Math.max(1, deadline - Date.now()) })
       if (!after.list.some(one => one.pid === process.pid)) throw new Error('the process list did not include this run')
     } catch (error) {
-      return { stopped: sent.length, remaining: undefined, names: countNames(sent), unchecked: String(error?.message ?? error).split('\n')[0] }
+      return { ...found, stopped: sent.length, remaining: undefined, names: countNames(sent), unchecked: String(error?.message ?? error).split('\n')[0] }
     }
     const isAlive = one => after.list.some(next => next.pid === one.pid && (one.started === undefined || next.started === undefined || next.started === one.started))
     const stopped = sent.filter(one => !isAlive(one))
     const remaining = new Set(targets.filter(isAlive).map(one => one.pid))
     const currentRoot = after.list.find(one => one.pid === liveRoot)
     const isRootReused = currentRoot !== undefined && (root === undefined || root.started !== undefined && currentRoot.started !== undefined && root.started !== currentRoot.started)
-    for (const one of leftoverProcesses({ list: after.list, self: isRootReused ? -1 : liveRoot, roots, exclude: after.lister === undefined ? exclude : [...exclude, after.lister] })) {
+    for (const one of leftoverPlan({ list: after.list, self: isRootReused ? -1 : liveRoot, since: process.pid, roots, exclude: after.lister === undefined ? exclude : [...exclude, after.lister] }).kill) {
       if (one.pid !== process.pid) remaining.add(one.pid)
     }
-    return { stopped: stopped.length, remaining: remaining.size, names: countNames(stopped) }
+    return { ...found, stopped: stopped.length, remaining: remaining.size, names: countNames(stopped) }
   } finally { await world?.close() }
 }
