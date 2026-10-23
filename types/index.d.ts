@@ -185,6 +185,9 @@ export type ProgressMirror = {
   // asks again (a TaskUpdate that sets waiting to the person, or a turn that ends on a
   // question) or its words change.
   answered?: Record<string, string>
+  // A short tag of the path of the board this record was saved for (boardTag, retention.ts), so a
+  // second board sharing the store does not remove it. A record from before 0.24 has none.
+  board?: string
 }
 
 // What the pane shows under its input box: a side question's answer, what a quick add

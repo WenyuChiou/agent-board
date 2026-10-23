@@ -111,7 +111,9 @@ import {
 } from './inbox'
 import type { AgentTurn } from './inbox'
 import { keepRecent, liveToldKeys, remindersOf } from './remind'
-import { boardRecords, doneRecord, isExpiredRecord, monthPart, pruneBatch, RETENTION, sizeWarnings, staleFailedInbox, staleStoreTemps, storeBytes } from './retention'
+import { addPruned, boardRecords, boardTag, companionKeys, countPruned, currentPart, doneRecord, inboxDropped, isExpiredRecord, isSameWrite, monthParts, overCapKeys, pruneBatch, prunedNote, prunedSince, prunedTotal, readMonthParts, RETENTION, sizeWarnings, staleFailedInbox, staleInboxTemps, staleStoreTemps, storeBytes, unseenFailedInbox } from './retention'
+import type { StoreRecord } from './retention'
+import { INBOX_DROPPED_FILE } from './hook-reporters'
 import { agentName, answeredJson, answeredPath, buildView, mirrorMatchesTask, parseAnswered, parseSeen, seenJson, seenPath, statusLine, viewCache, withAnswered, withSeen } from './view'
 import type { StepRef, TaskRef, TaskRow, View, WaitingItem } from './view'
 import { acknowledgementKeys, archiveQuestionsKept, captureHashOf, captureJson, capturePath, emptyQuestions, parseCapture, withCaptures, isQuestionProof, isQuestionSnapshot, isTornLedger, migratedAnswered, observeQuestions, parseQuestions, questionProofJson, questionProofOf, questionProofPath, questionWords, questionsJson, questionsPath, resolveQuestion, resolvedQuestionsToRetire } from './questions'
@@ -273,11 +275,13 @@ const isWindows = async ($: EngineInterface, path: string): Promise<boolean> => 
 
 const sepOf = (path: string): string => (path.includes('\\') ? '\\' : '/')
 
-// The engine's file calls cannot rename or delete; the system's own commands do.
+// The engine's file calls cannot rename or delete; the system's own commands do. A file another
+// session already removed must not stop the rest of the batch (Remove-Item would stop at it with
+// -ErrorAction Stop), so errors are let pass and the look at the files afterwards says what went.
 const removeFiles = async ($: EngineInterface, files: readonly string[], isWin: boolean): Promise<boolean> => {
   if (files.length === 0) return true
   const argv = isWin
-    ? ['powershell', '-NoProfile', '-Command', `Remove-Item -Force -LiteralPath ${files.map(psQuote).join(',')} -ErrorAction Stop`]
+    ? ['powershell', '-NoProfile', '-Command', `Remove-Item -Force -LiteralPath ${files.map(psQuote).join(',')} -ErrorAction SilentlyContinue`]
     : ['rm', '-f', ...files]
   const ran = await $.process.run(argv, { timeoutMs: 10000 }).catch(() => null)
   if (ran === null || ran.exitCode !== 0) return false
@@ -853,14 +857,19 @@ const pendingTurns = async ($: EngineInterface): Promise<PendingTurn[]> => {
 const views = viewCache()
 // The store file's size at the last sweep (sweepFiles), for the warning above the board.
 let measuredStore = 0
+// What the board cleared in the last 7 days, read at the last sweep and after each prune (refreshPruned).
+let measuredPruned = { agent: 0, mirror: 0, turns: 0 }
 
 // The moment a view is built for: the pane's, which the 30 s tick and each change of the file move.
 const viewTime = async ($: EngineInterface): Promise<number> => (await read($, now)) || (await $.clock.now())
 
-// What the pane and the page say above the board when the file is cut off or too big.
-const warningOf = (snap: { size: number; tornTail?: { tasks: number } | null }, s: Strings): { warning?: string } => {
+// What the pane and the page say above the board when the file is cut off or too big, and the
+// line saying what the board cleared lately (its own, since it is not a warning).
+const warningOf = (snap: { size: number; tornTail?: { tasks: number } | null }, s: Strings): { warning?: string; pruned?: string } => {
   const lines = [...(snap.tornTail ? [s.progressIncomplete(snap.tornTail.tasks)] : []), ...sizeWarnings({ progress: snap.size, store: measuredStore }, s)]
-  return lines.length === 0 ? {} : { warning: lines.join(' · ') }
+  const pruned = prunedNote(measuredPruned, s)
+
+  return { ...(lines.length === 0 ? {} : { warning: lines.join(' · ') }), ...(pruned === null ? {} : { pruned }) }
 }
 
 // progress.html beside progress.md: the file's view and pending turns, at most once a minute
@@ -952,7 +961,10 @@ const noteDone = async ($: EngineInterface, projects: readonly ProgressProject[]
   if (Object.keys(fresh).length === 0 && !hasGone) return
   const without = (times: Record<string, number>): Record<string, number> => (isClean ? Object.fromEntries(Object.entries(times).filter(([key]) => done.has(key))) : times)
   await update($, doneSeen, old => without({ ...old, ...fresh }))
-  await saveDoneSeen($, at, kept => without({ ...fresh, ...kept }))
+  // A time already in the store for a task first seen done now is one that came back for an
+  // earlier task of that name (another session's save): the new time wins, so the later task
+  // gets its full day.
+  await saveDoneSeen($, at, kept => without({ ...kept, ...fresh }))
 }
 
 // When each hand-kept task was first seen done, in one store value `doneSeen` (#373). It was a
@@ -1123,18 +1135,15 @@ const notify = async ($: EngineInterface, text: string, project: string): Promis
 // The part of a month's journal or archive that new lines go to: the month's file until it reaches
 // 1 MB, then `-2`, and so on (retention.ts, #373). A stat per part; a second part is rare.
 const partFor = async ($: EngineInterface, base: string): Promise<string> => {
-  for (let part = 1; ; part += 1) {
-    const path = monthPart(base, part)
-    const stat = await $.fs.stat(path).catch(() => undefined)
-    if (stat === undefined || stat.size < RETENTION.monthPartBytes) return path
-  }
+  const sizes = await readMonthParts(base, async path => (await $.fs.stat(path).catch(() => undefined))?.size ?? null)
+  return currentPart(base, path => sizes.get(path) ?? null)
 }
 
 // Every part of a month that is there, oldest first.
 const partsOf = async ($: EngineInterface, base: string): Promise<string[]> => {
-  const parts: string[] = []
-  for (let part = 1; await $.fs.exists(monthPart(base, part)).catch(() => false); part += 1) parts.push(monthPart(base, part))
-  return parts
+  // An existing part is given the full size so the walk continues to the next part.
+  const sizes = await readMonthParts(base, async path => await $.fs.exists(path).catch(() => false) ? RETENTION.monthPartBytes : null)
+  return monthParts(base, path => sizes.get(path) !== null && sizes.has(path))
 }
 
 // Recounts today's finished steps from this month's journal, from its last part only, so the
@@ -1301,7 +1310,7 @@ const saveMine = async (
 ): Promise<void> => {
   const { current, next } = await updateBackgroundMirror($, change)
   if (next === null || current === null) return
-  await $.store.set(`mirror:${next.sessionId}`, next)
+  await $.store.set(`mirror:${next.sessionId}`, { ...next, board: boardTag(await progressPath($)) })
   if (!quiet) {
     const finished = completedSince(current, next)
     const title = next.title || fallbackTitle(next)
@@ -1649,7 +1658,7 @@ const takeAgentTurns = async ($: EngineInterface, turns: readonly AgentTurn[], a
   const latestWork = turns.filter(turn => isNewer(turn) && !boardTurns.has(turn)).at(-1)
   const state = boardTurns.has(latest) && hasRestoredQuestion ? 'waiting'
     : latestWork === undefined ? mirror.state : isAllDone(mirror) ? 'done' : latestWork.event === 'end' ? 'ended' : 'waiting'
-  mirror = { ...mirror, state, updated: at, turnOrder: Math.max(newest, ...turns.map(one => turnOrder(one) ?? -1)) }
+  mirror = { ...mirror, state, updated: at, turnOrder: Math.max(newest, ...turns.map(one => turnOrder(one) ?? -1)), board: boardTag(await progressPath($)) }
   const s = await wordsOf($)
   const written = mirror
   let hasMoved = false
@@ -1914,15 +1923,17 @@ const quarantineInbox = async ($: EngineInterface, from: string, to: string, rea
     target = `${to}.${n}`
   }
   const body = await $.fs.read(from).catch(() => undefined)
+  // The sweep keeps the file a week from now, not from its own time (#373). The time is written
+  // before the move, so a sweep that finds the file at once already has it; a move that fails
+  // leaves a time for a name that is not there, which the next sweep lets go.
+  const name = target.replace(/^.*[\\/]/, '')
+  const at = await $.clock.now()
+  await saveSetAside($, record => ({ ...record, [name]: at })).catch(() => undefined)
   const argv = isWin
     ? ['powershell', '-NoProfile', '-Command', `Move-Item -LiteralPath ${psQuote(from)} -Destination ${psQuote(target)} -ErrorAction Stop`]
     : ['mv', '-n', from, target]
   const ran = await $.process.run(argv, { timeoutMs: 10000 })
   if (ran.exitCode !== 0 || await $.fs.exists(from) || !(await $.fs.exists(target)) || (body !== undefined && await $.fs.read(target) !== body)) throw new Error('QUARANTINE_NOT_VERIFIED')
-  // The sweep keeps it a week from now, not from the file's own time (#373).
-  const at = await $.clock.now()
-  const name = target.replace(/^.*[\\/]/, '')
-  await $.store.set(SET_ASIDE, { ...setAsideRecord(await $.store.get(SET_ASIDE).catch(() => undefined)), [name]: at }).catch(() => undefined)
   await inboxNotice($, target, reason)
 }
 
@@ -2412,7 +2423,9 @@ const remindNow = async ($: EngineInterface): Promise<void> => {
   const isSeeding = !isReminderSeeded
   isReminderSeeded = true
   if (fresh.length === 0) return
-  const next = keepRecent({ ...told, ...Object.fromEntries(fresh.map(one => [one.key, at])) }, at, liveToldKeys(view))
+  // Both keys: the one 0.23.x sessions look for is written too (remind.ts, until 0.25).
+  const keys = fresh.flatMap(one => [one.key, ...(one.oldKey === undefined ? [] : [one.oldKey])])
+  const next = keepRecent({ ...told, ...Object.fromEntries(keys.map((key): [string, number] => [key, at])) }, at, liveToldKeys(view))
   await $.store.set('told', next)
   if (isSeeding && Object.keys(told).length === 0) return
   for (const one of fresh) {
@@ -2454,29 +2467,147 @@ const othersNote = async ($: EngineInterface): Promise<string | null> => {
 // session moves the same walk on. Only a key that can age is read: the large values (the board
 // script's copy, the reminders told) were read in full at every start for nothing (#371).
 // `passes`: the hourly sweep goes further along the walk than a start does. A record whose block
-// is still on the board is kept (boardRecords); with no whole board read (missing, unreadable, or
-// cut short, which hides the blocks after the cut), no record is looked at.
+// is still on the board is kept (boardRecords). Only a settled board says which blocks are gone:
+// with no board read (missing, unreadable, empty, or cut short, which hides the blocks after the
+// cut) no record is looked at, and a file that is half written when read looks like a whole board
+// with fewer blocks, so right before each batch of deletes the file's time and size must still
+// be the ones the read had, as in pruneAnswered. If not, that batch waits for the next walk.
+// After the walk, a store still at or over its hard cap loses its oldest ended records off the
+// board (capStore), under the same guard. Every record removed is counted by kind and day
+// (recordPruned) for the line the board shows.
+// Other boards' records and untagged ones use only the 30-day age rule; this board's tag
+// (boardTag) allows the shorter lives and the cap. Each key is read again right before
+// it is deleted (removeRecord), and a record written since the read stays; the keys that belong
+// to a record (companionKeys) go with it.
 const pruneStore = async ($: EngineInterface, at: number, passes = 1): Promise<void> => {
   const keys = await $.store.keys()
   await dropGeneratedSeed($, keys)
   const board = await read($, snapshot)
-  if (board.isMissing || board.error !== null || (board.tornTail ?? null) !== null) return
+  if (board.isMissing || board.error !== null || (board.tornTail ?? null) !== null || board.projects.length === 0) return
   const isOnBoard = boardRecords(board.projects)
-  const stored = await $.store.get(PRUNE_AFTER)
-  let after = typeof stored === 'string' ? stored : ''
-  for (let pass = 0; pass < passes; pass += 1) {
-    const { batch, next } = pruneBatch(keys, after)
-    for (const key of batch) {
-      if (!isOnBoard(key) && isExpiredRecord(key, await $.store.get(key), at)) await $.store.delete(key)
-    }
-    after = next
-    if (next === '') break
-    if (pass + 1 < passes) await breathe($)
+  const tag = boardTag(await progressPath($))
+  const isSettled = async (): Promise<boolean> => {
+    const path = await progressPath($)
+    const disk = await $.fs.stat(path).catch(() => undefined)
+    return board.path === path && disk?.mtimeMs === board.mtimeMs && disk.size === board.size
   }
-  await $.store.set(PRUNE_AFTER, after)
+  const gone: string[] = []
+  try {
+    const stored = await $.store.get(PRUNE_AFTER)
+    let after = typeof stored === 'string' ? stored : ''
+    let isStopped = false
+    for (let pass = 0; pass < passes; pass += 1) {
+      const { batch, next } = pruneBatch(keys, after)
+      const expired: StoreRecord[] = []
+      for (const key of batch) {
+        if (isOnBoard(key)) continue
+        const value = await $.store.get(key)
+        if (isExpiredRecord(key, value, at, tag)) expired.push({ key, value })
+      }
+      if (expired.length > 0 && !(await isSettled())) {
+        isStopped = true
+        break
+      }
+      for (const one of expired) {
+        if (await removeRecord($, one, keys)) gone.push(one.key)
+      }
+      after = next
+      if (next === '') break
+      if (pass + 1 < passes) await breathe($)
+    }
+    await $.store.set(PRUNE_AFTER, after)
+    if (!isStopped) gone.push(...(await capStore($, keys, new Set(gone), isOnBoard, isSettled, tag, at)))
+  } finally {
+    await recordPruned($, gone, at)
+  }
 }
 
 const PRUNE_AFTER = 'pruneAfter'
+const STORE_CAP_HELD = 'storeCapHeld'
+
+// One record and the keys that belong to it, removed unless the record was written again since the
+// prune read it (its `updated` is no longer the one it chose). True when it was removed.
+const removeRecord = async ($: EngineInterface, chosen: StoreRecord, keys: readonly string[]): Promise<boolean> => {
+  if (!isSameWrite(chosen.key, chosen.value, await $.store.get(chosen.key))) return false
+  await $.store.delete(chosen.key)
+  for (const extra of companionKeys(chosen.key, keys)) await $.store.delete(extra)
+
+  return true
+}
+
+// The hard cap: the store file, measured after the walk, is still at or over 1.5 MB. The records
+// that could go are read (the only pass that reads more than a batch, and only over the cap), and
+// the oldest ended ones off the board are removed until the size left is under it. If the file
+// has not yet shrunk by what the walk removed, this takes a few records more than it had to: an
+// ended record off the board is the cheapest thing to lose. Returns the keys it removed.
+const capStore = async (
+  $: EngineInterface,
+  keys: readonly string[],
+  removed: ReadonlySet<string>,
+  isOnBoard: (key: string) => boolean,
+  isSettled: () => Promise<boolean>,
+  tag: string,
+  at: number,
+): Promise<string[]> => {
+  const size = storeBytes(await $.fs.list(await storeDir($)).catch(() => []))
+  if (size < RETENTION.storeCapBytes) {
+    if (keys.includes(STORE_CAP_HELD)) await $.store.delete(STORE_CAP_HELD).catch(() => undefined)
+    return []
+  }
+  const held = await $.store.get(STORE_CAP_HELD).catch(() => undefined) as { at?: unknown } | undefined
+  if (typeof held?.at === 'number' && at >= held.at && at - held.at < RETENTION.capRetryMs) return []
+  const candidates = keys.filter(key => (key.startsWith('agent:') || key.startsWith('mirror:')) && !removed.has(key) && !isOnBoard(key))
+  const records: StoreRecord[] = []
+  for (let from = 0; from < candidates.length; from += RETENTION.pruneReads) {
+    for (const key of candidates.slice(from, from + RETENTION.pruneReads)) records.push({ key, value: await $.store.get(key) })
+    await breathe($)
+  }
+  const over = overCapKeys(records, isOnBoard, size, tag)
+  const gone: string[] = []
+  let isTried = over.length === 0
+  try {
+    if (over.length > 0 && await isSettled()) {
+      isTried = true
+      for (const key of over) {
+        const chosen = records.find(one => one.key === key)
+        if (chosen !== undefined && await removeRecord($, chosen, keys)) gone.push(key)
+      }
+    }
+  } catch {
+    // The keys removed so far are still counted.
+  }
+  // A full pass that cannot bring the store under the cap waits six hours before reading it all again.
+  const left = storeBytes(await $.fs.list(await storeDir($)).catch(() => []))
+  if (left >= RETENTION.storeCapBytes && isTried) await $.store.set(STORE_CAP_HELD, { at }).catch(() => undefined)
+  else if (left < RETENTION.storeCapBytes && keys.includes(STORE_CAP_HELD)) await $.store.delete(STORE_CAP_HELD).catch(() => undefined)
+
+  return gone
+}
+
+// The counts of what the board cleared, by kind and UTC day, in one small store value; and the
+// line's numbers refreshed from it.
+const PRUNED = 'prunedCounts'
+
+const recordPruned = async ($: EngineInterface, gone: readonly string[], at: number): Promise<void> => {
+  if (gone.length === 0) return
+  const next = addPruned(await $.store.get(PRUNED).catch(() => undefined), countPruned(gone), at)
+  await $.store.set(PRUNED, next).catch(() => undefined)
+  await refreshPruned($, at)
+}
+
+// The numbers behind the line the board shows: the store's counts for the last 7 days, and the
+// turns the inbox writers dropped in the same days (their dropped.log, INBOX_DROPPED_FILE).
+const refreshPruned = async ($: EngineInterface, at: number): Promise<void> => {
+  try {
+    const records = prunedTotal(await $.store.get(PRUNED).catch(() => undefined), at)
+    const inbox = inboxPath(await progressPath($))
+    const log = await $.fs.read(`${inbox}${sepOf(inbox)}${INBOX_DROPPED_FILE}`).catch(() => '')
+    const turns = inboxDropped(log, prunedSince(at))
+    measuredPruned = { ...records, turns: turns.age + turns.cap }
+  } catch {
+    // The line keeps its last numbers.
+  }
+}
 
 // The copies `generated:<file>` were what earlier releases wrote into other agents' files; no
 // release writes them any more. They only seed a connect record that does not exist yet, so they
@@ -2488,7 +2619,8 @@ const dropGeneratedSeed = async ($: EngineInterface, keys: readonly string[]): P
 }
 
 // Files that the board's own writes leave behind and nothing else removes: the store's cut-off
-// temporary copies after a day, and inbox files the drain gave up on a week after it did (#373).
+// temporary copies and the reporters' (inbox ones) after a day, and inbox files the drain gave up
+// on a week after it did (#373).
 // The same listing measures the store, for the warning on the board. One listing per folder, and
 // removals of up to 50 files at a time, which keeps a Windows command line short.
 const sweepFiles = async ($: EngineInterface): Promise<void> => {
@@ -2498,33 +2630,52 @@ const sweepFiles = async ($: EngineInterface): Promise<void> => {
   const store = await storeDir($)
   const kept = await $.fs.list(store).catch(() => [])
   measuredStore = storeBytes(kept)
+  await refreshPruned($, at)
   const inbox = inboxPath(path)
   // The record is read before the listing, so every name in it was set aside before the look.
-  const setAside = setAsideRecord(await $.store.get(SET_ASIDE).catch(() => undefined))
+  const setAside = inboxSetAsideTimes(await $.store.get(INBOX_SET_ASIDE).catch(() => undefined))
   const failed = await $.fs.list(inbox).catch(() => null)
   const swept = staleFailedInbox(failed ?? [], at, setAside)
+  const unseen = unseenFailedInbox(failed ?? [], setAside)
   const stale = [
     ...staleStoreTemps(kept, at).map(name => `${store}${sepOf(store)}${name}`),
     ...swept.map(name => `${inbox}${sepOf(inbox)}${name}`),
+    ...staleInboxTemps(failed ?? [], at).map(name => `${inbox}${sepOf(inbox)}${name}`),
   ]
   for (let from = 0; from < stale.length; from += 50) {
     await removeFiles($, stale.slice(from, from + 50), isWin)
     await breathe($)
   }
   // A name no longer in the inbox, or swept now, needs no time. Only those go, from the record as
-  // it is now: a file set aside while the removals ran keeps its time. With no listing, none go.
+  // it is now: a file set aside while the removals ran keeps its time. A `.failed` name with no
+  // time (set aside before this release, or its time could not be written) gets today's, so it is
+  // kept a week from now and never judged by its own date. With no listing, nothing changes.
   if (failed === null) return
   const listed = new Set(failed.map(entry => entry.name))
   const drop = new Set([...Object.keys(setAside).filter(name => !listed.has(name)), ...swept])
-  if (![...drop].some(name => setAside[name] !== undefined)) return
-  const current = setAsideRecord(await $.store.get(SET_ASIDE).catch(() => undefined))
-  await $.store.set(SET_ASIDE, Object.fromEntries(Object.entries(current).filter(([name]) => !drop.has(name)))).catch(() => undefined)
+  if (unseen.length === 0 && ![...drop].some(name => setAside[name] !== undefined)) return
+  await saveSetAside($, current => ({
+    ...Object.fromEntries(Object.entries(current).filter(([name]) => !drop.has(name))),
+    ...Object.fromEntries(unseen.filter(name => current[name] === undefined).map(name => [name, at])),
+  })).catch(() => undefined)
 }
 
 // When each inbox file was set aside as `.failed`, by name: a rename keeps the file's own time.
-const SET_ASIDE = 'inboxSetAside'
-const setAsideRecord = (value: unknown): Record<string, number> =>
+const INBOX_SET_ASIDE = 'inboxSetAside'
+const inboxSetAsideTimes = (value: unknown): Record<string, number> =>
   value === null || typeof value !== 'object' || Array.isArray(value) ? {} : Object.fromEntries(Object.entries(value).filter((entry): entry is [string, number] => typeof entry[1] === 'number'))
+
+// The record is read, changed and written as one step, one save after another in this session, so
+// the sweep cannot write back an older copy over a time the drain has just added.
+let setAsideSaves: Promise<unknown> = Promise.resolve()
+const saveSetAside = ($: EngineInterface, change: (record: Record<string, number>) => Record<string, number>): Promise<void> => {
+  const saved = setAsideSaves.then(async () => {
+    await $.store.set(INBOX_SET_ASIDE, change(inboxSetAsideTimes(await $.store.get(INBOX_SET_ASIDE))))
+  })
+  setAsideSaves = saved.catch(() => undefined)
+
+  return saved
+}
 
 // Where Claude Code keeps plugin stores: under its config folder, as progress.md's default is.
 const storeDir = async ($: EngineInterface): Promise<string> => {
@@ -2710,6 +2861,7 @@ export const register: Register = (on, options) => {
     const startedAt = await $.clock.now()
     await update($, now, () => startedAt)
     await pruneStore($, startedAt).catch(() => undefined)
+    await refreshPruned($, startedAt)
     // Work left running past a dispatch can outlive the module (a reload, the end): its
     // rejections are dropped rather than left unhandled.
     $.clock.every(POLL_MS, () => {

@@ -4707,7 +4707,8 @@ test('progress.html reads only the newest thirty unprocessed inbox files', async
   engineBeneath(on, world)
   await $.session.start({ cwd: '/work/persona_framework', surface: 'terminal', isInteractive: true })
   const page = world.files.get('/home/me/.claude/progress.html') ?? ''
-  const reads = world.reads!.filter(path => path.startsWith(`${INBOX}/`))
+  // The count file the inbox writers keep beside the turns (dropped.log) is read as well; it is not a turn.
+  const reads = world.reads!.filter(path => path.startsWith(`${INBOX}/`) && !path.endsWith('/dropped.log'))
   expect(reads).toHaveLength(30)
   expect(page).toContain('Use limit 33?')
   expect(page).toContain('Use limit 4?')
@@ -4931,6 +4932,57 @@ test('a question another agent asks notifies once, not the ones already there at
   expect(seen.notified).toEqual(['codex 在問：選哪個種子'])
   await clock.advance(30 * 1000)
   expect(seen.notified).toEqual(['codex 在問：選哪個種子'])
+})
+
+// A 0.23.x session sharing the store looks for the key made of the whole question, so a 0.24 session
+// writes it too until 0.25, and that older session does not say the question again.
+test('a question another agent asks is kept as told under the short key and under the key a 0.23.x session reads', async ($, on) => {
+  const world: World = { files: new Map([[FILE, ASKED('要不要重跑 — 可以重跑嗎？')]]), mtime: 1, hasTasks: true, store: { told: { old: Date.parse('2026-10-16T00:00:00.000Z') } } }
+  const clock = engineBeneath(on, world)
+  outside(on, world)
+  await $.session.start({ cwd: '/work/persona_framework', surface: 'desktop', isInteractive: true })
+  world.files.set(FILE, ASKED('選哪個種子 — 42 還是 7'))
+  world.mtime += 1
+  await clock.advance(2000)
+  // The question there at the start and the new one are both told, each under a short key and under the key a 0.23.x session reads.
+  const keys = Object.keys(world.store?.told as Record<string, number>).filter(key => key.startsWith('ask:'))
+  const shorts = keys.filter(key => /^ask:[0-9a-f]{16}$/.test(key))
+  const olders = keys.filter(key => !/^ask:[0-9a-f]{16}$/.test(key))
+  expect(shorts).toHaveLength(2)
+  expect(olders).toHaveLength(2)
+  expect(olders.some(key => key.includes('選哪個種子'))).toBe(true)
+})
+
+test('a question told by a 0.23.x session stays quiet when only its whole-question key is saved', async ($, on) => {
+  const at = Date.parse('2026-10-16T12:00:00.000Z')
+  const board = ASKED('選哪個種子 — 42 還是 7')
+  const projects = parseProgress(board)
+  const ledger = observeQuestions(emptyQuestions(), projects, null, [], at).ledger
+  const item = buildView(projects, [], null, at, 0, {}, ZH_TW, [], {}, ledger).waiting[0]
+  expect(item).toBeDefined()
+  const oldKey = `ask:${item?.questionId ?? item?.key}:${item?.text}`
+  // The session starts while this step is still at work, so the question arrives while it watches and
+  // would be told, as in the test above, but for the key the 0.23.x session saved.
+  const world: World = { files: new Map([[FILE, board.replace('- [?] ', '- [~] ')]]), mtime: 1, hasTasks: true, store: { told: {}, autoConnectOff: true, inboxDone: {} } }
+  const clock = engineBeneath(on, world)
+  const seen = outside(on, world)
+  await $.session.start({ cwd: '/work/persona_framework', surface: 'desktop', isInteractive: true })
+  const told = world.store?.told as Record<string, number>
+  const shortKeys = (): string[] => Object.keys(told).filter(key => /^ask:[0-9a-f]{16}$/.test(key))
+  const before = shortKeys()
+  // A 0.23.x session sharing the store and the question list tells the question as it arrives.
+  world.files.set(FILE, board)
+  world.files.set(QUESTIONS, questionsJson(ledger))
+  told[oldKey] = at
+  world.mtime += 1
+  await clock.advance(2000)
+  expect(seen.notified).toEqual([])
+  expect((world.store?.told as Record<string, number>)[oldKey]).toBe(at)
+  // A later poll still respects the old key, and adds no short key for this question.
+  world.mtime += 1
+  await clock.advance(30000)
+  expect(seen.notified).toEqual([])
+  expect(shortKeys()).toEqual(before)
 })
 
 test('work due today notifies once that day', async ($, on) => {
@@ -6235,6 +6287,8 @@ test('a captured question with an old source clock still gets its first save', a
 
 test('expired pending questions from another progress path are pruned at startup', async ($, on) => {
   const world = pendingQuestionWorld()
+  // The store is pruned only against a board with a project on it (#373), so the board is not empty.
+  world.files.set(FILE, '## synthetic-project\n### Synthetic task\n- [ ] Synthetic step\n')
   const key = seedPendingQuestion(world, 3 * 24 * 60 * 60 * 1000 + 1)
   const old = `pendingInboxQuestion:${sha256('/other/progress.md')}:old`
   const recent = `pendingInboxQuestion:${sha256('/other/progress.md')}:recent`

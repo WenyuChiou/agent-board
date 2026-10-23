@@ -74,6 +74,7 @@ export type World = {
   ignoreQuestionWrites?: boolean
   failQuestionCapture?: 'read' | 'write'
   failStore?: (operation: 'get' | 'set', key: string) => boolean
+  beforeStoreGet?: (key: string) => void | Promise<void>
   beforeStoreSet?: (key: string) => void
   ignoreStore?: (key: string) => boolean
   afterMove?: (from: string, to: string) => boolean
@@ -111,9 +112,12 @@ export const engineBeneath = (on: On, world: World): MockClock => {
   const shared = world.shared
   if (shared === undefined) {
     const store: Record<string, unknown> = world.store ?? { inboxDone: {} }
-    on('store.get', ($, e) => {
+    on('store.get', async ($, e) => {
       world.storeReads?.push(e.key)
-      return world.failStore?.('get', e.key) ? { deny: 'EIO' } : { value: store[e.key] }
+      const pending = world.beforeStoreGet?.(e.key)
+      const value = store[e.key]
+      await pending
+      return world.failStore?.('get', e.key) ? { deny: 'EIO' } : { value }
     })
     on('store.set', ($, e) => {
       world.beforeStoreSet?.(e.key)
@@ -211,6 +215,29 @@ export const engineBeneath = (on: On, world: World): MockClock => {
       const exitCode = world.unremovable?.has(dir) || hasEntries ? 1 : 0
       if (exitCode === 0 && !world.retainedOnRemove?.has(dir)) world.dirs?.delete(dir)
       return { value: { exitCode, stdout: '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
+    }
+    // PowerShell's Remove-Item over a list of paths: with -ErrorAction Stop the first path that is
+    // not there ends the command (exit 1) and the paths after it stay; otherwise it goes on.
+    if (e.argv[0] === 'powershell' && /^Remove-Item /.test(e.argv[3] ?? '')) {
+      world.ran?.push([...e.argv])
+      const command = e.argv[3] ?? ''
+      const paths = [...command.matchAll(/'((?:[^']|'')*)'/g)].map(found => posix((found[1] ?? '').replace(/''/g, "'")))
+      const isStop = command.includes('-ErrorAction Stop')
+      let exitCode = 0
+      for (const path of paths) {
+        if (!world.files.has(path)) {
+          if (!isStop) continue
+          exitCode = 1
+          break
+        }
+        if (world.unremovable?.has(path)) {
+          if (isStop) {
+            exitCode = 1
+            break
+          }
+        } else if (!world.retainedOnRemove?.has(path) && world.isRemoveRefused?.(path) !== true) world.files.delete(path)
+      }
+      return { value: { exitCode, stdout: '', stderr: exitCode === 0 ? '' : 'Cannot find path', isStdoutTruncated: false, isStderrTruncated: false } }
     }
     if (e.argv[0] === 'mv' || e.argv[0] === 'rm') {
       world.ran?.push([...e.argv])

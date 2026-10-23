@@ -169,6 +169,8 @@ export type Overview = { waiting: number; active: number; due: number; today: nu
 
 export type View = {
   warning?: string
+  // What the board cleared in the last 7 days (retention.ts); absent when it cleared nothing.
+  pruned?: string
   current: CurrentView | null
   pr: PrView | null
   overview: Overview

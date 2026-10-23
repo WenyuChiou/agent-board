@@ -70,7 +70,7 @@ export const ZH_TW = {
   lang: 'zh-TW' as Lang,
 
   inboxTitle: '收件匣報告已保留',
-  inboxHeld: (file: string, reason: string): string => `報告保留在 ${file}（${reason}）。請檢查檔案內容與來源 agent 的回報 hook。`,
+  inboxHeld: (file: string, reason: string): string => `報告保留在 ${file}（${reason}）。標成 .failed 的報告會保留 7 天。請檢查檔案內容與來源 agent 的回報 hook。`,
 
   // Time and dates
   justNow: '剛剛',
@@ -488,7 +488,12 @@ export const ZH_TW = {
   boardWriteFailed: '寫不進進度檔，沒有改任何東西。',
   progressIncomplete: (n: number): string => `progress.md 有一行標記未寫完，可能有 ${n} 項工作未顯示`,
   progressLarge: (kb: number, cap: number): string => `progress.md 已有 ${kb} KB，超過 ${cap} KB；手寫的工作與等你回覆的步驟都不會被刪，可封存已完成的工作`,
-  storeLarge: (mb: string, cap: string): string => `看板存的紀錄已有 ${mb} MB（上限 ${cap} MB），舊紀錄會陸續清掉`,
+  storeLarge: (mb: string, cap: string): string => `看板存的紀錄已有 ${mb} MB（上限 ${cap} MB）；只有區塊已離開看板的 session 紀錄會被清掉，其餘都會保留`,
+  prunedAgents: (n: number): string => `${n} 筆舊的 agent 紀錄`,
+  prunedSessions: (n: number): string => `${n} 份舊的 session 工作清單`,
+  prunedTurns: (n: number): string => `${n} 則還沒讀的收件匣回合`,
+  prunedJoin: (parts: readonly string[]): string => (parts.length < 2 ? parts.join('') : `${parts.slice(0, -1).join('、')}和 ${parts.at(-1)}`),
+  prunedLine: (list: string, days: number): string => `最近 ${days} 天清掉了 ${list}`,
   reporterFailed: (reason: string): string => `進度回報未能儲存（${reason}），請檢查進度檔後再試。`,
   tailRepairFailed: '無法安全修復不完整的結尾，沒有改任何東西。請檢查進度檔後再重新回報。',
   fileProgress: '你的進度檔',

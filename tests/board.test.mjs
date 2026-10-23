@@ -1151,6 +1151,39 @@ syncBuiltinESMExports()`)
   }
 })
 
+test('CLI ticks rotate a full journal, chat reads the last part, and archive retries find earlier entries', () => {
+  const at = Date.UTC(2026, 9, 17, 12)
+  const month = `${new Date(at).getFullYear()}-${String(new Date(at).getMonth() + 1).padStart(2, '0')}`
+  const journal = `progress-journal-${month}.md`
+  const nextJournal = `progress-journal-${month}-2.md`
+  const archive = `progress-archive-${month}.md`
+  const file = '## Synthetic\n### Synthetic work\n- [ ] Verify rotation\n'
+  const inspect = dir => ({ files: Object.fromEntries(readdirSync(dir).filter(name => name.endsWith('.md')).map(name => [name, readFileSync(join(dir, name), 'utf8')])) })
+  const change = script => `Date.now = () => ${at}\n${script}`
+  const full = 'x'.repeat(1048576)
+  const ticked = chatRun(['--keys', 'x'], { file: () => file, beside: { [journal]: full }, change, inspect })
+  assert.equal(ticked.status, 0, ticked.stdout + ticked.stderr)
+  assert.equal(ticked.files[journal], full)
+  assert.ok(ticked.files['progress.md'].includes('- [x] Verify rotation'))
+  assert.ok(ticked.files[nextJournal].includes('Synthetic · Synthetic work · Verify rotation'))
+  const chat = chatRun(['--chat'], { file: () => ticked.files['progress.md'], beside: { [journal]: full, [nextJournal]: ticked.files[nextJournal] }, change })
+  assert.equal(chat.status, 0, chat.stdout + chat.stderr)
+  assert.match(chat.stdout, /✓ 1 done today/)
+  assert.ok(chat.stdout.includes('Synthetic work: Verify rotation'), chat.stdout)
+  const saved = chatRun(['--keys', 'a'], { file: () => file, change, inspect })
+  assert.equal(saved.status, 0, saved.stdout + saved.stderr)
+  const entry = saved.files[archive]
+  assert.ok(entry.includes('### Synthetic work'))
+  // Padding precedes the saved entry so its task still ends at the end of the file.
+  const earlier = `${'x'.repeat(1048576 - Buffer.byteLength(entry) - 1)}\n${entry}`
+  assert.equal(Buffer.byteLength(earlier), 1048576)
+  const retried = chatRun(['--keys', 'a'], { file: () => file, beside: { [archive]: earlier }, change, inspect })
+  assert.equal(retried.status, 0, retried.stdout + retried.stderr)
+  assert.equal(retried.files[archive], earlier)
+  assert.ok(!retried.files['progress.md'].includes('### Synthetic work'))
+  assert.ok(!retried.files[`progress-archive-${month}-2.md`]?.includes('### Synthetic work'))
+})
+
 test('keys played on the board tick a hand-kept step, archive a stopped block, and leave a line in the journal', () => {
   const dir = mkdtempSync(join(tmpdir(), 'board-'))
   try {

@@ -32,7 +32,7 @@ export const EN: Strings = {
   lang: 'en' as Lang,
 
   inboxTitle: 'Inbox report retained',
-  inboxHeld: (file: string, reason: string): string => `Report retained at ${file} (${reason}). Check its contents and the source agent's reporting hook.`,
+  inboxHeld: (file: string, reason: string): string => `Report retained at ${file} (${reason}). A report set aside as .failed is kept for 7 days. Check its contents and the source agent's reporting hook.`,
 
   // Time and dates
   justNow: 'just now',
@@ -451,7 +451,12 @@ export const EN: Strings = {
   boardWriteFailed: "Couldn't write the progress file; nothing changed.",
   progressIncomplete: (n: number): string => `progress.md has a cut-off marker line; ${n} ${n === 1 ? 'task' : 'tasks'} may be hidden`,
   progressLarge: (kb: number, cap: number): string => `progress.md is ${kb} KB, over ${cap} KB; hand-kept tasks and steps waiting on you are never removed, so archive finished work to shrink it`,
-  storeLarge: (mb: string, cap: string): string => `The board's saved records are ${mb} MB (limit ${cap} MB); old records are being cleared`,
+  storeLarge: (mb: string, cap: string): string => `The board's saved records are ${mb} MB (limit ${cap} MB); only records of sessions whose block has left the board are cleared, and the rest stay`,
+  prunedAgents: (n: number): string => `${n} old agent ${n === 1 ? 'record' : 'records'}`,
+  prunedSessions: (n: number): string => `${n} old session ${n === 1 ? 'task list' : 'task lists'}`,
+  prunedTurns: (n: number): string => `${n} unread inbox ${n === 1 ? 'turn' : 'turns'}`,
+  prunedJoin: (parts: readonly string[]): string => (parts.length < 2 ? parts.join('') : `${parts.slice(0, -1).join(', ')} and ${parts.at(-1)}`),
+  prunedLine: (list: string, days: number): string => `Cleared ${list} in the last ${days} days`,
   reporterFailed: (reason: string): string => `The report could not be saved (${reason}); check the progress file and retry.`,
   tailRepairFailed: 'The incomplete end could not be safely repaired; nothing changed. Check the progress file before retrying.',
   fileProgress: 'your progress file',
