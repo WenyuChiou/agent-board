@@ -8,6 +8,7 @@ import { beforeEach, test } from 'node:test'
 import assert from 'node:assert/strict'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { inspect } from 'node:util'
+import { formatWriter } from './e2e/lib/faults.mjs'
 import { reporterPs1, reporterSh } from '../hooks/hook-reporters.ts'
 import { hookBootstrap, hookGuardSource, hookWorker } from '../hooks/hook-safety.ts'
 import { classifierDiagnostic, observeClassifier } from './fixtures/classifier-diagnostic.mjs'
@@ -869,6 +870,7 @@ test('a report hook whose reporter runs past its deadline is never queued', () =
   // Host command hooks fail open even though an explicit report worker returns a failure status.
   const env = { ...f.env, NODE_OPTIONS: `--require ${JSON.stringify(preload.replaceAll('\\', '/'))}` }
   const launcher = `const { spawnSync } = require('node:child_process'); const out = spawnSync(process.execPath, ${JSON.stringify(args)}, { input: require('node:fs').readFileSync(0), encoding: 'utf8', windowsHide: true }); if (out.error) throw out.error; process.stdout.write(String(out.status)); process.stderr.write(out.stderr)`
+  let firstError
   try {
     const out = await nativeProcess(process.execPath, ['-e', launcher], env, JSON.stringify({ session_id: 'synthetic-report-deadline', title: 'Synthetic report' }))
     assert.equal(out.error, undefined, hookFailure(out))
@@ -878,11 +880,21 @@ test('a report hook whose reporter runs past its deadline is never queued', () =
     assert.doesNotMatch(hookLog(f), /REPORTER_QUEUED/)
     assert.deepEqual(existsSync(join(f.root, 'pending')) ? readdirSync(join(f.root, 'pending')) : [], [])
     assert.equal(out.stdout, '1', 'the host wrapper must observe the report failure')
+  } catch (error) {
+    firstError = error
+    throw error
   } finally {
     // The hung reporter child outlives its worker; stop it by its own pid.
     try { if (existsSync(marker)) await stopReporter(Number(readFileSync(marker, 'utf8'))) } catch (error) {
       // A child that survives its kill keeps the fixture for a look, and fails the test.
-      if (error?.keepFixture) throw error
+      if (error?.keepFixture) {
+        if (firstError !== undefined) {
+          error.cause = firstError
+          // fixture() prints only the message, so the first failure is named there too.
+          error.message += `; first failure: ${firstError?.message ?? firstError}`
+        }
+        throw error
+      }
       process.stderr.write(`report-deadline child not stopped: ${error}\n`)
     }
   }
@@ -1458,23 +1470,26 @@ test('a reporter sweeps scratch files older than a minute from the inbox and kee
 
 test('the sh reporter logs CLEANUP_FAILED when its sweep fails, but not for a file that went mid-scan', { skip: process.platform === 'win32' }, () => fixture(async f => {
   const inbox = join(f.root, 'progress-inbox'), script = join(f.root, 'progress-report.sh'), tools = join(f.home, 'sweep-tools')
+  const locale = join(f.home, 'sweep-locale')
   f.save(script, reporterSh(inbox))
   mkdirSync(tools, { recursive: true })
   // A stand-in find on PATH says what a real one would, and fails.
   const sweep = async (complaint, session) => {
-    f.save(join(tools, 'find'), `#!/bin/sh\n${complaint ? `echo '${complaint}' >&2\n` : ''}exit 1\n`)
+    f.save(join(tools, 'find'), `#!/bin/sh\nprintf '%s' "$LC_ALL" > "$HOME/sweep-locale"\n${complaint ? `printf '%s\\n' '${complaint}' >&2\n` : ''}exit 1\n`)
     chmodSync(join(tools, 'find'), 0o700)
-    const out = await nativeProcess('/bin/sh', [script, 'codex', 'prompt'], { ...f.env, PATH: `${tools}${delimiter}${f.env.PATH}` }, JSON.stringify({ session_id: session, prompt: 'PRIVATE_RAW_PROMPT' }))
+    const out = await nativeProcess('/bin/sh', [script, 'codex', 'prompt'], { ...f.env, LC_ALL: 'POSIX', PATH: `${tools}${delimiter}${f.env.PATH}` }, JSON.stringify({ session_id: session, prompt: 'PRIVATE_RAW_PROMPT' }))
     assert.equal(out.error, undefined, hookFailure(out))
     assert.equal(out.status, 0, hookFailure(out))
+    assert.equal(readFileSync(locale, 'utf8'), 'C', 'find complaints must use the English locale')
     return hookLog(f).match(/CLEANUP_FAILED/g)?.length ?? 0
   }
   // GNU and BSD find say this for an entry another session removed or renamed after the listing.
   assert.equal(await sweep('find: /inbox/codex-turn-1-1.json.taking: No such file or directory', 'synthetic-sweep-gone'), 0)
   assert.equal(await sweep('find: /inbox: Permission denied', 'synthetic-sweep-denied'), 1)
   assert.equal(await sweep('', 'synthetic-sweep-silent'), 2)
+  assert.equal(await sweep('find: /inbox/codex-turn-1-1.json.taking: No such file or directory\nfind: /inbox: Permission denied', 'synthetic-sweep-mixed'), 3)
   // Each run still saved its receipt.
-  assert.equal(readdirSync(inbox).filter(name => name.endsWith('.json')).length, 3)
+  assert.equal(readdirSync(inbox).filter(name => name.endsWith('.json')).length, 4)
 }))
 
 test('a timed-out prompt classifier saves a metadata receipt that marks a board request but not a folder named agent-board', () => fixture(async f => {
@@ -3109,74 +3124,12 @@ while (!fs.existsSync(process.env.WRITERS_START)) {
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 5)
 }
 `)
-  // Keep this writer independent of product helpers so the documented procedure is exercised.
-  f.save(writer, String.raw`const fs = require('node:fs')
-const { randomBytes } = require('node:crypto')
-const { performance } = require('node:perf_hooks')
-const [file, id] = process.argv.slice(2)
-const lock = file + '.agent-board-lock'
-const pause = ms => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms)
-const isRefusedRename = error => process.platform === 'win32' && ['EPERM', 'EACCES', 'EBUSY'].includes(error.code)
-const own = new RegExp('<!-- auto session=' + id + ' [^\\n]*-->\\r?\\n[\\s\\S]*?<!-- /auto session=' + id + ' -->\\r?\\n?')
-const write = round => {
-  const token = randomBytes(16).toString('hex')
-  const claim = JSON.stringify({ version: 1, pid: process.pid, token })
-  const block = '<!-- auto session=' + id + ' agent=format state=working updated=2026-01-31T09:30:00Z -->\n### FORMAT writer ' + id + '\n- [~] Round ' + round + '\n<!-- /auto session=' + id + ' -->\n'
-  const until = performance.now() + 2000
-  let fd
-  for (;;) {
-    try {
-      fd = fs.openSync(lock, 'wx', 0o600)
-      break
-    } catch (error) {
-      // FORMAT.md: an existing lock, or an access-denied create on Windows, means busy.
-      if (error.code !== 'EEXIST' && !(process.platform === 'win32' && error.code === 'EPERM')) throw error
-      if (performance.now() >= until) throw new Error('LOCK_BUSY')
-      pause(Math.min(10, until - performance.now()))
-    }
-  }
-  try {
-    fs.writeFileSync(fd, claim)
-  } catch (error) {
-    // An empty or partial lock is never recovered, so remove the file this writer created.
-    fs.closeSync(fd)
-    fs.unlinkSync(lock)
-    throw error
-  }
-  try {
-    for (let attempt = 0; attempt < 3; attempt += 1) {
-      const temporary = file + '.' + token + '.' + attempt + '.format-tmp'
-      try {
-        const before = fs.readFileSync(file, 'utf8')
-        fs.writeFileSync(temporary, own.test(before) ? before.replace(own, block) : before + block, { flag: 'wx', mode: 0o600 })
-        const stop = performance.now() + 2000
-        for (let delay = 10; ; delay *= 2) {
-          try {
-            fs.renameSync(temporary, file)
-            break
-          } catch (error) {
-            if (!isRefusedRename(error) || performance.now() >= stop) throw error
-            pause(Math.max(0, Math.min(delay, stop - performance.now())))
-          }
-        }
-      } finally {
-        if (fs.existsSync(temporary)) fs.unlinkSync(temporary)
-      }
-      if (fs.readFileSync(file, 'utf8').includes(block)) return
-    }
-    throw new Error('WRITE_FAILED')
-  } finally {
-    fs.closeSync(fd)
-    // Compare the whole text: a lock that is not this writer's must stay where it is.
-    if (fs.readFileSync(lock, 'utf8') === claim) fs.unlinkSync(lock)
-  }
-}
-// The gate releases each hook's first process; the hook writes from a later one.
-// Ten rounds keep these writers writing while the hooks write.
-for (let round = 1; round <= 10; round += 1) {
-  write(round)
-  if (round < 10) pause(50)
-}
+  // Keep this independent of product helpers, using the same documented procedure as the L5 journey.
+  f.save(writer, `const fs = require('node:fs')
+const main = ${formatWriter.toString()}
+const [file, session] = process.argv.slice(2)
+// Test-only headroom lets a loaded CI machine schedule every competing writer.
+main(fs, { file, session, rounds: 10, spacingMs: 50, lockWaitMs: 8000, gateMs: 15000 }).then(isWritten => { process.exitCode = isWritten ? 0 : 2 })
 `)
   const hooks = Array.from({ length: 8 }, (_, i) => `format-concurrent-hook-${i}`)
   const writers = Array.from({ length: 4 }, (_, i) => `f000000${i}`)
@@ -3214,12 +3167,16 @@ for (let round = 1; round <= 10; round += 1) {
       assert.equal(result.status, 0, hookFailure(result))
       assert.equal(result.error, undefined, hookFailure(result))
     }
+    for (const result of results.slice(hooks.length)) {
+      assert.match(result.stdout, /^WRITER_OK(?: after .*)?$/m)
+      assert.doesNotMatch(result.stdout, /\bLOST\b/)
+    }
     assert.ok(text.includes('Manual text must survive\n'), text)
     for (const id of owners) {
       assert.equal(text.split(`<!-- auto session=${id} `).length - 1, 1, text)
       assert.equal(text.split(`<!-- /auto session=${id} -->`).length - 1, 1, text)
     }
-    for (const id of writers) assert.match(text, new RegExp(`### FORMAT writer ${id}\\r?\\n- \\[~\\] Round 10\\r?\\n`))
+    for (const id of writers) assert.match(text, new RegExp(`### Format writer ${id}\\r?\\n> Context: Synthetic FORMAT.md writer\\r?\\n- \\[~\\] Round 10\\r?\\n`))
     assert.deepEqual(pendingFiles(f), [])
     const leftovers = readdirSync(f.root, { recursive: true }).filter(name => /\.agent-board-lock(?:\.recover)?$|\.(?:tmp|format-tmp|board-tmp)$/.test(name))
     assert.deepEqual(leftovers, [])

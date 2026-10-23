@@ -69,6 +69,78 @@ export const lockFile = async (world, name) => {
   }
 }
 
+// Windows only: a program outside the board holds progress.md open (share mode None) while one
+// writer renames over it, so the writer meets a refused rename, not a refused first read.
+export const holdNextRename = async world => {
+  assert.equal(process.platform, 'win32')
+  const request = join(world.root, 'rename-request')
+  const ready = join(world.root, 'rename-held')
+  const refused = join(world.root, 'rename-refused')
+  const quote = value => value.replace(/'/g, "''")
+  const worker = childIn(world, 'powershell.exe', ['-NoProfile', '-Command', `
+$ErrorActionPreference = 'Stop'
+[Console]::Out.WriteLine('HOLDER_READY')
+$until = [DateTime]::UtcNow.AddSeconds(20)
+while (!(Test-Path -LiteralPath '${quote(request)}')) {
+  if ([DateTime]::UtcNow -ge $until) { throw 'Rename never requested' }
+  Start-Sleep -Milliseconds 5
+}
+$f = [IO.File]::Open('${quote(world.path)}', 'Open', 'ReadWrite', 'None')
+try {
+  [IO.File]::WriteAllText('${quote(ready)}', '')
+  $until = [DateTime]::UtcNow.AddSeconds(10)
+  while (!(Test-Path -LiteralPath '${quote(refused)}')) {
+    if ([DateTime]::UtcNow -ge $until) { throw 'Rename was never refused' }
+    Start-Sleep -Milliseconds 5
+  }
+} finally { $f.Dispose() }
+[Console]::Out.WriteLine('HOLDER_RELEASED')
+`], { lifetimeMs: LOCK_READY_MS + 30000 })
+  try {
+    await seenWithin(() => {
+      if (worker.failure()) throw worker.failure()
+      return worker.output()
+    }, text => text.includes('HOLDER_READY'), LOCK_READY_MS)
+    // The holder opens progress.md once the writer's temp file is written, which is before the writer
+    // starts its 2 s rename clock: on a loaded machine the holder's start must not use that time up.
+    // The first refused rename tells the holder to let go.
+    const preload = world.write('hold-rename.cjs', `const fs = require('node:fs')
+const { syncBuiltinESMExports } = require('node:module')
+const write = fs.writeFileSync
+const rename = fs.renameSync
+const file = ${JSON.stringify(world.path)}
+let isHeld = false
+fs.writeFileSync = (target, ...rest) => {
+  const result = write(target, ...rest)
+  if (!isHeld && typeof target === 'string' && target.startsWith(file + '.') && target.endsWith('.format-tmp')) {
+    isHeld = true
+    write(${JSON.stringify(request)}, '')
+    const until = performance.now() + 8000
+    while (!fs.existsSync(${JSON.stringify(ready)})) {
+      if (performance.now() >= until) throw new Error('HOLDER_TIMEOUT')
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 5)
+    }
+  }
+  return result
+}
+fs.renameSync = (from, to) => {
+  try { return rename(from, to) } catch (error) {
+    if (to === file && ['EPERM', 'EACCES', 'EBUSY'].includes(error.code)) write(${JSON.stringify(refused)}, error.code)
+    throw error
+  }
+}
+syncBuiltinESMExports()
+`)
+    const before = world.env.NODE_OPTIONS
+    world.env.NODE_OPTIONS += ` --require=${JSON.stringify(preload)}`
+    world.cleanups.push(() => { world.env.NODE_OPTIONS = before })
+    return { finished: () => worker.done }
+  } catch (error) {
+    await worker.stop()
+    throw error
+  }
+}
+
 export const twoWriters = async (world, a, b) => {
   const gate = world.write('writers-go', '')
   const workers = [a, b].map((value, index) => childIn(world, process.execPath, ['--input-type=module', '-e', `import { readFileSync, writeFileSync, renameSync } from 'node:fs'
@@ -173,7 +245,7 @@ syncBuiltinESMExports()
 
 // Added for the L5 concurrent-writers journey: the write procedure docs/FORMAT.md gives other
 // writers ("Concurrent writers"), run as separate processes. Each write takes the native lock
-// (`<file>.agent-board-lock`, created exclusively, busy for at most 2 s), reads the file, changes
+// (`<file>.agent-board-lock`, created exclusively, waited on for at most `lockWaitMs`, 2 s by default), reads the file, changes
 // only its own block, writes a temp file beside progress.md and renames it over (on Windows a
 // refused rename is tried again with a doubling pause, up to 2 s), and reads back; when its block
 // did not read back it tries again, up to three tries in all. It then releases the lock, removing it
@@ -182,8 +254,8 @@ syncBuiltinESMExports()
 // Prints WRITER_OK, or WRITE_FAILED with the error codes it met, and returns whether it wrote.
 // The two gates (the start signal, and the writer before it) are waited for at most gateMs: after
 // a hard kill of the driver nobody opens them, and without a deadline this process would poll for ever.
-const formatWriter = async (fs, config) => {
-  const { file, session, rounds, spacingMs, gate, after, gateMs } = config
+export const formatWriter = async (fs, config) => {
+  const { file, session, rounds, spacingMs, gate, after, gateMs, lockWaitMs = 2000 } = config
   const pause = ms => new Promise(done => setTimeout(done, ms))
   const isWindows = process.platform === 'win32'
   const lock = `${file}.agent-board-lock`
@@ -203,7 +275,7 @@ const formatWriter = async (fs, config) => {
   const end = `<!-- /auto session=${session} -->`
   // Returns the lock's descriptor with the claim written in it, or undefined with the reason in codes.
   const take = async claim => {
-    const until = performance.now() + 2000
+    const until = performance.now() + lockWaitMs
     for (;;) {
       let fd
       try {
@@ -296,10 +368,10 @@ const WRITER_GATE_MS = 20000
 // One process per session id, all waiting on a gate file so they start together. With
 // isSequential each waits for the one before it to finish instead, so no two overlap. rounds
 // and spacingMs repeat the whole procedure to keep writers busy while other writers are active.
-export const formatWriters = async (world, sessions, { rounds = 1, spacingMs = 0, isSequential = false, gateMs = WRITER_GATE_MS } = {}) => {
+export const formatWriters = async (world, sessions, { rounds = 1, spacingMs = 0, isSequential = false, gateMs = WRITER_GATE_MS, lockWaitMs = 2000 } = {}) => {
   const gate = join(world.root, 'format-writers-go')
   const workers = sessions.map((session, index) => {
-    const config = { file: world.path, session, rounds, spacingMs, gate, gateMs, after: isSequential && index > 0 ? join(world.root, `format-writer-done-${index - 1}`) : undefined }
+    const config = { file: world.path, session, rounds, spacingMs, gate, gateMs, lockWaitMs, after: isSequential && index > 0 ? join(world.root, `format-writer-done-${index - 1}`) : undefined }
     return childIn(world, process.execPath, ['--input-type=module', '-e', `import * as fs from 'node:fs'
 const main = ${formatWriter.toString()}
 process.exitCode = await main(fs, ${JSON.stringify(config)}) ? 0 : 2
