@@ -1,0 +1,2 @@
+- **The Codex host tests no longer race a cold Node start (#268).** The host-behaviour cases answer through an in-process stub, so a slow start on a busy machine cannot reach the 5 s deadline; one real app-server smoke test and the Windows process-tree cleanup test still start real processes.
+  Tests: `codex host: control requests answer through the fixture stub, so a slow Node start cannot reach the deadline`, `codex host: one real app-server subprocess smoke test still passes`.
