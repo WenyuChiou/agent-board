@@ -4,7 +4,7 @@ import type { Engine } from 'claude-code/testing'
 import { localDay } from '../hooks/journal'
 import { paletteFor } from '../hooks/palette'
 import { parseProgress } from '../hooks/parse'
-import { captureJson, capturePath, emptyQuestions, observeQuestions, parseCapture, parseQuestions, questionProofJson, questionProofPath, questionsJson, questionsPath } from '../hooks/questions'
+import { captureJson, capturePath, emptyQuestions, observeQuestions, parseCapture, parseQuestions, questionProofJson, questionProofPath, questionsJson, questionsPath, resolveQuestion } from '../hooks/questions'
 import type { QuestionCapture } from '../hooks/questions'
 import { sha256 } from '../hooks/sha256'
 import { STRINGS } from '../hooks/strings'
@@ -678,6 +678,149 @@ test('a question pass held for a minute leaves one read of the ledger waiting', 
   expect(world.reads.filter(path => path === LEDGER)).toHaveLength(1)
 })
 
+test('an inbox drain held on the ledger for a minute releases the write queue within 16 seconds and records its saved question once', { timeoutMs: 30_000 }, async ($, on) => {
+  const world = makeWorld([[FILE, `## demo\n${block('a1b2c301', 'working', 1, '- [~] Work')}`]])
+  world.env = english
+  world.hasTasks = true
+  world.store = { lang: 'en', autoConnectOff: true, inboxDone: {} }
+  world.reply = prompt => prompt.includes('TITLE:') ? 'TITLE: Add the limiter\nDONE: Added the middleware\nNEXT: Write the tests\nASK: Keep the limiter, OK?' : undefined
+  const clock = engineBeneath(on, world)
+  await $.session.start(START)
+  for (let n = 0; n < 3; n++) await clock.advance(2000)
+  let isArmed = false
+  let inFlight = 0
+  let maxInFlight = 0
+  let release = (): void => undefined
+  world.beforeStoreSet = key => { if (key.startsWith('pendingInboxQuestion:')) isArmed = true }
+  world.holdRead = path => {
+    if (path !== LEDGER || !isArmed) return undefined
+    inFlight += 1
+    maxInFlight = Math.max(maxInFlight, inFlight)
+    return new Promise<void>(resolve => {
+      release = () => { isArmed = false; inFlight -= 1; resolve() }
+    })
+  }
+  put(world, `${INBOX}/codex-turn-1760600000-1.json`, JSON.stringify({ session_id: 'synthetic-drain-question', cwd: '/work/api-gateway', last_assistant_message: 'Synthetic work is done. Keep the limiter, OK?' }), NOW)
+  await clock.advance(4000)
+  expect(inFlight).toBe(1)
+  let hasWritten = false
+  const writing = $.command.run({ ...TIDY, args: 'add demo: Synthetic write after the drain' }).then(() => { hasWritten = true })
+  try {
+    for (let n = 0; n < 8; n++) await clock.advance(2000)
+    expect(world.files.get(FILE)).toContain('Synthetic write after the drain')
+    expect(hasWritten).toBe(true)
+    expect(Object.keys(world.store).some(key => key.startsWith('pendingInboxQuestion:'))).toBe(true)
+    expect(inFlight).toBe(1)
+    expect(maxInFlight).toBe(1)
+    for (let n = 0; n < 22; n++) await clock.advance(2000)
+    world.holdRead = undefined
+    release()
+  } finally {
+    world.holdRead = undefined
+    if (inFlight > 0) release()
+    await clock.advance(2000)
+    await writing
+  }
+  for (let n = 0; n < 3; n++) await clock.advance(2000)
+  expect(ledgerRecords(world).filter(record => record.words === 'Keep the limiter, OK?')).toHaveLength(1)
+  expect(Object.keys(world.store).some(key => key.startsWith('pendingInboxQuestion:'))).toBe(false)
+  expect(maxInFlight).toBe(1)
+})
+
+test('a ledger read held for a minute shows the question-list error after 15 seconds and a successful pass clears it', { timeoutMs: 30_000 }, async ($, on) => {
+  const world = makeWorld([[FILE, pruningBoard]])
+  world.env = english
+  world.store = { lang: 'en', autoConnectOff: true, inboxDone: {} }
+  const clock = engineBeneath(on, world)
+  await $.session.start({ ...START, surface: 'desktop' })
+  for (let n = 0; n < 3; n++) await clock.advance(2000)
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
+  let release = (): void => undefined
+  let reads = 0
+  world.holdRead = path => {
+    if (path !== LEDGER) return undefined
+    reads += 1
+    return new Promise<void>(resolve => {
+      release = resolve
+    })
+  }
+  put(world, LEDGER, world.files.get(LEDGER)!, NOW)
+  try {
+    await clock.advance(2000)
+    expect(reads).toBe(1)
+    await clock.advance(14_000)
+    expect(await ui.find({ type: 'Text', text: EN.questionsUnreadable() })).toBeUndefined()
+    await clock.advance(2000)
+    expect(await ui.find({ type: 'Text', text: EN.questionsUnreadable() })).toBeDefined()
+    for (let n = 0; n < 22; n++) await clock.advance(2000)
+    expect(reads).toBe(1)
+    expect(await ui.find({ type: 'Text', text: EN.questionsUnreadable() })).toBeDefined()
+    await clock.advance(1000)
+    world.holdRead = undefined
+    release()
+    await clock.advance(2000)
+    await clock.advance(2000)
+    expect(await ui.find({ type: 'Text', text: EN.questionsUnreadable() })).toBeUndefined()
+  } finally {
+    world.holdRead = undefined
+    release()
+    await clock.advance(2000)
+    await ui.unmount()
+  }
+})
+
+test('a caller waiting behind two successive ten-second question passes gives up within 15 seconds in total', async ($, on) => {
+  const world = makeWorld([[FILE, `## demo\n${block('a1b2c301', 'waiting', 1, '- [?] Publish the first plan, OK?', 'Add a shelf')}`]])
+  world.env = english
+  world.store = { lang: 'en', autoConnectOff: true, inboxDone: {}, opened: ['waiting'] }
+  let isArmed = false
+  let held = 0
+  let reached!: () => void
+  const entered = new Promise<void>(resolve => { reached = resolve })
+  const releases: Array<() => void> = []
+  // The cache is written at the end of each pass, so only the next pass's first read is held.
+  on('state.set', { plugin: 'agent-board', key: 'questionLedger' }, ($, e, next) => {
+    if (held === 1) isArmed = true
+    return next(e)
+  })
+  const clock = engineBeneath(on, world)
+  await $.session.start({ ...START, surface: 'desktop' })
+  for (let n = 0; n < 3; n++) await clock.advance(2000)
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
+  isArmed = true
+  world.holdRead = path => {
+    if (path !== LEDGER || !isArmed || held >= 2) return undefined
+    isArmed = false
+    held += 1
+    reached()
+    return new Promise<void>(resolve => { releases.push(resolve) })
+  }
+  const key = 'demo::Add a shelf::0::hide'
+  const first = ui.press({ key })
+  await entered
+  const second = ui.press({ key })
+  await clock.advance(1)
+  let hasFinished = false
+  const waiting = ui.press({ key }).then(() => { hasFinished = true })
+  try {
+    await clock.advance(9999)
+    releases[0]!()
+    await clock.advance(1)
+    expect(held).toBe(2)
+    // A second past the third press's 15-second deadline; with a deadline per pass it waits to 25.
+    await clock.advance(6000)
+    expect(hasFinished).toBe(true)
+    expect(await ui.find({ type: 'Text', text: EN.pressLedgerFailed })).toBeDefined()
+  } finally {
+    await clock.advance(5000)
+    world.holdRead = undefined
+    for (const release of releases) release()
+    await clock.advance(2000)
+    await Promise.all([first, second, waiting])
+    await ui.unmount()
+  }
+})
+
 test('board reads that hang for a minute leave one question pass at a time while the 2-second timer ticks, and an inbox question is recorded within seconds once they answer', { timeoutMs: 30_000 }, async ($, on) => {
   const board = `## demo\n${block('a1b2c301', 'waiting', 1, '- [?] Publish the first plan, OK?')}`
   const world = makeWorld([[FILE, board]])
@@ -796,6 +939,116 @@ test('a progress.md with a mid-file cut-off block writes the ledger and shows no
   } finally {
     await ui.unmount()
   }
+})
+
+test('a pending inbox question stays stored when its block is cut between the drain and the pass, and is recorded once when whole', async ($, on) => {
+  const whole = `## demo\n${block('55fb44cb', 'working', 0, '- [~] Work', 'Add a shelf')}\n## later\n${block('a1b2c301', 'working', 0, '- [~] Work')}`
+  const cut = whole.replace('<!-- /auto session=55fb44cb -->', '')
+  const world = makeWorld([[FILE, whole]])
+  world.env = english
+  const pending = { id: '55fb44cb', agent: 'codex', project: 'demo', text: 'Ship the shelf, OK?', isQuestion: true, at: NOW - 60_000, sourceRevisions: ['f'.repeat(64)] }
+  const key = `pendingInboxQuestion:${sha256(FILE)}:${sha256(JSON.stringify([pending.id, pending.sourceRevisions]))}`
+  let isRestoring = false
+  let reads = 0
+  const discarded: string[] = []
+  world.store = new Proxy({ lang: 'en', autoConnectOff: true, inboxDone: {}, [key]: pending }, {
+    deleteProperty: (target, one) => {
+      discarded.push(String(one))
+      return Reflect.deleteProperty(target, one)
+    },
+  })
+  world.beforeStoreGet = one => { if (one === key) isRestoring = true }
+  world.beforeRead = path => {
+    if (path !== FILE || !isRestoring) return
+    reads += 1
+    if (reads === 2) world.files.set(FILE, cut)
+  }
+  const clock = engineBeneath(on, world)
+  let hasPassed = false
+  on('state.set', { plugin: 'agent-board', key: 'questionLedger' }, ($, e, next) => {
+    if (reads >= 2) hasPassed = true
+    return next(e)
+  })
+  expect(parseProgress(cut)).toEqual(parseProgress(whole))
+  await $.session.start({ ...START, surface: 'desktop' })
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
+  try {
+    expect(reads).toBeGreaterThanOrEqual(2)
+    expect(hasPassed).toBe(true)
+    expect(world.store[key]).toEqual(pending)
+    expect(discarded).not.toContain(key)
+    expect(ledgerRecords(world).some(record => record.words === pending.text)).toBe(false)
+    expect(await ui.find({ type: 'Text', text: EN.inboxQuestionNotKept })).toBeDefined()
+    world.beforeRead = undefined
+    world.files.set(FILE, whole)
+    world.mtime += 1
+    for (let n = 0; n < 3; n++) await clock.advance(2000)
+    expect(ledgerRecords(world).filter(record => record.words === pending.text)).toHaveLength(1)
+    expect(world.store[key]).toBeUndefined()
+    expect(discarded.filter(one => one === key)).toHaveLength(1)
+  } finally {
+    await ui.unmount()
+  }
+})
+
+test('a pending inbox question no pass can record stays stored, runs no question pass on idle polls, and is tried again once progress.md changes', async ($, on) => {
+  // Two blocks with one session id under one heading: the pass records neither them nor the turn.
+  const twice = `## demo\n${block('55fb44cb', 'working', 0, '- [~] Work', 'Add a shelf')}${block('55fb44cb', 'working', 0, '- [~] Work', 'Paint it')}`
+  const once = `## demo\n${block('55fb44cb', 'working', 0, '- [~] Work', 'Add a shelf')}`
+  const world = makeWorld([[FILE, twice]])
+  world.env = english
+  const pending = { id: '55fb44cb', agent: 'codex', project: 'demo', text: 'Ship the shelf, OK?', isQuestion: true, at: NOW - 60_000, sourceRevisions: ['f'.repeat(64)] }
+  const key = `pendingInboxQuestion:${sha256(FILE)}:${sha256(JSON.stringify([pending.id, pending.sourceRevisions]))}`
+  world.store = { lang: 'en', autoConnectOff: true, inboxDone: {}, [key]: pending }
+  const clock = engineBeneath(on, world)
+  let passes = 0
+  on('state.set', { plugin: 'agent-board', key: 'questionLedger' }, ($, e, next) => {
+    passes += 1
+    return next(e)
+  })
+  await $.session.start({ ...START, surface: 'desktop' })
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
+  try {
+    for (let n = 0; n < 4; n++) await clock.advance(2000)
+    expect(passes).toBeGreaterThan(0)
+    expect(world.store[key]).toEqual(pending)
+    expect(ledgerRecords(world).some(record => record.words === pending.text)).toBe(false)
+    const before = passes
+    for (let n = 0; n < 5; n++) await clock.advance(2000)
+    expect(passes).toBe(before)
+    world.files.set(FILE, once)
+    world.mtime += 1
+    for (let n = 0; n < 3; n++) await clock.advance(2000)
+    expect(ledgerRecords(world).filter(record => record.words === pending.text)).toHaveLength(1)
+    expect(world.store[key]).toBeUndefined()
+  } finally {
+    await ui.unmount()
+  }
+})
+
+test('a pending inbox question a session asked before in the same words, and the person answered, stays stored until the pass records this ask', async ($, on) => {
+  // The answered record has the same scope and words, but another inbox file's revision.
+  const twice = `## demo\n${block('55fb44cb', 'working', 0, '- [~] Work', 'Add a shelf')}${block('55fb44cb', 'working', 0, '- [~] Work', 'Paint it')}`
+  const once = `## demo\n${block('55fb44cb', 'working', 0, '- [~] Work', 'Add a shelf')}`
+  const earlier = { id: '55fb44cb', agent: 'codex', project: 'demo', text: 'Ship the shelf, OK?', isQuestion: true, at: NOW - 2 * HOUR, sourceRevisions: ['e'.repeat(64)] }
+  const seeded = observeQuestions(emptyQuestions(), parseProgress(once), null, [], NOW - 2 * HOUR, true, 'seed', { retired: [], consumed: [] }, [earlier]).ledger
+  const asked = seeded.records.find(record => record.words === earlier.text)!
+  const answered = resolveQuestion(seeded, asked.id, NOW - HOUR)
+  const world = makeWorld([[FILE, twice], [LEDGER, questionsJson(answered)]])
+  world.env = english
+  const pending = { ...earlier, at: NOW - 60_000, sourceRevisions: ['f'.repeat(64)] }
+  const key = `pendingInboxQuestion:${sha256(FILE)}:${sha256(JSON.stringify([pending.id, pending.sourceRevisions]))}`
+  world.store = { lang: 'en', autoConnectOff: true, inboxDone: {}, [key]: pending }
+  const clock = engineBeneath(on, world)
+  await $.session.start({ ...START, surface: 'desktop' })
+  for (let n = 0; n < 4; n++) await clock.advance(2000)
+  expect(world.store[key]).toEqual(pending)
+  expect(ledgerRecords(world).filter(record => record.words === pending.text && record.isUnresolved)).toHaveLength(0)
+  world.files.set(FILE, once)
+  world.mtime += 1
+  for (let n = 0; n < 3; n++) await clock.advance(2000)
+  expect(ledgerRecords(world).filter(record => record.words === pending.text && record.isUnresolved)).toHaveLength(1)
+  expect(world.store[key]).toBeUndefined()
 })
 
 test('a saved pending question of a block cut off before its question line stays stored, and is recorded once when the block is whole', async ($, on) => {

@@ -480,7 +480,7 @@ test('a question hidden on the pane stays hidden while its block is cut off and 
   const ship = seeded.records.find(record => record.words === 'Ship the shelf, OK?')!
   const answered = [ship.id]
   const hidden = resolveQuestion(seeded, ship.id, NOW)
-  const cut = [...head, '- [?] Paint it, O', ...AFTER].join('\n')
+  const cut = [...head, '- [?] Ship the shelf', ...AFTER].join('\n')
   const projects = parseProgress(cut)
   const frozen = cutOffScopes(projects, cutOffSpans(cut))
   const during = observeQuestions(hidden, projects, null, answered, NOW + 1000, true, 'cut', undefined, [], [], frozen).ledger
@@ -488,7 +488,7 @@ test('a question hidden on the pane stays hidden while its block is cut off and 
   const view = buildView(projects, [], null, NOW + 1000, 0, {}, EN, answered, {}, during, undefined, [], frozen)
   const shown = [...view.waiting, ...(view.reminder ?? []), ...(view.older ?? [])].filter(item => item.project === 'demo-152')
   expect(shown).toHaveLength(1)
-  expect(shown[0]).toMatchObject({ text: 'Paint it, O', hideKey: '' })
+  expect(shown[0]).toMatchObject({ text: 'Ship the shelf', hideKey: '' })
   expect(shown[0]?.questionId).toBeUndefined()
   const restored = [...head, '- [?] Paint it, OK?', '<!-- /auto session=55fb44cb -->', ...AFTER].join('\n')
   const after = observeQuestions(during, parseProgress(restored), null, answered, NOW + 2000, true, 'whole').ledger

@@ -726,21 +726,37 @@ const passQuestions = async ($: EngineInterface, path: string, projects: readonl
 }
 
 const pollQuestions = async ($: EngineInterface, path: string, projects: readonly ProgressProject[], isSettled = false, captured: readonly PendingTurn[] = [], answeredTurns: readonly QuestionAnswerEvidence[] = [], resolveId?: string): Promise<boolean> => {
+  const deadline = (await $.clock.now()) + HUNG_MS
   while (questionsRunning !== null) {
-    // A pass still running after HUNG_MS is taken as hung: this caller gives up, and no
-    // second pass starts beside it.
-    if (!(await isDoneWithin($, questionsRunning, HUNG_MS))) {
+    const waiting = questionsRunning
+    // Successive passes share this caller's wait, rather than each starting it over.
+    const remaining = deadline - (await $.clock.now())
+    if (remaining <= 0 || !(await isDoneWithin($, waiting, remaining))) {
       questionsSeen = null
       return false
     }
   }
   const run = passQuestions($, path, projects, isSettled, captured, answeredTurns, resolveId)
   questionsRunning = run
-  try {
-    return await run
-  } finally {
+  // The run keeps the gate after its caller gives up, including when its finally rejects.
+  const release = (): void => {
     if (questionsRunning === run) questionsRunning = null
   }
+  run.then(release, release)
+  // A timer callback that rejects would go unhandled in the worker, so the store calls end in a catch.
+  $.clock.after(HUNG_MS, () => {
+    if (questionsRunning !== run) return
+    read($, hasQuestionsProblem)
+      .then(async wasProblem => {
+        if (questionsRunning === run && !wasProblem) await update($, hasQuestionsProblem, () => true)
+      })
+      .catch(() => undefined)
+  })
+  if (!(await isDoneWithin($, run, HUNG_MS))) {
+    questionsSeen = null
+    return false
+  }
+  return await run
 }
 
 // What an idle question pass is made from (#156): the files beside progress.md it reads
@@ -933,9 +949,11 @@ const pollSeen = async (
 // after HUNG_MS is taken as hung: the next one starts in its place, and what the hung one would
 // still write is dropped. While a poll that was taken over is still held, no other is taken over.
 // Every caller shares one question pass at a time; the poll and the timer's retain skip while
-// one runs. A press, the drain's question or the archive waits for it up to HUNG_MS, then gives
-// up. No pass starts beside a held one, so a question file that never answers stops question
-// passes until it does, while the status line and progress.html are still drawn.
+// one runs. A press, the drain's question or the archive waits behind other passes for HUNG_MS
+// in total, then gives its own pass HUNG_MS. Giving up releases the caller and the write queue,
+// while the run keeps the gate until it settles. A run held for HUNG_MS shows the question-list
+// error; its finally clears it after success. Pending inbox questions stay saved until the
+// ledger records their source and words, while the status line and progress.html still draw.
 const HUNG_MS = 15 * 1000
 let pollRun = 0
 let pollStartedAt = 0
@@ -2354,8 +2372,28 @@ const keepInboxQuestions = async ($: EngineInterface, captured: readonly Pending
       await pendingQuestionsProblem($, true)
       return
     }
-    for (const [key] of pending) await discard(key)
-    await pendingQuestionsProblem($, hasCleanupProblem || hasRestoreProblem || unkept.size > 0)
+    let hasUnrecorded = false
+    if (pending.length > 0) {
+      // The pass can see a block cut off after our read and succeed without recording its turn.
+      const ledger = await read($, questionLedger)
+      for (const [key, turn] of pending) {
+        // A turn the pass never records (not a question, or no session) goes as before. Only this
+        // turn's own evidence counts: an earlier ask of the same words by the same session, answered
+        // long ago, is not a record of this one.
+        const scope = !turn.isQuestion || turn.id === undefined ? null : questionScope(turn.project, turn.agent, turn.id)
+        const json = JSON.stringify(turn)
+        const revisions = turn.sourceRevisions ?? []
+        const isRecorded = scope === null || ledger.records.some(record => record.scope === scope && record.words === questionWords(turn.text) && (record.producerSources?.includes(json) || revisions.length > 0 && revisions.every(revision => record.producerRevisions?.includes(revision))))
+        if (isRecorded) await discard(key)
+        else {
+          hasUnrecorded = true
+          // Held like a cut-off block's turn: tried again once progress.md changes, not on every
+          // idle poll, so a turn no pass can record does not run a pass every 2 seconds.
+          heldInboxQuestions.add(key)
+        }
+      }
+    }
+    await pendingQuestionsProblem($, hasUnrecorded || hasCleanupProblem || hasRestoreProblem || unkept.size > 0)
   })
 }
 
