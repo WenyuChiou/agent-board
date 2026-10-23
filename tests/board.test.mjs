@@ -1383,7 +1383,7 @@ setTimeout(() => process.stdout.write('Redis it is; wiring it up now.\\n'), 1000
   const script = join(dir, 'agent-board.mjs')
   writeFileSync(script, `globalThis.AGENT_BOARD = ${JSON.stringify({ path, lang: 'en' })}\n${now === undefined ? '' : `Date.now = () => ${now}\n`}${source}`)
   const child = spawn(process.execPath, [script, '--serve-child', ...serveArgs], {
-    env: { ...process.env, CLAUDE_PROGRESS_FILE: '', NO_COLOR: '1', AGENT_BOARD_GROK: stand, AGENT_BOARD_CODEX: stand, XDG_RUNTIME_DIR: run, ...env },
+    env: { ...process.env, HOME: dir, USERPROFILE: dir, CLAUDE_CONFIG_DIR: dir, CLAUDE_PROGRESS_FILE: '', NO_COLOR: '1', AGENT_BOARD_GROK: stand, AGENT_BOARD_CODEX: stand, XDG_RUNTIME_DIR: run, ...env },
     stdio: ['ignore', 'pipe', 'pipe'],
   })
   let stderr = ''
@@ -3065,7 +3065,7 @@ test('a refused close on the page says why next to the close button', async () =
 test('unexpected server read and action errors return a reason and log their stacks', async () => {
   const source = BOARD_SCRIPT
     .replace('\n    view: freshView,\n    pending,', '\n    view: () => { throw new TypeError("synthetic server read failure") },\n    pending,')
-    .replace('\n    tidy,\n    paste,', '\n    tidy: () => { throw new TypeError("synthetic server action failure") },\n    paste,')
+    .replace('\n    tidy,\n', '\n    tidy: () => { throw new TypeError("synthetic server action failure") },\n')
   assert.ok(source.includes('synthetic server read failure') && source.includes('synthetic server action failure'))
   const board = await page('', {}, [], undefined, source)
   try {
@@ -4401,8 +4401,8 @@ const tidyFixture = fn => {
     const path = join(dir, 'progress.md')
     const script = join(dir, 'agent-board.mjs')
     writeFileSync(script, `globalThis.AGENT_BOARD = ${JSON.stringify({ path, lang: 'en' })}\nDate.now = () => ${TIDY_NOW}\n${BOARD_SCRIPT}`)
-    const command = (args = ['--tidy'], preload = '') => spawnSync(process.execPath, [...(preload ? ['-r', preload] : []), script, ...args], {
-      cwd: dir, encoding: 'utf8', timeout: 10000,
+    const command = (args = ['--tidy'], preload = '', input = '') => spawnSync(process.execPath, [...(preload ? ['-r', preload] : []), script, ...args], {
+      cwd: dir, encoding: 'utf8', timeout: 10000, input,
       env: { ...process.env, HOME: dir, USERPROFILE: dir, CLAUDE_CONFIG_DIR: dir, CLAUDE_PROGRESS_FILE: path, NO_COLOR: '1' },
     })
     const snapshot = () => Object.fromEntries(readdirSync(dir).map(name => [name, readFileSync(join(dir, name))]))
@@ -5356,4 +5356,186 @@ global.setInterval = callback => { callback(); return { unref() {} } }
   assert.ok(Object.keys(ran.files).some(name => name.startsWith('progress-questions-source-')), JSON.stringify(Object.keys(ran.files)))
   assert.match(ran.stderr, /some changes may already be saved/)
   assert.doesNotMatch(ran.stderr, /nothing was changed/)
+})
+
+// The bundled actions run against one synthetic scratch board, without a server or host.
+const bulkFixture = (fn, lang = 'en') => tidyFixture(f => {
+  const script = join(f.dir, 'bulk.mjs')
+  const source = BOARD_SCRIPT.replace(/await \w+\(\);(?=\s*\}\s*catch \(error\))/, '')
+  assert.notEqual(source, BOARD_SCRIPT)
+  const run = code => {
+    writeFileSync(script, `globalThis.AGENT_BOARD = ${JSON.stringify({ path: f.path, lang })}\nDate.now = () => ${TIDY_NOW}\n${source}\n{ ${code} }`)
+    const result = spawnSync(process.execPath, [script], { cwd: f.dir, encoding: 'utf8', timeout: 10000, env: { ...process.env, HOME: f.dir, USERPROFILE: f.dir, CLAUDE_CONFIG_DIR: f.dir, CLAUDE_PROGRESS_FILE: f.path } })
+    assert.equal(result.status, 0, result.stderr)
+    return JSON.parse(result.stdout)
+  }
+  fn({ ...f, run })
+})
+
+test('tidy --stopped moves every stopped block and names the count', () => {
+  for (const [lang, words] of [['en', EN], ['zh-TW', ZH_TW], ['zh-CN', ZH_CN]]) bulkFixture(f => {
+    const board = '# Progress\n\n## Synthetic\n' + f.block('aaaab001', 'Stopped one', 'ended', 1) + f.block('aaaab002', 'Stopped two', 'working', 25) + f.block('aaaab003', 'Live stays', 'working', 1) + '### Manual stays\n- [ ] Next\n'
+    writeFileSync(f.path, board)
+    const got = f.run(`const before = read(path); const p = bulkTidy({selector:'stopped'}); const unchanged = read(path) === before; const result = bulkTidy({token:p.token}); process.stdout.write(JSON.stringify({p,unchanged,result,board:read(path),journal:read(journalPath(path,Date.now())),done:countDay(read(journalPath(path,Date.now())),Date.now())}));`)
+    assert.equal(got.p.count, 2)
+    assert.equal(got.unchanged, true)
+    assert.equal(got.result.note, words.tidyResult(2, 0))
+    assert.ok(got.board.includes('Live stays') && got.board.includes('Manual stays'))
+    assert.ok(!got.board.includes('Stopped one') && !got.board.includes('Stopped two'))
+    assert.equal((got.journal.match(/"phase":"committed"/g) ?? []).length, 2)
+    assert.equal(got.done, 0)
+  }, lang)
+})
+
+test("tidy --agent grok leaves other agents' blocks alone", () => bulkFixture(f => {
+  writeFileSync(f.path, '## Synthetic\n' + f.block('aaaab011', 'Grok old', 'ended', 1).replace('agent=codex', 'agent=grok') + f.block('aaaab012', 'Codex stays', 'ended', 100))
+  const got = f.run(`const p=bulkTidy({selector:'agent',value:'grok'}); const result=bulkTidy({token:p.token}); process.stdout.write(JSON.stringify({p,result,board:read(path)}));`)
+  assert.equal(got.p.count, 1)
+  assert.equal(got.result.ok, true)
+  assert.ok(got.board.includes('Codex stays') && !got.board.includes('Grok old'))
+}))
+
+test('tidy --older 14 refuses a row that changed during the sweep', () => bulkFixture(f => {
+  writeFileSync(f.path, '## Synthetic\n' + f.block('aaaab021', 'Old changes', 'ended', 15 * 24) + f.block('aaaab022', 'Old unchanged', 'ended', 15 * 24) + f.block('aaaab023', 'Boundary stays', 'ended', 14 * 24))
+  const got = f.run(`const p=bulkTidy({selector:'older',value:'14'}); writeFileSync(path,read(path).replace('Old changes','Changed meanwhile')); const result=bulkTidy({token:p.token}); const replay=bulkTidy({token:p.token}); process.stdout.write(JSON.stringify({p,result,replay,board:read(path)}));`)
+  assert.equal(got.p.count, 2)
+  assert.equal(got.result.ok, false)
+  assert.equal(got.result.note, EN.tidyResult(1, 1))
+  assert.equal(got.replay.ok, false)
+  assert.ok(got.board.includes('Changed meanwhile') && got.board.includes('Boundary stays') && !got.board.includes('Old unchanged'))
+}))
+
+test('bulk tidy preview cancellation and invalid selectors write no sidecars', () => bulkFixture(f => {
+  writeFileSync(f.path, '## Synthetic\n' + f.block('aaaab031', 'Keep', 'ended', 1))
+  const before = readFileSync(f.path, 'utf8')
+  const got = f.run(`const p=bulkTidy({selector:'stopped'}); const cancelled=bulkTidy({token:p.token,cancel:true}); const invalid=['0','-1','1.5','Infinity','NaN','999999999999999999'].map(value=>bulkTidy({selector:'older',value}).ok); process.stdout.write(JSON.stringify({cancelled,invalid}));`)
+  assert.equal(got.cancelled.ok, true)
+  assert.ok(got.invalid.every(one => !one))
+  assert.equal(readFileSync(f.path, 'utf8'), before)
+  assert.deepEqual(readdirSync(f.dir).filter(name => name.startsWith('progress-')), [])
+}))
+
+test('bulk tidy protects questions without durable retention and ignores new matching blocks', () => bulkFixture(f => {
+  const asking = f.block('aaaab041', 'Question stays', 'ended', 100, '- [?] Synthetic approval, OK?')
+  const added = f.block('aaaab043', 'New match stays', 'ended', 100)
+  writeFileSync(f.path, '## Synthetic\n' + asking + f.block('aaaab042', 'Old moves', 'ended', 100))
+  const got = f.run(`const p=bulkTidy({selector:'stopped'}); writeFileSync(path,read(path)+${JSON.stringify(added)}); const result=bulkTidy({token:p.token}); process.stdout.write(JSON.stringify({result,board:read(path)}));`)
+  assert.equal(got.result.note, EN.tidyResult(1, 1))
+  assert.ok(got.board.includes('Question stays') && got.board.includes('New match stays') && !got.board.includes('Old moves'))
+}))
+
+test('bulk tidy CLI stays preview only without a terminal and rejects conflicting selectors', () => tidyFixture(f => {
+  writeFileSync(f.path, '## Synthetic\n' + f.block('aaaab051', 'Keep', 'ended', 1))
+  const before = f.snapshot()
+  const preview = f.command(['--tidy', '--stopped'])
+  assert.equal(preview.status, 0, preview.stderr)
+  assert.ok(preview.stdout.includes(EN.tidyNeedsTerminal))
+  assert.deepEqual(f.snapshot(), before)
+  const invalid = f.command(['--tidy', '--stopped', '--older', '14'])
+  assert.equal(invalid.status, 1)
+  assert.ok(invalid.stdout.includes(EN.tidyInvalid))
+  assert.deepEqual(f.snapshot(), before)
+}))
+
+test('bulk tidy rechecks fingerprints after saving the archive and never journals a refused move as committed', () => bulkFixture(f => {
+  writeFileSync(f.path, '## Synthetic\n' + f.block('aaaab061', 'Old snapshot', 'ended', 100))
+  const got = f.run(`const fs = await import('node:fs'); const sync = (await import('node:module')).syncBuiltinESMExports; const rename = fs.default.renameSync; let changed=false; fs.default.renameSync=(from,to)=>{rename(from,to); if(!changed && String(to).includes('-archive-')){changed=true; writeFileSync(path,read(path).replace('Old snapshot','New producer report'));}}; sync(); const p=bulkTidy({selector:'stopped'}); const result=bulkTidy({token:p.token}); process.stdout.write(JSON.stringify({result,board:read(path),journal:read(journalPath(path,Date.now())),archive:read(archivePath(path,Date.now()))}));`)
+  assert.equal(got.result.note, EN.tidyResult(0, 1))
+  assert.ok(got.board.includes('New producer report'))
+  assert.ok(got.archive.includes('Old snapshot'))
+  assert.ok(!got.journal.includes('"phase":"committed"'))
+}))
+
+test('bulk tidy preserves an archive copy after failed removal and reports an incomplete journal honestly', () => {
+  for (const fault of ['archive', 'board', 'audit']) bulkFixture(f => {
+    writeFileSync(f.path, '## Synthetic\n' + f.block('aaaab071', 'Preserve work', 'ended', 100))
+    const got = f.run(`const fs = await import('node:fs'); const sync=(await import('node:module')).syncBuiltinESMExports; const rename=fs.default.renameSync; const write=fs.default.writeFileSync; fs.default.renameSync=(from,to)=>{if(${JSON.stringify(fault)}==='archive' && String(to).includes('-archive-') || ${JSON.stringify(fault)}==='board' && String(to)===path) throw Object.assign(new Error('synthetic'),{code:'EACCES'}); return rename(from,to);}; fs.default.writeFileSync=(file,data,...rest)=>{if(${JSON.stringify(fault)}==='audit' && String(file).includes('-journal-') && String(data).includes('"phase":"committed"')) throw Object.assign(new Error('synthetic'),{code:'EACCES'}); return write(file,data,...rest);}; sync(); const p=bulkTidy({selector:'stopped'}); const result=bulkTidy({token:p.token}); process.stdout.write(JSON.stringify({result,board:read(path),archive:read(archivePath(path,Date.now())),journal:read(journalPath(path,Date.now()))}));`)
+    assert.equal(got.result.ok, false)
+    assert.ok(got.result.note.includes('incomplete'))
+    assert.equal(got.board.includes('Preserve work'), fault !== 'audit')
+    assert.equal(got.archive.includes('Preserve work'), fault !== 'archive')
+    assert.ok(!got.journal.includes('"phase":"committed"'))
+  })
+})
+
+test('bulk tidy expires previews and terminal A cancels without archiving', () => bulkFixture(f => {
+  writeFileSync(f.path, '## Synthetic\n' + f.block('aaaab081', 'Keep on cancel', 'ended', 100))
+  const got = f.run(`const p=bulkTidy({selector:'stopped'}); const old=Date.now(); Date.now=()=>old+300001; const expired=bulkTidy({token:p.token}); Date.now=()=>old; const first=press(emptyBoardState,'A'); const cancelled=press(first.state,'escape'); process.stdout.write(JSON.stringify({expired,first,cancelled,board:read(path)}));`)
+  assert.equal(got.expired.ok, false)
+  assert.ok(got.first.state.note.includes(EN.tidyConfirmKey))
+  assert.equal(got.cancelled.state.note, EN.tidyCancelled)
+  assert.ok(got.board.includes('Keep on cancel'))
+}))
+
+test('page bulk tidy requires a single use preview and protects the authenticated route', { timeout: 30000 }, async () => {
+  const board = await page()
+  try {
+    for (const [headers, status] of [[{ origin: 'https://evil.example' }, 403], [{ 'x-board-token': 'wrong' }, 403], [{ 'content-type': 'text/plain' }, 415]]) {
+      assert.equal((await board.call('POST', '/api/tidy-bulk', { body: { selector: 'stopped' }, headers })).status, status)
+    }
+    const before = readFileSync(join(board.dir, 'progress.md'), 'utf8')
+    const preview = (await board.call('POST', '/api/tidy-bulk', { body: { selector: 'agent', value: 'gemini' } })).json()
+    assert.equal(preview.count, 1)
+    assert.equal(readFileSync(join(board.dir, 'progress.md'), 'utf8'), before)
+    const committed = await board.call('POST', '/api/tidy-bulk', { body: { token: preview.token } })
+    assert.equal(committed.status, 200, committed.body)
+    const replay = await board.call('POST', '/api/tidy-bulk', { body: { token: preview.token } })
+    assert.equal(replay.status, 409)
+    assert.ok(!readFileSync(join(board.dir, 'progress.md'), 'utf8').includes('Fix the broken links'))
+    const html = (await board.call('GET', '/?t=' + board.token)).body
+    const model = (await board.call('GET', '/api/board')).json().model
+    const dom = await pageDom(html, model, { post: async req => ({ ok: true, json: async () => req.body.selector ? { ok: true, count: 1, token: 'synthetic-preview', note: 'Synthetic preview count 1' } : { ok: true, note: 'Synthetic archived' } }) })
+    dom.node('tidy-selector').value = 'agent'
+    dom.node('tidy-value').value = 'grok'
+    dom.node('tidy-selector').value = 'stopped'
+    dom.node('tidy-selector').events.change()
+    dom.node('tidy-preview').click()
+    await dom.settle()
+    assert.equal(dom.node('tidy-confirm').hidden, false)
+    assert.equal(dom.requests.at(-1).body.value, '')
+    assert.equal(dom.requests.filter(req => req.body.token && !req.body.cancel).length, 0)
+    dom.node('tidy-confirm').click()
+    dom.node('tidy-confirm').click()
+    await dom.settle()
+    assert.equal(dom.requests.filter(req => req.body.token && !req.body.cancel).length, 1)
+  } finally { await board.close() }
+})
+
+test('bulk tidy keeps duplicate identities and manual headings inside automatic markers', () => bulkFixture(f => {
+  const manual = f.block('aaaab091', 'Auto with manual', 'ended', 100, '- [x] Auto step\n### Hand kept question\n- [?] Keep this manual approval, OK?')
+  const duplicate = f.block('aaaab092', 'Duplicate one', 'ended', 100) + f.block('aaaab092', 'Duplicate two', 'ended', 100)
+  writeFileSync(f.path, '## Synthetic\n' + manual + duplicate)
+  const before = readFileSync(f.path, 'utf8')
+  const got = f.run(`const p=bulkTidy({selector:'stopped'}); process.stdout.write(JSON.stringify(p));`)
+  assert.equal(got.count, 0)
+  assert.equal(readFileSync(f.path, 'utf8'), before)
+  assert.deepEqual(readdirSync(f.dir).filter(name => name.startsWith('progress-')), [])
+}))
+
+test('bulk tidy keeps an archived unresolved question durable and preserves a resumed owner', () => bulkFixture(f => {
+  const board = '## Synthetic\n' + f.block('aaaab101', 'Question retained', 'ended', 100, '- [?] Synthetic retention approval, OK?') + f.block('aaaab102', 'Owner resumes', 'ended', 100)
+  const seed = chatRun(['--keys', ''], { file: () => board, inspect: sweepFiles, change: text => `Date.now = () => ${TIDY_NOW}\n${text}` })
+  assert.equal(seed.status, 0, seed.stderr)
+  writeFileSync(f.path, board)
+  for (const [name, text] of Object.entries(seed.files)) writeFileSync(join(f.dir, name), text)
+  const got = f.run(`const p=bulkTidy({selector:'stopped'}); const current=read(path).replace('session=aaaab102 agent=codex state=ended','session=aaaab102 agent=codex state=working').replaceAll(${JSON.stringify(new Date(TIDY_NOW - 100 * 3600000).toISOString())},${JSON.stringify(new Date(TIDY_NOW).toISOString())}); writeFileSync(path,current.replace('session=aaaab101 agent=codex state=ended updated='+${JSON.stringify(new Date(TIDY_NOW).toISOString())},'session=aaaab101 agent=codex state=ended updated='+${JSON.stringify(new Date(TIDY_NOW - 100 * 3600000).toISOString())})); const result=bulkTidy({token:p.token}); process.stdout.write(JSON.stringify({result,board:read(path)}));`)
+  assert.equal(got.result.note, EN.tidyResult(1, 1))
+  assert.ok(!got.board.includes('Question retained') && got.board.includes('Owner resumes'))
+  const files = sweepFiles(f.dir).files
+  assert.equal(archivedCopies(files).length, 1)
+  assert.ok(JSON.parse(files['progress-questions.json']).records.some(record => record.isUnresolved && record.words === 'Synthetic retention approval, OK?'))
+}))
+
+test('bulk tidy CLI requires the exact confirmation after preview and cancels on end of input', () => {
+  for (const input of ['', 'no\n', 'ARCHIVE\n']) tidyFixture(f => {
+    const before = '## Synthetic\n' + f.block('aaaab111', 'Confirm only', 'ended', 1)
+    writeFileSync(f.path, before)
+    const preload = join(f.dir, 'tty.cjs')
+    writeFileSync(preload, 'Object.defineProperty(process.stdin, "isTTY", { value: true });')
+    const result = f.command(['--tidy', '--stopped'], preload, input)
+    assert.equal(result.status, 0, result.stderr)
+    assert.ok(result.stdout.indexOf('Preview: 1') < result.stdout.indexOf(EN.tidyConfirmPrompt))
+    assert.equal(readFileSync(f.path, 'utf8').includes('Confirm only'), input !== 'ARCHIVE\n')
+    assert.ok(result.stdout.includes(input === 'ARCHIVE\n' ? EN.tidyResult(1, 0) : EN.tidyCancelled))
+  })
 })

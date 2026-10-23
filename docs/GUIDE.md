@@ -241,3 +241,25 @@ Explicit archive keeps its complete unresolved copy in the older shelf. Unexpect
 A stale report cannot revive an already resolved question with the same known producer revision and words. An explicit renewed revision or a substantively changed question can appear again.
 Live questions on the terminal and native pane reminder/older shelves support Already answered, hide and Show again without changing the source or its age. Retained copies whose producer source has gone are labeled review only; the served page's reminder/older sections are also review only and expose no hide control.
 A failed or dropped native-pane reply leaves its question unread. Successful submission resolves only the exact question still present afterward; a question renewed during delivery remains waiting. Moving an existing question into retained storage does not generate a new notification.
+
+### Preview a bulk archive
+
+`node agent-board.mjs --tidy --stopped` previews stopped session blocks. Use
+`--tidy --agent grok` to filter by exact agent name, or `--tidy --older 14` for
+blocks last updated more than 14 days ago. These explicit choices keep live
+sessions, manual tasks, ambiguous duplicate sessions, and blocks containing
+additional manual headings. They do not change the age rules of bare `--tidy`.
+
+In a terminal, review the count, then type `ARCHIVE` and Enter to confirm. Any
+other answer or end of input cancels. Piped commands only preview. In `--watch`,
+press `A` to preview all stopped blocks and press `A` again to confirm; another
+key cancels. The page has a separate **Bulk archive** section with a selector,
+Preview, Confirm archive and Cancel. Previews expire after five minutes. A row
+that changes after preview stays, and newly matching rows need another preview.
+
+Questions are kept, not dismissed or answered. A block whose question cannot be
+kept stays. Successful moves have a journal audit record that does not count as
+completed work. If saving fails, some archive copies or removals may already be
+saved: the message reports incomplete work, not a rollback. Review the board
+and archive before trying again. The pane and `/progress tidy` have not gained
+these selectors yet.

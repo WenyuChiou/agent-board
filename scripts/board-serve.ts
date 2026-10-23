@@ -35,6 +35,8 @@ export type ServeOptions = {
   act: (action: BoardAction) => string
   // Every finished task to the archive now: the line to show.
   tidy: () => string
+  // Bulk cleanup only acts on a separately confirmed server-side preview.
+  bulkTidy?: (body: Record<string, unknown>) => { ok: boolean; note: string; token?: string; count?: number }
   paste: (text: string, reviewToken?: string) => { isAdded: boolean; note: string; review?: { token: string; current: string; incoming: string } }
   // Why the board or a press could not be made when it met a file the board could not read or
   // write (the note the terminal board shows), or null for an error of any other kind. A phone
@@ -401,6 +403,11 @@ export const startServer = (o: ServeOptions): void => {
         const note = o.act(action) || o.s.pressNothing
         const isDone = ![o.s.boardWriteFailed, o.s.boardTickGone, o.s.archiveGone, o.s.hideFailed, o.s.boardLineChanged, o.s.questionRetentionFailed, o.s.pressFailed].includes(note)
         return json(res, isDone ? 200 : 409, { note })
+      }
+      if (url.pathname === '/api/tidy-bulk') {
+        if (!o.bulkTidy) return json(res, 400, { note: o.s.pressFailed })
+        const result = o.bulkTidy(body)
+        return json(res, result.ok ? 200 : 409, result)
       }
       if (url.pathname === '/api/tidy') {
         const note = o.tidy()

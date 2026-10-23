@@ -454,3 +454,17 @@ Full-source evidence is additive companion storage: progress-questions-source-<S
 Exact producer provenance uses opaque SHA-256 hashes of the original filename plus exact input bytes, with complete redacted producer payload retained separately in the record. Resolution receipts keep these revisions through projection; replaying an already resolved raw revision cannot create a new question. A new file/content revision remains observable independently of heartbeat time.
 An immutable archived disposition records explicit user intent to move the retained source aside. Retained questions from stopped, ended or done sessions that are not displayed with their task stay under Older unanswered questions; other unexpected source loss retains its normal age partition, including prominent unknown/future clocks. Neither disposition resolves the question.
 A known producer token and normalized question words bind a resolved incarnation. Replaying that exact token/content cannot create another unanswered incarnation or a current waiting action. An explicit renewed producer revision or substantively changed question remains observable. A question with no producer token is resolved only by an explicit Resolve, which binds its normalized words to its task: the resolution ends when the agent ticks or removes that step or the task is renamed, and the same words can then ask again. Renaming the task brings its resolved no-token question back.
+
+### Explicit bulk-archive audit
+
+The plain-Node bulk archive writes comment records to the existing monthly journal:
+`<!-- agent-board-tidy {"id":"<sha256>","phase":"prepared","project":"…","title":"…"} -->`.
+`id` hashes the project, session and approved complete-block fingerprint; `<` and `>` in JSON
+text are escaped. `prepared` is saved before copying/removing that block, and
+`committed` after the board replacement succeeds. Each phase is deduplicated.
+These are not completed-step lines and do not increase daily/report totals.
+A prepared record alone does not prove removal: an archive write, fingerprint
+conflict, board write or final journal write may have interrupted the operation.
+The source/archived block must be inspected before interpreting that incomplete
+record. This is recoverable archive-first ordering, not a multi-file transaction
+or automatic rollback. Older readers ignore these comments.

@@ -8,6 +8,9 @@
 // progress file and language the Claude Code session uses set on its first line. `--keys
 // "down x"` plays keys without a terminal and prints the board after them, for tests and checks.
 import { spawn, spawnSync } from 'node:child_process'
+import { createInterface } from 'node:readline'
+import { currentTidyCandidate, previewTidy, tidySelector } from '../hooks/tidy'
+import type { TidyPreview } from '../hooks/tidy'
 import { localProgressPath, runCodexLocal } from './codex-local'
 import { legacyConnect } from './connect-transaction'
 import { chmodSync, closeSync, existsSync, fstatSync, fsyncSync, linkSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
@@ -575,7 +578,7 @@ const openHtml = (done: (note: string, isOpen: boolean) => void): void => {
 // leaves the work in both, never in neither. An entry already archived by an earlier try
 // (another session wrote meanwhile) is not archived twice. How many entries went, or null
 // when a file could not be written.
-const archiveOut = (take: (text: string) => { text: string; entries: string[] } | null | typeof AGAIN, now: number): number | null => {
+const archiveOut = (take: (text: string) => { text: string; entries: string[] } | null | typeof AGAIN, now: number, onReplaced?: () => void): number | null => {
   const archived = new Set<string>()
   const wrote = rewrite(path, text => {
     const taken = take(text)
@@ -592,7 +595,7 @@ const archiveOut = (take: (text: string) => { text: string; entries: string[] } 
       for (const entry of fresh) archived.add(entry)
     }
     return taken.text
-  })
+  }, onReplaced)
 
   return wrote === null ? null : archived.size
 }
@@ -806,6 +809,89 @@ const tidy = (isNow = true): string => {
   return count === 0 ? (isNow ? s.tidyNothing : s.tidyScheduledNothing) : s.tidyMoved(count)
 }
 
+// Preview tokens are local to this process, short lived, bounded, and consumed before
+// writes. A repeated confirmation can never authorize whatever appeared afterwards.
+const tidyPreviews = new Map<string, TidyPreview>()
+const bulkTidy = (body: Record<string, unknown>): { ok: boolean; note: string; token?: string; count?: number } => {
+  const now = Date.now()
+  for (const [token, preview] of tidyPreviews) if (now - preview.now > 5 * 60 * 1000 || now < preview.now) tidyPreviews.delete(token)
+  if (typeof body.token === 'string') {
+    const preview = tidyPreviews.get(body.token)
+    tidyPreviews.delete(body.token)
+    if (body.cancel === true) return { ok: true, note: s.tidyCancelled }
+    if (preview === undefined) return { ok: false, note: s.tidyExpired }
+    let moved = 0
+    let refused = 0
+    for (const candidate of preview.candidates) {
+      let replaced = false
+      let takenLast = false
+      const id = sha256(JSON.stringify([candidate.ref.project, candidate.ref.session, candidate.fingerprint]))
+      const audit = (phase: 'prepared' | 'committed'): void => {
+        const marker = `<!-- agent-board-tidy ${JSON.stringify({ id, phase, project: candidate.ref.project, title: candidate.ref.title }).replace(/</g, '\\u003c').replace(/>/g, '\\u003e')} -->`
+        const saved = rewrite(journalPath(path, preview.now), past => past.includes(marker) ? past : `${past.replace(/\s*$/, '')}\n${marker}\n`)
+        if (saved === null) throw fileError(journalPath(path, preview.now), { code: 'EAGAIN' })
+      }
+      try {
+        archiveOut(text => {
+          takenLast = false
+          const current = currentTidyCandidate(text, preview, candidate, s)
+          if (current === undefined) return null
+          if (current.asks && !keepAskedQuestions(parseProgress(text), current.ref, now)) return null
+          // Retention and the audit can race a producer. rewrite also checks again before
+          // rename; every retry still compares with the original approved fingerprint.
+          if (read(path) !== text) return AGAIN
+          const taken = takeTask(text, current.ref, preview.now, s)
+          if (taken === null) return null
+          audit('prepared')
+          takenLast = true
+          return taken
+        }, preview.now, () => { replaced = takenLast })
+        if (!replaced) { refused += 1; continue }
+        audit('committed')
+        moved += 1
+      } catch (error) {
+        if (!(error instanceof BoardFileError)) throw error
+        // An archive/capture or board rename may already have landed. Never promise a
+        // rollback; the prepared audit and archive remain available for inspection.
+        return { ok: false, note: s.tidyPartial(moved, refused, preview.candidates.length - moved - refused) }
+      }
+    }
+    return { ok: refused === 0, note: s.tidyResult(moved, refused) }
+  }
+  const selector = tidySelector(body.selector, body.value)
+  if (selector === null) return { ok: false, note: s.tidyInvalid }
+  const preview = previewTidy(read(path), selector, now, s)
+  const count = preview.candidates.length
+  const note = s.tidyPreviewCount(count, preview.candidates.filter(one => one.asks).length)
+  if (count === 0) return { ok: true, note, count }
+  if (tidyPreviews.size >= 16) tidyPreviews.delete(tidyPreviews.keys().next().value!)
+  const token = randomUUID()
+  tidyPreviews.set(token, preview)
+  return { ok: true, note, token, count }
+}
+
+const runBulkTidy = async (): Promise<void> => {
+  const selectors = args.filter(one => ['--stopped', '--agent', '--older'].includes(one))
+  const kind = selectors[0]?.slice(2)
+  const preview = selectors.length === 1 ? bulkTidy({ selector: kind, value: kind === 'stopped' ? undefined : flag(selectors[0]!) }) : { ok: false, note: s.tidyInvalid }
+  process.stdout.write(`${preview.note}\n`)
+  if (!preview.ok) { process.exitCode = 1; return }
+  if (!('token' in preview) || !preview.token) return
+  if (!process.stdin.isTTY) { process.stdout.write(`${s.tidyNeedsTerminal}\n`); return }
+  process.stdout.write(`${s.tidyConfirmPrompt}\n`)
+  const input = createInterface({ input: process.stdin, terminal: false })
+  const answer = await new Promise<string>(resolve => {
+    input.once('line', line => resolve(line))
+    input.once('close', () => resolve(''))
+    input.once('SIGINT', () => resolve(''))
+  })
+  input.close()
+  const result = bulkTidy({ token: preview.token, cancel: answer.trim() !== 'ARCHIVE' })
+  process.stdout.write(`${result.note}\n`)
+  if (!result.ok) process.exitCode = 1
+}
+let terminalTidyToken: string | undefined
+
 // Keys as the terminal sends them, named the way boardKey reads them. One read can hold more
 // than one key (a held arrow, a paste).
 const keyName = (one: string): string =>
@@ -825,6 +911,13 @@ const failureNote = (error: unknown): string => {
 }
 
 const press = (state: BoardState, key: string): { state: BoardState; isQuit: boolean; isHtml: boolean; isWrite: boolean } => {
+  if (key === 'A' || terminalTidyToken !== undefined) {
+    const token = terminalTidyToken
+    terminalTidyToken = undefined
+    const result = token === undefined ? bulkTidy({ selector: 'stopped' }) : bulkTidy({ token, cancel: key !== 'A' })
+    if (token === undefined) terminalTidyToken = result.token
+    return { state: { ...state, note: result.note + (terminalTidyToken ? ` ${s.tidyConfirmKey}` : ''), tone: result.ok ? 'quiet' : 'alert' }, isQuit: key === 'q', isHtml: false, isWrite: true }
+  }
   const shown = freshView()
   const items = boardItems(shown, pending(), state.isIdleOpen ?? false, state.isOlderOpen ?? false)
   const { state: next, action } = boardKey(state, key, items, s)
@@ -972,6 +1065,7 @@ const serveChild = (): void => {
     pending,
     act,
     tidy,
+    bulkTidy,
     paste,
     // The page names a file it could not read or write the way the terminal board does, for a
     // press and for the board it shows. The page is answered, so the exit code and stderr are
@@ -1173,7 +1267,8 @@ const run = async (): Promise<void> => {
     // Before the flags that serve, open or write: a chat reply never starts a page.
     chat()
   } else if (args.includes('--tidy')) {
-    process.stdout.write(`${tidy(false)}\n`)
+    if (args.some(one => ['--stopped', '--agent', '--older'].includes(one))) await runBulkTidy()
+    else process.stdout.write(`${tidy(false)}\n`)
   } else if (args.includes('--serve')) {
     await serveBoard()
   } else if (args.includes('--html')) {

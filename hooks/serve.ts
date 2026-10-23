@@ -489,6 +489,8 @@ const PAGE_WORDS = [
   'boardInbox',
   'sectionRecent',
   'archiveNow',
+  'tidyBulk', 'tidyStopped', 'tidyAgent', 'tidyOlder', 'tidyValue',
+  'tidyPreviewButton', 'tidyConfirmButton', 'tidyCancelButton',
   'serveClosed',
   'serveClose',
   'serveOffline',
@@ -645,6 +647,16 @@ button.fchip{min-height:28px;padding:0 10px;border-radius:999px;background:var(-
 <section class="counts" id="counts"></section>
 <div id="scope" class="scope"></div>
 <div id="board"></div>
+<details class="card" id="tidy-bulk">
+<summary>${esc(s.tidyBulk)}</summary>
+<div class="actions">
+<label for="tidy-selector">${esc(s.tidyBulk)}</label>
+<select id="tidy-selector"><option value="stopped">${esc(s.tidyStopped)}</option><option value="agent">${esc(s.tidyAgent)}</option><option value="older">${esc(s.tidyOlder)}</option></select>
+<label for="tidy-value" id="tidy-value-label" hidden>${esc(s.tidyValue)}</label>
+<input id="tidy-value" type="text" hidden autocomplete="off">
+</div>
+<div class="actions"><button type="button" id="tidy-preview">${esc(s.tidyPreviewButton)}</button><button type="button" id="tidy-confirm" hidden disabled>${esc(s.tidyConfirmButton)}</button><button type="button" id="tidy-cancel" hidden data-local>${esc(s.tidyCancelButton)}</button></div>
+</details>
 <details class="card paste"><summary>${esc(s.servePasteTitle)}</summary>
 <p class="quiet small">${esc(s.servePasteHint)}</p>
 <textarea id="paste" spellcheck="false"></textarea>
@@ -732,6 +744,7 @@ const PAGE_SCRIPT = String.raw`
     }
   }
   function beginPress() {
+    if (!tidyCommitting && (tidyToken || tidyBusy)) resetTidy();
     note.textContent = '';
     note.className = '';
     lostResults.forEach(function (card) { card.remove(); });
@@ -768,6 +781,7 @@ const PAGE_SCRIPT = String.raw`
     document.querySelectorAll('button[data-static]').forEach(function (node) { node.disabled = false; });
     offlineButtons.forEach(function (node) { node.disabled = false; });
     offlineButtons = [];
+    tidyControls();
     // A press that met the offline server keeps its failure, no longer the offline advice.
     Object.keys(results).forEach(function (key) { if (results[key].text === w('serveOffline')) { results[key].text = w('pressFailed'); paintResult(key); } });
     // Redraw even an unchanged model to restore each action's own sending state.
@@ -1112,11 +1126,13 @@ const PAGE_SCRIPT = String.raw`
     board.textContent = '';
     filterNodes = [];
     filterGroups = [];
-    // Footer and paste controls keep their slots across board redraws.
+    // Static controls keep their slots across board redraws.
     var pasteSlot = resultSlots.paste;
     var closeSlot = resultSlots.close;
+    var tidySlot = resultSlots.tidy;
     resultSlots = pasteSlot ? { paste: pasteSlot } : {};
     if (closeSlot) resultSlots.close = closeSlot;
+    if (tidySlot) resultSlots.tidy = tidySlot;
     if (model.warning) add(board, el('p', 't-alert', model.warning));
     waitingHead = el('h2', 'n-waiting', '● ' + w('sectionWaiting'));
     nothing = model.asks.length === 0 ? el('div', 'n-today', w('nothingForYou')) : null;
@@ -1281,6 +1297,88 @@ const PAGE_SCRIPT = String.raw`
       if (!isClosed) timer = setTimeout(refresh, 3000);
     });
   }
+  var tidySelector = document.getElementById('tidy-selector');
+  var tidyValue = document.getElementById('tidy-value');
+  var tidyPreview = document.getElementById('tidy-preview');
+  var tidyConfirm = document.getElementById('tidy-confirm');
+  var tidyCancel = document.getElementById('tidy-cancel');
+  var tidyToken = '';
+  var tidyRevision = 0;
+  var tidyBusy = false;
+  var tidyCommitting = false;
+  function tidyControls() {
+    tidyValue.hidden = tidySelector.value === 'stopped';
+    document.getElementById('tidy-value-label').hidden = tidyValue.hidden;
+    tidySelector.disabled = tidyCommitting;
+    tidyValue.disabled = tidyCommitting;
+    tidyPreview.disabled = tidyBusy || isUnreachable;
+    tidyConfirm.hidden = !tidyToken;
+    tidyConfirm.disabled = !tidyToken || tidyBusy || isUnreachable;
+    tidyCancel.hidden = !tidyToken && !tidyBusy;
+    tidyCancel.disabled = tidyCommitting;
+  }
+  function discardTidyToken(oldToken) {
+    if (oldToken && !isUnreachable) call('/api/tidy-bulk', { token: oldToken, cancel: true }).catch(function () {});
+  }
+  function resetTidy() {
+    if (tidyCommitting) return;
+    tidyRevision += 1;
+    var oldToken = tidyToken;
+    tidyToken = '';
+    tidyBusy = false;
+    discardTidyToken(oldToken);
+    delete results.tidy;
+    if (resultSlots.tidy) resultSlots.tidy.node.textContent = '';
+    tidyControls();
+  }
+  tidySelector.addEventListener('change', resetTidy);
+  tidyValue.addEventListener('input', resetTidy);
+  tidyCancel.addEventListener('click', resetTidy);
+  tidyPreview.addEventListener('click', function () {
+    if (tidyBusy || isUnreachable) return;
+    resetTidy();
+    beginPress();
+    var revision = tidyRevision;
+    tidyBusy = true;
+    tidyControls();
+    say(w('pressPending'), '', 'tidy');
+    call('/api/tidy-bulk', { selector: tidySelector.value, value: tidySelector.value === 'stopped' ? '' : tidyValue.value }).then(function (data) {
+      if (revision !== tidyRevision) { discardTidyToken(data.token); return; }
+      tidyBusy = false;
+      tidyToken = data.ok && data.count > 0 && typeof data.token === 'string' ? data.token : '';
+      say(data.note || w(data.ok ? 'pressDone' : 'pressFailed'), data.ok ? 'done' : 'alert', 'tidy');
+      tidyControls();
+    }, function () {
+      if (revision !== tidyRevision) return;
+      tidyBusy = false;
+      say(w('serveOffline'), 'alert', 'tidy');
+      tidyControls();
+    });
+  });
+  tidyConfirm.addEventListener('click', function () {
+    if (!tidyToken || tidyBusy || isUnreachable) return;
+    var confirmed = tidyToken;
+    tidyToken = '';
+    tidyBusy = true;
+    tidyCommitting = true;
+    beginPress();
+    tidyControls();
+    say(w('pressPending'), '', 'tidy');
+    call('/api/tidy-bulk', { token: confirmed }).then(function (data) {
+      tidyBusy = false;
+      tidyCommitting = false;
+      say(data.note || w(data.ok ? 'pressDone' : 'pressFailed'), data.ok ? 'done' : 'alert', 'tidy');
+      tidyControls();
+      refresh();
+    }, function () {
+      tidyBusy = false;
+      tidyCommitting = false;
+      say(w('serveOffline'), 'alert', 'tidy');
+      tidyControls();
+    });
+  });
+  resultSlot(document.getElementById('tidy-bulk'), 'tidy', '', w('tidyBulk'));
+  tidyControls();
   document.getElementById('close').addEventListener('click', function () {
     if (isUnreachable) return;
     beginPress();
