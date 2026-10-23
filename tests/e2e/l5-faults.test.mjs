@@ -3,7 +3,6 @@ import assert from 'node:assert/strict'
 import { EN } from '../../hooks/strings-en.ts'
 import { STALE_MS } from '../../hooks/parse.ts'
 import { makeWorld } from './lib/world.mjs'
-import { seenWithin } from './lib/expect.mjs'
 import { block, hook } from './lib/writers.mjs'
 import { formatWriters, keptHookEvents, lockFile, storageFault, tear } from './lib/faults.mjs'
 import { chat, html, pageDom, run, serve } from './lib/surfaces.mjs'
@@ -479,8 +478,17 @@ test('L5 OpenCode exit: a row whose end report missed the hook limit reads as st
     }
     world.jump(`${STALE_MS / 60000 + 1}m`)
     const saysWhy = EN.sessionStopped(EN.hoursAgo(STALE_MS / 3600000))
-    // The open page's server reads the moved clock within 100 ms; a page that never says why fails.
-    await seenWithin(() => server.page(), text => text.slice(text.indexOf(title), text.indexOf(title) + 300).includes(saysWhy), 5000)
+    // The server child re-reads the clock file every 100 ms: read the page only once the server's
+    // own clock has taken the jump (as l4-time.test.mjs does).
+    const poll = async () => {
+      const response = await fetch(new URL('/api/board', server.url), { headers: { 'x-board-token': new URL(server.url).searchParams.get('t') }, signal: AbortSignal.timeout(15000) })
+      assert.equal(response.status, 200)
+      return response.json()
+    }
+    for (let attempt = 0; Math.abs((await poll()).now - world.now) > 2000; attempt++) {
+      assert.ok(attempt < 50, 'The page server never took the clock jump')
+      await new Promise(done => setTimeout(done, 100))
+    }
     for (const [surface, text] of Object.entries(await rows())) {
       const at = text.indexOf(title)
       assert.ok(at >= 0, `${surface} lost the row:\n${text}`)

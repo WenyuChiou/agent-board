@@ -938,7 +938,7 @@ test('concurrent native connect and remove serialize their ownership and disable
   assert.equal(JSON.parse(config).private, f.foreign.private)
 }))
 
-test('antigravity connect preserves third-party hook bytes through connect and removal', () => fixture(async f => {
+test('antigravity connect keeps the content and order of third-party hooks through connect and removal', () => fixture(async f => {
   mkdirSync(join(f.home, '.gemini', 'antigravity'), { recursive: true })
   const config = join(f.home, '.gemini', 'config', 'hooks.json')
   const foreign = { 'orca-status': Object.fromEntries(['PreInvocation', 'PostInvocation', 'Stop', 'PostToolUse'].map(event => [event, [{ type: 'command', command: `synthetic-orca-${event}`, timeout: 5 }]])) }

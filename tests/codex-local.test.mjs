@@ -8,7 +8,6 @@ import { beforeEach, test } from 'node:test'
 import assert from 'node:assert/strict'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { inspect } from 'node:util'
-import { boardRun } from '../hooks/board-commands.ts'
 import { reporterPs1, reporterSh } from '../hooks/hook-reporters.ts'
 import { hookBootstrap, hookGuardSource, hookWorker } from '../hooks/hook-safety.ts'
 import { classifierDiagnostic, observeClassifier } from './fixtures/classifier-diagnostic.mjs'
@@ -2097,9 +2096,9 @@ await hooks.event({ event: { type: 'session.deleted', properties: { info: { id: 
 }
 // A loaded machine can push a report past the worker's 2 s limit (#241). An event the worker queued
 // is applied by settleQueue before a real-mode check reads the board. A report given up on
-// (REPORTER_TIMEOUT) is lost: a check that fails after one runs again in a fresh home, three times
-// in all, and each retry is named. `retry` says which log shows such a loss; the hang and fail
-// scenarios log theirs by design and never retry.
+// (REPORTER_TIMEOUT) is lost: a check that fails after one runs once more in a fresh home, and that
+// retry is named. `retry` says which log shows such a loss; the hang and fail scenarios log theirs
+// by design and never retry.
 const LOST = text => /opencode REPORTER_TIMEOUT/.test(text)
 const opencodeOneShotHome = async (t, check, { retry = LOST } = {}) => {
   for (let attempt = 1; ; attempt++) {
@@ -2110,8 +2109,8 @@ const opencodeOneShotHome = async (t, check, { retry = LOST } = {}) => {
       assert.equal(installed.status, 0, installed.stderr)
       return await check(home, join(home, '.agent-board', 'progress.md'), log)
     } catch (error) {
-      if (!retry || attempt === 3 || !existsSync(log) || !retry(readFileSync(log, 'utf8'))) throw error
-      // Each retry is named in the test output, so a regression that only sometimes misses the
+      if (!retry || attempt === 2 || !existsSync(log) || !retry(readFileSync(log, 'utf8'))) throw error
+      // The retry is named in the test output, so a regression that only sometimes misses the
       // limit still shows.
       t.diagnostic(`one-shot retry ${attempt}: ${String(error?.message).split('\n')[0]}`)
     } finally { rmSync(home, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }) }
@@ -3585,6 +3584,9 @@ const legacyConnect = (f, progress, mode = 'connect', lang = 'en') => {
   assert.equal(result.status, 0, result.stderr + result.stdout)
   return runner
 }
+// A board path with characters such as `~` or `_` (as on CI runners) is written into skills as code
+// points; read those back before looking for a folder name (as tests/legacy-connect.test.mjs does).
+const decoded = text => text.replace(/String\.fromCodePoint\(([\d,]+)\)/g, (_, codes) => String.fromCodePoint(...codes.split(',').map(Number)))
 
 test('connection data roots distinguish POSIX apostrophes from encoded PowerShell quoting', async () => {
   const resolver = registerHooks({ resolve(specifier, context, next) {
@@ -3665,14 +3667,37 @@ test("antigravity: setup-agent takes over the connect's skill for a progress fil
   legacyConnect(f, progress)
   const skill = join(f.home, '.gemini', 'config', 'skills', 'agent-board', 'SKILL.md')
   // The connect's skill runs the board beside that progress file.
-  assert.ok(readFileSync(skill, 'utf8').includes(boardRun(join(dirname(progress), 'agent-board.mjs'))))
+  assert.ok(decoded(readFileSync(skill, 'utf8')).includes('synthetic-progress-folder'))
   const installed = f.install('--agent', 'antigravity', '--apply')
   assert.equal(installed.status, 0, installed.stderr + installed.stdout)
   assert.ok(!(installed.stderr + installed.stdout).includes('INSTALL_CONFLICT'))
   assert.equal(readFileSync(skill, 'utf8'), readFileSync(f.skill, 'utf8'))
 }))
 
-test('antigravity: setup-agent preserves third-party hook bytes through install and removal', () => fixture(async f => {
+test("antigravity: setup-agent takes over the connect's skill for a progress file that CLAUDE_CONFIG_DIR or CLAUDE_PROGRESS_FILE names", async () => {
+  for (const name of ['CLAUDE_CONFIG_DIR', 'CLAUDE_PROGRESS_FILE']) await fixture(async f => {
+    mkdirSync(join(f.home, '.gemini', 'antigravity'), { recursive: true })
+    const progress = join(f.home, 'synthetic-config-folder', 'progress.md')
+    mkdirSync(dirname(progress), { recursive: true })
+    legacyConnect(f, progress)
+    // Only the variable names the file: the connect's own record of it is taken out.
+    const record = join(f.root, 'legacy-connect.json')
+    const { connectedProgress, ...rest } = JSON.parse(readFileSync(record, 'utf8'))
+    assert.ok(connectedProgress, name)
+    f.save(record, JSON.stringify(rest))
+    const skill = join(f.home, '.gemini', 'config', 'skills', 'agent-board', 'SKILL.md')
+    const install = extraEnv => spawnSync(process.execPath, [setup, '--home', f.home, '--codex-dir', join(f.home, '.codex'), '--grok-dir', join(f.home, '.grok'), '--hermes-dir', join(f.home, '.hermes'), '--agent', 'antigravity', '--apply'], { env: { ...f.env, ...extraEnv }, encoding: 'utf8', windowsHide: true, timeout: 15000 })
+    // Without the variable nothing marks the skill as the connect's, so setup-agent refuses it.
+    const refused = install({})
+    assert.match(refused.stderr + refused.stdout, /INSTALL_CONFLICT/, name)
+    const installed = install({ [name]: name === 'CLAUDE_CONFIG_DIR' ? dirname(progress) : progress })
+    assert.equal(installed.status, 0, `${name}: ${installed.stderr}${installed.stdout}`)
+    assert.ok(!(installed.stderr + installed.stdout).includes('INSTALL_CONFLICT'), name)
+    assert.equal(readFileSync(skill, 'utf8'), readFileSync(f.skill, 'utf8'), name)
+  })
+})
+
+test('antigravity: setup-agent keeps the content and order of third-party hooks through install and removal', () => fixture(async f => {
   const config = join(f.home, '.gemini', 'config', 'hooks.json')
   const foreign = { 'orca-status': Object.fromEntries(['PreInvocation', 'PostInvocation', 'Stop', 'PostToolUse'].map(event => [event, [{ type: 'command', command: `synthetic-orca-${event}`, timeout: 5 }]])) }
   const original = JSON.stringify(foreign, null, 2) + '\n'
@@ -3722,6 +3747,7 @@ test('antigravity: a payload the board refuses logs its reason and still answers
     const result = await fireCommand(f, hook.command, JSON.stringify({ conversation_id: 'synthetic-wrong-field', prompt: 'PRIVATE_PROMPT' }))
     assert.equal(result.status, 0, hookFailure(result))
     assert.equal(result.stdout.trim(), '{}')
+    assert.ok(!result.stderr.includes('AGENT_BOARD_REASON'), result.stderr)
     assert.match(hookLog(f), /antigravity REPORTER_FAILED INVALID_SESSION\r?\n$/, lang)
     assert.ok(!hookLog(f).includes('PRIVATE_') && !hookLog(f).includes('synthetic-wrong-field'))
   })
