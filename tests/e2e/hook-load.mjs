@@ -1,9 +1,9 @@
 import assert from 'node:assert/strict'
-import { spawnSync } from 'node:child_process'
 import { mkdirSync, readFileSync, readdirSync, realpathSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
-import { homedir, tmpdir } from 'node:os'
+import { homedir, tmpdir, userInfo } from 'node:os'
 import { join } from 'node:path'
 import { performance } from 'node:perf_hooks'
+import { fileURLToPath } from 'node:url'
 import { hookLoadMarker, leftoverProcesses, makeRedact, percentile, redactDeep, tallyOf } from './lib/soak-report.mjs'
 
 process.stdout.on('error', () => {})
@@ -63,8 +63,9 @@ const between = (random, [low, high]) => low + Math.floor(random() * (high - low
 const kilobytes = bytes => `${Math.round(bytes / 1024)} KB`
 const firstLine = error => String(error?.message ?? error).split(/\r?\n/)[0]
 
-// Every process running now, with its creation time where available, and the lister's own pid.
-const processList = () => {
+// Every process running now, with its creation time where available, and the lister's own pid. The
+// lister starts as every e2e child does, inside a world (lib/spawn.mjs); Linux reads /proc instead.
+const processList = async ({ spawnIsolated, world }) => {
   if (process.platform === 'linux') {
     const list = []
     for (const entry of readdirSync('/proc')) {
@@ -79,17 +80,33 @@ const processList = () => {
     return { list }
   }
   const isWindows = process.platform === 'win32'
-  const result = isWindows
-    ? spawnSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', '[Console]::OutputEncoding = [Text.Encoding]::UTF8; Get-CimInstance Win32_Process | Select-Object ProcessId,ParentProcessId,Name,CommandLine,@{Name="started";Expression={if ($null -ne $_.CreationDate) { ([DateTimeOffset]$_.CreationDate).ToUnixTimeMilliseconds() }}} | ConvertTo-Json -Compress'], { encoding: 'utf8', timeout: 30000, windowsHide: true, maxBuffer: 64 * MEGABYTE })
-    : spawnSync('ps', ['-axww', '-o', 'pid=,ppid=,comm=,command='], { encoding: 'utf8', timeout: 30000, maxBuffer: 64 * MEGABYTE })
-  if (result.status !== 0) throw new Error(`the process list could not be read (${result.error?.code ?? `exit ${result.status}`})`)
+  const [file, args] = isWindows
+    ? ['powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', '[Console]::OutputEncoding = [Text.Encoding]::UTF8; Get-CimInstance Win32_Process | Select-Object ProcessId,ParentProcessId,Name,CommandLine,@{Name="started";Expression={if ($null -ne $_.CreationDate) { ([DateTimeOffset]$_.CreationDate).ToUnixTimeMilliseconds() }}} | ConvertTo-Json -Compress']]
+    : ['ps', ['-axww', '-o', 'pid=,ppid=,comm=,command=']]
+  const child = spawnIsolated(file, args, { env: world.env, cwd: world.root, stdio: ['ignore', 'pipe', 'pipe'] })
+  const chunks = []
+  let size = 0, isTooBig = false, isTimedOut = false
+  child.stdout.on('data', chunk => {
+    size += chunk.length
+    if (size > 64 * MEGABYTE) { isTooBig = true; child.kill('SIGKILL') } else chunks.push(chunk)
+  })
+  child.stderr.resume()
+  // A world's fresh profile folders give PowerShell a cold start.
+  const timer = setTimeout(() => { isTimedOut = true; child.kill('SIGKILL') }, 60000)
+  const status = await new Promise(done => {
+    child.once('error', error => done(error.code ?? 'error'))
+    child.once('close', (code, signal) => done(isTooBig ? 'over 64 MB of output' : isTimedOut ? 'no answer in 60 s' : signal ? `stopped by ${signal}` : code === 0 ? 0 : `exit ${code}`))
+  })
+  clearTimeout(timer)
+  if (status !== 0) throw new Error(`the process list could not be read (${status})`)
+  const stdout = Buffer.concat(chunks).toString('utf8')
   const list = isWindows
-    ? [JSON.parse(result.stdout)].flat().map(one => ({ pid: one.ProcessId, ppid: one.ParentProcessId, started: typeof one.started === 'number' ? one.started : undefined, name: one.Name ?? '', command: one.CommandLine ?? '' }))
-    : result.stdout.split('\n').flatMap(line => {
+    ? [JSON.parse(stdout)].flat().map(one => ({ pid: one.ProcessId, ppid: one.ParentProcessId, started: typeof one.started === 'number' ? one.started : undefined, name: one.Name ?? '', command: one.CommandLine ?? '' }))
+    : stdout.split('\n').flatMap(line => {
       const found = /^\s*(\d+)\s+(\d+)\s+(\S+)\s+(.*)$/.exec(line)
       return found ? [{ pid: Number(found[1]), ppid: Number(found[2]), name: found[3], command: found[4] }] : []
     })
-  return { list, lister: result.pid }
+  return { list, lister: child.pid }
 }
 
 // The JSON report, through a temporary file and a rename; Windows refuses a rename onto a file another
@@ -111,14 +128,16 @@ const writeJson = (dir, value) => {
 }
 
 const hookLoad = async ({ out, isStdinStop }) => {
-  const [{ makeWorld }, { HOOK_TIMEOUT_MS, PAGE_MS }, { hook, hookHosts }, { serve }, { knownFailure }] = await Promise.all([
-    import('./lib/world.mjs'), import('./lib/budget.mjs'), import('./lib/writers.mjs'), import('./lib/surfaces.mjs'), import('./lib/known.mjs'),
+  const [{ makeWorld }, { HOOK_TIMEOUT_MS, PAGE_MS }, { hook, hookHosts }, { serve }, { knownFailure }, { spawnIsolated }] = await Promise.all([
+    import('./lib/world.mjs'), import('./lib/budget.mjs'), import('./lib/writers.mjs'), import('./lib/surfaces.mjs'), import('./lib/known.mjs'), import('./lib/spawn.mjs'),
   ])
   const size = isFull ? FULL : SMOKE
   const t0 = performance.now()
   const since = () => performance.now() - t0
   const report = { status: 'running', mode: isFull ? 'full' : 'smoke', sessions: size.sessions, seconds: size.seconds, startedAt: new Date().toISOString(), stats: undefined, checks: [], notes: [] }
-  const redactions = [['<tmp>', tmpdir()], ['<home>', homedir()], ['<repo>', process.cwd()]]
+  // Started by soak.mjs, this run's home, temp and working folders are a world's; the account's own
+  // home and the checkout are redacted too.
+  const redactions = [['<tmp>', tmpdir()], ['<home>', homedir()], ['<home>', userInfo().homedir], ['<repo>', fileURLToPath(new URL('../..', import.meta.url)).replace(/[\\/]$/, '')], ['<cwd>', process.cwd()]]
   for (const [name, path] of [['<tmp>', tmpdir()], ['<home>', homedir()]]) {
     try { if (realpathSync.native(path) !== path) redactions.push([name, realpathSync.native(path)]) } catch {}
   }
@@ -242,7 +261,7 @@ const hookLoad = async ({ out, isStdinStop }) => {
       if (!shortIds.has(id)) {
         let text = ''
         try { text = readFileSync(world.path, 'utf8') } catch {}
-        const found = new RegExp(`^<!-- auto session=([a-f0-9]{8}) [^\\n]*? resume=${id}(?= |-->)`, 'm').exec(text)
+        const found = text.match(new RegExp(`^<!-- auto session=([a-f0-9]{8}) [^\\n]*? resume=${id}(?= |-->)`, 'm'))
         if (found) shortIds.set(id, found[1])
       }
       return shortIds.get(id)
@@ -390,14 +409,16 @@ const hookLoad = async ({ out, isStdinStop }) => {
     const leftoverWaitMs = stopper.signal.aborted || report.status === 'failed' ? 10000 : LEFTOVER_WAIT_MS
     const waitNote = leftoverWaitMs < LEFTOVER_WAIT_MS ? ' The wait was shortened because the run was stopped.' : ''
     await new Promise(done => setTimeout(done, leftoverWaitMs))
+    let listerWorld
     try {
-      const { list, lister } = processList()
+      if (process.platform !== 'linux') listerWorld = makeWorld()
+      const { list, lister } = await processList({ spawnIsolated, world: listerWorld })
       if (!list.some(one => one.pid === process.pid)) throw new Error('the process list did not include this run')
       const left = leftoverProcesses({ list, self: process.pid, roots, exclude: lister === undefined ? [] : [lister] })
       for (const one of left) { try { process.kill(one.pid, 'SIGKILL') } catch {} }
       let stopping = ''
       if (left.length > 0) {
-        const after = processList().list
+        const after = (await processList({ spawnIsolated, world: listerWorld })).list
         if (!after.some(one => one.pid === process.pid)) throw new Error('the process list did not include this run')
         const remaining = left.filter(one => after.some(next => next.pid === one.pid && (one.started === undefined || next.started === undefined || next.started === one.started))).length
         stopping = remaining === 0 ? 'They were stopped.' : `${remaining} could not be stopped.`
@@ -405,6 +426,7 @@ const hookLoad = async ({ out, isStdinStop }) => {
       const names = Object.entries(left.reduce((counts, one) => ({ ...counts, [one.name]: (counts[one.name] ?? 0) + 1 }), {})).map(([name, count]) => `${name} ${count}`).join(', ')
       outcomes.leftovers = { ok: left.length === 0, line: (left.length === 0 ? `None of ${list.length} processes running ${leftoverWaitMs / 1000} s after the end (${closedAt.slice(11, 19)}) came from this check.` : `${left.length} processes from this check were still running ${leftoverWaitMs / 1000} s after the end: ${names}. ${stopping}`) + waitNote }
     } catch (error) { outcomes.leftovers = { ok: false, line: `The processes could not be counted: ${firstLine(error)}` } }
+    try { await listerWorld?.close() } catch (error) { problem(`The lister's world did not close cleanly: ${firstLine(error?.errors?.[0] ?? error)}`) }
   }
 
   for (const [key, title] of Object.entries(TITLES)) {

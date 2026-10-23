@@ -1,5 +1,4 @@
 import assert from 'node:assert/strict'
-import { spawn } from 'node:child_process'
 import { mkdirSync, readFileSync, readdirSync, realpathSync, renameSync, unlinkSync } from 'node:fs'
 import { arch, homedir, release, tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
@@ -196,10 +195,16 @@ const soak = async ({ minutes, out }) => {
     const startedAt = Date.now()
     say(`soak: hook-load phase began after ${Math.round(since() / 1000)} s`)
     isHookLoadRunning = true
-    let child, deadline, killTimer
+    let child, deadline, killTimer, phaseWorld
     const stop = () => child?.stdin.end('stop\n')
     try {
-      child = spawn(process.execPath, [fileURLToPath(new URL('./hook-load.mjs', import.meta.url)), '--out', folder, '--stop-on-stdin'], { stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true })
+      // The phase starts as every e2e child does, inside a world of its own (lib/spawn.mjs), and makes
+      // its worlds in that world's temp folder. It keeps the world's folders, not its clock and
+      // clipboard preloads, and it gets CI or AGENT_BOARD_HEAVY_TESTS, which choose its size.
+      phaseWorld = makeWorld()
+      const env = Object.fromEntries(Object.entries(phaseWorld.env).filter(([name]) => name !== 'NODE_OPTIONS' && !name.startsWith('E2E_')))
+      for (const name of ['CI', 'AGENT_BOARD_HEAVY_TESTS']) if (process.env[name] !== undefined) env[name] = process.env[name]
+      child = spawnIsolated(process.execPath, [fileURLToPath(new URL('./hook-load.mjs', import.meta.url)), '--out', folder, '--stop-on-stdin'], { env, cwd: phaseWorld.root, stdio: ['pipe', 'pipe', 'pipe'] })
       child.stdin.on('error', () => {})
       stopper.signal.addEventListener('abort', stop)
       let isTimedOut = false
@@ -228,8 +233,14 @@ const soak = async ({ minutes, out }) => {
       clearTimeout(deadline)
       clearTimeout(killTimer)
       stopper.signal.removeEventListener('abort', stop)
-      if (child?.exitCode === null && child.signalCode === null) stop()
+      // The world is removed only once the child is gone: on Windows its working folder is inside it.
+      if (child?.pid !== undefined && child.exitCode === null && child.signalCode === null) {
+        const closed = new Promise(done => child.once('close', done))
+        child.kill('SIGKILL')
+        await Promise.race([closed, new Promise(done => setTimeout(done, 5000))])
+      }
       isHookLoadRunning = false
+      try { await phaseWorld?.close() } catch (error) { say(`soak: the hook-load phase's world did not close cleanly: ${String(error?.errors?.[0]?.message ?? error?.message ?? error).split('\n')[0]}`) }
     }
   }
   try {
