@@ -7,16 +7,16 @@
 </p>
 
 <p align="center"><b>整合</b><br>
-<a href="#支援的-agent"><img src="docs/images/agents/claude-code.svg" width="20" height="20" alt="Claude Code 圖示">&nbsp;Claude&nbsp;Code</a>&emsp;
-<a href="#支援的-agent"><img src="docs/images/agents/codex.svg" width="20" height="20" alt="Codex 圖示">&nbsp;Codex</a>&emsp;
-<a href="#支援的-agent"><img src="docs/images/agents/antigravity.svg" width="20" height="20" alt="Antigravity 圖示">&nbsp;Antigravity</a>&emsp;
-<a href="#支援的-agent"><img src="docs/images/agents/opencode.svg" width="20" height="20" alt="OpenCode 圖示">&nbsp;OpenCode</a>&emsp;
-<a href="#支援的-agent"><img src="docs/images/agents/cursor.svg" width="20" height="20" alt="Cursor 圖示">&nbsp;Cursor</a>&emsp;
-<a href="#支援的-agent"><img src="docs/images/agents/grok-build.svg" width="20" height="20" alt="Grok Build 圖示">&nbsp;Grok&nbsp;Build</a>&emsp;
-<a href="#支援的-agent"><img src="docs/images/agents/muse-code.svg" width="20" height="20" alt="Muse Code 圖示">&nbsp;Muse&nbsp;Code</a>&emsp;
-<a href="#支援的-agent"><img src="docs/images/agents/hermes-agent.svg" width="20" height="20" alt="Hermes Agent 圖示">&nbsp;Hermes&nbsp;Agent</a>&emsp;
-<a href="#支援的-agent"><img src="docs/images/agents/openclaw.svg" width="20" height="20" alt="OpenClaw 圖示">&nbsp;OpenClaw</a>&emsp;
-<a href="#支援的-agent"><img src="docs/images/agents/deepseek-harness.svg" width="20" height="20" alt="DeepSeek Harness 圖示">&nbsp;DeepSeek&nbsp;Harness</a>
+<a href="#支援的-agent"><img src="docs/images/agents/chip-claude-code.svg" height="28" alt="Claude Code"></a>
+<a href="#支援的-agent"><img src="docs/images/agents/chip-codex.svg" height="28" alt="Codex"></a>
+<a href="#支援的-agent"><img src="docs/images/agents/chip-antigravity.svg" height="28" alt="Antigravity"></a>
+<a href="#支援的-agent"><img src="docs/images/agents/chip-opencode.svg" height="28" alt="OpenCode"></a>
+<a href="#支援的-agent"><img src="docs/images/agents/chip-cursor.svg" height="28" alt="Cursor"></a>
+<a href="#支援的-agent"><img src="docs/images/agents/chip-grok-build.svg" height="28" alt="Grok Build"></a>
+<a href="#支援的-agent"><img src="docs/images/agents/chip-muse-code.svg" height="28" alt="Muse Code"></a>
+<a href="#支援的-agent"><img src="docs/images/agents/chip-hermes-agent.svg" height="28" alt="Hermes Agent"></a>
+<a href="#支援的-agent"><img src="docs/images/agents/chip-openclaw.svg" height="28" alt="OpenClaw"></a>
+<a href="#支援的-agent"><img src="docs/images/agents/chip-deepseek-harness.svg" height="28" alt="DeepSeek Harness"></a>
 </p>
 
 <p align="center"><sub>dot 和其他網頁聊天要自己回報：把它們的區塊貼進<a href="#看板的網頁">看板的網頁</a>。</sub></p>

@@ -7,16 +7,16 @@
 </p>
 
 <p align="center"><b>Integrations</b><br>
-<a href="#supported-agents"><img src="docs/images/agents/claude-code.svg" width="20" height="20" alt="Claude Code icon">&nbsp;Claude&nbsp;Code</a>&emsp;
-<a href="#supported-agents"><img src="docs/images/agents/codex.svg" width="20" height="20" alt="Codex icon">&nbsp;Codex</a>&emsp;
-<a href="#supported-agents"><img src="docs/images/agents/antigravity.svg" width="20" height="20" alt="Antigravity icon">&nbsp;Antigravity</a>&emsp;
-<a href="#supported-agents"><img src="docs/images/agents/opencode.svg" width="20" height="20" alt="OpenCode icon">&nbsp;OpenCode</a>&emsp;
-<a href="#supported-agents"><img src="docs/images/agents/cursor.svg" width="20" height="20" alt="Cursor icon">&nbsp;Cursor</a>&emsp;
-<a href="#supported-agents"><img src="docs/images/agents/grok-build.svg" width="20" height="20" alt="Grok Build icon">&nbsp;Grok&nbsp;Build</a>&emsp;
-<a href="#supported-agents"><img src="docs/images/agents/muse-code.svg" width="20" height="20" alt="Muse Code icon">&nbsp;Muse&nbsp;Code</a>&emsp;
-<a href="#supported-agents"><img src="docs/images/agents/hermes-agent.svg" width="20" height="20" alt="Hermes Agent icon">&nbsp;Hermes&nbsp;Agent</a>&emsp;
-<a href="#supported-agents"><img src="docs/images/agents/openclaw.svg" width="20" height="20" alt="OpenClaw icon">&nbsp;OpenClaw</a>&emsp;
-<a href="#supported-agents"><img src="docs/images/agents/deepseek-harness.svg" width="20" height="20" alt="DeepSeek Harness icon">&nbsp;DeepSeek&nbsp;Harness</a>
+<a href="#supported-agents"><img src="docs/images/agents/chip-claude-code.svg" height="28" alt="Claude Code"></a>
+<a href="#supported-agents"><img src="docs/images/agents/chip-codex.svg" height="28" alt="Codex"></a>
+<a href="#supported-agents"><img src="docs/images/agents/chip-antigravity.svg" height="28" alt="Antigravity"></a>
+<a href="#supported-agents"><img src="docs/images/agents/chip-opencode.svg" height="28" alt="OpenCode"></a>
+<a href="#supported-agents"><img src="docs/images/agents/chip-cursor.svg" height="28" alt="Cursor"></a>
+<a href="#supported-agents"><img src="docs/images/agents/chip-grok-build.svg" height="28" alt="Grok Build"></a>
+<a href="#supported-agents"><img src="docs/images/agents/chip-muse-code.svg" height="28" alt="Muse Code"></a>
+<a href="#supported-agents"><img src="docs/images/agents/chip-hermes-agent.svg" height="28" alt="Hermes Agent"></a>
+<a href="#supported-agents"><img src="docs/images/agents/chip-openclaw.svg" height="28" alt="OpenClaw"></a>
+<a href="#supported-agents"><img src="docs/images/agents/chip-deepseek-harness.svg" height="28" alt="DeepSeek Harness"></a>
 </p>
 
 <p align="center"><sub>dot and other web chats report by hand: you paste their block into <a href="#the-boards-page">the board's page</a>.</sub></p>

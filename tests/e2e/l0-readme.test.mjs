@@ -45,13 +45,12 @@ const UNVERIFIED = ['Antigravity', 'Cursor', 'Grok Build', 'Muse Code', 'DeepSee
 const OLD_COMMANDS = ['claude plugin marketplace add WenyuChiou/agent-board', 'claude plugin install agent-board@agent-board', '/hooks', '/progress', '$agent-board', '/board', '/agent-board', 'node ~/.agent-board/agent-board.mjs --watch', '--html', 'node ~/.agent-board/agent-board.mjs --serve', 'node ~/.agent-board/agent-board.mjs --chat', 'node ~/.agent-board/agent-board.mjs --codex-doctor --agent codex']
 // The code each row of the surface table holds, in its order: terminal, browser, chat app, one agent's setup.
 const SURFACE_COMMANDS = [['node ~/.agent-board/agent-board.mjs --watch', '--html'], ['node ~/.agent-board/agent-board.mjs --serve'], ['node ~/.agent-board/agent-board.mjs --chat'], ['node ~/.agent-board/agent-board.mjs --codex-doctor --agent codex']]
-// Per language: the strip's label, the word its icons' alt text adds to a name, the two command
-// subsections, the caveat on a command not verified yet, the board's page heading, and how each
-// surface row starts.
+// Per language: the strip's label, the two command subsections, the caveat on a command not
+// verified yet, the board's page heading, and how each surface row starts.
 const WORDS = {
-  en: { label: 'Integrations', icon: 'icon', inAgent: 'Open the board in your agent', anywhere: 'Open the board anywhere', unverified: '(not verified yet)', page: "The board's page", surfaces: ['Any terminal', 'A browser', 'A chat app', "Check one agent's setup"] },
-  'zh-TW': { label: '整合', icon: '圖示', inAgent: '在你的 agent 裡打開看板', anywhere: '在任何地方打開看板', unverified: '（還沒驗證）', page: '看板的網頁', surfaces: ['任何終端機', '瀏覽器', '聊天軟體', '檢查某個 agent 的設定'] },
-  'zh-CN': { label: '集成', icon: '图标', inAgent: '在你的 agent 里打开看板', anywhere: '在任何地方打开看板', unverified: '（还没验证）', page: '看板的网页', surfaces: ['任何终端', '浏览器', '聊天软件', '检查某个 agent 的设置'] },
+  en: { label: 'Integrations', inAgent: 'Open the board in your agent', anywhere: 'Open the board anywhere', unverified: '(not verified yet)', page: "The board's page", surfaces: ['Any terminal', 'A browser', 'A chat app', "Check one agent's setup"] },
+  'zh-TW': { label: '整合', inAgent: '在你的 agent 裡打開看板', anywhere: '在任何地方打開看板', unverified: '（還沒驗證）', page: '看板的網頁', surfaces: ['任何終端機', '瀏覽器', '聊天軟體', '檢查某個 agent 的設定'] },
+  'zh-CN': { label: '集成', inAgent: '在你的 agent 里打开看板', anywhere: '在任何地方打开看板', unverified: '（还没验证）', page: '看板的网页', surfaces: ['任何终端', '浏览器', '聊天软件', '检查某个 agent 的设置'] },
 }
 // A piece of text as a pattern that matches it and nothing else.
 const literal = text => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
@@ -231,36 +230,53 @@ describe('L0 discover and install from the README', () => {
     assert.equal(new Set(Object.values(SECTIONS).map(list => list.length)).size, 1, 'every language has the same number of sections')
   })
 
-  test("L0 README: under the cover, each README lists the same ten integrations in the support matrix's order, each with its icon, a readable name and a link to its own support matrix", () => {
+  test("L0 README: under the cover, each README lists the same ten integrations in the support matrix's order, each as one dark chip with the agent's tile and name, its name as alt text and a link to its own support matrix", () => {
+    const chipsOf = {}
     for (const [name, lang] of READMES) {
       const text = read(name)
       const words = WORDS[lang]
       const header = headerOf(text)
       const strip = header.match(new RegExp(`<p align="center"><b>${literal(words.label)}</b><br>\\n([\\s\\S]*?)\\n</p>`))
       assert.ok(strip, `${name}: the header has an "${words.label}" strip`)
-      assert.ok(strip.index > header.indexOf(`docs/images/cover-${lang}-dark.svg`), `${name}: the strip comes after the cover`)
-      const entry = /<a href="([^"]*)">(<img\b[^>]*>)&nbsp;([^<]*)<\/a>/g
-      const entries = [...strip[1].matchAll(entry)]
-      // Entries part only at a breaking space, so the strip wraps on a narrow screen; nothing else
-      // sits between them, so dot and the web chats stay out of it.
-      assert.match(strip[1].replace(entry, ''), /^(?:&emsp;\n)*$/, `${name}: the strip holds only its entries, each break a wrapping space`)
-      const names = entries.map(match => match[3].replaceAll('&nbsp;', ' '))
-      assert.deepEqual(names, INTEGRATIONS, `${name}: the strip names the ten integrations in order`)
+      const cover = header.indexOf(`docs/images/cover-${lang}-dark.svg`)
+      assert.ok(strip.index > cover, `${name}: the strip comes after the cover`)
+      // GitHub breaks a line between an image and the text beside it, so each entry is one picture
+      // holding the tile and the name. Chips part only at a space, so the strip wraps on a narrow
+      // screen; nothing else sits between them, so dot and the web chats stay out of it.
+      const entry = /<a href="([^"]*)">(<img\b[^>]*>)<\/a>/g
+      assert.match(strip[1].replace(entry, ''), /^\n*$/, `${name}: the strip holds only its chips, one to a line`)
+      const attribute = (img, key) => img.match(new RegExp(`\\s${key}="([^"]*)"`))?.[1]
+      const chips = [...strip[1].matchAll(entry)].map(([, href, img]) => ({ href, ...Object.fromEntries(['src', 'height', 'alt'].map(key => [key, attribute(img, key)])) }))
+      assert.deepEqual(chips.map(chip => chip.alt), INTEGRATIONS, `${name}: the strip names the ten integrations in order`)
       // The order is the support matrix's own: its rows with an icon, read in the same README.
       const matrix = section(text, SECTIONS[lang][2])
       assert.ok(matrix, `${name}: the support matrix section exists`)
       assert.deepEqual(rows(matrix, '| <img').map(cells => cells[1]), INTEGRATIONS, `${name}: the matrix lists the same agents in the same order`)
       assert.doesNotMatch(matrix.slice(0, matrix.indexOf('\n|')), /<img\b/, `${name}: no icons stand above the matrix`)
-      const attribute = (img, key) => img.match(new RegExp(`\\s${key}="([^"]*)"`))?.[1]
-      for (const [i, [, href, img]] of entries.entries()) {
-        const agent = INTEGRATIONS[i]
-        const [src, width, height, alt] = ['src', 'width', 'height', 'alt'].map(key => attribute(img, key))
-        assert.equal(src, `docs/images/agents/${agent.toLowerCase().replaceAll(' ', '-')}.svg`, `${name}: ${agent}'s icon`)
+      const darkCover = read(`docs/images/cover-${lang}-dark.svg`)
+      for (const { href, src, height, alt } of chips) {
+        const file = alt.toLowerCase().replaceAll(' ', '-')
+        assert.equal(src, `docs/images/agents/chip-${file}.svg`, `${name}: ${alt}'s chip`)
         assert.ok(exists(src), `${name}: ${src} exists`)
-        assert.deepEqual([width, height], ['20', '20'], `${name}: ${agent}'s icon is 20 by 20, like every other`)
-        assert.equal(alt, `${agent} ${words.icon}`, `${name}: ${agent}'s icon says what it is`)
-        assert.equal(href, anchorOf(SECTIONS[lang][2]), `${name}: ${agent} links to this README's support matrix`)
+        assert.equal(href, anchorOf(SECTIONS[lang][2]), `${name}: ${alt} links to this README's support matrix`)
+        const svg = read(src)
+        assert.equal(/^<svg\b[^>]*\sheight="(\d+)"/.exec(svg)?.[1], height, `${name}: ${alt}'s chip is shown at its own height`)
+        assert.ok(svg.includes(`aria-label="${alt}"`) && svg.includes(`<title>${alt}</title>`), `${src} names ${alt}`)
+        assert.doesNotMatch(svg, /data:image\//, `${src} holds no embedded bitmap`)
+        // Drawn from the same icon source as the agent's own tile: the chip has the tile's colour and
+        // its whole mark (every path of a logo, or the letter of a tile without one), then the name.
+        const icon = read(`docs/images/agents/${file}.svg`)
+        const tile = /<rect width="48" height="48" rx="11" fill="(#[0-9A-Fa-f]{6})"/.exec(icon)?.[1]
+        assert.ok(tile && svg.includes(`fill="${tile}"`), `${src} shows ${alt}'s tile`)
+        const marks = [...icon.matchAll(/<path d="[^"]+"\/>|<text\b[^>]*>[^<]*<\/text>/g)].map(([mark]) => mark.startsWith('<path') ? mark : `>${/>([^<]*)</.exec(mark)[1]}</text>`)
+        assert.ok(marks.length > 0 && marks.every(mark => svg.includes(mark)), `${src} draws ${alt}'s mark`)
+        assert.match(svg, new RegExp(`<text\\b[^>]*>${literal(alt)}</text>`), `${src} shows the name ${alt}`)
+        // The chip's card is the dark cover's card, so the strip shares the README's one dark look.
+        const card = /<rect x="0\.5" y="0\.5" [^>]*fill="(#[0-9a-f]{6})"/.exec(svg)?.[1]
+        assert.ok(card && darkCover.includes(card), `${src}: its card colour ${card} is the dark cover's`)
       }
+      assert.equal(new Set(chips.map(chip => chip.height)).size, 1, `${name}: every chip has the same height`)
+      chipsOf[lang] = chips.map(chip => chip.src)
       // The strip names integrations; how each was checked stays in the matrix.
       assert.doesNotMatch(header.slice(strip.index), /verif|驗證|验证/i, `${name}: the header claims no verification`)
       for (const mention of header.matchAll(/\bdot\b/g)) {
@@ -268,6 +284,8 @@ describe('L0 discover and install from the README', () => {
         assert.ok(before.lastIndexOf('<sub>') > before.lastIndexOf('</sub>'), `${name}: dot is named only in the small note under the strip`)
       }
     }
+    // One set of chips for every language: the names are product names.
+    for (const lang of ['zh-TW', 'zh-CN']) assert.deepEqual(chipsOf[lang], chipsOf.en, `the ${lang} README shows the English README's chips in the same order`)
   })
 
   test('L0 README: the header has no Node badge and only small project badges, and the install steps keep Node 22+ for npm and 18+ for a checkout', () => {
