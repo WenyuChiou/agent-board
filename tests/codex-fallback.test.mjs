@@ -2,7 +2,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs'
+import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, sep } from 'node:path'
 import { pathToFileURL } from 'node:url'
@@ -18,6 +18,7 @@ const approvedConnect = f => {
   const result = f.run('connect')
   assert.equal(result.state.setup.codexTrusted, true)
   assert.doesNotMatch(readFileSync(f.instructions, 'utf8'), /agent-board:start/)
+  assert.deepEqual(result.state.codexApproval.binary, binaryOf(f.executable))
   return result
 }
 const assertApproved = (f, result) => {
@@ -25,7 +26,15 @@ const assertApproved = (f, result) => {
   assert.ok(!result.result.problems.some(one => one.key === 'codex:approval'))
   assert.doesNotMatch(readFileSync(f.instructions, 'utf8'), /agent-board:start/)
   const config = join(f.root, 'config.toml')
-  assert.deepEqual(result.state.codexApproval, { source: f.config, sourceHash: sha(readFileSync(f.config)), configHash: existsSync(config) ? sha(readFileSync(config)) : null })
+  // The executable is remembered when Codex itself said yes; the 0.23 upgrade path may have none.
+  const { binary, ...approval } = result.state.codexApproval
+  assert.deepEqual(approval, { source: f.config, sourceHash: sha(readFileSync(f.config)), configHash: existsSync(config) ? sha(readFileSync(config)) : null })
+  if (binary !== undefined) assert.deepEqual(binary, binaryOf(f.executable))
+}
+const binaryOf = file => {
+  const path = realpathSync.native(file)
+  const { size, mtimeMs } = statSync(path)
+  return { path, size, mtime: mtimeMs }
 }
 const sha = bytes => createHash('sha256').update(bytes).digest('hex')
 const fixture = async action => {
@@ -107,7 +116,7 @@ syncBuiltinESMExports()`)
     assert.equal(result.status, 0, result.stderr + result.stdout)
     return JSON.parse(result.stdout)
   }
-  try { await action({ home, root, config, instructions, override, options, log, replies, control, request, run }) }
+  try { await action({ home, root, config, instructions, override, options, log, replies, control, executable, request, run }) }
   finally { rmSync(home, { recursive: true, maxRetries: 5, retryDelay: 100 }) }
 }
 
@@ -584,26 +593,108 @@ test('an upgrade cannot seed approval if this connect rewrites hooks.json', () =
   assert.match(readFileSync(f.instructions, 'utf8'), /agent-board:start/)
 }))
 
+test('an approved Codex replaced by an upgrade that then cannot be asked gets the fallback back', () => fixture(async f => {
+  approvedConnect(f)
+  // A new Codex can stop trusting our hooks without changing hooks.json or config.toml.
+  appendFileSync(f.executable, '\n// a newer Codex\n')
+  writeFileSync(f.options, JSON.stringify({ rejected: true }))
+  const result = f.run('connect')
+  assert.equal(result.state.setup.codexTrusted, false)
+  assert.match(readFileSync(f.instructions, 'utf8'), /agent-board:start/)
+  // With no Codex found, the remembered approval stands as before.
+  const missing = f.run('connect', { codexExecutable: join(f.home, 'missing-control.exe') })
+  assert.equal(missing.state.setup.codexTrusted, true)
+  assert.doesNotMatch(readFileSync(f.instructions, 'utf8'), /agent-board:start/)
+  // The new Codex's own yes is remembered with it.
+  writeFileSync(f.options, JSON.stringify({ trust: 'trusted' }))
+  assertApproved(f, f.run('connect'))
+  assert.deepEqual(JSON.parse(readFileSync(f.control, 'utf8')).codexApproval.binary, binaryOf(f.executable))
+}))
+
+test('a home approved under 0.23 is not taken as approved when config.toml changed after its last connect', () => fixture(async f => {
+  approvedConnect(f)
+  const state = JSON.parse(readFileSync(f.control, 'utf8'))
+  delete state.codexApproval
+  writeFileSync(f.control, JSON.stringify(state))
+  // Untrusting our hooks in /hooks writes config.toml, which the 0.23 connect never saw.
+  const config = join(f.root, 'config.toml')
+  writeFileSync(config, '[hooks.state]\n')
+  const saved = statSync(f.control).mtimeMs / 1000
+  const unavailable = { codexExecutable: join(f.home, 'missing-control.exe') }
+  utimesSync(config, saved - 60, saved - 60)
+  assert.equal(f.run('status', unavailable).state.setup.codexTrusted, true)
+  utimesSync(config, saved + 60, saved + 60)
+  assert.equal(f.run('status', unavailable).state.setup.codexTrusted, false)
+  const result = f.run('connect', unavailable)
+  assert.equal(result.state.setup.codexTrusted, false)
+  assert.equal(result.state.codexApproval, undefined)
+  assert.match(readFileSync(f.instructions, 'utf8'), /agent-board:start/)
+}))
+
+// A home whose 0.23 connect confirmed the approval, with Codex not answering now.
+const approvedUnder023 = f => {
+  approvedConnect(f)
+  const state = JSON.parse(readFileSync(f.control, 'utf8'))
+  delete state.codexApproval
+  writeFileSync(f.control, JSON.stringify(state))
+  writeFileSync(f.options, JSON.stringify({ rejected: true }))
+  return statSync(f.control).mtimeMs / 1000
+}
+
+test('a home approved under 0.23 is not taken as approved when its Codex executable changed after its last connect and Codex cannot be asked', () => fixture(async f => {
+  const saved = approvedUnder023(f)
+  // A Codex upgrade replaces the executable, which the 0.23 connect never saw.
+  utimesSync(f.executable, saved + 60, saved + 60)
+  assert.equal(f.run('status').state.setup.codexTrusted, false)
+  const result = f.run('connect')
+  assert.equal(result.state.setup.codexTrusted, false)
+  assert.equal(result.state.codexApproval, undefined)
+  assert.match(readFileSync(f.instructions, 'utf8'), /agent-board:start/)
+}))
+
+test('a home approved under 0.23 whose Codex executable is older than its last connect is taken as approved and remembers that executable', () => fixture(async f => {
+  const saved = approvedUnder023(f)
+  utimesSync(f.executable, saved - 60, saved - 60)
+  assert.equal(f.run('status').state.setup.codexTrusted, true)
+  const result = f.run('connect')
+  assertApproved(f, result)
+  assert.deepEqual(result.state.codexApproval.binary, binaryOf(f.executable))
+}))
+
+test('a config.toml with a byte-order mark, CRLF and characters outside ASCII hashes the same on both sides of the connect', () => fixture(async f => {
+  writeFileSync(join(f.root, 'config.toml'), '\uFEFF# \u500b\u4eba\u8a2d\u5b9a \u2713 \u{1F600}\r\nmodel = "synthetic"\r\n')
+  assertApproved(f, approvedConnect(f))
+}))
+
 test('the shared Codex approval decision requires the exact current source and hash', () => {
   const source = join(tmpdir(), 'synthetic-codex', 'hooks.json')
   const sourceHash = 'a'.repeat(64), otherHash = 'b'.repeat(64), configHash = 'c'.repeat(64), otherConfig = 'd'.repeat(64)
   const approval = { source, sourceHash, configHash }
   const observation = { source, sourceHash, trusted: true, hooks: [], configHash }
   for (const stale of [{ ...observation, source: source + '.other' }, { ...observation, sourceHash: otherHash }, { ...observation, configHash: otherConfig }]) {
-    assert.deepEqual(codexApproval(stale, source, sourceHash, configHash, approval, true, sourceHash), { trusted: false, approval })
+    assert.deepEqual(codexApproval(stale, source, sourceHash, configHash, approval, true, sourceHash, null), { trusted: false, approval })
   }
-  assert.deepEqual(codexApproval(observation, source, sourceHash, configHash, undefined, false, otherHash), { trusted: true, approval })
-  assert.deepEqual(codexApproval(observation, source, sourceHash, undefined, approval, true, sourceHash), { trusted: false, approval })
+  assert.deepEqual(codexApproval(observation, source, sourceHash, configHash, undefined, false, otherHash, null), { trusted: true, approval })
+  assert.deepEqual(codexApproval(observation, source, sourceHash, undefined, approval, true, sourceHash, null), { trusted: false, approval })
   // A no clears the approval whatever config.toml holds.
-  assert.deepEqual(codexApproval({ ...observation, trusted: false, configHash: otherConfig }, source, sourceHash, configHash, approval, true, sourceHash), { trusted: false, approval: undefined })
-  assert.deepEqual(codexApproval(undefined, source, sourceHash, configHash, approval, false, otherHash), { trusted: true, approval })
+  assert.deepEqual(codexApproval({ ...observation, trusted: false, configHash: otherConfig }, source, sourceHash, configHash, approval, true, sourceHash, null), { trusted: false, approval: undefined })
+  assert.deepEqual(codexApproval(undefined, source, sourceHash, configHash, approval, false, otherHash, null), { trusted: true, approval })
   const elsewhere = { ...approval, source: source + '.other' }
-  assert.deepEqual(codexApproval(undefined, source, sourceHash, configHash, elsewhere, true, sourceHash), { trusted: false, approval: elsewhere })
-  for (const current of [otherConfig, null, undefined]) assert.deepEqual(codexApproval(undefined, source, sourceHash, current, approval, true, sourceHash), { trusted: false, approval })
-  assert.deepEqual(codexApproval(undefined, source, sourceHash, configHash, { source, sourceHash }, true, sourceHash), { trusted: false, approval: { source, sourceHash } })
-  assert.deepEqual(codexApproval(undefined, source, otherHash, configHash, approval, true, sourceHash), { trusted: false, approval })
-  assert.deepEqual(codexApproval(undefined, source, null, configHash, approval, true, null), { trusted: false, approval })
-  assert.deepEqual(codexApproval(undefined, source, sourceHash, null, undefined, true, sourceHash), { trusted: true, approval: { source, sourceHash, configHash: null } })
-  assert.deepEqual(codexApproval(undefined, source, sourceHash, undefined, undefined, true, sourceHash), { trusted: false, approval: undefined })
-  assert.deepEqual(codexApproval(undefined, source, sourceHash, configHash, undefined, true, otherHash), { trusted: false, approval: undefined })
+  assert.deepEqual(codexApproval(undefined, source, sourceHash, configHash, elsewhere, true, sourceHash, null), { trusted: false, approval: elsewhere })
+  for (const current of [otherConfig, null, undefined]) assert.deepEqual(codexApproval(undefined, source, sourceHash, current, approval, true, sourceHash, null), { trusted: false, approval })
+  assert.deepEqual(codexApproval(undefined, source, sourceHash, configHash, { source, sourceHash }, true, sourceHash, null), { trusted: false, approval: { source, sourceHash } })
+  assert.deepEqual(codexApproval(undefined, source, otherHash, configHash, approval, true, sourceHash, null), { trusted: false, approval })
+  assert.deepEqual(codexApproval(undefined, source, null, configHash, approval, true, null, null), { trusted: false, approval })
+  assert.deepEqual(codexApproval(undefined, source, sourceHash, null, undefined, true, sourceHash, null), { trusted: true, approval: { source, sourceHash, configHash: null } })
+  assert.deepEqual(codexApproval(undefined, source, sourceHash, undefined, undefined, true, sourceHash, null), { trusted: false, approval: undefined })
+  assert.deepEqual(codexApproval(undefined, source, sourceHash, configHash, undefined, true, otherHash, null), { trusted: false, approval: undefined })
+  // The executable that said yes is remembered. When Codex cannot be asked, a different one
+  // found here does not confirm the approval, and none found keeps it.
+  const binary = { path: join(tmpdir(), 'synthetic-codex', 'codex.exe'), size: 10, mtime: 1 }
+  const remembered = { ...approval, binary }
+  assert.deepEqual(codexApproval(observation, source, sourceHash, configHash, undefined, false, otherHash, binary), { trusted: true, approval: remembered })
+  for (const current of [binary, null]) assert.deepEqual(codexApproval(undefined, source, sourceHash, configHash, remembered, false, otherHash, current), { trusted: true, approval: remembered })
+  for (const current of [{ ...binary, path: binary.path + '.new' }, { ...binary, size: 11 }, { ...binary, mtime: 2 }, undefined]) assert.deepEqual(codexApproval(undefined, source, sourceHash, configHash, remembered, false, otherHash, current), { trusted: false, approval: remembered })
+  assert.deepEqual(codexApproval(undefined, source, sourceHash, configHash, approval, false, otherHash, binary), { trusted: false, approval })
+  assert.deepEqual(codexApproval(undefined, source, sourceHash, configHash, undefined, true, sourceHash, binary), { trusted: true, approval: remembered })
 })

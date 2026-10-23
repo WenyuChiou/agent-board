@@ -9,6 +9,22 @@ type Json = Record<string, unknown>
 type Hook = { key: string; currentHash: string; sourcePath: string; eventName: string; command: string; enabled: boolean; trustStatus: string }
 export type CodexHookIdentity = { event: string; command: string }
 export type CodexTrustObservation = { source: string; sourceHash: string; trusted: boolean; hooks: { event: string; key: string; hash: string; trust: string }[] }
+export type CodexBinary = { path: string; size: number; mtime: number }
+
+// The codex executable found for the check, as it is on disk: null when there is none,
+// undefined when it is there but cannot be read (then no approval is confirmed without
+// asking Codex).
+export const codexBinaryOf = (executable: string | undefined): CodexBinary | null | undefined => {
+  if (executable === undefined) return null
+  try {
+    // The native form gives one spelling of the path whatever the case PATH used on Windows.
+    const path = realpathSync.native(executable)
+    const { size, mtimeMs } = statSync(path)
+    return { path, size, mtime: mtimeMs }
+  } catch (error) {
+    return (error as { code?: string }).code === 'ENOENT' ? null : undefined
+  }
+}
 
 // The sha of Codex's config.toml, which untrusting or turning hooks off in /hooks changes:
 // null when there is none, undefined when it exists but cannot be read (then no approval

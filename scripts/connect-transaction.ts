@@ -4,9 +4,9 @@ import { dirname, isAbsolute, join, resolve } from 'node:path'
 import type { Lang, Strings } from '../hooks/i18n'
 import { BOARD_FOR, agentHooks, connectDataRoots, connectPath, isNodeSupported, isSetupState, nodeVersionOf, setupSeed, setupProblemText, withoutSection } from '../hooks/connect-pure'
 import { managedCommandLines } from '../hooks/codex-fallback'
-import { codexConfigHash, findCodexExecutable, inspectCodexHooks } from './codex-host'
+import { codexBinaryOf, codexConfigHash, findCodexExecutable, inspectCodexHooks } from './codex-host'
 import { codexApproval } from './codex-approval'
-import type { CodexApproval, CodexCheck } from './codex-approval'
+import type { CodexApproval, CodexCheck, CodexFound } from './codex-approval'
 import type { ConnectContext, SetupState } from '../hooks/connect-pure'
 import { langOf, STRINGS } from '../hooks/strings'
 import { installControlRoot, withInstallLock } from './install-control'
@@ -72,6 +72,8 @@ export class ConnectTransaction {
     if (existsSync(this.file)) {
       const state = JSON.parse(readLocal(this.file)) as ConnectState
       if (state.codexApproval !== undefined && (state.codexApproval === null || typeof state.codexApproval !== 'object' || Array.isArray(state.codexApproval) || typeof state.codexApproval.source !== 'string' || !isAbsolute(state.codexApproval.source) || typeof state.codexApproval.sourceHash !== 'string' || !/^[a-f0-9]{64}$/.test(state.codexApproval.sourceHash) || state.codexApproval.configHash !== undefined && state.codexApproval.configHash !== null && (typeof state.codexApproval.configHash !== 'string' || !/^[a-f0-9]{64}$/.test(state.codexApproval.configHash)))) throw new Error('INVALID_CONNECT_STATE')
+      const binary = state.codexApproval?.binary
+      if (binary !== undefined && (binary === null || typeof binary !== 'object' || Array.isArray(binary) || typeof binary.path !== 'string' || !isAbsolute(binary.path) || !Number.isSafeInteger(binary.size) || binary.size < 0 || typeof binary.mtime !== 'number' || !Number.isFinite(binary.mtime))) throw new Error('INVALID_CONNECT_STATE')
       if (state.connectedProgress !== undefined && (typeof state.connectedProgress !== 'string' || !isAbsolute(state.connectedProgress))) throw new Error('INVALID_CONNECT_STATE')
       if (state.version !== 1 || !Number.isSafeInteger(state.revision) || state.revision < 0 || typeof state.disabled !== 'boolean' || state.owned === null || typeof state.owned !== 'object' || Array.isArray(state.owned) || Object.entries(state.owned).some(([file, value]) => !isAbsolute(file) || typeof value !== 'string' || !/^[a-f0-9]{64}$/.test(value)) || !Array.isArray(state.notified) || state.notified.some(value => typeof value !== 'string') || state.boardLang !== undefined && langOf(state.boardLang) !== state.boardLang || state.setup !== undefined && !isSetupState(state.setup)) throw new Error('INVALID_CONNECT_STATE')
       if (state.pending !== undefined) {
@@ -173,6 +175,7 @@ const checkedRequest = (value: unknown): LegacyConnectRequest => {
 }
 
 const codexBinary = (): string | undefined => findCodexExecutable(process.env.PATH ?? '', process.platform, process.arch)
+const mtimeOf = (file: string): number | undefined => { try { return statSync(file).mtimeMs } catch { return undefined } }
 
 // The connect worker has a 10 s process.run limit in register.tsx. On Windows,
 // other connect work takes 0.4–1.1 s and app-server startup takes 0.25 s to over 1 s.
@@ -181,9 +184,7 @@ const CODEX_CHECK_REQUEST_MS = 2000
 // A cold app-server start can take over 2 s; the first answer may use more of the budget.
 const CODEX_CHECK_INITIALIZE_MS = 3500
 
-const codexObservation = async (request: LegacyConnectRequest): Promise<CodexCheck | undefined> => {
-  if (!['connect', 'auto', 'status'].includes(request.mode)) return undefined
-  const executable = request.codexExecutable ?? codexBinary()
+const codexObservation = async (request: LegacyConnectRequest, executable: string | undefined): Promise<CodexCheck | undefined> => {
   if (executable === undefined) return undefined
   const deadline = performance.now() + CODEX_CHECK_BUDGET_MS
   const home = request.home, folder = dirname(request.progress), codexHome = request.dirs?.codex ?? join(home, '.codex')
@@ -335,8 +336,18 @@ export const foreignHostCheck = (transaction: ConnectTransaction, context: Conne
 export const legacyConnect = async (value: unknown, bundle: string): Promise<{ state: ConnectState; result: ReturnType<typeof connectLegacy> | null }> => {
   const request = checkedRequest(value)
   if (request.node === null || nodeVersionOf(request.node) === null || !isNodeSupported(request.node) || !isNodeSupported(`v${process.versions.node}`)) throw new Error('NODE_REQUIRED')
-  const observation = await codexObservation(request)
+  const executable = ['connect', 'auto', 'status'].includes(request.mode) ? request.codexExecutable ?? codexBinary() : undefined
+  // Read before Codex is asked, so an approval names the executable that answered.
+  const binary = codexBinaryOf(executable)
+  const observation = await codexObservation(request, executable)
   return withInstallLock(request.home, () => {
+    // A 0.23 approval cannot have seen an untrust in /hooks (it writes config.toml) or a
+    // Codex upgrade made after legacy-connect.json was last written. An ack or language
+    // save also writes it without a check, so a change before one of those is missed.
+    // With no saved state the SDK seed carries no codexTrusted, so nothing is seeded anyway.
+    const savedAt = mtimeOf(join(installControlRoot(request.home), 'legacy-connect.json'))
+    const changedAt = [mtimeOf(join(request.dirs?.codex ?? join(request.home, '.codex'), 'config.toml')), binary?.mtime]
+    const found: CodexFound = { binary, isSeedStale: changedAt.some(time => time !== undefined && (savedAt === undefined || time > savedAt)) }
     const transaction = new ConnectTransaction(request.home, request.seed)
     const state = transaction.state
     // Check the host's current path before creating authority, staging writes, or
@@ -353,7 +364,7 @@ export const legacyConnect = async (value: unknown, bundle: string): Promise<{ s
       const text = transaction.exists(source) ? transaction.maybe(source) : null
       const sourceHash = text === null ? null : hash(text)
       const trusted = request.mode === 'ack' ? stored?.codexTrusted === true
-        : codexApproval(observation, resolve(source), sourceHash, codexConfigHash(context.codexHome), state.codexApproval, stored?.codexTrusted, sourceHash).trusted
+        : codexApproval(observation, resolve(source), sourceHash, codexConfigHash(context.codexHome), state.codexApproval, stored?.codexTrusted === true && !found.isSeedStale, sourceHash, found.binary).trusted
       const setup: SetupState = {
         ...(stored ?? { agents: [], node: request.node }),
         codexTrusted: trusted,
@@ -424,7 +435,7 @@ export const legacyConnect = async (value: unknown, bundle: string): Promise<{ s
       const { seed: _seed, ...metadata } = one
       state.pending = { request: metadata, bundle: hash(bundle) }
       transaction.save()
-      const result = connectLegacy(transaction, one, bundle, process.platform === 'win32', observation)
+      const result = connectLegacy(transaction, one, bundle, process.platform === 'win32', observation, found)
       state.revision += 1
       delete state.pending
       transaction.save()

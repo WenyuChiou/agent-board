@@ -3,13 +3,13 @@ import type { AgentSetup, HookState, SetupNotice, SetupProblem, SetupState } fro
 import { langOf, STRINGS } from '../hooks/strings'
 import type { ConnectTransaction, LegacyConnectRequest } from './connect-transaction'
 import { codexApproval } from './codex-approval'
-import type { CodexCheck } from './codex-approval'
+import type { CodexCheck, CodexFound } from './codex-approval'
 import { codexFallbackCommand, managedFallback } from '../hooks/codex-fallback'
 import { sha256 } from '../hooks/sha256'
 
 const skillFolder = (file: string): string | null => /[\\/]SKILL\.md$/.test(file) ? file.replace(/[\\/][^\\/]*$/, '') : null
 
-export const connectLegacy = (transaction: ConnectTransaction, request: LegacyConnectRequest, bundle: string, isWin: boolean, observation?: CodexCheck): { text: string; lines: string[]; done: string[]; problems: SetupProblem[] } => {
+export const connectLegacy = (transaction: ConnectTransaction, request: LegacyConnectRequest, bundle: string, isWin: boolean, observation: CodexCheck | undefined, found: CodexFound): { text: string; lines: string[]; done: string[]; problems: SetupProblem[] } => {
   const mode = request.mode
   const remove = mode === 'remove'
   const isAuto = mode === 'auto'
@@ -266,7 +266,7 @@ export const connectLegacy = (transaction: ConnectTransaction, request: LegacyCo
     }
   }
   const codexCurrent = existsSync(codexSource) ? readMaybe(codexSource) : null
-  const decision = codexApproval(observation, codexSource, codexCurrent === null ? null : sha256(codexCurrent), configHashViaTransaction(), transaction.state.codexApproval, transaction.state.setup?.codexTrusted, beforeHash)
+  const decision = codexApproval(observation, codexSource, codexCurrent === null ? null : sha256(codexCurrent), configHashViaTransaction(), transaction.state.codexApproval, transaction.state.setup?.codexTrusted === true && !found.isSeedStale, beforeHash, found.binary)
   let codexTrusted = decision.trusted
   if (remove || decision.approval === undefined) delete transaction.state.codexApproval
   else transaction.state.codexApproval = decision.approval
