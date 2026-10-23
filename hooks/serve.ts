@@ -10,6 +10,7 @@ import { RESUME } from './parse'
 import { replyHint, wayBackText } from './view'
 import type { AgentTarget, StepRef, TaskRef, View } from './view'
 import type { Connection, Message } from './messaging'
+import { address, isOpen } from './messaging'
 
 // The board's page: what `agent-board.mjs --serve` shows in a browser for agents other than
 // Claude Code, and what a press on it does. It does what the pane does: tick a hand-kept step,
@@ -23,14 +24,14 @@ import type { Connection, Message } from './messaging'
 export type SendMode = 'send' | 'connected' | 'open' | 'claude' | 'none'
 type Delivery = { id: string; turn: string; agent: string }
 type Receipt = Pick<Message, 'id' | 'status' | 'reply' | 'error'>
-type Messaging = { connections: readonly Connection[]; messages: readonly Message[] }
+type Messaging = { connections: readonly Connection[]; messages: readonly Omit<Message, 'nonce' | 'hash'>[] }
 
 const liveTarget = (agent: string, session: string | undefined, connections: readonly Connection[]): Connection | undefined => {
-  const matches = connections.filter(one => one.agent === (agent || 'claude') && one.session === session)
-  return matches.length === 1 ? matches[0] : undefined
+  const matches = session === undefined ? [] : connections.filter(one => address(one.agent, one.session) === address(agent || 'claude', session))
+  return matches.length === 1 && !matches[0]?.contested ? matches[0] : undefined
 }
-const rowReceipt = (agent: string, session: string | undefined, messages: readonly Message[]): { receipt?: Receipt } => {
-  const one = session === undefined ? undefined : messages.filter(message => message.to === `${agent || 'claude'}:${session}`).at(-1)
+const rowReceipt = (agent: string, session: string | undefined, messages: readonly Omit<Message, 'nonce' | 'hash'>[]): { receipt?: Receipt } => {
+  const one = session === undefined ? undefined : messages.filter(message => message.to === address(agent || 'claude', session)).at(-1)
   return one === undefined ? {} : { receipt: { id: one.id, status: one.status, reply: one.reply, error: one.error } }
 }
 
@@ -210,8 +211,9 @@ export const serveModel = (view: View, pending: readonly PendingTurn[], s: Strin
       const { ask } = item
       const isManual = ask.where === 'manual'
       const connection = isManual || isLan ? undefined : liveTarget(ask.agent, ask.nativeSession, messaging?.connections ?? [])
+      const isContested = !isManual && !isLan && connection === undefined && (messaging?.connections.some(one => one.agent === (ask.agent || 'claude') && one.session === ask.nativeSession) ?? false)
       const baseMode = isManual ? 'none' : sendMode(ask.agent, ask.target)
-      const mode = connection ? 'connected' : (messaging || !allowResume) && baseMode === 'send' ? 'open' : baseMode
+      const mode = connection ? 'connected' : isContested || !allowResume && baseMode === 'send' ? 'open' : baseMode
       const send = onLan(mode)
       // A phone on the local network gets the id, but neither the command nor its folder.
       const hint = replyHint(ask, s, !isLan)
@@ -243,15 +245,16 @@ export const serveModel = (view: View, pending: readonly PendingTurn[], s: Strin
         back: wayBackText(hint),
         sessionId: ask.where === 'other' ? ask.sessionId : null,
         reopen: hint.reopen,
-        isSending: isSending(ask.target) || connection !== undefined && (messaging?.messages.some(one => one.target === connection.id && ['queued', 'uncertain', 'accepted'].includes(one.status)) ?? false),
+        isSending: isSending(ask.target) || connection !== undefined && (messaging?.messages.some(one => one.target === connection.id && isOpen(one)) ?? false),
       })
       continue
     }
     if (item.type === 'row') {
       const { row } = item
       const connection = isLan ? undefined : liveTarget(row.agent, row.nativeSession, messaging?.connections ?? [])
+      const isContested = !isLan && connection === undefined && (messaging?.connections.some(one => one.agent === (row.agent || 'claude') && one.session === row.nativeSession) ?? false)
       const baseMode = row.target === null ? (row.auto === null ? 'none' : 'claude') : sendMode(row.agent, row.target)
-      const mode = connection ? 'connected' : (messaging || !allowResume) && baseMode === 'send' ? 'open' : baseMode
+      const mode = connection ? 'connected' : isContested || !allowResume && baseMode === 'send' ? 'open' : baseMode
       const send = onLan(mode)
       const rows = idleKeys.has(row.key) ? idle : stoppedKeys.has(row.key) ? stopped : (groups.get(row.project) ?? [])
       if (!idleKeys.has(row.key) && !stoppedKeys.has(row.key)) groups.set(row.project, rows)
@@ -287,8 +290,8 @@ export const serveModel = (view: View, pending: readonly PendingTurn[], s: Strin
         where: send === 'send' ? (row.target?.dir ?? '') : '',
         // A row says why only when a reply could otherwise be expected here.
         info: connection ? '' : lanInfo(baseMode, row.agent) ?? (send === 'open' ? infoOf(send, row.agent, row.title, '', s) : ''),
-        isSending: isSending(row.target) || connection !== undefined && (messaging?.messages.some(one => one.target === connection.id && ['queued', 'uncertain', 'accepted'].includes(one.status)) ?? false),
-        hasCopyBox: lanInfo(baseMode, row.agent) !== null || (messaging !== undefined || !allowResume) && row.auto !== null && connection === undefined,
+        isSending: isSending(row.target) || connection !== undefined && (messaging?.messages.some(one => one.target === connection.id && isOpen(one)) ?? false),
+        hasCopyBox: isContested || lanInfo(baseMode, row.agent) !== null || !allowResume && row.auto !== null && connection === undefined,
       })
       continue
     }
@@ -389,9 +392,10 @@ const actionOf = (items: readonly BoardItem[], request: ServeRequest, s: Strings
   if (item.type === 'ask' && item.ask.where === 'manual') return { type: 'refuse', note: s.serveManualReply }
   const mode = target === null ? (agent === '' ? 'claude' : 'none') : sendMode(agent, target)
   const title = item.type === 'ask' ? item.ask.task : item.row.title
+  const native = item.type === 'ask' ? item.ask.nativeSession : item.row.nativeSession
+  const connected = liveTarget(agent, native, connections)
+  if (!isLan && !connected && connections.some(one => one.agent === (agent || 'claude') && one.session === native)) return { type: 'refuse', note: s.messagesContested }
   if (request.type === 'message') {
-    const native = item.type === 'ask' ? item.ask.nativeSession : item.row.nativeSession
-    const connected = liveTarget(agent, native, connections)
     const question = item.type === 'ask' ? item.ask.text : item.row.question ?? ''
     if (isLan || !connected || connected.id !== request.connection || connected.turn !== request.turn || connected.session !== request.session || (request.asked ?? '') !== question || !text) return { type: 'refuse', note: s.messagesFailed }
     return { type: 'message', connection: { id: connected.id, turn: connected.turn, agent: connected.agent }, text, title }
@@ -400,7 +404,7 @@ const actionOf = (items: readonly BoardItem[], request: ServeRequest, s: Strings
   if (isLan) return { type: 'refuse', note: s.serveLanSend(agent) }
   // A closed progress record is not a live receiver. Resuming a saved session is a
   // separate, explicitly enabled action, never a fallback for a disconnected adapter.
-  if (isMessaging || !allowResume) return { type: 'refuse', note: s.messagesFailed }
+  if (!allowResume) return { type: 'refuse', note: s.messagesFailed }
   // Keys are a project and a title, which another session's block can take over between the
   // page's redraw and the press.
   if (request.session !== target.session) return { type: 'refuse', note: s.boardLineChanged }
@@ -839,6 +843,8 @@ const PAGE_SCRIPT = String.raw`
     if (!receipt) return null;
     var labels = { queued: 'messagesQueued', uncertain: 'messagesUncertain', accepted: 'messagesAccepted', acknowledged: 'messagesAcknowledged', rejected: 'messagesRejected' };
     if (receipt.status === 'acknowledged' || receipt.status === 'rejected') Object.keys(messageAttempts).forEach(function (slot) { if (messageAttempts[slot].id === receipt.id) delete messageAttempts[slot]; });
+    // The server already took a nonce ACK off; a receipt kept from a version 1 store was
+    // acknowledged with the message id instead.
     var reply = receipt.reply || '';
     var ack = 'ACK ' + receipt.id;
     if (reply.indexOf(ack) === 0 && (reply.length === ack.length || /\s/.test(reply.charAt(ack.length)))) reply = reply.slice(ack.length).trim();

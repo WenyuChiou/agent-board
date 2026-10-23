@@ -18,6 +18,9 @@ export const EN: Strings = {
   messagesRejected: 'Rejected / not sent',
   messagesFailed: 'Could not send; the target may be offline or its binding changed.',
   messagesConflict: 'This message id already has different contents; resend refused.',
+  messagesBusy: 'Not sent: another message to this session is still waiting.',
+  messagesTextRefused: 'Not sent: the text contains Agent Board\'s own message markers.',
+  messagesContested: 'Not sent: two programs claim this session. Copy the text instead.',
   localAgentTask: (agent: string): string => `Local ${agent} task`,
   localAgentSkillDescription: 'Open the local interactive board and track real task progress for the currently connected session.',
   localAgentStepFormat: 'One Markdown task line: "- [x] finished", "- [~] current", "- [ ] next", "- [?] waiting on the user", "- [!] blocked", "- [>] running elsewhere or handed off", "- [-] cancelled"',
@@ -482,6 +485,11 @@ export const EN: Strings = {
   serveClosed: 'The board is closed; you can close this tab. To open it again, ask an agent to show the progress.',
   serveCloseBusy: 'A message is still on its way to an agent; close the board once it replies.',
   serveNotStarted: 'its server did not start.',
+  serveStoreFailed: (code: string, folder: string) => code === 'MESSAGE_STORE_IN_USE'
+    ? `The board could not open its message folder (${code}): ${folder}. If no other board is running, delete server.lock in that folder and try again.`
+    : ['MESSAGE_STORE_ACL', 'UNSAFE_MESSAGE_DIRECTORY', 'EACCES', 'EPERM'].includes(code)
+      ? `The board could not open its message folder (${code}): ${folder}. Check that the folder is your account's own and that no other account can open it, then try again.`
+      : `The board could not open its message folder (${code}): ${folder}. Its message file may be damaged. Move messages.json out of that folder, then try again.`,
   serveOffline: "Can't reach the board. Run the board with --serve again; it opens a new page, and you can close this one.",
   serveOfflineLan: "Can't reach the board. On the computer, run the board with --serve --lan again and open the new address.",
   themeLabel: 'Theme',

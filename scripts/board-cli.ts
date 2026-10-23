@@ -17,6 +17,7 @@ import { basename, dirname, join, resolve } from 'node:path'
 import { archivableAsking, confirmMatches, confirmTask, mergeBlock, takeArchivable, takeManualDone, takeTask, setManualStep } from '../hooks/blocks'
 import type { ConfirmedTask } from '../hooks/blocks'
 import { startServer } from './board-serve'
+import { moveLockAside } from './board-messaging'
 import { idleTimeout } from '../hooks/serve'
 import { boardKey, boardScreen, boardText, CHAT_MAX, chatText, doneToday, emptyBoardState, peekInbox, boardItems, pinned, redact } from '../hooks/board'
 import type { BoardAction, BoardState } from '../hooks/board'
@@ -900,6 +901,7 @@ let served: string | undefined
 // The same progress.md named two ways (C:/x and C:\x) is one board, with one page.
 const board = (file: string): string => resolve(file)
 const serveFile = (): string => (served ??= join(runFolder(), `agent-board-${createHash('sha256').update(board(path)).digest('hex').slice(0, 16)}.json`))
+const messagesDirectory = (): string => resolve(flag('--messages-dir') ?? serveFile().replace(/\.json$/, '-messages'))
 // Where 0.19.0 left it, beside progress.md.
 const oldServeFile = `${path.replace(/\.md$/i, '')}-serve.json`
 const script = process.argv[1] ?? ''
@@ -960,44 +962,55 @@ const ping = async (running: Running, waitMs = 1500): Promise<Record<string, unk
 }
 
 const serveChild = (): void => {
-  startServer({
-    allowResume: args.includes('--allow-resume'),
-    messagesDirectory: flag('--messages-dir'),
-    reports: () => parseProgress(read(path)).flatMap(project => project.tasks.flatMap(task => task.auto === null ? [] : [{ agent: task.auto.agent, session: task.auto.resume ?? task.auto.session, updated: task.auto.updated }])),
-    s,
-    port: Number(flag('--port') ?? 0) || 0,
-    ping: { path, built, idleMs: idleMs(), allowResume: args.includes('--allow-resume'), messagesDirectory: flag('--messages-dir') ? resolve(flag('--messages-dir')!) : null },
-    // Every page request starts by reading the board.
-    view: freshView,
-    pending,
-    act,
-    tidy,
-    paste,
-    // The page names a file it could not read or write the way the terminal board does, for a
-    // press and for the board it shows. The page is answered, so the exit code and stderr are
-    // left alone. File labels and reasons stay the same on local and network pages.
-    failure: error => (error instanceof BoardFileError ? storageNote(error) : null),
-    idleMs: idleMs(),
-    onReady: (url, port) => {
-      // Without its address file no later `--serve` finds this page, and each would start one
-      // more; so it does not start at all. Nor when the file is there already: another
-      // `--serve` started a page at the same moment and wrote first, and that one is the page.
-      try {
-        writeFileSync(serveFile(), JSON.stringify({ pid: process.pid, port, url, path, built }), { mode: 0o600, flag: 'wx' })
-      } catch {
-        return false
-      }
-      // The one line `--serve` waits for. Its pipe closes once it has read it.
-      process.stdout.on('error', () => undefined)
-      process.stdout.write(`${url}\n`)
-      return true
-    },
-    onStop: () => {
-      // The file goes only while it is still this server's: a newer one may have taken it over.
-      unlinkIf(serveFile(), () => readRunning()?.pid === process.pid)
-      process.exit(0)
-    },
-  })
+  try {
+    startServer({
+      allowResume: args.includes('--allow-resume'),
+      messagesDirectory: messagesDirectory(),
+      isDefaultMessagesDirectory: flag('--messages-dir') === undefined,
+      reports: () => parseProgress(read(path)).flatMap(project => project.tasks.flatMap(task => task.auto === null ? [] : [{ agent: task.auto.agent, session: task.auto.resume ?? task.auto.session, updated: task.auto.updated }])),
+      s,
+      port: Number(flag('--port') ?? 0) || 0,
+      ping: { path, built, idleMs: idleMs(), allowResume: args.includes('--allow-resume'), messagesDirectory: messagesDirectory() },
+      // Every page request starts by reading the board.
+      view: freshView,
+      pending,
+      act,
+      tidy,
+      paste,
+      // The page names a file it could not read or write the way the terminal board does, for a
+      // press and for the board it shows. The page is answered, so the exit code and stderr are
+      // left alone. File labels and reasons stay the same on local and network pages.
+      failure: error => (error instanceof BoardFileError ? storageNote(error) : null),
+      idleMs: idleMs(),
+      onReady: (url, port) => {
+        // Without its address file no later `--serve` finds this page, and each would start one
+        // more; so it does not start at all. Nor when the file is there already: another
+        // `--serve` started a page at the same moment and wrote first, and that one is the page.
+        try {
+          writeFileSync(serveFile(), JSON.stringify({ pid: process.pid, port, url, path, built }), { mode: 0o600, flag: 'wx' })
+        } catch {
+          return false
+        }
+        // The one line `--serve` waits for. Its pipe closes once it has read it.
+        process.stdout.on('error', () => undefined)
+        process.stderr.on('error', () => undefined)
+        process.stdout.write(`${url}\n`)
+        return true
+      },
+      onStop: () => {
+        // The file goes only while it is still this server's: a newer one may have taken it over.
+        unlinkIf(serveFile(), () => readRunning()?.pid === process.pid)
+        process.exit(0)
+      },
+    })
+  } catch (error) {
+    if (!(error instanceof Error) || error.cause !== 'MESSAGE_STORE_FAILED') throw error
+    const errno = (error as NodeJS.ErrnoException).code
+    const code = /^[A-Z][A-Z0-9_]{0,63}$/.test(error.message) ? error.message
+      : typeof errno === 'string' && /^[A-Z][A-Z0-9_]{0,63}$/.test(errno) ? errno : 'UNREADABLE'
+    process.stderr.write(`MESSAGE_STORE_FAILED ${code}\n`)
+    process.exitCode = 1
+  }
 }
 
 // The page at that address is asked to close, and whether it agreed is answered. It refuses while
@@ -1041,7 +1054,7 @@ const runningPage = async (): Promise<{ page: Running; isKept: boolean; idleMs?:
   const first = await ping(running)
   const answer = first !== null && first !== 'silent' ? first : isRunning(running.pid) ? await ping(running, 5000) : first
   // An idle preference must not close a page that may hold an unsent reply.
-  if (answer !== null && answer !== 'silent' && typeof answer.path === 'string' && board(answer.path) === board(path) && answer.built === built && answer.allowResume === args.includes('--allow-resume') && (flag('--messages-dir') === undefined || answer.messagesDirectory === resolve(flag('--messages-dir')!))) return { page: running, isKept: false, idleMs: typeof answer.idleMs === 'number' && Number.isFinite(answer.idleMs) && answer.idleMs >= 0 ? answer.idleMs : undefined }
+  if (answer !== null && answer !== 'silent' && typeof answer.path === 'string' && board(answer.path) === board(path) && answer.built === built && answer.allowResume === args.includes('--allow-resume') && (flag('--messages-dir') === undefined || answer.messagesDirectory === messagesDirectory())) return { page: running, isKept: false, idleMs: typeof answer.idleMs === 'number' && Number.isFinite(answer.idleMs) && answer.idleMs >= 0 ? answer.idleMs : undefined }
   return (await stays(running, serveFile())) ? { page: running, isKept: true } : null
 }
 
@@ -1092,36 +1105,76 @@ const serveBoard = async (): Promise<void> => {
     return value === undefined ? [] : [name, value]
   })
   if (args.includes('--allow-resume')) rest.push('--allow-resume')
-  // In the board's own folder, not the agent's, so the server holds no project folder open.
-  const child = spawn(process.execPath, [script, '--serve-child', ...rest], { cwd: dirname(path), detached: true, stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true })
-  // The child prints its address once it listens; it exits at once when it cannot.
-  const url = await new Promise<string | null>(done => {
-    let out = ''
-    const timer = setTimeout(() => done(null), 10_000)
-    const end = (value: string | null): void => {
-      clearTimeout(timer)
-      done(value)
-    }
-    child.stdout?.on('data', (chunk: Buffer) => {
-      out += chunk.toString('utf8')
-      if (out.includes('\n')) end(out.split('\n')[0]?.trim() || null)
+  const startPage = async (): Promise<{ url: string | null; stderr: string }> => {
+    // In the board's own folder, not the agent's, so the server holds no project folder open.
+    const child = spawn(process.execPath, [script, '--serve-child', ...rest], { cwd: dirname(path), detached: true, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true })
+    let stderr = ''
+    child.stderr?.on('data', (chunk: Buffer) => { stderr = (stderr + chunk.toString('utf8')).slice(-16_384) })
+    // The child prints its address once it listens; it exits at once when it cannot.
+    const url = await new Promise<string | null>(done => {
+      let out = ''
+      const timer = setTimeout(() => done(null), 10_000)
+      const end = (value: string | null): void => {
+        clearTimeout(timer)
+        done(value)
+      }
+      child.stdout?.on('data', (chunk: Buffer) => {
+        out += chunk.toString('utf8')
+        if (out.includes('\n')) end(out.split('\n')[0]?.trim() || null)
+      })
+      child.once('close', () => end(null))
+      child.once('error', () => end(null))
     })
-    child.once('exit', () => end(null))
-    child.once('error', () => end(null))
-  })
-  // One that has not answered in time would start late and hold a page nobody was told about.
-  if (url === null && child.exitCode === null) child.kill()
-  child.stdout?.destroy()
-  child.unref()
-  if (url === null) {
+    // One that has not answered in time would start late and hold a page nobody was told about.
+    if (url === null && child.exitCode === null) child.kill()
+    child.stdout?.destroy()
+    child.stderr?.destroy()
+    child.unref()
+    return { url, stderr }
+  }
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const { url, stderr } = await startPage()
+    if (url !== null) return show(url)
     // Another `--serve` started at the same moment may have written its address first: this
-    // page stopped then, and that one is the page to show.
-    const other = await runningPage()
-    if (other !== null) return show(other.page.url, other.isKept, other.idleMs)
-    process.stdout.write(`\n${s.serveFailed(s.serveNotStarted)}\n`)
+    // page stopped then, and that one is the page to show. When it took the message folder
+    // first, this page stopped before that one had written its address, so it is given the
+    // few seconds a page takes to start.
+    const storeCode = /^MESSAGE_STORE_FAILED ([A-Z][A-Z0-9_]{0,63})\r?$/m.exec(stderr)?.[1]
+    const lock = join(messagesDirectory(), 'server.lock')
+    let held = ''
+    if (attempt === 0 && storeCode === 'MESSAGE_STORE_IN_USE' && flag('--messages-dir') === undefined) {
+      try {
+        held = readFileSync(lock, 'utf8')
+      } catch { held = '' }
+    }
+    const until = Date.now() + (storeCode === 'MESSAGE_STORE_IN_USE' ? 10_000 : 0)
+    for (;;) {
+      const other = await runningPage()
+      if (other !== null) return show(other.page.url, other.isKept, other.idleMs)
+      if (Date.now() >= until) break
+      await new Promise(done => setTimeout(done, 200))
+    }
+    // A hub killed without stopping leaves its pid, and after a restart that number can belong to
+    // another program. The hub of the default folder leaves its address beside the lock, so the
+    // lock is moved only when that address no longer answers. A hub still starting has no address
+    // yet, and another board using this folder through --messages-dir writes none, so neither is
+    // ever taken over. A folder given here through --messages-dir is never taken over either.
+    if (/^[1-9][0-9]*$/.test(held)) {
+      try {
+        const owner = JSON.parse(readFileSync(join(messagesDirectory(), 'server.owner'), 'utf8')) as Partial<Running>
+        if (owner.pid === Number(held) && typeof owner.port === 'number' && Number.isInteger(owner.port) && typeof owner.url === 'string'
+          && /^http:\/\/127\.0\.0\.1:\d+\/\?t=[\w-]+$/.test(owner.url)
+          && owner.port === Number(new URL(owner.url).port)
+          && await ping({ pid: owner.pid, port: owner.port, url: owner.url, path: '', built: '' }, 5000) === null
+          && readFileSync(lock, 'utf8') === held) {
+          try { moveLockAside(lock, held) } catch {}
+          continue
+        }
+      } catch {}
+    }
+    process.stdout.write(`\n${storeCode ? s.serveStoreFailed(storeCode, messagesDirectory()) : s.serveFailed(s.serveNotStarted)}\n`)
     return
   }
-  await show(url)
 }
 
 // The home folder, or none when the computer does not say: a failure must not raise another.
