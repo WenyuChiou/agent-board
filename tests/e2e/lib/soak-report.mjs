@@ -63,6 +63,27 @@ export const makeRedact = (entries, secrets = []) => {
   }
 }
 
+// The processes a run left behind (#395). `list` holds every running process as { pid, ppid, name,
+// command, started }. A leftover is any of them, other than the run itself and the excluded ones (the lister)
+// with their children, that descends from the run, or whose command line names one of the run's
+// folders: a hook worker whose parent is gone has no parent chain left to follow.
+export const leftoverProcesses = ({ list, self, roots, exclude = [] }) => {
+  const processes = new Map(list.map(one => [one.pid, one]))
+  const descends = (pid, from) => {
+    for (let child = processes.get(pid), steps = 0; child !== undefined && child.ppid > 0 && steps < 64; steps += 1) {
+      const parent = processes.get(child.ppid)
+      // A newer parent reused an old pid; it cannot have started this child.
+      if (parent?.started !== undefined && child.started !== undefined && parent.started > child.started) return false
+      if (child.ppid === from) return true
+      child = parent
+    }
+    return false
+  }
+  const patterns = roots.map(root => typeof root === 'string' ? pathPattern(root) : null).filter(pattern => pattern !== null)
+  const isExcluded = one => (one.ppid === self && /^conhost\.exe$/i.test(one.name)) || exclude.some(pid => one.pid === pid || descends(one.pid, pid))
+  return list.filter(one => one.pid !== self && !isExcluded(one) && (descends(one.pid, self) || patterns.some(pattern => String(one.command ?? '').search(pattern) !== -1)))
+}
+
 export const redactDeep = (value, redact) => {
   if (typeof value === 'string') return redact(value)
   if (Array.isArray(value)) return value.map(item => redactDeep(item, redact))

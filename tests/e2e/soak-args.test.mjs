@@ -5,7 +5,7 @@ import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { makeWorld } from './lib/world.mjs'
 import { spawnIsolated } from './lib/spawn.mjs'
-import { OUT_DEFAULT, archiveIntegrity, archiveProblems, fileOpsPerPoll, levelOutcome, makeRedact, median, parseArguments, peakRss, percentile, pruneRefusal, redactDeep, tallyOf, writeReport } from './lib/soak-report.mjs'
+import { OUT_DEFAULT, archiveIntegrity, archiveProblems, fileOpsPerPoll, leftoverProcesses, levelOutcome, makeRedact, median, parseArguments, peakRss, percentile, pruneRefusal, redactDeep, tallyOf, writeReport } from './lib/soak-report.mjs'
 
 const soak = fileURLToPath(new URL('./soak.mjs', import.meta.url))
 
@@ -234,5 +234,32 @@ describe('L6 soak arguments', () => {
     assert.equal(rise.hold, undefined)
     assert.match(rise.line, /^The page server's highest memory was 390 MB up to the end of the archive and 500 MB after it \(limit 439 MB\)\.$/)
     assert.equal(levelOutcome({ ...unmeasured, after: 379 * megabyte, settled: 3, isOpsHeld: true }).ok, true)
+  })
+  test('L6 soak arguments: a leftover process of the hook load is one the run started, found by its parent chain or by the world folder in its command line, never the run, its lister or another world', () => {
+    const world = String.raw`C:\Users\RUNNER~1\AppData\Local\Temp\agent-board-e2e-AbC123`
+    const list = [
+      { pid: 100, ppid: 1, started: 1000, name: 'node.exe', command: 'node tests/e2e/hook-load.mjs' },
+      { pid: 101, ppid: 100, started: 1001, name: 'cmd.exe', command: 'cmd.exe /d /s /c "node hook"' },
+      { pid: 102, ppid: 101, started: 1002, name: 'node.exe', command: 'node -e worker' },
+      // A stale parent id names this run, but the process was already there before the run started.
+      { pid: 103, ppid: 100, started: 999, name: 'node.exe', command: 'node -e unrelated' },
+      { pid: 104, ppid: 103, started: 1003, name: 'node.exe', command: 'node -e unrelated-child' },
+      // A worker whose parent is gone, found by the world folder in either slash style and any letter case.
+      { pid: 200, ppid: 4, name: 'node.exe', command: `node ${world.toLowerCase().replaceAll('\\', '/')}/home/.claude/agent-board.mjs --serve` },
+      // Another world whose name only starts with this one's, and a process of nobody's.
+      { pid: 300, ppid: 4, name: 'node.exe', command: String.raw`node ${world}4\home\.claude\agent-board.mjs` },
+      { pid: 500, ppid: 1, name: 'explorer.exe', command: 'explorer.exe' },
+      // The lister and its console.
+      { pid: 400, ppid: 100, name: 'powershell.exe', command: 'powershell.exe -Command Get-CimInstance' },
+      { pid: 401, ppid: 400, name: 'conhost.exe', command: 'conhost.exe 0xffffffff' },
+      // Windows may also attach a console directly to this run.
+      { pid: 402, ppid: 100, name: 'ConHost.EXE', command: 'conhost.exe 0xffffffff' },
+    ]
+    assert.deepEqual(leftoverProcesses({ list, self: 100, roots: [world, undefined], exclude: [400] }).map(one => one.pid), [101, 102, 200])
+    assert.deepEqual(leftoverProcesses({ list: list.filter(one => ![101, 102, 200].includes(one.pid)), self: 100, roots: [world], exclude: [400] }), [])
+    // Missing creation times keep the parent-chain fallback used on macOS.
+    assert.deepEqual(leftoverProcesses({ list: list.filter(one => one.pid !== 104).map(({ started, ...one }) => one), self: 100, roots: [world], exclude: [400] }).map(one => one.pid), [101, 102, 103, 200])
+    // A parent chain that loops ends without hanging.
+    assert.deepEqual(leftoverProcesses({ list: [{ pid: 7, ppid: 8, name: 'a', command: '' }, { pid: 8, ppid: 7, name: 'b', command: '' }], self: 100, roots: [] }), [])
   })
 })
