@@ -373,12 +373,44 @@ export const confirmTask = (text: string, ref: ConfirmRef, now: number, s: Strin
   return { text: after, ref: { ...ref, expected: confirmKey(ref.project, changed, twins) }, auto: task.auto, entries: open.map(step => ({ project: ref.project, task: ref.title, step: step.text })) }
 }
 
-// Moves old blocks out; each entry is the block without its markers, under a dated heading,
-// ready to append to progress-archive.md.
-export const takeArchivable = (text: string, now: number, keep?: string, s: Strings = ZH_TW, isNow = false): Archived => {
+// The block still asks something of the person: a visible `[?]` step.
+const isAsking = (visible: readonly string[], span: BlockSpan): boolean =>
+  visible.slice(span.start, span.end + 1).some(line => STEP.exec(line ?? '')?.[2] === '?')
+
+// An automatic sweep takes a block that asks only when it has stopped (`ended` or `done`) and has
+// been quiet for the three days a stopped block is given. A `waiting` or `working` block may still
+// get its answer, and its question is a live one that a later poll would have to make again (#174).
+const isStoppedAsking = (span: BlockSpan, now: number): boolean =>
+  (span.state === 'ended' || span.state === 'done') && now - span.updated > STOPPED_ARCHIVE_MS
+
+// The blocks that ask which a sweep may take once the caller has checked that their questions are
+// kept outside the block (#174).
+export type AskingBlock = { span: BlockSpan; ref: TaskRef }
+export const archivableAsking = (text: string, now: number, keep?: string): AskingBlock[] => {
+  if (!text.includes('[?]')) return []
   const lines = linesOf(text)
   const visible = readable(lines)
-  const spans = scanBlocks(lines).filter(span => span.isClosed && span.session !== keep && isArchivable(span, now, isNow) && !visible.slice(span.start, span.end + 1).some(line => STEP.exec(line ?? '')?.[2] === '?'))
+  const spans = scanBlocks(lines).filter(span => span.isClosed && span.session !== keep && span.updated > 0 && isStoppedAsking(span, now) && isAsking(visible, span))
+  if (spans.length === 0) return []
+  const projects = parseProgress(text)
+
+  return spans.flatMap(span => {
+    // The task the explicit archive would name; a session id shared by two blocks names neither.
+    const tasks = projects.filter(project => project.name === span.project).flatMap(project => project.tasks).filter(task => task.auto?.session === span.session)
+    const task = tasks[0]
+
+    return tasks.length === 1 && task !== undefined ? [{ span, ref: { project: span.project, title: task.title, line: task.line, session: span.session } }] : []
+  })
+}
+
+// Moves old blocks out; each entry is the block without its markers, under a dated heading,
+// ready to append to progress-archive.md. A block with a visible `[?]` step stays unless it has
+// stopped (`ended` or `done`, three days quiet) and `mayTake` says its questions are kept
+// (`archivableAsking` lists the ones to ask about).
+export const takeArchivable = (text: string, now: number, keep?: string, s: Strings = ZH_TW, isNow = false, mayTake?: (span: BlockSpan) => boolean): Archived => {
+  const lines = linesOf(text)
+  const visible = readable(lines)
+  const spans = scanBlocks(lines).filter(span => span.isClosed && span.session !== keep && isArchivable(span, now, isNow) && (!isAsking(visible, span) || (isStoppedAsking(span, now) && mayTake?.(span) === true)))
   if (spans.length === 0) return { text, entries: [] }
   const entries = spans.map(span => {
     const body = lines.slice(span.start + 1, span.end)

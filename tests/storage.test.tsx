@@ -37,6 +37,9 @@ const scaled = (k: number): World => {
     if (!path.startsWith(`${INBOX}/`)) continue
     for (let copy = 1; copy < k; copy++) world.files.set(path.replace('.json', `-c${copy}.json`), text)
   }
+  // Each inbox file keeps its own time, as on a disk: without one it would take the board's, and
+  // every write to the board would look like a change to every waiting turn.
+  for (const path of world.files.keys()) if (path.startsWith(`${INBOX}/`)) (world.mtimes ??= {})[path] = world.mtime
   const store = world.store as Record<string, unknown>
   const seen: Record<string, number> = {}
   for (const [key, value] of Object.entries({ ...store })) {

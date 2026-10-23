@@ -30,9 +30,26 @@ export const hookTimeout = (agent: string, event = ''): number => {
 export const hostHookTimeout = (agent: string, event = ''): number => hookTimeout(agent, event) / (agent === 'gemini' ? 1 : 1000)
 export const HOOK_INPUT_TIMEOUT = Math.min(...Object.values(HOOK_TIMEOUTS).map(policy => policy.timeout)) - 1000
 
-// Only fixed diagnostic codes reach this file, never a payload, stderr, session id or path.
+// A worker can run seconds past its host's stop, so a kill can leave its temporary log file.
+// The worker's own log writes remove stale ones; the bootstrap, which rides on a cmd.exe
+// command line, stays without this.
+const HOOK_LOG_SWEEP = `    try {
+      const folder = path.dirname(file), cutoff = Date.now() - 60000
+      for (const name of fs.readdirSync(folder)) {
+        if (!/^hook-errors\\.log\\.\\d+\\.tmp$/.test(name)) continue
+        // Another writer may remove the same file first.
+        try {
+          const stale = path.join(folder, name), stat = fs.lstatSync(stale)
+          if (stat.isFile() && stat.mtimeMs < cutoff) fs.unlinkSync(stale)
+        } catch {}
+      }
+    } catch {}
+`
+
+// Only fixed diagnostic codes reach this file, the board's own refusal code among them, never a
+// payload, other stderr text, session id or path.
 // Read a bounded tail and replace atomically; a failed log cannot block a host hook.
-export const hookLogSource = (home: string, agent: string): string => `const fs = require('node:fs'), path = require('node:path')
+export const hookLogSource = (home: string, agent: string, sweep = false): string => `const fs = require('node:fs'), path = require('node:path')
 const hookError = code => {
   let temporary, owned = false
   try {
@@ -60,7 +77,7 @@ const hookError = code => {
     finally { fs.closeSync(output) }
     fs.renameSync(temporary, file)
     owned = false
-  } catch { process.stderr.write('AGENT_BOARD_HOOK_LOG_FAILED\\n') }
+${sweep ? HOOK_LOG_SWEEP : ''}  } catch { process.stderr.write('AGENT_BOARD_HOOK_LOG_FAILED\\n') }
   finally { if (owned) { try { fs.unlinkSync(temporary) } catch {} } }
 }
 `
@@ -92,7 +109,8 @@ const withHook = async action => {
 }
 `
 
-export const hookWorker = (home: string, script: string, boardPromptHelper: string): string => `import { createRequire } from 'node:module'
+// Late events queue under the board's data folder: the script's own folder unless named (#285).
+export const hookWorker = (home: string, script: string, boardPromptHelper: string, dataRoot?: string): string => `import { createRequire } from 'node:module'
 const require = createRequire(import.meta.url)
 const { spawnSync } = require('node:child_process')
 const { randomUUID } = require('node:crypto')
@@ -103,7 +121,7 @@ const value = name => { const at = args.indexOf(name); return at < 0 ? undefined
 const agent = value('--agent')
 const policies = ${JSON.stringify(HOOK_TIMEOUTS)}
 const safeAgent = Object.hasOwn(policies, agent) ? agent : 'unknown'
-${hookLogSource(home, '__AGENT__').replace(JSON.stringify('__AGENT__'), 'safeAgent')}
+${hookLogSource(home, '__AGENT__', true).replace(JSON.stringify('__AGENT__'), 'safeAgent')}
 const isReport = args.includes('--codex-report')
 const fail = code => { hookError(code); process.exitCode = isReport ? 1 : 0; if (!isReport && ['cursor', 'gemini', 'antigravity'].includes(agent)) process.stdout.write('{}\\n'); return false }
 const run = async () => {
@@ -150,7 +168,7 @@ const run = async () => {
       // A late copy is still written: it holds the worker's start time, and replay drops it once a
       // newer event was applied. A host that stops the worker mid-write leaves a .tmp file that is swept.
       if (isReport) return fail('REPORTER_TIMEOUT')
-      const pending = path.join(path.dirname(${JSON.stringify(script)}), 'pending')
+      const pending = path.join(${dataRoot === undefined ? `path.dirname(${JSON.stringify(script)})` : JSON.stringify(dataRoot)}, 'pending')
       fs.mkdirSync(pending, { recursive: true, mode: 0o700 })
       // Concurrent workers can pass 64 by a few because the count and write are separate.
       if (fs.readdirSync(pending).filter(name => name.endsWith('.json')).length >= 64) return fail('REPORTER_TIMEOUT')
@@ -182,7 +200,14 @@ const run = async () => {
     timeout: remaining, killSignal: 'SIGKILL', maxBuffer: 1048576,
   })
   if (result.error?.code === 'ETIMEDOUT' || result.signal || (result.error || result.status !== 0) && Date.now() >= deadline) return queue()
-  if (result.error || result.status !== 0) return fail('REPORTER_FAILED')
+  if (result.error || result.status !== 0) {
+    // The board names why it refused (INVALID_SESSION, say), in brackets that are full-width in
+    // Chinese, and the log line keeps that fixed code. A refused report also passes it on, on a
+    // line of its own, for the agent to correct (#217).
+    const reason = /[(（]([A-Z][A-Z0-9_]{2,63})[)）]/.exec(result.stderr ?? '')?.[1]
+    if (reason && isReport) process.stderr.write('AGENT_BOARD_REASON ' + reason + '\\n')
+    return fail(reason ? 'REPORTER_FAILED ' + reason : 'REPORTER_FAILED')
+  }
   process.stdout.write(result.stdout)
   return true
 }

@@ -73,24 +73,40 @@ write_fallback() {
   receipt='{'; separator=''; has_session=''
   # Escaped and non-ASCII values are omitted here; PowerShell preserves them. The first match
   # in the text is taken wherever it sits, so a key under extra can win over a top-level one.
-  for key in ${RECEIPT_KEYS.join(' ')}; do
-    pair=$(LC_ALL=C grep -o '"'"$key"'"[[:space:]]*:[[:space:]]*"[][ !#-Z^-~]*"' "$file.tmp" | head -n 1)
-    if [ -z "$pair" ]; then
+  matches=$(LC_ALL=C grep -oE ${shellQuote(String.raw`"(${RECEIPT_KEYS.join('|')})"[[:space:]]*:[[:space:]]*"([][ !#-Z^-~]*")?`)} "$file.tmp")
+  saved_ifs=$IFS; IFS='
+'
+  case $- in *f*) had_globbing_off=yes ;; *) had_globbing_off='' ;; esac
+  set -f
+  for receipt_key in ${RECEIPT_KEYS.join(' ')}; do
+    value=''; has_key=''
+    for pair in $matches; do
+      case "$pair" in \\"$receipt_key\\"*) ;; *) continue ;; esac
+      has_key=yes
+      candidate=\${pair#*:}
+      candidate=\${candidate#"\${candidate%%[![:space:]]*}"}
+      case "$candidate" in \\"*\\")
+        if [ "\${#candidate}" -ge 2 ]; then value=$candidate; break; fi ;;
+      esac
+    done
+    if [ -n "$value" ]; then
+      receipt="$receipt$separator\\"$receipt_key\\":$value"; separator=','
+      case "$receipt_key" in ${SESSION_KEYS.join('|')}) has_session=yes ;; esac
+    elif [ "$receipt_key" = workspaceRoot ] && [ -n "$has_key" ]; then
       # The inbox tells Grok from Cursor by a workspaceRoot field, so keep the field without its value.
-      if [ "$key" = workspaceRoot ] && LC_ALL=C grep -q '"workspaceRoot"[[:space:]]*:[[:space:]]*"' "$file.tmp"; then receipt="$receipt$separator\\"workspaceRoot\\":\\"\\""; separator=','; fi
-      continue
+      receipt="$receipt$separator\\"workspaceRoot\\":\\"\\""; separator=','
     fi
-    value=$(printf '%s' "$pair" | sed 's/^[^:]*:[[:space:]]*//')
-    receipt="$receipt$separator\\"$key\\":$value"; separator=','
-    case "$key" in ${SESSION_KEYS.join('|')}) has_session=yes ;; esac
   done
+  IFS=$saved_ifs
+  [ -n "$had_globbing_off" ] || set +f
   [ -n "$has_session" ] || return
   scan=$(LC_ALL=C sed -E ${shellQuote(SH_PATH_STRIP)} "$file.tmp") || scan=$(cat "$file.tmp")
   # An empty scan (sed and cat both failed) counts as a board request: a wrong mark only leaves a question waiting.
   case "$scan" in ''|${SH_HINT_PATTERNS}) receipt="$receipt$separator\\"board_request\\":true" ;; esac
   if (set -C; : > "$file.fallback"); then
     fallback_owned=yes
-    printf '%s}' "$receipt" > "$file.fallback" && mv "$file.fallback" "$file.json"
+    printf '%s}' "$receipt" > "$file.fallback" && mv "$file.fallback" "$file.json" || log_error REPORTER_FAILED
+  else log_error REPORTER_FAILED
   fi
 }
 timed_out() {
@@ -162,8 +178,15 @@ if [ -s "$ready" ]; then
   mv "$ready" "$file.json" || { log_error REPORTER_FAILED; finish; }
 else log_error INCOMPLETE_INPUT
 fi
+# Names first, so GNU find need not look at a taken file that another session renames mid-scan.
+# One that still goes between the listing and find's look at it (BSD find looks at every entry)
+# gives "No such file or directory", which is no failure. Any other complaint is logged, and so is
+# a failure with none. A reporter's scratch files go a minute after they were last written.
+sweep_errors=$(LC_ALL=C find "$dir/." ! -name . -prune \\( -name '*.tmp' -o -name '*.receipt' -o -name '*.fallback' -o -name '*.timeout' -o -name '*.complete' \\) -type f -mmin +1 -exec rm -f {} + 2>&1 >/dev/null)
+sweep_status=$?
+if [ "$sweep_status" -ne 0 ] && { [ -z "$sweep_errors" ] || printf '%s\\n' "$sweep_errors" | grep -qv 'No such file or directory'; }; then log_error CLEANUP_FAILED; fi
 # A turn file over 2 days old goes, and so do the oldest past ${INBOX_MAX_FILES} files or ${INBOX_MAX_BYTES} bytes.
-# Only *.json turn files: a taken, failed or temporary file stays. Each removal is counted in ${INBOX_DROPPED_FILE}.
+# Only *.json turn files, each removal counted in ${INBOX_DROPPED_FILE}: a taken or failed file stays.
 drop_turns() {
   drop_n=0
   while read -r drop_entry; do rm "$drop_entry" && drop_n=$((drop_n + 1)); done
@@ -196,7 +219,7 @@ drop_turns() {
   fi
 }
 saved=$(basename "$file.json")
-find "$dir" -name '*.json' ! -name "$saved" -mtime +2 | drop_turns age
+LC_ALL=C find "$dir/." ! -name . -prune -name '*.json' ! -name "$saved" -type f -mtime +2 | drop_turns age
 LC_ALL=C ls -ltr "$dir" | awk -v dir="$dir" -v saved="$saved" -v files=${INBOX_MAX_FILES} -v bytes=${INBOX_MAX_BYTES} '
   substr($1, 1, 1) == "-" && $NF ~ /^[a-z][a-z0-9]*-(prompt|turn|end)-[A-Za-z0-9_.-]+[.]json$/ { n++; name[n] = $NF; size[n] = $5; total++; sum += $5 }
   END { for (i = 1; i <= n && (total > files || sum > bytes); i++) { if (name[i] == saved) continue; print dir "/" name[i]; total--; sum -= size[i] } }' | drop_turns cap
@@ -235,6 +258,13 @@ function Write-HookError([string]$Code) {
     $ownsTemp = $true
     Move-Item -LiteralPath $temp -Destination $log -Force
     $ownsTemp = $false
+    try {
+      $cutoff = (Get-Date).AddSeconds(-60)
+      Get-ChildItem -LiteralPath $logDir -Filter 'hook-errors.log.*.tmp' | Where-Object {
+        $_.Name -match '^hook-errors\\.log\\.\\d+\\.tmp$' -and -not $_.PSIsContainer -and
+        -not ($_.Attributes -band [IO.FileAttributes]::ReparsePoint) -and $_.LastWriteTime -lt $cutoff
+      } | Remove-Item -Force
+    } catch {}
   } catch { [Console]::Error.WriteLine('AGENT_BOARD_HOOK_LOG_FAILED') }
   finally { if ($ownsTemp) { Remove-Item -LiteralPath $temp -Force -ErrorAction SilentlyContinue } }
 }
@@ -300,7 +330,7 @@ function Read-PromptReceipt([string]$File, [Diagnostics.Stopwatch]$Clock) {
   }
 }
 $tmp = ''; $ownsTemp = $false; $receiptTmp = ''; $ownsReceipt = $false
-$fallback = ''; $fallbackTmp = ''; $ownsFallback = $false
+$fallback = ''; $fallbackTmp = ''; $ownsFallback = $false; $hasFallbackFailure = $false
 $clock = [Diagnostics.Stopwatch]::StartNew()
 try {
   if ($Payload -eq '' -and [Console]::IsInputRedirected) {
@@ -349,7 +379,7 @@ try {
         $json = ConvertTo-Json -InputObject $metadata -Compress -Depth 4
         $fallback = [regex]::Replace($json, '[^\\x20-\\x7e]', { param($match) '\\u' + ([int][char]$match.Value).ToString('x4') })
       }
-    } catch { $fallback = '' }
+    } catch { $fallback = ''; $hasFallbackFailure = $raw -is [Management.Automation.PSCustomObject] }
   }
   $dir = ${fromShell ? '$env:AGENT_BOARD_SH_INBOX' : "Join-Path $PSScriptRoot 'progress-inbox'"}
   New-Item -ItemType Directory -Force -Path $dir | Out-Null
@@ -370,9 +400,15 @@ try {
   }
   Move-Item -LiteralPath $ready -Destination (Join-Path $dir ($name + '.json'))
   if ($ready -eq $tmp) { $ownsTemp = $false } else { $ownsReceipt = $false }
-  # A turn file over 2 days old goes, and so do the oldest past ${INBOX_MAX_FILES} files or ${INBOX_MAX_BYTES} bytes.
-  # Only *.json turn files: a taken, failed or temporary file stays. Each removal is counted in ${INBOX_DROPPED_FILE}.
+  # The receipt is saved: a file that cannot be removed is only a cleanup failure, and one another reporter removed first is none.
   try {
+    $scratchCutoff = (Get-Date).AddMinutes(-1)
+    Get-ChildItem -LiteralPath $dir -File | Where-Object {
+      $_.Extension -in @('.tmp', '.receipt', '.fallback', '.timeout', '.complete') -and $_.LastWriteTime -lt $scratchCutoff
+    } | Remove-Item -Force -ErrorAction SilentlyContinue -ErrorVariable cleanupErrors
+    if (@($cleanupErrors | Where-Object { $_.CategoryInfo.Category -ne 'ObjectNotFound' }).Count -gt 0) { Write-HookError 'CLEANUP_FAILED' }
+    # A turn file over 2 days old goes, and so do the oldest past ${INBOX_MAX_FILES} files or ${INBOX_MAX_BYTES} bytes.
+    # Only *.json turn files, each removal counted in ${INBOX_DROPPED_FILE}: a taken or failed file stays.
     $droppedLog = Join-Path $dir '${INBOX_DROPPED_FILE}'
     function Remove-Turns([object[]]$Old, [string]$Reason) {
       $count = 0
@@ -415,7 +451,7 @@ try {
         }
       } catch {}
     }
-    Remove-Turns @(Get-ChildItem -LiteralPath $dir -Filter '*.json' | Where-Object { $_.Name -cne ($name + '.json') -and $_.LastWriteTime -lt (Get-Date).AddDays(-2) }) 'age'
+    Remove-Turns @(Get-ChildItem -LiteralPath $dir -File -Filter '*.json' | Where-Object { $_.Name -cne ($name + '.json') -and $_.LastWriteTime -lt (Get-Date).AddDays(-2) }) 'age'
     $turns = @(Get-ChildItem -LiteralPath $dir -File -Filter '*.json' | Where-Object { $_.Name -cmatch '^[a-z][a-z0-9]*-(prompt|turn|end)-[A-Za-z0-9_.-]+\\.json$' } | Sort-Object LastWriteTimeUtc)
     $turnCount = $turns.Count; $turnBytes = [long](($turns | Measure-Object -Property Length -Sum).Sum)
     $over = @()
@@ -428,6 +464,7 @@ try {
   } catch { Write-HookError 'CLEANUP_FAILED' }
 } catch {
   $code = switch ($_.Exception.Message) { 'INPUT_TIMEOUT' { 'INPUT_TIMEOUT' }; 'REPORTER_TIMEOUT' { 'REPORTER_TIMEOUT' }; 'INPUT_TOO_LARGE' { 'INPUT_TOO_LARGE' }; 'INCOMPLETE_INPUT' { 'INCOMPLETE_INPUT' }; default { 'REPORTER_FAILED' } }
+  if ($code -eq 'REPORTER_TIMEOUT' -and $hasFallbackFailure) { Write-HookError 'REPORTER_FAILED' }
   if ($code -eq 'REPORTER_TIMEOUT' -and $fallback -ne '') {
     try {
       $fallbackTmp = Join-Path $dir ($name + '.fallback')
@@ -437,6 +474,7 @@ try {
       $ownsFallback = $false
     } catch {
       if ($ownsFallback) { Remove-Item -LiteralPath $fallbackTmp -Force -ErrorAction SilentlyContinue; $ownsFallback = $false }
+      Write-HookError 'REPORTER_FAILED'
     }
   }
   Write-HookError $code

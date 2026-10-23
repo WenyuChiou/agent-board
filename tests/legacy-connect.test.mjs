@@ -3,7 +3,7 @@ import { createHash } from 'node:crypto'
 import { once } from 'node:events'
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, unlinkSync, utimesSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { setTimeout as delay } from 'node:timers/promises'
 import assert from 'node:assert/strict'
 import test from 'node:test'
@@ -567,11 +567,11 @@ const taggedBoard = (version, commit) => {
   taggedBoards.set(version, code)
   return code
 }
-const adoption = (f, code, hasPriorOwnership = false) => {
+const adoption = (f, code, hasPriorOwnership = false, hookVersion) => {
   const board = join(f.home, 'data-a', 'agent-board.mjs')
   // This is boardScriptFor's exact header; the installer under test is the
   // compiled worker, rather than a direct source-module ownership check.
-  const header = `globalThis.AGENT_BOARD = ${JSON.stringify({ path: f.progress, lang: 'en' })}\n`
+  const header = `globalThis.AGENT_BOARD = ${JSON.stringify({ ...(hookVersion === undefined ? {} : { hookVersion }), path: f.progress, lang: 'en' })}\n`
   const before = header + code
   mkdirSync(join(f.home, 'data-a'))
   writeFileSync(board, before)
@@ -597,7 +597,9 @@ const adoption = (f, code, hasPriorOwnership = false) => {
   assert.equal(existsSync(attempted), false, 'no native host discovery or invocation')
   assert.equal(JSON.parse(readFileSync(f.config)).private, f.foreign.private)
   assert.ok(readFileSync(f.config, 'utf8').includes('foreign-command'))
-  return { board, before, after: readFileSync(board, 'utf8'), expected: header + bundle, output: JSON.parse(result.stdout) }
+  // The current header also names the hook version its worker checks (#285).
+  const current = `globalThis.AGENT_BOARD = ${JSON.stringify({ hookVersion: 1, path: f.progress, lang: 'en' })}\n`
+  return { board, before, after: readFileSync(board, 'utf8'), expected: current + bundle, output: JSON.parse(result.stdout) }
 }
 
 for (const [version, commit] of [['0.23.3', '5610ce6a051ba772ee074ac50bdcbc22c6195f6f'], ['0.23.2', 'b0bb351462158b80ae29161c37054f4549901ac0']]) test(`bundled tagged board adoption: exact ${version} without prior ownership updates and becomes owned`, () => fixture(async f => {
@@ -607,6 +609,24 @@ for (const [version, commit] of [['0.23.3', '5610ce6a051ba772ee074ac50bdcbc22c61
   assert.equal(result.after, result.expected)
   assert.equal(result.output.state.owned[result.board], createHash('sha256').update(result.after).digest('hex'))
 }))
+
+test('bundled tagged board adoption recognizes supported hook versions and preserves future ones', async () => {
+  const hookSource = readFileSync(new URL('../hooks/hook-safety.ts', import.meta.url), 'utf8')
+  const version = Number(hookSource.match(/export const HOOK_VERSION = (\d+)/)[1])
+  const body = taggedBoard('0.23.3', '5610ce6a051ba772ee074ac50bdcbc22c6195f6f')
+  for (const hookVersion of [1, version + 1]) await fixture(async f => {
+    const result = adoption(f, body, false, hookVersion)
+    if (hookVersion === 1) {
+      assert.equal(result.after, result.expected)
+      assert.equal(result.output.state.owned[result.board], createHash('sha256').update(result.after).digest('hex'))
+      assert.equal(result.output.result.problems.some(problem => problem.key === `preserved:${result.board}`), false)
+    } else {
+      assert.equal(result.after, result.before)
+      assert.equal(result.output.state.owned[result.board], undefined)
+      assert.ok(result.output.result.problems.some(problem => problem.key === `preserved:${result.board}`))
+    }
+  })
+})
 
 test('bundled tagged board adoption: a modified published board stays preserved and unowned', () => fixture(async f => {
   const modified = taggedBoard('0.23.3', '5610ce6a051ba772ee074ac50bdcbc22c6195f6f') + '\n// Synthetic personal modification\n'
@@ -916,4 +936,52 @@ test('concurrent native connect and remove serialize their ownership and disable
   const config = readFileSync(f.config, 'utf8')
   assert.equal(config.includes('progress-report.'), !state.disabled)
   assert.equal(JSON.parse(config).private, f.foreign.private)
+}))
+
+test('antigravity connect keeps the content and order of third-party hooks through connect and removal', () => fixture(async f => {
+  mkdirSync(join(f.home, '.gemini', 'antigravity'), { recursive: true })
+  const config = join(f.home, '.gemini', 'config', 'hooks.json')
+  const foreign = { 'orca-status': Object.fromEntries(['PreInvocation', 'PostInvocation', 'Stop', 'PostToolUse'].map(event => [event, [{ type: 'command', command: `synthetic-orca-${event}`, timeout: 5 }]])) }
+  const original = JSON.stringify(foreign, null, 2) + '\n'
+  mkdirSync(dirname(config), { recursive: true })
+  writeFileSync(config, original)
+  f.run(f.request('connect'))
+  const text = readFileSync(config, 'utf8')
+  const hooks = JSON.parse(text)
+  assert.deepEqual(hooks['orca-status'], foreign['orca-status'])
+  assert.equal(Object.keys(hooks)[0], 'orca-status')
+  const slice = value => value.slice(value.indexOf('  "orca-status":'), value.indexOf('\n  }') + '\n  }'.length)
+  assert.equal(slice(text), slice(original))
+  f.run(f.request('remove'))
+  assert.equal(readFileSync(config, 'utf8'), original)
+}))
+
+test('antigravity connect: the legacy connector writes the Antigravity report hooks next to the skill', () => fixture(async f => {
+  mkdirSync(join(f.home, '.gemini', 'antigravity-cli'), { recursive: true })
+  const config = join(f.home, '.gemini', 'config', 'hooks.json')
+  const foreign = { 'someone-else': { Stop: [{ type: 'command', command: 'foreign-command', timeout: 5 }] } }
+  mkdirSync(dirname(config), { recursive: true })
+  writeFileSync(config, JSON.stringify(foreign))
+  f.run(f.request('connect'))
+  const hooks = JSON.parse(readFileSync(config, 'utf8'))
+  assert.deepEqual(hooks['someone-else'], foreign['someone-else'])
+  const worker = join(dirname(f.progress), 'progress-hook.mjs')
+  const states = { SessionStart: 'waiting', PreInvocation: 'working', PostInvocation: 'working', Stop: 'waiting' }
+  assert.deepEqual(Object.keys(hooks['agent-board']), Object.keys(states))
+  for (const [event, entries] of Object.entries(hooks['agent-board'])) {
+    assert.equal(entries.length, 1)
+    assert.equal(entries[0].type, 'command')
+    assert.equal(entries[0].timeout, 3)
+    // Windows runs the hook through PowerShell's -EncodedCommand, so read the launch line back.
+    const command = process.platform === 'win32' ? Buffer.from(entries[0].command.split(' ').at(-1), 'base64').toString('utf16le') : entries[0].command
+    for (const part of [worker, f.progress, '--agent-status', 'antigravity', states[event], '--hook-event', event]) assert.ok(command.includes(part), `${event} lacks ${part}: ${command}`)
+  }
+  assert.ok(existsSync(join(f.home, '.gemini', 'config', 'skills', 'agent-board', 'SKILL.md')))
+  assert.ok(existsSync(worker))
+  assert.deepEqual(f.run(f.request('status')).state.setup.agents.find(one => one.agent === 'antigravity'), { agent: 'antigravity', label: 'Antigravity', hook: 'configured', board: 'ready' })
+  f.run(f.request('remove'))
+  const removed = JSON.parse(readFileSync(config, 'utf8'))
+  assert.equal(removed['agent-board'], undefined)
+  assert.deepEqual(removed['someone-else'], foreign['someone-else'])
+  assert.ok(!existsSync(worker))
 }))

@@ -118,11 +118,16 @@ test('a board-only reply restores an existing question on every board surface an
   for (const text of [boardText(view, [], EN), chatText(view, [], [], EN, '/synthetic'), dashboardHtml(view, EN, '/synthetic/progress.md', ''), JSON.stringify(serveModel(view, [], EN))]) assert.ok(text.includes('100 or 300 a minute?'), text.slice(0, 500))
 })
 
-test('the native OpenCode prompt callback flags exact board commands without retaining their text', async () => {
+test('the native OpenCode prompt callback flags exact board commands without retaining their text', async t => {
+  const exitListeners = process.listeners('exit')
+  t.after(() => {
+    for (const listener of process.listeners('exit')) if (!exitListeners.includes(listener)) process.removeListener('exit', listener)
+    delete globalThis[Symbol.for('agent-board.opencode-open-sessions')]
+  })
   const { opencodePlugin } = await import('../hooks/local-agents.ts')
   const saved = []
   const source = opencodePlugin('node', '/synthetic/board.mjs', '/synthetic/progress.md', 'Progress', process.env.HOME)
-  const factory = new Function('createRequire', 'spawnSync', 'tool', `${source.replace(/^import .*\n/gm, '').replaceAll('import.meta.url', JSON.stringify(import.meta.url)).replace('export const AgentBoardLocal', 'const AgentBoardLocal')}\nreturn AgentBoardLocal`)(createRequire, (_node, _args, options) => { saved.push(JSON.parse(options.input)); return { status: 0, stdout: '' } }, Object.assign(value => value, { schema: { string: () => ({}), enum: () => ({}), array: () => ({}) } }))
+  const factory = new Function('createRequire', 'spawnSync', 'tool', `${source.replace(/^import .*\n/gm, '').replaceAll('import.meta.url', JSON.stringify(import.meta.url)).replace('export const AgentBoardLocal', 'const AgentBoardLocal')}\nreturn AgentBoardLocal`)(createRequire, (_node, _args, options) => { saved.push(JSON.parse(options.input)); return { status: 0, stdout: '' } }, Object.assign(value => value, { schema: { string: () => ({ describe: () => ({}) }), enum: () => ({}), array: () => ({}) } }))
   const hooks = await factory({ client: { session: { get: async ({ path }) => ({ data: { id: path.id } }) } } })
   await hooks['chat.message']({ sessionID: 'synthetic-owner' }, { parts: [{ type: 'text', text: '/board' }] })
   assert.equal(saved[0].board_request, true)
@@ -825,3 +830,49 @@ for (const agent of ['opencode', 'openclaw']) {
     assert.match(droppedLog(inbox), /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ 1 cap\n$/)
   }))
 }
+test('the sh timeout receipt reads every key with one grep', async () => {
+  const { reporterSh } = await import('../hooks/hook-reporters.ts')
+  const fallback = reporterSh('/x').split('write_fallback() {')[1].split('\ntimed_out() {')[0]
+  assert.equal((fallback.match(/\bgrep\b/g) || []).length, 1)
+  assert.doesNotMatch(fallback, /for key in/)
+})
+
+test('the sh timeout receipt preserves ordered plain metadata and the session gate', () => fixture(async home => {
+  const { reporterSh } = await import('../hooks/hook-reporters.ts')
+  const source = reporterSh('/x')
+  const fallback = source.slice(source.indexOf('write_fallback() {'), source.indexOf('\ntimed_out() {'))
+  const file = shellPath(join(home, 'receipt')), script = join(home, 'fallback.sh')
+  const quote = value => `'${value.replaceAll("'", "'\\''")}'`
+  writeFileSync(script, `file=${quote(file)}\nlog_error() { printf '%s\\n' "$1" >&2; }\n${fallback}\nwrite_fallback\nexit 0\n`)
+  const cases = [
+    [{ extra: { cwd: 'a"b' }, session_id: 'synthetic', cwd: '/later plain *', workspaceRoot: '/中文', prompt: 'PRIVATE_RAW_PROMPT' }, { session_id: 'synthetic', cwd: '/later plain *', workspaceRoot: '' }],
+    [{ directory: '/dir *', conversationId: 'conversation', sessionId: 'camel', session_id: 'synthetic', cwd: '', prompt: '/board' }, { session_id: 'synthetic', sessionId: 'camel', conversationId: 'conversation', cwd: '', directory: '/dir *', board_request: true }],
+    [{ cwd: '/synthetic', prompt: 'PRIVATE_RAW_PROMPT' }, null],
+  ]
+  // A value is never read as a file pattern: with globbing on, this file's name would replace the line.
+  // Windows cannot name a file this way, so only POSIX runs check it.
+  if (process.platform !== 'win32') {
+    writeFileSync(join(home, '"cwd":"x-glob"'), '')
+    cases.push([{ session_id: 'synthetic', cwd: 'x*' }, { session_id: 'synthetic', cwd: 'x*' }])
+  }
+  const run = () => spawnSync(sh, [shellPath(script)], { cwd: home, env: { ...process.env, HOME: home, USERPROFILE: home }, encoding: 'utf8', windowsHide: true, timeout: 10000 })
+  for (const [payload, expected] of cases) {
+    rmSync(file + '.json', { force: true })
+    writeFileSync(file + '.tmp', JSON.stringify(payload))
+    const out = run()
+    assert.equal(out.status, 0, out.stderr)
+    assert.equal(out.stderr, '')
+    if (expected === null) assert.equal(existsSync(file + '.json'), false)
+    else assert.equal(readFileSync(file + '.json', 'utf8'), JSON.stringify(expected))
+  }
+  // A receipt whose temporary file cannot be created is reported, and another's file is left alone.
+  rmSync(file + '.json', { force: true })
+  writeFileSync(file + '.fallback', 'other')
+  writeFileSync(file + '.tmp', JSON.stringify({ session_id: 'synthetic' }))
+  const out = run()
+  assert.equal(out.status, 0, out.stderr)
+  // The reporter sends the shell's own message to /dev/null; this harness does not.
+  assert.match(out.stderr, /(^|\n)REPORTER_FAILED\n$/)
+  assert.equal(existsSync(file + '.json'), false)
+  assert.equal(readFileSync(file + '.fallback', 'utf8'), 'other')
+}))

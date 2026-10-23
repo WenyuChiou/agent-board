@@ -2,12 +2,14 @@ import { test } from 'node:test'
 import { registerHooks } from 'node:module'
 import assert from 'node:assert/strict'
 import { join } from 'node:path'
+import { pathToFileURL } from 'node:url'
 import { EN } from '../../hooks/strings-en.ts'
 import { ZH_TW } from '../../hooks/i18n.ts'
 import { ZH_CN } from '../../hooks/strings-zh-cn.ts'
 import { makeWorld } from './lib/world.mjs'
-import { block } from './lib/writers.mjs'
-import { chat, inspectSurfaces, pageDom, run, serve, terminal } from './lib/surfaces.mjs'
+import { block, turn } from './lib/writers.mjs'
+import { chat, inspectSurfaces, pageDom, plain, run, serve, terminal } from './lib/surfaces.mjs'
+import { knownFailure } from './lib/known.mjs'
 import { noMachineIds } from './lib/expect.mjs'
 import { storageFault } from './lib/faults.mjs'
 
@@ -233,4 +235,128 @@ test('L7 errors: every error is one plain sentence with no stack trace and no fu
       sentence(result.stdout.trim(), world)
     } finally { await world.close() }
   }
+})
+
+// How wide a terminal draws a line: CJK, fullwidth forms and emoji take two columns, anything
+// else one. This count is kept here apart from the board's own in hooks/board.ts, which is not
+// exported, so a wrong count in the product cannot hide itself in the check.
+const WIDE = /[\u{1100}-\u{115f}\u{2e80}-\u{a4cf}\u{ac00}-\u{d7a3}\u{f900}-\u{faff}\u{fe30}-\u{fe6f}\u{ff00}-\u{ff60}\u{ffe0}-\u{ffe6}\u{20000}-\u{3fffd}\p{Emoji_Presentation}]/u
+// A colour code takes no column, so it is taken off before the count.
+const displayWidth = text => [...plain(text)].reduce((sum, char) => sum + (WIDE.test(char) ? 2 : 1), 0)
+const COLUMNS = 100
+const DAY = 24 * 60 * 60 * 1000
+
+// Each name is its role word and as many repeats of one phrase as it takes to pass 120 columns.
+// A Chinese name that long has about 60 characters, so a count of characters instead of columns
+// would let it through.
+const wording = {
+  en: {
+    unit: ' reservoir release schedule for the synthetic basin',
+    role: { project: 'Basin planning', other: 'Delta monitoring', due: 'Review budget', title: 'Reconcile releases', context: 'Why this exists', step: 'Compare totals', question: 'Publish the schedule', report: 'Finished checking' },
+    ask: ', OK?',
+  },
+  'zh-TW': {
+    unit: '合成流域水庫放水排程，',
+    role: { project: '流域規劃', other: '三角洲監測', due: '審查預算', title: '核對放水量', context: '這項工作的原因', step: '比對總量', question: '發布排程', report: '完成檢查' },
+    ask: '，可以嗎？',
+  },
+  'zh-CN': {
+    unit: '合成流域水库放水排程，',
+    role: { project: '流域规划', other: '三角洲监测', due: '审查预算', title: '核对放水量', context: '这项工作的原因', step: '比对总量', question: '发布排程', report: '完成检查' },
+    ask: '，可以吗？',
+  },
+}
+const longName = (lang, role, number = '', tail = '') => {
+  const { unit, role: roles } = wording[lang]
+  let text = number === '' ? roles[role] : `${roles[role]} ${number}`
+  while (displayWidth(text + tail) < 120) text += unit
+  return text + tail
+}
+const AGENT = 'synthetic-reporting-agent-with-a-long-name'
+
+// A board with every kind of row in it, all with long names: a question, working, due soon, idle
+// and stopped tasks, questions that have waited 4 and 8 days, and a turn nobody has taken in yet.
+const seedLongBoard = async (world, lang) => {
+  const name = (role, number, tail) => longName(lang, role, number, tail)
+  const project = name('project')
+  const other = name('other')
+  const ask = (session, number, tail = wording[lang].ask) => block(world, { project, agent: AGENT, session, state: 'waiting', title: name('title', number), steps: [`- [?] ${name('question', number, tail)}`] })
+  // A question's age starts when the board first looks at it, so the board looks and the clock then moves.
+  world.write('progress.md', `## ${project}\n`)
+  ask('a1000015', 5)
+  await terminal.keys(world, 'down')
+  world.jump('4d')
+  ask('a1000016', 6)
+  await terminal.keys(world, 'down')
+  world.jump('4d')
+  // The heartbeat of a block does not renew its question, so both stay 8 and 4 days old.
+  ask('a1000015', 5)
+  ask('a1000016', 6)
+  const due = new Date(world.now + 2 * DAY).toISOString().slice(5, 10)
+  world.write('progress.md', world.read('progress.md').replace(`## ${project}\n`, `## ${project}\n### ${name('due')}\n> due ${due}\n- [ ] ${name('step', 9)}\n`))
+  // The step of the working task that starts with emoji is the one a terminal draws wider than the
+  // board counts it.
+  const marks = '\u{2705}'.repeat(6)
+  block(world, { project, agent: AGENT, session: 'a1000011', title: name('title', 1), steps: [`- [x] ${name('step', 1)}`, `- [~] ${marks}${name('step', 2)}`, `- [ ] ${name('step', 3)}`] })
+  ask('a1000012', 2)
+  block(world, { project: other, agent: AGENT, session: 'a1000013', updated: new Date(world.now - 8 * DAY).toISOString(), title: name('title', 3), steps: [`- [~] ${name('step', 4)}`] })
+  block(world, { project: other, agent: AGENT, session: 'a1000014', state: 'ended', title: name('title', 4), steps: [`- [~] ${name('step', 5)}`] })
+  // block() writes one fixed context line, so the long one replaces it.
+  world.write('progress.md', world.read('progress.md').replaceAll('> Context: Synthetic journey scenario', `> Context: ${name('context')}`))
+  turn(world, 'codex', { session: 'codex-width-session', project: name('other', 'inbox'), text: name('report') })
+  return { project, other, name }
+}
+
+// The overflow lines #383 names, as wideLinesOf words them ("<language> / <screen> / <width> columns: <line>").
+// They are the group heading (a line that starts with the arrow), a line with emoji, the due badge
+// that is added after the line is clipped, and the rows of the shelves that --all opens (a project
+// and task row with the arrow between them, and the question under it).
+const SHELF_QUESTION = new RegExp(`: {5}(?:${Object.values(wording).map(one => one.role.question).join('|')})`)
+const of383 = line => /: ▸ \S/.test(line) || /\p{Emoji_Presentation}/u.test(line) || line.includes('⚑')
+  || (line.includes('/ board with --all /') && (/: {3}\S.* › /.test(line) || SHELF_QUESTION.test(line)))
+
+const wideLines = text => text.split(/\r?\n/).filter(line => displayWidth(line) > COLUMNS).map(line => `${displayWidth(line)} columns: ${line}`)
+
+// Draws the long-named board in each language and gives back every line a 100-column terminal
+// would wrap, with its language and screen. All three languages run before anything is asserted,
+// so one failure shows how far each of them goes.
+const wideLinesOf = async (look, expected) => {
+  const wide = []
+  for (const s of locales) {
+    const world = makeWorld({ lang: s.lang })
+    try {
+      await seedLongBoard(world, s.lang)
+      // The board reads the terminal's width from process.stdout.columns, which a piped run lacks.
+      const preload = world.write('columns-preload.mjs', `Object.defineProperty(process.stdout, 'columns', { value: ${COLUMNS}, configurable: true })\n`)
+      world.env.NODE_OPTIONS += ` --import=${pathToFileURL(preload).href}`
+      const screens = await look(world)
+      // A screen that never showed the long names would pass for the wrong reason.
+      const shown = screens.map(([, text]) => text).join('\n')
+      // The role word and the number are what tells one row from another, so both must be there.
+      for (const [role, number] of expected) assert.ok(shown.includes(`${wording[s.lang].role[role]} ${number}`.trim()), `${s.lang}: ${role} ${number} is not on any screen\n${shown}`)
+      for (const [surface, text] of screens) wide.push(...wideLines(text).map(line => `${s.lang} / ${surface} / ${line}`))
+    } finally { await world.close() }
+  }
+  return wide
+}
+
+test('L7 one line per row at 100 columns: the terminal board and its screen keep every line within 100 display columns in en, zh-TW and zh-CN', async () => {
+  const wide = await wideLinesOf(async world => {
+    const screens = [['board', await terminal.screen(world)], ['board with --all', await terminal.screen(world, ['--all'])]]
+    // The screen shows a row's steps only once the row is open, and one run opens one line. With
+    // the idle shelf open (i) the lines are the question, due, working, idle and stopped tasks and
+    // the turn. With the older shelf open (l) the two aged questions come after the first one.
+    const opened = ['enter', 'i down enter', 'i down down enter', 'i down down down enter', 'i down down down down enter', 'i down down down down down enter', 'l down enter', 'l down down enter']
+    for (const keys of opened) screens.push([`screen after ${keys}`, await terminal.keys(world, keys)])
+    // The 100 must have reached the board, or every line would fit at the 80 it falls back to.
+    assert.ok(screens.some(([, text]) => text.split('\n').some(line => displayWidth(line) > 80)), screens[0][1])
+    return screens
+  }, [['project', ''], ['other', ''], ['due', ''], ['title', 1], ['title', 3], ['title', 4], ['question', 2], ['question', 5], ['question', 6], ['other', 'inbox']])
+  // Four kinds of line run past 100 columns today, and #383 names all of them. A line of any other
+  // kind is a new overflow and fails here at once, outside the known failure. The chat print is
+  // left out on purpose, since it has its own 200-column line.
+  assert.deepEqual(wide.filter(line => !of383(line)), [], 'a line past 100 columns that #383 does not name')
+  const named = wide.filter(of383)
+  // The overflow does not depend on load, so the known failure may not pass quietly.
+  await knownFailure(383, () => assert.deepEqual(named, []))
 })

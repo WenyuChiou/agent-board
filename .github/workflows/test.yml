@@ -158,11 +158,16 @@ jobs:
   # The user-journey tests: the board script on plain Node, driven the way a person uses it
   # (terminal board, --chat, the --serve page over HTTP, --html) in isolated temp homes.
   journeys:
-    name: journeys (${{ matrix.os }})
+    # Node 24 keeps the old check names, which branch protection on main requires, and the Node 22
+    # rows add their version.
+    name: journeys (${{ matrix.os }}${{ matrix.node == 22 && ', Node 22' || '' }})
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest]
+        # Both lines run, as in the jobs above, so a journey that depends on one Node's behaviour
+        # fails here.
+        node: [22, 24]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 10
     steps:
@@ -171,7 +176,7 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          node-version: 24
+          node-version: ${{ matrix.node }}
 
       # `node --test` passes with zero tests when the pattern matches nothing, so a missing
       # journey folder fails here instead of passing silently.

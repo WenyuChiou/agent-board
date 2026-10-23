@@ -13,8 +13,9 @@ const KB = 1024
 const MB = 1024 * KB
 
 export const RETENTION = {
-  // An agent session's record outlives its block: a stopped session's block goes to the archive
-  // three days after it stopped, so its record is not needed after that.
+  // An agent session's record outlives its block: a block that ended goes to the archive three
+  // days after its last write (one that still asks only once its question is kept), and a block
+  // still on the board, such as a working or waiting one that asks, keeps its record at any age.
   endedAgentMs: 3 * DAY,
   agentMs: 30 * DAY,
   // A session's mirror with no open step is no longer on the board; one with open steps is.
@@ -161,9 +162,10 @@ export const staleStoreTemps = (entries: readonly ListedFile[], now: number): st
 // The temporary copy a reporter leaves in the inbox when it is cut off: every reporter (sh,
 // PowerShell, the opencode plugin) writes a turn to `<turn name>.tmp` and then moves it to
 // `<turn name>.json`, and one that kept the name `<turn name>.json.tmp` is the same thing. A
-// reporter is done in seconds, so one a day old is a partial write that the drain skips and nothing
-// else removes. Never a turn (`.json`), a prompt receipt, a file a session has taken or one set
-// aside (`.failed`).
+// reporter is done in seconds, so one a day old is a partial write that the drain skips. The sh and
+// PowerShell reporters remove their scratch files a minute old themselves; an inbox only the
+// OpenCode and OpenClaw plugins write to has no other cleanup. Never a turn (`.json`), a prompt
+// receipt, a file a session has taken or one set aside (`.failed`).
 const INBOX_TEMP = /\.tmp$/
 
 export const staleInboxTemps = (entries: readonly ListedFile[], now: number): string[] =>
