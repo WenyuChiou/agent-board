@@ -8,9 +8,9 @@ import type { ConfirmRef } from './blocks'
 import { ciWords, prWords } from './github'
 import { doingTask, fallbackTitle, isAnswered, waitsOnYou } from './mirror'
 import type { Tone } from './palette'
-import { countSteps, currentStepIndex, doneKey, isHereProject, isStale, isTaskComplete, parseProgress, RESUME } from './parse'
+import { countSteps, currentStepIndex, doneKey, isHereProject, isMarksComplete, isStale, isTaskComplete, parseProgress, RESUME } from './parse'
 import { sha256 } from './sha256'
-import { observeQuestions, pendingQuestionSlot, questionScope, questionSlot } from './questions'
+import { observeQuestions, pendingQuestionSlot, questionScope, questionSlot, sourceSnapshot } from './questions'
 import type { QuestionLedger, QuestionProofs } from './questions'
 import { questionAge } from './question-aging'
 import type { PendingTurn } from './board'
@@ -930,12 +930,9 @@ export const buildView = (
     // Keep that orphaned copy for review without offering it as a live question again.
     let isInactiveSource = false
     if (source.kind === 'block' && !liveScopes.has(record.scope)) {
-      try {
-        const saved = JSON.parse(source.data) as ProgressTask
-        isInactiveSource = saved.auto !== null && (saved.auto.state === 'ended' || saved.auto.state === 'done' || isStale(saved.auto, now) || isTaskComplete(saved))
-      } catch {
-        // Unknown historical source shapes retain the existing review behavior.
-      }
+      // Unknown historical source shapes retain the existing review behavior.
+      const saved = sourceSnapshot(source.data)
+      isInactiveSource = saved !== null && saved.auto !== null && (saved.auto.state === 'ended' || saved.auto.state === 'done' || isStale(saved.auto, now) || isMarksComplete(saved.steps))
     }
     const stage = record.isArchived || isInactiveSource || inactiveScopes.has(record.scope) ? 'older' : age.stage
     const item: WaitingItem = { key: `retained::${record.id}`, questionId: record.id, ageStage: stage, project: source.project, task: source.task, context: source.context, ...parts, when: age.age === null ? s.questionAgeUnknown : relativeTime(record.firstObserved, now, s), ...askOf(parts.text, parts.note), where: 'other', agent: source.agent === 'claude' ? '' : source.agent, session: source.session, sessionId: null, resumeVia: null, reopen: null, hideKey: record.id, canHide: false, step: null, target: null }

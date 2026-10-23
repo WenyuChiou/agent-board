@@ -227,6 +227,44 @@ test('captures and proofs beyond the newest 16 are pruned at tidy, and the ledge
   expect(filesOf(world, CAPTURES)).toHaveLength(16)
 })
 
+test('twenty copies of one open question whose blocks differ only in their lines read as one copy, and all but the newest go at tidy', async ($, on) => {
+  const asked = block('a1b2c301', 'waiting', 0, '- [?] Publish the synthetic plan, OK?')
+  const others = Array.from({ length: 16 }, (_, n) => block(`c${n.toString(16).padStart(7, '0')}`, 'waiting', 0, `- [?] Keep synthetic question ${n}, OK?`)).join('')
+  const board = `## demo\n${asked}${others}`
+  const projects = parseProgress(board)
+  const ledger = observeQuestions(emptyQuestions(), projects, null, [], NOW, true, 'seed').ledger
+  const open = ledger.records.find(record => record.source?.session === 'a1b2c301')!
+  const versions = Array.from({ length: 20 }, (_, offset) => {
+    const task = parseProgress(`## demo\n${'\n'.repeat(offset)}${asked}`)[0]!.tasks[0]!
+    return { ...open, source: { ...open.source!, data: JSON.stringify(task) } }
+  })
+  const parsed = versions.map(record => {
+    const text = captureJson(record, 'unresolved')
+    return parseCapture(text, sha256(text))!
+  })
+  expect(new Set(parsed.map(capture => JSON.stringify(capture.record))).size).toBe(1)
+  expect(parsed[0]?.record.source?.data).toBe(JSON.stringify({ auto: projects[0]!.tasks[0]!.auto, steps: projects[0]!.tasks[0]!.steps.map(step => step.status) }))
+  const world = makeWorld([[FILE, board]])
+  world.env = english
+  world.ran = []
+  const clock = engineBeneath(on, world)
+  put(world, LEDGER, questionsJson(ledger), 1)
+  versions.forEach((record, n) => putCapture(world, record, 'unresolved', 1_000 + n))
+  const needed = ledger.records.filter(record => record.id !== open.id)
+  needed.forEach((record, n) => putCapture(world, record, 'unresolved', 5_000 + n))
+  await $.session.start(START)
+  await clock.advance(2000)
+  const current = captureFile(versions[19]!, 'unresolved')
+  await $.command.run(TIDY)
+  expect(filesOf(world, CAPTURES)).toHaveLength(17)
+  expect(world.files.has(current)).toBe(true)
+  for (const record of versions.slice(0, 19)) expect(world.files.has(captureFile(record, 'unresolved'))).toBe(false)
+  for (const record of needed) expect(world.files.has(captureFile(record, 'unresolved'))).toBe(true)
+  expect(removals(world)).toBe(1)
+  expect(ledgerRecords(world).find(record => record.id === open.id)?.isUnresolved).toBe(true)
+  expect(ledgerRecords(world).filter(record => record.isUnresolved)).toHaveLength(17)
+})
+
 test('twenty unresolved questions with no other copy keep all twenty captures at tidy', async ($, on) => {
   const board = `## demo\n${Array.from({ length: 20 }, (_, n) => block(`a1b2c3${n.toString(16).padStart(2, '0')}`, 'waiting', 1, `- [?] Question number ${n}, OK?`)).join('')}`
   const world = makeWorld([[FILE, board]])

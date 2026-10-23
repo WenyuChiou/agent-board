@@ -10,7 +10,9 @@ export type QuestionSource = {
   text: string
   agent: string
   session: string
-  // Complete structured source, retained independently of display clipping.
+  // The structured source, retained independently of display clipping: for a block or hand-kept
+  // task its marker fields and step marks (a copy before 0.24.0 holds the whole task, #419); for
+  // this session's own task or an inbox turn, the whole of it.
   data: string
 }
 

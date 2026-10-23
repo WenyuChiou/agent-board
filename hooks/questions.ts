@@ -1,4 +1,4 @@
-import type { ProgressMirror, ProgressProject, QuestionLedger, QuestionProofs, QuestionRecord, QuestionSource } from '../types'
+import type { ProgressAuto, ProgressMirror, ProgressProject, ProgressStepStatus, ProgressTask, QuestionLedger, QuestionProofs, QuestionRecord, QuestionSource } from '../types'
 import type { PendingTurn } from './board'
 import type { AgentTurn } from './inbox'
 import { scanBlocks, shortId, stepWords } from './blocks'
@@ -19,14 +19,60 @@ export const questionSlot = (scope: string, index: number | string): string => J
 export const pendingQuestionSlot = (scope: string, text: string): string => questionSlot(scope, `inbox:${questionWords(text)}`)
 export const migrationKey = (legacy: string): string => `question-migrated:${sha256(legacy)}`
 export const isQuestionSnapshot = (text: string): boolean => scanBlocks(text.split(/\r?\n/)).every(span => span.isClosed)
+// A question's copy of its block or hand-kept task: the marker fields and each step's mark, which
+// are all its readers need. The whole task held every step's words and line once per waiting
+// step, so a real board's ledger grew past the host's 4 MiB write limit, and every edit above a
+// block wrote a new copy of each of its questions (#419).
+export const sourceData = (task: ProgressTask): string => JSON.stringify({ auto: task.auto, steps: task.steps.map(step => step.status) })
+
+type SourceSnapshot = { auto: ProgressAuto | null; steps: ProgressStepStatus[] }
+const parsedJson = (text: string): unknown => {
+  try {
+    return JSON.parse(text) as unknown
+  } catch {
+    return undefined
+  }
+}
+// The whole-task form an old copy holds: an object with the task's title.
+const isWholeTask = (value: unknown): boolean => value !== null && typeof value === 'object' && !Array.isArray(value) && 'title' in value
+const snapshotOf = (saved: unknown): SourceSnapshot | null => {
+  if (saved === null || typeof saved !== 'object' || Array.isArray(saved)) return null
+  const value = saved as Record<string, unknown>
+  if (!Array.isArray(value.steps)) return null
+  const steps: unknown[] = isWholeTask(value) ? value.steps.map(step => step !== null && typeof step === 'object' && !Array.isArray(step) ? (step as Record<string, unknown>).status : null) : value.steps
+  if (steps.some(status => typeof status !== 'string' || !['done', 'doing', 'todo', 'waiting', 'running', 'blocked', 'cancelled'].includes(status))) return null
+  if (value.auto !== null) {
+    if (typeof value.auto !== 'object' || Array.isArray(value.auto)) return null
+    const auto = value.auto as Record<string, unknown>
+    if (typeof auto.session !== 'string' || typeof auto.agent !== 'string' || !['working', 'waiting', 'done', 'ended'].includes(auto.state as string) || typeof auto.updated !== 'number' || !Number.isFinite(auto.updated)) return null
+    if ((auto.resume !== null && typeof auto.resume !== 'string') || (auto.dir !== null && typeof auto.dir !== 'string') || (auto.pr !== null && (typeof auto.pr !== 'number' || !Number.isFinite(auto.pr))) || (auto.ci !== null && !['none', 'pending', 'pass', 'fail'].includes(auto.ci as string))) return null
+  }
+  return { auto: value.auto as ProgressAuto | null, steps: steps as ProgressStepStatus[] }
+}
+
+// The marker fields and step marks a copy holds, in either form: this one, or the whole task a
+// copy written before 0.24.0 holds. Null for any other shape, so a broken file never throws in a reader.
+export const sourceSnapshot = (data: string): SourceSnapshot | null => snapshotOf(parsedJson(data))
+
+// An old whole-task copy of a block or hand-kept task reads as the copy this version writes, so
+// it compares equal to the live block, and the copies of one block at different lines are one.
+// Other shapes stay as they are; an own or inbox copy is small, and its exact text is read back.
+const normalizeSource = (source: QuestionSource): QuestionSource => {
+  if (source.kind !== 'block' && source.kind !== 'manual') return source
+  const parsed = parsedJson(source.data)
+  return isWholeTask(parsed) && snapshotOf(parsed) !== null ? { ...source, data: sourceData(parsed as unknown as ProgressTask) } : source
+}
+
 export const archiveQuestionsKept = (projects: readonly ProgressProject[], ref: TaskRef, ledger: QuestionLedger): boolean => {
   const tasks = projects.filter(project => project.name === ref.project).flatMap(project => project.tasks).filter(task => ref.session === null ? task.title === ref.title : task.auto?.session === ref.session)
   if (tasks.length !== 1) return false
   const task = tasks[0]
   if (task === undefined) return false
   const scope = questionScope(ref.project, task.auto?.agent ?? 'manual', task.auto?.session ?? task.title)
+  // The copy no longer holds the title, so the record is tied to this task by its title and
+  // session; two hand-kept tasks that ask the same have the same marks.
   return task.steps.filter(step => step.status === 'waiting').every(step => ledger.records.some(record => record.isUnresolved
-    ? record.source?.project === ref.project && record.source.text === step.text && record.source.data === JSON.stringify(task)
+    ? isAskedBy(record, ref) && record.source?.text === step.text && record.source.data === sourceData(task)
     : record.resolvedAt !== undefined && record.source !== undefined && record.scope === scope && record.words === questionWords(step.text) && (record.producer ?? '') === (step.questionToken ?? '') && !ledger.records.some(other => other.isUnresolved && other.scope === scope && other.words === questionWords(step.text))))
 }
 // The questions of one block in the ledger: its project and title and, for an agent's block, its
@@ -73,6 +119,7 @@ export const parseQuestions = (text: string, isMissing = false): QuestionLedger 
       if (row.producerRevisions !== undefined && (!Array.isArray(row.producerRevisions) || row.producerRevisions.some(revision => typeof revision !== 'string' || !/^[a-f0-9]{64}$/.test(revision)))) return null
       if (row.producerSources !== undefined && (!Array.isArray(row.producerSources) || row.producerSources.some(source => typeof source !== 'string'))) return null
       if (row.source !== undefined && (row.source === null || typeof row.source !== 'object' || !['block', 'own', 'manual', 'inbox'].includes(row.source.kind) || ['project', 'task', 'context', 'text', 'agent', 'session', 'data'].some(key => typeof (row.source as unknown as Record<string, unknown>)[key] !== 'string'))) return null
+      if (row.source !== undefined) row.source = normalizeSource(row.source)
       ids.add(row.id)
     }
     if (Object.values(data.legacy).some(id => typeof id !== 'string' || (id !== '' && !ids.has(id)))) return null
@@ -105,7 +152,9 @@ export const parseCapture = (text: string, hash: string): QuestionCapture | null
     const value = JSON.parse(text) as QuestionCapture
     if (value.version !== 1 || !['unresolved', 'resolved', 'archived'].includes(value.disposition) || value.record?.source === undefined) return null
     const next = Number(value.record.id.slice(value.record.id.lastIndexOf(':') + 1)) + 1
-    return parseQuestions(JSON.stringify({ version: 1, next, records: [value.record], legacy: {} })) === null ? null : value
+    const parsed = parseQuestions(JSON.stringify({ version: 1, next, records: [value.record], legacy: {} }))
+    const record = parsed?.records[0]
+    return record === undefined ? null : { ...value, record }
   } catch {
     return null
   }
@@ -199,7 +248,7 @@ const isCovered = (record: QuestionRecord, capture: QuestionCapture): boolean =>
 // - it is not among the newest `keep` captures;
 // - the ledger file itself holds that question, with everything the capture adds, so no
 //   unresolved question lives only in a copy that is removed;
-// - it is not the copy of the question's open state that every poll looks for (it would be
+// - it is not the newest copy of the question's open state that every poll looks for (it would be
 //   written again at once);
 // - and either the question is resolved and retired, so nothing reads its copies any more, or
 //   a newer copy of the same kind for the same question already holds everything this one does,
@@ -230,7 +279,12 @@ export const captureCovers = (ledger: QuestionLedger, held: readonly HeldCapture
     if (record === undefined || !isCovered(record, one.capture)) return []
     const proof = record.isUnresolved === false && record.resolvedAt !== undefined ? sha256(record.id) : null
     if (proof !== null && retiredHashes.has(proof)) return [{ hash: one.hash, cover: null, retired: proof }]
-    if (record.isUnresolved && captureJson(record, 'unresolved') === captureJson(one.capture.record, one.capture.disposition)) return []
+    if (record.isUnresolved && captureJson(record, 'unresolved') === captureJson(one.capture.record, one.capture.disposition)) {
+      // Old copies of one block at different lines all read as the open copy now: the newest,
+      // in the order two sessions agree on, is the one kept, and it covers the rest.
+      const newest = (byQuestion.get(record.id) ?? []).find(other => captureJson(record, 'unresolved') === captureJson(other.capture.record, other.capture.disposition))
+      if (newest !== undefined) return newest.hash === one.hash ? [] : [{ hash: one.hash, cover: newest.hash, retired: null }]
+    }
     const own = rank.get(one.hash) ?? 0
     const cover = (byQuestion.get(record.id) ?? []).find(other => (rank.get(other.hash) ?? 0) < own && other.capture.disposition === one.capture.disposition && restored([other.capture, one.capture]) === alone(other))
     return cover === undefined ? [] : [{ hash: one.hash, cover: cover.hash, retired: null }]
@@ -275,7 +329,7 @@ const observations = (projects: readonly ProgressProject[], mine: ProgressMirror
       // The task's background and its copy as data are the same for each of its steps, so they
       // are worked out once per task rather than once per step (#371).
       const context = task.notes.find(note => /^(?:背景|Context|Background)\s*[:：]/i.test(note))?.replace(/^(?:背景|Context|Background)\s*[:：]\s*/i, '') ?? (task.auto === null ? task.notes.join('\n') : '')
-      const data = JSON.stringify(task)
+      const data = sourceData(task)
       task.steps.forEach((step, index) => rows.push({ scope, session: task.auto?.session ?? '', index, text: step.text, isWaiting: step.status === 'waiting', producer: step.questionToken ?? '', source: { kind: task.auto === null ? 'manual' : 'block', project: project.name, task: task.title, context, text: step.text, agent: task.auto?.agent ?? '', session: task.auto?.session ?? '', data } }))
     }
   }
