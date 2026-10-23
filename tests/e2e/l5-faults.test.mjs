@@ -4,7 +4,7 @@ import { EN } from '../../hooks/strings-en.ts'
 import { STALE_MS } from '../../hooks/parse.ts'
 import { makeWorld } from './lib/world.mjs'
 import { block, hook } from './lib/writers.mjs'
-import { formatWriters, keptHookEvents, lockFile, storageFault, tear } from './lib/faults.mjs'
+import { formatWriters, holdNextRename, keptHookEvents, lockFile, storageFault, tear } from './lib/faults.mjs'
 import { chat, html, pageDom, run, serve } from './lib/surfaces.mjs'
 
 const journalText = world => world.files().filter(name => /^progress-journal-.*\.md$/.test(name)).map(name => world.read(name)).join('\n')
@@ -319,12 +319,9 @@ test('L5 locked file: the Codex hook keeps a locked Stop event, exits 0, and the
   } finally { await world.close() }
 })
 
-// Eight hooks and four writers that follow docs/FORMAT.md ("Concurrent writers"), together.
-// Windows refuses a rename onto a file another process has open, so on Windows the writers repeat
-// the procedure for a few seconds while the hooks run, which is how the loss was seen (#249).
-// The writers take the native lock the hooks take, so no two of them write at once. The other
-// systems never refuse that rename: there the hooks go first, then the writers one after another,
-// each once, and a lost block is a bug.
+// Eight hooks and four FORMAT.md writers contend for the same lock on every system.
+// Windows repeats writes for a few seconds to cover the timing of the loss seen in #249;
+// POSIX uses fewer, closer rounds to keep the concurrent leg short.
 const RACE_WRITERS = ['f0000001', 'f0000002', 'f0000003', 'f0000004']
 const RACE_HOOKS = Array.from({ length: 8 }, (_, index) => `codex-race-session-${index + 1}`)
 // Returns what was lost or broken, and lets a setup failure (a broken install, a writer that never
@@ -336,19 +333,14 @@ const raceOnce = async isWindows => {
     const warmup = 'codex-race-warmup'
     const warmed = await hook(world, 'codex', 'UserPromptSubmit', { session_id: warmup, prompt: 'Warm up', cwd: world.root })
     assert.equal(warmed.status, 0, whyFailed(warmed))
-    const writers = await formatWriters(world, RACE_WRITERS, isWindows ? { rounds: 40, spacingMs: 75 } : { isSequential: true })
+    const rounds = isWindows ? 40 : 30
+    // Test-only headroom lets a loaded CI machine schedule every competing writer.
+    const writers = await formatWriters(world, RACE_WRITERS, { rounds, spacingMs: isWindows ? 75 : 25, lockWaitMs: 8000 })
     const start = () => RACE_HOOKS.map(session => hook(world, 'codex', 'UserPromptSubmit', { session_id: session, prompt: 'Review the synthetic routes', cwd: world.root }))
-    let written, ran
-    if (isWindows) {
-      writers.go()
-      const hooks = start()
-      written = await writers.finished()
-      ran = await Promise.all(hooks)
-    } else {
-      ran = await Promise.all(start())
-      writers.go()
-      written = await writers.finished()
-    }
+    writers.go()
+    const hooks = start()
+    const written = await writers.finished()
+    const ran = await Promise.all(hooks)
     // A hook that finds the board busy keeps its event and exits 0. The next hook run applies it.
     // Settling runs replay what was kept (a second one only when the first left something), and
     // an event still kept after them was never applied, which is a lost block.
@@ -364,6 +356,7 @@ const raceOnce = async isWindows => {
       // The writer prints WRITER_READY first. What it says it could not do is the WRITE_FAILED line.
       const failure = result.stdout.split('\n').find(line => line.startsWith('WRITE_FAILED'))
       if (result.status !== 0 || !result.stdout.includes('WRITER_OK')) problems.push(`writer ${RACE_WRITERS[index]} failed: ${failure?.trim() || result.stderr.trim() || result.stdout.trim()}`)
+      if (/\bLOST\b/.test(result.stdout)) problems.push(`writer ${RACE_WRITERS[index]} repaired a lost block: ${result.stdout.trim()}`)
     })
     ran.forEach((result, index) => {
       if (result.status !== 0) problems.push(`hook ${RACE_HOOKS[index]} exited ${result.status}: ${whyFailed(result).trim()}`)
@@ -380,19 +373,20 @@ const raceOnce = async isWindows => {
       const count = occurrences(source, `<!-- auto session=${session} `)
       if (count === 0) problems.push(`writer block lost: ${session}`)
       if (count > 1) problems.push(`writer block doubled: ${session}`)
+      const own = source.split(`<!-- auto session=${session} `)[1]?.split(`<!-- /auto session=${session} -->`)[0]
+      if (!own?.split(/\r?\n/).includes(`- [~] Round ${rounds}`)) problems.push(`writer last round lost: ${session} expected Round ${rounds}`)
     }
     return problems
   } finally { await world.close() }
 }
 
-// #249: a writer that followed FORMAT.md was refused the rename (EPERM) and gave up after three
-// tries, or its block was lost under the concurrent writes, and a hook could lose its block the
-// other way round, to a writer that had read the file before the hook wrote and renamed its copy
-// over the hook's block. Writers that take the native lock and try a refused rename again (#381)
-// lose neither, so any problem fails the journey. While a writer holds the lock no other writer has
-// the file open, so the journey does not reach the refused-rename retry; a program outside the board
-// holding the file open would.
-test('L5 concurrent writers: 8 hooks and 4 FORMAT.md writers lose no block on Windows', async () => {
+// #249: under concurrent writes a writer that followed FORMAT.md could lose its block, and a hook
+// could lose its block to a writer that renamed an older copy over it. Writers and hooks that take
+// the native lock lose neither, so any problem fails the journey: a block lost or doubled, a writer
+// whose last round is not the one in its block, or a writer that had to repair a lost block (LOST),
+// which means something wrote without the lock. A rename refused by a program outside the board
+// holding the file open is the next test.
+test('L5 concurrent writers: 8 hooks and 4 FORMAT.md writers lose no block', async () => {
   const isWindows = process.platform === 'win32'
   // The loss on Windows depended on which process held the file at which moment, so one clean run
   // does not show it gone: up to three runs try to catch it, and a run that loses something ends
@@ -400,6 +394,28 @@ test('L5 concurrent writers: 8 hooks and 4 FORMAT.md writers lose no block on Wi
   let problems = []
   for (let attempt = 1; attempt <= (isWindows ? 3 : 1) && problems.length === 0; attempt++) problems = await raceOnce(isWindows)
   assert.deepEqual(problems, [])
+})
+
+test('L5 FORMAT.md writer: a block whose rename is refused while another program holds the file still lands', { skip: process.platform !== 'win32' }, async t => {
+  const world = makeWorld()
+  try {
+    world.write('progress.md', '## Synthetic rename\nManual text must survive\n')
+    const holder = await holdNextRename(world)
+    // Test-only headroom keeps CPU contention separate from the rename retry.
+    const writers = await formatWriters(world, ['f2000001'], { lockWaitMs: 8000 })
+    writers.go()
+    const [result] = await writers.finished()
+    assert.equal(result.status, 0, result.stderr || result.stdout)
+    assert.match(result.stdout, /WRITER_OK after (?:EPERM|EACCES|EBUSY)(?:,|\r?$)/m)
+    assert.doesNotMatch(result.stdout, /\bLOST\b/)
+    const held = await holder.finished()
+    assert.equal(held.status, 0, held.stderr)
+    assert.match(held.stdout, /HOLDER_RELEASED/)
+    t.diagnostic(result.stdout.trim())
+    assert.match(world.read('progress.md'), /Manual text must survive\n/)
+    assert.match(world.read('progress.md'), /- \[~\] Round 1\n<!-- \/auto session=f2000001 -->/)
+    assert.ok(!world.files().some(name => /\.agent-board-lock$|\.format-tmp$/.test(name)))
+  } finally { await world.close() }
 })
 
 // pageDom (lib/surfaces.mjs) answers /api/board itself and has no document.querySelectorAll, so it
