@@ -8,6 +8,7 @@ import { beforeEach, test } from 'node:test'
 import assert from 'node:assert/strict'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { inspect } from 'node:util'
+import { boardRun } from '../hooks/board-commands.ts'
 import { reporterPs1, reporterSh } from '../hooks/hook-reporters.ts'
 import { hookBootstrap, hookGuardSource, hookWorker } from '../hooks/hook-safety.ts'
 import { classifierDiagnostic, observeClassifier } from './fixtures/classifier-diagnostic.mjs'
@@ -3659,7 +3660,8 @@ test("antigravity: setup-agent takes over the connect's skill for a progress fil
   mkdirSync(dirname(progress), { recursive: true })
   legacyConnect(f, progress)
   const skill = join(f.home, '.gemini', 'config', 'skills', 'agent-board', 'SKILL.md')
-  assert.ok(readFileSync(skill, 'utf8').includes('synthetic-progress-folder'))
+  // The connect's skill runs the board beside that progress file.
+  assert.ok(readFileSync(skill, 'utf8').includes(boardRun(join(dirname(progress), 'agent-board.mjs'))))
   const installed = f.install('--agent', 'antigravity', '--apply')
   assert.equal(installed.status, 0, installed.stderr + installed.stdout)
   assert.ok(!(installed.stderr + installed.stdout).includes('INSTALL_CONFLICT'))
