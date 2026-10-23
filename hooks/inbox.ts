@@ -155,6 +155,14 @@ export const inboxTime = (fileName: string): number | undefined => {
   return Number.isSafeInteger(at) ? milliseconds(at) : undefined
 }
 
+export const QUESTION_KEEP_MS = 3 * 24 * 60 * 60 * 1000
+
+export const isQuestionStale = (name: string, now: number): boolean => {
+  const at = inboxTime(name)
+
+  return at !== undefined && now - at > QUESTION_KEEP_MS
+}
+
 // v0.19.1 stored raw seconds or milliseconds, doubled with an end-event bit.
 // Keep that bit while migrating old mirrors; otherwise an upgrade could replay
 // an older seconds event over a newer, already stored seconds event.
@@ -335,8 +343,12 @@ export const keepInboxDone = (done: Readonly<Record<string, string>>, now: numbe
 // on the board: a file whose session closed half-way, or whose turn the board or the model
 // could not take, is taken again once CLAIM_MS have passed, and set aside as
 // `<inbox name>.failed` after MAX_TRIES attempts, kept rather than deleted.
+// A file set aside by 0.23.x's question hold is taken once more after upgrading.
 export const CLAIM_MS = 15 * 60 * 1000
 export const MAX_TRIES = 8
+export const RETAKE_TRY = MAX_TRIES + 1
+// At most five held turns wait at once, so summaries do not queue past CLAIM_MS.
+export const RETAKE_PER_LOOK = 5
 
 export const takenName = (name: string, session: string, at: number, attempt = 1): string =>
   `${name}.${session.replace(/\W/g, '') || 'x'}-${Math.max(0, Math.floor(at)).toString(36)}-${attempt}.taking`
@@ -356,6 +368,23 @@ export const readClaim = (file: string): Claim | null => {
 export const isTakenFile = (name: string): boolean => readClaim(name) !== null
 
 export const failedName = (name: string): string => `${name}.failed`
+
+// A turn taken once more and failing again is set aside under a name no look takes again.
+export const retakenFailedName = (name: string): string => `${name}.retaken.failed`
+
+export const QUESTION_HOLD = 'QUESTION_RETENTION_FAILED'
+
+export const setAsideOf = (file: string): string | null => {
+  const name = file.endsWith('.failed') ? file.slice(0, -'.failed'.length) : ''
+
+  return isInboxFile(name) ? name : null
+}
+
+export const isQuestionHold = (note: string | undefined): boolean => {
+  const fields = note?.split(':') ?? []
+
+  return /^-?\d+$/.test(fields[0] ?? '') && Number(fields[0]) <= MAX_TRIES && /^-?\d+$/.test(fields[1] ?? '') && fields.slice(2).join(':') === QUESTION_HOLD
+}
 
 // What a session does with a file another look left taken: leave it to the session that may
 // still be on it, take it again, or set it aside. A claim without a time goes by the file's

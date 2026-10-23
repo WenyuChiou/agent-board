@@ -5,7 +5,6 @@ import { STALE_MS } from '../../hooks/parse.ts'
 import { makeWorld } from './lib/world.mjs'
 import { block, hook } from './lib/writers.mjs'
 import { formatWriters, keptHookEvents, lockFile, storageFault, tear } from './lib/faults.mjs'
-import { knownFailure } from './lib/known.mjs'
 import { chat, html, pageDom, run, serve } from './lib/surfaces.mjs'
 
 const journalText = world => world.files().filter(name => /^progress-journal-.*\.md$/.test(name)).map(name => world.read(name)).join('\n')
@@ -323,13 +322,13 @@ test('L5 locked file: the Codex hook keeps a locked Stop event, exits 0, and the
 // Eight hooks and four writers that follow docs/FORMAT.md ("Concurrent writers"), together.
 // Windows refuses a rename onto a file another process has open, so on Windows the writers repeat
 // the procedure for a few seconds while the hooks run, which is how the loss was seen (#249).
-// The procedure has no lock, so overlapping writers can overwrite each other on any system. The
-// other systems therefore run no writer while a hook runs: the hooks go first, then the writers
-// one after another, each once, so nothing competes for the file and a lost block there is a bug.
+// The writers take the native lock the hooks take, so no two of them write at once. The other
+// systems never refuse that rename: there the hooks go first, then the writers one after another,
+// each once, and a lost block is a bug.
 const RACE_WRITERS = ['f0000001', 'f0000002', 'f0000003', 'f0000004']
 const RACE_HOOKS = Array.from({ length: 8 }, (_, index) => `codex-race-session-${index + 1}`)
 // Returns what was lost or broken, and lets a setup failure (a broken install, a writer that never
-// got ready, a driver timeout) throw, so that it can never pass for the known failure.
+// got ready, a driver timeout) throw.
 const raceOnce = async isWindows => {
   const world = makeWorld()
   const problems = []
@@ -386,34 +385,21 @@ const raceOnce = async isWindows => {
   } finally { await world.close() }
 }
 
-// What #249 reports: a writer that follows FORMAT.md is refused the rename (EPERM) and gives up
-// after three tries, or its block is lost under the concurrent writes. A hook can lose its block
-// to the same race the other way round: the writer read the file before the hook wrote, takes no
-// lock, and renames its copy over the hook's block. Both go when other writers take the native
-// lock (#381). Anything else (a hook that exits non-zero, a doubled block, a writer that never
-// started) is a plain failure.
-const SYMPTOM_249 = /^writer f\d+ failed: WRITE_FAILED .*EPERM|^(?:writer|hook) block lost/
-const HOOK_LOST = /^hook block lost/
-// The runs that lost a hook block lost 1 of up to 11 (the warm-up, 8 racing hooks and 1 or 2
-// settling runs). More than 2 is more than that race's odd loss.
-const HOOK_LOST_MAX = 2
-
+// #249: a writer that followed FORMAT.md was refused the rename (EPERM) and gave up after three
+// tries, or its block was lost under the concurrent writes, and a hook could lose its block the
+// other way round, to a writer that had read the file before the hook wrote and renamed its copy
+// over the hook's block. Writers that take the native lock and try a refused rename again (#381)
+// lose neither, so any problem fails the journey. While a writer holds the lock no other writer has
+// the file open, so the journey does not reach the refused-rename retry; a program outside the board
+// holding the file open would.
 test('L5 concurrent writers: 8 hooks and 4 FORMAT.md writers lose no block on Windows', async () => {
   const isWindows = process.platform === 'win32'
-  // The loss on Windows depends on which process holds the file at which moment, so a clean run
-  // does not show it fixed: up to three runs try to catch it, and a run that loses something ends
-  // the loop at once. A pass is logged by the markers below (mayPass), never reported as a fix.
+  // The loss on Windows depended on which process held the file at which moment, so one clean run
+  // does not show it gone: up to three runs try to catch it, and a run that loses something ends
+  // the loop at once.
   let problems = []
   for (let attempt = 1; attempt <= (isWindows ? 3 : 1) && problems.length === 0; attempt++) problems = await raceOnce(isWindows)
-  if (isWindows) {
-    const others = problems.filter(problem => !SYMPTOM_249.test(problem))
-    assert.deepEqual(others, [], `not a known failure: ${others.join(' | ')}`)
-    // The marker passes on a lucky run, so the hooks' losses are bounded outside it. The writers'
-    // are not: 3 of the 4 failed in some runs.
-    const hooksLost = problems.filter(problem => HOOK_LOST.test(problem))
-    assert.ok(hooksLost.length <= HOOK_LOST_MAX, `${hooksLost.length} hook blocks lost, more than ${HOOK_LOST_MAX}: ${hooksLost.join(' | ')}`)
-    await knownFailure(249, () => assert.deepEqual(problems, []), { mayPass: true })
-  } else assert.deepEqual(problems, [])
+  assert.deepEqual(problems, [])
 })
 
 // pageDom (lib/surfaces.mjs) answers /api/board itself and has no document.querySelectorAll, so it

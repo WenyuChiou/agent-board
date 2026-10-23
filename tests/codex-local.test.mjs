@@ -1,7 +1,7 @@
 import { spawn, spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { createRequire, registerHooks } from 'node:module'
-import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, unlinkSync, utimesSync, writeFileSync } from 'node:fs'
+import { chmodSync, closeSync, existsSync, lstatSync, lutimesSync, mkdirSync, mkdtempSync, openSync, readFileSync, readdirSync, rmSync, symlinkSync, unlinkSync, utimesSync, writeFileSync } from 'node:fs'
 import { availableParallelism, constants, setPriority, tmpdir } from 'node:os'
 import { delimiter, dirname, join, resolve } from 'node:path'
 import { beforeEach, test } from 'node:test'
@@ -9,7 +9,7 @@ import assert from 'node:assert/strict'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { inspect } from 'node:util'
 import { reporterPs1, reporterSh } from '../hooks/hook-reporters.ts'
-import { hookWorker } from '../hooks/hook-safety.ts'
+import { hookBootstrap, hookGuardSource, hookWorker } from '../hooks/hook-safety.ts'
 import { classifierDiagnostic, observeClassifier } from './fixtures/classifier-diagnostic.mjs'
 import { assertNativeProbeReturned, nativeProbeDiagnostic } from './fixtures/native-probe-diagnostic.mjs'
 
@@ -122,12 +122,12 @@ const nativeHook = (command, env, input, after = setTimeout, stop = stopNativeTr
   return nativeProcess(isWin ? process.env.ComSpec || 'cmd.exe' : '/bin/sh', [isWin ? '/c' : '-c', command], env, JSON.stringify(input), after, stop)
 }
 
-const fireCommand = (f, command, input, limit = 10000) => {
+const fireCommand = (f, command, input, limit = 10000, after = callback => setTimeout(callback, limit)) => {
   const isWindows = process.platform === 'win32'
   return nativeProcess(isWindows ? process.env.ComSpec || 'cmd.exe' : '/bin/sh', isWindows ? ['/d', '/s', '/c', `"${command}"`] : ['-c', command], f.env, input,
-    callback => setTimeout(callback, limit), stopNativeTree, { windowsVerbatimArguments: isWindows })
+    after, stopNativeTree, { windowsVerbatimArguments: isWindows })
 }
-const fireHook = (f, input, limit) => fireCommand(f, JSON.parse(readFileSync(f.hooks, 'utf8')).hooks.UserPromptSubmit[0].hooks[0].command, input, limit)
+const fireHook = (f, input, limit, after) => fireCommand(f, JSON.parse(readFileSync(f.hooks, 'utf8')).hooks.UserPromptSubmit[0].hooks[0].command, input, limit, after)
 
 const hookLog = f => existsSync(join(f.root, 'hook-errors.log')) ? readFileSync(join(f.root, 'hook-errors.log'), 'utf8') : ''
 
@@ -816,6 +816,71 @@ test('a hook worker that starts after the host would stop it still reads its inp
   assert.deepEqual(pendingFiles(f), [])
 }))
 
+test('a hook log write sweeps stale hook-errors.log temp files but keeps fresh ones', () => fixture(f => {
+  assert.equal(f.install('--agent', 'antigravity', '--apply').status, 0)
+  f.save(join(f.root, 'agent-board-hook.mjs'), hookWorker(f.home, f.script, 'const isBoardRequest = () => false'))
+  const stale = join(f.root, 'hook-errors.log.111.tmp'), fresh = join(f.root, 'hook-errors.log.222.tmp')
+  const directory = join(f.root, 'hook-errors.log.333.tmp'), foreign = join(f.root, 'hook-errors.log.other.tmp')
+  f.save(stale, 'stale'); f.save(fresh, 'fresh'); f.save(foreign, 'foreign')
+  mkdirSync(directory)
+  const old = new Date(Date.now() - 300000)
+  for (const file of [stale, directory, foreign]) utimesSync(file, old, old)
+  // An old link is no log file of its own: it stays, and so does what it points to. Windows may refuse to make one.
+  const link = join(f.root, 'hook-errors.log.444.tmp'), target = join(f.root, 'link-target.txt')
+  f.save(target, 'target'); utimesSync(target, old, old)
+  let hasLink = true
+  try { symlinkSync(target, link, 'file'); lutimesSync(link, old, old) } catch { hasLink = false }
+  assert.ok(hasLink || process.platform === 'win32', 'symlink setup failed')
+  const out = spawnSync(process.execPath, [join(f.root, 'agent-board-hook.mjs'), '--hook-version', '1', '--agent-status', '--agent', 'antigravity', '--hook-started', String(Date.now() - 3000)], {
+    env: f.env, input: JSON.stringify({ conversationId: 'synthetic-log-sweep' }), encoding: 'utf8', windowsHide: true, timeout: 20000,
+  })
+  assert.equal(out.status, 0, hookFailure(out))
+  assert.match(hookLog(f), /REPORTER_QUEUED/)
+  assert.equal(existsSync(stale), false)
+  assert.equal(existsSync(fresh), true)
+  assert.equal(existsSync(directory), true)
+  assert.equal(existsSync(foreign), true)
+  if (hasLink) assert.equal(lstatSync(link).isSymbolicLink(), true)
+  assert.equal(readFileSync(target, 'utf8'), 'target')
+}))
+
+test('only the hook worker carries the hook-errors.log temp sweep, not the bootstrap or the SDK guard', () => {
+  const sweep = 'cutoff = Date.now() - 60000'
+  assert.equal(hookWorker('/synthetic-home', '/synthetic/board.mjs', 'const isBoardRequest = () => false').includes(sweep), true)
+  // The bootstrap rides on a cmd.exe command line, which holds at most 8,191 characters.
+  assert.equal(hookBootstrap('/synthetic-home', 'antigravity').includes(sweep), false)
+  assert.equal(hookGuardSource('/synthetic-home', 'opencode').includes(sweep), false)
+})
+
+test('a report hook whose reporter runs past its deadline is never queued', () => fixture(async f => {
+  assert.equal(f.install('--agent', 'cursor', '--apply').status, 0)
+  f.save(join(f.root, 'agent-board-hook.mjs'), hookWorker(f.home, f.script, 'const isBoardRequest = () => false'))
+  const preload = join(f.home, 'hang-report.cjs'), marker = join(f.home, 'report-child-started')
+  f.save(preload, `if (process.argv.includes('--hook-deadline')) { require('node:fs').writeFileSync(${JSON.stringify(marker)}, String(process.pid)); setInterval(() => {}, 1000) }\n`)
+  const worker = join(f.root, 'agent-board-hook.mjs')
+  const args = [worker, '--hook-version', '1', '--codex-report', '--agent', 'codex']
+  // Host command hooks fail open even though an explicit report worker returns a failure status.
+  const env = { ...f.env, NODE_OPTIONS: `--require ${JSON.stringify(preload.replaceAll('\\', '/'))}` }
+  const launcher = `const { spawnSync } = require('node:child_process'); const out = spawnSync(process.execPath, ${JSON.stringify(args)}, { input: require('node:fs').readFileSync(0), encoding: 'utf8', windowsHide: true }); if (out.error) throw out.error; process.stdout.write(String(out.status)); process.stderr.write(out.stderr)`
+  try {
+    const out = await nativeProcess(process.execPath, ['-e', launcher], env, JSON.stringify({ session_id: 'synthetic-report-deadline', title: 'Synthetic report' }))
+    assert.equal(out.error, undefined, hookFailure(out))
+    assert.equal(out.status, 0, hookFailure(out))
+    assert.equal(existsSync(marker), true, `the reporter child must start and hang: ${hookFailure(out)} ${hookLog(f)}`)
+    assert.match(hookLog(f), /REPORTER_TIMEOUT/)
+    assert.doesNotMatch(hookLog(f), /REPORTER_QUEUED/)
+    assert.deepEqual(existsSync(join(f.root, 'pending')) ? readdirSync(join(f.root, 'pending')) : [], [])
+    assert.equal(out.stdout, '1', 'the host wrapper must observe the report failure')
+  } finally {
+    // The hung reporter child outlives its worker; stop it by its own pid.
+    try { if (existsSync(marker)) await stopReporter(Number(readFileSync(marker, 'utf8'))) } catch (error) {
+      // A child that survives its kill keeps the fixture for a look, and fails the test.
+      if (error?.keepFixture) throw error
+      process.stderr.write(`report-deadline child not stopped: ${error}\n`)
+    }
+  }
+}))
+
 test('a hook worker that starts just before its deadline still queues an event whose input arrives after it', () => fixture(async f => {
   assert.equal(f.install('--agent', 'gemini', '--apply').status, 0)
   const worker = join(f.root, 'agent-board-hook.mjs')
@@ -1286,6 +1351,116 @@ test('legacy prompt classifiers time out and reap their process without promotin
   }
 }))
 
+for (const isWindows of [false, true]) test(`the ${isWindows ? 'PowerShell' : 'sh'} reporter logs REPORTER_FAILED when its timeout receipt cannot be saved`, { skip: isWindows !== (process.platform === 'win32') }, () => fixture(async f => {
+  const inbox = join(f.root, 'progress-inbox'), script = join(f.root, isWindows ? 'progress-report.ps1' : 'progress-report.sh')
+  const pidFile = join(f.home, 'classifier.pid'), preload = join(f.home, 'hang-classifier.cjs')
+  let source = isWindows ? reporterPs1() : reporterSh(inbox)
+  const env = { ...f.env, NODE_OPTIONS: `--require ${JSON.stringify(preload.replaceAll('\\', '/'))}` }
+  const stale = join(f.root, 'hook-errors.log.111.tmp'), fresh = join(f.root, 'hook-errors.log.222.tmp')
+  if (isWindows) {
+    const anchor = '      Move-Item -LiteralPath $fallbackTmp'
+    assert.equal(source.split(anchor).length, 2, 'fallback move anchor must be unique')
+    source = source.replace(anchor, () => "      throw 'SYNTHETIC_FALLBACK_FAILURE'\n" + anchor)
+    f.save(stale, 'stale'); f.save(fresh, 'fresh')
+    const old = new Date(Date.now() - 300000)
+    utimesSync(stale, old, old)
+  } else {
+    const mv = spawnSync('/bin/sh', ['-c', 'command -v mv'], { encoding: 'utf8' })
+    assert.equal(mv.status, 0, mv.stderr)
+    const tools = join(f.home, 'tools'), shim = join(tools, 'mv')
+    const quote = value => `'${value.replaceAll("'", "'\\''")}'`
+    f.save(shim, `#!/bin/sh\nfor arg do case "$arg" in *.fallback) exit 1 ;; esac; done\nexec ${quote(mv.stdout.trim())} "$@"\n`)
+    chmodSync(shim, 0o700)
+    env.PATH = `${tools}${delimiter}${env.PATH}`
+  }
+  f.save(script, source)
+  f.save(preload, `require('node:fs').writeFileSync(${JSON.stringify(pidFile)}, String(process.pid))\nsetInterval(() => {}, 1000)\n`)
+  try {
+    const args = isWindows ? ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', script, 'codex', 'prompt'] : [script, 'codex', 'prompt']
+    const out = await nativeProcess(isWindows ? 'powershell.exe' : '/bin/sh', args, env, JSON.stringify({ session_id: 'synthetic-failed-fallback', prompt: 'PRIVATE_RAW_PROMPT' }))
+    assert.equal(out.error, undefined, hookFailure(out))
+    assert.equal(out.status, 0, hookFailure(out))
+    assert.equal(existsSync(pidFile), true, 'exercise the hung classifier')
+    assert.equal(isReporterAlive(Number(readFileSync(pidFile, 'utf8'))), false)
+    assert.deepEqual(readdirSync(inbox), [])
+    const log = hookLog(f)
+    assert.match(log, /REPORTER_FAILED[\s\S]*REPORTER_TIMEOUT/)
+    assert.doesNotMatch(log, /PRIVATE_/)
+    if (isWindows) {
+      assert.equal(existsSync(stale), false)
+      assert.equal(existsSync(fresh), true)
+      rmSync(join(f.root, 'hook-errors.log'))
+      rmSync(pidFile)
+      const anchor = '      $metadata = New-Object Collections.Specialized.OrderedDictionary'
+      const source = reporterPs1()
+      assert.equal(source.split(anchor).length, 2, 'metadata build anchor must be unique')
+      f.save(script, source.replace(anchor, () => "      throw 'SYNTHETIC_METADATA_FAILURE'\n" + anchor))
+      const out = await nativeProcess('powershell.exe', args, env, JSON.stringify({ session_id: 'synthetic-metadata-failure', prompt: 'PRIVATE_RAW_PROMPT' }))
+      assert.equal(out.error, undefined, hookFailure(out))
+      assert.equal(out.status, 0, hookFailure(out))
+      assert.equal(existsSync(pidFile), true, 'exercise the classifier after a metadata failure')
+      assert.equal(isReporterAlive(Number(readFileSync(pidFile, 'utf8'))), false)
+      assert.deepEqual(readdirSync(inbox), [])
+      assert.match(hookLog(f), /REPORTER_FAILED[\s\S]*REPORTER_TIMEOUT/)
+    }
+  } finally {
+    if (existsSync(pidFile)) await stopReporter(Number(readFileSync(pidFile, 'utf8')))
+  }
+}))
+
+test('a reporter sweeps scratch files older than a minute from the inbox and keeps fresh ones', () => fixture(async f => {
+  const isWindows = process.platform === 'win32'
+  const inbox = join(f.root, 'progress-inbox'), script = join(f.root, isWindows ? 'progress-report.ps1' : 'progress-report.sh')
+  const old = new Date(Date.now() - 300000)
+  const names = ['tmp', 'receipt', 'fallback', 'timeout', 'complete'].map(suffix => `codex-prompt-1-1.${suffix}`)
+  for (const name of [...names, 'notes.txt']) { const file = join(inbox, name); f.save(file, 'stale'); utimesSync(file, old, old) }
+  f.save(join(inbox, 'codex-prompt-1-2.tmp'), 'fresh')
+  // On Windows, a scratch file another program holds open cannot be removed: that is logged, and the receipt is still saved.
+  // 0x10000000 is libuv's exclusive-open flag, which Node does not name.
+  const held = join(inbox, 'codex-prompt-1-3.tmp')
+  f.save(held, 'held'); utimesSync(held, old, old)
+  f.save(script, isWindows ? reporterPs1() : reporterSh(inbox))
+  const args = isWindows ? ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', script, 'codex', 'prompt'] : [script, 'codex', 'prompt']
+  const lock = isWindows ? openSync(held, 0x10000000) : undefined
+  let out
+  try {
+    out = await nativeProcess(isWindows ? 'powershell.exe' : '/bin/sh', args, f.env, JSON.stringify({ session_id: 'synthetic-scratch-sweep', prompt: 'PRIVATE_RAW_PROMPT' }))
+  } finally {
+    if (lock !== undefined) closeSync(lock)
+  }
+  assert.equal(out.error, undefined, hookFailure(out))
+  assert.equal(out.status, 0, hookFailure(out))
+  const files = readdirSync(inbox)
+  for (const name of names) assert.equal(files.includes(name), false, name)
+  assert.equal(files.includes('codex-prompt-1-2.tmp'), true)
+  assert.equal(files.includes('notes.txt'), true)
+  assert.equal(files.filter(name => name.endsWith('.json')).length, 1)
+  assert.equal(files.includes('codex-prompt-1-3.tmp'), isWindows)
+  if (isWindows) assert.match(hookLog(f), /CLEANUP_FAILED/)
+  else assert.doesNotMatch(hookLog(f), /CLEANUP_FAILED/)
+}))
+
+test('the sh reporter logs CLEANUP_FAILED when its sweep fails, but not for a file that went mid-scan', { skip: process.platform === 'win32' }, () => fixture(async f => {
+  const inbox = join(f.root, 'progress-inbox'), script = join(f.root, 'progress-report.sh'), tools = join(f.home, 'sweep-tools')
+  f.save(script, reporterSh(inbox))
+  mkdirSync(tools, { recursive: true })
+  // A stand-in find on PATH says what a real one would, and fails.
+  const sweep = async (complaint, session) => {
+    f.save(join(tools, 'find'), `#!/bin/sh\n${complaint ? `echo '${complaint}' >&2\n` : ''}exit 1\n`)
+    chmodSync(join(tools, 'find'), 0o700)
+    const out = await nativeProcess('/bin/sh', [script, 'codex', 'prompt'], { ...f.env, PATH: `${tools}${delimiter}${f.env.PATH}` }, JSON.stringify({ session_id: session, prompt: 'PRIVATE_RAW_PROMPT' }))
+    assert.equal(out.error, undefined, hookFailure(out))
+    assert.equal(out.status, 0, hookFailure(out))
+    return hookLog(f).match(/CLEANUP_FAILED/g)?.length ?? 0
+  }
+  // GNU and BSD find say this for an entry another session removed or renamed after the listing.
+  assert.equal(await sweep('find: /inbox/codex-turn-1-1.json.taking: No such file or directory', 'synthetic-sweep-gone'), 0)
+  assert.equal(await sweep('find: /inbox: Permission denied', 'synthetic-sweep-denied'), 1)
+  assert.equal(await sweep('', 'synthetic-sweep-silent'), 2)
+  // Each run still saved its receipt.
+  assert.equal(readdirSync(inbox).filter(name => name.endsWith('.json')).length, 3)
+}))
+
 test('a timed-out prompt classifier saves a metadata receipt that marks a board request but not a folder named agent-board', () => fixture(async f => {
   const isWindows = process.platform === 'win32'
   const inbox = join(f.root, 'progress-inbox'), script = join(f.root, isWindows ? 'progress-report.ps1' : 'progress-report.sh')
@@ -1296,6 +1471,7 @@ test('a timed-out prompt classifier saves a metadata receipt that marks a board 
   const args = isWindows ? ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', script, 'cursor', 'prompt'] : [script, 'cursor', 'prompt']
   // Only the words outside the folder paths count: a project folder named agent-board is no board request.
   // The sh reporter keeps only plain ASCII values; PowerShell keeps every value.
+  // `kept` lists keys in the receipt's order (RECEIPT_KEYS); the POSIX check also compares the bytes.
   const grok = { hookEventName: 'UserPromptSubmit' }
   const cases = [
     { payload: { cwd: '/synthetic/中文', prompt: '/board', transcript_path: '/synthetic/中文/PRIVATE_TRANSCRIPT.jsonl' }, kept: isWindows ? { cwd: '/synthetic/中文' } : {}, isBoard: true },
@@ -1303,30 +1479,40 @@ test('a timed-out prompt classifier saves a metadata receipt that marks a board 
     { payload: { cwd: '/synthetic/agent-board', prompt: 'PRIVATE_RAW_PROMPT', transcript_path: '/synthetic/agent-board/PRIVATE_TRANSCRIPT.jsonl' }, kept: { cwd: '/synthetic/agent-board' } },
     { payload: { cwd: 'C:\\synthetic\\agent-board', prompt: 'PRIVATE_RAW_PROMPT', transcript_path: 'C:\\synthetic\\agent-board\\PRIVATE_TRANSCRIPT.jsonl' }, kept: isWindows ? { cwd: 'C:\\synthetic\\agent-board' } : {} },
     // Grok Build sends camelCase fields, and the inbox knows it by its workspaceRoot field.
-    { key: 'sessionId', payload: { ...grok, workspaceRoot: '/synthetic/agent-board', transcriptPath: '/synthetic/agent-board/PRIVATE_TRANSCRIPT.jsonl', prompt: 'PRIVATE_RAW_PROMPT' }, kept: { ...grok, workspaceRoot: '/synthetic/agent-board' } },
-    { key: 'sessionId', payload: { ...grok, workspaceRoot: '/synthetic/中文', prompt: 'PRIVATE_RAW_PROMPT' }, kept: { ...grok, workspaceRoot: isWindows ? '/synthetic/中文' : '' } },
+    { key: 'sessionId', payload: { ...grok, workspaceRoot: '/synthetic/agent-board', transcriptPath: '/synthetic/agent-board/PRIVATE_TRANSCRIPT.jsonl', prompt: 'PRIVATE_RAW_PROMPT' }, kept: { workspaceRoot: '/synthetic/agent-board', ...grok } },
+    { key: 'sessionId', payload: { ...grok, workspaceRoot: '/synthetic/中文', prompt: 'PRIVATE_RAW_PROMPT' }, kept: { workspaceRoot: isWindows ? '/synthetic/中文' : '', ...grok } },
+    { payload: { extra: { cwd: 'a"b' }, cwd: '/synthetic/later plain *', prompt: 'PRIVATE_RAW_PROMPT' }, kept: { cwd: '/synthetic/later plain *' } },
+    { payload: { hookEventName: 'UserPromptSubmit', hook_event_name: 'UserPromptSubmit', directory: '/synthetic/dir *', project_dir: '/synthetic/project', workspace: '/synthetic/work', workspaceRoot: '/synthetic/root', cwd: '/synthetic/cwd', conversationId: 'synthetic-conversation', conversation_id: 'synthetic-conversation-underscore', 'thread-id': 'synthetic-thread-dash', thread_id: 'synthetic-thread', extra: { sessionID: 'synthetic-upper' }, sessionId: 'synthetic-camel', prompt: 'PRIVATE_RAW_PROMPT' }, kept: { sessionId: 'synthetic-camel', sessionID: 'synthetic-upper', 'thread-id': 'synthetic-thread-dash', thread_id: 'synthetic-thread', conversation_id: 'synthetic-conversation-underscore', conversationId: 'synthetic-conversation', cwd: '/synthetic/cwd', workspaceRoot: '/synthetic/root', workspace: '/synthetic/work', project_dir: '/synthetic/project', directory: '/synthetic/dir *', hook_event_name: 'UserPromptSubmit', hookEventName: 'UserPromptSubmit' } },
+    { key: null, payload: { cwd: '/synthetic/project', prompt: 'PRIVATE_RAW_PROMPT' } },
   ]
   for (const [index, { key = 'session_id', payload, kept, isBoard = false }] of cases.entries()) {
     const session = `synthetic-timeout-${index}`
     rmSync(pidFile, { force: true })
+    rmSync(join(f.root, 'hook-errors.log'), { force: true })
     let isGone = false
     try {
       const out = await nativeProcess(isWindows ? 'powershell.exe' : '/bin/sh', args, env,
-        JSON.stringify({ [key]: session, ...payload }),
+        JSON.stringify({ ...(key === null ? {} : { [key]: session }), ...payload }),
         callback => setTimeout(callback, 30000))
       assert.equal(out.error, undefined, hookFailure(out))
       assert.equal(out.status, 0, hookFailure(out))
       assert.equal(out.stdout.trim(), '{}')
-      assert.equal(existsSync(pidFile), true, 'exercise the real classifier process')
+      assert.equal(existsSync(pidFile), true, `exercise the real classifier process, case ${index}: ${hookLog(f)}`)
       assert.equal(isReporterAlive(Number(readFileSync(pidFile, 'utf8'))), false)
       isGone = true
       const files = readdirSync(inbox)
+      const log = hookLog(f)
+      assert.match(log, /REPORTER_TIMEOUT/)
+      assert.doesNotMatch(log, /REPORTER_FAILED/)
+      if (key === null) { assert.deepEqual(files, []); continue }
       assert.equal(files.length, 1)
       assert.ok(files[0].endsWith('.json'))
       const body = readFileSync(join(inbox, files[0]), 'utf8')
       assert.doesNotMatch(body, /[^\x20-\x7e]|PRIVATE_|\/board|transcript_path|transcriptPath/)
-      assert.deepEqual(JSON.parse(body), { [key]: session, ...kept, ...(isBoard ? { board_request: true } : {}) }, `case ${index}`)
-      assert.match(readFileSync(join(f.root, 'hook-errors.log'), 'utf8'), /REPORTER_TIMEOUT/)
+      const expected = { [key]: session, ...kept, ...(isBoard ? { board_request: true } : {}) }
+      assert.deepEqual(JSON.parse(body), expected, `case ${index}`)
+      assert.deepEqual(Object.keys(JSON.parse(body)), Object.keys(expected), `key order, case ${index}`)
+      if (!isWindows) assert.equal(body, JSON.stringify(expected), `raw case ${index}`)
       rmSync(join(inbox, files[0]))
     } finally {
       if (!isGone && existsSync(pidFile)) await stopReporter(Number(readFileSync(pidFile, 'utf8')))
@@ -2587,6 +2773,146 @@ const assertBusyFailure = (result, f) => {
   assert.ok(!result.stderr.includes(f.home), result.stderr)
   assert.doesNotMatch(result.stderr, /\bat /)
 }
+
+test('writers taking the native lock: 8 Codex hooks and 4 FORMAT.md writers lose no block on Windows', t => fixture(async f => {
+  assert.equal(f.install('--apply').status, 0)
+  f.save(f.progress, '## FORMAT concurrency\n\nManual text must survive\n')
+  const gate = join(f.home, 'writers-start')
+  const barrier = join(f.home, 'writers-barrier.cjs')
+  const writer = join(f.home, 'format-writer.cjs')
+  f.save(barrier, `const fs = require('node:fs')
+const { performance } = require('node:perf_hooks')
+fs.writeFileSync(process.env.WRITER_READY, '')
+const until = performance.now() + 15000
+while (!fs.existsSync(process.env.WRITERS_START)) {
+  if (performance.now() >= until) throw new Error('START_TIMEOUT')
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 5)
+}
+`)
+  // Keep this writer independent of product helpers so the documented procedure is exercised.
+  f.save(writer, String.raw`const fs = require('node:fs')
+const { randomBytes } = require('node:crypto')
+const { performance } = require('node:perf_hooks')
+const [file, id] = process.argv.slice(2)
+const lock = file + '.agent-board-lock'
+const pause = ms => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms)
+const isRefusedRename = error => process.platform === 'win32' && ['EPERM', 'EACCES', 'EBUSY'].includes(error.code)
+const own = new RegExp('<!-- auto session=' + id + ' [^\\n]*-->\\r?\\n[\\s\\S]*?<!-- /auto session=' + id + ' -->\\r?\\n?')
+const write = round => {
+  const token = randomBytes(16).toString('hex')
+  const claim = JSON.stringify({ version: 1, pid: process.pid, token })
+  const block = '<!-- auto session=' + id + ' agent=format state=working updated=2026-01-31T09:30:00Z -->\n### FORMAT writer ' + id + '\n- [~] Round ' + round + '\n<!-- /auto session=' + id + ' -->\n'
+  const until = performance.now() + 2000
+  let fd
+  for (;;) {
+    try {
+      fd = fs.openSync(lock, 'wx', 0o600)
+      break
+    } catch (error) {
+      // FORMAT.md: an existing lock, or an access-denied create on Windows, means busy.
+      if (error.code !== 'EEXIST' && !(process.platform === 'win32' && error.code === 'EPERM')) throw error
+      if (performance.now() >= until) throw new Error('LOCK_BUSY')
+      pause(Math.min(10, until - performance.now()))
+    }
+  }
+  try {
+    fs.writeFileSync(fd, claim)
+  } catch (error) {
+    // An empty or partial lock is never recovered, so remove the file this writer created.
+    fs.closeSync(fd)
+    fs.unlinkSync(lock)
+    throw error
+  }
+  try {
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const temporary = file + '.' + token + '.' + attempt + '.format-tmp'
+      try {
+        const before = fs.readFileSync(file, 'utf8')
+        fs.writeFileSync(temporary, own.test(before) ? before.replace(own, block) : before + block, { flag: 'wx', mode: 0o600 })
+        const stop = performance.now() + 2000
+        for (let delay = 10; ; delay *= 2) {
+          try {
+            fs.renameSync(temporary, file)
+            break
+          } catch (error) {
+            if (!isRefusedRename(error) || performance.now() >= stop) throw error
+            pause(Math.max(0, Math.min(delay, stop - performance.now())))
+          }
+        }
+      } finally {
+        if (fs.existsSync(temporary)) fs.unlinkSync(temporary)
+      }
+      if (fs.readFileSync(file, 'utf8').includes(block)) return
+    }
+    throw new Error('WRITE_FAILED')
+  } finally {
+    fs.closeSync(fd)
+    // Compare the whole text: a lock that is not this writer's must stay where it is.
+    if (fs.readFileSync(lock, 'utf8') === claim) fs.unlinkSync(lock)
+  }
+}
+// The gate releases each hook's first process; the hook writes from a later one.
+// Ten rounds keep these writers writing while the hooks write.
+for (let round = 1; round <= 10; round += 1) {
+  write(round)
+  if (round < 10) pause(50)
+}
+`)
+  const hooks = Array.from({ length: 8 }, (_, i) => `format-concurrent-hook-${i}`)
+  const writers = Array.from({ length: 4 }, (_, i) => `f000000${i}`)
+  const owners = [...hooks.map(id => createHash('sha256').update(`codex:${id}`).digest('hex').slice(0, 8)), ...writers]
+  const ready = owners.map(id => join(f.home, `writer-ready-${id}`))
+  const runs = [], stops = []
+  // The helper's deadline callback stops its owned tree and waits for closed stdio.
+  const after = stop => {
+    stops.push(stop)
+    return setTimeout(stop, 20000)
+  }
+  const track = run => {
+    runs.push(run)
+    run.catch(() => {})
+  }
+  const environment = i => ({ ...f.env, NODE_OPTIONS: `--require ${JSON.stringify(barrier)}`, WRITER_READY: ready[i], WRITERS_START: gate })
+  try {
+    for (const [i, id] of hooks.entries()) {
+      track(fireHook({ ...f, env: { ...environment(i), CODEX_THREAD_ID: id } }, JSON.stringify({ session_id: id, hook_event_name: 'UserPromptSubmit', turn_id: 'turn-1' }), 20000, after))
+    }
+    for (const [i, id] of writers.entries()) {
+      track(nativeProcess(process.execPath, [writer, f.progress, id], environment(i + hooks.length), '', after))
+    }
+    const until = Date.now() + 15000
+    while (!ready.every(file => existsSync(file))) {
+      assert.ok(Date.now() < until, `all twelve children must reach the shared start gate: ${ready.map(file => existsSync(file))}`)
+      await new Promise(done => setTimeout(done, 5))
+    }
+    f.save(gate, '')
+    const results = await Promise.all(runs)
+    const text = readFileSync(f.progress, 'utf8')
+    const missing = owners.filter(id => !text.includes(`<!-- auto session=${id} `))
+    t.diagnostic(JSON.stringify({ exits: results.map(result => result.status), missing }))
+    for (const result of results) {
+      assert.equal(result.status, 0, hookFailure(result))
+      assert.equal(result.error, undefined, hookFailure(result))
+    }
+    assert.ok(text.includes('Manual text must survive\n'), text)
+    for (const id of owners) {
+      assert.equal(text.split(`<!-- auto session=${id} `).length - 1, 1, text)
+      assert.equal(text.split(`<!-- /auto session=${id} -->`).length - 1, 1, text)
+    }
+    for (const id of writers) assert.match(text, new RegExp(`### FORMAT writer ${id}\\r?\\n- \\[~\\] Round 10\\r?\\n`))
+    assert.deepEqual(pendingFiles(f), [])
+    const leftovers = readdirSync(f.root, { recursive: true }).filter(name => /\.agent-board-lock(?:\.recover)?$|\.(?:tmp|format-tmp|board-tmp)$/.test(name))
+    assert.deepEqual(leftovers, [])
+  } finally {
+    for (const stop of stops) stop()
+    const settled = await Promise.allSettled(runs)
+    for (const result of settled) {
+      if (result.status === 'fulfilled' && result.value.status !== 0) t.diagnostic(hookFailure(result.value))
+    }
+    const failure = settled.find(result => result.status === 'rejected')
+    if (failure) throw failure.reason
+  }
+}))
 
 test('L5 locked file: the hook retries, exits 0, and the Stop event lands on the next run', () => fixture(f => {
   assert.equal(f.install('--apply').status, 0)

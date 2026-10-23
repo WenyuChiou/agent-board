@@ -92,17 +92,24 @@ import {
   restoreAgentBoardQuestion,
   withAgentPrompts,
   claimAction,
+  CLAIM_MS,
   failedName,
   inboxOrder,
   isInboxFile,
+  isQuestionHold,
+  isQuestionStale,
   isTextLog,
   isTranscriptPath,
   keepInboxDone,
   keepInboxFailed,
   MAX_TRIES,
+  RETAKE_TRY,
+  RETAKE_PER_LOOK,
   promptKey,
+  setAsideOf,
   readClaim,
   readTurn,
+  retakenFailedName,
   takenName,
   turnOrder,
   normalizeTurnOrder,
@@ -217,6 +224,7 @@ let inboxSeen = -1
 let inboxListed = 0
 // Each retained file and reason is named once, so two stuck files cannot take turns notifying.
 const inboxNoticesShown = new Set<string>()
+const inboxRetakeRefused = new Map<string, number>()
 const pendingJournals = new Map<string, Record<string, string[]>>()
 const pendingInboxQuestions = new Map<string, PendingTurn>()
 const droppingInboxQuestions = new Set<string>()
@@ -1751,9 +1759,9 @@ const agentProjection = async ($: EngineInterface, id: string, raw: ProgressMirr
 const agentMirror = async ($: EngineInterface, id: string): Promise<ProgressMirror | undefined> =>
   (await agentProjection($, id, await $.store.get(`agent:${id}`) as ProgressMirror | undefined)).mirror
 
-const takeAgentTurns = async ($: EngineInterface, turns: readonly AgentTurn[], attempt = 0, isLastTry = false): Promise<void> => {
+const takeAgentTurns = async ($: EngineInterface, turns: readonly AgentTurn[], attempt = 0, isLastTry = false, questionless: ReadonlySet<AgentTurn> = new Set()): Promise<AgentTurn[]> => {
   const last = turns.at(-1)
-  if (last === undefined) return
+  if (last === undefined) return []
   const at = await $.clock.now()
   const owner = `agent:${last.id}`
   const raw = await $.store.get(owner) as ProgressMirror | undefined
@@ -1773,6 +1781,7 @@ const takeAgentTurns = async ($: EngineInterface, turns: readonly AgentTurn[], a
   // A turn written before the person's latest prompt but read after it (#145) still brings its finished
   // work; it may not reopen the question that prompt answered. A turn with no clock stays out.
   const isLate = (turn: AgentTurn): boolean => turnOrder(turn) !== undefined && isAfterLast(turn) && !isAfterPrompt(turn)
+  const newer = turns.filter(isNewer)
   const digested = turnsToDigest(turns.map(turn => isBoardTurn(turn) ? { ...turn, event: 'end' as const } : turn.event === 'end' && lastQuestion(turn.answer, true) !== null ? { ...turn, event: 'turn' as const } : turn))
   const boardTurns = new Set<AgentTurn>()
   let hasRestoredQuestion = false
@@ -1798,7 +1807,7 @@ const takeAgentTurns = async ($: EngineInterface, turns: readonly AgentTurn[], a
       if (isLateTurn) continue
       boardTurns.add(turn)
       const restored = restoreAgentBoardQuestion(mirror, { ...turn, prompt, answer }, at)
-      if (restored !== null) {
+      if (restored !== null && !questionless.has(turn)) {
         mirror = restored
         hasRestoredQuestion = true
       }
@@ -1813,7 +1822,7 @@ const takeAgentTurns = async ($: EngineInterface, turns: readonly AgentTurn[], a
     if (isLateTurn) hasLateWork = true
     if (digested.has(index)) {
       mirror = answerTurns(mirror)
-      const summed = await summarize($, mirror, prompt, answer, isLastTry ? 'keep' : 'retry', isLateTurn)
+      const summed = await summarize($, mirror, prompt, answer, isLastTry ? 'keep' : 'retry', isLateTurn || questionless.has(turn))
       if (summed !== null) mirror = applyDigest(mirror, summed.digest, summed.now, summed.s)
     }
     mirror = { ...mirror, lastAnswer: answerKey(answer) }
@@ -1829,10 +1838,10 @@ const takeAgentTurns = async ($: EngineInterface, turns: readonly AgentTurn[], a
   // bring back one archived since.
   if (mirror.tasks.length === 0 || latest === undefined) {
     rememberAnswered(evidence)
-    return
+    return newer
   }
   const isReplay = turns.some(turn => boardTurns.has(turn) && turnOrder(turn) === newest)
-  if (turns.filter(isNewer).every(turn => boardTurns.has(turn)) && !hasRestoredQuestion && !isReplay && !hasLateWork) return
+  if (newer.every(turn => boardTurns.has(turn)) && !hasRestoredQuestion && !isReplay && !hasLateWork) return newer
   const latestWork = turns.filter(turn => isNewer(turn) && !boardTurns.has(turn)).at(-1)
   const state = boardTurns.has(latest) && hasRestoredQuestion ? 'waiting'
     : latestWork === undefined ? mirror.state : isAllDone(mirror) ? 'done' : latestWork.event === 'end' ? 'ended' : 'waiting'
@@ -1867,8 +1876,9 @@ const takeAgentTurns = async ($: EngineInterface, turns: readonly AgentTurn[], a
   })
   if (hasMoved) {
     if (attempt >= 2) throw new Error(NOT_KEPT)
-    await takeAgentTurns($, turns, attempt + 1, isLastTry)
+    return takeAgentTurns($, turns, attempt + 1, isLastTry, questionless)
   }
+  return newer
 }
 
 // This queue contains bounded file writes, never model work. Prompt receipts can
@@ -2257,7 +2267,11 @@ const drainInbox = async ($: EngineInterface): Promise<void> => {
     if (stat.mtimeMs === inboxSeen && now - stat.mtimeMs > 2000 && now - inboxListed < 60 * 1000) return
     inboxSeen = stat.mtimeMs
     inboxListed = now
-    const entries = await $.fs.list(dir).catch(() => [])
+    let isListed = true
+    const entries = await $.fs.list(dir).catch(() => {
+      isListed = false
+      return []
+    })
     const done = hasRecord ? (stored as Record<string, string>) : {}
     at = await $.clock.now()
     const session = (await read($, mine))?.sessionId.slice(0, 8) ?? '-'
@@ -2275,12 +2289,13 @@ const drainInbox = async ($: EngineInterface): Promise<void> => {
       }
       const action = claimAction(claim, entry.mtimeMs, at)
       if (action === 'setAside') {
+        const target = claim.attempt > MAX_TRIES ? retakenFailedName(claim.name) : failedName(claim.name)
         try {
           const notes = await readInboxRecord($, 'inboxFailed')
           await recordInbox($, [], { [claim.name]: notes[claim.name] ?? `${claim.attempt}:${at}:MAX_TRIES` }, at)
-          await quarantineInbox($, from, `${dir}${sep}${failedName(claim.name)}`, 'MAX_TRIES', isWin)
+          await quarantineInbox($, from, `${dir}${sep}${target}`, 'MAX_TRIES', isWin)
         } catch (error) {
-          await inboxNotice($, await $.fs.exists(from) ? from : `${dir}${sep}${failedName(claim.name)}`, inboxFailure(error))
+          await inboxNotice($, await $.fs.exists(from) ? from : `${dir}${sep}${target}`, inboxFailure(error))
         }
       }
       if (action !== 'retake') continue
@@ -2296,6 +2311,51 @@ const drainInbox = async ($: EngineInterface): Promise<void> => {
     for (const name of fresh) {
       const to = `${dir}${sep}${takenName(name, session, at)}`
       if (await moveFile($, `${dir}${sep}${name}`, to, isWin)) taken.push({ path: to, name, attempt: 1, turn: undefined })
+    }
+    // 0.23.x's question hold set these turns aside; the claim's attempt guards one last try.
+    // Fresh turns keep their slots, and held turns use only those left over.
+    // Oldest first, as fresh turns are: a listing puts every end before every turn, and a newer
+    // turn taken first would leave a session's older held turns changing nothing.
+    const setAside = entries.filter(entry => entry.kind === 'file' && setAsideOf(entry.name) !== null)
+      .sort((a, b) => inboxOrder(setAsideOf(a.name)!, setAsideOf(b.name)!))
+    const heldNames = new Set(setAside.map(entry => setAsideOf(entry.name)!))
+    if (isListed) for (const name of inboxRetakeRefused.keys()) if (!heldNames.has(name)) inboxRetakeRefused.delete(name)
+    if (setAside.length > 0) {
+      try {
+        const failed = await readInboxRecord($, 'inboxFailed')
+        let retakes = entries.filter(entry => entry.kind === 'file' && readClaim(entry.name)?.attempt === RETAKE_TRY).length
+        for (const entry of setAside) {
+          if (taken.length >= 20 || retakes >= RETAKE_PER_LOOK) break
+          const name = setAsideOf(entry.name)!
+          if (done[name] !== undefined || !isQuestionHold(failed[name])) continue
+          const refusedAt = inboxRetakeRefused.get(name)
+          if (refusedAt !== undefined && at - refusedAt < CLAIM_MS) continue
+          const from = `${dir}${sep}${entry.name}`
+          try {
+            const to = `${dir}${sep}${takenName(name, session, at, RETAKE_TRY)}`
+            if (!(await moveFile($, from, to, isWin)) && !(await $.fs.exists(to))) {
+              // A timed-out move may have landed; a missing source belongs to another session.
+              if (!(await $.fs.exists(from))) {
+                inboxRetakeRefused.delete(name)
+                continue
+              }
+              inboxRetakeRefused.set(name, at)
+              throw new Error('INBOX_RETAKE_MOVE_FAILED')
+            }
+            inboxRetakeRefused.delete(name)
+            taken.push({ path: to, name, attempt: RETAKE_TRY, turn: undefined })
+            retakes += 1
+          } catch (error) {
+            await inboxNotice($, from, inboxFailure(error))
+          }
+        }
+        // A crash between a move above and this note, then a 0.23.x session putting the claim back, allows one more retake.
+        // Older sessions preserve this note when they put an attempt-nine claim back as held.
+        const notes = Object.fromEntries(taken.filter(one => one.attempt === RETAKE_TRY).map(one => [one.name, `${RETAKE_TRY}:${at}:INBOX_RETAKEN`]))
+        await recordInbox($, [], notes, at)
+      } catch (error) {
+        await inboxNotice($, dir, inboxFailure(error))
+      }
     }
     // Read at once, before the model may keep the turn waiting. A file that cannot be read
     // now stays taken for a later look; malformed JSON or a missing session is
@@ -2354,29 +2414,46 @@ const drainInbox = async ($: EngineInterface): Promise<void> => {
     for (const all of bySession.values()) {
       // The queue can run longer than a claim holds: a file another look took again while
       // this job waited is that look's to finish.
-      const group: Taken[] = []
-      for (const one of all) if (await $.fs.exists(one.path)) group.push(one)
-      if (group.length === 0) continue
-      const isLastTry = group.some(one => one.attempt >= MAX_TRIES)
-      try {
-        const home = ((await $.env.get('USERPROFILE')) ?? (await $.env.get('HOME')) ?? '').replace(/[\\/]+$/, '')
-        await takeAgentTurns($, group.flatMap(one => (one.turn === null || one.turn === undefined ? [] : [one.turn])), 0, isLastTry)
-        const questions = peekInbox(group.flatMap(one => one.body === undefined ? [] : [{ name: one.name, body: one.body, at }]), () => '', text => redact(text, home, isWin)).filter(turn => turn.isQuestion)
-        if (questions.length > 0) {
-          await retainInboxQuestions($, questions)
-          // A question and its answer can arrive in one look: the answer was remembered before
-          // the question was kept, so it settles now instead of at the next poll.
-          const asked = new Set(questions.map(one => JSON.stringify([one.agent, one.id])))
-          if ([...answeredPending.keys()].some(key => asked.has(key))) await pollAnsweredQuestions($, await progressPath($), undefined)
+      const present: Taken[] = []
+      for (const one of all) if (await $.fs.exists(one.path)) present.push(one)
+      // A held turn's retake is its last try, a fresh turn beside it is not: each run of retakes
+      // or of other turns is taken on its own, oldest first. A run that fails holds back newer ones,
+      // unless a retake is among them: holding that back would use up its last try.
+      const runs: Taken[][] = []
+      for (const one of present) {
+        const run = runs.at(-1)
+        if (run !== undefined && (run[0]!.attempt > MAX_TRIES) === (one.attempt > MAX_TRIES)) run.push(one)
+        else runs.push([one])
+      }
+      for (const [index, group] of runs.entries()) {
+        const isLastTry = group.some(one => one.attempt >= MAX_TRIES)
+        try {
+          const home = ((await $.env.get('USERPROFILE')) ?? (await $.env.get('HOME')) ?? '').replace(/[\\/]+$/, '')
+          // Older turns never replace newer work, and old questions must not return to the ledger.
+          const questionless = new Set(group.flatMap(one => one.attempt > MAX_TRIES && one.turn != null && isQuestionStale(one.name, at) ? [one.turn] : []))
+          const newer = await takeAgentTurns($, group.flatMap(one => (one.turn === null || one.turn === undefined ? [] : [one.turn])), 0, isLastTry, questionless)
+          const questions = peekInbox(group.flatMap(one => one.body === undefined || one.attempt > MAX_TRIES && (one.turn == null || !newer.includes(one.turn) || isQuestionStale(one.name, at)) ? [] : [{ name: one.name, body: one.body, at }]), () => '', text => redact(text, home, isWin)).filter(turn => turn.isQuestion)
+          if (questions.length > 0) {
+            await retainInboxQuestions($, questions)
+            // A question and its answer can arrive in one look: the answer was remembered before
+            // the question was kept, so it settles now instead of at the next poll.
+            const asked = new Set(questions.map(one => JSON.stringify([one.agent, one.id])))
+            if ([...answeredPending.keys()].some(key => asked.has(key))) await pollAnsweredQuestions($, await progressPath($), undefined)
+          }
+          settled.push(...group)
+        } catch (error) {
+          const why = (error instanceof Error ? error.message : String(error)).replace(/\s+/g, ' ').slice(0, 200)
+          // With a retake ahead the loop goes on, and the retake's newer turn lands first: this
+          // older turn's retry then changes nothing, and its summary is lost, as for any turn older
+          // than its block. Holding the retake back instead would use up its last try.
+          const isRetakeAhead = runs.slice(index + 1).some(run => run[0]!.attempt > MAX_TRIES)
+          for (const one of isRetakeAhead ? group : runs.slice(index).flat()) failed[one.name] = `${one.attempt}:${at}:${why}`
+          // A file error is named now. The model's silence, or a block not yet read back, is
+          // tried again quietly, as before; the last try sets the file aside, which is named.
+          const reason = inboxFailure(error)
+          if (reason !== 'INBOX_FAILED') await inboxNotice($, group[0]!.path, reason)
+          if (!isRetakeAhead) break
         }
-        settled.push(...group)
-      } catch (error) {
-        const why = (error instanceof Error ? error.message : String(error)).replace(/\s+/g, ' ').slice(0, 200)
-        for (const one of group) failed[one.name] = `${one.attempt}:${at}:${why}`
-        // A file error is named now. The model's silence, or a block not yet read back, is
-        // tried again quietly, as before; the last try sets the file aside, which is named.
-        const reason = inboxFailure(error)
-        if (reason !== 'INBOX_FAILED') await inboxNotice($, group[0]!.path, reason)
       }
     }
     await recordInbox($, settled.map(one => one.name), failed, at)

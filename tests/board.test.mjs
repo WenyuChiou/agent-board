@@ -4628,6 +4628,44 @@ fs.openSync = (file, ...rest) => {
   assert.deepEqual([...new Set(archivedCopies(swept.files).map(copy => copy.record.words))], ['Publish Old plan, OK?'])
 })
 
+test('--tidy on a board that changes on its first two tries archives the done block on the third and keeps the block that asks, and says the file was not updated when it changes on all three', () => {
+  const at = Date.now()
+  const done = `<!-- auto session=a1b2c323 agent=codex state=done updated=${new Date(at - 20 * 3600000).toISOString()} -->\n### Finished plan\n- [x] Ship it\n<!-- /auto session=a1b2c323 -->\n`
+  const board = `${askingBoard()}${done}`
+  const seed = chatRun(['--keys', ''], { file: () => board, inspect: sweepFiles })
+  assert.equal(seed.status, 0, seed.stderr)
+  // Another agent adds a task each time the sweep writes a copy of a question (`copy`), or each
+  // time it is about to replace progress.md (`rename`).
+  const busy = at => questionFault(`const board = path.join(__dirname, 'progress.md')
+const open = fs.openSync
+let n = 0
+fs.openSync = (file, ...rest) => {
+  const name = path.basename(String(file))
+  if (rest[0] === 'wx' && (${JSON.stringify(at)} === 'copy' ? name.includes('-questions-source-') : name.startsWith('progress.md.') && name.endsWith('.board-tmp'))) {
+    n += 1
+    fs.appendFileSync(board, '### Added by another agent ' + n + '\\n- [ ] Not seen by the sweep\\n')
+  }
+  return open(file, ...rest)
+}`)
+  // Every try that checks the block that asks finds the board changed; the third does not check it.
+  const swept = chatRun(['--tidy'], { file: () => board, beside: seed.files, inspect: sweepFiles, preload: busy('copy') })
+  assert.equal(swept.status, 0, swept.stderr)
+  assert.equal(swept.stdout, 'Archived 1 task.\n')
+  assert.ok(swept.archive.includes('Finished plan'), swept.archive)
+  assert.ok(!swept.board.includes('Finished plan'), swept.board)
+  // The third try leaves the block that asks where it is; the next quiet sweep takes it.
+  assert.ok(swept.board.includes('Old plan'), swept.board)
+  assert.ok(!swept.archive.includes('Old plan'), swept.archive)
+  assert.ok(swept.board.includes('Added by another agent 2'), swept.board)
+  assert.ok(!swept.board.includes('Added by another agent 3'), swept.board)
+  // Changed on every try, the sweep writes nothing over the other agent's task and says so.
+  const stuck = chatRun(['--tidy'], { file: () => board, beside: seed.files, inspect: sweepFiles, preload: busy('rename') })
+  assert.equal(stuck.status, 1, stuck.stdout)
+  assert.match(`${stuck.stdout}${stuck.stderr}`, /Couldn't safely read or update your progress file/)
+  assert.ok(stuck.board.includes('Added by another agent 3'), stuck.board)
+  assert.ok(stuck.board.includes('Finished plan'), stuck.board)
+})
+
 test('--tidy tells the blocks of two sessions with one title apart when it keeps their questions', () => {
   const at = Date.now()
   const block = (session, state, hours, steps) => `<!-- auto session=${session} agent=codex state=${state} updated=${new Date(at - hours * 3600000).toISOString()} -->\n### Shared plan\n${steps}\n<!-- /auto session=${session} -->\n`
