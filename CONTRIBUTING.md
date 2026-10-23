@@ -93,7 +93,7 @@ The owner names one Claude Code session maintainer of this repository. It plans 
 
 ## Images
 
-README pictures are SVGs that `bun docs/preview/render.ts` draws from synthetic data with the board's own code, in the README's own language, with alt text that says synthetic; a picture that has a light and a dark version is shown through `<picture>`. Never hand-edit a generated SVG. Do not add a gallery to the guides. Historical assets remain in `docs/images/`. `node docs/preview/png.mjs` renders social previews; its fonts/tool requirements are documented in the preview sources. A synthetic render is not native acceptance evidence. Keep bearer URLs, conversations and private identifiers out of public images.
+README pictures are SVGs that `bun docs/preview/render.ts` draws from synthetic data with the board's own code, in the README's own language, with alt text that says synthetic; README pictures use their dark version, the same look as the social preview. Never hand-edit a generated SVG. Do not add a gallery to the guides. Historical assets remain in `docs/images/`. `node docs/preview/png.mjs` renders social previews; its fonts/tool requirements are documented in the preview sources. A synthetic render is not native acceptance evidence. Keep bearer URLs, conversations and private identifiers out of public images.
 
 ## Releases
 
