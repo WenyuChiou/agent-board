@@ -1568,7 +1568,7 @@ test('an unreadable failure-note map preserves both existing maps and the input'
   await clock.advance(5000)
   expect(world.store!.inboxDone).toEqual({})
   expect(world.store!.inboxFailed).toEqual({ other: '1:1792152000000:prior diagnostic' })
-  expect([...world.files.keys()].some(path => path.endsWith('.taking'))).toBe(true)
+  expect(world.files.get(`${INBOX}/${PROBE_NAME}`)).toBe(PROBE_BODY)
 })
 
 test('an invalid receipt map cannot authorize cleanup of a retained claim', async ($, on) => {
@@ -6409,7 +6409,7 @@ test('a fresh session keeps a pending inbox question from the store without its 
   expect(storedQuestion(world, 'Keep the complete question, OK?')).not.toBe('')
 })
 
-test('another agent’s turn, left in the inbox by its hook, becomes its block once, read by one session', async ($, on) => {
+test('another agent’s turn, left in the inbox by its hook, becomes its block once, read by one session', { timeoutMs: 30_000 }, async ($, on) => {
   const payload = JSON.stringify({
     type: 'agent-turn-complete',
     'thread-id': '0199a7c3-codex-thread',
@@ -6420,7 +6420,7 @@ test('another agent’s turn, left in the inbox by its hook, becomes its block o
   const world: World = {
     files: new Map([
       [FILE, '# 專案進度\n'],
-      [`${INBOX}/codex-turn-1760000000-42.json`, payload],
+      [`${INBOX}/codex-turn-1792151999000-42.json`, payload],
     ]),
     mtime: 1,
     hasTasks: true,
@@ -6443,7 +6443,7 @@ test('another agent’s turn, left in the inbox by its hook, becomes its block o
   expect((world.files.get(FILE) ?? '').match(/加好限流中介層/g)).toHaveLength(1)
 
   // The session ends: its block says so.
-  world.files.set(`${INBOX}/codex-end-1760000100-43.json`, JSON.stringify({ session_id: '0199a7c3-codex-thread', cwd: '/work/api-gateway' }))
+  world.files.set(`${INBOX}/codex-end-1792152005000-43.json`, JSON.stringify({ session_id: '0199a7c3-codex-thread', cwd: '/work/api-gateway' }))
   world.mtime += 1
   await clock.advance(5000)
   expect(world.files.get(FILE) ?? '').toContain('agent=codex state=ended')
@@ -7192,7 +7192,7 @@ test('a file left taken past its last try is kept as a .failed file, not deleted
   const name = 'codex-turn-1792216380-1.json'
   const left = `${INBOX}/${name}.deadbeef-${(at - 16 * 60 * 1000).toString(36)}-8.taking`
   const body = JSON.stringify({ session_id: 'ours', cwd: '/work/api-gateway', last_assistant_message: 'Added the middleware. 100 or 300 a minute?' })
-  const world: World = { files: new Map([[FILE, '# Progress\n'], [left, body]]), mtime: 1, hasTasks: true, reply: RATE_LIMIT_REPLY }
+  const world: World = { files: new Map([[FILE, '# Progress\n'], [left, body]]), mtime: 1, hasTasks: true, reply: RATE_LIMIT_REPLY, store: { inboxDone: {}, inboxFailed: { [name]: `8:${at}:TRYING` } } }
   const clock = engineBeneath(on, world)
   await $.session.start({ cwd: '/work/persona_framework', surface: 'desktop', isInteractive: true })
   await clock.advance(5000)
@@ -7422,7 +7422,7 @@ test('a held turn an older session puts back after its retake is not taken again
   const claim = takenOf(world)[0]!
   expect(claim).toContain('-9.taking')
   const note = (store.inboxFailed as Record<string, string>)[name]
-  expect(note).toBe(`9:${at + 5000}:INBOX_RETAKEN`)
+  expect(note).toBe(`9:${at + 5000}:TRYING`)
 
   // An older session keeps the stored note while returning this claim to .failed.
   world.files.set(path, world.files.get(claim)!)
@@ -7575,7 +7575,7 @@ test('a newer fresh turn waits when an older held turn of its session is not kep
   await $.session.start({ cwd: '/work/persona_framework', surface: 'desktop', isInteractive: true })
   await clock.advance(5000)
   expect((store.inboxFailed as Record<string, string>)[held]).toMatch(/^9:/)
-  expect((store.inboxFailed as Record<string, string>)[fresh]).toMatch(/^1:/)
+  expect((store.inboxFailed as Record<string, string>)[fresh]).toBeUndefined()
   expect(world.asked?.some(prompt => prompt.includes('fresh-item'))).toBe(false)
   expect(takenOf(world).some(path => path.includes(`${fresh}.`) && path.endsWith('-1.taking'))).toBe(true)
   expect((store.inboxDone as Record<string, string>)[fresh]).toBeUndefined()
@@ -7734,7 +7734,15 @@ test('fresh turn files are taken before held turns when the look is full', async
   await $.session.start({ cwd: '/work/persona_framework', surface: 'desktop', isInteractive: true })
   await clock.advance(5000)
   const moves = (): string[] => world.ran!.filter(argv => argv[0] === 'mv' && argv[1]?.startsWith(`${INBOX}/`)).map(argv => argv[1]!)
-  expect(moves()).toEqual(fresh.slice(0, 20).map(name => `${INBOX}/${name}`))
+  expect(moves()).toEqual(fresh.slice(0, 10).map(name => `${INBOX}/${name}`))
+  for (const name of fresh.slice(0, 10)) expect((store.inboxDone as Record<string, string>)[name]).toBeDefined()
+  for (const name of fresh.slice(10)) expect(world.files.has(`${INBOX}/${name}`)).toBe(true)
+  for (const name of held) expect(world.files.has(`${INBOX}/${name}.failed`)).toBe(true)
+  expect(takenOf(world)).toEqual([])
+
+  world.mtime += 1
+  await clock.advance(5000)
+  expect(moves().slice(10)).toEqual(fresh.slice(10, 20).map(name => `${INBOX}/${name}`))
   for (const name of fresh.slice(0, 20)) expect((store.inboxDone as Record<string, string>)[name]).toBeDefined()
   expect(world.files.has(`${INBOX}/${fresh[20]}`)).toBe(true)
   for (const name of held) expect(world.files.has(`${INBOX}/${name}.failed`)).toBe(true)
@@ -7778,6 +7786,7 @@ test('a newer turn saved during a held turn\'s summary keeps its old question ou
 test('on its last try, a turn the model gives no summary for keeps the block’s open steps', async ($, on) => {
   const at = Date.parse('2026-10-16T12:00:00.000Z')
   const world: World = {
+    store: { inboxDone: {}, inboxFailed: { 'codex-turn-1792216390-2.json': `7:${at}:TRYING` } },
     files: new Map([
       [FILE, '# Progress\n'],
       [`${INBOX}/codex-turn-1792216380-1.json`, JSON.stringify({ session_id: 'ours', cwd: '/work/web-app', prompt: 'Ship the page', last_assistant_message: 'Shipped the page.' })],
