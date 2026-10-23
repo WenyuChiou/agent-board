@@ -738,15 +738,20 @@ export const buildView = (
       // answered or hidden. Any other [?] step asks as written, with no question id, as before the
       // ledger first sees it.
       const scopeRecords = isFrozen ? (observed?.ledger.records.filter(record => record.scope === scope) ?? []) : []
-      // A record covers a step only when it can show it (it keeps its source) or has ended. The
-      // same words win over a start of them, and only the last step can be the cut one. The same
-      // question asked again leaves its old resolved record in the ledger, so a live one wins.
+      // A question that should show but does not is worse than one shown twice. Only one saved
+      // candidate covers a step, and an answer needs the same token or saved source revisions.
       const savedFor = (index: number) => {
-        const words = questionWords(task.steps[index]!.text)
-        const covering = scopeRecords.filter(record => record.source !== undefined || !record.isUnresolved)
+        const step = task.steps[index]!
+        const words = questionWords(step.text)
+        const token = step.questionToken ?? ''
+        const covering = scopeRecords.filter(record => {
+          if (record.producer && token !== '' && record.producer !== token) return false
+          if (record.isUnresolved) return record.source !== undefined
+          return token !== '' && token === record.producer || pending.some(turn => turn.isQuestion && turn.id !== undefined && questionScope(turn.project, turn.agent, turn.id) === scope && questionWords(turn.text) === record.words && turn.sourceRevisions !== undefined && turn.sourceRevisions.length > 0 && turn.sourceRevisions.every(revision => record.producerRevisions?.includes(revision)))
+        })
         const same = covering.filter(record => record.words === words)
-        const cut = same.length > 0 || words === '' || index !== task.steps.length - 1 ? [] : covering.filter(record => record.words.startsWith(words))
-        return [...same, ...cut].find(record => record.isUnresolved) ?? same[0] ?? cut[0]
+        const candidates = same.length > 0 || words === '' || index !== task.steps.length - 1 ? same : covering.filter(record => record.words.startsWith(words))
+        return candidates.length === 1 ? candidates[0] : undefined
       }
       const isAsked = (index: number): boolean => {
         if (isFrozen) {

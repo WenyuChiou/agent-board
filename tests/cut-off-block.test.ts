@@ -453,8 +453,8 @@ test('a frozen waiting task with no saved question lists its open step in Waitin
   }
 })
 
-test("a frozen block's step that its resolved saved question covers stays out of Waiting on you while the block is cut off", () => {
-  const head = [...BEFORE.slice(0, 4), CUT.replace('2026-10-20T01:17:08.128Z', new Date(NOW).toISOString()), '### Add a shelf', '- [?] Ship the shelf, OK?']
+test("a frozen block's step stays out of Waiting on you while cut off only when its answered saved question has its token", () => {
+  const head = [...BEFORE.slice(0, 4), CUT.replace('2026-10-20T01:17:08.128Z', new Date(NOW).toISOString()), '### Add a shelf', '- [?] Ship the shelf, OK?', `<!-- question=${'c'.repeat(64)}:1 -->`]
   const whole = [...head, '<!-- /auto session=55fb44cb -->', ...AFTER].join('\n')
   const seeded = observeQuestions(emptyQuestions(), parseProgress(whole), null, [], NOW, true, 'seed').ledger
   const ship = seeded.records.find(record => record.words === 'Ship the shelf, OK?')!
@@ -464,6 +464,105 @@ test("a frozen block's step that its resolved saved question covers stays out of
   const frozen = cutOffScopes(projects, cutOffSpans(cut))
   const view = buildView(projects, [], null, NOW, 0, {}, EN, [], {}, ledger, undefined, [], frozen)
   expect([...view.waiting, ...(view.reminder ?? []), ...(view.older ?? [])].some(item => item.project === 'demo-152')).toBe(false)
+  const withoutToken = [...head.slice(0, -1), ...AFTER].join('\n')
+  const tokenless = parseProgress(withoutToken)
+  const unrecorded = buildView(tokenless, [], null, NOW, 0, {}, EN, [], {}, ledger, undefined, [], cutOffScopes(tokenless, cutOffSpans(withoutToken)))
+  const asks = unrecorded.waiting.filter(item => item.project === 'demo-152')
+  expect(asks).toHaveLength(1)
+  expect(asks[0]).toMatchObject({ text: 'Ship the shelf, OK?', hideKey: '' })
+  expect(asks[0]?.questionId).toBeUndefined()
+})
+
+test('a question hidden on the pane stays hidden while its block is cut off and once it is whole, and an open step beside it shows unrecorded', () => {
+  const head = [...BEFORE.slice(0, 4), CUT.replace('2026-10-20T01:17:08.128Z', new Date(NOW).toISOString()), '### Add a shelf', '- [?] Ship the shelf, OK?', `<!-- question=${'c'.repeat(64)}:1 -->`]
+  const whole = [...head, '<!-- /auto session=55fb44cb -->', ...AFTER].join('\n')
+  const seeded = observeQuestions(emptyQuestions(), parseProgress(whole), null, [], NOW, true, 'seed').ledger
+  const ship = seeded.records.find(record => record.words === 'Ship the shelf, OK?')!
+  const answered = [ship.id]
+  const hidden = resolveQuestion(seeded, ship.id, NOW)
+  const cut = [...head, '- [?] Paint it, O', ...AFTER].join('\n')
+  const projects = parseProgress(cut)
+  const frozen = cutOffScopes(projects, cutOffSpans(cut))
+  const during = observeQuestions(hidden, projects, null, answered, NOW + 1000, true, 'cut', undefined, [], [], frozen).ledger
+  expect(during.records.find(record => record.id === ship.id)).toEqual(hidden.records.find(record => record.id === ship.id))
+  const view = buildView(projects, [], null, NOW + 1000, 0, {}, EN, answered, {}, during, undefined, [], frozen)
+  const shown = [...view.waiting, ...(view.reminder ?? []), ...(view.older ?? [])].filter(item => item.project === 'demo-152')
+  expect(shown).toHaveLength(1)
+  expect(shown[0]).toMatchObject({ text: 'Paint it, O', hideKey: '' })
+  expect(shown[0]?.questionId).toBeUndefined()
+  const restored = [...head, '- [?] Paint it, OK?', '<!-- /auto session=55fb44cb -->', ...AFTER].join('\n')
+  const after = observeQuestions(during, parseProgress(restored), null, answered, NOW + 2000, true, 'whole').ledger
+  expect(after.records.filter(record => record.words === ship.words).map(record => [record.id, record.resolvedAt])).toEqual([[ship.id, NOW]])
+  const painted = after.records.filter(record => record.words === 'Paint it, OK?')
+  expect(painted).toHaveLength(1)
+  const final = buildView(parseProgress(restored), [], null, NOW + 2000, 0, {}, EN, answered, {}, after)
+  expect(final.waiting.filter(item => item.project === 'demo-152').map(item => [item.text, item.questionId])).toEqual([['Paint it, OK?', painted[0]!.id]])
+})
+
+test('a question asked again under a new revision before the pass sees it shows while its block is cut off, not hidden by the old answer', () => {
+  const head = [...BEFORE.slice(0, 4), CUT.replace('2026-10-20T01:17:08.128Z', new Date(NOW).toISOString()), '### Add a shelf', '- [?] Paint it, OK?']
+  const token = `${'d'.repeat(64)}:1`
+  const whole = [...head, `<!-- question=${token} -->`, '<!-- /auto session=55fb44cb -->', ...AFTER].join('\n')
+  const seeded = observeQuestions(emptyQuestions(), parseProgress(whole), null, [], NOW, true, 'seed').ledger
+  const paint = seeded.records.find(record => record.words === 'Paint it, OK?')!
+  const answered = [paint.id]
+  const hidden = resolveQuestion(seeded, paint.id, NOW)
+  for (const revision of [1, 2]) {
+    const cut = [...head, `<!-- question=${'d'.repeat(64)}:${revision} -->`, ...AFTER].join('\n')
+    const projects = parseProgress(cut)
+    const view = buildView(projects, [], null, NOW, 0, {}, EN, answered, {}, hidden, undefined, [], cutOffScopes(projects, cutOffSpans(cut)))
+    const asks = view.waiting.filter(item => item.project === 'demo-152')
+    expect(asks).toHaveLength(revision === 1 ? 0 : 1)
+    if (revision === 2) {
+      expect(asks[0]).toMatchObject({ text: paint.words, hideKey: '' })
+      expect(asks[0]?.questionId).toBeUndefined()
+    }
+  }
+  // Asked again while the first ask is still open: both show, the new one not yet recorded.
+  const renewed = [...head, `<!-- question=${'d'.repeat(64)}:2 -->`, ...AFTER].join('\n')
+  const renewedProjects = parseProgress(renewed)
+  const open = buildView(renewedProjects, [], null, NOW, 0, {}, EN, [], {}, seeded, undefined, [], cutOffScopes(renewedProjects, cutOffSpans(renewed)))
+  expect(open.waiting.filter(item => item.project === 'demo-152').map(item => `${item.text} ${item.questionId ?? 'unrecorded'}`).sort()).toEqual([`${paint.words} ${paint.id}`, `${paint.words} unrecorded`].sort())
+  const r1 = '1'.repeat(64)
+  const r2 = '2'.repeat(64)
+  const ledger = { ...hidden, records: hidden.records.map(record => record.id === paint.id ? { ...record, producer: '', producerRevisions: [r1] } : record) }
+  const cut = [...head, ...AFTER].join('\n')
+  const projects = parseProgress(cut)
+  const frozen = cutOffScopes(projects, cutOffSpans(cut))
+  for (const revision of [r1, r2]) {
+    const pending: PendingTurn = { id: '55fb44cb', agent: 'codex', project: 'demo-152', text: paint.words, isQuestion: true, at: NOW, sourceRevisions: [revision] }
+    const view = buildView(projects, [], null, NOW, 0, {}, EN, answered, {}, ledger, undefined, [pending], frozen)
+    const asks = view.waiting.filter(item => item.project === 'demo-152')
+    expect(asks).toHaveLength(revision === r1 ? 0 : 1)
+    if (revision === r2) {
+      expect(asks[0]).toMatchObject({ text: paint.words, hideKey: '' })
+      expect(asks[0]?.questionId).toBeUndefined()
+    }
+  }
+})
+
+test('a cut step that two saved questions could have begun shows unrecorded, and so does one that only an answered question begins', () => {
+  const head = [...BEFORE.slice(0, 4), CUT.replace('2026-10-20T01:17:08.128Z', new Date(NOW).toISOString()), '### Add a shelf']
+  const whole = [...head, '- [?] Deploy staging, OK?', `<!-- question=${'e'.repeat(64)}:1 -->`, '- [?] Deploy stage two, OK?', '<!-- /auto session=55fb44cb -->', ...AFTER].join('\n')
+  const ledger = observeQuestions(emptyQuestions(), parseProgress(whole), null, [], NOW, true, 'seed').ledger
+  const saved = ledger.records.filter(record => record.words.startsWith('Deploy st'))
+  expect(saved).toHaveLength(2)
+  const cut = [...head, '- [?] Deploy st', ...AFTER].join('\n')
+  const projects = parseProgress(cut)
+  const frozen = cutOffScopes(projects, cutOffSpans(cut))
+  const view = buildView(projects, [], null, NOW, 0, {}, EN, [], {}, ledger, undefined, [], frozen)
+  const asks = view.waiting.filter(item => item.project === 'demo-152')
+  const unrecorded = asks.filter(item => item.questionId === undefined)
+  expect(unrecorded).toHaveLength(1)
+  expect(unrecorded[0]).toMatchObject({ text: 'Deploy st', hideKey: '' })
+  expect(asks.filter(item => item.questionId !== undefined).map(item => item.questionId).sort()).toEqual(saved.map(record => record.id).sort())
+  const staging = saved.find(record => record.words === 'Deploy staging, OK?')!
+  const hidden = resolveQuestion({ ...ledger, records: [staging] }, staging.id, NOW)
+  const answered = buildView(projects, [], null, NOW, 0, {}, EN, [staging.id], {}, hidden, undefined, [], frozen)
+  const remaining = answered.waiting.filter(item => item.project === 'demo-152')
+  expect(remaining).toHaveLength(1)
+  expect(remaining[0]).toMatchObject({ text: 'Deploy st', hideKey: '' })
+  expect(remaining[0]?.questionId).toBeUndefined()
 })
 
 test('a question asked again before its block was cut shows once by its live record, not as the old answered one', () => {

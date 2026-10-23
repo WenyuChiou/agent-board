@@ -128,7 +128,7 @@ import type { ListedFile, StoreRecord } from './retention'
 import { INBOX_DROPPED_FILE } from './hook-reporters'
 import { agentName, answeredJson, answeredPath, buildView, mirrorMatchesTask, parseAnswered, parseSeen, seenJson, seenPath, statusLine, viewCache, withAnswered, withSeen } from './view'
 import type { StepRef, TaskRef, TaskRow, View, WaitingItem } from './view'
-import { acknowledgementKeys, archiveQuestionsKept, captureHashOf, captureJson, capturePath, cutOffScopes, emptyQuestions, parseCapture, withCaptures, isAskedBy, isQuestionProof, isQuestionSnapshot, isTornLedger, ledgerLeftovers, migratedAnswered, observeQuestions, parseQuestions, prunableCaptures, prunableProofs, questionFilesKey, questionProofJson, questionProofOf, questionProofPath, questionWords, questionsJson, questionsPath, resolveQuestion, resolvedQuestionsToRetire, QUESTION_FILES_KEPT } from './questions'
+import { acknowledgementKeys, archiveQuestionsKept, captureHashOf, captureJson, capturePath, cutOffScopes, emptyQuestions, parseCapture, withCaptures, isAskedBy, isQuestionProof, isQuestionSnapshot, isTornLedger, ledgerLeftovers, migratedAnswered, observeQuestions, parseQuestions, prunableCaptures, prunableProofs, questionFilesKey, questionProofJson, questionProofOf, questionProofPath, questionScope, questionWords, questionsJson, questionsPath, resolveQuestion, resolvedQuestionsToRetire, QUESTION_FILES_KEPT } from './questions'
 import type { HeldCapture, HeldProof, QuestionAnswerEvidence, QuestionCapture, QuestionProofs, QuestionRecord } from './questions'
 
 const PANE = 'agent-board'
@@ -238,6 +238,8 @@ const inboxRetakeRefused = new Map<string, number>()
 const inboxHoldMissing = new Map<string, number>()
 const pendingJournals = new Map<string, Record<string, string[]>>()
 const pendingInboxQuestions = new Map<string, PendingTurn>()
+const heldInboxQuestions = new Set<string>()
+let heldInboxQuestionsAt: number | null = null
 const droppingInboxQuestions = new Set<string>()
 let pendingQuestionRetry: Promise<void> | null = null
 let hasRestoredInboxQuestions = false
@@ -507,12 +509,13 @@ const PRUNED_PER_SWEEP = 200
 // was made from. The listing alone says whether there is anything to trim, so an hour with
 // nothing over the floor reads no file; otherwise every file is read afresh, never from what the
 // polls remember, so a copy damaged since they looked cannot be the newer copy that lets an older
-// one go. The 200 removals per sweep are shared with torn ledgers and temporary copies.
+// one go. The 200 removals per sweep are shared with torn ledgers and temporary copies; a failed
+// leftover sweep ends the sweep because it may already have removed files.
 const pruneQuestionFiles = async ($: EngineInterface, path: string): Promise<void> => {
   if ([...pendingQuestionProofs.values()].some(proof => proof.path === path)) return
   const dir = path.replace(/[\\/][^\\/]*$/, '')
   const entries = await $.fs.list(dir)
-  const left = await sweepLedgerLeftovers($, path, dir, entries).catch(() => 0)
+  const left = await sweepLedgerLeftovers($, path, dir, entries).catch(() => PRUNED_PER_SWEEP)
   if (left >= PRUNED_PER_SWEEP) return
   const names = entries.map(entry => entry.name)
   const proofsOf = (kind: keyof QuestionProofs): number => names.filter(name => questionProofOf(path, name)?.kind === kind).length
@@ -564,7 +567,8 @@ const pruneAnswered = async ($: EngineInterface, path: string, projects: readonl
   await pollQuestions($, path, projects, true)
 }
 
-const pollQuestions = async ($: EngineInterface, path: string, projects: readonly ProgressProject[], isSettled = false, captured: readonly PendingTurn[] = [], answeredTurns: readonly QuestionAnswerEvidence[] = [], resolveId?: string): Promise<boolean> => {
+let questionsRunning: Promise<boolean> | null = null
+const passQuestions = async ($: EngineInterface, path: string, projects: readonly ProgressProject[], isSettled = false, captured: readonly PendingTurn[] = [], answeredTurns: readonly QuestionAnswerEvidence[] = [], resolveId?: string): Promise<boolean> => {
   const file = questionsPath(path)
   let outcome: 'ok' | 'race' | 'fault' = 'fault'
   let at = 0
@@ -638,7 +642,7 @@ const pollQuestions = async ($: EngineInterface, path: string, projects: readonl
       for (const record of observed.records) {
         if (record.source === undefined) continue
         if (record.isUnresolved && !captures.some(capture => captureJson(capture.record, capture.disposition) === captureJson(record, 'unresolved'))) await keepQuestionCapture($, path, record, 'unresolved')
-        if (record.isUnresolved === false && current.records.some(old => old.id === record.id && old.isUnresolved === true)) await keepQuestionCapture($, path, record, 'resolved')
+        if (record.isUnresolved === false && current.records.some(old => old.id === record.id && old.isUnresolved === true) && !captures.some(capture => captureJson(capture.record, capture.disposition) === captureJson(record, 'resolved'))) await keepQuestionCapture($, path, record, 'resolved')
       }
       const retiredResolutions = resolvedQuestionsToRetire(baseline, projects, mirror, pending, frozen)
       for (const old of current.records) {
@@ -721,6 +725,24 @@ const pollQuestions = async ($: EngineInterface, path: string, projects: readonl
   }
 }
 
+const pollQuestions = async ($: EngineInterface, path: string, projects: readonly ProgressProject[], isSettled = false, captured: readonly PendingTurn[] = [], answeredTurns: readonly QuestionAnswerEvidence[] = [], resolveId?: string): Promise<boolean> => {
+  while (questionsRunning !== null) {
+    // A pass still running after HUNG_MS is taken as hung: this caller gives up, and no
+    // second pass starts beside it.
+    if (!(await isDoneWithin($, questionsRunning, HUNG_MS))) {
+      questionsSeen = null
+      return false
+    }
+  }
+  const run = passQuestions($, path, projects, isSettled, captured, answeredTurns, resolveId)
+  questionsRunning = run
+  try {
+    return await run
+  } finally {
+    if (questionsRunning === run) questionsRunning = null
+  }
+}
+
 // What an idle question pass is made from (#156): the files beside progress.md it reads
 // (`questionFilesKey`), the inbox turns, this session's list, the asks it hides and the answers
 // it still carries. A pass that went through cleanly is not made again until one of them moves,
@@ -739,6 +761,7 @@ const questionsKey = async ($: EngineInterface, path: string, batch: readonly un
 
 const pollAnsweredQuestions = async ($: EngineInterface, path: string, projects: readonly ProgressProject[] | undefined, evidence: readonly AgentTurn[] = []): Promise<void> => {
   rememberAnswered(evidence)
+  if (evidence.length > 0 && questionsRunning !== null) return
   try {
     const matches = (record: QuestionRecord, turn: QuestionAnswerEvidence): boolean => record.source?.kind === 'inbox' && record.source.agent === turn.agent && record.source.session === turn.id
     const batch = [...answeredPending.entries()]
@@ -908,19 +931,18 @@ const pollSeen = async (
 // No file call has a time limit of its own, and one that never returns (a drive that went away,
 // say) held `isPolling` for good, so the pane stopped redrawing (#156). A poll still running
 // after HUNG_MS is taken as hung: the next one starts in its place, and what the hung one would
-// still write is dropped. The question pass, where most of a poll's reads are, is waited on for
-// one poll at most, so the status line and progress.html are drawn while it is held up. While a
-// poll or a pass that was taken over is still held, no other is taken over: a file that stays
-// held does not gather another read every 15 seconds.
+// still write is dropped. While a poll that was taken over is still held, no other is taken over.
+// Every caller shares one question pass at a time; the poll and the timer's retain skip while
+// one runs. A press, the drain's question or the archive waits for it up to HUNG_MS, then gives
+// up. No pass starts beside a held one, so a question file that never answers stops question
+// passes until it does, while the status line and progress.html are still drawn.
 const HUNG_MS = 15 * 1000
 let pollRun = 0
 let pollStartedAt = 0
 let replacedPoll: number | null = null
 let progressChangedAt: number | null = null
 let progressCutSettled = false
-let questionPassRun = 0
-let questionPassAt: number | null = null
-let replacedPass: number | null = null
+let questionPassing: Promise<void> | null = null
 
 // True when the work settled within `ms`; false when it is still running then, which it may go on doing.
 const isDoneWithin = ($: EngineInterface, work: Promise<unknown>, ms: number): Promise<boolean> =>
@@ -929,19 +951,14 @@ const isDoneWithin = ($: EngineInterface, work: Promise<unknown>, ms: number): P
     work.then(() => resolve(true), () => resolve(true))
   })
 
-// One question pass at a time. A pass that ends after a newer one started may have written what
-// it read before the newer one did, so the next idle poll passes again.
+// The poll skips a running question pass instead of piling up reads behind a held file. Waiting
+// for at most one poll here lets the pane draw while that pass is held.
 const questionPass = async ($: EngineInterface, path: string, projects: readonly ProgressProject[]): Promise<void> => {
-  const at = await $.clock.now()
-  if (questionPassAt !== null && (at - questionPassAt < HUNG_MS || replacedPass !== null)) return
-  if (questionPassAt !== null) replacedPass = questionPassRun
-  const run = ++questionPassRun
-  questionPassAt = at
-  const pass = pollAnsweredQuestions($, path, projects).finally(() => {
-    if (run === questionPassRun) questionPassAt = null
-    else questionsSeen = null
-    if (run === replacedPass) replacedPass = null
+  if (questionPassing !== null || questionsRunning !== null) return
+  const pass: Promise<void> = pollAnsweredQuestions($, path, projects).finally(() => {
+    if (questionPassing === pass) questionPassing = null
   })
+  questionPassing = pass
   await isDoneWithin($, pass, POLL_MS)
 }
 
@@ -2308,13 +2325,23 @@ const keepInboxQuestions = async ($: EngineInterface, captured: readonly Pending
       await pendingQuestionsProblem($, hasCleanupProblem || hasRestoreProblem || unkept.size > 0)
       return
     }
+    // Taken before the read: a poll that sees a change while it is under way must not mark this
+    // older text as the one the held turns were checked against.
+    const changedAt = progressChangedAt
     const text = await readText($, path).catch(() => null)
-    const isCutSettled = progressChangedAt !== null && at - progressChangedAt >= CUT_SETTLE_MS
+    const isCutSettled = changedAt !== null && at - changedAt >= CUT_SETTLE_MS
     if (text === null || !isQuestionSnapshot(text, isCutSettled)) {
       await pendingQuestionsProblem($, true)
       return
     }
     const projects = parseProgress(text)
+    // A cut-off block cannot answer a saved turn or give the ledger its question yet. Keep that
+    // turn until progress.md changes, without reading the same cut-off block on every idle poll.
+    const frozen = cutOffScopes(projects, cutOffSpans(text, isCutSettled))
+    heldInboxQuestions.clear()
+    heldInboxQuestionsAt = changedAt
+    for (const [key, turn] of pending) if (turn.id !== undefined && frozen.has(questionScope(turn.project, turn.agent, turn.id))) heldInboxQuestions.add(key)
+    pending = pending.filter(([key]) => !heldInboxQuestions.has(key))
     for (const [key, turn] of pending) {
       const words = questionWords(turn.text)
       const steps = projects.filter(project => project.name === turn.project).flatMap(project => project.tasks).filter(task => task.auto?.session === turn.id && task.auto.agent === turn.agent).flatMap(task => task.steps).filter(step => questionWords(step.text) === words || questionWords(step.text).endsWith(` — ${words}`))
@@ -2333,7 +2360,9 @@ const keepInboxQuestions = async ($: EngineInterface, captured: readonly Pending
 }
 
 const retainInboxQuestions = async ($: EngineInterface, captured: readonly PendingTurn[] = [], isRestoring = false): Promise<void> => {
+  if (captured.length === 0 && !isRestoring && questionsRunning !== null) return
   if (captured.length === 0 && (pendingQuestionRetry !== null || !isRestoring && hasRestoredInboxQuestions && pendingInboxQuestions.size === 0 && droppingInboxQuestions.size === 0)) return
+  if (captured.length === 0 && !isRestoring && hasRestoredInboxQuestions && droppingInboxQuestions.size === 0 && progressChangedAt === heldInboxQuestionsAt && [...pendingInboxQuestions.keys()].every(key => heldInboxQuestions.has(key))) return
   const job = keepInboxQuestions($, captured, isRestoring)
   if (captured.length > 0) return job
   pendingQuestionRetry = job
@@ -3370,6 +3399,12 @@ export const register: Register = (on, options) => {
   on('session.start', async ($, e, next) => {
     pendingCache = null
     progressChangedAt = null
+    heldInboxQuestions.clear()
+    heldInboxQuestionsAt = null
+    // A question pass an earlier session left held is that session's: it does not hold this
+    // one's passes back.
+    questionsRunning = null
+    questionPassing = null
     progressCutSettled = false
     questionFailures = 0
     questionRaces = 0
@@ -3403,7 +3438,7 @@ export const register: Register = (on, options) => {
     hasPaneOpenAnswer = false
     hasNoPaneSurface = (await surfacesOf($))?.length === 0
     await isDoneWithin($, poll($), HUNG_MS)
-    await retainInboxQuestions($, [], true).catch(async () => pendingQuestionsProblem($, true)).catch(() => undefined)
+    await isDoneWithin($, retainInboxQuestions($, [], true).catch(async () => pendingQuestionsProblem($, true)).catch(() => undefined), HUNG_MS)
     const startedAt = await $.clock.now()
     await update($, now, () => startedAt)
     await pruneStore($, startedAt, 1, RETENTION.pruneStartReads).catch(() => undefined)

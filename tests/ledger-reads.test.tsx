@@ -563,24 +563,36 @@ test('a poll held by a read of progress.md gives way to a new one after 15 secon
   } finally { await ui.unmount() }
 })
 
-test('a first read of progress.md that never answers at session start still lets the 2-second poll take over after 15 seconds', { timeoutMs: 30_000 }, async ($, on) => {
+for (const hasSavedQuestion of [false, true]) test(`a first read of progress.md that never answers at session start still lets the 2-second poll take over after 15 seconds ${hasSavedQuestion ? 'with a saved pending question too' : 'with an empty store'}`, { timeoutMs: 30_000 }, async ($, on) => {
   const board = `## demo\n${block('a1b2c301', 'working', 1, '- [~] Work')}`
   const world = makeWorld([[FILE, board]])
   world.env = english
+  const pending = { id: 'a1b2c301', agent: 'codex', project: 'demo', text: 'Ship the shelf, OK?', isQuestion: true, at: NOW - 60_000, sourceRevisions: ['f'.repeat(64)] }
+  const key = `pendingInboxQuestion:${sha256(FILE)}:${sha256(JSON.stringify([pending.id, pending.sourceRevisions]))}`
+  if (hasSavedQuestion) world.store = { ...world.store, [key]: pending }
   const clock = engineBeneath(on, world)
-  let isFirstRead = true
-  let reached = (): void => undefined
-  const reading = new Promise<void>(resolve => { reached = resolve })
+  const reached: Array<() => void> = []
+  const readings = Array.from({ length: hasSavedQuestion ? 2 : 1 }, () => new Promise<void>(resolve => { reached.push(resolve) }))
+  const held: Array<() => void> = []
   world.holdRead = path => {
-    if (path !== FILE || !isFirstRead) return undefined
-    isFirstRead = false
-    reached()
-    return new Promise(() => undefined)
+    if (path !== FILE) return undefined
+    reached[held.length]?.()
+    return new Promise<void>(resolve => { held.push(resolve) })
   }
+  // The first poll reads progress.md and, with a saved pending question, so does its restore: both reads stay held.
   const started = $.session.start(START)
-  await reading
-  await clock.advance(15_001)
+  for (const reading of readings) {
+    await reading
+    await clock.advance(15_001)
+  }
   await started
+  // The timers run while every read of progress.md is still held: a 2-second poll takes the held one's place.
+  world.fileOps = []
+  await clock.advance(2_000)
+  expect(world.fileOps).toContain(`stat ${FILE}`)
+  // Once the reads answer, the pane shows a change made since.
+  world.holdRead = undefined
+  for (const release of held) release()
   world.files.set(FILE, `${board}${block('a1b2c302', 'working', 1, '- [~] Later work')}`)
   world.mtime += 1
   const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
@@ -632,7 +644,26 @@ test('a poll held for a minute leaves at most two reads of the held file waiting
   expect(world.reads.filter(path => path === answered)).toHaveLength(2)
 })
 
-test('a question pass held for a minute leaves at most two reads of the ledger waiting', async ($, on) => {
+test('a poll whose reads of progress.md hang for a minute starts at most two polls while the 2-second timer ticks', async ($, on) => {
+  const board = `## demo\n${block('a1b2c301', 'working', 1, '- [~] Work')}`
+  const world = makeWorld([[FILE, board]])
+  world.env = english
+  const clock = engineBeneath(on, world)
+  await $.session.start(START)
+  for (let n = 0; n < 3; n++) await clock.advance(2000)
+  const held: Array<() => void> = []
+  world.holdRead = path => (path === FILE ? new Promise<void>(resolve => { held.push(resolve) }) : undefined)
+  world.files.set(FILE, `${board}${block('a1b2c302', 'working', 1, '- [~] Later work')}`)
+  world.mtime += 1
+  world.reads = []
+  for (let n = 0; n < 30; n++) await clock.advance(2000)
+  // The held poll and the one that took its place: no third starts while the first is still held.
+  expect(world.reads.filter(path => path === FILE)).toHaveLength(2)
+  world.holdRead = undefined
+  for (const release of held) release()
+})
+
+test('a question pass held for a minute leaves one read of the ledger waiting', async ($, on) => {
   const board = `## demo\n${block('a1b2c301', 'waiting', 1, '- [?] Publish the first plan, OK?')}`
   const world = makeWorld([[FILE, board]])
   world.env = english
@@ -644,7 +675,56 @@ test('a question pass held for a minute leaves at most two reads of the ledger w
   world.holdRead = path => (path === LEDGER ? new Promise(() => undefined) : undefined)
   world.reads = []
   for (let n = 0; n < 30; n++) await clock.advance(2000)
-  expect(world.reads.filter(path => path === LEDGER)).toHaveLength(2)
+  expect(world.reads.filter(path => path === LEDGER)).toHaveLength(1)
+})
+
+test('board reads that hang for a minute leave one question pass at a time while the 2-second timer ticks, and an inbox question is recorded within seconds once they answer', { timeoutMs: 30_000 }, async ($, on) => {
+  const board = `## demo\n${block('a1b2c301', 'waiting', 1, '- [?] Publish the first plan, OK?')}`
+  const world = makeWorld([[FILE, board]])
+  world.env = english
+  world.hasTasks = true
+  world.store = { lang: 'en', autoConnectOff: true, inboxDone: {} }
+  world.reply = prompt => prompt.includes('TITLE:') ? 'TITLE: Add the limiter\nDONE: Added the middleware\nNEXT: Write the tests\nASK: Keep the limiter, OK?' : undefined
+  const clock = engineBeneath(on, world)
+  await $.session.start(START)
+  for (let n = 0; n < 3; n++) await clock.advance(2000)
+  put(world, LEDGER, world.files.get(LEDGER)!, NOW)
+  const held: Array<() => void> = []
+  let inFlight = 0
+  let maxInFlight = 0
+  world.written = []
+  world.holdRead = path => {
+    if (path !== LEDGER) return undefined
+    inFlight += 1
+    maxInFlight = Math.max(maxInFlight, inFlight)
+    return new Promise<void>(resolve => {
+      held.push(() => {
+        inFlight -= 1
+        resolve()
+      })
+    })
+  }
+  const inbox = `${INBOX}/codex-turn-1760600000-1.json`
+  put(world, inbox, JSON.stringify({ session_id: 'synthetic-question', cwd: '/work/api-gateway', last_assistant_message: 'Synthetic work is done. Keep the limiter, OK?' }), NOW)
+  try {
+    for (let n = 0; n < 30; n++) await clock.advance(2000)
+    expect(maxInFlight).toBe(1)
+    // The drain took the turn while the pass was held: its question waits saved, not recorded.
+    expect(Object.keys(world.store).some(key => key.startsWith('pendingInboxQuestion:'))).toBe(true)
+  } finally {
+    world.holdRead = undefined
+    for (const release of held) release()
+  }
+  for (let n = 0; n < 3; n++) await clock.advance(2000)
+  // If the drain has not taken the file yet, allow its next five-second inbox interval too.
+  if (world.files.has(inbox)) await clock.advance(5000)
+  expect(world.files.has(inbox)).toBe(false)
+  expect(ledgerRecords(world).some(record => record.words.includes('Keep the limiter'))).toBe(true)
+  expect(Object.keys(world.store).some(key => key.startsWith('pendingInboxQuestion:'))).toBe(false)
+  expect(maxInFlight).toBe(1)
+  const captureWrites = world.written.filter(path => path.includes(CAPTURES))
+  expect(captureWrites.length).toBeGreaterThan(0)
+  expect(new Set(captureWrites).size).toBe(captureWrites.length)
 })
 
 // The live board that showed the red line: no ledger yet, two torn ledgers from days ago, and a
@@ -716,6 +796,29 @@ test('a progress.md with a mid-file cut-off block writes the ledger and shows no
   } finally {
     await ui.unmount()
   }
+})
+
+test('a saved pending question of a block cut off before its question line stays stored, and is recorded once when the block is whole', async ($, on) => {
+  const head = '# Progress\n\n## demo-152\n\n<!-- auto session=55fb44cb agent=codex state=waiting updated=2026-10-15T01:17:08.128Z source=turns -->\n### Add a shelf\n'
+  const tail = `\n## demo\n${block('a1b2c301', 'working', 1, '- [~] Work')}`
+  const world = makeWorld([[FILE, `${head}${tail}`]])
+  world.env = english
+  const pending = { id: '55fb44cb', agent: 'codex', project: 'demo-152', text: 'Ship the shelf, OK?', isQuestion: true, at: NOW - 60_000, sourceRevisions: ['f'.repeat(64)] }
+  const key = `pendingInboxQuestion:${sha256(FILE)}:${sha256(JSON.stringify([pending.id, pending.sourceRevisions]))}`
+  world.store = { ...world.store, [key]: pending }
+  const clock = engineBeneath(on, world)
+  await $.session.start(START)
+  await clock.advance(2000)
+  expect(world.store[key]).toEqual(pending)
+  expect(ledgerRecords(world).some(record => record.words === pending.text)).toBe(false)
+  world.reads = []
+  await clock.advance(2000)
+  expect(world.reads).not.toContain(FILE)
+  world.files.set(FILE, `${head}- [?] Ship the shelf, OK?\n<!-- /auto session=55fb44cb -->\n${tail}`)
+  world.mtime += 1
+  await clock.advance(4000)
+  expect(ledgerRecords(world).filter(record => record.words === pending.text)).toHaveLength(1)
+  expect(world.store[key]).toBeUndefined()
 })
 
 test('a cut-off block is listed under Board health at the bottom, not in the warning', async ($, on) => {
@@ -1187,6 +1290,30 @@ test('one archive sweep removes at most 200 files across torn ledgers and old pr
   await $.command.run(TIDY)
   expect(removedPerProcess(world).reduce((sum, count) => sum + count, 0)).toBe(100)
   expect(filesOf(world, RETIRED)).toHaveLength(16)
+})
+
+test('an archive sweep whose torn-ledger removal fails after removing files ends there, and the next sweep goes on', async ($, on) => {
+  const world = makeWorld([[FILE, pruningBoard]])
+  world.env = english
+  const clock = engineBeneath(on, world)
+  await $.session.start(START)
+  await clock.advance(2000)
+  const torn = Array.from({ length: 150 }, (_, n) => `${LEDGER}.torn-${NOW - 8 * 24 * HOUR - n}-${4000 + n}`)
+  torn.forEach(path => put(world, path, '{"version":1,"rec', 1))
+  putOrphans(world, 166)
+  const proofs = filesOf(world, RETIRED)
+  world.beforeExists = path => { if (torn.includes(path)) throw new Error('EIO') }
+  world.ran = []
+  await $.command.run(TIDY)
+  expect(removedPerProcess(world)).toEqual([50])
+  expect(torn.filter(path => world.files.has(path))).toHaveLength(100)
+  expect(filesOf(world, RETIRED)).toEqual(proofs)
+  world.beforeExists = undefined
+  world.ran = []
+  await $.command.run(TIDY)
+  expect(removedPerProcess(world).reduce((sum, count) => sum + count, 0)).toBe(200)
+  expect(torn.filter(path => world.files.has(path))).toEqual([])
+  expect(filesOf(world, RETIRED)).toHaveLength(66)
 })
 
 test('the archive sweep keeps the newest three torn ledgers and removes day-old temporary copies of the ledger', async ($, on) => {
