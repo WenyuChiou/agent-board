@@ -3,13 +3,25 @@
 <p align="center"><b>每个 AI coding agent 在做什么，一个看板看完；哪个在等你，就在那里回它。</b></p>
 
 <p align="center">
-<picture><source media="(prefers-color-scheme: dark)" srcset="docs/images/cover-zh-CN-dark.svg"><img alt="会动的看板，分六幕：Claude Code、Codex、Antigravity 和 OpenCode 汇报到同一个终端看板；每一步实时打勾；Codex 的问题跳到最上面；按一个键就复制好回答；在看板网页上给 Codex 发的消息送达后，能看到它回复（预览，0.24.1 起提供）；一行 npx 命令接上每个 agent，0.24.0 起上架 npm。合成数据。" src="docs/images/cover-zh-CN-light.svg" width="860"></picture>
+<img alt="会动的看板，分六幕：Claude Code、Codex、Antigravity 和 OpenCode 汇报到同一个终端看板；每一步实时打勾；Codex 的问题跳到最上面；按一个键就复制好回答；在看板网页上给 Codex 发的消息送达后，能看到它回复（预览，0.24.1 起提供）；一行 npx 命令接上每个 agent，0.24.0 起上架 npm。合成数据。" src="docs/images/cover-zh-CN-dark.svg" width="860">
 </p>
 
-<p align="center">
-<a href="#快速开始"><img alt="Node.js 18+ from a checkout, 22+ for the npm package" src="https://img.shields.io/badge/Node.js-18%2B%20checkout%20%C2%B7%2022%2B%20npm-339933"></a>
-<a href="LICENSE"><img alt="MIT 许可证" src="https://img.shields.io/badge/license-MIT-green"></a>
+<p align="center"><b>集成</b><br>
+<a href="#支持的-agent"><img src="docs/images/agents/claude-code.svg" width="20" height="20" alt="Claude Code 图标">&nbsp;Claude&nbsp;Code</a>&emsp;
+<a href="#支持的-agent"><img src="docs/images/agents/codex.svg" width="20" height="20" alt="Codex 图标">&nbsp;Codex</a>&emsp;
+<a href="#支持的-agent"><img src="docs/images/agents/antigravity.svg" width="20" height="20" alt="Antigravity 图标">&nbsp;Antigravity</a>&emsp;
+<a href="#支持的-agent"><img src="docs/images/agents/opencode.svg" width="20" height="20" alt="OpenCode 图标">&nbsp;OpenCode</a>&emsp;
+<a href="#支持的-agent"><img src="docs/images/agents/cursor.svg" width="20" height="20" alt="Cursor 图标">&nbsp;Cursor</a>&emsp;
+<a href="#支持的-agent"><img src="docs/images/agents/grok-build.svg" width="20" height="20" alt="Grok Build 图标">&nbsp;Grok&nbsp;Build</a>&emsp;
+<a href="#支持的-agent"><img src="docs/images/agents/muse-code.svg" width="20" height="20" alt="Muse Code 图标">&nbsp;Muse&nbsp;Code</a>&emsp;
+<a href="#支持的-agent"><img src="docs/images/agents/hermes-agent.svg" width="20" height="20" alt="Hermes Agent 图标">&nbsp;Hermes&nbsp;Agent</a>&emsp;
+<a href="#支持的-agent"><img src="docs/images/agents/openclaw.svg" width="20" height="20" alt="OpenClaw 图标">&nbsp;OpenClaw</a>&emsp;
+<a href="#支持的-agent"><img src="docs/images/agents/deepseek-harness.svg" width="20" height="20" alt="DeepSeek Harness 图标">&nbsp;DeepSeek&nbsp;Harness</a>
 </p>
+
+<p align="center"><sub>dot 和其他网页聊天要自己汇报：把它们的区块贴进<a href="#看板的网页">看板的网页</a>。</sub></p>
+
+<p align="center"><a href="LICENSE"><img alt="MIT 许可证" src="https://img.shields.io/badge/license-MIT-green"></a></p>
 
 <p align="center"><a href="README.md">English</a> · <a href="README.zh-TW.md">繁體中文</a> · 简体中文</p>
 
@@ -25,7 +37,15 @@ npx @wenyuchiou/agent-board setup --apply
 npx @wenyuchiou/agent-board --serve
 ```
 
-第一行会找出这台电脑上装了哪些 agent，列出设置会改什么，不写入任何东西；第二行才真正写入；第三行打开看板网页。然后给每个 agent 开一个新对话：原来就开着的对话不会接入。只设置一个 agent 的话，加上 `--agent` 和它的名字，例如 `--agent codex`；Claude Code 则改用它的插件接入（见[常用命令](#常用命令)）。详见[安装指南](docs/SETUP.md#install-with-npm)（英文）。
+第一行会找出这台电脑上装了哪些 agent，列出设置会改什么，不写入任何东西；第二行才真正写入；第三行打开看板网页。只设置一个 agent 的话，加上 `--agent` 和它的名字，例如 `--agent codex`。详见[安装指南](docs/SETUP.md#install-with-npm)（英文）。
+
+然后：
+
+- 给每个 agent 开一个新对话：原来就开着的对话不会接入。
+- **Claude Code** 改用它的插件接入：`claude plugin marketplace add WenyuChiou/agent-board`，再运行 `claude plugin install agent-board@agent-board`。
+- **Codex：** 到 `/hooks` 信任它的 hooks（[做法](docs/CODEX.md)）。
+- **OpenCode、OpenClaw：** 重新加载它们的插件。
+- **dot 和其他网页聊天：** 把 [AGENTS.md 最后一段](AGENTS.md#report-your-progress-to-the-progress-pane)贴进那个 agent 的指令，再把它写出的区块贴进[看板的网页](#看板的网页)。
 
 <details>
 <summary><b>不用 npm：用 git clone 安装</b></summary>
@@ -61,22 +81,33 @@ CLI、桌面 App、IDE 的实际 hook 事件分开验收；装好了文件、传
 
 ## 常用命令
 
-| | 在哪里 | 怎么接入 | 打开看板 |
-|:-:|---|---|---|
-| <img src="docs/images/agents/claude-code.svg" width="20" alt="Claude Code"> | Claude Code | `claude plugin marketplace add WenyuChiou/agent-board`<br>`claude plugin install agent-board@agent-board` | `/progress` |
-| <img src="docs/images/agents/codex.svg" width="20" alt="Codex"> | Codex CLI 和 App | 运行 [setup](#快速开始)，再到 `/hooks` 信任它的 hooks（[做法](docs/CODEX.md)） | `$agent-board` |
-| <img src="docs/images/agents/opencode.svg" width="20" alt="OpenCode"> | OpenCode | 运行 [setup](#快速开始)，再重新加载它的插件 | `/board` |
-| <img src="docs/images/agents/hermes-agent.svg" width="20" alt="Hermes Agent"> <img src="docs/images/agents/openclaw.svg" width="20" alt="OpenClaw"> | Hermes Agent、OpenClaw | 运行 [setup](#快速开始)，OpenClaw 还要重新加载插件 | `/agent-board` |
-| <img src="docs/images/agents/antigravity.svg" width="20" alt="Antigravity"> <img src="docs/images/agents/cursor.svg" width="20" alt="Cursor"> <img src="docs/images/agents/grok-build.svg" width="20" alt="Grok Build"> <img src="docs/images/agents/muse-code.svg" width="20" alt="Muse Code"> <img src="docs/images/agents/deepseek-harness.svg" width="20" alt="DeepSeek Harness"> | Antigravity、Cursor、Grok Build、Muse Code、DeepSeek Harness | 运行 [setup](#快速开始) | `/agent-board`（还没验证） |
-| | dot 和其他网页聊天 | 把 [AGENTS.md 最后一段](AGENTS.md#report-your-progress-to-the-progress-pane)贴进那个 agent 的指令 | 把它的区块贴进[看板的网页](#看板的网页) |
-| | 任何终端 | — | `node ~/.agent-board/agent-board.mjs --watch`（`--html` 在浏览器打开） |
-| | 浏览器 | — | `node ~/.agent-board/agent-board.mjs --serve` |
-| | 聊天软件（通过 Hermes Agent 或 OpenClaw） | — | `node ~/.agent-board/agent-board.mjs --chat` |
-| | 检查某个 agent 的设置 | — | `node ~/.agent-board/agent-board.mjs --codex-doctor --agent codex` |
+### 在你的 agent 里打开看板
 
-**在聊天软件里，** `--chat` 把看板打印成纯文本，缩到一条消息放得下，没有网页也没有链接。它会把你的主目录显示成 `~`，并遮掉它认得的凭证形式，例如 `token=...`；其他形式的机密它识别不出来，所以别把机密写进看板。
+| | Agent | 看板命令 |
+|:-:|---|---|
+| <img src="docs/images/agents/claude-code.svg" width="20" alt="Claude Code"> | Claude Code | `/progress` |
+| <img src="docs/images/agents/codex.svg" width="20" alt="Codex"> | Codex CLI 和 App | `$agent-board` |
+| <img src="docs/images/agents/antigravity.svg" width="20" alt="Antigravity"> | Antigravity | `/agent-board`（还没验证） |
+| <img src="docs/images/agents/opencode.svg" width="20" alt="OpenCode"> | OpenCode | `/board` |
+| <img src="docs/images/agents/cursor.svg" width="20" alt="Cursor"> | Cursor | `/agent-board`（还没验证） |
+| <img src="docs/images/agents/grok-build.svg" width="20" alt="Grok Build"> | Grok Build | `/agent-board`（还没验证） |
+| <img src="docs/images/agents/muse-code.svg" width="20" alt="Muse Code"> | Muse Code | `/agent-board`（还没验证） |
+| <img src="docs/images/agents/hermes-agent.svg" width="20" alt="Hermes Agent"> | Hermes Agent | `/agent-board` |
+| <img src="docs/images/agents/openclaw.svg" width="20" alt="OpenClaw"> | OpenClaw | `/agent-board` |
+| <img src="docs/images/agents/deepseek-harness.svg" width="20" alt="DeepSeek Harness"> | DeepSeek Harness | `/agent-board`（还没验证） |
 
 **Claude 桌面 App** 无法显示面板：底部状态栏会显示看板状态，`/progress` 会提供可回答问题、归档工作的[看板网页](#看板的网页)链接；网页无法启动时改开只读网页。看板网页需要 `/progress connect` 安装的看板脚本，或在下次会话开始时更新。
+
+### 在任何地方打开看板
+
+| 在哪里 | 命令 |
+|---|---|
+| 任何终端 | `node ~/.agent-board/agent-board.mjs --watch`（`--html` 在浏览器打开） |
+| 浏览器 | `node ~/.agent-board/agent-board.mjs --serve` |
+| 聊天软件（通过 Hermes Agent 或 OpenClaw） | `node ~/.agent-board/agent-board.mjs --chat` |
+| 检查某个 agent 的设置 | `node ~/.agent-board/agent-board.mjs --codex-doctor --agent codex` |
+
+**在聊天软件里，** `--chat` 把看板打印成纯文本，缩到一条消息放得下，没有网页也没有链接。它会把你的主目录显示成 `~`，并遮掉它认得的凭证形式，例如 `token=...`；其他形式的机密它识别不出来，所以别把机密写进看板。
 
 <details>
 <summary><b>终端看板的按键</b></summary>
@@ -100,8 +131,6 @@ CLI、桌面 App、IDE 的实际 hook 事件分开验收；装好了文件、传
 </details>
 
 ## 支持的 agent
-
-<p><img src="docs/images/agents/claude-code.svg" width="28" alt="Claude Code"> <img src="docs/images/agents/codex.svg" width="28" alt="Codex"> <img src="docs/images/agents/antigravity.svg" width="28" alt="Antigravity"> <img src="docs/images/agents/opencode.svg" width="28" alt="OpenCode"> <img src="docs/images/agents/cursor.svg" width="28" alt="Cursor"> <img src="docs/images/agents/grok-build.svg" width="28" alt="Grok Build"> <img src="docs/images/agents/muse-code.svg" width="28" alt="Muse Code"> <img src="docs/images/agents/hermes-agent.svg" width="28" alt="Hermes Agent"> <img src="docs/images/agents/openclaw.svg" width="28" alt="OpenClaw"> <img src="docs/images/agents/deepseek-harness.svg" width="28" alt="DeepSeek Harness"></p>
 
 | | Agent | 在哪里运行 | 看板上有什么 | 从看板回复 |
 |:-:|---|---|---|---|
@@ -149,11 +178,11 @@ Hooks 只说对话在做事还是在等；步骤和什么时候算完成，来�
 
 **终端看板**（`--watch`），打开了 Codex 的问题：按 `y` 或 `n` 复制回答。
 
-<picture><source media="(prefers-color-scheme: dark)" srcset="docs/images/board/codex-zh-CN-dark.svg"><img alt="终端看板，打开了 Codex CLI 的问题；按 y 或 n 复制回答。合成数据。" src="docs/images/board/codex-zh-CN-light.svg"></picture>
+<img alt="终端看板，打开了 Codex CLI 的问题；按 y 或 n 复制回答。合成数据。" src="docs/images/board/codex-zh-CN-dark.svg">
 
 **Claude Code 的面板**，放在对话旁边：还是同一个看板，问题的答案变成按钮。
 
-<picture><source media="(prefers-color-scheme: dark)" srcset="docs/images/pane-zh-CN-dark.svg"><img alt="Claude Code 的进度面板：上方是等你、进行中、快到期和今天完成的数量，接着是等你回答的问题“上线方式”，每个答案一个按钮，还有打字回复的框、回复后隐藏它的按钮，以及一行“还有 4 件等你”。合成数据。" src="docs/images/pane-zh-CN-light.svg"></picture>
+<img alt="Claude Code 的进度面板：上方是等你、进行中、快到期和今天完成的数量，接着是等你回答的问题“上线方式”，每个答案一个按钮，还有打字回复的框、回复后隐藏它的按钮，以及一行“还有 4 件等你”。合成数据。" src="docs/images/pane-zh-CN-dark.svg">
 
 两张图都由看板自己的代码用合成数据画出。原生 hooks 的验收证据另有[记录](docs/validation/2026-10-19-native-hooks.md)。
 
