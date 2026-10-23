@@ -5,7 +5,7 @@ import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { makeWorld } from './lib/world.mjs'
 import { spawnIsolated } from './lib/spawn.mjs'
-import { OUT_DEFAULT, archiveIntegrity, archiveProblems, fileOpsPerPoll, levelOutcome, makeRedact, median, parseArguments, peakRss, percentile, pruneRefusal, redactDeep, tallyOf, writeReport } from './lib/soak-report.mjs'
+import { OUT_DEFAULT, archiveIntegrity, archiveProblems, fileOpsPerPoll, hookLoadMarker, leftoverPlan, leftoverProcesses, levelOutcome, makeRedact, median, parseArguments, peakRss, percentile, pruneRefusal, queuedSessions, redactDeep, tallyOf, writeReport } from './lib/soak-report.mjs'
 
 const soak = fileURLToPath(new URL('./soak.mjs', import.meta.url))
 
@@ -234,5 +234,117 @@ describe('L6 soak arguments', () => {
     assert.equal(rise.hold, undefined)
     assert.match(rise.line, /^The page server's highest memory was 390 MB up to the end of the archive and 500 MB after it \(limit 439 MB\)\.$/)
     assert.equal(levelOutcome({ ...unmeasured, after: 379 * megabyte, settled: 3, isOpsHeld: true }).ok, true)
+  })
+  test('L6 soak arguments: a leftover process of the hook load is one the run started, found by its parent chain or by the world folder in its command line, never the run, its lister or another world', () => {
+    const world = String.raw`C:\Users\RUNNER~1\AppData\Local\Temp\agent-board-e2e-AbC123`
+    const list = [
+      { pid: 100, ppid: 1, started: 1000, name: 'node.exe', command: 'node tests/e2e/hook-load.mjs' },
+      { pid: 101, ppid: 100, started: 1001, name: 'cmd.exe', command: 'cmd.exe /d /s /c "node hook"' },
+      { pid: 102, ppid: 101, started: 1002, name: 'node.exe', command: 'node -e worker' },
+      // A stale parent id names this run, but the process was already there before the run started.
+      { pid: 103, ppid: 100, started: 999, name: 'node.exe', command: 'node -e unrelated' },
+      { pid: 104, ppid: 103, started: 1003, name: 'node.exe', command: 'node -e unrelated-child' },
+      // A worker whose parent is gone, found by the world folder in either slash style and any letter case.
+      { pid: 200, ppid: 4, name: 'node.exe', command: `node ${world.toLowerCase().replaceAll('\\', '/')}/home/.claude/agent-board.mjs --serve` },
+      // Another world whose name only starts with this one's, and a process of nobody's.
+      { pid: 300, ppid: 4, name: 'node.exe', command: String.raw`node ${world}4\home\.claude\agent-board.mjs` },
+      { pid: 500, ppid: 1, name: 'explorer.exe', command: 'explorer.exe' },
+      // The lister and its console.
+      { pid: 400, ppid: 100, name: 'powershell.exe', command: 'powershell.exe -Command Get-CimInstance' },
+      { pid: 401, ppid: 400, name: 'conhost.exe', command: 'conhost.exe 0xffffffff' },
+      // Windows may also attach a console directly to this run.
+      { pid: 402, ppid: 100, name: 'ConHost.EXE', command: 'conhost.exe 0xffffffff' },
+    ]
+    assert.deepEqual(leftoverProcesses({ list, self: 100, roots: [world, undefined], exclude: [400] }).map(one => one.pid), [101, 102, 200])
+    assert.deepEqual(leftoverProcesses({ list: list.filter(one => ![101, 102, 200].includes(one.pid)), self: 100, roots: [world], exclude: [400] }), [])
+    // Missing creation times keep the parent-chain fallback used on macOS.
+    assert.deepEqual(leftoverProcesses({ list: list.filter(one => one.pid !== 104).map(({ started, ...one }) => one), self: 100, roots: [world], exclude: [400] }).map(one => one.pid), [101, 102, 103, 200])
+    // A parent chain that loops ends without hanging.
+    assert.deepEqual(leftoverProcesses({ list: [{ pid: 7, ppid: 8, name: 'a', command: '' }, { pid: 8, ppid: 7, name: 'b', command: '' }], self: 100, roots: [] }), [])
+  })
+  test("L6 soak arguments: the leftover plan kills this run's descendants and its later path matches, and only reports a path match that started before the run", () => {
+    const world = '/tmp/agent-board-e2e-this-run'
+    const list = [
+      { pid: 100, ppid: 1, started: 1000, name: 'node', command: 'node hook-load.mjs' },
+      { pid: 101, ppid: 100, name: 'node', command: 'node child' },
+      { pid: 102, ppid: 101, started: 1002, name: 'node', command: 'node grandchild' },
+      { pid: 200, ppid: 4, started: 2000, name: 'node', command: `node ${world}/worker` },
+      { pid: 201, ppid: 4, started: 500, name: 'node', command: `node ${world}/worker` },
+      { pid: 202, ppid: 4, name: 'node', command: `node ${world}/worker` },
+      { pid: 300, ppid: 4, started: 2000, name: 'node', command: 'node /tmp/agent-board-e2e-another-run/worker' },
+    ]
+    const plan = leftoverPlan({ list, self: 100, roots: [world] })
+    assert.deepEqual(plan.kill, [list[1], list[2], list[3]])
+    assert.deepEqual(plan.keep, [list[4], list[5]])
+    const orphaned = leftoverPlan({ list, self: undefined, since: 100, roots: [world] })
+    assert.deepEqual(orphaned.kill, [list[3]])
+    assert.deepEqual(orphaned.keep, [list[4], list[5]])
+    const noStart = list.map(one => one.pid === 100 ? { ...one, started: undefined } : one)
+    assert.deepEqual(leftoverPlan({ list: noStart, self: 100, roots: [world] }), { kill: [noStart[1], noStart[2]], keep: [noStart[3], noStart[4], noStart[5]] })
+    assert.deepEqual(leftoverPlan({ list: [{ ...list[0], pid: 99 }, ...noStart], self: 100, since: 99, roots: [world] }), plan)
+    assert.deepEqual(leftoverPlan({ list: [{ ...list[0], pid: 99, started: 500 }, ...list], self: 100, since: 99, roots: [world] }), plan)
+    assert.deepEqual(leftoverPlan({ list, self: 999, since: 100, roots: [world] }), orphaned)
+    assert.deepEqual(leftoverPlan({ list, self: 100, roots: [world], exclude: [101, 200] }), { kill: [], keep: [list[4], list[5]] })
+    const sameStart = { ...list[3], started: 1000 }
+    assert.deepEqual(leftoverPlan({ list: [list[0], sameStart], self: 100, roots: [world] }), { kill: [sameStart], keep: [] })
+  })
+  test('L6 soak arguments: an orphaned PowerShell hook counts only when its encoded command names this world', () => {
+    const world = String.raw`C:\Users\RUNNER~1\AppData\Local\Temp\agent-board-e2e-AbC123`
+    const encoded = script => Buffer.from(script, 'utf16le').toString('base64')
+    const list = ['-EncodedCommand', '-ENC', '-eC', '-E'].flatMap((flag, index) => [
+      { pid: 200 + index, ppid: 4, name: 'powershell.exe', command: `powershell.exe -NoProfile ${flag} ${encoded(`& '${world}/home/.claude/agent-board.mjs'`)}` },
+      { pid: 300 + index, ppid: 4, name: 'powershell.exe', command: `powershell.exe -NoProfile ${flag} ${encoded(`& '${world}4/home/.claude/agent-board.mjs'`)}` },
+    ])
+    list.push(
+      { pid: 400, ppid: 4, name: 'powershell.exe', command: 'powershell.exe -enc not-base64!' },
+      { pid: 401, ppid: 4, name: 'powershell.exe', command: 'powershell.exe -enc YQ==' },
+      { pid: 402, ppid: 4, name: 'powershell.exe', command: 'powershell.exe -enc ANg=' },
+      { pid: 204, ppid: 4, name: 'cmd.exe', command: `cmd /d /s /c "powershell.exe -NoProfile -EncodedCommand ${encoded(`& '${world}/home/.claude/agent-board.mjs'`)}"` },
+    )
+    assert.deepEqual(leftoverProcesses({ list, self: 100, roots: [world] }).map(one => one.pid), [200, 201, 202, 203, 204])
+    assert.deepEqual(leftoverProcesses({ list, self: 100, roots: [world], exclude: [201] }).map(one => one.pid), [200, 202, 203, 204])
+  })
+  test('L6 soak arguments: queued sessions come from raw hook payloads and board entries, skipping malformed, unreadable and temporary files', () => {
+    const raw = payload => JSON.stringify({ version: 1, kind: 'raw', at: 1000, argv: [], env: {}, payload })
+    const sessions = queuedSessions([
+      { name: '1000-a.raw.json', text: raw({ session_id: 'load-codex-0' }) },
+      { name: '1001-b.raw.json', text: raw({ sessionId: 'load-grok-1' }) },
+      { name: '1002-c.raw.json', text: raw({ conversationId: 'load-antigravity-2' }) },
+      { name: '1003-d.json', text: JSON.stringify({ version: 1, session: 'load-codex-3', payload: {} }) },
+      { name: '1004-e.json', text: '{broken' },
+      { name: '1005-f.json' },
+      { name: '1006-g.raw.json.tmp', text: raw({ session_id: 'load-codex-4' }) },
+      { name: '1007-h.json', text: 'null' },
+      { name: '1008-i.raw.json', text: raw({ session_id: 42 }) },
+    ])
+    assert.deepEqual([...sessions], ['load-codex-0', 'load-grok-1', 'load-antigravity-2', 'load-codex-3'])
+    assert.equal(sessions.has('load-codex-4'), false)
+    assert.equal(sessions.has('load-codex-5'), false)
+  })
+  test('L6 soak arguments: a failed hook load check is known for #241 only on Windows, when no hook exited non-zero or ran past twice the 3 s budget, the poll interval fits its budget, every poll was answered, some report was shown and every late or missed report came back while that session\'s own event was queued', () => {
+    const marker = (key, outcome, platform = 'win32') => hookLoadMarker({ key, outcome, platform, budgetMs: 3000 })
+    const slowHooks = { ok: false, over: 1, failedRuns: 0, maxMs: 3126 }
+    const latePage = { ok: false, shown: 2182, slow: 30, slowNotQueued: 0, failedAnswers: 0, pollWithinBudget: true }
+    assert.deepEqual(marker('hooks', slowHooks), { issue: 241, explains: true })
+    assert.deepEqual(marker('page', latePage), { issue: 241, explains: true })
+    // A lucky pass on Windows still carries the marker; other systems and other checks carry none.
+    assert.deepEqual(marker('hooks', { ok: true }), { issue: 241, explains: true })
+    assert.deepEqual(marker('page', { ok: true, pollWithinBudget: true }), { issue: 241, explains: true })
+    assert.equal(marker('hooks', slowHooks, 'linux'), undefined)
+    assert.equal(marker('page', latePage, 'darwin'), undefined)
+    assert.equal(marker('caps', { ok: false }), undefined)
+    // Outside the pattern: a hook that exited non-zero, one that ran past 6 s, a failure with no slow
+    // run, a late report without its own queued event, a bad poll interval, an unanswered poll, no report shown, or nothing slow.
+    assert.equal(marker('hooks', { ...slowHooks, failedRuns: 1 }).explains, false)
+    assert.equal(marker('hooks', { ...slowHooks, maxMs: 6001 }).explains, false)
+    assert.equal(marker('hooks', { ok: false, over: 0, failedRuns: 0, maxMs: 0 }).explains, false)
+    assert.equal(marker('page', { ...latePage, slowNotQueued: 1 }).explains, false)
+    assert.equal(marker('page', { ...latePage, pollWithinBudget: false }).explains, false)
+    assert.equal(marker('page', { ...latePage, pollWithinBudget: undefined }).explains, false)
+    assert.equal(marker('page', { ok: true, pollWithinBudget: false }).explains, false)
+    assert.equal(marker('page', { ...latePage, failedAnswers: 1 }).explains, false)
+    assert.equal(marker('page', { ...latePage, shown: 0 }).explains, false)
+    assert.equal(marker('page', { ...latePage, slow: 0 }).explains, false)
+    assert.equal(marker('page', {}).explains, false)
   })
 })

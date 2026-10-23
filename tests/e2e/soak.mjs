@@ -1,14 +1,16 @@
 import assert from 'node:assert/strict'
-import { mkdirSync, readFileSync, readdirSync, realpathSync, renameSync } from 'node:fs'
+import { mkdirSync, readFileSync, readdirSync, realpathSync, renameSync, unlinkSync } from 'node:fs'
 import { arch, homedir, release, tmpdir } from 'node:os'
-import { dirname, join } from 'node:path'
+import { dirname, join, resolve } from 'node:path'
 import { performance } from 'node:perf_hooks'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { OUT_DEFAULT, archiveIntegrity, archiveProblems, fileOpsPerPoll, levelOutcome, makeRedact, median, parseArguments, peakRss, percentile, pruneRefusal, tallyOf, writeReport } from './lib/soak-report.mjs'
+import { stopTree } from './lib/processes.mjs'
 
 // L6 soak: the terminal board (--watch) and the page server (--serve) run side by side on one
 // isolated world while data grows to the scale budget, tasks are archived and the polling goes on.
 // It is not a *.test.mjs file, so it never runs per pull request (.github/workflows/soak.yml runs it).
+// The hook load phase follows the soak's teardown when minutes <= 35.
 //   node tests/e2e/soak.mjs [--minutes 1..45] [--out DIR]
 
 const TITLES = {
@@ -19,6 +21,12 @@ const TITLES = {
   watch: 'L6 soak: the terminal board keeps running beside the page',
   level: 'L6 soak: server memory levels off',
 }
+// The hook load phase's own check, beside the checks hook-load.mjs reports (#395).
+const HOOK_LOAD_TITLE = 'L6 hook load: the phase ran to its end and wrote its report'
+// The soak ends by its hard deadline, minutes + 5 with the tail inside it. 35 + 5, a minute of teardown
+// and at most 16 for the hook load (its 15-minute bound and a minute to end it) stay under the 60-minute job.
+const HOOK_LOAD_MAX_MINUTES = 35
+const HOOK_LOAD_LIMIT_MS = 15 * 60000
 // A check that fails on main because of a known problem passes through knownFailure with its hold id:
 // the page server reads every ledger and capture file on every poll (audit P1-3), so its memory
 // climbs and its answers slow down to minutes; and the question ledger and capture files of an
@@ -108,7 +116,7 @@ const soak = async ({ minutes, out }) => {
     wakers.add(wake)
   })
   const isRunning = () => control.stop === undefined
-  let world, server, watch
+  let world, server, watch, stopping
   // A busy page server cannot answer a close request, so the last resort ends both board processes.
   // The page server is a detached process: it is ended only while the world's address file still
   // names its pid and address, so a pid the system gave to another program is never touched.
@@ -117,12 +125,15 @@ const soak = async ({ minutes, out }) => {
     try { watch?.child.kill() } catch {}
   }
   let isGivingUp = false
+  let isHookLoadRunning = false
   const giveUp = async note => {
     if (isGivingUp) return
     isGivingUp = true
+    const stopDeadline = Date.now() + 25000
     problem(note)
     save()
     endBoards()
+    if (stopping !== undefined) await Promise.race([stopping, new Promise(done => setTimeout(done, Math.max(0, stopDeadline - Date.now())))])
     await Promise.race([world?.close().catch(() => {}), new Promise(done => setTimeout(done, 15000))])
     process.exit(1)
   }
@@ -135,7 +146,8 @@ const soak = async ({ minutes, out }) => {
     stopper.abort()
     for (const wake of [...wakers]) wake()
     // The run should stop by itself within moments; if it does not, leave with what there is.
-    setTimeout(() => giveUp('The soak did not stop in 30 seconds and was closed from outside.'), 30000).unref()
+    const stopSeconds = isHookLoadRunning ? 90 : 30
+    setTimeout(() => giveUp(`The soak did not stop in ${stopSeconds} seconds and was closed from outside.`), stopSeconds * 1000).unref()
   }
   process.on('SIGINT', () => stopNow('interrupted'))
   process.on('SIGTERM', () => stopNow('interrupted'))
@@ -174,6 +186,96 @@ const soak = async ({ minutes, out }) => {
     clearTimeout(deadline)
     say(`soak: the report cannot be written to ${out} (${saveFailure.code ?? saveFailure.message}).`)
     return 1
+  }
+
+  // The hook load has its own world and process tree, after this world's teardown. A stop of the
+  // soak asks it to stop too, while its own bound still leaves time to close and count leftovers.
+  const hookLoadPhase = async () => {
+    if (stopper.signal.aborted) return []
+    // Absolute: the child's working folder is its world's, which is removed afterwards.
+    const folder = resolve(out, 'hook-load')
+    const file = join(folder, 'hook-load.json')
+    try { unlinkSync(file) } catch (error) { if (error.code !== 'ENOENT') throw error }
+    const startedAt = Date.now()
+    say(`soak: hook-load phase began after ${Math.round(since() / 1000)} s`)
+    isHookLoadRunning = true
+    let child, deadline, killTimer, phaseWorld
+    let roots = []
+    let isFinished = false
+    const stop = () => {
+      child?.stdin.end('stop\n')
+      if (killTimer === undefined || stopper.signal.aborted) {
+        clearTimeout(killTimer)
+        killTimer = setTimeout(() => { void stopPhase() }, stopper.signal.aborted ? 30000 : 60000)
+      }
+    }
+    const stopPhase = () => {
+      if (stopping === undefined) stopping = (async () => {
+        try {
+          // Recheck after listing: a child that exited meanwhile may already have had its pid reused.
+          const stopped = await stopTree({ spawnIsolated, makeWorld, rootPid: child.pid, isRootAlive: () => child.exitCode === null && child.signalCode === null, roots, timeoutMs: stopper.signal.aborted ? 50000 : 60000 })
+          report.hookLoad = { ...report.hookLoad, stopped }
+          const names = Object.entries(stopped.names).map(([name, count]) => `${name} ${count}`).join(', ') || 'none'
+          say(stopped.remaining === undefined
+            ? `soak: ${stopped.stopped} processes of the hook-load phase were sent a kill (${names}); whether any remain is unknown: ${stopped.unchecked}.`
+            : `soak: ${stopped.stopped} processes of the hook-load phase were stopped (${names}); ${stopped.remaining} remain.`)
+        } catch (error) {
+          report.notes.push(`The hook-load phase's process tree could not be stopped and counted: ${String(error?.message ?? error).split('\n')[0]}`)
+          try { child.kill('SIGKILL') } catch {}
+        }
+        save()
+      })()
+      return stopping
+    }
+    try {
+      // The phase starts as every e2e child does, inside a world of its own (lib/spawn.mjs), and makes
+      // its worlds in that world's temp folder. It keeps the world's folders, not its clock and
+      // clipboard preloads, and it gets CI or AGENT_BOARD_HEAVY_TESTS, which choose its size.
+      phaseWorld = makeWorld()
+      roots = [phaseWorld.root, realpathSync.native(phaseWorld.root)]
+      const env = Object.fromEntries(Object.entries(phaseWorld.env).filter(([name]) => name !== 'NODE_OPTIONS' && !name.startsWith('E2E_')))
+      for (const name of ['CI', 'AGENT_BOARD_HEAVY_TESTS']) if (process.env[name] !== undefined) env[name] = process.env[name]
+      child = spawnIsolated(process.execPath, [fileURLToPath(new URL('./hook-load.mjs', import.meta.url)), '--out', folder, '--stop-on-stdin'], { env, cwd: phaseWorld.root, stdio: ['pipe', 'pipe', 'pipe'] })
+      child.stdin.on('error', () => {})
+      stopper.signal.addEventListener('abort', stop)
+      let isTimedOut = false
+      deadline = setTimeout(() => {
+        isTimedOut = true
+        stop()
+      }, HOOK_LOAD_LIMIT_MS)
+      let carry = '', said = ''
+      child.stdout.setEncoding('utf8').on('data', chunk => {
+        const lines = (carry + chunk).split('\n')
+        carry = lines.pop()
+        for (const line of lines) if (line.trim() !== '') say(`hook-load: ${line.trim().replace(/^hook load: /, '')}`)
+      })
+      child.stderr.setEncoding('utf8').on('data', chunk => { said = (said + chunk).slice(-400) })
+      const { code, signal } = await new Promise(done => {
+        child.once('close', (code, signal) => done({ code, signal }))
+        child.once('error', error => { said = error.message; done({ code: null, signal: null }) })
+      })
+      const exit = typeof code === 'number' ? `exit ${code}` : signal ? `stopped by ${signal}` : 'no exit code'
+      if (stopping !== undefined) await stopping
+      let found
+      try { found = JSON.parse(readFileSync(file, 'utf8')) } catch {}
+      if (!Array.isArray(found?.checks) || !(Date.parse(found.startedAt) >= startedAt)) return [{ title: HOOK_LOAD_TITLE, status: 'fail', line: isTimedOut ? `The phase did not exit within ${HOOK_LOAD_LIMIT_MS / 60000} minutes and was stopped (${exit}).` : `The phase left no current report (${exit}).${said ? ` It said: ${said.trim().split('\n').at(-1)}` : ''}` }]
+      report.hookLoad = { ...report.hookLoad, mode: found.mode, sessions: found.sessions, seconds: found.seconds, status: found.status, stats: found.stats, notes: found.notes }
+      isFinished = !isTimedOut && found.status === 'finished' && code === 0
+      return [...found.checks, { title: HOOK_LOAD_TITLE, status: isFinished ? 'pass' : 'fail', line: isTimedOut ? `The phase did not exit within ${HOOK_LOAD_LIMIT_MS / 60000} minutes and was stopped (${exit}).` : `The ${found.mode} run, ${found.sessions} sessions for ${found.seconds} s, ${found.status} (${exit}).` }]
+    } finally {
+      clearTimeout(deadline)
+      clearTimeout(killTimer)
+      stopper.signal.removeEventListener('abort', stop)
+      // The world is removed only once the child is gone: on Windows its working folder is inside it.
+      if (child?.pid !== undefined) {
+        const isAlive = child.exitCode === null && child.signalCode === null
+        const closed = isAlive ? new Promise(done => child.once('close', done)) : undefined
+        if (isAlive || !isFinished) await stopPhase()
+        if (isAlive) await Promise.race([closed, new Promise(done => setTimeout(done, 5000))])
+      }
+      isHookLoadRunning = false
+      try { await phaseWorld?.close() } catch (error) { say(`soak: the hook-load phase's world did not close cleanly: ${String(error?.errors?.[0]?.message ?? error?.message ?? error).split('\n')[0]}`) }
+    }
   }
   try {
     world = makeWorld()
@@ -727,7 +829,7 @@ const soak = async ({ minutes, out }) => {
     isLoopDone = true
   }
   // Teardown has its own limit, so a hung close never outlives the job.
-  setTimeout(() => giveUp('The teardown took over a minute and was cut short.'), 60000).unref()
+  const teardownTimer = setTimeout(() => giveUp('The teardown took over a minute and was cut short.'), 60000).unref()
 
   if (report.status === 'running') report.status = control.stop ?? 'finished'
   report.finishedAt = new Date().toISOString()
@@ -747,7 +849,16 @@ const soak = async ({ minutes, out }) => {
     closeFailure = error
     problem(`The world did not close cleanly: ${String(error?.errors?.[0]?.message ?? error?.message ?? error).split('\n')[0]}`)
   }
-  if (closeFailure !== undefined || saveFailure !== undefined) save()
+  clearTimeout(teardownTimer)
+  const skip = minutes > HOOK_LOAD_MAX_MINUTES ? 'hook-load phase skipped: needs minutes ≤ 35 to fit the 60-minute job'
+    : report.status !== 'finished' || stopper.signal.aborted ? 'hook-load phase skipped: the soak did not finish' : undefined
+  if (skip !== undefined) {
+    say(skip)
+    report.notes.push(skip)
+  } else {
+    report.checks.push(...await hookLoadPhase().catch(error => [{ title: HOOK_LOAD_TITLE, status: 'fail', line: `The phase could not run: ${String(error?.message ?? error).split('\n')[0]}` }]))
+  }
+  save()
   for (const check of report.checks) say(`${check.status}: ${check.title} - ${check.line}`)
   if (report.checks.length > 0) say(`soak: ${tallyOf(report.checks)}`)
   if (saveFailure !== undefined) say(`soak: the report could not be written (${saveFailure.code ?? saveFailure.message}).`)
