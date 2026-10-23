@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { mkdirSync, readFileSync, readdirSync, realpathSync, renameSync, unlinkSync } from 'node:fs'
 import { arch, homedir, release, tmpdir } from 'node:os'
-import { dirname, join } from 'node:path'
+import { dirname, join, resolve } from 'node:path'
 import { performance } from 'node:perf_hooks'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { OUT_DEFAULT, archiveIntegrity, archiveProblems, fileOpsPerPoll, levelOutcome, makeRedact, median, parseArguments, peakRss, percentile, pruneRefusal, tallyOf, writeReport } from './lib/soak-report.mjs'
@@ -189,7 +189,8 @@ const soak = async ({ minutes, out }) => {
   // soak asks it to stop too, while its own bound still leaves time to close and count leftovers.
   const hookLoadPhase = async () => {
     if (stopper.signal.aborted) return []
-    const folder = join(out, 'hook-load')
+    // Absolute: the child's working folder is its world's, which is removed afterwards.
+    const folder = resolve(out, 'hook-load')
     const file = join(folder, 'hook-load.json')
     try { unlinkSync(file) } catch (error) { if (error.code !== 'ENOENT') throw error }
     const startedAt = Date.now()
