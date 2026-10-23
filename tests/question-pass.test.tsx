@@ -1,10 +1,9 @@
 import { expect, test } from 'claude-code/testing'
-import { parseProgress } from '../hooks/parse'
-import { captureJson, capturePath, copiesToKeep, emptyQuestions, identitiesToRetire, observeQuestions, questionsJson, questionsPath, withCaptures } from '../hooks/questions'
-import type { QuestionCapture } from '../hooks/questions'
+import { copiesToKeep, identitiesToRetire, parseQuestions, questionProofJson, questionProofPath, questionScope, questionsJson, questionsPath, withCaptures } from '../hooks/questions'
+import type { QuestionCapture, QuestionRecord } from '../hooks/questions'
 import { sha256 } from '../hooks/sha256'
 import { finished, held, ledgerOf, question, reopened } from './fixtures/question-files'
-import { engineBeneath, FILE, makeWorld } from './fixtures/pane-world'
+import { engineBeneath, FILE, INBOX, makeWorld } from './fixtures/pane-world'
 import type { World } from './fixtures/pane-world'
 
 // A question pass on a board with thousands of questions and question copies beside it (#416).
@@ -13,7 +12,6 @@ const english = { HOME: '/home/me', LANG: 'en_US.UTF-8' }
 const HOUR = 3_600_000
 const NOW = Date.parse('2026-10-16T12:00:00.000Z')
 const START = { cwd: '/work/persona_framework', surface: 'terminal' as const, isInteractive: true }
-const QUESTION_FILE = /-questions-(?:source|retired|consumed)-[a-f0-9]{64}\.json$/
 
 test('a question pass over 1,000 open questions and 5,600 copies works out the copies to keep and the questions to retire well within a second', () => {
   const open = Array.from({ length: 1000 }, (_, n) => question(n + 1))
@@ -44,6 +42,9 @@ test('a question pass over 1,000 open questions and 5,600 copies works out the c
   expect(ids('unresolved')).toEqual(open.filter((_, n) => n % 2 === 0 && (n >= 200 || n % 10 === 0)).map(record => record.id))
   expect(ids('resolved')).toEqual(open.filter((_, n) => n % 2 === 1).map(record => record.id))
   expect(retired).toEqual(open.filter((_, n) => n % 10 === 0).map(record => record.id))
+  // A question whose retirement proof is already kept is left out.
+  const proven = retired.slice(0, 40).map(id => sha256(id))
+  expect(identitiesToRetire(current, observed, [], proven)).toEqual(retired.slice(40))
 })
 
 // Assigned in place: thousands of files spread into a new object each would cost seconds.
@@ -52,57 +53,73 @@ const put = (world: World, path: string, text: string, mtime: number): void => {
   world.mtimes ??= {}
   world.mtimes[path] = mtime
 }
-const putCapture = (world: World, record: Parameters<typeof captureJson>[0], disposition: QuestionCapture['disposition'], mtime: number): void => {
-  put(world, capturePath(FILE, sha256(captureJson(record, disposition))), captureJson(record, disposition), mtime)
-}
 const block = (session: string, steps: string): string =>
   `<!-- auto session=${session} agent=codex state=waiting updated=${new Date(NOW - HOUR).toISOString().replace(/\.\d{3}Z$/, 'Z')} -->\n### Synthetic plan ${session}\n> Context: Synthetic data.\n${steps}\n<!-- /auto session=${session} -->\n`
 
-test('a session start on a board with 300 waiting questions and 5,500 old copies never goes a second without a trip to the host, and writes no copy it already has', { timeoutMs: 600_000 }, async ($, on) => {
-  // Claude Code unloads a mod whose worker has not answered its heartbeat for 5 s (#371), and the
-  // worker answers only while it waits on the host: the time between two host calls is that stretch.
-  let last = Date.now()
-  let lastCall = ''
-  let longest = 0
-  let between = ''
-  const timed = ((...args: unknown[]) => {
-    const callback = args.at(-1)
-    if (typeof callback !== 'function') return Reflect.apply(on, undefined, args)
-    return Reflect.apply(on, undefined, [...args.slice(0, -1), (...inner: unknown[]) => {
-      const at = Date.now()
-      // From the first call on: before it the mod has done nothing, and the time is the test's own.
-      if (lastCall !== '' && at - last > longest) {
-        longest = at - last
-        between = `${lastCall} and ${String(args[0])}`
-      }
-      last = at
-      lastCall = String(args[0])
-      return Reflect.apply(callback, undefined, inner)
-    }])
-  }) as typeof on
-  const board = `## demo\n${Array.from({ length: 300 }, (_, n) => block(`b0${n.toString(16).padStart(6, '0')}`, `- [?] Publish plan number ${n}, OK?`)).join('')}`
+test('question passes over a board whose retirement proofs all exist read each proof once, and neither write a proof nor ask whether one exists', { timeoutMs: 240_000 }, async ($, on) => {
+  const board = `## demo\n${block('a1b2c302', '- [~] Work')}`
   const world = makeWorld([[FILE, board]])
   world.env = english
-  const clock = engineBeneath(timed, world)
-  // The ledger and a copy of each open question, as a pane that watched this board wrote them,
-  // listed after 5,500 copies of 2,750 answered questions.
-  const asked = observeQuestions(emptyQuestions(), parseProgress(board), null, [], NOW, true, 'seed').ledger
-  const answered = Array.from({ length: 2750 }, (_, n) => finished(n + 1))
-  put(world, questionsPath(FILE), questionsJson({ ...asked, next: 3100, records: [...asked.records, ...answered] }), 1)
-  answered.forEach((record, n) => {
-    putCapture(world, reopened(record), 'unresolved', 10 + n * 2)
-    putCapture(world, record, 'resolved', 11 + n * 2)
+  // Every path the mod asks the host whether it exists.
+  const asked: string[] = []
+  const watched = ((...args: unknown[]) => {
+    const handler = args.at(-1)
+    if (args[0] !== 'fs.exists' || typeof handler !== 'function') return Reflect.apply(on, undefined, args)
+    return Reflect.apply(on, undefined, [...args.slice(0, -1), (...inner: unknown[]) => {
+      const event = inner[1] as { path?: unknown } | undefined
+      if (typeof event?.path === 'string') asked.push(event.path)
+      return Reflect.apply(handler, undefined, inner)
+    }])
+  }) as typeof on
+  const clock = engineBeneath(watched, world)
+  // 300 questions answered on this block and gone from it: every pass finds them again as ones
+  // to retire, and each already has its retirement proof.
+  const scope = questionScope('demo', 'codex', 'a1b2c302')
+  const gone = Array.from({ length: 300 }, (_, n): QuestionRecord => {
+    const words = `Synthetic old question ${n + 1}?`
+    const record = finished(n + 1)
+    return { ...record, id: `question:${sha256(JSON.stringify([scope, words, 1, 1, record.incarnation]))}:${n + 1}`, scope, words, source: { ...record.source!, session: 'a1b2c302', text: words } }
   })
-  asked.records.forEach((record, n) => putCapture(world, record, 'unresolved', 6_000 + n))
-  const before = [...world.files.keys()].filter(path => QUESTION_FILE.test(path)).length
-  expect(before).toBe(5800)
+  put(world, questionsPath(FILE), questionsJson(ledgerOf(...gone)), 1)
+  const proofs = gone.map((record, n) => {
+    const path = questionProofPath(FILE, 'retired', sha256(record.id))
+    put(world, path, questionProofJson('retired', sha256(record.id)), 10 + n)
+    return path
+  })
+  world.reads = []
   world.written = []
-  lastCall = ''
-  longest = 0
   await $.session.start(START)
-  await clock.advance(2000)
-  console.log(`longest stretch without a host call: ${longest} ms, between ${between}`)
-  expect(longest).toBeLessThan(1000)
-  expect(world.written.filter(path => QUESTION_FILE.test(path))).toEqual([])
-  expect([...world.files.keys()].filter(path => QUESTION_FILE.test(path)).length).toBe(before)
+  await clock.advance(10_000)
+  // The first look reads each proof; the passes after it trust that look and never check again.
+  // Keeping a proof again costs three trips to the host, the first asking whether it exists.
+  const counts = new Map<string, number>()
+  for (const path of world.reads.filter(one => proofs.includes(one))) counts.set(path, (counts.get(path) ?? 0) + 1)
+  expect(counts.size).toBe(300)
+  expect(Math.max(...counts.values())).toBe(1)
+  expect(world.written.filter(path => proofs.includes(path))).toEqual([])
+  expect(asked.filter(path => proofs.includes(path))).toEqual([])
+})
+
+test('a look at the inbox that takes questions from ten sessions keeps them all in one question pass', { timeoutMs: 240_000 }, async ($, on) => {
+  const world = makeWorld([[FILE, `## demo\n${block('a1b2c302', '- [~] Work')}`]])
+  world.env = english
+  world.reply = () => 'TITLE: Synthetic release\nCONTEXT: Inbox turns\nDONE: Prepared the change\nNEXT: Publish it\nASK: -'
+  const clock = engineBeneath(on, world)
+  for (let n = 0; n < 10; n++) {
+    const body = JSON.stringify({ session_id: `synthetic-session-${n}`, cwd: '/work/demo', prompt: 'Synthetic request', last_assistant_message: `Synthetic change ${n} is ready. Publish it to the synthetic staging board, OK?` })
+    put(world, `${INBOX}/codex-turn-${1_760_000_000 + n}-1.json`, body, 1_000 + n)
+  }
+  const fromInbox = (): number => (parseQuestions(world.files.get(questionsPath(FILE)) ?? '')?.records ?? []).filter(record => record.source?.kind === 'inbox').length
+  await $.session.start(START)
+  // The polls before the look, then the look itself, five seconds in.
+  await clock.advance(4000)
+  world.written = []
+  await clock.advance(1000)
+  // The look's work runs on after the clock call; wait for it in real time.
+  for (let n = 0; n < 200 && fromInbox() < 10; n++) await new Promise(resolve => setTimeout(resolve, 50))
+  expect(fromInbox()).toBe(10)
+  // The ledger is written to a temporary file and moved into place: once when the look's blocks
+  // are settled and polled, once when its questions are kept. Two passes for each session, each
+  // seconds long on a big board, wrote it twenty times.
+  expect(world.written.filter(path => path.startsWith(`${questionsPath(FILE)}.tmp-`))).toHaveLength(2)
 })

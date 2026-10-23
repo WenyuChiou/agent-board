@@ -48,6 +48,7 @@ export type World = {
   reads?: string[]
   written?: string[]
   beforeRead?: (path: string) => void
+  holdRead?: { when: (path: string) => boolean; reached: () => void; release: Promise<void> }
   readValue?: (path: string) => unknown
   beforeExists?: (path: string) => void
   mtimes?: Record<string, number>
@@ -366,6 +367,12 @@ export const engineBeneath = (on: On, world: World): MockClock => {
     const path = posix(e.path)
     world.reads?.push(path)
     world.beforeRead?.(path)
+    const held = world.holdRead
+    if (held !== undefined && held.when(path)) {
+      world.holdRead = undefined
+      held.reached()
+      await held.release
+    }
     const hold = world.holdJournalRead
     if (path.includes('-journal-') && hold !== undefined) {
       world.holdJournalRead = undefined

@@ -404,7 +404,7 @@ const view = (source = read(path), now = Date.now()) => {
       const captures = readQuestionCaptures()
       if (captures === null) return null
       for (const copy of copiesToKeep(current, next, captures)) keepQuestionCapture(copy.record, copy.disposition)
-      for (const id of identitiesToRetire(current, next, resolvedQuestionsToRetire(current, projects, null, turns))) keepQuestionProof('retired', sha256(id))
+      for (const id of identitiesToRetire(current, next, resolvedQuestionsToRetire(current, projects, null, turns), proofs?.retired)) keepQuestionProof('retired', sha256(id))
       proofs = readQuestionProofs()
       if (proofs === null) return null
       next = observeQuestions(current, projects, null, answered, now, isSettled, incarnation, proofs, turns).ledger

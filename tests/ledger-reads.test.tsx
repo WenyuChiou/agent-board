@@ -20,6 +20,8 @@ const CAPTURES = '-questions-source-'
 const RETIRED = '-questions-retired-'
 const CONSUMED = '-questions-consumed-'
 const TIDY = { command: 'progress', args: 'tidy', origin: { kind: 'composer' as const }, presentation: { isFullscreen: true, columns: 160 } }
+// The session start's own sweep waits for the first look at the inbox, five seconds in (#416).
+const PAST_START_SWEEP = 6000
 const START = { cwd: '/work/persona_framework', surface: 'terminal' as const, isInteractive: true }
 
 const block = (session: string, state: string, hours: number, steps: string, title = `Synthetic plan ${session}`): string =>
@@ -393,26 +395,26 @@ test('pruning reads the files afresh, so a copy damaged on disk since the polls 
   world.ran = []
   const clock = engineBeneath(on, world)
   await $.session.start(START)
-  await clock.advance(2000)
+  await clock.advance(PAST_START_SWEEP)
   const open = ledgerRecords(world).find(record => record.isUnresolved)!
   const current = captureFile(open, 'unresolved')
   put(world, current, world.files.get(current)!, 5_000)
-  // Twenty older states of the open question's block, the newest of them (and so the one that lets the others go) read and remembered by the polls.
+  // Twenty older states of the open question's block, read and remembered by the polls. The copy of
+  // its present state is the newest, and so the one that lets the others go.
   const versions = Array.from({ length: 20 }, (_, version) => ({ ...open, source: { ...open.source!, data: JSON.stringify({ version }) } }))
   versions.forEach((record, version) => putCapture(world, record, 'unresolved', 1_000 + version))
   await clock.advance(2000)
   await clock.advance(2000)
   // Damaged without moving its size or time: the same number of characters, no longer what its name says.
-  const newest = captureFile(versions[19]!, 'unresolved')
-  const good = world.files.get(newest)!
-  put(world, newest, `${good.slice(0, -2)}x\n`, 1_019)
-  expect(world.files.get(newest)).toHaveLength(good.length)
+  const good = world.files.get(current)!
+  put(world, current, `${good.slice(0, -2)}x\n`, 5_000)
+  expect(world.files.get(current)).toHaveLength(good.length)
   world.ran = []
   await $.command.run(TIDY)
   expect(removals(world)).toBe(0)
   expect(filesOf(world, CAPTURES)).toHaveLength(21)
   // Written whole again, it is read afresh and the five oldest go.
-  put(world, newest, good, 1_019)
+  put(world, current, good, 5_000)
   await $.command.run(TIDY)
   expect(removals(world)).toBe(1)
   expect(filesOf(world, CAPTURES)).toHaveLength(16)
@@ -423,22 +425,24 @@ test('pruning reads the proofs afresh, so a proof damaged on disk since the poll
   world.env = english
   const clock = engineBeneath(on, world)
   await $.session.start(START)
-  await clock.advance(2000)
+  await clock.advance(PAST_START_SWEEP)
   // Twenty retirement proofs that nothing refers to, put there after the session start's sweep and read by two polls.
   const keys = putOrphans(world, 20)
   await clock.advance(2000)
   await clock.advance(2000)
-  // The newest of them, damaged without moving its size or time: the same number of characters, no longer what its name says.
-  const newest = proofFile('retired', keys[19]!)
-  const good = world.files.get(newest)!
-  put(world, newest, `${good.slice(0, -2)}x\n`, 1_019)
-  expect(world.files.get(newest)).toHaveLength(good.length)
+  // The oldest of them, one the sweep would remove, damaged without moving its size or time: the
+  // same number of characters, no longer what its name says. The polls remember it as it was; the
+  // sweep reads each file it removes again (#416).
+  const oldest = proofFile('retired', keys[0]!)
+  const good = world.files.get(oldest)!
+  put(world, oldest, `${good.slice(0, -2)}x\n`, 1_000)
+  expect(world.files.get(oldest)).toHaveLength(good.length)
   world.ran = []
   await $.command.run(TIDY)
   expect(removals(world)).toBe(0)
   expect(filesOf(world, RETIRED)).toHaveLength(20)
   // Written whole again, it is read afresh and the four oldest go.
-  put(world, newest, good, 1_019)
+  put(world, oldest, good, 1_000)
   await $.command.run(TIDY)
   expect(removals(world)).toBe(1)
   expect(filesOf(world, RETIRED)).toHaveLength(16)
@@ -529,7 +533,7 @@ test('nothing is removed while the ledger cannot be read, and the files go once 
   world.env = english
   const clock = engineBeneath(on, world)
   await $.session.start(START)
-  await clock.advance(2000)
+  await clock.advance(PAST_START_SWEEP)
   putOrphans(world, 20)
   await clock.advance(2000)
   await clock.advance(2000)
@@ -558,7 +562,7 @@ test('nothing is removed while the acknowledgement list cannot be read, and the 
   world.env = english
   const clock = engineBeneath(on, world)
   await $.session.start(START)
-  await clock.advance(2000)
+  await clock.advance(PAST_START_SWEEP)
   putOrphans(world, 20)
   await clock.advance(2000)
   await clock.advance(2000)
@@ -586,7 +590,7 @@ test('nothing is removed while a retirement proof is still being written, and th
   world.env = english
   const clock = engineBeneath(on, world)
   await $.session.start(START)
-  await clock.advance(2000)
+  await clock.advance(PAST_START_SWEEP)
   putOrphans(world, 20)
   await clock.advance(2000)
   await clock.advance(2000)
@@ -618,15 +622,14 @@ test('nothing is removed when the ledger changes between the choice and the remo
   world.env = english
   const clock = engineBeneath(on, world)
   await $.session.start(START)
-  await clock.advance(2000)
+  await clock.advance(PAST_START_SWEEP)
   putOrphans(world, 20)
   await clock.advance(2000)
   await clock.advance(2000)
-  // Another session writes the ledger after the clean-up read it (it reads the acknowledgement list next).
-  let isArmed = false
+  // Another session writes the ledger after the clean-up chose its files, as it reads them again.
+  let isArmed = true
   world.beforeRead = path => {
-    if (path.includes(RETIRED)) isArmed = true
-    if (!isArmed || path !== ANSWERED) return
+    if (!isArmed || !path.includes(RETIRED)) return
     isArmed = false
     world.files.set(LEDGER, `${world.files.get(LEDGER)}\n`)
   }
@@ -663,7 +666,7 @@ test('one sweep removes at most 200 files, fifty to a process, and the next swee
   world.env = english
   const clock = engineBeneath(on, world)
   await $.session.start(START)
-  await clock.advance(2000)
+  await clock.advance(PAST_START_SWEEP)
   putOrphans(world, 260)
   await clock.advance(2000)
   await clock.advance(2000)
