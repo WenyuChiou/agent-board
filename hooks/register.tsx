@@ -2865,10 +2865,11 @@ const ownStoreBytes = async ($: EngineInterface, listing?: readonly ListedFile[]
     // This listing still needs verification if a small remaining file grows later.
     ownStoreMiss = { names, at: null }
   }
-  // Without a failed identification or a remembered file leaving, trust a lone file without
-  // reading: it could belong to another copy only if ours was never written, or left before it
-  // was identified.
-  const isLoneOwn = files.length <= 1 && !(ownStoreMiss?.names.split('\n').includes(files[0]?.name ?? '') ?? false)
+  // Until this session fails an identification or sees the remembered file leave, trust a lone
+  // file without reading: it could belong to another copy only if ours was never written, or left
+  // before it was identified. After that, the file left alone may be another copy's, whatever
+  // listings came between.
+  const isLoneOwn = files.length <= 1 && ownStoreMiss === null
   if (files.every(entry => entry.size <= RETENTION.storeWarnBytes) || isLoneOwn) return storeBytes(files)
   if (cached !== undefined) return cached.size
   const at = await $.clock.now()

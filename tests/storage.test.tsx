@@ -775,6 +775,44 @@ test('a remaining store file is checked as soon as it grows after the identified
   await ui.unmount()
 })
 
+test("the store cap and size warning wait when another copy's file comes back alone after a listing with no store file", async ($, on) => {
+  const size = 1_600_000
+  const world = capWorld(100_000)
+  world.isArchiveClockOnly = true
+  world.reads = []
+  const store = world.store as Record<string, unknown>
+  store.storeId = '99aabbccddeeff00'
+  const own = `${STORE_DIR}/agent-board_inline-fbbbbbbbbbbb.json`
+  const other = `${STORE_DIR}/agent-board_agent-board-fccccccccccc.json`
+  const otherText = JSON.stringify({ storeId: '00ffeeddccbbaa99' }).padEnd(size)
+  world.files.delete(STORE_FILE)
+  world.files.set(own, JSON.stringify({ storeId: store.storeId }))
+  world.files.set(other, otherText)
+  const clock = engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/other-project', surface: 'desktop', isInteractive: true })
+  await clock.advance(1)
+  expect(world.reads.filter(path => path.startsWith(`${STORE_DIR}/`))).toEqual([own, other])
+  // A listing that shows no store file at all forgets the identified one.
+  world.files.delete(own)
+  world.files.delete(other)
+  world.storeReads = []
+  await clock.advance(HOUR + 60_000)
+  expect(world.storeReads).toContain('pruneAfter')
+  world.files.set(other, otherText)
+  world.reads.length = 0
+  world.storeReads = []
+  await clock.advance(HOUR)
+  expect(world.storeReads).toContain('pruneAfter')
+  expect(world.reads.filter(path => path.startsWith(`${STORE_DIR}/`))).toEqual([other])
+  const candidates = [OLD_MIRROR, 'agent:0d0d0d02', 'agent:0d0d0d03', 'agent:0d0d0d04']
+  for (const key of candidates) expect(store[key]).toBeDefined()
+  expect(store.storeCapHeld).toBeUndefined()
+  expect(store.prunedCounts).toBeUndefined()
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
+  expect(await ui.find({ type: 'Text', text: EN.storeLarge('1.5', '1.5') })).toBeUndefined()
+  await ui.unmount()
+})
+
 test('a failed store listing keeps the identified file for the next pass', async ($, on) => {
   const size = 1_600_000
   const world = capWorld(100_000)
