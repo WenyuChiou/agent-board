@@ -5,6 +5,7 @@ import { dirname, join, resolve } from 'node:path'
 import { performance } from 'node:perf_hooks'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { OUT_DEFAULT, archiveIntegrity, archiveProblems, fileOpsPerPoll, levelOutcome, makeRedact, median, parseArguments, peakRss, percentile, pruneRefusal, tallyOf, writeReport } from './lib/soak-report.mjs'
+import { stopTree } from './lib/processes.mjs'
 
 // L6 soak: the terminal board (--watch) and the page server (--serve) run side by side on one
 // isolated world while data grows to the scale budget, tasks are archived and the polling goes on.
@@ -115,7 +116,7 @@ const soak = async ({ minutes, out }) => {
     wakers.add(wake)
   })
   const isRunning = () => control.stop === undefined
-  let world, server, watch
+  let world, server, watch, stopping
   // A busy page server cannot answer a close request, so the last resort ends both board processes.
   // The page server is a detached process: it is ended only while the world's address file still
   // names its pid and address, so a pid the system gave to another program is never touched.
@@ -128,9 +129,11 @@ const soak = async ({ minutes, out }) => {
   const giveUp = async note => {
     if (isGivingUp) return
     isGivingUp = true
+    const stopDeadline = Date.now() + 25000
     problem(note)
     save()
     endBoards()
+    if (stopping !== undefined) await Promise.race([stopping, new Promise(done => setTimeout(done, Math.max(0, stopDeadline - Date.now())))])
     await Promise.race([world?.close().catch(() => {}), new Promise(done => setTimeout(done, 15000))])
     process.exit(1)
   }
@@ -197,12 +200,39 @@ const soak = async ({ minutes, out }) => {
     say(`soak: hook-load phase began after ${Math.round(since() / 1000)} s`)
     isHookLoadRunning = true
     let child, deadline, killTimer, phaseWorld
-    const stop = () => child?.stdin.end('stop\n')
+    let roots = []
+    let isFinished = false
+    const stop = () => {
+      child?.stdin.end('stop\n')
+      if (killTimer === undefined || stopper.signal.aborted) {
+        clearTimeout(killTimer)
+        killTimer = setTimeout(() => { void stopPhase() }, stopper.signal.aborted ? 30000 : 60000)
+      }
+    }
+    const stopPhase = () => {
+      if (stopping === undefined) stopping = (async () => {
+        try {
+          // Recheck after listing: a child that exited meanwhile may already have had its pid reused.
+          const stopped = await stopTree({ spawnIsolated, makeWorld, rootPid: child.pid, isRootAlive: () => child.exitCode === null && child.signalCode === null, roots, timeoutMs: stopper.signal.aborted ? 50000 : 60000 })
+          report.hookLoad = { ...report.hookLoad, stopped }
+          const names = Object.entries(stopped.names).map(([name, count]) => `${name} ${count}`).join(', ') || 'none'
+          say(stopped.remaining === undefined
+            ? `soak: ${stopped.stopped} processes of the hook-load phase were sent a kill (${names}); whether any remain is unknown: ${stopped.unchecked}.`
+            : `soak: ${stopped.stopped} processes of the hook-load phase were stopped (${names}); ${stopped.remaining} remain.`)
+        } catch (error) {
+          report.notes.push(`The hook-load phase's process tree could not be stopped and counted: ${String(error?.message ?? error).split('\n')[0]}`)
+          try { child.kill('SIGKILL') } catch {}
+        }
+        save()
+      })()
+      return stopping
+    }
     try {
       // The phase starts as every e2e child does, inside a world of its own (lib/spawn.mjs), and makes
       // its worlds in that world's temp folder. It keeps the world's folders, not its clock and
       // clipboard preloads, and it gets CI or AGENT_BOARD_HEAVY_TESTS, which choose its size.
       phaseWorld = makeWorld()
+      roots = [phaseWorld.root, realpathSync.native(phaseWorld.root)]
       const env = Object.fromEntries(Object.entries(phaseWorld.env).filter(([name]) => name !== 'NODE_OPTIONS' && !name.startsWith('E2E_')))
       for (const name of ['CI', 'AGENT_BOARD_HEAVY_TESTS']) if (process.env[name] !== undefined) env[name] = process.env[name]
       child = spawnIsolated(process.execPath, [fileURLToPath(new URL('./hook-load.mjs', import.meta.url)), '--out', folder, '--stop-on-stdin'], { env, cwd: phaseWorld.root, stdio: ['pipe', 'pipe', 'pipe'] })
@@ -212,7 +242,6 @@ const soak = async ({ minutes, out }) => {
       deadline = setTimeout(() => {
         isTimedOut = true
         stop()
-        killTimer = setTimeout(() => child.kill('SIGKILL'), 60000)
       }, HOOK_LOAD_LIMIT_MS)
       let carry = '', said = ''
       child.stdout.setEncoding('utf8').on('data', chunk => {
@@ -221,24 +250,28 @@ const soak = async ({ minutes, out }) => {
         for (const line of lines) if (line.trim() !== '') say(`hook-load: ${line.trim().replace(/^hook load: /, '')}`)
       })
       child.stderr.setEncoding('utf8').on('data', chunk => { said = (said + chunk).slice(-400) })
-      const code = await new Promise(done => {
-        child.once('close', done)
-        child.once('error', error => { said = error.message; done(null) })
+      const { code, signal } = await new Promise(done => {
+        child.once('close', (code, signal) => done({ code, signal }))
+        child.once('error', error => { said = error.message; done({ code: null, signal: null }) })
       })
+      const exit = typeof code === 'number' ? `exit ${code}` : signal ? `stopped by ${signal}` : 'no exit code'
+      if (stopping !== undefined) await stopping
       let found
       try { found = JSON.parse(readFileSync(file, 'utf8')) } catch {}
-      if (!Array.isArray(found?.checks) || !(Date.parse(found.startedAt) >= startedAt)) return [{ title: HOOK_LOAD_TITLE, status: 'fail', line: isTimedOut ? `The phase did not exit within ${HOOK_LOAD_LIMIT_MS / 60000} minutes and was stopped.` : `The phase exited ${code} and left no current report.${said ? ` It said: ${said.trim().split('\n').at(-1)}` : ''}` }]
-      report.hookLoad = { mode: found.mode, sessions: found.sessions, seconds: found.seconds, status: found.status, stats: found.stats, notes: found.notes }
-      return [...found.checks, { title: HOOK_LOAD_TITLE, status: !isTimedOut && found.status === 'finished' ? 'pass' : 'fail', line: isTimedOut ? `The phase did not exit within ${HOOK_LOAD_LIMIT_MS / 60000} minutes and was stopped.` : `The ${found.mode} run, ${found.sessions} sessions for ${found.seconds} s, ${found.status} and exited ${code}.` }]
+      if (!Array.isArray(found?.checks) || !(Date.parse(found.startedAt) >= startedAt)) return [{ title: HOOK_LOAD_TITLE, status: 'fail', line: isTimedOut ? `The phase did not exit within ${HOOK_LOAD_LIMIT_MS / 60000} minutes and was stopped (${exit}).` : `The phase left no current report (${exit}).${said ? ` It said: ${said.trim().split('\n').at(-1)}` : ''}` }]
+      report.hookLoad = { ...report.hookLoad, mode: found.mode, sessions: found.sessions, seconds: found.seconds, status: found.status, stats: found.stats, notes: found.notes }
+      isFinished = !isTimedOut && found.status === 'finished' && code === 0
+      return [...found.checks, { title: HOOK_LOAD_TITLE, status: isFinished ? 'pass' : 'fail', line: isTimedOut ? `The phase did not exit within ${HOOK_LOAD_LIMIT_MS / 60000} minutes and was stopped (${exit}).` : `The ${found.mode} run, ${found.sessions} sessions for ${found.seconds} s, ${found.status} (${exit}).` }]
     } finally {
       clearTimeout(deadline)
       clearTimeout(killTimer)
       stopper.signal.removeEventListener('abort', stop)
       // The world is removed only once the child is gone: on Windows its working folder is inside it.
-      if (child?.pid !== undefined && child.exitCode === null && child.signalCode === null) {
-        const closed = new Promise(done => child.once('close', done))
-        child.kill('SIGKILL')
-        await Promise.race([closed, new Promise(done => setTimeout(done, 5000))])
+      if (child?.pid !== undefined) {
+        const isAlive = child.exitCode === null && child.signalCode === null
+        const closed = isAlive ? new Promise(done => child.once('close', done)) : undefined
+        if (isAlive || !isFinished) await stopPhase()
+        if (isAlive) await Promise.race([closed, new Promise(done => setTimeout(done, 5000))])
       }
       isHookLoadRunning = false
       try { await phaseWorld?.close() } catch (error) { say(`soak: the hook-load phase's world did not close cleanly: ${String(error?.errors?.[0]?.message ?? error?.message ?? error).split('\n')[0]}`) }

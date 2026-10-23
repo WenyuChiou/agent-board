@@ -5,7 +5,7 @@ import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { makeWorld } from './lib/world.mjs'
 import { spawnIsolated } from './lib/spawn.mjs'
-import { OUT_DEFAULT, archiveIntegrity, archiveProblems, fileOpsPerPoll, hookLoadMarker, leftoverProcesses, levelOutcome, makeRedact, median, parseArguments, peakRss, percentile, pruneRefusal, redactDeep, tallyOf, writeReport } from './lib/soak-report.mjs'
+import { OUT_DEFAULT, archiveIntegrity, archiveProblems, fileOpsPerPoll, hookLoadMarker, leftoverProcesses, levelOutcome, makeRedact, median, parseArguments, peakRss, percentile, pruneRefusal, queuedSessions, redactDeep, tallyOf, writeReport } from './lib/soak-report.mjs'
 
 const soak = fileURLToPath(new URL('./soak.mjs', import.meta.url))
 
@@ -262,23 +262,60 @@ describe('L6 soak arguments', () => {
     // A parent chain that loops ends without hanging.
     assert.deepEqual(leftoverProcesses({ list: [{ pid: 7, ppid: 8, name: 'a', command: '' }, { pid: 8, ppid: 7, name: 'b', command: '' }], self: 100, roots: [] }), [])
   })
-  test('L6 soak arguments: a failed hook load check is known for #241 only on Windows, when no hook exited non-zero or ran past twice the 3 s budget, every poll was answered, some report was shown and every late or missed report came back while an event was queued', () => {
+  test('L6 soak arguments: an orphaned PowerShell hook counts only when its encoded command names this world', () => {
+    const world = String.raw`C:\Users\RUNNER~1\AppData\Local\Temp\agent-board-e2e-AbC123`
+    const encoded = script => Buffer.from(script, 'utf16le').toString('base64')
+    const list = ['-EncodedCommand', '-ENC', '-eC', '-E'].flatMap((flag, index) => [
+      { pid: 200 + index, ppid: 4, name: 'powershell.exe', command: `powershell.exe -NoProfile ${flag} ${encoded(`& '${world}/home/.claude/agent-board.mjs'`)}` },
+      { pid: 300 + index, ppid: 4, name: 'powershell.exe', command: `powershell.exe -NoProfile ${flag} ${encoded(`& '${world}4/home/.claude/agent-board.mjs'`)}` },
+    ])
+    list.push(
+      { pid: 400, ppid: 4, name: 'powershell.exe', command: 'powershell.exe -enc not-base64!' },
+      { pid: 401, ppid: 4, name: 'powershell.exe', command: 'powershell.exe -enc YQ==' },
+      { pid: 402, ppid: 4, name: 'powershell.exe', command: 'powershell.exe -enc ANg=' },
+      { pid: 204, ppid: 4, name: 'cmd.exe', command: `cmd /d /s /c "powershell.exe -NoProfile -EncodedCommand ${encoded(`& '${world}/home/.claude/agent-board.mjs'`)}"` },
+    )
+    assert.deepEqual(leftoverProcesses({ list, self: 100, roots: [world] }).map(one => one.pid), [200, 201, 202, 203, 204])
+    assert.deepEqual(leftoverProcesses({ list, self: 100, roots: [world], exclude: [201] }).map(one => one.pid), [200, 202, 203, 204])
+  })
+  test('L6 soak arguments: queued sessions come from raw hook payloads and board entries, skipping malformed, unreadable and temporary files', () => {
+    const raw = payload => JSON.stringify({ version: 1, kind: 'raw', at: 1000, argv: [], env: {}, payload })
+    const sessions = queuedSessions([
+      { name: '1000-a.raw.json', text: raw({ session_id: 'load-codex-0' }) },
+      { name: '1001-b.raw.json', text: raw({ sessionId: 'load-grok-1' }) },
+      { name: '1002-c.raw.json', text: raw({ conversationId: 'load-antigravity-2' }) },
+      { name: '1003-d.json', text: JSON.stringify({ version: 1, session: 'load-codex-3', payload: {} }) },
+      { name: '1004-e.json', text: '{broken' },
+      { name: '1005-f.json' },
+      { name: '1006-g.raw.json.tmp', text: raw({ session_id: 'load-codex-4' }) },
+      { name: '1007-h.json', text: 'null' },
+      { name: '1008-i.raw.json', text: raw({ session_id: 42 }) },
+    ])
+    assert.deepEqual([...sessions], ['load-codex-0', 'load-grok-1', 'load-antigravity-2', 'load-codex-3'])
+    assert.equal(sessions.has('load-codex-4'), false)
+    assert.equal(sessions.has('load-codex-5'), false)
+  })
+  test('L6 soak arguments: a failed hook load check is known for #241 only on Windows, when no hook exited non-zero or ran past twice the 3 s budget, the poll interval fits its budget, every poll was answered, some report was shown and every late or missed report came back while that session\'s own event was queued', () => {
     const marker = (key, outcome, platform = 'win32') => hookLoadMarker({ key, outcome, platform, budgetMs: 3000 })
     const slowHooks = { ok: false, over: 1, failedRuns: 0, maxMs: 3126 }
-    const latePage = { ok: false, shown: 2182, slow: 30, slowNotQueued: 0, failedAnswers: 0 }
+    const latePage = { ok: false, shown: 2182, slow: 30, slowNotQueued: 0, failedAnswers: 0, pollWithinBudget: true }
     assert.deepEqual(marker('hooks', slowHooks), { issue: 241, explains: true })
     assert.deepEqual(marker('page', latePage), { issue: 241, explains: true })
     // A lucky pass on Windows still carries the marker; other systems and other checks carry none.
     assert.deepEqual(marker('hooks', { ok: true }), { issue: 241, explains: true })
+    assert.deepEqual(marker('page', { ok: true, pollWithinBudget: true }), { issue: 241, explains: true })
     assert.equal(marker('hooks', slowHooks, 'linux'), undefined)
     assert.equal(marker('page', latePage, 'darwin'), undefined)
     assert.equal(marker('caps', { ok: false }), undefined)
     // Outside the pattern: a hook that exited non-zero, one that ran past 6 s, a failure with no slow
-    // run, a late report while nothing was queued, an unanswered poll, no report shown, or nothing slow.
+    // run, a late report without its own queued event, a bad poll interval, an unanswered poll, no report shown, or nothing slow.
     assert.equal(marker('hooks', { ...slowHooks, failedRuns: 1 }).explains, false)
     assert.equal(marker('hooks', { ...slowHooks, maxMs: 6001 }).explains, false)
     assert.equal(marker('hooks', { ok: false, over: 0, failedRuns: 0, maxMs: 0 }).explains, false)
     assert.equal(marker('page', { ...latePage, slowNotQueued: 1 }).explains, false)
+    assert.equal(marker('page', { ...latePage, pollWithinBudget: false }).explains, false)
+    assert.equal(marker('page', { ...latePage, pollWithinBudget: undefined }).explains, false)
+    assert.equal(marker('page', { ok: true, pollWithinBudget: false }).explains, false)
     assert.equal(marker('page', { ...latePage, failedAnswers: 1 }).explains, false)
     assert.equal(marker('page', { ...latePage, shown: 0 }).explains, false)
     assert.equal(marker('page', { ...latePage, slow: 0 }).explains, false)

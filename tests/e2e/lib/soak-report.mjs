@@ -47,6 +47,38 @@ const pathPattern = path => {
   return new RegExp(`${parts.map(escapeText).join('[\\\\/]+')}(?![A-Za-z0-9_-])`, 'gi')
 }
 
+// Windows hides an Antigravity hook's paths inside a UTF-16LE PowerShell command.
+const commandText = command => {
+  const text = String(command ?? '')
+  const decoded = []
+  for (const found of text.matchAll(/(?:^|\s)-(?:encodedcommand|enc|ec|e)\s+(?:"([A-Za-z0-9+/]+={0,2})"|'([A-Za-z0-9+/]+={0,2})'|([A-Za-z0-9+/]+={0,2}))(?=[\s"']|$)/gi)) {
+    try {
+      const encoded = found[1] ?? found[2] ?? found[3]
+      const bytes = Buffer.from(encoded, 'base64')
+      if (bytes.length % 2 !== 0 || bytes.toString('base64').replace(/=+$/, '') !== encoded.replace(/=+$/, '')) continue
+      decoded.push(new TextDecoder('utf-16le', { fatal: true }).decode(bytes))
+    } catch {}
+  }
+  return [text, ...decoded].join('\n')
+}
+
+// Both queue writers keep the hook's raw session id; partial writes are not events.
+export const queuedSessions = files => {
+  const sessions = new Set()
+  for (const { name, text } of files) {
+    if (!name.endsWith('.json') || typeof text !== 'string') continue
+    try {
+      const entry = JSON.parse(text)
+      if (entry?.version !== 1) continue
+      const session = entry.kind === 'raw'
+        ? [entry.payload?.session_id, entry.payload?.sessionId, entry.payload?.conversationId].find(value => typeof value === 'string' && value !== '')
+        : entry.session
+      if (typeof session === 'string' && session !== '') sessions.add(session)
+    } catch {}
+  }
+  return sessions
+}
+
 // `entries` is a list of [placeholder, path]; the longest path goes first, so a world folder inside
 // the temp folder reads <world>, not <tmp>/…. `secrets` are exact strings (the page's address and token).
 export const makeRedact = (entries, secrets = []) => {
@@ -81,21 +113,21 @@ export const leftoverProcesses = ({ list, self, roots, exclude = [] }) => {
   }
   const patterns = roots.map(root => typeof root === 'string' ? pathPattern(root) : null).filter(pattern => pattern !== null)
   const isExcluded = one => (one.ppid === self && /^conhost\.exe$/i.test(one.name)) || exclude.some(pid => one.pid === pid || descends(one.pid, pid))
-  return list.filter(one => one.pid !== self && !isExcluded(one) && (descends(one.pid, self) || patterns.some(pattern => String(one.command ?? '').search(pattern) !== -1)))
+  return list.filter(one => one.pid !== self && !isExcluded(one) && (descends(one.pid, self) || patterns.some(pattern => commandText(one.command).search(pattern) !== -1)))
 }
 
 // The open issue marked on a hook load check, and whether it explains this outcome (#395). #241: on
 // a busy Windows machine a hook can run longer than the 3 s budget, and an event whose reporter runs
 // out of time is queued until a later hook applies it, so the page shows it late or never. Only that
 // pattern counts: no hook exited non-zero or ran past twice the budget, every poll was answered, some
-// report was shown, and every late or missed report returned while an event was queued. Anything
-// else stays a failure.
+// report was shown, the page's poll interval fits its budget, and every late or missed report came
+// back while that session's own event was queued. Anything else stays a failure.
 export const hookLoadMarker = ({ key, outcome, platform, budgetMs }) => {
   if (platform !== 'win32' || (key !== 'hooks' && key !== 'page')) return undefined
-  if (outcome.ok) return { issue: 241, explains: true }
+  if (outcome.ok && (key === 'hooks' || outcome.pollWithinBudget === true)) return { issue: 241, explains: true }
   const explains = key === 'hooks'
     ? outcome.over > 0 && outcome.failedRuns === 0 && outcome.maxMs <= 2 * budgetMs
-    : outcome.shown > 0 && outcome.slow > 0 && outcome.slowNotQueued === 0 && outcome.failedAnswers === 0
+    : outcome.pollWithinBudget === true && outcome.shown > 0 && outcome.slow > 0 && outcome.slowNotQueued === 0 && outcome.failedAnswers === 0
   return { issue: 241, explains }
 }
 

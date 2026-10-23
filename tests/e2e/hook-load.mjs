@@ -4,7 +4,8 @@ import { homedir, tmpdir, userInfo } from 'node:os'
 import { join } from 'node:path'
 import { performance } from 'node:perf_hooks'
 import { fileURLToPath } from 'node:url'
-import { hookLoadMarker, leftoverProcesses, makeRedact, percentile, redactDeep, tallyOf } from './lib/soak-report.mjs'
+import { hookLoadMarker, leftoverProcesses, makeRedact, percentile, queuedSessions, redactDeep, tallyOf } from './lib/soak-report.mjs'
+import { processList, stopTree } from './lib/processes.mjs'
 
 process.stdout.on('error', () => {})
 process.stderr.on('error', () => {})
@@ -63,52 +64,6 @@ const between = (random, [low, high]) => low + Math.floor(random() * (high - low
 const kilobytes = bytes => `${Math.round(bytes / 1024)} KB`
 const firstLine = error => String(error?.message ?? error).split(/\r?\n/)[0]
 
-// Every process running now, with its creation time where available, and the lister's own pid. The
-// lister starts as every e2e child does, inside a world (lib/spawn.mjs); Linux reads /proc instead.
-const processList = async ({ spawnIsolated, world }) => {
-  if (process.platform === 'linux') {
-    const list = []
-    for (const entry of readdirSync('/proc')) {
-      if (!/^\d+$/.test(entry)) continue
-      try {
-        const stat = readFileSync(`/proc/${entry}/stat`, 'utf8')
-        const close = stat.lastIndexOf(')')
-        const fields = stat.slice(close + 2).split(' ')
-        list.push({ pid: Number(entry), ppid: Number(fields[1]), started: Number(fields[19]), name: stat.slice(stat.indexOf('(') + 1, close), command: readFileSync(`/proc/${entry}/cmdline`, 'utf8').split('\0').join(' ') })
-      } catch {}
-    }
-    return { list }
-  }
-  const isWindows = process.platform === 'win32'
-  const [file, args] = isWindows
-    ? ['powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', '[Console]::OutputEncoding = [Text.Encoding]::UTF8; Get-CimInstance Win32_Process | Select-Object ProcessId,ParentProcessId,Name,CommandLine,@{Name="started";Expression={if ($null -ne $_.CreationDate) { ([DateTimeOffset]$_.CreationDate).ToUnixTimeMilliseconds() }}} | ConvertTo-Json -Compress']]
-    : ['ps', ['-axww', '-o', 'pid=,ppid=,comm=,command=']]
-  const child = spawnIsolated(file, args, { env: world.env, cwd: world.root, stdio: ['ignore', 'pipe', 'pipe'] })
-  const chunks = []
-  let size = 0, isTooBig = false, isTimedOut = false
-  child.stdout.on('data', chunk => {
-    size += chunk.length
-    if (size > 64 * MEGABYTE) { isTooBig = true; child.kill('SIGKILL') } else chunks.push(chunk)
-  })
-  child.stderr.resume()
-  // A world's fresh profile folders give PowerShell a cold start.
-  const timer = setTimeout(() => { isTimedOut = true; child.kill('SIGKILL') }, 60000)
-  const status = await new Promise(done => {
-    child.once('error', error => done(error.code ?? 'error'))
-    child.once('close', (code, signal) => done(isTooBig ? 'over 64 MB of output' : isTimedOut ? 'no answer in 60 s' : signal ? `stopped by ${signal}` : code === 0 ? 0 : `exit ${code}`))
-  })
-  clearTimeout(timer)
-  if (status !== 0) throw new Error(`the process list could not be read (${status})`)
-  const stdout = Buffer.concat(chunks).toString('utf8')
-  const list = isWindows
-    ? [JSON.parse(stdout)].flat().map(one => ({ pid: one.ProcessId, ppid: one.ParentProcessId, started: typeof one.started === 'number' ? one.started : undefined, name: one.Name ?? '', command: one.CommandLine ?? '' }))
-    : stdout.split('\n').flatMap(line => {
-      const found = /^\s*(\d+)\s+(\d+)\s+(\S+)\s+(.*)$/.exec(line)
-      return found ? [{ pid: Number(found[1]), ppid: Number(found[2]), name: found[3], command: found[4] }] : []
-    })
-  return { list, lister: child.pid }
-}
-
 // The JSON report, through a temporary file and a rename; Windows refuses a rename onto a file another
 // program has open, so that is retried briefly.
 const writeJson = (dir, value) => {
@@ -158,7 +113,6 @@ const hookLoad = async ({ out, isStdinStop }) => {
   // Stopping: a signal, stdin when asked, or the hard deadline. Every wait wakes at once, and the
   // run still closes its world and looks for leftover processes.
   const stopper = new AbortController()
-  let isClosing = false
   const wakers = new Set()
   const sleep = ms => new Promise(done => {
     const wake = () => { clearTimeout(timer); wakers.delete(wake); done() }
@@ -170,11 +124,26 @@ const hookLoad = async ({ out, isStdinStop }) => {
     report.status = status
     stopper.abort()
     for (const wake of [...wakers]) wake()
-    // Teardown is already under way; a deadline only wakes waits, never starts it again.
-    if (isClosing) return
-    setTimeout(() => {
+    // The fallback also covers a world whose cleanup is already waiting on a stuck child.
+    setTimeout(async () => {
       problem('The run did not finish within 90 seconds of being stopped and was closed from outside.')
+      let hasCount = false
+      const giveUp = setTimeout(() => {
+        report.notes.push(hasCount ? 'Closing the stopped world did not finish within 20 seconds.' : 'Stopping the process tree did not finish within 20 seconds; the stopped count is unknown.')
+        save()
+        process.exit(1)
+      }, 20000)
+      try {
+        const stopped = await stopTree({ spawnIsolated, makeWorld, rootPid: process.pid, roots })
+        const names = Object.entries(stopped.names).map(([name, count]) => `${name} ${count}`).join(', ') || 'none'
+        report.notes.push(stopped.remaining === undefined
+          ? `${stopped.stopped} processes of this run were sent a kill (${names}); whether any remain is unknown: ${stopped.unchecked}.`
+          : `${stopped.stopped} processes of this run were stopped (${names}); ${stopped.remaining} remain.`)
+        hasCount = true
+        await world?.close()
+      } catch (error) { report.notes.push(`The process tree could not be stopped and counted: ${firstLine(error)}`) }
       save()
+      clearTimeout(giveUp)
       process.exit(1)
     }, 90000).unref()
   }
@@ -208,12 +177,20 @@ const hookLoad = async ({ out, isStdinStop }) => {
     redactions.push(['<world>', world.root], ['<world>', realpathSync.native(world.root)])
     const pendingFolder = join(world.home, '.agent-board', 'pending')
     const queuedNow = () => { try { return readdirSync(pendingFolder).filter(name => name.endsWith('.json')).length } catch { return 0 } }
+    const sessionsQueuedNow = () => {
+      try {
+        return queuedSessions(readdirSync(pendingFolder).filter(name => name.endsWith('.json')).map(name => {
+          try { return { name, text: readFileSync(join(pendingFolder, name), 'utf8') } } catch { return { name } }
+        }))
+      } catch { return new Set() }
+    }
     const server = await serve.start(world, [], { lifetimeMs: size.seconds * 1000 + 6 * 60000, idleMinutes: Math.ceil(size.seconds / 60) + 10 })
     const token = new URL(server.url).searchParams.get('t')
     secrets.push(server.url, new URL(server.url).search, token)
     // The page's own poll interval, read from the page the server sends.
     await server.page()
     const pollMs = server.pollMs
+    const pollWithinBudget = Number.isFinite(pollMs) && pollMs <= PAGE_MS
 
     // The first hook of a host installs that host's hooks, so each host runs once alone first.
     for (const host of hookHosts) {
@@ -269,11 +246,16 @@ const hookLoad = async ({ out, isStdinStop }) => {
     // A 500 ms gap matches the soak and puts about a few open pages' load on the server. Each hook
     // that returned waits until an answer shows its session working (after the start event) or waiting (after Stop).
     const expected = new Set()
+    const noteQueued = () => {
+      const queued = sessionsQueuedNow()
+      for (const one of expected) if (queued.has(one.id)) one.isQueued = true
+    }
     const observerEnd = new AbortController()
     const board = new URL('/api/board', server.url)
     const observe = async () => {
       while (!observerEnd.signal.aborted) {
         if (expected.size === 0) { await sleep(OBSERVE_GAP_MS); continue }
+        noteQueued()
         const start = since()
         let model
         try {
@@ -282,6 +264,7 @@ const hookLoad = async ({ out, isStdinStop }) => {
           else problem(`The page server answered a poll with ${response.status}.`)
         } catch (error) { if (!observerEnd.signal.aborted) problem(`A poll got no answer: ${firstLine(error)}`) }
         const at = since()
+        noteQueued()
         answers.count += 1
         if (model === undefined) answers.failed += 1
         else {
@@ -298,7 +281,7 @@ const hookLoad = async ({ out, isStdinStop }) => {
     }
     const shown = (id, host, isWorking, returnedAt) => new Promise(resolve => {
       if (!isRunning()) return resolve({ host, isCut: true })
-      const one = { id, host, isWorking, returnedAt, done: result => { clearTimeout(timer); stopper.signal.removeEventListener('abort', cut); expected.delete(one); resolve(result) } }
+      const one = { id, host, isWorking, returnedAt, isQueued: sessionsQueuedNow().has(id), done: result => { clearTimeout(timer); stopper.signal.removeEventListener('abort', cut); expected.delete(one); resolve({ ...result, isQueued: one.isQueued }) } }
       const timer = setTimeout(() => one.done({ host, isMissed: true }), SEEN_GIVE_UP_MS)
       const cut = () => one.done({ host, isCut: true })
       stopper.signal.addEventListener('abort', cut)
@@ -325,9 +308,8 @@ const hookLoad = async ({ out, isStdinStop }) => {
             if (!isOk) problem(`A ${host} ${event} hook exited ${result.status}: ${(result.stderr || result.stdout).trim().split(/\r?\n/)[0]}`)
           } catch (error) { problem(`A ${host} ${event} hook failed: ${firstLine(error)}`) }
           runs.push({ host, event, ms: Math.round(performance.now() - start), isOk })
-          // Whether any hook event sat in the queue when this one returned: a queued event reaches
-          // the page only when a later hook applies it.
-          if (isOk) { const isQueued = queuedNow() > 0; seen.push({ ...await shown(id, host, isWorking, since()), isQueued }) }
+          // Only this session's queued event explains its late report, at return or a later poll.
+          if (isOk) seen.push(await shown(id, host, isWorking, since()))
           if (since() < endAt) await sleep(between(random, gap))
         }
       }
@@ -381,19 +363,20 @@ const hookLoad = async ({ out, isStdinStop }) => {
     const slowNotQueued = slow.filter(one => !one.isQueued).length
     const slowBy = hookHosts.map(host => `${host} ${slow.filter(one => one.host === host).length}`).join(', ')
     outcomes.page = {
-      ok: shownMs.length > 0 && late === 0 && missed === 0,
+      ok: pollWithinBudget && shownMs.length > 0 && late === 0 && missed === 0,
       shown: shownMs.length,
       slow: slow.length,
       slowNotQueued,
       failedAnswers: answers.failed,
-      line: `${seen.length} reports: shown after p50 ${percentile(shownMs, 0.5) ?? '?'} ms, p95 ${percentile(shownMs, 0.95) ?? '?'} ms, max ${shownMs.length ? Math.max(...shownMs) : '?'} ms; ${late} later than ${PAGE_MS} ms (the page polls every ${pollMs} ms), ${missed} not shown within ${SEEN_GIVE_UP_MS / 1000} s.${slow.length ? ` Of the late and missed ${slow.length} (${slowBy}), ${slow.length - slowNotQueued} came back while hook events were queued.` : ''}`,
+      pollWithinBudget,
+      line: `${seen.length} reports: shown after p50 ${percentile(shownMs, 0.5) ?? '?'} ms, p95 ${percentile(shownMs, 0.95) ?? '?'} ms, max ${shownMs.length ? Math.max(...shownMs) : '?'} ms; ${late} later than ${PAGE_MS} ms (the page polls every ${pollMs ?? '?'} ms, ${pollWithinBudget ? 'within' : 'outside'} the ${PAGE_MS} ms budget), ${missed} not shown within ${SEEN_GIVE_UP_MS / 1000} s.${slow.length ? ` Of the late and missed ${slow.length} (${slowBy}), ${slow.length - slowNotQueued} came back while that session's own event was queued.` : ''}`,
     }
     const isUnderCaps = !hasSampleError && peaks.progressBytes > 0 && peaks.progressBytes <= CAPS.progressBytes && peaks.inboxFiles <= CAPS.inboxFiles && peaks.inboxBytes <= CAPS.inboxBytes && peaks.captures <= CAPS.captures && peaks.monthBytes <= CAPS.monthBytes
     outcomes.caps = {
       ok: isUnderCaps,
       line: `At most: progress.md ${kilobytes(peaks.progressBytes)} (cap 512 KB), progress-inbox ${peaks.inboxFiles} files and ${kilobytes(peaks.inboxBytes)} (caps 1,000 files and 1.5 MB), ${peaks.captures} question capture files (cap 16), the largest month file ${kilobytes(peaks.monthBytes)} (cap 1 MB); all the board's other files beside progress.md ${kilobytes(peaks.companionBytes)}, ${peaks.queued} queued hook events.${peaks.progressBytes === 0 ? ' No progress.md data was measured.' : ''}${hasSampleError ? ' A storage sample could not be read.' : ''}`,
     }
-    report.stats = { runs: runs.length, turns: Math.floor(runs.length / 2), hooks: { p50: percentile(times, 0.5), p95: percentile(times, 0.95), max: times.length ? Math.max(...times) : undefined, byHost }, page: { reports: seen.length, p50: percentile(shownMs, 0.5), p95: percentile(shownMs, 0.95), max: shownMs.length ? Math.max(...shownMs) : undefined, late, missed, slow: slow.length, slowNotQueued, pollMs }, answers: { count: answers.count, failed: answers.failed, p50: percentile(answers.ms, 0.5), p95: percentile(answers.ms, 0.95), max: answers.ms.length ? Math.max(...answers.ms) : undefined }, peaks, hookErrors: codes }
+    report.stats = { runs: runs.length, turns: Math.floor(runs.length / 2), hooks: { p50: percentile(times, 0.5), p95: percentile(times, 0.95), max: times.length ? Math.max(...times) : undefined, byHost }, page: { reports: seen.length, p50: percentile(shownMs, 0.5), p95: percentile(shownMs, 0.95), max: shownMs.length ? Math.max(...shownMs) : undefined, late, missed, slow: slow.length, slowNotQueued, pollMs, pollWithinBudget }, answers: { count: answers.count, failed: answers.failed, p50: percentile(answers.ms, 0.5), p95: percentile(answers.ms, 0.95), max: answers.ms.length ? Math.max(...answers.ms) : undefined }, peaks, hookErrors: codes }
   } catch (error) {
     report.status = 'failed'
     problem(`The run stopped on an error: ${firstLine(error)}`)
@@ -403,7 +386,6 @@ const hookLoad = async ({ out, isStdinStop }) => {
   // tree may be left after 30 s, or 10 s when stopped: no descendant of this process, and nothing
   // whose command line names the world's folder, which also finds a worker whose parent is gone.
   const closedAt = new Date().toISOString()
-  isClosing = true
   try { await world?.close() } catch (error) { problem(`The world did not close cleanly: ${firstLine(error?.errors?.[0] ?? error)}`) }
   if (world !== undefined) {
     const leftoverWaitMs = stopper.signal.aborted || report.status === 'failed' ? 10000 : LEFTOVER_WAIT_MS
