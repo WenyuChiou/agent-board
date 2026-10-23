@@ -115,17 +115,23 @@ export const parseCapture = (text: string, hash: string): QuestionCapture | null
 // A stale mutable index cannot erase an immutable source or reverse its resolution receipt.
 export const withCaptures = (ledger: QuestionLedger, captures: readonly QuestionCapture[]): QuestionLedger => {
   const records = ledger.records.map(record => ({ ...record }))
+  // Each id to its first record, which a search of the list would find; a board holds thousands (#416).
+  const byId = new Map<string, QuestionRecord>()
+  for (const record of records) if (!byId.has(record.id)) byId.set(record.id, record)
   for (const capture of captures) {
-    const previous = records.find(record => record.id === capture.record.id)
-    if (previous === undefined) records.push({ ...capture.record })
-    else {
+    const previous = byId.get(capture.record.id)
+    if (previous === undefined) {
+      const record = { ...capture.record }
+      records.push(record)
+      byId.set(record.id, record)
+    } else {
       if (previous.source === undefined) previous.source = capture.record.source
       if (capture.record.producerRevisions !== undefined) previous.producerRevisions = [...new Set([...(previous.producerRevisions ?? []), ...capture.record.producerRevisions])]
       if (capture.record.producerSources !== undefined) previous.producerSources = [...new Set([...(previous.producerSources ?? []), ...capture.record.producerSources])]
     }
   }
   for (const capture of captures) {
-    const record = records.find(one => one.id === capture.record.id)
+    const record = byId.get(capture.record.id)
     if (record === undefined) continue
     if (capture.disposition === 'archived') record.isArchived = true
     if (capture.disposition === 'resolved') {
@@ -136,6 +142,31 @@ export const withCaptures = (ledger: QuestionLedger, captures: readonly Question
     }
   }
   return { ...ledger, next: records.reduce((next, record) => Math.max(next, Number(record.id.slice(record.id.lastIndexOf(':') + 1)) + 1), ledger.next), records }
+}
+
+// The copies a question pass keeps before it writes the ledger, in the order of `observed`: an
+// open question whose copy is not among `captures` yet, and a question resolved since `current`
+// was read. Each capture is serialised once, not once for every record: on a board with
+// thousands of each, comparing them pair by pair kept the first poll from reaching the host for
+// longer than Claude Code waits before it unloads the mod (#416).
+export const copiesToKeep = (current: QuestionLedger, observed: QuestionLedger, captures: readonly QuestionCapture[]): { record: QuestionRecord; disposition: 'unresolved' | 'resolved' }[] => {
+  const held = new Set(captures.map(capture => captureJson(capture.record, capture.disposition)))
+  const openIds = new Set(current.records.filter(record => record.isUnresolved === true).map(record => record.id))
+  return observed.records.flatMap(record => {
+    if (record.source === undefined) return []
+    const kept: { record: QuestionRecord; disposition: 'unresolved' | 'resolved' }[] = []
+    if (record.isUnresolved && !held.has(captureJson(record, 'unresolved'))) kept.push({ record, disposition: 'unresolved' })
+    if (record.isUnresolved === false && openIds.has(record.id)) kept.push({ record, disposition: 'resolved' })
+    return kept
+  })
+}
+
+// The questions a pass retires, in the order of `current`: one that was on the board and now is
+// neither waiting there nor resolved, and one whose resolution `resolvedQuestionsToRetire` lets go.
+export const identitiesToRetire = (current: QuestionLedger, observed: QuestionLedger, retiredResolutions: readonly string[]): string[] => {
+  const still = new Set(observed.records.filter(record => (record.isPresent && record.isWaiting) || record.resolvedAt !== undefined).map(record => record.id))
+  const resolutions = new Set(retiredResolutions)
+  return current.records.filter(old => (old.isPresent && !still.has(old.id)) || resolutions.has(old.id)).map(old => old.id)
 }
 
 // The folder keeps at least this many of each kind of question file (#156): the newest by

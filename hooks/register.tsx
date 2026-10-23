@@ -124,7 +124,7 @@ import type { ListedFile, StoreRecord } from './retention'
 import { INBOX_DROPPED_FILE } from './hook-reporters'
 import { agentName, answeredJson, answeredPath, buildView, mirrorMatchesTask, parseAnswered, parseSeen, seenJson, seenPath, statusLine, viewCache, withAnswered, withSeen } from './view'
 import type { StepRef, TaskRef, TaskRow, View, WaitingItem } from './view'
-import { acknowledgementKeys, archiveQuestionsKept, captureHashOf, captureJson, capturePath, emptyQuestions, parseCapture, withCaptures, isAskedBy, isQuestionProof, isQuestionSnapshot, isTornLedger, migratedAnswered, observeQuestions, parseQuestions, prunableCaptures, prunableProofs, questionProofJson, questionProofOf, questionProofPath, questionWords, questionsJson, questionsPath, resolveQuestion, resolvedQuestionsToRetire, QUESTION_FILES_KEPT } from './questions'
+import { acknowledgementKeys, archiveQuestionsKept, captureHashOf, captureJson, capturePath, copiesToKeep, emptyQuestions, identitiesToRetire, parseCapture, withCaptures, isAskedBy, isQuestionProof, isQuestionSnapshot, isTornLedger, migratedAnswered, observeQuestions, parseQuestions, prunableCaptures, prunableProofs, questionProofJson, questionProofOf, questionProofPath, questionWords, questionsJson, questionsPath, resolveQuestion, resolvedQuestionsToRetire, QUESTION_FILES_KEPT } from './questions'
 import type { HeldCapture, HeldProof, QuestionAnswerEvidence, QuestionCapture, QuestionProofs, QuestionRecord } from './questions'
 
 const PANE = 'agent-board'
@@ -543,11 +543,19 @@ const pollQuestions = async ($: EngineInterface, path: string, projects: readonl
     const mirror = await read($, mine)
     const answered = await read($, hiddenAsks)
     const pending = [...(await pendingTurns($)), ...captured]
-    // A delayed save keeps the turn's age, including when a normal poll saw its block first.
+    // A delayed save keeps the turn's age, including when a normal poll saw its block first. Each
+    // turn is serialised once, not once for every record (#416).
+    const capturedAt = new Map<string, number>()
+    for (const turn of captured) {
+      const time = turn.sourceAt ?? turn.at
+      if (!Number.isFinite(time) || time < 0) continue
+      const json = JSON.stringify(turn)
+      capturedAt.set(json, Math.min(capturedAt.get(json) ?? time, time))
+    }
     const observe = (current: ReturnType<typeof emptyQuestions>, proofs: QuestionProofs | undefined): ReturnType<typeof emptyQuestions> => {
       const observed = observeQuestions(current, projects, mirror, answered, at, isSettled, incarnation, proofs, pending, answeredTurns).ledger
       return { ...observed, records: observed.records.map(record => {
-        const times = captured.filter(turn => record.producerSources?.includes(JSON.stringify(turn))).map(turn => turn.sourceAt ?? turn.at).filter(time => Number.isFinite(time) && time >= 0)
+        const times = (record.producerSources ?? []).flatMap(source => capturedAt.get(source) ?? [])
         return times.length === 0 ? record : { ...record, firstObserved: Math.min(record.firstObserved, ...times) }
       }) }
     }
@@ -604,15 +612,8 @@ const pollQuestions = async ($: EngineInterface, path: string, projects: readonl
       const baseline = resolveId === undefined ? current : resolveQuestion(current, resolveId, at)
       let observed = observe(baseline, proofs ?? undefined)
       await breathe($)
-      for (const record of observed.records) {
-        if (record.source === undefined) continue
-        if (record.isUnresolved && !captures.some(capture => captureJson(capture.record, capture.disposition) === captureJson(record, 'unresolved'))) await keepQuestionCapture($, path, record, 'unresolved')
-        if (record.isUnresolved === false && current.records.some(old => old.id === record.id && old.isUnresolved === true)) await keepQuestionCapture($, path, record, 'resolved')
-      }
-      const retiredResolutions = resolvedQuestionsToRetire(baseline, projects, mirror, pending)
-      for (const old of current.records) {
-        if ((old.isPresent && !observed.records.some(record => record.id === old.id && ((record.isPresent && record.isWaiting) || record.resolvedAt !== undefined))) || retiredResolutions.includes(old.id)) await keepQuestionProof($, path, 'retired', sha256(old.id))
-      }
+      for (const copy of copiesToKeep(current, observed, captures)) await keepQuestionCapture($, path, copy.record, copy.disposition)
+      for (const id of identitiesToRetire(current, observed, resolvedQuestionsToRetire(baseline, projects, mirror, pending))) await keepQuestionProof($, path, 'retired', sha256(id))
       proofs = await questionProofsFor($, path)
       if (proofs === null) return AGAIN
       const keptCaptures = await questionCapturesFor($, path)
@@ -655,8 +656,10 @@ const pollQuestions = async ($: EngineInterface, path: string, projects: readonl
         const latestProofs = await questionProofsFor($, path)
         if (latestProofs === null) return AGAIN
         const next = migratedAnswered(current, kept, latestProofs.consumed)
+        const nextKeys = new Set(next)
+        const consumed = new Set(latestProofs.consumed)
         for (const key of current) {
-          if (next.includes(key) && Object.hasOwn(kept.legacy, key) && !latestProofs.consumed.includes(sha256(key))) await keepQuestionProof($, path, 'consumed', sha256(key))
+          if (nextKeys.has(key) && Object.hasOwn(kept.legacy, key) && !consumed.has(sha256(key))) await keepQuestionProof($, path, 'consumed', sha256(key))
         }
         return answeredJson(next) === answeredJson(current) ? null : answeredJson(next)
       })
