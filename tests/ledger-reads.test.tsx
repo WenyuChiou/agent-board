@@ -426,6 +426,28 @@ test('archiving a block marks only its own questions, not those of another sessi
   expect(ledgerRecords(world).filter(record => record.isArchived).map(record => record.words)).toEqual(['First session question, OK?'])
 })
 
+test('an ended block whose hidden question\'s annotation now repeats another step\'s is not archived, and stays with both questions', async ($, on) => {
+  const first = `${'a'.repeat(64)}:1`
+  const second = `${'b'.repeat(64)}:1`
+  const boardA = `## demo\n${block('a1b2c301', 'ended', 96, `- [x] Draft the synthetic plan\n- [?] Publish the first synthetic plan, OK?\n<!-- question=${first} -->\n- [?] Publish the second synthetic plan, OK?\n<!-- question=${second} -->`)}`
+  const world = makeWorld([[FILE, boardA]])
+  world.env = english
+  seedAsked(world, boardA)
+  const hidden = ledgerRecords(world).find(record => record.producer === second)!
+  world.files.set(ANSWERED, JSON.stringify({ answered: [hidden.id] }))
+  world.files.set(FILE, boardA.replace(second, first))
+  const clock = engineBeneath(on, world)
+  await $.session.start(START)
+  await clock.advance(2000)
+  await clock.advance(2000)
+  await $.command.run(TIDY)
+  expect(world.files.get(FILE)).toContain('session=a1b2c301')
+  expect(world.files.get(FILE)).toContain('- [?] Publish the first synthetic plan, OK?')
+  expect(world.files.get(FILE)).toContain('- [?] Publish the second synthetic plan, OK?')
+  expect(capturesOf(world).filter(copy => copy.disposition === 'archived')).toEqual([])
+  expect(ledgerRecords(world).filter(record => record.isArchived)).toEqual([])
+})
+
 test('pruning reads the files afresh, so a copy damaged on disk since the polls looked is not the newer copy', async ($, on) => {
   const board = `## demo\n${block('a1b2c301', 'waiting', 1, '- [?] Publish the first plan, OK?')}`
   const world = makeWorld([[FILE, board]])

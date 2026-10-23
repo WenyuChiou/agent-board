@@ -68,11 +68,15 @@ export const archiveQuestionsKept = (projects: readonly ProgressProject[], ref: 
   if (tasks.length !== 1) return false
   const task = tasks[0]
   if (task === undefined) return false
+  // The polls drop a step whose token another step repeats, so a waiting step with a repeated
+  // token has no live identity, and an old copy of it cannot justify archiving the block.
+  const tokens = task.steps.map(step => step.questionToken ?? '').filter(token => token !== '')
+  if (task.steps.some(step => step.status === 'waiting' && (step.questionToken ?? '') !== '' && tokens.filter(token => token === step.questionToken).length > 1)) return false
   const scope = questionScope(ref.project, task.auto?.agent ?? 'manual', task.auto?.session ?? task.title)
   // The copy no longer holds the title, so the record is tied to this task by its title and
   // session; two hand-kept tasks that ask the same have the same marks.
   return task.steps.filter(step => step.status === 'waiting').every(step => ledger.records.some(record => record.isUnresolved
-    ? isAskedBy(record, ref) && record.source?.text === step.text && record.source.data === sourceData(task)
+    ? isAskedBy(record, ref) && record.source?.text === step.text && record.source.data === sourceData(task) && (record.producer ?? '') === (step.questionToken ?? '')
     : record.resolvedAt !== undefined && record.source !== undefined && record.scope === scope && record.words === questionWords(step.text) && (record.producer ?? '') === (step.questionToken ?? '') && !ledger.records.some(other => other.isUnresolved && other.scope === scope && other.words === questionWords(step.text))))
 }
 // The questions of one block in the ledger: its project and title and, for an agent's block, its

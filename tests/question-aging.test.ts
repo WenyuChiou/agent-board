@@ -421,3 +421,24 @@ test('retaining a question changes no reminder identity while a new producer inc
   const renewed = observeQuestions(completed, projects, null, [], START + 2, true, 'remind:3').ledger
   expect(remindersOf(buildView(projects, [], null, START + 2, 0, {}, STRINGS.en, [], {}, renewed), told, START + 2, '2026-10-01', STRINGS.en).length).toBe(1)
 })
+
+test('archiving a block refuses when a step\'s question annotation changed or now repeats another step\'s, so a kept question keeps its own identity', () => {
+  const first = `${'a'.repeat(64)}:1`
+  const second = `${'b'.repeat(64)}:1`
+  const done = `${'d'.repeat(64)}:1`
+  const text = board(`- [x] Synthetic preparation\n<!-- question=${done} -->\n- [?] Publish the first synthetic plan, OK?\n<!-- question=${first} -->\n- [?] Publish the second synthetic plan, OK?\n<!-- question=${second} -->`).replace('state=waiting', 'state=ended')
+  const projects = parseProgress(text)
+  expect(projects[0]!.tasks[0]!.steps.map(step => step.questionToken)).toEqual([done, first, second])
+  const ledger = observeQuestions(emptyQuestions(), projects, null, [], START, true, 'seed').ledger
+  const ref = { project: 'demo', title: 'Release', line: 2, session: 'a1b2c3d4' }
+  expect(archiveQuestionsKept(projects, ref, ledger)).toBe(true)
+  expect(archiveQuestionsKept(parseProgress(text.replace(second, `${'c'.repeat(64)}:1`)), ref, ledger)).toBe(false)
+  expect(archiveQuestionsKept(parseProgress(text.replace(second, first)), ref, ledger)).toBe(false)
+  // A finished step that now repeats a waiting step's token leaves every mark and waiting token
+  // as it was, but the polls no longer see the waiting step's identity.
+  expect(archiveQuestionsKept(parseProgress(text.replace(done, first)), ref, ledger)).toBe(false)
+  // Two finished steps that share a token leave the waiting steps' identities as they were.
+  const twice = board(`- [x] Synthetic preparation\n<!-- question=${done} -->\n- [x] Synthetic review\n<!-- question=${'e'.repeat(64)}:1 -->\n- [?] Publish the first synthetic plan, OK?\n<!-- question=${first} -->`).replace('state=waiting', 'state=ended')
+  const kept = observeQuestions(emptyQuestions(), parseProgress(twice), null, [], START, true, 'seed').ledger
+  expect(archiveQuestionsKept(parseProgress(twice.replace(`${'e'.repeat(64)}:1`, done)), ref, kept)).toBe(true)
+})
