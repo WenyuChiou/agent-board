@@ -128,7 +128,7 @@ import type { ListedFile, StoreRecord } from './retention'
 import { INBOX_DROPPED_FILE } from './hook-reporters'
 import { agentName, answeredJson, answeredPath, buildView, mirrorMatchesTask, parseAnswered, parseSeen, seenJson, seenPath, statusLine, viewCache, withAnswered, withSeen } from './view'
 import type { StepRef, TaskRef, TaskRow, View, WaitingItem } from './view'
-import { acknowledgementKeys, archiveQuestionsKept, captureHashOf, captureJson, capturePath, cutOffScopes, emptyQuestions, parseCapture, withCaptures, isAskedBy, isQuestionProof, isQuestionSnapshot, isTornLedger, ledgerLeftovers, migratedAnswered, observeQuestions, parseQuestions, prunableCaptures, prunableProofs, questionFilesKey, questionProofJson, questionProofOf, questionProofPath, questionScope, questionWords, questionsJson, questionsPath, resolveQuestion, resolvedQuestionsToRetire, QUESTION_FILES_KEPT } from './questions'
+import { acknowledgementKeys, archiveQuestionsKept, captureHashOf, captureJson, capturePath, cutOffScopes, emptyQuestions, parseCapture, withCaptures, isAskedBy, isQuestionProof, isQuestionSnapshot, isTornLedger, ledgerLeftovers, migratedAnswered, observeQuestions, ownQuestionsKey, parseQuestions, prunableCaptures, prunableProofs, questionFilesKey, questionProofJson, questionProofOf, questionProofPath, questionScope, questionWords, questionsJson, questionsPath, resolveQuestion, resolvedQuestionsToRetire, QUESTION_FILES_KEPT } from './questions'
 import type { HeldCapture, HeldProof, QuestionAnswerEvidence, QuestionCapture, QuestionProofs, QuestionRecord } from './questions'
 
 const PANE = 'agent-board'
@@ -760,11 +760,12 @@ const pollQuestions = async ($: EngineInterface, path: string, projects: readonl
 }
 
 // What an idle question pass is made from (#156): the files beside progress.md it reads
-// (`questionFilesKey`), the inbox turns, this session's list, the asks it hides and the answers
-// it still carries. A pass that went through cleanly is not made again until one of them moves,
-// so a quiet poll lists two folders instead of reading the question files. Null, so the pass is
-// made, while a file there was just written or the folder does not list: a pass that cannot
-// list still counts toward the questions problem, as before.
+// (`questionFilesKey`), the inbox turns, the questions of this session's list
+// (`ownQuestionsKey`), the asks it hides and the answers it still carries. A pass that went
+// through cleanly is not made again until one of them moves, so a quiet poll lists two folders
+// instead of reading the question files. Null, so the pass is made, while a file there was just
+// written or the folder does not list: a pass that cannot list still counts toward the questions
+// problem, as before.
 let questionsSeen: string | null = null
 const questionsKey = async ($: EngineInterface, path: string, batch: readonly unknown[]): Promise<string | null> => {
   const at = await $.clock.now()
@@ -772,7 +773,7 @@ const questionsKey = async ($: EngineInterface, path: string, batch: readonly un
   const files = entries === null ? null : questionFilesKey(path, answeredPath(path), entries, at, POLL_MS)
   if (files === null) return null
 
-  return JSON.stringify([path, files, await pendingTurns($), await read($, mine), await read($, hiddenAsks), batch])
+  return JSON.stringify([path, files, await pendingTurns($), ownQuestionsKey(await read($, mine)), await read($, hiddenAsks), batch])
 }
 
 const pollAnsweredQuestions = async ($: EngineInterface, path: string, projects: readonly ProgressProject[] | undefined, evidence: readonly AgentTurn[] = []): Promise<void> => {

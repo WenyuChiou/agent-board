@@ -276,6 +276,18 @@ export const questionFilesKey = (
 
 type Observation = { scope: string; session: string; index: number | string; text: string; isWaiting: boolean; producer: string; producerRevisions?: string[]; producerSources?: string[]; source: QuestionSource }
 
+const ownObservations = (mine: ProgressMirror): Observation[] => {
+  const own = shortId(mine.sessionId)
+  const scope = questionScope(mine.project, 'claude', own)
+  return mine.tasks.map((task, index) => ({ scope, session: own, index, text: stepWords(task).trim(), isWaiting: waitsOnYou(mine, task) && task.blocked === null, producer: questionToken(task), source: { kind: 'own', project: mine.project, task: mine.title, context: mine.context, text: stepWords(task).trim(), agent: 'claude', session: own, data: JSON.stringify({ task, title: mine.title, context: mine.context }) } }))
+}
+
+// All a question pass reads from this session's own list: whose it is and the rows it gives.
+// Its times, turn state and background jobs change with every hook of a running session and
+// are left out, so they do not make an idle poll pass again (#416).
+export const ownQuestionsKey = (mine: ProgressMirror | null): string =>
+  JSON.stringify(mine === null ? null : [shortId(mine.sessionId), mine.project, ownObservations(mine)])
+
 const observations = (projects: readonly ProgressProject[], mine: ProgressMirror | null, pending: readonly PendingTurn[], frozen: ReadonlySet<string> = new Set()): Observation[] => {
   const own = mine === null ? '' : shortId(mine.sessionId)
   const rows: Observation[] = []
@@ -295,10 +307,7 @@ const observations = (projects: readonly ProgressProject[], mine: ProgressMirror
       task.steps.forEach((step, index) => rows.push({ scope, session: task.auto?.session ?? '', index, text: step.text, isWaiting: step.status === 'waiting', producer: step.questionToken ?? '', source: { kind: task.auto === null ? 'manual' : 'block', project: project.name, task: task.title, context, text: step.text, agent: task.auto?.agent ?? '', session: task.auto?.session ?? '', data } }))
     }
   }
-  if (mine !== null) {
-    const scope = questionScope(mine.project, 'claude', own)
-    mine.tasks.forEach((task, index) => rows.push({ scope, session: own, index, text: stepWords(task).trim(), isWaiting: waitsOnYou(mine, task) && task.blocked === null, producer: questionToken(task), source: { kind: 'own', project: mine.project, task: mine.title, context: mine.context, text: stepWords(task).trim(), agent: 'claude', session: own, data: JSON.stringify({ task, title: mine.title, context: mine.context }) } }))
-  }
+  if (mine !== null) rows.push(...ownObservations(mine))
   for (const turn of pending) {
     if (!turn.isQuestion || turn.id === undefined) continue
     const scope = questionScope(turn.project, turn.agent, turn.id)

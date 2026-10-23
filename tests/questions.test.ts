@@ -1,12 +1,12 @@
 import { test, expect } from 'claude-code/testing'
 import { parseProgress } from '../hooks/parse'
 import { buildView } from '../hooks/view'
-import { acknowledgementKeys, archiveQuestionsKept, captureJson, emptyQuestions, isAskedBy, isQuestionSnapshot, isTornLedger, ledgerLeftovers, LEDGER_TEMP_MS, migratedAnswered, migrationKey, observeQuestions, parseCapture, parseQuestions, prunableCaptures, prunableProofs, questionFilesKey, questionsJson, resolveQuestion, resolvedQuestionsToRetire, withCaptures } from '../hooks/questions'
+import { acknowledgementKeys, archiveQuestionsKept, captureJson, emptyQuestions, isAskedBy, isQuestionSnapshot, isTornLedger, ledgerLeftovers, LEDGER_TEMP_MS, migratedAnswered, migrationKey, observeQuestions, ownQuestionsKey, parseCapture, parseQuestions, prunableCaptures, prunableProofs, questionFilesKey, questionsJson, resolveQuestion, resolvedQuestionsToRetire, withCaptures } from '../hooks/questions'
 import type { QuestionLedger } from '../hooks/questions'
 import { edited, finished, held, ledgerOf, named, proof, question, reopened } from './fixtures/question-files'
 import { STRINGS } from '../hooks/strings'
 import { sha256 } from '../hooks/sha256'
-import { applyTaskCreate, applyTaskUpdate, emptyMirror, fromTaskList, questionToken } from '../hooks/mirror'
+import { applyTaskCreate, applyTaskUpdate, emptyMirror, fromTaskList, markAnswered, questionToken } from '../hooks/mirror'
 import { markAsked } from '../hooks/digest'
 import { renderAutoBlock } from '../hooks/blocks'
 import { remindersOf } from '../hooks/remind'
@@ -735,4 +735,29 @@ test('the question files key lists the question files in name order, and is null
   ])
   const fresh = entries.map(entry => (entry.name === 'progress-questions.json' ? { ...entry, mtimeMs: now - 1_999 } : entry))
   expect(questionFilesKey(path, '/home/me/.claude/progress-answered.json', fresh, now, 2_000)).toBeNull()
+})
+
+test('the own list\'s part of the idle question key moves with its questions, not with its times, turn state or background jobs', () => {
+  let mirror = emptyMirror('a1b2c3d4-native', 'demo', NOW)
+  mirror = applyTaskCreate(mirror, { subject: 'Ship', metadata: { waiting: 'you', why: 'Ready to publish?' } }, '1', NOW)
+  mirror = applyTaskCreate(mirror, { subject: 'Docs' }, '2', NOW)
+  const key = ownQuestionsKey(mirror)
+  // What every hook of a running session changes, one at a time so a failure names the field.
+  const churn: Array<Partial<typeof mirror>> = [{ updated: NOW + 60_000 }, { isTurnRunning: true }, { state: 'working' }, { backgroundJobs: 2 }, { backgroundJobIds: ['job-1', 'job-2'] }, { backgroundReleases: ['job-0'] }, { backgroundReleaseCount: 1 }]
+  for (const change of churn) expect([change, ownQuestionsKey({ ...mirror, ...change })]).toEqual([change, key])
+  // What a question pass reads: the steps' words and tasks, whether a step still waits, the
+  // list's title and context, and whose list it is.
+  const moved = [
+    applyTaskUpdate(mirror, { taskId: '1', metadata: { why: 'Ready to publish today?' } }, NOW),
+    markAnswered(mirror),
+    applyTaskUpdate(mirror, { taskId: '2', subject: 'Docs again' }, NOW),
+    applyTaskUpdate(mirror, { taskId: '2', status: 'completed' }, NOW),
+    applyTaskUpdate(mirror, { taskId: '2', status: 'deleted' }, NOW),
+    { ...mirror, title: 'Another title' },
+    { ...mirror, context: 'Another context' },
+    { ...mirror, project: 'other' },
+    { ...mirror, sessionId: 'b1b2c3d4-native' },
+    null,
+  ]
+  for (const [index, one] of moved.entries()) expect([index, ownQuestionsKey(one) === key]).toEqual([index, false])
 })
