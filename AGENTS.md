@@ -36,6 +36,8 @@ node scripts/preflight.mjs             # before Ready: base merged, touched test
 
 CI (`.github/workflows/test.yml`, on every pull request and every push to `main`) runs `claude plugin validate --strict .`, `claude plugin test .`, the installer check for the runner's system and the remote reporter tests, on Ubuntu and on Windows; the two `node --test` lines above on Node 22 and 24 on both; the board bundle and released-files checks on Ubuntu; and `tests/npm-package.test.mjs` on Node 22 and 24 on both. `.github/workflows/pr-check.yml` runs `scripts/pr-check.mjs` from `main` on every pull request. CI does not run `tsc -p .`, so run that yourself.
 
+On your own computer, run only the test files your change touches, and only one test run at a time. Never run full suites, long soak runs, mutation sweeps or the L5 busy-machine test (it keeps up to three CPUs busy) there. The exception is `claude plugin test .`, which runs every `tests/*.test.ts` and `tests/*.test.tsx` file: when your change touches one of those files, run it once, alone, before Ready. CI runs the full suites and the busy-machine test on every pull request, and `.github/workflows/soak.yml` runs the soak weekly and on demand. The busy-machine test skips itself unless `CI` is set or `AGENT_BOARD_HEAVY_TESTS=1`.
+
 `.claude-plugin/types/` is written by Claude Code every time it loads the mod from a folder. It is gitignored. Do not edit it. If `tsc -p .` complains about missing files or modules, run `claude --plugin-dir .` once.
 
 If you cannot run `claude` in your environment, say so in your report. Do not claim the checks passed.
