@@ -103,6 +103,7 @@ export const pressTarget = (view: View, button: string, s: Strings = ZH_TW): { k
   if (button === 'section::waiting') return { key: button, revision: '', label: s.sectionWaiting }
   if (button === 'section::due') return { key: button, revision: '', label: s.sectionDue }
   if (button === 'section::recent') return { key: button, revision: '', label: s.sectionRecent }
+  if (button === 'section::health') return { key: button, revision: '', label: s.sectionHealth }
   if (button === 'section::reminder') return { key: button, revision: '', label: s.sectionQuestionReminders }
   if (button === 'section::older') return { key: button, revision: '', label: s.sectionOlderQuestions }
   if (button === 'section::others') return { key: button, revision: '', label: view.current === null ? s.sectionActive : s.sectionOther }
@@ -915,6 +916,8 @@ export const drawPane = (ui: PaneUi, model: PaneModel, actions: PaneActions): Re
       <Text color={palette.muted}>
         {s.progressFileShown}
       </Text>
+      {(view.health?.length ?? 0) > 0 && fold('health', s.sectionHealth, view.health!.length, 'quiet', '')}
+      {isOpen('health') && (view.health ?? []).map(line => muted(line))}
     </Box>
   )
 }

@@ -185,6 +185,7 @@ export type View = {
   active: TaskRow[]
   groups: RowGroup[]
   recent: DoneItem[]
+  health?: string[]
 }
 
 const MINUTE = 60 * 1000
@@ -671,8 +672,9 @@ export const buildView = (
   questions?: QuestionLedger,
   proofs: QuestionProofs | null = { retired: [], consumed: [] },
   pending: readonly PendingTurn[] = [],
+  frozen: ReadonlySet<string> = new Set(),
 ): View => {
-  const observed = questions === undefined ? null : observeQuestions(questions, projects, mine, answered, now, false, 'preview', proofs ?? { retired: [], consumed: [] }, pending)
+  const observed = questions === undefined ? null : observeQuestions(questions, projects, mine, answered, now, false, 'preview', proofs ?? { retired: [], consumed: [] }, pending, [], frozen)
   const marked = new Set(proofs === null ? [] : observed?.marked ?? answered)
   const ownId = mine === null ? '' : shortId(mine.sessionId)
   const waiting: WaitingItem[] = []
@@ -712,6 +714,8 @@ export const buildView = (
       const when = relativeTime(updated, now, s)
       const isComplete = isTaskComplete(task) || task.auto?.state === 'done'
       const isManual = task.auto === null
+      const scope = questionScope(project.name, task.auto?.agent ?? 'manual', task.auto?.session ?? task.title)
+      const isFrozen = frozen.has(scope)
       const lastActive = hasTime(updated) ? updated : seen[taskFingerprint(project.name, task)]
       const days = task.due === null ? null : dueDays(task.due, now)
       const isDue = task.due !== null && days !== null && days <= 14
@@ -720,21 +724,25 @@ export const buildView = (
       // Questions travel with an inactive session rather than asking for a live reply.
       const stale = isStale(task.auto, now)
       const isInactive = !isManual && (isComplete || stale || task.auto?.state === 'ended')
-      if (isInactive) inactiveScopes.set(questionScope(project.name, task.auto?.agent ?? '', task.auto?.session ?? ''), updated)
-      else if (!isManual) liveScopes.add(questionScope(project.name, task.auto?.agent ?? '', task.auto?.session ?? ''))
+      if (isInactive) inactiveScopes.set(scope, updated)
+      else if (!isManual) liveScopes.add(scope)
       const taskQuestions: WaitingItem[] = []
       const keys = task.auto === null || observed === null
         ? blockKeys(task)
-        : task.steps.map((step, index) => step.status === 'waiting' ? observed.keys[questionSlot(questionScope(project.name, task.auto?.agent ?? '', task.auto?.session ?? ''), index)] ?? '' : '')
-      const isAsked = (index: number): boolean => !marked.has(keys[index] ?? '') && observed?.ledger.records.find(record => record.id === keys[index])?.isUnresolved !== false
+        : task.steps.map((step, index) => step.status === 'waiting' ? observed.keys[questionSlot(scope, index)] ?? '' : '')
+      // A cut-off block's steps are not read as questions. It asks only while a question kept from
+      // before the cut is shown in its place, so the block sits where it would whole, and is never
+      // dropped with nothing shown for it.
+      const isKept = isFrozen && (observed?.ledger.records.some(record => record.scope === scope && record.isUnresolved && record.source !== undefined && !marked.has(record.id)) ?? false)
+      const isAsked = (index: number): boolean => isFrozen ? isKept : !marked.has(keys[index] ?? '') && observed?.ledger.records.find(record => record.id === keys[index])?.isUnresolved !== false
       const stageOf = (index: number) => {
-        const id = observed?.keys[questionSlot(questionScope(project.name, task.auto?.agent ?? 'manual', task.auto?.session ?? task.title), index)]
+        const id = observed?.keys[questionSlot(scope, index)]
         return questionAge(observed?.ledger.records.find(record => record.id === id)?.firstObserved ?? 0, now).stage
       }
-      const isPrompt = (index: number): boolean => isAsked(index) && stageOf(index) === 'pending'
+      const isPrompt = (index: number): boolean => !isFrozen && isAsked(index) && stageOf(index) === 'pending'
 
       task.steps.forEach((step, index) => {
-        if (step.status !== 'waiting') return
+        if (step.status !== 'waiting' || isFrozen) return
         const parts = splitNote(step.text)
         taskQuestions.push({
           key: `${key}::${index}`,
@@ -756,7 +764,7 @@ export const buildView = (
           resumeVia: task.auto?.resume ? resumeVia(task.auto.agent) : null,
           reopen: task.auto?.resume ? resumeCommand(task.auto.resume, task.auto.dir, task.auto.agent) : null,
           hideKey: keys[index] ?? '',
-          questionId: observed?.keys[questionSlot(questionScope(project.name, task.auto?.agent ?? 'manual', task.auto?.session ?? task.title), index)],
+          questionId: observed?.keys[questionSlot(scope, index)],
           step: isManual ? { project: name, title, step: step.text, line: step.line, raw: step.raw } : null,
           target: targetOf(task.auto),
           ...(task.auto === null ? {} : { nativeSession: task.auto.resume ?? task.auto.session }),
@@ -1023,7 +1031,7 @@ export const progressBar = (done: number, total: number, width: number): { fille
 export const viewCache = (size = 2): { view: (...args: Parameters<typeof buildView>) => View; built: () => number } => {
   let kept: Array<{ args: readonly unknown[]; key: string; view: View }> = []
   let built = 0
-  const keyOf = (args: readonly unknown[]): string => JSON.stringify(args.map((arg, index) => (index === 6 ? (arg as Strings | undefined)?.lang ?? null : arg ?? null)))
+  const keyOf = (args: readonly unknown[]): string => JSON.stringify(args.map((arg, index) => (index === 6 ? (arg as Strings | undefined)?.lang ?? null : arg instanceof Set ? [...arg] : arg ?? null)))
 
   return {
     view: (...args) => {

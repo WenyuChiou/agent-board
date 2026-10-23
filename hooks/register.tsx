@@ -9,12 +9,16 @@ import type { EngineInterface, PluginOptions, PromptSubmitResult, Register } fro
 
 import type { RenderSurface } from 'claude-code'
 
-import type { ProgressAnswer, ProgressMirror, ProgressPr, ProgressSnapshot, ResolveResult } from '../types'
+import type { CutBlock, ProgressAnswer, ProgressMirror, ProgressPr, ProgressSnapshot, ResolveResult } from '../types'
 import {
   addManualTask,
   confirmMatches,
   confirmTask,
   confirmedTarget,
+  CUT_SETTLE_MS,
+  cutBlockLines,
+  cutOffBlocks,
+  cutOffSpans,
   extractAutoBlock,
   manualTaskCount,
   removeAutoBlock,
@@ -122,7 +126,7 @@ import { keepRecent, liveToldKeys, remindersOf } from './remind'
 import { boardRecords, doneRecord, isExpiredRecord, monthPart, pruneBatch, RETENTION, sizeWarnings, staleFailedInbox, staleStoreTemps, storeBytes } from './retention'
 import { agentName, answeredJson, answeredPath, buildView, mirrorMatchesTask, parseAnswered, parseSeen, seenJson, seenPath, statusLine, viewCache, withAnswered, withSeen } from './view'
 import type { StepRef, TaskRef, TaskRow, View, WaitingItem } from './view'
-import { acknowledgementKeys, archiveQuestionsKept, captureHashOf, captureJson, capturePath, emptyQuestions, parseCapture, withCaptures, isAskedBy, isQuestionProof, isQuestionSnapshot, isTornLedger, ledgerLeftovers, migratedAnswered, observeQuestions, parseQuestions, prunableCaptures, prunableProofs, questionFilesKey, questionProofJson, questionProofOf, questionProofPath, questionWords, questionsJson, questionsPath, resolveQuestion, resolvedQuestionsToRetire, QUESTION_FILES_KEPT } from './questions'
+import { acknowledgementKeys, archiveQuestionsKept, captureHashOf, captureJson, capturePath, cutOffScopes, emptyQuestions, parseCapture, withCaptures, isAskedBy, isQuestionProof, isQuestionSnapshot, isTornLedger, ledgerLeftovers, migratedAnswered, observeQuestions, parseQuestions, prunableCaptures, prunableProofs, questionFilesKey, questionProofJson, questionProofOf, questionProofPath, questionWords, questionsJson, questionsPath, resolveQuestion, resolvedQuestionsToRetire, QUESTION_FILES_KEPT } from './questions'
 import type { HeldCapture, HeldProof, QuestionAnswerEvidence, QuestionCapture, QuestionProofs, QuestionRecord } from './questions'
 
 const PANE = 'agent-board'
@@ -378,6 +382,7 @@ let isPrunePending = false
 let questionWrite = 0
 let questionFailures = 0
 let questionRaces = 0
+let questionFailedSince: number | null = null
 // Board writes and prompt receipts are already committed when settling can race.
 // Keep their evidence through ordinary polls rather than replaying intake without it.
 const answeredPending = new Map<string, QuestionAnswerEvidence>()
@@ -521,7 +526,8 @@ const pruneQuestionFiles = async ($: EngineInterface, path: string): Promise<voi
   // A few dozen paths to a process keeps one command line far below the system's limit.
   for (let from = 0; from < sweep.length; from += 50) if (!(await removeFiles($, sweep.slice(from, from + 50), isWin))) return
 }
-// Torn ledgers past the newest few, and temporary copies of a ledger write a day old (#156). The
+// Torn ledgers past the newest few or over a week old, and temporary copies of a ledger write a
+// day old (#156). The
 // ledger is read only when a temporary copy is old enough to go, since one goes only while the
 // ledger itself reads. A torn file is read first: when putting a moved-aside ledger back failed,
 // a whole ledger keeps the torn name.
@@ -549,14 +555,15 @@ const pruneAnswered = async ($: EngineInterface, path: string, projects: readonl
 const pollQuestions = async ($: EngineInterface, path: string, projects: readonly ProgressProject[], isSettled = false, captured: readonly PendingTurn[] = [], answeredTurns: readonly QuestionAnswerEvidence[] = [], resolveId?: string): Promise<boolean> => {
   const file = questionsPath(path)
   let outcome: 'ok' | 'race' | 'fault' = 'fault'
+  let at = 0
   try {
-    const at = await $.clock.now()
+    at = await $.clock.now()
     const mirror = await read($, mine)
     const answered = await read($, hiddenAsks)
     const pending = [...(await pendingTurns($)), ...captured]
     // A delayed save keeps the turn's age, including when a normal poll saw its block first.
     const observe = (current: ReturnType<typeof emptyQuestions>, proofs: QuestionProofs | undefined): ReturnType<typeof emptyQuestions> => {
-      const observed = observeQuestions(current, projects, mirror, answered, at, isSettled, incarnation, proofs, pending, answeredTurns).ledger
+      const observed = observeQuestions(current, projects, mirror, answered, at, isSettled, incarnation, proofs, pending, answeredTurns, frozen).ledger
       return { ...observed, records: observed.records.map(record => {
         const times = captured.filter(turn => record.producerSources?.includes(JSON.stringify(turn))).map(turn => turn.sourceAt ?? turn.at).filter(time => Number.isFinite(time) && time >= 0)
         return times.length === 0 ? record : { ...record, firstObserved: Math.min(record.firstObserved, ...times) }
@@ -576,7 +583,6 @@ const pollQuestions = async ($: EngineInterface, path: string, projects: readonl
         return false
       }
       if (isTornLedger(await readText($, aside))) {
-        await update($, hasQuestionsProblem, () => true)
         return true
       }
       // A good ledger another session wrote between the read and the move goes back, unless a
@@ -595,10 +601,12 @@ const pollQuestions = async ($: EngineInterface, path: string, projects: readonl
       return false
     }
     const source = await readText($, path)
-    if (!isQuestionSnapshot(source) || JSON.stringify(parseProgress(source)) !== JSON.stringify(projects)) {
+    const isCutSettled = progressChangedAt !== null && at - progressChangedAt >= CUT_SETTLE_MS
+    if (!isQuestionSnapshot(source, isCutSettled) || JSON.stringify(parseProgress(source)) !== JSON.stringify(projects)) {
       outcome = 'race'
       return false
     }
+    const frozen = cutOffScopes(projects, cutOffSpans(source, isCutSettled))
     let expected = ''
     let wasMissing = false
     await rewrite($, file, async before => {
@@ -620,7 +628,7 @@ const pollQuestions = async ($: EngineInterface, path: string, projects: readonl
         if (record.isUnresolved && !captures.some(capture => captureJson(capture.record, capture.disposition) === captureJson(record, 'unresolved'))) await keepQuestionCapture($, path, record, 'unresolved')
         if (record.isUnresolved === false && current.records.some(old => old.id === record.id && old.isUnresolved === true)) await keepQuestionCapture($, path, record, 'resolved')
       }
-      const retiredResolutions = resolvedQuestionsToRetire(baseline, projects, mirror, pending)
+      const retiredResolutions = resolvedQuestionsToRetire(baseline, projects, mirror, pending, frozen)
       for (const old of current.records) {
         if ((old.isPresent && !observed.records.some(record => record.id === old.id && ((record.isPresent && record.isWaiting) || record.resolvedAt !== undefined))) || retiredResolutions.includes(old.id)) await keepQuestionProof($, path, 'retired', sha256(old.id))
       }
@@ -680,18 +688,23 @@ const pollQuestions = async ($: EngineInterface, path: string, projects: readonl
     return false
   } finally {
     // Another session's write landing between two reads is not a fault: only a ledger that stays
-    // unreadable or unwritable for three polls in a row is worth telling the person about. A
-    // race that never ends (a damaged proof file) is one too, after half a minute.
+    // unreadable or unwritable for ten minutes and at least three faults (or fifteen races) is
+    // worth telling the person about.
     if (outcome === 'ok') {
       questionFailures = 0
       questionRaces = 0
-    } else if (outcome === 'race') questionRaces += 1
-    else questionFailures += 1
+      questionFailedSince = null
+    } else {
+      // A clock moved back starts the ten-minute wait again from now.
+      if (at > 0 && (questionFailedSince === null || at < questionFailedSince)) questionFailedSince = at
+      if (outcome === 'race') questionRaces += 1
+      else questionFailures += 1
+    }
     // A pass that did not go through, from any caller, is made again at the next poll.
     if (outcome !== 'ok') questionsSeen = null
     // Written only when it changes, so a quiet poll does not redraw every pane.
     const wasProblem = await read($, hasQuestionsProblem)
-    const isProblem = outcome !== 'ok' && (wasProblem || questionFailures >= 3 || questionRaces >= 15)
+    const isProblem = outcome !== 'ok' && (wasProblem || ((questionFailures >= 3 || questionRaces >= 15) && at - (questionFailedSince ?? at) >= 10 * 60 * 1000))
     if (isProblem !== wasProblem) await update($, hasQuestionsProblem, () => isProblem)
   }
 }
@@ -758,14 +771,16 @@ const setAnswered = async ($: EngineInterface, item: WaitingItem, isHidden: bool
   }
   if (!(await pollQuestions($, snap.path || (await progressPath($)), snap.projects))) return { isDone: false, reason: 'ledgerUnreadable' }
   const ledger = await read($, questionLedger)
-  const currentView = buildView(snap.projects, [], await read($, mine), await $.clock.now(), 0, {}, await wordsOf($), await read($, hiddenAsks), {}, ledger, await questionProofsFor($, snap.path || (await progressPath($))), await pendingTurns($))
+  const currentView = buildView(snap.projects, [], await read($, mine), await $.clock.now(), 0, {}, await wordsOf($), await read($, hiddenAsks), {}, ledger, await questionProofsFor($, snap.path || (await progressPath($))), await pendingTurns($), cutOffScopes(snap.projects, snap.cutSpans ?? []))
   if (![...currentView.waiting, ...(currentView.reminder ?? []), ...(currentView.older ?? []), ...currentView.hidden].some(one => (!isHidden || one.canHide !== false) && one.hideKey === item.hideKey && one.project === item.project && one.text === item.text && one.note === item.note)) return { isDone: false, reason: 'notFound' }
   const file = answeredPath(snap.path || (await progressPath($)))
   let reason: 'notFound' | 'progressUnreadable' | 'ledgerUnreadable' | 'writeFailed' = 'writeFailed'
   const list = await enqueue(async () => {
     let fresh: ProgressProject[]
+    let source: string
     try {
-      fresh = parseProgress(await readText($, snap.path || (await progressPath($))))
+      source = await readText($, snap.path || (await progressPath($)))
+      fresh = parseProgress(source)
     } catch {
       reason = 'progressUnreadable'
       return null
@@ -775,7 +790,9 @@ const setAnswered = async ($: EngineInterface, item: WaitingItem, isHidden: bool
       return null
     }
     const latest = await read($, questionLedger)
-    const current = buildView(fresh, [], await read($, mine), await $.clock.now(), 0, {}, await wordsOf($), await read($, hiddenAsks), {}, latest, await questionProofsFor($, snap.path || (await progressPath($))), await pendingTurns($))
+    const at = await $.clock.now()
+    const frozen = cutOffScopes(fresh, cutOffSpans(source, progressChangedAt !== null && at - progressChangedAt >= CUT_SETTLE_MS))
+    const current = buildView(fresh, [], await read($, mine), at, 0, {}, await wordsOf($), await read($, hiddenAsks), {}, latest, await questionProofsFor($, snap.path || (await progressPath($))), await pendingTurns($), frozen)
     if (![...current.waiting, ...(current.reminder ?? []), ...(current.older ?? []), ...current.hidden].some(one => (!isHidden || one.canHide !== false) && one.hideKey === item.hideKey && one.project === item.project && one.text === item.text && one.note === item.note)) { reason = 'notFound'; return null }
     await rewrite(
       $,
@@ -785,7 +802,7 @@ const setAnswered = async ($: EngineInterface, item: WaitingItem, isHidden: bool
         const now = parseAnswered(before, stat === undefined ? 0 : (await $.clock.now()) - stat.mtimeMs)
         const proofs = await questionProofsFor($, snap.path || (await progressPath($)))
         if (proofs === null || (isHidden && proofs.retired.includes(sha256(item.hideKey)))) return AGAIN
-        return now === null ? AGAIN : answeredJson(withAnswered(now, isHidden ? [item.hideKey] : acknowledgementKeys(observeQuestions(latest, fresh, await read($, mine), now, await $.clock.now(), true).ledger, item.hideKey), isHidden))
+        return now === null ? AGAIN : answeredJson(withAnswered(now, isHidden ? [item.hideKey] : acknowledgementKeys(observeQuestions(latest, fresh, await read($, mine), now, await $.clock.now(), true, 'preview', undefined, [], [], frozen).ledger, item.hideKey), isHidden))
       },
       check => parseAnswered(check)?.includes(item.hideKey) === isHidden,
     )
@@ -887,6 +904,8 @@ const HUNG_MS = 15 * 1000
 let pollRun = 0
 let pollStartedAt = 0
 let replacedPoll: number | null = null
+let progressChangedAt: number | null = null
+let progressCutSettled = false
 let questionPassRun = 0
 let questionPassAt: number | null = null
 let replacedPass: number | null = null
@@ -937,6 +956,8 @@ const poll = async ($: EngineInterface, canReplace = false): Promise<void> => {
     const stat = await $.fs.stat(path).catch(() => undefined)
     if (!isCurrent()) return
     if (stat === undefined) {
+      progressChangedAt = null
+      progressCutSettled = false
       if (Object.keys(await read($, firstSeen)).length > 0) await update($, firstSeen, () => ({}))
       if (!previous.isMissing || previous.path !== path) {
         await update($, resolveResult, () => null)
@@ -946,6 +967,21 @@ const poll = async ($: EngineInterface, canReplace = false): Promise<void> => {
     }
     const isSame = previous.path === path && previous.mtimeMs === stat.mtimeMs && previous.size === stat.size
     if (isSame && previous.error === null && !previous.isMissing) {
+      if (progressChangedAt === null) progressChangedAt = pollStartedAt
+      if (!progressCutSettled && pollStartedAt - progressChangedAt >= CUT_SETTLE_MS) {
+        const source = await $.fs.read(path).catch(() => null)
+        if (!isCurrent()) return
+        if (source !== null) {
+          progressCutSettled = true
+          const cutBlocks = cutOffBlocks(source, true)
+          const cutSpans = cutOffSpans(source, true)
+          if (JSON.stringify(cutBlocks) !== JSON.stringify(previous.cutBlocks ?? []) || JSON.stringify(cutSpans) !== JSON.stringify(previous.cutSpans ?? [])) {
+            await update($, snapshot, snap => ({ ...snap, cutBlocks, cutSpans }))
+            await refreshStatus($)
+            await writeDashboard($)
+          }
+        }
+      }
       await pollSeen($, path, previous.projects, false, isPrunePending ? { mtimeMs: stat.mtimeMs, size: stat.size } : null)
       if (!isCurrent()) return
       await questionPass($, path, previous.projects)
@@ -964,6 +1000,8 @@ const poll = async ($: EngineInterface, canReplace = false): Promise<void> => {
       // for the same moment, so it is built once (viewCache).
       const changedAt = await $.clock.now()
       if (!isCurrent()) return
+      progressChangedAt = changedAt
+      progressCutSettled = cutOffSpans(source, true).length === 0
       await update($, now, () => changedAt)
       await update($, snapshot, () => ({
         path,
@@ -973,6 +1011,8 @@ const poll = async ($: EngineInterface, canReplace = false): Promise<void> => {
         size: stat.size,
         projects,
         tornTail: progressTail(source),
+        cutBlocks: cutOffBlocks(source),
+        cutSpans: cutOffSpans(source),
       }))
       await pollSeen($, path, projects, true)
       if (!isCurrent()) return
@@ -980,7 +1020,9 @@ const poll = async ($: EngineInterface, canReplace = false): Promise<void> => {
       if (!isCurrent()) return
       const result = await read($, resolveResult)
       if (result !== null) {
-        const view = buildView(projects, [], await read($, mine), await $.clock.now(), 0, {}, await wordsOf($), await read($, hiddenAsks), {}, await read($, questionLedger), await questionProofsFor($, path), await pendingTurns($))
+        const at = await $.clock.now()
+        const frozen = cutOffScopes(projects, cutOffSpans(source, at - changedAt >= CUT_SETTLE_MS))
+        const view = buildView(projects, [], await read($, mine), at, 0, {}, await wordsOf($), await read($, hiddenAsks), {}, await read($, questionLedger), await questionProofsFor($, path), await pendingTurns($), frozen)
         const rows = [...view.stopped, ...view.recent]
         const isDrawn = result.kind === 'changed'
           ? rows.some(row => result.key.startsWith(`${row.key}::`))
@@ -1050,10 +1092,12 @@ let measuredStore = 0
 // The moment a view is built for: the pane's, which the 30 s tick and each change of the file move.
 const viewTime = async ($: EngineInterface): Promise<number> => (await read($, now)) || (await $.clock.now())
 
-// What the pane and the page say above the board when the file is cut off or too big.
-const warningOf = (snap: { size: number; tornTail?: { tasks: number } | null }, s: Strings): { warning?: string } => {
+// What the pane and the page say above the board when the file is cut off or too big, and in
+// the health section at the bottom when a block has no end marker.
+const warningOf = (snap: { size: number; tornTail?: { tasks: number } | null; cutBlocks?: readonly CutBlock[] }, s: Strings): { warning?: string; health?: string[] } => {
   const lines = [...(snap.tornTail ? [s.progressIncomplete(snap.tornTail.tasks)] : []), ...sizeWarnings({ progress: snap.size, store: measuredStore }, s)]
-  return lines.length === 0 ? {} : { warning: lines.join(' · ') }
+  const health = cutBlockLines(snap.cutBlocks ?? [], s)
+  return { ...(lines.length === 0 ? {} : { warning: lines.join(' · ') }), ...(health.length === 0 ? {} : { health }) }
 }
 
 // progress.html beside progress.md: the file's view and pending turns, at most once a minute
@@ -1065,7 +1109,7 @@ const writeDashboard = async ($: EngineInterface, force = false): Promise<{ path
   if (!force && at - dashboardAt < 60 * 1000) return { path }
   const s = await wordsOf($)
   const view = {
-    ...views.view(snap.projects, [], null, await viewTime($), await read($, today), await read($, doneSeen), s, await read($, hiddenAsks), await read($, firstSeen), await read($, questionLedger), await questionProofsFor($, snap.path || (await progressPath($))), await pendingTurns($)),
+    ...views.view(snap.projects, [], null, await viewTime($), await read($, today), await read($, doneSeen), s, await read($, hiddenAsks), await read($, firstSeen), await read($, questionLedger), await questionProofsFor($, snap.path || (await progressPath($))), await pendingTurns($), cutOffScopes(snap.projects, snap.cutSpans ?? [])),
     ...warningOf(snap, s),
   }
   await breathe($)
@@ -1204,11 +1248,12 @@ const refreshStatus = async ($: EngineInterface): Promise<void> => {
     if (!hasPaneOpenAnswer && surfaces !== null) hasNoPaneSurface = surfaces.length === 0
   }
   const s = await wordsOf($)
+  const snap = await read($, snapshot)
   let text = isPaneOpen
     ? undefined
     : statusLine(
         views.view(
-          (await read($, snapshot)).projects,
+          snap.projects,
           await read($, here),
           await read($, mine),
           await viewTime($),
@@ -1220,6 +1265,7 @@ const refreshStatus = async ($: EngineInterface): Promise<void> => {
           await read($, questionLedger),
           await questionProofsFor($, await progressPath($)),
           await pendingTurns($),
+          cutOffScopes(snap.projects, snap.cutSpans ?? []),
         ),
         s,
       )
@@ -1256,25 +1302,25 @@ const enqueue = <T,>(job: () => Promise<T>): Promise<T> => {
 
 // What a change answers to have the file read again before it is made: a write caught half-way.
 const AGAIN = Symbol('again')
-// How many times `rewrite` makes a change; a change that counts its calls knows its last.
+// How many times `rewrite` makes a change; it tells the change which try is the last.
 const REWRITE_TRIES = 3
 
 // Read, change, write, read back. When another session's write lands in between, the change
 // is made again over what that session wrote, so neither undoes the other; `change` must be
-// safe to make twice. It answers null to leave the file as it is. `isKept` says whether what
-// was read back still holds the change (by default: is exactly what was written). The text
-// last written comes back, or null when nothing was.
+// safe to make twice, and is told when it runs for the last time. It answers null to leave the
+// file as it is. `isKept` says whether what was read back still holds the change (by default:
+// is exactly what was written). The text last written comes back, or null when nothing was.
 const rewrite = async (
   $: EngineInterface,
   path: string,
-  change: (before: string) => Promise<string | null | typeof AGAIN> | string | null | typeof AGAIN,
+  change: (before: string, isLast: boolean) => Promise<string | null | typeof AGAIN> | string | null | typeof AGAIN,
   isKept: (check: string, after: string) => boolean = (check, after) => check === after,
   writer: (path: string, text: string) => Promise<void> = (path, text) => $.fs.write(path, text),
 ): Promise<string | null> => {
   let wrote: string | null = null
   for (let attempt = 0; attempt < REWRITE_TRIES; attempt += 1) {
     const before = await readText($, path)
-    const after = await change(before)
+    const after = await change(before, attempt === REWRITE_TRIES - 1)
     if (after === AGAIN) continue
     if (after === null || after === before) break
     await writer(path, after)
@@ -2195,7 +2241,8 @@ const keepInboxQuestions = async ($: EngineInterface, captured: readonly Pending
       return
     }
     const text = await readText($, path).catch(() => null)
-    if (text === null || !isQuestionSnapshot(text)) {
+    const isCutSettled = progressChangedAt !== null && at - progressChangedAt >= CUT_SETTLE_MS
+    if (text === null || !isQuestionSnapshot(text, isCutSettled)) {
       await pendingQuestionsProblem($, true)
       return
     }
@@ -2529,17 +2576,21 @@ const archiveOld = async ($: EngineInterface, isNow = false): Promise<number> =>
   const seen = await read($, doneSeen)
   const archived = new Set<string>()
   const keys = new Set<string>()
-  let tries = 0
-  await rewrite($, path, async text => {
+  // The blocks that ask which a try has archived, by session, with the lines they had then.
+  const moved = new Map<string, string>()
+  await rewrite($, path, async (text, isLast) => {
     // A block that still asks goes only when the explicit archive's own check passes for it (#174).
     // The ledger is settled once for all of them. Another agent's write meanwhile (a new `[?]`
     // step) must not be written over with a result made from the older text: start again from it.
-    // A board busy enough to change it on every try would skip the whole sweep, so on the last try
-    // the blocks that ask stay and the rest (done blocks, hand-kept tasks) goes ahead.
-    tries += 1
-    const asking = tries < REWRITE_TRIES ? archivableAsking(text, at, keep) : []
+    // A board busy enough to change it on every try would skip the whole sweep, so the last try
+    // checks no question and the rest (done blocks, hand-kept tasks) goes ahead. A block that asks
+    // stays then, unless an earlier try archived it and it still reads the same: its questions are
+    // kept and its copy is in the archive, so it leaves as counted.
+    const asking = archivableAsking(text, at, keep)
     const kept = new Set<number>()
-    if (asking.length > 0) {
+    if (isLast) {
+      for (const { span, text: lines } of asking) if (moved.get(span.session) === lines) kept.add(span.start)
+    } else if (asking.length > 0) {
       const projects = parseProgress(text)
       const isSettled = await pollQuestions($, path, projects, true)
       if (await readText($, path) !== text) return AGAIN
@@ -2558,6 +2609,7 @@ const archiveOld = async ($: EngineInterface, isNow = false): Promise<number> =>
     await appendArchive($, archivePath(path, at), entries.filter(entry => !archived.has(entry)), s)
     for (const entry of entries) archived.add(entry)
     for (const key of manual.keys) keys.add(key)
+    for (const { span, text: lines } of asking) if (kept.has(span.start)) moved.set(span.session, lines)
     return manual.text
   })
   if (keys.size > 0) {
@@ -2692,8 +2744,9 @@ const remind = async ($: EngineInterface): Promise<void> => {
 const remindNow = async ($: EngineInterface): Promise<void> => {
   const at = await $.clock.now()
   const s = await wordsOf($)
+  const snap = await read($, snapshot)
   const view = views.view(
-    (await read($, snapshot)).projects,
+    snap.projects,
     await read($, here),
     await read($, mine),
     await viewTime($),
@@ -2705,6 +2758,7 @@ const remindNow = async ($: EngineInterface): Promise<void> => {
     await read($, questionLedger),
     await questionProofsFor($, await progressPath($)),
     await pendingTurns($),
+    cutOffScopes(snap.projects, snap.cutSpans ?? []),
   )
   await breathe($)
   const stored = await $.store.get('told')
@@ -2983,6 +3037,13 @@ const answerHere = async ($: EngineInterface): Promise<void> => {
 export const register: Register = (on, options) => {
   on('session.start', async ($, e, next) => {
     pendingCache = null
+    progressChangedAt = null
+    progressCutSettled = false
+    questionFailures = 0
+    questionRaces = 0
+    questionFailedSince = null
+    inboxSeen = -1
+    inboxListed = 0
     knownPath = await findProgressPath($)
     await settleLang($, options)
     const words = await wordsOf($)
@@ -3457,7 +3518,7 @@ export const register: Register = (on, options) => {
       const latest = await read($, snapshot)
       const currentAt = (await read($, now)) || (await $.clock.now())
       return {
-        ...views.view(latest.projects, await read($, here), await read($, mine), currentAt, await read($, today), await read($, doneSeen), s, await read($, hiddenAsks), await read($, firstSeen), await read($, questionLedger), await questionProofsFor($, latest.path || (await progressPath($))), await pendingTurns($)),
+        ...views.view(latest.projects, await read($, here), await read($, mine), currentAt, await read($, today), await read($, doneSeen), s, await read($, hiddenAsks), await read($, firstSeen), await read($, questionLedger), await questionProofsFor($, latest.path || (await progressPath($))), await pendingTurns($), cutOffScopes(latest.projects, latest.cutSpans ?? [])),
         ...warningOf(latest, s),
       }
     }
@@ -3636,7 +3697,8 @@ export const register: Register = (on, options) => {
         enqueue(async () => {
           const snap = await read($, snapshot)
           const path = snap.path || (await progressPath($))
-          const projects = parseProgress(await readText($, path))
+          const source = await readText($, path)
+          const projects = parseProgress(source)
           const savedResolution = async (): Promise<boolean> => {
             const captures = await questionCapturesFor($, path)
             if (captures === null || !captures.some(capture => capture.disposition === 'resolved' && capture.record.id === questionId && capture.record.resolvedAt !== undefined)) return false
@@ -3644,7 +3706,9 @@ export const register: Register = (on, options) => {
             return true
           }
           if (!(await pollQuestions($, path, projects))) return result(await savedResolution() ? 'resolved' : 'failed')
-          const view = buildView(projects, [], await read($, mine), await $.clock.now(), 0, {}, s, await read($, hiddenAsks), {}, await read($, questionLedger), await questionProofsFor($, path), await pendingTurns($))
+          const at = await $.clock.now()
+          const frozen = cutOffScopes(projects, cutOffSpans(source, progressChangedAt !== null && at - progressChangedAt >= CUT_SETTLE_MS))
+          const view = buildView(projects, [], await read($, mine), at, 0, {}, s, await read($, hiddenAsks), {}, await read($, questionLedger), await questionProofsFor($, path), await pendingTurns($), frozen)
           const items = [...view.stopped.flatMap(row => row.questions ?? []), ...view.recent.flatMap(row => row.questions ?? [])]
           if (item.questionId === undefined || !items.some(question => question.questionId === item.questionId && question.text === item.text && question.note === item.note)) return result('changed')
           if (!(await pollQuestions($, path, projects, false, [], [], questionId))) return result(await savedResolution() ? 'resolved' : 'failed')

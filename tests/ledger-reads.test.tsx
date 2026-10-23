@@ -1,9 +1,15 @@
+import type { On } from 'claude-code'
 import { expect, test } from 'claude-code/testing'
+import type { Engine } from 'claude-code/testing'
+import { localDay } from '../hooks/journal'
+import { paletteFor } from '../hooks/palette'
 import { parseProgress } from '../hooks/parse'
 import { captureJson, capturePath, emptyQuestions, observeQuestions, parseCapture, parseQuestions, questionProofJson, questionProofPath, questionsJson, questionsPath } from '../hooks/questions'
 import type { QuestionCapture } from '../hooks/questions'
 import { sha256 } from '../hooks/sha256'
+import { STRINGS } from '../hooks/strings'
 import { answeredPath } from '../hooks/view'
+import { EN } from '../hooks/strings-en'
 import { finished, ledgerOf, reopened } from './fixtures/question-files'
 import { engineBeneath, FILE, INBOX, makeWorld, PANE, PROPS, visiblePaneText } from './fixtures/pane-world'
 import type { World } from './fixtures/pane-world'
@@ -585,6 +591,527 @@ test('a question pass held for a minute leaves at most two reads of the ledger w
   expect(world.reads.filter(path => path === LEDGER)).toHaveLength(2)
 })
 
+// The live board that showed the red line: no ledger yet, two torn ledgers from days ago, and a
+// block cut off in the middle of the file (no end marker, more sections after it).
+test('a board with no ledger, two torn ledgers days old and a block cut off in the middle folds the cut-off notice under Board health, with no error or retry', async ($, on) => {
+  const cut = '<!-- auto session=55fb44cb agent=codex state=waiting updated=2026-10-15T01:17:08.128Z source=turns -->'
+  const day = localDay(Date.parse('2026-10-15T01:17:08.128Z')).slice(5)
+  const board = `# Progress\n\n## demo-152\n\n${cut}\n### Add a shelf\n> waiting on your repl\n\n## demo\n${block('a1b2c301', 'waiting', 1, '- [?] Publish the first plan, OK?')}`
+  const world = makeWorld([[FILE, board]])
+  world.env = english
+  world.hasTasks = true
+  world.store = { lang: 'en', autoConnectOff: true, inboxDone: {} }
+  world.reply = prompt => prompt.includes('TITLE:') ? 'TITLE: Add the limiter\nDONE: Added the middleware\nNEXT: Write the tests\nASK: Keep the limiter, OK?' : undefined
+  put(world, `${INBOX}/codex-turn-1760600000-1.json`, JSON.stringify({ session_id: 'synthetic-question', cwd: '/work/api-gateway', last_assistant_message: 'Synthetic work is done. Keep the limiter, OK?' }), 1_000)
+  const torn = [3, 3.1].map(days => `${LEDGER}.torn-${NOW - days * 24 * HOUR}-synthetic-session`)
+  torn.forEach(path => put(world, path, '{"version":1,"rec', NOW - 3 * 24 * HOUR))
+  const clock = engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/demo', surface: 'desktop', isInteractive: true })
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
+  const seen = new Set<string>()
+  // More polls than the 15 races that would raise the question list's problem line.
+  for (let n = 0; n < 20; n += 1) {
+    await clock.advance(2000)
+    if (await ui.find({ type: 'Text', text: EN.questionsUnreadable() }) !== undefined) seen.add('unreadable')
+    if (await ui.find({ type: 'Text', text: EN.inboxQuestionNotKept }) !== undefined) seen.add('notKept')
+  }
+  expect([...seen]).toEqual([])
+  const notice = EN.blockCutOff('Codex', day)
+  expect(await ui.find({ type: 'Button', key: 'section::health' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: notice })).toBeUndefined()
+  await ui.press({ key: 'section::health' })
+  expect(await ui.find({ type: 'Text', text: notice })).toBeDefined()
+  expect((world.files.get(FILE.replace('.md', '.html')) ?? '').split(notice).length - 1).toBe(1)
+  // The ledger is written, with the board's question and the inbox turn's, and the torn ledgers,
+  // three days old, stay for the sweep.
+  const words = ledgerRecords(world).map(record => record.words)
+  expect(words).toContain('Publish the first plan, OK?')
+  expect(words).toContain('Keep the limiter, OK?')
+  expect(torn.filter(path => world.files.has(path))).toEqual(torn)
+  expect(world.files.get(FILE)?.startsWith(board.slice(0, board.indexOf('## demo\n')))).toBe(true)
+  await ui.unmount()
+})
+
+test('a progress.md with a mid-file cut-off block writes the ledger and shows no error line', async ($, on) => {
+  const cut = '<!-- auto session=55fb44cb agent=codex state=waiting updated=2026-10-15T01:17:08.128Z source=turns -->'
+  const board = `# Progress\n\n## demo-152\n\n${cut}\n### Add a shelf\n> waiting on your repl\n\n## demo\n${block('a1b2c301', 'waiting', 1, '- [?] Publish the first plan, OK?')}\n${block('9a9a9a9a', 'done', 2, '- [x] Finished step', 'A finished plan')}`
+  const world = makeWorld([[FILE, board]])
+  world.env = english
+  world.hasTasks = true
+  world.store = { lang: 'en', autoConnectOff: true, inboxDone: {} }
+  const clock = engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/demo', surface: 'desktop', isInteractive: true })
+  await clock.advance(2000)
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
+  try {
+    expect(world.files.has(LEDGER)).toBe(true)
+    expect(ledgerRecords(world).map(record => record.words)).toContain('Publish the first plan, OK?')
+    const alertTexts = (await ui.findAll({ type: 'Text' })).filter(node => node.props.color === paletteFor('dark').alert)
+    expect(alertTexts).toEqual([])
+    const hideBtn = (await ui.findAll({ type: 'Button' })).find(node => node.key?.endsWith('::hide'))
+    expect(hideBtn?.key).toBeDefined()
+    await ui.press({ key: hideBtn!.key! })
+    expect(ledgerRecords(world).find(record => record.words === 'Publish the first plan, OK?')?.resolvedAt).not.toBeNull()
+    await ui.press({ key: 'section::recent' })
+    await ui.press({ key: 'archive' })
+    expect(world.files.get(ARCHIVE) ?? '').toContain('A finished plan')
+    expect(world.files.get(FILE) ?? '').not.toContain('A finished plan')
+    expect(world.files.get(FILE) ?? '').toContain('Add a shelf')
+  } finally {
+    await ui.unmount()
+  }
+})
+
+test('a cut-off block is listed under Board health at the bottom, not in the warning', async ($, on) => {
+  const cut = '<!-- auto session=55fb44cb agent=codex state=waiting updated=2026-10-15T01:17:08.128Z source=turns -->'
+  const day = localDay(Date.parse('2026-10-15T01:17:08.128Z')).slice(5)
+  const notice = EN.blockCutOff('Codex', day)
+  const board = `# Progress\n\n## demo-152\n\n${cut}\n### Add a shelf\n> waiting on your repl\n\n## demo\n${block('a1b2c301', 'waiting', 1, '- [?] Publish the first plan, OK?')}`
+  const world = makeWorld([[FILE, board]])
+  world.env = english
+  world.hasTasks = true
+  world.store = { lang: 'en', autoConnectOff: true, inboxDone: {}, told: { seed: 1 } }
+  const notified: string[] = []
+  on('ui.notify', ($, e) => {
+    notified.push(e.message)
+    return {}
+  })
+  const clock = engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/demo', surface: 'desktop', isInteractive: true })
+  await clock.advance(2000)
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
+  try {
+    expect(notified.some(text => text.includes('cut off') || text.includes('55fb44cb'))).toBe(false)
+    const sections = (await ui.findAll({ type: 'Button' })).map(node => node.key).filter((key): key is string => key?.startsWith('section::') ?? false)
+    expect(sections.at(-1)).toBe('section::health')
+    expect(await ui.find({ type: 'Button', key: 'section::health', text: `▸ ${EN.sectionHealth}` })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: notice })).toBeUndefined()
+    const beforeOpen = visiblePaneText(await ui.drawn())
+    expect(beforeOpen.indexOf(EN.sectionHealth)).toBeGreaterThan(beforeOpen.indexOf(EN.progressFileShown))
+    await ui.press({ key: 'section::health' })
+    const line = await ui.find({ type: 'Text', text: notice })
+    expect(line).toBeDefined()
+    expect(line?.props).toMatchObject({ color: paletteFor('dark').muted })
+    expect(line?.props.color).not.toBe(paletteFor('dark').alert)
+    expect(notice).toContain('Codex')
+    expect(notice).toContain(day)
+    expect(notice).not.toContain('<!--')
+    expect(notice).not.toContain('55fb44cb')
+    expect(notice).not.toContain('line ')
+    expect(notice).not.toContain('progress.md')
+  } finally {
+    await ui.unmount()
+  }
+})
+
+test('the pane records no half-written question of a block cut off in the middle, and its tidy does not count the block\'s questions gone', async ($, on) => {
+  const head = `# Progress\n\n## demo-152\n\n<!-- auto session=55fb44cb agent=codex state=waiting updated=2026-10-15T01:17:08Z -->\n### Add a shelf\n`
+  const tail = `\n## demo\n${block('a1b2c301', 'waiting', 1, '- [?] Publish the first plan, OK?')}`
+  // The pane watched the block whole; a write then cut it in the middle of its question.
+  const whole = `${head}- [?] Paint it, OK?\n<!-- /auto session=55fb44cb -->\n${tail}`
+  const world = makeWorld([[FILE, `${head}- [?] Paint it, O\n${tail}`]])
+  world.env = english
+  seedAsked(world, whole)
+  const [paint] = ledgerRecords(world).filter(record => record.words === 'Paint it, OK?')
+  expect(paint?.isWaiting).toBe(true)
+  const clock = engineBeneath(on, world)
+  await $.session.start(START)
+  for (let n = 0; n < 3; n += 1) await clock.advance(2000)
+  await $.command.run(TIDY)
+  await clock.advance(2000)
+  const records = ledgerRecords(world)
+  expect(records.map(record => record.words)).not.toContain('Paint it, O')
+  expect(records.find(record => record.id === paint?.id)).toMatchObject({ isPresent: true, isWaiting: true })
+  expect(world.files.has(proofFile('retired', paint!.id))).toBe(false)
+})
+
+test('the pane keeps the question and writes no retirement proof when its block is cut right after the marker', async ($, on) => {
+  const head = `## demo\n<!-- auto session=55fb44cb agent=codex state=waiting updated=${new Date(NOW).toISOString()} -->\n`
+  const tail = `\n## later\n${block('a1b2c301', 'working', 0, '- [~] Work')}`
+  const whole = `${head}### Add a shelf\n- [?] Paint it, OK?\n<!-- /auto session=55fb44cb -->\n${tail}`
+  const world = makeWorld([[FILE, whole]])
+  world.env = english
+  seedAsked(world, whole)
+  const paint = ledgerRecords(world).find(record => record.words === 'Paint it, OK?')!
+  const clock = engineBeneath(on, world)
+  await $.session.start(START)
+  await clock.advance(2000)
+  world.files.set(FILE, `${head}${tail}`)
+  world.mtime += 1
+  for (let pass = 0; pass < 3; pass += 1) await clock.advance(2000)
+  await $.command.run(TIDY)
+  expect(ledgerRecords(world).find(record => record.id === paint.id)).toMatchObject({ isUnresolved: true, isPresent: true, isWaiting: true })
+  expect(world.files.has(proofFile('retired', paint.id))).toBe(false)
+  world.files.set(FILE, whole)
+  world.mtime += 1
+  for (let pass = 0; pass < 3; pass += 1) await clock.advance(2000)
+  expect(ledgerRecords(world).filter(record => record.words === paint.words).map(record => record.id)).toEqual([paint.id])
+  expect(world.files.has(proofFile('retired', paint.id))).toBe(false)
+})
+
+test('the pane shows a frozen question once in full without its cut-off prefix', async ($, on) => {
+  const head = `## demo\n<!-- auto session=55fb44cb agent=codex state=waiting updated=${new Date(NOW).toISOString()} -->\n### Add a shelf\n`
+  const tail = `\n## later\n${block('a1b2c301', 'working', 0, '- [~] Work')}`
+  const whole = `${head}- [?] Paint it, OK?\n<!-- /auto session=55fb44cb -->\n${tail}`
+  const world = makeWorld([[FILE, `${head}- [?] Paint it, O\n${tail}`]])
+  world.env = english
+  world.store = { lang: 'en', autoConnectOff: true, inboxDone: {}, opened: ['waiting'] }
+  seedAsked(world, whole)
+  const clock = engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/demo', surface: 'desktop', isInteractive: true })
+  for (let pass = 0; pass < 3; pass += 1) await clock.advance(2000)
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
+  try {
+    expect(await ui.findAll({ type: 'Button', text: 'Paint it, OK?' })).toHaveLength(1)
+    // The text match is a substring one, so the full question is the only button it may find.
+    expect((await ui.findAll({ type: 'Button', text: 'Paint it, O' }) as Array<{ text?: string }>).map(node => node.text)).toEqual(['Paint it, OK?'])
+    await $.command.run({ ...TIDY, args: 'open' })
+    const html = world.files.get(FILE.replace(/\.md$/, '.html')) ?? ''
+    expect(html).toContain('Paint it, OK?')
+    expect(html).not.toContain('Paint it, O<')
+  } finally {
+    await ui.unmount()
+  }
+})
+
+test('the pane refuses a hide when the question block loses its end marker before the press', async ($, on) => {
+  const whole = `## demo\n${block('55fb44cb', 'waiting', 0, '- [?] Paint it, OK?', 'Add a shelf')}\n## later\n${block('a1b2c301', 'working', 0, '- [~] Work')}`
+  const cut = whole.replace('<!-- /auto session=55fb44cb -->', '')
+  const world = makeWorld([[FILE, whole]])
+  world.env = english
+  world.store = { lang: 'en', autoConnectOff: true, inboxDone: {}, opened: ['waiting'] }
+  seedAsked(world, whole)
+  const paint = ledgerRecords(world).find(record => record.words === 'Paint it, OK?')!
+  const clock = engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/demo', surface: 'desktop', isInteractive: true })
+  await clock.advance(2000)
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
+  try {
+    const key = 'demo::Add a shelf::0::hide'
+    expect(await ui.find({ type: 'Button', key })).toBeDefined()
+    // Keeping the empty marker line leaves the parsed tasks equal to the pane's snapshot.
+    world.files.set(FILE, cut)
+    world.mtime += 1
+    await ui.press({ key })
+    expect(JSON.parse(world.files.get(ANSWERED) ?? '{"answered":[]}').answered).not.toContain(paint.id)
+    expect(await ui.find({ type: 'Text', text: EN.boardLineChanged })).toBeDefined()
+    expect(ledgerRecords(world).find(record => record.id === paint.id)?.isUnresolved).toBe(true)
+    world.files.set(FILE, whole)
+    world.mtime += 1
+    await clock.advance(2000)
+    expect(ledgerRecords(world).filter(record => record.words === paint.words).map(record => record.id)).toEqual([paint.id])
+  } finally {
+    await ui.unmount()
+  }
+})
+
+test('the pane unhides a frozen question without consuming an unmapped legacy acknowledgement', async ($, on) => {
+  const whole = `## demo\n${block('55fb44cb', 'waiting', 0, '- [?] Paint it, OK?', 'Add a shelf')}\n## later\n${block('a1b2c301', 'working', 0, '- [~] Work')}`
+  const cut = whole.replace('<!-- /auto session=55fb44cb -->', '')
+  const world = makeWorld([[FILE, cut]])
+  world.env = english
+  world.store = { lang: 'en', autoConnectOff: true, inboxDone: {}, opened: ['hidden'] }
+  seedAsked(world, whole)
+  const paint = ledgerRecords(world).find(record => record.words === 'Paint it, OK?')!
+  const legacy = '55fb44cb 0 Paint it, OK?'
+  put(world, ANSWERED, JSON.stringify({ answered: [paint.id, legacy] }), 3)
+  const clock = engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/demo', surface: 'desktop', isInteractive: true })
+  await clock.advance(2000)
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
+  try {
+    const key = `retained::${paint.id}::unhide`
+    expect(await ui.find({ type: 'Button', key })).toBeDefined()
+    await ui.press({ key })
+    expect(JSON.parse(world.files.get(ANSWERED)!).answered).toEqual([legacy])
+    expect(ledgerRecords(world).filter(record => record.words === paint.words).map(record => record.id)).toEqual([paint.id])
+    expect(ledgerRecords(world).find(record => record.id === paint.id)?.isUnresolved).toBe(true)
+  } finally {
+    await ui.unmount()
+  }
+})
+
+test('the pane refuses a resolution when the stopped question block loses its end marker before the press', async ($, on) => {
+  const whole = `## demo\n${block('55fb44cb', 'ended', 0, '- [?] Paint it, OK?', 'Add a shelf')}\n## later\n${block('a1b2c301', 'working', 0, '- [~] Work')}`
+  const cut = whole.replace('<!-- /auto session=55fb44cb -->', '')
+  const world = makeWorld([[FILE, whole]])
+  world.env = english
+  world.store = { lang: 'en', autoConnectOff: true, inboxDone: {}, opened: ['stopped'] }
+  seedAsked(world, whole)
+  const paint = ledgerRecords(world).find(record => record.words === 'Paint it, OK?')!
+  const clock = engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/demo', surface: 'desktop', isInteractive: true })
+  await clock.advance(2000)
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
+  try {
+    const key = 'demo::Add a shelf::0::resolve'
+    expect(await ui.find({ type: 'Button', key })).toBeDefined()
+    world.files.set(FILE, cut)
+    world.mtime += 1
+    await ui.press({ key })
+    await clock.advance(2000)
+    expect(await ui.find({ type: 'Text', text: EN.resolveChanged })).toBeDefined()
+    expect(ledgerRecords(world).find(record => record.id === paint.id)?.isUnresolved).toBe(true)
+    expect(capturesOf(world).some(capture => capture.record.id === paint.id && capture.disposition === 'resolved')).toBe(false)
+    world.files.set(FILE, whole)
+    world.mtime += 1
+    await clock.advance(2000)
+    expect(ledgerRecords(world).filter(record => record.words === paint.words).map(record => record.id)).toEqual([paint.id])
+  } finally {
+    await ui.unmount()
+  }
+})
+
+test('a block cut off at the end of the file shows one line about the block and no retry once the file is still, and no line while it is still changing', async ($, on) => {
+  const cut = '<!-- auto session=55fb44cb agent=codex state=waiting updated=2026-10-15T01:17:08.128Z source=turns -->'
+  const day = localDay(Date.parse('2026-10-15T01:17:08.128Z')).slice(5)
+  const board = `# Progress\n\n## demo\n${block('a1b2c301', 'waiting', 1, '- [?] Publish the first plan, OK?')}\n## demo-152\n\n${cut}\n### Add a shelf\n> waiting on your repl\n`
+  const notice = EN.blockCutOff('Codex', day)
+  const world = makeWorld([[FILE, board]])
+  world.env = english
+  world.hasTasks = true
+  world.store = { lang: 'en', autoConnectOff: true, inboxDone: {}, opened: ['health'] }
+  const clock = engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/demo', surface: 'desktop', isInteractive: true })
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
+  try {
+    // While the file is still changing at every poll, even past 10 seconds, there is no line about the cut-off block.
+    for (let n = 0; n < 6; n += 1) {
+      world.files.set(FILE, `${board}${'\n'.repeat(n + 1)}`)
+      world.mtime += 1
+      await clock.advance(2000)
+      expect(await ui.find({ type: 'Text', text: notice })).toBeUndefined()
+    }
+    for (let n = 0; n < 5; n += 1) await clock.advance(2000)
+    expect(await ui.find({ type: 'Text', text: notice })).toBeDefined()
+    // Once settled, no red question problem and no endless race.
+    const seen = new Set<string>()
+    for (let n = 0; n < 15; n += 1) {
+      await clock.advance(2000)
+      if (await ui.find({ type: 'Text', text: EN.questionsUnreadable() }) !== undefined) seen.add('unreadable')
+      if (await ui.find({ type: 'Text', text: EN.inboxQuestionNotKept }) !== undefined) seen.add('notKept')
+    }
+    expect([...seen]).toEqual([])
+    expect(await ui.find({ type: 'Text', text: notice })).toBeDefined()
+    expect(visiblePaneText(await ui.drawn()).split(notice).length - 1).toBe(1)
+    world.reads = []
+    await clock.advance(2000)
+    expect(world.reads).toEqual([])
+  } finally {
+    await ui.unmount()
+  }
+})
+
+test('a block cut off at the end of the file is not named while the file has been still for 8 seconds, and is named at 10', async ($, on) => {
+  const cut = '<!-- auto session=55fb44cb agent=codex state=waiting updated=2026-10-15T01:17:08.128Z source=turns -->'
+  const day = localDay(Date.parse('2026-10-15T01:17:08.128Z')).slice(5)
+  const board = `# Progress\n\n## demo\n${block('a1b2c301', 'waiting', 1, '- [?] Publish the first plan, OK?')}\n## demo-152\n\n${cut}\n### Add a shelf\n> waiting on your repl\n`
+  const notice = EN.blockCutOff('Codex', day)
+  const world = makeWorld([[FILE, board]])
+  world.env = english
+  world.hasTasks = true
+  world.store = { lang: 'en', autoConnectOff: true, inboxDone: {}, opened: ['health'] }
+  const clock = engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/demo', surface: 'desktop', isInteractive: true })
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
+  try {
+    // 4 polls (8 seconds unchanged): no notice and no ledger write yet.
+    for (let n = 0; n < 4; n += 1) {
+      await clock.advance(2000)
+      expect(await ui.find({ type: 'Button', key: 'section::health' })).toBeUndefined()
+      expect(await ui.find({ type: 'Text', text: notice })).toBeUndefined()
+      expect(world.files.has(LEDGER)).toBe(false)
+    }
+    // 5th poll (10 seconds unchanged): the notice and the ledger write both appear.
+    await clock.advance(2000)
+    expect(await ui.find({ type: 'Button', key: 'section::health' })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: notice })).toBeDefined()
+    expect(world.files.has(LEDGER)).toBe(true)
+    expect(ledgerRecords(world).map(record => record.words)).toContain('Publish the first plan, OK?')
+  } finally {
+    await ui.unmount()
+  }
+})
+
+const engineWithOffset = (on: Parameters<typeof engineBeneath>[0], world: World, offsetOf: () => number) =>
+  engineBeneath(((...args: Parameters<typeof on>) => {
+    if (args[0] !== 'clock.now') return Reflect.apply(on, undefined, args)
+    const callback = args.at(-1) as (...a: unknown[]) => Promise<{ value: number }>
+    return on('clock.now', async ($, event, next) => {
+      const result = await callback($, event, next)
+      return { ...result, value: result.value + offsetOf() }
+    })
+  }) as typeof on, world)
+
+test('moving a torn question list aside shows no question-list error', async ($, on) => {
+  const board = `## demo\n${block('a1b2c301', 'waiting', 1, '- [?] Publish the first plan, OK?')}`
+  const world = makeWorld([[FILE, board]])
+  world.env = english
+  world.store = { lang: 'en', autoConnectOff: true, inboxDone: {} }
+  seedAsked(world, board)
+  put(world, LEDGER, '{"version":1,"rec', 1)
+  const clock = engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/demo', surface: 'desktop', isInteractive: true })
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
+  try {
+    expect(await ui.find({ type: 'Text', text: EN.questionsUnreadable() })).toBeUndefined()
+    await clock.advance(2000)
+    expect(await ui.find({ type: 'Text', text: EN.questionsUnreadable() })).toBeUndefined()
+    expect(ledgerRecords(world).map(record => record.words)).toContain('Publish the first plan, OK?')
+    expect(filesOf(world, `${LEDGER}.torn-`)).toHaveLength(1)
+  } finally {
+    await ui.unmount()
+  }
+})
+
+test('an unwritable question list shows no error before ten minutes of failed passes', async ($, on) => {
+  const board = `## demo\n${block('a1b2c301', 'waiting', 1, '- [?] Publish the first plan, OK?')}`
+  const world = makeWorld([[FILE, board]])
+  world.env = english
+  world.store = { lang: 'en', autoConnectOff: true, inboxDone: {} }
+  let offset = 0
+  const clock = engineWithOffset(on, world, () => offset)
+  await $.session.start({ cwd: '/work/demo', surface: 'desktop', isInteractive: true })
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
+  try {
+    put(world, LEDGER, '{"version":999}', NOW + 10)
+    // Fault 1 at t0 = NOW + 2000, followed by 3 more faults before 10 minutes (9m59.999s after t0).
+    await clock.advance(2000)
+    await clock.advance(2000)
+    await clock.advance(2000)
+    offset = 10 * 60_000 - 6000 - 1
+    await clock.advance(2000)
+    expect(await ui.find({ type: 'Text', text: EN.questionsUnreadable() })).toBeUndefined()
+  } finally {
+    await ui.unmount()
+  }
+})
+
+test('an unwritable question list shows the short error after ten minutes of failed passes, and a good pass clears it', async ($, on) => {
+  expect(STRINGS.en.questionsUnreadable()).toBe("Questions can't be hidden or archived right now. If this lasts, check that the disk has free space.")
+  expect(STRINGS['zh-TW'].questionsUnreadable()).toBe('目前無法隱藏或封存問題。如果持續發生，請檢查磁碟空間。')
+  expect(STRINGS['zh-CN'].questionsUnreadable()).toBe('目前无法隐藏或归档问题。如果持续发生，请检查磁盘空间。')
+  const board = `## demo\n${block('a1b2c301', 'waiting', 1, '- [?] Publish the first plan, OK?')}`
+  const world = makeWorld([[FILE, board]])
+  world.env = english
+  world.store = { lang: 'en', autoConnectOff: true, inboxDone: {} }
+  let offset = 0
+  const clock = engineWithOffset(on, world, () => offset)
+  await $.session.start({ cwd: '/work/demo', surface: 'desktop', isInteractive: true })
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
+  try {
+    put(world, LEDGER, '{"version":999}', NOW + 10)
+    await clock.advance(2000)
+    await clock.advance(2000)
+    offset = 10 * 60_000
+    await clock.advance(2000)
+    const shown = await ui.find({ type: 'Text', text: "Questions can't be hidden or archived right now. If this lasts, check that the disk has free space." })
+    expect(shown).toBeDefined()
+    // A good pass clears the error and resets the 10-minute timer.
+    world.files.delete(LEDGER)
+    await clock.advance(2000)
+    expect(await ui.find({ type: 'Text', text: EN.questionsUnreadable() })).toBeUndefined()
+    put(world, LEDGER, '{"version":999}', NOW + 20 * 60_000)
+    await clock.advance(2000)
+    await clock.advance(2000)
+    offset += 5 * 60_000
+    await clock.advance(2000)
+    expect(await ui.find({ type: 'Text', text: EN.questionsUnreadable() })).toBeUndefined()
+  } finally {
+    await ui.unmount()
+  }
+})
+
+test('two failed question passes over ten minutes show no error and the third shows it', async ($, on) => {
+  const world = makeWorld([[FILE, pruningBoard]])
+  world.env = english
+  let offset = 0
+  const clock = engineWithOffset(on, world, () => offset)
+  await $.session.start({ cwd: '/work/demo', surface: 'desktop', isInteractive: true })
+  for (let pass = 0; pass < 3; pass += 1) await clock.advance(2000)
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
+  try {
+    put(world, LEDGER, '{"version":999}', NOW + 10)
+    await clock.advance(2000)
+    offset = 10 * 60_000 + 1
+    await clock.advance(2000)
+    expect(await ui.find({ type: 'Text', text: EN.questionsUnreadable() })).toBeUndefined()
+    await clock.advance(2000)
+    expect(await ui.find({ type: 'Text', text: EN.questionsUnreadable() })).toBeDefined()
+  } finally {
+    await ui.unmount()
+  }
+})
+
+test('fourteen question races over ten minutes show no error and the fifteenth shows it', async ($, on) => {
+  const world = makeWorld([[FILE, pruningBoard]])
+  world.env = english
+  let offset = 0
+  const clock = engineWithOffset(on, world, () => offset)
+  await $.session.start({ cwd: '/work/demo', surface: 'desktop', isInteractive: true })
+  for (let pass = 0; pass < 3; pass += 1) await clock.advance(2000)
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
+  try {
+    // An unreadable proof listing takes the race path before any ledger write.
+    world.unlistable = new Set([FILE.replace(/\/[^/]*$/, '')])
+    await clock.advance(2000)
+    offset = 10 * 60_000 + 1
+    for (let race = 2; race <= 14; race += 1) {
+      await clock.advance(2000)
+      expect(await ui.find({ type: 'Text', text: EN.questionsUnreadable() })).toBeUndefined()
+    }
+    await clock.advance(2000)
+    expect(await ui.find({ type: 'Text', text: EN.questionsUnreadable() })).toBeDefined()
+  } finally {
+    await ui.unmount()
+  }
+})
+
+test('a clock moved back an hour restarts the ten-minute wait for the question-list error', async ($, on) => {
+  const world = makeWorld([[FILE, pruningBoard]])
+  world.env = english
+  let offset = 0
+  const clock = engineWithOffset(on, world, () => offset)
+  await $.session.start({ cwd: '/work/demo', surface: 'desktop', isInteractive: true })
+  for (let pass = 0; pass < 3; pass += 1) await clock.advance(2000)
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
+  try {
+    put(world, LEDGER, '{"version":999}', NOW + 10)
+    for (let fault = 0; fault < 3; fault += 1) await clock.advance(2000)
+    offset = -HOUR
+    await clock.advance(2000)
+    expect(await ui.find({ type: 'Text', text: EN.questionsUnreadable() })).toBeUndefined()
+    // The next pass is 9m59.999s after the jump, then the next is exactly ten minutes after it.
+    offset = -HOUR + 10 * 60_000 - 2000 - 1
+    await clock.advance(2000)
+    expect(await ui.find({ type: 'Text', text: EN.questionsUnreadable() })).toBeUndefined()
+    offset = -HOUR + 10 * 60_000 - 4000
+    await clock.advance(2000)
+    expect(await ui.find({ type: 'Text', text: EN.questionsUnreadable() })).toBeDefined()
+  } finally {
+    await ui.unmount()
+  }
+})
+
+test('the archive sweep removes torn ledgers over a week old even among the newest three, and keeps younger ones', async ($, on) => {
+  const world = makeWorld([[FILE, pruningBoard]])
+  world.env = english
+  world.ran = []
+  const clock = engineBeneath(on, world)
+  await $.session.start(START)
+  await clock.advance(2000)
+  put(world, LEDGER, questionsJson(emptyQuestions()), NOW - HOUR)
+  // Three only, so none goes for being past the newest three.
+  const young = [`${LEDGER}.torn-${NOW - 6 * 24 * HOUR}-synthetic-session`]
+  // Over a week old by the time in its name, and one moved aside by hand, by its own time.
+  const old = [`${LEDGER}.torn-${NOW - 8 * 24 * HOUR}-4243`, `${LEDGER}.torn-20261007`]
+  for (const path of [...young, ...old]) put(world, path, '{"version":1,"rec', 1)
+  world.mtimes = { ...world.mtimes, [old[1]!]: NOW - 9 * 24 * HOUR }
+  await $.command.run(TIDY)
+  expect(young.filter(path => world.files.has(path))).toEqual(young)
+  expect(old.filter(path => world.files.has(path))).toEqual([])
+})
+
 test('the archive sweep keeps the newest three torn ledgers and removes day-old temporary copies of the ledger', async ($, on) => {
   const board = `## demo\n${block('a1b2c301', 'working', 1, '- [~] Work')}`
   const world = makeWorld([[FILE, board]])
@@ -976,6 +1503,56 @@ test('a board that changes on every try still has its finished blocks archived, 
   expect(world.files.get(FILE)).not.toContain('session=a1b2c301')
   expect(world.files.get(ARCHIVE)).toContain('Publish the plan, OK?')
   expect(ledgerRecords(world).filter(record => record.isUnresolved).map(record => record.words)).toEqual(['Publish the plan, OK?'])
+})
+
+// A sweep whose first try archives the block that asks and is then undone by another agent's write
+// (with `isChanged`, one that also adds a step to that block), and whose second try finds the board
+// changed while it checks the question, so the third try is the last.
+const sweptTwice = async ($: Engine, on: On, isChanged: boolean): Promise<World> => {
+  const asking = '- [x] Draft\n- [?] Publish the plan, OK?'
+  const boardAt = (hours: number, steps = asking): string => `## demo\n${block('a1b2c301', 'ended', hours, steps)}${block('a1b2c302', 'done', 5, '- [x] Finished')}`
+  const world = makeWorld([[FILE, boardAt(48)]])
+  world.env = english
+  seedAsked(world, boardAt(48))
+  const clock = engineBeneath(on, world)
+  await $.session.start(START)
+  await clock.advance(2000)
+  await clock.advance(2000)
+  world.files.set(FILE, boardAt(96))
+  world.mtime += 1
+  let isUndone = false
+  world.afterWrite = () => {
+    isUndone = true
+    return `${boardAt(96, isChanged ? `- [x] Draft\n- [x] Read it again\n- [?] Publish the plan, OK?` : asking)}### Added by another agent\n- [ ] Not seen by the sweep\n`
+  }
+  world.beforeRead = path => {
+    if (path !== ANSWERED || !isUndone) return
+    isUndone = false
+    world.files.set(FILE, `${world.files.get(FILE)}\n`)
+    world.mtime += 1
+  }
+  await $.command.run(TIDY)
+  world.beforeRead = undefined
+
+  return world
+}
+
+test('a block that asks which an earlier try archived leaves on the last try when it reads the same, so it is in one place', async ($, on) => {
+  const world = await sweptTwice($, on, false)
+  expect(world.files.get(FILE)).toContain('Added by another agent')
+  expect(world.files.get(FILE)).not.toContain('session=a1b2c301')
+  expect(world.files.get(FILE)).not.toContain('session=a1b2c302')
+  expect(world.files.get(ARCHIVE)?.split('Publish the plan, OK?').length).toBe(2)
+  expect(world.files.get(ARCHIVE)?.split('Finished').length).toBe(2)
+  expect(ledgerRecords(world).filter(record => record.isUnresolved).map(record => record.words)).toEqual(['Publish the plan, OK?'])
+})
+
+test('a block that asks which changed after an earlier try archived it stays on the last try, and its newer text is not archived unchecked', async ($, on) => {
+  const world = await sweptTwice($, on, true)
+  expect(world.files.get(FILE)).toContain('- [x] Read it again\n- [?] Publish the plan, OK?')
+  expect(world.files.get(FILE)).not.toContain('session=a1b2c302')
+  expect(world.files.get(ARCHIVE)?.split('Publish the plan, OK?').length).toBe(2)
+  expect(world.files.get(ARCHIVE)).not.toContain('Read it again')
 })
 
 test("the person's Archive of a block that asks starts again from the text when another agent writes while its question is kept", async ($, on) => {
