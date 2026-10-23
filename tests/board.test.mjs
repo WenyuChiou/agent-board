@@ -234,6 +234,146 @@ test('a block without an end marker at the end of the file stays on the board an
   }
 })
 
+// A block cut off in the middle of the file: no end marker, and more sections after it.
+const cutBoard = (cut = '55fb44cb') => ['# Progress', '', '## demo-152', '', `<!-- auto session=${cut} agent=codex state=waiting updated=2026-10-20T01:17:08.128Z source=turns -->`, '### Add a shelf', '> waiting on your repl', '', '## demo-154', '',
+  '<!-- auto session=1d0ef21d agent=codex state=waiting updated=2026-10-20T04:12:58.831Z -->', '### Fix the working text', '- [?] Ship it, OK?', '<!-- /auto session=1d0ef21d -->', '',
+  '<!-- auto session=9a9a9a9a agent=codex state=done updated=2026-10-10T04:12:58.831Z -->', '### A finished plan', '- [x] Did it', '<!-- /auto session=9a9a9a9a -->', '', '### Hand-kept task', '- [ ] Keep me', ''].join('\n')
+const cutFollowing = cutBoard().slice(cutBoard().indexOf('\n\n## demo-154'))
+const cutFiles = dir => ({ board: readFileSync(join(dir, 'progress.md'), 'utf8'), archive: readdirSync(dir).filter(name => name.startsWith('progress-archive-')).map(name => readFileSync(join(dir, name), 'utf8')).join('\n') })
+
+const cutDate = new Date(Date.parse('2026-10-20T01:17:08.128Z'))
+const cutDay = `${String(cutDate.getMonth() + 1).padStart(2, '0')}-${String(cutDate.getDate()).padStart(2, '0')}`
+// Off a terminal the script draws 80 columns, so the notice wraps onto two rows at a space.
+const oneLine = text => text.replace(/\n/g, ' ')
+
+test('the board script places a cut-off block notice at the bottom by agent and date in every language, and leaves it out of --chat', () => {
+  for (const [lang, words] of [
+    ['en', `A Codex task from ${cutDay} was cut off when its session crashed. It's shown as it was; its last lines may show twice.`],
+    ['zh-TW', `${cutDay}的一個 Codex 工作在 session 當掉時被截斷了，照原樣顯示；最後幾行可能會出現兩次。`],
+    ['zh-CN', `${cutDay}的一个 Codex 工作在 session 崩溃时被截断了，按原样显示；最后几行可能会出现两次。`],
+  ]) {
+    const board = chatRun([], { file: () => cutBoard(), lang, change: tornChange })
+    assert.equal(board.status, 0, board.stderr)
+    assert.equal(oneLine(board.stdout).split(words).length - 1, 1, board.stdout)
+    assert.equal(oneLine(board.stdout).trimEnd().endsWith(words), true, board.stdout)
+    assert.ok(board.stdout.includes('Fix the working text') && board.stdout.includes('Hand-kept task'), board.stdout)
+    const chat = chatRun(['--chat'], { file: () => cutBoard(), lang, change: tornChange })
+    assert.equal(chat.status, 0, chat.stderr)
+    assert.equal(oneLine(chat.stdout).includes(words), false, chat.stdout)
+  }
+})
+
+test('the board script names a block cut off at the end of the file once the file has been still for 10 seconds', () => {
+  const endCut = `${cutBoard().slice(0, cutBoard().indexOf('\n\n## demo-154'))}\n`
+  const words = `A Codex task from ${cutDay} was cut off when its session crashed. It's shown as it was; its last lines may show twice.`
+  const touch = ageMs => questionFault(`const at = (${TORN_NOW} - ${ageMs}) / 1000\nfs.utimesSync(path.join(__dirname, 'progress.md'), at, at)`)
+  const settled = chatRun([], { file: () => endCut, change: tornChange, preload: touch(11_000) })
+  assert.equal(settled.status, 0, settled.stderr)
+  assert.equal(oneLine(settled.stdout).split(words).length - 1, 1, settled.stdout)
+  const fresh = chatRun([], { file: () => endCut, change: tornChange, preload: touch(9_000) })
+  assert.equal(fresh.status, 0, fresh.stderr)
+  assert.equal(oneLine(fresh.stdout).includes(words), false, fresh.stdout)
+})
+
+test('--tidy beside a block cut off in the middle of the file archives the finished block after it alone and keeps the rest', () => {
+  const ran = chatRun(['--tidy'], { file: () => cutBoard(), change: tornChange, inspect: cutFiles })
+  assert.equal(ran.status, 0, ran.stderr)
+  assert.ok(ran.archive.includes('A finished plan') && !ran.archive.includes('Add a shelf') && !ran.archive.includes('Ship it') && !ran.archive.includes('Keep me'), ran.archive)
+  assert.equal(ran.board, cutBoard().replace('<!-- auto session=9a9a9a9a agent=codex state=done updated=2026-10-10T04:12:58.831Z -->\n### A finished plan\n- [x] Did it\n<!-- /auto session=9a9a9a9a -->\n\n', ''))
+})
+
+test('a reporter for another session writes below a block cut off in the middle of the file, and one for its own session writes its block in place of the marker line', () => {
+  for (const [args, payload] of [
+    [['--codex-event'], { session_id: 'synthetic-cut-239', hook_event_name: 'SessionStart' }],
+    [['--agent-status', '--agent', 'gemini'], { session_id: 'synthetic-cut-239', state: 'working' }],
+    [['--codex-report', '--session', 'synthetic-cut-239'], { project: 'demo-152', title: 'New report', state: 'working', steps: ['- [ ] Next'] }],
+  ]) {
+    // The marker this reporter gives the session, from a first report on an empty board.
+    const first = chatRun(args, { file: () => '# Progress\n', input: JSON.stringify(payload), inspect: cutFiles })
+    const marker = /<!-- auto session=([0-9a-f]{8})[^\n]*-->/.exec(first.board)
+    assert.ok(marker, `${args[0]}: ${first.board}`)
+    const [ownMarker, id] = marker
+    const other = chatRun(args, { file: () => cutBoard(), input: JSON.stringify(payload), inspect: cutFiles })
+    assert.equal(other.status, 0, other.stderr)
+    assert.ok(other.board.startsWith(cutBoard()) && other.board.length > cutBoard().length, `${args[0]}: ${other.board}`)
+    // Its own block has no end marker: the reporter writes its closed block in place of the
+    // marker line, and the old lines and every section after them stay byte for byte.
+    const ownFile = cutBoard().replace(/<!-- auto session=55fb44cb[^\n]*-->/, ownMarker)
+    const own = chatRun(args, { file: () => ownFile, input: JSON.stringify(payload), inspect: cutFiles })
+    assert.equal(own.status, 0, `${args[0]}: ${own.stderr}`)
+    assert.ok(own.board.startsWith(`# Progress\n\n## demo-152\n\n<!-- auto session=${id}`), `${args[0]}: ${own.board}`)
+    assert.ok(own.board.endsWith(`<!-- /auto session=${id} -->\n### Add a shelf\n> waiting on your repl${cutFollowing}`), `${args[0]}: ${own.board}`)
+  }
+})
+
+test('the board script records no question from the half-written last line of a block cut off in the middle', () => {
+  const ran = chatRun(['--keys', ''], { file: () => cutBoard().replace('> waiting on your repl', '- [?] Paint it, O'), inspect: dir => ({ ...questionFiles(dir), ...cutFiles(dir) }) })
+  assert.equal(ran.status, 0, ran.stderr)
+  assert.deepEqual(JSON.parse(ran.files['progress-questions.json']).records.map(row => row.words), ['Ship it, OK?'])
+})
+
+test('the board script shows a frozen question once in full without its cut-off prefix', () => {
+  const cut = cutBoard().replace('> waiting on your repl', '- [?] Paint it, O')
+  const whole = cut.replace('- [?] Paint it, O', '- [?] Paint it, OK?\n<!-- /auto session=55fb44cb -->')
+  const seeded = chatRun(['--keys', ''], { file: () => whole, change: tornChange, inspect: questionFiles })
+  assert.equal(seeded.status, 0, seeded.stderr)
+  for (const args of [[], ['--keys', ''], ['--chat']]) {
+    const shown = chatRun(args, { file: () => cut, beside: seeded.files, change: tornChange })
+    assert.equal(shown.status, 0, shown.stderr)
+    assert.equal(shown.stdout.split('Paint it, OK?').length - 1, 1, shown.stdout)
+    assert.doesNotMatch(shown.stdout, /Paint it, O(?!K\?)/)
+  }
+})
+
+test('the board script refuses a hide when the question block loses its end marker during the press', () => {
+  const whole = cutBoard().replace('2026-10-20T01:17:08.128Z', new Date(TORN_NOW).toISOString()).replace('> waiting on your repl', '- [?] Paint it, OK?\n<!-- /auto session=55fb44cb -->')
+  const seeded = chatRun(['--keys', ''], { file: () => whole, change: tornChange, inspect: questionFiles })
+  assert.equal(seeded.status, 0, seeded.stderr)
+  const paint = JSON.parse(seeded.files['progress-questions.json']).records.find(record => record.words === 'Paint it, OK?')
+  const ran = chatRun(['--keys', 'h'], {
+    file: () => whole, beside: seeded.files, change: tornChange, inspect: dir => ({ ...questionFiles(dir), ...cutFiles(dir) }),
+    preload: questionFault(`Error.stackTraceLimit = 50
+const original = fs.readFileSync
+const progress = path.join(__dirname, 'progress.md')
+const answered = path.join(__dirname, 'progress-answered.json')
+let isCut = false
+fs.readFileSync = (file, ...rest) => {
+  const frames = new Error().stack?.split('\\n') ?? []
+  if (!isCut && String(file) === answered && frames.some(line => /^\\s+at act \\(/.test(line)) && frames.some(line => /^\\s+at rewrite \\(/.test(line)) && !frames.some(line => /^\\s+at view \\(/.test(line))) {
+    isCut = true
+    fs.writeFileSync(progress, original(progress, 'utf8').replace('<!-- /auto session=55fb44cb -->', ''))
+  }
+  return original(file, ...rest)
+}`),
+  })
+  assert.equal(ran.status, 0, ran.stderr)
+  assert.equal(ran.board, whole.replace('<!-- /auto session=55fb44cb -->', ''))
+  assert.ok(ran.stdout.includes(EN.hideFailed), ran.stdout)
+  assert.equal(JSON.parse(ran.answered ?? '{"answered":[]}').answered.includes(paint.id), false)
+  const records = JSON.parse(ran.files['progress-questions.json']).records
+  assert.deepEqual(records.filter(record => record.words === paint.words).map(record => record.id), [paint.id])
+  assert.equal(records.find(record => record.id === paint.id).isUnresolved, true)
+})
+
+test('the board script unhides a frozen question without consuming an unmapped legacy acknowledgement', () => {
+  const whole = cutBoard().replace('2026-10-20T01:17:08.128Z', new Date(TORN_NOW).toISOString()).replace('> waiting on your repl', '- [?] Paint it, OK?\n<!-- /auto session=55fb44cb -->')
+  const seeded = chatRun(['--keys', ''], { file: () => whole, change: tornChange, inspect: questionFiles })
+  assert.equal(seeded.status, 0, seeded.stderr)
+  const paint = JSON.parse(seeded.files['progress-questions.json']).records.find(record => record.words === 'Paint it, OK?')
+  const legacy = '55fb44cb 0 Paint it, OK?'
+  const ran = chatRun(['--keys', 'u'], {
+    file: () => whole.replace('<!-- /auto session=55fb44cb -->', ''),
+    beside: { ...seeded.files, 'progress-answered.json': JSON.stringify({ answered: [paint.id, legacy] }) },
+    change: tornChange, inspect: questionFiles,
+  })
+  assert.equal(ran.status, 0, ran.stderr)
+  assert.ok(ran.stdout.includes(EN.boardShown), ran.stdout)
+  assert.deepEqual(JSON.parse(ran.answered).answered, [legacy])
+  const records = JSON.parse(ran.files['progress-questions.json']).records
+  assert.deepEqual(records.filter(record => record.words === paint.words).map(record => record.id), [paint.id])
+  assert.equal(records.find(record => record.id === paint.id).isUnresolved, true)
+})
+
 test('an invalid report leaves the cut marker untouched and creates no saved fragment', () => {
   for (const [args, payload] of [[['--codex-event'], { session_id: 'bad' }], [['--codex-report', '--session', 'synthetic-invalid-239'], { title: '', steps: [] }]]) {
     const file = tornDay()
@@ -4697,6 +4837,47 @@ fs.openSync = (file, ...rest) => {
   assert.match(`${stuck.stdout}${stuck.stderr}`, /Couldn't safely read or update your progress file/)
   assert.ok(stuck.board.includes('Added by another agent 3'), stuck.board)
   assert.ok(stuck.board.includes('Finished plan'), stuck.board)
+})
+
+test('--tidy takes a block that asks on its last try when an earlier try archived it and it reads the same, and leaves one that changed since', () => {
+  const at = Date.now()
+  const done = `<!-- auto session=a1b2c323 agent=codex state=done updated=${new Date(at - 20 * 3600000).toISOString()} -->\n### Finished plan\n- [x] Ship it\n<!-- /auto session=a1b2c323 -->\n`
+  const board = `${askingBoard()}${done}`
+  const seed = chatRun(['--keys', ''], { file: () => board, inspect: sweepFiles })
+  assert.equal(seed.status, 0, seed.stderr)
+  // Another agent writes progress.md twice: as the first try writes the archive, so that try starts
+  // again, and as the second try checks the question, so the third is the last. With `isChanged`,
+  // the second write also adds a step to the block that asks, after both checks read it.
+  const twice = isChanged => questionFault(`const board = path.join(__dirname, 'progress.md')
+const open = fs.openSync
+let archives = 0
+let copies = 0
+fs.openSync = (file, ...rest) => {
+  const name = path.basename(String(file))
+  if (rest[0] === 'wx' && name.startsWith('progress-archive-') && name.endsWith('.board-tmp') && ++archives === 1) fs.appendFileSync(board, '### Added during the archive write\\n- [ ] Not seen by the sweep\\n')
+  if (rest[0] === 'wx' && name.includes('-questions-source-') && ++copies === 2) {
+    const text = fs.readFileSync(board, 'utf8') + '### Added during the question check\\n- [ ] Not seen either\\n'
+    fs.writeFileSync(board, ${isChanged} ? text.replace('- [x] Draft\\n- [?] Publish Old plan', '- [x] Draft\\n- [x] Read it again\\n- [?] Publish Old plan') : text)
+  }
+  return open(file, ...rest)
+}`)
+  const swept = chatRun(['--tidy'], { file: () => board, beside: seed.files, inspect: sweepFiles, preload: twice(false) })
+  assert.equal(swept.status, 0, swept.stderr)
+  // The first try archived the old block; the last one takes it out of the file, so it is counted once and is in one place.
+  assert.equal(swept.stdout, 'Archived 2 tasks.\n')
+  assert.ok(!swept.board.includes('Old plan'), swept.board)
+  assert.ok(!swept.board.includes('Finished plan'), swept.board)
+  assert.ok(swept.board.includes('Young plan'), swept.board)
+  assert.ok(swept.board.includes('Added during the archive write') && swept.board.includes('Added during the question check'), swept.board)
+  assert.equal(swept.archive.split('Publish Old plan, OK?').length - 1, 1, swept.archive)
+  assert.equal(swept.archive.split('Finished plan').length - 1, 1, swept.archive)
+  // Changed since the first try archived it, the block stays for the next sweep, and its newer text is not archived unchecked.
+  const changed = chatRun(['--tidy'], { file: () => board, beside: seed.files, inspect: sweepFiles, preload: twice(true) })
+  assert.equal(changed.status, 0, changed.stderr)
+  assert.ok(changed.board.includes('- [x] Read it again\n- [?] Publish Old plan, OK?'), changed.board)
+  assert.ok(!changed.board.includes('Finished plan'), changed.board)
+  assert.equal(changed.archive.split('Publish Old plan, OK?').length - 1, 1, changed.archive)
+  assert.ok(!changed.archive.includes('Read it again'), changed.archive)
 })
 
 test('--tidy tells the blocks of two sessions with one title apart when it keeps their questions', () => {

@@ -80,7 +80,7 @@ test('an edit above a block that asks writes no new copy of its question over te
   expect(world.written.filter(path => path.includes('-questions-source-')).length).toBeGreaterThan(0)
 })
 
-test('a question ledger the host refuses to write shows the question-list line after three passes, and each pass sends it once', async ($, on) => {
+test('a question ledger the host refuses to write shows the question-list line once its passes have failed for ten minutes, and each pass sends it once', { timeoutMs: 120_000 }, async ($, on) => {
   const world = makeWorld([[FILE, askingBoard(12)]])
   world.env = english
   world.written = []
@@ -92,21 +92,33 @@ test('a question ledger the host refuses to write shows the question-list line a
   const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
   try {
     const sent = (): number => (world.refused ?? []).filter(path => path.startsWith(`${LEDGER}.tmp-`)).length
-    const trace: Array<{ sent: number; isShown: boolean }> = []
+    const isShown = async (): Promise<boolean> => visiblePaneText(await ui.drawn()).includes(EN.questionsUnreadable())
+    const trace: Array<{ since: number; isShown: boolean }> = []
     let before = sent()
-    for (let poll = 0; poll < 8; poll += 1) {
+    let elapsed = 0
+    let firstRefused: number | null = before > 0 ? 0 : null
+    // A little past ten minutes of polls, so the wait is over by a few passes.
+    while (elapsed < 612_000) {
       await clock.advance(2000)
+      elapsed += 2000
       const now = sent()
       // One pass to a poll, and a refused write is not tried again inside it.
       expect(now - before).toBeLessThanOrEqual(1)
       before = now
-      trace.push({ sent: now, isShown: visiblePaneText(await ui.drawn()).includes(EN.questionsUnreadable()) })
+      if (now > 0 && firstRefused === null) firstRefused = elapsed
+      const since = firstRefused === null ? -1 : elapsed - firstRefused
+      // The pane is looked at early, around the ten minutes, and at the end.
+      if (since < 10_000 || (since >= 588_000 && since <= 612_000) || elapsed >= 612_000) trace.push({ since, isShown: await isShown() })
     }
+    expect(firstRefused).not.toBeNull()
     expect(world.files.has(LEDGER)).toBe(false)
-    expect(sent()).toBeGreaterThanOrEqual(3)
+    // Every poll made a pass that sent the ledger once and was refused.
+    expect(sent()).toBeGreaterThanOrEqual(300)
     // Every ledger write the pane sent was the refused one.
     expect((world.written ?? []).filter(path => path.startsWith(`${LEDGER}.tmp-`))).toHaveLength(sent())
-    // The line shows once three passes have failed in a row, and stays.
-    expect(trace).toEqual(trace.map(one => ({ sent: one.sent, isShown: one.sent >= 3 })))
+    // Faults alone do not show the line: it waits until the writes have failed for ten minutes, then stays.
+    expect(trace.filter(one => one.since >= 0 && one.since < 598_000).every(one => !one.isShown)).toBe(true)
+    expect(trace.filter(one => one.since >= 602_000).every(one => one.isShown)).toBe(true)
+    expect(trace.some(one => one.since >= 602_000)).toBe(true)
   } finally { await ui.unmount() }
 })

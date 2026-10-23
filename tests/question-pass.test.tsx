@@ -4,6 +4,7 @@ import type { QuestionCapture, QuestionRecord } from '../hooks/questions'
 import { sha256 } from '../hooks/sha256'
 import { finished, held, ledgerOf, question, reopened } from './fixtures/question-files'
 import { engineBeneath, FILE, INBOX, makeWorld } from './fixtures/pane-world'
+import { timeStretches, untilQuiet } from './fixtures/big-board'
 import type { World } from './fixtures/pane-world'
 
 // A question pass on a board with thousands of questions and question copies beside it (#416).
@@ -41,6 +42,9 @@ test('a question pass over 1,000 open questions and 5,600 copies works out the c
   const ids = (disposition: QuestionCapture['disposition']): string[] => copies.filter(copy => copy.disposition === disposition).map(copy => copy.record.id)
   expect(ids('unresolved')).toEqual(open.filter((_, n) => n % 2 === 0 && (n >= 200 || n % 10 === 0)).map(record => record.id))
   expect(ids('resolved')).toEqual(open.filter((_, n) => n % 2 === 1).map(record => record.id))
+  // An answered copy already among the files is not written again (#414).
+  const onDisk = copies.filter(copy => copy.disposition === 'resolved').slice(0, 10).map(copy => ({ version: 1 as const, disposition: 'resolved' as const, record: copy.record }))
+  expect(copiesToKeep(current, observed, [...captures, ...onDisk]).filter(copy => copy.disposition === 'resolved').map(copy => copy.record.id)).toEqual(ids('resolved').slice(10))
   expect(retired).toEqual(open.filter((_, n) => n % 10 === 0).map(record => record.id))
   // A question whose retirement proof is already kept is left out.
   const proven = retired.slice(0, 40).map(id => sha256(id))
@@ -104,7 +108,8 @@ test('a look at the inbox that takes questions from ten sessions keeps them all 
   const world = makeWorld([[FILE, `## demo\n${block('a1b2c302', '- [~] Work')}`]])
   world.env = english
   world.reply = () => 'TITLE: Synthetic release\nCONTEXT: Inbox turns\nDONE: Prepared the change\nNEXT: Publish it\nASK: -'
-  const clock = engineBeneath(on, world)
+  const timing = timeStretches(on)
+  const clock = engineBeneath(timing.on, world)
   for (let n = 0; n < 10; n++) {
     const body = JSON.stringify({ session_id: `synthetic-session-${n}`, cwd: '/work/demo', prompt: 'Synthetic request', last_assistant_message: `Synthetic change ${n} is ready. Publish it to the synthetic staging board, OK?` })
     put(world, `${INBOX}/codex-turn-${1_760_000_000 + n}-1.json`, body, 1_000 + n)
@@ -114,12 +119,57 @@ test('a look at the inbox that takes questions from ten sessions keeps them all 
   // The polls before the look, then the look itself, five seconds in.
   await clock.advance(4000)
   world.written = []
+  // The look's work runs on after the clock call: the count waits until the module makes no
+  // more calls beneath it.
+  timing.begin()
   await clock.advance(1000)
-  // The look's work runs on after the clock call; wait for it in real time.
-  for (let n = 0; n < 200 && fromInbox() < 10; n++) await new Promise(resolve => setTimeout(resolve, 50))
+  await untilQuiet(timing.stretches, 1000)
+  timing.stop()
   expect(fromInbox()).toBe(10)
+  expect(Object.keys(world.store?.inboxDone as Record<string, string>)).toHaveLength(10)
   // The ledger is written to a temporary file and moved into place: once when the look's blocks
   // are settled and polled, once when its questions are kept. Two passes for each session, each
   // seconds long on a big board, wrote it twenty times.
   expect(world.written.filter(path => path.startsWith(`${questionsPath(FILE)}.tmp-`))).toHaveLength(2)
+})
+
+test('a look whose one question the store will not keep sends back only the run that asked it, and the other run is done', { timeoutMs: 240_000 }, async ($, on) => {
+  const world = makeWorld([[FILE, `## demo\n${block('a1b2c302', '- [~] Work')}`]])
+  world.env = english
+  world.reply = () => 'TITLE: Synthetic release\nCONTEXT: Inbox turns\nDONE: Prepared the change\nNEXT: Publish it\nASK: -'
+  const timing = timeStretches(on)
+  const clock = engineBeneath(timing.on, world)
+  const names = [0, 1].map(n => `codex-turn-${1_760_000_000 + n}-1.json`)
+  names.forEach((name, n) => put(world, `${INBOX}/${name}`, JSON.stringify({ session_id: `synthetic-session-${n}`, cwd: '/work/demo', prompt: 'Synthetic request', last_assistant_message: `Synthetic change ${n} is ready. Publish it to the synthetic staging board, OK?` }), 1_000 + n))
+  // Every time, the store refuses the preview of the first question it is asked to keep.
+  let refused: string | undefined
+  world.failStore = (operation, key) => {
+    if (operation !== 'set' || !key.startsWith('pendingInboxQuestion:')) return false
+    refused ??= key
+    return key === refused
+  }
+  await $.session.start(START)
+  timing.begin()
+  await clock.advance(5000)
+  await untilQuiet(timing.stretches, 1000)
+  timing.stop()
+  expect(refused).toBeDefined()
+  const done = names.filter(name => (world.store?.inboxDone as Record<string, string>)[name] !== undefined)
+  const failed = (world.store?.inboxFailed ?? {}) as Record<string, string>
+  const held = names.filter(name => failed[name] !== undefined)
+  // One run is done: its file is gone, and its question went into the pass from the turn it took.
+  // The other question is in the ledger only as it was seen in its inbox file, before any look.
+  expect(done).toHaveLength(1)
+  expect([...world.files.keys()].filter(path => path.includes(done[0]!.replace(/\.json$/, '')))).toEqual([])
+  const taken = (parseQuestions(world.files.get(questionsPath(FILE)) ?? '')?.records ?? [])
+    .flatMap(record => record.producerSources ?? [])
+    .map(source => JSON.parse(source) as { sources?: string[]; at: number })
+    .filter(turn => turn.at > 1_000_000)
+    .flatMap(turn => turn.sources ?? [])
+  expect(taken).toEqual([done[0]!])
+  // Only the other is sent back, to be taken again once its claim runs out.
+  expect(held).toHaveLength(1)
+  expect(held[0]).not.toBe(done[0])
+  expect(failed[held[0]!]).toMatch(/^1:\d+:PENDING_QUESTION_NOT_KEPT$/)
+  expect([...world.files.keys()].filter(path => path.startsWith(`${INBOX}/`) && path.includes(held[0]!.replace(/\.json$/, '')))).toHaveLength(1)
 })

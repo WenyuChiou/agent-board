@@ -1785,7 +1785,7 @@ test('local reports refuse hidden appends without changing progress or session s
   assert.equal(readFileSync(f.progress, 'utf8'), '\u0060\u0060\u0060\n')
 }))
 
-test('local reports refuse a closing marker beyond another task block', () => fixture(f => {
+test('local reports write in place of their marker line when their end marker is beyond another task block, and leave the other block as it was', () => fixture(f => {
   assert.equal(f.install('--apply').status, 0)
   assert.equal(f.report().status, 0)
   const owned = readFileSync(f.progress, 'utf8')
@@ -1794,9 +1794,14 @@ test('local reports refuse a closing marker beyond another task block', () => fi
   const before = owned.replace(end, '') + other + end + '\n'
   writeFileSync(f.progress, before)
   const result = f.report('done', ['- [x] Finished'])
-  assert.notEqual(result.status, 0)
-  assert.match(result.stderr, /BLOCK_CONFLICT/)
-  assert.equal(readFileSync(f.progress, 'utf8'), before)
+  assert.equal(result.status, 0, result.stderr)
+  const after = readFileSync(f.progress, 'utf8')
+  assert.ok(after.includes(`### Task\n- [x] Finished\n${end}`), after)
+  assert.ok(after.endsWith(before.slice(before.indexOf('\n### '))), after)
+  assert.ok(after.includes(other), after)
+  assert.equal((after.match(/<!-- auto session=/g) ?? []).length, 2, after)
+  assert.equal(after.split(end).length - 1, 2, after)
+  assert.match(f.command([]).stdout, /Keep this task/)
 }))
 
 test('local reports ignore a fenced closing marker while replacing their own complete block', () => fixture(f => {

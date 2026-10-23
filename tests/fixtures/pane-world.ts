@@ -46,9 +46,14 @@ export type World = {
   env?: Record<string, string>
   stats?: string[]
   reads?: string[]
+  // Every file call, as `<call> <path>`: stat, exists, list, read and write.
+  fileOps?: string[]
+  // A read of a path it gives a promise for waits on that promise, then answers with the text the
+  // file held when it was asked: a promise that never settles is a drive that went away.
+  holdRead?: (path: string) => Promise<unknown> | undefined
   written?: string[]
   beforeRead?: (path: string) => void
-  holdRead?: { when: (path: string) => boolean; reached: () => void; release: Promise<void> }
+  pauseRead?: { when: (path: string) => boolean; reached: () => void; release: Promise<void> }
   readValue?: (path: string) => unknown
   beforeExists?: (path: string) => void
   mtimes?: Record<string, number>
@@ -346,6 +351,7 @@ export const engineBeneath = (on: On, world: World): MockClock => {
   })
   on('fs.stat', ($, e) => {
     world.stats?.push(e.path)
+    world.fileOps?.push(`stat ${posix(e.path)}`)
     const path = posix(e.path)
     const text = world.files.get(path)
     const isDir = [...world.files.keys()].some(file => file.startsWith(`${path}/`))
@@ -356,10 +362,12 @@ export const engineBeneath = (on: On, world: World): MockClock => {
       : { value: { kind: 'file' as const, size: text.length, mtimeMs, isLink: false } }
   })
   on('fs.exists', ($, e) => {
+    world.fileOps?.push(`exists ${posix(e.path)}`)
     world.beforeExists?.(posix(e.path))
     return { value: world.dirs?.has(posix(e.path)) || world.files.has(posix(e.path)) || [...world.files.keys()].some(path => path.startsWith(`${posix(e.path)}/`)) }
   })
   on('fs.list', ($, e) => {
+    world.fileOps?.push(`list ${posix(e.path ?? '')}`)
     if (world.unlistable?.has(posix(e.path ?? ''))) return { deny: 'EACCES' }
     const dir = `${posix(e.path ?? '').replace(/\/$/, '')}/`
     const names = [...world.files.keys()].filter(path => path.startsWith(dir) && !path.slice(dir.length).includes('/'))
@@ -370,12 +378,19 @@ export const engineBeneath = (on: On, world: World): MockClock => {
   on('fs.read', async ($, e) => {
     const path = posix(e.path)
     world.reads?.push(path)
+    world.fileOps?.push(`read ${path}`)
+    const held = world.holdRead?.(path)
+    if (held !== undefined) {
+      const asked = world.files.get(path)
+      await held
+      return asked === undefined ? { deny: 'ENOENT' } : { value: asked }
+    }
     world.beforeRead?.(path)
-    const held = world.holdRead
-    if (held !== undefined && held.when(path)) {
-      world.holdRead = undefined
-      held.reached()
-      await held.release
+    const paused = world.pauseRead
+    if (paused !== undefined && paused.when(path)) {
+      world.pauseRead = undefined
+      paused.reached()
+      await paused.release
     }
     const hold = world.holdJournalRead
     if (path.includes('-journal-') && hold !== undefined) {
@@ -392,6 +407,7 @@ export const engineBeneath = (on: On, world: World): MockClock => {
   on('fs.write', async ($, e) => {
     const path = posix(e.path)
     world.written?.push(path)
+    world.fileOps?.push(`write ${path}`)
     if (world.unwritable?.has(path) || (world.failQuestionCapture === 'write' && path.includes('-questions-source-'))) return { deny: 'EACCES' }
     if (world.writeLimit !== undefined) {
       const bytes = new TextEncoder().encode(e.text).length

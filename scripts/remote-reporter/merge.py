@@ -148,7 +148,7 @@ def merge_text(board_text, fragments, under=None, with_outcomes=False):
             previous = lines[existing["start"]:existing["end"] + 1]
             incoming_time, existing_time = updated_time(block[0]), updated_time(previous[0])
             if not existing["closed"]:
-                outcome = "replaced: the board block had no end marker"
+                outcome = "replaced: the board block had no end marker; its old lines stay below it as text"
             elif previous == block:
                 outcomes.append((session, "no-op: identical block"))
                 continue
@@ -162,7 +162,8 @@ def merge_text(board_text, fragments, under=None, with_outcomes=False):
                 outcome = "replaced: newer fragment"
             else:
                 outcome = "replaced: updated stamps cannot be compared (missing, invalid or without a timezone)"
-            lines = [*lines[:existing["start"]], *block, *lines[existing["end"] + 1:]]
+            end = existing["end"] if existing["closed"] else existing["start"]
+            lines = [*lines[:existing["start"]], *block, *lines[end + 1:]]
             changed = True
             outcomes.append((session, outcome))
             continue

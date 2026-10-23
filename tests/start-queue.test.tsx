@@ -71,7 +71,7 @@ test('on a board with 5,500 question copies, 500 proofs and 400 inbox turns, the
   let trimFrom = 0
   let release = (): void => undefined
   let heldAt = 0
-  world.holdRead = {
+  world.pauseRead = {
     when: path => {
       if (!QUESTION_FILE.test(path)) return false
       if (seen.has(path)) return true
