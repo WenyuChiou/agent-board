@@ -8024,7 +8024,7 @@ test('connecting writes the board script and each installed agent’s board comm
   await $.session.start({ cwd: '/work/persona_framework', surface: 'terminal', isInteractive: true })
   await settledSetup($, world)
   const board = world.files.get('/home/me/.claude/agent-board.mjs') ?? ''
-  expect(board.split('\n')[0]).toBe('globalThis.AGENT_BOARD = {"path":"/home/me/.claude/progress.md","lang":"zh-TW"}')
+  expect(board.split('\n')[0]).toBe('globalThis.AGENT_BOARD = {"hookVersion":1,"path":"/home/me/.claude/progress.md","lang":"zh-TW"}')
   const geminiPrompt = /^prompt = (.*)$/m.exec(world.files.get('/home/me/.gemini/commands/board.toml') ?? '')?.[1] ?? 'null'
   expect(JSON.parse(geminiPrompt)).toContain('!{node "/home/me/.claude/agent-board.mjs" --serve}')
   expect(world.files.get('/home/me/.agents/skills/agent-board/SKILL.md')).toContain('node "/home/me/.claude/agent-board.mjs"')
@@ -8057,16 +8057,16 @@ test('a session whose system speaks another language leaves the board script and
   engineBeneath(on, world)
   await $.session.start({ cwd: '/work/persona_framework', surface: 'terminal', isInteractive: true })
   await settledSetup($, world)
-  expect((world.files.get(board) ?? '').split('\n')[0]).toBe('globalThis.AGENT_BOARD = {"path":"/home/me/.claude/progress.md","lang":"zh-TW"}')
+  expect((world.files.get(board) ?? '').split('\n')[0]).toBe('globalThis.AGENT_BOARD = {"hookVersion":1,"path":"/home/me/.claude/progress.md","lang":"zh-TW"}')
   expect(world.files.get(skill)).toContain(`description: ${JSON.stringify(ZH_TW.boardCommandDescription)}`)
 
   // A language picked takes the files with it at once; so does going back to auto, which
   // then means this session's.
   await $.command.run({ ...TIDY, args: 'lang zh-CN' })
-  expect((world.files.get(board) ?? '').split('\n')[0]).toBe('globalThis.AGENT_BOARD = {"path":"/home/me/.claude/progress.md","lang":"zh-CN"}')
+  expect((world.files.get(board) ?? '').split('\n')[0]).toBe('globalThis.AGENT_BOARD = {"hookVersion":1,"path":"/home/me/.claude/progress.md","lang":"zh-CN"}')
   expect(world.files.get(skill)).toContain(`description: ${JSON.stringify(ZH_CN.boardCommandDescription)}`)
   await $.command.run({ ...TIDY, args: 'lang auto' })
-  expect((world.files.get(board) ?? '').split('\n')[0]).toBe('globalThis.AGENT_BOARD = {"path":"/home/me/.claude/progress.md","lang":"en"}')
+  expect((world.files.get(board) ?? '').split('\n')[0]).toBe('globalThis.AGENT_BOARD = {"hookVersion":1,"path":"/home/me/.claude/progress.md","lang":"en"}')
   expect(world.files.get(skill)).toContain(`description: ${JSON.stringify(EN.boardCommandDescription)}`)
 })
 
@@ -8089,9 +8089,9 @@ test('with the autoConnect option off, going back to auto reaches the board scri
   await $.session.start({ cwd: '/work/persona_framework', surface: 'terminal', isInteractive: true })
   // Nothing is written behind the person's back, so the files wait for a connect.
   await $.command.run({ ...TIDY, args: 'lang auto' })
-  expect((world.files.get(board) ?? '').split('\n')[0]).toBe('globalThis.AGENT_BOARD = {"path":"/home/me/.claude/progress.md","lang":"zh-CN"}')
+  expect((world.files.get(board) ?? '').split('\n')[0]).toBe('globalThis.AGENT_BOARD = {"hookVersion":1,"path":"/home/me/.claude/progress.md","lang":"zh-CN"}')
   await $.command.run({ ...TIDY, args: 'connect' })
-  expect((world.files.get(board) ?? '').split('\n')[0]).toBe('globalThis.AGENT_BOARD = {"path":"/home/me/.claude/progress.md","lang":"en"}')
+  expect((world.files.get(board) ?? '').split('\n')[0]).toBe('globalThis.AGENT_BOARD = {"hookVersion":1,"path":"/home/me/.claude/progress.md","lang":"en"}')
   expect(world.files.get(skill)).toContain(`description: ${JSON.stringify(EN.boardCommandDescription)}`)
 })
 
@@ -8121,7 +8121,7 @@ test('a connect run by hand takes the language another session picked after this
   native.boardLang = 'en'
   world.files.set('/home/me/.agent-board/legacy-connect.json', JSON.stringify(native))
   await $.command.run({ ...TIDY, args: 'connect' })
-  expect((world.files.get(board) ?? '').split('\n')[0]).toBe('globalThis.AGENT_BOARD = {"path":"/home/me/.claude/progress.md","lang":"en"}')
+  expect((world.files.get(board) ?? '').split('\n')[0]).toBe('globalThis.AGENT_BOARD = {"hookVersion":1,"path":"/home/me/.claude/progress.md","lang":"en"}')
   expect(world.files.get(skill)).toContain(`description: ${JSON.stringify(EN.boardCommandDescription)}`)
 
   // And then `/progress lang zh-TW`.
@@ -8129,7 +8129,7 @@ test('a connect run by hand takes the language another session picked after this
   native.boardLang = 'zh-TW'
   world.files.set('/home/me/.agent-board/legacy-connect.json', JSON.stringify(native))
   await $.command.run({ ...TIDY, args: 'connect' })
-  expect((world.files.get(board) ?? '').split('\n')[0]).toBe('globalThis.AGENT_BOARD = {"path":"/home/me/.claude/progress.md","lang":"zh-TW"}')
+  expect((world.files.get(board) ?? '').split('\n')[0]).toBe('globalThis.AGENT_BOARD = {"hookVersion":1,"path":"/home/me/.claude/progress.md","lang":"zh-TW"}')
   expect(world.files.get(skill)).toContain(`description: ${JSON.stringify(ZH_TW.boardCommandDescription)}`)
 })
 
@@ -8151,7 +8151,7 @@ test('the plugin’s language option gives the board script and skill their lang
   engineBeneath(on, world)
   await $.session.start({ cwd: '/work/persona_framework', surface: 'terminal', isInteractive: true })
   await settledSetup($, world)
-  expect((world.files.get(board) ?? '').split('\n')[0]).toBe('globalThis.AGENT_BOARD = {"path":"/home/me/.claude/progress.md","lang":"zh-CN"}')
+  expect((world.files.get(board) ?? '').split('\n')[0]).toBe('globalThis.AGENT_BOARD = {"hookVersion":1,"path":"/home/me/.claude/progress.md","lang":"zh-CN"}')
   expect(world.files.get(skill)).toContain(`description: ${JSON.stringify(ZH_CN.boardCommandDescription)}`)
 })
 
@@ -8470,9 +8470,31 @@ test('the status says what each agent still needs, Codex approving, Hermes Agent
   expect(status.text).toContain(ZH_TW.setupAgent('Codex', [ZH_TW.setupHookConfigured, ZH_TW.setupCodexTrust, ZH_TW.setupBoardReady]))
   expect(status.text).toContain(ZH_TW.setupAgent('Hermes Agent', [ZH_TW.setupHookConfigured, ZH_TW.setupHermesTrust, ZH_TW.setupBoardReady]))
   expect(status.text).toContain(ZH_TW.setupAgent('OpenClaw', [ZH_TW.setupHookConfigured, ZH_TW.setupOpenclawRestart, ZH_TW.setupBoardReady]))
-  for (const label of ['Gemini CLI', 'Cursor', 'Grok Build', 'Muse Code', 'OpenCode']) expect(status.text).toContain(ZH_TW.setupAgent(label, [ZH_TW.setupHookConfigured, ZH_TW.setupBoardReady]))
-  // Antigravity only shows the board; it has no turn-end hook.
-  expect(status.text).toContain(ZH_TW.setupAgent('Antigravity', [ZH_TW.setupBoardReady]))
+  // Antigravity gets its report hooks with its skill (#285).
+  for (const label of ['Gemini CLI', 'Cursor', 'Grok Build', 'Muse Code', 'OpenCode', 'Antigravity']) expect(status.text).toContain(ZH_TW.setupAgent(label, [ZH_TW.setupHookConfigured, ZH_TW.setupBoardReady]))
+})
+
+test('the pane connects with Antigravity present without Node’s Buffer or process', async ($, on) => {
+  const runtime = globalThis as unknown as {
+    Buffer?: unknown
+    process?: { execPath?: unknown }
+  }
+  expect(runtime.Buffer).toBeUndefined()
+  expect(runtime.process?.execPath).toBeUndefined()
+  const home = '/home/synthetic-user'
+  const files = new Map(EVERY_AGENT.map(([path, text]): [string, string] => [path.replace('/home/me', home), text]))
+  const world: World = {
+    files, mtime: 1, hasTasks: true, ran: [], openclaw: 'OpenClaw 2026.5.2 (1a2b3c4)\n',
+    env: { HOME: home, LANG: 'en_US.UTF-8' },
+  }
+  engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/synthetic-project', surface: 'terminal', isInteractive: true })
+  await settledSetup($, world)
+  await $.command.run({ ...TIDY, args: 'connect' })
+  const status = await $.command.run({ ...TIDY, args: 'connect status' })
+  expect(status.text).not.toContain(EN.setupHookFailed)
+  expect(status.text).not.toContain(EN.setupBoardFailed)
+  expect(status.text).toContain(EN.setupAgent('Antigravity', [EN.setupHookConfigured, EN.setupBoardReady]))
 })
 
 test('once the hooks are taken out, the status says so rather than showing the last setup', async ($, on) => {

@@ -427,7 +427,7 @@ export const legacyConnect = async (value: unknown, bundle: string): Promise<{ s
       const hosts = new Set(agentHooks(context).map(hook => connectPath(hook.file, isWindows)))
       for (const file of Object.keys(state.owned)) {
         const isOtherFolder = connectPath(dirname(file), isWindows) !== connectPath(dirname(one.progress), isWindows)
-        const isReporter = /^(?:agent-board\.mjs|progress-report\.(?:sh|ps1))$/.test(file.split(/[\\/]/).at(-1) ?? '')
+        const isReporter = /^(?:agent-board\.mjs|progress-hook\.mjs|progress-report\.(?:sh|ps1))$/.test(file.split(/[\\/]/).at(-1) ?? '')
         if (!hosts.has(connectPath(file, isWindows)) && isOtherFolder && isReporter) delete state.owned[file]
       }
       state.disabled = one.mode === 'remove' ? true : one.mode === 'connect' ? false : state.disabled
@@ -435,7 +435,7 @@ export const legacyConnect = async (value: unknown, bundle: string): Promise<{ s
       const { seed: _seed, ...metadata } = one
       state.pending = { request: metadata, bundle: hash(bundle) }
       transaction.save()
-      const result = connectLegacy(transaction, one, bundle, process.platform === 'win32', observation, found)
+      const result = connectLegacy(transaction, one, bundle, process.platform === 'win32', observation, found, process.execPath)
       state.revision += 1
       delete state.pending
       transaction.save()

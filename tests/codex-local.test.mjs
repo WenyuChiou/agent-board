@@ -644,11 +644,14 @@ test('a queued event from every host is replayed by the next hook', async t => {
       assert.equal(argv[0], '--hook-version')
     } else {
       const saved = []
-      const instantiate = (source, suffix) => new Function('createRequire', 'spawnSync', 'tool', `${source.replace(/^import .*\n/gm, '').replaceAll('import.meta.url', JSON.stringify(import.meta.url)).replace('export default', 'const plugin =').replace(/^export /gm, '')}\n${suffix}`)(createRequire, (node, args, options) => { saved.push({ node, args: [...args], input: options.input }); return { status: 0, stdout: '' } }, Object.assign(value => value, { schema: { string: () => ({}), enum: () => ({}), array: () => ({}) } }))
+      const instantiate = (source, suffix) => new Function('createRequire', 'spawnSync', 'tool', `${source.replace(/^import .*\n/gm, '').replaceAll('import.meta.url', JSON.stringify(import.meta.url)).replace('export default', 'const plugin =').replace(/^export /gm, '')}\n${suffix}`)(createRequire, (node, args, options) => { saved.push({ node, args: [...args], input: options.input }); return { status: 0, stdout: '' } }, Object.assign(value => value, { schema: { string: () => ({ describe: () => ({}) }), enum: () => ({}), array: () => ({}) } }))
       if (host.agent === 'opencode') {
-        const factory = instantiate(opencodePlugin(process.execPath, worker, f.progress, 'Progress', f.home), 'return AgentBoardLocal')
-        const hooks = await factory({ client: { session: { get: async ({ path }) => ({ data: { id: path.id } }) } } })
-        await hooks.event({ event: { type: 'session.status', properties: { sessionID: payload.session_id, status: { type: 'busy' } } } })
+        const exitListeners = process.listeners('exit')
+        try {
+          const factory = instantiate(opencodePlugin(process.execPath, worker, f.progress, 'Progress', f.home), 'return AgentBoardLocal')
+          const hooks = await factory({ client: { session: { get: async ({ path }) => ({ data: { id: path.id } }) } } })
+          await hooks.event({ event: { type: 'session.status', properties: { sessionID: payload.session_id, status: { type: 'busy' } } } })
+        } finally { dropExitReports(exitListeners) }
       } else if (host.agent === 'openclaw') {
         const { plugin, report } = instantiate(openclawLocalPlugin(process.execPath, worker, f.progress, f.home), 'return { plugin, report }')
         if (host.mode === '--codex-event') {
@@ -1129,15 +1132,23 @@ fs.writeFileSync = (file, text, ...rest) => {
   assert.ok(!readdirSync(f.root).some(name => name.endsWith('.tmp')))
 }))
 
+// The OpenCode plugin ends its open sessions as its process exits (#217). A test that loads it
+// into this process drops that listener, so the runner's own exit reports nothing.
+const dropExitReports = before => {
+  for (const listener of process.listeners('exit')) if (!before.includes(listener)) process.removeListener('exit', listener)
+  delete globalThis[Symbol.for('agent-board.opencode-open-sessions')]
+}
+
 test('SDK metadata and reporter execution share one deadline without a late write', () => fixture(async f => {
   const { home, env, root } = f
   const marker = join(home, 'late-report'), pidFile = join(home, 'reporter.pid')
+  const exitListeners = process.listeners('exit')
   let childPid
   try {
     const installed = spawnSync(process.execPath, [setup, '--home', home, '--agent', 'opencode', '--apply'], { env, encoding: 'utf8', windowsHide: true, timeout: 15000 })
     assert.equal(installed.status, 0, installed.stderr)
     const source = readFileSync(join(home, '.config', 'opencode', 'plugins', 'agent-board-local.js'), 'utf8')
-    const stub = 'const tool = Object.assign(value => value, { schema: { string: () => ({}), enum: () => ({}), array: () => ({}) } })'
+    const stub = 'const tool = Object.assign(value => value, { schema: { string: () => ({ describe: () => ({}) }), enum: () => ({}), array: () => ({}) } })'
     const plugin = join(home, 'synthetic-plugin.mjs')
     writeFileSync(plugin, source.replace("import { tool } from '@opencode-ai/plugin'", stub))
     writeFileSync(join(root, 'agent-board.mjs'), `globalThis.AGENT_BOARD = {"hookVersion":1,"synthetic":true}\nimport { writeFileSync } from 'node:fs'\nwriteFileSync(${JSON.stringify(pidFile)}, String(process.pid))\nsetTimeout(() => writeFileSync(${JSON.stringify(marker)}, 'late'), 1600)\n`)
@@ -1156,6 +1167,7 @@ test('SDK metadata and reporter execution share one deadline without a late writ
     assert.equal(existsSync(marker), false)
     assert.match(readFileSync(join(root, 'hook-errors.log'), 'utf8'), /REPORTER_TIMEOUT/)
   } finally {
+    dropExitReports(exitListeners)
     if (childPid === undefined && existsSync(pidFile)) childPid = Number(readFileSync(pidFile, 'utf8'))
     await stopReporter(childPid)
   }
@@ -1855,6 +1867,7 @@ test('a shared installation retains its chosen progress path when another agent 
 
 test('OpenCode metadata adapter and task tool work without reading messages or Claude', async () => {
   const home = mkdtempSync(join(tmpdir(), 'opencode-adapter-'))
+  const exitListeners = process.listeners('exit')
   try {
     const env = isolatedEnv(home)
     const installed = spawnSync(process.execPath, [setup, '--home', home, '--agent', 'opencode', '--apply'], { env, encoding: 'utf8', windowsHide: true })
@@ -1863,7 +1876,7 @@ test('OpenCode metadata adapter and task tool work without reading messages or C
     const source = readFileSync(plugin, 'utf8')
     assert.ok(!source.includes('session.messages') && !source.includes('transcript'))
     // A minimal SDK stand-in verifies our adapter only, not OpenCode host discovery.
-    const stub = 'const tool = Object.assign(value => value, { schema: { string: () => ({}), enum: () => ({}), array: () => ({}) } })'
+    const stub = 'const tool = Object.assign(value => value, { schema: { string: () => ({ describe: () => ({}) }), enum: () => ({}), array: () => ({}) } })'
     const testPlugin = join(home, 'adapter-test.mjs')
     writeFileSync(testPlugin, source.replace("import { tool } from '@opencode-ai/plugin'", stub))
     const { AgentBoardLocal } = await import(pathToFileURL(testPlugin))
@@ -1892,18 +1905,22 @@ test('OpenCode metadata adapter and task tool work without reading messages or C
       await new Promise(resolve => setImmediate(resolve))
       assert.deepEqual(readFileSync(progress), held)
     } finally { clearTimeout(deadline) }
-  } finally { rmSync(home, { recursive: true, force: true }) }
+  } finally {
+    dropExitReports(exitListeners)
+    rmSync(home, { recursive: true, force: true })
+  }
 })
 
-const opencodeSpawnFixture = async (standIn, check) => {
+const opencodeSpawnFixture = async (standIn, check, host = {}) => {
   const home = mkdtempSync(join(tmpdir(), 'opencode-timeout-'))
   const probe = { calls: [], run: standIn }
   globalThis.agentBoardOpenCodeSpawn = probe
+  const exitListeners = process.listeners('exit')
   try {
-    const installed = spawnSync(process.execPath, [setup, '--home', home, '--agent', 'opencode', '--apply'], { env: isolatedEnv(home), encoding: 'utf8', windowsHide: true })
+    const installed = spawnSync(process.execPath, [setup, '--home', home, '--agent', 'opencode', '--apply', ...(host.lang ? ['--lang', host.lang] : [])], { env: isolatedEnv(home), encoding: 'utf8', windowsHide: true })
     assert.equal(installed.status, 0, installed.stderr)
     const source = readFileSync(join(home, '.config', 'opencode', 'plugins', 'agent-board-local.js'), 'utf8')
-    const stub = 'const tool = Object.assign(value => value, { schema: { string: () => ({}), enum: () => ({}), array: () => ({}) } })'
+    const stub = 'const tool = Object.assign(value => value, { schema: { string: () => ({ describe: () => ({}) }), enum: () => ({}), array: () => ({}) } })'
     const spawnStub = `import { spawnSync as realSpawnSync } from 'node:child_process'
 const spawnSync = (file, args, options) => {
   const probe = globalThis.agentBoardOpenCodeSpawn
@@ -1914,17 +1931,316 @@ const spawnSync = (file, args, options) => {
     const testPlugin = join(home, 'timeout-test.mjs')
     writeFileSync(testPlugin, source.replace("import { tool } from '@opencode-ai/plugin'", stub).replace("import { spawnSync } from 'node:child_process'", spawnStub))
     const { AgentBoardLocal } = await import(pathToFileURL(testPlugin))
-    const instance = await AgentBoardLocal({ client: { session: { get: async ({ path }) => ({ data: { id: path.id } }) } } })
+    const instance = await AgentBoardLocal({ ...host.context, client: { session: { get: async ({ path }) => ({ data: { id: path.id, ...host.info } }) } } })
     const payload = { title: 'Synthetic timeout task', project: 'OpenCode fixture', state: 'working', steps: ['- [~] Synthetic timeout step'] }
     const context = { sessionID: 'opencode-timeout-session' }
-    await check({ instance, payload, context, probe, progress: join(home, '.agent-board', 'progress.md'), log: join(home, '.agent-board', 'hook-errors.log') })
+    await check({ AgentBoardLocal, instance, payload, context, probe, progress: join(home, '.agent-board', 'progress.md'), log: join(home, '.agent-board', 'hook-errors.log') })
   } finally {
+    dropExitReports(exitListeners)
     delete globalThis.agentBoardOpenCodeSpawn
     rmSync(home, { recursive: true, force: true })
   }
 }
 
 const opencodeTimeoutResult = () => ({ error: { code: 'ETIMEDOUT' }, status: null, signal: 'SIGKILL' })
+const opencodeRealSpawn = (file, args, options, realSpawnSync) => realSpawnSync(file, args, options)
+const opencodeBusy = sessionID => ({ event: { type: 'session.status', properties: { sessionID, status: { type: 'busy' } } } })
+
+test("opencode: a session's block is filed under the folder it ran in", async () => {
+  const folder = join(tmpdir(), 'synthetic-opencode-folder')
+  await opencodeSpawnFixture(opencodeRealSpawn, async f => {
+    await f.instance.event(opencodeBusy('opencode-folder-session'))
+    // A session whose metadata names no folder takes the plugin's own.
+    const fallback = await f.AgentBoardLocal({ directory: join(tmpdir(), 'synthetic-plugin-folder'), client: { session: { get: async ({ path }) => ({ data: { id: path.id } }) } } })
+    await fallback['chat.message']({ sessionID: 'opencode-plugin-folder-session' }, { parts: [{ type: 'text', text: 'Synthetic prompt' }] })
+    const text = readFileSync(f.progress, 'utf8')
+    for (const name of ['synthetic-opencode-folder', 'synthetic-plugin-folder']) {
+      assert.match(text, new RegExp(String.raw`^## ${name}\r?\n<!-- auto session=\S+ agent=opencode [^\n]*state=working[^\n]*-->\r?\n### ${name}\r?$`, 'm'))
+    }
+    assert.ok(!text.includes('## opencode'), text)
+    // Only the folder's name is kept, never its path or the prompt.
+    assert.ok(!text.includes(tmpdir()) && !text.includes('Synthetic prompt'), text)
+  }, { info: { directory: folder } })
+})
+
+test("opencode: an explicit report naming a project moves the session's block", async () => {
+  await opencodeSpawnFixture(opencodeRealSpawn, async f => {
+    const session = 'opencode-move-session'
+    await f.instance.event(opencodeBusy(session))
+    assert.match(readFileSync(f.progress, 'utf8'), /^## synthetic-move-folder\r?$/m)
+    await f.instance.tool.agent_board_progress.execute({ title: 'Synthetic moved task', project: 'Synthetic Report Project', state: 'waiting', steps: ['- [?] Synthetic blue or green?'] }, { sessionID: session })
+    const text = readFileSync(f.progress, 'utf8')
+    const heading = text.indexOf('## Synthetic Report Project')
+    assert.ok(heading > text.indexOf('## synthetic-move-folder'), text)
+    assert.equal(text.match(/agent=opencode/g).length, 1, text)
+    assert.ok(text.indexOf('agent=opencode') > heading && text.indexOf('### Synthetic moved task') > heading, text)
+    assert.match(text, /- \[\?\] Synthetic blue or green\?/)
+  }, { info: { directory: join(tmpdir(), 'synthetic-move-folder') } })
+})
+
+test('a status hook other than OpenCode keeps its agent heading when its payload names a folder', () => fixture(f => {
+  assert.equal(f.install('--apply').status, 0)
+  for (const agent of ['gemini', 'grok', 'muse']) {
+    const result = f.command(['--agent-status', '--agent', agent, '--state', 'working'], { session_id: `synthetic-${agent}-status-session`, cwd: join(tmpdir(), `synthetic-${agent}-folder`) })
+    assert.equal(result.status, 0, result.stderr)
+  }
+  const text = readFileSync(f.progress, 'utf8')
+  for (const agent of ['gemini', 'grok', 'muse']) {
+    assert.match(text, new RegExp(String.raw`^## ${agent}\r?$`, 'm'))
+    assert.ok(!text.includes(`synthetic-${agent}-folder`), text)
+  }
+}))
+
+// Runs the installed OpenCode plugin in a child that ends as a one-shot `opencode run` does: its
+// session goes idle, no session.deleted comes, and the process exits. Each board call is logged
+// with the session and state it reports, and each report made while exiting with its folder;
+// `hang` makes the calls made while exiting hang.
+// Applies what the worker queued (REPORTER_QUEUED): each board run replays the queue first (#241),
+// and a run that itself runs out of time queues its own event, so it runs until the queue is
+// empty, five times at most.
+const settleQueue = home => {
+  const root = join(home, '.agent-board'), pending = join(root, 'pending')
+  for (let count = 0; count < 5 && existsSync(pending) && readdirSync(pending).some(name => name.endsWith('.json')); count++) {
+    const result = spawnSync(process.execPath, [join(root, 'agent-board.mjs'), '--agent-status', '--agent', 'opencode', '--progress-file', join(root, 'progress.md'), '--home', home], { env: isolatedEnv(home), input: JSON.stringify({ session_id: 'synthetic-settle', state: 'waiting' }), encoding: 'utf8', windowsHide: true, timeout: 30000 })
+    assert.equal(result.status, 0, result.stderr)
+  }
+  assert.ok(!existsSync(pending) || !readdirSync(pending).some(name => name.endsWith('.json')), 'queued events were not all applied')
+}
+// Every event reached the board: nothing failed or was given up on, and what was queued was applied.
+const assertNothingLost = log => assert.deepEqual((existsSync(log) ? readFileSync(log, 'utf8') : '').split(/\r?\n/).filter(line => line !== '' && !/ opencode REPORTER_QUEUED$/.test(line)), [])
+const opencodeOneShot = (home, mode, scenario = 'default') => {
+  const source = readFileSync(join(home, '.config', 'opencode', 'plugins', 'agent-board-local.js'), 'utf8')
+  const stub = 'const tool = Object.assign(value => value, { schema: { string: () => ({ describe: () => ({}) }), enum: () => ({}), array: () => ({}) } })'
+  const calls = join(home, `one-shot-calls-${mode}-${scenario}.jsonl`), marks = join(home, `one-shot-marks-${mode}-${scenario}.json`)
+  const exits = join(home, `one-shot-exits-${mode}-${scenario}.jsonl`)
+  writeFileSync(calls, '')
+  writeFileSync(exits, '')
+  const spawnStub = `import { spawnSync as realSpawnSync } from 'node:child_process'
+import { appendFileSync } from 'node:fs'
+const spawnSync = (file, args, options) => {
+  const { session_id, state, cwd } = JSON.parse(options.input)
+  appendFileSync(${JSON.stringify(calls)}, JSON.stringify({ session: session_id, state, isExiting: globalThis.isExiting === true }) + '\\n')
+  if (globalThis.isExiting) appendFileSync(${JSON.stringify(exits)}, JSON.stringify(cwd ?? null) + '\\n')
+  if (globalThis.isExiting && ${JSON.stringify(mode)} === 'fail') return { status: 1, stdout: '', stderr: '' }
+  if (globalThis.isExiting && ${JSON.stringify(mode)} === 'hang') {
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, options.timeout)
+    return { error: { code: 'ETIMEDOUT' }, status: null, signal: 'SIGKILL' }
+  }
+  return realSpawnSync(file, args, options)
+}`
+  const plugin = join(home, `one-shot-plugin-${mode}-${scenario}.mjs`), main = join(home, `one-shot-${mode}-${scenario}.mjs`)
+  const copy = join(home, `one-shot-plugin-${mode}-${scenario}-copy.mjs`)
+  writeFileSync(plugin, source.replace("import { tool } from '@opencode-ai/plugin'", stub).replace("import { spawnSync } from 'node:child_process'", spawnStub))
+  writeFileSync(copy, readFileSync(plugin))
+  // Exit listeners run in order, so the ones around the plugin's own time its exit work.
+  writeFileSync(main, `import { writeFileSync } from 'node:fs'
+const marks = {}
+process.on('exit', () => { marks.start = Date.now(); globalThis.isExiting = true })
+const { AgentBoardLocal } = await import(${JSON.stringify(pathToFileURL(plugin).href)})
+process.on('exit', () => { marks.end = Date.now(); writeFileSync(${JSON.stringify(marks)}, JSON.stringify(marks)) })
+let gets = 0, release = () => {}
+const isStalled = ${JSON.stringify(scenario)} === 'stalled'
+const holdAt = { 'late-chat': 0, 'second-chat': 2 }[${JSON.stringify(scenario)}] ?? -1
+const held = holdAt >= 0 ? new Promise(resolve => { release = resolve }) : null
+const data = path => ({ data: { id: path.id, ...(path.id === 'synthetic-subagent' ? { parentID: 'synthetic-one-shot' } : {}) } })
+const get = ({ path }) => {
+  const call = gets++
+  if (isStalled && call > 0) return new Promise(() => {})
+  return held && call === holdAt ? held.then(() => data(path)) : Promise.resolve(data(path))
+}
+const directory = ${JSON.stringify(join(tmpdir(), 'synthetic-one-shot-folder'))}
+const hooks = await AgentBoardLocal({ directory, client: { session: { get } } })
+if (${JSON.stringify(scenario)} === 'chat') {
+  await hooks['chat.message']({ sessionID: 'synthetic-one-shot' }, { parts: [{ type: 'text', text: 'Synthetic prompt' }] })
+} else if (${JSON.stringify(scenario)} === 'busy') {
+  await hooks.event({ event: { type: 'session.status', properties: { sessionID: 'synthetic-one-shot', status: { type: 'busy' } } } })
+} else if (isStalled) {
+  await hooks['chat.message']({ sessionID: 'synthetic-one-shot' }, { parts: [{ type: 'text', text: 'Synthetic prompt' }] })
+  // The reply ends, and OpenCode exits while this event's lookup has not returned.
+  hooks.event({ event: { type: 'session.idle', properties: { sessionID: 'synthetic-one-shot' } } })
+} else if (${JSON.stringify(scenario)} === 'second-chat') {
+  // A reply ends, the next prompt starts another, and OpenCode exits before that prompt's lookup returns.
+  await hooks['chat.message']({ sessionID: 'synthetic-one-shot' }, { parts: [{ type: 'text', text: 'Synthetic prompt' }] })
+  await hooks.event({ event: { type: 'session.idle', properties: { sessionID: 'synthetic-one-shot' } } })
+  hooks['chat.message']({ sessionID: 'synthetic-one-shot' }, { parts: [{ type: 'text', text: 'Synthetic prompt' }] })
+} else if (${JSON.stringify(scenario)} === 'late-chat') {
+  // The reply ends, and its idle event is reported, before the prompt's own lookup returns.
+  const chat = hooks['chat.message']({ sessionID: 'synthetic-one-shot' }, { parts: [{ type: 'text', text: 'Synthetic prompt' }] })
+  await hooks.event({ event: { type: 'session.idle', properties: { sessionID: 'synthetic-one-shot' } } })
+  release()
+  await chat
+} else if (${JSON.stringify(scenario)} === 'twice') {
+  // OpenCode loads the plugin a second time in the same process; both copies see the session.
+  const again = await (await import(${JSON.stringify(pathToFileURL(copy).href)})).AgentBoardLocal({ directory, client: { session: { get } } })
+  await hooks['chat.message']({ sessionID: 'synthetic-one-shot' }, { parts: [{ type: 'text', text: 'Synthetic prompt' }] })
+  await hooks.event({ event: { type: 'session.idle', properties: { sessionID: 'synthetic-one-shot' } } })
+  await again.event({ event: { type: 'session.idle', properties: { sessionID: 'synthetic-one-shot' } } })
+} else {
+await hooks['chat.message']({ sessionID: 'synthetic-one-shot' }, { parts: [{ type: 'text', text: 'Synthetic prompt' }] })
+await hooks.event({ event: { type: 'session.idle', properties: { sessionID: 'synthetic-one-shot' } } })
+await hooks.event({ event: { type: 'session.status', properties: { sessionID: 'synthetic-subagent', status: { type: 'busy' } } } })
+await hooks.event({ event: { type: 'session.status', properties: { sessionID: 'synthetic-closed', status: { type: 'busy' } } } })
+await hooks.event({ event: { type: 'session.deleted', properties: { info: { id: 'synthetic-closed' } } } })
+  if (['two', 'replying'].includes(${JSON.stringify(scenario)})) {
+    await hooks['chat.message']({ sessionID: 'synthetic-second' }, { parts: [{ type: 'text', text: 'Synthetic prompt' }] })
+    await hooks.event({ event: { type: 'session.status', properties: { sessionID: 'synthetic-second', status: { type: 'busy' } } } })
+    if (${JSON.stringify(scenario)} === 'two') await hooks.event({ event: { type: 'session.idle', properties: { sessionID: 'synthetic-second' } } })
+  }
+}
+`)
+  const result = spawnSync(process.execPath, [main], { env: isolatedEnv(home), encoding: 'utf8', windowsHide: true, timeout: 30000 })
+  assert.equal(result.status, 0, result.stderr)
+  if (mode === 'real') settleQueue(home)
+  const lines = file => readFileSync(file, 'utf8').split('\n').filter(Boolean).map(line => JSON.parse(line))
+  return { calls: lines(calls), exitFolders: lines(exits), marks: JSON.parse(readFileSync(marks, 'utf8')) }
+}
+// A loaded machine can push a report past the worker's 2 s limit (#241). An event the worker queued
+// is applied by settleQueue before a real-mode check reads the board. A report given up on
+// (REPORTER_TIMEOUT) is lost: a check that fails after one runs once more in a fresh home, and that
+// retry is named. `retry` says which log shows such a loss; the hang and fail scenarios log theirs
+// by design and never retry.
+const LOST = text => /opencode REPORTER_TIMEOUT/.test(text)
+const opencodeOneShotHome = async (t, check, { retry = LOST } = {}) => {
+  for (let attempt = 1; ; attempt++) {
+    const home = mkdtempSync(join(tmpdir(), 'opencode-one-shot-'))
+    const log = join(home, '.agent-board', 'hook-errors.log')
+    try {
+      const installed = spawnSync(process.execPath, [setup, '--home', home, '--agent', 'opencode', '--apply'], { env: isolatedEnv(home), encoding: 'utf8', windowsHide: true, timeout: 15000 })
+      assert.equal(installed.status, 0, installed.stderr)
+      return await check(home, join(home, '.agent-board', 'progress.md'), log)
+    } catch (error) {
+      if (!retry || attempt === 2 || !existsSync(log) || !retry(readFileSync(log, 'utf8'))) throw error
+      // The retry is named in the test output, so a regression that only sometimes misses the
+      // limit still shows.
+      t.diagnostic(`one-shot retry ${attempt}: ${String(error?.message).split('\n')[0]}`)
+    } finally { rmSync(home, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }) }
+  }
+}
+const ONE_SHOT_EVENTS = [
+  { session: 'synthetic-one-shot', state: 'working', isExiting: false },
+  { session: 'synthetic-one-shot', state: 'waiting', isExiting: false },
+  { session: 'synthetic-closed', state: 'working', isExiting: false },
+  { session: 'synthetic-closed', state: 'ended', isExiting: false },
+]
+const oneShotState = (text, session) => text.split(/\r?\n/).find(line => line.includes('agent=opencode') && line.includes(`resume=${session} `))?.match(/state=(\w+)/)?.[1]
+
+test('opencode: a one-shot run ends its session when OpenCode exits', t => opencodeOneShotHome(t, async (home, progress, log) => {
+  const run = opencodeOneShot(home, 'real')
+  // Only the session still open is ended, once; a subagent's is never reported.
+  assert.deepEqual(run.calls, [...ONE_SHOT_EVENTS, { session: 'synthetic-one-shot', state: 'ended', isExiting: true }])
+  // The end report names the session's folder, as its other reports do.
+  assert.deepEqual(run.exitFolders, [join(tmpdir(), 'synthetic-one-shot-folder')])
+  const text = readFileSync(progress, 'utf8')
+  assert.equal(oneShotState(text, 'synthetic-one-shot'), 'ended', text)
+  assert.equal(oneShotState(text, 'synthetic-closed'), 'ended', text)
+  assert.match(text, /^## synthetic-one-shot-folder\r?$/m)
+  assert.ok(!text.includes('synthetic-subagent') && !text.includes('Synthetic prompt'), text)
+  assertNothingLost(log)
+}))
+
+test('opencode: ending sessions at exit stops at the hook limit when the board hangs', t => opencodeOneShotHome(t, async (home, progress, log) => {
+  const run = opencodeOneShot(home, 'hang')
+  assert.deepEqual(run.calls, [...ONE_SHOT_EVENTS, { session: 'synthetic-one-shot', state: 'ended', isExiting: true }])
+  // One 2 s deadline plus the worker's 500 ms grace, never the host's whole wait.
+  const spent = run.marks.end - run.marks.start
+  assert.ok(spent >= 2000 && spent < 3500, `exit took ${spent} ms`)
+  assert.equal(oneShotState(readFileSync(progress, 'utf8'), 'synthetic-one-shot'), 'waiting')
+  assert.match(readFileSync(log, 'utf8'), /opencode REPORTER_TIMEOUT/)
+}, { retry: false }))
+
+test('opencode: two sessions in one process both end within one shared deadline', async t => {
+  for (const mode of ['real', 'hang']) await opencodeOneShotHome(t, async (home, progress, log) => {
+    const run = opencodeOneShot(home, mode, 'two')
+    const exiting = run.calls.filter(call => call.isExiting)
+    const text = readFileSync(progress, 'utf8')
+    if (mode === 'real') {
+      assert.deepEqual(exiting, ['synthetic-one-shot', 'synthetic-second'].map(session => ({ session, state: 'ended', isExiting: true })))
+      for (const session of ['synthetic-one-shot', 'synthetic-second']) assert.equal(oneShotState(text, session), 'ended', text)
+      assertNothingLost(log)
+    } else {
+      assert.deepEqual(exiting, [{ session: 'synthetic-one-shot', state: 'ended', isExiting: true }])
+      assert.equal(readFileSync(log, 'utf8').match(/opencode REPORTER_TIMEOUT/g)?.length, 2)
+      const spent = run.marks.end - run.marks.start
+      assert.ok(spent >= 2000 && spent < 3500, `exit took ${spent} ms`)
+      for (const session of ['synthetic-one-shot', 'synthetic-second']) assert.equal(oneShotState(text, session), 'waiting', text)
+    }
+  }, { retry: mode === 'real' && LOST })
+})
+
+test('opencode: a reporter that fails while OpenCode exits is logged and does not hold the exit', t => opencodeOneShotHome(t, async (home, progress, log) => {
+  const run = opencodeOneShot(home, 'fail', 'two')
+  assert.deepEqual(run.calls.filter(call => call.isExiting), ['synthetic-one-shot', 'synthetic-second'].map(session => ({ session, state: 'ended', isExiting: true })))
+  assert.equal(readFileSync(log, 'utf8').match(/opencode REPORTER_FAILED/g)?.length, 2)
+  const spent = run.marks.end - run.marks.start
+  assert.ok(spent < 1000, `exit took ${spent} ms`)
+  for (const session of ['synthetic-one-shot', 'synthetic-second']) assert.equal(oneShotState(readFileSync(progress, 'utf8'), session), 'waiting')
+}, { retry: false }))
+
+test('opencode: a session still replying when OpenCode exits is not ended', t => opencodeOneShotHome(t, async (home, progress, log) => {
+  const run = opencodeOneShot(home, 'real', 'replying')
+  assert.deepEqual(run.calls.filter(call => call.isExiting), [{ session: 'synthetic-one-shot', state: 'ended', isExiting: true }])
+  const text = readFileSync(progress, 'utf8')
+  assert.equal(oneShotState(text, 'synthetic-one-shot'), 'ended', text)
+  assert.equal(oneShotState(text, 'synthetic-second'), 'working', text)
+  assertNothingLost(log)
+}))
+
+test('opencode: a session whose reply ended while its lookup was pending is ended at exit', t => opencodeOneShotHome(t, async (home, progress, log) => {
+  const run = opencodeOneShot(home, 'real', 'stalled')
+  assert.deepEqual(run.calls, [{ session: 'synthetic-one-shot', state: 'working', isExiting: false }, { session: 'synthetic-one-shot', state: 'ended', isExiting: true }])
+  assert.equal(oneShotState(readFileSync(progress, 'utf8'), 'synthetic-one-shot'), 'ended')
+  // Only the lookup that never returned is given up on.
+  assert.equal(readFileSync(log, 'utf8').match(/opencode REPORTER_TIMEOUT/g)?.length, 1)
+}, { retry: text => (text.match(/opencode REPORTER_TIMEOUT/g) ?? []).length > 1 }))
+
+test('opencode: a prompt whose lookup returns after its reply ended is still ended at exit', t => opencodeOneShotHome(t, async (home, progress, log) => {
+  const run = opencodeOneShot(home, 'real', 'late-chat')
+  assert.deepEqual(run.calls, [{ session: 'synthetic-one-shot', state: 'waiting', isExiting: false }, { session: 'synthetic-one-shot', state: 'working', isExiting: false }, { session: 'synthetic-one-shot', state: 'ended', isExiting: true }])
+  assert.equal(oneShotState(readFileSync(progress, 'utf8'), 'synthetic-one-shot'), 'ended')
+  assertNothingLost(log)
+}))
+
+test('opencode: a session whose next prompt is still being looked up at exit is not ended', t => opencodeOneShotHome(t, async (home, progress, log) => {
+  const run = opencodeOneShot(home, 'real', 'second-chat')
+  assert.deepEqual(run.calls.filter(call => call.isExiting), [])
+  assert.equal(oneShotState(readFileSync(progress, 'utf8'), 'synthetic-one-shot'), 'waiting')
+  // Only the prompt whose lookup never returned is given up on.
+  const lines = readFileSync(log, 'utf8').split(/\r?\n/).filter(line => line !== '' && !/ opencode REPORTER_QUEUED$/.test(line))
+  assert.equal(lines.length, 1, lines.join('\n'))
+  assert.match(lines[0], / opencode REPORTER_TIMEOUT$/)
+}, { retry: text => (text.match(/opencode REPORTER_TIMEOUT/g) ?? []).length > 1 }))
+
+test('opencode: a plugin loaded twice in one process ends each session once at exit', t => opencodeOneShotHome(t, async (home, progress, log) => {
+  const run = opencodeOneShot(home, 'real', 'twice')
+  assert.deepEqual(run.calls.filter(call => call.isExiting), [{ session: 'synthetic-one-shot', state: 'ended', isExiting: true }])
+  assert.equal(oneShotState(readFileSync(progress, 'utf8'), 'synthetic-one-shot'), 'ended')
+  assertNothingLost(log)
+}))
+
+test('opencode: a later report for an ended session reopens its row', t => opencodeOneShotHome(t, async (home, progress, log) => {
+  for (const scenario of ['chat', 'busy']) {
+    opencodeOneShot(home, 'real')
+    assert.equal(oneShotState(readFileSync(progress, 'utf8'), 'synthetic-one-shot'), 'ended')
+    const run = opencodeOneShot(home, 'real', scenario)
+    assert.deepEqual(run.calls, [{ session: 'synthetic-one-shot', state: 'working', isExiting: false }])
+    assert.equal(oneShotState(readFileSync(progress, 'utf8'), 'synthetic-one-shot'), 'working')
+  }
+  assertNothingLost(log)
+}))
+
+test('opencode: a refused progress report tells the model why', async () => {
+  // A Chinese board brackets the code in full-width parentheses; the same code comes through.
+  for (const lang of ['en', 'zh-TW', 'zh-CN']) await opencodeSpawnFixture(opencodeRealSpawn, async f => {
+    assert.ok(readFileSync(join(dirname(f.progress), 'agent-board.mjs'), 'utf8').split('\n', 1)[0].includes(`"lang":"${lang}"`), lang)
+    // The step format the model reads is in the board's language and names every mark.
+    const plugin = readFileSync(join(dirname(dirname(f.progress)), '.config', 'opencode', 'plugins', 'agent-board-local.js'), 'utf8')
+    const format = plugin.slice(plugin.indexOf({ en: 'One Markdown task line', 'zh-TW': '一行 Markdown 任務', 'zh-CN': '一行 Markdown 任务' }[lang])).split(')', 1)[0]
+    for (const mark of ['x', '~', ' ', '?', '!', '>', '-']) assert.ok(format.includes(`- [${mark}]`), `${lang} ${mark}`)
+    await assert.rejects(f.instance.tool.agent_board_progress.execute({ ...f.payload, title: 'Synthetic refused task', steps: ['Synthetic plain step'] }, f.context), { message: 'AGENT_BOARD_REPORT_FAILED: INVALID_STEP' })
+    assert.ok(!readFileSync(f.progress, 'utf8').includes('Synthetic refused task'))
+    assert.match(readFileSync(f.log, 'utf8'), /opencode REPORTER_FAILED INVALID_STEP\r?\n/)
+  }, { lang })
+})
 
 test('an OpenCode report retries once when the runtime ends spawnSync early with ETIMEDOUT', async () => {
   await opencodeSpawnFixture((file, args, options, realSpawnSync, count) => count === 1 ? opencodeTimeoutResult() : realSpawnSync(file, args, options), async f => {
@@ -3256,4 +3572,212 @@ test('queued status events use their start time and reject invalid timestamps', 
   assert.equal(f.event('UserPromptSubmit').status, 0)
   assert.match(readFileSync(f.progress, 'utf8'), new RegExp(`<!-- auto session=${owner.slice(0, 8)} [^\n]*state=working`))
   assert.deepEqual(pendingFiles(f), [])
+}))
+
+// Runs /progress connect from a copy of the bundle, as the plugin does, outside the installer's folder.
+const legacyConnect = (f, progress, mode = 'connect', lang = 'en') => {
+  const source = readFileSync(resolve('hooks/board-script.ts'), 'utf8')
+  const runner = join(f.home, 'connect-runner.mjs')
+  if (!existsSync(runner)) f.save(runner, JSON.parse(source.slice(source.indexOf('export const BOARD_SCRIPT = ') + 'export const BOARD_SCRIPT = '.length)))
+  const request = { mode, home: f.home, progress, lang, node: process.version, codexExecutable: join(f.home, 'missing-control.exe') }
+  const result = spawnSync(process.execPath, [runner, '--legacy-connect-request', JSON.stringify(request)], { env: f.env, encoding: 'utf8', windowsHide: true, timeout: 15000 })
+  assert.equal(result.status, 0, result.stderr + result.stdout)
+  return runner
+}
+// A board path with characters such as `~` (a Windows short name, as on CI runners) is written into
+// skills as code points; read those back before looking for a folder name (as legacy-connect tests do).
+const decoded = text => text.replace(/String\.fromCodePoint\(([\d,]+)\)/g, (_, codes) => String.fromCodePoint(...codes.split(',').map(Number)))
+
+test('connection data roots distinguish POSIX apostrophes from encoded PowerShell quoting', async () => {
+  const resolver = registerHooks({ resolve(specifier, context, next) {
+    try { return next(specifier, context) } catch (error) {
+      if (error.code !== 'ERR_MODULE_NOT_FOUND' || !specifier.startsWith('.')) throw error
+      return next(`${specifier}.ts`, context)
+    }
+  } })
+  try {
+    const { connectDataRoots } = await import('../hooks/connect-pure.ts')
+    const { antigravityCommand } = await import('../hooks/local-agents.ts')
+    assert.ok(!connectDataRoots("node '/home/synthetic''x/.claude/progress-hook.mjs'").includes("/home/synthetic'x/.claude"))
+    const folder = "C:\\Users\\o'synthetic\\.claude"
+    const command = antigravityCommand(['node', `${folder}\\progress-hook.mjs`], true, value => value)
+    assert.ok(connectDataRoots(command).includes(folder))
+  } finally { resolver.deregister() }
+})
+
+test('antigravity: setup-agent takes over a home the legacy connect hooked first', () => fixture(async f => {
+  mkdirSync(join(f.home, '.gemini', 'antigravity'), { recursive: true })
+  const progress = join(f.home, '.claude', 'progress.md')
+  legacyConnect(f, progress)
+  const skill = join(f.home, '.gemini', 'config', 'skills', 'agent-board', 'SKILL.md')
+  const previous = readFileSync(skill, 'utf8')
+  const installed = f.install('--agent', 'antigravity', '--apply')
+  assert.equal(installed.status, 0, installed.stderr + installed.stdout)
+  assert.ok(!(installed.stderr + installed.stdout).includes('INSTALL_CONFLICT'))
+  const installerSkill = readFileSync(skill, 'utf8')
+  assert.notEqual(installerSkill, previous)
+  assert.equal(installerSkill, readFileSync(f.skill, 'utf8'))
+  const config = join(f.home, '.gemini', 'config', 'hooks.json')
+  assert.ok(JSON.parse(readFileSync(config, 'utf8'))['agent-board-local'])
+  legacyConnect(f, progress)
+  const hooks = JSON.parse(readFileSync(config, 'utf8'))
+  assert.equal(hooks['agent-board'], undefined)
+  assert.ok(hooks['agent-board-local'])
+  assert.equal(readFileSync(skill, 'utf8'), installerSkill)
+  const runner = legacyConnect(f, progress, 'status')
+  const status = spawnSync(process.execPath, [runner, '--legacy-connect-request', JSON.stringify({ mode: 'status', home: f.home, progress, lang: 'en', node: process.version })], { env: f.env, encoding: 'utf8', windowsHide: true, timeout: 15000 })
+  assert.equal(status.status, 0, status.stderr + status.stdout)
+  const agent = JSON.parse(status.stdout).state.setup.agents.find(one => one.agent === 'antigravity')
+  assert.ok(agent)
+  assert.notEqual(agent.hook, 'failed')
+  assert.notEqual(agent.board, 'failed')
+  const doctor = f.command(['--codex-doctor', '--agent', 'antigravity'])
+  assert.equal(doctor.status, 0, doctor.stderr + doctor.stdout)
+  assert.equal(JSON.parse(doctor.stdout).reportHook, 'installer')
+  // The connect never records setup-agent's skill as its own output, and its remove leaves it.
+  const { owned } = JSON.parse(readFileSync(join(f.home, '.agent-board', 'legacy-connect.json'), 'utf8'))
+  const installerHash = createHash('sha256').update(installerSkill).digest('hex')
+  assert.ok(!Object.values(owned).includes(installerHash), JSON.stringify(owned))
+  legacyConnect(f, progress, 'remove')
+  assert.equal(readFileSync(skill, 'utf8'), installerSkill)
+  assert.ok(JSON.parse(readFileSync(config, 'utf8'))['agent-board-local'])
+}))
+
+test('antigravity connect: where setup-agent hooked Antigravity first, the connect adds no definition and no worker', () => fixture(async f => {
+  mkdirSync(join(f.home, '.gemini', 'antigravity'), { recursive: true })
+  const progress = join(f.home, '.claude', 'progress.md')
+  const installed = f.install('--agent', 'antigravity', '--apply')
+  assert.equal(installed.status, 0, installed.stderr + installed.stdout)
+  const runner = legacyConnect(f, progress)
+  const hooks = JSON.parse(readFileSync(join(f.home, '.gemini', 'config', 'hooks.json'), 'utf8'))
+  assert.equal(hooks['agent-board'], undefined)
+  assert.ok(hooks['agent-board-local'])
+  assert.ok(!existsSync(join(f.home, '.claude', 'progress-hook.mjs')))
+  const status = spawnSync(process.execPath, [runner, '--legacy-connect-request', JSON.stringify({ mode: 'status', home: f.home, progress, lang: 'en', node: process.version })], { env: f.env, encoding: 'utf8', windowsHide: true, timeout: 15000 })
+  assert.equal(status.status, 0, status.stderr + status.stdout)
+  const agent = JSON.parse(status.stdout).state.setup.agents.find(one => one.agent === 'antigravity')
+  assert.ok(agent)
+  assert.notEqual(agent.hook, 'failed')
+}))
+
+test("antigravity: setup-agent takes over the connect's skill for a progress file outside the default folder", () => fixture(async f => {
+  mkdirSync(join(f.home, '.gemini', 'antigravity'), { recursive: true })
+  const progress = join(f.home, 'synthetic-progress-folder', 'progress.md')
+  mkdirSync(dirname(progress), { recursive: true })
+  legacyConnect(f, progress)
+  const skill = join(f.home, '.gemini', 'config', 'skills', 'agent-board', 'SKILL.md')
+  // The connect's skill runs the board beside that progress file.
+  assert.ok(decoded(readFileSync(skill, 'utf8')).includes('synthetic-progress-folder'))
+  const installed = f.install('--agent', 'antigravity', '--apply')
+  assert.equal(installed.status, 0, installed.stderr + installed.stdout)
+  assert.ok(!(installed.stderr + installed.stdout).includes('INSTALL_CONFLICT'))
+  assert.equal(readFileSync(skill, 'utf8'), readFileSync(f.skill, 'utf8'))
+}))
+
+test("antigravity: setup-agent takes over the connect's skill for a progress file that CLAUDE_CONFIG_DIR or CLAUDE_PROGRESS_FILE names", async () => {
+  for (const name of ['CLAUDE_CONFIG_DIR', 'CLAUDE_PROGRESS_FILE']) await fixture(async f => {
+    mkdirSync(join(f.home, '.gemini', 'antigravity'), { recursive: true })
+    const progress = join(f.home, 'synthetic-config-folder', 'progress.md')
+    mkdirSync(dirname(progress), { recursive: true })
+    legacyConnect(f, progress)
+    // Only the variable names the file: the connect's own record of it is taken out.
+    const record = join(f.root, 'legacy-connect.json')
+    const { connectedProgress, ...rest } = JSON.parse(readFileSync(record, 'utf8'))
+    assert.ok(connectedProgress, name)
+    f.save(record, JSON.stringify(rest))
+    const skill = join(f.home, '.gemini', 'config', 'skills', 'agent-board', 'SKILL.md')
+    const install = extraEnv => spawnSync(process.execPath, [setup, '--home', f.home, '--codex-dir', join(f.home, '.codex'), '--grok-dir', join(f.home, '.grok'), '--hermes-dir', join(f.home, '.hermes'), '--agent', 'antigravity', '--apply'], { env: { ...f.env, ...extraEnv }, encoding: 'utf8', windowsHide: true, timeout: 15000 })
+    // Without the variable nothing marks the skill as the connect's, so setup-agent refuses it.
+    const refused = install({})
+    assert.match(refused.stderr + refused.stdout, /INSTALL_CONFLICT/, name)
+    const installed = install({ [name]: name === 'CLAUDE_CONFIG_DIR' ? dirname(progress) : progress })
+    assert.equal(installed.status, 0, `${name}: ${installed.stderr}${installed.stdout}`)
+    assert.ok(!(installed.stderr + installed.stdout).includes('INSTALL_CONFLICT'), name)
+    assert.equal(readFileSync(skill, 'utf8'), readFileSync(f.skill, 'utf8'), name)
+  })
+})
+
+test('antigravity: setup-agent keeps the content and order of third-party hooks through install and removal', () => fixture(async f => {
+  const config = join(f.home, '.gemini', 'config', 'hooks.json')
+  const foreign = { 'orca-status': Object.fromEntries(['PreInvocation', 'PostInvocation', 'Stop', 'PostToolUse'].map(event => [event, [{ type: 'command', command: `synthetic-orca-${event}`, timeout: 5 }]])) }
+  const original = JSON.stringify(foreign, null, 2) + '\n'
+  f.save(config, original)
+  const installed = f.install('--agent', 'antigravity', '--apply')
+  assert.equal(installed.status, 0, installed.stderr + installed.stdout)
+  const text = readFileSync(config, 'utf8')
+  const hooks = JSON.parse(text)
+  assert.deepEqual(hooks['orca-status'], foreign['orca-status'])
+  assert.equal(Object.keys(hooks)[0], 'orca-status')
+  const slice = value => value.slice(value.indexOf('  "orca-status":'), value.indexOf('\n  }') + '\n  }'.length)
+  assert.equal(slice(text), slice(original))
+  const removed = f.command(['--codex-remove', '--agent', 'antigravity', '--apply'])
+  assert.equal(removed.status, 0, removed.stderr + removed.stdout)
+  assert.equal(readFileSync(config, 'utf8'), original)
+}))
+
+test('antigravity: one synthetic agy turn reaches the board through the connected hook', () => fixture(async f => {
+  mkdirSync(join(f.home, '.gemini', 'antigravity-cli'), { recursive: true })
+  const progress = join(f.home, '.claude', 'progress.md')
+  legacyConnect(f, progress)
+  const hooks = JSON.parse(readFileSync(join(f.home, '.gemini', 'config', 'hooks.json'), 'utf8'))['agent-board']
+  const conversationId = 'synthetic-agy-turn'
+  for (const [event, [hook]] of Object.entries(hooks)) {
+    const result = await fireCommand(f, hook.command, JSON.stringify({ conversationId, workspacePaths: ['PRIVATE_WORKSPACE'], prompt: 'PRIVATE_PROMPT' }))
+    assert.equal(result.status, 0, `${event} ${hookFailure(result)}`)
+    assert.equal(result.stdout.trim(), '{}', event)
+  }
+  const text = readFileSync(progress, 'utf8')
+  const marker = text.split(/\r?\n/).find(line => line.includes('agent=antigravity'))
+  assert.ok(marker, text)
+  assert.match(marker, /state=waiting/)
+  assert.match(marker, new RegExp(`resume=${conversationId}`))
+  assert.ok(!text.includes('PRIVATE_'))
+  assert.equal(hookLog(f), '')
+}))
+
+test('antigravity: a payload the board refuses logs its reason and still answers Antigravity', async () => {
+  // A Chinese board brackets the code in full-width parentheses; the log keeps the same code.
+  for (const lang of ['en', 'zh-TW', 'zh-CN']) await fixture(async f => {
+    mkdirSync(join(f.home, '.gemini', 'antigravity-cli'), { recursive: true })
+    const progress = join(f.home, '.claude', 'progress.md')
+    legacyConnect(f, progress, 'connect', lang)
+    assert.ok(readFileSync(join(f.home, '.claude', 'agent-board.mjs'), 'utf8').split('\n', 1)[0].includes(`"lang":"${lang}"`), lang)
+    const [hook] = JSON.parse(readFileSync(join(f.home, '.gemini', 'config', 'hooks.json'), 'utf8'))['agent-board'].PreInvocation
+    // No conversationId: the board refuses it, and the log names why with a fixed code only.
+    const result = await fireCommand(f, hook.command, JSON.stringify({ conversation_id: 'synthetic-wrong-field', prompt: 'PRIVATE_PROMPT' }))
+    assert.equal(result.status, 0, hookFailure(result))
+    assert.equal(result.stdout.trim(), '{}')
+    assert.ok(!result.stderr.includes('AGENT_BOARD_REASON'), result.stderr)
+    assert.match(hookLog(f), /antigravity REPORTER_FAILED INVALID_SESSION\r?\n$/, lang)
+    assert.ok(!hookLog(f).includes('PRIVATE_') && !hookLog(f).includes('synthetic-wrong-field'))
+  })
+})
+
+test('doctor: a host with a skill but no report hook is named', () => fixture(async f => {
+  mkdirSync(join(f.home, '.gemini', 'antigravity-cli'), { recursive: true })
+  const progress = join(f.home, '.claude', 'progress.md')
+  const runner = legacyConnect(f, progress)
+  const isolated = ['--home', f.home, '--codex-dir', join(f.home, '.codex'), '--grok-dir', join(f.home, '.grok'), '--hermes-dir', join(f.home, '.hermes')]
+  const doctor = () => {
+    const result = spawnSync(process.execPath, [runner, ...isolated, '--codex-doctor', '--agent', 'antigravity'], { env: f.env, encoding: 'utf8', windowsHide: true, timeout: 15000 })
+    assert.equal(result.status, 0, result.stderr)
+    return JSON.parse(result.stdout)
+  }
+  const connected = doctor()
+  assert.equal(connected.reportHook, 'connect')
+  assert.equal(connected.problem, undefined)
+  // An older /progress connect wrote only the skill.
+  const config = join(f.home, '.gemini', 'config', 'hooks.json')
+  const hooks = JSON.parse(readFileSync(config, 'utf8'))
+  delete hooks['agent-board']
+  writeFileSync(config, JSON.stringify(hooks))
+  const skillOnly = doctor()
+  assert.equal(skillOnly.reportHook, 'none')
+  assert.equal(skillOnly.problem, 'Antigravity: skill only, no report hook')
+  // Once the connect is taken out, the installer's hook is the one named.
+  legacyConnect(f, progress, 'remove')
+  assert.equal(f.install('--agent', 'antigravity', '--apply').status, 0)
+  const installed = doctor()
+  assert.equal(installed.reportHook, 'installer')
+  assert.equal(installed.problem, undefined)
 }))

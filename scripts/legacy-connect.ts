@@ -1,4 +1,4 @@
-import { reporterPs1, reporterSh, agentHooks, boardLangOf, boardScriptFor, connectDataRoots, connectPath, COLLISION, DELETE, generatedFile, hasOurHook, isNodeSupported, isReleased, isReleasedBoard, NODE_MIN, OPENCLAW_MIN, openclawSavedBy, openclawTooOld, setupAgents, setupLines, setupProblemText, worseHook } from '../hooks/connect-pure'
+import { reporterPs1, reporterSh, agentHooks, boardLangOf, boardScriptFor, connectDataRoots, connectPath, COLLISION, DELETE, generatedFile, hasAntigravityHook, hasInstallerAntigravityHook, hasOurHook, HOOK_WORKER, isInstallerSkill, isNodeSupported, isReleased, isReleasedBoard, NODE_MIN, OPENCLAW_MIN, openclawSavedBy, openclawTooOld, setupAgents, setupLines, setupProblemText, worseHook } from '../hooks/connect-pure'
 import type { AgentSetup, HookState, SetupNotice, SetupProblem, SetupState } from '../hooks/connect-pure'
 import { langOf, STRINGS } from '../hooks/strings'
 import type { ConnectTransaction, LegacyConnectRequest } from './connect-transaction'
@@ -6,10 +6,12 @@ import { codexApproval } from './codex-approval'
 import type { CodexCheck, CodexFound } from './codex-approval'
 import { codexFallbackCommand, managedFallback } from '../hooks/codex-fallback'
 import { sha256 } from '../hooks/sha256'
+import { hookWorker } from '../hooks/hook-safety'
+import { boardPromptHelper, boardRequestWords } from '../hooks/board-commands'
 
 const skillFolder = (file: string): string | null => /[\\/]SKILL\.md$/.test(file) ? file.replace(/[\\/][^\\/]*$/, '') : null
 
-export const connectLegacy = (transaction: ConnectTransaction, request: LegacyConnectRequest, bundle: string, isWin: boolean, observation: CodexCheck | undefined, found: CodexFound): { text: string; lines: string[]; done: string[]; problems: SetupProblem[] } => {
+export const connectLegacy = (transaction: ConnectTransaction, request: LegacyConnectRequest, bundle: string, isWin: boolean, observation: CodexCheck | undefined, found: CodexFound, nodePath?: string): { text: string; lines: string[]; done: string[]; problems: SetupProblem[] } => {
   const mode = request.mode
   const remove = mode === 'remove'
   const isAuto = mode === 'auto'
@@ -105,6 +107,12 @@ export const connectLegacy = (transaction: ConnectTransaction, request: LegacyCo
   // compares the whole file: an edited bundle, old or new, is preserved.
   const knownBoards = (text: string): boolean => Object.values(STRINGS).some(words => text === boardScript(path, words.lang)) || isReleasedBoard(text, path)
   const hasBoard = remove || (sharedFile(board, boardCode, knownBoards))
+  // Antigravity's commands run the board through this worker, which queues a late event under
+  // the data folder the board's Codex reports already use (#285). Written once, when needed.
+  const worker = folder + sep + HOOK_WORKER
+  const workerCode = hookWorker(home, board, boardPromptHelper(boardRequestWords(Object.values(STRINGS))), [home, '.agent-board'].join(sep))
+  let workerState: boolean | undefined
+  const hasWorker = (): boolean => (workerState ??= hasBoard && sharedFile(worker, workerCode))
   const savedBy = remove ? null : openclawSavedBy(readMaybe([openclawHome, 'openclaw.json'].join(sep)) ?? '')
   // A config no OpenClaw has saved yet (installed, never run) says nothing of its version,
   // so OpenClaw is asked, as it is when the config names one too old.
@@ -122,7 +130,7 @@ export const connectLegacy = (transaction: ConnectTransaction, request: LegacyCo
     warn(`removeFailed:${folder}`, { message: 'connectRemoveFailed', args: [folder] })
     failedLabels.add(label)
   }
-  for (const hook of agentHooks({ home, sep, isWindows: isWin, script, inbox: inboxPath(path), codexHome, grokHome, hermesHome, openclawHome, opencodeHome, board, s: STRINGS[fileLang] })) {
+  for (const hook of agentHooks({ home, sep, isWindows: isWin, script, inbox: inboxPath(path), codexHome, grokHome, hermesHome, openclawHome, opencodeHome, board, node: nodePath, progress: path, s: STRINGS[fileLang] })) {
     let isInstalled = false
     for (const dir of hook.dirs ?? [hook.dir]) isInstalled = isInstalled || (existsSync(dir))
     // Taking the hooks out goes by our own files, so one an earlier connect left where the
@@ -133,7 +141,9 @@ export const connectLegacy = (transaction: ConnectTransaction, request: LegacyCo
     if (!isInstalled) continue
     // Found, but its reporter or the board script is not ours to run: the problem with that
     // file is named above, and the agent is named as not set up.
-    if (!remove && hook.label !== '' && (failed.has(hook.agent) || !hasReporter)) {
+    // Antigravity's commands need the board and its worker, not the reporter; where setup-agent
+    // hooked it, none of ours are written, and neither is the worker.
+    if (!remove && hook.label !== '' && (failed.has(hook.agent) || (hook.agent === 'antigravity' ? !hasInstallerAntigravityHook(readMaybe(hook.file) ?? '') && !hasWorker() : !hasReporter))) {
       mark(hook, 'failed')
       continue
     }
@@ -229,11 +239,13 @@ export const connectLegacy = (transaction: ConnectTransaction, request: LegacyCo
         tidyFolder(skillDir, hook.label)
       } else if (after !== before) {
         writeFile(hook.file, after, hook.generated)
-      } else if (!remove && hook.generated) {
+      } else if (!remove && hook.generated && !(hook.agent === 'antigravity' && isInstallerSkill(after))) {
+        // setup-agent's skill, left as it is, is never recorded as ours: a later connect or
+        // remove would take it for its own output.
         transaction.own(hook.file, after)
       }
       const hasMovedHook = !remove && typeof after === 'string' && after !== before
-        && (hook.generated || /progress-report\.(?:ps1|sh)/.test(before))
+        && (hook.generated || hook.agent === 'antigravity' || /progress-report\.(?:ps1|sh)/.test(before))
         && otherRoots.some(root =>
           !connectDataRoots(after, true).some(one => connectPath(one, isWin) === connectPath(root, isWin)),
         )
@@ -246,7 +258,7 @@ export const connectLegacy = (transaction: ConnectTransaction, request: LegacyCo
       // nothing; the reporter's name in the file does.
       // Codex and Hermes ask the person to approve a changed hook again, so those still say so.
       // A file of ours from an earlier version, by its record, is not news either.
-      if (isAuto && !hasMovedHook && hook.agent !== 'codex' && hook.agent !== 'hermes' && (hook.edit(before, true, previous) === DELETE || hasOurHook(before))) continue
+      if (isAuto && !hasMovedHook && hook.agent !== 'codex' && hook.agent !== 'hermes' && (hook.edit(before, true, previous) === DELETE || hasOurHook(before) || hook.agent === 'antigravity' && hasAntigravityHook(before))) continue
       // OpenClaw takes two files, a plugin and the config entry that loads it.
       if (hook.label === '' || done.includes(hook.label)) continue
       done.push(hook.label)
@@ -298,6 +310,8 @@ export const connectLegacy = (transaction: ConnectTransaction, request: LegacyCo
     }
   }
   if (remove) {
+    // The worker stays while Antigravity's hooks that run it could not be taken out.
+    if (!failedLabels.has('Antigravity') && existsSync(worker)) sharedFile(worker, workerCode)
     if (canRemoveBoard) sharedFile(board, boardCode, knownBoards)
     else if (existsSync(board)) warn(`boardRetained:${board}`, { message: 'connectBoardRetained', args: [board] })
   }
