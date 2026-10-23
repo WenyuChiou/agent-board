@@ -186,6 +186,7 @@ type World = {
   browserExitCode?: number
   hasNoHardLinks?: boolean
   nodeGate?: { reached: () => void; release: Promise<void> }
+  workerGate?: { reached: () => void; release: Promise<void> }
   workerFailure?: string
   bootstrapFailure?: boolean
   setupDone?: Promise<void>
@@ -369,6 +370,12 @@ const engineBeneath = (on: On, world: World): MockClock => {
     }
     if (e.argv[0] === 'node' && e.argv[3] === CONNECT_EXECUTE) {
       world.ran?.push([...e.argv])
+      if (world.workerGate !== undefined) {
+        const gate = world.workerGate
+        world.workerGate = undefined
+        gate.reached()
+        await gate.release
+      }
       try {
         if (world.workerFailure !== undefined) throw new Error(world.workerFailure)
         const stage = JSON.parse(e.argv[5] ?? '{}') as { file: string }
@@ -7902,6 +7909,30 @@ test('a write another session makes between this one’s read and write is not l
   const ticked = world.files.get(FILE) ?? ''
   expect(ticked).toContain('- [x] 推薦信 — 等教授回覆')
   expect(ticked).toContain('### C 的工作')
+})
+
+test('a session start does not wait for the connect worker\'s Codex check', async ($, on) => {
+  let reached!: () => void
+  let release!: () => void
+  const waiting = new Promise<void>(done => { reached = done })
+  const held = new Promise<void>(done => { release = done })
+  const world: World = { files: new Map([[FILE, '# Progress\n'], ['/home/me/.codex/config.toml', '']]), mtime: 1, hasTasks: true, workerGate: { reached, release: held }, store: { inboxDone: {}, autoConnectOff: false }, stats: [] }
+  const clock = engineBeneath(on, world)
+  outside(on, world)
+  try {
+    await $.session.start({ cwd: '/work/persona_framework', surface: 'desktop', isInteractive: true })
+    await waiting
+    const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
+    expect(await ui.find({ type: 'Text', text: ZH_TW.empty })).toBeDefined()
+    await clock.advance(5000)
+    expect(world.stats?.some(path => path.endsWith('progress.md'))).toBe(true)
+    const answer = await $.command.run({ ...TIDY, args: '' })
+    expect(answer).toBeDefined()
+    await ui.unmount()
+  } finally {
+    release()
+    await settledSetup($, world)
+  }
 })
 
 test('startup shows the pane and polls the inbox while a version probe waits and remove fences its delayed auto request', async ($, on) => {

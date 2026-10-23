@@ -2,7 +2,8 @@ import { reporterPs1, reporterSh, agentHooks, boardLangOf, boardScriptFor, conne
 import type { AgentSetup, HookState, SetupNotice, SetupProblem, SetupState } from '../hooks/connect-pure'
 import { langOf, STRINGS } from '../hooks/strings'
 import type { ConnectTransaction, LegacyConnectRequest } from './connect-transaction'
-import type { CodexTrustObservation } from './codex-host'
+import { codexApproval } from './codex-approval'
+import type { CodexCheck, CodexFound } from './codex-approval'
 import { codexFallbackCommand, managedFallback } from '../hooks/codex-fallback'
 import { sha256 } from '../hooks/sha256'
 import { hookWorker } from '../hooks/hook-safety'
@@ -10,7 +11,7 @@ import { boardPromptHelper, boardRequestWords } from '../hooks/board-commands'
 
 const skillFolder = (file: string): string | null => /[\\/]SKILL\.md$/.test(file) ? file.replace(/[\\/][^\\/]*$/, '') : null
 
-export const connectLegacy = (transaction: ConnectTransaction, request: LegacyConnectRequest, bundle: string, isWin: boolean, observation?: CodexTrustObservation, nodePath?: string): { text: string; lines: string[]; done: string[]; problems: SetupProblem[] } => {
+export const connectLegacy = (transaction: ConnectTransaction, request: LegacyConnectRequest, bundle: string, isWin: boolean, observation: CodexCheck | undefined, found: CodexFound, nodePath?: string): { text: string; lines: string[]; done: string[]; problems: SetupProblem[] } => {
   const mode = request.mode
   const remove = mode === 'remove'
   const isAuto = mode === 'auto'
@@ -22,6 +23,17 @@ export const connectLegacy = (transaction: ConnectTransaction, request: LegacyCo
   const existsSync = (file: string): boolean => transaction.exists(file)
   const sep = isWin ? '\\' : '/'
   const codexHome = request.dirs?.codex ?? [home, '.codex'].join(sep)
+  const codexSource = [codexHome, 'hooks.json'].join(sep)
+  // A missing hooks.json has no hash, so the 0.23 upgrade path cannot remember an empty one.
+  const codexBefore = existsSync(codexSource) ? readMaybe(codexSource) : null
+  const beforeHash = codexBefore === null ? null : sha256(codexBefore)
+  const codexConfig = [codexHome, 'config.toml'].join(sep)
+  // Read through the transaction, because the plugin's tests load this file and allow it no
+  // node: imports. Null when there is no config.toml, undefined when it cannot be read.
+  const configHashViaTransaction = (): string | null | undefined => {
+    if (!existsSync(codexConfig)) return null
+    try { return sha256(readLocal(codexConfig)) } catch { return undefined }
+  }
   const grokHome = request.dirs?.grok ?? [home, '.grok'].join(sep)
   const hermesHome = request.dirs?.hermes ?? [home, '.hermes'].join(sep)
   const openclawHome = request.dirs?.openclaw ?? [home, '.openclaw'].join(sep)
@@ -265,9 +277,11 @@ export const connectLegacy = (transaction: ConnectTransaction, request: LegacyCo
       else warn(`writeFailed:${activeFile}`, hook.label === '' ? { message: 'connectBoardFailed', args: [activeFile] } : { message: 'connectFailed', args: [hook.label, activeFile] })
     }
   }
-  const codexSource = [codexHome, 'hooks.json'].join(sep)
-  const normalized = (value: string): string => value.replace(/\\/g, '/')
-  let codexTrusted = observation?.trusted === true && normalized(observation.source) === normalized(codexSource) && observation.sourceHash === sha256(readLocal(codexSource))
+  const codexCurrent = existsSync(codexSource) ? readMaybe(codexSource) : null
+  const decision = codexApproval(observation, codexSource, codexCurrent === null ? null : sha256(codexCurrent), configHashViaTransaction(), transaction.state.codexApproval, transaction.state.setup?.codexTrusted === true && !found.isSeedStale, beforeHash, found.binary)
+  let codexTrusted = decision.trusted
+  if (remove || decision.approval === undefined) delete transaction.state.codexApproval
+  else transaction.state.codexApproval = decision.approval
   if (existsSync(codexHome)) {
     const instructions = [[codexHome, 'AGENTS.md'].join(sep), [codexHome, 'AGENTS.override.md'].join(sep)]
     const effective = existsSync(instructions[1]!) && readMaybe(instructions[1]!)?.trim() !== '' ? instructions[1]! : instructions[0]!
@@ -277,7 +291,7 @@ export const connectLegacy = (transaction: ConnectTransaction, request: LegacyCo
         const before = readLocal(file)
         // Instruction reads can yield to an external editor. Recheck source and
         // owned executables at each retirement, not only when the lock was taken.
-        if (codexTrusted && observation!.sourceHash !== sha256(readLocal(codexSource))) {
+        if (codexTrusted && (decision.approval?.sourceHash !== sha256(readLocal(codexSource)) || decision.approval?.configHash !== configHashViaTransaction())) {
           codexTrusted = false
           warn('codex:approval', { message: 'setupCodexApproval', args: [] })
         }

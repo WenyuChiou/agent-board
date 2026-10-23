@@ -76,10 +76,11 @@ Generated board commands preserve literal paths with spaces or shell metacharact
 Windows and POSIX. Updating them still preserves personal edits and unrelated files.
 
 The optional connector requires Node.js 18+ for its native worker; setup and
-removal fail closed without it. Ownership, disable intent and last setup status
-live in `~/.agent-board/legacy-connect.json`, shared across Claude data roots and
-protected by the independent installer's home-level lock. Reload older plugin
-sessions before migration: writers that ignore the lock are not coordinated.
+removal fail closed without it. Ownership, disable intent, last setup status and
+the remembered Codex approval live in `~/.agent-board/legacy-connect.json`,
+shared across Claude data roots and protected by the independent installer's
+home-level lock. Reload older plugin sessions before migration: writers that
+ignore the lock are not coordinated.
 Automatic probes run after pane/polling startup and outside the mutation lock,
 and only for the default Claude data folder (`CLAUDE_CONFIG_DIR` unset or `~/.claude`) with the
 default progress file or the one last connected by hand; any other session
@@ -238,4 +239,4 @@ block, then retry. A successful write must produce one visible task for that ses
 See the [2026-10-19 native acceptance record](validation/2026-10-19-native-hooks.md)
 for the observed CLI events, cross-host ACKs, the Windows failure and its retest.
 
-Codex hook installation is separate from current native approval. The optional connector retains managed reporting fallback until its exact current definitions are approved in /hooks, using bounded read-only control discovery outside the install lock. Unknown/disabled/changed observations retain or restore fallback on connect; status projects current readiness without modifying AGENTS. Existing nonempty AGENTS.override.md is treated as the effective instruction file. Only positively owned board scripts can become generated fallback commands.
+Codex hook installation is separate from current native approval. The optional connector retains managed reporting fallback until its exact current definitions are approved in /hooks, using bounded read-only control discovery outside the install lock. An approval Codex confirmed is remembered with the hooks.json it was given for and the sha of Codex's config.toml at that time. A check that cannot get an answer from Codex keeps that approval while both files are unchanged; any change counts, including untrusting or disabling hooks in /hooks, which rewrites config.toml. The approval also names the Codex executable found when it was remembered (real path, size, modification time); when Codex cannot be asked and a different or unreadable executable is found, as after a Codex upgrade, the approval is not confirmed, and with no executable found it holds. An answer in a shape this release does not know (a new hash format, no enabled flag) counts as no answer, unless it calls one of the hooks anything but trusted, which is a no. A Codex answer that the definitions are unapproved, disabled or not listed, or a check that cannot get an answer from Codex after either file changed, retains or restores fallback on connect. Status projects current readiness without modifying AGENTS. Existing nonempty AGENTS.override.md is treated as the effective instruction file. Only positively owned board scripts can become generated fallback commands.
