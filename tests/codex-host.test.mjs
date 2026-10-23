@@ -159,10 +159,22 @@ for (const [label, hooks, error] of [
   ['changed command', hooks => hooks.map((hook,index) => index === 1 ? {...hook,command:'personal-command'} : hook), 'OWNED_HOOKS_NOT_FOUND'],
   ['duplicate definition', hooks => [...hooks, hooks[0]], 'OWNED_HOOKS_NOT_FOUND'],
   ['duplicate key', hooks => hooks.map(hook => ({...hook,key:'shared'})), 'OWNED_HOOKS_NOT_FOUND'],
-  ['disabled hook', hooks => hooks.map((hook,index) => index === 0 ? {...hook,enabled:false} : hook), 'HOOK_DISABLED_OR_HASH_UNSUPPORTED'],
-  ['unsupported hash', hooks => hooks.map((hook,index) => index === 0 ? {...hook,currentHash:'future-hash'} : hook), 'HOOK_DISABLED_OR_HASH_UNSUPPORTED'],
+  ['disabled hook', hooks => hooks.map((hook,index) => index === 0 ? {...hook,enabled:false} : hook), 'HOOK_DISABLED'],
+  ['unsupported hash', hooks => hooks.map((hook,index) => index === 0 ? {...hook,currentHash:'future-hash'} : hook), 'HOOK_FORMAT_UNSUPPORTED'],
+  ['missing key', hooks => hooks.map(({key, ...hook}) => hook), 'HOOK_FORMAT_UNSUPPORTED'],
+  ['enabled flag that is not a boolean', hooks => hooks.map((hook,index) => index === 0 ? {...hook,enabled:'yes'} : hook), 'HOOK_FORMAT_UNSUPPORTED'],
+  ['disabled hook without a key', hooks => hooks.map(({key, ...hook},index) => index === 0 ? {...hook,enabled:false} : {key, ...hook}), 'HOOK_DISABLED'],
 ]) test(`trust observation refuses ${label} without granting trust`, async () => fixture({hooks}, async f => {
   await assert.rejects(inspectCodexHooks(f.executable, f.config, identities), new RegExp(error))
+  assert.equal(readFileSync(f.config, 'utf8'), f.contents)
+}))
+
+for (const [label, change] of [
+  ['a hash format this code does not know', hook => ({...hook,currentHash:'future-hash'})],
+  ['no enabled flag', ({enabled, ...hook}) => hook],
+  ['no key', ({key, ...hook}) => hook],
+]) test(`an untrusted answer with ${label} is still a no`, async () => fixture({hooks:hooks => hooks.map((hook,index) => index === 0 ? change({...hook,trustStatus:'untrusted'}) : hook)}, async f => {
+  assert.equal((await inspectCodexHooks(f.executable, f.config, identities)).trusted, false)
   assert.equal(readFileSync(f.config, 'utf8'), f.contents)
 }))
 
@@ -191,4 +203,21 @@ test('an empty or duplicate identity request cannot use vacuous trust', async ()
 test('a Codex control request whose shared deadline has expired times out immediately', async () => fixture({}, async f => {
   await assert.rejects(inspectCodexHooks(f.executable, f.config, identities, 2000, performance.now() - 1), /CODEX_CONTROL_TIMEOUT/)
   assert.equal(readFileSync(f.config, 'utf8'), f.contents)
+}))
+
+test('closing the Codex check ends the processes its app-server started, on Windows', { skip: process.platform !== 'win32' && 'the process-tree kill is Windows-only; elsewhere only the app-server itself is ended' }, async () => fixture({}, async f => {
+  const pidFile = join(f.config, '..', 'helper.pid'), host = join(f.config, '..', 'tree-host.mjs')
+  // A synthetic app-server that starts a helper of its own before it answers.
+  writeFileSync(host, `import { spawn as startHelper } from 'node:child_process'
+import { writeFileSync as writePid } from 'node:fs'
+writePid(${JSON.stringify(pidFile)}, String(startHelper(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore', detached: true, windowsHide: true }).pid))
+` + readFileSync(f.executable, 'utf8'))
+  let pid
+  const isAlive = () => { try { process.kill(pid, 0); return true } catch { return false } }
+  try {
+    assert.equal((await inspectCodexHooks(host, f.config, identities)).trusted, true)
+    pid = Number(readFileSync(pidFile, 'utf8'))
+    for (const until = Date.now() + 5000; isAlive() && Date.now() < until;) await new Promise(done => setTimeout(done, 50))
+    assert.equal(isAlive(), false)
+  } finally { if (pid !== undefined && isAlive()) process.kill(pid) }
 }))

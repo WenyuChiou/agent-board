@@ -233,7 +233,7 @@ claude plugin marketplace remove agent-board
 
 提供 Agent Board／host 版本、CLI／App／IDE、OS 與合成重現資料；只有選用 plugin 才需要 Claude 版本。不上傳原始進度、inbox、封存、日誌、session log、憑證或看板 token。[安全回報](../SECURITY.md#reporting-a-problem)。
 
-目前 Codex hooks 尚未在 /hooks 核准時，選用連接器會保留受管理的回報指示。Codex 確認核准後，connect 會拿掉這些指示，並記下這次核准對應的 hooks.json。問不到 Codex 時（找不到執行檔、回應太慢、出錯），只要 hooks.json 沒變，就沿用記下的核准。Codex 回答 hooks 未核准、已關閉或不在清單上，或問不到 Codex 而 hooks.json 改過時，connect 會把指示加回來。Windows 上用 npm 裝的 Codex，檢查時直接執行 npm 套件內的 Codex 執行檔，不經過 `codex.cmd`。status 查詢信任，但不修改指示。
+目前 Codex hooks 尚未在 /hooks 核准時，選用連接器會保留受管理的回報指示。Codex 確認核准後，connect 會拿掉這些指示，並記下這次核准對應的 hooks.json 與當時 Codex 的 config.toml。問不到 Codex 時（找不到執行檔、回應太慢、出錯、回答的格式這一版讀不懂），只要這兩個檔都沒變，就沿用記下的核准。Codex 回答 hooks 未核准、已關閉或不在清單上，或問不到 Codex 而其中一個檔改過時（任何改動都算，包括在 /hooks 取消核准或關閉 hooks，這會改寫 config.toml），connect 會把指示加回來。Windows 上用 npm 裝的 Codex，檢查時直接執行 npm 套件內的 Codex 執行檔，不經過 `codex.cmd`。status 查詢信任，但不修改指示。
 
 完整來源也保存在看板旁、依內容定址的 progress-questions-source-*.json 檔案。備份或搬移時請保留整組 questions 檔案。側欄封存時（session 開始、每小時與側欄整理；看板腳本的 `--tidy` 不會）每種檔案（來源副本、retired 證明、consumed 證明）保留最新的 16 個，較舊的只有在 questions 檔或較新的副本已完整記下其內容時才會刪除；可能是唯一紀錄的檔案會留著，任何一個讀不到時就一個都不刪，一次整理最多刪 200 個，其餘留到下一次。每次讀取都合併所有副本，過期索引無法刪掉原始來源。清理與明確封存前必須成功寫入並讀回完整副本。end 事件只關閉連線，不代表回答問題；同一來源的多個問題與僅出現在 end 的問題都保留。副本損壞或無法讀取時，拒絕清理來源與新的隱藏操作。
 處理與解決後仍保留精確來源版本，因此重播舊的原始檔不會把已回答問題當作新問題；新的來源版本仍可被辨識。

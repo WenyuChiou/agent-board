@@ -39,7 +39,7 @@ const taggedBoards = new Map()
 test('a malformed remembered Codex approval makes the connect state invalid', () => fixture(async f => {
   f.run(f.request('connect'))
   const state = JSON.parse(readFileSync(f.control, 'utf8'))
-  for (const approval of [null, [], true, {}, { source: 'relative/hooks.json', sourceHash: 'a'.repeat(64) }, { source: f.config, sourceHash: 'A'.repeat(64) }, { source: f.config, sourceHash: 'a'.repeat(63) }, { source: f.config, sourceHash: 1 }]) {
+  for (const approval of [null, [], true, {}, { source: 'relative/hooks.json', sourceHash: 'a'.repeat(64) }, { source: f.config, sourceHash: 'A'.repeat(64) }, { source: f.config, sourceHash: 'a'.repeat(63) }, { source: f.config, sourceHash: 1 }, { source: f.config, sourceHash: 'a'.repeat(64), configHash: 'A'.repeat(64) }, { source: f.config, sourceHash: 'a'.repeat(64), configHash: 'a'.repeat(63) }, { source: f.config, sourceHash: 'a'.repeat(64), configHash: 1 }]) {
     writeFileSync(f.control, JSON.stringify({ ...state, codexApproval: approval }))
     const result = f.command(f.request('status'))
     assert.notEqual(result.status, 0)

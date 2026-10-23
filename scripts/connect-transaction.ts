@@ -5,9 +5,8 @@ import type { Lang, Strings } from '../hooks/i18n'
 import { BOARD_FOR, agentHooks, connectDataRoots, connectPath, isNodeSupported, isSetupState, nodeVersionOf, setupSeed, setupProblemText, withoutSection } from '../hooks/connect-pure'
 import { managedCommandLines } from '../hooks/codex-fallback'
 import { findCodexExecutable, inspectCodexHooks } from './codex-host'
-import { codexApproval } from './codex-approval'
-import type { CodexApproval } from './codex-approval'
-import type { CodexTrustObservation } from './codex-host'
+import { codexApproval, codexConfigHash } from './codex-approval'
+import type { CodexApproval, CodexCheck } from './codex-approval'
 import type { ConnectContext, SetupState } from '../hooks/connect-pure'
 import { langOf, STRINGS } from '../hooks/strings'
 import { installControlRoot, withInstallLock } from './install-control'
@@ -72,7 +71,7 @@ export class ConnectTransaction {
     if (existsSync(authority) && !existsSync(this.file)) throw new Error('MISSING_CONNECT_STATE')
     if (existsSync(this.file)) {
       const state = JSON.parse(readLocal(this.file)) as ConnectState
-      if (state.codexApproval !== undefined && (state.codexApproval === null || typeof state.codexApproval !== 'object' || Array.isArray(state.codexApproval) || typeof state.codexApproval.source !== 'string' || !isAbsolute(state.codexApproval.source) || typeof state.codexApproval.sourceHash !== 'string' || !/^[a-f0-9]{64}$/.test(state.codexApproval.sourceHash))) throw new Error('INVALID_CONNECT_STATE')
+      if (state.codexApproval !== undefined && (state.codexApproval === null || typeof state.codexApproval !== 'object' || Array.isArray(state.codexApproval) || typeof state.codexApproval.source !== 'string' || !isAbsolute(state.codexApproval.source) || typeof state.codexApproval.sourceHash !== 'string' || !/^[a-f0-9]{64}$/.test(state.codexApproval.sourceHash) || state.codexApproval.configHash !== undefined && state.codexApproval.configHash !== null && (typeof state.codexApproval.configHash !== 'string' || !/^[a-f0-9]{64}$/.test(state.codexApproval.configHash)))) throw new Error('INVALID_CONNECT_STATE')
       if (state.connectedProgress !== undefined && (typeof state.connectedProgress !== 'string' || !isAbsolute(state.connectedProgress))) throw new Error('INVALID_CONNECT_STATE')
       if (state.version !== 1 || !Number.isSafeInteger(state.revision) || state.revision < 0 || typeof state.disabled !== 'boolean' || state.owned === null || typeof state.owned !== 'object' || Array.isArray(state.owned) || Object.entries(state.owned).some(([file, value]) => !isAbsolute(file) || typeof value !== 'string' || !/^[a-f0-9]{64}$/.test(value)) || !Array.isArray(state.notified) || state.notified.some(value => typeof value !== 'string') || state.boardLang !== undefined && langOf(state.boardLang) !== state.boardLang || state.setup !== undefined && !isSetupState(state.setup)) throw new Error('INVALID_CONNECT_STATE')
       if (state.pending !== undefined) {
@@ -179,8 +178,10 @@ const codexBinary = (): string | undefined => findCodexExecutable(process.env.PA
 // other connect work takes 0.4–1.1 s and app-server startup takes 0.25 s to over 1 s.
 const CODEX_CHECK_BUDGET_MS = 5000
 const CODEX_CHECK_REQUEST_MS = 2000
+// A cold app-server start can take over 2 s; the first answer may use more of the budget.
+const CODEX_CHECK_INITIALIZE_MS = 3500
 
-const codexObservation = async (request: LegacyConnectRequest): Promise<CodexTrustObservation | undefined> => {
+const codexObservation = async (request: LegacyConnectRequest): Promise<CodexCheck | undefined> => {
   if (!['connect', 'auto', 'status'].includes(request.mode)) return undefined
   const executable = request.codexExecutable ?? codexBinary()
   if (executable === undefined) return undefined
@@ -191,12 +192,16 @@ const codexObservation = async (request: LegacyConnectRequest): Promise<CodexTru
     const config = JSON.parse(hook.edit('{}', false) as string) as { hooks: Record<string, { hooks: { command: string }[] }[]> }
     const expected = Object.entries(config.hooks).map(([event, groups]) => ({ event: event[0]!.toLowerCase() + event.slice(1), command: groups[0]!.hooks[0]!.command }))
     const before = readFileSync(hook.file)
+    // An answer counts only for the config.toml Codex read; codexApproval compares it again at the decision.
+    const configHash = codexConfigHash(codexHome)
+    if (configHash === undefined) return undefined
     for (let attempt = 0; attempt < 2; attempt++) {
-      try { return await inspectCodexHooks(executable, hook.file, expected, CODEX_CHECK_REQUEST_MS, deadline) } catch (error) {
+      try { return { ...await inspectCodexHooks(executable, hook.file, expected, CODEX_CHECK_REQUEST_MS, deadline, CODEX_CHECK_INITIALIZE_MS), configHash } } catch (error) {
         // Codex answered, but our hooks are turned off in /hooks or are not the ones it lists:
         // that is a no, not a failed look, so a remembered approval must not outlive it.
-        if (error instanceof Error && ['HOOK_DISABLED_OR_HASH_UNSUPPORTED', 'OWNED_HOOKS_NOT_FOUND'].includes(error.message)) {
-          return before.equals(readFileSync(hook.file)) ? { source: resolve(hook.file), sourceHash: createHash('sha256').update(before).digest('hex'), trusted: false, hooks: [] } : undefined
+        // A hash format Codex has changed is not a no (HOOK_FORMAT_UNSUPPORTED).
+        if (error instanceof Error && ['HOOK_DISABLED', 'OWNED_HOOKS_NOT_FOUND'].includes(error.message)) {
+          return before.equals(readFileSync(hook.file)) ? { source: resolve(hook.file), sourceHash: createHash('sha256').update(before).digest('hex'), trusted: false, hooks: [], configHash } : undefined
         }
         if (!(error instanceof Error) || !['CODEX_CONTROL_TIMEOUT', 'CODEX_CONTROL_UNAVAILABLE'].includes(error.message) || deadline - performance.now() < 1000) return undefined
       }
@@ -344,10 +349,11 @@ export const legacyConnect = async (value: unknown, bundle: string): Promise<{ s
       const missing = request.mode === 'status' ? missingBoardHosts(transaction, context) : []
       const s = STRINGS[request.lang]
       const source = join(context.codexHome, 'hooks.json')
-      const text = transaction.maybe(source)
+      // A missing hooks.json has no hash, so the 0.23 upgrade path cannot remember an empty one.
+      const text = transaction.exists(source) ? transaction.maybe(source) : null
       const sourceHash = text === null ? null : hash(text)
       const trusted = request.mode === 'ack' ? stored?.codexTrusted === true
-        : codexApproval(observation, resolve(source), sourceHash, state.codexApproval, stored?.codexTrusted, sourceHash).trusted
+        : codexApproval(observation, resolve(source), sourceHash, codexConfigHash(context.codexHome), state.codexApproval, stored?.codexTrusted, sourceHash).trusted
       const setup: SetupState = {
         ...(stored ?? { agents: [], node: request.node }),
         codexTrusted: trusted,

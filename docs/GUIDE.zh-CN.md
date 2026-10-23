@@ -233,7 +233,7 @@ claude plugin marketplace remove agent-board
 
 提供 Agent Board／host 版本、CLI／App／IDE、OS 与合成复现数据；只有可选 plugin 才需要 Claude 版本。不上传原始进度、inbox、归档、日志、session log、凭证或看板 token。[安全报告](../SECURITY.md#reporting-a-problem)。
 
-当前 Codex hooks 尚未在 /hooks 批准时，可选连接器会保留受管理的报告指示。Codex 确认批准后，connect 会去掉这些指示，并记下这次批准对应的 hooks.json。问不到 Codex 时（找不到可执行文件、响应太慢、出错），只要 hooks.json 没变，就沿用记下的批准。Codex 回答 hooks 未批准、已关闭或不在列表中，或问不到 Codex 而 hooks.json 改过时，connect 会把指示加回来。Windows 上用 npm 安装的 Codex，检查时直接运行 npm 包内的 Codex 可执行文件，不经过 `codex.cmd`。status 查询信任，但不修改指示。
+当前 Codex hooks 尚未在 /hooks 批准时，可选连接器会保留受管理的报告指示。Codex 确认批准后，connect 会去掉这些指示，并记下这次批准对应的 hooks.json 与当时 Codex 的 config.toml。问不到 Codex 时（找不到可执行文件、响应太慢、出错、回答的格式这一版读不懂），只要这两个文件都没变，就沿用记下的批准。Codex 回答 hooks 未批准、已关闭或不在列表中，或问不到 Codex 而其中一个文件改过时（任何改动都算，包括在 /hooks 取消批准或关闭 hooks，这会改写 config.toml），connect 会把指示加回来。Windows 上用 npm 安装的 Codex，检查时直接运行 npm 包内的 Codex 可执行文件，不经过 `codex.cmd`。status 查询信任，但不修改指示。
 
 完整来源也保存在看板旁、按内容寻址的 progress-questions-source-*.json 文件。备份或移动时请保留整组 questions 文件。侧栏归档时（session 开始、每小时与侧栏整理；看板脚本的 `--tidy` 不会）每种文件（来源副本、retired 证明、consumed 证明）保留最新的 16 个，较旧的只有在 questions 文件或较新的副本已完整记下其内容时才会删除；可能是唯一记录的文件会留着，任何一个读不到时就一个都不删，一次整理最多删 200 个，其余留到下一次。每次读取都合并所有副本，过期索引无法删除原始来源。清理与明确归档前必须成功写入并读回完整副本。end 事件只关闭连接，不代表回答问题；同一来源的多个问题与仅出现在 end 的问题都保留。副本损坏或无法读取时，拒绝清理来源与新的隐藏操作。
 处理与解决后仍保留精确来源版本，因此重放旧的原始文件不会把已回答问题当作新问题；新的来源版本仍可被识别。

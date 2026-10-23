@@ -24,8 +24,10 @@ const assertApproved = (f, result) => {
   assert.equal(result.state.setup.codexTrusted, true, JSON.stringify({ problems: result.result.problems, methods: readFileSync(f.log, 'utf8') }))
   assert.ok(!result.result.problems.some(one => one.key === 'codex:approval'))
   assert.doesNotMatch(readFileSync(f.instructions, 'utf8'), /agent-board:start/)
-  assert.deepEqual(result.state.codexApproval, { source: f.config, sourceHash: createHash('sha256').update(readFileSync(f.config)).digest('hex') })
+  const config = join(f.root, 'config.toml')
+  assert.deepEqual(result.state.codexApproval, { source: f.config, sourceHash: sha(readFileSync(f.config)), configHash: existsSync(config) ? sha(readFileSync(config)) : null })
 }
+const sha = bytes => createHash('sha256').update(bytes).digest('hex')
 const fixture = async action => {
   const home = mkdtempSync(join(tmpdir(), 'codex-fallback-'))
   const root = join(home, '.codex'), config = join(root, 'hooks.json'), instructions = join(root, 'AGENTS.md'), override = join(root, 'AGENTS.override.md')
@@ -68,7 +70,7 @@ childProcess.spawn = (file, args, ...rest) => {
       if (req.method !== 'hooks/list') throw Error('FORBIDDEN_METHOD')
       const data = JSON.parse(readFileSync(${JSON.stringify(config)}, 'utf8'))
       let n = 0
-      const hooks = options.unlisted ? [] : Object.entries(data.hooks ?? {}).flatMap(([event, groups]) => groups.flatMap(group => (group.hooks ?? []).map(hook => ({ key: 'key-' + (++n), currentHash: 'sha256:' + '1'.repeat(64), sourcePath: ${JSON.stringify(config)}, eventName: event[0].toLowerCase() + event.slice(1), command: hook.command, enabled: !options.disabled, trustStatus: options.trust }))))
+      const hooks = options.unlisted ? [] : Object.entries(data.hooks ?? {}).flatMap(([event, groups]) => groups.flatMap(group => (group.hooks ?? []).map(hook => ({ key: 'key-' + (++n), currentHash: options.currentHash ?? 'sha256:' + '1'.repeat(64), sourcePath: ${JSON.stringify(config)}, eventName: event[0].toLowerCase() + event.slice(1), command: hook.command, ...(options.noEnabled ? {} : { enabled: !options.disabled }), trustStatus: options.trust }))))
       answer(req, { result: { data: [{ hooks, errors: [] }] } })
     }
     const delayMs = options.delays?.[req.method] ?? (req.method === 'hooks/list' ? options.attemptDelays?.[attempt - 1] ?? options.delayMs : 0)
@@ -357,6 +359,21 @@ test('a hook source change while reading instructions cannot retire an existing 
   assert.equal(result.state.setup.codexTrusted, false)
 }))
 
+test('a Codex config.toml change while reading instructions cannot retire an existing fallback', () => fixture(async f => {
+  const config = join(f.root, 'config.toml')
+  writeFileSync(config, '# synthetic Codex settings\n')
+  f.run('connect')
+  const before = readFileSync(f.instructions, 'utf8')
+  writeFileSync(f.options, JSON.stringify({ trust: 'trusted' }))
+  const preload = join(f.home, 'config-drift.mjs')
+  // As above, but /hooks rewrites config.toml after Codex answered and before the fallback is retired.
+  writeFileSync(preload, `import fs from 'node:fs';import{syncBuiltinESMExports}from'node:module';const read=fs.readFileSync;let reads=0;fs.readFileSync=(file,...args)=>{if(file===${JSON.stringify(f.instructions)}&&reads++===1)fs.appendFileSync(${JSON.stringify(config)},'# hooks untrusted\\n');return read(file,...args)};syncBuiltinESMExports()`)
+  const result = f.run('connect', {}, { NODE_OPTIONS: '--import=' + pathToFileURL(preload).href })
+  assert.match(readFileSync(config, 'utf8'), /hooks untrusted/)
+  assert.equal(readFileSync(f.instructions, 'utf8'), before)
+  assert.equal(result.state.setup.codexTrusted, false)
+}))
+
 test('an approved Codex whose check cannot run keeps no fallback while hooks.json is unchanged', () => fixture(async f => {
   approvedConnect(f)
   for (const mode of ['connect', 'auto']) {
@@ -394,7 +411,11 @@ for (const answer of ['disabled', 'unlisted']) test(`an approved Codex whose hoo
 }))
 
 test('a Codex that is really untrusted gets the fallback', () => fixture(async f => {
+  // The first connect writes our hooks; only the second finds them listed, untrusted.
+  f.run('connect')
+  writeFileSync(f.replies, '')
   const result = f.run('connect')
+  assert.ok(readFileSync(f.replies, 'utf8').split('\n').includes('hooks/list'))
   assert.equal(result.state.setup.codexTrusted, false)
   assert.ok(result.result.problems.some(one => one.key === 'codex:approval'))
   assert.match(readFileSync(f.instructions, 'utf8'), /agent-board:start/)
@@ -468,6 +489,72 @@ test('a Codex answer that takes 1.5 s counts on the first attempt', () => fixtur
   assert.equal(readFileSync(f.log, 'utf8').trim().split('\n').filter(one => one === 'initialize').length, 1)
 }))
 
+test('a cold Codex start that takes 2.5 s to answer counts on the first attempt', () => fixture(async f => {
+  f.run('connect')
+  writeFileSync(f.options, JSON.stringify({ trust: 'trusted', delays: { initialize: 2500 } }))
+  writeFileSync(f.log, '')
+  assertApproved(f, f.run('connect'))
+  assert.equal(readFileSync(f.log, 'utf8').trim().split('\n').filter(one => one === 'initialize').length, 1)
+}))
+
+test('an approved Codex whose hooks Codex lists in a hash format this code does not know keeps no fallback', () => fixture(async f => {
+  approvedConnect(f)
+  writeFileSync(f.options, JSON.stringify({ trust: 'trusted', currentHash: 'future-hash' }))
+  writeFileSync(f.replies, '')
+  assertApproved(f, f.run('connect'))
+  assert.ok(readFileSync(f.replies, 'utf8').split('\n').includes('hooks/list'))
+}))
+
+test('an approved Codex whose hooks Codex calls untrusted in a hash format this code does not know gets the fallback back', () => fixture(async f => {
+  approvedConnect(f)
+  // A new hash format untrusts the hooks without touching config.toml.
+  writeFileSync(f.options, JSON.stringify({ trust: 'untrusted', currentHash: 'future-hash' }))
+  const result = f.run('connect')
+  assert.equal(result.state.setup.codexTrusted, false)
+  assert.equal(JSON.parse(readFileSync(f.control, 'utf8')).codexApproval, undefined)
+  assert.match(readFileSync(f.instructions, 'utf8'), /agent-board:start/)
+}))
+
+test('a hooks list without an enabled flag keeps a remembered approval only while config.toml is unchanged', () => fixture(async f => {
+  const config = join(f.root, 'config.toml')
+  writeFileSync(config, '# synthetic Codex settings\n')
+  approvedConnect(f)
+  // An answer this code cannot read counts as no answer, so config.toml decides.
+  writeFileSync(f.options, JSON.stringify({ trust: 'trusted', noEnabled: true }))
+  writeFileSync(f.replies, '')
+  assertApproved(f, f.run('connect'))
+  assert.ok(readFileSync(f.replies, 'utf8').split('\n').includes('hooks/list'))
+  writeFileSync(config, '# synthetic Codex settings, hooks turned off\n')
+  const result = f.run('connect')
+  assert.equal(result.state.setup.codexTrusted, false)
+  assert.ok(result.result.problems.some(one => one.key === 'codex:approval'))
+  assert.match(readFileSync(f.instructions, 'utf8'), /agent-board:start/)
+}))
+
+test('a change to Codex config.toml voids a remembered approval when Codex cannot be asked', () => fixture(async f => {
+  const config = join(f.root, 'config.toml')
+  writeFileSync(config, '# synthetic Codex settings\n')
+  approvedConnect(f)
+  const unavailable = { codexExecutable: join(f.home, 'missing-control.exe') }
+  assertApproved(f, f.run('connect', unavailable))
+  // Untrusting or turning the hooks off in /hooks rewrites config.toml, not hooks.json.
+  writeFileSync(config, '# synthetic Codex settings, hooks untrusted\n')
+  const result = f.run('connect', unavailable)
+  assert.equal(result.state.setup.codexTrusted, false)
+  assert.ok(result.result.problems.some(one => one.key === 'codex:approval'))
+  assert.match(readFileSync(f.instructions, 'utf8'), /agent-board:start/)
+}))
+
+test('a home approved under 0.23 whose hooks.json is gone does not count as approved', () => fixture(async f => {
+  approvedConnect(f)
+  const state = JSON.parse(readFileSync(f.control, 'utf8'))
+  delete state.codexApproval
+  writeFileSync(f.control, JSON.stringify(state))
+  rmSync(f.config)
+  const result = f.run('status', { codexExecutable: join(f.home, 'missing-control.exe') })
+  assert.equal(result.state.setup.codexTrusted, false)
+}))
+
 test('a shared Codex check deadline bounds delayed requests across both attempts', () => fixture(async f => {
   approvedConnect(f)
   // A connect with an instant answer measures this machine's start-up time.
@@ -499,17 +586,24 @@ test('an upgrade cannot seed approval if this connect rewrites hooks.json', () =
 
 test('the shared Codex approval decision requires the exact current source and hash', () => {
   const source = join(tmpdir(), 'synthetic-codex', 'hooks.json')
-  const sourceHash = 'a'.repeat(64), otherHash = 'b'.repeat(64)
-  const approval = { source, sourceHash }
-  const observation = { ...approval, trusted: true, hooks: [] }
-  for (const stale of [{ ...observation, source: source + '.other' }, { ...observation, sourceHash: otherHash }]) {
-    assert.deepEqual(codexApproval(stale, source, sourceHash, approval, true, sourceHash), { trusted: false, approval })
+  const sourceHash = 'a'.repeat(64), otherHash = 'b'.repeat(64), configHash = 'c'.repeat(64), otherConfig = 'd'.repeat(64)
+  const approval = { source, sourceHash, configHash }
+  const observation = { source, sourceHash, trusted: true, hooks: [], configHash }
+  for (const stale of [{ ...observation, source: source + '.other' }, { ...observation, sourceHash: otherHash }, { ...observation, configHash: otherConfig }]) {
+    assert.deepEqual(codexApproval(stale, source, sourceHash, configHash, approval, true, sourceHash), { trusted: false, approval })
   }
-  assert.deepEqual(codexApproval({ ...observation, trusted: false }, source, sourceHash, approval, true, sourceHash), { trusted: false, approval: undefined })
-  assert.deepEqual(codexApproval(undefined, source, sourceHash, approval, false, otherHash), { trusted: true, approval })
-  const elsewhere = { source: source + '.other', sourceHash }
-  assert.deepEqual(codexApproval(undefined, source, sourceHash, elsewhere, true, sourceHash), { trusted: false, approval: elsewhere })
-  assert.deepEqual(codexApproval(undefined, source, otherHash, approval, true, sourceHash), { trusted: false, approval })
-  assert.deepEqual(codexApproval(undefined, source, null, approval, true, null), { trusted: false, approval })
-  assert.deepEqual(codexApproval(undefined, source, sourceHash, undefined, true, otherHash), { trusted: false, approval: undefined })
+  assert.deepEqual(codexApproval(observation, source, sourceHash, configHash, undefined, false, otherHash), { trusted: true, approval })
+  assert.deepEqual(codexApproval(observation, source, sourceHash, undefined, approval, true, sourceHash), { trusted: false, approval })
+  // A no clears the approval whatever config.toml holds.
+  assert.deepEqual(codexApproval({ ...observation, trusted: false, configHash: otherConfig }, source, sourceHash, configHash, approval, true, sourceHash), { trusted: false, approval: undefined })
+  assert.deepEqual(codexApproval(undefined, source, sourceHash, configHash, approval, false, otherHash), { trusted: true, approval })
+  const elsewhere = { ...approval, source: source + '.other' }
+  assert.deepEqual(codexApproval(undefined, source, sourceHash, configHash, elsewhere, true, sourceHash), { trusted: false, approval: elsewhere })
+  for (const current of [otherConfig, null, undefined]) assert.deepEqual(codexApproval(undefined, source, sourceHash, current, approval, true, sourceHash), { trusted: false, approval })
+  assert.deepEqual(codexApproval(undefined, source, sourceHash, configHash, { source, sourceHash }, true, sourceHash), { trusted: false, approval: { source, sourceHash } })
+  assert.deepEqual(codexApproval(undefined, source, otherHash, configHash, approval, true, sourceHash), { trusted: false, approval })
+  assert.deepEqual(codexApproval(undefined, source, null, configHash, approval, true, null), { trusted: false, approval })
+  assert.deepEqual(codexApproval(undefined, source, sourceHash, null, undefined, true, sourceHash), { trusted: true, approval: { source, sourceHash, configHash: null } })
+  assert.deepEqual(codexApproval(undefined, source, sourceHash, undefined, undefined, true, sourceHash), { trusted: false, approval: undefined })
+  assert.deepEqual(codexApproval(undefined, source, sourceHash, configHash, undefined, true, otherHash), { trusted: false, approval: undefined })
 })
