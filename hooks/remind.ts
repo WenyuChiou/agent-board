@@ -9,7 +9,9 @@ import type { View } from './view'
 // (shared by every open session through the store, so one question pings once, not once per
 // session); a key not in it is new.
 
-export type Reminder = { key: string; kind: 'ask' | 'due'; text: string; project: string }
+// `oldKey`: the key 0.23.x sessions look for, written too until 0.25, so a session of that version
+// that shares the store does not say again a question a newer one already said.
+export type Reminder = { key: string; oldKey?: string; kind: 'ask' | 'due'; text: string; project: string }
 
 export const remindersOf = (
   view: View,
@@ -27,7 +29,8 @@ export const remindersOf = (
     // list held whole questions, one per id (#373). The old key still counts as told, so the
     // first run after an update does not say every waiting question again.
     const key = toldKey(item.questionId ?? item.key, item.text)
-    if (told[key] === undefined && told[`ask:${item.questionId ?? item.key}:${item.text}`] === undefined) out.push({ key, kind: 'ask', project: item.project, text: s.noticeAsked(item.agent || item.project, item.text) })
+    const oldKey = `ask:${item.questionId ?? item.key}:${item.text}`
+    if (told[key] === undefined && told[oldKey] === undefined) out.push({ key, oldKey, kind: 'ask', project: item.project, text: s.noticeAsked(item.agent || item.project, item.text) })
   }
   for (const row of view.due) {
     if (row.due === null) continue

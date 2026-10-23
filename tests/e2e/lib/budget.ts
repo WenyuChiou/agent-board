@@ -37,5 +37,6 @@ export const RETIREMENT_PROGRESS_BYTES = RETIREMENT_LIVE_BLOCKS * RETIREMENT_BLO
 // different rules. PowerShell removes files older than 2 days (AddDays(-2)), and sh runs
 // find -mtime +2, which counts whole days and so keeps a file until it is 3 days old. The test runs
 // the reporter of its own system, so the cap is the larger rule, sh's: 3 days of the 2 turn files
-// a day, plus the file that run writes. PowerShell stays under it.
+// a day, plus the file that run writes. PowerShell stays under it. It counts turn files; the
+// reporters' count file dropped.log is checked on its own.
 export const RETIREMENT_INBOX_FILES = 3 * 2 + 1

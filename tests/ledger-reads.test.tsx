@@ -147,6 +147,35 @@ test('a capture is read once, a damaged one is read at every look, and a repaire
   expect(timesRead()).toBe(damaged + 1)
 })
 
+test('on Windows question-file pruning continues through later batches after an already removed file returns exit code 1', async ($, on) => {
+  const world = makeWorld([[FILE, pruningBoard]])
+  world.env = { ...english, OS: 'Windows_NT' }
+  world.ran = []
+  world.missingRemoveExitCode = 1
+  const clock = engineBeneath(on, world)
+  await $.session.start(START)
+  await clock.advance(2000)
+  const keys = putOrphans(world, 136)
+  const first = proofFile('retired', keys[0]!)
+  const gone = proofFile('retired', keys[1]!)
+  let isRaced = false
+  world.isRemoveRefused = path => {
+    if (path === first) {
+      world.files.delete(gone)
+      isRaced = true
+    }
+    return false
+  }
+  world.ran = []
+  await $.command.run(TIDY)
+  expect(isRaced).toBe(true)
+  const removals = world.ran.filter(argv => argv[0] === 'powershell' && (argv[3] ?? '').startsWith('Remove-Item'))
+  expect(removals).toHaveLength(3)
+  for (const argv of removals) expect(argv[3]).toContain('; exit 0')
+  for (const key of keys.slice(0, 120)) expect(world.files.has(proofFile('retired', key))).toBe(false)
+  for (const key of keys.slice(120)) expect(world.files.has(proofFile('retired', key))).toBe(true)
+})
+
 test('captures and proofs beyond the newest 16 are pruned at tidy, and the ledger still holds every unresolved question', async ($, on) => {
   const board = `## demo\n${block('a1b2c301', 'waiting', 1, '- [?] Publish the first plan, OK?')}${block('a1b2c302', 'working', 1, '- [~] Work')}`
   const world = makeWorld([[FILE, board]])

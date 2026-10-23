@@ -20,6 +20,7 @@ export const ZH_CN: Strings = {
   messagesConflict: '相同消息编号已有不同内容，已拒绝重发。',
   localAgentTask: (agent: string): string => `${agent} 本地任务`,
   localAgentSkillDescription: '打开本地交互看板，跟踪当前已接线 session 的实际任务进度。',
+  localAgentStepFormat: '一行 Markdown 任务：“- [x] 完成”、“- [~] 进行中”、“- [ ] 下一步”、“- [?] 等用户回答”、“- [!] 卡住”、“- [>] 在别处运行或已交接”、“- [-] 取消”',
   localAgentLifecycle: "等待下一个工作指令",
   localHostReview: '安装文件后仍须在原生 host 核对 hooks／plugin 是否启用，并分开验收 CLI、App、IDE 的实际事件；现有 session 可能需要重新加载。此安装不绕过信任、不读对话、不启用远程控制，也不代表已建立传信连接。',
   localAgentSkill: (command: string): string => `执行 \`${command} --serve\`，显示最后一行的交互看板链接；桌面有打开网址工具时就在面板打开。这是网页 UI，不是原生 pane。CLI 也可在另一个终端执行 \`${command} --watch\`。\n\n用户要求跟踪当前工作时，在每个实际步骤或状态改变后自行报告最少任务摘要，不传原始对话或机密。OpenCode 使用 agent_board_progress 工具，由工具 context 绑定当前 session；Codex 用当前 CODEX_THREAD_ID，执行 \`${command} --codex-report\`；Cursor 只有在 hooks 注入 AGENT_BOARD_AGENT=cursor 和 AGENT_BOARD_SESSION_ID 后才执行 \`${command} --codex-report --agent cursor\`。没有可证明的绑定就明示未接通，不扫描对话或猜 session，也不指定其他 session。命令以 stdin 接受 JSON：{\"title\":\"任务摘要\",\"project\":\"项目\",\"state\":\"working\",\"steps\":[\"- [x] 已完成\",\"- [~] 当前步骤\"]}。等用户用 waiting 与 [?]；阻挡用 [!]；所有步骤完成才用 done。hooks 只更新活动状态，语义步骤由你明确报告。不要以写文件、mock 或 RPC 接受宣称自动 hooks 或反向送达已验收。一般回复不批准工具或 PR 合并。`,
@@ -32,7 +33,7 @@ export const ZH_CN: Strings = {
   lang: 'zh-CN' as Lang,
 
   inboxTitle: '收件箱报告已保留',
-  inboxHeld: (file: string, reason: string): string => `报告保留在 ${file}（${reason}）。请检查文件内容与来源 agent 的汇报 hook。`,
+  inboxHeld: (file: string, reason: string): string => `报告保留在 ${file}（${reason}）。标成 .failed 的报告会保留 7 天。请检查文件内容与来源 agent 的汇报 hook。`,
 
   // Time and dates
   justNow: '刚刚',
@@ -256,6 +257,7 @@ export const ZH_CN: Strings = {
   setupAgent: (label: string, parts: string[]): string => `${label}：${parts.join('；')}`,
   setupHookConfigured: '汇报 hook 已接上',
   setupHookFailed: '汇报 hook 没接上，原因在下面',
+  setupSkillOnly: '只有 skill，没有汇报 hook',
   setupHookUnreadable: '配置文件读不懂，没有接',
   setupHookTooOld: '版本太旧，没有接',
   setupCodexTrust: '第一次要在 Codex 的 /hooks 里批准',
@@ -449,7 +451,12 @@ export const ZH_CN: Strings = {
   progressIncomplete: (n: number): string => `progress.md 有一行标记未写完，可能有 ${n} 项工作未显示`,
   blockCutOff: (agent: string, day: string | null): string => `${day === null ? '' : `${day}的`}一个${agent === '' ? '' : ` ${agent} `}工作在 session 崩溃时被截断了，按原样显示；最后几行可能会出现两次。`,
   progressLarge: (kb: number, cap: number): string => `progress.md 已有 ${kb} KB，超过 ${cap} KB；手写的工作与等你回复的步骤都不会被删，可归档已完成的工作`,
-  storeLarge: (mb: string, cap: string): string => `看板存的记录已有 ${mb} MB（上限 ${cap} MB），旧记录会陆续清掉`,
+  storeLarge: (mb: string, cap: string): string => `看板存的记录已有 ${mb} MB（上限 ${cap} MB）；只有区块已离开看板的 session 记录会被清掉，其余都会保留`,
+  prunedAgents: (n: number): string => `${n} 条旧的 agent 记录`,
+  prunedSessions: (n: number): string => `${n} 份旧的 session 工作清单`,
+  prunedTurns: (n: number): string => `${n} 条还没读的收件箱回合`,
+  prunedJoin: (parts: readonly string[]): string => (parts.length < 2 ? parts.join('') : `${parts.slice(0, -1).join('、')}和 ${parts.at(-1)}`),
+  prunedLine: (list: string, days: number): string => `最近 ${days} 天清掉了 ${list}`,
   reporterFailed: (reason: string): string => `进度报告未能保存（${reason}），请检查进度文件后重试。`,
   tailRepairFailed: '无法安全修复不完整的结尾，没有改动任何内容。请检查进度文件后重新报告。',
   fileProgress: '你的进度文件',

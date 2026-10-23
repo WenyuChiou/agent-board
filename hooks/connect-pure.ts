@@ -1,5 +1,7 @@
 import { boardPromptHelper, boardRequestWords, boardRun, geminiBoardCommand, normalizeCommandPath, opencodeBoardCommand } from './board-commands'
-import { hookGuardSource, hostHookTimeout } from './hook-safety'
+import { HOOK_VERSION, hookGuardSource, hostHookTimeout } from './hook-safety'
+import { INBOX_DROPPED_COPY, INBOX_DROPPED_FILE, INBOX_DROPPED_FOLD_BYTES, INBOX_DROPPED_KEEP_DAYS, INBOX_DROPPED_STALE_MINUTES, INBOX_MAX_BYTES, INBOX_MAX_FILES } from './hook-reporters'
+import { antigravityCommand, antigravityHooks, encodedCommandText, hookCommandArgs } from './local-agents'
 import { legacyOpenClawPlugin, legacyOpenCodePlugin } from './legacy-hook-plugins'
 import { LANGS, ZH_TW } from './i18n'
 import type { Strings } from './i18n'
@@ -10,6 +12,69 @@ import { STRINGS } from './strings'
 
 const BOARD_WORDS = boardRequestWords(Object.values(STRINGS))
 const BOARD_PROMPT_HELPER = boardPromptHelper(BOARD_WORDS)
+
+// The inbox cap (#373) for the plugins that save turn files themselves, as the reporter scripts
+// keep it: once a turn file is saved, the oldest go past INBOX_MAX_FILES files or INBOX_MAX_BYTES
+// bytes, and each removal is counted in INBOX_DROPPED_FILE. A failure here never loses the turn
+// just saved.
+const INBOX_CAP = `const capInbox = saved => {
+  try {
+    const turns = readdirSync(INBOX).filter(name => /^[a-z][a-z0-9]*-(prompt|turn|end)-[\\w.-]+\\.json$/.test(name)).flatMap(name => {
+      try {
+        const stat = statSync(join(INBOX, name))
+        return stat.isFile() ? [{ name, size: stat.size, at: stat.mtimeMs }] : []
+      } catch { return [] }
+    }).sort((a, b) => a.at - b.at)
+    let files = turns.length, bytes = turns.reduce((sum, one) => sum + one.size, 0), removed = 0
+    for (const one of turns) {
+      if (files <= ${INBOX_MAX_FILES} && bytes <= ${INBOX_MAX_BYTES}) break
+      if (one.name === saved) continue
+      try { unlinkSync(join(INBOX, one.name)); removed += 1 } catch {}
+      files -= 1; bytes -= one.size
+    }
+    if (removed === 0) return
+    const log = join(INBOX, '${INBOX_DROPPED_FILE}')
+    appendFileSync(log, new Date().toISOString().slice(0, 19) + 'Z ' + removed + ' cap\\n')
+    // A plugin keeps one process id for hours: each fold's copy is named for its time as well, so a
+    // copy an earlier fold of this process kept is never written over and is claimed like any other.
+    const aside = log + '.' + process.pid + String(Date.now())
+    // Claim only old, unclaimed copies left by a stopped writer. One that cannot be added back goes
+    // back under its own name, for the next writer to claim.
+    for (const name of readdirSync(INBOX)) {
+      try {
+        const copy = join(INBOX, name)
+        if (copy === aside || !/${INBOX_DROPPED_COPY}/.test(name)) continue
+        const stat = statSync(copy)
+        if (!stat.isFile() || stat.mtimeMs >= Date.now() - ${INBOX_DROPPED_STALE_MINUTES * 60000}) continue
+        const claimed = copy + '.' + process.pid
+        renameSync(copy, claimed)
+        try {
+          appendFileSync(log, readFileSync(claimed, 'utf8'))
+        } catch {
+          renameSync(claimed, copy)
+          continue
+        }
+        unlinkSync(claimed)
+      } catch {}
+    }
+    // Fold counts by UTC day and reason, keeping ${INBOX_DROPPED_KEEP_DAYS} days back.
+    if (statSync(log).size > ${INBOX_DROPPED_FOLD_BYTES}) {
+      renameSync(log, aside)
+      const cutoff = new Date(Date.now() - ${INBOX_DROPPED_KEEP_DAYS} * 86400000).toISOString().slice(0, 10)
+      const counts = new Map()
+      for (const line of readFileSync(aside, 'utf8').split('\\n')) {
+        const match = /^(\\d{4}-\\d\\d-\\d\\d)T\\d\\d:\\d\\d:\\d\\dZ (\\d+) (age|cap)\\r?$/.exec(line)
+        if (match === null || match[1] < cutoff) continue
+        const key = match[1] + ' ' + match[3]
+        counts.set(key, (counts.get(key) || 0) + Number(match[2]))
+      }
+      const folded = [...counts.keys()].sort().map(key => key.slice(0, 10) + 'T00:00:00Z ' + counts.get(key) + ' ' + key.slice(11) + '\\n').join('')
+      appendFileSync(log, folded)
+      unlinkSync(aside)
+    }
+  } catch {}
+}
+`
 
 export { reporterSh, reporterPs1 } from './hook-reporters'
 
@@ -153,7 +218,8 @@ export const withoutSection = (text: string): string => {
 // Where each agent keeps what `/progress connect` changes, and how. `dir` says the agent is
 // installed (its folder under the home directory); `edit` turns the file's text into the
 // new text, or null when the file cannot be read as JSON and is left alone.
-export type ConnectContext = { home: string; sep: string; isWindows: boolean; script: string; inbox: string; codexHome: string; grokHome: string; hermesHome: string; openclawHome: string; opencodeHome?: string; board?: string; s?: Strings }
+// `node` and `progress` build Antigravity's commands; only a connect that writes them passes them.
+export type ConnectContext = { home: string; sep: string; isWindows: boolean; script: string; inbox: string; codexHome: string; grokHome: string; hermesHome: string; openclawHome: string; opencodeHome?: string; board?: string; node?: string; progress?: string; s?: Strings }
 
 export type AgentHook = {
   agent: string
@@ -190,6 +256,27 @@ const join = (ctx: ConnectContext, ...parts: string[]): string => [ctx.home, ...
 // Other tools (Orca among them) put hooks in ~/.grok/hooks for a Grok Build that may never
 // be installed, so the folder alone is no sign of it: Grok's own config or sessions are.
 const grokSigns = (ctx: ConnectContext): string[] => ['config.toml', 'sessions', '.metadata_version', 'agent_id'].map(name => [ctx.grokHome, name].join(ctx.sep))
+
+// The Antigravity app and `agy` each leave a folder of their own; both read ~/.gemini/config.
+const antigravitySigns = (ctx: ConnectContext): string[] => ['antigravity', 'antigravity-cli', 'antigravity-ide'].map(name => join(ctx, '.gemini', name))
+
+// Antigravity's definition of ours in ~/.gemini/config/hooks.json, and the hook worker its
+// commands run, next to the reporter. The installer's are agent-board-local and
+// agent-board-hook.mjs, so the two never take each other's (#285).
+export const ANTIGRAVITY_HOOK = 'agent-board'
+const INSTALLER_ANTIGRAVITY_HOOK = 'agent-board-local'
+export const HOOK_WORKER = 'progress-hook.mjs'
+
+export const hasAntigravityHook = (text: string): boolean => {
+  const config = readConfig(text)
+  return config !== null && Object.hasOwn(config, ANTIGRAVITY_HOOK)
+}
+
+// setup-agent's own Antigravity hooks, which the connect leaves to report alone.
+export const hasInstallerAntigravityHook = (text: string): boolean => {
+  const config = readConfig(text)
+  return config !== null && Object.hasOwn(config, INSTALLER_ANTIGRAVITY_HOOK)
+}
 
 const jsonEdit =
   (add: (config: Json) => Json, preservePositions = false) =>
@@ -430,6 +517,28 @@ export const agentHooks = (ctx: ConnectContext): AgentHook[] => {
       generated: true,
       edit: generatedFile(opencodePlugin(ctx), [opencodePlugin(ctx, false), legacyOpenCodePlugin(ctx), legacyOpenCodePlugin(ctx, false), legacyOpenCodePlugin(ctx, true, false)]),
     },
+    {
+      // Antigravity groups its events under one named definition. Its commands are the
+      // installer's: the hook worker runs the board within Antigravity's limit (#241, #285).
+      agent: 'antigravity',
+      label: 'Antigravity',
+      dir: join(ctx, '.gemini', 'antigravity'),
+      dirs: antigravitySigns(ctx),
+      file: join(ctx, '.gemini', 'config', 'hooks.json'),
+      edit: (text, remove) => {
+        const config = readConfig(text)
+        if (config === null) return null
+        const { [ANTIGRAVITY_HOOK]: _, ...others } = config
+        // Where the installer (setup-agent) hooked Antigravity, its hooks report: a second set
+        // would report every event twice.
+        if (remove || Object.hasOwn(config, INSTALLER_ANTIGRAVITY_HOOK)) return writeChanged(text, config, others)
+        const folder = ctx.script.replace(/[\\/][^\\/]*$/, '')
+        const progress = ctx.progress ?? [folder, 'progress.md'].join(ctx.sep)
+        const command = (event: string, state: string): string =>
+          antigravityCommand(hookCommandArgs(ctx.node ?? 'node', ctx.home, 'antigravity', [folder, HOOK_WORKER].join(ctx.sep), progress, event, state), ctx.isWindows, shellQuote)
+        return writeChanged(text, config, { ...config, [ANTIGRAVITY_HOOK]: antigravityHooks(command) })
+      },
+    },
     ...boardCommands(ctx),
   ]
 }
@@ -439,12 +548,13 @@ export const agentHooks = (ctx: ConnectContext): AgentHook[] => {
 // deleted. Every export of a plugin file must be a function.
 export const opencodePlugin = (ctx: ConnectContext, withPrompt = true, flagsBoardRequests = true): string => `// Written by the Agent Board plugin (/progress connect): reports each finished turn to the Agent Board
 // pane.
-import { closeSync, mkdirSync, openSync, renameSync, unlinkSync, writeFileSync } from 'node:fs'
+import { appendFileSync, closeSync, mkdirSync, openSync, readdirSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 ${hookGuardSource(ctx.home, 'opencode')}
 
 ${withPrompt && flagsBoardRequests ? BOARD_PROMPT_HELPER + '\n' : ''}const INBOX = ${JSON.stringify(ctx.inbox)}
 
+${INBOX_CAP}
 const save = (event, payload, current) => {
   let temporary, owned = false
   try {
@@ -459,6 +569,7 @@ const save = (event, payload, current) => {
     current()
     renameSync(temporary, join(INBOX, name + '.json'))
     owned = false
+    capInbox(name + '.json')
   } catch (error) { hookError(error?.message === 'HOOK_TIMEOUT' ? 'REPORTER_TIMEOUT' : 'REPORTER_FAILED') }
   finally { if (owned) { try { unlinkSync(temporary) } catch {} } }
 }
@@ -599,12 +710,13 @@ export const withoutOpenclawPlugin = (config: Json, file: string): Json => {
 // a compaction or a restart does not end the session.
 export const openclawPlugin = (ctx: ConnectContext, withPrompt = true, flagsBoardRequests = true): string => `// Written by the Agent Board plugin (/progress connect): reports each finished turn to the Agent Board
 // pane.
-import { closeSync, mkdirSync, openSync, renameSync, unlinkSync, writeFileSync } from 'node:fs'
+import { appendFileSync, closeSync, mkdirSync, openSync, readdirSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 ${hookGuardSource(ctx.home, 'openclaw')}
 
 ${withPrompt && flagsBoardRequests ? BOARD_PROMPT_HELPER + '\n' : ''}const INBOX = ${JSON.stringify(ctx.inbox)}
 
+${INBOX_CAP}
 const save = (event, payload, current) => {
   let temporary, owned = false
   try {
@@ -619,6 +731,7 @@ const save = (event, payload, current) => {
     current()
     renameSync(temporary, join(INBOX, name + '.json'))
     owned = false
+    capInbox(name + '.json')
   } catch (error) { hookError(error?.message === 'HOOK_TIMEOUT' ? 'REPORTER_TIMEOUT' : 'REPORTER_FAILED') }
   finally { if (owned) { try { unlinkSync(temporary) } catch {} } }
 }
@@ -664,7 +777,8 @@ ${withPrompt ? `    api.on('before_prompt_build', (_event, ctx) => withHook(curr
 
 // The standalone board, with the progress file and language of the session that wrote it
 // set on its first line (an ES module's imports run first either way).
-export const boardScriptFor = (path: string, lang: string, code: string): string => `globalThis.AGENT_BOARD = ${JSON.stringify({ path, lang })}\n${code}`
+// It declares its hook version first, which the hook worker reads before running it (#285).
+export const boardScriptFor = (path: string, lang: string, code: string): string => `globalThis.AGENT_BOARD = ${JSON.stringify({ hookVersion: HOOK_VERSION, path, lang })}\n${code}`
 
 // The language a board script already written prints in, from its first line; '' when it
 // names none.
@@ -701,7 +815,9 @@ export const isReleasedBoard = (text: string, path: string): boolean => {
   const cut = text.indexOf('\n')
   if (cut < 0) return false
   const head = text.slice(0, cut)
-  if (!LANGS.some(lang => head === `globalThis.AGENT_BOARD = ${JSON.stringify({ path, lang })}`)) return false
+  // Since #285 the line names the hook version first; a board of any hook version is ours.
+  const heads = LANGS.flatMap(lang => [{ path, lang }, ...Array.from({ length: HOOK_VERSION }, (_, at) => ({ hookVersion: at + 1, path, lang }))])
+  if (!heads.some(one => head === `globalThis.AGENT_BOARD = ${JSON.stringify(one)}`)) return false
 
   return isReleased('board', text.slice(cut + 1))
 }
@@ -759,6 +875,20 @@ export const connectDataRoots = (text: string, isNearestOnly = false): string[] 
     catch { strings.push(yamlDoubleQuoted(match[0])) }
   }
   const roots = new Set<string>()
+  // Antigravity's command names its folder by the hook worker, quoted whole; on Windows that
+  // command is PowerShell's encoded text, which doubles an apostrophe, where a POSIX shell
+  // closes and reopens the quote instead (#285).
+  const decoded: string[] = []
+  for (const source of strings) for (const match of source.matchAll(/-EncodedCommand\s+([A-Za-z0-9+/]+={0,2})/g)) {
+    try { decoded.push(encodedCommandText(match[1]!)) } catch {}
+  }
+  for (const source of decoded) for (const match of source.matchAll(/'((?:[A-Za-z]:[\\/]|\/)(?:[^'\r\n]|'')*?)[\\/]progress-hook\.mjs'/g)) {
+    roots.add(match[1]!.replace(/''/g, "'"))
+  }
+  for (const source of strings) for (const match of source.matchAll(/'((?:[A-Za-z]:[\\/]|\/)(?:[^'\r\n]|'\\'')*?)[\\/]progress-hook\.mjs'/g)) {
+    roots.add(match[1]!.replace(/'\\''/g, "'"))
+  }
+  strings.push(...decoded)
   for (const value of [...strings]) {
     for (const match of value.matchAll(/String\.fromCodePoint\((\d+(?:,\d+)*)\)/g)) {
       const points = match[1]!.split(',').map(Number)
@@ -860,14 +990,14 @@ export const BOARD_FOR: Record<string, readonly string[]> = {
 }
 
 // An agent's board command is ready when a board file it reads is in place and Node.js runs;
-// one that could not be written, with none in place, failed. Antigravity has a board file and
-// no hook.
+// one that could not be written, with none in place, failed. Antigravity with a board file and
+// no hook state (a status saved before #285) is shown with no hook.
 export const setupAgents = (
   hooks: readonly Omit<AgentSetup, 'board'>[],
   boards: Partial<Record<string, 'ok' | 'failed'>>,
   isNodeReady: boolean,
 ): AgentSetup[] => {
-  const all = boards.antigravity === undefined ? [...hooks] : [...hooks, { agent: 'antigravity', label: 'Antigravity', hook: null }]
+  const all = boards.antigravity === undefined || hooks.some(one => one.agent === 'antigravity') ? [...hooks] : [...hooks, { agent: 'antigravity', label: 'Antigravity', hook: null }]
 
   return all.map(one => {
     const read = Object.keys(BOARD_FOR).filter(file => BOARD_FOR[file]?.includes(one.agent)).map(file => boards[file])
@@ -881,7 +1011,8 @@ export const setupAgents = (
 export const setupLines = (state: StoredSetupState, s: Strings = ZH_TW, withProblems = true): string[] => {
   const problems = state.problems.filter(isSetupProblem)
   const hookWords = (one: AgentSetup): string[] => {
-    if (one.hook === null) return []
+    // Its skill opens the board, but none of its turns reach it (#285).
+    if (one.hook === null) return one.board === 'ready' || one.board === 'runtime' ? [s.setupSkillOnly] : []
     if (one.hook !== 'configured') return [one.hook === 'unreadable' ? s.setupHookUnreadable : one.hook === 'tooOld' ? s.setupHookTooOld : s.setupHookFailed]
     const needs = one.agent === 'codex' ? (state.codexTrusted === true ? [] : [s.setupCodexTrust]) : one.agent === 'hermes' ? [s.setupHermesTrust] : one.agent === 'openclaw' ? [s.setupOpenclawRestart] : []
     return [s.setupHookConfigured, ...needs]
@@ -928,6 +1059,10 @@ export const setupSeed = (value: unknown): SetupState | undefined => {
 // Gemini CLI, OpenCode and Muse Code; Hermes Agent and Antigravity keep their own folder.
 const SKILL = 'agent-board'
 
+// The skill setup-agent writes, in any language.
+export const isInstallerSkill = (text: string): boolean =>
+  Object.values(STRINGS).some(s => text.startsWith(`---\nname: ${SKILL}\ndescription: ${JSON.stringify(s.localAgentSkillDescription)}\n---\n\n`))
+
 export const boardCommands = (ctx: ConnectContext): AgentHook[] => {
   if (ctx.board === undefined) return []
   const opencodeHome = ctx.opencodeHome ?? join(ctx, '.config', 'opencode')
@@ -966,14 +1101,15 @@ export const boardCommands = (ctx: ConnectContext): AgentHook[] => {
     { agent: 'opencode', label: '', dir: opencodeHome, file: [opencodeHome, 'commands', 'board.md'].join(ctx.sep), generated: true, edit: file('opencode') },
     { agent: 'hermes', label: '', dir: ctx.hermesHome, file: [ctx.hermesHome, 'skills', SKILL, 'SKILL.md'].join(ctx.sep), generated: true, edit: file('hermes') },
     {
-      // Antigravity reads its skills here; it has no turn-end hook of its own, so it only shows
-      // the board.
+      // Antigravity reads its skills here; its hook is in agentHooks. The installer
+      // (setup-agent) takes this file over, and its skill is left as it is (#285).
       agent: 'antigravity',
       label: '',
       dir: join(ctx, '.gemini', 'antigravity'),
+      dirs: antigravitySigns(ctx),
       file: join(ctx, '.gemini', 'config', 'skills', SKILL, 'SKILL.md'),
       generated: true,
-      edit: file('skill'),
+      edit: (text, remove, previous) => isInstallerSkill(text) ? text : file('skill')(text, remove, previous),
     },
   ]
 }

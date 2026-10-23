@@ -20,6 +20,7 @@ export const EN: Strings = {
   messagesConflict: 'This message id already has different contents; resend refused.',
   localAgentTask: (agent: string): string => `Local ${agent} task`,
   localAgentSkillDescription: 'Open the local interactive board and track real task progress for the currently connected session.',
+  localAgentStepFormat: 'One Markdown task line: "- [x] finished", "- [~] current", "- [ ] next", "- [?] waiting on the user", "- [!] blocked", "- [>] running elsewhere or handed off", "- [-] cancelled"',
   localAgentLifecycle: "Waiting for the next instruction",
   localHostReview: 'After installing files, verify hooks/plugins are enabled in the native host and accept real events separately for CLI, App and IDE. Existing sessions may need reload. Setup does not bypass trust, read conversations, enable remote control or establish message receiving.',
   localAgentSkill: (command: string): string => `Run \`${command} --serve\` and show the interactive link on its last line. On desktop open it in a panel when a URL-opening tool is available. This is a web UI, not a native pane. CLI users may run \`${command} --watch\` in another terminal.\n\nWhen asked to track current work, report minimal task summaries after each real step or state change; never raw chat or secrets. In OpenCode use agent_board_progress, bound by the tool context. In Codex use current CODEX_THREAD_ID with \`${command} --codex-report\`. In Cursor, only after hooks inject AGENT_BOARD_AGENT=cursor and AGENT_BOARD_SESSION_ID, use \`${command} --codex-report --agent cursor\`. Without a proven binding say it is disconnected. Never scan transcripts, guess ids or specify another session. Commands accept JSON on stdin: {\"title\":\"Task summary\",\"project\":\"Project\",\"state\":\"working\",\"steps\":[\"- [x] Finished\",\"- [~] Current step\"]}. Use waiting and [?] for user input, [!] for a blocker, done only when every step is complete. Hooks update activity only; you explicitly report semantic steps. Files, mocks or RPC acceptance do not prove live hooks or reverse delivery. Ordinary replies cannot approve tools or PR merges.`,
@@ -32,7 +33,7 @@ export const EN: Strings = {
   lang: 'en' as Lang,
 
   inboxTitle: 'Inbox report retained',
-  inboxHeld: (file: string, reason: string): string => `Report retained at ${file} (${reason}). Check its contents and the source agent's reporting hook.`,
+  inboxHeld: (file: string, reason: string): string => `Report retained at ${file} (${reason}). A report set aside as .failed is kept for 7 days. Check its contents and the source agent's reporting hook.`,
 
   // Time and dates
   justNow: 'just now',
@@ -257,6 +258,7 @@ export const EN: Strings = {
   setupAgent: (label: string, parts: string[]): string => `${label}: ${parts.join('; ')}`,
   setupHookConfigured: 'reporting hook configured',
   setupHookFailed: 'reporting hook not configured, see below',
+  setupSkillOnly: 'skill only, no report hook',
   setupHookUnreadable: 'config not understood, left out',
   setupHookTooOld: 'too old, left out',
   setupCodexTrust: "approve it once in Codex's /hooks",
@@ -453,7 +455,12 @@ export const EN: Strings = {
   progressIncomplete: (n: number): string => `progress.md has a cut-off marker line; ${n} ${n === 1 ? 'task' : 'tasks'} may be hidden`,
   blockCutOff: (agent: string, day: string | null): string => `${agent === '' ? 'A' : /^[aeiou]/i.test(agent) ? 'An' : 'A'} ${agent === '' ? '' : `${agent} `}task${day === null ? '' : ` from ${day}`} was cut off when its session crashed. It's shown as it was; its last lines may show twice.`,
   progressLarge: (kb: number, cap: number): string => `progress.md is ${kb} KB, over ${cap} KB; hand-kept tasks and steps waiting on you are never removed, so archive finished work to shrink it`,
-  storeLarge: (mb: string, cap: string): string => `The board's saved records are ${mb} MB (limit ${cap} MB); old records are being cleared`,
+  storeLarge: (mb: string, cap: string): string => `The board's saved records are ${mb} MB (limit ${cap} MB); only records of sessions whose block has left the board are cleared, and the rest stay`,
+  prunedAgents: (n: number): string => `${n} old agent ${n === 1 ? 'record' : 'records'}`,
+  prunedSessions: (n: number): string => `${n} old session ${n === 1 ? 'task list' : 'task lists'}`,
+  prunedTurns: (n: number): string => `${n} unread inbox ${n === 1 ? 'turn' : 'turns'}`,
+  prunedJoin: (parts: readonly string[]): string => (parts.length < 2 ? parts.join('') : `${parts.slice(0, -1).join(', ')} and ${parts.at(-1)}`),
+  prunedLine: (list: string, days: number): string => `Cleared ${list} in the last ${days} days`,
   reporterFailed: (reason: string): string => `The report could not be saved (${reason}); check the progress file and retry.`,
   tailRepairFailed: 'The incomplete end could not be safely repaired; nothing changed. Check the progress file before retrying.',
   fileProgress: 'your progress file',

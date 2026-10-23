@@ -1,4 +1,5 @@
 import { connectLegacy } from '../../scripts/legacy-connect'
+import { CODEX_NOT_FOUND } from '../../scripts/codex-approval'
 import type { ConnectState, ConnectTransaction, LegacyConnectRequest } from '../../scripts/connect-transaction'
 import { setupSeed, withoutSection } from '../../hooks/connect'
 import { sha256 } from '../../hooks/sha256'
@@ -72,7 +73,8 @@ export const memoryConnect = (files: Map<string, string>, dirs: Set<string> | un
   if (request.boardLang !== undefined) state.boardLang = request.boardLang
   save()
   const isWin = /^[a-zA-Z]:[\\/]/.test(request.home)
-  const result = connectLegacy(transaction, request, bundle, isWin)
+  // No Codex here: none found, and nothing for a 0.23 approval to have missed.
+  const result = connectLegacy(transaction, request, bundle, isWin, undefined, CODEX_NOT_FOUND)
   state.revision += 1
   save()
   return { state, result }

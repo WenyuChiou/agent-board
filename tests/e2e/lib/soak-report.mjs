@@ -47,6 +47,38 @@ const pathPattern = path => {
   return new RegExp(`${parts.map(escapeText).join('[\\\\/]+')}(?![A-Za-z0-9_-])`, 'gi')
 }
 
+// Windows hides an Antigravity hook's paths inside a UTF-16LE PowerShell command.
+const commandText = command => {
+  const text = String(command ?? '')
+  const decoded = []
+  for (const found of text.matchAll(/(?:^|\s)-(?:encodedcommand|enc|ec|e)\s+(?:"([A-Za-z0-9+/]+={0,2})"|'([A-Za-z0-9+/]+={0,2})'|([A-Za-z0-9+/]+={0,2}))(?=[\s"']|$)/gi)) {
+    try {
+      const encoded = found[1] ?? found[2] ?? found[3]
+      const bytes = Buffer.from(encoded, 'base64')
+      if (bytes.length % 2 !== 0 || bytes.toString('base64').replace(/=+$/, '') !== encoded.replace(/=+$/, '')) continue
+      decoded.push(new TextDecoder('utf-16le', { fatal: true }).decode(bytes))
+    } catch {}
+  }
+  return [text, ...decoded].join('\n')
+}
+
+// Both queue writers keep the hook's raw session id; partial writes are not events.
+export const queuedSessions = files => {
+  const sessions = new Set()
+  for (const { name, text } of files) {
+    if (!name.endsWith('.json') || typeof text !== 'string') continue
+    try {
+      const entry = JSON.parse(text)
+      if (entry?.version !== 1) continue
+      const session = entry.kind === 'raw'
+        ? [entry.payload?.session_id, entry.payload?.sessionId, entry.payload?.conversationId].find(value => typeof value === 'string' && value !== '')
+        : entry.session
+      if (typeof session === 'string' && session !== '') sessions.add(session)
+    } catch {}
+  }
+  return sessions
+}
+
 // `entries` is a list of [placeholder, path]; the longest path goes first, so a world folder inside
 // the temp folder reads <world>, not <tmp>/…. `secrets` are exact strings (the page's address and token).
 export const makeRedact = (entries, secrets = []) => {
@@ -61,6 +93,55 @@ export const makeRedact = (entries, secrets = []) => {
     for (const { placeholder, pattern } of patterns) result = result.replace(pattern, () => placeholder)
     return result
   }
+}
+
+// The processes a run left behind (#395). `list` holds every running process as { pid, ppid, name,
+// command, started }. A leftover is any of them, other than the run itself and the excluded ones (the lister)
+// with their children, that descends from the run, or whose command line names one of the run's
+// folders: a hook worker whose parent is gone has no parent chain left to follow.
+export const leftoverProcesses = ({ list, self, roots, exclude = [] }) => {
+  const processes = new Map(list.map(one => [one.pid, one]))
+  const descends = (pid, from) => {
+    for (let child = processes.get(pid), steps = 0; child !== undefined && child.ppid > 0 && steps < 64; steps += 1) {
+      const parent = processes.get(child.ppid)
+      // A newer parent reused an old pid; it cannot have started this child.
+      if (parent?.started !== undefined && child.started !== undefined && parent.started > child.started) return false
+      if (child.ppid === from) return true
+      child = parent
+    }
+    return false
+  }
+  const patterns = roots.map(root => typeof root === 'string' ? pathPattern(root) : null).filter(pattern => pattern !== null)
+  const isExcluded = one => (one.ppid === self && /^conhost\.exe$/i.test(one.name)) || exclude.some(pid => one.pid === pid || descends(one.pid, pid))
+  return list.filter(one => one.pid !== self && !isExcluded(one) && (descends(one.pid, self) || patterns.some(pattern => commandText(one.command).search(pattern) !== -1)))
+}
+
+export const leftoverPlan = ({ list, self, since, roots, exclude = [] }) => {
+  const left = leftoverProcesses({ list, self, roots, exclude })
+  const descendants = new Set(leftoverProcesses({ list, self, roots: [], exclude }).map(one => one.pid))
+  // Path-only matches must start at or after self, or since when self has no start time, in this same list.
+  const started = list.find(one => one.pid === self)?.started ?? list.find(one => one.pid === since)?.started
+  const kill = [], keep = []
+  for (const one of left) {
+    if (descendants.has(one.pid) || started !== undefined && one.started !== undefined && one.started >= started) kill.push(one)
+    else keep.push(one)
+  }
+  return { kill, keep }
+}
+
+// The open issue marked on a hook load check, and whether it explains this outcome (#395). #241: on
+// a busy Windows machine a hook can run longer than the 3 s budget, and an event whose reporter runs
+// out of time is queued until a later hook applies it, so the page shows it late or never. Only that
+// pattern counts: no hook exited non-zero or ran past twice the budget, every poll was answered, some
+// report was shown, the page's poll interval fits its budget, and every late or missed report came
+// back while that session's own event was queued. Anything else stays a failure.
+export const hookLoadMarker = ({ key, outcome, platform, budgetMs }) => {
+  if (platform !== 'win32' || (key !== 'hooks' && key !== 'page')) return undefined
+  if (outcome.ok && (key === 'hooks' || outcome.pollWithinBudget === true)) return { issue: 241, explains: true }
+  const explains = key === 'hooks'
+    ? outcome.over > 0 && outcome.failedRuns === 0 && outcome.maxMs <= 2 * budgetMs
+    : outcome.pollWithinBudget === true && outcome.shown > 0 && outcome.slow > 0 && outcome.slowNotQueued === 0 && outcome.failedAnswers === 0
+  return { issue: 241, explains }
 }
 
 export const redactDeep = (value, redact) => {

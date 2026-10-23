@@ -58,6 +58,7 @@ export const ZH_TW = {
   messagesConflict: '相同訊息編號已有不同內容，已拒絕重送。',
   localAgentTask: (agent: string): string => `${agent} 本機任務`,
   localAgentSkillDescription: '開啟本機互動看板，追蹤目前已接線 session 的實際任務進度。',
+  localAgentStepFormat: '一行 Markdown 任務：「- [x] 完成」、「- [~] 進行中」、「- [ ] 下一步」、「- [?] 等使用者回答」、「- [!] 卡住」、「- [>] 在別處執行或已交棒」、「- [-] 取消」',
   localAgentLifecycle: "等待下一個工作指令",
   localHostReview: '安裝檔案後仍須在原生 host 核對 hooks／plugin 是否啟用，並分開驗收 CLI、App、IDE 的實際事件；既有 session 可能需要重新載入。此安裝不繞過信任、不讀對話、不啟用遠端控制，也不代表已建立傳訊連線。',
   localAgentSkill: (command: string): string => `執行 \`${command} --serve\`，顯示最後一行的互動看板連結；桌面有開啟網址工具時就在面板開啟。這是網頁 UI，不是原生 pane。CLI 也可在另一個終端執行 \`${command} --watch\`。\n\n使用者要求追蹤目前工作時，在每個實際步驟或狀態改變後自行回報最少任務摘要，不傳原始對話或機密。OpenCode 使用 agent_board_progress 工具，由工具 context 綁定目前 session；Codex 用目前 CODEX_THREAD_ID，執行 \`${command} --codex-report\`；Cursor 只有在 hooks 注入 AGENT_BOARD_AGENT=cursor 和 AGENT_BOARD_SESSION_ID 後才執行 \`${command} --codex-report --agent cursor\`。沒有可證明的綁定就明示未接通，不掃描對話或猜 session，也不指定其他 session。命令以 stdin 接受 JSON：{\"title\":\"任務摘要\",\"project\":\"專案\",\"state\":\"working\",\"steps\":[\"- [x] 已完成\",\"- [~] 目前步驟\"]}。等使用者用 waiting 與 [?]；阻擋用 [!]；所有步驟完成才用 done。hooks 只更新活動狀態，語意步驟由你明確回報。不要以寫檔、mock 或 RPC 接受宣稱自動 hooks 或反向送達已驗收。一般回覆不批准工具或 PR 合併。`,
@@ -70,7 +71,7 @@ export const ZH_TW = {
   lang: 'zh-TW' as Lang,
 
   inboxTitle: '收件匣報告已保留',
-  inboxHeld: (file: string, reason: string): string => `報告保留在 ${file}（${reason}）。請檢查檔案內容與來源 agent 的回報 hook。`,
+  inboxHeld: (file: string, reason: string): string => `報告保留在 ${file}（${reason}）。標成 .failed 的報告會保留 7 天。請檢查檔案內容與來源 agent 的回報 hook。`,
 
   // Time and dates
   justNow: '剛剛',
@@ -295,6 +296,7 @@ export const ZH_TW = {
   setupAgent: (label: string, parts: string[]): string => `${label}：${parts.join('；')}`,
   setupHookConfigured: '回報 hook 已接上',
   setupHookFailed: '回報 hook 沒接上，原因在下面',
+  setupSkillOnly: '只有 skill，沒有回報 hook',
   setupHookUnreadable: '設定檔讀不懂，沒有接',
   setupHookTooOld: '版本太舊，沒有接',
   setupCodexTrust: '第一次要在 Codex 的 /hooks 核准',
@@ -490,7 +492,12 @@ export const ZH_TW = {
   progressIncomplete: (n: number): string => `progress.md 有一行標記未寫完，可能有 ${n} 項工作未顯示`,
   blockCutOff: (agent: string, day: string | null): string => `${day === null ? '' : `${day}的`}一個${agent === '' ? '' : ` ${agent} `}工作在 session 當掉時被截斷了，照原樣顯示；最後幾行可能會出現兩次。`,
   progressLarge: (kb: number, cap: number): string => `progress.md 已有 ${kb} KB，超過 ${cap} KB；手寫的工作與等你回覆的步驟都不會被刪，可封存已完成的工作`,
-  storeLarge: (mb: string, cap: string): string => `看板存的紀錄已有 ${mb} MB（上限 ${cap} MB），舊紀錄會陸續清掉`,
+  storeLarge: (mb: string, cap: string): string => `看板存的紀錄已有 ${mb} MB（上限 ${cap} MB）；只有區塊已離開看板的 session 紀錄會被清掉，其餘都會保留`,
+  prunedAgents: (n: number): string => `${n} 筆舊的 agent 紀錄`,
+  prunedSessions: (n: number): string => `${n} 份舊的 session 工作清單`,
+  prunedTurns: (n: number): string => `${n} 則還沒讀的收件匣回合`,
+  prunedJoin: (parts: readonly string[]): string => (parts.length < 2 ? parts.join('') : `${parts.slice(0, -1).join('、')}和 ${parts.at(-1)}`),
+  prunedLine: (list: string, days: number): string => `最近 ${days} 天清掉了 ${list}`,
   reporterFailed: (reason: string): string => `進度回報未能儲存（${reason}），請檢查進度檔後再試。`,
   tailRepairFailed: '無法安全修復不完整的結尾，沒有改任何東西。請檢查進度檔後再重新回報。',
   fileProgress: '你的進度檔',

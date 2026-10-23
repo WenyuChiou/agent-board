@@ -194,6 +194,7 @@ footer{font-size:12.5px;overflow-wrap:anywhere}code{background:var(--inset);bord
 <div class="wide dashboard-shell"><nav class="dash-nav" aria-label="${esc(s.dashSections)}"><h2>${esc(s.dashSections)}</h2>${sections.filter(([, , count]) => count > 0).map(([id, title, count]) => `<button type="button" data-section="dash-${id}"><span>${esc(title)}</span>${id === 'idle' ? '' : `<span class="ct">${count}</span>`}</button>`).join('')}</nav>
 <main>
 ${view.warning ? `<p role="status" style="color:var(--alert)">${esc(view.warning)}</p>` : ''}
+${view.pruned ? `<p role="status" class="quiet">${esc(view.pruned)}</p>` : ''}
 <section class="counts">${counts
     .map(([glyph, n, word, role]) => `<span><span style="color:var(--${n > 0 ? role : 'muted'})">${glyph} ${n}</span> ${esc(word)}</span>`)
     .join('')}</section>

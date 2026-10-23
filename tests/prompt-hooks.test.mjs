@@ -1,11 +1,11 @@
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, closeSync, existsSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'node:fs'
 import * as fs from 'node:fs'
 import { createRequire, registerHooks, syncBuiltinESMExports } from 'node:module'
 import { pathToFileURL } from 'node:url'
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { createHash } from 'node:crypto'
-import { spawnSync } from 'node:child_process'
+import { spawn, spawnSync } from 'node:child_process'
 import { join, sep } from 'node:path'
 import { tmpdir } from 'node:os'
 import { classifierDiagnostic, observeClassifier } from './fixtures/classifier-diagnostic.mjs'
@@ -118,11 +118,16 @@ test('a board-only reply restores an existing question on every board surface an
   for (const text of [boardText(view, [], EN), chatText(view, [], [], EN, '/synthetic'), dashboardHtml(view, EN, '/synthetic/progress.md', ''), JSON.stringify(serveModel(view, [], EN))]) assert.ok(text.includes('100 or 300 a minute?'), text.slice(0, 500))
 })
 
-test('the native OpenCode prompt callback flags exact board commands without retaining their text', async () => {
+test('the native OpenCode prompt callback flags exact board commands without retaining their text', async t => {
+  const exitListeners = process.listeners('exit')
+  t.after(() => {
+    for (const listener of process.listeners('exit')) if (!exitListeners.includes(listener)) process.removeListener('exit', listener)
+    delete globalThis[Symbol.for('agent-board.opencode-open-sessions')]
+  })
   const { opencodePlugin } = await import('../hooks/local-agents.ts')
   const saved = []
   const source = opencodePlugin('node', '/synthetic/board.mjs', '/synthetic/progress.md', 'Progress', process.env.HOME)
-  const factory = new Function('createRequire', 'spawnSync', 'tool', `${source.replace(/^import .*\n/gm, '').replaceAll('import.meta.url', JSON.stringify(import.meta.url)).replace('export const AgentBoardLocal', 'const AgentBoardLocal')}\nreturn AgentBoardLocal`)(createRequire, (_node, _args, options) => { saved.push(JSON.parse(options.input)); return { status: 0, stdout: '' } }, Object.assign(value => value, { schema: { string: () => ({}), enum: () => ({}), array: () => ({}) } }))
+  const factory = new Function('createRequire', 'spawnSync', 'tool', `${source.replace(/^import .*\n/gm, '').replaceAll('import.meta.url', JSON.stringify(import.meta.url)).replace('export const AgentBoardLocal', 'const AgentBoardLocal')}\nreturn AgentBoardLocal`)(createRequire, (_node, _args, options) => { saved.push(JSON.parse(options.input)); return { status: 0, stdout: '' } }, Object.assign(value => value, { schema: { string: () => ({ describe: () => ({}) }), enum: () => ({}), array: () => ({}) } }))
   const hooks = await factory({ client: { session: { get: async ({ path }) => ({ data: { id: path.id } }) } } })
   await hooks['chat.message']({ sessionID: 'synthetic-owner' }, { parts: [{ type: 'text', text: '/board' }] })
   assert.equal(saved[0].board_request, true)
@@ -530,6 +535,373 @@ test('legacy SDK reporters remove their partial temporary files and preserve for
   }
 })
 
+// The inbox caps (#373). The limits are written out here, not read from the code under test.
+const { reporterPs1: capReporterPs1, reporterSh: capReporterSh } = await import('../hooks/connect-pure.ts')
+const { inboxDropped, prunedSince } = await import('../hooks/retention.ts')
+const CAP_POWERSHELL = process.platform === 'win32' ? join(process.env.SystemRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe') : null
+const CAP_DAY = 24 * 60 * 60 * 1000
+const CAP_PAYLOAD = '{"session_id":"synthetic-cap"}'
+
+test('the generated sh reporter uses no brace intervals on old mawk', () => {
+  assert.doesNotMatch(capReporterSh('/synthetic/progress-inbox'), /[\])]{[0-9]/)
+})
+
+const seedFile = (inbox, name, bytes, ageMs) => {
+  mkdirSync(inbox, { recursive: true })
+  const file = join(inbox, name)
+  writeFileSync(file, 'x'.repeat(bytes))
+  const at = new Date(Date.now() - ageMs)
+  utimesSync(file, at, at)
+}
+
+const capCommand = (kind, home) => {
+  const script = join(home, kind === 'sh' ? 'progress-report.sh' : 'progress-report.ps1')
+  writeFileSync(script, kind === 'sh' ? capReporterSh(shellPath(join(home, 'progress-inbox'))) : capReporterPs1())
+  return kind === 'sh' ? [sh, [shellPath(script), 'codex', 'turn']] : [CAP_POWERSHELL, ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', script, 'codex', 'turn']]
+}
+
+const runCapReporter = (kind, home) => {
+  const [program, args] = capCommand(kind, home)
+  const result = spawnSync(program, args, { env: { ...process.env, HOME: home, USERPROFILE: home }, input: CAP_PAYLOAD, encoding: 'utf8', windowsHide: true })
+  assert.equal(result.status, 0, result.stderr)
+}
+
+const droppedLog = inbox => readFileSync(join(inbox, 'dropped.log'), 'utf8')
+
+// Runs the sh reporter's own cleanup on Windows too: Git Bash normally hands the hook to
+// PowerShell, so a stand-in `uname` in `tools` says Linux. Git's bin/bash.exe puts /usr/bin ahead
+// of the PATH it is given; its usr/bin/bash.exe keeps it.
+const runPosixSh = (home, tools) => {
+  mkdirSync(tools, { recursive: true })
+  const uname = join(tools, 'uname')
+  writeFileSync(uname, '#!/bin/sh\nprintf "%s\\n" Linux\n')
+  chmodSync(uname, 0o755)
+  const [shell, args] = capCommand('sh', home)
+  const program = process.platform === 'win32' && existsSync('C:/Program Files/Git/usr/bin/bash.exe') ? 'C:/Program Files/Git/usr/bin/bash.exe' : shell
+  const env = { ...process.env, HOME: home, USERPROFILE: home, PATH: tools + (process.platform === 'win32' ? ';' : ':') + process.env.PATH }
+  const result = spawnSync(program, args, { env, input: CAP_PAYLOAD, encoding: 'utf8', windowsHide: true })
+  assert.equal(result.status, 0, result.stderr)
+}
+
+const capOldestOfFiles = kind => fixture(async home => {
+  const inbox = join(home, 'progress-inbox')
+  // The oldest turn file is index 0. The taken and failed files are older than all of them and the
+  // others newest, so a cap that counted or removed any of them would show.
+  for (let i = 0; i < 1000; i += 1) seedFile(inbox, `codex-turn-${i}-1.json`, 20, (2000 - i) * 1000)
+  seedFile(inbox, 'codex-turn-5000-1.json.failed', 20, 5000 * 1000)
+  seedFile(inbox, 'codex-turn-5001-1.json.synthetic-session-1-1.taking', 20, 5000 * 1000)
+  seedFile(inbox, 'codex-turn-5002-1.tmp', 20, 0)
+  seedFile(inbox, 'codex-prompt-5003-1.receipt', 20, 0)
+  // A .json file that is not a turn file is not counted either.
+  seedFile(inbox, 'notes.json', 20, 0)
+  runCapReporter(kind, home)
+  const names = readdirSync(inbox)
+  assert.equal(names.filter(name => name.endsWith('.json') && name !== 'notes.json').length, 1000)
+  assert.ok(!names.includes('codex-turn-0-1.json'), 'the oldest turn file is removed')
+  assert.ok(names.includes('codex-turn-1-1.json'), 'the next oldest stays')
+  for (const kept of ['codex-turn-5000-1.json.failed', 'codex-turn-5001-1.json.synthetic-session-1-1.taking', 'codex-turn-5002-1.tmp', 'codex-prompt-5003-1.receipt', 'notes.json']) assert.ok(names.includes(kept), kept)
+  assert.match(droppedLog(inbox), /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ 1 cap\n$/)
+  assert.deepEqual(inboxDropped(droppedLog(inbox), 0), { age: 0, cap: 1 })
+})
+
+const capOldestOfBytes = kind => fixture(async home => {
+  const inbox = join(home, 'progress-inbox')
+  for (let i = 0; i < 5; i += 1) seedFile(inbox, `codex-turn-${i}-1.json`, 400000, (2000 - i) * 1000)
+  // Neither of these counts toward the 1572864 bytes: if they did, 3 files would have to go, not 2.
+  seedFile(inbox, 'codex-turn-5001-1.json.synthetic-session-1-1.taking', 700000, 5000 * 1000)
+  seedFile(inbox, 'codex-turn-5002-1.tmp', 300000, 0)
+  runCapReporter(kind, home)
+  const names = readdirSync(inbox)
+  const turns = names.filter(name => name.endsWith('.json'))
+  assert.equal(turns.length, 4, 'three of the five, and the one the reporter wrote')
+  assert.ok(!names.includes('codex-turn-0-1.json') && !names.includes('codex-turn-1-1.json'), 'the two oldest go')
+  assert.ok(names.includes('codex-turn-2-1.json'), 'the third stays')
+  assert.ok(turns.reduce((sum, name) => sum + fs.statSync(join(inbox, name)).size, 0) <= 1572864)
+  assert.ok(names.includes('codex-turn-5001-1.json.synthetic-session-1-1.taking') && names.includes('codex-turn-5002-1.tmp'))
+  assert.match(droppedLog(inbox), /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ 2 cap\n$/)
+})
+
+const capCountsAge = kind => fixture(async home => {
+  const inbox = join(home, 'progress-inbox')
+  for (let i = 0; i < 3; i += 1) seedFile(inbox, `codex-turn-${i}-1.json`, 20, 5 * CAP_DAY)
+  seedFile(inbox, 'codex-turn-3-1.json', 20, CAP_DAY)
+  seedFile(inbox, 'codex-turn-4-1.json.failed', 20, 5 * CAP_DAY)
+  seedFile(inbox, 'codex-turn-5-1.json.synthetic-session-1-1.taking', 20, 5 * CAP_DAY)
+  runCapReporter(kind, home)
+  assert.deepEqual(readdirSync(inbox).filter(name => /^codex-turn-\d-1\.json/.test(name)).sort(), ['codex-turn-3-1.json', 'codex-turn-4-1.json.failed', 'codex-turn-5-1.json.synthetic-session-1-1.taking'])
+  assert.match(droppedLog(inbox), /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ 3 age\n$/)
+})
+
+const capRemovalError = message => fixture(async home => {
+  const { shellQuote } = await import('../hooks/connect-pure.ts')
+  const tools = join(home, 'tools')
+  mkdirSync(tools)
+  const located = spawnSync(sh, ['-c', 'command -v rm'], { encoding: 'utf8', windowsHide: true })
+  assert.equal(located.status, 0, located.stderr)
+  const standIn = join(tools, 'rm')
+  writeFileSync(standIn, `#!/bin/sh\ncase "$1" in *codex-turn-0-1.json) printf '%s\\n' ${shellQuote(message)} >&2; exit 1 ;; esac\nexec ${shellQuote(located.stdout.trim())} "$@"\n`)
+  chmodSync(standIn, 0o755)
+  const inbox = join(home, 'progress-inbox')
+  seedFile(inbox, 'codex-turn-0-1.json', 20, 5 * CAP_DAY)
+  seedFile(inbox, 'codex-turn-1-1.json', 20, 5 * CAP_DAY)
+  runPosixSh(home, tools)
+  assert.ok(existsSync(join(inbox, 'codex-turn-0-1.json')), 'the failed removal is not counted')
+  assert.ok(!existsSync(join(inbox, 'codex-turn-1-1.json')), 'the successful removal is counted')
+  assert.deepEqual(inboxDropped(droppedLog(inbox), 0), { age: 1, cap: 0 })
+  const log = join(home, '.agent-board', 'hook-errors.log')
+  const errors = existsSync(log) ? readFileSync(log, 'utf8') : ''
+  if (message.includes('No such file or directory')) assert.doesNotMatch(errors, /CLEANUP_FAILED/)
+  else assert.equal(errors.split('\n').filter(line => line.endsWith(' CLEANUP_FAILED')).length, 1)
+})
+
+const seedDropped = now => {
+  const lines = []
+  const sums = new Map()
+  for (let back = 9; back >= 0; back -= 1) {
+    const day = new Date(now - back * CAP_DAY).toISOString().slice(0, 10)
+    for (const reason of ['age', 'cap']) {
+      let sum = 0
+      for (let i = 1; i <= 14; i += 1) {
+        const count = i + back + (reason === 'cap' ? 100 : 0)
+        lines.push(`${day}T12:34:56Z ${count} ${reason}${i % 2 === 0 ? '\r' : ''}\n`)
+        sum += count
+      }
+      if (back <= 8) sums.set(`${day} ${reason}`, sum)
+    }
+  }
+  lines.push('not a count\n', `${new Date(now).toISOString().slice(0, 10)}T12:34:56Z 99 other\n`)
+  return { text: lines.join(''), sums }
+}
+
+const assertFolded = (inbox, seeded, now, reason) => {
+  const today = new Date(now).toISOString().slice(0, 10)
+  const sums = new Map(seeded.sums)
+  sums.set(`${today} ${reason}`, sums.get(`${today} ${reason}`) + 1)
+  const expected = [...sums].map(([key, sum]) => `${key.slice(0, 10)}T00:00:00Z ${sum} ${key.slice(11)}`)
+  assert.deepEqual(droppedLog(inbox).trimEnd().split('\n'), expected)
+  assert.deepEqual(readdirSync(inbox).filter(name => name.startsWith('dropped.log')), ['dropped.log'])
+}
+
+const capFoldsCounts = (kind, isPaneCount = false) => fixture(async home => {
+  const now = Date.now()
+  const inbox = join(home, 'progress-inbox')
+  seedFile(inbox, 'codex-turn-0-1.json', 20, 5 * CAP_DAY)
+  const seeded = seedDropped(now)
+  writeFileSync(join(inbox, 'dropped.log'), seeded.text)
+  runCapReporter(kind, home)
+  if (isPaneCount) {
+    const own = `${new Date(now).toISOString().slice(0, 19)}Z 1 age\n`
+    assert.deepEqual(inboxDropped(droppedLog(inbox), prunedSince(now)), inboxDropped(seeded.text + own, prunedSince(now)))
+  } else assertFolded(inbox, seeded, now, 'age')
+})
+
+const capKeepsNewTurn = kind => fixture(async home => {
+  const inbox = join(home, 'progress-inbox')
+  for (let i = 0; i < 1000; i += 1) seedFile(inbox, `codex-turn-${i}-1.json`, 20, -3600000 - i * 1000)
+  runCapReporter(kind, home)
+  const names = readdirSync(inbox).filter(name => name.endsWith('.json'))
+  assert.equal(names.length, 1000)
+  assert.ok(names.some(name => !/^codex-turn-\d+-1\.json$/.test(name)), 'the newly written turn stays')
+  assert.ok(!names.includes('codex-turn-0-1.json'), 'the oldest seeded turn goes')
+  assert.match(droppedLog(inbox), /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ 1 cap\n$/)
+})
+
+const runCapAsync = ([program, args], home) => new Promise((resolve, reject) => {
+  const child = spawn(program, args, { env: { ...process.env, HOME: home, USERPROFILE: home }, windowsHide: true })
+  child.on('error', reject)
+  child.on('close', resolve)
+  child.stdin.end(CAP_PAYLOAD)
+})
+
+const capCountsOnce = kind => fixture(async home => {
+  const inbox = join(home, 'progress-inbox')
+  for (let i = 0; i < 6; i += 1) seedFile(inbox, `codex-turn-${i}-1.json`, 20, 5 * CAP_DAY)
+  const command = capCommand(kind, home)
+  const codes = await Promise.all([1, 2, 3, 4].map(() => runCapAsync(command, home)))
+  assert.deepEqual(codes, [0, 0, 0, 0])
+  assert.deepEqual(readdirSync(inbox).filter(name => /^codex-turn-\d-1\.json$/.test(name)), [])
+  const lines = droppedLog(inbox).trimEnd().split('\n')
+  assert.ok(lines.every(line => /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ \d+ age$/.test(line)), lines.join('|'))
+  const dropped = inboxDropped(droppedLog(inbox), 0)
+  assert.equal(dropped.cap, 0)
+  // Where a second delete of a file already deleted fails, each file is counted once. Windows can let
+  // two reporters that delete one file at the same moment both succeed, so there a count may be high, never low.
+  if (process.platform === 'win32') assert.ok(dropped.age >= 6, String(dropped.age))
+  else assert.equal(dropped.age, 6)
+})
+
+const isNotWindows = process.platform !== 'win32'
+test('the sh reporter removes the oldest turn file once the inbox passes 1000 files and counts it', () => capOldestOfFiles('sh'))
+test('the PowerShell reporter removes the oldest turn file once the inbox passes 1000 files and counts it', { skip: isNotWindows }, () => capOldestOfFiles('ps1'))
+test('the sh reporter removes the oldest turn files until the inbox is under 1572864 bytes and counts them', () => capOldestOfBytes('sh'))
+test('the PowerShell reporter removes the oldest turn files until the inbox is under 1572864 bytes and counts them', { skip: isNotWindows }, () => capOldestOfBytes('ps1'))
+test('the sh reporter counts the turn files its 2-day cleanup removes and leaves taken and failed files', () => capCountsAge('sh'))
+test("the sh reporter's age cleanup leaves only the turns under 3 days, its own new turn and dropped.log in the inbox", () => fixture(async home => {
+  const inbox = join(home, 'progress-inbox')
+  seedFile(inbox, 'codex-turn-0-1.json', 20, CAP_DAY)
+  seedFile(inbox, 'codex-turn-1-1.json', 20, 2.5 * CAP_DAY)
+  seedFile(inbox, 'codex-turn-2-1.json', 20, 3.5 * CAP_DAY)
+  seedFile(inbox, 'codex-turn-3-1.json', 20, 5 * CAP_DAY)
+  runPosixSh(home, join(home, 'tools'))
+  const names = readdirSync(inbox).sort()
+  const written = names.filter(name => /^codex-turn-\d{10,}-\d+\.json$/.test(name))
+  assert.equal(written.length, 1, JSON.stringify(names))
+  assert.deepEqual(names, ['codex-turn-0-1.json', 'codex-turn-1-1.json', written[0], 'dropped.log'].sort())
+  assert.match(droppedLog(inbox), /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ 2 age\n$/)
+}))
+test('the PowerShell reporter counts the turn files its 2-day cleanup removes and leaves taken and failed files', { skip: isNotWindows }, () => capCountsAge('ps1'))
+test('the sh reporter logs CLEANUP_FAILED once and does not count a turn it cannot remove', () => capRemovalError("rm: cannot remove 'x': Permission denied"))
+test('the sh reporter does not log CLEANUP_FAILED for a turn another reporter already removed', () => capRemovalError('No such file or directory'))
+test('the PowerShell reporter logs CLEANUP_FAILED once and does not count a turn another program holds open', { skip: isNotWindows }, () => fixture(async home => {
+  const inbox = join(home, 'progress-inbox')
+  const held = join(inbox, 'codex-turn-0-1.json')
+  seedFile(inbox, 'codex-turn-0-1.json', 20, 5 * CAP_DAY)
+  seedFile(inbox, 'codex-turn-1-1.json', 20, 5 * CAP_DAY)
+  const lock = openSync(held, 0x10000000)
+  try {
+    const [program, args] = capCommand('ps1', home)
+    const result = spawnSync(program, args, { env: { ...process.env, HOME: home, USERPROFILE: home }, input: CAP_PAYLOAD, encoding: 'utf8', windowsHide: true })
+    assert.equal(result.status, 0, result.stderr)
+  } finally {
+    closeSync(lock)
+  }
+  assert.ok(existsSync(held), 'the held turn survives')
+  assert.ok(!existsSync(join(inbox, 'codex-turn-1-1.json')), 'the other old turn is removed')
+  assert.deepEqual(inboxDropped(droppedLog(inbox), 0), { age: 1, cap: 0 })
+  const errors = readFileSync(join(home, '.agent-board', 'hook-errors.log'), 'utf8').trimEnd().split('\n')
+  assert.equal(errors.length, 1)
+  assert.match(errors[0], / CLEANUP_FAILED$/)
+}))
+test('the sh reporter folds the count file by UTC day and reason and keeps sums through 8 days back', () => capFoldsCounts('sh'))
+test('the PowerShell reporter folds the count file by UTC day and reason and keeps sums through 8 days back', { skip: isNotWindows }, () => capFoldsCounts('ps1'))
+test("the pane's count after a sh reporter trim equals the true total", () => capFoldsCounts('sh', true))
+test("the pane's count after a PowerShell reporter trim equals the true total", { skip: isNotWindows }, () => capFoldsCounts('ps1', true))
+test('the sh reporter keeps its new turn when 1000 seeded turns are an hour ahead', () => capKeepsNewTurn('sh'))
+test('the PowerShell reporter keeps its new turn when 1000 seeded turns are an hour ahead', { skip: isNotWindows }, () => capKeepsNewTurn('ps1'))
+test('several sh reporters at once lose no count of the turn files they remove', () => capCountsOnce('sh'))
+test('several PowerShell reporters at once lose no count of the turn files they remove', { skip: isNotWindows }, () => capCountsOnce('ps1'))
+
+test('the generated OpenCode and OpenClaw plugins keep the inbox to 1000 files and 1572864 bytes and count what they remove', async () => {
+  const home = fs.mkdtempSync(join(tmpdir(), 'plugin-inbox-cap-'))
+  try {
+    for (const [agent, name, end] of [['opencode', 'opencodePlugin', '\nconst OPENCLAW_ID'], ['openclaw', 'openclawPlugin', '\n// The standalone board']]) {
+      for (const scenario of ['files', 'bytes']) {
+        const now = Date.now()
+        const seeded = seedDropped(now)
+        const inbox = join(home, `${agent}-${scenario}`)
+        if (scenario === 'files') {
+          for (let i = 0; i < 1000; i += 1) seedFile(inbox, `codex-turn-${i}-1.json`, 20, (2000 - i) * 1000)
+          seedFile(inbox, 'codex-turn-5000-1.json.failed', 20, 5000 * 1000)
+          seedFile(inbox, 'codex-turn-5001-1.json.synthetic-session-1-1.taking', 20, 5000 * 1000)
+          seedFile(inbox, 'notes.json', 20, 0)
+          writeFileSync(join(inbox, 'dropped.log'), seeded.text)
+        } else {
+          for (let i = 0; i < 5; i += 1) seedFile(inbox, `codex-turn-${i}-1.json`, 400000, (2000 - i) * 1000)
+          seedFile(inbox, 'codex-turn-5001-1.json.synthetic-session-1-1.taking', 700000, 5000 * 1000)
+          seedFile(inbox, 'notes.json', 300000, 0)
+        }
+        const file = join(home, `${agent}-${scenario}.mjs`)
+        writeFileSync(file, template(name, end, true, { home, inbox }))
+        const plugin = await import(pathToFileURL(file).href)
+        if (agent === 'opencode') {
+          const hooks = await plugin.AgentBoard({ directory: '/synthetic-workspace', client: { session: { get: async ({ path }) => ({ data: { id: path.id } }) } } })
+          await hooks['chat.message']({ sessionID: 'synthetic-owner' })
+        } else {
+          const hooks = new Map()
+          plugin.default.register({ on: (event, callback) => hooks.set(event, callback) })
+          await hooks.get('before_prompt_build')({}, { sessionId: 'synthetic-owner', inputProvenance: { kind: 'external_user' } })
+        }
+        const names = readdirSync(inbox)
+        const turns = names.filter(one => one.endsWith('.json') && one !== 'notes.json')
+        assert.ok(names.includes('notes.json'), `${agent} ${scenario}: a .json file that is not a turn file stays`)
+        assert.ok(turns.some(one => one.startsWith(`${agent}-prompt-`)), `${agent} ${scenario}: the plugin keeps the file it wrote`)
+        assert.ok(names.some(one => one.endsWith('.taking')), `${agent} ${scenario}: a taken file stays`)
+        assert.ok(!names.includes('codex-turn-0-1.json'), `${agent} ${scenario}: the oldest goes`)
+        if (scenario === 'files') {
+          assert.equal(turns.length, 1000)
+          assert.ok(names.includes('codex-turn-1-1.json') && names.includes('codex-turn-5000-1.json.failed'))
+          assertFolded(inbox, seeded, now, 'cap')
+        } else {
+          assert.equal(turns.length, 4)
+          assert.ok(!names.includes('codex-turn-1-1.json') && names.includes('codex-turn-2-1.json'))
+          assert.match(droppedLog(inbox), /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ 2 cap\n$/)
+        }
+      }
+    }
+  } finally {
+    fs.rmSync(home, { recursive: true, force: true, maxRetries: 8, retryDelay: 50 })
+  }
+})
+
+
+const runCapPlugin = async (agent, home, inbox, suffix) => {
+  const name = agent === 'opencode' ? 'opencodePlugin' : 'openclawPlugin'
+  const end = agent === 'opencode' ? '\nconst OPENCLAW_ID' : '\n// The standalone board'
+  const file = join(home, `${agent}-${suffix}.mjs`)
+  writeFileSync(file, template(name, end, true, { home, inbox }))
+  const plugin = await import(pathToFileURL(file).href)
+  if (agent === 'opencode') {
+    const hooks = await plugin.AgentBoard({ directory: '/synthetic-workspace', client: { session: { get: async ({ path }) => ({ data: { id: path.id } }) } } })
+    await hooks['chat.message']({ sessionID: 'synthetic-owner' })
+  } else {
+    const hooks = new Map()
+    plugin.default.register({ on: (event, callback) => hooks.set(event, callback) })
+    await hooks.get('before_prompt_build')({}, { sessionId: 'synthetic-owner', inputProvenance: { kind: 'external_user' } })
+  }
+}
+
+const capRecoversDropped = async kind => {
+  for (const [name, ageMs, isRecovered] of [
+    ['dropped.log.12345', 120000, true],
+    ['dropped.log.12345', 10000, false],
+    ['dropped.log.12345.678', 120000, false],
+  ]) {
+    await fixture(async home => {
+      const inbox = join(home, 'progress-inbox')
+      seedFile(inbox, 'codex-turn-0-1.json', 1600000, 2000)
+      const copy = join(inbox, name)
+      const stamp = new Date().toISOString().slice(0, 19) + 'Z'
+      const text = `${stamp} 7 age\n${stamp} 11 cap\n`
+      writeFileSync(copy, text)
+      const mtime = new Date(Date.now() - ageMs)
+      utimesSync(copy, mtime, mtime)
+      if (kind === 'opencode') await runCapPlugin(kind, home, inbox, 'recover-dropped')
+      else runCapReporter(kind, home)
+      assert.equal(existsSync(copy), !isRecovered, `${kind}: ${name}, age ${ageMs}`)
+      if (!isRecovered) assert.equal(readFileSync(copy, 'utf8'), text)
+      assert.deepEqual(inboxDropped(droppedLog(inbox), prunedSince(Date.now())), isRecovered ? { age: 7, cap: 12 } : { age: 0, cap: 1 })
+      assert.deepEqual(readdirSync(inbox).filter(one => one.startsWith('dropped.log.')), isRecovered ? [] : [name])
+    })
+  }
+}
+
+test('the sh reporter recovers an old unclaimed dropped-log copy and leaves fresh and claimed copies', () => capRecoversDropped('sh'))
+test('the PowerShell reporter recovers an old unclaimed dropped-log copy and leaves fresh and claimed copies', { skip: isNotWindows }, () => capRecoversDropped('ps1'))
+test('the OpenCode plugin recovers an old unclaimed dropped-log copy and leaves fresh and claimed copies', () => capRecoversDropped('opencode'))
+
+for (const agent of ['opencode', 'openclaw']) {
+  test(`the pane's count after an ${agent} plugin trim equals the true total`, () => fixture(async home => {
+    const now = Date.now()
+    const inbox = join(home, 'progress-inbox')
+    for (let i = 0; i < 1000; i += 1) seedFile(inbox, `codex-turn-${i}-1.json`, 20, (2000 - i) * 1000)
+    const seeded = seedDropped(now)
+    writeFileSync(join(inbox, 'dropped.log'), seeded.text)
+    await runCapPlugin(agent, home, inbox, 'pane-count')
+    const own = `${new Date(now).toISOString().slice(0, 19)}Z 1 cap\n`
+    assert.deepEqual(inboxDropped(droppedLog(inbox), prunedSince(now)), inboxDropped(seeded.text + own, prunedSince(now)))
+  }))
+
+  test(`the ${agent} plugin keeps its new turn when 1000 seeded turns are an hour ahead`, () => fixture(async home => {
+    const inbox = join(home, 'progress-inbox')
+    for (let i = 0; i < 1000; i += 1) seedFile(inbox, `codex-turn-${i}-1.json`, 20, -3600000 - i * 1000)
+    await runCapPlugin(agent, home, inbox, 'future-turns')
+    const names = readdirSync(inbox).filter(name => name.endsWith('.json'))
+    assert.equal(names.length, 1000)
+    assert.ok(names.some(name => name.startsWith(`${agent}-prompt-`)))
+    assert.ok(!names.includes('codex-turn-0-1.json'))
+    assert.match(droppedLog(inbox), /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ 1 cap\n$/)
+  }))
+}
 test('the sh timeout receipt reads every key with one grep', async () => {
   const { reporterSh } = await import('../hooks/hook-reporters.ts')
   const fallback = reporterSh('/x').split('write_fallback() {')[1].split('\ntimed_out() {')[0]

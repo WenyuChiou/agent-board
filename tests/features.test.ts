@@ -2232,7 +2232,7 @@ test('each agent gets a board command in the form it reads, and a missing report
   // Board files never count as connecting an agent: only its turns reaching the board do.
   expect(boardCommands(ctx).every(hook => hook.label === '')).toBe(true)
   expect(boardCommands({ ...ctx, board: undefined })).toEqual([])
-  expect(boardScript('/h/.claude/progress.md', 'en').split('\n')[0]).toBe('globalThis.AGENT_BOARD = {"path":"/h/.claude/progress.md","lang":"en"}')
+  expect(boardScript('/h/.claude/progress.md', 'en').split('\n')[0]).toBe('globalThis.AGENT_BOARD = {"hookVersion":1,"path":"/h/.claude/progress.md","lang":"en"}')
   expect(reportCommand('/h/.claude/progress-report.sh', 'gemini', 'turn', false)).toBe("sh '/h/.claude/progress-report.sh' gemini turn || true")
 })
 
