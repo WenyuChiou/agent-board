@@ -507,12 +507,13 @@ const PRUNED_PER_SWEEP = 200
 // was made from. The listing alone says whether there is anything to trim, so an hour with
 // nothing over the floor reads no file; otherwise every file is read afresh, never from what the
 // polls remember, so a copy damaged since they looked cannot be the newer copy that lets an older
-// one go.
+// one go. The 200 removals per sweep are shared with torn ledgers and temporary copies.
 const pruneQuestionFiles = async ($: EngineInterface, path: string): Promise<void> => {
   if ([...pendingQuestionProofs.values()].some(proof => proof.path === path)) return
   const dir = path.replace(/[\\/][^\\/]*$/, '')
   const entries = await $.fs.list(dir)
-  await sweepLedgerLeftovers($, path, dir, entries).catch(() => undefined)
+  const left = await sweepLedgerLeftovers($, path, dir, entries).catch(() => 0)
+  if (left >= PRUNED_PER_SWEEP) return
   const names = entries.map(entry => entry.name)
   const proofsOf = (kind: keyof QuestionProofs): number => names.filter(name => questionProofOf(path, name)?.kind === kind).length
   if (names.filter(name => captureHashOf(path, name) !== null).length <= QUESTION_FILES_KEPT && proofsOf('retired') <= QUESTION_FILES_KEPT && proofsOf('consumed') <= QUESTION_FILES_KEPT) return
@@ -532,18 +533,18 @@ const pruneQuestionFiles = async ($: EngineInterface, path: string): Promise<voi
   const isWin = await isWindows($, file)
   // The first sweep of a board with thousands of files would hold the write queue for tens of
   // seconds, one process after another; the rest goes at the next sweep.
-  const sweep = doomed.slice(0, PRUNED_PER_SWEEP)
+  const sweep = doomed.slice(0, PRUNED_PER_SWEEP - left)
   // A few dozen paths to a process keeps one command line far below the system's limit.
   for (let from = 0; from < sweep.length; from += 50) if (!(await removeFiles($, sweep.slice(from, from + 50), isWin))) return
 }
 // Torn ledgers past the newest few or over a week old, and temporary copies of a ledger write a
-// day old (#156). The
+// day old (#156), sharing the sweep's 200 removals with captures and proofs. The
 // ledger is read only when a temporary copy is old enough to go, since one goes only while the
 // ledger itself reads. A torn file is read first: when putting a moved-aside ledger back failed,
 // a whole ledger keeps the torn name.
-const sweepLedgerLeftovers = async ($: EngineInterface, path: string, dir: string, entries: ReadonlyArray<{ name: string; mtimeMs: number }>): Promise<void> => {
-  // As many to a sweep as captures and proofs, so thousands of leftovers neither hold the write
-  // queue nor are all read at once; the rest goes at the next sweep.
+const sweepLedgerLeftovers = async ($: EngineInterface, path: string, dir: string, entries: ReadonlyArray<{ name: string; mtimeMs: number }>): Promise<number> => {
+  // The shared allowance keeps thousands of leftovers from holding the write queue or being
+  // read all at once; the rest goes at the next sweep.
   const leftovers = ledgerLeftovers(path, entries, await $.clock.now())
   const torn = leftovers.torn.slice(0, PRUNED_PER_SWEEP)
   const temps = leftovers.temps.slice(0, PRUNED_PER_SWEEP - torn.length)
@@ -551,9 +552,10 @@ const sweepLedgerLeftovers = async ($: EngineInterface, path: string, dir: strin
   const isLedgerRead = temps.length > 0 && await readText($, questionsPath(path)).then(text => parseQuestions(text) !== null, () => false)
   const tornText = await Promise.all(torn.map(name => readText($, fileOf(name)).then(text => isTornLedger(text), () => false)))
   const doomed = [...torn.filter((_, n) => tornText[n]), ...(isLedgerRead ? temps : [])].map(fileOf)
-  if (doomed.length === 0) return
+  if (doomed.length === 0) return 0
   const isWin = await isWindows($, path)
-  for (let from = 0; from < doomed.length; from += 50) if (!(await removeFiles($, doomed.slice(from, from + 50), isWin))) return
+  for (let from = 0; from < doomed.length; from += 50) if (!(await removeFiles($, doomed.slice(from, from + 50), isWin))) return doomed.length
+  return doomed.length
 }
 const pruneAnswered = async ($: EngineInterface, path: string, projects: readonly ProgressProject[], mtimeMs: number, size: number): Promise<void> => {
   // The ledger retires identities; old acknowledgement bytes remain available for migration.
@@ -3400,7 +3402,7 @@ export const register: Register = (on, options) => {
     await update($, hasTaskTools, () => hasTools)
     hasPaneOpenAnswer = false
     hasNoPaneSurface = (await surfacesOf($))?.length === 0
-    await poll($)
+    await isDoneWithin($, poll($), HUNG_MS)
     await retainInboxQuestions($, [], true).catch(async () => pendingQuestionsProblem($, true)).catch(() => undefined)
     const startedAt = await $.clock.now()
     await update($, now, () => startedAt)

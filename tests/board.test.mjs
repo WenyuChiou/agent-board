@@ -243,6 +243,8 @@ const cutFiles = dir => ({ board: readFileSync(join(dir, 'progress.md'), 'utf8')
 
 const cutDate = new Date(Date.parse('2026-10-20T01:17:08.128Z'))
 const cutDay = `${String(cutDate.getMonth() + 1).padStart(2, '0')}-${String(cutDate.getDate()).padStart(2, '0')}`
+// Off a terminal the script draws 80 columns, so the notice wraps onto two rows at a space.
+const oneLine = text => text.replace(/\n/g, ' ')
 
 test('the board script places a cut-off block notice at the bottom by agent and date in every language, and leaves it out of --chat', () => {
   for (const [lang, words] of [
@@ -252,12 +254,12 @@ test('the board script places a cut-off block notice at the bottom by agent and 
   ]) {
     const board = chatRun([], { file: () => cutBoard(), lang, change: tornChange })
     assert.equal(board.status, 0, board.stderr)
-    assert.equal(board.stdout.split(words).length - 1, 1, board.stdout)
-    assert.equal(board.stdout.trimEnd().endsWith(words), true, board.stdout)
+    assert.equal(oneLine(board.stdout).split(words).length - 1, 1, board.stdout)
+    assert.equal(oneLine(board.stdout).trimEnd().endsWith(words), true, board.stdout)
     assert.ok(board.stdout.includes('Fix the working text') && board.stdout.includes('Hand-kept task'), board.stdout)
     const chat = chatRun(['--chat'], { file: () => cutBoard(), lang, change: tornChange })
     assert.equal(chat.status, 0, chat.stderr)
-    assert.equal(chat.stdout.includes(words), false, chat.stdout)
+    assert.equal(oneLine(chat.stdout).includes(words), false, chat.stdout)
   }
 })
 
@@ -267,10 +269,10 @@ test('the board script names a block cut off at the end of the file once the fil
   const touch = ageMs => questionFault(`const at = (${TORN_NOW} - ${ageMs}) / 1000\nfs.utimesSync(path.join(__dirname, 'progress.md'), at, at)`)
   const settled = chatRun([], { file: () => endCut, change: tornChange, preload: touch(11_000) })
   assert.equal(settled.status, 0, settled.stderr)
-  assert.equal(settled.stdout.split(words).length - 1, 1, settled.stdout)
+  assert.equal(oneLine(settled.stdout).split(words).length - 1, 1, settled.stdout)
   const fresh = chatRun([], { file: () => endCut, change: tornChange, preload: touch(9_000) })
   assert.equal(fresh.status, 0, fresh.stderr)
-  assert.equal(fresh.stdout.includes(words), false, fresh.stdout)
+  assert.equal(oneLine(fresh.stdout).includes(words), false, fresh.stdout)
 })
 
 test('--tidy beside a block cut off in the middle of the file archives the finished block after it alone and keeps the rest', () => {

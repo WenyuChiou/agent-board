@@ -10,7 +10,7 @@ import { doingTask, fallbackTitle, isAnswered, waitsOnYou } from './mirror'
 import type { Tone } from './palette'
 import { countSteps, currentStepIndex, doneKey, isHereProject, isStale, isTaskComplete, parseProgress, RESUME } from './parse'
 import { sha256 } from './sha256'
-import { observeQuestions, pendingQuestionSlot, questionScope, questionSlot } from './questions'
+import { observeQuestions, pendingQuestionSlot, questionScope, questionSlot, questionWords } from './questions'
 import type { QuestionLedger, QuestionProofs } from './questions'
 import { questionAge } from './question-aging'
 import type { PendingTurn } from './board'
@@ -732,19 +732,38 @@ export const buildView = (
       const keys = task.auto === null || observed === null
         ? blockKeys(task)
         : task.steps.map((step, index) => step.status === 'waiting' ? observed.keys[questionSlot(scope, index)] ?? '' : '')
-      // A cut-off block's steps are not read as questions. It asks only while a question kept from
-      // before the cut is shown in its place, so the block sits where it would whole, and is never
-      // dropped with nothing shown for it.
-      const isKept = isFrozen && (observed?.ledger.records.some(record => record.scope === scope && record.isUnresolved && record.source !== undefined && !marked.has(record.id)) ?? false)
-      const isAsked = (index: number): boolean => isFrozen ? isKept : !marked.has(keys[index] ?? '') && observed?.ledger.records.find(record => record.id === keys[index])?.isUnresolved !== false
+      // A cut-off block's question records stay as they were, but its steps still show. A step a
+      // saved question of its scope covers (the same words, or the start of them the cut left) is
+      // shown by that saved question in the loop over the ledger below, or not at all once it is
+      // answered or hidden. Any other [?] step asks as written, with no question id, as before the
+      // ledger first sees it.
+      const scopeRecords = isFrozen ? (observed?.ledger.records.filter(record => record.scope === scope) ?? []) : []
+      // A record covers a step only when it can show it (it keeps its source) or has ended. The
+      // same words win over a start of them, and only the last step can be the cut one. The same
+      // question asked again leaves its old resolved record in the ledger, so a live one wins.
+      const savedFor = (index: number) => {
+        const words = questionWords(task.steps[index]!.text)
+        const covering = scopeRecords.filter(record => record.source !== undefined || !record.isUnresolved)
+        const same = covering.filter(record => record.words === words)
+        const cut = same.length > 0 || words === '' || index !== task.steps.length - 1 ? [] : covering.filter(record => record.words.startsWith(words))
+        return [...same, ...cut].find(record => record.isUnresolved) ?? same[0] ?? cut[0]
+      }
+      const isAsked = (index: number): boolean => {
+        if (isFrozen) {
+          const saved = savedFor(index)
+          return saved === undefined ? true : saved.isUnresolved === true && saved.source !== undefined && !marked.has(saved.id)
+        }
+        return !marked.has(keys[index] ?? '') && observed?.ledger.records.find(record => record.id === keys[index])?.isUnresolved !== false
+      }
       const stageOf = (index: number) => {
         const id = observed?.keys[questionSlot(scope, index)]
         return questionAge(observed?.ledger.records.find(record => record.id === id)?.firstObserved ?? 0, now).stage
       }
-      const isPrompt = (index: number): boolean => !isFrozen && isAsked(index) && stageOf(index) === 'pending'
+      const isPrompt = (index: number): boolean => isFrozen ? savedFor(index) === undefined && isAsked(index) && stageOf(index) === 'pending' : isAsked(index) && stageOf(index) === 'pending'
 
       task.steps.forEach((step, index) => {
-        if (step.status !== 'waiting' || isFrozen) return
+        if (step.status !== 'waiting') return
+        if (isFrozen && savedFor(index) !== undefined) return
         const parts = splitNote(step.text)
         taskQuestions.push({
           key: `${key}::${index}`,
@@ -765,8 +784,8 @@ export const buildView = (
               : (task.auto.resume ?? (task.auto.agent === 'claude' && RESUME.test(task.auto.session) ? task.auto.session : null)),
           resumeVia: task.auto?.resume ? resumeVia(task.auto.agent) : null,
           reopen: task.auto?.resume ? resumeCommand(task.auto.resume, task.auto.dir, task.auto.agent) : null,
-          hideKey: keys[index] ?? '',
-          questionId: observed?.keys[questionSlot(scope, index)],
+          hideKey: isFrozen ? '' : keys[index] ?? '',
+          questionId: isFrozen ? undefined : observed?.keys[questionSlot(scope, index)],
           step: isManual ? { project: name, title, step: step.text, line: step.line, raw: step.raw } : null,
           target: targetOf(task.auto),
           ...(task.auto === null ? {} : { nativeSession: task.auto.resume ?? task.auto.session }),

@@ -221,7 +221,7 @@ export const boardText = (view: View, pending: readonly PendingTurn[], s: String
   }
 
   if (view.groups.every(group => group.rows.length === 0) && asks.length === 0 && news.length === 0 && view.idle.length === 0 && view.stopped.length === 0 && view.due.length === 0 && recentQuestions.length === 0) lines.push(c('quiet', s.empty), '')
-  for (const line of view.health ?? []) lines.push(c('quiet', line))
+  for (const line of view.health ?? []) lines.push(...wrapNote(line, o.width - 2).map(part => c('quiet', part)))
 
   return `${lines.join('\n').replace(/\n+$/, '')}\n`
 }
@@ -710,7 +710,7 @@ export const boardScreen = (view: View, pending: readonly PendingTurn[], state: 
   if (items.length === 0 && view.idle.length === 0 && view.stopped.length === 0 && recentQuestions.length === 0) lines.push(c('quiet', s.empty))
   lines.push('', c('quiet', fit([...keysFor(items[at], s), s.boardKeysMove].join(' · '), o.width)))
   if (result === undefined) resultLines('')
-  for (const line of view.health ?? []) lines.push(c('quiet', line))
+  for (const line of view.health ?? []) lines.push(...wrapNote(line, o.width - 2).map(part => c('quiet', part)))
 
   return `${lines.join('\n')}\n`
 }

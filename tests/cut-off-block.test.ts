@@ -2,11 +2,13 @@ import { expect, test } from 'claude-code/testing'
 import type { ProgressMirror } from '../types'
 import { addManualTask, CUT_SETTLE_MS, cutBlockLines, cutOffBlocks, cutOffSpans, mergeBlock, removeAutoBlock, scanBlocks, takeArchivable, takeTask, upsertAutoBlock } from '../hooks/blocks'
 import { boardScreen, boardText, chatText } from '../hooks/board'
+import type { PendingTurn } from '../hooks/board'
 import { dashboardHtml } from '../hooks/dashboard'
 import { localDay } from '../hooks/journal'
 import { parseProgress, progressTail } from '../hooks/parse'
 import { putCodexBlock } from '../hooks/codex'
 import { cutOffScopes, emptyQuestions, isQuestionSnapshot, ledgerLeftovers, observeQuestions, resolvedQuestionsToRetire, resolveQuestion } from '../hooks/questions'
+import { sha256 } from '../hooks/sha256'
 import { STRINGS } from '../hooks/strings'
 import { buildView, viewCache } from '../hooks/view'
 
@@ -126,13 +128,39 @@ test('the text board lists a cut-off block on a muted line at the bottom', () =>
   const health = cutBlockLines(cutOffBlocks(BOARD), EN)
   const notice = EN.blockCutOff('Codex', day)
   const view = { ...buildView(parseProgress(BOARD), [], null, NOW, 0, {}, EN), health }
-  const text = boardText(view, [], EN, { width: 80, isColor: true })
-  expect(text.trimEnd().endsWith(`\u001b[2m${notice}\u001b[0m`)).toBe(true)
-  const screen = boardScreen(view, [], { selected: 0, key: null, open: null, seen: null, note: '' }, EN, { width: 80, isColor: true })
-  expect(screen.trimEnd().endsWith(`\u001b[2m${notice}\u001b[0m`)).toBe(true)
+  const state = { selected: 0, key: null, open: null, seen: null, note: '' }
+  // Wide enough for the whole notice on one row; at 80 columns it wraps onto rows that fit, as
+  // recovery advice does, and loses no word.
+  expect(boardText(view, [], EN, { width: 120, isColor: true }).trimEnd().endsWith(`\u001b[2m${notice}\u001b[0m`)).toBe(true)
+  expect(boardScreen(view, [], state, EN, { width: 120, isColor: true }).trimEnd().endsWith(`\u001b[2m${notice}\u001b[0m`)).toBe(true)
+  for (const out of [boardText(view, [], EN, { width: 80, isColor: true }), boardScreen(view, [], state, EN, { width: 80, isColor: true })]) {
+    const tail = out.trimEnd().split('\n').slice(-2)
+    expect(tail.every(line => line.startsWith('\u001b[2m') && line.endsWith('\u001b[0m'))).toBe(true)
+    const parts = tail.map(line => line.slice(4, -4))
+    expect(parts.join(' ')).toBe(notice)
+    expect(parts.every(part => part.length <= 78)).toBe(true)
+  }
   const chat = chatText(view, [], [], EN, '/home/me', false)
   expect(chat).not.toContain(notice)
   expect(chat).not.toContain(EN.sectionHealth)
+})
+
+test("a cut-off block's agent name reaches the notice, the text board and its screen with no control characters", () => {
+  const board = BOARD.replace('agent=codex', 'agent=co\u001b[2Jde\u0007x')
+  const controls = /[\u0000-\u0009\u000b-\u001f\u007f-\u009f]/
+  // The notice every surface shows has the codes out already.
+  const health = cutBlockLines(cutOffBlocks(board), EN)
+  expect(health).toHaveLength(1)
+  expect(health[0]).toContain('co[2Jdex')
+  expect(health[0]).not.toMatch(controls)
+  // And the terminal takes them out of a health line that still holds them.
+  const raw = health.map(line => line.replace('co[2Jdex', 'co\u001b[2Jde\u0007x'))
+  const view = { ...buildView(parseProgress(board), [], null, NOW, 0, {}, EN), health: raw }
+  const state = { selected: 0, key: null, open: null, seen: null, note: '' }
+  for (const out of [boardText(view, [], EN, { width: 200, isColor: false }), boardScreen(view, [], state, EN, { width: 200, isColor: false })]) {
+    expect(out).toContain('co[2Jdex')
+    expect(out).not.toMatch(controls)
+  }
 })
 
 test('a cut-off block\'s own session rewrites only that block and gives it its end marker, and every section after it stays', () => {
@@ -177,10 +205,24 @@ test('the archive never takes a cut-off block, and takes a finished block after 
   expect(takeTask(BOARD, { project: 'demo-152', session: '55fb44cb', title: 'Add a shelf', line: 5 }, NOW + 30 * DAY, EN)).toBeNull()
 })
 
-test('a pasted block and the Codex reporter leave a cut-off block of their session alone', () => {
+test('a pasted block leaves a cut-off block of its session alone', () => {
   const pasted = [CUT.replace('2026-10-20T01:17:08.128Z', '2026-10-22T11:00:00Z'), '### Pasted', '- [ ] Pasted step', '<!-- /auto session=55fb44cb -->'].join('\n')
   expect(mergeBlock(BOARD, pasted, NOW, EN)).toEqual({ problem: 'notYours' })
-  expect(() => putCodexBlock(BOARD, { session: 'synthetic', agent: 'codex', project: 'demo-152', title: 'Codex plan', steps: ['- [ ] Step'], state: 'working', updated: new Date(NOW).toISOString() } as Parameters<typeof putCodexBlock>[1], '55fb44cb'.padEnd(64, 'a'))).toThrow('BLOCK_CONFLICT')
+})
+
+test("a local report for its own block cut off in the middle writes its block in place of the marker line, and the cut block's lines and every section after them stay", () => {
+  const board = BOARD.replace(CUT, CUT_MARKER)
+  const next = putCodexBlock(board, { session: 'synthetic', agent: 'codex', project: 'demo-152', title: 'Codex plan', steps: ['- [ ] Step'], state: 'working', updated: new Date(NOW).toISOString() } as Parameters<typeof putCodexBlock>[1], OWNER)
+  expect(next).toBe([
+    '# Progress', '', '## demo-152', '',
+    `<!-- auto session=aaaaaaaa agent=codex source=codex-local owner=${OWNER} state=working updated=2026-10-22T12:00:00.000Z resume=synthetic -->`,
+    '### Codex plan',
+    '- [ ] Step',
+    '<!-- /auto session=aaaaaaaa -->',
+    '### Add a shelf',
+    '> waiting on your repl',
+    ...AFTER,
+  ].join('\n'))
 })
 
 test("the own session's upsert of a block cut right after its marker keeps the hand-kept task under it byte for byte", () => {
@@ -293,6 +335,25 @@ test('a question in a block cut off in the middle keeps its record and its hide,
   }
 })
 
+test('a pending inbox turn of a block cut off in the middle adds no question, and the question keeps its id and its hide once the block is whole', () => {
+  const head = BEFORE.slice(0, 5)
+  const whole = [...head, '### Add a shelf', '- [?] Ship the shelf, OK?', `<!-- question=${'b'.repeat(64)}:1 -->`, '<!-- /auto session=55fb44cb -->', ...AFTER].join('\n')
+  const seeded = observeQuestions(emptyQuestions(), parseProgress(whole), null, [], NOW, true, 'seed').ledger
+  const ship = seeded.records.find(record => record.words === 'Ship the shelf, OK?')!
+  expect(ship.producer).toBe(`${'b'.repeat(64)}:1`)
+  const hidden = resolveQuestion(seeded, ship.id, NOW)
+  const pending: PendingTurn = { id: '55fb44cb', agent: 'codex', project: 'demo-152', text: ship.words, isQuestion: true, at: NOW }
+  const cut = [...head, '### Add a shelf', '- [?] Ship the shelf, O', ...AFTER].join('\n')
+  const projects = parseProgress(cut)
+  const frozen = cutOffScopes(projects, cutOffSpans(cut))
+  const during = observeQuestions(hidden, projects, null, [], NOW + 1000, true, 'cut', undefined, [pending], [], frozen).ledger
+  expect(during.records.map(record => record.id)).toEqual(hidden.records.map(record => record.id))
+  expect(during.records.find(record => record.id === ship.id)).toEqual(hidden.records.find(record => record.id === ship.id))
+  const after = observeQuestions(during, parseProgress(whole), null, [], NOW + 2000, true, 'whole', undefined, [pending]).ledger
+  expect(after.records.filter(record => record.words === ship.words).map(record => record.id)).toEqual([ship.id])
+  expect(after.records.find(record => record.id === ship.id)).toMatchObject({ isUnresolved: false, resolvedAt: NOW })
+})
+
 test('a block cut right after its marker keeps its question unresolved with the same id until the whole block returns', () => {
   for (const [heading, marker] of [
     ['', CUT],
@@ -363,16 +424,66 @@ test('a frozen waiting task shows only its saved question until it is marked ans
   expect(answered.hidden.filter(item => item.project === 'demo-152').map(item => [item.questionId, item.text])).toEqual([[paint.id, 'Paint it, OK?']])
 })
 
-test('a frozen waiting task with no saved question stays visible with its steps and no question', () => {
+test('a frozen waiting task with no saved question lists its open step in Waiting on you without recording it', () => {
   const marker = CUT.replace('2026-10-20T01:17:08.128Z', new Date(NOW).toISOString())
   const cut = [...BEFORE.slice(0, 4), marker, '### Add a shelf', '- [~] Sand the shelf', '- [?] Paint it, O', ...AFTER].join('\n')
   const projects = parseProgress(cut)
   const frozen = cutOffScopes(projects, cutOffSpans(cut))
-  const view = buildView(projects, [], null, NOW, 0, {}, EN, [], {}, emptyQuestions(), undefined, [], frozen)
-  const row = view.active.find(item => item.project === 'demo-152')
-  expect(row).toMatchObject({ title: 'Add a shelf', question: null, auto: 'waiting', left: ['Sand the shelf', 'Paint it, O'] })
-  expect(row?.steps.map(step => step.text)).toEqual(['Sand the shelf', 'Paint it, O'])
-  expect([...view.waiting, ...(view.reminder ?? []), ...(view.older ?? []), ...view.hidden].some(item => item.text === 'Paint it, O')).toBe(false)
+  for (const ledger of [emptyQuestions(), undefined]) {
+    const view = buildView(projects, [], null, NOW, 0, {}, EN, [], {}, ledger, undefined, [], frozen)
+    const asks = view.waiting.filter(item => item.project === 'demo-152')
+    expect(asks).toHaveLength(1)
+    expect(asks[0]).toMatchObject({ text: 'Paint it, O', hideKey: '' })
+    expect(asks[0]?.questionId).toBeUndefined()
+    expect(view.active.some(item => item.project === 'demo-152')).toBe(false)
+    expect(view.focus).toEqual({ type: 'ask', item: asks[0] })
+  }
+  const hand = [...HAND, '- [?] Keep me, OK?']
+  const p0 = P0.replace(HAND.join('\n'), hand.join('\n')).replace('2026-10-20T01:17:08.128Z', new Date(NOW).toISOString())
+  const p0Projects = parseProgress(p0)
+  const p0Frozen = cutOffScopes(p0Projects, cutOffSpans(p0))
+  for (const ledger of [emptyQuestions(), undefined]) {
+    const view = buildView(p0Projects, [], null, NOW, 0, {}, EN, [], {}, ledger, undefined, [], p0Frozen)
+    const asks = view.waiting.filter(item => item.project === 'demo-152')
+    expect(asks).toHaveLength(1)
+    expect(asks[0]).toMatchObject({ text: 'Keep me, OK?', hideKey: '' })
+    expect(asks[0]?.questionId).toBeUndefined()
+    expect(view.active.some(item => item.project === 'demo-152')).toBe(false)
+    expect(view.focus).toEqual({ type: 'ask', item: asks[0] })
+  }
+})
+
+test("a frozen block's step that its resolved saved question covers stays out of Waiting on you while the block is cut off", () => {
+  const head = [...BEFORE.slice(0, 4), CUT.replace('2026-10-20T01:17:08.128Z', new Date(NOW).toISOString()), '### Add a shelf', '- [?] Ship the shelf, OK?']
+  const whole = [...head, '<!-- /auto session=55fb44cb -->', ...AFTER].join('\n')
+  const seeded = observeQuestions(emptyQuestions(), parseProgress(whole), null, [], NOW, true, 'seed').ledger
+  const ship = seeded.records.find(record => record.words === 'Ship the shelf, OK?')!
+  const ledger = resolveQuestion(seeded, ship.id, NOW)
+  const cut = [...head, ...AFTER].join('\n')
+  const projects = parseProgress(cut)
+  const frozen = cutOffScopes(projects, cutOffSpans(cut))
+  const view = buildView(projects, [], null, NOW, 0, {}, EN, [], {}, ledger, undefined, [], frozen)
+  expect([...view.waiting, ...(view.reminder ?? []), ...(view.older ?? [])].some(item => item.project === 'demo-152')).toBe(false)
+})
+
+test('a question asked again before its block was cut shows once by its live record, not as the old answered one', () => {
+  const marker = CUT.replace('2026-10-20T01:17:08.128Z', new Date(NOW).toISOString())
+  const head = [...BEFORE.slice(0, 4), marker, '### Add a shelf', '- [?] Paint it, OK?']
+  const whole = [...head, '<!-- /auto session=55fb44cb -->', ...AFTER].join('\n')
+  const first = observeQuestions(emptyQuestions(), parseProgress(whole), null, [], NOW, true, 'seed').ledger
+  const old = first.records.find(record => record.words === 'Paint it, OK?')!
+  const proofs = { retired: [sha256(old.id)], consumed: [] }
+  // The answered question is retired and asked again, so the ledger holds both, the old one first.
+  const ledger = observeQuestions(resolveQuestion(first, old.id, NOW), parseProgress(whole), null, [], NOW + 1000, true, 'renewed', proofs).ledger
+  const asked = ledger.records.filter(record => record.words === 'Paint it, OK?')
+  expect(asked.map(record => record.isUnresolved)).toEqual([false, true])
+  const cut = [...head, ...AFTER].join('\n')
+  const projects = parseProgress(cut)
+  const frozen = cutOffScopes(projects, cutOffSpans(cut))
+  const view = buildView(projects, [], null, NOW + 2000, 0, {}, EN, [], {}, ledger, proofs, [], frozen)
+  expect(view.active.some(item => item.project === 'demo-152')).toBe(false)
+  const shown = [...view.waiting, ...(view.reminder ?? []), ...(view.older ?? []), ...view.hidden].filter(item => item.project === 'demo-152')
+  expect(shown.map(item => item.questionId)).toEqual([asked[1]!.id])
 })
 
 test('a frozen working task keeps its row without a cut question and shows its saved question once', () => {

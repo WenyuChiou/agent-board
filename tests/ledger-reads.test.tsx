@@ -563,6 +563,33 @@ test('a poll held by a read of progress.md gives way to a new one after 15 secon
   } finally { await ui.unmount() }
 })
 
+test('a first read of progress.md that never answers at session start still lets the 2-second poll take over after 15 seconds', { timeoutMs: 30_000 }, async ($, on) => {
+  const board = `## demo\n${block('a1b2c301', 'working', 1, '- [~] Work')}`
+  const world = makeWorld([[FILE, board]])
+  world.env = english
+  const clock = engineBeneath(on, world)
+  let isFirstRead = true
+  let reached = (): void => undefined
+  const reading = new Promise<void>(resolve => { reached = resolve })
+  world.holdRead = path => {
+    if (path !== FILE || !isFirstRead) return undefined
+    isFirstRead = false
+    reached()
+    return new Promise(() => undefined)
+  }
+  const started = $.session.start(START)
+  await reading
+  await clock.advance(15_001)
+  await started
+  world.files.set(FILE, `${board}${block('a1b2c302', 'working', 1, '- [~] Later work')}`)
+  world.mtime += 1
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
+  try {
+    await clock.advance(2000)
+    expect(visiblePaneText(await ui.drawn())).toMatch(/▸\s+2\s+in progress/)
+  } finally { await ui.unmount() }
+})
+
 test('a write made while a poll is held still lands, without waiting on the held read', async ($, on) => {
   const board = `## demo\n${block('a1b2c301', 'working', 1, '- [~] Work')}`
   const world = makeWorld([[FILE, board]])
@@ -1139,6 +1166,27 @@ test('the archive sweep removes torn ledgers over a week old even among the newe
   await $.command.run(TIDY)
   expect(young.filter(path => world.files.has(path))).toEqual(young)
   expect(old.filter(path => world.files.has(path))).toEqual([])
+})
+
+test('one archive sweep removes at most 200 files across torn ledgers and old proofs, and the next sweep takes the rest', { timeoutMs: 60_000 }, async ($, on) => {
+  const world = makeWorld([[FILE, pruningBoard]])
+  world.env = english
+  const clock = engineBeneath(on, world)
+  await $.session.start(START)
+  await clock.advance(2000)
+  const torn = Array.from({ length: 150 }, (_, n) => `${LEDGER}.torn-${NOW - 8 * 24 * HOUR - n}-${4000 + n}`)
+  torn.forEach(path => put(world, path, '{"version":1,"rec', 1))
+  // The newest 16 proofs stay, leaving 150 to share the allowance with the torn ledgers.
+  putOrphans(world, 166)
+  world.ran = []
+  await $.command.run(TIDY)
+  expect(removedPerProcess(world).reduce((sum, count) => sum + count, 0)).toBe(200)
+  expect(torn.filter(path => world.files.has(path))).toEqual([])
+  expect(filesOf(world, RETIRED)).toHaveLength(116)
+  world.ran = []
+  await $.command.run(TIDY)
+  expect(removedPerProcess(world).reduce((sum, count) => sum + count, 0)).toBe(100)
+  expect(filesOf(world, RETIRED)).toHaveLength(16)
 })
 
 test('the archive sweep keeps the newest three torn ledgers and removes day-old temporary copies of the ledger', async ($, on) => {

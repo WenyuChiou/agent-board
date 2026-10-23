@@ -238,11 +238,13 @@ export const cutOffBlocks = (text: string, isSettled = false): CutBlock[] => {
   return scanBlocks(lines).filter(span => isCutOff(span) && !lines.slice(span.start + 1, span.end + 2).some(isCutMarker)).map(span => cutBlockOf(span, lines[span.start] ?? ''))
 }
 
-// The board names the first few; more than that is a file to look over as a whole anyway.
+// The board names the first few; more than that is a file to look over as a whole anyway. The
+// agent name comes from the file, so control characters are taken out before any surface shows it.
 export const cutBlockLines = (cut: readonly CutBlock[], s: Strings = ZH_TW): string[] =>
   cut.slice(0, 3).map(one => {
-    const key = one.agent.toLowerCase()
-    const agent = one.agent === '' ? '' : Object.hasOwn(s.agentNames, key) ? (s.agentNames[key] ?? one.agent) : one.agent
+    const name = one.agent.replace(/[\u0000-\u001f\u007f-\u009f]/g, '')
+    const key = name.toLowerCase()
+    const agent = name === '' ? '' : Object.hasOwn(s.agentNames, key) ? (s.agentNames[key] ?? name) : name
     return s.blockCutOff(agent, one.updated === null ? null : localDay(one.updated).slice(5))
   })
 

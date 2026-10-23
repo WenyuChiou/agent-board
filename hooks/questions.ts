@@ -302,6 +302,7 @@ const observations = (projects: readonly ProgressProject[], mine: ProgressMirror
   for (const turn of pending) {
     if (!turn.isQuestion || turn.id === undefined) continue
     const scope = questionScope(turn.project, turn.agent, turn.id)
+    if (frozen.has(scope)) continue
     const matching = rows.filter(row => row.isWaiting && row.scope === scope && questionWords(row.text) === questionWords(turn.text))
     if (matching.length === 1 && matching[0] !== undefined) {
       const row = matching[0]
