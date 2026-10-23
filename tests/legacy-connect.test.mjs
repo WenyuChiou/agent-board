@@ -36,6 +36,18 @@ const fixture = async fn => {
 
 const taggedBoards = new Map()
 
+test('a malformed remembered Codex approval makes the connect state invalid', () => fixture(async f => {
+  f.run(f.request('connect'))
+  const state = JSON.parse(readFileSync(f.control, 'utf8'))
+  for (const approval of [null, [], true, {}, { source: 'relative/hooks.json', sourceHash: 'a'.repeat(64) }, { source: f.config, sourceHash: 'A'.repeat(64) }, { source: f.config, sourceHash: 'a'.repeat(63) }, { source: f.config, sourceHash: 1 }, { source: f.config, sourceHash: 'a'.repeat(64), configHash: 'A'.repeat(64) }, { source: f.config, sourceHash: 'a'.repeat(64), configHash: 'a'.repeat(63) }, { source: f.config, sourceHash: 'a'.repeat(64), configHash: 1 }, ...[null, [], { path: 'relative/codex.exe', size: 1, mtime: 1 }, { path: f.config, size: -1, mtime: 1 }, { path: f.config, size: 1.5, mtime: 1 }, { path: f.config, size: 1, mtime: '1' }].map(binary => ({ source: f.config, sourceHash: 'a'.repeat(64), configHash: null, binary }))]) {
+    writeFileSync(f.control, JSON.stringify({ ...state, codexApproval: approval }))
+    const result = f.command(f.request('status'))
+    assert.notEqual(result.status, 0)
+    assert.match(result.stderr, /INVALID_CONNECT_STATE/)
+    assert.deepEqual(JSON.parse(readFileSync(f.control, 'utf8')).codexApproval, approval)
+  }
+}))
+
 const dataRootHosts = f => {
   for (const dir of ['.gemini/antigravity', '.cursor', '.hermes', '.grok', '.config/opencode', '.config/muse', '.openclaw']) mkdirSync(join(f.home, dir), { recursive: true })
   const progress = join(f.home, '.claude', 'progress.md')
@@ -249,7 +261,7 @@ test('acknowledgement preserves the checked Codex status without launching anoth
   assert.equal(JSON.parse(output.stdout).state.setup.problems.some(problem => problem.key === 'codex:approval'), false)
   assert.equal(existsSync(marker), false)
   assert.equal(f.command(f.request('status', { codexExecutable: process.execPath }), { env }).status, 0)
-  assert.equal(readFileSync(marker, 'utf8'), 'called\n')
+  assert.equal(readFileSync(marker, 'utf8'), 'called\ncalled\n')
 }))
 
 test('a YAML command with combined apostrophe quoting or non-JSON escapes keeps its board', async () => {
@@ -702,7 +714,7 @@ for (const lang of ['en', 'zh-TW', 'zh-CN']) test(`native legacy connect and rem
   const removed = f.run(f.request('remove', { lang }))
   assert.equal(removed.state.disabled, true)
   assert.deepEqual(JSON.parse(readFileSync(f.config)), f.foreign)
-  assert.ok(!existsSync(join(f.home, 'data-a', 'agent-board.mjs')))
+  assert.ok(!existsSync(join(f.home, 'data-a', 'agent-board.mjs')), JSON.stringify(removed.result.problems))
   assert.ok(existsSync(join(f.home, 'data-a', `progress-report.${process.platform === 'win32' ? 'ps1' : 'sh'}`)))
 }))
 
