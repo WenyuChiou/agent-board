@@ -283,6 +283,18 @@ export const observeQuestions = (
   answeredTurns: readonly (AgentTurn | QuestionAnswerEvidence)[] = [],
 ): { ledger: QuestionLedger; keys: Record<string, string>; marked: string[] } => {
   const records = ledger.records.map(row => ({ ...row }))
+  // Scope and words do not change during observation; index their mutable record objects
+  // once instead of scanning the full ledger for every question.
+  const recordGroups = new Map<string, QuestionRecord[]>()
+  const recordKey = (scope: string, words: string): string => JSON.stringify([scope, words])
+  const indexRecord = (record: QuestionRecord): void => {
+    const key = recordKey(record.scope, record.words)
+    const group = recordGroups.get(key)
+    if (group === undefined) recordGroups.set(key, [record])
+    else group.push(record)
+  }
+  for (const record of records) indexRecord(record)
+  const recordsOf = (scope: string, words: string): readonly QuestionRecord[] => recordGroups.get(recordKey(scope, words)) ?? []
   for (const record of records) {
     if (record.source?.kind !== 'inbox' || !record.isUnresolved) continue
     let source: PendingTurn
@@ -312,15 +324,16 @@ export const observeQuestions = (
   // between the rows of a group, so they are read only.
   const copiesOf = (row: Observation): readonly Observation[] => copyIndex.get(copyKey(row)) ?? []
   const hasNewRevision = (row: Observation, record: QuestionRecord): boolean =>
-    [row, ...records.filter(other => other.scope === row.scope && other.words === record.words && other.isPresent && other.isUnresolved)]
+    [row, ...recordsOf(row.scope, record.words).filter(other => other.isPresent && other.isUnresolved)]
       .some(other => other.producerRevisions?.some(revision => !record.producerRevisions?.includes(revision)))
   const resolved = seen.flatMap(row => {
     const copies = copiesOf(row)
-    const record = row.isWaiting ? records.find(record => record.scope === row.scope && (record.producer ?? '') === row.producer && record.words === questionWords(row.text) && record.isUnresolved === false && (row.producer !== '' || (record.resolvedAt !== undefined && record.source?.task === row.source.task && !proofs.retired.includes(sha256(record.id)) && record.occurrence === copies.indexOf(row) + 1 && record.copies === copies.length && !hasNewRevision(row, record)))) : undefined
+    const record = row.isWaiting ? recordsOf(row.scope, questionWords(row.text)).find(record => (record.producer ?? '') === row.producer && record.isUnresolved === false && (row.producer !== '' || (record.resolvedAt !== undefined && record.source?.task === row.source.task && !proofs.retired.includes(sha256(record.id)) && record.occurrence === copies.indexOf(row) + 1 && record.copies === copies.length && !hasNewRevision(row, record)))) : undefined
     return record === undefined ? [] : [{ row, record }]
   })
   const rows = seen.filter(row => !resolved.some(item => item.row === row) && (row.source.kind !== 'inbox' || row.producerRevisions === undefined || row.producerRevisions.length === 0 || !row.producerRevisions.every(revision => records.some(record => record.scope === row.scope && record.isUnresolved === false && record.producerRevisions?.includes(revision)))))
-  for (const record of records) {
+  // Most views have no retirement proofs; hashing every ledger id then cannot match.
+  if (proofs.retired.length > 0) for (const record of records) {
     if (proofs.retired.includes(sha256(record.id))) {
       record.isPresent = false
       record.isWaiting = false
@@ -342,7 +355,7 @@ export const observeQuestions = (
     const first = alike[0]
     if (first === undefined) continue
     const words = questionWords(first.text)
-    const candidates = records.filter(row => row.scope === first.scope && row.words === words && row.isPresent)
+    const candidates = recordsOf(first.scope, words).filter(row => row.isPresent)
     const copies = copiesOf(first)
     const isAmbiguous = candidates.some(row => !row.producer && row.copies !== copies.length)
     if (isAmbiguous) for (const old of candidates.filter(record => !record.producer)) {
@@ -374,6 +387,7 @@ export const observeQuestions = (
         const binding = sha256(JSON.stringify([row.scope, words, occurrence, copies.length, incarnation]))
         record = { id: `question:${binding}:${next++}`, scope: row.scope, words, occurrence, copies: copies.length, isWaiting: true, isPresent: true, firstObserved: Number.isFinite(now) && now > 0 ? now : 0, incarnation, producer: row.producer }
         records.push(record)
+        indexRecord(record)
       }
       if (record === undefined) return
       record.isWaiting = row.isWaiting

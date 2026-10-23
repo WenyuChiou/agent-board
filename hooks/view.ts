@@ -673,6 +673,11 @@ export const buildView = (
   pending: readonly PendingTurn[] = [],
 ): View => {
   const observed = questions === undefined ? null : observeQuestions(questions, projects, mine, answered, now, false, 'preview', proofs ?? { retired: [], consumed: [] }, pending)
+  // Repeated question lookups share one index for this immutable observed view.
+  const questionRecords = new Map<string, QuestionLedger['records'][number]>()
+  for (const record of observed?.ledger.records ?? []) {
+    if (!questionRecords.has(record.id)) questionRecords.set(record.id, record)
+  }
   const marked = new Set(proofs === null ? [] : observed?.marked ?? answered)
   const ownId = mine === null ? '' : shortId(mine.sessionId)
   const waiting: WaitingItem[] = []
@@ -726,10 +731,10 @@ export const buildView = (
       const keys = task.auto === null || observed === null
         ? blockKeys(task)
         : task.steps.map((step, index) => step.status === 'waiting' ? observed.keys[questionSlot(questionScope(project.name, task.auto?.agent ?? '', task.auto?.session ?? ''), index)] ?? '' : '')
-      const isAsked = (index: number): boolean => !marked.has(keys[index] ?? '') && observed?.ledger.records.find(record => record.id === keys[index])?.isUnresolved !== false
+      const isAsked = (index: number): boolean => !marked.has(keys[index] ?? '') && questionRecords.get(keys[index] ?? '')?.isUnresolved !== false
       const stageOf = (index: number) => {
         const id = observed?.keys[questionSlot(questionScope(project.name, task.auto?.agent ?? 'manual', task.auto?.session ?? task.title), index)]
-        return questionAge(observed?.ledger.records.find(record => record.id === id)?.firstObserved ?? 0, now).stage
+        return questionAge(questionRecords.get(id ?? '')?.firstObserved ?? 0, now).stage
       }
       const isPrompt = (index: number): boolean => isAsked(index) && stageOf(index) === 'pending'
 
@@ -762,8 +767,8 @@ export const buildView = (
           ...(task.auto === null ? {} : { nativeSession: task.auto.resume ?? task.auto.session }),
         })
       })
-      const unresolved = taskQuestions.filter(item => !marked.has(item.hideKey) && observed?.ledger.records.find(record => record.id === item.questionId)?.isUnresolved !== false)
-      if (isInactive) inactiveHidden.push(...taskQuestions.filter(item => marked.has(item.hideKey) && observed?.ledger.records.find(record => record.id === item.questionId)?.isUnresolved !== false))
+      const unresolved = taskQuestions.filter(item => !marked.has(item.hideKey) && questionRecords.get(item.questionId ?? '')?.isUnresolved !== false)
+      if (isInactive) inactiveHidden.push(...taskQuestions.filter(item => marked.has(item.hideKey) && questionRecords.get(item.questionId ?? '')?.isUnresolved !== false))
       if (!isInactive) waiting.push(...taskQuestions)
 
       let completion: DoneItem & { at: number } | null = null
@@ -900,9 +905,9 @@ export const buildView = (
     return [{ key: `inbox::${id}`, questionId: id, project: turn.project, task: '', context: '', ...parts, when: '', ...askOf(parts.text, parts.note), where: 'other' as const, agent: turn.agent, session: turn.id ?? '', sessionId: null, resumeVia: null, reopen: null, hideKey: id, step: null, target: null }]
   })
   const own = mine === null ? [] : ownWaiting(mine, observed?.keys).map(item => ({ ...item, questionId: item.hideKey }))
-  const isResolved = (item: WaitingItem): boolean => observed?.ledger.records.find(record => record.id === item.questionId)?.isUnresolved === false
+  const isResolved = (item: WaitingItem): boolean => questionRecords.get(item.questionId ?? '')?.isUnresolved === false
   const all = [...own, ...waiting, ...inbox].filter(item => !isResolved(item)).map(item => {
-    const record = observed?.ledger.records.find(row => row.id === item.questionId)
+    const record = questionRecords.get(item.questionId ?? '')
     const age = questionAge(record?.firstObserved ?? 0, now)
     return { ...item, ageStage: age.stage, when: age.age === null ? s.questionAgeUnknown : relativeTime(record?.firstObserved ?? 0, now, s) }
   }).sort(

@@ -1,3 +1,5 @@
+// Keep the pure view budget in the existing Linux/Windows Node CI entry point.
+import './view-budget.test.mjs'
 // The board script `/progress connect` writes, run the way every other agent runs it: plain
 // Node, no Claude Code. Needs Node 22.18+ or 24 (it reads hooks/board-script.ts directly).
 import { execFile, execFileSync, spawn, spawnSync } from 'node:child_process'
