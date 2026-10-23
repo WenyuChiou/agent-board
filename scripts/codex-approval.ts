@@ -1,6 +1,5 @@
-import { createHash } from 'node:crypto'
-import { readFileSync } from 'node:fs'
-import { join } from 'node:path'
+// Pure: legacy-connect imports it, and the plugin's tests load legacy-connect, where a module
+// may import only its own files and claude-code. Each caller hashes config.toml itself.
 import type { CodexTrustObservation } from './codex-host'
 
 // configHash is the sha of Codex's config.toml when Codex confirmed the approval, or
@@ -9,13 +8,6 @@ import type { CodexTrustObservation } from './codex-host'
 // successful check replaces it.
 export type CodexApproval = { source: string; sourceHash: string; configHash?: string | null }
 export type CodexCheck = CodexTrustObservation & { configHash: string | null }
-
-// undefined when config.toml exists but cannot be read: then no approval is confirmed or remembered.
-export const codexConfigHash = (codexHome: string): string | null | undefined => {
-  try { return createHash('sha256').update(readFileSync(join(codexHome, 'config.toml'))).digest('hex') } catch (error) {
-    return (error as { code?: string }).code === 'ENOENT' ? null : undefined
-  }
-}
 
 export const codexApproval = (observation: CodexCheck | undefined, source: string, sourceHash: string | null, configHash: string | null | undefined, approval: CodexApproval | undefined, wasTrusted: boolean | undefined, beforeHash: string | null): { trusted: boolean; approval: CodexApproval | undefined } => {
   const sameSource = (path: string): boolean => path.replace(/\\/g, '/') === source.replace(/\\/g, '/')

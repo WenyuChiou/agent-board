@@ -10,6 +10,16 @@ type Hook = { key: string; currentHash: string; sourcePath: string; eventName: s
 export type CodexHookIdentity = { event: string; command: string }
 export type CodexTrustObservation = { source: string; sourceHash: string; trusted: boolean; hooks: { event: string; key: string; hash: string; trust: string }[] }
 
+// The sha of Codex's config.toml, which untrusting or turning hooks off in /hooks changes:
+// null when there is none, undefined when it exists but cannot be read (then no approval
+// is confirmed or remembered). It hashes the UTF-8 text, as legacy-connect does through its
+// transaction, so the two agree on any file that holds still while connect runs.
+export const codexConfigHash = (codexHome: string): string | null | undefined => {
+  try { return createHash('sha256').update(readFileSync(join(codexHome, 'config.toml'), 'utf8')).digest('hex') } catch (error) {
+    return (error as { code?: string }).code === 'ENOENT' ? null : undefined
+  }
+}
+
 // npm installs on Windows put only shims on PATH; run the package's own native
 // binary directly and never a .cmd through a shell.
 export const findCodexExecutable = (pathValue: string, platform: string, arch: string): string | undefined => {

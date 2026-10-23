@@ -2,7 +2,7 @@ import { reporterPs1, reporterSh, agentHooks, boardLangOf, boardScriptFor, conne
 import type { AgentSetup, HookState, SetupNotice, SetupProblem, SetupState } from '../hooks/connect-pure'
 import { langOf, STRINGS } from '../hooks/strings'
 import type { ConnectTransaction, LegacyConnectRequest } from './connect-transaction'
-import { codexApproval, codexConfigHash } from './codex-approval'
+import { codexApproval } from './codex-approval'
 import type { CodexCheck } from './codex-approval'
 import { codexFallbackCommand, managedFallback } from '../hooks/codex-fallback'
 import { sha256 } from '../hooks/sha256'
@@ -25,6 +25,13 @@ export const connectLegacy = (transaction: ConnectTransaction, request: LegacyCo
   // A missing hooks.json has no hash, so the 0.23 upgrade path cannot remember an empty one.
   const codexBefore = existsSync(codexSource) ? readMaybe(codexSource) : null
   const beforeHash = codexBefore === null ? null : sha256(codexBefore)
+  const codexConfig = [codexHome, 'config.toml'].join(sep)
+  // Read through the transaction, because the plugin's tests load this file and allow it no
+  // node: imports. Null when there is no config.toml, undefined when it cannot be read.
+  const configHashViaTransaction = (): string | null | undefined => {
+    if (!existsSync(codexConfig)) return null
+    try { return sha256(readLocal(codexConfig)) } catch { return undefined }
+  }
   const grokHome = request.dirs?.grok ?? [home, '.grok'].join(sep)
   const hermesHome = request.dirs?.hermes ?? [home, '.hermes'].join(sep)
   const openclawHome = request.dirs?.openclaw ?? [home, '.openclaw'].join(sep)
@@ -259,7 +266,7 @@ export const connectLegacy = (transaction: ConnectTransaction, request: LegacyCo
     }
   }
   const codexCurrent = existsSync(codexSource) ? readMaybe(codexSource) : null
-  const decision = codexApproval(observation, codexSource, codexCurrent === null ? null : sha256(codexCurrent), codexConfigHash(codexHome), transaction.state.codexApproval, transaction.state.setup?.codexTrusted, beforeHash)
+  const decision = codexApproval(observation, codexSource, codexCurrent === null ? null : sha256(codexCurrent), configHashViaTransaction(), transaction.state.codexApproval, transaction.state.setup?.codexTrusted, beforeHash)
   let codexTrusted = decision.trusted
   if (remove || decision.approval === undefined) delete transaction.state.codexApproval
   else transaction.state.codexApproval = decision.approval
@@ -272,7 +279,7 @@ export const connectLegacy = (transaction: ConnectTransaction, request: LegacyCo
         const before = readLocal(file)
         // Instruction reads can yield to an external editor. Recheck source and
         // owned executables at each retirement, not only when the lock was taken.
-        if (codexTrusted && (decision.approval?.sourceHash !== sha256(readLocal(codexSource)) || decision.approval?.configHash !== codexConfigHash(codexHome))) {
+        if (codexTrusted && (decision.approval?.sourceHash !== sha256(readLocal(codexSource)) || decision.approval?.configHash !== configHashViaTransaction())) {
           codexTrusted = false
           warn('codex:approval', { message: 'setupCodexApproval', args: [] })
         }
