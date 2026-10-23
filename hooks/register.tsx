@@ -2330,7 +2330,15 @@ const drainInbox = async ($: EngineInterface): Promise<void> => {
     for (const all of bySession.values()) {
       // A different session may have taken the file while this job waited.
       const present: Taken[] = []
-      for (const one of all) if (await $.fs.exists(one.path)) present.push(one)
+      for (const one of all) {
+        try {
+          if (await $.fs.exists(one.path)) present.push(one)
+        } catch (error) {
+          const reason = inboxFailure(error)
+          failed[one.name] = `${one.attempt}:${at}:${reason}`
+          await inboxNotice($, one.path, reason)
+        }
+      }
       // A held turn's retake is its last try, a fresh turn beside it is not: each run of retakes
       // or of other turns is taken on its own, oldest first. A run that fails holds back newer ones,
       // unless a retake is among them: holding that back would use up its last try.
@@ -2342,13 +2350,13 @@ const drainInbox = async ($: EngineInterface): Promise<void> => {
       }
       for (const [index, group] of runs.entries()) {
         const isLastTry = group.some(one => one.attempt >= MAX_TRIES)
+        const home = ((await $.env.get('USERPROFILE')) ?? (await $.env.get('HOME')) ?? '').replace(/[\\/]+$/, '')
+        // Older turns never replace newer work, and old questions must not return to the ledger.
+        const questionless = new Set(group.flatMap(one => one.attempt > MAX_TRIES && one.turn != null && isQuestionStale(one.name, at) ? [one.turn] : []))
+        const tryingAt = await $.clock.now()
+        // The note only counts tries; a refused write must not stop the turn reaching the board.
+        await recordInbox($, [], Object.fromEntries(group.map(one => [one.name, `${one.attempt}:${tryingAt}:TRYING`])), tryingAt).catch(() => undefined)
         try {
-          const home = ((await $.env.get('USERPROFILE')) ?? (await $.env.get('HOME')) ?? '').replace(/[\\/]+$/, '')
-          // Older turns never replace newer work, and old questions must not return to the ledger.
-          const questionless = new Set(group.flatMap(one => one.attempt > MAX_TRIES && one.turn != null && isQuestionStale(one.name, at) ? [one.turn] : []))
-          const tryingAt = await $.clock.now()
-          // The note only counts tries; a refused write must not stop the turn reaching the board.
-          await recordInbox($, [], Object.fromEntries(group.map(one => [one.name, `${one.attempt}:${tryingAt}:TRYING`])), tryingAt).catch(() => undefined)
           const newer = await takeAgentTurns($, group.flatMap(one => (one.turn === null || one.turn === undefined ? [] : [one.turn])), 0, isLastTry, questionless)
           const questions = peekInbox(group.flatMap(one => one.body === undefined || one.attempt > MAX_TRIES && (one.turn == null || !newer.includes(one.turn) || isQuestionStale(one.name, at)) ? [] : [{ name: one.name, body: one.body, at }]), () => '', text => redact(text, home, isWin)).filter(turn => turn.isQuestion)
           if (questions.length > 0) {
@@ -2383,7 +2391,7 @@ const drainInbox = async ($: EngineInterface): Promise<void> => {
   }).catch(async error => {
     await (async () => {
       const notes = await readInboxRecord($, 'inboxFailed')
-      const failed = Object.fromEntries(regular.filter(one => !wasInboxTried(notes[one.name], one.attempt)).map(one => [one.name, `${one.attempt}:${at}:${inboxFailure(error)}`]))
+      const failed = Object.fromEntries(regular.filter(one => new RegExp(`^${one.attempt}:-?\\d+:TRYING$`).test(notes[one.name] ?? '')).map(one => [one.name, `${one.attempt}:${at}:${inboxFailure(error)}`]))
       await recordInbox($, [], failed, at)
     })().catch(() => undefined)
     await inboxNotice($, taken[0]!.path, inboxFailure(error))

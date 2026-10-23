@@ -583,13 +583,15 @@ test('a non-string inbox read is noted as invalid and uses up its tries', { time
   expect(world.asked).toEqual([])
 })
 
-test('a job that fails before its group records each attempt and stops after its last try', { timeoutMs: 30_000 }, async ($, on) => {
+test('a file whose existence check fails records each attempt and stops after its last try', { timeoutMs: 30_000 }, async ($, on) => {
   const world = backlog(1)
   const name = nameOf(AT - 60_000, 0)
   const readPaths = new Set<string>()
+  let checks = 0
   world.beforeRead = path => { if (path.endsWith('.taking')) readPaths.add(path) }
   world.beforeExists = path => {
     if (!readPaths.delete(path)) return
+    checks += 1
     throw new Error('EIO')
   }
   const clock = engineBeneath(on, world)
@@ -599,6 +601,7 @@ test('a job that fails before its group records each attempt and stops after its
     world.mtime += 1
     await clock.advance(5000)
     expect((world.store!.inboxFailed as Record<string, string>)[name]).toBe(`${attempt}:${AT + attempt * 5000 + world.clockOffset!}:INBOX_FAILED`)
+    expect(checks).toBe(attempt)
   }
   world.clockOffset! += CLAIM_MS + 1
   world.mtime += 1
@@ -606,6 +609,41 @@ test('a job that fails before its group records each attempt and stops after its
   expect(world.files.has(`${INBOX}/${name}.failed`)).toBe(true)
   expect(takenOf(world)).toEqual([])
   expect(world.asked).toEqual([])
+})
+
+test('a failing existence check for one conversation neither sets aside nor holds up another conversation\'s untried claim', { timeoutMs: 30_000 }, async ($, on) => {
+  const world = backlog(1)
+  const first = nameOf(AT - 60_000, 0)
+  const next = nameOf(AT - 59_000, 1)
+  world.files.set(`${INBOX}/${takenName(next, 'closed', AT - CLAIM_MS - 1, MAX_TRIES)}`, body('untried-work'))
+  const readPaths = new Set<string>()
+  const notesBeforeTry: Array<string | undefined> = []
+  const writtenNotes: Array<string | undefined> = []
+  world.beforeRead = path => { if (path.endsWith('.taking')) readPaths.add(path) }
+  world.beforeExists = path => {
+    if (!readPaths.delete(path)) return
+    if (path.includes(first)) throw new Error('EIO')
+    if (path.includes(next)) notesBeforeTry.push((world.store!.inboxFailed as Record<string, string> | undefined)?.[next])
+  }
+  world.afterStoreSet = (key, value) => {
+    if (key === 'inboxFailed') writtenNotes.push((value as Record<string, string>)[next])
+  }
+  const clock = engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/persona_framework', surface: 'desktop', isInteractive: true })
+  await clock.advance(5000)
+  expect(notesBeforeTry).toEqual([undefined])
+  expect(writtenNotes.filter(note => note !== undefined)).toEqual([`${MAX_TRIES}:${AT + 5000}:TRYING`])
+  expect((world.store!.inboxFailed as Record<string, string>)[first]).toBe(`1:${AT + 5000}:INBOX_FAILED`)
+  expect((world.store!.inboxDone as Record<string, string>)[next]).toBeDefined()
+  expect(failedOf(world)).toEqual([])
+  expect(world.asked!.filter(prompt => prompt.includes('untried-work'))).toHaveLength(1)
+  expect((world.files.get(FILE) ?? '').match(/## untried-work\n/g)).toHaveLength(1)
+  world.clockOffset! += CLAIM_MS + 1
+  world.mtime += 1
+  await clock.advance(5000)
+  expect(failedOf(world)).toEqual([])
+  expect(world.asked!.filter(prompt => prompt.includes('untried-work'))).toHaveLength(1)
+  expect((world.files.get(FILE) ?? '').match(/## untried-work\n/g)).toHaveLength(1)
 })
 
 test('a prompt whose existence check fails is noted and does not stop the turns taken with it', { timeoutMs: 30_000 }, async ($, on) => {
