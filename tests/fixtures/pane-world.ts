@@ -38,11 +38,18 @@ export type World = {
   hasTasks: boolean
   isArchiveClockOnly?: boolean
   at?: number
+  clockOffset?: number
+  isInboxClockOnly?: boolean
+  inboxLookMs?: number
+  completeDelayMs?: number
+  completeDue?: (at: number) => void
   env?: Record<string, string>
   stats?: string[]
   reads?: string[]
   written?: string[]
   beforeRead?: (path: string) => void
+  readValue?: (path: string) => unknown
+  beforeExists?: (path: string) => void
   mtimes?: Record<string, number>
   unreadable?: Set<string>
   hold?: { reached: () => void; release: Promise<void> }
@@ -56,6 +63,7 @@ export type World = {
   gh?: () => { exitCode: number; stdout: string; stderr: string }
   isMoveRefused?: (path: string) => boolean
   isRemoveRefused?: (path: string) => boolean
+  failNextRemove?: boolean
   hang?: (prompt: string) => boolean
   holdComplete?: { reached: () => void; release: Promise<void> }
   asked?: string[]
@@ -75,6 +83,7 @@ export type World = {
   failQuestionCapture?: 'read' | 'write'
   failStore?: (operation: 'get' | 'set', key: string) => boolean
   beforeStoreSet?: (key: string) => void
+  afterStoreSet?: (key: string, value: unknown) => void
   ignoreStore?: (key: string) => boolean
   afterMove?: (from: string, to: string) => boolean
   unremovable?: Set<string>
@@ -93,6 +102,14 @@ const posix = (path: string): string => path.replace(/^[A-Za-z]:\\/, '/').replac
 let workerStageSequence = 0
 
 export const engineBeneath = (on: On, world: World): MockClock => {
+  let modelNow = world.at ?? Date.parse('2026-10-16T12:00:00.000Z')
+  const delayed: Array<{ at: number; finish: () => void }> = []
+  if (world.completeDelayMs !== undefined) world.completeDue = at => {
+    for (const one of delayed.filter(one => one.at <= at)) {
+      delayed.splice(delayed.indexOf(one), 1)
+      one.finish()
+    }
+  }
   const files = world.files
   Object.defineProperty(files, 'set', { configurable: true, writable: true, value: (path: string, text: string) => {
     Map.prototype.set.call(files, path, text)
@@ -100,10 +117,19 @@ export const engineBeneath = (on: On, world: World): MockClock => {
     return files
   } })
   world.setupDone = new Promise<void>(done => { world.finishSetup = done })
-  const clockOn = world.isArchiveClockOnly ? ((...args: Parameters<On>) => {
-    if (args[0] !== 'clock.every') return Reflect.apply(on, undefined, args)
+  const clockOn = world.isArchiveClockOnly || world.isInboxClockOnly || world.completeDelayMs !== undefined || world.clockOffset !== undefined ? ((...args: Parameters<On>) => {
     const callback = args.at(-1)
     if (typeof callback !== 'function') throw new Error('Invalid clock fixture')
+    // Move the claim clock without running fifteen minutes of unrelated timers.
+    if (args[0] === 'clock.now' && (world.clockOffset !== undefined || world.completeDelayMs !== undefined)) return on('clock.now', async ($, event, next) => {
+      const result = await Reflect.apply(callback, undefined, [$, event, next])
+      modelNow = result.value + (world.clockOffset ?? 0)
+      return { ...result, value: modelNow }
+    })
+    // An answer at the deadline wins the tie in delayed-answer tests.
+    if (args[0] === 'clock.after' && world.completeDelayMs !== undefined) return on('clock.after', ($, event, next) => Reflect.apply(callback, undefined, [$, { ...event, ms: event.ms === world.completeDelayMs ? event.ms + 1 : event.ms }, next]))
+    if (args[0] === 'clock.every' && world.isInboxClockOnly) return on('clock.every', ($, event, next) => Reflect.apply(callback, undefined, [$, { ...event, ms: event.ms === 5000 ? world.inboxLookMs ?? 5000 : 24 * 60 * 60 * 1000 }, next]))
+    if (args[0] !== 'clock.every' || !world.isArchiveClockOnly) return Reflect.apply(on, undefined, args)
     return on('clock.every', ($, event, next) => Reflect.apply(callback, undefined, [$, { ...event, ms: event.ms === 3600000 ? event.ms : 7200000 }, next]))
   }) as On : on
   const clock = mock.clock(clockOn, { now: world.at ?? Date.parse('2026-10-16T12:00:00.000Z') })
@@ -120,6 +146,7 @@ export const engineBeneath = (on: On, world: World): MockClock => {
       if (world.failStore?.('set', e.key)) return { deny: 'EIO' }
       if (world.ignoreStore?.(e.key)) return { value: undefined }
       store[e.key] = e.value
+      world.afterStoreSet?.(e.key, e.value)
       return { value: undefined }
     })
     on('store.delete', ($, e) => { delete store[e.key]; return { value: undefined } })
@@ -214,6 +241,10 @@ export const engineBeneath = (on: On, world: World): MockClock => {
     }
     if (e.argv[0] === 'mv' || e.argv[0] === 'rm') {
       world.ran?.push([...e.argv])
+      if (e.argv[0] === 'rm' && world.failNextRemove) {
+        world.failNextRemove = false
+        return { value: { exitCode: 1, stdout: '', stderr: 'EACCES', isStdoutTruncated: false, isStderrTruncated: false } }
+      }
       let exitCode = 0
       if (e.argv[0] === 'mv') {
         const rest = e.argv.slice(e.argv[1] === '-n' || e.argv[1] === '-f' ? 2 : 1)
@@ -272,6 +303,9 @@ export const engineBeneath = (on: On, world: World): MockClock => {
       hold.reached()
       return hold.release.then(() => answerOf(prompt))
     }
+    if (world.completeDelayMs !== undefined) return new Promise(resolve => {
+      delayed.push({ at: modelNow + world.completeDelayMs!, finish: () => resolve(answerOf(prompt)) })
+    })
     return world.hang?.(prompt) === true ? new Promise<never>(() => undefined) : answerOf(prompt)
   })
   on('fs.stat', ($, e) => {
@@ -285,7 +319,10 @@ export const engineBeneath = (on: On, world: World): MockClock => {
       ? { deny: 'ENOENT' }
       : { value: { kind: 'file' as const, size: text.length, mtimeMs, isLink: false } }
   })
-  on('fs.exists', ($, e) => ({ value: world.dirs?.has(posix(e.path)) || world.files.has(posix(e.path)) || [...world.files.keys()].some(path => path.startsWith(`${posix(e.path)}/`)) }))
+  on('fs.exists', ($, e) => {
+    world.beforeExists?.(posix(e.path))
+    return { value: world.dirs?.has(posix(e.path)) || world.files.has(posix(e.path)) || [...world.files.keys()].some(path => path.startsWith(`${posix(e.path)}/`)) }
+  })
   on('fs.list', ($, e) => {
     if (world.unlistable?.has(posix(e.path ?? ''))) return { deny: 'EACCES' }
     const dir = `${posix(e.path ?? '').replace(/\/$/, '')}/`
@@ -307,6 +344,7 @@ export const engineBeneath = (on: On, world: World): MockClock => {
     }
     const text = world.files.get(path)
     if (world.unreadable?.has(path) || (world.failQuestionCapture === 'read' && path.includes('-questions-source-'))) return { deny: 'EFBIG' }
+    if (world.readValue !== undefined && path.endsWith('.taking')) return { value: world.readValue(path) as string }
     return text === undefined ? { deny: 'ENOENT' } : { value: text }
   })
   on('fs.write', async ($, e) => {
