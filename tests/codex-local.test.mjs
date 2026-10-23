@@ -494,7 +494,10 @@ test('a reporter that hangs is cut at its timeout and the host hook exits 0', ()
   }
 }))
 
-test('L5 busy machine: Antigravity and Codex hooks apply or queue every event with all but one CPU busy', t => fixture(async f => {
+// The busy loops took all but one core of a 16-thread desktop, and overlapping local runs froze it (#241), so this
+// test runs only in CI or when AGENT_BOARD_HEAVY_TESTS=1 asks for it.
+const isHeavyRun = Boolean(process.env.CI) || process.env.AGENT_BOARD_HEAVY_TESTS === '1'
+test('L5 busy machine: Antigravity and Codex hooks apply or queue every event with all but one CPU busy', { skip: isHeavyRun ? false : 'keeps up to 3 CPUs busy; runs in CI, or locally with AGENT_BOARD_HEAVY_TESTS=1' }, t => fixture(async f => {
   assert.equal(f.install('--apply').status, 0)
   assert.equal(f.install('--agent', 'antigravity', '--apply').status, 0)
   // Records when each hook's worker started, and the PowerShell start that Antigravity's Windows wrapper
@@ -508,7 +511,8 @@ if (basename(process.argv[1] || '') === 'agent-board-hook.mjs') {
 `)
   // One core stays free and the loops run below normal priority: the machine is busy, but neither the hook
   // nor the other test files that `node --test` runs at the same time go without CPU before the host's 3 s stop.
-  const busyCount = Math.max(1, availableParallelism() - 1)
+  // At most 3 loops: all but one core of a 4-vCPU CI runner, as before.
+  const busyCount = Math.max(1, Math.min(availableParallelism() - 1, 3))
   let priority = 'below normal priority'
   const busy = []
   const records = []
