@@ -56,6 +56,7 @@ export type World = {
   gh?: () => { exitCode: number; stdout: string; stderr: string }
   isMoveRefused?: (path: string) => boolean
   isRemoveRefused?: (path: string) => boolean
+  missingRemoveExitCode?: number
   hang?: (prompt: string) => boolean
   holdComplete?: { reached: () => void; release: Promise<void> }
   asked?: string[]
@@ -226,7 +227,10 @@ export const engineBeneath = (on: On, world: World): MockClock => {
       let exitCode = 0
       for (const path of paths) {
         if (!world.files.has(path)) {
-          if (!isStop) continue
+          if (!isStop) {
+            exitCode = world.missingRemoveExitCode ?? exitCode
+            continue
+          }
           exitCode = 1
           break
         }

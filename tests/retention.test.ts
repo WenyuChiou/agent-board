@@ -88,7 +88,7 @@ test('hint and done marks keep their 30 days, a broken record counts as old, and
   expect(isExpiredRecord('pendingInboxQuestion:synthetic', { at: NOW - 2 * DAY }, NOW, BOARD)).toBe(false)
   expect(isExpiredRecord('pendingInboxQuestion:synthetic', { at: NOW - 259200000 - 1 }, NOW, BOARD)).toBe(true)
   expect(isExpiredRecord('mirror:synthetic-4', 'not a mirror', NOW, BOARD)).toBe(true)
-  for (const key of ['closedByPerson', 'lang', 'told', 'inboxDone', 'completion:synthetic', 'agentPrompt:synthetic:1:2', 'pendingJournal:synthetic', 'generated:/synthetic/file']) {
+  for (const key of ['storeId', 'closedByPerson', 'lang', 'told', 'inboxDone', 'completion:synthetic', 'agentPrompt:synthetic:1:2', 'pendingJournal:synthetic', 'generated:/synthetic/file']) {
     expect(isExpiredRecord(key, { updated: 0, at: 0 }, NOW, BOARD)).toBe(false)
   }
 })
@@ -258,6 +258,23 @@ test('a store at or over 1572864 bytes loses its oldest ended agent and mirror r
   expect(overCapKeys(records, never, 1572863, BOARD)).toEqual([])
   // Records that are not the cap's to take are never named.
   expect(overCapKeys([{ key: 'told', value: padded('ended', NOW - 9 * DAY, false) }, { key: 'hinted:0a0a0a01', value: padded('ended', NOW - 9 * DAY, false) }], never, 4000000, BOARD)).toEqual([])
+})
+
+test('the store cap removes only as many CJK records as bring the file under the cap', () => {
+  const records = [1, 2, 3].map(n => ({
+    key: `agent:0000000${n}`,
+    value: { ...record('ended', NOW - (4 - n) * HOUR, false), tasks: [{ subject: '合成步驟'.repeat(100), status: 'completed' }] },
+  }))
+  const first = records[0]!
+  const second = records[1]!
+  const encoder = new TextEncoder()
+  const object = { [first.key]: first.value, [second.key]: second.value }
+  const text = JSON.stringify(object, null, 2)
+  const nextEntry = text.indexOf(`  "${second.key}"`)
+  expect(recordBytes(first.key, first.value)).toBe(encoder.encode(text.slice(2, nextEntry)).length)
+  const each = recordBytes(first.key, first.value)
+  const size = 1572864 + each + Math.floor(each / 2)
+  expect(overCapKeys([...records].reverse(), () => false, size, BOARD)).toEqual([first.key, second.key])
 })
 
 test('a record on the board and a mirror with open steps of a session on the board stay when the store stays over the cap', () => {

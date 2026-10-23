@@ -119,8 +119,8 @@ import {
 } from './inbox'
 import type { AgentTurn } from './inbox'
 import { keepRecent, liveToldKeys, remindersOf } from './remind'
-import { addPruned, boardRecords, boardTag, companionKeys, countPruned, currentPart, doneRecord, inboxDropped, isExpiredRecord, isSameWrite, monthParts, overCapKeys, pruneBatch, prunedNote, prunedSince, prunedTotal, readMonthParts, RETENTION, sizeWarnings, staleFailedInbox, staleInboxTemps, staleStoreTemps, storeBytes, unseenFailedInbox } from './retention'
-import type { StoreRecord } from './retention'
+import { addPruned, boardRecords, boardTag, companionKeys, countPruned, currentPart, doneRecord, inboxDropped, isExpiredRecord, isSameWrite, monthParts, overCapKeys, pruneBatch, prunedNote, prunedSince, prunedTotal, readMonthParts, RETENTION, sizeWarnings, staleFailedInbox, staleInboxTemps, staleStoreTemps, storeBytes, STORE_FILE, unseenFailedInbox } from './retention'
+import type { ListedFile, StoreRecord } from './retention'
 import { INBOX_DROPPED_FILE } from './hook-reporters'
 import { agentName, answeredJson, answeredPath, buildView, mirrorMatchesTask, parseAnswered, parseSeen, seenJson, seenPath, statusLine, viewCache, withAnswered, withSeen } from './view'
 import type { StepRef, TaskRef, TaskRow, View, WaitingItem } from './view'
@@ -286,14 +286,15 @@ const sepOf = (path: string): string => (path.includes('\\') ? '\\' : '/')
 
 // The engine's file calls cannot rename or delete; the system's own commands do. A file another
 // session already removed must not stop the rest of the batch (Remove-Item would stop at it with
-// -ErrorAction Stop), so errors are let pass and the look at the files afterwards says what went.
+// -ErrorAction Stop). Windows ignores the command's exit code, including a missing path's error;
+// the look at the files afterwards says what went. POSIX still checks rm -f's exit code.
 const removeFiles = async ($: EngineInterface, files: readonly string[], isWin: boolean): Promise<boolean> => {
   if (files.length === 0) return true
   const argv = isWin
-    ? ['powershell', '-NoProfile', '-Command', `Remove-Item -Force -LiteralPath ${files.map(psQuote).join(',')} -ErrorAction SilentlyContinue`]
+    ? ['powershell', '-NoProfile', '-Command', `Remove-Item -Force -LiteralPath ${files.map(psQuote).join(',')} -ErrorAction SilentlyContinue; exit 0`]
     : ['rm', '-f', ...files]
   const ran = await $.process.run(argv, { timeoutMs: 10000 }).catch(() => null)
-  if (ran === null || ran.exitCode !== 0) return false
+  if (ran === null || (!isWin && ran.exitCode !== 0)) return false
   for (const file of files) if (await $.fs.exists(file)) return false
 
   return true
@@ -2469,6 +2470,10 @@ const archiveOld = async ($: EngineInterface, isNow = false): Promise<number> =>
   if (keys.size > 0) {
     await update($, doneSeen, old => Object.fromEntries(Object.entries(old).filter(([key]) => !keys.has(key))))
     await saveDoneSeen($, at, kept => Object.fromEntries(Object.entries(kept).filter(([key]) => !keys.has(key))))
+    // A 0.23.x session may have written the task's own `done:` key meanwhile: it goes too, or the
+    // next start would move it back into doneSeen (loadDoneSeen).
+    const stored = new Set(await $.store.keys().catch(() => []))
+    for (const key of keys) if (stored.has(key)) await $.store.delete(key).catch(() => undefined)
   }
   await pruneQuestionFiles($, path).catch(() => undefined)
   await poll($)
@@ -2526,6 +2531,7 @@ const archiveOne = async ($: EngineInterface, ref: TaskRef): Promise<boolean> =>
     const key = doneKey(ref.project, ref.title)
     await update($, doneSeen, old => Object.fromEntries(Object.entries(old).filter(([one]) => one !== key)))
     await saveDoneSeen($, at, kept => Object.fromEntries(Object.entries(kept).filter(([one]) => one !== key)))
+    if ((await $.store.keys().catch(() => [])).includes(key)) await $.store.delete(key).catch(() => undefined)
   }
   await poll($)
 
@@ -2618,11 +2624,11 @@ const remindNow = async ($: EngineInterface): Promise<void> => {
   const fresh = remindersOf(view, told, at, localDay(at), s)
   const isSeeding = !isReminderSeeded
   isReminderSeeded = true
-  if (fresh.length === 0) return
   // Both keys: the one 0.23.x sessions look for is written too (remind.ts, until 0.25).
   const keys = fresh.flatMap(one => [one.key, ...(one.oldKey === undefined ? [] : [one.oldKey])])
   const next = keepRecent({ ...told, ...Object.fromEntries(keys.map((key): [string, number] => [key, at])) }, at, liveToldKeys(view))
-  await $.store.set('told', next)
+  if (Object.keys(next).length !== Object.keys(told).length || Object.entries(next).some(([key, value]) => !Object.hasOwn(told, key) || told[key] !== value)) await $.store.set('told', next)
+  if (fresh.length === 0) return
   if (isSeeding && Object.keys(told).length === 0) return
   for (const one of fresh) {
     if (isSeeding && one.kind === 'ask') continue
@@ -2658,10 +2664,11 @@ const othersNote = async ($: EngineInterface): Promise<string | null> => {
 }
 
 // Keeps the store to what the board still needs (retention.ts, #373). A pass reads at most
-// RETENTION.pruneReads values, the next ones in name order after where the last pass stopped, so
-// a session start costs the same on a store of any size; the walk point is in the store, so every
-// session moves the same walk on. Only a key that can age is read: the large values (the board
-// script's copy, the reminders told) were read in full at every start for nothing (#371).
+// its batch size (RETENTION.pruneStartReads at start, pruneReads hourly), in name order after where
+// the last pass stopped. A session start costs the same on a store of any size; the walk point is
+// in the store, so every session moves the same walk on. Only a key that can age is read: the
+// large values (the board script's copy, the reminders told) were read in full at every start
+// for nothing (#371).
 // `passes`: the hourly sweep goes further along the walk than a start does. A record whose block
 // is still on the board is kept (boardRecords). Only a settled board says which blocks are gone:
 // with no board read (missing, unreadable, empty, or cut short, which hides the blocks after the
@@ -2675,7 +2682,7 @@ const othersNote = async ($: EngineInterface): Promise<string | null> => {
 // (boardTag) allows the shorter lives and the cap. Each key is read again right before
 // it is deleted (removeRecord), and a record written since the read stays; the keys that belong
 // to a record (companionKeys) go with it.
-const pruneStore = async ($: EngineInterface, at: number, passes = 1): Promise<void> => {
+const pruneStore = async ($: EngineInterface, at: number, passes = 1, batchSize: number = RETENTION.pruneReads): Promise<void> => {
   const keys = await $.store.keys()
   await dropGeneratedSeed($, keys)
   const board = await read($, snapshot)
@@ -2693,7 +2700,7 @@ const pruneStore = async ($: EngineInterface, at: number, passes = 1): Promise<v
     let after = typeof stored === 'string' ? stored : ''
     let isStopped = false
     for (let pass = 0; pass < passes; pass += 1) {
-      const { batch, next } = pruneBatch(keys, after)
+      const { batch, next } = pruneBatch(keys, after, batchSize)
       const expired: StoreRecord[] = []
       for (const key of batch) {
         if (isOnBoard(key)) continue
@@ -2721,6 +2728,35 @@ const pruneStore = async ($: EngineInterface, at: number, passes = 1): Promise<v
 const PRUNE_AFTER = 'pruneAfter'
 const STORE_CAP_HELD = 'storeCapHeld'
 
+// A development copy has its own store beside the installed copy. Only read the files when a
+// large one makes their identity matter; a saved id identifies our plain JSON file thereafter.
+let ownStoreFile: string | null = null
+let ownStoreMiss: { names: string; at: number } | null = null
+const ownStoreBytes = async ($: EngineInterface, listing?: readonly ListedFile[]): Promise<number | null> => {
+  const directory = await storeDir($)
+  const entries = listing ?? await $.fs.list(directory).catch(() => [])
+  const files = entries.filter(entry => entry.kind === 'file' && STORE_FILE.test(entry.name))
+  if (files.length <= 1 || files.every(entry => entry.size <= RETENTION.storeWarnBytes)) return storeBytes(files)
+  const cached = files.find(entry => entry.name === ownStoreFile)
+  if (cached !== undefined) return cached.size
+  const names = files.map(entry => entry.name).sort().join('\n')
+  const at = await $.clock.now()
+  if (ownStoreMiss?.names === names && at >= ownStoreMiss.at && at - ownStoreMiss.at < 60 * 60 * 1000) return null
+  const saved = await $.store.get('storeId').catch(() => undefined)
+  const id = typeof saved === 'string' && /^[0-9a-f]{16}$/.test(saved) ? saved : Array.from({ length: 16 }, () => Math.floor(Math.random() * 16).toString(16)).join('')
+  if (id !== saved) await $.store.set('storeId', id).catch(() => undefined)
+  for (const entry of files) {
+    const text = await $.fs.read(`${directory}${sepOf(directory)}${entry.name}`).catch(() => '')
+    if (!text.includes(id)) continue
+    ownStoreFile = entry.name
+    ownStoreMiss = null
+    return entry.size
+  }
+  ownStoreMiss = { names, at: await $.clock.now() }
+
+  return null
+}
+
 // One record and the keys that belong to it, removed unless the record was written again since the
 // prune read it (its `updated` is no longer the one it chose). True when it was removed.
 const removeRecord = async ($: EngineInterface, chosen: StoreRecord, keys: readonly string[]): Promise<boolean> => {
@@ -2745,7 +2781,8 @@ const capStore = async (
   tag: string,
   at: number,
 ): Promise<string[]> => {
-  const size = storeBytes(await $.fs.list(await storeDir($)).catch(() => []))
+  const size = await ownStoreBytes($)
+  if (size === null) return []
   if (size < RETENTION.storeCapBytes) {
     if (keys.includes(STORE_CAP_HELD)) await $.store.delete(STORE_CAP_HELD).catch(() => undefined)
     return []
@@ -2773,7 +2810,8 @@ const capStore = async (
     // The keys removed so far are still counted.
   }
   // A full pass that cannot bring the store under the cap waits six hours before reading it all again.
-  const left = storeBytes(await $.fs.list(await storeDir($)).catch(() => []))
+  const left = await ownStoreBytes($)
+  if (left === null) return gone
   if (left >= RETENTION.storeCapBytes && isTried) await $.store.set(STORE_CAP_HELD, { at }).catch(() => undefined)
   else if (left < RETENTION.storeCapBytes && keys.includes(STORE_CAP_HELD)) await $.store.delete(STORE_CAP_HELD).catch(() => undefined)
 
@@ -2826,7 +2864,7 @@ const sweepFiles = async ($: EngineInterface): Promise<void> => {
   const isWin = await isWindows($, path)
   const store = await storeDir($)
   const kept = await $.fs.list(store).catch(() => [])
-  measuredStore = storeBytes(kept)
+  measuredStore = (await ownStoreBytes($, kept)) ?? 0
   await refreshPruned($, at)
   const inbox = inboxPath(path)
   // The record is read before the listing, so every name in it was set aside before the look.
@@ -3057,7 +3095,7 @@ export const register: Register = (on, options) => {
     await retainInboxQuestions($, [], true).catch(async () => pendingQuestionsProblem($, true)).catch(() => undefined)
     const startedAt = await $.clock.now()
     await update($, now, () => startedAt)
-    await pruneStore($, startedAt).catch(() => undefined)
+    await pruneStore($, startedAt, 1, RETENTION.pruneStartReads).catch(() => undefined)
     await refreshPruned($, startedAt)
     // Work left running past a dispatch can outlive the module (a reload, the end): its
     // rejections are dropped rather than left unhandled.

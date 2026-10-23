@@ -189,7 +189,15 @@ if [ "$sweep_status" -ne 0 ] && { [ -z "$sweep_errors" ] || printf '%s\\n' "$swe
 # Only *.json turn files, each removal counted in ${INBOX_DROPPED_FILE}: a taken or failed file stays.
 drop_turns() {
   drop_n=0
-  while read -r drop_entry; do rm "$drop_entry" && drop_n=$((drop_n + 1)); done
+  drop_failed=''
+  while read -r drop_entry; do
+    if drop_error=$(LC_ALL=C rm "$drop_entry" 2>&1); then
+      drop_n=$((drop_n + 1))
+    else
+      case "$drop_error" in *'No such file or directory'*) ;; *) drop_failed=1 ;; esac
+    fi
+  done
+  [ -z "$drop_failed" ] || log_error CLEANUP_FAILED
   [ "$drop_n" -gt 0 ] || return 0
   drop_log="$dir/${INBOX_DROPPED_FILE}"; drop_aside="$drop_log.$$"
   printf '%s %s %s\\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$drop_n" "$1" >> "$drop_log"
@@ -412,7 +420,12 @@ try {
     $droppedLog = Join-Path $dir '${INBOX_DROPPED_FILE}'
     function Remove-Turns([object[]]$Old, [string]$Reason) {
       $count = 0
-      foreach ($turn in $Old) { try { Remove-Item -LiteralPath $turn.FullName -Force -ErrorAction Stop; $count++ } catch {} }
+      $cleanupFailed = $false
+      foreach ($turn in $Old) {
+        try { Remove-Item -LiteralPath $turn.FullName -Force -ErrorAction Stop; $count++ }
+        catch { if ($_.CategoryInfo.Category -ne 'ObjectNotFound' -and $_.Exception -isnot [System.Management.Automation.ItemNotFoundException]) { $cleanupFailed = $true } }
+      }
+      if ($cleanupFailed) { Write-HookError 'CLEANUP_FAILED' }
       if ($count -eq 0) { return }
       $line = ('{0} {1} {2}' -f [DateTime]::UtcNow.ToString('yyyy-MM-dd\\THH:mm:ss\\Z', [Globalization.CultureInfo]::InvariantCulture), $count, $Reason) + [char]10
       # Another reporter adding its line holds the file for a moment: try again.

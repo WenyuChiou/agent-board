@@ -3,7 +3,7 @@ import { expect, test } from 'claude-code/testing'
 import type { Engine } from 'claude-code/testing'
 import type { ProgressMirror } from '../types'
 import { completionPrefix, emptyMirror } from '../hooks/mirror'
-import { boardTag, inboxDropped, isPrunableKey } from '../hooks/retention'
+import { boardTag, inboxDropped, isPrunableKey, recordBytes } from '../hooks/retention'
 import { EN } from '../hooks/strings-en'
 import { engineBeneath, FILE, INBOX, PANE, PROPS } from './fixtures/pane-world'
 import type { World } from './fixtures/pane-world'
@@ -59,6 +59,8 @@ type StartReads = { total: number; pruned: number; keys: number; boardBytes: num
 
 const startReads = async ($: Engine, on: On, k: number): Promise<StartReads> => {
   const world = scaled(k)
+  const expired = Array.from({ length: 10 }, (_, n) => `agent:${n.toString(16).padStart(8, '0')}`)
+  for (const key of expired) (world.store as Record<string, unknown>)[key] = record(key.slice(6), 'ended', BIG_AT - 4 * DAY, false)
   const reads: string[] = []
   world.storeReads = reads
   world.reads = []
@@ -67,6 +69,7 @@ const startReads = async ($: Engine, on: On, k: number): Promise<StartReads> => 
   const clock = engineBeneath(on, world)
   await $.session.start({ cwd: '/work/project-3', surface: 'desktop', isInteractive: true })
   await clock.advance(1)
+  for (const key of expired) expect(world.store?.[key]).toBeUndefined()
   return {
     total: reads.length,
     pruned: reads.filter(key => isPrunableKey(key) || key === 'pruneAfter').length,
@@ -76,7 +79,8 @@ const startReads = async ($: Engine, on: On, k: number): Promise<StartReads> => 
     inboxBytes: inbox.reduce((sum, [, text]) => sum + text.length, 0),
     fileReads: world.reads.length,
     boardReads: world.reads.filter(path => path === FILE).length,
-    inboxReads: world.reads.filter(path => path.startsWith(`${INBOX}/`)).length,
+    // Turn files only: dropped.log is the cleared count's small file, read again after a prune.
+    inboxReads: world.reads.filter(path => path.startsWith(`${INBOX}/`) && !path.endsWith('/dropped.log')).length,
   }
 }
 
@@ -87,11 +91,11 @@ for (const k of [1, 4]) {
     const seen = await startReads($, on, k)
     counts.set(k, seen)
     expect(seen.pruned).toBeLessThanOrEqual(25)
-    expect(seen.pruned).toBeGreaterThanOrEqual(20)
-    // 736 is the 1x inbox; 10 bounds the start's board polls, and 800 leaves 64 reads for the board and other files.
+    expect(seen.pruned).toBeGreaterThanOrEqual(11)
+    // The start reads 30 turn files at either scale, each once (the inbox cache); board polls stay within 10 reads.
     expect(seen.fileReads).toBeLessThanOrEqual(800)
     expect(seen.boardReads).toBeLessThanOrEqual(10)
-    expect(seen.inboxReads).toBeLessThanOrEqual(736)
+    expect(seen.inboxReads).toBeLessThanOrEqual(30)
   })
 }
 
@@ -108,6 +112,7 @@ test('four times the board, inbox and store keeps session start store reads fixe
   expect(four?.total).toBe(one?.total)
   expect(four?.boardReads ?? Infinity).toBeLessThanOrEqual(one?.boardReads ?? 0)
   expect(four?.inboxReads ?? Infinity).toBeLessThanOrEqual(one?.inboxReads ?? 0)
+  expect(four?.inboxReads ?? Infinity).toBeLessThanOrEqual(30)
 })
 
 test('after a walk over the store, ended and stale records are gone and every open record and question stays', { timeoutMs: 300000 }, async ($, on) => {
@@ -115,7 +120,7 @@ test('after a walk over the store, ended and stale records are gone and every op
   const store = world.store as Record<string, unknown>
   const at = BIG_AT
   store['agent:0e0e0e01'] = record('0e0e0e01', 'ended', at - 259200000 - HOUR, true)
-  store['agent:ffffffff'] = record('ffffffff', 'ended', at - 259200000 + HOUR, true)
+  store['agent:ffffffff'] = record('ffffffff', 'ended', at - 2 * DAY, true)
   store['agent:0e0e0e03'] = record('0e0e0e03', 'waiting', at - 29 * DAY, true)
   store['mirror:synthetic-open-29d'] = record('synthetic-open-29d', 'ended', at - 29 * DAY, true)
   store['mirror:synthetic-ended-8d'] = record('synthetic-ended-8d', 'ended', at - 8 * DAY, false)
@@ -147,7 +152,7 @@ test('after a walk over the store, ended and stale records are gone and every op
   // The board's own records of today are all kept.
   expect(Object.keys(store).filter(key => key.startsWith('agent:')).length).toBe(194 + 3)
   expect(Object.keys(store).filter(key => key.startsWith('mirror:')).length).toBeGreaterThanOrEqual(69 + 2)
-  // The 3,400 reminders told come down to the newest 500 at the first new reminder.
+  // The 3,400 reminders told come down to the newest 500 at the first reminder pass.
   expect(Object.keys(store.told as Record<string, number>).length).toBeLessThanOrEqual(500)
   // The copies of other agents' files go once the connect worker keeps its own record.
   expect(Object.keys(store).filter(key => key.startsWith('generated:'))).toEqual([])
@@ -492,6 +497,95 @@ const capStart = async ($: Engine, on: On, world: World): Promise<void> => {
   await clock.advance(1)
 }
 
+test("a store cap pass leaves this board's records when only another copy's store is over the cap", async ($, on) => {
+  const world = capWorld(100_000)
+  world.isArchiveClockOnly = true
+  const store = world.store as Record<string, unknown>
+  store.storeId = '0123456789abcdef'
+  world.files.delete(STORE_FILE)
+  world.files.set(`${STORE_DIR}/agent-board_inline-111111111111.json`, 'x'.repeat(1_600_000))
+  world.files.set(`${STORE_DIR}/agent-board_agent-board-222222222222.json`, JSON.stringify({ storeId: store.storeId }))
+  const clock = engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/other-project', surface: 'desktop', isInteractive: true })
+  await clock.advance(1)
+  const candidates = [OLD_MIRROR, 'agent:0d0d0d02', 'agent:0d0d0d03', 'agent:0d0d0d04']
+  for (const key of candidates) expect(store[key]).toBeDefined()
+  expect(store.storeCapHeld).toBeUndefined()
+  await clock.advance(HOUR)
+  for (const key of candidates) expect(store[key]).toBeDefined()
+  expect(store.storeCapHeld).toBeUndefined()
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
+  expect(await ui.find({ type: 'Text', text: EN.storeLarge('1.5', '1.5') })).toBeUndefined()
+  await ui.unmount()
+})
+
+test("the store cap measures this copy's store when two copies are there", async ($, on) => {
+  const size = 1_600_000
+  const world = capWorld(size)
+  const store = world.store as Record<string, unknown>
+  store.storeId = 'fedcba9876543210'
+  world.files.delete(STORE_FILE)
+  const own = JSON.stringify({ storeId: store.storeId })
+  world.files.set(`${STORE_DIR}/agent-board_agent-board-444444444444.json`, '{}')
+  world.files.set(`${STORE_DIR}/agent-board_inline-333333333333.json`, own + ' '.repeat(size - own.length))
+  const oldest = [OLD_MIRROR, 'agent:0d0d0d02', 'agent:0d0d0d03']
+  const freed = oldest.reduce((sum, key) => sum + recordBytes(key, store[key]), 0)
+  expect(size - freed).toBeLessThan(1_572_864)
+  expect(size - freed + recordBytes(oldest[2]!, store[oldest[2]!])).toBeGreaterThanOrEqual(1_572_864)
+  await capStart($, on, world)
+  for (const key of oldest) expect(store[key]).toBeUndefined()
+  expect(store['agent:0d0d0d04']).toBeDefined()
+  expect(store.prunedCounts).toEqual({ '2026-10-16': { agent: 2, mirror: 1 } })
+})
+
+test("the first start after the upgrade waits for the store id to reach the disk, then caps this copy's store", async ($, on) => {
+  const size = 1_600_000
+  const world = capWorld(size)
+  world.isArchiveClockOnly = true
+  world.reads = []
+  const store = world.store as Record<string, unknown>
+  const records = Object.keys(store).filter(key => key.startsWith('agent:') || key.startsWith('mirror:'))
+  const other = `${STORE_DIR}/agent-board_agent-board-555555555555.json`
+  const own = `${STORE_DIR}/agent-board_inline-666666666666.json`
+  world.files.delete(STORE_FILE)
+  world.files.set(other, 'x'.repeat(size))
+  world.files.set(own, 'x'.repeat(size))
+  const clock = engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/other-project', surface: 'desktop', isInteractive: true })
+  await clock.advance(1)
+  for (const key of records) expect(store[key]).toBeDefined()
+  expect(store.storeCapHeld).toBeUndefined()
+  expect(store.storeId).toMatch(/^[0-9a-f]{16}$/)
+  const reads = world.reads.filter(path => path.startsWith(`${STORE_DIR}/`))
+  expect(reads).toEqual([other, own])
+  const text = JSON.stringify({ storeId: store.storeId })
+  world.files.set(own, text + ' '.repeat(size - text.length))
+  await clock.advance(HOUR + 60_000)
+  for (const key of [OLD_MIRROR, 'agent:0d0d0d02', 'agent:0d0d0d03']) expect(store[key]).toBeUndefined()
+  expect(store['agent:0d0d0d04']).toBeDefined()
+  expect(store.prunedCounts).toEqual({ '2026-10-16': { agent: 2, mirror: 1 } })
+})
+
+test('an old reminder list is trimmed on a pass with nothing new to remind', async ($, on) => {
+  const told = Object.fromEntries(Array.from({ length: 600 }, (_, n) => [`synthetic-old-${n}`, AT - 4 * DAY - n]))
+  const world: World = {
+    files: new Map([[FILE, BOARD]]), mtime: 1, hasTasks: true,
+    store: { inboxDone: {}, autoConnectOff: true, told },
+  }
+  let writes = 0
+  world.beforeStoreSet = key => { if (key === 'told') writes += 1 }
+  const clock = engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/synthetic', surface: 'desktop', isInteractive: true })
+  await clock.advance(30_000)
+  const next = world.store?.told as Record<string, number>
+  expect(Object.keys(next).length).toBeLessThanOrEqual(500)
+  expect(Object.values(next).every(at => AT + 30_000 - at < 3 * DAY)).toBe(true)
+  expect(writes).toBe(1)
+  writes = 0
+  await clock.advance(30_000)
+  expect(writes).toBe(0)
+})
+
 test('a store over 1572864 bytes loses its oldest ended records off the board until it is under the cap, and the pane says how many', async ($, on) => {
   const world = capWorld(1_572_864 + 26_000)
   await capStart($, on, world)
@@ -804,6 +898,44 @@ test('a time that comes back for an archived task does not win over the new time
   expect((store.doneSeen as Record<string, number>)[key]).toBeGreaterThan(first ?? Infinity)
   expect(world.files.get(FILE)).toContain('### Synthetic weekly review')
 })
+
+for (const mode of ['tidy', 'single'] as const) {
+  test(`a ${mode} archive removes a legacy done key so a later done task of the same name waits its own day`, async ($, on) => {
+    const title = 'Synthetic weekly review'
+    const key = `done:synthetic-project::${title}`
+    const board = `## synthetic-project\n### ${title}\n- [x] Synthetic step\n`
+    // A row's own archive needs a row: with an open step the task is one under the other open work
+    // (a done one is only in the done section, whose button archives all of them at once).
+    const first = mode === 'tidy' ? board : `## synthetic-project\n### ${title}\n- [ ] Synthetic step\n`
+    const world: World = {
+      files: new Map([[FILE, first]]), mtime: 1, hasTasks: true,
+      isArchiveClockOnly: true,
+      store: { inboxDone: {}, autoConnectOff: true, lang: 'en', opened: ['others'] },
+    }
+    const store = world.store as Record<string, unknown>
+    const clock = engineBeneath(on, world)
+    await $.session.start({ cwd: '/work/synthetic', surface: 'desktop', isInteractive: true })
+    await clock.advance(1)
+    // A 0.23.x session writes its key after this session's start migrated legacy keys.
+    store[key] = AT - 2 * DAY
+    if (mode === 'tidy') await $.command.run({ command: 'progress', args: 'tidy', origin: { kind: 'composer' } })
+    else {
+      const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
+      await ui.press({ key: `synthetic-project::${title}` })
+      await ui.press({ key: `synthetic-project::${title}::archive` })
+      await ui.unmount()
+    }
+    expect(world.files.get(FILE)).not.toContain(`### ${title}`)
+    expect(store[key]).toBeUndefined()
+    expect((store.doneSeen as Record<string, number> | undefined)?.[key]).toBeUndefined()
+    world.files.set(FILE, board)
+    world.mtime += 1
+    await $.session.start({ cwd: '/work/synthetic', surface: 'desktop', isInteractive: true })
+    await clock.advance(HOUR)
+    expect(world.files.get(FILE)).toContain(`### ${title}`)
+    expect((store.doneSeen as Record<string, number>)[key]).toBeGreaterThanOrEqual(AT)
+  })
+}
 
 // An inbox file the drain gave up on (#373): kept a week from when it was set aside.
 const BROKEN = 'codex-turn-1792216380-10.json'

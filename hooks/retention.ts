@@ -35,6 +35,7 @@ export const RETENTION = {
   prunedDays: 7,
   // Values read per pass over the store, so a pass costs the same on a store of any size.
   pruneReads: 20,
+  pruneStartReads: 10,
 } as const
 
 const PRUNABLE = ['agent:', 'mirror:', 'hinted:', 'done:', 'pendingInboxQuestion:']
@@ -152,7 +153,7 @@ export type ListedFile = { name: string; kind: string; size: number; mtimeMs: nu
 
 // The temporary copy a store write leaves when it is cut off. Only this plugin's own store's.
 const STORE_TEMP = /^agent-board_.+\.json\.tmp\.[0-9a-z]+$/i
-const STORE_FILE = /^agent-board_.+\.json$/i
+export const STORE_FILE = /^agent-board_.+\.json$/i
 // An inbox file the drain gave up on: `<name>.failed`, then `.failed.1`, `.failed.2`, ...
 const FAILED = /\.failed(?:\.\d+)?$/
 
@@ -205,10 +206,9 @@ export const inboxDropped = (text: string, since: number): { age: number; cap: n
   return sums
 }
 
-// What one record adds to the store file: its key and its value as JSON, and the punctuation
-// around them. The file is measured as a whole, so this only has to be close; the next sweep
-// measures it again.
-export const recordBytes = (key: string, value: unknown): number => key.length + (JSON.stringify(value) ?? '').length + 4
+// One record's share of the indented UTF-8 store file: the entry, its comma and newline, without
+// the object's own braces. Nested indentation and characters wider than one byte count too.
+export const recordBytes = (key: string, value: unknown): number => new TextEncoder().encode(JSON.stringify({ [key]: value }, null, 2)).length - 2
 
 export type StoreRecord = { key: string; value: unknown }
 
@@ -296,8 +296,8 @@ export const prunedNote = (counts: Pruned & { turns: number }, s: Strings = ZH_T
   return parts.length === 0 ? null : s.prunedLine(s.prunedJoin(parts), RETENTION.prunedDays)
 }
 
-// The plugin's store file. A development copy of the plugin keeps a second one beside it, so the
-// largest is the one measured.
+// The largest matching store size, for a single copy or when every copy is below the warning.
+// With larger files beside it, the caller identifies this plugin's own file before measuring it.
 export const storeBytes = (entries: readonly ListedFile[]): number =>
   Math.max(0, ...entries.filter(entry => entry.kind === 'file' && STORE_FILE.test(entry.name)).map(entry => entry.size))
 
