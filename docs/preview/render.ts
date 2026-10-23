@@ -4,6 +4,7 @@
 //   bun docs/preview/render.ts cover-en (only the files whose names start with cover-en)
 // Writes docs/images/{tour,flow,promo}-<lang>.svg, docs/images/board/<agent>-<lang>-<light|dark>.svg,
 // docs/images/cover-<lang>-<light|dark>.svg (the README's animated cover), docs/images/agents/<agent>.svg,
+// docs/images/agents/chip-<agent>.svg (the README's Integrations strip; `bun docs/preview/render.ts chip-`),
 // and docs/preview/out/dashboard-<lang>.html for
 // docs/preview/png.mjs, which takes the progress.html screenshots and the social preview.
 import { mkdirSync, readdirSync, writeFileSync } from 'fs'
@@ -1434,6 +1435,38 @@ if (named !== undefined && !hasFontTools(named)) throw new Error(`PYTHON is ${na
 const python = named ?? ['python3', 'python'].find(hasFontTools)
 if (python === undefined) throw new Error('docs/preview/fonts.py needs Python 3 with fontTools 4.60 or newer: pip install "fonttools>=4.60" brotli (or set PYTHON)')
 
+// The README's Integrations strip: one chip per agent, its tile and its name in one picture.
+// GitHub breaks a line between an image and the text beside it, so a tile and a name set side
+// by side part at the end of a line. The chips take the cover's dark card and ink; the names
+// are product names, so one set serves every README. Every chip has the same height and
+// padding: its width is its name's width in Inter, which fonts.py measures for all of them at once.
+const CHIP = { height: 28, pad: 4, tile: 20, gap: 8, end: 10, size: 14, weight: 600 }
+const chipWidths = new Map<string, number>()
+const nameWidth = (name: string): number => {
+  if (chipWidths.size === 0) {
+    const names = AGENT_ICONS.map(icon => icon.name)
+    const run = Bun.spawnSync([python, join(import.meta.dir, 'fonts.py'), '--width', String(CHIP.weight), String(CHIP.size), ...names], { stderr: 'inherit' })
+    if (run.exitCode !== 0) throw new Error(`fonts.py --width stopped with exit code ${run.exitCode}`)
+    const widths = JSON.parse(run.stdout.toString()) as number[]
+    names.forEach((one, i) => chipWidths.set(one, widths[i] ?? 0))
+  }
+  const width = chipWidths.get(name)
+  if (width === undefined || width <= 0) throw new Error(`fonts.py measured no width for "${name}"`)
+  return width
+}
+const chip = (icon: AgentIcon): string => {
+  const { height, pad, tile, gap, end, size, weight } = CHIP
+  const left = pad + tile + gap
+  const width = Math.ceil(left + nameWidth(icon.name) + end)
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}" role="img" aria-label="${esc(icon.name)}" font-family="'Inter', sans-serif">
+<title>${esc(icon.name)}</title>
+<rect x="0.5" y="0.5" width="${width - 1}" height="${height - 1}" rx="${num(tile * 0.23 + pad - 0.5)}" fill="${BRAND.card}" stroke="${BRAND.line}"/>
+${iconTile(icon.name, pad, pad, tile)}
+<text x="${left}" y="${num(height / 2 + size * 0.36)}" font-size="${size}" font-weight="${weight}" fill="${BRAND.ink}">${esc(icon.name)}</text>
+</svg>
+`
+}
+
 // `bun docs/preview/render.ts cover-en` writes only the files whose names start with `cover-en`,
 // and gives only those their fonts: to try one picture out without redrawing the others.
 const only = process.argv[2]
@@ -1446,6 +1479,7 @@ const write = (path: string, make: () => string): void => {
 
 mkdirSync(join(OUT, 'agents'), { recursive: true })
 for (const icon of AGENT_ICONS) write(join(OUT, 'agents', `${icon.file}.svg`), () => agentIcon(icon))
+for (const icon of AGENT_ICONS) write(join(OUT, 'agents', `chip-${icon.file}.svg`), () => chip(icon))
 for (const lang of LANGS) write(join(OUT, `promo-${lang}.svg`), () => promo(lang))
 
 mkdirSync(join(OUT, 'board'), { recursive: true })
@@ -1461,11 +1495,11 @@ for (const lang of LANGS) {
 // Each SVG then gets the letters it draws from its fonts (fonts.py, which needs fontTools).
 const svgs = only !== undefined ? written : [
   ...readdirSync(OUT).filter(name => name.endsWith('.svg')).map(name => join(OUT, name)),
-  ...AGENT_ICONS.map(icon => join(OUT, 'agents', `${icon.file}.svg`)),
+  ...AGENT_ICONS.flatMap(icon => [join(OUT, 'agents', `${icon.file}.svg`), join(OUT, 'agents', `chip-${icon.file}.svg`)]),
   ...readdirSync(join(OUT, 'board')).filter(name => name.endsWith('.svg')).map(name => join(OUT, 'board', name)),
 ]
 if (svgs.length === 0) throw new Error(`No image's name starts with ${only}`)
 const fonts = Bun.spawnSync([python, join(import.meta.dir, 'fonts.py'), ...svgs], { stdout: 'inherit', stderr: 'inherit' })
 if (fonts.exitCode !== 0) throw new Error(`fonts.py stopped with exit code ${fonts.exitCode}`)
 if (only !== undefined) console.log(`wrote ${written.length} image(s) starting with ${only} to ${OUT}`)
-else console.log(`wrote the pane top, tour, flow, promotional card, the README cover and CLI boards in ${LANGS.length} languages and ${AGENT_ICONS.length} agent icons to ${OUT}, and ${LANGS.length} progress.html pages to ${PAGES}`)
+else console.log(`wrote the pane top, tour, flow, promotional card, the README cover and CLI boards in ${LANGS.length} languages and ${AGENT_ICONS.length} agent icons and chips to ${OUT}, and ${LANGS.length} progress.html pages to ${PAGES}`)
