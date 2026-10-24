@@ -2851,7 +2851,9 @@ test('native Antigravity hook commands bind conversationId, record metadata only
   for (const event of Object.keys(hooks)) {
     const result = await fire(event)
     assert.equal(result.error, undefined, hookFailure(result))
-    assert.equal(result.status, 0, hookFailure(result)); assert.deepEqual(JSON.parse(result.stdout), {})
+    assert.equal(result.status, 0, hookFailure(result))
+    if (event === 'SessionStart') assert.equal(typeof JSON.parse(result.stdout).injectSteps?.[0]?.systemMessage?.systemMessage, 'string')
+    else assert.deepEqual(JSON.parse(result.stdout), {})
     const saved = JSON.parse(readFileSync(record, 'utf8'))
     assert.equal(saved.session, conversationId)
     assert.equal(saved.activity.at(-1).event, event)
@@ -3678,6 +3680,54 @@ test('antigravity: setup-agent keeps the content and order of third-party hooks 
   assert.equal(readFileSync(config, 'utf8'), original)
 }))
 
+test('Antigravity reports its own waiting question with the command bound by native hooks', async () => {
+  for (const lang of ['en', 'zh-TW', 'zh-CN']) for (const connector of ['setup', 'connect']) await fixture(async f => {
+    mkdirSync(join(f.home, '.gemini', 'antigravity-cli'), { recursive: true })
+    const progress = join(f.home, 'synthetic %literal% ` $ board', 'progress.md')
+    if (connector === 'connect') legacyConnect(f, progress, 'connect', lang)
+    else assert.equal(f.install('--agent', 'antigravity', '--lang', lang, '--progress-file', progress, '--apply').status, 0)
+    const hooks = JSON.parse(readFileSync(join(f.home, '.gemini', 'config', 'hooks.json'), 'utf8'))[connector === 'connect' ? 'agent-board' : 'agent-board-local']
+    const conversationId = 'synthetic-agy-question-session'
+    const payload = { conversationId, session_id: 'synthetic-foreign-session', invocationNum: 0, transcriptPath: 'PRIVATE_TRANSCRIPT_DO_NOT_OPEN', prompt: 'PRIVATE_PROMPT', toolCall: { args: 'PRIVATE_TOOL' } }
+    const fire = event => fireCommand(f, hooks[event][0].command, JSON.stringify(payload))
+    const started = await fire('SessionStart')
+    assert.equal(started.status, 0, hookFailure(started))
+    const context = JSON.parse(started.stdout).injectSteps?.[0]?.systemMessage?.systemMessage
+    assert.equal(typeof context, 'string', `${connector} ${lang}: missing native report context`)
+    assert.ok(!context.includes('PRIVATE_'))
+    const command = context.match(/`(node [^`\r\n]+)`/)?.[1]
+    assert.ok(command, context)
+    const first = await fire('PreInvocation')
+    assert.equal(first.status, 0, hookFailure(first))
+    assert.equal(JSON.parse(first.stdout).injectSteps?.[0]?.ephemeralMessage, context)
+    payload.invocationNum = 1
+    const later = await fire('PreInvocation')
+    assert.equal(later.status, 0, hookFailure(later))
+    assert.deepEqual(JSON.parse(later.stdout), {})
+    const foreign = '<!-- auto session=abcdef12 agent=opencode state=waiting updated=2026-10-24T00:00:00Z -->\n### Foreign question\n- [?] Blue or green?\n<!-- /auto session=abcdef12 -->\n'
+    f.save(progress, readFileSync(progress, 'utf8') + foreign)
+    const steps = ['- [x] Synthetic first step', '- [x] Synthetic second step', '- [?] Blue or green?']
+    const report = await fireCommand(f, command, JSON.stringify({ title: 'Synthetic Antigravity question', project: 'Synthetic test', state: 'waiting', steps }))
+    assert.equal(report.status, 0, hookFailure(report))
+    const block = createHash('sha256').update(`antigravity:${conversationId}`).digest('hex').slice(0, 8)
+    assert.equal(JSON.parse(report.stdout).block, block)
+    for (const event of ['PostInvocation', 'Stop']) {
+      const result = await fire(event)
+      assert.equal(result.status, 0, hookFailure(result))
+      assert.deepEqual(JSON.parse(result.stdout), {})
+    }
+    const text = readFileSync(progress, 'utf8')
+    const own = text.match(new RegExp(`<!-- auto session=${block} [^\\n]*-->[\\s\\S]*?<!-- /auto session=${block} -->`))?.[0]
+    assert.ok(own, text)
+    assert.match(own.split('\n')[0], / agent=antigravity /)
+    assert.match(own.split('\n')[0], / state=waiting /)
+    for (const step of steps) assert.ok(own.includes(step), own)
+    assert.ok(text.includes(foreign), 'another agent question must remain unchanged')
+    assert.ok(!text.includes('PRIVATE_') && !text.includes('synthetic-foreign-session'))
+    assert.equal(hookLog(f), '')
+  })
+})
+
 test('antigravity: one synthetic agy turn reaches the board through the connected hook', () => fixture(async f => {
   mkdirSync(join(f.home, '.gemini', 'antigravity-cli'), { recursive: true })
   const progress = join(f.home, '.claude', 'progress.md')
@@ -3687,7 +3737,8 @@ test('antigravity: one synthetic agy turn reaches the board through the connecte
   for (const [event, [hook]] of Object.entries(hooks)) {
     const result = await fireCommand(f, hook.command, JSON.stringify({ conversationId, workspacePaths: ['PRIVATE_WORKSPACE'], prompt: 'PRIVATE_PROMPT' }))
     assert.equal(result.status, 0, `${event} ${hookFailure(result)}`)
-    assert.equal(result.stdout.trim(), '{}', event)
+    if (event === 'SessionStart') assert.equal(typeof JSON.parse(result.stdout).injectSteps?.[0]?.systemMessage?.systemMessage, 'string')
+    else assert.equal(result.stdout.trim(), '{}', event)
   }
   const text = readFileSync(progress, 'utf8')
   const marker = text.split(/\r?\n/).find(line => line.includes('agent=antigravity'))
