@@ -504,6 +504,7 @@ export const observeQuestions = (
   const retired = new Set(proofs.retired)
   const hashes = new Map<string, string>()
   const isRetired = (record: QuestionRecord): boolean => {
+    if (retired.size === 0) return false
     const hash = hashes.get(record.id) ?? sha256(record.id)
     hashes.set(record.id, hash)
     return retired.has(hash)

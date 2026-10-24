@@ -303,9 +303,21 @@ const sameQuestion = (left, right) => left.scope === right.scope
 
 const missingValues = (before, after) => (before ?? []).filter(value => !(after ?? []).includes(value))
 
+// A retained question can remain in the main list; checking only Older rejects visible evidence.
+export const questionRecoveryOf = (status, model) => {
+  const surfaces = ['asks', 'reminder', 'older', 'hidden']
+  const checked = status === 200 && surfaces.every(name => Array.isArray(model?.[name]) && model[name].every(item => item !== null && typeof item === 'object' && (item.questionId === undefined || typeof item.questionId === 'string' && /^question:[a-f0-9]{64}:\d+$/.test(item.questionId))))
+  return {
+    status, checked,
+    questionIds: checked ? [...new Set(surfaces.flatMap(name => model[name].flatMap(item => item.questionId === undefined ? [] : [item.questionId])))] : [],
+    surfaceCounts: checked ? Object.fromEntries(surfaces.map(name => [name, model[name].length])) : {},
+    error: checked ? undefined : 'The page did not return valid question membership for every board surface.',
+  }
+}
+
 // Every unanswered question belonging to a task that left progress.md must still project from the
 // ledger and immutable captures with its identity, original clock and complete recovery evidence.
-export const archiveQuestionIntegrity = ({ before, after, archivedSessions }) => {
+export const archiveQuestionIntegrity = ({ before, after, archivedSessions, recoverableQuestionIds = new Set() }) => {
   const sessionOf = scope => { try { return JSON.parse(scope)[2] } catch { return '' } }
   const expected = before.filter(record => record.isUnresolved && archivedSessions.has(sessionOf(record.scope)))
   const afterById = new Map(after.map(record => [record.id, record]))
@@ -322,7 +334,7 @@ export const archiveQuestionIntegrity = ({ before, after, archivedSessions }) =>
     if (current.firstObserved !== previous.firstObserved) result.reaged.push(previous.id)
     if (current.producer !== previous.producer || missingValues(previous.producerRevisions, current.producerRevisions).length > 0 || missingValues(previous.producerSources, current.producerSources).length > 0) result.provenanceLost.push(previous.id)
     if (previous.source === undefined || current.source === undefined || JSON.stringify(current.source) !== JSON.stringify(previous.source)) result.sourceLost.push(previous.id)
-    if (!current.isUnresolved || current.source === undefined || !current.isArchived) result.undiscoverable.push(previous.id)
+    if (!current.isUnresolved || current.source === undefined || !recoverableQuestionIds.has(previous.id)) result.undiscoverable.push(previous.id)
   }
   return result
 }
@@ -336,7 +348,7 @@ export const archiveQuestionProblems = integrity => [
     [integrity.rebound, 'unanswered questions changed scope or producer binding'],
     [integrity.provenanceLost, 'unanswered questions lost producer provenance'],
     [integrity.sourceLost, 'unanswered questions lost their retained source'],
-    [integrity.undiscoverable, 'unanswered questions are not recoverable on the archived shelf'],
+    [integrity.undiscoverable, 'unanswered questions are not recoverable on the board'],
   ].flatMap(([ids, words]) => ids.length === 0 ? [] : [`${ids.length} ${words} (${ids.join(', ')})`]),
 ]
 

@@ -25,6 +25,7 @@ import { EN } from '../hooks/strings-en.ts'
 import { ZH_TW } from '../hooks/i18n.ts'
 import { ZH_CN } from '../hooks/strings-zh-cn.ts'
 import { immutableQuestionFiles } from '../scripts/question-files.ts'
+import { recentInboxFiles } from '../scripts/inbox-files.ts'
 
 const TORN_NOW = Date.parse('2026-10-20T12:00:00Z')
 const tornDay = () => '# Progress\r\n\r\n## Synthetic day\r\n### Hand task alpha\r\n- [ ] Plan\r\n\r\n### Hand task beta\r\n- [ ] Review\r\n\r\n' +
@@ -3239,7 +3240,7 @@ test('a refused close on the page says why next to the close button', async () =
 
 test('unexpected server read and action errors return a reason and log their stacks', async () => {
   const source = BOARD_SCRIPT
-    .replace('\n    view: freshView,\n    pending,', '\n    view: () => { throw new TypeError("synthetic server read failure") },\n    pending,')
+    .replace('\n    view: freshView,', '\n    view: () => { throw new TypeError("synthetic server read failure") },')
     .replace('\n    tidy,\n    paste,', '\n    tidy: () => { throw new TypeError("synthetic server action failure") },\n    paste,')
   assert.ok(source.includes('synthetic server read failure') && source.includes('synthetic server action failure'))
   const board = await page('', {}, [], undefined, source)
@@ -4737,14 +4738,139 @@ process.on('exit', () => process.stderr.write('READS ' + JSON.stringify(counts) 
   assert.deepEqual(counted.files, files)
 })
 
-const questionFilesFixture = (hasWatchFailure = false) => {
+test('the page retains the identity of a historical unanswered question on its Older shelf', async () => {
+  const board = await page()
+  try {
+    assert.equal((await board.call('GET', '/api/board')).status, 200)
+    const ledgerPath = board.path.replace(/\.md$/, '-questions.json')
+    const ledger = JSON.parse(readFileSync(ledgerPath, 'utf8'))
+    const question = ledger.records.find(record => record.words === 'Redis or Memcached?')
+    assert.ok(question)
+    assert.notEqual(question.isArchived, true)
+    writeFileSync(board.path, '# Progress\n')
+    const response = await board.call('GET', '/api/board')
+    assert.equal(response.status, 200)
+    const retained = response.json().model.older.find(item => item.text === 'Redis or Memcached?')
+    assert.ok(retained, 'the historical source must remain recoverable')
+    assert.equal(retained.questionId, question.id)
+  } finally { await board.close() }
+})
+
+test('the page retains the identity of a historical question that remains in the main questions', async () => {
+  const board = await page()
+  try {
+    const source = readFileSync(board.path, 'utf8')
+    const working = source.replace(/state=ended updated=\S+/, `state=working updated=${new Date().toISOString()}`)
+    assert.notEqual(working, source)
+    writeFileSync(board.path, working)
+    assert.equal((await board.call('GET', '/api/board')).status, 200)
+    const ledger = JSON.parse(readFileSync(board.path.replace(/\.md$/, '-questions.json'), 'utf8'))
+    const question = ledger.records.find(record => record.words === 'Redis or Memcached?')
+    assert.ok(question)
+    assert.notEqual(question.isArchived, true)
+    writeFileSync(board.path, '# Progress\n')
+    const response = await board.call('GET', '/api/board')
+    assert.equal(response.status, 200)
+    const retained = response.json().model.asks.find(item => item.text === 'Redis or Memcached?')
+    assert.ok(retained, 'the historical source keeps its existing visible placement')
+    assert.equal(retained.questionId, question.id)
+  } finally { await board.close() }
+})
+
+const inboxFilesFixture = (hasWatchFailure = false) => {
+  const root = mkdtempSync(join(tmpdir(), 'agent-board-inbox-files-'))
+  const directory = join(root, 'files')
+  mkdirSync(directory)
+  const watchers = []
+  const reader = recentInboxFiles({
+    directory, isPersistent: true, accepts: name => name.endsWith('.json'),
+    watchFiles: (_directory, changed) => {
+      if (hasWatchFailure) throw new Error('synthetic watcher unavailable')
+      const watcher = new EventEmitter()
+      watcher.close = () => { watcher.isClosed = true; watcher.emit('close') }
+      watcher.unref = () => {}
+      watcher.changed = name => changed('change', name)
+      watchers.push(watcher)
+      return watcher
+    },
+  })
+  const add = (name, text, at = 1) => {
+    const file = join(directory, name)
+    writeFileSync(file, text)
+    utimesSync(file, at, at)
+    return file
+  }
+  return { root, directory, reader, watchers, add, end: () => { reader.close(); rmSync(root, { recursive: true, force: true }) } }
+}
+
+test('inbox display hints keep the newest thirty reports and notice additions and removals', () => {
+  const fixture = inboxFilesFixture()
+  try {
+    for (let index = 0; index < 35; index++) fixture.add(`${index}.json`, `report ${index}`, index + 1)
+    const first = fixture.reader.read(false)
+    assert.equal(first.length, 30)
+    assert.equal(first[0].body, 'report 34')
+    assert.equal(first.at(-1).body, 'report 5')
+    fs.unlinkSync(join(fixture.directory, '34.json'))
+    assert.equal(fixture.reader.read(false)[0].body, 'report 33')
+    fixture.add('new.json', 'a new report', 40)
+    assert.equal(fixture.reader.read(false)[0].body, 'a new report')
+  } finally { fixture.end() }
+})
+
+test('inbox display hints reread changed contents with the same name size and modification time', () => {
+  const fixture = inboxFilesFixture()
+  try {
+    fixture.add('one.json', 'first report')
+    assert.equal(fixture.reader.read(false)[0].body, 'first report')
+    fixture.add('one.json', 'other report')
+    fixture.watchers[0].changed('one.json')
+    assert.equal(fixture.reader.read(false)[0].body, 'other report')
+    fixture.add('one.json', 'third report')
+    fixture.watchers[0].changed(null)
+    assert.equal(fixture.reader.read(false)[0].body, 'third report')
+  } finally { fixture.end() }
+})
+
+test('inbox action reads bypass hints before an event arrives and forget a removed report', () => {
+  const fixture = inboxFilesFixture()
+  try {
+    fixture.add('one.json', 'first report')
+    assert.equal(fixture.reader.read(false)[0].body, 'first report')
+    fixture.add('one.json', 'other report')
+    assert.equal(fixture.reader.read()[0].body, 'other report')
+    fs.unlinkSync(join(fixture.directory, 'one.json'))
+    assert.deepEqual(fixture.reader.read(false), [])
+    fixture.add('one.json', 'third report')
+    assert.equal(fixture.reader.read(false)[0].body, 'third report')
+  } finally { fixture.end() }
+})
+
+test('inbox watcher failures and directory replacement keep fresh report discovery available', () => {
+  for (const hasWatchFailure of [false, true]) {
+    const fixture = inboxFilesFixture(hasWatchFailure)
+    try {
+      fixture.add('one.json', 'first report')
+      assert.equal(fixture.reader.read(false)[0].body, 'first report')
+      if (!hasWatchFailure) fixture.watchers[0].emit('error', new Error('synthetic watcher failed'))
+      fixture.add('one.json', 'other report')
+      assert.equal(fixture.reader.read(false)[0].body, 'other report')
+      renameSync(fixture.directory, join(fixture.root, 'old-files'))
+      mkdirSync(fixture.directory)
+      fixture.add('new.json', 'a new directory')
+      assert.equal(fixture.reader.read(false)[0].body, 'a new directory')
+    } finally { fixture.end() }
+  }
+})
+
+const questionFilesFixture = (hasWatchFailure = false, onName = () => {}) => {
   const root = mkdtempSync(join(tmpdir(), 'agent-board-question-files-'))
   const directory = join(root, 'files')
   mkdirSync(directory)
   const watchers = []
   const reader = immutableQuestionFiles({
     directory, isPersistent: true,
-    accepts: name => /^[a-f0-9]{64}\.question$/.test(name),
+    accepts: name => { onName(name); return /^[a-f0-9]{64}\.question$/.test(name) },
     parse: (text, name) => sha(text) === name.slice(0, 64) ? { text } : null,
     watchFiles: (_directory, changed) => {
       if (hasWatchFailure) throw new Error('synthetic watcher unavailable')
@@ -4779,6 +4905,24 @@ test('question companion hints validate new files and forget deleted files befor
     assert.notEqual(returned[0], first[0])
     fixture.add('second immutable question')
     assert.equal(fixture.reader.read(false).length, 2)
+  } finally { fixture.end() }
+})
+
+test('question companion polls reuse filename validation until a listed name leaves the directory', () => {
+  const checked = []
+  const fixture = questionFilesFixture(false, name => checked.push(name))
+  try {
+    const name = fixture.add('stable filename contract')
+    writeFileSync(join(fixture.directory, 'unrelated-file'), '')
+    assert.equal(fixture.reader.read(false).length, 1)
+    const first = checked.length
+    assert.equal(fixture.reader.read(false).length, 1)
+    assert.equal(checked.length, first, 'unchanged directory names repeated expensive filename validation')
+    fs.unlinkSync(join(fixture.directory, name))
+    assert.deepEqual(fixture.reader.read(false), [])
+    fixture.add('stable filename contract')
+    assert.equal(fixture.reader.read(false).length, 1)
+    assert.equal(checked.length, first + 1, 'a name that returns must be checked again')
   } finally { fixture.end() }
 })
 

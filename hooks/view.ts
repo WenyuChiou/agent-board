@@ -953,8 +953,9 @@ export const buildView = (
   }
   for (const item of shownRecent) item.questions = item.questions?.filter(question => question.questionId === undefined || !liveQuestions.has(question.questionId))
   const onShelf = new Set([...stopped.flatMap(({ row }) => row.questions ?? []), ...shownRecent.flatMap(item => item.questions ?? [])].flatMap(item => item.questionId === undefined ? [] : [item.questionId]))
+  const shownQuestions = new Set([...all, ...hidden].flatMap(item => item.questionId === undefined ? [] : [item.questionId]))
   for (const record of observed?.ledger.records ?? []) {
-    if (!record.isUnresolved || record.source === undefined || onShelf.has(record.id) || [...all, ...hidden].some(item => item.questionId === record.id)) continue
+    if (!record.isUnresolved || record.source === undefined || onShelf.has(record.id) || shownQuestions.has(record.id)) continue
     const source = record.source
     const parts = splitNote(source.text)
     const age = questionAge(record.firstObserved, now)

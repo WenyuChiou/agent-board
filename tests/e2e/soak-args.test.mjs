@@ -7,7 +7,7 @@ import { fileURLToPath } from 'node:url'
 import { makeWorld } from './lib/world.mjs'
 import { spawnIsolated } from './lib/spawn.mjs'
 import { knownFailure } from './lib/known.mjs'
-import { OUT_DEFAULT, archiveIntegrity, archiveProblems, archiveQuestionIntegrity, archiveQuestionProblems, archiveRefusal, classifySoakChecks, fileOpsPerPoll, hookLoadMarker, leftoverPlan, leftoverProcesses, levelOutcome, makeRedact, median, parseArguments, peakRss, percentile, queuedSessions, questionEvidenceProjection, redactDeep, tallyOf, writeReport } from './lib/soak-report.mjs'
+import { OUT_DEFAULT, archiveIntegrity, archiveProblems, archiveQuestionIntegrity, archiveQuestionProblems, archiveRefusal, classifySoakChecks, fileOpsPerPoll, hookLoadMarker, leftoverPlan, leftoverProcesses, levelOutcome, makeRedact, median, parseArguments, peakRss, percentile, queuedSessions, questionEvidenceProjection, questionRecoveryOf, redactDeep, tallyOf, writeReport } from './lib/soak-report.mjs'
 
 const soak = fileURLToPath(new URL('./soak.mjs', import.meta.url))
 
@@ -272,10 +272,38 @@ describe('L6 soak arguments', () => {
   test('L6 soak arguments: archived unanswered questions pass by retaining recovery evidence, not by leaving zero records', () => {
     const before = [{ ...question(), isArchived: undefined }]
     const after = [question()]
-    const integrity = archiveQuestionIntegrity({ before, after, archivedSessions: new Set(['b1']) })
+    const integrity = archiveQuestionIntegrity({ before, after, archivedSessions: new Set(['b1']), recoverableQuestionIds: new Set(after.map(record => record.id)) })
     assert.equal(after.length, 1)
     assert.equal(integrity.checked, 1)
     assert.deepEqual(archiveQuestionProblems(integrity), [])
+  })
+
+  test('L6 soak arguments: page recovery reads every question surface and refuses incomplete evidence', () => {
+    const first = question().id
+    const second = question({ words: 'Choose another path?', incarnation: 'second' }).id
+    const model = { asks: [{ questionId: first }], reminder: [{ questionId: second }], older: [{ questionId: first }], hidden: [{ text: 'manual question' }] }
+    const recovery = questionRecoveryOf(200, model)
+    assert.equal(recovery.checked, true)
+    assert.deepEqual(recovery.questionIds, [first, second])
+    assert.deepEqual(recovery.surfaceCounts, { asks: 1, reminder: 1, older: 1, hidden: 1 })
+    for (const broken of [{ ...model, hidden: undefined }, { ...model, older: [{ questionId: 7 }] }, { ...model, asks: [null] }]) {
+      const rejected = questionRecoveryOf(200, broken)
+      assert.equal(rejected.checked, false)
+      assert.deepEqual(rejected.questionIds, [])
+    }
+    assert.equal(questionRecoveryOf(503, model).checked, false)
+  })
+
+  test('L6 soak arguments: actual shelf membership recovers a historical question without an archived flag', () => {
+    const record = question({ isArchived: undefined })
+    const integrity = archiveQuestionIntegrity({ before: [record], after: [record], archivedSessions: new Set(['b1']), recoverableQuestionIds: new Set([record.id]) })
+    assert.deepEqual(archiveQuestionProblems(integrity), [])
+  })
+
+  test('L6 soak arguments: an archived flag cannot replace actual shelf recovery evidence', () => {
+    const record = question()
+    const integrity = archiveQuestionIntegrity({ before: [record], after: [record], archivedSessions: new Set(['b1']) })
+    assert.deepEqual(integrity.undiscoverable, [record.id])
   })
 
   test('L6 soak arguments: archived unanswered-question integrity names every identity, age, provenance, source and recovery violation', () => {
@@ -289,8 +317,8 @@ describe('L6 soak arguments', () => {
       [[{ ...original, scope: JSON.stringify(['demo', 'codex', 'other']) }], /1 unanswered questions changed scope or producer binding/],
       [[{ ...original, producerRevisions: [], producerSources: [] }], /1 unanswered questions lost producer provenance/],
       [[{ ...original, source: undefined }], /1 unanswered questions lost their retained source/],
-      [[{ ...original, isArchived: false }], /1 unanswered questions are not recoverable on the archived shelf/],
-      [[{ ...original, isUnresolved: false }], /1 unanswered questions are not recoverable on the archived shelf/],
+      [[{ ...original, isArchived: false }], /1 unanswered questions are not recoverable on the board/],
+      [[{ ...original, isUnresolved: false }], /1 unanswered questions are not recoverable on the board/],
     ]
     for (const [after, expected] of variants) {
       const integrity = archiveQuestionIntegrity({ before: [original], after, archivedSessions: new Set(['b1']) })

@@ -18,6 +18,7 @@ export const immutableQuestionFiles = <T>(options: {
   watchFiles?: WatchFiles
 }) => {
   const known = new Map<string, { stamp: string; value: T }>()
+  const accepted = new Map<string, boolean>()
   const dirty = new Set<string>()
   let values: T[] = []
   let identity = ''
@@ -25,6 +26,13 @@ export const immutableQuestionFiles = <T>(options: {
   let hasFailed = false
   let isClosed = false
   let isUncertain = true
+  const accepts = (name: string): boolean => {
+    const previous = accepted.get(name)
+    if (previous !== undefined) return previous
+    const result = options.accepts(name)
+    accepted.set(name, result)
+    return result
+  }
   const close = () => {
     const previous = watcher
     watcher = null
@@ -32,6 +40,7 @@ export const immutableQuestionFiles = <T>(options: {
   }
   const invalidateAll = () => {
     known.clear()
+    accepted.clear()
     dirty.clear()
     values = []
     isUncertain = true
@@ -46,7 +55,7 @@ export const immutableQuestionFiles = <T>(options: {
     try {
       const current = (options.watchFiles ?? ((directory, listener) => watch(directory, listener)))(options.directory, (_event, name) => {
         if (name === null) isUncertain = true
-        else if (options.accepts(String(name))) dirty.add(String(name))
+        else if (accepts(String(name))) dirty.add(String(name))
       })
       watcher = current
       current.on('error', fail)
@@ -69,10 +78,14 @@ export const immutableQuestionFiles = <T>(options: {
           hasFailed = false
         }
         watchDirectory()
-        const names = readdirSync(options.directory).filter(options.accepts)
+        const names = readdirSync(options.directory)
         const listed = new Set(names)
+        // Matching a stable name must not rebuild its path prefix on every poll. Forget absent
+        // names so this cache stays bounded by the current directory, including unrelated files.
+        for (const name of accepted.keys()) if (!listed.has(name)) accepted.delete(name)
         const next: T[] = []
         for (const name of names) {
+          if (!accepts(name)) continue
           const previous = known.get(name)
           if (previous !== undefined && !isFresh && watcher !== null && !isUncertain && !dirty.has(name)) {
             next.push(previous.value)
@@ -104,7 +117,7 @@ export const immutableQuestionFiles = <T>(options: {
         return null
       }
     },
-    invalidate: (name: string): void => { if (options.accepts(name)) dirty.add(name) },
+    invalidate: (name: string): void => { if (accepts(name)) dirty.add(name) },
     close: (): void => { isClosed = true; close() },
   }
 }

@@ -4,7 +4,7 @@ import { arch, homedir, release, tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { performance } from 'node:perf_hooks'
 import { fileURLToPath, pathToFileURL } from 'node:url'
-import { OUT_DEFAULT, archiveIntegrity, archiveProblems, archiveQuestionIntegrity, archiveQuestionProblems, archiveRefusal, classifySoakChecks, fileOpsPerPoll, levelOutcome, makeRedact, median, parseArguments, peakRss, percentile, questionEvidenceProjection, tallyOf, writeReport } from './lib/soak-report.mjs'
+import { OUT_DEFAULT, archiveIntegrity, archiveProblems, archiveQuestionIntegrity, archiveQuestionProblems, archiveRefusal, classifySoakChecks, fileOpsPerPoll, levelOutcome, makeRedact, median, parseArguments, peakRss, percentile, questionEvidenceProjection, questionRecoveryOf, tallyOf, writeReport } from './lib/soak-report.mjs'
 import { stopTree } from './lib/processes.mjs'
 
 // L6 soak: the terminal board (--watch) and the page server (--serve) run side by side on one
@@ -756,6 +756,16 @@ const soak = async ({ minutes, out }) => {
     if (state.archivedSessions === undefined || state.archiveEndPolls === undefined) outcomes.preserve = { skipped: 'The run ended before the archive phase was done.' }
     else {
       const archived = state.archivedSessions
+      // A retained source can stay in the main questions or move to a shelf. Preserve that existing
+      // placement and ask every actual page surface for membership instead of trusting a flag.
+      let recovery = { status: 0, checked: false, questionIds: [], error: undefined }
+      try {
+        const response = await server.get('/api/board')
+        recovery = questionRecoveryOf(response.status, response.status === 200 ? response.json().model : undefined)
+      } catch (error) {
+        recovery.error = `The page questions could not be read: ${String(error?.message ?? error).split('\n')[0]}`
+      }
+      report.archive.recovery = recovery
       const held = holdings()
       const records = sumOf(held, archived, 'records')
       const captures = sumOf(held, archived, 'captures')
@@ -768,6 +778,7 @@ const soak = async ({ minutes, out }) => {
       const unread = state.heldBefore.error !== undefined ? `just before the archive (${state.heldBefore.error})` : held.error !== undefined ? `at the end (${held.error})` : undefined
       // Unread evidence can hide a lost identity, so it never counts as successful preservation.
       if (unread !== undefined) outcomes.preserve = { ok: false, isUnheld: true, line: `Question recovery evidence could not be read ${unread}.` }
+      else if (!recovery.checked) outcomes.preserve = { ok: false, isUnheld: true, line: recovery.error }
       // A refused or unanswered archive request leaves stopped tasks with questions out, the one
       // path that keeps them, so preservation cannot be judged: it fails, or is the known slowness.
       // Work the archive lost or did not move fails whatever its requests answered.
@@ -776,10 +787,10 @@ const soak = async ({ minutes, out }) => {
       else if (afterArchive < TAIL_POLLS) outcomes.preserve = { skipped: `Only ${afterArchive} polls came after the archive phase, ${TAIL_POLLS} are needed. At the end, ${counted}.` }
       else if (archived.size === 0) outcomes.preserve = { ok: false, isUnheld: true, line: 'No task left progress.md, so archived-question preservation could not be checked.' }
       else {
-        const integrity = archiveQuestionIntegrity({ before: state.heldBefore.questions, after: held.questions, archivedSessions: archived })
+        const integrity = archiveQuestionIntegrity({ before: state.heldBefore.questions, after: held.questions, archivedSessions: archived, recoverableQuestionIds: new Set(recovery.questionIds) })
         const problems = archiveQuestionProblems(integrity)
         report.archive.questionIntegrity = integrity
-        outcomes.preserve = { ok: problems.length === 0, isUnheld: problems.length === 0 ? undefined : true, line: problems.length === 0 ? `${integrity.checked} unanswered questions from archived tasks retained their IDs, original age, scope and producer provenance, source copies and archived-shelf recovery; ${counted}, after ${afterArchive} polls.` : `Archived unanswered-question recovery failed: ${problems.join('; ')}. At the end, ${counted}.` }
+        outcomes.preserve = { ok: problems.length === 0, isUnheld: problems.length === 0 ? undefined : true, line: problems.length === 0 ? `${integrity.checked} unanswered questions from archived tasks retained their IDs, original age, scope and producer provenance, source copies and recovery on the actual page; ${counted}, after ${afterArchive} polls.` : `Archived unanswered-question recovery failed: ${problems.join('; ')}. At the end, ${counted}.` }
       }
     }
 

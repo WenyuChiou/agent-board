@@ -18,6 +18,7 @@ import { archivableAsking, confirmMatches, confirmTask, CUT_SETTLE_MS, cutBlockL
 import type { ConfirmedTask } from '../hooks/blocks'
 import { startServer } from './board-serve'
 import { immutableQuestionFiles } from './question-files'
+import { recentInboxFiles } from './inbox-files'
 import { idleTimeout } from '../hooks/serve'
 import { boardKey, boardScreen, boardText, CHAT_MAX, chatText, doneToday, emptyBoardState, peekInbox, boardItems, pinned, redact } from '../hooks/board'
 import type { BoardAction, BoardState } from '../hooks/board'
@@ -143,32 +144,8 @@ const readLog = (file: string): string => {
 }
 
 // `scrub` hides what must not be sent on, in a reply, before its question is picked and cut.
-const pending = (scrub?: (text: string) => string) => {
-  const dir = join(dirname(path), 'progress-inbox')
-  let names: string[] = []
-  try {
-    names = readdirSync(dir).filter(name => isInboxFile(name))
-  } catch {
-    return []
-  }
-  const entries = names.flatMap(name => {
-    try {
-      const stat = statSync(join(dir, name))
-      return stat.isFile() ? [{ name, at: stat.mtimeMs }] : []
-    } catch {
-      return []
-    }
-  })
-    .sort((a, b) => b.at - a.at)
-    .slice(0, 30)
-  const files = entries.flatMap(entry => {
-    try {
-      return [{ ...entry, body: read(join(dir, entry.name)) }]
-    } catch {
-      return []
-    }
-  })
-
+const pending = (scrub?: (text: string) => string, isFresh = !isViewQuestionRead) => {
+  const files = inboxFiles.read(isFresh)
   return peekInbox(files, readLog, scrub)
 }
 
@@ -184,6 +161,11 @@ let questionWrite = 0
 const isQuestionWriter = !args.includes('--chat') && args.some(arg => ['--watch', '--serve', '--serve-child', '--keys'].includes(arg))
 const isPersistentQuestions = !args.includes('--chat') && args.some(arg => ['--watch', '--serve', '--serve-child'].includes(arg))
 let isViewQuestionRead = false
+const inboxFiles = recentInboxFiles({
+  directory: join(dirname(path), 'progress-inbox'),
+  isPersistent: isPersistentQuestions,
+  accepts: isInboxFile,
+})
 let tornQuestionCache: { text: string; isTorn: boolean } | null = null
 let parsedQuestionCache: { file: string; text: string; isMissing: boolean; ledger: QuestionLedger | null } | null = null
 let capturedQuestionCache: { ledger: QuestionLedger; captures: QuestionCapture[]; merged: QuestionLedger } | null = null
@@ -397,10 +379,10 @@ const readBoardView = (source: string, now: number) => {
   const file = questionsPath(path)
   const record = readQuestions(file)
   let proofs = readQuestionProofs()
+  const previewProofs = proofs
   if (record !== null) lastQuestions = record
   const frozen = cutOffScopes(projects, cutOffSpans(source, isCutSettled))
-  const observed = observeQuestions(lastQuestions, projects, null, answered, now, isSettled, 'preview', proofs ?? undefined, turns, [], frozen)
-  let questions = observed.ledger
+  let questions: QuestionLedger | null = null
   // Chat and a one-shot read never write. Interactive readers persist before accepting hides.
   if (record !== null && proofs !== null && isQuestionSnapshot(source, isCutSettled) && isQuestionWriter) {
     const incarnation = `${questionWriter}:${questionWrite++}`
@@ -413,9 +395,12 @@ const readBoardView = (source: string, now: number) => {
       if (captures === null) return null
       for (const copy of copiesToKeep(current, next, captures)) keepQuestionCapture(copy.record, copy.disposition)
       for (const id of identitiesToRetire(current, next, resolvedQuestionsToRetire(current, projects, null, turns, frozen), proofs?.retired)) keepQuestionProof('retired', sha256(id))
-      proofs = readQuestionProofs()
-      if (proofs === null) return null
-      next = observeQuestions(current, projects, null, answered, now, isSettled, incarnation, proofs, turns, [], frozen).ledger
+      const latestProofs = readQuestionProofs()
+      if (latestProofs === null) return null
+      // New retirement proofs change the observation; unchanged validated proofs already produced
+      // this result. Repeating it needlessly copies and hashes every retained question (#428).
+      if (latestProofs !== proofs) next = observeQuestions(current, projects, null, answered, now, isSettled, incarnation, latestProofs, turns, [], frozen).ledger
+      proofs = latestProofs
       const raw = parsedQuestions(file, before, !existsSync(file))
       return raw !== null && questionsJson(next) === questionsJson(raw) ? before : questionsJson(next)
     })
@@ -439,6 +424,7 @@ const readBoardView = (source: string, now: number) => {
       }
     }
   }
+  questions ??= observeQuestions(lastQuestions, projects, null, answered, now, isSettled, 'preview', previewProofs ?? undefined, turns, [], frozen).ledger
   // A question marked answered in a pane on this machine is kept off the board too.
   const tail = progressTail(source)
   const warnings = [...(tail === null ? [] : [s.progressIncomplete(tail.tasks)]), ...sizeWarnings({ progress: Buffer.byteLength(source), store: 0 }, s)]
@@ -1018,7 +1004,7 @@ const serveChild = (): void => {
     ping: { path, built, idleMs: idleMs(), allowResume: args.includes('--allow-resume'), messagesDirectory: flag('--messages-dir') ? resolve(flag('--messages-dir')!) : null },
     // Every page request starts by reading the board.
     view: freshView,
-    pending,
+    pending: (isFresh = true) => pending(undefined, isFresh),
     act,
     tidy,
     paste,
