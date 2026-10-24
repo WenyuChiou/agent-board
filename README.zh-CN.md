@@ -251,4 +251,4 @@ node ~/.agent-board/agent-board.mjs --codex-doctor --agent codex
 
 [MIT](LICENSE)。agent 的图标来自 [Simple Icons](https://simpleicons.org)（CC0）和 [Lobe Icons](https://github.com/lobehub/lobe-icons)（MIT），这些图标属于各自的所有者；没有图标的 agent 用名字的第一个字母表示。
 
-<p align="center"><sub>版本 0.23.5 · <a href="CHANGELOG.md">更新日志</a></sub></p>
+<p align="center"><sub>版本 0.24.0 · <a href="CHANGELOG.md">更新日志</a></sub></p>

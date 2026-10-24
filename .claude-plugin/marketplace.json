@@ -1,17 +1,18 @@
 {
   "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
   "name": "agent-board",
-  "description": "Agent Board: a local interactive board for coding agents",
+  "description": "Agent Board 0.24.0: a local interactive board for coding agents",
   "owner": {
     "name": "Wenyu Chiou"
   },
   "plugins": [
     {
       "name": "agent-board",
-      "description": "A local board for coding agents: shared progress, persistent questions and live replies. Optional Claude Code pane.",
+      "description": "Agent Board 0.24.0: shared progress, persistent questions and live replies. Optional Claude Code pane.",
       "source": "./",
       "category": "productivity",
-      "strict": true
+      "strict": true,
+      "version": "0.24.0"
     }
   ]
 }

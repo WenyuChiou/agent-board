@@ -1,2 +1,0 @@
-- **Contributors: the pull request rules now ask for a CHANGELOG fragment (#229).** CONTRIBUTING.md rule 6 and the pull request template ask each fix or feature pull request for a new `changelog.d/<issue>-<slug>.md` instead of an entry under `## Unreleased`; release step 2 runs `scripts/changelog-fold.mjs`. CI now also runs the preflight and CHANGELOG fold tests.
-  Tests: none (documentation only).
