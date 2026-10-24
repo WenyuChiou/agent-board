@@ -134,17 +134,23 @@ export const parseCapture = (text: string, hash: string): QuestionCapture | null
 // A stale mutable index cannot erase an immutable source or reverse its resolution receipt.
 export const withCaptures = (ledger: QuestionLedger, captures: readonly QuestionCapture[]): QuestionLedger => {
   const records = ledger.records.map(record => ({ ...record }))
+  // Each id to its first record, which a search of the list would find; a board holds thousands (#416).
+  const byId = new Map<string, QuestionRecord>()
+  for (const record of records) if (!byId.has(record.id)) byId.set(record.id, record)
   for (const capture of captures) {
-    const previous = records.find(record => record.id === capture.record.id)
-    if (previous === undefined) records.push({ ...capture.record })
-    else {
+    const previous = byId.get(capture.record.id)
+    if (previous === undefined) {
+      const record = { ...capture.record }
+      records.push(record)
+      byId.set(record.id, record)
+    } else {
       if (previous.source === undefined) previous.source = capture.record.source
       if (capture.record.producerRevisions !== undefined) previous.producerRevisions = [...new Set([...(previous.producerRevisions ?? []), ...capture.record.producerRevisions])]
       if (capture.record.producerSources !== undefined) previous.producerSources = [...new Set([...(previous.producerSources ?? []), ...capture.record.producerSources])]
     }
   }
   for (const capture of captures) {
-    const record = records.find(one => one.id === capture.record.id)
+    const record = byId.get(capture.record.id)
     if (record === undefined) continue
     if (capture.disposition === 'archived') record.isArchived = true
     if (capture.disposition === 'resolved') {
@@ -157,6 +163,35 @@ export const withCaptures = (ledger: QuestionLedger, captures: readonly Question
   return { ...ledger, next: records.reduce((next, record) => Math.max(next, Number(record.id.slice(record.id.lastIndexOf(':') + 1)) + 1), ledger.next), records }
 }
 
+// The copies a question pass keeps before it writes the ledger, in the order of `observed`: an
+// open question whose copy is not among `captures` yet, and a question resolved since `current`
+// was read. Each capture is serialised once, not once for every record: on a board with
+// thousands of each, comparing them pair by pair kept the first poll from reaching the host for
+// longer than Claude Code waits before it unloads the mod (#416).
+export const copiesToKeep = (current: QuestionLedger, observed: QuestionLedger, captures: readonly QuestionCapture[]): { record: QuestionRecord; disposition: 'unresolved' | 'resolved' }[] => {
+  const held = new Set(captures.map(capture => captureJson(capture.record, capture.disposition)))
+  const openIds = new Set(current.records.filter(record => record.isUnresolved === true).map(record => record.id))
+  return observed.records.flatMap(record => {
+    if (record.source === undefined) return []
+    const kept: { record: QuestionRecord; disposition: 'unresolved' | 'resolved' }[] = []
+    if (record.isUnresolved && !held.has(captureJson(record, 'unresolved'))) kept.push({ record, disposition: 'unresolved' })
+    if (record.isUnresolved === false && openIds.has(record.id) && !held.has(captureJson(record, 'resolved'))) kept.push({ record, disposition: 'resolved' })
+    return kept
+  })
+}
+
+// The questions a pass retires that have no retirement proof among `kept` yet, in the order of
+// `current`: one that was on the board and now is neither waiting there nor resolved, and one
+// whose resolution `resolvedQuestionsToRetire` lets go. The same questions come back on every
+// pass, and checking each kept proof on disk again cost three trips to the host apiece, thousands
+// a minute on a big board, while the write queue waited (#416).
+export const identitiesToRetire = (current: QuestionLedger, observed: QuestionLedger, retiredResolutions: readonly string[], kept: readonly string[] = []): string[] => {
+  const still = new Set(observed.records.filter(record => (record.isPresent && record.isWaiting) || record.resolvedAt !== undefined).map(record => record.id))
+  const resolutions = new Set(retiredResolutions)
+  const proven = new Set(kept)
+  return current.records.filter(old => ((old.isPresent && !still.has(old.id)) || resolutions.has(old.id)) && !proven.has(sha256(old.id))).map(old => old.id)
+}
+
 // The folder keeps at least this many of each kind of question file (#156): the newest by
 // modified time, whatever they hold. Older ones go only when the rules below find nothing in
 // them that the ledger or a newer file does not already hold, so the number is a floor.
@@ -164,6 +199,7 @@ export const QUESTION_FILES_KEPT = 16
 
 export type HeldCapture = { hash: string; mtimeMs: number; capture: QuestionCapture }
 export type HeldProof = { kind: keyof QuestionProofs; hash: string; mtimeMs: number }
+export type CaptureCover = { hash: string; cover: string | null; retired: string | null }
 
 // Newest first. The name breaks a tie, so two sessions looking at the same folder pick the same files.
 const newestFirst = <T extends { hash: string; mtimeMs: number }>(files: readonly T[]): T[] =>
@@ -176,7 +212,9 @@ const restored = (captures: readonly QuestionCapture[]): string => JSON.stringif
 const isCovered = (record: QuestionRecord, capture: QuestionCapture): boolean =>
   JSON.stringify(withCaptures({ ...emptyQuestions(), records: [record] }, [capture]).records) === JSON.stringify([record])
 
-// Which capture files can go (their hashes). A capture of a question goes only when all of these hold:
+// Which capture files can go, each with the file that lets it go: the retirement proof, or the
+// newest newer copy that holds what it holds. The trim reads exactly those again before it removes
+// anything (#416). A capture of a question goes only when all of these hold:
 // - it is not among the newest `keep` captures;
 // - the ledger file itself holds that question, with everything the capture adds, so no
 //   unresolved question lives only in a copy that is removed;
@@ -186,7 +224,7 @@ const isCovered = (record: QuestionRecord, capture: QuestionCapture): boolean =>
 //   a newer copy of the same kind for the same question already holds everything this one does,
 //   which leaves the newest copy of each kind in place, so a ledger lost later is rebuilt as before.
 // Anything else stays, even when that leaves more than `keep` files.
-export const prunableCaptures = (ledger: QuestionLedger, held: readonly HeldCapture[], retired: readonly string[], keep = QUESTION_FILES_KEPT): string[] => {
+export const captureCovers = (ledger: QuestionLedger, held: readonly HeldCapture[], retired: readonly string[], keep = QUESTION_FILES_KEPT): CaptureCover[] => {
   const ordered = newestFirst(held)
   const candidates = ordered.slice(keep)
   if (candidates.length === 0) return []
@@ -199,16 +237,28 @@ export const prunableCaptures = (ledger: QuestionLedger, held: readonly HeldCapt
     if (same === undefined) byQuestion.set(one.capture.record.id, [one])
     else same.push(one)
   }
-  return candidates.filter(one => {
+  // What each copy restores on its own, worked out once however many older copies it is weighed against.
+  const restoredAlone = new Map<string, string>()
+  const alone = (one: HeldCapture): string => {
+    const text = restoredAlone.get(one.hash) ?? restored([one.capture])
+    restoredAlone.set(one.hash, text)
+    return text
+  }
+  return candidates.flatMap<CaptureCover>(one => {
     const record = records.get(one.capture.record.id)
-    if (record === undefined || !isCovered(record, one.capture)) return false
-    if (record.isUnresolved === false && record.resolvedAt !== undefined && retiredHashes.has(sha256(record.id))) return true
-    if (record.isUnresolved && captureJson(record, 'unresolved') === captureJson(one.capture.record, one.capture.disposition)) return false
+    if (record === undefined || !isCovered(record, one.capture)) return []
+    const proof = record.isUnresolved === false && record.resolvedAt !== undefined ? sha256(record.id) : null
+    if (proof !== null && retiredHashes.has(proof)) return [{ hash: one.hash, cover: null, retired: proof }]
+    if (record.isUnresolved && captureJson(record, 'unresolved') === captureJson(one.capture.record, one.capture.disposition)) return []
     const own = rank.get(one.hash) ?? 0
-
-    return (byQuestion.get(record.id) ?? []).some(other => (rank.get(other.hash) ?? 0) < own && other.capture.disposition === one.capture.disposition && restored([other.capture, one.capture]) === restored([other.capture]))
-  }).map(one => one.hash)
+    const cover = (byQuestion.get(record.id) ?? []).find(other => (rank.get(other.hash) ?? 0) < own && other.capture.disposition === one.capture.disposition && restored([other.capture, one.capture]) === alone(other))
+    return cover === undefined ? [] : [{ hash: one.hash, cover: cover.hash, retired: null }]
+  })
 }
+
+// The hashes alone.
+export const prunableCaptures = (ledger: QuestionLedger, held: readonly HeldCapture[], retired: readonly string[], keep = QUESTION_FILES_KEPT): string[] =>
+  captureCovers(ledger, held, retired, keep).map(one => one.hash)
 
 // Which proof files can go. Beyond the newest `keep` of its kind, a proof goes only when nothing
 // can still refer to it: a retired proof is the hash of a question id, a consumed proof the hash
@@ -391,14 +441,28 @@ export const observeQuestions = (
   const hasNewRevision = (row: Observation, record: QuestionRecord): boolean =>
     [row, ...records.filter(other => other.scope === row.scope && other.words === record.words && other.isPresent && other.isUnresolved)]
       .some(other => other.producerRevisions?.some(revision => !record.producerRevisions?.includes(revision)))
+  // Each row's words, each record's hash and the retired set are worked out once a pass, not once
+  // for every pair of row and record (#416).
+  const retired = new Set(proofs.retired)
+  const hashes = new Map<string, string>()
+  const isRetired = (record: QuestionRecord): boolean => {
+    const hash = hashes.get(record.id) ?? sha256(record.id)
+    hashes.set(record.id, hash)
+    return retired.has(hash)
+  }
   const resolved = seen.flatMap(row => {
+    if (!row.isWaiting) return []
     const copies = copiesOf(row)
-    const record = row.isWaiting ? records.find(record => record.scope === row.scope && (record.producer ?? '') === row.producer && record.words === questionWords(row.text) && record.isUnresolved === false && (row.producer !== '' || (record.resolvedAt !== undefined && record.source?.task === row.source.task && !proofs.retired.includes(sha256(record.id)) && record.occurrence === copies.indexOf(row) + 1 && record.copies === copies.length && !hasNewRevision(row, record)))) : undefined
+    const words = questionWords(row.text)
+    const record = records.find(record => record.scope === row.scope && (record.producer ?? '') === row.producer && record.words === words && record.isUnresolved === false && (row.producer !== '' || (record.resolvedAt !== undefined && record.source?.task === row.source.task && !isRetired(record) && record.occurrence === copies.indexOf(row) + 1 && record.copies === copies.length && !hasNewRevision(row, record))))
     return record === undefined ? [] : [{ row, record }]
   })
-  const rows = seen.filter(row => !resolved.some(item => item.row === row) && (row.source.kind !== 'inbox' || row.producerRevisions === undefined || row.producerRevisions.length === 0 || !row.producerRevisions.every(revision => records.some(record => record.scope === row.scope && record.isUnresolved === false && record.producerRevisions?.includes(revision)))))
+  const resolvedRows = new Set(resolved.map(item => item.row))
+  // The revisions a settled record of each scope already holds.
+  const settledRevisions = new Set(records.filter(record => record.isUnresolved === false).flatMap(record => (record.producerRevisions ?? []).map(revision => JSON.stringify([record.scope, revision]))))
+  const rows = seen.filter(row => !resolvedRows.has(row) && (row.source.kind !== 'inbox' || row.producerRevisions === undefined || row.producerRevisions.length === 0 || !row.producerRevisions.every(revision => settledRevisions.has(JSON.stringify([row.scope, revision])))))
   for (const record of records) {
-    if (proofs.retired.includes(sha256(record.id))) {
+    if (isRetired(record)) {
       record.isPresent = false
       record.isWaiting = false
     }

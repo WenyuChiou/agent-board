@@ -1,7 +1,7 @@
 import { test, expect } from 'claude-code/testing'
 import { parseProgress } from '../hooks/parse'
 import { buildView } from '../hooks/view'
-import { acknowledgementKeys, archiveQuestionsKept, captureJson, emptyQuestions, isAskedBy, isQuestionSnapshot, isTornLedger, ledgerLeftovers, LEDGER_TEMP_MS, migratedAnswered, migrationKey, observeQuestions, ownQuestionsKey, parseCapture, parseQuestions, prunableCaptures, prunableProofs, questionFilesKey, questionsJson, resolveQuestion, resolvedQuestionsToRetire, withCaptures } from '../hooks/questions'
+import { acknowledgementKeys, archiveQuestionsKept, captureCovers, captureJson, emptyQuestions, isAskedBy, isQuestionSnapshot, isTornLedger, ledgerLeftovers, LEDGER_TEMP_MS, migratedAnswered, migrationKey, observeQuestions, ownQuestionsKey, parseCapture, parseQuestions, prunableCaptures, prunableProofs, questionFilesKey, questionsJson, resolveQuestion, resolvedQuestionsToRetire, withCaptures } from '../hooks/questions'
 import type { QuestionLedger } from '../hooks/questions'
 import { edited, finished, held, ledgerOf, named, proof, question, reopened } from './fixtures/question-files'
 import { STRINGS } from '../hooks/strings'
@@ -619,6 +619,20 @@ test('an answered question keeps its copies until its retirement proof exists', 
   const ledger = ledgerOf(answered, ...fillers.map(one => one.capture.record))
   expect(prunableCaptures(ledger, [...copies, ...fillers], [])).toEqual([])
   expect(new Set(prunableCaptures(ledger, [...copies, ...fillers], [sha256(answered.id)]))).toEqual(named(copies))
+})
+
+test('each capture that can go is named with the file that lets it go: its retirement proof, or the newest newer copy that holds what it holds', () => {
+  const answered = finished(1)
+  const old = [held(reopened(answered), 'unresolved', 1), held(answered, 'resolved', 2)]
+  const snapshots = Array.from({ length: 20 }, (_, version) => held(edited(9, version), 'unresolved', 100 + version))
+  // The newest file is a resolved copy of the open question, so it covers none of its open copies.
+  const resolved = held(finished(9), 'resolved', 200)
+  const covers = captureCovers(ledgerOf(answered, edited(9, 19)), [...old, ...snapshots, resolved], [sha256(answered.id)])
+  const byHash = (one: { hash: string }, other: { hash: string }): number => one.hash.localeCompare(other.hash)
+  expect([...covers].sort(byHash)).toEqual([
+    ...old.map(one => ({ hash: one.hash, cover: null, retired: sha256(answered.id) })),
+    ...snapshots.slice(0, 5).map(one => ({ hash: one.hash, cover: snapshots[19]!.hash, retired: null })),
+  ].sort(byHash))
 })
 
 test('question proofs beyond the newest 16 go only when no ledger record, capture or acknowledgement refers to them', () => {

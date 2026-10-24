@@ -29,7 +29,7 @@ import { qrModules, qrText } from '../hooks/qr'
 import { langOf, plainReason, STRINGS } from '../hooks/strings'
 import { answeredJson, answeredPath, buildView, manualDoneSeen, parseAnswered, parseSeen, seenJson, seenPath, taskFingerprint, withAnswered, withSeen } from '../hooks/view'
 import type { TaskRef } from '../hooks/view'
-import { acknowledgementKeys, archiveQuestionsKept, captureHashOf, captureJson, capturePath, cutOffScopes, emptyQuestions, parseCapture, withCaptures, isAskedBy, isQuestionProof, isQuestionSnapshot, isTornLedger, migratedAnswered, observeQuestions, parseQuestions, questionProofJson, questionProofOf, questionProofPath, questionsJson, questionsPath, resolvedQuestionsToRetire } from '../hooks/questions'
+import { acknowledgementKeys, archiveQuestionsKept, captureHashOf, captureJson, capturePath, copiesToKeep, cutOffScopes, emptyQuestions, identitiesToRetire, parseCapture, withCaptures, isAskedBy, isQuestionProof, isQuestionSnapshot, isTornLedger, migratedAnswered, observeQuestions, parseQuestions, questionProofJson, questionProofOf, questionProofPath, questionsJson, questionsPath, resolvedQuestionsToRetire } from '../hooks/questions'
 import type { QuestionCapture, QuestionProofs, QuestionRecord } from '../hooks/questions'
 import { sha256 } from '../hooks/sha256'
 
@@ -415,15 +415,8 @@ const view = (source = read(path), now = Date.now()) => {
       let next = observeQuestions(current, projects, null, answered, now, isSettled, incarnation, proofs ?? undefined, turns, [], frozen).ledger
       const captures = readQuestionCaptures()
       if (captures === null) return null
-      for (const record of next.records) {
-        if (record.source === undefined) continue
-        if (record.isUnresolved && !captures.some(capture => captureJson(capture.record, capture.disposition) === captureJson(record, 'unresolved'))) keepQuestionCapture(record, 'unresolved')
-        if (record.isUnresolved === false && current.records.some(old => old.id === record.id && old.isUnresolved === true)) keepQuestionCapture(record, 'resolved')
-      }
-      const retiredResolutions = resolvedQuestionsToRetire(current, projects, null, turns, frozen)
-      for (const old of current.records) {
-        if ((old.isPresent && !next.records.some(record => record.id === old.id && ((record.isPresent && record.isWaiting) || record.resolvedAt !== undefined))) || retiredResolutions.includes(old.id)) keepQuestionProof('retired', sha256(old.id))
-      }
+      for (const copy of copiesToKeep(current, next, captures)) keepQuestionCapture(copy.record, copy.disposition)
+      for (const id of identitiesToRetire(current, next, resolvedQuestionsToRetire(current, projects, null, turns, frozen), proofs?.retired)) keepQuestionProof('retired', sha256(id))
       proofs = readQuestionProofs()
       if (proofs === null) return null
       next = observeQuestions(current, projects, null, answered, now, isSettled, incarnation, proofs, turns, [], frozen).ledger
@@ -440,8 +433,9 @@ const view = (source = read(path), now = Date.now()) => {
           const latestProofs = readQuestionProofs()
           if (latestProofs === null) return null
           const next = migratedAnswered(current, lastQuestions, latestProofs.consumed)
+          const consumed = new Set(latestProofs.consumed)
           for (const key of current) {
-            if (Object.hasOwn(lastQuestions.legacy, key) && !latestProofs.consumed.includes(sha256(key))) keepQuestionProof('consumed', sha256(key))
+            if (Object.hasOwn(lastQuestions.legacy, key) && !consumed.has(sha256(key))) keepQuestionProof('consumed', sha256(key))
           }
           return answeredJson(next) === answeredJson(current) ? before : answeredJson(next)
         })
