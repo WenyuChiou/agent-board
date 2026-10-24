@@ -3683,9 +3683,15 @@ test('antigravity: setup-agent keeps the content and order of third-party hooks 
 test('Antigravity reports its own waiting question with the command bound by native hooks', async () => {
   for (const lang of ['en', 'zh-TW', 'zh-CN']) for (const connector of ['setup', 'connect']) await fixture(async f => {
     mkdirSync(join(f.home, '.gemini', 'antigravity-cli'), { recursive: true })
-    const progress = join(f.home, 'synthetic %literal% ` $ board', 'progress.md')
+    // POSIX hook installation rejects shell expansion characters; its quoted
+    // paths still accept spaces and apostrophes. Windows uses encoded hooks.
+    const folder = process.platform === 'win32' ? 'synthetic %literal% ` $ board' : "synthetic literal's board"
+    const progress = join(f.home, folder, 'progress.md')
     if (connector === 'connect') legacyConnect(f, progress, 'connect', lang)
-    else assert.equal(f.install('--agent', 'antigravity', '--lang', lang, '--progress-file', progress, '--apply').status, 0)
+    else {
+      const installed = f.install('--agent', 'antigravity', '--lang', lang, '--progress-file', progress, '--apply')
+      assert.equal(installed.status, 0, `${connector} ${lang}: ${installed.stderr}${installed.stdout}`)
+    }
     const hooks = JSON.parse(readFileSync(join(f.home, '.gemini', 'config', 'hooks.json'), 'utf8'))[connector === 'connect' ? 'agent-board' : 'agent-board-local']
     const conversationId = 'synthetic-agy-question-session'
     const payload = { conversationId, session_id: 'synthetic-foreign-session', invocationNum: 0, transcriptPath: 'PRIVATE_TRANSCRIPT_DO_NOT_OPEN', prompt: 'PRIVATE_PROMPT', toolCall: { args: 'PRIVATE_TOOL' } }
