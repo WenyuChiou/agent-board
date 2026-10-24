@@ -17,6 +17,7 @@ import { basename, dirname, join, resolve } from 'node:path'
 import { archivableAsking, confirmMatches, confirmTask, CUT_SETTLE_MS, cutBlockLines, cutOffBlocks, cutOffSpans, mergeBlock, takeArchivable, takeManualDone, takeTask, setManualStep } from '../hooks/blocks'
 import type { ConfirmedTask } from '../hooks/blocks'
 import { startServer } from './board-serve'
+import { immutableQuestionFiles } from './question-files'
 import { idleTimeout } from '../hooks/serve'
 import { boardKey, boardScreen, boardText, CHAT_MAX, chatText, doneToday, emptyBoardState, peekInbox, boardItems, pinned, redact } from '../hooks/board'
 import type { BoardAction, BoardState } from '../hooks/board'
@@ -30,7 +31,7 @@ import { langOf, plainReason, STRINGS } from '../hooks/strings'
 import { answeredJson, answeredPath, buildView, manualDoneSeen, parseAnswered, parseSeen, seenJson, seenPath, taskFingerprint, withAnswered, withSeen } from '../hooks/view'
 import type { TaskRef } from '../hooks/view'
 import { acknowledgementKeys, archiveQuestionsKept, captureHashOf, captureJson, capturePath, copiesToKeep, cutOffScopes, emptyQuestions, identitiesToRetire, parseCapture, withCaptures, isAskedBy, isQuestionProof, isQuestionSnapshot, isTornLedger, migratedAnswered, observeQuestions, parseQuestions, questionProofJson, questionProofOf, questionProofPath, questionsJson, questionsPath, resolvedQuestionsToRetire } from '../hooks/questions'
-import type { QuestionCapture, QuestionProofs, QuestionRecord } from '../hooks/questions'
+import type { QuestionCapture, QuestionLedger, QuestionProofs, QuestionRecord } from '../hooks/questions'
 import { sha256 } from '../hooks/sha256'
 
 // The line `/progress connect` puts above the bundle sets it.
@@ -181,6 +182,23 @@ let lastQuestions = emptyQuestions()
 const questionWriter = randomUUID()
 let questionWrite = 0
 const isQuestionWriter = !args.includes('--chat') && args.some(arg => ['--watch', '--serve', '--serve-child', '--keys'].includes(arg))
+const isPersistentQuestions = !args.includes('--chat') && args.some(arg => ['--watch', '--serve', '--serve-child'].includes(arg))
+let isViewQuestionRead = false
+let tornQuestionCache: { text: string; isTorn: boolean } | null = null
+let parsedQuestionCache: { file: string; text: string; isMissing: boolean; ledger: QuestionLedger | null } | null = null
+let capturedQuestionCache: { ledger: QuestionLedger; captures: QuestionCapture[]; merged: QuestionLedger } | null = null
+const tornQuestions = (text: string): boolean => {
+  if (tornQuestionCache?.text === text) return tornQuestionCache.isTorn
+  const isTorn = isTornLedger(text)
+  tornQuestionCache = { text, isTorn }
+  return isTorn
+}
+const parsedQuestions = (file: string, text: string, isMissing: boolean): QuestionLedger | null => {
+  if (parsedQuestionCache?.file === file && parsedQuestionCache.text === text && parsedQuestionCache.isMissing === isMissing) return parsedQuestionCache.ledger
+  const ledger = parseQuestions(text, isMissing)
+  parsedQuestionCache = { file, text, isMissing, ledger }
+  return ledger
+}
 
 // Neither a quarantine nor a missing ledger may replace another session's complete file.
 // mv -n also returns zero when it skips a destination, so check that the source is gone.
@@ -229,7 +247,7 @@ const quarantineQuestions = (file: string): boolean => {
 const readQuestions = (file: string, text?: string) => {
   if (text === undefined) {
     text = read(file)
-    if (isQuestionWriter && isTornLedger(text)) {
+    if (isQuestionWriter && tornQuestions(text)) {
       if (!quarantineQuestions(file)) return null
       text = read(file)
     }
@@ -241,47 +259,36 @@ const readQuestions = (file: string, text?: string) => {
     if ((error as { code?: string } | null)?.code !== 'ENOENT') throw fileError(file, error)
     isMissing = true
   }
-  const parsed = parseQuestions(text, isMissing)
+  const parsed = parsedQuestions(file, text, isMissing)
   const captures = readQuestionCaptures()
-  return parsed === null || captures === null ? null : withCaptures(parsed, captures)
+  if (parsed === null || captures === null) return null
+  if (capturedQuestionCache?.ledger === parsed && capturedQuestionCache.captures === captures) return capturedQuestionCache.merged
+  const merged = withCaptures(parsed, captures)
+  capturedQuestionCache = { ledger: parsed, captures, merged }
+  return merged
 }
 // A capture or proof file is named by the hash of what it holds, so a listed name is read and
 // checked once, and again only if its size or time moves (#156): --watch draws every 2 seconds.
-const capturesRead = new Map<string, { stamp: string; capture: QuestionCapture }>()
-const proofsRead = new Map<string, string>()
-const stampOf = (file: string): string => {
-  const one = statSync(file)
-  return `${one.size}:${one.mtimeMs}`
-}
-// What a listing did not show is forgotten, so the memory follows the folder.
-const forgetUnlisted = (known: Map<string, unknown>, listed: ReadonlySet<string>): void => {
-  for (const file of known.keys()) if (!listed.has(file)) known.delete(file)
-}
-const readQuestionCaptures = (): QuestionCapture[] | null => {
-  try {
-    const captures: QuestionCapture[] = []
-    const listed = new Set<string>()
-    for (const name of readdirSync(dirname(path))) {
-      const hash = captureHashOf(path, name)
-      if (hash === null) continue
-      const file = capturePath(path, hash)
-      listed.add(file)
-      const stamp = stampOf(file)
-      const remembered = capturesRead.get(file)
-      let capture = remembered?.stamp === stamp ? remembered.capture : null
-      if (capture === null) {
-        capture = parseCapture(read(file), hash)
-        if (capture === null) return null
-        capturesRead.set(file, { stamp, capture })
-      }
-      captures.push(capture)
-    }
-    forgetUnlisted(capturesRead, listed)
-    return captures
-  } catch {
-    return null
-  }
-}
+const captureFiles = immutableQuestionFiles<QuestionCapture>({
+  directory: dirname(path),
+  isPersistent: isPersistentQuestions,
+  accepts: name => captureHashOf(path, name) !== null,
+  parse: (text, name) => {
+    const hash = captureHashOf(path, name)
+    return hash === null ? null : parseCapture(text, hash)
+  },
+})
+const readQuestionCaptures = (): QuestionCapture[] | null => captureFiles.read(!isViewQuestionRead)
+const proofFiles = immutableQuestionFiles<{ kind: keyof QuestionProofs; hash: string }>({
+  directory: dirname(path),
+  isPersistent: isPersistentQuestions,
+  accepts: name => questionProofOf(path, name) !== null,
+  parse: (text, name) => {
+    const proof = questionProofOf(path, name)
+    return proof !== null && isQuestionProof(text, proof.kind, proof.hash) ? proof : null
+  },
+})
+let questionProofCache: { files: { kind: keyof QuestionProofs; hash: string }[]; proofs: QuestionProofs } | null = null
 const keepQuestionCapture = (record: QuestionRecord, disposition: QuestionCapture['disposition']): void => {
   const text = captureJson(record, disposition)
   const file = capturePath(path, sha256(text))
@@ -293,29 +300,17 @@ const keepQuestionCapture = (record: QuestionRecord, disposition: QuestionCaptur
     if ((error as { code?: string } | null)?.code !== 'EEXIST') throw fileError(file, error)
   }
   if (read(file) !== text) throw fileError(file, { code: 'EAGAIN' })
+  captureFiles.invalidate(basename(file))
 }
 const readQuestionProofs = (): QuestionProofs | null => {
-  try {
-    if (pendingQuestionProofs.size > 0) return null
-    const proofs: QuestionProofs = { retired: [], consumed: [] }
-    const listed = new Set<string>()
-    for (const name of readdirSync(dirname(path))) {
-      const proof = questionProofOf(path, name)
-      if (proof === null) continue
-      const file = questionProofPath(path, proof.kind, proof.hash)
-      listed.add(file)
-      const stamp = stampOf(file)
-      if (proofsRead.get(file) !== stamp) {
-        if (!isQuestionProof(read(file), proof.kind, proof.hash)) return null
-        proofsRead.set(file, stamp)
-      }
-      proofs[proof.kind].push(proof.hash)
-    }
-    forgetUnlisted(proofsRead, listed)
-    return proofs
-  } catch {
-    return null
-  }
+  if (pendingQuestionProofs.size > 0) return null
+  const files = proofFiles.read(!isViewQuestionRead)
+  if (files === null) return null
+  if (questionProofCache?.files === files) return questionProofCache.proofs
+  const proofs: QuestionProofs = { retired: [], consumed: [] }
+  for (const proof of files) proofs[proof.kind].push(proof.hash)
+  questionProofCache = { files, proofs }
+  return proofs
 }
 const pendingQuestionProofs = new Map<string, { kind: keyof QuestionProofs; hash: string }>()
 const keepQuestionProof = (kind: keyof QuestionProofs, hash: string): void => {
@@ -330,6 +325,7 @@ const keepQuestionProof = (kind: keyof QuestionProofs, hash: string): void => {
     if ((error as { code?: string } | null)?.code !== 'EEXIST') throw fileError(file, error)
   }
   if (!isQuestionProof(read(file), kind, hash)) throw fileError(file, { code: 'EAGAIN' })
+  proofFiles.invalidate(basename(file))
   pendingQuestionProofs.delete(file)
 }
 // A file that cannot be looked at is not settled, as view() reads it.
@@ -358,7 +354,7 @@ const keepAskedQuestions = (projects: ReturnType<typeof parseProgress>, ref: Tas
 
   return true
 }
-const view = (source = read(path), now = Date.now()) => {
+const readBoardView = (source: string, now: number) => {
   for (const proof of [...pendingQuestionProofs.values()]) keepQuestionProof(proof.kind, proof.hash)
   const projects = parseProgress(source)
   const turns = pending(text => redact(text, homeOrNone(), process.platform === 'win32'))
@@ -420,7 +416,7 @@ const view = (source = read(path), now = Date.now()) => {
       proofs = readQuestionProofs()
       if (proofs === null) return null
       next = observeQuestions(current, projects, null, answered, now, isSettled, incarnation, proofs, turns, [], frozen).ledger
-      const raw = parseQuestions(before, !existsSync(file))
+      const raw = parsedQuestions(file, before, !existsSync(file))
       return raw !== null && questionsJson(next) === questionsJson(raw) ? before : questionsJson(next)
     })
     if (wrote !== null) {
@@ -448,6 +444,11 @@ const view = (source = read(path), now = Date.now()) => {
   const warnings = [...(tail === null ? [] : [s.progressIncomplete(tail.tasks)]), ...sizeWarnings({ progress: Buffer.byteLength(source), store: 0 }, s)]
   const health = cutBlockLines(cutOffBlocks(source, isCutSettled), s)
   return { ...buildView(projects, [basename(process.cwd())], null, now, countDay(journalToday(now), now), manualDoneSeen(projects, seen, now, s), s, answered, seen, questions, readQuestionProofs(), turns, frozen), ...(warnings.length === 0 ? {} : { warning: warnings.join(' · ') }), ...(health.length === 0 ? {} : { health }) }
+}
+
+const view = (source = read(path), now = Date.now()) => {
+  isViewQuestionRead = true
+  try { return readBoardView(source, now) } finally { isViewQuestionRead = false }
 }
 
 const freshView = () => {

@@ -2,6 +2,7 @@
 // Node, no Claude Code. Needs Node 22.18+ or 24 (it reads hooks/board-script.ts directly).
 import { execFile, execFileSync, spawn, spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
+import { EventEmitter } from 'node:events'
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs'
 import { request } from 'node:http'
 import { createServer as createNetServer } from 'node:net'
@@ -23,6 +24,7 @@ import { liveBoardScript } from '../hooks/live-page.ts'
 import { EN } from '../hooks/strings-en.ts'
 import { ZH_TW } from '../hooks/i18n.ts'
 import { ZH_CN } from '../hooks/strings-zh-cn.ts'
+import { immutableQuestionFiles } from '../scripts/question-files.ts'
 
 const TORN_NOW = Date.parse('2026-10-20T12:00:00Z')
 const tornDay = () => '# Progress\r\n\r\n## Synthetic day\r\n### Hand task alpha\r\n- [ ] Plan\r\n\r\n### Hand task beta\r\n- [ ] Review\r\n\r\n' +
@@ -4733,6 +4735,176 @@ process.on('exit', () => process.stderr.write('READS ' + JSON.stringify(counts) 
   assert.equal(counts.length, 4, counted.stderr)
   assert.ok(counts.every(count => count === 1), counted.stderr)
   assert.deepEqual(counted.files, files)
+})
+
+const questionFilesFixture = (hasWatchFailure = false) => {
+  const root = mkdtempSync(join(tmpdir(), 'agent-board-question-files-'))
+  const directory = join(root, 'files')
+  mkdirSync(directory)
+  const watchers = []
+  const reader = immutableQuestionFiles({
+    directory, isPersistent: true,
+    accepts: name => /^[a-f0-9]{64}\.question$/.test(name),
+    parse: (text, name) => sha(text) === name.slice(0, 64) ? { text } : null,
+    watchFiles: (_directory, changed) => {
+      if (hasWatchFailure) throw new Error('synthetic watcher unavailable')
+      const watcher = new EventEmitter()
+      watcher.close = () => { watcher.isClosed = true; watcher.emit('close') }
+      watcher.unref = () => {}
+      watcher.changed = name => changed('change', name)
+      watchers.push(watcher)
+      return watcher
+    },
+  })
+  const add = text => {
+    const name = `${sha(text)}.question`
+    writeFileSync(join(directory, name), text)
+    return name
+  }
+  return { root, directory, reader, watchers, add, end: () => { reader.close(); rmSync(root, { recursive: true, force: true }) } }
+}
+
+test('question companion hints validate new files and forget deleted files before they reappear', () => {
+  const fixture = questionFilesFixture()
+  try {
+    const name = fixture.add('first immutable question')
+    const first = fixture.reader.read(false)
+    assert.equal(first.length, 1)
+    assert.equal(fixture.reader.read(false), first)
+    fs.unlinkSync(join(fixture.directory, name))
+    assert.deepEqual(fixture.reader.read(false), [])
+    fixture.add('first immutable question')
+    const returned = fixture.reader.read(false)
+    assert.deepEqual(returned, first)
+    assert.notEqual(returned[0], first[0])
+    fixture.add('second immutable question')
+    assert.equal(fixture.reader.read(false).length, 2)
+  } finally { fixture.end() }
+})
+
+test('question companion hints reread a changed file even when its size and modification time stay fixed', () => {
+  const fixture = questionFilesFixture()
+  try {
+    const text = 'an immutable question'
+    const name = fixture.add(text)
+    const file = join(fixture.directory, name)
+    const before = statSync(file)
+    assert.equal(fixture.reader.read(false).length, 1)
+    writeFileSync(file, text.replace('an', 'xx'))
+    utimesSync(file, before.atime, before.mtime)
+    fixture.watchers[0].changed(name)
+    assert.equal(fixture.reader.read(false), null)
+    writeFileSync(file, text)
+    fixture.watchers[0].changed(null)
+    assert.equal(fixture.reader.read(false)[0].text, text)
+  } finally { fixture.end() }
+})
+
+test('question companion actions check changed metadata before a watcher event arrives', () => {
+  const fixture = questionFilesFixture()
+  try {
+    const name = fixture.add('immutable action evidence')
+    assert.equal(fixture.reader.read(false).length, 1)
+    writeFileSync(join(fixture.directory, name), 'corrupted before an action')
+    assert.equal(fixture.reader.read(), null)
+    assert.equal(fixture.reader.read(false), null)
+  } finally { fixture.end() }
+})
+
+test('question companion watcher errors and unavailable watchers fall back to full metadata checks', () => {
+  for (const hasWatchFailure of [false, true]) {
+    const fixture = questionFilesFixture(hasWatchFailure)
+    try {
+      const name = fixture.add('immutable fallback evidence')
+      assert.equal(fixture.reader.read(false).length, 1)
+      if (!hasWatchFailure) fixture.watchers[0].emit('error', new Error('synthetic watcher failed'))
+      writeFileSync(join(fixture.directory, name), 'corrupt fallback evidence')
+      assert.equal(fixture.reader.read(false), null)
+    } finally { fixture.end() }
+  }
+})
+
+test('question companion directory replacement reattaches the watcher and discards its old contents', () => {
+  const fixture = questionFilesFixture()
+  try {
+    fixture.add('old directory evidence')
+    assert.equal(fixture.reader.read(false).length, 1)
+    renameSync(fixture.directory, join(fixture.root, 'old-files'))
+    mkdirSync(fixture.directory)
+    fixture.add('new directory evidence')
+    assert.deepEqual(fixture.reader.read(false), [{ text: 'new directory evidence' }])
+    assert.equal(fixture.watchers.length, 2)
+    assert.equal(fixture.watchers[0].isClosed, true)
+  } finally { fixture.end() }
+})
+
+test('a persistent page keeps question metadata work flat as immutable companions accumulate', { timeout: 30_000 }, async t => {
+  const board = serveIn()
+  const seed = chatRun(['--keys', ''], { file: askingBoard, inspect: sweepFiles })
+  assert.equal(seed.status, 0, seed.stderr)
+  writeFileSync(board.path, seed.board)
+  for (const [name, text] of Object.entries(seed.files)) writeFileSync(join(board.dir, name), text)
+  const probe = join(board.dir, 'question-io-counts.json')
+  const preload = join(board.dir, 'question-io.cjs')
+  writeFileSync(preload, questionFault(`if (process.argv.includes('--serve-child')) {
+  const counts = { stat: 0, read: 0, list: 0 }
+  const family = file => /-questions-(source|retired|consumed)-[a-f0-9]{64}\\.json$/.test(String(file))
+  for (const name of ['statSync', 'lstatSync', 'readFileSync']) {
+    const original = fs[name]
+    fs[name] = (file, ...rest) => { if (family(file)) counts[name === 'readFileSync' ? 'read' : 'stat'] += 1; return original(file, ...rest) }
+  }
+  const list = fs.readdirSync
+  fs.readdirSync = (dir, ...rest) => { if (path.resolve(String(dir)) === __dirname) counts.list += 1; return list(dir, ...rest) }
+  const http = require('node:http')
+  const emit = http.Server.prototype.emit
+  const write = fs.writeFileSync
+  let sequence = 0
+  http.Server.prototype.emit = function (event, ...args) {
+    if (event === 'request') args[1].once('finish', () => write(${JSON.stringify(probe)}, JSON.stringify({ sequence: ++sequence, counts })))
+    return emit.call(this, event, ...args)
+  }
+}`))
+  board.env.NODE_OPTIONS = `--require ${JSON.stringify(preload)}`
+  const urls = []
+  try {
+    const url = board.urlOf(await board.serve())
+    assert.ok(url)
+    urls.push(url)
+    const token = new URL(url).searchParams.get('t')
+    const snapshot = () => { try { return JSON.parse(readFileSync(probe, 'utf8')) } catch { return null } }
+    const poll = async () => {
+      const before = snapshot()?.sequence ?? 0
+      const response = await fetch(new URL('/api/board', url), { headers: { 'x-board-token': token } })
+      assert.equal(response.status, 200)
+      await response.arrayBuffer()
+      for (let tries = 0; tries < 100; tries++) {
+        const current = snapshot()
+        if (current !== null && current.sequence > before) return current.counts
+        await delay(10)
+      }
+      assert.fail('the owned page did not write its request counters')
+    }
+    const work = (before, after) => Object.keys(after).reduce((sum, key) => sum + after[key] - before[key], 0)
+    await poll()
+    const first = await poll()
+    const small = work(first, await poll())
+    for (let i = 0; i < 200; i++) {
+      const hash = sha(`unrelated retired question ${i}`)
+      writeFileSync(join(board.dir, `progress-questions-retired-${hash}.json`), proofJson('retired', hash))
+    }
+    await poll()
+    const settled = await poll()
+    const afterLarge = await poll()
+    const large = work(settled, afterLarge)
+    const extra = sha('one more unrelated retired question')
+    writeFileSync(join(board.dir, `progress-questions-retired-${extra}.json`), proofJson('retired', extra))
+    const changed = work(afterLarge, await poll())
+    t.diagnostic(`question companion operations per page read: small=${small}, with 200 extra=${large}, one new=${changed}`)
+    assert.ok(large <= small + 16, `metadata work grew from ${small} to ${large} operations`)
+    assert.ok(changed <= small + 16, `one new companion caused ${changed} operations instead of bounded work near ${small}`)
+  } finally {
+    await board.end(urls)
+  }
 })
 
 test('the terminal board forgets a question copy or proof that left the folder, so one that comes back is read again', () => {
