@@ -86,6 +86,10 @@ export type World = {
   setupDone?: Promise<void>
   finishSetup?: () => void
   unwritable?: Set<string>
+  // The host's cap on one write, in bytes: a longer write is refused as the host refuses it, and
+  // its path goes in `refused` (#419).
+  writeLimit?: number
+  refused?: string[]
   ignoreQuestionWrites?: boolean
   failQuestionCapture?: 'read' | 'write'
   failStore?: (operation: 'get' | 'set', key: string) => boolean
@@ -405,6 +409,13 @@ export const engineBeneath = (on: On, world: World): MockClock => {
     world.written?.push(path)
     world.fileOps?.push(`write ${path}`)
     if (world.unwritable?.has(path) || (world.failQuestionCapture === 'write' && path.includes('-questions-source-'))) return { deny: 'EACCES' }
+    if (world.writeLimit !== undefined) {
+      const bytes = new TextEncoder().encode(e.text).length
+      if (bytes > world.writeLimit) {
+        world.refused?.push(path)
+        return { deny: `refused: ${bytes} bytes is over the ${world.writeLimit}-byte limit` }
+      }
+    }
     if (world.ignoreQuestionWrites && path.endsWith('-questions.json')) return { value: undefined }
     const hold = world.hold
     if (hold !== undefined && path === FILE) {

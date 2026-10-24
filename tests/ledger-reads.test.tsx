@@ -237,6 +237,44 @@ test('captures and proofs beyond the newest 16 are pruned at tidy, and the ledge
   expect(filesOf(world, CAPTURES)).toHaveLength(16)
 })
 
+test('twenty copies of one open question whose blocks differ only in their lines read as one copy, and all but the newest go at tidy', async ($, on) => {
+  const asked = block('a1b2c301', 'waiting', 0, '- [?] Publish the synthetic plan, OK?')
+  const others = Array.from({ length: 16 }, (_, n) => block(`c${n.toString(16).padStart(7, '0')}`, 'waiting', 0, `- [?] Keep synthetic question ${n}, OK?`)).join('')
+  const board = `## demo\n${asked}${others}`
+  const projects = parseProgress(board)
+  const ledger = observeQuestions(emptyQuestions(), projects, null, [], NOW, true, 'seed').ledger
+  const open = ledger.records.find(record => record.source?.session === 'a1b2c301')!
+  const versions = Array.from({ length: 20 }, (_, offset) => {
+    const task = parseProgress(`## demo\n${'\n'.repeat(offset)}${asked}`)[0]!.tasks[0]!
+    return { ...open, source: { ...open.source!, data: JSON.stringify(task) } }
+  })
+  const parsed = versions.map(record => {
+    const text = captureJson(record, 'unresolved')
+    return parseCapture(text, sha256(text))!
+  })
+  expect(new Set(parsed.map(capture => JSON.stringify(capture.record))).size).toBe(1)
+  expect(parsed[0]?.record.source?.data).toBe(JSON.stringify({ auto: projects[0]!.tasks[0]!.auto, steps: projects[0]!.tasks[0]!.steps.map(step => step.status) }))
+  const world = makeWorld([[FILE, board]])
+  world.env = english
+  world.ran = []
+  const clock = engineBeneath(on, world)
+  put(world, LEDGER, questionsJson(ledger), 1)
+  versions.forEach((record, n) => putCapture(world, record, 'unresolved', 1_000 + n))
+  const needed = ledger.records.filter(record => record.id !== open.id)
+  needed.forEach((record, n) => putCapture(world, record, 'unresolved', 5_000 + n))
+  await $.session.start(START)
+  await clock.advance(2000)
+  const current = captureFile(versions[19]!, 'unresolved')
+  await $.command.run(TIDY)
+  expect(filesOf(world, CAPTURES)).toHaveLength(17)
+  expect(world.files.has(current)).toBe(true)
+  for (const record of versions.slice(0, 19)) expect(world.files.has(captureFile(record, 'unresolved'))).toBe(false)
+  for (const record of needed) expect(world.files.has(captureFile(record, 'unresolved'))).toBe(true)
+  expect(removals(world)).toBe(1)
+  expect(ledgerRecords(world).find(record => record.id === open.id)?.isUnresolved).toBe(true)
+  expect(ledgerRecords(world).filter(record => record.isUnresolved)).toHaveLength(17)
+})
+
 test('twenty unresolved questions with no other copy keep all twenty captures at tidy', async ($, on) => {
   const board = `## demo\n${Array.from({ length: 20 }, (_, n) => block(`a1b2c3${n.toString(16).padStart(2, '0')}`, 'waiting', 1, `- [?] Question number ${n}, OK?`)).join('')}`
   const world = makeWorld([[FILE, board]])
@@ -396,6 +434,28 @@ test('archiving a block marks only its own questions, not those of another sessi
   expect(world.files.get(FILE)).toContain('session=a1b2c302')
   expect(capturesOf(world).filter(copy => copy.disposition === 'archived').map(copy => copy.record.words)).toEqual(['First session question, OK?'])
   expect(ledgerRecords(world).filter(record => record.isArchived).map(record => record.words)).toEqual(['First session question, OK?'])
+})
+
+test('an ended block whose hidden question\'s annotation now repeats another step\'s is not archived, and stays with both questions', async ($, on) => {
+  const first = `${'a'.repeat(64)}:1`
+  const second = `${'b'.repeat(64)}:1`
+  const boardA = `## demo\n${block('a1b2c301', 'ended', 96, `- [x] Draft the synthetic plan\n- [?] Publish the first synthetic plan, OK?\n<!-- question=${first} -->\n- [?] Publish the second synthetic plan, OK?\n<!-- question=${second} -->`)}`
+  const world = makeWorld([[FILE, boardA]])
+  world.env = english
+  seedAsked(world, boardA)
+  const hidden = ledgerRecords(world).find(record => record.producer === second)!
+  world.files.set(ANSWERED, JSON.stringify({ answered: [hidden.id] }))
+  world.files.set(FILE, boardA.replace(second, first))
+  const clock = engineBeneath(on, world)
+  await $.session.start(START)
+  await clock.advance(2000)
+  await clock.advance(2000)
+  await $.command.run(TIDY)
+  expect(world.files.get(FILE)).toContain('session=a1b2c301')
+  expect(world.files.get(FILE)).toContain('- [?] Publish the first synthetic plan, OK?')
+  expect(world.files.get(FILE)).toContain('- [?] Publish the second synthetic plan, OK?')
+  expect(capturesOf(world).filter(copy => copy.disposition === 'archived')).toEqual([])
+  expect(ledgerRecords(world).filter(record => record.isArchived)).toEqual([])
 })
 
 test('pruning reads the files afresh, so a copy damaged on disk since the polls looked is not the newer copy', async ($, on) => {
