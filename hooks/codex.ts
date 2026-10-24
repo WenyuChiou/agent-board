@@ -129,15 +129,16 @@ export const putCodexBlock = (text: string, report: CodexReport, owner: string, 
   let next: string
   if (existing) {
     const attrs = parseAttrs(lines[existing.start] ?? '')
-    if (!existing.isClosed || attrs.owner !== owner || attrs.agent !== agent) throw new Error('BLOCK_CONFLICT')
+    if (attrs.owner !== owner || attrs.agent !== agent) throw new Error('BLOCK_CONFLICT')
+    const last = existing.isClosed ? existing.end : existing.start
     const offset = (index: number): number => lines.slice(0, index).reduce((total, line) => total + line.length + 1, 0)
-    const end = offset(existing.end) + (lines[existing.end] ?? '').replace(/\r$/, '').length
+    const end = offset(last) + (lines[last] ?? '').replace(/\r$/, '').length
     // Only a report that changes the project moves the block (#246). Any other write keeps
     // its place, so a block someone moved, or a heading the parser reads differently, stays.
     const project = isProjectChanged ? parseProgress(text).find(project => project.tasks.some(task => task.auto?.session === id)) : undefined
     // Compare names as the parser reads them: it drops a heading's trailing `#`.
     next = isProjectChanged && project?.name !== (parseProgress(`## ${report.project}`)[0]?.name ?? report.project)
-      ? append(text.slice(0, offset(existing.start)) + text.slice(offset(existing.end + 1)))
+      ? append(text.slice(0, offset(existing.start)) + text.slice(offset(last + 1)))
       : text.slice(0, offset(existing.start)) + block + text.slice(end)
   } else {
     next = append(text)

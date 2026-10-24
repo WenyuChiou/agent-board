@@ -5,7 +5,7 @@ export const PAGE_MS = 4000
 // Receipt slack on top of the connector and page polls: covers one delivery round trip on a loaded CI runner.
 export const RECEIPT_SLACK_MS = 2000
 // D24: file operations per idle poll. The page server's check is in l4-time.test.mjs. The pane's
-// is skipped there, since plain Node cannot load the pane.
+// is in tests/ledger-reads.test.tsx (#156), since plain Node cannot load the pane.
 export const IDLE_POLL_FILE_OPS = 6
 // D24, the plan's scale budget: 100 live sessions, 300 blocks, 1,000 question records.
 export const LIVE_SESSIONS = 100
@@ -37,5 +37,6 @@ export const RETIREMENT_PROGRESS_BYTES = RETIREMENT_LIVE_BLOCKS * RETIREMENT_BLO
 // different rules. PowerShell removes files older than 2 days (AddDays(-2)), and sh runs
 // find -mtime +2, which counts whole days and so keeps a file until it is 3 days old. The test runs
 // the reporter of its own system, so the cap is the larger rule, sh's: 3 days of the 2 turn files
-// a day, plus the file that run writes. PowerShell stays under it.
+// a day, plus the file that run writes. PowerShell stays under it. It counts turn files; the
+// reporters' count file dropped.log is checked on its own.
 export const RETIREMENT_INBOX_FILES = 3 * 2 + 1

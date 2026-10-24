@@ -301,11 +301,13 @@ export const countSteps = (task: ProgressTask): TaskCount => {
   return { done: counted.filter(step => step.status === 'done').length, total: counted.length }
 }
 
-export const isTaskComplete = (task: ProgressTask): boolean => {
-  const { done, total } = countSteps(task)
+export const isMarksComplete = (statuses: readonly ProgressStepStatus[]): boolean => {
+  const counted = statuses.filter(status => status !== 'cancelled')
 
-  return total > 0 ? done === total : task.steps.length > 0 && task.steps.every(step => step.status === 'cancelled')
+  return counted.length > 0 ? counted.every(status => status === 'done') : statuses.length > 0 && statuses.every(status => status === 'cancelled')
 }
+
+export const isTaskComplete = (task: ProgressTask): boolean => isMarksComplete(task.steps.map(step => step.status))
 
 // The step to highlight: the explicit `[~]`, else the first open one.
 export const currentStepIndex = (task: ProgressTask): number => {

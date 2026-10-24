@@ -1,22 +1,28 @@
 // Draws the README images from the board's own code: drawPane's tree and boardScreen's lines,
 // laid out like a terminal (terminal.ts), written as SVG. One set per language.
 //   bun docs/preview/render.ts          (run `claude --plugin-dir .` once first, for the JSX setup)
+//   bun docs/preview/render.ts cover-en (only the files whose names start with cover-en)
 // Writes docs/images/{tour,flow,promo}-<lang>.svg, docs/images/board/<agent>-<lang>-<light|dark>.svg,
-// docs/images/agents/<agent>.svg, and docs/preview/out/dashboard-<lang>.html for
+// docs/images/cover-<lang>-<light|dark>.svg (the README's animated cover), docs/images/agents/<agent>.svg,
+// docs/images/agents/chip-<agent>.svg (the README's Integrations strip; `bun docs/preview/render.ts chip-`),
+// and docs/preview/out/dashboard-<lang>.html for
 // docs/preview/png.mjs, which takes the progress.html screenshots and the social preview.
 import { mkdirSync, readdirSync, writeFileSync } from 'fs'
-import { join } from 'path'
+import { basename, join } from 'path'
 import { upsertAutoBlock } from '../../hooks/blocks'
-import { boardItems, boardScreen, emptyBoardState } from '../../hooks/board'
+import { boardItems, boardScreen, emptyBoardState, fit } from '../../hooks/board'
+import type { BoardState } from '../../hooks/board'
 import { dashboardHtml } from '../../hooks/dashboard'
 import { countDay, journalLine } from '../../hooks/journal'
 import { applyTaskCreate, applyTaskUpdate, emptyMirror } from '../../hooks/mirror'
 import { DARK, LIGHT } from '../../hooks/palette'
 import type { Palette } from '../../hooks/palette'
 import { parseProgress } from '../../hooks/parse'
+import { emptyQuestions } from '../../hooks/questions'
 import { STRINGS } from '../../hooks/strings'
-import { buildView } from '../../hooks/view'
-import { CLI_FILES, NOW, SAMPLES, SESSION, MIN } from './samples'
+import { buildView, replyHint } from '../../hooks/view'
+import { CLI_FILES, COVER, COVER_AGENTS, COVER_MARKS, COVER_MOMENTS, NOW, SAMPLES, SESSION, MIN, coverFile } from './samples'
+import type { CoverAgent, CoverSample } from './samples'
 import { AGENT_ICONS, TESTED_ICONS } from './icons'
 import type { AgentIcon } from './icons'
 import { CELL, LINE, gridSvg, keyBox, layout, rowOf, toNode, widthCells } from './terminal'
@@ -239,10 +245,11 @@ const glyph = (icon: AgentIcon, x: number, y: number, size: number): string => {
 // A near-black tile gets a faint rim, or it sinks into a dark page; a coloured one needs none.
 const isDark = (tile: string): boolean => parseInt(tile.slice(1, 3), 16) + parseInt(tile.slice(3, 5), 16) + parseInt(tile.slice(5, 7), 16) < 120
 
-// An agent's tile, `size` square, from its name; nothing for a name without one.
+// An agent's tile, `size` square, from its name. A name without a tile throws: a renamed agent
+// would otherwise drop out of a picture without a word.
 const iconTile = (name: string, x: number, y: number, size: number): string => {
   const icon = AGENT_ICONS.find(one => one.name === name)
-  if (icon === undefined) return ''
+  if (icon === undefined) throw new Error(`No tile for the agent "${name}" in AGENT_ICONS`)
   const rim = isDark(icon.tile) ? `<rect x="${x + 0.5}" y="${y + 0.5}" width="${size - 1}" height="${size - 1}" rx="${size * 0.23 - 0.5}" fill="none" stroke="#fff" stroke-opacity="0.22"/>` : ''
   return `<rect x="${x}" y="${y}" width="${size}" height="${size}" rx="${size * 0.23}" fill="${icon.tile}"/>${rim}${glyph(icon, x, y, size)}`
 }
@@ -888,6 +895,528 @@ ${terminal(mode, monoOf(lang), title, gridSvg(grid, PAD, BAR + PAD, theme), grid
 `
 }
 
+// The README's cover, a 29 s loop in six scenes, each named by a caption at the left: what Agent
+// Board is (four agents come onto one board), steps ticking live, a question jumping to the top,
+// answering it with one key, messaging an agent from the board (a preview of Send to Codex, #318,
+// whose milestone is 0.24.1) and connecting every agent with one command. The screen is the terminal board
+// (`--watch`) as boardScreen draws it at each moment (COVER and COVER_MARKS in samples.ts), each
+// agent's tile on the window's edge beside its line. The page's reply box in scene 5 is drawn in
+// the page's own words (serveSend, serveSending and messagesAcknowledged in hooks/strings-en.ts),
+// since the terminal board has none. CSS keyframes only, so GitHub plays it in an <img>; with
+// reduced motion only the last scene shows, and it alone says what the board is for.
+const COVER_LOOP = 29
+// Where each scene starts, in seconds; each ends where the next starts. Scene 5 has the most to
+// follow, so it is the longest.
+const COVER_SCENES = [0, 4.5, 9, 13.5, 18, 24]
+// When each moment of COVER_MARKS reaches the board. Claude's task closes (moment 8) half a second
+// before Codex's question comes (moment 9), so the question is the one change the eye sees.
+const COVER_AT = [0, 0.8, 1.6, 2.4, 4.9, 6, 7, 8, 9.1, 9.8, 14.5, 15.6, 16.6, 22.6, 25.6]
+// The moments the left column follows.
+const MOMENT = { asks: 9, copied: 11, opened: 12 }
+// The person's presses and the message's way to Codex: typed, sent, then Codex's reply. Each
+// receipt stays long enough to read. The veil comes down at `veil`, before the loop turns.
+const COVER_T = { up: 14.2, y: 15.3, type: 18.6, aim: 20.1, tap: 21.2, send: 21.4, arrive: 21.8, replied: 22.6, veil: 28.5 }
+const FADE = 0.3
+// A terminal redraws at once, so the board's lines and the tiles beside them change in a blink
+// rather than fading through each other.
+const REDRAW = 0.08
+// How long the pointer takes to reach the Send button.
+const POINT_IN = 0.9
+// Where the cursor is at each moment: on an agent's line or on the question at the top, whether
+// that line is open, and whether y has just copied its answer.
+type CoverCursor = { on: CoverAgent | 'ask'; isOpen?: boolean; isCopied?: boolean }
+const COVER_CURSOR: CoverCursor[] = [
+  { on: 'claude' }, { on: 'claude' }, { on: 'claude' }, { on: 'claude' },
+  { on: 'claude', isOpen: true }, { on: 'claude', isOpen: true }, { on: 'claude', isOpen: true }, { on: 'claude', isOpen: true },
+  { on: 'claude' }, { on: 'claude' }, { on: 'ask' }, { on: 'ask', isCopied: true },
+  { on: 'codex' }, { on: 'codex' }, { on: 'ask', isOpen: true },
+]
+// The left column, the gap the tiles sit in, and the margin round the picture.
+const COVER_LEFT = 40
+const COVER_COL = 362
+const COVER_GAP = 24
+const COVER_EDGE = 24
+const TILE = 24
+// The look round the window: the README's brand ground (the tour's and the promotional card's)
+// for a dark README, and the same in paper tones for a light one. Both use the brand's teal, the
+// light one a deeper shade so text in it still reads on paper; the board inside keeps its own
+// palette.
+const COVER_LOOK: Record<Mode, { sky: [string, string, string]; dot: string; dots: number; glow: number; ink: string; muted: string; accent: string; card: string; line: string; shadow: string; depth: number }> = {
+  dark: { sky: ['#0f1a24', '#0c1116', '#090b0d'], dot: '#ffffff', dots: 0.05, glow: 0.2, ink: BRAND.ink, muted: BRAND.muted, accent: DARK.accent, card: BRAND.card, line: BRAND.line, shadow: '#000000', depth: 0.55 },
+  light: { sky: ['#fdfcf8', '#f6f5f0', '#eceee8'], dot: '#1f2324', dots: 0.06, glow: 0.12, ink: '#1f2324', muted: LIGHT.muted, accent: '#00757e', card: '#ffffff', line: '#e3e4de', shadow: '#1f2324', depth: 0.16 },
+}
+type CoverScene = { caption: [string, string]; sub: string[] }
+// Each scene's caption (its second line in the accent colour) and the line under it. The chips say
+// from which release a thing is there: scene 5's follows #318's milestone, so change it here only
+// if that milestone moves, and delete it once Send to Codex has shipped. Scene 6's row is the
+// agents the command sets up, not a claim that each was checked: the README says how each was.
+const COVER_WORDS: Record<Lang, { label: string; scenes: CoverScene[]; legend: [string, string, string]; pick: string; works: string; soon: { send: string; npm: string } }> = {
+  en: {
+    label: 'Claude Code, Codex, Antigravity and OpenCode report to one board and their steps tick live; Codex asks whether to open its pull request and one key copies the answer; a message written on the board’s page reaches Codex and its reply shows, a preview coming in 0.24.1; one npx command connects every agent, on npm from 0.24.0',
+    scenes: [
+      { caption: ['Every agent,', 'one board.'], sub: ['Each one reports in by itself,', 'so you stop checking each window.'] },
+      { caption: ['Watch steps', 'tick off live.'], sub: ['Each step shows up the moment', 'the agent finishes it.'] },
+      { caption: ['Questions jump', 'to the top.'], sub: ['The agent that needs you comes first,', 'its question in plain words.'] },
+      { caption: ['Answer with', 'one key.'], sub: ['Pick the question and press y:', 'the answer is copied for Codex.'] },
+      { caption: ['Message agents', 'from the board.'], sub: ['Write to Codex from the board', 'in your browser, and see it reply.'] },
+      { caption: ['One command,', 'every agent.'], sub: ['One board for every coding agent:', 'what waits on you comes first.'] },
+    ],
+    legend: ['done', 'doing', 'to do'],
+    pick: 'Pick it',
+    works: 'SET UP BY THE SAME COMMAND',
+    soon: { send: 'Coming in 0.24.1', npm: 'On npm from 0.24.0' },
+  },
+  // Chinese headlines leave out the punctuation at the end of a line, as Chinese display type does.
+  'zh-TW': {
+    label: 'Claude Code、Codex、Antigravity、OpenCode 都回報到同一塊看板，每一步即時打勾；Codex 問能不能開 pull request，按一個鍵就複製好答案；在看板網頁寫給 Codex 的訊息，看得到它送達和回覆（0.24.1 起提供的預覽）；一行 npx 指令接上每個 agent（0.24.0 起上架 npm）',
+    scenes: [
+      { caption: ['每個 agent', '同一塊看板'], sub: ['每個 agent 都會自動回報，', '不用一個個視窗切過去。'] },
+      { caption: ['每一步', '即時打勾'], sub: ['agent 做完一步，', '看板馬上就顯示。'] },
+      { caption: ['等你回答的', '排在最上面'], sub: ['需要你的 agent 排第一，', '問題用白話寫清楚。'] },
+      { caption: ['按一個鍵', '就能回答'], sub: ['選到問題，按 y：', '答案複製好了，貼給 Codex 就好。'] },
+      { caption: ['從看板直接', '傳訊息給 agent'], sub: ['在看板網頁上寫訊息給 Codex，', '看著它送達、回覆。'] },
+      { caption: ['一行指令', '接上每個 agent'], sub: ['所有 coding agent 共用一塊看板，', '等你回答的排第一。'] },
+    ],
+    legend: ['完成', '進行中', '待辦'],
+    pick: '選它',
+    works: '同一行指令就能設定',
+    soon: { send: '0.24.1 起提供', npm: '0.24.0 起上架 npm' },
+  },
+  'zh-CN': {
+    label: 'Claude Code、Codex、Antigravity、OpenCode 都汇报到同一块看板，每一步实时打勾；Codex 问能不能开 pull request，按一个键就复制好答案；在看板网页上给 Codex 发的消息，能看到它送达和回复（0.24.1 起提供的预览）；一行 npx 命令接上每个 agent（0.24.0 起上架 npm）',
+    scenes: [
+      { caption: ['每个 agent', '同一块看板'], sub: ['每个 agent 都会自动汇报，', '不用一个个窗口切过去。'] },
+      { caption: ['每一步', '实时打勾'], sub: ['agent 做完一步，', '看板马上就显示。'] },
+      { caption: ['等你回答的', '排在最上面'], sub: ['需要你的 agent 排第一，', '问题用大白话写清楚。'] },
+      { caption: ['按一个键', '就能回答'], sub: ['选中问题，按 y：', '答案已经复制好，粘贴给 Codex 就行。'] },
+      { caption: ['从看板直接', '发消息给 agent'], sub: ['在看板网页上给 Codex 发消息，', '看着它送达、回复。'] },
+      { caption: ['一行命令', '接上每个 agent'], sub: ['所有 coding agent 共用一块看板，', '等你回答的排第一。'] },
+    ],
+    legend: ['完成', '进行中', '待办'],
+    pick: '选中它',
+    works: '同一行命令就能设置',
+    soon: { send: '0.24.1 起提供', npm: '0.24.0 起上架 npm' },
+  },
+}
+// The setup command scene 6 shows, and the agents it shows under it: the README's supported list.
+const COVER_COMMAND = 'npx @wenyuchiou/agent-board setup --apply'
+const COVER_WORKS = ['Claude Code', 'Codex', 'Antigravity', 'OpenCode', 'Cursor', 'Grok Build', 'Muse Code', 'Hermes Agent', 'OpenClaw', 'DeepSeek Harness']
+const COVER_NAMES: Record<CoverAgent, string> = { claude: 'Claude Code', codex: 'Codex', antigravity: 'Antigravity', opencode: 'OpenCode' }
+// The board's colours on the cover. In light, the board's own navy accent and olive waiting colour
+// would sit beside the cover's teal as a second accent, so the cover gives the light board the
+// brand's deep teal and a warmer amber; both read at about 5:1 on the board's ground.
+const coverPalette = (mode: Mode): Palette => (mode === 'light' ? { ...TERMINAL.light.palette, accent: '#00757e', waiting: '#946200' } : TERMINAL[mode].palette)
+
+// A rough width of a line at `size`, to fit a box round it: the fonts are not measured here.
+const textW = (text: string, size: number): number => [...text].reduce((n, ch) => n + size * (ch.charCodeAt(0) > 0x2e80 ? 1 : 0.55), 0)
+const lineText = (row: Grid[number] | undefined): string => (row ?? []).map(cell => cell.ch).join('')
+const rowKey = (row: Grid[number] | undefined): string =>
+  (row ?? []).map(cell => `${cell.ch}|${cell.style.fg ?? ''}|${cell.style.bold === true ? 1 : 0}`).join('/')
+
+// The board at moment `m`, as boardScreen prints it `cols` wide, in the terminal's colours, without
+// its last line, the keys: that line grows with the selected line's keys and would be cut short,
+// and the cover shows the keys that matter beside the window. It also leaves out two hints a
+// stranger cannot place: the one under an open question to reply in the agent's own session
+// (scene 4's words say the answer is copied for Codex, and "can't reply from here" would read as
+// the opposite at a glance), and the one under a live session's line to archive it once it stops.
+// And it names each agent once, as its tile does: the board today says "codex is working · codex".
+const coverBoard = (lang: Lang, mode: Mode, m: number, cols: number): Grid => {
+  const s = STRINGS[lang]
+  const c = COVER[lang] as CoverSample
+  const file = coverFile(c, m)
+  // Every step the sample ticks was ticked this morning, so they are what "done today" counts.
+  const view = buildView(parseProgress(file), [], null, NOW, (file.match(/^- \[x\] /gm) ?? []).length, {}, s)
+  const items = boardItems(view, [], false, false)
+  const cursor = COVER_CURSOR[m]
+  if (cursor === undefined) throw new Error(`The cover has no cursor for moment ${m}`)
+  const at = items.findIndex(item => (cursor.on === 'ask' ? item.type === 'ask' : item.type === 'row' && item.row.project === c.tasks[cursor.on].project))
+  const item = items[at]
+  if (item === undefined) throw new Error(`The cover's moment ${m} has no line for the cursor (${cursor.on}), language ${lang}`)
+  const label = item.type === 'ask' ? item.ask.task : item.type === 'row' ? item.row.title : ''
+  const copied = cursor.isCopied === true ? { note: s.copied, tone: 'done' as const, result: { key: item.key, revision: null, label } } : {}
+  const state: BoardState = { ...emptyBoardState, selected: at, key: item.key, open: cursor.isOpen === true ? item.key : null, ...copied }
+  const lines = boardScreen(view, [], state, s, { width: cols, isColor: true }).replace(/\n$/, '').split('\n')
+  if (lines.length < 3 || lines[lines.length - 2] !== '') throw new Error(`The cover's moment ${m} does not end with the board's key line, language ${lang}`)
+  const plain = boardScreen(view, [], state, s, { width: cols, isColor: false }).replace(/\n$/, '').split('\n')
+  // The hints as boardScreen prints them, so only those exact lines go.
+  const hints = new Set([s.archiveLive, ...items.flatMap(one => (one.type === 'ask' ? [replyHint(one.ask, s).where] : []))].filter(hint => hint !== '').map(hint => `    ${fit(hint, cols - 6)}`.trimEnd()))
+  const isHint = (i: number): boolean => hints.has((plain[i] ?? '').trimEnd())
+  const withNames = (line: string): string =>
+    COVER_AGENTS.reduce((text, agent) => text.replace(`${s.agentWorking(agent)} · ${agent}`, s.agentWorking(COVER_NAMES[agent])).replace(` · ${agent} › `, ` · ${COVER_NAMES[agent]} › `), line)
+  return ansiGrid(`${lines.slice(0, -2).filter((_, i) => !isHint(i)).map(withNames).join('\n')}\n`, coverPalette(mode))
+}
+
+// The board's width on the cover for a theme: as wide as its widest line in any language, so the
+// three covers keep one shape, and then wider until no moment prints a line cut short, since the
+// board cuts a line a little inside the width it is given. Worked out once per theme.
+const coverColsByMode = new Map<Mode, number>()
+const coverCols = (mode: Mode): number => {
+  const known = coverColsByMode.get(mode)
+  if (known !== undefined) return known
+  const whole = LANGS.flatMap(one => Array.from({ length: COVER_MOMENTS }, (_, m) => coverBoard(one, mode, m, 400).map(row => lineText(row).trimEnd())))
+  const isWhole = (n: number): boolean => LANGS.every((one, l) => Array.from({ length: COVER_MOMENTS }, (_, m) => m).every(m => coverBoard(one, mode, m, n).map(row => lineText(row).trimEnd()).join('\n') === (whole[l * COVER_MOMENTS + m] ?? []).join('\n')))
+  let cols = Math.max(...whole.flatMap(rows => rows.map(widthCells)))
+  while (!isWhole(cols)) {
+    cols++
+    if (cols > 200) throw new Error(`The cover's board still cuts a line at 200 columns, ${mode}`)
+  }
+  coverColsByMode.set(mode, cols)
+  return cols
+}
+
+const cover = (lang: Lang, mode: Mode): string => {
+  const s = STRINGS[lang]
+  const c = COVER[lang] as CoverSample
+  const w = COVER_WORDS[lang]
+  const t = TERMINAL[mode]
+  const look = COVER_LOOK[mode]
+  const pal = coverPalette(mode)
+  const mono = monoOf(lang)
+  const T = COVER_T
+  const isCjk = lang !== 'en'
+  if (COVER_AT.length !== COVER_MOMENTS || COVER_CURSOR.length !== COVER_MOMENTS) throw new Error(`The cover has ${COVER_AT.length} times and ${COVER_CURSOR.length} cursors for ${COVER_MOMENTS} moments`)
+  // A short list of marks would leave an agent off the board from that moment on, without a word.
+  const short = COVER_AGENTS.find(agent => COVER_MARKS[agent].length !== COVER_MOMENTS)
+  if (short !== undefined) throw new Error(`The cover has ${COVER_MARKS[short].length} marks for ${short} and ${COVER_MOMENTS} moments`)
+  if (w.scenes.length !== COVER_SCENES.length) throw new Error(`The ${lang} cover has ${w.scenes.length} captions for ${COVER_SCENES.length} scenes`)
+  const cols = coverCols(mode)
+  const boards = Array.from({ length: COVER_MOMENTS }, (_, m) => coverBoard(lang, mode, m, cols))
+  // At least 22 rows, so the left column keeps its room above the scene markers, under scene 5's
+  // card and scene 6's logos, however short the longest board is.
+  const rows = Math.max(22, ...boards.map(grid => grid.length))
+  const winX = COVER_LEFT + COVER_COL + COVER_GAP
+  const winY = COVER_EDGE
+  const winW = cols * CELL + PAD * 2
+  const W = Math.round(winX + winW + COVER_EDGE)
+  const H = Math.round(winY + BAR + PAD + rows * LINE + PAD + COVER_EDGE)
+  const p = (sec: number): string => `${((Math.max(0, Math.min(COVER_LOOP, sec)) / COVER_LOOP) * 100).toFixed(2)}%`
+  const keyframes: string[] = []
+  // Two stops at the same point (p(COVER_LOOP) is 100.00%, the same as 100%) let the later one win,
+  // which once faded the last scene out over the whole loop; stops out of order go wrong the same way.
+  const frames = (body: string): string => {
+    const stops = [...body.matchAll(/(\d+(?:\.\d+)?)%(?=[^{}]*\{)/g)].map(stop => Number(stop[1]))
+    if (!stops.every((stop, i) => i === 0 || stop > (stops[i - 1] ?? 0))) throw new Error(`The cover has a keyframe whose stops do not rise: ${body}`)
+    const name = `c${keyframes.length}`
+    keyframes.push(`@keyframes ${name} { ${body} }`)
+    return name
+  }
+  const EASE = 'animation-timing-function: cubic-bezier(0.16, 1, 0.3, 1)'
+  // On from `start`, rising a little into place, until `end`, when it fades out; from 0 it is
+  // already on, and to the loop's end it stays: the veil hides the turn, where 0% takes it off
+  // again. `rise` is how far it rises.
+  const STAY = '100% { opacity: 1 }'
+  const span = (start: number, end: number, rise = 0): string => {
+    const from = rise === 0 ? '' : `; transform: translateY(${rise}px)`
+    const on = rise === 0 ? '' : '; transform: translateY(0)'
+    const into = start <= 0 ? `0% { opacity: 1${on} }` : `0%, ${p(start)} { opacity: 0${from}; ${EASE} } ${p(start + 0.45)} { opacity: 1${on} }`
+    const out = end >= COVER_LOOP ? STAY : `${p(end - FADE)} { opacity: 1 } ${p(end)}, 100% { opacity: 0 }`
+    return frames(`${into} ${out}`)
+  }
+  const lastClass = (end: number): string => (end >= COVER_LOOP ? ' last' : '')
+  // A brief glow, on and off.
+  const glow = (start: number, length: number, peak: number): string =>
+    frames(`0%, ${p(start)} { opacity: 0 } ${p(start + 0.12)} { opacity: ${peak} } ${p(start + length)}, 100% { opacity: 0 }`)
+  // A surface's moments: the first drawn plainly, and each later one laid over it from its time,
+  // as the rows that differ from the first plus every row the one before drew, so nothing shows
+  // through when that one goes. Each row brings its own ground.
+  type Moment = { at: number; rows: Array<{ key: string; svg: string }> }
+  const layered = (moments: Moment[], ground: (i: number) => string): string => {
+    const base = moments[0]?.rows ?? []
+    const drawn = new Set<number>()
+    return [
+      base.map(row => row.svg).join(''),
+      ...moments.slice(1).map((moment, k) => {
+        moment.rows.forEach((row, i) => {
+          if (row.key !== base[i]?.key) drawn.add(i)
+        })
+        const next = moments[k + 2]
+        const end = next === undefined ? null : next.at + REDRAW
+        const name = frames(`0%, ${p(moment.at)} { opacity: 0 } ${p(moment.at + REDRAW)} { opacity: 1 } ${end === null ? STAY : `${p(end)} { opacity: 1 } ${p(end + 0.02)}, 100% { opacity: 0 }`}`)
+        const lines = [...drawn].sort((a, b) => a - b).map(i => `${ground(i)}${moment.rows[i]?.svg ?? ''}`).join('')
+        return `<g class="a ${name}${end === null ? ' last' : ''}">${lines}</g>`
+      }),
+    ].join('\n')
+  }
+
+  // The window: the board at each moment, a row at a time.
+  const theme: Theme = { ground: t.ground, ink: t.ink, edge: t.edge, muted: pal.muted, accent: pal.accent, frame: pal.frame }
+  const rowY = (i: number): number => BAR + PAD + i * LINE
+  const boardSvg = layered(
+    boards.map((grid, m) => ({ at: COVER_AT[m] ?? 0, rows: Array.from({ length: rows }, (_, i) => ({ key: rowKey(grid[i]), svg: grid[i] === undefined ? '' : gridSvg([grid[i] as Grid[number]], PAD, rowY(i), theme) })) })),
+    i => `<rect x="1" y="${rowY(i)}" width="${num(winW - 2)}" height="${LINE}" fill="${t.ground}"/>`,
+  )
+  // A soft band over the lines a moment brings that the one before did not show, as they land; in
+  // the waiting colour when a question comes.
+  // A line's words without the cursor's mark, so a line that only gains or loses the cursor does
+  // not glow as new: when Antigravity asks, the line the cursor leaves would light up as well.
+  const calm = (row: Grid[number] | undefined): string => lineText(row).replace(/^(\s*)›/, '$1 ').trimEnd()
+  const bands = boards.slice(1).map((grid, k) => {
+    const m = k + 1
+    const before = new Set(boards[k]?.map(calm) ?? [])
+    const isAsking = COVER_AGENTS.some(agent => (COVER_MARKS[agent][m] ?? '').includes('?') && !(COVER_MARKS[agent][m - 1] ?? '').includes('?'))
+    const fresh = grid.map((row, i) => i > 0 && lineText(row).trim() !== '' && !before.has(calm(row)))
+    const runs: Array<[number, number]> = []
+    fresh.forEach((isFresh, i) => {
+      if (!isFresh) return
+      const last = runs[runs.length - 1]
+      if (last !== undefined && last[1] === i - 1) last[1] = i
+      else runs.push([i, i])
+    })
+    return runs.map(([a, b]) => `<rect class="a ${glow(COVER_AT[m] ?? 0, 0.8, isAsking ? (mode === 'dark' ? 0.12 : 0.2) : 0.15)}" x="1" y="${rowY(a) - 1}" width="${num(winW - 2)}" height="${(b - a + 1) * LINE + 2}" fill="${isAsking ? pal.waiting : pal.accent}"/>`).join('')
+  }).join('')
+  // Scene 5: Codex's line lights up when the person's message reaches it, and again when it replies.
+  const codexAt = boards[MOMENT.opened]?.findIndex(row => lineText(row).replace(/^[›\s]+/, '').trimEnd() === c.tasks.codex.title) ?? -1
+  if (codexAt < 0) throw new Error(`Codex has no line on the board when the message is sent, language ${lang}`)
+  const reached = [[T.arrive, pal.accent], [T.replied, pal.done]].map(([at, colour]) => `<rect class="a ${glow(at as number, 1, 0.22)}" x="1" y="${rowY(codexAt) - 1}" width="${num(winW - 2)}" height="${2 * LINE + 2}" fill="${colour}"/>`).join('')
+  // The shadow is cast by a still rect the window's size under it, not by the window, so a change
+  // on the board does not make the viewer work the shadow out again.
+  const winH = BAR + PAD + rows * LINE + PAD
+  const windowSvg = `<rect x="${winX}" y="${winY}" width="${num(winW)}" height="${winH}" rx="12" fill="${t.ground}" filter="url(#lift)"/>${terminal(mode, mono, 'agent-board --watch', `<g clip-path="url(#board)">${boardSvg}${bands}${reached}</g>`, rows, winX, winY, cols)}`
+
+  // Each agent's tile on the window's left edge, beside its line, and the asking agent's beside
+  // its question too. A tile stays while its line does, and moves with it.
+  const tileY = (line: number): number => winY + rowY(line) + 9.5 - TILE / 2
+  type Slot = { key: string; name: string; line: number }
+  const slots = boards.map((grid, m) => COVER_AGENTS.flatMap((agent): Slot[] => {
+    const marks = COVER_MARKS[agent][m]
+    if (marks === null || marks === undefined) return []
+    const task = c.tasks[agent]
+    const own = grid.findIndex(row => lineText(row).replace(/^[›\s]+/, '').trimEnd() === task.title)
+    const asking = marks.includes('?') ? grid.findIndex(row => lineText(row).trimEnd() === `● ${s.sectionWaiting}`) + 1 : -1
+    return [
+      ...(own > 0 ? [{ key: `${agent}:row`, name: COVER_NAMES[agent], line: own }] : []),
+      ...(asking > 0 ? [{ key: `${agent}:ask`, name: COVER_NAMES[agent], line: asking }] : []),
+    ]
+  }))
+  type Segment = { name: string; line: number; from: number; to: number }
+  const segments: Segment[] = []
+  const open = new Map<string, Segment>()
+  slots.forEach((list, m) => {
+    const at = COVER_AT[m] ?? 0
+    for (const [key, segment] of open) {
+      if (list.some(slot => slot.key === key && slot.line === segment.line)) continue
+      segment.to = at
+      open.delete(key)
+    }
+    for (const slot of list) {
+      if (open.has(slot.key)) continue
+      const segment = { name: slot.name, line: slot.line, from: at, to: COVER_LOOP }
+      segments.push(segment)
+      open.set(slot.key, segment)
+    }
+  })
+  const tiles = segments.map(one => {
+    const tile = iconTile(one.name, winX - TILE / 2, Math.round(tileY(one.line) * 100) / 100, TILE)
+    if (one.from <= 0 && one.to >= COVER_LOOP) return tile
+    const on = one.from <= 0 ? '0% { opacity: 1 }' : `0%, ${p(one.from)} { opacity: 0 } ${p(one.from + REDRAW)} { opacity: 1 }`
+    const off = one.to >= COVER_LOOP ? STAY : `${p(one.to)} { opacity: 1 } ${p(one.to + REDRAW)}, 100% { opacity: 0 }`
+    return `<g class="a ${frames(`${on} ${off}`)}${lastClass(one.to)}">${tile}</g>`
+  }).join('\n')
+
+  // The left column: the board's mark, then each scene's caption, the line under it, and what the
+  // scene shows beside the board.
+  const mark = `<g transform="translate(${COVER_LEFT} 34)"><rect width="30" height="30" rx="8" fill="${BRAND.accent}"/><rect x="7" y="8" width="16" height="3.1" rx="1.55" fill="#0c1116"/><rect x="7" y="13.7" width="10.6" height="3.1" rx="1.55" fill="#0c1116"/><circle cx="20.3" cy="19.4" r="3.2" fill="${DARK.waiting}"/></g><text x="${COVER_LEFT + 42}" y="56" font-size="22" font-weight="700" fill="${look.ink}">Agent Board</text>`
+  const capY = 150
+  const capSize = isCjk ? 40 : 42
+  const subY = capY + 54 + 46
+  const subSize = isCjk ? 18 : 17
+  const propY = (k: number): number => subY + ((w.scenes[k]?.sub.length ?? 0) - 1) * 26 + 34
+  const ends = COVER_SCENES.map((_, k) => COVER_SCENES[k + 1] ?? COVER_LOOP)
+  const chip = (x: number, y: number, text: string): string => {
+    const cw = 30 + [...text].reduce((n, ch) => n + (ch.charCodeAt(0) > 0x2e80 ? 12 : 7), 0)
+    // In light, the amber is too pale for 12 px words on its own tint; a darker one reads at 6:1.
+    const ink = mode === 'light' ? '#7a5100' : pal.waiting
+    return `<rect x="${x}" y="${y}" width="${cw}" height="22" rx="11" fill="${pal.waiting}" fill-opacity="0.1" stroke="${pal.waiting}" stroke-opacity="0.55"/><circle cx="${x + 12}" cy="${y + 11}" r="3" fill="${pal.waiting}"/><text x="${x + 21}" y="${y + 15.5}" font-size="12" font-weight="600" fill="${ink}">${esc(text)}</text>`
+  }
+  const captions = w.scenes.map((scene, k) => {
+    const start = COVER_SCENES[k] ?? 0
+    const end = ends[k] ?? COVER_LOOP
+    const lines = scene.caption.map((line, i) => `<tspan x="${COVER_LEFT}" y="${capY + i * 54}"${i === 1 ? ` fill="${look.accent}"` : ''}>${esc(line)}</tspan>`).join('')
+    const sub = scene.sub.map((line, i) => `<text x="${COVER_LEFT}" y="${subY + i * 26}" font-size="${subSize}" fill="${look.muted}">${esc(line)}</text>`).join('')
+    return `<g class="a ${span(start, end, 14)}${lastClass(end)}"><text font-size="${capSize}" font-weight="800" ${HEADLINE} fill="${look.ink}">${lines}</text></g>
+<g class="a ${span(start + 0.15, end, 10)}${lastClass(end)}">${sub}</g>`
+  }).join('\n')
+
+  // Scene 1: the agents themselves, each named, as each one reaches the board, so "every agent"
+  // still reads where the board's own lines are too small to.
+  const crew = COVER_AGENTS.map((agent, k) => {
+    const x = COVER_LEFT + (k % 2) * 180
+    const y = propY(0) + Math.floor(k / 2) * 52
+    return `<g class="a ${span(COVER_AT[k] ?? 0, ends[0] ?? 0, 8)}">${iconTile(COVER_NAMES[agent], x, y, 36)}<text x="${x + 48}" y="${y + 24}" font-size="16" font-weight="600" fill="${look.ink}">${esc(COVER_NAMES[agent])}</text></g>`
+  }).join('\n')
+
+  // Scene 2: what the board's marks mean. The ▸ glyph is small in every font, so it is drawn larger
+  // to sit level with the other two.
+  const legend = (() => {
+    const y = propY(1) + 20
+    const signs: Array<[string, string, number]> = [['✓', pal.done, 17], ['▸', pal.accent, 25], ['○', pal.muted, 17]]
+    return `<g class="a ${span((COVER_SCENES[1] ?? 0) + 0.4, ends[1] ?? 0)}" font-size="17">${signs.map(([sign, colour, size], i) => `<text x="${COVER_LEFT + i * 116}" y="${y}"><tspan font-family="${mono}" font-weight="700" font-size="${size}" dy="${size > 17 ? 2 : 0}" fill="${colour}">${sign}</tspan><tspan dx="8" dy="${size > 17 ? -2 : 0}" fill="${look.ink}">${esc(w.legend[i] ?? '')}</tspan></text>`).join('')}</g>`
+  })()
+
+  // Scene 3: the question as it comes, larger, in a card like the promotional card's note.
+  const ask = (() => {
+    const y = propY(2)
+    const question = c.tasks.codex.asks?.[2] ?? ''
+    const cw = COVER_COL - 2
+    return `<g class="a ${span(COVER_AT[MOMENT.asks] ?? 0, ends[2] ?? 0, 10)}"><rect x="${COVER_LEFT}" y="${y}" width="${cw}" height="92" rx="14" fill="${look.card}" stroke="${pal.waiting}" stroke-opacity="0.85" stroke-width="1.6" filter="url(#soft)"/>
+${iconTile('Codex', COVER_LEFT + 16, y + 16, 30)}
+<text x="${COVER_LEFT + 58}" y="${y + 30}" font-size="16" font-weight="700" fill="${look.ink}">Codex</text>
+<text x="${COVER_LEFT + 58}" y="${y + 48}" font-size="13" fill="${pal.waiting}">● ${esc(c.tasks.codex.project)} · ${esc(s.sectionWaiting)}</text>
+<text x="${COVER_LEFT + 16}" y="${y + 76}" font-size="17" font-weight="600" fill="${look.ink}">${esc(question)}</text></g>`
+  })()
+
+  // Scene 4: the two keys, each pressed in turn, and what the second did. Under y, the board's own
+  // words for that answer, so the keycap and the board's line read the same.
+  const keys = (() => {
+    const y = propY(3)
+    const key = (x: number, label: string, at: number, words: string): string => {
+      const press = frames(`0%, ${p(at)} { transform: translateY(0) } ${p(at + 0.08)} { transform: translateY(3px) } ${p(at + 0.3)}, 100% { transform: translateY(0) }`)
+      return `<g class="k ${press}"><rect x="${x}" y="${y + 4}" width="54" height="54" rx="10" fill="${look.line}"/><rect x="${x}" y="${y}" width="54" height="54" rx="10" fill="${look.card}" stroke="${look.line}" stroke-width="1.5"/><text x="${x + 27}" y="${y + 36}" text-anchor="middle" font-family="${mono}" font-size="24" font-weight="700" fill="${look.ink}">${esc(label)}</text></g>
+<rect class="a ${glow(at, 0.6, 0.35)}" x="${x}" y="${y}" width="54" height="54" rx="10" fill="none" stroke="${pal.accent}" stroke-width="2.5"/>
+<text x="${x + 27}" y="${y + 82}" text-anchor="middle" font-size="14" fill="${look.muted}">${esc(words)}</text>`
+    }
+    const copied = `<g class="a ${span(COVER_AT[MOMENT.copied] ?? 0, ends[3] ?? 0)}"><text x="${COVER_LEFT}" y="${y + 122}" font-size="17" font-weight="600" fill="${pal.done}">✓ ${esc(s.copied)}</text></g>`
+    return `<g class="a ${span((COVER_SCENES[3] ?? 0) + 0.2, ends[3] ?? 0)}">${key(COVER_LEFT, '↑', T.up, w.pick)}${key(COVER_LEFT + 150, 'y', T.y, s.yesAnswer)}</g>${copied}`
+  })()
+
+  // Scene 5: Codex's card on the board's page, with its reply box and Send button. The person's
+  // words are typed in, sent (the box empties, as the page's does), and the receipt line reads
+  // Sending, then Replied: the page's steps between those pass too fast to read at this pace.
+  const sendStart = COVER_SCENES[4] ?? 0
+  const sendEnd = ends[4] ?? 0
+  const cardY = propY(4) + 30
+  const cardH = 156
+  const boxX = COVER_LEFT + 16
+  const boxY = cardY + 74
+  const BOX_H = 46
+  const sendLabel = s.serveSend('Codex')
+  const sendW = Math.round(textW(sendLabel, 13.5) + 26)
+  const boxW = COVER_COL - 2 - 32 - sendW - 8
+  const sendX = boxX + boxW + 8
+  const sendH = 34
+  const sendY = boxY + (BOX_H - sendH) / 2
+  const receiptY = boxY + BOX_H + 26
+  const composer = `<rect x="${COVER_LEFT}" y="${cardY}" width="${COVER_COL - 2}" height="${cardH}" rx="14" fill="${look.card}" stroke="${look.line}" filter="url(#soft)"/>
+${iconTile('Codex', COVER_LEFT + 16, cardY + 14, 28)}
+<text x="${COVER_LEFT + 54}" y="${cardY + 33}" font-size="16" font-weight="700" fill="${look.ink}">Codex</text>
+<text x="${COVER_LEFT + 16}" y="${cardY + 60}" font-size="13.5"><tspan font-weight="600" fill="${pal.project}">${esc(c.tasks.codex.project)}</tspan><tspan fill="${look.muted}"> › ${esc(c.tasks.codex.title)}</tspan></text>
+<rect x="${boxX}" y="${boxY}" width="${boxW}" height="${BOX_H}" rx="8" fill="${t.ground}" stroke="${pal.frame}" stroke-opacity="0.6"/>
+<text x="${boxX + 10}" y="${boxY + 21}" font-size="13" fill="${pal.muted}">${esc(s.serveMessagePlaceholder('Codex'))}</text>
+<rect x="${num(sendX)}" y="${sendY}" width="${sendW}" height="${sendH}" rx="8" fill="${look.accent}"/>
+<text x="${num(sendX + sendW / 2)}" y="${sendY + 22}" text-anchor="middle" font-size="13.5" font-weight="600" fill="${t.ground}">${esc(sendLabel)}</text>`
+  // Typed a line at a time, each uncovered from the left a letter at a time by a rect in the box's
+  // colour that shrinks to its right edge; the group covers the placeholder while it shows.
+  let typedAt = T.type
+  const typedLines = c.message.map((line, j) => {
+    const letters = [...line].length
+    const start = typedAt
+    const length = Math.max(0.6, letters * 0.035)
+    typedAt += length
+    const x = boxX + 10
+    const y = boxY + 20 + j * 18
+    const mask = frames(`0%, ${p(start)} { opacity: 1; transform: scaleX(1); animation-timing-function: steps(${letters}, end) } ${p(start + length)}, 100% { opacity: 1; transform: scaleX(0) }`)
+    return `<text x="${x}" y="${y}" font-size="13" fill="${t.ink}">${esc(line)}</text><rect class="a m ${mask}" x="${x - 2}" y="${y - 14}" width="${num(textW(line, 13) + 6)}" height="18" fill="${t.ground}"/>`
+  })
+  const typed = `<g class="a ${frames(`0%, ${p(T.type)} { opacity: 0 } ${p(T.type + 0.05)} { opacity: 1 } ${p(T.send)} { opacity: 1 } ${p(T.send + 0.05)}, 100% { opacity: 0 }`)}"><rect x="${boxX + 1}" y="${boxY + 1}" width="${boxW - 2}" height="${BOX_H - 2}" rx="7" fill="${t.ground}"/>${typedLines.join('')}</g>`
+  const tapped = `<rect class="a ${glow(T.tap, 0.5, 0.35)}" x="${num(sendX)}" y="${sendY}" width="${sendW}" height="${sendH}" rx="8" fill="#ffffff"/>`
+  const receipt = (text: string, colour: string): string => `<text x="${boxX}" y="${receiptY}" font-size="15" font-weight="600" fill="${colour}">${esc(text)}</text>`
+  // Inside the card's rounded corners, so covering one receipt with the next never clips the card.
+  const receiptGround = `<rect x="${boxX - 2}" y="${receiptY - 18}" width="${COVER_COL - 2 - 28}" height="24" fill="${look.card}"/>`
+  const receipts = [
+    [T.send, T.replied, receipt(s.serveSending('Codex'), look.accent)],
+    [T.replied, sendEnd, receipt(`✓ ${s.messagesAcknowledged}`, pal.done)],
+  ].map(([from, to, svg]) => `<g class="a ${frames(`0%, ${p(from as number)} { opacity: 0 } ${p((from as number) + 0.1)} { opacity: 1 } ${p(to as number)} { opacity: 1 } ${p((to as number) + 0.02)}, 100% { opacity: 0 }`)}">${receiptGround}${svg}</g>`).join('')
+  // The pointer: in from below onto the Send button, a press, and away once it has gone through.
+  const pointer = (() => {
+    const tipX = sendX + sendW / 2
+    const tipY = sendY + sendH * 0.62
+    const at = (x: number, y: number, k = 1): string => `transform: translate(${num(x)}px, ${num(y)}px) scale(${k})`
+    const move = 'animation-timing-function: cubic-bezier(0.3, 0.7, 0.2, 1)'
+    const name = frames(`0%, ${p(T.aim)} { opacity: 0; ${at(tipX + 90, tipY + 110)}; ${move} } ${p(T.aim + 0.2)} { opacity: 1 } ${p(T.aim + POINT_IN)} { ${at(tipX, tipY)} } ${p(T.tap)} { ${at(tipX, tipY)} } ${p(T.tap + 0.1)} { ${at(tipX, tipY, 0.86)} } ${p(T.tap + 0.25)} { ${at(tipX, tipY)} } ${p(T.send + 0.5)} { opacity: 1 } ${p(T.send + 0.8)}, 100% { opacity: 0; ${at(tipX, tipY)} }`)
+    const [fill, line] = mode === 'light' ? ['#1b1b1b', '#ffffff'] : ['#ffffff', '#1b1b1b']
+    return `<g class="a ${name}"><path d="M0 0V18.5L4.6 14.2L7.7 21.2L10.9 19.8L7.9 13H14Z" fill="${fill}" stroke="${line}" stroke-width="1.3" stroke-linejoin="round"/></g>`
+  })()
+  const send = `<g class="a ${span(sendStart + 0.2, sendEnd, 12)}">${composer}
+${typed}${tapped}
+${receipts}</g>
+${pointer}`
+  // The preview marks: sending between sessions in scene 5, the npm package in scene 6.
+  const sendChip = `<g class="a ${span(sendStart + 0.3, sendEnd)}">${chip(COVER_LEFT, propY(4) - 8, w.soon.send)}</g>`
+
+  // Scene 6: the command, large enough to read and copy, broken where a terminal would wrap it,
+  // the npm mark, and the agents it works with.
+  const setup = (() => {
+    const y = propY(5)
+    const end = COVER_LOOP
+    const size = 16
+    const boxW = COVER_COL - 2
+    const boxH = 76
+    // The ten agents in one row across the column, so they end well above the scene markers.
+    const tileSize = 28
+    const tileGap = (COVER_COL - 2 - COVER_WORKS.length * tileSize) / (COVER_WORKS.length - 1)
+    const tilesY = y + boxH + 52
+    const [program, ...rest] = COVER_COMMAND.split(' setup')
+    const works = COVER_WORKS.map((name, i) => iconTile(name, Math.round(COVER_LEFT + i * (tileSize + tileGap)), tilesY + 24, tileSize)).join('')
+    return `<g class="a ${span((COVER_SCENES[5] ?? 0) + 0.25, end, 10)} last"><rect x="${COVER_LEFT}" y="${y}" width="${boxW}" height="${boxH}" rx="12" fill="${look.card}" stroke="${look.accent}" stroke-width="1.6"/>
+<text font-family="${mono}" font-size="${size}" fill="${look.ink}"><tspan x="${COVER_LEFT + 18}" y="${y + 32}"><tspan fill="${look.muted}">$ </tspan>${esc(program ?? '')}</tspan><tspan x="${COVER_LEFT + 18 + 2 * size * 0.6}" y="${y + 56}">setup${esc(rest.join(' setup'))}</tspan></text>
+${chip(COVER_LEFT, y + boxH + 12, w.soon.npm)}</g>
+<g class="a ${span((COVER_SCENES[5] ?? 0) + 0.6, end)} last"><text x="${COVER_LEFT}" y="${tilesY + 12}" font-size="12" font-weight="700" letter-spacing="${isCjk ? 2 : 2.2}" fill="${look.muted}">${esc(w.works)}</text>${works}</g>`
+  })()
+
+  // The scene markers along the bottom of the left column: one lights for each scene. Reduced
+  // motion hides them, since the still is not one of six.
+  const pipY = H - COVER_EDGE - 10
+  const pips = `<g class="pips">${COVER_SCENES.map((_, k) => `<rect x="${COVER_LEFT + k * 34}" y="${pipY}" width="26" height="5" rx="2.5" fill="${look.muted}" fill-opacity="0.5"/>`).join('')}${COVER_SCENES.map((start, k) => `<rect class="a ${span(start, ends[k] ?? COVER_LOOP)}" x="${COVER_LEFT + k * 34}" y="${pipY}" width="26" height="5" rx="2.5" fill="${look.accent}"/>`).join('')}</g>`
+
+  // At the loop's turn the picture goes through its own ground, so the last scene's words and the
+  // first's never show mixed: the veil comes down, the frames change behind it, and it lifts.
+  const veil = `<rect class="a ${frames(`0% { opacity: 1 } ${p(0.4)}, ${p(T.veil)} { opacity: 0 } 100% { opacity: 1 }`)}" width="${W}" height="${H}" rx="18" fill="${look.sky[1]}"/>`
+  const label = w.label
+
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}" role="img" aria-label="${esc(label)}" font-family="${sansOf(lang)}">
+<title>Agent Board: ${esc(label)}</title>
+<defs><linearGradient id="sky" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="${look.sky[0]}"/><stop offset="0.55" stop-color="${look.sky[1]}"/><stop offset="1" stop-color="${look.sky[2]}"/></linearGradient>
+<radialGradient id="glow" cx="0.72" cy="0.3" r="0.6"><stop offset="0" stop-color="${look.accent}" stop-opacity="${look.glow}"/><stop offset="1" stop-color="${look.accent}" stop-opacity="0"/></radialGradient>
+<pattern id="dots" width="24" height="24" patternUnits="userSpaceOnUse"><circle cx="2" cy="2" r="1" fill="${look.dot}" fill-opacity="${look.dots}"/></pattern>
+<clipPath id="edge"><rect width="${W}" height="${H}" rx="18"/></clipPath>
+<clipPath id="board"><rect x="1" y="${BAR + 1}" width="${num(winW - 2)}" height="${PAD + rows * LINE + PAD - 13}"/></clipPath>
+<filter id="lift" x="-10%" y="-10%" width="120%" height="130%"><feDropShadow dx="0" dy="14" stdDeviation="18" flood-color="${look.shadow}" flood-opacity="${look.depth}"/></filter>
+<filter id="soft" x="-10%" y="-10%" width="120%" height="140%"><feDropShadow dx="0" dy="6" stdDeviation="8" flood-color="${look.shadow}" flood-opacity="${look.depth * 0.7}"/></filter></defs>
+<style>
+.a, .k { animation-duration: ${COVER_LOOP}s; animation-iteration-count: infinite; animation-timing-function: linear; }
+.a { opacity: 0; }
+/* A viewer that does not play CSS animation shows the last scene still; a playing one follows its keyframes. */
+.a.last { opacity: 1; }
+.m { transform-box: fill-box; transform-origin: 100% 50%; }
+${keyframes.join('\n')}
+${keyframes.map((_, i) => `.c${i} { animation-name: c${i} }`).join('\n')}
+@media (prefers-reduced-motion: reduce) {
+  .a { animation: none; opacity: 0; }
+  .k { animation: none; }
+  .pips { display: none; }
+  .last { opacity: 1; }
+}
+</style>
+<g clip-path="url(#edge)">
+<rect width="${W}" height="${H}" fill="url(#sky)"/><rect width="${W}" height="${H}" fill="url(#glow)"/><rect width="${W}" height="${H}" fill="url(#dots)"/>
+${mark}
+${captions}
+${crew}
+${legend}
+${ask}
+${keys}
+${sendChip}
+${send}
+${setup}
+${pips}
+${windowSvg}
+${tiles}
+${veil}
+</g>
+</svg>
+`
+}
+
 // fonts.py, run at the end, needs Python with fontTools 4.60 or newer and brotli; it is found
 // before anything is written, so without it the images stay as they were. Another fontTools
 // version cuts the fonts into slightly different bytes, so every image would show as changed.
@@ -906,25 +1435,71 @@ if (named !== undefined && !hasFontTools(named)) throw new Error(`PYTHON is ${na
 const python = named ?? ['python3', 'python'].find(hasFontTools)
 if (python === undefined) throw new Error('docs/preview/fonts.py needs Python 3 with fontTools 4.60 or newer: pip install "fonttools>=4.60" brotli (or set PYTHON)')
 
+// The README's Integrations strip: one chip per agent, its tile and its name in one picture.
+// GitHub breaks a line between an image and the text beside it, so a tile and a name set side
+// by side part at the end of a line. The chips take the cover's dark card and ink; the names
+// are product names, so one set serves every README. Every chip has the same height and
+// padding: its width is its name's width in Inter, which fonts.py measures for all of them at once.
+const CHIP = { height: 28, pad: 4, tile: 20, gap: 8, end: 10, size: 14, weight: 600 }
+const chipWidths = new Map<string, number>()
+const nameWidth = (name: string): number => {
+  if (chipWidths.size === 0) {
+    const names = AGENT_ICONS.map(icon => icon.name)
+    const run = Bun.spawnSync([python, join(import.meta.dir, 'fonts.py'), '--width', String(CHIP.weight), String(CHIP.size), ...names], { stderr: 'inherit' })
+    if (run.exitCode !== 0) throw new Error(`fonts.py --width stopped with exit code ${run.exitCode}`)
+    const widths = JSON.parse(run.stdout.toString()) as number[]
+    names.forEach((one, i) => chipWidths.set(one, widths[i] ?? 0))
+  }
+  const width = chipWidths.get(name)
+  if (width === undefined || width <= 0) throw new Error(`fonts.py measured no width for "${name}"`)
+  return width
+}
+const chip = (icon: AgentIcon): string => {
+  const { height, pad, tile, gap, end, size, weight } = CHIP
+  const left = pad + tile + gap
+  const width = Math.ceil(left + nameWidth(icon.name) + end)
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}" role="img" aria-label="${esc(icon.name)}" font-family="'Inter', sans-serif">
+<title>${esc(icon.name)}</title>
+<rect x="0.5" y="0.5" width="${width - 1}" height="${height - 1}" rx="${num(tile * 0.23 + pad - 0.5)}" fill="${BRAND.card}" stroke="${BRAND.line}"/>
+${iconTile(icon.name, pad, pad, tile)}
+<text x="${left}" y="${num(height / 2 + size * 0.36)}" font-size="${size}" font-weight="${weight}" fill="${BRAND.ink}">${esc(icon.name)}</text>
+</svg>
+`
+}
+
+// `bun docs/preview/render.ts cover-en` writes only the files whose names start with `cover-en`,
+// and gives only those their fonts: to try one picture out without redrawing the others.
+const only = process.argv[2]
+const written: string[] = []
+const write = (path: string, make: () => string): void => {
+  if (only !== undefined && !basename(path).startsWith(only)) return
+  writeFileSync(path, make())
+  if (path.endsWith('.svg')) written.push(path)
+}
+
 mkdirSync(join(OUT, 'agents'), { recursive: true })
-for (const icon of AGENT_ICONS) writeFileSync(join(OUT, 'agents', `${icon.file}.svg`), agentIcon(icon))
-for (const lang of LANGS) writeFileSync(join(OUT, `promo-${lang}.svg`), promo(lang))
+for (const icon of AGENT_ICONS) write(join(OUT, 'agents', `${icon.file}.svg`), () => agentIcon(icon))
+for (const icon of AGENT_ICONS) write(join(OUT, 'agents', `chip-${icon.file}.svg`), () => chip(icon))
+for (const lang of LANGS) write(join(OUT, `promo-${lang}.svg`), () => promo(lang))
 
 mkdirSync(join(OUT, 'board'), { recursive: true })
 for (const lang of LANGS) {
-  for (const agent of CLI_AGENTS) for (const mode of ['light', 'dark'] as const) writeFileSync(join(OUT, 'board', `${agent}-${lang}-${mode}.svg`), cliBoard(lang, mode, agent))
-  for (const mode of ['light', 'dark'] as const) writeFileSync(join(OUT, `pane-${lang}-${mode}.svg`), pane(lang, mode))
-  writeFileSync(join(OUT, `tour-${lang}.svg`), tour(lang))
-  writeFileSync(join(OUT, `flow-${lang}.svg`), flow(lang))
-  writeFileSync(join(PAGES, `dashboard-${lang}.html`), dashboard(lang))
+  for (const agent of CLI_AGENTS) for (const mode of ['light', 'dark'] as const) write(join(OUT, 'board', `${agent}-${lang}-${mode}.svg`), () => cliBoard(lang, mode, agent))
+  for (const mode of ['light', 'dark'] as const) write(join(OUT, `pane-${lang}-${mode}.svg`), () => pane(lang, mode))
+  for (const mode of ['light', 'dark'] as const) write(join(OUT, `cover-${lang}-${mode}.svg`), () => cover(lang, mode))
+  write(join(OUT, `tour-${lang}.svg`), () => tour(lang))
+  write(join(OUT, `flow-${lang}.svg`), () => flow(lang))
+  write(join(PAGES, `dashboard-${lang}.html`), () => dashboard(lang))
 }
 
 // Each SVG then gets the letters it draws from its fonts (fonts.py, which needs fontTools).
-const svgs = [
+const svgs = only !== undefined ? written : [
   ...readdirSync(OUT).filter(name => name.endsWith('.svg')).map(name => join(OUT, name)),
-  ...AGENT_ICONS.map(icon => join(OUT, 'agents', `${icon.file}.svg`)),
+  ...AGENT_ICONS.flatMap(icon => [join(OUT, 'agents', `${icon.file}.svg`), join(OUT, 'agents', `chip-${icon.file}.svg`)]),
   ...readdirSync(join(OUT, 'board')).filter(name => name.endsWith('.svg')).map(name => join(OUT, 'board', name)),
 ]
+if (svgs.length === 0) throw new Error(`No image's name starts with ${only}`)
 const fonts = Bun.spawnSync([python, join(import.meta.dir, 'fonts.py'), ...svgs], { stdout: 'inherit', stderr: 'inherit' })
 if (fonts.exitCode !== 0) throw new Error(`fonts.py stopped with exit code ${fonts.exitCode}`)
-console.log(`wrote the pane top, tour, flow, promotional card and CLI boards in ${LANGS.length} languages and ${AGENT_ICONS.length} agent icons to ${OUT}, and ${LANGS.length} progress.html pages to ${PAGES}`)
+if (only !== undefined) console.log(`wrote ${written.length} image(s) starting with ${only} to ${OUT}`)
+else console.log(`wrote the pane top, tour, flow, promotional card, the README cover and CLI boards in ${LANGS.length} languages and ${AGENT_ICONS.length} agent icons and chips to ${OUT}, and ${LANGS.length} progress.html pages to ${PAGES}`)

@@ -186,6 +186,7 @@ type World = {
   browserExitCode?: number
   hasNoHardLinks?: boolean
   nodeGate?: { reached: () => void; release: Promise<void> }
+  workerGate?: { reached: () => void; release: Promise<void> }
   workerFailure?: string
   bootstrapFailure?: boolean
   setupDone?: Promise<void>
@@ -369,6 +370,12 @@ const engineBeneath = (on: On, world: World): MockClock => {
     }
     if (e.argv[0] === 'node' && e.argv[3] === CONNECT_EXECUTE) {
       world.ran?.push([...e.argv])
+      if (world.workerGate !== undefined) {
+        const gate = world.workerGate
+        world.workerGate = undefined
+        gate.reached()
+        await gate.release
+      }
       try {
         if (world.workerFailure !== undefined) throw new Error(world.workerFailure)
         const stage = JSON.parse(e.argv[5] ?? '{}') as { file: string }
@@ -1561,7 +1568,7 @@ test('an unreadable failure-note map preserves both existing maps and the input'
   await clock.advance(5000)
   expect(world.store!.inboxDone).toEqual({})
   expect(world.store!.inboxFailed).toEqual({ other: '1:1792152000000:prior diagnostic' })
-  expect([...world.files.keys()].some(path => path.endsWith('.taking'))).toBe(true)
+  expect(world.files.get(`${INBOX}/${PROBE_NAME}`)).toBe(PROBE_BODY)
 })
 
 test('an invalid receipt map cannot authorize cleanup of a retained claim', async ($, on) => {
@@ -1594,6 +1601,8 @@ test('quarantining invalid input preserves an earlier failed payload with the sa
   const world = probeWorld()
   world.files.set(`${INBOX}/${PROBE_NAME}`, '{new broken input')
   world.files.set(`${INBOX}/${PROBE_NAME}.failed`, 'older evidence')
+  // Quarantined a day ago: a file given up on is kept for a week (#373).
+  world.mtimes = { [`${INBOX}/${PROBE_NAME}.failed`]: Date.parse('2026-10-15T12:00:00.000Z') }
   const clock = engineBeneath(on, world)
   await probeStart($)
   await clock.advance(5000)
@@ -3985,7 +3994,7 @@ test('the question ledger is written to a temp file and moved into place, never 
 })
 
 test('the pane says when the question ledger cannot be read', async ($, on) => {
-  const world: World = { files: new Map([[FILE, '## demo\n### Release\n- [?] Publish, OK?\n']]), mtime: 1, hasTasks: true, store: { lang: 'en', autoConnectOff: true, inboxDone: {}, opened: ['waiting'] } }
+  const world: World = { files: new Map([[FILE, '## demo\n### Release\n- [?] Publish, OK?\n']]), mtime: 1, clockOffset: 0, hasTasks: true, store: { lang: 'en', autoConnectOff: true, inboxDone: {}, opened: ['waiting'] } }
   const clock = engineBeneath(on, world)
   await $.session.start({ cwd: '/work/demo', surface: 'desktop', isInteractive: true })
   await clock.advance(2100)
@@ -3996,6 +4005,7 @@ test('the pane says when the question ledger cannot be read', async ($, on) => {
   expect(await ui.find({ type: 'Text', text: EN.questionsUnreadable() })).toBeUndefined()
   await clock.advance(2100)
   expect(await ui.find({ type: 'Text', text: EN.questionsUnreadable() })).toBeUndefined()
+  world.clockOffset = 10 * 60 * 1000
   await clock.advance(2100)
   expect({ stage: 'three failures', visible: await ui.find({ type: 'Text', text: EN.questionsUnreadable() }) !== undefined }).toEqual({ stage: 'three failures', visible: true })
   world.files.delete(QUESTIONS)
@@ -4003,6 +4013,10 @@ test('the pane says when the question ledger cannot be read', async ($, on) => {
   expect(await ui.find({ type: 'Text', text: EN.questionsUnreadable() })).toBeUndefined()
   world.files.set(QUESTIONS, '{')
   world.isMoveRefused = path => path.startsWith(`${QUESTIONS}.tmp-`)
+  await clock.advance(2100)
+  expect(await ui.find({ type: 'Text', text: EN.questionsUnreadable() })).toBeUndefined()
+  await clock.advance(2100)
+  world.clockOffset += 10 * 60 * 1000
   await clock.advance(2100)
   expect({ stage: 'quarantined but replacement failed', visible: await ui.find({ type: 'Text', text: EN.questionsUnreadable() }) !== undefined }).toEqual({ stage: 'quarantined but replacement failed', visible: true })
   world.isMoveRefused = undefined
@@ -4711,7 +4725,8 @@ test('progress.html reads only the newest thirty unprocessed inbox files', async
   engineBeneath(on, world)
   await $.session.start({ cwd: '/work/persona_framework', surface: 'terminal', isInteractive: true })
   const page = world.files.get('/home/me/.claude/progress.html') ?? ''
-  const reads = world.reads!.filter(path => path.startsWith(`${INBOX}/`))
+  // The count file the inbox writers keep beside the turns (dropped.log) is read as well; it is not a turn.
+  const reads = world.reads!.filter(path => path.startsWith(`${INBOX}/`) && !path.endsWith('/dropped.log'))
   expect(reads).toHaveLength(30)
   expect(page).toContain('Use limit 33?')
   expect(page).toContain('Use limit 4?')
@@ -4935,6 +4950,57 @@ test('a question another agent asks notifies once, not the ones already there at
   expect(seen.notified).toEqual(['codex 在問：選哪個種子'])
   await clock.advance(30 * 1000)
   expect(seen.notified).toEqual(['codex 在問：選哪個種子'])
+})
+
+// A 0.23.x session sharing the store looks for the key made of the whole question, so a 0.24 session
+// writes it too until 0.25, and that older session does not say the question again.
+test('a question another agent asks is kept as told under the short key and under the key a 0.23.x session reads', async ($, on) => {
+  const world: World = { files: new Map([[FILE, ASKED('要不要重跑 — 可以重跑嗎？')]]), mtime: 1, hasTasks: true, store: { told: { old: Date.parse('2026-10-16T00:00:00.000Z') } } }
+  const clock = engineBeneath(on, world)
+  outside(on, world)
+  await $.session.start({ cwd: '/work/persona_framework', surface: 'desktop', isInteractive: true })
+  world.files.set(FILE, ASKED('選哪個種子 — 42 還是 7'))
+  world.mtime += 1
+  await clock.advance(2000)
+  // The question there at the start and the new one are both told, each under a short key and under the key a 0.23.x session reads.
+  const keys = Object.keys(world.store?.told as Record<string, number>).filter(key => key.startsWith('ask:'))
+  const shorts = keys.filter(key => /^ask:[0-9a-f]{16}$/.test(key))
+  const olders = keys.filter(key => !/^ask:[0-9a-f]{16}$/.test(key))
+  expect(shorts).toHaveLength(2)
+  expect(olders).toHaveLength(2)
+  expect(olders.some(key => key.includes('選哪個種子'))).toBe(true)
+})
+
+test('a question told by a 0.23.x session stays quiet when only its whole-question key is saved', async ($, on) => {
+  const at = Date.parse('2026-10-16T12:00:00.000Z')
+  const board = ASKED('選哪個種子 — 42 還是 7')
+  const projects = parseProgress(board)
+  const ledger = observeQuestions(emptyQuestions(), projects, null, [], at).ledger
+  const item = buildView(projects, [], null, at, 0, {}, ZH_TW, [], {}, ledger).waiting[0]
+  expect(item).toBeDefined()
+  const oldKey = `ask:${item?.questionId ?? item?.key}:${item?.text}`
+  // The session starts while this step is still at work, so the question arrives while it watches and
+  // would be told, as in the test above, but for the key the 0.23.x session saved.
+  const world: World = { files: new Map([[FILE, board.replace('- [?] ', '- [~] ')]]), mtime: 1, hasTasks: true, store: { told: {}, autoConnectOff: true, inboxDone: {} } }
+  const clock = engineBeneath(on, world)
+  const seen = outside(on, world)
+  await $.session.start({ cwd: '/work/persona_framework', surface: 'desktop', isInteractive: true })
+  const told = world.store?.told as Record<string, number>
+  const shortKeys = (): string[] => Object.keys(told).filter(key => /^ask:[0-9a-f]{16}$/.test(key))
+  const before = shortKeys()
+  // A 0.23.x session sharing the store and the question list tells the question as it arrives.
+  world.files.set(FILE, board)
+  world.files.set(QUESTIONS, questionsJson(ledger))
+  told[oldKey] = at
+  world.mtime += 1
+  await clock.advance(2000)
+  expect(seen.notified).toEqual([])
+  expect((world.store?.told as Record<string, number>)[oldKey]).toBe(at)
+  // A later poll still respects the old key, and adds no short key for this question.
+  world.mtime += 1
+  await clock.advance(30000)
+  expect(seen.notified).toEqual([])
+  expect(shortKeys()).toEqual(before)
 })
 
 test('work due today notifies once that day', async ($, on) => {
@@ -6065,7 +6131,7 @@ test('a question that could not be kept is kept on a later poll once the questio
 })
 
 test('a question file that cannot be read shows one line at once instead of retrying the turn for hours', async ($, on) => {
-  const world = pendingQuestionWorld()
+  const world = { ...pendingQuestionWorld(), clockOffset: 0 }
   const clock = engineBeneath(on, world)
   const seen = outside(on, world)
   await $.session.start({ cwd: '/work/demo', surface: 'desktop', isInteractive: true })
@@ -6085,8 +6151,12 @@ test('a question file that cannot be read shows one line at once instead of retr
   await clock.advance(4000)
   expect(seen.notified).toEqual(notifications)
   expect(await ui.find({ type: 'Text', text: line })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: EN.questionsUnreadable() })).toBeUndefined()
+  world.clockOffset = 10 * 60 * 1000
+  await clock.advance(2000)
   expect(await ui.find({ type: 'Text', text: EN.questionsUnreadable() })).toBeDefined()
   world.isMoveRefused = undefined
+  world.clockOffset = 0
   await clock.advance(2000)
   expect(await ui.find({ type: 'Text', text: line })).toBeUndefined()
   await ui.unmount()
@@ -6239,6 +6309,8 @@ test('a captured question with an old source clock still gets its first save', a
 
 test('expired pending questions from another progress path are pruned at startup', async ($, on) => {
   const world = pendingQuestionWorld()
+  // The store is pruned only against a board with a project on it (#373), so the board is not empty.
+  world.files.set(FILE, '## synthetic-project\n### Synthetic task\n- [ ] Synthetic step\n')
   const key = seedPendingQuestion(world, 3 * 24 * 60 * 60 * 1000 + 1)
   const old = `pendingInboxQuestion:${sha256('/other/progress.md')}:old`
   const recent = `pendingInboxQuestion:${sha256('/other/progress.md')}:recent`
@@ -6346,7 +6418,7 @@ test('a fresh session keeps a pending inbox question from the store without its 
   expect(storedQuestion(world, 'Keep the complete question, OK?')).not.toBe('')
 })
 
-test('another agent’s turn, left in the inbox by its hook, becomes its block once, read by one session', async ($, on) => {
+test('another agent’s turn, left in the inbox by its hook, becomes its block once, read by one session', { timeoutMs: 30_000 }, async ($, on) => {
   const payload = JSON.stringify({
     type: 'agent-turn-complete',
     'thread-id': '0199a7c3-codex-thread',
@@ -6357,7 +6429,7 @@ test('another agent’s turn, left in the inbox by its hook, becomes its block o
   const world: World = {
     files: new Map([
       [FILE, '# 專案進度\n'],
-      [`${INBOX}/codex-turn-1760000000-42.json`, payload],
+      [`${INBOX}/codex-turn-1792151999000-42.json`, payload],
     ]),
     mtime: 1,
     hasTasks: true,
@@ -6380,7 +6452,7 @@ test('another agent’s turn, left in the inbox by its hook, becomes its block o
   expect((world.files.get(FILE) ?? '').match(/加好限流中介層/g)).toHaveLength(1)
 
   // The session ends: its block says so.
-  world.files.set(`${INBOX}/codex-end-1760000100-43.json`, JSON.stringify({ session_id: '0199a7c3-codex-thread', cwd: '/work/api-gateway' }))
+  world.files.set(`${INBOX}/codex-end-1792152005000-43.json`, JSON.stringify({ session_id: '0199a7c3-codex-thread', cwd: '/work/api-gateway' }))
   world.mtime += 1
   await clock.advance(5000)
   expect(world.files.get(FILE) ?? '').toContain('agent=codex state=ended')
@@ -7129,7 +7201,7 @@ test('a file left taken past its last try is kept as a .failed file, not deleted
   const name = 'codex-turn-1792216380-1.json'
   const left = `${INBOX}/${name}.deadbeef-${(at - 16 * 60 * 1000).toString(36)}-8.taking`
   const body = JSON.stringify({ session_id: 'ours', cwd: '/work/api-gateway', last_assistant_message: 'Added the middleware. 100 or 300 a minute?' })
-  const world: World = { files: new Map([[FILE, '# Progress\n'], [left, body]]), mtime: 1, hasTasks: true, reply: RATE_LIMIT_REPLY }
+  const world: World = { files: new Map([[FILE, '# Progress\n'], [left, body]]), mtime: 1, hasTasks: true, reply: RATE_LIMIT_REPLY, store: { inboxDone: {}, inboxFailed: { [name]: `8:${at}:TRYING` } } }
   const clock = engineBeneath(on, world)
   await $.session.start({ cwd: '/work/persona_framework', surface: 'desktop', isInteractive: true })
   await clock.advance(5000)
@@ -7187,6 +7259,29 @@ test('turn files set aside by the old question hold are taken once after the upg
     expect(world.files.has(`${INBOX}/${held}.failed`)).toBe(false)
   }
   expect(world.asked?.length).toBe(asks)
+})
+
+test('an old held .failed file survives the start sweep and is retaken', async ($, on) => {
+  const at = Date.parse('2026-10-16T12:00:00Z')
+  const name = 'codex-turn-1792216380-1.json'
+  const path = `${INBOX}/${name}.failed`
+  // Held by a 0.23.x session ten days ago: no set-aside time was recorded, and the file's own date is old.
+  const store: Record<string, unknown> = { inboxDone: {}, autoConnectOff: true, inboxFailed: { [name]: `8:${at - 10 * 86400000}:QUESTION_RETENTION_FAILED` } }
+  const world: World = {
+    files: new Map([[FILE, '# Progress\n'], [path, JSON.stringify({ session_id: 'held-old', cwd: '/work/api-gateway', last_assistant_message: 'Added the middleware. 100 or 300 a minute?' })]]),
+    mtimes: { [path]: at - 10 * 86400000 },
+    mtime: 1, hasTasks: true, store, reply: RATE_LIMIT_REPLY,
+  }
+  const clock = engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/persona_framework', surface: 'desktop', isInteractive: true })
+  await clock.advance(5000)
+  // The sweep saw the file and gave it today's time instead of judging it by its date.
+  expect((store.inboxSetAside as Record<string, number> | undefined)?.[`${name}.failed`]).toBeGreaterThanOrEqual(at)
+  expect(world.files.get(FILE) ?? '').toContain('## api-gateway\n')
+  expect(world.files.has(path)).toBe(false)
+  expect((store.inboxDone as Record<string, string>)[name]).toBeDefined()
+  expect((store.inboxFailed as Record<string, string>)[name]).toBeUndefined()
+  expect(takenOf(world)).toEqual([])
 })
 
 test('a set-aside turn older than the block\'s current turn changes nothing', async ($, on) => {
@@ -7336,7 +7431,7 @@ test('a held turn an older session puts back after its retake is not taken again
   const claim = takenOf(world)[0]!
   expect(claim).toContain('-9.taking')
   const note = (store.inboxFailed as Record<string, string>)[name]
-  expect(note).toBe(`9:${at + 5000}:INBOX_RETAKEN`)
+  expect(note).toBe(`9:${at + 5000}:TRYING`)
 
   // An older session keeps the stored note while returning this claim to .failed.
   world.files.set(path, world.files.get(claim)!)
@@ -7489,7 +7584,7 @@ test('a newer fresh turn waits when an older held turn of its session is not kep
   await $.session.start({ cwd: '/work/persona_framework', surface: 'desktop', isInteractive: true })
   await clock.advance(5000)
   expect((store.inboxFailed as Record<string, string>)[held]).toMatch(/^9:/)
-  expect((store.inboxFailed as Record<string, string>)[fresh]).toMatch(/^1:/)
+  expect((store.inboxFailed as Record<string, string>)[fresh]).toBeUndefined()
   expect(world.asked?.some(prompt => prompt.includes('fresh-item'))).toBe(false)
   expect(takenOf(world).some(path => path.includes(`${fresh}.`) && path.endsWith('-1.taking'))).toBe(true)
   expect((store.inboxDone as Record<string, string>)[fresh]).toBeUndefined()
@@ -7648,7 +7743,15 @@ test('fresh turn files are taken before held turns when the look is full', async
   await $.session.start({ cwd: '/work/persona_framework', surface: 'desktop', isInteractive: true })
   await clock.advance(5000)
   const moves = (): string[] => world.ran!.filter(argv => argv[0] === 'mv' && argv[1]?.startsWith(`${INBOX}/`)).map(argv => argv[1]!)
-  expect(moves()).toEqual(fresh.slice(0, 20).map(name => `${INBOX}/${name}`))
+  expect(moves()).toEqual(fresh.slice(0, 10).map(name => `${INBOX}/${name}`))
+  for (const name of fresh.slice(0, 10)) expect((store.inboxDone as Record<string, string>)[name]).toBeDefined()
+  for (const name of fresh.slice(10)) expect(world.files.has(`${INBOX}/${name}`)).toBe(true)
+  for (const name of held) expect(world.files.has(`${INBOX}/${name}.failed`)).toBe(true)
+  expect(takenOf(world)).toEqual([])
+
+  world.mtime += 1
+  await clock.advance(5000)
+  expect(moves().slice(10)).toEqual(fresh.slice(10, 20).map(name => `${INBOX}/${name}`))
   for (const name of fresh.slice(0, 20)) expect((store.inboxDone as Record<string, string>)[name]).toBeDefined()
   expect(world.files.has(`${INBOX}/${fresh[20]}`)).toBe(true)
   for (const name of held) expect(world.files.has(`${INBOX}/${name}.failed`)).toBe(true)
@@ -7692,6 +7795,7 @@ test('a newer turn saved during a held turn\'s summary keeps its old question ou
 test('on its last try, a turn the model gives no summary for keeps the block’s open steps', async ($, on) => {
   const at = Date.parse('2026-10-16T12:00:00.000Z')
   const world: World = {
+    store: { inboxDone: {}, inboxFailed: { 'codex-turn-1792216390-2.json': `7:${at}:TRYING` } },
     files: new Map([
       [FILE, '# Progress\n'],
       [`${INBOX}/codex-turn-1792216380-1.json`, JSON.stringify({ session_id: 'ours', cwd: '/work/web-app', prompt: 'Ship the page', last_assistant_message: 'Shipped the page.' })],
@@ -7823,6 +7927,30 @@ test('a write another session makes between this one’s read and write is not l
   const ticked = world.files.get(FILE) ?? ''
   expect(ticked).toContain('- [x] 推薦信 — 等教授回覆')
   expect(ticked).toContain('### C 的工作')
+})
+
+test('a session start does not wait for the connect worker\'s Codex check', async ($, on) => {
+  let reached!: () => void
+  let release!: () => void
+  const waiting = new Promise<void>(done => { reached = done })
+  const held = new Promise<void>(done => { release = done })
+  const world: World = { files: new Map([[FILE, '# Progress\n'], ['/home/me/.codex/config.toml', '']]), mtime: 1, hasTasks: true, workerGate: { reached, release: held }, store: { inboxDone: {}, autoConnectOff: false }, stats: [] }
+  const clock = engineBeneath(on, world)
+  outside(on, world)
+  try {
+    await $.session.start({ cwd: '/work/persona_framework', surface: 'desktop', isInteractive: true })
+    await waiting
+    const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
+    expect(await ui.find({ type: 'Text', text: ZH_TW.empty })).toBeDefined()
+    await clock.advance(5000)
+    expect(world.stats?.some(path => path.endsWith('progress.md'))).toBe(true)
+    const answer = await $.command.run({ ...TIDY, args: '' })
+    expect(answer).toBeDefined()
+    await ui.unmount()
+  } finally {
+    release()
+    await settledSetup($, world)
+  }
 })
 
 test('startup shows the pane and polls the inbox while a version probe waits and remove fences its delayed auto request', async ($, on) => {
@@ -7993,7 +8121,7 @@ test('connecting writes the board script and each installed agent’s board comm
   await $.session.start({ cwd: '/work/persona_framework', surface: 'terminal', isInteractive: true })
   await settledSetup($, world)
   const board = world.files.get('/home/me/.claude/agent-board.mjs') ?? ''
-  expect(board.split('\n')[0]).toBe('globalThis.AGENT_BOARD = {"path":"/home/me/.claude/progress.md","lang":"zh-TW"}')
+  expect(board.split('\n')[0]).toBe('globalThis.AGENT_BOARD = {"hookVersion":1,"path":"/home/me/.claude/progress.md","lang":"zh-TW"}')
   const geminiPrompt = /^prompt = (.*)$/m.exec(world.files.get('/home/me/.gemini/commands/board.toml') ?? '')?.[1] ?? 'null'
   expect(JSON.parse(geminiPrompt)).toContain('!{node "/home/me/.claude/agent-board.mjs" --serve}')
   expect(world.files.get('/home/me/.agents/skills/agent-board/SKILL.md')).toContain('node "/home/me/.claude/agent-board.mjs"')
@@ -8026,16 +8154,16 @@ test('a session whose system speaks another language leaves the board script and
   engineBeneath(on, world)
   await $.session.start({ cwd: '/work/persona_framework', surface: 'terminal', isInteractive: true })
   await settledSetup($, world)
-  expect((world.files.get(board) ?? '').split('\n')[0]).toBe('globalThis.AGENT_BOARD = {"path":"/home/me/.claude/progress.md","lang":"zh-TW"}')
+  expect((world.files.get(board) ?? '').split('\n')[0]).toBe('globalThis.AGENT_BOARD = {"hookVersion":1,"path":"/home/me/.claude/progress.md","lang":"zh-TW"}')
   expect(world.files.get(skill)).toContain(`description: ${JSON.stringify(ZH_TW.boardCommandDescription)}`)
 
   // A language picked takes the files with it at once; so does going back to auto, which
   // then means this session's.
   await $.command.run({ ...TIDY, args: 'lang zh-CN' })
-  expect((world.files.get(board) ?? '').split('\n')[0]).toBe('globalThis.AGENT_BOARD = {"path":"/home/me/.claude/progress.md","lang":"zh-CN"}')
+  expect((world.files.get(board) ?? '').split('\n')[0]).toBe('globalThis.AGENT_BOARD = {"hookVersion":1,"path":"/home/me/.claude/progress.md","lang":"zh-CN"}')
   expect(world.files.get(skill)).toContain(`description: ${JSON.stringify(ZH_CN.boardCommandDescription)}`)
   await $.command.run({ ...TIDY, args: 'lang auto' })
-  expect((world.files.get(board) ?? '').split('\n')[0]).toBe('globalThis.AGENT_BOARD = {"path":"/home/me/.claude/progress.md","lang":"en"}')
+  expect((world.files.get(board) ?? '').split('\n')[0]).toBe('globalThis.AGENT_BOARD = {"hookVersion":1,"path":"/home/me/.claude/progress.md","lang":"en"}')
   expect(world.files.get(skill)).toContain(`description: ${JSON.stringify(EN.boardCommandDescription)}`)
 })
 
@@ -8058,9 +8186,9 @@ test('with the autoConnect option off, going back to auto reaches the board scri
   await $.session.start({ cwd: '/work/persona_framework', surface: 'terminal', isInteractive: true })
   // Nothing is written behind the person's back, so the files wait for a connect.
   await $.command.run({ ...TIDY, args: 'lang auto' })
-  expect((world.files.get(board) ?? '').split('\n')[0]).toBe('globalThis.AGENT_BOARD = {"path":"/home/me/.claude/progress.md","lang":"zh-CN"}')
+  expect((world.files.get(board) ?? '').split('\n')[0]).toBe('globalThis.AGENT_BOARD = {"hookVersion":1,"path":"/home/me/.claude/progress.md","lang":"zh-CN"}')
   await $.command.run({ ...TIDY, args: 'connect' })
-  expect((world.files.get(board) ?? '').split('\n')[0]).toBe('globalThis.AGENT_BOARD = {"path":"/home/me/.claude/progress.md","lang":"en"}')
+  expect((world.files.get(board) ?? '').split('\n')[0]).toBe('globalThis.AGENT_BOARD = {"hookVersion":1,"path":"/home/me/.claude/progress.md","lang":"en"}')
   expect(world.files.get(skill)).toContain(`description: ${JSON.stringify(EN.boardCommandDescription)}`)
 })
 
@@ -8090,7 +8218,7 @@ test('a connect run by hand takes the language another session picked after this
   native.boardLang = 'en'
   world.files.set('/home/me/.agent-board/legacy-connect.json', JSON.stringify(native))
   await $.command.run({ ...TIDY, args: 'connect' })
-  expect((world.files.get(board) ?? '').split('\n')[0]).toBe('globalThis.AGENT_BOARD = {"path":"/home/me/.claude/progress.md","lang":"en"}')
+  expect((world.files.get(board) ?? '').split('\n')[0]).toBe('globalThis.AGENT_BOARD = {"hookVersion":1,"path":"/home/me/.claude/progress.md","lang":"en"}')
   expect(world.files.get(skill)).toContain(`description: ${JSON.stringify(EN.boardCommandDescription)}`)
 
   // And then `/progress lang zh-TW`.
@@ -8098,7 +8226,7 @@ test('a connect run by hand takes the language another session picked after this
   native.boardLang = 'zh-TW'
   world.files.set('/home/me/.agent-board/legacy-connect.json', JSON.stringify(native))
   await $.command.run({ ...TIDY, args: 'connect' })
-  expect((world.files.get(board) ?? '').split('\n')[0]).toBe('globalThis.AGENT_BOARD = {"path":"/home/me/.claude/progress.md","lang":"zh-TW"}')
+  expect((world.files.get(board) ?? '').split('\n')[0]).toBe('globalThis.AGENT_BOARD = {"hookVersion":1,"path":"/home/me/.claude/progress.md","lang":"zh-TW"}')
   expect(world.files.get(skill)).toContain(`description: ${JSON.stringify(ZH_TW.boardCommandDescription)}`)
 })
 
@@ -8120,7 +8248,7 @@ test('the plugin’s language option gives the board script and skill their lang
   engineBeneath(on, world)
   await $.session.start({ cwd: '/work/persona_framework', surface: 'terminal', isInteractive: true })
   await settledSetup($, world)
-  expect((world.files.get(board) ?? '').split('\n')[0]).toBe('globalThis.AGENT_BOARD = {"path":"/home/me/.claude/progress.md","lang":"zh-CN"}')
+  expect((world.files.get(board) ?? '').split('\n')[0]).toBe('globalThis.AGENT_BOARD = {"hookVersion":1,"path":"/home/me/.claude/progress.md","lang":"zh-CN"}')
   expect(world.files.get(skill)).toContain(`description: ${JSON.stringify(ZH_CN.boardCommandDescription)}`)
 })
 
@@ -8439,9 +8567,31 @@ test('the status says what each agent still needs, Codex approving, Hermes Agent
   expect(status.text).toContain(ZH_TW.setupAgent('Codex', [ZH_TW.setupHookConfigured, ZH_TW.setupCodexTrust, ZH_TW.setupBoardReady]))
   expect(status.text).toContain(ZH_TW.setupAgent('Hermes Agent', [ZH_TW.setupHookConfigured, ZH_TW.setupHermesTrust, ZH_TW.setupBoardReady]))
   expect(status.text).toContain(ZH_TW.setupAgent('OpenClaw', [ZH_TW.setupHookConfigured, ZH_TW.setupOpenclawRestart, ZH_TW.setupBoardReady]))
-  for (const label of ['Gemini CLI', 'Cursor', 'Grok Build', 'Muse Code', 'OpenCode']) expect(status.text).toContain(ZH_TW.setupAgent(label, [ZH_TW.setupHookConfigured, ZH_TW.setupBoardReady]))
-  // Antigravity only shows the board; it has no turn-end hook.
-  expect(status.text).toContain(ZH_TW.setupAgent('Antigravity', [ZH_TW.setupBoardReady]))
+  // Antigravity gets its report hooks with its skill (#285).
+  for (const label of ['Gemini CLI', 'Cursor', 'Grok Build', 'Muse Code', 'OpenCode', 'Antigravity']) expect(status.text).toContain(ZH_TW.setupAgent(label, [ZH_TW.setupHookConfigured, ZH_TW.setupBoardReady]))
+})
+
+test('the pane connects with Antigravity present without Node’s Buffer or process', async ($, on) => {
+  const runtime = globalThis as unknown as {
+    Buffer?: unknown
+    process?: { execPath?: unknown }
+  }
+  expect(runtime.Buffer).toBeUndefined()
+  expect(runtime.process?.execPath).toBeUndefined()
+  const home = '/home/synthetic-user'
+  const files = new Map(EVERY_AGENT.map(([path, text]): [string, string] => [path.replace('/home/me', home), text]))
+  const world: World = {
+    files, mtime: 1, hasTasks: true, ran: [], openclaw: 'OpenClaw 2026.5.2 (1a2b3c4)\n',
+    env: { HOME: home, LANG: 'en_US.UTF-8' },
+  }
+  engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/synthetic-project', surface: 'terminal', isInteractive: true })
+  await settledSetup($, world)
+  await $.command.run({ ...TIDY, args: 'connect' })
+  const status = await $.command.run({ ...TIDY, args: 'connect status' })
+  expect(status.text).not.toContain(EN.setupHookFailed)
+  expect(status.text).not.toContain(EN.setupBoardFailed)
+  expect(status.text).toContain(EN.setupAgent('Antigravity', [EN.setupHookConfigured, EN.setupBoardReady]))
 })
 
 test('once the hooks are taken out, the status says so rather than showing the last setup', async ($, on) => {

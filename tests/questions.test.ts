@@ -1,12 +1,12 @@
 import { test, expect } from 'claude-code/testing'
 import { parseProgress } from '../hooks/parse'
 import { buildView } from '../hooks/view'
-import { acknowledgementKeys, archiveQuestionsKept, captureJson, emptyQuestions, isAskedBy, isQuestionSnapshot, isTornLedger, migratedAnswered, migrationKey, observeQuestions, parseCapture, parseQuestions, prunableCaptures, prunableProofs, questionsJson, resolveQuestion, resolvedQuestionsToRetire, withCaptures } from '../hooks/questions'
+import { acknowledgementKeys, archiveQuestionsKept, captureCovers, captureJson, emptyQuestions, isAskedBy, isQuestionSnapshot, isTornLedger, ledgerLeftovers, LEDGER_TEMP_MS, migratedAnswered, migrationKey, observeQuestions, ownQuestionsKey, parseCapture, parseQuestions, prunableCaptures, prunableProofs, questionFilesKey, questionsJson, resolveQuestion, resolvedQuestionsToRetire, withCaptures } from '../hooks/questions'
 import type { QuestionLedger } from '../hooks/questions'
 import { edited, finished, held, ledgerOf, named, proof, question, reopened } from './fixtures/question-files'
 import { STRINGS } from '../hooks/strings'
 import { sha256 } from '../hooks/sha256'
-import { applyTaskCreate, applyTaskUpdate, emptyMirror, fromTaskList, questionToken } from '../hooks/mirror'
+import { applyTaskCreate, applyTaskUpdate, emptyMirror, fromTaskList, markAnswered, questionToken } from '../hooks/mirror'
 import { markAsked } from '../hooks/digest'
 import { renderAutoBlock } from '../hooks/blocks'
 import { remindersOf } from '../hooks/remind'
@@ -621,6 +621,20 @@ test('an answered question keeps its copies until its retirement proof exists', 
   expect(new Set(prunableCaptures(ledger, [...copies, ...fillers], [sha256(answered.id)]))).toEqual(named(copies))
 })
 
+test('each capture that can go is named with the file that lets it go: its retirement proof, or the newest newer copy that holds what it holds', () => {
+  const answered = finished(1)
+  const old = [held(reopened(answered), 'unresolved', 1), held(answered, 'resolved', 2)]
+  const snapshots = Array.from({ length: 20 }, (_, version) => held(edited(9, version), 'unresolved', 100 + version))
+  // The newest file is a resolved copy of the open question, so it covers none of its open copies.
+  const resolved = held(finished(9), 'resolved', 200)
+  const covers = captureCovers(ledgerOf(answered, edited(9, 19)), [...old, ...snapshots, resolved], [sha256(answered.id)])
+  const byHash = (one: { hash: string }, other: { hash: string }): number => one.hash.localeCompare(other.hash)
+  expect([...covers].sort(byHash)).toEqual([
+    ...old.map(one => ({ hash: one.hash, cover: null, retired: sha256(answered.id) })),
+    ...snapshots.slice(0, 5).map(one => ({ hash: one.hash, cover: snapshots[19]!.hash, retired: null })),
+  ].sort(byHash))
+})
+
 test('question proofs beyond the newest 16 go only when no ledger record, capture or acknowledgement refers to them', () => {
   const records = [finished(1), finished(2), question(3)]
   const ledger: QuestionLedger = { ...ledgerOf(...records), legacy: { 'a1b2c3d4 1 Old ask?': records[0]!.id } }
@@ -678,4 +692,86 @@ test("an archived mark counts only while the question's block is gone", () => {
   const gone = observe(marked, '## demo\n').ledger.records[0]
   expect(gone?.isArchived).toBe(true)
   expect(gone?.isUnresolved).toBe(true)
+})
+
+test('torn ledgers past the newest three go by the time in their names, and temporary copies of the ledger once a day old', () => {
+  const path = '/home/me/.claude/progress.md'
+  const ledger = 'progress-questions.json'
+  const now = Date.parse('2026-10-16T12:00:00Z')
+  const entries = [
+    // Moved aside by the pane (session) and by the board script (process id); the names, not
+    // the files' own times, say which is newest.
+    { name: `${ledger}.torn-${now - 5_000}-synthetic-session`, mtimeMs: 1 },
+    { name: `${ledger}.torn-${now - 1_000}-4242`, mtimeMs: 1 },
+    { name: `${ledger}.torn-${now - 4_000}-4243`, mtimeMs: 9 },
+    { name: `${ledger}.torn-${now - 2_000}-synthetic-session`, mtimeMs: 1 },
+    { name: `${ledger}.torn-${now - 3_000}-synthetic-session`, mtimeMs: 1 },
+    { name: `${ledger}.tmp-synthetic-session-1`, mtimeMs: now - LEDGER_TEMP_MS - 1 },
+    { name: `${ledger}.tmp-synthetic-session-2`, mtimeMs: now - LEDGER_TEMP_MS + 1 },
+    { name: `${ledger}.4242.mf3x9k.board-tmp`, mtimeMs: now - LEDGER_TEMP_MS - 1 },
+    // Not the ledger's: another file's temporary copy and the ledger itself stay.
+    { name: 'progress-answered.json.tmp-synthetic-session-3', mtimeMs: 1 },
+    { name: 'progress.md.4242.mf3x9k.board-tmp', mtimeMs: 1 },
+    { name: ledger, mtimeMs: 1 },
+  ]
+  const { torn, temps } = ledgerLeftovers(path, entries, now)
+  expect(torn.sort()).toEqual([
+    `${ledger}.torn-${now - 5_000}-synthetic-session`,
+    `${ledger}.torn-${now - 4_000}-4243`,
+  ])
+  expect(temps.sort()).toEqual([
+    `${ledger}.4242.mf3x9k.board-tmp`,
+    `${ledger}.tmp-synthetic-session-1`,
+  ])
+})
+
+test('the question files key lists the question files in name order, and is null while one was just written', () => {
+  const path = '/home/me/.claude/progress.md'
+  const now = Date.parse('2026-10-16T12:00:00Z')
+  const hash = 'a'.repeat(64)
+  const entries = [
+    { name: 'progress-questions.json', size: 30, mtimeMs: 5 },
+    { name: 'progress.md', size: 20, mtimeMs: 4 },
+    { name: 'progress-answered.json', size: 10, mtimeMs: 3 },
+    { name: `progress-questions-source-${hash}.json`, size: 40, mtimeMs: 2 },
+    { name: `progress-questions-retired-${hash}.json`, size: 50, mtimeMs: 1 },
+    // Not read by a question pass: another file family and leftovers of a ledger write.
+    { name: 'progress-seen.json', size: 60, mtimeMs: now },
+    { name: 'progress-questions.json.tmp-synthetic-session-1', size: 30, mtimeMs: now },
+    { name: 'progress-archive-2026-10.md', size: 70, mtimeMs: now },
+  ]
+  expect(questionFilesKey(path, '/home/me/.claude/progress-answered.json', entries, now, 2_000)).toEqual([
+    ['progress-answered.json', 10, 3],
+    [`progress-questions-retired-${hash}.json`, 50, 1],
+    [`progress-questions-source-${hash}.json`, 40, 2],
+    ['progress-questions.json', 30, 5],
+    ['progress.md', 20, 4],
+  ])
+  const fresh = entries.map(entry => (entry.name === 'progress-questions.json' ? { ...entry, mtimeMs: now - 1_999 } : entry))
+  expect(questionFilesKey(path, '/home/me/.claude/progress-answered.json', fresh, now, 2_000)).toBeNull()
+})
+
+test('the own list\'s part of the idle question key moves with its questions, not with its times, turn state or background jobs', () => {
+  let mirror = emptyMirror('a1b2c3d4-native', 'demo', NOW)
+  mirror = applyTaskCreate(mirror, { subject: 'Ship', metadata: { waiting: 'you', why: 'Ready to publish?' } }, '1', NOW)
+  mirror = applyTaskCreate(mirror, { subject: 'Docs' }, '2', NOW)
+  const key = ownQuestionsKey(mirror)
+  // What every hook of a running session changes, one at a time so a failure names the field.
+  const churn: Array<Partial<typeof mirror>> = [{ updated: NOW + 60_000 }, { isTurnRunning: true }, { state: 'working' }, { backgroundJobs: 2 }, { backgroundJobIds: ['job-1', 'job-2'] }, { backgroundReleases: ['job-0'] }, { backgroundReleaseCount: 1 }]
+  for (const change of churn) expect([change, ownQuestionsKey({ ...mirror, ...change })]).toEqual([change, key])
+  // What a question pass reads: the steps' words and tasks, whether a step still waits, the
+  // list's title and context, and whose list it is.
+  const moved = [
+    applyTaskUpdate(mirror, { taskId: '1', metadata: { why: 'Ready to publish today?' } }, NOW),
+    markAnswered(mirror),
+    applyTaskUpdate(mirror, { taskId: '2', subject: 'Docs again' }, NOW),
+    applyTaskUpdate(mirror, { taskId: '2', status: 'completed' }, NOW),
+    applyTaskUpdate(mirror, { taskId: '2', status: 'deleted' }, NOW),
+    { ...mirror, title: 'Another title' },
+    { ...mirror, context: 'Another context' },
+    { ...mirror, project: 'other' },
+    { ...mirror, sessionId: 'b1b2c3d4-native' },
+    null,
+  ]
+  for (const [index, one] of moved.entries()) expect([index, ownQuestionsKey(one) === key]).toEqual([index, false])
 })

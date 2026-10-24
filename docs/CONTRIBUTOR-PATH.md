@@ -75,7 +75,7 @@ S=$(mktemp -d)
 iso() { env HOME="$S" USERPROFILE="$S" HERMES_HOME="$S/hermes" GROK_HOME="$S/grok" OPENCLAW_STATE_DIR="$S/openclaw" CODEX_HOME="$S/codex" OPENCODE_CONFIG_DIR="$S/opencode" DSH_HOME="$S/dsh" XDG_CONFIG_HOME="$S/xdg" LOCALAPPDATA="$S/local" APPDATA="$S/roaming" CLAUDE_PROGRESS_FILE="$S/progress.md" CLAUDE_CONFIG_DIR="$S/claude" "$@"; }
 ```
 
-Then run what CI runs on plain Node, and the two generated-file checks:
+From the test lines below, run only the test files your change touches, one run at a time (AGENTS.md, Checks); CI runs all of them. Then run the two generated-file checks:
 
 ```sh
 iso node --test tests/exchange.test.mjs tests/messaging.test.mjs

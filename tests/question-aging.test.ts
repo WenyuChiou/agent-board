@@ -1,6 +1,6 @@
 import { test, expect } from 'claude-code/testing'
 import { ageQuestions, questionAge, QUESTION_DAY } from '../hooks/question-aging'
-import { archiveQuestionsKept, captureJson, emptyQuestions, observeQuestions, parseCapture, parseQuestions, questionsJson, withCaptures } from '../hooks/questions'
+import { archiveQuestionsKept, captureCovers, captureJson, emptyQuestions, observeQuestions, parseCapture, parseQuestions, questionsJson, withCaptures } from '../hooks/questions'
 import { parseProgress } from '../hooks/parse'
 import { applyTaskCreate, applyTaskUpdate, emptyMirror } from '../hooks/mirror'
 import { renderAutoBlock, takeArchivable } from '../hooks/blocks'
@@ -14,6 +14,92 @@ import { remindersOf } from '../hooks/remind'
 
 const START = Date.parse('2026-10-01T00:00:00Z')
 const board = (steps: string, updated = START): string => `## demo\n<!-- auto session=a1b2c3d4 agent=codex state=waiting updated=${new Date(updated).toISOString()} -->\n### Release\n${steps}\n<!-- /auto session=a1b2c3d4 -->\n`
+
+test('a question\'s copy of its block holds the block\'s state and step marks, not its lines, so an edit above the block changes nothing in it', () => {
+  const original = board('- [x] Synthetic preparation\n- [?] Publish the synthetic plan, OK?')
+  const projects = parseProgress(original)
+  const task = projects[0]!.tasks[0]!
+  const shifted = parseProgress(original.replace('## demo\n', '## demo\n> Synthetic note above the block\n\n'))
+  expect(shifted[0]!.tasks[0]!.line).toBeGreaterThan(task.line)
+  const first = observeQuestions(emptyQuestions(), projects, null, [], START, true, 'writer:1').ledger
+  const next = observeQuestions(first, shifted, null, [], START, true, 'writer:2').ledger
+  const expected = JSON.stringify({ auto: task.auto, steps: task.steps.map(step => step.status) })
+  expect(first.records[0]?.source?.data).toBe(expected)
+  expect(next.records[0]?.source).toEqual(first.records[0]?.source)
+  const data = first.records[0]?.source?.data ?? ''
+  expect(data.includes(task.steps[1]!.text)).toBe(false)
+  expect(data.includes('"line"')).toBe(false)
+})
+
+test('a hand-kept task\'s question copy keeps it apart from another hand-kept task that asks the same, so archiving one waits for its own copy', () => {
+  const text = '## Home\n### Pay rent\n- [?] Send the synthetic receipt, OK?\n\n### Pay water\n- [?] Send the synthetic receipt, OK?\n'
+  const projects = parseProgress(text)
+  const rent = projects[0]!.tasks[0]!
+  const water = projects[0]!.tasks[1]!
+  // Both tasks have the same marks, so the same copy data: only the title tells them apart.
+  expect(JSON.stringify({ auto: rent.auto, steps: rent.steps.map(step => step.status) })).toBe(JSON.stringify({ auto: water.auto, steps: water.steps.map(step => step.status) }))
+  const ledger = observeQuestions(emptyQuestions(), projects, null, [], START, true, 'writer:1').ledger
+  const onlyRent = { ...ledger, records: ledger.records.filter(record => record.source?.task === 'Pay rent') }
+  expect(onlyRent.records).toHaveLength(1)
+  expect(archiveQuestionsKept(projects, { project: 'Home', title: 'Pay rent', line: rent.line, session: null }, onlyRent)).toBe(true)
+  expect(archiveQuestionsKept(projects, { project: 'Home', title: 'Pay water', line: water.line, session: null }, onlyRent)).toBe(false)
+  expect(archiveQuestionsKept(projects, { project: 'Home', title: 'Pay water', line: water.line, session: null }, ledger)).toBe(true)
+})
+
+test('a ledger and a question copy written before 0.24.0 hold the whole task, and read as the same copy of the block\'s state and marks', () => {
+  const projects = parseProgress(board('- [?] Publish the synthetic plan, OK?') + '\n## Personal\n### Letter\n- [?] Send the synthetic letter, OK?\n')
+  const first = observeQuestions(emptyQuestions(), projects, null, [], START, true, 'writer:1').ledger
+  for (const record of first.records) {
+    const task = projects.find(project => project.name === record.source!.project)!.tasks[0]!
+    const old = { ...record, source: { ...record.source!, data: JSON.stringify(task) } }
+    const expected = JSON.stringify({ auto: task.auto, steps: task.steps.map(step => step.status) })
+    const ledger = { ...first, records: [old] }
+    const parsed = parseQuestions(questionsJson(ledger))!
+    expect(parsed.records[0]?.source?.data).toBe(expected)
+    expect(questionsJson(parseQuestions(questionsJson(parsed))!)).toBe(questionsJson(parsed))
+    const text = captureJson(old, 'unresolved')
+    const capture = parseCapture(text, sha256(text))!
+    expect(capture.record.source?.data).toBe(expected)
+    expect(parseCapture(captureJson(capture.record, 'unresolved'), sha256(captureJson(capture.record, 'unresolved')))).toEqual(capture)
+    for (const data of [JSON.stringify({ n: 3 }), 'not JSON', '[]', JSON.stringify({ title: 'Broken', auto: null, steps: [null] })]) {
+      const unchanged = { ...ledger, records: [{ ...old, source: { ...old.source, data } }] }
+      expect(parseQuestions(questionsJson(unchanged))?.records[0]?.source?.data).toBe(data)
+    }
+    for (const kind of ['own', 'inbox'] as const) {
+      const unchanged = { ...ledger, records: [{ ...old, source: { ...old.source, kind } }] }
+      expect(parseQuestions(questionsJson(unchanged))?.records[0]?.source?.data).toBe(old.source.data)
+      const ownText = captureJson(unchanged.records[0]!, 'unresolved')
+      expect(parseCapture(ownText, sha256(ownText))?.record.source?.data).toBe(old.source.data)
+    }
+  }
+  // The raw files differ, but equal normalized copies use the same deterministic name tie-break.
+  const record = first.records[0]!
+  const task = projects[0]!.tasks[0]!
+  const held = [0, 10].map(offset => {
+    const old = { ...record, source: { ...record.source!, data: JSON.stringify({ ...task, line: task.line + offset }) } }
+    const text = captureJson(old, 'unresolved')
+    return { hash: sha256(text), mtimeMs: START, capture: parseCapture(text, sha256(text))! }
+  })
+  const ordered = [...held].sort((a, b) => a.hash < b.hash ? 1 : a.hash > b.hash ? -1 : 0)
+  expect(captureCovers(first, held, [], 0)).toEqual([{ hash: ordered[1]!.hash, cover: ordered[0]!.hash, retired: null }])
+  expect(captureCovers(first, [...held].reverse(), [], 0)).toEqual([{ hash: ordered[1]!.hash, cover: ordered[0]!.hash, retired: null }])
+})
+
+test('a retained question of a finished block whose copy was written by 0.24.0 or before stays under Older', () => {
+  const first = observeQuestions(emptyQuestions(), parseProgress(board('- [?] Publish the synthetic plan, OK?')), null, [], START, true, 'writer:1').ledger
+  const task = parseProgress(board('- [x] Publish the synthetic plan, OK?'))[0]!.tasks[0]!
+  expect(task.auto?.state).toBe('waiting')
+  for (const data of [JSON.stringify({ auto: task.auto, steps: task.steps.map(step => step.status) }), JSON.stringify(task)]) {
+    const ledger = { ...first, records: first.records.map(record => ({ ...record, source: { ...record.source!, data } })) }
+    const view = buildView([], [], null, START, 0, {}, STRINGS.en, [], {}, ledger)
+    expect(view.waiting).toEqual([])
+    expect(view.older?.map(item => item.questionId)).toEqual([first.records[0]!.id])
+  }
+  for (const data of ['not JSON', JSON.stringify({ n: 3 }), JSON.stringify({ auto: [], steps: ['done'] }), JSON.stringify({ auto: task.auto, steps: [null] })]) {
+    const ledger = { ...first, records: first.records.map(record => ({ ...record, source: { ...record.source!, data } })) }
+    expect(buildView([], [], null, START, 0, {}, STRINGS.en, [], {}, ledger).waiting).toHaveLength(1)
+  }
+})
 
 test('question age is pending at three days, a reminder through seven days, and older only after seven days', () => {
   for (const [age, stage] of [[3 * QUESTION_DAY, 'pending'], [3 * QUESTION_DAY + 1, 'reminder'], [7 * QUESTION_DAY, 'reminder'], [7 * QUESTION_DAY + 1, 'older']] as const) {
@@ -120,7 +206,8 @@ test('complete retained source questions remain recoverable after explicit archi
   const view = buildView([], [], null, START + QUESTION_DAY, 0, {}, STRINGS.en, [], {}, reloaded)
   expect(view.waiting.length).toBe(0)
   expect(view.older?.[0]?.text).toBe('Full question with exact  whitespace?')
-  expect(reloaded.records[0]?.source?.data).toBe(JSON.stringify(projects[0]?.tasks[0]))
+  const task = projects[0]!.tasks[0]!
+  expect(reloaded.records[0]?.source?.data).toBe(JSON.stringify({ auto: task.auto, steps: task.steps.map(step => step.status) }))
   expect(reloaded.records[0]?.firstObserved).toBe(START)
 })
 
@@ -333,4 +420,25 @@ test('retaining a question changes no reminder identity while a new producer inc
   const completed = observeQuestions(first, parseProgress(board('- [x] Publish?')), null, [], START + 1, true, 'remind:2').ledger
   const renewed = observeQuestions(completed, projects, null, [], START + 2, true, 'remind:3').ledger
   expect(remindersOf(buildView(projects, [], null, START + 2, 0, {}, STRINGS.en, [], {}, renewed), told, START + 2, '2026-10-01', STRINGS.en).length).toBe(1)
+})
+
+test('archiving a block refuses when a step\'s question annotation changed or now repeats another step\'s, so a kept question keeps its own identity', () => {
+  const first = `${'a'.repeat(64)}:1`
+  const second = `${'b'.repeat(64)}:1`
+  const done = `${'d'.repeat(64)}:1`
+  const text = board(`- [x] Synthetic preparation\n<!-- question=${done} -->\n- [?] Publish the first synthetic plan, OK?\n<!-- question=${first} -->\n- [?] Publish the second synthetic plan, OK?\n<!-- question=${second} -->`).replace('state=waiting', 'state=ended')
+  const projects = parseProgress(text)
+  expect(projects[0]!.tasks[0]!.steps.map(step => step.questionToken)).toEqual([done, first, second])
+  const ledger = observeQuestions(emptyQuestions(), projects, null, [], START, true, 'seed').ledger
+  const ref = { project: 'demo', title: 'Release', line: 2, session: 'a1b2c3d4' }
+  expect(archiveQuestionsKept(projects, ref, ledger)).toBe(true)
+  expect(archiveQuestionsKept(parseProgress(text.replace(second, `${'c'.repeat(64)}:1`)), ref, ledger)).toBe(false)
+  expect(archiveQuestionsKept(parseProgress(text.replace(second, first)), ref, ledger)).toBe(false)
+  // A finished step that now repeats a waiting step's token leaves every mark and waiting token
+  // as it was, but the polls no longer see the waiting step's identity.
+  expect(archiveQuestionsKept(parseProgress(text.replace(done, first)), ref, ledger)).toBe(false)
+  // Two finished steps that share a token leave the waiting steps' identities as they were.
+  const twice = board(`- [x] Synthetic preparation\n<!-- question=${done} -->\n- [x] Synthetic review\n<!-- question=${'e'.repeat(64)}:1 -->\n- [?] Publish the first synthetic plan, OK?\n<!-- question=${first} -->`).replace('state=waiting', 'state=ended')
+  const kept = observeQuestions(emptyQuestions(), parseProgress(twice), null, [], START, true, 'seed').ledger
+  expect(archiveQuestionsKept(parseProgress(twice.replace(`${'e'.repeat(64)}:1`, done)), ref, kept)).toBe(true)
 })

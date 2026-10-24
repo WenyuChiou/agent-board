@@ -132,8 +132,10 @@ python3 scripts/remote-reporter/merge.py ~/.claude/progress.md muse.md
 For the same session, `merge.py` reports and skips older fragments, reports a
 conflict and keeps the existing block when equal `updated=` times have
 different content, and leaves identical imports unchanged.
-A newer fragment replaces the block. A board block with no end marker is
-repaired regardless of its timestamp. If the block on the board has no
+A newer fragment replaces the block. A board block with no end marker takes
+the fragment regardless of its timestamp: the fragment replaces only that
+block's start marker line, and the block's old lines stay below it as plain
+text, to delete by hand. If the block on the board has no
 readable time, or either time has no timezone (a date alone counts as
 midnight UTC), the fragment replaces the block as before and the merge
 reports that the times cannot be compared; arrival time is never used. A

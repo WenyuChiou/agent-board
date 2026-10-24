@@ -14,7 +14,7 @@ import { chmodSync, closeSync, existsSync, fstatSync, fsyncSync, linkSync, lstat
 import { createHash, randomUUID } from 'node:crypto'
 import { homedir, tmpdir } from 'node:os'
 import { basename, dirname, join, resolve } from 'node:path'
-import { archivableAsking, confirmMatches, confirmTask, mergeBlock, takeArchivable, takeManualDone, takeTask, setManualStep } from '../hooks/blocks'
+import { archivableAsking, confirmMatches, confirmTask, CUT_SETTLE_MS, cutBlockLines, cutOffBlocks, cutOffSpans, mergeBlock, takeArchivable, takeManualDone, takeTask, setManualStep } from '../hooks/blocks'
 import type { ConfirmedTask } from '../hooks/blocks'
 import { startServer } from './board-serve'
 import { idleTimeout } from '../hooks/serve'
@@ -22,13 +22,14 @@ import { boardKey, boardScreen, boardText, CHAT_MAX, chatText, doneToday, emptyB
 import type { BoardAction, BoardState } from '../hooks/board'
 import { LOG_TAIL, isInboxFile } from '../hooks/inbox'
 import { dashboardHtml } from '../hooks/dashboard'
-import { appendJournal, archivePath, countDay, hasArchiveEntry, journalLine, journalPath } from '../hooks/journal'
+import { appendJournal, archivePath, countDay, hasArchiveEntry, journalLine, journalPath, localDay, parseJournal } from '../hooks/journal'
+import { currentPart, monthParts, sizeWarnings } from '../hooks/retention'
 import { parseProgress, progressTail } from '../hooks/parse'
 import { qrModules, qrText } from '../hooks/qr'
 import { langOf, plainReason, STRINGS } from '../hooks/strings'
 import { answeredJson, answeredPath, buildView, manualDoneSeen, parseAnswered, parseSeen, seenJson, seenPath, taskFingerprint, withAnswered, withSeen } from '../hooks/view'
 import type { TaskRef } from '../hooks/view'
-import { acknowledgementKeys, archiveQuestionsKept, captureHashOf, captureJson, capturePath, emptyQuestions, parseCapture, withCaptures, isAskedBy, isQuestionProof, isQuestionSnapshot, isTornLedger, migratedAnswered, observeQuestions, parseQuestions, questionProofJson, questionProofOf, questionProofPath, questionsJson, questionsPath, resolvedQuestionsToRetire } from '../hooks/questions'
+import { acknowledgementKeys, archiveQuestionsKept, captureHashOf, captureJson, capturePath, copiesToKeep, cutOffScopes, emptyQuestions, identitiesToRetire, parseCapture, withCaptures, isAskedBy, isQuestionProof, isQuestionSnapshot, isTornLedger, migratedAnswered, observeQuestions, parseQuestions, questionProofJson, questionProofOf, questionProofPath, questionsJson, questionsPath, resolvedQuestionsToRetire } from '../hooks/questions'
 import type { QuestionCapture, QuestionProofs, QuestionRecord } from '../hooks/questions'
 import { sha256 } from '../hooks/sha256'
 
@@ -93,6 +94,27 @@ const read = (file: string): string => {
     if ((error as { code?: string } | null)?.code === 'ENOENT') return ''
     throw fileError(file, error, true)
   }
+}
+
+// The part of a month's journal or archive new lines go to: the month's file until it reaches
+// 1 MB, then `-2`, and so on (hooks/retention.ts, #373).
+const partOf = (base: string): string => currentPart(base, file => {
+  try {
+    return statSync(file).size
+  } catch {
+    return null
+  }
+})
+
+// This month's journal as far as today needs it: its last part, and the one before when the last
+// began today. The rest of a long month is not read (#373).
+const journalToday = (now: number): string => {
+  const base = journalPath(path, now)
+  const parts = monthParts(base, existsSync)
+  // A month with no journal yet is read as before, so a file the board cannot read is still named.
+  const text = read(parts.at(-1) ?? base)
+  const before = parts.at(-2)
+  return before !== undefined && !parseJournal(text).some(entry => entry.at < localDay(now)) ? `${read(before)}\n${text}` : text
 }
 
 // A session log's end only, kept while the file is unchanged: --watch looks again every
@@ -310,17 +332,25 @@ const keepQuestionProof = (kind: keyof QuestionProofs, hash: string): void => {
   if (!isQuestionProof(read(file), kind, hash)) throw fileError(file, { code: 'EAGAIN' })
   pendingQuestionProofs.delete(file)
 }
+// A file that cannot be looked at is not settled, as view() reads it.
+const isCutSettledAt = (now: number): boolean => {
+  try {
+    return now - statSync(path).mtimeMs >= CUT_SETTLE_MS
+  } catch {
+    return false
+  }
+}
 // What the explicit archive checks before it takes a block that asks (#174): its questions are
 // kept in the ledger, and a durable 'archived' copy of each one still open is written. False
 // leaves the block where it is; a copy that cannot be written throws. Only a board that writes the
 // ledger brings it up to date, so a question asked since (or asked again in the words of an
 // answered one) may not be in it yet: the sources are looked at as a settling pass would, and a
 // block with a question that pass would add stays.
-const keepAskedQuestions = (projects: ReturnType<typeof parseProgress>, ref: TaskRef, now: number): boolean => {
+const keepAskedQuestions = (projects: ReturnType<typeof parseProgress>, ref: TaskRef, now: number, frozen: ReadonlySet<string>): boolean => {
   const latest = readQuestions(questionsPath(path))
   const proofs = readQuestionProofs()
   if (latest === null || proofs === null || !archiveQuestionsKept(projects, ref, latest)) return false
-  const settled = observeQuestions(latest, projects, null, parseAnswered(read(answeredPath(path))) ?? [], now, true, 'preview', proofs, pending()).ledger
+  const settled = observeQuestions(latest, projects, null, parseAnswered(read(answeredPath(path))) ?? [], now, true, 'preview', proofs, pending(), [], frozen).ledger
   if (settled.records.some(record => record.isUnresolved && isAskedBy(record, ref) && !latest.records.some(old => old.id === record.id && old.isUnresolved))) return false
   for (const record of latest.records) {
     if (record.isUnresolved && isAskedBy(record, ref)) keepQuestionCapture(record, 'archived')
@@ -333,14 +363,17 @@ const view = (source = read(path), now = Date.now()) => {
   const projects = parseProgress(source)
   const turns = pending(text => redact(text, homeOrNone(), process.platform === 'win32'))
   let stat = ''
+  let mtimeMs = 0
   try {
     const one = statSync(path)
     stat = `${one.mtimeMs}:${one.size}`
+    mtimeMs = one.mtimeMs
   } catch {
     // A missing file holds no task to keep or drop.
   }
   if (stat !== lastStat.stat) lastStat = { stat, at: now }
   const isSettled = stat !== '' && now - lastStat.at >= 1000 && projects.length > 0
+  const isCutSettled = stat !== '' && now - mtimeMs >= CUT_SETTLE_MS
   let seen = lastSeen
   try {
     const file = seenPath(path)
@@ -369,30 +402,24 @@ const view = (source = read(path), now = Date.now()) => {
   const record = readQuestions(file)
   let proofs = readQuestionProofs()
   if (record !== null) lastQuestions = record
-  const observed = observeQuestions(lastQuestions, projects, null, answered, now, isSettled, 'preview', proofs ?? undefined, turns)
+  const frozen = cutOffScopes(projects, cutOffSpans(source, isCutSettled))
+  const observed = observeQuestions(lastQuestions, projects, null, answered, now, isSettled, 'preview', proofs ?? undefined, turns, [], frozen)
   let questions = observed.ledger
   // Chat and a one-shot read never write. Interactive readers persist before accepting hides.
-  if (record !== null && proofs !== null && isQuestionSnapshot(source) && isQuestionWriter) {
+  if (record !== null && proofs !== null && isQuestionSnapshot(source, isCutSettled) && isQuestionWriter) {
     const incarnation = `${questionWriter}:${questionWrite++}`
     const wrote = rewrite(file, before => {
       if (read(path) !== source) return null
       const current = readQuestions(file, before)
       if (current === null) return null
-      let next = observeQuestions(current, projects, null, answered, now, isSettled, incarnation, proofs ?? undefined, turns).ledger
+      let next = observeQuestions(current, projects, null, answered, now, isSettled, incarnation, proofs ?? undefined, turns, [], frozen).ledger
       const captures = readQuestionCaptures()
       if (captures === null) return null
-      for (const record of next.records) {
-        if (record.source === undefined) continue
-        if (record.isUnresolved && !captures.some(capture => captureJson(capture.record, capture.disposition) === captureJson(record, 'unresolved'))) keepQuestionCapture(record, 'unresolved')
-        if (record.isUnresolved === false && current.records.some(old => old.id === record.id && old.isUnresolved === true)) keepQuestionCapture(record, 'resolved')
-      }
-      const retiredResolutions = resolvedQuestionsToRetire(current, projects, null, turns)
-      for (const old of current.records) {
-        if ((old.isPresent && !next.records.some(record => record.id === old.id && ((record.isPresent && record.isWaiting) || record.resolvedAt !== undefined))) || retiredResolutions.includes(old.id)) keepQuestionProof('retired', sha256(old.id))
-      }
+      for (const copy of copiesToKeep(current, next, captures)) keepQuestionCapture(copy.record, copy.disposition)
+      for (const id of identitiesToRetire(current, next, resolvedQuestionsToRetire(current, projects, null, turns, frozen), proofs?.retired)) keepQuestionProof('retired', sha256(id))
       proofs = readQuestionProofs()
       if (proofs === null) return null
-      next = observeQuestions(current, projects, null, answered, now, isSettled, incarnation, proofs, turns).ledger
+      next = observeQuestions(current, projects, null, answered, now, isSettled, incarnation, proofs, turns, [], frozen).ledger
       const raw = parseQuestions(before, !existsSync(file))
       return raw !== null && questionsJson(next) === questionsJson(raw) ? before : questionsJson(next)
     })
@@ -406,8 +433,9 @@ const view = (source = read(path), now = Date.now()) => {
           const latestProofs = readQuestionProofs()
           if (latestProofs === null) return null
           const next = migratedAnswered(current, lastQuestions, latestProofs.consumed)
+          const consumed = new Set(latestProofs.consumed)
           for (const key of current) {
-            if (Object.hasOwn(lastQuestions.legacy, key) && !latestProofs.consumed.includes(sha256(key))) keepQuestionProof('consumed', sha256(key))
+            if (Object.hasOwn(lastQuestions.legacy, key) && !consumed.has(sha256(key))) keepQuestionProof('consumed', sha256(key))
           }
           return answeredJson(next) === answeredJson(current) ? before : answeredJson(next)
         })
@@ -417,7 +445,9 @@ const view = (source = read(path), now = Date.now()) => {
   }
   // A question marked answered in a pane on this machine is kept off the board too.
   const tail = progressTail(source)
-  return { ...buildView(projects, [basename(process.cwd())], null, now, countDay(read(journalPath(path, now)), now), manualDoneSeen(projects, seen, now, s), s, answered, seen, questions, readQuestionProofs(), turns), ...(tail === null ? {} : { warning: s.progressIncomplete(tail.tasks) }) }
+  const warnings = [...(tail === null ? [] : [s.progressIncomplete(tail.tasks)]), ...sizeWarnings({ progress: Buffer.byteLength(source), store: 0 }, s)]
+  const health = cutBlockLines(cutOffBlocks(source, isCutSettled), s)
+  return { ...buildView(projects, [basename(process.cwd())], null, now, countDay(journalToday(now), now), manualDoneSeen(projects, seen, now, s), s, answered, seen, questions, readQuestionProofs(), turns, frozen), ...(warnings.length === 0 ? {} : { warning: warnings.join(' · ') }), ...(health.length === 0 ? {} : { health }) }
 }
 
 const freshView = () => {
@@ -435,7 +465,7 @@ const options = () => ({
   isIdleOpen: args.includes('--all'),
 })
 
-// How many times `rewrite` makes a change; a change that counts its calls knows its last.
+// How many times `rewrite` makes a change; it tells the change which try is the last.
 const REWRITE_TRIES = 3
 // What a change answers to have the file read again before it is made: another write landed
 // while the change was being worked out.
@@ -445,8 +475,9 @@ const AGAIN = Symbol('again')
 // this process's own (two boards can run at once), renamed over it, then read back; made
 // again from the new text when another write landed in between or the rename failed (on
 // Windows, a file another program holds open), as the pane's own writes are. A failed
-// read is never an empty file. `change` can run more than once, on newer text each time.
-const rewrite = (file: string, change: (text: string) => string | null | typeof AGAIN, onReplaced?: () => void): string | null => {
+// read is never an empty file. `change` can run more than once, on newer text each time, and
+// is told when it runs for the last time.
+const rewrite = (file: string, change: (text: string, isLast: boolean) => string | null | typeof AGAIN, onReplaced?: () => void): string | null => {
   let failure: unknown = { code: 'EAGAIN' }
   for (let attempt = 0; attempt < REWRITE_TRIES; attempt += 1) {
     const before = read(file)
@@ -456,7 +487,7 @@ const rewrite = (file: string, change: (text: string) => string | null | typeof 
       continue
     }
     const wasMissing = isLedger && before === '' && !existsSync(file)
-    const after = change(before)
+    const after = change(before, attempt === REWRITE_TRIES - 1)
     if (after === AGAIN) continue
     if (after === null) return null
     if (after === before) return after
@@ -575,17 +606,21 @@ const openHtml = (done: (note: string, isOpen: boolean) => void): void => {
 // leaves the work in both, never in neither. An entry already archived by an earlier try
 // (another session wrote meanwhile) is not archived twice. How many entries went, or null
 // when a file could not be written.
-const archiveOut = (take: (text: string) => { text: string; entries: string[] } | null | typeof AGAIN, now: number): number | null => {
+const archiveOut = (take: (text: string, isLast: boolean) => { text: string; entries: string[] } | null | typeof AGAIN, now: number): number | null => {
   const archived = new Set<string>()
-  const wrote = rewrite(path, text => {
-    const taken = take(text)
+  const wrote = rewrite(path, (text, isLast) => {
+    const taken = take(text, isLast)
     if (taken === AGAIN) return AGAIN
     if (taken === null) return text
     const fresh = taken.entries.filter(entry => !archived.has(entry))
     if (fresh.length > 0) {
-      const kept = rewrite(archivePath(path, now), past => {
+      const part = partOf(archivePath(path, now))
+      // A previous try may have saved to the part before, the one that then reached 1 MB.
+      const earlier = monthParts(archivePath(path, now), existsSync).filter(one => one !== part).at(-1)
+      const before = earlier === undefined ? '' : read(earlier)
+      const kept = rewrite(part, past => {
         // A previous process may have saved the archive but failed to remove the task.
-        const missing = fresh.filter(entry => !hasArchiveEntry(past, entry))
+        const missing = fresh.filter(entry => !hasArchiveEntry(past, entry) && !hasArchiveEntry(before, entry))
         return missing.length === 0 ? past : `${past.trim() === '' ? `${s.archiveTitle}\n\n` : past.replace(/\s*$/, '\n\n')}${missing.join('\n\n')}\n`
       })
       if (kept === null) return null
@@ -611,9 +646,9 @@ const answeredAge = (file: string): number => {
 // that were there before, or that another writer added meanwhile, stay as they are. If that
 // fails too, the board's own error is the true one: some changes may already be saved.
 // Otherwise nothing of this press is left, so the count of writes goes back to before it.
-const undoJournal = (added: Map<string, number>, now: number, writesBefore: number, error?: unknown): void => {
+const undoJournal = (added: Map<string, number>, journal: string, writesBefore: number, error?: unknown): void => {
   try {
-    if (added.size > 0) rewrite(journalPath(path, now), past => {
+    if (added.size > 0) rewrite(journal, past => {
       const remaining = new Map(added)
       return past.split(/(?<=\n)/).filter(line => {
         const entry = line.replace(/\r?\n$/, '')
@@ -636,6 +671,8 @@ const act = (action: BoardAction, fallback?: { copyText?: string; tone?: 'done' 
     return text
   }
   const now = Date.now()
+  // Chosen once, so lines a failed press takes back come out of the part they went to.
+  const journal = partOf(journalPath(path, now))
   if (action.type === 'copy') {
     if (copy(action.text)) return done(s.copied)
     if (fallback !== undefined) fallback.copyText = action.text
@@ -653,7 +690,7 @@ const act = (action: BoardAction, fallback?: { copyText?: string; tone?: 'done' 
         const next = confirmTask(text, action.ref, now, s)
         if (next === null) return null
         const lines = next.entries.map(entry => journalLine(entry, now, s))
-        rewrite(journalPath(path, now), past => {
+        rewrite(journal, past => {
           const missing = lines.filter(line => !past.split(/\r?\n/).includes(line))
           for (const line of missing) added.set(line, Math.max(added.get(line) ?? 0, missing.filter(entry => entry === line).length))
           return appendJournal(past, missing, s)
@@ -663,13 +700,13 @@ const act = (action: BoardAction, fallback?: { copyText?: string; tone?: 'done' 
       }, () => { isReplaced = true })
     } catch (error) {
       if (!(error instanceof BoardFileError) || error.file !== path || isReplaced) throw error
-      undoJournal(added, now, writesBefore, error)
+      undoJournal(added, journal, writesBefore, error)
       error.isUnchanged = true
       throw error
     }
     // A retry found the task changed by another writer. If no write of this press landed, its
     // journal lines go too; the press says the line changed, as before.
-    if (wrote === null && !isReplaced) undoJournal(added, now, writesBefore)
+    if (wrote === null && !isReplaced) undoJournal(added, journal, writesBefore)
     const found = confirmed as ConfirmedTask | null
     if (found === null || wrote === null || !confirmMatches(read(path), found.ref, s)) return s.boardLineChanged
     return done(s.confirmedDone(action.title))
@@ -689,7 +726,7 @@ const act = (action: BoardAction, fallback?: { copyText?: string; tone?: 'done' 
         if (after !== text) {
           // Save history before ticking: a journal failure must leave the step available
           // to retry. A failed board replacement removes only this press's journal line.
-          rewrite(journalPath(path, now), past => {
+          rewrite(journal, past => {
             if (past.includes(line)) return past
             added.set(line, 1)
             return appendJournal(past, [line], s)
@@ -700,7 +737,7 @@ const act = (action: BoardAction, fallback?: { copyText?: string; tone?: 'done' 
       }, () => { isReplaced = true })
     } catch (error) {
       if (!(error instanceof BoardFileError) || error.file !== path || isReplaced) throw error
-      undoJournal(added, now, writesBefore, error)
+      undoJournal(added, journal, writesBefore, error)
       error.isUnchanged = true
       throw error
     }
@@ -718,7 +755,7 @@ const act = (action: BoardAction, fallback?: { copyText?: string; tone?: 'done' 
     const count = archiveOut(text => {
       const current = parseProgress(text)
       const asking = current.some(project => project.name === action.ref.project && project.tasks.some(task => (action.ref.session === null ? task.title === action.ref.title : task.auto?.session === action.ref.session) && task.steps.some(step => step.status === 'waiting')))
-      if (asking && !keepAskedQuestions(current, action.ref, now)) {
+      if (asking && !keepAskedQuestions(current, action.ref, now, cutOffScopes(current, cutOffSpans(text, isCutSettledAt(now))))) {
         retentionFailed = true
         return { text, entries: [] }
       }
@@ -745,10 +782,12 @@ const act = (action: BoardAction, fallback?: { copyText?: string; tone?: 'done' 
       const proofs = readQuestionProofs()
       if (proofs === null || (isHidden && keys.some(key => proofs.retired.includes(sha256(key))))) return null
       if (latest === null || persisted === null || (isHidden && keys.some(key => !persisted.records.some(record => record.id === key && record.isWaiting && record.isPresent)))) return null
-      const projects = parseProgress(read(path))
-      const fresh = buildView(projects, [], null, now, 0, {}, s, answered ?? [], {}, latest, proofs, pending())
+      const source = read(path)
+      const projects = parseProgress(source)
+      const frozen = cutOffScopes(projects, cutOffSpans(source, isCutSettledAt(now)))
+      const fresh = buildView(projects, [], null, now, 0, {}, s, answered ?? [], {}, latest, proofs, pending(), frozen)
       if (isHidden && keys.some(key => ![...fresh.waiting, ...(fresh.reminder ?? []), ...(fresh.older ?? []), ...fresh.hidden].some(item => item.canHide !== false && item.hideKey === key))) return null
-      const aliases = observeQuestions(latest, projects, null, answered ?? [], now, true).ledger
+      const aliases = observeQuestions(latest, projects, null, answered ?? [], now, true, 'preview', undefined, [], [], frozen).ledger
       return answered === null ? null : answeredJson(withAnswered(answered, isHidden ? keys : keys.flatMap(key => acknowledgementKeys(aliases, key)), isHidden))
     })
     if (wrote === null) return s.hideFailed
@@ -770,34 +809,43 @@ const tidy = (isNow = true): string => {
       // Unknown manual ages stay; an unreadable hint need not block dated agent blocks.
     }
   }
-  let tries = 0
-  const count = archiveOut(text => {
+  // The blocks that ask which a try has archived, by session, with the lines they had then.
+  const moved = new Map<string, string>()
+  const count = archiveOut((text, isLast) => {
     // A block that still asks goes only when the explicit archive's own check passes for it (#174).
-    // A board busy enough to change on every try would skip the whole sweep, so on the last try
-    // the blocks that ask stay and the rest (done blocks, hand-kept tasks) goes ahead, as the
-    // pane's sweep does.
-    tries += 1
-    const asking = tries < REWRITE_TRIES ? archivableAsking(text, now) : []
+    // A board busy enough to change on every try would skip the whole sweep, so the last try checks
+    // no question and the rest (done blocks, hand-kept tasks) goes ahead, as the pane's sweep does.
+    // A block that asks stays then, unless an earlier try archived it and it still reads the same:
+    // its questions are kept and its copy is in the archive, so it leaves as counted.
+    const asking = archivableAsking(text, now)
     const kept = new Set<number>()
-    for (const { span, ref } of asking) {
-      try {
-        if (keepAskedQuestions(parseProgress(text), ref, now)) kept.add(span.start)
-      } catch (error) {
-        // A copy that cannot be written keeps the block, as a failed check does.
-        if (!(error instanceof BoardFileError)) throw error
+    if (isLast) {
+      for (const { span, text: lines } of asking) if (moved.get(span.session) === lines) kept.add(span.start)
+    } else {
+      const projects = parseProgress(text)
+      const frozen = cutOffScopes(projects, cutOffSpans(text, isCutSettledAt(now)))
+      for (const { span, ref } of asking) {
+        try {
+          if (keepAskedQuestions(projects, ref, now, frozen)) kept.add(span.start)
+        } catch (error) {
+          // A copy that cannot be written keeps the block, as a failed check does.
+          if (!(error instanceof BoardFileError)) throw error
+        }
       }
+      // Another agent's write during the question check (a new `[?]` step) is read again before
+      // anything is archived. One that lands after this read is caught by `rewrite` once the
+      // archive is written, and the next try starts again from it.
+      if (asking.length > 0 && read(path) !== text) return AGAIN
     }
-    // Another agent's write during the question check (a new `[?]` step) is read again before
-    // anything is archived. One that lands after this read is caught by `rewrite` once the
-    // archive is written, which leaves the entry in both files, never in neither.
-    if (asking.length > 0 && read(path) !== text) return AGAIN
     const blocks = takeArchivable(text, now, undefined, s, isNow, span => kept.has(span.start))
     const manual = takeManualDone(blocks.text, now, (_key, project, task) => {
       const at = seen[taskFingerprint(project, task)]
       return at !== undefined && at <= now ? at : undefined
     }, s, isNow)
     const entries = [...blocks.entries, ...manual.entries]
-    return entries.length === 0 ? null : { text: manual.text, entries }
+    if (entries.length === 0) return null
+    for (const { span, text: lines } of asking) if (kept.has(span.start)) moved.set(span.session, lines)
+    return { text: manual.text, entries }
   }, now)
   if (count === null) {
     if (!isNow) process.exitCode = 1
@@ -1145,7 +1193,7 @@ const chat = (): void => {
     // A reply is hidden whole, before its question is picked and cut to length.
     const source = read(path)
     const updates = pending(text => redact(text, home, isWin))
-    process.stdout.write(chatText(view(source, now), updates, doneToday(read(journalPath(path, now)), now, s), s, home, isWin, CHAT_MAX, now))
+    process.stdout.write(chatText(view(source, now), updates, doneToday(journalToday(now), now, s), s, home, isWin, CHAT_MAX, now))
   } catch (error) {
     process.exitCode = 1
     const code = (error as { code?: unknown } | null)?.code

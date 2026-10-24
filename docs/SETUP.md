@@ -76,10 +76,11 @@ Generated board commands preserve literal paths with spaces or shell metacharact
 Windows and POSIX. Updating them still preserves personal edits and unrelated files.
 
 The optional connector requires Node.js 18+ for its native worker; setup and
-removal fail closed without it. Ownership, disable intent and last setup status
-live in `~/.agent-board/legacy-connect.json`, shared across Claude data roots and
-protected by the independent installer's home-level lock. Reload older plugin
-sessions before migration: writers that ignore the lock are not coordinated.
+removal fail closed without it. Ownership, disable intent, last setup status and
+the remembered Codex approval live in `~/.agent-board/legacy-connect.json`,
+shared across Claude data roots and protected by the independent installer's
+home-level lock. Reload older plugin sessions before migration: writers that
+ignore the lock are not coordinated.
 Automatic probes run after pane/polling startup and outside the mutation lock,
 and only for the default Claude data folder (`CLAUDE_CONFIG_DIR` unset or `~/.claude`) with the
 default progress file or the one last connected by hand; any other session
@@ -91,7 +92,7 @@ configuration or prove native execution.
 
 ## Install with npm
 
-From its first npm release (planned for 0.24.0), the same installer is on npm as `@wenyuchiou/agent-board`. With Node.js 22+ (what the
+From 0.24.0, the same installer is on npm as `@wenyuchiou/agent-board`. With Node.js 22+ (what the
 package's `engines` field asks for) and no checkout:
 
 ```sh
@@ -162,6 +163,13 @@ configuration HMR. No credential, telemetry or provider setting is changed.
 OpenCode's metadata lookup must return the exact session before it reports; missing or
 foreign responses are ignored. Changing an installed host directory requires removing
 the old scoped installation first, so an orphan plugin cannot continue reporting.
+OpenCode sends no session end for a one-shot `opencode run`, so as OpenCode exits the
+plugin ends the top-level sessions it reported that had finished their reply, within 2 s
+plus the worker's 500 ms grace.
+A session still replying is left as it is and goes stale by age. Quitting OpenCode ends
+its rows too; a resumed session reopens its row. New OpenCode blocks are filed under the
+folder the session ran in. The progress tool takes each step as one Markdown task line
+(`- [~] Current step`); a refused report names the board's reason, such as `INVALID_STEP`.
 
 All these hooks report activity only. Semantic steps need a host-proven own-session
 report; only OpenCode's generated tool supplies that context directly. This setup does
@@ -180,6 +188,16 @@ The [official native schema](https://antigravity.google/docs/hooks) puts events 
 named definition, with command handlers directly under non-tool events. Edited or disabled
 owned definitions become conflicts instead of being overwritten or silently enabled.
 Removal preserves unrelated named definitions.
+
+The Claude plugin's `/progress connect` writes the same four commands under its own
+`agent-board` definition, next to the board skill, and runs them through `progress-hook.mjs`
+beside its progress file. Where this installer's `agent-board-local` definition is there,
+the connect writes none and takes out one it wrote before. When this installer runs after
+the connect, both definitions report until the connect next runs (the next Claude Code
+session, or `/progress connect`). This installer takes over the skill file the connect
+wrote, and the connect then leaves this installer's skill as it is. While a host has the
+skill but neither definition,
+`--codex-doctor --agent antigravity` says `skill only, no report hook`.
 
 On Windows the generated command uses Windows PowerShell's encoded-command mode to
 forward stdin to the exact Node executable and reporter paths. This avoids Antigravity's
@@ -221,4 +239,4 @@ block, then retry. A successful write must produce one visible task for that ses
 See the [2026-10-19 native acceptance record](validation/2026-10-19-native-hooks.md)
 for the observed CLI events, cross-host ACKs, the Windows failure and its retest.
 
-Codex hook installation is separate from current native approval. The optional connector retains managed reporting fallback until its exact current definitions are approved in /hooks, using bounded read-only control discovery outside the install lock. Unknown/disabled/changed observations retain or restore fallback on connect; status projects current readiness without modifying AGENTS. Existing nonempty AGENTS.override.md is treated as the effective instruction file. Only positively owned board scripts can become generated fallback commands.
+Codex hook installation is separate from current native approval. The optional connector retains managed reporting fallback until its exact current definitions are approved in /hooks, using bounded read-only control discovery outside the install lock. An approval Codex confirmed is remembered with the hooks.json it was given for and the sha of Codex's config.toml at that time. A check that cannot get an answer from Codex keeps that approval while both files are unchanged; any change counts, including untrusting or disabling hooks in /hooks, which rewrites config.toml. The approval also names the Codex executable found when it was remembered (real path, size, modification time); when Codex cannot be asked and a different or unreadable executable is found, as after a Codex upgrade, the approval is not confirmed, and with no executable found it holds. An answer in a shape this release does not know (a new hash format, no enabled flag) counts as no answer, unless it calls one of the hooks anything but trusted, which is a no. A Codex answer that the definitions are unapproved, disabled or not listed, or a check that cannot get an answer from Codex after either file changed, retains or restores fallback on connect. Status projects current readiness without modifying AGENTS. Existing nonempty AGENTS.override.md is treated as the effective instruction file. Only positively owned board scripts can become generated fallback commands.
