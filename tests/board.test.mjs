@@ -4803,6 +4803,46 @@ const inboxFilesFixture = (hasWatchFailure = false) => {
   return { root, directory, reader, watchers, add, end: () => { reader.close(); rmSync(root, { recursive: true, force: true }) } }
 }
 
+test('empty inbox polls list membership once and discover reports that appear later', () => {
+  const fixture = inboxFilesFixture()
+  const originalStat = fs.statSync
+  const originalList = fs.readdirSync
+  const operations = []
+  fs.statSync = (...args) => {
+    if (args[0] === fixture.directory) operations.push('stat')
+    return originalStat(...args)
+  }
+  fs.readdirSync = (...args) => {
+    if (args[0] === fixture.directory) operations.push('readdir')
+    return originalList(...args)
+  }
+  syncBuiltinESMExports()
+  const empty = isFresh => {
+    operations.length = 0
+    assert.deepEqual(fixture.reader.read(isFresh), [])
+    assert.deepEqual(operations, ['readdir'], 'an empty inbox needs only its membership listing')
+  }
+  try {
+    empty(false)
+    empty(true)
+    fixture.add('one.json', 'first report')
+    assert.equal(fixture.reader.read(false)[0].body, 'first report')
+    const watcher = fixture.watchers.at(-1)
+    fs.unlinkSync(join(fixture.directory, 'one.json'))
+    empty(false)
+    assert.equal(watcher.isClosed, true)
+    renameSync(fixture.directory, join(fixture.root, 'old-files'))
+    mkdirSync(fixture.directory)
+    fixture.add('one.json', 'returned report')
+    assert.equal(fixture.reader.read(false)[0].body, 'returned report')
+  } finally {
+    fs.statSync = originalStat
+    fs.readdirSync = originalList
+    syncBuiltinESMExports()
+    fixture.end()
+  }
+})
+
 test('inbox display hints keep the newest thirty reports and notice additions and removals', () => {
   const fixture = inboxFilesFixture()
   try {
@@ -4844,6 +4884,24 @@ test('inbox action reads bypass hints before an event arrives and forget a remov
     fixture.add('one.json', 'third report')
     assert.equal(fixture.reader.read(false)[0].body, 'third report')
   } finally { fixture.end() }
+})
+
+test('inbox without a watcher rereads mutable reports even when all file metadata stays fixed', () => {
+  const fixture = inboxFilesFixture(true)
+  const file = fixture.add('one.json', 'first report')
+  const originalStat = fs.statSync
+  const unchanged = originalStat(file)
+  fs.statSync = (...args) => args[0] === file ? unchanged : originalStat(...args)
+  syncBuiltinESMExports()
+  try {
+    assert.equal(fixture.reader.read(false)[0].body, 'first report')
+    fixture.add('one.json', 'other report')
+    assert.equal(fixture.reader.read(false)[0].body, 'other report')
+  } finally {
+    fs.statSync = originalStat
+    syncBuiltinESMExports()
+    fixture.end()
+  }
 })
 
 test('inbox watcher failures and directory replacement keep fresh report discovery available', () => {

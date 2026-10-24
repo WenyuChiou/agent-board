@@ -53,6 +53,17 @@ export const recentInboxFiles = (options: {
   return {
     read: (isFresh = true): InboxEntry[] => {
       try {
+        const names = readdirSync(options.directory).filter(options.accepts)
+        // An empty listing has no entries to validate. Drop old hints so the next report is read
+        // fresh, without adding directory identity checks to every empty-inbox poll (#428).
+        if (names.length === 0) {
+          close()
+          known.clear()
+          dirty.clear()
+          identity = ''
+          isUncertain = true
+          return []
+        }
         const directory = statSync(options.directory)
         const nextIdentity = `${directory.dev}:${directory.ino}:${directory.birthtimeMs}`
         if (identity !== nextIdentity) {
@@ -64,7 +75,6 @@ export const recentInboxFiles = (options: {
           hasFailed = false
         }
         watchDirectory()
-        const names = readdirSync(options.directory).filter(options.accepts)
         const listed = new Set(names)
         for (const name of known.keys()) if (!listed.has(name)) known.delete(name)
         for (const name of names) {
@@ -74,7 +84,7 @@ export const recentInboxFiles = (options: {
             const entry = statSync(join(options.directory, name))
             if (!entry.isFile()) { known.delete(name); continue }
             const stamp = `${entry.size}:${entry.mtimeMs}:${entry.ctimeMs}:${entry.ino}`
-            const body = !isFresh && !isUncertain && !dirty.has(name) && previous?.stamp === stamp ? previous.body : undefined
+            const body = !isFresh && watcher !== null && !isUncertain && !dirty.has(name) && previous?.stamp === stamp ? previous.body : undefined
             known.set(name, { stamp, at: entry.mtimeMs, ...(body === undefined ? {} : { body }) })
           } catch {
             known.delete(name)
