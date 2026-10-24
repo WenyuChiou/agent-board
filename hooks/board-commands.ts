@@ -1,13 +1,14 @@
 import type { Strings } from './i18n'
 
 // Native command-file syntax is separate from the shell command it contains.
-export const boardRun = (path: string): string => {
+export const boardRun = (path: string, args: string[] = []): string => {
   if (!path || path.includes('\0')) throw new Error('INVALID_BOARD_PATH')
-  if (/^[A-Za-z0-9 ._:/\\-]+$/.test(path)) return `node "${path}"`
+  if (args.length === 0 && /^[A-Za-z0-9 ._:/\\-]+$/.test(path)) return `node "${path}"`
   // Only numeric code points enter the shell. This also keeps native !{...},
   // Markdown backticks and Windows %VAR% expansion away from literal path data.
   const points = Array.from(path, char => char.codePointAt(0)).join(',')
-  const source = `const p=String.fromCodePoint(${points});process.argv.splice(1,0,p);import(require('node:url').pathToFileURL(p).href)`
+  const extra = args.length === 0 ? '' : `process.argv.push(${args.map(value => `String.fromCodePoint(${Array.from(value, char => char.codePointAt(0)).join(',')})`).join(',')});`
+  const source = `const p=String.fromCodePoint(${points});process.argv.splice(1,0,p);${extra}import(require('node:url').pathToFileURL(p).href)`
   return `node --input-type=commonjs -e "${source}" --`
 }
 

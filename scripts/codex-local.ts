@@ -398,7 +398,18 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
     }
     if (mode === '--codex-report') output({ session, block: hash(`${agent}:${session}`).slice(0, 8), state: report!.state, updated: report!.updated, progress })
     else if (agent === 'cursor') output(raw.hook_event_name === 'sessionStart' ? { env: { AGENT_BOARD_SESSION_ID: session, AGENT_BOARD_AGENT: agent } } : {})
-    else if (agent === 'gemini' || agent === 'antigravity') output({})
+    else if (agent === 'antigravity') {
+      // The host supplies the binding; the agent supplies semantic summaries. A first
+      // invocation also covers resumed conversations that have no SessionStart event.
+      const isStart = current.event === 'SessionStart'
+      const isFirst = current.event === 'PreInvocation' && raw.invocationNum === 0
+      // Legacy connect runs a bundle beside its chosen progress file, outside root.
+      const context = isStart || isFirst ? s.localAgentAntigravityContext(boardRun(process.argv[1] ?? script, [
+        '--codex-report', '--agent', 'antigravity', '--session', session,
+        '--progress-file', progress, '--home', home, '--data-dir', root,
+      ])) : ''
+      output(isStart ? { injectSteps: [{ systemMessage: { systemMessage: context } }] } : isFirst ? { injectSteps: [{ ephemeralMessage: context }] } : {})
+    } else if (agent === 'gemini') output({})
     return true
   }
 
