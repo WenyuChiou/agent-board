@@ -402,6 +402,10 @@ const answeredPending = new Map<string, QuestionAnswerEvidence>()
 // ten minutes after that instead of until any inbox record of its session shows up: a record
 // another session writes late still settles, and sessions that never ask do not pile up.
 const answeredKeptSince = new Map<string, number>()
+// How many answers were ever added or updated. The idle question key holds this count rather than
+// the answers themselves, so a new answer moves the key and one aging out does not: the pass before
+// already carried it, and dropping it gives a pass nothing new to do (#416).
+let answersAdded = 0
 const rememberAnswered = (turns: readonly AgentTurn[]): void => {
   for (const turn of turns) {
     if ((turn.event !== 'prompt' && (turn.event !== 'turn' || turn.answer.trim() === '')) || turn.at === undefined || !Number.isFinite(turn.at)) continue
@@ -409,6 +413,7 @@ const rememberAnswered = (turns: readonly AgentTurn[]): void => {
     if ((answeredPending.get(key)?.at ?? -Infinity) >= turn.at) continue
     answeredPending.set(key, { agent: turn.agent, id: turn.id, event: turn.event, at: turn.at })
     answeredKeptSince.delete(key)
+    answersAdded += 1
   }
 }
 const pendingQuestionProofs = new Map<string, { path: string; kind: keyof QuestionProofs; hash: string }>()
@@ -761,19 +766,19 @@ const pollQuestions = async ($: EngineInterface, path: string, projects: readonl
 
 // What an idle question pass is made from (#156): the files beside progress.md it reads
 // (`questionFilesKey`), the inbox turns, the questions of this session's list
-// (`ownQuestionsKey`), the asks it hides and the answers it still carries. A pass that went
+// (`ownQuestionsKey`), the asks it hides and how many answers were added. A pass that went
 // through cleanly is not made again until one of them moves, so a quiet poll lists two folders
 // instead of reading the question files. Null, so the pass is made, while a file there was just
 // written or the folder does not list: a pass that cannot list still counts toward the questions
 // problem, as before.
 let questionsSeen: string | null = null
-const questionsKey = async ($: EngineInterface, path: string, batch: readonly unknown[]): Promise<string | null> => {
+const questionsKey = async ($: EngineInterface, path: string, added: number): Promise<string | null> => {
   const at = await $.clock.now()
   const entries = await $.fs.list(path.replace(/[\\/][^\\/]*$/, '')).catch(() => null)
   const files = entries === null ? null : questionFilesKey(path, answeredPath(path), entries, at, POLL_MS)
   if (files === null) return null
 
-  return JSON.stringify([path, files, await pendingTurns($), ownQuestionsKey(await read($, mine)), await read($, hiddenAsks), batch])
+  return JSON.stringify([path, files, await pendingTurns($), ownQuestionsKey(await read($, mine)), await read($, hiddenAsks), added])
 }
 
 const pollAnsweredQuestions = async ($: EngineInterface, path: string, projects: readonly ProgressProject[] | undefined, evidence: readonly AgentTurn[] = []): Promise<void> => {
@@ -782,15 +787,17 @@ const pollAnsweredQuestions = async ($: EngineInterface, path: string, projects:
   try {
     const matches = (record: QuestionRecord, turn: QuestionAnswerEvidence): boolean => record.source?.kind === 'inbox' && record.source.agent === turn.agent && record.source.session === turn.id
     const batch = [...answeredPending.entries()]
+    // Counted with the batch, so an answer remembered while the key is read is not taken as carried.
+    const added = answersAdded
     if (evidence.length > 0) {
       if (batch.length === 0) return
       const ledger = await read($, questionLedger)
       if (!batch.some(([, turn]) => ledger.records.some(record => record.isUnresolved && matches(record, turn)))) return
     }
     // Taken before the pass, so a write that lands while it runs makes the next poll pass again.
-    const key = evidence.length > 0 ? null : await questionsKey($, path, batch)
-    // A pass skipped as unchanged went through with this same batch, so the answers it carries
-    // still age out below.
+    const key = evidence.length > 0 ? null : await questionsKey($, path, added)
+    // A pass skipped as unchanged had no answer added since the clean pass it stands for, which
+    // carried every answer in this batch, so they still age out below.
     if (key === null || key !== questionsSeen) {
       if (!(await pollQuestions($, path, projects ?? parseProgress(await readText($, path)), false, [], batch.map(([, turn]) => turn)))) return
       questionsSeen = key
