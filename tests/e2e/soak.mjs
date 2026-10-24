@@ -398,7 +398,7 @@ const soak = async ({ minutes, out }) => {
       for (const name of names) {
         try {
           const text = readFileSync(join(world.claudeDir, name), 'utf8')
-          const hash = CAPTURE.exec(name)?.[1]
+          const hash = name.match(CAPTURE)?.[1]
           if (hash === undefined) throw new Error(`${name} has no question capture hash`)
           captures.push({ hash, text })
         } catch (error) { found.error ??= error.code ?? error.message }
