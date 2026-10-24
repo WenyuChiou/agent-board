@@ -5,7 +5,8 @@ import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { makeWorld } from './lib/world.mjs'
 import { spawnIsolated } from './lib/spawn.mjs'
-import { OUT_DEFAULT, archiveIntegrity, archiveProblems, fileOpsPerPoll, hookLoadMarker, leftoverPlan, leftoverProcesses, levelOutcome, makeRedact, median, parseArguments, peakRss, percentile, pruneRefusal, queuedSessions, redactDeep, tallyOf, writeReport } from './lib/soak-report.mjs'
+import { knownFailure } from './lib/known.mjs'
+import { OUT_DEFAULT, archiveIntegrity, archiveProblems, classifySoakChecks, fileOpsPerPoll, hookLoadMarker, leftoverPlan, leftoverProcesses, levelOutcome, makeRedact, median, parseArguments, peakRss, percentile, pruneRefusal, queuedSessions, redactDeep, tallyOf, writeReport } from './lib/soak-report.mjs'
 
 const soak = fileURLToPath(new URL('./soak.mjs', import.meta.url))
 
@@ -21,6 +22,35 @@ const attempt = (world, args) => new Promise((resolve, reject) => {
 })
 
 describe('L6 soak arguments', () => {
+  test('L6 soak results: measured successes pass while their hold identifiers remain registered', async () => {
+    const titles = { ops: 'File operations', prune: 'Pruned questions', level: 'Memory level' }
+    const holds = { ops: 'hold:serve-poll-file-ops', prune: 'hold:question-ledger-prune' }
+    const outcomes = { ops: { ok: true, line: 'Measured 2 operations.' }, prune: { ok: true, line: 'Measured 0 leftovers.' }, level: { ok: true, hold: holds.ops, line: 'Memory settled.' } }
+    const results = await classifySoakChecks({ outcomes, titles, holds, minutes: 35, knownFailure })
+    assert.deepEqual(results, Object.entries(titles).map(([key, title]) => ({ title, status: 'pass', line: outcomes[key].line })))
+    assert.deepEqual(holds, { ops: 'hold:serve-poll-file-ops', prune: 'hold:question-ledger-prune' })
+  })
+  test('L6 soak results: held failures remain known and unheld failures still fail', async () => {
+    const titles = { ops: 'File operations', prune: 'Pruned questions', watch: 'Terminal board', crash: 'Crashed server' }
+    const holds = { ops: 'hold:serve-poll-file-ops', prune: 'hold:question-ledger-prune', crash: 'hold:serve-poll-file-ops' }
+    const outcomes = { ops: { ok: false, line: 'Too many operations.' }, prune: { ok: false, line: 'Leftovers remain.' }, watch: { ok: false, line: 'Terminal stopped.' }, crash: { ok: false, isUnheld: true, line: 'Server exited.' } }
+    const results = await classifySoakChecks({ outcomes, titles, holds, minutes: 35, knownFailure })
+    assert.deepEqual(results.map(one => one.status), ['known', 'known', 'fail', 'fail'])
+    assert.match(results[0].line, /Known problem \(hold:serve-poll-file-ops\)/)
+    assert.match(results[1].line, /Known problem \(hold:question-ledger-prune\)/)
+    assert.equal(results[3].line, outcomes.crash.line)
+  })
+  test('L6 soak results: an unexpected known-failure error fails the check', async () => {
+    const results = await classifySoakChecks({ outcomes: { ops: { ok: false, line: 'Measurement failed.' } }, titles: { ops: 'File operations' }, holds: { ops: 'invalid hold' }, minutes: 35, knownFailure })
+    assert.deepEqual(results, [{ title: 'File operations', status: 'fail', line: 'Invalid known failure: invalid hold Measurement failed.' }])
+  })
+  test('L6 soak results: missing measurements fail full runs and may skip short runs', async () => {
+    const input = { outcomes: { ops: { skipped: 'No polls completed.' } }, titles: { ops: 'File operations' }, holds: { ops: 'hold:serve-poll-file-ops' }, knownFailure }
+    const full = await classifySoakChecks({ ...input, minutes: 35 })
+    const short = await classifySoakChecks({ ...input, minutes: 1 })
+    assert.deepEqual(full, [{ title: 'File operations', status: 'fail', line: 'Not measured in a 35-minute run: No polls completed.' }])
+    assert.deepEqual(short, [{ title: 'File operations', status: 'skipped', line: 'No polls completed.' }])
+  })
   test('L6 soak arguments: a rejected --minutes value, a repeated flag and an unknown flag exit 2 with one plain line and create no report folder', async () => {
     const world = makeWorld()
     try {

@@ -4,7 +4,7 @@ import { arch, homedir, release, tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { performance } from 'node:perf_hooks'
 import { fileURLToPath, pathToFileURL } from 'node:url'
-import { OUT_DEFAULT, archiveIntegrity, archiveProblems, fileOpsPerPoll, levelOutcome, makeRedact, median, parseArguments, peakRss, percentile, pruneRefusal, tallyOf, writeReport } from './lib/soak-report.mjs'
+import { OUT_DEFAULT, archiveIntegrity, archiveProblems, classifySoakChecks, fileOpsPerPoll, levelOutcome, makeRedact, median, parseArguments, peakRss, percentile, pruneRefusal, tallyOf, writeReport } from './lib/soak-report.mjs'
 import { stopTree } from './lib/processes.mjs'
 
 // L6 soak: the terminal board (--watch) and the page server (--serve) run side by side on one
@@ -799,27 +799,7 @@ const soak = async ({ minutes, out }) => {
     else if (state.archiveEndAt === undefined) outcomes.level = { skipped: 'The run ended before the archive phase was done.' }
     else outcomes.level = levelOutcome({ before, after, settled: settled.length, needed: SETTLED_LINES, settleSeconds: SETTLE_MS / 1000, archiveMinutes: Math.round((state.archiveEndAt - state.archiveStartAt) / 6000) / 10, isOpsHeld, hold: HOLDS.ops })
 
-    // CI runs 30 minutes: a check such a run could not measure fails it, since the run then proved
-    // nothing about it. A shorter run, tried by hand, may skip.
-    const isFullRun = minutes >= 30
-    const results = []
-    for (const [key, title] of Object.entries(TITLES)) {
-      const outcome = outcomes[key]
-      if (outcome.skipped !== undefined) {
-        results.push(isFullRun ? { title, status: 'fail', line: `Not measured in a ${minutes}-minute run: ${outcome.skipped}` } : { title, status: 'skipped', line: outcome.skipped })
-        continue
-      }
-      // An outcome the known slowness explains names that hold itself (pruneRefusal, levelOutcome).
-      const hold = outcome.hold ?? HOLDS[key]
-      if (hold === undefined || outcome.isUnheld) { results.push({ title, status: outcome.ok ? 'pass' : 'fail', line: outcome.line }); continue }
-      try {
-        // An assertion error, so the known failure still counts once knownFailure accepts only
-        // assertion errors (#376).
-        await knownFailure(hold, () => { if (!outcome.ok) assert.fail(outcome.line) })
-        results.push({ title, status: 'known', line: `${outcome.line} Known problem (${hold}).` })
-      } catch (error) { results.push({ title, status: 'fail', line: `${error.message} ${outcome.line}` }) }
-    }
-    report.checks = results
+    report.checks = await classifySoakChecks({ outcomes, titles: TITLES, holds: HOLDS, minutes, knownFailure })
   } catch (error) {
     report.status = 'failed'
     problem(`The soak stopped on an error: ${String(error?.message ?? error).split('\n')[0]}`)

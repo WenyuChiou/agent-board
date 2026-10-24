@@ -1,3 +1,4 @@
+import assert from 'node:assert/strict'
 import { mkdirSync, renameSync, unlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -345,4 +346,27 @@ export const writeReport = (dir, report, redact) => {
     writeFileSync(temporary, text)
     replace(temporary, file)
   }
+}
+
+// A full run must measure every check; shorter diagnostic runs may skip one.
+export const classifySoakChecks = async ({ outcomes, titles, holds, minutes, knownFailure }) => {
+  const isFullRun = minutes >= 30
+  const results = []
+  for (const [key, title] of Object.entries(titles)) {
+    const outcome = outcomes[key]
+    if (outcome.skipped !== undefined) {
+      results.push(isFullRun ? { title, status: 'fail', line: `Not measured in a ${minutes}-minute run: ${outcome.skipped}` } : { title, status: 'skipped', line: outcome.skipped })
+      continue
+    }
+    if (outcome.ok) { results.push({ title, status: 'pass', line: outcome.line }); continue }
+    // An outcome the known slowness explains names that hold itself (pruneRefusal, levelOutcome).
+    const hold = outcome.hold ?? holds[key]
+    if (hold === undefined || outcome.isUnheld) { results.push({ title, status: outcome.ok ? 'pass' : 'fail', line: outcome.line }); continue }
+    try {
+      // Only an assertion failure may stand for the registered known problem.
+      await knownFailure(hold, () => { if (!outcome.ok) assert.fail(outcome.line) })
+      results.push({ title, status: 'known', line: `${outcome.line} Known problem (${hold}).` })
+    } catch (error) { results.push({ title, status: 'fail', line: `${error.message} ${outcome.line}` }) }
+  }
+  return results
 }
