@@ -88,7 +88,10 @@ const spaced = (path: string): string => path.replace(/([AaCc])(?=\d)/g, '$1 ')
 export const agentMarkCss = (): string =>
   '.ag{width:24px;height:24px;border-radius:7px;display:inline-grid;place-items:center;flex:none;background:var(--muted);color:#fff;font:600 12px/1 system-ui;vertical-align:middle}.ag-other{background:var(--inset);color:var(--muted)}' +
     `.ag-own{background:var(--inset) url("data:image/svg+xml,${encodeURIComponent(OWN_MARK)}") center/76% 76% no-repeat;box-shadow:inset 0 0 0 1px var(--line-strong)}` + AGENT_ICONS.map(icon => {
-    const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="${icon.viewBox ?? '0 0 24 24'}" fill="${icon.ink ?? 'white'}"${icon.isEvenOdd ? ' fill-rule="evenodd"' : ''}>${(icon.paths ?? []).map(path => `<path d="${spaced(path)}"/>`).join('')}</svg>`
+    // A hex color gains "23" in a data URL, which can resemble an eight-hex id.
+    const channels = icon.ink?.match(/^#([a-f\d]{2})([a-f\d]{2})([a-f\d]{2})$/i)
+    const ink = channels ? `rgb(${channels.slice(1).map(channel => parseInt(channel, 16)).join(',')})` : icon.ink ?? 'white'
+    const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="${icon.viewBox ?? '0 0 24 24'}" fill="${ink}"${icon.isEvenOdd ? ' fill-rule="evenodd"' : ''}>${(icon.paths ?? []).map(path => `<path d="${spaced(path)}"/>`).join('')}</svg>`
     return `.ag-${icon.file}{background:${icon.tile}${icon.paths ? ` url("data:image/svg+xml,${encodeURIComponent(svg)}") center/76% 76% no-repeat` : ''}}` + (icon.letter && !icon.paths ? `.ag-${icon.file}::before{content:"${icon.letter}"}` : '')
   }).join('')
 

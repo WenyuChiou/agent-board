@@ -6329,18 +6329,20 @@ test('official agent marks retain their source viewport on every board surface',
   const { agentMarkCss } = await sourceAgentMarks()
   const css = agentMarkCss()
   const page = await sourcePage()
+  assert.doesNotMatch(page, /\b[\da-f]{8}\b|\b[\da-f]{40}\b|\b[\da-f]{64}\b|(?<![A-Za-z])[A-Za-z]:[\\/]|\/home\/|\/Users\//i, 'brand SVG encoding keeps the default-page privacy contract')
   const official = {
     antigravity: ['0 0 180 180', 'cbc9e89e57b6ec9d4a155a53e84b722edc8f4ffcf9e33f6765bbd04cbca77422'],
     'deepseek-harness': ['0 0 50 50', '112fe133fd1d80bc5c7a785426e1ba6838458b1d21d3d8db9421273150c41182'],
   }
   for (const icon of AGENT_ICONS) {
+    assert.match(icon.tile, /^#[0-9A-Fa-f]{6}$/, `${icon.file} keeps the README tile color contract`)
     assert.ok(icon.paths?.length, `${icon.file} has a verified brand shape`)
     const rule = css.match(new RegExp(`\\.ag-${icon.file}\\{([^}]+)\\}`))?.[1]
     const encoded = rule?.match(/url\("data:image\/svg\+xml,([^"]+)"\)/)?.[1]
     assert.ok(encoded, icon.file)
     const svg = decodeURIComponent(encoded)
     assert.ok(svg.includes(`viewBox="${icon.viewBox ?? '0 0 24 24'}"`), icon.file)
-    assert.ok(svg.includes(`fill="${icon.ink ?? 'white'}"`), icon.file)
+    assert.ok(svg.includes(`fill="${icon.file === 'muse-code' ? 'rgb(0,130,251)' : 'white'}"`), icon.file)
     assert.equal(svg.includes('fill-rule="evenodd"'), !!icon.isEvenOdd, icon.file)
     const paths = [...svg.matchAll(/<path d="([^"]+)"\/>/g)].map(match => match[1].replace(/\s/g, ''))
     assert.deepEqual(paths, icon.paths.map(path => path.replace(/\s/g, '')), icon.file)
@@ -6349,7 +6351,7 @@ test('official agent marks retain their source viewport on every board surface',
     if (icon.file === 'muse-code') {
       assert.equal(createHash('sha256').update(icon.paths[0]).digest('hex'), 'f8bffc5fd6188e1dbbc34e95fcef3e35c20450857252bc35c1a5af07f85b321f', 'Muse geometry matches its pinned library source')
       assert.equal(icon.ink, '#0082FB')
-      assert.equal(icon.tile, '#fff')
+      assert.equal(icon.tile, '#FFFFFF')
       assert.ok(!css.includes('.ag-muse-code::before'))
       for (const prefix of ['', 'chip-']) {
         const image = readFileSync(new URL(`../docs/images/agents/${prefix}${icon.file}.svg`, import.meta.url), 'utf8')
