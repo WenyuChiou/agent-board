@@ -76,6 +76,8 @@ export const ZH_TW = {
 
   // Time and dates
   justNow: '剛剛',
+  futureTime: (age: string): string => `未來時間 · ${age}`,
+  futureTimeUnknown: '未來時間 · 經過時間不明',
   minutesAgo: (n: number): string => `${n} 分鐘前`,
   hoursAgo: (n: number): string => `${n} 小時前`,
   yesterday: '昨天',
@@ -452,6 +454,7 @@ export const ZH_TW = {
   dashStamp: (time: string): string => `更新於 ${time}`,
   dashInboxHint: '請回到該 agent 的對話裡回覆；這個頁面不能傳送回覆。',
   windowOpened: (): string => '已在瀏覽器開啟進度看板。',
+  windowSaved: (page = 'progress.html', file = 'progress.md'): string => `已將 ${page} 存在 ${file} 旁，可自行開啟。`,
   windowFailed: (page = 'progress.html', file = 'progress.md'): string => `無法開啟進度看板：瀏覽器啟動失敗。請自行開啟 ${file} 旁邊的 ${page}。`,
 
   // The board other agents show (the standalone script and each agent's board command)
@@ -500,6 +503,7 @@ export const ZH_TW = {
   prunedJoin: (parts: readonly string[]): string => (parts.length < 2 ? parts.join('') : `${parts.slice(0, -1).join('、')}和 ${parts.at(-1)}`),
   prunedLine: (list: string, days: number): string => `最近 ${days} 天清掉了 ${list}`,
   reporterFailed: (reason: string): string => `進度回報未能儲存（${reason}），請檢查進度檔後再試。`,
+  reporterLockDenied: '無法在 progress.md 旁建立檔案（權限遭拒），請檢查資料夾權限後再試。',
   tailRepairFailed: '無法安全修復不完整的結尾，沒有改任何東西。請檢查進度檔後再重新回報。',
   fileProgress: '你的進度檔',
   fileQuestions: '問題清單',

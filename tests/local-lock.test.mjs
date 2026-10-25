@@ -7,6 +7,7 @@ import { setTimeout as delay } from 'node:timers/promises'
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { withLocalLock } from '../scripts/local-lock.ts'
+import { withDeniedCreation } from './fixtures/windows-create-denied.mjs'
 
 const moduleUrl = new URL('../scripts/local-lock.ts', import.meta.url).href
 const program = `
@@ -216,6 +217,25 @@ test('an uncreatable native lock fails before the mutation runs', async () => fi
   mkdirSync(lock)
   assert.throws(() => withLocalLock(lock, () => assert.fail('mutation ran'), { waitMs: 0 }))
   assert.equal(existsSync(lock), true)
+}))
+
+test('a Windows folder that denies lock creation reports LOCK_DENIED without running the mutation', { skip: process.platform !== 'win32' && 'Windows ACLs only' }, () => fixture(async ({ root, lock }) => {
+  await withDeniedCreation(root, () => {
+    assert.throws(() => withLocalLock(lock, () => assert.fail('mutation ran'), { waitMs: 100 }), /^Error: LOCK_DENIED$/)
+    assert.equal(existsSync(lock), false)
+    assert.equal(existsSync(`${lock}.recover`), false)
+  })
+  withLocalLock(lock, () => undefined)
+  assert.equal(existsSync(lock), false)
+}))
+
+test('a held Windows lock remains LOCK_BUSY when its directory also denies creation', { skip: process.platform !== 'win32' && 'Windows ACLs only' }, () => fixture(async ({ root, lock }) => {
+  const owner = JSON.stringify({ version: 1, pid: process.pid, token: 'a'.repeat(32) })
+  writeFileSync(lock, owner)
+  await withDeniedCreation(root, () => {
+    assert.throws(() => withLocalLock(lock, () => assert.fail('mutation ran'), { waitMs: 100 }), /^Error: LOCK_BUSY$/)
+    assert.equal(readFileSync(lock, 'utf8'), owner)
+  })
 }))
 
 test('failed native lock initialization closes its descriptor and preserves a detected replacement', async () => fixture(async ({ root, lock }) => {

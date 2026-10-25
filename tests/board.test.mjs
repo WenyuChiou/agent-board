@@ -3768,9 +3768,12 @@ test('L5 restarted server: an old page tab disables its buttons and says how to 
     'zh-CN': '连不上看板。请在电脑上用 --serve --lan 重新启动看板，再打开新地址。',
   }
   for (const [lang, line] of Object.entries(lines)) {
-    for (const failure of lang === 'en' ? ['poll', 'paste', 'close', 'tick', 'tidy'] : ['poll']) {
-      const board = await page('', {}, ['--lang', lang])
-      try {
+    const board = await page('', {}, ['--lang', lang])
+    try {
+      // Each offline surface gets its own connected DOM before the same server stops.
+      // Reusing that server keeps native permission setup out of the per-surface loop.
+      const cases = []
+      for (const failure of lang === 'en' ? ['poll', 'paste', 'close', 'tick', 'tidy'] : ['poll']) {
         const model = (await board.call('GET', '/api/board')).json().model
         const html = (await board.call('GET', `/?t=${board.token}`)).body
         const response = reply => ({ ok: reply.status === 200, json: async () => reply.json() })
@@ -3790,8 +3793,11 @@ test('L5 restarted server: an old page tab disables its buttons and says how to 
           }
         }
         assert.ok(dom.allButtons().length > 3)
-        await board.call('POST', '/api/close', { body: {} })
-        await board.exited
+        cases.push({ failure, dom, model, html, phone })
+      }
+      await board.call('POST', '/api/close', { body: {} })
+      await board.exited
+      for (const { failure, dom, model, html, phone } of cases) {
         if (failure === 'poll') {
           await dom.redraw(model)
           await dom.settle()
@@ -3829,8 +3835,8 @@ test('L5 restarted server: an old page tab disables its buttons and says how to 
         assert.equal(dom.requests.length, requests, 'offline presses send and queue nothing')
         assert.equal(dom.node('offline').textContent, line)
         assert.ok(!existsSync(join(board.dir, 'grok-ran.json')))
-      } finally { await board.close() }
-    }
+      }
+    } finally { await board.close() }
   }
 })
 
@@ -4582,6 +4588,110 @@ test('two --serve run at the same moment open one page between them, and a serve
     assert.equal(JSON.parse(readFileSync(board.served, 'utf8')).url, urls[0])
   } finally {
     await board.end(urls)
+  }
+})
+
+test('Windows concurrent page startup waits for the winning address to finish publishing', { skip: process.platform !== 'win32' && 'Windows ACLs only', timeout: 60_000 }, async () => {
+  const board = serveIn()
+  const held = join(board.dir, 'publisher-held')
+  const release = join(board.dir, 'publisher-release')
+  const lost = join(board.dir, 'publisher-contender-lost')
+  const prefix = `import publicationFs340 from 'node:fs'
+import publicationCp340 from 'node:child_process'
+import { syncBuiltinESMExports as publicationSync340 } from 'node:module'
+const publicationOpen340 = publicationFs340.openSync
+const publicationClose340 = publicationFs340.closeSync
+const publicationWrite340 = publicationFs340.writeFileSync
+const publicationRead340 = publicationFs340.readFileSync
+const publicationSpawn340 = publicationCp340.spawn
+const publicationFds340 = new Map()
+let publicationReads340 = 0
+publicationCp340.spawn = (command, args, options) => {
+  if (process.argv.includes('--serve') && args.includes('--serve-child')) {
+    publicationWrite340(${JSON.stringify(lost)}, 'lost')
+    return publicationSpawn340(command, ['--input-type=module', '-e', 'process.exit(0)'], options)
+  }
+  return publicationSpawn340(command, args, options)
+}
+publicationFs340.openSync = (file, flags, ...rest) => {
+  const fd = publicationOpen340(file, flags, ...rest)
+  if (file === ${JSON.stringify(board.served)}) publicationFds340.set(fd, flags)
+  return fd
+}
+publicationFs340.closeSync = fd => {
+  publicationFds340.delete(fd)
+  return publicationClose340(fd)
+}
+publicationFs340.writeFileSync = (file, data, ...rest) => {
+  if (process.env.AGENT_BOARD_TEST_PUBLISH_WAIT === '1' && publicationFds340.get(file) === 'wx') {
+    publicationWrite340(${JSON.stringify(held)}, 'waiting')
+    const until = performance.now() + 15_000
+    while (!publicationFs340.existsSync(${JSON.stringify(release)})) {
+      if (performance.now() >= until) throw new Error('FIXTURE_PUBLISH_TIMEOUT')
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20)
+    }
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 200)
+  }
+  return publicationWrite340(file, data, ...rest)
+}
+publicationFs340.readFileSync = (file, ...rest) => {
+  const value = publicationRead340(file, ...rest)
+  if (process.argv.includes('--serve') && publicationFds340.get(file) === 'r' && value.length === 0) {
+    publicationReads340 += 1
+    if (publicationReads340 === 2) {
+      const past = new Date(Date.now() - 11_000)
+      publicationFs340.utimesSync(${JSON.stringify(board.served)}, past, past)
+      publicationWrite340(${JSON.stringify(release)}, 'publish')
+    }
+  }
+  return value
+}
+publicationSync340()
+`
+  writeFileSync(board.script, prefix + readFileSync(board.script, 'utf8'))
+  const publisher = spawn(process.execPath, [board.script, '--serve-child'], {
+    env: { ...board.env, AGENT_BOARD_TEST_PUBLISH_WAIT: '1' },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  })
+  let stderr = ''
+  publisher.stderr.setEncoding('utf8')
+  publisher.stderr.on('data', chunk => { stderr += chunk })
+  const exited = new Promise(done => publisher.once('exit', done))
+  const published = new Promise((done, fail) => {
+    let out = ''
+    publisher.stdout.setEncoding('utf8')
+    publisher.stdout.on('data', chunk => {
+      out += chunk
+      if (out.includes('\n')) done(out.split('\n')[0].trim())
+    })
+    publisher.once('error', fail)
+    exited.then(code => fail(new Error(`the publisher exited with ${code}: ${stderr}`)))
+  })
+  published.catch(() => undefined)
+  let url = null
+  try {
+    for (let tries = 0; !existsSync(held) && tries < 500; tries++) await delay(20)
+    assert.ok(existsSync(held), stderr)
+    assert.equal(statSync(board.served).size, 0, 'the winner has reserved the address but has not published a token')
+    // The ordinary simultaneous-start test covers a real losing child. Here its exit is
+    // controlled so permission-command speed cannot choose the publication handshake.
+    // Aging the reservation only after contention covers a cutoff crossed mid-launch.
+    const out = await board.serve(['--quiet-board'])
+    url = await Promise.race([published, delay(5000).then(() => { throw new Error('the winner did not publish') })])
+    assert.ok(existsSync(lost), 'the losing child exited before the winner published')
+    assert.ok(existsSync(board.served), 'the in-flight winner must keep its reserved address')
+    assert.equal(board.urlOf(out), url, out)
+    assert.ok(existsSync(release), 'the winner was held until the launcher reread the still-empty address')
+    assert.equal(JSON.parse(readFileSync(board.served, 'utf8')).pid, publisher.pid)
+  } finally {
+    try {
+      writeFileSync(release, 'release')
+      await Promise.race([published.catch(() => undefined), delay(5000)])
+      await board.end([url])
+    } finally {
+      if (publisher.exitCode === null) publisher.kill()
+      await Promise.race([exited, delay(5000, undefined, { ref: false }).then(() => { throw new Error('the owned publisher did not exit') })])
+    }
   }
 })
 

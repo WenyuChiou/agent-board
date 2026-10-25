@@ -13,11 +13,14 @@ const isBusy = (error: unknown): boolean => {
   return code === 'EEXIST' || process.platform === 'win32' && code === 'EPERM'
 }
 
-const claim = (file: string): Claim | null => {
+const claim = (file: string, busy?: (code: string) => void): Claim | null => {
   const text = JSON.stringify({ version: 1, pid: process.pid, token: randomBytes(16).toString('hex') })
   let fd: number
   try { fd = openSync(file, 'wx', 0o600) } catch (error) {
-    if (isBusy(error)) return null
+    if (isBusy(error)) {
+      busy?.((error as { code: string }).code)
+      return null
+    }
     throw error
   }
   let identity: Stats | undefined
@@ -102,13 +105,25 @@ export const withLocalLock = <T>(file: string, action: () => T & Synchronous<T>,
   mkdirSync(dirname(file), { recursive: true })
   const started = performance.now()
   let owner: Claim | null = null
+  let lastCode = ''
+  const busy = (code: string): void => { lastCode = code }
   for (;;) {
-    owner = claim(file)
+    owner = claim(file, busy)
     if (owner !== null) break
     recover(file, staleMs)
-    owner = claim(file)
+    owner = claim(file, busy)
     if (owner !== null) break
-    if (performance.now() - started >= waitMs) throw new Error('LOCK_BUSY')
+    if (performance.now() - started >= waitMs) {
+      // A disappearing owner can cause EPERM during the wait. Classify only the final
+      // failed create, and do not infer absence from an unreadable directory entry.
+      if (lastCode === 'EPERM') {
+        try { lstatSync(file) } catch (error) {
+          if ((error as { code?: string }).code === 'ENOENT') throw new Error('LOCK_DENIED')
+          throw error
+        }
+      }
+      throw new Error('LOCK_BUSY')
+    }
     Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, Math.max(0, Math.min(10, waitMs - (performance.now() - started))))
   }
   try { return action() } finally { release(file, owner) }

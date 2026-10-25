@@ -1232,11 +1232,17 @@ const writeDashboard = async ($: EngineInterface, force = false): Promise<{ path
   }
 }
 
+let isInteractiveSession = true
+
 // Opens progress.html in the default browser: a window of its own on the desktop.
-const openDashboard = async ($: EngineInterface): Promise<string> => {
+const openDashboard = async ($: EngineInterface, isInteractive: boolean): Promise<string> => {
   const s = await wordsOf($)
   const { path, problem } = await writeDashboard($, true)
   if (problem !== undefined) return problem
+  if (!isInteractive) {
+    const file = (await read($, snapshot)).path || (await progressPath($))
+    return s.windowSaved(path.split(/[\\/]/).pop(), file.split(/[\\/]/).pop())
+  }
   const argv = (await isWindows($, path))
     ? ['cmd', '/c', 'start', '', path]
     : (await $.env.get('HOME'))?.startsWith('/Users/')
@@ -2951,6 +2957,7 @@ const archiveOne = async ($: EngineInterface, ref: TaskRef): Promise<boolean> =>
   const at = await $.clock.now()
   const s = await wordsOf($)
   const archived = new Set<string>()
+  const observed = await read($, firstSeen)
   const wrote = await rewrite($, path, async text => {
     const projects = parseProgress(text)
     const hasQuestions = projects.some(project => project.name === ref.project && project.tasks.some(task => (ref.session === null ? task.title === ref.title : task.auto?.session === ref.session) && task.steps.some(step => step.status === 'waiting')))
@@ -2959,7 +2966,7 @@ const archiveOne = async ($: EngineInterface, ref: TaskRef): Promise<boolean> =>
       // Another agent's write while the question check ran is not written over with the older text.
       if (await readText($, path) !== text) return AGAIN
     }
-    const taken = takeTask(text, ref, at, s)
+    const taken = takeTask(text, ref, at, s, observed)
     if (taken === null) return null
     await appendArchive($, archivePath(path, at), taken.entries.filter(entry => !archived.has(entry)), s)
     for (const entry of taken.entries) archived.add(entry)
@@ -2982,7 +2989,8 @@ const confirmOne = async ($: EngineInterface, ref: ConfirmRef): Promise<(Confirm
   const at = await $.clock.now()
   const s = await wordsOf($)
   const original = await readText($, path)
-  const candidate = confirmTask(original, ref, at, s)
+  const observed = await read($, firstSeen)
+  const candidate = confirmTask(original, ref, at, s, observed)
   if (candidate === null) return null
   const selected = confirmedTarget(original, ref, s)
   const mirrors = new Map<string, { stored: ProgressMirror | undefined; seen: string }>()
@@ -2998,7 +3006,7 @@ const confirmOne = async ($: EngineInterface, ref: ConfirmRef): Promise<(Confirm
   let confirmed: ConfirmedTask | null = null
   await rewrite($, path, text => {
     if (confirmed !== null && confirmMatches(text, confirmed.ref, s)) return text
-    const next = confirmTask(text, ref, at, s)
+    const next = confirmTask(text, ref, at, s, observed)
     if (next === null) return null
     confirmed = next
     return next.text
@@ -3528,6 +3536,7 @@ const answerHere = async ($: EngineInterface): Promise<void> => {
 
 export const register: Register = (on, options) => {
   on('session.start', async ($, e, next) => {
+    isInteractiveSession = e.isInteractive !== false
     pendingCache = null
     progressChangedAt = null
     heldInboxQuestions.clear()
@@ -3639,6 +3648,7 @@ export const register: Register = (on, options) => {
   })
 
   on('command.run', { command: 'progress' }, async ($, e) => {
+    const isInteractive = isInteractiveSession
     const arg = e.args.trim()
     const language = /^(?:lang|language|語言|语言)\s*(\S*)$/i.exec(arg)
     if (language !== null) {
@@ -3673,7 +3683,7 @@ export const register: Register = (on, options) => {
       return { text: moved === 0 ? s.tidyNothing : s.tidyMoved(moved) }
     }
     if (/^(open|window|html|視窗|窗口|網頁|网页)$/i.test(arg)) {
-      return { text: await openDashboard($) }
+      return { text: await openDashboard($, isInteractive) }
     }
     if (/^(同步|sync)$/i.test(arg)) {
       await resync($)
@@ -3742,10 +3752,17 @@ export const register: Register = (on, options) => {
     startingPages += 1
     try {
       await refreshStatus($)
-      const { page, needsInstall } = await openLiveBoard($, progress, s)
+      const connecting = backgroundConnect
+      let live = await openLiveBoard($, progress, s)
+      if (live.needsInstall && connecting !== null) {
+        // A first open can race the existing upgrade; never run the old file while waiting.
+        await isDoneWithin($, connecting, 5000)
+        live = await openLiveBoard($, progress, s)
+      }
+      const { page, needsInstall } = live
       if (page !== null) return { text: `${s.livePageOpened}\n<${page.url}>${page.isKept ? `\n${s.serveKept}` : ''}` }
       // openDashboard already words the result, with the file names when the browser fails.
-      return { text: `${s.livePageFallback}\n${needsInstall ? `${s.livePageNeedsInstall}\n` : ''}${await openDashboard($)}` }
+      return { text: `${s.livePageFallback}\n${needsInstall ? `${s.livePageNeedsInstall}\n` : ''}${await openDashboard($, isInteractive)}` }
     } finally {
       startingPages -= 1
       // A footer that cannot be redrawn must not take away the link the person waited for.

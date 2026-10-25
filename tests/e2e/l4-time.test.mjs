@@ -84,6 +84,81 @@ describe('L4 time and scale', () => {
     } finally { await world.close() }
   })
 
+  test('L4 a one-day-ahead stopped agent ages from its first local observation across polling and restart', async () => {
+    const world = makeWorld()
+    try {
+      const title = 'Future-clock worker'
+      const stamp = new Date(world.now + DAY).toISOString()
+      // Chat expands a stopped row only when it retains a question; exercise that path too.
+      block(world, { session: 'a4000382', state: 'working', updated: stamp, title, steps: ['- [~] Synthetic work', '- [?] Keep the synthetic worker, OK?'] })
+      const before = world.read('progress.md')
+      const files = world.files()
+      assert.ok((await terminal.screen(world)).includes(EN.futureTimeUnknown))
+      assert.ok((await chat(world)).stdout.includes(EN.futureTimeUnknown))
+      assert.deepEqual(world.files(), files, 'read-only readers establish no clock observation or question baseline')
+      const server = await serve.start(world)
+      assert.ok((await server.get('/api/board')).json().model.groups.flatMap(group => group.rows).some(row => row.title === title))
+      world.jump('13h')
+      let report
+      for (let attempt = 0; ; attempt++) {
+        report = (await server.get('/api/board')).json()
+        if (Math.abs(report.now - world.now) <= 2000) break
+        assert.ok(attempt < 50, 'The page server never took the clock jump')
+        await new Promise(done => setTimeout(done, 100))
+      }
+      const row = report.model.stopped.find(row => row.title === title)
+      assert.ok(row, 'the unchanged future-dated worker must leave In progress after the stale interval')
+      assert.ok(row.when.includes(EN.hoursAgo(13)), row.when)
+      assert.match(row.when, /future time/i)
+      assert.ok(!row.when.includes(EN.justNow), row.when)
+      const observed = world.read('progress-seen.json')
+      const screens = {
+        terminal: await terminal.screen(world, ['--all']),
+        chat: (await chat(world)).stdout,
+        html: (await html(world)).visible,
+        page: await server.page(),
+      }
+      for (const [surface, screen] of Object.entries(screens)) {
+        assert.ok(screen.includes(title) && screen.includes(EN.hoursAgo(13)), `${surface}: ${screen}`)
+        assert.match(screen, /future time/i)
+      }
+      assert.equal(world.read('progress-seen.json'), observed, 'read-only surfaces retain the original observation')
+      await server.stop()
+      const restarted = await serve.start(world)
+      assert.ok((await restarted.get('/api/board')).json().model.stopped.some(row => row.title === title))
+      assert.equal(world.read('progress-seen.json'), observed, 'a restart retains the first observation')
+      assert.equal(world.read('progress.md'), before, 'the writer timestamp and original block remain unchanged')
+    } finally { await world.close() }
+  })
+
+  test('L4 all 501 future updates keep their first observations across a served-board restart', async () => {
+    const world = makeWorld()
+    try {
+      const updated = world.now + DAY
+      const source = '## Future clocks\n' + Array.from({ length: 501 }, (_, index) => blockText({
+        session: (0x38200000 + index).toString(16), state: 'working', updated,
+        title: `Future worker ${index}`, steps: ['- [~] Synthetic work'],
+      })).join('\n') + '\n'
+      world.write('progress.md', source)
+      const server = await serve.start(world)
+      const first = (await server.get('/api/board')).json().model
+      assert.equal(first.groups.flatMap(group => group.rows).length, 501)
+      const seen = world.read('progress-seen.json')
+      assert.equal(Object.keys(JSON.parse(seen).seen).length, 501)
+      await server.get('/api/board')
+      assert.equal(world.read('progress-seen.json'), seen)
+      await server.stop()
+      world.jump('13h')
+      const restarted = await serve.start(world)
+      const later = (await restarted.get('/api/board')).json().model
+      assert.equal(later.stopped.length, 501, 'every present update must become stale, including the row beyond the manual cache limit')
+      assert.equal(later.groups.flatMap(group => group.rows).length, 0)
+      assert.ok(later.stopped.every(row => row.when.includes(EN.hoursAgo(13)) && /future time/i.test(row.when)))
+      assert.equal(world.read('progress-seen.json'), seen)
+      assert.equal(world.read('progress.md'), source)
+    } finally { await world.close() }
+  })
+
   test('L4 +7 d: the idle shelf and the reminder list a task untouched for 7 days and an ask waiting 5 days, with their ages', async () => {
     const world = makeWorld()
     try {

@@ -708,7 +708,7 @@ const act = (action: BoardAction, fallback?: { copyText?: string; tone?: 'done' 
     try {
       wrote = rewrite(path, text => {
         if (confirmed !== null && confirmMatches(text, confirmed.ref, s)) return text
-        const next = confirmTask(text, action.ref, now, s)
+        const next = confirmTask(text, action.ref, now, s, lastSeen)
         if (next === null) return null
         const lines = next.entries.map(entry => journalLine(entry, now, s))
         rewrite(journal, past => {
@@ -780,7 +780,7 @@ const act = (action: BoardAction, fallback?: { copyText?: string; tone?: 'done' 
         retentionFailed = true
         return { text, entries: [] }
       }
-      return takeTask(text, action.ref, now, s)
+      return takeTask(text, action.ref, now, s, lastSeen)
     }, now)
     if (retentionFailed) return s.questionRetentionFailed
     if (count === null) return s.boardWriteFailed
@@ -1110,12 +1110,14 @@ const stays = async (running: Running, file: string): Promise<boolean> => {
 // The running page of this copy for this file, or null. Any other page found in the file (one
 // that no longer answers, or an older copy's) is let go, so a new one can write the file; but an
 // older copy's page that will not close (a reply is on its way) is kept, and `isKept` says so.
-const runningPage = async (): Promise<{ page: Running; isKept: boolean; idleMs?: number | undefined } | null> => {
+const runningPage = async (isStarting = false): Promise<{ page: Running; isKept: boolean; idleMs?: number | undefined } | null> => {
   const running = readRunning()
   if (running === null) {
     // A file that has not read for ten seconds (either way, should the clock have been set
     // back) was cut short by a crash; it would keep every new page from starting.
-    unlinkIf(serveFile(), () => Math.abs(Date.now() - statSync(serveFile()).mtimeMs) > 10_000)
+    // During a launch, this may still be the winning child's reservation. Its age can cross
+    // the crash cutoff while native permission checks run; only the initial lookup clears it.
+    if (!isStarting) unlinkIf(serveFile(), () => Math.abs(Date.now() - statSync(serveFile()).mtimeMs) > 10_000)
     return null
   }
   // A page that is still running but slow to answer (a busy disk) gets longer before it counts
@@ -1184,10 +1186,11 @@ const serveBoard = async (): Promise<void> => {
   if (args.includes('--allow-resume')) rest.push('--allow-resume')
   // In the board's own folder, not the agent's, so the server holds no project folder open.
   const child = spawn(process.execPath, [...serverMemoryArgs(process.execArgv, process.env.NODE_OPTIONS), script, '--serve-child', ...rest], { cwd: dirname(path), detached: true, stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true })
+  const readyBy = performance.now() + 10_000
   // The child prints its address once it listens; it exits at once when it cannot.
   const url = await new Promise<string | null>(done => {
     let out = ''
-    const timer = setTimeout(() => done(null), 10_000)
+    const timer = setTimeout(() => done(null), Math.max(0, readyBy - performance.now()))
     const end = (value: string | null): void => {
       clearTimeout(timer)
       done(value)
@@ -1206,7 +1209,15 @@ const serveBoard = async (): Promise<void> => {
   if (url === null) {
     // Another `--serve` started at the same moment may have written its address first: this
     // page stopped then, and that one is the page to show.
-    const other = await runningPage()
+    let other = await runningPage(true)
+    // The winner reserves an empty file before checking its inherited ACL. A second child
+    // can exit before the token is published, or a checked read can span that write.
+    // Keep the same launch deadline while an address is still being published.
+    while (other === null && process.platform === 'win32' && performance.now() < readyBy) {
+      if (!existsSync(file)) break
+      await new Promise<void>(done => setTimeout(done, 50))
+      other = await runningPage(true)
+    }
     if (other !== null) return show(other.page.url, other.isKept, other.idleMs)
     process.stdout.write(`\n${s.serveFailed(s.serveNotStarted)}\n`)
     return
@@ -1365,6 +1376,6 @@ try {
     process.exitCode = 1
     const raw = String((error as { code?: string })?.code ?? (error instanceof Error ? error.message : 'UNKNOWN'))
     const reason = /^[A-Z][A-Z0-9_]{0,63}$/.test(raw) ? raw : 'UNKNOWN'
-    process.stderr.write(`${reason === 'INCOMPLETE_PROGRESS_TAIL' ? s.tailRepairFailed : s.reporterFailed(reason)}\n`)
+    process.stderr.write(`${reason === 'LOCK_DENIED' ? s.reporterLockDenied : reason === 'INCOMPLETE_PROGRESS_TAIL' ? s.tailRepairFailed : s.reporterFailed(reason)}\n`)
   } else failureNote(error)
 }

@@ -13,9 +13,10 @@ import { PANE_MS, PAGE_MS } from './lib/budget.mjs'
 const ask = (world, agent = 'codex') => block(world, { agent, state: 'waiting', title: 'Release the gateway', steps: ['- [x] Check routes', '- [?] Ship the gateway, OK?'] })
 const seed = world => {
   const sessions = []
+  const startedAt = world.now - 8
   for (const [index, agent] of ['codex', 'antigravity', 'hermes', 'grok'].entries()) {
     for (let n = 0; n < 2; n++) {
-      const one = { agent, project: ['api-gateway', 'docs-site', 'research-hub'][index % 3], session: `a${index}00000${n}`, title: `${agent} task ${n + 1}`, state: n ? 'waiting' : 'working', steps: n ? ['- [?] Publish the synthetic report, OK?'] : ['- [~] Validate the synthetic report'] }
+      const one = { agent, project: ['api-gateway', 'docs-site', 'research-hub'][index % 3], session: `a${index}00000${n}`, title: `${agent} task ${n + 1}`, updated: new Date(startedAt + sessions.length).toISOString(), state: n ? 'waiting' : 'working', steps: n ? ['- [?] Publish the synthetic report, OK?'] : ['- [~] Validate the synthetic report'] }
       block(world, one)
       sessions.push(one)
     }
@@ -54,10 +55,12 @@ describe('L2 a working day', { concurrency: 2 }, () => {
     const world = makeWorld()
     try {
       const agents = ['codex', 'antigravity', 'hermes']
-      for (const [index, agent] of agents.entries()) block(world, { agent, session: `b100000${index}`, title: `Finish ${agent} report` })
+      const startedAt = world.now - agents.length
+      for (const [index, agent] of agents.entries()) block(world, { agent, session: `b100000${index}`, title: `Finish ${agent} report`, updated: new Date(startedAt + index).toISOString() })
       const server = await serve.start(world)
       await server.page()
-      for (const [index, agent] of agents.entries()) block(world, { agent, session: `b100000${index}`, title: `Finish ${agent} report`, state: 'done', steps: ['- [x] Check routes'] })
+      const finishedAt = world.now - agents.length
+      for (const [index, agent] of agents.entries()) block(world, { agent, session: `b100000${index}`, title: `Finish ${agent} report`, updated: new Date(finishedAt + index).toISOString(), state: 'done', steps: ['- [x] Check routes'] })
       const screens = await inspectSurfaces(world, server)
       for (const [surface, text] of Object.entries(screens)) {
         await knownFailure('hold:all-agent-done-today', () => assert.match(text, /(?:3\s+done today|done today\s*3)/i, surface))
@@ -70,10 +73,13 @@ describe('L2 a working day', { concurrency: 2 }, () => {
     const world = makeWorld()
     try {
       const agents = ['claude', 'codex', 'antigravity', 'hermes', 'grok', 'gemini', 'cursor', 'openclaw', 'opencode', 'muse', 'deepseek']
-      for (const [index, agent] of agents.entries()) block(world, { agent, session: (0xb2000000 + index).toString(16), title: `Journal ${agent} report` })
+      const startedAt = world.now - agents.length
+      for (const [index, agent] of agents.entries()) block(world, { agent, session: (0xb2000000 + index).toString(16), title: `Journal ${agent} report`, updated: new Date(startedAt + index).toISOString() })
       const server = await serve.start(world)
       await server.page()
-      for (const [index, agent] of agents.entries()) block(world, { agent, session: (0xb2000000 + index).toString(16), title: `Journal ${agent} report`, state: 'done', steps: ['- [x] Check routes'] })
+      // Recent rows are ordered by timestamp, so a batch must not depend on millisecond ties.
+      const finishedAt = world.now - agents.length
+      for (const [index, agent] of agents.entries()) block(world, { agent, session: (0xb2000000 + index).toString(16), title: `Journal ${agent} report`, updated: new Date(finishedAt + index).toISOString(), state: 'done', steps: ['- [x] Check routes'] })
       const first = await inspectSurfaces(world, server)
       assert.match(first.page, /Done recently/)
       assert.match(first.page, /Journal deepseek report/)
