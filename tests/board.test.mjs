@@ -27,6 +27,7 @@ import { ZH_CN } from '../hooks/strings-zh-cn.ts'
 import { immutableQuestionFiles } from '../scripts/question-files.ts'
 import { recentInboxFiles } from '../scripts/inbox-files.ts'
 import { serverMemoryArgs } from '../scripts/server-runtime.ts'
+import { isPrivateRuntimeSddl } from '../scripts/runtime-folder.ts'
 
 const TORN_NOW = Date.parse('2026-10-20T12:00:00Z')
 const tornDay = () => '# Progress\r\n\r\n## Synthetic day\r\n### Hand task alpha\r\n- [ ] Plan\r\n\r\n### Hand task beta\r\n- [ ] Review\r\n\r\n' +
@@ -1538,7 +1539,20 @@ const GROK_ID = '01a14a94-0dee-7543-8208-991a4266a1da'
 
 // Where the board script keeps a running page's address: in the folder for running programs
 // (XDG_RUNTIME_DIR, here one of the test's own), named for the progress.md it serves.
-const servedAt = (run, path) => join(run, `agent-board-${createHash('sha256').update(path).digest('hex').slice(0, 16)}.json`)
+const servedAt = (run, path) => join(process.platform === 'win32' ? join(run, 'agent-board') : run, `agent-board-${createHash('sha256').update(path).digest('hex').slice(0, 16)}.json`)
+
+// These fixtures stand for an address written by an older, trusted server. A broad legacy
+// file has its own refusal test and must not be made trusted merely by moving it.
+const addressFixture = (file, text) => {
+  writeFileSync(file, text)
+  if (process.platform !== 'win32') return
+  const system = join(process.env.SystemRoot ?? 'C:\\Windows', 'System32')
+  const who = execFileSync(join(system, 'whoami.exe'), ['/user', '/fo', 'csv', '/nh'], { encoding: 'utf8', windowsHide: true })
+  const sid = /"(S-\d+(?:-\d+)+)"\s*$/.exec(who)?.[1]
+  assert.ok(sid)
+  execFileSync(join(system, 'icacls.exe'), [file, '/setowner', `*${sid}`, '/L'], { windowsHide: true, stdio: 'pipe' })
+  execFileSync(join(system, 'icacls.exe'), [file, '/inheritance:r', '/grant:r', `*${sid}:F`, '/L'], { windowsHide: true, stdio: 'pipe' })
+}
 
 // A live session's question: a stopped session's question no longer waits on you (#185),
 // so page tests that need a waiting question add this one.
@@ -4142,6 +4156,7 @@ const serveIn = () => {
   const dir = mkdtempSync(join(tmpdir(), 'board-serve-'))
   const run = join(dir, 'run')
   mkdirSync(run, { mode: 0o700 })
+  if (process.platform === 'win32') mkdirSync(join(run, 'agent-board'))
   const path = join(dir, 'progress.md')
   writeFileSync(path, FILE)
   const script = join(dir, 'agent-board.mjs')
@@ -4189,6 +4204,263 @@ const serveIn = () => {
   }
   return { dir, path, script, env, serve, urlOf, served, end }
 }
+
+test('Windows page address tokens stay in a current-account-only runtime folder', { skip: process.platform !== 'win32' && 'Windows ACLs only', timeout: 40_000 }, async () => {
+  const board = serveIn()
+  let url = null
+  try {
+    url = board.urlOf(await board.serve(['--quiet-board']))
+    assert.ok(url)
+    assert.equal(JSON.parse(readFileSync(board.served, 'utf8')).url, url)
+    const system = join(process.env.SystemRoot ?? 'C:\\Windows', 'System32')
+    const account = execFileSync(join(system, 'whoami.exe'), ['/user', '/fo', 'csv', '/nh'], { encoding: 'utf8', windowsHide: true })
+    const sid = /"(S-\d+(?:-\d+)+)"\s*$/.exec(account)?.[1]
+    assert.ok(sid)
+    const acl = JSON.parse(execFileSync(join(system, 'WindowsPowerShell', 'v1.0', 'powershell.exe'), ['-NoProfile', '-NonInteractive', '-Command', 'Get-Acl -LiteralPath $env:AGENT_BOARD_ACL_TEST_PATH | Select-Object Owner,AreAccessRulesProtected,Sddl | ConvertTo-Json -Compress'], {
+      env: { ...board.env, AGENT_BOARD_ACL_TEST_PATH: resolve(board.served, '..') }, encoding: 'utf8', windowsHide: true,
+    }))
+    assert.equal(acl.AreAccessRulesProtected, true, 'the token folder must not inherit shared temp permissions')
+    const aces = [...acl.Sddl.matchAll(/\(([^()]*)\)/g)].map(match => match[1].split(';'))
+    assert.equal(aces.length, 1)
+    assert.equal(aces[0][0], 'A')
+    assert.equal(aces[0][2], 'FA')
+    assert.equal(aces[0][5], sid)
+    assert.ok(!aces[0][1].includes('ID'), 'the one account grant is explicit')
+  } finally { await board.end([url]) }
+})
+
+test('runtime ACL validation rejects other owners, other accounts, inherited folders and incomplete grants', () => {
+  const sid = 'S-1-5-21-100-200-300-1001'
+  const own = `O:${sid}G:SYD:P(A;OICI;FA;;;${sid})`
+  assert.equal(isPrivateRuntimeSddl(own, sid, true), true)
+  assert.equal(isPrivateRuntimeSddl(`O:${sid}G:SYD:AI(A;ID;FA;;;${sid})`, sid, false), true)
+  assert.equal(isPrivateRuntimeSddl(`O:${sid}G:SYD:P(A;;FA;;;${sid})`, sid, false), true)
+  for (const changed of [
+    own.replace(`O:${sid}`, 'O:SY'), own.replace('D:P', 'D:AI'),
+    own.replace(';OICI;', ';OICIID;'), own.replace(';OICI;', ';OI;'), own.replace(';FA;', ';FR;'),
+    `${own}(A;OICI;FA;;;WD)`, `${own}(D;OICI;FR;;;WD)`, own.replace(`;;;${sid}`, ';;;SY'),
+    `O:${sid}G:SYD:NO_ACCESS_CONTROL`, `O:${sid}G:SYD:P`,
+  ]) assert.equal(isPrivateRuntimeSddl(changed, sid, true), false, changed)
+  assert.equal(isPrivateRuntimeSddl('O:LAG:SYD:P(A;OICI;FA;;;LA)', 'S-1-5-21-100-200-300-500', true, { LA: 'S-1-5-21-100-200-300-500' }), true)
+  assert.equal(isPrivateRuntimeSddl('O:LAG:SYD:P(A;OICI;FA;;;LA)', sid, true, { LA: 'S-1-5-21-100-200-300-500' }), false)
+})
+
+test('Windows page ACL setup failure prints one bounded line and writes no token', { skip: process.platform !== 'win32' && 'Windows ACLs only', timeout: 30_000 }, async () => {
+  const board = serveIn()
+  const preload = join(board.dir, 'acl-denied.cjs')
+  writeFileSync(preload, `const cp = require('node:child_process'); const original = cp.execFileSync
+cp.execFileSync = (file, ...args) => { if (/icacls\\.exe$/i.test(String(file))) throw Object.assign(new Error('synthetic ACL denial'), { code: 'EACCES' }); return original(file, ...args) }
+require('node:module').syncBuiltinESMExports()
+`)
+  board.env.NODE_OPTIONS = `--require ${JSON.stringify(preload)}`
+  try {
+    for (const mode of ['--serve', '--serve-child']) {
+      const ran = spawnSync(process.execPath, [board.script, mode, '--no-open', '--quiet-board'], { env: board.env, encoding: 'utf8', timeout: 20_000 })
+      assert.equal(ran.status, 1, ran.stderr)
+      assert.equal(mode === '--serve-child' ? ran.stderr.trim() : ran.stdout.trim(), EN.serveRuntimePrivate)
+      assert.equal(mode === '--serve-child' ? ran.stdout : ran.stderr, '')
+      assert.ok(!(ran.stdout + ran.stderr).includes(board.dir) && !(ran.stdout + ran.stderr).includes('http:'))
+      assert.ok(!existsSync(board.served))
+      assert.deepEqual(readdirSync(join(board.env.XDG_RUNTIME_DIR, 'agent-board')), [])
+    }
+  } finally { await board.end([]) }
+})
+
+test('Windows page startup refuses a runtime junction without changing its destination', { skip: process.platform !== 'win32' && 'Windows junctions only', timeout: 30_000 }, async () => {
+  for (const level of ['folder', 'parent']) {
+    const board = serveIn()
+    const other = join(board.dir, 'synthetic-other-folder')
+    mkdirSync(other)
+    const sentinel = join(other, 'keep.txt')
+    writeFileSync(sentinel, 'Synthetic file must stay unchanged')
+    const target = level === 'parent' ? board.env.XDG_RUNTIME_DIR : join(board.env.XDG_RUNTIME_DIR, 'agent-board')
+    renameSync(target, join(board.dir, 'unused-runtime'))
+    fs.symlinkSync(other, target, 'junction')
+    try {
+      const ran = spawnSync(process.execPath, [board.script, '--serve', '--no-open', '--quiet-board'], { env: board.env, encoding: 'utf8', timeout: 20_000 })
+      assert.equal(ran.status, 1, ran.stderr)
+      assert.equal(ran.stdout.trim(), EN.serveRuntimePrivate)
+      assert.equal(readFileSync(sentinel, 'utf8'), 'Synthetic file must stay unchanged')
+      assert.deepEqual(readdirSync(other), ['keep.txt'])
+    } finally { await board.end([]) }
+  }
+})
+
+test('Windows page startup refuses an existing address file granted to another account', { skip: process.platform !== 'win32' && 'Windows ACLs only', timeout: 50_000 }, async () => {
+  const board = serveIn()
+  const icacls = join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'icacls.exe')
+  let url = null
+  try {
+    url = board.urlOf(await board.serve(['--quiet-board']))
+    assert.ok(url)
+    execFileSync(icacls, [board.served, '/grant', '*S-1-1-0:R', '/L'], { windowsHide: true, stdio: 'pipe' })
+    const again = await board.serve(['--quiet-board'])
+    assert.ok(!again.includes(url), 'the widened address must not be used to contact or open the running page')
+    assert.equal(again.trim(), EN.serveFailed(EN.serveNotStarted))
+  } finally {
+    if (existsSync(board.served)) execFileSync(icacls, [board.served, '/remove', '*S-1-1-0', '/L'], { windowsHide: true, stdio: 'pipe' })
+    await board.end([url])
+  }
+})
+
+test('Windows page startup moves a verified private legacy address once and reuses its page', { skip: process.platform !== 'win32' && 'Windows ACLs only', timeout: 50_000 }, async () => {
+  const board = serveIn()
+  const legacy = join(board.env.XDG_RUNTIME_DIR, board.served.split(/[\\/]/).at(-1))
+  let url = null
+  try {
+    url = board.urlOf(await board.serve(['--quiet-board']))
+    assert.ok(url)
+    renameSync(board.served, legacy)
+    assert.ok(!existsSync(board.served))
+    assert.equal(board.urlOf(await board.serve(['--quiet-board'])), url)
+    assert.ok(!existsSync(legacy), 'a migrated address is no longer in the old runtime root')
+    assert.equal(JSON.parse(readFileSync(board.served, 'utf8')).url, url)
+    assert.equal(board.urlOf(await board.serve(['--quiet-board'])), url)
+    assert.ok(!existsSync(legacy))
+  } finally { await board.end([url]) }
+})
+
+test('Windows page startup leaves an untrusted legacy address unread and contacts only its new page', { skip: process.platform !== 'win32' && 'Windows ACLs only', timeout: 40_000 }, async () => {
+  const board = serveIn()
+  const legacy = join(board.env.XDG_RUNTIME_DIR, board.served.split(/[\\/]/).at(-1))
+  let requests = 0
+  const fake = (await import('node:http')).createServer((req, res) => { requests++; res.writeHead(200, { 'content-type': 'application/json' }); res.end('{}') })
+  await new Promise(done => fake.listen(0, '127.0.0.1', done))
+  const oldUrl = `http://127.0.0.1:${fake.address().port}/?t=synthetic-untrusted-legacy-token`
+  const bytes = JSON.stringify({ pid: process.pid, port: fake.address().port, url: oldUrl, path: board.path, built: '' })
+  writeFileSync(legacy, bytes)
+  execFileSync(join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'icacls.exe'), [legacy, '/grant', '*S-1-1-0:R', '/L'], { windowsHide: true, stdio: 'pipe' })
+  const opened = join(board.dir, 'untrusted-content-was-opened')
+  const preload = join(board.dir, 'observe-legacy.cjs')
+  writeFileSync(preload, `const fs = require('node:fs'); const open = fs.openSync; const read = fs.readFileSync
+const source = ${JSON.stringify(legacy)}; const marker = ${JSON.stringify(opened)}
+fs.openSync = (file, ...args) => { if (String(file) === source) fs.writeFileSync(marker, 'opened'); return open(file, ...args) }
+fs.readFileSync = (file, ...args) => { if (String(file) === source) fs.writeFileSync(marker, 'read'); return read(file, ...args) }
+require('node:module').syncBuiltinESMExports()
+`)
+  board.env.NODE_OPTIONS = `--require ${JSON.stringify(preload)}`
+  let url = null
+  try {
+    url = board.urlOf(await board.serve(['--quiet-board']))
+    assert.ok(url && url !== oldUrl)
+    assert.equal(requests, 0)
+    assert.ok(!existsSync(opened), 'the legacy token is not read even when its JSON looks valid')
+    assert.equal(readFileSync(legacy, 'utf8'), bytes)
+    assert.equal(JSON.parse(readFileSync(board.served, 'utf8')).url, url)
+  } finally { await new Promise(done => fake.close(done)); await board.end([url]) }
+})
+
+test('Windows page startup without XDG runtime keeps the token under the isolated home', { skip: process.platform !== 'win32' && 'Windows runtime fallback only', timeout: 30_000 }, async () => {
+  const board = await page('', { XDG_RUNTIME_DIR: '' })
+  try {
+    const file = servedAt(join(process.env.USERPROFILE, '.cache'), board.path)
+    assert.equal(JSON.parse(readFileSync(file, 'utf8')).url, board.url.href)
+    const old = join(tmpdir(), file.split(/[\\/]/).at(-1))
+    assert.ok(!existsSync(old), 'the shared temp root gets no address token')
+  } finally { await board.close() }
+})
+
+test('a private address renamed from another board is never migrated, contacted or closed', { timeout: 120_000 }, async () => {
+  for (const location of process.platform === 'win32' ? ['legacy', 'current'] : ['current']) {
+    const victim = serveIn()
+    const other = serveIn()
+    const requests = join(other.dir, 'requests.jsonl')
+    const preload = join(other.dir, 'observe-requests.cjs')
+    writeFileSync(preload, `const http = require('node:http'); const fs = require('node:fs'); const original = http.createServer
+http.createServer = (listener, ...args) => original((req, res) => { fs.appendFileSync(${JSON.stringify(requests)}, JSON.stringify({ method: req.method, path: req.url }) + '\\n'); return listener(req, res) }, ...args)
+require('node:module').syncBuiltinESMExports()
+`)
+    other.env.NODE_OPTIONS = `--require ${JSON.stringify(preload)}`
+    let victimUrl = null, otherUrl = null, otherBytes, replay, original
+    try {
+      otherUrl = other.urlOf(await other.serve(['--quiet-board']))
+      assert.ok(otherUrl)
+      // Trusted setup records the owned server. The attacker-mode operation below only moves
+      // its directory entry; it does not read or rewrite the private token's contents.
+      otherBytes = readFileSync(other.served)
+      original = fs.lstatSync(other.served)
+      writeFileSync(requests, '')
+      replay = location === 'legacy' ? join(victim.env.XDG_RUNTIME_DIR, victim.served.split(/[\\/]/).at(-1)) : victim.served
+      renameSync(other.served, replay)
+      const renamed = fs.lstatSync(replay)
+      assert.deepEqual([renamed.dev, renamed.ino, renamed.size], [original.dev, original.ino, original.size])
+      victimUrl = victim.urlOf(await victim.serve(['--quiet-board']))
+      assert.deepEqual(readFileSync(requests, 'utf8').trim().split('\n').filter(Boolean).map(line => JSON.parse(line)), [], 'a mismatched record authorizes no request to the other board')
+      const pid = JSON.parse(otherBytes.toString('utf8')).pid
+      assert.doesNotThrow(() => process.kill(pid, 0), 'the other owned board remains running')
+      if (location === 'legacy') {
+        assert.ok(victimUrl && victimUrl !== otherUrl)
+        assert.deepEqual(readFileSync(replay), otherBytes)
+        assert.equal(JSON.parse(readFileSync(victim.served, 'utf8')).path, victim.path)
+      } else assert.equal(victimUrl, null, 'an existing mismatched current address fails closed')
+    } finally {
+      // Restore the owned server's pointer only after the assertions, so its normal cleanup
+      // can wait for that exact process rather than relying on a detached child's timing.
+      if (replay && existsSync(replay) && original) {
+        const held = fs.lstatSync(replay)
+        if (held.dev === original.dev && held.ino === original.ino && !existsSync(other.served)) renameSync(replay, other.served)
+      }
+      if (otherBytes && !existsSync(other.served)) {
+        const pid = JSON.parse(otherBytes.toString('utf8')).pid
+        let isAlive = false
+        try { process.kill(pid, 0); isAlive = true } catch {}
+        if (isAlive) addressFixture(other.served, otherBytes)
+      }
+      await victim.end([victimUrl])
+      await other.end([otherUrl])
+    }
+  }
+})
+
+test('Windows page ACL checks use the system module instead of an inherited module path', { skip: process.platform !== 'win32' && 'Windows PowerShell modules only', timeout: 40_000 }, async () => {
+  const board = serveIn()
+  const modules = join(board.dir, 'untrusted-modules')
+  const module = join(modules, 'Microsoft.PowerShell.Security')
+  mkdirSync(module, { recursive: true })
+  const touched = join(board.dir, 'untrusted-module-loaded')
+  writeFileSync(join(module, 'Microsoft.PowerShell.Security.psd1'), "@{ RootModule = 'fake.psm1'; ModuleVersion = '99.0.0'; GUID = '34000000-0000-4000-8000-000000000001'; FunctionsToExport = @('Get-Acl') }")
+  writeFileSync(join(module, 'fake.psm1'), `function Get-Acl { Set-Content -LiteralPath '${touched.replaceAll("'", "''")}' -Value 'unexpected'; throw 'synthetic untrusted ACL module' }; Export-ModuleMember -Function Get-Acl`)
+  board.env.PSModulePath = modules
+  let url = null
+  try {
+    url = board.urlOf(await board.serve(['--quiet-board']))
+    assert.ok(url)
+    assert.ok(!existsSync(touched))
+    assert.equal(board.env.PSModulePath, modules, 'the caller environment is unchanged')
+  } finally { await board.end([url]) }
+})
+
+test('Windows page token writes explicitly own a new file before trusting its inherited ACL', { skip: process.platform !== 'win32' && 'Windows token owner only', timeout: 40_000 }, async () => {
+  const board = serveIn()
+  const preload = join(board.dir, 'default-group-owner.cjs')
+  const changed = join(board.dir, 'new-file-owner-set')
+  writeFileSync(preload, `const cp = require('node:child_process'); const fs = require('node:fs'); const original = cp.execFileSync
+const target = ${JSON.stringify(board.served)}.toLowerCase(); const marker = ${JSON.stringify(changed)}
+let owned = false
+cp.execFileSync = (file, args, options) => {
+  if (/icacls\\.exe$/i.test(String(file)) && String(args[0]).toLowerCase() === target && args.includes('/setowner')) { owned = true; fs.writeFileSync(marker, 'set before read and write') }
+  if (/powershell\\.exe$/i.test(String(file)) && String(options?.env?.AGENT_BOARD_RUNTIME_ACL_PATH).toLowerCase() === target && !owned) {
+    const account = original(String(file).replace(/WindowsPowerShell[\\\\/]v1\\.0[\\\\/]powershell\\.exe$/i, 'whoami.exe'), ['/user', '/fo', 'csv', '/nh'], { encoding: 'utf8', windowsHide: true })
+    const sid = /"(S-\\d+(?:-\\d+)+)"\\s*$/.exec(account)?.[1]
+    if (!sid) throw new Error('synthetic account lookup failed')
+    fs.writeFileSync(marker + '.group-default', 'modeled group default owner')
+    return 'O:BAG:SYD:AI(A;ID;FA;;;' + sid + ')'
+  }
+  return original(file, args, options)
+}
+require('node:module').syncBuiltinESMExports()
+`)
+  board.env.NODE_OPTIONS = `--require ${JSON.stringify(preload)}`
+  let url = null
+  try {
+    url = board.urlOf(await board.serve(['--quiet-board']))
+    if (!url) assert.ok(existsSync(changed + '.group-default'), 'the failure must come from the modeled group owner')
+    assert.ok(url)
+    assert.equal(readFileSync(changed, 'utf8'), 'set before read and write')
+    assert.ok(!existsSync(changed + '.group-default'), 'ownership is set before an inherited group owner can be trusted')
+    assert.equal(JSON.parse(readFileSync(board.served, 'utf8')).url, url)
+  } finally { await board.end([url]) }
+})
 
 test('server memory arguments retain explicit heap choices and ignore unrelated Node flags', () => {
   assert.deepEqual(serverMemoryArgs([], ''), ['--optimize-for-size'])
@@ -4319,8 +4591,8 @@ test("the page's address stays out of progress.md's folder, and a file left by a
   const gone = { pid: 999999, port, url: `http://127.0.0.1:${port}/?t=gone`, path: board.path, built: '' }
   // Where 0.19.0 kept the address, token and all, and where this copy keeps it.
   const old = join(board.dir, 'progress-serve.json')
-  writeFileSync(old, JSON.stringify(gone))
-  writeFileSync(board.served, JSON.stringify(gone))
+  addressFixture(old, JSON.stringify(gone))
+  addressFixture(board.served, JSON.stringify(gone))
   const urls = []
   try {
     const first = board.urlOf(await board.serve())
@@ -4341,7 +4613,7 @@ test("the page's address stays out of progress.md's folder, and a file left by a
 
 test('an address file cut short by a crash is cleared once it is old, and the next --serve starts a page', { timeout: 60_000 }, async () => {
   const board = serveIn()
-  writeFileSync(board.served, '{"pid": 12')
+  addressFixture(board.served, '{"pid": 12')
   const past = new Date(Date.now() - 60_000)
   utimesSync(board.served, past, past)
   const urls = []
@@ -4515,7 +4787,7 @@ test('an address file naming a dead process, or a running one with nothing at it
     const board = serveIn()
     const port = await freePort()
     const stale = `http://127.0.0.1:${port}/?t=gone`
-    writeFileSync(board.served, JSON.stringify({ pid, port, url: stale, path: board.path, built: '' }))
+    addressFixture(board.served, JSON.stringify({ pid, port, url: stale, path: board.path, built: '' }))
     const urls = []
     try {
       const out = await board.serve()
@@ -4540,7 +4812,7 @@ test('a page whose process runs and whose port takes the connection but says not
   await new Promise(done => quiet.listen(0, '127.0.0.1', done))
   const { port } = quiet.address()
   const stale = `http://127.0.0.1:${port}/?t=quiet`
-  writeFileSync(board.served, JSON.stringify({ pid: process.pid, port, url: stale, path: board.path, built: '' }))
+  addressFixture(board.served, JSON.stringify({ pid: process.pid, port, url: stale, path: board.path, built: '' }))
   try {
     const out = await board.serve()
     assert.equal(board.urlOf(out), stale, out)

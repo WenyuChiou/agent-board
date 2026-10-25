@@ -480,6 +480,7 @@ export const ZH_CN: Strings = {
   serveIdleTimed: (minutes: number): string => `此看板已设置闲置 ${minutes} 分钟后自动关闭；可用 --serve 再打开。`,
   serveLanIdle: '在你的网络上，10 分钟没人用就会自己关掉。',
   serveFailed: (why: string): string => `打不开看板网页：${why}`,
+  serveRuntimePrivate: '无法将看板网页的地址文件保护为仅此账号可用；没有启动网页。',
   serveLanAt: (url: string): string => `同一网络上的手机，打开 ${url} 或扫这个二维码：`,
   serveLanNone: '找不到这台电脑在局域网上的地址，手机打不开这个看板。',
   serveLanNotOurs: (address: string): string => `${address} 不是这台电脑在局域网上的私有地址，看板没办法开在那里。`,
