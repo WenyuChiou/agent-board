@@ -675,8 +675,9 @@ export const buildView = (
   proofs: QuestionProofs | null = { retired: [], consumed: [] },
   pending: readonly PendingTurn[] = [],
   frozen: ReadonlySet<string> = new Set(),
+  observe: typeof observeQuestions = observeQuestions,
 ): View => {
-  const observed = questions === undefined ? null : observeQuestions(questions, projects, mine, answered, now, false, 'preview', proofs ?? { retired: [], consumed: [] }, pending, [], frozen)
+  const observed = questions === undefined ? null : observe(questions, projects, mine, answered, now, false, 'preview', proofs ?? { retired: [], consumed: [] }, pending, [], frozen)
   const marked = new Set(proofs === null ? [] : observed?.marked ?? answered)
   const ownId = mine === null ? '' : shortId(mine.sessionId)
   const waiting: WaitingItem[] = []

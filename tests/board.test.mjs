@@ -266,7 +266,7 @@ test('the board script places a cut-off block notice at the bottom by agent and 
   }
 })
 
-test('the board script names a block cut off at the end of the file once the file has been still for 10 seconds', () => {
+test('the board script names a block cut off at the end of the file once the file has been still for 10 seconds', { timeout: 30_000 }, async () => {
   const endCut = `${cutBoard().slice(0, cutBoard().indexOf('\n\n## demo-154'))}\n`
   const words = `A Codex task from ${cutDay} was cut off when its session crashed. It's shown as it was; its last lines may show twice.`
   const touch = ageMs => questionFault(`const at = (${TORN_NOW} - ${ageMs}) / 1000\nfs.utimesSync(path.join(__dirname, 'progress.md'), at, at)`)
@@ -276,6 +276,27 @@ test('the board script names a block cut off at the end of the file once the fil
   const fresh = chatRun([], { file: () => endCut, change: tornChange, preload: touch(9_000) })
   assert.equal(fresh.status, 0, fresh.stderr)
   assert.equal(oneLine(fresh.stdout).includes(words), false, fresh.stdout)
+  const source = `import { readFileSync as fixtureReadClock } from 'node:fs'
+Date.now = () => { try { return Number(fixtureReadClock(globalThis.AGENT_BOARD.path + '.clock', 'utf8')) } catch { return ${TORN_NOW} } }
+${BOARD_SCRIPT}`
+  const served = await page(endCut, {}, [], TORN_NOW, source)
+  try {
+    const at = (TORN_NOW - 9000) / 1000
+    utimesSync(served.path, at, at)
+    const ledgerFile = join(served.dir, 'progress-questions.json')
+    const poll = async () => assert.equal((await served.call('GET', '/api/board')).status, 200)
+    await poll()
+    assert.equal(existsSync(ledgerFile), false, 'an unsettled incomplete source must not write a ledger')
+    writeFileSync(served.path + '.clock', String(TORN_NOW + 3000))
+    await poll()
+    assert.equal(existsSync(ledgerFile), true, 'unchanged text must cross the settling boundary before it writes')
+    writeFileSync(served.path + '.clock', String(TORN_NOW))
+    renameSync(ledgerFile, ledgerFile + '.synthetic-saved')
+    await poll()
+    assert.equal(existsSync(ledgerFile), false, 'a changed clock must invalidate the settled snapshot and refuse a write')
+  } finally {
+    await served.close()
+  }
 })
 
 test('--tidy beside a block cut off in the middle of the file archives the finished block after it alone and keeps the rest', () => {
@@ -5107,6 +5128,123 @@ test('a persistent page keeps question metadata work flat as immutable companion
   } finally {
     await board.end(urls)
   }
+})
+
+test('unchanged page polls reuse canonical question evidence without reparsing the ledger', { timeout: 30_000 }, async t => {
+  const board = serveIn()
+  const seed = chatRun(['--keys', ''], { file: askingBoard, inspect: sweepFiles })
+  assert.equal(seed.status, 0, seed.stderr)
+  writeFileSync(board.path, seed.board)
+  for (const [name, text] of Object.entries(seed.files)) writeFileSync(join(board.dir, name), text)
+  const probe = join(board.dir, 'question-allocation-counts.json')
+  const preload = join(board.dir, 'question-allocation.cjs')
+  writeFileSync(preload, questionFault(`if (process.argv.includes('--serve-child')) {
+  const counts = { parsed: 0, ledgers: 0, captures: 0, ledgerBytes: 0, captureBytes: 0, progressScans: 0 }
+  const progress = ${JSON.stringify(seed.board)}
+  const split = String.prototype.split
+  String.prototype.split = function (...args) { if (String(this) === progress) counts.progressScans += 1; return split.apply(this, args) }
+  const parse = JSON.parse
+  const stringify = JSON.stringify
+  JSON.parse = (text, ...rest) => {
+    const value = parse(text, ...rest)
+    if (value?.version === 1 && Array.isArray(value.records)) counts.parsed += 1
+    return value
+  }
+  JSON.stringify = (value, ...rest) => {
+    const text = stringify(value, ...rest)
+    if (value?.version === 1 && Array.isArray(value.records)) { counts.ledgers += 1; counts.ledgerBytes += Buffer.byteLength(text) }
+    if (value?.version === 1 && value.record && value.disposition) { counts.captures += 1; counts.captureBytes += Buffer.byteLength(text) }
+    return text
+  }
+  const http = require('node:http')
+  const emit = http.Server.prototype.emit
+  const write = fs.writeFileSync
+  let sequence = 0
+  http.Server.prototype.emit = function (event, ...args) {
+    if (event === 'request') args[1].once('finish', () => write(${JSON.stringify(probe)}, stringify({ sequence: ++sequence, counts })))
+    return emit.call(this, event, ...args)
+  }
+}`))
+  board.env.NODE_OPTIONS = `--require ${JSON.stringify(preload)}`
+  const urls = []
+  try {
+    const url = board.urlOf(await board.serve())
+    assert.ok(url)
+    urls.push(url)
+    const token = new URL(url).searchParams.get('t')
+    const snapshot = () => { try { return JSON.parse(readFileSync(probe, 'utf8')) } catch { return null } }
+    const poll = async () => {
+      const before = snapshot()?.sequence ?? 0
+      const response = await fetch(new URL('/api/board', url), { headers: { 'x-board-token': token } })
+      assert.equal(response.status, 200)
+      await response.arrayBuffer()
+      for (let tries = 0; tries < 100; tries++) {
+        const current = snapshot()
+        if (current !== null && current.sequence > before) return current.counts
+        await delay(10)
+      }
+      assert.fail('the owned page did not write its allocation counters')
+    }
+    await poll()
+    await poll()
+    const before = await poll()
+    const saved = readFileSync(join(board.dir, 'progress-questions.json'), 'utf8')
+    await poll()
+    await poll()
+    const after = await poll()
+    const delta = Object.fromEntries(Object.keys(after).map(key => [key, after[key] - before[key]]))
+    t.diagnostic(`unchanged question JSON work over three page reads: ${JSON.stringify(delta)}`)
+    assert.equal(delta.parsed, 0, 'unchanged validated ledger bytes were parsed again')
+    assert.equal(delta.captures, 0, 'unchanged immutable captures were serialized again')
+    assert.ok(delta.ledgers <= 3, `three reads serialized ${delta.ledgers} complete ledgers`)
+    assert.equal(delta.progressScans, 0, 'unchanged progress source was scanned again')
+    assert.equal(readFileSync(join(board.dir, 'progress-questions.json'), 'utf8'), saved)
+
+    const old = JSON.parse(saved).records.find(record => record.isUnresolved && record.source)
+    assert.ok(old)
+    const copy = `${JSON.stringify({ version: 1, disposition: 'unresolved', record: { ...old, producerSources: ['synthetic-new-provenance'] } })}\n`
+    writeFileSync(join(board.dir, `progress-questions-source-${sha(copy)}.json`), copy)
+    await poll()
+    const refreshed = JSON.parse(readFileSync(join(board.dir, 'progress-questions.json'), 'utf8')).records.find(record => record.id === old.id)
+    assert.ok(refreshed.producerSources.includes('synthetic-new-provenance'))
+    assert.equal(refreshed.firstObserved, old.firstObserved)
+    assert.deepEqual(refreshed.source, old.source)
+    const kept = `${JSON.stringify({ version: 1, disposition: 'unresolved', record: refreshed })}\n`
+    const keptFile = join(board.dir, `progress-questions-source-${sha(kept)}.json`)
+    assert.equal(readFileSync(keptFile, 'utf8'), kept)
+    fs.unlinkSync(keptFile)
+    await poll()
+    assert.equal(readFileSync(keptFile, 'utf8'), kept, 'a removed durable source must be recreated before the ledger is accepted')
+    const restored = JSON.parse(readFileSync(join(board.dir, 'progress-questions.json'), 'utf8')).records.find(record => record.id === old.id)
+    assert.equal(restored.firstObserved, old.firstObserved)
+    assert.deepEqual(restored.source, old.source)
+  } finally {
+    await board.end(urls)
+  }
+})
+
+test('standalone question writes omit index whitespace while preserving every retained identity and source', () => {
+  const seed = chatRun(['--keys', ''], { file: askingBoard, inspect: sweepFiles })
+  assert.equal(seed.status, 0, seed.stderr)
+  const ledger = JSON.parse(seed.files['progress-questions.json'])
+  assert.equal(seed.files['progress-questions.json'], JSON.stringify(ledger) + '\n')
+  const pretty = JSON.stringify(ledger, null, 2) + '\n'
+  const files = { ...seed.files, 'progress-questions.json': pretty }
+  const unchanged = chatRun(['--keys', ''], { file: () => seed.board, beside: files, inspect: sweepFiles })
+  assert.equal(unchanged.status, 0, unchanged.stderr)
+  assert.equal(unchanged.files['progress-questions.json'], pretty, 'unchanged existing indexes retain their original bytes')
+  const extended = seed.board + '\n## Synthetic addition\n### A new synthetic question\n- [?] Continue the synthetic plan, OK?\n'
+  const changed = chatRun(['--keys', ''], { file: () => extended, beside: files, inspect: sweepFiles })
+  assert.equal(changed.status, 0, changed.stderr)
+  const next = JSON.parse(changed.files['progress-questions.json'])
+  assert.equal(changed.files['progress-questions.json'], JSON.stringify(next) + '\n')
+  assert.ok(next.records.length > ledger.records.length)
+  for (const old of ledger.records) {
+    const kept = next.records.find(record => record.id === old.id)
+    assert.ok(kept, old.id)
+    for (const key of ['scope', 'firstObserved', 'incarnation', 'producer', 'producerRevisions', 'producerSources', 'source']) assert.deepEqual(kept[key], old[key], `${old.id} ${key}`)
+  }
+  for (const [name, text] of Object.entries(seed.files)) if (/^progress-questions-source-/.test(name)) assert.equal(changed.files[name], text, 'source capture bytes and hashes must remain unchanged')
 })
 
 test('the terminal board forgets a question copy or proof that left the folder, so one that comes back is read again', () => {
