@@ -1547,11 +1547,24 @@ const addressFixture = (file, text) => {
   writeFileSync(file, text)
   if (process.platform !== 'win32') return
   const system = join(process.env.SystemRoot ?? 'C:\\Windows', 'System32')
-  const who = execFileSync(join(system, 'whoami.exe'), ['/user', '/fo', 'csv', '/nh'], { encoding: 'utf8', windowsHide: true })
-  const sid = /"(S-\d+(?:-\d+)+)"\s*$/.exec(who)?.[1]
-  assert.ok(sid)
-  execFileSync(join(system, 'icacls.exe'), [file, '/setowner', `*${sid}`, '/L'], { windowsHide: true, stdio: 'pipe' })
-  execFileSync(join(system, 'icacls.exe'), [file, '/inheritance:r', '/grant:r', `*${sid}:F`, '/L'], { windowsHide: true, stdio: 'pipe' })
+  // /grant:r retains unrelated explicit grants. A trusted synthetic legacy file needs a
+  // fresh DACL, including on a CI account whose default file grants are explicit.
+  execFileSync(join(system, 'WindowsPowerShell', 'v1.0', 'powershell.exe'), ['-NoProfile', '-NonInteractive', '-Command',
+    "$ErrorActionPreference = 'Stop'; $PSModuleAutoLoadingPreference = 'None'; $sid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User; "
+      + '$security = [System.Security.AccessControl.FileSecurity]::new(); $security.SetOwner($sid); $security.SetAccessRuleProtection($true, $false); '
+      + '$security.AddAccessRule([System.Security.AccessControl.FileSystemAccessRule]::new($sid, [System.Security.AccessControl.FileSystemRights]::FullControl, [System.Security.AccessControl.AccessControlType]::Allow)); '
+      + '[System.IO.File]::SetAccessControl($env:AGENT_BOARD_ACL_FIXTURE_PATH, $security)',
+  ], { env: { ...process.env, AGENT_BOARD_ACL_FIXTURE_PATH: file }, windowsHide: true, stdio: 'pipe' })
+}
+
+const windowsAcl = (file, env) => {
+  const system = join(process.env.SystemRoot ?? 'C:\\Windows', 'System32')
+  return JSON.parse(execFileSync(join(system, 'WindowsPowerShell', 'v1.0', 'powershell.exe'), ['-NoProfile', '-NonInteractive', '-Command',
+    '$acl = Microsoft.PowerShell.Security\\Get-Acl -LiteralPath $env:AGENT_BOARD_ACL_TEST_PATH; '
+      + '[pscustomobject]@{ AreAccessRulesProtected = $acl.AreAccessRulesProtected; Sddl = $acl.Sddl; OwnerSid = $acl.GetOwner([System.Security.Principal.SecurityIdentifier]).Value; CurrentSid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value; Sids = @($acl.GetAccessRules($true, $true, [System.Security.Principal.SecurityIdentifier]) | ForEach-Object { $_.IdentityReference.Value }) } | Microsoft.PowerShell.Utility\\ConvertTo-Json -Compress',
+  ], {
+    env: { ...env, PSModulePath: join(system, 'WindowsPowerShell', 'v1.0', 'Modules'), AGENT_BOARD_ACL_TEST_PATH: file }, encoding: 'utf8', windowsHide: true,
+  }))
 }
 
 // A live session's question: a stopped session's question no longer waits on you (#185),
@@ -1639,7 +1652,8 @@ setTimeout(() => process.stdout.write('Redis it is; wiring it up now.\\n'), 1000
       child.kill()
       if (await Promise.race([exited, new Promise(done => setTimeout(() => done('still running'), 5000))]) === 'still running') throw new Error('Fixture process did not exit')
     }
-    rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })
+    // The synchronous API does not retry a Windows process's lingering cwd handle.
+    await fs.promises.rm(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })
     return code
   }
   return { dir, path, url, port, token, call, rows, rowOf, keyOf, close, exited, stderr: () => stderr, served: servedAt(run, path) }
@@ -4206,7 +4220,7 @@ const serveIn = () => {
       for (let tries = 0; alive() && tries < 50; tries++) await new Promise(done => setTimeout(done, 100))
       assert.ok(!alive(), 'the fixture server must exit before cleanup')
     }
-    rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })
+    await fs.promises.rm(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })
   }
   return { dir, path, script, env, serve, urlOf, served, end }
 }
@@ -4222,17 +4236,29 @@ test('Windows page address tokens stay in a current-account-only runtime folder'
     const account = execFileSync(join(system, 'whoami.exe'), ['/user', '/fo', 'csv', '/nh'], { encoding: 'utf8', windowsHide: true })
     const sid = /"(S-\d+(?:-\d+)+)"\s*$/.exec(account)?.[1]
     assert.ok(sid)
-    const acl = JSON.parse(execFileSync(join(system, 'WindowsPowerShell', 'v1.0', 'powershell.exe'), ['-NoProfile', '-NonInteractive', '-Command', 'Get-Acl -LiteralPath $env:AGENT_BOARD_ACL_TEST_PATH | Select-Object Owner,AreAccessRulesProtected,Sddl | ConvertTo-Json -Compress'], {
-      env: { ...board.env, AGENT_BOARD_ACL_TEST_PATH: resolve(board.served, '..') }, encoding: 'utf8', windowsHide: true,
-    }))
+    const acl = windowsAcl(resolve(board.served, '..'), board.env)
     assert.equal(acl.AreAccessRulesProtected, true, 'the token folder must not inherit shared temp permissions')
     const aces = [...acl.Sddl.matchAll(/\(([^()]*)\)/g)].map(match => match[1].split(';'))
     assert.equal(aces.length, 1)
     assert.equal(aces[0][0], 'A')
     assert.equal(aces[0][2], 'FA')
-    assert.equal(aces[0][5], sid)
+    assert.deepEqual(acl.Sids, [sid])
     assert.ok(!aces[0][1].includes('ID'), 'the one account grant is explicit')
   } finally { await board.end([url]) }
+})
+
+test('Windows trusted address fixtures replace unrelated explicit grants', { skip: process.platform !== 'win32' && 'Windows ACLs only', timeout: 30_000 }, async () => {
+  const board = serveIn()
+  try {
+    writeFileSync(board.served, 'synthetic')
+    const system = join(process.env.SystemRoot ?? 'C:\\Windows', 'System32')
+    execFileSync(join(system, 'icacls.exe'), [board.served, '/grant:r', '*S-1-1-0:F', '/L'], { windowsHide: true, stdio: 'pipe' })
+    addressFixture(board.served, 'trusted fixture')
+    const acl = windowsAcl(board.served, board.env)
+    assert.equal(acl.OwnerSid, acl.CurrentSid)
+    assert.deepEqual(acl.Sids, [acl.CurrentSid])
+    assert.equal(acl.AreAccessRulesProtected, true)
+  } finally { await fs.promises.rm(board.dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }) }
 })
 
 test('runtime ACL validation rejects other owners, other accounts, inherited folders and incomplete grants', () => {
