@@ -414,6 +414,7 @@ export const EN: Strings = {
   dashStamp: (time: string): string => `updated ${time}`,
   dashInboxHint: "Reply in the agent's own session; this page cannot send replies.",
   windowOpened: (): string => 'Opened the board page in your browser.',
+  windowSaved: (page = 'progress.html', file = 'progress.md'): string => `Saved ${page} next to ${file}. You can open it yourself.`,
   windowFailed: (page = 'progress.html', file = 'progress.md'): string => `Could not open the board page: the browser could not be started. Open ${page}, next to ${file}, yourself.`,
 
   // The board other agents show (the standalone script and each agent's board command)

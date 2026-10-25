@@ -413,6 +413,7 @@ export const ZH_CN: Strings = {
   dashStamp: (time: string): string => `更新于 ${time}`,
   dashInboxHint: '请回到该 agent 的对话里回复；这个页面不能发送回复。',
   windowOpened: (): string => '已在浏览器打开进度看板。',
+  windowSaved: (page = 'progress.html', file = 'progress.md'): string => `已将 ${page} 保存在 ${file} 旁，可自行打开。`,
   windowFailed: (page = 'progress.html', file = 'progress.md'): string => `无法打开进度看板：浏览器启动失败。请自行打开 ${file} 旁边的 ${page}。`,
 
   // The board other agents show (the standalone script and each agent's board command)

@@ -1,0 +1,2 @@
+- The first /progress can wait up to five seconds for the existing startup upgrade before retrying the current installed live-board script. Print-mode commands save a read-only page without starting a browser, including explicit open and live-page fallback (#393).
+  Tests: `/progress waits for a pending upgrade connection before its first live-page start`, `/progress bounds a pending upgrade connection and uses the read-only fallback`, `/progress in print mode saves the read-only page without opening a browser`.
