@@ -1232,11 +1232,17 @@ const writeDashboard = async ($: EngineInterface, force = false): Promise<{ path
   }
 }
 
+let isInteractiveSession = true
+
 // Opens progress.html in the default browser: a window of its own on the desktop.
-const openDashboard = async ($: EngineInterface): Promise<string> => {
+const openDashboard = async ($: EngineInterface, isInteractive: boolean): Promise<string> => {
   const s = await wordsOf($)
   const { path, problem } = await writeDashboard($, true)
   if (problem !== undefined) return problem
+  if (!isInteractive) {
+    const file = (await read($, snapshot)).path || (await progressPath($))
+    return s.windowSaved(path.split(/[\\/]/).pop(), file.split(/[\\/]/).pop())
+  }
   const argv = (await isWindows($, path))
     ? ['cmd', '/c', 'start', '', path]
     : (await $.env.get('HOME'))?.startsWith('/Users/')
@@ -3530,6 +3536,7 @@ const answerHere = async ($: EngineInterface): Promise<void> => {
 
 export const register: Register = (on, options) => {
   on('session.start', async ($, e, next) => {
+    isInteractiveSession = e.isInteractive !== false
     pendingCache = null
     progressChangedAt = null
     heldInboxQuestions.clear()
@@ -3641,6 +3648,7 @@ export const register: Register = (on, options) => {
   })
 
   on('command.run', { command: 'progress' }, async ($, e) => {
+    const isInteractive = isInteractiveSession
     const arg = e.args.trim()
     const language = /^(?:lang|language|語言|语言)\s*(\S*)$/i.exec(arg)
     if (language !== null) {
@@ -3675,7 +3683,7 @@ export const register: Register = (on, options) => {
       return { text: moved === 0 ? s.tidyNothing : s.tidyMoved(moved) }
     }
     if (/^(open|window|html|視窗|窗口|網頁|网页)$/i.test(arg)) {
-      return { text: await openDashboard($) }
+      return { text: await openDashboard($, isInteractive) }
     }
     if (/^(同步|sync)$/i.test(arg)) {
       await resync($)
@@ -3744,10 +3752,17 @@ export const register: Register = (on, options) => {
     startingPages += 1
     try {
       await refreshStatus($)
-      const { page, needsInstall } = await openLiveBoard($, progress, s)
+      const connecting = backgroundConnect
+      let live = await openLiveBoard($, progress, s)
+      if (live.needsInstall && connecting !== null) {
+        // A first open can race the existing upgrade; never run the old file while waiting.
+        await isDoneWithin($, connecting, 5000)
+        live = await openLiveBoard($, progress, s)
+      }
+      const { page, needsInstall } = live
       if (page !== null) return { text: `${s.livePageOpened}\n<${page.url}>${page.isKept ? `\n${s.serveKept}` : ''}` }
       // openDashboard already words the result, with the file names when the browser fails.
-      return { text: `${s.livePageFallback}\n${needsInstall ? `${s.livePageNeedsInstall}\n` : ''}${await openDashboard($)}` }
+      return { text: `${s.livePageFallback}\n${needsInstall ? `${s.livePageNeedsInstall}\n` : ''}${await openDashboard($, isInteractive)}` }
     } finally {
       startingPages -= 1
       // A footer that cannot be redrawn must not take away the link the person waited for.

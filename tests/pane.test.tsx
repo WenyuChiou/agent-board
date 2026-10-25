@@ -3398,6 +3398,99 @@ test('/progress starts the live board page when the pane cannot be placed and re
   expect(world.ran?.some(argv => ['xdg-open', 'open', 'cmd'].includes(argv[0] ?? ''))).toBe(false)
 })
 
+test('/progress waits for a pending upgrade connection before its first live-page start', async ($, on) => {
+  const old = `globalThis.AGENT_BOARD = ${JSON.stringify({ path: FILE, lang: 'en' })}\n${RELEASE_0_20_5.board}`
+  const url = `http://127.0.0.1:34567/?t=${'u'.repeat(32)}`
+  let reached!: () => void
+  let release!: () => void
+  const waiting = new Promise<void>(done => { reached = done })
+  const held = new Promise<void>(done => { release = done })
+  const world: World = { files: new Map([[FILE, JOBS], [LIVE_SCRIPT, old]]), mtime: 1, hasTasks: true, ran: [], liveCalls: [], workerGate: { reached, release: held }, paneReason: 'no attached surface places panes (desktop)', store: { inboxDone: {}, lang: 'en' }, liveOutput: `${EN.serveAt(url)}\n` }
+  engineBeneath(on, world)
+  outside(on, world)
+  try {
+    await $.session.start({ cwd: '/work/demo', surface: 'desktop', isInteractive: true })
+    await waiting
+    expect(world.files.get(LIVE_SCRIPT)).toBe(old)
+    // The first command reads the old bytes while the existing worker resumes its upgrade.
+    world.beforeRead = path => { if (path === LIVE_SCRIPT) release() }
+    const result = await $.command.run({ ...TIDY, args: '' })
+    expect(result.text).toBe(`${EN.livePageOpened}\n<${url}>`)
+    expect(world.files.get(LIVE_SCRIPT)).toBe(installedBoard())
+    expect(world.liveCalls).toHaveLength(1)
+    expect(world.ran?.some(argv => ['xdg-open', 'open', 'cmd'].includes(argv[0] ?? ''))).toBe(false)
+  } finally {
+    release()
+    await settledSetup($, world)
+  }
+})
+
+test('/progress bounds a pending upgrade connection and uses the read-only fallback', async ($, on) => {
+  const old = `globalThis.AGENT_BOARD = ${JSON.stringify({ path: FILE, lang: 'en' })}\n${RELEASE_0_20_5.board}`
+  const url = `http://127.0.0.1:34567/?t=${'v'.repeat(32)}`
+  let reached!: () => void
+  let release!: () => void
+  let armed!: () => void
+  const waiting = new Promise<void>(done => { reached = done })
+  const held = new Promise<void>(done => { release = done })
+  const timer = new Promise<void>(done => { armed = done })
+  const world: World = { files: new Map([[FILE, JOBS], [LIVE_SCRIPT, old]]), mtime: 1, hasTasks: true, ran: [], liveCalls: [], workerGate: { reached, release: held }, paneReason: 'no attached surface places panes (desktop)', store: { inboxDone: {}, lang: 'en' }, liveOutput: `${EN.serveAt(url)}\n` }
+  let isObserving = false
+  // The clock call stays pending until it fires; observe the original mock's registration.
+  const clockOn = ((...args: Parameters<On>) => {
+    const callback = args.at(-1)
+    if (args[0] !== 'clock.after' || typeof callback !== 'function') return Reflect.apply(on, undefined, args)
+    return on('clock.after', ($, event, next) => {
+      const result = Reflect.apply(callback, undefined, [$, event, next])
+      if (isObserving && event.ms === 5000) armed()
+      return result
+    })
+  }) as On
+  const clock = engineBeneath(clockOn, world)
+  outside(on, world)
+  try {
+    await $.session.start({ cwd: '/work/demo', surface: 'desktop', isInteractive: true })
+    await waiting
+    isObserving = true
+    const opening = $.command.run({ ...TIDY, args: '' })
+    expect(await Promise.race([timer.then(() => true), opening.then(() => false)])).toBe(true)
+    await clock.advance(5000)
+    const result = await opening
+    expect(result.text).toBe(`${EN.livePageFallback}\n${EN.livePageNeedsInstall}\n${EN.windowOpened()}`)
+    expect(world.files.get(LIVE_SCRIPT)).toBe(old)
+    expect(world.liveCalls).toEqual([])
+    release()
+    await settledSetup($, world)
+    expect((await $.command.run({ ...TIDY, args: '' })).text).toBe(`${EN.livePageOpened}\n<${url}>`)
+  } finally {
+    release()
+    await settledSetup($, world)
+  }
+})
+
+test('/progress in print mode saves the read-only page without opening a browser', async ($, on) => {
+  const world: World = { files: new Map([[FILE, JOBS]]), mtime: 1, hasTasks: true, ran: [], hasNoSurface: true, paneReason: 'no-surface: no surface is attached ($.session.surfaces() is empty)', env: { HOME: '/home/me', OS: 'Windows_NT' }, store: { inboxDone: {}, autoConnectOff: true, lang: 'en' } }
+  engineBeneath(on, world)
+  outside(on, world)
+  await $.session.start({ cwd: '/work/demo', surface: null, isInteractive: false })
+  await settledSetup($, world)
+  for (const lang of ['en', 'zh-TW', 'zh-CN'] as const) {
+    await $.command.run({ ...TIDY, args: `lang ${lang}` })
+    for (const isInstalled of [false, true]) {
+      world.files.delete(LIVE_SCRIPT)
+      if (isInstalled) world.files.set(LIVE_SCRIPT, installedBoard())
+      world.liveFailure = isInstalled ? 'exit' : undefined
+      for (const args of ['', 'open']) {
+        const before = world.ran?.length ?? 0
+        const result = await $.command.run({ ...TIDY, args })
+        expect(world.ran?.slice(before).some(argv => ['xdg-open', 'open', 'cmd'].includes(argv[0] ?? ''))).toBe(false)
+        expect(result.text).toContain('progress.html')
+        expect(world.files.get('/home/me/.claude/progress.html')).toContain('<!doctype html>')
+      }
+    }
+  }
+})
+
 test('/progress reuses a running live page and does not start a second one', async ($, on) => {
   const url = `http://127.0.0.1:34567/?t=${'c'.repeat(32)}`
   const world: World = { files: new Map([[FILE, JOBS], [LIVE_SCRIPT, installedBoard()]]), mtime: 1, hasTasks: true, ran: [], written: [], liveCalls: [], paneReason: 'no attached surface places panes (desktop)', store: { autoConnectOff: true, lang: 'en' }, liveOutput: `${EN.serveAt(url)}\n` }

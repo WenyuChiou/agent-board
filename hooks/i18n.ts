@@ -454,6 +454,7 @@ export const ZH_TW = {
   dashStamp: (time: string): string => `更新於 ${time}`,
   dashInboxHint: '請回到該 agent 的對話裡回覆；這個頁面不能傳送回覆。',
   windowOpened: (): string => '已在瀏覽器開啟進度看板。',
+  windowSaved: (page = 'progress.html', file = 'progress.md'): string => `已將 ${page} 存在 ${file} 旁，可自行開啟。`,
   windowFailed: (page = 'progress.html', file = 'progress.md'): string => `無法開啟進度看板：瀏覽器啟動失敗。請自行開啟 ${file} 旁邊的 ${page}。`,
 
   // The board other agents show (the standalone script and each agent's board command)
