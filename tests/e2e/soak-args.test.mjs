@@ -1,12 +1,13 @@
 import { describe, test } from 'node:test'
 import assert from 'node:assert/strict'
+import { createHash } from 'node:crypto'
 import { existsSync, readFileSync, readdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { makeWorld } from './lib/world.mjs'
 import { spawnIsolated } from './lib/spawn.mjs'
 import { knownFailure } from './lib/known.mjs'
-import { OUT_DEFAULT, archiveIntegrity, archiveProblems, classifySoakChecks, fileOpsPerPoll, hookLoadMarker, leftoverPlan, leftoverProcesses, levelOutcome, makeRedact, median, parseArguments, peakRss, percentile, pruneRefusal, queuedSessions, redactDeep, tallyOf, writeReport } from './lib/soak-report.mjs'
+import { OUT_DEFAULT, archiveIntegrity, archiveProblems, archiveQuestionIntegrity, archiveQuestionProblems, archiveRefusal, classifySoakChecks, fileOpsPerPoll, hookLoadMarker, leftoverPlan, leftoverProcesses, levelOutcome, makeRedact, median, parseArguments, peakRss, percentile, queuedSessions, questionEvidenceProjection, questionRecoveryOf, redactDeep, tallyOf, writeReport } from './lib/soak-report.mjs'
 
 const soak = fileURLToPath(new URL('./soak.mjs', import.meta.url))
 
@@ -23,21 +24,21 @@ const attempt = (world, args) => new Promise((resolve, reject) => {
 
 describe('L6 soak arguments', () => {
   test('L6 soak results: measured successes pass while their hold identifiers remain registered', async () => {
-    const titles = { ops: 'File operations', prune: 'Pruned questions', level: 'Memory level' }
-    const holds = { ops: 'hold:serve-poll-file-ops', prune: 'hold:question-ledger-prune' }
-    const outcomes = { ops: { ok: true, line: 'Measured 2 operations.' }, prune: { ok: true, line: 'Measured 0 leftovers.' }, level: { ok: true, hold: holds.ops, line: 'Memory settled.' } }
+    const titles = { ops: 'File operations', preserve: 'Preserved questions', level: 'Memory level' }
+    const holds = { ops: 'hold:serve-poll-file-ops' }
+    const outcomes = { ops: { ok: true, line: 'Measured 2 operations.' }, preserve: { ok: true, line: 'Measured 4 recoverable questions.' }, level: { ok: true, hold: holds.ops, line: 'Memory settled.' } }
     const results = await classifySoakChecks({ outcomes, titles, holds, minutes: 35, knownFailure })
     assert.deepEqual(results, Object.entries(titles).map(([key, title]) => ({ title, status: 'pass', line: outcomes[key].line })))
-    assert.deepEqual(holds, { ops: 'hold:serve-poll-file-ops', prune: 'hold:question-ledger-prune' })
+    assert.deepEqual(holds, { ops: 'hold:serve-poll-file-ops' })
   })
   test('L6 soak results: held failures remain known and unheld failures still fail', async () => {
-    const titles = { ops: 'File operations', prune: 'Pruned questions', watch: 'Terminal board', crash: 'Crashed server' }
-    const holds = { ops: 'hold:serve-poll-file-ops', prune: 'hold:question-ledger-prune', crash: 'hold:serve-poll-file-ops' }
-    const outcomes = { ops: { ok: false, line: 'Too many operations.' }, prune: { ok: false, line: 'Leftovers remain.' }, watch: { ok: false, line: 'Terminal stopped.' }, crash: { ok: false, isUnheld: true, line: 'Server exited.' } }
+    const titles = { ops: 'File operations', preserve: 'Preserved questions', watch: 'Terminal board', crash: 'Crashed server' }
+    const holds = { ops: 'hold:serve-poll-file-ops', crash: 'hold:serve-poll-file-ops' }
+    const outcomes = { ops: { ok: false, line: 'Too many operations.' }, preserve: { ok: false, line: 'Question recovery failed.' }, watch: { ok: false, line: 'Terminal stopped.' }, crash: { ok: false, isUnheld: true, line: 'Server exited.' } }
     const results = await classifySoakChecks({ outcomes, titles, holds, minutes: 35, knownFailure })
-    assert.deepEqual(results.map(one => one.status), ['known', 'known', 'fail', 'fail'])
+    assert.deepEqual(results.map(one => one.status), ['known', 'fail', 'fail', 'fail'])
     assert.match(results[0].line, /Known problem \(hold:serve-poll-file-ops\)/)
-    assert.match(results[1].line, /Known problem \(hold:question-ledger-prune\)/)
+    assert.equal(results[1].status, 'fail')
     assert.equal(results[3].line, outcomes.crash.line)
   })
   test('L6 soak results: an unexpected known-failure error fails the check', async () => {
@@ -212,36 +213,149 @@ describe('L6 soak arguments', () => {
     assert.ok(archiveProblems(kept).includes('2 stopped tasks are still in progress.md, more than the 0 whose archive was not answered'))
   })
 
+  const question = (overrides = {}) => {
+    const record = {
+      scope: JSON.stringify(['demo', 'codex', 'b1']),
+      words: 'Publish the plan, OK?',
+      occurrence: 1,
+      copies: 1,
+      isWaiting: false,
+      isPresent: false,
+      isUnresolved: true,
+      isArchived: true,
+      firstObserved: 1720000000000,
+      incarnation: 'first',
+      producer: 'codex:publish-plan',
+      producerRevisions: ['a'.repeat(64)],
+      producerSources: ['source-a'],
+      source: { kind: 'block', project: 'demo', task: 'Plan', context: 'Release', text: 'Publish the plan, OK?', agent: 'codex', session: 'b1', data: JSON.stringify({ auto: { session: 'b1', agent: 'codex', state: 'ended', updated: 1720000000000, resume: null, dir: null, pr: null, ci: null }, steps: ['done', 'waiting'] }) },
+      ...overrides,
+    }
+    const binding = createHash('sha256').update(JSON.stringify([record.scope, record.words, record.occurrence, record.copies, record.incarnation])).digest('hex')
+    return { id: overrides.id ?? `question:${binding}:1`, ...record }
+  }
+  const ledgerText = records => `${JSON.stringify({ version: 1, next: records.reduce((next, record) => Math.max(next, Number(record.id.slice(record.id.lastIndexOf(':') + 1)) + 1), 1), records, legacy: {} })}\n`
+  const captureEvidence = value => {
+    const text = `${JSON.stringify(value)}\n`
+    return { hash: createHash('sha256').update(text).digest('hex'), text }
+  }
+
+  test('L6 soak arguments: the holdings evidence reader rejects one malformed record mixed with a valid record', () => {
+    const malformed = question({ words: 'Ship the plan, OK?', incarnation: 'second' })
+    delete malformed.isUnresolved
+    delete malformed.occurrence
+    delete malformed.copies
+    const evidence = questionEvidenceProjection({ ledgerText: ledgerText([question(), malformed]), captures: [] })
+    assert.match(evidence.error, /question ledger record is invalid/)
+    assert.equal(evidence.questions, undefined)
+  })
+
+  test('L6 soak arguments: the holdings evidence reader rejects bad capture versions and sources', () => {
+    const record = question()
+    const invalidVersion = captureEvidence({ version: 2, disposition: 'archived', record })
+    const invalidSource = captureEvidence({ version: 1, disposition: 'archived', record: { ...record, source: {} } })
+    for (const capture of [invalidVersion, invalidSource]) {
+      const evidence = questionEvidenceProjection({ ledgerText: ledgerText([]), captures: [capture] })
+      assert.match(evidence.error, /question capture schema is invalid/)
+    }
+  })
+
+  test('L6 soak arguments: the holdings evidence reader projects a valid archived capture onto its ledger record', () => {
+    const record = question({ isArchived: undefined })
+    const capture = captureEvidence({ version: 1, disposition: 'archived', record })
+    const evidence = questionEvidenceProjection({ ledgerText: ledgerText([record]), captures: [capture] })
+    assert.equal(evidence.error, undefined)
+    assert.equal(evidence.questions.length, 1)
+    assert.equal(evidence.questions[0].isArchived, true)
+  })
+
+  test('L6 soak arguments: archived unanswered questions pass by retaining recovery evidence, not by leaving zero records', () => {
+    const before = [{ ...question(), isArchived: undefined }]
+    const after = [question()]
+    const integrity = archiveQuestionIntegrity({ before, after, archivedSessions: new Set(['b1']), recoverableQuestionIds: new Set(after.map(record => record.id)) })
+    assert.equal(after.length, 1)
+    assert.equal(integrity.checked, 1)
+    assert.deepEqual(archiveQuestionProblems(integrity), [])
+  })
+
+  test('L6 soak arguments: page recovery reads every question surface and refuses incomplete evidence', () => {
+    const first = question().id
+    const second = question({ words: 'Choose another path?', incarnation: 'second' }).id
+    const model = { asks: [{ questionId: first }], reminder: [{ questionId: second }], older: [{ questionId: first }], hidden: [{ text: 'manual question' }] }
+    const recovery = questionRecoveryOf(200, model)
+    assert.equal(recovery.checked, true)
+    assert.deepEqual(recovery.questionIds, [first, second])
+    assert.deepEqual(recovery.surfaceCounts, { asks: 1, reminder: 1, older: 1, hidden: 1 })
+    for (const broken of [{ ...model, hidden: undefined }, { ...model, older: [{ questionId: 7 }] }, { ...model, asks: [null] }]) {
+      const rejected = questionRecoveryOf(200, broken)
+      assert.equal(rejected.checked, false)
+      assert.deepEqual(rejected.questionIds, [])
+    }
+    assert.equal(questionRecoveryOf(503, model).checked, false)
+  })
+
+  test('L6 soak arguments: actual shelf membership recovers a historical question without an archived flag', () => {
+    const record = question({ isArchived: undefined })
+    const integrity = archiveQuestionIntegrity({ before: [record], after: [record], archivedSessions: new Set(['b1']), recoverableQuestionIds: new Set([record.id]) })
+    assert.deepEqual(archiveQuestionProblems(integrity), [])
+  })
+
+  test('L6 soak arguments: an archived flag cannot replace actual shelf recovery evidence', () => {
+    const record = question()
+    const integrity = archiveQuestionIntegrity({ before: [record], after: [record], archivedSessions: new Set(['b1']) })
+    assert.deepEqual(integrity.undiscoverable, [record.id])
+  })
+
+  test('L6 soak arguments: archived unanswered-question integrity names every identity, age, provenance, source and recovery violation', () => {
+    const original = question()
+    const changedId = question({ id: 'question:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb:2' })
+    assert.match(archiveQuestionProblems(archiveQuestionIntegrity({ before: [], after: [], archivedSessions: new Set(['b1']) })).join('; '), /preservation was not measured/)
+    const variants = [
+      [[], /1 unanswered question IDs are missing/],
+      [[changedId], /1 unanswered question IDs changed/],
+      [[{ ...original, firstObserved: original.firstObserved + 1 }], /1 unanswered questions lost their original age/],
+      [[{ ...original, scope: JSON.stringify(['demo', 'codex', 'other']) }], /1 unanswered questions changed scope or producer binding/],
+      [[{ ...original, producerRevisions: [], producerSources: [] }], /1 unanswered questions lost producer provenance/],
+      [[{ ...original, source: undefined }], /1 unanswered questions lost their retained source/],
+      [[{ ...original, isArchived: false }], /1 unanswered questions are not recoverable on the board/],
+      [[{ ...original, isUnresolved: false }], /1 unanswered questions are not recoverable on the board/],
+    ]
+    for (const [after, expected] of variants) {
+      const integrity = archiveQuestionIntegrity({ before: [original], after, archivedSessions: new Set(['b1']) })
+      assert.match(archiveQuestionProblems(integrity).join('; '), expected)
+    }
+  })
+
   test('L6 soak arguments: an archive with no answer in time, a 408 or one cut short is the known slowness only while file operations fail and nothing was lost', () => {
     const clean = { archived: 5, lost: 0, unarchived: 0, othersLost: 0, unpressedGone: 0, stopped: 2, stoppedLeft: 1, stoppedUnanswered: 1 }
-    assert.equal(pruneRefusal({ refusals: [], integrity: clean, isOpsHeld: true, hold, counted }), undefined)
+    assert.equal(archiveRefusal({ refusals: [], integrity: clean, isOpsHeld: true, hold, counted }), undefined)
     // A wait that ran out and a 408 from the server's own wait.
-    const timeout = pruneRefusal({ refusals: [{ cause: 'timeout', count: 1 }, { cause: 'timeout', count: 1 }], integrity: clean, isOpsHeld: true, hold, counted })
+    const timeout = archiveRefusal({ refusals: [{ cause: 'timeout', count: 1 }, { cause: 'timeout', count: 1 }], integrity: clean, isOpsHeld: true, hold, counted })
     assert.equal(timeout.ok, false)
     assert.equal(timeout.hold, hold)
     assert.equal(timeout.isUnheld, undefined)
-    assert.match(timeout.line, /^The archive did not finish \(2 got no answer in time\), so pruning was not judged: the page server's known slowness explains it, since the file-operation check fails; nothing was lost \(5 tasks are in the archive file and 1 of the 2 stopped tasks are still in progress\.md\)\. At the end, 5 tasks were archived\.$/)
+    assert.match(timeout.line, /^The archive did not finish \(2 got no answer in time\), so unanswered-question preservation was not judged: the page server's known slowness explains it, since the file-operation check fails; nothing was lost \(5 tasks are in the archive file and 1 of the 2 stopped tasks are still in progress\.md\)\. At the end, 5 tasks were archived\.$/)
     // Stopped tasks the time limit left unreached.
-    const cut = pruneRefusal({ refusals: [{ cause: 'cut', count: 1 }], integrity: clean, isOpsHeld: true, hold, counted })
+    const cut = archiveRefusal({ refusals: [{ cause: 'cut', count: 1 }], integrity: clean, isOpsHeld: true, hold, counted })
     assert.equal(cut.hold, hold)
     assert.match(cut.line, /1 stopped tasks were not reached before the time limit/)
     // The same, with a task lost, an answered task still there, or another block gone: never held.
     for (const [change, words] of [[{ lost: 1 }, /1 tasks left progress\.md but are not in the archive file/], [{ unarchived: 1 }, /1 tasks whose archive was answered are still in progress\.md/], [{ othersLost: 1 }, /1 blocks the archive was not to touch left progress\.md/]]) {
-      const outcome = pruneRefusal({ refusals: [{ cause: 'cut', count: 1 }], integrity: { ...clean, ...change }, isOpsHeld: true, hold, counted })
+      const outcome = archiveRefusal({ refusals: [{ cause: 'cut', count: 1 }], integrity: { ...clean, ...change }, isOpsHeld: true, hold, counted })
       assert.equal(outcome.isUnheld, true)
       assert.equal(outcome.hold, undefined)
       assert.match(outcome.line, words)
     }
     // With the file-operation check passing or skipped there is no known slowness to explain it.
-    const unheld = pruneRefusal({ refusals: [{ cause: 'timeout', count: 1 }], integrity: clean, isOpsHeld: false, hold, counted })
+    const unheld = archiveRefusal({ refusals: [{ cause: 'timeout', count: 1 }], integrity: clean, isOpsHeld: false, hold, counted })
     assert.equal(unheld.isUnheld, true)
     assert.match(unheld.line, /the file-operation check does not fail, so its known slowness does not explain it/)
   })
 
-  test('L6 soak arguments: an archive refused with an error status or a failed connection fails pruning even while the slowness is held', () => {
+  test('L6 soak arguments: an archive refused with an error status or a failed connection fails preservation even while the slowness is held', () => {
     const clean = { archived: 5, lost: 0, unarchived: 0, othersLost: 0, unpressedGone: 0, stopped: 2, stoppedLeft: 1, stoppedUnanswered: 1 }
     for (const [refusals, words] of [[[{ cause: 'status', status: 503, count: 1 }], /1 answered 503/], [[{ cause: 'timeout', count: 1 }, { cause: 'status', status: 500, count: 1 }], /1 got no answer in time, 1 answered 500/], [[{ cause: 'refused', count: 1 }], /1 could not connect/], [[{ cause: 'closed', count: 1 }], /1 lost the connection twice before an answer/], [[{ cause: 'unreadable', count: 1 }], /1 stopped tasks could not be pressed because the board could not be read/], [[{ cause: 'button', count: 1 }], /1 stopped tasks had no Archive button/]]) {
-      const outcome = pruneRefusal({ refusals, integrity: clean, isOpsHeld: true, hold, counted })
+      const outcome = archiveRefusal({ refusals, integrity: clean, isOpsHeld: true, hold, counted })
       assert.equal(outcome.ok, false)
       assert.equal(outcome.isUnheld, true)
       assert.equal(outcome.hold, undefined)

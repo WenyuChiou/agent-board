@@ -1,7 +1,7 @@
 import { test, expect } from 'claude-code/testing'
 import { parseProgress } from '../hooks/parse'
 import { buildView } from '../hooks/view'
-import { acknowledgementKeys, archiveQuestionsKept, captureCovers, captureJson, emptyQuestions, isAskedBy, isQuestionSnapshot, isTornLedger, ledgerLeftovers, LEDGER_TEMP_MS, migratedAnswered, migrationKey, observeQuestions, ownQuestionsKey, parseCapture, parseQuestions, prunableCaptures, prunableProofs, questionFilesKey, questionsJson, resolveQuestion, resolvedQuestionsToRetire, withCaptures } from '../hooks/questions'
+import { acknowledgementKeys, archiveQuestionsKept, captureCovers, captureJson, compactQuestionsJson, emptyQuestions, isAskedBy, isQuestionSnapshot, isTornLedger, ledgerLeftovers, LEDGER_TEMP_MS, migratedAnswered, migrationKey, observeQuestions, ownQuestionsKey, parseCapture, parseQuestions, prunableCaptures, prunableProofs, questionFilesKey, questionsJson, resolveQuestion, resolvedQuestionsToRetire, withCaptures } from '../hooks/questions'
 import type { QuestionLedger } from '../hooks/questions'
 import { edited, finished, held, ledgerOf, named, proof, question, reopened } from './fixtures/question-files'
 import { STRINGS } from '../hooks/strings'
@@ -13,6 +13,7 @@ import { remindersOf } from '../hooks/remind'
 import { peekInbox } from '../hooks/board'
 import { answerAgentPrompt, blockId } from '../hooks/inbox'
 import type { AgentTurn } from '../hooks/inbox'
+import { reusableQuestionObservation } from '../scripts/question-observation'
 
 const NOW = Date.parse('2026-10-16T12:00:00Z')
 const file = (steps: string, project = 'demo', session = 'a1b2c3d4'): string =>
@@ -21,6 +22,92 @@ const observe = (ledger: QuestionLedger, text: string, answered: string[] = [], 
   observeQuestions(ledger, parseProgress(text), null, answered, at, settled)
 const view = (ledger: QuestionLedger, text: string, answered: string[] = []) =>
   buildView(parseProgress(text), [], null, NOW, 0, {}, STRINGS.en, answered, {}, ledger)
+
+test('compact question indexes preserve every value and parse like existing formatted indexes', () => {
+  const ledger = observeQuestions(emptyQuestions(), parseProgress(file('- [?] 發送 synthetic plan, OK?')), null, [], NOW, true, 'birth').ledger
+  const record = ledger.records[0]!
+  const enriched = { ...ledger, records: [{ ...record, producerRevisions: [sha256('synthetic revision')], producerSources: ['synthetic producer'], source: { ...record.source!, context: '中文\n"quoted"\u0000\ud800' } }], future: { value: ['retain this', 1, null] } }
+  const pretty = questionsJson(enriched)
+  const compact = compactQuestionsJson(enriched)
+  expect(compact.length).toBeLessThan(pretty.length)
+  expect(JSON.parse(compact)).toEqual(JSON.parse(pretty))
+  expect(parseQuestions(compact)).toEqual(parseQuestions(pretty))
+  expect(captureJson(parseQuestions(compact)!.records[0]!, 'unresolved')).toBe(captureJson(parseQuestions(pretty)!.records[0]!, 'unresolved'))
+})
+
+test('retained question observations reuse allocations while new identities keep their current clock and incarnation', () => {
+  const projects = parseProgress(file('- [?] Publish the synthetic plan, OK?'))
+  const ledger = observeQuestions(emptyQuestions(), projects, null, [], NOW, true, 'birth').ledger
+  const proofs = { retired: [], consumed: [] }
+  const reader = reusableQuestionObservation()
+  const first = reader(ledger, projects, null, [], NOW + 1, true, 'reader:1', proofs)
+  const later = reader(ledger, projects, null, [], NOW + 900000, true, 'reader:2', proofs)
+  expect(later).toBe(first)
+  expect(later).toEqual(observeQuestions(ledger, projects, null, [], NOW + 900000, true, 'reader:2', proofs))
+  const empty = emptyQuestions()
+  const born = reader(empty, projects, null, [], NOW, true, 'new:1', proofs)
+  const renewed = reader(empty, projects, null, [], NOW + 900000, true, 'new:2', proofs)
+  expect(renewed.ledger.records[0]?.id).not.toBe(born.ledger.records[0]?.id)
+  expect(renewed.ledger.records[0]?.firstObserved).toBe(NOW + 900000)
+})
+
+test('question observation reuse invalidates for ledger project hide proof source clock and frozen scope changes', () => {
+  const projects = parseProgress(file('- [?] Publish the synthetic plan, OK?'))
+  const ledger = observeQuestions(emptyQuestions(), projects, null, [], NOW, true, 'birth').ledger
+  type Inputs = Parameters<typeof observeQuestions>
+  const baseline: Inputs = [ledger, projects, null, [], NOW + 1, true, 'reader', { retired: [], consumed: [] }, [], [], new Set()]
+  const changing = (edit: (input: Inputs) => void): Inputs => {
+    const input: Inputs = [...baseline]
+    edit(input)
+    return input
+  }
+  const cases: Inputs[] = [
+    changing(input => { input[0] = { ...ledger } }),
+    changing(input => { input[1] = parseProgress(file('- [?] Publish the changed plan, OK?')) }),
+    changing(input => { input[2] = emptyMirror('11223344', 'demo', NOW) }),
+    changing(input => { input[3] = [ledger.records[0]!.id] }),
+    changing(input => { input[5] = false }),
+    changing(input => { input[7] = { retired: [sha256(ledger.records[0]!.id)], consumed: [] } }),
+    changing(input => { input[8] = [{ id: 'a1b2c3d4', agent: 'codex', project: 'demo', text: 'A fresh inbox question?', isQuestion: true, at: NOW + 2 }] }),
+    changing(input => { input[9] = [{ id: 'a1b2c3d4', agent: 'codex', event: 'prompt', at: NOW + 2 }] }),
+    changing(input => { input[10] = new Set([ledger.records[0]!.scope]) }),
+  ]
+  for (const input of cases) {
+    const reader = reusableQuestionObservation()
+    const previous = reader(...baseline)
+    const changed = reader(...input)
+    expect(changed).not.toBe(previous)
+    expect(changed).toEqual(observeQuestions(...input))
+  }
+  const reader = reusableQuestionObservation()
+  const mutable: Inputs = [ledger, projects, null, [], NOW + 1, true, 'reader', { retired: [], consumed: [] }, [], [], new Set()]
+  const first = reader(...mutable)
+  mutable[7]!.retired.push(sha256(ledger.records[0]!.id))
+  const retired = reader(...mutable)
+  expect(retired).not.toBe(first)
+  expect(retired).toEqual(observeQuestions(...mutable))
+  const pending: Inputs = [...baseline]
+  pending[8] = [{ id: 'a1b2c3d4', agent: 'codex', project: 'demo', text: 'Another inbox question?', isQuestion: true, at: NOW + 2 }]
+  pending[0] = observeQuestions(...pending).ledger
+  const original = reader(...pending)
+  expect(reader(...pending)).toBe(original)
+  pending[8]![0]!.at = NOW + 3
+  expect(reader(...pending)).not.toBe(original)
+  expect(reader(...pending)).toEqual(observeQuestions(...pending))
+})
+
+test('a view with reused question observations still updates every age region as time passes', () => {
+  const projects = parseProgress(file('- [?] Publish the synthetic plan, OK?'))
+  const ledger = observeQuestions(emptyQuestions(), projects, null, [], NOW, true, 'birth').ledger
+  const proofs = { retired: [], consumed: [] }
+  for (const s of Object.values(STRINGS)) {
+    const reader = reusableQuestionObservation()
+    for (const at of [NOW, NOW + 13 * 3600000, NOW + 2 * 86400000, NOW + 31 * 86400000]) {
+      expect(buildView(projects, [], null, at, 0, {}, s, [], {}, ledger, proofs, [], new Set(), reader))
+        .toEqual(buildView(projects, [], null, at, 0, {}, s, [], {}, ledger, proofs))
+    }
+  }
+})
 
 test("your own session's question stays under Waiting on you after 12 quiet hours while the session runs", () => {
   const quiet = NOW - 13 * 60 * 60 * 1000

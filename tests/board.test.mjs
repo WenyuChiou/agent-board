@@ -2,6 +2,7 @@
 // Node, no Claude Code. Needs Node 22.18+ or 24 (it reads hooks/board-script.ts directly).
 import { execFile, execFileSync, spawn, spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
+import { EventEmitter } from 'node:events'
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs'
 import { request } from 'node:http'
 import { createServer as createNetServer } from 'node:net'
@@ -23,6 +24,9 @@ import { liveBoardScript } from '../hooks/live-page.ts'
 import { EN } from '../hooks/strings-en.ts'
 import { ZH_TW } from '../hooks/i18n.ts'
 import { ZH_CN } from '../hooks/strings-zh-cn.ts'
+import { immutableQuestionFiles } from '../scripts/question-files.ts'
+import { recentInboxFiles } from '../scripts/inbox-files.ts'
+import { serverMemoryArgs } from '../scripts/server-runtime.ts'
 
 const TORN_NOW = Date.parse('2026-10-20T12:00:00Z')
 const tornDay = () => '# Progress\r\n\r\n## Synthetic day\r\n### Hand task alpha\r\n- [ ] Plan\r\n\r\n### Hand task beta\r\n- [ ] Review\r\n\r\n' +
@@ -263,7 +267,7 @@ test('the board script places a cut-off block notice at the bottom by agent and 
   }
 })
 
-test('the board script names a block cut off at the end of the file once the file has been still for 10 seconds', () => {
+test('the board script names a block cut off at the end of the file once the file has been still for 10 seconds', { timeout: 30_000 }, async () => {
   const endCut = `${cutBoard().slice(0, cutBoard().indexOf('\n\n## demo-154'))}\n`
   const words = `A Codex task from ${cutDay} was cut off when its session crashed. It's shown as it was; its last lines may show twice.`
   const touch = ageMs => questionFault(`const at = (${TORN_NOW} - ${ageMs}) / 1000\nfs.utimesSync(path.join(__dirname, 'progress.md'), at, at)`)
@@ -273,6 +277,27 @@ test('the board script names a block cut off at the end of the file once the fil
   const fresh = chatRun([], { file: () => endCut, change: tornChange, preload: touch(9_000) })
   assert.equal(fresh.status, 0, fresh.stderr)
   assert.equal(oneLine(fresh.stdout).includes(words), false, fresh.stdout)
+  const source = `import { readFileSync as fixtureReadClock } from 'node:fs'
+Date.now = () => { try { return Number(fixtureReadClock(globalThis.AGENT_BOARD.path + '.clock', 'utf8')) } catch { return ${TORN_NOW} } }
+${BOARD_SCRIPT}`
+  const served = await page(endCut, {}, [], TORN_NOW, source)
+  try {
+    const at = (TORN_NOW - 9000) / 1000
+    utimesSync(served.path, at, at)
+    const ledgerFile = join(served.dir, 'progress-questions.json')
+    const poll = async () => assert.equal((await served.call('GET', '/api/board')).status, 200)
+    await poll()
+    assert.equal(existsSync(ledgerFile), false, 'an unsettled incomplete source must not write a ledger')
+    writeFileSync(served.path + '.clock', String(TORN_NOW + 3000))
+    await poll()
+    assert.equal(existsSync(ledgerFile), true, 'unchanged text must cross the settling boundary before it writes')
+    writeFileSync(served.path + '.clock', String(TORN_NOW))
+    renameSync(ledgerFile, ledgerFile + '.synthetic-saved')
+    await poll()
+    assert.equal(existsSync(ledgerFile), false, 'a changed clock must invalidate the settled snapshot and refuse a write')
+  } finally {
+    await served.close()
+  }
 })
 
 test('--tidy beside a block cut off in the middle of the file archives the finished block after it alone and keeps the rest', () => {
@@ -3237,7 +3262,7 @@ test('a refused close on the page says why next to the close button', async () =
 
 test('unexpected server read and action errors return a reason and log their stacks', async () => {
   const source = BOARD_SCRIPT
-    .replace('\n    view: freshView,\n    pending,', '\n    view: () => { throw new TypeError("synthetic server read failure") },\n    pending,')
+    .replace('\n    view: freshView,', '\n    view: () => { throw new TypeError("synthetic server read failure") },')
     .replace('\n    tidy,\n    paste,', '\n    tidy: () => { throw new TypeError("synthetic server action failure") },\n    paste,')
   assert.ok(source.includes('synthetic server read failure') && source.includes('synthetic server action failure'))
   const board = await page('', {}, [], undefined, source)
@@ -4165,6 +4190,59 @@ const serveIn = () => {
   return { dir, path, script, env, serve, urlOf, served, end }
 }
 
+test('server memory arguments retain explicit heap choices and ignore unrelated Node flags', () => {
+  assert.deepEqual(serverMemoryArgs([], ''), ['--optimize-for-size'])
+  assert.deepEqual(serverMemoryArgs(['--inspect=0', '--require', '--max-semi-space-size=8'], ''), ['--optimize-for-size'])
+  const explicit = ['--inspect=0', '--max_old_space_size', '128', '--heap-growing-percent=30']
+  assert.deepEqual(serverMemoryArgs(explicit, '--max-semi-space-size=8'), ['--max_old_space_size', '128', '--heap-growing-percent=30'])
+  assert.deepEqual(explicit, ['--inspect=0', '--max_old_space_size', '128', '--heap-growing-percent=30'])
+  for (const options of ['--max-semi-space-size=8', '--max_old_space_size 128', '"--max-heap-size=128"', '--max-old-space-size-percentage=25']) assert.deepEqual(serverMemoryArgs([], options), [])
+  for (const argument of ['--no-optimize-for-size', '--nooptimize-for-size', '--nooptimize_for_size']) assert.deepEqual(serverMemoryArgs([argument], ''), [argument])
+  assert.deepEqual(serverMemoryArgs([], '--require "a path/--max-old-space-size.cjs"'), ['--optimize-for-size'])
+})
+
+test('a background page uses its memory policy without changing the account\'s Node options', { timeout: 40_000 }, async () => {
+  const board = serveIn()
+  const preload = join(board.dir, 'runtime.cjs')
+  const received = join(board.dir, 'runtime.json')
+  writeFileSync(preload, `if (process.argv.includes('--serve-child')) require('node:fs').writeFileSync(${JSON.stringify(received)}, JSON.stringify({ argv: process.execArgv, options: process.env.NODE_OPTIONS }))\n`)
+  board.env.NODE_OPTIONS = `--require ${JSON.stringify(preload)}`
+  let url = null
+  try {
+    url = board.urlOf(await board.serve(['--quiet-board']))
+    assert.ok(url)
+    const runtime = JSON.parse(readFileSync(received, 'utf8'))
+    assert.deepEqual(runtime.argv, ['--optimize-for-size'])
+    assert.equal(runtime.options, board.env.NODE_OPTIONS)
+    const response = await fetch(new URL('/api/board', url), { headers: { 'x-board-token': new URL(url).searchParams.get('t') } })
+    assert.equal(response.status, 200)
+    await response.arrayBuffer()
+  } finally { await board.end([url]) }
+})
+
+test('a background page preserves explicit heap settings from the caller and the environment', { timeout: 60_000 }, async () => {
+  for (const variant of [
+    { argv: ['--max-semi-space-size=8'], options: '', expected: ['--max-semi-space-size=8'] },
+    { argv: [], options: '--max-semi-space-size=8', expected: [] },
+    { argv: ['--nooptimize-for-size'], options: '', expected: ['--nooptimize-for-size'] },
+  ]) {
+    const board = serveIn()
+    const preload = join(board.dir, 'runtime.cjs')
+    const received = join(board.dir, 'runtime.json')
+    writeFileSync(preload, `if (process.argv.includes('--serve-child')) require('node:fs').writeFileSync(${JSON.stringify(received)}, JSON.stringify({ argv: process.execArgv, options: process.env.NODE_OPTIONS }))\n`)
+    board.env.NODE_OPTIONS = `--require ${JSON.stringify(preload)} ${variant.options}`.trim()
+    let url = null
+    try {
+      const out = await new Promise((done, fail) => execFile(process.execPath, [...variant.argv, board.script, '--serve', '--no-open', '--quiet-board'], { env: board.env, encoding: 'utf8', timeout: 20_000 }, (error, stdout) => error ? fail(error) : done(stdout)))
+      url = board.urlOf(out)
+      assert.ok(url)
+      const runtime = JSON.parse(readFileSync(received, 'utf8'))
+      assert.deepEqual(runtime.argv, variant.expected)
+      assert.equal(runtime.options, board.env.NODE_OPTIONS)
+    } finally { await board.end([url]) }
+  }
+})
+
 // A port nothing listens on.
 const freePort = () =>
   new Promise(done => {
@@ -4733,6 +4811,494 @@ process.on('exit', () => process.stderr.write('READS ' + JSON.stringify(counts) 
   assert.equal(counts.length, 4, counted.stderr)
   assert.ok(counts.every(count => count === 1), counted.stderr)
   assert.deepEqual(counted.files, files)
+})
+
+test('the page retains the identity of a historical unanswered question on its Older shelf', async () => {
+  const board = await page()
+  try {
+    assert.equal((await board.call('GET', '/api/board')).status, 200)
+    const ledgerPath = board.path.replace(/\.md$/, '-questions.json')
+    const ledger = JSON.parse(readFileSync(ledgerPath, 'utf8'))
+    const question = ledger.records.find(record => record.words === 'Redis or Memcached?')
+    assert.ok(question)
+    assert.notEqual(question.isArchived, true)
+    writeFileSync(board.path, '# Progress\n')
+    const response = await board.call('GET', '/api/board')
+    assert.equal(response.status, 200)
+    const retained = response.json().model.older.find(item => item.text === 'Redis or Memcached?')
+    assert.ok(retained, 'the historical source must remain recoverable')
+    assert.equal(retained.questionId, question.id)
+  } finally { await board.close() }
+})
+
+test('the page retains the identity of a historical question that remains in the main questions', async () => {
+  const board = await page()
+  try {
+    const source = readFileSync(board.path, 'utf8')
+    const working = source.replace(/state=ended updated=\S+/, `state=working updated=${new Date().toISOString()}`)
+    assert.notEqual(working, source)
+    writeFileSync(board.path, working)
+    assert.equal((await board.call('GET', '/api/board')).status, 200)
+    const ledger = JSON.parse(readFileSync(board.path.replace(/\.md$/, '-questions.json'), 'utf8'))
+    const question = ledger.records.find(record => record.words === 'Redis or Memcached?')
+    assert.ok(question)
+    assert.notEqual(question.isArchived, true)
+    writeFileSync(board.path, '# Progress\n')
+    const response = await board.call('GET', '/api/board')
+    assert.equal(response.status, 200)
+    const retained = response.json().model.asks.find(item => item.text === 'Redis or Memcached?')
+    assert.ok(retained, 'the historical source keeps its existing visible placement')
+    assert.equal(retained.questionId, question.id)
+  } finally { await board.close() }
+})
+
+const inboxFilesFixture = (hasWatchFailure = false) => {
+  const root = mkdtempSync(join(tmpdir(), 'agent-board-inbox-files-'))
+  const directory = join(root, 'files')
+  mkdirSync(directory)
+  const watchers = []
+  const reader = recentInboxFiles({
+    directory, isPersistent: true, accepts: name => name.endsWith('.json'),
+    watchFiles: (_directory, changed) => {
+      if (hasWatchFailure) throw new Error('synthetic watcher unavailable')
+      const watcher = new EventEmitter()
+      watcher.close = () => { watcher.isClosed = true; watcher.emit('close') }
+      watcher.unref = () => {}
+      watcher.changed = name => changed('change', name)
+      watchers.push(watcher)
+      return watcher
+    },
+  })
+  const add = (name, text, at = 1) => {
+    const file = join(directory, name)
+    writeFileSync(file, text)
+    utimesSync(file, at, at)
+    return file
+  }
+  return { root, directory, reader, watchers, add, end: () => { reader.close(); rmSync(root, { recursive: true, force: true }) } }
+}
+
+test('empty inbox polls list membership once and discover reports that appear later', () => {
+  const fixture = inboxFilesFixture()
+  const originalStat = fs.statSync
+  const originalList = fs.readdirSync
+  const operations = []
+  fs.statSync = (...args) => {
+    if (args[0] === fixture.directory) operations.push('stat')
+    return originalStat(...args)
+  }
+  fs.readdirSync = (...args) => {
+    if (args[0] === fixture.directory) operations.push('readdir')
+    return originalList(...args)
+  }
+  syncBuiltinESMExports()
+  const empty = isFresh => {
+    operations.length = 0
+    assert.deepEqual(fixture.reader.read(isFresh), [])
+    assert.deepEqual(operations, ['readdir'], 'an empty inbox needs only its membership listing')
+  }
+  try {
+    empty(false)
+    empty(true)
+    fixture.add('one.json', 'first report')
+    assert.equal(fixture.reader.read(false)[0].body, 'first report')
+    const watcher = fixture.watchers.at(-1)
+    fs.unlinkSync(join(fixture.directory, 'one.json'))
+    empty(false)
+    assert.equal(watcher.isClosed, true)
+    renameSync(fixture.directory, join(fixture.root, 'old-files'))
+    mkdirSync(fixture.directory)
+    fixture.add('one.json', 'returned report')
+    assert.equal(fixture.reader.read(false)[0].body, 'returned report')
+  } finally {
+    fs.statSync = originalStat
+    fs.readdirSync = originalList
+    syncBuiltinESMExports()
+    fixture.end()
+  }
+})
+
+test('inbox display hints keep the newest thirty reports and notice additions and removals', () => {
+  const fixture = inboxFilesFixture()
+  try {
+    for (let index = 0; index < 35; index++) fixture.add(`${index}.json`, `report ${index}`, index + 1)
+    const first = fixture.reader.read(false)
+    assert.equal(first.length, 30)
+    assert.equal(first[0].body, 'report 34')
+    assert.equal(first.at(-1).body, 'report 5')
+    fs.unlinkSync(join(fixture.directory, '34.json'))
+    assert.equal(fixture.reader.read(false)[0].body, 'report 33')
+    fixture.add('new.json', 'a new report', 40)
+    assert.equal(fixture.reader.read(false)[0].body, 'a new report')
+  } finally { fixture.end() }
+})
+
+test('inbox display hints reread changed contents with the same name size and modification time', () => {
+  const fixture = inboxFilesFixture()
+  try {
+    fixture.add('one.json', 'first report')
+    assert.equal(fixture.reader.read(false)[0].body, 'first report')
+    fixture.add('one.json', 'other report')
+    fixture.watchers[0].changed('one.json')
+    assert.equal(fixture.reader.read(false)[0].body, 'other report')
+    fixture.add('one.json', 'third report')
+    fixture.watchers[0].changed(null)
+    assert.equal(fixture.reader.read(false)[0].body, 'third report')
+  } finally { fixture.end() }
+})
+
+test('inbox action reads bypass hints before an event arrives and forget a removed report', () => {
+  const fixture = inboxFilesFixture()
+  try {
+    fixture.add('one.json', 'first report')
+    assert.equal(fixture.reader.read(false)[0].body, 'first report')
+    fixture.add('one.json', 'other report')
+    assert.equal(fixture.reader.read()[0].body, 'other report')
+    fs.unlinkSync(join(fixture.directory, 'one.json'))
+    assert.deepEqual(fixture.reader.read(false), [])
+    fixture.add('one.json', 'third report')
+    assert.equal(fixture.reader.read(false)[0].body, 'third report')
+  } finally { fixture.end() }
+})
+
+test('inbox without a watcher rereads mutable reports even when all file metadata stays fixed', () => {
+  const fixture = inboxFilesFixture(true)
+  const file = fixture.add('one.json', 'first report')
+  const originalStat = fs.statSync
+  const unchanged = originalStat(file)
+  fs.statSync = (...args) => args[0] === file ? unchanged : originalStat(...args)
+  syncBuiltinESMExports()
+  try {
+    assert.equal(fixture.reader.read(false)[0].body, 'first report')
+    fixture.add('one.json', 'other report')
+    assert.equal(fixture.reader.read(false)[0].body, 'other report')
+  } finally {
+    fs.statSync = originalStat
+    syncBuiltinESMExports()
+    fixture.end()
+  }
+})
+
+test('inbox watcher failures and directory replacement keep fresh report discovery available', () => {
+  for (const hasWatchFailure of [false, true]) {
+    const fixture = inboxFilesFixture(hasWatchFailure)
+    try {
+      fixture.add('one.json', 'first report')
+      assert.equal(fixture.reader.read(false)[0].body, 'first report')
+      if (!hasWatchFailure) fixture.watchers[0].emit('error', new Error('synthetic watcher failed'))
+      fixture.add('one.json', 'other report')
+      assert.equal(fixture.reader.read(false)[0].body, 'other report')
+      renameSync(fixture.directory, join(fixture.root, 'old-files'))
+      mkdirSync(fixture.directory)
+      fixture.add('new.json', 'a new directory')
+      assert.equal(fixture.reader.read(false)[0].body, 'a new directory')
+    } finally { fixture.end() }
+  }
+})
+
+const questionFilesFixture = (hasWatchFailure = false, onName = () => {}) => {
+  const root = mkdtempSync(join(tmpdir(), 'agent-board-question-files-'))
+  const directory = join(root, 'files')
+  mkdirSync(directory)
+  const watchers = []
+  const reader = immutableQuestionFiles({
+    directory, isPersistent: true,
+    accepts: name => { onName(name); return /^[a-f0-9]{64}\.question$/.test(name) },
+    parse: (text, name) => sha(text) === name.slice(0, 64) ? { text } : null,
+    watchFiles: (_directory, changed) => {
+      if (hasWatchFailure) throw new Error('synthetic watcher unavailable')
+      const watcher = new EventEmitter()
+      watcher.close = () => { watcher.isClosed = true; watcher.emit('close') }
+      watcher.unref = () => {}
+      watcher.changed = name => changed('change', name)
+      watchers.push(watcher)
+      return watcher
+    },
+  })
+  const add = text => {
+    const name = `${sha(text)}.question`
+    writeFileSync(join(directory, name), text)
+    return name
+  }
+  return { root, directory, reader, watchers, add, end: () => { reader.close(); rmSync(root, { recursive: true, force: true }) } }
+}
+
+test('question companion hints validate new files and forget deleted files before they reappear', () => {
+  const fixture = questionFilesFixture()
+  try {
+    const name = fixture.add('first immutable question')
+    const first = fixture.reader.read(false)
+    assert.equal(first.length, 1)
+    assert.equal(fixture.reader.read(false), first)
+    fs.unlinkSync(join(fixture.directory, name))
+    assert.deepEqual(fixture.reader.read(false), [])
+    fixture.add('first immutable question')
+    const returned = fixture.reader.read(false)
+    assert.deepEqual(returned, first)
+    assert.notEqual(returned[0], first[0])
+    fixture.add('second immutable question')
+    assert.equal(fixture.reader.read(false).length, 2)
+  } finally { fixture.end() }
+})
+
+test('question companion polls reuse filename validation until a listed name leaves the directory', () => {
+  const checked = []
+  const fixture = questionFilesFixture(false, name => checked.push(name))
+  try {
+    const name = fixture.add('stable filename contract')
+    writeFileSync(join(fixture.directory, 'unrelated-file'), '')
+    assert.equal(fixture.reader.read(false).length, 1)
+    const first = checked.length
+    assert.equal(fixture.reader.read(false).length, 1)
+    assert.equal(checked.length, first, 'unchanged directory names repeated expensive filename validation')
+    fs.unlinkSync(join(fixture.directory, name))
+    assert.deepEqual(fixture.reader.read(false), [])
+    fixture.add('stable filename contract')
+    assert.equal(fixture.reader.read(false).length, 1)
+    assert.equal(checked.length, first + 1, 'a name that returns must be checked again')
+  } finally { fixture.end() }
+})
+
+test('question companion hints reread a changed file even when its size and modification time stay fixed', () => {
+  const fixture = questionFilesFixture()
+  try {
+    const text = 'an immutable question'
+    const name = fixture.add(text)
+    const file = join(fixture.directory, name)
+    const before = statSync(file)
+    assert.equal(fixture.reader.read(false).length, 1)
+    writeFileSync(file, text.replace('an', 'xx'))
+    utimesSync(file, before.atime, before.mtime)
+    fixture.watchers[0].changed(name)
+    assert.equal(fixture.reader.read(false), null)
+    writeFileSync(file, text)
+    fixture.watchers[0].changed(null)
+    assert.equal(fixture.reader.read(false)[0].text, text)
+  } finally { fixture.end() }
+})
+
+test('question companion actions check changed metadata before a watcher event arrives', () => {
+  const fixture = questionFilesFixture()
+  try {
+    const name = fixture.add('immutable action evidence')
+    assert.equal(fixture.reader.read(false).length, 1)
+    writeFileSync(join(fixture.directory, name), 'corrupted before an action')
+    assert.equal(fixture.reader.read(), null)
+    assert.equal(fixture.reader.read(false), null)
+  } finally { fixture.end() }
+})
+
+test('question companion watcher errors and unavailable watchers fall back to full metadata checks', () => {
+  for (const hasWatchFailure of [false, true]) {
+    const fixture = questionFilesFixture(hasWatchFailure)
+    try {
+      const name = fixture.add('immutable fallback evidence')
+      assert.equal(fixture.reader.read(false).length, 1)
+      if (!hasWatchFailure) fixture.watchers[0].emit('error', new Error('synthetic watcher failed'))
+      writeFileSync(join(fixture.directory, name), 'corrupt fallback evidence')
+      assert.equal(fixture.reader.read(false), null)
+    } finally { fixture.end() }
+  }
+})
+
+test('question companion directory replacement reattaches the watcher and discards its old contents', () => {
+  const fixture = questionFilesFixture()
+  try {
+    fixture.add('old directory evidence')
+    assert.equal(fixture.reader.read(false).length, 1)
+    renameSync(fixture.directory, join(fixture.root, 'old-files'))
+    mkdirSync(fixture.directory)
+    fixture.add('new directory evidence')
+    assert.deepEqual(fixture.reader.read(false), [{ text: 'new directory evidence' }])
+    assert.equal(fixture.watchers.length, 2)
+    assert.equal(fixture.watchers[0].isClosed, true)
+  } finally { fixture.end() }
+})
+
+test('a persistent page keeps question metadata work flat as immutable companions accumulate', { timeout: 30_000 }, async t => {
+  const board = serveIn()
+  const seed = chatRun(['--keys', ''], { file: askingBoard, inspect: sweepFiles })
+  assert.equal(seed.status, 0, seed.stderr)
+  writeFileSync(board.path, seed.board)
+  for (const [name, text] of Object.entries(seed.files)) writeFileSync(join(board.dir, name), text)
+  const probe = join(board.dir, 'question-io-counts.json')
+  const preload = join(board.dir, 'question-io.cjs')
+  writeFileSync(preload, questionFault(`if (process.argv.includes('--serve-child')) {
+  const counts = { stat: 0, read: 0, list: 0 }
+  const family = file => /-questions-(source|retired|consumed)-[a-f0-9]{64}\\.json$/.test(String(file))
+  for (const name of ['statSync', 'lstatSync', 'readFileSync']) {
+    const original = fs[name]
+    fs[name] = (file, ...rest) => { if (family(file)) counts[name === 'readFileSync' ? 'read' : 'stat'] += 1; return original(file, ...rest) }
+  }
+  const list = fs.readdirSync
+  fs.readdirSync = (dir, ...rest) => { if (path.resolve(String(dir)) === __dirname) counts.list += 1; return list(dir, ...rest) }
+  const http = require('node:http')
+  const emit = http.Server.prototype.emit
+  const write = fs.writeFileSync
+  let sequence = 0
+  http.Server.prototype.emit = function (event, ...args) {
+    if (event === 'request') args[1].once('finish', () => write(${JSON.stringify(probe)}, JSON.stringify({ sequence: ++sequence, counts })))
+    return emit.call(this, event, ...args)
+  }
+}`))
+  board.env.NODE_OPTIONS = `--require ${JSON.stringify(preload)}`
+  const urls = []
+  try {
+    const url = board.urlOf(await board.serve())
+    assert.ok(url)
+    urls.push(url)
+    const token = new URL(url).searchParams.get('t')
+    const snapshot = () => { try { return JSON.parse(readFileSync(probe, 'utf8')) } catch { return null } }
+    const poll = async () => {
+      const before = snapshot()?.sequence ?? 0
+      const response = await fetch(new URL('/api/board', url), { headers: { 'x-board-token': token } })
+      assert.equal(response.status, 200)
+      await response.arrayBuffer()
+      for (let tries = 0; tries < 100; tries++) {
+        const current = snapshot()
+        if (current !== null && current.sequence > before) return current.counts
+        await delay(10)
+      }
+      assert.fail('the owned page did not write its request counters')
+    }
+    const work = (before, after) => Object.keys(after).reduce((sum, key) => sum + after[key] - before[key], 0)
+    await poll()
+    const first = await poll()
+    const small = work(first, await poll())
+    for (let i = 0; i < 200; i++) {
+      const hash = sha(`unrelated retired question ${i}`)
+      writeFileSync(join(board.dir, `progress-questions-retired-${hash}.json`), proofJson('retired', hash))
+    }
+    await poll()
+    const settled = await poll()
+    const afterLarge = await poll()
+    const large = work(settled, afterLarge)
+    const extra = sha('one more unrelated retired question')
+    writeFileSync(join(board.dir, `progress-questions-retired-${extra}.json`), proofJson('retired', extra))
+    const changed = work(afterLarge, await poll())
+    t.diagnostic(`question companion operations per page read: small=${small}, with 200 extra=${large}, one new=${changed}`)
+    assert.ok(large <= small + 16, `metadata work grew from ${small} to ${large} operations`)
+    assert.ok(changed <= small + 16, `one new companion caused ${changed} operations instead of bounded work near ${small}`)
+  } finally {
+    await board.end(urls)
+  }
+})
+
+test('unchanged page polls reuse canonical question evidence without reparsing the ledger', { timeout: 30_000 }, async t => {
+  const board = serveIn()
+  const seed = chatRun(['--keys', ''], { file: askingBoard, inspect: sweepFiles })
+  assert.equal(seed.status, 0, seed.stderr)
+  writeFileSync(board.path, seed.board)
+  for (const [name, text] of Object.entries(seed.files)) writeFileSync(join(board.dir, name), text)
+  const probe = join(board.dir, 'question-allocation-counts.json')
+  const preload = join(board.dir, 'question-allocation.cjs')
+  writeFileSync(preload, questionFault(`if (process.argv.includes('--serve-child')) {
+  const counts = { parsed: 0, ledgers: 0, captures: 0, ledgerBytes: 0, captureBytes: 0, progressScans: 0 }
+  const progress = ${JSON.stringify(seed.board)}
+  const split = String.prototype.split
+  String.prototype.split = function (...args) { if (String(this) === progress) counts.progressScans += 1; return split.apply(this, args) }
+  const parse = JSON.parse
+  const stringify = JSON.stringify
+  JSON.parse = (text, ...rest) => {
+    const value = parse(text, ...rest)
+    if (value?.version === 1 && Array.isArray(value.records)) counts.parsed += 1
+    return value
+  }
+  JSON.stringify = (value, ...rest) => {
+    const text = stringify(value, ...rest)
+    if (value?.version === 1 && Array.isArray(value.records)) { counts.ledgers += 1; counts.ledgerBytes += Buffer.byteLength(text) }
+    if (value?.version === 1 && value.record && value.disposition) { counts.captures += 1; counts.captureBytes += Buffer.byteLength(text) }
+    return text
+  }
+  const http = require('node:http')
+  const emit = http.Server.prototype.emit
+  const write = fs.writeFileSync
+  let sequence = 0
+  http.Server.prototype.emit = function (event, ...args) {
+    if (event === 'request') args[1].once('finish', () => write(${JSON.stringify(probe)}, stringify({ sequence: ++sequence, counts })))
+    return emit.call(this, event, ...args)
+  }
+}`))
+  board.env.NODE_OPTIONS = `--require ${JSON.stringify(preload)}`
+  const urls = []
+  try {
+    const url = board.urlOf(await board.serve())
+    assert.ok(url)
+    urls.push(url)
+    const token = new URL(url).searchParams.get('t')
+    const snapshot = () => { try { return JSON.parse(readFileSync(probe, 'utf8')) } catch { return null } }
+    const poll = async () => {
+      const before = snapshot()?.sequence ?? 0
+      const response = await fetch(new URL('/api/board', url), { headers: { 'x-board-token': token } })
+      assert.equal(response.status, 200)
+      await response.arrayBuffer()
+      for (let tries = 0; tries < 100; tries++) {
+        const current = snapshot()
+        if (current !== null && current.sequence > before) return current.counts
+        await delay(10)
+      }
+      assert.fail('the owned page did not write its allocation counters')
+    }
+    await poll()
+    await poll()
+    const before = await poll()
+    const saved = readFileSync(join(board.dir, 'progress-questions.json'), 'utf8')
+    await poll()
+    await poll()
+    const after = await poll()
+    const delta = Object.fromEntries(Object.keys(after).map(key => [key, after[key] - before[key]]))
+    t.diagnostic(`unchanged question JSON work over three page reads: ${JSON.stringify(delta)}`)
+    assert.equal(delta.parsed, 0, 'unchanged validated ledger bytes were parsed again')
+    assert.equal(delta.captures, 0, 'unchanged immutable captures were serialized again')
+    assert.ok(delta.ledgers <= 3, `three reads serialized ${delta.ledgers} complete ledgers`)
+    assert.equal(delta.progressScans, 0, 'unchanged progress source was scanned again')
+    assert.equal(readFileSync(join(board.dir, 'progress-questions.json'), 'utf8'), saved)
+
+    const old = JSON.parse(saved).records.find(record => record.isUnresolved && record.source)
+    assert.ok(old)
+    const copy = `${JSON.stringify({ version: 1, disposition: 'unresolved', record: { ...old, producerSources: ['synthetic-new-provenance'] } })}\n`
+    writeFileSync(join(board.dir, `progress-questions-source-${sha(copy)}.json`), copy)
+    await poll()
+    const refreshed = JSON.parse(readFileSync(join(board.dir, 'progress-questions.json'), 'utf8')).records.find(record => record.id === old.id)
+    assert.ok(refreshed.producerSources.includes('synthetic-new-provenance'))
+    assert.equal(refreshed.firstObserved, old.firstObserved)
+    assert.deepEqual(refreshed.source, old.source)
+    const kept = `${JSON.stringify({ version: 1, disposition: 'unresolved', record: refreshed })}\n`
+    const keptFile = join(board.dir, `progress-questions-source-${sha(kept)}.json`)
+    assert.equal(readFileSync(keptFile, 'utf8'), kept)
+    fs.unlinkSync(keptFile)
+    await poll()
+    assert.equal(readFileSync(keptFile, 'utf8'), kept, 'a removed durable source must be recreated before the ledger is accepted')
+    const restored = JSON.parse(readFileSync(join(board.dir, 'progress-questions.json'), 'utf8')).records.find(record => record.id === old.id)
+    assert.equal(restored.firstObserved, old.firstObserved)
+    assert.deepEqual(restored.source, old.source)
+  } finally {
+    await board.end(urls)
+  }
+})
+
+test('standalone question writes omit index whitespace while preserving every retained identity and source', () => {
+  const seed = chatRun(['--keys', ''], { file: askingBoard, inspect: sweepFiles })
+  assert.equal(seed.status, 0, seed.stderr)
+  const ledger = JSON.parse(seed.files['progress-questions.json'])
+  assert.equal(seed.files['progress-questions.json'], JSON.stringify(ledger) + '\n')
+  const pretty = JSON.stringify(ledger, null, 2) + '\n'
+  const files = { ...seed.files, 'progress-questions.json': pretty }
+  const unchanged = chatRun(['--keys', ''], { file: () => seed.board, beside: files, inspect: sweepFiles })
+  assert.equal(unchanged.status, 0, unchanged.stderr)
+  assert.equal(unchanged.files['progress-questions.json'], pretty, 'unchanged existing indexes retain their original bytes')
+  const extended = seed.board + '\n## Synthetic addition\n### A new synthetic question\n- [?] Continue the synthetic plan, OK?\n'
+  const changed = chatRun(['--keys', ''], { file: () => extended, beside: files, inspect: sweepFiles })
+  assert.equal(changed.status, 0, changed.stderr)
+  const next = JSON.parse(changed.files['progress-questions.json'])
+  assert.equal(changed.files['progress-questions.json'], JSON.stringify(next) + '\n')
+  assert.ok(next.records.length > ledger.records.length)
+  for (const old of ledger.records) {
+    const kept = next.records.find(record => record.id === old.id)
+    assert.ok(kept, old.id)
+    for (const key of ['scope', 'firstObserved', 'incarnation', 'producer', 'producerRevisions', 'producerSources', 'source']) assert.deepEqual(kept[key], old[key], `${old.id} ${key}`)
+  }
+  for (const [name, text] of Object.entries(seed.files)) if (/^progress-questions-source-/.test(name)) assert.equal(changed.files[name], text, 'source capture bytes and hashes must remain unchanged')
 })
 
 test('the terminal board forgets a question copy or proof that left the folder, so one that comes back is read again', () => {

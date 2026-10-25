@@ -153,6 +153,8 @@ export const parseQuestions = (text: string, isMissing = false): QuestionLedger 
 }
 
 export const questionsJson = (ledger: QuestionLedger): string => `${JSON.stringify(ledger, null, 2)}\n`
+// Standalone polls rewrite this machine index often; indentation need not be allocated or read back.
+export const compactQuestionsJson = (ledger: QuestionLedger): string => `${JSON.stringify(ledger)}\n`
 
 // A resolution is permanent for this incarnation, while its source stays available.
 export const resolveQuestion = (ledger: QuestionLedger, id: string, now: number): QuestionLedger => ({
@@ -504,6 +506,7 @@ export const observeQuestions = (
   const retired = new Set(proofs.retired)
   const hashes = new Map<string, string>()
   const isRetired = (record: QuestionRecord): boolean => {
+    if (retired.size === 0) return false
     const hash = hashes.get(record.id) ?? sha256(record.id)
     hashes.set(record.id, hash)
     return retired.has(hash)

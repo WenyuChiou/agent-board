@@ -4,7 +4,7 @@ import { arch, homedir, release, tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { performance } from 'node:perf_hooks'
 import { fileURLToPath, pathToFileURL } from 'node:url'
-import { OUT_DEFAULT, archiveIntegrity, archiveProblems, classifySoakChecks, fileOpsPerPoll, levelOutcome, makeRedact, median, parseArguments, peakRss, percentile, pruneRefusal, tallyOf, writeReport } from './lib/soak-report.mjs'
+import { OUT_DEFAULT, archiveIntegrity, archiveProblems, archiveQuestionIntegrity, archiveQuestionProblems, archiveRefusal, classifySoakChecks, fileOpsPerPoll, levelOutcome, makeRedact, median, parseArguments, peakRss, percentile, questionEvidenceProjection, questionRecoveryOf, tallyOf, writeReport } from './lib/soak-report.mjs'
 import { stopTree } from './lib/processes.mjs'
 
 // L6 soak: the terminal board (--watch) and the page server (--serve) run side by side on one
@@ -16,7 +16,7 @@ import { stopTree } from './lib/processes.mjs'
 const TITLES = {
   ops: 'L6 soak: 300 polls with new asks keep file operations per poll flat',
   memory: 'L6 soak: server memory stays under 150 MB after 300 polls',
-  prune: 'L6 soak: question ledger and capture files are pruned after their tasks are archived',
+  preserve: 'L6 soak: archived unanswered questions retain identity, age, provenance, source and discoverability',
   survive: 'L6 soak: the page server survives 1,000 polls with no exit',
   watch: 'L6 soak: the terminal board keeps running beside the page',
   level: 'L6 soak: server memory levels off',
@@ -29,14 +29,13 @@ const HOOK_LOAD_MAX_MINUTES = 35
 const HOOK_LOAD_LIMIT_MS = 15 * 60000
 // A check that fails on main because of a known problem passes through knownFailure with its hold id:
 // the page server reads every ledger and capture file on every poll (audit P1-3), so its memory
-// climbs and its answers slow down to minutes; and the question ledger and capture files of an
-// archived task are never removed. Survival is held only for falling short of 1,000 polls while
+// climbs and its answers slow down to minutes. Survival is held only for falling short of 1,000 polls while
 // the file-operation check still fails, since that slowness is what keeps a run short: a page
 // server that is gone, answers with an error, drops a connection or leaves a poll unanswered for
 // 5 minutes is never held, and neither is a run that reaches 1,000, which says nothing of the bug.
 // While the file-operation check fails and is held, the same slowness also explains an archive that
-// got no answer in time and too few memory lines after it (see pruneRefusal and levelOutcome).
-const HOLDS = { ops: 'hold:serve-poll-file-ops', memory: 'hold:serve-poll-file-ops', prune: 'hold:question-ledger-prune', survive: 'hold:serve-poll-file-ops' }
+// got no answer in time and too few memory lines after it (see archiveRefusal and levelOutcome).
+const HOLDS = { ops: 'hold:serve-poll-file-ops', memory: 'hold:serve-poll-file-ops', survive: 'hold:serve-poll-file-ops' }
 
 const ARCHIVE_SLACK_MS = 120000
 // The tail may run this far past the planned time. Its end cuts the poll under way short, so the
@@ -67,7 +66,7 @@ const PROJECTS = ['api-gateway', 'docs-site', 'research-hub', 'billing-core', 'm
 const AGENTS = ['codex', 'antigravity', 'hermes', 'grok', 'gemini', 'cursor', 'opencode', 'muse']
 const TOPICS = ['routes', 'cache', 'invoices', 'login', 'exports', 'search index', 'retries', 'metrics', 'templates', 'queue', 'backups', 'rate limits']
 const TURN_HOSTS = ['cursor', 'gemini', 'opencode', 'hermes', 'muse']
-const CAPTURE = /^progress-questions-source-[a-f0-9]{64}\.json$/
+const CAPTURE = /^progress-questions-source-([a-f0-9]{64})\.json$/
 const PROOF = /^progress-questions-(?:retired|consumed)-[a-f0-9]{64}\.json$/
 
 const wait = ms => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms)
@@ -380,7 +379,8 @@ const soak = async ({ minutes, out }) => {
       return { ...last }
     }
 
-    // The ledger records and capture files of each task, by the session in their scope.
+    // The ledger records and capture files of each task, plus the same capture projection the board
+    // uses to recover questions whose mutable ledger entry is stale or missing.
     const sessionOf = scope => { try { return JSON.parse(scope)[2] } catch { return '' } }
     const holdings = () => {
       const bySession = new Map()
@@ -389,15 +389,30 @@ const soak = async ({ minutes, out }) => {
         one[key] += 1
         bySession.set(session, one)
       }
-      const found = { bySession, ledgerTotal: 0, captureTotal: 0, error: undefined }
-      try {
-        const ledger = JSON.parse(readFileSync(join(world.claudeDir, 'progress-questions.json'), 'utf8')).records
-        found.ledgerTotal = ledger.length
-        for (const one of ledger) add(sessionOf(one.scope), 'records')
-      } catch (error) { found.error = error.code ?? error.message }
-      for (const name of readdirSync(world.claudeDir).filter(one => CAPTURE.test(one))) {
-        found.captureTotal += 1
-        try { add(sessionOf(JSON.parse(readFileSync(join(world.claudeDir, name), 'utf8')).record.scope), 'captures') } catch {}
+      const found = { bySession, ledgerTotal: 0, captureTotal: 0, questions: [], error: undefined }
+      let ledgerText
+      const captures = []
+      try { ledgerText = readFileSync(join(world.claudeDir, 'progress-questions.json'), 'utf8') } catch (error) { found.error = error.code ?? error.message }
+      let names = []
+      try { names = readdirSync(world.claudeDir).filter(one => CAPTURE.test(one)) } catch (error) { found.error ??= error.code ?? error.message }
+      for (const name of names) {
+        try {
+          const text = readFileSync(join(world.claudeDir, name), 'utf8')
+          const hash = name.match(CAPTURE)?.[1]
+          if (hash === undefined) throw new Error(`${name} has no question capture hash`)
+          captures.push({ hash, text })
+        } catch (error) { found.error ??= error.code ?? error.message }
+      }
+      if (found.error === undefined && ledgerText !== undefined) {
+        const evidence = questionEvidenceProjection({ ledgerText, captures })
+        if (evidence.error !== undefined) found.error = evidence.error
+        else {
+          found.ledgerTotal = evidence.ledger.length
+          found.captureTotal = evidence.captures.length
+          found.questions = evidence.questions
+          for (const record of evidence.ledger) add(sessionOf(record.scope), 'records')
+          for (const capture of evidence.captures) add(sessionOf(capture.record.scope), 'captures')
+        }
       }
       return found
     }
@@ -596,7 +611,7 @@ const soak = async ({ minutes, out }) => {
         try { block(sw, specOf(number, ended.includes(number) ? 'ended' : 'done')) } catch (error) { problem(`A writer failed: ${String(error.message).split('\n')[0]}`) }
       }
       await waitPolls(3)
-      // What the tasks hold just before the archive, so the prune check knows there was something to prune.
+      // What the tasks hold just before the archive, so preservation is compared with actual evidence.
       state.heldBefore = holdings()
       const sessionsIn = () => new Set([...readFileSync(world.path, 'utf8').matchAll(/^<!-- auto session=([a-f0-9]+) /gm)].map(one => one[1]))
       // The blocks the archive is not to touch (the Codex hook's), to tell later that none was lost.
@@ -675,7 +690,7 @@ const soak = async ({ minutes, out }) => {
       state.archiveEndAt = since()
       state.watchFramesAtArchive = watch.frames
       setPhase('tail')
-      // The tail lasts the planned time, and then until the prune check has its polls and the
+      // The tail lasts the planned time, and then until the preservation check has its polls and the
       // levels-off check its memory lines, but never past the slack.
       const settledLines = () => samples.serve.filter(one => one.t >= state.archiveEndAt + SETTLE_MS).length
       const isTailDone = () => since() >= total + TAIL_SLACK_MS || (since() >= total && tailPolls().length >= TAIL_POLLS && settledLines() >= SETTLED_LINES)
@@ -738,9 +753,19 @@ const soak = async ({ minutes, out }) => {
     // an archive with no answer in time and too few memory lines after it.
     const isOpsHeld = outcomes.ops.ok === false && outcomes.ops.isUnheld !== true
 
-    if (state.archivedSessions === undefined || state.archiveEndPolls === undefined) outcomes.prune = { skipped: 'The run ended before the archive phase was done.' }
+    if (state.archivedSessions === undefined || state.archiveEndPolls === undefined) outcomes.preserve = { skipped: 'The run ended before the archive phase was done.' }
     else {
       const archived = state.archivedSessions
+      // A retained source can stay in the main questions or move to a shelf. Preserve that existing
+      // placement and ask every actual page surface for membership instead of trusting a flag.
+      let recovery = { status: 0, checked: false, questionIds: [], error: undefined }
+      try {
+        const response = await server.get('/api/board')
+        recovery = questionRecoveryOf(response.status, response.status === 200 ? response.json().model : undefined)
+      } catch (error) {
+        recovery.error = `The page questions could not be read: ${String(error?.message ?? error).split('\n')[0]}`
+      }
+      report.archive.recovery = recovery
       const held = holdings()
       const records = sumOf(held, archived, 'records')
       const captures = sumOf(held, archived, 'captures')
@@ -751,18 +776,22 @@ const soak = async ({ minutes, out }) => {
       // end can be higher than the one before it.
       const counted = `${archived.size} tasks were archived; they had ${recordsBefore} ledger records and ${capturesBefore} capture files just before the archive and ${records} and ${captures} at the end (${held.ledgerTotal} records and ${held.captureTotal} capture files in all)`
       const unread = state.heldBefore.error !== undefined ? `just before the archive (${state.heldBefore.error})` : held.error !== undefined ? `at the end (${held.error})` : undefined
-      // An unread ledger counts no record, which would read as pruned or as nothing to prune.
-      if (unread !== undefined) outcomes.prune = { ok: false, isUnheld: true, line: `The question ledger could not be read ${unread}.` }
+      // Unread evidence can hide a lost identity, so it never counts as successful preservation.
+      if (unread !== undefined) outcomes.preserve = { ok: false, isUnheld: true, line: `Question recovery evidence could not be read ${unread}.` }
+      else if (!recovery.checked) outcomes.preserve = { ok: false, isUnheld: true, line: recovery.error }
       // A refused or unanswered archive request leaves stopped tasks with questions out, the one
-      // path that keeps them, so pruning cannot be judged: it fails, or is the known slowness.
+      // path that keeps them, so preservation cannot be judged: it fails, or is the known slowness.
       // Work the archive lost or did not move fails whatever its requests answered.
-      else if (archiveProblems(report.archive.integrity).length > 0) outcomes.prune = { ok: false, isUnheld: true, line: `The archive went wrong: ${archiveProblems(report.archive.integrity).join('; ')}. At the end, ${counted}.` }
-      else if (report.archive.refused > 0) outcomes.prune = pruneRefusal({ refusals: report.archive.refusals, integrity: report.archive.integrity, isOpsHeld, hold: HOLDS.ops, counted })
-      else if (afterArchive < TAIL_POLLS) outcomes.prune = { skipped: `Only ${afterArchive} polls came after the archive phase, ${TAIL_POLLS} are needed. At the end, ${counted}.` }
-      else if (archived.size === 0) outcomes.prune = { ok: false, isUnheld: true, line: 'No task left progress.md, so nothing could be pruned.' }
-      // With nothing there before, "none left" would prove nothing.
-      else if (recordsBefore === 0 || capturesBefore === 0) outcomes.prune = { ok: false, isUnheld: true, line: `The archived tasks had ${recordsBefore} ledger records and ${capturesBefore} capture files before the archive, so there was nothing to prune.` }
-      else outcomes.prune = { ok: records === 0 && captures === 0, line: `${counted}, after ${afterArchive} polls.` }
+      else if (archiveProblems(report.archive.integrity).length > 0) outcomes.preserve = { ok: false, isUnheld: true, line: `The archive went wrong: ${archiveProblems(report.archive.integrity).join('; ')}. At the end, ${counted}.` }
+      else if (report.archive.refused > 0) outcomes.preserve = archiveRefusal({ refusals: report.archive.refusals, integrity: report.archive.integrity, isOpsHeld, hold: HOLDS.ops, counted })
+      else if (afterArchive < TAIL_POLLS) outcomes.preserve = { skipped: `Only ${afterArchive} polls came after the archive phase, ${TAIL_POLLS} are needed. At the end, ${counted}.` }
+      else if (archived.size === 0) outcomes.preserve = { ok: false, isUnheld: true, line: 'No task left progress.md, so archived-question preservation could not be checked.' }
+      else {
+        const integrity = archiveQuestionIntegrity({ before: state.heldBefore.questions, after: held.questions, archivedSessions: archived, recoverableQuestionIds: new Set(recovery.questionIds) })
+        const problems = archiveQuestionProblems(integrity)
+        report.archive.questionIntegrity = integrity
+        outcomes.preserve = { ok: problems.length === 0, isUnheld: problems.length === 0 ? undefined : true, line: problems.length === 0 ? `${integrity.checked} unanswered questions from archived tasks retained their IDs, original age, scope and producer provenance, source copies and recovery on the actual page; ${counted}, after ${afterArchive} polls.` : `Archived unanswered-question recovery failed: ${problems.join('; ')}. At the end, ${counted}.` }
+      }
     }
 
     // Survival is about the server staying up and answering; slow answers are counted, and the
