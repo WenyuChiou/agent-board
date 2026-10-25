@@ -358,5 +358,5 @@ test('L7 one line per row at 100 columns: the terminal board and its screen keep
   assert.deepEqual(wide.filter(line => !of383(line)), [], 'a line past 100 columns that #383 does not name')
   const named = wide.filter(of383)
   // The overflow does not depend on load, so the known failure may not pass quietly.
-  await knownFailure(383, () => assert.deepEqual(named, []))
+  assert.deepEqual(named, [])
 })

@@ -6137,3 +6137,60 @@ global.setInterval = callback => { callback(); return { unref() {} } }
   assert.match(ran.stderr, /some changes may already be saved/)
   assert.doesNotMatch(ran.stderr, /nothing was changed/)
 })
+
+// Import the pure renderer so these regressions do not depend on a maintainer bundle rebuild.
+const sourceBoard = async () => {
+  const loader = registerHooks({
+    resolve(specifier, context, nextResolve) {
+      if (context.parentURL?.startsWith(new URL('../hooks/', import.meta.url).href) && /^\.\.?\//.test(specifier) && !/\.[a-z]+$/i.test(specifier)) return nextResolve(`${specifier}.ts`, context)
+      return nextResolve(specifier, context)
+    },
+  })
+  try {
+    const [board, view, parse] = await Promise.all([import('../hooks/board.ts'), import('../hooks/view.ts'), import('../hooks/parse.ts')])
+    return { ...board, ...view, ...parse }
+  } finally { loader.deregister() }
+}
+
+const terminalWidth = text => [...text.replace(/\x1b\[[0-9;]*m/g, '')].reduce((sum, char) => sum + (/[\u{1100}-\u{115f}\u{2e80}-\u{a4cf}\u{ac00}-\u{d7a3}\u{f900}-\u{faff}\u{fe30}-\u{fe6f}\u{ff00}-\u{ff60}\u{ffe0}-\u{ffe6}\u{20000}-\u{3fffd}\p{Emoji_Presentation}]/u.test(char) ? 2 : 1), 0)
+
+test('the terminal board keeps group headings, --all question shelves and the due badge within the width in en, zh-TW and zh-CN', async () => {
+  const { boardText, boardScreen, emptyBoardState, buildView, parseProgress } = await sourceBoard()
+  const now = Date.parse('2026-10-25T12:00:00Z')
+  const project = `Synthetic basin ${'流域 planning ✅ '.repeat(18)}`
+  const task = `Synthetic task ${'水庫 release schedule '.repeat(18)}`
+  const source = `## ${project}\n### ${task}\n> due 10-27\n- [ ] ${'核對 compare totals '.repeat(18)}\n<!-- auto session=38300001 agent=codex state=working updated=2026-10-25T12:00:00Z -->\n### Working ${task}\n- [~] ${'✅計算 compare '.repeat(18)}\n<!-- /auto session=38300001 -->\n`
+  for (const s of [EN, ZH_TW, ZH_CN]) {
+    const parsed = buildView(parseProgress(source), [], null, now, 0, {}, s)
+    assert.equal(parsed.due.length, 1, s.lang)
+    assert.equal(parsed.groups.length, 1, 'a working group heading is rendered')
+    const view = { ...parsed, reminder: [{ project, task, text: `Reminder ${task}`, note: task, when: '4 days' }], older: [{ project, task, text: `Older ${task}`, note: task, when: '8 days' }] }
+    for (const width of [100, 160]) for (const isColor of [false, true]) {
+      const text = boardText(view, [], s, { width, isColor, isIdleOpen: true })
+      const screen = boardScreen(view, [], emptyBoardState, s, { width, isColor })
+      for (const output of [text, screen]) {
+        assert.ok(output.includes('Synthetic basin'), 'the project remains visible')
+        assert.ok(output.includes('Synthetic task'), 'the task remains visible')
+        assert.ok(output.includes('…'), 'long fixture content is actually cut')
+        for (const line of output.split('\n')) assert.ok(terminalWidth(line) <= width, `${s.lang} / ${width}: ${terminalWidth(line)} columns: ${line}`)
+      }
+      assert.ok(text.includes('Reminder') && text.includes('Older'), 'both question shelves are rendered')
+      const badge = `⚑ ${parsed.due[0].due.left}`
+      const badgeLine = screen.split('\n').find(line => line.includes(badge))
+      assert.ok(badgeLine?.includes('…'), `the complete due badge stays after the clipped status: ${screen}`)
+    }
+  }
+})
+
+test('an emoji counts as two columns when a board line is cut to the width', async () => {
+  const { fit, chatText, buildView, parseProgress } = await sourceBoard()
+  for (const emoji of ['✅', '😀', '🧪']) {
+    assert.equal(fit(emoji.repeat(5), 10), emoji.repeat(5))
+    assert.equal(fit(emoji.repeat(6), 10), `${emoji.repeat(4)}…`)
+    assert.ok(terminalWidth(fit(`${emoji}漢${emoji}`, 5)) <= 5)
+  }
+  assert.equal(fit('漢字漢字', 5), '漢字…')
+  const title = '✅'.repeat(150)
+  const view = buildView(parseProgress(`## Chat\n### ${title}\n- [ ] Next\n`), [], null, Date.parse('2026-10-25T12:00:00Z'), 0, {}, EN)
+  assert.ok(chatText(view, [], [], EN, '/synthetic-home').includes(title), '--chat keeps its existing line budget rather than terminal emoji widths')
+})
