@@ -26,6 +26,7 @@ import { ZH_TW } from '../hooks/i18n.ts'
 import { ZH_CN } from '../hooks/strings-zh-cn.ts'
 import { immutableQuestionFiles } from '../scripts/question-files.ts'
 import { recentInboxFiles } from '../scripts/inbox-files.ts'
+import { serverMemoryArgs } from '../scripts/server-runtime.ts'
 
 const TORN_NOW = Date.parse('2026-10-20T12:00:00Z')
 const tornDay = () => '# Progress\r\n\r\n## Synthetic day\r\n### Hand task alpha\r\n- [ ] Plan\r\n\r\n### Hand task beta\r\n- [ ] Review\r\n\r\n' +
@@ -4188,6 +4189,59 @@ const serveIn = () => {
   }
   return { dir, path, script, env, serve, urlOf, served, end }
 }
+
+test('server memory arguments retain explicit heap choices and ignore unrelated Node flags', () => {
+  assert.deepEqual(serverMemoryArgs([], ''), ['--optimize-for-size'])
+  assert.deepEqual(serverMemoryArgs(['--inspect=0', '--require', '--max-semi-space-size=8'], ''), ['--optimize-for-size'])
+  const explicit = ['--inspect=0', '--max_old_space_size', '128', '--heap-growing-percent=30']
+  assert.deepEqual(serverMemoryArgs(explicit, '--max-semi-space-size=8'), ['--max_old_space_size', '128', '--heap-growing-percent=30'])
+  assert.deepEqual(explicit, ['--inspect=0', '--max_old_space_size', '128', '--heap-growing-percent=30'])
+  for (const options of ['--max-semi-space-size=8', '--max_old_space_size 128', '"--max-heap-size=128"', '--max-old-space-size-percentage=25']) assert.deepEqual(serverMemoryArgs([], options), [])
+  for (const argument of ['--no-optimize-for-size', '--nooptimize-for-size', '--nooptimize_for_size']) assert.deepEqual(serverMemoryArgs([argument], ''), [argument])
+  assert.deepEqual(serverMemoryArgs([], '--require "a path/--max-old-space-size.cjs"'), ['--optimize-for-size'])
+})
+
+test('a background page uses its memory policy without changing the account\'s Node options', { timeout: 40_000 }, async () => {
+  const board = serveIn()
+  const preload = join(board.dir, 'runtime.cjs')
+  const received = join(board.dir, 'runtime.json')
+  writeFileSync(preload, `if (process.argv.includes('--serve-child')) require('node:fs').writeFileSync(${JSON.stringify(received)}, JSON.stringify({ argv: process.execArgv, options: process.env.NODE_OPTIONS }))\n`)
+  board.env.NODE_OPTIONS = `--require ${JSON.stringify(preload)}`
+  let url = null
+  try {
+    url = board.urlOf(await board.serve(['--quiet-board']))
+    assert.ok(url)
+    const runtime = JSON.parse(readFileSync(received, 'utf8'))
+    assert.deepEqual(runtime.argv, ['--optimize-for-size'])
+    assert.equal(runtime.options, board.env.NODE_OPTIONS)
+    const response = await fetch(new URL('/api/board', url), { headers: { 'x-board-token': new URL(url).searchParams.get('t') } })
+    assert.equal(response.status, 200)
+    await response.arrayBuffer()
+  } finally { await board.end([url]) }
+})
+
+test('a background page preserves explicit heap settings from the caller and the environment', { timeout: 60_000 }, async () => {
+  for (const variant of [
+    { argv: ['--max-semi-space-size=8'], options: '', expected: ['--max-semi-space-size=8'] },
+    { argv: [], options: '--max-semi-space-size=8', expected: [] },
+    { argv: ['--nooptimize-for-size'], options: '', expected: ['--nooptimize-for-size'] },
+  ]) {
+    const board = serveIn()
+    const preload = join(board.dir, 'runtime.cjs')
+    const received = join(board.dir, 'runtime.json')
+    writeFileSync(preload, `if (process.argv.includes('--serve-child')) require('node:fs').writeFileSync(${JSON.stringify(received)}, JSON.stringify({ argv: process.execArgv, options: process.env.NODE_OPTIONS }))\n`)
+    board.env.NODE_OPTIONS = `--require ${JSON.stringify(preload)} ${variant.options}`.trim()
+    let url = null
+    try {
+      const out = await new Promise((done, fail) => execFile(process.execPath, [...variant.argv, board.script, '--serve', '--no-open', '--quiet-board'], { env: board.env, encoding: 'utf8', timeout: 20_000 }, (error, stdout) => error ? fail(error) : done(stdout)))
+      url = board.urlOf(out)
+      assert.ok(url)
+      const runtime = JSON.parse(readFileSync(received, 'utf8'))
+      assert.deepEqual(runtime.argv, variant.expected)
+      assert.equal(runtime.options, board.env.NODE_OPTIONS)
+    } finally { await board.end([url]) }
+  }
+})
 
 // A port nothing listens on.
 const freePort = () =>

@@ -20,6 +20,7 @@ import { startServer } from './board-serve'
 import { immutableQuestionFiles } from './question-files'
 import { reusableQuestionObservation } from './question-observation'
 import { recentInboxFiles } from './inbox-files'
+import { serverMemoryArgs } from './server-runtime'
 import { idleTimeout } from '../hooks/serve'
 import { boardKey, boardScreen, boardText, CHAT_MAX, chatText, doneToday, emptyBoardState, peekInbox, boardItems, pinned, redact } from '../hooks/board'
 import type { BoardAction, BoardState } from '../hooks/board'
@@ -1160,7 +1161,7 @@ const serveBoard = async (): Promise<void> => {
   })
   if (args.includes('--allow-resume')) rest.push('--allow-resume')
   // In the board's own folder, not the agent's, so the server holds no project folder open.
-  const child = spawn(process.execPath, [script, '--serve-child', ...rest], { cwd: dirname(path), detached: true, stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true })
+  const child = spawn(process.execPath, [...serverMemoryArgs(process.execArgv, process.env.NODE_OPTIONS), script, '--serve-child', ...rest], { cwd: dirname(path), detached: true, stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true })
   // The child prints its address once it listens; it exits at once when it cannot.
   const url = await new Promise<string | null>(done => {
     let out = ''
