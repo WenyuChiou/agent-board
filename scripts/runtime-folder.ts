@@ -27,11 +27,14 @@ const currentAccount = (): Account => {
 
 const acl = (file: string): string => execFileSync(join(system(), 'WindowsPowerShell', 'v1.0', 'powershell.exe'), [
   '-NoProfile', '-NonInteractive', '-Command',
-  "$ErrorActionPreference = 'Stop'; Get-Acl -LiteralPath $env:AGENT_BOARD_RUNTIME_ACL_PATH | Select-Object -ExpandProperty Sddl",
+  "$ErrorActionPreference = 'Stop'; $PSModuleAutoLoadingPreference = 'None'; $target = $env:AGENT_BOARD_RUNTIME_ACL_PATH; "
+    + "$sections = [System.Security.AccessControl.AccessControlSections]'Access,Owner,Group'; "
+    + '$security = if ([System.IO.Directory]::Exists($target)) { [System.IO.Directory]::GetAccessControl($target, $sections) } else { [System.IO.File]::GetAccessControl($target, $sections) }; '
+    + '$security.GetSecurityDescriptorSddlForm($sections)',
 ], {
   ...options,
-  // A PowerShell 7 parent's module path can select an incompatible or user-supplied ACL
-  // module in Windows PowerShell. This security check uses the system's modules only.
+  // Fresh isolated profiles need no command discovery, and a PowerShell parent's module
+  // path must not select an incompatible or user-supplied security implementation.
   env: { ...process.env, PSModulePath: join(system(), 'WindowsPowerShell', 'v1.0', 'Modules'), AGENT_BOARD_RUNTIME_ACL_PATH: resolve(file) },
 }).trim()
 

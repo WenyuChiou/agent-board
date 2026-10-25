@@ -4436,6 +4436,28 @@ test('Windows page ACL checks use the system module instead of an inherited modu
   } finally { await board.end([url]) }
 })
 
+test('Windows page ACL checks work without PowerShell command discovery', { skip: process.platform !== 'win32' && 'Windows PowerShell only', timeout: 40_000 }, async () => {
+  const board = serveIn()
+  const preload = join(board.dir, 'no-module-discovery.cjs')
+  writeFileSync(preload, `const cp = require('node:child_process'); const original = cp.execFileSync
+cp.execFileSync = (file, args, options) => {
+  if (/powershell\\.exe$/i.test(String(file))) {
+    const index = args.indexOf('-Command')
+    if (index >= 0) args = args.map((arg, at) => at === index + 1 ? "$PSModuleAutoLoadingPreference = 'None'; " + arg : arg)
+  }
+  return original(file, args, options)
+}
+require('node:module').syncBuiltinESMExports()
+`)
+  board.env.NODE_OPTIONS = `--require ${JSON.stringify(preload)}`
+  let url = null
+  try {
+    url = board.urlOf(await board.serve(['--quiet-board']))
+    assert.ok(url)
+    assert.equal(JSON.parse(readFileSync(board.served, 'utf8')).path, board.path)
+  } finally { await board.end([url]) }
+})
+
 test('Windows page token writes explicitly own a new file before trusting its inherited ACL', { skip: process.platform !== 'win32' && 'Windows token owner only', timeout: 40_000 }, async () => {
   const board = serveIn()
   const preload = join(board.dir, 'default-group-owner.cjs')
