@@ -28,9 +28,9 @@ const SECTIONS = {
 // language: the page's Send button, its sending line and the reply receipt (serveSend,
 // serveSending and messagesAcknowledged in the strings tables).
 const SCENES = {
-  en: [[['Every agent,', 'one board.'], ['Watch steps', 'tick off live.'], ['Questions jump', 'to the top.'], ['Answer with', 'one key.'], ['Message agents', 'from the board.'], ['One command,', 'every agent.']], 'Coming in 0.24.1', ['Send to Codex', 'Sending to Codex; waiting for its reply…', '✓ Replied']],
-  'zh-TW': [[['每個 agent', '同一塊看板'], ['每一步', '即時打勾'], ['等你回答的', '排在最上面'], ['按一個鍵', '就能回答'], ['從看板直接', '傳訊息給 agent'], ['一行指令', '接上每個 agent']], '0.24.1 起提供', ['傳給 Codex', '正在傳給 Codex，等它回完…', '✓ 已回覆']],
-  'zh-CN': [[['每个 agent', '同一块看板'], ['每一步', '实时打勾'], ['等你回答的', '排在最上面'], ['按一个键', '就能回答'], ['从看板直接', '发消息给 agent'], ['一行命令', '接上每个 agent']], '0.24.1 起提供', ['发给 Codex', '正在发给 Codex，等它回完…', '✓ 已回复']],
+  en: [[['Every agent,', 'one board.'], ['Watch steps', 'tick off live.'], ['Questions jump', 'to the top.'], ['Answer with', 'one key.'], ['Message agents', 'from the board.'], ['One command,', 'every agent.']], 'Coming in 0.24.2', ['Send to Codex', 'Sending to Codex; waiting for its reply…', '✓ Replied']],
+  'zh-TW': [[['每個 agent', '同一塊看板'], ['每一步', '即時打勾'], ['等你回答的', '排在最上面'], ['按一個鍵', '就能回答'], ['從看板直接', '傳訊息給 agent'], ['一行指令', '接上每個 agent']], '0.24.2 起提供', ['傳給 Codex', '正在傳給 Codex，等它回完…', '✓ 已回覆']],
+  'zh-CN': [[['每个 agent', '同一块看板'], ['每一步', '实时打勾'], ['等你回答的', '排在最上面'], ['按一个键', '就能回答'], ['从看板直接', '发消息给 agent'], ['一行命令', '接上每个 agent']], '0.24.2 起提供', ['发给 Codex', '正在发给 Codex，等它回完…', '✓ 已回复']],
 }
 // The command the last scene shows, which reduced motion keeps on screen: the program on one line
 // and its arguments on the next, as a terminal this narrow would wrap it.

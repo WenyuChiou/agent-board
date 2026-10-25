@@ -1,0 +1,2 @@
+- **The README cover uses the approved preview target (#438).** Scene 5 now labels Send to Codex as a 0.24.2 preview in all three languages, their cover alt texts and the six generated light and dark SVGs. The npm availability caption remains 0.24.0.
+  Tests: `L0 README: the README's first image is its dark cover SVG with a synthetic label`, `L0 README: the cover loops through six captioned scenes in 20 to 30 seconds, moves with CSS alone and stands still on the setup scene for reduced motion`.

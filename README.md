@@ -3,7 +3,7 @@
 <p align="center"><b>See what every AI coding agent is doing, and answer the one that needs you, from one board.</b></p>
 
 <p align="center">
-<img alt="An animated board in six scenes: Claude Code, Codex, Antigravity and OpenCode report to one terminal board; their steps tick off live; Codex's question jumps to the top; one key copies the answer; a message written on the board's page reaches Codex and its reply shows, a preview coming in 0.24.1; and one npx command connects every agent, on npm from 0.24.0. Synthetic data." src="docs/images/cover-en-dark.svg" width="860">
+<img alt="An animated board in six scenes: Claude Code, Codex, Antigravity and OpenCode report to one terminal board; their steps tick off live; Codex's question jumps to the top; one key copies the answer; a message written on the board's page reaches Codex and its reply shows, a preview coming in 0.24.2; and one npx command connects every agent, on npm from 0.24.0. Synthetic data." src="docs/images/cover-en-dark.svg" width="860">
 </p>
 
 <p align="center"><b>Integrations</b><br>
