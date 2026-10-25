@@ -28,6 +28,7 @@ import { immutableQuestionFiles } from '../scripts/question-files.ts'
 import { recentInboxFiles } from '../scripts/inbox-files.ts'
 import { serverMemoryArgs } from '../scripts/server-runtime.ts'
 import { isPrivateRuntimeSddl } from '../scripts/runtime-folder.ts'
+import { AGENT_ICONS } from '../hooks/agent-icons.ts'
 
 const TORN_NOW = Date.parse('2026-10-20T12:00:00Z')
 const tornDay = () => '# Progress\r\n\r\n## Synthetic day\r\n### Hand task alpha\r\n- [ ] Plan\r\n\r\n### Hand task beta\r\n- [ ] Review\r\n\r\n' +
@@ -6315,6 +6316,82 @@ const sourcePage = async (lang = 'en', words = {}) => {
     return servePage({ ...STRINGS[lang], ...words }, 'synthetic')
   } finally { loader.deregister() }
 }
+
+const sourceAgentMarks = async () => {
+  const loader = registerHooks({ resolve(specifier, context, nextResolve) {
+    if (context.parentURL?.startsWith(new URL('../hooks/', import.meta.url).href) && /^\.\.?\//.test(specifier) && !/\.[a-z]+$/i.test(specifier)) return nextResolve(`${specifier}.ts`, context)
+    return nextResolve(specifier, context)
+  } })
+  try { return await import('../hooks/page-look.ts') } finally { loader.deregister() }
+}
+
+test('official agent marks retain their source viewport on every board surface', async () => {
+  const { agentMarkCss } = await sourceAgentMarks()
+  const css = agentMarkCss()
+  const page = await sourcePage()
+  const official = {
+    antigravity: ['0 0 180 180', 'cbc9e89e57b6ec9d4a155a53e84b722edc8f4ffcf9e33f6765bbd04cbca77422'],
+    'deepseek-harness': ['0 0 50 50', '112fe133fd1d80bc5c7a785426e1ba6838458b1d21d3d8db9421273150c41182'],
+  }
+  for (const icon of AGENT_ICONS) {
+    assert.ok(icon.paths?.length, `${icon.file} has a verified brand shape`)
+    const rule = css.match(new RegExp(`\\.ag-${icon.file}\\{([^}]+)\\}`))?.[1]
+    const encoded = rule?.match(/url\("data:image\/svg\+xml,([^"]+)"\)/)?.[1]
+    assert.ok(encoded, icon.file)
+    const svg = decodeURIComponent(encoded)
+    assert.ok(svg.includes(`viewBox="${icon.viewBox ?? '0 0 24 24'}"`), icon.file)
+    assert.ok(svg.includes(`fill="${icon.ink ?? 'white'}"`), icon.file)
+    assert.equal(svg.includes('fill-rule="evenodd"'), !!icon.isEvenOdd, icon.file)
+    const paths = [...svg.matchAll(/<path d="([^"]+)"\/>/g)].map(match => match[1].replace(/\s/g, ''))
+    assert.deepEqual(paths, icon.paths.map(path => path.replace(/\s/g, '')), icon.file)
+    assert.ok(page.includes(encoded), `served page: ${icon.file}`)
+    assert.ok(BOARD_SCRIPT.includes(icon.paths[0]), `installed bundle: ${icon.file}`)
+    if (icon.file === 'muse-code') {
+      assert.equal(createHash('sha256').update(icon.paths[0]).digest('hex'), 'f8bffc5fd6188e1dbbc34e95fcef3e35c20450857252bc35c1a5af07f85b321f', 'Muse geometry matches its pinned library source')
+      assert.equal(icon.ink, '#0082FB')
+      assert.equal(icon.tile, '#fff')
+      assert.ok(!css.includes('.ag-muse-code::before'))
+      for (const prefix of ['', 'chip-']) {
+        const image = readFileSync(new URL(`../docs/images/agents/${prefix}${icon.file}.svg`, import.meta.url), 'utf8')
+        assert.ok(image.includes('fill="#0082FB"'))
+        assert.ok(image.includes(`<path d="${icon.paths[0]}"/>`))
+      }
+      for (const lang of ['en', 'zh-TW', 'zh-CN']) for (const theme of ['light', 'dark']) {
+        const cover = readFileSync(new URL(`../docs/images/cover-${lang}-${theme}.svg`, import.meta.url), 'utf8')
+        assert.ok(cover.includes(`<path d="${icon.paths[0]}"/>`), `Muse cover parity: ${lang}/${theme}`)
+        assert.ok(cover.includes('fill="#0082FB"'), `Muse cover ink: ${lang}/${theme}`)
+      }
+    } else assert.equal(icon.ink, undefined, 'existing marks retain their white foreground')
+    if (official[icon.file]) {
+      const [viewBox, hash] = official[icon.file]
+      assert.equal(icon.viewBox, viewBox)
+      assert.equal(createHash('sha256').update(icon.paths[0]).digest('hex'), hash, 'official path geometry is unchanged')
+      for (const prefix of ['', 'chip-']) {
+        const image = readFileSync(new URL(`../docs/images/agents/${prefix}${icon.file}.svg`, import.meta.url), 'utf8')
+        assert.ok(image.includes(`viewBox="${viewBox}"`), `preview viewport: ${prefix}${icon.file}`)
+        assert.ok(image.includes(`<path d="${icon.paths[0]}"/>`), `preview geometry: ${prefix}${icon.file}`)
+      }
+    }
+  }
+})
+
+test('agent aliases and fallback labels keep the correct identity without changing native acceptance', async () => {
+  const { agentMark } = await sourceAgentMarks()
+  assert.deepEqual(Object.fromEntries(AGENT_ICONS.map(icon => [icon.file, icon.isTested])), {
+    'claude-code': true, codex: true, 'gemini-cli': true, cursor: false, opencode: true,
+    'grok-build': true, 'hermes-agent': true, 'muse-code': false, antigravity: true,
+    'deepseek-harness': false, openclaw: true,
+  })
+  for (const icon of AGENT_ICONS) {
+    for (const alias of [icon.file, icon.file.split('-')[0], icon.name]) {
+      assert.equal(agentMark(alias), `<span class="ag ag-${icon.file}" aria-hidden="true"></span>`, alias)
+    }
+  }
+  assert.ok(agentMark('').includes('ag-claude-code'))
+  assert.equal(agentMark('codex', true), '<span class="ag ag-own" aria-hidden="true"></span>')
+  assert.equal(agentMark('constructor'), '<span class="ag ag-other" aria-hidden="true">C</span>')
+  assert.equal(agentMark('<unknown>'), '<span class="ag ag-other" aria-hidden="true">&lt;</span>')
+})
 
 test('phone tiles and sidebar views count the same tasks, inbox updates and recent completions', async () => {
   const model = redesignModel()

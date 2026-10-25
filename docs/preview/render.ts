@@ -239,7 +239,9 @@ const glyph = (icon: AgentIcon, x: number, y: number, size: number): string => {
   }
   const g = size * GLYPH
   const rule = icon.isEvenOdd === true ? ' fill-rule="evenodd"' : ''
-  return `<g transform="translate(${num(x + (size - g) / 2)} ${num(y + (size - g) / 2)}) scale(${Math.round((g / 24) * 10000) / 10000})" fill="#fff"${rule}>${icon.paths.map(d => `<path d="${d}"/>`).join('')}</g>`
+  const ink = icon.ink ?? '#fff'
+  if (icon.viewBox !== undefined) return `<svg x="${num(x + (size - g) / 2)}" y="${num(y + (size - g) / 2)}" width="${num(g)}" height="${num(g)}" viewBox="${icon.viewBox}" fill="${ink}"${rule}>${icon.paths.map(d => `<path d="${d}"/>`).join('')}</svg>`
+  return `<g transform="translate(${num(x + (size - g) / 2)} ${num(y + (size - g) / 2)}) scale(${Math.round((g / 24) * 10000) / 10000})" fill="${ink}"${rule}>${icon.paths.map(d => `<path d="${d}"/>`).join('')}</g>`
 }
 
 // A near-black tile gets a faint rim, or it sinks into a dark page; a coloured one needs none.
