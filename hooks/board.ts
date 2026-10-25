@@ -408,7 +408,7 @@ export const chatText = (
   const isNext = (step: ViewStep): boolean => step.number !== null && !['done', 'cancelled', 'waiting'].includes(step.status)
   rows.forEach(({ row, mark }, index) => {
     const next = (row.steps.find(step => step.isCurrent && isNext(step)) ?? row.steps.find(isNext))?.text
-    const words = `${mark} ${named(row.project)} › ${row.title}${row.due === null ? '' : ` · ${row.due.left}`}${next === undefined ? '' : ` — ${s.reportNext(next)}`}`
+    const words = `${mark} ${named(row.project)} › ${row.title}${row.hasFutureTime ? ` · ${row.when}` : ''}${row.due === null ? '' : ` · ${row.due.left}`}${next === undefined ? '' : ` — ${s.reportNext(next)}`}`
     items.push(`${index === 0 ? '\n' : ''}${line(words)}`)
   })
   if (asks.length === 0 && rows.length === 0 && news.length === 0 && view.idle.length === 0 && view.stopped.length === 0 && recentQuestions.length === 0) items.push(s.empty)

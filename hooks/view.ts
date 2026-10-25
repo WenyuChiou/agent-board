@@ -8,7 +8,7 @@ import type { ConfirmRef } from './blocks'
 import { ciWords, prWords } from './github'
 import { doingTask, fallbackTitle, isAnswered, waitsOnYou } from './mirror'
 import type { Tone } from './palette'
-import { countSteps, currentStepIndex, doneKey, isHereProject, isMarksComplete, isStale, isTaskComplete, parseProgress, RESUME } from './parse'
+import { countSteps, currentStepIndex, doneKey, FUTURE_SKEW_MS, futureTimeKey, isHereProject, isMarksComplete, isStale, isTaskComplete, observedTime, parseProgress, RESUME } from './parse'
 import { sha256 } from './sha256'
 import { observeQuestions, pendingQuestionSlot, questionScope, questionSlot, questionWords, sourceSnapshot } from './questions'
 import type { QuestionLedger, QuestionProofs } from './questions'
@@ -127,6 +127,7 @@ export type TaskRow = {
   status: string
   tone: Tone
   when: string
+  hasFutureTime?: boolean
   isHere: boolean
   auto: 'working' | 'waiting' | 'ended' | null
   steps: ViewStep[]
@@ -587,6 +588,7 @@ export const seenPath = (path: string): string => `${path.replace(/\.md$/i, '')}
 
 const SEEN_MAX = 500
 const hasTime = (time: unknown): time is number => typeof time === 'number' && Number.isFinite(time) && time > 0
+const isFutureKey = (key: string): boolean => /^future:[0-9a-f]{64}$/.test(key)
 
 // Notes and indentation do not mean the task's work changed.
 export const taskFingerprint = (project: string, task: ProgressTask): string =>
@@ -598,7 +600,13 @@ export const parseSeen = (text: string, age = 0): Record<string, number> | null 
     const data: unknown = JSON.parse(text)
     const list = data !== null && typeof data === 'object' && 'seen' in data ? data.seen : null
     if (list === null || typeof list !== 'object' || Array.isArray(list)) return {}
-    return Object.fromEntries(Object.entries(list).filter(([key, time]) => /^[0-9a-f]{64}$/.test(key) && hasTime(time)).slice(0, SEEN_MAX))
+    const entries = Object.entries(list).filter(([, time]) => hasTime(time))
+    // The writer bounds absent clock entries. A present update's baseline must survive
+    // decoding even when the board has more rows than the manual observation cache.
+    return Object.fromEntries([
+      ...entries.filter(([key]) => isFutureKey(key)),
+      ...entries.filter(([key]) => /^[0-9a-f]{64}$/.test(key)).slice(0, SEEN_MAX),
+    ])
   } catch {
     return Math.abs(age) < HALF_WRITE_MS ? null : {}
   }
@@ -617,13 +625,23 @@ export const withSeen = (
   isSettled = false,
 ): Record<string, number> => {
   const entries = new Map<string, number>()
+  const presentClocks = new Set<string>()
   const earliest = (key: string): number | undefined => {
     const times = [seen[key], other[key]].filter(hasTime)
     return times.length > 0 ? Math.min(...times) : undefined
   }
   for (const project of projects) {
     for (const task of project.tasks) {
-      if (hasTime(task.auto?.updated)) continue
+      if (task.auto !== null && hasTime(task.auto.updated)) {
+        // The same update keeps its first local observation through clock catch-up.
+        const key = futureTimeKey(task.auto)
+        const first = earliest(key)
+        if (first !== undefined || task.auto.updated - now > FUTURE_SKEW_MS) {
+          entries.set(key, first ?? now)
+          presentClocks.add(key)
+        }
+        continue
+      }
       const key = taskFingerprint(project.name, task)
       const time = earliest(key) ?? now
       if (hasTime(time)) entries.set(key, time)
@@ -635,7 +653,16 @@ export const withSeen = (
       if (!entries.has(key) && time !== undefined) entries.set(key, time)
     }
   }
-  return Object.fromEntries([...entries].slice(0, SEEN_MAX))
+  const clocks = [...entries].filter(([key]) => isFutureKey(key))
+  // An empty read proves no update disappeared and cannot add new clock observations.
+  const keptClocks = projects.length === 0 && !isSettled ? clocks : [
+    ...clocks.filter(([key]) => presentClocks.has(key)),
+    ...clocks.filter(([key]) => !presentClocks.has(key)).slice(0, SEEN_MAX),
+  ]
+  return Object.fromEntries([
+    ...keptClocks,
+    ...[...entries].filter(([key]) => !isFutureKey(key)).slice(0, SEEN_MAX),
+  ])
 }
 
 export const seenJson = (seen: Readonly<Record<string, number>>): string => `${JSON.stringify({ seen }, null, 2)}\n`
@@ -713,8 +740,9 @@ export const buildView = (
       const repeat = (repeats.get(base) ?? 0) + 1
       repeats.set(base, repeat)
       const key = repeat === 1 ? base : `${base}#${repeat}`
-      const updated = task.auto?.updated ?? 0
-      const when = relativeTime(updated, now, s)
+      const clock = observedTime(task.auto, now, seen)
+      const updated = clock.updated
+      const when = clock.isFuture ? updated > now ? s.futureTimeUnknown : s.futureTime(relativeTime(updated, now, s)) : relativeTime(updated, now, s)
       const isComplete = isTaskComplete(task) || task.auto?.state === 'done'
       const isManual = task.auto === null
       const scope = questionScope(project.name, task.auto?.agent ?? 'manual', task.auto?.session ?? task.title)
@@ -725,7 +753,7 @@ export const buildView = (
       const isIdle = !isComplete && !isDue && hasTime(lastActive) && now - lastActive > IDLE_MS
       const context = contextOf(task)
       // Questions travel with an inactive session rather than asking for a live reply.
-      const stale = isStale(task.auto, now)
+      const stale = isStale(task.auto, now, updated)
       const isInactive = !isManual && (isComplete || stale || task.auto?.state === 'ended')
       if (isInactive) inactiveScopes.set(scope, updated)
       else if (!isManual) liveScopes.add(scope)
@@ -806,7 +834,7 @@ export const buildView = (
         const doneAt = doneSeen[doneKey(name, title)]
         const seen = isManual ? doneAt === null ? null : doneAt ?? now : updated
         if (seen !== null && now - seen < DAY) {
-          completion = { key, project: name, title, when: relativeTime(seen, now, s), at: seen, questions: isInactive ? unresolved : [] }
+          completion = { key, project: name, title, when: clock.isFuture ? when : relativeTime(seen, now, s), at: seen, questions: isInactive ? unresolved : [] }
           recent.push(completion)
         }
         if (!isInactive || (unresolved.length === 0 && !task.steps.some(step => step.status === 'waiting'))) continue
@@ -837,7 +865,8 @@ export const buildView = (
         done,
         total,
         ...phrase,
-        when: isIdle ? relativeTime(lastActive ?? 0, now, s) : when,
+        when: isIdle && !clock.isFuture ? relativeTime(lastActive ?? 0, now, s) : when,
+        ...(clock.isFuture ? { hasFutureTime: true } : {}),
         isHere,
         auto,
         steps: rowSteps(task, s),
@@ -966,7 +995,7 @@ export const buildView = (
     if (source.kind === 'block' && !liveScopes.has(record.scope)) {
       // Unknown historical source shapes retain the existing review behavior.
       const saved = sourceSnapshot(source.data)
-      isInactiveSource = saved !== null && saved.auto !== null && (saved.auto.state === 'ended' || saved.auto.state === 'done' || isStale(saved.auto, now) || isMarksComplete(saved.steps))
+      isInactiveSource = saved !== null && saved.auto !== null && (saved.auto.state === 'ended' || saved.auto.state === 'done' || isStale(saved.auto, now, observedTime(saved.auto, now, seen).updated) || isMarksComplete(saved.steps))
     }
     const stage = record.isArchived || isInactiveSource || inactiveScopes.has(record.scope) ? 'older' : age.stage
     const item: WaitingItem = { key: `retained::${record.id}`, questionId: record.id, ageStage: stage, project: source.project, task: source.task, context: source.context, ...parts, when: age.age === null ? s.questionAgeUnknown : relativeTime(record.firstObserved, now, s), ...askOf(parts.text, parts.note), where: 'other', agent: source.agent === 'claude' ? '' : source.agent, session: source.session, sessionId: null, resumeVia: null, reopen: null, hideKey: record.id, canHide: false, step: null, target: null }

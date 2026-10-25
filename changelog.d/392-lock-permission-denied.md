@@ -1,0 +1,2 @@
+- A Windows lock creation that ends its bounded wait with EPERM and no lock file reports a permission failure instead of a busy lock. Explicit reports show one plain permission message and are not queued for retry. A real held lock still reports LOCK_BUSY (#392).
+  Tests: `a Windows folder that denies lock creation reports LOCK_DENIED without running the mutation`, `a held Windows lock remains LOCK_BUSY when its directory also denies creation`, `an explicit Windows report into a denied folder gives a plain permission message and is not queued`.

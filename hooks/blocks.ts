@@ -9,7 +9,7 @@ import type { QuickEntry } from './quick'
 import type { StepRef, TaskRef } from './view'
 import { sha256 } from './sha256'
 import { oneLine, plain } from './step-words'
-import { isStale } from './parse'
+import { isStale, observedTime } from './parse'
 import type { JournalEntry } from './journal'
 
 // Each session's mod owns one block of the file, between its own markers, and rewrites
@@ -395,9 +395,9 @@ export type ConfirmedTask = { text: string; ref: ConfirmRef; entries: Array<Omit
 
 // A person's completion changes only the exact task drawn, and only after its agent
 // stopped. Recheck here, inside each caller's read/change/write retry.
-export const confirmTask = (text: string, ref: ConfirmRef, now: number, s: Strings = ZH_TW): ConfirmedTask | null => {
+export const confirmTask = (text: string, ref: ConfirmRef, now: number, s: Strings = ZH_TW, seen: Readonly<Record<string, number>> = {}): ConfirmedTask | null => {
   const task = confirmedTarget(text, ref, s)
-  if (task === null || task.line < 0 || task.auto !== null && task.auto.state !== 'ended' && !isStale(task.auto, now)) return null
+  if (task === null || task.line < 0 || task.auto !== null && task.auto.state !== 'ended' && !isStale(task.auto, now, observedTime(task.auto, now, seen).updated)) return null
   const lines = linesOf(text)
   const spans = scanBlocks(lines)
   const span = ref.session === null ? undefined : spans.find(one => one.session === ref.session)
@@ -533,7 +533,7 @@ export const takeManualDone = (
 // null when it cannot be found for sure: a block without its end marker, a heading that is
 // gone or has a twin, a heading inside some session's block, or a session id two blocks
 // share when the row's project and each block's first heading cannot tell them apart.
-export const takeTask = (text: string, ref: TaskRef, now: number, s: Strings = ZH_TW): Archived | null => {
+export const takeTask = (text: string, ref: TaskRef, now: number, s: Strings = ZH_TW, observations: Readonly<Record<string, number>> = {}): Archived | null => {
   const lines = linesOf(text)
   const seen = seenOf(lines)
   const spans = scanBlocks(lines)
@@ -561,7 +561,10 @@ export const takeTask = (text: string, ref: TaskRef, now: number, s: Strings = Z
     if (span === undefined || !span.isClosed) return null
     // Recheck ownership at the write boundary: a stopped row may have resumed since it
     // was drawn. Unknown clocks cannot prove that a working/waiting session stopped.
-    if ((span.state === 'working' || span.state === 'waiting') && (span.updated <= 0 || now - span.updated <= STALE_MS)) return null
+    if (span.state === 'working' || span.state === 'waiting') {
+      const auto = parseProgress(text).flatMap(project => project.tasks).find(task => task.line === span.heading)?.auto ?? null
+      if (auto === null || !isStale(auto, now, observedTime(auto, now, observations).updated)) return null
+    }
 
     return { text: removeSpans(text, [span]), entries: [[heading, ...lines.slice(span.start + 1, span.end)].join('\n')] }
   }

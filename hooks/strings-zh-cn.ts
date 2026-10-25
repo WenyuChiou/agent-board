@@ -38,6 +38,8 @@ export const ZH_CN: Strings = {
 
   // Time and dates
   justNow: '刚刚',
+  futureTime: (age: string): string => `未来时间 · ${age}`,
+  futureTimeUnknown: '未来时间 · 经过时间不明',
   minutesAgo: (n: number): string => `${n} 分钟前`,
   hoursAgo: (n: number): string => `${n} 小时前`,
   yesterday: '昨天',
@@ -459,6 +461,7 @@ export const ZH_CN: Strings = {
   prunedJoin: (parts: readonly string[]): string => (parts.length < 2 ? parts.join('') : `${parts.slice(0, -1).join('、')}和 ${parts.at(-1)}`),
   prunedLine: (list: string, days: number): string => `最近 ${days} 天清掉了 ${list}`,
   reporterFailed: (reason: string): string => `进度报告未能保存（${reason}），请检查进度文件后重试。`,
+  reporterLockDenied: '无法在 progress.md 旁创建文件（权限被拒绝），请检查文件夹权限后重试。',
   tailRepairFailed: '无法安全修复不完整的结尾，没有改动任何内容。请检查进度文件后重新报告。',
   fileProgress: '你的进度文件',
   fileQuestions: '问题清单',

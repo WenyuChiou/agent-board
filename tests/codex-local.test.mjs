@@ -13,6 +13,7 @@ import { reporterPs1, reporterSh } from '../hooks/hook-reporters.ts'
 import { hookBootstrap, hookGuardSource, hookWorker } from '../hooks/hook-safety.ts'
 import { classifierDiagnostic, observeClassifier } from './fixtures/classifier-diagnostic.mjs'
 import { assertNativeProbeReturned, nativeProbeDiagnostic } from './fixtures/native-probe-diagnostic.mjs'
+import { withDeniedCreation } from './fixtures/windows-create-denied.mjs'
 
 test('native cleanup diagnostics keep watchdog failures bounded and private', () => {
   const error = Object.assign(new Error('PRIVATE_ERROR'), { code: 'ETIMEDOUT', path: '/PRIVATE_EXECUTABLE', spawnargs: ['PRIVATE_ARGUMENT'] })
@@ -3447,6 +3448,29 @@ test('a read-only progress.md fails in one plain line without queuing the event'
     assert.deepEqual(pendingFiles(f), [])
     assert.deepEqual(readFileSync(f.progress), before)
   } finally { chmodSync(f.progress, 0o666) }
+}))
+
+test('an explicit Windows report into a denied folder gives a plain permission message and is not queued', { skip: process.platform !== 'win32' && 'Windows ACLs only' }, () => fixture(async f => {
+  assert.equal(f.install('--apply').status, 0)
+  const folder = join(f.home, 'denied-progress')
+  const progress = join(folder, 'progress.md')
+  f.save(progress, '## Synthetic denied report\n')
+  const before = readFileSync(progress)
+  await withDeniedCreation(folder, () => {
+    const result = f.command(['--codex-report', '--progress-file', progress, '--lang', 'en'], { title: 'Synthetic report', state: 'working', steps: ['- [~] Synthetic work'] })
+    assert.equal(result.status, 1, result.stderr)
+    assert.equal(result.stdout, '')
+    assert.equal(result.stderr.trim().split(/\r?\n/).length, 1, result.stderr)
+    assert.match(result.stderr, /permission denied/i)
+    assert.doesNotMatch(result.stderr, /LOCK_BUSY|\bat /)
+    assert.ok(!result.stderr.includes(f.home), result.stderr)
+    assert.deepEqual(pendingFiles(f), [])
+    assert.deepEqual(readFileSync(progress), before)
+    assert.equal(existsSync(`${progress}.agent-board-lock`), false)
+  })
+  const accepted = f.command(['--codex-report', '--progress-file', progress, '--lang', 'en'], { title: 'Synthetic report', state: 'working', steps: ['- [~] Synthetic work'] })
+  assert.equal(accepted.status, 0, accepted.stderr)
+  assert.match(readFileSync(progress, 'utf8'), /Synthetic report/)
 }))
 
 test('a queued event with a system error is kept and the hook fails in one plain line', () => fixture(f => {

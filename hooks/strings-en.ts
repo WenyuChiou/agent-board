@@ -38,6 +38,8 @@ export const EN: Strings = {
 
   // Time and dates
   justNow: 'just now',
+  futureTime: (age: string): string => `Future time · ${age}`,
+  futureTimeUnknown: 'Future time · age unknown',
   minutesAgo: (n: number): string => `${n} min ago`,
   hoursAgo: (n: number): string => `${n} h ago`,
   yesterday: 'yesterday',
@@ -463,6 +465,7 @@ export const EN: Strings = {
   prunedJoin: (parts: readonly string[]): string => (parts.length < 2 ? parts.join('') : `${parts.slice(0, -1).join(', ')} and ${parts.at(-1)}`),
   prunedLine: (list: string, days: number): string => `Cleared ${list} in the last ${days} days`,
   reporterFailed: (reason: string): string => `The report could not be saved (${reason}); check the progress file and retry.`,
+  reporterLockDenied: 'Can\'t create files next to progress.md (permission denied); check the folder permissions and retry.',
   tailRepairFailed: 'The incomplete end could not be safely repaired; nothing changed. Check the progress file before retrying.',
   fileProgress: 'your progress file',
   fileQuestions: 'the question list',

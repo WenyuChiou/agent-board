@@ -2951,6 +2951,7 @@ const archiveOne = async ($: EngineInterface, ref: TaskRef): Promise<boolean> =>
   const at = await $.clock.now()
   const s = await wordsOf($)
   const archived = new Set<string>()
+  const observed = await read($, firstSeen)
   const wrote = await rewrite($, path, async text => {
     const projects = parseProgress(text)
     const hasQuestions = projects.some(project => project.name === ref.project && project.tasks.some(task => (ref.session === null ? task.title === ref.title : task.auto?.session === ref.session) && task.steps.some(step => step.status === 'waiting')))
@@ -2959,7 +2960,7 @@ const archiveOne = async ($: EngineInterface, ref: TaskRef): Promise<boolean> =>
       // Another agent's write while the question check ran is not written over with the older text.
       if (await readText($, path) !== text) return AGAIN
     }
-    const taken = takeTask(text, ref, at, s)
+    const taken = takeTask(text, ref, at, s, observed)
     if (taken === null) return null
     await appendArchive($, archivePath(path, at), taken.entries.filter(entry => !archived.has(entry)), s)
     for (const entry of taken.entries) archived.add(entry)
@@ -2982,7 +2983,8 @@ const confirmOne = async ($: EngineInterface, ref: ConfirmRef): Promise<(Confirm
   const at = await $.clock.now()
   const s = await wordsOf($)
   const original = await readText($, path)
-  const candidate = confirmTask(original, ref, at, s)
+  const observed = await read($, firstSeen)
+  const candidate = confirmTask(original, ref, at, s, observed)
   if (candidate === null) return null
   const selected = confirmedTarget(original, ref, s)
   const mirrors = new Map<string, { stored: ProgressMirror | undefined; seen: string }>()
@@ -2998,7 +3000,7 @@ const confirmOne = async ($: EngineInterface, ref: ConfirmRef): Promise<(Confirm
   let confirmed: ConfirmedTask | null = null
   await rewrite($, path, text => {
     if (confirmed !== null && confirmMatches(text, confirmed.ref, s)) return text
-    const next = confirmTask(text, ref, at, s)
+    const next = confirmTask(text, ref, at, s, observed)
     if (next === null) return null
     confirmed = next
     return next.text

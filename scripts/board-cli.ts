@@ -707,7 +707,7 @@ const act = (action: BoardAction, fallback?: { copyText?: string; tone?: 'done' 
     try {
       wrote = rewrite(path, text => {
         if (confirmed !== null && confirmMatches(text, confirmed.ref, s)) return text
-        const next = confirmTask(text, action.ref, now, s)
+        const next = confirmTask(text, action.ref, now, s, lastSeen)
         if (next === null) return null
         const lines = next.entries.map(entry => journalLine(entry, now, s))
         rewrite(journal, past => {
@@ -779,7 +779,7 @@ const act = (action: BoardAction, fallback?: { copyText?: string; tone?: 'done' 
         retentionFailed = true
         return { text, entries: [] }
       }
-      return takeTask(text, action.ref, now, s)
+      return takeTask(text, action.ref, now, s, lastSeen)
     }, now)
     if (retentionFailed) return s.questionRetentionFailed
     if (count === null) return s.boardWriteFailed
@@ -1338,6 +1338,6 @@ try {
     process.exitCode = 1
     const raw = String((error as { code?: string })?.code ?? (error instanceof Error ? error.message : 'UNKNOWN'))
     const reason = /^[A-Z][A-Z0-9_]{0,63}$/.test(raw) ? raw : 'UNKNOWN'
-    process.stderr.write(`${reason === 'INCOMPLETE_PROGRESS_TAIL' ? s.tailRepairFailed : s.reporterFailed(reason)}\n`)
+    process.stderr.write(`${reason === 'LOCK_DENIED' ? s.reporterLockDenied : reason === 'INCOMPLETE_PROGRESS_TAIL' ? s.tailRepairFailed : s.reporterFailed(reason)}\n`)
   } else failureNote(error)
 }
