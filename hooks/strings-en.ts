@@ -488,6 +488,7 @@ export const EN: Strings = {
   serveIdleTimed: (minutes: number): string => `This board is configured to close after ${minutes} minutes unused. Reopen with --serve.`,
   serveLanIdle: 'On your network it closes itself after 10 minutes unused.',
   serveFailed: (why: string): string => `Couldn't open the board page: ${why}`,
+  serveRuntimePrivate: "Couldn't protect the board page's address file for this account; no page was started.",
   serveLanAt: (url: string): string => `On a phone on the same network, open ${url} or scan this code:`,
   serveLanNone: "This computer has no address on a local network, so a phone can't open the board.",
   serveLanNotOurs: (address: string): string => `${address} is not a private network address of this computer, so the board can't open there.`,

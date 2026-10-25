@@ -21,6 +21,7 @@ import { immutableQuestionFiles } from './question-files'
 import { reusableQuestionObservation } from './question-observation'
 import { recentInboxFiles } from './inbox-files'
 import { serverMemoryArgs } from './server-runtime'
+import { migratePrivateRuntimeFile, privateRuntimeFolder, readPrivateRuntimeFile, RuntimeFolderError, writePrivateRuntimeFile } from './runtime-folder'
 import { idleTimeout } from '../hooks/serve'
 import { boardKey, boardScreen, boardText, CHAT_MAX, chatText, doneToday, emptyBoardState, peekInbox, boardItems, pinned, redact } from '../hooks/board'
 import type { BoardAction, BoardState } from '../hooks/board'
@@ -945,12 +946,12 @@ const isOwnFolder = (dir: string): boolean => {
   }
 }
 
-// The folder for running programs when it is this account's own, else ~/.cache/agent-board
-// (the temp folder on Windows, which is the account's own there).
+// Windows temp folders can grant sandbox accounts access. Protect only our dedicated child,
+// never the caller's whole runtime directory, before a token can be written.
 const runFolder = (): string => {
   const runtime = process.env.XDG_RUNTIME_DIR
+  if (process.platform === 'win32') return privateRuntimeFolder(runtime ? join(runtime, 'agent-board') : join(homedir(), '.cache', 'agent-board'))
   if (runtime && isOwnFolder(runtime)) return runtime
-  if (process.platform === 'win32') return tmpdir()
   const own = join(homedir(), '.cache', 'agent-board')
   try {
     mkdirSync(own, { recursive: true, mode: 0o700 })
@@ -981,17 +982,26 @@ const built = (() => {
 
 type Running = { pid: number; port: number; url: string; path: string; built: string }
 
+const parseRunning = (text: string): Running | null => {
+  try {
+    const found = JSON.parse(text) as Partial<Running> | null
+    if (found === null || typeof found !== 'object') return null
+    // A private file can still have been renamed from another board's old shared folder.
+    // Its token authorizes requests only after it is bound to the requested progress file.
+    return typeof found.pid === 'number' && typeof found.port === 'number' && typeof found.url === 'string' && /^http:\/\/127\.0\.0\.1:\d+\/\?t=[\w-]+$/.test(found.url)
+      && typeof found.path === 'string' && board(found.path) === board(path)
+      ? { pid: found.pid, port: found.port, url: found.url, path: found.path, built: String(found.built ?? '') }
+      : null
+  } catch { return null }
+}
+
 const readRunning = (file = serveFile()): Running | null => {
   try {
     // Only a file of this account's own, never a link to one somewhere else.
     const own = lstatSync(file)
     if (own.isSymbolicLink() || (process.getuid !== undefined && own.uid !== process.getuid())) return null
-    const found = JSON.parse(read(file)) as Partial<Running>
-    // Only an address of the shape this server writes: anything else would stop `--serve` when
-    // it reads the token out of it.
-    return typeof found.pid === 'number' && typeof found.port === 'number' && typeof found.url === 'string' && /^http:\/\/127\.0\.0\.1:\d+\/\?t=[\w-]+$/.test(found.url)
-      ? { pid: found.pid, port: found.port, url: found.url, path: String(found.path ?? ''), built: String(found.built ?? '') }
-      : null
+    const source = process.platform === 'win32' ? readPrivateRuntimeFile(file)?.text : read(file)
+    return source === undefined ? null : parseRunning(source)
   } catch {
     return null
   }
@@ -1028,6 +1038,8 @@ const ping = async (running: Running, waitMs = 1500): Promise<Record<string, unk
 }
 
 const serveChild = (): void => {
+  // Fail within run's bounded error handler before any asynchronous server callback exists.
+  const file = serveFile()
   startServer({
     allowResume: args.includes('--allow-resume'),
     messagesDirectory: flag('--messages-dir'),
@@ -1051,7 +1063,9 @@ const serveChild = (): void => {
       // more; so it does not start at all. Nor when the file is there already: another
       // `--serve` started a page at the same moment and wrote first, and that one is the page.
       try {
-        writeFileSync(serveFile(), JSON.stringify({ pid: process.pid, port, url, path, built }), { mode: 0o600, flag: 'wx' })
+        const text = JSON.stringify({ pid: process.pid, port, url, path, built })
+        if (process.platform === 'win32') writePrivateRuntimeFile(file, text)
+        else writeFileSync(file, text, { mode: 0o600, flag: 'wx' })
       } catch {
         return false
       }
@@ -1062,7 +1076,7 @@ const serveChild = (): void => {
     },
     onStop: () => {
       // The file goes only while it is still this server's: a newer one may have taken it over.
-      unlinkIf(serveFile(), () => readRunning()?.pid === process.pid)
+      unlinkIf(file, () => readRunning(file)?.pid === process.pid)
       process.exit(0)
     },
   })
@@ -1096,12 +1110,14 @@ const stays = async (running: Running, file: string): Promise<boolean> => {
 // The running page of this copy for this file, or null. Any other page found in the file (one
 // that no longer answers, or an older copy's) is let go, so a new one can write the file; but an
 // older copy's page that will not close (a reply is on its way) is kept, and `isKept` says so.
-const runningPage = async (): Promise<{ page: Running; isKept: boolean; idleMs?: number | undefined } | null> => {
+const runningPage = async (isStarting = false): Promise<{ page: Running; isKept: boolean; idleMs?: number | undefined } | null> => {
   const running = readRunning()
   if (running === null) {
     // A file that has not read for ten seconds (either way, should the clock have been set
     // back) was cut short by a crash; it would keep every new page from starting.
-    unlinkIf(serveFile(), () => Math.abs(Date.now() - statSync(serveFile()).mtimeMs) > 10_000)
+    // During a launch, this may still be the winning child's reservation. Its age can cross
+    // the crash cutoff while native permission checks run; only the initial lookup clears it.
+    if (!isStarting) unlinkIf(serveFile(), () => Math.abs(Date.now() - statSync(serveFile()).mtimeMs) > 10_000)
     return null
   }
   // A page that is still running but slow to answer (a busy disk) gets longer before it counts
@@ -1140,6 +1156,14 @@ const showLan = async (url: string): Promise<void> => {
 // an agent's command tool is not left waiting on the server.
 const serveBoard = async (): Promise<void> => {
   const requestedIdle = idleMs()
+  const file = serveFile()
+  if (process.platform === 'win32' && !existsSync(file)) {
+    const runtime = process.env.XDG_RUNTIME_DIR
+    const legacy = [runtime ? join(runtime, basename(file)) : '', join(tmpdir(), basename(file))]
+    for (const previous of new Set(legacy.filter(value => value !== '' && value !== file))) {
+      if (!existsSync(file)) migratePrivateRuntimeFile(previous, file, text => parseRunning(text) !== null)
+    }
+  }
   if (!args.includes('--quiet-board')) process.stdout.write(boardText(view(), pending(), s, options()))
   // The note goes above the address, so the address stays the last line an agent shows.
   const show = async (url: string, isKept = false, actualIdle?: number): Promise<void> => {
@@ -1162,10 +1186,11 @@ const serveBoard = async (): Promise<void> => {
   if (args.includes('--allow-resume')) rest.push('--allow-resume')
   // In the board's own folder, not the agent's, so the server holds no project folder open.
   const child = spawn(process.execPath, [...serverMemoryArgs(process.execArgv, process.env.NODE_OPTIONS), script, '--serve-child', ...rest], { cwd: dirname(path), detached: true, stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true })
+  const readyBy = performance.now() + 10_000
   // The child prints its address once it listens; it exits at once when it cannot.
   const url = await new Promise<string | null>(done => {
     let out = ''
-    const timer = setTimeout(() => done(null), 10_000)
+    const timer = setTimeout(() => done(null), Math.max(0, readyBy - performance.now()))
     const end = (value: string | null): void => {
       clearTimeout(timer)
       done(value)
@@ -1184,7 +1209,15 @@ const serveBoard = async (): Promise<void> => {
   if (url === null) {
     // Another `--serve` started at the same moment may have written its address first: this
     // page stopped then, and that one is the page to show.
-    const other = await runningPage()
+    let other = await runningPage(true)
+    // The winner reserves an empty file before checking its inherited ACL. A second child
+    // can exit before the token is published, or a checked read can span that write.
+    // Keep the same launch deadline while an address is still being published.
+    while (other === null && process.platform === 'win32' && performance.now() < readyBy) {
+      if (!existsSync(file)) break
+      await new Promise<void>(done => setTimeout(done, 50))
+      other = await runningPage(true)
+    }
     if (other !== null) return show(other.page.url, other.isKept, other.idleMs)
     process.stdout.write(`\n${s.serveFailed(s.serveNotStarted)}\n`)
     return
@@ -1332,9 +1365,14 @@ const run = async (): Promise<void> => {
 try {
   await run()
 } catch (error) {
-  // The verified worker wrapper bounds data-URL errors and owns stage cleanup.
-  if (flag('--legacy-connect-request') !== undefined && typeof (globalThis as { AGENT_BOARD_WORKER_SOURCE?: unknown }).AGENT_BOARD_WORKER_SOURCE === 'string') throw error
-  if (args.some(arg => ['--codex-event', '--agent-status', '--codex-report'].includes(arg))) {
+  if (error instanceof RuntimeFolderError) {
+    process.exitCode = 1
+    const output = args.includes('--serve-child') ? process.stderr : process.stdout
+    output.write(`${s.serveRuntimePrivate}\n`)
+  } else if (flag('--legacy-connect-request') !== undefined && typeof (globalThis as { AGENT_BOARD_WORKER_SOURCE?: unknown }).AGENT_BOARD_WORKER_SOURCE === 'string') {
+    // The verified worker wrapper bounds data-URL errors and owns stage cleanup.
+    throw error
+  } else if (args.some(arg => ['--codex-event', '--agent-status', '--codex-report'].includes(arg))) {
     process.exitCode = 1
     const raw = String((error as { code?: string })?.code ?? (error instanceof Error ? error.message : 'UNKNOWN'))
     const reason = /^[A-Z][A-Z0-9_]{0,63}$/.test(raw) ? raw : 'UNKNOWN'

@@ -452,5 +452,7 @@ export const startServer = (o: ServeOptions): void => {
   server.listen(o.port, '127.0.0.1', () => {
     port = (server.address() as AddressInfo).port
     if (!o.onReady(`http://127.0.0.1:${port}/?t=${token}`, port)) stop()
+    // Preparing a private address can block; inactivity starts once that address is ready.
+    else lastSeen = Date.now()
   })
 }
