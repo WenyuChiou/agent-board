@@ -2,9 +2,10 @@ import type { On } from 'claude-code'
 import { expect, test } from 'claude-code/testing'
 import type { Engine } from 'claude-code/testing'
 import { localDay } from '../hooks/journal'
+import { isInboxFile } from '../hooks/inbox'
 import { paletteFor } from '../hooks/palette'
 import { parseProgress } from '../hooks/parse'
-import { captureJson, capturePath, emptyQuestions, observeQuestions, parseCapture, parseQuestions, questionProofJson, questionProofPath, questionsJson, questionsPath, resolveQuestion } from '../hooks/questions'
+import { captureJson, capturePath, emptyQuestions, observeQuestions, parseCapture, parseQuestions, questionFilesKey, questionProofJson, questionProofPath, questionsJson, questionsPath, resolveQuestion } from '../hooks/questions'
 import type { QuestionCapture } from '../hooks/questions'
 import { sha256 } from '../hooks/sha256'
 import { STRINGS } from '../hooks/strings'
@@ -569,6 +570,78 @@ test('idle polls run no question pass while only this session\'s background jobs
   expect(jobs()).toMatchObject({ backgroundJobs: 5 })
   expect(world.files.get(FILE)).toBe(board0)
   expect(passed).toEqual([false, false, false, false, false])
+})
+
+test('adding one remembered answer alone runs exactly one question pass and later idle polls stay quiet', async ($, on) => {
+  const world = makeWorld([[FILE, '## demo\n']])
+  world.env = english
+  world.reply = () => 'TITLE: Synthetic work\nCONTEXT: Synthetic data\nDONE: -\nNEXT: -\nASK: -'
+  let own: unknown = null
+  let hidden: unknown = []
+  let arriving: (() => void) | undefined
+  const directory = FILE.slice(0, FILE.lastIndexOf('/') + 1)
+  const inputs = () => ({
+    path: FILE,
+    files: questionFilesKey(FILE, ANSWERED, [...world.files].flatMap(([path, text]) =>
+      path.startsWith(directory) && !path.slice(directory.length).includes('/')
+        ? [{ name: path.slice(directory.length), size: text.length, mtimeMs: world.mtimes?.[path] ?? world.mtime }]
+        : []), NOW, 2000),
+    pending: [...world.files.keys()].filter(path => path.startsWith(`${INBOX}/`) && isInboxFile(path.slice(INBOX.length + 1))),
+    own: structuredClone(own),
+    hidden: structuredClone(hidden),
+  })
+  const passes: ReturnType<typeof inputs>[] = []
+  on('state.set', { plugin: 'agent-board', key: 'mine' }, ($, event, next) => {
+    own = event.value
+    return next(event)
+  })
+  on('state.set', { plugin: 'agent-board', key: 'hiddenAsks' }, ($, event, next) => {
+    hidden = event.value
+    return next(event)
+  })
+  // A completed pass publishes the ledger cache once, even when no file changes.
+  on('state.set', { plugin: 'agent-board', key: 'questionLedger' }, ($, event, next) => {
+    passes.push(inputs())
+    return next(event)
+  })
+  // Deliver between the inbox's stat and list: no poll can see an unclaimed turn and
+  // invalidate the pending-turn key before the answer itself is remembered.
+  const clock = engineBeneath(((...args: Parameters<On>) => {
+    const callback = args.at(-1)
+    if (args[0] !== 'fs.stat' || typeof callback !== 'function') return Reflect.apply(on, undefined, args)
+    return on('fs.stat', ($, event, next) => {
+      const path = event.path.replace(/^[A-Za-z]:\\/, '/').replace(/\\/g, '/')
+      if (path === INBOX && arriving !== undefined) {
+        const deliver = arriving
+        arriving = undefined
+        deliver()
+      }
+      return Reflect.apply(callback, undefined, [$, event, next])
+    })
+  }) as On, world)
+  await $.session.start(START)
+  for (let n = 0; n < 3; n++) await clock.advance(2000)
+  const fixed = inputs()
+  expect(fixed.files).not.toBeNull()
+  expect(fixed.pending).toEqual([])
+  expect(fixed.own).not.toBeNull()
+  passes.length = 0
+  await clock.advance(2000)
+  expect(passes).toEqual([])
+  const name = `codex-turn-${Math.floor(NOW / 1000)}-1.json`
+  arriving = () => put(world, `${INBOX}/${name}`, JSON.stringify({
+    session_id: 'synthetic-answer-only', cwd: '/work/demo', prompt: 'Synthetic request', last_assistant_message: 'Synthetic work is done.',
+  }), 2)
+  for (let n = 0; n < 5; n++) await clock.advance(2000)
+  expect(arriving).toBeUndefined()
+  expect((world.store?.inboxDone as Record<string, string>)[name]).toBeDefined()
+  expect(inputs()).toEqual(fixed)
+  expect(passes).toEqual([fixed])
+  for (let n = 0; n < 5; n++) {
+    await clock.advance(2000)
+    expect(inputs()).toEqual(fixed)
+    expect(passes).toEqual([fixed])
+  }
 })
 
 test('remembered answers aging out run no question pass, and after a new answer is taken the polls are quiet again', { timeoutMs: 60_000 }, async ($, on) => {
