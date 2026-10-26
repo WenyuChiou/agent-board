@@ -3391,9 +3391,9 @@ main(fs, { file, session, rounds: 10, spacingMs: 50, lockWaitMs: 8000, gateMs: 1
     }
     f.save(gate, '')
     const results = await Promise.all(runs)
-    const text = readFileSync(f.progress, 'utf8')
+    let text = readFileSync(f.progress, 'utf8')
     const missing = owners.filter(id => !text.includes(`<!-- auto session=${id} `))
-    t.diagnostic(JSON.stringify({ exits: results.map(result => result.status), missing }))
+    t.diagnostic(JSON.stringify({ phase: 'foreground-exit', exits: results.map(result => result.status), missing }))
     for (const result of results) {
       assert.equal(result.status, 0, hookFailure(result))
       assert.equal(result.error, undefined, hookFailure(result))
@@ -3402,6 +3402,11 @@ main(fs, { file, session, rounds: 10, spacingMs: 50, lockWaitMs: 8000, gateMs: 1
       assert.match(result.stdout, /^WRITER_OK(?: after .*)?$/m)
       assert.doesNotMatch(result.stdout, /\bLOST\b/)
     }
+    // A successful foreground command can leave its event with the bounded recovery worker.
+    await waitForAutomaticRecovery(() => {
+      text = readFileSync(f.progress, 'utf8')
+      return pendingFiles(f).length === 0 && owners.every(id => text.includes(`<!-- auto session=${id} `))
+    }, 'all twelve writer events must settle before verifying their blocks')
     assert.ok(text.includes('Manual text must survive\n'), text)
     for (const id of owners) {
       assert.equal(text.split(`<!-- auto session=${id} `).length - 1, 1, text)
@@ -3417,6 +3422,153 @@ main(fs, { file, session, rounds: 10, spacingMs: 50, lockWaitMs: 8000, gateMs: 1
     for (const result of settled) {
       if (result.status === 'fulfilled' && result.value.status !== 0) t.diagnostic(hookFailure(result.value))
     }
+    const failure = settled.find(result => result.status === 'rejected')
+    if (failure) throw failure.reason
+  }
+}))
+
+test('concurrent writers wait for autonomous recovery before asserting every block exactly once', t => fixture(async f => {
+  assert.equal(f.install('--apply').status, 0)
+  f.save(f.progress, '## FORMAT concurrency\n\nManual text must survive\n')
+  const gate = join(f.home, 'recovery-writers-start')
+  const release = join(f.home, 'recovery-writers-release')
+  const recoveryPids = join(f.home, 'recovery-writer-pids')
+  const barrier = join(f.home, 'recovery-writers-barrier.cjs')
+  const writer = join(f.home, 'recovery-format-writer.cjs')
+  const hooks = Array.from({ length: 8 }, (_, i) => `recovery-concurrent-hook-${i}`)
+  const writers = Array.from({ length: 4 }, (_, i) => `f100000${i}`)
+  const writerDone = writers.map(id => join(f.home, `recovery-format-done-${id}`))
+  const selectedHook = hooks[3]
+  const selectedHash = createHash('sha256').update(`codex:${selectedHook}`).digest('hex')
+  const selectedOwner = selectedHash.slice(0, 8)
+  const selectedMarker = `<!-- auto session=${selectedOwner} `
+  f.save(barrier, `const fs = require('node:fs')
+const path = require('node:path')
+const { performance } = require('node:perf_hooks')
+const originalRename = fs.renameSync
+fs.renameSync = function(from, to) {
+  if (String(to) === ${JSON.stringify(f.progress)}) {
+    const next = fs.readFileSync(from, 'utf8')
+    const prior = fs.existsSync(to) ? fs.readFileSync(to, 'utf8') : ''
+    if (next.includes(${JSON.stringify(selectedMarker)}) && !prior.includes(${JSON.stringify(selectedMarker)}) && !fs.existsSync(${JSON.stringify(release)})) {
+      throw Object.assign(new Error('synthetic selected event is temporarily busy'), { code: 'EBUSY' })
+    }
+  }
+  return originalRename.apply(this, arguments)
+}
+require('node:module').syncBuiltinESMExports()
+if (process.argv.includes('--recover-pending')) {
+  fs.mkdirSync(${JSON.stringify(recoveryPids)}, { recursive: true })
+  fs.writeFileSync(path.join(${JSON.stringify(recoveryPids)}, String(process.pid)), '')
+}
+fs.writeFileSync(process.env.WRITER_READY, '')
+const until = performance.now() + 15000
+while (!fs.existsSync(process.env.WRITERS_START)) {
+  if (performance.now() >= until) throw new Error('START_TIMEOUT')
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 5)
+}
+// The original twelve-writer test covers lock contention. Queue this event only
+// after FORMAT writers finish so its deliberate busy write cannot starve them.
+if (process.argv.includes('--codex-event')) {
+  const writers = ${JSON.stringify(writerDone)}
+  while (!writers.every(file => fs.existsSync(file))) {
+    if (performance.now() >= until) throw new Error('FORMAT_WRITERS_TIMEOUT')
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 5)
+  }
+}
+`)
+  // Keep this independent of product helpers, using the same documented procedure as the L5 journey.
+  f.save(writer, `const fs = require('node:fs')
+const main = ${formatWriter.toString()}
+const [file, session, done] = process.argv.slice(2)
+// Test-only headroom lets a loaded CI machine schedule every competing writer.
+main(fs, { file, session, rounds: 10, spacingMs: 50, lockWaitMs: 8000, gateMs: 15000 }).then(isWritten => {
+  if (isWritten) fs.writeFileSync(done, '')
+  process.exitCode = isWritten ? 0 : 2
+})
+`)
+  const owners = [...hooks.map(id => createHash('sha256').update(`codex:${id}`).digest('hex').slice(0, 8)), ...writers]
+  const ready = owners.map(id => join(f.home, `recovery-writer-ready-${id}`))
+  const runs = [], stops = []
+  const after = stop => {
+    stops.push(stop)
+    return setTimeout(stop, 20000)
+  }
+  const track = run => {
+    runs.push(run)
+    run.catch(() => {})
+  }
+  const environment = i => ({ ...f.env, NODE_OPTIONS: `--require ${JSON.stringify(barrier)}`, WRITER_READY: ready[i], WRITERS_START: gate })
+  const recoveryPidValues = () => existsSync(recoveryPids) ? readdirSync(recoveryPids).map(Number).filter(Number.isSafeInteger) : []
+  try {
+    for (const [i, id] of hooks.entries()) {
+      track(fireHook({ ...f, env: { ...environment(i), CODEX_THREAD_ID: id } }, JSON.stringify({ session_id: id, hook_event_name: 'UserPromptSubmit', turn_id: 'turn-1' }), 20000, after))
+    }
+    for (const [i, id] of writers.entries()) {
+      track(nativeProcess(process.execPath, [writer, f.progress, id, writerDone[i]], environment(i + hooks.length), '', after))
+    }
+    const readyUntil = Date.now() + 15000
+    while (!ready.every(file => existsSync(file))) {
+      assert.ok(Date.now() < readyUntil, `all twelve children must reach the shared start gate: ${ready.map(file => existsSync(file))}`)
+      await new Promise(done => setTimeout(done, 5))
+    }
+    f.save(gate, '')
+    const results = await Promise.all(runs)
+    for (const result of results) {
+      assert.equal(result.status, 0, hookFailure(result))
+      assert.equal(result.error, undefined, hookFailure(result))
+    }
+    for (const result of results.slice(hooks.length)) {
+      assert.match(result.stdout, /^WRITER_OK(?: after .*)?$/m)
+      assert.doesNotMatch(result.stdout, /\bLOST\b/)
+    }
+    const beforeRelease = readFileSync(f.progress, 'utf8')
+    const missingBeforeRelease = owners.filter(id => !beforeRelease.includes(`<!-- auto session=${id} `))
+    const selectedPendingName = pendingFiles(f).find(name => {
+      try { return readFileSync(join(f.root, 'pending', name), 'utf8').includes(selectedHook) } catch (error) {
+        if (error.code === 'ENOENT') return false
+        throw error
+      }
+    })
+    assert.ok(missingBeforeRelease.includes(selectedOwner), `selected event must be absent before recovery: ${missingBeforeRelease}`)
+    assert.ok(selectedPendingName, `selected event must remain identifiable in pending/: ${pendingFiles(f)}`)
+    const selectedPending = JSON.parse(readFileSync(join(f.root, 'pending', selectedPendingName), 'utf8'))
+    assert.equal(selectedPending.payload.session_id, selectedHook)
+    assert.equal(selectedPending.payload.turn_id, 'turn-1')
+    assert.ok(Number.isFinite(selectedPending.at))
+    assert.ok(Number.isFinite(Date.parse(selectedPending.now)))
+    await waitForAutomaticRecovery(() => recoveryPidValues().length > 0, 'the queued event must launch an owned automatic recovery helper')
+    const ownedRecoveryPids = recoveryPidValues()
+    assert.ok(ownedRecoveryPids.some(isReporterAlive), `an owned recovery helper must be live before release: ${ownedRecoveryPids}`)
+    t.diagnostic(JSON.stringify({ phase: 'before-release', exits: results.map(result => result.status), missing: missingBeforeRelease, pending: pendingFiles(f), recoveryPids: ownedRecoveryPids }))
+    f.save(release, '')
+    let settled = beforeRelease
+    await waitForAutomaticRecovery(() => {
+      settled = readFileSync(f.progress, 'utf8')
+      const isSelectedPending = existsSync(join(f.root, 'pending', selectedPendingName))
+      return !isSelectedPending && owners.every(id => settled.includes(`<!-- auto session=${id} `))
+    }, 'automatic recovery must drain the selected event and restore all twelve blocks')
+    await waitForAutomaticRecovery(() => ownedRecoveryPids.every(pid => !isReporterAlive(pid)), 'every owned recovery helper must exit after draining', 3000)
+    const saved = JSON.parse(readFileSync(join(f.root, 'sessions', `${selectedHash}.json`), 'utf8'))
+    assert.equal(saved.appliedAt, selectedPending.at)
+    assert.equal(Date.parse(saved.updated), Date.parse(selectedPending.now))
+    assert.ok(settled.includes('Manual text must survive\n'), settled)
+    for (const id of owners) {
+      assert.equal(settled.split(`<!-- auto session=${id} `).length - 1, 1, settled)
+      assert.equal(settled.split(`<!-- /auto session=${id} -->`).length - 1, 1, settled)
+    }
+    for (const id of writers) assert.match(settled, new RegExp(`### Format writer ${id}\\r?\\n> Context: Synthetic FORMAT.md writer\\r?\\n- \\[~\\] Round 10\\r?\\n`))
+    assert.deepEqual(pendingFiles(f), [])
+    const leftovers = readdirSync(f.root, { recursive: true }).filter(name => /\.agent-board-lock(?:\.recover)?$|\.(?:tmp|format-tmp|board-tmp)$/.test(name))
+    assert.deepEqual(leftovers, [])
+  } finally {
+    f.save(release, '')
+    for (const stop of stops) stop()
+    const settled = await Promise.allSettled(runs)
+    for (const result of settled) {
+      if (result.status === 'fulfilled' && result.value.status !== 0) t.diagnostic(hookFailure(result.value))
+    }
+    for (const pid of recoveryPidValues()) if (isReporterAlive(pid)) await stopReporter(pid)
     const failure = settled.find(result => result.status === 'rejected')
     if (failure) throw failure.reason
   }
