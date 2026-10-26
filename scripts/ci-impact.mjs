@@ -228,7 +228,9 @@ export const buildPlan = async (files, { roots, forceFull = false }) => {
     plan.testFiles.journeys = tests.journeys.filter(path => path === 'tests/e2e/l0-readme.test.mjs')
     if (plan.checks.journeys && !plan.testFiles.journeys.length) throw new Error('README contract test is missing')
   }
-  const isOnlyTests = files.length > 0 && files.every(path => groupForTest(path) || path === 'tests/ci-impact.test.mjs')
+  // Release fragments do not change which tests a test-only PR needs.
+  const nonFragmentPaths = files.filter(path => !/^changelog\.d\/[^/]+\.md$/.test(path))
+  const isOnlyTests = nonFragmentPaths.length > 0 && nonFragmentPaths.every(path => groupForTest(path) || path === 'tests/ci-impact.test.mjs')
   if (isOnlyTests && !plan.full) {
     for (const group of GROUPS) if (plan.checks[group]) {
       plan.testFiles[group] = tests[group].filter(path => files.includes(path))

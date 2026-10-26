@@ -351,6 +351,50 @@ test('a new standalone test is included even before its name appears in the work
   })
 })
 
+test('test-only CI selection stays narrow beside a changelog fragment', async () => {
+  const { buildPlan } = await import('../scripts/ci-impact.mjs')
+  await withFixture(async root => {
+    await writeFixture(root, 'tests/changed.test.mjs', 'export const changed = true')
+    await writeFixture(root, 'tests/unrelated.test.mjs', 'export const unrelated = true')
+    const fragment = 'changelog.d/339-test-fragment-selection.md'
+    const plan = await buildPlan(['tests/changed.test.mjs', fragment], { roots: [root] })
+    assert.equal(plan.full, false)
+    assertOnly(plan, ['board'])
+    assert.deepEqual(plan.testFiles.board, ['tests/changed.test.mjs'])
+    const notes = await buildPlan([fragment], { roots: [root] })
+    assertOnly(notes, [])
+  })
+})
+
+test('a changelog fragment does not hide removal of the only affected test', async () => {
+  const { buildPlan } = await import('../scripts/ci-impact.mjs')
+  await withFixture(async base => withFixture(async head => {
+    await writeFixture(base, 'tests/deleted.test.mjs', 'export const deleted = true')
+    await writeFixture(base, 'tests/remaining.test.mjs', 'export const remaining = true')
+    await writeFixture(head, 'tests/remaining.test.mjs', 'export const remaining = true')
+    const plan = await buildPlan(['tests/deleted.test.mjs', 'changelog.d/339-test-fragment-selection.md'], { roots: [base, head] })
+    assert.equal(plan.full, true)
+    assert.ok(plan.notes.some(note => note.includes('removed test')))
+    assert.deepEqual(plan.testFiles.board, ['tests/remaining.test.mjs'])
+  }))
+})
+
+test('runtime and unknown changes keep conservative CI selection beside a changelog fragment', async () => {
+  const { buildPlan } = await import('../scripts/ci-impact.mjs')
+  await withFixture(async root => {
+    await writeFixture(root, 'tests/changed.test.mjs', "import '../hooks/runtime.ts'")
+    await writeFixture(root, 'tests/unrelated.test.mjs', 'export const unrelated = true')
+    await writeFixture(root, 'hooks/runtime.ts', 'export const runtime = true')
+    const fragment = 'changelog.d/339-test-fragment-selection.md'
+    const runtime = await buildPlan(['hooks/runtime.ts', 'tests/changed.test.mjs', fragment], { roots: [root] })
+    assert.equal(runtime.full, false)
+    assert.deepEqual(runtime.testFiles.board, ['tests/changed.test.mjs', 'tests/unrelated.test.mjs'])
+    const unknown = await buildPlan(['unknown-input.dat', 'tests/changed.test.mjs', fragment], { roots: [root] })
+    assert.equal(unknown.full, true)
+    assert.ok(Object.values(unknown.checks).every(Boolean))
+  })
+})
+
 test('removing the only affected test forces a complete plan rather than a zero-test pass', async () => {
   const { buildPlan } = await import('../scripts/ci-impact.mjs')
   await withFixture(async base => withFixture(async head => {
