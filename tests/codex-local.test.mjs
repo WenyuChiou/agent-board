@@ -15,6 +15,7 @@ import { classifierDiagnostic, observeClassifier } from './fixtures/classifier-d
 import { assertNativeProbeReturned, nativeProbeDiagnostic } from './fixtures/native-probe-diagnostic.mjs'
 import { withDeniedCreation } from './fixtures/windows-create-denied.mjs'
 import { generatedHookCommand } from './fixtures/generated-hook-command.mjs'
+import { assertClassifierExited, observeClassifierExit } from './fixtures/classifier-exit-proof.mjs'
 
 test('native cleanup diagnostics keep watchdog failures bounded and private', () => {
   const error = Object.assign(new Error('PRIVATE_ERROR'), { code: 'ETIMEDOUT', path: '/PRIVATE_EXECUTABLE', spawnargs: ['PRIVATE_ARGUMENT'] })
@@ -1610,7 +1611,8 @@ test('a timed-out prompt classifier saves a metadata receipt that marks a board 
   const isWindows = process.platform === 'win32'
   const inbox = join(f.root, 'progress-inbox'), script = join(f.root, isWindows ? 'progress-report.ps1' : 'progress-report.sh')
   const pidFile = join(f.home, 'classifier.pid'), preload = join(f.home, 'hang-classifier.cjs')
-  f.save(script, isWindows ? reporterPs1() : reporterSh(inbox))
+  const exitProof = join(f.home, 'classifier-exit.json')
+  f.save(script, isWindows ? observeClassifierExit(reporterPs1(), exitProof) : reporterSh(inbox))
   f.save(preload, `const fs = require('node:fs')\nfs.writeFileSync(${JSON.stringify(pidFile)}, String(process.pid))\nsetInterval(() => {}, 1000)\n`)
   const env = { ...f.env, NODE_OPTIONS: `--require ${JSON.stringify(preload.replaceAll('\\', '/'))}` }
   const args = isWindows ? ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', script, 'cursor', 'prompt'] : [script, 'cursor', 'prompt']
@@ -1633,6 +1635,7 @@ test('a timed-out prompt classifier saves a metadata receipt that marks a board 
   for (const [index, { key = 'session_id', payload, kept, isBoard = false }] of cases.entries()) {
     const session = `synthetic-timeout-${index}`
     rmSync(pidFile, { force: true })
+    rmSync(exitProof, { force: true })
     rmSync(join(f.root, 'hook-errors.log'), { force: true })
     let isGone = false
     try {
@@ -1643,7 +1646,8 @@ test('a timed-out prompt classifier saves a metadata receipt that marks a board 
       assert.equal(out.status, 0, hookFailure(out))
       assert.equal(out.stdout.trim(), '{}')
       assert.equal(existsSync(pidFile), true, `exercise the real classifier process, case ${index}: ${hookLog(f)}`)
-      assert.equal(isReporterAlive(Number(readFileSync(pidFile, 'utf8'))), false)
+      if (isWindows) assertClassifierExited(exitProof)
+      else assert.equal(isReporterAlive(Number(readFileSync(pidFile, 'utf8'))), false)
       isGone = true
       const files = readdirSync(inbox)
       const log = hookLog(f)
@@ -1663,6 +1667,26 @@ test('a timed-out prompt classifier saves a metadata receipt that marks a board 
       if (!isGone && existsSync(pidFile)) await stopReporter(Number(readFileSync(pidFile, 'utf8')))
     }
   }
+}))
+
+test('a classifier interrupted while publishing its PID marker still proves its owned process exited', { skip: process.platform !== 'win32' }, () => fixture(async f => {
+  const script = join(f.root, 'progress-report.ps1'), pidFile = join(f.home, 'classifier.pid')
+  const exitProof = join(f.home, 'classifier-exit.json'), preload = join(f.home, 'partial-classifier-pid.cjs')
+  f.save(script, observeClassifierExit(reporterPs1(), exitProof))
+  f.save(preload, `const fs = require('node:fs')\nfs.writeFileSync(${JSON.stringify(pidFile)}, '')\nsetTimeout(() => fs.writeFileSync(${JSON.stringify(pidFile)}, String(process.pid)), 3000)\nsetInterval(() => {}, 1000)\n`)
+  const env = { ...f.env, NODE_OPTIONS: `--require ${JSON.stringify(preload.replaceAll('\\', '/'))}` }
+  const out = await nativeProcess('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', script, 'cursor', 'prompt'], env,
+    JSON.stringify({ session_id: 'synthetic-partial-pid', prompt: 'PRIVATE_RAW_PROMPT' }))
+  assertClassifierExited(exitProof)
+  assert.equal(out.error, undefined, hookFailure(out))
+  assert.equal(out.status, 0, hookFailure(out))
+  assert.equal(out.stdout.trim(), '{}')
+  assert.equal(readFileSync(pidFile, 'utf8'), '')
+  const inbox = join(f.root, 'progress-inbox')
+  const files = readdirSync(inbox)
+  assert.equal(files.length, 1)
+  assert.deepEqual(JSON.parse(readFileSync(join(inbox, files[0]), 'utf8')), { session_id: 'synthetic-partial-pid' })
+  assert.match(hookLog(f), /REPORTER_TIMEOUT/)
 }))
 
 test('a delayed input and hung prompt classifier share one deadline without promoting a raw receipt', { skip: process.platform === 'win32' }, () => fixture(async f => {
