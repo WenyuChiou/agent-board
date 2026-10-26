@@ -62,6 +62,23 @@ retry after fixing its reported problem. `--chat` remains read-only even with `-
 `--tidy` takes precedence over `--serve`, `--watch` and `--html`, so those combinations
 run only the sweep. The explicit interactive tidy still archives finished work immediately.
 
+If a lifecycle hook cannot write the selected board, its metadata enters a local
+pending queue. The installed worker starts one bounded recovery job for that board,
+with at most three passes within eight seconds including launch delay. It preserves
+the original event time and drops events superseded by newer session activity.
+This recovery never sends messages or replays uncertain deliveries. A persistent
+lock or an unavailable reporter leaves the metadata and records
+`HOOK_RECOVERY_NEEDED` in the local hook diagnostics. After resolving the reported
+problem, run an explicit pass with the exact installed Node and script paths:
+
+```sh
+node ~/.agent-board/agent-board.mjs --recover-hooks
+```
+
+The JSON result names the processed and remaining metadata counts for the selected
+progress file. This command reads no stdin, starts no model, and changes no hook
+trust. It can be used even when no further agent prompt is expected.
+
 For maintenance, the installed program retains the compatibility flags
 `--codex-doctor --agent <name>` and `--codex-remove --agent <name>`; removal previews
 before `--apply`. Close that board first. Progress/history/session records remain, and

@@ -1,3 +1,5 @@
+import { hookRecoverySource } from './hook-recovery.ts'
+
 // Milliseconds internally; Gemini stores milliseconds, the other command hosts seconds.
 // Keep the existing per-event host floors until the host descriptors own this table.
 export const HOOK_VERSION = 1
@@ -112,8 +114,9 @@ const withHook = async action => {
 // Late events queue under the board's data folder: the script's own folder unless named (#285).
 export const hookWorker = (home: string, script: string, boardPromptHelper: string, dataRoot?: string): string => `import { createRequire } from 'node:module'
 const require = createRequire(import.meta.url)
-const { spawnSync } = require('node:child_process')
-const { randomUUID } = require('node:crypto')
+const { spawn, spawnSync } = require('node:child_process')
+const { randomUUID, createHash } = require('node:crypto')
+const { fileURLToPath } = require('node:url')
 const { performance } = require('node:perf_hooks')
 ${boardPromptHelper}
 const args = process.argv.slice(2)
@@ -124,6 +127,7 @@ const safeAgent = Object.hasOwn(policies, agent) ? agent : 'unknown'
 ${hookLogSource(home, '__AGENT__', true).replace(JSON.stringify('__AGENT__'), 'safeAgent')}
 const isReport = args.includes('--codex-report')
 const fail = code => { hookError(code); process.exitCode = isReport ? 1 : 0; if (!isReport && ['cursor', 'gemini', 'antigravity'].includes(agent)) process.stdout.write('{}\\n'); return false }
+${hookRecoverySource(home, script, dataRoot)}
 const run = async () => {
   const now = Date.now(), supplied = Number(value('--hook-started'))
   const started = Math.floor(Math.min(performance.timeOrigin, Number.isSafeInteger(supplied) && supplied >= 0 && supplied <= now ? supplied : Infinity))
@@ -188,13 +192,14 @@ const run = async () => {
       fs.writeFileSync(temporary, JSON.stringify({ version: 1, kind: 'raw', at: started, argv: reporterArgs, env, payload: kept }), { flag: 'wx', mode: 0o600 })
       fs.renameSync(temporary, file)
       temporary = undefined
+      requestRecovery()
       return fail('REPORTER_QUEUED')
     } catch { return fail('REPORTER_FAILED') }
     finally { if (temporary) { try { fs.unlinkSync(temporary) } catch {} } }
   }
   const remaining = deadline - Date.now()
   if (remaining <= 0) return queue()
-  const childArgs = [...reporterArgs, '--hook-deadline', String(deadline), '--hook-started', String(started), '--home', ${JSON.stringify(home)}]
+  const childArgs = [...reporterArgs, ...(!isReport ? ['--hook-recovery-parent'] : []), '--hook-deadline', String(deadline), '--hook-started', String(started), '--home', ${JSON.stringify(home)}]
   const result = spawnSync(process.execPath, [${JSON.stringify(script)}, ...childArgs], {
     input: JSON.stringify(payload), encoding: 'utf8', windowsHide: true,
     timeout: remaining, killSignal: 'SIGKILL', maxBuffer: 1048576,
@@ -208,8 +213,10 @@ const run = async () => {
     if (reason && isReport) process.stderr.write('AGENT_BOARD_REASON ' + reason + '\\n')
     return fail(reason ? 'REPORTER_FAILED ' + reason : 'REPORTER_FAILED')
   }
+  if (!isReport && result.stderr?.split(/\\r?\\n/).includes('AGENT_BOARD_HOOK_PENDING')) requestRecovery()
   process.stdout.write(result.stdout)
   return true
 }
-await run().catch(() => fail('REPORTER_FAILED'))
+if (args.includes('--recover-pending')) recoverPending()
+else await run().catch(() => fail('REPORTER_FAILED'))
 `

@@ -20,6 +20,7 @@ import { installControlRoot, withInstallLock } from './install-control'
 import { boardPromptHelper, boardRequestWords, boardRun, isBoardRequest } from '../hooks/board-commands'
 import { PROMPT_EVENTS } from '../hooks/inbox'
 import { windowsHookNode } from './windows-hook-node'
+import { claimHookRecovery } from './hook-recovery-owner'
 
 type Json = Record<string, unknown>
 type Manifest = { files: Record<string, string>; groups: Record<string, unknown> }
@@ -115,7 +116,7 @@ const saveReporterTail = (progress: string, fragment: Buffer): string => {
 const filesByFolder = (mode: string, agent: string): boolean => mode === '--codex-event' || mode === '--agent-status' && agent === 'opencode'
 
 export const runCodexLocal = async (args: string[], boardPath: string, s: Strings): Promise<boolean> => {
-  const mode = ['--codex-setup', '--codex-doctor', '--codex-remove', '--codex-trust', '--codex-report', '--codex-event', '--agent-status'].find(one => args.includes(one))
+  const mode = ['--recover-hooks', '--codex-setup', '--codex-doctor', '--codex-remove', '--codex-trust', '--codex-report', '--codex-event', '--agent-status'].find(one => args.includes(one))
   if (!mode) return false
   const flag = (name: string): string | undefined => {
     const index = args.indexOf(name)
@@ -158,16 +159,27 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
   const manifest: Manifest = { files: object(loaded.files ?? {}) as Record<string, string>, groups: object(loaded.groups ?? {}) }
   const output = (value: unknown): void => { process.stdout.write(`${JSON.stringify(value, null, 2)}\n`) }
 
-  if (mode === '--codex-event' || mode === '--codex-report' || mode === '--agent-status') {
+  if (mode === '--codex-event' || mode === '--codex-report' || mode === '--agent-status' || mode === '--recover-hooks') {
+    const isRecovery = mode === '--recover-hooks'
+    const ownerToken = isRecovery ? flag('--recovery-owner-token') : undefined
+    const recoveryOwner = ownerToken === undefined ? undefined : {
+      token: ownerToken,
+      previous: flag('--recovery-previous-token') ?? '',
+      pid: Number(flag('--recovery-owner-pid')),
+      created: Number(flag('--recovery-owner-created')),
+    }
+    let ownership: 'busy' | 'owned' | 'coalesced' = 'busy'
     const now = Date.now(), supplied = Number(flag('--hook-started'))
     // Keep the source time even after a slow launch: re-dating an old Stop can replace a newer prompt.
     const started = Number.isSafeInteger(supplied) && supplied >= 0 && supplied <= now ? supplied : now
     const value = flag('--hook-deadline')
-    const hookDeadline = value === undefined ? Infinity : Number(value)
-    if (value !== undefined && !Number.isSafeInteger(hookDeadline)) throw new Error('INVALID_HOOK_DEADLINE')
+    const suppliedDeadline = value === undefined ? Infinity : Number(value)
+    if (value !== undefined && !Number.isSafeInteger(suppliedDeadline)) throw new Error('INVALID_HOOK_DEADLINE')
+    // A recovery pass has its own bound; replay keeps each stored event's source time.
+    const hookDeadline = isRecovery ? Math.min(Date.now() + 1800, suppliedDeadline) : suppliedDeadline
     const checkDeadline = (): void => { if (Date.now() >= hookDeadline) throw new Error('HOOK_TIMEOUT') }
     checkDeadline()
-    const raw = await input()
+    const raw: Json = isRecovery ? {} : await input()
     checkDeadline()
     type Pending = {
       version: number; progress: string; mode: string; agent: LocalAgent; session: string; now: string; at?: number
@@ -202,8 +214,7 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
         } : {},
       }
     }
-    const current = buildEntry(mode, agent, raw, flag, process.env, progress, started)
-    const { session } = current
+    const current = isRecovery ? undefined : buildEntry(mode, agent, raw, flag, process.env, progress, started)
     const rawEntry = (raw: Json): Pending => {
       if (raw.version !== 1 || raw.kind !== 'raw' || !Number.isSafeInteger(raw.at) || Number(raw.at) < 0 || Number(raw.at) > Date.now() + 60000) throw new Error('INVALID_RAW_ENTRY')
       if (!Array.isArray(raw.argv) || !raw.argv.every(value => typeof value === 'string')) throw new Error('INVALID_RAW_ARGV')
@@ -292,6 +303,13 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
     }
     const pending = join(root, 'pending')
     const pendingFiles = (): string[] => existsSync(pending) ? readdirSync(pending).filter(name => name.endsWith('.json')).sort() : []
+    const readPending = (file: string): Json => {
+      // Native input is at most 1 MiB. Allow its metadata envelope, not an unbounded file.
+      if (statSync(file).size > 2 * 1024 * 1024) throw Object.assign(new Error('PENDING_FILE_TOO_LARGE'), { code: 'E2BIG' })
+      const text = readFileSync(file, 'utf8')
+      if (Buffer.byteLength(text) > 2 * 1024 * 1024) throw Object.assign(new Error('PENDING_FILE_TOO_LARGE'), { code: 'E2BIG' })
+      return object(JSON.parse(text))
+    }
     // A queued entry passes the same checks a live event passes above before it is applied.
     const isHookEntry = (entry: Pending): boolean =>
       (entry.mode === '--codex-event' || entry.mode === '--agent-status' && entry.agent !== 'codex' && entry.agent !== 'cursor' && ['working', 'waiting', 'ended'].includes(String(entry.status)))
@@ -311,14 +329,14 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
       return (entry.at ?? Date.parse(entry.now)) < (typeof record.appliedAt === 'number' ? record.appliedAt : Date.parse(String(record.updated)))
     }
     // Only hooks have the 2.4 s cap to stay within their 3 s timeout.
-    const retryDeadline = mode === '--codex-report' ? performance.now() + 1800 : Math.min(performance.now() + 1800, 2400)
+    const retryDeadline = mode === '--codex-report' || isRecovery ? performance.now() + 1800 : Math.min(performance.now() + 1800, 2400)
     const inheritedDeadline = performance.now() + (hookDeadline - Date.now())
     // Stop 200 ms before the inherited deadline, when the hook worker kills this process:
     // a process killed while holding the board lock blocks every hook until the lock goes stale.
     const deadline = Math.min(retryDeadline, inheritedDeadline - 200)
     let queuedFile: string | undefined
     const queue = (error: unknown): void => {
-      if (queuedFile !== undefined) return
+      if (current === undefined || queuedFile !== undefined) return
       mkdirSync(pending, { recursive: true })
       if (pendingFiles().length >= 64) throw error
       const file = join(pending, `${String(started).padStart(15, '0')}-${randomUUID()}.json`)
@@ -326,12 +344,17 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
       queuedFile = file
     }
     let delay = 50
+    let processed = 0
     let report: CodexReport | undefined
     for (;;) {
       try {
         checkDeadline()
         report = withLocalLock(`${progress}.agent-board-lock`, () => {
           checkDeadline()
+          if (recoveryOwner !== undefined) {
+            ownership = claimHookRecovery(root, progress, recoveryOwner) ? 'owned' : 'coalesced'
+            if (ownership === 'coalesced') return
+          }
           // Interrupted queue writes are disposable only after active writers have had time to finish.
           if (existsSync(pending)) for (const name of readdirSync(pending).filter(name => name.endsWith('.tmp'))) {
             checkDeadline()
@@ -357,7 +380,7 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
             const file = join(pending, name)
             if (file === queuedFile) continue
             try {
-              const stored = object(JSON.parse(readFileSync(file, 'utf8')))
+              const stored = readPending(file)
               const entry = name.endsWith('.raw.json') ? rawEntry(stored) : stored as Pending
               if (entry.version === 1 && typeof entry.progress === 'string' && isHookEntry(entry)) {
                 if (entry.progress !== progress) continue
@@ -371,7 +394,9 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
             try { unlinkSync(file) } catch (error) {
               if ((error as { code?: string }).code !== 'ENOENT') throw error
             }
+            processed += 1
           }
+          if (current === undefined) return
           const applied = apply(current)
           if (queuedFile !== undefined) {
             try { unlinkSync(queuedFile) } catch (error) {
@@ -399,6 +424,19 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
         delay = Math.min(delay * 2, 400)
       }
     }
+    if (current === undefined) {
+      const remaining = pendingFiles().filter(name => {
+        try {
+          const stored = readPending(join(pending, name))
+          const entry = name.endsWith('.raw.json') ? rawEntry(stored) : stored as Pending
+          return entry.version === 1 && isHookEntry(entry) && entry.progress === progress
+        } catch (error) { return (error as { code?: string }).code !== 'ENOENT' }
+      }).length
+      output({ recoveryVersion: 1, processed, pending: remaining, ...(recoveryOwner === undefined ? {} : { owner: ownership }) })
+      return true
+    }
+    const { session } = current
+    if (mode !== '--codex-report' && args.includes('--hook-recovery-parent') && queuedFile !== undefined && existsSync(queuedFile)) process.stderr.write('AGENT_BOARD_HOOK_PENDING\n')
     if (mode === '--codex-report') output({ session, block: hash(`${agent}:${session}`).slice(0, 8), state: report!.state, updated: report!.updated, progress })
     else if (agent === 'cursor') output(raw.hook_event_name === 'sessionStart' ? { env: { AGENT_BOARD_SESSION_ID: session, AGENT_BOARD_AGENT: agent } } : {})
     else if (agent === 'antigravity') {

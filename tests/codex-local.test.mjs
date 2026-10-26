@@ -639,6 +639,7 @@ test('a queued event from every host is replayed by the next hook', async t => {
   for (const host of hosts) await t.test(`${host.agent} ${host.mode ?? host.event}`, () => fixture(async f => {
     const installed = f.install('--agent', host.agent, '--apply')
     assert.equal(installed.status, 0, installed.stderr)
+    holdAutomaticRecovery(f)
     const worker = join(f.root, 'agent-board-hook.mjs')
     let argv
     let payload = { ...host.payload }, input
@@ -734,6 +735,7 @@ child.spawnSync = (_executable, args) => {
 
 test('a hook whose reporter runs past the deadline saves the raw event and the next hook applies it', () => fixture(async f => {
   assert.equal(f.install('--apply').status, 0)
+  holdAutomaticRecovery(f)
   const real = readFileSync(f.script)
   const pidFile = join(f.root, 'raw-reporter.pid')
   f.save(f.script, `${real.toString().split('\n')[0]}\nimport { writeFileSync } from 'node:fs'\nwriteFileSync(${JSON.stringify(pidFile)}, String(process.pid))\nsetInterval(() => {}, 1000)\n`)
@@ -786,6 +788,7 @@ test('a hook whose reporter runs past the deadline saves the raw event and the n
 
 test('the hook deadline counts from the process start, not from when the worker runs', () => fixture(f => {
   assert.equal(f.install('--agent', 'gemini', '--apply').status, 0)
+  holdAutomaticRecovery(f)
   const worker = join(f.root, 'agent-board-hook.mjs')
   const argv = ['--hook-version', '1', '--hook-event', 'BeforeAgent', '--agent-status', '--agent', 'gemini', '--state', 'working', '--progress-file', f.progress]
   const payload = { session_id: session }
@@ -809,6 +812,7 @@ test('the hook deadline counts from the process start, not from when the worker 
 
 test('an Antigravity worker delayed past ten seconds preserves its event time without overwriting newer work', () => fixture(f => {
   assert.equal(f.install('--agent', 'antigravity', '--apply').status, 0)
+  holdAutomaticRecovery(f)
   const conversationId = 'synthetic-delayed-antigravity-241'
   const old = Date.now() - 11000, newer = Date.now() - 1000
   const report = (state, event, at) => f.command(['--agent-status', '--agent', 'antigravity', '--state', state, '--event', event, '--hook-started', String(at)], { conversationId })
@@ -850,6 +854,7 @@ test('an older live lifecycle event cannot replace a newer state or its update t
 test('a hook worker that starts after the host would stop it still reads its input and queues the event', () => fixture(f => {
   // A cold Windows PowerShell start can delay Antigravity's worker past its 3 s host limit (#241).
   assert.equal(f.install('--agent', 'antigravity', '--apply').status, 0)
+  holdAutomaticRecovery(f)
   const worker = join(f.root, 'agent-board-hook.mjs')
   const conversationId = 'late-antigravity-session'
   const argv = ['--hook-version', '1', '--hook-event', 'Stop', '--agent-status', '--agent', 'antigravity', '--state', 'waiting', '--event', 'Stop', '--progress-file', f.progress]
@@ -949,6 +954,7 @@ test('a report hook whose reporter runs past its deadline is never queued', () =
 
 test('a hook worker that starts just before its deadline still queues an event whose input arrives after it', () => fixture(async f => {
   assert.equal(f.install('--agent', 'gemini', '--apply').status, 0)
+  holdAutomaticRecovery(f)
   const worker = join(f.root, 'agent-board-hook.mjs')
   const stampFile = join(f.root, 'deadline-stamp.txt')
   const preload = join(f.home, 'deadline-soon.cjs')
@@ -1035,6 +1041,7 @@ test('a raw entry with an unknown flag or environment variable is dropped, not a
 
 test('raw replay classifies board requests and ordinary prompts like live events', () => fixture(f => {
   assert.equal(f.install('--agent', 'gemini', '--apply').status, 0)
+  holdAutomaticRecovery(f)
   const worker = join(f.root, 'agent-board-hook.mjs')
   for (const [index, prompt] of ['/agent-board', 'Continue the task'].entries()) {
     const at = Date.now() - 3050
@@ -2748,6 +2755,7 @@ test('Windows Antigravity falls back to PowerShell when setup cannot verify a qu
 
 test('Windows Antigravity queues an event with its launch process start stamp', { skip: process.platform !== 'win32' }, () => fixture(async f => {
   assert.equal(f.install('--agent', 'antigravity', '--apply').status, 0)
+  holdAutomaticRecovery(f)
   const worker = join(f.root, 'agent-board-hook.mjs')
   const command = JSON.parse(readFileSync(join(f.home, '.gemini', 'config', 'hooks.json')))['agent-board-local'].PreInvocation[0].command
   const stampFile = join(f.root, 'powershell-stamp.json')
@@ -3155,6 +3163,15 @@ require('node:module').syncBuiltinESMExports()
 }
 
 const pendingFiles = f => existsSync(join(f.root, 'pending')) ? readdirSync(join(f.root, 'pending')).filter(name => name.endsWith('.json')).sort() : []
+
+// These regressions inspect the queue before deliberately replaying it. A live
+// owner keeps automatic draining separate; its own lifecycle is tested below.
+const holdAutomaticRecovery = f => {
+  const normalized = process.platform === 'win32' ? resolve(f.progress).toLowerCase() : resolve(f.progress)
+  const file = join(f.root, `hook-recovery-${createHash('sha256').update(normalized).digest('hex')}.json`)
+  f.save(file, JSON.stringify({ version: 1, pid: process.pid, token: createHash('sha256').update(f.root).digest('hex').slice(0, 32), created: Date.now() }))
+}
+
 
 test('a first Codex event names its block and project after its working folder', () => fixture(f => {
   assert.equal(f.install('--apply').status, 0)
@@ -4057,4 +4074,262 @@ test('doctor: a host with a skill but no report hook is named', () => fixture(as
   const installed = doctor()
   assert.equal(installed.reportHook, 'installer')
   assert.equal(installed.problem, undefined)
+}))
+
+test('manual hook recovery drains a queued final Stop without waiting for stdin', () => fixture(async f => {
+  assert.equal(f.install('--apply').status, 0)
+  assert.equal(f.event('UserPromptSubmit', 'manual-recovery-turn').status, 0)
+  const foreign = '<!-- auto session=abcdef12 agent=opencode state=waiting updated=2026-10-24T00:00:00Z -->\n### Foreign bytes stay exact\n- [?] Blue or green?\n<!-- /auto session=abcdef12 -->\n'
+  f.save(f.progress, readFileSync(f.progress, 'utf8') + foreign)
+  const locked = lockedProgress(f)
+  const queued = f.event('Stop', 'manual-recovery-turn', {}, locked.env)
+  assert.equal(queued.status, 0, queued.stderr)
+  const [name] = pendingFiles(f)
+  assert.ok(name, 'the locked direct CLI event must enter pending/')
+  const source = JSON.parse(readFileSync(join(f.root, 'pending', name), 'utf8'))
+  assert.equal(source.payload.hook_event_name, 'Stop')
+  unlinkSync(locked.marker)
+  const isolated = ['--home', f.home, '--codex-dir', join(f.home, '.codex'), '--grok-dir', join(f.home, '.grok'), '--hermes-dir', join(f.home, '.hermes')]
+  const recovered = await nativeProcess(process.execPath, [f.script, ...isolated, '--recover-hooks'], f.env, '', callback => setTimeout(callback, 10000), stopNativeTree, { isInputOpen: true })
+  assert.equal(recovered.error, undefined, hookFailure(recovered))
+  assert.equal(recovered.status, 0, hookFailure(recovered))
+  assert.deepEqual(JSON.parse(recovered.stdout), { recoveryVersion: 1, processed: 1, pending: 0 })
+  assert.equal(recovered.stderr, '')
+  assert.deepEqual(pendingFiles(f), [])
+  const owner = createHash('sha256').update(`codex:${session}`).digest('hex')
+  const record = JSON.parse(readFileSync(join(f.root, 'sessions', `${owner}.json`), 'utf8'))
+  assert.equal(record.state, 'waiting')
+  assert.equal(record.appliedAt, source.at)
+  assert.equal(Date.parse(record.updated), Date.parse(source.now))
+  const board = readFileSync(f.progress, 'utf8')
+  assert.match(board, new RegExp(`<!-- auto session=${owner.slice(0, 8)} [^\n]*state=waiting`))
+  assert.equal(board.split(foreign).length, 2, 'the unrelated block bytes must remain exact and singular')
+}))
+
+test('manual hook recovery drops stale metadata and leaves other boards and messages untouched', () => fixture(f => {
+  assert.equal(f.install('--apply').status, 0)
+  const activeSession = 'manual-grok-session-123'
+  const working = f.command(['--agent-status', '--agent', 'grok', '--state', 'working'], { session_id: activeSession })
+  assert.equal(working.status, 0, working.stderr)
+  const owner = createHash('sha256').update(`grok:${activeSession}`).digest('hex')
+  const recordFile = join(f.root, 'sessions', `${owner}.json`)
+  const newer = JSON.parse(readFileSync(recordFile, 'utf8'))
+  const boardBefore = readFileSync(f.progress)
+  const staleAt = newer.appliedAt - 1000
+  f.save(join(f.root, 'pending', '001.json'), JSON.stringify({
+    version: 1, progress: f.progress, mode: '--agent-status', agent: 'grok', session: activeSession, status: 'waiting',
+    now: new Date(staleAt).toISOString().replace(/\.\d{3}Z$/, 'Z'), at: staleAt, isBoardPrompt: false, isPrompt: false,
+    payload: {},
+  }) + '\n')
+  const otherProgress = join(f.home, 'other-board', 'progress.md')
+  const otherBoard = Buffer.from('## Other board\r\n\r\nForeign bytes stay exact.\r\n')
+  f.save(otherProgress, otherBoard)
+  const foreignName = '002.json'
+  const foreignQueue = JSON.stringify({
+    version: 1, progress: otherProgress, mode: '--agent-status', agent: 'grok', session: 'foreign-hook-session-123', status: 'waiting',
+    now: new Date().toISOString().replace(/\.\d{3}Z$/, 'Z'), at: Date.now(), isBoardPrompt: false, isPrompt: false, payload: {},
+  }) + '\n'
+  f.save(join(f.root, 'pending', foreignName), foreignQueue)
+  const messages = join(f.root, 'messages', 'messages.json')
+  const messageBytes = Buffer.from(JSON.stringify({ messages: [{ id: 'SYNTHETIC-UNCERTAIN-1', target: 'binding1', turn: 'turn1', from: 'board', to: 'codex:synthetic', text: 'Synthetic message must not be sent', status: 'uncertain', updated: 1, reply: '', error: 'ACK_TIMEOUT' }] }, null, 2) + '\n')
+  f.save(messages, messageBytes)
+  const invoked = join(f.home, 'unexpected-model-send')
+  const standIn = join(f.home, 'unexpected-model-send.cjs')
+  f.save(standIn, `require('node:fs').writeFileSync(${JSON.stringify(invoked)}, 'invoked')\n`)
+  const result = f.command(['--recover-hooks', '--messages-dir', dirname(messages)], undefined, { AGENT_BOARD_CODEX: standIn })
+  assert.equal(result.status, 0, result.stderr)
+  // The result counts this selected board; a different board's queue remains below.
+  assert.deepEqual(JSON.parse(result.stdout), { recoveryVersion: 1, processed: 1, pending: 0 })
+  assert.equal(result.stderr, '')
+  assert.deepEqual(readFileSync(f.progress), boardBefore)
+  assert.deepEqual(JSON.parse(readFileSync(recordFile, 'utf8')), newer)
+  assert.equal(readFileSync(join(f.root, 'pending', foreignName), 'utf8'), foreignQueue)
+  assert.deepEqual(pendingFiles(f), [foreignName])
+  assert.deepEqual(readFileSync(otherProgress), otherBoard)
+  assert.deepEqual(readFileSync(messages), messageBytes)
+  assert.equal(existsSync(invoked), false, 'recovery must not invoke a model, Send transport, or approval path')
+}))
+
+const automaticRecoveryFixture = f => {
+  const pidFile = join(f.home, 'automatic-recovery.pid')
+  const attemptsFile = join(f.home, 'automatic-recovery-attempts')
+  const preload = join(f.home, 'observe-automatic-recovery.cjs')
+  f.save(preload, `const child = require('node:child_process')
+const fs = require('node:fs')
+const spawn = child.spawn
+const spawnSync = child.spawnSync
+child.spawn = (executable, args, options) => {
+  const result = spawn(executable, args, options)
+  if (Array.isArray(args) && args.includes('--recover-pending')) fs.writeFileSync(${JSON.stringify(pidFile)}, String(result.pid))
+  return result
+}
+child.spawnSync = (executable, args, options) => {
+  if (Array.isArray(args) && args.includes('--recover-hooks')) fs.appendFileSync(${JSON.stringify(attemptsFile)}, '1\\n')
+  return spawnSync(executable, args, options)
+}
+require('node:module').syncBuiltinESMExports()
+`)
+  const normalized = process.platform === 'win32' ? resolve(f.progress).toLowerCase() : resolve(f.progress)
+  const lease = join(f.root, `hook-recovery-${createHash('sha256').update(normalized).digest('hex')}.json`)
+  const hooks = JSON.parse(readFileSync(join(f.home, '.gemini', 'config', 'hooks.json'), 'utf8'))['agent-board-local']
+  const conversationId = 'synthetic-automatic-recovery-session'
+  const payload = JSON.stringify({ conversationId, invocationNum: 0, prompt: 'PRIVATE_PROMPT', approval: 'PRIVATE_APPROVAL' })
+  const record = join(f.root, 'sessions', createHash('sha256').update(`antigravity:${conversationId}`).digest('hex') + '.json')
+  return { pidFile, attemptsFile, preload, lease, hooks, conversationId, payload, record }
+}
+
+const waitForAutomaticRecovery = async (condition, message, limit = 10000) => {
+  const until = Date.now() + limit
+  while (!condition() && Date.now() < until) await new Promise(done => setTimeout(done, 25))
+  assert.ok(condition(), message)
+}
+
+test('automatic hook recovery applies a queued Antigravity Stop after the lock is released', { timeout: 30000 }, () => fixture(async f => {
+  assert.equal(f.install('--agent', 'antigravity', '--apply').status, 0)
+  const recovery = automaticRecoveryFixture(f)
+  const started = await fireCommand(f, recovery.hooks.PreInvocation[0].command, recovery.payload)
+  assert.equal(started.status, 0, hookFailure(started))
+  assert.equal(JSON.parse(readFileSync(recovery.record, 'utf8')).state, 'working')
+  const foreign = Buffer.from('<!-- auto session=abcdef12 agent=opencode state=waiting updated=2026-10-24T00:00:00Z -->\r\n### Foreign bytes stay exact\r\n- [?] Blue or green?\r\n<!-- /auto session=abcdef12 -->\r\n')
+  f.save(f.progress, Buffer.concat([readFileSync(f.progress), foreign]))
+  const messages = join(f.root, 'messages', 'messages.json')
+  const messageBytes = Buffer.from('{"messages":[{"id":"SYNTHETIC-UNCERTAIN-AUTO","status":"uncertain","text":"PRIVATE_MESSAGE"}]}\n')
+  f.save(messages, messageBytes)
+  const locked = lockedProgress(f)
+  const env = { ...f.env, NODE_OPTIONS: `${locked.env.NODE_OPTIONS} --require ${JSON.stringify(recovery.preload)}` }
+  let recoveryPid
+  try {
+    const stopped = await fireCommand({ ...f, env }, recovery.hooks.Stop[0].command, recovery.payload)
+    assert.equal(stopped.status, 0, hookFailure(stopped))
+    await waitForAutomaticRecovery(() => existsSync(recovery.pidFile) && pendingFiles(f).length === 1, 'the installed Stop hook must queue once and launch its owned recovery helper')
+    recoveryPid = Number(readFileSync(recovery.pidFile, 'utf8'))
+    assert.ok(isReporterAlive(recoveryPid), 'the tracked automatic recovery helper must be live before the lock is released')
+    const [queuedName] = pendingFiles(f)
+    const source = JSON.parse(readFileSync(join(f.root, 'pending', queuedName), 'utf8'))
+    assert.equal(source.event, 'Stop')
+    assert.doesNotMatch(JSON.stringify(source), /PRIVATE_/)
+    unlinkSync(locked.marker)
+    await waitForAutomaticRecovery(() => pendingFiles(f).length === 0 && !existsSync(recovery.lease) && JSON.parse(readFileSync(recovery.record, 'utf8')).state === 'waiting', 'automatic recovery must drain the selected queue, remove its lease and apply waiting')
+    await waitForAutomaticRecovery(() => !isReporterAlive(recoveryPid), 'the owned automatic recovery helper must exit after draining', 3000)
+    const saved = JSON.parse(readFileSync(recovery.record, 'utf8'))
+    assert.equal(saved.appliedAt, source.at)
+    assert.equal(Date.parse(saved.updated), Date.parse(source.now))
+    assert.ok(readFileSync(f.progress).includes(foreign), 'the unrelated foreign block bytes must remain exact')
+    assert.deepEqual(readFileSync(messages), messageBytes)
+  } finally {
+    rmSync(locked.marker, { force: true })
+    if (Number.isInteger(recoveryPid) && isReporterAlive(recoveryPid)) await stopReporter(recoveryPid)
+  }
+}))
+
+test('automatic hook recovery exhausts three locked attempts and leaves manual recovery possible', { timeout: 30000 }, () => fixture(async f => {
+  assert.equal(f.install('--agent', 'antigravity', '--apply').status, 0)
+  const recovery = automaticRecoveryFixture(f)
+  const started = await fireCommand(f, recovery.hooks.PreInvocation[0].command, recovery.payload)
+  assert.equal(started.status, 0, hookFailure(started))
+  const locked = lockedProgress(f)
+  const env = { ...f.env, NODE_OPTIONS: `${locked.env.NODE_OPTIONS} --require ${JSON.stringify(recovery.preload)}` }
+  let recoveryPid
+  try {
+    const stopped = await fireCommand({ ...f, env }, recovery.hooks.Stop[0].command, recovery.payload)
+    assert.equal(stopped.status, 0, hookFailure(stopped))
+    await waitForAutomaticRecovery(() => existsSync(recovery.pidFile) && pendingFiles(f).length === 1, 'the installed Stop hook must launch recovery for its queued metadata')
+    recoveryPid = Number(readFileSync(recovery.pidFile, 'utf8'))
+    await waitForAutomaticRecovery(() => !isReporterAlive(recoveryPid), 'the bounded automatic helper must exit while the synthetic lock remains held')
+    assert.equal(readFileSync(recovery.attemptsFile, 'utf8'), '1\n1\n1\n')
+    assert.match(hookLog(f), /antigravity HOOK_RECOVERY_NEEDED\r?\n$/)
+    assert.equal(existsSync(recovery.lease), false)
+    assert.equal(pendingFiles(f).length, 1)
+    assert.equal(JSON.parse(readFileSync(recovery.record, 'utf8')).state, 'working')
+    unlinkSync(locked.marker)
+    const manual = f.command(['--recover-hooks', '--progress-file', f.progress])
+    assert.equal(manual.status, 0, manual.stderr)
+    assert.deepEqual(JSON.parse(manual.stdout), { recoveryVersion: 1, processed: 1, pending: 0 })
+    assert.deepEqual(pendingFiles(f), [])
+    assert.equal(JSON.parse(readFileSync(recovery.record, 'utf8')).state, 'waiting')
+  } finally {
+    rmSync(locked.marker, { force: true })
+    if (Number.isInteger(recoveryPid) && isReporterAlive(recoveryPid)) await stopReporter(recoveryPid)
+  }
+}))
+
+test('automatic hook recovery preserves an old claim while its owner is still alive', () => fixture(f => {
+  assert.equal(f.install('--agent', 'antigravity', '--apply').status, 0)
+  const recovery = automaticRecoveryFixture(f)
+  const claim = JSON.stringify({ version: 1, pid: process.pid, token: 'a'.repeat(32), created: Date.now() - 60000 })
+  f.save(recovery.lease, claim)
+  const worker = join(f.root, 'agent-board-hook.mjs')
+  const args = [worker, '--hook-version', '1', '--hook-event', 'Stop', '--agent-status', '--agent', 'antigravity', '--state', 'waiting', '--event', 'Stop', '--progress-file', f.progress, '--hook-started', String(Date.now() - 3000)]
+  const result = spawnSync(process.execPath, args, { env: { ...f.env, NODE_OPTIONS: `--require ${JSON.stringify(recovery.preload)}` }, input: recovery.payload, encoding: 'utf8', windowsHide: true, timeout: 5000 })
+  assert.equal(result.status, 0, hookFailure(result))
+  assert.equal(pendingFiles(f).length, 1)
+  assert.equal(readFileSync(recovery.lease, 'utf8'), claim)
+  assert.equal(existsSync(recovery.pidFile), false, 'a live claim must coalesce a new job without spawning another helper')
+  assert.equal(existsSync(`${recovery.lease}.recover`), false)
+  const manual = f.command(['--recover-hooks', '--progress-file', f.progress])
+  assert.equal(manual.status, 0, manual.stderr)
+  assert.deepEqual(JSON.parse(manual.stdout), { recoveryVersion: 1, processed: 1, pending: 0 })
+  assert.equal(readFileSync(recovery.lease, 'utf8'), claim, 'manual recovery does not take another live owner claim')
+}))
+
+test('automatic hook recovery replaces a stale claim only after its owner has exited', { timeout: 15000 }, () => fixture(async f => {
+  assert.equal(f.install('--agent', 'antigravity', '--apply').status, 0)
+  const recovery = automaticRecoveryFixture(f)
+  const exited = spawnSync(process.execPath, ['-e', ''], { env: f.env, encoding: 'utf8', windowsHide: true, timeout: 5000 })
+  assert.equal(exited.status, 0)
+  assert.ok(Number.isInteger(exited.pid) && exited.pid > 0)
+  assert.equal(isReporterAlive(exited.pid), false)
+  f.save(recovery.lease, JSON.stringify({ version: 1, pid: exited.pid, token: 'b'.repeat(32), created: Date.now() - 31000 }))
+  // An earlier worker could crash while holding its secondary guard. The new
+  // handover uses the existing board lock and must not depend on that tombstone.
+  const crashedGuard = JSON.stringify({ version: 1, pid: exited.pid, token: 'c'.repeat(32), created: Date.now() - 31000 })
+  f.save(`${recovery.lease}.recover`, crashedGuard)
+  const args = [join(f.root, 'agent-board-hook.mjs'), '--hook-version', '1', '--hook-event', 'Stop', '--agent-status', '--agent', 'antigravity', '--state', 'waiting', '--event', 'Stop', '--progress-file', f.progress, '--hook-started', String(Date.now() - 3000)]
+  let pid
+  try {
+    const result = spawnSync(process.execPath, args, { env: { ...f.env, NODE_OPTIONS: `--require ${JSON.stringify(recovery.preload)}` }, input: recovery.payload, encoding: 'utf8', windowsHide: true, timeout: 5000 })
+    assert.equal(result.status, 0, hookFailure(result))
+    await waitForAutomaticRecovery(() => existsSync(recovery.pidFile), 'a proven-dead stale owner must allow one new helper')
+    pid = Number(readFileSync(recovery.pidFile, 'utf8'))
+    await waitForAutomaticRecovery(() => !isReporterAlive(pid), 'the replacement helper must exit')
+    assert.equal(existsSync(recovery.lease), false)
+    assert.equal(readFileSync(`${recovery.lease}.recover`, 'utf8'), crashedGuard)
+    assert.deepEqual(pendingFiles(f), [])
+    assert.equal(JSON.parse(readFileSync(recovery.record, 'utf8')).state, 'waiting')
+  } finally {
+    if (Number.isInteger(pid) && isReporterAlive(pid)) await stopReporter(pid)
+  }
+}))
+
+test('automatic hook recovery serializes competing stale replacement candidates', { timeout: 15000 }, () => fixture(async f => {
+  assert.equal(f.install('--apply').status, 0)
+  const selected = process.platform === 'win32' ? resolve(f.progress).toLowerCase() : resolve(f.progress)
+  const claim = join(f.root, `hook-recovery-${createHash('sha256').update(selected).digest('hex')}.json`)
+  const dead = spawnSync(process.execPath, ['-e', ''], { env: f.env, encoding: 'utf8', timeout: 3000, windowsHide: true })
+  assert.equal(dead.status, 0)
+  assert.throws(() => process.kill(dead.pid, 0), error => error.code === 'ESRCH')
+  f.save(claim, JSON.stringify({ version: 1, pid: dead.pid, token: '1'.repeat(32), created: Date.now() - 60000 }))
+  const guard = JSON.stringify({ version: 1, pid: dead.pid, token: '2'.repeat(32), created: Date.now() - 60000 })
+  f.save(`${claim}.recover`, guard)
+  const worker = join(f.home, 'replacement-candidate.mjs')
+  f.save(worker, `import { claimHookRecovery } from ${JSON.stringify(new URL('../scripts/hook-recovery-owner.ts', import.meta.url).href)}
+import { withLocalLock } from ${JSON.stringify(new URL('../scripts/local-lock.ts', import.meta.url).href)}
+const [root, progress, value] = process.argv.slice(2)
+const request = { ...JSON.parse(value), pid: process.pid }
+const owned = withLocalLock(progress + '.agent-board-lock', () => claimHookRecovery(root, progress, request), { waitMs: 1500 })
+process.stdout.write(JSON.stringify({ owned, pid: process.pid, token: request.token }))
+`)
+  const created = Date.now()
+  const results = await Promise.all(['3', '4'].map(token => nativeProcess(process.execPath, [worker, f.root, f.progress, JSON.stringify({ previous: '1'.repeat(32), token: token.repeat(32), created })], f.env, '', callback => setTimeout(callback, 5000))))
+  const outcomes = results.map(result => {
+    assert.equal(result.error, undefined, hookFailure(result))
+    assert.equal(result.status, 0, hookFailure(result))
+    return JSON.parse(result.stdout)
+  })
+  const winners = outcomes.filter(outcome => outcome.owned)
+  assert.equal(winners.length, 1)
+  assert.deepEqual(JSON.parse(readFileSync(claim, 'utf8')), { version: 1, pid: winners[0].pid, token: winners[0].token, created })
+  assert.equal(readFileSync(`${claim}.recover`, 'utf8'), guard)
+  assert.equal(existsSync(`${f.progress}.agent-board-lock`), false)
+  assert.equal(existsSync(`${f.progress}.agent-board-lock.recover`), false)
 }))
