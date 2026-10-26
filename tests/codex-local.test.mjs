@@ -1213,6 +1213,8 @@ test('SDK metadata and reporter execution share one deadline without a late writ
   try {
     const installed = spawnSync(process.execPath, [setup, '--home', home, '--agent', 'opencode', '--apply'], { env, encoding: 'utf8', windowsHide: true, timeout: 15000 })
     assert.equal(installed.status, 0, installed.stderr)
+    // Inspect the original reporter deadline without a separate recovery replay.
+    holdAutomaticRecovery(f)
     const source = readFileSync(join(home, '.config', 'opencode', 'plugins', 'agent-board-local.js'), 'utf8')
     const stub = 'const tool = Object.assign(value => value, { schema: { string: () => ({ describe: () => ({}) }), enum: () => ({}), array: () => ({}) } })'
     const plugin = join(home, 'synthetic-plugin.mjs')
