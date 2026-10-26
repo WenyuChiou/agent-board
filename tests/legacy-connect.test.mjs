@@ -9,6 +9,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { pathToFileURL } from 'node:url'
 import { RELEASE_0_20_5 } from './fixtures/released.ts'
+import { generatedHookCommand } from './fixtures/generated-hook-command.mjs'
 
 const source = readFileSync(new URL('../hooks/board-script.ts', import.meta.url), 'utf8')
 const bundle = JSON.parse(source.slice(source.indexOf('export const BOARD_SCRIPT = ') + 'export const BOARD_SCRIPT = '.length))
@@ -984,8 +985,7 @@ test('antigravity connect: the legacy connector writes the Antigravity report ho
     assert.equal(entries.length, 1)
     assert.equal(entries[0].type, 'command')
     assert.equal(entries[0].timeout, 3)
-    // Windows runs the hook through PowerShell's -EncodedCommand, so read the launch line back.
-    const command = process.platform === 'win32' ? Buffer.from(entries[0].command.split(' ').at(-1), 'base64').toString('utf16le') : entries[0].command
+    const command = generatedHookCommand(entries[0].command).text
     for (const part of [worker, f.progress, '--agent-status', 'antigravity', states[event], '--hook-event', event]) assert.ok(command.includes(part), `${event} lacks ${part}: ${command}`)
   }
   assert.ok(existsSync(join(f.home, '.gemini', 'config', 'skills', 'agent-board', 'SKILL.md')))

@@ -1,7 +1,7 @@
 import { boardPromptHelper, boardRequestWords, boardRun, geminiBoardCommand, normalizeCommandPath, opencodeBoardCommand } from './board-commands'
 import { HOOK_VERSION, hookGuardSource, hostHookTimeout } from './hook-safety'
 import { INBOX_DROPPED_COPY, INBOX_DROPPED_FILE, INBOX_DROPPED_FOLD_BYTES, INBOX_DROPPED_KEEP_DAYS, INBOX_DROPPED_STALE_MINUTES, INBOX_MAX_BYTES, INBOX_MAX_FILES } from './hook-reporters'
-import { antigravityCommand, antigravityHooks, encodedCommandText, hookCommandArgs } from './local-agents'
+import { antigravityCommand, antigravityHooks, directHookArgs, encodedCommandText, hookCommandArgs } from './local-agents'
 import { legacyOpenClawPlugin, legacyOpenCodePlugin } from './legacy-hook-plugins'
 import { LANGS, ZH_TW } from './i18n'
 import type { Strings } from './i18n'
@@ -219,7 +219,7 @@ export const withoutSection = (text: string): string => {
 // installed (its folder under the home directory); `edit` turns the file's text into the
 // new text, or null when the file cannot be read as JSON and is left alone.
 // `node` and `progress` build Antigravity's commands; only a connect that writes them passes them.
-export type ConnectContext = { home: string; sep: string; isWindows: boolean; script: string; inbox: string; codexHome: string; grokHome: string; hermesHome: string; openclawHome: string; opencodeHome?: string; board?: string; node?: string; progress?: string; s?: Strings }
+export type ConnectContext = { home: string; sep: string; isWindows: boolean; script: string; inbox: string; codexHome: string; grokHome: string; hermesHome: string; openclawHome: string; opencodeHome?: string; board?: string; node?: string; antigravityNode?: string; progress?: string; s?: Strings }
 
 export type AgentHook = {
   agent: string
@@ -535,7 +535,7 @@ export const agentHooks = (ctx: ConnectContext): AgentHook[] => {
         const folder = ctx.script.replace(/[\\/][^\\/]*$/, '')
         const progress = ctx.progress ?? [folder, 'progress.md'].join(ctx.sep)
         const command = (event: string, state: string): string =>
-          antigravityCommand(hookCommandArgs(ctx.node ?? 'node', ctx.home, 'antigravity', [folder, HOOK_WORKER].join(ctx.sep), progress, event, state), ctx.isWindows, shellQuote)
+          antigravityCommand(hookCommandArgs(ctx.node ?? 'node', ctx.home, 'antigravity', [folder, HOOK_WORKER].join(ctx.sep), progress, event, state), ctx.isWindows, shellQuote, ctx.antigravityNode)
         return writeChanged(text, config, { ...config, [ANTIGRAVITY_HOOK]: antigravityHooks(command) })
       },
     },
@@ -875,6 +875,12 @@ export const connectDataRoots = (text: string, isNearestOnly = false): string[] 
     catch { strings.push(yamlDoubleQuoted(match[0])) }
   }
   const roots = new Set<string>()
+  for (const source of [...strings]) {
+    const args = directHookArgs(source)
+    if (!args) continue
+    strings.push(...args)
+    for (const arg of args) if (/^(?:[A-Za-z]:[\\/]|\/)[^\r\n]*[\\/]progress-hook\.mjs$/.test(arg)) roots.add(arg.replace(/[\\/][^\\/]+$/, ''))
+  }
   // Antigravity's command names its folder by the hook worker, quoted whole; on Windows that
   // command is PowerShell's encoded text, which doubles an apostrophe, where a POSIX shell
   // closes and reopens the quote instead (#285).

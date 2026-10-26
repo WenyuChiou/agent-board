@@ -11,6 +11,7 @@ import type { ConnectContext, SetupState } from '../hooks/connect-pure'
 import { langOf, STRINGS } from '../hooks/strings'
 import { installControlRoot, withInstallLock } from './install-control'
 import { connectLegacy } from './legacy-connect'
+import { windowsHookNode } from './windows-hook-node'
 
 export type LegacyConnectRequest = {
   mode: 'auto' | 'connect' | 'remove' | 'status' | 'ack' | 'language'
@@ -435,7 +436,10 @@ export const legacyConnect = async (value: unknown, bundle: string): Promise<{ s
       const { seed: _seed, ...metadata } = one
       state.pending = { request: metadata, bundle: hash(bundle) }
       transaction.save()
-      const result = connectLegacy(transaction, one, bundle, process.platform === 'win32', observation, found, process.execPath)
+      const antigravity = agentHooks(context).find(hook => hook.agent === 'antigravity' && hook.label !== '')
+      const hasAntigravity = antigravity !== undefined && (antigravity.dirs ?? [antigravity.dir]).some(dir => transaction.exists(dir))
+      const directNode = isWindows && hasAntigravity ? windowsHookNode(process.execPath) : undefined
+      const result = connectLegacy(transaction, one, bundle, process.platform === 'win32', observation, found, process.execPath, directNode)
       state.revision += 1
       delete state.pending
       transaction.save()

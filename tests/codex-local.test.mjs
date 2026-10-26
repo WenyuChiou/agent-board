@@ -1,7 +1,7 @@
 import { spawn, spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { createRequire, registerHooks } from 'node:module'
-import { chmodSync, closeSync, existsSync, lstatSync, lutimesSync, mkdirSync, mkdtempSync, openSync, readFileSync, readdirSync, rmSync, symlinkSync, unlinkSync, utimesSync, writeFileSync } from 'node:fs'
+import { chmodSync, closeSync, copyFileSync, existsSync, lstatSync, lutimesSync, mkdirSync, mkdtempSync, openSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, unlinkSync, utimesSync, writeFileSync } from 'node:fs'
 import { availableParallelism, constants, setPriority, tmpdir } from 'node:os'
 import { delimiter, dirname, join, resolve } from 'node:path'
 import { beforeEach, test } from 'node:test'
@@ -14,6 +14,7 @@ import { hookBootstrap, hookGuardSource, hookWorker } from '../hooks/hook-safety
 import { classifierDiagnostic, observeClassifier } from './fixtures/classifier-diagnostic.mjs'
 import { assertNativeProbeReturned, nativeProbeDiagnostic } from './fixtures/native-probe-diagnostic.mjs'
 import { withDeniedCreation } from './fixtures/windows-create-denied.mjs'
+import { generatedHookCommand } from './fixtures/generated-hook-command.mjs'
 
 test('native cleanup diagnostics keep watchdog failures bounded and private', () => {
   const error = Object.assign(new Error('PRIVATE_ERROR'), { code: 'ETIMEDOUT', path: '/PRIVATE_EXECUTABLE', spawnargs: ['PRIVATE_ARGUMENT'] })
@@ -502,14 +503,19 @@ const isHeavyRun = Boolean(process.env.CI) || process.env.AGENT_BOARD_HEAVY_TEST
 test('L5 busy machine: Antigravity and Codex hooks apply or queue every event with up to 3 CPUs busy', { skip: isHeavyRun ? false : 'keeps up to 3 CPUs busy; runs in CI, or locally with AGENT_BOARD_HEAVY_TESTS=1' }, t => fixture(async f => {
   assert.equal(f.install('--apply').status, 0)
   assert.equal(f.install('--agent', 'antigravity', '--apply').status, 0)
-  // Records when each hook's worker started, and the PowerShell start that Antigravity's Windows wrapper
-  // passes, so a failure tells a hook that never got the CPU apart from one that missed its deadline.
+  // A direct command sets its argument data after preloads run. Observe the worker import too,
+  // so a failure tells a worker that never got the CPU apart from one that missed its deadline.
   const preload = join(f.home, 'worker-start.cjs')
   f.save(preload, `const { basename } = require('node:path')
-if (basename(process.argv[1] || '') === 'agent-board-hook.mjs') {
+const markWorker = () => {
   const at = process.argv.indexOf('--hook-started')
   try { require('node:fs').writeFileSync(process.env.L5_START_STAMP, Date.now() + ' ' + (at === -1 ? '' : process.argv[at + 1]), { flag: 'wx' }) } catch {}
 }
+if (basename(process.argv[1] || '') === 'agent-board-hook.mjs') markWorker()
+require('node:module').registerHooks({ load(url, context, next) {
+  if (url.endsWith('/agent-board-hook.mjs')) markWorker()
+  return next(url, context)
+} })
 `)
   // One core stays free and the loops run below normal priority: the machine is busy, but neither the hook
   // nor the other test files that `node --test` runs at the same time go without CPU before the host's 3 s stop.
@@ -640,8 +646,8 @@ test('a queued event from every host is replayed by the next hook', async t => {
       const config = JSON.parse(readFileSync(join(f.home, ...host.config)))
       const hook = host.agent === 'antigravity' ? config['agent-board-local'][host.event][0] : config.hooks[host.event][0]
       const command = hook.command ?? hook.hooks[0].command
-      const launch = host.agent === 'antigravity' && process.platform === 'win32' ? Buffer.from(command.split(' ').at(-1), 'base64').toString('utf16le') : command
-      const words = [...launch.matchAll(/"([^"]*)"|'((?:[^']|'')*)'|(\S+)/g)].map(match => match[1] ?? match[2]?.replaceAll("''", "'") ?? match[3])
+      const launch = generatedHookCommand(command)
+      const words = launch.args ?? [...launch.text.matchAll(/"([^"]*)"|'((?:[^']|'')*)'|(\S+)/g)].map(match => match[1] ?? match[2]?.replaceAll("''", "'") ?? match[3])
       argv = words.slice(words.indexOf('--hook-version'), words.includes('--hook-started') ? words.indexOf('--hook-started') : undefined)
       assert.equal(argv[0], '--hook-version')
     } else {
@@ -2591,23 +2597,176 @@ test('Windows Antigravity commands fit cmd.exe with a 120 character home path', 
   for (const group of Object.values(hooks)) for (const hook of group) assert.ok(hook.command.length < 8191, `${hook.command.length} characters`)
 }))
 
-test('Windows Antigravity queues an event with the PowerShell process start stamp', { skip: process.platform !== 'win32' }, () => fixture(async f => {
+const syntheticWindowsWrapperWorker = (capture, stdout, stderr, status) => `import { writeFileSync } from 'node:fs'
+let input = ''
+process.stdin.setEncoding('utf8')
+process.stdin.on('data', chunk => { input += chunk })
+process.stdin.on('end', () => {
+  writeFileSync(${JSON.stringify(capture)}, JSON.stringify({ worker: process.argv[1], argv: process.argv.slice(2), input }))
+  process.stdout.write(${JSON.stringify(stdout)})
+  process.stderr.write(${JSON.stringify(stderr)})
+  process.exit(${status})
+})
+`
+
+test('Windows Antigravity verified Node commands bypass PowerShell and preserve synthetic session state through cmd', { skip: process.platform !== 'win32' }, t => fixture(async f => {
+  if (f.home.length >= 119) return t.skip('TEMP is too long to leave room for a 120 character home path')
+  const home = join(f.home, 'h'.repeat(119 - f.home.length))
+  assert.equal(home.length, 120)
+  mkdirSync(home)
+  const env = isolatedEnv(home)
+  const installed = spawnSync(process.execPath, [setup, '--home', home, '--agent', 'antigravity', '--apply'], { env, encoding: 'utf8', windowsHide: true, timeout: 15000 })
+  assert.equal(installed.status, 0, installed.stderr)
+  const root = join(home, '.agent-board')
+  const progress = join(root, 'progress.md')
+  const hooks = JSON.parse(readFileSync(join(home, '.gemini', 'config', 'hooks.json'), 'utf8'))['agent-board-local']
+  if (/^powershell\.exe /i.test(hooks.PreInvocation[0].command)) return t.skip('this Node executable has no verified quote-free absolute path')
+  const foreign = '<!-- auto session=abcdef12 agent=opencode state=waiting updated=2026-10-24T00:00:00Z -->\n### Foreign task\n- [?] Blue or green?\n<!-- /auto session=abcdef12 -->\n'
+  writeFileSync(progress, readFileSync(progress, 'utf8') + foreign)
+  const conversationId = 'synthetic-direct-node-session'
+  const payload = JSON.stringify({ conversationId, prompt: 'PRIVATE_PROMPT' })
+  const preInvocation = await fireCommand({ env }, hooks.PreInvocation[0].command, payload)
+  assert.equal(preInvocation.status, 0, hookFailure(preInvocation))
+  const record = join(root, 'sessions', createHash('sha256').update(`antigravity:${conversationId}`).digest('hex') + '.json')
+  assert.equal(JSON.parse(readFileSync(record, 'utf8')).state, 'working')
+  const stopped = await fireCommand({ env }, hooks.Stop[0].command, payload)
+  assert.equal(stopped.status, 0, hookFailure(stopped))
+  assert.equal(JSON.parse(readFileSync(record, 'utf8')).state, 'waiting')
+  const text = readFileSync(progress, 'utf8')
+  assert.ok(text.includes(foreign), 'another agent block must remain unchanged')
+  assert.match(text, /agent=antigravity .*state=waiting/)
+  for (const group of Object.values(hooks)) for (const hook of group) {
+    assert.ok(hook.command.length < 8191, `${hook.command.length} characters`)
+    const executable = hook.command.split(' ')[0]
+    assert.match(executable, /^[A-Za-z]:[\\/][A-Za-z0-9_.~\\/-]+\.exe$/i)
+    const actual = statSync(executable, { bigint: true })
+    const expected = statSync(process.execPath, { bigint: true })
+    assert.ok(actual.ino > 0n && expected.ino > 0n)
+    assert.equal(actual.dev, expected.dev)
+    assert.equal(actual.ino, expected.ino)
+    assert.ok(!/powershell(?:\.exe)?/i.test(hook.command), hook.command)
+  }
+}))
+
+test('Windows Antigravity synthetic direct wrapper preserves stdin argv output and exit code through cmd', { skip: process.platform !== 'win32' }, t => fixture(async f => {
+  const home = join(f.home, "synthetic wrapper's home")
+  mkdirSync(home)
+  const env = isolatedEnv(home)
+  const installed = spawnSync(process.execPath, [setup, '--home', home, '--agent', 'antigravity', '--apply'], { env, encoding: 'utf8', windowsHide: true, timeout: 15000 })
+  assert.equal(installed.status, 0, installed.stderr)
+  const root = join(home, '.agent-board')
+  const worker = join(root, 'agent-board-hook.mjs')
+  const capture = join(root, 'synthetic-wrapper-capture.json')
+  const stdout = 'synthetic wrapper stdout: 雪\n'
+  const stderr = 'synthetic wrapper stderr: O\'Hara "quoted"\n'
+  // This exercises only the generated command contract with a disposable worker,
+  // not native Antigravity delivery or a model acknowledgement.
+  writeFileSync(worker, syntheticWindowsWrapperWorker(capture, stdout, stderr, 37))
+  const command = JSON.parse(readFileSync(join(home, '.gemini', 'config', 'hooks.json'), 'utf8'))['agent-board-local'].PreInvocation[0].command
+  if (/^powershell\.exe /i.test(command)) return t.skip('this Node executable has no verified quote-free absolute path')
+  const payload = { unicode: '雪', apostrophe: "O'Hara", quote: '"quoted"', newline: 'line one\nline two' }
+  const input = JSON.stringify(payload)
+  const result = await fireCommand({ env }, command, input)
+  assert.equal(result.status, 37, hookFailure(result))
+  assert.equal(result.stdout, stdout)
+  assert.equal(result.stderr, stderr)
+  const saved = JSON.parse(readFileSync(capture, 'utf8'))
+  assert.equal(saved.worker, worker)
+  assert.ok(saved.worker.includes(' ') && saved.worker.includes("'"), saved.worker)
+  assert.ok(saved.argv.includes(join(root, 'progress.md')), JSON.stringify(saved.argv))
+  assert.equal(saved.input, input)
+  assert.deepEqual(JSON.parse(saved.input), payload)
+}))
+
+test('Windows Antigravity binds its executable across PATH batch files and another event working directory', { skip: process.platform !== 'win32' }, () => fixture(async f => {
+  const home = join(f.home, "b's")
+  const runtime = join(f.home, 'bound node')
+  const shadow = join(f.home, 'shadow')
+  const otherCwd = join(f.home, 'other cwd')
+  for (const dir of [home, runtime, shadow, otherCwd]) mkdirSync(dir)
+  const boundNode = join(runtime, 'node.exe')
+  copyFileSync(process.execPath, boundNode)
+  copyFileSync(process.execPath, join(otherCwd, 'node.exe'))
+  const marker = join(shadow, 'ran.txt')
+  writeFileSync(join(shadow, 'node.cmd'), `@echo off\r\n> "${marker}" echo SYNTHETIC_SHADOW_COMMAND\r\nexit /b 37\r\n`)
+  const env = { ...isolatedEnv(home), PATH: [shadow, runtime, process.env.PATH].join(delimiter) }
+  const installed = spawnSync(boundNode, [setup, '--home', home, '--agent', 'antigravity', '--apply'], { env, cwd: home, encoding: 'utf8', windowsHide: true, timeout: 15000 })
+  assert.equal(installed.status, 0, installed.stderr)
+  const root = join(home, '.agent-board')
+  const capture = join(root, 'bound-executable.json')
+  writeFileSync(join(root, 'agent-board-hook.mjs'), `import { writeFileSync } from 'node:fs'\nwriteFileSync(${JSON.stringify(capture)}, JSON.stringify({ executable: process.execPath }))\n`)
+  const command = JSON.parse(readFileSync(join(home, '.gemini', 'config', 'hooks.json'), 'utf8'))['agent-board-local'].Stop[0].command
+  for (const cwd of [home, otherCwd]) {
+    const result = spawnSync(process.env.ComSpec || 'cmd.exe', ['/d', '/s', '/c', `"${command}"`], { env, cwd, input: '{}', encoding: 'utf8', windowsHide: true, windowsVerbatimArguments: true, timeout: 15000 })
+    assert.equal(result.status, 0, hookFailure(result))
+    assert.equal(existsSync(marker), false, 'a PATH batch file must not replace the bound executable')
+    const actual = statSync(JSON.parse(readFileSync(capture, 'utf8')).executable, { bigint: true })
+    const expected = statSync(boundNode, { bigint: true })
+    assert.ok(actual.ino > 0n && expected.ino > 0n)
+    assert.equal(actual.dev, expected.dev)
+    assert.equal(actual.ino, expected.ino, 'another event cwd must not replace the bound executable')
+  }
+}))
+
+test('Windows Antigravity falls back to PowerShell when setup cannot verify a quote-free Node path', { skip: process.platform !== 'win32' }, () => fixture(async f => {
+  const home = join(f.home, "f's")
+  mkdirSync(home)
+  const system32 = join(process.env.SystemRoot || 'C:\\Windows', 'System32')
+  const powershell = join(system32, 'WindowsPowerShell', 'v1.0')
+  const setupEnv = { ...Object.fromEntries(Object.entries(isolatedEnv(home)).filter(([key]) => key.toLowerCase() !== 'comspec')), PATH: [system32, powershell].join(delimiter), ComSpec: join(f.home, 'unavailable-short-path-probe.exe') }
+  const nodeLookup = spawnSync(join(system32, 'where.exe'), ['node'], { env: setupEnv, encoding: 'utf8', windowsHide: true, timeout: 15000 })
+  assert.notEqual(nodeLookup.status, 0, nodeLookup.stdout + nodeLookup.stderr)
+  // Force a spaced executable and an unavailable short-path query. A runner's
+  // original Node may already be quote-free, and 8.3 aliases may or may not exist.
+  const runtime = join(f.home, 'n s')
+  mkdirSync(runtime)
+  const fallbackNode = join(runtime, 'node.exe')
+  // Program Files can deny a hard link; a private copy keeps the original runtime untouched.
+  copyFileSync(process.execPath, fallbackNode)
+  const installed = spawnSync(fallbackNode, [setup, '--home', home, '--agent', 'antigravity', '--apply'], { env: setupEnv, encoding: 'utf8', windowsHide: true, timeout: 15000 })
+  assert.equal(installed.status, 0, installed.stderr)
+  const root = join(home, '.agent-board')
+  const worker = join(root, 'agent-board-hook.mjs')
+  const capture = join(root, 'synthetic-fallback-capture.json')
+  const stdout = 'synthetic fallback stdout\n'
+  const stderr = 'synthetic fallback stderr\n'
+  writeFileSync(worker, syntheticWindowsWrapperWorker(capture, stdout, stderr, 37))
+  const command = JSON.parse(readFileSync(join(home, '.gemini', 'config', 'hooks.json'), 'utf8'))['agent-board-local'].Stop[0].command
+  assert.match(command, /^powershell\.exe /i)
+  assert.ok(command.length < 8191, `${command.length} characters`)
+  const payload = { unicode: '雪', apostrophe: "O'Hara", quote: '"quoted"', newline: 'line one\nline two' }
+  const input = JSON.stringify(payload)
+  const result = await fireCommand({ env: setupEnv }, command, input)
+  assert.equal(result.status, 37, hookFailure(result))
+  assert.equal(result.stdout, stdout)
+  assert.equal(result.stderr, stderr)
+  const saved = JSON.parse(readFileSync(capture, 'utf8'))
+  assert.equal(saved.worker, worker)
+  assert.equal(saved.input, input)
+  assert.deepEqual(JSON.parse(saved.input), payload)
+}))
+
+test('Windows Antigravity queues an event with its launch process start stamp', { skip: process.platform !== 'win32' }, () => fixture(async f => {
   assert.equal(f.install('--agent', 'antigravity', '--apply').status, 0)
   const worker = join(f.root, 'agent-board-hook.mjs')
   const command = JSON.parse(readFileSync(join(f.home, '.gemini', 'config', 'hooks.json')))['agent-board-local'].PreInvocation[0].command
   const stampFile = join(f.root, 'powershell-stamp.json')
   const preload = join(f.home, 'queue-antigravity.cjs')
-  f.save(preload, `if (process.argv[1] === ${JSON.stringify(worker)}) {
+  f.save(preload, `require('node:module').registerHooks({ load(url, context, next) {
+  if (url === ${JSON.stringify(pathToFileURL(worker).href)}) {
   const at = Number(process.argv[process.argv.indexOf('--hook-started') + 1])
   require('node:fs').writeFileSync(${JSON.stringify(stampFile)}, JSON.stringify({ at, nodeStarted: require('node:perf_hooks').performance.timeOrigin }))
   process.argv.push('--hook-deadline', String(Date.now() - 1))
 }
+  return next(url, context)
+} })
 `)
   const result = await fireCommand({ ...f, env: { ...f.env, NODE_OPTIONS: `--require ${JSON.stringify(preload)}` } }, command, JSON.stringify({ conversationId: 'stamped-antigravity-session' }))
   assert.equal(result.status, 0, hookFailure(result))
   const stamp = JSON.parse(readFileSync(stampFile))
   assert.ok(Number.isSafeInteger(stamp.at))
-  assert.ok(stamp.at < Math.floor(stamp.nodeStarted), 'PowerShell must have started before Node')
+  assert.ok(stamp.at <= Math.floor(stamp.nodeStarted), 'the deadline must include process startup, before the worker import')
+  if (!/powershell\.exe/i.test(command)) assert.equal(stamp.at, Math.floor(stamp.nodeStarted))
   const files = pendingFiles(f)
   assert.equal(files.length, 1)
   assert.match(files[0], /\.raw\.json$/)
@@ -2628,7 +2787,7 @@ test('Antigravity setup merges its named native hooks and removes only the owned
   assert.deepEqual(Object.keys(config['agent-board-local']), ['SessionStart', 'PreInvocation', 'PostInvocation', 'Stop'])
   assert.equal(config.hooks, undefined)
   const stop = config['agent-board-local'].Stop[0].command
-  const launch = process.platform === 'win32' ? Buffer.from(stop.split(' ').at(-1), 'base64').toString('utf16le') : stop
+  const launch = generatedHookCommand(stop).text
   assert.match(launch, /--state['"]? ['"]?waiting['"]? ['"]?--event['"]? ['"]?Stop/)
   assert.deepEqual(JSON.parse(f.install('--agent', 'antigravity').stdout).changes, [])
   assert.equal(f.command(['--codex-remove', '--agent', 'antigravity', '--apply']).status, 0)
@@ -3631,6 +3790,40 @@ test('connection data roots distinguish POSIX apostrophes from encoded PowerShel
     const folder = "C:\\Users\\o'synthetic\\.claude"
     const command = antigravityCommand(['node', `${folder}\\progress-hook.mjs`], true, value => value)
     assert.ok(connectDataRoots(command).includes(folder))
+  } finally { resolver.deregister() }
+})
+
+test('direct Windows hook argument data preserves ownership roots without executing the command', async () => {
+  const resolver = registerHooks({ resolve(specifier, context, next) {
+    try { return next(specifier, context) } catch (error) {
+      if (error.code !== 'ERR_MODULE_NOT_FOUND' || !specifier.startsWith('.')) throw error
+      return next(`${specifier}.ts`, context)
+    }
+  } })
+  try {
+    const { connectDataRoots } = await import('../hooks/connect-pure.ts')
+    const { antigravityCommand, directHookArgs, hookCommandArgs } = await import('../hooks/local-agents.ts')
+    for (const folder of ["C:\\Users\\o'synthetic\\.claude", "C:\\Users\\o''synthetic\\.claude", 'C:\\synthetic 雪\\board']) {
+      const worker = `${folder}\\progress-hook.mjs`
+      const argv = hookCommandArgs('C:\\Program Files\\nodejs\\node.exe', folder, 'antigravity', worker, `${folder}\\progress.md`, 'Stop', 'waiting')
+      const command = antigravityCommand(argv, true, value => value, 'C:\\synthetic\\node.exe')
+      assert.deepEqual(directHookArgs(command), [argv[0], ...argv.slice(4)])
+      assert.ok(connectDataRoots(command).includes(folder))
+      assert.ok(connectDataRoots(JSON.stringify({ command })).includes(folder))
+    }
+    const data = JSON.stringify(['node', 'C:\\synthetic\\progress-hook.mjs'])
+    const source = `process.argv=JSON.parse(${JSON.stringify(data)});globalThis.syntheticHookDecodeExecuted=true`
+    const command = `node --input-type=commonjs -e eval(Buffer.from('${Buffer.from(source).toString('base64')}','base64').toString('utf8'))`
+    assert.ok(connectDataRoots(command).includes('C:\\synthetic'))
+    assert.equal(globalThis.syntheticHookDecodeExecuted, undefined)
+    assert.equal(directHookArgs(command.replace('--input-type=commonjs', '--input-type=module')), null)
+    for (const source of ['throw Error()', 'process.argv=JSON.parse("[1]");', 'process.argv=JSON.parse("{}");']) {
+      const invalid = `node --input-type=commonjs -e eval(Buffer.from('${Buffer.from(source).toString('base64')}','base64').toString('utf8'))`
+      assert.equal(directHookArgs(invalid), null)
+    }
+    assert.throws(() => antigravityCommand(['node', 'worker.mjs'], true, value => value, 'C:\\synthetic\\node.exe'), /INVALID_HOOK_COMMAND/)
+    for (const executable of ['node', 'node.exe']) assert.throws(() => antigravityCommand(['node'], true, value => value, executable), /UNSAFE_HOOK_EXECUTABLE/)
+    assert.throws(() => antigravityCommand(['node'], true, value => value, 'node&other'), /UNSAFE_HOOK_EXECUTABLE/)
   } finally { resolver.deregister() }
 })
 

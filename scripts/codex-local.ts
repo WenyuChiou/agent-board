@@ -19,6 +19,7 @@ import { withLocalLock } from './local-lock'
 import { installControlRoot, withInstallLock } from './install-control'
 import { boardPromptHelper, boardRequestWords, boardRun, isBoardRequest } from '../hooks/board-commands'
 import { PROMPT_EVENTS } from '../hooks/inbox'
+import { windowsHookNode } from './windows-hook-node'
 
 type Json = Record<string, unknown>
 type Manifest = { files: Record<string, string>; groups: Record<string, unknown> }
@@ -452,7 +453,8 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
   }
   if (agent === 'antigravity') {
     const name = 'agent-board-local'
-    const desired = antigravityHooks((event, state) => antigravityCommand(hookArgs(event, state), process.platform === 'win32', quote))
+    const directNode = windowsHookNode(process.execPath)
+    const desired = antigravityHooks((event, state) => antigravityCommand(hookArgs(event, state), process.platform === 'win32', quote, directNode))
     const existing = hookConfig[name], owned = manifest.groups[name]
     if (isReadable && existing !== undefined && !(owned !== undefined && isSame(existing, owned)) && !(!remove && isSame(existing, desired))) conflicts.push(`${config}:${name}`)
     if (isReadable && owned !== undefined && existing === undefined) conflicts.push(`${config}:${name}`)
