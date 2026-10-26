@@ -435,7 +435,7 @@ export const confirmTask = (text: string, ref: ConfirmRef, now: number, s: Strin
 }
 
 // The block still asks something of the person: a visible `[?]` step.
-const isAsking = (visible: readonly string[], span: BlockSpan): boolean =>
+const isAsking = (visible: readonly (string | null)[], span: BlockSpan): boolean =>
   visible.slice(span.start, span.end + 1).some(line => STEP.exec(line ?? '')?.[2] === '?')
 
 // An automatic sweep takes a block that asks only when it has stopped (`ended` or `done`) and has
