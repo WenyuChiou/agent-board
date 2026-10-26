@@ -456,7 +456,10 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
 
   const hasHooks = agent === 'codex' || agent === 'cursor' || statusEvents[agent] !== undefined
   const nativeConfig = agent === 'openclaw' ? join(openclawDir, 'openclaw.json') : agent === 'deepseek' ? join(deepseekDir, 'cordis.patch.yml') : config
-  const parsedConfig = hasHooks || agent === 'openclaw' ? readConfig(initial(nativeConfig) ?? '') : {}
+  const nativeConfigText = initial(nativeConfig) ?? ''
+  // Windows tools may write Codex's JSON with a UTF-8 BOM; JSON.parse does not accept it.
+  const configText = agent === 'codex' && nativeConfigText.startsWith('\uFEFF') ? nativeConfigText.slice(1) : nativeConfigText
+  const parsedConfig = hasHooks || agent === 'openclaw' ? readConfig(configText) : {}
   const hookConfig = parsedConfig ?? {}
   // A config that cannot be read is one conflict of its own; its groups are not also reported as edited.
   const isReadable = parsedConfig !== null

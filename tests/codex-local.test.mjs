@@ -329,6 +329,59 @@ test('local setup reports a config that is not valid JSON as one conflict and le
   assert.equal(existsSync(f.root), false)
 }))
 
+test('setup accepts a UTF-8 BOM in existing Codex hooks without losing foreign data', () => fixture(f => {
+  const foreign = { hooks: [{ type: 'command', command: 'echo other' }] }
+  const original = Buffer.from(`\uFEFF${JSON.stringify({ other: { keep: true }, hooks: { Stop: [foreign] } }, null, 2).replaceAll('\n', '\r\n')}\r\n`)
+  const progress = Buffer.from('selected progress stays exact\r\n')
+  const credentials = join(f.home, '.codex', 'auth.json')
+  const credentialBytes = Buffer.from('{"synthetic":"credential stays exact"}\r\n')
+  f.save(f.hooks, original)
+  f.save(f.progress, progress)
+  f.save(credentials, credentialBytes)
+
+  const preview = f.install()
+  assert.equal(preview.status, 0, preview.stderr)
+  assert.deepEqual(readFileSync(f.hooks), original)
+  assert.deepEqual(readFileSync(f.progress), progress)
+  assert.deepEqual(readFileSync(credentials), credentialBytes)
+
+  const applied = f.install('--apply')
+  assert.equal(applied.status, 0, applied.stderr)
+  const configured = JSON.parse(readFileSync(f.hooks))
+  assert.deepEqual(configured.other, { keep: true })
+  assert.deepEqual(configured.hooks.Stop[0], foreign)
+  assert.deepEqual(readFileSync(f.progress), progress)
+  assert.deepEqual(readFileSync(credentials), credentialBytes)
+
+  const installed = readFileSync(f.hooks)
+  const reinstalled = f.install('--apply')
+  assert.equal(reinstalled.status, 0, reinstalled.stderr)
+  assert.deepEqual(readFileSync(f.hooks), installed)
+  assert.deepEqual(readFileSync(f.progress), progress)
+  assert.deepEqual(readFileSync(credentials), credentialBytes)
+
+  const removed = f.command(['--codex-remove', '--apply'])
+  assert.equal(removed.status, 0, removed.stderr)
+  assert.deepEqual(JSON.parse(readFileSync(f.hooks)), { other: { keep: true }, hooks: { Stop: [foreign] } })
+  assert.deepEqual(readFileSync(f.progress), progress)
+  assert.deepEqual(readFileSync(credentials), credentialBytes)
+}))
+
+test('setup preserves malformed BOM-prefixed Codex hooks when it refuses installation', () => fixture(f => {
+  const original = Buffer.from('\uFEFF{"hooks":\r\n')
+  f.save(f.hooks, original)
+  const preview = f.install()
+  assert.equal(preview.status, 0, preview.stderr)
+  assert.deepEqual(JSON.parse(preview.stdout).conflicts.filter(one => one.startsWith(f.hooks)), [f.hooks], preview.stdout)
+  assert.deepEqual(readFileSync(f.hooks), original)
+
+  const applied = f.install('--apply')
+  assert.notEqual(applied.status, 0, applied.stderr)
+  assert.deepEqual(JSON.parse(applied.stdout).conflicts.filter(one => one.startsWith(f.hooks)), [f.hooks], applied.stdout)
+  assert.deepEqual(readFileSync(f.hooks), original)
+  assert.equal(existsSync(f.root), false)
+}))
+
 test('local setup preserves native config formatting when its content does not change', () => fixture(f => {
   for (const [agent, file] of [['codex', f.hooks], ['openclaw', join(f.home, '.openclaw', 'openclaw.json')]]) {
     const installed = f.install('--agent', agent, '--apply')
