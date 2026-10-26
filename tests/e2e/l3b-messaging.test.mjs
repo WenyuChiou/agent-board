@@ -84,19 +84,6 @@ describe('L3b messages between sessions and agents', { timeout: 90000, concurren
     { agent: 'antigravity' }, { agent: 'hermes' },
   ], async hub => { await nativeOrFallback(hub, hub.actors[0], hub.actors[1], 233) }))
 
-  test('messages: every sender-receiver pair either delivers with a receipt or names the fallback in words', { timeout: 80000, concurrency: 2 }, async t => {
-    const pairs = SENDERS.flatMap(from => RECEIVERS.map(to => ({ from, to, relation: from === to ? 'own' : 'other' })))
-    await Promise.all(pairs.map(({ from, to, relation }) => t.test(`${from} → ${to} (${relation})`, { timeout: 20000 }, async () => withHub([
-      ...(from === 'page' ? [] : [{ agent: from, title: 'Prepare message sender' }]),
-      { agent: to, title: 'Review message receiver' },
-    ], async hub => {
-      const receiver = hub.actors.at(-1)
-      const source = from === 'page' ? 'page' : hub.actors[0]
-      if (source !== 'page') assert.notEqual(source.session, receiver.session)
-      await nativeOrFallback(hub, source, receiver, GAPS[to])
-    }))))
-  })
-
   test('messages: a delivered message shows on every surface, not only the serve page', { timeout: 20000 }, async () => withHub([
     { agent: 'codex' }, { agent: 'antigravity' },
   ], async hub => {
@@ -156,4 +143,18 @@ describe('L3b messages between sessions and agents', { timeout: 90000, concurren
     assert.equal(receiver.received.length, 1)
     await hub.cleanPage()
   }))
+})
+
+// The matrix keeps its own budget instead of sharing the other journeys' watchdog.
+test('messages: every sender-receiver pair either delivers with a receipt or names the fallback in words', { timeout: 80000, concurrency: 2 }, async t => {
+  const pairs = SENDERS.flatMap(from => RECEIVERS.map(to => ({ from, to, relation: from === to ? 'own' : 'other' })))
+  await Promise.all(pairs.map(({ from, to, relation }) => t.test(`${from} → ${to} (${relation})`, { timeout: 20000 }, async () => withHub([
+    ...(from === 'page' ? [] : [{ agent: from, title: 'Prepare message sender' }]),
+    { agent: to, title: 'Review message receiver' },
+  ], async hub => {
+    const receiver = hub.actors.at(-1)
+    const source = from === 'page' ? 'page' : hub.actors[0]
+    if (source !== 'page') assert.notEqual(source.session, receiver.session)
+    await nativeOrFallback(hub, source, receiver, GAPS[to])
+  }))))
 })
