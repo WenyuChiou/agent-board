@@ -75,7 +75,7 @@ S=$(mktemp -d)
 iso() { env HOME="$S" USERPROFILE="$S" HERMES_HOME="$S/hermes" GROK_HOME="$S/grok" OPENCLAW_STATE_DIR="$S/openclaw" CODEX_HOME="$S/codex" OPENCODE_CONFIG_DIR="$S/opencode" DSH_HOME="$S/dsh" XDG_CONFIG_HOME="$S/xdg" LOCALAPPDATA="$S/local" APPDATA="$S/roaming" CLAUDE_PROGRESS_FILE="$S/progress.md" CLAUDE_CONFIG_DIR="$S/claude" "$@"; }
 ```
 
-From the test lines below, run only the test files your change touches, one run at a time (AGENTS.md, Checks); CI runs all of them. Then run the two generated-file checks:
+From the test lines below, run only the test files your change touches, one run at a time (AGENTS.md, Checks); CI runs affected groups and reports omitted groups as not run (see [affected CI](dev/CI.md)). Then run the two generated-file checks:
 
 ```sh
 iso node --test tests/exchange.test.mjs tests/messaging.test.mjs
@@ -92,7 +92,7 @@ The installer checks and the type check the template lists are in [CONTRIBUTING.
 
 If you changed `scripts/board-cli.ts` or a `hooks/` file it imports, rebuild the bundle with `npx --yes bun@1.4.2 scripts/build-board.ts` and commit `hooks/board-script.ts` together with the change.
 
-CI also runs `claude plugin validate --strict .` and `claude plugin test .` on Ubuntu and Windows. To run them yourself, install the version CI pins, then run both through `iso` (offline, no login, several minutes):
+When the plugin group is selected, CI runs `claude plugin validate --strict .` and `claude plugin test .` on Ubuntu and Windows. To run them yourself, install the version CI pins, then run both through `iso` (offline, no login, several minutes):
 
 ```sh
 npm install -g @anthropic-ai/claude-code@2.1.301

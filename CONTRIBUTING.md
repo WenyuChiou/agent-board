@@ -10,7 +10,7 @@ Independent development and installation do not require Claude Code. Optional pa
 
 ## Run the checks
 
-From the repository root, with Node 22.18+ or 24 and npm (for `npx`), the checks CI runs on every pull request:
+From the repository root, with Node 22.18+ or 24 and npm (for `npx`), the check catalog below; CI selects the affected groups for each pull-request push:
 
 ```sh
 node --test tests/exchange.test.mjs tests/messaging.test.mjs tests/pr-check.test.mjs tests/preflight.test.mjs tests/changelog-fold.test.mjs tests/team-stats.test.mjs
@@ -37,7 +37,7 @@ python3 -B scripts/remote-reporter/test_pipeline.py
 
 Run strict TypeScript for changed standalone modules with Node typings from your development environment. Full `tsc -p .` additionally needs the host-generated `.claude-plugin/types/` SDK, written when Claude Code loads the local plugin (`claude --plugin-dir .`). It is gitignored and must not be invented or edited. If unavailable, report full typechecking as unrun; passing standalone checks does not replace it. Do not start model work merely to claim an offline check passed.
 
-CI runs plugin/installer/reporter checks on Linux and Windows; Node 22/24 exchange, messaging and board checks on both systems; the Node 22/24 PR-check tests and npm package tests on both systems, in jobs of their own; and the PR check (`.github/workflows/pr-check.yml`). It checks generated bundles/releases, but not full `tsc -p .`.
+CI selects affected groups from changed paths and base/head dependencies, using the same plan for Draft and Ready. Selected groups retain their platform/version coverage; full runs occur for manifests, governance, selector changes, unclassified paths, releases, the weekly schedule and explicit full dispatch. The first selector rollout runs every group. The PR check still runs separately on every pull request. Generated checks run when affected; full `tsc -p .` remains separate. See [affected CI](docs/dev/CI.md).
 
 ## Changes and evidence
 
@@ -67,10 +67,10 @@ Several agents (Claude Code sessions, Codex, Antigravity, cloud agents such as d
    - reads the whole diff against the issues on the first lines of the body: those issues, nothing extra, and no bug fix in a feature pull request;
    - reruns the checks that cover the change on its own copy, rather than trusting the reported results;
    - comments on the pull request `Review: APPROVE <full head sha>` with what was verified, or `Review: REQUEST CHANGES <full head sha>` with the findings, naming the reviewer (`by owner`, `by maintainer` or `by code-review subagent`); any later push needs a new verdict;
-   - merges only the head named in `Review: APPROVE <head sha>`, once every CI job in `.github/workflows/` is green, not only the ones GitHub marks as required. The merge is a squash merge of that head: `gh pr merge <N> --squash --match-head-commit <head sha>`.
+   - merges only the head named in `Review: APPROVE <head sha>`, once impact planning, CI validation, every selected CI job and every other applicable workflow in `.github/workflows/` have succeeded, not only the checks GitHub marks as required. Only groups explicitly omitted as unaffected by the plan may be skipped; skipped, neutral, cancelled or missing selected checks are not passes. The merge is a squash merge of that head: `gh pr merge <N> --squash --match-head-commit <head sha>`.
    - then deletes the branch, and comments on each closed issue with the merge commit and the evidence.
 
-   A pull request that reports a check it did not run is not ready to merge. A merge with no `Review: APPROVE` for the merged head breaks this rule: the reviewer opens an issue (rule 11) and reviews it after the fact.
+   A pull request that reports an unrun check as passed is not ready to merge. It lists unaffected omitted groups as not run, with the plan; any applicable check left unrun still blocks merging. A merge with no `Review: APPROVE` for the merged head breaks this rule: the reviewer opens an issue (rule 11) and reviews it after the fact.
 10. **At most two open pull requests per author, and eight in all.** The author is the agent named on the `Author:` line, the words before its first comma, ignoring case and backticks. An agent that a coordinating session dispatches adds its lane in brackets, the name of the session that sent it (`Author: codex (phase1), fix/x`), and each agent and lane together counts as one author, so two sessions that both send work to Codex do not share its two slots. Drafts count. Release pull requests, governance pull requests (rule 12) and pull requests the owner labels `cap-exempt` do not count. Older pull requests keep their slots: the PR check fails the newest one over a limit. Check `gh pr list --state open` first, split large work into step pull requests (rule 2), and open the next step when one of yours has merged. If yours does not fit, close it and later open a new pull request from the same branch, or keep your claim `waiting for a slot`. Do not reopen the closed one: GitHub keeps its first creation time, so it would take a slot ahead of newer pull requests.
 11. **Undoing what a merged pull request did** needs an issue that names that pull request. A revert also goes through a pull request.
 12. **Governance files** (`AGENTS.md`, `CONTRIBUTING.md`, `.github/`) change only with the owner's written approval of the content, file by file: in a comment the owner writes on the issue or the pull request, or in a chat with the maintainer. The pull request body quotes the owner's approving words, and nothing else from the chat, with their date and where they were given. The maintainer then reviews and merges it as in rule 9, as for any other pull request. A workflow can widen what CI is allowed to do, so a pull request that changes `.github/workflows/` needs the owner's approval for each workflow file it changes before the maintainer merges it. A change to the text after the approval needs a new one. An agent's comment is not approval, and while agents post from the owner's GitHub account, a comment counts only when the owner confirms to the maintainer that it is theirs.
