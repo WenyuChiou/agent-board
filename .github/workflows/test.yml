@@ -79,7 +79,7 @@ jobs:
           CI_SOURCE_ROOTS: '["${{ github.workspace }}/checker","${{ github.workspace }}/source"]'
           CI_BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before || github.sha }}
           CI_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
-          CI_FORCE_FULL: ${{ github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.full) || startsWith(github.event.pull_request.title, 'chore(release):') || github.event.before == '0000000000000000000000000000000000000000' }}
+          CI_FORCE_FULL: ${{ github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.full) || startsWith(github.event.pull_request.title, 'chore(release):') || (github.event_name == 'push' && github.event.before == '0000000000000000000000000000000000000000') }}
         run: |
           if [ -f checker/scripts/ci-impact.mjs ]; then
             node checker/scripts/ci-impact.mjs plan
