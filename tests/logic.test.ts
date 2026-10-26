@@ -807,6 +807,16 @@ test('a stopped task keeps its question on the Stopped shelf and is not counted 
   expect(hidden.stopped).toHaveLength(1)
 })
 
+test('an explicit done block keeps its unanswered question on the stopped shelf after its recent completion expires', () => {
+  const file = '## demo\n<!-- auto session=a1b2c3d4 agent=codex state=done updated=2026-10-15T11:00:00Z -->\n### Release\n- [?] Publish, OK?\n- [ ] Finish\n<!-- /auto session=a1b2c3d4 -->'
+  const view = buildView(parseProgress(file), [], null, NOW)
+  expect(view.waiting).toEqual([])
+  expect(view.active).toEqual([])
+  expect(view.stopped).toHaveLength(1)
+  expect(view.stopped[0]).toMatchObject({ auto: 'ended', question: 'Publish, OK?' })
+  expect(view.stopped[0]?.questions).toHaveLength(1)
+})
+
 test('future-clock staleness preserves an unanswered question identity, age and original source', () => {
   const stamp = NOW + 24 * HOUR
   const projects = parseProgress(`## demo\n<!-- auto session=a1b2c3d4 agent=codex state=waiting updated=${new Date(stamp).toISOString()} -->\n### Future question\n- [?] Publish, OK?\n<!-- /auto session=a1b2c3d4 -->`)
