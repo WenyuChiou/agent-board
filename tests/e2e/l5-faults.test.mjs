@@ -1,8 +1,10 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
+import { readdirSync } from 'node:fs'
 import { EN } from '../../hooks/strings-en.ts'
 import { STALE_MS } from '../../hooks/parse.ts'
 import { makeWorld } from './lib/world.mjs'
+import { observeHookRecovery } from './lib/recovery-observation.mjs'
 import { block, hook } from './lib/writers.mjs'
 import { formatWriters, holdNextRename, keptHookEvents, lockFile, storageFault, tear } from './lib/faults.mjs'
 import { chat, html, pageDom, run, serve } from './lib/surfaces.mjs'
@@ -341,17 +343,17 @@ const raceOnce = async isWindows => {
     const hooks = start()
     const written = await writers.finished()
     const ran = await Promise.all(hooks)
-    // A hook that finds the board busy keeps its event and exits 0. The next hook run applies it.
-    // Settling runs replay what was kept (a second one only when the first left something), and
-    // an event still kept after them was never applied, which is a lost block.
+    // Recovery may finish between the separate reads of the board and pending files.
+    // Observe the existing recovery bound without another foreground event.
     const sessions = [warmup, ...RACE_HOOKS]
-    for (const number of [1, 2]) {
-      const settle = `codex-race-settle-${number}`
-      sessions.push(settle)
-      const settled = await hook(world, 'codex', 'UserPromptSubmit', { session_id: settle, prompt: 'Settle', cwd: world.root })
-      if (settled.status !== 0) problems.push(`settling hook exited ${settled.status}: ${whyFailed(settled).trim()}`)
-      if (keptHookEvents(world).length === 0) break
-    }
+    const observed = await observeHookRecovery({
+      sessions,
+      read: () => ({
+        source: world.read('progress.md'),
+        pending: keptHookEvents(world),
+        files: readdirSync(world.root, { recursive: true }).map(String).filter(name => /pending|recovery|claim|\.lock|\.tmp|taken/.test(name)).sort(),
+      }),
+    })
     written.forEach((result, index) => {
       // The writer prints WRITER_READY first. What it says it could not do is the WRITE_FAILED line.
       const failure = result.stdout.split('\n').find(line => line.startsWith('WRITE_FAILED'))
@@ -361,14 +363,14 @@ const raceOnce = async isWindows => {
     ran.forEach((result, index) => {
       if (result.status !== 0) problems.push(`hook ${RACE_HOOKS[index]} exited ${result.status}: ${whyFailed(result).trim()}`)
     })
-    const source = world.read('progress.md')
-    const kept = keptHookEvents(world)
+    const source = observed.source
+    const kept = observed.pending
     for (const session of sessions) {
       const count = occurrences(source, `resume=${session} `)
       if (count === 0 && !kept.includes(session)) problems.push(`hook block lost: ${session}`)
       if (count > 1) problems.push(`hook block doubled: ${session}`)
     }
-    for (const session of kept) problems.push(`hook event never applied: ${session} still waits in the pending folder after the settling runs`)
+    for (const session of kept) problems.push(`hook event never applied: ${session} still waits in the pending folder after bounded autonomous recovery`)
     for (const session of RACE_WRITERS) {
       const count = occurrences(source, `<!-- auto session=${session} `)
       if (count === 0) problems.push(`writer block lost: ${session}`)
@@ -376,6 +378,8 @@ const raceOnce = async isWindows => {
       const own = source.split(`<!-- auto session=${session} `)[1]?.split(`<!-- /auto session=${session} -->`)[0]
       if (!own?.split(/\r?\n/).includes(`- [~] Round ${rounds}`)) problems.push(`writer last round lost: ${session} expected Round ${rounds}`)
     }
+    if (!observed.isSettled && problems.length === 0) problems.push('automatic recovery did not settle within its observation bound')
+    if (problems.length) problems.push(`recovery observations: ${JSON.stringify(observed.snapshots)}`)
     return problems
   } finally { await world.close() }
 }
