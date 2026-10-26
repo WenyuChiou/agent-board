@@ -1289,8 +1289,9 @@ const legacyReporterProbe = (isPowerShell = process.platform === 'win32', shell 
   const first = await nativeProcess(executable, args, env, payload, callback => setTimeout(callback, 30000))
   assert.equal(first.status, 0, first.stderr)
   assert.equal(first.stdout.trim(), '{}')
-  const delivered = readdirSync(inbox).filter(name => name.endsWith('.json'))
-  assert.equal(delivered.length, 1)
+  const delivered = existsSync(inbox) ? readdirSync(inbox).filter(name => name.endsWith('.json')) : []
+  const codes = hookLog(f).match(/\b(?:INPUT_TIMEOUT|INCOMPLETE_INPUT|INPUT_TOO_LARGE|REPORTER_TIMEOUT|REPORTER_FAILED)\b/g) ?? []
+  assert.equal(delivered.length, 1, `${hookFailure(first)}; hookCodes=${codes.slice(-5).join(',')}`)
   assert.equal(readFileSync(join(inbox, delivered[0]), 'utf8'), payload)
   const log = join(home, '.agent-board', 'hook-errors.log')
   mkdirSync(dirname(log), { recursive: true })
@@ -1369,7 +1370,10 @@ test('the PowerShell classifier uses the first Node path when several applicatio
   // and must start the first match: the later, non-executable node.exe never runs.
   const source = reporterPs1()
   assert.doesNotMatch(source, /Get-Command node/)
-  f.save(file, observeClassifier(source, diagnostic))
+  // Expire the input-stage clock so this case exercises selection in its own scope.
+  const selectionSource = source.replace('    $receipt = Read-PromptReceipt $tmp $clock',
+    '    Start-Sleep -Milliseconds 2100\n    $receipt = Read-PromptReceipt $tmp $clock')
+  f.save(file, observeClassifier(selectionSource, diagnostic, { isSelectionOnly: true }))
   // Only bounds a hung process on a slow Windows CI runner; the reporter's own deadline is not timed here.
   const result = await nativeProcess(powershell, ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', file, 'codex', 'prompt'], env, raw, callback => setTimeout(callback, 30000))
   assert.equal(result.error, undefined)
@@ -1392,7 +1396,7 @@ test('the PowerShell reporter never looks for Node in its working folder through
   const powershell = join(process.env.SystemRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe')
   const file = join(f.root, 'progress-report.ps1'), diagnostic = join(f.home, 'classifier-probe.txt')
   const raw = JSON.stringify({ session_id: 'synthetic-working-folder', cwd: '/synthetic/project', prompt: '/board' })
-  f.save(file, observeClassifier(reporterPs1(), diagnostic))
+  f.save(file, observeClassifier(reporterPs1(), diagnostic, { isSelectionOnly: true }))
   // Only bounds a hung process on a slow Windows CI runner; the reporter's own deadline is not timed here.
   const result = await nativeProcess(powershell, ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', file, 'codex', 'prompt'], env, raw, callback => setTimeout(callback, 30000), undefined, { cwd: work })
   assert.equal(result.error, undefined)

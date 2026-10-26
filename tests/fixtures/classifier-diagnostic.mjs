@@ -11,7 +11,12 @@ const replaceOnce = (source, before, after) => {
 // environment values or stream contents are saved. File I/O is in the outer
 // finally, after the final budget check, receipt operation and owned cleanup.
 // Phase assignments still add small observer overhead within that deadline.
-export const observeClassifier = (source, file) => {
+export const observeClassifier = (source, file, { isSelectionOnly = false } = {}) => {
+  // PATH-selection cases exclude earlier input work, while keeping the same
+  // two-second classifier budget. Timeout cases retain the shared clock.
+  if (isSelectionOnly) source = replaceOnce(source,
+    '    $receipt = Read-PromptReceipt $tmp $clock',
+    '    $clock.Restart()\n    $receipt = Read-PromptReceipt $tmp $clock')
   source = replaceOnce(source, '  $process = $null; $isStarted = $false', `  $process = $null; $isStarted = $false
   $probe = [ordered]@{ phase = 'budget'; started = $false; errorType = ''; hresult = 0; innerType = ''; innerHresult = 0; nativeCode = 0; exitCode = -1; outputLength = -1; errorLength = -1; elapsedMs = 0 }
   $output = $null; $errors = $null`)
