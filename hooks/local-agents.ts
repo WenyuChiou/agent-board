@@ -65,11 +65,30 @@ export const hookCommandArgs = (node: string, home: string, agent: LocalAgent, w
   ...(agent === 'antigravity' ? ['--event', event] : []), '--progress-file', progress,
 ]
 
-// Antigravity's Windows executor passes one quoted argument to cmd /c using CreateProcess
-// escaping. Embedded executable quotes become literal \" bytes. Keep that command free of
-// inner quotes; PowerShell forwards stdin to Node.
-export const antigravityCommand = (argv: string[], isWindows: boolean, quote: (value: string) => string): string => {
+// Decode data only: ownership checks need the worker path inside the direct Windows command.
+export const directHookArgs = (command: string): string[] | null => {
+  const encoded = /--input-type=commonjs\s+-e\s+eval\(Buffer\.from\('([A-Za-z0-9+/]+={0,2})','base64'\)\.toString\('utf8'\)\)/.exec(command)?.[1]
+  if (!encoded || encoded.length > 32768) return null
+  try {
+    const source = new TextDecoder('utf-8', { fatal: true }).decode(fromBase64(encoded))
+    const literal = /^process\.argv=JSON\.parse\(("(?:\\[\s\S]|[^"\\])*")\);/.exec(source)?.[1]
+    if (!literal) return null
+    const args: unknown = JSON.parse(JSON.parse(literal))
+    return Array.isArray(args) && args.length <= 256 && args.every(value => typeof value === 'string' && value.length <= 4096) ? args : null
+  } catch { return null }
+}
+
+// Antigravity's executor adds one quoted cmd argument and cannot preserve embedded executable
+// quotes. A verified quote-free Node starts directly; all paths and bootstrap bytes stay encoded.
+export const antigravityCommand = (argv: string[], isWindows: boolean, quote: (value: string) => string, windowsNode?: string): string => {
   if (!isWindows) return argv.map(quote).join(' ')
+  if (windowsNode !== undefined) {
+    if (!/^[A-Za-z]:[\\/][A-Za-z0-9_.~\\/-]+\.exe$/i.test(windowsNode)) throw new Error('UNSAFE_HOOK_EXECUTABLE')
+    if (argv[1] !== '--input-type=commonjs' || argv[2] !== '-e' || !argv[3]) throw new Error('INVALID_HOOK_COMMAND')
+    const args = JSON.stringify([argv[0], ...argv.slice(4)])
+    const source = `process.argv=JSON.parse(${JSON.stringify(args)});process.argv.push('--hook-started',String(Math.floor(require('node:perf_hooks').performance.timeOrigin)));${argv[3]}`
+    return `${windowsNode} --input-type=commonjs -e eval(Buffer.from('${base64(new TextEncoder().encode(source))}','base64').toString('utf8'))`
+  }
   const launch = `& ${argv.map(value => `'${value.replaceAll("'", "''")}'`).join(' ')} --hook-started ([DateTimeOffset]::new([Diagnostics.Process]::GetCurrentProcess().StartTime).ToUnixTimeMilliseconds()); exit $LASTEXITCODE`
   return `powershell.exe -NoLogo -NoProfile -NonInteractive -EncodedCommand ${base64(utf16le(launch))}`
 }

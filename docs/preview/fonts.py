@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # Puts the fonts the README images use into the images themselves.
 #   python3 docs/preview/fonts.py <file.svg>...   (bun docs/preview/render.ts runs it for you)
+#   python3 docs/preview/fonts.py --width <weight> <size> <text>...   (render.ts sizes the chips with it)
 # Needs fontTools 4.60 or newer with WOFF2 support: pip install "fonttools>=4.60" brotli
 #
 # GitHub shows a README's SVG as an image, and an image may not fetch a font, so each SVG
@@ -14,6 +15,7 @@ import base64
 import functools
 import hashlib
 import io
+import json
 import re
 import sys
 import urllib.parse
@@ -145,10 +147,27 @@ def embed(path: Path) -> int:
     return len(parts)
 
 
+# How wide each text is in Inter at one weight and size, in pixels, so render.ts can fit a chip
+# around an agent's name with the same padding on every chip. The optical size follows the font
+# size, as a browser picks it. Advances only: kerning may draw a name a fraction of a pixel narrower.
+def widths(weight: int, size: float, texts: list[str]) -> list[float]:
+    one = TTFont(fetch('Inter'))
+    low, high = next((axis.minValue, axis.maxValue) for axis in one['fvar'].axes if axis.axisTag == 'opsz')
+    one = instancer.instantiateVariableFont(one, {'wght': weight, 'opsz': min(max(size, low), high)})
+    cmap = one.getBestCmap()
+    em = one['head'].unitsPerEm
+    return [round(sum(one['hmtx'][cmap[ord(ch)]][0] for ch in text) * size / em, 2) for text in texts]
+
+
 if __name__ == '__main__':
+    if sys.argv[1:2] == ['--width']:
+        if len(sys.argv) < 5:
+            sys.exit('usage: fonts.py --width <weight> <size> <text>...')
+        print(json.dumps(widths(int(sys.argv[2]), float(sys.argv[3]), sys.argv[4:])))
+        sys.exit(0)
     files = [Path(arg) for arg in sys.argv[1:]]
     if not files:
-        sys.exit('usage: fonts.py <file.svg>...')
+        sys.exit('usage: fonts.py <file.svg>...\n       fonts.py --width <weight> <size> <text>...')
     for path in files:
         embed(path)
     print(f'fonts.py: embedded the fonts in {len(files)} SVG files')

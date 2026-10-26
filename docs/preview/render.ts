@@ -4,6 +4,7 @@
 //   bun docs/preview/render.ts cover-en (only the files whose names start with cover-en)
 // Writes docs/images/{tour,flow,promo}-<lang>.svg, docs/images/board/<agent>-<lang>-<light|dark>.svg,
 // docs/images/cover-<lang>-<light|dark>.svg (the README's animated cover), docs/images/agents/<agent>.svg,
+// docs/images/agents/chip-<agent>.svg (the README's Integrations strip; `bun docs/preview/render.ts chip-`),
 // and docs/preview/out/dashboard-<lang>.html for
 // docs/preview/png.mjs, which takes the progress.html screenshots and the social preview.
 import { mkdirSync, readdirSync, writeFileSync } from 'fs'
@@ -238,7 +239,9 @@ const glyph = (icon: AgentIcon, x: number, y: number, size: number): string => {
   }
   const g = size * GLYPH
   const rule = icon.isEvenOdd === true ? ' fill-rule="evenodd"' : ''
-  return `<g transform="translate(${num(x + (size - g) / 2)} ${num(y + (size - g) / 2)}) scale(${Math.round((g / 24) * 10000) / 10000})" fill="#fff"${rule}>${icon.paths.map(d => `<path d="${d}"/>`).join('')}</g>`
+  const ink = icon.ink ?? '#fff'
+  if (icon.viewBox !== undefined) return `<svg x="${num(x + (size - g) / 2)}" y="${num(y + (size - g) / 2)}" width="${num(g)}" height="${num(g)}" viewBox="${icon.viewBox}" fill="${ink}"${rule}>${icon.paths.map(d => `<path d="${d}"/>`).join('')}</svg>`
+  return `<g transform="translate(${num(x + (size - g) / 2)} ${num(y + (size - g) / 2)}) scale(${Math.round((g / 24) * 10000) / 10000})" fill="${ink}"${rule}>${icon.paths.map(d => `<path d="${d}"/>`).join('')}</g>`
 }
 
 // A near-black tile gets a faint rim, or it sinks into a dark page; a coloured one needs none.
@@ -897,7 +900,7 @@ ${terminal(mode, monoOf(lang), title, gridSvg(grid, PAD, BAR + PAD, theme), grid
 // The README's cover, a 29 s loop in six scenes, each named by a caption at the left: what Agent
 // Board is (four agents come onto one board), steps ticking live, a question jumping to the top,
 // answering it with one key, messaging an agent from the board (a preview of Send to Codex, #318,
-// whose milestone is 0.24.1) and connecting every agent with one command. The screen is the terminal board
+// targeted for 0.24.2 in the release handover) and connecting every agent with one command. The screen is the terminal board
 // (`--watch`) as boardScreen draws it at each moment (COVER and COVER_MARKS in samples.ts), each
 // agent's tile on the window's edge beside its line. The page's reply box in scene 5 is drawn in
 // the page's own words (serveSend, serveSending and messagesAcknowledged in hooks/strings-en.ts),
@@ -946,12 +949,12 @@ const COVER_LOOK: Record<Mode, { sky: [string, string, string]; dot: string; dot
 }
 type CoverScene = { caption: [string, string]; sub: string[] }
 // Each scene's caption (its second line in the accent colour) and the line under it. The chips say
-// from which release a thing is there: scene 5's follows #318's milestone, so change it here only
-// if that milestone moves, and delete it once Send to Codex has shipped. Scene 6's row is the
+// from which release a thing is there: scene 5 uses the release handover's approved preview
+// target; delete it once Send to Codex has shipped. Scene 6's row is the
 // agents the command sets up, not a claim that each was checked: the README says how each was.
 const COVER_WORDS: Record<Lang, { label: string; scenes: CoverScene[]; legend: [string, string, string]; pick: string; works: string; soon: { send: string; npm: string } }> = {
   en: {
-    label: 'Claude Code, Codex, Antigravity and OpenCode report to one board and their steps tick live; Codex asks whether to open its pull request and one key copies the answer; a message written on the board’s page reaches Codex and its reply shows, a preview coming in 0.24.1; one npx command connects every agent, on npm from 0.24.0',
+    label: 'Claude Code, Codex, Antigravity and OpenCode report to one board and their steps tick live; Codex asks whether to open its pull request and one key copies the answer; a message written on the board’s page reaches Codex and its reply shows, a preview coming in 0.24.2; one npx command connects every agent, on npm from 0.24.0',
     scenes: [
       { caption: ['Every agent,', 'one board.'], sub: ['Each one reports in by itself,', 'so you stop checking each window.'] },
       { caption: ['Watch steps', 'tick off live.'], sub: ['Each step shows up the moment', 'the agent finishes it.'] },
@@ -963,11 +966,11 @@ const COVER_WORDS: Record<Lang, { label: string; scenes: CoverScene[]; legend: [
     legend: ['done', 'doing', 'to do'],
     pick: 'Pick it',
     works: 'SET UP BY THE SAME COMMAND',
-    soon: { send: 'Coming in 0.24.1', npm: 'On npm from 0.24.0' },
+    soon: { send: 'Coming in 0.24.2', npm: 'On npm from 0.24.0' },
   },
   // Chinese headlines leave out the punctuation at the end of a line, as Chinese display type does.
   'zh-TW': {
-    label: 'Claude Code、Codex、Antigravity、OpenCode 都回報到同一塊看板，每一步即時打勾；Codex 問能不能開 pull request，按一個鍵就複製好答案；在看板網頁寫給 Codex 的訊息，看得到它送達和回覆（0.24.1 起提供的預覽）；一行 npx 指令接上每個 agent（0.24.0 起上架 npm）',
+    label: 'Claude Code、Codex、Antigravity、OpenCode 都回報到同一塊看板，每一步即時打勾；Codex 問能不能開 pull request，按一個鍵就複製好答案；在看板網頁寫給 Codex 的訊息，看得到它送達和回覆（0.24.2 起提供的預覽）；一行 npx 指令接上每個 agent（0.24.0 起上架 npm）',
     scenes: [
       { caption: ['每個 agent', '同一塊看板'], sub: ['每個 agent 都會自動回報，', '不用一個個視窗切過去。'] },
       { caption: ['每一步', '即時打勾'], sub: ['agent 做完一步，', '看板馬上就顯示。'] },
@@ -979,10 +982,10 @@ const COVER_WORDS: Record<Lang, { label: string; scenes: CoverScene[]; legend: [
     legend: ['完成', '進行中', '待辦'],
     pick: '選它',
     works: '同一行指令就能設定',
-    soon: { send: '0.24.1 起提供', npm: '0.24.0 起上架 npm' },
+    soon: { send: '0.24.2 起提供', npm: '0.24.0 起上架 npm' },
   },
   'zh-CN': {
-    label: 'Claude Code、Codex、Antigravity、OpenCode 都汇报到同一块看板，每一步实时打勾；Codex 问能不能开 pull request，按一个键就复制好答案；在看板网页上给 Codex 发的消息，能看到它送达和回复（0.24.1 起提供的预览）；一行 npx 命令接上每个 agent（0.24.0 起上架 npm）',
+    label: 'Claude Code、Codex、Antigravity、OpenCode 都汇报到同一块看板，每一步实时打勾；Codex 问能不能开 pull request，按一个键就复制好答案；在看板网页上给 Codex 发的消息，能看到它送达和回复（0.24.2 起提供的预览）；一行 npx 命令接上每个 agent（0.24.0 起上架 npm）',
     scenes: [
       { caption: ['每个 agent', '同一块看板'], sub: ['每个 agent 都会自动汇报，', '不用一个个窗口切过去。'] },
       { caption: ['每一步', '实时打勾'], sub: ['agent 做完一步，', '看板马上就显示。'] },
@@ -994,7 +997,7 @@ const COVER_WORDS: Record<Lang, { label: string; scenes: CoverScene[]; legend: [
     legend: ['完成', '进行中', '待办'],
     pick: '选中它',
     works: '同一行命令就能设置',
-    soon: { send: '0.24.1 起提供', npm: '0.24.0 起上架 npm' },
+    soon: { send: '0.24.2 起提供', npm: '0.24.0 起上架 npm' },
   },
 }
 // The setup command scene 6 shows, and the agents it shows under it: the README's supported list.
@@ -1434,6 +1437,38 @@ if (named !== undefined && !hasFontTools(named)) throw new Error(`PYTHON is ${na
 const python = named ?? ['python3', 'python'].find(hasFontTools)
 if (python === undefined) throw new Error('docs/preview/fonts.py needs Python 3 with fontTools 4.60 or newer: pip install "fonttools>=4.60" brotli (or set PYTHON)')
 
+// The README's Integrations strip: one chip per agent, its tile and its name in one picture.
+// GitHub breaks a line between an image and the text beside it, so a tile and a name set side
+// by side part at the end of a line. The chips take the cover's dark card and ink; the names
+// are product names, so one set serves every README. Every chip has the same height and
+// padding: its width is its name's width in Inter, which fonts.py measures for all of them at once.
+const CHIP = { height: 28, pad: 4, tile: 20, gap: 8, end: 10, size: 14, weight: 600 }
+const chipWidths = new Map<string, number>()
+const nameWidth = (name: string): number => {
+  if (chipWidths.size === 0) {
+    const names = AGENT_ICONS.map(icon => icon.name)
+    const run = Bun.spawnSync([python, join(import.meta.dir, 'fonts.py'), '--width', String(CHIP.weight), String(CHIP.size), ...names], { stderr: 'inherit' })
+    if (run.exitCode !== 0) throw new Error(`fonts.py --width stopped with exit code ${run.exitCode}`)
+    const widths = JSON.parse(run.stdout.toString()) as number[]
+    names.forEach((one, i) => chipWidths.set(one, widths[i] ?? 0))
+  }
+  const width = chipWidths.get(name)
+  if (width === undefined || width <= 0) throw new Error(`fonts.py measured no width for "${name}"`)
+  return width
+}
+const chip = (icon: AgentIcon): string => {
+  const { height, pad, tile, gap, end, size, weight } = CHIP
+  const left = pad + tile + gap
+  const width = Math.ceil(left + nameWidth(icon.name) + end)
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}" role="img" aria-label="${esc(icon.name)}" font-family="'Inter', sans-serif">
+<title>${esc(icon.name)}</title>
+<rect x="0.5" y="0.5" width="${width - 1}" height="${height - 1}" rx="${num(tile * 0.23 + pad - 0.5)}" fill="${BRAND.card}" stroke="${BRAND.line}"/>
+${iconTile(icon.name, pad, pad, tile)}
+<text x="${left}" y="${num(height / 2 + size * 0.36)}" font-size="${size}" font-weight="${weight}" fill="${BRAND.ink}">${esc(icon.name)}</text>
+</svg>
+`
+}
+
 // `bun docs/preview/render.ts cover-en` writes only the files whose names start with `cover-en`,
 // and gives only those their fonts: to try one picture out without redrawing the others.
 const only = process.argv[2]
@@ -1446,6 +1481,7 @@ const write = (path: string, make: () => string): void => {
 
 mkdirSync(join(OUT, 'agents'), { recursive: true })
 for (const icon of AGENT_ICONS) write(join(OUT, 'agents', `${icon.file}.svg`), () => agentIcon(icon))
+for (const icon of AGENT_ICONS) write(join(OUT, 'agents', `chip-${icon.file}.svg`), () => chip(icon))
 for (const lang of LANGS) write(join(OUT, `promo-${lang}.svg`), () => promo(lang))
 
 mkdirSync(join(OUT, 'board'), { recursive: true })
@@ -1461,11 +1497,11 @@ for (const lang of LANGS) {
 // Each SVG then gets the letters it draws from its fonts (fonts.py, which needs fontTools).
 const svgs = only !== undefined ? written : [
   ...readdirSync(OUT).filter(name => name.endsWith('.svg')).map(name => join(OUT, name)),
-  ...AGENT_ICONS.map(icon => join(OUT, 'agents', `${icon.file}.svg`)),
+  ...AGENT_ICONS.flatMap(icon => [join(OUT, 'agents', `${icon.file}.svg`), join(OUT, 'agents', `chip-${icon.file}.svg`)]),
   ...readdirSync(join(OUT, 'board')).filter(name => name.endsWith('.svg')).map(name => join(OUT, 'board', name)),
 ]
 if (svgs.length === 0) throw new Error(`No image's name starts with ${only}`)
 const fonts = Bun.spawnSync([python, join(import.meta.dir, 'fonts.py'), ...svgs], { stdout: 'inherit', stderr: 'inherit' })
 if (fonts.exitCode !== 0) throw new Error(`fonts.py stopped with exit code ${fonts.exitCode}`)
 if (only !== undefined) console.log(`wrote ${written.length} image(s) starting with ${only} to ${OUT}`)
-else console.log(`wrote the pane top, tour, flow, promotional card, the README cover and CLI boards in ${LANGS.length} languages and ${AGENT_ICONS.length} agent icons to ${OUT}, and ${LANGS.length} progress.html pages to ${PAGES}`)
+else console.log(`wrote the pane top, tour, flow, promotional card, the README cover and CLI boards in ${LANGS.length} languages and ${AGENT_ICONS.length} agent icons and chips to ${OUT}, and ${LANGS.length} progress.html pages to ${PAGES}`)

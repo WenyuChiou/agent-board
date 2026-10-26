@@ -1,7 +1,7 @@
-import type { ProgressMirror, ProgressProject, QuestionLedger, QuestionProofs, QuestionRecord, QuestionSource } from '../types'
+import type { CutBlock, ProgressAuto, ProgressMirror, ProgressProject, ProgressStepStatus, ProgressTask, QuestionLedger, QuestionProofs, QuestionRecord, QuestionSource } from '../types'
 import type { PendingTurn } from './board'
 import type { AgentTurn } from './inbox'
-import { scanBlocks, shortId, stepWords } from './blocks'
+import { cutOffTest, scanBlocks, shortId, stepWords } from './blocks'
 import { questionToken, waitsOnYou } from './mirror'
 import { sha256 } from './sha256'
 import type { TaskRef } from './view'
@@ -18,15 +18,84 @@ export const questionScope = (project: string, agent: string, session: string): 
 export const questionSlot = (scope: string, index: number | string): string => JSON.stringify([scope, index])
 export const pendingQuestionSlot = (scope: string, text: string): string => questionSlot(scope, `inbox:${questionWords(text)}`)
 export const migrationKey = (legacy: string): string => `question-migrated:${sha256(legacy)}`
-export const isQuestionSnapshot = (text: string): boolean => scanBlocks(text.split(/\r?\n/)).every(span => span.isClosed)
+// A board read halfway through a write ends in a block with no end marker. One cut off in the
+// middle of the file is not being written, so it does not hold the questions back (`cutOffTest`).
+export const isQuestionSnapshot = (text: string, isSettled = false): boolean => {
+  const lines = text.split(/\r?\n/)
+  const isCutOff = cutOffTest(lines, isSettled)
+
+  return scanBlocks(lines).every(span => span.isClosed || isCutOff(span))
+}
+// The question scopes of blocks cut off in the middle of the file. What a write left half done is
+// neither read as questions nor taken as their removal or answer: their records stay as they were
+// until the block has its end marker again, so a question cut out of it is not asked anew.
+// A block cut right after its marker has no parsed task, so its scope comes from the cut span.
+export const cutOffScopes = (projects: readonly ProgressProject[], cut: readonly CutBlock[]): Set<string> => {
+  const sessions = new Set(cut.map(one => one.session))
+
+  return new Set([
+    ...cut.map(one => questionScope(one.project, one.agent.toLowerCase(), one.session)),
+    ...projects.flatMap(project => project.tasks.flatMap(task => task.auto !== null && sessions.has(task.auto.session) ? [questionScope(project.name, task.auto.agent, task.auto.session)] : [])),
+  ])
+}
+// A question's copy of its block or hand-kept task: the marker fields and each step's mark, which
+// are all its readers need. The whole task held every step's words and line once per waiting
+// step, so a real board's ledger grew past the host's 4 MiB write limit, and every edit above a
+// block wrote a new copy of each of its questions (#419).
+export const sourceData = (task: ProgressTask): string => JSON.stringify({ auto: task.auto, steps: task.steps.map(step => step.status) })
+
+type SourceSnapshot = { auto: ProgressAuto | null; steps: ProgressStepStatus[] }
+const parsedJson = (text: string): unknown => {
+  try {
+    return JSON.parse(text) as unknown
+  } catch {
+    return undefined
+  }
+}
+// The whole-task form an old copy holds: an object with the task's title.
+const isWholeTask = (value: unknown): boolean => value !== null && typeof value === 'object' && !Array.isArray(value) && 'title' in value
+const snapshotOf = (saved: unknown): SourceSnapshot | null => {
+  if (saved === null || typeof saved !== 'object' || Array.isArray(saved)) return null
+  const value = saved as Record<string, unknown>
+  if (!Array.isArray(value.steps)) return null
+  const steps: unknown[] = isWholeTask(value) ? value.steps.map(step => step !== null && typeof step === 'object' && !Array.isArray(step) ? (step as Record<string, unknown>).status : null) : value.steps
+  if (steps.some(status => typeof status !== 'string' || !['done', 'doing', 'todo', 'waiting', 'running', 'blocked', 'cancelled'].includes(status))) return null
+  if (value.auto !== null) {
+    if (typeof value.auto !== 'object' || Array.isArray(value.auto)) return null
+    const auto = value.auto as Record<string, unknown>
+    if (typeof auto.session !== 'string' || typeof auto.agent !== 'string' || !['working', 'waiting', 'done', 'ended'].includes(auto.state as string) || typeof auto.updated !== 'number' || !Number.isFinite(auto.updated)) return null
+    if ((auto.resume !== null && typeof auto.resume !== 'string') || (auto.dir !== null && typeof auto.dir !== 'string') || (auto.pr !== null && (typeof auto.pr !== 'number' || !Number.isFinite(auto.pr))) || (auto.ci !== null && !['none', 'pending', 'pass', 'fail'].includes(auto.ci as string))) return null
+  }
+  return { auto: value.auto as ProgressAuto | null, steps: steps as ProgressStepStatus[] }
+}
+
+// The marker fields and step marks a copy holds, in either form: this one, or the whole task a
+// copy written before 0.24.0 holds. Null for any other shape, so a broken file never throws in a reader.
+export const sourceSnapshot = (data: string): SourceSnapshot | null => snapshotOf(parsedJson(data))
+
+// An old whole-task copy of a block or hand-kept task reads as the copy this version writes, so
+// it compares equal to the live block, and the copies of one block at different lines are one.
+// Other shapes stay as they are; an own or inbox copy is small, and its exact text is read back.
+const normalizeSource = (source: QuestionSource): QuestionSource => {
+  if (source.kind !== 'block' && source.kind !== 'manual') return source
+  const parsed = parsedJson(source.data)
+  return isWholeTask(parsed) && snapshotOf(parsed) !== null ? { ...source, data: sourceData(parsed as unknown as ProgressTask) } : source
+}
+
 export const archiveQuestionsKept = (projects: readonly ProgressProject[], ref: TaskRef, ledger: QuestionLedger): boolean => {
   const tasks = projects.filter(project => project.name === ref.project).flatMap(project => project.tasks).filter(task => ref.session === null ? task.title === ref.title : task.auto?.session === ref.session)
   if (tasks.length !== 1) return false
   const task = tasks[0]
   if (task === undefined) return false
+  // The polls drop a step whose token another step repeats, so a waiting step with a repeated
+  // token has no live identity, and an old copy of it cannot justify archiving the block.
+  const tokens = task.steps.map(step => step.questionToken ?? '').filter(token => token !== '')
+  if (task.steps.some(step => step.status === 'waiting' && (step.questionToken ?? '') !== '' && tokens.filter(token => token === step.questionToken).length > 1)) return false
   const scope = questionScope(ref.project, task.auto?.agent ?? 'manual', task.auto?.session ?? task.title)
+  // The copy no longer holds the title, so the record is tied to this task by its title and
+  // session; two hand-kept tasks that ask the same have the same marks.
   return task.steps.filter(step => step.status === 'waiting').every(step => ledger.records.some(record => record.isUnresolved
-    ? record.source?.project === ref.project && record.source.text === step.text && record.source.data === JSON.stringify(task)
+    ? isAskedBy(record, ref) && record.source?.text === step.text && record.source.data === sourceData(task) && (record.producer ?? '') === (step.questionToken ?? '')
     : record.resolvedAt !== undefined && record.source !== undefined && record.scope === scope && record.words === questionWords(step.text) && (record.producer ?? '') === (step.questionToken ?? '') && !ledger.records.some(other => other.isUnresolved && other.scope === scope && other.words === questionWords(step.text))))
 }
 // The questions of one block in the ledger: its project and title and, for an agent's block, its
@@ -73,6 +142,7 @@ export const parseQuestions = (text: string, isMissing = false): QuestionLedger 
       if (row.producerRevisions !== undefined && (!Array.isArray(row.producerRevisions) || row.producerRevisions.some(revision => typeof revision !== 'string' || !/^[a-f0-9]{64}$/.test(revision)))) return null
       if (row.producerSources !== undefined && (!Array.isArray(row.producerSources) || row.producerSources.some(source => typeof source !== 'string'))) return null
       if (row.source !== undefined && (row.source === null || typeof row.source !== 'object' || !['block', 'own', 'manual', 'inbox'].includes(row.source.kind) || ['project', 'task', 'context', 'text', 'agent', 'session', 'data'].some(key => typeof (row.source as unknown as Record<string, unknown>)[key] !== 'string'))) return null
+      if (row.source !== undefined) row.source = normalizeSource(row.source)
       ids.add(row.id)
     }
     if (Object.values(data.legacy).some(id => typeof id !== 'string' || (id !== '' && !ids.has(id)))) return null
@@ -83,6 +153,8 @@ export const parseQuestions = (text: string, isMissing = false): QuestionLedger 
 }
 
 export const questionsJson = (ledger: QuestionLedger): string => `${JSON.stringify(ledger, null, 2)}\n`
+// Standalone polls rewrite this machine index often; indentation need not be allocated or read back.
+export const compactQuestionsJson = (ledger: QuestionLedger): string => `${JSON.stringify(ledger)}\n`
 
 // A resolution is permanent for this incarnation, while its source stays available.
 export const resolveQuestion = (ledger: QuestionLedger, id: string, now: number): QuestionLedger => ({
@@ -105,7 +177,9 @@ export const parseCapture = (text: string, hash: string): QuestionCapture | null
     const value = JSON.parse(text) as QuestionCapture
     if (value.version !== 1 || !['unresolved', 'resolved', 'archived'].includes(value.disposition) || value.record?.source === undefined) return null
     const next = Number(value.record.id.slice(value.record.id.lastIndexOf(':') + 1)) + 1
-    return parseQuestions(JSON.stringify({ version: 1, next, records: [value.record], legacy: {} })) === null ? null : value
+    const parsed = parseQuestions(JSON.stringify({ version: 1, next, records: [value.record], legacy: {} }))
+    const record = parsed?.records[0]
+    return record === undefined ? null : { ...value, record }
   } catch {
     return null
   }
@@ -115,17 +189,23 @@ export const parseCapture = (text: string, hash: string): QuestionCapture | null
 // A stale mutable index cannot erase an immutable source or reverse its resolution receipt.
 export const withCaptures = (ledger: QuestionLedger, captures: readonly QuestionCapture[]): QuestionLedger => {
   const records = ledger.records.map(record => ({ ...record }))
+  // Each id to its first record, which a search of the list would find; a board holds thousands (#416).
+  const byId = new Map<string, QuestionRecord>()
+  for (const record of records) if (!byId.has(record.id)) byId.set(record.id, record)
   for (const capture of captures) {
-    const previous = records.find(record => record.id === capture.record.id)
-    if (previous === undefined) records.push({ ...capture.record })
-    else {
+    const previous = byId.get(capture.record.id)
+    if (previous === undefined) {
+      const record = { ...capture.record }
+      records.push(record)
+      byId.set(record.id, record)
+    } else {
       if (previous.source === undefined) previous.source = capture.record.source
       if (capture.record.producerRevisions !== undefined) previous.producerRevisions = [...new Set([...(previous.producerRevisions ?? []), ...capture.record.producerRevisions])]
       if (capture.record.producerSources !== undefined) previous.producerSources = [...new Set([...(previous.producerSources ?? []), ...capture.record.producerSources])]
     }
   }
   for (const capture of captures) {
-    const record = records.find(one => one.id === capture.record.id)
+    const record = byId.get(capture.record.id)
     if (record === undefined) continue
     if (capture.disposition === 'archived') record.isArchived = true
     if (capture.disposition === 'resolved') {
@@ -138,6 +218,35 @@ export const withCaptures = (ledger: QuestionLedger, captures: readonly Question
   return { ...ledger, next: records.reduce((next, record) => Math.max(next, Number(record.id.slice(record.id.lastIndexOf(':') + 1)) + 1), ledger.next), records }
 }
 
+// The copies a question pass keeps before it writes the ledger, in the order of `observed`: an
+// open question whose copy is not among `captures` yet, and a question resolved since `current`
+// was read. Each capture is serialised once, not once for every record: on a board with
+// thousands of each, comparing them pair by pair kept the first poll from reaching the host for
+// longer than Claude Code waits before it unloads the mod (#416).
+export const copiesToKeep = (current: QuestionLedger, observed: QuestionLedger, captures: readonly QuestionCapture[]): { record: QuestionRecord; disposition: 'unresolved' | 'resolved' }[] => {
+  const held = new Set(captures.map(capture => captureJson(capture.record, capture.disposition)))
+  const openIds = new Set(current.records.filter(record => record.isUnresolved === true).map(record => record.id))
+  return observed.records.flatMap(record => {
+    if (record.source === undefined) return []
+    const kept: { record: QuestionRecord; disposition: 'unresolved' | 'resolved' }[] = []
+    if (record.isUnresolved && !held.has(captureJson(record, 'unresolved'))) kept.push({ record, disposition: 'unresolved' })
+    if (record.isUnresolved === false && openIds.has(record.id) && !held.has(captureJson(record, 'resolved'))) kept.push({ record, disposition: 'resolved' })
+    return kept
+  })
+}
+
+// The questions a pass retires that have no retirement proof among `kept` yet, in the order of
+// `current`: one that was on the board and now is neither waiting there nor resolved, and one
+// whose resolution `resolvedQuestionsToRetire` lets go. The same questions come back on every
+// pass, and checking each kept proof on disk again cost three trips to the host apiece, thousands
+// a minute on a big board, while the write queue waited (#416).
+export const identitiesToRetire = (current: QuestionLedger, observed: QuestionLedger, retiredResolutions: readonly string[], kept: readonly string[] = []): string[] => {
+  const still = new Set(observed.records.filter(record => (record.isPresent && record.isWaiting) || record.resolvedAt !== undefined).map(record => record.id))
+  const resolutions = new Set(retiredResolutions)
+  const proven = new Set(kept)
+  return current.records.filter(old => ((old.isPresent && !still.has(old.id)) || resolutions.has(old.id)) && !proven.has(sha256(old.id))).map(old => old.id)
+}
+
 // The folder keeps at least this many of each kind of question file (#156): the newest by
 // modified time, whatever they hold. Older ones go only when the rules below find nothing in
 // them that the ledger or a newer file does not already hold, so the number is a floor.
@@ -145,6 +254,7 @@ export const QUESTION_FILES_KEPT = 16
 
 export type HeldCapture = { hash: string; mtimeMs: number; capture: QuestionCapture }
 export type HeldProof = { kind: keyof QuestionProofs; hash: string; mtimeMs: number }
+export type CaptureCover = { hash: string; cover: string | null; retired: string | null }
 
 // Newest first. The name breaks a tie, so two sessions looking at the same folder pick the same files.
 const newestFirst = <T extends { hash: string; mtimeMs: number }>(files: readonly T[]): T[] =>
@@ -157,17 +267,19 @@ const restored = (captures: readonly QuestionCapture[]): string => JSON.stringif
 const isCovered = (record: QuestionRecord, capture: QuestionCapture): boolean =>
   JSON.stringify(withCaptures({ ...emptyQuestions(), records: [record] }, [capture]).records) === JSON.stringify([record])
 
-// Which capture files can go (their hashes). A capture of a question goes only when all of these hold:
+// Which capture files can go, each with the file that lets it go: the retirement proof, or the
+// newest newer copy that holds what it holds. The trim reads exactly those again before it removes
+// anything (#416). A capture of a question goes only when all of these hold:
 // - it is not among the newest `keep` captures;
 // - the ledger file itself holds that question, with everything the capture adds, so no
 //   unresolved question lives only in a copy that is removed;
-// - it is not the copy of the question's open state that every poll looks for (it would be
+// - it is not the newest copy of the question's open state that every poll looks for (it would be
 //   written again at once);
 // - and either the question is resolved and retired, so nothing reads its copies any more, or
 //   a newer copy of the same kind for the same question already holds everything this one does,
 //   which leaves the newest copy of each kind in place, so a ledger lost later is rebuilt as before.
 // Anything else stays, even when that leaves more than `keep` files.
-export const prunableCaptures = (ledger: QuestionLedger, held: readonly HeldCapture[], retired: readonly string[], keep = QUESTION_FILES_KEPT): string[] => {
+export const captureCovers = (ledger: QuestionLedger, held: readonly HeldCapture[], retired: readonly string[], keep = QUESTION_FILES_KEPT): CaptureCover[] => {
   const ordered = newestFirst(held)
   const candidates = ordered.slice(keep)
   if (candidates.length === 0) return []
@@ -180,16 +292,33 @@ export const prunableCaptures = (ledger: QuestionLedger, held: readonly HeldCapt
     if (same === undefined) byQuestion.set(one.capture.record.id, [one])
     else same.push(one)
   }
-  return candidates.filter(one => {
+  // What each copy restores on its own, worked out once however many older copies it is weighed against.
+  const restoredAlone = new Map<string, string>()
+  const alone = (one: HeldCapture): string => {
+    const text = restoredAlone.get(one.hash) ?? restored([one.capture])
+    restoredAlone.set(one.hash, text)
+    return text
+  }
+  return candidates.flatMap<CaptureCover>(one => {
     const record = records.get(one.capture.record.id)
-    if (record === undefined || !isCovered(record, one.capture)) return false
-    if (record.isUnresolved === false && record.resolvedAt !== undefined && retiredHashes.has(sha256(record.id))) return true
-    if (record.isUnresolved && captureJson(record, 'unresolved') === captureJson(one.capture.record, one.capture.disposition)) return false
+    if (record === undefined || !isCovered(record, one.capture)) return []
+    const proof = record.isUnresolved === false && record.resolvedAt !== undefined ? sha256(record.id) : null
+    if (proof !== null && retiredHashes.has(proof)) return [{ hash: one.hash, cover: null, retired: proof }]
+    if (record.isUnresolved && captureJson(record, 'unresolved') === captureJson(one.capture.record, one.capture.disposition)) {
+      // Old copies of one block at different lines all read as the open copy now: the newest,
+      // in the order two sessions agree on, is the one kept, and it covers the rest.
+      const newest = (byQuestion.get(record.id) ?? []).find(other => captureJson(record, 'unresolved') === captureJson(other.capture.record, other.capture.disposition))
+      if (newest !== undefined) return newest.hash === one.hash ? [] : [{ hash: one.hash, cover: newest.hash, retired: null }]
+    }
     const own = rank.get(one.hash) ?? 0
-
-    return (byQuestion.get(record.id) ?? []).some(other => (rank.get(other.hash) ?? 0) < own && other.capture.disposition === one.capture.disposition && restored([other.capture, one.capture]) === restored([other.capture]))
-  }).map(one => one.hash)
+    const cover = (byQuestion.get(record.id) ?? []).find(other => (rank.get(other.hash) ?? 0) < own && other.capture.disposition === one.capture.disposition && restored([other.capture, one.capture]) === alone(other))
+    return cover === undefined ? [] : [{ hash: one.hash, cover: cover.hash, retired: null }]
+  })
 }
+
+// The hashes alone.
+export const prunableCaptures = (ledger: QuestionLedger, held: readonly HeldCapture[], retired: readonly string[], keep = QUESTION_FILES_KEPT): string[] =>
+  captureCovers(ledger, held, retired, keep).map(one => one.hash)
 
 // Which proof files can go. Beyond the newest `keep` of its kind, a proof goes only when nothing
 // can still refer to it: a retired proof is the hash of a question id, a consumed proof the hash
@@ -209,9 +338,67 @@ export const prunableProofs = (ledger: QuestionLedger, captures: readonly Questi
   return (['retired', 'consumed'] as const).flatMap(kind => newestFirst(held.filter(one => one.kind === kind)).slice(keep).filter(one => !known.has(one.hash)))
 }
 
+// What a torn ledger or a cut-off write leaves beside the ledger, and nothing else removes
+// (#156): a torn ledger moved aside (`.torn-<time>-<who>`), kept to look into, and a temporary
+// copy of a write that a crash or a failed clean-up left (`.tmp-<session>-<n>` from the pane,
+// `.<pid>.<time>.board-tmp` from the board script). The torn files past the newest `keepTorn`, by
+// the time in their names (in milliseconds; a name moved aside by hand, such as `.torn-2026-10-19`,
+// by the file's own time), and
+// any over a week old, so a few left from one bad day do not stay for good; and the temporary
+// copies over a day old. The caller removes a torn file only when it still holds torn text, and a
+// temporary copy only while the ledger itself reads: with no ledger, a temporary copy may be the
+// only complete one.
+export const LEDGER_TORN_KEPT = 3
+export const LEDGER_TORN_MS = 7 * 24 * 60 * 60 * 1000
+export const LEDGER_TEMP_MS = 24 * 60 * 60 * 1000
+export const ledgerLeftovers = (path: string, entries: ReadonlyArray<{ name: string; mtimeMs: number }>, now: number, keepTorn = LEDGER_TORN_KEPT): { torn: string[]; temps: string[] } => {
+  const ledger = questionsPath(path).replace(/^.*[\\/]/, '')
+  const tornAt = (entry: { name: string; mtimeMs: number }): number => Number(/^\.torn-(\d{12,})-/.exec(entry.name.slice(ledger.length))?.[1] ?? entry.mtimeMs)
+  const torn = entries
+    .filter(entry => entry.name.startsWith(`${ledger}.torn-`))
+    .sort((a, b) => tornAt(b) - tornAt(a) || (a.name < b.name ? -1 : 1))
+    .filter((entry, index) => index >= keepTorn || now - tornAt(entry) > LEDGER_TORN_MS)
+  const isTemp = (name: string): boolean => name.startsWith(`${ledger}.tmp-`) || (name.startsWith(`${ledger}.`) && name.endsWith('.board-tmp'))
+  const temps = entries.filter(entry => isTemp(entry.name) && now - entry.mtimeMs > LEDGER_TEMP_MS)
+
+  return { torn: torn.map(entry => entry.name), temps: temps.map(entry => entry.name) }
+}
+
+// What an idle question pass reads from the folder beside progress.md (#156): progress.md, the
+// ledger, the answered file, the copies and the proofs, by name, size and time, in name order.
+// Null while one of them is younger than `freshMs`: a second write in the same second can keep
+// both its size and a whole-second time, so it would look unchanged.
+export const questionFilesKey = (
+  path: string,
+  answered: string,
+  entries: ReadonlyArray<{ name: string; size: number; mtimeMs: number }>,
+  now: number,
+  freshMs: number,
+): Array<readonly [string, number, number]> | null => {
+  const names = [path, questionsPath(path), answered].map(file => file.replace(/^.*[\\/]/, ''))
+  const files = entries
+    .filter(entry => names.includes(entry.name) || captureHashOf(path, entry.name) !== null || questionProofOf(path, entry.name) !== null)
+    .map(entry => [entry.name, entry.size, entry.mtimeMs] as const)
+    .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+
+  return files.some(([, , mtimeMs]) => now - mtimeMs < freshMs) ? null : files
+}
+
 type Observation = { scope: string; session: string; index: number | string; text: string; isWaiting: boolean; producer: string; producerRevisions?: string[]; producerSources?: string[]; source: QuestionSource }
 
-const observations = (projects: readonly ProgressProject[], mine: ProgressMirror | null, pending: readonly PendingTurn[]): Observation[] => {
+const ownObservations = (mine: ProgressMirror): Observation[] => {
+  const own = shortId(mine.sessionId)
+  const scope = questionScope(mine.project, 'claude', own)
+  return mine.tasks.map((task, index) => ({ scope, session: own, index, text: stepWords(task).trim(), isWaiting: waitsOnYou(mine, task) && task.blocked === null, producer: questionToken(task), source: { kind: 'own', project: mine.project, task: mine.title, context: mine.context, text: stepWords(task).trim(), agent: 'claude', session: own, data: JSON.stringify({ task, title: mine.title, context: mine.context }) } }))
+}
+
+// All a question pass reads from this session's own list: whose it is and the rows it gives.
+// Its times, turn state and background jobs change with every hook of a running session and
+// are left out, so they do not make an idle poll pass again (#416).
+export const ownQuestionsKey = (mine: ProgressMirror | null): string =>
+  JSON.stringify(mine === null ? null : [shortId(mine.sessionId), mine.project, ownObservations(mine)])
+
+const observations = (projects: readonly ProgressProject[], mine: ProgressMirror | null, pending: readonly PendingTurn[], frozen: ReadonlySet<string> = new Set()): Observation[] => {
   const own = mine === null ? '' : shortId(mine.sessionId)
   const rows: Observation[] = []
   const scopes = new Set<string>()
@@ -220,22 +407,21 @@ const observations = (projects: readonly ProgressProject[], mine: ProgressMirror
     for (const task of project.tasks) {
       if (mine !== null && task.auto?.session === own) continue
       const scope = questionScope(project.name, task.auto?.agent ?? 'manual', task.auto?.session ?? task.title)
+      if (frozen.has(scope)) continue
       if (scopes.has(scope)) ambiguous.add(scope)
       scopes.add(scope)
       // The task's background and its copy as data are the same for each of its steps, so they
       // are worked out once per task rather than once per step (#371).
       const context = task.notes.find(note => /^(?:背景|Context|Background)\s*[:：]/i.test(note))?.replace(/^(?:背景|Context|Background)\s*[:：]\s*/i, '') ?? (task.auto === null ? task.notes.join('\n') : '')
-      const data = JSON.stringify(task)
+      const data = sourceData(task)
       task.steps.forEach((step, index) => rows.push({ scope, session: task.auto?.session ?? '', index, text: step.text, isWaiting: step.status === 'waiting', producer: step.questionToken ?? '', source: { kind: task.auto === null ? 'manual' : 'block', project: project.name, task: task.title, context, text: step.text, agent: task.auto?.agent ?? '', session: task.auto?.session ?? '', data } }))
     }
   }
-  if (mine !== null) {
-    const scope = questionScope(mine.project, 'claude', own)
-    mine.tasks.forEach((task, index) => rows.push({ scope, session: own, index, text: stepWords(task).trim(), isWaiting: waitsOnYou(mine, task) && task.blocked === null, producer: questionToken(task), source: { kind: 'own', project: mine.project, task: mine.title, context: mine.context, text: stepWords(task).trim(), agent: 'claude', session: own, data: JSON.stringify({ task, title: mine.title, context: mine.context }) } }))
-  }
+  if (mine !== null) rows.push(...ownObservations(mine))
   for (const turn of pending) {
     if (!turn.isQuestion || turn.id === undefined) continue
     const scope = questionScope(turn.project, turn.agent, turn.id)
+    if (frozen.has(scope)) continue
     const matching = rows.filter(row => row.isWaiting && row.scope === scope && questionWords(row.text) === questionWords(turn.text))
     if (matching.length === 1 && matching[0] !== undefined) {
       const row = matching[0]
@@ -257,14 +443,14 @@ const observations = (projects: readonly ProgressProject[], mine: ProgressMirror
 
 // Seeing the source without its question ends a no-token resolution's lifetime.
 // A missing source alone cannot prove that an unchanged question was renewed.
-export const resolvedQuestionsToRetire = (ledger: QuestionLedger, projects: readonly ProgressProject[], mine: ProgressMirror | null, pending: readonly PendingTurn[]): string[] => {
-  const seen = observations(projects, mine, pending)
+export const resolvedQuestionsToRetire = (ledger: QuestionLedger, projects: readonly ProgressProject[], mine: ProgressMirror | null, pending: readonly PendingTurn[], frozen: ReadonlySet<string> = new Set()): string[] => {
+  const seen = observations(projects, mine, pending, frozen)
   const scopes = new Set([
     ...projects.flatMap(project => project.tasks.map(task => questionScope(project.name, task.auto?.agent ?? 'manual', task.auto?.session ?? task.title))),
     ...(mine === null ? [] : [questionScope(mine.project, 'claude', shortId(mine.sessionId))]),
     ...seen.map(row => row.scope),
   ])
-  return ledger.records.filter(record => record.resolvedAt !== undefined && scopes.has(record.scope) && !seen.some(row => row.scope === record.scope && row.isWaiting && questionWords(row.text) === record.words)).map(record => record.id)
+  return ledger.records.filter(record => record.resolvedAt !== undefined && scopes.has(record.scope) && !frozen.has(record.scope) && !seen.some(row => row.scope === record.scope && row.isWaiting && questionWords(row.text) === record.words)).map(record => record.id)
 }
 
 // Words identify candidates, not questions. A durable sequence identifies each incarnation;
@@ -281,6 +467,7 @@ export const observeQuestions = (
   proofs: QuestionProofs = { retired: [], consumed: [] },
   pending: readonly PendingTurn[] = [],
   answeredTurns: readonly (AgentTurn | QuestionAnswerEvidence)[] = [],
+  frozen: ReadonlySet<string> = new Set(),
 ): { ledger: QuestionLedger; keys: Record<string, string>; marked: string[] } => {
   const records = ledger.records.map(row => ({ ...row }))
   for (const record of records) {
@@ -297,7 +484,7 @@ export const observeQuestions = (
   }
   // Producer receipts and an explicit resolution suppress only the resolved incarnation.
   // A new file/content revision can still prove a fresh ask without changing its words.
-  const seen = observations(projects, mine, pending)
+  const seen = observations(projects, mine, pending, frozen)
   // Each row's copies (the rows of its scope with the same words, in order), indexed once:
   // comparing every row with every other took seconds on a board of a few thousand steps (#371).
   const copyKey = (row: Observation): string => JSON.stringify([row.scope, questionWords(row.text)])
@@ -314,14 +501,29 @@ export const observeQuestions = (
   const hasNewRevision = (row: Observation, record: QuestionRecord): boolean =>
     [row, ...records.filter(other => other.scope === row.scope && other.words === record.words && other.isPresent && other.isUnresolved)]
       .some(other => other.producerRevisions?.some(revision => !record.producerRevisions?.includes(revision)))
+  // Each row's words, each record's hash and the retired set are worked out once a pass, not once
+  // for every pair of row and record (#416).
+  const retired = new Set(proofs.retired)
+  const hashes = new Map<string, string>()
+  const isRetired = (record: QuestionRecord): boolean => {
+    if (retired.size === 0) return false
+    const hash = hashes.get(record.id) ?? sha256(record.id)
+    hashes.set(record.id, hash)
+    return retired.has(hash)
+  }
   const resolved = seen.flatMap(row => {
+    if (!row.isWaiting) return []
     const copies = copiesOf(row)
-    const record = row.isWaiting ? records.find(record => record.scope === row.scope && (record.producer ?? '') === row.producer && record.words === questionWords(row.text) && record.isUnresolved === false && (row.producer !== '' || (record.resolvedAt !== undefined && record.source?.task === row.source.task && !proofs.retired.includes(sha256(record.id)) && record.occurrence === copies.indexOf(row) + 1 && record.copies === copies.length && !hasNewRevision(row, record)))) : undefined
+    const words = questionWords(row.text)
+    const record = records.find(record => record.scope === row.scope && (record.producer ?? '') === row.producer && record.words === words && record.isUnresolved === false && (row.producer !== '' || (record.resolvedAt !== undefined && record.source?.task === row.source.task && !isRetired(record) && record.occurrence === copies.indexOf(row) + 1 && record.copies === copies.length && !hasNewRevision(row, record))))
     return record === undefined ? [] : [{ row, record }]
   })
-  const rows = seen.filter(row => !resolved.some(item => item.row === row) && (row.source.kind !== 'inbox' || row.producerRevisions === undefined || row.producerRevisions.length === 0 || !row.producerRevisions.every(revision => records.some(record => record.scope === row.scope && record.isUnresolved === false && record.producerRevisions?.includes(revision)))))
+  const resolvedRows = new Set(resolved.map(item => item.row))
+  // The revisions a settled record of each scope already holds.
+  const settledRevisions = new Set(records.filter(record => record.isUnresolved === false).flatMap(record => (record.producerRevisions ?? []).map(revision => JSON.stringify([record.scope, revision]))))
+  const rows = seen.filter(row => !resolvedRows.has(row) && (row.source.kind !== 'inbox' || row.producerRevisions === undefined || row.producerRevisions.length === 0 || !row.producerRevisions.every(revision => settledRevisions.has(JSON.stringify([row.scope, revision])))))
   for (const record of records) {
-    if (proofs.retired.includes(sha256(record.id))) {
+    if (isRetired(record)) {
       record.isPresent = false
       record.isWaiting = false
     }
@@ -387,7 +589,7 @@ export const observeQuestions = (
   }
   if (isSettled) {
     for (const record of records) {
-      if (!assigned.has(record.id)) {
+      if (!assigned.has(record.id) && !frozen.has(record.scope)) {
         // End, cleanup and disconnection are not evidence that this exact ask was answered.
         if (record.source?.kind === 'inbox' && record.isUnresolved) continue
         record.isPresent = false

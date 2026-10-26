@@ -1,18 +1,19 @@
 import { test, expect } from 'claude-code/testing'
 import { parseProgress } from '../hooks/parse'
 import { buildView } from '../hooks/view'
-import { acknowledgementKeys, archiveQuestionsKept, captureJson, emptyQuestions, isAskedBy, isQuestionSnapshot, isTornLedger, migratedAnswered, migrationKey, observeQuestions, parseCapture, parseQuestions, prunableCaptures, prunableProofs, questionsJson, resolveQuestion, resolvedQuestionsToRetire, withCaptures } from '../hooks/questions'
+import { acknowledgementKeys, archiveQuestionsKept, captureCovers, captureJson, compactQuestionsJson, emptyQuestions, isAskedBy, isQuestionSnapshot, isTornLedger, ledgerLeftovers, LEDGER_TEMP_MS, migratedAnswered, migrationKey, observeQuestions, ownQuestionsKey, parseCapture, parseQuestions, prunableCaptures, prunableProofs, questionFilesKey, questionsJson, resolveQuestion, resolvedQuestionsToRetire, withCaptures } from '../hooks/questions'
 import type { QuestionLedger } from '../hooks/questions'
 import { edited, finished, held, ledgerOf, named, proof, question, reopened } from './fixtures/question-files'
 import { STRINGS } from '../hooks/strings'
 import { sha256 } from '../hooks/sha256'
-import { applyTaskCreate, applyTaskUpdate, emptyMirror, fromTaskList, questionToken } from '../hooks/mirror'
+import { applyTaskCreate, applyTaskUpdate, emptyMirror, fromTaskList, markAnswered, questionToken } from '../hooks/mirror'
 import { markAsked } from '../hooks/digest'
 import { renderAutoBlock } from '../hooks/blocks'
 import { remindersOf } from '../hooks/remind'
 import { peekInbox } from '../hooks/board'
 import { answerAgentPrompt, blockId } from '../hooks/inbox'
 import type { AgentTurn } from '../hooks/inbox'
+import { reusableQuestionObservation } from '../scripts/question-observation'
 
 const NOW = Date.parse('2026-10-16T12:00:00Z')
 const file = (steps: string, project = 'demo', session = 'a1b2c3d4'): string =>
@@ -21,6 +22,92 @@ const observe = (ledger: QuestionLedger, text: string, answered: string[] = [], 
   observeQuestions(ledger, parseProgress(text), null, answered, at, settled)
 const view = (ledger: QuestionLedger, text: string, answered: string[] = []) =>
   buildView(parseProgress(text), [], null, NOW, 0, {}, STRINGS.en, answered, {}, ledger)
+
+test('compact question indexes preserve every value and parse like existing formatted indexes', () => {
+  const ledger = observeQuestions(emptyQuestions(), parseProgress(file('- [?] 發送 synthetic plan, OK?')), null, [], NOW, true, 'birth').ledger
+  const record = ledger.records[0]!
+  const enriched = { ...ledger, records: [{ ...record, producerRevisions: [sha256('synthetic revision')], producerSources: ['synthetic producer'], source: { ...record.source!, context: '中文\n"quoted"\u0000\ud800' } }], future: { value: ['retain this', 1, null] } }
+  const pretty = questionsJson(enriched)
+  const compact = compactQuestionsJson(enriched)
+  expect(compact.length).toBeLessThan(pretty.length)
+  expect(JSON.parse(compact)).toEqual(JSON.parse(pretty))
+  expect(parseQuestions(compact)).toEqual(parseQuestions(pretty))
+  expect(captureJson(parseQuestions(compact)!.records[0]!, 'unresolved')).toBe(captureJson(parseQuestions(pretty)!.records[0]!, 'unresolved'))
+})
+
+test('retained question observations reuse allocations while new identities keep their current clock and incarnation', () => {
+  const projects = parseProgress(file('- [?] Publish the synthetic plan, OK?'))
+  const ledger = observeQuestions(emptyQuestions(), projects, null, [], NOW, true, 'birth').ledger
+  const proofs = { retired: [], consumed: [] }
+  const reader = reusableQuestionObservation()
+  const first = reader(ledger, projects, null, [], NOW + 1, true, 'reader:1', proofs)
+  const later = reader(ledger, projects, null, [], NOW + 900000, true, 'reader:2', proofs)
+  expect(later).toBe(first)
+  expect(later).toEqual(observeQuestions(ledger, projects, null, [], NOW + 900000, true, 'reader:2', proofs))
+  const empty = emptyQuestions()
+  const born = reader(empty, projects, null, [], NOW, true, 'new:1', proofs)
+  const renewed = reader(empty, projects, null, [], NOW + 900000, true, 'new:2', proofs)
+  expect(renewed.ledger.records[0]?.id).not.toBe(born.ledger.records[0]?.id)
+  expect(renewed.ledger.records[0]?.firstObserved).toBe(NOW + 900000)
+})
+
+test('question observation reuse invalidates for ledger project hide proof source clock and frozen scope changes', () => {
+  const projects = parseProgress(file('- [?] Publish the synthetic plan, OK?'))
+  const ledger = observeQuestions(emptyQuestions(), projects, null, [], NOW, true, 'birth').ledger
+  type Inputs = Parameters<typeof observeQuestions>
+  const baseline: Inputs = [ledger, projects, null, [], NOW + 1, true, 'reader', { retired: [], consumed: [] }, [], [], new Set()]
+  const changing = (edit: (input: Inputs) => void): Inputs => {
+    const input: Inputs = [...baseline]
+    edit(input)
+    return input
+  }
+  const cases: Inputs[] = [
+    changing(input => { input[0] = { ...ledger } }),
+    changing(input => { input[1] = parseProgress(file('- [?] Publish the changed plan, OK?')) }),
+    changing(input => { input[2] = emptyMirror('11223344', 'demo', NOW) }),
+    changing(input => { input[3] = [ledger.records[0]!.id] }),
+    changing(input => { input[5] = false }),
+    changing(input => { input[7] = { retired: [sha256(ledger.records[0]!.id)], consumed: [] } }),
+    changing(input => { input[8] = [{ id: 'a1b2c3d4', agent: 'codex', project: 'demo', text: 'A fresh inbox question?', isQuestion: true, at: NOW + 2 }] }),
+    changing(input => { input[9] = [{ id: 'a1b2c3d4', agent: 'codex', event: 'prompt', at: NOW + 2 }] }),
+    changing(input => { input[10] = new Set([ledger.records[0]!.scope]) }),
+  ]
+  for (const input of cases) {
+    const reader = reusableQuestionObservation()
+    const previous = reader(...baseline)
+    const changed = reader(...input)
+    expect(changed).not.toBe(previous)
+    expect(changed).toEqual(observeQuestions(...input))
+  }
+  const reader = reusableQuestionObservation()
+  const mutable: Inputs = [ledger, projects, null, [], NOW + 1, true, 'reader', { retired: [], consumed: [] }, [], [], new Set()]
+  const first = reader(...mutable)
+  mutable[7]!.retired.push(sha256(ledger.records[0]!.id))
+  const retired = reader(...mutable)
+  expect(retired).not.toBe(first)
+  expect(retired).toEqual(observeQuestions(...mutable))
+  const pending: Inputs = [...baseline]
+  pending[8] = [{ id: 'a1b2c3d4', agent: 'codex', project: 'demo', text: 'Another inbox question?', isQuestion: true, at: NOW + 2 }]
+  pending[0] = observeQuestions(...pending).ledger
+  const original = reader(...pending)
+  expect(reader(...pending)).toBe(original)
+  pending[8]![0]!.at = NOW + 3
+  expect(reader(...pending)).not.toBe(original)
+  expect(reader(...pending)).toEqual(observeQuestions(...pending))
+})
+
+test('a view with reused question observations still updates every age region as time passes', () => {
+  const projects = parseProgress(file('- [?] Publish the synthetic plan, OK?'))
+  const ledger = observeQuestions(emptyQuestions(), projects, null, [], NOW, true, 'birth').ledger
+  const proofs = { retired: [], consumed: [] }
+  for (const s of Object.values(STRINGS)) {
+    const reader = reusableQuestionObservation()
+    for (const at of [NOW, NOW + 13 * 3600000, NOW + 2 * 86400000, NOW + 31 * 86400000]) {
+      expect(buildView(projects, [], null, at, 0, {}, s, [], {}, ledger, proofs, [], new Set(), reader))
+        .toEqual(buildView(projects, [], null, at, 0, {}, s, [], {}, ledger, proofs))
+    }
+  }
+})
 
 test("your own session's question stays under Waiting on you after 12 quiet hours while the session runs", () => {
   const quiet = NOW - 13 * 60 * 60 * 1000
@@ -621,6 +708,20 @@ test('an answered question keeps its copies until its retirement proof exists', 
   expect(new Set(prunableCaptures(ledger, [...copies, ...fillers], [sha256(answered.id)]))).toEqual(named(copies))
 })
 
+test('each capture that can go is named with the file that lets it go: its retirement proof, or the newest newer copy that holds what it holds', () => {
+  const answered = finished(1)
+  const old = [held(reopened(answered), 'unresolved', 1), held(answered, 'resolved', 2)]
+  const snapshots = Array.from({ length: 20 }, (_, version) => held(edited(9, version), 'unresolved', 100 + version))
+  // The newest file is a resolved copy of the open question, so it covers none of its open copies.
+  const resolved = held(finished(9), 'resolved', 200)
+  const covers = captureCovers(ledgerOf(answered, edited(9, 19)), [...old, ...snapshots, resolved], [sha256(answered.id)])
+  const byHash = (one: { hash: string }, other: { hash: string }): number => one.hash.localeCompare(other.hash)
+  expect([...covers].sort(byHash)).toEqual([
+    ...old.map(one => ({ hash: one.hash, cover: null, retired: sha256(answered.id) })),
+    ...snapshots.slice(0, 5).map(one => ({ hash: one.hash, cover: snapshots[19]!.hash, retired: null })),
+  ].sort(byHash))
+})
+
 test('question proofs beyond the newest 16 go only when no ledger record, capture or acknowledgement refers to them', () => {
   const records = [finished(1), finished(2), question(3)]
   const ledger: QuestionLedger = { ...ledgerOf(...records), legacy: { 'a1b2c3d4 1 Old ask?': records[0]!.id } }
@@ -678,4 +779,86 @@ test("an archived mark counts only while the question's block is gone", () => {
   const gone = observe(marked, '## demo\n').ledger.records[0]
   expect(gone?.isArchived).toBe(true)
   expect(gone?.isUnresolved).toBe(true)
+})
+
+test('torn ledgers past the newest three go by the time in their names, and temporary copies of the ledger once a day old', () => {
+  const path = '/home/me/.claude/progress.md'
+  const ledger = 'progress-questions.json'
+  const now = Date.parse('2026-10-16T12:00:00Z')
+  const entries = [
+    // Moved aside by the pane (session) and by the board script (process id); the names, not
+    // the files' own times, say which is newest.
+    { name: `${ledger}.torn-${now - 5_000}-synthetic-session`, mtimeMs: 1 },
+    { name: `${ledger}.torn-${now - 1_000}-4242`, mtimeMs: 1 },
+    { name: `${ledger}.torn-${now - 4_000}-4243`, mtimeMs: 9 },
+    { name: `${ledger}.torn-${now - 2_000}-synthetic-session`, mtimeMs: 1 },
+    { name: `${ledger}.torn-${now - 3_000}-synthetic-session`, mtimeMs: 1 },
+    { name: `${ledger}.tmp-synthetic-session-1`, mtimeMs: now - LEDGER_TEMP_MS - 1 },
+    { name: `${ledger}.tmp-synthetic-session-2`, mtimeMs: now - LEDGER_TEMP_MS + 1 },
+    { name: `${ledger}.4242.mf3x9k.board-tmp`, mtimeMs: now - LEDGER_TEMP_MS - 1 },
+    // Not the ledger's: another file's temporary copy and the ledger itself stay.
+    { name: 'progress-answered.json.tmp-synthetic-session-3', mtimeMs: 1 },
+    { name: 'progress.md.4242.mf3x9k.board-tmp', mtimeMs: 1 },
+    { name: ledger, mtimeMs: 1 },
+  ]
+  const { torn, temps } = ledgerLeftovers(path, entries, now)
+  expect(torn.sort()).toEqual([
+    `${ledger}.torn-${now - 5_000}-synthetic-session`,
+    `${ledger}.torn-${now - 4_000}-4243`,
+  ])
+  expect(temps.sort()).toEqual([
+    `${ledger}.4242.mf3x9k.board-tmp`,
+    `${ledger}.tmp-synthetic-session-1`,
+  ])
+})
+
+test('the question files key lists the question files in name order, and is null while one was just written', () => {
+  const path = '/home/me/.claude/progress.md'
+  const now = Date.parse('2026-10-16T12:00:00Z')
+  const hash = 'a'.repeat(64)
+  const entries = [
+    { name: 'progress-questions.json', size: 30, mtimeMs: 5 },
+    { name: 'progress.md', size: 20, mtimeMs: 4 },
+    { name: 'progress-answered.json', size: 10, mtimeMs: 3 },
+    { name: `progress-questions-source-${hash}.json`, size: 40, mtimeMs: 2 },
+    { name: `progress-questions-retired-${hash}.json`, size: 50, mtimeMs: 1 },
+    // Not read by a question pass: another file family and leftovers of a ledger write.
+    { name: 'progress-seen.json', size: 60, mtimeMs: now },
+    { name: 'progress-questions.json.tmp-synthetic-session-1', size: 30, mtimeMs: now },
+    { name: 'progress-archive-2026-10.md', size: 70, mtimeMs: now },
+  ]
+  expect(questionFilesKey(path, '/home/me/.claude/progress-answered.json', entries, now, 2_000)).toEqual([
+    ['progress-answered.json', 10, 3],
+    [`progress-questions-retired-${hash}.json`, 50, 1],
+    [`progress-questions-source-${hash}.json`, 40, 2],
+    ['progress-questions.json', 30, 5],
+    ['progress.md', 20, 4],
+  ])
+  const fresh = entries.map(entry => (entry.name === 'progress-questions.json' ? { ...entry, mtimeMs: now - 1_999 } : entry))
+  expect(questionFilesKey(path, '/home/me/.claude/progress-answered.json', fresh, now, 2_000)).toBeNull()
+})
+
+test('the own list\'s part of the idle question key moves with its questions, not with its times, turn state or background jobs', () => {
+  let mirror = emptyMirror('a1b2c3d4-native', 'demo', NOW)
+  mirror = applyTaskCreate(mirror, { subject: 'Ship', metadata: { waiting: 'you', why: 'Ready to publish?' } }, '1', NOW)
+  mirror = applyTaskCreate(mirror, { subject: 'Docs' }, '2', NOW)
+  const key = ownQuestionsKey(mirror)
+  // What every hook of a running session changes, one at a time so a failure names the field.
+  const churn: Array<Partial<typeof mirror>> = [{ updated: NOW + 60_000 }, { isTurnRunning: true }, { state: 'working' }, { backgroundJobs: 2 }, { backgroundJobIds: ['job-1', 'job-2'] }, { backgroundReleases: ['job-0'] }, { backgroundReleaseCount: 1 }]
+  for (const change of churn) expect([change, ownQuestionsKey({ ...mirror, ...change })]).toEqual([change, key])
+  // What a question pass reads: the steps' words and tasks, whether a step still waits, the
+  // list's title and context, and whose list it is.
+  const moved = [
+    applyTaskUpdate(mirror, { taskId: '1', metadata: { why: 'Ready to publish today?' } }, NOW),
+    markAnswered(mirror),
+    applyTaskUpdate(mirror, { taskId: '2', subject: 'Docs again' }, NOW),
+    applyTaskUpdate(mirror, { taskId: '2', status: 'completed' }, NOW),
+    applyTaskUpdate(mirror, { taskId: '2', status: 'deleted' }, NOW),
+    { ...mirror, title: 'Another title' },
+    { ...mirror, context: 'Another context' },
+    { ...mirror, project: 'other' },
+    { ...mirror, sessionId: 'b1b2c3d4-native' },
+    null,
+  ]
+  for (const [index, one] of moved.entries()) expect([index, ownQuestionsKey(one) === key]).toEqual([index, false])
 })

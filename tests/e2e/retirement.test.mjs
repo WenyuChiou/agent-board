@@ -18,13 +18,24 @@ const two = day => String(day).padStart(2, '0')
 const titlesIn = text => [...text.matchAll(/^### (.+?)\r?$/gm)].map(match => match[1])
 const archiveText = world => world.files().filter(name => /^progress-archive-.*\.md$/.test(name)).map(name => world.read(name)).join('\n')
 
+// dropped.log is the reporters' count of the turns they removed (docs/FORMAT.md), not a turn.
+const inboxOf = world => {
+  const names = readdirSync(world.inbox)
+  return {
+    turns: names.filter(name => name.endsWith('.json')).length,
+    others: names.filter(name => !name.endsWith('.json')).sort(),
+  }
+}
+
 // What the live file and the inbox hold, as docs/FORMAT.md names them.
 const measure = world => {
   const live = world.read('progress.md')
+  const { turns, others } = inboxOf(world)
   return {
     progress: Buffer.byteLength(live),
     blocks: (live.match(/^<!-- auto /gm) ?? []).length,
-    inbox: readdirSync(world.inbox).length,
+    inbox: turns,
+    others,
   }
 }
 
@@ -93,8 +104,9 @@ test('Retirement: after 30 simulated days of daily churn, progress.md and the in
       // The reporter runs at the end of every tenth day, as the next turn of any agent would.
       if (day % 10 === 9) {
         await reportTurn(world, `hermes-${label}`)
-        const inbox = readdirSync(world.inbox).length
-        assert.ok(inbox <= RETIREMENT_INBOX_FILES, `day ${day}: ${inbox} inbox files after a reporter run, cap ${RETIREMENT_INBOX_FILES}`)
+        const { turns, others } = inboxOf(world)
+        assert.ok(turns <= RETIREMENT_INBOX_FILES, `day ${day}: ${turns} inbox files after a reporter run, cap ${RETIREMENT_INBOX_FILES}`)
+        assert.deepEqual(others, ['dropped.log'], `day ${day}: non-turn inbox files after a reporter run: ${others.join(', ')}`)
       }
       world.jump('1d')
       // The scheduled sweep every second night: no Claude session, the standalone board's own command.
@@ -115,6 +127,7 @@ test('Retirement: after 30 simulated days of daily churn, progress.md and the in
     }
     const last = samples.at(-1)
     assert.ok(last.inbox <= RETIREMENT_INBOX_FILES, `${last.inbox} inbox files after ${RETIREMENT_DAYS} days, cap ${RETIREMENT_INBOX_FILES}`)
+    assert.deepEqual(last.others, ['dropped.log'], `non-turn inbox files after ${RETIREMENT_DAYS} days: ${last.others.join(', ')}`)
     // FORMAT.md (Versioning, full-source evidence) says never to age-prune the question evidence:
     // the ledger and its capture files. So after 30 days the ledger holds exactly the questions
     // asked while someone looked, the first day's included, with at least as many capture files. How

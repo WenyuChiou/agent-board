@@ -75,27 +75,32 @@ const CODES = { waiting: '33', accent: '36', done: '32', alert: '31', quiet: '2'
 
 const paint = (isColor: boolean) => (code: keyof typeof CODES, text: string): string => (isColor && text !== '' ? `\u001b[${CODES[code]}m${text}\u001b[0m` : text)
 
-// Cut to the terminal's width, counting a CJK character as two columns.
-const columns = (char: string): number => (/[ᄀ-ᅟ⺀-꓏가-힣豈-﫿︰-﹏＀-｠￠-￦]/.test(char) ? 2 : 1)
+// Chat keeps its existing budget; terminals also draw emoji and supplementary CJK wide.
+const chatColumns = (char: string): number => (/[ᄀ-ᅟ⺀-꓏가-힣豈-﫿︰-﹏＀-｠￠-￦]/.test(char) ? 2 : 1)
+const columns = (char: string): number => (chatColumns(char) === 2 || /[\u{20000}-\u{3fffd}\p{Emoji_Presentation}]/u.test(char) ? 2 : 1)
+const displayColumns = (text: string): number => [...text].reduce((sum, char) => sum + columns(char), 0)
 
 // Control characters out: the text comes from other agents' blocks and turns, and an escape
 // sequence in it would move the cursor or clear the screen of the terminal it is printed in.
 export const plain = (text: string): string => text.replace(/\t/g, ' ').replace(/[\u0000-\u001f\u007f-\u009f]/g, '')
 
-export const fit = (raw: string, width: number): string => {
+const fitted = (raw: string, width: number, columnOf: (char: string) => number): string => {
+  if (width <= 0) return ''
   const text = plain(raw)
   const chars = [...text]
-  if (chars.reduce((sum, char) => sum + columns(char), 0) <= width) return text
+  if (chars.reduce((sum, char) => sum + columnOf(char), 0) <= width) return text
   let used = 0
   let out = ''
   for (const char of chars) {
-    if (used + columns(char) > width - 1) break
-    used += columns(char)
+    if (used + columnOf(char) > width - 1) break
+    used += columnOf(char)
     out += char
   }
 
   return `${out}…`
 }
+
+export const fit = (raw: string, width: number): string => fitted(raw, width, columns)
 
 const MARK: Record<string, string> = { done: '✓', doing: '▸', todo: '○', waiting: '●', running: '◐', blocked: '!', cancelled: '–' }
 
@@ -167,7 +172,7 @@ export const boardText = (view: View, pending: readonly PendingTurn[], s: String
   for (const [title, items] of [[s.sectionQuestionReminders, view.reminder ?? []], [s.sectionOlderQuestions, view.older ?? []]] as const) {
     if (items.length === 0) continue
     lines.push(`${title} (${items.length}) · --all`)
-    if (o.isIdleOpen) for (const item of items) lines.push(`  ${item.project} › ${item.task} · ${item.when}`, `    ${item.text}${item.note ? ` — ${item.note}` : ''}`)
+    if (o.isIdleOpen) for (const item of items) lines.push(`  ${fit(`${item.project} › ${item.task} · ${item.when}`, o.width - 4)}`, `    ${fit(`${item.text}${item.note ? ` — ${item.note}` : ''}`, o.width - 6)}`)
   }
   // Questions marked answered in a pane are left out, and counted so they are not lost.
   const hidden = view.hidden.length === 0 ? [] : [c('quiet', s.hiddenCount(view.hidden.length))]
@@ -189,7 +194,8 @@ export const boardText = (view: View, pending: readonly PendingTurn[], s: String
 
   for (const group of view.groups) {
     if (group.rows.length === 0) continue
-    lines.push(c('project', `▸ ${group.project}`) + c('quiet', `  ${group.summary}`))
+    const summary = fit(`  ${group.summary}`, Math.max(0, o.width - 3))
+    lines.push(c('project', fit(`▸ ${group.project}`, o.width - displayColumns(summary))) + c('quiet', summary))
     for (const row of group.rows) lines.push(...rowLines(row, s, o))
     lines.push('')
   }
@@ -221,6 +227,7 @@ export const boardText = (view: View, pending: readonly PendingTurn[], s: String
   }
 
   if (view.groups.every(group => group.rows.length === 0) && asks.length === 0 && news.length === 0 && view.idle.length === 0 && view.stopped.length === 0 && view.due.length === 0 && recentQuestions.length === 0) lines.push(c('quiet', s.empty), '')
+  for (const line of view.health ?? []) lines.push(...wrapNote(line, o.width - 2).map(part => c('quiet', part)))
 
   return `${lines.join('\n').replace(/\n+$/, '')}\n`
 }
@@ -336,7 +343,7 @@ const clipped = (text: string, home: string, isWindows: boolean): string =>
   text.length <= CHAT_CLIP ? text : withoutHomeStart(text.slice(0, CHAT_CLIP).replace(/\s*\S*$/, ''), home, isWindows)
 
 const chatLine = (text: string, indent: number, home: string, isWindows: boolean): string =>
-  `${' '.repeat(indent)}${fit(redact(clipped(plain(text), home, isWindows), home, isWindows), CHAT_LINE - indent)}`
+  `${' '.repeat(indent)}${fitted(redact(clipped(plain(text), home, isWindows), home, isWindows), CHAT_LINE - indent, chatColumns)}`
 
 // What finished today, by the local calendar day, from the journal and in the weekly report's
 // own words (`project · task: step, step`).
@@ -407,7 +414,7 @@ export const chatText = (
   const isNext = (step: ViewStep): boolean => step.number !== null && !['done', 'cancelled', 'waiting'].includes(step.status)
   rows.forEach(({ row, mark }, index) => {
     const next = (row.steps.find(step => step.isCurrent && isNext(step)) ?? row.steps.find(isNext))?.text
-    const words = `${mark} ${named(row.project)} › ${row.title}${row.due === null ? '' : ` · ${row.due.left}`}${next === undefined ? '' : ` — ${s.reportNext(next)}`}`
+    const words = `${mark} ${named(row.project)} › ${row.title}${row.hasFutureTime ? ` · ${row.when}` : ''}${row.due === null ? '' : ` · ${row.due.left}`}${next === undefined ? '' : ` — ${s.reportNext(next)}`}`
     items.push(`${index === 0 ? '\n' : ''}${line(words)}`)
   })
   if (asks.length === 0 && rows.length === 0 && news.length === 0 && view.idle.length === 0 && view.stopped.length === 0 && recentQuestions.length === 0) items.push(s.empty)
@@ -651,7 +658,7 @@ export const boardScreen = (view: View, pending: readonly PendingTurn[], state: 
       item.type === 'ask' ? `● ${item.ask.ageStage === 'older' ? s.sectionOlderQuestions : item.ask.ageStage === 'reminder' ? s.sectionQuestionReminders : s.sectionWaiting}` : item.type === 'row' ? `▸ ${item.row.project}` : `◐ ${s.boardInbox}`
     if (head !== section) {
       if (section !== '') lines.push('')
-      lines.push(item.type === 'ask' ? c('waiting', head) : item.type === 'row' ? c('project', head) : c('accent', head))
+      lines.push(item.type === 'ask' ? c('waiting', fit(head, o.width)) : item.type === 'row' ? c('project', fit(head, o.width)) : c('accent', fit(head, o.width)))
       section = head
     }
     const line = (text: string): string => (isHere ? c('bold', text) : text)
@@ -680,7 +687,9 @@ export const boardScreen = (view: View, pending: readonly PendingTurn[], state: 
       const count = row.total > 0 ? `${row.done}/${row.total} ` : ''
       lines.push(`${mark} ${line(fit(row.title, o.width - 4))}`)
       if (result?.key === item.key) resultLines('    ')
-      lines.push(`    ${c('quiet', fit(`${count}${row.status}${who}${row.when ? ` · ${row.when}` : ''}`, o.width - 6))}${row.due ? `  ${c('alert', `⚑ ${row.due.left}`)}` : ''}`)
+      const badge = row.due ? `⚑ ${row.due.left}` : ''
+      const reserve = badge === '' ? 0 : displayColumns(badge) + 2
+      lines.push(`    ${c('quiet', fit(`${count}${row.status}${who}${row.when ? ` · ${row.when}` : ''}`, o.width - 6 - reserve))}${badge === '' ? '' : `  ${c('alert', badge)}`}`)
       if ((isOpen || isHere) && (row.auto === 'working' || row.auto === 'waiting')) lines.push(`    ${c('quiet', fit(s.archiveLive, o.width - 6))}`)
       if (isOpen) {
         if (row.question) lines.push(`    ${fit(row.question, o.width - 6)}`)
@@ -709,6 +718,7 @@ export const boardScreen = (view: View, pending: readonly PendingTurn[], state: 
   if (items.length === 0 && view.idle.length === 0 && view.stopped.length === 0 && recentQuestions.length === 0) lines.push(c('quiet', s.empty))
   lines.push('', c('quiet', fit([...keysFor(items[at], s), s.boardKeysMove].join(' · '), o.width)))
   if (result === undefined) resultLines('')
+  for (const line of view.health ?? []) lines.push(...wrapNote(line, o.width - 2).map(part => c('quiet', part)))
 
   return `${lines.join('\n')}\n`
 }

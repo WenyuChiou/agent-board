@@ -1,7 +1,7 @@
 import { spawn, spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { createRequire, registerHooks } from 'node:module'
-import { chmodSync, closeSync, existsSync, lstatSync, lutimesSync, mkdirSync, mkdtempSync, openSync, readFileSync, readdirSync, rmSync, symlinkSync, unlinkSync, utimesSync, writeFileSync } from 'node:fs'
+import { chmodSync, closeSync, copyFileSync, existsSync, lstatSync, lutimesSync, mkdirSync, mkdtempSync, openSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, unlinkSync, utimesSync, writeFileSync } from 'node:fs'
 import { availableParallelism, constants, setPriority, tmpdir } from 'node:os'
 import { delimiter, dirname, join, resolve } from 'node:path'
 import { beforeEach, test } from 'node:test'
@@ -13,6 +13,8 @@ import { reporterPs1, reporterSh } from '../hooks/hook-reporters.ts'
 import { hookBootstrap, hookGuardSource, hookWorker } from '../hooks/hook-safety.ts'
 import { classifierDiagnostic, observeClassifier } from './fixtures/classifier-diagnostic.mjs'
 import { assertNativeProbeReturned, nativeProbeDiagnostic } from './fixtures/native-probe-diagnostic.mjs'
+import { withDeniedCreation } from './fixtures/windows-create-denied.mjs'
+import { generatedHookCommand } from './fixtures/generated-hook-command.mjs'
 
 test('native cleanup diagnostics keep watchdog failures bounded and private', () => {
   const error = Object.assign(new Error('PRIVATE_ERROR'), { code: 'ETIMEDOUT', path: '/PRIVATE_EXECUTABLE', spawnargs: ['PRIVATE_ARGUMENT'] })
@@ -498,17 +500,22 @@ test('a reporter that hangs is cut at its timeout and the host hook exits 0', ()
 // The busy loops took all but one core of a 16-thread desktop, and overlapping local runs froze it (#241), so this
 // test runs only in CI or when AGENT_BOARD_HEAVY_TESTS=1 asks for it.
 const isHeavyRun = Boolean(process.env.CI) || process.env.AGENT_BOARD_HEAVY_TESTS === '1'
-test('L5 busy machine: Antigravity and Codex hooks apply or queue every event with all but one CPU busy', { skip: isHeavyRun ? false : 'keeps up to 3 CPUs busy; runs in CI, or locally with AGENT_BOARD_HEAVY_TESTS=1' }, t => fixture(async f => {
+test('L5 busy machine: Antigravity and Codex hooks apply or queue every event with up to 3 CPUs busy', { skip: isHeavyRun ? false : 'keeps up to 3 CPUs busy; runs in CI, or locally with AGENT_BOARD_HEAVY_TESTS=1' }, t => fixture(async f => {
   assert.equal(f.install('--apply').status, 0)
   assert.equal(f.install('--agent', 'antigravity', '--apply').status, 0)
-  // Records when each hook's worker started, and the PowerShell start that Antigravity's Windows wrapper
-  // passes, so a failure tells a hook that never got the CPU apart from one that missed its deadline.
+  // A direct command sets its argument data after preloads run. Observe the worker import too,
+  // so a failure tells a worker that never got the CPU apart from one that missed its deadline.
   const preload = join(f.home, 'worker-start.cjs')
   f.save(preload, `const { basename } = require('node:path')
-if (basename(process.argv[1] || '') === 'agent-board-hook.mjs') {
+const markWorker = () => {
   const at = process.argv.indexOf('--hook-started')
   try { require('node:fs').writeFileSync(process.env.L5_START_STAMP, Date.now() + ' ' + (at === -1 ? '' : process.argv[at + 1]), { flag: 'wx' }) } catch {}
 }
+if (basename(process.argv[1] || '') === 'agent-board-hook.mjs') markWorker()
+require('node:module').registerHooks({ load(url, context, next) {
+  if (url.endsWith('/agent-board-hook.mjs')) markWorker()
+  return next(url, context)
+} })
 `)
   // One core stays free and the loops run below normal priority: the machine is busy, but neither the hook
   // nor the other test files that `node --test` runs at the same time go without CPU before the host's 3 s stop.
@@ -632,6 +639,7 @@ test('a queued event from every host is replayed by the next hook', async t => {
   for (const host of hosts) await t.test(`${host.agent} ${host.mode ?? host.event}`, () => fixture(async f => {
     const installed = f.install('--agent', host.agent, '--apply')
     assert.equal(installed.status, 0, installed.stderr)
+    holdAutomaticRecovery(f)
     const worker = join(f.root, 'agent-board-hook.mjs')
     let argv
     let payload = { ...host.payload }, input
@@ -639,8 +647,8 @@ test('a queued event from every host is replayed by the next hook', async t => {
       const config = JSON.parse(readFileSync(join(f.home, ...host.config)))
       const hook = host.agent === 'antigravity' ? config['agent-board-local'][host.event][0] : config.hooks[host.event][0]
       const command = hook.command ?? hook.hooks[0].command
-      const launch = host.agent === 'antigravity' && process.platform === 'win32' ? Buffer.from(command.split(' ').at(-1), 'base64').toString('utf16le') : command
-      const words = [...launch.matchAll(/"([^"]*)"|'((?:[^']|'')*)'|(\S+)/g)].map(match => match[1] ?? match[2]?.replaceAll("''", "'") ?? match[3])
+      const launch = generatedHookCommand(command)
+      const words = launch.args ?? [...launch.text.matchAll(/"([^"]*)"|'((?:[^']|'')*)'|(\S+)/g)].map(match => match[1] ?? match[2]?.replaceAll("''", "'") ?? match[3])
       argv = words.slice(words.indexOf('--hook-version'), words.includes('--hook-started') ? words.indexOf('--hook-started') : undefined)
       assert.equal(argv[0], '--hook-version')
     } else {
@@ -727,6 +735,7 @@ child.spawnSync = (_executable, args) => {
 
 test('a hook whose reporter runs past the deadline saves the raw event and the next hook applies it', () => fixture(async f => {
   assert.equal(f.install('--apply').status, 0)
+  holdAutomaticRecovery(f)
   const real = readFileSync(f.script)
   const pidFile = join(f.root, 'raw-reporter.pid')
   f.save(f.script, `${real.toString().split('\n')[0]}\nimport { writeFileSync } from 'node:fs'\nwriteFileSync(${JSON.stringify(pidFile)}, String(process.pid))\nsetInterval(() => {}, 1000)\n`)
@@ -779,6 +788,7 @@ test('a hook whose reporter runs past the deadline saves the raw event and the n
 
 test('the hook deadline counts from the process start, not from when the worker runs', () => fixture(f => {
   assert.equal(f.install('--agent', 'gemini', '--apply').status, 0)
+  holdAutomaticRecovery(f)
   const worker = join(f.root, 'agent-board-hook.mjs')
   const argv = ['--hook-version', '1', '--hook-event', 'BeforeAgent', '--agent-status', '--agent', 'gemini', '--state', 'working', '--progress-file', f.progress]
   const payload = { session_id: session }
@@ -789,7 +799,7 @@ test('the hook deadline counts from the process start, not from when the worker 
   const queued = pendingFiles(f)[0]
   assert.ok(queued, 'an expired reporter deadline must save the event in pending/')
   assert.equal(JSON.parse(readFileSync(join(f.root, 'pending', queued))).at, at)
-  for (const [index, invalid] of [String(Date.now() + 60000), String(Date.now() - 11000), '1.5', 'NaN', '9007199254740992'].entries()) {
+  for (const [index, invalid] of [String(Date.now() + 60000), '-1', '1.5', 'NaN', '9007199254740992'].entries()) {
     const id = `invalid-start-session-${index}`
     const out = spawnSync(process.execPath, [worker, ...argv, '--hook-started', invalid], { env: f.env, input: JSON.stringify({ session_id: id }), encoding: 'utf8', windowsHide: true, timeout: 5000 })
     assert.equal(out.status, 0, out.stderr)
@@ -800,13 +810,55 @@ test('the hook deadline counts from the process start, not from when the worker 
   }
 }))
 
+test('an Antigravity worker delayed past ten seconds preserves its event time without overwriting newer work', () => fixture(f => {
+  assert.equal(f.install('--agent', 'antigravity', '--apply').status, 0)
+  holdAutomaticRecovery(f)
+  const conversationId = 'synthetic-delayed-antigravity-241'
+  const old = Date.now() - 11000, newer = Date.now() - 1000
+  const report = (state, event, at) => f.command(['--agent-status', '--agent', 'antigravity', '--state', state, '--event', event, '--hook-started', String(at)], { conversationId })
+  assert.equal(report('working', 'PreInvocation', newer).status, 0)
+  const before = readFileSync(f.progress)
+  const result = spawnSync(process.execPath, [join(f.root, 'agent-board-hook.mjs'), '--hook-version', '1', '--hook-event', 'Stop', '--agent-status', '--agent', 'antigravity', '--state', 'waiting', '--event', 'Stop', '--progress-file', f.progress, '--hook-started', String(old)], {
+    env: f.env, input: JSON.stringify({ conversationId }), encoding: 'utf8', windowsHide: true, timeout: 5000,
+  })
+  assert.equal(result.status, 0, result.stderr)
+  const queued = pendingFiles(f)
+  assert.equal(queued.length, 1, 'the late worker must queue its expired event instead of re-dating it')
+  assert.equal(JSON.parse(readFileSync(join(f.root, 'pending', queued[0]), 'utf8')).at, old)
+  assert.deepEqual(readFileSync(f.progress), before)
+  assert.equal(report('working', 'PreInvocation', newer).status, 0)
+  assert.deepEqual(pendingFiles(f), [])
+  assert.deepEqual(readFileSync(f.progress), before)
+  const owner = createHash('sha256').update(`antigravity:${conversationId}`).digest('hex')
+  assert.equal(JSON.parse(readFileSync(join(f.root, 'sessions', `${owner}.json`), 'utf8')).appliedAt, newer)
+}))
+
+test('an older live lifecycle event cannot replace a newer state or its update time', () => fixture(f => {
+  assert.equal(f.install('--agent', 'antigravity', '--apply').status, 0)
+  const conversationId = 'synthetic-ordered-antigravity-241'
+  const old = Date.now() - 1500, newer = Date.now() - 1000
+  const report = (state, event, at) => f.command(['--agent-status', '--agent', 'antigravity', '--state', state, '--event', event, '--hook-started', String(at)], { conversationId })
+  assert.equal(report('waiting', 'Stop', newer).status, 0)
+  const before = readFileSync(f.progress)
+  const owner = createHash('sha256').update(`antigravity:${conversationId}`).digest('hex')
+  const record = join(f.root, 'sessions', `${owner}.json`)
+  const previous = readFileSync(record)
+  assert.equal(report('working', 'PostInvocation', old).status, 0)
+  assert.deepEqual(readFileSync(f.progress), before)
+  assert.deepEqual(readFileSync(record), previous)
+  assert.equal(report('working', 'PreInvocation', newer + 1).status, 0)
+  assert.equal(JSON.parse(readFileSync(record, 'utf8')).state, 'working')
+  assert.equal(JSON.parse(readFileSync(record, 'utf8')).appliedAt, newer + 1)
+}))
+
 test('a hook worker that starts after the host would stop it still reads its input and queues the event', () => fixture(f => {
   // A cold Windows PowerShell start can delay Antigravity's worker past its 3 s host limit (#241).
   assert.equal(f.install('--agent', 'antigravity', '--apply').status, 0)
+  holdAutomaticRecovery(f)
   const worker = join(f.root, 'agent-board-hook.mjs')
   const conversationId = 'late-antigravity-session'
   const argv = ['--hook-version', '1', '--hook-event', 'Stop', '--agent-status', '--agent', 'antigravity', '--state', 'waiting', '--event', 'Stop', '--progress-file', f.progress]
-  // 3 s back is past the 2.7 s input line and leaves 7 s for Node to start inside the 10 s --hook-started window.
+  // Three seconds back is past the input deadline, so the worker must use late-input queueing.
   const at = Date.now() - 3000
   const result = spawnSync(process.execPath, [worker, ...argv, '--hook-started', String(at)], { env: f.env, input: JSON.stringify({ conversationId }), encoding: 'utf8', windowsHide: true, timeout: 20000 })
   assert.equal(result.status, 0, hookFailure(result))
@@ -902,6 +954,7 @@ test('a report hook whose reporter runs past its deadline is never queued', () =
 
 test('a hook worker that starts just before its deadline still queues an event whose input arrives after it', () => fixture(async f => {
   assert.equal(f.install('--agent', 'gemini', '--apply').status, 0)
+  holdAutomaticRecovery(f)
   const worker = join(f.root, 'agent-board-hook.mjs')
   const stampFile = join(f.root, 'deadline-stamp.txt')
   const preload = join(f.home, 'deadline-soon.cjs')
@@ -988,6 +1041,7 @@ test('a raw entry with an unknown flag or environment variable is dropped, not a
 
 test('raw replay classifies board requests and ordinary prompts like live events', () => fixture(f => {
   assert.equal(f.install('--agent', 'gemini', '--apply').status, 0)
+  holdAutomaticRecovery(f)
   const worker = join(f.root, 'agent-board-hook.mjs')
   for (const [index, prompt] of ['/agent-board', 'Continue the task'].entries()) {
     const at = Date.now() - 3050
@@ -1159,6 +1213,8 @@ test('SDK metadata and reporter execution share one deadline without a late writ
   try {
     const installed = spawnSync(process.execPath, [setup, '--home', home, '--agent', 'opencode', '--apply'], { env, encoding: 'utf8', windowsHide: true, timeout: 15000 })
     assert.equal(installed.status, 0, installed.stderr)
+    // Inspect the original reporter deadline without a separate recovery replay.
+    holdAutomaticRecovery(f)
     const source = readFileSync(join(home, '.config', 'opencode', 'plugins', 'agent-board-local.js'), 'utf8')
     const stub = 'const tool = Object.assign(value => value, { schema: { string: () => ({ describe: () => ({}) }), enum: () => ({}), array: () => ({}) } })'
     const plugin = join(home, 'synthetic-plugin.mjs')
@@ -1233,8 +1289,9 @@ const legacyReporterProbe = (isPowerShell = process.platform === 'win32', shell 
   const first = await nativeProcess(executable, args, env, payload, callback => setTimeout(callback, 30000))
   assert.equal(first.status, 0, first.stderr)
   assert.equal(first.stdout.trim(), '{}')
-  const delivered = readdirSync(inbox).filter(name => name.endsWith('.json'))
-  assert.equal(delivered.length, 1)
+  const delivered = existsSync(inbox) ? readdirSync(inbox).filter(name => name.endsWith('.json')) : []
+  const codes = hookLog(f).match(/\b(?:INPUT_TIMEOUT|INCOMPLETE_INPUT|INPUT_TOO_LARGE|REPORTER_TIMEOUT|REPORTER_FAILED)\b/g) ?? []
+  assert.equal(delivered.length, 1, `${hookFailure(first)}; hookCodes=${codes.slice(-5).join(',')}`)
   assert.equal(readFileSync(join(inbox, delivered[0]), 'utf8'), payload)
   const log = join(home, '.agent-board', 'hook-errors.log')
   mkdirSync(dirname(log), { recursive: true })
@@ -1313,7 +1370,10 @@ test('the PowerShell classifier uses the first Node path when several applicatio
   // and must start the first match: the later, non-executable node.exe never runs.
   const source = reporterPs1()
   assert.doesNotMatch(source, /Get-Command node/)
-  f.save(file, observeClassifier(source, diagnostic))
+  // Expire the input-stage clock so this case exercises selection in its own scope.
+  const selectionSource = source.replace('    $receipt = Read-PromptReceipt $tmp $clock',
+    '    Start-Sleep -Milliseconds 2100\n    $receipt = Read-PromptReceipt $tmp $clock')
+  f.save(file, observeClassifier(selectionSource, diagnostic, { isSelectionOnly: true }))
   // Only bounds a hung process on a slow Windows CI runner; the reporter's own deadline is not timed here.
   const result = await nativeProcess(powershell, ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', file, 'codex', 'prompt'], env, raw, callback => setTimeout(callback, 30000))
   assert.equal(result.error, undefined)
@@ -1336,7 +1396,7 @@ test('the PowerShell reporter never looks for Node in its working folder through
   const powershell = join(process.env.SystemRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe')
   const file = join(f.root, 'progress-report.ps1'), diagnostic = join(f.home, 'classifier-probe.txt')
   const raw = JSON.stringify({ session_id: 'synthetic-working-folder', cwd: '/synthetic/project', prompt: '/board' })
-  f.save(file, observeClassifier(reporterPs1(), diagnostic))
+  f.save(file, observeClassifier(reporterPs1(), diagnostic, { isSelectionOnly: true }))
   // Only bounds a hung process on a slow Windows CI runner; the reporter's own deadline is not timed here.
   const result = await nativeProcess(powershell, ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', file, 'codex', 'prompt'], env, raw, callback => setTimeout(callback, 30000), undefined, { cwd: work })
   assert.equal(result.error, undefined)
@@ -1475,7 +1535,8 @@ test('the sh reporter logs CLEANUP_FAILED when its sweep fails, but not for a fi
   mkdirSync(tools, { recursive: true })
   // A stand-in find on PATH says what a real one would, and fails.
   const sweep = async (complaint, session) => {
-    f.save(join(tools, 'find'), `#!/bin/sh\nprintf '%s' "$LC_ALL" > "$HOME/sweep-locale"\n${complaint ? `printf '%s\\n' '${complaint}' >&2\n` : ''}exit 1\n`)
+    // Only the sweep that removes files records its locale: the counted age look runs after it.
+    f.save(join(tools, 'find'), `#!/bin/sh\ncase " $* " in *" -exec "*) printf '%s' "$LC_ALL" > "$HOME/sweep-locale" ;; esac\n${complaint ? `printf '%s\\n' '${complaint}' >&2\n` : ''}exit 1\n`)
     chmodSync(join(tools, 'find'), 0o700)
     const out = await nativeProcess('/bin/sh', [script, 'codex', 'prompt'], { ...f.env, LC_ALL: 'POSIX', PATH: `${tools}${delimiter}${f.env.PATH}` }, JSON.stringify({ session_id: session, prompt: 'PRIVATE_RAW_PROMPT' }))
     assert.equal(out.error, undefined, hookFailure(out))
@@ -1784,7 +1845,7 @@ test('local reports refuse hidden appends without changing progress or session s
   assert.equal(readFileSync(f.progress, 'utf8'), '\u0060\u0060\u0060\n')
 }))
 
-test('local reports refuse a closing marker beyond another task block', () => fixture(f => {
+test('local reports write in place of their marker line when their end marker is beyond another task block, and leave the other block as it was', () => fixture(f => {
   assert.equal(f.install('--apply').status, 0)
   assert.equal(f.report().status, 0)
   const owned = readFileSync(f.progress, 'utf8')
@@ -1793,9 +1854,14 @@ test('local reports refuse a closing marker beyond another task block', () => fi
   const before = owned.replace(end, '') + other + end + '\n'
   writeFileSync(f.progress, before)
   const result = f.report('done', ['- [x] Finished'])
-  assert.notEqual(result.status, 0)
-  assert.match(result.stderr, /BLOCK_CONFLICT/)
-  assert.equal(readFileSync(f.progress, 'utf8'), before)
+  assert.equal(result.status, 0, result.stderr)
+  const after = readFileSync(f.progress, 'utf8')
+  assert.ok(after.includes(`### Task\n- [x] Finished\n${end}`), after)
+  assert.ok(after.endsWith(before.slice(before.indexOf('\n### '))), after)
+  assert.ok(after.includes(other), after)
+  assert.equal((after.match(/<!-- auto session=/g) ?? []).length, 2, after)
+  assert.equal(after.split(end).length - 1, 2, after)
+  assert.match(f.command([]).stdout, /Keep this task/)
 }))
 
 test('local reports ignore a fenced closing marker while replacing their own complete block', () => fixture(f => {
@@ -2544,23 +2610,177 @@ test('Windows Antigravity commands fit cmd.exe with a 120 character home path', 
   for (const group of Object.values(hooks)) for (const hook of group) assert.ok(hook.command.length < 8191, `${hook.command.length} characters`)
 }))
 
-test('Windows Antigravity queues an event with the PowerShell process start stamp', { skip: process.platform !== 'win32' }, () => fixture(async f => {
+const syntheticWindowsWrapperWorker = (capture, stdout, stderr, status) => `import { writeFileSync } from 'node:fs'
+let input = ''
+process.stdin.setEncoding('utf8')
+process.stdin.on('data', chunk => { input += chunk })
+process.stdin.on('end', () => {
+  writeFileSync(${JSON.stringify(capture)}, JSON.stringify({ worker: process.argv[1], argv: process.argv.slice(2), input }))
+  process.stdout.write(${JSON.stringify(stdout)})
+  process.stderr.write(${JSON.stringify(stderr)})
+  process.exit(${status})
+})
+`
+
+test('Windows Antigravity verified Node commands bypass PowerShell and preserve synthetic session state through cmd', { skip: process.platform !== 'win32' }, t => fixture(async f => {
+  if (f.home.length >= 119) return t.skip('TEMP is too long to leave room for a 120 character home path')
+  const home = join(f.home, 'h'.repeat(119 - f.home.length))
+  assert.equal(home.length, 120)
+  mkdirSync(home)
+  const env = isolatedEnv(home)
+  const installed = spawnSync(process.execPath, [setup, '--home', home, '--agent', 'antigravity', '--apply'], { env, encoding: 'utf8', windowsHide: true, timeout: 15000 })
+  assert.equal(installed.status, 0, installed.stderr)
+  const root = join(home, '.agent-board')
+  const progress = join(root, 'progress.md')
+  const hooks = JSON.parse(readFileSync(join(home, '.gemini', 'config', 'hooks.json'), 'utf8'))['agent-board-local']
+  if (/^powershell\.exe /i.test(hooks.PreInvocation[0].command)) return t.skip('this Node executable has no verified quote-free absolute path')
+  const foreign = '<!-- auto session=abcdef12 agent=opencode state=waiting updated=2026-10-24T00:00:00Z -->\n### Foreign task\n- [?] Blue or green?\n<!-- /auto session=abcdef12 -->\n'
+  writeFileSync(progress, readFileSync(progress, 'utf8') + foreign)
+  const conversationId = 'synthetic-direct-node-session'
+  const payload = JSON.stringify({ conversationId, prompt: 'PRIVATE_PROMPT' })
+  const preInvocation = await fireCommand({ env }, hooks.PreInvocation[0].command, payload)
+  assert.equal(preInvocation.status, 0, hookFailure(preInvocation))
+  const record = join(root, 'sessions', createHash('sha256').update(`antigravity:${conversationId}`).digest('hex') + '.json')
+  assert.equal(JSON.parse(readFileSync(record, 'utf8')).state, 'working')
+  const stopped = await fireCommand({ env }, hooks.Stop[0].command, payload)
+  assert.equal(stopped.status, 0, hookFailure(stopped))
+  assert.equal(JSON.parse(readFileSync(record, 'utf8')).state, 'waiting')
+  const text = readFileSync(progress, 'utf8')
+  assert.ok(text.includes(foreign), 'another agent block must remain unchanged')
+  assert.match(text, /agent=antigravity .*state=waiting/)
+  for (const group of Object.values(hooks)) for (const hook of group) {
+    assert.ok(hook.command.length < 8191, `${hook.command.length} characters`)
+    const executable = hook.command.split(' ')[0]
+    assert.match(executable, /^[A-Za-z]:[\\/][A-Za-z0-9_.~\\/-]+\.exe$/i)
+    const actual = statSync(executable, { bigint: true })
+    const expected = statSync(process.execPath, { bigint: true })
+    assert.ok(actual.ino > 0n && expected.ino > 0n)
+    assert.equal(actual.dev, expected.dev)
+    assert.equal(actual.ino, expected.ino)
+    assert.ok(!/powershell(?:\.exe)?/i.test(hook.command), hook.command)
+  }
+}))
+
+test('Windows Antigravity synthetic direct wrapper preserves stdin argv output and exit code through cmd', { skip: process.platform !== 'win32' }, t => fixture(async f => {
+  const home = join(f.home, "synthetic wrapper's home")
+  mkdirSync(home)
+  const env = isolatedEnv(home)
+  const installed = spawnSync(process.execPath, [setup, '--home', home, '--agent', 'antigravity', '--apply'], { env, encoding: 'utf8', windowsHide: true, timeout: 15000 })
+  assert.equal(installed.status, 0, installed.stderr)
+  const root = join(home, '.agent-board')
+  const worker = join(root, 'agent-board-hook.mjs')
+  const capture = join(root, 'synthetic-wrapper-capture.json')
+  const stdout = 'synthetic wrapper stdout: 雪\n'
+  const stderr = 'synthetic wrapper stderr: O\'Hara "quoted"\n'
+  // This exercises only the generated command contract with a disposable worker,
+  // not native Antigravity delivery or a model acknowledgement.
+  writeFileSync(worker, syntheticWindowsWrapperWorker(capture, stdout, stderr, 37))
+  const command = JSON.parse(readFileSync(join(home, '.gemini', 'config', 'hooks.json'), 'utf8'))['agent-board-local'].PreInvocation[0].command
+  if (/^powershell\.exe /i.test(command)) return t.skip('this Node executable has no verified quote-free absolute path')
+  const payload = { unicode: '雪', apostrophe: "O'Hara", quote: '"quoted"', newline: 'line one\nline two' }
+  const input = JSON.stringify(payload)
+  const result = await fireCommand({ env }, command, input)
+  assert.equal(result.status, 37, hookFailure(result))
+  assert.equal(result.stdout, stdout)
+  assert.equal(result.stderr, stderr)
+  const saved = JSON.parse(readFileSync(capture, 'utf8'))
+  assert.equal(saved.worker, worker)
+  assert.ok(saved.worker.includes(' ') && saved.worker.includes("'"), saved.worker)
+  assert.ok(saved.argv.includes(join(root, 'progress.md')), JSON.stringify(saved.argv))
+  assert.equal(saved.input, input)
+  assert.deepEqual(JSON.parse(saved.input), payload)
+}))
+
+test('Windows Antigravity binds its executable across PATH batch files and another event working directory', { skip: process.platform !== 'win32' }, () => fixture(async f => {
+  const home = join(f.home, "b's")
+  const runtime = join(f.home, 'bound node')
+  const shadow = join(f.home, 'shadow')
+  const otherCwd = join(f.home, 'other cwd')
+  for (const dir of [home, runtime, shadow, otherCwd]) mkdirSync(dir)
+  const boundNode = join(runtime, 'node.exe')
+  copyFileSync(process.execPath, boundNode)
+  copyFileSync(process.execPath, join(otherCwd, 'node.exe'))
+  const marker = join(shadow, 'ran.txt')
+  writeFileSync(join(shadow, 'node.cmd'), `@echo off\r\n> "${marker}" echo SYNTHETIC_SHADOW_COMMAND\r\nexit /b 37\r\n`)
+  const env = { ...isolatedEnv(home), PATH: [shadow, runtime, process.env.PATH].join(delimiter) }
+  const installed = spawnSync(boundNode, [setup, '--home', home, '--agent', 'antigravity', '--apply'], { env, cwd: home, encoding: 'utf8', windowsHide: true, timeout: 15000 })
+  assert.equal(installed.status, 0, installed.stderr)
+  const root = join(home, '.agent-board')
+  const capture = join(root, 'bound-executable.json')
+  writeFileSync(join(root, 'agent-board-hook.mjs'), `import { writeFileSync } from 'node:fs'\nwriteFileSync(${JSON.stringify(capture)}, JSON.stringify({ executable: process.execPath }))\n`)
+  const command = JSON.parse(readFileSync(join(home, '.gemini', 'config', 'hooks.json'), 'utf8'))['agent-board-local'].Stop[0].command
+  for (const cwd of [home, otherCwd]) {
+    const result = spawnSync(process.env.ComSpec || 'cmd.exe', ['/d', '/s', '/c', `"${command}"`], { env, cwd, input: '{}', encoding: 'utf8', windowsHide: true, windowsVerbatimArguments: true, timeout: 15000 })
+    assert.equal(result.status, 0, hookFailure(result))
+    assert.equal(existsSync(marker), false, 'a PATH batch file must not replace the bound executable')
+    const actual = statSync(JSON.parse(readFileSync(capture, 'utf8')).executable, { bigint: true })
+    const expected = statSync(boundNode, { bigint: true })
+    assert.ok(actual.ino > 0n && expected.ino > 0n)
+    assert.equal(actual.dev, expected.dev)
+    assert.equal(actual.ino, expected.ino, 'another event cwd must not replace the bound executable')
+  }
+}))
+
+test('Windows Antigravity falls back to PowerShell when setup cannot verify a quote-free Node path', { skip: process.platform !== 'win32' }, () => fixture(async f => {
+  const home = join(f.home, "f's")
+  mkdirSync(home)
+  const system32 = join(process.env.SystemRoot || 'C:\\Windows', 'System32')
+  const powershell = join(system32, 'WindowsPowerShell', 'v1.0')
+  const setupEnv = { ...Object.fromEntries(Object.entries(isolatedEnv(home)).filter(([key]) => key.toLowerCase() !== 'comspec')), PATH: [system32, powershell].join(delimiter), ComSpec: join(f.home, 'unavailable-short-path-probe.exe') }
+  const nodeLookup = spawnSync(join(system32, 'where.exe'), ['node'], { env: setupEnv, encoding: 'utf8', windowsHide: true, timeout: 15000 })
+  assert.notEqual(nodeLookup.status, 0, nodeLookup.stdout + nodeLookup.stderr)
+  // Force a spaced executable and an unavailable short-path query. A runner's
+  // original Node may already be quote-free, and 8.3 aliases may or may not exist.
+  const runtime = join(f.home, 'n s')
+  mkdirSync(runtime)
+  const fallbackNode = join(runtime, 'node.exe')
+  // Program Files can deny a hard link; a private copy keeps the original runtime untouched.
+  copyFileSync(process.execPath, fallbackNode)
+  const installed = spawnSync(fallbackNode, [setup, '--home', home, '--agent', 'antigravity', '--apply'], { env: setupEnv, encoding: 'utf8', windowsHide: true, timeout: 15000 })
+  assert.equal(installed.status, 0, installed.stderr)
+  const root = join(home, '.agent-board')
+  const worker = join(root, 'agent-board-hook.mjs')
+  const capture = join(root, 'synthetic-fallback-capture.json')
+  const stdout = 'synthetic fallback stdout\n'
+  const stderr = 'synthetic fallback stderr\n'
+  writeFileSync(worker, syntheticWindowsWrapperWorker(capture, stdout, stderr, 37))
+  const command = JSON.parse(readFileSync(join(home, '.gemini', 'config', 'hooks.json'), 'utf8'))['agent-board-local'].Stop[0].command
+  assert.match(command, /^powershell\.exe /i)
+  assert.ok(command.length < 8191, `${command.length} characters`)
+  const payload = { unicode: '雪', apostrophe: "O'Hara", quote: '"quoted"', newline: 'line one\nline two' }
+  const input = JSON.stringify(payload)
+  const result = await fireCommand({ env: setupEnv }, command, input)
+  assert.equal(result.status, 37, hookFailure(result))
+  assert.equal(result.stdout, stdout)
+  assert.equal(result.stderr, stderr)
+  const saved = JSON.parse(readFileSync(capture, 'utf8'))
+  assert.equal(saved.worker, worker)
+  assert.equal(saved.input, input)
+  assert.deepEqual(JSON.parse(saved.input), payload)
+}))
+
+test('Windows Antigravity queues an event with its launch process start stamp', { skip: process.platform !== 'win32' }, () => fixture(async f => {
   assert.equal(f.install('--agent', 'antigravity', '--apply').status, 0)
+  holdAutomaticRecovery(f)
   const worker = join(f.root, 'agent-board-hook.mjs')
   const command = JSON.parse(readFileSync(join(f.home, '.gemini', 'config', 'hooks.json')))['agent-board-local'].PreInvocation[0].command
   const stampFile = join(f.root, 'powershell-stamp.json')
   const preload = join(f.home, 'queue-antigravity.cjs')
-  f.save(preload, `if (process.argv[1] === ${JSON.stringify(worker)}) {
+  f.save(preload, `require('node:module').registerHooks({ load(url, context, next) {
+  if (url === ${JSON.stringify(pathToFileURL(worker).href)}) {
   const at = Number(process.argv[process.argv.indexOf('--hook-started') + 1])
   require('node:fs').writeFileSync(${JSON.stringify(stampFile)}, JSON.stringify({ at, nodeStarted: require('node:perf_hooks').performance.timeOrigin }))
   process.argv.push('--hook-deadline', String(Date.now() - 1))
 }
+  return next(url, context)
+} })
 `)
   const result = await fireCommand({ ...f, env: { ...f.env, NODE_OPTIONS: `--require ${JSON.stringify(preload)}` } }, command, JSON.stringify({ conversationId: 'stamped-antigravity-session' }))
   assert.equal(result.status, 0, hookFailure(result))
   const stamp = JSON.parse(readFileSync(stampFile))
   assert.ok(Number.isSafeInteger(stamp.at))
-  assert.ok(stamp.at < Math.floor(stamp.nodeStarted), 'PowerShell must have started before Node')
+  assert.ok(stamp.at <= Math.floor(stamp.nodeStarted), 'the deadline must include process startup, before the worker import')
+  if (!/powershell\.exe/i.test(command)) assert.equal(stamp.at, Math.floor(stamp.nodeStarted))
   const files = pendingFiles(f)
   assert.equal(files.length, 1)
   assert.match(files[0], /\.raw\.json$/)
@@ -2581,7 +2801,7 @@ test('Antigravity setup merges its named native hooks and removes only the owned
   assert.deepEqual(Object.keys(config['agent-board-local']), ['SessionStart', 'PreInvocation', 'PostInvocation', 'Stop'])
   assert.equal(config.hooks, undefined)
   const stop = config['agent-board-local'].Stop[0].command
-  const launch = process.platform === 'win32' ? Buffer.from(stop.split(' ').at(-1), 'base64').toString('utf16le') : stop
+  const launch = generatedHookCommand(stop).text
   assert.match(launch, /--state['"]? ['"]?waiting['"]? ['"]?--event['"]? ['"]?Stop/)
   assert.deepEqual(JSON.parse(f.install('--agent', 'antigravity').stdout).changes, [])
   assert.equal(f.command(['--codex-remove', '--agent', 'antigravity', '--apply']).status, 0)
@@ -2845,7 +3065,9 @@ test('native Antigravity hook commands bind conversationId, record metadata only
   for (const event of Object.keys(hooks)) {
     const result = await fire(event)
     assert.equal(result.error, undefined, hookFailure(result))
-    assert.equal(result.status, 0, hookFailure(result)); assert.deepEqual(JSON.parse(result.stdout), {})
+    assert.equal(result.status, 0, hookFailure(result))
+    if (event === 'SessionStart') assert.equal(typeof JSON.parse(result.stdout).injectSteps?.[0]?.systemMessage?.systemMessage, 'string')
+    else assert.deepEqual(JSON.parse(result.stdout), {})
     const saved = JSON.parse(readFileSync(record, 'utf8'))
     assert.equal(saved.session, conversationId)
     assert.equal(saved.activity.at(-1).event, event)
@@ -2947,6 +3169,15 @@ require('node:module').syncBuiltinESMExports()
 }
 
 const pendingFiles = f => existsSync(join(f.root, 'pending')) ? readdirSync(join(f.root, 'pending')).filter(name => name.endsWith('.json')).sort() : []
+
+// These regressions inspect the queue before deliberately replaying it. A live
+// owner keeps automatic draining separate; its own lifecycle is tested below.
+const holdAutomaticRecovery = f => {
+  const normalized = process.platform === 'win32' ? resolve(f.progress).toLowerCase() : resolve(f.progress)
+  const file = join(f.root, `hook-recovery-${createHash('sha256').update(normalized).digest('hex')}.json`)
+  f.save(file, JSON.stringify({ version: 1, pid: process.pid, token: createHash('sha256').update(f.root).digest('hex').slice(0, 32), created: Date.now() }))
+}
+
 
 test('a first Codex event names its block and project after its working folder', () => fixture(f => {
   assert.equal(f.install('--apply').status, 0)
@@ -3160,9 +3391,9 @@ main(fs, { file, session, rounds: 10, spacingMs: 50, lockWaitMs: 8000, gateMs: 1
     }
     f.save(gate, '')
     const results = await Promise.all(runs)
-    const text = readFileSync(f.progress, 'utf8')
+    let text = readFileSync(f.progress, 'utf8')
     const missing = owners.filter(id => !text.includes(`<!-- auto session=${id} `))
-    t.diagnostic(JSON.stringify({ exits: results.map(result => result.status), missing }))
+    t.diagnostic(JSON.stringify({ phase: 'foreground-exit', exits: results.map(result => result.status), missing }))
     for (const result of results) {
       assert.equal(result.status, 0, hookFailure(result))
       assert.equal(result.error, undefined, hookFailure(result))
@@ -3171,6 +3402,11 @@ main(fs, { file, session, rounds: 10, spacingMs: 50, lockWaitMs: 8000, gateMs: 1
       assert.match(result.stdout, /^WRITER_OK(?: after .*)?$/m)
       assert.doesNotMatch(result.stdout, /\bLOST\b/)
     }
+    // A successful foreground command can leave its event with the bounded recovery worker.
+    await waitForAutomaticRecovery(() => {
+      text = readFileSync(f.progress, 'utf8')
+      return pendingFiles(f).length === 0 && owners.every(id => text.includes(`<!-- auto session=${id} `))
+    }, 'all twelve writer events must settle before verifying their blocks')
     assert.ok(text.includes('Manual text must survive\n'), text)
     for (const id of owners) {
       assert.equal(text.split(`<!-- auto session=${id} `).length - 1, 1, text)
@@ -3186,6 +3422,153 @@ main(fs, { file, session, rounds: 10, spacingMs: 50, lockWaitMs: 8000, gateMs: 1
     for (const result of settled) {
       if (result.status === 'fulfilled' && result.value.status !== 0) t.diagnostic(hookFailure(result.value))
     }
+    const failure = settled.find(result => result.status === 'rejected')
+    if (failure) throw failure.reason
+  }
+}))
+
+test('concurrent writers wait for autonomous recovery before asserting every block exactly once', t => fixture(async f => {
+  assert.equal(f.install('--apply').status, 0)
+  f.save(f.progress, '## FORMAT concurrency\n\nManual text must survive\n')
+  const gate = join(f.home, 'recovery-writers-start')
+  const release = join(f.home, 'recovery-writers-release')
+  const recoveryPids = join(f.home, 'recovery-writer-pids')
+  const barrier = join(f.home, 'recovery-writers-barrier.cjs')
+  const writer = join(f.home, 'recovery-format-writer.cjs')
+  const hooks = Array.from({ length: 8 }, (_, i) => `recovery-concurrent-hook-${i}`)
+  const writers = Array.from({ length: 4 }, (_, i) => `f100000${i}`)
+  const writerDone = writers.map(id => join(f.home, `recovery-format-done-${id}`))
+  const selectedHook = hooks[3]
+  const selectedHash = createHash('sha256').update(`codex:${selectedHook}`).digest('hex')
+  const selectedOwner = selectedHash.slice(0, 8)
+  const selectedMarker = `<!-- auto session=${selectedOwner} `
+  f.save(barrier, `const fs = require('node:fs')
+const path = require('node:path')
+const { performance } = require('node:perf_hooks')
+const originalRename = fs.renameSync
+fs.renameSync = function(from, to) {
+  if (String(to) === ${JSON.stringify(f.progress)}) {
+    const next = fs.readFileSync(from, 'utf8')
+    const prior = fs.existsSync(to) ? fs.readFileSync(to, 'utf8') : ''
+    if (next.includes(${JSON.stringify(selectedMarker)}) && !prior.includes(${JSON.stringify(selectedMarker)}) && !fs.existsSync(${JSON.stringify(release)})) {
+      throw Object.assign(new Error('synthetic selected event is temporarily busy'), { code: 'EBUSY' })
+    }
+  }
+  return originalRename.apply(this, arguments)
+}
+require('node:module').syncBuiltinESMExports()
+if (process.argv.includes('--recover-pending')) {
+  fs.mkdirSync(${JSON.stringify(recoveryPids)}, { recursive: true })
+  fs.writeFileSync(path.join(${JSON.stringify(recoveryPids)}, String(process.pid)), '')
+}
+fs.writeFileSync(process.env.WRITER_READY, '')
+const until = performance.now() + 15000
+while (!fs.existsSync(process.env.WRITERS_START)) {
+  if (performance.now() >= until) throw new Error('START_TIMEOUT')
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 5)
+}
+// The original twelve-writer test covers lock contention. Queue this event only
+// after FORMAT writers finish so its deliberate busy write cannot starve them.
+if (process.argv.includes('--codex-event')) {
+  const writers = ${JSON.stringify(writerDone)}
+  while (!writers.every(file => fs.existsSync(file))) {
+    if (performance.now() >= until) throw new Error('FORMAT_WRITERS_TIMEOUT')
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 5)
+  }
+}
+`)
+  // Keep this independent of product helpers, using the same documented procedure as the L5 journey.
+  f.save(writer, `const fs = require('node:fs')
+const main = ${formatWriter.toString()}
+const [file, session, done] = process.argv.slice(2)
+// Test-only headroom lets a loaded CI machine schedule every competing writer.
+main(fs, { file, session, rounds: 10, spacingMs: 50, lockWaitMs: 8000, gateMs: 15000 }).then(isWritten => {
+  if (isWritten) fs.writeFileSync(done, '')
+  process.exitCode = isWritten ? 0 : 2
+})
+`)
+  const owners = [...hooks.map(id => createHash('sha256').update(`codex:${id}`).digest('hex').slice(0, 8)), ...writers]
+  const ready = owners.map(id => join(f.home, `recovery-writer-ready-${id}`))
+  const runs = [], stops = []
+  const after = stop => {
+    stops.push(stop)
+    return setTimeout(stop, 20000)
+  }
+  const track = run => {
+    runs.push(run)
+    run.catch(() => {})
+  }
+  const environment = i => ({ ...f.env, NODE_OPTIONS: `--require ${JSON.stringify(barrier)}`, WRITER_READY: ready[i], WRITERS_START: gate })
+  const recoveryPidValues = () => existsSync(recoveryPids) ? readdirSync(recoveryPids).map(Number).filter(Number.isSafeInteger) : []
+  try {
+    for (const [i, id] of hooks.entries()) {
+      track(fireHook({ ...f, env: { ...environment(i), CODEX_THREAD_ID: id } }, JSON.stringify({ session_id: id, hook_event_name: 'UserPromptSubmit', turn_id: 'turn-1' }), 20000, after))
+    }
+    for (const [i, id] of writers.entries()) {
+      track(nativeProcess(process.execPath, [writer, f.progress, id, writerDone[i]], environment(i + hooks.length), '', after))
+    }
+    const readyUntil = Date.now() + 15000
+    while (!ready.every(file => existsSync(file))) {
+      assert.ok(Date.now() < readyUntil, `all twelve children must reach the shared start gate: ${ready.map(file => existsSync(file))}`)
+      await new Promise(done => setTimeout(done, 5))
+    }
+    f.save(gate, '')
+    const results = await Promise.all(runs)
+    for (const result of results) {
+      assert.equal(result.status, 0, hookFailure(result))
+      assert.equal(result.error, undefined, hookFailure(result))
+    }
+    for (const result of results.slice(hooks.length)) {
+      assert.match(result.stdout, /^WRITER_OK(?: after .*)?$/m)
+      assert.doesNotMatch(result.stdout, /\bLOST\b/)
+    }
+    const beforeRelease = readFileSync(f.progress, 'utf8')
+    const missingBeforeRelease = owners.filter(id => !beforeRelease.includes(`<!-- auto session=${id} `))
+    const selectedPendingName = pendingFiles(f).find(name => {
+      try { return readFileSync(join(f.root, 'pending', name), 'utf8').includes(selectedHook) } catch (error) {
+        if (error.code === 'ENOENT') return false
+        throw error
+      }
+    })
+    assert.ok(missingBeforeRelease.includes(selectedOwner), `selected event must be absent before recovery: ${missingBeforeRelease}`)
+    assert.ok(selectedPendingName, `selected event must remain identifiable in pending/: ${pendingFiles(f)}`)
+    const selectedPending = JSON.parse(readFileSync(join(f.root, 'pending', selectedPendingName), 'utf8'))
+    assert.equal(selectedPending.payload.session_id, selectedHook)
+    assert.equal(selectedPending.payload.turn_id, 'turn-1')
+    assert.ok(Number.isFinite(selectedPending.at))
+    assert.ok(Number.isFinite(Date.parse(selectedPending.now)))
+    await waitForAutomaticRecovery(() => recoveryPidValues().length > 0, 'the queued event must launch an owned automatic recovery helper')
+    const ownedRecoveryPids = recoveryPidValues()
+    assert.ok(ownedRecoveryPids.some(isReporterAlive), `an owned recovery helper must be live before release: ${ownedRecoveryPids}`)
+    t.diagnostic(JSON.stringify({ phase: 'before-release', exits: results.map(result => result.status), missing: missingBeforeRelease, pending: pendingFiles(f), recoveryPids: ownedRecoveryPids }))
+    f.save(release, '')
+    let settled = beforeRelease
+    await waitForAutomaticRecovery(() => {
+      settled = readFileSync(f.progress, 'utf8')
+      const isSelectedPending = existsSync(join(f.root, 'pending', selectedPendingName))
+      return !isSelectedPending && owners.every(id => settled.includes(`<!-- auto session=${id} `))
+    }, 'automatic recovery must drain the selected event and restore all twelve blocks')
+    await waitForAutomaticRecovery(() => ownedRecoveryPids.every(pid => !isReporterAlive(pid)), 'every owned recovery helper must exit after draining', 3000)
+    const saved = JSON.parse(readFileSync(join(f.root, 'sessions', `${selectedHash}.json`), 'utf8'))
+    assert.equal(saved.appliedAt, selectedPending.at)
+    assert.equal(Date.parse(saved.updated), Date.parse(selectedPending.now))
+    assert.ok(settled.includes('Manual text must survive\n'), settled)
+    for (const id of owners) {
+      assert.equal(settled.split(`<!-- auto session=${id} `).length - 1, 1, settled)
+      assert.equal(settled.split(`<!-- /auto session=${id} -->`).length - 1, 1, settled)
+    }
+    for (const id of writers) assert.match(settled, new RegExp(`### Format writer ${id}\\r?\\n> Context: Synthetic FORMAT.md writer\\r?\\n- \\[~\\] Round 10\\r?\\n`))
+    assert.deepEqual(pendingFiles(f), [])
+    const leftovers = readdirSync(f.root, { recursive: true }).filter(name => /\.agent-board-lock(?:\.recover)?$|\.(?:tmp|format-tmp|board-tmp)$/.test(name))
+    assert.deepEqual(leftovers, [])
+  } finally {
+    f.save(release, '')
+    for (const stop of stops) stop()
+    const settled = await Promise.allSettled(runs)
+    for (const result of settled) {
+      if (result.status === 'fulfilled' && result.value.status !== 0) t.diagnostic(hookFailure(result.value))
+    }
+    for (const pid of recoveryPidValues()) if (isReporterAlive(pid)) await stopReporter(pid)
     const failure = settled.find(result => result.status === 'rejected')
     if (failure) throw failure.reason
   }
@@ -3441,6 +3824,29 @@ test('a read-only progress.md fails in one plain line without queuing the event'
   } finally { chmodSync(f.progress, 0o666) }
 }))
 
+test('an explicit Windows report into a denied folder gives a plain permission message and is not queued', { skip: process.platform !== 'win32' && 'Windows ACLs only' }, () => fixture(async f => {
+  assert.equal(f.install('--apply').status, 0)
+  const folder = join(f.home, 'denied-progress')
+  const progress = join(folder, 'progress.md')
+  f.save(progress, '## Synthetic denied report\n')
+  const before = readFileSync(progress)
+  await withDeniedCreation(folder, () => {
+    const result = f.command(['--codex-report', '--progress-file', progress, '--lang', 'en'], { title: 'Synthetic report', state: 'working', steps: ['- [~] Synthetic work'] })
+    assert.equal(result.status, 1, result.stderr)
+    assert.equal(result.stdout, '')
+    assert.equal(result.stderr.trim().split(/\r?\n/).length, 1, result.stderr)
+    assert.match(result.stderr, /permission denied/i)
+    assert.doesNotMatch(result.stderr, /LOCK_BUSY|\bat /)
+    assert.ok(!result.stderr.includes(f.home), result.stderr)
+    assert.deepEqual(pendingFiles(f), [])
+    assert.deepEqual(readFileSync(progress), before)
+    assert.equal(existsSync(`${progress}.agent-board-lock`), false)
+  })
+  const accepted = f.command(['--codex-report', '--progress-file', progress, '--lang', 'en'], { title: 'Synthetic report', state: 'working', steps: ['- [~] Synthetic work'] })
+  assert.equal(accepted.status, 0, accepted.stderr)
+  assert.match(readFileSync(progress, 'utf8'), /Synthetic report/)
+}))
+
 test('a queued event with a system error is kept and the hook fails in one plain line', () => fixture(f => {
   assert.equal(f.install('--apply').status, 0)
   assert.equal(f.event('UserPromptSubmit').status, 0)
@@ -3562,6 +3968,40 @@ test('connection data roots distinguish POSIX apostrophes from encoded PowerShel
   } finally { resolver.deregister() }
 })
 
+test('direct Windows hook argument data preserves ownership roots without executing the command', async () => {
+  const resolver = registerHooks({ resolve(specifier, context, next) {
+    try { return next(specifier, context) } catch (error) {
+      if (error.code !== 'ERR_MODULE_NOT_FOUND' || !specifier.startsWith('.')) throw error
+      return next(`${specifier}.ts`, context)
+    }
+  } })
+  try {
+    const { connectDataRoots } = await import('../hooks/connect-pure.ts')
+    const { antigravityCommand, directHookArgs, hookCommandArgs } = await import('../hooks/local-agents.ts')
+    for (const folder of ["C:\\Users\\o'synthetic\\.claude", "C:\\Users\\o''synthetic\\.claude", 'C:\\synthetic 雪\\board']) {
+      const worker = `${folder}\\progress-hook.mjs`
+      const argv = hookCommandArgs('C:\\Program Files\\nodejs\\node.exe', folder, 'antigravity', worker, `${folder}\\progress.md`, 'Stop', 'waiting')
+      const command = antigravityCommand(argv, true, value => value, 'C:\\synthetic\\node.exe')
+      assert.deepEqual(directHookArgs(command), [argv[0], ...argv.slice(4)])
+      assert.ok(connectDataRoots(command).includes(folder))
+      assert.ok(connectDataRoots(JSON.stringify({ command })).includes(folder))
+    }
+    const data = JSON.stringify(['node', 'C:\\synthetic\\progress-hook.mjs'])
+    const source = `process.argv=JSON.parse(${JSON.stringify(data)});globalThis.syntheticHookDecodeExecuted=true`
+    const command = `node --input-type=commonjs -e eval(Buffer.from('${Buffer.from(source).toString('base64')}','base64').toString('utf8'))`
+    assert.ok(connectDataRoots(command).includes('C:\\synthetic'))
+    assert.equal(globalThis.syntheticHookDecodeExecuted, undefined)
+    assert.equal(directHookArgs(command.replace('--input-type=commonjs', '--input-type=module')), null)
+    for (const source of ['throw Error()', 'process.argv=JSON.parse("[1]");', 'process.argv=JSON.parse("{}");']) {
+      const invalid = `node --input-type=commonjs -e eval(Buffer.from('${Buffer.from(source).toString('base64')}','base64').toString('utf8'))`
+      assert.equal(directHookArgs(invalid), null)
+    }
+    assert.throws(() => antigravityCommand(['node', 'worker.mjs'], true, value => value, 'C:\\synthetic\\node.exe'), /INVALID_HOOK_COMMAND/)
+    for (const executable of ['node', 'node.exe']) assert.throws(() => antigravityCommand(['node'], true, value => value, executable), /UNSAFE_HOOK_EXECUTABLE/)
+    assert.throws(() => antigravityCommand(['node'], true, value => value, 'node&other'), /UNSAFE_HOOK_EXECUTABLE/)
+  } finally { resolver.deregister() }
+})
+
 test('antigravity: setup-agent takes over a home the legacy connect hooked first', () => fixture(async f => {
   mkdirSync(join(f.home, '.gemini', 'antigravity'), { recursive: true })
   const progress = join(f.home, '.claude', 'progress.md')
@@ -3672,6 +4112,60 @@ test('antigravity: setup-agent keeps the content and order of third-party hooks 
   assert.equal(readFileSync(config, 'utf8'), original)
 }))
 
+test('Antigravity reports its own waiting question with the command bound by native hooks', async () => {
+  for (const lang of ['en', 'zh-TW', 'zh-CN']) for (const connector of ['setup', 'connect']) await fixture(async f => {
+    mkdirSync(join(f.home, '.gemini', 'antigravity-cli'), { recursive: true })
+    // POSIX hook installation rejects shell expansion characters; its quoted
+    // paths still accept spaces and apostrophes. Windows uses encoded hooks.
+    const folder = process.platform === 'win32' ? 'synthetic %literal% ` $ board' : "synthetic literal's board"
+    const progress = join(f.home, folder, 'progress.md')
+    if (connector === 'connect') legacyConnect(f, progress, 'connect', lang)
+    else {
+      const installed = f.install('--agent', 'antigravity', '--lang', lang, '--progress-file', progress, '--apply')
+      assert.equal(installed.status, 0, `${connector} ${lang}: ${installed.stderr}${installed.stdout}`)
+    }
+    const hooks = JSON.parse(readFileSync(join(f.home, '.gemini', 'config', 'hooks.json'), 'utf8'))[connector === 'connect' ? 'agent-board' : 'agent-board-local']
+    const conversationId = 'synthetic-agy-question-session'
+    const payload = { conversationId, session_id: 'synthetic-foreign-session', invocationNum: 0, transcriptPath: 'PRIVATE_TRANSCRIPT_DO_NOT_OPEN', prompt: 'PRIVATE_PROMPT', toolCall: { args: 'PRIVATE_TOOL' } }
+    const fire = event => fireCommand(f, hooks[event][0].command, JSON.stringify(payload))
+    const started = await fire('SessionStart')
+    assert.equal(started.status, 0, hookFailure(started))
+    const context = JSON.parse(started.stdout).injectSteps?.[0]?.systemMessage?.systemMessage
+    assert.equal(typeof context, 'string', `${connector} ${lang}: missing native report context`)
+    assert.ok(!context.includes('PRIVATE_'))
+    const command = context.match(/`(node [^`\r\n]+)`/)?.[1]
+    assert.ok(command, context)
+    const first = await fire('PreInvocation')
+    assert.equal(first.status, 0, hookFailure(first))
+    assert.equal(JSON.parse(first.stdout).injectSteps?.[0]?.ephemeralMessage, context)
+    payload.invocationNum = 1
+    const later = await fire('PreInvocation')
+    assert.equal(later.status, 0, hookFailure(later))
+    assert.deepEqual(JSON.parse(later.stdout), {})
+    const foreign = '<!-- auto session=abcdef12 agent=opencode state=waiting updated=2026-10-24T00:00:00Z -->\n### Foreign question\n- [?] Blue or green?\n<!-- /auto session=abcdef12 -->\n'
+    f.save(progress, readFileSync(progress, 'utf8') + foreign)
+    const steps = ['- [x] Synthetic first step', '- [x] Synthetic second step', '- [?] Blue or green?']
+    const report = await fireCommand(f, command, JSON.stringify({ title: 'Synthetic Antigravity question', project: 'Synthetic test', state: 'waiting', steps }))
+    assert.equal(report.status, 0, hookFailure(report))
+    const block = createHash('sha256').update(`antigravity:${conversationId}`).digest('hex').slice(0, 8)
+    assert.equal(JSON.parse(report.stdout).block, block)
+    for (const event of ['PostInvocation', 'Stop']) {
+      const result = await fire(event)
+      assert.equal(result.status, 0, hookFailure(result))
+      assert.deepEqual(JSON.parse(result.stdout), {})
+    }
+    const text = readFileSync(progress, 'utf8')
+    const own = text.match(new RegExp(`<!-- auto session=${block} [^\\n]*-->[\\s\\S]*?<!-- /auto session=${block} -->`))?.[0]
+    assert.ok(own, text)
+    assert.match(own.split('\n')[0], / agent=antigravity /)
+    assert.match(own.split('\n')[0], / state=waiting /)
+    for (const step of steps) assert.ok(own.includes(step), own)
+    assert.ok(text.includes(foreign), 'another agent question must remain unchanged')
+    assert.ok(!text.includes('PRIVATE_') && !text.includes('synthetic-foreign-session'))
+    assert.equal(hookLog(f), '')
+  })
+})
+
 test('antigravity: one synthetic agy turn reaches the board through the connected hook', () => fixture(async f => {
   mkdirSync(join(f.home, '.gemini', 'antigravity-cli'), { recursive: true })
   const progress = join(f.home, '.claude', 'progress.md')
@@ -3681,7 +4175,8 @@ test('antigravity: one synthetic agy turn reaches the board through the connecte
   for (const [event, [hook]] of Object.entries(hooks)) {
     const result = await fireCommand(f, hook.command, JSON.stringify({ conversationId, workspacePaths: ['PRIVATE_WORKSPACE'], prompt: 'PRIVATE_PROMPT' }))
     assert.equal(result.status, 0, `${event} ${hookFailure(result)}`)
-    assert.equal(result.stdout.trim(), '{}', event)
+    if (event === 'SessionStart') assert.equal(typeof JSON.parse(result.stdout).injectSteps?.[0]?.systemMessage?.systemMessage, 'string')
+    else assert.equal(result.stdout.trim(), '{}', event)
   }
   const text = readFileSync(progress, 'utf8')
   const marker = text.split(/\r?\n/).find(line => line.includes('agent=antigravity'))
@@ -3737,4 +4232,262 @@ test('doctor: a host with a skill but no report hook is named', () => fixture(as
   const installed = doctor()
   assert.equal(installed.reportHook, 'installer')
   assert.equal(installed.problem, undefined)
+}))
+
+test('manual hook recovery drains a queued final Stop without waiting for stdin', () => fixture(async f => {
+  assert.equal(f.install('--apply').status, 0)
+  assert.equal(f.event('UserPromptSubmit', 'manual-recovery-turn').status, 0)
+  const foreign = '<!-- auto session=abcdef12 agent=opencode state=waiting updated=2026-10-24T00:00:00Z -->\n### Foreign bytes stay exact\n- [?] Blue or green?\n<!-- /auto session=abcdef12 -->\n'
+  f.save(f.progress, readFileSync(f.progress, 'utf8') + foreign)
+  const locked = lockedProgress(f)
+  const queued = f.event('Stop', 'manual-recovery-turn', {}, locked.env)
+  assert.equal(queued.status, 0, queued.stderr)
+  const [name] = pendingFiles(f)
+  assert.ok(name, 'the locked direct CLI event must enter pending/')
+  const source = JSON.parse(readFileSync(join(f.root, 'pending', name), 'utf8'))
+  assert.equal(source.payload.hook_event_name, 'Stop')
+  unlinkSync(locked.marker)
+  const isolated = ['--home', f.home, '--codex-dir', join(f.home, '.codex'), '--grok-dir', join(f.home, '.grok'), '--hermes-dir', join(f.home, '.hermes')]
+  const recovered = await nativeProcess(process.execPath, [f.script, ...isolated, '--recover-hooks'], f.env, '', callback => setTimeout(callback, 10000), stopNativeTree, { isInputOpen: true })
+  assert.equal(recovered.error, undefined, hookFailure(recovered))
+  assert.equal(recovered.status, 0, hookFailure(recovered))
+  assert.deepEqual(JSON.parse(recovered.stdout), { recoveryVersion: 1, processed: 1, pending: 0 })
+  assert.equal(recovered.stderr, '')
+  assert.deepEqual(pendingFiles(f), [])
+  const owner = createHash('sha256').update(`codex:${session}`).digest('hex')
+  const record = JSON.parse(readFileSync(join(f.root, 'sessions', `${owner}.json`), 'utf8'))
+  assert.equal(record.state, 'waiting')
+  assert.equal(record.appliedAt, source.at)
+  assert.equal(Date.parse(record.updated), Date.parse(source.now))
+  const board = readFileSync(f.progress, 'utf8')
+  assert.match(board, new RegExp(`<!-- auto session=${owner.slice(0, 8)} [^\n]*state=waiting`))
+  assert.equal(board.split(foreign).length, 2, 'the unrelated block bytes must remain exact and singular')
+}))
+
+test('manual hook recovery drops stale metadata and leaves other boards and messages untouched', () => fixture(f => {
+  assert.equal(f.install('--apply').status, 0)
+  const activeSession = 'manual-grok-session-123'
+  const working = f.command(['--agent-status', '--agent', 'grok', '--state', 'working'], { session_id: activeSession })
+  assert.equal(working.status, 0, working.stderr)
+  const owner = createHash('sha256').update(`grok:${activeSession}`).digest('hex')
+  const recordFile = join(f.root, 'sessions', `${owner}.json`)
+  const newer = JSON.parse(readFileSync(recordFile, 'utf8'))
+  const boardBefore = readFileSync(f.progress)
+  const staleAt = newer.appliedAt - 1000
+  f.save(join(f.root, 'pending', '001.json'), JSON.stringify({
+    version: 1, progress: f.progress, mode: '--agent-status', agent: 'grok', session: activeSession, status: 'waiting',
+    now: new Date(staleAt).toISOString().replace(/\.\d{3}Z$/, 'Z'), at: staleAt, isBoardPrompt: false, isPrompt: false,
+    payload: {},
+  }) + '\n')
+  const otherProgress = join(f.home, 'other-board', 'progress.md')
+  const otherBoard = Buffer.from('## Other board\r\n\r\nForeign bytes stay exact.\r\n')
+  f.save(otherProgress, otherBoard)
+  const foreignName = '002.json'
+  const foreignQueue = JSON.stringify({
+    version: 1, progress: otherProgress, mode: '--agent-status', agent: 'grok', session: 'foreign-hook-session-123', status: 'waiting',
+    now: new Date().toISOString().replace(/\.\d{3}Z$/, 'Z'), at: Date.now(), isBoardPrompt: false, isPrompt: false, payload: {},
+  }) + '\n'
+  f.save(join(f.root, 'pending', foreignName), foreignQueue)
+  const messages = join(f.root, 'messages', 'messages.json')
+  const messageBytes = Buffer.from(JSON.stringify({ messages: [{ id: 'SYNTHETIC-UNCERTAIN-1', target: 'binding1', turn: 'turn1', from: 'board', to: 'codex:synthetic', text: 'Synthetic message must not be sent', status: 'uncertain', updated: 1, reply: '', error: 'ACK_TIMEOUT' }] }, null, 2) + '\n')
+  f.save(messages, messageBytes)
+  const invoked = join(f.home, 'unexpected-model-send')
+  const standIn = join(f.home, 'unexpected-model-send.cjs')
+  f.save(standIn, `require('node:fs').writeFileSync(${JSON.stringify(invoked)}, 'invoked')\n`)
+  const result = f.command(['--recover-hooks', '--messages-dir', dirname(messages)], undefined, { AGENT_BOARD_CODEX: standIn })
+  assert.equal(result.status, 0, result.stderr)
+  // The result counts this selected board; a different board's queue remains below.
+  assert.deepEqual(JSON.parse(result.stdout), { recoveryVersion: 1, processed: 1, pending: 0 })
+  assert.equal(result.stderr, '')
+  assert.deepEqual(readFileSync(f.progress), boardBefore)
+  assert.deepEqual(JSON.parse(readFileSync(recordFile, 'utf8')), newer)
+  assert.equal(readFileSync(join(f.root, 'pending', foreignName), 'utf8'), foreignQueue)
+  assert.deepEqual(pendingFiles(f), [foreignName])
+  assert.deepEqual(readFileSync(otherProgress), otherBoard)
+  assert.deepEqual(readFileSync(messages), messageBytes)
+  assert.equal(existsSync(invoked), false, 'recovery must not invoke a model, Send transport, or approval path')
+}))
+
+const automaticRecoveryFixture = f => {
+  const pidFile = join(f.home, 'automatic-recovery.pid')
+  const attemptsFile = join(f.home, 'automatic-recovery-attempts')
+  const preload = join(f.home, 'observe-automatic-recovery.cjs')
+  f.save(preload, `const child = require('node:child_process')
+const fs = require('node:fs')
+const spawn = child.spawn
+const spawnSync = child.spawnSync
+child.spawn = (executable, args, options) => {
+  const result = spawn(executable, args, options)
+  if (Array.isArray(args) && args.includes('--recover-pending')) fs.writeFileSync(${JSON.stringify(pidFile)}, String(result.pid))
+  return result
+}
+child.spawnSync = (executable, args, options) => {
+  if (Array.isArray(args) && args.includes('--recover-hooks')) fs.appendFileSync(${JSON.stringify(attemptsFile)}, '1\\n')
+  return spawnSync(executable, args, options)
+}
+require('node:module').syncBuiltinESMExports()
+`)
+  const normalized = process.platform === 'win32' ? resolve(f.progress).toLowerCase() : resolve(f.progress)
+  const lease = join(f.root, `hook-recovery-${createHash('sha256').update(normalized).digest('hex')}.json`)
+  const hooks = JSON.parse(readFileSync(join(f.home, '.gemini', 'config', 'hooks.json'), 'utf8'))['agent-board-local']
+  const conversationId = 'synthetic-automatic-recovery-session'
+  const payload = JSON.stringify({ conversationId, invocationNum: 0, prompt: 'PRIVATE_PROMPT', approval: 'PRIVATE_APPROVAL' })
+  const record = join(f.root, 'sessions', createHash('sha256').update(`antigravity:${conversationId}`).digest('hex') + '.json')
+  return { pidFile, attemptsFile, preload, lease, hooks, conversationId, payload, record }
+}
+
+const waitForAutomaticRecovery = async (condition, message, limit = 10000) => {
+  const until = Date.now() + limit
+  while (!condition() && Date.now() < until) await new Promise(done => setTimeout(done, 25))
+  assert.ok(condition(), message)
+}
+
+test('automatic hook recovery applies a queued Antigravity Stop after the lock is released', { timeout: 30000 }, () => fixture(async f => {
+  assert.equal(f.install('--agent', 'antigravity', '--apply').status, 0)
+  const recovery = automaticRecoveryFixture(f)
+  const started = await fireCommand(f, recovery.hooks.PreInvocation[0].command, recovery.payload)
+  assert.equal(started.status, 0, hookFailure(started))
+  assert.equal(JSON.parse(readFileSync(recovery.record, 'utf8')).state, 'working')
+  const foreign = Buffer.from('<!-- auto session=abcdef12 agent=opencode state=waiting updated=2026-10-24T00:00:00Z -->\r\n### Foreign bytes stay exact\r\n- [?] Blue or green?\r\n<!-- /auto session=abcdef12 -->\r\n')
+  f.save(f.progress, Buffer.concat([readFileSync(f.progress), foreign]))
+  const messages = join(f.root, 'messages', 'messages.json')
+  const messageBytes = Buffer.from('{"messages":[{"id":"SYNTHETIC-UNCERTAIN-AUTO","status":"uncertain","text":"PRIVATE_MESSAGE"}]}\n')
+  f.save(messages, messageBytes)
+  const locked = lockedProgress(f)
+  const env = { ...f.env, NODE_OPTIONS: `${locked.env.NODE_OPTIONS} --require ${JSON.stringify(recovery.preload)}` }
+  let recoveryPid
+  try {
+    const stopped = await fireCommand({ ...f, env }, recovery.hooks.Stop[0].command, recovery.payload)
+    assert.equal(stopped.status, 0, hookFailure(stopped))
+    await waitForAutomaticRecovery(() => existsSync(recovery.pidFile) && pendingFiles(f).length === 1, 'the installed Stop hook must queue once and launch its owned recovery helper')
+    recoveryPid = Number(readFileSync(recovery.pidFile, 'utf8'))
+    assert.ok(isReporterAlive(recoveryPid), 'the tracked automatic recovery helper must be live before the lock is released')
+    const [queuedName] = pendingFiles(f)
+    const source = JSON.parse(readFileSync(join(f.root, 'pending', queuedName), 'utf8'))
+    assert.equal(source.event, 'Stop')
+    assert.doesNotMatch(JSON.stringify(source), /PRIVATE_/)
+    unlinkSync(locked.marker)
+    await waitForAutomaticRecovery(() => pendingFiles(f).length === 0 && !existsSync(recovery.lease) && JSON.parse(readFileSync(recovery.record, 'utf8')).state === 'waiting', 'automatic recovery must drain the selected queue, remove its lease and apply waiting')
+    await waitForAutomaticRecovery(() => !isReporterAlive(recoveryPid), 'the owned automatic recovery helper must exit after draining', 3000)
+    const saved = JSON.parse(readFileSync(recovery.record, 'utf8'))
+    assert.equal(saved.appliedAt, source.at)
+    assert.equal(Date.parse(saved.updated), Date.parse(source.now))
+    assert.ok(readFileSync(f.progress).includes(foreign), 'the unrelated foreign block bytes must remain exact')
+    assert.deepEqual(readFileSync(messages), messageBytes)
+  } finally {
+    rmSync(locked.marker, { force: true })
+    if (Number.isInteger(recoveryPid) && isReporterAlive(recoveryPid)) await stopReporter(recoveryPid)
+  }
+}))
+
+test('automatic hook recovery exhausts three locked attempts and leaves manual recovery possible', { timeout: 30000 }, () => fixture(async f => {
+  assert.equal(f.install('--agent', 'antigravity', '--apply').status, 0)
+  const recovery = automaticRecoveryFixture(f)
+  const started = await fireCommand(f, recovery.hooks.PreInvocation[0].command, recovery.payload)
+  assert.equal(started.status, 0, hookFailure(started))
+  const locked = lockedProgress(f)
+  const env = { ...f.env, NODE_OPTIONS: `${locked.env.NODE_OPTIONS} --require ${JSON.stringify(recovery.preload)}` }
+  let recoveryPid
+  try {
+    const stopped = await fireCommand({ ...f, env }, recovery.hooks.Stop[0].command, recovery.payload)
+    assert.equal(stopped.status, 0, hookFailure(stopped))
+    await waitForAutomaticRecovery(() => existsSync(recovery.pidFile) && pendingFiles(f).length === 1, 'the installed Stop hook must launch recovery for its queued metadata')
+    recoveryPid = Number(readFileSync(recovery.pidFile, 'utf8'))
+    await waitForAutomaticRecovery(() => !isReporterAlive(recoveryPid), 'the bounded automatic helper must exit while the synthetic lock remains held')
+    assert.equal(readFileSync(recovery.attemptsFile, 'utf8'), '1\n1\n1\n')
+    assert.match(hookLog(f), /antigravity HOOK_RECOVERY_NEEDED\r?\n$/)
+    assert.equal(existsSync(recovery.lease), false)
+    assert.equal(pendingFiles(f).length, 1)
+    assert.equal(JSON.parse(readFileSync(recovery.record, 'utf8')).state, 'working')
+    unlinkSync(locked.marker)
+    const manual = f.command(['--recover-hooks', '--progress-file', f.progress])
+    assert.equal(manual.status, 0, manual.stderr)
+    assert.deepEqual(JSON.parse(manual.stdout), { recoveryVersion: 1, processed: 1, pending: 0 })
+    assert.deepEqual(pendingFiles(f), [])
+    assert.equal(JSON.parse(readFileSync(recovery.record, 'utf8')).state, 'waiting')
+  } finally {
+    rmSync(locked.marker, { force: true })
+    if (Number.isInteger(recoveryPid) && isReporterAlive(recoveryPid)) await stopReporter(recoveryPid)
+  }
+}))
+
+test('automatic hook recovery preserves an old claim while its owner is still alive', () => fixture(f => {
+  assert.equal(f.install('--agent', 'antigravity', '--apply').status, 0)
+  const recovery = automaticRecoveryFixture(f)
+  const claim = JSON.stringify({ version: 1, pid: process.pid, token: 'a'.repeat(32), created: Date.now() - 60000 })
+  f.save(recovery.lease, claim)
+  const worker = join(f.root, 'agent-board-hook.mjs')
+  const args = [worker, '--hook-version', '1', '--hook-event', 'Stop', '--agent-status', '--agent', 'antigravity', '--state', 'waiting', '--event', 'Stop', '--progress-file', f.progress, '--hook-started', String(Date.now() - 3000)]
+  const result = spawnSync(process.execPath, args, { env: { ...f.env, NODE_OPTIONS: `--require ${JSON.stringify(recovery.preload)}` }, input: recovery.payload, encoding: 'utf8', windowsHide: true, timeout: 5000 })
+  assert.equal(result.status, 0, hookFailure(result))
+  assert.equal(pendingFiles(f).length, 1)
+  assert.equal(readFileSync(recovery.lease, 'utf8'), claim)
+  assert.equal(existsSync(recovery.pidFile), false, 'a live claim must coalesce a new job without spawning another helper')
+  assert.equal(existsSync(`${recovery.lease}.recover`), false)
+  const manual = f.command(['--recover-hooks', '--progress-file', f.progress])
+  assert.equal(manual.status, 0, manual.stderr)
+  assert.deepEqual(JSON.parse(manual.stdout), { recoveryVersion: 1, processed: 1, pending: 0 })
+  assert.equal(readFileSync(recovery.lease, 'utf8'), claim, 'manual recovery does not take another live owner claim')
+}))
+
+test('automatic hook recovery replaces a stale claim only after its owner has exited', { timeout: 15000 }, () => fixture(async f => {
+  assert.equal(f.install('--agent', 'antigravity', '--apply').status, 0)
+  const recovery = automaticRecoveryFixture(f)
+  const exited = spawnSync(process.execPath, ['-e', ''], { env: f.env, encoding: 'utf8', windowsHide: true, timeout: 5000 })
+  assert.equal(exited.status, 0)
+  assert.ok(Number.isInteger(exited.pid) && exited.pid > 0)
+  assert.equal(isReporterAlive(exited.pid), false)
+  f.save(recovery.lease, JSON.stringify({ version: 1, pid: exited.pid, token: 'b'.repeat(32), created: Date.now() - 31000 }))
+  // An earlier worker could crash while holding its secondary guard. The new
+  // handover uses the existing board lock and must not depend on that tombstone.
+  const crashedGuard = JSON.stringify({ version: 1, pid: exited.pid, token: 'c'.repeat(32), created: Date.now() - 31000 })
+  f.save(`${recovery.lease}.recover`, crashedGuard)
+  const args = [join(f.root, 'agent-board-hook.mjs'), '--hook-version', '1', '--hook-event', 'Stop', '--agent-status', '--agent', 'antigravity', '--state', 'waiting', '--event', 'Stop', '--progress-file', f.progress, '--hook-started', String(Date.now() - 3000)]
+  let pid
+  try {
+    const result = spawnSync(process.execPath, args, { env: { ...f.env, NODE_OPTIONS: `--require ${JSON.stringify(recovery.preload)}` }, input: recovery.payload, encoding: 'utf8', windowsHide: true, timeout: 5000 })
+    assert.equal(result.status, 0, hookFailure(result))
+    await waitForAutomaticRecovery(() => existsSync(recovery.pidFile), 'a proven-dead stale owner must allow one new helper')
+    pid = Number(readFileSync(recovery.pidFile, 'utf8'))
+    await waitForAutomaticRecovery(() => !isReporterAlive(pid), 'the replacement helper must exit')
+    assert.equal(existsSync(recovery.lease), false)
+    assert.equal(readFileSync(`${recovery.lease}.recover`, 'utf8'), crashedGuard)
+    assert.deepEqual(pendingFiles(f), [])
+    assert.equal(JSON.parse(readFileSync(recovery.record, 'utf8')).state, 'waiting')
+  } finally {
+    if (Number.isInteger(pid) && isReporterAlive(pid)) await stopReporter(pid)
+  }
+}))
+
+test('automatic hook recovery serializes competing stale replacement candidates', { timeout: 15000 }, () => fixture(async f => {
+  assert.equal(f.install('--apply').status, 0)
+  const selected = process.platform === 'win32' ? resolve(f.progress).toLowerCase() : resolve(f.progress)
+  const claim = join(f.root, `hook-recovery-${createHash('sha256').update(selected).digest('hex')}.json`)
+  const dead = spawnSync(process.execPath, ['-e', ''], { env: f.env, encoding: 'utf8', timeout: 3000, windowsHide: true })
+  assert.equal(dead.status, 0)
+  assert.throws(() => process.kill(dead.pid, 0), error => error.code === 'ESRCH')
+  f.save(claim, JSON.stringify({ version: 1, pid: dead.pid, token: '1'.repeat(32), created: Date.now() - 60000 }))
+  const guard = JSON.stringify({ version: 1, pid: dead.pid, token: '2'.repeat(32), created: Date.now() - 60000 })
+  f.save(`${claim}.recover`, guard)
+  const worker = join(f.home, 'replacement-candidate.mjs')
+  f.save(worker, `import { claimHookRecovery } from ${JSON.stringify(new URL('../scripts/hook-recovery-owner.ts', import.meta.url).href)}
+import { withLocalLock } from ${JSON.stringify(new URL('../scripts/local-lock.ts', import.meta.url).href)}
+const [root, progress, value] = process.argv.slice(2)
+const request = { ...JSON.parse(value), pid: process.pid }
+const owned = withLocalLock(progress + '.agent-board-lock', () => claimHookRecovery(root, progress, request), { waitMs: 1500 })
+process.stdout.write(JSON.stringify({ owned, pid: process.pid, token: request.token }))
+`)
+  const created = Date.now()
+  const results = await Promise.all(['3', '4'].map(token => nativeProcess(process.execPath, [worker, f.root, f.progress, JSON.stringify({ previous: '1'.repeat(32), token: token.repeat(32), created })], f.env, '', callback => setTimeout(callback, 5000))))
+  const outcomes = results.map(result => {
+    assert.equal(result.error, undefined, hookFailure(result))
+    assert.equal(result.status, 0, hookFailure(result))
+    return JSON.parse(result.stdout)
+  })
+  const winners = outcomes.filter(outcome => outcome.owned)
+  assert.equal(winners.length, 1)
+  assert.deepEqual(JSON.parse(readFileSync(claim, 'utf8')), { version: 1, pid: winners[0].pid, token: winners[0].token, created })
+  assert.equal(readFileSync(`${claim}.recover`, 'utf8'), guard)
+  assert.equal(existsSync(`${f.progress}.agent-board-lock`), false)
+  assert.equal(existsSync(`${f.progress}.agent-board-lock.recover`), false)
 }))

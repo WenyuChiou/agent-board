@@ -8,10 +8,22 @@ import { spawnSync } from 'node:child_process'
 import { exchange } from '../scripts/exchange.mjs'
 import { dispatchCodex } from '../scripts/codex-owner.mjs'
 import { bindingOf, progressBlock, commandOf, codexRequest } from '../scripts/exchange-contract.ts'
-import { parseProgress } from '../hooks/parse.ts'
+import { futureTimeKey, isStale, observedTime, parseProgress, STALE_MS } from '../hooks/parse.ts'
 import { EN } from '../hooks/strings-en.ts'
 import { ZH_TW } from '../hooks/i18n.ts'
 import { ZH_CN } from '../hooks/strings-zh-cn.ts'
+
+test('plain Node loads future-clock parser helpers without a bundler', () => {
+  const now = Date.parse('2026-10-16T12:00:00Z')
+  const stamp = now + 24 * 60 * 60 * 1000
+  const auto = parseProgress(`## Synthetic\n<!-- auto session=f3820001 agent=codex state=working updated=${new Date(stamp).toISOString()} -->\n### Clock\n- [~] Synthetic work\n<!-- /auto session=f3820001 -->`)[0]?.tasks[0]?.auto
+  assert.ok(auto)
+  const seen = { [futureTimeKey(auto)]: now }
+  const clock = observedTime(auto, now + STALE_MS + 1, seen)
+  assert.equal(clock.isFuture, true)
+  assert.equal(isStale(auto, now + STALE_MS + 1, clock.updated), true)
+  assert.equal(auto.updated, stamp)
+})
 
 const fixture = async (t, agent = 'dot') => {
   const root = await mkdtemp(join(tmpdir(), 'agent-board-exchange-'))

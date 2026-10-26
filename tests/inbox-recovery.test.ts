@@ -77,3 +77,9 @@ test('the same reporter instant orders a turn before its end across timestamp un
   expect(inboxOrder('codex-turn-1792216380000-1.json', 'codex-end-1792216380-2.json')).toBeLessThan(0)
   expect(inboxOrder('codex-end-1792216380-1.json', 'codex-turn-1792216380000-2.json')).toBeGreaterThan(0)
 })
+
+test('a retained inbox notice says a file set aside as .failed is kept for 7 days in every language', () => {
+  expect(EN.inboxHeld('fixture.failed', 'INVALID_INPUT')).toContain('.failed is kept for 7 days')
+  expect(ZH_TW.inboxHeld('fixture.failed', 'INVALID_INPUT')).toContain('.failed 的報告會保留 7 天')
+  expect(ZH_CN.inboxHeld('fixture.failed', 'INVALID_INPUT')).toContain('.failed 的报告会保留 7 天')
+})

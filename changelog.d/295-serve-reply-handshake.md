@@ -1,2 +1,0 @@
-- **The reply-in-flight replacement test waits for each fixture phase (#295).** Wait for the stand-in to start before testing a newer `--serve`, require its successful reply to drain before replacement, and observe the old page's exit before cleanup. Missing signals fail at the existing test deadline instead of letting a fixed polling window fall through; production deadlines are unchanged.
-  Tests: `a newer --serve does not start a second page while the page it would replace is sending a reply, shows that page with a note, and replaces it once the reply is in`.

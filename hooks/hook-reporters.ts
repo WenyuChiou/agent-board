@@ -20,6 +20,20 @@ const PS_PATH_STRIP = String.raw`"(?:${PATH_KEYS.join('|')})"\s*:\s*"(?:[^"\\]|\
 // Each board word as a case pattern in any letter case, e.g. *[Bb][Oo][Aa][Rr][Dd]*.
 const SH_HINT_PATTERNS = BOARD_REQUEST_HINTS.map(hint => `*${[...hint].map(char => /[a-z]/i.test(char) ? `[${char.toUpperCase()}${char.toLowerCase()}]` : char).join('')}*`).join('|')
 
+// The inbox holds at most this many turn files and bytes (#373). A reporter that finds it past
+// either removes the oldest turn files, and adds one line to INBOX_DROPPED_FILE for each
+// removal, `<UTC time> <count> <reason>` with the reason `age` or `cap`. That file is not
+// `*.json`, so no reader takes it for a turn.
+export const INBOX_MAX_FILES = 1000
+export const INBOX_MAX_BYTES = 1.5 * 1024 * 1024
+export const INBOX_DROPPED_FILE = 'dropped.log'
+export const INBOX_DROPPED_FOLD_BYTES = 6144
+export const INBOX_DROPPED_KEEP_DAYS = 8
+// A copy of the count file a stopped writer left behind (`dropped.log.<digits>`), and how old it is
+// before another writer claims it: a fold in progress is far younger.
+export const INBOX_DROPPED_COPY = '^' + INBOX_DROPPED_FILE.replace(/\./g, '\\.') + '\\.[0-9]+$'
+export const INBOX_DROPPED_STALE_MINUTES = 1
+
 // POSIX hosts need only sh. MSYS uses the existing bounded Windows reporter:
 // forking a watchdog after a native-pipe reader can itself stall before it runs.
 // An interrupted read is never promoted from a temporary file.
@@ -167,10 +181,56 @@ fi
 # Names first, so GNU find need not look at a taken file that another session renames mid-scan.
 # One that still goes between the listing and find's look at it (BSD find looks at every entry)
 # gives "No such file or directory", which is no failure. Any other complaint is logged, and so is
-# a failure with none.
-sweep_errors=$(LC_ALL=C find "$dir/." ! -name . -prune \\( \\( -name '*.json' -type f -mtime +2 \\) -o \\( \\( -name '*.tmp' -o -name '*.receipt' -o -name '*.fallback' -o -name '*.timeout' -o -name '*.complete' \\) -type f -mmin +1 \\) \\) -exec rm -f {} + 2>&1 >/dev/null)
+# a failure with none. A reporter's scratch files go a minute after they were last written.
+sweep_errors=$(LC_ALL=C find "$dir/." ! -name . -prune \\( -name '*.tmp' -o -name '*.receipt' -o -name '*.fallback' -o -name '*.timeout' -o -name '*.complete' \\) -type f -mmin +1 -exec rm -f {} + 2>&1 >/dev/null)
 sweep_status=$?
 if [ "$sweep_status" -ne 0 ] && { [ -z "$sweep_errors" ] || printf '%s\\n' "$sweep_errors" | grep -qv 'No such file or directory'; }; then log_error CLEANUP_FAILED; fi
+# A turn file over 2 days old goes, and so do the oldest past ${INBOX_MAX_FILES} files or ${INBOX_MAX_BYTES} bytes.
+# Only *.json turn files, each removal counted in ${INBOX_DROPPED_FILE}: a taken or failed file stays.
+drop_turns() {
+  drop_n=0
+  drop_failed=''
+  while read -r drop_entry; do
+    if drop_error=$(LC_ALL=C rm "$drop_entry" 2>&1); then
+      drop_n=$((drop_n + 1))
+    else
+      case "$drop_error" in *'No such file or directory'*) ;; *) drop_failed=1 ;; esac
+    fi
+  done
+  [ -z "$drop_failed" ] || log_error CLEANUP_FAILED
+  [ "$drop_n" -gt 0 ] || return 0
+  drop_log="$dir/${INBOX_DROPPED_FILE}"; drop_aside="$drop_log.$$"
+  printf '%s %s %s\\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$drop_n" "$1" >> "$drop_log"
+  # Claim only old, unclaimed copies left by a stopped writer. One that cannot be added back goes
+  # back under its own name, for the next writer to claim.
+  for drop_copy in "$dir"/${INBOX_DROPPED_FILE}.*; do
+    [ -f "$drop_copy" ] && [ "$drop_copy" != "$drop_aside" ] || continue
+    drop_suffix=\${drop_copy##*/${INBOX_DROPPED_FILE}.}
+    case "$drop_suffix" in ''|*[!0-9]*) continue ;; esac
+    [ -n "$(find "$drop_copy" -mmin +${INBOX_DROPPED_STALE_MINUTES})" ] || continue
+    mv "$drop_copy" "$drop_copy.$$" || continue
+    { cat "$drop_copy.$$" >> "$drop_log" && rm -f "$drop_copy.$$"; } || mv "$drop_copy.$$" "$drop_copy"
+  done
+  # Fold counts by UTC day and reason, keeping ${INBOX_DROPPED_KEEP_DAYS} days back.
+  # A copy left under this process id by an earlier one waits to be claimed; this fold waits too.
+  if [ -n "$(find "$drop_log" -size +${INBOX_DROPPED_FOLD_BYTES}c)" ] && [ ! -e "$drop_aside" ] && mv "$drop_log" "$drop_aside"; then
+    drop_secs=$(($(date -u +%s) - ${INBOX_DROPPED_KEEP_DAYS * 86400}))
+    drop_day=$(date -u -d "@$drop_secs" +%Y-%m-%d 2>/dev/null) || drop_day=$(date -u -r "$drop_secs" +%Y-%m-%d 2>/dev/null) || drop_day=''
+    LC_ALL=C awk -v cutoff="$drop_day" '
+      { sub(/\\r$/, "") }
+      /^[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z [0-9]+ (age|cap)$/ {
+        day = substr($1, 1, 10)
+        if (cutoff == "" || day >= cutoff) sums[day " " $3] += $2
+      }
+      END { for (key in sums) { split(key, parts, " "); printf "%sT00:00:00Z %.0f %s\\n", parts[1], sums[key], parts[2] } }
+    ' "$drop_aside" > "$drop_aside.sum" && LC_ALL=C sort -k1,1 -k3,3 "$drop_aside.sum" >> "$drop_log" && rm -f "$drop_aside" "$drop_aside.sum" || rm -f "$drop_aside.sum"
+  fi
+}
+saved=$(basename "$file.json")
+LC_ALL=C find "$dir/." ! -name . -prune -name '*.json' ! -name "$saved" -type f -mtime +2 | drop_turns age
+LC_ALL=C ls -ltr "$dir" | awk -v dir="$dir" -v saved="$saved" -v files=${INBOX_MAX_FILES} -v bytes=${INBOX_MAX_BYTES} '
+  substr($1, 1, 1) == "-" && $NF ~ /^[a-z][a-z0-9]*-(prompt|turn|end)-[A-Za-z0-9_.-]+[.]json$/ { n++; name[n] = $NF; size[n] = $5; total++; sum += $5 }
+  END { for (i = 1; i <= n && (total > files || sum > bytes); i++) { if (name[i] == saved) continue; print dir "/" name[i]; total--; sum -= size[i] } }' | drop_turns cap
 finish
 `
 
@@ -350,12 +410,70 @@ try {
   if ($ready -eq $tmp) { $ownsTemp = $false } else { $ownsReceipt = $false }
   # The receipt is saved: a file that cannot be removed is only a cleanup failure, and one another reporter removed first is none.
   try {
-    $receiptCutoff = (Get-Date).AddDays(-2); $scratchCutoff = (Get-Date).AddMinutes(-1)
+    $scratchCutoff = (Get-Date).AddMinutes(-1)
     Get-ChildItem -LiteralPath $dir -File | Where-Object {
-      ($_.Extension -eq '.json' -and $_.LastWriteTime -lt $receiptCutoff) -or
-      ($_.Extension -in @('.tmp', '.receipt', '.fallback', '.timeout', '.complete') -and $_.LastWriteTime -lt $scratchCutoff)
+      $_.Extension -in @('.tmp', '.receipt', '.fallback', '.timeout', '.complete') -and $_.LastWriteTime -lt $scratchCutoff
     } | Remove-Item -Force -ErrorAction SilentlyContinue -ErrorVariable cleanupErrors
     if (@($cleanupErrors | Where-Object { $_.CategoryInfo.Category -ne 'ObjectNotFound' }).Count -gt 0) { Write-HookError 'CLEANUP_FAILED' }
+    # A turn file over 2 days old goes, and so do the oldest past ${INBOX_MAX_FILES} files or ${INBOX_MAX_BYTES} bytes.
+    # Only *.json turn files, each removal counted in ${INBOX_DROPPED_FILE}: a taken or failed file stays.
+    $droppedLog = Join-Path $dir '${INBOX_DROPPED_FILE}'
+    function Remove-Turns([object[]]$Old, [string]$Reason) {
+      $count = 0
+      $cleanupFailed = $false
+      foreach ($turn in $Old) {
+        try { Remove-Item -LiteralPath $turn.FullName -Force -ErrorAction Stop; $count++ }
+        catch { if ($_.CategoryInfo.Category -ne 'ObjectNotFound' -and $_.Exception -isnot [System.Management.Automation.ItemNotFoundException]) { $cleanupFailed = $true } }
+      }
+      if ($cleanupFailed) { Write-HookError 'CLEANUP_FAILED' }
+      if ($count -eq 0) { return }
+      $line = ('{0} {1} {2}' -f [DateTime]::UtcNow.ToString('yyyy-MM-dd\\THH:mm:ss\\Z', [Globalization.CultureInfo]::InvariantCulture), $count, $Reason) + [char]10
+      # Another reporter adding its line holds the file for a moment: try again.
+      for ($try = 0; $try -lt 20; $try++) { try { [IO.File]::AppendAllText($droppedLog, $line); break } catch { Start-Sleep -Milliseconds 25 } }
+      $aside = $droppedLog + '.' + $PID
+      # Claim only old, unclaimed copies left by a stopped writer. One that cannot be added back goes
+      # back under its own name, for the next writer to claim.
+      foreach ($copy in @(Get-ChildItem -LiteralPath $dir -File -Filter '${INBOX_DROPPED_FILE}.*')) {
+        try {
+          if ($copy.FullName -eq $aside -or $copy.Name -cnotmatch '${INBOX_DROPPED_COPY}' -or $copy.LastWriteTimeUtc -ge [DateTime]::UtcNow.AddMinutes(-${INBOX_DROPPED_STALE_MINUTES})) { continue }
+          $claimed = $copy.FullName + '.' + $PID
+          Move-Item -LiteralPath $copy.FullName -Destination $claimed
+          $isAdded = $false
+          for ($try = 0; $try -lt 20; $try++) { try { [IO.File]::AppendAllText($droppedLog, [IO.File]::ReadAllText($claimed)); $isAdded = $true; break } catch { Start-Sleep -Milliseconds 25 } }
+          if ($isAdded) { Remove-Item -LiteralPath $claimed -Force } else { Move-Item -LiteralPath $claimed -Destination $copy.FullName }
+        } catch {}
+      }
+      # Fold counts by UTC day and reason, keeping ${INBOX_DROPPED_KEEP_DAYS} days back.
+      try {
+        if ((Get-Item -LiteralPath $droppedLog).Length -gt ${INBOX_DROPPED_FOLD_BYTES}) {
+          Move-Item -LiteralPath $droppedLog -Destination $aside
+          $cutoff = [DateTime]::UtcNow.AddDays(-${INBOX_DROPPED_KEEP_DAYS}).ToString('yyyy-MM-dd', [Globalization.CultureInfo]::InvariantCulture)
+          $counts = @{}
+          foreach ($entry in @(Get-Content -LiteralPath $aside -Encoding UTF8)) {
+            if ($entry -cmatch '^([0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9])T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z ([0-9]+) (age|cap)\\r?$' -and [string]::CompareOrdinal($Matches[1], $cutoff) -ge 0) {
+              $key = $Matches[1] + ' ' + $Matches[3]
+              $counts[$key] = [long]$counts[$key] + [long]$Matches[2]
+            }
+          }
+          $folded = foreach ($key in @($counts.Keys | Sort-Object)) { '{0}T00:00:00Z {1} {2}' -f $key.Substring(0, 10), $counts[$key], $key.Substring(11) }
+          $isAppended = @($folded).Count -eq 0
+          if (!$isAppended) {
+            for ($try = 0; $try -lt 20; $try++) { try { [IO.File]::AppendAllText($droppedLog, (@($folded) -join [char]10) + [char]10); $isAppended = $true; break } catch { Start-Sleep -Milliseconds 25 } }
+          }
+          if ($isAppended) { Remove-Item -LiteralPath $aside -Force }
+        }
+      } catch {}
+    }
+    Remove-Turns @(Get-ChildItem -LiteralPath $dir -File -Filter '*.json' | Where-Object { $_.Name -cne ($name + '.json') -and $_.LastWriteTime -lt (Get-Date).AddDays(-2) }) 'age'
+    $turns = @(Get-ChildItem -LiteralPath $dir -File -Filter '*.json' | Where-Object { $_.Name -cmatch '^[a-z][a-z0-9]*-(prompt|turn|end)-[A-Za-z0-9_.-]+\\.json$' } | Sort-Object LastWriteTimeUtc)
+    $turnCount = $turns.Count; $turnBytes = [long](($turns | Measure-Object -Property Length -Sum).Sum)
+    $over = @()
+    foreach ($turn in $turns) {
+      if ($turnCount -le ${INBOX_MAX_FILES} -and $turnBytes -le ${INBOX_MAX_BYTES}) { break }
+      if ($turn.Name -ceq ($name + '.json')) { continue }
+      $over += $turn; $turnCount--; $turnBytes -= $turn.Length
+    }
+    Remove-Turns $over 'cap'
   } catch { Write-HookError 'CLEANUP_FAILED' }
 } catch {
   $code = switch ($_.Exception.Message) { 'INPUT_TIMEOUT' { 'INPUT_TIMEOUT' }; 'REPORTER_TIMEOUT' { 'REPORTER_TIMEOUT' }; 'INPUT_TOO_LARGE' { 'INPUT_TOO_LARGE' }; 'INCOMPLETE_INPUT' { 'INCOMPLETE_INPUT' }; default { 'REPORTER_FAILED' } }

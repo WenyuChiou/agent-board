@@ -8,6 +8,7 @@ import type {
   ProgressTask,
   ProgressTail,
 } from '../types'
+import { sha256 } from './sha256.ts'
 
 // `## project` / `### task` / `> note` / `- [x] step`, plus the auto markers a session's
 // mod writes around its own block. Everything else is ignored, so free text never breaks
@@ -301,11 +302,13 @@ export const countSteps = (task: ProgressTask): TaskCount => {
   return { done: counted.filter(step => step.status === 'done').length, total: counted.length }
 }
 
-export const isTaskComplete = (task: ProgressTask): boolean => {
-  const { done, total } = countSteps(task)
+export const isMarksComplete = (statuses: readonly ProgressStepStatus[]): boolean => {
+  const counted = statuses.filter(status => status !== 'cancelled')
 
-  return total > 0 ? done === total : task.steps.length > 0 && task.steps.every(step => step.status === 'cancelled')
+  return counted.length > 0 ? counted.every(status => status === 'done') : statuses.length > 0 && statuses.every(status => status === 'cancelled')
 }
+
+export const isTaskComplete = (task: ProgressTask): boolean => isMarksComplete(task.steps.map(step => step.status))
 
 // The step to highlight: the explicit `[~]`, else the first open one.
 export const currentStepIndex = (task: ProgressTask): number => {
@@ -318,9 +321,24 @@ export const currentStepIndex = (task: ProgressTask): number => {
 // A block whose session stopped writing to it (the terminal closed without the session
 // ending, a crash) still says working or waiting; after half a day it is treated as ended.
 export const STALE_MS = 12 * 60 * 60 * 1000
+export const FUTURE_SKEW_MS = 5 * 60 * 1000
 
-export const isStale = (auto: ProgressAuto | null, now: number): boolean =>
-  auto !== null && (auto.state === 'working' || auto.state === 'waiting') && auto.updated > 0 && now - auto.updated > STALE_MS
+export const futureTimeKey = (auto: ProgressAuto): string =>
+  `future:${sha256(JSON.stringify(['future-time', auto.agent, auto.session, auto.updated]))}`
+
+// Keep the writer's stamp intact. The local observation belongs to that exact update,
+// and remains authoritative when the local clock eventually catches up with it.
+export const observedTime = (auto: ProgressAuto | null, now: number, seen: Readonly<Record<string, number>>): { updated: number; isFuture: boolean } => {
+  const updated = auto?.updated ?? 0
+  if (auto === null || !Number.isFinite(updated) || updated <= 0) return { updated, isFuture: false }
+  const first = seen[futureTimeKey(auto)]
+  const isObserved = typeof first === 'number' && Number.isFinite(first) && first > 0
+  const isFuture = isObserved || updated - now > FUTURE_SKEW_MS
+  return { updated: isObserved ? first : updated, isFuture }
+}
+
+export const isStale = (auto: ProgressAuto | null, now: number, updated = auto?.updated ?? 0): boolean =>
+  auto !== null && (auto.state === 'working' || auto.state === 'waiting') && updated > 0 && now - updated > STALE_MS
 
 // The key a finished hand-kept task is remembered by, to archive it a day later.
 export const doneKey = (project: string, title: string): string => `done:${project}::${title}`

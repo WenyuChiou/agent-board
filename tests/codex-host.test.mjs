@@ -1,6 +1,10 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import childProcess from 'node:child_process'
+import { EventEmitter } from 'node:events'
+import { syncBuiltinESMExports } from 'node:module'
+import { PassThrough, Writable } from 'node:stream'
+import { appendFileSync, chmodSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { createHash } from 'node:crypto'
@@ -111,6 +115,36 @@ test('native Codex discovery preserves executable permission checks outside Wind
     assert.equal(findCodexExecutable('relative:' + f.prefix, 'linux', 'x64'), realpathSync(file))
   })
 })
+const stubChild = receive => {
+  const child = new EventEmitter()
+  child.stdout = new PassThrough()
+  child.stderr = new PassThrough()
+  let buffer = '', isClosed = false
+  child.stdin = new Writable({ write(chunk, encoding, done) {
+    try {
+      buffer += String(chunk)
+      let end
+      while ((end = buffer.indexOf('\n')) >= 0) {
+        const request = JSON.parse(buffer.slice(0, end))
+        buffer = buffer.slice(end + 1)
+        const reply = receive(request)
+        if (reply !== undefined) child.stdout.write(JSON.stringify({ id: request.id, ...reply }) + '\n')
+      }
+      done()
+    } catch (error) { done(error) }
+  } })
+  child.kill = () => {
+    if (isClosed) return true
+    isClosed = true
+    child.stdin.destroy()
+    child.stdout.end()
+    child.stderr.end()
+    child.emit('exit', null, 'SIGTERM')
+    return true
+  }
+  return child
+}
+
 const fixture = async (options, action) => {
   const dir = mkdtempSync(join(tmpdir(), 'board-trust-observation-'))
   const config = join(dir, 'hooks.json'), log = join(dir, 'methods.jsonl'), executable = join(dir, 'host.mjs')
@@ -132,10 +166,87 @@ createInterface({input:process.stdin}).on('line', text => {
     process.stdout.write(JSON.stringify({id:request.id, ${options.rejected ? 'error:{message:"unsupported"}' : `result:${JSON.stringify(response)}`}})+'\\n')
   } else process.stdout.write(JSON.stringify({id:request.id,error:{message:'FORBIDDEN_METHOD'}})+'\\n')
 })
+if (process.send) process.send('ready')
 `)
-  try { await action({config, log, executable, contents}) }
-  finally { rmSync(dir, {recursive:true, maxRetries:5, retryDelay:100}) }
+  const spawn = childProcess.spawn
+  const children = []
+  let prestarted, attempts = 0
+  const track = child => {
+    const closed = new Promise(done => child.once('exit', done).once('error', done))
+    children.push({ child, closed })
+    return child
+  }
+  try {
+    if (options.prestart) {
+      prestarted = track(spawn(process.execPath, [executable, 'app-server', '--stdio'], { windowsHide: true, stdio: ['pipe', 'pipe', 'pipe', 'ipc'] }))
+      // A cold synthetic Node start gets its own 30 s ready handshake, outside the unchanged 5 s RPC cap.
+      await new Promise((done, reject) => {
+        const timer = setTimeout(() => finish(new Error('FIXTURE_READY_TIMEOUT')), 30000)
+        const finish = error => {
+          clearTimeout(timer)
+          prestarted.off('message', ready)
+          prestarted.off('error', failed)
+          prestarted.off('exit', exited)
+          error ? reject(error) : done()
+        }
+        const ready = message => { if (message === 'ready') finish() }
+        const failed = error => finish(error)
+        const exited = () => finish(new Error('FIXTURE_EXITED_BEFORE_READY'))
+        prestarted.on('message', ready).once('error', failed).once('exit', exited)
+      })
+      prestarted.disconnect()
+    }
+    // Only this fixture's exact app-server argv is intercepted; restore the builtin even when an assertion fails.
+    childProcess.spawn = (file, args, ...rest) => {
+      if (file !== process.execPath || args?.length !== 3 || ![executable, join(dir, 'tree-host.mjs')].includes(args[0]) || args[1] !== 'app-server' || args[2] !== '--stdio') return spawn(file, args, ...rest)
+      attempts++
+      if (options.prestart) {
+        assert.equal(attempts, 1)
+        return prestarted
+      }
+      if (options.real) return track(spawn(file, args, ...rest))
+      const child = stubChild(request => {
+        appendFileSync(log, request.method + '\n')
+        if (request.id === undefined) return
+        if (request.method === 'initialize') return { result: {} }
+        if (request.method !== 'hooks/list') return { error: { message: 'FORBIDDEN_METHOD' } }
+        if (options.changed) writeFileSync(config, 'external changed definition')
+        return options.rejected ? { error: { message: 'unsupported' } } : { result: response }
+      })
+      children.push({ child, closed: Promise.resolve() })
+      return child
+    }
+    syncBuiltinESMExports()
+    await action({config, log, executable, contents, attempts: () => attempts, realChildren: () => children.filter(one => one.child.pid !== undefined).length})
+  } finally {
+    childProcess.spawn = spawn
+    syncBuiltinESMExports()
+    try {
+      for (const { child, closed } of children) {
+        if (child.exitCode == null && child.signalCode == null) child.kill()
+        // Reap every owned real child before removing its files; a broken cleanup fails within 5 s.
+        let timer
+        try { await Promise.race([closed, new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('FIXTURE_CLEANUP_TIMEOUT')), 5000) })]) }
+        finally { clearTimeout(timer) }
+      }
+    } finally { rmSync(dir, {recursive:true, maxRetries:5, retryDelay:100}) }
+  }
 }
+
+test('codex host: control requests answer through the fixture stub, so a slow Node start cannot reach the deadline', async () => fixture({}, async f => {
+  assert.equal((await inspectCodexHooks(f.executable, f.config, identities)).trusted, true)
+  assert.equal(f.attempts(), 1)
+  assert.equal(f.realChildren(), 0)
+  assert.deepEqual(readFileSync(f.log, 'utf8').trim().split('\n'), ['initialize', 'initialized', 'hooks/list'])
+}))
+
+test('codex host: one real app-server subprocess smoke test still passes', { timeout: 45000 }, async () => fixture({prestart:true}, async f => {
+  assert.equal((await inspectCodexHooks(f.executable, f.config, identities)).trusted, true)
+  assert.equal(f.attempts(), 1)
+  assert.equal(f.realChildren(), 1)
+  assert.deepEqual(readFileSync(f.log, 'utf8').trim().split('\n'), ['initialize', 'initialized', 'hooks/list'])
+  assert.equal(readFileSync(f.config, 'utf8'), f.contents)
+}))
 
 test('legacy hook trust observation accepts only the three exact current definitions and makes no changes', async () => fixture({}, async f => {
   const result = await inspectCodexHooks(f.executable, f.config, identities)
@@ -205,7 +316,8 @@ test('a Codex control request whose shared deadline has expired times out immedi
   assert.equal(readFileSync(f.config, 'utf8'), f.contents)
 }))
 
-test('closing the Codex check ends the processes its app-server started, on Windows', { skip: process.platform !== 'win32' && 'the process-tree kill is Windows-only; elsewhere only the app-server itself is ended' }, async () => fixture({}, async f => {
+// This separate real-process exception verifies Windows descendant cleanup, not cold app-server startup.
+test('closing the Codex check ends the processes its app-server started, on Windows', { skip: process.platform !== 'win32' && 'the process-tree kill is Windows-only; elsewhere only the app-server itself is ended' }, async () => fixture({real:true}, async f => {
   const pidFile = join(f.config, '..', 'helper.pid'), host = join(f.config, '..', 'tree-host.mjs')
   // A synthetic app-server that starts a helper of its own before it answers.
   writeFileSync(host, `import { spawn as startHelper } from 'node:child_process'
@@ -219,5 +331,15 @@ writePid(${JSON.stringify(pidFile)}, String(startHelper(process.execPath, ['-e',
     pid = Number(readFileSync(pidFile, 'utf8'))
     for (const until = Date.now() + 5000; isAlive() && Date.now() < until;) await new Promise(done => setTimeout(done, 50))
     assert.equal(isAlive(), false)
-  } finally { if (pid !== undefined && isAlive()) process.kill(pid) }
+  } finally {
+    // Discovery can fail after the helper starts but before its pid was read above.
+    if (pid === undefined) {
+      try { pid = Number(readFileSync(pidFile, 'utf8')) } catch {}
+    }
+    if (Number.isSafeInteger(pid) && pid > 0) {
+      if (isAlive()) process.kill(pid)
+      for (const until = Date.now() + 5000; isAlive() && Date.now() < until;) await new Promise(done => setTimeout(done, 50))
+      assert.equal(isAlive(), false, 'the synthetic helper must exit before the fixture is removed')
+    }
+  }
 }))

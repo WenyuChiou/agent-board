@@ -1,6 +1,7 @@
 import { boardPromptHelper, boardRequestWords, boardRun, geminiBoardCommand, normalizeCommandPath, opencodeBoardCommand } from './board-commands'
 import { HOOK_VERSION, hookGuardSource, hostHookTimeout } from './hook-safety'
-import { antigravityCommand, antigravityHooks, encodedCommandText, hookCommandArgs } from './local-agents'
+import { INBOX_DROPPED_COPY, INBOX_DROPPED_FILE, INBOX_DROPPED_FOLD_BYTES, INBOX_DROPPED_KEEP_DAYS, INBOX_DROPPED_STALE_MINUTES, INBOX_MAX_BYTES, INBOX_MAX_FILES } from './hook-reporters'
+import { antigravityCommand, antigravityHooks, directHookArgs, encodedCommandText, hookCommandArgs } from './local-agents'
 import { legacyOpenClawPlugin, legacyOpenCodePlugin } from './legacy-hook-plugins'
 import { LANGS, ZH_TW } from './i18n'
 import type { Strings } from './i18n'
@@ -11,6 +12,69 @@ import { STRINGS } from './strings'
 
 const BOARD_WORDS = boardRequestWords(Object.values(STRINGS))
 const BOARD_PROMPT_HELPER = boardPromptHelper(BOARD_WORDS)
+
+// The inbox cap (#373) for the plugins that save turn files themselves, as the reporter scripts
+// keep it: once a turn file is saved, the oldest go past INBOX_MAX_FILES files or INBOX_MAX_BYTES
+// bytes, and each removal is counted in INBOX_DROPPED_FILE. A failure here never loses the turn
+// just saved.
+const INBOX_CAP = `const capInbox = saved => {
+  try {
+    const turns = readdirSync(INBOX).filter(name => /^[a-z][a-z0-9]*-(prompt|turn|end)-[\\w.-]+\\.json$/.test(name)).flatMap(name => {
+      try {
+        const stat = statSync(join(INBOX, name))
+        return stat.isFile() ? [{ name, size: stat.size, at: stat.mtimeMs }] : []
+      } catch { return [] }
+    }).sort((a, b) => a.at - b.at)
+    let files = turns.length, bytes = turns.reduce((sum, one) => sum + one.size, 0), removed = 0
+    for (const one of turns) {
+      if (files <= ${INBOX_MAX_FILES} && bytes <= ${INBOX_MAX_BYTES}) break
+      if (one.name === saved) continue
+      try { unlinkSync(join(INBOX, one.name)); removed += 1 } catch {}
+      files -= 1; bytes -= one.size
+    }
+    if (removed === 0) return
+    const log = join(INBOX, '${INBOX_DROPPED_FILE}')
+    appendFileSync(log, new Date().toISOString().slice(0, 19) + 'Z ' + removed + ' cap\\n')
+    // A plugin keeps one process id for hours: each fold's copy is named for its time as well, so a
+    // copy an earlier fold of this process kept is never written over and is claimed like any other.
+    const aside = log + '.' + process.pid + String(Date.now())
+    // Claim only old, unclaimed copies left by a stopped writer. One that cannot be added back goes
+    // back under its own name, for the next writer to claim.
+    for (const name of readdirSync(INBOX)) {
+      try {
+        const copy = join(INBOX, name)
+        if (copy === aside || !/${INBOX_DROPPED_COPY}/.test(name)) continue
+        const stat = statSync(copy)
+        if (!stat.isFile() || stat.mtimeMs >= Date.now() - ${INBOX_DROPPED_STALE_MINUTES * 60000}) continue
+        const claimed = copy + '.' + process.pid
+        renameSync(copy, claimed)
+        try {
+          appendFileSync(log, readFileSync(claimed, 'utf8'))
+        } catch {
+          renameSync(claimed, copy)
+          continue
+        }
+        unlinkSync(claimed)
+      } catch {}
+    }
+    // Fold counts by UTC day and reason, keeping ${INBOX_DROPPED_KEEP_DAYS} days back.
+    if (statSync(log).size > ${INBOX_DROPPED_FOLD_BYTES}) {
+      renameSync(log, aside)
+      const cutoff = new Date(Date.now() - ${INBOX_DROPPED_KEEP_DAYS} * 86400000).toISOString().slice(0, 10)
+      const counts = new Map()
+      for (const line of readFileSync(aside, 'utf8').split('\\n')) {
+        const match = /^(\\d{4}-\\d\\d-\\d\\d)T\\d\\d:\\d\\d:\\d\\dZ (\\d+) (age|cap)\\r?$/.exec(line)
+        if (match === null || match[1] < cutoff) continue
+        const key = match[1] + ' ' + match[3]
+        counts.set(key, (counts.get(key) || 0) + Number(match[2]))
+      }
+      const folded = [...counts.keys()].sort().map(key => key.slice(0, 10) + 'T00:00:00Z ' + counts.get(key) + ' ' + key.slice(11) + '\\n').join('')
+      appendFileSync(log, folded)
+      unlinkSync(aside)
+    }
+  } catch {}
+}
+`
 
 export { reporterSh, reporterPs1 } from './hook-reporters'
 
@@ -155,7 +219,7 @@ export const withoutSection = (text: string): string => {
 // installed (its folder under the home directory); `edit` turns the file's text into the
 // new text, or null when the file cannot be read as JSON and is left alone.
 // `node` and `progress` build Antigravity's commands; only a connect that writes them passes them.
-export type ConnectContext = { home: string; sep: string; isWindows: boolean; script: string; inbox: string; codexHome: string; grokHome: string; hermesHome: string; openclawHome: string; opencodeHome?: string; board?: string; node?: string; progress?: string; s?: Strings }
+export type ConnectContext = { home: string; sep: string; isWindows: boolean; script: string; inbox: string; codexHome: string; grokHome: string; hermesHome: string; openclawHome: string; opencodeHome?: string; board?: string; node?: string; antigravityNode?: string; progress?: string; s?: Strings }
 
 export type AgentHook = {
   agent: string
@@ -471,7 +535,7 @@ export const agentHooks = (ctx: ConnectContext): AgentHook[] => {
         const folder = ctx.script.replace(/[\\/][^\\/]*$/, '')
         const progress = ctx.progress ?? [folder, 'progress.md'].join(ctx.sep)
         const command = (event: string, state: string): string =>
-          antigravityCommand(hookCommandArgs(ctx.node ?? 'node', ctx.home, 'antigravity', [folder, HOOK_WORKER].join(ctx.sep), progress, event, state), ctx.isWindows, shellQuote)
+          antigravityCommand(hookCommandArgs(ctx.node ?? 'node', ctx.home, 'antigravity', [folder, HOOK_WORKER].join(ctx.sep), progress, event, state), ctx.isWindows, shellQuote, ctx.antigravityNode)
         return writeChanged(text, config, { ...config, [ANTIGRAVITY_HOOK]: antigravityHooks(command) })
       },
     },
@@ -484,12 +548,13 @@ export const agentHooks = (ctx: ConnectContext): AgentHook[] => {
 // deleted. Every export of a plugin file must be a function.
 export const opencodePlugin = (ctx: ConnectContext, withPrompt = true, flagsBoardRequests = true): string => `// Written by the Agent Board plugin (/progress connect): reports each finished turn to the Agent Board
 // pane.
-import { closeSync, mkdirSync, openSync, renameSync, unlinkSync, writeFileSync } from 'node:fs'
+import { appendFileSync, closeSync, mkdirSync, openSync, readdirSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 ${hookGuardSource(ctx.home, 'opencode')}
 
 ${withPrompt && flagsBoardRequests ? BOARD_PROMPT_HELPER + '\n' : ''}const INBOX = ${JSON.stringify(ctx.inbox)}
 
+${INBOX_CAP}
 const save = (event, payload, current) => {
   let temporary, owned = false
   try {
@@ -504,6 +569,7 @@ const save = (event, payload, current) => {
     current()
     renameSync(temporary, join(INBOX, name + '.json'))
     owned = false
+    capInbox(name + '.json')
   } catch (error) { hookError(error?.message === 'HOOK_TIMEOUT' ? 'REPORTER_TIMEOUT' : 'REPORTER_FAILED') }
   finally { if (owned) { try { unlinkSync(temporary) } catch {} } }
 }
@@ -644,12 +710,13 @@ export const withoutOpenclawPlugin = (config: Json, file: string): Json => {
 // a compaction or a restart does not end the session.
 export const openclawPlugin = (ctx: ConnectContext, withPrompt = true, flagsBoardRequests = true): string => `// Written by the Agent Board plugin (/progress connect): reports each finished turn to the Agent Board
 // pane.
-import { closeSync, mkdirSync, openSync, renameSync, unlinkSync, writeFileSync } from 'node:fs'
+import { appendFileSync, closeSync, mkdirSync, openSync, readdirSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 ${hookGuardSource(ctx.home, 'openclaw')}
 
 ${withPrompt && flagsBoardRequests ? BOARD_PROMPT_HELPER + '\n' : ''}const INBOX = ${JSON.stringify(ctx.inbox)}
 
+${INBOX_CAP}
 const save = (event, payload, current) => {
   let temporary, owned = false
   try {
@@ -664,6 +731,7 @@ const save = (event, payload, current) => {
     current()
     renameSync(temporary, join(INBOX, name + '.json'))
     owned = false
+    capInbox(name + '.json')
   } catch (error) { hookError(error?.message === 'HOOK_TIMEOUT' ? 'REPORTER_TIMEOUT' : 'REPORTER_FAILED') }
   finally { if (owned) { try { unlinkSync(temporary) } catch {} } }
 }
@@ -807,6 +875,12 @@ export const connectDataRoots = (text: string, isNearestOnly = false): string[] 
     catch { strings.push(yamlDoubleQuoted(match[0])) }
   }
   const roots = new Set<string>()
+  for (const source of [...strings]) {
+    const args = directHookArgs(source)
+    if (!args) continue
+    strings.push(...args)
+    for (const arg of args) if (/^(?:[A-Za-z]:[\\/]|\/)[^\r\n]*[\\/]progress-hook\.mjs$/.test(arg)) roots.add(arg.replace(/[\\/][^\\/]+$/, ''))
+  }
   // Antigravity's command names its folder by the hook worker, quoted whole; on Windows that
   // command is PowerShell's encoded text, which doubles an apostrophe, where a POSIX shell
   // closes and reopens the quote instead (#285).

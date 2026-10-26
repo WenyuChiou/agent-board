@@ -30,7 +30,7 @@ export type ServeOptions = {
   // What the server answers a second `--serve` with, so it can tell it is the same board.
   ping: Record<string, unknown>
   view: () => View
-  pending: () => PendingTurn[]
+  pending: (isFresh?: boolean) => PendingTurn[]
   // A tick or an archive, written the way the terminal board writes one: the line to show.
   act: (action: BoardAction) => string
   // Every finished task to the archive now: the line to show.
@@ -348,7 +348,7 @@ export const startServer = (o: ServeOptions): void => {
         // A file the board cannot read is named on the page, which would otherwise say it is offline.
         try {
           const state = isLan ? undefined : messaging?.snapshot(Date.now(), o.reports?.())
-          return json(res, 200, { model: serveModel(o.view(), o.pending(), o.s, sending, isLan, state, o.allowResume), replies: [...replies.values()], messaging: isLan ? undefined : state ?? { enabled: false, connections: [], messages: [] }, now: Date.now() })
+          return json(res, 200, { model: serveModel(o.view(), o.pending(false), o.s, sending, isLan, state, o.allowResume), replies: [...replies.values()], messaging: isLan ? undefined : state ?? { enabled: false, connections: [], messages: [] }, now: Date.now() })
         } catch (error) {
           const note = o.failure(error, isLan)
           if (note === null) {
@@ -452,5 +452,7 @@ export const startServer = (o: ServeOptions): void => {
   server.listen(o.port, '127.0.0.1', () => {
     port = (server.address() as AddressInfo).port
     if (!o.onReady(`http://127.0.0.1:${port}/?t=${token}`, port)) stop()
+    // Preparing a private address can block; inactivity starts once that address is ready.
+    else lastSeen = Date.now()
   })
 }

@@ -82,6 +82,7 @@ export const idleTimeout = (value: string | undefined): number => {
 export type ServeStep = { text: string; note: string; status: string; isCurrent: boolean }
 
 export type ServeAsk = {
+  questionId?: string
   delivery?: Delivery
   receipt?: Receipt
   key: string
@@ -161,8 +162,8 @@ export type ServeRow = {
 }
 
 // A question marked answered, listed so it can be shown again.
-export type ServeHidden = { key: string; project: string; agent: string; isOwn?: true; task: string; text: string }
-export type ServeRetained = { project: string; agent: string; isOwn?: true; task: string; text: string; note: string; context: string; when: string }
+export type ServeHidden = { key: string; project: string; agent: string; isOwn?: true; task: string; text: string; questionId?: string }
+export type ServeRetained = { project: string; agent: string; isOwn?: true; task: string; text: string; note: string; context: string; when: string; questionId?: string }
 
 export type ServeTurn = { key: string; project: string; agent: string; text: string; isQuestion: boolean; info: string }
 
@@ -219,6 +220,7 @@ export const serveModel = (view: View, pending: readonly PendingTurn[], s: Strin
         ...(connection === undefined ? {} : { delivery: { id: connection.id, turn: connection.turn, agent: connection.agent } }),
         ...(isLan ? {} : rowReceipt(ask.agent, ask.nativeSession, messaging?.messages ?? [])),
         key: item.key,
+        ...(ask.questionId === undefined ? {} : { questionId: ask.questionId }),
         project: ask.project,
         agent: ask.agent,
         ...(isManual ? { isOwn: true as const } : {}),
@@ -310,9 +312,9 @@ export const serveModel = (view: View, pending: readonly PendingTurn[], s: Strin
     asks,
     idle,
     stopped,
-    hidden: view.hidden.map(item => ({ key: `hidden:${item.hideKey}`, project: item.project, agent: item.agent, ...(item.where === 'manual' ? { isOwn: true as const } : {}), task: item.task, text: item.text })),
-    reminder: (view.reminder ?? []).map(({ project, agent, where, task, text, note, context, when }) => ({ project, agent, ...(where === 'manual' ? { isOwn: true as const } : {}), task, text, note, context, when })),
-    older: (view.older ?? []).map(({ project, agent, where, task, text, note, context, when }) => ({ project, agent, ...(where === 'manual' ? { isOwn: true as const } : {}), task, text, note, context, when })),
+    hidden: view.hidden.map(item => ({ key: `hidden:${item.hideKey}`, project: item.project, agent: item.agent, ...(item.where === 'manual' ? { isOwn: true as const } : {}), task: item.task, text: item.text, ...(item.questionId === undefined ? {} : { questionId: item.questionId }) })),
+    reminder: (view.reminder ?? []).map(({ project, agent, where, task, text, note, context, when, questionId }) => ({ project, agent, ...(where === 'manual' ? { isOwn: true as const } : {}), task, text, note, context, when, ...(questionId === undefined ? {} : { questionId }) })),
+    older: (view.older ?? []).map(({ project, agent, where, task, text, note, context, when, questionId }) => ({ project, agent, ...(where === 'manual' ? { isOwn: true as const } : {}), task, text, note, context, when, ...(questionId === undefined ? {} : { questionId }) })),
     groups: [...groups].map(([project, rows]) => ({ project, rows })),
     turns,
     recent: view.recent.map(item => ({ project: item.project, title: item.title, when: item.when, questions: item.questions?.map(question => [question.text, question.note].filter(Boolean).join(' — ')) })),

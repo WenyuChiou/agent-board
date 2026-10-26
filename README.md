@@ -3,13 +3,25 @@
 <p align="center"><b>See what every AI coding agent is doing, and answer the one that needs you, from one board.</b></p>
 
 <p align="center">
-<picture><source media="(prefers-color-scheme: dark)" srcset="docs/images/cover-en-dark.svg"><img alt="An animated board in six scenes: Claude Code, Codex, Antigravity and OpenCode report to one terminal board; their steps tick off live; Codex's question jumps to the top; one key copies the answer; a message written on the board's page reaches Codex and its reply shows, a preview coming in 0.24.1; and one npx command connects every agent, on npm from 0.24.0. Synthetic data." src="docs/images/cover-en-light.svg" width="860"></picture>
+<img alt="An animated board in six scenes: Claude Code, Codex, Antigravity and OpenCode report to one terminal board; their steps tick off live; Codex's question jumps to the top; one key copies the answer; a message written on the board's page reaches Codex and its reply shows, a preview coming in 0.24.2; and one npx command connects every agent, on npm from 0.24.0. Synthetic data." src="docs/images/cover-en-dark.svg" width="860">
 </p>
 
-<p align="center">
-<a href="#quick-start"><img alt="Node.js 18+ from a checkout, 22+ for the npm package" src="https://img.shields.io/badge/Node.js-18%2B%20checkout%20%C2%B7%2022%2B%20npm-339933"></a>
-<a href="LICENSE"><img alt="MIT license" src="https://img.shields.io/badge/license-MIT-green"></a>
+<p align="center"><b>Integrations</b><br>
+<a href="#supported-agents"><img src="docs/images/agents/chip-claude-code.svg" height="28" alt="Claude Code"></a>
+<a href="#supported-agents"><img src="docs/images/agents/chip-codex.svg" height="28" alt="Codex"></a>
+<a href="#supported-agents"><img src="docs/images/agents/chip-antigravity.svg" height="28" alt="Antigravity"></a>
+<a href="#supported-agents"><img src="docs/images/agents/chip-opencode.svg" height="28" alt="OpenCode"></a>
+<a href="#supported-agents"><img src="docs/images/agents/chip-cursor.svg" height="28" alt="Cursor"></a>
+<a href="#supported-agents"><img src="docs/images/agents/chip-grok-build.svg" height="28" alt="Grok Build"></a>
+<a href="#supported-agents"><img src="docs/images/agents/chip-muse-code.svg" height="28" alt="Muse Code"></a>
+<a href="#supported-agents"><img src="docs/images/agents/chip-hermes-agent.svg" height="28" alt="Hermes Agent"></a>
+<a href="#supported-agents"><img src="docs/images/agents/chip-openclaw.svg" height="28" alt="OpenClaw"></a>
+<a href="#supported-agents"><img src="docs/images/agents/chip-deepseek-harness.svg" height="28" alt="DeepSeek Harness"></a>
 </p>
+
+<p align="center"><sub>dot and other web chats report by hand: you paste their block into <a href="#the-boards-page">the board's page</a>.</sub></p>
+
+<p align="center"><a href="LICENSE"><img alt="MIT license" src="https://img.shields.io/badge/license-MIT-green"></a></p>
 
 <p align="center">English · <a href="README.zh-TW.md">繁體中文</a> · <a href="README.zh-CN.md">简体中文</a></p>
 
@@ -25,7 +37,15 @@ npx @wenyuchiou/agent-board setup --apply
 npx @wenyuchiou/agent-board --serve
 ```
 
-The first command finds the agents on this computer and shows what setup would change, writing nothing. The second makes the change, and the third opens the board's page. Then start a new session of each agent: a session that was already open is not connected. To set up one agent only, add `--agent` and its name, such as `--agent codex`; Claude Code connects through its plugin instead (see [Key commands](#key-commands)). More in the [setup guide](docs/SETUP.md#install-with-npm).
+The first command finds the agents on this computer and shows what setup would change, writing nothing. The second makes the change, and the third opens the board's page. To set up one agent only, add `--agent` and its name, such as `--agent codex`. More in the [setup guide](docs/SETUP.md#install-with-npm).
+
+Then:
+
+- Start a new session of each agent: a session that was already open is not connected.
+- **Claude Code** connects through its plugin instead: `claude plugin marketplace add WenyuChiou/agent-board`, then `claude plugin install agent-board@agent-board`.
+- **Codex:** trust its hooks in `/hooks` ([how](docs/CODEX.md)).
+- **OpenCode, OpenClaw:** reload their plugins.
+- **dot and other web chats:** paste [the last section of AGENTS.md](AGENTS.md#report-your-progress-to-the-progress-pane) into the agent's instructions, then paste the block it writes into [the board's page](#the-boards-page).
 
 <details>
 <summary><b>Without npm: install from a checkout</b></summary>
@@ -61,22 +81,33 @@ Tell me which existing sessions need reload and which adapters remain unsupporte
 
 ## Key commands
 
-| | Where | Connect it | Open the board |
-|:-:|---|---|---|
-| <img src="docs/images/agents/claude-code.svg" width="20" alt="Claude Code"> | Claude Code | `claude plugin marketplace add WenyuChiou/agent-board`<br>`claude plugin install agent-board@agent-board` | `/progress` |
-| <img src="docs/images/agents/codex.svg" width="20" alt="Codex"> | Codex CLI and App | [Setup](#quick-start), then trust its hooks in `/hooks` ([how](docs/CODEX.md)) | `$agent-board` |
-| <img src="docs/images/agents/opencode.svg" width="20" alt="OpenCode"> | OpenCode | [Setup](#quick-start), then reload its plugins | `/board` |
-| <img src="docs/images/agents/hermes-agent.svg" width="20" alt="Hermes Agent"> <img src="docs/images/agents/openclaw.svg" width="20" alt="OpenClaw"> | Hermes Agent, OpenClaw | [Setup](#quick-start); then reload OpenClaw's plugins | `/agent-board` |
-| <img src="docs/images/agents/antigravity.svg" width="20" alt="Antigravity"> <img src="docs/images/agents/cursor.svg" width="20" alt="Cursor"> <img src="docs/images/agents/grok-build.svg" width="20" alt="Grok Build"> <img src="docs/images/agents/muse-code.svg" width="20" alt="Muse Code"> <img src="docs/images/agents/deepseek-harness.svg" width="20" alt="DeepSeek Harness"> | Antigravity, Cursor, Grok Build, Muse Code, DeepSeek Harness | [Setup](#quick-start) | `/agent-board` (not verified yet) |
-| | dot and other web chats | Paste [the last section of AGENTS.md](AGENTS.md#report-your-progress-to-the-progress-pane) into the agent's instructions | Paste its block into [the board's page](#the-boards-page) |
-| | Any terminal | — | `node ~/.agent-board/agent-board.mjs --watch` (`--html` opens it in the browser) |
-| | A browser | — | `node ~/.agent-board/agent-board.mjs --serve` |
-| | A chat app, through an agent (Hermes Agent, OpenClaw) | — | `node ~/.agent-board/agent-board.mjs --chat` |
-| | Check one agent's setup | — | `node ~/.agent-board/agent-board.mjs --codex-doctor --agent codex` |
+### Open the board in your agent
 
-**In a chat app,** `--chat` prints the board as plain text cut to fit one message, with no page or link. It shows your home folder as `~` and hides the credential forms it knows, such as `token=...`; a secret in another shape is not recognised, so keep secrets out of the board.
+| | Agent | Board command |
+|:-:|---|---|
+| <img src="docs/images/agents/claude-code.svg" width="20" alt="Claude Code"> | Claude Code | `/progress` |
+| <img src="docs/images/agents/codex.svg" width="20" alt="Codex"> | Codex CLI and App | `$agent-board` |
+| <img src="docs/images/agents/antigravity.svg" width="20" alt="Antigravity"> | Antigravity | `/agent-board` (not verified yet) |
+| <img src="docs/images/agents/opencode.svg" width="20" alt="OpenCode"> | OpenCode | `/board` |
+| <img src="docs/images/agents/cursor.svg" width="20" alt="Cursor"> | Cursor | `/agent-board` (not verified yet) |
+| <img src="docs/images/agents/grok-build.svg" width="20" alt="Grok Build"> | Grok Build | `/agent-board` (not verified yet) |
+| <img src="docs/images/agents/muse-code.svg" width="20" alt="Muse Code"> | Muse Code | `/agent-board` (not verified yet) |
+| <img src="docs/images/agents/hermes-agent.svg" width="20" alt="Hermes Agent"> | Hermes Agent | `/agent-board` |
+| <img src="docs/images/agents/openclaw.svg" width="20" alt="OpenClaw"> | OpenClaw | `/agent-board` |
+| <img src="docs/images/agents/deepseek-harness.svg" width="20" alt="DeepSeek Harness"> | DeepSeek Harness | `/agent-board` (not verified yet) |
 
 **In the Claude desktop app,** which cannot show the pane, the footer shows the board's status and `/progress` gives you a link to [the board's page](#the-boards-page), where you can answer questions and archive work; if that page cannot start, it opens the read-only page. The board page needs the board script that `/progress connect` installs, or the next session start updates.
+
+### Open the board anywhere
+
+| Where | Command |
+|---|---|
+| Any terminal | `node ~/.agent-board/agent-board.mjs --watch` (`--html` opens it in the browser) |
+| A browser | `node ~/.agent-board/agent-board.mjs --serve` |
+| A chat app, through an agent (Hermes Agent, OpenClaw) | `node ~/.agent-board/agent-board.mjs --chat` |
+| Check one agent's setup | `node ~/.agent-board/agent-board.mjs --codex-doctor --agent codex` |
+
+**In a chat app,** `--chat` prints the board as plain text cut to fit one message, with no page or link. It shows your home folder as `~` and hides the credential forms it knows, such as `token=...`; a secret in another shape is not recognised, so keep secrets out of the board.
 
 <details>
 <summary><b>Keys on the terminal board</b></summary>
@@ -100,19 +131,6 @@ Finished work leaves the board by itself. The board writes `progress.md` as care
 </details>
 
 ## Supported agents
-
-<p>
-<img src="docs/images/agents/claude-code.svg" width="28" alt="Claude Code">
-<img src="docs/images/agents/codex.svg" width="28" alt="Codex">
-<img src="docs/images/agents/antigravity.svg" width="28" alt="Antigravity">
-<img src="docs/images/agents/opencode.svg" width="28" alt="OpenCode">
-<img src="docs/images/agents/cursor.svg" width="28" alt="Cursor">
-<img src="docs/images/agents/grok-build.svg" width="28" alt="Grok Build">
-<img src="docs/images/agents/muse-code.svg" width="28" alt="Muse Code">
-<img src="docs/images/agents/hermes-agent.svg" width="28" alt="Hermes Agent">
-<img src="docs/images/agents/openclaw.svg" width="28" alt="OpenClaw">
-<img src="docs/images/agents/deepseek-harness.svg" width="28" alt="DeepSeek Harness">
-</p>
 
 | | Agent | Runs in | On the board | Reply from the board |
 |:-:|---|---|---|---|
@@ -160,11 +178,11 @@ Hooks say whether a session is working or waiting; its steps and when it is done
 
 **The terminal board** (`--watch`), with Codex's question open: `y` or `n` copies the answer.
 
-<picture><source media="(prefers-color-scheme: dark)" srcset="docs/images/board/codex-en-dark.svg"><img alt="The terminal board with a Codex CLI question open; y or n copies the answer. Synthetic data." src="docs/images/board/codex-en-light.svg"></picture>
+<img alt="The terminal board with a Codex CLI question open; y or n copies the answer. Synthetic data." src="docs/images/board/codex-en-dark.svg">
 
 **Claude Code's pane**, beside the chat: the same board, with the question's answers as buttons.
 
-<picture><source media="(prefers-color-scheme: dark)" srcset="docs/images/pane-en-dark.svg"><img alt="Claude Code's progress pane: counts of what is waiting, in progress, due soon and done today, then the question waiting on you, a release plan, with a button for each answer, a box for another reply, a button to hide it once answered, and a line for the 4 more waiting on you. Synthetic data." src="docs/images/pane-en-light.svg"></picture>
+<img alt="Claude Code's progress pane: counts of what is waiting, in progress, due soon and done today, then the question waiting on you, a release plan, with a button for each answer, a box for another reply, a button to hide it once answered, and a line for the 4 more waiting on you. Synthetic data." src="docs/images/pane-en-dark.svg">
 
 Both pictures are drawn by the board's own code from synthetic data. Native hook evidence is [recorded separately](docs/validation/2026-10-19-native-hooks.md).
 
@@ -233,4 +251,4 @@ The pane follows Claude Code's theme (`/config`, then **Theme**); the page and `
 
 [MIT](LICENSE). Agent logos are from [Simple Icons](https://simpleicons.org) (CC0) and [Lobe Icons](https://github.com/lobehub/lobe-icons) (MIT) and belong to their owners; an agent without a logo is shown by its initial.
 
-<p align="center"><sub>Version 0.23.5 · <a href="CHANGELOG.md">Changelog</a></sub></p>
+<p align="center"><sub>Version 0.24.0 · <a href="CHANGELOG.md">Changelog</a></sub></p>

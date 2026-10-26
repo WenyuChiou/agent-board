@@ -1,15 +1,15 @@
-import type { ProgressMirror, ProgressMirrorTask, ProgressSessionState, ProgressTask } from '../types'
+import type { CutBlock, ProgressMirror, ProgressMirrorTask, ProgressSessionState, ProgressTask } from '../types'
 import { prWords } from './github'
 import { ZH_TW } from './i18n'
 import type { Strings } from './i18n'
 import { localDay } from './journal'
 import { fallbackTitle, isAnswered, questionToken, retainedCancelledOf } from './mirror'
-import { AUTO_END, AUTO_START, autoOf, doneKey, isTaskComplete, parseAttrs, parseProgress, projectHead, readable, RESUME, STALE_MS } from './parse'
+import { AUTO_END, AUTO_START, autoOf, doneKey, isCutMarker, isTaskComplete, parseAttrs, parseProgress, projectHead, readable, RESUME, STALE_MS } from './parse'
 import type { QuickEntry } from './quick'
 import type { StepRef, TaskRef } from './view'
 import { sha256 } from './sha256'
 import { oneLine, plain } from './step-words'
-import { isStale } from './parse'
+import { isStale, observedTime } from './parse'
 import type { JournalEntry } from './journal'
 
 // Each session's mod owns one block of the file, between its own markers, and rewrites
@@ -189,6 +189,65 @@ export const scanBlocks = (raws: readonly string[]): BlockSpan[] => {
   return spans
 }
 
+export const CUT_SETTLE_MS = 10 * 1000
+
+// A block with no end marker that a `##` heading, a block start or a block end follows was cut off
+// by a write that never finished, not one still being written: a writer adds to the end of the file
+// or rewrites it whole, never into the middle, and those lines come only after it is done with the
+// block. Other text after it (a step after a blank line, a fence, a comment) may be the rest of a
+// block a reader caught halfway. Once the file has stayed still for CUT_SETTLE_MS, a block with no
+// end marker at the end of the file is cut off too. A cut-off block ends where scanBlocks ends it,
+// so the question pass need not wait for it, and the board notes it in its health section.
+export const cutOffTest = (lines: readonly string[], isSettled = false): ((span: BlockSpan) => boolean) => {
+  if (isSettled) return span => !span.isClosed
+  let last = -1
+  seenOf(lines).forEach((line, index) => {
+    if (PROJECT.test(line) || AUTO_START.test(line) || AUTO_END.test(line)) last = index
+  })
+
+  return span => !span.isClosed && span.end < last
+}
+
+const cutBlockOf = (span: BlockSpan, raw: string): CutBlock => {
+  const attrs = parseAttrs(AUTO_START.exec(raw)?.[1] ?? '')
+  const parsed = attrs.updated === undefined ? Number.NaN : Date.parse(attrs.updated)
+  return {
+    line: span.start + 1,
+    project: span.project,
+    session: span.session,
+    agent: attrs.agent ?? '',
+    updated: Number.isNaN(parsed) ? null : parsed,
+  }
+}
+
+// Every block that ended without its marker, including one whose marker line was itself cut off,
+// so the question ledger keeps the questions of both.
+export const cutOffSpans = (text: string, isSettled = false): CutBlock[] => {
+  const lines = linesOf(text)
+  const isCutOff = cutOffTest(lines, isSettled)
+
+  return scanBlocks(lines).filter(isCutOff).map(span => cutBlockOf(span, lines[span.start] ?? ''))
+}
+
+// A block whose end marker was itself cut has the cut-off line already (`progressTail`), so it is
+// not named a second time.
+export const cutOffBlocks = (text: string, isSettled = false): CutBlock[] => {
+  const lines = linesOf(text)
+  const isCutOff = cutOffTest(lines, isSettled)
+
+  return scanBlocks(lines).filter(span => isCutOff(span) && !lines.slice(span.start + 1, span.end + 2).some(isCutMarker)).map(span => cutBlockOf(span, lines[span.start] ?? ''))
+}
+
+// The board names the first few; more than that is a file to look over as a whole anyway. The
+// agent name comes from the file, so control characters are taken out before any surface shows it.
+export const cutBlockLines = (cut: readonly CutBlock[], s: Strings = ZH_TW): string[] =>
+  cut.slice(0, 3).map(one => {
+    const name = one.agent.replace(/[\u0000-\u001f\u007f-\u009f]/g, '')
+    const key = name.toLowerCase()
+    const agent = name === '' ? '' : Object.hasOwn(s.agentNames, key) ? (s.agentNames[key] ?? name) : name
+    return s.blockCutOff(agent, one.updated === null ? null : localDay(one.updated).slice(5))
+  })
+
 const trimBlankEdges = (lines: string[], at: number): void => {
   // Collapse the blank lines around `at` to one.
   let from = at
@@ -245,7 +304,8 @@ export const upsertAutoBlock = (text: string, mirror: ProgressMirror, s: Strings
   const existing = scanBlocks(lines).find(span => span.session === id)
 
   if (existing !== undefined) {
-    lines.splice(existing.start, existing.end - existing.start + 1, ...block)
+    const end = existing.isClosed ? existing.end : existing.start
+    lines.splice(existing.start, end - existing.start + 1, ...block)
 
     return lines.join(eol) + eol
   }
@@ -276,7 +336,8 @@ const removeSpans = (text: string, spans: readonly BlockSpan[]): string => {
   const eol = eolOf(text)
   const lines = linesOf(text)
   for (const span of [...spans].sort((a, b) => b.start - a.start)) {
-    lines.splice(span.start, span.end - span.start + 1)
+    const end = span.isClosed ? span.end : span.start
+    lines.splice(span.start, end - span.start + 1)
     trimBlankEdges(lines, Math.min(span.start, lines.length))
   }
   dropEmptySections(lines, new Set(spans.map(span => span.project)))
@@ -334,9 +395,9 @@ export type ConfirmedTask = { text: string; ref: ConfirmRef; entries: Array<Omit
 
 // A person's completion changes only the exact task drawn, and only after its agent
 // stopped. Recheck here, inside each caller's read/change/write retry.
-export const confirmTask = (text: string, ref: ConfirmRef, now: number, s: Strings = ZH_TW): ConfirmedTask | null => {
+export const confirmTask = (text: string, ref: ConfirmRef, now: number, s: Strings = ZH_TW, seen: Readonly<Record<string, number>> = {}): ConfirmedTask | null => {
   const task = confirmedTarget(text, ref, s)
-  if (task === null || task.line < 0 || task.auto !== null && task.auto.state !== 'ended' && !isStale(task.auto, now)) return null
+  if (task === null || task.line < 0 || task.auto !== null && task.auto.state !== 'ended' && !isStale(task.auto, now, observedTime(task.auto, now, seen).updated)) return null
   const lines = linesOf(text)
   const spans = scanBlocks(lines)
   const span = ref.session === null ? undefined : spans.find(one => one.session === ref.session)
@@ -384,8 +445,9 @@ const isStoppedAsking = (span: BlockSpan, now: number): boolean =>
   (span.state === 'ended' || span.state === 'done') && now - span.updated > STOPPED_ARCHIVE_MS
 
 // The blocks that ask which a sweep may take once the caller has checked that their questions are
-// kept outside the block (#174).
-export type AskingBlock = { span: BlockSpan; ref: TaskRef }
+// kept outside the block (#174), each with its lines as they read now (`text`), so a later try can
+// tell the block it checked from one changed since.
+export type AskingBlock = { span: BlockSpan; ref: TaskRef; text: string }
 export const archivableAsking = (text: string, now: number, keep?: string): AskingBlock[] => {
   if (!text.includes('[?]')) return []
   const lines = linesOf(text)
@@ -399,7 +461,7 @@ export const archivableAsking = (text: string, now: number, keep?: string): Aski
     const tasks = projects.filter(project => project.name === span.project).flatMap(project => project.tasks).filter(task => task.auto?.session === span.session)
     const task = tasks[0]
 
-    return tasks.length === 1 && task !== undefined ? [{ span, ref: { project: span.project, title: task.title, line: task.line, session: span.session } }] : []
+    return tasks.length === 1 && task !== undefined ? [{ span, ref: { project: span.project, title: task.title, line: task.line, session: span.session }, text: lines.slice(span.start, span.end + 1).join('\n') }] : []
   })
 }
 
@@ -471,7 +533,7 @@ export const takeManualDone = (
 // null when it cannot be found for sure: a block without its end marker, a heading that is
 // gone or has a twin, a heading inside some session's block, or a session id two blocks
 // share when the row's project and each block's first heading cannot tell them apart.
-export const takeTask = (text: string, ref: TaskRef, now: number, s: Strings = ZH_TW): Archived | null => {
+export const takeTask = (text: string, ref: TaskRef, now: number, s: Strings = ZH_TW, observations: Readonly<Record<string, number>> = {}): Archived | null => {
   const lines = linesOf(text)
   const seen = seenOf(lines)
   const spans = scanBlocks(lines)
@@ -499,7 +561,10 @@ export const takeTask = (text: string, ref: TaskRef, now: number, s: Strings = Z
     if (span === undefined || !span.isClosed) return null
     // Recheck ownership at the write boundary: a stopped row may have resumed since it
     // was drawn. Unknown clocks cannot prove that a working/waiting session stopped.
-    if ((span.state === 'working' || span.state === 'waiting') && (span.updated <= 0 || now - span.updated <= STALE_MS)) return null
+    if (span.state === 'working' || span.state === 'waiting') {
+      const auto = parseProgress(text).flatMap(project => project.tasks).find(task => task.line === span.heading)?.auto ?? null
+      if (auto === null || !isStale(auto, now, observedTime(auto, now, observations).updated)) return null
+    }
 
     return { text: removeSpans(text, [span]), entries: [[heading, ...lines.slice(span.start + 1, span.end)].join('\n')] }
   }

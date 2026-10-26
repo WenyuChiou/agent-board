@@ -2,7 +2,7 @@ import { emptyQuestions, observeQuestions } from '../hooks/questions'
 import { expect, test } from 'claude-code/testing'
 
 import type { ProgressMirror } from '../types'
-import { archivableAsking, extractAutoBlock, removeAutoBlock, renderAutoBlock, scanBlocks, setManualStep, stateWords, takeArchivable, upsertAutoBlock } from '../hooks/blocks'
+import { archivableAsking, confirmTask, extractAutoBlock, removeAutoBlock, renderAutoBlock, scanBlocks, setManualStep, stateWords, takeArchivable, takeTask, upsertAutoBlock } from '../hooks/blocks'
 import { ZH_TW } from '../hooks/i18n'
 import { STRINGS } from '../hooks/strings'
 import { answerAgentPrompt } from '../hooks/inbox'
@@ -17,7 +17,7 @@ import {
   resumeNote,
   stateOf,
 } from '../hooks/mirror'
-import { parseProgress } from '../hooks/parse'
+import { futureTimeKey, parseProgress, STALE_MS } from '../hooks/parse'
 import { BIG_AT, bigBoard } from './fixtures/big-board'
 import { answeredJson, answeredPath, buildView, dueDays, foldSteps, IDLE_MS, keptAnswered, parseAnswered, parseSeen, relativeTime, seenJson, seenPath, taskFingerprint, withAnswered, withSeen } from '../hooks/view'
 
@@ -694,6 +694,104 @@ test("an ended or stale session's task moves to the Stopped shelf and leaves the
   expect(view.recent.map(row => row.title)).toEqual(['Finished'])
 })
 
+test('a future-dated update becomes stale from its first local observation without changing its timestamp', () => {
+  for (const state of ['working', 'waiting']) {
+    const stamp = NOW + 24 * HOUR
+    const text = `## demo\n<!-- auto session=a1b2c3d4 agent=codex state=${state} updated=${new Date(stamp).toISOString()} -->\n### Future clock\n- [~] Finish\n<!-- /auto session=a1b2c3d4 -->`
+    const projects = parseProgress(text)
+    const seen = withSeen({}, projects, NOW)
+    const initial = buildView(projects, [], null, NOW, 0, {}, ZH_TW, [], seen)
+    expect(initial.active[0]?.auto).toBe(state)
+    const later = buildView(projects, [], null, NOW + STALE_MS + 1, 0, {}, ZH_TW, [], withSeen(seen, projects, NOW + STALE_MS + 1))
+    expect(later.active).toEqual([])
+    expect(later.stopped[0]?.auto).toBe('ended')
+    expect(later.stopped[0]?.when).toContain(ZH_TW.hoursAgo(12))
+    expect(later.stopped[0]?.when).toContain('未來時間')
+    expect(projects[0]?.tasks[0]?.auto?.updated).toBe(stamp)
+    expect(projects[0]?.tasks[0]?.auto?.state).toBe(state)
+  }
+})
+
+test('polling, a restart and the clock catching up never renew an observed future update', () => {
+  const stamp = NOW + 24 * HOUR
+  const projects = parseProgress(`## demo\n<!-- auto session=a1b2c3d4 agent=codex state=working updated=${new Date(stamp).toISOString()} -->\n### Future clock\n- [~] Finish\n<!-- /auto session=a1b2c3d4 -->`)
+  const original = withSeen({}, projects, NOW)
+  for (const at of [NOW + HOUR, NOW + STALE_MS + 1, stamp - 4 * 60_000, stamp + HOUR, NOW + IDLE_MS + 1]) {
+    const restored = parseSeen(seenJson(original)) ?? {}
+    const observed = withSeen(restored, projects, at, {}, true)
+    expect(observed).toEqual(original)
+    const view = buildView(projects, [], null, at, 0, {}, ZH_TW, [], observed)
+    if (at - NOW > STALE_MS) {
+      expect(view.active).toEqual([])
+      const row = view.stopped[0] ?? view.idle[0]
+      expect(row?.auto).toBe('ended')
+      expect(row?.when).not.toBe(ZH_TW.justNow)
+      expect(row?.when).toContain('未來時間')
+    }
+  }
+})
+
+test('a read-only future row without an observation reports unknown age instead of inventing a fresh time', () => {
+  const projects = parseProgress(`## demo\n<!-- auto session=a1b2c3d4 agent=codex state=working updated=${new Date(NOW + 24 * HOUR).toISOString()} -->\n### Future clock\n- [~] Finish\n<!-- /auto session=a1b2c3d4 -->`)
+  const seen = {}
+  for (const at of [NOW, NOW + HOUR, NOW + STALE_MS + 1]) {
+    const row = buildView(projects, [], null, at, 0, {}, ZH_TW, [], seen).active[0]
+    expect(row?.when).toBe(ZH_TW.futureTimeUnknown)
+    expect(row?.when).not.toContain(ZH_TW.justNow)
+  }
+  expect(seen).toEqual({})
+})
+
+test('a changed writer timestamp renews a future observation while a small future offset stays within tolerance', () => {
+  const text = (stamp: number): string => `## demo\n<!-- auto session=a1b2c3d4 agent=codex state=working updated=${new Date(stamp).toISOString()} -->\n### Future clock\n- [~] Finish\n<!-- /auto session=a1b2c3d4 -->`
+  const older = withSeen({}, parseProgress(text(NOW + 24 * HOUR)), NOW - STALE_MS - 1)
+  const changed = parseProgress(text(NOW + 48 * HOUR))
+  const fresh = withSeen(older, changed, NOW, {}, true)
+  const view = buildView(changed, [], null, NOW, 0, {}, ZH_TW, [], fresh)
+  expect(view.active[0]?.auto).toBe('working')
+  expect(view.active[0]?.when).toContain('未來時間')
+  const small = parseProgress(text(NOW + 5 * 60_000))
+  expect(withSeen({}, small, NOW)).toEqual({})
+  expect(buildView(small, [], null, NOW).active[0]?.when).toBe(ZH_TW.justNow)
+})
+
+test('recent automatic completions retain future-clock markers in every language', () => {
+  for (const s of Object.values(STRINGS)) for (const state of ['done', 'working', 'ended']) for (const isObserved of [false, true]) {
+    const projects = parseProgress(`## demo\n<!-- auto session=a1b2c3d4 agent=codex state=${state} updated=${new Date(NOW + 24 * HOUR).toISOString()} -->\n### Future completion\n- [x] Finished\n<!-- /auto session=a1b2c3d4 -->`)
+    const seen = isObserved ? withSeen({}, projects, NOW - HOUR) : {}
+    const row = buildView(projects, [], null, NOW, 0, {}, s, [], seen).recent[0]
+    expect(row?.when).toBe(isObserved ? s.futureTime(s.hoursAgo(1)) : s.futureTimeUnknown)
+  }
+})
+
+test('every present future update retains its first baseline beyond the manual observation limit', () => {
+  const future = Array.from({ length: 501 }, (_, index) => `<!-- auto session=${(0x38200000 + index).toString(16)} agent=codex state=working updated=${new Date(NOW + 24 * HOUR).toISOString()} -->\n### Future worker ${index}\n- [~] Finish\n<!-- /auto session=${(0x38200000 + index).toString(16)} -->`).join('\n')
+  const manual = Array.from({ length: 600 }, (_, index) => `### Manual ${index}\n- [ ] Finish`).join('\n')
+  const projects = parseProgress(`## demo\n${future}\n${manual}\n`)
+  const first = withSeen({}, projects, NOW)
+  expect(Object.keys(first).filter(key => /^[0-9a-f]{64}$/.test(key))).toHaveLength(500)
+  const restored = parseSeen(seenJson(first)) ?? {}
+  for (const task of projects[0]?.tasks ?? []) if (task.auto !== null) expect(restored[futureTimeKey(task.auto)]).toBe(NOW)
+  const later = withSeen(restored, projects, NOW + STALE_MS + 1, {}, true)
+  const view = buildView(projects, [], null, NOW + STALE_MS + 1, 0, {}, ZH_TW, [], later)
+  expect(view.stopped).toHaveLength(501)
+  expect(view.active.filter(row => row.auto !== null)).toEqual([])
+})
+
+test('future observation grace stays bounded while an empty read preserves known baselines', () => {
+  const blocks = Array.from({ length: 600 }, (_, index) => `<!-- auto session=${(0x38200000 + index).toString(16)} agent=codex state=working updated=${new Date(NOW + 24 * HOUR).toISOString()} -->\n### Future ${index}\n- [~] Finish\n<!-- /auto session=${(0x38200000 + index).toString(16)} -->`).join('\n')
+  const projects = parseProgress(`## demo\n${blocks}\n`)
+  const first = withSeen({}, projects, NOW)
+  const empty = withSeen(parseSeen(seenJson(first)) ?? {}, [], NOW + HOUR)
+  expect(empty).toEqual(first)
+  const restored = withSeen(parseSeen(seenJson(empty)) ?? {}, projects, NOW + STALE_MS + 1, {}, true)
+  expect(buildView(projects, [], null, NOW + STALE_MS + 1, 0, {}, ZH_TW, [], restored).stopped).toHaveLength(600)
+  const next = parseProgress(`## demo\n<!-- auto session=cafe0382 agent=codex state=working updated=${new Date(NOW + 48 * HOUR).toISOString()} -->\n### New future\n- [~] Finish\n<!-- /auto session=cafe0382 -->`)
+  const held = withSeen(restored, next, NOW + HOUR)
+  expect(Object.keys(held)).toHaveLength(501)
+  expect(Object.keys(withSeen(held, next, NOW + HOUR, {}, true))).toHaveLength(1)
+})
+
 test('a stopped task keeps its question on the Stopped shelf and is not counted as In progress', () => {
   const file = '## demo\n<!-- auto session=a1b2c3d4 agent=codex state=ended updated=2026-10-16T11:00:00Z resume=codex-session-123 dir=%2Fw -->\n### Release\n- [?] Publish, OK?\n- [ ] Finish\n<!-- /auto session=a1b2c3d4 -->'
   const view = buildView(parseProgress(file), [], null, NOW)
@@ -707,6 +805,46 @@ test('a stopped task keeps its question on the Stopped shelf and is not counted 
   expect(hidden.waiting).toEqual([])
   expect(hidden.hidden).toHaveLength(1)
   expect(hidden.stopped).toHaveLength(1)
+})
+
+test('future-clock staleness preserves an unanswered question identity, age and original source', () => {
+  const stamp = NOW + 24 * HOUR
+  const projects = parseProgress(`## demo\n<!-- auto session=a1b2c3d4 agent=codex state=waiting updated=${new Date(stamp).toISOString()} -->\n### Future question\n- [?] Publish, OK?\n<!-- /auto session=a1b2c3d4 -->`)
+  const ledger = observeQuestions(emptyQuestions(), projects, null, [], NOW, true, 'fixture:382').ledger
+  const original = ledger.records[0]
+  expect(original?.firstObserved).toBe(NOW)
+  expect(original?.source).toBeDefined()
+  const source = JSON.stringify(original?.source)
+  const seen = withSeen({}, projects, NOW)
+  const at = NOW + STALE_MS + 1
+  const view = buildView(projects, [], null, at, 0, {}, ZH_TW, [], withSeen(seen, projects, at), ledger)
+  expect(view.waiting).toEqual([])
+  expect(view.stopped[0]?.questions?.map(question => question.questionId)).toEqual([original?.id])
+  const kept = observeQuestions(ledger, projects, null, [], at, false, 'preview').ledger.records[0]
+  expect(kept?.id).toBe(original?.id)
+  expect(kept?.firstObserved).toBe(NOW)
+  expect(JSON.stringify(kept?.source)).toBe(source)
+  expect(projects[0]?.tasks[0]?.auto?.updated).toBe(stamp)
+})
+
+test('explicit actions on an observed future-dated stopped task recheck the same update at the write boundary', () => {
+  const text = (stamp: number): string => `## demo\n<!-- auto session=a1b2c3d4 agent=codex state=working updated=${new Date(stamp).toISOString()} -->\n### Future clock\n- [~] Finish\n<!-- /auto session=a1b2c3d4 -->`
+  const original = text(NOW + 24 * HOUR)
+  const projects = parseProgress(original)
+  const seen = withSeen({}, projects, NOW)
+  const at = NOW + STALE_MS + 1
+  const row = buildView(projects, [], null, at, 0, {}, ZH_TW, [], seen).stopped[0]
+  expect(row?.confirm).not.toBe(null)
+  expect(row?.archive).not.toBe(null)
+  if (!row?.confirm || !row.archive) throw new Error('stopped row actions missing')
+  expect(confirmTask(original, row.confirm, at, ZH_TW, seen)?.text).toContain('state=done')
+  const archived = takeTask(original, row.archive, at, ZH_TW, seen)
+  expect(archived).not.toBe(null)
+  expect(archived?.text).not.toContain('Future clock')
+  const changed = text(NOW + 48 * HOUR)
+  expect(confirmTask(changed, row.confirm, at, ZH_TW, seen)).toBe(null)
+  expect(takeTask(changed, row.archive, at, ZH_TW, seen)).toBe(null)
+  expect(takeArchivable(original, at, undefined, ZH_TW, true).text).toBe(original)
 })
 
 test('a task idle exactly seven days stays on the board and one idle a millisecond longer is hidden', () => {
@@ -792,7 +930,9 @@ test("a task due within two weeks, this session's own block and a future timesta
 - [~] Work
 <!-- /auto session=a1b2c3d4 -->`
   const projects = parseProgress(file)
-  const seen = withSeen({}, projects, NOW - IDLE_MS - 1)
+  // The manual tasks were observed earlier; this future-dated block arrives now.
+  const beforeFuture = projects.map(project => ({ ...project, tasks: project.tasks.filter(task => task.title !== 'Future') }))
+  const seen = withSeen(withSeen({}, beforeFuture, NOW - IDLE_MS - 1), projects, NOW)
   const view = buildView(projects, [], sampleMirror(), NOW, 0, {}, ZH_TW, [], seen)
   expect(view.idle.map(row => row.title)).toEqual(['Later'])
   expect(view.due.map(row => row.title)).toEqual(['Late', 'Due'])

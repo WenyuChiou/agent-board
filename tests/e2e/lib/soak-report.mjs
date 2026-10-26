@@ -1,3 +1,5 @@
+import assert from 'node:assert/strict'
+import { createHash } from 'node:crypto'
 import { mkdirSync, renameSync, unlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -47,6 +49,38 @@ const pathPattern = path => {
   return new RegExp(`${parts.map(escapeText).join('[\\\\/]+')}(?![A-Za-z0-9_-])`, 'gi')
 }
 
+// Windows hides an Antigravity hook's paths inside a UTF-16LE PowerShell command.
+const commandText = command => {
+  const text = String(command ?? '')
+  const decoded = []
+  for (const found of text.matchAll(/(?:^|\s)-(?:encodedcommand|enc|ec|e)\s+(?:"([A-Za-z0-9+/]+={0,2})"|'([A-Za-z0-9+/]+={0,2})'|([A-Za-z0-9+/]+={0,2}))(?=[\s"']|$)/gi)) {
+    try {
+      const encoded = found[1] ?? found[2] ?? found[3]
+      const bytes = Buffer.from(encoded, 'base64')
+      if (bytes.length % 2 !== 0 || bytes.toString('base64').replace(/=+$/, '') !== encoded.replace(/=+$/, '')) continue
+      decoded.push(new TextDecoder('utf-16le', { fatal: true }).decode(bytes))
+    } catch {}
+  }
+  return [text, ...decoded].join('\n')
+}
+
+// Both queue writers keep the hook's raw session id; partial writes are not events.
+export const queuedSessions = files => {
+  const sessions = new Set()
+  for (const { name, text } of files) {
+    if (!name.endsWith('.json') || typeof text !== 'string') continue
+    try {
+      const entry = JSON.parse(text)
+      if (entry?.version !== 1) continue
+      const session = entry.kind === 'raw'
+        ? [entry.payload?.session_id, entry.payload?.sessionId, entry.payload?.conversationId].find(value => typeof value === 'string' && value !== '')
+        : entry.session
+      if (typeof session === 'string' && session !== '') sessions.add(session)
+    } catch {}
+  }
+  return sessions
+}
+
 // `entries` is a list of [placeholder, path]; the longest path goes first, so a world folder inside
 // the temp folder reads <world>, not <tmp>/…. `secrets` are exact strings (the page's address and token).
 export const makeRedact = (entries, secrets = []) => {
@@ -61,6 +95,55 @@ export const makeRedact = (entries, secrets = []) => {
     for (const { placeholder, pattern } of patterns) result = result.replace(pattern, () => placeholder)
     return result
   }
+}
+
+// The processes a run left behind (#395). `list` holds every running process as { pid, ppid, name,
+// command, started }. A leftover is any of them, other than the run itself and the excluded ones (the lister)
+// with their children, that descends from the run, or whose command line names one of the run's
+// folders: a hook worker whose parent is gone has no parent chain left to follow.
+export const leftoverProcesses = ({ list, self, roots, exclude = [] }) => {
+  const processes = new Map(list.map(one => [one.pid, one]))
+  const descends = (pid, from) => {
+    for (let child = processes.get(pid), steps = 0; child !== undefined && child.ppid > 0 && steps < 64; steps += 1) {
+      const parent = processes.get(child.ppid)
+      // A newer parent reused an old pid; it cannot have started this child.
+      if (parent?.started !== undefined && child.started !== undefined && parent.started > child.started) return false
+      if (child.ppid === from) return true
+      child = parent
+    }
+    return false
+  }
+  const patterns = roots.map(root => typeof root === 'string' ? pathPattern(root) : null).filter(pattern => pattern !== null)
+  const isExcluded = one => (one.ppid === self && /^conhost\.exe$/i.test(one.name)) || exclude.some(pid => one.pid === pid || descends(one.pid, pid))
+  return list.filter(one => one.pid !== self && !isExcluded(one) && (descends(one.pid, self) || patterns.some(pattern => commandText(one.command).search(pattern) !== -1)))
+}
+
+export const leftoverPlan = ({ list, self, since, roots, exclude = [] }) => {
+  const left = leftoverProcesses({ list, self, roots, exclude })
+  const descendants = new Set(leftoverProcesses({ list, self, roots: [], exclude }).map(one => one.pid))
+  // Path-only matches must start at or after self, or since when self has no start time, in this same list.
+  const started = list.find(one => one.pid === self)?.started ?? list.find(one => one.pid === since)?.started
+  const kill = [], keep = []
+  for (const one of left) {
+    if (descendants.has(one.pid) || started !== undefined && one.started !== undefined && one.started >= started) kill.push(one)
+    else keep.push(one)
+  }
+  return { kill, keep }
+}
+
+// The open issue marked on a hook load check, and whether it explains this outcome (#395). #241: on
+// a busy Windows machine a hook can run longer than the 3 s budget, and an event whose reporter runs
+// out of time is queued until a later hook applies it, so the page shows it late or never. Only that
+// pattern counts: no hook exited non-zero or ran past twice the budget, every poll was answered, some
+// report was shown, the page's poll interval fits its budget, and every late or missed report came
+// back while that session's own event was queued. Anything else stays a failure.
+export const hookLoadMarker = ({ key, outcome, platform, budgetMs }) => {
+  if (platform !== 'win32' || (key !== 'hooks' && key !== 'page')) return undefined
+  if (outcome.ok && (key === 'hooks' || outcome.pollWithinBudget === true)) return { issue: 241, explains: true }
+  const explains = key === 'hooks'
+    ? outcome.over > 0 && outcome.failedRuns === 0 && outcome.maxMs <= 2 * budgetMs
+    : outcome.pollWithinBudget === true && outcome.shown > 0 && outcome.slow > 0 && outcome.slowNotQueued === 0 && outcome.failedAnswers === 0
+  return { issue: 241, explains }
 }
 
 export const redactDeep = (value, redact) => {
@@ -111,11 +194,71 @@ const megabytes = bytes => (bytes / 1048576).toFixed(0)
 const kilobytes = bytes => (bytes / 1024).toFixed(bytes < 10240 ? 1 : 0)
 const count = value => (value === undefined ? '?' : Number(value).toLocaleString('en-US'))
 const clockOf = iso => (typeof iso === 'string' ? iso.slice(11, 19) : '?')
+const sha256 = text => createHash('sha256').update(text).digest('hex')
 
 // How many checks came out each way, in plain words: "3 passed, 2 known, 1 failed, 0 skipped".
 export const tallyOf = checks => {
   const many = status => checks.filter(check => check.status === status).length
   return `${many('pass')} passed, ${many('known')} known, ${many('fail')} failed, ${many('skipped')} skipped`
+}
+
+const isQuestionSource = source => source !== null && typeof source === 'object' && ['block', 'own', 'manual', 'inbox'].includes(source.kind) && ['project', 'task', 'context', 'text', 'agent', 'session', 'data'].every(key => typeof source[key] === 'string')
+
+// The soak runs under plain Node, so its reader mirrors the v1 parseQuestions/parseCapture schema
+// instead of importing TypeScript. It additionally requires the unresolved bit that this check
+// needs to distinguish evidence from an old record without silently dropping it.
+const isQuestionRecord = (record, next, ids) => {
+  if (record === null || typeof record !== 'object' || !/^question:[a-f0-9]{64}:\d+$/.test(record.id) || ids.has(record.id) || typeof record.scope !== 'string' || typeof record.words !== 'string' || typeof record.incarnation !== 'string') return false
+  if (!Number.isSafeInteger(record.occurrence) || record.occurrence < 1 || !Number.isSafeInteger(record.copies) || record.copies < record.occurrence || typeof record.isWaiting !== 'boolean' || typeof record.isPresent !== 'boolean' || typeof record.isUnresolved !== 'boolean' || !Number.isFinite(record.firstObserved) || record.firstObserved < 0) return false
+  const number = Number(record.id.slice(record.id.lastIndexOf(':') + 1))
+  if (!Number.isSafeInteger(number) || number >= next || record.id.split(':')[1] !== sha256(JSON.stringify([record.scope, record.words, record.occurrence, record.copies, record.incarnation]))) return false
+  if (record.producer !== undefined && typeof record.producer !== 'string') return false
+  if (record.resolvedAt !== undefined && (!Number.isFinite(record.resolvedAt) || record.resolvedAt < 0)) return false
+  if (record.isArchived !== undefined && typeof record.isArchived !== 'boolean') return false
+  if (record.producerRevisions !== undefined && (!Array.isArray(record.producerRevisions) || record.producerRevisions.some(revision => typeof revision !== 'string' || !/^[a-f0-9]{64}$/.test(revision)))) return false
+  if (record.producerSources !== undefined && (!Array.isArray(record.producerSources) || record.producerSources.some(source => typeof source !== 'string'))) return false
+  if (record.source !== undefined && !isQuestionSource(record.source)) return false
+  return true
+}
+
+export const questionEvidenceProjection = ({ ledgerText, captures }) => {
+  try {
+    const ledger = JSON.parse(ledgerText)
+    if (ledger.version !== 1 || !Number.isSafeInteger(ledger.next) || ledger.next < 1 || !Array.isArray(ledger.records) || ledger.legacy === null || typeof ledger.legacy !== 'object' || Array.isArray(ledger.legacy)) throw new Error('question ledger schema is invalid')
+    const ids = new Set()
+    for (const record of ledger.records) {
+      if (!isQuestionRecord(record, ledger.next, ids)) throw new Error('question ledger record is invalid')
+      ids.add(record.id)
+    }
+    if (Object.values(ledger.legacy).some(id => typeof id !== 'string' || (id !== '' && !ids.has(id)))) throw new Error('question ledger legacy binding is invalid')
+    const parsedCaptures = captures.map(({ hash, text }) => {
+      if (sha256(text) !== hash) throw new Error('question capture hash is invalid')
+      const capture = JSON.parse(text)
+      if (capture.version !== 1 || !['unresolved', 'resolved', 'archived'].includes(capture.disposition) || !isQuestionSource(capture.record?.source)) throw new Error('question capture schema is invalid')
+      const number = Number(capture.record.id.slice(capture.record.id.lastIndexOf(':') + 1))
+      if (!Number.isSafeInteger(number) || !isQuestionRecord(capture.record, number + 1, new Set())) throw new Error('question capture record is invalid')
+      return capture
+    })
+    const byId = new Map(ledger.records.map(record => [record.id, { ...record }]))
+    for (const capture of parsedCaptures) {
+      const previous = byId.get(capture.record.id)
+      if (previous === undefined) byId.set(capture.record.id, { ...capture.record })
+      else {
+        if (previous.source === undefined) previous.source = capture.record.source
+        if (capture.record.producerRevisions !== undefined) previous.producerRevisions = [...new Set([...(previous.producerRevisions ?? []), ...capture.record.producerRevisions])]
+        if (capture.record.producerSources !== undefined) previous.producerSources = [...new Set([...(previous.producerSources ?? []), ...capture.record.producerSources])]
+      }
+    }
+    for (const capture of parsedCaptures) {
+      const record = byId.get(capture.record.id)
+      if (record === undefined) continue
+      if (capture.disposition === 'archived') record.isArchived = true
+      if (capture.disposition === 'resolved') record.isUnresolved = false
+    }
+    return { ledger: ledger.records, captures: parsedCaptures, questions: [...byId.values()] }
+  } catch (error) {
+    return { error: error instanceof Error ? error.message : String(error) }
+  }
 }
 
 // Where each task the archive phase planned ended up. `planned` is [{ session, title, isStopped }];
@@ -152,6 +295,63 @@ export const archiveProblems = integrity => {
   return problems
 }
 
+const sameQuestion = (left, right) => left.scope === right.scope
+  && left.words === right.words
+  && left.occurrence === right.occurrence
+  && left.copies === right.copies
+  && left.incarnation === right.incarnation
+
+const missingValues = (before, after) => (before ?? []).filter(value => !(after ?? []).includes(value))
+
+// A retained question can remain in the main list; checking only Older rejects visible evidence.
+export const questionRecoveryOf = (status, model) => {
+  const surfaces = ['asks', 'reminder', 'older', 'hidden']
+  const checked = status === 200 && surfaces.every(name => Array.isArray(model?.[name]) && model[name].every(item => item !== null && typeof item === 'object' && (item.questionId === undefined || typeof item.questionId === 'string' && /^question:[a-f0-9]{64}:\d+$/.test(item.questionId))))
+  return {
+    status, checked,
+    questionIds: checked ? [...new Set(surfaces.flatMap(name => model[name].flatMap(item => item.questionId === undefined ? [] : [item.questionId])))] : [],
+    surfaceCounts: checked ? Object.fromEntries(surfaces.map(name => [name, model[name].length])) : {},
+    error: checked ? undefined : 'The page did not return valid question membership for every board surface.',
+  }
+}
+
+// Every unanswered question belonging to a task that left progress.md must still project from the
+// ledger and immutable captures with its identity, original clock and complete recovery evidence.
+export const archiveQuestionIntegrity = ({ before, after, archivedSessions, recoverableQuestionIds = new Set() }) => {
+  const sessionOf = scope => { try { return JSON.parse(scope)[2] } catch { return '' } }
+  const expected = before.filter(record => record.isUnresolved && archivedSessions.has(sessionOf(record.scope)))
+  const afterById = new Map(after.map(record => [record.id, record]))
+  const result = { checked: expected.length, missing: [], changedIds: [], reaged: [], rebound: [], provenanceLost: [], sourceLost: [], undiscoverable: [] }
+  for (const previous of expected) {
+    const current = afterById.get(previous.id)
+    if (current === undefined) {
+      const changed = after.find(record => record.id !== previous.id && sameQuestion(record, previous))
+      if (changed === undefined) result.missing.push(previous.id)
+      else result.changedIds.push(previous.id)
+      continue
+    }
+    if (!sameQuestion(current, previous)) result.rebound.push(previous.id)
+    if (current.firstObserved !== previous.firstObserved) result.reaged.push(previous.id)
+    if (current.producer !== previous.producer || missingValues(previous.producerRevisions, current.producerRevisions).length > 0 || missingValues(previous.producerSources, current.producerSources).length > 0) result.provenanceLost.push(previous.id)
+    if (previous.source === undefined || current.source === undefined || JSON.stringify(current.source) !== JSON.stringify(previous.source)) result.sourceLost.push(previous.id)
+    if (!current.isUnresolved || current.source === undefined || !recoverableQuestionIds.has(previous.id)) result.undiscoverable.push(previous.id)
+  }
+  return result
+}
+
+export const archiveQuestionProblems = integrity => [
+  ...(integrity.checked === 0 ? ['No unanswered question was observed before the archive, so preservation was not measured'] : []),
+  ...[
+    [integrity.missing, 'unanswered question IDs are missing'],
+    [integrity.changedIds, 'unanswered question IDs changed'],
+    [integrity.reaged, 'unanswered questions lost their original age'],
+    [integrity.rebound, 'unanswered questions changed scope or producer binding'],
+    [integrity.provenanceLost, 'unanswered questions lost producer provenance'],
+    [integrity.sourceLost, 'unanswered questions lost their retained source'],
+    [integrity.undiscoverable, 'unanswered questions are not recoverable on the board'],
+  ].flatMap(([ids, words]) => ids.length === 0 ? [] : [`${ids.length} ${words} (${ids.join(', ')})`]),
+]
+
 const CAUSES = {
   timeout: many => `${many} got no answer in time`,
   cut: many => `${many} stopped tasks were not reached before the time limit`,
@@ -172,11 +372,11 @@ const causesOf = refusals => {
   return words.join(', ')
 }
 
-// The prune check when the archive did not finish: undefined when nothing was refused. The page
+// The preservation check when the archive did not finish: undefined when nothing was refused. The page
 // server's known slowness (`hold`) explains only a timeout (a 408, or no answer within the wait) and
 // tasks the time limit left unreached, and only while the file-operation check fails and is held
 // (`isOpsHeld`) and the archive lost nothing (`integrity`). Any other refusal fails plainly.
-export const pruneRefusal = ({ refusals, integrity, isOpsHeld, hold, counted }) => {
+export const archiveRefusal = ({ refusals, integrity, isOpsHeld, hold, counted }) => {
   const total = refusals.reduce((sum, one) => sum + one.count, 0)
   if (total === 0) return undefined
   const causes = causesOf(refusals)
@@ -184,7 +384,7 @@ export const pruneRefusal = ({ refusals, integrity, isOpsHeld, hold, counted }) 
   const isSlowOnly = refusals.every(one => one.cause === 'timeout' || one.cause === 'cut')
   const left = `${integrity.archived} tasks are in the archive file and ${integrity.stoppedLeft} of the ${integrity.stopped} stopped tasks are still in progress.md`
   if (isOpsHeld && isSlowOnly && problems.length === 0) {
-    return { ok: false, hold, line: `The archive did not finish (${causes}), so pruning was not judged: the page server's known slowness explains it, since the file-operation check fails; nothing was lost (${left}). At the end, ${counted}.` }
+    return { ok: false, hold, line: `The archive did not finish (${causes}), so unanswered-question preservation was not judged: the page server's known slowness explains it, since the file-operation check fails; nothing was lost (${left}). At the end, ${counted}.` }
   }
   const why = !isSlowOnly ? 'an answer other than a timeout is not the known slowness'
     : !isOpsHeld ? 'the file-operation check does not fail, so its known slowness does not explain it'
@@ -264,4 +464,27 @@ export const writeReport = (dir, report, redact) => {
     writeFileSync(temporary, text)
     replace(temporary, file)
   }
+}
+
+// A full run must measure every check; shorter diagnostic runs may skip one.
+export const classifySoakChecks = async ({ outcomes, titles, holds, minutes, knownFailure }) => {
+  const isFullRun = minutes >= 30
+  const results = []
+  for (const [key, title] of Object.entries(titles)) {
+    const outcome = outcomes[key]
+    if (outcome.skipped !== undefined) {
+      results.push(isFullRun ? { title, status: 'fail', line: `Not measured in a ${minutes}-minute run: ${outcome.skipped}` } : { title, status: 'skipped', line: outcome.skipped })
+      continue
+    }
+    if (outcome.ok) { results.push({ title, status: 'pass', line: outcome.line }); continue }
+    // An outcome the known slowness explains names that hold itself (archiveRefusal, levelOutcome).
+    const hold = outcome.hold ?? holds[key]
+    if (hold === undefined || outcome.isUnheld) { results.push({ title, status: outcome.ok ? 'pass' : 'fail', line: outcome.line }); continue }
+    try {
+      // Only an assertion failure may stand for the registered known problem.
+      await knownFailure(hold, () => { if (!outcome.ok) assert.fail(outcome.line) })
+      results.push({ title, status: 'known', line: `${outcome.line} Known problem (${hold}).` })
+    } catch (error) { results.push({ title, status: 'fail', line: `${error.message} ${outcome.line}` }) }
+  }
+  return results
 }

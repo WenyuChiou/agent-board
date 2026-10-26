@@ -1,11 +1,13 @@
 import { describe, test } from 'node:test'
 import assert from 'node:assert/strict'
+import { createHash } from 'node:crypto'
 import { existsSync, readFileSync, readdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { makeWorld } from './lib/world.mjs'
 import { spawnIsolated } from './lib/spawn.mjs'
-import { OUT_DEFAULT, archiveIntegrity, archiveProblems, fileOpsPerPoll, levelOutcome, makeRedact, median, parseArguments, peakRss, percentile, pruneRefusal, redactDeep, tallyOf, writeReport } from './lib/soak-report.mjs'
+import { knownFailure } from './lib/known.mjs'
+import { OUT_DEFAULT, archiveIntegrity, archiveProblems, archiveQuestionIntegrity, archiveQuestionProblems, archiveRefusal, classifySoakChecks, fileOpsPerPoll, hookLoadMarker, leftoverPlan, leftoverProcesses, levelOutcome, makeRedact, median, parseArguments, peakRss, percentile, queuedSessions, questionEvidenceProjection, questionRecoveryOf, redactDeep, tallyOf, writeReport } from './lib/soak-report.mjs'
 
 const soak = fileURLToPath(new URL('./soak.mjs', import.meta.url))
 
@@ -21,6 +23,35 @@ const attempt = (world, args) => new Promise((resolve, reject) => {
 })
 
 describe('L6 soak arguments', () => {
+  test('L6 soak results: measured successes pass while their hold identifiers remain registered', async () => {
+    const titles = { ops: 'File operations', preserve: 'Preserved questions', level: 'Memory level' }
+    const holds = { ops: 'hold:serve-poll-file-ops' }
+    const outcomes = { ops: { ok: true, line: 'Measured 2 operations.' }, preserve: { ok: true, line: 'Measured 4 recoverable questions.' }, level: { ok: true, hold: holds.ops, line: 'Memory settled.' } }
+    const results = await classifySoakChecks({ outcomes, titles, holds, minutes: 35, knownFailure })
+    assert.deepEqual(results, Object.entries(titles).map(([key, title]) => ({ title, status: 'pass', line: outcomes[key].line })))
+    assert.deepEqual(holds, { ops: 'hold:serve-poll-file-ops' })
+  })
+  test('L6 soak results: held failures remain known and unheld failures still fail', async () => {
+    const titles = { ops: 'File operations', preserve: 'Preserved questions', watch: 'Terminal board', crash: 'Crashed server' }
+    const holds = { ops: 'hold:serve-poll-file-ops', crash: 'hold:serve-poll-file-ops' }
+    const outcomes = { ops: { ok: false, line: 'Too many operations.' }, preserve: { ok: false, line: 'Question recovery failed.' }, watch: { ok: false, line: 'Terminal stopped.' }, crash: { ok: false, isUnheld: true, line: 'Server exited.' } }
+    const results = await classifySoakChecks({ outcomes, titles, holds, minutes: 35, knownFailure })
+    assert.deepEqual(results.map(one => one.status), ['known', 'fail', 'fail', 'fail'])
+    assert.match(results[0].line, /Known problem \(hold:serve-poll-file-ops\)/)
+    assert.equal(results[1].status, 'fail')
+    assert.equal(results[3].line, outcomes.crash.line)
+  })
+  test('L6 soak results: an unexpected known-failure error fails the check', async () => {
+    const results = await classifySoakChecks({ outcomes: { ops: { ok: false, line: 'Measurement failed.' } }, titles: { ops: 'File operations' }, holds: { ops: 'invalid hold' }, minutes: 35, knownFailure })
+    assert.deepEqual(results, [{ title: 'File operations', status: 'fail', line: 'Invalid known failure: invalid hold Measurement failed.' }])
+  })
+  test('L6 soak results: missing measurements fail full runs and may skip short runs', async () => {
+    const input = { outcomes: { ops: { skipped: 'No polls completed.' } }, titles: { ops: 'File operations' }, holds: { ops: 'hold:serve-poll-file-ops' }, knownFailure }
+    const full = await classifySoakChecks({ ...input, minutes: 35 })
+    const short = await classifySoakChecks({ ...input, minutes: 1 })
+    assert.deepEqual(full, [{ title: 'File operations', status: 'fail', line: 'Not measured in a 35-minute run: No polls completed.' }])
+    assert.deepEqual(short, [{ title: 'File operations', status: 'skipped', line: 'No polls completed.' }])
+  })
   test('L6 soak arguments: a rejected --minutes value, a repeated flag and an unknown flag exit 2 with one plain line and create no report folder', async () => {
     const world = makeWorld()
     try {
@@ -182,36 +213,149 @@ describe('L6 soak arguments', () => {
     assert.ok(archiveProblems(kept).includes('2 stopped tasks are still in progress.md, more than the 0 whose archive was not answered'))
   })
 
+  const question = (overrides = {}) => {
+    const record = {
+      scope: JSON.stringify(['demo', 'codex', 'b1']),
+      words: 'Publish the plan, OK?',
+      occurrence: 1,
+      copies: 1,
+      isWaiting: false,
+      isPresent: false,
+      isUnresolved: true,
+      isArchived: true,
+      firstObserved: 1720000000000,
+      incarnation: 'first',
+      producer: 'codex:publish-plan',
+      producerRevisions: ['a'.repeat(64)],
+      producerSources: ['source-a'],
+      source: { kind: 'block', project: 'demo', task: 'Plan', context: 'Release', text: 'Publish the plan, OK?', agent: 'codex', session: 'b1', data: JSON.stringify({ auto: { session: 'b1', agent: 'codex', state: 'ended', updated: 1720000000000, resume: null, dir: null, pr: null, ci: null }, steps: ['done', 'waiting'] }) },
+      ...overrides,
+    }
+    const binding = createHash('sha256').update(JSON.stringify([record.scope, record.words, record.occurrence, record.copies, record.incarnation])).digest('hex')
+    return { id: overrides.id ?? `question:${binding}:1`, ...record }
+  }
+  const ledgerText = records => `${JSON.stringify({ version: 1, next: records.reduce((next, record) => Math.max(next, Number(record.id.slice(record.id.lastIndexOf(':') + 1)) + 1), 1), records, legacy: {} })}\n`
+  const captureEvidence = value => {
+    const text = `${JSON.stringify(value)}\n`
+    return { hash: createHash('sha256').update(text).digest('hex'), text }
+  }
+
+  test('L6 soak arguments: the holdings evidence reader rejects one malformed record mixed with a valid record', () => {
+    const malformed = question({ words: 'Ship the plan, OK?', incarnation: 'second' })
+    delete malformed.isUnresolved
+    delete malformed.occurrence
+    delete malformed.copies
+    const evidence = questionEvidenceProjection({ ledgerText: ledgerText([question(), malformed]), captures: [] })
+    assert.match(evidence.error, /question ledger record is invalid/)
+    assert.equal(evidence.questions, undefined)
+  })
+
+  test('L6 soak arguments: the holdings evidence reader rejects bad capture versions and sources', () => {
+    const record = question()
+    const invalidVersion = captureEvidence({ version: 2, disposition: 'archived', record })
+    const invalidSource = captureEvidence({ version: 1, disposition: 'archived', record: { ...record, source: {} } })
+    for (const capture of [invalidVersion, invalidSource]) {
+      const evidence = questionEvidenceProjection({ ledgerText: ledgerText([]), captures: [capture] })
+      assert.match(evidence.error, /question capture schema is invalid/)
+    }
+  })
+
+  test('L6 soak arguments: the holdings evidence reader projects a valid archived capture onto its ledger record', () => {
+    const record = question({ isArchived: undefined })
+    const capture = captureEvidence({ version: 1, disposition: 'archived', record })
+    const evidence = questionEvidenceProjection({ ledgerText: ledgerText([record]), captures: [capture] })
+    assert.equal(evidence.error, undefined)
+    assert.equal(evidence.questions.length, 1)
+    assert.equal(evidence.questions[0].isArchived, true)
+  })
+
+  test('L6 soak arguments: archived unanswered questions pass by retaining recovery evidence, not by leaving zero records', () => {
+    const before = [{ ...question(), isArchived: undefined }]
+    const after = [question()]
+    const integrity = archiveQuestionIntegrity({ before, after, archivedSessions: new Set(['b1']), recoverableQuestionIds: new Set(after.map(record => record.id)) })
+    assert.equal(after.length, 1)
+    assert.equal(integrity.checked, 1)
+    assert.deepEqual(archiveQuestionProblems(integrity), [])
+  })
+
+  test('L6 soak arguments: page recovery reads every question surface and refuses incomplete evidence', () => {
+    const first = question().id
+    const second = question({ words: 'Choose another path?', incarnation: 'second' }).id
+    const model = { asks: [{ questionId: first }], reminder: [{ questionId: second }], older: [{ questionId: first }], hidden: [{ text: 'manual question' }] }
+    const recovery = questionRecoveryOf(200, model)
+    assert.equal(recovery.checked, true)
+    assert.deepEqual(recovery.questionIds, [first, second])
+    assert.deepEqual(recovery.surfaceCounts, { asks: 1, reminder: 1, older: 1, hidden: 1 })
+    for (const broken of [{ ...model, hidden: undefined }, { ...model, older: [{ questionId: 7 }] }, { ...model, asks: [null] }]) {
+      const rejected = questionRecoveryOf(200, broken)
+      assert.equal(rejected.checked, false)
+      assert.deepEqual(rejected.questionIds, [])
+    }
+    assert.equal(questionRecoveryOf(503, model).checked, false)
+  })
+
+  test('L6 soak arguments: actual shelf membership recovers a historical question without an archived flag', () => {
+    const record = question({ isArchived: undefined })
+    const integrity = archiveQuestionIntegrity({ before: [record], after: [record], archivedSessions: new Set(['b1']), recoverableQuestionIds: new Set([record.id]) })
+    assert.deepEqual(archiveQuestionProblems(integrity), [])
+  })
+
+  test('L6 soak arguments: an archived flag cannot replace actual shelf recovery evidence', () => {
+    const record = question()
+    const integrity = archiveQuestionIntegrity({ before: [record], after: [record], archivedSessions: new Set(['b1']) })
+    assert.deepEqual(integrity.undiscoverable, [record.id])
+  })
+
+  test('L6 soak arguments: archived unanswered-question integrity names every identity, age, provenance, source and recovery violation', () => {
+    const original = question()
+    const changedId = question({ id: 'question:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb:2' })
+    assert.match(archiveQuestionProblems(archiveQuestionIntegrity({ before: [], after: [], archivedSessions: new Set(['b1']) })).join('; '), /preservation was not measured/)
+    const variants = [
+      [[], /1 unanswered question IDs are missing/],
+      [[changedId], /1 unanswered question IDs changed/],
+      [[{ ...original, firstObserved: original.firstObserved + 1 }], /1 unanswered questions lost their original age/],
+      [[{ ...original, scope: JSON.stringify(['demo', 'codex', 'other']) }], /1 unanswered questions changed scope or producer binding/],
+      [[{ ...original, producerRevisions: [], producerSources: [] }], /1 unanswered questions lost producer provenance/],
+      [[{ ...original, source: undefined }], /1 unanswered questions lost their retained source/],
+      [[{ ...original, isArchived: false }], /1 unanswered questions are not recoverable on the board/],
+      [[{ ...original, isUnresolved: false }], /1 unanswered questions are not recoverable on the board/],
+    ]
+    for (const [after, expected] of variants) {
+      const integrity = archiveQuestionIntegrity({ before: [original], after, archivedSessions: new Set(['b1']) })
+      assert.match(archiveQuestionProblems(integrity).join('; '), expected)
+    }
+  })
+
   test('L6 soak arguments: an archive with no answer in time, a 408 or one cut short is the known slowness only while file operations fail and nothing was lost', () => {
     const clean = { archived: 5, lost: 0, unarchived: 0, othersLost: 0, unpressedGone: 0, stopped: 2, stoppedLeft: 1, stoppedUnanswered: 1 }
-    assert.equal(pruneRefusal({ refusals: [], integrity: clean, isOpsHeld: true, hold, counted }), undefined)
+    assert.equal(archiveRefusal({ refusals: [], integrity: clean, isOpsHeld: true, hold, counted }), undefined)
     // A wait that ran out and a 408 from the server's own wait.
-    const timeout = pruneRefusal({ refusals: [{ cause: 'timeout', count: 1 }, { cause: 'timeout', count: 1 }], integrity: clean, isOpsHeld: true, hold, counted })
+    const timeout = archiveRefusal({ refusals: [{ cause: 'timeout', count: 1 }, { cause: 'timeout', count: 1 }], integrity: clean, isOpsHeld: true, hold, counted })
     assert.equal(timeout.ok, false)
     assert.equal(timeout.hold, hold)
     assert.equal(timeout.isUnheld, undefined)
-    assert.match(timeout.line, /^The archive did not finish \(2 got no answer in time\), so pruning was not judged: the page server's known slowness explains it, since the file-operation check fails; nothing was lost \(5 tasks are in the archive file and 1 of the 2 stopped tasks are still in progress\.md\)\. At the end, 5 tasks were archived\.$/)
+    assert.match(timeout.line, /^The archive did not finish \(2 got no answer in time\), so unanswered-question preservation was not judged: the page server's known slowness explains it, since the file-operation check fails; nothing was lost \(5 tasks are in the archive file and 1 of the 2 stopped tasks are still in progress\.md\)\. At the end, 5 tasks were archived\.$/)
     // Stopped tasks the time limit left unreached.
-    const cut = pruneRefusal({ refusals: [{ cause: 'cut', count: 1 }], integrity: clean, isOpsHeld: true, hold, counted })
+    const cut = archiveRefusal({ refusals: [{ cause: 'cut', count: 1 }], integrity: clean, isOpsHeld: true, hold, counted })
     assert.equal(cut.hold, hold)
     assert.match(cut.line, /1 stopped tasks were not reached before the time limit/)
     // The same, with a task lost, an answered task still there, or another block gone: never held.
     for (const [change, words] of [[{ lost: 1 }, /1 tasks left progress\.md but are not in the archive file/], [{ unarchived: 1 }, /1 tasks whose archive was answered are still in progress\.md/], [{ othersLost: 1 }, /1 blocks the archive was not to touch left progress\.md/]]) {
-      const outcome = pruneRefusal({ refusals: [{ cause: 'cut', count: 1 }], integrity: { ...clean, ...change }, isOpsHeld: true, hold, counted })
+      const outcome = archiveRefusal({ refusals: [{ cause: 'cut', count: 1 }], integrity: { ...clean, ...change }, isOpsHeld: true, hold, counted })
       assert.equal(outcome.isUnheld, true)
       assert.equal(outcome.hold, undefined)
       assert.match(outcome.line, words)
     }
     // With the file-operation check passing or skipped there is no known slowness to explain it.
-    const unheld = pruneRefusal({ refusals: [{ cause: 'timeout', count: 1 }], integrity: clean, isOpsHeld: false, hold, counted })
+    const unheld = archiveRefusal({ refusals: [{ cause: 'timeout', count: 1 }], integrity: clean, isOpsHeld: false, hold, counted })
     assert.equal(unheld.isUnheld, true)
     assert.match(unheld.line, /the file-operation check does not fail, so its known slowness does not explain it/)
   })
 
-  test('L6 soak arguments: an archive refused with an error status or a failed connection fails pruning even while the slowness is held', () => {
+  test('L6 soak arguments: an archive refused with an error status or a failed connection fails preservation even while the slowness is held', () => {
     const clean = { archived: 5, lost: 0, unarchived: 0, othersLost: 0, unpressedGone: 0, stopped: 2, stoppedLeft: 1, stoppedUnanswered: 1 }
     for (const [refusals, words] of [[[{ cause: 'status', status: 503, count: 1 }], /1 answered 503/], [[{ cause: 'timeout', count: 1 }, { cause: 'status', status: 500, count: 1 }], /1 got no answer in time, 1 answered 500/], [[{ cause: 'refused', count: 1 }], /1 could not connect/], [[{ cause: 'closed', count: 1 }], /1 lost the connection twice before an answer/], [[{ cause: 'unreadable', count: 1 }], /1 stopped tasks could not be pressed because the board could not be read/], [[{ cause: 'button', count: 1 }], /1 stopped tasks had no Archive button/]]) {
-      const outcome = pruneRefusal({ refusals, integrity: clean, isOpsHeld: true, hold, counted })
+      const outcome = archiveRefusal({ refusals, integrity: clean, isOpsHeld: true, hold, counted })
       assert.equal(outcome.ok, false)
       assert.equal(outcome.isUnheld, true)
       assert.equal(outcome.hold, undefined)
@@ -234,5 +378,117 @@ describe('L6 soak arguments', () => {
     assert.equal(rise.hold, undefined)
     assert.match(rise.line, /^The page server's highest memory was 390 MB up to the end of the archive and 500 MB after it \(limit 439 MB\)\.$/)
     assert.equal(levelOutcome({ ...unmeasured, after: 379 * megabyte, settled: 3, isOpsHeld: true }).ok, true)
+  })
+  test('L6 soak arguments: a leftover process of the hook load is one the run started, found by its parent chain or by the world folder in its command line, never the run, its lister or another world', () => {
+    const world = String.raw`C:\Users\RUNNER~1\AppData\Local\Temp\agent-board-e2e-AbC123`
+    const list = [
+      { pid: 100, ppid: 1, started: 1000, name: 'node.exe', command: 'node tests/e2e/hook-load.mjs' },
+      { pid: 101, ppid: 100, started: 1001, name: 'cmd.exe', command: 'cmd.exe /d /s /c "node hook"' },
+      { pid: 102, ppid: 101, started: 1002, name: 'node.exe', command: 'node -e worker' },
+      // A stale parent id names this run, but the process was already there before the run started.
+      { pid: 103, ppid: 100, started: 999, name: 'node.exe', command: 'node -e unrelated' },
+      { pid: 104, ppid: 103, started: 1003, name: 'node.exe', command: 'node -e unrelated-child' },
+      // A worker whose parent is gone, found by the world folder in either slash style and any letter case.
+      { pid: 200, ppid: 4, name: 'node.exe', command: `node ${world.toLowerCase().replaceAll('\\', '/')}/home/.claude/agent-board.mjs --serve` },
+      // Another world whose name only starts with this one's, and a process of nobody's.
+      { pid: 300, ppid: 4, name: 'node.exe', command: String.raw`node ${world}4\home\.claude\agent-board.mjs` },
+      { pid: 500, ppid: 1, name: 'explorer.exe', command: 'explorer.exe' },
+      // The lister and its console.
+      { pid: 400, ppid: 100, name: 'powershell.exe', command: 'powershell.exe -Command Get-CimInstance' },
+      { pid: 401, ppid: 400, name: 'conhost.exe', command: 'conhost.exe 0xffffffff' },
+      // Windows may also attach a console directly to this run.
+      { pid: 402, ppid: 100, name: 'ConHost.EXE', command: 'conhost.exe 0xffffffff' },
+    ]
+    assert.deepEqual(leftoverProcesses({ list, self: 100, roots: [world, undefined], exclude: [400] }).map(one => one.pid), [101, 102, 200])
+    assert.deepEqual(leftoverProcesses({ list: list.filter(one => ![101, 102, 200].includes(one.pid)), self: 100, roots: [world], exclude: [400] }), [])
+    // Missing creation times keep the parent-chain fallback used on macOS.
+    assert.deepEqual(leftoverProcesses({ list: list.filter(one => one.pid !== 104).map(({ started, ...one }) => one), self: 100, roots: [world], exclude: [400] }).map(one => one.pid), [101, 102, 103, 200])
+    // A parent chain that loops ends without hanging.
+    assert.deepEqual(leftoverProcesses({ list: [{ pid: 7, ppid: 8, name: 'a', command: '' }, { pid: 8, ppid: 7, name: 'b', command: '' }], self: 100, roots: [] }), [])
+  })
+  test("L6 soak arguments: the leftover plan kills this run's descendants and its later path matches, and only reports a path match that started before the run", () => {
+    const world = '/tmp/agent-board-e2e-this-run'
+    const list = [
+      { pid: 100, ppid: 1, started: 1000, name: 'node', command: 'node hook-load.mjs' },
+      { pid: 101, ppid: 100, name: 'node', command: 'node child' },
+      { pid: 102, ppid: 101, started: 1002, name: 'node', command: 'node grandchild' },
+      { pid: 200, ppid: 4, started: 2000, name: 'node', command: `node ${world}/worker` },
+      { pid: 201, ppid: 4, started: 500, name: 'node', command: `node ${world}/worker` },
+      { pid: 202, ppid: 4, name: 'node', command: `node ${world}/worker` },
+      { pid: 300, ppid: 4, started: 2000, name: 'node', command: 'node /tmp/agent-board-e2e-another-run/worker' },
+    ]
+    const plan = leftoverPlan({ list, self: 100, roots: [world] })
+    assert.deepEqual(plan.kill, [list[1], list[2], list[3]])
+    assert.deepEqual(plan.keep, [list[4], list[5]])
+    const orphaned = leftoverPlan({ list, self: undefined, since: 100, roots: [world] })
+    assert.deepEqual(orphaned.kill, [list[3]])
+    assert.deepEqual(orphaned.keep, [list[4], list[5]])
+    const noStart = list.map(one => one.pid === 100 ? { ...one, started: undefined } : one)
+    assert.deepEqual(leftoverPlan({ list: noStart, self: 100, roots: [world] }), { kill: [noStart[1], noStart[2]], keep: [noStart[3], noStart[4], noStart[5]] })
+    assert.deepEqual(leftoverPlan({ list: [{ ...list[0], pid: 99 }, ...noStart], self: 100, since: 99, roots: [world] }), plan)
+    assert.deepEqual(leftoverPlan({ list: [{ ...list[0], pid: 99, started: 500 }, ...list], self: 100, since: 99, roots: [world] }), plan)
+    assert.deepEqual(leftoverPlan({ list, self: 999, since: 100, roots: [world] }), orphaned)
+    assert.deepEqual(leftoverPlan({ list, self: 100, roots: [world], exclude: [101, 200] }), { kill: [], keep: [list[4], list[5]] })
+    const sameStart = { ...list[3], started: 1000 }
+    assert.deepEqual(leftoverPlan({ list: [list[0], sameStart], self: 100, roots: [world] }), { kill: [sameStart], keep: [] })
+  })
+  test('L6 soak arguments: an orphaned PowerShell hook counts only when its encoded command names this world', () => {
+    const world = String.raw`C:\Users\RUNNER~1\AppData\Local\Temp\agent-board-e2e-AbC123`
+    const encoded = script => Buffer.from(script, 'utf16le').toString('base64')
+    const list = ['-EncodedCommand', '-ENC', '-eC', '-E'].flatMap((flag, index) => [
+      { pid: 200 + index, ppid: 4, name: 'powershell.exe', command: `powershell.exe -NoProfile ${flag} ${encoded(`& '${world}/home/.claude/agent-board.mjs'`)}` },
+      { pid: 300 + index, ppid: 4, name: 'powershell.exe', command: `powershell.exe -NoProfile ${flag} ${encoded(`& '${world}4/home/.claude/agent-board.mjs'`)}` },
+    ])
+    list.push(
+      { pid: 400, ppid: 4, name: 'powershell.exe', command: 'powershell.exe -enc not-base64!' },
+      { pid: 401, ppid: 4, name: 'powershell.exe', command: 'powershell.exe -enc YQ==' },
+      { pid: 402, ppid: 4, name: 'powershell.exe', command: 'powershell.exe -enc ANg=' },
+      { pid: 204, ppid: 4, name: 'cmd.exe', command: `cmd /d /s /c "powershell.exe -NoProfile -EncodedCommand ${encoded(`& '${world}/home/.claude/agent-board.mjs'`)}"` },
+    )
+    assert.deepEqual(leftoverProcesses({ list, self: 100, roots: [world] }).map(one => one.pid), [200, 201, 202, 203, 204])
+    assert.deepEqual(leftoverProcesses({ list, self: 100, roots: [world], exclude: [201] }).map(one => one.pid), [200, 202, 203, 204])
+  })
+  test('L6 soak arguments: queued sessions come from raw hook payloads and board entries, skipping malformed, unreadable and temporary files', () => {
+    const raw = payload => JSON.stringify({ version: 1, kind: 'raw', at: 1000, argv: [], env: {}, payload })
+    const sessions = queuedSessions([
+      { name: '1000-a.raw.json', text: raw({ session_id: 'load-codex-0' }) },
+      { name: '1001-b.raw.json', text: raw({ sessionId: 'load-grok-1' }) },
+      { name: '1002-c.raw.json', text: raw({ conversationId: 'load-antigravity-2' }) },
+      { name: '1003-d.json', text: JSON.stringify({ version: 1, session: 'load-codex-3', payload: {} }) },
+      { name: '1004-e.json', text: '{broken' },
+      { name: '1005-f.json' },
+      { name: '1006-g.raw.json.tmp', text: raw({ session_id: 'load-codex-4' }) },
+      { name: '1007-h.json', text: 'null' },
+      { name: '1008-i.raw.json', text: raw({ session_id: 42 }) },
+    ])
+    assert.deepEqual([...sessions], ['load-codex-0', 'load-grok-1', 'load-antigravity-2', 'load-codex-3'])
+    assert.equal(sessions.has('load-codex-4'), false)
+    assert.equal(sessions.has('load-codex-5'), false)
+  })
+  test('L6 soak arguments: a failed hook load check is known for #241 only on Windows, when no hook exited non-zero or ran past twice the 3 s budget, the poll interval fits its budget, every poll was answered, some report was shown and every late or missed report came back while that session\'s own event was queued', () => {
+    const marker = (key, outcome, platform = 'win32') => hookLoadMarker({ key, outcome, platform, budgetMs: 3000 })
+    const slowHooks = { ok: false, over: 1, failedRuns: 0, maxMs: 3126 }
+    const latePage = { ok: false, shown: 2182, slow: 30, slowNotQueued: 0, failedAnswers: 0, pollWithinBudget: true }
+    assert.deepEqual(marker('hooks', slowHooks), { issue: 241, explains: true })
+    assert.deepEqual(marker('page', latePage), { issue: 241, explains: true })
+    // A lucky pass on Windows still carries the marker; other systems and other checks carry none.
+    assert.deepEqual(marker('hooks', { ok: true }), { issue: 241, explains: true })
+    assert.deepEqual(marker('page', { ok: true, pollWithinBudget: true }), { issue: 241, explains: true })
+    assert.equal(marker('hooks', slowHooks, 'linux'), undefined)
+    assert.equal(marker('page', latePage, 'darwin'), undefined)
+    assert.equal(marker('caps', { ok: false }), undefined)
+    // Outside the pattern: a hook that exited non-zero, one that ran past 6 s, a failure with no slow
+    // run, a late report without its own queued event, a bad poll interval, an unanswered poll, no report shown, or nothing slow.
+    assert.equal(marker('hooks', { ...slowHooks, failedRuns: 1 }).explains, false)
+    assert.equal(marker('hooks', { ...slowHooks, maxMs: 6001 }).explains, false)
+    assert.equal(marker('hooks', { ok: false, over: 0, failedRuns: 0, maxMs: 0 }).explains, false)
+    assert.equal(marker('page', { ...latePage, slowNotQueued: 1 }).explains, false)
+    assert.equal(marker('page', { ...latePage, pollWithinBudget: false }).explains, false)
+    assert.equal(marker('page', { ...latePage, pollWithinBudget: undefined }).explains, false)
+    assert.equal(marker('page', { ok: true, pollWithinBudget: false }).explains, false)
+    assert.equal(marker('page', { ...latePage, failedAnswers: 1 }).explains, false)
+    assert.equal(marker('page', { ...latePage, shown: 0 }).explains, false)
+    assert.equal(marker('page', { ...latePage, slow: 0 }).explains, false)
+    assert.equal(marker('page', {}).explains, false)
   })
 })

@@ -359,7 +359,7 @@ def parser_parity():
     unterminated = "## a\n\n" + MARK.format(s="12345678", a="codex") + "\n### old\n- [ ] step\n\nhand notes\n"
     out = merge_mod.merge_text(unterminated, [frag])
     check("11b block with no end marker is replaced, not duplicated",
-          out == "## a\n\n" + frag + "\nhand notes\n", out)
+          out == "## a\n\n" + frag + "### old\n- [ ] step\n\nhand notes\n", out)
     check("11c a block with no end marker is a warning", all(
         m.startswith("warning:") for m in validate_mod.validate_text(unterminated)))
     dup = "## a\n\n" + old + "\n" + old
@@ -545,8 +545,8 @@ def merge_repairs():
         broken = at_time(block("12345678"), stamp).split("<!-- /auto")[0]
         w(board, "## a\n\n" + broken + "\nhand notes\n")
         result = py("merge.py", board, frag)
-        check(name, result.returncode == 0 and r(board) == "## a\n\n" + incoming + "\nhand notes\n"
-              and "replaced: the board block had no end marker" in result.stdout, result.stdout + result.stderr)
+        check(name, result.returncode == 0 and r(board) == "## a\n\n" + incoming + broken.split("\n", 1)[1] + "\nhand notes\n"
+              and "replaced: the board block had no end marker; its old lines stay below it as text" in result.stdout, result.stdout + result.stderr)
 
     original_merge = merge_mod.merge_text
 
@@ -565,6 +565,37 @@ def merge_repairs():
                 check(name, False, "the changed block was accepted")
             except SystemExit as e:
                 check(name, "did not read back as written" in str(e), str(e))
+
+
+def cut_off_block():
+    # A block cut off in the middle of the board: no end marker, more sections after it.
+    cut = "<!-- auto session=55fb44cb agent=codex state=waiting updated=2026-10-20T01:17:08.128Z -->"
+    before = "# Progress\n\n## demo-152\n\n" + cut + "\n### Add a shelf\n> waiting on your repl\n"
+    following = ("\n## demo-154\n\n" + block("1d0ef21d", title="Fix the working text", steps=("- [?] Ship it, OK?",))
+                 + "\n" + block("9a9a9a9a", title="A finished plan", steps=("- [x] Did it",))
+                 + "\n### Hand-kept task\n- [ ] Keep me\n")
+    board = before + following
+    other = at_time(block("1d0ef21d", title="Fix the working text", steps=("- [x] Shipped",)), "2026-10-21T00:00:00Z")
+    out = merge_mod.merge_text(board, [other])
+    check("16a a fragment for the block after a cut-off block replaces only that block",
+          out.startswith(before) and "- [x] Shipped" in out and "Ship it, OK?" not in out
+          and out.endswith("\n" + block("9a9a9a9a", title="A finished plan", steps=("- [x] Did it",)) + "\n### Hand-kept task\n- [ ] Keep me\n"), out)
+    own = at_time(block("55fb44cb", title="Shelf added"), "2026-10-21T00:00:00Z")
+    out, outcomes = merge_mod.merge_text(board, [own], with_outcomes=True)
+    check("16b a fragment for the cut-off block's own session replaces it and keeps every section after it",
+          out == "# Progress\n\n## demo-152\n\n" + own + "### Add a shelf\n> waiting on your repl\n" + following
+          and outcomes == [("55fb44cb", "replaced: the board block had no end marker; its old lines stay below it as text")], (out, outcomes))
+    check("16c the cut-off block does not take the next block's end marker as its own",
+          out.count("<!-- /auto session=1d0ef21d -->") == 1 and out.count("<!-- /auto session=55fb44cb -->") == 1, out)
+    p0_tail = "### Hand-kept task\n- [ ] Keep me\n" + following
+    p0 = "# Progress\n\n## demo-152\n\n" + cut + "\n" + p0_tail
+    repaired = merge_mod.merge_text(p0, [own])
+    check("16d merge keeps a hand-kept task right after a marker with no end",
+          repaired == "# Progress\n\n## demo-152\n\n" + own + p0_tail, repaired)
+    later = at_time(block("55fb44cb", title="Shelf painted"), "2026-10-22T00:00:00Z")
+    again = merge_mod.merge_text(repaired, [later])
+    check("16e a second merge leaves the text a cut-off block left as it was",
+          again == "# Progress\n\n## demo-152\n\n" + later + p0_tail, again)
 
 
 def reporter_order():
@@ -626,6 +657,7 @@ def main():
         file_handling()
         merge_order()
         merge_repairs()
+        cut_off_block()
         reporter_order()
 
     print(f"\n==== {len(passed)} passed, {len(failed)} failed ====")

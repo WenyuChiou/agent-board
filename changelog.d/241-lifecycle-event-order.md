@@ -1,0 +1,2 @@
+- **Delayed hook events preserve their source time and cannot replace newer work (#241).** A worker delayed more than ten seconds no longer re-dates an old event, and directly arriving older lifecycle events keep the current session state and update time unchanged. Windows startup latency and automatic pending recovery remain separate follow-ups.
+  Tests: `an Antigravity worker delayed past ten seconds preserves its event time without overwriting newer work`, `an older live lifecycle event cannot replace a newer state or its update time`.

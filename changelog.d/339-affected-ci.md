@@ -1,0 +1,2 @@
+- Select CI groups from changed paths and base/head dependencies, keep the platform/Node matrices of affected groups, separate board/messaging and installer/reporter jobs, and fail the final gate when a selected check did not succeed (#339).
+  Tests: `ci impact selects only the installer runner needed by the changed installer path`; `base and head dependency unions retain a removed import edge`; `the exact workflow validation script rejects a skipped selected job and failed planner`.
