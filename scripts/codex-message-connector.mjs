@@ -51,7 +51,7 @@ export const connectCodexProxy = async ({ boardUrl, executable, thread, turn, su
       if (value.method === 'item/completed' && p.item?.type === 'agentMessage' && typeof p.item.text === 'string') {
         for (const [id, ack] of acknowledgements) {
           const line = p.item.text.split(/\r?\n/).find(line => line === 'ACK ' + id || line.startsWith('ACK ' + id + ' '))
-          if (line) { clearTimeout(ack.timer); acknowledgements.delete(id); ack.done(line.slice(0, 500)) }
+          if (line) { clearTimeout(ack.timer); acknowledgements.delete(id); ack.done(line.length > 200 ? 'ACK ' + id : line) }
         }
       }
       if (value.method === 'turn/completed') {
@@ -81,23 +81,25 @@ export const connectCodexProxy = async ({ boardUrl, executable, thread, turn, su
     child.stdin.write(JSON.stringify({ method: 'initialized', params: {} }) + '\n')
     session = await boardClient(boardUrl).attach({
       agent: 'codex', session: thread, turn, surface, verify, onError,
-      deliver: async (message, accepted) => {
+      deliver: async (message, accepted, begin) => {
         if (message.turn !== turn || !await verify()) throw new Error('TARGET_MISMATCH')
         let ackEntry
         const answer = new Promise((done, reject) => {
-          const timer = setTimeout(() => { acknowledgements.delete(message.id); reject(new Error('ACK_TIMEOUT')) }, 60_000)
+          const timer = setTimeout(() => { acknowledgements.delete(message.nonce); reject(new Error('ACK_TIMEOUT')) }, 60_000)
           ackEntry = { done, reject, timer }
-          acknowledgements.set(message.id, ackEntry)
+          acknowledgements.set(message.nonce, ackEntry)
         })
         // Install a rejection handler while the steer response is still in flight.
         void answer.catch(() => undefined)
         try {
-          const result = await request('turn/steer', { threadId: thread, expectedTurnId: turn, input: [{ type: 'text', text: deliveryPrompt(message), text_elements: [] }] })
+          const prompt = deliveryPrompt(message)
+          begin()
+          const result = await request('turn/steer', { threadId: thread, expectedTurnId: turn, input: [{ type: 'text', text: prompt, text_elements: [] }] })
           if (result.turnId !== turn) throw new Error('TURN_MISMATCH')
           await accepted()
           return await answer
         } catch (error) {
-          clearTimeout(ackEntry.timer); acknowledgements.delete(message.id)
+          clearTimeout(ackEntry.timer); acknowledgements.delete(message.nonce)
           throw error
         }
       },

@@ -12,6 +12,8 @@ import { stopTree } from './lib/processes.mjs'
 // It is not a *.test.mjs file, so it never runs per pull request (.github/workflows/soak.yml runs it).
 // The hook load phase follows the soak's teardown when minutes <= 35.
 //   node tests/e2e/soak.mjs [--minutes 1..45] [--out DIR]
+// Once the board soak is done it runs the messaging soak (tests/e2e/soak-messaging.mjs) as a child
+// process, and fails if that fails or cannot run. Its report, messaging-report.json, lands beside this one.
 
 const TITLES = {
   ops: 'L6 soak: 300 polls with new asks keep file operations per poll flat',
@@ -61,6 +63,9 @@ const HOOKS = 10
 const TURNS = 30
 const QUESTION_TURNS = 20
 const MEGABYTE = 1048576
+// The messaging soak that follows: its default length. The job's hour (60 minutes) has to hold both soaks.
+const MESSAGING_MINUTES = 8
+const MESSAGING_REPORT = 'messaging-report.json'
 
 const PROJECTS = ['api-gateway', 'docs-site', 'research-hub', 'billing-core', 'mobile-app', 'infra-tools', 'data-pipeline', 'search-service']
 const AGENTS = ['codex', 'antigravity', 'hermes', 'grok', 'gemini', 'cursor', 'opencode', 'muse']
@@ -116,12 +121,14 @@ const soak = async ({ minutes, out }) => {
   })
   const isRunning = () => control.stop === undefined
   let world, server, watch, stopping
+  const messaging = { child: undefined }
   // A busy page server cannot answer a close request, so the last resort ends both board processes.
   // The page server is a detached process: it is ended only while the world's address file still
   // names its pid and address, so a pid the system gave to another program is never touched.
   const endBoards = () => {
     try { if (server?.isOwned()) process.kill(server.pid) } catch {}
     try { watch?.child.kill() } catch {}
+    try { messaging.child?.kill() } catch {}
   }
   let isGivingUp = false
   let isHookLoadRunning = false
@@ -144,6 +151,8 @@ const soak = async ({ minutes, out }) => {
     save()
     stopper.abort()
     for (const wake of [...wakers]) wake()
+    // The messaging soak stops by itself on this signal, ends its own page server and writes its report.
+    try { messaging.child?.kill('SIGTERM') } catch {}
     // The run should stop by itself within moments; if it does not, leave with what there is.
     const stopSeconds = isHookLoadRunning ? 90 : 30
     setTimeout(() => giveUp(`The soak did not stop in ${stopSeconds} seconds and was closed from outside.`), stopSeconds * 1000).unref()
@@ -872,9 +881,58 @@ const soak = async ({ minutes, out }) => {
   if (report.checks.length > 0) say(`soak: ${tallyOf(report.checks)}`)
   if (saveFailure !== undefined) say(`soak: the report could not be written (${saveFailure.code ?? saveFailure.message}).`)
   say(`soak: ${report.status}`)
+  const isBoardGood = report.status === 'finished' && closeFailure === undefined && saveFailure === undefined && !report.checks.some(check => check.status === 'fail')
+
+  // The messaging soak is a program of its own with a world of its own. The world made here only gives
+  // it a home and a temp folder that spawnIsolated accepts; it takes no part in the run and goes with it.
+  // It runs after the board soak, so the two never share the machine, and it gets what the job's hour leaves.
+  const messagingMinutes = Math.min(MESSAGING_MINUTES, Math.max(1, 45 - minutes))
+  const outcome = { status: 'not run', minutes: messagingMinutes, report: MESSAGING_REPORT, exitCode: undefined, tally: undefined }
+  let launcher
+  try {
+    if (control.stop !== undefined) throw new Error(`the board soak was ${control.stop}`)
+    say(`soak: the messaging soak starts (${messagingMinutes} minutes)`)
+    launcher = makeWorld()
+    // The messaging soak sets up its own clock and preloads, so it starts without this world's.
+    const env = { ...launcher.env }
+    delete env.NODE_OPTIONS
+    const child = spawnIsolated(process.execPath, [fileURLToPath(new URL('./soak-messaging.mjs', import.meta.url)), '--minutes', String(messagingMinutes), '--out', resolve(out)], { env, cwd: launcher.root, stdio: ['ignore', 'pipe', 'pipe'] })
+    messaging.child = child
+    let carry = ''
+    let errors = ''
+    child.stdout.setEncoding('utf8').on('data', chunk => {
+      const lines = (carry + chunk).split('\n')
+      carry = lines.pop() ?? ''
+      for (const line of lines) say(line)
+    })
+    child.stderr.setEncoding('utf8').on('data', chunk => { errors = (errors + chunk).slice(-400) })
+    child.on('error', error => { errors = String(error.message) })
+    // Its own limit is minutes + 3; this is the last word, a little later, in case it hangs.
+    const lastWord = setTimeout(() => { try { child.kill() } catch {} }, (messagingMinutes + 5) * 60000)
+    const code = await new Promise(done => child.once('close', (exit, signal) => done(exit ?? (signal ? 1 : 0))))
+    clearTimeout(lastWord)
+    if (carry !== '') say(carry)
+    messaging.child = undefined
+    outcome.exitCode = code
+    let own
+    try { own = JSON.parse(readFileSync(join(out, MESSAGING_REPORT), 'utf8')) } catch {}
+    outcome.tally = Array.isArray(own?.checks) && own.checks.length > 0 ? tallyOf(own.checks) : undefined
+    // A check the messaging soak could not measure in the minutes left to it is not a pass.
+    const unmeasured = Array.isArray(own?.checks) ? own.checks.filter(check => check.status === 'skipped').length : 0
+    outcome.status = code === 0 && own?.status === 'finished' && unmeasured === 0 ? 'passed' : 'failed'
+    if (unmeasured > 0) say(`soak: the messaging soak could not measure ${unmeasured} of its checks in ${messagingMinutes} minutes`)
+    if (outcome.status === 'failed') say(`soak: the messaging soak failed (exit ${code}${own?.status ? `, ${own.status}` : ''})${errors ? `: ${errors.trim()}` : ''}`)
+  } catch (error) {
+    say(`soak: the messaging soak could not run: ${String(error?.message ?? error).split('\n')[0]}`)
+  } finally {
+    try { await launcher?.close() } catch (error) { say(`soak: the messaging soak's launcher world did not close cleanly: ${String(error?.message ?? error).split('\n')[0]}`) }
+  }
+  report.messaging = outcome
+  save()
+  say(`soak: messaging soak ${outcome.status}${outcome.tally ? ` (${outcome.tally})` : ''}`)
   // The default folder is in the temp folder, so a local run is told where its report went.
   if (out === OUT_DEFAULT) process.stdout.write(`soak: the report is in ${out}\n`)
-  return report.status === 'finished' && closeFailure === undefined && saveFailure === undefined && !report.checks.some(check => check.status === 'fail') ? 0 : 1
+  return isBoardGood && outcome.status === 'passed' && saveFailure === undefined ? 0 : 1
 }
 
 const parsed = parseArguments(process.argv.slice(2))

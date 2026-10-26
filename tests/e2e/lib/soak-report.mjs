@@ -404,6 +404,33 @@ export const levelOutcome = ({ before, after, settled, needed, settleSeconds, ar
   return { ok: after <= limit, line: `The page server's highest memory was ${megabytes(before)} MB up to the end of the archive and ${megabytes(after)} MB after it (limit ${megabytes(limit)} MB).` }
 }
 
+// The messaging soak's levels-off check. `points` are the hub's live memory at each memory line from
+// the moment the store is full to the end of sending: { sent, bytes }, where `bytes` is one kind of
+// memory after a full collection (the heap, or external memory) and `sent` is how many messages had
+// been sent when the line was written. A straight line is fitted through them (least squares) and its slope, in
+// bytes kept per message, may be no more than `limit`. Comparing the medians of two halves let a hub
+// that kept up to about 2.8 KB for each message pass, since the growth was smaller than the 3 MB
+// allowance. A slope has no such floor, but a few hundred KB of noise between lines can swamp it over
+// a short stretch (ten lines with a spread of 1 MB blur the slope by about 220 bytes over 3,000
+// messages), so a window of fewer than `fewestMessages` messages or `fewestLines` lines is not measured.
+export const liveMemoryLevel = (points, { fewestLines = 4, fewestMessages = 2000, limit = 256 } = {}) => {
+  const used = points.filter(one => Number.isFinite(one.sent) && Number.isFinite(one.bytes))
+  const lines = used.length
+  if (lines < fewestLines) return { skipped: `Only ${lines} memory lines came while the store was full, ${fewestLines} are needed.` }
+  const messages = Math.max(...used.map(one => one.sent)) - Math.min(...used.map(one => one.sent))
+  if (messages < fewestMessages) return { skipped: `Only ${count(messages)} messages were sent between the first and last of ${lines} memory lines while the store was full, ${count(fewestMessages)} are needed.` }
+  const meanSent = used.reduce((sum, one) => sum + one.sent, 0) / lines
+  const meanBytes = used.reduce((sum, one) => sum + one.bytes, 0) / lines
+  let along = 0
+  let spread = 0
+  for (const one of used) {
+    along += (one.sent - meanSent) * (one.bytes - meanBytes)
+    spread += (one.sent - meanSent) ** 2
+  }
+  const bytesPerMessage = along / spread
+  return { ok: bytesPerMessage <= limit, bytesPerMessage, messages, lines, limit }
+}
+
 // Plain words, one table. Every figure comes from the report object, so a half-finished report
 // (a timeout, a crash) reads the same way with what it has.
 export const reportMarkdown = report => {
@@ -436,6 +463,7 @@ export const reportMarkdown = report => {
   if (report.archive) lines.push(`- Archive: ${report.archive.path} ${count(report.archive.gone)} of ${count(report.archive.tried)} finished or stopped tasks left progress.md.`)
   if (report.archive?.resent > 0) lines.push(`- ${count(report.archive.resent)} archive requests were sent again after the connection closed before an answer.`)
   if (report.terminalBoard) lines.push(`- Terminal board: ${count(report.terminalBoard.frames)} screens drawn, ${count(report.terminalBoard.framesAfterArchive)} after the archive phase.`)
+  if (report.messaging) lines.push(`- Messaging soak: ${report.messaging.status}${report.messaging.tally ? `, ${report.messaging.tally}` : ''}; its own report is ${report.messaging.report}.`)
   for (const note of report.notes ?? []) lines.push(`- Note: ${note}`)
   lines.push('')
   return lines.join('\n')
@@ -455,10 +483,11 @@ const replace = (temporary, file) => {
 }
 
 // Both files, each through a temporary file and a rename, so a reader never sees half a report.
-export const writeReport = (dir, report, redact) => {
+// The messaging soak writes its own pair into the same folder, under other names and with its own words.
+export const writeReport = (dir, report, redact, { json = 'soak-report.json', markdown = 'soak-report.md', words = reportMarkdown } = {}) => {
   const clean = redactDeep(report, redact)
   mkdirSync(dir, { recursive: true })
-  for (const [name, text] of [['soak-report.json', `${JSON.stringify(clean, null, 2)}\n`], ['soak-report.md', reportMarkdown(clean)]]) {
+  for (const [name, text] of [[json, `${JSON.stringify(clean, null, 2)}\n`], [markdown, words(clean)]]) {
     const file = join(dir, name)
     const temporary = `${file}.${process.pid}.tmp`
     writeFileSync(temporary, text)

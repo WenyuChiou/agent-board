@@ -7,7 +7,7 @@ import { fileURLToPath } from 'node:url'
 import { makeWorld } from './lib/world.mjs'
 import { spawnIsolated } from './lib/spawn.mjs'
 import { knownFailure } from './lib/known.mjs'
-import { OUT_DEFAULT, archiveIntegrity, archiveProblems, archiveQuestionIntegrity, archiveQuestionProblems, archiveRefusal, classifySoakChecks, fileOpsPerPoll, hookLoadMarker, leftoverPlan, leftoverProcesses, levelOutcome, makeRedact, median, parseArguments, peakRss, percentile, queuedSessions, questionEvidenceProjection, questionRecoveryOf, redactDeep, tallyOf, writeReport } from './lib/soak-report.mjs'
+import { OUT_DEFAULT, archiveIntegrity, archiveProblems, archiveQuestionIntegrity, archiveQuestionProblems, archiveRefusal, classifySoakChecks, fileOpsPerPoll, hookLoadMarker, leftoverPlan, leftoverProcesses, levelOutcome, liveMemoryLevel, makeRedact, median, parseArguments, peakRss, percentile, queuedSessions, questionEvidenceProjection, questionRecoveryOf, redactDeep, tallyOf, writeReport } from './lib/soak-report.mjs'
 
 const soak = fileURLToPath(new URL('./soak.mjs', import.meta.url))
 
@@ -378,6 +378,51 @@ describe('L6 soak arguments', () => {
     assert.equal(rise.hold, undefined)
     assert.match(rise.line, /^The page server's highest memory was 390 MB up to the end of the archive and 500 MB after it \(limit 439 MB\)\.$/)
     assert.equal(levelOutcome({ ...unmeasured, after: 379 * megabyte, settled: 3, isOpsHeld: true }).ok, true)
+  })
+
+  // Eleven memory lines, 300 messages apart from the 2,000th to the 5,000th, around 20 MB with noise
+  // of up to 1 MB either way from one line to the next.
+  const megabyte = 1048576
+  const noise = [0.9, -0.7, 0.2, -1.0, 0.6, -0.3, 1.0, -0.8, 0.4, -0.5, 0.7].map(mb => mb * megabyte)
+  const memoryLines = (bytesPerMessage, lines = noise.length) => noise.slice(0, lines).map((spread, line) => ({ sent: 2000 + line * 300, bytes: 20 * megabyte + spread + bytesPerMessage * line * 300 }))
+  // No noise, lines 500 messages apart from the 2,000th: a line the slope can be read off exactly.
+  const cleanLine = (bytesPerMessage, lines = 6) => Array.from({ length: lines }, (_, line) => ({ sent: 2000 + line * 500, bytes: 100 * megabyte + bytesPerMessage * line * 500 }))
+
+  test('L6 messaging soak arguments: live memory that is flat within 1 MB of noise passes and one that keeps 400 bytes for each message, less than one stored record, fails', () => {
+    const flat = liveMemoryLevel(memoryLines(0))
+    assert.equal(flat.ok, true)
+    assert.ok(Math.abs(flat.bytesPerMessage) < 100, `the noise alone gave ${flat.bytesPerMessage} bytes per message`)
+    assert.equal(flat.messages, 3000)
+    assert.equal(flat.lines, 11)
+    // 1 KB for each message is 3 MB over the window, which the old rule (the second half's median against the
+    // first half's plus 3 MB) let through; the fitted slope is near 1,024 bytes per message and fails.
+    const leak = liveMemoryLevel(memoryLines(1024))
+    assert.equal(leak.ok, false)
+    assert.ok(leak.bytesPerMessage > 900 && leak.bytesPerMessage < 1150, `${leak.bytesPerMessage}`)
+    assert.equal(leak.limit, 256)
+    // A leak of one stored record for each message (about 0.4 to 0.6 KB) fails too, noise and all.
+    const record = liveMemoryLevel(memoryLines(400))
+    assert.equal(record.ok, false, `${record.bytesPerMessage}`)
+    // On a clean line the slope is exact, and the limit sits between 250 and 260 bytes per message.
+    assert.ok(Math.abs(liveMemoryLevel(cleanLine(100)).bytesPerMessage - 100) < 1e-6)
+    assert.equal(liveMemoryLevel(cleanLine(250)).ok, true)
+    assert.equal(liveMemoryLevel(cleanLine(260)).ok, false)
+    // Memory that falls as messages are sent is level.
+    assert.equal(liveMemoryLevel(cleanLine(-2000)).ok, true)
+  })
+
+  test('L6 messaging soak arguments: live memory over fewer than 2,000 messages or fewer than 4 memory lines is reported as not measured, however steeply it climbs', () => {
+    // Six lines over 1,500 messages with 1 KB kept for each: a leak, but the window is too short to tell it from noise.
+    assert.deepEqual(liveMemoryLevel(memoryLines(1024, 6)), { skipped: 'Only 1,500 messages were sent between the first and last of 6 memory lines while the store was full, 2,000 are needed.' })
+    // Three lines are too few, however far apart.
+    const sparse = [{ sent: 2000, bytes: 20 * megabyte }, { sent: 3500, bytes: 40 * megabyte }, { sent: 5000, bytes: 60 * megabyte }]
+    assert.deepEqual(liveMemoryLevel(sparse), { skipped: 'Only 3 memory lines came while the store was full, 4 are needed.' })
+    assert.deepEqual(liveMemoryLevel([]), { skipped: 'Only 0 memory lines came while the store was full, 4 are needed.' })
+    // A line with no figure (a probe line without external memory) is not a line.
+    assert.deepEqual(liveMemoryLevel(memoryLines(0).map(one => ({ ...one, bytes: Number.NaN }))), { skipped: 'Only 0 memory lines came while the store was full, 4 are needed.' })
+    // Two thousand messages between the first and last line is enough, 1,500 is not.
+    assert.equal(liveMemoryLevel(cleanLine(0, 5)).skipped, undefined)
+    assert.match(liveMemoryLevel(cleanLine(0, 4)).skipped, /^Only 1,500 messages were sent between the first and last of 4 memory lines/)
   })
   test('L6 soak arguments: a leftover process of the hook load is one the run started, found by its parent chain or by the world folder in its command line, never the run, its lister or another world', () => {
     const world = String.raw`C:\Users\RUNNER~1\AppData\Local\Temp\agent-board-e2e-AbC123`

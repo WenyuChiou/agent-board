@@ -519,7 +519,9 @@ const run = (lang, args = [], beside = {}, source = FILE, code = BOARD_SCRIPT) =
     writeFileSync(join(dir, 'progress-inbox', 'gemini-turn-1-1.json'), JSON.stringify({ session_id: 'g1', cwd: join(dir, 'docs-site'), prompt_response: 'Fixed 12 broken links.' }))
     const script = join(dir, 'agent-board.mjs')
     writeFileSync(script, `globalThis.AGENT_BOARD = ${JSON.stringify({ path, lang })}\n${code}`)
-    const env = { ...process.env, CLAUDE_PROGRESS_FILE: '', NO_COLOR: '1' }
+    const runtime = join(dir, 'run')
+    mkdirSync(runtime, { mode: 0o700 })
+    const env = { ...process.env, CLAUDE_PROGRESS_FILE: '', NO_COLOR: '1', HOME: dir, USERPROFILE: dir, TEMP: dir, TMP: dir, TMPDIR: dir, XDG_RUNTIME_DIR: runtime }
     return execFileSync(process.execPath, [script, ...args], { env, encoding: 'utf8' })
   } finally {
     rmSync(dir, { recursive: true, force: true })
@@ -1609,7 +1611,7 @@ setTimeout(() => process.stdout.write('Redis it is; wiring it up now.\\n'), 1000
   const script = join(dir, 'agent-board.mjs')
   writeFileSync(script, `globalThis.AGENT_BOARD = ${JSON.stringify({ path, lang: 'en' })}\n${now === undefined ? '' : `Date.now = () => ${now}\n`}${source}`)
   const child = spawn(process.execPath, [script, '--serve-child', ...serveArgs], {
-    env: { ...process.env, CLAUDE_PROGRESS_FILE: '', NO_COLOR: '1', AGENT_BOARD_GROK: stand, AGENT_BOARD_CODEX: stand, XDG_RUNTIME_DIR: run, ...env },
+    env: { ...process.env, CLAUDE_PROGRESS_FILE: '', HOME: dir, USERPROFILE: dir, TEMP: dir, TMP: dir, APPDATA: dir, LOCALAPPDATA: dir, NO_COLOR: '1', AGENT_BOARD_GROK: stand, AGENT_BOARD_CODEX: stand, XDG_RUNTIME_DIR: run, ...env },
     stdio: ['ignore', 'pipe', 'pipe'],
   })
   let stderr = ''
@@ -3291,8 +3293,8 @@ test('a refused close on the page says why next to the close button', async () =
 
 test('unexpected server read and action errors return a reason and log their stacks', async () => {
   const source = BOARD_SCRIPT
-    .replace('\n    view: freshView,', '\n    view: () => { throw new TypeError("synthetic server read failure") },')
-    .replace('\n    tidy,\n    paste,', '\n    tidy: () => { throw new TypeError("synthetic server action failure") },\n    paste,')
+    .replace(/\n( +)view: freshView,/, '\n$1view: () => { throw new TypeError("synthetic server read failure") },')
+    .replace(/\n( +)tidy,\n( +)paste,/, '\n$1tidy: () => { throw new TypeError("synthetic server action failure") },\n$2paste,')
   assert.ok(source.includes('synthetic server read failure') && source.includes('synthetic server action failure'))
   const board = await page('', {}, [], undefined, source)
   try {
@@ -4139,15 +4141,19 @@ test('--serve starts the page in the background once, and the next --serve bring
   writeFileSync(script, `globalThis.AGENT_BOARD = ${JSON.stringify({ path, lang: 'en' })}\n${BOARD_SCRIPT}`)
   const run = join(dir, 'run')
   mkdirSync(run, { mode: 0o700 })
-  const serve = () => execFileSync(process.execPath, [script, '--serve', '--no-open'], { env: { ...process.env, CLAUDE_PROGRESS_FILE: '', NO_COLOR: '1', XDG_RUNTIME_DIR: run }, encoding: 'utf8', timeout: 20_000 })
+  const serve = () => execFileSync(process.execPath, [script, '--serve', '--no-open'], { env: { ...process.env, CLAUDE_PROGRESS_FILE: '', NO_COLOR: '1', HOME: dir, USERPROFILE: dir, TEMP: dir, TMP: dir, TMPDIR: dir, XDG_RUNTIME_DIR: run }, encoding: 'utf8', timeout: 20_000 })
   const served = servedAt(run, path)
   let url = null
+  let pid = null
   try {
     const first = serve()
     url = first.match(/answer\): (http:\/\/127\.0\.0\.1:\d+\/\?t=[\w-]+)/)?.[1] ?? null
     assert.ok(url, first)
     assert.ok(first.startsWith('Progress  ● 1 waiting'), first)
-    assert.equal(JSON.parse(readFileSync(served, 'utf8')).url, url)
+    const record = JSON.parse(readFileSync(served, 'utf8'))
+    assert.equal(record.url, url)
+    pid = record.pid
+    assert.ok(Number.isInteger(pid) && pid > 0 && pid !== process.pid)
     const again = serve()
     assert.ok(again.includes(url), again)
   } finally {
@@ -4160,6 +4166,12 @@ test('--serve starts the page in the background once, and the next --serve bring
       })
       for (let tries = 0; existsSync(served) && tries < 50; tries++) await new Promise(done => setTimeout(done, 100))
       assert.ok(!existsSync(served))
+      // Address removal precedes final message-store cleanup on Windows.
+      if (pid !== null) {
+        const alive = () => { try { process.kill(pid, 0); return true } catch (error) { if (error.code === 'ESRCH') return false; throw error } }
+        for (let tries = 0; alive() && tries < 50; tries++) await new Promise(done => setTimeout(done, 100))
+        assert.ok(!alive(), 'the owned fixture server must exit before cleanup')
+      }
     }
     rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })
   }
@@ -4329,7 +4341,7 @@ test('Windows page startup refuses an existing address file granted to another a
     execFileSync(icacls, [board.served, '/grant', '*S-1-1-0:R', '/L'], { windowsHide: true, stdio: 'pipe' })
     const again = await board.serve(['--quiet-board'])
     assert.ok(!again.includes(url), 'the widened address must not be used to contact or open the running page')
-    assert.equal(again.trim(), EN.serveFailed(EN.serveNotStarted))
+    assert.equal(again.trim(), EN.serveStoreFailed('MESSAGE_STORE_IN_USE', board.served.replace(/\.json$/, '-messages')))
   } finally {
     if (existsSync(board.served)) execFileSync(icacls, [board.served, '/remove', '*S-1-1-0', '/L'], { windowsHide: true, stdio: 'pipe' })
     await board.end([url])
@@ -4386,7 +4398,7 @@ require('node:module').syncBuiltinESMExports()
 test('Windows page startup without XDG runtime keeps the token under the isolated home', { skip: process.platform !== 'win32' && 'Windows runtime fallback only', timeout: 30_000 }, async () => {
   const board = await page('', { XDG_RUNTIME_DIR: '' })
   try {
-    const file = servedAt(join(process.env.USERPROFILE, '.cache'), board.path)
+    const file = servedAt(join(board.dir, '.cache'), board.path)
     assert.equal(JSON.parse(readFileSync(file, 'utf8')).url, board.url.href)
     const old = join(tmpdir(), file.split(/[\\/]/).at(-1))
     assert.ok(!existsSync(old), 'the shared temp root gets no address token')
@@ -4631,9 +4643,11 @@ test('two --serve run at the same moment open one page between them, and a serve
     urls.push(...outs.map(board.urlOf))
     assert.ok(urls[0], outs[0])
     assert.equal(urls[1], urls[0], outs[1])
-    // It finds the address file taken: it prints no address, leaves the file as it was and stops.
-    const late = execFileSync(process.execPath, [board.script, '--serve-child'], { env: board.env, encoding: 'utf8', timeout: 10_000 })
-    assert.equal(late, '')
+    // The default hub refuses a second live owner before it can touch the address file.
+    const late = spawnSync(process.execPath, [board.script, '--serve-child'], { env: board.env, encoding: 'utf8', timeout: 10_000 })
+    assert.equal(late.status, 1)
+    assert.equal(late.stdout, '')
+    assert.match(late.stderr, /MESSAGE_STORE_IN_USE/)
     assert.equal(JSON.parse(readFileSync(board.served, 'utf8')).url, urls[0])
   } finally {
     await board.end(urls)
@@ -4845,7 +4859,9 @@ const timer = setInterval(() => {
   const agents = { AGENT_BOARD_GROK: stand, AGENT_BOARD_CODEX: stand }
   const board = await page('', agents, ['--allow-resume'])
   const script = join(board.dir, 'agent-board.mjs')
-  const env = { ...process.env, CLAUDE_PROGRESS_FILE: '', NO_COLOR: '1', XDG_RUNTIME_DIR: join(board.dir, 'run'), ...agents }
+  // Every home and settings folder an agent or the board reads is the fixture's own.
+  const homes = ['HOME', 'USERPROFILE', 'TEMP', 'TMP', 'TMPDIR', 'APPDATA', 'LOCALAPPDATA', 'XDG_CONFIG_HOME', 'XDG_DATA_HOME', 'XDG_STATE_HOME', 'XDG_CACHE_HOME', 'CLAUDE_CONFIG_DIR', 'HERMES_HOME', 'CODEX_HOME', 'GROK_HOME', 'OPENCLAW_STATE_DIR']
+  const env = { ...process.env, ...Object.fromEntries(homes.map(key => [key, board.dir])), CLAUDE_PROGRESS_FILE: '', NO_COLOR: '1', XDG_RUNTIME_DIR: join(board.dir, 'run'), ...agents }
   const ran = () => (existsSync(calls) ? readFileSync(calls, 'utf8').split('\n').filter(Boolean) : [])
   // A condition, not a fixed number of sleeps, advances each phase. The test's existing
   // deadline still bounds a missing signal; cancellation also releases the stand-in below.
@@ -5192,6 +5208,36 @@ fs.openSync = (file, ...rest) => { if (rest[0] === 'wx' && String(file).includes
 
 const sha = body => createHash('sha256').update(body).digest('hex')
 const proofJson = (kind, hash) => `${JSON.stringify({ version: 1, kind, hash })}\n`
+
+test('a page consumes a legacy acknowledgement without hiding the question asked again', { timeout: 30_000 }, async () => {
+  const board = await page()
+  try {
+    const first = await board.call('GET', '/api/board')
+    assert.equal(first.status, 200, first.body)
+    const ledgerPath = board.path.replace(/\.md$/, '-questions.json')
+    const ledger = JSON.parse(readFileSync(ledgerPath, 'utf8'))
+    const old = ledger.records.find(record => record.words === 'Redis or Memcached?')
+    assert.ok(old)
+    const legacy = 'b2c3d4e5 2 Redis or Memcached?'
+    const resolved = { ...old, isUnresolved: false, isWaiting: false, isPresent: false, resolvedAt: Date.now() - 1000 }
+    writeFileSync(ledgerPath, `${JSON.stringify({ ...ledger, records: ledger.records.map(record => record.id === old.id ? resolved : record), legacy: { [legacy]: old.id } })}\n`)
+    for (const name of readdirSync(board.dir).filter(name => name.startsWith('progress-questions-source-'))) rmSync(join(board.dir, name))
+    const receipt = `${JSON.stringify({ version: 1, disposition: 'resolved', record: resolved })}\n`
+    writeFileSync(join(board.dir, `progress-questions-source-${sha(receipt)}.json`), receipt)
+    writeFileSync(board.path.replace(/\.md$/, '-answered.json'), `${JSON.stringify({ answered: [legacy] })}\n`)
+    writeFileSync(join(board.dir, `progress-questions-retired-${sha(old.id)}.json`), proofJson('retired', sha(old.id)))
+    await delay(1100)
+    const response = await board.call('GET', '/api/board')
+    assert.equal(response.status, 200, response.body)
+    assert.equal(readFileSync(join(board.dir, `progress-questions-consumed-${sha(legacy)}.json`), 'utf8'), proofJson('consumed', sha(legacy)))
+    const records = JSON.parse(readFileSync(ledgerPath, 'utf8')).records.filter(record => record.words === old.words)
+    assert.equal(records.length, 2)
+    assert.ok(records.some(record => record.id !== old.id && record.isUnresolved))
+    const model = response.json().model
+    assert.ok(model.stopped.some(row => row.title === 'Pick the cache' && row.question === 'Redis or Memcached?'), JSON.stringify(model))
+    assert.ok(!model.hidden.some(item => item.text === 'Redis or Memcached?'), JSON.stringify(model.hidden))
+  } finally { await board.close() }
+})
 
 test('--tidy keeps a block that asks again in the words of an answered question whose retirement was recorded, and takes it while the answer stands', () => {
   const board = askingBoard()
@@ -6146,6 +6192,23 @@ test('default web and API refuse closed Codex and Grok sessions without starting
       assert.equal((await board.call('POST', '/api/act', { body: { ...body, type: 'message', connection: 'forged', turn: 'session' } })).status, 409)
       assert.equal(existsSync(join(board.dir, 'grok-ran.json')), false)
     }
+  } finally { await board.close() }
+})
+
+test('a closed session keeps resume-Send under --allow-resume when the hub is on by default', async () => {
+  const board = await page('', {}, ['--allow-resume'])
+  try {
+    assert.ok((await board.call('GET', '/api/board')).json().messaging.enabled)
+    const row = await board.rowOf('Pick the cache')
+    assert.equal(row.send, 'send')
+    assert.equal(row.hasCopyBox, false)
+    const sent = await board.call('POST', '/api/act', { body: { key: row.key, type: 'send', text: 'Redis', session: row.session, asked: row.question, fp: row.fp } })
+    assert.equal(sent.status, 202, sent.body)
+    for (let tries = 0; tries < 50; tries++) {
+      if ((await board.call('GET', '/api/board')).json().replies.length) break
+      await new Promise(done => setTimeout(done, 100))
+    }
+    assert.ok(existsSync(join(board.dir, 'grok-ran.json')))
   } finally { await board.close() }
 })
 
