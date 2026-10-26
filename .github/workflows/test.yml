@@ -186,3 +186,41 @@ jobs:
 
       - name: User-journey tests
         run: node --test "tests/e2e/*.test.mjs"
+
+  # Actual Chromium journeys follow the manually checked product workflows.
+  browser_journeys:
+    name: browser journeys (${{ matrix.os }}, Node 24)
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    env:
+      AGENT_BOARD_PLAYWRIGHT_MODULE: ${{ runner.temp }}/agent-board-playwright/node_modules/playwright/index.mjs
+      AGENT_BOARD_BROWSER_ARTIFACTS_DIR: ${{ runner.temp }}/agent-board-browser-artifacts
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+      - name: Install isolated browser test tools
+        shell: bash
+        run: |
+          npm install --prefix "$RUNNER_TEMP/agent-board-playwright" --no-save --package-lock=false --ignore-scripts --no-audit --no-fund playwright@1.62.1
+          node "$RUNNER_TEMP/agent-board-playwright/node_modules/playwright/cli.js" install --with-deps chromium
+      - name: Browser tests present
+        shell: bash
+        run: ls tests/browser/*.test.mjs
+      - name: Confirmed product journeys in Chromium
+        run: node --test --test-concurrency=1 "tests/browser/*.test.mjs"
+      - name: Keep synthetic browser evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: browser-journeys-${{ matrix.os }}
+          path: ${{ runner.temp }}/agent-board-browser-artifacts/
+          if-no-files-found: warn
+          retention-days: 7
