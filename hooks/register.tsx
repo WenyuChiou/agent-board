@@ -962,7 +962,9 @@ const pollSeen = async (
       return
     }
     const isStale = still !== null && projects.length > 0 && seenJson(withSeen(record, projects, at, {}, true)) !== seenJson(withSeen(record, projects, at))
-    if (isChanged || isRetry || isStale || (record[SWEEP_ARMED_KEY] === undefined && at >= seenRetryAt)) {
+    // A record that is missing the reserved entry is written to add it, but only where there is an observation to write it with.
+    const isUnarmed = record[SWEEP_ARMED_KEY] === undefined && withSeen(record, projects, at, {}, false, true)[SWEEP_ARMED_KEY] !== undefined
+    if (isChanged || isRetry || isStale || (isUnarmed && at >= seenRetryAt)) {
       hasSeenPending = true
       let observed = withSeen(record, projects, at, {}, false, true)
       await rewrite($, file, async text => {

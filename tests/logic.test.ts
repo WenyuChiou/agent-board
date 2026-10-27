@@ -895,6 +895,8 @@ test('tasks already seen done before the upgrade get their three days from the f
   const old = withSeen({}, projects, NOW - 10 * day)
   expect(withSeen(old, projects, NOW)).toEqual(old)
   expect(withSeen({}, [], NOW)).toEqual({})
+  // Nothing to observe, nothing to write: the reserved entry is written with the first observation.
+  expect(withSeen({}, [], NOW, {}, false, true)).toEqual({})
   expect(handKeptSeenAt(old, 'demo', task, NOW)).toBeUndefined()
   const armed = withSeen(old, projects, NOW, {}, false, true)
   expect(Object.keys(armed)[0]).toBe(SWEEP_ARMED_KEY)

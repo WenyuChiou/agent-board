@@ -654,7 +654,7 @@ export const withSeen = (
   }
   // A time on a clock that ran ahead would keep every task from ever being due: it counts as unknown.
   const held = earliest(SWEEP_ARMED_KEY)
-  const armed = held !== undefined && held - now <= FUTURE_SKEW_MS ? held : (isArming ? now : undefined)
+  const armedBefore = held !== undefined && held - now <= FUTURE_SKEW_MS ? held : undefined
   for (const project of projects) {
     for (const task of project.tasks) {
       if (task.auto !== null && hasTime(task.auto.updated)) {
@@ -684,11 +684,14 @@ export const withSeen = (
     ...clocks.filter(([key]) => presentClocks.has(key)),
     ...clocks.filter(([key]) => !presentClocks.has(key)).slice(0, SEEN_MAX),
   ]
-  return Object.fromEntries([
-    ...(armed === undefined ? [] : [[SWEEP_ARMED_KEY, armed] as const]),
+  const rest = [
     ...keptClocks,
     ...[...entries].filter(([key]) => key !== SWEEP_ARMED_KEY && !isFutureKey(key)).slice(0, SEEN_MAX),
-  ])
+  ]
+  // The reserved entry is first written with an observation it belongs to, so a board with
+  // nothing to observe leaves no file behind.
+  const armed = armedBefore ?? (isArming && rest.length > 0 ? now : undefined)
+  return Object.fromEntries([...(armed === undefined ? [] : [[SWEEP_ARMED_KEY, armed] as const]), ...rest])
 }
 
 // When a finished hand-kept task counts as seen done for the 3-day rule; undefined while either time
