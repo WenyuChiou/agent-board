@@ -383,6 +383,270 @@ test('setup preserves malformed BOM-prefixed Codex hooks when it refuses install
   assert.equal(existsSync(f.root), false)
 }))
 
+const setupAgent = (f, ...args) => spawnSync(process.execPath, [resolve('scripts/setup-agent.mjs'), '--home', f.home, '--codex-dir', join(f.home, '.codex'), '--grok-dir', join(f.home, '.grok'), '--hermes-dir', join(f.home, '.hermes'), ...args], { env: f.env, encoding: 'utf8', windowsHide: true, timeout: 30000 })
+
+test('setup on a computer with only Claude Code prints guidance and exits 0 without a stack trace', () => fixture(f => {
+  mkdirSync(join(f.home, '.claude'))
+  const english = { ...f, env: { ...f.env, LANG: '' } }
+  const guidance = setupAgent(english)
+  assert.equal(guidance.status, 0, guidance.stderr)
+  assert.equal(guidance.stderr, '')
+  assert.equal(guidance.stdout.trim().split('\n').length, 1)
+  for (const text of ['Claude Code', 'claude plugin marketplace add WenyuChiou/agent-board', 'claude plugin install agent-board@agent-board']) assert.ok(guidance.stdout.includes(text))
+  assert.doesNotMatch(guidance.stdout, /    at |INVALID_TARGETS/)
+  for (const args of [['--json'], ['--apply'], ['--apply', '--json']]) {
+    const result = setupAgent(english, ...args)
+    assert.equal(result.status, 0, result.stderr)
+    assert.equal(result.stderr, '')
+    if (args.includes('--json')) assert.deepEqual(JSON.parse(result.stdout), { targets: [], plans: [], applied: false })
+    else assert.equal(result.stdout, guidance.stdout)
+  }
+  const traditional = setupAgent(english, '--lang', 'zh-TW')
+  assert.equal(traditional.status, 0, traditional.stderr)
+  assert.equal(traditional.stderr, '')
+  assert.ok(traditional.stdout.includes('這台電腦只找到 Claude Code'))
+  assert.deepEqual(readdirSync(f.home), ['.claude'])
+}))
+
+test('setup on a computer with Claude Code and Codex previews Codex only', async () => {
+  await fixture(f => {
+    mkdirSync(join(f.home, '.claude'))
+    mkdirSync(join(f.home, '.codex'))
+    const result = setupAgent(f)
+    assert.equal(result.status, 0, result.stderr)
+    assert.equal(result.stderr, '')
+    assert.deepEqual(JSON.parse(result.stdout).targets, ['codex'])
+    assert.equal(existsSync(f.root), false)
+  })
+  await fixture(f => {
+    const result = setupAgent(f, '--lang', 'en')
+    assert.equal(result.status, 1)
+    assert.equal(result.stdout, '')
+    assert.equal(result.stderr.trim().split('\n').length, 1)
+    assert.match(result.stderr, /found no agent/)
+  })
+})
+
+const setupErrorCases = async check => {
+  for (const [args, code, cause] of [
+    [[], 'INVALID_TARGETS'],
+    [['--agent', 'bogus'], 'INVALID_TARGETS'],
+    [['--agent'], 'MISSING_ARGUMENT'],
+    [['--agent', 'codex', '--data-dir'], 'SETUP_FAILED', 'MISSING_ARGUMENT'],
+  ]) await fixture(f => check(f, (...extra) => setupAgent(f, '--lang', 'en', ...extra, ...args), { code, cause, isEmpty: !cause }))
+  await fixture(f => {
+    f.save(f.hooks, '{"hooks":')
+    check(f, (...extra) => setupAgent(f, '--lang', 'en', '--agent', 'codex', ...extra), { conflict: f.hooks })
+  })
+  await fixture(f => {
+    const installed = setupAgent(f, '--agent', 'codex', '--apply', '--progress-file', join(f.home, 'a', 'progress.md'))
+    assert.equal(installed.status, 0, installed.stderr)
+    check(f, (...extra) => setupAgent(f, '--lang', 'en', '--agent', 'cursor', '--apply', '--progress-file', join(f.home, 'b', 'progress.md'), ...extra), { code: 'SETUP_FAILED', cause: 'SHARED_BOARD_PATH_CONFLICT', agent: 'cursor' })
+  })
+  await fixture(f => {
+    assert.equal(f.install('--agent', 'cursor', '--apply').status, 0)
+    check(f, (...extra) => f.command(['--codex-trust', '--lang', 'en', ...extra]), { code: 'OWNED_CODEX_INSTALL_REQUIRED' })
+    assert.equal(f.install('--apply').status, 0)
+    check(f, (...extra) => f.command(['--codex-trust', '--lang', 'en', ...extra]), { code: 'CODEX_BINARY_REQUIRED' })
+  })
+  for (const record of ['{', '[]', '{"files":[]}', '{"groups":"x"}']) await fixture(f => {
+    assert.equal(f.install('--apply').status, 0)
+    f.save(join(f.root, 'install-codex.json'), record)
+    check(f, (...extra) => f.install('--agent', 'codex', '--lang', 'en', ...extra), { code: 'INVALID_INSTALL_RECORD', message: 'agent-board: setup cannot read install-codex.json, its own record of an earlier setup, so it left everything as it was. Move that file out of the folder where setup keeps its data, then run setup again.' })
+  })
+  await fixture(f => {
+    assert.equal(f.install('--apply').status, 0)
+    f.save(join(f.root, 'install-cursor.json'), '{')
+    check(f, (...extra) => f.install('--agent', 'codex', '--lang', 'en', ...extra), { code: 'INVALID_INSTALL_RECORD', message: 'agent-board: setup cannot read install-cursor.json, its own record of an earlier setup, so it left everything as it was. Move that file out of the folder where setup keeps its data, then run setup again.' })
+  })
+  await fixture(f => {
+    mkdirSync(join(f.root, 'install-codex.json'), { recursive: true })
+    check(f, (...extra) => f.install('--agent', 'codex', '--lang', 'en', ...extra), { code: 'EISDIR', message: 'agent-board: setup stopped while working on Codex. Run it again with --json to see the reason.' })
+  })
+  await fixture(f => {
+    check(f, (...extra) => setupAgent(f, '--lang', 'en', '--agent', 'codex', '--data-dir', join(f.home, 'a%b'), ...extra), { code: 'SETUP_FAILED', cause: 'UNSAFE_COMMAND_PATH', agent: 'codex', message: 'agent-board: setup cannot write its hook commands because a path it needs contains a quote, backtick, $ or % character. Put the setup data folder somewhere else with --data-dir, then run setup again.' })
+  })
+}
+
+test('every setup error is one sentence with one next step', async () => {
+  await setupErrorCases((f, run, expected) => {
+    const result = run()
+    assert.equal(result.status, 1, result.stderr)
+    if (expected.isEmpty) assert.equal(result.stdout, '')
+    if (expected.conflict) {
+      const plan = JSON.parse(result.stdout)
+      assert.equal(plan.applied, false)
+      assert.ok(plan.plans[0].conflicts.includes(expected.conflict))
+      assert.match(result.stderr, /without changing anything.*Codex/)
+    }
+    const text = result.stderr.trimEnd()
+    if (expected.message) assert.equal(text, expected.message)
+    assert.equal(text.split('\n').length, 1, text)
+    assert.ok(text.startsWith('agent-board: '), text)
+    assert.match(text, /\b(run|name|add|fix|wait)\b/i)
+    assert.doesNotMatch(text, /\b[A-Z][A-Z0-9]*_[A-Z0-9_]+\b|\n\s+at |Error:/)
+    assert.doesNotMatch(text, /\.mjs|\.ts/)
+    for (const path of [f.home, tmpdir(), process.cwd()]) assert.ok(!text.includes(path), text)
+  })
+  await fixture(f => {
+    assert.equal(f.install('--apply').status, 0)
+    for (const [lang, hint] of [['en', 'a setup option is missing its value'], ['zh-TW', 'setup 有個選項後面沒有接值'], ['zh-CN', 'setup 有个选项后面没有接值']]) {
+      const result = setupAgent(f, '--lang', lang, '--agent')
+      assert.equal(result.status, 1)
+      assert.equal(result.stdout, '')
+      assert.equal(result.stderr.trimEnd().split('\n').length, 1)
+      assert.ok(result.stderr.includes(hint), result.stderr)
+      const board = f.command(['--codex-setup', '--agent', 'codex', '--data-dir', '--lang', lang])
+      assert.equal(board.status, 1, board.stderr)
+      assert.equal(result.stderr, board.stderr)
+    }
+  })
+})
+
+test('setup --json keeps its error codes', async () => {
+  await setupErrorCases((f, run, expected) => {
+    const plain = run()
+    const result = run('--json')
+    assert.equal(result.status, 1, result.stderr)
+    if (expected.conflict) {
+      assert.equal(result.stderr, '')
+      const preview = JSON.parse(result.stdout)
+      assert.equal(preview.applied, false)
+      assert.ok(preview.plans[0].conflicts.includes(expected.conflict))
+      return
+    }
+    assert.equal(result.stdout, '')
+    assert.equal(result.stderr.trimEnd().split('\n').length, 1)
+    const { error } = JSON.parse(result.stderr)
+    assert.equal(error.code, expected.code)
+    assert.equal(error.message, plain.stderr.trimEnd())
+    if (expected.message) assert.equal(error.message, expected.message)
+    if (expected.cause) {
+      assert.equal(error.agent, expected.agent ?? 'codex')
+      assert.equal(error.cause, expected.cause)
+    }
+  })
+})
+
+const jsonHosts = [
+  ['cursor', '.cursor/hooks.json', 'Cursor'],
+  ['gemini', '.gemini/settings.json', 'Gemini CLI'],
+  ['grok', '.grok/hooks/agent-board-local.json', 'Grok Build'],
+  ['muse', '.config/muse/settings.json', 'Muse Code'],
+  ['antigravity', '.gemini/config/hooks.json', 'Antigravity'],
+  ['openclaw', '.openclaw/openclaw.json', 'OpenClaw'],
+]
+
+test('setup accepts a UTF-8 BOM in the existing hook config of each JSON host without losing foreign data', async () => {
+  for (const [host, relative] of jsonHosts) await fixture(f => {
+    const config = join(f.home, relative)
+    const foreign = { command: 'echo foreign' }
+    const originalConfig = { other: { keep: true }, ...(['cursor', 'gemini', 'grok', 'muse'].includes(host) ? { hooks: { ForeignEvent: [foreign] } } : host === 'openclaw' ? { plugins: { entries: { other: { enabled: true } } } } : {}) }
+    const original = Buffer.from(`\uFEFF${JSON.stringify(originalConfig, null, 2).replaceAll('\n', '\r\n')}\r\n`)
+    f.save(config, original)
+    const preview = f.install('--agent', host)
+    assert.equal(preview.status, 0, preview.stderr)
+    assert.deepEqual(JSON.parse(preview.stdout).conflicts, [])
+    assert.deepEqual(readFileSync(config), original)
+    const applied = f.install('--agent', host, '--apply')
+    assert.equal(applied.status, 0, applied.stderr)
+    const configured = JSON.parse(readFileSync(config))
+    const checkForeign = value => {
+      assert.deepEqual(value.other, originalConfig.other)
+      if (originalConfig.hooks) assert.deepEqual(value.hooks.ForeignEvent, [foreign])
+      if (originalConfig.plugins) assert.deepEqual(value.plugins.entries.other, { enabled: true })
+    }
+    checkForeign(configured)
+    if (host === 'antigravity') assert.ok(configured['agent-board-local'].SessionStart.length)
+    else if (host === 'openclaw') assert.ok(configured.plugins.entries['agent-board-local'])
+    else assert.ok(Object.keys(configured.hooks).some(event => event !== 'ForeignEvent'))
+    const installed = readFileSync(config)
+    const reinstalled = f.install('--agent', host, '--apply')
+    assert.equal(reinstalled.status, 0, reinstalled.stderr)
+    assert.deepEqual(JSON.parse(reinstalled.stdout).changes, [])
+    assert.deepEqual(readFileSync(config), installed)
+    const saved = Buffer.from(`\uFEFF${JSON.stringify(JSON.parse(installed), null, 2).replaceAll('\n', '\r\n')}\r\n`)
+    f.save(config, saved)
+    const resaved = f.install('--agent', host, '--apply')
+    assert.equal(resaved.status, 0, resaved.stderr)
+    assert.deepEqual(JSON.parse(resaved.stdout).changes, [])
+    assert.deepEqual(readFileSync(config), saved)
+    const removed = f.command(['--codex-remove', '--agent', host, '--apply'])
+    assert.equal(removed.status, 0, removed.stderr)
+    const remaining = JSON.parse(readFileSync(config))
+    checkForeign(remaining)
+    if (host === 'antigravity') assert.equal(remaining['agent-board-local'], undefined)
+    else if (host === 'openclaw') assert.equal(remaining.plugins.entries['agent-board-local'], undefined)
+    else assert.deepEqual(remaining.hooks, originalConfig.hooks)
+  })
+})
+
+test('setup still refuses a malformed host config that starts with a BOM', async () => {
+  for (const [host, relative, name] of jsonHosts) await fixture(f => {
+    const config = join(f.home, relative)
+    const original = Buffer.from('\uFEFF{"hooks":\r\n')
+    f.save(config, original)
+    const preview = f.install('--agent', host)
+    assert.equal(preview.status, 0, preview.stderr)
+    assert.ok(JSON.parse(preview.stdout).conflicts.includes(config))
+    assert.deepEqual(readFileSync(config), original)
+    const applied = f.install('--agent', host, '--apply')
+    assert.notEqual(applied.status, 0)
+    assert.deepEqual(readFileSync(config), original)
+    assert.equal(existsSync(f.root), false)
+    const common = setupAgent(f, '--lang', 'en', '--agent', host)
+    assert.equal(common.status, 1)
+    assert.equal(common.stderr.trimEnd().split('\n').length, 1)
+    assert.ok(common.stderr.includes(name), common.stderr)
+    assert.equal(JSON.parse(common.stdout).applied, false)
+    assert.deepEqual(readFileSync(config), original)
+    assert.equal(existsSync(f.root), false)
+  })
+})
+
+test('setup names the host with an unreadable config and still previews the others', async () => {
+  await fixture(f => {
+    const cursor = join(f.home, '.cursor', 'hooks.json')
+    f.save(cursor, '\uFEFF{"hooks":\r\n')
+    f.save(f.hooks, '{}')
+    const result = setupAgent(f, '--lang', 'en', '--agent', 'codex,cursor')
+    assert.equal(result.status, 1)
+    const preview = JSON.parse(result.stdout)
+    assert.deepEqual(preview.targets, ['codex', 'cursor'])
+    assert.equal(preview.applied, false)
+    assert.equal(preview.plans.length, 2)
+    assert.ok(preview.plans[1].conflicts.includes(cursor))
+    assert.deepEqual(preview.plans[0].conflicts, [])
+    assert.ok(preview.plans[0].changes.some(change => ['create', 'update'].includes(change.action)))
+    assert.equal(result.stderr.trimEnd().split('\n').length, 1)
+    assert.match(result.stderr, /Cursor/)
+    assert.doesNotMatch(result.stderr, /Codex/)
+    assert.equal(existsSync(f.root), false)
+  })
+  for (const [agent, relative, original, name] of [
+    ['cursor', '.cursor/hooks.json', '{"hooks":[]}', 'Cursor'],
+    ['cursor', '.cursor/hooks.json', '{"hooks":{"stop":"x"}}', 'Cursor'],
+    ['openclaw', '.openclaw/openclaw.json', '{"plugins":{"load":{"paths":"x"}}}', 'OpenClaw'],
+  ]) await fixture(f => {
+    const config = join(f.home, relative)
+    f.save(config, original)
+    const result = setupAgent(f, '--lang', 'en', '--agent', `codex,${agent}`)
+    assert.equal(result.status, 1)
+    const preview = JSON.parse(result.stdout)
+    assert.deepEqual(preview.targets, ['codex', agent])
+    assert.equal(preview.applied, false)
+    assert.equal(preview.plans.length, 2)
+    assert.deepEqual(preview.plans[1].conflicts, [config])
+    assert.deepEqual(preview.plans[0].conflicts, [])
+    assert.ok(preview.plans[0].changes.some(change => ['create', 'update'].includes(change.action)))
+    assert.equal(result.stderr.trimEnd().split('\n').length, 1)
+    assert.ok(result.stderr.includes(name), result.stderr)
+    assert.doesNotMatch(result.stderr, /Codex/)
+    assert.equal(existsSync(f.root), false)
+    assert.equal(readFileSync(config, 'utf8'), original)
+  })
+})
+
 test('local setup preserves native config formatting when its content does not change', () => fixture(f => {
   for (const [agent, file] of [['codex', f.hooks], ['openclaw', join(f.home, '.openclaw', 'openclaw.json')]]) {
     const installed = f.install('--agent', agent, '--apply')
@@ -1731,7 +1995,7 @@ test('the POSIX reporter bounds a Git Bash reader while host stdin stays open', 
 test('Codex trust requires an owned installation and an explicit host binary', () => fixture(f => {
   assert.notEqual(f.command(['--codex-trust']).status, 0)
   assert.equal(f.install('--apply').status, 0)
-  assert.match(f.command(['--codex-trust']).stderr, /CODEX_BINARY_REQUIRED/)
+  assert.match(f.command(['--codex-trust', '--json']).stderr, /CODEX_BINARY_REQUIRED/)
 }))
 
 test('the installed Codex host grants only six reviewed hashes and preserves unrelated config', { skip: !process.env.AGENT_BOARD_TEST_CODEX }, () => fixture(f => {
@@ -2478,7 +2742,7 @@ fs.readFileSync = (file, ...args) => {
 }
 syncBuiltinESMExports()
 `)
-  const result = spawnSync(process.execPath, ['--import', pathToFileURL(preload).href, f.script, '--codex-setup', '--home', f.home, '--codex-dir', join(f.home,'.codex'), '--apply'], {env:f.env, encoding:'utf8', windowsHide:true})
+  const result = spawnSync(process.execPath, ['--import', pathToFileURL(preload).href, f.script, '--codex-setup', '--home', f.home, '--codex-dir', join(f.home,'.codex'), '--apply', '--json'], {env:f.env, encoding:'utf8', windowsHide:true})
   assert.notEqual(result.status, 0)
   assert.match(result.stderr, /INSTALL_CHANGED/)
   assert.match(readFileSync(f.hooks, 'utf8'), /user-concurrent/)
@@ -4160,9 +4424,9 @@ test("antigravity: setup-agent takes over the connect's skill for a progress fil
     assert.ok(connectedProgress, name)
     f.save(record, JSON.stringify(rest))
     const skill = join(f.home, '.gemini', 'config', 'skills', 'agent-board', 'SKILL.md')
-    const install = extraEnv => spawnSync(process.execPath, [setup, '--home', f.home, '--codex-dir', join(f.home, '.codex'), '--grok-dir', join(f.home, '.grok'), '--hermes-dir', join(f.home, '.hermes'), '--agent', 'antigravity', '--apply'], { env: { ...f.env, ...extraEnv }, encoding: 'utf8', windowsHide: true, timeout: 15000 })
+    const install = (extraEnv, ...args) => spawnSync(process.execPath, [setup, '--home', f.home, '--codex-dir', join(f.home, '.codex'), '--grok-dir', join(f.home, '.grok'), '--hermes-dir', join(f.home, '.hermes'), '--agent', 'antigravity', '--apply', ...args], { env: { ...f.env, ...extraEnv }, encoding: 'utf8', windowsHide: true, timeout: 15000 })
     // Without the variable nothing marks the skill as the connect's, so setup-agent refuses it.
-    const refused = install({})
+    const refused = install({}, '--json')
     assert.match(refused.stderr + refused.stdout, /INSTALL_CONFLICT/, name)
     const installed = install({ [name]: name === 'CLAUDE_CONFIG_DIR' ? dirname(progress) : progress })
     assert.equal(installed.status, 0, `${name}: ${installed.stderr}${installed.stdout}`)

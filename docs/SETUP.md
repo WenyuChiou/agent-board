@@ -15,6 +15,8 @@ does not identify Gemini CLI: Antigravity uses that parent too. If the current h
 not created its configuration yet, select its known target with `--agent <name>`.
 `--agent all` previews all supported targets; it does not install the AI applications.
 
+If auto detection finds only Claude Code, setup prints the two `claude plugin` commands that connect it and exits 0 (with `--json` it prints the usual preview shape with empty `targets` and `plans` and `applied` false). Every setup error is one sentence with one next step. Add `--json` to get a failure as one JSON line on stderr, `{"error":{"code":"...","message":"..."}}`, with these codes: `INVALID_TARGETS`, `MISSING_ARGUMENT`, `SETUP_FAILED` (with the failing `agent` and its `cause`) and `UNKNOWN` (a conflict keeps its JSON preview on stdout and prints no stderr line). A leading UTF-8 byte-order mark in a JSON host config is read; setup writes that file back without it, and refuses malformed JSON whether or not it starts with one.
+
 Preview lists persistent files, hook definitions, conflicts and remaining capabilities.
 Apply the reviewed scope under the user's authorization. Preserve unrelated settings and
 edited files. A missing adapter remains `adapter-pending`; file installation is never

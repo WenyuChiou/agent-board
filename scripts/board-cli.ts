@@ -8,7 +8,7 @@
 // progress file and language the Claude Code session uses set on its first line. `--keys
 // "down x"` plays keys without a terminal and prints the board after them, for tests and checks.
 import { spawn, spawnSync } from 'node:child_process'
-import { localProgressPath, runCodexLocal } from './codex-local'
+import { localProgressPath, runCodexLocal, setupFailure } from './codex-local'
 import { legacyConnect } from './connect-transaction'
 import { chmodSync, closeSync, existsSync, fstatSync, fsyncSync, linkSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
 import { createHash, randomUUID } from 'node:crypto'
@@ -1406,5 +1406,9 @@ try {
     const raw = String((error as { code?: string })?.code ?? (error instanceof Error ? error.message : 'UNKNOWN'))
     const reason = /^[A-Z][A-Z0-9_]{0,63}$/.test(raw) ? raw : 'UNKNOWN'
     process.stderr.write(`${reason === 'LOCK_DENIED' ? s.reporterLockDenied : reason === 'INCOMPLETE_PROGRESS_TAIL' ? s.tailRepairFailed : s.reporterFailed(reason)}\n`)
+  } else if (args.some(arg => ['--codex-setup', '--codex-doctor', '--codex-remove', '--codex-trust'].includes(arg))) {
+    process.exitCode = 1
+    const failure = setupFailure(error, flag('--agent') ?? 'codex', s)
+    process.stderr.write(`${args.includes('--json') ? JSON.stringify({ error: failure }) : failure.message}\n`)
   } else failureNote(error)
 }
