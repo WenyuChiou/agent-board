@@ -4137,37 +4137,19 @@ test('--serve --quiet-board prints only the page address lines', { timeout: 40_0
 })
 
 test('--serve starts the page in the background once, and the next --serve brings back the same page', { timeout: 40_000 }, async () => {
-  const dir = mkdtempSync(join(tmpdir(), 'board-serve-'))
-  const path = join(dir, 'progress.md')
-  writeFileSync(path, FILE)
-  const script = join(dir, 'agent-board.mjs')
-  writeFileSync(script, `globalThis.AGENT_BOARD = ${JSON.stringify({ path, lang: 'en' })}\n${BOARD_SCRIPT}`)
-  const run = join(dir, 'run')
-  mkdirSync(run, { mode: 0o700 })
-  const serve = () => execFileSync(process.execPath, [script, '--serve', '--no-open'], { env: { ...process.env, CLAUDE_PROGRESS_FILE: '', NO_COLOR: '1', XDG_RUNTIME_DIR: run }, encoding: 'utf8', timeout: 20_000 })
-  const served = servedAt(run, path)
+  // serveIn's end waits for the page's process to exit: Windows keeps the fixture folder busy
+  // until then, after the address file is gone.
+  const board = serveIn()
   let url = null
   try {
-    const first = serve()
-    url = first.match(/answer\): (http:\/\/127\.0\.0\.1:\d+\/\?t=[\w-]+)/)?.[1] ?? null
+    const first = await board.serve()
+    url = board.urlOf(first)
     assert.ok(url, first)
     assert.ok(first.startsWith('Progress  ● 1 waiting'), first)
-    assert.equal(JSON.parse(readFileSync(served, 'utf8')).url, url)
-    const again = serve()
+    assert.equal(JSON.parse(readFileSync(board.served, 'utf8')).url, url)
+    const again = await board.serve()
     assert.ok(again.includes(url), again)
-  } finally {
-    if (url !== null) {
-      const { port, searchParams } = new URL(url)
-      await new Promise(done => {
-        const req = request({ host: '127.0.0.1', port, method: 'POST', path: '/api/close', headers: { host: `127.0.0.1:${port}`, 'x-board-token': searchParams.get('t'), 'content-type': 'application/json' } }, res => res.resume().on('end', done))
-        req.on('error', done)
-        req.end('{}')
-      })
-      for (let tries = 0; existsSync(served) && tries < 50; tries++) await new Promise(done => setTimeout(done, 100))
-      assert.ok(!existsSync(served))
-    }
-    rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })
-  }
+  } finally { await board.end([url]) }
 })
 
 test('/progress looks for the board script beside a Windows or a POSIX progress path', () => {
