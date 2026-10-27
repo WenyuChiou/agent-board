@@ -169,6 +169,9 @@ export type ServeTurn = { key: string; project: string; agent: string; text: str
 
 export type ServeModel = {
   warning?: string
+  details?: string
+  isLarge?: true
+  isCleanable?: true
   counts: { waiting: number; active: number; due: number; today: number }
   asks: ServeAsk[]
   hidden: ServeHidden[]
@@ -309,6 +312,9 @@ export const serveModel = (view: View, pending: readonly PendingTurn[], s: Strin
   return {
     counts: { ...view.overview, waiting: view.overview.waiting + remainingInbox(view, pending).filter(turn => turn.isQuestion).length },
     warning: view.warning,
+    ...(view.details === undefined ? {} : { details: view.details }),
+    ...(view.isLarge ? { isLarge: true } : {}),
+    ...(view.isCleanable ? { isCleanable: true } : {}),
     asks,
     idle,
     stopped,
@@ -491,6 +497,7 @@ const PAGE_WORDS = [
   'boardInbox',
   'sectionRecent',
   'archiveNow',
+  'cleanUp',
   'serveClosed',
   'serveClose',
   'serveOffline',
@@ -1104,6 +1111,17 @@ const PAGE_SCRIPT = String.raw`
   function render(model) {
     keepCopyFocus(function () { renderBoard(model); });
   }
+  // Archive now moves every finished task at once; Clean up runs the sweep --tidy runs.
+  function tidyBoard(key, route) {
+    say(w('pressPending'), '', key)
+    call(route, {}).then(function (data) {
+      say(data.note || w(data.ok ? 'pressDone' : 'pressFailed'), data.ok ? 'done' : 'alert', key)
+      refresh()
+    }, function () {
+      say(w('serveOffline'), 'alert', key)
+      unreachable()
+    })
+  }
   function renderBoard(model) {
     // What is typed, and where the cursor is, outlast a redraw.
     var kept = {};
@@ -1120,6 +1138,14 @@ const PAGE_SCRIPT = String.raw`
     resultSlots = pasteSlot ? { paste: pasteSlot } : {};
     if (closeSlot) resultSlots.close = closeSlot;
     if (model.warning) add(board, el('p', 't-alert', model.warning));
+    if (model.isCleanable) {
+      var cleanup = add(el('div', 'actions'), button(w('cleanUp'), function () { tidyBoard('cleanup', '/api/clean') }))
+      add(board, cleanup)
+      resultSlot(cleanup, 'cleanup', '', w('cleanUp'))
+    } else if (results.cleanup) {
+      resultSlot(board, 'cleanup', '', w('cleanUp'))
+    }
+    if (model.details) add(board, el('p', 't-quiet', model.details))
     waitingHead = el('h2', 'n-waiting', '● ' + w('sectionWaiting'));
     nothing = model.asks.length === 0 ? el('div', 'n-today', w('nothingForYou')) : null;
     add(board, waitingHead, nothing);
@@ -1199,8 +1225,7 @@ const PAGE_SCRIPT = String.raw`
         add(done, tracked(line, ['recent'], item));
       });
       var recent = add(el('div', 'card'), done, add(el('div', 'actions'), button(w('archiveNow'), function () {
-        say(w('pressPending'), '', 'recent');
-        call('/api/tidy', {}).then(function (data) { say(data.note || w(data.ok ? 'pressDone' : 'pressFailed'), data.ok ? 'done' : 'alert', 'recent'); refresh(); }, function () { say(w('serveOffline'), 'alert', 'recent'); unreachable(); });
+        tidyBoard('recent', '/api/tidy')
       })));
       resultSlot(recent, 'recent', '', w('sectionRecent'));
       groupVisibility(heading, from);

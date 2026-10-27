@@ -50,11 +50,15 @@ The flag performs one sweep and exits; it installs no schedule or service and op
 page. Choosing this command authorizes the normal sweep: done agent blocks older than
 12 hours and stopped blocks older than 3 days move to the monthly archive beside the
 selected progress file. Unanswered questions, incomplete blocks and missing/future
-timestamps stay. Completed hand-kept tasks use their recorded first-observation times
-and the plugin's one-day threshold; this is an observation, not the exact completion time.
+timestamps stay. Completed hand-kept tasks use a three-day threshold; in 0.24.1 scheduled
+`--tidy` only counts them and moves none. The details line shows how many can be archived.
+If `--tidy` moves nothing else and counts due tasks, it prints that count.
+This is an observation, not the exact completion time.
 The pane, `--watch` or `--serve` must first observe the completed task and save its fingerprint
 in `progress-seen.json`. A machine that runs only scheduled `--tidy` never records that
-observation, so unobserved hand-kept tasks stay even after repeated sweeps. The command
+observation or the reserved entry recording the first run of the three-day rule, so it
+counts nothing without that entry. The three days start at the later of the task's first
+observation and that first run, giving work seen done under 0.24.0 three days from the upgrade. The command
 does not create or update the observation file. Unknown, future or unreadable observations
 keep manual tasks; an unreadable observation file stays untouched and does not prevent
 eligible agent blocks from being archived.
@@ -62,7 +66,17 @@ Archive entries are saved before removing work from the board, and repeated runs
 not duplicate them. A failed persistence operation exits nonzero; retain the files and
 retry after fixing its reported problem. `--chat` remains read-only even with `--tidy`.
 `--tidy` takes precedence over `--serve`, `--watch` and `--html`, so those combinations
-run only the sweep. The explicit interactive tidy still archives finished work immediately.
+run only the sweep. A running `--serve` page also sweeps every hour; if the seen file cannot
+be read, that hourly pass writes nothing. A person's Clean up on the pane or page archives
+finished hand-kept tasks whose three days are up, exactly the ones the count line counts,
+plus what the normal sweep moves. It writes to the same monthly archive before the board.
+If the seen file cannot be read, Clean up archives nothing, writes nothing and says why.
+Unattended sweeps (pane start and hourly, `--tidy`, and page hourly) only count hand-kept
+tasks in 0.24.1 and move none. The size warning is one sentence with one Clean up button;
+the button also shows whenever the count is above zero, even without a size warning.
+Numbers and the count sit in the details line. The pane's Archive now and `/progress tidy`,
+the page's Archive now, and a row's Archive still move finished work immediately.
+Archive moves save work in monthly files, never delete it.
 
 If a lifecycle hook cannot write the selected board, its metadata enters a local
 pending queue. The installed worker starts one bounded recovery job for that board,

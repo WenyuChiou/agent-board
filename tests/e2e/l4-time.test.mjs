@@ -144,7 +144,8 @@ describe('L4 time and scale', () => {
       const first = (await server.get('/api/board')).json().model
       assert.equal(first.groups.flatMap(group => group.rows).length, 501)
       const seen = world.read('progress-seen.json')
-      assert.equal(Object.keys(JSON.parse(seen).seen).length, 501)
+      // Every future clock keeps its own baseline, alongside the reserved sweep-arming entry.
+      assert.equal(Object.keys(JSON.parse(seen).seen).length, 502)
       await server.get('/api/board')
       assert.equal(world.read('progress-seen.json'), seen)
       await server.stop()

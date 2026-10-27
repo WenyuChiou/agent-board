@@ -5,6 +5,10 @@ import type { ProgressMirror } from '../types'
 import { completionPrefix, emptyMirror } from '../hooks/mirror'
 import { boardTag, inboxDropped, isPrunableKey, recordBytes } from '../hooks/retention'
 import { EN } from '../hooks/strings-en'
+import { paletteFor } from '../hooks/palette'
+import { parseProgress } from '../hooks/parse'
+import { questionsPath } from '../hooks/questions'
+import { seenJson, seenPath, withSeen } from '../hooks/view'
 import { engineBeneath, FILE, INBOX, PANE, PROPS } from './fixtures/pane-world'
 import type { World } from './fixtures/pane-world'
 import { bigWorld, BIG_AT } from './fixtures/big-board'
@@ -415,11 +419,148 @@ test('the board says when progress.md and the saved records pass their size limi
   await $.session.start({ cwd: '/work/other-project', surface: 'desktop', isInteractive: true })
   await clock.advance(1)
   const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
-  const warning = [EN.progressLarge(Math.round(source.length / 1024), 512), EN.storeLarge('1.2', '1.5')].join(' · ')
-  expect(await ui.find({ type: 'Text', text: warning })).toBeDefined()
+  const details = [EN.progressLarge(Math.round(source.length / 1024), 512), EN.storeLarge('1.2', '1.5')].join(' · ')
+  expect(await ui.find({ type: 'Text', text: EN.boardLarge })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: details })).toBeDefined()
   // Over the limit, nothing is removed: the question and its task are still there, word for word.
   expect(world.files.get(FILE)).toBe(source)
   await ui.unmount()
+})
+
+test("the pane's size warning is one sentence with one Clean up button that archives what is due", async ($, on) => {
+  const now = Date.parse('2026-10-16T12:00:00Z')
+  const open = `### Still open\n> Context: ${'synthetic '.repeat(60_000)}\n- [x] Prepared\n- [ ] Next step\n`
+  const source = `## synthetic-project\n### Finished task\n- [x] Finished\n- [-] Cancelled\n${open}`
+  const seen = seenJson(withSeen({}, parseProgress(source), now - 4 * DAY, {}, false, true))
+  const world: World = { files: new Map([[FILE, source], [seenPath(FILE), seen]]), mtime: 1, hasTasks: true, store: { lang: 'en', inboxDone: {}, autoConnectOff: true } }
+  const clock = engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/synthetic-project', surface: 'desktop', isInteractive: true })
+  await clock.advance(1)
+  // Add the old block after the startup sweep so the button is what moves it.
+  const block = `<!-- auto session=464c0001 agent=codex state=done updated=${new Date(now - 13 * HOUR).toISOString()} -->\n### Finished agent block\n- [x] Finished\n<!-- /auto session=464c0001 -->\n`
+  world.files.set(FILE, source + block)
+  world.mtime += 1
+  await clock.advance(5000)
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
+  try {
+    const details = [EN.progressLarge(Math.round((source + block).length / 1024), 512), EN.canArchive(1)].join(' · ')
+    expect(await ui.findAll({ type: 'Text', text: EN.boardLarge })).toHaveLength(1)
+    expect(await ui.findAll({ type: 'Button', text: EN.cleanUp })).toHaveLength(1)
+    expect(await ui.find({ type: 'Button', key: 'clean', text: 'Clean up' })).toBeDefined()
+    const texts = await ui.findAll({ type: 'Text' })
+    const warningAt = texts.findIndex(node => node.text === EN.boardLarge)
+    const detailsAt = texts.findIndex(node => node.text === details)
+    expect(warningAt).toBeGreaterThanOrEqual(0)
+    expect(detailsAt).toBeGreaterThan(warningAt)
+    expect((await ui.find({ type: 'Text', text: details }))?.props).toMatchObject({ color: paletteFor('dark').muted })
+    await ui.press({ key: 'clean' })
+    expect(await ui.find({ type: 'Text', text: EN.tidyMoved(2) })).toBeDefined()
+    const archive = world.files.get('/home/me/.claude/progress-archive-2026-10.md') ?? ''
+    expect(archive).toContain('### Finished agent block\n- [x] Finished')
+    expect(archive).toContain('## synthetic-project · 2026-10-12\n### Finished task')
+    expect(archive).not.toContain('Still open')
+    expect(world.files.get(FILE)).toBe(`## synthetic-project\n${open}`)
+    expect(await ui.find({ type: 'Text', text: /can be archived/ })).toBeUndefined()
+    // The next poll drops the moved task's entry from the seen record; the second press starts after it.
+    await clock.advance(5000)
+    const after = Object.fromEntries(world.files)
+    await ui.press({ key: 'clean' })
+    expect(await ui.find({ type: 'Text', text: EN.tidyScheduledNothing })).toBeDefined()
+    expect(Object.fromEntries(world.files)).toEqual(after)
+  } finally {
+    await ui.unmount()
+  }
+})
+
+test('a small pane offers Clean up for its archive count and keeps the result after the button goes away', async ($, on) => {
+  const now = Date.parse('2026-10-16T12:00:00Z')
+  const source = '## synthetic-project\n### Finished task\n- [x] Finished\n### Still open\n- [ ] Next step\n'
+  const seen = seenJson(withSeen({}, parseProgress(source), now - 4 * DAY, {}, false, true))
+  const world: World = { files: new Map([[FILE, source], [seenPath(FILE), seen]]), mtime: 1, hasTasks: true, store: { lang: 'en', inboxDone: {}, autoConnectOff: true } }
+  const clock = engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/synthetic-project', surface: 'desktop', isInteractive: true })
+  await clock.advance(1)
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
+  try {
+    expect(await ui.find({ type: 'Text', text: EN.boardLarge })).toBeUndefined()
+    expect(await ui.find({ type: 'Text', text: EN.canArchive(1) })).toBeDefined()
+    expect(await ui.findAll({ type: 'Button', key: 'clean' })).toHaveLength(1)
+    await ui.press({ key: 'clean' })
+    expect(await ui.find({ type: 'Text', text: EN.tidyMoved(1) })).toBeDefined()
+    expect(await ui.find({ type: 'Button', key: 'clean' })).toBeUndefined()
+    expect(await ui.find({ type: 'Text', text: EN.canArchive(1) })).toBeUndefined()
+    expect(world.files.get(FILE)).toBe('## synthetic-project\n### Still open\n- [ ] Next step\n')
+  } finally { await ui.unmount() }
+})
+
+test('Clean up in the pane finishes, and sweeps a week-old torn question list, after it archives', async ($, on) => {
+  const now = Date.parse('2026-10-16T12:00:00Z')
+  const source = '## synthetic-project\n### Finished task\n- [x] Finished\n### Still open\n- [ ] Next step\n'
+  const seen = seenJson(withSeen({}, parseProgress(source), now - 4 * DAY, {}, false, true))
+  // The trim takes turns in the write queue for this file, so it must not run inside Clean up's own turn.
+  const torn = `${questionsPath(FILE)}.torn-${now - 8 * DAY}-4243`
+  const world: World = { files: new Map([[FILE, source], [seenPath(FILE), seen], [torn, '{"version":1,"rec']]), mtime: 1, hasTasks: true, store: { lang: 'en', inboxDone: {}, autoConnectOff: true } }
+  const clock = engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/synthetic-project', surface: 'desktop', isInteractive: true })
+  await clock.advance(1)
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
+  try {
+    await ui.press({ key: 'clean' })
+    expect(await ui.find({ type: 'Text', text: EN.tidyMoved(1) })).toBeDefined()
+    expect(world.files.get(FILE)).toBe('## synthetic-project\n### Still open\n- [ ] Next step\n')
+    expect(world.files.has(torn)).toBe(false)
+  } finally { await ui.unmount() }
+})
+
+test('Clean up in the pane changes no file when the seen file cannot be read', async ($, on) => {
+  const now = Date.parse('2026-10-16T12:00:00Z')
+  const source = `## synthetic-project\n### Finished task\n- [x] Finished\n### Still open\n> Context: ${'synthetic '.repeat(60_000)}\n- [ ] Next step\n`
+  const seen = seenJson(withSeen({}, parseProgress(source), now - 4 * DAY, {}, false, true))
+  const world: World = { files: new Map([[FILE, source], [seenPath(FILE), seen]]), mtime: 1, hasTasks: true, store: { lang: 'en', inboxDone: {}, autoConnectOff: true } }
+  const clock = engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/synthetic-project', surface: 'desktop', isInteractive: true })
+  await clock.advance(1)
+  world.files.set(FILE, source + `<!-- auto session=464d0003 agent=codex state=done updated=${new Date(now - 13 * HOUR).toISOString()} -->\n### Due agent block\n- [x] Finished\n<!-- /auto session=464d0003 -->\n`)
+  world.mtime += 1
+  await clock.advance(5000)
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
+  try {
+    // Corrupt the disk after a valid poll: a cached firstSeen atom must not authorize this press.
+    for (const text of ['{"seen":', '{"seen":[]}', seen]) {
+      world.files.set(seenPath(FILE), text)
+      world.mtimes ??= {}
+      world.mtimes[seenPath(FILE)] = now - 60_000
+      world.unreadable = new Set(text === seen ? [seenPath(FILE)] : [])
+      const before = Object.fromEntries(world.files)
+      await ui.press({ key: 'clean' })
+      expect(await ui.find({ type: 'Text', text: EN.cleanSeenUnreadable })).toBeDefined()
+      expect(Object.fromEntries(world.files)).toEqual(before)
+    }
+  } finally { await ui.unmount() }
+})
+
+test('Clean up keeps a finished hand-kept task during its upgrade grace and changes no file when no block is due', async ($, on) => {
+  const now = Date.parse('2026-10-16T12:00:00Z')
+  const source = `## synthetic-project\n### Finished task\n- [x] Finished\n### Still open\n> Context: ${'synthetic '.repeat(60_000)}\n- [ ] Next step\n`
+  // An older release saw it done long ago but did not arm the three-day rule.
+  const old = seenJson(withSeen({}, parseProgress(source), now - 10 * DAY))
+  const world: World = { files: new Map([[FILE, source], [seenPath(FILE), old]]), mtime: 1, hasTasks: true, isArchiveClockOnly: true, store: { lang: 'en', inboxDone: {}, autoConnectOff: true } }
+  const clock = engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/synthetic-project', surface: 'desktop', isInteractive: true })
+  await clock.advance(1)
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
+  try {
+    expect(await ui.find({ type: 'Text', text: EN.progressLarge(Math.round(source.length / 1024), 512) })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /can be archived/ })).toBeUndefined()
+    const before = Object.fromEntries(world.files)
+    for (let press = 0; press < 2; press++) {
+      await ui.press({ key: 'clean' })
+      expect(await ui.find({ type: 'Text', text: EN.tidyScheduledNothing })).toBeDefined()
+      expect(Object.fromEntries(world.files)).toEqual(before)
+    }
+    expect(world.files.get(FILE)).toBe(source)
+    expect(world.files.get('/home/me/.claude/progress-archive-2026-10.md')).toBeUndefined()
+  } finally { await ui.unmount() }
 })
 
 // What the inbox writers add to dropped.log when they remove a turn file unread (#373).
@@ -938,6 +1079,7 @@ test('a store that stays over 1572864 bytes keeps the records of blocks on the b
   expect(store.prunedCounts).toEqual({ '2026-10-16': { agent: 3, mirror: 1 } })
   const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
   expect(await ui.find({ type: 'Text', text: EN.storeLarge('4.8', '1.5') })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: EN.boardLarge })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: 'Cleared 3 old agent records and 1 old session task list in the last 7 days' })).toBeDefined()
   await ui.unmount()
 })

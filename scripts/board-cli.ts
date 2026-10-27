@@ -14,7 +14,7 @@ import { chmodSync, closeSync, existsSync, fstatSync, fsyncSync, linkSync, lstat
 import { createHash, randomUUID } from 'node:crypto'
 import { homedir, tmpdir } from 'node:os'
 import { basename, dirname, join, resolve } from 'node:path'
-import { archivableAsking, confirmMatches, confirmTask, CUT_SETTLE_MS, cutBlockLines, cutOffBlocks, cutOffSpans, mergeBlock, takeArchivable, takeManualDone, takeTask, setManualStep } from '../hooks/blocks'
+import { archivableAsking, countManualDone, isHandKeptMoveOn, confirmMatches, confirmTask, CUT_SETTLE_MS, cutBlockLines, cutOffBlocks, cutOffSpans, mergeBlock, takeArchivable, takeManualDone, takeTask, setManualStep } from '../hooks/blocks'
 import type { ConfirmedTask } from '../hooks/blocks'
 import { startServer } from './board-serve'
 import { immutableQuestionFiles } from './question-files'
@@ -28,11 +28,11 @@ import type { BoardAction, BoardState } from '../hooks/board'
 import { LOG_TAIL, isInboxFile } from '../hooks/inbox'
 import { dashboardHtml } from '../hooks/dashboard'
 import { appendJournal, archivePath, countDay, hasArchiveEntry, journalLine, journalPath, localDay, parseJournal } from '../hooks/journal'
-import { currentPart, monthParts, sizeWarnings } from '../hooks/retention'
+import { currentPart, monthParts, sizeWarnings, storageDetails } from '../hooks/retention'
 import { parseProgress, progressTail } from '../hooks/parse'
 import { qrModules, qrText } from '../hooks/qr'
 import { langOf, plainReason, STRINGS } from '../hooks/strings'
-import { answeredJson, answeredPath, buildView, manualDoneSeen, parseAnswered, parseSeen, seenJson, seenPath, taskFingerprint, withAnswered, withSeen } from '../hooks/view'
+import { answeredJson, answeredPath, buildView, handKeptSeenAt, isSeenText, manualDoneSeen, parseAnswered, parseSeen, seenJson, seenPath, withAnswered, withSeen } from '../hooks/view'
 import type { TaskRef } from '../hooks/view'
 import { acknowledgementKeys, archiveQuestionsKept, captureHashOf, captureJson, capturePath, compactQuestionsJson, copiesToKeep, cutOffScopes, emptyQuestions, identitiesToRetire, parseCapture, withCaptures, isAskedBy, isQuestionProof, isQuestionSnapshot, isTornLedger, migratedAnswered, observeQuestions, parseQuestions, questionProofJson, questionProofOf, questionProofPath, questionsPath, resolvedQuestionsToRetire } from '../hooks/questions'
 import type { QuestionCapture, QuestionLedger, QuestionProofs, QuestionRecord } from '../hooks/questions'
@@ -381,11 +381,11 @@ const readBoardView = (source: string, now: number) => {
       seen = record
       // Chat wins over every other flag and must never write a sidecar.
       if (!args.includes('--chat') && args.some(arg => ['--watch', '--serve', '--serve-child'].includes(arg))) {
-        let observed = withSeen(record, projects, now)
+        let observed = withSeen(record, projects, now, {}, false, true)
         const wrote = rewrite(file, before => {
           const current = parseSeen(before, answeredAge(file))
           if (current === null) return null
-          observed = withSeen(current, projects, now, observed, isSettled)
+          observed = withSeen(current, projects, now, observed, isSettled, true)
           return seenJson(observed) === seenJson(current) ? before : seenJson(observed)
         })
         seen = wrote === null ? seen : (parseSeen(wrote) ?? seen)
@@ -461,9 +461,13 @@ const readBoardView = (source: string, now: number) => {
   questions ??= observeWriterQuestions(lastQuestions, projects, null, answered, now, isSettled, 'preview', previewProofs ?? undefined, turns, [], frozen).ledger
   // A question marked answered in a pane on this machine is kept off the board too.
   const tail = progressHealthCache.tail
-  const warnings = [...(tail === null ? [] : [s.progressIncomplete(tail.tasks)]), ...sizeWarnings({ progress: Buffer.byteLength(source), store: 0 }, s)]
+  const sizes = { progress: Buffer.byteLength(source), store: 0 }
+  const large = sizeWarnings(sizes, s)
+  const warnings = [...(tail === null ? [] : [s.progressIncomplete(tail.tasks)]), ...large]
+  const finished = countManualDone(projects, now, (_key, project, task) => handKeptSeenAt(seen, project, task, now))
+  const details = storageDetails(sizes, finished, s)
   const health = progressHealthCache.lines
-  return { ...buildView(projects, [basename(process.cwd())], null, now, countDay(journalToday(now), now), manualDoneSeen(projects, seen, now, s), s, answered, seen, questions, readQuestionProofs(), turns, frozen, observeViewQuestions), ...(warnings.length === 0 ? {} : { warning: warnings.join(' · ') }), ...(health.length === 0 ? {} : { health }) }
+  return { ...buildView(projects, [basename(process.cwd())], null, now, countDay(journalToday(now), now), manualDoneSeen(projects, seen, now, s), s, answered, seen, questions, readQuestionProofs(), turns, frozen, observeViewQuestions), ...(warnings.length === 0 ? {} : { warning: warnings.join(' · ') }), ...(large.length === 0 ? {} : { isLarge: true as const }), ...(large.length === 0 && finished === 0 ? {} : { isCleanable: true as const }), ...(details === undefined ? {} : { details }), ...(health.length === 0 ? {} : { health }) }
 }
 
 const view = (source = read(path), now = Date.now()) => {
@@ -820,19 +824,24 @@ const act = (action: BoardAction, fallback?: { copyText?: string; tone?: 'done' 
 
 // Scheduled sweeps keep the plugin's age rules. An explicit interactive tidy may move
 // finished work at once; neither mode discards a stopped session before its three days.
-const tidy = (isNow = true): string => {
+const tidyCount = (isNow: boolean, isStrict = false, isCleanUp = false, counted?: (finished: number) => void): number | null => {
   const now = Date.now()
   let seen: Record<string, number> = {}
   if (!isNow) {
     try {
-      seen = parseSeen(read(seenPath(path)), answeredAge(seenPath(path))) ?? {}
+      const text = read(seenPath(path))
+      // The page's sweep writes nothing on a seen file it cannot read: half written, damaged or the wrong shape.
+      if (isStrict && !isSeenText(text)) return 0
+      seen = parseSeen(text, answeredAge(seenPath(path))) ?? {}
     } catch {
+      if (isStrict) return 0
       // Unknown manual ages stay; an unreadable hint need not block dated agent blocks.
     }
   }
   // The blocks that ask which a try has archived, by session, with the lines they had then.
   const moved = new Map<string, string>()
   const count = archiveOut((text, isLast) => {
+    if (!isNow && counted) counted(countManualDone(parseProgress(text), now, (_key, project, task) => handKeptSeenAt(seen, project, task, now)))
     // A block that still asks goes only when the explicit archive's own check passes for it (#174).
     // A board busy enough to change on every try would skip the whole sweep, so the last try checks
     // no question and the rest (done blocks, hand-kept tasks) goes ahead, as the pane's sweep does.
@@ -859,20 +868,36 @@ const tidy = (isNow = true): string => {
       if (asking.length > 0 && read(path) !== text) return AGAIN
     }
     const blocks = takeArchivable(text, now, undefined, s, isNow, span => kept.has(span.start))
-    const manual = takeManualDone(blocks.text, now, (_key, project, task) => {
-      const at = seen[taskFingerprint(project, task)]
-      return at !== undefined && at <= now ? at : undefined
-    }, s, isNow)
+    const manual = !isNow && !isCleanUp && !isHandKeptMoveOn
+      ? { text: blocks.text, entries: [], keys: [] }
+      : takeManualDone(blocks.text, now, (_key, project, task) => handKeptSeenAt(seen, project, task, now), s, isNow)
     const entries = [...blocks.entries, ...manual.entries]
     if (entries.length === 0) return null
     for (const { span, text: lines } of asking) if (kept.has(span.start)) moved.set(span.session, lines)
     return { text: manual.text, entries }
   }, now)
-  if (count === null) {
-    if (!isNow) process.exitCode = 1
-    return s.boardWriteFailed
+  return count
+}
+
+const tidyNote = (count: number | null, isNow: boolean, finished = 0): string =>
+  count === null ? s.boardWriteFailed : count === 0 ? (isNow ? s.tidyNothing : finished > 0 ? s.canArchive(finished) : s.tidyScheduledNothing) : s.tidyMoved(count)
+
+const tidy = (isNow = true): string => {
+  let finished = 0
+  const count = tidyCount(isNow, false, false, count => { finished = count })
+  if (count === null && !isNow) process.exitCode = 1
+  return tidyNote(count, isNow, finished)
+}
+
+// A person's Clean up moves the due hand-kept tasks as well as the normal sweep's blocks.
+// An unreadable completion record stops the whole press before any write.
+const cleanUp = (): string => {
+  try {
+    if (!isSeenText(read(seenPath(path)))) return s.cleanSeenUnreadable
+  } catch {
+    return s.cleanSeenUnreadable
   }
-  return count === 0 ? (isNow ? s.tidyNothing : s.tidyScheduledNothing) : s.tidyMoved(count)
+  return tidyNote(tidyCount(false, true, true), false)
 }
 
 // Keys as the terminal sends them, named the way boardKey reads them. One read can hold more
@@ -1053,6 +1078,10 @@ const serveChild = (): void => {
     act,
     tidy,
     paste,
+    clean: cleanUp,
+    sweep: () => { tidyCount(false, true) },
+    // Tests can shorten the hourly interval without changing the sweep rules.
+    sweepMs: Number.isInteger(Number(process.env.AGENT_BOARD_SWEEP_MS)) && Number(process.env.AGENT_BOARD_SWEEP_MS) >= 10 && Number(process.env.AGENT_BOARD_SWEEP_MS) <= 3_600_000 ? Number(process.env.AGENT_BOARD_SWEEP_MS) : 3_600_000,
     // The page names a file it could not read or write the way the terminal board does, for a
     // press and for the board it shows. The page is answered, so the exit code and stderr are
     // left alone. File labels and reasons stay the same on local and network pages.

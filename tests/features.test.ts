@@ -4,7 +4,7 @@ import { expect, test } from 'claude-code/testing'
 import type { ProgressMirror, ProgressPr } from '../types'
 import { askOf } from '../hooks/ask'
 import { boardItems, boardKey, boardScreen, boardText, CHAT_MAX, chatText, doneToday, emptyBoardState, fingerprint, fit, peekInbox, pinned, redact } from '../hooks/board'
-import { addManualTask, isArchivable, manualTaskCount, mergeBlock, renderAutoBlock, scanBlocks, setManualStep, takeArchivable, takeManualDone, takeTask, upsertAutoBlock } from '../hooks/blocks'
+import { addManualTask, countManualDone, HAND_KEPT_DONE_MS, isArchivable, isHandKeptMoveOn, manualTaskCount, mergeBlock, renderAutoBlock, scanBlocks, setManualStep, takeArchivable, takeManualDone, takeTask, upsertAutoBlock } from '../hooks/blocks'
 import { agentHooks, boardCommands, boardScript, COLLISION, DELETE, generatedFile, isNodeSupported, isReleased, isReleasedBoard, isSetupState, isWindowsHost, NODE_MIN, nodeVersionOf, openclawPlugin, openclawPrinted, openclawSavedBy, openclawTooOld, PROBLEM_ARGS, readConfig, RELEASE_PATHS, reportCommand, reporterPs1, reporterSh, setupAgents, setupLines, withFlatHook, withGroupedHook, withHermesHooks, withoutHermesHooks, withoutOurHooks, withoutSection } from '../hooks/connect'
 import { connectDataRoots, connectRecordPath, recoveryUnreadableCode } from '../hooks/connect-pure'
 import { boardRun } from '../hooks/board-commands'
@@ -30,6 +30,7 @@ import { RELEASED } from '../hooks/released'
 import { sha256 } from '../hooks/sha256'
 import { RELEASE_0_18_1, RELEASE_0_20_5 } from './fixtures/released'
 import { agentName, buildView, contextOf, handoffOf, manualDoneSeen, mirrorMatchesTask, replyHint, resumeCommand, resumeVia, statusLine, taskFingerprint, wayBackText, withSeen, IDLE_MS } from '../hooks/view'
+import { localDay } from '../hooks/journal'
 
 const ARCHIVE_AGENTS = ['claude', 'codex', 'gemini', 'cursor', 'grok', 'muse', 'hermes', 'openclaw', 'opencode', 'antigravity', 'deepseek', 'custom-agent']
 
@@ -550,7 +551,7 @@ test('a stopped session retains unresolved questions independently of its connec
   expect(stopped.groups).toEqual([])
 })
 
-test('finished hand-kept tasks leave a day after they were first seen done, whole, and nothing else moves', () => {
+test('a hand-kept task with every step done is archived three days after it was first seen done', () => {
   const day = 24 * 60 * 60 * 1000
   const text = `# 專案進度
 
@@ -558,7 +559,7 @@ test('finished hand-kept tasks leave a day after they were first seen done, whol
 ### Google 暑期實習
 > 截止 10-31
 - [x] 改履歷
-- [x] 投遞
+- [-] 投遞
 
 ### Meta 實習
 - [x] 改履歷
@@ -566,21 +567,58 @@ test('finished hand-kept tasks leave a day after they were first seen done, whol
 
 ## 研究
 ### 讀論文
-- [x] 讀完
+- [-] 讀完
 `
-  const seen: Record<string, number> = { 'done:求職::Google 暑期實習': NOW - 2 * day, 'done:研究::讀論文': NOW - day / 2 }
-  const out = takeManualDone(text, NOW, key => seen[key])
-  expect(out.keys).toEqual(['done:求職::Google 暑期實習'])
-  expect(out.entries).toEqual(['## 求職 · 2026-10-14\n### Google 暑期實習\n> 截止 10-31\n- [x] 改履歷\n- [x] 投遞'])
-  expect(out.text).toBe('# 專案進度\n\n## 求職\n### Meta 實習\n- [x] 改履歷\n- [ ] 投遞\n\n## 研究\n### 讀論文\n- [x] 讀完\n')
+  expect(HAND_KEPT_DONE_MS).toBe(3 * day)
+  const observed = NOW - 3 * day
+  const seen: Record<string, number> = { 'done:求職::Google 暑期實習': observed, 'done:研究::讀論文': observed }
+  for (const at of [NOW - 1, NOW, NOW + 1]) {
+    const out = takeManualDone(text, at, key => seen[key])
+    expect(countManualDone(parseProgress(text), at, key => seen[key])).toBe(out.entries.length)
+    if (at < NOW) {
+      expect(out.entries).toEqual([])
+      expect(out.text).toBe(text)
+    } else {
+      expect(out.keys).toEqual(['done:求職::Google 暑期實習', 'done:研究::讀論文'])
+      expect(out.entries).toEqual([
+        `## 求職 · ${localDay(observed)}\n### Google 暑期實習\n> 截止 10-31\n- [x] 改履歷\n- [-] 投遞`,
+        `## 研究 · ${localDay(observed)}\n### 讀論文\n- [-] 讀完`,
+      ])
+      expect(out.text).toBe('# 專案進度\n\n## 求職\n### Meta 實習\n- [x] 改履歷\n- [ ] 投遞\n')
+      const crlf = takeManualDone(text.replace(/\n/g, '\r\n'), at, key => seen[key])
+      expect(crlf.text).toBe(out.text.replace(/\n/g, '\r\n'))
+      expect(crlf.text).not.toMatch(/(?<!\r)\n/)
+    }
+  }
+  const immediate = takeManualDone(text, observed, () => undefined, ZH_TW, true)
+  expect(immediate.entries).toHaveLength(2)
+  expect(immediate.entries.every(entry => entry.includes(localDay(observed)))).toBe(true)
   // Never seen done: stays until the pane has seen it.
   expect(takeManualDone(text, NOW, () => undefined).entries).toEqual([])
+  expect(countManualDone(parseProgress(text), NOW, () => undefined)).toBe(0)
+})
+
+test('a hand-kept task with a waiting or open step is never archived', () => {
+  for (const mark of [' ', '~', '?', '>', '!']) {
+    const text = `## Synthetic\n### Still open\n- [x] Finished\n- [${mark}] Next step\n`
+    for (const isNow of [false, true]) {
+      const out = takeManualDone(text, NOW, () => NOW - 30 * 24 * 60 * 60 * 1000, ZH_TW, isNow)
+      expect(out.entries).toEqual([])
+      expect(out.keys).toEqual([])
+      expect(out.text).toBe(text)
+      expect(countManualDone(parseProgress(text), NOW, () => NOW - 30 * 24 * 60 * 60 * 1000)).toBe(0)
+    }
+  }
+})
+
+test('the scheduled hand-kept move is off in the first release', () => {
+  expect(isHandKeptMoveOn).toBe(false)
 })
 
 test("archived at the person's word, a finished hand-kept task carries the day it was seen done, or today when it never was", () => {
   const text = '# 專案進度\n\n## 研究\n### 讀論文\n- [x] 讀完\n\n### 寫摘要\n- [x] 寫完\n\n### 投稿\n- [ ] 送出\n'
   const seen: Record<string, number> = { 'done:研究::讀論文': NOW }
-  // Not asked: neither has been done a day yet.
+  // Not asked: neither has been observed done for three days yet.
   expect(takeManualDone(text, NOW, key => seen[key]).entries).toEqual([])
   const out = takeManualDone(text, NOW, key => seen[key], ZH_TW, true)
   expect(out.keys).toEqual(['done:研究::讀論文', 'done:研究::寫摘要'])

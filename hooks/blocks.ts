@@ -1,4 +1,4 @@
-import type { CutBlock, ProgressMirror, ProgressMirrorTask, ProgressSessionState, ProgressTask } from '../types'
+import type { CutBlock, ProgressMirror, ProgressMirrorTask, ProgressSessionState, ProgressProject, ProgressTask } from '../types'
 import { prWords } from './github'
 import { ZH_TW } from './i18n'
 import type { Strings } from './i18n'
@@ -19,6 +19,12 @@ const PROJECT = /^##\s+(.+?)\s*#*\s*$/
 const TASK = /^###\s+(.+?)\s*#*\s*$/
 const STEP = /^([ \t]*[-*+]\s+\[)([ xX~?>!-])(\]\s+)(.*)$/
 const DAY = 24 * 60 * 60 * 1000
+export const HAND_KEPT_DONE_MS = 3 * DAY
+// In the first release (#464), pane start/hourly, --tidy and page hourly sweeps
+// only count finished hand-kept tasks and move none.
+// A person's Clean up moves the due tasks regardless; explicit tidies and row archives
+// keep moving finished work at once. The next release enables unattended moves.
+export const isHandKeptMoveOn: boolean = false
 const STOPPED_ARCHIVE_MS = 3 * DAY
 
 export const shortId = (sessionId: string): string => sessionId.slice(0, 8)
@@ -484,12 +490,37 @@ export const takeArchivable = (text: string, now: number, keep?: string, s: Stri
   return { text: removeSpans(text, spans), entries }
 }
 
-// Hand-kept tasks whose every step is done, a day after the pane first saw them done
+const manualDoneTasks = (
+  projects: readonly ProgressProject[],
+  now: number,
+  seenAt: (key: string, project: string, task: ProgressTask) => number | undefined,
+  isNow = false,
+): Array<{ project: string; task: ProgressTask; key: string; at: number }> => {
+  const selected: Array<{ project: string; task: ProgressTask; key: string; at: number }> = []
+  for (const project of projects) {
+    for (const task of project.tasks) {
+      if (task.auto !== null || task.line < 0 || !isTaskComplete(task)) continue
+      const key = doneKey(project.name, task.title)
+      const at = seenAt(key, project.name, task) ?? (isNow ? now : undefined)
+      if (at === undefined || (!isNow && !(at <= now && now - at >= HAND_KEPT_DONE_MS))) continue
+      selected.push({ project: project.name, task, key, at })
+    }
+  }
+  return selected
+}
+
+export const countManualDone = (
+  projects: readonly ProgressProject[],
+  now: number,
+  seenAt: (key: string, project: string, task: ProgressTask) => number | undefined,
+): number => manualDoneTasks(projects, now, seenAt).length
+
+// Hand-kept tasks whose every step is done, three days after first observed done
 // (`seen`, by doneKey): moved out whole, heading to last step, like a session's block.
 // `isNow`: the person asked, so every finished one goes at once, under the day it was seen
 // done, or today when it never was.
-// The task context lets a standalone writer use fingerprint observations while the plugin
-// keeps its existing title-key observations.
+// Scheduled sweeps use fingerprint observations; an explicit pane tidy keeps its
+// existing title-key observations.
 export const takeManualDone = (
   text: string,
   now: number,
@@ -502,26 +533,20 @@ export const takeManualDone = (
   const spans: BlockSpan[] = []
   const entries: string[] = []
   const keys: string[] = []
-  for (const project of parseProgress(text)) {
-    for (const task of project.tasks) {
-      if (task.auto !== null || task.line < 0 || !isTaskComplete(task)) continue
-      const key = doneKey(project.name, task.title)
-      const at = seenAt(key, project.name, task) ?? (isNow ? now : undefined)
-      if (at === undefined || (!isNow && now - at < DAY)) continue
-      let end = task.line
-      for (let index = task.line + 1; index < lines.length; index += 1) {
-        const line = seen[index] ?? ''
-        if (PROJECT.test(line) || TASK.test(line) || AUTO_START.test(line)) break
-        if ((lines[index] ?? '').trim() !== '') end = index
-      }
-      const last = end
-      // The blank lines after it go too, so the next task moves up into its place.
-      while (end + 1 < lines.length && lines[end + 1]?.trim() === '') end += 1
-      spans.push({ session: '', state: 'done', updated: at, project: project.name, start: task.line, end, isClosed: true })
-      const day = localDay(at)
-      entries.push([`## ${project.name || s.uncategorized} · ${day}`, ...lines.slice(task.line, last + 1)].join('\n'))
-      keys.push(key)
+  for (const { project, task, key, at } of manualDoneTasks(parseProgress(text), now, seenAt, isNow)) {
+    let end = task.line
+    for (let index = task.line + 1; index < lines.length; index += 1) {
+      const line = seen[index] ?? ''
+      if (PROJECT.test(line) || TASK.test(line) || AUTO_START.test(line)) break
+      if ((lines[index] ?? '').trim() !== '') end = index
     }
+    const last = end
+    // The blank lines after it go too, so the next task moves up into its place.
+    while (end + 1 < lines.length && lines[end + 1]?.trim() === '') end += 1
+    spans.push({ session: '', state: 'done', updated: at, project, start: task.line, end, isClosed: true })
+    const day = localDay(at)
+    entries.push([`## ${project || s.uncategorized} · ${day}`, ...lines.slice(task.line, last + 1)].join('\n'))
+    keys.push(key)
   }
   if (spans.length === 0) return { text, entries: [], keys: [] }
 

@@ -166,6 +166,7 @@ export const boardText = (view: View, pending: readonly PendingTurn[], s: String
   const c = paint(o.isColor)
   const lines: string[] = [countLine(view, pending, s, c), '']
   if (view.warning) lines.push(c('alert', view.warning), '')
+  if (view.details) lines.push(c('quiet', view.details), '')
 
   const asks = asksOf(view, pending, s)
   const recentQuestions = view.recent.filter(item => (item.questions?.length ?? 0) > 0)
@@ -378,6 +379,7 @@ export const chatText = (
   // Each item is cut whole, never in the middle. A heading belongs to its first item.
   const items: string[] = [chatLine(countLine(view, pending, s, paint(false)), 0, home, isWindows)]
   if (view.warning) items[0] += `\n${view.warning}`
+  if (view.details) items[0] += `\n${view.details}`
   // Questions marked answered are left out and counted, as on the terminal board.
   const hidden = view.hidden.length === 0 ? null : s.hiddenCount(view.hidden.length)
   if (asks.length === 0) items.push(`\n${s.nothingForYou}${hidden === null ? '' : `\n${hidden}`}`)
@@ -629,6 +631,7 @@ export const boardScreen = (view: View, pending: readonly PendingTurn[], state: 
   const lines: string[] = [
     `${c('bold', s.paneTitle)}  ${c('waiting', `● ${waiting} ${s.countWaiting}`)}  ${c('accent', `▸ ${active} ${s.countActive}`)}  ${c('alert', `⚑ ${due} ${s.countDue}`)}  ${c('done', `✓ ${today} ${s.countToday}`)}`,
     ...(view.warning ? [c('alert', view.warning)] : []),
+    ...(view.details ? [c('quiet', view.details)] : []),
     ...(view.hidden.length === 0 ? [] : [c('quiet', `${s.hiddenCount(view.hidden.length)} · ${s.boardKeyShowHidden}`)]),
     ...((view.reminder?.length ?? 0) + (view.older?.length ?? 0) === 0 ? [] : [c('quiet', `${s.sectionQuestionReminders}: ${view.reminder?.length ?? 0} · ${s.sectionOlderQuestions}: ${view.older?.length ?? 0} · ${s.boardKeyOlder}`)]),
     ...(view.idle.length + view.stopped.length === 0 ? [] : [c('quiet', [

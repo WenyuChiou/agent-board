@@ -11,7 +11,7 @@ import { paletteFor } from '../hooks/palette'
 import { ZH_CN } from '../hooks/strings-zh-cn'
 import { pressTarget } from '../hooks/pane'
 import { dashboardHtml } from '../hooks/dashboard'
-import { buildView, IDLE_MS, parseSeen, seenJson, seenPath, withSeen } from '../hooks/view'
+import { buildView, IDLE_MS, parseSeen, seenJson, seenPath, SWEEP_ARMED_KEY, withSeen } from '../hooks/view'
 import type { TaskRow, View } from '../hooks/view'
 import { parseProgress } from '../hooks/parse'
 import { chatText, peekInbox } from '../hooks/board'
@@ -4552,7 +4552,7 @@ test('folded sections open on a press and stay open in the next session', async 
   await again.unmount()
 })
 
-test('a hand-kept task done for a day leaves for the archive by itself, and the next hour clears a done block', async ($, on) => {
+test('a hand-kept task done for days stays put in the first release while the next hour still clears a done block', async ($, on) => {
   const day = 24 * 60 * 60 * 1000
   const now = Date.parse('2026-10-16T12:00:00.000Z')
   const file = `# 專案進度
@@ -4571,19 +4571,22 @@ test('a hand-kept task done for a day leaves for the archive by itself, and the 
 - [x] 打 tag
 <!-- /auto session=c55e2f10 -->
 `
-  const world: World = { files: new Map([[FILE, file]]), mtime: 1, hasTasks: true, isArchiveClockOnly: true, store: { 'done:求職::Google 暑期實習': now - 2 * day } }
+  const observed = seenJson(withSeen({}, parseProgress(file), now - 4 * day, {}, false, true))
+  const world: World = { files: new Map([[FILE, file], [seenPath(FILE), observed]]), mtime: 1, hasTasks: true, isArchiveClockOnly: true, store: { 'done:求職::Google 暑期實習': now - 4 * day } }
   const clock = engineBeneath(on, world)
   await $.session.start({ cwd: '/work/persona_framework', surface: 'terminal', isInteractive: true })
   await clock.advance(1)
 
-  expect(world.files.get(ARCHIVE)).toContain('## 求職 · 2026-10-14\n### Google 暑期實習\n- [x] 改履歷\n- [x] 投遞')
-  expect(world.files.get(FILE)).toContain('## 求職\n### Meta 實習\n- [ ] 投遞')
-  expect(world.files.get(FILE)).not.toContain('Google 暑期實習')
+  expect(world.files.get(ARCHIVE) ?? '').not.toContain('Google 暑期實習')
+  expect(world.files.get(FILE)).toContain('### Meta 實習\n- [ ] 投遞')
+  expect(world.files.get(FILE)).toContain('### Google 暑期實習\n- [x] 改履歷\n- [x] 投遞')
   // Not yet half a day old: the done block stays until the hourly pass after it is.
   expect(world.files.get(FILE)).toContain('session=c55e2f10')
   await clock.advance(60 * 60 * 1000)
   expect(world.files.get(FILE)).not.toContain('session=c55e2f10')
   expect(world.files.get(ARCHIVE)).toContain('### 發佈 1.7.4')
+  expect(world.files.get(FILE)).toContain('Google 暑期實習')
+  expect(world.files.get(ARCHIVE)).not.toContain('Google 暑期實習')
 })
 
 test('/progress tidy archives a finished hand-kept task under the day it was done, not the day before', async ($, on) => {
@@ -9792,7 +9795,7 @@ test('the pane hides idle tasks behind one toggle and shows them with their age 
   expect(await ui.find({ type: 'Button', key: 'demo::Old plan::archive' })).toBeDefined()
   await ui.press({ key: 'section::idle' })
   expect(world.files.get(FILE)).toBe(board)
-  expect(world.files.get(seenPath(FILE))).toBe(record)
+  expect(world.files.get(seenPath(FILE))).toBe(seenJson(withSeen(parseSeen(record) ?? {}, parseProgress(board), at, {}, false, true)))
   await ui.unmount()
 })
 
@@ -9843,6 +9846,9 @@ test("one empty read of progress.md does not reset a task's first-seen time", as
   await settledSetup($, world)
   const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
   await clock.advance(5000)
+  const armed = world.files.get(seenPath(FILE)) ?? ''
+  const first = parseSeen(armed) ?? {}
+  expect(first).toEqual({ ...parseSeen(old), [SWEEP_ARMED_KEY]: Date.parse('2026-10-16T12:00:00Z') })
   expect(await ui.find({ type: 'Button', key: 'section::idle' })).toBeDefined()
   // Another program empties the file before writing it again, and the pane reads it in between,
   // even for a whole poll.
@@ -9852,14 +9858,15 @@ test("one empty read of progress.md does not reset a task's first-seen time", as
   world.files.set(FILE, board)
   world.mtime += 1
   await clock.advance(5000)
-  expect(world.files.get(seenPath(FILE))).toBe(old)
+  expect(world.files.get(seenPath(FILE))).toBe(armed)
   expect(await ui.find({ type: 'Button', key: 'section::idle' })).toBeDefined()
   // A task gone for good leaves the record once the file has held still.
   world.files.set(FILE, '## demo\n### New plan\n- [ ] Start\n')
   world.mtime += 1
   await clock.advance(5000)
   const kept = parseSeen(world.files.get(seenPath(FILE)) ?? '') ?? {}
-  expect(Object.keys(kept)).toEqual(Object.keys(withSeen({}, parseProgress(world.files.get(FILE) ?? ''), 1)))
+  expect(Object.keys(kept)).toEqual(Object.keys(withSeen({}, parseProgress(world.files.get(FILE) ?? ''), 1, first, true, true)))
+  expect(kept[SWEEP_ARMED_KEY]).toBe(first[SWEEP_ARMED_KEY])
   await ui.unmount()
 })
 
