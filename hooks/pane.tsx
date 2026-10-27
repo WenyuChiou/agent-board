@@ -713,14 +713,14 @@ export const drawPane = (ui: PaneUi, model: PaneModel, actions: PaneActions): Re
     <Box flexDirection="column">
       <Text bold>{s.paneTitle}</Text>
       {view.warning && <Text color={palette.alert}>{view.warning}</Text>}
-      {view.isLarge && (
+      {view.isCleanable && (
         <Box flexDirection="column">
           <Button key="clean" plain onPress={buttonPress('clean', actions.cleanUp)}>
             {s.cleanUp}
           </Button>
-          {cardResult('clean')}
         </Box>
       )}
+      {cardResult('clean')}
       {view.details && <Text color={palette.muted}>{view.details}</Text>}
       {view.pruned && <Text color={palette.muted}>{view.pruned}</Text>}
       {model.hasPendingQuestionsProblem && <Text color={palette.alert}>{s.inboxQuestionNotKept}</Text>}

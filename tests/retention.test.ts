@@ -74,15 +74,15 @@ test('the size warning is one sentence and its numbers move to the details line 
     expect(s.boardLarge).not.toMatch(/\d/)
     expect(sizeDetails(sizes, s)).toEqual([s.progressLarge(600, 512), s.storeLarge('1.3', '1.5')])
     for (const count of [1, 2]) {
-      expect(storageDetails(sizes, count, s)).toBe([s.progressLarge(600, 512), s.storeLarge('1.3', '1.5'), s.wouldArchive(count)].join(' · '))
-      expect(storageDetails({ progress: 0, store: 0 }, count, s)).toBe(s.wouldArchive(count))
+      expect(storageDetails(sizes, count, s)).toBe([s.progressLarge(600, 512), s.storeLarge('1.3', '1.5'), s.canArchive(count)].join(' · '))
+      expect(storageDetails({ progress: 0, store: 0 }, count, s)).toBe(s.canArchive(count))
     }
-    expect(s.wouldArchive(1)).not.toBe(s.wouldArchive(2))
+    expect(s.canArchive(1)).not.toBe(s.canArchive(2))
     expect(storageDetails(sizes, 0, s)).toBe(sizeDetails(sizes, s).join(' · '))
     expect(storageDetails({ progress: 0, store: 0 }, 0, s)).toBeUndefined()
   }
-  expect(STRINGS.en.wouldArchive(1)).toBe('1 finished task would be archived')
-  expect(STRINGS.en.wouldArchive(2)).toBe('2 finished tasks would be archived')
+  expect(STRINGS.en.canArchive(1)).toBe('1 finished task can be archived')
+  expect(STRINGS.en.canArchive(2)).toBe('2 finished tasks can be archived')
 })
 
 test('an ended agent record goes just over 3 days after its last write, and one still at work is kept for 30 days', () => {

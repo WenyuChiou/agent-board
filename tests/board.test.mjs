@@ -5966,7 +5966,7 @@ test('the size warning is one sentence with one Clean up button and its numbers 
       let model = (await board.call('GET', '/api/board')).json().model
       assert.equal(model.warning, s.boardLarge)
       assert.equal(model.isLarge, true)
-      assert.equal(model.details, [s.progressLarge(Math.round(Buffer.byteLength(source + block) / 1024), 512), s.wouldArchive(2)].join(' · '))
+      assert.equal(model.details, [s.progressLarge(Math.round(Buffer.byteLength(source + block) / 1024), 512), s.canArchive(2)].join(' · '))
       const html = (await board.call('GET', `/?t=${board.token}`)).body
       const dom = await pageDom(html, model, {
         currentModel: () => model,
@@ -5988,20 +5988,129 @@ test('the size warning is one sentence with one Clean up button and its numbers 
       buttons[0].click()
       await dom.settle()
       assert.deepEqual(dom.requests.map(request => request.path), ['/api/clean'])
-      assert.ok(dom.node('board').textContent.includes(s.tidyMoved(1)))
-      assert.equal(readFileSync(board.path, 'utf8'), source)
+      assert.ok(dom.node('board').textContent.includes(s.tidyMoved(3)))
+      assert.equal(readFileSync(board.path, 'utf8'), source.replace('### Finished one\n- [x] Last step\n### Finished two\n- [x] Last step\n', ''))
       const archive = readFileSync(join(board.dir, 'progress-archive-2026-10.md'), 'utf8')
       assert.ok(archive.includes('### Finished agent block'))
-      assert.ok(!archive.includes('Finished one') && !archive.includes('Finished two') && !archive.includes('Still open'))
-      assert.ok(model.details.includes(s.wouldArchive(2)), model.details)
+      assert.ok(archive.includes('Finished one') && archive.includes('Finished two') && !archive.includes('Still open'))
+      assert.ok(!model.details.includes(s.canArchive(2)), model.details)
     } finally { await board.close() }
   }
+})
+
+test('Clean up archives the finished hand-kept tasks it counted and nothing open', { timeout: 30_000 }, async () => {
+  const day = 86400000
+  const due = '### Due one\n- [x] Finished\n### Due two\n- [x] Finished\n'
+  const remaining = `### Recently finished\n- [x] Finished\n### Still open\n> Context: ${'synthetic '.repeat(60_000)}\n- [ ] Next step\n### Still asking\n- [x] Prepared\n- [?] Proceed, OK?\n`
+  const block = `<!-- auto session=464d0001 agent=codex state=done updated=${new Date(TIDY_NOW - 13 * 3600000).toISOString()} -->\n### Finished agent block\n- [x] Finished\n<!-- /auto session=464d0001 -->\n`
+  const key = (title, steps) => createHash('sha256').update(JSON.stringify(['Synthetic', title, steps])).digest('hex')
+  const seen = JSON.stringify({ seen: {
+    [SWEEP_ARMED_KEY]: TIDY_NOW - 5 * day,
+    [key('Due one', [['done', 'Finished']])]: TIDY_NOW - 4 * day,
+    [key('Due two', [['done', 'Finished']])]: TIDY_NOW - 4 * day,
+    [key('Recently finished', [['done', 'Finished']])]: TIDY_NOW - 2 * day,
+    [key('Still asking', [['done', 'Prepared'], ['waiting', 'Proceed, OK?']])]: TIDY_NOW - 10 * day,
+  } })
+  for (const [lang, s] of [['en', EN], ['zh-TW', ZH_TW], ['zh-CN', ZH_CN]]) {
+    const board = await page('', {}, ['--lang', lang], TIDY_NOW)
+    try {
+      writeFileSync(board.path, `## Synthetic\n${due}${remaining}${block}`)
+      writeFileSync(join(board.dir, 'progress-seen.json'), seen)
+      let model = (await board.call('GET', '/api/board')).json().model
+      assert.equal(model.warning, s.boardLarge)
+      assert.equal(model.isCleanable, true)
+      assert.equal(model.details.split(' · ').at(-1), s.canArchive(2))
+      const html = (await board.call('GET', `/?t=${board.token}`)).body
+      const dom = await pageDom(html, model, {
+        currentModel: () => model,
+        post: async ({ path, body }) => {
+          const response = await board.call('POST', path, { body })
+          model = (await board.call('GET', '/api/board')).json().model
+          return { ok: response.status === 200, json: async () => response.json() }
+        },
+      })
+      assert.equal(dom.buttons().filter(button => button.textContent === s.cleanUp).length, 1)
+      dom.buttons().find(button => button.textContent === s.cleanUp).click()
+      await dom.settle()
+      assert.deepEqual(dom.requests.map(request => request.path), ['/api/clean'])
+      assert.ok(dom.node('board').textContent.includes(s.tidyMoved(3)))
+      assert.equal(readFileSync(board.path, 'utf8'), `## Synthetic\n${remaining}`)
+      const archive = readFileSync(join(board.dir, 'progress-archive-2026-10.md'), 'utf8')
+      const done = new Date(TIDY_NOW - 4 * day)
+      const doneDay = `${done.getFullYear()}-${String(done.getMonth() + 1).padStart(2, '0')}-${String(done.getDate()).padStart(2, '0')}`
+      for (const title of ['Due one', 'Due two']) assert.ok(archive.includes(`## Synthetic · ${doneDay}\n### ${title}\n- [x] Finished`), archive)
+      assert.ok(archive.includes('### Finished agent block\n- [x] Finished'))
+      for (const title of ['Recently finished', 'Still open', 'Still asking']) assert.ok(!archive.includes(title), archive)
+      assert.ok(!model.details.includes(s.canArchive(1)) && !model.details.includes(s.canArchive(2)), model.details)
+      const snapshot = () => Object.fromEntries(readdirSync(board.dir).filter(name => statSync(join(board.dir, name)).isFile()).map(name => [name, readFileSync(join(board.dir, name))]))
+      const before = snapshot()
+      dom.buttons().find(button => button.textContent === s.cleanUp).click()
+      await dom.settle()
+      assert.ok(dom.node('board').textContent.includes(s.tidyScheduledNothing))
+      assert.deepEqual(snapshot(), before)
+    } finally { await board.close() }
+  }
+})
+
+test('Clean up on the page changes no file when the seen file cannot be read', { timeout: 15_000 }, async () => {
+  const board = await page('', {}, [], TIDY_NOW)
+  try {
+    const { source, seen } = largeManualBoard()
+    const block = `<!-- auto session=464d0002 agent=codex state=done updated=${new Date(TIDY_NOW - 13 * 3600000).toISOString()} -->\n### Due agent block\n- [x] Finished\n<!-- /auto session=464d0002 -->\n`
+    writeFileSync(board.path, source + block)
+    const record = join(board.dir, 'progress-seen.json')
+    writeFileSync(record, seen)
+    // The page's own reads would heal a damaged record (as they always have), so the press is
+    // made straight after the damage, with no read of the board in between.
+    assert.equal((await board.call('GET', '/api/board')).status, 200)
+    const snapshot = () => Object.fromEntries(readdirSync(board.dir).filter(name => statSync(join(board.dir, name)).isFile()).map(name => [name, readFileSync(join(board.dir, name))]))
+    for (const text of ['{"seen":', '{"seen":[]}']) {
+      writeFileSync(record, text)
+      utimesSync(record, (TIDY_NOW - 60_000) / 1000, (TIDY_NOW - 60_000) / 1000)
+      const before = snapshot()
+      const response = await board.call('POST', '/api/clean', { body: {} })
+      assert.equal(response.status, 200)
+      assert.equal(response.json().note, EN.cleanSeenUnreadable)
+      assert.deepEqual(snapshot(), before)
+    }
+  } finally { await board.close() }
+})
+
+test('a small page offers Clean up for its archive count and keeps the result after the button goes away', { timeout: 15_000 }, async () => {
+  const board = await page('', {}, [], TIDY_NOW)
+  try {
+    const { source, seen } = largeManualBoard()
+    writeFileSync(board.path, source.replace('synthetic '.repeat(60_000), 'Small board'))
+    writeFileSync(join(board.dir, 'progress-seen.json'), seen)
+    let model = (await board.call('GET', '/api/board')).json().model
+    assert.equal(model.isLarge, undefined)
+    assert.equal(model.warning, undefined)
+    assert.equal(model.isCleanable, true)
+    assert.equal(model.details, EN.canArchive(2))
+    const html = (await board.call('GET', `/?t=${board.token}`)).body
+    const dom = await pageDom(html, model, {
+      currentModel: () => model,
+      post: async ({ path, body }) => {
+        const response = await board.call('POST', path, { body })
+        model = (await board.call('GET', '/api/board')).json().model
+        return { ok: response.status === 200, json: async () => response.json() }
+      },
+    })
+    assert.equal(dom.buttons().filter(button => button.textContent === EN.cleanUp).length, 1)
+    assert.ok(!dom.node('board').textContent.includes(EN.boardLarge))
+    dom.buttons().find(button => button.textContent === EN.cleanUp).click()
+    await dom.settle()
+    assert.equal(model.isCleanable, undefined)
+    assert.equal(model.details, undefined)
+    assert.equal(dom.buttons().filter(button => button.textContent === EN.cleanUp).length, 0)
+    assert.ok(dom.node('board').textContent.includes(EN.tidyMoved(2)))
+  } finally { await board.close() }
 })
 
 test('terminal and HTML size warnings keep translated numbers in the details line without a Clean up button', () => {
   const { source, seen } = largeManualBoard()
   for (const [lang, s] of [['en', EN], ['zh-TW', ZH_TW], ['zh-CN', ZH_CN]]) {
-    const details = [s.progressLarge(Math.round(Buffer.byteLength(source) / 1024), 512), s.wouldArchive(2)].join(' · ')
+    const details = [s.progressLarge(Math.round(Buffer.byteLength(source) / 1024), 512), s.canArchive(2)].join(' · ')
     for (const args of [[], ['--chat']]) {
       const result = chatRun(args, { file: () => source, lang, beside: { 'progress-seen.json': seen }, change: text => `Date.now = () => ${TIDY_NOW}\n${text}` })
       assert.equal(result.status, 0, result.stderr)
@@ -6052,7 +6161,7 @@ test("the page's server runs the hourly sweep and writes nothing when the seen f
     assert.ok(history.includes('### Old agent block'))
     assert.ok(!history.includes('### Finished manual'))
     const model = (await board.call('GET', '/api/board')).json().model
-    assert.equal(model.details, EN.wouldArchive(1))
+    assert.equal(model.details, EN.canArchive(1))
   } finally { await board.close() }
 })
 
@@ -6084,12 +6193,12 @@ test('in its first release the sweep counts the tasks it would archive and moves
     const before = f.snapshot()
     const tidy = f.command()
     assert.equal(tidy.status, 0, tidy.stderr)
-    assert.equal(tidy.stdout.trim(), EN.tidyScheduledNothing)
+    assert.equal(tidy.stdout.trim(), isArmed ? EN.canArchive(2) : EN.tidyScheduledNothing)
     assert.deepEqual(f.snapshot(), before)
     const chat = f.command(['--chat'])
     assert.equal(chat.status, 0, chat.stderr)
-    assert.equal(chat.stdout.includes(EN.wouldArchive(2)), isArmed, chat.stdout)
-    assert.equal(chat.stdout.includes('would be archived'), isArmed, chat.stdout)
+    assert.equal(chat.stdout.includes(EN.canArchive(2)), isArmed, chat.stdout)
+    assert.equal(chat.stdout.includes('can be archived'), isArmed, chat.stdout)
     assert.deepEqual(f.snapshot(), before)
   }
 }))
@@ -6102,7 +6211,7 @@ test('counting a CRLF board keeps every remaining line CRLF on Windows', () => t
   const before = f.snapshot()
   const chat = f.command(['--chat'])
   assert.equal(chat.status, 0, chat.stderr)
-  assert.ok(chat.stdout.includes(EN.wouldArchive(1)), chat.stdout)
+  assert.ok(chat.stdout.includes(EN.canArchive(1)), chat.stdout)
   assert.deepEqual(f.snapshot(), before)
   assert.equal(readFileSync(f.path, 'utf8'), source)
   assert.doesNotMatch(readFileSync(f.path, 'utf8'), /(?<!\r)\n/)
@@ -6126,7 +6235,7 @@ test('--tidy counts recorded manual completion ages and preserves unknown or fut
   assert.deepEqual(f.snapshot(), before)
   const chat = f.command(['--chat'])
   assert.equal(chat.status, 0, chat.stderr)
-  assert.ok(chat.stdout.includes(EN.wouldArchive(1)), chat.stdout)
+  assert.ok(chat.stdout.includes(EN.canArchive(1)), chat.stdout)
   assert.deepEqual(f.snapshot(), before)
   assert.equal(readFileSync(seen, 'utf8'), record)
 }))
@@ -6148,7 +6257,7 @@ test('--tidy counts each manual task by its own fingerprint with no project or a
   assert.deepEqual(f.snapshot(), before)
   const chat = f.command(['--chat'])
   assert.equal(chat.status, 0, chat.stderr)
-  assert.ok(chat.stdout.includes(EN.wouldArchive(2)), chat.stdout)
+  assert.ok(chat.stdout.includes(EN.canArchive(2)), chat.stdout)
   assert.deepEqual(f.snapshot(), before)
   assert.equal(readFileSync(seen, 'utf8'), record)
 }))

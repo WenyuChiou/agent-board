@@ -128,7 +128,7 @@ import { keepRecent, liveToldKeys, remindersOf } from './remind'
 import { addPruned, boardRecords, boardTag, companionKeys, countPruned, currentPart, doneRecord, inboxDropped, isExpiredRecord, isSameWrite, monthParts, overCapKeys, pruneBatch, prunedNote, prunedSince, prunedTotal, readMonthParts, RETENTION, sizeWarnings, storageDetails, staleFailedInbox, staleInboxTemps, staleStoreTemps, storeBytes, STORE_FILE, unseenFailedInbox } from './retention'
 import type { ListedFile, StoreRecord } from './retention'
 import { INBOX_DROPPED_FILE } from './hook-reporters'
-import { agentName, answeredJson, answeredPath, buildView, handKeptSeenAt, mirrorMatchesTask, parseAnswered, parseSeen, seenJson, seenPath, statusLine, SWEEP_ARMED_KEY, viewCache, withAnswered, withSeen } from './view'
+import { agentName, answeredJson, answeredPath, buildView, handKeptSeenAt, isSeenText, mirrorMatchesTask, parseAnswered, parseSeen, seenJson, seenPath, statusLine, SWEEP_ARMED_KEY, viewCache, withAnswered, withSeen } from './view'
 import type { StepRef, TaskRef, TaskRow, View, WaitingItem } from './view'
 import { acknowledgementKeys, archiveQuestionsKept, captureCovers, captureHashOf, captureJson, capturePath, copiesToKeep, cutOffScopes, emptyQuestions, identitiesToRetire, parseCapture, withCaptures, isAskedBy, isQuestionProof, isQuestionSnapshot, isTornLedger, ledgerLeftovers, migratedAnswered, observeQuestions, ownQuestionsKey, parseQuestions, prunableProofs, questionFilesKey, questionProofJson, questionProofOf, questionProofPath, questionScope, questionWords, questionsJson, questionsPath, resolveQuestion, resolvedQuestionsToRetire, QUESTION_FILES_KEPT } from './questions'
 import type { HeldCapture, HeldProof, QuestionAnswerEvidence, QuestionCapture, QuestionProofs, QuestionRecord } from './questions'
@@ -1197,7 +1197,7 @@ const viewTime = async ($: EngineInterface): Promise<number> => (await read($, n
 // What the pane and the page say above the board when the file is cut off or too big, the line
 // saying what the board cleared lately (its own, since it is not a warning), and the health
 // section at the bottom when a block has no end marker.
-const warningOf = (snap: { size: number; projects: readonly ProgressProject[]; tornTail?: { tasks: number } | null; cutBlocks?: readonly CutBlock[] }, s: Strings, seen: Readonly<Record<string, number>>, at: number): { warning?: string; isLarge?: true; details?: string; pruned?: string; health?: string[] } => {
+const warningOf = (snap: { size: number; projects: readonly ProgressProject[]; tornTail?: { tasks: number } | null; cutBlocks?: readonly CutBlock[] }, s: Strings, seen: Readonly<Record<string, number>>, at: number): { warning?: string; isLarge?: true; isCleanable?: true; details?: string; pruned?: string; health?: string[] } => {
   const sizes = { progress: snap.size, store: measuredStore }
   const large = sizeWarnings(sizes, s)
   const lines = [...(snap.tornTail ? [s.progressIncomplete(snap.tornTail.tasks)] : []), ...large]
@@ -1205,7 +1205,7 @@ const warningOf = (snap: { size: number; projects: readonly ProgressProject[]; t
   const details = storageDetails(sizes, finished, s)
   const pruned = prunedNote(measuredPruned, s)
   const health = cutBlockLines(snap.cutBlocks ?? [], s)
-  return { ...(lines.length === 0 ? {} : { warning: lines.join(' · ') }), ...(large.length === 0 ? {} : { isLarge: true }), ...(details === undefined ? {} : { details }), ...(pruned === null ? {} : { pruned }), ...(health.length === 0 ? {} : { health }) }
+  return { ...(lines.length === 0 ? {} : { warning: lines.join(' · ') }), ...(large.length === 0 ? {} : { isLarge: true }), ...(large.length === 0 && finished === 0 ? {} : { isCleanable: true }), ...(details === undefined ? {} : { details }), ...(pruned === null ? {} : { pruned }), ...(health.length === 0 ? {} : { health }) }
 }
 
 // progress.html beside progress.md: the file's view and pending turns, at most once a minute
@@ -2876,17 +2876,19 @@ const writeHandoff = async ($: EngineInterface, summary: string): Promise<void> 
 
 // Old work moves to that month's archive file, so the file stays about what is open: done
 // blocks after half a day, stopped ones after three. A hand-kept task whose steps are all done is
-// due three days after the board first saw it done, and in this release is only counted
-// (`isHandKeptMoveOn`).
+// due three days after the board first saw it done. Unattended sweeps only count it in
+// this release (`isHandKeptMoveOn`); a person's Clean up moves what is due.
 // `isNow`: the person asked (`/progress tidy`, the archive button), so finished work goes now.
-const archiveOld = async ($: EngineInterface, isNow = false): Promise<number> => {
+const archiveOld = async ($: EngineInterface, isNow = false, isCleanUp = false): Promise<number> => {
   const path = await progressPath($)
   const mirror = await read($, mine)
   const keep = mirror === null ? undefined : shortId(mirror.sessionId)
   const at = await $.clock.now()
   const s = await wordsOf($)
   const seen = await read($, doneSeen)
-  const observed = await read($, firstSeen)
+  // A person's Clean up goes by the record on disk alone: one that stopped reading since the press
+  // began moves no hand-kept task, rather than falling back to the times the pane kept in memory.
+  const observed = isCleanUp ? (parseSeen(await readText($, seenPath(path))) ?? {}) : await read($, firstSeen)
   const archived = new Set<string>()
   const keys = new Set<string>()
   // The blocks that ask which a try has archived, by session, with the lines they had then.
@@ -2915,7 +2917,7 @@ const archiveOld = async ($: EngineInterface, isNow = false): Promise<number> =>
       }
     }
     const blocks = takeArchivable(text, at, keep, s, isNow, span => kept.has(span.start))
-    const manual = !isNow && !isHandKeptMoveOn
+    const manual = !isNow && !isCleanUp && !isHandKeptMoveOn
       ? { text: blocks.text, entries: [], keys: [] }
       : takeManualDone(blocks.text, at, isNow ? key => seen[key] : (_key, project, task) => handKeptSeenAt(observed, project, task, at), s, isNow)
     const entries = [...blocks.entries, ...manual.entries]
@@ -4162,8 +4164,19 @@ export const register: Register = (on, options) => {
         await trimQuestionFiles($).catch(() => undefined)
         return count === 0 ? s.tidyNothing : s.tidyMoved(count)
       },
+      // The trim runs after the queued job: it takes turns in the write queue itself, so inside
+      // the job it would wait for the job it belongs to.
       cleanUp: async () => {
-        const count = await enqueue(() => archiveOld($))
+        const count = await enqueue(async () => {
+          const path = await progressPath($)
+          try {
+            if (!isSeenText(await readText($, seenPath(path)))) return null
+          } catch {
+            return null
+          }
+          return archiveOld($, false, true)
+        })
+        if (count === null) return s.cleanSeenUnreadable
         await trimQuestionFiles($).catch(() => undefined)
         return count === 0 ? s.tidyScheduledNothing : s.tidyMoved(count)
       },

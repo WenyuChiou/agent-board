@@ -22,8 +22,8 @@ const DAY = 24 * 60 * 60 * 1000
 export const HAND_KEPT_DONE_MS = 3 * DAY
 // In the first release (#464), pane start/hourly, --tidy and page hourly sweeps
 // only count finished hand-kept tasks and move none.
-// The next release enables moves after the hand walk; explicit tidies and row archives
-// keep moving finished work at the person's word.
+// A person's Clean up moves the due tasks regardless; explicit tidies and row archives
+// keep moving finished work at once. The next release enables unattended moves.
 export const isHandKeptMoveOn: boolean = false
 const STOPPED_ARCHIVE_MS = 3 * DAY
 

@@ -467,7 +467,7 @@ const readBoardView = (source: string, now: number) => {
   const finished = countManualDone(projects, now, (_key, project, task) => handKeptSeenAt(seen, project, task, now))
   const details = storageDetails(sizes, finished, s)
   const health = progressHealthCache.lines
-  return { ...buildView(projects, [basename(process.cwd())], null, now, countDay(journalToday(now), now), manualDoneSeen(projects, seen, now, s), s, answered, seen, questions, readQuestionProofs(), turns, frozen, observeViewQuestions), ...(warnings.length === 0 ? {} : { warning: warnings.join(' · ') }), ...(large.length === 0 ? {} : { isLarge: true as const }), ...(details === undefined ? {} : { details }), ...(health.length === 0 ? {} : { health }) }
+  return { ...buildView(projects, [basename(process.cwd())], null, now, countDay(journalToday(now), now), manualDoneSeen(projects, seen, now, s), s, answered, seen, questions, readQuestionProofs(), turns, frozen, observeViewQuestions), ...(warnings.length === 0 ? {} : { warning: warnings.join(' · ') }), ...(large.length === 0 ? {} : { isLarge: true as const }), ...(large.length === 0 && finished === 0 ? {} : { isCleanable: true as const }), ...(details === undefined ? {} : { details }), ...(health.length === 0 ? {} : { health }) }
 }
 
 const view = (source = read(path), now = Date.now()) => {
@@ -824,7 +824,7 @@ const act = (action: BoardAction, fallback?: { copyText?: string; tone?: 'done' 
 
 // Scheduled sweeps keep the plugin's age rules. An explicit interactive tidy may move
 // finished work at once; neither mode discards a stopped session before its three days.
-const tidyCount = (isNow: boolean, isStrict = false): number | null => {
+const tidyCount = (isNow: boolean, isStrict = false, isCleanUp = false, counted?: (finished: number) => void): number | null => {
   const now = Date.now()
   let seen: Record<string, number> = {}
   if (!isNow) {
@@ -841,6 +841,7 @@ const tidyCount = (isNow: boolean, isStrict = false): number | null => {
   // The blocks that ask which a try has archived, by session, with the lines they had then.
   const moved = new Map<string, string>()
   const count = archiveOut((text, isLast) => {
+    if (!isNow && counted) counted(countManualDone(parseProgress(text), now, (_key, project, task) => handKeptSeenAt(seen, project, task, now)))
     // A block that still asks goes only when the explicit archive's own check passes for it (#174).
     // A board busy enough to change on every try would skip the whole sweep, so the last try checks
     // no question and the rest (done blocks, hand-kept tasks) goes ahead, as the pane's sweep does.
@@ -867,7 +868,7 @@ const tidyCount = (isNow: boolean, isStrict = false): number | null => {
       if (asking.length > 0 && read(path) !== text) return AGAIN
     }
     const blocks = takeArchivable(text, now, undefined, s, isNow, span => kept.has(span.start))
-    const manual = !isNow && !isHandKeptMoveOn
+    const manual = !isNow && !isCleanUp && !isHandKeptMoveOn
       ? { text: blocks.text, entries: [], keys: [] }
       : takeManualDone(blocks.text, now, (_key, project, task) => handKeptSeenAt(seen, project, task, now), s, isNow)
     const entries = [...blocks.entries, ...manual.entries]
@@ -878,19 +879,26 @@ const tidyCount = (isNow: boolean, isStrict = false): number | null => {
   return count
 }
 
-const tidyNote = (count: number | null, isNow: boolean): string =>
-  count === null ? s.boardWriteFailed : count === 0 ? (isNow ? s.tidyNothing : s.tidyScheduledNothing) : s.tidyMoved(count)
+const tidyNote = (count: number | null, isNow: boolean, finished = 0): string =>
+  count === null ? s.boardWriteFailed : count === 0 ? (isNow ? s.tidyNothing : finished > 0 ? s.canArchive(finished) : s.tidyScheduledNothing) : s.tidyMoved(count)
 
 const tidy = (isNow = true): string => {
-  const count = tidyCount(isNow)
+  let finished = 0
+  const count = tidyCount(isNow, false, false, count => { finished = count })
   if (count === null && !isNow) process.exitCode = 1
-  return tidyNote(count, isNow)
+  return tidyNote(count, isNow, finished)
 }
 
-// The page's Clean up button runs the sweep `--tidy` runs: it archives the agent blocks that are due,
-// and in this release counts finished hand-kept tasks without moving them (#464). It sets no exit
-// code: the server keeps running.
-const cleanUp = (): string => tidyNote(tidyCount(false), false)
+// A person's Clean up moves the due hand-kept tasks as well as the normal sweep's blocks.
+// An unreadable completion record stops the whole press before any write.
+const cleanUp = (): string => {
+  try {
+    if (!isSeenText(read(seenPath(path)))) return s.cleanSeenUnreadable
+  } catch {
+    return s.cleanSeenUnreadable
+  }
+  return tidyNote(tidyCount(false, true, true), false)
+}
 
 // Keys as the terminal sends them, named the way boardKey reads them. One read can hold more
 // than one key (a held arrow, a paste).

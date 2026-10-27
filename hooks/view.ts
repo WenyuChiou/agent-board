@@ -170,10 +170,12 @@ export type Overview = { waiting: number; active: number; due: number; today: nu
 
 export type View = {
   warning?: string
-  // The size warning's numbers and finished hand-kept tasks a sweep would archive (#464).
+  // The size warning's numbers and finished hand-kept tasks Clean up can archive (#464).
   details?: string
-  // The size warning is up; the page and pane offer Clean up.
+  // The size warning is up.
   isLarge?: true
+  // A size warning or due finished tasks make Clean up available on the page and pane.
+  isCleanable?: true
   // What the board cleared in the last 7 days (retention.ts); absent when it cleared nothing.
   pruned?: string
   current: CurrentView | null

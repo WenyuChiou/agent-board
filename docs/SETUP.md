@@ -49,8 +49,9 @@ page. Choosing this command authorizes the normal sweep: done agent blocks older
 12 hours and stopped blocks older than 3 days move to the monthly archive beside the
 selected progress file. Unanswered questions, incomplete blocks and missing/future
 timestamps stay. Completed hand-kept tasks use a three-day threshold; in 0.24.1 scheduled
-`--tidy` only counts them and moves none. The details line shows how many would be archived;
-the next release turns the move on. This is an observation, not the exact completion time.
+`--tidy` only counts them and moves none. The details line shows how many can be archived.
+If `--tidy` moves nothing else and counts due tasks, it prints that count.
+This is an observation, not the exact completion time.
 The pane, `--watch` or `--serve` must first observe the completed task and save its fingerprint
 in `progress-seen.json`. A machine that runs only scheduled `--tidy` never records that
 observation or the reserved entry recording the first run of the three-day rule, so it
@@ -64,12 +65,16 @@ not duplicate them. A failed persistence operation exits nonzero; retain the fil
 retry after fixing its reported problem. `--chat` remains read-only even with `--tidy`.
 `--tidy` takes precedence over `--serve`, `--watch` and `--html`, so those combinations
 run only the sweep. A running `--serve` page also sweeps every hour; if the seen file cannot
-be read, that hourly pass writes nothing. Clean up runs the same sweep as `--tidy`; neither
-it nor the hourly sweep moves hand-kept tasks in this release. The size warning is one
-sentence with one Clean up button, with numbers in the details line. The pane's Archive now
-and `/progress tidy` still move finished work immediately. The page's Archive now does too,
-but is offered only in Done recently, for work finished within a day; the page has no button
-for moving old finished hand-kept tasks. Archive moves save work in monthly files, never delete it.
+be read, that hourly pass writes nothing. A person's Clean up on the pane or page archives
+finished hand-kept tasks whose three days are up, exactly the ones the count line counts,
+plus what the normal sweep moves. It writes to the same monthly archive before the board.
+If the seen file cannot be read, Clean up archives nothing, writes nothing and says why.
+Unattended sweeps (pane start and hourly, `--tidy`, and page hourly) only count hand-kept
+tasks in 0.24.1 and move none. The size warning is one sentence with one Clean up button;
+the button also shows whenever the count is above zero, even without a size warning.
+Numbers and the count sit in the details line. The pane's Archive now and `/progress tidy`,
+the page's Archive now, and a row's Archive still move finished work immediately.
+Archive moves save work in monthly files, never delete it.
 
 If a lifecycle hook cannot write the selected board, its metadata enters a local
 pending queue. The installed worker starts one bounded recovery job for that board,

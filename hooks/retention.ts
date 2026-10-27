@@ -344,6 +344,6 @@ export const sizeDetails = (sizes: { progress: number; store: number }, s: Strin
 ]
 
 export const storageDetails = (sizes: { progress: number; store: number }, finished: number, s: Strings = ZH_TW): string | undefined => {
-  const details = [...sizeDetails(sizes, s), ...(finished > 0 ? [s.wouldArchive(finished)] : [])]
+  const details = [...sizeDetails(sizes, s), ...(finished > 0 ? [s.canArchive(finished)] : [])]
   return details.length === 0 ? undefined : details.join(' · ')
 }

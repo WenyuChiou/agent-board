@@ -171,6 +171,7 @@ export type ServeModel = {
   warning?: string
   details?: string
   isLarge?: true
+  isCleanable?: true
   counts: { waiting: number; active: number; due: number; today: number }
   asks: ServeAsk[]
   hidden: ServeHidden[]
@@ -313,6 +314,7 @@ export const serveModel = (view: View, pending: readonly PendingTurn[], s: Strin
     warning: view.warning,
     ...(view.details === undefined ? {} : { details: view.details }),
     ...(view.isLarge ? { isLarge: true } : {}),
+    ...(view.isCleanable ? { isCleanable: true } : {}),
     asks,
     idle,
     stopped,
@@ -1136,10 +1138,12 @@ const PAGE_SCRIPT = String.raw`
     resultSlots = pasteSlot ? { paste: pasteSlot } : {};
     if (closeSlot) resultSlots.close = closeSlot;
     if (model.warning) add(board, el('p', 't-alert', model.warning));
-    if (model.isLarge) {
+    if (model.isCleanable) {
       var cleanup = add(el('div', 'actions'), button(w('cleanUp'), function () { tidyBoard('cleanup', '/api/clean') }))
       add(board, cleanup)
       resultSlot(cleanup, 'cleanup', '', w('cleanUp'))
+    } else if (results.cleanup) {
+      resultSlot(board, 'cleanup', '', w('cleanUp'))
     }
     if (model.details) add(board, el('p', 't-quiet', model.details))
     waitingHead = el('h2', 'n-waiting', '● ' + w('sectionWaiting'));
