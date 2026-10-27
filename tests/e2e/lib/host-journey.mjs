@@ -1,14 +1,16 @@
-import { spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { isAbsolute, join, relative, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import assert from 'node:assert/strict'
+import { spawnIsolated } from './spawn.mjs'
+import { makeWorld } from './world.mjs'
 
 // Shared by the host journeys (tests/e2e/host-journeys.test.mjs) and the upgrade journey
 // (tests/host-upgrade.test.mjs): a synthetic home, the setup commands run inside it, one
 // reported turn and what the board shows for it. Nothing here runs an agent or a model.
+// Every process starts through spawnIsolated, inside a journey world (lib/world.mjs).
 export const repoRoot = fileURLToPath(new URL('../../../', import.meta.url))
 export const agents = {
   'Claude Code': { id: '', sign: '.claude' },
@@ -28,37 +30,65 @@ export const setupOrder = ['codex', 'cursor', 'opencode', 'grok', 'muse', 'herme
 const label = id => id || 'claude'
 export const titleOf = id => `Check the ${label(id)} gateway routes`
 export const questionOf = id => `Deploy the ${label(id)} routes to staging, OK?`
-const homes = []
-export const cleanup = () => {
-  for (const home of homes) rmSync(home, { recursive: true, force: true, maxRetries: 8, retryDelay: 50 })
+const worlds = []
+const folders = []
+export const cleanup = async () => {
+  const errors = []
+  for (const world of worlds) {
+    try { await world.close() } catch (error) { errors.push(error) }
+  }
+  for (const folder of folders) rmSync(folder, { recursive: true, force: true, maxRetries: 8, retryDelay: 50 })
+  if (errors.length) throw new AggregateError(errors, 'World cleanup failed')
 }
 // A new temporary folder that the test's cleanup removes; only folders made here are removed.
 export const tempFolder = () => {
   const folder = mkdtempSync(join(tmpdir(), 'agent-board-journey-'))
-  homes.push(folder)
+  folders.push(folder)
   return folder
 }
 
-// Every folder a spawned process makes lands in the home or in `scratch`, never in the real temporary folder.
-export const isolatedEnv = (home, scratch) => {
+// A world whose home holds only the folders that name the agents under test, so setup's own
+// detection sees exactly those agents. Every host variable names a folder of this home.
+export const fixture = signs => {
+  const world = makeWorld()
+  worlds.push(world)
+  const home = join(world.root, 'host')
+  mkdirSync(home, { recursive: true })
+  for (const sign of signs) mkdirSync(join(home, sign), { recursive: true })
+  // spawnIsolated refuses an empty CLAUDE_PROGRESS_FILE, so the board file is named here. That is
+  // the file a fresh setup defaults to; tests/codex-local.test.mjs covers the default itself.
+  const progress = join(home, '.agent-board', 'progress.md')
   const env = {
-    ...process.env, HOME: home, USERPROFILE: home,
+    ...world.env, HOME: home, USERPROFILE: home,
     LOCALAPPDATA: join(home, 'AppData', 'Local'), APPDATA: join(home, 'AppData', 'Roaming'),
-    CLAUDE_PROGRESS_FILE: '', CLAUDE_CONFIG_DIR: join(home, '.claude'),
+    CLAUDE_PROGRESS_FILE: progress, CLAUDE_CONFIG_DIR: join(home, '.claude'),
     CODEX_HOME: join(home, '.codex'), GROK_HOME: join(home, '.grok'), HERMES_HOME: join(home, '.hermes'),
     XDG_CONFIG_HOME: join(home, '.config'), OPENCODE_CONFIG_DIR: join(home, '.config', 'opencode'),
     OPENCLAW_STATE_DIR: join(home, '.openclaw'), DSH_HOME: join(home, '.dsh'),
-    TEMP: scratch, TMP: scratch, TMPDIR: scratch, NO_COLOR: '1', LANG: 'en',
+    LANG: 'en',
   }
-  for (const key of ['CODEX_THREAD_ID', 'AGENT_BOARD_SESSION_ID', 'AGENT_BOARD_AGENT']) delete env[key]
-  return env
+  return { world, home, env, script: join(home, '.agent-board', 'agent-board.mjs'), progress }
 }
 
-export const fixture = signs => {
-  const home = tempFolder()
-  for (const sign of signs) mkdirSync(join(home, sign), { recursive: true })
-  return { home, env: isolatedEnv(home, tempFolder()), script: join(home, '.agent-board', 'agent-board.mjs'), progress: join(home, '.agent-board', 'progress.md') }
-}
+// Runs node with the given arguments in the fixture's world and collects what it printed.
+const run = (f, args, { input, timeoutMs, env }) => new Promise((resolveRun, reject) => {
+  const child = spawnIsolated(process.execPath, args, { env: env ? { ...f.env, ...env } : f.env, cwd: f.world.root, stdio: ['pipe', 'pipe', 'pipe'] })
+  let stdout = '', stderr = '', failure
+  const timer = setTimeout(() => {
+    failure = new Error(`timed out after ${timeoutMs} ms`)
+    child.kill()
+  }, timeoutMs)
+  child.on('error', error => { failure = error })
+  child.stdin.on('error', error => { if (error.code !== 'EPIPE') failure = error })
+  child.stdout.setEncoding('utf8').on('data', chunk => { stdout += chunk })
+  child.stderr.setEncoding('utf8').on('data', chunk => { stderr += chunk })
+  child.once('close', status => {
+    clearTimeout(timer)
+    if (failure) reject(failure)
+    else resolveRun({ status, stdout, stderr })
+  })
+  child.stdin.end(input)
+})
 
 export const snapshot = home => {
   const entries = []
@@ -89,10 +119,8 @@ export const insideHome = (home, file) => {
   assert.ok(path !== '' && path !== '..' && !path.startsWith(`..${process.platform === 'win32' ? '\\' : '/'}`) && !isAbsolute(path), `setup change stays in the synthetic home: ${file}`)
 }
 
-export const setup = (f, args = [], source = repoRoot) => {
-  const stdout = checked(spawnSync(process.execPath, [join(source, 'scripts', 'setup-agent.mjs'), '--home', f.home, '--codex-dir', join(f.home, '.codex'), '--grok-dir', join(f.home, '.grok'), '--hermes-dir', join(f.home, '.hermes'), '--lang', 'en', ...args], {
-    env: f.env, encoding: 'utf8', windowsHide: true, timeout: 120000,
-  }), `setup ${args.join(' ')}`)
+export const setup = async (f, args = [], source = repoRoot) => {
+  const stdout = checked(await run(f, [join(source, 'scripts', 'setup-agent.mjs'), '--home', f.home, '--codex-dir', join(f.home, '.codex'), '--grok-dir', join(f.home, '.grok'), '--hermes-dir', join(f.home, '.hermes'), '--lang', 'en', ...args], { timeoutMs: 120000 }), `setup ${args.join(' ')}`)
   if (!stdout.trimStart().startsWith('{')) return stdout
   const plan = JSON.parse(stdout)
   for (const target of plan.plans) {
@@ -102,9 +130,9 @@ export const setup = (f, args = [], source = repoRoot) => {
   return plan
 }
 
-export const preview = (f, ids, source = repoRoot) => {
+export const preview = async (f, ids, source = repoRoot) => {
   const before = snapshot(f.home)
-  const plan = setup(f, [], source)
+  const plan = await setup(f, [], source)
   assert.deepEqual(plan.targets, ids)
   assert.equal(plan.applied, false)
   assert.ok(plan.plans.every(target => target.changes.length > 0))
@@ -112,8 +140,8 @@ export const preview = (f, ids, source = repoRoot) => {
   return plan
 }
 
-export const apply = (f, ids, source = repoRoot) => {
-  const plan = setup(f, ['--apply'], source)
+export const apply = async (f, ids, source = repoRoot) => {
+  const plan = await setup(f, ['--apply'], source)
   assert.deepEqual(plan.targets, ids)
   assert.equal(plan.applied, true)
   for (const target of plan.plans) for (const change of target.changes) assert.ok(existsSync(change.file), `${target.agent}: ${change.file} exists`)
@@ -122,17 +150,15 @@ export const apply = (f, ids, source = repoRoot) => {
   return plan
 }
 
-export const board = (f, ...args) => checked(spawnSync(process.execPath, [f.script, ...args], {
-  env: f.env, encoding: 'utf8', windowsHide: true, timeout: 60000,
-}), `board ${args.join(' ')}`)
+export const board = async (f, ...args) => checked(await run(f, [f.script, ...args], { timeoutMs: 60000 }), `board ${args.join(' ')}`)
 
-export const report = (f, id, state) => {
+export const report = async (f, id, state) => {
   const session = `${id}-journey-session`
-  const args = ['--codex-report', '--agent', id, ...(id === 'codex' ? [] : ['--session', session])]
-  checked(spawnSync(process.execPath, [f.script, ...args], {
-    env: { ...f.env, ...(id === 'codex' ? { CODEX_THREAD_ID: session } : {}) },
+  const args = [f.script, '--codex-report', '--agent', id, ...(id === 'codex' ? [] : ['--session', session])]
+  // Codex names its session in the environment; the other reporters take it as an argument.
+  checked(await run(f, args, {
     input: JSON.stringify({ title: titleOf(id), project: 'api-gateway', state, steps: ['- [x] Read the route table', '- [~] Compare the staging routes', state === 'waiting' ? `- [?] ${questionOf(id)}` : '- [ ] Deploy the routes'] }),
-    encoding: 'utf8', windowsHide: true, timeout: 60000,
+    timeoutMs: 60000, env: id === 'codex' ? { CODEX_THREAD_ID: session } : undefined,
   }), `${id}: ${state} turn`)
 }
 
@@ -159,9 +185,9 @@ export const assertBlocks = (f, ids) => {
   for (const id of ids) assert.equal(starts.filter(line => line.includes(` agent=${id} `)).length, 1, `${id}: one block after repeated turns`)
 }
 
-export const repeatApply = f => {
+export const repeatApply = async f => {
   const before = snapshot(f.home)
-  const plan = setup(f, ['--apply'])
+  const plan = await setup(f, ['--apply'])
   const after = snapshot(f.home)
   return { plan, before, after }
 }

@@ -8,7 +8,7 @@ import { agents, apply, assertBlocks, assertRepeat, assertWaiting, board, checke
 // the board group, whose CI job fetches the tags; the other host journeys are in tests/e2e/.
 after(cleanup)
 
-test('an upgrade from 0.24.0 in the same home keeps every listed agent\'s card and reports no change on a second apply', t => {
+test('an upgrade from 0.24.0 in the same home keeps every listed agent\'s card and reports no change on a second apply', async t => {
   const tag = 'agent-board--v0.24.0'
   const available = spawnSync('git', ['-C', repoRoot, 'cat-file', '-e', `${tag}^{commit}`], { encoding: 'utf8', windowsHide: true })
   assert.ifError(available.error)
@@ -21,13 +21,13 @@ test('an upgrade from 0.24.0 in the same home keeps every listed agent\'s card a
   checked(archive, 'archive 0.24.0')
   checked(spawnSync('tar', ['-x', '-f', '-'], { cwd: oldFolder, input: archive.stdout, encoding: 'utf8', windowsHide: true }), 'extract 0.24.0')
   const f = fixture(Object.values(agents).filter(agent => agent.id).map(agent => agent.sign))
-  apply(f, setupOrder, oldFolder)
-  for (const id of setupOrder) report(f, id, 'waiting')
-  const plan = apply(f, setupOrder)
+  await apply(f, setupOrder, oldFolder)
+  for (const id of setupOrder) await report(f, id, 'waiting')
+  const plan = await apply(f, setupOrder)
   assert.ok(plan.plans.some(target => target.changes.some(change => resolve(change.file) === resolve(f.script) && change.action === 'update')), 'upgrade updates the shared board script')
-  const text = board(f, '--chat')
+  const text = await board(f, '--chat')
   for (const id of setupOrder) assertWaiting(text, id)
-  report(f, 'codex', 'waiting')
+  await report(f, 'codex', 'waiting')
   assertBlocks(f, setupOrder)
-  assertRepeat(repeatApply(f), setupOrder)
+  assertRepeat(await repeatApply(f), setupOrder)
 })

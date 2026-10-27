@@ -65,7 +65,7 @@ const journeyOf = name => {
     assert.equal(agentMark(id), `<span class="ag ag-${icon.file}" aria-hidden="true"></span>`, `${name}: the card label uses its brand mark`)
     if (!id) {
       const before = snapshot(f.home)
-      const guidance = [setup(f), setup(f, ['--apply']), setup(f, ['--apply'])]
+      const guidance = [await setup(f), await setup(f, ['--apply']), await setup(f, ['--apply'])]
       for (const text of guidance) {
         assert.equal(text.trim().split(/\r?\n/).length, 1)
         assert.ok(text.includes('claude plugin marketplace add WenyuChiou/agent-board'))
@@ -75,22 +75,24 @@ const journeyOf = name => {
       assert.deepEqual(readdirSync(f.home), ['.claude'])
       const after = snapshot(f.home)
       assert.deepEqual(after, before)
+      // The plugin keeps the board script and the board file in Claude Code's own folder.
       f.script = join(f.home, '.claude', 'agent-board.mjs')
       f.progress = join(f.home, '.claude', 'progress.md')
+      f.env = { ...f.env, CLAUDE_PROGRESS_FILE: f.progress }
       writeFileSync(f.script, BOARD_SCRIPT)
       await writeClaude(f, false)
-      assertWorking(board(f), '')
+      assertWorking(await board(f), '')
       await writeClaude(f, true)
-      for (const args of [[], ['--chat']]) assertWaiting(board(f, ...args), '')
+      for (const args of [[], ['--chat']]) assertWaiting(await board(f, ...args), '')
       assertBlocks(f, ['claude'])
       return { guidance, before, after }
     }
-    preview(f, [id])
-    apply(f, [id])
-    report(f, id, 'working')
-    assertWorking(board(f), id)
-    report(f, id, 'waiting')
-    for (const args of [[], ['--chat']]) assertWaiting(board(f, ...args), id)
+    await preview(f, [id])
+    await apply(f, [id])
+    await report(f, id, 'working')
+    assertWorking(await board(f), id)
+    await report(f, id, 'waiting')
+    for (const args of [[], ['--chat']]) assertWaiting(await board(f, ...args), id)
     assertBlocks(f, [id])
     return repeatApply(f)
   })())
@@ -112,7 +114,7 @@ test('a second setup apply reports no change for each listed agent', async () =>
   }
 })
 
-test('a hook config that starts with a byte-order mark keeps its other entries through setup, a turn and a second apply', () => {
+test('a hook config that starts with a byte-order mark keeps its other entries through setup, a turn and a second apply', async () => {
   const configs = { codex: '.codex/hooks.json', cursor: '.cursor/hooks.json', grok: '.grok/hooks/agent-board-local.json', muse: '.config/muse/settings.json', antigravity: '.gemini/config/hooks.json', openclaw: '.openclaw/openclaw.json' }
   for (const [id, path] of Object.entries(configs)) {
     const f = fixture([Object.values(agents).find(agent => agent.id === id).sign])
@@ -121,18 +123,18 @@ test('a hook config that starts with a byte-order mark keeps its other entries t
     mkdirSync(dirname(config), { recursive: true })
     const original = Buffer.from(`\uFEFF${JSON.stringify(seed, null, 2).replaceAll('\n', '\r\n')}\r\n`)
     writeFileSync(config, original)
-    preview(f, [id])
+    await preview(f, [id])
     assert.deepEqual(readFileSync(config), original, `${id}: preview preserves BOM and CRLF bytes`)
-    apply(f, [id])
+    await apply(f, [id])
     const value = JSON.parse(readFileSync(config, 'utf8').replace(/^\uFEFF/, ''))
     assert.deepEqual(value.other, seed.other, `${id}: foreign data survives`)
     if (seed.hooks) assert.deepEqual(value.hooks.ForeignEvent, seed.hooks.ForeignEvent, `${id}: foreign hook survives`)
     if (seed.plugins) assert.deepEqual(value.plugins.entries.other, seed.plugins.entries.other, `${id}: foreign plugin survives`)
-    report(f, id, 'waiting')
-    for (const args of [[], ['--chat']]) assertWaiting(board(f, ...args), id)
+    await report(f, id, 'waiting')
+    for (const args of [[], ['--chat']]) assertWaiting(await board(f, ...args), id)
     assertBlocks(f, [id])
     const installed = readFileSync(config)
-    assertRepeat(repeatApply(f), [id])
+    assertRepeat(await repeatApply(f), [id])
     assert.deepEqual(readFileSync(config), installed, `${id}: second apply preserves config bytes`)
   }
 })
@@ -142,17 +144,17 @@ test('two agents and Claude Code in one home keep separate cards through setup a
   // skill and progress file hold one card per agent.
   const ids = ['codex', 'cursor']
   const f = fixture(Object.values(agents).filter(agent => ids.includes(agent.id)).map(agent => agent.sign))
-  preview(f, ids)
-  apply(f, ids)
-  for (const id of ids) report(f, id, 'waiting')
-  const text = board(f, '--chat')
+  await preview(f, ids)
+  await apply(f, ids)
+  for (const id of ids) await report(f, id, 'waiting')
+  const text = await board(f, '--chat')
   for (const id of ids) assertWaiting(text, id)
   assertBlocks(f, ids)
-  assertRepeat(repeatApply(f), ids)
+  assertRepeat(await repeatApply(f), ids)
   // Claude Code installs through its plugin, which writes into the same board file when
   // CLAUDE_PROGRESS_FILE names it, so its block is written here with the plugin's own writers.
   await writeClaude(f, true)
-  const withClaude = board(f, '--chat')
+  const withClaude = await board(f, '--chat')
   for (const id of [...ids, '']) assertWaiting(withClaude, id)
   assertBlocks(f, [...ids, 'claude'])
 })
