@@ -3102,6 +3102,98 @@ test('Windows Antigravity falls back to PowerShell when setup cannot verify a qu
   assert.deepEqual(JSON.parse(saved.input), payload)
 }))
 
+test('generated Codex and Antigravity hook commands reach Node without a PowerShell wrapper, except for an unverified Windows Node path', () => fixture(async f => {
+  const { windowsHookNode } = await import('../scripts/windows-hook-node.ts')
+  const codex = f.install('--agent', 'codex', '--apply')
+  assert.equal(codex.status, 0, codex.stderr)
+  let checked = 0
+  for (const groups of Object.values(JSON.parse(readFileSync(f.hooks, 'utf8')).hooks)) {
+    for (const group of groups) for (const { command } of group.hooks) {
+      if (!command.includes('--hook-event')) continue
+      assert.doesNotMatch(command, /powershell/i)
+      assert.ok(command.startsWith(`"${process.execPath}" "--input-type=commonjs" "-e" "eval(Buffer.from('`))
+      checked++
+    }
+  }
+  assert.ok(checked >= 4, `${checked} owned Codex commands checked`)
+
+  const antigravity = f.install('--agent', 'antigravity', '--apply')
+  assert.equal(antigravity.status, 0, antigravity.stderr)
+  const hooks = JSON.parse(readFileSync(join(f.home, '.gemini', 'config', 'hooks.json'), 'utf8'))['agent-board-local']
+  assert.deepEqual(Object.keys(hooks), ['SessionStart', 'PreInvocation', 'PostInvocation', 'Stop'])
+  const expected = windowsHookNode(process.execPath)
+  for (const group of Object.values(hooks)) {
+    assert.equal(group.length, 1)
+    for (const { command } of group) {
+      if (process.platform === 'win32' && expected === undefined) assert.match(command, /^powershell\.exe /i)
+      else {
+        assert.doesNotMatch(command, /powershell/i)
+        if (process.platform === 'win32') {
+          assert.ok(command.startsWith(`${expected} --input-type=commonjs -e eval(Buffer.from('`))
+          assert.ok(!command.includes('"'))
+        }
+      }
+    }
+  }
+}))
+
+test('Windows setup rewrites the PowerShell wrapper hook from an older install as a direct command once Node can be verified', { skip: process.platform !== 'win32' }, t => fixture(async f => {
+  const { windowsHookNode } = await import('../scripts/windows-hook-node.ts')
+  const home = join(f.home, "u's")
+  mkdirSync(home)
+  const system32 = join(process.env.SystemRoot || 'C:\\Windows', 'System32')
+  const powershell = join(system32, 'WindowsPowerShell', 'v1.0')
+  const setupEnv = { ...Object.fromEntries(Object.entries(isolatedEnv(home)).filter(([key]) => key.toLowerCase() !== 'comspec')), PATH: [system32, powershell].join(delimiter), ComSpec: join(f.home, 'unavailable-short-path-probe.exe') }
+  const nodeLookup = spawnSync(join(system32, 'where.exe'), ['node'], { env: setupEnv, encoding: 'utf8', windowsHide: true, timeout: 15000 })
+  assert.notEqual(nodeLookup.status, 0, nodeLookup.stdout + nodeLookup.stderr)
+  const runtime = join(f.home, 'n s')
+  mkdirSync(runtime)
+  const fallbackNode = join(runtime, 'node.exe')
+  copyFileSync(process.execPath, fallbackNode)
+  const installed = spawnSync(fallbackNode, [setup, '--home', home, '--agent', 'antigravity', '--apply'], { env: setupEnv, encoding: 'utf8', windowsHide: true, timeout: 15000 })
+  assert.equal(installed.status, 0, installed.stderr)
+  const file = join(home, '.gemini', 'config', 'hooks.json')
+  const config = JSON.parse(readFileSync(file, 'utf8'))
+  assert.deepEqual(Object.keys(config['agent-board-local']), ['SessionStart', 'PreInvocation', 'PostInvocation', 'Stop'])
+  for (const group of Object.values(config['agent-board-local'])) {
+    assert.equal(group.length, 1)
+    for (const { command } of group) assert.match(command, /^powershell\.exe /i)
+  }
+  const foreign = { Stop: [{ command: 'user-command' }] }
+  config.custom = foreign
+  writeFileSync(file, JSON.stringify(config))
+
+  const expected = windowsHookNode(process.execPath)
+  if (expected === undefined) {
+    t.skip('this Node executable has no verified quote-free absolute path')
+    return
+  }
+  const env = isolatedEnv(home)
+  const upgraded = spawnSync(process.execPath, [setup, '--home', home, '--agent', 'antigravity', '--apply'], { env, encoding: 'utf8', windowsHide: true, timeout: 15000 })
+  assert.equal(upgraded.status, 0, upgraded.stderr)
+  assert.deepEqual(JSON.parse(upgraded.stdout).conflicts, [])
+  const updated = JSON.parse(readFileSync(file, 'utf8'))
+  assert.deepEqual(Object.keys(updated).sort(), ['agent-board-local', 'custom'])
+  const hooks = updated['agent-board-local']
+  assert.deepEqual(Object.keys(hooks), ['SessionStart', 'PreInvocation', 'PostInvocation', 'Stop'])
+  for (const group of Object.values(hooks)) {
+    assert.equal(group.length, 1)
+    assert.ok(group[0].command.startsWith(`${expected} --input-type=commonjs -e eval(`))
+    assert.doesNotMatch(group[0].command, /powershell/i)
+  }
+  assert.deepEqual(updated.custom, foreign)
+  const before = readFileSync(file)
+  const repeated = spawnSync(process.execPath, [setup, '--home', home, '--agent', 'antigravity', '--apply'], { env, encoding: 'utf8', windowsHide: true, timeout: 15000 })
+  assert.equal(repeated.status, 0, repeated.stderr)
+  assert.deepEqual(readFileSync(file), before)
+
+  const result = await fireCommand({ env }, hooks.Stop[0].command, JSON.stringify({ conversationId: 'synthetic-upgraded-session' }))
+  assert.equal(result.status, 0, hookFailure(result))
+  const progress = readFileSync(join(home, '.agent-board', 'progress.md'), 'utf8')
+  assert.match(progress, /agent=antigravity/)
+  assert.match(progress, /state=waiting/)
+}))
+
 test('Windows Antigravity queues an event with its launch process start stamp', { skip: process.platform !== 'win32' }, () => fixture(async f => {
   assert.equal(f.install('--agent', 'antigravity', '--apply').status, 0)
   holdAutomaticRecovery(f)
@@ -4367,6 +4459,55 @@ test('direct Windows hook argument data preserves ownership roots without execut
     assert.throws(() => antigravityCommand(['node', 'worker.mjs'], true, value => value, 'C:\\synthetic\\node.exe'), /INVALID_HOOK_COMMAND/)
     for (const executable of ['node', 'node.exe']) assert.throws(() => antigravityCommand(['node'], true, value => value, executable), /UNSAFE_HOOK_EXECUTABLE/)
     assert.throws(() => antigravityCommand(['node'], true, value => value, 'node&other'), /UNSAFE_HOOK_EXECUTABLE/)
+  } finally { resolver.deregister() }
+})
+
+test('Windows Antigravity hook commands start the verified Node directly and keep PowerShell only for an unverified path', async () => {
+  const resolver = registerHooks({ resolve(specifier, context, next) {
+    try { return next(specifier, context) } catch (error) {
+      if (error.code !== 'ERR_MODULE_NOT_FOUND' || !specifier.startsWith('.')) throw error
+      return next(`${specifier}.ts`, context)
+    }
+  } })
+  try {
+    const { antigravityCommand, directHookArgs, encodedCommandText, hookCommandArgs } = await import('../hooks/local-agents.ts')
+    const home = "C:\\Users\\O'Hara 雪\\.agent-board"
+    const worker = home + '\\agent-board-hook.mjs'
+    const progress = home + '\\progress.md'
+    const argv = hookCommandArgs('C:\\Program Files\\nodejs\\node.exe', home, 'antigravity', worker, progress, 'Stop', 'waiting')
+    const node = 'C:\\PROGRA~1\\nodejs\\node.exe'
+    const quote = value => '"' + value + '"'
+    const command = antigravityCommand(argv, true, quote, node)
+    assert.ok(command.startsWith(node + " --input-type=commonjs -e eval(Buffer.from('"))
+    assert.doesNotMatch(command, /powershell/i)
+    assert.ok(!command.includes('"'))
+    assert.ok(command.length < 8191, `${command.length} characters`)
+    const args = directHookArgs(command)
+    assert.deepEqual(args, [argv[0], ...argv.slice(4)])
+    assert.ok(args.includes(worker))
+    assert.ok(args.includes(progress))
+    const encoded = /Buffer\.from\('([^']+)'/.exec(command)[1]
+    assert.ok(Buffer.from(encoded, 'base64').toString('utf8').includes('--hook-started'))
+
+    const fallback = antigravityCommand(argv, true, quote)
+    const prefix = 'powershell.exe -NoLogo -NoProfile -NonInteractive -EncodedCommand '
+    assert.ok(fallback.startsWith(prefix))
+    assert.ok(fallback.length < 8191, `${fallback.length} characters`)
+    const source = encodedCommandText(fallback.slice(prefix.length))
+    assert.ok(source.includes("'C:\\Program Files\\nodejs\\node.exe'"))
+    assert.ok(source.includes(worker.replaceAll("'", "''")))
+    assert.ok(source.includes('--hook-started'))
+    for (const executable of [
+      'C:\\Program Files\\nodejs\\node.exe', 'C:\\n"x\\node.exe', 'C:\\n%x%\\node.exe',
+      'C:\\n&x\\node.exe', 'C:\\n^x\\node.exe', 'C:\\n!x\\node.exe', 'C:\\n(x)\\node.exe',
+      "C:\\n'x\\node.exe", 'C:\\n,x\\node.exe', 'C:\\n;x\\node.exe', 'C:\\n=x\\node.exe', 'C:\\n雪\\node.exe',
+      'C:\\nodejs\\node.cmd', '\\\\server\\share\\node.exe', 'node.exe',
+    ]) assert.throws(() => antigravityCommand(argv, true, quote, executable), /UNSAFE_HOOK_EXECUTABLE/)
+
+    const posixQuote = value => "'" + value + "'"
+    const posix = antigravityCommand(argv, false, posixQuote)
+    assert.equal(posix, argv.map(posixQuote).join(' '))
+    assert.doesNotMatch(posix, /powershell/i)
   } finally { resolver.deregister() }
 })
 

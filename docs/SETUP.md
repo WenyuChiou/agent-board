@@ -232,10 +232,19 @@ wrote, and the connect then leaves this installer's skill as it is. While a host
 skill but neither definition,
 `--codex-doctor --agent antigravity` says `skill only, no report hook`.
 
-On Windows the generated command uses Windows PowerShell's encoded-command mode to
-forward stdin to the exact Node executable and reporter paths. This avoids Antigravity's
-`cmd /c` argument escaping failure for quoted paths such as `C:\Program Files\nodejs`.
-No PowerShell profile or execution-policy setting is changed.
+On Windows the generated command starts the exact Node executable directly
+(`node.exe --input-type=commonjs -e ...`), with the reporter paths carried inside it, so
+no PowerShell start sits in front of Node. Setup binds an absolute path that
+needs no quotes, using the Windows short (8.3) name of a path with spaces such as
+`C:\Program Files\nodejs` only after its file identity matches the running Node. Antigravity's
+`cmd /c` argument escaping cannot keep the quotes a spaced path needs, and a bare `node`
+would let `PATH` or the event's working directory choose another program. When setup cannot
+verify such a path (the volume has no short names, say), the command uses Windows
+PowerShell's encoded-command mode, which forwards stdin to the exact Node and reporter paths
+but puts a PowerShell start in front of Node; running setup again rewrites it as a direct
+command once one is possible.
+Codex's commands carry no wrapper from this installer. No PowerShell profile or
+execution-policy setting is changed.
 
 The reporter binds the native `conversationId`, ignoring transcript paths, prompts,
 workspace paths, tool inputs and model text. Its own session record retains at most 16

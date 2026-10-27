@@ -87,14 +87,14 @@ CLI、桌面 App、IDE 的實際 hook 事件分開驗收；安裝了檔案、傳
 |:-:|---|---|
 | <img src="docs/images/agents/claude-code.svg" width="20" alt="Claude Code"> | Claude Code | `/progress` |
 | <img src="docs/images/agents/codex.svg" width="20" alt="Codex"> | Codex CLI 與 App | `$agent-board` |
-| <img src="docs/images/agents/antigravity.svg" width="20" alt="Antigravity"> | Antigravity | `/agent-board`（還沒驗證） |
+| <img src="docs/images/agents/antigravity.svg" width="20" alt="Antigravity"> | Antigravity | `/agent-board`（在合成環境檢查過，還沒實機執行） |
 | <img src="docs/images/agents/opencode.svg" width="20" alt="OpenCode"> | OpenCode | `/board` |
-| <img src="docs/images/agents/cursor.svg" width="20" alt="Cursor"> | Cursor | `/agent-board`（還沒驗證） |
-| <img src="docs/images/agents/grok-build.svg" width="20" alt="Grok Build"> | Grok Build | `/agent-board`（還沒驗證） |
-| <img src="docs/images/agents/muse-code.svg" width="20" alt="Muse Code"> | Muse Code | `/agent-board`（還沒驗證） |
+| <img src="docs/images/agents/cursor.svg" width="20" alt="Cursor"> | Cursor | `/agent-board`（在合成環境檢查過，還沒實機執行） |
+| <img src="docs/images/agents/grok-build.svg" width="20" alt="Grok Build"> | Grok Build | `/agent-board`（在合成環境檢查過，還沒實機執行） |
+| <img src="docs/images/agents/muse-code.svg" width="20" alt="Muse Code"> | Muse Code | `/agent-board`（在合成環境檢查過，還沒實機執行） |
 | <img src="docs/images/agents/hermes-agent.svg" width="20" alt="Hermes Agent"> | Hermes Agent | `/agent-board` |
 | <img src="docs/images/agents/openclaw.svg" width="20" alt="OpenClaw"> | OpenClaw | `/agent-board` |
-| <img src="docs/images/agents/deepseek-harness.svg" width="20" alt="DeepSeek Harness"> | DeepSeek Harness | `/agent-board`（還沒驗證） |
+| <img src="docs/images/agents/deepseek-harness.svg" width="20" alt="DeepSeek Harness"> | DeepSeek Harness | `/agent-board`（在合成環境檢查過，還沒實機執行） |
 
 **Claude 桌面 App** 無法顯示面板：底部狀態列會顯示看板狀態，`/progress` 會提供可回覆問題、封存工作的[看板網頁](#看板的網頁)連結；網頁無法啟動時改開唯讀網頁。看板網頁需要 `/progress connect` 安裝的看板腳本，或在下次工作階段開始時更新。
 
@@ -157,9 +157,9 @@ Hooks 只說對話在做事還是在等；步驟和什麼時候算完成，來�
 | Codex | 0.163.0-alpha.10.2 app-server（[紀錄](docs/validation/2026-10-19-native-hooks.md)）；CLI 有 0.23.5 實機測試；App 未驗證 |
 | Antigravity | Windows 上的 CLI（[紀錄](docs/validation/2026-10-19-native-hooks.md)）；App 能打開看板，但還不會回報提問（#285）；IDE 未驗證 |
 | OpenCode | Plugin SDK 1.19.3（[紀錄](docs/validation/2026-10-19-portable-hosts.md)） |
-| Cursor | 未驗證 |
+| Cursor | 在合成環境檢查過，還沒實機執行 |
 | Grok Build | 1.0.62，搭配模擬模型 |
-| Muse Code | 未驗證 |
+| Muse Code | 在合成環境檢查過，還沒實機執行 |
 | Hermes Agent | 0.19.0，搭配模擬模型 |
 | OpenClaw | 原始碼契約與模擬回呼（[紀錄](docs/validation/2026-10-19-portable-hosts.md)）；應用程式本身未驗證 |
 | DeepSeek Harness | Plugin 載入（[紀錄](docs/validation/2026-10-19-portable-hosts.md)）；應用程式本身未驗證 |
