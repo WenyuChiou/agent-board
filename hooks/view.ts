@@ -170,6 +170,10 @@ export type Overview = { waiting: number; active: number; due: number; today: nu
 
 export type View = {
   warning?: string
+  // The size warning's numbers and finished hand-kept tasks a sweep would archive (#464).
+  details?: string
+  // The size warning is up; the page and pane offer Clean up.
+  isLarge?: true
   // What the board cleared in the last 7 days (retention.ts); absent when it cleared nothing.
   pruned?: string
   current: CurrentView | null
@@ -587,12 +591,29 @@ export const answeredJson = (answered: readonly string[]): string => `${JSON.str
 export const seenPath = (path: string): string => `${path.replace(/\.md$/i, '')}-seen.json`
 
 const SEEN_MAX = 500
+// One reserved entry in progress-seen.json (#464): when a reader that records first ran with the 3-day
+// rule. A finished hand-kept task's 3 days count from the later of this and its own first observation,
+// so tasks an earlier release saw done long ago get their 3 days from the upgrade. Absent = unknown.
+export const SWEEP_ARMED_KEY = sha256('hand-kept-sweep-armed')
 const hasTime = (time: unknown): time is number => typeof time === 'number' && Number.isFinite(time) && time > 0
 const isFutureKey = (key: string): boolean => /^future:[0-9a-f]{64}$/.test(key)
 
 // Notes and indentation do not mean the task's work changed.
 export const taskFingerprint = (project: string, task: ProgressTask): string =>
   sha256(JSON.stringify([project, task.title, task.steps.map(step => [step.status, step.text.trim()])]))
+
+// Whether the text is a seen file this reader understands: empty, or JSON holding a `seen` object. A
+// sweep that must write nothing on a file it cannot read (the page's, #464) stops on anything else.
+export const isSeenText = (text: string): boolean => {
+  if (text.trim() === '') return true
+  try {
+    const data: unknown = JSON.parse(text)
+    const list = data !== null && typeof data === 'object' && 'seen' in data ? data.seen : null
+    return list !== null && typeof list === 'object' && !Array.isArray(list)
+  } catch {
+    return false
+  }
+}
 
 export const parseSeen = (text: string, age = 0): Record<string, number> | null => {
   if (text.trim() === '') return {}
@@ -604,8 +625,8 @@ export const parseSeen = (text: string, age = 0): Record<string, number> | null 
     // The writer bounds absent clock entries. A present update's baseline must survive
     // decoding even when the board has more rows than the manual observation cache.
     return Object.fromEntries([
-      ...entries.filter(([key]) => isFutureKey(key)),
-      ...entries.filter(([key]) => /^[0-9a-f]{64}$/.test(key)).slice(0, SEEN_MAX),
+      ...entries.filter(([key]) => key === SWEEP_ARMED_KEY || isFutureKey(key)),
+      ...entries.filter(([key]) => key !== SWEEP_ARMED_KEY && /^[0-9a-f]{64}$/.test(key)).slice(0, SEEN_MAX),
     ])
   } catch {
     return Math.abs(age) < HALF_WRITE_MS ? null : {}
@@ -623,6 +644,7 @@ export const withSeen = (
   now: number,
   other: Readonly<Record<string, number>> = {},
   isSettled = false,
+  isArming = false,
 ): Record<string, number> => {
   const entries = new Map<string, number>()
   const presentClocks = new Set<string>()
@@ -630,6 +652,9 @@ export const withSeen = (
     const times = [seen[key], other[key]].filter(hasTime)
     return times.length > 0 ? Math.min(...times) : undefined
   }
+  // A time on a clock that ran ahead would keep every task from ever being due: it counts as unknown.
+  const held = earliest(SWEEP_ARMED_KEY)
+  const armed = held !== undefined && held - now <= FUTURE_SKEW_MS ? held : (isArming ? now : undefined)
   for (const project of projects) {
     for (const task of project.tasks) {
       if (task.auto !== null && hasTime(task.auto.updated)) {
@@ -660,9 +685,19 @@ export const withSeen = (
     ...clocks.filter(([key]) => !presentClocks.has(key)).slice(0, SEEN_MAX),
   ]
   return Object.fromEntries([
+    ...(armed === undefined ? [] : [[SWEEP_ARMED_KEY, armed] as const]),
     ...keptClocks,
-    ...[...entries].filter(([key]) => !isFutureKey(key)).slice(0, SEEN_MAX),
+    ...[...entries].filter(([key]) => key !== SWEEP_ARMED_KEY && !isFutureKey(key)).slice(0, SEEN_MAX),
   ])
+}
+
+// When a finished hand-kept task counts as seen done for the 3-day rule; undefined while either time
+// is unknown or in the future, so nothing is counted or moved on a guess.
+export const handKeptSeenAt = (seen: Readonly<Record<string, number>>, project: string, task: ProgressTask, now: number): number | undefined => {
+  const armed = seen[SWEEP_ARMED_KEY]
+  if (!hasTime(armed) || armed > now) return undefined
+  const observed = seen[taskFingerprint(project, task)]
+  return hasTime(observed) && observed <= now ? Math.max(observed, armed) : undefined
 }
 
 export const seenJson = (seen: Readonly<Record<string, number>>): string => `${JSON.stringify({ seen }, null, 2)}\n`

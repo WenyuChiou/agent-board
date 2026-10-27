@@ -47,6 +47,8 @@ export type PaneActions = {
   toggleSection: (id: string) => PressOutcome | Promise<PressOutcome>
   continueHere: () => PressOutcome | Promise<PressOutcome>
   archive: () => PressOutcome | Promise<PressOutcome>
+  // Clean up: the scheduled sweep (the hourly one, `--tidy`), not the archive of every finished task (#464).
+  cleanUp: () => PressOutcome | Promise<PressOutcome>
   takeOver: (row: TaskRow) => PressOutcome | Promise<PressOutcome>
   handOver: (row: TaskRow) => PressOutcome | Promise<PressOutcome>
   tick: (ref: StepRef) => PressOutcome | Promise<PressOutcome>
@@ -109,6 +111,7 @@ export const pressTarget = (view: View, button: string, s: Strings = ZH_TW): { k
   if (button === 'section::others') return { key: button, revision: '', label: view.current === null ? s.sectionActive : s.sectionOther }
   if (button === 'focus::more') return { key: button, revision: '', label: s.moreWaiting(view.waiting.length - (view.focus?.type === 'ask' ? 1 : 0)) }
   if (button === 'continue' && view.current !== null) return { key: button, revision: JSON.stringify([view.current.title, view.current.steps]), label: view.current.title }
+  if (button === 'clean') return { key: button, revision: '', label: s.cleanUp }
   if (button === 'archive') return { key: button, revision: '', label: view.recent.map(item => item.title).join(', ') }
   const asks = [...view.waiting, ...view.hidden, ...(view.reminder ?? []), ...(view.older ?? [])]
   const ask = asks.sort((a, b) => b.key.length - a.key.length).find(item => button === `ask::${item.key}` || button.startsWith(`${item.key}::`))
@@ -710,6 +713,15 @@ export const drawPane = (ui: PaneUi, model: PaneModel, actions: PaneActions): Re
     <Box flexDirection="column">
       <Text bold>{s.paneTitle}</Text>
       {view.warning && <Text color={palette.alert}>{view.warning}</Text>}
+      {view.isLarge && (
+        <Box flexDirection="column">
+          <Button key="clean" plain onPress={buttonPress('clean', actions.cleanUp)}>
+            {s.cleanUp}
+          </Button>
+          {cardResult('clean')}
+        </Box>
+      )}
+      {view.details && <Text color={palette.muted}>{view.details}</Text>}
       {view.pruned && <Text color={palette.muted}>{view.pruned}</Text>}
       {model.hasPendingQuestionsProblem && <Text color={palette.alert}>{s.inboxQuestionNotKept}</Text>}
       {model.hasQuestionsProblem && <Text color={palette.alert}>{s.questionsUnreadable()}</Text>}

@@ -2,7 +2,7 @@ import { emptyQuestions, observeQuestions } from '../hooks/questions'
 import { expect, test } from 'claude-code/testing'
 
 import type { ProgressMirror } from '../types'
-import { archivableAsking, confirmTask, extractAutoBlock, removeAutoBlock, renderAutoBlock, scanBlocks, setManualStep, stateWords, takeArchivable, takeTask, upsertAutoBlock } from '../hooks/blocks'
+import { archivableAsking, countManualDone, confirmTask, extractAutoBlock, removeAutoBlock, renderAutoBlock, scanBlocks, setManualStep, stateWords, takeArchivable, takeManualDone, takeTask, upsertAutoBlock } from '../hooks/blocks'
 import { ZH_TW } from '../hooks/i18n'
 import { STRINGS } from '../hooks/strings'
 import { answerAgentPrompt } from '../hooks/inbox'
@@ -19,7 +19,7 @@ import {
 } from '../hooks/mirror'
 import { futureTimeKey, parseProgress, STALE_MS } from '../hooks/parse'
 import { BIG_AT, bigBoard } from './fixtures/big-board'
-import { answeredJson, answeredPath, buildView, dueDays, foldSteps, IDLE_MS, keptAnswered, parseAnswered, parseSeen, relativeTime, seenJson, seenPath, taskFingerprint, withAnswered, withSeen } from '../hooks/view'
+import { answeredJson, answeredPath, buildView, dueDays, foldSteps, handKeptSeenAt, IDLE_MS, keptAnswered, parseAnswered, parseSeen, relativeTime, seenJson, seenPath, SWEEP_ARMED_KEY, taskFingerprint, withAnswered, withSeen } from '../hooks/view'
 
 const NOW = Date.parse('2026-10-16T12:00:00.000Z')
 const HOUR = 60 * 60 * 1000
@@ -884,6 +884,86 @@ test('a hand-kept task is aged from when its content was first seen, and editing
   expect(view(file.replace('[ ]', '[~]')).active).toHaveLength(1)
   expect(withSeen(seen, projects, NOW)).toEqual(seen)
   expect(Object.keys(seen)[0]).toMatch(/^[0-9a-f]{64}$/)
+})
+
+test('tasks already seen done before the upgrade get their three days from the first run of the new rule', () => {
+  const day = 24 * HOUR
+  const text = '## demo\n### Finished before upgrade\n- [x] Finished\n'
+  const projects = parseProgress(text)
+  const task = projects[0]!.tasks[0]!
+  const key = taskFingerprint('demo', task)
+  const old = withSeen({}, projects, NOW - 10 * day)
+  expect(withSeen(old, projects, NOW)).toEqual(old)
+  expect(withSeen({}, [], NOW)).toEqual({})
+  expect(handKeptSeenAt(old, 'demo', task, NOW)).toBeUndefined()
+  const armed = withSeen(old, projects, NOW, {}, false, true)
+  expect(Object.keys(armed)[0]).toBe(SWEEP_ARMED_KEY)
+  expect(armed[SWEEP_ARMED_KEY]).toBe(NOW)
+  expect(armed[key]).toBe(NOW - 10 * day)
+  expect(parseSeen(seenJson(armed))).toEqual(armed)
+  for (const isSettled of [false, true]) {
+    expect(withSeen(armed, [], NOW + day, {}, isSettled, true)[SWEEP_ARMED_KEY]).toBe(NOW)
+    expect(withSeen(armed, [], NOW + day, { [SWEEP_ARMED_KEY]: NOW - day }, isSettled)[SWEEP_ARMED_KEY]).toBe(NOW - day)
+    expect(withSeen({ [SWEEP_ARMED_KEY]: NOW - day }, [], NOW + day, armed, isSettled)[SWEEP_ARMED_KEY]).toBe(NOW - day)
+  }
+  // A clock that ran ahead must not hold every task from being due: a future armed time is unknown, and armed again.
+  const ahead = { ...armed, [SWEEP_ARMED_KEY]: NOW + day }
+  expect(withSeen(ahead, projects, NOW, {}, false, true)[SWEEP_ARMED_KEY]).toBe(NOW)
+  expect(SWEEP_ARMED_KEY in withSeen(ahead, projects, NOW)).toBe(false)
+  const crowded = parseProgress('## demo\n' + Array.from({ length: 510 }, (_, i) => `### Task ${i}\n- [x] Finished\n`).join(''))
+  const capped = parseSeen(seenJson(withSeen(armed, crowded, NOW + day, {}, true, true))) ?? {}
+  expect(capped[SWEEP_ARMED_KEY]).toBe(NOW)
+  expect(Object.keys(capped)).toHaveLength(501)
+  for (const seen of [{}, { [key]: NOW }, { [SWEEP_ARMED_KEY]: NOW }, { ...armed, [key]: NOW + 1 }, { ...armed, [SWEEP_ARMED_KEY]: NOW + 1 }]) {
+    expect(handKeptSeenAt(seen, 'demo', task, NOW)).toBeUndefined()
+  }
+  expect(handKeptSeenAt(armed, 'demo', task, NOW)).toBe(NOW)
+  for (const offset of [-1, 0]) {
+    const at = NOW + 3 * day + offset
+    const age = (_key: string, project: string, item: typeof task) => handKeptSeenAt(armed, project, item, at)
+    expect(countManualDone(projects, at, age)).toBe(offset < 0 ? 0 : 1)
+    expect(takeManualDone(text, at, age).entries).toHaveLength(offset < 0 ? 0 : 1)
+  }
+  const later = { ...armed, [key]: NOW + day }
+  expect(handKeptSeenAt(later, 'demo', task, NOW + day)).toBe(NOW + day)
+  for (const offset of [-1, 0]) {
+    const at = NOW + 4 * day + offset
+    expect(countManualDone(projects, at, (_key, project, item) => handKeptSeenAt(later, project, item, at))).toBe(offset < 0 ? 0 : 1)
+  }
+})
+
+test('a sweep over the synthetic big board counts in under a second and moves nothing open', () => {
+  const day = 24 * HOUR
+  const marks = [' ', '~', '?', '>', '!']
+  const appended = Array.from({ length: 40 }, (_, index) => `### Synthetic completion ${index}\n- [x] Finished\n- [${index < 30 ? '-' : marks[(index - 30) % marks.length]}] Last step\n`).join('')
+  const text = `${bigBoard().source}\n## Sweep sample\n${appended}`
+  const projects = parseProgress(text)
+  const seen = { ...withSeen({}, projects, BIG_AT - 30 * day), [SWEEP_ARMED_KEY]: BIG_AT - 4 * day }
+  const age = (_key: string, project: string, task: typeof projects[number]['tasks'][number]) => handKeptSeenAt(seen, project, task, BIG_AT)
+  const countStart = Date.now()
+  const count = countManualDone(projects, BIG_AT, age)
+  expect(Date.now() - countStart).toBeLessThan(1000)
+  const takeStart = Date.now()
+  const out = takeManualDone(text, BIG_AT, age)
+  expect(Date.now() - takeStart).toBeLessThan(1000)
+  expect(count).toBe(30)
+  expect(out.entries).toHaveLength(count)
+  for (const entry of out.entries) expect(entry).not.toMatch(/- \[[ ~?>!]\]/)
+  // One scan of each text, not one per block: a block's lines must come through the sweep unchanged.
+  const linesOf = (one: string): string[] => one.replace(/\r?\n$/, '').split(/\r?\n/)
+  const before = linesOf(text)
+  const after = linesOf(out.text)
+  const spansBefore = scanBlocks(before)
+  const spansAfter = scanBlocks(after)
+  expect(spansAfter.map(span => [span.session, span.state, span.updated])).toEqual(spansBefore.map(span => [span.session, span.state, span.updated]))
+  spansBefore.forEach((span, index) => {
+    const kept = spansAfter[index]!
+    expect(after.slice(kept.start, kept.end + 1)).toEqual(before.slice(span.start, span.end + 1))
+  })
+  const remaining = new Set(parseProgress(out.text).flatMap(project => project.tasks.map(task => taskFingerprint(project.name, task))))
+  for (const project of projects) for (const task of project.tasks) {
+    if (task.auto !== null || task.steps.some(step => step.status !== 'done' && step.status !== 'cancelled')) expect(remaining.has(taskFingerprint(project.name, task))).toBe(true)
+  }
 })
 
 test('a hand-kept task the seen record does not know is never hidden', () => {

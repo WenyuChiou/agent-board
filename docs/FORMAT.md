@@ -247,13 +247,19 @@ Old work moves out of `progress.md` into a monthly file in the same folder, so t
 |---|---|
 | A block with `state=done` | More than 12 hours after `updated` |
 | A block in any other state (`working`, `waiting`, `ended`) | More than 3 days after `updated` |
-| A hand-kept task whose steps are all done | At least 24 hours after the recorded observation of every step done: the pane uses its own record; standalone `--tidy` uses that task's fingerprint in `progress-seen.json` |
+| A hand-kept task whose steps are all `[x]` or `[-]` | At least 3 days after the recorded first observation of every step done, subject to the first-release rule below |
 
 Automatic sweeps move a block containing a visible unresolved `[?]` step only when its state is `ended` or `done`, only after its three stopped days (a done block that asks does not get the shorter 12 hours), and only once they have saved and read back the same complete question snapshot the explicit archive requires; if that fails the block stays. A `working` or `waiting` block that asks stays, however old. Only blocks with their end marker move. A block without one stays until someone fixes it. A block whose `updated` is missing, unreadable or in the future never moves. A pane sweep keeps its own session's block; standalone `--tidy` has no current-session exemption.
 
-The normal sweep runs when a Claude Code session with the mod starts, once an hour while it stays open, or once when the standalone board runs with `--tidy`. The standalone command needs no Claude session and installs no scheduler. `/progress 整理` (also `/progress tidy` and `/progress archive`) and "Archive now" in the pane request an immediate interactive tidy instead.
+The normal sweep runs when a Claude Code session with the mod starts, once an hour while it stays open, once when the standalone board runs with `--tidy`, and every hour while a `--serve` page stays running. The standalone command needs no Claude session and installs no scheduler. Clean up runs the same sweep as `--tidy`.
 
-The pane, `--watch` and `--serve` record manual-task fingerprint observations in `progress-seen.json`. `--tidy` only reads that record, never creates or refreshes it, and retains manual tasks with unknown or future observations. A machine running only scheduled `--tidy` therefore never archives a completed hand-kept task that has not been observed by one of those interactive readers. An unreadable observation file is left untouched; manual tasks stay, while eligible dated agent blocks can still move. The recorded time is a first observation of that completed fingerprint, not proof of its exact completion time.
+In 0.24.1, scheduled sweeps (pane start and hourly, `--tidy`, the page's hourly sweep, and Clean up) only count finished hand-kept tasks and move none. The details line says "N finished tasks would be archived" once their three days are up; the next release turns the move on. "Archive now" and `/progress tidy` (also `/progress 整理` and `/progress archive`) in the pane, the page's "Archive now", and a row's Archive still move finished work at once. The page offers Archive now only in Done recently, which lists work finished within a day. It has no button for moving old finished hand-kept tasks; use the pane's Archive now or `/progress tidy` for those.
+
+The pane, `--watch` and `--serve` record manual-task fingerprint observations in `progress-seen.json`. The file also holds one reserved entry: when the first recording reader ran with the three-day rule. A task's three days count from the later of that time and its own first observation, so tasks seen done under 0.24.0 get three days from the upgrade. `--tidy` and `--chat` only read the record and never arm it; a computer running only `--tidy` counts nothing without that reserved entry. Unknown or future observations keep a task out of the count. The recorded time is a first observation of that completed fingerprint, not proof of its exact completion time.
+
+When the seen file cannot be read, the page's hourly sweep skips that pass and writes nothing, including to the board, archive and seen file. Standalone `--tidy` leaves the unreadable file untouched and keeps hand-kept tasks, while eligible dated agent blocks can still move.
+
+When the board passes its size limit, the pane and page show a one-sentence warning and one Clean up button. The numbers and the count of finished tasks that would be archived appear below it in the details line. The terminal board, chat and `--html` show that line too, without a Clean up button. Nothing is deleted by the archive sweep.
 
 The archive file is named after `progress.md`: `progress-archive-YYYY-MM.md`, in the same folder. For `CLAUDE_PROGRESS_FILE=/work/board.md` it is `/work/board-archive-YYYY-MM.md`. The month is the local month of the sweep. Once a month's file holds 1 MB, the month goes on in `progress-archive-YYYY-MM-2.md`, then `-3`, and so on; each part is a file of its own as described here. A new archive file starts with the archive title in the pane's language (`# 進度封存` in zh-TW; see [Language](#language)) and a blank line. Each moved task is added as
 
@@ -460,7 +466,7 @@ How the pane reads it:
 10. When every step is `[x]` (or `[-]`), set `state=done` and update `updated=`.
 11. If you stop for good with steps left, set `state=ended`. If you cannot tell that a session ended, do nothing: after 12 hours without a write the pane shows the block as stopped.
 
-If you cannot write markers, write a plain hand-kept task (a `###` with steps) under your project. It shows in the pane, but it has no state, never shows as stopped, and leaves only 24 hours after the pane sees all its steps done.
+If you cannot write markers, write a plain hand-kept task (a `###` with steps) under your project. It shows in the pane, but it has no state and never shows as stopped. Once all its steps are `[x]` or `[-]`, it counts toward the archive after three days under the observation and upgrade rules above. In 0.24.1 scheduled sweeps only count it; explicit archive actions can move it at once.
 
 ## Versioning
 

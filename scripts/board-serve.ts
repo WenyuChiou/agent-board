@@ -35,6 +35,11 @@ export type ServeOptions = {
   act: (action: BoardAction) => string
   // Every finished task to the archive now: the line to show.
   tidy: () => string
+  // The Clean up button: the sweep `--tidy` runs (agent blocks by age; hand-kept tasks only once the
+  // move is on, #464), the line to show.
+  clean: () => string
+  sweep: () => void
+  sweepMs: number
   paste: (text: string, reviewToken?: string) => { isAdded: boolean; note: string; review?: { token: string; current: string; incoming: string } }
   // Why the board or a press could not be made when it met a file the board could not read or
   // write (the note the terminal board shows), or null for an error of any other kind. A phone
@@ -406,6 +411,10 @@ export const startServer = (o: ServeOptions): void => {
         const note = o.tidy()
         return json(res, note === o.s.boardWriteFailed ? 409 : 200, { note })
       }
+      if (url.pathname === '/api/clean') {
+        const note = o.clean()
+        return json(res, note === o.s.boardWriteFailed ? 409 : 200, { note })
+      }
       if (url.pathname === '/api/paste') {
         const pasted = o.paste(text(body.text), text(body.reviewToken))
         return json(res, pasted.isAdded ? 200 : 409, { note: pasted.note, review: pasted.review })
@@ -451,8 +460,13 @@ export const startServer = (o: ServeOptions): void => {
   server.on('close', () => clearInterval(idle))
   server.listen(o.port, '127.0.0.1', () => {
     port = (server.address() as AddressInfo).port
-    if (!o.onReady(`http://127.0.0.1:${port}/?t=${token}`, port)) stop()
+    if (!o.onReady(`http://127.0.0.1:${port}/?t=${token}`, port)) {
+      stop()
+      return
+    }
     // Preparing a private address can block; inactivity starts once that address is ready.
-    else lastSeen = Date.now()
+    lastSeen = Date.now()
+    const sweeper = setInterval(() => { try { o.sweep() } catch {} }, o.sweepMs)
+    server.on('close', () => clearInterval(sweeper))
   })
 }

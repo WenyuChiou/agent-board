@@ -30,6 +30,8 @@ import { serverMemoryArgs } from '../scripts/server-runtime.ts'
 import { isPrivateRuntimeSddl } from '../scripts/runtime-folder.ts'
 import { AGENT_ICONS } from '../hooks/agent-icons.ts'
 
+const SWEEP_ARMED_KEY = createHash('sha256').update('hand-kept-sweep-armed').digest('hex')
+
 const TORN_NOW = Date.parse('2026-10-20T12:00:00Z')
 const tornDay = () => '# Progress\r\n\r\n## Synthetic day\r\n### Hand task alpha\r\n- [ ] Plan\r\n\r\n### Hand task beta\r\n- [ ] Review\r\n\r\n' +
   ['codex', 'cursor', 'gemini', 'grok', 'opencode', 'hermes', 'claude'].map((agent, i) =>
@@ -2043,6 +2045,8 @@ test('the page answers only with its token and its own host, and closing it stop
     assert.equal((await call('GET', '/api/board', { headers: { host: `rebind.example:${port}` } })).status, 421)
     assert.equal((await call('POST', '/api/tidy', { body: {}, headers: { origin: 'https://evil.example' } })).status, 403)
     assert.equal((await call('POST', '/api/tidy', { body: {}, headers: { 'content-type': 'text/plain' } })).status, 415)
+    assert.equal((await call('POST', '/api/clean', { body: {}, headers: { origin: 'https://evil.example' } })).status, 403)
+    assert.equal((await call('POST', '/api/clean', { body: {}, headers: { 'content-type': 'text/plain' } })).status, 415)
     assert.equal((await call('GET', '/api/board')).status, 200)
     assert.ok(existsSync(board.served))
     assert.equal((await call('POST', '/api/close', { body: {} })).status, 200)
@@ -3293,10 +3297,11 @@ test('unexpected server read and action errors return a reason and log their sta
   const source = BOARD_SCRIPT
     .replace('\n    view: freshView,', '\n    view: () => { throw new TypeError("synthetic server read failure") },')
     .replace('\n    tidy,\n    paste,', '\n    tidy: () => { throw new TypeError("synthetic server action failure") },\n    paste,')
-  assert.ok(source.includes('synthetic server read failure') && source.includes('synthetic server action failure'))
+    .replace('clean: cleanUp,', 'clean: () => { throw new TypeError("synthetic server clean failure") },')
+  assert.ok(source.includes('synthetic server read failure') && source.includes('synthetic server action failure') && source.includes('synthetic server clean failure'))
   const board = await page('', {}, [], undefined, source)
   try {
-    for (const [method, route, body, reason] of [['GET', '/api/board', undefined, 'read'], ['POST', '/api/tidy', {}, 'action']]) {
+    for (const [method, route, body, reason] of [['GET', '/api/board', undefined, 'read'], ['POST', '/api/tidy', {}, 'action'], ['POST', '/api/clean', {}, 'clean']]) {
       const response = await board.call(method, route, { body })
       assert.equal(response.status, 500)
       assert.equal(response.json().note, 'Could not complete this action. Please try again.')
@@ -5918,9 +5923,9 @@ test('--tidy keeps a working or waiting block that asks, however old, while the 
 
 test('--tidy reports scheduled ages in every language and takes precedence over interactive modes', () => {
   const expected = {
-    en: 'Nothing is ready to archive. Agent blocks need more than 12 hours since their last update when done, or more than 3 days otherwise; completed hand-kept tasks need a completion observation at least 24 hours old. A block that still asks a question is archived only once it has ended or is done and the board has kept the question.',
-    'zh-TW': '目前沒有可封存的項目。代理區塊最後更新後，已完成需超過 12 小時，其他需超過 3 天；手動完成項目需有至少 24 小時前的完成觀察紀錄。仍在提問的區塊，要等它已結束或已完成，且看板留存該問題後才會封存。',
-    'zh-CN': '当前没有可归档的项目。代理区块最后更新后，已完成需超过 12 小时，其他需超过 3 天；手动完成项目需有至少 24 小时前的完成观察记录。仍在提问的区块，要等它已结束或已完成，且看板留存该问题后才会归档。',
+    en: EN.tidyScheduledNothing,
+    'zh-TW': ZH_TW.tidyScheduledNothing,
+    'zh-CN': ZH_CN.tidyScheduledNothing,
   }
   for (const lang of ['en', 'zh-TW', 'zh-CN']) tidyFixture(f => {
     writeFileSync(f.path, `## Synthetic\n${f.block('a1b2c313', 'Done at the boundary', 'done', 12)}${f.block('a1b2c314', 'Stopped at the boundary', 'ended', 72)}### Unobserved manual\n- [x] Finished\n`)
@@ -5939,45 +5944,212 @@ test('--tidy reports scheduled ages in every language and takes precedence over 
   })
 })
 
-test('--tidy uses recorded manual completion ages and preserves unknown or future observations', () => tidyFixture(f => {
+const largeManualBoard = () => {
+  const source = `## Synthetic\n### Finished one\n- [x] Last step\n### Finished two\n- [x] Last step\n### Still open\n> Context: ${'synthetic '.repeat(60_000)}\n- [ ] Next step\n`
+  const key = title => createHash('sha256').update(JSON.stringify(['Synthetic', title, [['done', 'Last step']]])).digest('hex')
+  const seen = JSON.stringify({ seen: {
+    [SWEEP_ARMED_KEY]: TIDY_NOW - 4 * 86400000,
+    [key('Finished one')]: TIDY_NOW - 4 * 86400000,
+    [key('Finished two')]: TIDY_NOW - 4 * 86400000,
+  } })
+  return { source, seen }
+}
+
+test('the size warning is one sentence with one Clean up button and its numbers sit in the details line', { timeout: 30_000 }, async () => {
+  const { source, seen } = largeManualBoard()
+  const block = `<!-- auto session=464c0002 agent=codex state=done updated=${new Date(TIDY_NOW - 13 * 3600000).toISOString()} -->\n### Finished agent block\n- [x] Last step\n<!-- /auto session=464c0002 -->\n`
+  for (const [lang, s] of [['en', EN], ['zh-TW', ZH_TW], ['zh-CN', ZH_CN]]) {
+    const board = await page('', {}, ['--lang', lang], TIDY_NOW)
+    try {
+      writeFileSync(board.path, source + block)
+      writeFileSync(join(board.dir, 'progress-seen.json'), seen)
+      let model = (await board.call('GET', '/api/board')).json().model
+      assert.equal(model.warning, s.boardLarge)
+      assert.equal(model.isLarge, true)
+      assert.equal(model.details, [s.progressLarge(Math.round(Buffer.byteLength(source + block) / 1024), 512), s.wouldArchive(2)].join(' · '))
+      const html = (await board.call('GET', `/?t=${board.token}`)).body
+      const dom = await pageDom(html, model, {
+        currentModel: () => model,
+        post: async ({ path, body }) => {
+          const response = await board.call('POST', path, { body })
+          model = (await board.call('GET', '/api/board')).json().model
+          return { ok: response.status === 200, json: async () => response.json() }
+        },
+      })
+      const paragraphs = dom.node('board').childNodes.filter(node => node.tag === 'p')
+      assert.equal(paragraphs.filter(node => node.textContent === s.boardLarge).length, 1)
+      const warning = paragraphs.find(node => node.textContent === s.boardLarge)
+      const details = paragraphs.find(node => node.textContent === model.details)
+      assert.ok(details && details.className.includes('t-quiet'))
+      assert.ok(paragraphs.indexOf(details) > paragraphs.indexOf(warning))
+      assert.doesNotMatch(warning.textContent, /\d/)
+      const buttons = dom.buttons().filter(button => button.textContent === s.cleanUp)
+      assert.equal(buttons.length, 1)
+      buttons[0].click()
+      await dom.settle()
+      assert.deepEqual(dom.requests.map(request => request.path), ['/api/clean'])
+      assert.ok(dom.node('board').textContent.includes(s.tidyMoved(1)))
+      assert.equal(readFileSync(board.path, 'utf8'), source)
+      const archive = readFileSync(join(board.dir, 'progress-archive-2026-10.md'), 'utf8')
+      assert.ok(archive.includes('### Finished agent block'))
+      assert.ok(!archive.includes('Finished one') && !archive.includes('Finished two') && !archive.includes('Still open'))
+      assert.ok(model.details.includes(s.wouldArchive(2)), model.details)
+    } finally { await board.close() }
+  }
+})
+
+test('terminal and HTML size warnings keep translated numbers in the details line without a Clean up button', () => {
+  const { source, seen } = largeManualBoard()
+  for (const [lang, s] of [['en', EN], ['zh-TW', ZH_TW], ['zh-CN', ZH_CN]]) {
+    const details = [s.progressLarge(Math.round(Buffer.byteLength(source) / 1024), 512), s.wouldArchive(2)].join(' · ')
+    for (const args of [[], ['--chat']]) {
+      const result = chatRun(args, { file: () => source, lang, beside: { 'progress-seen.json': seen }, change: text => `Date.now = () => ${TIDY_NOW}\n${text}` })
+      assert.equal(result.status, 0, result.stderr)
+      assert.ok(result.stdout.includes(s.boardLarge), result.stdout)
+      assert.ok(result.stdout.includes(details), result.stdout)
+      assert.ok(!result.stdout.includes(s.cleanUp), result.stdout)
+      assert.deepEqual(result.modified, [])
+      assert.deepEqual(result.wrote, [])
+    }
+    const html = htmlRun({ file: source, lang, beside: { 'progress-seen.json': seen }, now: TIDY_NOW })
+    assert.ok(html.includes(s.boardLarge))
+    assert.ok(html.includes(details))
+    // The Chinese legend also uses 清理 as a verb; it must not appear as an action label.
+    assert.ok(!html.includes(`>${s.cleanUp}<`))
+    assert.ok(![...html.matchAll(/<button\b[^>]*>([\s\S]*?)<\/button>/g)].some(match => match[1].includes(s.cleanUp)))
+  }
+})
+
+test("the page's server runs the hourly sweep and writes nothing when the seen file cannot be read", { timeout: 15_000 }, async () => {
+  const board = await page('', { AGENT_BOARD_SWEEP_MS: '100' }, [], TIDY_NOW)
+  try {
+    const source = '## Synthetic\n### Finished manual\n- [x] Last step\n'
+    const block = `<!-- auto session=464c0003 agent=codex state=done updated=${new Date(TIDY_NOW - 13 * 3600000).toISOString()} -->\n### Old agent block\n- [x] Last step\n<!-- /auto session=464c0003 -->\n`
+    const record = join(board.dir, 'progress-seen.json')
+    const archive = join(board.dir, 'progress-archive-2026-10.md')
+    writeFileSync(board.path, source + block)
+    writeFileSync(archive, '# Progress archive\n\nEarlier synthetic work\n')
+    writeFileSync(record, '{"seen":')
+    // The fixed test clock must see this as a young interrupted write, not stale damage.
+    utimesSync(record, TIDY_NOW / 1000, TIDY_NOW / 1000)
+    const snapshot = () => Object.fromEntries(readdirSync(board.dir).filter(name => name === 'progress.md' || name === 'progress-seen.json' || name.startsWith('progress-archive-')).map(name => [name, readFileSync(join(board.dir, name))]))
+    const before = snapshot()
+    await delay(1500)
+    assert.deepEqual(snapshot(), before)
+    // Damaged for good (older than a write in progress) or the wrong shape: still nothing is written.
+    for (const text of ['not json at all', '{"seen":[]}']) {
+      writeFileSync(record, text)
+      utimesSync(record, (TIDY_NOW - 60_000) / 1000, (TIDY_NOW - 60_000) / 1000)
+      const damaged = snapshot()
+      await delay(600)
+      assert.deepEqual(snapshot(), damaged)
+    }
+    const key = createHash('sha256').update(JSON.stringify(['Synthetic', 'Finished manual', [['done', 'Last step']]])).digest('hex')
+    writeFileSync(record, JSON.stringify({ seen: { [SWEEP_ARMED_KEY]: TIDY_NOW - 4 * 86400000, [key]: TIDY_NOW - 4 * 86400000 } }))
+    for (let attempts = 0; attempts < 50 && readFileSync(board.path, 'utf8').includes('Old agent block'); attempts++) await delay(100)
+    assert.equal(readFileSync(board.path, 'utf8'), source)
+    const history = readFileSync(archive, 'utf8')
+    assert.ok(history.includes('### Old agent block'))
+    assert.ok(!history.includes('### Finished manual'))
+    const model = (await board.call('GET', '/api/board')).json().model
+    assert.equal(model.details, EN.wouldArchive(1))
+  } finally { await board.close() }
+})
+
+test('in its first release the sweep counts the tasks it would archive and moves none', () => tidyFixture(f => {
+  const day = 24 * 3600000
+  const items = [
+    ['Due one', 'x'], ['Due two', '-'], ['Fresh', 'x'],
+    ['Unknown', 'x'], ['Future', 'x'], ['Still waiting', '?'],
+  ]
+  writeFileSync(f.path, `## Synthetic\n${items.map(([title, mark]) => `### ${title}\n- [${mark}] Last step\n`).join('')}`)
+  const key = (title, status = 'done') => createHash('sha256').update(JSON.stringify(['Synthetic', title, [[status, 'Last step']]])).digest('hex')
+  const seen = {
+    [SWEEP_ARMED_KEY]: TIDY_NOW - 4 * day,
+    [key('Due one')]: TIDY_NOW - 10 * day,
+    [key('Due two', 'cancelled')]: TIDY_NOW - 4 * day,
+    [key('Fresh')]: TIDY_NOW - 2 * day,
+    [key('Future')]: TIDY_NOW + day,
+    [key('Still waiting', 'waiting')]: TIDY_NOW - 10 * day,
+  }
+  const record = join(f.dir, 'progress-seen.json')
+  const archive = join(f.dir, 'progress-archive-2026-10.md')
+  writeFileSync(archive, '# Progress archive\n\nEarlier synthetic work\n')
+  writeFileSync(record, JSON.stringify({ seen }))
+  for (const isArmed of [true, false]) {
+    if (!isArmed) {
+      delete seen[SWEEP_ARMED_KEY]
+      writeFileSync(record, JSON.stringify({ seen }))
+    }
+    const before = f.snapshot()
+    const tidy = f.command()
+    assert.equal(tidy.status, 0, tidy.stderr)
+    assert.equal(tidy.stdout.trim(), EN.tidyScheduledNothing)
+    assert.deepEqual(f.snapshot(), before)
+    const chat = f.command(['--chat'])
+    assert.equal(chat.status, 0, chat.stderr)
+    assert.equal(chat.stdout.includes(EN.wouldArchive(2)), isArmed, chat.stdout)
+    assert.equal(chat.stdout.includes('would be archived'), isArmed, chat.stdout)
+    assert.deepEqual(f.snapshot(), before)
+  }
+}))
+
+test('counting a CRLF board keeps every remaining line CRLF on Windows', () => tidyFixture(f => {
+  const source = '## Synthetic\r\n### Finished\r\n- [x] Last step\r\n### Open\r\n- [ ] Next step\r\n'
+  const key = createHash('sha256').update(JSON.stringify(['Synthetic', 'Finished', [['done', 'Last step']]])).digest('hex')
+  writeFileSync(f.path, source)
+  writeFileSync(join(f.dir, 'progress-seen.json'), JSON.stringify({ seen: { [SWEEP_ARMED_KEY]: TIDY_NOW - 4 * 86400000, [key]: TIDY_NOW - 4 * 86400000 } }))
+  const before = f.snapshot()
+  const chat = f.command(['--chat'])
+  assert.equal(chat.status, 0, chat.stderr)
+  assert.ok(chat.stdout.includes(EN.wouldArchive(1)), chat.stdout)
+  assert.deepEqual(f.snapshot(), before)
+  assert.equal(readFileSync(f.path, 'utf8'), source)
+  assert.doesNotMatch(readFileSync(f.path, 'utf8'), /(?<!\r)\n/)
+}))
+
+test('--tidy counts recorded manual completion ages and preserves unknown or future observations', () => tidyFixture(f => {
   const titles = ['Old manual', 'Fresh manual', 'Unknown manual', 'Future manual']
   writeFileSync(f.path, `## Synthetic\n${titles.map(title => `### ${title}\n- [x] Finished\n`).join('')}`)
   const key = title => createHash('sha256').update(JSON.stringify(['Synthetic', title, [['done', 'Finished']]])).digest('hex')
   const record = JSON.stringify({ seen: {
-    [key('Old manual')]: TIDY_NOW - 25 * 3600000,
-    [key('Fresh manual')]: TIDY_NOW - 13 * 3600000,
+    [SWEEP_ARMED_KEY]: TIDY_NOW - 4 * 24 * 3600000,
+    [key('Old manual')]: TIDY_NOW - 3 * 24 * 3600000,
+    [key('Fresh manual')]: TIDY_NOW - 3 * 24 * 3600000 + 1,
     [key('Future manual')]: TIDY_NOW + 3600000,
   } })
   const seen = join(f.dir, 'progress-seen.json')
   writeFileSync(seen, record)
+  const before = f.snapshot()
   const result = f.command()
   assert.equal(result.status, 0, result.stderr)
-  const after = readFileSync(f.path, 'utf8')
-  assert.ok(!after.includes('Old manual'), after)
-  for (const title of titles.slice(1)) assert.ok(after.includes(title), after)
+  assert.deepEqual(f.snapshot(), before)
+  const chat = f.command(['--chat'])
+  assert.equal(chat.status, 0, chat.stderr)
+  assert.ok(chat.stdout.includes(EN.wouldArchive(1)), chat.stdout)
+  assert.deepEqual(f.snapshot(), before)
   assert.equal(readFileSync(seen, 'utf8'), record)
 }))
 
-test('--tidy ages each manual task by its own fingerprint with no project or a repeated title', () => tidyFixture(f => {
+test('--tidy counts each manual task by its own fingerprint with no project or a repeated title', () => tidyFixture(f => {
   writeFileSync(f.path, '### Outside project\n- [x] Outside step\n## Synthetic\n### Shared title\n- [x] Old step\n### Shared title\n- [x] Fresh step\n')
   const key = (project, title, step) => createHash('sha256').update(JSON.stringify([project, title, [['done', step]]])).digest('hex')
   const record = JSON.stringify({ seen: {
-    [key('', 'Outside project', 'Outside step')]: TIDY_NOW - 25 * 3600000,
-    [key('Synthetic', 'Shared title', 'Old step')]: TIDY_NOW - 25 * 3600000,
-    [key('Synthetic', 'Shared title', 'Fresh step')]: TIDY_NOW - 3600000,
+    [SWEEP_ARMED_KEY]: TIDY_NOW - 4 * 24 * 3600000,
+    [key('', 'Outside project', 'Outside step')]: TIDY_NOW - 3 * 24 * 3600000,
+    [key('Synthetic', 'Shared title', 'Old step')]: TIDY_NOW - 3 * 24 * 3600000,
+    [key('Synthetic', 'Shared title', 'Fresh step')]: TIDY_NOW - 3 * 24 * 3600000 + 1,
   } })
   const seen = join(f.dir, 'progress-seen.json')
   writeFileSync(seen, record)
+  const before = f.snapshot()
   const result = f.command()
   assert.equal(result.status, 0, result.stderr)
-  const after = readFileSync(f.path, 'utf8')
-  assert.ok(!after.includes('Outside project'), after)
-  assert.ok(!after.includes('Old step'), after)
-  assert.ok(after.includes('### Shared title\n- [x] Fresh step'), after)
-  const archive = readdirSync(f.dir).find(name => name.startsWith('progress-archive-'))
-  const history = readFileSync(join(f.dir, archive), 'utf8')
-  assert.ok(history.includes('Outside step') && history.includes('Old step'), history)
-  assert.ok(!history.includes('Fresh step'), history)
+  assert.deepEqual(f.snapshot(), before)
+  const chat = f.command(['--chat'])
+  assert.equal(chat.status, 0, chat.stderr)
+  assert.ok(chat.stdout.includes(EN.wouldArchive(2)), chat.stdout)
+  assert.deepEqual(f.snapshot(), before)
   assert.equal(readFileSync(seen, 'utf8'), record)
 }))
 
