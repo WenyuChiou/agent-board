@@ -8,9 +8,9 @@
   `a lock whose stat is refused with EPERM while it is released counts as busy, and a stat that stays refused is reported`,
   `a Codex hook whose lock create gets EPERM twice exits 0 and its event lands on the board or in pending`.
 - **A hook run whose reporter fails saves its event, and a failed recovery frees its claim (#241).**
-  Any other failed event (not a report, and not a refusal of the event itself such as `INVALID_SESSION`) is now saved
+  Any other failed event (not a report, and not a refusal of the event itself such as INVALID_SESSION) is now saved
   to the pending queue and recovery is asked for, instead of only being logged; the log keeps the failure code and adds
-  `REPORTER_QUEUED`. A recovery whose first pass ends before it takes the board lock now releases its claim, so the
+  REPORTER_QUEUED. A recovery whose first pass ends before it takes the board lock now releases its claim, so the
   next hook's recovery starts at once instead of waiting 30 seconds with events queued.
   Tests: `a hook run whose reporter fails saves the event to pending instead of dropping it`,
   `a recovery whose first pass fails before the lock releases its claim, so the next hook's recovery runs at once`,
