@@ -37,20 +37,24 @@ const SCENES = {
 const COMMAND = ['npx @wenyuchiou/agent-board', 'setup --apply']
 // The ten integrations the header names, in the support matrix's order (#407).
 const INTEGRATIONS = ['Claude Code', 'Codex', 'Antigravity', 'OpenCode', 'Cursor', 'Grok Build', 'Muse Code', 'Hermes Agent', 'OpenClaw', 'DeepSeek Harness']
-// Each agent's board command, and the agents whose command is not verified yet.
+// Each agent's board command, and the agents whose command is not run live yet.
 const BOARD_COMMANDS = { 'Claude Code': '/progress', Codex: '$agent-board', OpenCode: '/board' }
 const boardCommand = agent => BOARD_COMMANDS[agent] ?? '/agent-board'
-const UNVERIFIED = ['Antigravity', 'Cursor', 'Grok Build', 'Muse Code', 'DeepSeek Harness']
+// A live run is recorded in docs/parity-matrix.json with its date, host version and surface (#466).
+// An agent leaves this list in the same change that records its run.
+const NOT_RUN_LIVE = ['Antigravity', 'Cursor', 'Grok Build', 'Muse Code', 'DeepSeek Harness']
+// The agents whose only check is the synthetic home: their row in the table of checks has no host version or record.
+const SYNTHETIC_ONLY = ['Cursor', 'Muse Code']
 // Every command the single Key commands table held before #407 split it.
 const OLD_COMMANDS = ['claude plugin marketplace add WenyuChiou/agent-board', 'claude plugin install agent-board@agent-board', '/hooks', '/progress', '$agent-board', '/board', '/agent-board', 'node ~/.agent-board/agent-board.mjs --watch', '--html', 'node ~/.agent-board/agent-board.mjs --serve', 'node ~/.agent-board/agent-board.mjs --chat', 'node ~/.agent-board/agent-board.mjs --codex-doctor --agent codex']
 // The code each row of the surface table holds, in its order: terminal, browser, chat app, one agent's setup.
 const SURFACE_COMMANDS = [['node ~/.agent-board/agent-board.mjs --watch', '--html'], ['node ~/.agent-board/agent-board.mjs --serve'], ['node ~/.agent-board/agent-board.mjs --chat'], ['node ~/.agent-board/agent-board.mjs --codex-doctor --agent codex']]
-// Per language: the strip's label, the two command subsections, the caveat on a command not
-// verified yet, the board's page heading, and how each surface row starts.
+// Per language: the strip's label, the two command subsections, the caveat on a command
+// not run live yet, the board's page heading, and how each surface row starts.
 const WORDS = {
-  en: { label: 'Integrations', inAgent: 'Open the board in your agent', anywhere: 'Open the board anywhere', unverified: '(not verified yet)', page: "The board's page", surfaces: ['Any terminal', 'A browser', 'A chat app', "Check one agent's setup"] },
-  'zh-TW': { label: '整合', inAgent: '在你的 agent 裡打開看板', anywhere: '在任何地方打開看板', unverified: '（還沒驗證）', page: '看板的網頁', surfaces: ['任何終端機', '瀏覽器', '聊天軟體', '檢查某個 agent 的設定'] },
-  'zh-CN': { label: '集成', inAgent: '在你的 agent 里打开看板', anywhere: '在任何地方打开看板', unverified: '（还没验证）', page: '看板的网页', surfaces: ['任何终端', '浏览器', '聊天软件', '检查某个 agent 的设置'] },
+  en: { label: 'Integrations', inAgent: 'Open the board in your agent', anywhere: 'Open the board anywhere', checked: 'How each agent was checked', old: ['Untested'], notLive: '(checked in a synthetic home, not run live yet)', page: "The board's page", surfaces: ['Any terminal', 'A browser', 'A chat app', "Check one agent's setup"] },
+  'zh-TW': { label: '整合', inAgent: '在你的 agent 裡打開看板', anywhere: '在任何地方打開看板', checked: '各個 agent 是怎麼驗證的', old: ['未驗證', '還沒驗證'], notLive: '（在合成環境檢查過，還沒實機執行）', page: '看板的網頁', surfaces: ['任何終端機', '瀏覽器', '聊天軟體', '檢查某個 agent 的設定'] },
+  'zh-CN': { label: '集成', inAgent: '在你的 agent 里打开看板', anywhere: '在任何地方打开看板', checked: '每个 agent 是怎么验证的', old: ['未验证', '还没验证'], notLive: '（在合成环境检查过，还没实机运行）', page: '看板的网页', surfaces: ['任何终端', '浏览器', '聊天软件', '检查某个 agent 的设置'] },
 }
 // A piece of text as a pattern that matches it and nothing else.
 const literal = text => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
@@ -328,6 +332,33 @@ describe('L0 discover and install from the README', () => {
     }
   })
 
+  test('the README marks every agent that was not run live with the same phrase', () => {
+    for (const [name, lang] of READMES) {
+      const text = read(name)
+      const words = WORDS[lang]
+      const table = firstTable(section(text, words.inAgent, 3) ?? '')
+      const agents = rows(table, '| <img')
+      assert.deepEqual(agents.map(([icon]) => /alt="([^"]+)"/.exec(icon)?.[1]), INTEGRATIONS, `${name}: every agent has a command row`)
+      for (const [icon, , command] of agents) {
+        const agent = /alt="([^"]+)"/.exec(icon)[1]
+        assert.equal(command.split(words.notLive).length - 1, NOT_RUN_LIVE.includes(agent) ? 1 : 0, `${name}: ${agent} carries the exact phrase once only if it was not run live`)
+      }
+      assert.equal(text.split(words.notLive).length - 1, NOT_RUN_LIVE.length, `${name}: only the ${NOT_RUN_LIVE.join(', ')} command cells carry the phrase`)
+      for (const old of ['not verified yet', '還沒驗證', '还没验证']) assert.ok(!text.includes(old), `${name}: ${NOT_RUN_LIVE.join(', ')} no longer use "${old}"`)
+      // The table of what was checked says the same words, without the brackets, for an agent
+      // whose only check is the synthetic home; the other rows keep the host version or record.
+      const start = text.indexOf(`<summary><b>${words.checked}</b></summary>`)
+      assert.ok(start >= 0, `${name}: has the "${words.checked}" table`)
+      const checks = rows(firstTable(text.slice(start)), '| ').filter(([agent]) => INTEGRATIONS.includes(agent))
+      assert.deepEqual(checks.map(([agent]) => agent), INTEGRATIONS, `${name}: the table has a row for every agent`)
+      const phrase = words.notLive.slice(1, -1)
+      for (const [agent, cell] of checks) {
+        assert.equal(cell === phrase, SYNTHETIC_ONLY.includes(agent), `${name}: ${agent}'s checked cell is the phrase only if the synthetic home is its only check`)
+        assert.ok(!words.old.includes(cell), `${name}: ${agent}'s checked cell no longer says "${cell}"`)
+      }
+    }
+  })
+
   test('L0 README: the key commands split into a table per agent and a table per surface, and every command of the old single table is still there', () => {
     for (const [name, lang] of READMES) {
       const text = read(name)
@@ -344,7 +375,7 @@ describe('L0 discover and install from the README', () => {
         const agent = /alt="([^"]+)"/.exec(icon)[1]
         assert.ok(where.startsWith(agent), `${name}: ${agent}'s row names it`)
         assert.deepEqual(codeSpans(command), [boardCommand(agent)], `${name}: ${agent}'s board command`)
-        assert.equal(command.includes(words.unverified), UNVERIFIED.includes(agent), `${name}: ${agent}'s command is marked not verified only if it is not`)
+        assert.equal(command.includes(words.notLive), NOT_RUN_LIVE.includes(agent), `${name}: ${agent}'s command is marked not run live only if it has no recorded live run`)
       }
       // One row per surface, in order, each beside its own board script command, so two swapped
       // commands fail.
