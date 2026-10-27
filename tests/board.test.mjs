@@ -5889,18 +5889,21 @@ test('--tidy tells the blocks of two sessions with one title apart when it keeps
   assert.deepEqual(archivedCopies(swept.files).map(copy => copy.record.words), ['First session question, OK?'])
 })
 
-test('--tidy keeps a working or waiting block that asks, however old, while the ledger holds its question', () => {
+test('--tidy archives a working or waiting block that asks after seven days without a report and keeps it inside them, with the question kept', () => {
   const at = Date.now()
   const block = (session, state, hours) => `<!-- auto session=${session} agent=codex state=${state} updated=${new Date(at - hours * 3600000).toISOString()} -->\n### Plan ${session}\n- [?] Question of ${session}, OK?\n<!-- /auto session=${session} -->\n`
-  const board = `## Synthetic\n${block('a1b2c341', 'waiting', 100)}${block('a1b2c342', 'working', 24 * 40)}${block('a1b2c343', 'ended', 100)}`
+  const board = `## Synthetic\n${block('a1b2c341', 'waiting', 100)}${block('a1b2c342', 'working', 24 * 40)}${block('a1b2c343', 'ended', 100)}${block('a1b2c344', 'waiting', 144)}${block('a1b2c345', 'waiting', 24 * 8)}`
   const seed = chatRun(['--keys', ''], { file: () => board, inspect: sweepFiles })
   assert.equal(seed.status, 0, seed.stderr)
   const swept = chatRun(['--tidy'], { file: () => board, beside: seed.files, inspect: sweepFiles })
   assert.equal(swept.status, 0, swept.stderr)
-  assert.equal(swept.stdout, 'Archived 1 task.\n')
-  assert.ok(swept.board.includes('a1b2c341') && swept.board.includes('a1b2c342'), swept.board)
-  assert.ok(!swept.board.includes('a1b2c343'), swept.board)
-  assert.deepEqual(archivedCopies(swept.files).map(copy => copy.record.words), ['Question of a1b2c343, OK?'])
+  assert.equal(swept.stdout, 'Archived 3 tasks.\n')
+  assert.ok(swept.board.includes('a1b2c341') && swept.board.includes('a1b2c344'), swept.board)
+  for (const session of ['a1b2c342', 'a1b2c343', 'a1b2c345']) {
+    assert.ok(!swept.board.includes(session), swept.board)
+    assert.ok(swept.archive.includes(`Question of ${session}, OK?`), swept.archive)
+  }
+  assert.deepEqual(archivedCopies(swept.files).map(copy => copy.record.words).sort(), ['Question of a1b2c342, OK?', 'Question of a1b2c343, OK?', 'Question of a1b2c345, OK?'])
 })
 
 test('--tidy reports scheduled ages in every language and takes precedence over interactive modes', () => {

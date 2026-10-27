@@ -414,7 +414,7 @@ export const ZH_CN: Strings = {
   legendClose: '收起说明',
   legendDue: '⚑ 两周内截止',
   legendAsk: '〔确认〕好或不要 · 〔选一个〕按选项 · 〔填资料〕打字回复 · 〔动手〕做完按做好了 · 〔看一下〕看完回复 · 〔等别人〕到了再按',
-  legendCleanup: '半天没动静的对话算已停。未答问题按三／七天策略分组，仍有未答问题的区块不自动归档；明确归档须先安全保存完整问题。其他完成、停止及手写工作的清理期限维持不变。',
+  legendCleanup: '半天没动静的对话算已停。未答问题按三／七天策略分组。仍有未答问题的区块，已结束或完成的满三天、工作中或等待中的满七天没有新报告，才会自动归档；问题会先完整保存并留在“更早、尚未回答的问题”。明确归档同样先保存完整问题。其他完成、停止及手写工作的清理期限维持不变。',
   answered: (text: string): string => `已回复 Claude：${text}`,
   commandOf: (step: string): string => `“${step}”要跑的指令`,
   resumeOf: (title: string): string => `回到“${title}”的指令，贴到终端执行`,

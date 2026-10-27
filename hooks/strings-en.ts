@@ -415,7 +415,7 @@ export const EN: Strings = {
   legendClose: 'Hide legend',
   legendDue: '⚑ due within two weeks',
   legendAsk: '[Confirm] yes or no · [Choose] pick an option · [Input] type a reply · [Do] press "Did it" when finished · [Review] reply once you have looked · [Waiting] press once it arrives',
-  legendCleanup: 'A session quiet for half a day counts as stopped. Unanswered questions follow their own 3/7-day shelves and keep their source out of automatic archive. Explicit archive first preserves the complete question. Other cleanup periods stay unchanged.',
+  legendCleanup: 'A session quiet for half a day counts as stopped. Unanswered questions follow their own 3/7-day shelves. A block that still asks is archived automatically only after 3 days (ended or done) or 7 days with no report (working or waiting); its complete question is saved first and stays under Older unanswered questions. Explicit archive saves the complete question first too. Other cleanup periods stay unchanged.',
   answered: (text: string): string => `Replied to Claude: ${text}`,
   commandOf: (step: string): string => `Command to run for "${step}"`,
   resumeOf: (title: string): string => `Command to resume "${title}". Paste it into the terminal and run it.`,

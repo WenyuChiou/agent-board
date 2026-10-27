@@ -3,7 +3,7 @@ import { ageQuestions, questionAge, QUESTION_DAY } from '../hooks/question-aging
 import { archiveQuestionsKept, captureCovers, captureJson, emptyQuestions, observeQuestions, parseCapture, parseQuestions, questionsJson, withCaptures } from '../hooks/questions'
 import { parseProgress } from '../hooks/parse'
 import { applyTaskCreate, applyTaskUpdate, emptyMirror } from '../hooks/mirror'
-import { renderAutoBlock, takeArchivable } from '../hooks/blocks'
+import { archivableAsking, renderAutoBlock, takeArchivable } from '../hooks/blocks'
 import { buildView } from '../hooks/view'
 import { boardItems, boardKey, boardScreen, boardText, chatText, emptyBoardState, peekInbox, pinned } from '../hooks/board'
 import { sha256 } from '../hooks/sha256'
@@ -209,6 +209,30 @@ test('complete retained source questions remain recoverable after explicit archi
   const task = projects[0]!.tasks[0]!
   expect(reloaded.records[0]?.source?.data).toBe(JSON.stringify({ auto: task.auto, steps: task.steps.map(step => step.status) }))
   expect(reloaded.records[0]?.firstObserved).toBe(START)
+})
+
+test('a waiting block archived after seven days of silence keeps its question under Older unanswered, and a ledger lost afterwards gets it back from the saved copy', () => {
+  const text = board('- [?] Publish the synthetic plan, OK?')
+  const projects = parseProgress(text)
+  const ledger = observeQuestions(emptyQuestions(), projects, null, [], START, true, 'writer:1').ledger
+  const inside = START + 6 * QUESTION_DAY
+  expect(archivableAsking(text, inside)).toEqual([])
+  expect(takeArchivable(text, inside, undefined, STRINGS.en, false, () => true)).toEqual({ text, entries: [] })
+  const now = START + 7 * QUESTION_DAY + 60 * 60 * 1000
+  const asking = archivableAsking(text, now)
+  expect(asking).toHaveLength(1)
+  expect(archiveQuestionsKept(projects, asking[0]!.ref, ledger)).toBe(true)
+  const taken = takeArchivable(text, now, undefined, STRINGS.en, false, () => true)
+  expect(taken.entries).toHaveLength(1)
+  expect(taken.text).not.toContain('session=a1b2c3d4')
+  const record = ledger.records[0]!
+  const capture = { version: 1 as const, disposition: 'archived' as const, record }
+  for (const kept of [withCaptures(ledger, [capture]), withCaptures(emptyQuestions(), [capture])]) {
+    const view = buildView([], [], null, now, 0, {}, STRINGS.en, [], {}, kept)
+    expect(view.waiting).toEqual([])
+    expect(view.older?.map(question => question.text)).toEqual(['Publish the synthetic plan, OK?'])
+    expect(kept.records[0]?.firstObserved).toBe(START)
+  }
 })
 
 test('automatic archive never removes an unresolved question even in an ended or done block beyond seven days', () => {
