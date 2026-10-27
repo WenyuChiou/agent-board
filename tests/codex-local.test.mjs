@@ -1436,6 +1436,8 @@ test('unchanged status keeps its board timestamp and retries refused session rec
 test('a reporter error is logged and the previous block is kept', () => fixture(async f => {
   assert.equal(f.install('--apply').status, 0)
   assert.equal(f.report().status, 0)
+  // The failed run now asks for recovery; a live claim keeps that helper (it would inherit the fault below) from outliving the fixture.
+  holdAutomaticRecovery(f)
   const held = readFileSync(f.progress)
   const log = join(f.root, 'hook-errors.log')
   f.save(log, Array.from({ length: 250 }, (_, index) => `synthetic previous error ${index}\n`).join(''))
@@ -3958,6 +3960,31 @@ test('a hook whose progress.md is locked only briefly retries and lands the even
   assert.deepEqual(pendingFiles(f), [])
 }))
 
+test('a Codex hook whose lock create gets EPERM twice exits 0 and its event lands on the board or in pending', { skip: process.platform !== 'win32' && 'EPERM means a busy lock only on Windows' }, () => fixture(async f => {
+  assert.equal(f.install('--apply').status, 0)
+  // Windows refuses a create with EPERM while the previous owner's delete is in flight, and the file is gone a moment later (#241).
+  const preload = join(f.home, 'lock-create-eperm.cjs')
+  f.save(preload, `const fs = require('node:fs')
+const open = fs.openSync
+let left = 2
+fs.openSync = function (file, flags, ...rest) {
+  if (left > 0 && flags === 'wx' && String(file).endsWith('.agent-board-lock')) {
+    left -= 1
+    throw Object.assign(new Error('EPERM: operation not permitted, open'), { code: 'EPERM', errno: -4048, syscall: 'open', path: String(file) })
+  }
+  return open.call(this, file, flags, ...rest)
+}
+require('node:module').syncBuiltinESMExports()
+`)
+  const env = { ...f.env, NODE_OPTIONS: `${f.env.NODE_OPTIONS || ''} --require ${JSON.stringify(preload)}` }
+  const out = await fireHook({ ...f, env }, JSON.stringify({ session_id: session, hook_event_name: 'UserPromptSubmit', turn_id: 'turn-1' }))
+  assert.equal(out.status, 0, hookFailure(out))
+  const owner = createHash('sha256').update(`codex:${session}`).digest('hex').slice(0, 8)
+  const isOnBoard = existsSync(f.progress) && readFileSync(f.progress, 'utf8').includes(`<!-- auto session=${owner} `)
+  assert.ok(isOnBoard || pendingFiles(f).length === 1, `the event is neither on the board nor in pending: ${hookLog(f)}`)
+  assert.doesNotMatch(hookLog(f), /REPORTER_FAILED/)
+}))
+
 test('an explicit report on a locked progress.md still says in one line that it was not saved', () => fixture(f => {
   assert.equal(f.install('--apply').status, 0)
   assert.equal(f.event('UserPromptSubmit').status, 0)
@@ -4831,4 +4858,86 @@ process.stdout.write(JSON.stringify({ owned, pid: process.pid, token: request.to
   assert.equal(readFileSync(`${claim}.recover`, 'utf8'), guard)
   assert.equal(existsSync(`${f.progress}.agent-board-lock`), false)
   assert.equal(existsSync(`${f.progress}.agent-board-lock.recover`), false)
+}))
+
+test('a recovery whose first pass fails before the lock releases its claim, so the next hook\'s recovery runs at once', { timeout: 30000 }, () => fixture(async f => {
+  assert.equal(f.install('--agent', 'antigravity', '--apply').status, 0)
+  const recovery = automaticRecoveryFixture(f)
+  const failing = join(f.home, 'first-pass-fails.cjs')
+  // The helper that makes the first pass ends before it takes the board lock (it timed out, say).
+  f.save(failing, `const child = require('node:child_process')
+const prior = child.spawnSync
+child.spawnSync = (executable, args, options) => Array.isArray(args) && args.includes('--recover-hooks')
+  ? { status: null, signal: null, error: Object.assign(new Error('synthetic timeout'), { code: 'ETIMEDOUT' }), stdout: '', stderr: '' }
+  : prior(executable, args, options)
+require('node:module').syncBuiltinESMExports()
+`)
+  const env = { ...f.env, NODE_OPTIONS: `--require ${JSON.stringify(recovery.preload)} --require ${JSON.stringify(failing)}` }
+  const worker = join(f.root, 'agent-board-hook.mjs')
+  // Started 3 s ago, the hook is past its deadline: it queues the event and asks for recovery at once.
+  const fire = () => spawnSync(process.execPath, [worker, '--hook-version', '1', '--hook-event', 'Stop', '--agent-status', '--agent', 'antigravity', '--state', 'waiting', '--event', 'Stop', '--progress-file', f.progress, '--hook-started', String(Date.now() - 3000)], { env, input: recovery.payload, encoding: 'utf8', windowsHide: true, timeout: 5000 })
+  const pids = []
+  try {
+    for (const round of [1, 2]) {
+      rmSync(recovery.pidFile, { force: true })
+      const result = fire()
+      assert.equal(result.status, 0, hookFailure(result))
+      await waitForAutomaticRecovery(() => existsSync(recovery.pidFile), `hook ${round} must start a recovery helper at once, not wait out the first helper's claim`)
+      const pid = Number(readFileSync(recovery.pidFile, 'utf8'))
+      pids.push(pid)
+      await waitForAutomaticRecovery(() => !isReporterAlive(pid), `recovery helper ${round} must exit`)
+      assert.equal(existsSync(recovery.lease), false, `recovery helper ${round} left its claim behind`)
+      assert.equal(pendingFiles(f).length, round)
+    }
+    assert.match(hookLog(f), /antigravity HOOK_RECOVERY_NEEDED/)
+    // Neither event was lost: a replay with a working helper applies both.
+    const manual = f.command(['--recover-hooks', '--progress-file', f.progress])
+    assert.equal(manual.status, 0, manual.stderr)
+    assert.deepEqual(JSON.parse(manual.stdout), { recoveryVersion: 1, processed: 2, pending: 0 })
+    assert.deepEqual(pendingFiles(f), [])
+  } finally {
+    for (const pid of pids) if (isReporterAlive(pid)) await stopReporter(pid)
+  }
+}))
+
+test('a hook run whose reporter fails saves the event to pending instead of dropping it', { timeout: 30000 }, () => fixture(async f => {
+  assert.equal(f.install('--apply').status, 0)
+  // Only for its observers: the recovery helper's pid file and attempt count.
+  assert.equal(f.install('--agent', 'antigravity', '--apply').status, 0)
+  const recovery = automaticRecoveryFixture(f)
+  const fault = join(f.home, 'hook-reporter-fault.cjs')
+  // Only the reporter the hook starts fails (it carries --hook-recovery-parent); the recovery helper's replay works.
+  f.save(fault, `const fs = require('node:fs')
+if (process.argv.includes('--hook-recovery-parent')) {
+  const rename = fs.renameSync
+  fs.renameSync = (from, to) => {
+    if (String(to) === ${JSON.stringify(f.progress)}) throw Object.assign(new Error('PRIVATE_PATH PRIVATE_INPUT'), { code: 'EIO' })
+    return rename(from, to)
+  }
+  require('node:module').syncBuiltinESMExports()
+}
+`)
+  const env = { ...f.env, NODE_OPTIONS: `--require ${JSON.stringify(recovery.preload)} --require ${JSON.stringify(fault)}` }
+  const owner = createHash('sha256').update(`codex:${session}`).digest('hex').slice(0, 8)
+  const hasEvent = () => existsSync(f.progress) && readFileSync(f.progress, 'utf8').includes(`<!-- auto session=${owner} `)
+  let pid
+  try {
+    const failed = await fireHook({ ...f, env }, JSON.stringify({ session_id: session, hook_event_name: 'UserPromptSubmit', turn_id: 'turn-1', prompt: 'PRIVATE_PROMPT' }))
+    assert.equal(failed.status, 0, hookFailure(failed))
+    assert.match(hookLog(f), /codex REPORTER_FAILED EIO\r?\n[^\n]* codex REPORTER_QUEUED\r?\n$/)
+    assert.ok(existsSync(recovery.pidFile), 'a failed run must ask for recovery')
+    pid = Number(readFileSync(recovery.pidFile, 'utf8'))
+    await waitForAutomaticRecovery(() => hasEvent() && pendingFiles(f).length === 0, 'recovery must apply the event the failed run saved')
+    await waitForAutomaticRecovery(() => !isReporterAlive(pid), 'the recovery helper must exit after draining', 5000)
+    assert.ok(!readFileSync(f.progress, 'utf8').includes('PRIVATE_PROMPT'))
+    // A payload the board refuses cannot succeed on replay: it is logged and not saved.
+    rmSync(recovery.pidFile, { force: true })
+    const refused = await fireHook({ ...f, env }, JSON.stringify({ session_id: 'bad?', hook_event_name: 'UserPromptSubmit', turn_id: 'turn-1' }))
+    assert.equal(refused.status, 0, hookFailure(refused))
+    assert.match(hookLog(f), /codex REPORTER_FAILED INVALID_SESSION\r?\n$/)
+    assert.deepEqual(pendingFiles(f), [])
+    assert.equal(existsSync(recovery.pidFile), false)
+  } finally {
+    if (Number.isInteger(pid) && isReporterAlive(pid)) await stopReporter(pid)
+  }
 }))
