@@ -87,20 +87,12 @@ const isWin = process.platform === 'win32'
 const shown = path => isChat && home && (isWin ? path.toLowerCase().startsWith(home.toLowerCase()) : path.startsWith(home)) ? `~${path.slice(home.length)}` : path
 const code = error => error?.code ?? error?.name ?? 'UNKNOWN'
 const run = (path, passed, { isSetup = false, env = process.env } = {}) => {
-  const result = spawnSync(process.execPath, [path, ...passed], { stdio: isSetup ? ['inherit', 'inherit', 'pipe'] : 'inherit', encoding: 'utf8', env, windowsHide: true })
+  const result = spawnSync(process.execPath, [path, ...passed], { stdio: isSetup ? ['inherit', 'inherit', 'pipe'] : 'inherit', encoding: 'utf8', env: isSetup ? { ...env, AGENT_BOARD_SETUP_COMMAND: `npx ${name} setup` } : env, windowsHide: true })
   if (result.error) {
     console.error(message(`agent-board: could not start ${shown(path)} (${code(result.error)}).`, `agent-board：無法啟動 ${shown(path)}（${code(result.error)}）。`, `agent-board：无法启动 ${shown(path)}（${code(result.error)}）。`))
     process.exit(1)
   }
   if (isSetup && result.stderr) {
-    if (result.status !== 0 && /MISSING_ARGUMENT/.test(result.stderr)) {
-      console.error(message('agent-board: a setup option is missing its value. Options such as --agent, --home and --data-dir each take one; see agent-board setup --help.', 'agent-board：setup 有個選項後面沒有接值。--agent、--home、--data-dir 這類選項都要接一個值；請看 agent-board setup --help。', 'agent-board：setup 有个选项后面没有接值。--agent、--home、--data-dir 这类选项都要接一个值；请看 agent-board setup --help。'))
-      process.exit(1)
-    }
-    if (result.status !== 0 && /INVALID_TARGETS/.test(result.stderr)) {
-      console.error(message(`agent-board: setup found no agent to set up on this computer, or --agent named one it does not know. Name one: npx ${name} setup --agent codex (or cursor, opencode, gemini, grok, muse, hermes, openclaw, antigravity, deepseek, all).`, `agent-board：setup 在這台電腦找不到要設定的 agent，或 --agent 寫了它不認得的名稱。指定一個：npx ${name} setup --agent codex（或 cursor、opencode、gemini、grok、muse、hermes、openclaw、antigravity、deepseek、all）。`, `agent-board：setup 在这台电脑找不到要设置的 agent，或 --agent 写了它不认识的名称。指定一个：npx ${name} setup --agent codex（或 cursor、opencode、gemini、grok、muse、hermes、openclaw、antigravity、deepseek、all）。`))
-      process.exit(1)
-    }
     process.stderr.write(result.status === 0 ? result.stderr : result.stderr.replaceAll(resolve(pkg), '<agent-board package>').replaceAll(resolve(pkg).replaceAll('\\', '/'), '<agent-board package>'))
   }
   if (result.signal) {

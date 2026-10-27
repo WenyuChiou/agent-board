@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto'
 import { closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, readdirSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
-import { dirname, join, resolve } from 'node:path'
+import { basename, dirname, join, resolve } from 'node:path'
 import { performance } from 'node:perf_hooks'
 import { pathToFileURL } from 'node:url'
 import { boardConfirmedReport, codexEvent, codexEvents, codexReport, folderProject, putCodexBlock, sessionTitle } from '../hooks/codex'
@@ -33,6 +33,7 @@ const readBytes = (file: string): Buffer | null => {
   }
 }
 const readLocal = (file: string): string | null => readBytes(file)?.toString('utf8') ?? null
+const withoutBom = (text: string): string => text.startsWith('\uFEFF') ? text.slice(1) : text
 const object = (value: unknown): Json => {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('INVALID_JSON_OBJECT')
   return value as Json
@@ -80,6 +81,27 @@ const quote = (path: string): string => {
 
 export const localProgressPath = (explicit: string | undefined, fallback: string, stored?: unknown): string =>
   resolve(explicit ?? (process.env.CLAUDE_PROGRESS_FILE || (typeof stored === 'string' ? stored : fallback)))
+
+// What a person reads when a setup mode fails (#465): one sentence with its next step, never the code name, a stack or a path.
+export const setupFailure = (error: unknown, agent: string, s: Strings): { code: string; message: string } => {
+  const detail = error as { code?: unknown; message?: unknown; record?: unknown } | null | undefined
+  const isCode = (value: unknown): value is string => typeof value === 'string' && /^[A-Z][A-Z0-9_]{0,63}$/.test(value)
+  const code = isCode(detail?.code) ? detail.code : isCode(detail?.message) ? detail.message : error instanceof Error && /^[A-Za-z]{1,40}$/.test(error.name) ? error.name : 'UNKNOWN'
+  const unknown = s.setupAgentUnknown.toLowerCase()
+  const host = localAgents.includes(agent as LocalAgent) ? s.agentNames[agent] ?? unknown : unknown
+  const record = typeof detail?.record === 'string' && /^install-[a-z]+\.json$/.test(detail.record) ? detail.record : 'install-*.json'
+  const message = code === 'MISSING_ARGUMENT' ? s.setupErrorMissingValue
+    : code === 'INVALID_INSTALL_RECORD' ? s.setupErrorRecord(record)
+    : code === 'INSTALL_CONFLICT' ? s.setupErrorConflict(host)
+    : code === 'UNSAFE_COMMAND_PATH' ? s.setupErrorUnsafePath
+    : ['INVALID_JSON_OBJECT', 'INVALID_HOOK_GROUP', 'INVALID_PLUGIN_CONFIG'].includes(code) ? s.setupErrorConfig(host)
+    : code === 'SHARED_BOARD_PATH_CONFLICT' ? s.setupErrorBoardPath
+    : ['INSTALL_CHANGED', 'LOCK_BUSY', 'LOCK_OWNERSHIP_LOST'].includes(code) ? s.setupErrorBusy
+    : ['CODEX_BINARY_REQUIRED', 'ABSOLUTE_CODEX_BINARY_REQUIRED'].includes(code) ? s.setupErrorCodexBinary
+    : code === 'OWNED_CODEX_INSTALL_REQUIRED' ? s.setupErrorCodexInstall
+    : s.setupErrorOther(host)
+  return { code, message }
+}
 
 const reporterTail = (original: Buffer): { bytes: Buffer; fragment: Buffer | null } => {
   // Latin-1 keeps offsets in bytes, even when the last UTF-8 character was interrupted.
@@ -135,7 +157,17 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
     if (!before.has(file)) before.set(file, readLocal(file))
     return before.get(file)!
   }
-  const jsonInitial = (file: string): Json => object(JSON.parse(initial(file) ?? '{}'))
+  const jsonInitial = (file: string): Json => {
+    try {
+      const record = object(JSON.parse(initial(file) ?? '{}'))
+      if (record.files !== undefined) object(record.files)
+      if (record.groups !== undefined) object(record.groups)
+      return record
+    } catch (error) {
+      if (error instanceof SyntaxError || error instanceof Error && error.message === 'INVALID_JSON_OBJECT') throw Object.assign(new Error('INVALID_INSTALL_RECORD'), { record: basename(file) })
+      throw error
+    }
+  }
   const manifestFile = join(root, `install-${agent}.json`)
   const loaded = jsonInitial(manifestFile)
   const otherManifests = localAgents.filter(one => one !== agent).map(one => jsonInitial(join(root, `install-${one}.json`)))
@@ -455,11 +487,29 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
   }
 
   const hasHooks = agent === 'codex' || agent === 'cursor' || statusEvents[agent] !== undefined
+  const ownEvents = !hasHooks || agent === 'antigravity' ? [] : agent === 'cursor' ? Object.keys(cursorEvents) : agent === 'codex' ? codexEvents : Object.keys(statusEvents[agent] ?? {})
   const nativeConfig = agent === 'openclaw' ? join(openclawDir, 'openclaw.json') : agent === 'deepseek' ? join(deepseekDir, 'cordis.patch.yml') : config
   const nativeConfigText = initial(nativeConfig) ?? ''
-  // Windows tools may write Codex's JSON with a UTF-8 BOM; JSON.parse does not accept it.
-  const configText = agent === 'codex' && nativeConfigText.startsWith('\uFEFF') ? nativeConfigText.slice(1) : nativeConfigText
-  const parsedConfig = hasHooks || agent === 'openclaw' ? readConfig(configText) : {}
+  // Windows tools may start any JSON host config with a UTF-8 BOM; JSON.parse does not accept it.
+  const configText = withoutBom(nativeConfigText)
+  const isRecord = (value: unknown): value is Json => typeof value === 'object' && value !== null && !Array.isArray(value)
+  const isListOrAbsent = (value: unknown): boolean => value === undefined || Array.isArray(value)
+  const isShaped = (config: Json): boolean => {
+    const hooks = config.hooks
+    if (hooks !== undefined && !isRecord(hooks)) return false
+    if (isRecord(hooks) && ownEvents.some(event => !isListOrAbsent(hooks[event]))) return false
+    if (agent === 'openclaw' && config.plugins !== undefined) {
+      if (!isRecord(config.plugins)) return false
+      const { load, entries, allow } = config.plugins
+      if (load !== undefined && (!isRecord(load) || !isListOrAbsent(load.paths))) return false
+      if (entries !== undefined && !isRecord(entries)) return false
+      if (!isListOrAbsent(allow)) return false
+    }
+    return true
+  }
+  const read = hasHooks || agent === 'openclaw' ? readConfig(configText) : {}
+  // Wrong shapes are the same one conflict as unreadable JSON, so other agents still preview (#465).
+  const parsedConfig = read !== null && !isShaped(read) ? null : read
   const hookConfig = parsedConfig ?? {}
   // A config that cannot be read is one conflict of its own; its groups are not also reported as edited.
   const isReadable = parsedConfig !== null
@@ -472,7 +522,7 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
   const changes: { file: string; action: string }[] = []
   const nextHooks: Json = { ...hooks }
   const groups: Json = {}
-  for (const event of !hasHooks || agent === 'antigravity' ? [] : agent === 'cursor' ? Object.keys(cursorEvents) : agent === 'codex' ? codexEvents : Object.keys(statusEvents[agent] ?? {})) {
+  for (const event of ownEvents) {
     const state = statusEvents[agent]?.[event]
     const eventCommand = hookArgs(event, state).map(quote).join(' ')
     const group = agent === 'cursor' ? { command: eventCommand, timeout: hostHookTimeout(agent, event) } : { hooks: [{ type: 'command', command: eventCommand, timeout: hostHookTimeout(agent, event) }] }
@@ -609,8 +659,9 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
     })
     const hasConnectHook = connected.some(one => {
       if (one.agent !== agent || one.label === '') return false
-      const text = readLocal(one.file)
-      if (text === null) return false
+      const original = readLocal(one.file)
+      if (original === null) return false
+      const text = withoutBom(original)
       if (one.generated) return text !== ''
       const removed = one.edit(text, true)
       return typeof removed === 'string' && removed !== text
