@@ -37,7 +37,7 @@ python3 -B scripts/remote-reporter/test_pipeline.py
 
 Run strict TypeScript for changed standalone modules with Node typings from your development environment. Full `tsc -p .` additionally needs the host-generated `.claude-plugin/types/` SDK, written when Claude Code loads the local plugin (`claude --plugin-dir .`). It is gitignored and must not be invented or edited. If unavailable, report full typechecking as unrun; passing standalone checks does not replace it. Do not start model work merely to claim an offline check passed.
 
-CI selects affected groups from changed paths and base/head dependencies, using the same plan for Draft and Ready. Selected groups retain their platform/version coverage; full runs occur for manifests, governance, selector changes, unclassified paths, releases, the weekly schedule and explicit full dispatch. The first selector rollout runs every group. The PR check still runs separately on every pull request. Generated checks run when affected; full `tsc -p .` remains separate. See [affected CI](docs/dev/CI.md).
+CI selects affected groups from changed paths and base/head dependencies, using the same plan for Draft and Ready. On a pull request, Node groups run Node 22 on Ubuntu and Node 24 on Windows and plugin runs on Ubuntu only; `main`, the weekly run, a manual run and release PRs run every pair. Full runs occur for manifests, governance, selector changes, unclassified paths, releases, the weekly schedule and explicit full dispatch. The first selector rollout runs every group. The PR check still runs separately on every pull request. Generated checks run when affected; full `tsc -p .` remains separate. See [affected CI](docs/dev/CI.md).
 
 ## Changes and evidence
 

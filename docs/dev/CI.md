@@ -9,7 +9,7 @@ the same rules. The PR metadata checker still runs separately on every PR.
 | Legacy setup.ps1 or setup.sh | Installer on the matching system |
 | One existing Node test | That file in its existing platform/Node matrix |
 | New root Node test | Automatically included in the board group |
-| README only | README contract on Node 22/24, Ubuntu/Windows |
+| README only | README contract (on a PR: Node 22 on Ubuntu, Node 24 on Windows) |
 | Pane code | Its consumers, including plugin tests |
 | Board bundle source | Bundle verification and every bundle consumer |
 | Package/plugin manifests, governance, planner, unknown paths | Every group |
@@ -25,7 +25,10 @@ A first rollout with no base planner selects every group. Unclassifiable paths
 also select every group. Unsafe paths, incomplete diff reads and graph errors
 fail planning; they never become an empty passing plan.
 
-Selected Node groups retain Node 22/24 on Ubuntu and Windows. Browser checks use
+On a pull request, selected Node groups run Node 22 on Ubuntu and Node 24 on
+Windows, and plugin checks run on Ubuntu only. Pushes to main, the weekly run, a
+manual run and a release PR run Node 22 and 24 on both systems and plugin
+on both. Browser checks use
 Node 24/Chromium on both systems. Plugin checks keep the pinned offline Claude
 runner. Legacy installers and the Python reporter run without installing Claude.
 Board and messaging have separate ten-minute jobs. No product dependency is

@@ -92,7 +92,7 @@ The installer checks and the type check the template lists are in [CONTRIBUTING.
 
 If you changed `scripts/board-cli.ts` or a `hooks/` file it imports, rebuild the bundle with `npx --yes bun@1.4.2 scripts/build-board.ts` and commit `hooks/board-script.ts` together with the change.
 
-When the plugin group is selected, CI runs `claude plugin validate --strict .` and `claude plugin test .` on Ubuntu and Windows. To run them yourself, install the version CI pins, then run both through `iso` (offline, no login, several minutes):
+When the plugin group is selected, CI runs `claude plugin validate --strict .` and `claude plugin test .` on Ubuntu (both systems on `main` and release PRs). To run them yourself, install the version CI pins, then run both through `iso` (offline, no login, several minutes):
 
 ```sh
 npm install -g @anthropic-ai/claude-code@2.1.301
