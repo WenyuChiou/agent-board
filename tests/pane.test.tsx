@@ -62,6 +62,38 @@ test('the pane and its HTML warn once about a torn tail without losing complete 
   await ui.unmount()
 })
 
+test('the pane names agents by brand name', async ($, on) => {
+  const board = '## Demo\n' + ['codex', 'claude'].map((agent, index) => {
+    const id = String(index + 1).repeat(8)
+    return `<!-- auto session=${id} agent=${agent} state=waiting updated=2026-10-16T12:00:00Z -->\n### Plan ${index}\n- [?] Publish, OK?\n<!-- /auto session=${id} -->\n`
+  }).join('\n') + '\n### Hand kept\n- [?] Finish it\n' + ['codex', 'claude'].map((agent, index) => {
+    const id = String(index + 5).repeat(8)
+    return `\n<!-- auto session=${id} agent=${agent} state=working updated=2026-10-16T12:00:00Z -->\n### Build ${index}\n- [~] Compile\n<!-- /auto session=${id} -->\n`
+  }).join('')
+  const world: World = { files: new Map([[FILE, board]]), mtime: 1, hasTasks: true, store: { lang: 'en', autoConnectOff: true, opened: ['waiting', 'others'] } }
+  engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/elsewhere', surface: 'desktop', isInteractive: true })
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
+  for (const [index, name] of ['Codex', 'Claude Code'].entries()) {
+    await ui.press({ key: `ask::Demo::Plan ${index}::0` })
+    expect(await ui.find({ type: 'Text', text: `Demo › Plan ${index} · ${name}` })).toBeDefined()
+    const hint = index === 0 ? 'Reply in the "Plan 0" session (Codex)' : 'Reply in the "Plan 1" session'
+    expect(await ui.find({ type: 'Text', text: `${hint}. Can't reply from here.` })).toBeDefined()
+  }
+  // A working task's line names its agent by brand name too; a hand-kept one names none.
+  expect(await ui.find({ type: 'Text', text: /Codex · Codex is working/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /Claude Code · Claude is working/ })).toBeDefined()
+  await ui.press({ key: 'ask::Demo::Hand kept::0' })
+  expect(await ui.find({ type: 'Text', text: 'Demo › Hand kept' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /Demo › Hand kept ·/ })).toBeUndefined()
+  await $.turn.start({ text: 'Current plan', turnId: 't1' })
+  await $.tool.call({ tool: 'TaskCreate', subject: 'Current question', description: '' })
+  await $.tool.call({ tool: 'TaskUpdate', taskId: '1', metadata: { waiting: 'you', why: 'Publish, OK?' } })
+  await ui.press({ key: 'ask::mine::1' })
+  expect(await ui.find({ type: 'Text', text: /^.+ › Current plan · Claude Code$/ })).toBeDefined()
+  await ui.unmount()
+})
+
 test('a task handoff removes Continue while retaining the recipient in the pane and file', async ($, on) => {
   const world: World = { files: new Map(), mtime: 1, hasTasks: true }
   const clock = engineBeneath(on, world)
@@ -4918,7 +4950,7 @@ test('another agent’s question is answered there, but its command can be copie
   const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
 
   expect(await ui.find({ type: 'Text', text: '$ gcloud auth login' })).toBeDefined()
-  expect(await ui.find({ type: 'Text', text: /到「Backfill last year's events」那個對話（gemini）回覆/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /到「Backfill last year's events」那個對話（Gemini CLI）回覆/ })).toBeDefined()
   // A block that left no session id offers none to copy, and says there is no way back.
   expect(await ui.find({ type: 'Button', key: "data-pipeline::Backfill last year's events::1::id" })).toBeUndefined()
   expect(await ui.find({ type: 'Text', text: /對話 ID|3db00eaf/ })).toBeUndefined()
@@ -4969,7 +5001,7 @@ test('another session shows its task without ids and copies only an actionable r
   // Another agent's session is named by the start of its own id, which is offered to copy with
   // the command that reopens it.
   await ui.press({ key: 'ask::data-pipeline::Pick the cache::0' })
-  expect(await ui.find({ type: 'Text', text: /到「Pick the cache」那個對話（codex）回覆/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /到「Pick the cache」那個對話（Codex）回覆/ })).toBeDefined()
   await ui.press({ key: 'data-pipeline::Pick the cache::0::resume' })
   expect(seen.copied.at(-1)).toBe('codex resume 0199a2b3-c4d5-7e6f-8a9b-0c1d2e3f4a5b')
   // The way back is on the line itself too, as on the other surfaces, with the command that

@@ -2,6 +2,7 @@ import type { ProgressAuto, ProgressMirror, ProgressProject, ProgressStep, Progr
 import { askOf, askRank } from './ask'
 import { ZH_TW } from './i18n'
 import type { Strings } from './i18n'
+import { agentLabel } from './strings'
 import type { AskKind } from './ask'
 import { confirmKey, shortId, stepWords, upsertAutoBlock } from './blocks'
 import type { ConfirmRef } from './blocks'
@@ -398,14 +399,15 @@ const sessionName = (id: string): string => {
 export const agentName = (agent: string): string => (agent === '' || agent === 'claude' ? 'Claude Code' : agent)
 
 // User-facing hints name tasks and agents. Exact ids stay in internal bindings and in the
-// resume command copied on demand. `withCommand` false omits it on the LAN page.
+// resume command copied on demand. `withCommand` false omits it on the LAN page. `hasBrand`: the
+// agent is named by its brand name (the pane and the page), else by its slug (the terminal board).
 export type ReplyHint = { where: string; back: string; note: string; reopen: string | null }
-export const replyHint = (item: WaitingItem, s: Strings, withCommand = true): ReplyHint => {
+export const replyHint = (item: WaitingItem, s: Strings, withCommand = true, hasBrand = false): ReplyHint => {
   if (item.where !== 'other') return { where: '', back: '', note: '', reopen: null }
   const reopen = withCommand && item.sessionId !== null ? item.reopen : null
 
   return {
-    where: s.replyElsewhere(item.task, '', item.agent),
+    where: s.replyElsewhere(item.task, '', hasBrand ? agentLabel(item.agent, s) : item.agent),
     back: '',
     note: '',
     reopen,
@@ -890,7 +892,7 @@ export const buildView = (
       const { done, total } = countSteps(task)
       const phrase =
         auto === 'working'
-          ? { status: task.auto?.agent === 'claude' ? s.claudeWorking : s.agentWorking(task.auto?.agent ?? ''), tone: 'accent' as const }
+          ? { status: task.auto?.agent === 'claude' ? s.claudeWorking : s.agentWorking(agentLabel(task.auto?.agent ?? '', s)), tone: 'accent' as const }
           : auto === 'ended'
             ? { status: stale ? s.sessionStopped(when) : s.sessionEnded, tone: 'warn' as const }
             : task.steps.some((step, index) => step.status === 'waiting' && isAsked(index)) && !task.steps.some((step, index) => step.status === 'waiting' && isPrompt(index))

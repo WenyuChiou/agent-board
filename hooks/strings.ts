@@ -5,6 +5,12 @@ import { ZH_CN } from './strings-zh-cn'
 
 export const STRINGS: Record<Lang, Strings> = { en: EN, 'zh-TW': ZH_TW, 'zh-CN': ZH_CN }
 
+export const agentLabel = (agent: string, s: Strings): string => {
+  if (agent === '') return ''
+  const key = Object.hasOwn(s.agentNames, agent) ? agent : agent.toLowerCase()
+  return Object.hasOwn(s.agentNames, key) ? s.agentNames[key] ?? agent : agent
+}
+
 export const plainReason = (s: Strings, code: string): string =>
   /^(EACCES|EPERM|EROFS)$/.test(code) ? s.storageReadOnly
     : /^(EBUSY|EAGAIN)$/.test(code) ? s.storageBusy

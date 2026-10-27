@@ -15,6 +15,7 @@ import { basename, delimiter, isAbsolute, join } from 'node:path'
 import { boardItems } from '../hooks/board'
 import type { BoardAction, PendingTurn } from '../hooks/board'
 import type { Strings } from '../hooks/i18n'
+import { agentLabel } from '../hooks/strings'
 import { lanAddress, localHosts, pagePolicy, requestProblem, sendKey, sendPlan, serveAction, serveModel, servePage } from '../hooks/serve'
 import type { SendPlan } from '../hooks/serve'
 import type { AgentTarget, View } from '../hooks/view'
@@ -308,11 +309,11 @@ export const startServer = (o: ServeOptions): void => {
   // seconds and the answer comes with it, however long the agent takes.
   const send = (target: AgentTarget, reply: string, title: string, cardKey: string): { status: number; note: string } => {
     const plan = sendPlan(target, reply, isWindows)
-    if (plan === null) return { status: 409, note: o.s.serveSendNone(target.agent) }
-    const label = `${target.agent} · ${title}`
+    if (plan === null) return { status: 409, note: o.s.serveSendNone(agentLabel(target.agent, o.s)) }
+    const label = `${agentLabel(target.agent, o.s)} · ${title}`
     if (plan.cwd !== null && !isFolder(plan.cwd)) return { status: 409, note: o.s.serveSendFailed(label, o.s.serveFolderGone(basename(plan.cwd))) }
     const key = sendKey(target)
-    if (sending.has(key)) return { status: 409, note: o.s.serveSendBusy(target.agent) }
+    if (sending.has(key)) return { status: 409, note: o.s.serveSendBusy(agentLabel(target.agent, o.s)) }
     sending.add(key)
     replies.delete(key)
     run(plan, o.s, label)

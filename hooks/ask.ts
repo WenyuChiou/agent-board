@@ -46,6 +46,16 @@ const optionsOf = (text: string): string[] => {
   return [lead.replace(/^(要|用|選|是)/, '').trim(), rest].filter(one => one !== '' && [...one].length <= 24)
 }
 
+// The question is read before the note, and the first of them with two options is used; a lone
+// option reads as before, from the note when there is one, else from the question.
+const optionsRead = (subject: string, note: string): string[] => {
+  const fromQuestion = optionsOf(subject)
+  if (fromQuestion.length >= 2) return fromQuestion
+  const fromNote = optionsOf(note)
+
+  return fromNote.length >= 2 || note !== '' ? fromNote : fromQuestion
+}
+
 const kindOf = (value: unknown): AskKind | null => ASK_KINDS.find(one => one === value) ?? null
 
 // What Claude said (`metadata.ask`, `options`, `command`, `link`), else what the words imply.
@@ -55,9 +65,10 @@ export const askOf = (
   given: { ask?: unknown; options?: unknown; command?: unknown; link?: unknown } = {},
 ): Ask => {
   const text = `${note} ${subject}`.trim()
+  // What the agent gave wins whole.
   const options = Array.isArray(given.options)
     ? given.options.filter((one): one is string => typeof one === 'string' && one.trim() !== '').map(one => one.trim())
-    : optionsOf(note || subject)
+    : optionsRead(subject, note)
   const command = typeof given.command === 'string' && given.command.trim() !== '' ? given.command.trim() : (CODE.exec(text)?.[1] ?? null)
   const link = typeof given.link === 'string' && given.link.trim() !== '' ? given.link.trim() : (URL.exec(text)?.[0] ?? null)
   const said = kindOf(given.ask)

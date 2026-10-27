@@ -78,6 +78,7 @@ export const EN: Strings = {
   claudeWorking: 'Claude is working',
   agentWorking: (agent: string): string => `${agent} is working`,
   agentNames: {
+    claude: 'Claude Code',
     codex: 'Codex',
     gemini: 'Gemini CLI',
     cursor: 'Cursor',
@@ -542,6 +543,7 @@ export const EN: Strings = {
   serveCopyResume: 'Copy resume command',
   serveCopyCommand: 'Copy command',
   serveOpenLink: 'Open link',
+  serveMore: 'More',
   serveReplyPlaceholder: 'Your answer…',
   serveManualReply: 'This question has no agent to send to. Mark its step done instead.',
   serveMessagePlaceholder: (agent: string): string => `What to tell ${agent}…`,
