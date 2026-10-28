@@ -188,10 +188,10 @@ Hooks say whether a session is working or waiting; its steps and when it is done
 
 ## What you see
 
-- **Answer the one that is waiting.** A question from any agent sits at the top, with a button for each answer. With messaging on ([`--messages-dir`](docs/MESSAGING.md#enable-locally)) and that session connected, **Send** delivers your answer; otherwise **Copy** it and paste it into that chat.
+- **Answer the one that is waiting.** A question from any agent sits at the top, with a button for each answer. With messaging on ([`--messages-dir`](docs/MESSAGING.md#enable-locally)) and that session connected, **Send** queues your answer, and a confirmation from that session means it was received; otherwise press **Copy** and paste it into that chat.
 - **Check the others are still moving.** Each agent's task shows its current step and when it last reported. Work nobody has touched for a week folds into one **N idle 7+ days** line.
 - **Clear what is finished or dead.** Finished work moves to a monthly archive by itself. A session that stopped halfway can be archived, confirmed done or taken over.
-- **Tell an agent something without going there.** With messaging on and the session connected, type in the reply box and send it; otherwise the board copies it for you to paste.
+- **Tell an agent something without going there.** With messaging on and the session connected, type in the reply box and send it; otherwise press **Copy** and paste it there.
 
 **The terminal board** (`--watch`), with Codex's question open: `y` or `n` copies the answer.
 

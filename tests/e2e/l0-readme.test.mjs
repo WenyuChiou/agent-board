@@ -145,7 +145,9 @@ describe('L0 discover and install from the README', () => {
         connected: /messaging (?:is )?on.*session (?:is )?connected/i,
         actions: [/\*\*Send\*\*/i, /send it/i, /\*\*Send\*\*/i],
         noSend: /\b(?:do not|don't|never)\s+(?:\*\*)?send/i,
-        fallback: /(?:otherwise (?:\*\*Copy\*\*|copy|the board copies)|or \*\*Copy\*\*)/i,
+        fallback: /(?:otherwise (?:press \*\*Copy\*\*|\*\*Copy\*\*|copy|the board copies)|or \*\*Copy\*\*)/i,
+        answerQueue: /\*\*Send\*\* queues your answer.*confirmation from that session means it was received/i,
+        copyPress: /otherwise press \*\*Copy\*\*/i,
         altConnected: /messaging (?:is )?on.*Codex session connected.*Send.*queues/i,
         accepted: /accepted.*(?:does not|doesn't|not).*delivered/i,
         receipt: /confirmation.*session.*means (?:it was )?(?:received|receipt).*not.*(?:work|task).*done/i,
@@ -154,9 +156,11 @@ describe('L0 discover and install from the README', () => {
       'zh-TW': {
         starts: ['- **回覆在等你的那一個。**', '- **不用切過去也能交代事情。**', '- **回覆**問題：'],
         connected: /(?<![未沒])開(?:了|啟).*訊息功能.*對話(?:也)?連上/,
-        actions: [/\*\*傳送\*\*/, /送過去/, /\*\*傳送\*\*/],
+        actions: [/\*\*傳送\*\*/, /(?:送過去|傳送)/, /\*\*傳送\*\*/],
         noSend: /(?:不要|不能|不可|禁止)(?:\*\*)?(?:傳送|送過去)/,
         fallback: /(?:否則|或)(?:看板幫你|按)?(?:\*\*)?複製/,
+        answerQueue: /\*\*傳送\*\*.*排進佇列.*對話.*確認.*才代表收到/,
+        copyPress: /否則按\*\*複製\*\*/,
         altConnected: /(?<![未沒])開(?:了|啟).*訊息功能.*Codex.{0,12}對話(?:也)?連上.*(?:傳送|送出).*排.*佇列/,
         accepted: /已接受.*不代表.*送到/,
         receipt: /對話.*確認(?:才)?代表收到.*不代表.*做完/,
@@ -165,9 +169,11 @@ describe('L0 discover and install from the README', () => {
       'zh-CN': {
         starts: ['- **回复在等你的那一个。**', '- **不用切过去也能交代事情。**', '- **回复**问题：'],
         connected: /(?<![未没])开(?:了|启).*消息功能.*对话(?:也)?连上/,
-        actions: [/\*\*发送\*\*/, /送过去/, /\*\*发送\*\*/],
+        actions: [/\*\*发送\*\*/, /(?:送过去|发送)/, /\*\*发送\*\*/],
         noSend: /(?:不要|不能|不可|禁止)(?:\*\*)?(?:发送|送过去)/,
         fallback: /(?:否则|或)(?:看板帮你|按)?(?:\*\*)?复制/,
+        answerQueue: /\*\*发送\*\*.*排进队列.*对话.*确认.*才代表收到/,
+        copyPress: /否则按\*\*复制\*\*/,
         altConnected: /(?<![未没])开(?:了|启).*消息功能.*Codex.{0,12}对话(?:也)?连上.*(?:发送|送出).*排.*队列/,
         accepted: /已接受.*不代表.*送到/,
         receipt: /对话.*确认(?:才)?代表收到.*不代表.*做完/,
@@ -187,6 +193,8 @@ describe('L0 discover and install from the README', () => {
         assert.doesNotMatch(line, checks[lang].noSend, `${name}: ${label} does not forbid Send`)
         assert.match(line, checks[lang].fallback, `${name}: ${label} offers Copy otherwise`)
       }
+      assert.match(answer, checks[lang].answerQueue, `${name}: Send queues the answer and session confirmation means receipt`)
+      for (const line of [answer, tell]) assert.match(line, checks[lang].copyPress, `${name}: Copy requires a button press`)
       assert.ok(answer.includes('[`--messages-dir`](docs/MESSAGING.md#enable-locally)'), `${name}: Send links to the local messaging setup`)
       assert.match(page, checks[lang].lan, `${name}: the LAN page has no messaging`)
       const image = [...text.matchAll(/<img\b[^>]*>/g)].find(([tag]) => tag.includes(`docs/images/cover-${lang}-dark.svg`))?.[0] ?? ''
