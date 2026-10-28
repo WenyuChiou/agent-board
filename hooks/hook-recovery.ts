@@ -28,9 +28,13 @@ const readRecoveryClaim = file => {
   } catch (error) { if (error.code === 'ENOENT') return null; throw error }
   finally { if (fd !== undefined) fs.closeSync(fd) }
 }
+// The token names the holder: a hook worker draws it from 128 random bits for the one recovery it starts, and a takeover
+// writes a new one, so no other live recovery has it. The pid in the file is the hook worker's until a first pass takes
+// the board lock, so requiring it too kept the claim of a recovery that failed earlier, and new recoveries waited 30 s
+// for it (#241). A holder past the 30 s a takeover waits for leaves its claim to that takeover.
 const releaseRecovery = (file, token) => {
   const owner = readRecoveryClaim(file)
-  if (owner?.token === token && owner.pid === process.pid) fs.unlinkSync(file)
+  if (owner?.token === token && (owner.pid === process.pid || Date.now() - owner.created < 30000)) fs.unlinkSync(file)
 }
 const createRecoveryClaim = (file, created) => {
   const token = randomUUID().replaceAll('-', '')

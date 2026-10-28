@@ -57,6 +57,27 @@ if (options.busyObserved) {
   }
   syncBuiltinESMExports()
 }
+if (options.epermCreates || options.epermStat) {
+  // Windows refuses a create (and a stat) with EPERM while the previous owner's delete is in flight.
+  const open = fs.openSync, lstat = fs.lstatSync
+  let creates = 0, refused = 0
+  fs.openSync = (file, ...args) => {
+    if (file === options.lock && args[0] === 'wx') {
+      creates += 1
+      if (refused < (options.epermCreates ?? 0)) {
+        refused += 1
+        throw Object.assign(new Error('EPERM: operation not permitted, open'), { code: 'EPERM', errno: -4048, syscall: 'open', path: file })
+      }
+    }
+    return open(file, ...args)
+  }
+  fs.lstatSync = (file, ...args) => {
+    if (file === options.lock && options.epermStat) throw Object.assign(new Error('EPERM: operation not permitted, lstat'), { code: 'EPERM', errno: -4048, syscall: 'lstat', path: file })
+    return lstat(file, ...args)
+  }
+  process.on('exit', () => { if (options.attempts) writeFileSync(options.attempts, String(creates)) })
+  syncBuiltinESMExports()
+}
 if (options.recoverReached) {
   const original = fs.unlinkSync
   let held = false
@@ -236,6 +257,48 @@ test('a held Windows lock remains LOCK_BUSY when its directory also denies creat
     assert.throws(() => withLocalLock(lock, () => assert.fail('mutation ran'), { waitMs: 100 }), /^Error: LOCK_BUSY$/)
     assert.equal(readFileSync(lock, 'utf8'), owner)
   })
+}))
+
+const windowsOnly = { skip: process.platform !== 'win32' && 'EPERM means a busy lock only on Windows' }
+
+test('a lock create refused with EPERM while the lock file is absent takes the lock instead of reporting LOCK_DENIED', windowsOnly, () => fixture(async ({ root, lock, start }) => {
+  const result = join(root, 'result')
+  // Two refusals in a row, as when a releasing owner's unlink lands between the create and the stat, twice.
+  const taken = await start({ lock, result, waitMs: 0, epermCreates: 2 }).done
+  assert.equal(taken.code, 0, taken.stderr)
+  assert.equal(readFileSync(result, 'utf8'), 'written')
+  assert.equal(existsSync(lock), false)
+  assert.equal(existsSync(`${lock}.recover`), false)
+}))
+
+test('a lock create that stays refused with EPERM while the lock file is absent still reports LOCK_DENIED after a bounded number of tries', windowsOnly, () => fixture(async ({ root, lock, start }) => {
+  const result = join(root, 'result'), attempts = join(root, 'attempts')
+  const denied = await start({ lock, result, waitMs: 0, epermCreates: 1000, attempts }).done
+  assert.equal(denied.code, 1)
+  assert.match(denied.stderr, /^LOCK_DENIED$/)
+  assert.equal(existsSync(result), false)
+  // The first round makes 2 creates, each of the 5 further rounds 2 more.
+  assert.equal(Number(readFileSync(attempts, 'utf8')), 12)
+}))
+
+test('a lock whose stat is refused with EPERM while it is released counts as busy, and a stat that stays refused is reported', windowsOnly, () => fixture(async ({ root, lock, start }) => {
+  const result = join(root, 'result')
+  // A held lock: recovery cannot stat it and must leave it alone.
+  const held = JSON.stringify({ version: 1, pid: process.pid, token: 'a'.repeat(32) })
+  writeFileSync(lock, held)
+  const first = await start({ lock, result, waitMs: 0, epermStat: true }).done
+  assert.equal(first.code, 1)
+  assert.match(first.stderr, /^LOCK_BUSY$/)
+  assert.equal(readFileSync(lock, 'utf8'), held)
+  unlinkSync(lock)
+  // A create refused with EPERM whose follow-up stat is refused too: the file cannot be shown absent. It is tried again
+  // a bounded number of times, then the stat error is reported as it is, not as a busy lock.
+  const attempts = join(root, 'attempts')
+  const second = await start({ lock, result, waitMs: 0, epermCreates: 1000, epermStat: true, attempts }).done
+  assert.equal(second.code, 1)
+  assert.match(second.stderr, /^EPERM: operation not permitted, lstat$/)
+  assert.equal(Number(readFileSync(attempts, 'utf8')), 12)
+  assert.equal(existsSync(result), false)
 }))
 
 test('failed native lock initialization closes its descriptor and preserves a detected replacement', async () => fixture(async ({ root, lock }) => {

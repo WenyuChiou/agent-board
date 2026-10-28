@@ -436,16 +436,24 @@ const workflow = async () => {
   return readFile(new URL('../.github/workflows/test.yml', import.meta.url), 'utf8')
 }
 
-test('the workflow preserves Node 22 and 24 on both platforms for each selected Node suite', async () => {
+test('a pull request runs Node 22 on Ubuntu and Node 24 on Windows, and main, the weekly run and a release run every pair', async () => {
   const text = await workflow()
+  const two = '[{"os":"ubuntu-latest","node":22},{"os":"windows-latest","node":24}]'
+  const four = '[{"os":"ubuntu-latest","node":22},{"os":"ubuntu-latest","node":24},{"os":"windows-latest","node":22},{"os":"windows-latest","node":24}]'
+  const onPr = "(github.event_name == 'pull_request' && !startsWith(github.event.pull_request.title, 'chore(release):'))"
+  assert.ok(text.includes(`node_matrix: \${{ ${onPr} && '${two}' || '${four}' }}`))
+  assert.ok(text.includes(`plugin_os: \${{ ${onPr} && '["ubuntu-latest"]' || '["ubuntu-latest","windows-latest"]' }}`))
   for (const group of ['board', 'messaging', 'tooling', 'npm', 'journeys']) {
     const block = text.split('\n  ' + group + ':\n')[1]?.split(/\n  [\w-]+:\n/)[0]
     assert.ok(block, group)
-    assert.match(block, /os: \[ubuntu-latest, windows-latest\]/, group)
-    assert.match(block, /node: \[22, 24\]/, group)
+    assert.match(block, /include: \$\{\{ fromJSON\(needs\.impact\.outputs\.node_matrix\) \}\}/, group)
+    assert.doesNotMatch(block, /node: \[/, group)
+    assert.doesNotMatch(block, /^\s+os: \[/m, group)
     assert.match(block, /CI_TEST_FILES:/, group)
     assert.match(block, /node scripts\/ci-impact\.mjs run/, group)
   }
+  const plugin = text.split('\n  plugin:\n')[1]?.split(/\n  [\w-]+:\n/)[0]
+  assert.match(plugin, /os: \$\{\{ fromJSON\(needs\.impact\.outputs\.plugin_os\) \}\}/)
 })
 
 test('workflow selection uses base rules and bootstraps with every group selected', async () => {

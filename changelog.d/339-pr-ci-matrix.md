@@ -1,0 +1,2 @@
+- **A pull request runs each Node line and each system once (#339).** On a pull request the board, local exchange, pr-check, npm and journeys checks run Node 22 on Ubuntu and Node 24 on Windows, and the plugin checks run on Ubuntu only, so a pull request waits for about half as many CI jobs. Pushes to `main`, the weekly run, a manual run and release pull requests still run Node 22 and 24 on both systems and the plugin checks on both.
+  Tests: `a pull request runs Node 22 on Ubuntu and Node 24 on Windows, and main, the weekly run and a release run every pair`.
