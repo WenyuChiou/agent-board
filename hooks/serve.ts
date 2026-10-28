@@ -7,7 +7,7 @@ import { RELAY, ZH_TW } from './i18n'
 import type { Strings } from './i18n'
 import type { Tone } from './palette'
 import { RESUME } from './parse'
-import { replyHint, wayBackText } from './view'
+import { OLDER_SHOWN, replyHint, wayBackText } from './view'
 import type { AgentTarget, StepRef, TaskRef, View } from './view'
 import type { Connection, Message } from './messaging'
 
@@ -177,6 +177,7 @@ export type ServeModel = {
   hidden: ServeHidden[]
   reminder: ServeRetained[]
   older: ServeRetained[]
+  stoppedAsking?: number
   idle: ServeRow[]
   stopped: ServeRow[]
   groups: Array<{ project: string; rows: ServeRow[] }>
@@ -316,6 +317,7 @@ export const serveModel = (view: View, pending: readonly PendingTurn[], s: Strin
     ...(view.isLarge ? { isLarge: true } : {}),
     ...(view.isCleanable ? { isCleanable: true } : {}),
     asks,
+    ...((view.stoppedAsking ?? 0) > 0 ? { stoppedAsking: view.stoppedAsking } : {}),
     idle,
     stopped,
     hidden: view.hidden.map(item => ({ key: `hidden:${item.hideKey}`, project: item.project, agent: item.agent, ...(item.where === 'manual' ? { isOwn: true as const } : {}), task: item.task, text: item.text, ...(item.questionId === undefined ? {} : { questionId: item.questionId }) })),
@@ -490,6 +492,8 @@ const PAGE_WORDS = [
   'sectionWaiting',
   'sectionQuestionReminders',
   'sectionOlderQuestions',
+  'stoppedAsking',
+  'showAllQuestions',
   'questionAgingHint',
   'questionReviewOnly',
   'nothingForYou',
@@ -815,6 +819,12 @@ const PAGE_SCRIPT = String.raw`
     node.type = 'button';
     if (isLocal) node.setAttribute('data-local', '');
     node.addEventListener('click', function () { if (!isLocal && isUnreachable) return; if (!isView) beginPress(); onPress(); });
+    return node;
+  }
+  // A button that only opens or reveals something already on the page: it works without the server and is no action on a card.
+  function navButton(label, onPress) {
+    var node = button(label, onPress, '', true, true);
+    node.setAttribute('data-nav', '');
     return node;
   }
   // fp: the fingerprint the line was drawn with, which the server checks before it writes.
@@ -1150,18 +1160,43 @@ const PAGE_SCRIPT = String.raw`
     nothing = model.asks.length === 0 ? el('div', 'n-today', w('nothingForYou')) : null;
     add(board, waitingHead, nothing);
     model.asks.forEach(function (ask) { add(board, tracked(askCard(ask), ['waiting'], ask)); });
+    var olderShelf = null;
+    // Like the questions beside it, the line shows under All and Waiting only.
+    if (model.stoppedAsking > 0) add(board, tracked(navButton(w('stoppedAsking', model.stoppedAsking), function () {
+      opened['older:'] = true;
+      if (olderShelf) {
+        olderShelf.open = true;
+        olderShelf.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      }
+    }), ['waiting'], {}, '', true));
     [['reminder', 'sectionQuestionReminders'], ['older', 'sectionOlderQuestions']].forEach(function (pair) {
       var questions = model[pair[0]] || [];
       if (!questions.length) return;
       var from = filterNodes.length;
       var retained = el('details', 'card shelf');
+      if (pair[0] === 'older') olderShelf = retained;
       retained.open = opened[pair[0] + ':'] === true;
       retained.addEventListener('toggle', function () { opened[pair[0] + ':'] = retained.open; });
       add(retained, add(el('summary'), el('span', 'quiet', w(pair[1]) + ' (' + questions.length + ')')), el('p', 'quiet', w('questionAgingHint')), el('p', 'quiet', w('questionReviewOnly')));
-      questions.forEach(function (one) {
+      var shown = pair[0] === 'older' && !opened['older:all'] ? ${OLDER_SHOWN} : questions.length;
+      function appendQuestion(one) {
         add(retained, tracked(add(el('div'), add(el('div', 'where'), agentMark(who(one)), el('span', '', [one.project, one.agent, one.task, one.when].filter(Boolean).join(' · '))), el('div', 'q', one.text), el('div', '', one.note), el('div', 'quiet', one.context)), ['waiting'], one, '', true));
-      });
+      }
+      questions.slice(0, shown).forEach(appendQuestion);
       groupVisibility(retained, from);
+      if (shown < questions.length) {
+        var more = navButton(w('showAllQuestions', questions.length), function () {
+          opened['older:all'] = true;
+          var next = filterNodes.length;
+          questions.slice(shown).forEach(appendQuestion);
+          filterGroups.forEach(function (group) {
+            if (group.node === retained || group.node === waitingHead) group.entries = group.entries.concat(filterNodes.slice(next));
+          });
+          retained.removeChild(more);
+          applyPick();
+        });
+        add(retained, more);
+      }
       add(board, retained);
     });
     if (model.hidden.length) {

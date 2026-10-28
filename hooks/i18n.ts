@@ -400,6 +400,8 @@ export const ZH_TW = {
   sectionWaiting: '等你處理',
   sectionQuestionReminders: '較早的未答問題',
   sectionOlderQuestions: '更早、尚未回答的問題',
+  stoppedAsking: (n: number): string => `${n} 個未回答，在已停止的對話`,
+  showAllQuestions: (n: number): string => `顯示全部（${n}）`,
   questionAgingHint: '仍未回答；展開可查看。查看不會重設時間，也不代表核准或完成。',
   questionReviewOnly: '此處僅供查看保留的問題，不會變更原始資料或記錄「已回覆」。',
   resolveQuestion: '結案',

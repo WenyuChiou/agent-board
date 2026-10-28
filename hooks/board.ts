@@ -187,6 +187,8 @@ export const boardText = (view: View, pending: readonly PendingTurn[], s: String
     lines.push(...hidden.map(line => `  ${line}`), '')
   }
 
+  if ((view.stoppedAsking ?? 0) > 0) lines.push(c('quiet', s.stoppedAsking(view.stoppedAsking!)), '')
+
   if (view.due.length > 0) {
     lines.push(c('alert', `⚑ ${s.sectionDue}`))
     for (const row of view.due) lines.push(`  ${fit(`${row.project} › ${row.title}${row.due ? ` · ${row.due.left}` : ''}`, o.width - 4)}`)
@@ -387,13 +389,15 @@ export const chatText = (
     items.push([...(index === 0 ? ['', `● ${s.sectionWaiting}`] : []), line(ask.where + (ask.task ? ` › ${ask.task}` : ''), 2), line(ask.text, 4)].join('\n'))
   })
   if (asks.length > 0 && hidden !== null) items.push(`  ${hidden}`)
+  if ((view.stoppedAsking ?? 0) > 0) items.push(line(s.stoppedAsking(view.stoppedAsking!)))
   const news = pending.filter(turn => !turn.isQuestion)
   news.forEach((turn, index) => {
     const at = turn.sourceAt ?? turn.at
     const when = now !== undefined && Number.isFinite(at) && at > 0 && at <= now ? relativeTime(at, now, s) : ''
     items.push([...(index === 0 ? ['', `◐ ${s.chatPendingReports}`] : []), line(`${[named(turn.project), turn.agent].filter(part => part !== '').join(' · ')} · ${s.chatReportTime(when)}`, 2), line(turn.hasSummary === false ? s.chatNoSummary : turn.text, 4)].join('\n'))
   })
-  for (const [title, shelf] of [[s.sectionQuestionReminders, view.reminder ?? []], [s.sectionOlderQuestions, view.older ?? []]] as const) {
+  // The copies of a stopped row's questions (`older::`) are told once below, under their row.
+  for (const [title, shelf] of [[s.sectionQuestionReminders, view.reminder ?? []], [s.sectionOlderQuestions, (view.older ?? []).filter(item => !item.key.startsWith('older::'))]] as const) {
     if (shelf.length === 0) continue
     items.push(`\n${title} (${shelf.length})`)
     for (const item of shelf) items.push(line(`${named(item.project)} › ${item.task} · ${item.when}`, 2), line(`${item.text}${item.note ? ` — ${item.note}` : ''}`, 4))
@@ -632,6 +636,7 @@ export const boardScreen = (view: View, pending: readonly PendingTurn[], state: 
     `${c('bold', s.paneTitle)}  ${c('waiting', `● ${waiting} ${s.countWaiting}`)}  ${c('accent', `▸ ${active} ${s.countActive}`)}  ${c('alert', `⚑ ${due} ${s.countDue}`)}  ${c('done', `✓ ${today} ${s.countToday}`)}`,
     ...(view.warning ? [c('alert', view.warning)] : []),
     ...(view.details ? [c('quiet', view.details)] : []),
+    ...((view.stoppedAsking ?? 0) > 0 ? [c('quiet', `${s.stoppedAsking(view.stoppedAsking!)} · ${s.boardKeyOlder}`)] : []),
     ...(view.hidden.length === 0 ? [] : [c('quiet', `${s.hiddenCount(view.hidden.length)} · ${s.boardKeyShowHidden}`)]),
     ...((view.reminder?.length ?? 0) + (view.older?.length ?? 0) === 0 ? [] : [c('quiet', `${s.sectionQuestionReminders}: ${view.reminder?.length ?? 0} · ${s.sectionOlderQuestions}: ${view.older?.length ?? 0} · ${s.boardKeyOlder}`)]),
     ...(view.idle.length + view.stopped.length === 0 ? [] : [c('quiet', [

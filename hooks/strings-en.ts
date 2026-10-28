@@ -360,6 +360,8 @@ export const EN: Strings = {
   sectionWaiting: 'Waiting on you',
   sectionQuestionReminders: 'Earlier unanswered questions',
   sectionOlderQuestions: 'Older unanswered questions',
+  stoppedAsking: (n: number): string => `${n} unanswered in stopped sessions`,
+  showAllQuestions: (n: number): string => `Show all (${n})`,
   questionAgingHint: 'Still unanswered; expand to review. Viewing does not reset age, approve or complete anything.',
   questionReviewOnly: 'Review only here; retained source questions are not changed or marked answered.',
   resolveQuestion: 'Resolve',

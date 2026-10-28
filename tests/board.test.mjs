@@ -2620,6 +2620,7 @@ const pageDom = async (html, first, { post, confirm, messaging, copyAllowed = fa
       if (!this.disabled) this.events.click?.()
     }
     focus() {}
+    scrollIntoView() { this.scrolled = true }
     setSelectionRange() {}
     select() { this.isSelected = true }
   }
@@ -2697,8 +2698,10 @@ const pageDom = async (html, first, { post, confirm, messaging, copyAllowed = fa
   }
   await flush()
   const boardButtons = node => node.childNodes.flatMap(child => [...(child.tag === 'button' ? [child] : []), ...boardButtons(child)])
+  // The buttons that only open or reveal something already drawn (the stopped-sessions line, Show all) are not card actions.
+  const cardButtons = node => boardButtons(node).filter(button => button.getAttribute('data-nav') === null)
   return {
-    buttons: () => boardButtons(get('board')),
+    buttons: () => cardButtons(get('board')),
     boxes: () => get('board').querySelectorAll(),
     send: () => boardButtons(get('board')).find(button => button.textContent === 'Send to grok'),
     requests, copies,
@@ -3344,6 +3347,47 @@ test("a refusal caused by another agent's change stays next to the page card aft
     await dom.redraw({ ...base, asks: [{ ...ask, fp: 'after' }] })
     const results = pageCardResults(dom, ask.key).filter(node => node.textContent !== '')
     assert.deepEqual(results.map(node => node.textContent), ['That line just changed'])
+  } finally { await board.close() }
+})
+
+test('the page line for questions in stopped sessions opens the Older shelf, and Show all draws the rest without the server', async () => {
+  const board = await page()
+  try {
+    const html = (await board.call('GET', `/?t=${board.token}`)).body
+    const words = JSON.parse(html.match(/<script[^>]*id="words"[^>]*>([\s\S]*?)<\/script>/)[1])
+    const older = Array.from({ length: 12 }, (_, index) => ({ project: 'Demo', agent: 'codex', task: `Plan ${index}`, text: `Synthetic question ${index}, OK?`, note: '', context: '', when: '4 days ago', questionId: `synthetic-${index}` }))
+    const model = { counts: { waiting: 0, active: 0, due: 0, today: 0 }, groups: [], hidden: [], idle: [], stopped: [], turns: [], recent: [], asks: [], reminder: [], older, stoppedAsking: 12 }
+    const dom = await pageDom(html, model, { post: async () => { throw new Error('synthetic offline') } })
+    const walk = node => node.childNodes.flatMap(child => [child, ...walk(child)])
+    const shelf = () => walk(dom.node('board')).find(node => node.tag === 'details' && node.className === 'card shelf')
+    const shown = () => walk(shelf()).filter(node => node.className === 'q').length
+    const navigation = () => walk(dom.node('board')).filter(node => node.tag === 'button' && node.getAttribute('data-nav') !== null)
+    const line = words.stoppedAsking.replace('\u0001', '12')
+    const showAll = words.showAllQuestions.replace('\u0001', '12')
+    assert.deepEqual(navigation().map(button => button.textContent), [line, showAll])
+    assert.equal(shelf().open, false)
+    assert.equal(shown(), 10)
+    navigation()[0].click()
+    await dom.flush()
+    assert.equal(shelf().open, true)
+    assert.equal(shelf().scrolled, true)
+    const all = navigation().find(button => button.textContent === showAll)
+    assert.ok(all)
+    all.click()
+    await dom.flush()
+    assert.equal(shown(), 12)
+    assert.equal(navigation().some(button => button.textContent === showAll), false)
+    // The line belongs to Waiting: it shows under All and Waiting and hides under Due.
+    assert.equal(navigation()[0].hidden, false)
+    const due = dom.allButtons().find(button => button.textContent.startsWith(words.sectionDue))
+    assert.ok(due)
+    due.click()
+    await dom.flush()
+    assert.equal(navigation()[0].hidden, true)
+    // The choice survives the next redraw, and none of this reached the server.
+    await dom.redraw({ ...model })
+    assert.equal(shown(), 12)
+    assert.deepEqual(dom.requests, [])
   } finally { await board.close() }
 })
 

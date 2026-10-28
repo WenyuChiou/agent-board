@@ -11,7 +11,7 @@ import { paletteFor } from '../hooks/palette'
 import { ZH_CN } from '../hooks/strings-zh-cn'
 import { pressTarget } from '../hooks/pane'
 import { dashboardHtml } from '../hooks/dashboard'
-import { buildView, IDLE_MS, parseSeen, seenJson, seenPath, SWEEP_ARMED_KEY, withSeen } from '../hooks/view'
+import { buildView, IDLE_MS, OLDER_SHOWN, parseSeen, relativeTime, seenJson, seenPath, SWEEP_ARMED_KEY, withSeen } from '../hooks/view'
 import type { TaskRow, View } from '../hooks/view'
 import { parseProgress } from '../hooks/parse'
 import { chatText, peekInbox } from '../hooks/board'
@@ -9770,6 +9770,72 @@ test('resolving the last question does not add a phantom stopped task when it mo
   expect(await ui.find({ type: 'Button', key: 'section::idle' })).toBeDefined()
   expect(world.files.get(FILE)).toBe(board)
   await ui.unmount()
+})
+
+const stoppedPaneBoard = (count: number, at: number): string => '## Synthetic\n' + Array.from({ length: count }, (_, index) => {
+  const session = (0x40000000 + index).toString(16)
+  return `<!-- auto session=${session} agent=codex state=ended updated=${new Date(at - 13 * 3600000).toISOString()} -->\n### Plan ${index}\n- [?] Synthetic question ${index}, OK?\n<!-- /auto session=${session} -->\n`
+}).join('\n')
+
+test('the pane shows one line for questions in stopped sessions under Waiting, and pressing it opens the Older list', async ($, on) => {
+  const at = Date.parse('2026-10-16T12:00:00Z')
+  const firstAt = at - 4 * 86400000
+  const board = stoppedPaneBoard(2, at)
+  const ledger = observeQuestions(emptyQuestions(), parseProgress(board), null, [], firstAt, true, 'fixture:stopped').ledger
+  const world: World = { files: new Map([[FILE, board], [QUESTIONS, questionsJson(ledger)]]), mtime: 1, hasTasks: true, at, store: { lang: 'en', inboxDone: {} } }
+  engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/persona_framework', surface: 'desktop', isInteractive: true })
+  await settledSetup($, world)
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
+  try {
+    expect(await ui.find({ type: 'Button', key: 'section::stoppedAsking', text: `▸ ${EN.stoppedAsking(2)}` })).toBeDefined()
+    expect(await ui.find({ type: 'Button', key: 'section::waiting' })).toBeUndefined()
+    for (let index = 0; index < 2; index += 1) expect(await ui.find({ type: 'Button', key: `ask::older::Synthetic::Plan ${index}::0` })).toBeUndefined()
+    await ui.press({ key: 'section::stoppedAsking' })
+    expect(await ui.find({ type: 'Button', key: 'section::older', text: `▾ ${EN.sectionOlderQuestions}` })).toBeDefined()
+    expect(await ui.find({ type: 'Button', key: 'section::stoppedAsking', text: `▾ ${EN.stoppedAsking(2)}` })).toBeDefined()
+    for (let index = 0; index < 2; index += 1) expect(await ui.find({ type: 'Button', key: `ask::older::Synthetic::Plan ${index}::0` })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: relativeTime(firstAt, at, EN) })).toBeDefined()
+    const view = buildView(parseProgress(board), [], null, at, 0, {}, EN, [], {}, ledger)
+    expect(pressTarget(view, 'section::stoppedAsking', EN).label).toBe(EN.stoppedAsking(2))
+    expect(world.files.get(FILE)).toBe(board)
+  } finally {
+    await ui.unmount()
+  }
+})
+
+test('Older shows ten questions and a Show all button for the rest', async ($, on) => {
+  const at = Date.parse('2026-10-16T12:00:00Z')
+  const firstAt = at - 4 * 86400000
+  const board = stoppedPaneBoard(OLDER_SHOWN, at)
+  const ledger = observeQuestions(emptyQuestions(), parseProgress(board), null, [], firstAt, true, 'fixture:stopped').ledger
+  const world: World = { files: new Map([[FILE, board], [QUESTIONS, questionsJson(ledger)]]), mtime: 1, hasTasks: true, at, store: { lang: 'en', inboxDone: {} } }
+  const clock = engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/persona_framework', surface: 'desktop', isInteractive: true })
+  await settledSetup($, world)
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
+  try {
+    await ui.press({ key: 'section::stoppedAsking' })
+    for (let index = 0; index < OLDER_SHOWN; index += 1) expect(await ui.find({ type: 'Button', key: `ask::older::Synthetic::Plan ${index}::0` })).toBeDefined()
+    expect(await ui.find({ type: 'Button', key: 'section::olderAll' })).toBeUndefined()
+    const expanded = stoppedPaneBoard(12, at)
+    const nextLedger = observeQuestions(ledger, parseProgress(expanded), null, [], firstAt, true, 'fixture:more').ledger
+    world.files.set(FILE, expanded)
+    world.files.set(QUESTIONS, questionsJson(nextLedger))
+    world.mtime += 1
+    await clock.advance(2000)
+    for (let index = 0; index < 12; index += 1) {
+      const question = await ui.find({ type: 'Button', key: `ask::older::Synthetic::Plan ${index}::0` })
+      if (index < OLDER_SHOWN) expect(question).toBeDefined()
+      else expect(question).toBeUndefined()
+    }
+    expect(await ui.find({ type: 'Button', key: 'section::olderAll', text: EN.showAllQuestions(12) })).toBeDefined()
+    await ui.press({ key: 'section::olderAll' })
+    for (let index = 0; index < 12; index += 1) expect(await ui.find({ type: 'Button', key: `ask::older::Synthetic::Plan ${index}::0` })).toBeDefined()
+    expect(await ui.find({ type: 'Button', key: 'section::olderAll' })).toBeUndefined()
+  } finally {
+    await ui.unmount()
+  }
 })
 
 test('the pane hides idle tasks behind one toggle and shows them with their age when opened', async ($, on) => {

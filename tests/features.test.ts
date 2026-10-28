@@ -1,4 +1,4 @@
-import { emptyQuestions, observeQuestions } from '../hooks/questions'
+import { emptyQuestions, observeQuestions, resolveQuestion, withCaptures } from '../hooks/questions'
 import { expect, test } from 'claude-code/testing'
 
 import type { ProgressMirror, ProgressPr } from '../types'
@@ -29,10 +29,161 @@ import { applyCompletionOverlay, completionKey, completionOfBlock, completionOve
 import { RELEASED } from '../hooks/released'
 import { sha256 } from '../hooks/sha256'
 import { RELEASE_0_18_1, RELEASE_0_20_5 } from './fixtures/released'
-import { agentName, buildView, contextOf, handoffOf, manualDoneSeen, mirrorMatchesTask, replyHint, resumeCommand, resumeVia, statusLine, taskFingerprint, wayBackText, withSeen, IDLE_MS } from '../hooks/view'
+import { agentName, buildView, contextOf, handoffOf, manualDoneSeen, mirrorMatchesTask, OLDER_SHOWN, relativeTime, replyHint, resumeCommand, resumeVia, statusLine, taskFingerprint, wayBackText, withSeen, IDLE_MS } from '../hooks/view'
 import { localDay } from '../hooks/journal'
 
 const ARCHIVE_AGENTS = ['claude', 'codex', 'gemini', 'cursor', 'grok', 'muse', 'hermes', 'openclaw', 'opencode', 'antigravity', 'deepseek', 'custom-agent']
+
+const STOPPED_NOW = Date.parse('2026-10-16T12:00:00Z')
+const STOPPED_FIRST = STOPPED_NOW - 4 * 86400000
+const stoppedQuestionBoard = (sessions: number, questions = sessions, states: readonly string[] = ['ended']): string =>
+  '## Synthetic\n' + Array.from({ length: sessions }, (_, index) => {
+    const session = (0x40000000 + index).toString(16)
+    const count = Math.floor(questions / sessions) + (index < questions % sessions ? 1 : 0)
+    return `<!-- auto session=${session} agent=codex state=${states[index % states.length]} updated=${new Date(STOPPED_NOW - 13 * 3600000).toISOString()} -->\n### Plan ${index}\n${Array.from({ length: count }, (_, step) => `- [?] Synthetic question ${index}.${step}, OK?`).join('\n')}\n<!-- /auto session=${session} -->\n`
+  }).join('\n')
+
+test('an unanswered question in an ended session adds to one stopped-sessions line in Waiting', () => {
+  const projects = parseProgress(stoppedQuestionBoard(3, 3, ['ended', 'done', 'waiting']))
+  const ledger = observeQuestions(emptyQuestions(), projects, null, [], STOPPED_FIRST, true, 'fixture:stopped').ledger
+  for (const s of Object.values(STRINGS)) {
+    const view = buildView(projects, [], null, STOPPED_NOW, 0, {}, s, [], {}, ledger)
+    expect(view.stoppedAsking).toBe(3)
+    expect(view.waiting).toEqual([])
+    expect(view.overview.waiting).toBe(0)
+    expect(view.focus).toBe(null)
+    expect(boardText(view, [], s)).toContain(s.stoppedAsking(3))
+    expect(chatText(view, [], [], s, '/synthetic')).toContain(s.stoppedAsking(3))
+    expect(boardScreen(view, [], emptyBoardState, s)).toContain(s.stoppedAsking(3))
+    expect(dashboardHtml(view, s, '/synthetic/progress.md', '')).toContain(s.stoppedAsking(3))
+    expect(serveModel(view, [], s).stoppedAsking).toBe(3)
+    expect(servePage(s, 'n')).toContain("w('stoppedAsking'")
+    for (const quiet of [[], parseProgress('## Synthetic\n### Quiet work\n- [ ] Finish\n')]) {
+      const empty = buildView(quiet, [], null, STOPPED_NOW, 0, {}, s, [], {}, emptyQuestions())
+      expect(Object.hasOwn(empty, 'stoppedAsking')).toBe(false)
+      expect(Object.hasOwn(serveModel(empty, [], s), 'stoppedAsking')).toBe(false)
+      for (const text of [boardText(empty, [], s), chatText(empty, [], [], s, '/synthetic'), boardScreen(empty, [], emptyBoardState, s), dashboardHtml(empty, s, '/synthetic/progress.md', '')]) expect(text).not.toContain(s.stoppedAsking(3))
+    }
+  }
+})
+
+test('a question in a stopped session is listed under Older once, with the age it was first asked', () => {
+  const projects = parseProgress(stoppedQuestionBoard(1))
+  const ledger = observeQuestions(emptyQuestions(), projects, null, [], STOPPED_FIRST, true, 'fixture:stopped').ledger
+  const view = buildView(projects, [], null, STOPPED_NOW, 0, {}, STRINGS.en, [], {}, ledger)
+  expect(view.older).toHaveLength(1)
+  const question = view.older![0]!
+  expect(question.key.startsWith('older::')).toBe(true)
+  expect(question.ageStage).toBe('older')
+  expect(question.when).toBe(relativeTime(STOPPED_FIRST, STOPPED_NOW, STRINGS.en))
+  expect(question.when).not.toBe(relativeTime(STOPPED_NOW - 13 * 3600000, STOPPED_NOW, STRINGS.en))
+  expect(question.hideKey).toBe(view.stopped[0]!.questions![0]!.hideKey)
+  expect(view.waiting).toEqual([])
+  expect(view.reminder).toEqual([])
+  expect(serveModel(view, [], STRINGS.en).older.map(item => item.questionId)).toEqual([question.questionId])
+  const unknown = { ...ledger, records: ledger.records.map(record => ({ ...record, firstObserved: 0 })) }
+  expect(buildView(projects, [], null, STOPPED_NOW, 0, {}, STRINGS.en, [], {}, unknown).older?.[0]?.when).toBe(STRINGS.en.questionAgeUnknown)
+})
+
+test('a question on a Stopped row and in the Older list is counted once', () => {
+  const projects = parseProgress(stoppedQuestionBoard(1))
+  const ledger = observeQuestions(emptyQuestions(), projects, null, [], STOPPED_FIRST, true, 'fixture:stopped').ledger
+  const archived = withCaptures(ledger, [{ version: 1, disposition: 'archived', record: ledger.records[0]! }])
+  const repeated = observeQuestions(ledger, projects, null, [], STOPPED_NOW, true, 'fixture:again').ledger
+  for (const kept of [ledger, archived, repeated]) {
+    const view = buildView(projects, [], null, STOPPED_NOW, 0, {}, STRINGS.en, [], {}, kept)
+    expect(view.stopped[0]?.questions).toHaveLength(1)
+    expect(view.older?.map(item => item.questionId)).toEqual([view.stopped[0]!.questions![0]!.questionId])
+    expect(view.stoppedAsking).toBe(1)
+  }
+  const retained = buildView([], [], null, STOPPED_NOW, 0, {}, STRINGS.en, [], {}, archived)
+  expect(retained.stoppedAsking).toBe(1)
+  expect(retained.older).toHaveLength(1)
+})
+
+test('hiding or answering a question in Older lowers the stopped-sessions count', () => {
+  const projects = parseProgress(stoppedQuestionBoard(2))
+  const ledger = observeQuestions(emptyQuestions(), projects, null, [], STOPPED_FIRST, true, 'fixture:stopped').ledger
+  const initial = buildView(projects, [], null, STOPPED_NOW, 0, {}, STRINGS.en, [], {}, ledger)
+  expect(initial.stoppedAsking).toBe(2)
+  const first = initial.older![0]!
+  const second = initial.older![1]!
+  const hidden = buildView(projects, [], null, STOPPED_NOW, 0, {}, STRINGS.en, [first.hideKey], {}, ledger)
+  expect(hidden.stoppedAsking).toBe(1)
+  expect(hidden.hidden.map(item => item.questionId)).toEqual([first.questionId])
+  expect(hidden.older?.map(item => item.questionId)).toEqual([second.questionId])
+  const resolved = resolveQuestion(ledger, second.questionId!, STOPPED_NOW)
+  const answered = buildView(projects, [], null, STOPPED_NOW, 0, {}, STRINGS.en, [first.hideKey], {}, resolved)
+  expect(answered.stoppedAsking ?? 0).toBe(0)
+  expect(answered.older).toEqual([])
+})
+
+test('a question of a stopped session that was hidden before stays hidden and is not counted', () => {
+  const projects = parseProgress(stoppedQuestionBoard(1))
+  const ledger = observeQuestions(emptyQuestions(), projects, null, [], STOPPED_FIRST, true, 'fixture:stopped').ledger
+  const legacy = buildView(projects, [], null, STOPPED_NOW).stopped[0]!.questions![0]!.hideKey
+  const hidden = buildView(projects, [], null, STOPPED_NOW, 0, {}, STRINGS.en, [legacy], {}, ledger)
+  expect(hidden.older).toEqual([])
+  expect(Object.hasOwn(hidden, 'stoppedAsking')).toBe(false)
+  expect(hidden.hidden.map(item => item.questionId)).toEqual([ledger.records[0]!.id])
+})
+
+test('Older lists ten questions and a Show all control for the rest on the page and the dashboard', () => {
+  for (const count of [12, 10]) {
+    const projects = parseProgress(stoppedQuestionBoard(count))
+    const ledger = observeQuestions(emptyQuestions(), projects, null, [], STOPPED_FIRST, true, 'fixture:stopped').ledger
+    const view = buildView(projects, [], null, STOPPED_NOW, 0, {}, STRINGS.en, [], {}, ledger)
+    expect(view.older).toHaveLength(count)
+    expect(view.stoppedAsking).toBe(count)
+    const html = dashboardHtml(view, STRINGS.en, '/synthetic/progress.md', '')
+    const older = html.split('data-key="section:older"')[1]!.split('data-key="section:stopped"')[0]!
+    const [shown = '', rest = ''] = older.split('<details class="more" data-key="older:more">')
+    expect((shown.match(/class="ask"/g) ?? []).length).toBe(OLDER_SHOWN)
+    expect((rest.match(/class="ask"/g) ?? []).length).toBe(count - OLDER_SHOWN)
+    for (const item of view.older!.slice(0, OLDER_SHOWN)) expect(shown).toContain(item.text)
+    for (const item of view.older!.slice(OLDER_SHOWN)) expect(rest).toContain(item.text)
+    if (count > OLDER_SHOWN) expect(rest).toContain(`<summary>${STRINGS.en.showAllQuestions(count)}</summary>`)
+    else expect(html).not.toContain(STRINGS.en.showAllQuestions(count))
+  }
+  const page = servePage(STRINGS.en, 'n')
+  expect(page).toContain("w('showAllQuestions'")
+  expect(page).toContain(`? ${OLDER_SHOWN} : questions.length`)
+})
+
+test('the chat text tells the question of a stopped session once, under its row, and counts it in the stopped-sessions line', () => {
+  const projects = parseProgress(stoppedQuestionBoard(2))
+  const ledger = observeQuestions(emptyQuestions(), projects, null, [], STOPPED_FIRST, true, 'fixture:stopped').ledger
+  const view = buildView(projects, [], null, STOPPED_NOW, 0, {}, STRINGS.en, [], {}, ledger)
+  const text = chatText(view, [], [], STRINGS.en, '/synthetic')
+  const asked = view.stopped.flatMap(row => row.questions ?? [])
+  expect(asked).toHaveLength(2)
+  for (const question of asked) expect(text.split(question.text).length - 1).toBe(1)
+  expect(text).toContain(STRINGS.en.stoppedAsking(2))
+  expect(text).not.toContain(STRINGS.en.sectionOlderQuestions)
+})
+
+test('a board with two hundred stopped sessions and five hundred old questions gives one line, and draws only ten rows until Show all', () => {
+  const projects = parseProgress(stoppedQuestionBoard(200, 500))
+  const ledger = observeQuestions(emptyQuestions(), projects, null, [], STOPPED_FIRST, true, 'fixture:stopped').ledger
+  const view = buildView(projects, [], null, STOPPED_NOW, 0, {}, STRINGS.en, [], {}, ledger)
+  expect(view.stopped).toHaveLength(200)
+  expect(view.stoppedAsking).toBe(500)
+  expect(view.older).toHaveLength(500)
+  const html = dashboardHtml(view, STRINGS.en, '/synthetic/progress.md', '')
+  expect(html.split(`>${STRINGS.en.stoppedAsking(500)}</button>`)).toHaveLength(2)
+  const older = html.split('data-key="section:older"')[1]!
+  expect((older.split('<details class="more" data-key="older:more">')[0]!.match(/class="ask"/g) ?? []).length).toBe(OLDER_SHOWN)
+  expect(serveModel(view, [], STRINGS.en).stoppedAsking).toBe(500)
+})
+
+test('every language has the stopped-sessions line and the Show all words', () => {
+  for (const s of Object.values(STRINGS)) {
+    expect(s.stoppedAsking(3)).toContain('3')
+    expect(s.showAllQuestions(12)).toContain('12')
+    expect(pageWords(s).stoppedAsking).toContain('\u0001')
+    expect(pageWords(s).showAllQuestions).toContain('\u0001')
+  }
+})
 
 test('immutable completion overlays project exact or older mirrors and leave fresh genuine work unchanged', () => {
   const now = Date.parse('2026-10-19T12:00:00Z')

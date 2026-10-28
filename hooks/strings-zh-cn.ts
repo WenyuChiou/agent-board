@@ -359,6 +359,8 @@ export const ZH_CN: Strings = {
   sectionWaiting: '等你处理',
   sectionQuestionReminders: '较早的未答问题',
   sectionOlderQuestions: '更早、尚未回答的问题',
+  stoppedAsking: (n: number): string => `${n} 个未回答，在已停止的对话`,
+  showAllQuestions: (n: number): string => `显示全部（${n}）`,
   questionAgingHint: '仍未回答；展开可查看。查看不会重设时间，也不代表批准或完成。',
   questionReviewOnly: '此处仅供查看保留的问题，不会变更原始资料或记录「已回复」。',
   resolveQuestion: '标为已处理',
