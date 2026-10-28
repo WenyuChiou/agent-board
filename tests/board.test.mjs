@@ -6999,16 +6999,45 @@ test('the synthetic big board has the shape of a heavy user\'s board', async t =
       ['path', 'C:\\synthetic\\repo-1'], ['path', 'C:/synthetic/repo-1'],
       ['path', '/Users/synthetic/repo-1'], ['path', '/home/synthetic/repo-1'],
       ['path', 'C:\\'], ['path', '/Users/'], ['path', '/home/'],
-      ['session-id', uuid], ['session-id', 'session=short-id-460'], ['session-id', 'session: abc12345'],
-      ['session-id', 'session=s1'], ['session-id', 'session: short'],
-      ['session-id', 'session=s'], ['session-id', `session=${'s'.repeat(65)}`],
+      ['session-id', uuid], ['session-id', 'session: abc12345'],
+      ['session-id', 'session=12345678'], ['session-id', `session=${uuid}`],
       ['raw-json', '{"a":{"b":"quoted } brace and \\" quote"}}'],
       ['raw-json', '{\n  "synthetic": true\n}'], ['raw-json', '{}'],
       ['long-line', '中'.repeat(301)], ['long-line', '🧪'.repeat(301)],
     ]
     assert.deepEqual(samples.filter(([kind, sample]) => !neverShown(sample).some(one => one.kind === kind)), [], 'every unsafe sample is detected')
-    assert.deepEqual(neverShown('session=s1'), [{ kind: 'session-id', line: 1, column: 9, value: 's1' }])
-    assert.deepEqual(neverShown('session: short'), [{ kind: 'session-id', line: 1, column: 10, value: 'short' }])
+    const cases = [
+      ['{"key":', ['raw-json']],
+      ['○ 3 {"event":"synthetic-turn","session":"c13dc1a4-90bd-4000-8000-228bee76…', ['raw-json', 'session-id']],
+      ['Total 1234567 bytes', []],
+      ['Build 20261025', []],
+      ['Epoch 1761393600000', []],
+      ['deadbeef', []],
+      ['defaced', []],
+      ['This session: done', []],
+      ['Session: Claude is working', []],
+      ['Replace {} with null', []],
+      ['{}', ['raw-json']],
+      ['result:{}', ['raw-json']],
+      ['session=short-id-460', []],
+      ['session=s1', []],
+      ['session: short', []],
+      ['session=s', []],
+      [`session=${'s'.repeat(65)}`, []],
+      ['session=abcdef0', ['commit-id']],
+      ['session=deadbeef', []],
+      ['session=abc12345word', []],
+      ['session=abc12345-extra', ['commit-id']],
+      ['1'.repeat(40), ['hash']],
+      ['a'.repeat(40), ['hash']],
+    ]
+    for (const [sample, kinds] of cases) assert.deepEqual(neverShown(sample).map(one => one.kind), kinds, sample)
+    assert.deepEqual(neverShown(`session=${uuid}`), [{ kind: 'session-id', line: 1, column: 9, value: uuid }])
+    assert.deepEqual(neverShown('session: abc12345'), [{ kind: 'session-id', line: 1, column: 10, value: 'abc12345' }])
+    assert.deepEqual(neverShown('session=12345678'), [{ kind: 'session-id', line: 1, column: 9, value: '12345678' }])
+    const clipped = 'c13dc1a4-90bd-4000-8000-228bee76…'
+    assert.deepEqual(neverShown(`é🧪 ${clipped}`), [{ kind: 'session-id', line: 1, column: 4, value: clipped }])
+    assert.deepEqual(neverShown('é🧪 {"key":'), [{ kind: 'raw-json', line: 1, column: 4, value: '{"key":' }])
     for (const root of ['C:\\', '/Users/', '/home/']) assert.deepEqual(neverShown(root), [{ kind: 'path', line: 1, column: 1, value: root }])
     assert.deepEqual(neverShown('Compare 42 reports\nabcdef\nnotabcdef0word\n../fixtures/board.md\n../home/synthetic\nhttps://example.test/home/synthetic\n{choose one}\n' + '中'.repeat(300)), [], 'ordinary text, short hex and relative links are allowed')
     assert.deepEqual(neverShown('../home/\n../Users/\nhttps://example.test/home/\nhttps://example.test/Users/'), [], 'root matching still excludes relative paths and URL components')

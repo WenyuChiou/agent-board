@@ -1,7 +1,7 @@
-// Syntax is deliberately explicit: standalone hex tokens (7+, exactly 40 => hash),
+// Syntax is deliberately explicit: mixed digit/letter hex tokens (7+, 40 => hash),
 // drive-rooted paths or /Users/ and /home/ (including bare roots), UUIDs or
-// nonempty same-line session=/session: tokens (no resume-id length constraint),
-// valid JSON object fragments, and lines over 300 Unicode code points. CSI escapes
+// same-line session=/session: hex ids (8+ with a digit), including clipped UUIDs,
+// JSON objects or opening keys, and lines over 300 Unicode code points. CSI escapes
 // are ignored. Locations are 1-based in the resulting plain text, using code points.
 export const neverShown = drawn => {
   const text = drawn.replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, '')
@@ -12,13 +12,23 @@ export const neverShown = drawn => {
     const column = [...before.slice(before.lastIndexOf('\n') + 1)].length + 1
     findings.push({ kind, line, column, value })
   }
-  for (const match of text.matchAll(/\b[\da-f]{7,}\b/gi)) add(match[0].length === 40 ? 'hash' : 'commit-id', match[0], match.index)
-  for (const match of text.matchAll(/(?<![\w/\\:.~-])(?:[A-Z]:[\\/]|\/(?:Users|home)\/)[^\s<>"'`|]*/gi)) add('path', match[0], match.index)
-  for (const match of text.matchAll(/\b[\da-f]{8}-(?:[\da-f]{4}-){3}[\da-f]{12}\b/gi)) add('session-id', match[0], match.index)
-  for (const match of text.matchAll(/\bsession[ \t]*[=:][ \t]*(\S+)/gi)) {
-    const offset = match.index + match[0].lastIndexOf(match[1])
-    if (!findings.some(one => one.kind === 'session-id' && one.value === match[1] && one.line === text.slice(0, offset).split('\n').length)) add('session-id', match[1], offset)
+  // Classify session spans first, so UUID pieces do not become commit ids.
+  const sessions = []
+  const session = (value, start) => {
+    if (!sessions.some(one => one.start === start)) {
+      sessions.push({ start, end: start + value.length })
+      add('session-id', value, start)
+    }
   }
+  for (const match of text.matchAll(/\b[\da-f]{8}-(?:[\da-f]{4}-){3}(?:[\da-f]{12}\b|[\da-f]{0,11}(?:…|\.{3}))/gi)) session(match[0], match.index)
+  for (const match of text.matchAll(/\bsession[ \t]*[=:][ \t]*([\da-f]{8,})(?![\w-])/gi)) {
+    if (/\d/.test(match[1])) session(match[1], match.index + match[0].lastIndexOf(match[1]))
+  }
+  for (const match of text.matchAll(/\b[\da-f]{7,}\b/gi)) {
+    if (sessions.some(one => match.index >= one.start && match.index < one.end)) continue
+    if (match[0].length === 40 || (/\d/.test(match[0]) && /[a-f]/i.test(match[0]))) add(match[0].length === 40 ? 'hash' : 'commit-id', match[0], match.index)
+  }
+  for (const match of text.matchAll(/(?<![\w/\\:.~-])(?:[A-Z]:[\\/]|\/(?:Users|home)\/)[^\s<>"'`|]*/gi)) add('path', match[0], match.index)
 
   // Balance braces outside strings so nested objects, quoted braces and multiline
   // turns work, while ordinary prose such as {choose one} is not called JSON.
@@ -43,7 +53,15 @@ export const neverShown = drawn => {
     else if (char === '}' && stack.length > 0) {
       const start = stack.pop()
       const value = text.slice(start, index + 1)
-      try { JSON.parse(value); objects.push({ start, end: index + 1, value }) } catch {}
+      try {
+        JSON.parse(value)
+        const before = text.slice(text.lastIndexOf('\n', start - 1) + 1, start)
+        const after = text.slice(index + 1).split('\n')[0]
+        const isEmpty = /^\{\s*\}$/.test(value)
+        const isStandalone = !before.trim() && !after.trim()
+        const hasKey = /(?:"[^"\n]+"|[\w.-]+)[ \t]*:[ \t]*$/.test(before)
+        if (!isEmpty || isStandalone || hasKey) objects.push({ start, end: index + 1, value })
+      } catch {}
     }
   }
   objects.sort((a, b) => a.start - b.start)
@@ -51,6 +69,10 @@ export const neverShown = drawn => {
   for (const object of objects) if (object.start >= end) {
     add('raw-json', object.value, object.start)
     end = object.end
+  }
+  // A screen-width cut can remove the closing brace; the opening key still leaks.
+  for (const match of text.matchAll(/\{\s*"[^"\n]*"\s*:/g)) {
+    if (!objects.some(one => match.index >= one.start && match.index < one.end)) add('raw-json', match[0], match.index)
   }
   let offset = 0
   for (const line of text.split('\n')) {
