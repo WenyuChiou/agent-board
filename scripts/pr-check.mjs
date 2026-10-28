@@ -12,7 +12,7 @@ export const TOTAL_CAP = 8
 // four in all, counted apart from the team's.
 export const OUTSIDE_LOGIN_CAP = 2
 export const OUTSIDE_TOTAL_CAP = 4
-// A small docs fix (CONTRIBUTING.md rule 2) needs no issue line, claim or changelog fragment.
+// A small docs fix from outside the team (CONTRIBUTING.md rule 2) needs no issue line, claim or changelog fragment.
 export const SMALL_DOCS_FILES = 3
 export const SMALL_DOCS_LINES = 50
 // Larger than either of these, an outside pull request gets a note (never a failure).
@@ -415,8 +415,15 @@ export const cap = ({ open, number, body, isOutside = false, login = null, perAu
 }
 
 const dayMs = 24 * 60 * 60 * 1000
-const isClaimComment = comment => /^\s*Claim:/i.test(comment.body ?? '')
+// "Claim taken over:" is a claim too (CONTRIBUTING.md rule 3), as the team's claimed() reads it.
+const isClaimComment = comment => /^\s*Claim(?: taken over)?:/i.test(comment.body ?? '')
 const loginOf = comment => (typeof comment.user?.login === 'string' ? comment.user.login : null)
+const writtenAt = comment => Date.parse(comment.created_at ?? '')
+// Whether comment a came before comment b: by creation time, else by place in the list (GitHub lists oldest first).
+const isBefore = (comments, a, b) => {
+  const [first, second] = [writtenAt(a), writtenAt(b)]
+  return Number.isFinite(first) && Number.isFinite(second) && first !== second ? first < second : comments.indexOf(a) < comments.indexOf(b)
+}
 
 // A person may follow the branch name with more punctuation than the Author line does.
 const claimBoundary = '[\\s`\'",:;()!?*<>\\[\\].]'
@@ -427,13 +434,14 @@ const claimBoundary = '[\\s`\'",:;()!?*<>\\[\\].]'
 const claimEnd = comment => {
   const until = String(comment.body).match(/\buntil\s+(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2})/i)
   if (until) return Date.UTC(Number(until[1]), Number(until[2]) - 1, Number(until[3]), Number(until[4]), Number(until[5]))
-  const written = Date.parse(comment.created_at ?? '')
+  const written = writtenAt(comment)
   return Number.isFinite(written) ? written + (/waiting for a slot/i.test(comment.body) ? 7 : 2) * dayMs : Infinity
 }
 
 // The claim an outside pull request needs: a comment starting "Claim:" that the author wrote from their own login and
-// that names the branch, and no other login holding a live claim. The author's own claim running out while the pull
-// request is open is not a failure. A Handover: comment ends its writer's claim.
+// that names the branch, and no other login that claimed the issue earlier and still holds a live claim (rule 3: the
+// earlier claim wins, so a claim another login posts after the author's own does not block). The author's own claim
+// running out while the pull request is open is not a failure. A Handover: comment ends its writer's claim.
 export const outsideClaim = ({ comments, login, branch, issue = null, now = Date.now() }) => {
   const output = result()
   const on = issue === null ? '' : ` on #${issue}`
@@ -442,17 +450,19 @@ export const outsideClaim = ({ comments, login, branch, issue = null, now = Date
     return output
   }
   const own = login.toLowerCase()
-  if (!comments.some(comment => isClaimComment(comment) && loginOf(comment)?.toLowerCase() === own && namesBranch(comment.body, branch, claimBoundary))) {
+  const ownClaim = comments.find(comment => isClaimComment(comment) && loginOf(comment)?.toLowerCase() === own && namesBranch(comment.body, branch, claimBoundary))
+  if (!ownClaim) {
     output.problems.push(problem('claim', `no comment${on} starting "Claim:" from ${login} names this branch.`, `comment${on} from your own GitHub account "Claim: <agent>, <branch>, until <YYYY-MM-DD HH:MM> UTC" before starting work; a claim another login wrote does not count.`))
   }
+  // Each other login's latest claim sets when it runs out; isEarlier says it claimed the issue before the author did.
   const held = new Map()
   for (const comment of comments) {
-    const who = loginOf(comment)
-    if (!who || who.toLowerCase() === own) continue
-    if (isClaimComment(comment)) held.set(who.toLowerCase(), comment)
-    else if (/^\s*Handover:/i.test(comment.body ?? '')) held.delete(who.toLowerCase())
+    const who = loginOf(comment)?.toLowerCase()
+    if (!who || who === own) continue
+    if (isClaimComment(comment)) held.set(who, { comment, isEarlier: held.get(who)?.isEarlier || !ownClaim || isBefore(comments, comment, ownClaim) })
+    else if (/^\s*Handover:/i.test(comment.body ?? '')) held.delete(who)
   }
-  const holders = [...held.values()].filter(comment => claimEnd(comment) > now).map(loginOf)
+  const holders = [...held.values()].filter(item => item.isEarlier && claimEnd(item.comment) > now).map(item => loginOf(item.comment))
   if (holders.length) {
     output.problems.push(problem('claim', `${holders.join(', ')} ${holders.length === 1 ? 'holds' : 'hold'} a live claim${on}.`, 'take an issue nobody holds, or wait until that claim runs out; do not start a competing pull request, comment on theirs (CONTRIBUTING.md rule 3).'))
   }
@@ -584,7 +594,8 @@ export const checkPr = data => {
   }
   // Only the pull request's own association is read here; an unknown one is the team (a local --body-file run).
   const isOutside = isOutsideAssociation(data.association)
-  const isSmallDocs = isSmallDocsFix(data)
+  // The small docs lane is for outside pull requests; the team's rules do not change.
+  const isSmallDocs = isOutside && isSmallDocsFix(data)
   const issue = issueLine(data.body, data.title, { isOptional: isSmallDocs })
   const author = authorLine(data.body, data.branch)
   const isRelease = isReleaseTitle(data.title)

@@ -913,6 +913,18 @@ test('pr-check fails an outside pull request whose claim was written by someone 
   }
   assert.equal(claimProblems(outsidePr({ issueComments: [theirs('Claim: claude (pm), docs/x, until 2030-06-02T00:00Z'), own] })).length, 1)
   assert.equal(claimProblems(outsidePr({ issueComments: [theirs('Claim: claude (pm), docs/x, until 2030-06-01T11:59Z'), own] })).length, 0)
+  // A takeover is a claim too, for the author and for others.
+  assert.equal(claimProblems(outsidePr({ issueComments: [claimBy('newcomer', `Claim taken over: newcomer, ${branch}`)] })).length, 0)
+  assert.equal(claimProblems(outsidePr({ issueComments: [theirs('Claim taken over: dot, docs/x, until 2030-06-02 00:00 UTC'), own] })).length, 1)
+  // Only an earlier live claim blocks: the claim that came first wins (rule 3), by comment time and, at the same time, by order.
+  const live = 'Claim: claude (pm), docs/x, until 2030-06-02 00:00 UTC'
+  assert.equal(claimProblems(outsidePr({ issueComments: [theirs(live), own] })).length, 1)
+  assert.equal(claimProblems(outsidePr({ issueComments: [own, theirs(live)] })).length, 0)
+  assert.equal(claimProblems(outsidePr({ issueComments: [theirs(live, { created_at: '2030-05-31T11:00:00Z' }), own] })).length, 1)
+  assert.equal(claimProblems(outsidePr({ issueComments: [theirs(live, { created_at: '2030-05-31T13:00:00Z' }), own] })).length, 0)
+  // Their renewal after the author's claim does not make a later claim of an earlier one, and a new claim after a handover is later.
+  assert.equal(claimProblems(outsidePr({ issueComments: [theirs(live, { created_at: '2030-05-31T11:00:00Z' }), own, theirs(live, { created_at: '2030-05-31T13:00:00Z' })] })).length, 1)
+  assert.equal(claimProblems(outsidePr({ issueComments: [theirs(live, { created_at: '2030-05-31T10:00:00Z' }), theirs('Handover: docs/x, done: none, left: all', { created_at: '2030-05-31T11:00:00Z' }), own, theirs(live, { created_at: '2030-05-31T13:00:00Z' })] })).length, 0)
   // Another login's claim blocks the issue while it is live: by its time, 7 days for "waiting for a slot", else 2 days.
   const held = claimProblems(outsidePr({ issueComments: [theirs('Claim: claude (pm), docs/x, until 2030-06-02 00:00 UTC'), own] }))
   assert.equal(held.length, 1)
@@ -980,9 +992,18 @@ test('pr-check lets a small docs pull request from an outside author through wit
   const passed = checkPr(docsPr())
   assert.deepEqual(passed.problems, [])
   assert.ok(passed.info.includes('issue: a small docs fix needs no issue line.'))
-  // Every author gets the same, the owner's agents and a run that does not know the author too.
-  for (const association of ['OWNER', undefined]) assert.deepEqual(checkPr(docsPr({ association, login: undefined })).problems, [], String(association))
   assert.deepEqual(checkPr(docsPr({ title: 'docs(readme): explain the first step' })).problems, [])
+  // The lane is for outside pull requests: the owner's agents, and a run that does not know the author, still need the issue line and the claim.
+  for (const association of ['OWNER', 'MEMBER', 'COLLABORATOR', undefined]) {
+    const team = docsPr({ association, login: undefined })
+    const missing = checkPr(team).problems
+    assert.equal(missing.length, 1, String(association))
+    assert.equal(missing[0].check, 'issue')
+    assert.match(missing[0].message, /first non-empty body line must name one issue/)
+    const unclaimed = checkPr({ ...team, body: `Part of #42\n${docsBody}`, issueData: { state: 'open' }, issueComments: [] }).problems
+    assert.equal(unclaimed.length, 1, String(association))
+    assert.equal(unclaimed[0].check, 'claim')
+  }
   // Naming an issue it has no claim on, and that is not ready, is no failure either.
   const named = checkPr(docsPr({ body: `Part of #42\n${docsBody}`, issueData: { state: 'open', labels: [] }, issueComments: [] }))
   assert.deepEqual(named.problems, [])
