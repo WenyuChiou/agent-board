@@ -922,6 +922,9 @@ test('pr-check fails an outside pull request whose claim was written by someone 
   assert.equal(claimProblems(outsidePr({ issueComments: [own, theirs(live)] })).length, 0)
   assert.equal(claimProblems(outsidePr({ issueComments: [theirs(live, { created_at: '2030-05-31T11:00:00Z' }), own] })).length, 1)
   assert.equal(claimProblems(outsidePr({ issueComments: [theirs(live, { created_at: '2030-05-31T13:00:00Z' }), own] })).length, 0)
+  // A claim that ran out before the author claimed does not carry over: their live claim after the author's is a later one.
+  const ranOut = theirs('Claim: claude (pm), docs/x, until 2030-05-31 11:30 UTC', { created_at: '2030-05-31T11:00:00Z' })
+  assert.equal(claimProblems(outsidePr({ issueComments: [ranOut, own, theirs(live, { created_at: '2030-05-31T13:00:00Z' })] })).length, 0)
   // Their renewal after the author's claim does not make a later claim of an earlier one, and a new claim after a handover is later.
   assert.equal(claimProblems(outsidePr({ issueComments: [theirs(live, { created_at: '2030-05-31T11:00:00Z' }), own, theirs(live, { created_at: '2030-05-31T13:00:00Z' })] })).length, 1)
   assert.equal(claimProblems(outsidePr({ issueComments: [theirs(live, { created_at: '2030-05-31T10:00:00Z' }), theirs('Handover: docs/x, done: none, left: all', { created_at: '2030-05-31T11:00:00Z' }), own, theirs(live, { created_at: '2030-05-31T13:00:00Z' })] })).length, 0)

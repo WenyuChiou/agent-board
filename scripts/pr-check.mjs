@@ -459,8 +459,11 @@ export const outsideClaim = ({ comments, login, branch, issue = null, now = Date
   for (const comment of comments) {
     const who = loginOf(comment)?.toLowerCase()
     if (!who || who === own) continue
-    if (isClaimComment(comment)) held.set(who, { comment, isEarlier: held.get(who)?.isEarlier || !ownClaim || isBefore(comments, comment, ownClaim) })
-    else if (/^\s*Handover:/i.test(comment.body ?? '')) held.delete(who)
+    // An earlier claim carries over to a renewal only if it had not run out by then; one that had is over and the new claim is a new one.
+    if (isClaimComment(comment)) {
+      const prev = held.get(who)
+      held.set(who, { comment, isEarlier: (prev?.isEarlier && !(claimEnd(prev.comment) <= writtenAt(comment))) || !ownClaim || isBefore(comments, comment, ownClaim) })
+    } else if (/^\s*Handover:/i.test(comment.body ?? '')) held.delete(who)
   }
   const holders = [...held.values()].filter(item => item.isEarlier && claimEnd(item.comment) > now).map(item => loginOf(item.comment))
   if (holders.length) {
