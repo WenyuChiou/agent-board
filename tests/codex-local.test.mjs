@@ -5089,9 +5089,11 @@ if (process.argv.includes('--hook-recovery-parent')) {
 const RUN_SECRET = 'DO-NOT-STORE-THIS-PRIVATE-MESSAGE'
 const helperSession = 'helper-codex-session-456'
 const execSession = 'exec-codex-session-789'
-const rollout = (f, name, meta) => {
-  const file = join(f.home, 'codex-history', `rollout-${name}.jsonl`)
-  const first = { timestamp: '2026-10-27T12:00:00Z', type: 'session_meta', payload: { id: name, cwd: join(f.home, 'demo'), base_instructions: { text: RUN_SECRET }, ...meta } }
+const secondSession = 'second-codex-session-321'
+// A history file is named for its session, as Codex names it: rollout-<time>-<session id>.jsonl.
+const rollout = (f, id, meta) => {
+  const file = join(f.home, 'codex-history', `rollout-2026-10-27T12-00-00-${id}.jsonl`)
+  const first = { timestamp: '2026-10-27T12:00:00Z', type: 'session_meta', payload: { id, cwd: join(f.home, 'demo'), base_instructions: { text: RUN_SECRET }, ...meta } }
   f.save(file, `${JSON.stringify(first)}\n${JSON.stringify({ type: 'response_item', payload: { text: RUN_SECRET } })}\n`)
   return file
 }
@@ -5110,8 +5112,8 @@ const everyFile = dir => readdirSync(dir, { withFileTypes: true }).flatMap(entry
 test('a Codex helper thread is written as a run with its parent, and the person\'s own session carries no mark', () => fixture(f => {
   f.install('--apply')
   const cwd = join(f.home, 'demo')
-  const person = rollout(f, 'person', { originator: 'Codex Desktop', source: 'vscode', thread_source: 'user' })
-  const helper = rollout(f, 'helper', { originator: 'Codex Desktop', source: { subagent: { thread_spawn: { parent_thread_id: session, agent_nickname: 'Archimedes' } } }, thread_source: 'subagent', parent_thread_id: session })
+  const person = rollout(f, session, { originator: 'Codex Desktop', source: 'vscode', thread_source: 'user' })
+  const helper = rollout(f, helperSession, { originator: 'Codex Desktop', source: { subagent: { thread_spawn: { parent_thread_id: session, agent_nickname: 'Archimedes' } } }, thread_source: 'subagent', parent_thread_id: session })
   assert.equal(f.event('UserPromptSubmit', 'turn-1', { cwd, transcript_path: person }).status, 0)
   assert.equal(f.event('UserPromptSubmit', 'turn-h', { session_id: helperSession, cwd, transcript_path: helper }).status, 0)
   assert.doesNotMatch(markerOf(f, session), /origin=|parent=/)
@@ -5125,8 +5127,8 @@ test('a Codex helper thread is written as a run with its parent, and the person\
 test('a codex exec run with no parent named takes the Codex session working in the same project', () => fixture(f => {
   f.install('--apply')
   const cwd = join(f.home, 'demo')
-  const person = rollout(f, 'person', { originator: 'codex-tui', source: 'vscode', thread_source: 'user' })
-  const run = rollout(f, 'exec', { originator: 'codex_exec', source: 'exec', thread_source: 'user' })
+  const person = rollout(f, session, { originator: 'codex-tui', source: 'vscode', thread_source: 'user' })
+  const run = rollout(f, execSession, { originator: 'codex_exec', source: 'exec', thread_source: 'user' })
   assert.equal(f.event('UserPromptSubmit', 'turn-1', { cwd, transcript_path: person }).status, 0)
   assert.equal(f.event('UserPromptSubmit', 'turn-e', { session_id: execSession, cwd, transcript_path: run }).status, 0)
   assert.match(markerOf(f, execSession), new RegExp(` origin=run parent=${session} -->$`))
@@ -5141,7 +5143,7 @@ test('a Codex session with no history file is only a hint, and its first prompt 
   f.install('--apply')
   assert.equal(f.event('SessionStart', 'turn-1', { transcript_path: null }).status, 0)
   assert.match(markerOf(f, session), / origin=run -->$/)
-  const person = rollout(f, 'person', { originator: 'Codex Desktop', source: 'vscode', thread_source: 'user' })
+  const person = rollout(f, session, { originator: 'Codex Desktop', source: 'vscode', thread_source: 'user' })
   assert.equal(f.event('UserPromptSubmit', 'turn-2', { transcript_path: person }).status, 0)
   assert.doesNotMatch(markerOf(f, session), /origin=/)
   // A hint never undoes a plain statement, however late it comes.
@@ -5160,10 +5162,38 @@ test('a Codex session whose host sends no path, or a path that is not a Codex hi
   assert.equal(f.event('UserPromptSubmit', 'turn-2', { transcript_path: decoy }).status, 0)
   assert.doesNotMatch(markerOf(f, session), /origin=/)
   // A history file whose first line is not a session record gives no signal.
-  const odd = join(f.home, 'codex-history', 'rollout-odd.jsonl')
+  const odd = join(f.home, 'codex-history', `rollout-2026-10-27T12-00-00-${session}.jsonl`)
   f.save(odd, `${JSON.stringify({ type: 'response_item', payload: { originator: 'codex_exec', source: 'exec' } })}\nnot json\n`)
   assert.equal(f.event('UserPromptSubmit', 'turn-3', { transcript_path: odd }).status, 0)
   assert.doesNotMatch(markerOf(f, session), /origin=/)
+}))
+
+test('a hook that names the history file of another session gets no signal from it, and the same file read for its own session does', () => fixture(f => {
+  f.install('--apply')
+  const cwd = join(f.home, 'demo')
+  // The other session's file says it is a run; this session is not that one.
+  const other = rollout(f, execSession, { originator: 'codex_exec', source: 'exec', thread_source: 'user' })
+  assert.equal(f.event('UserPromptSubmit', 'turn-1', { cwd, transcript_path: other }).status, 0)
+  assert.doesNotMatch(markerOf(f, session), /origin=/)
+  // A session id that is only the tail of the other session's id does not open it either.
+  assert.equal(f.event('UserPromptSubmit', 'turn-t', { session_id: 'codex-session-789', cwd, transcript_path: other }).status, 0)
+  assert.doesNotMatch(markerOf(f, 'codex-session-789'), /origin=/)
+  assert.equal(f.event('UserPromptSubmit', 'turn-e', { session_id: execSession, cwd, transcript_path: other }).status, 0)
+  assert.match(markerOf(f, execSession), / origin=run/)
+}))
+
+test('a codex exec run takes no parent when two Codex sessions are working in its project, and is counted as a background run', () => fixture(f => {
+  f.install('--apply')
+  const cwd = join(f.home, 'demo')
+  const first = rollout(f, session, { originator: 'codex-tui', source: 'vscode', thread_source: 'user' })
+  const second = rollout(f, secondSession, { originator: 'codex-tui', source: 'vscode', thread_source: 'user' })
+  const run = rollout(f, execSession, { originator: 'codex_exec', source: 'exec', thread_source: 'user' })
+  assert.equal(f.event('UserPromptSubmit', 'turn-1', { cwd, transcript_path: first }).status, 0)
+  assert.equal(f.event('UserPromptSubmit', 'turn-2', { session_id: secondSession, cwd, transcript_path: second }).status, 0)
+  assert.equal(f.event('UserPromptSubmit', 'turn-e', { session_id: execSession, cwd, transcript_path: run }).status, 0)
+  assert.match(markerOf(f, execSession), / origin=run -->$/)
+  assert.doesNotMatch(markerOf(f, session), /origin=/)
+  assert.doesNotMatch(markerOf(f, secondSession), /origin=/)
 }))
 
 test('agents that give no signal keep their sessions as rows', () => fixture(f => {

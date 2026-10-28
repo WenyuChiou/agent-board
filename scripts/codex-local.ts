@@ -40,14 +40,19 @@ const object = (value: unknown): Json => {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('INVALID_JSON_OBJECT')
   return value as Json
 }
-// Who started a Codex session is in the first record of its history file (#399). The file is read
-// in small pieces up to its first line break and only those bytes are decoded; of that record
-// only four fields are kept, so no message, prompt or tool text is ever looked at or kept. A path
-// that is not a Codex history file, or a record that is not readable, gives null and the session
-// keeps its default.
-const SESSION_FILE = /^rollout-[^/\\]+\.jsonl$/
-const readSessionMeta = (path: string): CodexMeta | null => {
-  if (!SESSION_FILE.test(basename(path))) return null
+// Who started a Codex session is in the first record of its history file (#399). Only the
+// session's own file is opened: its name must be Codex's own form, rollout-<time>-<session id>.jsonl,
+// with exactly this session's id after the time, so another session's file, or any other file a
+// hook names, is never read. The file is read in pieces of 4 KiB until the piece that holds the
+// first line break, so up to 4 KiB after that break is read into memory with it; only the bytes
+// before the break are decoded, and of that record only four fields are kept: the first record is
+// decoded whole and everything but those four fields is dropped, and no text from the rest of the
+// file is ever decoded, looked at or kept. A path that is not the session's history file, or a
+// record that is not readable, gives null and the session keeps its default.
+const SESSION_FILE_TIME = /^rollout-\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-/
+const readSessionMeta = (path: string, session: string): CodexMeta | null => {
+  const name = basename(path)
+  if (!SESSION_FILE_TIME.test(name) || name.replace(SESSION_FILE_TIME, '') !== `${session}.jsonl`) return null
   let fd: number | undefined
   try {
     fd = openSync(path, 'r')
@@ -269,8 +274,8 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
       const folder = filesByFolder(mode, agent) ? folderProject(raw.cwd || (agent === 'cursor' && Array.isArray(raw.workspace_roots) && raw.workspace_roots.every(root => typeof root === 'string') ? raw.workspace_roots[0] : undefined)) : ''
       // Only metadata selected below is retained. Save no prompts, tool inputs,
       // last_assistant_message, or permission decisions from a hook payload. transcript_path is
-      // opened for the first record of the history file at a session's start or prompt, which says
-      // whether a person started it (#399), and for nothing else.
+      // opened, when it is this session's own history file, for its first record at a session's
+      // start or prompt, which says whether a person started it (#399), and for nothing else.
       const session = mode !== '--codex-report' ? agent === 'antigravity' ? payload.conversationId : payload.session_id ?? payload.sessionId ?? payload.sessionID ?? (agent === 'grok' ? env.GROK_SESSION_ID : undefined) : flag('--session') ?? (agent === 'codex' ? env.CODEX_THREAD_ID : env.AGENT_BOARD_AGENT === agent ? env.AGENT_BOARD_SESSION_ID : undefined)
       if (typeof session !== 'string' || !/^[a-zA-Z0-9][a-zA-Z0-9_-]{5,127}$/.test(session)) throw new Error('INVALID_SESSION')
       const now = new Date(at).toISOString().replace(/\.\d{3}Z$/, 'Z')
@@ -288,7 +293,7 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
       // give no signal, so their sessions stay rows as they were.
       const opens = agent === 'codex' && mode === '--codex-event' && /^(?:SessionStart|UserPromptSubmit)$/.test(String(payload.hook_event_name))
       const path = payload.transcript_path
-      const run = opens ? codexSignal(Object.hasOwn(payload, 'transcript_path'), path, typeof path === 'string' && path !== '' ? readSessionMeta(path) : null) : undefined
+      const run = opens ? codexSignal(Object.hasOwn(payload, 'transcript_path'), path, typeof path === 'string' && path !== '' ? readSessionMeta(path, session) : null) : undefined
       // A queued event keeps metadata only: the host's own fields stay out, as they do above.
       return {
         version: 1, progress, mode, agent, session, now, at, status: mode === '--agent-status' ? status : undefined, event, isBoardPrompt, isPrompt,
@@ -364,7 +369,8 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
       }, clock, s) : base
       const priorActivity = previous?.activity ?? []
       // Who started the session: a statement or a hint from this event, else what the record kept. A
-      // run with no parent named takes the person's session working in the same project (#399).
+      // run with no parent named takes the person's session working in the same project when exactly
+      // one is, else none (#399).
       const origin = withSignal(previous, cleanSignal(run))
       const parent = origin.origin !== 'run' ? undefined : origin.parent ?? pickParent(parseProgress(text), initial.project, Date.parse(clock), [owner.slice(0, 8), session]) ?? undefined
       const marked = { ...(origin.origin === undefined ? {} : { origin: origin.origin }), ...(parent === undefined ? {} : { parent }), ...(origin.isWeak === true ? { isWeak: true as const } : {}) }

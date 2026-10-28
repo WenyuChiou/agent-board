@@ -80,8 +80,11 @@ decision to stop that work permanently.
 
 Hooks keep only selected metadata. They ignore prompts, tool inputs, assistant messages and
 permission decisions, and call no model. The one thing they open from `transcript_path` is the
-first record of a Codex history file (`rollout-*.jsonl`), at a session's start and at each
-prompt, and from it they keep four short fields (`originator`, `source`, `thread_source`,
+first record of the session's own Codex history file (the `rollout-<time>-<session id>.jsonl` file named for the
+session; another session's file is never opened), at a session's start and at each prompt. The
+file is read in pieces of 4 KiB until the one that holds the first line break, so up to 4 KiB
+after the break is read into memory; only the bytes before the break are decoded, and of that
+record they keep four short fields (`originator`, `source`, `thread_source`,
 `parent_thread_id`) and nothing else. Those fields say whether a person started the session:
 a `codex exec` run, a helper thread or a subagent is a run Codex started for itself, written
 with `origin=run` (and `parent=` when its parent is known), and the board shows it as one line on

@@ -235,7 +235,7 @@ A row is a conversation a person started and typed into. A run an agent started 
 
 Two blocks with the same `agent` and the same full `resume` are one session. The newest `updated` is the row (the later one in the file on a tie); the other is listed under Stopped and may be archived while it still looks live. If either carries `origin=run`, the session is a run.
 
-Each local reporter marks a run from what its host already gives. Codex: the first record of the session's history file (`originator`, `source`, `thread_source`, `parent_thread_id`), else whether the session has a history file at all (a hint that a later event with a file replaces). Claude Code: print mode (`claude -p`). Writers that give no such signal write no `origin`, and their sessions stay rows. A writer that marks a run and does not know its parent may set `parent` to the person's session that is working in the same project at that moment; a reader never guesses one.
+Each local reporter marks a run from what its host already gives. Codex: the first record of the session's history file (`originator`, `source`, `thread_source`, `parent_thread_id`), else whether the session has a history file at all (a hint that a later event with a file replaces). Claude Code: print mode (`claude -p`). Writers that give no such signal write no `origin`, and their sessions stay rows. A writer that marks a run and does not know its parent may set `parent` to the person's session that is working in the same project at that moment, but only when exactly one such session is; with two or more it sets none, and the run is counted as a background run. A reader never guesses one.
 
 ### Unanswered question visibility
 

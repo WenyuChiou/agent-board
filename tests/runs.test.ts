@@ -242,16 +242,37 @@ test('the mark on Claude\'s own mirror follows the mode: print mode is a run, in
   expect('isRun' in withRunMark({ ...mirror, isRun: true }, false)).toBe(false)
 })
 
-test('the parent a writer picks is the newest person session working in the same project, never the run itself or a stale one', () => {
+test('the parent a writer picks is the one person session working in the same project, never the run itself or a stale one', () => {
   const stale: Spec = { session: 'hhhh0001', resume: 'hhhh0001-0000-4000-8000-000000000008', ageMinutes: 13 * 60 }
-  const newest: Spec = { session: 'hhhh0002', resume: 'hhhh0002-0000-4000-8000-000000000009', ageMinutes: 0.5 }
-  const projects = parseProgress(file(person, stale, newest, delegate(1, { ageMinutes: 0.1 })))
-  expect(pickParent(projects, 'Demo', NOW)).toBe('hhhh0002-0000-4000-8000-000000000009')
-  expect(pickParent(projects, ' demo ', NOW)).toBe('hhhh0002-0000-4000-8000-000000000009')
-  expect(pickParent(projects, 'Demo', NOW, ['hhhh0002'])).toBe(PERSON)
+  const projects = parseProgress(file(person, stale, delegate(1, { ageMinutes: 0.1 })))
+  expect(pickParent(projects, 'Demo', NOW)).toBe(PERSON)
+  expect(pickParent(projects, ' demo ', NOW)).toBe(PERSON)
+  expect(pickParent(projects, 'Demo', NOW, ['aaaa1111'])).toBe(null)
   expect(pickParent(projects, 'Elsewhere', NOW)).toBe(null)
   expect(pickParent(projects, '', NOW)).toBe(null)
   expect(pickParent(parseProgress(file({ ...person, state: 'done' })), 'Demo', NOW)).toBe(null)
+  // Two blocks of one session (same agent and full id) are one session, so still one candidate.
+  expect(pickParent(parseProgress(file(person, { ...person, session: 'aaaa1112', ageMinutes: 2 })), 'Demo', NOW)).toBe(PERSON)
+  // A session whose twin is marked a run is a run, so it is not a candidate.
+  expect(pickParent(parseProgress(file(person, { ...person, session: 'aaaa1112', ageMinutes: 2, run: true })), 'Demo', NOW)).toBe(null)
+})
+
+test('a run is given no parent when two person sessions are working in its project, and is counted only as a background run', () => {
+  const newest: Spec = { session: 'hhhh0002', resume: 'hhhh0002-0000-4000-8000-000000000009', ageMinutes: 0.5, title: 'Fix the importer' }
+  const projects = parseProgress(file(person, newest))
+  expect(pickParent(projects, 'Demo', NOW)).toBe(null)
+  // The run's own earlier block is not a candidate, but the two person sessions still are.
+  expect(pickParent(projects, 'Demo', NOW, ['cccc0003'])).toBe(null)
+  // With one of the two left out there is exactly one, and it is named.
+  expect(pickParent(projects, 'Demo', NOW, ['hhhh0002'])).toBe(PERSON)
+  const mine = { ...emptyMirror('11111111-0000-4000-8000-0000000000aa', 'Demo', NOW, ''), isRun: true as const }
+  const written = upsertAutoBlock(file(person, newest), mine, en)
+  expect(written).toContain('origin=run')
+  expect(written).not.toContain('parent=')
+  const view = viewOf(written)
+  expect(rowsOf(view)).toHaveLength(2)
+  expect(rowsOf(view).every(row => row.runs === undefined)).toBe(true)
+  expect(view.background).toContain('Background runs: 1')
 })
 
 test('Codex marks a session a run from its first record: exec, a helper thread, a subagent or a program originator', () => {

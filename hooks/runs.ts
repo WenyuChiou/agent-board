@@ -154,24 +154,29 @@ export const isOutranked = (tasks: readonly ProgressTask[], task: ProgressTask):
 }
 
 // A writer that knows a run but not who started it names the person's session that is working in
-// the same project right now: the one written most recently (#399). None gives null, and the run
-// is counted as a background run. `self` lists the ids the run itself goes by, so it never names
-// its own earlier block.
+// the same project right now, but only when there is exactly one (#399). With none, or with two or
+// more, it names nothing: the newer of two could be the wrong one, and a run with no known parent
+// is counted as a background run. Two blocks with one full session id are one session, and when
+// either is marked a run the session is a run, as in the fold. `self` lists the ids the run itself
+// goes by, so it never names its own earlier block.
 export const pickParent = (projects: readonly ProgressProject[], project: string, now: number, self: readonly string[] = []): string | null => {
   const name = project.trim().toLowerCase()
   if (name === '') return null
-  let best: ProgressAuto | null = null
+  const runs = new Set<string>()
+  for (const one of projects) for (const task of one.tasks) if (task.auto?.isRun === true) runs.add(task.auto.resume ?? task.auto.session)
+  const found = new Set<string>()
   for (const one of projects) {
     if (one.name.trim().toLowerCase() !== name) continue
     for (const task of one.tasks) {
       const auto = task.auto
       if (auto === null || auto.isRun === true || auto.state !== 'working' || now - auto.updated > STALE_MS) continue
       if (self.includes(auto.session) || auto.resume !== null && self.includes(auto.resume)) continue
-      if (best === null || auto.updated > best.updated) best = auto
+      const id = auto.resume ?? auto.session
+      if (!runs.has(id)) found.add(id)
     }
   }
 
-  return best === null ? null : best.resume ?? best.session
+  return found.size === 1 ? [...found][0] ?? null : null
 }
 
 export type RunOrigin = 'run' | 'person'

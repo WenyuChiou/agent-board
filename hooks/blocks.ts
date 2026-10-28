@@ -312,7 +312,8 @@ export const upsertAutoBlock = (text: string, mirror: ProgressMirror, s: Strings
   const id = shortId(mirror.sessionId)
   const existing = scanBlocks(lines).find(span => span.session === id)
   // A run keeps the parent its block already names; until one is named, it takes the person's
-  // session working in the same project right now (#399), or none, and counts as a background run.
+  // session working in the same project right now when exactly one is (#399), else none, and
+  // counts as a background run.
   const parent = mirror.isRun !== true ? undefined : (existing === undefined ? undefined : parseAttrs(lines[existing.start] ?? '').parent) ?? pickParent(parseProgress(text), mirror.project, mirror.updated, [id, mirror.sessionId]) ?? undefined
   const block = renderAutoBlock(mirror, s, parent)
 

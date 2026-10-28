@@ -5942,6 +5942,29 @@ test('refused, errored and foreground tool calls create no background work or ex
   expect(world.messageReads ?? 0).toBe(0)
 })
 
+// A subagent's events carry its agentId; the mod ignores them, so a subagent never writes a block
+// of its own and nothing of it reaches its parent's block (#399).
+test('a Claude subagent\'s events stay in its parent\'s block and add no row', async ($, on) => {
+  const world: World = { files: new Map(), mtime: 1, hasTasks: true }
+  const clock = engineBeneath(on, world)
+  outside(on, world)
+  await start($, 'Check work')
+  await $.tool.call({ tool: 'TaskCreate', subject: 'Check the tests', description: '' })
+  await clock.advance(10)
+  expect(world.files.get(FILE)?.match(/<!-- auto /g)).toHaveLength(1)
+  await $.turn.start({ text: 'Synthetic helper prompt', turnId: 'h1', agentId: 'synthetic-child' })
+  await $.tool.call({ tool: 'TaskCreate', subject: 'A helper step', description: '', agentId: 'synthetic-child' })
+  await $.turn.complete({ answer: 'Helper done.', durationMs: 1, isAborted: false, turnId: 'h1', reason: 'answer', agentId: 'synthetic-child' })
+  await clock.advance(10)
+  const text = world.files.get(FILE) ?? ''
+  expect(text.match(/<!-- auto /g)).toHaveLength(1)
+  expect(text).toContain('Check the tests')
+  expect(text).toContain('state=working')
+  expect(text).not.toContain('A helper step')
+  expect(text).not.toContain('Synthetic helper prompt')
+  expect(text).not.toContain('origin=run')
+})
+
 test('a turn that ends on a question waits on you even when Claude did not mark it, until you answer', async ($, on) => {
   const world: World = { files: new Map(), mtime: 1, hasTasks: true }
   const clock = engineBeneath(on, world)
