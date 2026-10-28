@@ -793,6 +793,13 @@ export const buildView = (
   const inactiveScopes = new Map<string, number>()
   const liveScopes = new Set<string>()
   const unreadable = new Set<string>()
+  for (const scope of frozen) {
+    try {
+      const parts: unknown = JSON.parse(scope)
+      if (!Array.isArray(parts) || parts.length !== 3 || !parts.every(part => typeof part === 'string')) continue
+      unreadable.add(parts[1] || 'claude')
+    } catch {}
+  }
   let order = 0
   // The parents whose rows carry their runs line; the runs of any other go to the background line.
   const placed = new Set<ProgressTask>()
@@ -839,7 +846,6 @@ export const buildView = (
       const scope = questionScope(project.name, task.auto?.agent ?? 'manual', task.auto?.session ?? task.title)
       const isFrozen = frozen.has(scope)
       const lastActive = hasTime(updated) ? updated : seen[taskFingerprint(project.name, task)]
-      if (isFrozen && task.auto !== null) unreadable.add(task.auto.agent)
       const days = task.due === null ? null : dueDays(task.due, now)
       const isDue = task.due !== null && days !== null && days <= 14
       const isIdle = !isComplete && !isDue && hasTime(lastActive) && now - lastActive > IDLE_MS

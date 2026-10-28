@@ -1370,7 +1370,7 @@ const PAGE_SCRIPT = String.raw`
       try {
         const data = JSON.parse(text)
         text = typeof data === 'string' ? data : ['text', 'message', 'summary', 'content', 'reply'].map(key => data && data[key]).find(one => typeof one === 'string') || w('pgUnreadableReply')
-      } catch (error) { text = w('pgUnreadableReply') }
+      } catch {}
     }
     return Array.from(text.replace(/\{\s*"[^"\n]*"\s*:[\s\S]*/g, '…')
       .replace(/\b[\da-f]{8}-(?:[\da-f]{4}-){3}[\da-f]{0,12}/gi, '…')
@@ -1384,6 +1384,20 @@ const PAGE_SCRIPT = String.raw`
   const pgTitle = ref => pgText(pgFullTitle(ref))
   const pgAge = ref => pgText(pgSource(ref).when || w('pgUnknownAge'))
   const pgFiltered = refs => refs.filter(ref => !pg.repo || ref.repo === pg.repo)
+  const pgOpenCount = bucket => {
+    const tasks = new Set()
+    const stopped = new Set(pgFiltered(bucket.stopped).map(ref => {
+      const source = pgSource(ref)
+      return JSON.stringify([ref.agent, source.project, source.title])
+    }))
+    pgFiltered(bucket.cards).forEach(ref => {
+      const source = pgSource(ref)
+      const title = ref.kind === 'question' ? source.task : source.title
+      const task = JSON.stringify([ref.agent, source.project, title])
+      if (title && !stopped.has(task)) tasks.add(task)
+    })
+    return pgFiltered(bucket.open).length + tasks.size
+  }
   const pgShownKey = () => [pg.pick, pg.tab, pg.repo].join('\u0001')
   const pgStatus = (ref, tab) => {
     const row = pgSource(ref)
@@ -1402,7 +1416,17 @@ const PAGE_SCRIPT = String.raw`
     renderGrouped(pg.model)
     pgScroll(board)
   }
-  const pgAll = repo => pgSelect(pg.model.view.all.isHidden ? pg.model.view.agents[0]?.agent || 'own' : 'all', repo)
+  const pgHolds = (bucket, repo) => !!bucket && ['cards', 'open', 'stopped', 'done', 'older'].some(shelf => bucket[shelf].some(ref => ref.repo === repo))
+  const pgAll = repo => {
+    const view = pg.model.view
+    if (repo) {
+      if (!view.all.isHidden && pgHolds(view.all, repo)) return pgSelect('all', repo)
+      const agent = pg.order.find(id => pgHolds(view.agents.find(one => one.agent === id), repo))
+      if (agent) return pgSelect(agent, repo)
+      if (pgHolds(view.own, repo)) return pgSelect('own', repo)
+    }
+    pgSelect(view.all.isHidden ? view.agents[0]?.agent || 'own' : 'all', repo)
+  }
   const pgPanel = (card, meta, key, actions) => {
     if (!actions.length) return
     const panel = add.apply(null, [el('div', 'actions pg-more-panel')].concat(actions))
@@ -1491,7 +1515,7 @@ const PAGE_SCRIPT = String.raw`
     const step = steps.find(one => one.isCurrent) || steps.find(one => one.status !== 'done' && one.status !== 'cancelled')
     const current = step ? pgText(step.text) : ''
     const detail = current ? status === 'pgQuiet' ? w('pgLast', current) : tab === 'stopped' ? w('pgStoppedAt', current) : current : ''
-    const meta = [w(status), isMixed && agentName(ref.agent), pgText(ref.repo), detail].filter(Boolean).join(' · ')
+    const meta = [w(status), isMixed && (ref.agent === '' ? w('pgOwn') : agentName(ref.agent)), pgText(ref.repo), detail].filter(Boolean).join(' · ')
     add(summary, isMixed ? agentMark(ref.agent) : el('span', 'pg-status', marks[status]), el('span', 'pg-title', pgTitle(ref)), el('span', 'pg-age', pgAge(ref)), el('span', 'pg-meta', meta), el('span', 'pg-step-count', row.total ? w('pgSteps', row.done, row.total) : ''))
     add(card, summary)
     const body = el('div', 'pg-row-body')
@@ -1713,13 +1737,23 @@ const PAGE_SCRIPT = String.raw`
       const isAll = pg.pick === 'all'
       const isOwn = pg.pick === 'own'
       const agent = view.agents.find(one => one.agent === pg.pick)
-      const bucket = isAll ? view.all : isOwn ? view.own : agent
+      let bucket = isAll ? view.all : isOwn ? view.own : agent
+      if (bucket && pg.repo && !isOwn) {
+        const merged = Object.assign({}, bucket)
+        for (const shelf of ['cards', 'open', 'stopped', 'done', 'older']) {
+          merged[shelf] = bucket[shelf].concat(view.own[shelf]).sort((a, b) => (b.at || 0) - (a.at || 0))
+        }
+        bucket = merged
+      }
       if (bucket) {
-        const heading = add(el('header', 'pg-view-head'), isAll ? null : agentMark(isOwn ? '' : pg.pick), el('h2', '', isAll ? w('pgAllAgents') : isOwn ? w('pgOwn') : agentName(pg.pick)), el('p', 'pg-muted', isAll ? w('pgAllCounts', view.agents.length, bucket.counts.open) : w('pgAgentCounts', bucket.counts.open, bucket.counts.needs)))
+        const open = pg.repo ? pgOpenCount(bucket) : bucket.counts.open
+        const needs = pg.repo ? pgFiltered(bucket.cards).length : bucket.counts.needs
+        const agents = pg.repo ? view.agents.filter(one => pgHolds(one, pg.repo)).length : view.agents.length
+        const heading = add(el('header', 'pg-view-head'), isAll ? null : agentMark(isOwn ? '' : pg.pick), el('h2', '', isAll ? w('pgAllAgents') : isOwn ? w('pgOwn') : agentName(pg.pick)), el('p', 'pg-muted', isAll ? w('pgAllCounts', agents, open) : w('pgAgentCounts', open, needs)))
         add(board, heading)
         if (agent && agent.isUnreadable) add(board, pgNotice(agent.agent))
         if (pg.repo) add(board, navButton(w('pgProject', pgText(pg.repo)), () => { pg.repo = ''; renderGrouped(pg.model) }))
-        if (isAll) { if (bucket.counts.needs) add(board, navButton(pgPlural('pgNeedLink', bucket.counts.needs), () => pgSelect('needs'))) }
+        if (isAll) { if (needs) add(board, navButton(pgPlural('pgNeedLink', needs), () => pgSelect('needs'))) }
         else if (bucket.cards.length || bucket.older.length) {
           const cards = pgFiltered(bucket.cards)
           pgSheet(board, cards, pgFiltered(bucket.older), cards.length, cards.filter(one => one.kind === 'question').length, cards.filter(one => one.kind === 'stuck').length, pg.pick + ':' + pg.repo, false)
@@ -1728,7 +1762,8 @@ const PAGE_SCRIPT = String.raw`
         tabs.setAttribute('role', 'tablist')
         const shelves = ['open', 'stopped', 'done']
         shelves.forEach(tab => {
-          const node = navButton(w({ open: 'pgOpen', stopped: 'pgStopped', done: 'pgDone' }[tab]) + ' ' + (pg.repo ? pgFiltered(bucket[tab]).length : bucket.counts[tab]), () => { pg.tab = tab; renderGrouped(pg.model) })
+          const count = pg.repo ? (tab === 'open' ? open : pgFiltered(bucket[tab]).length) : bucket.counts[tab]
+          const node = navButton(w({ open: 'pgOpen', stopped: 'pgStopped', done: 'pgDone' }[tab]) + ' ' + count, () => { pg.tab = tab; renderGrouped(pg.model) })
           node.setAttribute('role', 'tab')
           node.setAttribute('data-tab', tab)
           node.setAttribute('aria-selected', String(pg.tab === tab))
@@ -1739,7 +1774,7 @@ const PAGE_SCRIPT = String.raw`
         const rows = el('section')
         rows.id = 'task-list'
         rows.setAttribute('role', 'tabpanel')
-        pgRows(rows, pgFiltered(bucket[pg.tab]), pg.tab, isAll, pg.tab === 'open' ? 12 : 8)
+        pgRows(rows, pgFiltered(bucket[pg.tab]), pg.tab, isAll || !!pg.repo && !isOwn, pg.tab === 'open' ? 12 : 8)
         add(board, rows)
       }
     }

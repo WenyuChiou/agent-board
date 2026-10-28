@@ -6,12 +6,12 @@
 import { spawn } from 'node:child_process'
 import type { ChildProcess } from 'node:child_process'
 import { randomBytes } from 'node:crypto'
-import { existsSync, readFileSync, statSync } from 'node:fs'
+import { existsSync, statSync } from 'node:fs'
 import { createServer } from 'node:http'
 import type { IncomingMessage, Server, ServerResponse } from 'node:http'
 import type { AddressInfo } from 'node:net'
 import { homedir, networkInterfaces } from 'node:os'
-import { basename, delimiter, dirname, isAbsolute, join, resolve, sep } from 'node:path'
+import { basename, delimiter, isAbsolute, join } from 'node:path'
 import { boardItems } from '../hooks/board'
 import type { BoardAction, PendingTurn } from '../hooks/board'
 import type { Strings } from '../hooks/i18n'
@@ -21,6 +21,7 @@ import type { SendPlan } from '../hooks/serve'
 import type { AgentTarget, View } from '../hooks/view'
 import { RELEASED } from '../hooks/released'
 import { createMessaging } from './board-messaging'
+import { repoLookup } from './repo-lookup'
 import type { ProgressBinding } from '../hooks/messaging'
 
 export type ServeOptions = {
@@ -249,31 +250,7 @@ export const startServer = (o: ServeOptions): void => {
   const messaging = o.messagesDirectory ? createMessaging(o.messagesDirectory) : null
   const token = randomBytes(24).toString('base64url')
   const sending = new Set<string>()
-  // A folder with a repository keeps its name; one without is looked at again after a while,
-  // since a worktree may be made after the first look.
-  const repos = new Map<string, { repo: string | null; at: number }>()
-  const REPO_RETRY = 30 * 1000
-  const repoOf = (dir: string): string | null => {
-    const known = repos.get(dir)
-    const now = Date.now()
-    if (known !== undefined && (known.repo !== null || now - known.at < REPO_RETRY)) return known.repo
-    let repo: string | null = null
-    try {
-      if (!isAbsolute(dir)) throw new Error('a folder the file names without its full path')
-      const gitFile = readFileSync(join(dir, '.git'), 'utf8')
-      const first = gitFile.split(/\r?\n/, 1)[0]?.trim() ?? ''
-      const named = /^gitdir:\s*(.+)$/i.exec(first)?.[1]?.trim()
-      if (named !== undefined) {
-        const gitDir = isAbsolute(named) ? named : resolve(dir, named.replace(/[\\/]/g, sep))
-        const commonDir = readFileSync(join(gitDir, 'commondir'), 'utf8')
-        const common = commonDir.trim().replace(/[\\/]/g, sep)
-        const commonGit = isAbsolute(common) ? common : resolve(gitDir, common)
-        if (isFolder(dirname(commonGit))) repo = worktreeRepoName(dir, gitFile, commonDir)
-      }
-    } catch {}
-    repos.set(dir, { repo, at: now })
-    return repo
-  }
+  const repoOf = repoLookup(worktreeRepoName)
   // The last answer of each session the page sent to, until the next send to that session. One
   // entry per session at most; the page shows those that came after it loaded.
   const replies = new Map<string, Result & { at: number; key: string }>()

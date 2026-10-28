@@ -7227,8 +7227,8 @@ const sourceBoard = async () => {
     },
   })
   try {
-    const [board, view, parse, serve, questions] = await Promise.all([import('../hooks/board.ts'), import('../hooks/view.ts'), import('../hooks/parse.ts'), import('../hooks/serve.ts'), import('../hooks/questions.ts')])
-    return { ...board, ...view, ...parse, ...serve, ...questions }
+    const [board, view, parse, serve, questions, blocks] = await Promise.all([import('../hooks/board.ts'), import('../hooks/view.ts'), import('../hooks/parse.ts'), import('../hooks/serve.ts'), import('../hooks/questions.ts'), import('../hooks/blocks.ts')])
+    return { ...board, ...view, ...parse, ...serve, ...questions, cutOffSpans: blocks.cutOffSpans }
   } finally { loader.deregister() }
 }
 
@@ -7409,6 +7409,220 @@ const visibleRows = dom => dom.node('board').querySelectorAll('[data-row-key]')
 const rowPress = row => !row ? null : row.tag === 'summary' ? row : row.querySelector('summary')
 // Block labels occupy different lines; concatenating textContent invents a single diagnostic log.
 const groupedVisibleText = node => node.hidden ? '' : [node.text, ...node.childNodes.filter(child => node.tag !== 'details' || node.open || child.tag === 'summary').map(groupedVisibleText)].filter(Boolean).join('\n')
+
+test('Needs you keeps a bracketed question and reads the text from a JSON question', async () => {
+  const source = [
+    groupedBlock('49900001', 'codex', 'waiting', 'release-plan', 'Choose the deployment', ['- [?] [staging] Blue or green?']),
+    groupedBlock('49900002', 'gemini', 'waiting', 'guide-plan', 'Choose the guide', ['- [?] {"text":"Short or detailed?"}']),
+  ].join('\n')
+  const { board, model, html } = await groupedPage(source)
+  try {
+    const dom = await pageDom(html, model)
+    assert.equal(pickerButton(dom, 'needs').getAttribute('aria-current'), 'true')
+    const questions = dom.node('board').querySelectorAll('[data-ref-key]').map(card => card.childNodes.find(node => node.className === 'pg-question')?.textContent)
+    assert.ok(questions.includes('[staging] Blue or green?'), JSON.stringify(questions))
+    assert.ok(questions.includes('Short or detailed?'), JSON.stringify(questions))
+    assert.ok(!questions.includes('Could not read this response'), JSON.stringify(questions))
+  } finally { await board.close() }
+})
+
+test('choosing a project shows its own tasks or its agents with the project chip and filtered counts', async () => {
+  for (const agentCount of [1, 2]) {
+    const source = [
+      groupedBlock('49910001', 'codex', 'working', 'agent-project', 'First agent task', ['- [~] Continue']),
+      groupedBlock('49910002', 'codex', 'working', 'other-agent-project', 'Another agent task', ['- [~] Continue']),
+      ...(agentCount === 2 ? [groupedBlock('49910003', 'gemini', 'working', 'agent-project', 'Second agent task', ['- [~] Continue'])] : []),
+      '## manual-project\n### Review the hand-kept plan\n- [ ] Compare the options\n',
+      '## other-manual-project\n### Review the other plan\n- [ ] Read the notes\n',
+    ].join('\n')
+    const { board, model, html } = await groupedPage(source)
+    try {
+      const dom = await pageDom(html, model)
+      const chooseProject = async name => {
+        const search = dom.node('search')
+        search.value = name
+        search.events.input?.({ target: search })
+        await dom.flush()
+        const hit = dom.node('search-results').querySelectorAll('button').find(button => button.textContent === `${name} · ${name === 'manual-project' ? 1 : agentCount} open`)
+        assert.ok(hit, dom.node('search-results').textContent)
+        hit.click()
+        await dom.flush()
+      }
+      const chip = name => dom.node('board').querySelectorAll('button').find(button => button.textContent === `Project: ${name} ✕`)
+      const heading = () => dom.node('board').childNodes.find(node => node.className === 'pg-view-head')
+      const tabs = () => dom.node('board').querySelectorAll('[role="tab"]').map(tab => tab.textContent)
+
+      await chooseProject('manual-project')
+      assert.equal(pickerButton(dom, 'own').getAttribute('aria-current'), 'true')
+      assert.ok(heading().textContent.includes('Your own tasks'), heading().textContent)
+      assert.ok(heading().textContent.includes('1 open · 0 need you'), heading().textContent)
+      assert.equal(visibleRows(dom).length, 1)
+      assert.ok(visibleRows(dom)[0].textContent.includes('Review the hand-kept plan'))
+      assert.ok(chip('manual-project'), dom.node('board').textContent)
+      assert.deepEqual(tabs(), ['Open 1', 'Stopped 0', 'Done 0'])
+
+      chip('manual-project').click()
+      assert.equal(visibleRows(dom).length, 2)
+      const ownRow = visibleRows(dom).find(row => row.textContent.includes('Review the hand-kept plan'))
+      ownRow.querySelectorAll('button').find(button => button.textContent === 'Only manual-project').click()
+      assert.equal(pickerButton(dom, 'own').getAttribute('aria-current'), 'true')
+      assert.equal(visibleRows(dom).length, 1)
+      assert.ok(chip('manual-project'))
+
+      await chooseProject('agent-project')
+      assert.equal(pickerButton(dom, agentCount === 1 ? 'codex' : 'all').getAttribute('aria-current'), 'true')
+      assert.equal(visibleRows(dom).length, agentCount)
+      assert.ok(visibleRows(dom).every(row => !row.textContent.includes('Another agent task')))
+      assert.ok(chip('agent-project'))
+      assert.deepEqual(tabs(), [`Open ${agentCount}`, 'Stopped 0', 'Done 0'])
+      assert.ok(heading().textContent.includes(`${agentCount} open`), heading().textContent)
+    } finally { await board.close() }
+  }
+})
+
+test('a stopped task with a question is not counted as open in its project\'s view', async () => {
+  const runtime = await sourceBoard()
+  const project = 'stopped-question-project'
+  const title = 'Review the idle hand-kept plan'
+  const projects = runtime.parseProgress(`## ${project}\n### ${title}\n- [?] Blue or green?\n`)
+  const seen = { [runtime.taskFingerprint(project, projects[0].tasks[0])]: groupedNow - runtime.IDLE_MS - 1 }
+  const view = runtime.buildView(projects, [], null, groupedNow, 0, {}, EN, [], seen)
+  assert.equal(view.idle.length, 1)
+  assert.equal(view.idle[0].title, title)
+  const options = { now: groupedNow, repoOf: () => null, versions: { board: '1.2.3', package: null } }
+  const model = runtime.serveModel(view, [], EN, new Set(), false, undefined, false, options)
+  assert.equal(model.view.own.stopped.length, 1, 'the idle task belongs to the Stopped shelf')
+  assert.equal(model.view.own.open.length, 0)
+  assert.equal(model.view.own.cards.length, 1, 'its pending question still has a card')
+  const dom = await pageDom(runtime.servePage(EN, 'synthetic', false, 0, true), model)
+  const search = dom.node('search')
+  search.value = project
+  search.events.input?.({ target: search })
+  await dom.flush()
+  const results = dom.node('search-results')
+  const hit = results.querySelectorAll('button').find(button => button.textContent.startsWith(`${project} · `))
+  assert.ok(hit, results.textContent)
+  const hitCount = hit.textContent.match(/ · (\d+) open$/)
+  assert.ok(hitCount, hit.textContent)
+  const openCount = Number(hitCount[1])
+  assert.equal(openCount, 0)
+  hit.click()
+  await dom.flush()
+
+  assert.equal(pickerButton(dom, 'own').getAttribute('aria-current'), 'true')
+  const heading = dom.node('board').childNodes.find(node => node.className === 'pg-view-head')
+  const headingCount = heading.textContent.match(/(\d+) open\b/)
+  assert.ok(headingCount, heading.textContent)
+  assert.equal(Number(headingCount[1]), openCount, heading.textContent)
+  const tabs = dom.node('board').querySelectorAll('[role="tab"]')
+  assert.equal(tabs.find(tab => tab.getAttribute('data-tab') === 'open').textContent, `Open ${openCount}`)
+  const stoppedTab = tabs.find(tab => tab.getAttribute('data-tab') === 'stopped')
+  assert.equal(stoppedTab.textContent, 'Stopped 1')
+  stoppedTab.click()
+  assert.equal(visibleRows(dom).length, 1)
+  assert.ok(visibleRows(dom)[0].textContent.includes(title), visibleRows(dom)[0].textContent)
+})
+
+test('a project held by an agent and by the person\'s own list opens one view with both and the hit\'s count', async () => {
+  const runtime = await sourceBoard()
+  const project = 'shared-mix-project'
+  for (const agentCount of [1, 2]) {
+    const source = [
+      groupedBlock('49930001', 'codex', 'working', project, 'Continue the shared agent plan', ['- [~] Continue']),
+      groupedBlock('49930002', agentCount === 1 ? 'codex' : 'cursor', 'working', 'other-mix-project', 'Continue the other plan', ['- [~] Continue']),
+      `## ${project}\n### Review the shared hand-kept plan\n- [ ] Compare the options\n`,
+    ].join('\n')
+    const projects = runtime.parseProgress(source)
+    const view = runtime.buildView(projects, [], null, groupedNow, 0, {}, EN)
+    const options = { now: groupedNow, repoOf: () => null, versions: { board: '1.2.3', package: null } }
+    const model = runtime.serveModel(view, [], EN, new Set(), false, undefined, false, options)
+    assert.equal(model.view.all.isHidden, agentCount === 1)
+    const dom = await pageDom(runtime.servePage(EN, 'synthetic', false, 0, true), model)
+    const search = dom.node('search')
+    search.value = project
+    search.events.input?.({ target: search })
+    await dom.flush()
+    const results = dom.node('search-results')
+    const hit = results.querySelectorAll('button').find(button => button.textContent.startsWith(`${project} · `))
+    assert.ok(hit, results.textContent)
+    const hitCount = hit.textContent.match(/ · (\d+) open$/)
+    assert.ok(hitCount, hit.textContent)
+    const openCount = Number(hitCount[1])
+    assert.equal(openCount, 2)
+    hit.click()
+    await dom.flush()
+
+    assert.equal(pickerButton(dom, agentCount === 1 ? 'codex' : 'all').getAttribute('aria-current'), 'true')
+    const heading = dom.node('board').childNodes.find(node => node.className === 'pg-view-head')
+    assert.ok(heading.textContent.includes(agentCount === 1 ? 'Codex' : 'All agents'), heading.textContent)
+    const headingCount = heading.textContent.match(/(\d+) open\b/)
+    assert.ok(headingCount, heading.textContent)
+    assert.equal(Number(headingCount[1]), openCount, heading.textContent)
+    if (agentCount === 2) assert.ok(heading.textContent.includes('1 agent'), heading.textContent)
+    const openTab = dom.node('board').querySelectorAll('[role="tab"]').find(tab => tab.getAttribute('data-tab') === 'open')
+    assert.equal(openTab.textContent, `Open ${openCount}`)
+    const rows = visibleRows(dom)
+    assert.equal(rows.length, 2)
+    assert.ok(rows.some(row => row.textContent.includes('Continue the shared agent plan')))
+    const ownRow = rows.find(row => row.textContent.includes('Review the shared hand-kept plan'))
+    assert.ok(ownRow, dom.node('board').textContent)
+    const ownMeta = ownRow.querySelector('summary').childNodes.find(node => node.className === 'pg-meta')
+    assert.ok(ownMeta.textContent.includes('Your own tasks'), ownMeta.textContent)
+    assert.ok(!ownMeta.textContent.includes('Claude Code'), ownMeta.textContent)
+    assert.ok(rows.every(row => row.querySelector('summary').childNodes[0].className !== 'pg-status'))
+    const chip = dom.node('board').querySelectorAll('button').find(button => button.textContent === `Project: ${project} ✕`)
+    assert.ok(chip, dom.node('board').textContent)
+    chip.click()
+    await dom.flush()
+    assert.ok(!visibleRows(dom).some(row => row.textContent.includes('Review the shared hand-kept plan')))
+  }
+})
+
+test('a project\'s view counts a waiting or stuck task once as open, the number its search hit showed', async () => {
+  const project = 'shared-fix-project'
+  for (const agentCount of [2, 1]) {
+    const source = [
+      groupedBlock('49920001', 'codex', 'waiting', project, 'Choose the shared plan', ['- [?] Blue or green?', '- [?] Short or detailed?']),
+      groupedBlock('49920002', 'codex', 'working', project, 'Continue the shared plan', ['- [~] Continue']),
+      ...(agentCount === 2 ? [groupedBlock('49920003', 'cursor', 'working', project, 'Unblock the shared plan', ['- [!] Waiting for a review'])] : []),
+      groupedBlock('49920004', 'codex', 'working', 'other-fix-project', 'Continue the other plan', ['- [~] Continue']),
+    ].join('\n')
+    const { board, model, html } = await groupedPage(source)
+    try {
+      const dom = await pageDom(html, model)
+      const search = dom.node('search')
+      search.value = project
+      search.events.input?.({ target: search })
+      await dom.flush()
+      const results = dom.node('search-results')
+      const hit = results.querySelectorAll('button').find(button => button.textContent.startsWith(`${project} · `))
+      assert.ok(hit, results.textContent)
+      const hitCount = hit.textContent.match(/ · (\d+) open$/)
+      assert.ok(hitCount, hit.textContent)
+      const openCount = Number(hitCount[1])
+      assert.equal(openCount, agentCount + 1)
+      hit.click()
+      await dom.flush()
+
+      assert.equal(pickerButton(dom, agentCount === 1 ? 'codex' : 'all').getAttribute('aria-current'), 'true')
+      const heading = dom.node('board').childNodes.find(node => node.className === 'pg-view-head')
+      const headingCount = heading.textContent.match(/(\d+) open\b/)
+      assert.ok(headingCount, heading.textContent)
+      assert.equal(Number(headingCount[1]), openCount, heading.textContent)
+      const openTab = dom.node('board').querySelectorAll('[role="tab"]').find(tab => tab.getAttribute('data-tab') === 'open')
+      assert.equal(openTab.textContent, `Open ${openCount}`)
+      const needsCount = agentCount === 2 ? 3 : 2
+      if (agentCount === 2) {
+        assert.ok(dom.node('board').querySelectorAll('button').some(button => button.textContent === `${needsCount} things need you`), dom.node('board').textContent)
+      } else {
+        assert.ok(heading.textContent.includes(`${openCount} open · ${needsCount} need you`), heading.textContent)
+        assert.equal(dom.node('board').querySelectorAll('[data-ref-key]').length, needsCount)
+      }
+      assert.equal(visibleRows(dom).length, 1)
+      assert.ok(visibleRows(dom)[0].textContent.includes('Continue the shared plan'), visibleRows(dom)[0].textContent)
+    } finally { await board.close() }
+  }
+})
 
 test('with ?group=agent the page opens on Needs you with every unanswered question once and at most five Working now rows', async () => {
   const { board, model, html } = await groupedPage()
@@ -7641,6 +7855,51 @@ test('worktree folders show under their repository\'s name and projects with not
   }
 })
 
+test('a worktree whose repository was moved shows its own folder name again within half a minute', async () => {
+  const { repoLookup } = await import('../scripts/repo-lookup.ts')
+  const runtime = await sourceBoard()
+  const root = mkdtempSync(join(tmpdir(), 'board-repo-parent with space-'))
+  const repository = join(root, 'main repository')
+  const moved = join(root, 'moved repository')
+  const worktree = join(root, 'feature folder')
+  const admin = join(repository, '.git', 'worktrees', 'feature')
+  let clock = 0
+  const repoOf = repoLookup(runtime.worktreeRepoName, () => clock)
+  try {
+    mkdirSync(admin, { recursive: true })
+    mkdirSync(worktree)
+    writeFileSync(join(worktree, '.git'), `gitdir: ${admin.replaceAll('\\', '/')}\r\n`)
+    writeFileSync(join(admin, 'commondir'), '../..\r\n')
+    assert.equal(repoOf(worktree), 'main repository')
+    assert.equal(repoOf(repository), null)
+    assert.equal(repoOf('relative-folder'), null)
+    assert.ok([repository, moved].every(path => resolve(path).startsWith(resolve(root) + sep)))
+    renameSync(repository, moved)
+    clock = 29_999
+    assert.equal(repoOf(worktree), 'main repository')
+    clock = 30_000
+    assert.equal(repoOf(worktree), null)
+
+    const projects = runtime.parseProgress(groupedBlock('49930001', 'codex', 'working', 'feature folder', 'Keep the worktree task', ['- [~] Continue'], 5, worktree))
+    const view = runtime.buildView(projects, [], null, groupedNow, 0, {}, EN)
+    const model = runtime.serveModel(view, [], EN, new Set(), false, undefined, false, { now: groupedNow, repoOf, versions: { board: '1.2.3', package: null }, unreadable: [] })
+    assert.deepEqual(model.view.projects.map(project => project.name), ['feature folder'])
+    const dom = await pageDom(runtime.servePage(EN, 'synthetic', false, 0, true), model)
+    pickerButton(dom, 'codex').click()
+    assert.ok(visibleRows(dom)[0].textContent.includes('feature folder'))
+    assert.ok(!dom.node('board').textContent.includes('main repository'))
+
+    renameSync(moved, repository)
+    clock = 59_999
+    assert.equal(repoOf(worktree), null)
+    clock = 60_000
+    assert.equal(repoOf(worktree), 'main repository')
+  } finally {
+    assert.ok(resolve(root).startsWith(resolve(tmpdir()) + sep))
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
 test('the first screen of the synthetic big board shows nothing from the never-shown list', async () => {
   const extra = [
     ...Array.from({ length: 20 }, (_, index) => groupedBlock(String(47701000 + index), 'codex', 'working', 'cap-repo', `Synthetic cap open ${index}`, ['- [~] Continue the synthetic work'], 0)),
@@ -7680,6 +7939,35 @@ test('an agent whose block was cut off is named unreadable in the board view, th
   assert.deepEqual(model.view.agents.filter(agent => agent.isUnreadable).map(agent => agent.agent), ['codex'])
   const dom = await pageDom(runtime.servePage(EN, 'synthetic', false, 0, true), model)
   assert.ok(dom.node('unreadable-notices').textContent.includes("Codex's progress file could not be read"), dom.node('unreadable-notices').textContent)
+})
+
+test('an agent cut off before its first task still shows a warning in the picker and footer', async () => {
+  const runtime = await sourceBoard()
+  const source = groupedBlock('49920001', 'codex', 'working', 'complete-project', 'Keep the complete task', ['- [~] Continue']) + '\n' +
+    groupedBlock('49920002', 'CURSOR', 'working', 'cut-project', '', []).split('\n').slice(0, 2).join('\n')
+  const projects = runtime.parseProgress(source)
+  const spans = runtime.cutOffSpans(source, true)
+  const frozen = runtime.cutOffScopes(projects, spans)
+  assert.equal(spans.length, 1)
+  assert.deepEqual([...frozen], [runtime.questionScope('cut-project', 'cursor', '49920002')])
+  assert.ok(projects.flatMap(project => project.tasks).every(task => task.auto?.agent !== 'cursor'))
+  const plain = runtime.buildView(projects, [], null, groupedNow, 0, {}, EN)
+  assert.equal('unreadable' in plain, false)
+  const view = runtime.buildView(projects, [], null, groupedNow, 0, {}, EN, [], {}, undefined, undefined, [], frozen)
+  assert.deepEqual(view.unreadable, ['cursor'])
+  const options = { now: groupedNow, repoOf: () => null, versions: { board: '1.2.3', package: null }, unreadable: view.unreadable }
+  const model = runtime.serveModel(view, [], EN, new Set(), false, undefined, false, options)
+  assert.deepEqual(model.view.agents.filter(agent => agent.isUnreadable).map(agent => agent.agent), ['cursor'])
+  const dom = await pageDom(runtime.servePage(EN, 'synthetic', false, 0, true), model)
+  assert.ok(dom.node('unreadable-notices').textContent.includes("Cursor's progress file could not be read"), dom.node('unreadable-notices').textContent)
+  const cursor = pickerButton(dom, 'cursor')
+  assert.ok(cursor.textContent.includes('Cursor') && cursor.childNodes.some(node => node.className === 'pg-warn' && node.textContent === '⚠'), cursor.textContent)
+  cursor.click()
+  assert.ok(dom.node('board').textContent.includes("Cursor's progress file could not be read"))
+
+  const defensive = new Set([...frozen, runtime.questionScope('another-project', 'cursor', '49920003'), runtime.questionScope('claude-project', '', '49920004'), 'invalid', '{}', '["short","cursor"]', '["project","cursor",1]', '["project","cursor","extra","field"]'])
+  assert.deepEqual(runtime.buildView(projects, [], null, groupedNow, 0, {}, EN, [], {}, undefined, undefined, [], defensive).unreadable, ['cursor', 'claude'])
+  assert.equal('unreadable' in runtime.buildView([], [], null, groupedNow, 0, {}, EN, [], {}, undefined, undefined, [], new Set(['invalid', '{}'])), false)
 })
 
 test('an emoji counts as two columns when a board line is cut to the width', async () => {
