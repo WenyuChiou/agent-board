@@ -96,7 +96,7 @@ Tell me which existing sessions need reload and which adapters remain unsupporte
 | <img src="docs/images/agents/openclaw.svg" width="20" alt="OpenClaw"> | OpenClaw | `/agent-board` |
 | <img src="docs/images/agents/deepseek-harness.svg" width="20" alt="DeepSeek Harness"> | DeepSeek Harness | `/agent-board` (checked in a synthetic home, not run live yet) |
 
-**In the Claude desktop app,** which cannot show the pane, the footer shows the board's status and `/progress` gives you a link to [the board's page](#the-boards-page), where you can answer questions and archive work; if that page cannot start, it opens the read-only page. The board page needs the board script that `/progress connect` installs, or the next session start updates.
+**In the Claude desktop app,** when its Code tab shows no pane, the footer shows the waiting count and `/agent-board opens the board`. `/agent-board` starts the live [board page](#the-boards-page) and replies with its link, where you can answer questions and archive work; it works in every Claude Code session and leaves the pane as it is. When the pane cannot be placed, `/progress` does the same. If the live page cannot start, both open the read-only page. The board page needs the board script that `/progress connect` installs, or the next session start updates.
 
 ### Open the board anywhere
 

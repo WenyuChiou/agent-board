@@ -96,7 +96,7 @@ CLI、桌面 App、IDE 的实际 hook 事件分开验收；装好了文件、传
 | <img src="docs/images/agents/openclaw.svg" width="20" alt="OpenClaw"> | OpenClaw | `/agent-board` |
 | <img src="docs/images/agents/deepseek-harness.svg" width="20" alt="DeepSeek Harness"> | DeepSeek Harness | `/agent-board`（在合成环境检查过，还没实机运行） |
 
-**Claude 桌面 App** 无法显示面板：底部状态栏会显示看板状态，`/progress` 会提供可回答问题、归档工作的[看板网页](#看板的网页)链接；网页无法启动时改开只读网页。看板网页需要 `/progress connect` 安装的看板脚本，或在下次会话开始时更新。
+**Claude 桌面 App** 的 Code 标签页没有显示面板时：底部状态栏会显示等你的数量和“/agent-board 打开看板”。`/agent-board` 会启动可回答问题、归档工作的[看板网页](#看板的网页)并提供链接；每个 Claude Code 会话都能用，也不动面板。面板无法显示时，`/progress` 做同样的事。交互网页无法启动时，两者都改开只读网页。看板网页需要 `/progress connect` 安装的看板脚本，或在下次会话开始时更新。
 
 ### 在任何地方打开看板
 

@@ -104,7 +104,7 @@ export const EN: Strings = {
   statusPrefix: 'Progress',
   statusWaiting: (n: number): string => `${n} waiting on you`,
   statusDue: (n: number): string => `${n} due soon`,
-  statusBoardPage: '/progress opens the board page',
+  statusBoardPage: '/agent-board opens the board',
 
   // Pull requests
   ciPass: 'CI passed',
@@ -246,6 +246,8 @@ export const EN: Strings = {
   livePageFallback: 'The live board page could not start. Using the read-only page instead.',
   livePageNeedsInstall: 'The live page needs the board script installed by /progress connect, or updated at the next session start.',
   livePageStarting: 'Starting the board page…',
+  liveBoardCommandDescription: 'Agent Board: start the live board page and show its link (leaves the pane as it is)',
+  boardPageOpened: 'The board page, where you can answer questions and archive work:',
   connectDone: (list: string): string => `Connected: ${list}. After you restart them, every turn they finish reports to the pane.`,
   connectNone: 'No agent to connect was found (Codex, Gemini CLI, Cursor, OpenCode, Grok Build, Hermes Agent, Muse Code, OpenClaw).',
   setupCodexApproval: (): string => "Current Codex hook approval is unconfirmed. Check /hooks; existing managed reporting instructions are retained.",

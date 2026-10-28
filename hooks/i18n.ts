@@ -143,7 +143,7 @@ export const ZH_TW = {
   statusPrefix: '進度',
   statusWaiting: (n: number): string => `${n} 件等你`,
   statusDue: (n: number): string => `${n} 件快到期`,
-  statusBoardPage: '/progress 開啟看板網頁',
+  statusBoardPage: '/agent-board 開啟看板',
 
   // Pull requests
   ciPass: 'CI 通過',
@@ -284,6 +284,8 @@ export const ZH_TW = {
   livePageFallback: '互動看板網頁無法啟動，改用唯讀網頁。',
   livePageNeedsInstall: '互動網頁需要由 /progress connect 安裝看板腳本，或在下次工作階段開始時更新。',
   livePageStarting: '正在開啟看板網頁…',
+  liveBoardCommandDescription: 'Agent Board：啟動可以操作的看板網頁並提供連結（不動面板）',
+  boardPageOpened: '看板網頁，可以回覆問題或封存工作：',
   connectDone: (list: string): string => `已接上：${list}。重開它們之後，每回合結束都會自動回報到面板。`,
   connectNone: '沒找到可以接的 agent（Codex、Gemini CLI、Cursor、OpenCode、Grok Build、Hermes Agent、Muse Code、OpenClaw）。',
   setupCodexApproval: (): string => "尚未確認目前 Codex hook 的核准狀態。請檢查 /hooks；已有的受管理回報指示會保留。",
