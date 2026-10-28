@@ -261,8 +261,7 @@ export const groupBoard = (model: GroupingInput, now: number, repoOf: RepoOf, s:
   }
   const retained = [...model.reminder.map(item => ({ item, stage: 'reminder' as const })), ...model.older.map(item => ({ item, stage: 'older' as const }))]
   for (const { item, stage } of retained) {
-    const key = item.questionId === undefined ? `older:${keyOf(item.agent)}::${item.project}::${item.task}::${plain(item.text)}` : `older:${item.questionId}`
-    list({ ...tag(ownerOf(item), item.project, item.dir, item.at), key, task: item.task, text: item.text, stage, source: item }, older)
+    list({ ...tag(ownerOf(item), item.project, item.dir, item.at), key: item.key, task: item.task, text: item.text, stage, source: item }, older)
   }
 
   // Tasks. A helper run is not a row. Stuck is only what the caller marked.

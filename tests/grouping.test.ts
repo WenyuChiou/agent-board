@@ -70,7 +70,7 @@ const ask = (agent: string, project: string, task: string, text: string, over: P
   ...over,
 })
 
-const retained = (agent: string, project: string, task: string, text: string, over: Partial<GroupingRetained> = {}): GroupingRetained => ({ project, agent, task, text, note: '', context: '', when: '', ...over })
+const retained = (agent: string, project: string, task: string, text: string, over: Partial<GroupingRetained> = {}): GroupingRetained => ({ key: `older:${project}::${task}::${text}`, canHide: false, project, agent, task, text, note: '', context: '', when: '', ...over })
 
 const turn = (agent: string, project: string, text: string, isQuestion: boolean, over: Partial<GroupingTurn> = {}): GroupingTurn => ({ key: `turn:${agent}:${project}:${text.length}`, project, agent, text, isQuestion, info: '', ...over })
 
