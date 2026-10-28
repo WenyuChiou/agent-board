@@ -6,6 +6,7 @@ import type { Palette } from './palette'
 import { agentMark, agentMarkCss, boardMark, pageBaseCss, pageTokens, themeHead, themeSwitch } from './page-look'
 import type { Strings } from './i18n'
 import type { Focus, TaskRow, View, ViewStep, WaitingItem } from './view'
+import { OLDER_SHOWN } from './view'
 
 // progress.html: the same view as the pane, as a page any browser keeps open in a window of
 // its own, beside progress.md. Built from the file and pending inbox turns, without a session's
@@ -214,8 +215,9 @@ ${section(
   true,
 )}
 ${section('waiting', s.sectionWaiting, view.waiting.length, 'waiting', '', view.waiting.map(item => waitingItem(item, s)).join(''), true)}
+${(view.stoppedAsking ?? 0) > 0 ? `<p class="quiet"><button type="button" data-section="dash-older">${esc(s.stoppedAsking(view.stoppedAsking!))}</button></p>` : ''}
 ${section('reminder', s.sectionQuestionReminders, view.reminder?.length ?? 0, 'muted', s.questionAgingHint, (view.reminder ?? []).map(item => waitingItem(item, s)).join(''), false)}
-${section('older', s.sectionOlderQuestions, view.older?.length ?? 0, 'muted', s.questionAgingHint, (view.older ?? []).map(item => waitingItem(item, s)).join(''), false)}
+${section('older', s.sectionOlderQuestions, view.older?.length ?? 0, 'muted', s.questionAgingHint, (view.older ?? []).slice(0, OLDER_SHOWN).map(item => waitingItem(item, s)).join('') + ((view.older?.length ?? 0) > OLDER_SHOWN ? `<details class="more" data-key="older:more"><summary>${esc(s.showAllQuestions(view.older!.length))}</summary>${view.older!.slice(OLDER_SHOWN).map(item => waitingItem(item, s)).join('')}</details>` : ''), false)}
 ${view.hidden.length === 0 ? '' : `<p class="quiet">${esc(s.hiddenCount(view.hidden.length))}</p>`}
 ${view.idle.length === 0 ? '' : `<details class="section" data-key="section:idle"><summary><span class="quiet">${esc(s.idleCount(view.idle.length))}</span></summary>${view.idle.map(it => row(it, s, true)).join('')}</details>`}
 ${view.stopped.length === 0 ? '' : `<details class="section" data-key="section:stopped"><summary><span class="quiet">${esc(s.stoppedCount(view.stopped.length))}</span></summary>${view.stopped.map(it => row(it, s, true)).join('')}</details>`}

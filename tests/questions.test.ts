@@ -136,7 +136,7 @@ test("a woken session's new inbox question shows under Waiting on you while its 
     const shelf = result.stopped.flatMap(row => row.questions ?? [])
     expect(shelf.map(item => item.text)).toEqual(offset > 0 && text === 'Publish?' ? [] : ['Publish?'])
     expect(shelf.some(item => result.waiting.some(live => live.questionId === item.questionId))).toBe(false)
-    expect(result.older.map(item => item.text)).toEqual(offset <= 0 && text === 'Choose a date?' ? [text] : [])
+    expect(result.older.map(item => item.text)).toEqual(offset <= 0 && text === 'Choose a date?' ? [text, 'Publish?'] : offset > 0 && text === 'Publish?' ? [] : ['Publish?'])
   }
 })
 
@@ -149,7 +149,7 @@ test('a reworded question of a stopped session stays reviewable under Older', ()
     const result = view(next, changed)
     expect(result.waiting).toEqual([])
     expect(result.reminder).toEqual([])
-    expect(result.older.map(item => item.text)).toEqual(['Publish?'])
+    expect(result.older.map(item => item.text)).toEqual(replacement.includes('[?]') ? ['Publish?', 'Choose a date?'] : ['Publish?'])
     expect(result.older[0]?.questionId).toBe(ledger.records[0]!.id)
     expect(result.older[0]?.canHide).toBe(false)
     expect([...result.stopped, ...result.recent].flatMap(row => row.questions ?? []).map(item => item.text)).toEqual(replacement.includes('[?]') ? ['Choose a date?'] : [])
@@ -169,7 +169,8 @@ test("a done task's question stays on the Stopped shelf after it leaves Recent",
     expect(questions.map(item => item.questionId).sort()).toEqual(ledger.records.map(record => record.id).sort())
     expect(result.stopped.every(row => row.archive !== null)).toBe(true)
     expect(result.waiting).toEqual([])
-    expect(result.older).toEqual([])
+    expect(result.older.map(item => item.questionId).sort()).toEqual(ledger.records.map(record => record.id).sort())
+    expect(result.stoppedAsking).toBe(4)
   }
 })
 
@@ -357,7 +358,8 @@ test('stopped and done questions bypass aging, due dates, focus and notification
     const result = buildView(projects, [], null, NOW, 0, {}, s, [], {}, ledger)
     expect(result.waiting).toEqual([])
     expect(result.reminder).toEqual([])
-    expect(result.older).toEqual([])
+    expect(result.older.map(item => item.questionId)).toEqual([ledger.records[0]!.id])
+    expect(result.stoppedAsking).toBe(1)
     expect(result.overview.waiting).toBe(0)
     expect(result.focus).toBe(null)
     expect(remindersOf(result, {}, NOW, '2026-10-16', s)).toEqual([])

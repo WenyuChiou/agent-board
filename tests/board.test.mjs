@@ -2621,6 +2621,7 @@ const pageDom = async (html, first, { post, confirm, messaging, copyAllowed = fa
     }
     focus() { document.activeElement = this }
     blur() { if (document.activeElement === this) document.activeElement = null }
+    scrollIntoView() { this.scrolled = true }
     setSelectionRange() {}
     select() { this.isSelected = true }
   }
@@ -2698,8 +2699,10 @@ const pageDom = async (html, first, { post, confirm, messaging, copyAllowed = fa
   }
   await flush()
   const boardButtons = node => node.childNodes.flatMap(child => [...(child.tag === 'button' ? [child] : []), ...boardButtons(child)])
+  // The buttons that only open or reveal something already drawn (the stopped-sessions line, Show all) are not card actions.
+  const cardButtons = node => boardButtons(node).filter(button => button.getAttribute('data-nav') === null)
   return {
-    buttons: () => boardButtons(get('board')),
+    buttons: () => cardButtons(get('board')),
     boxes: () => get('board').querySelectorAll(),
     send: () => boardButtons(get('board')).find(button => button.textContent === 'Send to Grok Build'),
     requests, copies,
@@ -3351,6 +3354,70 @@ test("a refusal caused by another agent's change stays next to the page card aft
     await dom.redraw({ ...base, asks: [{ ...ask, fp: 'after' }] })
     const results = pageCardResults(dom, ask.key).filter(node => node.textContent !== '')
     assert.deepEqual(results.map(node => node.textContent), ['That line just changed'])
+  } finally { await board.close() }
+})
+
+test('the page line for questions in stopped sessions opens the Older shelf, and Show all draws the rest without the server', async () => {
+  const board = await page()
+  try {
+    const html = (await board.call('GET', `/?t=${board.token}`)).body
+    const words = JSON.parse(html.match(/<script[^>]*id="words"[^>]*>([\s\S]*?)<\/script>/)[1])
+    const older = Array.from({ length: 12 }, (_, index) => ({ key: `older:retained::synthetic-${index}@synthetic-${index}`, canHide: false, project: 'Demo', agent: 'codex', task: `Plan ${index}`, text: `Synthetic question ${index}, OK?`, note: '', context: '', when: '4 days ago', questionId: `synthetic-${index}` }))
+    const model = { counts: { waiting: 0, active: 0, due: 0, today: 0 }, groups: [], hidden: [], idle: [], stopped: [], turns: [], recent: [], asks: [], reminder: [], older, stoppedAsking: 12 }
+    const dom = await pageDom(html, model, { post: async () => { throw new Error('synthetic offline') } })
+    const walk = node => node.childNodes.flatMap(child => [child, ...walk(child)])
+    const shelf = () => walk(dom.node('board')).find(node => node.tag === 'details' && node.className === 'card shelf')
+    const shown = () => walk(shelf()).filter(node => node.className === 'q').length
+    const navigation = () => walk(dom.node('board')).filter(node => node.tag === 'button' && node.getAttribute('data-nav') !== null)
+    const line = words.stoppedAsking.replace('\u0001', '12')
+    const showAll = words.showAllQuestions.replace('\u0001', '12')
+    assert.deepEqual(navigation().map(button => button.textContent), [line, showAll])
+    assert.equal(shelf().open, false)
+    assert.equal(shown(), 10)
+    navigation()[0].click()
+    await dom.flush()
+    assert.equal(shelf().open, true)
+    assert.equal(shelf().scrolled, true)
+    const all = navigation().find(button => button.textContent === showAll)
+    assert.ok(all)
+    all.click()
+    await dom.flush()
+    assert.equal(shown(), 12)
+    assert.equal(navigation().some(button => button.textContent === showAll), false)
+    // The line belongs to Waiting: it shows under All and Waiting and hides under Due.
+    assert.equal(navigation()[0].hidden, false)
+    const due = dom.allButtons().find(button => button.textContent.startsWith(words.sectionDue))
+    assert.ok(due)
+    due.click()
+    await dom.flush()
+    assert.equal(navigation()[0].hidden, true)
+    // The choice survives the next redraw, and none of this reached the server.
+    await dom.redraw({ ...model })
+    assert.equal(shown(), 12)
+    assert.deepEqual(dom.requests, [])
+  } finally { await board.close() }
+})
+
+test('the page offers Already answered, hide on an Older question that can be hidden, and says review only on one that cannot', async () => {
+  const board = await page()
+  try {
+    const html = (await board.call('GET', `/?t=${board.token}`)).body
+    const words = JSON.parse(html.match(/<script[^>]*id="words"[^>]*>([\s\S]*?)<\/script>/)[1])
+    const entry = (index, canHide) => ({ key: `older:retained::synthetic-${index}@synthetic-${index}`, canHide, project: 'Demo', agent: 'codex', task: `Plan ${index}`, text: `Synthetic question ${index}, OK?`, note: '', context: '', when: '9 days ago', questionId: `synthetic-${index}` })
+    const model = { counts: { waiting: 0, active: 0, due: 0, today: 0 }, groups: [], hidden: [], idle: [], stopped: [], turns: [], recent: [], asks: [], reminder: [], older: [entry(0, true), entry(1, false)], stoppedAsking: 2 }
+    const dom = await pageDom(html, model, { post: async () => ({ ok: true, json: async () => ({ ok: true, note: 'Hidden' }) }) })
+    const walk = node => node.childNodes.flatMap(child => [child, ...walk(child)])
+    const cards = walk(dom.node('board')).filter(node => node.tag === 'div' && node.getAttribute('data-card-key') !== null)
+    const textOf = card => walk(card).filter(node => node.tag === 'button' || node.className === 'quiet').map(node => node.textContent)
+    assert.deepEqual(cards.map(card => card.getAttribute('data-card-key')), ['older:retained::synthetic-0@synthetic-0', 'older:retained::synthetic-1@synthetic-1'])
+    assert.ok(textOf(cards[0]).includes(words.answeredHide))
+    assert.ok(!textOf(cards[0]).includes(words.questionReviewOnly))
+    assert.ok(!textOf(cards[1]).includes(words.answeredHide))
+    assert.ok(textOf(cards[1]).includes(words.questionReviewOnly))
+    walk(cards[0]).find(node => node.tag === 'button' && node.textContent === words.answeredHide).click()
+    await dom.flush()
+    await dom.flush()
+    assert.deepEqual(dom.requests.map(one => [one.path, one.body.key, one.body.type]), [['/api/act', 'older:retained::synthetic-0@synthetic-0', 'hide']])
   } finally { await board.close() }
 })
 
@@ -5896,18 +5963,21 @@ test('--tidy tells the blocks of two sessions with one title apart when it keeps
   assert.deepEqual(archivedCopies(swept.files).map(copy => copy.record.words), ['First session question, OK?'])
 })
 
-test('--tidy keeps a working or waiting block that asks, however old, while the ledger holds its question', () => {
+test('--tidy archives a working or waiting block that asks after seven days without a report and keeps it inside them, with the question kept', () => {
   const at = Date.now()
   const block = (session, state, hours) => `<!-- auto session=${session} agent=codex state=${state} updated=${new Date(at - hours * 3600000).toISOString()} -->\n### Plan ${session}\n- [?] Question of ${session}, OK?\n<!-- /auto session=${session} -->\n`
-  const board = `## Synthetic\n${block('a1b2c341', 'waiting', 100)}${block('a1b2c342', 'working', 24 * 40)}${block('a1b2c343', 'ended', 100)}`
+  const board = `## Synthetic\n${block('a1b2c341', 'waiting', 100)}${block('a1b2c342', 'working', 24 * 40)}${block('a1b2c343', 'ended', 100)}${block('a1b2c344', 'waiting', 144)}${block('a1b2c345', 'waiting', 24 * 8)}`
   const seed = chatRun(['--keys', ''], { file: () => board, inspect: sweepFiles })
   assert.equal(seed.status, 0, seed.stderr)
   const swept = chatRun(['--tidy'], { file: () => board, beside: seed.files, inspect: sweepFiles })
   assert.equal(swept.status, 0, swept.stderr)
-  assert.equal(swept.stdout, 'Archived 1 task.\n')
-  assert.ok(swept.board.includes('a1b2c341') && swept.board.includes('a1b2c342'), swept.board)
-  assert.ok(!swept.board.includes('a1b2c343'), swept.board)
-  assert.deepEqual(archivedCopies(swept.files).map(copy => copy.record.words), ['Question of a1b2c343, OK?'])
+  assert.equal(swept.stdout, 'Archived 3 tasks.\n')
+  assert.ok(swept.board.includes('a1b2c341') && swept.board.includes('a1b2c344'), swept.board)
+  for (const session of ['a1b2c342', 'a1b2c343', 'a1b2c345']) {
+    assert.ok(!swept.board.includes(session), swept.board)
+    assert.ok(swept.archive.includes(`Question of ${session}, OK?`), swept.archive)
+  }
+  assert.deepEqual(archivedCopies(swept.files).map(copy => copy.record.words).sort(), ['Question of a1b2c342, OK?', 'Question of a1b2c343, OK?', 'Question of a1b2c345, OK?'])
 })
 
 test('--tidy reports scheduled ages in every language and takes precedence over interactive modes', () => {

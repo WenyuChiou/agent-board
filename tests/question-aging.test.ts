@@ -3,7 +3,7 @@ import { ageQuestions, questionAge, QUESTION_DAY } from '../hooks/question-aging
 import { archiveQuestionsKept, captureCovers, captureJson, emptyQuestions, observeQuestions, parseCapture, parseQuestions, questionsJson, withCaptures } from '../hooks/questions'
 import { parseProgress } from '../hooks/parse'
 import { applyTaskCreate, applyTaskUpdate, emptyMirror } from '../hooks/mirror'
-import { renderAutoBlock, takeArchivable } from '../hooks/blocks'
+import { archivableAsking, renderAutoBlock, takeArchivable } from '../hooks/blocks'
 import { buildView } from '../hooks/view'
 import { boardItems, boardKey, boardScreen, boardText, chatText, emptyBoardState, peekInbox, pinned } from '../hooks/board'
 import { sha256 } from '../hooks/sha256'
@@ -211,6 +211,30 @@ test('complete retained source questions remain recoverable after explicit archi
   expect(reloaded.records[0]?.firstObserved).toBe(START)
 })
 
+test('a waiting block archived after seven days of silence keeps its question under Older unanswered, and a ledger lost afterwards gets it back from the saved copy', () => {
+  const text = board('- [?] Publish the synthetic plan, OK?')
+  const projects = parseProgress(text)
+  const ledger = observeQuestions(emptyQuestions(), projects, null, [], START, true, 'writer:1').ledger
+  const inside = START + 6 * QUESTION_DAY
+  expect(archivableAsking(text, inside)).toEqual([])
+  expect(takeArchivable(text, inside, undefined, STRINGS.en, false, () => true)).toEqual({ text, entries: [] })
+  const now = START + 7 * QUESTION_DAY + 60 * 60 * 1000
+  const asking = archivableAsking(text, now)
+  expect(asking).toHaveLength(1)
+  expect(archiveQuestionsKept(projects, asking[0]!.ref, ledger)).toBe(true)
+  const taken = takeArchivable(text, now, undefined, STRINGS.en, false, () => true)
+  expect(taken.entries).toHaveLength(1)
+  expect(taken.text).not.toContain('session=a1b2c3d4')
+  const record = ledger.records[0]!
+  const capture = { version: 1 as const, disposition: 'archived' as const, record }
+  for (const kept of [withCaptures(ledger, [capture]), withCaptures(emptyQuestions(), [capture])]) {
+    const view = buildView([], [], null, now, 0, {}, STRINGS.en, [], {}, kept)
+    expect(view.waiting).toEqual([])
+    expect(view.older?.map(question => question.text)).toEqual(['Publish the synthetic plan, OK?'])
+    expect(kept.records[0]?.firstObserved).toBe(START)
+  }
+})
+
 test('automatic archive never removes an unresolved question even in an ended or done block beyond seven days', () => {
   const now = START + 10 * QUESTION_DAY
   for (const state of ['ended', 'done', 'waiting']) {
@@ -397,15 +421,29 @@ test('aged shelf hide actions keep identity and stale fingerprints while retaine
     const repeatedItems = boardItems(buildView(live, [], null, now + 1, 0, {}, s, [], {}, repeated), [], false, true)
     expect(boardKey(state, 'h', repeatedItems, s).action).toBe(null)
     expect(repeated.records.find(row => row.isWaiting && row.isPresent)?.id === first.records[0]!.id).toBe(false)
-    const captured = withCaptures(emptyQuestions(), [{ version: 1, disposition: 'archived', record: first.records[0]! }])
+    // A retained source without a current producer stays review only.
+    const captured = withCaptures(emptyQuestions(), [{ version: 1, disposition: 'unresolved', record: first.records[0]! }])
     const retained = buildView([], [], null, now, 0, {}, s, [], {}, captured)
     const retainedItems = boardItems(retained, [], false, true)
     const selected = pinned({ ...emptyBoardState, isOlderOpen: true }, retainedItems)
     expect(boardKey(selected, 'h', retainedItems, s).action).toBe(null)
     expect(boardScreen(retained, [], selected, s, { width: 500, isColor: false }).includes(s.questionReviewOnly)).toBe(true)
     expect(serveAction(retainedItems, { key: retainedItems[0]!.key, type: 'hide' }, s).type).toBe('refuse')
-    expect(serveModel(retained, [], s).older.length).toBe(1)
+    const shelf = (model: ReturnType<typeof serveModel>) => [...model.reminder, ...model.older]
+    expect(shelf(serveModel(retained, [], s)).map(one => one.canHide)).toEqual([false])
     expect(servePage(s, 'synthetic-nonce').includes(s.questionReviewOnly)).toBe(true)
+    // One kept from an archived block can be hidden, from the terminal board and the page alike (#400).
+    const archived = withCaptures(emptyQuestions(), [{ version: 1, disposition: 'archived', record: first.records[0]! }])
+    const kept = buildView([], [], null, now, 0, {}, s, [], {}, archived)
+    const keptItems = boardItems(kept, [], false, true)
+    const keptState = pinned({ ...emptyBoardState, isOlderOpen: true }, keptItems)
+    expect(boardKey(keptState, 'h', keptItems, s).action).toEqual({ type: 'hide', key: first.records[0]!.id, text: 'Publish?' })
+    expect(boardScreen(kept, [], keptState, s, { width: 500, isColor: false }).includes(s.questionReviewOnly)).toBe(false)
+    // Nothing is running, so the note about archiving a live session does not belong on it.
+    expect(boardScreen(kept, [], keptState, s, { width: 500, isColor: false }).includes(s.archiveLive)).toBe(false)
+    expect(serveAction(keptItems, { key: keptItems[0]!.key, type: 'hide' }, s)).toEqual({ type: 'hide', key: first.records[0]!.id, text: 'Publish?' })
+    const keptModel = serveModel(kept, [], s).older
+    expect(keptModel.map(one => [one.canHide, one.key])).toEqual([[true, keptItems[0]!.key]])
   }
 })
 

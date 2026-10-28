@@ -211,10 +211,10 @@ const askingBoard = (): string => [
   ...askingBlock('ffffffff', 'waiting', 100, ['- [?] Waiting for an answer, OK?']),
 ].join('\n')
 
-test('a block that asks is listed for the question check only once its three days are over', () => {
+test('a block that asks is listed for the question check only once its three or seven quiet days are over', () => {
   const asking = archivableAsking(askingBoard(), NOW)
   // The ended and the done block; not the one 50 hours old, nor the one that asks nothing, nor a
-  // working or waiting one, however long since its last write.
+  // working or waiting one inside their seven days.
   expect(asking.map(one => one.ref.session)).toEqual(['aaaaaaaa', 'bbbbbbbb'])
   expect(asking.map(one => [one.ref.project, one.ref.title])).toEqual([['alpha', 'Plan aaaaaaaa'], ['alpha', 'Plan bbbbbbbb']])
   // The session's own block is never listed.
@@ -233,7 +233,7 @@ test('a block that asks is taken only when the check says its questions are kept
   expect(one.text).not.toContain('session=aaaaaaaa')
   expect(one.text).toContain('session=bbbbbbbb')
   expect(one.text).toContain('session=eeeeeeee')
-  // Even a yes for every block does not take the one still inside its three days, or a working or waiting one.
+  // Even a yes for every block leaves the ended one inside its three days, and working or waiting ones inside their seven days.
   const all = takeArchivable(text, NOW, undefined, STRINGS.en, false, () => true)
   expect(all.entries).toHaveLength(3)
   expect(all.text).toContain('session=cccccccc')
@@ -245,17 +245,22 @@ test('a block that asks is taken only when the check says its questions are kept
   expect(own.text).toContain('session=aaaaaaaa')
 })
 
-test('a working or waiting block that asks is never taken, however long since its last write', () => {
-  for (const state of ['working', 'waiting']) for (const hours of [100, 24 * 40]) {
+test('a working or waiting block that asks is taken after seven days without a report, and an ended or done one after three', () => {
+  for (const state of ['working', 'waiting']) for (const hours of [100, 144, 167, 168, 169, 24 * 40]) {
     const text = ['## alpha', ...askingBlock('jjjjjjjj', state, hours, ['- [?] Pick 24 hours or 7 days?'])].join('\n')
-    expect(archivableAsking(text, NOW)).toEqual([])
-    expect(takeArchivable(text, NOW, undefined, STRINGS.en, false, () => true).entries).toEqual([])
+    const isDue = hours > 168
+    expect(archivableAsking(text, NOW).map(one => one.ref.session)).toEqual(isDue ? ['jjjjjjjj'] : [])
+    const taken = takeArchivable(text, NOW, undefined, STRINGS.en, false, () => true)
+    expect(taken.entries).toHaveLength(isDue ? 1 : 0)
+    expect(taken.text.includes('session=jjjjjjjj')).toBe(!isDue)
+    expect(takeArchivable(text, NOW, undefined, STRINGS.en)).toEqual({ text, entries: [] })
   }
-  // The same block once it has ended or is done is taken.
-  for (const state of ['ended', 'done']) {
-    const text = ['## alpha', ...askingBlock('jjjjjjjj', state, 100, ['- [?] Pick 24 hours or 7 days?'])].join('\n')
-    expect(archivableAsking(text, NOW).map(one => one.ref.session)).toEqual(['jjjjjjjj'])
-    expect(takeArchivable(text, NOW, undefined, STRINGS.en, false, () => true).entries).toHaveLength(1)
+  for (const state of ['ended', 'done']) for (const hours of [60, 100]) {
+    const text = ['## alpha', ...askingBlock('jjjjjjjj', state, hours, ['- [?] Pick 24 hours or 7 days?'])].join('\n')
+    const isDue = hours > 72
+    expect(archivableAsking(text, NOW).map(one => one.ref.session)).toEqual(isDue ? ['jjjjjjjj'] : [])
+    expect(takeArchivable(text, NOW, undefined, STRINGS.en, false, () => true).entries).toHaveLength(isDue ? 1 : 0)
+    expect(takeArchivable(text, NOW, undefined, STRINGS.en)).toEqual({ text, entries: [] })
   }
 })
 
@@ -805,6 +810,19 @@ test('a stopped task keeps its question on the Stopped shelf and is not counted 
   expect(hidden.waiting).toEqual([])
   expect(hidden.hidden).toHaveLength(1)
   expect(hidden.stopped).toHaveLength(1)
+})
+
+test('a block that asks and has been silent for twelve hours is listed under Stopped with its question, not under Waiting', () => {
+  const at = (hours: number): string => ['## alpha', ...askingBlock('a1b2c400', 'waiting', hours, ['- [?] Publish the synthetic plan, OK?'])].join('\n')
+  const view = buildView(parseProgress(at(13)), [], null, NOW)
+  expect(view.waiting).toEqual([])
+  expect(view.overview.waiting).toBe(0)
+  expect(view.stopped).toHaveLength(1)
+  expect(view.stopped[0]?.questions?.map(question => question.text)).toEqual(['Publish the synthetic plan, OK?'])
+  expect(view.overview.stopped).toBe(1)
+  const recent = buildView(parseProgress(at(11)), [], null, NOW)
+  expect(recent.waiting).toHaveLength(1)
+  expect(recent.stopped).toEqual([])
 })
 
 test('an explicit done block keeps its unanswered question on the stopped shelf after its recent completion expires', () => {
