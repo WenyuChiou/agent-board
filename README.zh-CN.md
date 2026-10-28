@@ -85,7 +85,7 @@ CLI、桌面 App、IDE 的实际 hook 事件分开验收；装好了文件、传
 
 | | Agent | 看板命令 |
 |:-:|---|---|
-| <img src="docs/images/agents/claude-code.svg" width="20" alt="Claude Code"> | Claude Code | `/progress`（面板）、`/agent-board`（可操作的看板网页） |
+| <img src="docs/images/agents/claude-code.svg" width="20" alt="Claude Code"> | Claude Code | `/progress` |
 | <img src="docs/images/agents/codex.svg" width="20" alt="Codex"> | Codex CLI 和 App | `$agent-board` |
 | <img src="docs/images/agents/antigravity.svg" width="20" alt="Antigravity"> | Antigravity | `/agent-board`（在合成环境检查过，还没实机运行） |
 | <img src="docs/images/agents/opencode.svg" width="20" alt="OpenCode"> | OpenCode | `/board` |
