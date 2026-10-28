@@ -80,9 +80,10 @@ test('the full generated worker bundle runs through verified staging without rec
   // the structural checks above catch an embedded generated predecessor.
   assert.ok(Buffer.byteLength(code) < 1024 * 1024)
   // The cap only guards against the bundle containing itself, which roughly doubles its size.
-  // A 750,000-character cap still catches that. Each board-cli pull request adds about 5 KB,
-  // so a tighter cap fails on ordinary growth.
-  assert.ok(code.length < 750000)
+  // An 800,000-character cap still catches that. Each board-cli pull request adds about 5 KB,
+  // so a tighter cap fails on ordinary growth; the cap went from 750,000 when the bundle reached
+  // 747,490 characters on main and #400 added about 4 KB.
+  assert.ok(code.length < 800000)
   assert.ok(!code.includes('BOARD_SCRIPT'), 'the worker bundle embeds no earlier board bundle')
   const { digest, value } = stage(code)
   try {

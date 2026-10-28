@@ -2125,7 +2125,10 @@ test('a waiting or working block that asks is archived after seven days without 
     await ui.press({ key: 'section::older' })
     const pane = visiblePaneText(await ui.drawn())
     for (const question of archived) expect(pane).toContain(question)
-    expect(pane).not.toContain('Waiting question, OK?')
+    // The six-day waiting block stays, and it has been quiet for more than twelve hours, so its question sits
+    // on its Stopped row and is listed here too: four questions in stopped sessions in all.
+    expect(pane).toContain('Waiting question, OK?')
+    expect(pane).toContain('4 unanswered in stopped sessions')
   } finally { await ui.unmount() }
 })
 

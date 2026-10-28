@@ -85,6 +85,16 @@ test('a question in a stopped session is listed under Older once, with the age i
   expect(buildView(projects, [], null, STOPPED_NOW, 0, {}, STRINGS.en, [], {}, unknown).older?.[0]?.when).toBe(STRINGS.en.questionAgeUnknown)
 })
 
+test('a question first seen today in a block quiet for thirty days is listed under Older as thirty days old, not just now', () => {
+  const board = stoppedQuestionBoard(1).replace(/updated=\S+/, `updated=${new Date(STOPPED_NOW - 30 * 86400000).toISOString()}`)
+  const projects = parseProgress(board)
+  const ledger = observeQuestions(emptyQuestions(), projects, null, [], STOPPED_NOW, true, 'fixture:stopped').ledger
+  const view = buildView(projects, [], null, STOPPED_NOW, 0, {}, STRINGS.en, [], {}, ledger)
+  expect(view.older).toHaveLength(1)
+  expect(view.older![0]!.when).toBe(STRINGS.en.daysAgo(30))
+  expect(view.older![0]!.when).not.toBe(STRINGS.en.justNow)
+})
+
 test('a question on a Stopped row and in the Older list is counted once', () => {
   const projects = parseProgress(stoppedQuestionBoard(1))
   const ledger = observeQuestions(emptyQuestions(), projects, null, [], STOPPED_FIRST, true, 'fixture:stopped').ledger

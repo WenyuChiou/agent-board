@@ -1056,18 +1056,22 @@ export const buildView = (
   // A question that sits on a Stopped or recent row is also listed under Older, with the age it was
   // first asked, so the stopped-sessions line in Waiting has one list to open (#400). The row keeps its
   // own copy. A question the ledger loop already put there is not listed twice, and every stopped
-  // question is counted once by its id.
+  // question is counted once by its id. A board that first looks at a long-quiet block cannot have
+  // seen the question before the block's last write, so the question is at least that old: the age
+  // is taken from the earlier of the two, and never reads "just now" for a month-old block.
   const olderIds = new Set(older.flatMap(item => item.questionId === undefined ? [] : [item.questionId]))
-  for (const row of [...stopped.map(({ row }) => row), ...shownRecent]) {
-    for (const question of row.questions ?? []) {
+  const askedOn = [...stopped.map(({ row, updated }) => ({ questions: row.questions ?? [], updated })), ...shownRecent.map(item => ({ questions: item.questions ?? [], updated: 0 }))]
+  for (const { questions, updated } of askedOn) {
+    for (const question of questions) {
       const id = question.questionId
       if (id === undefined || marked.has(id)) continue
       const record = recordsById.get(id)
       if (record?.isUnresolved === false) continue
       stoppedQuestions.add(id)
       if (olderIds.has(id)) continue
-      const age = questionAge(record?.firstObserved ?? 0, now)
-      older.push({ ...question, key: `older::${question.key}`, ageStage: 'older', when: age.age === null ? s.questionAgeUnknown : relativeTime(record?.firstObserved ?? 0, now, s) })
+      const first = record?.firstObserved ?? 0
+      const askedAt = updated > 0 && updated < first ? updated : first
+      older.push({ ...question, key: `older::${question.key}`, ageStage: 'older', when: questionAge(first, now).age === null ? s.questionAgeUnknown : relativeTime(askedAt, now, s) })
       olderIds.add(id)
     }
   }

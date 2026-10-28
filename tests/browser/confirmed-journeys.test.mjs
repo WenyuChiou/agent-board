@@ -180,8 +180,10 @@ ${block('a11ce023', 'gemini', 'done', 'Synthetic archive', 'Completed synthetic 
       const before = record()
       assert.ok(before)
       await page.getByText('2 stopped', { exact: true }).click()
-      await page.getByText(words, { exact: false }).waitFor()
+      // The question shows on its Stopped row and, once, in the closed Older shelf: look at the row.
+      await page.getByRole('listitem').getByText(words, { exact: false }).waitFor()
       await page.getByRole('button', { name: 'Archive', exact: true }).click()
+      await page.getByRole('listitem').getByText(words, { exact: false }).waitFor({ state: 'detached' })
       await page.getByText('Older unanswered questions (1)', { exact: true }).click()
       await page.getByText(words, { exact: true }).waitFor()
       await page.getByText('Keep the active fixture visible', { exact: true }).waitFor()
