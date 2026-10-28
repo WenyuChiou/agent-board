@@ -93,7 +93,7 @@ The agent is the words before the first comma of the pull request's `Author:` li
 
 An agent below these aims two weeks running takes smaller issues for a while: one at a time, a single module with Node tests, and briefs whose Checks the maintainer writes. It goes back to normal after two first-review approvals in a row.
 
-<!-- part-b:start source=~/.claude/docs/PROJECT_WORKFLOW.md sha256=a7fa8b2842a77a1726abc845d8ced9dc2806d1d06b878bf76d7e00943c3d4d2c -->
+<!-- part-b:start source=PROJECT_WORKFLOW.md sha256=f6a68dab110a00e3d81c3f9c3105148ed54791da521a49aabc85c38600b46712 -->
 ## Part B — contributors (copied into each repo's workflow file)
 
 ### B1. The steps
@@ -117,8 +117,6 @@ Open an issue only where the repo's rules tell you to (agent-board: when no issu
 - In the PR body, give each issue its own `Fixes #N` or `Part of #N` line and its evidence (B1 step 6).
 - If review finds a problem in one issue, take that issue out of the PR (its changes, its changelog fragment and its `Fixes #N` or `Part of #N` line) and say so on the issue; fix it later in another PR, and do not hold up the rest.
 - One branch per PR, and at most one PR of yours waiting for review or CI.
-
-(Wenyu 2026-10-21: one issue per PR was too slow; 「新增功能(可以主要大功能發一個PR) bug 可以其中2-3個一起發」.)
 
 ### B4. Shared files
 - The repo file lists which files each lane owns. A PR that changes another lane's files needs one of its issues to name that lane.
