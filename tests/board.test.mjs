@@ -2447,11 +2447,11 @@ test('with explicit legacy opt-in a reply goes into a closed Grok session once, 
     assert.ok(!existsSync(join(board.dir, 'grok-ran.json')))
     const first = await call('POST', '/api/act', { body: { key, type: 'send', text: 'Redis', session: 'b2c3d4e5', asked: 'Redis or Memcached?', fp } })
     assert.equal(first.status, 202, first.body)
-    assert.equal(first.json().note, 'Sent to grok · Pick the cache; its reply shows here when it comes (it can take a few minutes).')
+    assert.equal(first.json().note, 'Sent to Grok Build · Pick the cache; its reply shows here when it comes (it can take a few minutes).')
     assert.equal((await rows()).find(row => row.key === key)?.isSending, true)
     const second = await call('POST', '/api/act', { body: { key, type: 'send', text: 'Memcached', session: 'b2c3d4e5', asked: 'Redis or Memcached?', fp } })
     assert.equal(second.status, 409)
-    assert.equal(second.json().note, 'Another message is on its way to this grok session; send again once it replies.')
+    assert.equal(second.json().note, 'Another message is on its way to this Grok Build session; send again once it replies.')
     // Closing now would cut the agent off halfway.
     const busy = await call('POST', '/api/close', { body: {} })
     assert.equal(busy.status, 409)
@@ -2463,7 +2463,7 @@ test('with explicit legacy opt-in a reply goes into a closed Grok session once, 
     }
     assert.equal(replies.length, 1, JSON.stringify(replies))
     assert.equal(replies[0].ok, true)
-    assert.equal(replies[0].note, 'Sent to grok · Pick the cache. It replied: Redis it is; wiring it up now.')
+    assert.equal(replies[0].note, 'Sent to Grok Build · Pick the cache. It replied: Redis it is; wiring it up now.')
     assert.equal((await rows()).find(row => row.key === key)?.isSending, false)
     const ran = JSON.parse(readFileSync(join(board.dir, 'grok-ran.json'), 'utf8'))
     assert.deepEqual(ran.args, ['-r', GROK_ID, '--single=About "Redis or Memcached?": Redis'])
@@ -2619,7 +2619,8 @@ const pageDom = async (html, first, { post, confirm, messaging, copyAllowed = fa
     click() {
       if (!this.disabled) this.events.click?.()
     }
-    focus() {}
+    focus() { document.activeElement = this }
+    blur() { if (document.activeElement === this) document.activeElement = null }
     scrollIntoView() { this.scrolled = true }
     setSelectionRange() {}
     select() { this.isSelected = true }
@@ -2703,12 +2704,16 @@ const pageDom = async (html, first, { post, confirm, messaging, copyAllowed = fa
   return {
     buttons: () => cardButtons(get('board')),
     boxes: () => get('board').querySelectorAll(),
-    send: () => boardButtons(get('board')).find(button => button.textContent === 'Send to grok'),
+    send: () => boardButtons(get('board')).find(button => button.textContent === 'Send to Grok Build'),
     requests, copies,
     copied,
     allButtons: () => document.querySelectorAll('button'),
     node: get,
-    key: event => document.events.keydown?.(event),
+    key: event => {
+      document.events.keydown?.(event)
+      if (['Enter', ' '].includes(event.key) && document.activeElement?.tag === 'button') document.activeElement.click()
+    },
+    active: () => document.activeElement,
     flush,
     settle,
     redraw: async next => {
@@ -2756,6 +2761,7 @@ test('the serve page and the terminal board answer every action with a visible l
     const first = await pageDom(html, model)
     const labels = first.buttons().map(button => button.textContent)
     for (const [index, label] of labels.entries()) {
+      if (label === words.serveMore) continue
       const dom = await pageDom(html, model, { post: async () => { throw new Error('synthetic offline') } })
       dom.boxes().forEach(box => { box.value = 'A synthetic reply' })
       const button = dom.buttons()[index]
@@ -3131,9 +3137,10 @@ test('every serve page action on every card kind from every agent answers with a
             return { ok: false, json: async () => ({ note: serverNote }) }
           } finally { fixture.disable(); refreshed = runtime.serveModel(runtime.view(), runtime.pending(), runtime.s) }
         } })
-        assert.equal(dom.buttons().length, projected.expected, `${cell.title}: exact offered button set`)
+        const actionButtons = dom.buttons().filter(button => button.textContent !== runtime.s.serveMore)
+        assert.equal(actionButtons.length, projected.expected, `${cell.title}: exact offered button set`)
         dom.boxes().forEach(box => { box.value = 'Synthetic reply' })
-        const button = dom.buttons()[index]
+        const button = actionButtons[index]
         assert.ok(button, `${cell.title}: button ${index}`)
         button.click()
         await dom.flush(); await dom.flush()
@@ -3247,7 +3254,7 @@ test("a background reply's result on the page appears next to its card", { timeo
       const box = dom.boxes().find(node => node.getAttribute('data-key').startsWith(`${ask.key}\u0001`))
       assert.ok(box, agent)
       box.value = 'Synthetic reply'
-      const send = dom.buttons().find(button => button.textContent === `Send to ${agent}` && pageCard(button).getAttribute('data-card-key') === ask.key)
+      const send = dom.buttons().find(button => button.textContent === `Send to ${EN.agentNames[agent]}` && pageCard(button).getAttribute('data-card-key') === ask.key)
       assert.ok(send, agent)
       send.click()
       await dom.flush(); await dom.flush()
@@ -4053,7 +4060,7 @@ test('the page keeps actionable progress delays without connection inventory or 
       const shown = dom.node('main').textContent
       assert.ok(shown.includes(s.sessionsWaiting), shown)
       assert.ok(shown.includes(s.sessionsTimedOut), shown)
-      assert.match(shown, /antigravity/)
+      assert.match(shown, /Antigravity/)
       assert.doesNotMatch(shown, /codex|receiv|收訊|接收|連線|连接|private-native-session|Private transport/i)
       sessions.splice(0)
       await dom.redraw(model)
@@ -5068,7 +5075,7 @@ test('with --lan the page also opens on the local network, with a token of its o
     const key = await keyOf('Pick the cache')
     const sent = await fetchAt(host, lanPort, 'POST', '/api/act', { 'x-board-token': phone }, { key, type: 'send', text: 'Redis', session: 'b2c3d4e5' })
     assert.equal(sent.status, 409)
-    assert.equal(sent.json().note, "A reply to grok runs a program on the computer, so it is sent from the computer's own page. You can copy the answer here.")
+    assert.equal(sent.json().note, "A reply to Grok Build runs a program on the computer, so it is sent from the computer's own page. You can copy the answer here.")
     assert.ok(!existsSync(join(board.dir, 'grok-ran.json')))
     // A tick from the phone is written the way the computer's page writes one.
     const fabrikam = await rowOf('Fabrikam fellowship')
@@ -6635,6 +6642,207 @@ const sourceAgentMarks = async () => {
   try { return await import('../hooks/page-look.ts') } finally { loader.deregister() }
 }
 
+const cardsModel = (agent = 'codex') => {
+  const ask = { key: 'ask', project: 'Demo', agent, task: 'Plan', text: 'Publish, OK?', note: 'A useful note', kind: 'confirm', chip: 'Confirm', answers: ['Yes', 'No'], canTick: false, canHide: true, command: 'echo demo', link: 'https://example.com', reopen: 'codex resume synthetic', send: 'none', fp: 'first' }
+  const row = { key: 'row', project: 'Demo', agent, title: 'Working plan', status: 'Working', tone: 'accent', total: 1, done: 0, steps: [], next: 'Next step', canArchive: true, canConfirm: true, resume: 'codex resume synthetic', send: 'none', hasCopyBox: true, fp: 'first' }
+  const retained = { project: 'Demo', agent, task: 'Retained plan', text: 'Older question', note: '', context: '', when: '9 days ago' }
+  return {
+    counts: { waiting: 1, active: 1, due: 0, today: 0 }, asks: [ask],
+    groups: [{ project: 'Demo', rows: [row] }],
+    turns: [{ key: 'turn', project: 'Demo', agent, text: 'Inbox update', isQuestion: false }],
+    older: [retained], reminder: [{ ...retained, text: 'Reminder question' }],
+    hidden: [{ key: 'hidden', project: 'Demo', agent, task: 'Hidden plan', text: 'Hidden question' }],
+    idle: [{ ...row, key: 'idle', title: 'Idle plan' }],
+    stopped: [{ ...row, key: 'stopped', title: 'Stopped plan' }], recent: [],
+  }
+}
+const cardWithKey = (dom, key) => {
+  const card = pressWalk(dom.node('board')).find(node => node.getAttribute('data-card-key') === key)
+  assert.ok(card, key)
+  return card
+}
+const isPageVisible = node => {
+  for (let one = node; one; one = one.parentNode) if (one.hidden) return false
+  return true
+}
+const cardActionNodes = card => pressWalk(card).filter(node =>
+  node.parentNode?.className === 'actions' && (node.tag === 'button' || node.tag === 'a') && node.getAttribute('aria-controls') === null,
+)
+
+test('the page names each agent by its brand name on questions, rows, turns and older questions', async () => {
+  for (const lang of ['en', 'zh-TW', 'zh-CN']) {
+    const html = await sourcePage(lang)
+    for (const [agent, name] of Object.entries(EN.agentNames)) {
+      const dom = await pageDom(html, cardsModel(agent))
+      assert.ok(cardWithKey(dom, 'ask').textContent.includes(`Demo · ${name} › Plan`))
+      const row = pressWalk(dom.node('board')).find(node => node.tag === 'summary' && node.textContent.includes('Working plan'))
+      assert.ok(row.textContent.includes(`Working · ${name}`))
+      assert.ok(cardWithKey(dom, 'turn').textContent.includes(`Demo · ${name}`))
+      const where = pressWalk(dom.node('board')).filter(node => node.className === 'where')
+      // A letter mark leads the line for an agent with no logo.
+      assert.ok(where.some(node => node.textContent.endsWith(`Demo · ${name} · Retained plan · 9 days ago`)))
+      const filter = sideButton(dom, `${name} 4`)
+      assert.ok(filter, `${lang}: ${name}`)
+      filter.click()
+      assert.ok(dom.node('scope').textContent.includes(`${name} ×`))
+      assert.ok(descendants(dom.node('scope')).some(node => node.getAttribute('aria-label') === ({ en: EN, 'zh-TW': ZH_TW, 'zh-CN': ZH_CN })[lang].removeFilter(name)))
+    }
+  }
+})
+
+test('a Claude Code card says Claude Code and a hand-kept task names no agent', async () => {
+  const model = cardsModel('')
+  model.asks.push({ ...model.asks[0], key: 'own-ask', task: 'My checklist', isOwn: true, canTick: true, answers: [] })
+  model.groups[0].rows.push({ ...model.groups[0].rows[0], key: 'own-row', title: 'My task', isOwn: true })
+  const dom = await pageDom(await sourcePage(), model)
+  assert.ok(cardWithKey(dom, 'ask').textContent.includes('Demo · Claude Code › Plan'))
+  assert.equal(cardWithKey(dom, 'own-ask').childNodes[0].textContent, 'Demo › My checklist')
+  const summaries = pressWalk(dom.node('board')).filter(node => node.tag === 'summary')
+  assert.ok(summaries.find(node => node.textContent.startsWith('Working plan')).textContent.includes('Claude Code'))
+  assert.ok(!summaries.find(node => node.textContent.startsWith('My task')).textContent.includes('Claude Code'))
+  assert.ok(sideButton(dom, 'Claude Code 4'))
+  assert.ok(sideButton(dom, 'Your own tasks 2'))
+})
+
+test('an agent without a brand name keeps its own name', async () => {
+  const html = await sourcePage()
+  for (const agent of ['My-agent', 'constructor', 'toString']) {
+    const dom = await pageDom(html, cardsModel(agent))
+    assert.ok(cardWithKey(dom, 'ask').textContent.includes(`Demo · ${agent} › Plan`))
+    assert.ok(sideButton(dom, `${agent} 4`))
+    assert.ok(pressWalk(cardWithKey(dom, 'ask')).some(node => node.className === 'ag ag-other'))
+  }
+  const dom = await pageDom(html, cardsModel('CODEX'))
+  assert.ok(cardWithKey(dom, 'ask').textContent.includes('Demo · Codex › Plan'))
+})
+
+test("every card kind on the page carries its agent's mark", async () => {
+  const dom = await pageDom(await sourcePage(), cardsModel())
+  for (const key of ['ask', 'row', 'idle', 'stopped', 'turn', 'hidden']) {
+    const card = cardWithKey(dom, key)
+    const root = ['row', 'idle', 'stopped'].includes(key) ? card.parentNode : card
+    assert.equal(pressWalk(root).filter(node => node.className === 'ag ag-codex').length, 1, key)
+  }
+  for (const text of ['Older question', 'Reminder question']) {
+    const question = pressWalk(dom.node('board')).find(node => node.className === 'q' && node.textContent === text)
+    assert.equal(pressWalk(question.parentNode).filter(node => node.className === 'ag ag-codex').length, 1, text)
+  }
+})
+
+test('a question card puts the answer buttons first and Copy resume command last', async () => {
+  const dom = await pageDom(await sourcePage(), cardsModel())
+  const card = cardWithKey(dom, 'ask')
+  assert.deepEqual(cardActionNodes(card).map(node => node.textContent), ['Yes', 'No', EN.serveCopyCommand, EN.answeredHide, EN.serveOpenLink, EN.serveCopyResume])
+  const answerRow = card.childNodes.findIndex(node => node.className === 'actions')
+  const composer = card.childNodes.findIndex(node => node.className === 'composer')
+  assert.ok(answerRow < composer)
+  assert.equal(card.childNodes[composer + 1].className, 'actions')
+  const row = cardWithKey(dom, 'row')
+  assert.ok(row.childNodes.findIndex(node => node.className === 'composer') < row.childNodes.findIndex(node => node.className === 'actions'))
+  assert.equal(cardActionNodes(row).at(-1).textContent, EN.serveCopyResume)
+})
+
+test('a card with more than three actions shows three and the rest behind More', async () => {
+  const dom = await pageDom(await sourcePage(), cardsModel())
+  for (const key of ['ask', 'row']) {
+    const card = cardWithKey(dom, key)
+    const actions = cardActionNodes(card)
+    assert.equal(actions.filter(isPageVisible).length, 3, key)
+    const more = pressWalk(card).filter(node => node.textContent === EN.serveMore && node.tag === 'button')
+    assert.equal(more.length, 1)
+    const panel = card.childNodes.find(node => node.id === more[0].getAttribute('aria-controls'))
+    assert.equal(panel.className, 'actions')
+    assert.equal(panel.hidden, true)
+    assert.equal(more[0].getAttribute('aria-expanded'), 'false')
+    assert.deepEqual(panel.childNodes.map(node => node.textContent), actions.slice(3).map(node => node.textContent))
+  }
+})
+
+test('a card with three actions or fewer shows no More button', async () => {
+  const html = await sourcePage()
+  for (const canHide of [false, true]) {
+    const model = cardsModel()
+    model.asks[0] = { ...model.asks[0], command: null, reopen: null, link: null, canHide }
+    model.groups[0].rows[0] = { ...model.groups[0].rows[0], resume: null, canConfirm: canHide }
+    const dom = await pageDom(html, model)
+    for (const key of ['ask', 'row']) {
+      const card = cardWithKey(dom, key)
+      assert.equal(cardActionNodes(card).length, canHide ? 3 : 2)
+      assert.ok(cardActionNodes(card).every(isPageVisible))
+      assert.ok(!pressWalk(card).some(node => node.tag === 'button' && node.textContent === EN.serveMore))
+    }
+  }
+})
+
+test('a question with four answers keeps all four visible', async () => {
+  const model = cardsModel()
+  model.asks[0] = { ...model.asks[0], kind: 'choose', answers: ['A', 'B', 'C', 'D'] }
+  const dom = await pageDom(await sourcePage(), model)
+  const card = cardWithKey(dom, 'ask')
+  assert.deepEqual(cardActionNodes(card).filter(isPageVisible).map(node => node.textContent), ['A', 'B', 'C', 'D'])
+  const more = pressWalk(card).find(node => node.tag === 'button' && node.textContent === EN.serveMore)
+  more.click()
+  assert.deepEqual(cardActionNodes(card).filter(isPageVisible).map(node => node.textContent), ['A', 'B', 'C', 'D', EN.serveCopyCommand, EN.answeredHide, EN.serveOpenLink, EN.serveCopyResume])
+})
+
+test('More opens and closes by keyboard and keeps its state across a refresh', async () => {
+  const model = cardsModel()
+  const html = await sourcePage()
+  const dom = await pageDom(html, model, { copyAllowed: true })
+  const moreFor = key => pressWalk(cardWithKey(dom, key)).find(node => node.tag === 'button' && node.textContent === EN.serveMore)
+  const panelFor = (key, more) => cardWithKey(dom, key).childNodes.find(node => node.id === more.getAttribute('aria-controls'))
+  let more = moreFor('ask')
+  assert.equal(more.type, 'button')
+  assert.notEqual(more.getAttribute('data-local'), null)
+  more.focus()
+  dom.key({ key: 'Enter' })
+  assert.equal(more.getAttribute('aria-expanded'), 'true')
+  assert.equal(panelFor('ask', more).hidden, false)
+  dom.key({ key: ' ' })
+  assert.equal(panelFor('ask', more).hidden, true)
+  more.click()
+  moreFor('row').click()
+  // Escape closes the panel the focus is in and sends the focus back to its More button.
+  panelFor('ask', more).childNodes[0].focus()
+  dom.key({ key: 'Escape' })
+  assert.equal(dom.active(), more)
+  assert.equal(more.getAttribute('aria-expanded'), 'false')
+  assert.equal(moreFor('row').getAttribute('aria-expanded'), 'true')
+  // A reply being typed elsewhere keeps the open panels; with no focus anywhere, Escape closes them.
+  dom.boxes()[0].focus()
+  dom.key({ key: 'Escape' })
+  assert.equal(moreFor('row').getAttribute('aria-expanded'), 'true')
+  dom.active().blur()
+  dom.key({ key: 'Escape' })
+  assert.equal(moreFor('row').getAttribute('aria-expanded'), 'false')
+  more.click()
+  more.focus()
+  await dom.redraw({ ...model, warning: 'Refresh' })
+  more = moreFor('ask')
+  assert.equal(more.getAttribute('aria-expanded'), 'true')
+  assert.equal(panelFor('ask', more).hidden, false)
+  assert.equal(dom.active(), more)
+  dom.buttons().find(node => pageCard(node).getAttribute('data-card-key') === 'ask' && node.textContent === EN.serveCopyCommand).click()
+  await dom.flush()
+  const result = pageCardResults(dom, 'ask').find(node => node.textContent === EN.copied)
+  assert.ok(result)
+  more.click()
+  assert.equal(result.textContent, EN.copied)
+  let isOffline = false
+  const offline = await pageDom(html, model, { getBoard: async () => {
+    if (isOffline) throw new Error('Synthetic offline')
+    return { ok: true, json: async () => ({ model, now: 1 }) }
+  } })
+  const offlineCard = cardWithKey(offline, 'ask')
+  const offlineMore = pressWalk(offlineCard).find(node => node.tag === 'button' && node.textContent === EN.serveMore)
+  isOffline = true
+  await offline.redraw(model)
+  assert.ok(!offlineMore.disabled)
+  assert.equal(cardActionNodes(offlineCard).find(node => node.textContent === EN.answeredHide).disabled, true)
+  offlineMore.click()
+  assert.equal(offlineMore.getAttribute('aria-expanded'), 'true')
+})
+
 test('official agent marks retain their source viewport on every board surface', async () => {
   const { agentMarkCss } = await sourceAgentMarks()
   const css = agentMarkCss()
@@ -6757,7 +6965,7 @@ test('offline notices and board warnings use the alert contrast colours', async 
 test('the serve page sidebar sorts the board by view, project and agent with counts', async () => {
   const model = redesignModel()
   const dom = await pageDom(redesignPage(), model)
-  for (const label of ['Everything 5', 'Waiting on you 2', 'In progress 1', 'Due soon 1', 'Stopped 1', 'Done recently 1', 'Alpha 3', 'Beta 2', 'codex 3', 'gemini 2']) assert.ok(sideButton(dom, label), label)
+  for (const label of ['Everything 5', 'Waiting on you 2', 'In progress 1', 'Due soon 1', 'Stopped 1', 'Done recently 1', 'Alpha 3', 'Beta 2', 'Codex 3', 'Gemini CLI 2']) assert.ok(sideButton(dom, label), label)
   assert.equal(descendants(dom.node('board')).find(node => node.className?.includes('ag-codex')).getAttribute('aria-hidden'), 'true')
   dom.boxes()[0].value = 'Synthetic draft'
   sideButton(dom, 'Alpha 3').click()
@@ -6786,7 +6994,7 @@ test('the serve page sidebar sorts the board by view, project and agent with cou
   delete own.recent[0].agent
   await dom.redraw(own)
   assert.ok(sideButton(dom, 'Your own tasks 1'))
-  assert.ok(sideButton(dom, 'claude 1'))
+  assert.ok(sideButton(dom, 'Claude Code 1'))
   for (const mark of ['ag ag-own', 'ag ag-claude-code']) assert.ok(descendants(dom.node('board')).some(node => node.className === mark), mark)
   const full = redesignModel()
   full.reminder = [{ project: 'Alpha', agent: 'codex', task: 'Retained', text: 'Reminder question' }]
@@ -6814,19 +7022,19 @@ test('the serve page sidebar sorts the board by view, project and agent with cou
 test("a sidebar filter that matches nothing shows that view's empty state and a way to clear it", async () => {
   const dom = await pageDom(redesignPage(), redesignModel())
   sideButton(dom, 'Stopped 1').click()
-  sideButton(dom, 'codex 3').click()
-  assert.ok(visibleWords(dom.node('board')).includes('Nothing here for codex.'))
+  sideButton(dom, 'Codex 3').click()
+  assert.ok(visibleWords(dom.node('board')).includes('Nothing here for Codex.'))
   assert.ok(!visibleWords(dom.node('board')).includes('Stopped plan'))
   const clear = dom.allButtons().find(button => button.textContent === 'Clear filters')
   assert.ok(clear && !clear.hidden)
   clear.click()
   assert.ok(visibleWords(dom.node('board')).includes('Stopped plan'))
-  assert.ok(!visibleWords(dom.node('board')).includes('Nothing here for codex.'))
-  sideButton(dom, 'gemini 2').click()
-  const chip = descendants(dom.node('scope')).find(node => node.getAttribute('aria-label') === 'Remove the gemini filter')
+  assert.ok(!visibleWords(dom.node('board')).includes('Nothing here for Codex.'))
+  sideButton(dom, 'Gemini CLI 2').click()
+  const chip = descendants(dom.node('scope')).find(node => node.getAttribute('aria-label') === 'Remove the Gemini CLI filter')
   assert.ok(chip)
   chip.click()
-  assert.equal(sideButton(dom, 'gemini 2').getAttribute('aria-pressed'), 'false')
+  assert.equal(sideButton(dom, 'Gemini CLI 2').getAttribute('aria-pressed'), 'false')
   const blank = { counts: { waiting: 0, active: 0, due: 0, today: 0 }, asks: [], hidden: [], idle: [], stopped: [], groups: [], turns: [], recent: [] }
   await dom.redraw(blank)
   assert.ok(visibleWords(dom.node('board')).includes('Nothing has stopped'))

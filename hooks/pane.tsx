@@ -12,6 +12,7 @@ import type {
 import type { PressOutcome, ProgressAnswer, ProgressPressResult, ProgressStepStatus, ResolveResult } from '../types'
 import type { Strings } from './i18n'
 import { ZH_TW } from './i18n'
+import { agentLabel } from './strings'
 import { askColor, stepColor, toneColor } from './palette'
 import type { Palette } from './palette'
 import { OLDER_SHOWN, progressBar, replyHint } from './view'
@@ -285,7 +286,7 @@ export const drawPane = (ui: PaneUi, model: PaneModel, actions: PaneActions): Re
     if (item.where === 'other') {
       const run = item.kind === 'do' ? item.command : null
       const open = item.kind === 'review' ? item.link : null
-      const hint = replyHint(item, s)
+      const hint = replyHint(item, s, true, true)
       return (
         <Box flexDirection="column">
           {run !== null && <Text color={palette.accent} wrap="wrap">{`$ ${run}`}</Text>}
@@ -409,7 +410,7 @@ export const drawPane = (ui: PaneUi, model: PaneModel, actions: PaneActions): Re
   const askDetail = (item: WaitingItem) => (
     <Box flexDirection="column">
       <Text color={palette.project} wrap="truncate-end">
-        {`${item.project} › ${item.task}${item.agent === '' ? '' : ` · ${item.agent}`}`}
+        {`${item.project} › ${item.task}${item.where === 'manual' ? '' : ` · ${agentLabel(item.agent || 'claude', s)}`}`}
       </Text>
       {item.note !== '' && <Text wrap="wrap">{item.note}</Text>}
       {item.note === '' && item.context !== '' && muted(s.contextLine(item.context))}
@@ -554,7 +555,7 @@ export const drawPane = (ui: PaneUi, model: PaneModel, actions: PaneActions): Re
   const taskRow = (row: TaskRow, showProject: boolean) => {
     const isRowOpen = model.expanded === row.key
     const tail = row.due === null ? `${row.done}/${row.total}` : row.due.left
-    const meta = [row.due === null ? '' : row.due.date, showProject ? row.project : '', row.agent, row.status, row.pr, row.when].filter(
+    const meta = [row.due === null ? '' : row.due.date, showProject ? row.project : '', row.auto === null ? '' : agentLabel(row.agent || 'claude', s), row.status, row.pr, row.when].filter(
       part => part !== '',
     )
 

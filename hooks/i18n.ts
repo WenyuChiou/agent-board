@@ -117,6 +117,7 @@ export const ZH_TW = {
   claudeWorking: 'Claude 正在做',
   agentWorking: (agent: string): string => `${agent} 正在做`,
   agentNames: {
+    claude: 'Claude Code',
     codex: 'Codex',
     gemini: 'Gemini CLI',
     cursor: 'Cursor',
@@ -581,6 +582,7 @@ export const ZH_TW = {
   serveCopyResume: '複製續接指令',
   serveCopyCommand: '複製指令',
   serveOpenLink: '打開連結',
+  serveMore: '更多',
   serveReplyPlaceholder: '你的回答…',
   serveManualReply: '這是手動記錄的問題，沒有可接收回覆的代理程式；請將該步驟標為完成。',
   serveMessagePlaceholder: (agent: string): string => `要跟 ${agent} 說的話…`,

@@ -2,6 +2,8 @@
 
 This page sets how much work is open at once, when a finding becomes an issue, and how a pull request goes from claim to merge. It applies to every agent and person working in this repository: Claude Code sessions, Codex, dot and Muse, and agents on other computers. [CONTRIBUTING.md, Pull requests](../../CONTRIBUTING.md#pull-requests) has the rules each pull request must meet; where the two disagree, CONTRIBUTING.md wins.
 
+If you work from outside the team, [CONTRIBUTOR-PATH.md](../CONTRIBUTOR-PATH.md) gives every step you need. The parts of this page about lanes, Codex runs, dot and Muse, the roadmap line and the weekly table are about the owner's own agents.
+
 ## Mode and settings
 
 This repository follows the multi-agent workflow standard that its maintainer keeps on the owner's computer. [Part B](#part-b--contributors-copied-into-each-repos-workflow-file), at the end of this page, is a copy of the steps that standard asks of every contributor. Where this page or CONTRIBUTING.md says something different, they win.
@@ -26,7 +28,7 @@ This repository follows the multi-agent workflow standard that its maintainer ke
 
 - Each author (an agent and its lane, CONTRIBUTING rule 10) works on one pull request at a time: one feature (it may span several issues), or two or three bug fixes, never more than three (CONTRIBUTING rule 2). It has at most one pull request waiting for review or CI. Claim the next issues after that pull request merges.
 - An author has at most two open pull requests (CONTRIBUTING rule 10). Open pull requests stay at six or fewer; eight is the hard cap.
-- Work in the next milestone only. Milestones after the next one are parked: no claims there until the release before them ships. Each new milestone opens with at most 15 issues, each with an owner, and the rest wait in Later.
+- Work in the next milestone only. Milestones after the next one are parked: no claims there until the release before them ships. An issue labelled `for-agent` is the exception: the maintainer labels it so an agent outside the team can take it whatever its milestone. Each new milestone opens with at most 15 issues, each with an owner, and the rest wait in Later.
 
 ## When a finding becomes an issue
 
@@ -36,7 +38,7 @@ A finding becomes a new issue only if it:
 - tells the person something untrue, or
 - blocks an open pull request.
 
-Anything else you find goes in a comment on one of your own issues (CONTRIBUTING rule 2), and the maintainer files it if it qualifies. The same problem on another surface is a comment on the issue that already has it. An audit or a test run that finds many problems hands in one list in a comment, not a batch of issues. Until fewer than 60 issues are open, at most three new issues a day. An issue that CONTRIBUTING.md requires (a merge without an approving review, rule 9; undoing a merged pull request, rule 11) is always allowed and does not count toward that limit.
+Anything else you find goes in a comment on one of your own issues (CONTRIBUTING rule 2), and the maintainer files it if it qualifies. The same problem on another surface is a comment on the issue that already has it. An audit or a test run that finds many problems hands in one list in a comment, not a batch of issues. Until fewer than 60 issues are open, at most three new issues a day. An issue that CONTRIBUTING.md requires (a merge without an approving review, rule 9; undoing a merged pull request, rule 11) is always allowed and does not count toward that limit. These limits are for the team's own findings: bug reports and ideas from anyone else are welcome through the issue forms.
 
 ## Closing more than we open
 
@@ -62,6 +64,14 @@ Each step is one comment on GitHub, so an agent on another computer can see whos
 ## Merge order
 
 When several pull requests are green, pull requests that change neither `hooks/board-script.ts` nor the string tables merge first, smallest first. Then pull requests that change either merge one at a time, the oldest Ready first. For each, the maintainer merges `main` into the branch, rebuilds the bundle with Bun 1.4.2, reviews the new head and comments `Review: APPROVE <new head sha>` (CONTRIBUTING rules 4 and 9), waits for CI and merges. Afterwards the maintainer comments "main moved, merge it" on the other open pull requests.
+
+## Pull requests from forks
+
+Checks on a pull request from a fork wait for a maintainer's approval, for every outside contributor and every push (the repository's Actions setting).
+
+- **Approving a run.** The maintainer looks for held runs at least once a day. Before approving, read the whole diff under Files changed, `.github/`, `scripts/` and `tests/` first: a pull request's own workflow files decide what its run does, and CI runs its own test files. Approve the run for the newest head only.
+- **If many arrive at once.** The owner can limit issues, comments and pull requests to people who have contributed before, for one week: `gh api -X PUT repos/WenyuChiou/agent-board/interaction-limits -f limit=contributors_only -f expiry=one_week`. `gh api -X DELETE repos/WenyuChiou/agent-board/interaction-limits` lifts it. It is a brake for a flood, not a standing rule.
+- **A pull request that skips the rules** gets one comment pointing to [CONTRIBUTOR-PATH.md](../CONTRIBUTOR-PATH.md) and what is missing. It is closed only if nothing changes in a week.
 
 ## Who takes which issue
 

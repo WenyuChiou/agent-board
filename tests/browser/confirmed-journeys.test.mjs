@@ -134,7 +134,7 @@ ${block('a11ce023', 'gemini', 'done', 'Synthetic archive', 'Completed synthetic 
       const board = new BoardPage(page)
       await board.open(await startServer())
       const card = board.task(before.title)
-      await card.getByText(/antigravity is working/).waitFor()
+      await card.getByText(/Antigravity is working/).waitFor()
 
       const marker = join(root, 'synthetic-progress-lock')
       const injection = join(root, 'synthetic-progress-lock.cjs')
@@ -156,7 +156,7 @@ ${block('a11ce023', 'gemini', 'done', 'Synthetic archive', 'Completed synthetic 
       assert.equal(after.state, 'waiting')
       assert.ok(queued.some(entry => entry.at === after.appliedAt))
       assert.deepEqual(readdirSync(join(data, 'pending')).filter(name => name.endsWith('.json')), [])
-      await card.getByText(/antigravity is working/).waitFor({ state: 'detached' })
+      await card.getByText(/Antigravity is working/).waitFor({ state: 'detached' })
       await card.getByText(/next: Waiting for the next instruction/).waitFor()
       assert.equal(existsSync(marker), false)
       writeFileSync(join(evidence, 'stop-recovery.json'), JSON.stringify({ releasedAt, observedAt: Date.now(), sourceAt: after.appliedAt, state: after.state, pendingAfter: 0, noNextHookOrManualRecovery: true }, null, 2))

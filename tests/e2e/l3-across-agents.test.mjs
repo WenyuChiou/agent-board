@@ -158,7 +158,7 @@ describe('L3 across agents and sessions', () => {
       const before = (await server.get('/api/board')).json().model
       assert.equal(before.stopped.filter(one => one.title === 'Resume gateway publishing').length, 1)
       block(world, { agent: 'codex', state: 'working', title: 'Resume gateway publishing', steps: ['- [~] Publish routes'] })
-      await seenPageWithin(server, text => text.includes('codex is working'), PAGE_MS)
+      await seenPageWithin(server, text => text.includes('Codex is working'), PAGE_MS)
       const after = (await server.get('/api/board')).json().model
       const rows = [...after.groups.flatMap(group => group.rows), ...after.stopped]
       assert.equal(rows.filter(one => one.title === 'Resume gateway publishing').length, 1)

@@ -18,7 +18,7 @@ import { applyTaskCreate, applyTaskUpdate, asData, cleanContext, cleanTitle, cli
 import { DARK, LIGHT, paletteFor } from '../hooks/palette'
 import { autoOf, doneKey, parseProgress } from '../hooks/parse'
 import { LANGS, RELAY, ZH_TW } from '../hooks/i18n'
-import { resolveLang, STRINGS } from '../hooks/strings'
+import { agentLabel, resolveLang, STRINGS } from '../hooks/strings'
 import { parseQuickAdd } from '../hooks/quick'
 import { keepRecent, remindersOf } from '../hooks/remind'
 import { lanAddress, localHosts, pagePolicy, pageWords, replyText, requestProblem, sendKey, sendMode, sendPlan, serveAction, serveModel, servePage } from '../hooks/serve'
@@ -643,6 +643,82 @@ test('what a waiting step asks decides its buttons: confirm, choose, do, review,
     kind: 'choose',
     options: ['0.7.0', '1.0.0'],
   })
+})
+
+test('a choice question with a note keeps its two options as buttons', () => {
+  for (const question of ['Which metric, win rate or Elo?', '用 win rate 還是 Elo？', '用 win rate 还是 Elo？']) {
+    const note = 'the reports will follow it'
+    const expected = { kind: 'choose', options: ['win rate', 'Elo'] }
+    expect(askOf(question, note)).toMatchObject(expected)
+    const projects = parseProgress('## Demo\n' + ['codex', 'claude'].map((agent, index) => {
+      const id = String(index + 1).repeat(8)
+      return `<!-- auto session=${id} agent=${agent} state=waiting updated=${new Date(NOW).toISOString()} -->\n### Metric ${agent}\n- [?] ${question} — ${note}\n<!-- /auto session=${id} -->\n`
+    }).join('\n'))
+    const view = buildView(projects, [], null, NOW, 0, {}, STRINGS.en)
+    expect(view.waiting).toHaveLength(2)
+    for (const item of view.waiting) expect(item).toMatchObject({ ...expected, text: question, note })
+    expect(serveModel(view, [], STRINGS.en).asks.map(item => item.answers)).toEqual([expected.options, expected.options])
+    const ledger = observeQuestions(emptyQuestions(), projects, null, [], NOW - 9 * 86400000, true, 'fixture:choice').ledger
+    const retained = buildView(projects, [], null, NOW, 0, {}, STRINGS.en, [], {}, ledger)
+    expect(retained.older).toHaveLength(2)
+    for (const item of retained.older ?? []) expect(item).toMatchObject({ ...expected, text: question, note })
+    expect(serveModel(retained, [], STRINGS.en).older.map(item => [item.text, item.note])).toEqual([[question, note], [question, note]])
+  }
+})
+
+test('a note that holds a choice does not replace the options in the question', () => {
+  expect(askOf('Which metric, win rate or Elo?', 'later we may use A or B?')).toMatchObject({ kind: 'choose', options: ['win rate', 'Elo'] })
+  expect(askOf('用 win rate 還是 Elo？', '之後用 A 還是 B？')).toMatchObject({ kind: 'choose', options: ['win rate', 'Elo'] })
+})
+
+test('options the agent gave win over options found in the question or the note', () => {
+  expect(askOf('win rate or Elo?', 'A or B?', { options: [' X ', 'Y', '', null] })).toMatchObject({ kind: 'choose', options: ['X', 'Y'] })
+  expect(askOf('win rate or Elo?', 'A or B?', { ask: 'choose', options: ['X'] }).options).toEqual(['X'])
+  expect(askOf('Which one?', 'A or B?', { options: 'X or Y?' })).toMatchObject({ kind: 'choose', options: ['A', 'B'] })
+  expect(askOf('Pick', `A or ${'B'.repeat(25)}?`, { ask: 'choose' }).options).toEqual(['A'])
+})
+
+test('a question with no choice still takes its options from the note', () => {
+  for (const note of ['win rate or Elo?', 'win rate 還是 Elo？', 'win rate 还是 Elo？']) {
+    expect(askOf('Pick', note)).toMatchObject({ kind: 'choose', options: ['win rate', 'Elo'] })
+  }
+  expect(askOf('Ready, OK?', 'a note with no choice')).toMatchObject({ kind: 'reply', options: [] })
+})
+
+test('a note that asks or points to something of its own decides the kind, whatever the question holds', () => {
+  const rows = [
+    { question: '測試還是紅的，要重跑嗎？', note: '要我直接重跑 CI 嗎？', kind: 'confirm' },
+    { question: '問題還是在嗎？', note: '可以關掉這個 issue 嗎？', kind: 'confirm' },
+    { question: 'build 還是壞的？', note: '請在本機跑 `npm ci`', kind: 'do', command: 'npm ci' },
+    { question: '預覽頁還是跑版？', note: '看一下 https://example.test/preview', kind: 'review', link: 'https://example.test/preview' },
+    { question: '預覽頁還是跑版？', note: '看一下預覽頁', kind: 'review' },
+    { question: 'Which build, old or new?', note: 'Please run the installer', kind: 'do' },
+    { question: 'Which build, old or new?', note: 'Run the installer', kind: 'do' },
+    { question: 'Should I merge #12 or not?', note: 'Shall I merge it now?', kind: 'confirm' },
+  ]
+  for (const { question, note, kind, command, link } of rows) {
+    expect(askOf(question, note)).toMatchObject({ kind, options: [], ...(command && { command }), ...(link && { link }) })
+  }
+  for (const [question, note] of [
+    ['用 win rate 還是 Elo？', '之後的報表會按照這個算'],
+    ['用 win rate 還是 Elo？', '我建議 Elo'],
+    ['Which metric, win rate or Elo?', 'the runs will follow it'],
+    ['Which metric, win rate or Elo?', 'the reviewers asked for one'],
+    ['Which metric, win rate or Elo?', 'click-through rate is the same'],
+    ['Which metric, win rate or Elo?', 'run-to-run variance is small'],
+    ['Which metric, win rate or Elo?', ''],
+    ['Which metric, win rate or Elo?', 'the reports will follow it'],
+  ]) {
+    expect(askOf(question, note)).toMatchObject({ kind: 'choose', options: ['win rate', 'Elo'] })
+  }
+})
+
+test('agent labels read only brand names owned by the table and preserve an empty agent', () => {
+  for (const s of Object.values(STRINGS)) {
+    expect(agentLabel('claude', s)).toBe('Claude Code')
+    expect(agentLabel('CODEX', s)).toBe('Codex')
+    for (const agent of ['', 'custom-agent', 'constructor', 'toString']) expect(agentLabel(agent, s)).toBe(agent)
+  }
 })
 
 test('the focus is the most pressing thing: an answer here, then elsewhere, then today, then stuck, then waiting on others', () => {
@@ -1909,7 +1985,7 @@ test('a turn that only showed the board is not work, in any language or agent', 
 
 test('a reply that is the printed board and a sentence is a look at the board, asked in plain words, while work that shows it too is not', () => {
   const said = (prompt: string, answer: string) => readTurn('grok-turn-1-1.json', JSON.stringify({ session_id: 's', cwd: '/w/app', prompt, last_assistant_message: answer }))
-  const board = 'Progress  ● 2 waiting  ▸ 5 in progress  ⚑ 0 due soon  ✓ 1 done today\n\n● Waiting on you\n  api-gateway › Rate limits\n    [Choose] 100 or 300 a minute?\n\n▸ api-gateway  1 item · 1 working\n  Rate limits\n    1/3 grok is working\n'
+  const board = 'Progress  ● 2 waiting  ▸ 5 in progress  ⚑ 0 due soon  ✓ 1 done today\n\n● Waiting on you\n  api-gateway › Rate limits\n    [Choose] 100 or 300 a minute?\n\n▸ api-gateway  1 item · 1 working\n  Rate limits\n    1/3 Grok Build is working\n'
   const zh = '進度  ● 2 等你  ▸ 5 進行中  ⚑ 0 快到期  ✓ 1 今天完成\n\n● 現在最需要你\n  api-gateway › 限流\n'
   // Grok Build took "我想看一下進度" for the board skill: the request alone does not say so.
   expect(isBoardTurn(said('我想看一下目前所有專案的進度', `\`\`\`\n${zh}\`\`\`\n\n先回 persona_framework 的 T10：三個重判決定還等你拍板。`)!)).toBe(true)
@@ -2847,7 +2923,7 @@ test('with explicit legacy opt-in the page offers a send only into a Grok or Cod
   const row = (title: string) => [...model.groups.flatMap(group => group.rows), ...model.stopped].find(one => one.title === title)
   expect(row('Pick the cache')).toMatchObject({ send: 'send', where: '/w/api-gateway', info: '', isSending: false })
   const codex = model.asks.find(ask => ask.agent === 'codex')
-  expect(codex).toMatchObject({ send: 'open', info: STRINGS.en.serveSendOpen('codex'), where: '' })
+  expect(codex).toMatchObject({ send: 'open', info: STRINGS.en.serveSendOpen('Codex'), where: '' })
   expect(codex?.answers.length).toBeGreaterThan(0)
   // A hand-kept question is the person's own: ticking it is the answer, with nothing to copy.
   expect(model.asks.find(ask => ask.project === 'docs-site')).toMatchObject({ send: 'none', answers: [], canTick: true, info: '' })
@@ -2914,7 +2990,7 @@ test('a press on the page is worked out from the file as it is now: a line that 
   expect(resumeAction(items, { key: 'row:gone', type: 'tick', text: '', session: '' }, STRINGS.en)).toEqual({ type: 'refuse', note: STRINGS.en.boardLineChanged })
   // An open Codex session is answered in its own window.
   const codex = keyOf(item => item.type === 'ask' && item.ask.agent === 'codex')
-  expect(resumeAction(items, { key: codex, type: 'send', text: '300', session: 'a1b2c3d4' }, STRINGS.en)).toEqual({ type: 'refuse', note: STRINGS.en.serveSendOpen('codex') })
+  expect(resumeAction(items, { key: codex, type: 'send', text: '300', session: 'a1b2c3d4' }, STRINGS.en)).toEqual({ type: 'refuse', note: STRINGS.en.serveSendOpen('Codex') })
   const manual = keyOf(item => item.type === 'ask' && item.ask.project === 'docs-site')
   expect(resumeAction(items, { key: manual, type: 'tick', text: '', session: '', fp: fpIn(items, manual) }, STRINGS.en).type).toBe('tick')
   expect(resumeAction(items, { key: manual, type: 'send', text: 'yes', session: '' }, STRINGS.en)).toEqual({ type: 'refuse', note: STRINGS.en.serveManualReply })
@@ -3077,7 +3153,7 @@ test('from the local network a reply to an agent is offered as a copy, and refus
   const model = resumeModel(serveView(), [], STRINGS.en, new Set(), true)
   const rows = [...model.groups.flatMap(group => group.rows), ...model.stopped]
   // The row keeps a box to write the answer in and copy it, as the note says.
-  expect(rows.find(one => one.title === 'Pick the cache')).toMatchObject({ send: 'open', where: '', info: STRINGS.en.serveLanSend('grok'), hasCopyBox: true })
+  expect(rows.find(one => one.title === 'Pick the cache')).toMatchObject({ send: 'open', where: '', info: STRINGS.en.serveLanSend('Grok Build'), hasCopyBox: true })
   expect(resumeModel(serveView(), [], STRINGS.en).stopped.find(one => one.title === 'Pick the cache')).toMatchObject({ send: 'send', hasCopyBox: false })
   // Nor is a command to resume a session shown there: it names the session's folder.
   const ended = buildView(
@@ -3098,13 +3174,13 @@ test('from the local network a reply to an agent is offered as a copy, and refus
   expect(resumeOf(false)).toContain('claude --resume dddddddd-1111')
   expect(resumeOf(true)).toBe(null)
   // What was not a send stays as it was.
-  expect(model.asks.find(ask => ask.agent === 'codex')).toMatchObject({ send: 'open', info: STRINGS.en.serveSendOpen('codex') })
+  expect(model.asks.find(ask => ask.agent === 'codex')).toMatchObject({ send: 'open', info: STRINGS.en.serveSendOpen('Codex') })
   expect(rows.find(one => one.title === 'Dark mode for the settings page')?.send).toBe('claude')
   const items = boardItems(serveView(), [])
   const key = items.find(item => item.type === 'row' && item.row.title === 'Pick the cache')?.key ?? ''
   const press = { key, type: 'send', text: 'Redis', session: GROK.session, asked: 'Redis or Memcached?', fp: fpIn(items, key) }
   expect(resumeAction(items, press, STRINGS.en).type).toBe('send')
-  expect(resumeAction(items, press, STRINGS.en, true)).toEqual({ type: 'refuse', note: STRINGS.en.serveLanSend('grok') })
+  expect(resumeAction(items, press, STRINGS.en, true)).toEqual({ type: 'refuse', note: STRINGS.en.serveLanSend('Grok Build') })
   expect(resumeAction(items, { ...press, type: 'archive' }, STRINGS.en, true)).toMatchObject({ type: 'archive', title: 'Pick the cache' })
 })
 
@@ -3135,7 +3211,7 @@ test("on the local network every agent's task shows as on the computer, except t
     const here = computer.find(row => who(row) === agent)
     const there = lan.find(row => who(row) === agent)
     if (here === undefined || there === undefined) throw new Error(`no row for ${agent}`)
-    if (here.send === 'send') expect(there).toEqual({ ...here, send: 'open', where: '', info: STRINGS.en.serveLanSend(agent), hasCopyBox: true, resume: null })
+    if (here.send === 'send') expect(there).toEqual({ ...here, send: 'open', where: '', info: STRINGS.en.serveLanSend(agentLabel(agent, STRINGS.en)), hasCopyBox: true, resume: null })
     else expect(there).toEqual({ ...here, resume: null })
   }
   // Claude's row has a command to resume it on the computer, which stays there.

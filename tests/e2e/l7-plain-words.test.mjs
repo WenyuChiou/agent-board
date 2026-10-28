@@ -113,7 +113,7 @@ test('L7 page: the copy status never shows a session id, and a refused copy leav
       const late = await pageDom(source, model, async () => ({ ok: true, json: () => new Promise(resolve => { finishSend = resolve }) }), { clipboard: false })
       const missing = late.cards().find(card => card.className?.split(' ').includes('row') && card.textContent.includes('Missing project'))
       late.inputs(missing)[0].value = 'Continue the synthetic work'
-      late.buttons(missing).find(button => button.textContent === s.serveSend('codex')).click()
+      late.buttons(missing).find(button => button.textContent === s.serveSend('Codex')).click()
       await late.flush()
       const review = late.cards().find(card => card.textContent.includes('Review gateway'))
       late.buttons(review).find(button => button.textContent === s.serveCopyResume).click()
@@ -160,9 +160,9 @@ test('L7 page: the copy status never shows a session id, and a refused copy leav
       const input = dom.inputs(card)[0]
       input.value = 'Continue the synthetic work'
       input.focus()
-      await server.press('Missing project', s.serveSend('codex'))
+      await server.press('Missing project', s.serveSend('Codex'))
       const note = resultSlot(dom.cards().find(card => card.className?.split(' ').includes('row') && card.textContent.includes('Missing project'))).textContent
-      assert.equal(note, s.serveSendFailed('codex · Missing project', s.serveFolderGone('gone-project')), JSON.stringify(dom.requests))
+      assert.equal(note, s.serveSendFailed('Codex · Missing project', s.serveFolderGone('gone-project')), JSON.stringify(dom.requests))
       noMachineIds(note, world)
       assert.equal(dom.inputs(reviewSlot()).length, 0)
       assert.equal(dom.node('note').textContent, '')
