@@ -1,8 +1,8 @@
 # From an issue to a merged pull request
 
-This page is for an agent working on Agent Board from another computer, with `git`, `gh` (logged in to GitHub) and Node 22.18+ or 24. It gives the commands for [CONTRIBUTING.md, Pull requests](../CONTRIBUTING.md#pull-requests); where the two disagree, CONTRIBUTING.md wins. Every command runs as written in bash on Linux and in Git Bash on Windows. On macOS, the `date` in step 2 is the one command known to differ; it falls back to macOS's own form (`-v`). macOS has not been tried. Nothing here needs Claude Code, files on the maintainer's computer or a chat: everything happens in the repository, its issues and its pull requests.
+This page is for a person or an agent working on Agent Board from another computer, with `git`, `gh` (logged in to GitHub) and Node 22.18+ or 24. It gives the commands for [CONTRIBUTING.md, Pull requests](../CONTRIBUTING.md#pull-requests); where the two disagree, CONTRIBUTING.md wins. Every command runs as written in bash on Linux and in Git Bash on Windows. On macOS, the `date` in step 2 is the one command known to differ; it falls back to macOS's own form (`-v`). macOS has not been tried. Nothing here needs Claude Code, files on the maintainer's computer or a chat: everything happens in the repository, its issues and its pull requests.
 
-Below, `<agent>` is your name in lower case (`codex`, `dot`, `muse`, `cursor`). An agent that a coordinating session sent adds that session's lane in brackets (`codex (phase1)`). `<N>` is the issue (each issue, when your pull request names several), `<PR>` your pull request and `<branch>` your branch, named `<type>/<short-slug>` (`fix/question-ledger-write`).
+Below, `<agent>` is your name in lower case: your agent's name (`codex`, `dot`, `muse`, `cursor`), or your GitHub login if you work by hand. An agent working for someone outside the team adds that person's GitHub login in brackets (`claude (octocat)`). An agent that a coordinating session sent adds that session's lane in brackets (`codex (phase1)`). `<N>` is the issue (each issue, when your pull request names several), `<PR>` your pull request and `<branch>` your branch, named `<type>/<short-slug>` (`fix/question-ledger-write`).
 
 ## How a pull request moves
 
@@ -15,7 +15,7 @@ gh issue list -R WenyuChiou/agent-board --state open --label ready --label for-a
 gh issue list -R WenyuChiou/agent-board --state open --label ready --label for-dot     # dot or Muse (rule 3)
 ```
 
-Take one without `claimed` or `blocked`. Its body says what to change and what is out of scope, the **Acceptance tests** (the test titles your pull request adds), the **Executor** and what it is **Blocked by**. The body is the current scope. If a comment seems to change it, ask (step 8).
+Take one from the first list (the second is kept for the owner's cloud agents, dot and Muse), without `claimed` or `blocked`. An empty first list means no issue is open to agents outside the team right now; the maintainer adds `for-agent` when one is. Meanwhile bug reports and ideas are welcome through the issue forms, and you may open an issue for a change you would like to make and say you would like to take it. The issue's body says what to change and what is out of scope, the **Acceptance tests** (the test titles your pull request adds), the **Executor** and what it is **Blocked by**. The body is the current scope. If a comment seems to change it, ask (step 8).
 
 ## 2. Claim it
 
@@ -24,7 +24,7 @@ gh pr list -R WenyuChiou/agent-board --state open
 gh issue view <N> -R WenyuChiou/agent-board --comments
 ```
 
-Go on only if nobody has an open pull request for the issue or a `Claim:` whose time has not passed, you have no issue in progress outside this pull request (claim the next only after your last pull request merges), the issue is in the next milestone (later milestones are parked), and you have a free slot ([docs/dev/team-process.md, One thing at a time](dev/team-process.md#one-thing-at-a-time)). A slot is rule 10: at most two open pull requests per author and eight in all. Drafts count; release pull requests, governance pull requests and those labelled `cap-exempt` do not. Keep open pull requests at six or fewer; eight is the hard cap. One pull request covers one feature (even when it spans several issues) or two or three bug fixes, never more than three; claim every issue it will name, with the same branch ([CONTRIBUTING.md](../CONTRIBUTING.md#pull-requests) rules 2 and 3). Then claim each one, at most two days ahead:
+Go on only if nobody has an open pull request for the issue or a `Claim:` whose time has not passed, you have no issue in progress outside this pull request (claim the next only after your last pull request merges), the issue is in the next milestone (later milestones are parked; an issue labelled `for-agent` is open to you whatever its milestone), and you have a free slot ([docs/dev/team-process.md, One thing at a time](dev/team-process.md#one-thing-at-a-time)). A slot is rule 10: at most two open pull requests per author and eight in all. Drafts count; release pull requests, governance pull requests and those labelled `cap-exempt` do not. Keep open pull requests at six or fewer; eight is the hard cap. One pull request covers one feature (even when it spans several issues) or two or three bug fixes, never more than three; claim every issue it will name, with the same branch ([CONTRIBUTING.md](../CONTRIBUTING.md#pull-requests) rules 2 and 3). Then claim each one, at most two days ahead:
 
 ```sh
 until=$(date -u -d '+1 day' '+%Y-%m-%d %H:%M' 2>/dev/null || date -u -v+1d '+%Y-%m-%d %H:%M')
@@ -62,7 +62,7 @@ Your fork is then `origin` and this repository `upstream`. From then on:
 - add `--base upstream/main` to `node scripts/pr-check.mjs --body-file …`;
 - run `git fetch upstream` first, then add `--base upstream/main --no-fetch` to `node scripts/preflight.mjs …`, which otherwise fetches `main` from `origin`, your fork.
 
-GitHub may hold CI on a first pull request from a fork until the maintainer lets it run.
+GitHub holds the PR check and CI on a pull request from a fork until a maintainer approves each run (step 6).
 
 Follow [AGENTS.md](../AGENTS.md), Working on this repository, for where code goes and how it is written. A change to `AGENTS.md`, `CONTRIBUTING.md` or anything under `.github/` needs the owner's written approval of its content, quoted in the pull request body ([CONTRIBUTING.md](../CONTRIBUTING.md#pull-requests) rule 12). Use synthetic data only: made-up projects, sessions and paths.
 
@@ -136,7 +136,7 @@ gh pr create -R WenyuChiou/agent-board --draft --title "fix(cli): <summary>" --b
 node scripts/pr-check.mjs --pr <PR>
 ```
 
-From a fork, `gh pr create` also needs `--head <your GitHub login>:<branch>`. The PR check prints what is still missing and how to fix it. After you edit the body, update the pull request with `gh pr edit <PR> -R WenyuChiou/agent-board --body-file ../pr-body.md`; the check runs again.
+From a fork, `gh pr create` also needs `--head <your GitHub login>:<branch>`, and GitHub holds the PR check and CI until a maintainer approves the run. Each push, body edit, label change or `gh pr ready` starts a run that waits again; the maintainer looks for held runs at least once a day. So push when a piece of work is done, not after every small edit, and keep the pull request a draft until the approved runs pass (rule 7). The PR check prints what is still missing and how to fix it. After you edit the body, update the pull request with `gh pr edit <PR> -R WenyuChiou/agent-board --body-file ../pr-body.md`; the check runs again.
 
 If the PR check says you are over the open pull request limit, close the newest of yours (`gh pr close <PR> -R WenyuChiou/agent-board`) and, once a slot is free, open a new pull request from the same branch. Do not reopen the closed one: it would keep its first place in the queue.
 

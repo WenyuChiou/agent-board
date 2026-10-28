@@ -79,10 +79,12 @@ test('the full generated worker bundle runs through verified staging without rec
   // Staged code has no argv size limit. This is only a coarse growth alarm;
   // the structural checks above catch an embedded generated predecessor.
   assert.ok(Buffer.byteLength(code) < 1024 * 1024)
-  // The cap only guards against the bundle containing itself, which roughly doubles its size.
-  // A 750,000-character cap still catches that. Each board-cli pull request adds about 5 KB,
-  // so a tighter cap fails on ordinary growth.
-  assert.ok(code.length < 750000)
+  // A bundle built twice into itself repeats every module banner, so each hooks/ module appears once.
+  // An earlier build embedded as a string keeps its banners inside the string: the BOARD_SCRIPT
+  // checks and the byte cap catch that. A character cap was only a guess, and ordinary growth reached it.
+  const modules = code.match(/^\/\/ hooks\/[\w./-]+\.tsx?$/gm) ?? []
+  assert.ok(modules.length > 20, 'the worker bundle carries its hooks/ module banners')
+  assert.equal(new Set(modules).size, modules.length, 'each hooks/ module appears once in the worker bundle')
   assert.ok(!code.includes('BOARD_SCRIPT'), 'the worker bundle embeds no earlier board bundle')
   const { digest, value } = stage(code)
   try {
