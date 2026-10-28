@@ -19,7 +19,7 @@ import { DARK, LIGHT } from '../../hooks/palette'
 import type { Palette } from '../../hooks/palette'
 import { parseProgress } from '../../hooks/parse'
 import { emptyQuestions } from '../../hooks/questions'
-import { STRINGS } from '../../hooks/strings'
+import { STRINGS, agentLabel } from '../../hooks/strings'
 import { buildView, replyHint } from '../../hooks/view'
 import { CLI_FILES, COVER, COVER_AGENTS, COVER_MARKS, COVER_MOMENTS, NOW, SAMPLES, SESSION, MIN, coverFile } from './samples'
 import type { CoverAgent, CoverSample } from './samples'
@@ -1021,7 +1021,7 @@ const rowKey = (row: Grid[number] | undefined): string =>
 // stranger cannot place: the one under an open question to reply in the agent's own session
 // (scene 4's words say the answer is copied for Codex, and "can't reply from here" would read as
 // the opposite at a glance), and the one under a live session's line to archive it once it stops.
-// And it names each agent once, as its tile does: the board today says "codex is working · codex".
+// And it names each agent once, as its tile does: the board today says "Codex is working · codex".
 const coverBoard = (lang: Lang, mode: Mode, m: number, cols: number): Grid => {
   const s = STRINGS[lang]
   const c = COVER[lang] as CoverSample
@@ -1044,7 +1044,7 @@ const coverBoard = (lang: Lang, mode: Mode, m: number, cols: number): Grid => {
   const hints = new Set([s.archiveLive, ...items.flatMap(one => (one.type === 'ask' ? [replyHint(one.ask, s).where] : []))].filter(hint => hint !== '').map(hint => `    ${fit(hint, cols - 6)}`.trimEnd()))
   const isHint = (i: number): boolean => hints.has((plain[i] ?? '').trimEnd())
   const withNames = (line: string): string =>
-    COVER_AGENTS.reduce((text, agent) => text.replace(`${s.agentWorking(agent)} · ${agent}`, s.agentWorking(COVER_NAMES[agent])).replace(` · ${agent} › `, ` · ${COVER_NAMES[agent]} › `), line)
+    COVER_AGENTS.reduce((text, agent) => text.replace(`${s.agentWorking(agentLabel(agent, s))} · ${agent}`, s.agentWorking(COVER_NAMES[agent])).replace(` · ${agent} › `, ` · ${COVER_NAMES[agent]} › `), line)
   return ansiGrid(`${lines.slice(0, -2).filter((_, i) => !isHint(i)).map(withNames).join('\n')}\n`, coverPalette(mode))
 }
 

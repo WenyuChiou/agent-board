@@ -145,7 +145,8 @@ describe('L2 a working day', { concurrency: 2 }, () => {
       const initial = await createPage()
       const labels = initial.cards().flatMap(card => initial.buttons(card).map(button => ({ card: card.textContent.includes('Publish page report') ? 'Publish page report' : 'Publish docs', label: button.textContent })))
       assert.ok(labels.length > 0)
-      for (const { card: title, label } of labels) {
+      // More only shows or hides the buttons behind it; each of those is pressed in its own turn.
+      for (const { card: title, label } of labels.filter(one => one.label !== EN.serveMore)) {
         const page = await createPage()
         const card = page.cards().find(one => one.textContent.includes(title) && page.buttons(one).some(button => button.textContent === label))
         assert.ok(card, `${title}: ${label}`)

@@ -5,6 +5,7 @@ import { htmlLang } from './dashboard'
 import { AGENT_ALIASES, agentMarkCss, boardMark, pageBaseCss, pageTokens, themeHead, themeSwitch } from './page-look'
 import { RELAY, ZH_TW } from './i18n'
 import type { Strings } from './i18n'
+import { agentLabel } from './strings'
 import type { Tone } from './palette'
 import { RESUME } from './parse'
 import { replyHint, wayBackText } from './view'
@@ -191,9 +192,10 @@ export type ServeModel = {
 
 // `task` and `session` name the Claude Code session to answer in, the way the pane does.
 const infoOf = (mode: SendMode, agent: string, task: string, session: string, s: Strings): string => {
-  if (mode === 'open') return s.serveSendOpen(agent)
+  const name = agentLabel(agent || 'claude', s)
+  if (mode === 'open') return s.serveSendOpen(name)
   if (mode === 'claude') return s.replyElsewhere(task, '', '')
-  if (mode === 'none') return s.serveSendNone(agent)
+  if (mode === 'none') return s.serveSendNone(name)
 
   return ''
 }
@@ -204,7 +206,7 @@ const infoOf = (mode: SendMode, agent: string, task: string, session: string, s:
 export const serveModel = (view: View, pending: readonly PendingTurn[], s: Strings = ZH_TW, sending: ReadonlySet<string> = new Set(), isLan = false, messaging?: Messaging, allowResume = false): ServeModel => {
   const isSending = (target: AgentTarget | null): boolean => target !== null && sending.has(sendKey(target))
   const onLan = (mode: SendMode): SendMode => (isLan && mode === 'send' ? 'open' : mode)
-  const lanInfo = (mode: SendMode, agent: string): string | null => (isLan && mode === 'send' ? s.serveLanSend(agent) : null)
+  const lanInfo = (mode: SendMode, agent: string): string | null => (isLan && mode === 'send' ? s.serveLanSend(agentLabel(agent || 'claude', s)) : null)
   const asks: ServeAsk[] = []
   const groups = new Map<string, ServeRow[]>()
   const idle: ServeRow[] = []
@@ -222,7 +224,7 @@ export const serveModel = (view: View, pending: readonly PendingTurn[], s: Strin
       const mode = connection ? 'connected' : (messaging || !allowResume) && baseMode === 'send' ? 'open' : baseMode
       const send = onLan(mode)
       // A phone on the local network gets the id, but neither the command nor its folder.
-      const hint = replyHint(ask, s, !isLan)
+      const hint = replyHint(ask, s, !isLan, true)
       asks.push({
         ...(connection === undefined ? {} : { delivery: { id: connection.id, turn: connection.turn, agent: connection.agent } }),
         ...(isLan ? {} : rowReceipt(ask.agent, ask.nativeSession, messaging?.messages ?? [])),
@@ -411,7 +413,7 @@ const actionOf = (items: readonly BoardItem[], request: ServeRequest, s: Strings
     return { type: 'message', connection: { id: connected.id, turn: connected.turn, agent: connected.agent }, text, title }
   }
   if (mode !== 'send' || target === null) return { type: 'refuse', note: infoOf(mode, agent, title, item.type === 'ask' ? item.ask.session : '', s) }
-  if (isLan) return { type: 'refuse', note: s.serveLanSend(agent) }
+  if (isLan) return { type: 'refuse', note: s.serveLanSend(agentLabel(agent || 'claude', s)) }
   // A closed progress record is not a live receiver. Resuming a saved session is a
   // separate, explicitly enabled action, never a fallback for a disconnected adapter.
   if (isMessaging || !allowResume) return { type: 'refuse', note: s.messagesFailed }
@@ -514,6 +516,7 @@ const PAGE_WORDS = [
   'serveCopyResume',
   'serveCopyCommand',
   'serveOpenLink',
+  'serveMore',
   'answeredHide',
   'showAgain',
   'hiddenCount',
@@ -535,6 +538,7 @@ const PAGE_WORDS = [
 
 // The chat prompt goes as it is in every language: the chat reads it, not the person.
 export const pageWords = (s: Strings): Record<string, string> => ({
+  ...Object.fromEntries(Object.entries(s.agentNames).map(([agent, name]) => [`agent:${agent}`, name])),
   ...Object.fromEntries(
     PAGE_WORDS.map(key => {
       const value = s[key] as unknown
@@ -690,6 +694,8 @@ const PAGE_SCRIPT = String.raw`
   var GLYPH = { done: '✓', doing: '▸', todo: '•', waiting: '●', running: '◐', blocked: '!', cancelled: '–' };
   var last = '';
   var opened = {};
+  var morePanels = [];
+  var moreCount = 0;
   var timer = null;
   var isClosed = false;
   var isUnreachable = false;
@@ -849,7 +855,12 @@ const PAGE_SCRIPT = String.raw`
       return data.ok;
     }, function () { say(w('messagesFailed'), 'alert', key); unreachable(); return false; }).then(function (ok) { refresh(); return ok; });
   }
-  function agentName(agent) { return agent || 'claude'; }
+  function brand(agent) {
+    if (!agent) return '';
+    var key = 'agent:' + agent.toLowerCase();
+    return Object.prototype.hasOwnProperty.call(W, key) ? W[key] : agent;
+  }
+  function agentName(agent) { return brand(agent || 'claude'); }
   function receiptLine(receipt) {
     if (!receipt) return null;
     var labels = { queued: 'messagesQueued', uncertain: 'messagesUncertain', accepted: 'messagesAccepted', acknowledged: 'messagesAcknowledged', rejected: 'messagesRejected' };
@@ -875,7 +886,7 @@ const PAGE_SCRIPT = String.raw`
           nativeAct(key, text, delivery, session, asked, fp, go).then(function (ok) { if (ok) input.value = ''; });
           return;
         }
-        act(key, 'send', text, w('serveSending', agent), session, asked, fp).then(function (ok) { if (ok) input.value = ''; });
+        act(key, 'send', text, w('serveSending', agentName(agent)), session, asked, fp).then(function (ok) { if (ok) input.value = ''; });
       }, 'primary')
       : button(w('serveCopy'), function () {
         var text = input.value.trim();
@@ -901,38 +912,63 @@ const PAGE_SCRIPT = String.raw`
     });
     return list;
   }
+  function setMore(one, isOpen) {
+    opened['more:' + one.key] = isOpen;
+    one.panel.hidden = !isOpen;
+    one.button.setAttribute('aria-expanded', String(isOpen));
+  }
+  function cardActions(card, key, answers, others, composer) {
+    if (answers.length) add(card, add.apply(null, [el('div', 'actions')].concat(answers)));
+    if (composer) add(card, composer);
+    var limit = Math.max(3, answers.length) - answers.length;
+    var visible = others.slice(0, limit);
+    var rest = others.slice(limit);
+    if (!others.length) return;
+    var actions = add.apply(null, [el('div', 'actions')].concat(visible));
+    add(card, actions);
+    if (!rest.length) return;
+    var panel = add.apply(null, [el('div', 'actions')].concat(rest));
+    panel.id = 'more-actions-' + (++moreCount);
+    var more = button(w('serveMore'), function () { setMore(one, panel.hidden); }, '', true, true);
+    more.setAttribute('aria-controls', panel.id);
+    var one = { key: key, button: more, panel: panel };
+    setMore(one, opened['more:' + key] === true);
+    morePanels.push(one);
+    add(actions, more);
+    add(card, panel);
+  }
   function askCard(ask) {
     var card = el('article', 'card ask');
-    add(card, add(el('div', 'where'), agentMark(who(ask)), el('span', '', [ask.project, ask.agent].filter(Boolean).join(' · ') + (ask.task ? ' › ' + ask.task : ''))));
+    add(card, add(el('div', 'where'), agentMark(who(ask)), el('span', '', [ask.project, brand(who(ask))].filter(Boolean).join(' · ') + (ask.task ? ' › ' + ask.task : ''))));
     // The chip is a pill on the page, so the brackets the terminal needs are left off.
     add(card, add(el('div', 'q'), el('span', 'chip k-' + ask.kind, String(ask.chip).replace(/^\s*[\[〔]\s*|\s*[\]〕]\s*$/g, '')), el('b', '', ask.text)));
     if (ask.note) add(card, el('div', '', ask.note));
     else if (ask.context) add(card, el('div', 'quiet', ask.context));
     if (ask.command) add(card, el('code', '', '$ ' + ask.command));
-    var actions = el('div', 'actions');
-    if (ask.canTick) actions.appendChild(button(w('serveTickNext', ask.text), function () { act(ask.key, 'tick', '', '', '', '', ask.fp); }, 'primary'));
+    var answers = [];
+    var actions = [];
+    if (ask.canTick) answers.push(button(w('serveTickNext', ask.text), function () { act(ask.key, 'tick', '', '', '', '', ask.fp); }, 'primary'));
     ask.answers.forEach(function (answer, index) {
       var send = ask.send === 'send' || ask.send === 'connected';
       var node = button(answer, function () {
         if (ask.send === 'connected') nativeAct(ask.key, answer, ask.delivery, ask.session, ask.text, ask.fp, node);
-        else if (send) act(ask.key, 'send', answer, w('serveSending', ask.agent), ask.session, ask.text, ask.fp);
+        else if (send) act(ask.key, 'send', answer, w('serveSending', agentName(ask.agent)), ask.session, ask.text, ask.fp);
         else copy(answer, ask.key);
       }, index === 0 ? 'primary' : '', !send);
       node.disabled = send && ask.isSending;
-      actions.appendChild(node);
+      answers.push(node);
     });
-    if (ask.command) actions.appendChild(button(w('serveCopyCommand'), function () { copy(ask.command, ask.key); }, '', true));
-    if (ask.reopen) actions.appendChild(button(w('serveCopyResume'), function () { copy(ask.reopen, ask.key); }, '', true));
-    if (ask.canHide) actions.appendChild(button(w('answeredHide'), function () { act(ask.key, 'hide'); }));
+    if (ask.command) actions.push(button(w('serveCopyCommand'), function () { copy(ask.command, ask.key); }, '', true));
+    if (ask.canHide) actions.push(button(w('answeredHide'), function () { act(ask.key, 'hide'); }));
     if (ask.link && /^https:\/\//i.test(ask.link)) {
       var link = el('a', 'btn', w('serveOpenLink'));
       link.href = ask.link;
       link.target = '_blank';
       link.rel = 'noreferrer noopener';
-      actions.appendChild(link);
+      actions.push(link);
     }
-    if (actions.childNodes.length) add(card, actions);
-    if (!ask.canTick) add(card, replyBox(ask.key, w('serveReplyPlaceholder'), ask.send, ask.agent, ask.where, ask.isSending, ask.session, ask.text, ask.fp, ask.delivery));
+    if (ask.reopen) actions.push(button(w('serveCopyResume'), function () { copy(ask.reopen, ask.key); }, '', true));
+    cardActions(card, ask.key, answers, actions, ask.canTick ? null : replyBox(ask.key, w('serveReplyPlaceholder'), ask.send, ask.agent, ask.where, ask.isSending, ask.session, ask.text, ask.fp, ask.delivery));
     if (ask.receipt) add(card, receiptLine(ask.receipt));
     if (ask.archiveNote) add(card, el('div', 'quiet small archive-note', ask.archiveNote));
     if (ask.info) add(card, el('div', 'quiet small', ask.info));
@@ -949,7 +985,8 @@ const PAGE_SCRIPT = String.raw`
     var summary = el('summary');
     add(summary, el('span', 'title', row.title));
     if (row.due) add(summary, el('span', 'due', '⚑ ' + row.due));
-    add(summary, add(el('span', 'meta t-' + row.tone), agentMark(who(row)), el('span', '', (row.total > 0 ? row.done + '/' + row.total + ' ' : '') + row.status + (row.agent ? ' · ' + row.agent : '') + (row.when ? ' · ' + row.when : ''))));
+    var name = brand(who(row));
+    add(summary, add(el('span', 'meta t-' + row.tone), agentMark(who(row)), el('span', '', (row.total > 0 ? row.done + '/' + row.total + ' ' : '') + row.status + (name ? ' · ' + name : '') + (row.when ? ' · ' + row.when : ''))));
     card.appendChild(summary);
     var body = el('div', 'body');
     if (row.archiveNote) add(body, el('div', 'quiet small archive-note', row.archiveNote));
@@ -958,14 +995,14 @@ const PAGE_SCRIPT = String.raw`
     if (row.steps.length) add(body, stepsList(row.steps));
     if (row.handoff) add(body, el('div', 'quiet small', row.handoff));
     if (row.runs) add(body, el('div', 'quiet small', row.runs));
-    var actions = el('div', 'actions');
-    if (row.next) actions.appendChild(button(w('serveTickNext', row.next), function () { act(row.key, 'tick', row.next, '', '', '', row.fp); }, 'primary'));
-    if (row.canArchive) actions.appendChild(button(w('serveArchive'), function () { act(row.key, 'archive', '', '', '', '', row.fp); }));
-    if (row.canConfirm) actions.appendChild(button(w('confirmDone'), function () { act(row.key, 'done', '', '', '', '', row.fp); }));
-    if (row.resume) actions.appendChild(button(w('serveCopyResume'), function () { copy(row.resume, row.key); }, '', true));
-    if (actions.childNodes.length) add(body, actions);
     if (row.send === 'send' || row.send === 'connected') add(body, replyBox(row.key, w('serveMessagePlaceholder', agentName(row.agent)), row.send, row.agent, row.where, row.isSending, row.session, asked, row.fp, row.delivery));
     else if (row.hasCopyBox) add(body, replyBox(row.key, w('serveReplyPlaceholder'), 'copy', row.agent, '', false, row.session, asked));
+    var actions = [];
+    if (row.next) actions.push(button(w('serveTickNext', row.next), function () { act(row.key, 'tick', row.next, '', '', '', row.fp); }, 'primary'));
+    if (row.canArchive) actions.push(button(w('serveArchive'), function () { act(row.key, 'archive', '', '', '', '', row.fp); }));
+    if (row.canConfirm) actions.push(button(w('confirmDone'), function () { act(row.key, 'done', '', '', '', '', row.fp); }));
+    if (row.resume) actions.push(button(w('serveCopyResume'), function () { copy(row.resume, row.key); }, '', true));
+    cardActions(body, row.key, [], actions, null);
     if (row.receipt) add(body, receiptLine(row.receipt));
     if (row.info) add(body, el('div', 'quiet small', row.info));
     resultSlot(body, row.key, row.fp, row.title);
@@ -974,7 +1011,7 @@ const PAGE_SCRIPT = String.raw`
   }
   function turnCard(turn) {
     var card = el('article', 'card turn');
-    add(card, add(el('div', 'where'), agentMark(who(turn)), el('span', '', [turn.project, turn.agent].filter(Boolean).join(' · '))));
+    add(card, add(el('div', 'where'), agentMark(who(turn)), el('span', '', [turn.project, brand(who(turn))].filter(Boolean).join(' · '))));
     add(card, el('div', turn.isQuestion ? 'q' : '', turn.text));
     if (turn.isQuestion) add(card, replyBox(turn.key, w('serveReplyPlaceholder'), 'copy', turn.agent, '', false));
     if (turn.info) add(card, el('div', 'quiet small', turn.info));
@@ -1025,7 +1062,22 @@ const PAGE_SCRIPT = String.raw`
   document.getElementById('side-open').addEventListener('click', function () { drawer(document.getElementById('side-open').getAttribute('aria-expanded') !== 'true'); });
   document.getElementById('side-close').addEventListener('click', function () { drawer(false); });
   document.getElementById('side-scrim').addEventListener('click', function () { drawer(false); });
-  if (typeof document.addEventListener === 'function') document.addEventListener('keydown', function (event) { if (event.key === 'Escape' && document.getElementById('side-open').getAttribute('aria-expanded') === 'true') drawer(false); });
+  if (typeof document.addEventListener === 'function') document.addEventListener('keydown', function (event) {
+    if (event.key !== 'Escape') return;
+    if (document.getElementById('side-open').getAttribute('aria-expanded') === 'true') { drawer(false); return; }
+    // Only the panel the focus is in (or its More button) closes; with no focus anywhere, every open one does.
+    // A reply being typed elsewhere is left alone.
+    var active = document.activeElement;
+    var isIdle = !active || active === document.body;
+    morePanels.forEach(function (one) {
+      if (one.panel.hidden) return;
+      var isInside = false;
+      for (var node = active; node; node = node.parentNode) if (node === one.panel || node === one.button) isInside = true;
+      if (!isInside && !isIdle) return;
+      setMore(one, false);
+      if (isInside && active !== one.button) one.button.focus();
+    });
+  });
   if (typeof ResizeObserver === 'function' && document.documentElement) {
     var head = document.getElementById('head');
     new ResizeObserver(function () { document.documentElement.style.setProperty('--head-h', head.offsetHeight + 'px'); }).observe(head);
@@ -1050,14 +1102,14 @@ const PAGE_SCRIPT = String.raw`
     add(scope, el('h2', '', w(view[1])), el('span', 'n', w('viewCount', counted)));
     ['project', 'agent'].forEach(function (kind) {
       if (kind === 'project' ? !pick.project : pick.agent === null) return;
-      var label = pick[kind] || w('sideOwnTasks');
+      var label = kind === 'agent' ? brand(pick.agent) || w('sideOwnTasks') : pick.project;
       var chip = button(label + ' ×', function () { pick[kind] = kind === 'agent' ? null : ''; applyPick(); }, 'fchip', true, true);
       chip.setAttribute('aria-label', w('removeFilter', label));
       add(scope, chip);
     });
     emptyCard.textContent = '';
     emptyCard.hidden = visible !== 0 || !!nothing && !nothing.hidden;
-    var name = [pick.project, pick.agent === null ? '' : pick.agent || w('sideOwnTasks')].filter(Boolean).join(' · ');
+    var name = [pick.project, pick.agent === null ? '' : brand(pick.agent) || w('sideOwnTasks')].filter(Boolean).join(' · ');
     var key = { all: 'empty', waiting: 'nothingForYou', progress: 'empty', due: 'viewEmptyDue', stopped: 'viewEmptyStopped', recent: 'viewEmptyRecent' }[pick.view];
     add(emptyCard, el('p', '', name ? w('viewEmptyFiltered', name) : w(key)));
     if (name) add(emptyCard, button(w('clearFilters'), function () { pick.project = ''; pick.agent = null; applyPick(); }, '', true, true));
@@ -1093,7 +1145,7 @@ const PAGE_SCRIPT = String.raw`
       group(kind === 'project' ? 'sideProjects' : 'sideAgents', values.map(function (value) {
         var items = filterNodes.filter(function (one) { return one[kind] === value; });
         var tone = items.some(function (one) { return one.views.indexOf('waiting') !== -1; }) ? 'waiting' : items.some(function (one) { return one.views.indexOf('due') !== -1; }) ? 'soon' : items.every(function (one) { return one.views.indexOf('stopped') !== -1 || one.views.indexOf('recent') !== -1; }) ? 'muted' : '';
-        return { value: value, label: value || w('sideOwnTasks'), count: items.filter(function (one) { return !one.isShelf; }).length, tone: tone };
+        return { value: value, label: kind === 'agent' ? brand(value) || w('sideOwnTasks') : value, count: items.filter(function (one) { return !one.isShelf; }).length, tone: tone };
       }), kind);
     });
     if (had) navNodes.forEach(function (one) { if (one.kind === had.kind && one.value === had.value && typeof one.node.focus === 'function') one.node.focus(); });
@@ -1135,8 +1187,11 @@ const PAGE_SCRIPT = String.raw`
     board.querySelectorAll('textarea[data-key]').forEach(function (box) { kept[box.getAttribute('data-key')] = box.value; });
     var active = document.activeElement;
     var focus = active && active.getAttribute ? active.getAttribute('data-key') : null;
+    var moreFocus = morePanels.filter(function (one) { return one.button === active; })[0];
     var caret = focus ? [active.selectionStart, active.selectionEnd] : null;
     board.textContent = '';
+    morePanels = [];
+    moreCount = 0;
     filterNodes = [];
     filterGroups = [];
     // Footer and paste controls keep their slots across board redraws.
@@ -1166,7 +1221,7 @@ const PAGE_SCRIPT = String.raw`
       retained.addEventListener('toggle', function () { opened[pair[0] + ':'] = retained.open; });
       add(retained, add(el('summary'), el('span', 'quiet', w(pair[1]) + ' (' + questions.length + ')')), el('p', 'quiet', w('questionAgingHint')), el('p', 'quiet', w('questionReviewOnly')));
       questions.forEach(function (one) {
-        add(retained, tracked(add(el('div'), add(el('div', 'where'), agentMark(who(one)), el('span', '', [one.project, one.agent, one.task, one.when].filter(Boolean).join(' · '))), el('div', 'q', one.text), el('div', '', one.note), el('div', 'quiet', one.context)), ['waiting'], one, '', true));
+        add(retained, tracked(add(el('div'), add(el('div', 'where'), agentMark(who(one)), el('span', '', [one.project, brand(who(one)), one.task, one.when].filter(Boolean).join(' · '))), el('div', 'q', one.text), el('div', '', one.note), el('div', 'quiet', one.context)), ['waiting'], one, '', true));
       });
       groupVisibility(retained, from);
       add(board, retained);
@@ -1178,7 +1233,7 @@ const PAGE_SCRIPT = String.raw`
       shelf.addEventListener('toggle', function () { opened['hidden:'] = shelf.open; });
       add(shelf, add(el('summary'), el('span', 'quiet', w('hiddenCount', model.hidden.length))));
       model.hidden.forEach(function (one) {
-        var hiddenCard = add(el('div'), add(el('div', 'where'), agentMark(who(one)), el('span', '', [one.project, one.agent].filter(Boolean).join(' · ') + (one.task ? ' › ' + one.task : ''))), el('div', 'q', one.text), add(el('div', 'actions'), button(w('showAgain'), function () { act(one.key, 'unhide'); })));
+        var hiddenCard = add(el('div'), add(el('div', 'where'), agentMark(who(one)), el('span', '', [one.project, brand(who(one))].filter(Boolean).join(' · ') + (one.task ? ' › ' + one.task : ''))), el('div', 'q', one.text), add(el('div', 'actions'), button(w('showAgain'), function () { act(one.key, 'unhide'); })));
         resultSlot(hiddenCard, one.key, one.text, one.task);
         add(shelf, tracked(hiddenCard, ['waiting'], one, '', true));
       });
@@ -1246,6 +1301,7 @@ const PAGE_SCRIPT = String.raw`
     drawSide();
     applyPick();
     drawLostResults();
+    if (moreFocus) morePanels.forEach(function (one) { if (one.key === moreFocus.key) one.button.focus(); });
     board.querySelectorAll('textarea[data-key]').forEach(function (box) {
       var key = box.getAttribute('data-key');
       if (key in kept) box.value = kept[key];
