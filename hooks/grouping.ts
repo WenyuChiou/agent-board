@@ -14,6 +14,9 @@ import { agentLabel } from './strings'
 // What the page adds when it builds the model (#477). The model on main carries none of it yet,
 // so each field is optional: a missing time, folder or session reads as unknown, and a missing
 // run, stuck or unreadable mark reads as "no". The module invents no rule for any of them.
+// The page fills: `at` on rows, asks, older questions, turns and finished tasks; `dir`; `isRun`
+// and `parent`; `sessionId` and `stuck` on rows; `agents` with `unreadable`; `agent` and `isOwn`
+// on finished tasks; and `finished` with each task's `key`.
 export type Extra = {
   // When it last moved, in epoch milliseconds. A time after `now` reads as `now`.
   at?: number
@@ -32,9 +35,10 @@ export type GroupingRow = ServeRow & Extra & {
 export type GroupingAsk = ServeAsk & Extra
 export type GroupingRetained = ServeRetained & Extra
 export type GroupingTurn = ServeTurn & Extra
-// A finished task has neither a key nor an agent in the model; a missing agent reads as Claude
-// Code, as everywhere in the model.
-export type GroupingDone = ServeModel['recent'][number] & Extra & { agent?: string; isOwn?: true }
+// A finished task has neither a key nor an agent in the model. A missing agent is not Claude Code
+// (the producer does not say whose task it was): it counts in All only, under no agent. '' is
+// Claude Code's own wire value. `key` is the key of the stopped row the task came from.
+export type GroupingDone = ServeModel['recent'][number] & Extra & { agent?: string; isOwn?: true; key?: string }
 
 // A `ServeModel` fits this: it is the part of the model that is read.
 export type GroupingInput = {
@@ -45,7 +49,11 @@ export type GroupingInput = {
   stopped: readonly GroupingRow[]
   groups: ReadonlyArray<{ project: string; rows: readonly GroupingRow[] }>
   turns: readonly GroupingTurn[]
+  // At most three, as the producer caps it; Done reads it only when `finished` is missing.
   recent: readonly GroupingDone[]
+  // The week's finished tasks with no cap. When given, they are the only source of Done, and a
+  // finished task is not also on the stopped shelf (the producer moves all but three there).
+  finished?: readonly GroupingDone[]
   // Agents, with the mark for those whose progress file could not be read. An agent with the mark
   // has a group even with no task.
   agents?: ReadonlyArray<{ agent: string; unreadable?: true }>
@@ -56,8 +64,8 @@ export type RepoOf = (dir: string) => string | null | undefined
 
 // Every row and question carries these.
 export type Tagged = {
-  // `claude` for Claude Code (the model writes ''), the lower-cased id for any other agent, and
-  // '' for a hand-kept task (`isOwn`).
+  // `claude` for Claude Code, the lower-cased id otherwise, '' for a hand-kept task (`isOwn`)
+  // or for a finished task whose agent the model did not say.
   agent: string
   isOwn: boolean
   // The heading it sits under, and the repository it belongs to.
@@ -75,7 +83,7 @@ export type GroupedTask = Tagged & {
   isIdle: boolean
   // A question card or a stuck card stands for it, so the Open list leaves it out.
   hasCard: boolean
-  source: GroupingRow | GroupingDone
+  source: GroupingRow | GroupingDone | GroupingAsk
 }
 
 export type GroupedQuestion = Tagged & {
@@ -174,6 +182,11 @@ const holderOf = (item: Asker): Holder => ({ agent: item.agent, isOwn: item.isOw
 
 const identity = (agent: string, isOwn: boolean, project: string, title: string): string => JSON.stringify([isOwn ? '' : keyOf(agent), project, title])
 
+// Whether a stopped row is the one a finished task came from, when the task has no key: the task
+// says whose it was, or nothing, and then any agent's row fits.
+const isHers = (item: GroupingDone, row: GroupingRow): boolean =>
+  item.isOwn === true ? row.isOwn === true : item.agent === undefined || (row.isOwn !== true && keyOf(row.agent) === keyOf(item.agent))
+
 export const groupBoard = (model: GroupingInput, now: number, repoOf: RepoOf, s: Strings = ZH_TW): Grouping => {
   const folders = new Map<string, string>()
   const repoName = (project: string, dir: string | null | undefined): string => {
@@ -264,27 +277,57 @@ export const groupBoard = (model: GroupingInput, now: number, repoOf: RepoOf, s:
     list({ ...tag(ownerOf(item), item.project, item.dir, item.at), key: item.key, task: item.task, text: item.text, stage, source: item }, older)
   }
 
+  // A finished task is listed while it is within the week. The week's uncapped list is the source
+  // when the page gives one; else it is `recent`, which the producer caps at three.
+  const finished = (model.finished ?? model.recent).filter(item => item.isRun !== true && !(isKnown(item.at) && item.at < now - DONE_MS))
+  // A finished task is Done and not also Stopped, so the stopped row it came from is left out: the
+  // row with its key, else the first with the same heading and title. A task takes at most one
+  // row, and a row goes once.
+  const taken = new Set<number>()
+  for (const item of finished) {
+    const found = rows.findIndex(({ row, shelf }, index) => shelf === 'stopped' && row.isRun !== true && !taken.has(index) && (item.key !== undefined ? row.key === item.key : row.project === item.project && row.title === item.title && isHers(item, row)))
+    if (found !== -1) taken.add(found)
+  }
+
   // Tasks. A helper run is not a row. Stuck is only what the caller marked.
   const tasks: GroupedTask[] = []
   const stuck: Card[] = []
   const rowKeys = new Set<string>()
-  for (const { row, shelf, isIdle } of rows) {
-    if (row.isRun === true || rowKeys.has(row.key)) continue
+  const rowIds = new Set(rows.filter(({ row }) => row.isRun !== true).map(({ row }) => identity(row.agent, row.isOwn === true, row.project, row.title)))
+  for (const [index, { row, shelf, isIdle }] of rows.entries()) {
+    if (row.isRun === true || taken.has(index) || rowKeys.has(row.key)) continue
     rowKeys.add(row.key)
     const tagged = tag({ agent: row.agent, isOwn: row.isOwn === true }, row.project, row.dir, row.at)
     if (row.stuck !== undefined) stuck.push({ ...tagged, type: 'stuck', key: `stuck:${row.key}`, task: row.title, reason: row.stuck.reason, source: row })
     tasks.push({ ...tagged, key: row.key, title: row.title, shelf, isIdle, hasCard: row.stuck !== undefined || carded.has(identity(row.agent, row.isOwn === true, row.project, row.title)), source: row })
   }
-  // A finished task is listed while it is within the week.
+  // The producer gives a task that waits on the person a question and no row. It is one open task
+  // however many questions it has, and its card stands for it. A helper run's question is not a task.
+  const waiting = new Map<string, { ask: GroupingAsk; at: number }>()
+  for (const ask of model.asks) {
+    const id = identity(ask.agent, ask.isOwn === true, ask.project, ask.task)
+    if (ask.isRun === true || rowIds.has(id)) continue
+    const held = waiting.get(id)
+    if (held === undefined) waiting.set(id, { ask, at: timeOf(ask.at) })
+    else held.at = Math.max(held.at, timeOf(ask.at))
+  }
+  for (const { ask, at } of waiting.values()) {
+    const tagged = tag({ agent: ask.agent, isOwn: ask.isOwn === true }, ask.project, ask.dir, at)
+    tasks.push({ ...tagged, key: `waiting:${tagged.agent}:${ask.project}::${ask.task}`, title: ask.task, shelf: 'open', isIdle: false, hasCard: true, source: ask })
+  }
+  // A finished task whose agent the model did not say is under no agent: it counts in All only.
   const repeats = new Map<string, number>()
-  for (const item of model.recent) {
-    if (item.isRun === true || isKnown(item.at) && item.at < now - DONE_MS) continue
+  for (const item of finished) {
     const base = `done::${item.project}::${item.title}`
     const repeat = (repeats.get(base) ?? 0) + 1
     repeats.set(base, repeat)
+    const tagged: Tagged =
+      item.isOwn === true || item.agent !== undefined
+        ? tag({ agent: item.agent ?? '', isOwn: item.isOwn === true }, item.project, item.dir, item.at)
+        : { agent: '', isOwn: false, project: item.project, repo: repoName(item.project, item.dir), at: timeOf(item.at) }
     tasks.push({
-      ...tag({ agent: item.agent ?? '', isOwn: item.isOwn === true }, item.project, item.dir, item.at),
-      key: repeat === 1 ? base : `${base}#${repeat}`,
+      ...tagged,
+      key: item.key ?? (repeat === 1 ? base : `${base}#${repeat}`),
       title: item.title,
       shelf: 'done',
       isIdle: false,
@@ -319,7 +362,8 @@ export const groupBoard = (model: GroupingInput, now: number, repoOf: RepoOf, s:
   }
 
   const lastOf = new Map<string, number>()
-  for (const one of [...sortedTasks, ...cards, ...sortedOlder]) if (!one.isOwn) lastOf.set(one.agent, Math.max(lastOf.get(one.agent) ?? 0, one.at))
+  // A finished task under no agent sets nobody's time.
+  for (const one of [...sortedTasks, ...cards, ...sortedOlder]) if (!one.isOwn && one.agent !== '') lastOf.set(one.agent, Math.max(lastOf.get(one.agent) ?? 0, one.at))
   const agents = [...spelled.keys()]
     .map((agent, index) => ({ agent, index, last: lastOf.get(agent) ?? 0 }))
     .sort((a, b) => b.last - a.last || a.index - b.index)

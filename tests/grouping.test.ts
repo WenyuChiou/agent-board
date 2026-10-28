@@ -1,6 +1,6 @@
 import { test, expect } from 'claude-code/testing'
 import { groupBoard } from '../hooks/grouping'
-import type { GroupingAsk, GroupingDone, GroupingInput, GroupingRetained, GroupingRow, GroupingTurn } from '../hooks/grouping'
+import type { Grouping, GroupingAsk, GroupingDone, GroupingInput, GroupingRetained, GroupingRow, GroupingTurn } from '../hooks/grouping'
 import type { ServeModel } from '../hooks/serve'
 import { EN } from '../hooks/strings-en'
 
@@ -121,7 +121,7 @@ test('grouping puts every task and question under its agent with open, needs, st
     ],
     idle: [row('codex', 'demo', 'Dormant branch', { at: ago(9 * DAY) })],
     recent: [
-      // No agent: the model's own reading is Claude Code.
+      // No agent: the model did not say whose it was, so it is under no agent.
       done('demo', 'Ship the synthetic demo', { at: ago(HOUR) }),
       done('demo', 'Rename the synthetic module', { agent: 'codex', at: ago(2 * DAY) }),
       done('demo', 'Retired long ago', { agent: 'codex', at: ago(8 * DAY) }),
@@ -135,7 +135,7 @@ test('grouping puts every task and question under its agent with open, needs, st
   // Most recent activity first; an agent with nothing dated goes last, whatever its place in the input.
   expect(result.agents.map(group => group.agent)).toEqual(['codex', 'claude', 'dot', 'robo-7', 'cursor'])
   const [codex, claude, dot, robo, cursor] = result.agents
-  expect(claude?.counts).toEqual({ open: 4, needs: 0, stopped: 1, done: 1, older: 0 })
+  expect(claude?.counts).toEqual({ open: 4, needs: 0, stopped: 1, done: 0, older: 0 })
   expect(codex?.counts).toEqual({ open: 2, needs: 1, stopped: 2, done: 1, older: 0 })
   expect(dot?.counts).toEqual({ open: 0, needs: 0, stopped: 1, done: 0, older: 0 })
   expect(robo?.counts).toEqual({ open: 0, needs: 0, stopped: 1, done: 0, older: 0 })
@@ -159,7 +159,7 @@ test('grouping puts every task and question under its agent with open, needs, st
   expect(titles(codex?.stopped ?? [])).toEqual(['Retire the flag', 'Dormant branch'])
   expect(codex?.stopped.map(one => one.isIdle)).toEqual([false, true])
   expect(titles(codex?.done ?? [])).toEqual(['Rename the synthetic module'])
-  expect(titles(claude?.done ?? [])).toEqual(['Ship the synthetic demo'])
+  expect(titles(claude?.done ?? [])).toEqual([])
   expect(codex?.cards.map(card => card.type)).toEqual(['question'])
   expect(result.own.cards.map(card => [card.agent, card.isOwn])).toEqual([['', true]])
 
@@ -167,6 +167,10 @@ test('grouping puts every task and question under its agent with open, needs, st
   expect(result.all.isHidden).toBe(false)
   expect(result.all.counts).toEqual({ open: 6, needs: 1, stopped: 5, done: 2, older: 0 })
   expect(result.all.stopped.map(one => one.agent)).toEqual(['dot', 'robo-7', 'codex', 'claude', 'codex'])
+  // A finished task with no agent is in All and under nobody: it makes no group and is not Claude Code's.
+  expect(titles(result.all.done)).toEqual(['Ship the synthetic demo', 'Rename the synthetic module'])
+  expect(result.all.done[0]?.agent).toBe('')
+  expect(result.all.done[0]?.isOwn).toBe(false)
   expect(result.agents.reduce((sum, group) => sum + group.counts.stopped, 0)).toBe(result.all.counts.stopped)
   // Needs you spans the hand-kept question too.
   expect(result.needs.n).toBe(2)
@@ -177,6 +181,136 @@ test('grouping puts every task and question under its agent with open, needs, st
   expect(single.agents[0]?.counts.open).toBe(1)
   expect(single.all.isHidden).toBe(true)
   expect(single.all.counts.open).toBe(1)
+
+  // A finished task whose agent is not said makes no group of its own and is not credited to anyone; a hand-kept one is the person's.
+  const unsaid = groupBoard(board({ recent: [done('demo', 'Unsaid synthetic task', { at: ago(HOUR) }), done('Home', 'Water the synthetic plants', { isOwn: true, at: ago(HOUR) })] }), NOW, none, EN)
+  expect(unsaid.agents).toEqual([])
+  expect(unsaid.all.counts.done).toBe(1)
+  expect(titles(unsaid.all.done)).toEqual(['Unsaid synthetic task'])
+  expect(unsaid.own.counts.done).toBe(1)
+  expect(titles(unsaid.own.done)).toEqual(['Water the synthetic plants'])
+
+  // An explicit empty agent is Claude Code's wire value, and an unassigned task sets nobody's time.
+  const explicit = groupBoard(board({ recent: [done('demo', 'Ship the synthetic demo', { at: ago(HOUR) }), done('demo', 'Finish the synthetic notes', { agent: '', at: ago(2 * HOUR) })] }), NOW, none, EN)
+  expect(explicit.agents.map(group => group.agent)).toEqual(['claude'])
+  expect(explicit.agents[0]?.counts.done).toBe(1)
+  expect(titles(explicit.agents[0]?.done ?? [])).toEqual(['Finish the synthetic notes'])
+  expect(explicit.agents[0]?.last).toBe(ago(2 * HOUR))
+  expect(explicit.all.counts.done).toBe(2)
+
+  // The producer gives a waiting task a question and no row. It is one open task, however many questions it has.
+  const waiting = ask('grok', 'demo', 'Waiting synthetic task', 'Which synthetic option?')
+  const oneQuestion = groupBoard(board({ asks: [waiting] }), NOW, none, EN)
+  expect(oneQuestion.agents.map(group => group.agent)).toEqual(['grok'])
+  expect(oneQuestion.agents[0]?.counts).toEqual({ open: 1, needs: 1, stopped: 0, done: 0, older: 0 })
+  expect(oneQuestion.agents[0]?.open).toEqual([])
+  expect(oneQuestion.projects).toEqual([{ name: 'demo', open: 1 }])
+  expect(oneQuestion.working).toEqual([])
+  const twoQuestions = groupBoard(board({ asks: [waiting, ask('grok', 'demo', 'Waiting synthetic task', 'Which other synthetic option?', { key: 'ask:demo::Waiting synthetic task::2' })] }), NOW, none, EN)
+  expect(twoQuestions.agents[0]?.counts).toEqual({ open: 1, needs: 2, stopped: 0, done: 0, older: 0 })
+  expect(twoQuestions.all.counts.open).toBe(1)
+  expect(twoQuestions.projects).toEqual([{ name: 'demo', open: 1 }])
+  expect(twoQuestions.agents[0]?.open).toEqual([])
+  expect(twoQuestions.working).toEqual([])
+
+  // Four tasks finished today: the producer shows three in `recent` and puts the fourth on the stopped shelf.
+  const today = (isFinished: boolean): Grouping => {
+    const items = [
+      done('demo', 'Finished one', { agent: 'codex', at: ago(HOUR) }),
+      done('demo', 'Finished two', { agent: 'codex', at: ago(2 * HOUR) }),
+      done('demo', 'Finished three', { agent: 'codex', at: ago(3 * HOUR) }),
+    ]
+    const four = done('demo', 'Finished four', { agent: 'codex', at: ago(4 * HOUR) })
+
+    return groupBoard(board({ recent: items, stopped: [row('codex', 'demo', 'Finished four', { at: ago(4 * HOUR) })], ...(isFinished ? { finished: [...items, four] } : {}) }), NOW, none, EN)
+  }
+  const withFinished = today(true).agents[0]
+  expect(withFinished?.counts).toEqual({ open: 0, needs: 0, stopped: 0, done: 4, older: 0 })
+  expect(withFinished?.stopped).toEqual([])
+  expect(titles(withFinished?.done ?? [])).toEqual(['Finished one', 'Finished two', 'Finished three', 'Finished four'])
+  // Without the field the board reads as before: three done and the fourth stopped.
+  const withoutFinished = today(false).agents[0]
+  expect(withoutFinished?.counts).toEqual({ open: 0, needs: 0, stopped: 1, done: 3, older: 0 })
+
+  // A finished task with a key takes exactly its own row, even when another row has the same heading and title.
+  const keyed = groupBoard(
+    board({
+      stopped: [row('codex', 'demo', 'Shared synthetic title', { key: 'row:codex-copy' }), row('gemini', 'demo', 'Shared synthetic title', { key: 'row:gemini-copy' })],
+      finished: [done('demo', 'Shared synthetic title', { key: 'row:gemini-copy', agent: 'gemini', at: ago(HOUR) })],
+    }),
+    NOW,
+    none,
+    EN,
+  )
+  expect(keyed.agents.map(group => [group.agent, group.counts.stopped, group.counts.done])).toEqual([['gemini', 0, 1], ['codex', 1, 0]])
+  expect(keyed.all.done[0]?.key).toBe('row:gemini-copy')
+
+  // Only counted completions replace stopped rows; ownership and duplicate rows stay distinct.
+  const matched = groupBoard(board({
+    idle: [row('codex', 'demo', 'Shared finish', { key: 'idle:first', stuck: { reason: 'Synthetic idle wait' } })],
+    stopped: [
+      row('codex', 'demo', 'Shared finish', { key: 'stopped:second' }),
+      row('gemini', 'demo', 'Shared finish', { key: 'stopped:other-agent' }),
+      row('', 'Home', 'Own finish', { key: 'stopped:claude' }),
+      row('', 'Home', 'Own finish', { key: 'stopped:own', isOwn: true }),
+      row('cursor', 'demo', 'Unassigned finish', { stuck: { reason: 'Synthetic stopped wait' } }),
+      row('codex', 'demo', 'Outside the week'),
+      row('codex', 'demo', 'Finished helper', { isRun: true }),
+      row('codex', 'demo', 'Unmatched key'),
+    ],
+    groups: grouped([row('codex', 'demo', 'Open finish')]),
+    recent: [done('demo', 'Ignored recent task', { agent: 'grok' })],
+    finished: [
+      done('demo', 'Shared finish', { agent: 'CODEX' }),
+      done('demo', 'Shared finish', { agent: 'codex' }),
+      done('Home', 'Own finish', { isOwn: true }),
+      done('demo', 'Unassigned finish'),
+      done('demo', 'Outside the week', { agent: 'codex', at: ago(7 * DAY + 1) }),
+      done('demo', 'Finished helper', { agent: 'codex', isRun: true }),
+      done('demo', 'Unmatched key', { agent: 'codex', key: 'missing:row' }),
+      done('demo', 'Open finish', { agent: 'codex' }),
+      done('demo', 'Exactly a week', { agent: 'codex', at: ago(7 * DAY) }),
+    ],
+  }), NOW, none, EN)
+  expect(matched.agents.map(group => group.agent)).toEqual(['codex', 'gemini', 'claude'])
+  expect(matched.all.stopped.map(task => task.key)).toEqual(['stopped:other-agent', 'stopped:claude', 'row:demo::Outside the week', 'row:demo::Unmatched key'])
+  expect(matched.needs.stuck).toBe(0)
+  expect(matched.all.done.map(task => task.key)).toEqual(['done::demo::Exactly a week', 'done::demo::Shared finish', 'done::demo::Shared finish#2', 'done::demo::Unassigned finish', 'missing:row', 'done::demo::Open finish'])
+  expect(matched.all.counts.done).toBe(6)
+  expect(titles(matched.own.done)).toEqual(['Own finish'])
+  expect(titles(matched.all.open)).toEqual(['Open finish'])
+  const noFinished = groupBoard(board({ recent: [done('demo', 'Ignored synthetic recent', { agent: 'codex' })], finished: [] }), NOW, none, EN)
+  expect(noFinished.all.done).toEqual([])
+  expect(noFinished.agents).toEqual([])
+
+  // No row, question or finished task has a time: agents come in the order the input first names them,
+  // every list keeps the input order, nothing is working now, and a finished task with no time still counts.
+  const undated = groupBoard(
+    board({
+      asks: [ask('gemini', 'demo', 'Pick one', 'Which synthetic one?')],
+      idle: [row('codex', 'demo', 'Idle synthetic task')],
+      stopped: [row('codex', 'demo', 'Shelved synthetic task')],
+      groups: grouped([row('', 'demo', 'First synthetic task'), row('codex', 'demo', 'Second synthetic task'), row('codex', 'demo', 'Third synthetic task')]),
+      recent: [done('demo', 'Finished synthetic task', { agent: 'codex' }), done('demo', 'Finished by Claude', { agent: '' })],
+    }),
+    NOW,
+    none,
+    EN,
+  )
+  expect(undated.agents.map(group => group.agent)).toEqual(['gemini', 'codex', 'claude'])
+  expect(undated.agents.map(group => group.last)).toEqual([0, 0, 0])
+  const [gemini, codexUndated, claudeUndated] = undated.agents
+  expect(gemini?.counts).toEqual({ open: 1, needs: 1, stopped: 0, done: 0, older: 0 })
+  expect(titles(codexUndated?.open ?? [])).toEqual(['Second synthetic task', 'Third synthetic task'])
+  expect(titles(codexUndated?.stopped ?? [])).toEqual(['Idle synthetic task', 'Shelved synthetic task'])
+  expect(titles(codexUndated?.done ?? [])).toEqual(['Finished synthetic task'])
+  expect(titles(claudeUndated?.open ?? [])).toEqual(['First synthetic task'])
+  expect(titles(claudeUndated?.done ?? [])).toEqual(['Finished by Claude'])
+  expect(undated.needs.cards.map(card => card.task)).toEqual(['Pick one'])
+  expect(titles(undated.all.open)).toEqual(['First synthetic task', 'Second synthetic task', 'Third synthetic task'])
+  expect(titles(undated.all.stopped)).toEqual(['Idle synthetic task', 'Shelved synthetic task'])
+  expect(titles(undated.all.done)).toEqual(['Finished synthetic task', 'Finished by Claude'])
+  expect(undated.working).toEqual([])
 })
 
 test('grouping lists each unanswered question once in Needs you and leaves a carded task out of Open', () => {
@@ -220,11 +354,16 @@ test('grouping lists each unanswered question once in Needs you and leaves a car
   // A task with a card is counted as open but is not listed under Open; a stuck task is carded too.
   const claude = result.agents.find(group => group.agent === 'claude')
   const codex = result.agents.find(group => group.agent === 'codex')
-  expect(claude?.counts.open).toBe(5)
+  // Five rows, and two tasks whose only trace is a question ('Tie one', 'Tie two'): they have no row.
+  expect(claude?.counts.open).toBe(7)
   expect(titles(claude?.open ?? [])).toEqual(['Plain row', 'At the edge', 'Just past it'])
   expect(claude?.open.every(task => !task.hasCard)).toBe(true)
   expect(codex?.counts.open).toBe(1)
   expect(codex?.open).toEqual([])
+  // Gemini has a question and no row: one open task, carded.
+  const gemini = result.agents.find(group => group.agent === 'gemini')
+  expect(gemini?.counts).toEqual({ open: 1, needs: 1, stopped: 0, done: 0, older: 0 })
+  expect(gemini?.open).toEqual([])
   expect(result.all.open.some(task => task.title === 'Port the parser')).toBe(false)
 
   // Working now: the 30 minutes before `now`, newest first, no carded task and no hand-kept one.
@@ -419,7 +558,7 @@ const bigBoard = () => {
     const isOwn = k < 14 && k % 7 === 6
     const agent = AGENTS[k % 8] as string
     const isRecent = k < 14
-    recent.push(done(isOwn ? 'Home' : `${REPOS[k % 10]}-1`, `Finished synthetic task ${k}`, { ...(isOwn ? { isOwn: true as const } : agent === 'claude' ? {} : { agent }), ...(isOwn ? {} : { dir: folder(REPOS[k % 10] as string, 1) }), at: isRecent ? ago(k * 11 * HOUR) : ago(8 * DAY + k * HOUR) }))
+    recent.push(done(isOwn ? 'Home' : `${REPOS[k % 10]}-1`, `Finished synthetic task ${k}`, { ...(isOwn ? { isOwn: true as const } : { agent: wireOf(agent) }), ...(isOwn ? {} : { dir: folder(REPOS[k % 10] as string, 1) }), at: isRecent ? ago(k * 11 * HOUR) : ago(8 * DAY + k * HOUR) }))
     if (isRecent) count(isOwn ? '' : agent, 'done')
   }
 
@@ -459,6 +598,8 @@ test('grouping on the synthetic big board adds up to the board\'s totals', () =>
   expect(result.needs.older).toHaveLength(500)
   expect(result.all.counts).toEqual({ open: 295, needs: 12, stopped: 199, done: 12, older: 500 })
   expect(result.all.isHidden).toBe(false)
+  // The same finished tasks given as `finished` count the same as given as `recent`.
+  expect(groupBoard({ ...model, finished: model.recent }, NOW, repoOf, EN).all.counts).toEqual(result.all.counts)
 
   // Agents are in order of their latest activity, and the order is the input's alone.
   const lasts = result.agents.map(group => group.last)
