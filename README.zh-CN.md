@@ -2,8 +2,25 @@
 
 <p align="center"><b>每个 AI coding agent 在做什么，一个看板看完；哪个在等你，就在那里回它。</b></p>
 
+需要 Node.js 22 以上，在任何终端运行：
+
+```sh
+npx @wenyuchiou/agent-board setup
+npx @wenyuchiou/agent-board setup --apply
+npx @wenyuchiou/agent-board --serve
+```
+
+用同一个 Wi-Fi 的手机，扫 `npx @wenyuchiou/agent-board --serve --lan` 印出的二维码。只在信得过的网络上用：这个链接没有加密，拿到的人都能打开网页。详情见[看板的网页](#看板的网页)。
+
+- **我用 Claude Code：** `/agent-board`
+- **我用 Codex：** `$agent-board`
+- **我用 Antigravity：** `/agent-board`（在测试环境检查过，还没实机运行）
+- **我用 OpenCode：** `/board`
+
+只运行设置并不会接上 agent：请先完成[快速开始](#快速开始)中各 agent 的额外步骤，开一个新对话，再用上面对应的入口。
+
 <p align="center">
-<img alt="会动的看板，分六幕：Claude Code、Codex、Antigravity 和 OpenCode 汇报到同一个终端看板；每一步实时打勾；Codex 的问题跳到最上面；按一个键就复制好回答；在看板网页上给 Codex 发的消息送达后，能看到它回复（预览，0.24.2 起提供）；一行 npx 命令接上每个 agent，0.24.0 起上架 npm。合成数据。" src="docs/images/cover-zh-CN-dark.svg" width="860">
+<img alt="会动的看板：各个 agent 汇报进度、提问和回复，一行设置命令就能接上。开启消息功能、Codex 的对话也连上时，按发送会把回复排进队列。“已接受”不代表送到；那个对话回的确认才代表收到，不代表事情做完。LAN 网页没有消息功能。合成数据。" src="docs/images/cover-zh-CN-dark.svg" width="860">
 </p>
 
 <p align="center"><b>集成</b><br>
@@ -87,14 +104,14 @@ CLI、桌面 App、IDE 的实际 hook 事件分开验收；装好了文件、传
 |:-:|---|---|
 | <img src="docs/images/agents/claude-code.svg" width="20" alt="Claude Code"> | Claude Code | `/progress` |
 | <img src="docs/images/agents/codex.svg" width="20" alt="Codex"> | Codex CLI 和 App | `$agent-board` |
-| <img src="docs/images/agents/antigravity.svg" width="20" alt="Antigravity"> | Antigravity | `/agent-board`（在合成环境检查过，还没实机运行） |
+| <img src="docs/images/agents/antigravity.svg" width="20" alt="Antigravity"> | Antigravity | `/agent-board`（在测试环境检查过，还没实机运行） |
 | <img src="docs/images/agents/opencode.svg" width="20" alt="OpenCode"> | OpenCode | `/board` |
-| <img src="docs/images/agents/cursor.svg" width="20" alt="Cursor"> | Cursor | `/agent-board`（在合成环境检查过，还没实机运行） |
-| <img src="docs/images/agents/grok-build.svg" width="20" alt="Grok Build"> | Grok Build | `/agent-board`（在合成环境检查过，还没实机运行） |
-| <img src="docs/images/agents/muse-code.svg" width="20" alt="Muse Code"> | Muse Code | `/agent-board`（在合成环境检查过，还没实机运行） |
+| <img src="docs/images/agents/cursor.svg" width="20" alt="Cursor"> | Cursor | `/agent-board`（在测试环境检查过，还没实机运行） |
+| <img src="docs/images/agents/grok-build.svg" width="20" alt="Grok Build"> | Grok Build | `/agent-board`（在测试环境检查过，还没实机运行） |
+| <img src="docs/images/agents/muse-code.svg" width="20" alt="Muse Code"> | Muse Code | `/agent-board`（在测试环境检查过，还没实机运行） |
 | <img src="docs/images/agents/hermes-agent.svg" width="20" alt="Hermes Agent"> | Hermes Agent | `/agent-board` |
 | <img src="docs/images/agents/openclaw.svg" width="20" alt="OpenClaw"> | OpenClaw | `/agent-board` |
-| <img src="docs/images/agents/deepseek-harness.svg" width="20" alt="DeepSeek Harness"> | DeepSeek Harness | `/agent-board`（在合成环境检查过，还没实机运行） |
+| <img src="docs/images/agents/deepseek-harness.svg" width="20" alt="DeepSeek Harness"> | DeepSeek Harness | `/agent-board`（在测试环境检查过，还没实机运行） |
 
 **Claude 桌面 App** 的 Code 标签页没有显示面板时：底部状态栏会显示等你的数量和“/agent-board 打开看板”。`/agent-board` 会启动可回答问题、归档工作的[看板网页](#看板的网页)并提供链接；每个 Claude Code 会话都能用，也不动面板。面板无法显示时，`/progress` 做同样的事。交互网页无法启动时，两者都改开只读网页。看板网页需要 `/progress connect` 安装的看板脚本，或在下次会话开始时更新。
 
@@ -157,9 +174,9 @@ Hooks 只说对话在做事还是在等；步骤和什么时候算完成，来�
 | Codex | 0.163.0-alpha.10.2 app-server（[记录](docs/validation/2026-10-19-native-hooks.md)）；CLI 有 0.23.5 实机测试；App 未验证 |
 | Antigravity | Windows 上的 CLI（[记录](docs/validation/2026-10-19-native-hooks.md)）；App 能打开看板，但还不会报告提问（#285）；IDE 未验证 |
 | OpenCode | Plugin SDK 1.19.3（[记录](docs/validation/2026-10-19-portable-hosts.md)） |
-| Cursor | 在合成环境检查过，还没实机运行 |
+| Cursor | 在测试环境检查过，还没实机运行 |
 | Grok Build | 1.0.62，搭配模拟模型 |
-| Muse Code | 在合成环境检查过，还没实机运行 |
+| Muse Code | 在测试环境检查过，还没实机运行 |
 | Hermes Agent | 0.19.0，搭配模拟模型 |
 | OpenClaw | 源代码契约和模拟回调（[记录](docs/validation/2026-10-19-portable-hosts.md)）；应用本身未验证 |
 | DeepSeek Harness | 插件加载（[记录](docs/validation/2026-10-19-portable-hosts.md)）；应用本身未验证 |
@@ -171,10 +188,10 @@ Hooks 只说对话在做事还是在等；步骤和什么时候算完成，来�
 
 ## 你会看到什么
 
-- **回复在等你的那一个。** 任何 agent 的问题都排在最上面，每个答案一个按钮。开启了消息功能（[`--messages-dir`](docs/MESSAGING.md#enable-locally)，英文说明）、对方的对话又有实时连接，点**发送**就送到；没有的话，点**复制**再贴回它的对话。
+- **回复在等你的那一个。** 任何 agent 的问题都排在最上面，每个答案一个按钮。开启消息功能（[`--messages-dir`](docs/MESSAGING.md#enable-locally)，英文说明）、那个对话也连上时，按**发送**会把回复排进队列，那个对话回复确认才代表收到；否则按**复制**，再贴回它的对话。
 - **确认其他的还在动。** 每个 agent 的工作都显示现在做到哪一步、多久前报告过。超过一周没人动的工作收进一行 **N 项超过 7 天没动**。
 - **收掉做完的和停掉的。** 做完的工作会自己移到每月归档文件。做到一半停掉的对话，可以归档、确认完成，或接手继续做。
-- **不用切过去也能交代事情。** 在看板上写回复：开启了消息功能、对方又有连接，就直接发过去；没有的话看板帮你复制好，你再贴上。
+- **不用切过去也能交代事情。** 开启消息功能、对话也连上时，在回复框打字就能发送；否则按**复制**，再贴过去。
 
 **终端看板**（`--watch`），打开了 Codex 的问题：按 `y` 或 `n` 复制回答。
 
@@ -190,7 +207,7 @@ Hooks 只说对话在做事还是在等；步骤和什么时候算完成，来�
 
 上面的看板命令会在浏览器打开看板网页（在聊天软件里则只打印纯文本，没有链接）。在任何终端运行 `node ~/.agent-board/agent-board.mjs --serve` 也一样，再运行一次就会重新打开网页。在网页上可以：
 
-- **回复**问题：开启了消息功能、对方的对话又在线，就直接**发送**，否则**复制**回复。
+- **回复**问题：开启消息功能、对话也连上时就**发送**，否则**复制**回复。LAN 网页没有消息功能。
 - **勾掉**下一步、**归档**一件工作，或点**现在归档**收走所有做完的。
 - **已回复，先隐藏**：已在原来对话里回过的问题，只在这台电脑上隐藏，直到那个对话问新的问题；不会发出任何内容。
 - **贴入区块**：把 Muse、dot 这类网页聊天的进度贴进来。
