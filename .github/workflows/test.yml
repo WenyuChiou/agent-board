@@ -39,6 +39,11 @@ jobs:
       plan: ${{ steps.plan.outputs.plan }}
       full: ${{ steps.plan.outputs.full }}
       installers_os: ${{ steps.plan.outputs.installers_os }}
+      # A pull request runs each Node line once and each system once (Node 22 on Ubuntu, Node 24 on
+      # Windows) and plugin on Ubuntu only. main, the weekly run, a manual run and a release PR run
+      # every pair, so a failure only one pair shows is still caught before a release.
+      node_matrix: ${{ (github.event_name == 'pull_request' && !startsWith(github.event.pull_request.title, 'chore(release):')) && '[{"os":"ubuntu-latest","node":22},{"os":"windows-latest","node":24}]' || '[{"os":"ubuntu-latest","node":22},{"os":"ubuntu-latest","node":24},{"os":"windows-latest","node":22},{"os":"windows-latest","node":24}]' }}
+      plugin_os: ${{ (github.event_name == 'pull_request' && !startsWith(github.event.pull_request.title, 'chore(release):')) && '["ubuntu-latest"]' || '["ubuntu-latest","windows-latest"]' }}
       bundle: ${{ steps.plan.outputs.bundle }}
       released: ${{ steps.plan.outputs.released }}
       board: ${{ steps.plan.outputs.board }}
@@ -114,10 +119,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest]
         # The CLI loads .ts files through Node's type stripping: on by default from
         # 22.18 and in 24. Both lines run so an import Node cannot load fails here.
-        node: [22, 24]
+        include: ${{ fromJSON(needs.impact.outputs.node_matrix) }}
     runs-on: ${{ matrix.os }}
     # Split board and messaging so Windows keeps its existing ten-minute budget.
     timeout-minutes: 10
@@ -143,10 +147,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest]
         # The CLI loads .ts files through Node's type stripping: on by default from
         # 22.18 and in 24. Both lines run so an import Node cannot load fails here.
-        node: [22, 24]
+        include: ${{ fromJSON(needs.impact.outputs.node_matrix) }}
     runs-on: ${{ matrix.os }}
     # Split board and messaging so Windows keeps its existing ten-minute budget.
     timeout-minutes: 10
@@ -172,8 +175,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest]
-        node: [22, 24]
+        include: ${{ fromJSON(needs.impact.outputs.node_matrix) }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 5
     steps:
@@ -199,8 +201,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest]
-        node: [22, 24]
+        include: ${{ fromJSON(needs.impact.outputs.node_matrix) }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 5
     steps:
@@ -223,7 +224,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest]
+        os: ${{ fromJSON(needs.impact.outputs.plugin_os) }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 15
     steps:
@@ -300,16 +301,14 @@ jobs:
   journeys:
     needs: impact
     if: ${{ needs.impact.outputs.full == 'true' || needs.impact.outputs.journeys == 'true' }}
-    # Node 24 keeps the old check names, which branch protection on main requires, and the Node 22
-    # rows add their version.
+    # Node 22 rows add their version to the name.
     name: journeys (${{ matrix.os }}${{ matrix.node == 22 && ', Node 22' || '' }})
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest]
         # Both lines run, as in the jobs above, so a journey that depends on one Node's behaviour
         # fails here.
-        node: [22, 24]
+        include: ${{ fromJSON(needs.impact.outputs.node_matrix) }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 10
     steps:
