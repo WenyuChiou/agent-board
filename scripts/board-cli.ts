@@ -34,7 +34,7 @@ import { qrModules, qrText } from '../hooks/qr'
 import { langOf, plainReason, STRINGS } from '../hooks/strings'
 import { answeredJson, answeredPath, buildView, handKeptSeenAt, isSeenText, manualDoneSeen, parseAnswered, parseSeen, seenJson, seenPath, withAnswered, withSeen } from '../hooks/view'
 import type { TaskRef } from '../hooks/view'
-import { acknowledgementKeys, archiveQuestionsKept, captureHashOf, captureJson, capturePath, compactQuestionsJson, copiesToKeep, cutOffScopes, emptyQuestions, identitiesToRetire, parseCapture, withCaptures, isAskedBy, isQuestionProof, isQuestionSnapshot, isTornLedger, migratedAnswered, observeQuestions, parseQuestions, questionProofJson, questionProofOf, questionProofPath, questionsPath, resolvedQuestionsToRetire } from '../hooks/questions'
+import { acknowledgementKeys, archiveQuestionsKept, captureHashOf, captureJson, capturePath, compactQuestionsJson, copiesToKeep, cutOffScopes, emptyQuestions, identitiesToRetire, parseCapture, withCaptures, isAskedBy, isKeptQuestion, isQuestionProof, isQuestionSnapshot, isTornLedger, migratedAnswered, observeQuestions, parseQuestions, questionProofJson, questionProofOf, questionProofPath, questionsPath, resolvedQuestionsToRetire } from '../hooks/questions'
 import type { QuestionCapture, QuestionLedger, QuestionProofs, QuestionRecord } from '../hooks/questions'
 import { sha256 } from '../hooks/sha256'
 
@@ -805,8 +805,10 @@ const act = (action: BoardAction, fallback?: { copyText?: string; tone?: 'done' 
       const latest = readQuestions(questionsPath(path))
       const persisted = parseQuestions(read(questionsPath(path)))
       const proofs = readQuestionProofs()
-      if (proofs === null || (isHidden && keys.some(key => proofs.retired.includes(sha256(key))))) return null
-      if (latest === null || persisted === null || (isHidden && keys.some(key => !persisted.records.some(record => record.id === key && record.isWaiting && record.isPresent)))) return null
+      // A question kept from an archived block has a retired identity and no longer waits on the board, and can still be hidden (#400).
+      const isKept = (key: string): boolean => latest !== null && isKeptQuestion(latest, key)
+      if (proofs === null || (isHidden && keys.some(key => proofs.retired.includes(sha256(key)) && !isKept(key)))) return null
+      if (latest === null || persisted === null || (isHidden && keys.some(key => !isKept(key) && !persisted.records.some(record => record.id === key && record.isWaiting && record.isPresent)))) return null
       const source = read(path)
       const projects = parseProgress(source)
       const frozen = cutOffScopes(projects, cutOffSpans(source, isCutSettledAt(now)))

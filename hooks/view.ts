@@ -101,8 +101,11 @@ export type WaitingItem = {
   // What the person's Answered press keeps, to hide the question until the session asks
   // something else (`answeredKey`); '' for a hand-kept step, which is ticked instead.
   hideKey: string
-  // A retained source without a current producer is available for review, not a new hide.
+  // A retained source without a current producer is available for review, not a new hide. One kept
+  // from an archived block can be hidden (#400): hiding writes only the hidden list, never the source.
   canHide?: boolean
+  // Kept for review after its session's block was archived: nothing is running that could be archived.
+  isKept?: true
   // A hand-kept step can be ticked from the pane; another session's cannot.
   step: StepRef | null
   // Another agent's session the question came from; null for Claude's and hand-kept ones.
@@ -188,6 +191,8 @@ export type View = {
   hidden: WaitingItem[]
   reminder?: WaitingItem[]
   older?: WaitingItem[]
+  // Unanswered questions of stopped sessions, each counted once; Waiting shows one line.
+  stoppedAsking?: number
   hasPendingQuestions?: boolean
   idle: TaskRow[]
   stopped: TaskRow[]
@@ -202,6 +207,7 @@ const MINUTE = 60 * 1000
 const HOUR = 60 * MINUTE
 const DAY = 24 * HOUR
 export const IDLE_MS = 7 * DAY
+export const OLDER_SHOWN = 10
 
 export const relativeTime = (then: number, now: number, s: Strings = ZH_TW): string => {
   if (then <= 0) return ''
@@ -748,6 +754,7 @@ export const buildView = (
 ): View => {
   const observed = questions === undefined ? null : observe(questions, projects, mine, answered, now, false, 'preview', proofs ?? { retired: [], consumed: [] }, pending, [], frozen)
   const marked = new Set(proofs === null ? [] : observed?.marked ?? answered)
+  const recordsById = new Map((observed?.ledger.records ?? []).map(record => [record.id, record]))
   const ownId = mine === null ? '' : shortId(mine.sessionId)
   const waiting: WaitingItem[] = []
   const inactiveHidden: WaitingItem[] = []
@@ -1026,6 +1033,7 @@ export const buildView = (
   for (const item of shownRecent) item.questions = item.questions?.filter(question => question.questionId === undefined || !liveQuestions.has(question.questionId))
   const onShelf = new Set([...stopped.flatMap(({ row }) => row.questions ?? []), ...shownRecent.flatMap(item => item.questions ?? [])].flatMap(item => item.questionId === undefined ? [] : [item.questionId]))
   const shownQuestions = new Set([...all, ...hidden].flatMap(item => item.questionId === undefined ? [] : [item.questionId]))
+  const stoppedQuestions = new Set<string>()
   for (const record of observed?.ledger.records ?? []) {
     if (!record.isUnresolved || record.source === undefined || onShelf.has(record.id) || shownQuestions.has(record.id)) continue
     const source = record.source
@@ -1039,12 +1047,38 @@ export const buildView = (
       const saved = sourceSnapshot(source.data)
       isInactiveSource = saved !== null && saved.auto !== null && (saved.auto.state === 'ended' || saved.auto.state === 'done' || isStale(saved.auto, now, observedTime(saved.auto, now, seen).updated) || isMarksComplete(saved.steps))
     }
-    const stage = record.isArchived || isInactiveSource || inactiveScopes.has(record.scope) ? 'older' : age.stage
-    const item: WaitingItem = { key: `retained::${record.id}`, questionId: record.id, ageStage: stage, project: source.project, task: source.task, context: source.context, ...parts, when: age.age === null ? s.questionAgeUnknown : relativeTime(record.firstObserved, now, s), ...askOf(parts.text, parts.note), where: 'other', agent: source.agent === 'claude' ? '' : source.agent, session: source.session, sessionId: null, resumeVia: null, reopen: null, hideKey: record.id, canHide: false, step: null, target: null }
+    const isStopped = record.isArchived || isInactiveSource || inactiveScopes.has(record.scope)
+    const stage = isStopped ? 'older' : age.stage
+    const item: WaitingItem = { key: `retained::${record.id}`, questionId: record.id, ageStage: stage, project: source.project, task: source.task, context: source.context, ...parts, when: age.age === null ? s.questionAgeUnknown : relativeTime(record.firstObserved, now, s), ...askOf(parts.text, parts.note), where: 'other', agent: source.agent === 'claude' ? '' : source.agent, session: source.session, sessionId: null, resumeVia: null, reopen: null, hideKey: record.id, canHide: record.isArchived === true, ...(record.isArchived === true ? { isKept: true as const } : {}), step: null, target: null }
     if (marked.has(record.id)) hidden.push(item)
     else if (stage === 'pending') asks.push(item)
     else if (stage === 'reminder') reminder.push(item)
-    else older.push(item)
+    else {
+      older.push(item)
+      if (isStopped) stoppedQuestions.add(record.id)
+    }
+  }
+  // A question that sits on a Stopped or recent row is also listed under Older, with the age it was
+  // first asked, so the stopped-sessions line in Waiting has one list to open (#400). The row keeps its
+  // own copy. A question the ledger loop already put there is not listed twice, and every stopped
+  // question is counted once by its id. A board that first looks at a long-quiet block cannot have
+  // seen the question before the block's last write, so the question is at least that old: the age
+  // is taken from the earlier of the two, and never reads "just now" for a month-old block.
+  const olderIds = new Set(older.flatMap(item => item.questionId === undefined ? [] : [item.questionId]))
+  const askedOn = [...stopped.map(({ row, updated }) => ({ questions: row.questions ?? [], updated })), ...shownRecent.map(item => ({ questions: item.questions ?? [], updated: 0 }))]
+  for (const { questions, updated } of askedOn) {
+    for (const question of questions) {
+      const id = question.questionId
+      if (id === undefined || marked.has(id)) continue
+      const record = recordsById.get(id)
+      if (record?.isUnresolved === false) continue
+      stoppedQuestions.add(id)
+      if (olderIds.has(id)) continue
+      const first = record?.firstObserved ?? 0
+      const askedAt = updated > 0 && updated < first ? updated : first
+      older.push({ ...question, key: `older::${question.key}`, ageStage: 'older', when: questionAge(first, now).age === null ? s.questionAgeUnknown : relativeTime(askedAt, now, s) })
+      olderIds.add(id)
+    }
   }
   const dueRows = due.map(({ days: _days, ...row }) => row)
   const now1 = asks.find(item => askRank(item.kind) < 2)
@@ -1079,6 +1113,7 @@ export const buildView = (
     hidden,
     reminder,
     older,
+    ...(stoppedQuestions.size > 0 ? { stoppedAsking: stoppedQuestions.size } : {}),
     hasPendingQuestions: questions !== undefined,
     idle,
     stopped: stopped.map(item => item.row),

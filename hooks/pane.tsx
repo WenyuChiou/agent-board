@@ -15,7 +15,7 @@ import { ZH_TW } from './i18n'
 import { agentLabel } from './strings'
 import { askColor, stepColor, toneColor } from './palette'
 import type { Palette } from './palette'
-import { progressBar, replyHint } from './view'
+import { OLDER_SHOWN, progressBar, replyHint } from './view'
 import type { Focus, PrView, StepRef, TaskRow, Tone, View, ViewStep, WaitingItem } from './view'
 
 // The pane's drawing, from the view and a set of actions; it never touches the engine,
@@ -109,6 +109,8 @@ export const pressTarget = (view: View, button: string, s: Strings = ZH_TW): { k
   if (button === 'section::health') return { key: button, revision: '', label: s.sectionHealth }
   if (button === 'section::reminder') return { key: button, revision: '', label: s.sectionQuestionReminders }
   if (button === 'section::older') return { key: button, revision: '', label: s.sectionOlderQuestions }
+  if (button === 'section::stoppedAsking') return { key: button, revision: '', label: s.stoppedAsking(view.stoppedAsking ?? 0) }
+  if (button === 'section::olderAll') return { key: button, revision: '', label: s.showAllQuestions(view.older?.length ?? 0) }
   if (button === 'section::others') return { key: button, revision: '', label: view.current === null ? s.sectionActive : s.sectionOther }
   if (button === 'focus::more') return { key: button, revision: '', label: s.moreWaiting(view.waiting.length - (view.focus?.type === 'ask' ? 1 : 0)) }
   if (button === 'continue' && view.current !== null) return { key: button, revision: JSON.stringify([view.current.title, view.current.steps]), label: view.current.title }
@@ -413,7 +415,7 @@ export const drawPane = (ui: PaneUi, model: PaneModel, actions: PaneActions): Re
       {item.note !== '' && <Text wrap="wrap">{item.note}</Text>}
       {item.note === '' && item.context !== '' && muted(s.contextLine(item.context))}
       {item.when !== '' && muted(item.when)}
-      {item.canHide === false ? muted(s.questionReviewOnly) : item.where !== 'manual' && muted(s.archiveLive)}
+      {item.canHide === false ? muted(s.questionReviewOnly) : item.where !== 'manual' && item.isKept !== true && muted(s.archiveLive)}
       {askActions(item)}
       {item.hideKey !== '' && item.canHide !== false && (
         <Box marginTop={1}>
@@ -761,11 +763,20 @@ export const drawPane = (ui: PaneUi, model: PaneModel, actions: PaneActions): Re
 
       {view.waiting.length > 0 && fold('waiting', s.sectionWaiting, view.waiting.length, 'warn', '')}
       {isOpen('waiting') && view.waiting.map(waitingRow)}
+      {(view.stoppedAsking ?? 0) > 0 && <Box flexDirection="column">
+        <Button key="section::stoppedAsking" plain onPress={buttonPress('section::stoppedAsking', () => actions.toggleSection('older'), true)}>
+          {`${isOpen('older') ? '▾' : '▸'} ${s.stoppedAsking(view.stoppedAsking!)}`}
+        </Button>
+        {cardResult('section::stoppedAsking')}
+      </Box>}
       {(['reminder', 'older'] as const).map(id => {
         const items = view[id] ?? []
+        const shownItems = id === 'older' && !isOpen('olderAll') ? items.slice(0, OLDER_SHOWN) : items
         return items.length === 0 ? null : <Box flexDirection="column">
           {fold(id, id === 'reminder' ? s.sectionQuestionReminders : s.sectionOlderQuestions, items.length, 'quiet', s.questionAgingHint)}
-          {isOpen(id) && items.map(item => <Box flexDirection="column">{waitingRow(item)}{muted(item.when)}</Box>)}
+          {isOpen(id) && shownItems.map(item => <Box flexDirection="column">{waitingRow(item)}{muted(item.when)}</Box>)}
+          {isOpen(id) && shownItems.length < items.length && <Button key="section::olderAll" plain onPress={buttonPress('section::olderAll', () => actions.toggleSection('olderAll'), true)}>{s.showAllQuestions(items.length)}</Button>}
+          {cardResult('section::olderAll')}
         </Box>
       })}
       {view.hidden.length > 0 && (

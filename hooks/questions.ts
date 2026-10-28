@@ -619,6 +619,11 @@ export const observeQuestions = (
   }
 }
 
+// A question kept for review after its block was archived (#400). Its identity is retired and it no
+// longer waits on the board, yet it can be hidden: that writes only the hidden list.
+export const isKeptQuestion = (ledger: QuestionLedger, id: string): boolean =>
+  ledger.records.some(record => record.id === id && record.isUnresolved && record.isArchived === true && record.source !== undefined)
+
 export const acknowledgementKeys = (ledger: QuestionLedger, id: string): string[] =>
   [id, ...Object.entries(ledger.legacy).filter(([, target]) => target === id).flatMap(([key]) => [key, migrationKey(key)])]
 
