@@ -524,6 +524,34 @@ test('a question with no choice still takes its options from the note', () => {
   expect(askOf('Ready, OK?', 'a note with no choice')).toMatchObject({ kind: 'reply', options: [] })
 })
 
+test('a note that asks or points to something of its own decides the kind, whatever the question holds', () => {
+  const rows = [
+    { question: '測試還是紅的，要重跑嗎？', note: '要我直接重跑 CI 嗎？', kind: 'confirm' },
+    { question: '問題還是在嗎？', note: '可以關掉這個 issue 嗎？', kind: 'confirm' },
+    { question: 'build 還是壞的？', note: '請在本機跑 `npm ci`', kind: 'do', command: 'npm ci' },
+    { question: '預覽頁還是跑版？', note: '看一下 https://example.test/preview', kind: 'review', link: 'https://example.test/preview' },
+    { question: '預覽頁還是跑版？', note: '看一下預覽頁', kind: 'review' },
+    { question: 'Which build, old or new?', note: 'Please run the installer', kind: 'do' },
+    { question: 'Which build, old or new?', note: 'Run the installer', kind: 'do' },
+    { question: 'Should I merge #12 or not?', note: 'Shall I merge it now?', kind: 'confirm' },
+  ]
+  for (const { question, note, kind, command, link } of rows) {
+    expect(askOf(question, note)).toMatchObject({ kind, options: [], ...(command && { command }), ...(link && { link }) })
+  }
+  for (const [question, note] of [
+    ['用 win rate 還是 Elo？', '之後的報表會按照這個算'],
+    ['用 win rate 還是 Elo？', '我建議 Elo'],
+    ['Which metric, win rate or Elo?', 'the runs will follow it'],
+    ['Which metric, win rate or Elo?', 'the reviewers asked for one'],
+    ['Which metric, win rate or Elo?', 'click-through rate is the same'],
+    ['Which metric, win rate or Elo?', 'run-to-run variance is small'],
+    ['Which metric, win rate or Elo?', ''],
+    ['Which metric, win rate or Elo?', 'the reports will follow it'],
+  ]) {
+    expect(askOf(question, note)).toMatchObject({ kind: 'choose', options: ['win rate', 'Elo'] })
+  }
+})
+
 test('agent labels read only brand names owned by the table and preserve an empty agent', () => {
   for (const s of Object.values(STRINGS)) {
     expect(agentLabel('claude', s)).toBe('Claude Code')

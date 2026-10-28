@@ -1,7 +1,9 @@
 - **Every card names its agent by brand, a noted choice question keeps its options, and Reply comes first with at most three buttons (#461).**
   A question step is read for its options in the order the agent's own `options`, then the
   question, then the note, so `Which metric, win rate or Elo? — the reports will follow it`
-  keeps its two buttons whatever the note says. The page and the pane print `Codex`,
+  keeps its two buttons whatever the note says, unless the note asks a yes/no question, holds a link or a
+  command, or opens by asking for a look or an action: then the note decides the kind and a stray `or`
+  or `還是` in the question does not make a choice. The page and the pane print `Codex`,
   `Claude Code` or `Gemini CLI` from the `agentNames` table instead of the lower-case name
   (an agent with no brand name keeps its own name; a hand-kept task names no agent), and
   the terminal board and `progress.html` say `Codex is working` the same way while their
@@ -14,6 +16,7 @@
   `a note that holds a choice does not replace the options in the question`,
   `options the agent gave win over options found in the question or the note`,
   `a question with no choice still takes its options from the note`,
+  `a note that asks or points to something of its own decides the kind, whatever the question holds`,
   `agent labels read only brand names owned by the table and preserve an empty agent`,
   `the page names each agent by its brand name on questions, rows, turns and older questions`,
   `a Claude Code card says Claude Code and a hand-kept task names no agent`,
