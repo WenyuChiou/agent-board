@@ -7267,7 +7267,10 @@ test('the synthetic big board has the shape of a heavy user\'s board', async t =
   assert.equal(ledger.records.length, 500)
   assert.ok(ledger.records.every(record => record.firstObserved === bigBoardFirstObserved))
   const view = buildView(projects, [], null, bigBoardNow, 0, {}, EN, [], {}, ledger)
-  assert.equal(view.older.length, 100, 'live sessions retain their older unanswered questions')
+  // Since #400 a stopped session's question is also listed under Older, once, so Older holds the
+  // live sessions' older questions and every question of the 200 ended sessions.
+  assert.equal(view.stoppedAsking, 400, 'each question of an ended session counts once on the stopped-sessions line')
+  assert.equal(view.older.length, 500, 'Older lists the live sessions\' older questions and each stopped session\'s question once')
 
   const it = t.test.bind(t)
   await it('the never-shown check finds hashes, paths, session ids, raw JSON and long lines', () => {
