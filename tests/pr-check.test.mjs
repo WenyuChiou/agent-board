@@ -7,8 +7,8 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import {
   TOTAL_CAP, addedLines, apiReader, authorKey, authorLine, binaryImages, cap, changelog, checkPr, claimed,
-  isGovernancePath, issueLine, main, naming, needsBundle, privateData, report, reportMarkdown,
-  reviewOf, sections, stripComments, testTitles, titleKnown, verdict,
+  isGovernancePath, isOutsideAssociation, isSmallDocsFix, issueLine, main, naming, needsBundle, outsideClaim,
+  privateData, report, reportMarkdown, reviewOf, sections, stripComments, testTitles, titleKnown, verdict,
 } from '../scripts/pr-check.mjs'
 
 const script = fileURLToPath(new URL('../scripts/pr-check.mjs', import.meta.url))
@@ -819,4 +819,272 @@ test('pr-check looks up each further issue with the token and names the issue th
   assert.equal(calls.filter(call => call.path.endsWith('/issues/43')).length, 1)
   assert.equal(repeated.stdout.split('no comment on #43 claims').length - 1, 1)
   assert.match(repeated.stdout, /#43 is listed more than once/)
+})
+
+// Pull requests from outside the team (#482): a made-up newcomer who is not the owner, a member or a collaborator.
+const outsideNow = Date.parse('2030-06-01T12:00:00Z')
+const outsideOpen = (number, login, extra = {}) => ({ ...openPr(number, `${login}-agent`), isOutside: true, association: 'NONE', login, ...extra })
+const teamOpen = count => Array.from({ length: count }, (_, index) => openPr(index + 1, `agent-${index + 1}`))
+const claimBy = (login, text, extra = {}) => ({ user: { login }, body: text, created_at: '2030-05-31T12:00:00Z', ...extra })
+const readyLabels = [{ name: 'enhancement' }, { name: 'ready' }, { name: 'for-agent' }]
+// syntheticPr, written by a newcomer who claimed a ready issue from their own login.
+const outsidePr = (extra = {}) => ({
+  ...syntheticPr(), association: 'NONE', login: 'newcomer', now: outsideNow,
+  issueData: { state: 'open', labels: readyLabels },
+  issueComments: [claimBy('newcomer', `Claim: newcomer, ${branch}, until 2030-06-02 12:00 UTC`)],
+  ...extra,
+})
+
+// The event of a pull request in the fixture, and GitHub's answers for issue #42 and the open pull requests.
+const eventArgs = (setup, association, login = 'newcomer') => {
+  setup.put('event.json', JSON.stringify({ repository: { full_name: 'synthetic/example' }, pull_request: { number: 17, title: 'fix: synthetic check', body, draft: false, created_at: '2030-01-01T00:00:00Z', labels: [], author_association: association, user: { login }, head: { ref: branch, sha: setup.head }, base: { sha: setup.base } } }))
+  return ['--event', join(setup.directory, 'event.json'), '--repo-dir', setup.directory]
+}
+const apiEnv = { GITHUB_API_URL: 'https://api.example.invalid', GITHUB_TOKEN: 'synthetic-token-value' }
+const githubAnswers = (calls, { labels = [], comments = [], pulls = [] }) => async url => {
+  calls.push(url.pathname)
+  const payload = url.pathname.endsWith('/issues/42') ? { state: 'open', labels } : url.pathname.endsWith('/issues/42/comments') ? comments : url.pathname.endsWith('/pulls') ? pulls : []
+  return { ok: true, status: 200, json: async () => payload, headers: new Headers() }
+}
+const pullItem = (number, association, login) => ({ number, title: 'fix: synthetic', body: `Fixes #${number}\nAuthor: agent-${number}, fix/synthetic-${number}`, created_at: `2030-01-01T00:00:${String(number).padStart(2, '0')}Z`, labels: [], author_association: association, user: { login } })
+
+test("pr-check counts an outside author's open pull requests by login, apart from the team's eight", () => {
+  assert.ok(['NONE', 'CONTRIBUTOR', 'FIRST_TIME_CONTRIBUTOR', 'first_timer'].every(isOutsideAssociation))
+  assert.ok([undefined, null, '', 'OWNER', 'member', 'COLLABORATOR'].every(value => !isOutsideAssociation(value)))
+  // The third pull request of one login fails and the two older ones keep their slots; a login is not case-sensitive.
+  const own = [outsideOpen(21, 'newcomer'), outsideOpen(22, 'Newcomer'), outsideOpen(23, 'newcomer'), outsideOpen(24, 'visitor')]
+  assert.equal(cap({ open: own, number: 22, isOutside: true, login: 'Newcomer' }).problems.length, 0)
+  const third = cap({ open: own, number: 23, isOutside: true, login: 'newcomer' })
+  assert.equal(third.problems.length, 1)
+  assert.match(third.problems[0].message, /"newcomer" would have 3 open pull requests, over 2 per login: #21, #22, #23/)
+  assert.equal(cap({ open: own, number: 24, isOutside: true, login: 'visitor' }).problems.length, 0)
+  assert.match(cap({ open: own.slice(0, 2), number: null, body: 'Author: x, fix/x', isOutside: true, login: 'newcomer' }).problems[0].message, /#21, #22, this one/)
+  // Four in all, whoever wrote them: the fifth fails.
+  const four = ['a', 'b', 'c', 'd'].map((login, index) => outsideOpen(31 + index, login))
+  assert.equal(cap({ open: four, number: 34, isOutside: true, login: 'd' }).problems.length, 0)
+  const fifth = cap({ open: [...four, outsideOpen(35, 'e')], number: 35, isOutside: true, login: 'e' })
+  assert.equal(fifth.problems.length, 1)
+  assert.match(fifth.problems[0].message, /5 outside pull requests would be open, over the 4 in all; counted: #31, #32, #33, #34, #35/)
+  // The team's eight and the outside four do not count toward each other.
+  const mixed = [...teamOpen(TOTAL_CAP), ...four]
+  assert.equal(cap({ open: mixed, number: TOTAL_CAP }).problems.length, 0)
+  assert.equal(cap({ open: mixed, number: 34, isOutside: true, login: 'd' }).problems.length, 0)
+  assert.equal(cap({ open: [...teamOpen(TOTAL_CAP), outsideOpen(31, 'a')], number: 31, isOutside: true, login: 'a' }).problems.length, 0)
+  assert.match(cap({ open: [...mixed, openPr(9, 'agent-9')], number: 9 }).problems[0].message, /^9 pull requests would be open, over the 8 in all; counted: #1, #2, #3, #4, #5, #6, #7, #8, #9\./)
+  // The name an outside pull request puts on its Author line takes no slot of the team's author, however old it is.
+  const named = [openPr(1, 'dot'), openPr(2, 'dot'), outsideOpen(31, 'newcomer', { body: 'Fixes #31\nAuthor: dot, fix/synthetic-31', createdAt: '2029-12-31T00:00:00Z' })]
+  assert.equal(cap({ open: named, number: 2 }).problems.length, 0)
+  // The exemptions are the team's: a governance, cap-exempt or release pull request from outside still takes a slot.
+  const exempt = [outsideOpen(21, 'newcomer', { isGovernance: true }), outsideOpen(22, 'newcomer', { labels: [{ name: 'cap-exempt' }] }), outsideOpen(23, 'newcomer', { title: 'chore(release): synthetic' })]
+  assert.equal(cap({ open: exempt, number: 22, isOutside: true, login: 'newcomer' }).problems.length, 0)
+  assert.equal(cap({ open: exempt, number: 23, isOutside: true, login: 'newcomer' }).problems.length, 1)
+  // The same through checkPr: a governance file does not make an outside pull request exempt, and the owner's is.
+  const open = [outsideOpen(21, 'newcomer'), outsideOpen(22, 'newcomer'), outsideOpen(17, 'newcomer', { createdAt: '2030-01-02T00:00:00Z' })]
+  const governed = outsidePr({ open, paths: [...syntheticPr().paths, 'CONTRIBUTING.md'] })
+  assert.ok(checkPr(governed).problems.some(item => item.check === 'cap'))
+  assert.equal(checkPr(governed).info.includes('cap: this pull request is exempt.'), false)
+  assert.equal(checkPr({ ...governed, association: 'OWNER' }).problems.some(item => item.check === 'cap'), false)
+  assert.ok(checkPr({ ...governed, association: 'OWNER' }).info.includes('cap: this pull request is exempt.'))
+})
+
+test('pr-check fails an outside pull request whose claim was written by someone else or whose issue is not ready', async t => {
+  const problemsOf = data => checkPr(data).problems
+  const claimProblems = data => problemsOf(data).filter(item => item.check === 'claim')
+  const issueProblems = data => problemsOf(data).filter(item => item.check === 'issue')
+  const own = claimBy('newcomer', `Claim: newcomer, ${branch}, until 2030-06-02 12:00 UTC`)
+  const theirs = (text, extra) => claimBy('maintainer', text, extra)
+  assert.deepEqual(problemsOf(outsidePr()), [])
+  // The author's own claim running out while the pull request is open is no failure, and a login is not case-sensitive.
+  assert.deepEqual(problemsOf(outsidePr({ issueComments: [claimBy('Newcomer', `Claim: newcomer, ${branch}, until 2030-05-01 00:00 UTC`)] })), [])
+  // A claim another login wrote does not count, even when it names this author and branch.
+  const elsewhere = claimProblems(outsidePr({ issueComments: [theirs(`Claim: newcomer, ${branch}, until 2030-05-01 00:00 UTC`)] }))
+  assert.equal(elsewhere.length, 1)
+  assert.match(elsewhere[0].message, /no comment starting "Claim:" from newcomer names this branch/)
+  for (const comments of [
+    [claimBy('newcomer', `I would like this one: ${branch}`)],
+    [claimBy('newcomer', 'Claim: newcomer, fix/another-branch, until 2030-06-02 12:00 UTC')],
+    [claimBy('newcomer', `Claim: newcomer, ${branch}-2, until 2030-06-02 12:00 UTC`)],
+    [{ body: `Claim: newcomer, ${branch}` }],
+    [],
+  ]) assert.equal(claimProblems(outsidePr({ issueComments: comments })).length, 1, JSON.stringify(comments))
+  // The branch may be quoted or followed by punctuation, and the owner's agents' "T…Z" end time is read too.
+  for (const text of [`Claim: newcomer, '${branch}', until 2030-06-02 12:00 UTC`, `Claim: newcomer, ${branch}: starting now`]) {
+    assert.equal(claimProblems(outsidePr({ issueComments: [claimBy('newcomer', text)] })).length, 0, text)
+  }
+  assert.equal(claimProblems(outsidePr({ issueComments: [theirs('Claim: claude (pm), docs/x, until 2030-06-02T00:00Z'), own] })).length, 1)
+  assert.equal(claimProblems(outsidePr({ issueComments: [theirs('Claim: claude (pm), docs/x, until 2030-06-01T11:59Z'), own] })).length, 0)
+  // Another login's claim blocks the issue while it is live: by its time, 7 days for "waiting for a slot", else 2 days.
+  const held = claimProblems(outsidePr({ issueComments: [theirs('Claim: claude (pm), docs/x, until 2030-06-02 00:00 UTC'), own] }))
+  assert.equal(held.length, 1)
+  assert.match(held[0].message, /maintainer holds a live claim/)
+  for (const text of ['Claim: claude (pm), docs/x, waiting for a slot', 'Claim: dot, docs/x']) {
+    assert.equal(claimProblems(outsidePr({ issueComments: [theirs(text), own] })).length, 1, text)
+    assert.equal(claimProblems(outsidePr({ issueComments: [theirs(text, { created_at: '2030-05-20T00:00:00Z' }), own] })).length, 0, text)
+  }
+  assert.equal(claimProblems(outsidePr({ issueComments: [theirs('Claim: claude (pm), docs/x, until 2030-06-01 11:59 UTC'), own] })).length, 0)
+  assert.equal(claimProblems(outsidePr({ issueComments: [theirs('Claim: claude (pm), docs/x, until 2030-06-02 00:00 UTC'), theirs('Handover: docs/x, done: all, left: none'), own] })).length, 0)
+  assert.match(outsideClaim({ comments: [], login: 'newcomer', branch, issue: 43 }).problems[0].message, /no comment on #43 starting "Claim:"/)
+  assert.match(outsideClaim({ comments: [own], login: undefined, branch }).problems[0].message, /login is unknown/)
+  // The issue needs ready and for-agent and must not be blocked.
+  assert.equal(issueProblems(outsidePr()).length, 0)
+  assert.match(issueProblems(outsidePr({ issueData: { state: 'open', labels: [{ name: 'ready' }] } }))[0].message, /^#42 is not labelled "for-agent"/)
+  assert.match(issueProblems(outsidePr({ issueData: { state: 'open', labels: [{ name: 'enhancement' }, 'for-agent'] } }))[0].message, /^#42 is not labelled "ready"/)
+  assert.match(issueProblems(outsidePr({ issueData: { state: 'open' } }))[0].message, /^#42 is not labelled "ready" and "for-agent"/)
+  assert.match(issueProblems(outsidePr({ issueData: { state: 'open', labels: [...readyLabels, { name: 'blocked' }] } }))[0].message, /^#42 is labelled "blocked"/)
+  // Each listed issue is judged on its own.
+  const two = second => ({ ...twoIssuePr(second), association: 'NONE', login: 'newcomer', now: outsideNow, issueData: { state: 'open', labels: readyLabels }, issueComments: [own] })
+  assert.deepEqual(problemsOf(two({ issueData: { state: 'open', labels: readyLabels }, issueComments: [own] })), [])
+  const second = problemsOf(two({ issueData: { state: 'open', labels: [{ name: 'ready' }] }, issueComments: [] })).map(item => item.message)
+  assert.equal(second.length, 2)
+  assert.ok(second.some(message => /no comment on #43 starting "Claim:"/.test(message)))
+  assert.ok(second.some(message => /^#43 is not labelled "for-agent"/.test(message)))
+  // A release title from outside fails.
+  const release = problemsOf(outsidePr({ title: 'chore(release): Agent Board 9.9.9' })).filter(item => item.check === 'outside')
+  assert.equal(release.length, 1)
+  assert.match(release[0].message, /release pull request comes from the maintainer/)
+  // In CI the association and login come from the event, and the labels and comment authors from the API.
+  const setup = fixture(t)
+  const originalFetch = globalThis.fetch
+  t.after(() => { globalThis.fetch = originalFetch })
+  const calls = []
+  globalThis.fetch = githubAnswers(calls, { labels: [{ name: 'enhancement' }], comments: [claimBy('maintainer', `Claim: codex, ${branch}, until 2099-01-01 00:00 UTC`)] })
+  const failed = await runMain(eventArgs(setup, 'NONE'), apiEnv)
+  assert.equal(failed.status, 1, failed.stdout + failed.stderr)
+  assert.match(failed.stdout, /FAIL claim: no comment starting "Claim:" from newcomer names this branch/)
+  assert.match(failed.stdout, /FAIL claim: maintainer holds a live claim/)
+  assert.match(failed.stdout, /FAIL issue: #42 is not labelled "ready" and "for-agent"/)
+  globalThis.fetch = githubAnswers(calls, { labels: readyLabels, comments: [claimBy('newcomer', `Claim: newcomer, ${branch}, until 2000-01-01 00:00 UTC`)] })
+  const passed = await runMain(eventArgs(setup, 'NONE'), apiEnv)
+  assert.equal(passed.status, 0, passed.stdout + passed.stderr)
+  // An event without them: the association and login are read from this pull request's entry in the open list.
+  const notClaimed = { labels: readyLabels, comments: [{ body: `Claim: codex, ${branch}, until 2099-01-01 00:00 UTC` }] }
+  globalThis.fetch = githubAnswers(calls, { ...notClaimed, pulls: [pullItem(17, 'NONE', 'newcomer')] })
+  const listed = await runMain(eventArgs(setup, undefined, null), apiEnv)
+  assert.equal(listed.status, 1, listed.stdout + listed.stderr)
+  assert.match(listed.stdout, /FAIL claim: no comment starting "Claim:" from newcomer names this branch/)
+  // Found in neither, the author reads as the team.
+  globalThis.fetch = githubAnswers(calls, notClaimed)
+  const unknown = await runMain(eventArgs(setup, undefined, null), apiEnv)
+  assert.equal(unknown.status, 0, unknown.stdout + unknown.stderr)
+})
+
+test('pr-check lets a small docs pull request from an outside author through without an issue or a claim', () => {
+  const docsFiles = ['README.md', 'docs/CONTRIBUTOR-PATH.md']
+  const addedIn = count => Array.from({ length: count }, (_, index) => ({ path: 'docs/CONTRIBUTOR-PATH.md', line: index + 1, text: `A synthetic sentence ${index}.` }))
+  const docsBody = 'Author: newcomer, docs/synthetic-check\n\n## What and why\nExplains a step.\n\n## Checks\n- [x] Run the tests - passed\n'
+  const docsPr = (extra = {}) => outsidePr({
+    title: 'docs: explain the first step', body: docsBody, branch: 'docs/synthetic-check',
+    paths: docsFiles, changedPaths: docsFiles, addedPaths: [], headPaths: docsFiles, changelogText: '', added: addedIn(10),
+    issueData: null, issueComments: null, ...extra,
+  })
+  const passed = checkPr(docsPr())
+  assert.deepEqual(passed.problems, [])
+  assert.ok(passed.info.includes('issue: a small docs fix needs no issue line.'))
+  // Every author gets the same, the owner's agents and a run that does not know the author too.
+  for (const association of ['OWNER', undefined]) assert.deepEqual(checkPr(docsPr({ association, login: undefined })).problems, [], String(association))
+  assert.deepEqual(checkPr(docsPr({ title: 'docs(readme): explain the first step' })).problems, [])
+  // Naming an issue it has no claim on, and that is not ready, is no failure either.
+  const named = checkPr(docsPr({ body: `Part of #42\n${docsBody}`, issueData: { state: 'open', labels: [] }, issueComments: [] }))
+  assert.deepEqual(named.problems, [])
+  assert.ok(named.info.includes('claim: a small docs fix needs none.'))
+  // Anything bigger follows the normal rules, so the missing issue line fails.
+  for (const extra of [
+    { paths: [...docsFiles, 'docs/a.md', 'docs/b.md'] },
+    { added: addedIn(51) },
+    { paths: ['docs/FORMAT.md'] },
+    { paths: ['docs/dev/team-process.md'] },
+    { paths: ['docs/preview/render.ts'] },
+    { paths: ['CONTRIBUTING.md'] },
+    { paths: ['scripts/synthetic.mjs'] },
+    { title: 'fix: explain the first step' },
+  ]) assert.ok(checkPr(docsPr(extra)).problems.some(item => item.check === 'issue'), JSON.stringify(extra))
+  assert.deepEqual(checkPr(docsPr({ added: addedIn(50), paths: ['README.md', 'README.zh-TW.md', 'docs/guides/synthetic.md'] })).problems, [])
+  assert.equal(isSmallDocsFix({ title: 'docs: x', paths: [], added: [] }), false)
+  assert.equal(isSmallDocsFix({ title: 'docsify: x', paths: ['README.md'], added: [] }), false)
+  assert.equal(isSmallDocsFix({ title: 'docs: x', paths: ['docs/Dev/CI.md'], added: [] }), false)
+})
+
+test('pr-check only notes, and does not fail, a large or governance-touching outside pull request', async t => {
+  const stat = (path, added, deleted = 0) => ({ path, added, deleted })
+  const notes = data => checkPr(data).info.filter(line => line.startsWith('outside note:'))
+  const files = count => Array.from({ length: count }, (_, index) => stat(`docs/synthetic-${index}.md`, 1))
+  assert.deepEqual(notes(outsidePr({ numstat: [stat('scripts/pr-check.mjs', 300, 200)] })), [])
+  const large = outsidePr({ numstat: [stat('scripts/pr-check.mjs', 300, 201)] })
+  assert.deepEqual(checkPr(large).problems, [])
+  assert.equal(notes(large).length, 1)
+  assert.match(notes(large)[0], /501 changed lines in 1 file .*ask on the issue first \(CONTRIBUTING\.md, Outside contributors\)/)
+  assert.deepEqual(notes(outsidePr({ numstat: files(15) })), [])
+  const many = outsidePr({ numstat: files(16) })
+  assert.deepEqual(checkPr(many).problems, [])
+  assert.match(notes(many)[0], /16 changed lines in 16 files/)
+  // Changelog fragments and the two generated files are not counted.
+  const generated = [stat('changelog.d/42-synthetic-check.md', 900), stat('hooks/board-script.ts', 900, 900), stat('hooks/released.ts', 900), stat('scripts/pr-check.mjs', 10), ...files(14)]
+  assert.deepEqual(notes(outsidePr({ numstat: generated })), [])
+  // A change to a file the maintainer looks at first is noted by name and still passes.
+  for (const path of ['AGENTS.md', 'CONTRIBUTING.md', '.github/workflows/test.yml', 'package.json', '.claude-plugin/plugin.json']) {
+    const checked = checkPr(outsidePr({ paths: [...syntheticPr().paths, path] }))
+    assert.deepEqual(checked.problems, [], path)
+    assert.ok(checked.info.some(line => line.startsWith('outside note:') && line.includes(path) && /ask on the issue first/.test(line)), path)
+  }
+  assert.deepEqual(notes(outsidePr({ paths: [...syntheticPr().paths, 'docs/CONTRIBUTOR-PATH.md', 'scripts/pr-check.mjs', 'hooks/pane.tsx'] })), [])
+  // The notes are for outside pull requests only.
+  const owner = { ...large, association: 'OWNER', paths: [...large.paths, 'AGENTS.md'] }
+  assert.deepEqual(notes(owner), [])
+  assert.deepEqual(notes({ ...owner, association: undefined }), [])
+  // In CI the size comes from git's numstat on the pull request's commits: a binary file counts no lines.
+  const setup = fixture(t)
+  setup.put('docs/synthetic.md', `${Array.from({ length: 501 }, (_, index) => `Line ${index}.`).join('\n')}\n`)
+  setup.put('docs/synthetic.dat', 'binary\0data\n')
+  setup.put('hooks/board-script.ts', 'generated\n'.repeat(600))
+  setup.git('add', '--', 'docs/synthetic.md', 'docs/synthetic.dat', 'hooks/board-script.ts')
+  setup.git('-c', 'user.name=Synthetic', '-c', 'user.email=synthetic@example.invalid', '-c', 'commit.gpgsign=false', 'commit', '-m', 'docs: synthetic size')
+  const head = setup.git('rev-parse', 'HEAD')
+  setup.put('event.json', JSON.stringify({ repository: { full_name: 'synthetic/example' }, pull_request: { number: 17, title: 'fix: synthetic check', body, draft: false, created_at: '2030-01-01T00:00:00Z', labels: [], author_association: 'NONE', user: { login: 'newcomer' }, head: { ref: branch, sha: head }, base: { sha: setup.base } } }))
+  const execution = await runMain(['--event', join(setup.directory, 'event.json'), '--repo-dir', setup.directory, '--offline'])
+  assert.equal(execution.status, 0, execution.stdout + execution.stderr)
+  // 501 lines of the new page and 2 of the fixture's CHANGELOG entry, in three files; the generated bundle is left out.
+  assert.match(execution.stdout, /info outside note: 503 changed lines in 3 files/)
+})
+
+test("pr-check leaves the owner's agents' caps and claims as they were", async t => {
+  // The owner, a member, a collaborator and a run that does not know the author are all judged as before.
+  for (const association of ['OWNER', 'MEMBER', 'COLLABORATOR', undefined]) {
+    const team = { ...syntheticPr(), association, login: 'WenyuChiou', now: outsideNow }
+    assert.deepEqual(checkPr(team).problems, [], String(association))
+    // No ready label, no login on the comment and another login's live claim do not matter to the team.
+    const lax = checkPr({ ...team, issueData: { state: 'open', labels: [] }, issueComments: [claimBy('someone', 'Claim: dot, fix/another, until 2030-06-02 00:00 UTC'), { body: `Claim: codex, ${branch}, until 2030-06-02 00:00 UTC` }] })
+    assert.deepEqual(lax.problems, [], String(association))
+    // The claim must still name this agent and branch.
+    const wrongAgent = checkPr({ ...team, issueComments: [claimBy('WenyuChiou', `Claim: dot, ${branch}, until 2030-06-02 00:00 UTC`)] }).problems
+    assert.equal(wrongAgent.length, 1)
+    assert.match(wrongAgent[0].message, /^no issue comment claims this branch for this agent/)
+    // A release or governance pull request keeps its exemption from the cap.
+    assert.equal(checkPr({ ...team, title: 'chore(release): Agent Board 9.9.9' }).problems.some(item => item.check === 'outside'), false)
+    assert.ok(checkPr({ ...team, paths: [...team.paths, 'CONTRIBUTING.md'] }).info.includes('cap: this pull request is exempt.'))
+    // Four outside pull requests do not count toward the eight, and a ninth team pull request still fails as before.
+    const outside = [21, 22, 23, 24].map(number => outsideOpen(number, `visitor-${number}`))
+    assert.deepEqual(checkPr({ ...team, open: [...teamOpen(7), ...outside] }).problems, [], String(association))
+    const over = checkPr({ ...team, open: [...teamOpen(8), ...outside] }).problems.filter(item => item.check === 'cap')
+    assert.equal(over.length, 1)
+    assert.match(over[0].message, /^9 pull requests would be open, over the 8 in all; counted: #1, #2, #3, #4, #5, #6, #7, #8\./)
+    // Two per author still holds, and an outside pull request that names the same agent takes no slot.
+    const codex = [openPr(1, 'codex (local)'), openPr(2, 'codex (local)')]
+    const third = checkPr({ ...team, open: codex }).problems.filter(item => item.check === 'cap')
+    assert.equal(third.length, 1)
+    assert.match(third[0].message, /"codex \(local\)" would have 3 open pull requests, over 2 per author: #1, #2, #17/)
+    const named = outsideOpen(21, 'visitor', { body: 'Fixes #21\nAuthor: codex (local), fix/synthetic-21', createdAt: '2029-12-31T00:00:00Z' })
+    assert.deepEqual(checkPr({ ...team, open: [codex[0], named] }).problems, [], String(association))
+  }
+  // In CI the owner's pull request is read from the event: the claim and the cap are the team's, whoever else is open.
+  const setup = fixture(t)
+  const originalFetch = globalThis.fetch
+  t.after(() => { globalThis.fetch = originalFetch })
+  const calls = []
+  const pulls = [...[1, 2, 3, 4, 5, 6, 7].map(number => pullItem(number, 'OWNER', 'WenyuChiou')), ...[21, 22, 23, 24].map(number => pullItem(number, 'NONE', `visitor-${number}`))]
+  globalThis.fetch = githubAnswers(calls, { labels: [], comments: [{ body: `Claim: codex, ${branch}, until 2030-01-01 00:00 UTC` }], pulls })
+  const passed = await runMain(eventArgs(setup, 'OWNER', 'WenyuChiou'), apiEnv)
+  assert.equal(passed.status, 0, passed.stdout + passed.stderr)
+  assert.ok(calls.some(path => path.endsWith('/pulls/1/files')))
+  // An outside pull request has no governance exemption, so its files are never listed.
+  assert.equal(calls.some(path => path.endsWith('/pulls/21/files')), false)
 })
