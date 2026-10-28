@@ -482,6 +482,9 @@ const chosen = (state: BoardState, items: readonly BoardItem[]): number => {
 
 // In the order the screen shows them: what waits on you, each project's work, then turns
 // no Claude Code session has taken in.
+// The key of a question on the reminder or Older shelf: the page names the line it drew by it.
+export const olderKey = (ask: WaitingItem): string => `older:${ask.key}@${ask.questionId}`
+
 // The full action catalog includes idle rows for the page server. Terminal callers pass
 // their shelf state so only rows the person can see are selectable.
 export const boardItems = (view: View, pending: readonly PendingTurn[], isIdleOpen = true, isOlderOpen = false): BoardItem[] => {
@@ -492,7 +495,7 @@ export const boardItems = (view: View, pending: readonly PendingTurn[], isIdleOp
     // A question's key holds its words, so a press made while it showed one question is refused
     // once the same step asks another, rather than taken as the answer to the new one.
     ...view.waiting.map(ask => ({ type: 'ask' as const, key: ask.hideKey === '' ? `ask:${ask.key}` : `ask:${ask.key}@${ask.hideKey}`, ask })),
-    ...(isOlderOpen ? [...(view.reminder ?? []), ...(view.older ?? [])].map(ask => ({ type: 'ask' as const, key: `older:${ask.key}@${ask.questionId}`, ask })) : []),
+    ...(isOlderOpen ? [...(view.reminder ?? []), ...(view.older ?? [])].map(ask => ({ type: 'ask' as const, key: olderKey(ask), ask })) : []),
     ...rows.map(row => ({ type: 'row' as const, key: `row:${row.key}`, row })),
     ...remainingInbox(view, pending).map((turn, index) => ({ type: 'turn' as const, key: `turn:${turn.agent}:${turn.project}:${index}`, turn })),
   ]
@@ -678,7 +681,7 @@ export const boardScreen = (view: View, pending: readonly PendingTurn[], state: 
       lines.push(`    ${c('project', fit(where + (ask.task ? ` › ${ask.task}` : ''), o.width - 6))}`)
       if (isOpen || isHere) {
         if (ask.canHide === false) lines.push(`    ${c('quiet', fit(s.questionReviewOnly, o.width - 6))}`)
-        else if (ask.where !== 'manual') lines.push(`    ${c('quiet', fit(s.archiveLive, o.width - 6))}`)
+        else if (ask.where !== 'manual' && ask.isKept !== true) lines.push(`    ${c('quiet', fit(s.archiveLive, o.width - 6))}`)
         if (ask.note) lines.push(`    ${fit(ask.note, o.width - 6)}`)
         answersOf(ask, s).forEach((answer, n) => lines.push(`    ${c('accent', ask.kind === 'confirm' ? (n === 0 ? 'y' : 'n') : String(n + 1))} ${fit(answer, o.width - 8)}`))
         if (ask.command !== null) lines.push(`    ${c('accent', fit(`$ ${ask.command}`, o.width - 6))}`)

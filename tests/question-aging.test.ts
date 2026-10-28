@@ -421,15 +421,29 @@ test('aged shelf hide actions keep identity and stale fingerprints while retaine
     const repeatedItems = boardItems(buildView(live, [], null, now + 1, 0, {}, s, [], {}, repeated), [], false, true)
     expect(boardKey(state, 'h', repeatedItems, s).action).toBe(null)
     expect(repeated.records.find(row => row.isWaiting && row.isPresent)?.id === first.records[0]!.id).toBe(false)
-    const captured = withCaptures(emptyQuestions(), [{ version: 1, disposition: 'archived', record: first.records[0]! }])
+    // A retained source without a current producer stays review only.
+    const captured = withCaptures(emptyQuestions(), [{ version: 1, disposition: 'unresolved', record: first.records[0]! }])
     const retained = buildView([], [], null, now, 0, {}, s, [], {}, captured)
     const retainedItems = boardItems(retained, [], false, true)
     const selected = pinned({ ...emptyBoardState, isOlderOpen: true }, retainedItems)
     expect(boardKey(selected, 'h', retainedItems, s).action).toBe(null)
     expect(boardScreen(retained, [], selected, s, { width: 500, isColor: false }).includes(s.questionReviewOnly)).toBe(true)
     expect(serveAction(retainedItems, { key: retainedItems[0]!.key, type: 'hide' }, s).type).toBe('refuse')
-    expect(serveModel(retained, [], s).older.length).toBe(1)
+    const shelf = (model: ReturnType<typeof serveModel>) => [...model.reminder, ...model.older]
+    expect(shelf(serveModel(retained, [], s)).map(one => one.canHide)).toEqual([false])
     expect(servePage(s, 'synthetic-nonce').includes(s.questionReviewOnly)).toBe(true)
+    // One kept from an archived block can be hidden, from the terminal board and the page alike (#400).
+    const archived = withCaptures(emptyQuestions(), [{ version: 1, disposition: 'archived', record: first.records[0]! }])
+    const kept = buildView([], [], null, now, 0, {}, s, [], {}, archived)
+    const keptItems = boardItems(kept, [], false, true)
+    const keptState = pinned({ ...emptyBoardState, isOlderOpen: true }, keptItems)
+    expect(boardKey(keptState, 'h', keptItems, s).action).toEqual({ type: 'hide', key: first.records[0]!.id, text: 'Publish?' })
+    expect(boardScreen(kept, [], keptState, s, { width: 500, isColor: false }).includes(s.questionReviewOnly)).toBe(false)
+    // Nothing is running, so the note about archiving a live session does not belong on it.
+    expect(boardScreen(kept, [], keptState, s, { width: 500, isColor: false }).includes(s.archiveLive)).toBe(false)
+    expect(serveAction(keptItems, { key: keptItems[0]!.key, type: 'hide' }, s)).toEqual({ type: 'hide', key: first.records[0]!.id, text: 'Publish?' })
+    const keptModel = serveModel(kept, [], s).older
+    expect(keptModel.map(one => [one.canHide, one.key])).toEqual([[true, keptItems[0]!.key]])
   }
 })
 

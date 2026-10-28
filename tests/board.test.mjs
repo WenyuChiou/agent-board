@@ -3362,7 +3362,7 @@ test('the page line for questions in stopped sessions opens the Older shelf, and
   try {
     const html = (await board.call('GET', `/?t=${board.token}`)).body
     const words = JSON.parse(html.match(/<script[^>]*id="words"[^>]*>([\s\S]*?)<\/script>/)[1])
-    const older = Array.from({ length: 12 }, (_, index) => ({ project: 'Demo', agent: 'codex', task: `Plan ${index}`, text: `Synthetic question ${index}, OK?`, note: '', context: '', when: '4 days ago', questionId: `synthetic-${index}` }))
+    const older = Array.from({ length: 12 }, (_, index) => ({ key: `older:retained::synthetic-${index}@synthetic-${index}`, canHide: false, project: 'Demo', agent: 'codex', task: `Plan ${index}`, text: `Synthetic question ${index}, OK?`, note: '', context: '', when: '4 days ago', questionId: `synthetic-${index}` }))
     const model = { counts: { waiting: 0, active: 0, due: 0, today: 0 }, groups: [], hidden: [], idle: [], stopped: [], turns: [], recent: [], asks: [], reminder: [], older, stoppedAsking: 12 }
     const dom = await pageDom(html, model, { post: async () => { throw new Error('synthetic offline') } })
     const walk = node => node.childNodes.flatMap(child => [child, ...walk(child)])
@@ -3395,6 +3395,29 @@ test('the page line for questions in stopped sessions opens the Older shelf, and
     await dom.redraw({ ...model })
     assert.equal(shown(), 12)
     assert.deepEqual(dom.requests, [])
+  } finally { await board.close() }
+})
+
+test('the page offers Already answered, hide on an Older question that can be hidden, and says review only on one that cannot', async () => {
+  const board = await page()
+  try {
+    const html = (await board.call('GET', `/?t=${board.token}`)).body
+    const words = JSON.parse(html.match(/<script[^>]*id="words"[^>]*>([\s\S]*?)<\/script>/)[1])
+    const entry = (index, canHide) => ({ key: `older:retained::synthetic-${index}@synthetic-${index}`, canHide, project: 'Demo', agent: 'codex', task: `Plan ${index}`, text: `Synthetic question ${index}, OK?`, note: '', context: '', when: '9 days ago', questionId: `synthetic-${index}` })
+    const model = { counts: { waiting: 0, active: 0, due: 0, today: 0 }, groups: [], hidden: [], idle: [], stopped: [], turns: [], recent: [], asks: [], reminder: [], older: [entry(0, true), entry(1, false)], stoppedAsking: 2 }
+    const dom = await pageDom(html, model, { post: async () => ({ ok: true, json: async () => ({ ok: true, note: 'Hidden' }) }) })
+    const walk = node => node.childNodes.flatMap(child => [child, ...walk(child)])
+    const cards = walk(dom.node('board')).filter(node => node.tag === 'div' && node.getAttribute('data-card-key') !== null)
+    const textOf = card => walk(card).filter(node => node.tag === 'button' || node.className === 'quiet').map(node => node.textContent)
+    assert.deepEqual(cards.map(card => card.getAttribute('data-card-key')), ['older:retained::synthetic-0@synthetic-0', 'older:retained::synthetic-1@synthetic-1'])
+    assert.ok(textOf(cards[0]).includes(words.answeredHide))
+    assert.ok(!textOf(cards[0]).includes(words.questionReviewOnly))
+    assert.ok(!textOf(cards[1]).includes(words.answeredHide))
+    assert.ok(textOf(cards[1]).includes(words.questionReviewOnly))
+    walk(cards[0]).find(node => node.tag === 'button' && node.textContent === words.answeredHide).click()
+    await dom.flush()
+    await dom.flush()
+    assert.deepEqual(dom.requests.map(one => [one.path, one.body.key, one.body.type]), [['/api/act', 'older:retained::synthetic-0@synthetic-0', 'hide']])
   } finally { await board.close() }
 })
 

@@ -101,8 +101,11 @@ export type WaitingItem = {
   // What the person's Answered press keeps, to hide the question until the session asks
   // something else (`answeredKey`); '' for a hand-kept step, which is ticked instead.
   hideKey: string
-  // A retained source without a current producer is available for review, not a new hide.
+  // A retained source without a current producer is available for review, not a new hide. One kept
+  // from an archived block can be hidden (#400): hiding writes only the hidden list, never the source.
   canHide?: boolean
+  // Kept for review after its session's block was archived: nothing is running that could be archived.
+  isKept?: true
   // A hand-kept step can be ticked from the pane; another session's cannot.
   step: StepRef | null
   // Another agent's session the question came from; null for Claude's and hand-kept ones.
@@ -1046,7 +1049,7 @@ export const buildView = (
     }
     const isStopped = record.isArchived || isInactiveSource || inactiveScopes.has(record.scope)
     const stage = isStopped ? 'older' : age.stage
-    const item: WaitingItem = { key: `retained::${record.id}`, questionId: record.id, ageStage: stage, project: source.project, task: source.task, context: source.context, ...parts, when: age.age === null ? s.questionAgeUnknown : relativeTime(record.firstObserved, now, s), ...askOf(parts.text, parts.note), where: 'other', agent: source.agent === 'claude' ? '' : source.agent, session: source.session, sessionId: null, resumeVia: null, reopen: null, hideKey: record.id, canHide: false, step: null, target: null }
+    const item: WaitingItem = { key: `retained::${record.id}`, questionId: record.id, ageStage: stage, project: source.project, task: source.task, context: source.context, ...parts, when: age.age === null ? s.questionAgeUnknown : relativeTime(record.firstObserved, now, s), ...askOf(parts.text, parts.note), where: 'other', agent: source.agent === 'claude' ? '' : source.agent, session: source.session, sessionId: null, resumeVia: null, reopen: null, hideKey: record.id, canHide: record.isArchived === true, ...(record.isArchived === true ? { isKept: true as const } : {}), step: null, target: null }
     if (marked.has(record.id)) hidden.push(item)
     else if (stage === 'pending') asks.push(item)
     else if (stage === 'reminder') reminder.push(item)

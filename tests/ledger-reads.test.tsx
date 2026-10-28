@@ -2166,6 +2166,44 @@ test('an explicit archive and the automatic one keep a waiting block\'s question
   } finally { await ui.unmount() }
 })
 
+test('a question kept from a block the seven-day sweep archived can be hidden from Older, then shows under hidden and no longer under Older, and can be shown again', async ($, on) => {
+  const board = `## demo\n${block('a1b2c501', 'waiting', 24 * 8, '- [x] Draft the plan\n- [?] Publish the plan, OK?')}`
+  const world = makeWorld([[FILE, board]])
+  world.env = english
+  seedAsked(world, board)
+  const clock = engineBeneath(on, world)
+  await $.session.start(START)
+  await clock.advance(PAST_START_SWEEP)
+  expect(world.files.get(FILE)).not.toContain('session=a1b2c501')
+  const kept = ledgerRecords(world).find(record => record.words === 'Publish the plan, OK?')!
+  expect(kept.isArchived).toBe(true)
+  // The sweep has retired the question's identity, which is what used to refuse a hide of it.
+  await clock.advance(2000)
+  expect(world.files.has(proofFile('retired', kept.id))).toBe(true)
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
+  try {
+    await ui.press({ key: 'section::older' })
+    expect(visiblePaneText(await ui.drawn())).toContain('Publish the plan, OK?')
+    await ui.press({ key: `ask::retained::${kept.id}` })
+    await ui.press({ key: `retained::${kept.id}::hide` })
+    await clock.advance(2000)
+    expect(JSON.parse(world.files.get(ANSWERED) ?? '{"answered":[]}').answered).toEqual([kept.id])
+    // It left Older (and the stopped-sessions line), and the hidden shelf counts it.
+    const hidden = visiblePaneText(await ui.drawn())
+    expect(hidden).toContain('1 answered, hidden')
+    expect(hidden).not.toContain('Publish the plan, OK?')
+    expect(hidden).not.toContain('unanswered in stopped sessions')
+    await ui.press({ key: 'section::hidden' })
+    expect(visiblePaneText(await ui.drawn())).toContain('Publish the plan, OK?')
+    // Nothing else changed: it is still an unanswered archived question, and Show again brings it back.
+    expect(ledgerRecords(world).find(record => record.id === kept.id)?.isUnresolved).toBe(true)
+    await ui.press({ key: `retained::${kept.id}::unhide` })
+    await clock.advance(2000)
+    expect(JSON.parse(world.files.get(ANSWERED) ?? '{"answered":[]}').answered).toEqual([])
+    expect(visiblePaneText(await ui.drawn())).toContain('1 unanswered in stopped sessions')
+  } finally { await ui.unmount() }
+})
+
 test('a board that changes on every try still has its finished blocks archived, and the block that asks waits for the next sweep', async ($, on) => {
   const boardAt = (hours: number): string => `## demo\n${block('a1b2c301', 'ended', hours, '- [x] Draft\n- [?] Publish the plan, OK?')}${block('a1b2c302', 'done', 5, '- [x] Finished')}`
   const world = makeWorld([[FILE, boardAt(48)]])

@@ -2915,7 +2915,8 @@ test('the terminal key contract covers every card kind from every agent and sour
     }
   }
   expect(cells.size).toBe(192)
-  expect(offered).toBe(376)
+  // 376 before the retained cells, whose questions kept from an archived block now offer h too (#400).
+  expect(offered).toBe(392)
 })
 
 test('with explicit legacy opt-in the page offers a send only into a Grok or Codex session that has closed; an open one, Claude and a hand-kept task each get their own way', () => {

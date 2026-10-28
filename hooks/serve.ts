@@ -1,5 +1,5 @@
 import type { AskKind } from './ask'
-import { answersOf, boardItems, fingerprint, remainingInbox } from './board'
+import { answersOf, boardItems, fingerprint, olderKey, remainingInbox } from './board'
 import type { BoardItem, PendingTurn } from './board'
 import { htmlLang } from './dashboard'
 import { AGENT_ALIASES, agentMarkCss, boardMark, pageBaseCss, pageTokens, themeHead, themeSwitch } from './page-look'
@@ -9,7 +9,7 @@ import { agentLabel } from './strings'
 import type { Tone } from './palette'
 import { RESUME } from './parse'
 import { OLDER_SHOWN, replyHint, wayBackText } from './view'
-import type { AgentTarget, StepRef, TaskRef, View } from './view'
+import type { AgentTarget, StepRef, TaskRef, View, WaitingItem } from './view'
 import type { Connection, Message } from './messaging'
 
 // The board's page: what `agent-board.mjs --serve` shows in a browser for agents other than
@@ -164,7 +164,8 @@ export type ServeRow = {
 
 // A question marked answered, listed so it can be shown again.
 export type ServeHidden = { key: string; project: string; agent: string; isOwn?: true; task: string; text: string; questionId?: string }
-export type ServeRetained = { project: string; agent: string; isOwn?: true; task: string; text: string; note: string; context: string; when: string; questionId?: string }
+// key names the line in the action route; canHide is false for a retained source that is only for review.
+export type ServeRetained = { key: string; canHide: boolean; project: string; agent: string; isOwn?: true; task: string; text: string; note: string; context: string; when: string; questionId?: string }
 
 export type ServeTurn = { key: string; project: string; agent: string; text: string; isQuestion: boolean; info: string }
 
@@ -200,6 +201,22 @@ const infoOf = (mode: SendMode, agent: string, task: string, session: string, s:
 // The keys are the terminal board's (`boardItems`), so a press names the line it was on.
 // `isLan`: the page as a phone sees it on the local network, where a reply that would run an
 // agent on the computer is offered as a copy instead.
+// A question on the reminder or Older shelf. The page may hide it under the key the action route names,
+// unless it is a retained source kept for review only.
+const retainedOf = (item: WaitingItem): ServeRetained => ({
+  key: olderKey(item),
+  canHide: item.hideKey !== '' && item.canHide !== false,
+  project: item.project,
+  agent: item.agent,
+  ...(item.where === 'manual' ? { isOwn: true as const } : {}),
+  task: item.task,
+  text: item.text,
+  note: item.note,
+  context: item.context,
+  when: item.when,
+  ...(item.questionId === undefined ? {} : { questionId: item.questionId }),
+})
+
 export const serveModel = (view: View, pending: readonly PendingTurn[], s: Strings = ZH_TW, sending: ReadonlySet<string> = new Set(), isLan = false, messaging?: Messaging, allowResume = false): ServeModel => {
   const isSending = (target: AgentTarget | null): boolean => target !== null && sending.has(sendKey(target))
   const onLan = (mode: SendMode): SendMode => (isLan && mode === 'send' ? 'open' : mode)
@@ -323,8 +340,8 @@ export const serveModel = (view: View, pending: readonly PendingTurn[], s: Strin
     idle,
     stopped,
     hidden: view.hidden.map(item => ({ key: `hidden:${item.hideKey}`, project: item.project, agent: item.agent, ...(item.where === 'manual' ? { isOwn: true as const } : {}), task: item.task, text: item.text, ...(item.questionId === undefined ? {} : { questionId: item.questionId }) })),
-    reminder: (view.reminder ?? []).map(({ project, agent, where, task, text, note, context, when, questionId }) => ({ project, agent, ...(where === 'manual' ? { isOwn: true as const } : {}), task, text, note, context, when, ...(questionId === undefined ? {} : { questionId }) })),
-    older: (view.older ?? []).map(({ project, agent, where, task, text, note, context, when, questionId }) => ({ project, agent, ...(where === 'manual' ? { isOwn: true as const } : {}), task, text, note, context, when, ...(questionId === undefined ? {} : { questionId }) })),
+    reminder: (view.reminder ?? []).map(retainedOf),
+    older: (view.older ?? []).map(retainedOf),
     groups: [...groups].map(([project, rows]) => ({ project, rows })),
     turns,
     recent: view.recent.map(item => ({ project: item.project, title: item.title, when: item.when, questions: item.questions?.map(question => [question.text, question.note].filter(Boolean).join(' — ')) })),
@@ -1232,10 +1249,13 @@ const PAGE_SCRIPT = String.raw`
       if (pair[0] === 'older') olderShelf = retained;
       retained.open = opened[pair[0] + ':'] === true;
       retained.addEventListener('toggle', function () { opened[pair[0] + ':'] = retained.open; });
-      add(retained, add(el('summary'), el('span', 'quiet', w(pair[1]) + ' (' + questions.length + ')')), el('p', 'quiet', w('questionAgingHint')), el('p', 'quiet', w('questionReviewOnly')));
+      add(retained, add(el('summary'), el('span', 'quiet', w(pair[1]) + ' (' + questions.length + ')')), el('p', 'quiet', w('questionAgingHint')));
       var shown = pair[0] === 'older' && !opened['older:all'] ? ${OLDER_SHOWN} : questions.length;
       function appendQuestion(one) {
-        add(retained, tracked(add(el('div'), add(el('div', 'where'), agentMark(who(one)), el('span', '', [one.project, brand(who(one)), one.task, one.when].filter(Boolean).join(' · '))), el('div', 'q', one.text), el('div', '', one.note), el('div', 'quiet', one.context)), ['waiting'], one, '', true));
+        // A question that can be hidden has the same button as a live one; a retained source kept for review only says so.
+        var card = add(el('div'), add(el('div', 'where'), agentMark(who(one)), el('span', '', [one.project, brand(who(one)), one.task, one.when].filter(Boolean).join(' · '))), el('div', 'q', one.text), el('div', '', one.note), el('div', 'quiet', one.context), one.canHide ? add(el('div', 'actions'), button(w('answeredHide'), function () { act(one.key, 'hide'); })) : el('div', 'quiet', w('questionReviewOnly')));
+        resultSlot(card, one.key, one.text, one.task);
+        add(retained, tracked(card, ['waiting'], one, '', true));
       }
       questions.slice(0, shown).forEach(appendQuestion);
       groupVisibility(retained, from);
