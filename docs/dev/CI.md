@@ -25,6 +25,16 @@ A first rollout with no base planner selects every group. Unclassifiable paths
 also select every group. Unsafe paths, incomplete diff reads and graph errors
 fail planning; they never become an empty passing plan.
 
+On a pull request the test jobs check out GitHub's merge of the pull request into
+main (`github.sha`), not its head, so a pull request that is behind main is tested
+with main's newer changes. GitHub makes that merge when the pull request is
+opened, pushed or reopened; when main moves on later, merge main or push again
+before merging. A pull request with a merge conflict gets no run until main is
+merged. The planner and pr-check still read the pull request's own base and head.
+A test file the planner selects from the head must also exist in the merge, so a
+pull request whose selected test main deleted or renamed fails until it merges
+main.
+
 On a pull request, selected Node groups run Node 22 on Ubuntu and Node 24 on
 Windows, and plugin checks run on Ubuntu only. Pushes to main, the weekly run, a
 manual run and a release PR run Node 22 and 24 on both systems and plugin
@@ -44,6 +54,8 @@ GitHub Actions. Requiring old expanded matrix row names would leave unaffected
 PRs waiting for contexts that a skipped matrix never creates. The approved
 migration runs the rollout in full first and preserves all other protections.
 Existing PRs then merge main before using the new gate.
+Branch protection also requires a pull request to be up to date with main before
+it merges, so the merge CI tested is the one that lands.
 
 A weekly full run and workflow_dispatch with full=true exercise the complete
 catalog. Releases, manifest/governance/planner changes and unknown paths also
