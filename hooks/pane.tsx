@@ -570,6 +570,11 @@ export const drawPane = (ui: PaneUi, model: PaneModel, actions: PaneActions): Re
             {meta.join(' · ')}
           </Text>
         </Box>
+        {row.runs !== undefined && (
+          <Box paddingLeft={2}>
+            <Text color={palette.muted} wrap="truncate-end">{row.runs}</Text>
+          </Box>
+        )}
         {!isRowOpen && cardResult(row.key)}
         {isRowOpen && (
           <Box paddingLeft={2} flexDirection="column" marginTop={1}>
@@ -672,6 +677,7 @@ export const drawPane = (ui: PaneUi, model: PaneModel, actions: PaneActions): Re
         <Text color={current.tone === 'quiet' ? palette.muted : color(current.tone)} wrap="wrap">
           {current.status}
         </Text>
+        {current.runs !== undefined && muted(current.runs, 'truncate-end')}
         {showAll ? (
           <Box flexDirection="column" marginTop={1}>
             {steps(current.steps)}
@@ -804,6 +810,11 @@ export const drawPane = (ui: PaneUi, model: PaneModel, actions: PaneActions): Re
           {shelfQuestions(row.questions ?? [], row.key)}
         </Box>
       ))}
+      {view.background !== undefined && (
+        <Box marginTop={1}>
+          <Text color={palette.muted} wrap="truncate-end">{view.background}</Text>
+        </Box>
+      )}
       {hasDetachedResult && (
         <Box key={`stopped::${resultTask}`} flexDirection="column" marginTop={1} paddingLeft={1}>
           {muted([model.resolveResult?.project, model.resolveResult?.title].filter(Boolean).join(' · '))}

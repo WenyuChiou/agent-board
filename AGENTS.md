@@ -56,6 +56,7 @@ If you cannot run `claude` in your environment, say so in your report. Do not cl
 | `hooks/pane.tsx` | Draws the pane from a view and a set of actions. |
 | `hooks/parse.ts` | Reads `progress.md` into projects, tasks and steps; auto-marker attributes, staleness, due dates, project matching. `readable` says which lines the format reads (not in a code fence or a comment); `blocks.ts` uses it too, so the writer never touches a block the parser skips. |
 | `hooks/blocks.ts` | Writes, removes and extracts a session's block; picks what to archive; adds a quick-add task; ticks a hand-kept step; merges a block pasted from a web chat (`mergeBlock`), checked as `validate.py --block` checks one. |
+| `hooks/runs.ts` | Pure: folds the runs an agent started for itself into their parent's row or the Background runs line, keeps the newer of two blocks for one agent and session id, and reads what a host says about who started a session (Codex's first history record, Claude's print mode). |
 | `hooks/mirror.ts` | Mirrors Claude's Task list (TaskCreate, TaskUpdate, TodoWrite) and its `metadata`; words the compaction note; titles and notices. |
 | `hooks/ask.ts` | Works out what a `[?]` step asks of the person, from explicit metadata or from its words. |
 | `hooks/view.ts` | Turns the parsed file and this session's list into what the pane, the status line and `progress.html` show; also reads a task's background line. |

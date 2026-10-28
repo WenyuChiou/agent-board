@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto'
-import { closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, readdirSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
+import { closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { basename, dirname, join, resolve } from 'node:path'
 import { performance } from 'node:perf_hooks'
@@ -9,7 +9,9 @@ import type { CodexReport } from '../hooks/codex'
 import { agentHooks, BOARD_FOR, readConfig } from '../hooks/connect-pure'
 import type { Strings } from '../hooks/i18n'
 import { STRINGS } from '../hooks/strings'
-import { progressTail } from '../hooks/parse'
+import { parseProgress, progressTail } from '../hooks/parse'
+import { cleanSignal, codexSignal, pickParent, withSignal } from '../hooks/runs'
+import type { CodexMeta, RunSignal } from '../hooks/runs'
 import { antigravityCommand, antigravityHooks, cursorEvent, cursorEvents, hookCommandArgs, lifecycleCapability, localAgents, opencodePlugin, statusEvents } from '../hooks/local-agents'
 import type { LocalAgent } from '../hooks/local-agents'
 import { deepseekLocalPlugin, deepseekPatch, openclawLocalPlugin } from '../hooks/portable-agents'
@@ -37,6 +39,48 @@ const withoutBom = (text: string): string => text.startsWith('\uFEFF') ? text.sl
 const object = (value: unknown): Json => {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('INVALID_JSON_OBJECT')
   return value as Json
+}
+// Who started a Codex session is in the first record of its history file (#399). The file is read
+// in small pieces up to its first line break and only those bytes are decoded; of that record
+// only four fields are kept, so no message, prompt or tool text is ever looked at or kept. A path
+// that is not a Codex history file, or a record that is not readable, gives null and the session
+// keeps its default.
+const SESSION_FILE = /^rollout-[^/\\]+\.jsonl$/
+const readSessionMeta = (path: string): CodexMeta | null => {
+  if (!SESSION_FILE.test(basename(path))) return null
+  let fd: number | undefined
+  try {
+    fd = openSync(path, 'r')
+    const piece = Buffer.alloc(4096)
+    const line: Buffer[] = []
+    let length = 0
+    let offset = 0
+    for (;;) {
+      const size = readSync(fd, piece, 0, piece.length, offset)
+      if (size === 0) break
+      const end = piece.subarray(0, size).indexOf(0x0a)
+      const used = end < 0 ? size : end
+      line.push(Buffer.from(piece.subarray(0, used)))
+      length += used
+      offset += size
+      if (end >= 0) break
+      if (length >= 262144) return null
+    }
+    const first = object(JSON.parse(Buffer.concat(line).toString('utf8')))
+    if (first.type !== 'session_meta') return null
+    const meta = object(first.payload)
+    const source = meta.source
+
+    return {
+      originator: typeof meta.originator === 'string' ? meta.originator.slice(0, 64) : undefined,
+      // A helper's source names its parent and role; only the fact that it is a helper is kept.
+      source: typeof source === 'string' ? source.slice(0, 64) : typeof source === 'object' && source !== null && 'subagent' in source ? { subagent: true } : undefined,
+      thread_source: typeof meta.thread_source === 'string' ? meta.thread_source.slice(0, 64) : undefined,
+      parent_thread_id: typeof meta.parent_thread_id === 'string' ? meta.parent_thread_id.slice(0, 128) : undefined,
+    }
+  } catch { return null } finally {
+    if (fd !== undefined) try { closeSync(fd) } catch {}
+  }
 }
 const atomic = (file: string, text: string | Buffer, current: () => void = () => {}, retryRecord = false): void => {
   mkdirSync(dirname(file), { recursive: true })
@@ -216,13 +260,17 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
     type Pending = {
       version: number; progress: string; mode: string; agent: LocalAgent; session: string; now: string; at?: number
       status: unknown; event?: string; folder?: string; isBoardPrompt: boolean; isPrompt: boolean; payload: Json
+      // Who started the session, as far as the host's own words say (#399); absent when they say nothing.
+      run?: RunSignal
     }
     const buildEntry = (mode: string, agent: LocalAgent, raw: Json, flag: (name: string) => string | undefined, env: NodeJS.ProcessEnv, progress: string, at: number): Pending => {
       const payload = agent === 'cursor' && mode === '--codex-event' ? cursorEvent(raw) : raw
       // Read before Cursor's adapter drops workspace_roots; a queued raw event keeps cwd and workspace_roots for this (#246).
       const folder = filesByFolder(mode, agent) ? folderProject(raw.cwd || (agent === 'cursor' && Array.isArray(raw.workspace_roots) && raw.workspace_roots.every(root => typeof root === 'string') ? raw.workspace_roots[0] : undefined)) : ''
-      // Only metadata selected below is retained. Never open transcript_path or save prompts,
-      // tool inputs, last_assistant_message, or permission decisions from a hook payload.
+      // Only metadata selected below is retained. Save no prompts, tool inputs,
+      // last_assistant_message, or permission decisions from a hook payload. transcript_path is
+      // opened for the first record of the history file at a session's start or prompt, which says
+      // whether a person started it (#399), and for nothing else.
       const session = mode !== '--codex-report' ? agent === 'antigravity' ? payload.conversationId : payload.session_id ?? payload.sessionId ?? payload.sessionID ?? (agent === 'grok' ? env.GROK_SESSION_ID : undefined) : flag('--session') ?? (agent === 'codex' ? env.CODEX_THREAD_ID : env.AGENT_BOARD_AGENT === agent ? env.AGENT_BOARD_SESSION_ID : undefined)
       if (typeof session !== 'string' || !/^[a-zA-Z0-9][a-zA-Z0-9_-]{5,127}$/.test(session)) throw new Error('INVALID_SESSION')
       const now = new Date(at).toISOString().replace(/\.\d{3}Z$/, 'Z')
@@ -236,10 +284,16 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
       const isBoardPrompt = (isPromptEvent(raw) || raw.prompt_submitted === true) && (raw.board_request === true || isBoardRequest(raw, boardRequestWords(Object.values(STRINGS))))
       // No longer changes any step (#243); kept so events queued by an older version still validate.
       const isPrompt = !isBoardPrompt && mode === '--agent-status' && status === 'working' && (payload.prompt_submitted === true || /^(?:UserPromptSubmit|user_prompt_submit|BeforeAgent)$/.test(String(payload.hook_event_name ?? payload.hookEventName)))
+      // Only Codex says it, and only as a session opens or takes a prompt; the other local agents
+      // give no signal, so their sessions stay rows as they were.
+      const opens = agent === 'codex' && mode === '--codex-event' && /^(?:SessionStart|UserPromptSubmit)$/.test(String(payload.hook_event_name))
+      const path = payload.transcript_path
+      const run = opens ? codexSignal(Object.hasOwn(payload, 'transcript_path'), path, typeof path === 'string' && path !== '' ? readSessionMeta(path) : null) : undefined
       // A queued event keeps metadata only: the host's own fields stay out, as they do above.
       return {
         version: 1, progress, mode, agent, session, now, at, status: mode === '--agent-status' ? status : undefined, event, isBoardPrompt, isPrompt,
         ...(filesByFolder(mode, agent) ? { folder } : {}),
+        ...(run === undefined ? {} : { run }),
         payload: mode === '--codex-report' ? payload : mode === '--codex-event' ? {
           session_id: payload.session_id, hook_event_name: payload.hook_event_name,
           turn_id: payload.turn_id, prompt_submitted: payload.prompt_submitted,
@@ -286,7 +340,7 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
       const isLockedRename = process.platform === 'win32' && failure?.code === 'EPERM' && failure.syscall === 'rename' && typeof failure.dest === 'string' && resolve(failure.dest) === progress && isWritable()
       return failure?.code === 'EBUSY' || failure?.code === 'EAGAIN' || isLockedRename || error instanceof Error && error.message === 'LOCK_BUSY'
     }
-    const apply = ({ mode, agent, session, now, at, status, event, folder = '', isBoardPrompt, payload }: Pending): CodexReport => {
+    const apply = ({ mode, agent, session, now, at, status, event, folder = '', isBoardPrompt, payload, run }: Pending): CodexReport => {
       const owner = hash(`${agent}:${session}`)
       const recordFile = join(root, 'sessions', `${owner}.json`)
       const saved = readLocal(recordFile)
@@ -309,10 +363,15 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
         ...base, title: sessionTitle(name, s.localAgentTask(agent)), project: name || agent,
       }, clock, s) : base
       const priorActivity = previous?.activity ?? []
-      const report = { ...initial, appliedAt: Math.max(at ?? Date.parse(now), original?.appliedAt ?? Date.parse(original?.updated ?? now)), ...(isBoardPrompt && previous ? { state: previous.state, steps: previous.steps } : {}), agent, ...(event === undefined ? {} : { activity: [...priorActivity, { event, state: String(status), updated: clock }].slice(-16) }) }
+      // Who started the session: a statement or a hint from this event, else what the record kept. A
+      // run with no parent named takes the person's session working in the same project (#399).
+      const origin = withSignal(previous, cleanSignal(run))
+      const parent = origin.origin !== 'run' ? undefined : origin.parent ?? pickParent(parseProgress(text), initial.project, Date.parse(clock), [owner.slice(0, 8), session]) ?? undefined
+      const marked = { ...(origin.origin === undefined ? {} : { origin: origin.origin }), ...(parent === undefined ? {} : { parent }), ...(origin.isWeak === true ? { isWeak: true as const } : {}) }
+      const report = { ...initial, ...marked, appliedAt: Math.max(at ?? Date.parse(now), original?.appliedAt ?? Date.parse(original?.updated ?? now)), ...(isBoardPrompt && previous ? { state: previous.state, steps: previous.steps } : {}), agent, ...(event === undefined ? {} : { activity: [...priorActivity, { event, state: String(status), updated: clock }].slice(-16) }) }
       // A replay can skip writes only after a board completion reached the cache too.
       const repaired = reporterTail(bytes)
-      if (repaired.fragment === null && mode !== '--codex-report' && previous === original && original !== null && previous !== null && previous.state === report.state && previous.turn === report.turn && JSON.stringify(previous.steps) === JSON.stringify(report.steps) && (event === undefined || priorActivity.at(-1)?.event === event)) {
+      if (repaired.fragment === null && mode !== '--codex-report' && previous === original && original !== null && previous !== null && previous.state === report.state && previous.turn === report.turn && JSON.stringify(previous.steps) === JSON.stringify(report.steps) && previous.origin === report.origin && previous.parent === report.parent && (event === undefined || priorActivity.at(-1)?.event === event)) {
         if (report.appliedAt > (original.appliedAt ?? Date.parse(original.updated))) atomic(recordFile, `${JSON.stringify({ ...original, appliedAt: report.appliedAt }, null, 2)}\n`, checkDeadline, true)
         return report
       }

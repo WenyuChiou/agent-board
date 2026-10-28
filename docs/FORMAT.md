@@ -149,7 +149,7 @@ An agent block is the part of the file one session owns. The session writes it a
 Start marker, on a line of its own, starting in column 0:
 
 ```
-<!-- auto session=<8 chars> agent=<name> state=<working|waiting|done|ended> updated=<ISO 8601> [resume=<full session id>] [dir=<percent-encoded folder>] [pr=<n> ci=<none|pending|pass|fail>] -->
+<!-- auto session=<8 chars> agent=<name> state=<working|waiting|done|ended> updated=<ISO 8601> [resume=<full session id>] [dir=<percent-encoded folder>] [pr=<n> ci=<none|pending|pass|fail>] [origin=run] [parent=<session id>] -->
 ```
 
 End marker, same placement:
@@ -174,6 +174,8 @@ An attribute is `name=value`, where the name is letters, digits, `_` or `-`, and
 | `ci` | No | `none`, `pending`, `pass` or `fail`. Shown after the PR number, only when `pr` is present. Other values are ignored. |
 | `source` | No | `turns` when steps were summed up from session turns; `codex-local`, `cursor-local` or `opencode-local` for the independent local reporter. Readers show the block the same way. |
 | `owner` | No | Full SHA-256 of `<agent>:<full-session-id>` for a local reporter. Prevents accidental short-id collisions and pasted replacements of its block; it is not an authentication credential. Older readers ignore it. |
+| `origin` | No | `run` marks a session an agent started for itself: a delegate's `codex exec` or `claude -p`, a subagent, a helper thread. A conversation a person started and typed into carries no `origin`. Any other value reads as a person's. A run is never a row of its own; see [Runs an agent started](#runs-an-agent-started). |
+| `parent` | No | With `origin=run`, the session that started the run: its full session id (`resume`) or its block id (`session`), the same characters `resume` allows. Without `origin=run`, or with a value that is not an id, it is ignored. A run with no parent, or whose parent is not in the file, counts on the folded "Background runs" line. |
 
 The independent local reporter keeps its hash prefix in `session` and writes its own
 validated full native id in `resume`. Live receivers match that full id and agent,
@@ -226,6 +228,14 @@ A block in state `working` or `waiting` whose `updated` is more than 12 hours ol
 If the writer's timestamp is more than five minutes ahead, the row marks it as a future time and counts silence from the first local observation of that exact agent, session and update. The pane, `--watch` and `--serve` keep this observation in `progress-seen.json`; repeated polls, restarts and the local clock catching up keep the original baseline. A different writer timestamp starts a new observation. Read-only surfaces use the existing observation; if none has been established they show unknown age rather than inventing one. Automatic archival still uses the original writer timestamp and the rules below. Question identity, source snapshots and question-age baselines keep their own original values.
 
 Every currently present future update keeps its baseline, including boards with more than 500 such rows. Manual observations retain their 500-entry bound separately. Before the source settles, up to 500 absent future updates are kept as a grace record; once it has settled, absent records can leave. An empty read retains the existing clock baselines until tasks return, without adding new ones. Automatic completion entries keep the same future-time marker and known or unknown age as other agent rows.
+
+### Runs an agent started
+
+A row is a conversation a person started and typed into. A run an agent started for itself carries `origin=run` and, when the writer knows it, `parent=`. The board draws no row for it: the row of the session that started it gets one line, for example `+3 runs by Codex, last 20 min ago`. A run with no known parent is counted only on one folded line, "Background runs", which is not part of the header counts. A parent that is itself a run passes its runs up to the person's session, up to 8 steps.
+
+Two blocks with the same `agent` and the same full `resume` are one session. The newest `updated` is the row (the later one in the file on a tie); the other is listed under Stopped and may be archived while it still looks live. If either carries `origin=run`, the session is a run.
+
+Each local reporter marks a run from what its host already gives. Codex: the first record of the session's history file (`originator`, `source`, `thread_source`, `parent_thread_id`), else whether the session has a history file at all (a hint that a later event with a file replaces). Claude Code: print mode (`claude -p`). Writers that give no such signal write no `origin`, and their sessions stay rows. A writer that marks a run and does not know its parent may set `parent` to the person's session that is working in the same project at that moment; a reader never guesses one.
 
 ### Unanswered question visibility
 

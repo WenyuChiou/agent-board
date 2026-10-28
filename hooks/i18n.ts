@@ -377,6 +377,12 @@ export const ZH_TW = {
   hiddenCount: (n: number): string => `已回覆、隱藏的 ${n} 項`,
   idleCount: (n: number): string => `${n} 項超過 7 天沒動`,
   stoppedCount: (n: number): string => `${n} 項已停止`,
+  // The runs an agent started for itself (#399): one line on the row of the session that started
+  // them, one folded line for runs no session is known for, and the status of the older block of
+  // two for one session. `when` is empty when no write time is readable.
+  runsLine: (n: number, agents: string, when: string): string => `另有 ${n} 次 ${agents} 執行${when === '' ? '' : when === '剛剛' || when === '昨天' ? `，${when}` : `，最近 ${when}`}`,
+  backgroundRuns: (n: number, when: string): string => `背景執行 ${n} 次${when === '' ? '' : when === '剛剛' || when === '昨天' ? `，${when}` : `，最近 ${when}`}`,
+  duplicateSession: '與較新的一列是同一場對話，可封存這份',
   tickStep: '完成這步',
   handOver: '交給 Claude',
   nothingForYou: '✓ 現在沒有要你做的事',

@@ -86,6 +86,8 @@ export const autoOf = (raw: string): ProgressAuto | null => {
   const state = SESSION_STATES.find(one => one === attrs.state) ?? 'waiting'
   const updated = Date.parse(attrs.updated ?? '')
   const pr = Number(attrs.pr)
+  // `origin=run` is the one value that means anything (#399); `parent` only matters beside it.
+  const isRun = attrs.origin === 'run'
 
   return {
     session,
@@ -96,6 +98,8 @@ export const autoOf = (raw: string): ProgressAuto | null => {
     dir: folderOf(attrs.dir),
     pr: Number.isInteger(pr) && pr > 0 ? pr : null,
     ci: CI_STATES.find(one => one === attrs.ci) ?? null,
+    ...(isRun ? { isRun: true as const } : {}),
+    ...(isRun && attrs.parent !== undefined && RESUME.test(attrs.parent) ? { parent: attrs.parent } : {}),
   }
 }
 

@@ -75,6 +75,7 @@ const row = (it: TaskRow, s: Strings, showProject: boolean): string => {
     `<details class="row" data-key="${esc(it.key)}"><summary><span class="title">${esc(it.title)}</span>` +
     `<span class="tail" style="color:var(--${it.due === null ? 'muted' : toneVar(it.due.tone)})">${esc(it.due === null ? `${it.done}/${it.total}` : it.due.left)}</span>` +
     `<span class="meta" style="color:var(--${toneVar(it.tone)})">${agentMark(it.agent, it.auto === null)}${bar(it.done, it.total)} ${esc(meta.join(' · '))}</span></summary>` +
+    (it.runs === undefined ? '' : `<p class="quiet">${esc(it.runs)}</p>`) +
     (it.context === '' ? '' : `<p class="quiet">${esc(s.contextLine(it.context))}</p>`) +
     steps(it.steps) +
     '</details>'
@@ -218,6 +219,7 @@ ${section('older', s.sectionOlderQuestions, view.older?.length ?? 0, 'muted', s.
 ${view.hidden.length === 0 ? '' : `<p class="quiet">${esc(s.hiddenCount(view.hidden.length))}</p>`}
 ${view.idle.length === 0 ? '' : `<details class="section" data-key="section:idle"><summary><span class="quiet">${esc(s.idleCount(view.idle.length))}</span></summary>${view.idle.map(it => row(it, s, true)).join('')}</details>`}
 ${view.stopped.length === 0 ? '' : `<details class="section" data-key="section:stopped"><summary><span class="quiet">${esc(s.stoppedCount(view.stopped.length))}</span></summary>${view.stopped.map(it => row(it, s, true)).join('')}</details>`}
+${view.background === undefined ? '' : `<p class="quiet">${esc(view.background)}</p>`}
 ${section('due', s.sectionDue, view.due.length, 'soon', nearest === undefined ? '' : s.nearestDue(nearest.title, nearest.due?.left ?? ''), view.due.map(it => row(it, s, true)).join(''), false)}
 ${section(
   'others',

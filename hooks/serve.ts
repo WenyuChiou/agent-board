@@ -147,6 +147,8 @@ export type ServeRow = {
   archiveNote: string
   resume: string | null
   handoff: string
+  // The runs this session started for itself, as one line; '' when none (#399).
+  runs: string
   // Its session still asks the person something (not marked answered): the card opens by itself.
   isAsking: boolean
   // That question, as a reply from the page names it; '' when none.
@@ -172,6 +174,8 @@ export type ServeModel = {
   details?: string
   isLarge?: true
   isCleanable?: true
+  // Runs agents started for themselves that no session is known for, as one folded line (#399).
+  background?: string
   counts: { waiting: number; active: number; due: number; today: number }
   asks: ServeAsk[]
   hidden: ServeHidden[]
@@ -284,6 +288,7 @@ export const serveModel = (view: View, pending: readonly PendingTurn[], s: Strin
         // The command to resume a session names its folder, and the account with it: the computer's only.
         resume: isLan ? null : row.resume,
         handoff: row.handoff,
+        runs: row.runs ?? '',
         isAsking: row.question !== null,
         question: row.question ?? '',
         send,
@@ -315,6 +320,7 @@ export const serveModel = (view: View, pending: readonly PendingTurn[], s: Strin
     ...(view.details === undefined ? {} : { details: view.details }),
     ...(view.isLarge ? { isLarge: true } : {}),
     ...(view.isCleanable ? { isCleanable: true } : {}),
+    ...(view.background === undefined ? {} : { background: view.background }),
     asks,
     idle,
     stopped,
@@ -951,6 +957,7 @@ const PAGE_SCRIPT = String.raw`
     if (row.pr) add(body, el('div', 'quiet', row.pr));
     if (row.steps.length) add(body, stepsList(row.steps));
     if (row.handoff) add(body, el('div', 'quiet small', row.handoff));
+    if (row.runs) add(body, el('div', 'quiet small', row.runs));
     var actions = el('div', 'actions');
     if (row.next) actions.appendChild(button(w('serveTickNext', row.next), function () { act(row.key, 'tick', row.next, '', '', '', row.fp); }, 'primary'));
     if (row.canArchive) actions.appendChild(button(w('serveArchive'), function () { act(row.key, 'archive', '', '', '', '', row.fp); }));
@@ -1200,6 +1207,8 @@ const PAGE_SCRIPT = String.raw`
       groupVisibility(stoppedShelf, from);
       add(board, stoppedShelf);
     }
+    // Runs no session is known for are one line, never a row or a count.
+    if (model.background) add(board, el('div', 'quiet small', model.background));
     model.groups.forEach(function (group) {
       var from = filterNodes.length;
       var heading = el('h2', 'where', '▸ ' + group.project);

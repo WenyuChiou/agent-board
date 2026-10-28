@@ -78,8 +78,16 @@ block `ended` merely to avoid duplicate cards. Finish a completed task as `done`
 unfinished work waiting. `ended` is reserved for observed session termination or an explicit
 decision to stop that work permanently.
 
-Hooks keep only selected metadata. They ignore `transcript_path`, prompts, tool inputs,
-assistant messages and permission decisions, never read transcripts, and call no model.
+Hooks keep only selected metadata. They ignore prompts, tool inputs, assistant messages and
+permission decisions, and call no model. The one thing they open from `transcript_path` is the
+first record of a Codex history file (`rollout-*.jsonl`), at a session's start and at each
+prompt, and from it they keep four short fields (`originator`, `source`, `thread_source`,
+`parent_thread_id`) and nothing else. Those fields say whether a person started the session:
+a `codex exec` run, a helper thread or a subagent is a run Codex started for itself, written
+with `origin=run` (and `parent=` when its parent is known), and the board shows it as one line on
+its parent's row instead of a row of its own ([FORMAT.md](FORMAT.md#runs-an-agent-started)). A
+session with no history file is only a hint, and a later event with one replaces it. A Codex
+that gives no such record leaves the session a row.
 A permission event marks waiting; no output approves a tool or merge. `Stop` marks activity waiting, never conversation termination or task completion. Detailed steps and completion still come from explicit reports.
 Disconnected or untrusted hooks cannot update activity; existing stale-time rules apply.
 

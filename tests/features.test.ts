@@ -3611,7 +3611,7 @@ test('two hand-kept tasks with the same title and next step are told apart by ho
   expect(fpIn(itemsOf(`${twins}\n### Weekly review\n- [ ] Write notes\n`), one ?? '')).not.toBe(fpIn(before, one ?? ''))
   expect(fpIn(itemsOf(`${twins}\n## Work\n### Weekly review\n- [ ] Write notes\n`), one ?? '')).toBe(fpIn(before, one ?? ''))
   // A block has an id of its own, and a same-titled block of another session does not change it.
-  const block = (session: string): string => `## api\n<!-- auto session=${session} agent=codex state=ended updated=2026-10-17T08:30:00Z resume=0199a2b3-c4d5-7e6f-8a9b-0c1d2e3f4a5b dir=%2Fw%2Fapi -->\n### Wire the cache\n- [ ] Pick a size\n<!-- /auto session=${session} -->\n`
+  const block = (session: string): string => `## api\n<!-- auto session=${session} agent=codex state=ended updated=2026-10-17T08:30:00Z resume=0199a2b3-c4d5-7e6f-8a9b-${session.padEnd(12, '0')} dir=%2Fw%2Fapi -->\n### Wire the cache\n- [ ] Pick a size\n<!-- /auto session=${session} -->\n`
   const alone = itemsOf(block('a1000000'))
   expect(fpIn(itemsOf(`${block('a1000000')}\n${block('a2000000')}`), alone[0]?.key ?? '')).toBe(fpIn(alone, alone[0]?.key ?? ''))
 })

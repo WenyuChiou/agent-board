@@ -2,8 +2,11 @@ import type { Strings } from './i18n'
 import type { LocalAgent } from './local-agents'
 import { baseName, parseAttrs, parseProgress, RESUME } from './parse'
 import { scanBlocks } from './blocks'
+import type { Origin } from './runs'
 
-export type CodexReport = {
+// `origin`, `parent` and `isWeak` say who started the session (#399): a run an agent started for
+// itself is written with `origin=run`, and `parent=` names the session that started it.
+export type CodexReport = Origin & {
   session: string
   turn: string | null
   state: 'working' | 'waiting' | 'done' | 'ended'
@@ -114,7 +117,9 @@ export const putCodexBlock = (text: string, report: CodexReport, owner: string, 
   const agent = report.agent ?? 'codex'
   // The block id is a hash prefix; only the host's full id can match a live receiver.
   const resume = RESUME.test(report.session) ? ` resume=${report.session}` : ''
-  const marker = `<!-- auto session=${id} agent=${agent} source=${agent}-local owner=${owner} state=${report.state} updated=${report.updated}${resume} -->`
+  // Only a run is marked: a person's session is the default, so its block stays as it was.
+  const run = report.origin === 'run' ? ` origin=run${report.parent !== undefined && RESUME.test(report.parent) ? ` parent=${report.parent}` : ''}` : ''
+  const marker = `<!-- auto session=${id} agent=${agent} source=${agent}-local owner=${owner} state=${report.state} updated=${report.updated}${resume}${run} -->`
   const eol = text.includes('\r\n') ? '\r\n' : '\n'
   const block = [marker, `### ${report.title}`, ...report.steps, `<!-- /auto session=${id} -->`].join(eol)
   // Use the board's scanner: Markdown examples are not task ownership, and a

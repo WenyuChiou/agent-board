@@ -132,6 +132,7 @@ const rowLines = (row: TaskRow, s: Strings, o: BoardOptions): string[] => {
   const who = row.agent === '' ? '' : ` · ${row.agent}`
   const count = row.total > 0 ? `${row.done}/${row.total} ` : ''
   const lines = [`  ${c('bold', fit(row.title, o.width - 4))}`, `    ${c('quiet', fit(`${count}${row.status}${who}${row.when ? ` · ${row.when}` : ''}`, o.width - 6))}`]
+  if (row.runs) lines.push(`    ${c('quiet', fit(row.runs, o.width - 6))}`)
   if (row.context) lines.push(`    ${c('quiet', fit(row.context, o.width - 6))}`)
   for (const step of row.steps) {
     const tone = step.status === 'waiting' ? 'waiting' : step.status === 'blocked' ? 'alert' : step.isCurrent ? 'accent' : step.status === 'done' ? 'quiet' : null
@@ -228,6 +229,8 @@ export const boardText = (view: View, pending: readonly PendingTurn[], s: String
   }
 
   if (view.groups.every(group => group.rows.length === 0) && asks.length === 0 && news.length === 0 && view.idle.length === 0 && view.stopped.length === 0 && view.due.length === 0 && recentQuestions.length === 0) lines.push(c('quiet', s.empty), '')
+  // Runs agents started for themselves, with no session known: one folded line, never in the counts (#399).
+  if (view.background) lines.push(c('quiet', fit(view.background, o.width)), '')
   for (const line of view.health ?? []) lines.push(...wrapNote(line, o.width - 2).map(part => c('quiet', part)))
 
   return `${lines.join('\n').replace(/\n+$/, '')}\n`
@@ -400,6 +403,7 @@ export const chatText = (
   }
   if (view.idle.length > 0) items.push(line(s.idleCount(view.idle.length)))
   if (view.stopped.length > 0) items.push(line(s.stoppedCount(view.stopped.length)))
+  if (view.background) items.push(line(view.background))
   for (const row of view.stopped.filter(row => (row.questions?.length ?? 0) > 0)) {
     items.push(line(`${named(row.project)} › ${row.title} · ${row.when}`, 2))
     for (const question of row.questions ?? []) items.push(line(`${question.text}${question.note ? ` — ${question.note}` : ''}`, 4))
@@ -416,7 +420,7 @@ export const chatText = (
   const isNext = (step: ViewStep): boolean => step.number !== null && !['done', 'cancelled', 'waiting'].includes(step.status)
   rows.forEach(({ row, mark }, index) => {
     const next = (row.steps.find(step => step.isCurrent && isNext(step)) ?? row.steps.find(isNext))?.text
-    const words = `${mark} ${named(row.project)} › ${row.title}${row.hasFutureTime ? ` · ${row.when}` : ''}${row.due === null ? '' : ` · ${row.due.left}`}${next === undefined ? '' : ` — ${s.reportNext(next)}`}`
+    const words = `${mark} ${named(row.project)} › ${row.title}${row.hasFutureTime ? ` · ${row.when}` : ''}${row.due === null ? '' : ` · ${row.due.left}`}${next === undefined ? '' : ` — ${s.reportNext(next)}`}${row.runs ? ` · ${row.runs}` : ''}`
     items.push(`${index === 0 ? '\n' : ''}${line(words)}`)
   })
   if (asks.length === 0 && rows.length === 0 && news.length === 0 && view.idle.length === 0 && view.stopped.length === 0 && recentQuestions.length === 0) items.push(s.empty)
@@ -639,6 +643,7 @@ export const boardScreen = (view: View, pending: readonly PendingTurn[], state: 
       view.stopped.length === 0 ? '' : s.stoppedCount(view.stopped.length),
       s.boardKeyIdle,
     ].filter(part => part !== '').join(' · '))]),
+    ...(view.background ? [c('quiet', fit(view.background, o.width))] : []),
     '',
   ]
   const result = state.result
@@ -693,6 +698,7 @@ export const boardScreen = (view: View, pending: readonly PendingTurn[], state: 
       const badge = row.due ? `⚑ ${row.due.left}` : ''
       const reserve = badge === '' ? 0 : displayColumns(badge) + 2
       lines.push(`    ${c('quiet', fit(`${count}${row.status}${who}${row.when ? ` · ${row.when}` : ''}`, o.width - 6 - reserve))}${badge === '' ? '' : `  ${c('alert', badge)}`}`)
+      if (row.runs) lines.push(`    ${c('quiet', fit(row.runs, o.width - 6))}`)
       if ((isOpen || isHere) && (row.auto === 'working' || row.auto === 'waiting')) lines.push(`    ${c('quiet', fit(s.archiveLive, o.width - 6))}`)
       if (isOpen) {
         if (row.question) lines.push(`    ${fit(row.question, o.width - 6)}`)

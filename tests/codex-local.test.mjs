@@ -2127,7 +2127,7 @@ test('native lifecycle events retain a board-confirmed completion in session JSO
   }
 }))
 
-test('Codex lifecycle hooks never read transcripts or retain conversation and approval payloads', () => fixture(f => {
+test('Codex lifecycle hooks never retain conversation and approval payloads, and open nothing that is not a Codex history file', () => fixture(f => {
   f.install('--apply')
   const secret = 'DO-NOT-STORE-THIS-PRIVATE-TEXT'
   const transcript = join(f.home, 'nonexistent-transcript')
@@ -5081,4 +5081,94 @@ if (process.argv.includes('--hook-recovery-parent')) {
   } finally {
     if (Number.isInteger(pid) && isReporterAlive(pid)) await stopReporter(pid)
   }
+}))
+
+// Who started a Codex session (#399): the hook reads the first record of the session's history
+// file, keeps four short fields of it and nothing else, and writes a run an agent started for
+// itself with `origin=run` and the session that started it with `parent=`.
+const RUN_SECRET = 'DO-NOT-STORE-THIS-PRIVATE-MESSAGE'
+const helperSession = 'helper-codex-session-456'
+const execSession = 'exec-codex-session-789'
+const rollout = (f, name, meta) => {
+  const file = join(f.home, 'codex-history', `rollout-${name}.jsonl`)
+  const first = { timestamp: '2026-10-27T12:00:00Z', type: 'session_meta', payload: { id: name, cwd: join(f.home, 'demo'), base_instructions: { text: RUN_SECRET }, ...meta } }
+  f.save(file, `${JSON.stringify(first)}\n${JSON.stringify({ type: 'response_item', payload: { text: RUN_SECRET } })}\n`)
+  return file
+}
+const markerOf = (f, id) => {
+  const text = readFileSync(f.progress, 'utf8')
+  const owner = createHash('sha256').update(`codex:${id}`).digest('hex')
+
+  const marker = text.split('\n').find(line => line.startsWith('<!-- auto ') && line.includes(`owner=${owner}`))
+  // A missing block must fail the test, not satisfy a check that something is absent.
+  assert.ok(marker, `no block for ${id}`)
+
+  return marker
+}
+const everyFile = dir => readdirSync(dir, { withFileTypes: true }).flatMap(entry => entry.isDirectory() ? everyFile(join(dir, entry.name)) : [join(dir, entry.name)])
+
+test('a Codex helper thread is written as a run with its parent, and the person\'s own session carries no mark', () => fixture(f => {
+  f.install('--apply')
+  const cwd = join(f.home, 'demo')
+  const person = rollout(f, 'person', { originator: 'Codex Desktop', source: 'vscode', thread_source: 'user' })
+  const helper = rollout(f, 'helper', { originator: 'Codex Desktop', source: { subagent: { thread_spawn: { parent_thread_id: session, agent_nickname: 'Archimedes' } } }, thread_source: 'subagent', parent_thread_id: session })
+  assert.equal(f.event('UserPromptSubmit', 'turn-1', { cwd, transcript_path: person }).status, 0)
+  assert.equal(f.event('UserPromptSubmit', 'turn-h', { session_id: helperSession, cwd, transcript_path: helper }).status, 0)
+  assert.doesNotMatch(markerOf(f, session), /origin=|parent=/)
+  assert.match(markerOf(f, helperSession), new RegExp(` origin=run parent=${session} -->$`))
+  // Only the four fields are kept: nothing else of the history file reaches the board or its records.
+  for (const file of everyFile(f.root)) assert.ok(!readFileSync(file, 'latin1').includes(RUN_SECRET), file)
+  assert.ok(!readFileSync(f.hooks, 'latin1').includes('Archimedes'))
+  assert.ok(!readFileSync(f.progress, 'utf8').includes('Archimedes'))
+}))
+
+test('a codex exec run with no parent named takes the Codex session working in the same project', () => fixture(f => {
+  f.install('--apply')
+  const cwd = join(f.home, 'demo')
+  const person = rollout(f, 'person', { originator: 'codex-tui', source: 'vscode', thread_source: 'user' })
+  const run = rollout(f, 'exec', { originator: 'codex_exec', source: 'exec', thread_source: 'user' })
+  assert.equal(f.event('UserPromptSubmit', 'turn-1', { cwd, transcript_path: person }).status, 0)
+  assert.equal(f.event('UserPromptSubmit', 'turn-e', { session_id: execSession, cwd, transcript_path: run }).status, 0)
+  assert.match(markerOf(f, execSession), new RegExp(` origin=run parent=${session} -->$`))
+  // The run keeps that parent after the person's session has stopped.
+  assert.equal(f.event('Stop', 'turn-1', { cwd, transcript_path: person }).status, 0)
+  assert.equal(f.event('Stop', 'turn-e', { session_id: execSession, cwd, transcript_path: run }).status, 0)
+  assert.match(markerOf(f, execSession), new RegExp(` origin=run parent=${session} -->$`))
+  assert.doesNotMatch(markerOf(f, session), /origin=/)
+}))
+
+test('a Codex session with no history file is only a hint, and its first prompt with one takes the mark back', () => fixture(f => {
+  f.install('--apply')
+  assert.equal(f.event('SessionStart', 'turn-1', { transcript_path: null }).status, 0)
+  assert.match(markerOf(f, session), / origin=run -->$/)
+  const person = rollout(f, 'person', { originator: 'Codex Desktop', source: 'vscode', thread_source: 'user' })
+  assert.equal(f.event('UserPromptSubmit', 'turn-2', { transcript_path: person }).status, 0)
+  assert.doesNotMatch(markerOf(f, session), /origin=/)
+  // A hint never undoes a plain statement, however late it comes.
+  assert.equal(f.event('UserPromptSubmit', 'turn-3', { transcript_path: null }).status, 0)
+  assert.doesNotMatch(markerOf(f, session), /origin=/)
+}))
+
+test('a Codex session whose host sends no path, or a path that is not a Codex history file, stays a row', () => fixture(f => {
+  f.install('--apply')
+  assert.equal(f.event('UserPromptSubmit', 'turn-1').status, 0)
+  assert.notEqual(markerOf(f, session), '')
+  assert.doesNotMatch(markerOf(f, session), /origin=/)
+  // A file with another name is never opened, even when its first line says it is a run.
+  const decoy = join(f.home, 'codex-history', 'notes.jsonl')
+  f.save(decoy, `${JSON.stringify({ type: 'session_meta', payload: { originator: 'codex_exec', source: 'exec' } })}\n`)
+  assert.equal(f.event('UserPromptSubmit', 'turn-2', { transcript_path: decoy }).status, 0)
+  assert.doesNotMatch(markerOf(f, session), /origin=/)
+  // A history file whose first line is not a session record gives no signal.
+  const odd = join(f.home, 'codex-history', 'rollout-odd.jsonl')
+  f.save(odd, `${JSON.stringify({ type: 'response_item', payload: { originator: 'codex_exec', source: 'exec' } })}\nnot json\n`)
+  assert.equal(f.event('UserPromptSubmit', 'turn-3', { transcript_path: odd }).status, 0)
+  assert.doesNotMatch(markerOf(f, session), /origin=/)
+}))
+
+test('agents that give no signal keep their sessions as rows', () => fixture(f => {
+  f.install('--apply')
+  assert.equal(f.command(['--agent-status', '--agent', 'opencode', '--state', 'working'], { session_id: 'opencode-session-123', transcript_path: null }).status, 0)
+  assert.match(readFileSync(f.progress, 'utf8'), /agent=opencode/)
+  assert.doesNotMatch(readFileSync(f.progress, 'utf8'), /origin=/)
 }))

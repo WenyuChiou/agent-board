@@ -8,6 +8,7 @@ import { AUTO_END, AUTO_START, autoOf, doneKey, isCutMarker, isTaskComplete, par
 import type { QuickEntry } from './quick'
 import type { StepRef, TaskRef } from './view'
 import { sha256 } from './sha256'
+import { isOutranked, pickParent } from './runs'
 import { oneLine, plain } from './step-words'
 import { isStale, observedTime } from './parse'
 import type { JournalEntry } from './journal'
@@ -68,7 +69,7 @@ const markOf = (task: ProgressMirrorTask): string => {
 
 // The marker carries what another session's pane needs: the full id and folder for a
 // resume command, and how the pull request stands.
-const markerOf = (mirror: ProgressMirror): string => {
+const markerOf = (mirror: ProgressMirror, parent?: string): string => {
   const pr = mirror.pr ?? null
   const attrs = [
     `session=${shortId(mirror.sessionId)}`,
@@ -80,6 +81,9 @@ const markerOf = (mirror: ProgressMirror): string => {
     mirror.cwd ? `dir=${encodeURIComponent(mirror.cwd)}` : '',
     pr === null ? '' : `pr=${pr.number} ci=${pr.ci}`,
     mirror.source === 'turns' ? 'source=turns' : '',
+    // A session an agent started for itself (#399); a person's has no such mark.
+    mirror.isRun === true ? 'origin=run' : '',
+    mirror.isRun === true && parent !== undefined && RESUME.test(parent) ? `parent=${parent}` : '',
   ]
 
   return `<!-- auto ${attrs.filter(attr => attr !== '').join(' ')} -->`
@@ -96,13 +100,13 @@ export const stepWords = (task: ProgressMirrorTask, s: Strings = ZH_TW): string 
   return `${oneLine(task.subject)}${reason}`
 }
 
-export const renderAutoBlock = (mirror: ProgressMirror, s: Strings = ZH_TW): string[] => {
+export const renderAutoBlock = (mirror: ProgressMirror, s: Strings = ZH_TW, parent?: string): string[] => {
   const id = shortId(mirror.sessionId)
   const pr = mirror.pr ?? null
   const meta = [stateWords(mirror.state, mirror.agent, s), mirror.branch, pr === null ? '' : prWords(pr, s)].filter(part => part !== '').join(' · ')
 
   return [
-    markerOf(mirror),
+    markerOf(mirror, parent),
     `### ${oneLine(mirror.title) || oneLine(fallbackTitle(mirror)) || s.unnamed}`,
     `> ${oneLine(meta)}`,
     ...(mirror.context ? [s.contextNote(oneLine(mirror.context))] : []),
@@ -305,9 +309,12 @@ const placeUnder = (lines: string[], project: string, added: readonly string[], 
 export const upsertAutoBlock = (text: string, mirror: ProgressMirror, s: Strings = ZH_TW): string => {
   const eol = eolOf(text)
   const lines = linesOf(text)
-  const block = renderAutoBlock(mirror, s)
   const id = shortId(mirror.sessionId)
   const existing = scanBlocks(lines).find(span => span.session === id)
+  // A run keeps the parent its block already names; until one is named, it takes the person's
+  // session working in the same project right now (#399), or none, and counts as a background run.
+  const parent = mirror.isRun !== true ? undefined : (existing === undefined ? undefined : parseAttrs(lines[existing.start] ?? '').parent) ?? pickParent(parseProgress(text), mirror.project, mirror.updated, [id, mirror.sessionId]) ?? undefined
+  const block = renderAutoBlock(mirror, s, parent)
 
   if (existing !== undefined) {
     const end = existing.isClosed ? existing.end : existing.start
@@ -587,8 +594,13 @@ export const takeTask = (text: string, ref: TaskRef, now: number, s: Strings = Z
     // Recheck ownership at the write boundary: a stopped row may have resumed since it
     // was drawn. Unknown clocks cannot prove that a working/waiting session stopped.
     if (span.state === 'working' || span.state === 'waiting') {
-      const auto = parseProgress(text).flatMap(project => project.tasks).find(task => task.line === span.heading)?.auto ?? null
-      if (auto === null || !isStale(auto, now, observedTime(auto, now, observations).updated)) return null
+      const tasks = parseProgress(text).flatMap(project => project.tasks)
+      const task = tasks.find(one => one.line === span.heading)
+      const auto = task?.auto ?? null
+      // The older block of a twin pair is offered for archive while it still looks live (#399):
+      // a newer block with the same agent and full id is the one that runs.
+      const isTwin = ref.isDuplicate === true && task !== undefined && isOutranked(tasks, task)
+      if (auto === null || !isTwin && !isStale(auto, now, observedTime(auto, now, observations).updated)) return null
     }
 
     return { text: removeSpans(text, [span]), entries: [[heading, ...lines.slice(span.start + 1, span.end)].join('\n')] }

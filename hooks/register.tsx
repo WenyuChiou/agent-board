@@ -34,6 +34,7 @@ import {
   upsertAutoBlock,
 } from './blocks'
 import type { ConfirmedTask, ConfirmRef } from './blocks'
+import { withRunMark } from './runs'
 import { ciFinished, GH_FIELDS, prFromGh } from './github'
 import {
   appendJournal,
@@ -1728,7 +1729,9 @@ const loadMine = async ($: EngineInterface, cwd: string): Promise<void> => {
   const stored = (await completedMirror($, key, raw)).mirror
   const fresh = emptyMirror(sessionId, await projectName($), await $.clock.now(), cwd)
   // Background processes belong to the old host, even when the conversation resumes.
-  await update($, mine, () => (stored === undefined ? fresh : { ...clearBackgroundJobs({ ...fresh, ...stored }), isTurnRunning: false, cwd: stored.cwd || cwd }))
+  // A print-mode session (`claude -p`) is a run an agent started for itself, not a conversation a person
+  // typed into (#399); the block says so, and the board folds it into its parent's row.
+  await update($, mine, () => withRunMark(stored === undefined ? fresh : { ...clearBackgroundJobs({ ...fresh, ...stored }), isTurnRunning: false, cwd: stored.cwd || cwd }, !isInteractiveSession))
 }
 
 const completedMirror = async ($: EngineInterface, key: string, raw: ProgressMirror | undefined): Promise<{ mirror: ProgressMirror | undefined; barrier: number }> => {
