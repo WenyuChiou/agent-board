@@ -10,7 +10,7 @@ npx @wenyuchiou/agent-board setup --apply
 npx @wenyuchiou/agent-board --serve
 ```
 
-On a phone on the same Wi-Fi, scan the QR code printed by `npx @wenyuchiou/agent-board --serve --lan` — use it only on a network you trust: the LAN link is plain HTTP and anyone with it can use the page. Details: [the board's page](#the-boards-page).
+Scan the QR code from `npx @wenyuchiou/agent-board --serve --lan` with a phone on the same Wi-Fi. Use it only on a network you trust: the link is not encrypted and anyone who has it can open the page. Details: [the board's page](#the-boards-page).
 
 - **I use Claude Code:** `/agent-board`
 - **I use Codex:** `$agent-board`
@@ -20,7 +20,7 @@ On a phone on the same Wi-Fi, scan the QR code printed by `npx @wenyuchiou/agent
 Setup alone does not connect an agent: complete the agent-specific steps in [Quick start](#quick-start), start a new session, then use its entry above.
 
 <p align="center">
-<img alt="An animated board in six scenes: Claude Code, Codex, Antigravity and OpenCode report to one terminal board; steps tick off; a question rises; one key copies an answer. On the local board, messaging enabled with --messages-dir and a valid live receiver for the exact Codex agent and session lets Send queue a message; accepted is transport acceptance, while an actual session ACK means receipt, not task completion. Messaging is absent from the LAN page. One npx command starts setup. Synthetic data." src="docs/images/cover-en-dark.svg" width="860">
+<img alt="An animated board: agents report progress, questions and replies, and one setup command connects them. With messaging on and the Codex session connected, Send queues a reply. &quot;Accepted&quot; does not mean delivered; a confirmation from that session means it was received, not that the work is done. The LAN page has no messaging. Synthetic data." src="docs/images/cover-en-dark.svg" width="860">
 </p>
 
 <p align="center"><b>Integrations</b><br>
@@ -188,10 +188,10 @@ Hooks say whether a session is working or waiting; its steps and when it is done
 
 ## What you see
 
-- **Answer the one that is waiting.** A question from any agent sits at the top, with a button for each answer. On the local board, enable messaging with [`--messages-dir`](docs/MESSAGING.md#enable-locally) and connect a valid live receiver for the exact agent and session to use **Send**; a progress card alone does not enable it. Otherwise an offline card keeps **Copy** for you to paste into its chat. Queued means stored locally, not delivered; accepted means transport acceptance, not an ACK; acknowledged means the session's actual ACK, which proves receipt, not task completion. An uncertain message is never automatically replayed. Messaging and its history are absent from the LAN page.
+- **Answer the one that is waiting.** A question from any agent sits at the top, with a button for each answer. With messaging on ([`--messages-dir`](docs/MESSAGING.md#enable-locally)) and that session connected, **Send** delivers your answer; otherwise **Copy** it and paste it into that chat.
 - **Check the others are still moving.** Each agent's task shows its current step and when it last reported. Work nobody has touched for a week folds into one **N idle 7+ days** line.
 - **Clear what is finished or dead.** Finished work moves to a monthly archive by itself. A session that stopped halfway can be archived, confirmed done or taken over.
-- **Tell an agent something without going there.** On the local board, use the reply box to send to a valid live receiver for the exact session when messaging is enabled; otherwise an offline card keeps **Copy**.
+- **Tell an agent something without going there.** With messaging on and the session connected, type in the reply box and send it; otherwise the board copies it for you to paste.
 
 **The terminal board** (`--watch`), with Codex's question open: `y` or `n` copies the answer.
 
@@ -207,7 +207,7 @@ Both pictures are drawn by the board's own code from synthetic data. Native hook
 
 The board commands above open the board as a page in your browser (in a chat app they print plain text instead, with no link). From any terminal, `node ~/.agent-board/agent-board.mjs --serve` does the same; run it again to reopen the page. On the page you can:
 
-- **Answer** a question: on the local board, **Send** needs messaging enabled and a valid live receiver for the exact agent and session; an offline card keeps **Copy**. Messaging and its history are absent from the LAN page.
+- **Answer** a question: **Send** it when messaging is on and the session is connected, or **Copy** the reply. The LAN page has no messaging.
 - **Tick** your next step, **archive** a task, or **Archive now** to clear everything finished.
 - **Already answered, hide** a question you answered in its own chat: hidden on this computer until that session asks something new; nothing is sent.
 - **Paste a block** from a web chat such as Muse or dot.

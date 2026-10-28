@@ -99,7 +99,8 @@ describe('L0 discover and install from the README', () => {
     const labels = { en: agent => `I use ${agent}:`, 'zh-TW': agent => `我用 ${agent}：`, 'zh-CN': agent => `我用 ${agent}：` }
     const phone = { en: /phone.*same Wi-?Fi/i, 'zh-TW': /同一.*Wi-?Fi.*手機/i, 'zh-CN': /同一.*Wi-?Fi.*手机/i }
     const qr = { en: /QR/i, 'zh-TW': /QR/i, 'zh-CN': /二维码/ }
-    const trust = { en: /trust/i, 'zh-TW': /信得過/, 'zh-CN': /信得过/ }
+    const trust = { en: /\btrust\b/i, 'zh-TW': /信得過/, 'zh-CN': /信得过/ }
+    const exposure = { en: /not encrypted.*anyone who has it can open/i, 'zh-TW': /沒有加密.*拿到的人都能(?:打開|開啟)/, 'zh-CN': /没有加密.*拿到的人都能打开/ }
     for (const [name, lang] of READMES) {
       const text = read(name)
       const cover = text.indexOf(`docs/images/cover-${lang}-dark.svg`)
@@ -118,7 +119,7 @@ describe('L0 discover and install from the README', () => {
       assert.match(lan, qr[lang], `${name}: LAN mentions a QR code`)
       assert.match(lan, phone[lang], `${name}: the phone is on the same Wi-Fi`)
       assert.match(lan, trust[lang], `${name}: the LAN trust limit is stated`)
-      assert.match(lan, /HTTP/i, `${name}: the LAN transport is HTTP`)
+      assert.match(lan, exposure[lang], `${name}: the link is unencrypted and anyone with it can open the page`)
       const starts = first.split('\n').filter(line => /^- \*\*(?:I use |我用 )/.test(line))
       assert.equal(starts.length, agents.length, `${name}: one start for each of the four agents`)
       const allStarts = text.split('\n').filter(line => /^- \*\*(?:I use |我用 )/.test(line))
@@ -136,36 +137,65 @@ describe('L0 discover and install from the README', () => {
   })
 
   test('L0 README: each README describes Send as docs/MESSAGING.md does and its cover alt text agrees', () => {
-    // Check complete, local statements separately: a matching term elsewhere in the README must
-    // not make an incomplete Send description or cover alt text pass.
+    // Match the relationships in each local statement, rather than technical implementation
+    // vocabulary or isolated words that could appear in an unrelated paragraph.
     const checks = {
       en: {
-        start: '- **Answer the one that is waiting.**',
-        body: [/local board/i, /enable messaging with.*--messages-dir.*valid live receiver for the exact agent and session/i, /progress card alone does not enable/i, /offline card keeps \*\*Copy\*\*/i, /Queued means stored locally, not delivered/i, /accepted means transport acceptance, not an ACK/i, /session's actual ACK.*receipt, not task completion/i, /uncertain message is never automatically replayed/i, /Messaging and its history are absent from the LAN page/i],
-        alt: [/local board.*messaging enabled with --messages-dir.*valid live receiver for the exact Codex agent and session.*Send queue/i, /accepted is transport acceptance/i, /actual session ACK means receipt, not task completion/i, /Messaging is absent from the LAN page/i],
+        starts: ['- **Answer the one that is waiting.**', '- **Tell an agent something without going there.**', '- **Answer** a question:'],
+        connected: /messaging (?:is )?on.*session (?:is )?connected/i,
+        actions: [/\*\*Send\*\*/i, /send it/i, /\*\*Send\*\*/i],
+        noSend: /\b(?:do not|don't|never)\s+(?:\*\*)?send/i,
+        fallback: /(?:otherwise (?:\*\*Copy\*\*|copy|the board copies)|or \*\*Copy\*\*)/i,
+        altConnected: /messaging (?:is )?on.*Codex session connected.*Send.*queues/i,
+        accepted: /accepted.*(?:does not|doesn't|not).*delivered/i,
+        receipt: /confirmation.*session.*means (?:it was )?(?:received|receipt).*not.*(?:work|task).*done/i,
+        lan: /LAN page (?:has )?no messaging/i,
       },
       'zh-TW': {
-        start: '- **回覆在等你的那一個。**',
-        body: [/本機看板/, /--messages-dir.*開啟訊息功能.*符合確切 agent 與對話的有效即時接收端.*才能\*\*傳送/, /進度卡片本身不會啟用傳送/, /離線卡片保留\*\*複製/, /已排隊表示存在本機、尚未送達/, /已接受表示傳輸接受、尚非 ACK/, /對話實際的 ACK.*收到，不代表工作完成/, /不確定的訊息不會自動重送/, /LAN 網頁沒有訊息功能及其歷史紀錄/],
-        alt: [/本機看板以 --messages-dir 開啟訊息功能.*符合 Codex agent 與確切對話的有效即時接收端.*傳送可將訊息排隊/, /已接受是傳輸接受/, /實際對話的 ACK 代表收到，不代表工作完成/, /LAN 網頁沒有訊息功能/],
+        starts: ['- **回覆在等你的那一個。**', '- **不用切過去也能交代事情。**', '- **回覆**問題：'],
+        connected: /(?<![未沒])開(?:了|啟).*訊息功能.*對話(?:也)?連上/,
+        actions: [/\*\*傳送\*\*/, /送過去/, /\*\*傳送\*\*/],
+        noSend: /(?:不要|不能|不可|禁止)(?:\*\*)?(?:傳送|送過去)/,
+        fallback: /(?:否則|或)(?:看板幫你|按)?(?:\*\*)?複製/,
+        altConnected: /(?<![未沒])開(?:了|啟).*訊息功能.*Codex.{0,12}對話(?:也)?連上.*(?:傳送|送出).*排.*佇列/,
+        accepted: /已接受.*不代表.*送到/,
+        receipt: /對話.*確認(?:才)?代表收到.*不代表.*做完/,
+        lan: /LAN 網頁沒有訊息功能/,
       },
       'zh-CN': {
-        start: '- **回复在等你的那一个。**',
-        body: [/本地看板/, /--messages-dir.*开启消息功能.*符合确切 agent 与对话的有效实时接收端.*才能\*\*发送/, /进度卡片本身不会启用发送/, /离线卡片保留\*\*复制/, /已排队表示存在本地、尚未送达/, /已接受表示传输接受、尚非 ACK/, /对话实际的 ACK.*收到，不代表工作完成/, /不确定的消息不会自动重发/, /LAN 网页没有消息功能及其历史记录/],
-        alt: [/本地看板以 --messages-dir 开启消息功能.*符合 Codex agent 与确切对话的有效实时接收端.*发送可将消息排队/, /已接受是传输接受/, /实际对话的 ACK 代表收到，不代表工作完成/, /LAN 网页没有消息功能/],
+        starts: ['- **回复在等你的那一个。**', '- **不用切过去也能交代事情。**', '- **回复**问题：'],
+        connected: /(?<![未没])开(?:了|启).*消息功能.*对话(?:也)?连上/,
+        actions: [/\*\*发送\*\*/, /送过去/, /\*\*发送\*\*/],
+        noSend: /(?:不要|不能|不可|禁止)(?:\*\*)?(?:发送|送过去)/,
+        fallback: /(?:否则|或)(?:看板帮你|按)?(?:\*\*)?复制/,
+        altConnected: /(?<![未没])开(?:了|启).*消息功能.*Codex.{0,12}对话(?:也)?连上.*(?:发送|送出).*排.*队列/,
+        accepted: /已接受.*不代表.*送到/,
+        receipt: /对话.*确认(?:才)?代表收到.*不代表.*做完/,
+        lan: /LAN 网页没有消息功能/,
       },
     }
     for (const [name, lang] of READMES) {
       const text = read(name)
       const what = section(text, SECTIONS[lang][3]) ?? ''
-      const body = what.split('\n').find(line => line.startsWith(checks[lang].start)) ?? ''
-      assert.ok(body, `${name}: the Send explanation exists in What you see`)
-      assert.ok(body.includes('[`--messages-dir`](docs/MESSAGING.md#enable-locally)'), `${name}: Send links to the local messaging setup`)
+      const pageSection = section(text, WORDS[lang].page, 3) ?? ''
+      const [answer, tell] = checks[lang].starts.slice(0, 2).map(start => what.split('\n').find(line => line.startsWith(start)) ?? '')
+      const page = pageSection.split('\n').find(line => line.startsWith(checks[lang].starts[2])) ?? ''
+      for (const [index, [label, line]] of [['answer', answer], ['tell', tell], ['page', page]].entries()) {
+        assert.ok(line, `${name}: ${label} explanation exists`)
+        assert.match(line, checks[lang].connected, `${name}: ${label} requires messaging on and a connected session`)
+        assert.match(line, checks[lang].actions[index], `${name}: ${label} offers Send`)
+        assert.doesNotMatch(line, checks[lang].noSend, `${name}: ${label} does not forbid Send`)
+        assert.match(line, checks[lang].fallback, `${name}: ${label} offers Copy otherwise`)
+      }
+      assert.ok(answer.includes('[`--messages-dir`](docs/MESSAGING.md#enable-locally)'), `${name}: Send links to the local messaging setup`)
+      assert.match(page, checks[lang].lan, `${name}: the LAN page has no messaging`)
       const image = [...text.matchAll(/<img\b[^>]*>/g)].find(([tag]) => tag.includes(`docs/images/cover-${lang}-dark.svg`))?.[0] ?? ''
-      const alt = /\balt="([^"]*)"/.exec(image)?.[1] ?? ''
+      const alt = (/\balt="([^"]*)"/.exec(image)?.[1] ?? '').replaceAll('&quot;', '"')
       assert.ok(alt, `${name}: cover has alt text`)
-      for (const pattern of checks[lang].body) assert.match(body, pattern, `${name}: Send body covers ${pattern}`)
-      for (const pattern of checks[lang].alt) assert.match(alt, pattern, `${name}: Send alt covers ${pattern}`)
+      assert.match(alt, checks[lang].altConnected, `${name}: alt describes the enabled, connected queue`)
+      assert.match(alt, checks[lang].accepted, `${name}: alt distinguishes accepted from delivered`)
+      assert.match(alt, checks[lang].receipt, `${name}: alt distinguishes receipt from completed work`)
+      assert.match(alt, checks[lang].lan, `${name}: alt says LAN has no messaging`)
       assert.doesNotMatch(alt, /\b\d+\.\d+\.\d+\b|preview|預覽|预览/i, `${name}: the alt does not describe Send as an upcoming preview`)
     }
   })
