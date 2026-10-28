@@ -5,7 +5,7 @@ import { renderAutoBlock, takeTask, upsertAutoBlock } from '../hooks/blocks'
 import { dashboardHtml } from '../hooks/dashboard'
 import { applyTaskCreate, emptyMirror } from '../hooks/mirror'
 import { autoOf, parseProgress } from '../hooks/parse'
-import { emptyQuestions, observeQuestions } from '../hooks/questions'
+import { emptyQuestions, observeQuestions, withCaptures } from '../hooks/questions'
 import { cleanSignal, codexSignal, foldRuns, pickParent, withRunMark, withSignal } from '../hooks/runs'
 import { serveModel } from '../hooks/serve'
 import { STRINGS } from '../hooks/strings'
@@ -120,6 +120,36 @@ test('a question a run saved in the ledger is not asked again and is not counted
   expect(view.overview.waiting).toBe(0)
   expect(serveModel(view, [], en).asks).toEqual([])
   expect(rowsOf(view)).toHaveLength(1)
+})
+
+test('an archived twin loser adds no second question under Older and no stopped-sessions count while its winner is live', () => {
+  const winner: Spec = { session: 'aaaa1111', agent: 'codex', resume: PERSON, state: 'waiting', ageMinutes: 1 }
+  const loser: Spec = { ...winner, session: 'bbbb2222', ageMinutes: 2 }
+  const question = '- [?] Which database should we use? — Postgres or SQLite?'
+  const fullBoard = file(winner, loser).replaceAll('- [~] A step', question)
+  const ledger = observeQuestions(emptyQuestions(), parseProgress(fullBoard), null, [], NOW, true, 'fixture:fold').ledger
+  const record = ledger.records.find(record => record.source?.session === loser.session)!
+  const archived = withCaptures(ledger, [{ version: 1, disposition: 'archived', record }])
+  const board = file(winner).replace('- [~] A step', question)
+  const view = buildView(parseProgress(board), [], null, NOW, 0, {}, en, [], {}, archived)
+  expect(view.waiting).toHaveLength(1)
+  expect(view.older ?? []).toHaveLength(0)
+  expect(view.stoppedAsking).toBe(undefined)
+})
+
+test('an archived helper run whose starter is live keeps its question under the starter\'s agent and counts it once', () => {
+  const starter: Spec = { ...person, agent: 'codex' }
+  const helper: Spec = { session: 'bbbb2222', agent: 'claude', run: true, parent: PERSON, ageMinutes: 2 }
+  const question = '- [?] Which database should we use? — Postgres or SQLite?'
+  const fullBoard = `## Demo\n${block(starter)}\n${block(helper).replace('- [~] A step', question)}`
+  const ledger = observeQuestions(emptyQuestions(), parseProgress(fullBoard), null, [], NOW, true, 'fixture:fold').ledger
+  const record = ledger.records.find(record => record.source?.session === helper.session)!
+  const archived = withCaptures(ledger, [{ version: 1, disposition: 'archived', record }])
+  const view = buildView(parseProgress(file(starter)), [], null, NOW, 0, {}, en, [], {}, archived)
+  expect(view.older).toHaveLength(1)
+  expect(view.older?.[0]?.agent).toBe('codex')
+  expect(view.stoppedAsking).toBe(1)
+  expect(view.waiting).toHaveLength(0)
 })
 
 test('the runs of the session whose pane this is show on its current card, not on the Background runs line', () => {

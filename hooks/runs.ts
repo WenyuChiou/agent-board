@@ -27,6 +27,40 @@ const MAX_HOPS = 8
 
 const sessionKey = (auto: ProgressAuto): string | null => (auto.resume === null ? null : `${auto.agent}\u0000${auto.resume}`)
 
+// The key two blocks of one session share (agent and full id), for a reader that holds a block's
+// saved copy instead of the block.
+export const sessionIdentity = sessionKey
+
+// Who started a run whose own block may be gone: its saved marker names a parent, and the parent is
+// followed through the runs still on the board to the first block that is not a run (#399). Null
+// when none is named, it is not on the board, the chain loops or is longer than eight hops. The
+// kept question of an archived run is listed under that session's agent, as a live run's folds
+// into that session's row.
+export const startersOf = (projects: readonly ProgressProject[]): ((auto: ProgressAuto) => ProgressAuto | null) => {
+  const blocks = projects.flatMap(project => project.tasks.flatMap(task => task.auto === null ? [] : [task.auto]))
+  const byId = new Map<string, ProgressAuto>()
+  // A person's block wins an id shared with a run, just as it does in the live fold.
+  for (const auto of [...blocks.filter(auto => auto.isRun !== true), ...blocks.filter(auto => auto.isRun === true)]) {
+    for (const id of [auto.resume, auto.session]) {
+      if (id !== null && !byId.has(id)) byId.set(id, auto)
+    }
+  }
+
+  return auto => {
+    let at = auto
+    const seen = new Set([auto])
+    for (let hop = 0; hop < MAX_HOPS; hop += 1) {
+      const next = at.parent === undefined ? undefined : byId.get(at.parent)
+      if (next === undefined || seen.has(next)) return null
+      if (next.isRun !== true) return next
+      seen.add(next)
+      at = next
+    }
+
+    return null
+  }
+}
+
 const isAfter = (a: Entry, b: Entry): boolean =>
   a.auto.updated !== b.auto.updated ? a.auto.updated > b.auto.updated : a.order > b.order
 

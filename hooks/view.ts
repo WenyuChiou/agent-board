@@ -14,7 +14,7 @@ import { sha256 } from './sha256'
 import { observeQuestions, pendingQuestionSlot, questionScope, questionSlot, questionWords, sourceSnapshot } from './questions'
 import type { QuestionLedger, QuestionProofs } from './questions'
 import { questionAge } from './question-aging'
-import { foldRuns, mergeGroups } from './runs'
+import { foldRuns, mergeGroups, sessionIdentity, startersOf } from './runs'
 import type { RunGroup } from './runs'
 import type { PendingTurn } from './board'
 
@@ -1099,9 +1099,25 @@ export const buildView = (
   const onShelf = new Set([...stopped.flatMap(({ row }) => row.questions ?? []), ...shownRecent.flatMap(item => item.questions ?? [])].flatMap(item => item.questionId === undefined ? [] : [item.questionId]))
   const shownQuestions = new Set([...all, ...hidden].flatMap(item => item.questionId === undefined ? [] : [item.questionId]))
   const stoppedQuestions = new Set<string>()
+  const keptSessions = new Set([...keptTasks].flatMap(task => task.auto === null ? [] : [sessionIdentity(task.auto)]).filter(identity => identity !== null))
+  const runSessions = new Set(projects.flatMap(project => project.tasks.flatMap(task => task.auto?.isRun === true ? [sessionIdentity(task.auto)] : [])).filter(identity => identity !== null))
+  const starterOf = startersOf(projects)
   for (const record of observed?.ledger.records ?? []) {
     if (!record.isUnresolved || record.source === undefined || onShelf.has(record.id) || shownQuestions.has(record.id) || foldedScopes.has(record.scope)) continue
     const source = record.source
+    const saved = source.kind === 'block' ? sourceSnapshot(source.data) : null
+    let agent = source.agent
+    // A kept question whose block is gone is folded by its saved copy, as the live block was (#399): a
+    // copy of a session that is a row on the board today is that row's, which shows its own question;
+    // a copy of a run is listed under the agent of the session that started it, when that one is on
+    // the board.
+    if (saved !== null && saved.auto !== null && !liveScopes.has(record.scope) && !keptScopes.has(record.scope)) {
+      const identity = sessionIdentity(saved.auto)
+      if (identity !== null && keptSessions.has(identity)) continue
+      const isRun = saved.auto.isRun === true || identity !== null && runSessions.has(identity)
+      const starter = isRun ? starterOf(saved.auto) : null
+      if (starter !== null) agent = starter.agent
+    }
     const parts = splitNote(source.text)
     const age = questionAge(record.firstObserved, now)
     // A source copy still knows a stopped session after its block was removed or replaced.
@@ -1109,12 +1125,11 @@ export const buildView = (
     let isInactiveSource = false
     if (source.kind === 'block' && !liveScopes.has(record.scope)) {
       // Unknown historical source shapes retain the existing review behavior.
-      const saved = sourceSnapshot(source.data)
       isInactiveSource = saved !== null && saved.auto !== null && (saved.auto.state === 'ended' || saved.auto.state === 'done' || isStale(saved.auto, now, observedTime(saved.auto, now, seen).updated) || isMarksComplete(saved.steps))
     }
     const isStopped = record.isArchived || isInactiveSource || inactiveScopes.has(record.scope)
     const stage = isStopped ? 'older' : age.stage
-    const item: WaitingItem = { key: `retained::${record.id}`, questionId: record.id, ageStage: stage, project: source.project, task: source.task, context: source.context, ...parts, when: age.age === null ? s.questionAgeUnknown : relativeTime(record.firstObserved, now, s), ...askOf(parts.text, parts.note), where: 'other', agent: source.agent === 'claude' ? '' : source.agent, session: source.session, sessionId: null, resumeVia: null, reopen: null, hideKey: record.id, canHide: record.isArchived === true, ...(record.isArchived === true ? { isKept: true as const } : {}), step: null, target: null }
+    const item: WaitingItem = { key: `retained::${record.id}`, questionId: record.id, ageStage: stage, project: source.project, task: source.task, context: source.context, ...parts, when: age.age === null ? s.questionAgeUnknown : relativeTime(record.firstObserved, now, s), ...askOf(parts.text, parts.note), where: 'other', agent: agent === 'claude' ? '' : agent, session: source.session, sessionId: null, resumeVia: null, reopen: null, hideKey: record.id, canHide: record.isArchived === true, ...(record.isArchived === true ? { isKept: true as const } : {}), step: null, target: null }
     if (marked.has(record.id)) hidden.push(item)
     else if (stage === 'pending') asks.push(item)
     else if (stage === 'reminder') reminder.push(item)
