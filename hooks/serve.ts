@@ -1,6 +1,7 @@
 import type { AskKind } from './ask'
 import { answersOf, boardItems, fingerprint, olderKey, remainingInbox } from './board'
 import type { BoardItem, PendingTurn } from './board'
+import { clipLine, LABEL_ROOM, LINE_ROOM } from './clip'
 import { htmlLang } from './dashboard'
 import { groupBoard } from './grouping'
 import type { Bucket, Card, GroupedQuestion, GroupedTask, RepoOf } from './grouping'
@@ -82,7 +83,10 @@ export const idleTimeout = (value: string | undefined): number => {
   return Number(value) * 60_000
 }
 
-export type ServeStep = { text: string; note: string; status: string; isCurrent: boolean }
+// `line`, here and on the other texts below, is the text folded to one line (hooks/clip.ts) and
+// capped; it is absent when that is the text itself. The browser cuts the line to its width with an
+// ellipsis.
+export type ServeStep = { text: string; note: string; status: string; isCurrent: boolean; line?: string }
 
 export type ServeAsk = {
   at?: number
@@ -96,8 +100,12 @@ export type ServeAsk = {
   agent: string
   task: string
   text: string
+  // The words of a Done button that ticks this question, clipped.
+  label?: string
   note: string
+  noteLine?: string
   context: string
+  contextLine?: string
   kind: AskKind
   chip: string
   answers: string[]
@@ -140,6 +148,7 @@ export type ServeRow = {
   project: string
   title: string
   context: string
+  contextLine?: string
   status: string
   tone: Tone
   when: string
@@ -150,6 +159,8 @@ export type ServeRow = {
   pr: string
   steps: ServeStep[]
   next: string | null
+  // The words of the Done button for `next`, clipped; `next` itself is what a press must send back.
+  nextLabel?: string
   // A hand-kept task, the person's own (its agent is '', as Claude Code's is); absent otherwise.
   isOwn?: true
   canArchive: boolean
@@ -176,12 +187,12 @@ export type ServeRow = {
 // A question marked answered, listed so it can be shown again.
 export type ServeHidden = { key: string; project: string; agent: string; isOwn?: true; task: string; text: string; questionId?: string }
 // key names the line in the action route; canHide is false for a retained source that is only for review.
-export type ServeRetained = { key: string; canHide: boolean; project: string; agent: string; isOwn?: true; task: string; text: string; note: string; context: string; when: string; questionId?: string; at?: number; dir?: string | null }
+export type ServeRetained = { key: string; canHide: boolean; project: string; agent: string; isOwn?: true; task: string; text: string; note: string; context: string; contextLine?: string; when: string; questionId?: string; at?: number; dir?: string | null }
 
 export type ServeTurn = { key: string; project: string; agent: string; text: string; isQuestion: boolean; info: string; at?: number }
 
 export type GroupOptions = { now: number; repoOf: RepoOf; versions: { board: string; package: string | null }; unreadable: readonly string[] }
-type ServeDone = { project: string; title: string; when: string; questions?: string[]; key?: string; agent?: string; isOwn?: true; dir?: string | null; at?: number }
+type ServeDone = { project: string; title: string; line?: string; when: string; questions?: string[]; key?: string; agent?: string; isOwn?: true; dir?: string | null; at?: number }
 type PageRef = { key: string; kind: 'question' | 'stuck' | 'task'; agent: string; project: string; repo: string; at: number; sourceKey?: string }
 type PageBucket = { counts: Bucket['counts']; cards: PageRef[]; open: PageRef[]; stopped: PageRef[]; done: PageRef[]; older: PageRef[] }
 type PageView = {
@@ -254,6 +265,27 @@ const infoOf = (mode: SendMode, agent: string, task: string, session: string, s:
   return ''
 }
 
+// The text folded to one line and capped at `room` characters, or undefined when that is the text itself.
+const clipped = (text: string, room: number): string | undefined => {
+  const { line } = clipLine(text, room)
+  return line === text ? undefined : line
+}
+const lined = (text: string): { line?: string } => {
+  const line = clipped(text, LINE_ROOM)
+
+  return line === undefined ? {} : { line }
+}
+const contextLined = (text: string): { contextLine?: string } => {
+  const line = clipped(text, LINE_ROOM)
+
+  return line === undefined ? {} : { contextLine: line }
+}
+const noteLined = (text: string): { noteLine?: string } => {
+  const line = clipped(text, LINE_ROOM)
+
+  return line === undefined ? {} : { noteLine: line }
+}
+
 // The keys are the terminal board's (`boardItems`), so a press names the line it was on.
 // `isLan`: the page as a phone sees it on the local network, where a reply that would run an
 // agent on the computer is offered as a copy instead.
@@ -269,6 +301,7 @@ const retainedOf = (item: WaitingItem): ServeRetained => ({
   text: item.text,
   note: item.note,
   context: item.context,
+  ...contextLined(item.context),
   when: item.when,
   ...(item.questionId === undefined ? {} : { questionId: item.questionId }),
 })
@@ -295,6 +328,7 @@ export const serveModel = (view: View, pending: readonly PendingTurn[], s: Strin
       const send = onLan(mode)
       // A phone on the local network gets the id, but neither the command nor its folder.
       const hint = replyHint(ask, s, !isLan, true)
+      const label = ask.step === null ? undefined : clipped(ask.text, LABEL_ROOM)
       asks.push({
         ...(group === undefined ? {} : { ...(ask.at === undefined ? {} : { at: ask.at }), dir: ask.dir ?? null, when: ask.when }),
         ...(connection === undefined ? {} : { delivery: { id: connection.id, turn: connection.turn, agent: connection.agent } }),
@@ -306,8 +340,11 @@ export const serveModel = (view: View, pending: readonly PendingTurn[], s: Strin
         ...(isManual ? { isOwn: true as const } : {}),
         task: ask.task,
         text: ask.text,
+        ...(label === undefined ? {} : { label }),
         note: ask.note,
+        ...noteLined(ask.note),
         context: ask.context,
+        ...contextLined(ask.context),
         kind: ask.kind,
         chip: s.chip(s.ask[ask.kind]),
         // A hand-kept question is the person's own: ticking it is the answer.
@@ -335,6 +372,7 @@ export const serveModel = (view: View, pending: readonly PendingTurn[], s: Strin
       const baseMode = row.target === null ? (row.auto === null ? 'none' : 'claude') : sendMode(row.agent, row.target)
       const mode = connection ? 'connected' : (messaging || !allowResume) && baseMode === 'send' ? 'open' : baseMode
       const send = onLan(mode)
+      const nextLabel = row.next === null ? undefined : clipped(row.next.step, LABEL_ROOM)
       const rows = idleKeys.has(row.key) ? idle : stoppedKeys.has(row.key) ? stopped : (groups.get(row.project) ?? [])
       if (!idleKeys.has(row.key) && !stoppedKeys.has(row.key)) groups.set(row.project, rows)
       rows.push({
@@ -353,6 +391,7 @@ export const serveModel = (view: View, pending: readonly PendingTurn[], s: Strin
         project: row.project,
         title: row.title,
         context: row.context,
+        ...contextLined(row.context),
         status: row.status,
         tone: row.tone,
         when: row.when,
@@ -362,8 +401,9 @@ export const serveModel = (view: View, pending: readonly PendingTurn[], s: Strin
         total: row.total,
         due: row.due?.left ?? null,
         pr: row.pr,
-        steps: row.steps.map(step => ({ text: step.text, note: step.note, status: step.status, isCurrent: step.isCurrent })),
+        steps: row.steps.map(step => ({ text: step.text, note: step.note, status: step.status, isCurrent: step.isCurrent, ...lined(step.note ? `${step.text} — ${step.note}` : step.text) })),
         next: row.next?.step ?? null,
+        ...(nextLabel === undefined ? {} : { nextLabel }),
         canArchive: row.archive !== null,
         canConfirm: row.confirm != null,
         archiveNote: row.auto === 'working' || row.auto === 'waiting' ? s.archiveLive : '',
@@ -413,7 +453,7 @@ export const serveModel = (view: View, pending: readonly PendingTurn[], s: Strin
     older: (view.older ?? []).map(retainedOf),
     groups: [...groups].map(([project, rows]) => ({ project, rows })),
     turns,
-    recent: view.recent.map(item => ({ project: item.project, title: item.title, when: item.when, questions: item.questions?.map(question => [question.text, question.note].filter(Boolean).join(' — ')) })),
+    recent: view.recent.map(item => ({ project: item.project, title: item.title, ...lined(item.title), when: item.when, questions: item.questions?.map(question => [question.text, question.note].filter(Boolean).join(' — ')) })),
   }
   if (group === undefined) return model
   const extra = (item: WaitingItem): ServeRetained => ({ ...retainedOf(item), ...(item.at === undefined ? {} : { at: item.at }), dir: item.dir ?? null })
@@ -781,6 +821,7 @@ button.fchip{min-height:28px;padding:0 10px;border-radius:var(--radius-round);ba
 .composer textarea{display:block;border:0;background:transparent;min-height:52px;padding:10px 12px 2px;outline:none}.composer .cf{display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:6px}.composer .where{flex:1;padding-left:6px;color:var(--muted);font-size:var(--text-xs)}.composer button{margin-left:auto;min-height:32px;font-size:var(--text-sm)}
 .ask .where,.turn .where{display:flex;align-items:flex-start;gap:7px}.ask .where>span:last-child,.turn .where>span:last-child{min-width:0}.where .ag{margin-top:1px}.q{display:flex;align-items:baseline;flex-wrap:wrap;gap:8px}.q b{font-size:var(--text-md);font-weight:600}.chip{font-size:var(--text-xs);border:1px solid currentColor;padding:3px 8px;border-radius:var(--radius-round)}
 .meta .ag{width:22px;height:22px;margin-right:6px;vertical-align:middle}.archive-note{font-size:var(--text-xs)}
+${CLIP_CSS}
 .steps li{grid-template-columns:22px minmax(0,1fr);gap:5px 10px;padding:5px 8px;border-radius:var(--radius-m)}.steps li.now{background:var(--inset)}.steps .mk{width:22px;height:22px;display:grid;place-items:center;font-size:var(--text-sm);cursor:default;user-select:none}
 .history>div{padding:10px 0;border-bottom:1px solid var(--line);display:flex;align-items:center;gap:10px;flex-wrap:wrap}
 .pfoot{display:flex;align-items:center;gap:10px 16px;flex-wrap:wrap;border-top:1px solid var(--line);padding-top:14px;font-size:var(--text-xs);color:var(--muted)}.pfoot p{margin:0;flex:1 1 22em}.pfoot button{font-size:var(--text-sm);min-height:32px}.pfoot .press-result{flex-basis:100%}
@@ -812,6 +853,8 @@ button.fchip{min-height:28px;padding:0 10px;border-radius:var(--radius-round);ba
 </html>
 `
 
+const CLIP_CSS = `.clip{flex:1 1 0;min-width:0}.clip>summary,.clip[open]>summary{display:block;cursor:pointer}.clip>summary::before,.clip[open]>summary::before{content:none}.clip .short{display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.clip .whole{display:none;white-space:pre-wrap;overflow-wrap:anywhere}.clip[open] .short{display:none}.clip[open] .whole{display:block}`
+
 const GROUP_CSS = `
 .grouped{overflow-wrap:anywhere}
 .grouped .topbar{min-height:56px;flex-wrap:nowrap}.grouped .brand{flex:1;min-width:0}.grouped .brand h1{white-space:nowrap}
@@ -835,7 +878,7 @@ const GROUP_CSS = `
 .grouped .pg-more{margin-left:auto}.grouped .pg-more-panel{padding:8px 0}.grouped .composer{padding:8px;border:1px solid var(--line);background:var(--inset)}.grouped textarea{width:100%;min-width:0;min-height:64px;font:inherit;resize:vertical;border:1px solid var(--line);padding:8px;background:var(--ground);color:var(--ink)}.grouped .cf{display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap}
 .grouped .pg-list{display:grid;gap:0;min-width:0}.grouped .pg-row{border-bottom:1px solid var(--line);min-width:0}.grouped .pg-row>summary{list-style:none;cursor:pointer;display:grid;grid-template-columns:24px minmax(0,1fr) auto;gap:4px 12px;padding:12px 0;align-items:center;min-width:0}.grouped .pg-row>summary::-webkit-details-marker{display:none}
 .grouped .pg-title{font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0}.grouped .pg-age{font-size:var(--text-xs);color:var(--muted);white-space:nowrap}.grouped .pg-meta{grid-column:2;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:var(--muted);font-size:var(--text-xs);min-width:0}.grouped .pg-step-count{grid-column:3;font-size:var(--text-xs);color:var(--muted)}
-.grouped .pg-row[open]{background:var(--inset)}.grouped .pg-row-body{padding:0 12px 16px 36px;display:grid;gap:10px}.grouped .pg-steps{display:grid;gap:6px;padding:0;list-style:none;margin:0}.grouped .pg-steps .now{font-weight:700}.grouped .pg-steps li{overflow-wrap:anywhere}
+.grouped .pg-row[open]{background:var(--inset)}.grouped .pg-row-body{padding:0 12px 16px 36px;display:grid;gap:10px}.grouped .pg-steps{display:grid;gap:6px;padding:0;list-style:none;margin:0}.grouped .pg-steps .now{font-weight:700}.grouped .pg-steps li{display:flex;align-items:baseline;gap:8px;min-width:0;overflow-wrap:anywhere}.grouped .pg-steps li>button{flex:none}
 .grouped .pg-tabs{display:flex;gap:16px;border-bottom:1px solid var(--line);margin:16px 0 4px}.grouped .pg-tabs>button{border:0;border-radius:0;border-bottom:2px solid transparent}.grouped .pg-tabs>[aria-selected="true"]{border-bottom-color:var(--ink);font-weight:600}
 .grouped .pg-view-head{display:flex;align-items:center;flex-wrap:wrap;gap:8px 12px}.grouped .pg-view-head>p{flex-basis:100%}.grouped .pg-working{display:grid;gap:12px}.grouped .pg-older{margin-top:12px;display:grid;gap:8px}
 .grouped .pg-notice{color:var(--alert);display:grid;gap:8px}.grouped .pg-notice summary{cursor:pointer}.grouped .pg-fresh{display:grid;justify-items:start;gap:16px;padding:24px 0}.grouped .pg-fresh .mark{width:44px;height:44px}.grouped code{font-family:var(--font-mono);overflow-wrap:anywhere}
@@ -849,7 +892,7 @@ const GROUP_CSS = `
 
 const groupedPage = (s: Strings, nonce: string, isLan: boolean): string => `<!doctype html>
 <html lang="${htmlLang(s)}">
-<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="referrer" content="no-referrer"><title>Agent Board</title>${faviconLink}<script nonce="${nonce}">${themeHead}</script><style nonce="${nonce}">${pageTokens('56px')}${pageBaseCss}${agentMarkCss()}${GROUP_CSS}</style></head>
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="referrer" content="no-referrer"><title>Agent Board</title>${faviconLink}<script nonce="${nonce}">${themeHead}</script><style nonce="${nonce}">${pageTokens('56px')}${pageBaseCss}${agentMarkCss()}${CLIP_CSS}${GROUP_CSS}</style></head>
 <body class="grouped">
 <header class="head" id="head"><div class="wide topbar"><div class="brand">${boardMark}<h1>Agent Board</h1><span class="live" title="${esc(s.serveLiveHint)}"><i></i>${esc(s.serveLive)}</span></div><button id="search-open" type="button" data-local aria-label="${esc(s.pgSearch)}" aria-controls="searchbar" aria-expanded="false">⌕</button><div id="header-theme">${themeSwitch(s)}</div></div></header>
 <div id="offline" role="status" aria-live="polite"></div>
@@ -1089,12 +1132,23 @@ const PAGE_SCRIPT = String.raw`
     add(box, input, add(footer, go));
     return box;
   }
-  function stepsList(steps) {
+  // A text shows as one line, cut to the width it has with an ellipsis (the style does that);
+  // pressing it, or Enter on it, opens the whole text in its place. An open one stays open across
+  // a redraw (opened[ref]). The short text is the folded, capped copy when the model sent one.
+  function clipped(short, whole, cls, ref) {
+    var box = el('details', 'clip ' + cls);
+    box.open = opened[ref] === true;
+    box.addEventListener('toggle', function () { opened[ref] = box.open; });
+    add(box, add(el('summary'), el('span', 'short', short || whole), el('span', 'whole', whole)));
+    return box;
+  }
+  function stepsList(steps, key) {
     var list = el('ol', 'steps');
-    steps.forEach(function (step) {
+    steps.forEach(function (step, index) {
       var item = el('li', step.isCurrent ? 'now' : '');
-      add(item, el('span', 'mk s-' + step.status, GLYPH[step.status] || '•'), el('span', 't' + (step.status === 'done' || step.status === 'cancelled' ? ' t-quiet' : ''), step.text));
-      if (step.note) add(item, el('span', 'sn s-' + step.status, step.note));
+      var cls = 't' + (step.status === 'done' || step.status === 'cancelled' ? ' t-quiet' : '');
+      add(item, el('span', 'mk s-' + step.status, GLYPH[step.status] || '•'));
+      add(item, clipped(step.line, step.note ? step.text + ' — ' + step.note : step.text, cls, 'step:' + key + ':' + index));
       list.appendChild(item);
     });
     return list;
@@ -1129,12 +1183,16 @@ const PAGE_SCRIPT = String.raw`
     add(card, add(el('div', 'where'), agentMark(who(ask)), el('span', '', [ask.project, brand(who(ask))].filter(Boolean).join(' · ') + (ask.task ? ' › ' + ask.task : ''))));
     // The chip is a pill on the page, so the brackets the terminal needs are left off.
     add(card, add(el('div', 'q'), el('span', 'chip k-' + ask.kind, String(ask.chip).replace(/^\s*[\[〔]\s*|\s*[\]〕]\s*$/g, '')), el('b', '', ask.text)));
-    if (ask.note) add(card, el('div', '', ask.note));
-    else if (ask.context) add(card, el('div', 'quiet', ask.context));
+    if (ask.note) add(card, clipped(ask.noteLine, ask.note, 'note', 'note:' + ask.key));
+    else if (ask.context) add(card, clipped(ask.contextLine, ask.context, 'quiet context', 'context:' + ask.key));
     if (ask.command) add(card, el('code', '', '$ ' + ask.command));
     var answers = [];
     var actions = [];
-    if (ask.canTick) answers.push(button(w('serveTickNext', ask.text), function () { act(ask.key, 'tick', '', '', '', '', ask.fp); }, 'primary'));
+    if (ask.canTick) {
+      var tick = button(w('serveTickNext', ask.label || ask.text), function () { act(ask.key, 'tick', '', '', '', '', ask.fp); }, 'primary');
+      if (ask.label) tick.title = ask.text;
+      answers.push(tick);
+    }
     ask.answers.forEach(function (answer, index) {
       var send = ask.send === 'send' || ask.send === 'connected';
       var node = button(answer, function () {
@@ -1177,15 +1235,19 @@ const PAGE_SCRIPT = String.raw`
     card.appendChild(summary);
     var body = el('div', 'body');
     if (row.archiveNote) add(body, el('div', 'quiet small archive-note', row.archiveNote));
-    if (row.context) add(body, el('div', 'quiet', row.context));
+    if (row.context) add(body, clipped(row.contextLine, row.context, 'quiet context', 'context:' + row.key));
     if (row.pr) add(body, el('div', 'quiet', row.pr));
-    if (row.steps.length) add(body, stepsList(row.steps));
+    if (row.steps.length) add(body, stepsList(row.steps, row.key));
     if (row.handoff) add(body, el('div', 'quiet small', row.handoff));
     if (row.runs) add(body, el('div', 'quiet small', row.runs));
     if (row.send === 'send' || row.send === 'connected') add(body, replyBox(row.key, w('serveMessagePlaceholder', agentName(row.agent)), row.send, row.agent, row.where, row.isSending, row.session, asked, row.fp, row.delivery));
     else if (row.hasCopyBox) add(body, replyBox(row.key, w('serveReplyPlaceholder'), 'copy', row.agent, '', false, row.session, asked));
     var actions = [];
-    if (row.next) actions.push(button(w('serveTickNext', row.next), function () { act(row.key, 'tick', row.next, '', '', '', row.fp); }, 'primary'));
+    if (row.next) {
+      var tickNext = button(w('serveTickNext', row.nextLabel || row.next), function () { act(row.key, 'tick', row.next, '', '', '', row.fp); }, 'primary');
+      if (row.nextLabel) tickNext.title = row.next;
+      actions.push(tickNext);
+    }
     if (row.canArchive) actions.push(button(w('serveArchive'), function () { act(row.key, 'archive', '', '', '', '', row.fp); }));
     if (row.canConfirm) actions.push(button(w('confirmDone'), function () { act(row.key, 'done', '', '', '', '', row.fp); }));
     if (row.resume) actions.push(button(w('serveCopyResume'), function () { copy(row.resume, row.key); }, '', true));
@@ -1451,7 +1513,8 @@ const PAGE_SCRIPT = String.raw`
     question.setAttribute('title', pgText(isStuck ? ask.title : ask.text))
     add(card, meta, question)
     if (isStuck) add(card, el('p', 'pg-note', pgText(ask.stuck && ask.stuck.reason)))
-    else if (ask.note) add(card, el('p', 'pg-note', pgText(ask.note)))
+    else if (ask.note) add(card, clipped(pgText(ask.noteLine || ask.note), ask.note, 'pg-note', 'note:' + key))
+    else if (ask.context) add(card, clipped(pgText(ask.contextLine || ask.context), ask.context, 'quiet context', 'context:' + key))
     const answers = []
     const others = []
     if (isStuck) {
@@ -1518,6 +1581,7 @@ const PAGE_SCRIPT = String.raw`
     add(summary, isMixed ? agentMark(ref.agent) : el('span', 'pg-status', marks[status]), el('span', 'pg-title', pgTitle(ref)), el('span', 'pg-age', pgAge(ref)), el('span', 'pg-meta', meta), el('span', 'pg-step-count', row.total ? w('pgSteps', row.done, row.total) : ''))
     add(card, summary)
     const body = el('div', 'pg-row-body')
+    if (row.context) add(body, clipped(pgText(row.contextLine || row.context), row.context, 'quiet context', 'context:' + key))
     const completed = steps.filter(one => one.status === 'done' || one.status === 'cancelled')
     if (completed.length) {
       const folded = el('details')
@@ -1558,7 +1622,10 @@ const PAGE_SCRIPT = String.raw`
   const pgStepList = (steps, row) => {
     const list = el('ol', 'pg-steps')
     steps.forEach(step => {
-      const line = el('li', step.isCurrent ? 'now' : '', (GLYPH[step.status] || '○') + ' ' + pgText(step.text))
+      const line = el('li', step.isCurrent ? 'now' : '')
+      const whole = step.note ? step.text + ' — ' + step.note : step.text
+      const cls = 't' + (step.status === 'done' || step.status === 'cancelled' ? ' t-quiet' : '')
+      add(line, el('span', 'mk s-' + step.status, GLYPH[step.status] || '○'), clipped(pgText(step.line || whole), whole, cls, 'step:' + row.key + ':' + row.steps.indexOf(step)))
       if (row.isOwn && step.status !== 'done' && step.status !== 'cancelled') add(line, button(w('serveTickNext', pgText(step.text)), () => act(row.key, 'tick', step.text, '', '', '', row.fp)))
       add(list, line)
     })
@@ -1853,7 +1920,7 @@ const PAGE_SCRIPT = String.raw`
       var shown = pair[0] === 'older' && !opened['older:all'] ? ${OLDER_SHOWN} : questions.length;
       function appendQuestion(one) {
         // A question that can be hidden has the same button as a live one; a retained source kept for review only says so.
-        var card = add(el('div'), add(el('div', 'where'), agentMark(who(one)), el('span', '', [one.project, brand(who(one)), one.task, one.when].filter(Boolean).join(' · '))), el('div', 'q', one.text), el('div', '', one.note), el('div', 'quiet', one.context), one.canHide ? add(el('div', 'actions'), button(w('answeredHide'), function () { act(one.key, 'hide'); })) : el('div', 'quiet', w('questionReviewOnly')));
+        var card = add(el('div'), add(el('div', 'where'), agentMark(who(one)), el('span', '', [one.project, brand(who(one)), one.task, one.when].filter(Boolean).join(' · '))), el('div', 'q', one.text), el('div', '', one.note), one.context ? clipped(one.contextLine, one.context, 'quiet context', 'context:' + one.key) : el('div', 'quiet', ''), one.canHide ? add(el('div', 'actions'), button(w('answeredHide'), function () { act(one.key, 'hide'); })) : el('div', 'quiet', w('questionReviewOnly')));
         resultSlot(card, one.key, one.text, one.task);
         add(retained, tracked(card, ['waiting'], one, '', true));
       }
@@ -1932,7 +1999,7 @@ const PAGE_SCRIPT = String.raw`
       add(board, heading);
       var done = el('div', 'history');
       model.recent.forEach(function (item) {
-        var line = add(el('div'), el('span', 's-done', '✓'), el('span', 't-quiet', [item.project, item.title, item.when].filter(Boolean).join(' · ')));
+        var line = add(el('div'), el('span', 's-done', '✓'), clipped(item.line ? [item.project, item.line, item.when].filter(Boolean).join(' · ') : '', [item.project, item.title, item.when].filter(Boolean).join(' · '), 't-quiet', 'recent:' + item.project + ':' + item.title));
         (item.questions || []).forEach(function (question) { add(line, el('p', 't-quiet', question)); });
         add(done, tracked(line, ['recent'], item));
       });

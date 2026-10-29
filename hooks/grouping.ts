@@ -1,5 +1,6 @@
 import { AGENT_ICONS } from './agent-icons'
 import { ZH_TW } from './i18n'
+import { folderOf } from './question-merge'
 import type { Strings } from './i18n'
 import type { ServeAsk, ServeModel, ServeRetained, ServeRow, ServeTurn } from './serve'
 import { agentLabel } from './strings'
@@ -180,7 +181,7 @@ type Asker = { agent: string; isOwn?: true; isRun?: true; parent?: string }
 
 const holderOf = (item: Asker): Holder => ({ agent: item.agent, isOwn: item.isOwn === true, isRun: item.isRun === true, parent: item.parent })
 
-const identity = (agent: string, isOwn: boolean, project: string, title: string): string => JSON.stringify([isOwn ? '' : keyOf(agent), project, title])
+const identity = (agent: string, isOwn: boolean, project: string, title: string, dir: string | null | undefined): string => JSON.stringify([isOwn ? '' : keyOf(agent), project, title, folderOf(dir ?? '')])
 
 // Whether a stopped row is the one a finished task came from, when the task has no key: the task
 // says whose it was, or nothing, and then any agent's row fits.
@@ -251,11 +252,12 @@ export const groupBoard = (model: GroupingInput, now: number, repoOf: RepoOf, s:
     return at.isRun ? own : at
   }
 
-  // Questions. The same words under one task, in two blocks, are one question: the newest stays
-  // where the first stood, and a pending question keeps an older copy of itself off the older line.
+  // Copies under one task share a card only in the same folder. The newest stays where the first
+  // stood, and a pending question keeps an older copy of itself off the older line.
   const listed = new Map<string, { list: GroupedQuestion[]; index: number }>()
   const list = (question: GroupedQuestion, into: GroupedQuestion[]): void => {
-    const id = JSON.stringify([question.agent, question.project, question.task, plain(question.text)])
+    const note = 'note' in question.source && typeof question.source.note === 'string' ? plain(question.source.note) : ''
+    const id = JSON.stringify([question.agent, question.project, question.task, plain(question.text), note, folderOf(question.source.dir ?? '')])
     const held = listed.get(id)
     if (held === undefined) {
       listed.set(id, { list: into, index: into.length })
@@ -267,7 +269,7 @@ export const groupBoard = (model: GroupingInput, now: number, repoOf: RepoOf, s:
   const carded = new Set<string>()
   for (const ask of model.asks) {
     list({ ...tag(ownerOf(ask), ask.project, ask.dir, ask.at), key: ask.key, task: ask.task, text: ask.text, stage: 'pending', source: ask }, pending)
-    carded.add(identity(ask.agent, ask.isOwn === true, ask.project, ask.task))
+    carded.add(identity(ask.agent, ask.isOwn === true, ask.project, ask.task, ask.dir))
   }
   for (const turn of model.turns) {
     if (turn.isQuestion) list({ ...tag(ownerOf(turn), turn.project, turn.dir, turn.at), key: turn.key, task: '', text: turn.text, stage: 'pending', source: turn }, pending)
@@ -293,27 +295,27 @@ export const groupBoard = (model: GroupingInput, now: number, repoOf: RepoOf, s:
   const tasks: GroupedTask[] = []
   const stuck: Card[] = []
   const rowKeys = new Set<string>()
-  const rowIds = new Set(rows.filter(({ row }) => row.isRun !== true).map(({ row }) => identity(row.agent, row.isOwn === true, row.project, row.title)))
+  const rowIds = new Set(rows.filter(({ row }) => row.isRun !== true).map(({ row }) => identity(row.agent, row.isOwn === true, row.project, row.title, row.dir)))
   for (const [index, { row, shelf, isIdle }] of rows.entries()) {
     if (row.isRun === true || taken.has(index) || rowKeys.has(row.key)) continue
     rowKeys.add(row.key)
     const tagged = tag({ agent: row.agent, isOwn: row.isOwn === true }, row.project, row.dir, row.at)
     if (row.stuck !== undefined) stuck.push({ ...tagged, type: 'stuck', key: `stuck:${row.key}`, task: row.title, reason: row.stuck.reason, source: row })
-    tasks.push({ ...tagged, key: row.key, title: row.title, shelf, isIdle, hasCard: row.stuck !== undefined || carded.has(identity(row.agent, row.isOwn === true, row.project, row.title)), source: row })
+    tasks.push({ ...tagged, key: row.key, title: row.title, shelf, isIdle, hasCard: row.stuck !== undefined || carded.has(identity(row.agent, row.isOwn === true, row.project, row.title, row.dir)), source: row })
   }
   // The producer gives a task that waits on the person a question and no row. It is one open task
   // however many questions it has, and its card stands for it. A helper run's question is not a task.
   const waiting = new Map<string, { ask: GroupingAsk; at: number }>()
   for (const ask of model.asks) {
-    const id = identity(ask.agent, ask.isOwn === true, ask.project, ask.task)
+    const id = identity(ask.agent, ask.isOwn === true, ask.project, ask.task, ask.dir)
     if (ask.isRun === true || rowIds.has(id)) continue
     const held = waiting.get(id)
     if (held === undefined) waiting.set(id, { ask, at: timeOf(ask.at) })
     else held.at = Math.max(held.at, timeOf(ask.at))
   }
-  for (const { ask, at } of waiting.values()) {
+  for (const [id, { ask, at }] of waiting) {
     const tagged = tag({ agent: ask.agent, isOwn: ask.isOwn === true }, ask.project, ask.dir, at)
-    tasks.push({ ...tagged, key: `waiting:${tagged.agent}:${ask.project}::${ask.task}`, title: ask.task, shelf: 'open', isIdle: false, hasCard: true, source: ask })
+    tasks.push({ ...tagged, key: `waiting:${id}`, title: ask.task, shelf: 'open', isIdle: false, hasCard: true, source: ask })
   }
   // A finished task whose agent the model did not say is under no agent: it counts in All only.
   const repeats = new Map<string, number>()
