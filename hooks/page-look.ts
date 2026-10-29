@@ -1,12 +1,13 @@
 import { AGENT_ICONS } from './agent-icons'
 import type { Strings } from './i18n'
+import { FONT_LICENSE, FONT_REGULAR, FONT_SEMIBOLD } from './page-fonts'
 import { DARK, LIGHT, PAGE_DARK, PAGE_LIGHT } from './palette'
 
 const cssVars = (values: Record<string, string>): string => Object.entries(values).map(([key, value]) => `--${key}:${value}`).join(';')
 
 export const pageTokens = (headHeight = '54px'): string => {
   const shared = {
-    'font-sans': 'system-ui,-apple-system,"Segoe UI",Roboto,"Noto Sans","Noto Sans TC","Noto Sans SC","Hiragino Sans","PingFang TC","PingFang SC","Microsoft JhengHei","Microsoft YaHei",sans-serif',
+    'font-sans': '"Atkinson Hyperlegible Next",system-ui,-apple-system,"Segoe UI",Roboto,"Noto Sans","Noto Sans TC","Noto Sans SC","Hiragino Sans","PingFang TC","PingFang SC","Microsoft JhengHei","Microsoft YaHei",sans-serif',
     'font-mono': 'ui-monospace,"SF Mono","Cascadia Mono","Segoe UI Mono",Menlo,Consolas,"Liberation Mono",monospace',
     'text-xs': '12px', 'text-sm': '14px', 'text-md': '16px', 'text-lg': '20px',
     'radius-s': '6px', 'radius-m': '10px', 'radius-round': '999px',
@@ -123,6 +124,8 @@ export const agentMark = (agent: string, isOwn = false): string => {
 }
 
 export const pageBaseCss = `
+@font-face{font-family:'Atkinson Hyperlegible Next';src:url(data:font/woff2;base64,${FONT_REGULAR}) format('woff2');font-weight:400;font-display:swap;/* ${FONT_LICENSE} */}
+@font-face{font-family:'Atkinson Hyperlegible Next';src:url(data:font/woff2;base64,${FONT_SEMIBOLD}) format('woff2');font-weight:600;font-display:swap}
 *,*::before,*::after{box-sizing:border-box}
 html{background:var(--ground)}
 body{margin:0;background:var(--ground);color:var(--ink);font:var(--text-md)/1.55 var(--font-sans);-webkit-font-smoothing:antialiased}

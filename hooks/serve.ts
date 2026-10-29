@@ -728,7 +728,7 @@ const esc = (text: string): string => text.replace(/&/g, '&amp;').replace(/</g, 
 // it talks to its own server only, never sends the address (with its token) on to a link it
 // opens, and cannot be framed by another page.
 export const pagePolicy = (nonce: string): string =>
-  `default-src 'none'; script-src 'nonce-${nonce}'; style-src 'nonce-${nonce}'; connect-src 'self'; img-src data:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'`
+  `default-src 'none'; script-src 'nonce-${nonce}'; style-src 'nonce-${nonce}'; connect-src 'self'; img-src data:; font-src data:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'`
 
 // `isLan`: the page a phone opens on the local network, which closes sooner.
 export const servePage = (s: Strings, nonce: string, isLan = false, idleMs = 0, isGrouped = false): string => isGrouped ? groupedPage(s, nonce, isLan) : `<!doctype html>

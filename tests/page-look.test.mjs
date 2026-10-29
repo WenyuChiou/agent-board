@@ -1,5 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import { createHash } from 'node:crypto'
+import { readFileSync } from 'node:fs'
 import { registerHooks } from 'node:module'
 
 const loader = registerHooks({
@@ -19,11 +21,12 @@ try {
     import('../hooks/view.ts'),
     import('../hooks/strings.ts'),
     import('../hooks/agent-icons.ts'),
+    import('../hooks/page-fonts.ts'),
   ])
 } finally { loader.deregister() }
 
-const [{ pageTokens, boardMark }, { servePage, pagePolicy }, { dashboardHtml }, { parseProgress }, { buildView }, { STRINGS }, { AGENT_ICONS }] = source
-const SANS = 'system-ui,-apple-system,"Segoe UI",Roboto,"Noto Sans","Noto Sans TC","Noto Sans SC","Hiragino Sans","PingFang TC","PingFang SC","Microsoft JhengHei","Microsoft YaHei",sans-serif'
+const [{ pageTokens, boardMark }, { servePage, pagePolicy }, { dashboardHtml }, { parseProgress }, { buildView }, { STRINGS }, { AGENT_ICONS }, { FONT_LICENSE }] = source
+const SANS = '"Atkinson Hyperlegible Next",system-ui,-apple-system,"Segoe UI",Roboto,"Noto Sans","Noto Sans TC","Noto Sans SC","Hiragino Sans","PingFang TC","PingFang SC","Microsoft JhengHei","Microsoft YaHei",sans-serif'
 const MONO = 'ui-monospace,"SF Mono","Cascadia Mono","Segoe UI Mono",Menlo,Consolas,"Liberation Mono",monospace'
 const SHAPES = '<rect class="lg-ink" x="8" y="8" width="36" height="8"/><path class="lg-flag" d="M8 24H56L48 32L56 40H8Z"/><rect class="lg-ink" x="8" y="48" width="28" height="8"/>'
 const PRIVACY = /\b[\da-f]{8}\b|\b[\da-f]{40}\b|\b[\da-f]{64}\b|(?<![A-Za-z])[A-Za-z]:[\\/]|\/home\/|\/Users\//i
@@ -63,7 +66,8 @@ const declarations = body => body.split(';').filter(part => part.trim() !== '').
 })
 
 // Keep media ancestors so only the phone navigation may have a surface background.
-const cssRules = (css, ancestors = []) => {
+const cssRules = (rawCss, ancestors = []) => {
+  const css = rawCss.replace(/\/\*[\s\S]*?\*\//g, '')
   const rules = []
   let start = 0
   let depth = 0
@@ -84,7 +88,9 @@ const cssRules = (css, ancestors = []) => {
       if (--depth !== 0) continue
       const selector = css.slice(start, open).trim()
       const body = css.slice(open + 1, index)
-      if (selector.startsWith('@')) rules.push(...cssRules(body, [...ancestors, selector]))
+      if (selector === '@font-face') {
+        // The font test checks these descriptors separately from page style tokens.
+      } else if (selector.startsWith('@')) rules.push(...cssRules(body, [...ancestors, selector]))
       else rules.push({ selector, ancestors, declarations: declarations(body) })
       start = index + 1
     }
@@ -260,24 +266,50 @@ test('every text colour passes 4.5:1 and every mark colour 3:1 on its surface in
   }
 })
 
-test('the page uses the system font stack, makes no font request and allows no font source', () => {
-  assert.equal(light['font-sans'], SANS, 'the sans token is the exact system stack')
+test('the page embeds its fonts, makes no font request and allows only font-src data:', () => {
+  assert.equal(light['font-sans'], SANS, 'the sans token starts with Atkinson and keeps the system stack')
   assert.equal(light['font-mono'], MONO, 'the mono token is the exact system stack')
+  assert.match(FONT_LICENSE, /^Copyright 2020-2024 The Atkinson Hyperlegible Next Project Authors/)
+  assert.equal(FONT_LICENSE, readFileSync(new URL('../hooks/fonts/OFL.txt', import.meta.url), 'utf8'), 'the bundled license matches the license shipped beside the source')
+  const hashes = {
+    400: '378aea0f5c1d179f4e0b5382c06bfc87571b98cfcc4fd1352bc979e2e2259c54',
+    600: '4ab00275cc496a478fce7baafe89ed44af875acf57655dfd1183ff22bd23829a',
+  }
   const policy = pagePolicy('n')
   assert.match(policy, /(?:^|;)\s*default-src 'none'(?:;|$)/)
-  assert.doesNotMatch(policy, /(?:^|;)\s*font-src\b/i)
+  assert.deepEqual(policy.split(';').map(part => part.trim()).filter(part => /^font-src(?:\s|$)/i.test(part)), ['font-src data:'])
   assert.match(policy, /(?:^|;)\s*img-src data:(?:;|$)/)
   for (const lang of ['en', 'zh-TW', 'zh-CN']) {
     for (const { name, html } of renders(lang)) {
       const where = `${name}/${lang}`
       assert.match(html, new RegExp(`<html lang="${{ en: 'en', 'zh-TW': 'zh-Hant', 'zh-CN': 'zh-Hans' }[lang]}"`), `${where}: the document has its language`)
-      assert.doesNotMatch(html, /@font-face|@import\b|\.(?:woff2?|ttf|otf)\b/i, `${where}: no font resources are embedded or requested`)
-      const markup = html.replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, '')
+      const css = [...html.matchAll(/<style\b[^>]*>([\s\S]*?)<\/style>/gi)].map(match => match[1]).join('\n')
+      assert.ok(css.includes(FONT_LICENSE), `${where}: the license ships inside the page`)
+      const cleanCss = css.replace(/\/\*[\s\S]*?\*\//g, '')
+      const faces = [...cleanCss.matchAll(/@font-face\s*\{([^{}]*)\}/gi)].map(match => match[1])
+      assert.equal(faces.length, 2, `${where}: both font faces are embedded`)
+      const weights = []
+      for (const face of faces) {
+        assert.match(face, /\bfont-family\s*:\s*(['"])Atkinson Hyperlegible Next\1\s*;/i, `${where}: font family`)
+        assert.match(face, /\bfont-display\s*:\s*swap\s*(?:;|$)/i, `${where}: font display`)
+        const weight = /\bfont-weight\s*:\s*(400|600)\s*(?:;|$)/i.exec(face)?.[1]
+        assert.ok(weight, `${where}: regular or semibold weight`)
+        weights.push(weight)
+        const src = /\bsrc\s*:\s*url\(\s*(['"]?)(data:font\/woff2;base64,([A-Za-z0-9+/]+={0,2}))\1\s*\)\s*format\(\s*(['"])woff2\4\s*\)/i.exec(face)
+        assert.ok(src, `${where}: ${weight} is an inline WOFF2 font`)
+        const bytes = Buffer.from(src[3], 'base64')
+        assert.equal(bytes.subarray(0, 4).toString('ascii'), 'wOF2', `${where}: ${weight} has a WOFF2 signature`)
+        assert.equal(createHash('sha256').update(bytes).digest('hex'), hashes[weight], `${where}: ${weight} matches the approved font`)
+      }
+      assert.deepEqual(weights.sort(), ['400', '600'], `${where}: one face for each weight`)
+      assert.doesNotMatch(cleanCss, /@import\b/i, `${where}: no imported stylesheet`)
+      for (const src of cleanCss.matchAll(/(?:^|[;{])\s*src\s*:\s*([^}]+)/gi)) assert.doesNotMatch(svgUrlsRemoved(src[1]), /https?:|\/\//i, `${where}: no remote CSS source`)
+      const markup = svgUrlsRemoved(html.replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, '').replace(/\/\*[\s\S]*?\*\//g, ''))
       assert.doesNotMatch(markup, /(?:https?:)?\/\/[a-z\d]/i, `${where}: no remote or protocol-relative URL`)
       for (const link of html.match(/<link\b[^>]*>/gi) ?? []) assert.doesNotMatch(link, /\brel\s*=\s*["'](?:stylesheet|preload)["']/i, `${where}: no stylesheet or preload link`)
-      for (const match of html.matchAll(/url\(\s*(?:"([^"]*)"|'([^']*)'|([^)]*))\s*\)/gi)) assert.match(match[1] ?? match[2] ?? match[3], /^data:image\/svg\+xml,/, `${where}: CSS URLs are only inline SVG images`)
+      for (const match of cleanCss.matchAll(/url\(\s*(?:"([^"]*)"|'([^']*)'|([^)]*))\s*\)/gi)) assert.match(match[1] ?? match[2] ?? match[3], /^(?:data:image\/svg\+xml,|data:font\/woff2;base64,)/, `${where}: CSS URLs are inline SVG images or WOFF2 fonts`)
       const sans = valuesOf(styleRules(html).find(rule => rule.selector === ':root'))['font-sans']
-      assert.equal(sans, SANS, `${where}: the rendered page uses the system stack`)
+      assert.equal(sans, SANS, `${where}: the rendered page uses Atkinson with the system fallback stack`)
       for (const face of ['Noto Sans TC', 'Noto Sans SC', 'PingFang TC', 'PingFang SC', 'Microsoft JhengHei', 'Microsoft YaHei']) assert.ok(sans.includes(`"${face}"`), `${where}: ${face} is available for Chinese text`)
     }
   }
