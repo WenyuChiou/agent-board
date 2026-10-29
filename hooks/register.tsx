@@ -1284,6 +1284,29 @@ const openLiveBoard = async ($: EngineInterface, path: string, s: Strings): Prom
   }
 }
 
+const showBoardPage = async ($: EngineInterface, progress: string, s: Strings, headline: string, isInteractive: boolean): Promise<{ text: string }> => {
+  // Starting the page can take half a minute; the footer says it is on its way meanwhile.
+  startingPages += 1
+  try {
+    await refreshStatus($)
+    const connecting = backgroundConnect
+    let live = await openLiveBoard($, progress, s)
+    if (live.needsInstall && connecting !== null) {
+      // A first open can race the existing upgrade; never run the old file while waiting.
+      await isDoneWithin($, connecting, 5000)
+      live = await openLiveBoard($, progress, s)
+    }
+    const { page, needsInstall } = live
+    if (page !== null) return { text: `${headline}\n<${page.url}>${page.isKept ? `\n${s.serveKept}` : ''}` }
+    // openDashboard already words the result, with the file names when the browser fails.
+    return { text: `${s.livePageFallback}\n${needsInstall ? `${s.livePageNeedsInstall}\n` : ''}${await openDashboard($, isInteractive)}` }
+  } finally {
+    startingPages -= 1
+    // A footer that cannot be redrawn must not take away the link the person waited for.
+    await refreshStatus($).catch(() => undefined)
+  }
+}
+
 // Hand-kept tasks seen done for the first time get a timestamp, so they leave a day later. A
 // time kept for a task that is no longer done in the whole file (archived, or ticked open again)
 // is let go, so a later task of the same name starts its own day. Every save keeps only the tasks
@@ -3536,14 +3559,25 @@ const settle = async ($: EngineInterface, isWriteBlocking = true): Promise<void>
   if (isWriteBlocking) await writing
 }
 
+// A press queues a turn; two presses before the first turn starts used to queue two.
+const sendingOwn = new Map<string, Promise<PromptSubmitResult>>()
+
 // A prompt of this plugin's own, run as a turn once the session is idle. It is not the
 // person's message, even when another plugin's hook took theirs without passing it on, and
 // it skips this plugin's own prompt.submit hook.
 const submitOwn = ($: EngineInterface, text: string): Promise<PromptSubmitResult> => {
+  const sending = sendingOwn.get(text)
+  if (sending !== undefined) return sending
   isNextTurnAnswer = false
   nextTurnNotification = false
 
-  return $.prompt.submit({ text })
+  const sent = $.prompt.submit({ text })
+  sendingOwn.set(text, sent)
+  const clear = (): void => {
+    if (sendingOwn.get(text) === sent) sendingOwn.delete(text)
+  }
+  sent.then(clear, clear)
+  return sent
 }
 
 // The person wrote in this session: with a Task list, every step Claude asked them is answered.
@@ -3578,6 +3612,8 @@ export const register: Register = (on, options) => {
     await settleLang($, options)
     const words = await wordsOf($)
     await $.command.register({ name: 'progress', description: words.commandDescription, argumentHint: words.commandHint })
+    await $.command.register({ name: 'agent-board', description: words.liveBoardCommandDescription }).catch(() => undefined)
+    sendingOwn.clear()
     await detectHere($)
     await loadMine($, e.cwd)
     await update($, isNotifyOn, () => true)
@@ -3768,26 +3804,15 @@ export const register: Register = (on, options) => {
     // This open's own answer decides; the footer's flag may already follow a newer roster.
     if (!hasNoPaneSurfaceIn(opened)) return { text: s.paneNotOpened(opened.reason) }
     const progress = path || (await progressPath($))
-    // Starting the page can take half a minute; the footer says it is on its way meanwhile.
-    startingPages += 1
-    try {
-      await refreshStatus($)
-      const connecting = backgroundConnect
-      let live = await openLiveBoard($, progress, s)
-      if (live.needsInstall && connecting !== null) {
-        // A first open can race the existing upgrade; never run the old file while waiting.
-        await isDoneWithin($, connecting, 5000)
-        live = await openLiveBoard($, progress, s)
-      }
-      const { page, needsInstall } = live
-      if (page !== null) return { text: `${s.livePageOpened}\n<${page.url}>${page.isKept ? `\n${s.serveKept}` : ''}` }
-      // openDashboard already words the result, with the file names when the browser fails.
-      return { text: `${s.livePageFallback}\n${needsInstall ? `${s.livePageNeedsInstall}\n` : ''}${await openDashboard($, isInteractive)}` }
-    } finally {
-      startingPages -= 1
-      // A footer that cannot be redrawn must not take away the link the person waited for.
-      await refreshStatus($).catch(() => undefined)
-    }
+    return showBoardPage($, progress, s, s.livePageOpened, isInteractive)
+  })
+
+  on('command.run', { command: 'agent-board' }, async $ => {
+    const isInteractive = isInteractiveSession
+    const s = await wordsOf($)
+    const { path } = await read($, snapshot)
+    const progress = path || (await progressPath($))
+    return showBoardPage($, progress, s, s.boardPageOpened, isInteractive)
   })
 
   // Who wrote a prompt is known here, not at turn.start: only the person's own message answers

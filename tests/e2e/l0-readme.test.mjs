@@ -53,8 +53,8 @@ const SURFACE_COMMANDS = [['node ~/.agent-board/agent-board.mjs --watch', '--htm
 // not run live yet, the board's page heading, and how each surface row starts.
 const WORDS = {
   en: { label: 'Integrations', inAgent: 'Open the board in your agent', anywhere: 'Open the board anywhere', checked: 'How each agent was checked', old: ['Untested'], notLive: '(checked in a synthetic home, not run live yet)', page: "The board's page", surfaces: ['Any terminal', 'A browser', 'A chat app', "Check one agent's setup"] },
-  'zh-TW': { label: '整合', inAgent: '在你的 agent 裡打開看板', anywhere: '在任何地方打開看板', checked: '各個 agent 是怎麼驗證的', old: ['未驗證', '還沒驗證'], notLive: '（在合成環境檢查過，還沒實機執行）', page: '看板的網頁', surfaces: ['任何終端機', '瀏覽器', '聊天軟體', '檢查某個 agent 的設定'] },
-  'zh-CN': { label: '集成', inAgent: '在你的 agent 里打开看板', anywhere: '在任何地方打开看板', checked: '每个 agent 是怎么验证的', old: ['未验证', '还没验证'], notLive: '（在合成环境检查过，还没实机运行）', page: '看板的网页', surfaces: ['任何终端', '浏览器', '聊天软件', '检查某个 agent 的设置'] },
+  'zh-TW': { label: '整合', inAgent: '在你的 agent 裡打開看板', anywhere: '在任何地方打開看板', checked: '各個 agent 是怎麼驗證的', old: ['未驗證', '還沒驗證'], notLive: '（在測試環境檢查過，還沒實機執行）', page: '看板的網頁', surfaces: ['任何終端機', '瀏覽器', '聊天軟體', '檢查某個 agent 的設定'] },
+  'zh-CN': { label: '集成', inAgent: '在你的 agent 里打开看板', anywhere: '在任何地方打开看板', checked: '每个 agent 是怎么验证的', old: ['未验证', '还没验证'], notLive: '（在测试环境检查过，还没实机运行）', page: '看板的网页', surfaces: ['任何终端', '浏览器', '聊天软件', '检查某个 agent 的设置'] },
 }
 // A piece of text as a pattern that matches it and nothing else.
 const literal = text => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
@@ -93,6 +93,121 @@ const groupsAround = (svg, at) => {
 }
 
 describe('L0 discover and install from the README', () => {
+  test('L0 README: the first screen of each README holds the tagline, the install commands, --serve --lan with its QR code and an I-use start for each main agent', () => {
+    const agents = ['Claude Code', 'Codex', 'Antigravity', 'OpenCode']
+    const taglines = { en: 'See what every AI coding agent is doing, and answer the one that needs you, from one board.', 'zh-TW': '每個 AI coding agent 在做什麼，一個看板看完；哪個在等你，就在那裡回它。', 'zh-CN': '每个 AI coding agent 在做什么，一个看板看完；哪个在等你，就在那里回它。' }
+    const labels = { en: agent => `I use ${agent}:`, 'zh-TW': agent => `我用 ${agent}：`, 'zh-CN': agent => `我用 ${agent}：` }
+    const phone = { en: /phone.*same Wi-?Fi/i, 'zh-TW': /同一.*Wi-?Fi.*手機/i, 'zh-CN': /同一.*Wi-?Fi.*手机/i }
+    const qr = { en: /QR/i, 'zh-TW': /QR/i, 'zh-CN': /二维码/ }
+    const trust = { en: /\btrust\b/i, 'zh-TW': /信得過/, 'zh-CN': /信得过/ }
+    const exposure = { en: /not encrypted.*anyone who has it can open/i, 'zh-TW': /沒有加密.*拿到的人都能(?:打開|開啟)/, 'zh-CN': /没有加密.*拿到的人都能打开/ }
+    for (const [name, lang] of READMES) {
+      const text = read(name)
+      const cover = text.indexOf(`docs/images/cover-${lang}-dark.svg`)
+      assert.ok(cover >= 0, `${name}: the cover exists`)
+      const first = text.slice(0, cover)
+      const tagline = /<p align="center"><b>[^<]+<\/b><\/p>/.exec(first)
+      assert.ok(tagline, `${name}: a tagline precedes the cover`)
+      assert.equal(tagline[0], `<p align="center"><b>${taglines[lang]}</b></p>`, `${name}: the original tagline precedes the cover`)
+      const node = first.indexOf('Node.js 22', tagline.index + tagline[0].length)
+      const install = /```(?:sh|bash)\n(npx @wenyuchiou\/agent-board setup\nnpx @wenyuchiou\/agent-board setup --apply\nnpx @wenyuchiou\/agent-board --serve)\n```/.exec(first)
+      assert.ok(node > tagline.index && install && install.index > node, `${name}: Node 22 and all three ordered install commands follow the tagline`)
+      const lanLines = first.split('\n').filter(line => line.includes('npx @wenyuchiou/agent-board --serve --lan'))
+      assert.equal(lanLines.length, 1, `${name}: one phone route before the cover`)
+      const lan = lanLines[0]
+      assert.ok(first.indexOf(lan) > install.index + install[0].length, `${name}: LAN follows the install commands`)
+      assert.match(lan, qr[lang], `${name}: LAN mentions a QR code`)
+      assert.match(lan, phone[lang], `${name}: the phone is on the same Wi-Fi`)
+      assert.match(lan, trust[lang], `${name}: the LAN trust limit is stated`)
+      assert.match(lan, exposure[lang], `${name}: the link is unencrypted and anyone with it can open the page`)
+      const starts = first.split('\n').filter(line => /^- \*\*(?:I use |我用 )/.test(line))
+      assert.equal(starts.length, agents.length, `${name}: one start for each of the four agents`)
+      const allStarts = text.split('\n').filter(line => /^- \*\*(?:I use |我用 )/.test(line))
+      assert.deepEqual(allStarts, starts, `${name}: no I-use starts are duplicated or added after the cover`)
+      let at = first.indexOf(lan)
+      for (const [i, agent] of agents.entries()) {
+        const line = starts[i]
+        assert.ok(line.startsWith(`- **${labels[lang](agent)}**`), `${name}: start ${i + 1} is ${agent}`)
+        assert.ok(first.indexOf(line) > at, `${name}: ${agent}'s start is after the LAN line and preceding starts`)
+        assert.ok(codeSpans(line).includes(agent === 'Claude Code' ? '/agent-board' : boardCommand(agent)), `${name}: ${agent}'s start names its board command`)
+        at = first.indexOf(line)
+      }
+      assert.ok(starts[2].includes(WORDS[lang].notLive), `${name}: Antigravity is marked not run live`)
+    }
+  })
+
+  test('L0 README: each README describes Send as docs/MESSAGING.md does and its cover alt text agrees', () => {
+    // Match the relationships in each local statement, rather than technical implementation
+    // vocabulary or isolated words that could appear in an unrelated paragraph.
+    const checks = {
+      en: {
+        starts: ['- **Answer the one that is waiting.**', '- **Tell an agent something without going there.**', '- **Answer** a question:'],
+        connected: /messaging (?:is )?on.*session (?:is )?connected/i,
+        actions: [/\*\*Send\*\*/i, /send it/i, /\*\*Send\*\*/i],
+        noSend: /\b(?:do not|don't|never)\s+(?:\*\*)?send/i,
+        fallback: /(?:otherwise (?:press \*\*Copy\*\*|\*\*Copy\*\*|copy|the board copies)|or \*\*Copy\*\*)/i,
+        answerQueue: /\*\*Send\*\* queues your answer.*confirmation from that session means it was received/i,
+        copyPress: /otherwise press \*\*Copy\*\*/i,
+        altConnected: /messaging (?:is )?on.*Codex session connected.*Send.*queues/i,
+        accepted: /accepted.*(?:does not|doesn't|not).*delivered/i,
+        receipt: /confirmation.*session.*means (?:it was )?(?:received|receipt).*not.*(?:work|task).*done/i,
+        lan: /LAN page (?:has )?no messaging/i,
+      },
+      'zh-TW': {
+        starts: ['- **回覆在等你的那一個。**', '- **不用切過去也能交代事情。**', '- **回覆**問題：'],
+        connected: /(?<![未沒])開(?:了|啟).*訊息功能.*對話(?:也)?連上/,
+        actions: [/\*\*傳送\*\*/, /(?:送過去|傳送)/, /\*\*傳送\*\*/],
+        noSend: /(?:不要|不能|不可|禁止)(?:\*\*)?(?:傳送|送過去)/,
+        fallback: /(?:否則|或)(?:看板幫你|按)?(?:\*\*)?複製/,
+        answerQueue: /\*\*傳送\*\*.*排進佇列.*對話.*確認.*才代表收到/,
+        copyPress: /否則按\*\*複製\*\*/,
+        altConnected: /(?<![未沒])開(?:了|啟).*訊息功能.*Codex.{0,12}對話(?:也)?連上.*(?:傳送|送出).*排.*佇列/,
+        accepted: /已接受.*不代表.*送到/,
+        receipt: /對話.*確認(?:才)?代表收到.*不代表.*做完/,
+        lan: /LAN 網頁沒有訊息功能/,
+      },
+      'zh-CN': {
+        starts: ['- **回复在等你的那一个。**', '- **不用切过去也能交代事情。**', '- **回复**问题：'],
+        connected: /(?<![未没])开(?:了|启).*消息功能.*对话(?:也)?连上/,
+        actions: [/\*\*发送\*\*/, /(?:送过去|发送)/, /\*\*发送\*\*/],
+        noSend: /(?:不要|不能|不可|禁止)(?:\*\*)?(?:发送|送过去)/,
+        fallback: /(?:否则|或)(?:看板帮你|按)?(?:\*\*)?复制/,
+        answerQueue: /\*\*发送\*\*.*排进队列.*对话.*确认.*才代表收到/,
+        copyPress: /否则按\*\*复制\*\*/,
+        altConnected: /(?<![未没])开(?:了|启).*消息功能.*Codex.{0,12}对话(?:也)?连上.*(?:发送|送出).*排.*队列/,
+        accepted: /已接受.*不代表.*送到/,
+        receipt: /对话.*确认(?:才)?代表收到.*不代表.*做完/,
+        lan: /LAN 网页没有消息功能/,
+      },
+    }
+    for (const [name, lang] of READMES) {
+      const text = read(name)
+      const what = section(text, SECTIONS[lang][3]) ?? ''
+      const pageSection = section(text, WORDS[lang].page, 3) ?? ''
+      const [answer, tell] = checks[lang].starts.slice(0, 2).map(start => what.split('\n').find(line => line.startsWith(start)) ?? '')
+      const page = pageSection.split('\n').find(line => line.startsWith(checks[lang].starts[2])) ?? ''
+      for (const [index, [label, line]] of [['answer', answer], ['tell', tell], ['page', page]].entries()) {
+        assert.ok(line, `${name}: ${label} explanation exists`)
+        assert.match(line, checks[lang].connected, `${name}: ${label} requires messaging on and a connected session`)
+        assert.match(line, checks[lang].actions[index], `${name}: ${label} offers Send`)
+        assert.doesNotMatch(line, checks[lang].noSend, `${name}: ${label} does not forbid Send`)
+        assert.match(line, checks[lang].fallback, `${name}: ${label} offers Copy otherwise`)
+      }
+      assert.match(answer, checks[lang].answerQueue, `${name}: Send queues the answer and session confirmation means receipt`)
+      for (const line of [answer, tell]) assert.match(line, checks[lang].copyPress, `${name}: Copy requires a button press`)
+      assert.ok(answer.includes('[`--messages-dir`](docs/MESSAGING.md#enable-locally)'), `${name}: Send links to the local messaging setup`)
+      assert.match(page, checks[lang].lan, `${name}: the LAN page has no messaging`)
+      const image = [...text.matchAll(/<img\b[^>]*>/g)].find(([tag]) => tag.includes(`docs/images/cover-${lang}-dark.svg`))?.[0] ?? ''
+      const alt = (/\balt="([^"]*)"/.exec(image)?.[1] ?? '').replaceAll('&quot;', '"')
+      assert.ok(alt, `${name}: cover has alt text`)
+      assert.match(alt, checks[lang].altConnected, `${name}: alt describes the enabled, connected queue`)
+      assert.match(alt, checks[lang].accepted, `${name}: alt distinguishes accepted from delivered`)
+      assert.match(alt, checks[lang].receipt, `${name}: alt distinguishes receipt from completed work`)
+      assert.match(alt, checks[lang].lan, `${name}: alt says LAN has no messaging`)
+      assert.doesNotMatch(alt, /\b\d+\.\d+\.\d+\b|preview|預覽|预览/i, `${name}: the alt does not describe Send as an upcoming preview`)
+    }
+  })
+
   test("L0 README: the README's first image is its dark cover SVG with a synthetic label", () => {
     for (const [name, lang, synthetic] of READMES) {
       const text = read(name)
@@ -296,7 +411,17 @@ describe('L0 discover and install from the README', () => {
     for (const [name, lang] of READMES) {
       const text = read(name)
       const header = headerOf(text)
-      assert.doesNotMatch(header, /Node\.js|badge\/Node/i, `${name}: the header has no Node badge`)
+      // Node as ordinary prerequisite text or in an illustration is fine; a Node badge is not.
+      // Read both HTML and Markdown images so changing image syntax cannot bypass the check.
+      const htmlImages = [...header.matchAll(/<img\b[^>]*>/gi)].map(([tag]) => ({
+        alt: /\balt=["']([^"']*)["']/i.exec(tag)?.[1] ?? '',
+        src: /\bsrc=["']([^"']*)["']/i.exec(tag)?.[1] ?? '',
+      }))
+      const markdownImages = [...header.matchAll(/!\[([^\]]*)\]\(([^)\s]+)(?:\s+[^)]*)?\)/g)].map(([, alt, src]) => ({ alt, src }))
+      for (const { alt, src } of [...htmlImages, ...markdownImages]) {
+        const isBadge = /shields\.io|\/badges?(?:\/|[._-])/i.test(src) || (/^Node(?:\.js)?(?:\s+\d+(?:\+|\.x)?)?$/i.test(alt) && /(?:^|\/)node(?:[.-]?js)?\.svg(?:\?|$)/i.test(src))
+        assert.ok(!isBadge || !/node(?:\.js)?/i.test(`${alt} ${src}`), `${name}: the header has no Node image badge`)
+      }
       // A badge links to what it reports: the license file, or the test workflow's real status. The
       // npm package has no version to show before 0.24.0 is published.
       const badges = [...header.matchAll(/<a href="([^"]+)"><img alt="([^"]*)" src="(https:\/\/(?:img\.shields\.io|github\.com)\/[^"]+)"><\/a>/g)]
@@ -343,7 +468,12 @@ describe('L0 discover and install from the README', () => {
         const agent = /alt="([^"]+)"/.exec(icon)[1]
         assert.equal(command.split(words.notLive).length - 1, NOT_RUN_LIVE.includes(agent) ? 1 : 0, `${name}: ${agent} carries the exact phrase once only if it was not run live`)
       }
-      assert.equal(text.split(words.notLive).length - 1, NOT_RUN_LIVE.length, `${name}: only the ${NOT_RUN_LIVE.join(', ')} command cells carry the phrase`)
+      const header = headerOf(text)
+      const starts = header.split('\n').filter(line => line.includes('Antigravity') && line.startsWith('- **'))
+      assert.equal(starts.length, 1, `${name}: the header has one Antigravity start`)
+      assert.ok(starts[0].includes(words.notLive), `${name}: the Antigravity start carries the phrase`)
+      assert.equal(text.split(words.notLive).length - 1, NOT_RUN_LIVE.length + 1, `${name}: the header and only the ${NOT_RUN_LIVE.join(', ')} command cells carry the phrase`)
+      if (lang !== 'en') assert.ok(!text.includes(lang === 'zh-TW' ? '在合成環境檢查過，還沒實機執行' : '在合成环境检查过，还没实机运行'), `${name}: no old synthetic-home wording remains`)
       for (const old of ['not verified yet', '還沒驗證', '还没验证']) assert.ok(!text.includes(old), `${name}: ${NOT_RUN_LIVE.join(', ')} no longer use "${old}"`)
       // The table of what was checked says the same words, without the brackets, for an agent
       // whose only check is the synthetic home; the other rows keep the host version or record.

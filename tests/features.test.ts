@@ -3243,10 +3243,12 @@ test("the page runs only its own script, and the chat prompt in it cannot close 
 
 // A word the page script asks for but is not given would show as the text "undefined".
 test('every word the page script asks for is one the page is given', () => {
-  const words = pageWords(STRINGS.en)
+  // One script serves both pages; the words of the agent-first page (?group=agent) go only to that page.
+  const words = pageWords(STRINGS.en, true)
   const named = [...servePage(STRINGS.en, 'n').matchAll(/\bw\(([^)]*)\)/g)].flatMap(found => [...found[1].matchAll(/(?<!=== )'([A-Za-z]+)'/g)].map(key => key[1]))
   expect(named.length).toBeGreaterThan(20)
   expect(named.filter(key => !(key in words))).toEqual([])
+  expect(Object.keys(pageWords(STRINGS.en)).filter(key => key.startsWith('pg'))).toEqual([])
 })
 
 const oldClockFragment = (at: number, state = 'working'): string =>

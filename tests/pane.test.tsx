@@ -160,6 +160,8 @@ type World = {
   surfaceCalls?: number
   paneReason?: string
   paneOpenCalls?: number
+  registered?: string[]
+  registeredDescriptions?: string[]
   liveOutput?: string
   liveFailure?: 'exit' | 'timeout' | 'truncated'
   liveCalls?: Array<{ argv: string[]; init: unknown }>
@@ -341,7 +343,11 @@ const engineBeneath = (on: On, world: World): MockClock => {
       name: null,
     },
   }))
-  on('command.register', ($, e) => ({ value: { command: e.name } }))
+  on('command.register', ($, e) => {
+    world.registered?.push(e.name)
+    world.registeredDescriptions?.push(e.description ?? '')
+    return { value: { command: e.name } }
+  })
   on('ui.open', () => {
     world.paneOpenCalls = (world.paneOpenCalls ?? 0) + 1
     return { value: world.paneReason === undefined ? { isPlaced: true as const } : { isPlaced: false as const, reason: world.paneReason } }
@@ -3802,6 +3808,143 @@ test('the footer status is unchanged when the pane is placed', async ($, on) => 
   await $.command.run({ ...TIDY, args: '' })
   expect(seen.status.at(-1)).toBeUndefined()
   expect(world.surfaceCalls).toBe(surfaceCalls)
+})
+
+test('with a pane surface, /agent-board starts the live board page and leaves the pane open', async ($, on) => {
+  const world: World = { files: new Map([[FILE, JOBS], [LIVE_SCRIPT, installedBoard()]]), mtime: 1, hasTasks: true, ran: [], liveCalls: [], store: { autoConnectOff: true, lang: 'en' } }
+  engineBeneath(on, world)
+  const seen = outside(on, world)
+  await $.session.start({ cwd: '/work/demo', surface: 'desktop', isInteractive: true })
+  for (const lang of ['en', 'zh-TW', 'zh-CN'] as const) {
+    const url = `http://127.0.0.1:34567/?t=${lang.replace('-', '').padEnd(32, 'a')}`
+    const s = STRINGS[lang]
+    await $.command.run({ ...TIDY, args: `lang ${lang}` })
+    world.liveOutput = `${s.serveAt(url)}\n`
+    const paneOpenCalls = world.paneOpenCalls
+    const status = seen.status.at(-1)
+    const result = await $.command.run({ ...TIDY, command: 'agent-board', args: '' })
+    expect(result.text).toBe(`${s.boardPageOpened}\n<${url}>`)
+    expect(world.paneOpenCalls).toBe(paneOpenCalls)
+    expect(seen.status.at(-1)).toBe(status)
+    expect(world.liveCalls?.at(-1)).toEqual({
+      argv: ['node', LIVE_SCRIPT, '--serve', '--no-open', '--quiet-board', '--idle-minutes', '30', '--lang', lang],
+      init: { timeoutMs: 35000 },
+    })
+  }
+  expect(world.ran?.some(argv => ['xdg-open', 'open', 'cmd'].includes(argv[0] ?? ''))).toBe(false)
+})
+
+test('with no pane surface, /agent-board replies with the live board page link and does not try to place the pane', async ($, on) => {
+  const url = `http://127.0.0.1:34567/?t=${'n'.repeat(32)}`
+  const world: World = { files: new Map([[FILE, JOBS], [LIVE_SCRIPT, installedBoard()]]), mtime: 1, hasTasks: true, hasNoSurface: true, paneReason: 'no-surface: no surface is attached ($.session.surfaces() is empty)', ran: [], liveCalls: [], liveOutput: `${EN.serveAt(url)}\n`, store: { autoConnectOff: true, closedByPerson: true, lang: 'en' } }
+  engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/demo', surface: 'desktop', isInteractive: true })
+  const result = await $.command.run({ ...TIDY, command: 'agent-board', args: '' })
+  expect(result.text).toBe(`${EN.boardPageOpened}\n<${url}>`)
+  expect(world.paneOpenCalls ?? 0).toBe(0)
+})
+
+test('/agent-board falls back to the read-only page when the live page cannot start', async ($, on) => {
+  const world: World = { files: new Map([[FILE, JOBS], [LIVE_SCRIPT, installedBoard()]]), mtime: 1, hasTasks: true, ran: [], liveCalls: [], liveFailure: 'exit', paneReason: 'no attached surface places panes (desktop)', store: { autoConnectOff: true, lang: 'en' } }
+  engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/demo', surface: 'desktop', isInteractive: true })
+  const board = await $.command.run({ ...TIDY, command: 'agent-board', args: '' })
+  const progress = await $.command.run({ ...TIDY, args: '' })
+  const expected = `${EN.livePageFallback}\n${EN.windowOpened()}`
+  expect(board.text).toBe(expected)
+  expect(progress.text).toBe(expected)
+  expect(world.files.get('/home/me/.claude/progress.html')).toContain('<!doctype html>')
+})
+
+test('the footer status shows the waiting count and /agent-board when no surface is attached', async ($, on) => {
+  const world: World = { files: new Map([[FILE, JOBS]]), mtime: 1, hasTasks: true, hasNoSurface: true, store: { autoConnectOff: true, closedByPerson: true, lang: 'en' } }
+  const clock = engineBeneath(on, world)
+  const seen = outside(on, world)
+  await $.session.start({ cwd: '/work/demo', surface: 'desktop', isInteractive: true })
+  await clock.advance(10)
+  for (const lang of ['en', 'zh-TW', 'zh-CN'] as const) {
+    const s = STRINGS[lang]
+    await $.command.run({ ...TIDY, args: `lang ${lang}` })
+    const normalStatus = `${s.statusPrefix} · ${s.statusWaiting(1)}`
+    expect(seen.status.at(-1)).toBe(`${normalStatus} · ${s.statusBoardPage}`)
+    expect(seen.status.at(-1)).toContain('/agent-board')
+    expect(seen.status.at(-1)).toContain(s.statusWaiting(1))
+  }
+})
+
+test('the plugin registers /agent-board beside /progress', async ($, on) => {
+  const world: World = { files: new Map([[FILE, JOBS]]), mtime: 1, hasTasks: true, registered: [], registeredDescriptions: [], store: { autoConnectOff: true, closedByPerson: true, lang: 'en' } }
+  engineBeneath(on, world)
+  for (const lang of ['en', 'zh-TW', 'zh-CN'] as const) {
+    world.store!.lang = lang
+    const before = world.registered?.length ?? 0
+    await $.session.start({ cwd: '/work/demo', surface: 'desktop', isInteractive: true })
+    expect(world.registered?.slice(before)).toEqual(['progress', 'agent-board'])
+    expect(world.registeredDescriptions?.slice(before)).toEqual([
+      STRINGS[lang].commandDescription,
+      STRINGS[lang].liveBoardCommandDescription,
+    ])
+    expect(world.registeredDescriptions?.slice(before).every(description => description.length > 0)).toBe(true)
+  }
+})
+
+test('a second press of continue before the first turn starts sends nothing', async ($, on) => {
+  const fixture = paneEngineFixture({ agent: 'claude', source: 'this-session', kind: 'own-block', name: 'Pending continue' })
+  const { world } = fixture
+  const clock = engineBeneath(on, world)
+  const submissions: string[] = []
+  let release = (): void => undefined
+  let reached = (): void => undefined
+  const gate = new Promise<void>(done => { release = done })
+  const started = new Promise<void>(done => { reached = done })
+  on('prompt.submit', async ($, event) => {
+    submissions.push(event.text)
+    reached()
+    await gate
+    return { text: event.text }
+  })
+  await $.session.start({ cwd: '/work/persona_framework', surface: 'desktop', isInteractive: true })
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
+  const first = ui.press({ key: 'continue' })
+  let second: Promise<void> | undefined
+  try {
+    await started
+    second = ui.press({ key: 'continue' })
+    await clock.settle()
+    expect(submissions).toEqual([EN.continueText])
+    release()
+    await Promise.all([first, second])
+    expect(besideButton(await ui.findAll({ type: 'Box' }), 'continue')).toContain(EN.pressSent)
+    await ui.press({ key: 'continue' })
+    expect(submissions).toEqual([EN.continueText, EN.continueText])
+    expect(besideButton(await ui.findAll({ type: 'Box' }), 'continue')).toContain(EN.pressSent)
+  } finally {
+    release()
+    await first.catch(() => undefined)
+    await second?.catch(() => undefined)
+    await ui.unmount()
+  }
+})
+
+test('a press of continue whose prompt was refused does not block the next press', async ($, on) => {
+  const { world } = paneEngineFixture({ agent: 'claude', source: 'this-session', kind: 'own-block', name: 'Refused continue' })
+  engineBeneath(on, world)
+  const submissions: string[] = []
+  on('prompt.submit', ($, event) => {
+    submissions.push(event.text)
+    return submissions.length === 1 ? { drop: 'synthetic session gone' } : { text: event.text }
+  })
+  await $.session.start({ cwd: '/work/persona_framework', surface: 'desktop', isInteractive: true })
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
+  try {
+    await ui.press({ key: 'continue' })
+    expect(besideButton(await ui.findAll({ type: 'Box' }), 'continue')).toContain(EN.pressSessionGone)
+    await ui.press({ key: 'continue' })
+    expect(submissions).toEqual([EN.continueText, EN.continueText])
+    expect(besideButton(await ui.findAll({ type: 'Box' }), 'continue')).toContain(EN.pressSent)
+  } finally {
+    await ui.unmount()
+  }
 })
 
 test('with the pane closed, the line under the prompt carries the progress', async ($, on) => {

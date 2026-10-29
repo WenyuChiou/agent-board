@@ -185,4 +185,4 @@ if (!isChat) {
 // A separate process preserves argv[1], which the installed page server identifies.
 const env = dataDir ? { ...process.env } : process.env
 if (dataDir) delete env.CLAUDE_PROGRESS_FILE
-run(installed, passArgs, { env })
+run(installed, passArgs, { env: { ...env, AGENT_BOARD_PACKAGE_VERSION: v } })

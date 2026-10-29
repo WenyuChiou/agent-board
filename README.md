@@ -2,8 +2,25 @@
 
 <p align="center"><b>See what every AI coding agent is doing, and answer the one that needs you, from one board.</b></p>
 
+With Node.js 22+, in any terminal:
+
+```sh
+npx @wenyuchiou/agent-board setup
+npx @wenyuchiou/agent-board setup --apply
+npx @wenyuchiou/agent-board --serve
+```
+
+Scan the QR code from `npx @wenyuchiou/agent-board --serve --lan` with a phone on the same Wi-Fi. Use it only on a network you trust: the link is not encrypted and anyone who has it can open the page. Details: [the board's page](#the-boards-page).
+
+- **I use Claude Code:** `/agent-board`
+- **I use Codex:** `$agent-board`
+- **I use Antigravity:** `/agent-board` (checked in a synthetic home, not run live yet)
+- **I use OpenCode:** `/board`
+
+Setup alone does not connect an agent: complete the agent-specific steps in [Quick start](#quick-start), start a new session, then use its entry above.
+
 <p align="center">
-<img alt="An animated board in six scenes: Claude Code, Codex, Antigravity and OpenCode report to one terminal board; their steps tick off live; Codex's question jumps to the top; one key copies the answer; a message written on the board's page reaches Codex and its reply shows, a preview coming in 0.24.2; and one npx command connects every agent, on npm from 0.24.0. Synthetic data." src="docs/images/cover-en-dark.svg" width="860">
+<img alt="An animated board: agents report progress, questions and replies, and one setup command connects them. With messaging on and the Codex session connected, Send queues a reply. &quot;Accepted&quot; does not mean delivered; a confirmation from that session means it was received, not that the work is done. The LAN page has no messaging. Synthetic data." src="docs/images/cover-en-dark.svg" width="860">
 </p>
 
 <p align="center"><b>Integrations</b><br>
@@ -96,7 +113,7 @@ Tell me which existing sessions need reload and which adapters remain unsupporte
 | <img src="docs/images/agents/openclaw.svg" width="20" alt="OpenClaw"> | OpenClaw | `/agent-board` |
 | <img src="docs/images/agents/deepseek-harness.svg" width="20" alt="DeepSeek Harness"> | DeepSeek Harness | `/agent-board` (checked in a synthetic home, not run live yet) |
 
-**In the Claude desktop app,** which cannot show the pane, the footer shows the board's status and `/progress` gives you a link to [the board's page](#the-boards-page), where you can answer questions and archive work; if that page cannot start, it opens the read-only page. The board page needs the board script that `/progress connect` installs, or the next session start updates.
+**In the Claude desktop app,** when its Code tab shows no pane, the footer shows the waiting count and `/agent-board opens the board`. `/agent-board` starts the live [board page](#the-boards-page) and replies with its link, where you can answer questions and archive work; it works in every Claude Code session and leaves the pane as it is. When the pane cannot be placed, `/progress` does the same. If the live page cannot start, both open the read-only page. The board page needs the board script that `/progress connect` installs, or the next session start updates.
 
 ### Open the board anywhere
 
@@ -171,10 +188,10 @@ Hooks say whether a session is working or waiting; its steps and when it is done
 
 ## What you see
 
-- **Answer the one that is waiting.** A question from any agent sits at the top, with a button for each answer. Once you turn messaging on ([`--messages-dir`](docs/MESSAGING.md#enable-locally)), **Send** reaches a session that has a live connection; otherwise **Copy** gives you the reply to paste into its chat.
+- **Answer the one that is waiting.** A question from any agent sits at the top, with a button for each answer. With messaging on ([`--messages-dir`](docs/MESSAGING.md#enable-locally)) and that session connected, **Send** queues your answer, and a confirmation from that session means it was received; otherwise press **Copy** and paste it into that chat.
 - **Check the others are still moving.** Each agent's task shows its current step and when it last reported. Work nobody has touched for a week folds into one **N idle 7+ days** line.
 - **Clear what is finished or dead.** Finished work moves to a monthly archive by itself. A session that stopped halfway can be archived, confirmed done or taken over.
-- **Tell an agent something without going there.** Type a reply on the board: with messaging on, it goes straight to that session if it is connected; otherwise the board copies it for you to paste.
+- **Tell an agent something without going there.** With messaging on and the session connected, type in the reply box and send it; otherwise press **Copy** and paste it there.
 
 **The terminal board** (`--watch`), with Codex's question open: `y` or `n` copies the answer.
 
@@ -190,7 +207,7 @@ Both pictures are drawn by the board's own code from synthetic data. Native hook
 
 The board commands above open the board as a page in your browser (in a chat app they print plain text instead, with no link). From any terminal, `node ~/.agent-board/agent-board.mjs --serve` does the same; run it again to reopen the page. On the page you can:
 
-- **Answer** a question: **Send** to a session that is online (with messaging on), or **Copy** the reply.
+- **Answer** a question: **Send** it when messaging is on and the session is connected, or **Copy** the reply. The LAN page has no messaging.
 - **Tick** your next step, **archive** a task, or **Archive now** to clear everything finished.
 - **Already answered, hide** a question you answered in its own chat: hidden on this computer until that session asks something new; nothing is sent.
 - **Paste a block** from a web chat such as Muse or dot.

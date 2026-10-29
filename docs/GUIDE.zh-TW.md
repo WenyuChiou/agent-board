@@ -109,12 +109,13 @@ claude plugin install agent-board@agent-board
 
 開啟新 Claude Code session，使用 `/progress`。側欄鏡像 Task 工具，也可透過它的模型整理回合。問題與決策顯示於任務上方；側欄跟隨 Claude 主題，網頁跟隨系統主題，除非你在網頁上選了亮色或暗色。
 
-Claude 桌面 App 會顯示底部狀態列；`/progress` 會提供可回覆問題、封存工作的看板網頁，互動網頁無法啟動時則開啟唯讀網頁。網頁啟動最多約需半分鐘，期間底部狀態列會顯示正在開啟。互動網頁需要由 `/progress connect` 安裝看板腳本，或在下次工作階段開始時更新。使用同一份已安裝的看板腳本的工作階段與 agent 會共用執行中的網頁。`/progress` 開的網頁在最後一個分頁關掉 30 分鐘後關閉，再執行一次 `/progress` 就有新連結；你自己用 `--serve` 開的網頁照它自己的設定。`/progress` 會換掉用 `--allow-resume` 開的網頁，除非那裡還有回覆正在送出；需要接續回覆時，之後再執行一次 `--serve --allow-resume`。Claude Code CLI 則顯示側欄。
+`/agent-board` 會啟動（或沿用）可回覆問題、封存工作的看板網頁並提供連結，不動面板，每個工作階段都能用。Claude 桌面 App 的 Code 分頁沒有顯示面板時，底部狀態列會顯示等你的數量和「/agent-board 開啟看板」；那裡的 `/progress` 做同樣的事；互動網頁無法啟動時，兩者都開啟唯讀網頁。網頁啟動最多約需半分鐘，期間底部狀態列會顯示正在開啟。互動網頁需要由 `/progress connect` 安裝看板腳本，或在下次工作階段開始時更新。使用同一份已安裝的看板腳本的工作階段與 agent 會共用執行中的網頁。`/progress` 或 `/agent-board` 開的網頁在最後一個分頁關掉 30 分鐘後關閉，再執行一次該指令就有新連結；你自己用 `--serve` 開的網頁照它自己的設定。`/progress` 和 `/agent-board` 會換掉用 `--allow-resume` 開的網頁，除非那裡還有回覆正在送出；需要接續回覆時，之後再執行一次 `--serve --allow-resume`。Claude Code CLI 則顯示側欄。
 
 | 指令／輸入 | 操作 |
 | --- | --- |
 | `/progress connect`、`connect status`、`connect remove` | 選用 plugin 連接、上次狀態、移除 |
 | `+ 求職: 研究駐點 截止 11-20; 草稿; 送出` | 側欄快速新增，也可用 `/progress add …` |
+| `/agent-board` | 啟動（或沿用）看板網頁並提供連結；不動面板 |
 | `/progress open` | 產生並開啟唯讀 `progress.html` |
 | `/progress tidy`、`/progress sync` | 封存符合條件工作；重讀 Task／PR |
 | `/progress report`、`/progress today` | 複製週報／日報 |

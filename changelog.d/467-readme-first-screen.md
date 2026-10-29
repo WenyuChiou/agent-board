@@ -1,0 +1,2 @@
+- **The README opens with what Agent Board does, the phone route and a start for each main agent (#467).** `--serve --lan` and its QR code are on the first screen, and Send is described as it works today, in all three languages.
+  Tests: `L0 README: the first screen of each README holds the tagline, the install commands, --serve --lan with its QR code and an I-use start for each main agent`, `L0 README: each README describes Send as docs/MESSAGING.md does and its cover alt text agrees`.

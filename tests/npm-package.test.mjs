@@ -377,6 +377,16 @@ test("--data-dir runs that folder's board without CLAUDE_PROGRESS_FILE", () => f
   assert.equal(JSON.parse(inherited.stdout), progress)
 }))
 
+test('the launcher tells the board script which package version it runs from', () => fixture(f => {
+  const pkg = packed(f)
+  const root = join(f.home, 'data dir')
+  save(join(root, 'agent-board.mjs'), 'globalThis.AGENT_BOARD = {}\nprocess.stdout.write(JSON.stringify(process.env.AGENT_BOARD_PACKAGE_VERSION ?? null))\n')
+  const result = f.run(pkg, ['--chat', '--data-dir', root], { AGENT_BOARD_PACKAGE_VERSION: '0.0.0' })
+  success(result)
+  assert.equal(result.stderr, '')
+  assert.equal(JSON.parse(result.stdout), manifest.version)
+}))
+
 test('agent-board setup with no agent found says how to name one, without a stack trace', () => fixture(f => {
   const pkg = packed(f)
   for (const [lang, hint] of [['en', 'setup found no agent'], ['zh-TW', 'setup 在這台電腦找不到要設定的 agent'], ['zh-CN', 'setup 在这台电脑找不到要设置的 agent']]) {
