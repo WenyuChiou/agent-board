@@ -1,5 +1,5 @@
 import { test, expect } from 'claude-code/testing'
-import { emptyQuestions, observeQuestions, resolveQuestion } from '../hooks/questions'
+import { emptyQuestions, observeQuestions, resolveQuestion, withCaptures } from '../hooks/questions'
 import type { QuestionLedger } from '../hooks/questions'
 import { parseProgress } from '../hooks/parse'
 import { buildView, relativeTime } from '../hooks/view'
@@ -274,6 +274,27 @@ test('a question asked again after a different one does not bring back a copy it
   const ledger = ledgerOf([{ text: first, at: START }, { text: asked, at: START + HOUR }, { text: moved, at: START + 2 * HOUR }, { text: again, at: START + 2.5 * HOUR }])
   const view = viewOf(again, ledger)
   // The first session's copy was covered before the second session asked again.
+  expect(view.waiting.map(item => item.key)).toEqual([expect.stringContaining('Task bbbb2222')])
+  expect(view.waiting[0]?.when).toBe(relativeTime(START + 2.5 * HOUR, NOW, EN))
+})
+
+test('a question asked again after a different one stays closed when recovered records come back out of order', () => {
+  const first = block('aaaa1111', 'codex', 'demo', QUESTION)
+  const owner = 'b'.repeat(64)
+  const asked = first + block('bbbb2222', 'codex', 'demo', `${QUESTION}
+<!-- question=${owner}:1 -->`)
+  const moved = first + block('bbbb2222', 'codex', 'demo', `Pick a name or a date?
+<!-- question=${owner}:2 -->`)
+  const again = first + block('bbbb2222', 'codex', 'demo', `${QUESTION}
+<!-- question=${owner}:3 -->`)
+  const ledger = ledgerOf([{ text: first, at: START }, { text: asked, at: START + HOUR }, { text: moved, at: START + 2 * HOUR }, { text: again, at: START + 2.5 * HOUR }])
+  // Capture filenames can restore Q1, Q3, R2 even though the owner asked Q1, R2, Q3.
+  const recovered = withCaptures(emptyQuestions(), [0, 1, 3, 2].map(index => {
+    const record = ledger.records[index]!
+    return { version: 1, disposition: record.isUnresolved ? 'unresolved' : 'resolved', record }
+  }))
+  expect(recovered.records.map(record => record.firstObserved)).toEqual([START, START + HOUR, START + 2.5 * HOUR, START + 2 * HOUR])
+  const view = viewOf(again, recovered)
   expect(view.waiting.map(item => item.key)).toEqual([expect.stringContaining('Task bbbb2222')])
   expect(view.waiting[0]?.when).toBe(relativeTime(START + 2.5 * HOUR, NOW, EN))
 })

@@ -3,6 +3,8 @@ import { answersOf, boardItems, fingerprint, olderKey, remainingInbox } from './
 import type { BoardItem, PendingTurn } from './board'
 import { clipLine, LABEL_ROOM, LINE_ROOM } from './clip'
 import { htmlLang } from './dashboard'
+import { groupBoard } from './grouping'
+import type { Bucket, Card, GroupedQuestion, GroupedTask, RepoOf } from './grouping'
 import { AGENT_ALIASES, agentMarkCss, boardMark, pageBaseCss, pageTokens, themeHead, themeSwitch } from './page-look'
 import { RELAY, ZH_TW } from './i18n'
 import type { Strings } from './i18n'
@@ -87,6 +89,9 @@ export const idleTimeout = (value: string | undefined): number => {
 export type ServeStep = { text: string; note: string; status: string; isCurrent: boolean; line?: string }
 
 export type ServeAsk = {
+  at?: number
+  dir?: string | null
+  when?: string
   questionId?: string
   delivery?: Delivery
   receipt?: Receipt
@@ -133,6 +138,10 @@ export type ServeAsk = {
 }
 
 export type ServeRow = {
+  at?: number
+  dir?: string | null
+  sessionId?: string
+  stuck?: { reason: string }
   delivery?: Delivery
   receipt?: Receipt
   key: string
@@ -178,9 +187,49 @@ export type ServeRow = {
 // A question marked answered, listed so it can be shown again.
 export type ServeHidden = { key: string; project: string; agent: string; isOwn?: true; task: string; text: string; questionId?: string }
 // key names the line in the action route; canHide is false for a retained source that is only for review.
-export type ServeRetained = { key: string; canHide: boolean; project: string; agent: string; isOwn?: true; task: string; text: string; note: string; context: string; contextLine?: string; when: string; questionId?: string }
+export type ServeRetained = { key: string; canHide: boolean; project: string; agent: string; isOwn?: true; task: string; text: string; note: string; context: string; contextLine?: string; when: string; questionId?: string; at?: number; dir?: string | null }
 
-export type ServeTurn = { key: string; project: string; agent: string; text: string; isQuestion: boolean; info: string }
+export type ServeTurn = { key: string; project: string; agent: string; text: string; isQuestion: boolean; info: string; at?: number }
+
+export type GroupOptions = { now: number; repoOf: RepoOf; versions: { board: string; package: string | null }; unreadable: readonly string[] }
+type ServeDone = { project: string; title: string; line?: string; when: string; questions?: string[]; key?: string; agent?: string; isOwn?: true; dir?: string | null; at?: number }
+type PageRef = { key: string; kind: 'question' | 'stuck' | 'task'; agent: string; project: string; repo: string; at: number; sourceKey?: string }
+type PageBucket = { counts: Bucket['counts']; cards: PageRef[]; open: PageRef[]; stopped: PageRef[]; done: PageRef[]; older: PageRef[] }
+type PageView = {
+  now: number
+  n: number
+  questions: number
+  stuck: number
+  versions: GroupOptions['versions']
+  agents: Array<PageBucket & { agent: string; name: string; icon: string; last: number; isUnreadable: boolean }>
+  needs: { n: number; questions: number; stuck: number; cards: PageRef[]; older: PageRef[] }
+  working: PageRef[]
+  all: PageBucket & { isHidden: boolean }
+  own: PageBucket
+  projects: Array<{ name: string; open: number }>
+}
+
+// Worktree metadata uses the writer's path syntax, even when the reader runs on another OS.
+// The server checks that this repository still exists before using the returned name.
+export const worktreeRepoName = (dir: string, gitFile: string, commonDir: string): string | null => {
+  const git = /^gitdir:\s*(.+?)\s*$/.exec(gitFile.split(/\r?\n/)[0] ?? '')?.[1]
+  const common = commonDir.split(/\r?\n/)[0]?.trim()
+  if (!git || !common) return null
+  const resolvePath = (base: string, path: string): string => {
+    const normalized = path.replace(/\\/g, '/')
+    const absolute = /^(?:[a-z]:\/|\/)/i.test(normalized) ? normalized : `${base.replace(/\\/g, '/')}/${normalized}`
+    const parts: string[] = []
+    for (const part of absolute.split('/')) {
+      if (part === '..') parts.pop()
+      else if (part !== '.' && part !== '') parts.push(part)
+    }
+    return parts.join('/')
+  }
+  const parts = resolvePath(resolvePath(dir, git), common).split('/')
+  parts.pop()
+  const name = parts.pop()
+  return name && !/^[a-z]:$/i.test(name) ? name : null
+}
 
 export type ServeModel = {
   warning?: string
@@ -200,7 +249,10 @@ export type ServeModel = {
   groups: Array<{ project: string; rows: ServeRow[] }>
   turns: ServeTurn[]
   // Finished in the last day, until it goes to the archive.
-  recent: Array<{ project: string; title: string; line?: string; when: string; questions?: string[] }>
+  recent: ServeDone[]
+  finished?: ServeDone[]
+  agents?: Array<{ agent: string; unreadable?: true }>
+  view?: PageView
 }
 
 // `task` and `session` name the Claude Code session to answer in, the way the pane does.
@@ -254,7 +306,7 @@ const retainedOf = (item: WaitingItem): ServeRetained => ({
   ...(item.questionId === undefined ? {} : { questionId: item.questionId }),
 })
 
-export const serveModel = (view: View, pending: readonly PendingTurn[], s: Strings = ZH_TW, sending: ReadonlySet<string> = new Set(), isLan = false, messaging?: Messaging, allowResume = false): ServeModel => {
+export const serveModel = (view: View, pending: readonly PendingTurn[], s: Strings = ZH_TW, sending: ReadonlySet<string> = new Set(), isLan = false, messaging?: Messaging, allowResume = false, group?: GroupOptions): ServeModel => {
   const isSending = (target: AgentTarget | null): boolean => target !== null && sending.has(sendKey(target))
   const onLan = (mode: SendMode): SendMode => (isLan && mode === 'send' ? 'open' : mode)
   const lanInfo = (mode: SendMode, agent: string): string | null => (isLan && mode === 'send' ? s.serveLanSend(agentLabel(agent || 'claude', s)) : null)
@@ -278,6 +330,7 @@ export const serveModel = (view: View, pending: readonly PendingTurn[], s: Strin
       const hint = replyHint(ask, s, !isLan, true)
       const label = ask.step === null ? undefined : clipped(ask.text, LABEL_ROOM)
       asks.push({
+        ...(group === undefined ? {} : { ...(ask.at === undefined ? {} : { at: ask.at }), dir: ask.dir ?? null, when: ask.when }),
         ...(connection === undefined ? {} : { delivery: { id: connection.id, turn: connection.turn, agent: connection.agent } }),
         ...(isLan ? {} : rowReceipt(ask.agent, ask.nativeSession, messaging?.messages ?? [])),
         key: item.key,
@@ -323,6 +376,15 @@ export const serveModel = (view: View, pending: readonly PendingTurn[], s: Strin
       const rows = idleKeys.has(row.key) ? idle : stoppedKeys.has(row.key) ? stopped : (groups.get(row.project) ?? [])
       if (!idleKeys.has(row.key) && !stoppedKeys.has(row.key)) groups.set(row.project, rows)
       rows.push({
+        ...(group === undefined ? {} : {
+          ...(row.at === undefined ? {} : { at: row.at }),
+          dir: row.dir ?? null,
+          ...(row.nativeSession === undefined ? {} : { sessionId: row.nativeSession }),
+          // Run ownership is not reported by the current producer (#399).
+          ...(!idleKeys.has(row.key) && !stoppedKeys.has(row.key) && row.auto !== null && row.auto !== 'ended' && row.steps.some(step => step.status === 'blocked')
+            ? { stuck: { reason: (row.steps.find(step => step.status === 'blocked')?.note || row.steps.find(step => step.status === 'blocked')?.text || '').replace(/\s+/g, ' ').trim().slice(0, 80) } }
+            : {}),
+        }),
         ...(connection === undefined ? {} : { delivery: { id: connection.id, turn: connection.turn, agent: connection.agent } }),
         ...(isLan ? {} : rowReceipt(row.agent, row.nativeSession, messaging?.messages ?? [])),
         key: item.key,
@@ -364,6 +426,7 @@ export const serveModel = (view: View, pending: readonly PendingTurn[], s: Strin
     }
     const { turn } = item
     turns.push({
+      ...(group === undefined ? {} : { at: turn.at }),
       key: item.key,
       project: turn.project,
       agent: turn.agent,
@@ -374,7 +437,7 @@ export const serveModel = (view: View, pending: readonly PendingTurn[], s: Strin
     })
   }
 
-  return {
+  const model: ServeModel = {
     counts: { ...view.overview, waiting: view.overview.waiting + remainingInbox(view, pending).filter(turn => turn.isQuestion).length },
     warning: view.warning,
     ...(view.details === undefined ? {} : { details: view.details }),
@@ -392,6 +455,46 @@ export const serveModel = (view: View, pending: readonly PendingTurn[], s: Strin
     turns,
     recent: view.recent.map(item => ({ project: item.project, title: item.title, ...lined(item.title), when: item.when, questions: item.questions?.map(question => [question.text, question.note].filter(Boolean).join(' — ')) })),
   }
+  if (group === undefined) return model
+  const extra = (item: WaitingItem): ServeRetained => ({ ...retainedOf(item), ...(item.at === undefined ? {} : { at: item.at }), dir: item.dir ?? null })
+  model.reminder = (view.reminder ?? []).map(extra)
+  model.older = (view.older ?? []).map(extra)
+  model.finished = (view.finished ?? []).map(item => ({ ...item, key: `row:${item.key}`, questions: item.questions?.map(question => [question.text, question.note].filter(Boolean).join(' — ')) }))
+  model.recent = view.recent.map((item, index) => {
+    const finished = model.finished?.find(one => one.key === `row:${item.key}`)
+    return { ...model.recent[index]!, key: `row:${item.key}`, ...(finished === undefined ? {} : { agent: finished.agent, ...(finished.isOwn ? { isOwn: true as const } : {}), dir: finished.dir, at: finished.at }) }
+  })
+  model.agents = [...new Set(group.unreadable)].map(agent => ({ agent, unreadable: true }))
+  const grouped = groupBoard(model, group.now, group.repoOf, s)
+  const ref = (one: Card | GroupedTask | GroupedQuestion): PageRef => ({
+    key: one.key,
+    kind: 'type' in one ? one.type : 'stage' in one ? 'question' : 'task',
+    agent: one.agent,
+    project: one.project,
+    repo: one.repo,
+    at: one.at,
+    ...('shelf' in one && one.source.key !== one.key ? { sourceKey: one.source.key } : {}),
+  })
+  const bucket = (one: Bucket): PageBucket => ({ counts: one.counts, cards: one.cards.map(ref), open: one.open.map(ref), stopped: one.stopped.map(ref), done: one.done.map(ref), older: one.older.map(ref) })
+  model.view = {
+    now: group.now,
+    n: grouped.needs.n,
+    questions: grouped.needs.questions,
+    stuck: grouped.needs.stuck,
+    versions: group.versions,
+    agents: grouped.agents.map(one => ({ ...bucket(one), agent: one.agent, name: one.name, icon: one.icon, last: one.last, isUnreadable: one.isUnreadable })),
+    needs: { ...grouped.needs, cards: grouped.needs.cards.map(ref), older: grouped.needs.older.map(ref) },
+    working: grouped.working.map(ref),
+    all: { ...bucket(grouped.all), isHidden: grouped.all.isHidden },
+    own: bucket(grouped.own),
+    projects: grouped.projects,
+  }
+  // Repository names are computed locally before folder paths are removed for a phone.
+  if (isLan) {
+    for (const item of [...model.asks, ...model.reminder, ...model.older, ...model.idle, ...model.stopped, ...model.groups.flatMap(one => one.rows), ...model.finished, ...model.recent]) delete item.dir
+    for (const row of [...model.idle, ...model.stopped, ...model.groups.flatMap(one => one.rows)]) delete row.sessionId
+  }
+  return model
 }
 
 // `asked`: with a reply, the question the page showed it under ('' for none). `fp`: the line's
@@ -595,18 +698,28 @@ const PAGE_WORDS = [
   'pressEmpty',
   'pressPending',
   'boardCopyFailedBelow',
+  'pgNeeds', 'pgAll', 'pgAgents', 'pgOwn', 'pgOpen', 'pgStopped', 'pgDone', 'pgSearch',
+  'pgProjects', 'pgTasks', 'pgNoMatches', 'pgRefine', 'pgTabTitle', 'pgQuestions', 'pgQuestionsOne',
+  'pgStuckCount', 'pgStuckCountOne', 'pgCopyHint', 'pgWorking', 'pgWorkingCount', 'pgWorkingLink',
+  'pgNoWorking', 'pgAllTasks', 'pgNothing', 'pgNothingHint', 'pgOlder', 'pgOlderOne', 'pgSeeAll', 'pgMore',
+  'pgAsks', 'pgIsStuck', 'pgOwnTodo', 'pgWriteOwn', 'pgCopyAnswer', 'pgCopyOnlyHint',
+  'pgAllAgents', 'pgAgentCounts', 'pgAllCounts', 'pgNeedLink', 'pgNeedLinkOne', 'pgAsking', 'pgStuck', 'pgQuiet', 'pgTodo',
+  'pgLast', 'pgStoppedAt', 'pgSteps', 'pgDoneSteps', 'pgDoneStepsOne', 'pgMoreSteps', 'pgMoreStepsOne',
+  'pgOnly', 'pgProject', 'pgOpenCount', 'pgVersion', 'pgVersions', 'pgPrivacy', 'pgUnreadable',
+  'pgHowFix', 'pgFixAdvice', 'pgReady', 'pgReadyHint', 'pgInClaude', 'pgInCodex', 'pgUnreadableReply', 'pgUnknownAge',
 ] as const satisfies ReadonlyArray<keyof Strings>
 
 // The chat prompt goes as it is in every language: the chat reads it, not the person.
-export const pageWords = (s: Strings): Record<string, string> => ({
+export const pageWords = (s: Strings, isGrouped = false): Record<string, string> => ({
   ...Object.fromEntries(Object.entries(s.agentNames).map(([agent, name]) => [`agent:${agent}`, name])),
   ...Object.fromEntries(
-    PAGE_WORDS.map(key => {
+    PAGE_WORDS.filter(key => isGrouped || !key.startsWith('pg')).map(key => {
       const value = s[key] as unknown
       return [key, typeof value === 'function' ? String((value as (...blanks: string[]) => unknown)('\u0001', '\u0002')) : String(value)]
     }),
   ),
   relayPrompt: RELAY,
+  ...(isGrouped ? { group: 'agent' } : {}),
 })
 
 const esc = (text: string): string => text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;')
@@ -618,7 +731,7 @@ export const pagePolicy = (nonce: string): string =>
   `default-src 'none'; script-src 'nonce-${nonce}'; style-src 'nonce-${nonce}'; connect-src 'self'; img-src data:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'`
 
 // `isLan`: the page a phone opens on the local network, which closes sooner.
-export const servePage = (s: Strings, nonce: string, isLan = false, idleMs = 0): string => `<!doctype html>
+export const servePage = (s: Strings, nonce: string, isLan = false, idleMs = 0, isGrouped = false): string => isGrouped ? groupedPage(s, nonce, isLan) : `<!doctype html>
 <html lang="${htmlLang(s)}">
 <head>
 <meta charset="utf-8">
@@ -709,7 +822,7 @@ button.fchip{min-height:28px;padding:0 10px;border-radius:999px;background:var(-
 .composer textarea{display:block;border:0;background:transparent;min-height:52px;padding:10px 12px 2px;outline:none}.composer .cf{display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:6px}.composer .where{flex:1;padding-left:6px;color:var(--muted);font-size:12.5px}.composer button{margin-left:auto;min-height:32px;font-size:13px}
 .ask .where,.turn .where{display:flex;align-items:flex-start;gap:7px}.ask .where>span:last-child,.turn .where>span:last-child{min-width:0}.where .ag{margin-top:1px}.q{display:flex;align-items:baseline;flex-wrap:wrap;gap:8px}.q b{font-size:1.08rem;font-weight:600}.chip{font-size:12px;border:1px solid currentColor;padding:3px 8px;border-radius:999px}
 .meta .ag{width:22px;height:22px;margin-right:6px;vertical-align:middle}.archive-note{font-size:12px}
-.clip{flex:1 1 0;min-width:0}.clip>summary,.clip[open]>summary{display:block;cursor:pointer}.clip>summary::before,.clip[open]>summary::before{content:none}.clip .short{display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.clip .whole{display:none;white-space:pre-wrap;overflow-wrap:anywhere}.clip[open] .short{display:none}.clip[open] .whole{display:block}
+${CLIP_CSS}
 .steps li{grid-template-columns:22px minmax(0,1fr);gap:5px 10px;padding:5px 8px;border-radius:8px}.steps li.now{background:var(--inset)}.steps .mk{width:22px;height:22px;display:grid;place-items:center;font-size:14px;cursor:default;user-select:none}
 .history>div{padding:10px 0;border-bottom:1px solid var(--line);display:flex;align-items:center;gap:10px;flex-wrap:wrap}
 .pfoot{display:flex;align-items:center;gap:10px 16px;flex-wrap:wrap;border-top:1px solid var(--line);padding-top:14px;font-size:12.5px;color:var(--muted)}.pfoot p{margin:0;flex:1 1 22em}.pfoot button{font-size:13px;min-height:32px}.pfoot .press-result{flex-basis:100%}
@@ -739,6 +852,55 @@ button.fchip{min-height:28px;padding:0 10px;border-radius:999px;background:var(-
 <script nonce="${nonce}">${PAGE_SCRIPT}</script>
 </body>
 </html>
+`
+
+const CLIP_CSS = `.clip{flex:1 1 0;min-width:0}.clip>summary,.clip[open]>summary{display:block;cursor:pointer}.clip>summary::before,.clip[open]>summary::before{content:none}.clip .short{display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.clip .whole{display:none;white-space:pre-wrap;overflow-wrap:anywhere}.clip[open] .short{display:none}.clip[open] .whole{display:block}`
+
+const GROUP_CSS = `
+.grouped{overflow-wrap:anywhere}
+.grouped .topbar{min-height:56px;flex-wrap:nowrap}.grouped .brand{flex:1;min-width:0}.grouped .brand h1{white-space:nowrap}
+.grouped .live{display:inline-flex;gap:6px;align-items:center;color:var(--muted);font-size:12px}.grouped .live i{width:7px;height:7px;border-radius:50%;background:var(--done)}
+.grouped button,.grouped .btn{font:inherit;min-height:40px;max-width:100%;padding:6px 12px;border:1px solid var(--line);border-radius:6px;background:transparent;color:var(--ink);cursor:pointer;text-align:left;overflow-wrap:anywhere}
+.grouped button:hover,.grouped .btn:hover{background:var(--inset)}.grouped button.primary{background:var(--accent);color:var(--on-accent);border-color:var(--accent)}
+.grouped .shell{display:grid;grid-template-columns:248px minmax(0,1fr);gap:32px;align-items:start}
+.grouped main{min-width:0;padding:20px 0 40px;display:grid;gap:24px}.grouped #board{min-width:0;display:grid;gap:24px}
+.grouped #picker{position:sticky;top:var(--head-h,56px);max-height:calc(100dvh - var(--head-h,56px));overflow-y:auto;padding:20px 0;align-self:start;min-width:0;z-index:5;background:var(--ground)}
+.grouped #picks{display:grid;gap:4px}.grouped #picks>button{display:flex;align-items:center;gap:8px;width:100%;border-color:transparent}.grouped #picks .pg-name{flex:1;min-width:0}
+.grouped #picks>button[aria-current="true"]{background:var(--ink);color:var(--ground)}.grouped .pg-count{font-variant-numeric:tabular-nums}.grouped .pg-flag{color:var(--waiting);font-weight:600;white-space:nowrap}
+.grouped .pg-picker-head{display:flex;justify-content:space-between;gap:12px;color:var(--muted);font-size:12px;margin:18px 12px 4px}
+.grouped #searchbar{position:relative;margin-bottom:12px}.grouped #search{width:100%;min-width:0;font:inherit;padding:10px;border:1px solid var(--line);border-radius:6px;background:var(--surface);color:var(--ink)}
+.grouped #search-results{position:absolute;top:100%;left:0;width:min(540px,calc(100vw - 32px));max-height:65dvh;overflow:auto;z-index:10;background:var(--surface);border:1px solid var(--line);padding:12px}
+.grouped #search-results button{display:block;width:100%;margin:4px 0}.grouped #search-results h3{font-size:14px;margin:10px 0 4px}.grouped #search-open{display:none}
+.grouped h2,.grouped h3,.grouped p{margin:0}.grouped h2{font-size:24px}.grouped h3{font-size:19px}.grouped .pg-muted,.grouped .quiet{color:var(--muted)}.grouped .small{font-size:12px}
+.grouped .pg-sheet{background:var(--surface);border:1px solid var(--line);padding:16px;min-width:0}.grouped .pg-sheet-head{display:flex;align-items:center;flex-wrap:wrap;gap:8px 16px}.grouped .pg-sheet>p{margin:8px 0 0}
+.grouped .pg-card{padding:16px 0;border-top:1px solid var(--line);min-width:0;display:grid;gap:8px}.grouped .pg-card:first-of-type{margin-top:12px}.grouped .pg-card-meta{display:flex;align-items:center;gap:8px;color:var(--muted);font-size:12px}.grouped .pg-card-meta>span:last-child{flex:1}
+.grouped .pg-question{font-size:19px;font-weight:600;line-height:1.4;display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden;overflow-wrap:anywhere}.grouped .pg-note{color:var(--muted)}
+.grouped .actions{display:flex;gap:8px;flex-wrap:wrap;align-items:center}.grouped .pg-answer{border-color:var(--line-strong);font-weight:600}.grouped .pg-write{border-color:transparent;color:var(--muted)}
+.grouped .pg-more{margin-left:auto}.grouped .pg-more-panel{padding:8px 0}.grouped .composer{padding:8px;border:1px solid var(--line);background:var(--inset)}.grouped textarea{width:100%;min-width:0;min-height:64px;font:inherit;resize:vertical;border:1px solid var(--line);padding:8px;background:var(--ground);color:var(--ink)}.grouped .cf{display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap}
+.grouped .pg-list{display:grid;gap:0;min-width:0}.grouped .pg-row{border-bottom:1px solid var(--line);min-width:0}.grouped .pg-row>summary{list-style:none;cursor:pointer;display:grid;grid-template-columns:24px minmax(0,1fr) auto;gap:4px 12px;padding:12px 0;align-items:center;min-width:0}.grouped .pg-row>summary::-webkit-details-marker{display:none}
+.grouped .pg-title{font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0}.grouped .pg-age{font-size:12px;color:var(--muted);white-space:nowrap}.grouped .pg-meta{grid-column:2;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:var(--muted);font-size:12px;min-width:0}.grouped .pg-step-count{grid-column:3;font-size:12px;color:var(--muted)}
+.grouped .pg-row[open]{background:var(--inset)}.grouped .pg-row-body{padding:0 12px 16px 36px;display:grid;gap:10px}.grouped .pg-steps{display:grid;gap:6px;padding:0;list-style:none;margin:0}.grouped .pg-steps .now{font-weight:700}.grouped .pg-steps li{display:flex;align-items:baseline;gap:8px;min-width:0}.grouped .pg-steps li>button{flex:none}
+.grouped .pg-tabs{display:flex;gap:16px;border-bottom:1px solid var(--line);margin:16px 0 4px}.grouped .pg-tabs>button{border:0;border-radius:0;border-bottom:2px solid transparent}.grouped .pg-tabs>[aria-selected="true"]{border-bottom-color:var(--ink);font-weight:600}
+.grouped .pg-view-head{display:flex;align-items:center;flex-wrap:wrap;gap:8px 12px}.grouped .pg-view-head>p{flex-basis:100%}.grouped .pg-working{display:grid;gap:12px}.grouped .pg-older{margin-top:12px;display:grid;gap:8px}
+.grouped .pg-notice{color:var(--alert);display:grid;gap:8px}.grouped .pg-notice summary{cursor:pointer}.grouped .pg-fresh{display:grid;justify-items:start;gap:16px;padding:24px 0}.grouped .pg-fresh .mark{width:44px;height:44px}.grouped code{font-family:ui-monospace,Consolas,monospace;overflow-wrap:anywhere}
+.grouped .paste{border-top:1px solid var(--line);padding-top:16px}.grouped .paste>summary{cursor:pointer}.grouped .paste>p,.grouped .paste>.actions,.grouped .paste>textarea{margin-top:10px}
+.grouped .pfoot{display:flex;flex-wrap:wrap;gap:12px 20px;align-items:center;border-top:1px solid var(--line);padding-top:16px;color:var(--muted);font-size:12px}.grouped #versions,.grouped #unreadable-notices{flex-basis:100%}.grouped #footer-theme{display:none}
+.grouped #offline:empty,.grouped #note:empty,.grouped .press-result:empty{display:none}.grouped #offline,.grouped #note{color:var(--alert)}.grouped .press-result{font-size:12px}.grouped .press-result.done{color:var(--done)}.grouped .press-result.alert{color:var(--alert)}
+@media(max-width:760px){.grouped .wide{padding-inline:12px}.grouped .shell{display:block}.grouped .brand{gap:8px}.grouped .brand h1{font-size:18px}.grouped .topbar{gap:8px}.grouped #header-theme{display:none}.grouped #footer-theme{display:block}.grouped #search-open{display:inline-flex;align-items:center;justify-content:center;flex:none;padding:8px;min-width:44px}.grouped .live{font-size:11px}
+.grouped #picker{position:sticky;top:var(--head-h,56px);display:flex;gap:6px;max-height:none;overflow-x:auto;overflow-y:hidden;padding:8px 0;white-space:nowrap;border-bottom:1px solid var(--line);width:100%;max-width:100%;scrollbar-width:thin}.grouped #picks{display:contents}.grouped #picks>button{flex:0 0 auto;width:auto;min-height:44px;white-space:nowrap}.grouped .pg-picker-head{display:none}.grouped #searchbar{display:none;position:fixed;top:calc(var(--head-h,56px) + 60px);left:12px;right:12px;white-space:normal;z-index:10;margin:0}.grouped #picker.pg-searching #searchbar{display:block}.grouped #search-results{width:100%}
+.grouped button,.grouped .btn,.grouped summary,.grouped .seg button{min-height:44px}.grouped .seg button{min-width:44px}.grouped .pg-tabs{gap:4px}.grouped .pg-step-count{display:none}.grouped .pg-row>summary{grid-template-columns:24px minmax(0,1fr) auto;gap:4px 8px}.grouped .pg-meta{grid-column:2 / 4}.grouped .pg-sheet{padding:12px}.grouped .pg-row-body{padding-left:12px}.grouped .pg-age{max-width:6em;white-space:normal;text-align:right}.grouped .actions>button{min-width:44px}.grouped .pg-question{font-size:19px}.grouped .pg-fresh{padding-top:12px}}
+`
+
+const groupedPage = (s: Strings, nonce: string, isLan: boolean): string => `<!doctype html>
+<html lang="${htmlLang(s)}">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="referrer" content="no-referrer"><title>Agent Board</title><link rel="icon" href="data:,"><script nonce="${nonce}">${themeHead}</script><style nonce="${nonce}">${pageTokens()}${pageBaseCss}${agentMarkCss()}${CLIP_CSS}${GROUP_CSS}</style></head>
+<body class="grouped">
+<header class="head" id="head"><div class="wide topbar"><div class="brand">${boardMark}<h1>Agent Board</h1><span class="live" title="${esc(s.serveLiveHint)}"><i></i>${esc(s.serveLive)}</span></div><button id="search-open" type="button" data-local aria-label="${esc(s.pgSearch)}" aria-controls="searchbar" aria-expanded="false">⌕</button><div id="header-theme">${themeSwitch(s)}</div></div></header>
+<div id="offline" role="status" aria-live="polite"></div>
+<div class="wide shell"><aside id="picker" aria-label="${esc(s.pgAgents)}"><div id="searchbar"><input id="search" type="search" placeholder="${esc(s.pgSearch)}" aria-label="${esc(s.pgSearch)}" aria-controls="search-results" autocomplete="off"><div id="search-results" hidden></div></div><div id="picks"></div></aside>
+<main><div id="fresh-mark" hidden>${boardMark}</div><div id="board"></div><details class="paste"><summary>${esc(s.servePasteTitle)}</summary><p class="quiet small">${esc(s.servePasteHint)}</p><textarea id="paste" spellcheck="false"></textarea><div class="actions"><button type="button" class="primary" id="paste-go" data-static>${esc(s.servePaste)}</button><button type="button" id="relay" data-local>${esc(s.serveRelay)}</button></div><p class="quiet small">${esc(s.serveRelayHint)}</p></details>
+<footer class="pfoot"><p id="versions"></p><p>${esc(s.pgPrivacy)}</p><div id="unreadable-notices"></div><button type="button" id="close" data-static>${esc(s.serveClose)}</button><div id="footer-theme">${themeSwitch(s)}</div></footer><div id="note" role="status" aria-live="polite"></div></main></div>
+<script type="application/json" id="words">${JSON.stringify(pageWords(isLan ? { ...s, serveOffline: s.serveOfflineLan } : s, true)).replace(/</g, '\\u003c')}</script><script nonce="${nonce}">${PAGE_SCRIPT}</script></body></html>
 `
 
 // The page's own script: it reads the board from its server every 3 seconds and redraws when
@@ -956,7 +1118,7 @@ const PAGE_SCRIPT = String.raw`
         }
         act(key, 'send', text, w('serveSending', agentName(agent)), session, asked, fp).then(function (ok) { if (ok) input.value = ''; });
       }, 'primary')
-      : button(w('serveCopy'), function () {
+      : button(w(W.group === 'agent' ? 'pgCopyAnswer' : 'serveCopy'), function () {
         var text = input.value.trim();
         if (text) copy(text, key);
         else say(w('pressEmpty'), 'alert', key);
@@ -966,6 +1128,7 @@ const PAGE_SCRIPT = String.raw`
       if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); go.click(); }
     });
     var footer = el('div', 'cf');
+    if (W.group === 'agent') add(footer, el('span', 'quiet small', w('pgCopyOnlyHint')));
     if (where) add(footer, el('div', 'where', where));
     add(box, input, add(footer, go));
     return box;
@@ -1140,18 +1303,21 @@ const PAGE_SCRIPT = String.raw`
     filterGroups.push({ node: node, entries: filterNodes.slice(from) });
   }
   function drawer(isOpen) {
+    if (W.group === 'agent') return;
     var isExpanded = document.getElementById('side-open').getAttribute('aria-expanded') === 'true';
     if (document.body) document.body.className = isOpen ? 'drawer-open' : '';
     document.getElementById('side-open').setAttribute('aria-expanded', String(isOpen));
     var target = document.getElementById(isOpen ? 'side-close' : 'side-open');
     if ((isOpen || isExpanded) && target && typeof target.focus === 'function') target.focus();
   }
-  document.getElementById('side-open').addEventListener('click', function () { drawer(document.getElementById('side-open').getAttribute('aria-expanded') !== 'true'); });
-  document.getElementById('side-close').addEventListener('click', function () { drawer(false); });
-  document.getElementById('side-scrim').addEventListener('click', function () { drawer(false); });
+  if (W.group !== 'agent') {
+    document.getElementById('side-open').addEventListener('click', function () { drawer(document.getElementById('side-open').getAttribute('aria-expanded') !== 'true'); });
+    document.getElementById('side-close').addEventListener('click', function () { drawer(false); });
+    document.getElementById('side-scrim').addEventListener('click', function () { drawer(false); });
+  }
   if (typeof document.addEventListener === 'function') document.addEventListener('keydown', function (event) {
     if (event.key !== 'Escape') return;
-    if (document.getElementById('side-open').getAttribute('aria-expanded') === 'true') { drawer(false); return; }
+    if (W.group !== 'agent' && document.getElementById('side-open').getAttribute('aria-expanded') === 'true') { drawer(false); return; }
     // Only the panel the focus is in (or its More button) closes; with no focus anywhere, every open one does.
     // A reply being typed elsewhere is left alone.
     var active = document.activeElement;
@@ -1257,6 +1423,440 @@ const PAGE_SCRIPT = String.raw`
   function render(model) {
     keepCopyFocus(function () { renderBoard(model); });
   }
+  const pg = { pick: 'needs', tab: 'open', repo: '', shown: {}, older: {}, order: [], model: null, sources: {}, targets: {}, drafts: {}, hits: [], mark: W.group === 'agent' ? document.getElementById('fresh-mark') : null }
+  const pgPlural = (key, n) => { const word = n === 1 ? key + 'One' : key; return w(word, n) }
+  // The first screen describes work, so diagnostic identifiers and logs stay out of its labels.
+  const pgText = value => {
+    let text = String(value || '').trim()
+    if (/^[{[]/.test(text)) {
+      try {
+        const data = JSON.parse(text)
+        text = typeof data === 'string' ? data : ['text', 'message', 'summary', 'content', 'reply'].map(key => data && data[key]).find(one => typeof one === 'string') || w('pgUnreadableReply')
+      } catch {}
+    }
+    return Array.from(text.replace(/\{\s*"[^"\n]*"\s*:[\s\S]*/g, '…')
+      .replace(/\b[\da-f]{8}-(?:[\da-f]{4}-){3}[\da-f]{0,12}/gi, '…')
+      .replace(/\bsession\s*[=:]\s*[\da-f]{8,}/gi, '…')
+      .replace(/\b[\da-f]{7,}\b/gi, one => one.length === 40 || /\d/.test(one) && /[a-f]/i.test(one) ? '…' : one)
+      .replace(/(?:[A-Z]:[\\/]|\/(?:Users|home)\/)[^\s<>"'\x60|]*/gi, '…')
+      .replace(/#\d+\b/g, '').replace(/\s+/g, ' ').trim()).slice(0, 220).join('')
+  }
+  const pgSource = ref => pg.sources[ref.sourceKey || ref.key] || pg.sources[ref.key.replace(/^stuck:/, '')] || {}
+  const pgFullTitle = ref => String(pgSource(ref).title || pgSource(ref).task || pgSource(ref).text || '')
+  const pgTitle = ref => pgText(pgFullTitle(ref))
+  const pgAge = ref => pgText(pgSource(ref).when || w('pgUnknownAge'))
+  const pgFiltered = refs => refs.filter(ref => !pg.repo || ref.repo === pg.repo)
+  const pgOpenCount = bucket => {
+    const tasks = new Set()
+    const stopped = new Set(pgFiltered(bucket.stopped).map(ref => {
+      const source = pgSource(ref)
+      return JSON.stringify([ref.agent, source.project, source.title])
+    }))
+    pgFiltered(bucket.cards).forEach(ref => {
+      const source = pgSource(ref)
+      const title = ref.kind === 'question' ? source.task : source.title
+      const task = JSON.stringify([ref.agent, source.project, title])
+      if (title && !stopped.has(task)) tasks.add(task)
+    })
+    return pgFiltered(bucket.open).length + tasks.size
+  }
+  const pgShownKey = () => [pg.pick, pg.tab, pg.repo].join('\u0001')
+  const pgStatus = (ref, tab) => {
+    const row = pgSource(ref)
+    if (ref.kind === 'stuck' || row.stuck) return 'pgStuck'
+    if (ref.kind === 'question' || row.isAsking) return 'pgAsking'
+    if (tab === 'done') return 'pgDone'
+    if (tab === 'stopped') return 'pgStopped'
+    if (row.isOwn || ref.agent === '') return 'pgTodo'
+    return ref.at > 0 && pg.model.view.now - ref.at <= 30 * 60 * 1000 ? 'pgWorking' : 'pgQuiet'
+  }
+  const pgScroll = node => { if (node && node.scrollIntoView) node.scrollIntoView({ block: 'start' }) }
+  const pgSelect = (value, repo) => {
+    pg.pick = value
+    pg.repo = repo || ''
+    pg.tab = 'open'
+    renderGrouped(pg.model)
+    pgScroll(board)
+  }
+  const pgHolds = (bucket, repo) => !!bucket && ['cards', 'open', 'stopped', 'done', 'older'].some(shelf => bucket[shelf].some(ref => ref.repo === repo))
+  const pgAll = repo => {
+    const view = pg.model.view
+    if (repo) {
+      if (!view.all.isHidden && pgHolds(view.all, repo)) return pgSelect('all', repo)
+      const agent = pg.order.find(id => pgHolds(view.agents.find(one => one.agent === id), repo))
+      if (agent) return pgSelect(agent, repo)
+      if (pgHolds(view.own, repo)) return pgSelect('own', repo)
+    }
+    pgSelect(view.all.isHidden ? view.agents[0]?.agent || 'own' : 'all', repo)
+  }
+  const pgPanel = (card, meta, key, actions) => {
+    if (!actions.length) return
+    const panel = add.apply(null, [el('div', 'actions pg-more-panel')].concat(actions))
+    panel.id = 'more-actions-' + (++moreCount)
+    const more = navButton(w('serveMore'), () => setMore(one, panel.hidden))
+    more.className = 'pg-more'
+    more.setAttribute('aria-controls', panel.id)
+    const one = { key: key, button: more, panel: panel }
+    setMore(one, opened['more:' + key] === true)
+    morePanels.push(one)
+    add(meta, more)
+    add(card, panel)
+  }
+  const pgCard = ref => {
+    const ask = pgSource(ref)
+    const isStuck = ref.kind === 'stuck'
+    const key = ask.key || ref.key
+    const card = el('article', 'pg-card')
+    card.setAttribute('data-ref-key', ref.key)
+    const owner = ask.isOwn || ref.agent === '' ? w('pgOwnTodo') : w(isStuck ? 'pgIsStuck' : 'pgAsks', agentName(ref.agent))
+    const meta = add(el('div', 'pg-card-meta'), agentMark(ref.agent), el('span', '', [owner, pgText(ref.repo), pgAge(ref)].filter(Boolean).join(' · ')))
+    const question = el('div', 'pg-question', pgText(isStuck ? ask.title : ask.text))
+    question.setAttribute('title', pgText(isStuck ? ask.title : ask.text))
+    add(card, meta, question)
+    if (isStuck) add(card, el('p', 'pg-note', pgText(ask.stuck && ask.stuck.reason)))
+    else if (ask.note) add(card, clipped(pgText(ask.noteLine || ask.note), ask.note, 'pg-note', 'note:' + key))
+    else if (ask.context) add(card, clipped(pgText(ask.contextLine || ask.context), ask.context, 'quiet context', 'context:' + key))
+    const answers = []
+    const others = []
+    if (isStuck) {
+      if (ask.resume) answers.push(button(w('serveCopyResume'), () => copy(ask.resume, key), '', true))
+    } else if (ask.isOwn) {
+      if (ask.canTick) answers.push(button(w('pgDone'), () => act(key, 'tick', '', '', '', '', ask.fp), 'primary'))
+    } else {
+      const options = ask.answers || []
+      options.slice(0, 2).forEach(answer => answers.push(button(pgText(answer), () => copy(answer, key), 'pg-answer', true)))
+      answers.push(button(w('pgWriteOwn'), () => {
+        opened['reply:' + key] = !opened['reply:' + key]
+        renderGrouped(pg.model)
+        if (opened['reply:' + key]) {
+          const box = Array.from(board.querySelectorAll('textarea[data-key]')).find(one => one.getAttribute('data-key').split('\u0001')[0] === key)
+          if (box) box.focus({ preventScroll: true })
+        }
+      }, 'pg-write', true, true))
+      options.slice(2).forEach(answer => others.push(button(pgText(answer), () => copy(answer, key), 'pg-answer', true)))
+      if (ask.command) others.push(button(w('serveCopyCommand'), () => copy(ask.command, key), '', true))
+      if (ask.link && /^https:\/\//i.test(ask.link)) {
+        const link = el('a', 'btn', w('serveOpenLink'))
+        link.href = ask.link
+        link.target = '_blank'
+        link.rel = 'noreferrer noopener'
+        others.push(link)
+      }
+      if (ask.reopen) others.push(button(w('serveCopyResume'), () => copy(ask.reopen, key), '', true))
+      if (ask.canHide) others.push(button(w('answeredHide'), () => act(key, 'hide')))
+    }
+    if (answers.length) add(card, add.apply(null, [el('div', 'actions')].concat(answers)))
+    if (!isStuck && !ask.isOwn && opened['reply:' + key]) add(card, replyBox(key, w('serveReplyPlaceholder'), 'copy', ref.agent, '', false, ask.session, ask.text, ask.fp))
+    pgPanel(card, meta, key, others)
+    resultSlot(card, key, ask.fp || ask.text, ask.task || ask.title || ref.repo)
+    pg.targets[ref.key] = card
+    return card
+  }
+  const pgRows = (parent, refs, tab, isMixed, cap, slot) => {
+    const list = el('div', 'pg-list')
+    const key = slot || pgShownKey()
+    const shown = pg.shown[key] || cap
+    refs.slice(0, shown).forEach(ref => add(list, pgRow(ref, tab, isMixed)))
+    add(parent, list)
+    if (shown < refs.length) add(parent, navButton(w('pgMore', refs.length - shown), () => {
+      pg.shown[key] = shown + 20
+      renderGrouped(pg.model)
+    }))
+  }
+  const pgRow = (ref, tab, isMixed) => {
+    const row = pgSource(ref)
+    const key = row.key || ref.key
+    const card = el('details', 'pg-row')
+    card.setAttribute('data-row-key', ref.key)
+    card.open = opened[ref.key] === true
+    card.setAttribute('aria-expanded', String(card.open))
+    const summary = el('summary')
+    summary.setAttribute('aria-expanded', String(card.open))
+    const status = pgStatus(ref, tab)
+    const marks = { pgAsking: '⚑', pgStuck: '×', pgWorking: '▸', pgQuiet: '◌', pgTodo: '○', pgStopped: '▪', pgDone: '✓' }
+    const steps = row.steps || []
+    const step = steps.find(one => one.isCurrent) || steps.find(one => one.status !== 'done' && one.status !== 'cancelled')
+    const current = step ? pgText(step.text) : ''
+    const detail = current ? status === 'pgQuiet' ? w('pgLast', current) : tab === 'stopped' ? w('pgStoppedAt', current) : current : ''
+    const meta = [w(status), isMixed && (ref.agent === '' ? w('pgOwn') : agentName(ref.agent)), pgText(ref.repo), detail].filter(Boolean).join(' · ')
+    add(summary, isMixed ? agentMark(ref.agent) : el('span', 'pg-status', marks[status]), el('span', 'pg-title', pgTitle(ref)), el('span', 'pg-age', pgAge(ref)), el('span', 'pg-meta', meta), el('span', 'pg-step-count', row.total ? w('pgSteps', row.done, row.total) : ''))
+    add(card, summary)
+    const body = el('div', 'pg-row-body')
+    if (row.context) add(body, clipped(pgText(row.contextLine || row.context), row.context, 'quiet context', 'context:' + key))
+    const completed = steps.filter(one => one.status === 'done' || one.status === 'cancelled')
+    if (completed.length) {
+      const folded = el('details')
+      add(folded, el('summary', 'pg-muted', pgPlural('pgDoneSteps', completed.length)), pgStepList(completed, row))
+      add(body, folded)
+    }
+    const left = steps.filter(one => one.status !== 'done' && one.status !== 'cancelled' && one.status !== 'waiting')
+    const primary = left.find(one => one.isCurrent) || left[0]
+    if (primary) add(body, pgStepList([primary], row))
+    const rest = left.filter(one => one !== primary)
+    if (rest.length) {
+      const folded = el('details')
+      add(folded, el('summary', 'pg-muted', pgPlural('pgMoreSteps', rest.length)), pgStepList(rest, row))
+      add(body, folded)
+    }
+    const actions = el('div', 'actions')
+    if (row.isOwn && tab !== 'done') {
+      if (row.next) add(actions, button(w('pgDone'), () => act(key, 'tick', row.next, '', '', '', row.fp), 'primary'))
+    } else if (row.resume) add(actions, button(w('serveCopyResume'), () => copy(row.resume, key), 'primary', true))
+    add(actions, navButton(w('pgOnly', pgText(ref.repo)), () => pgAll(ref.repo)))
+    const others = []
+    if (row.canArchive) others.push(button(w('serveArchive'), () => act(key, 'archive', '', '', '', '', row.fp)))
+    if (row.canConfirm && tab !== 'done') others.push(button(w('confirmDone'), () => act(key, 'done', '', '', '', '', row.fp)))
+    pgPanel(body, actions, key, others)
+    add(body, actions)
+    resultSlot(body, key, row.fp, row.title || row.task)
+    body.hidden = !card.open
+    add(card, body)
+    card.addEventListener('toggle', () => {
+      opened[ref.key] = card.open
+      body.hidden = !card.open
+      card.setAttribute('aria-expanded', String(card.open))
+      summary.setAttribute('aria-expanded', String(card.open))
+    })
+    pg.targets[ref.key] = card
+    return card
+  }
+  const pgStepList = (steps, row) => {
+    const list = el('ol', 'pg-steps')
+    steps.forEach(step => {
+      const line = el('li', step.isCurrent ? 'now' : '')
+      const whole = step.note ? step.text + ' — ' + step.note : step.text
+      const cls = 't' + (step.status === 'done' || step.status === 'cancelled' ? ' t-quiet' : '')
+      add(line, el('span', 'mk s-' + step.status, GLYPH[step.status] || '○'), clipped(pgText(step.line || whole), whole, cls, 'step:' + row.key + ':' + row.steps.indexOf(step)))
+      if (row.isOwn && step.status !== 'done' && step.status !== 'cancelled') add(line, button(w('serveTickNext', pgText(step.text)), () => act(row.key, 'tick', step.text, '', '', '', row.fp)))
+      add(list, line)
+    })
+    return list
+  }
+  const pgOlder = (parent, refs, key) => {
+    if (!refs.length) return
+    const box = el('div', 'pg-older')
+    const shown = pg.older[key] || 0
+    add(box, el('p', 'pg-muted', pgPlural('pgOlder', refs.length)))
+    refs.slice(0, shown).forEach(ref => add(box, pgCard(ref)))
+    if (shown < refs.length) add(box, navButton(shown ? w('pgMore', refs.length - shown) : w('pgSeeAll'), () => {
+      pg.older[key] = shown + 20
+      renderGrouped(pg.model)
+    }))
+    add(parent, box)
+  }
+  const pgSheet = (parent, cards, older, n, questions, stuck, key, isNeeds) => {
+    const sheet = el('section', 'pg-sheet')
+    const heading = el('h2', 'pg-flag', w('pgNeeds') + ' | ' + n)
+    if (isNeeds) heading.setAttribute('data-needs-count', String(n))
+    const head = add(el('div', 'pg-sheet-head'), heading)
+    if (n) add(head, el('span', 'pg-muted small', [questions > 0 && pgPlural('pgQuestions', questions), stuck > 0 && pgPlural('pgStuckCount', stuck)].filter(Boolean).join(', ')))
+    if (isNeeds) add(head, navButton(w('pgWorkingLink', pg.model.view.working.length), () => pgScroll(pg.targets.working)))
+    add(sheet, head)
+    if (cards.length) {
+      add(sheet, el('p', 'pg-muted small', w('pgCopyHint')))
+      cards.forEach(ref => add(sheet, pgCard(ref)))
+    } else add(sheet, el('p', '', w('pgNothing')), el('p', 'pg-muted', w('pgNothingHint')))
+    pgOlder(sheet, older, key)
+    add(parent, sheet)
+  }
+  const pgNotice = agent => {
+    const box = el('div', 'pg-notice')
+    const how = el('details')
+    add(how, el('summary', '', w('pgHowFix')), el('p', '', w('pgFixAdvice')))
+    return add(box, el('p', '', w('pgUnreadable', agentName(agent))), how)
+  }
+  const pgPicker = view => {
+    const picks = document.getElementById('picks')
+    const active = document.activeElement
+    const focused = active && active.getAttribute && active.getAttribute('data-pick')
+    picks.textContent = ''
+    const entry = (value, label, count, needs, agent, isUnreadable) => {
+      const node = navButton('', () => pgSelect(value))
+      node.setAttribute('data-pick', value)
+      node.setAttribute('aria-current', String(pg.pick === value))
+      if (agent !== undefined) add(node, agentMark(agent))
+      add(node, el('span', 'pg-name', label), el('span', 'pg-count', count))
+      if (needs > 0) add(node, el('span', 'pg-flag', '⚑ ' + needs))
+      if (value === 'needs') node.setAttribute('data-needs-count', String(view.needs.n))
+      if (isUnreadable) add(node, el('span', 'pg-warn', '⚠'))
+      add(picks, node)
+      if (focused === value) node.focus({ preventScroll: true })
+    }
+    const isFresh = !view.agents.length && !Object.values(view.own.counts).some(n => n > 0)
+    if (isFresh) return
+    entry('needs', w('pgNeeds'), view.needs.n, view.needs.n)
+    if (!view.all.isHidden) entry('all', w('pgAll'), view.all.counts.open, 0)
+    add(picks, add(el('div', 'pg-picker-head'), el('span', '', w('pgAgents')), el('span', '', w('pgOpen'))))
+    pg.order.forEach(id => {
+      const agent = view.agents.find(one => one.agent === id)
+      if (agent) entry(id, agentName(id), agent.counts.open, agent.counts.needs, id, agent.isUnreadable)
+    })
+    if (Object.values(view.own.counts).some(n => n > 0)) entry('own', w('pgOwn'), view.own.counts.open, view.own.counts.needs, '')
+  }
+  const pgTaskHits = view => {
+    const found = new Map()
+    const buckets = view.agents.concat([view.own])
+    buckets.forEach(bucket => {
+      const shelves = ['open', 'stopped', 'done']
+      shelves.forEach(tab => bucket[tab].forEach(ref => {
+        if (!found.has(ref.key)) found.set(ref.key, { ref: ref, tab: tab, title: pgTitle(ref), card: false })
+      }))
+      bucket.cards.forEach(ref => {
+        const source = pgSource(ref)
+        const title = pgText(source.title || source.task || source.text)
+        if (!found.has(ref.key)) found.set(ref.key, { ref: ref, tab: 'open', title: title, card: true })
+      })
+    })
+    return Array.from(found.values())
+  }
+  const pgChooseTask = hit => {
+    const ref = hit.ref
+    pg.pick = ref.agent || 'own'
+    pg.repo = ''
+    pg.tab = hit.tab
+    opened[ref.key] = true
+    const bucket = pg.pick === 'own' ? pg.model.view.own : pg.model.view.agents.find(one => one.agent === pg.pick)
+    if (bucket && !hit.card) {
+      const index = bucket[hit.tab].findIndex(one => one.key === ref.key)
+      pg.shown[pgShownKey()] = Math.max(pg.shown[pgShownKey()] || (hit.tab === 'open' ? 12 : 8), index + 1)
+    }
+    renderGrouped(pg.model)
+    pgScroll(pg.targets[ref.key])
+  }
+  const pgSearch = () => {
+    const input = document.getElementById('search')
+    const overlay = document.getElementById('search-results')
+    const value = input.value.trim().toLowerCase()
+    overlay.textContent = ''
+    overlay.hidden = !value
+    pg.hits = []
+    if (!value || !pg.model) return
+    const view = pg.model.view
+    const section = (label, hits) => {
+      if (!hits.length) return
+      add(overlay, el('h3', '', w(label)))
+      hits.slice(0, 8).forEach(hit => {
+        const choose = () => {
+          input.value = ''
+          overlay.hidden = true
+          document.getElementById('picker').className = ''
+          document.getElementById('search-open').setAttribute('aria-expanded', 'false')
+          hit.pick()
+        }
+        pg.hits.push(choose)
+        add(overlay, navButton(hit.label, choose))
+      })
+      if (hits.length > 8) add(overlay, el('p', 'pg-muted small', w('pgRefine', hits.length - 8)))
+    }
+    section('pgAgents', pg.order.map(id => view.agents.find(one => one.agent === id)).filter(Boolean).filter(agent => agentName(agent.agent).toLowerCase().includes(value)).map(agent => ({ label: agentName(agent.agent), pick: () => pgSelect(agent.agent) })))
+    section('pgProjects', view.projects.filter(project => project.name.toLowerCase().includes(value)).map(project => ({ label: pgText(project.name) + ' · ' + w('pgOpenCount', project.open), pick: () => pgAll(project.name) })))
+    section('pgTasks', pgTaskHits(view).filter(hit => pgFullTitle(hit.ref).toLowerCase().includes(value)).map(hit => ({ label: hit.title + ' · ' + w(pgStatus(hit.ref, hit.tab)), pick: () => pgChooseTask(hit) })))
+    if (!pg.hits.length) add(overlay, el('p', '', w('pgNoMatches')))
+  }
+  const renderGrouped = model => {
+    if (!model.view) return
+    board.querySelectorAll('textarea[data-key]').forEach(box => { pg.drafts[box.getAttribute('data-key')] = box.value })
+    const active = document.activeElement
+    const focused = active && active.getAttribute && active.getAttribute('data-key')
+    const caret = focused ? [active.selectionStart, active.selectionEnd] : null
+    const moreFocused = morePanels.find(one => one.button === active)
+    pg.model = model
+    const view = model.view
+    view.agents.forEach(agent => { if (!pg.order.includes(agent.agent)) pg.order.push(agent.agent) })
+    // A view that no longer has anything to show (its agent left the board) goes back to Needs you.
+    const hasPick = pg.pick === 'needs' || (pg.pick === 'all' && !view.all.isHidden) || (pg.pick === 'own' && Object.values(view.own.counts).some(n => n > 0)) || view.agents.some(one => one.agent === pg.pick)
+    if (!hasPick) { pg.pick = 'needs'; pg.repo = ''; pg.tab = 'open' }
+    pg.sources = {}
+    const sources = [].concat(model.asks, model.reminder, model.older, model.idle, model.stopped, model.groups.flatMap(group => group.rows), model.turns, model.recent, model.finished || [])
+    sources.forEach(item => { if (item.key) pg.sources[item.key] = Object.assign({}, pg.sources[item.key], item) })
+    pg.targets = {}
+    document.title = view.needs.n ? w('pgTabTitle', view.needs.n) : 'Agent Board'
+    const version = view.versions
+    document.getElementById('versions').textContent = !version.package || version.package === version.board ? w('pgVersion', version.board) : w('pgVersions', version.board, version.package)
+    const notices = document.getElementById('unreadable-notices')
+    notices.textContent = ''
+    view.agents.filter(agent => agent.isUnreadable).forEach(agent => add(notices, el('p', '', w('pgUnreadable', agentName(agent.agent)))))
+    pgPicker(view)
+    board.textContent = ''
+    morePanels = []
+    moreCount = 0
+    const pasteSlot = resultSlots.paste
+    const closeSlot = resultSlots.close
+    resultSlots = {}
+    if (pasteSlot) resultSlots.paste = pasteSlot
+    if (closeSlot) resultSlots.close = closeSlot
+    const isFresh = !view.agents.length && !Object.values(view.own.counts).some(n => n > 0)
+    if (isFresh) {
+      const fresh = el('section', 'pg-fresh')
+      if (pg.mark) pg.mark.hidden = false
+      add(fresh, pg.mark, el('h2', '', w('pgReady')), el('p', 'pg-muted', w('pgReadyHint')), add(el('p'), el('span', '', w('pgInClaude') + ' '), el('code', '', '/agent-board'), el('span', '', '. ' + w('pgInCodex') + ' '), el('code', '', '$agent-board'), el('span', '', '.')))
+      add(board, fresh)
+    } else if (pg.pick === 'needs') {
+      pgSheet(board, view.needs.cards, view.needs.older, view.needs.n, view.needs.questions, view.needs.stuck, 'needs', true)
+      const working = add(el('section', 'pg-working'), el('h2', '', w('pgWorking')), el('p', 'pg-muted', w('pgWorkingCount', view.working.length)))
+      working.id = 'working-now'
+      pg.targets.working = working
+      if (view.working.length) pgRows(working, view.working, 'open', true, 5, 'working')
+      else add(working, el('p', 'pg-muted', w('pgNoWorking')))
+      add(working, navButton(w('pgAllTasks'), () => pgAll()))
+      add(board, working)
+    } else {
+      const isAll = pg.pick === 'all'
+      const isOwn = pg.pick === 'own'
+      const agent = view.agents.find(one => one.agent === pg.pick)
+      let bucket = isAll ? view.all : isOwn ? view.own : agent
+      if (bucket && pg.repo && !isOwn) {
+        const merged = Object.assign({}, bucket)
+        for (const shelf of ['cards', 'open', 'stopped', 'done', 'older']) {
+          merged[shelf] = bucket[shelf].concat(view.own[shelf]).sort((a, b) => (b.at || 0) - (a.at || 0))
+        }
+        bucket = merged
+      }
+      if (bucket) {
+        const open = pg.repo ? pgOpenCount(bucket) : bucket.counts.open
+        const needs = pg.repo ? pgFiltered(bucket.cards).length : bucket.counts.needs
+        const agents = pg.repo ? view.agents.filter(one => pgHolds(one, pg.repo)).length : view.agents.length
+        const heading = add(el('header', 'pg-view-head'), isAll ? null : agentMark(isOwn ? '' : pg.pick), el('h2', '', isAll ? w('pgAllAgents') : isOwn ? w('pgOwn') : agentName(pg.pick)), el('p', 'pg-muted', isAll ? w('pgAllCounts', agents, open) : w('pgAgentCounts', open, needs)))
+        add(board, heading)
+        if (agent && agent.isUnreadable) add(board, pgNotice(agent.agent))
+        if (pg.repo) add(board, navButton(w('pgProject', pgText(pg.repo)), () => { pg.repo = ''; renderGrouped(pg.model) }))
+        if (isAll) { if (needs) add(board, navButton(pgPlural('pgNeedLink', needs), () => pgSelect('needs'))) }
+        else if (bucket.cards.length || bucket.older.length) {
+          const cards = pgFiltered(bucket.cards)
+          pgSheet(board, cards, pgFiltered(bucket.older), cards.length, cards.filter(one => one.kind === 'question').length, cards.filter(one => one.kind === 'stuck').length, pg.pick + ':' + pg.repo, false)
+        }
+        const tabs = el('div', 'pg-tabs')
+        tabs.setAttribute('role', 'tablist')
+        const shelves = ['open', 'stopped', 'done']
+        shelves.forEach(tab => {
+          const count = pg.repo ? (tab === 'open' ? open : pgFiltered(bucket[tab]).length) : bucket.counts[tab]
+          const node = navButton(w({ open: 'pgOpen', stopped: 'pgStopped', done: 'pgDone' }[tab]) + ' ' + count, () => { pg.tab = tab; renderGrouped(pg.model) })
+          node.setAttribute('role', 'tab')
+          node.setAttribute('data-tab', tab)
+          node.setAttribute('aria-selected', String(pg.tab === tab))
+          node.setAttribute('aria-controls', 'task-list')
+          add(tabs, node)
+        })
+        add(board, tabs)
+        const rows = el('section')
+        rows.id = 'task-list'
+        rows.setAttribute('role', 'tabpanel')
+        pgRows(rows, pgFiltered(bucket[pg.tab]), pg.tab, isAll || !!pg.repo && !isOwn, pg.tab === 'open' ? 12 : 8)
+        add(board, rows)
+      }
+    }
+    drawLostResults()
+    if (moreFocused) morePanels.forEach(one => { if (one.key === moreFocused.key) one.button.focus({ preventScroll: true }) })
+    board.querySelectorAll('textarea[data-key]').forEach(box => {
+      const key = box.getAttribute('data-key')
+      if (Object.prototype.hasOwnProperty.call(pg.drafts, key)) box.value = pg.drafts[key]
+      if (key === focused) {
+        box.focus({ preventScroll: true })
+        if (caret) box.setSelectionRange(caret[0], caret[1])
+      }
+    })
+    pgSearch()
+  }
   // Archive now moves every finished task at once; Clean up runs the sweep --tidy runs.
   function tidyBoard(key, route) {
     say(w('pressPending'), '', key)
@@ -1269,6 +1869,7 @@ const PAGE_SCRIPT = String.raw`
     })
   }
   function renderBoard(model) {
+    if (W.group === 'agent') { renderGrouped(model); return; }
     // What is typed, and where the cursor is, outlast a redraw.
     var kept = {};
     board.querySelectorAll('textarea[data-key]').forEach(function (box) { kept[box.getAttribute('data-key')] = box.value; });
@@ -1453,20 +2054,20 @@ const PAGE_SCRIPT = String.raw`
   function refresh() {
     if (isClosed) return;
     clearTimeout(timer);
-    call('/api/board').then(function (data) {
+    call(W.group === 'agent' ? '/api/board?group=agent' : '/api/board').then(function (data) {
       if (!data.ok || !data.model) {
         if (data.note) { reachable(); say(data.note, 'alert'); }
         else unreachable();
         return;
       }
       reachable();
-      var text = JSON.stringify([data.model, data.messaging && data.messaging.sessions]);
+      var text = JSON.stringify([data.model, data.messaging && data.messaging.sessions], W.group === 'agent' ? function (key, value) { return key === 'now' ? Math.floor(value / 60000) : value; } : undefined);
       if (text !== last) {
         last = text; render(data.model);
         if (presence) { presence.remove(); presence = null; }
         // Show actionable progress delays, never transport inventory or native identifiers.
         var sessions = (data.messaging && data.messaging.sessions || []).filter(function (one) { return one.status === 'waiting' || one.status === 'timed_out'; });
-        if (sessions.length) {
+        if (W.group !== 'agent' && sessions.length) {
           presence = el('section', 'card');
           add(presence, el('h2', '', w('sessionsTitle')));
           sessions.forEach(function (one) {
@@ -1528,6 +2129,21 @@ const PAGE_SCRIPT = String.raw`
   });
   document.getElementById('relay').addEventListener('click', function () { beginPress(); copy(W.relayPrompt, 'paste'); });
   resultSlot(document.querySelector('.paste'), 'paste', '', w('servePasteTitle'));
+  if (W.group === 'agent') {
+    const input = document.getElementById('search')
+    input.addEventListener('input', pgSearch)
+    input.addEventListener('keydown', event => {
+      if (event.key === 'Enter' && pg.hits.length) { event.preventDefault(); pg.hits[0]() }
+      if (event.key === 'Escape') { input.value = ''; pgSearch(); document.getElementById('search-open').focus() }
+    })
+    document.getElementById('search-open').addEventListener('click', () => {
+      const opener = document.getElementById('search-open')
+      const isOpen = opener.getAttribute('aria-expanded') !== 'true'
+      document.getElementById('picker').className = isOpen ? 'pg-searching' : ''
+      opener.setAttribute('aria-expanded', String(isOpen))
+      if (isOpen) input.focus({ preventScroll: true })
+    })
+  }
   refresh();
 })();
 `

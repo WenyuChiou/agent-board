@@ -68,7 +68,10 @@ export const closedCopies = (records: readonly QuestionRecord[], marked: Readonl
   const closed = new Map<string, Map<string, Seen>>()
   const next = new Map<number, number>()
   const last = new Map<string, number>()
-  records.forEach((record, rank) => {
+  // Recovery appends captures in file order, so each owner's successor follows observation time.
+  const observed = records.map((record, rank) => ({ record, rank }))
+    .sort((a, b) => a.record.firstObserved - b.record.firstObserved || a.rank - b.rank)
+  observed.forEach(({ record, rank }) => {
     if (ownerOf(record) === '') return
     const owner = ownerKey(record)
     const before = last.get(owner)
