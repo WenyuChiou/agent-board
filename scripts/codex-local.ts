@@ -1,17 +1,17 @@
 import { createHash, randomUUID } from 'node:crypto'
-import { closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
+import { closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, readdirSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
-import { basename, dirname, join, resolve } from 'node:path'
+import { basename, dirname, isAbsolute, join, resolve } from 'node:path'
 import { performance } from 'node:perf_hooks'
 import { pathToFileURL } from 'node:url'
-import { boardConfirmedReport, codexEvent, codexEvents, codexReport, folderProject, putCodexBlock, sessionTitle } from '../hooks/codex'
+import { boardConfirmedReport, codexEvent, codexEvents, codexReport, dropCodexBlock, folderProject, putCodexBlock, sessionTitle } from '../hooks/codex'
 import type { CodexReport } from '../hooks/codex'
 import { agentHooks, BOARD_FOR, readConfig } from '../hooks/connect-pure'
 import type { Strings } from '../hooks/i18n'
 import { STRINGS } from '../hooks/strings'
-import { parseProgress, progressTail } from '../hooks/parse'
-import { cleanSignal, codexSignal, pickParent, withSignal } from '../hooks/runs'
-import type { CodexMeta, RunSignal } from '../hooks/runs'
+import { parseProgress, progressTail, STALE_MS } from '../hooks/parse'
+import { cleanSignal, codexSignal, isStrongRun, pickParent, withSignal } from '../hooks/runs'
+import type { RunSignal } from '../hooks/runs'
 import { antigravityCommand, antigravityHooks, cursorEvent, cursorEvents, hookCommandArgs, lifecycleCapability, localAgents, opencodePlugin, statusEvents } from '../hooks/local-agents'
 import type { LocalAgent } from '../hooks/local-agents'
 import { deepseekLocalPlugin, deepseekPatch, openclawLocalPlugin } from '../hooks/portable-agents'
@@ -23,11 +23,18 @@ import { boardPromptHelper, boardRequestWords, boardRun, isBoardRequest } from '
 import { PROMPT_EVENTS } from '../hooks/inbox'
 import { windowsHookNode } from './windows-hook-node'
 import { claimHookRecovery } from './hook-recovery-owner'
+import { findSessionFile, readSessionMeta } from './codex-history'
 
 type Json = Record<string, unknown>
 type Manifest = { files: Record<string, string>; groups: Record<string, unknown> }
 
 const hash = (text: string): string => createHash('sha256').update(text).digest('hex')
+// Folder names are display labels; reports bind to the whole directory without retaining its path.
+const cwdDigest = (cwd: unknown): string | undefined => {
+  if (typeof cwd !== 'string' || !isAbsolute(cwd)) return undefined
+  const normalized = resolve(cwd)
+  return hash(process.platform === 'win32' ? normalized.toLowerCase() : normalized)
+}
 const readBytes = (file: string): Buffer | null => {
   try { return readFileSync(file) } catch (error) {
     if ((error as { code?: string }).code === 'ENOENT') return null
@@ -39,53 +46,6 @@ const withoutBom = (text: string): string => text.startsWith('\uFEFF') ? text.sl
 const object = (value: unknown): Json => {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('INVALID_JSON_OBJECT')
   return value as Json
-}
-// Who started a Codex session is in the first record of its history file (#399). Only the
-// session's own file is opened: its name must be Codex's own form, rollout-<time>-<session id>.jsonl,
-// with exactly this session's id after the time, so another session's file, or any other file a
-// hook names, is never read. The file is read in pieces of 4 KiB until the piece that holds the
-// first line break, so up to 4 KiB after that break is read into memory with it; only the bytes
-// before the break are decoded, and of that record only four fields are kept: the first record is
-// decoded whole and everything but those four fields is dropped, and no text from the rest of the
-// file is ever decoded, looked at or kept. A path that is not the session's history file, or a
-// record that is not readable, gives null and the session keeps its default.
-const SESSION_FILE_TIME = /^rollout-\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-/
-const readSessionMeta = (path: string, session: string): CodexMeta | null => {
-  const name = basename(path)
-  if (!SESSION_FILE_TIME.test(name) || name.replace(SESSION_FILE_TIME, '') !== `${session}.jsonl`) return null
-  let fd: number | undefined
-  try {
-    fd = openSync(path, 'r')
-    const piece = Buffer.alloc(4096)
-    const line: Buffer[] = []
-    let length = 0
-    let offset = 0
-    for (;;) {
-      const size = readSync(fd, piece, 0, piece.length, offset)
-      if (size === 0) break
-      const end = piece.subarray(0, size).indexOf(0x0a)
-      const used = end < 0 ? size : end
-      line.push(Buffer.from(piece.subarray(0, used)))
-      length += used
-      offset += size
-      if (end >= 0) break
-      if (length >= 262144) return null
-    }
-    const first = object(JSON.parse(Buffer.concat(line).toString('utf8')))
-    if (first.type !== 'session_meta') return null
-    const meta = object(first.payload)
-    const source = meta.source
-
-    return {
-      originator: typeof meta.originator === 'string' ? meta.originator.slice(0, 64) : undefined,
-      // A helper's source names its parent and role; only the fact that it is a helper is kept.
-      source: typeof source === 'string' ? source.slice(0, 64) : typeof source === 'object' && source !== null && 'subagent' in source ? { subagent: true } : undefined,
-      thread_source: typeof meta.thread_source === 'string' ? meta.thread_source.slice(0, 64) : undefined,
-      parent_thread_id: typeof meta.parent_thread_id === 'string' ? meta.parent_thread_id.slice(0, 128) : undefined,
-    }
-  } catch { return null } finally {
-    if (fd !== undefined) try { closeSync(fd) } catch {}
-  }
 }
 const atomic = (file: string, text: string | Buffer, current: () => void = () => {}, retryRecord = false): void => {
   mkdirSync(dirname(file), { recursive: true })
@@ -264,9 +224,24 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
     checkDeadline()
     type Pending = {
       version: number; progress: string; mode: string; agent: LocalAgent; session: string; now: string; at?: number
-      status: unknown; event?: string; folder?: string; isBoardPrompt: boolean; isPrompt: boolean; payload: Json
+      status: unknown; event?: string; folder?: string; folderDigest?: string; isBoardPrompt: boolean; isPrompt: boolean; payload: Json
       // Who started the session, as far as the host's own words say (#399); absent when they say nothing.
       run?: RunSignal
+    }
+    const reportSession = (): string | undefined => {
+      const digest = cwdDigest(process.cwd())
+      if (digest === undefined || !existsSync(join(root, 'sessions'))) return undefined
+      const candidates: string[] = []
+      for (const file of readdirSync(join(root, 'sessions'))) {
+        if (!/^[a-f0-9]{64}\.json$/.test(file)) continue
+        try {
+          const record = object(JSON.parse(readLocal(join(root, 'sessions', file)) ?? '{}'))
+          const updated = Date.parse(String(record.updated))
+          if (record.agent === 'codex' && record.folderDigest === digest && record.origin !== 'run' && (record.state === 'working' || record.state === 'waiting') && updated <= started && started - updated <= STALE_MS && typeof record.session === 'string' && /^[a-zA-Z0-9][a-zA-Z0-9_-]{5,127}$/.test(record.session)) candidates.push(record.session)
+        } catch {}
+        if (candidates.length > 1) return undefined
+      }
+      return candidates.length === 1 ? candidates[0] : undefined
     }
     const buildEntry = (mode: string, agent: LocalAgent, raw: Json, flag: (name: string) => string | undefined, env: NodeJS.ProcessEnv, progress: string, at: number): Pending => {
       const payload = agent === 'cursor' && mode === '--codex-event' ? cursorEvent(raw) : raw
@@ -276,7 +251,8 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
       // last_assistant_message, or permission decisions from a hook payload. transcript_path is
       // opened, when it is this session's own history file, for its first record at a session's
       // start or prompt, which says whether a person started it (#399), and for nothing else.
-      const session = mode !== '--codex-report' ? agent === 'antigravity' ? payload.conversationId : payload.session_id ?? payload.sessionId ?? payload.sessionID ?? (agent === 'grok' ? env.GROK_SESSION_ID : undefined) : flag('--session') ?? (agent === 'codex' ? env.CODEX_THREAD_ID : env.AGENT_BOARD_AGENT === agent ? env.AGENT_BOARD_SESSION_ID : undefined)
+      const session = mode !== '--codex-report' ? agent === 'antigravity' ? payload.conversationId : payload.session_id ?? payload.sessionId ?? payload.sessionID ?? (agent === 'grok' ? env.GROK_SESSION_ID : undefined) : flag('--session') ?? (agent === 'codex' ? env.CODEX_THREAD_ID ?? reportSession() : env.AGENT_BOARD_AGENT === agent ? env.AGENT_BOARD_SESSION_ID : undefined)
+      if (session === undefined && mode === '--codex-report' && agent === 'codex') throw new Error('UNBOUND_REPORT')
       if (typeof session !== 'string' || !/^[a-zA-Z0-9][a-zA-Z0-9_-]{5,127}$/.test(session)) throw new Error('INVALID_SESSION')
       const now = new Date(at).toISOString().replace(/\.\d{3}Z$/, 'Z')
       if (mode === '--agent-status' && (agent === 'codex' || agent === 'cursor')) throw new Error('INVALID_EVENT')
@@ -298,6 +274,7 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
       return {
         version: 1, progress, mode, agent, session, now, at, status: mode === '--agent-status' ? status : undefined, event, isBoardPrompt, isPrompt,
         ...(filesByFolder(mode, agent) ? { folder } : {}),
+        ...(agent === 'codex' && mode === '--codex-event' ? { folderDigest: cwdDigest(raw.cwd) } : {}),
         ...(run === undefined ? {} : { run }),
         payload: mode === '--codex-report' ? payload : mode === '--codex-event' ? {
           session_id: payload.session_id, hook_event_name: payload.hook_event_name,
@@ -306,6 +283,7 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
       }
     }
     const current = isRecovery ? undefined : buildEntry(mode, agent, raw, flag, process.env, progress, started)
+    const isInferredReport = mode === '--codex-report' && agent === 'codex' && flag('--session') === undefined && process.env.CODEX_THREAD_ID === undefined
     const rawEntry = (raw: Json): Pending => {
       if (raw.version !== 1 || raw.kind !== 'raw' || !Number.isSafeInteger(raw.at) || Number(raw.at) < 0 || Number(raw.at) > Date.now() + 60000) throw new Error('INVALID_RAW_ENTRY')
       if (!Array.isArray(raw.argv) || !raw.argv.every(value => typeof value === 'string')) throw new Error('INVALID_RAW_ARGV')
@@ -345,17 +323,37 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
       const isLockedRename = process.platform === 'win32' && failure?.code === 'EPERM' && failure.syscall === 'rename' && typeof failure.dest === 'string' && resolve(failure.dest) === progress && isWritable()
       return failure?.code === 'EBUSY' || failure?.code === 'EAGAIN' || isLockedRename || error instanceof Error && error.message === 'LOCK_BUSY'
     }
-    const apply = ({ mode, agent, session, now, at, status, event, folder = '', isBoardPrompt, payload, run }: Pending): CodexReport => {
+    const withdrawRunBlock = (owner: string): void => {
+      const before = readBytes(progress)
+      if (before === null) return
+      const next = Buffer.from(dropCodexBlock(before.toString('latin1'), owner), 'latin1')
+      if (!next.equals(before)) atomic(progress, next, checkDeadline)
+    }
+    const apply = ({ mode, agent, session, now, at, status, event, folder = '', folderDigest, isBoardPrompt, payload, run }: Pending): CodexReport => {
       const owner = hash(`${agent}:${session}`)
       const recordFile = join(root, 'sessions', `${owner}.json`)
       const saved = readLocal(recordFile)
       const original = saved === null ? null : JSON.parse(saved) as CodexReport & { appliedAt?: number }
       if (original?.agent && original.agent !== agent) throw new Error('SESSION_CONFLICT')
       // Direct events can arrive out of order too, before they ever enter the pending queue.
-      if (mode !== '--codex-report' && original !== null && (at ?? Date.parse(now)) < (original.appliedAt ?? Date.parse(original.updated))) return original
-      const bytes = readBytes(progress) ?? Buffer.alloc(0)
+      if (mode !== '--codex-report' && original !== null && (at ?? Date.parse(now)) < (original.appliedAt ?? Date.parse(original.updated))) {
+        const signal = cleanSignal(run)
+        // A newer explicit person statement is never undone by older run proof.
+        if (signal === undefined || !isStrongRun(signal) || isStrongRun(original) || original.origin === 'person' && original.isWeak !== true) return original
+        // Origin proof can arrive late without reopening an older lifecycle event.
+        const { isWeak: _isWeak, ...kept } = original
+        const report = { ...kept, origin: 'run' as const, ...(signal.parent === undefined ? {} : { parent: signal.parent }) }
+        withdrawRunBlock(owner)
+        atomic(recordFile, `${JSON.stringify(report, null, 2)}\n`, checkDeadline, true)
+        return report
+      }
+      const history = agent === 'codex' && mode === '--codex-report' && original === null ? findSessionFile(dirname(configs.codex!), session) : null
+      const meta = history === null ? null : readSessionMeta(history, session)
+      const origin = withSignal(original, cleanSignal(run) ?? (meta === null ? undefined : codexSignal(true, history, meta)))
+      const isRun = isStrongRun(origin)
+      const bytes = isRun ? Buffer.alloc(0) : readBytes(progress) ?? Buffer.alloc(0)
       const text = bytes.toString('utf8')
-      const previous = original === null || mode === '--codex-report' ? original : boardConfirmedReport(text, original, owner)
+      const previous = original === null || mode === '--codex-report' || isRun ? original : boardConfirmedReport(text, original, owner)
       const clock = previous === null ? now : new Date(Math.max(Date.parse(now), Date.parse(previous.updated))).toISOString()
       const base = mode === '--codex-event' ? codexEvent(previous, isBoardPrompt ? { ...payload, prompt_submitted: false } : payload, clock, s) : codexReport(previous, session, mode === '--agent-status' ? {
         title: previous?.title ?? s.localAgentTask(agent), project: previous?.project ?? agent,
@@ -368,16 +366,24 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
         ...base, title: sessionTitle(name, s.localAgentTask(agent)), project: name || agent,
       }, clock, s) : base
       const priorActivity = previous?.activity ?? []
-      // Who started the session: a statement or a hint from this event, else what the record kept. A
-      // run with no parent named takes the person's session working in the same project when exactly
-      // one is, else none (#399).
-      const origin = withSignal(previous, cleanSignal(run))
-      const parent = origin.origin !== 'run' ? undefined : origin.parent ?? pickParent(parseProgress(text), initial.project, Date.parse(clock), [owner.slice(0, 8), session]) ?? undefined
+      // Only a weak hint needs a parent; a strong run keeps its record without a block.
+      const parent = origin.origin !== 'run' ? undefined : isRun ? origin.parent : origin.parent ?? pickParent(parseProgress(text), initial.project, Date.parse(clock), [owner.slice(0, 8), session]) ?? undefined
       const marked = { ...(origin.origin === undefined ? {} : { origin: origin.origin }), ...(parent === undefined ? {} : { parent }), ...(origin.isWeak === true ? { isWeak: true as const } : {}) }
-      const report = { ...initial, ...marked, appliedAt: Math.max(at ?? Date.parse(now), original?.appliedAt ?? Date.parse(original?.updated ?? now)), ...(isBoardPrompt && previous ? { state: previous.state, steps: previous.steps } : {}), agent, ...(event === undefined ? {} : { activity: [...priorActivity, { event, state: String(status), updated: clock }].slice(-16) }) }
+      const { origin: _origin, parent: _parent, isWeak: _isWeak, ...lifecycle } = initial
+      const directory = agent === 'codex' && mode === '--codex-event' && name !== ''
+        ? { folder: name, folderDigest }
+        : { folder: original?.folder, folderDigest: original?.folderDigest }
+      const report = { ...lifecycle, ...marked, ...directory, appliedAt: Math.max(at ?? Date.parse(now), original?.appliedAt ?? Date.parse(original?.updated ?? now)), ...(isBoardPrompt && previous ? { state: previous.state, steps: previous.steps } : {}), agent, ...(event === undefined ? {} : { activity: [...priorActivity, { event, state: String(status), updated: clock }].slice(-16) }) }
+      if (isRun) {
+        // A lazy history file can prove that a block written from a hint is a run.
+        // Once the record is strong, later reports still never read the board.
+        if (original !== null && !isStrongRun(original)) withdrawRunBlock(owner)
+        atomic(recordFile, `${JSON.stringify(report, null, 2)}\n`, checkDeadline, true)
+        return report
+      }
       // A replay can skip writes only after a board completion reached the cache too.
       const repaired = reporterTail(bytes)
-      if (repaired.fragment === null && mode !== '--codex-report' && previous === original && original !== null && previous !== null && previous.state === report.state && previous.turn === report.turn && JSON.stringify(previous.steps) === JSON.stringify(report.steps) && previous.origin === report.origin && previous.parent === report.parent && (event === undefined || priorActivity.at(-1)?.event === event)) {
+      if (repaired.fragment === null && mode !== '--codex-report' && previous === original && original !== null && previous !== null && previous.state === report.state && previous.turn === report.turn && JSON.stringify(previous.steps) === JSON.stringify(report.steps) && previous.origin === report.origin && previous.parent === report.parent && previous.isWeak === report.isWeak && previous.folder === report.folder && previous.folderDigest === report.folderDigest && (event === undefined || priorActivity.at(-1)?.event === event)) {
         if (report.appliedAt > (original.appliedAt ?? Date.parse(original.updated))) atomic(recordFile, `${JSON.stringify({ ...original, appliedAt: report.appliedAt }, null, 2)}\n`, checkDeadline, true)
         return report
       }
@@ -413,6 +419,7 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
       && localAgents.includes(entry.agent) && /^[a-zA-Z0-9][a-zA-Z0-9_-]{5,127}$/.test(String(entry.session))
       && typeof entry.now === 'string' && typeof entry.isPrompt === 'boolean' && typeof entry.isBoardPrompt === 'boolean'
       && (entry.folder === undefined || typeof entry.folder === 'string')
+      && (entry.folderDigest === undefined || typeof entry.folderDigest === 'string' && /^[a-f0-9]{64}$/.test(entry.folderDigest))
       && (!Object.hasOwn(entry, 'at') || typeof entry.at === 'number' && Number.isFinite(entry.at))
       && (entry.event === undefined || entry.agent === 'antigravity' && entry.mode === '--agent-status' && statusEvents.antigravity?.[entry.event] === entry.status)
       // A live event's own session_id is either missing or the session it is filed under.
@@ -481,7 +488,8 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
               const entry = name.endsWith('.raw.json') ? rawEntry(stored) : stored as Pending
               if (entry.version === 1 && typeof entry.progress === 'string' && isHookEntry(entry)) {
                 if (entry.progress !== progress) continue
-                if (!isOverdue(entry)) apply(entry)
+                const signal = cleanSignal(entry.run)
+                if (!isOverdue(entry) || signal !== undefined && isStrongRun(signal)) apply(entry)
               }
             } catch (error) {
               const code = (error as { code?: unknown } | null)?.code
@@ -494,6 +502,7 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
             processed += 1
           }
           if (current === undefined) return
+          if (isInferredReport && reportSession() !== current.session) throw new Error('UNBOUND_REPORT')
           const applied = apply(current)
           if (queuedFile !== undefined) {
             try { unlinkSync(queuedFile) } catch (error) {

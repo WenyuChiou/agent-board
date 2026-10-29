@@ -487,10 +487,11 @@ export const archivableAsking = (text: string, now: number, keep?: string): Aski
 // ready to append to progress-archive.md. A block with a visible `[?]` step stays unless it has
 // been quiet long enough (`isAskingArchiveDue`) and `mayTake` says its questions are kept outside
 // it, so the question goes on under Older unanswered (`archivableAsking` lists the ones to ask about).
-export const takeArchivable = (text: string, now: number, keep?: string, s: Strings = ZH_TW, isNow = false, mayTake?: (span: BlockSpan) => boolean): Archived => {
+// A verified agent run needs neither an age wait nor a retained question.
+export const takeArchivable = (text: string, now: number, keep?: string, s: Strings = ZH_TW, isNow = false, mayTake?: (span: BlockSpan) => boolean, isAgentRun?: (span: BlockSpan) => boolean): Archived => {
   const lines = linesOf(text)
   const visible = readable(lines)
-  const spans = scanBlocks(lines).filter(span => span.isClosed && span.session !== keep && isArchivable(span, now, isNow) && (!isAsking(visible, span) || (isAskingArchiveDue(span, now) && mayTake?.(span) === true)))
+  const spans = scanBlocks(lines).filter(span => span.isClosed && span.session !== keep && (isAgentRun?.(span) === true || isArchivable(span, now, isNow) && (!isAsking(visible, span) || (isAskingArchiveDue(span, now) && mayTake?.(span) === true))))
   if (spans.length === 0) return { text, entries: [] }
   const entries = spans.map(span => {
     const body = lines.slice(span.start + 1, span.end)

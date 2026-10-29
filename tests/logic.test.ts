@@ -1080,3 +1080,19 @@ test('the seen record keeps the earliest time per task, drops tasks no longer in
   expect(seenPath('/tmp/progress.md')).toBe('/tmp/progress-seen.json')
   expect(seenPath('/tmp/BOARD.MD')).toBe('/tmp/BOARD-seen.json')
 })
+
+test('tidy takes a verified run of any age without keeping its question and respects keep and closed markers', () => {
+  const now = Date.parse('2026-10-27T12:00:00Z')
+  const block = (id: string, isClosed = true): string => `<!-- auto session=${id} agent=codex state=working updated=2026-10-27T12:00:00Z -->
+### Synthetic run
+- [?] Ship it, OK?
+${isClosed ? `<!-- /auto session=${id} -->` : ''}
+`
+  const text = '## demo\n' + block('aaaa1111') + block('bbbb2222') + block('cccc3333', false)
+  const taken = takeArchivable(text, now, 'bbbb2222', ZH_TW, false, () => false, () => true)
+  expect(taken.entries).toHaveLength(1)
+  expect(taken.entries[0]).toContain('Ship it, OK?')
+  expect(taken.text).not.toContain('session=aaaa1111')
+  expect(taken.text).toContain('session=bbbb2222')
+  expect(taken.text).toContain('session=cccc3333')
+})
