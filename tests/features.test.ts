@@ -292,16 +292,18 @@ test('Confirm done distinguishes manual twins across repeated project headings a
 
 test('Confirm done on a marker with no space before --> keeps its end and reads back as done', () => {
   const now = Date.parse('2026-10-19T12:00:00Z')
+  // FORMAT.md also accepts `<!--auto` with no space after `<!--`; its start stays as written.
   const markers = [
-    '<!-- auto session=a1b2c3d4 agent=codex updated=2026-10-19T11:00:00Z state=ended-->',
-    '<!-- auto session=a1b2c3d4 agent=codex state=ended updated=2026-10-19T11:00:00Z-->',
+    ['<!-- auto session=a1b2c3d4 agent=codex updated=2026-10-19T11:00:00Z state=ended-->', '<!-- auto session=a1b2c3d4 agent=codex updated=2026-10-19T12:00:00.000Z state=done -->'],
+    ['<!-- auto session=a1b2c3d4 agent=codex state=ended updated=2026-10-19T11:00:00Z-->', '<!-- auto session=a1b2c3d4 agent=codex state=done updated=2026-10-19T12:00:00.000Z -->'],
+    ['<!--auto session=a1b2c3d4 agent=codex state=ended updated=2026-10-19T11:00:00Z-->', '<!--auto session=a1b2c3d4 agent=codex state=done updated=2026-10-19T12:00:00.000Z -->'],
   ]
-  for (const marker of markers) {
+  for (const [marker, expected] of markers) {
     const file = `## demo\n${marker}\n### Ship\n- [ ] finish\n<!-- /auto session=a1b2c3d4 -->\n`
     const row = boardItems(buildView(parseProgress(file), [], null, now, 0, {}, STRINGS.en), []).find(item => item.type === 'row' && item.row.title === 'Ship')
     if (row?.type !== 'row' || row.row.confirm == null) throw new Error('Missing synthetic row')
     const result = confirmTask(file, row.row.confirm, now, STRINGS.en)
-    expect(result?.text.split('\n')[1]).toBe(`<!-- auto session=a1b2c3d4 agent=codex ${marker.includes('state=ended updated') ? 'state=done updated=2026-10-19T12:00:00.000Z' : 'updated=2026-10-19T12:00:00.000Z state=done'} -->`)
+    expect(result?.text.split('\n')[1]).toBe(expected)
     expect(parseProgress(result?.text ?? '')[0]?.tasks[0]?.auto?.state).toBe('done')
   }
 })
