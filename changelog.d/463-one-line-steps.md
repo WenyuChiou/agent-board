@@ -18,7 +18,7 @@
   `a card's notes show as one line with the full text on open`,
   `on a 375 px phone every step and note is one line and opens to the whole text`.
 - **One question asked in several places is one card (#463).** Questions with the same agent, the
-  same folder the session ran in (`dir=`; `C:\a\b` and `C:/a/b` are one folder, and the heading of the
+  same folder the session ran in (its dir= field; C:\a\b and C:/a/b are one folder, and the heading of the
   project is not the folder) and the same words once trimmed and with spaces collapsed show as one
   card, with the oldest age and the newest source; the other copies stay in the question list. A
   question with no known folder stays its own card. Hide closes every copy recorded so far,
