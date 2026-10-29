@@ -4807,6 +4807,19 @@ for (const surface of ['/progress tidy', 'the pane archive'] as const) test(`${s
   expect(world.files.get(ARCHIVE)?.split('### Synthetic twin').length).toBe(3)
 })
 
+test('/progress tidy still says two archived tasks when a stale write puts the two same-title blocks back once', async ($, on) => {
+  const block = (session: string): string => `<!-- auto session=${session} agent=codex state=done updated=2026-10-16T08:00:00Z -->\n### Synthetic twin\n- [x] Finished\n<!-- /auto session=${session} -->\n`
+  const file = `# Progress\n\n## Synthetic\n${block('a1b2c393')}\n${block('a1b2c394')}`
+  const world: World = { files: new Map([[FILE, file]]), mtime: 1, hasTasks: true, store: { lang: 'en', autoConnectOff: true } }
+  engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/synthetic', surface: 'desktop', isInteractive: true })
+  // Another session's write, made from the file before the board's, lands right after it once.
+  world.afterWrite = () => file
+  expect((await $.command.run(TIDY)).text).toBe(STRINGS.en.tidyMoved(2))
+  expect(world.files.get(FILE)).not.toContain('Synthetic twin')
+  expect(world.files.get(ARCHIVE)?.split('### Synthetic twin').length).toBe(3)
+})
+
 test('on a light terminal no text falls back to the terminal dim', async ($, on) => {
   const world: World = { files: new Map([[FILE, JOBS]]), mtime: 1, hasTasks: true, store: { opened: ['others', 'waiting', 'recent', 'steps'] } }
   engineBeneath(on, world)

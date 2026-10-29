@@ -3003,7 +3003,11 @@ const archiveOld = async ($: EngineInterface, isNow = false, isCleanUp = false):
     for (const entry of fresh) archived.set(entry, (archived.get(entry) ?? 0) + 1)
     for (const entry of pendingMoved) moved.set(entry.session, entry.text)
     await $.fs.write(path, text)
-    for (const entry of pendingEntries) removed.set(entry, (removed.get(entry) ?? 0) + 1)
+    // Another session's stale write can put the blocks back and the next try remove them again:
+    // an entry counts the most copies one write removed, not the sum over the tries.
+    const going = new Map<string, number>()
+    for (const entry of pendingEntries) going.set(entry, (going.get(entry) ?? 0) + 1)
+    for (const [entry, count] of going) removed.set(entry, Math.max(removed.get(entry) ?? 0, count))
     for (const key of pendingKeys) keys.add(key)
   })
   if (wrote === null) {
