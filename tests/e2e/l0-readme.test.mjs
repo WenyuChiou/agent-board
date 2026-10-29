@@ -93,7 +93,7 @@ const groupsAround = (svg, at) => {
 }
 
 describe('L0 discover and install from the README', () => {
-  test('L0 README: the first screen of each README holds the tagline, the install commands, --serve --lan with its QR code and an I-use start for each main agent', () => {
+  test('L0 README: each README opens with its title, tagline, badges and cover, and its Quick start holds the install commands, --serve --lan with its QR code and an I-use start for each main agent', () => {
     const agents = ['Claude Code', 'Codex', 'Antigravity', 'OpenCode']
     const taglines = { en: 'See what every AI coding agent is doing, and answer the one that needs you, from one board.', 'zh-TW': '每個 AI coding agent 在做什麼，一個看板看完；哪個在等你，就在那裡回它。', 'zh-CN': '每个 AI coding agent 在做什么，一个看板看完；哪个在等你，就在那里回它。' }
     const labels = { en: agent => `I use ${agent}:`, 'zh-TW': agent => `我用 ${agent}：`, 'zh-CN': agent => `我用 ${agent}：` }
@@ -105,15 +105,19 @@ describe('L0 discover and install from the README', () => {
       const text = read(name)
       const cover = text.indexOf(`docs/images/cover-${lang}-dark.svg`)
       assert.ok(cover >= 0, `${name}: the cover exists`)
-      const first = text.slice(0, cover)
-      const tagline = /<p align="center"><b>[^<]+<\/b><\/p>/.exec(first)
-      assert.ok(tagline, `${name}: a tagline precedes the cover`)
-      assert.equal(tagline[0], `<p align="center"><b>${taglines[lang]}</b></p>`, `${name}: the original tagline precedes the cover`)
-      const node = first.indexOf('Node.js 22', tagline.index + tagline[0].length)
+      // The top is the project's name, one line on what it does, its badges, then the picture.
+      const top = text.slice(0, cover).split('\n').filter(Boolean)
+      assert.equal(top[0], '<h1 align="center">Agent Board</h1>', `${name}: the title comes first`)
+      assert.equal(top[1], `<p align="center"><b>${taglines[lang]}</b></p>`, `${name}: the original tagline follows the title`)
+      assert.match(top[2], /^<p align="center"><a href="LICENSE"><img [^>]*src="https:\/\/img\.shields\.io\//, `${name}: the badges follow the tagline`)
+      assert.ok(!text.slice(0, cover).includes('npx @wenyuchiou/agent-board'), `${name}: no install command comes before the cover`)
+      const first = section(text, SECTIONS[lang][0])
+      assert.ok(first, `${name}: Quick start exists`)
+      const node = first.indexOf('Node.js 22')
       const install = /```(?:sh|bash)\n(npx @wenyuchiou\/agent-board setup\nnpx @wenyuchiou\/agent-board setup --apply\nnpx @wenyuchiou\/agent-board --serve)\n```/.exec(first)
-      assert.ok(node > tagline.index && install && install.index > node, `${name}: Node 22 and all three ordered install commands follow the tagline`)
+      assert.ok(node >= 0 && install && install.index > node, `${name}: Quick start gives Node 22, then all three ordered install commands`)
       const lanLines = first.split('\n').filter(line => line.includes('npx @wenyuchiou/agent-board --serve --lan'))
-      assert.equal(lanLines.length, 1, `${name}: one phone route before the cover`)
+      assert.equal(lanLines.length, 1, `${name}: one phone route in Quick start`)
       const lan = lanLines[0]
       assert.ok(first.indexOf(lan) > install.index + install[0].length, `${name}: LAN follows the install commands`)
       assert.match(lan, qr[lang], `${name}: LAN mentions a QR code`)
@@ -123,7 +127,7 @@ describe('L0 discover and install from the README', () => {
       const starts = first.split('\n').filter(line => /^- \*\*(?:I use |我用 )/.test(line))
       assert.equal(starts.length, agents.length, `${name}: one start for each of the four agents`)
       const allStarts = text.split('\n').filter(line => /^- \*\*(?:I use |我用 )/.test(line))
-      assert.deepEqual(allStarts, starts, `${name}: no I-use starts are duplicated or added after the cover`)
+      assert.deepEqual(allStarts, starts, `${name}: no I-use starts are duplicated or added outside Quick start`)
       let at = first.indexOf(lan)
       for (const [i, agent] of agents.entries()) {
         const line = starts[i]
@@ -212,7 +216,7 @@ describe('L0 discover and install from the README', () => {
     for (const [name, lang, synthetic] of READMES) {
       const text = read(name)
       // The first picture a reader meets: the first <img> that is not a badge.
-      const first = [...text.matchAll(/<img\b[^>]*>/g)].find(match => !/img\.shields\.io/.test(match[0]))
+      const first = [...text.matchAll(/<img\b[^>]*>/g)].find(match => !/img\.shields\.io|\/badge\.svg"/.test(match[0]))
       assert.ok(first, `${name} has an image`)
       const src = /\bsrc="([^"]+)"/.exec(first[0])
       const alt = /\balt="([^"]*)"/.exec(first[0])
@@ -227,7 +231,7 @@ describe('L0 discover and install from the README', () => {
   test('L0 README: the cover loops through six captioned scenes in 20 to 30 seconds, moves with CSS alone and stands still on the setup scene for reduced motion', () => {
     for (const [name, lang] of READMES) {
       const text = read(name)
-      const first = [...text.matchAll(/<img\b[^>]*>/g)].find(match => !/img\.shields\.io/.test(match[0]))
+      const first = [...text.matchAll(/<img\b[^>]*>/g)].find(match => !/img\.shields\.io|\/badge\.svg"/.test(match[0]))
       assert.ok(first, `${name}: the first non-badge image exists`)
       const src = /\bsrc="([^"]+)"/.exec(first[0])
       assert.equal(src?.[1], `docs/images/cover-${lang}-dark.svg`, `${name}: the first image is its animated cover`)
@@ -422,14 +426,15 @@ describe('L0 discover and install from the README', () => {
         const isBadge = /shields\.io|\/badges?(?:\/|[._-])/i.test(src) || (/^Node(?:\.js)?(?:\s+\d+(?:\+|\.x)?)?$/i.test(alt) && /(?:^|\/)node(?:[.-]?js)?\.svg(?:\?|$)/i.test(src))
         assert.ok(!isBadge || !/node(?:\.js)?/i.test(`${alt} ${src}`), `${name}: the header has no Node image badge`)
       }
-      // A badge links to what it reports: the license file, or the test workflow's real status. The
-      // npm package has no version to show before 0.24.0 is published.
+      // A badge links to what it reports: the license file, the test workflow's real status, or the
+      // published npm package's version.
       const badges = [...header.matchAll(/<a href="([^"]+)"><img alt="([^"]*)" src="(https:\/\/(?:img\.shields\.io|github\.com)\/[^"]+)"><\/a>/g)]
       assert.ok(badges.some(([, href, alt, src]) => href === 'LICENSE' && alt && src === 'https://img.shields.io/badge/license-MIT-green'), `${name}: the MIT badge links to LICENSE`)
       for (const [, href, , src] of badges) {
         const workflow = 'https://github.com/WenyuChiou/agent-board/actions/workflows/test.yml'
         const isLicense = href === 'LICENSE' && src === 'https://img.shields.io/badge/license-MIT-green'
-        assert.ok(isLicense || (href === workflow && src === `${workflow}/badge.svg`), `${name}: ${src} is the license badge or the test workflow's status`)
+        const isNpm = href === 'https://www.npmjs.com/package/@wenyuchiou/agent-board' && src === 'https://img.shields.io/npm/v/@wenyuchiou/agent-board'
+        assert.ok(isLicense || isNpm || (href === workflow && src === `${workflow}/badge.svg`), `${name}: ${src} is the license badge, the test workflow's status or the npm version`)
       }
       assert.equal(badges.length, [...header.matchAll(/img\.shields\.io|\/badge\.svg/g)].length, `${name}: every badge is one of those`)
       const quick = section(text, SECTIONS[lang][0])
@@ -468,11 +473,10 @@ describe('L0 discover and install from the README', () => {
         const agent = /alt="([^"]+)"/.exec(icon)[1]
         assert.equal(command.split(words.notLive).length - 1, NOT_RUN_LIVE.includes(agent) ? 1 : 0, `${name}: ${agent} carries the exact phrase once only if it was not run live`)
       }
-      const header = headerOf(text)
-      const starts = header.split('\n').filter(line => line.includes('Antigravity') && line.startsWith('- **'))
-      assert.equal(starts.length, 1, `${name}: the header has one Antigravity start`)
+      const starts = section(text, SECTIONS[lang][0]).split('\n').filter(line => line.includes('Antigravity') && line.startsWith('- **'))
+      assert.equal(starts.length, 1, `${name}: Quick start has one Antigravity start`)
       assert.ok(starts[0].includes(words.notLive), `${name}: the Antigravity start carries the phrase`)
-      assert.equal(text.split(words.notLive).length - 1, NOT_RUN_LIVE.length + 1, `${name}: the header and only the ${NOT_RUN_LIVE.join(', ')} command cells carry the phrase`)
+      assert.equal(text.split(words.notLive).length - 1, NOT_RUN_LIVE.length + 1, `${name}: Quick start and only the ${NOT_RUN_LIVE.join(', ')} command cells carry the phrase`)
       if (lang !== 'en') assert.ok(!text.includes(lang === 'zh-TW' ? '在合成環境檢查過，還沒實機執行' : '在合成环境检查过，还没实机运行'), `${name}: no old synthetic-home wording remains`)
       for (const old of ['not verified yet', '還沒驗證', '还没验证']) assert.ok(!text.includes(old), `${name}: ${NOT_RUN_LIVE.join(', ')} no longer use "${old}"`)
       // The table of what was checked says the same words, without the brackets, for an agent
@@ -520,7 +524,7 @@ describe('L0 discover and install from the README', () => {
       // The steps after setup are a list under Quick start: Claude Code's plugin, Codex's hooks,
       // the plugin reloads and dot's paste.
       const quick = section(text, SECTIONS[lang][0])
-      const steps = quick.slice(0, quick.indexOf('<details>')).split('\n').filter(line => line.startsWith('- ')).join('\n')
+      const steps = quick.slice(0, quick.indexOf('<details>')).split('\n').filter(line => line.startsWith('- ') && !/^- \*\*(?:I use |我用 )/.test(line)).join('\n')
       for (const agent of ['Claude Code', 'Codex', 'OpenCode', 'OpenClaw', 'dot']) assert.ok(steps.includes(agent), `${name}: the steps after setup name ${agent}`)
       for (const link of ['docs/CODEX.md', 'AGENTS.md#report-your-progress-to-the-progress-pane', anchorOf(words.page)]) assert.ok(steps.includes(`](${link})`), `${name}: the steps after setup link to ${link}`)
       // Each old command is still there: a board command once for each agent that uses it, any other once.

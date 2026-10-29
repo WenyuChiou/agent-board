@@ -1447,14 +1447,17 @@ const enqueue = <T,>(job: () => Promise<T>): Promise<T> => {
 
 // What a change answers to have the file read again before it is made: a write caught half-way.
 const AGAIN = Symbol('again')
+const WRITE_RACE = Symbol('write race')
 // How many times `rewrite` makes a change; it tells the change which try is the last.
 const REWRITE_TRIES = 3
 
-// Read, change, write, read back. When another session's write lands in between, the change
-// is made again over what that session wrote, so neither undoes the other; `change` must be
-// safe to make twice, and is told when it runs for the last time. It answers null to leave the
-// file as it is. `isKept` says whether what was read back still holds the change (by default:
-// is exactly what was written). The text last written comes back, or null when nothing was.
+// Read, change, read again just before the write, write, read back. Earlier file changes are
+// kept by making the change again over the new text within the same tries. Other writers take
+// no lock, so a change between the last read and the write can still be lost. `change` must be
+// safe to make twice, is told when it runs for the last time, and answers null to leave the file
+// as it is. `isKept` says whether the read-back still holds the change (by default: is exactly
+// what was written). The last attempt's written text comes back even if its read-back differs,
+// so an undone final write may still be reported as made.
 const rewrite = async (
   $: EngineInterface,
   path: string,
@@ -1466,8 +1469,13 @@ const rewrite = async (
   for (let attempt = 0; attempt < REWRITE_TRIES; attempt += 1) {
     const before = await readText($, path)
     const after = await change(before, attempt === REWRITE_TRIES - 1)
-    if (after === AGAIN) continue
+    if (after === AGAIN) {
+      wrote = null
+      continue
+    }
     if (after === null || after === before) break
+    wrote = null
+    if (await readText($, path) !== before) continue
     await writer(path, after)
     wrote = after
     if (isKept(await readText($, path), after)) break
@@ -2061,7 +2069,7 @@ const takeAgentTurns = async ($: EngineInterface, turns: readonly AgentTurn[], a
     const path = await progressPath($)
     const isKept = (check: string): boolean =>
       extractAutoBlock(check, written.sessionId) === extractAutoBlock(upsertAutoBlock(check, written, s), written.sessionId)
-    await rewrite($, path, async before => {
+    const wrote = await rewrite($, path, async before => {
       const current = await $.store.get(owner) as ProgressMirror | undefined
       if (JSON.stringify(current ?? null) !== JSON.stringify(written) || JSON.stringify((await agentProjection($, last.id, current)).mirror ?? null) !== JSON.stringify(written)) {
         hasMoved = true
@@ -2071,7 +2079,10 @@ const takeAgentTurns = async ($: EngineInterface, turns: readonly AgentTurn[], a
     }, isKept)
     if (hasMoved) return
     // Another session's write can undo it three times over; only a block read back counts.
-    if (!isKept(await readText($, path))) throw new Error(NOT_KEPT)
+    if (!isKept(await readText($, path))) {
+      if (wrote === null) throw WRITE_RACE
+      throw new Error(NOT_KEPT)
+    }
     if (answeredLater !== undefined) {
       answeredLater.push(...answers)
       return
@@ -2786,11 +2797,35 @@ const drainInbox = async ($: EngineInterface): Promise<void> => {
           if (questions.length > 0) asking.push({ group, questions })
           settled.push(...group)
         } catch (error) {
-          const why = (error instanceof Error ? error.message : String(error)).replace(/\s+/g, ' ').slice(0, 200)
           // With a retake ahead the loop goes on, and the retake's newer turn lands first: this
           // older turn's retry then changes nothing, and its summary is lost, as for any turn older
           // than its block. Holding the retake back instead would use up its last try.
           const isRetakeAhead = runs.slice(index + 1).some(run => run[0]!.attempt > MAX_TRIES)
+          if (error === WRITE_RACE && group.every(one => one.attempt <= MAX_TRIES)) {
+            // The block did not survive a conflict. Keep question previews and return the inputs
+            // without replacing a file another reporter may have put at the original name.
+            const questions = peekInbox(group.flatMap(one => one.body === undefined ? [] : [{ name: one.name, body: one.body, at }]), () => '', text => redact(text, home, isWin)).filter(turn => turn.isQuestion)
+            if (questions.length > 0) await retainInboxQuestions($, questions).catch(() => undefined)
+            for (const one of group) {
+              try {
+                await enqueue(async () => {
+                  const notes = await readInboxRecord($, 'inboxFailed')
+                  if (notes[one.name] !== `${one.attempt}:${tryingAt}:TRYING`) return
+                  delete notes[one.name]
+                  await writeInboxRecord($, 'inboxFailed', notes)
+                })
+                const original = one.path.replace(/[^\\/]+$/, () => one.name)
+                if (!(await placeFile($, one.path, original, isWin))) throw new Error('INBOX_RETURN_FAILED')
+              } catch (returnError) {
+                const reason = inboxFailure(returnError)
+                failed[one.name] = `${one.attempt}:${at}:${reason}`
+                await inboxNotice($, one.path, reason)
+              }
+            }
+            if (!isRetakeAhead) break
+            continue
+          }
+          const why = (error === WRITE_RACE ? NOT_KEPT : error instanceof Error ? error.message : String(error)).replace(/\s+/g, ' ').slice(0, 200)
           for (const one of group) failed[one.name] = `${one.attempt}:${at}:${why}`
           // A file error is named now. The model's silence, or a block not yet read back, is
           // tried again quietly, as before; the last try sets the file aside, which is named.
@@ -2920,10 +2955,15 @@ const archiveOld = async ($: EngineInterface, isNow = false, isCleanUp = false):
   // Counted with their number: two done blocks with the same title and steps make one entry text,
   // and both leave (#231).
   const archived = new Map<string, number>()
+  // A copy may precede a rejected write; only actual removals count as moves.
+  const removed = new Map<string, number>()
   const keys = new Set<string>()
+  let pendingEntries: string[] = []
+  let pendingKeys: string[] = []
+  let pendingMoved: Array<{ session: string, text: string }> = []
   // The blocks that ask which a try has archived, by session, with the lines they had then.
   const moved = new Map<string, string>()
-  await rewrite($, path, async (text, isLast) => {
+  const wrote = await rewrite($, path, async (text, isLast) => {
     // A block that still asks goes only when the explicit archive's own check passes for it (#174).
     // The ledger is settled once for all of them. Another agent's write meanwhile (a new `[?]`
     // step) must not be written over with a result made from the older text: start again from it.
@@ -2952,14 +2992,24 @@ const archiveOld = async ($: EngineInterface, isNow = false, isCleanUp = false):
       : takeManualDone(blocks.text, at, isNow ? key => seen[key] : (_key, project, task) => handKeptSeenAt(observed, project, task, at), s, isNow)
     const entries = [...blocks.entries, ...manual.entries]
     if (entries.length === 0) return null
+    pendingEntries = entries
+    pendingKeys = manual.keys
+    pendingMoved = asking.filter(({ span }) => kept.has(span.start)).map(({ span, text }) => ({ session: span.session, text }))
+    return manual.text
+  }, undefined, async (path, text) => {
     // Made again after another session's write, the same blocks are not archived twice.
-    const fresh = unwrittenEntries(entries, archived)
+    const fresh = unwrittenEntries(pendingEntries, archived)
     await appendArchive($, archivePath(path, at), fresh, s)
     for (const entry of fresh) archived.set(entry, (archived.get(entry) ?? 0) + 1)
-    for (const key of manual.keys) keys.add(key)
-    for (const { span, text: lines } of asking) if (kept.has(span.start)) moved.set(span.session, lines)
-    return manual.text
+    for (const entry of pendingMoved) moved.set(entry.session, entry.text)
+    await $.fs.write(path, text)
+    for (const entry of pendingEntries) removed.set(entry, (removed.get(entry) ?? 0) + 1)
+    for (const key of pendingKeys) keys.add(key)
   })
+  if (wrote === null) {
+    await poll($)
+    return 0
+  }
   if (keys.size > 0) {
     await update($, doneSeen, old => Object.fromEntries(Object.entries(old).filter(([key]) => !keys.has(key))))
     await saveDoneSeen($, at, kept => Object.fromEntries(Object.entries(kept).filter(([key]) => !keys.has(key))))
@@ -2970,7 +3020,7 @@ const archiveOld = async ($: EngineInterface, isNow = false, isCleanUp = false):
   }
   await poll($)
 
-  return [...archived.values()].reduce((sum, one) => sum + one, 0)
+  return [...removed.values()].reduce((sum, one) => sum + one, 0)
 }
 
 // What the explicit archive checks before it takes a block that asks (#174): the ledger settled
@@ -3005,6 +3055,7 @@ const archiveOne = async ($: EngineInterface, ref: TaskRef): Promise<boolean> =>
   const s = await wordsOf($)
   const archived = new Set<string>()
   const observed = await read($, firstSeen)
+  let pendingEntries: string[] = []
   const wrote = await rewrite($, path, async text => {
     const projects = parseProgress(text)
     const hasQuestions = projects.some(project => project.name === ref.project && project.tasks.some(task => (ref.session === null ? task.title === ref.title : task.auto?.session === ref.session) && task.steps.some(step => step.status === 'waiting')))
@@ -3015,9 +3066,12 @@ const archiveOne = async ($: EngineInterface, ref: TaskRef): Promise<boolean> =>
     }
     const taken = takeTask(text, ref, at, s, observed)
     if (taken === null) return null
-    await appendArchive($, archivePath(path, at), taken.entries.filter(entry => !archived.has(entry)), s)
-    for (const entry of taken.entries) archived.add(entry)
+    pendingEntries = taken.entries
     return taken.text
+  }, undefined, async (path, text) => {
+    await appendArchive($, archivePath(path, at), pendingEntries.filter(entry => !archived.has(entry)), s)
+    for (const entry of pendingEntries) archived.add(entry)
+    await $.fs.write(path, text)
   })
   if (wrote === null) return false
   if (ref.session === null) {
@@ -3498,14 +3552,15 @@ const quickAdd = async ($: EngineInterface, input: string): Promise<string> => {
     // Made again over another session's write, the task is added once: a retry finds the
     // heading already there one more time than at the first read.
     let count: number | null = null
-    await rewrite($, await progressPath($), before => {
+    const path = await progressPath($)
+    await rewrite($, path, before => {
       const found = manualTaskCount(before, entry)
       if (count === null) count = found
       return found > count ? null : addManualTask(before, entry, s)
     })
     await poll($)
+    return count !== null && manualTaskCount(await readText($, path), entry) > count
   })
-    .then(() => true)
     .catch(() => false)
 
   return wrote ? quickAddWords(entry, s) : s.quickUnreadable

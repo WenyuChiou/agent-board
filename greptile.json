@@ -1,0 +1,32 @@
+{
+  "strictness": 2,
+  "commentTypes": ["logic", "syntax"],
+  "autoReview": ["open", "push"],
+  "triggerOnDrafts": true,
+  "statusCheck": true,
+  "shouldUpdateDescription": false,
+  "includeConfidenceScore": true,
+  "includeSequenceDiagram": false,
+  "ignorePatterns": "hooks/board-script.ts\nhooks/released.ts\ndocs/images/**\ndocs/preview/out/**\n**/*.svg\n**/*.png\npackage-lock.json",
+  "instructions": "Comment inline only on must-fix findings: wrong or broken behaviour; an error swallowed or reported as success; data loss (a write that can drop text another writer added, or a move or delete with no kept copy); a security problem or a leaked token, session id or home folder path; a requirement of the linked issue, or a rule in AGENTS.md, CONTRIBUTING.md or docs/dev/team-process.md, that the change does not meet; a bug fix or behaviour change with no test. Each finding names the file and line, a concrete input or sequence that goes wrong, and the fix. Everything else (naming, style, refactors, optional tests) goes in at most three short lines at the end of the summary, never as an inline comment. Do not repeat a finding that a later commit fixed or that the PR conversation already answered.",
+  "customContext": {
+    "rules": [
+      {
+        "rule": "Every user-visible string added or changed must have an entry in all three string tables: hooks/i18n.ts, hooks/strings-en.ts and hooks/strings-zh-cn.ts. A string only in one or two of them is a must-fix.",
+        "scope": ["hooks/**", "scripts/**"]
+      },
+      {
+        "rule": "Tests, fixtures, docs and pictures use synthetic data only: no real person names, session ids, home folder paths (C:\\Users\\<name>, /Users/<name>, /home/<name>), tokens or real conversation text.",
+        "scope": ["tests/**", "docs/**", "README*.md", "CHANGELOG.md"]
+      },
+      {
+        "rule": "A write to the progress file or another user file must not lose text another writer added between the read and the write: read again just before writing and check the result after. Report a removed or skipped re-read as a must-fix.",
+        "scope": ["hooks/**", "scripts/**"]
+      },
+      {
+        "rule": "hooks/board-script.ts is built by scripts/build-board.ts, and hooks/released.ts (with tests/fixtures/released.ts) by scripts/build-released.ts, both with Bun 1.4.2. Never ask for a hand edit there; when a source file they are built from changes, the PR rebuilds them or its body says 'maintainer rebuilds at merge'.",
+        "scope": ["hooks/**", "scripts/**"]
+      }
+    ]
+  }
+}

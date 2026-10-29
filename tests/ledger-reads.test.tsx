@@ -2136,7 +2136,7 @@ test('an explicit archive and the automatic one keep a waiting block\'s question
   const steps = '- [x] Draft the plan\n- [?] Publish the plan, OK?'
   // The sweep takes the waiting block quiet for eight days; the waiting block quiet for thirteen
   // hours is on its Stopped row and still inside its seven days, so the person archives it there.
-  const board = `## demo\n${block('a1b2c401', 'waiting', 24 * 8, steps)}${block('a1b2c402', 'waiting', 13, steps)}`
+  const board = `## demo\n${block('a1b2c401', 'waiting', 24 * 8, steps)}${block('a1b2c402', 'waiting', 13, steps)}`.replaceAll(' agent=codex ', ' agent=codex dir=%2Fwork%2Fdemo ')
   const world = makeWorld([[FILE, board]])
   world.env = english
   world.store = { ...world.store, opened: ['stopped'] }
@@ -2152,7 +2152,7 @@ test('an explicit archive and the automatic one keep a waiting block\'s question
     await ui.press({ key: 'demo::Synthetic plan a1b2c402::archive' })
     await clock.advance(2000)
     expect(world.files.get(FILE)).not.toContain('session=a1b2c402')
-    // Both blocks left the file the same way: each has a saved copy of its question, marked archived, and the pane lists both.
+    // Both blocks left the file the same way: each has a saved copy of its question, marked archived.
     const copies = capturesOf(world).filter(copy => copy.disposition === 'archived')
     expect(copies).toHaveLength(2)
     const [automatic, explicit] = ['a1b2c401', 'a1b2c402'].map(session => copies.find(copy => copy.record.source?.session === session))
@@ -2161,8 +2161,9 @@ test('an explicit archive and the automatic one keep a waiting block\'s question
     const kept = (copy: QuestionCapture | undefined) => ({ words: copy?.record.words, text: copy?.record.source?.text, kind: copy?.record.source?.kind, isUnresolved: copy?.record.isUnresolved })
     expect(kept(explicit)).toEqual(kept(automatic))
     expect(ledgerRecords(world).map(record => [record.words, record.isArchived, record.isUnresolved])).toEqual([['Publish the plan, OK?', true, true], ['Publish the plan, OK?', true, true]])
+    // The same question asked in two stopped sessions is one line under Older (#463); both copies stay in the list above.
     await ui.press({ key: 'section::older' })
-    expect(visiblePaneText(await ui.drawn()).split('Publish the plan, OK?').length - 1).toBe(2)
+    expect(visiblePaneText(await ui.drawn()).split('Publish the plan, OK?').length - 1).toBe(1)
   } finally { await ui.unmount() }
 })
 
