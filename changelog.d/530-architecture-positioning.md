@@ -1,0 +1,1 @@
+- **Architecture documentation clarifies multi-agent cockpit positioning and memory tool coexistence (#530).** Defines the four-layer agentic stack, distinguishes passive cognitive context recall from active human-in-the-loop task orchestration, and documents the native IPC dispatcher latency roadmap. Tests: none (documentation only).
