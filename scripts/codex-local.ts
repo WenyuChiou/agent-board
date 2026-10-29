@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto'
 import { closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, readdirSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
-import { basename, dirname, join, resolve } from 'node:path'
+import { basename, dirname, isAbsolute, join, resolve } from 'node:path'
 import { performance } from 'node:perf_hooks'
 import { pathToFileURL } from 'node:url'
 import { boardConfirmedReport, codexEvent, codexEvents, codexReport, dropCodexBlock, folderProject, putCodexBlock, sessionTitle } from '../hooks/codex'
@@ -29,6 +29,12 @@ type Json = Record<string, unknown>
 type Manifest = { files: Record<string, string>; groups: Record<string, unknown> }
 
 const hash = (text: string): string => createHash('sha256').update(text).digest('hex')
+// Folder names are display labels; reports bind to the whole directory without retaining its path.
+const cwdDigest = (cwd: unknown): string | undefined => {
+  if (typeof cwd !== 'string' || !isAbsolute(cwd)) return undefined
+  const normalized = resolve(cwd)
+  return hash(process.platform === 'win32' ? normalized.toLowerCase() : normalized)
+}
 const readBytes = (file: string): Buffer | null => {
   try { return readFileSync(file) } catch (error) {
     if ((error as { code?: string }).code === 'ENOENT') return null
@@ -218,20 +224,20 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
     checkDeadline()
     type Pending = {
       version: number; progress: string; mode: string; agent: LocalAgent; session: string; now: string; at?: number
-      status: unknown; event?: string; folder?: string; isBoardPrompt: boolean; isPrompt: boolean; payload: Json
+      status: unknown; event?: string; folder?: string; folderDigest?: string; isBoardPrompt: boolean; isPrompt: boolean; payload: Json
       // Who started the session, as far as the host's own words say (#399); absent when they say nothing.
       run?: RunSignal
     }
     const reportSession = (): string | undefined => {
-      const folder = folderProject(process.cwd())
-      if (folder === '' || !existsSync(join(root, 'sessions'))) return undefined
+      const digest = cwdDigest(process.cwd())
+      if (digest === undefined || !existsSync(join(root, 'sessions'))) return undefined
       const candidates: string[] = []
       for (const file of readdirSync(join(root, 'sessions'))) {
         if (!/^[a-f0-9]{64}\.json$/.test(file)) continue
         try {
           const record = object(JSON.parse(readLocal(join(root, 'sessions', file)) ?? '{}'))
           const updated = Date.parse(String(record.updated))
-          if (record.agent === 'codex' && record.folder === folder && record.origin !== 'run' && (record.state === 'working' || record.state === 'waiting') && updated <= started && started - updated <= STALE_MS && typeof record.session === 'string' && /^[a-zA-Z0-9][a-zA-Z0-9_-]{5,127}$/.test(record.session)) candidates.push(record.session)
+          if (record.agent === 'codex' && record.folderDigest === digest && record.origin !== 'run' && (record.state === 'working' || record.state === 'waiting') && updated <= started && started - updated <= STALE_MS && typeof record.session === 'string' && /^[a-zA-Z0-9][a-zA-Z0-9_-]{5,127}$/.test(record.session)) candidates.push(record.session)
         } catch {}
         if (candidates.length > 1) return undefined
       }
@@ -268,6 +274,7 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
       return {
         version: 1, progress, mode, agent, session, now, at, status: mode === '--agent-status' ? status : undefined, event, isBoardPrompt, isPrompt,
         ...(filesByFolder(mode, agent) ? { folder } : {}),
+        ...(agent === 'codex' && mode === '--codex-event' ? { folderDigest: cwdDigest(raw.cwd) } : {}),
         ...(run === undefined ? {} : { run }),
         payload: mode === '--codex-report' ? payload : mode === '--codex-event' ? {
           session_id: payload.session_id, hook_event_name: payload.hook_event_name,
@@ -322,7 +329,7 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
       const next = Buffer.from(dropCodexBlock(before.toString('latin1'), owner), 'latin1')
       if (!next.equals(before)) atomic(progress, next, checkDeadline)
     }
-    const apply = ({ mode, agent, session, now, at, status, event, folder = '', isBoardPrompt, payload, run }: Pending): CodexReport => {
+    const apply = ({ mode, agent, session, now, at, status, event, folder = '', folderDigest, isBoardPrompt, payload, run }: Pending): CodexReport => {
       const owner = hash(`${agent}:${session}`)
       const recordFile = join(root, 'sessions', `${owner}.json`)
       const saved = readLocal(recordFile)
@@ -363,7 +370,10 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
       const parent = origin.origin !== 'run' ? undefined : isRun ? origin.parent : origin.parent ?? pickParent(parseProgress(text), initial.project, Date.parse(clock), [owner.slice(0, 8), session]) ?? undefined
       const marked = { ...(origin.origin === undefined ? {} : { origin: origin.origin }), ...(parent === undefined ? {} : { parent }), ...(origin.isWeak === true ? { isWeak: true as const } : {}) }
       const { origin: _origin, parent: _parent, isWeak: _isWeak, ...lifecycle } = initial
-      const report = { ...lifecycle, ...marked, ...(agent === 'codex' && mode === '--codex-event' && name !== '' ? { folder: name } : original?.folder === undefined ? {} : { folder: original.folder }), appliedAt: Math.max(at ?? Date.parse(now), original?.appliedAt ?? Date.parse(original?.updated ?? now)), ...(isBoardPrompt && previous ? { state: previous.state, steps: previous.steps } : {}), agent, ...(event === undefined ? {} : { activity: [...priorActivity, { event, state: String(status), updated: clock }].slice(-16) }) }
+      const directory = agent === 'codex' && mode === '--codex-event' && name !== ''
+        ? { folder: name, folderDigest }
+        : { folder: original?.folder, folderDigest: original?.folderDigest }
+      const report = { ...lifecycle, ...marked, ...directory, appliedAt: Math.max(at ?? Date.parse(now), original?.appliedAt ?? Date.parse(original?.updated ?? now)), ...(isBoardPrompt && previous ? { state: previous.state, steps: previous.steps } : {}), agent, ...(event === undefined ? {} : { activity: [...priorActivity, { event, state: String(status), updated: clock }].slice(-16) }) }
       if (isRun) {
         // A lazy history file can prove that a block written from a hint is a run.
         // Once the record is strong, later reports still never read the board.
@@ -373,7 +383,7 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
       }
       // A replay can skip writes only after a board completion reached the cache too.
       const repaired = reporterTail(bytes)
-      if (repaired.fragment === null && mode !== '--codex-report' && previous === original && original !== null && previous !== null && previous.state === report.state && previous.turn === report.turn && JSON.stringify(previous.steps) === JSON.stringify(report.steps) && previous.origin === report.origin && previous.parent === report.parent && previous.isWeak === report.isWeak && previous.folder === report.folder && (event === undefined || priorActivity.at(-1)?.event === event)) {
+      if (repaired.fragment === null && mode !== '--codex-report' && previous === original && original !== null && previous !== null && previous.state === report.state && previous.turn === report.turn && JSON.stringify(previous.steps) === JSON.stringify(report.steps) && previous.origin === report.origin && previous.parent === report.parent && previous.isWeak === report.isWeak && previous.folder === report.folder && previous.folderDigest === report.folderDigest && (event === undefined || priorActivity.at(-1)?.event === event)) {
         if (report.appliedAt > (original.appliedAt ?? Date.parse(original.updated))) atomic(recordFile, `${JSON.stringify({ ...original, appliedAt: report.appliedAt }, null, 2)}\n`, checkDeadline, true)
         return report
       }
@@ -409,6 +419,7 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
       && localAgents.includes(entry.agent) && /^[a-zA-Z0-9][a-zA-Z0-9_-]{5,127}$/.test(String(entry.session))
       && typeof entry.now === 'string' && typeof entry.isPrompt === 'boolean' && typeof entry.isBoardPrompt === 'boolean'
       && (entry.folder === undefined || typeof entry.folder === 'string')
+      && (entry.folderDigest === undefined || typeof entry.folderDigest === 'string' && /^[a-f0-9]{64}$/.test(entry.folderDigest))
       && (!Object.hasOwn(entry, 'at') || typeof entry.at === 'number' && Number.isFinite(entry.at))
       && (entry.event === undefined || entry.agent === 'antigravity' && entry.mode === '--agent-status' && statusEvents.antigravity?.[entry.event] === entry.status)
       // A live event's own session_id is either missing or the session it is filed under.

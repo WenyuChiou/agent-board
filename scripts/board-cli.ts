@@ -846,22 +846,31 @@ const tidyCount = (isNow: boolean, isStrict = false, isCleanUp = false, counted?
   const moved = new Map<string, string>()
   const runCache = new Map<string, boolean>()
   const codexHome = resolve(flag('--codex-dir') ?? (process.env.CODEX_HOME || join(homedir(), '.codex')))
+  const cursorPath = `${path.replace(/\.md$/i, '')}-run-cursor.txt`
+  const cursor = read(cursorPath).trim()
+  const lookupKey = (id: string): string => sha256(`${codexHome}\0${id}`)
+  let nextCursor = cursor
   const count = archiveOut((text, isLast) => {
     const lines = text.split(/\r?\n/)
     const spans = scanBlocks(lines)
     const runs = new Set<number>()
-    // Newer blocks are checked first, with at most fifty history lookups per tidy, retries included.
-    for (const span of [...spans].sort((a, b) => b.updated - a.updated || b.start - a.start)) {
-      if (!span.isClosed) continue
-      const id = runLookupId(lines[span.start] ?? '')
-      if (id === null) continue
-      if (!runCache.has(id) && runCache.size < 50) {
-        const file = findSessionFile(codexHome, id)
-        const signal = file === null ? undefined : codexSignal(true, file, readSessionMeta(file, id))
-        runCache.set(id, signal !== undefined && isStrongRun(signal))
-      }
-      if (runCache.get(id) === true) runs.add(span.start)
+    const ids = [...new Set([...spans].sort((a, b) => b.updated - a.updated || b.start - a.start).flatMap(span => {
+      const id = span.isClosed ? runLookupId(lines[span.start] ?? '') : null
+      return id === null ? [] : [id]
+    }))]
+    // Resume after the last lookup so retained and unreadable blocks cannot starve older runs.
+    // Only the cursor survives a tidy; every archive still needs fresh proof from the history.
+    const first = ids.findIndex(id => lookupKey(id) === cursor) + 1
+    for (const id of [...ids.slice(first), ...ids.slice(0, first)]) {
+      if (runCache.has(id)) continue
+      // The cache is shared by rewrite retries, keeping the whole tidy within fifty lookups.
+      if (runCache.size >= 50) break
+      const file = findSessionFile(codexHome, id)
+      const signal = file === null ? undefined : codexSignal(true, file, readSessionMeta(file, id))
+      runCache.set(id, signal !== undefined && isStrongRun(signal))
+      nextCursor = lookupKey(id)
     }
+    for (const span of spans) if (span.isClosed && runCache.get(runLookupId(lines[span.start] ?? '') ?? '') === true) runs.add(span.start)
     if (!isNow && counted) counted(countManualDone(parseProgress(text), now, (_key, project, task) => handKeptSeenAt(seen, project, task, now)))
     // A block that still asks goes only when the explicit archive's own check passes for it (#174).
     // A board busy enough to change on every try would skip the whole sweep, so the last try checks
@@ -897,6 +906,7 @@ const tidyCount = (isNow: boolean, isStrict = false, isCleanUp = false, counted?
     for (const { span, text: lines } of asking) if (kept.has(span.start)) moved.set(span.session, lines)
     return { text: manual.text, entries }
   }, now)
+  if (nextCursor !== cursor) rewrite(cursorPath, () => `${nextCursor}\n`)
   return count
 }
 

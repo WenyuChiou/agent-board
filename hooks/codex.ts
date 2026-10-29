@@ -9,6 +9,7 @@ import type { Origin } from './runs'
 export type CodexReport = Origin & {
   session: string
   folder?: string
+  folderDigest?: string
   turn: string | null
   state: 'working' | 'waiting' | 'done' | 'ended'
   title: string

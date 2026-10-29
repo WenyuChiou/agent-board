@@ -5328,6 +5328,41 @@ test('a Codex App session a person started is written and shows as a row', () =>
   assert.match(markerOf(f, session), /state=done/)
 }))
 
+test("a report from a folder with the same name as a person's session in another folder is not written to that session", () => fixture(f => {
+  assert.equal(f.install('--apply').status, 0)
+  const personFolder = join(f.home, 'a', 'demo')
+  const otherFolder = join(f.home, 'b', 'demo')
+  for (const cwd of [personFolder, otherFolder]) mkdirSync(cwd, { recursive: true })
+  const path = rollout(f, session, { originator: 'Codex Desktop', source: 'vscode', thread_source: 'user' })
+  assert.equal(f.event('UserPromptSubmit', 'turn-person', { cwd: personFolder, transcript_path: path }).status, 0)
+  const before = everyFile(f.root).map(file => [file, readFileSync(file)])
+  const result = folderReport(f, otherFolder)
+  assert.notEqual(result.status, 0)
+  assert.equal(result.stderr.trim(), 'This session cannot report steps yet; the board still shows it from its hooks.')
+  assert.equal(result.stdout, '')
+  assert.deepEqual(everyFile(f.root).map(file => [file, readFileSync(file)]), before)
+  assert.equal(sessionRecord(f, session).folder, 'demo')
+  const record = sessionRecord(f, session)
+  assert.match(record.folderDigest, /^[a-f0-9]{64}$/)
+  assert.ok(!JSON.stringify(record).includes(personFolder))
+  const recordFile = join(f.root, 'sessions', createHash('sha256').update(`codex:${session}`).digest('hex') + '.json')
+  const { folderDigest, ...legacy } = record
+  f.save(recordFile, JSON.stringify(legacy))
+  const legacyBytes = readFileSync(f.progress)
+  const unbound = folderReport(f, personFolder)
+  assert.notEqual(unbound.status, 0)
+  assert.equal(unbound.stdout, '')
+  assert.deepEqual(readFileSync(f.progress), legacyBytes)
+  assert.deepEqual(sessionRecord(f, session), legacy)
+  // Windows aliases and a trailing separator retain the same directory identity.
+  const alias = process.platform === 'win32' ? personFolder.toUpperCase() + '\\' : personFolder + '/'
+  assert.equal(f.event('UserPromptSubmit', 'turn-next', { cwd: alias, transcript_path: path }).status, 0)
+  assert.equal(sessionRecord(f, session).folderDigest, folderDigest)
+  const bound = folderReport(f, personFolder)
+  assert.equal(bound.status, 0, bound.stderr)
+  assert.equal(JSON.parse(bound.stdout).session, session)
+}))
+
 test("a run's last line that reads like a question is not listed under Waiting on you", () => fixture(f => {
   f.install('--apply')
   const path = rollout(f, execSession, { source: 'exec' })
@@ -5520,7 +5555,9 @@ test('folder reporting refuses ambiguous, stale, ended, old and strong-run recor
   f.install('--apply')
   const cwd = join(f.home, 'demo')
   mkdirSync(cwd)
-  const saveRecord = (id, extra = {}) => f.save(join(f.root, 'sessions', createHash('sha256').update(`codex:${id}`).digest('hex') + '.json'), JSON.stringify({ session: id, agent: 'codex', folder: 'demo', state: 'waiting', updated: new Date().toISOString(), ...extra }))
+  const normalized = resolve(cwd)
+  const folderDigest = createHash('sha256').update(process.platform === 'win32' ? normalized.toLowerCase() : normalized).digest('hex')
+  const saveRecord = (id, extra = {}) => f.save(join(f.root, 'sessions', createHash('sha256').update(`codex:${id}`).digest('hex') + '.json'), JSON.stringify({ session: id, agent: 'codex', folder: 'demo', folderDigest, state: 'waiting', updated: new Date().toISOString(), ...extra }))
   const refused = () => {
     const before = everyFile(f.root).map(file => [file, readFileSync(file, 'utf8')])
     const result = folderReport(f, cwd)
@@ -5530,7 +5567,7 @@ test('folder reporting refuses ambiguous, stale, ended, old and strong-run recor
     assert.deepEqual(everyFile(f.root).map(file => [file, readFileSync(file, 'utf8')]), before)
   }
   refused()
-  saveRecord(session, { folder: undefined })
+  saveRecord(session, { folder: undefined, folderDigest: undefined })
   saveRecord(execSession, { origin: 'run' })
   saveRecord(helperSession, { state: 'ended' })
   saveRecord(secondSession, { updated: '2020-01-01T00:00:00Z' })
@@ -5577,6 +5614,36 @@ test('a tidy checks at most fifty session histories and the next tidy archives t
   assert.match(remaining, /synthetic-bounded-run-01/)
   assert.equal(f.command(['--tidy']).status, 0)
   assert.doesNotMatch(readFileSync(f.progress, 'utf8'), /<!-- auto /)
+}))
+
+test('an older run behind fifty retained blocks is archived by a later tidy', () => fixture(f => {
+  assert.equal(f.install('--apply').status, 0)
+  rollout(f, execSession, { source: 'exec' })
+  const ids = Array.from({ length: 50 }, (_, index) => `synthetic-retained-session-${String(index).padStart(2, '0')}`)
+  for (const [index, id] of ids.entries()) {
+    if (index % 2 === 0) rollout(f, id, { source: 'vscode', thread_source: 'user' })
+    else f.save(rollout(f, id, {}), '{unreadable history\n')
+  }
+  const kept = ids.map(id => oldBlock(id, id).replace(/updated=\S+/, 'updated=2026-10-27T12:00:00Z')).join('')
+  const run = oldBlock(execSession, 'Older verified run').replace(/updated=\S+/, 'updated=2026-10-26T12:00:00Z')
+  const original = '## demo\n' + run + kept
+  f.save(f.progress, original)
+  const first = f.command(['--tidy'])
+  assert.equal(first.status, 0, first.stderr)
+  assert.equal(readFileSync(f.progress, 'utf8'), original)
+  const second = f.command(['--tidy'])
+  assert.equal(second.status, 0, second.stderr)
+  const after = readFileSync(f.progress, 'utf8')
+  assert.doesNotMatch(after, /Older verified run/)
+  assert.ok(after.includes(kept))
+  const archives = everyFile(f.root).filter(file => /progress-archive-.*\.md$/.test(file))
+  assert.equal(archives.length, 1)
+  const archived = readFileSync(archives[0], 'utf8')
+  assert.equal(archived.match(/### Older verified run/g)?.length, 1)
+  assert.doesNotMatch(archived, /synthetic-retained-session/)
+  assert.equal(f.command(['--tidy']).status, 0)
+  assert.equal(readFileSync(archives[0], 'utf8'), archived)
+  assert.equal(readFileSync(f.progress, 'utf8'), after)
 }))
 
 test('tidy keeps an explicit person origin and uses the home history when CODEX_HOME is empty', () => fixture(f => {
