@@ -313,6 +313,41 @@ test('grouping puts every task and question under its agent with open, needs, st
   expect(undated.working).toEqual([])
 })
 
+test('two folders asking the same words under one agent show two Needs you cards on the agent-first page', () => {
+  const asks = [
+    ask('codex', 'demo', 'Port the parser', 'Merge the synthetic branch, OK?', { key: 'ask:one', dir: '/work/one', at: ago(4 * MIN) }),
+    ask('codex', 'demo', 'Port the parser', 'Merge the synthetic branch, OK?', { key: 'ask:two', dir: '/work/two', at: ago(2 * MIN) }),
+  ]
+  const rows = [
+    row('codex', 'demo', 'Port the parser', { key: 'row:one', dir: '/work/one' }),
+    row('codex', 'demo', 'Port the parser', { key: 'row:two', dir: '/work/two' }),
+  ]
+  // Waiting tasks may have no row, or only one folder may still have a row on the open shelf.
+  for (const open of [[], rows.slice(0, 1), rows]) {
+    const result = groupBoard(board({ asks, groups: grouped(open) }), NOW, none, EN)
+    expect(result.needs.n).toBe(2)
+    expect(result.needs.questions).toBe(2)
+    expect(result.needs.cards.map(card => card.key)).toEqual(['ask:two', 'ask:one'])
+    const codex = result.agents.find(group => group.agent === 'codex')
+    expect(codex?.counts).toEqual({ open: 2, needs: 2, stopped: 0, done: 0, older: 0 })
+    expect(codex?.cards.map(card => card.key)).toEqual(['ask:two', 'ask:one'])
+    expect(codex?.open).toEqual([])
+    expect(result.all.counts.open).toBe(2)
+    expect(result.all.counts.needs).toBe(2)
+    expect(result.projects).toEqual([{ name: 'two', open: 1 }, { name: 'one', open: 1 }])
+  }
+})
+
+test('two questions in one task and folder that differ only in their note show two Needs you cards', () => {
+  const asks = [
+    ask('codex', 'demo', 'Deploy', 'Deploy', { key: 'ask:staging', note: 'staging?', dir: '/work/one', at: ago(4 * MIN) }),
+    ask('codex', 'demo', 'Deploy', 'Deploy', { key: 'ask:production', note: 'production?', dir: '/work/one', at: ago(2 * MIN) }),
+  ]
+  const result = groupBoard(board({ asks, groups: grouped([]) }), NOW, none, EN)
+  expect(result.needs.questions).toBe(2)
+  expect(result.needs.cards.map(card => card.key)).toEqual(['ask:production', 'ask:staging'])
+})
+
 test('grouping lists each unanswered question once in Needs you and leaves a carded task out of Open', () => {
   const parser = ask('codex', 'demo', 'Port the parser', 'Merge the synthetic branch, OK?', { key: 'ask:demo::Port the parser::1@a', at: ago(4 * MIN) })
   // The same question in a second block of the same task: one question, kept at the newer time.

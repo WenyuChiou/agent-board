@@ -14,7 +14,7 @@ import type { ConfirmRef } from './blocks'
 
 // A turn another agent's hook left that no Claude Code session has summed up yet. The
 // board only peeks at it: taking it is a Claude Code session's job, so the two never race.
-export type PendingTurn = { id?: string; fullText?: string; sources?: string[]; sourceRevisions?: string[]; isClosed?: boolean; agent: string; project: string; text: string; isQuestion: boolean; at: number; sourceAt?: number; hasSummary?: boolean }
+export type PendingTurn = { id?: string; dir?: string; fullText?: string; sources?: string[]; sourceRevisions?: string[]; isClosed?: boolean; agent: string; project: string; text: string; isQuestion: boolean; at: number; sourceAt?: number; hasSummary?: boolean }
 
 // A reply's last line of prose, its code blocks left out: where a reply usually says what
 // came of the turn.
@@ -53,10 +53,10 @@ export const peekInbox = (
       // statement cannot prove a previous question answered before anyone captured it.
       const key = JSON.stringify([turn.id, turn.project, question.replace(/\s+/g, ' ').trim()])
       const previous = questions.get(key)
-      questions.set(key, { id: turn.id, fullText: answer, sources: [...new Set([...(previous?.sources ?? []), file.name])], sourceRevisions: [...new Set([...(previous?.sourceRevisions ?? []), sha256(JSON.stringify([file.name, file.body]))])], agent: turn.agent, project: turn.project, text, isQuestion: true, at: previous?.at ?? file.at, sourceAt: turn.at ?? file.at, hasSummary: true, ...(turn.event === 'end' ? { isClosed: true } : {}) })
+      questions.set(key, { id: turn.id, fullText: answer, sources: [...new Set([...(previous?.sources ?? []), file.name])], sourceRevisions: [...new Set([...(previous?.sourceRevisions ?? []), sha256(JSON.stringify([file.name, file.body]))])], agent: turn.agent, project: turn.project, dir: turn.cwd, text, isQuestion: true, at: previous?.at ?? file.at, sourceAt: turn.at ?? file.at, hasSummary: true, ...(turn.event === 'end' ? { isClosed: true } : {}) })
       latest.delete(turn.id)
     } else if (turn.event !== 'end' && text !== '') {
-      latest.set(turn.id, { id: turn.id, fullText: answer, agent: turn.agent, project: turn.project, text, isQuestion: false, at: file.at, sourceAt: turn.at ?? file.at, hasSummary: summary !== undefined && summary !== null })
+      latest.set(turn.id, { id: turn.id, fullText: answer, agent: turn.agent, project: turn.project, dir: turn.cwd, text, isQuestion: false, at: file.at, sourceAt: turn.at ?? file.at, hasSummary: summary !== undefined && summary !== null })
     }
     if (turn.event === 'end') {
       latest.delete(turn.id)
@@ -486,8 +486,10 @@ const chosen = (state: BoardState, items: readonly BoardItem[]): number => {
 
 // In the order the screen shows them: what waits on you, each project's work, then turns
 // no Claude Code session has taken in.
-// The key of a question on the reminder or Older shelf: the page names the line it drew by it.
-export const olderKey = (ask: WaitingItem): string => `older:${ask.key}@${ask.questionId}`
+// The key of a question on the reminder or Older shelf: the page names the line it drew by it. It
+// holds the key a Hide would write (`hideKey`), which changes when another copy of the question
+// arrives, so a press made before that is refused rather than taken for the new copy.
+export const olderKey = (ask: WaitingItem): string => `older:${ask.key}@${ask.questionId}@${ask.hideKey}`
 
 // The full action catalog includes idle rows for the page server. Terminal callers pass
 // their shelf state so only rows the person can see are selectable.

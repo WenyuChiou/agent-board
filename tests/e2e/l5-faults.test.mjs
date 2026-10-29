@@ -62,8 +62,10 @@ test('L5 read-only file: a failed tick writes no journal line and shows a one-li
     })
     const card = page.cards().find(one => one.textContent.includes('First card'))
     assert.ok(card, page.text())
-    const button = page.buttons(card).find(one => one.textContent === `Done: ${step}`)
+    // The button names this long step by its first words (#463); the whole step is its title and is what a press sends.
+    const button = page.buttons(card).find(one => one.textContent.startsWith('Done: ') && one.title === step)
     assert.ok(button, card.textContent)
+    assert.ok(button.textContent.endsWith('…'), button.textContent)
     button.click()
     await page.flush()
     assert.equal(response.status, 409)
