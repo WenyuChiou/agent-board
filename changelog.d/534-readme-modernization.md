@@ -1,2 +1,2 @@
 - **README features core pillars and architectural positioning reference (#534).** Highlights the three core architectural pillars (Single Markdown Ledger, Unified Multi-Agent Cockpit, and Bi-directional Human Governance) and links to the Architecture Positioning Guide, in all three languages.
-  Tests: `L0 discover and install from the README`.
+  Tests: `L0 README: each README shows the cover before its first section, then the same eight sections in the same order`.
