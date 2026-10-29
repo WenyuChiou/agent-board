@@ -125,7 +125,7 @@ const surfaceAllowed = (name, selector, rule) => {
   if (/(?:^|\s)(?:#search|#search-results|textarea|input)(?=$|[:[\s])/.test(selector)) return true
   if (/(?:^|\s)\.seg$/.test(selector)) return true
   if (name === 'grouped') return /(?:^|\s)\.pg-sheet$/.test(selector) || (isMobile(rule) && /(?:#picks>button|button\.nav)(?=$|[:[])/.test(selector))
-  return selector === 'details.section[data-key="section:waiting"]' || (isMobile(rule) && /(?:^|\s)\.dash-nav button(?=$|[:[])/.test(selector))
+  return selector === "details.section[data-key='section:waiting']" || (isMobile(rule) && /(?:^|\s)\.dash-nav button(?=$|[:[])/.test(selector))
 }
 
 test('the page and the dashboard use only colour, size, radius, shadow and duration tokens from page-look', () => {
@@ -187,7 +187,7 @@ test('the page and the dashboard use only colour, size, radius, shadow and durat
       }
     }
     if (name === 'grouped') assert.ok(shadowCount > 0, 'the search results panel retains its shadow')
-    const sheet = { classic: '.card', grouped: '.grouped .pg-sheet', dashboard: 'details.section[data-key="section:waiting"]' }[name]
+    const sheet = { classic: '.card', grouped: '.grouped .pg-sheet', dashboard: "details.section[data-key='section:waiting']" }[name]
     assert.ok(rules.some(rule => rule.selector === sheet && rule.declarations.some(item => /^(?:background|background-color)$/.test(item.property) && item.value === 'var(--surface)')), `${name}: ${sheet} retains its surface background`)
     const bodyFont = rules.filter(rule => rule.selector === 'body').flatMap(rule => rule.declarations.filter(item => item.property === 'font')).at(-1)
     assert.equal(bodyFont?.value, 'var(--text-md)/1.55 var(--font-sans)', `${name}: body uses the shared readable text size and line height`)
