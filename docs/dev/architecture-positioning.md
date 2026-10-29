@@ -32,7 +32,7 @@ Tools addressing problem 1 (such as `persistent-memory`) and tools addressing pr
 |   - Bi-directional Human-in-the-Loop decision queues              |
 +-------------------------------------------------------------------+
                                   |
-                                  | Verified facts (progress-journal.md)
+                                  | Progress milestones (progress-journal-YYYY-MM.md)
                                   v
 +-------------------------------------------------------------------+
 |        Layer 2: Internal Cognitive Memory (Persistent Memory Tools)       |
@@ -66,8 +66,8 @@ Tools addressing problem 1 (such as `persistent-memory`) and tools addressing pr
 
 Rather than competing, memory systems and mission control cockpits form a complementary pipeline:
 
-1. **High-Purity Facts Upstream:**
-   Raw tool observation transcripts often contain trial-and-error noise. In contrast, the steps recorded in Agent Board's ledger (`[x] Step`) represent human-authorized, verified milestones. Memory tools can ingest `progress-journal.md` as ground-truth facts to produce cleaner long-term memories.
+1. **Structured Milestones Upstream:**
+   Raw tool observation transcripts often contain trial-and-error noise. In contrast, the steps recorded in Agent Board's ledger (`[x] Step`) represent structured task milestones reported by agents, which can be further confirmed or archived during human oversight. Memory tools can ingest monthly journal files following the `progress-journal-YYYY-MM.md` convention (e.g. `progress-journal-2026-10.md`) as structured progress records across months, providing clearer milestone history than unparsed terminal logs.
 2. **Surface Memory Status Downstream:**
    Memory tools operate in the dark background; developers often wonder whether context was successfully injected. Agent Board surfaces session health and readiness without cluttering the primary prompt window.
 
