@@ -165,7 +165,7 @@ gh pr view <PR> -R WenyuChiou/agent-board --comments
 node scripts/pr-check.mjs --pr <PR>      # also prints the latest Review: verdict and whether it is for your head
 ```
 
-`Review: REQUEST CHANGES <sha>` lists findings. Fix each finding, merge `main` (step 9), run preflight again and update Checks, push, answer each finding in a comment that names the commit that fixed it, then comment `Ready for review <new full head sha>`. How many review rounds there are, and what happens after the second REQUEST CHANGES, are in [docs/dev/team-process.md, From claim to merge](dev/team-process.md#from-claim-to-merge). After `Review: APPROVE <sha>`, push nothing unless asked: any push needs a new verdict.
+`Review: REQUEST CHANGES <sha>` lists findings. Fix each finding, merge `main` (step 9), run preflight again and update Checks, push, answer each finding in a comment that names the commit that fixed it, then comment `Ready for review <new full head sha>`. How many review rounds there are, and what happens after the second REQUEST CHANGES, are in [docs/dev/team-process.md, From claim to merge](dev/team-process.md#from-claim-to-merge). After `Review: APPROVE <sha>`, push nothing unless asked. A later push needs a new verdict unless it only merges `main` without conflicts and with nothing else in the merge commit (CONTRIBUTING rules 4 and 9).
 
 A question goes on the issue, not on the pull request and not in a chat:
 
@@ -197,7 +197,7 @@ Fragments in `changelog.d/` do not conflict, since each pull request adds its ow
 
 ## 10. After the merge, or handing over
 
-You never merge. The maintainer (the owner, or the Claude Code session the owner named maintainer) reviews and merges, deletes the branch, and comments on each issue with the merge commit and the evidence; each `Fixes #N` line closes its issue, while a `Part of #N` line leaves its issue open for the next step. There is nothing left for you to do on this pull request, and its branch is not reused: the next step of a split issue is a new pull request ([CONTRIBUTING.md](../CONTRIBUTING.md#pull-requests) rule 2), from a new branch.
+Someone other than you approves ([CONTRIBUTING.md](../CONTRIBUTING.md#pull-requests) rule 8). Then a collaborator with write access, the maintainer or the owner merges as rule 9 says, and comments on each issue with the merge commit and the evidence; GitHub deletes eligible same-repository branches; a fork owner may need to delete their branch; each `Fixes #N` line closes its issue, while a `Part of #N` line leaves its issue open for the next step. There is nothing left for you to do on this pull request, and its branch is not reused: the next step of a split issue is a new pull request ([CONTRIBUTING.md](../CONTRIBUTING.md#pull-requests) rule 2), from a new branch.
 
 If you stop before the work is done, push your branch, then:
 
@@ -205,3 +205,29 @@ If you stop before the work is done, push your branch, then:
 gh issue comment <N> -R WenyuChiou/agent-board --body "Handover: <branch>, done: …, left: …, checks run: …"
 gh issue edit <N> -R WenyuChiou/agent-board --remove-label claimed
 ```
+
+## 11. Review and merge someone else's pull request
+
+With write access to this repository you may also review and merge pull requests you did not write ([CONTRIBUTING.md](../CONTRIBUTING.md#pull-requests) rules 8 and 9). In this step `<PR>` is the pull request you are reviewing, and `<N>` is each linked issue. Take one marked `Ready for review <sha>` that nobody is reviewing, and say so first:
+
+```sh
+gh pr list -R WenyuChiou/agent-board --state open
+gh pr view <PR> -R WenyuChiou/agent-board --json headRefOid,body,isDraft
+gh api repos/WenyuChiou/agent-board/issues/<PR>/comments --paginate
+gh pr comment <PR> -R WenyuChiou/agent-board --body "Reviewing: <GitHub login or agent>"
+gh pr diff <PR> -R WenyuChiou/agent-board
+gh api repos/WenyuChiou/agent-board/pulls/<PR>/reviews --paginate
+gh api repos/WenyuChiou/agent-board/pulls/<PR>/comments --paginate
+gh pr checks <PR> -R WenyuChiou/agent-board
+```
+
+Read the diff against the issues on the body's first lines, and each P0 or P1 finding from Greptile or Codex. If either bot did not review this head (a fork, a failed or stuck run), run a code review of the head yourself, such as a local Codex run or your agent's code-review subagent, and post its result on the pull request. Then post one verdict with all findings at once: `Review: APPROVE <full head sha> by <login>` with what you verified, or `Review: REQUEST CHANGES <full head sha> by <login>` with each finding by file and line. Your own agent, lane or subagent cannot approve your own pull request, except that a pull request the maintainer wrote may be approved by a code-review subagent the maintainer runs, whose verdict the maintainer posts as given (rule 8).
+
+Merge only when the latest verdict is an approval satisfying rule 8 for the current head (or for a head the branch has since moved from only by a clean merge of `main`, without conflicts or anything else in the merge commit), and impact planning, CI validation, every selected CI job, every other applicable workflow in `.github/workflows/`, and the `Greptile Review` check have succeeded on the current head; when Greptile did not review that head, your own code review posted for it stands in for that check (rule 9). Skipped, neutral, cancelled or missing selected checks are not passes; only groups explicitly omitted as unaffected by the plan may be skipped (rule 9):
+
+```sh
+gh pr merge <PR> -R WenyuChiou/agent-board --squash --match-head-commit <head sha>
+gh issue comment <N> -R WenyuChiou/agent-board --body "Fixed by #<PR>, merged as <merge sha>. <evidence>"
+```
+
+GitHub deletes a merged branch from this repository. A governance pull request also needs the owner's approval quoted in its body (rule 12), and a release pull request stays with the maintainer ([Releases](../CONTRIBUTING.md#releases)).
