@@ -13,7 +13,7 @@ import { pressTarget } from '../hooks/pane'
 import { dashboardHtml } from '../hooks/dashboard'
 import { buildView, IDLE_MS, OLDER_SHOWN, parseSeen, relativeTime, seenJson, seenPath, SWEEP_ARMED_KEY, withSeen } from '../hooks/view'
 import type { TaskRow, View } from '../hooks/view'
-import { parseProgress } from '../hooks/parse'
+import { doneKey, parseProgress } from '../hooks/parse'
 import { chatText, peekInbox } from '../hooks/board'
 import { answerAgentPrompt, blockId, CLAIM_MS, isInboxFile, takenName, withAgentPrompts } from '../hooks/inbox'
 import { applyTaskCreate, applyTaskUpdate, completionKey, completionOverlay, emptyMirror } from '../hooks/mirror'
@@ -174,6 +174,7 @@ type World = {
   reads?: string[]
   written?: string[]
   beforeRead?: (path: string) => void
+  afterRead?: (path: string) => void
   mtimes?: Record<string, number>
   // Paths that exist but refuse to be read (too big, locked).
   unreadable?: Set<string>
@@ -535,6 +536,7 @@ const engineBeneath = (on: On, world: World): MockClock => {
       return { deny: 'EIO' }
     }
     const text = world.files.get(path)
+    world.afterRead?.(path)
     if (world.unreadable?.has(path) || (world.failQuestionCapture === 'read' && path.includes('-questions-source-'))) return { deny: 'EFBIG' }
     return text === undefined ? { deny: 'ENOENT' } : { value: text }
   })
@@ -8197,6 +8199,313 @@ test('an upgrade’s first look at the inbox counts the files already there as r
   expect(world.asked?.some(prompt => prompt.includes('Old reply'))).toBe(false)
 })
 
+test('a hand edit that lands between the board\'s read and its write is kept', async ($, on) => {
+  const before = '# Progress\n\n## Notes\n### Hand kept\n- [~] Draft\n'
+  const edited = before.replace('- [~] Draft', '- [x] Draft')
+  const world: World = { files: new Map([[FILE, before]]), mtime: 1, hasTasks: true }
+  engineBeneath(on, world)
+  await start($, 'Keep the hand edit')
+  world.afterRead = path => {
+    if (path !== FILE) return
+    world.afterRead = undefined
+    world.files.set(FILE, edited)
+    world.mtime += 1
+  }
+  await $.tool.call({ tool: 'TaskCreate', subject: 'Board step', description: '' })
+
+  const text = world.files.get(FILE) ?? ''
+  expect(text).toContain('- [x] Draft')
+  expect(text).toContain('<!-- auto session=2be48af2 agent=claude')
+  expect(text).toContain('- [ ] Board step')
+})
+
+test('another session\'s block written in that gap is kept', async ($, on) => {
+  const before = '# Progress\n'
+  const theirs = '\n## Other\n<!-- auto session=abcddcba agent=codex state=working updated=2026-10-16T12:00:00Z -->\n### Other work\n- [~] Keep working\n<!-- /auto session=abcddcba -->\n'
+  const world: World = { files: new Map([[FILE, before]]), mtime: 1, hasTasks: true }
+  engineBeneath(on, world)
+  await start($, 'Keep both blocks')
+  world.afterRead = path => {
+    if (path !== FILE) return
+    world.afterRead = undefined
+    world.files.set(FILE, before + theirs)
+    world.mtime += 1
+  }
+  await $.tool.call({ tool: 'TaskCreate', subject: 'Board step', description: '' })
+
+  const text = world.files.get(FILE) ?? ''
+  expect(text).toContain(theirs.trim())
+  expect(text).toContain('<!-- auto session=2be48af2 agent=claude')
+  expect(text).toContain('- [ ] Board step')
+})
+
+test('a file that keeps changing through every try is not written over', async ($, on) => {
+  const before = '# Progress\n\n## Notes\n### Hand kept\n- [~] Draft 0\n'
+  const world: World = { files: new Map([[FILE, before]]), mtime: 1, hasTasks: true, written: [] }
+  engineBeneath(on, world)
+  await start($, 'Keep concurrent edits')
+  let edits = 0
+  world.written = []
+  world.afterRead = path => {
+    if (path !== FILE) return
+    edits += 1
+    world.files.set(FILE, before.replace('Draft 0', `Draft ${edits}`))
+    world.mtime += 1
+  }
+  await $.tool.call({ tool: 'TaskCreate', subject: 'Board step', description: '' })
+  world.afterRead = undefined
+
+  expect(world.written.filter(path => path === FILE)).toHaveLength(0)
+  expect(world.files.get(FILE)).toBe(before.replace('Draft 0', `Draft ${edits}`))
+  expect(edits).toBeGreaterThanOrEqual(6)
+  // The mirror keeps the pending block for the next queued write.
+  await $.tool.call({ tool: 'TaskUpdate', taskId: '1', status: 'in_progress' })
+  expect(world.files.get(FILE) ?? '').toContain('- [~] Board step')
+  expect(world.files.get(FILE) ?? '').toContain(`Draft ${edits}`)
+})
+
+test('a quick add reports failure when the file keeps moving before every write', async ($, on) => {
+  const before = '# Progress\n\n## Notes\n### Hand kept\n- [~] Draft 0\n'
+  const world: World = { files: new Map([[FILE, before]]), mtime: 1, hasTasks: true, written: [] }
+  engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/persona_framework', surface: 'terminal', isInteractive: true })
+  let edits = 0
+  world.written = []
+  world.afterRead = path => {
+    if (path !== FILE) return
+    edits += 1
+    world.files.set(FILE, before.replace('Draft 0', `Draft ${edits}`))
+    world.mtime += 1
+  }
+  const result = await $.command.run({ ...TIDY, args: 'add Notes: Added task; Next step' })
+  world.afterRead = undefined
+
+  expect(result.text).toBe(ZH_TW.quickUnreadable)
+  expect(world.written.filter(path => path === FILE)).toHaveLength(0)
+  expect(world.files.get(FILE) ?? '').not.toContain('### Added task')
+  const retry = await $.command.run({ ...TIDY, args: 'add Notes: Added task; Next step' })
+  expect(retry.text).not.toBe(ZH_TW.quickUnreadable)
+  expect((world.files.get(FILE) ?? '').match(/### Added task/g)).toHaveLength(1)
+})
+
+test('an archive sweep keeps aging metadata and reports no moves when every write conflicts', async ($, on) => {
+  const before = '# Progress\n\n## Finished\n### Keep the record\n- [x] Done\n\n## Notes\n### Hand kept\n- [~] Draft 0\n'
+  const key = doneKey('Finished', 'Keep the record')
+  const world: World = { files: new Map([[FILE, before]]), mtime: 1, hasTasks: true, store: { inboxDone: {}, autoConnectOff: true }, written: [] }
+  engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/persona_framework', surface: 'terminal', isInteractive: true })
+  const seen = (world.store!.doneSeen as Record<string, number>)[key]
+  expect(seen).toBeDefined()
+  let edits = 0
+  world.written = []
+  world.afterRead = path => {
+    if (path !== FILE) return
+    edits += 1
+    world.files.set(FILE, before.replace('Draft 0', `Draft ${edits}`))
+    world.mtime += 1
+  }
+  const result = await $.command.run(TIDY)
+  world.afterRead = undefined
+
+  expect(result.text).toBe(ZH_TW.tidyNothing)
+  expect(world.written.filter(path => path === FILE)).toHaveLength(0)
+  expect(world.files.get(FILE) ?? '').toContain('### Keep the record')
+  expect((world.store!.doneSeen as Record<string, number>)[key]).toBe(seen)
+  expect(world.files.has(ARCHIVE)).toBe(false)
+})
+
+test('a manual tick reports failure and leaves no journal entry when every write conflicts', async ($, on) => {
+  const world: World = { files: new Map([[FILE, JOBS]]), mtime: 1, hasTasks: true, written: [] }
+  engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/persona_framework', surface: 'terminal', isInteractive: true })
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
+  let edits = 0
+  world.written = []
+  world.afterRead = path => {
+    if (path !== FILE) return
+    edits += 1
+    world.files.set(FILE, `${JOBS}\n<!-- Hand edit ${edits} -->\n`)
+    world.mtime += 1
+  }
+  await ui.press({ key: '求職::Google 暑期實習::1::done' })
+  world.afterRead = undefined
+
+  expect(world.written.filter(path => path === FILE)).toHaveLength(0)
+  expect(world.files.get(FILE) ?? '').toContain('- [?] 推薦信 — 等教授回覆')
+  expect(world.written.some(path => path.includes('-journal-'))).toBe(false)
+  expect(await ui.find({ type: 'Text', text: ZH_TW.boardTickGone })).toBeDefined()
+  await ui.press({ key: '求職::Google 暑期實習::1::done' })
+  expect(world.files.get(FILE) ?? '').toContain('- [x] 推薦信 — 等教授回覆')
+  await ui.unmount()
+})
+
+test('a write that is written over and then cannot be made again is reported as not kept', async ($, on) => {
+  const world: World = { files: new Map([[FILE, JOBS]]), mtime: 1, hasTasks: true, written: [] }
+  engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/persona_framework', surface: 'terminal', isInteractive: true })
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
+  let edits = 0
+  world.written = []
+  world.afterWrite = () => {
+    world.afterRead = path => {
+      if (path !== FILE) return
+      edits += 1
+      world.files.set(FILE, `${JOBS}\n<!-- Hand edit ${edits} -->\n`)
+      world.mtime += 1
+    }
+    return JOBS
+  }
+  await ui.press({ key: '求職::Google 暑期實習::1::done' })
+  world.afterRead = undefined
+
+  expect(world.written.filter(path => path === FILE)).toHaveLength(1)
+  expect(edits).toBeGreaterThanOrEqual(5)
+  expect(world.files.get(FILE) ?? '').toContain('- [?] 推薦信 — 等教授回覆')
+  expect(world.written.some(path => path.includes('-journal-'))).toBe(false)
+  expect(await ui.find({ type: 'Text', text: ZH_TW.boardTickGone })).toBeDefined()
+  await ui.unmount()
+})
+
+test('a tick that is kept while another writer adds other text is reported as done', async ($, on) => {
+  const before = '# Progress\n\n## Demo\n### Checklist\n- [ ] First step\n- [ ] Last step\n'
+  const world: World = { files: new Map([[FILE, before]]), mtime: 1, hasTasks: true, store: { autoConnectOff: true, opened: ['others'] }, written: [] }
+  engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/persona_framework', surface: 'desktop', isInteractive: true })
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
+  await ui.press({ key: 'Demo::Checklist' })
+  world.written = []
+  world.afterWrite = () => `${world.files.get(FILE) ?? ''}\n<!-- Another writer's note -->\n`
+  await ui.press({ key: 'Demo::Checklist::tick' })
+
+  const text = world.files.get(FILE) ?? ''
+  expect(world.written.filter(path => path === FILE)).toHaveLength(1)
+  expect(text).toContain('- [x] First step')
+  expect(text).toContain('<!-- Another writer\'s note -->')
+  const journal = [...world.files].filter(([path]) => path.includes('-journal-')).map(([, lines]) => lines).join('\n')
+  expect(journal.split('\n').filter(line => line.includes('First step'))).toHaveLength(1)
+  expect(besideButton(await ui.findAll({ type: 'Box' }), 'Demo::Checklist::tick')).toContain(ZH_TW.boardTicked('First step'))
+  await ui.unmount()
+})
+
+test('a final write is still reported when its read-back differs', async ($, on) => {
+  const world: World = { files: new Map([[FILE, JOBS]]), mtime: 1, hasTasks: true, written: [] }
+  engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/persona_framework', surface: 'terminal', isInteractive: true })
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
+  const undo = (): string => { world.afterWrite = undo; return JOBS }
+  world.written = []
+  world.afterWrite = undo
+  await ui.press({ key: '求職::Google 暑期實習::1::done' })
+  world.afterWrite = undefined
+
+  expect(world.written.filter(path => path === FILE)).toHaveLength(3)
+  expect(world.files.get(FILE) ?? '').toContain('- [?] 推薦信 — 等教授回覆')
+  expect(world.written.some(path => path.includes('-journal-'))).toBe(true)
+  await ui.unmount()
+})
+
+test('an archive already done when another writer adds other text reports its moves', async ($, on) => {
+  const before = '# Progress\n\n## Finished\n### Keep the record\n- [x] Done\n\n## Notes\n### Hand kept\n- [~] Draft 0\n'
+  const world: World = { files: new Map([[FILE, before]]), mtime: 1, hasTasks: true, store: { inboxDone: {}, autoConnectOff: true }, written: [] }
+  engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/persona_framework', surface: 'terminal', isInteractive: true })
+  world.written = []
+  world.afterWrite = () => `${world.files.get(FILE) ?? ''}\n<!-- Another writer's note -->\n`
+  const result = await $.command.run(TIDY)
+
+  const text = world.files.get(FILE) ?? ''
+  expect(world.written.filter(path => path === FILE)).toHaveLength(1)
+  expect(text).not.toContain('### Keep the record')
+  expect(text).toContain('<!-- Another writer\'s note -->')
+  expect((world.files.get(ARCHIVE) ?? '').match(/### Keep the record/g)).toHaveLength(1)
+  expect(result.text).toBe(ZH_TW.tidyMoved(1))
+})
+
+test('a sweep whose write never lands copies nothing to the archive, and the next sweep copies each block once', async ($, on) => {
+  const before = '# Progress\n\n## Finished\n### First record\n- [x] Done\n\n### Second record\n- [x] Done\n\n## Notes\n### Hand kept\n- [~] Draft 0\n'
+  const world: World = { files: new Map([[FILE, before]]), mtime: 1, hasTasks: true, store: { inboxDone: {}, autoConnectOff: true }, written: [] }
+  engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/persona_framework', surface: 'terminal', isInteractive: true })
+  let edits = 0
+  world.written = []
+  world.afterRead = path => {
+    if (path !== FILE) return
+    edits += 1
+    world.files.set(FILE, before.replace('Draft 0', `Draft ${edits}`))
+    world.mtime += 1
+  }
+  const failed = await $.command.run(TIDY)
+  world.afterRead = undefined
+
+  expect(failed.text).toBe(ZH_TW.tidyNothing)
+  expect(world.written.filter(path => path === FILE)).toHaveLength(0)
+  expect(world.files.has(ARCHIVE)).toBe(false)
+  expect(world.files.get(FILE) ?? '').toContain('### First record')
+  expect(world.files.get(FILE) ?? '').toContain('### Second record')
+  await $.command.run(TIDY)
+  const archive = world.files.get(ARCHIVE) ?? ''
+  expect(archive.match(/### First record/g)).toHaveLength(1)
+  expect(archive.match(/### Second record/g)).toHaveLength(1)
+  expect(world.files.get(FILE) ?? '').not.toContain('### First record')
+  expect(world.files.get(FILE) ?? '').not.toContain('### Second record')
+})
+
+test('a sweep whose first write is overwritten and later tries conflict reports no moves', async ($, on) => {
+  const before = '# Progress\n\n## Finished\n### Keep the record\n- [x] Done\n\n## Notes\n### Hand kept\n- [~] Draft 0\n'
+  const key = doneKey('Finished', 'Keep the record')
+  const world: World = { files: new Map([[FILE, before]]), mtime: 1, hasTasks: true, store: { inboxDone: {}, autoConnectOff: true }, written: [] }
+  engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/persona_framework', surface: 'terminal', isInteractive: true })
+  const seen = (world.store!.doneSeen as Record<string, number>)[key]
+  expect(seen).toBeDefined()
+  let edits = 0
+  world.written = []
+  world.afterWrite = () => {
+    world.afterRead = path => {
+      if (path !== FILE) return
+      edits += 1
+      world.files.set(FILE, before.replace('Draft 0', `Draft ${edits}`))
+      world.mtime += 1
+    }
+    return before
+  }
+  const result = await $.command.run(TIDY)
+  world.afterRead = undefined
+
+  expect(world.written.filter(path => path === FILE)).toHaveLength(1)
+  expect(result.text).toBe(ZH_TW.tidyNothing)
+  expect(world.files.get(FILE) ?? '').toContain('### Keep the record')
+  expect((world.store!.doneSeen as Record<string, number>)[key]).toBe(seen)
+})
+
+test('a row archive that never writes copies nothing, and a retry copies the task once', async ($, on) => {
+  const before = '# Progress\n\n## Finished\n### First record\n- [ ] Next\n\n## Notes\n### Hand kept\n- [~] Draft 0\n'
+  const world: World = { files: new Map([[FILE, before]]), mtime: 1, hasTasks: true, store: { inboxDone: {}, autoConnectOff: true }, written: [] }
+  engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/persona_framework', surface: 'terminal', isInteractive: true })
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
+  await ui.press({ key: 'section::others' })
+  await ui.press({ key: 'Finished::First record' })
+  let edits = 0
+  world.written = []
+  world.afterRead = path => {
+    if (path !== FILE) return
+    edits += 1
+    world.files.set(FILE, before.replace('Draft 0', `Draft ${edits}`))
+    world.mtime += 1
+  }
+  await ui.press({ key: 'Finished::First record::archive' })
+  world.afterRead = undefined
+
+  expect(world.written.filter(path => path === FILE)).toHaveLength(0)
+  expect(world.files.has(ARCHIVE)).toBe(false)
+  expect(world.files.get(FILE) ?? '').toContain('### First record')
+  await ui.press({ key: 'Finished::First record::archive' })
+  expect((world.files.get(ARCHIVE) ?? '').match(/### First record/g)).toHaveLength(1)
+  expect(world.files.get(FILE) ?? '').not.toContain('### First record')
+  await ui.unmount()
+})
+
 test('a write another session makes between this one’s read and write is not lost, and nothing is archived twice', async ($, on) => {
   const theirs = `${OLD_DONE}\n## other\n### B 的工作\n- [ ] 一步\n`
   const world: World = { files: new Map([[FILE, OLD_DONE]]), mtime: 1, hasTasks: true, afterWrite: () => theirs }
@@ -10150,4 +10459,40 @@ test('YAML named escapes decode every PyYAML character in path data', () => {
   for (const [escape, value] of Object.entries({ a: '\x07', b: '\b', e: '\x1b', f: '\f', v: '\v', N: '\x85', _: '\xa0', L: '\u2028', P: '\u2029' })) {
     expect(connectDataRoots(`command: "sh '/scratch/a\\${escape}b/progress-report.sh' hermes turn"`)).toContain(`/scratch/a${value}b`)
   }
+})
+
+test('a Claude print-mode session writes no block and leaves its existing block alone', async ($, on) => {
+  const prior = `## Synthetic project
+<!-- auto session=${SESSION.slice(0, 8)} agent=claude state=waiting updated=2026-10-27T12:00:00Z -->
+### Existing work
+- [ ] Preserve this block
+<!-- /auto session=${SESSION.slice(0, 8)} -->
+`
+  const shared: Record<string, unknown> = { autoConnectOff: true }
+  const world: World = { files: new Map([[FILE, prior]]), mtime: 1, hasTasks: true, shared }
+  const clock = engineBeneath(on, world)
+  const seen = outside(on, world)
+  await $.session.start({ cwd: '/work/demo', surface: null, isInteractive: false })
+  await $.turn.start({ text: 'Synthetic review', turnId: 'print-turn' })
+  await $.tool.call({ tool: 'TaskCreate', subject: 'Review synthetic work', description: '', metadata: { waiting: 'you', ask: 'review', why: 'Ready to review, OK?' } })
+  await clock.advance(5000)
+  expect(world.files.get(FILE)).toBe(prior)
+  expect(JSON.parse(world.files.get(QUESTIONS) ?? '{"records":[]}').records).toEqual([])
+  const mirror = shared[`mirror:${SESSION}`] as ProgressMirror
+  expect(mirror.isRun).toBe(true)
+  expect(mirror.tasks[0]?.waiting).toBe('you')
+  const view = buildView(parseProgress(prior), [], mirror, Date.parse('2026-10-27T12:00:10Z'), 0, {}, ZH_TW, [], {}, emptyQuestions())
+  expect(view.waiting).toEqual([])
+  expect(view.overview.waiting).toBe(0)
+  expect(seen.status.at(-1) ?? '').not.toContain(ZH_TW.statusWaiting(1))
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
+  expect(await ui.find({ type: 'Button', key: 'mine::1::沒問題' })).toBeUndefined()
+  expect(await ui.find({ type: 'Text', text: '● 0' })).toBeDefined()
+  await ui.unmount()
+  world.files.set(FILE, '')
+  world.mtime += 1
+  await $.tool.call({ tool: 'TaskUpdate', taskId: '1', status: 'in_progress' })
+  await clock.advance(5000)
+  expect(world.files.get(FILE)).toBe('')
+  expect(JSON.parse(world.files.get(QUESTIONS) ?? '{"records":[]}').records).toEqual([])
 })

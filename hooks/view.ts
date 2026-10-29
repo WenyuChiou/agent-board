@@ -1111,7 +1111,7 @@ export const buildView = (
     const parts = splitNote(turn.text)
     return [{ key: `inbox::${id}`, questionId: id, dir: turn.dir ?? null, project: turn.project, task: '', context: '', ...parts, when: '', at: turn.at, ...askOf(parts.text, parts.note), where: 'other' as const, agent: turn.agent, session: turn.id ?? '', sessionId: null, resumeVia: null, reopen: null, hideKey: id, step: null, target: null }]
   })
-  const own = mine === null ? [] : ownWaiting(mine, observed?.keys).map(item => ({ ...item, questionId: item.hideKey }))
+  const own = mine === null || mine.isRun === true ? [] : ownWaiting(mine, observed?.keys).map(item => ({ ...item, questionId: item.hideKey }))
   // Each record by its id, once: a board holds hundreds of questions and thousands of records.
   const recordOf = new Map<string, QuestionRecord>()
   const rankOf = new Map<string, number>()

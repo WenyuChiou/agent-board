@@ -52,8 +52,13 @@ node ~/.agent-board/agent-board.mjs --codex-report
 {"title":"Check the installer","project":"Agent-Board","state":"working","steps":["- [x] Read setup","- [~] Run tests"]}
 ```
 
-`CODEX_THREAD_ID` binds to the current thread, never a name or a conversation file.
-`--session` is for explicit offline fixtures, not for a skill to select another chat.
+`--session` or `CODEX_THREAD_ID`, when supplied, binds to that exact thread. Otherwise the
+command binds only when one recent working or waiting Codex hook record has the same cleaned
+working-folder name. Older records without a folder and runs, weak or strong, are excluded; zero or
+multiple candidates bind nothing. This lets a Codex App session report without the variable.
+If no session binds, the command exits non-zero with one board sentence; the agent continues
+its work without repeating that notice. `--session` is for explicit offline fixtures, not for
+a skill to select another chat.
 The block id is derived from the full thread id; its full ownership digest prevents a
 short-id collision from overwriting another block. Only that block changes. Explicit
 reports work in an existing desktop conversation. Skill discovery may need a new turn
@@ -86,11 +91,20 @@ file is read in pieces of 4 KiB until the one that holds the first line break, s
 after the break is read into memory; only the bytes before the break are decoded, and of that
 record they keep four short fields (`originator`, `source`, `thread_source`,
 `parent_thread_id`) and nothing else. Those fields say whether a person started the session:
-a `codex exec` run, a helper thread or a subagent is a run Codex started for itself, written
-with `origin=run` (and `parent=` when its parent is known), and the board shows it as one line on
-its parent's row instead of a row of its own ([FORMAT.md](FORMAT.md#runs-an-agent-started)). A
-session with no history file is only a hint, and a later event with one replaces it. A Codex
-that gives no such record leaves the session a row.
+a `codex exec` run, a helper thread, a subagent, a non-user `thread_source`, a
+`parent_thread_id`, or a `codex_exec` / `codex_sdk` / `codex_mcp` originator proves a run.
+It keeps its local session record but writes no block, row, run count or question
+([FORMAT.md](FORMAT.md#runs-an-agent-started)). A weak hint, such as no history path,
+keeps the earlier marked-block behavior; a later strong signal replaces it.
+
+A first explicit report without a hook record and the board script's tidy can also find
+the session's own history under `CODEX_HOME/sessions/YYYY/MM/DD/` (or `--codex-dir`,
+else the home's `.codex`). Lookup reads at most 60 directories, newest first, and uses the
+same exact filename rule and first-record reader. Tidy checks at most 50 sessions, newest
+block first, caching each result for that pass. An old run block, marked or unmarked,
+moves through the normal archive path as soon as its record proves it is a run, including
+a block with a question. Missing, unreadable or unrecognized history provides no run proof.
+The optional Claude plugin sweep does not open history files and keeps its current age rules.
 A permission event marks waiting; no output approves a tool or merge. `Stop` marks activity waiting, never conversation termination or task completion. Detailed steps and completion still come from explicit reports.
 Disconnected or untrusted hooks cannot update activity; existing stale-time rules apply.
 

@@ -387,6 +387,7 @@ export const questionFilesKey = (
 type Observation = { scope: string; session: string; index: number | string; text: string; isWaiting: boolean; producer: string; producerRevisions?: string[]; producerSources?: string[]; source: QuestionSource }
 
 const ownObservations = (mine: ProgressMirror): Observation[] => {
+  if (mine.isRun === true) return []
   const own = shortId(mine.sessionId)
   const scope = questionScope(mine.project, 'claude', own)
   return mine.tasks.map((task, index) => ({ scope, session: own, index, text: stepWords(task).trim(), isWaiting: waitsOnYou(mine, task) && task.blocked === null, producer: questionToken(task), source: { kind: 'own', project: mine.project, task: mine.title, context: mine.context, text: stepWords(task).trim(), agent: 'claude', session: own, data: JSON.stringify({ task, title: mine.title, context: mine.context }) } }))
