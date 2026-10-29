@@ -8,7 +8,7 @@ import { spawnSync } from 'node:child_process'
 import { exchange } from '../scripts/exchange.mjs'
 import { dispatchCodex } from '../scripts/codex-owner.mjs'
 import { bindingOf, progressBlock, commandOf, codexRequest } from '../scripts/exchange-contract.ts'
-import { futureTimeKey, isStale, observedTime, parseProgress, STALE_MS } from '../hooks/parse.ts'
+import { DEFAULT_STALE_MS, futureTimeKey, isStale, observedTime, parseProgress, parseStaleMs, STALE_MS } from '../hooks/parse.ts'
 import { EN } from '../hooks/strings-en.ts'
 import { ZH_TW } from '../hooks/i18n.ts'
 import { ZH_CN } from '../hooks/strings-zh-cn.ts'
@@ -23,6 +23,35 @@ test('plain Node loads future-clock parser helpers without a bundler', () => {
   assert.equal(clock.isFuture, true)
   assert.equal(isStale(auto, now + STALE_MS + 1, clock.updated), true)
   assert.equal(auto.updated, stamp)
+})
+
+test('parseStaleMs supports custom values, clamps to 1 minute, and falls back to default', () => {
+  assert.equal(parseStaleMs(undefined), DEFAULT_STALE_MS)
+  assert.equal(parseStaleMs(null), DEFAULT_STALE_MS)
+  assert.equal(parseStaleMs(''), DEFAULT_STALE_MS)
+  assert.equal(parseStaleMs('invalid'), DEFAULT_STALE_MS)
+  assert.equal(parseStaleMs('300000'), 300000)
+  assert.equal(parseStaleMs(600000), 600000)
+  assert.equal(parseStaleMs('1000'), 60000)
+  assert.equal(parseStaleMs(500), 60000)
+})
+
+test('isStale respects configurable staleness threshold', () => {
+  const now = Date.parse('2026-10-16T12:00:00Z')
+  const auto = {
+    agent: 'codex',
+    session: 'sess-1234',
+    state: 'working',
+    updated: now - 10 * 60 * 1000,
+    resume: null,
+    isRun: false
+  }
+  // Default is 12 hours: after 10 minutes, it is not stale
+  assert.equal(isStale(auto, now, auto.updated), false)
+  // With custom 5 minute staleness: after 10 minutes, it is stale
+  assert.equal(isStale(auto, now, auto.updated, 5 * 60 * 1000), true)
+  // With custom 15 minute staleness: after 10 minutes, it is still active
+  assert.equal(isStale(auto, now, auto.updated, 15 * 60 * 1000), false)
 })
 
 const fixture = async (t, agent = 'dot') => {

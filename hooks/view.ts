@@ -9,7 +9,7 @@ import type { ConfirmRef } from './blocks'
 import { ciWords, prWords } from './github'
 import { doingTask, fallbackTitle, isAnswered, waitsOnYou } from './mirror'
 import type { Tone } from './palette'
-import { countSteps, currentStepIndex, doneKey, FUTURE_SKEW_MS, futureTimeKey, isHereProject, isMarksComplete, isStale, isTaskComplete, observedTime, parseProgress, RESUME } from './parse'
+import { countSteps, currentStepIndex, doneKey, FUTURE_SKEW_MS, futureTimeKey, isHereProject, isMarksComplete, isStale, isTaskComplete, observedTime, parseProgress, RESUME, STALE_MS } from './parse'
 import { sha256 } from './sha256'
 import { observeQuestions, pendingQuestionSlot, questionScope, questionSlot, questionWords, sourceSnapshot } from './questions'
 import type { QuestionLedger, QuestionProofs } from './questions'
@@ -774,6 +774,7 @@ export const buildView = (
   pending: readonly PendingTurn[] = [],
   frozen: ReadonlySet<string> = new Set(),
   observe: typeof observeQuestions = observeQuestions,
+  staleMs: number = STALE_MS,
 ): View => {
   // A run an agent started for itself is no row and asks no one (#399); the older block of a twin
   // pair is no second row. What is left is what the rows, the questions and the counts read.
@@ -852,7 +853,7 @@ export const buildView = (
       const isIdle = !isComplete && !isDue && hasTime(lastActive) && now - lastActive > IDLE_MS
       const context = contextOf(task)
       // Questions travel with an inactive session rather than asking for a live reply.
-      const stale = isStale(task.auto, now, updated)
+      const stale = isStale(task.auto, now, updated, staleMs)
       const isInactive = !isManual && (isComplete || stale || task.auto?.state === 'ended')
       if (isInactive) inactiveScopes.set(scope, updated)
       else if (!isManual) liveScopes.add(scope)
@@ -1170,7 +1171,7 @@ export const buildView = (
     let isInactiveSource = false
     if (source.kind === 'block' && !liveScopes.has(record.scope)) {
       // Unknown historical source shapes retain the existing review behavior.
-      isInactiveSource = saved !== null && saved.auto !== null && (saved.auto.state === 'ended' || saved.auto.state === 'done' || isStale(saved.auto, now, observedTime(saved.auto, now, seen).updated) || isMarksComplete(saved.steps))
+      isInactiveSource = saved !== null && saved.auto !== null && (saved.auto.state === 'ended' || saved.auto.state === 'done' || isStale(saved.auto, now, observedTime(saved.auto, now, seen).updated, staleMs) || isMarksComplete(saved.steps))
     }
     const isStopped = record.isArchived || isInactiveSource || inactiveScopes.has(record.scope)
     const stage = isStopped ? 'older' : age.stage
