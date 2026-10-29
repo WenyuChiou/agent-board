@@ -24,8 +24,8 @@
         "scope": ["hooks/**", "scripts/**"]
       },
       {
-        "rule": "hooks/board-script.ts and hooks/released.ts are bundles built by scripts/build-board.ts with Bun 1.4.2. Never ask for a hand edit there; when a source file they are built from changes, the PR rebuilds them or its body says 'maintainer rebuilds at merge'.",
-        "scope": ["hooks/**"]
+        "rule": "hooks/board-script.ts is built by scripts/build-board.ts, and hooks/released.ts (with tests/fixtures/released.ts) by scripts/build-released.ts, both with Bun 1.4.2. Never ask for a hand edit there; when a source file they are built from changes, the PR rebuilds them or its body says 'maintainer rebuilds at merge'.",
+        "scope": ["hooks/**", "scripts/**"]
       }
     ]
   }
