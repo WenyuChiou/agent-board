@@ -5,9 +5,10 @@ import { scanBlocks } from './blocks'
 import type { Origin } from './runs'
 
 // `origin`, `parent` and `isWeak` say who started the session (#399): a run an agent started for
-// itself is written with `origin=run`, and `parent=` names the session that started it.
+// itself keeps only a session record; weak hints retain the legacy block mark and parent.
 export type CodexReport = Origin & {
   session: string
+  folder?: string
   turn: string | null
   state: 'working' | 'waiting' | 'done' | 'ended'
   title: string
@@ -28,6 +29,9 @@ const line = (value: unknown): string => {
   if (!clean || clean.length > 500) throw new Error('INVALID_TEXT')
   return clean
 }
+
+// The same heading the board reads for a project (hooks/parse.ts).
+const PROJECT_HEADING = /^##\s+(.+?)\s*#*\s*$/
 
 const OPENCLAW_WORKSPACE = /[\\/]\.openclaw[\\/]workspace(?:-[^\\/]*)?[\\/]*$/
 
@@ -151,4 +155,27 @@ export const putCodexBlock = (text: string, report: CodexReport, owner: string, 
   const visible = parseProgress(next).flatMap(project => project.tasks).filter(task => task.auto?.session === id && task.auto.agent === agent)
   if (visible.length !== 1) throw new Error('BLOCK_NOT_VISIBLE')
   return next
+}
+
+export const dropCodexBlock = (text: string, owner: string): string => {
+  if (!/^[a-f0-9]{64}$/.test(owner)) return text
+  const lines = text.split('\n')
+  const spans = scanBlocks(lines).filter(span => span.session === owner.slice(0, 8))
+  const span = spans[0]
+  if (spans.length !== 1 || span === undefined) return text
+  const attrs = parseAttrs(lines[span.start] ?? '')
+  if (attrs.owner !== owner || attrs.agent !== 'codex') return text
+  // Like removeAutoBlock, an unfinished block loses only its marker. Slice the
+  // raw span so mixed line endings and every other writer's bytes stay intact.
+  const last = span.isClosed ? span.end : span.start
+  const offset = (index: number): number => lines.slice(0, index).reduce((total, line) => total + line.length + 1, 0)
+  // putCodexBlock opens a section of its own for a new block: when this block is all that section
+  // holds, its heading and the blank line before it go too, so nothing of the withdrawn run is left.
+  let first = span.start
+  const next = lines.slice(last + 1).find(line => line.trim() !== '')
+  if (first > 0 && PROJECT_HEADING.test(lines[first - 1] ?? '') && (next === undefined || PROJECT_HEADING.test(next))) {
+    first -= 1
+    if (first > 0 && (lines[first - 1] ?? '').trim() === '') first -= 1
+  }
+  return text.slice(0, offset(first)) + text.slice(offset(last + 1))
 }

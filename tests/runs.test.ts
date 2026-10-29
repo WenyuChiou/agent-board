@@ -6,7 +6,7 @@ import { dashboardHtml } from '../hooks/dashboard'
 import { applyTaskCreate, emptyMirror } from '../hooks/mirror'
 import { autoOf, parseProgress } from '../hooks/parse'
 import { emptyQuestions, observeQuestions, withCaptures } from '../hooks/questions'
-import { cleanSignal, codexSignal, foldRuns, pickParent, withRunMark, withSignal } from '../hooks/runs'
+import { cleanSignal, codexSignal, foldRuns, isStrongRun, pickParent, withRunMark, withSignal } from '../hooks/runs'
 import { serveModel } from '../hooks/serve'
 import { STRINGS } from '../hooks/strings'
 import { buildView } from '../hooks/view'
@@ -240,7 +240,7 @@ test('the marker is read as origin=run and a parent that is an id, and a parent 
   expect(autoOf('session=abcdef12 agent=claude state=working updated=2026-10-27T12:00:00Z origin=run')?.isRun).toBe(true)
 })
 
-test('a writer marks a print-mode session with origin=run and names the person working in the same project as its parent', () => {
+test('the legacy run serializer retains its mark and names the person working in the same project', () => {
   const mine = { ...emptyMirror('11111111-0000-4000-8000-0000000000aa', 'Demo', NOW, ''), isRun: true as const }
   const written = upsertAutoBlock(file(person), mine, en)
   expect(written).toContain(`origin=run parent=${PERSON}`)
@@ -258,7 +258,7 @@ test('a person\'s session is written with no origin and no parent', () => {
   expect(upsertAutoBlock(file(person), mine, en)).not.toContain('origin=')
 })
 
-test('a print-mode session with no person working in its project is written with origin=run and no parent', () => {
+test('the legacy run serializer retains its mark without a parent when no person is working in its project', () => {
   const mine = { ...emptyMirror('33333333-0000-4000-8000-0000000000cc', 'Elsewhere', NOW, ''), isRun: true as const }
   const written = upsertAutoBlock(file(person), mine, en)
   expect(written).toContain('origin=run')
@@ -382,4 +382,10 @@ test('the runs and background words exist in every language and carry the count'
     expect(s.backgroundRuns(4, '')).toContain('4')
     expect(s.duplicateSession.length).toBeGreaterThan(0)
   }
+})
+
+test('a strong run is suppressed while a weak hint remains eligible for the legacy writer', () => {
+  expect(isStrongRun(withSignal(null, codexSignal(true, 'history', { source: 'exec' })))).toBe(true)
+  expect(isStrongRun(withSignal(null, codexSignal(true, null, null)))).toBe(false)
+  expect(isStrongRun(withSignal(null, codexSignal(true, 'history', { originator: 'Codex Desktop' })))).toBe(false)
 })

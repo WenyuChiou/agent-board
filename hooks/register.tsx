@@ -1456,7 +1456,7 @@ const rewrite = async (
 // writes its own block in between.
 const writeMine = async ($: EngineInterface): Promise<void> => {
   const mirror = await read($, mine)
-  if (mirror === null) return
+  if (mirror === null || mirror.isRun === true) return
   const s = await wordsOf($)
   await rewrite(
     $,
@@ -1731,7 +1731,7 @@ const loadMine = async ($: EngineInterface, cwd: string): Promise<void> => {
   const fresh = emptyMirror(sessionId, await projectName($), await $.clock.now(), cwd)
   // Background processes belong to the old host, even when the conversation resumes.
   // A print-mode session (`claude -p`) is a run an agent started for itself, not a conversation a person
-  // typed into (#399); the block says so, and the board folds it into its parent's row.
+  // typed into (#501); its mirror stays local and writeMine writes no block.
   await update($, mine, () => withRunMark(stored === undefined ? fresh : { ...clearBackgroundJobs({ ...fresh, ...stored }), isTurnRunning: false, cwd: stored.cwd || cwd }, !isInteractiveSession))
 }
 

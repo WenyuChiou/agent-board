@@ -14,7 +14,7 @@ import { chmodSync, closeSync, existsSync, fstatSync, fsyncSync, linkSync, lstat
 import { createHash, randomUUID } from 'node:crypto'
 import { homedir, tmpdir } from 'node:os'
 import { basename, dirname, join, resolve } from 'node:path'
-import { archivableAsking, countManualDone, isHandKeptMoveOn, confirmMatches, confirmTask, CUT_SETTLE_MS, cutBlockLines, cutOffBlocks, cutOffSpans, mergeBlock, takeArchivable, takeManualDone, takeTask, setManualStep } from '../hooks/blocks'
+import { archivableAsking, countManualDone, isHandKeptMoveOn, confirmMatches, confirmTask, CUT_SETTLE_MS, cutBlockLines, cutOffBlocks, cutOffSpans, mergeBlock, scanBlocks, takeArchivable, takeManualDone, takeTask, setManualStep } from '../hooks/blocks'
 import type { ConfirmedTask } from '../hooks/blocks'
 import { startServer } from './board-serve'
 import { immutableQuestionFiles } from './question-files'
@@ -37,6 +37,8 @@ import type { TaskRef } from '../hooks/view'
 import { acknowledgementKeys, archiveQuestionsKept, captureHashOf, captureJson, capturePath, compactQuestionsJson, copiesToKeep, cutOffScopes, emptyQuestions, identitiesToRetire, parseCapture, withCaptures, isAskedBy, isKeptQuestion, isQuestionProof, isQuestionSnapshot, isTornLedger, migratedAnswered, observeQuestions, parseQuestions, questionProofJson, questionProofOf, questionProofPath, questionsPath, resolvedQuestionsToRetire } from '../hooks/questions'
 import type { QuestionCapture, QuestionLedger, QuestionProofs, QuestionRecord } from '../hooks/questions'
 import { sha256 } from '../hooks/sha256'
+import { codexSignal, isStrongRun, runLookupId } from '../hooks/runs'
+import { findSessionFile, readSessionMeta } from './codex-history'
 
 // The line `/progress connect` puts above the bundle sets it.
 const BAKED = (globalThis as { AGENT_BOARD?: { path?: string; lang?: string } }).AGENT_BOARD ?? {}
@@ -842,14 +844,31 @@ const tidyCount = (isNow: boolean, isStrict = false, isCleanUp = false, counted?
   }
   // The blocks that ask which a try has archived, by session, with the lines they had then.
   const moved = new Map<string, string>()
+  const runCache = new Map<string, boolean>()
+  const codexHome = resolve(flag('--codex-dir') ?? (process.env.CODEX_HOME || join(homedir(), '.codex')))
   const count = archiveOut((text, isLast) => {
+    const lines = text.split(/\r?\n/)
+    const spans = scanBlocks(lines)
+    const runs = new Set<number>()
+    // Newer blocks are checked first, with at most fifty history lookups per tidy, retries included.
+    for (const span of [...spans].sort((a, b) => b.updated - a.updated || b.start - a.start)) {
+      if (!span.isClosed) continue
+      const id = runLookupId(lines[span.start] ?? '')
+      if (id === null) continue
+      if (!runCache.has(id) && runCache.size < 50) {
+        const file = findSessionFile(codexHome, id)
+        const signal = file === null ? undefined : codexSignal(true, file, readSessionMeta(file, id))
+        runCache.set(id, signal !== undefined && isStrongRun(signal))
+      }
+      if (runCache.get(id) === true) runs.add(span.start)
+    }
     if (!isNow && counted) counted(countManualDone(parseProgress(text), now, (_key, project, task) => handKeptSeenAt(seen, project, task, now)))
     // A block that still asks goes only when the explicit archive's own check passes for it (#174).
     // A board busy enough to change on every try would skip the whole sweep, so the last try checks
     // no question and the rest (done blocks, hand-kept tasks) goes ahead, as the pane's sweep does.
     // A block that asks stays then, unless an earlier try archived it and it still reads the same:
     // its questions are kept and its copy is in the archive, so it leaves as counted.
-    const asking = archivableAsking(text, now)
+    const asking = archivableAsking(text, now).filter(one => !runs.has(one.span.start))
     const kept = new Set<number>()
     if (isLast) {
       for (const { span, text: lines } of asking) if (moved.get(span.session) === lines) kept.add(span.start)
@@ -869,7 +888,7 @@ const tidyCount = (isNow: boolean, isStrict = false, isCleanUp = false, counted?
       // archive is written, and the next try starts again from it.
       if (asking.length > 0 && read(path) !== text) return AGAIN
     }
-    const blocks = takeArchivable(text, now, undefined, s, isNow, span => kept.has(span.start))
+    const blocks = takeArchivable(text, now, undefined, s, isNow, span => kept.has(span.start), span => runs.has(span.start))
     const manual = !isNow && !isCleanUp && !isHandKeptMoveOn
       ? { text: blocks.text, entries: [], keys: [] }
       : takeManualDone(blocks.text, now, (_key, project, task) => handKeptSeenAt(seen, project, task, now), s, isNow)
@@ -1407,7 +1426,7 @@ try {
     process.exitCode = 1
     const raw = String((error as { code?: string })?.code ?? (error instanceof Error ? error.message : 'UNKNOWN'))
     const reason = /^[A-Z][A-Z0-9_]{0,63}$/.test(raw) ? raw : 'UNKNOWN'
-    process.stderr.write(`${reason === 'LOCK_DENIED' ? s.reporterLockDenied : reason === 'INCOMPLETE_PROGRESS_TAIL' ? s.tailRepairFailed : s.reporterFailed(reason)}\n`)
+    process.stderr.write(`${reason === 'UNBOUND_REPORT' ? s.codexReportUnbound : reason === 'LOCK_DENIED' ? s.reporterLockDenied : reason === 'INCOMPLETE_PROGRESS_TAIL' ? s.tailRepairFailed : s.reporterFailed(reason)}\n`)
   } else if (args.some(arg => ['--codex-setup', '--codex-doctor', '--codex-remove', '--codex-trust'].includes(arg))) {
     process.exitCode = 1
     const failure = setupFailure(error, flag('--agent') ?? 'codex', s)

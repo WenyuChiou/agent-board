@@ -10008,3 +10008,39 @@ test('YAML named escapes decode every PyYAML character in path data', () => {
     expect(connectDataRoots(`command: "sh '/scratch/a\\${escape}b/progress-report.sh' hermes turn"`)).toContain(`/scratch/a${value}b`)
   }
 })
+
+test('a Claude print-mode session writes no block and leaves its existing block alone', async ($, on) => {
+  const prior = `## Synthetic project
+<!-- auto session=${SESSION.slice(0, 8)} agent=claude state=waiting updated=2026-10-27T12:00:00Z -->
+### Existing work
+- [ ] Preserve this block
+<!-- /auto session=${SESSION.slice(0, 8)} -->
+`
+  const shared: Record<string, unknown> = { autoConnectOff: true }
+  const world: World = { files: new Map([[FILE, prior]]), mtime: 1, hasTasks: true, shared }
+  const clock = engineBeneath(on, world)
+  const seen = outside(on, world)
+  await $.session.start({ cwd: '/work/demo', surface: null, isInteractive: false })
+  await $.turn.start({ text: 'Synthetic review', turnId: 'print-turn' })
+  await $.tool.call({ tool: 'TaskCreate', subject: 'Review synthetic work', description: '', metadata: { waiting: 'you', ask: 'review', why: 'Ready to review, OK?' } })
+  await clock.advance(5000)
+  expect(world.files.get(FILE)).toBe(prior)
+  expect(JSON.parse(world.files.get(QUESTIONS) ?? '{"records":[]}').records).toEqual([])
+  const mirror = shared[`mirror:${SESSION}`] as ProgressMirror
+  expect(mirror.isRun).toBe(true)
+  expect(mirror.tasks[0]?.waiting).toBe('you')
+  const view = buildView(parseProgress(prior), [], mirror, Date.parse('2026-10-27T12:00:10Z'), 0, {}, ZH_TW, [], {}, emptyQuestions())
+  expect(view.waiting).toEqual([])
+  expect(view.overview.waiting).toBe(0)
+  expect(seen.status.at(-1) ?? '').not.toContain(ZH_TW.statusWaiting(1))
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
+  expect(await ui.find({ type: 'Button', key: 'mine::1::沒問題' })).toBeUndefined()
+  expect(await ui.find({ type: 'Text', text: '● 0' })).toBeDefined()
+  await ui.unmount()
+  world.files.set(FILE, '')
+  world.mtime += 1
+  await $.tool.call({ tool: 'TaskUpdate', taskId: '1', status: 'in_progress' })
+  await clock.advance(5000)
+  expect(world.files.get(FILE)).toBe('')
+  expect(JSON.parse(world.files.get(QUESTIONS) ?? '{"records":[]}').records).toEqual([])
+})

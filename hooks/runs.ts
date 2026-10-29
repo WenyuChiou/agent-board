@@ -1,9 +1,9 @@
 import type { ProgressAuto, ProgressMirror, ProgressProject, ProgressTask } from '../types'
-import { RESUME, STALE_MS } from './parse'
+import { parseAttrs, RESUME, STALE_MS } from './parse'
 
-// Only a conversation a person started is a row (#399). A run an agent started for itself (a
-// delegate's one-shot, a helper thread, a subagent) joins the row of the session that started it
-// as one line, or is counted on the folded "Background runs" line when no session is known.
+// Only a conversation a person started is a row (#501). Strong host signals suppress new run
+// blocks; legacy blocks and weak hints still fold into the row of the session that started
+// them, or the "Background runs" line when no session is known.
 // Everything here is pure: the writers decide what a host's signals mean, the readers fold.
 
 export type RunGroup = { count: number; agents: string[]; last: number }
@@ -256,6 +256,17 @@ export const cleanSignal = (value: unknown): RunSignal | undefined => {
   const parent = one.origin === 'run' && typeof one.parent === 'string' && RESUME.test(one.parent) ? one.parent : undefined
 
   return { origin: one.origin, ...(parent === undefined ? {} : { parent }), ...(one.isWeak === true ? { isWeak: true as const } : {}) }
+}
+
+export const isStrongRun = (value: { origin?: unknown; isWeak?: unknown }): boolean =>
+  value.origin === 'run' && value.isWeak !== true
+
+// The marker alone cannot distinguish a hint from a host statement; tidy must check history.
+export const runLookupId = (marker: string): string | null => {
+  const attrs = parseAttrs(marker)
+  const id = attrs.resume
+
+  return attrs.agent?.toLowerCase() === 'codex' && id !== undefined && RESUME.test(id) && (attrs.origin === undefined || attrs.origin === 'run') ? id : null
 }
 
 export type Origin = { origin?: RunOrigin; parent?: string; isWeak?: true }

@@ -5084,15 +5084,14 @@ if (process.argv.includes('--hook-recovery-parent')) {
 }))
 
 // Who started a Codex session (#399): the hook reads the first record of the session's history
-// file, keeps four short fields of it and nothing else, and writes a run an agent started for
-// itself with `origin=run` and the session that started it with `parent=`.
+// file, keeps four short fields of it and nothing else, and writes no block for a strong run.
 const RUN_SECRET = 'DO-NOT-STORE-THIS-PRIVATE-MESSAGE'
 const helperSession = 'helper-codex-session-456'
 const execSession = 'exec-codex-session-789'
 const secondSession = 'second-codex-session-321'
 // A history file is named for its session, as Codex names it: rollout-<time>-<session id>.jsonl.
 const rollout = (f, id, meta) => {
-  const file = join(f.home, 'codex-history', `rollout-2026-10-27T12-00-00-${id}.jsonl`)
+  const file = join(f.home, '.codex', 'sessions', '2026', '10', '27', `rollout-2026-10-27T12-00-00-${id}.jsonl`)
   const first = { timestamp: '2026-10-27T12:00:00Z', type: 'session_meta', payload: { id, cwd: join(f.home, 'demo'), base_instructions: { text: RUN_SECRET }, ...meta } }
   f.save(file, `${JSON.stringify(first)}\n${JSON.stringify({ type: 'response_item', payload: { text: RUN_SECRET } })}\n`)
   return file
@@ -5109,7 +5108,7 @@ const markerOf = (f, id) => {
 }
 const everyFile = dir => readdirSync(dir, { withFileTypes: true }).flatMap(entry => entry.isDirectory() ? everyFile(join(dir, entry.name)) : [join(dir, entry.name)])
 
-test('a Codex helper thread is written as a run with its parent, and the person\'s own session carries no mark', () => fixture(f => {
+test('a Codex helper thread writes no block, and the person\'s own session carries no mark', () => fixture(f => {
   f.install('--apply')
   const cwd = join(f.home, 'demo')
   const person = rollout(f, session, { originator: 'Codex Desktop', source: 'vscode', thread_source: 'user' })
@@ -5117,25 +5116,28 @@ test('a Codex helper thread is written as a run with its parent, and the person\
   assert.equal(f.event('UserPromptSubmit', 'turn-1', { cwd, transcript_path: person }).status, 0)
   assert.equal(f.event('UserPromptSubmit', 'turn-h', { session_id: helperSession, cwd, transcript_path: helper }).status, 0)
   assert.doesNotMatch(markerOf(f, session), /origin=|parent=/)
-  assert.match(markerOf(f, helperSession), new RegExp(` origin=run parent=${session} -->$`))
+  assertNoBlock(f, helperSession)
+  assert.equal(sessionRecord(f, helperSession).parent, session)
   // Only the four fields are kept: nothing else of the history file reaches the board or its records.
   for (const file of everyFile(f.root)) assert.ok(!readFileSync(file, 'latin1').includes(RUN_SECRET), file)
   assert.ok(!readFileSync(f.hooks, 'latin1').includes('Archimedes'))
   assert.ok(!readFileSync(f.progress, 'utf8').includes('Archimedes'))
 }))
 
-test('a codex exec run with no parent named takes the Codex session working in the same project', () => fixture(f => {
+test('a codex exec run with no parent named writes nothing beside the person working in the same project', () => fixture(f => {
   f.install('--apply')
   const cwd = join(f.home, 'demo')
   const person = rollout(f, session, { originator: 'codex-tui', source: 'vscode', thread_source: 'user' })
   const run = rollout(f, execSession, { originator: 'codex_exec', source: 'exec', thread_source: 'user' })
   assert.equal(f.event('UserPromptSubmit', 'turn-1', { cwd, transcript_path: person }).status, 0)
   assert.equal(f.event('UserPromptSubmit', 'turn-e', { session_id: execSession, cwd, transcript_path: run }).status, 0)
-  assert.match(markerOf(f, execSession), new RegExp(` origin=run parent=${session} -->$`))
-  // The run keeps that parent after the person's session has stopped.
+  assertNoBlock(f, execSession)
+  assert.equal(sessionRecord(f, execSession).parent, undefined)
+  // A later Stop keeps the run suppressed after the person's session has stopped.
   assert.equal(f.event('Stop', 'turn-1', { cwd, transcript_path: person }).status, 0)
   assert.equal(f.event('Stop', 'turn-e', { session_id: execSession, cwd, transcript_path: run }).status, 0)
-  assert.match(markerOf(f, execSession), new RegExp(` origin=run parent=${session} -->$`))
+  assertNoBlock(f, execSession)
+  assert.equal(sessionRecord(f, execSession).parent, undefined)
   assert.doesNotMatch(markerOf(f, session), /origin=/)
 }))
 
@@ -5179,10 +5181,10 @@ test('a hook that names the history file of another session gets no signal from 
   assert.equal(f.event('UserPromptSubmit', 'turn-t', { session_id: 'codex-session-789', cwd, transcript_path: other }).status, 0)
   assert.doesNotMatch(markerOf(f, 'codex-session-789'), /origin=/)
   assert.equal(f.event('UserPromptSubmit', 'turn-e', { session_id: execSession, cwd, transcript_path: other }).status, 0)
-  assert.match(markerOf(f, execSession), / origin=run/)
+  assertNoBlock(f, execSession)
 }))
 
-test('a codex exec run takes no parent when two Codex sessions are working in its project, and is counted as a background run', () => fixture(f => {
+test('a codex exec run writes nothing when two person sessions are working in its project', () => fixture(f => {
   f.install('--apply')
   const cwd = join(f.home, 'demo')
   const first = rollout(f, session, { originator: 'codex-tui', source: 'vscode', thread_source: 'user' })
@@ -5191,7 +5193,8 @@ test('a codex exec run takes no parent when two Codex sessions are working in it
   assert.equal(f.event('UserPromptSubmit', 'turn-1', { cwd, transcript_path: first }).status, 0)
   assert.equal(f.event('UserPromptSubmit', 'turn-2', { session_id: secondSession, cwd, transcript_path: second }).status, 0)
   assert.equal(f.event('UserPromptSubmit', 'turn-e', { session_id: execSession, cwd, transcript_path: run }).status, 0)
-  assert.match(markerOf(f, execSession), / origin=run -->$/)
+  assertNoBlock(f, execSession)
+  assert.equal(sessionRecord(f, execSession).parent, undefined)
   assert.doesNotMatch(markerOf(f, session), /origin=/)
   assert.doesNotMatch(markerOf(f, secondSession), /origin=/)
 }))
@@ -5201,4 +5204,390 @@ test('agents that give no signal keep their sessions as rows', () => fixture(f =
   assert.equal(f.command(['--agent-status', '--agent', 'opencode', '--state', 'working'], { session_id: 'opencode-session-123', transcript_path: null }).status, 0)
   assert.match(readFileSync(f.progress, 'utf8'), /agent=opencode/)
   assert.doesNotMatch(readFileSync(f.progress, 'utf8'), /origin=/)
+}))
+
+const sessionRecord = (f, id) => JSON.parse(readFileSync(join(f.root, 'sessions', createHash('sha256').update(`codex:${id}`).digest('hex') + '.json'), 'utf8'))
+const assertNoBlock = (f, id) => assert.ok(!existsSync(f.progress) || !readFileSync(f.progress, 'utf8').includes(createHash('sha256').update(`codex:${id}`).digest('hex')))
+const reportPayload = { title: 'Synthetic work', project: 'demo', state: 'working', steps: ['- [~] Verify the change'] }
+const folderReport = (f, cwd, payload = reportPayload, extra = []) => spawnSync(process.execPath, [f.script, '--home', f.home, '--codex-dir', join(f.home, '.codex'), '--codex-report', ...extra], {
+  cwd, env: { ...f.env, CODEX_THREAD_ID: undefined }, input: JSON.stringify(payload), encoding: 'utf8', windowsHide: true, timeout: 15000,
+})
+const oldBlock = (id, title, mark = '') => {
+  const block = createHash('sha256').update(`codex:${id}`).digest('hex').slice(0, 8)
+  return `<!-- auto session=${block} agent=codex state=waiting updated=${new Date().toISOString()} resume=${id}${mark} -->
+### ${title}
+- [?] Review it, OK?
+<!-- /auto session=${block} -->
+`
+}
+
+test('a block written from a weak hint is withdrawn when the session proves to be a run', async () => {
+  for (const hint of ['missing', 'null', 'replay']) await fixture(async f => {
+    f.install('--apply')
+    const cwd = join(f.home, 'demo')
+    const person = rollout(f, session, { originator: 'Codex Desktop', source: 'vscode', thread_source: 'user' })
+    assert.equal(f.event('UserPromptSubmit', 'turn-person', { cwd, transcript_path: person }).status, 0)
+    const personBytes = readFileSync(f.progress)
+    f.save(f.progress, Buffer.concat([Buffer.from('## Foreign\r\nKeep café.\n\r\n'), personBytes, Buffer.from([0xff, 0xc3, 0x0a])]))
+    // The withdrawn run leaves nothing behind, not even the heading of the section its block opened.
+    const expected = readFileSync(f.progress)
+    const path = join(f.home, '.codex', 'sessions', '2026', '10', '27', `rollout-2026-10-27T12-00-00-${execSession}.jsonl`)
+    assert.equal(existsSync(path), false)
+    assert.equal(f.event(hint === 'replay' ? 'UserPromptSubmit' : 'SessionStart', 'turn-run', { session_id: execSession, cwd, transcript_path: hint === 'null' ? null : path }).status, 0)
+    if (hint === 'null') assert.match(markerOf(f, execSession), / origin=run\b/)
+    else assert.doesNotMatch(markerOf(f, execSession), /origin=/)
+    assert.equal(sessionRecord(f, execSession).isWeak, true)
+    const before = readFileSync(f.progress)
+    const marker = markerOf(f, execSession).replace(/\r$/, '')
+    const start = before.indexOf(Buffer.from(marker))
+    const id = createHash('sha256').update(`codex:${execSession}`).digest('hex').slice(0, 8)
+    const close = Buffer.from(`<!-- /auto session=${id} -->`)
+    const end = before.indexOf(close, start) + close.length
+    const afterLine = before[end] === 13 ? end + 2 : end + 1
+    assert.equal(rollout(f, execSession, { source: 'exec' }), path)
+    const proven = f.event('UserPromptSubmit', 'turn-run', { session_id: execSession, cwd, transcript_path: path })
+    assert.equal(proven.status, 0, proven.stderr)
+    assertNoBlock(f, execSession)
+    assert.deepEqual(readFileSync(f.progress), expected)
+    assert.ok(readFileSync(f.progress).includes(personBytes))
+    assert.equal(sessionRecord(f, execSession).origin, 'run')
+    assert.equal(sessionRecord(f, execSession).isWeak, undefined)
+    const stamp = statSync(f.progress).mtimeMs
+    assert.equal(f.event('Stop', 'turn-run', { session_id: execSession }).status, 0)
+    assertNoBlock(f, execSession)
+    const report = f.command(['--codex-report', '--session', execSession], reportPayload)
+    assert.equal(report.status, 0, report.stderr)
+    assertNoBlock(f, execSession)
+    assert.deepEqual(readFileSync(f.progress), expected)
+    assert.equal(statSync(f.progress).mtimeMs, stamp)
+
+    const { dropCodexBlock } = await sourceModules()
+    const owner = createHash('sha256').update(`codex:${execSession}`).digest('hex')
+    const block = before.subarray(start, afterLine).toString('latin1')
+    for (const text of [
+      block + block,
+      block.replace(`owner=${owner}`, `owner=${owner.slice(0, 63)}0`),
+      block.replace('agent=codex', 'agent=cursor'),
+      `\x60\x60\x60markdown\n${block}\x60\x60\x60\n`,
+      '## No matching block\r\nKeep these bytes.\n',
+    ]) assert.equal(dropCodexBlock(text, owner), text)
+  })
+})
+
+test('a codex exec run that another agent started writes nothing to progress.md', () => fixture(f => {
+  f.install('--apply')
+  unlinkSync(f.progress)
+  const signals = [
+    { source: 'exec' },
+    { originator: 'codex_exec', thread_source: 'user' },
+    { source: { subagent: { thread_spawn: { parent_thread_id: session } } } },
+    { originator: 'Codex Desktop', parent_thread_id: session },
+    { thread_source: 'agent_created_thread' },
+    { originator: 'codex_sdk' },
+    { originator: 'codex_mcp' },
+  ]
+  for (const [index, meta] of signals.entries()) {
+    const id = `synthetic-run-${index}`
+    const path = rollout(f, id, meta)
+    const event = f.event('UserPromptSubmit', 'turn-r', { session_id: id, cwd: join(f.home, 'demo'), transcript_path: path })
+    assert.equal(event.status, 0, event.stderr)
+    assert.equal(existsSync(f.progress), false)
+    assert.equal(sessionRecord(f, id).origin, 'run')
+    assert.equal(sessionRecord(f, id).isWeak, undefined)
+    const report = f.command(['--codex-report', '--session', id], reportPayload)
+    assert.equal(report.status, 0, report.stderr)
+    assert.equal(f.event('Stop', 'turn-r', { session_id: id }).status, 0)
+    assert.equal(existsSync(f.progress), false)
+  }
+  // An existing file is preserved byte for byte too, including its timestamps.
+  f.save(f.progress, '## Synthetic person\r\nKeep these bytes.\r\n')
+  const before = readFileSync(f.progress)
+  const stamp = statSync(f.progress).mtimeMs
+  assert.equal(f.command(['--codex-report', '--session', 'synthetic-run-0'], reportPayload).status, 0)
+  assert.deepEqual(readFileSync(f.progress), before)
+  assert.equal(statSync(f.progress).mtimeMs, stamp)
+}))
+
+test('a Codex App session a person started is written and shows as a row', () => fixture(f => {
+  f.install('--apply')
+  const cwd = join(f.home, 'demo')
+  mkdirSync(cwd)
+  const path = rollout(f, session, { originator: 'Codex Desktop', source: 'vscode', thread_source: 'user' })
+  assert.equal(f.event('UserPromptSubmit', 'turn-a', { cwd, transcript_path: path }, { CODEX_THREAD_ID: undefined }).status, 0)
+  assert.equal(sessionRecord(f, session).folder, 'demo')
+  const report = folderReport(f, cwd)
+  assert.equal(report.status, 0, report.stderr)
+  assert.equal(JSON.parse(report.stdout).session, session)
+  assert.match(markerOf(f, session), /state=working/)
+  const shown = f.command([])
+  assert.equal(shown.status, 0, shown.stderr)
+  assert.match(shown.stdout, /Synthetic work/)
+  assert.match(readFileSync(f.progress, 'utf8'), /Verify the change/)
+  assert.doesNotMatch(shown.stdout, /Background runs|\+1 runs/)
+  assert.equal(folderReport(f, cwd, { ...reportPayload, state: 'done', steps: ['- [x] Verified'] }).status, 0)
+  assert.match(markerOf(f, session), /state=done/)
+}))
+
+test("a run's last line that reads like a question is not listed under Waiting on you", () => fixture(f => {
+  f.install('--apply')
+  const path = rollout(f, execSession, { source: 'exec' })
+  assert.equal(f.event('UserPromptSubmit', 'turn-r', { session_id: execSession, transcript_path: path }).status, 0)
+  assert.equal(f.command(['--codex-report', '--session', execSession], { ...reportPayload, state: 'waiting', steps: ['- [?] REQUEST CHANGES: ship it, OK?'] }).status, 0)
+  assert.equal(f.event('Stop', 'turn-r', { session_id: execSession, last_assistant_message: 'Ship it, OK?' }).status, 0)
+  assert.equal(readFileSync(f.progress, 'utf8'), '')
+  const shown = f.command(['--keys', 'j'])
+  assert.equal(shown.status, 0, shown.stderr)
+  assert.doesNotMatch(shown.stdout, /REQUEST CHANGES|ship it|Synthetic work|Background runs/)
+  const ledgerFile = f.progress.replace(/\.md$/, '-questions.json')
+  assert.deepEqual(existsSync(ledgerFile) ? JSON.parse(readFileSync(ledgerFile, 'utf8')).records : [], [])
+}))
+
+test("an old block of an agent's run is archived once and a person's block is kept", () => fixture(f => {
+  f.install('--apply')
+  rollout(f, execSession, { originator: 'codex_exec' })
+  rollout(f, helperSession, { source: { subagent: true } })
+  rollout(f, session, { originator: 'Codex Desktop', source: 'vscode', thread_source: 'user' })
+  rollout(f, secondSession, { originator: 'codex-tui', thread_source: 'user' })
+  f.save(f.progress, '## demo\n' + oldBlock(execSession, 'Old unmarked run') + oldBlock(helperSession, 'Old marked run', ' origin=run') + oldBlock(session, 'Keep App person') + oldBlock(secondSession, 'Keep terminal person with an old hint', ' origin=run'))
+  const tidy = f.command(['--tidy'])
+  assert.equal(tidy.status, 0, tidy.stderr)
+  const text = readFileSync(f.progress, 'utf8')
+  assert.doesNotMatch(text, /Old unmarked run|Old marked run/)
+  assert.match(text, /Keep App person/)
+  assert.match(text, /Keep terminal person/)
+  const archives = everyFile(f.root).filter(file => /progress-archive-.*\.md$/.test(file))
+  assert.equal(archives.length, 1)
+  const before = readFileSync(archives[0], 'utf8')
+  assert.equal(before.match(/### Old unmarked run/g)?.length, 1)
+  assert.equal(before.match(/### Old marked run/g)?.length, 1)
+  assert.match(before, /## demo · \d{4}-\d{2}-\d{2}/)
+  assert.match(before, /Review it, OK/)
+  assert.equal(f.command(['--tidy']).status, 0)
+  assert.equal(readFileSync(archives[0], 'utf8'), before)
+}))
+
+test('a block whose session record cannot be read is kept', () => fixture(f => {
+  f.install('--apply')
+  rollout(f, execSession, { source: 'exec' })
+  const unreadable = join(f.home, '.codex', 'sessions', '2026', '10', '27', `rollout-2026-10-27T12-00-00-${helperSession}.jsonl`)
+  mkdirSync(unreadable, { recursive: true })
+  const odd = rollout(f, secondSession, {})
+  f.save(odd, '{"type":"response_item","payload":{"source":"exec"}}\n')
+  const kept = oldBlock(session, 'Missing history', ' origin=run') + oldBlock(helperSession, 'Unreadable history') + oldBlock(secondSession, 'Not a session record')
+  f.save(f.progress, '## demo\n' + oldBlock(execSession, 'Known run') + kept)
+  assert.equal(f.command(['--tidy']).status, 0)
+  const after = readFileSync(f.progress, 'utf8')
+  assert.doesNotMatch(after, /Known run/)
+  assert.ok(after.includes(kept))
+}))
+
+const sourceModules = async () => {
+  const resolver = registerHooks({ resolve(specifier, context, next) {
+    try { return next(specifier, context) } catch (error) {
+      if (error.code !== 'ERR_MODULE_NOT_FOUND' || !specifier.startsWith('.')) throw error
+      return next(`${specifier}.ts`, context)
+    }
+  } })
+  try {
+    return { ...await import('../scripts/codex-history.ts'), ...await import('../hooks/strings.ts'), ...await import('../hooks/codex.ts') }
+  } finally { resolver.deregister() }
+}
+
+test('the Codex instructions never tell the person that CODEX_THREAD_ID is missing', async () => {
+  const { STRINGS } = await sourceModules()
+  for (const s of Object.values(STRINGS)) {
+    const fallback = s.codexFallbackInstructions('board --codex-report')
+    const skill = s.localAgentSkill('board')
+    assert.doesNotMatch(fallback + skill, /CODEX_THREAD_ID/)
+    assert.match(fallback, /--codex-report/)
+    assert.match(fallback, /\[-\]/)
+    assert.match(skill, /--codex-report/)
+    assert.ok(s.codexReportUnbound.length > 0)
+  }
+  assert.match(STRINGS.en.codexFallbackInstructions('board'), /carry on with the work and say nothing/)
+})
+
+test('a report without a session record checks its own history before it can write', () => fixture(f => {
+  f.install('--apply')
+  rollout(f, execSession, { originator: 'codex_sdk' })
+  const result = f.command(['--codex-report', '--session', execSession], reportPayload)
+  assert.equal(result.status, 0, result.stderr)
+  assert.equal(readFileSync(f.progress, 'utf8'), '')
+  assert.equal(sessionRecord(f, execSession).origin, 'run')
+  const person = f.command(['--codex-report', '--session', session], reportPayload)
+  assert.equal(person.status, 0, person.stderr)
+  assert.notEqual(markerOf(f, session), '')
+  const invalid = rollout(f, helperSession, {})
+  f.save(invalid, '{"type":"response_item","payload":{"source":"exec"}}\n')
+  assert.equal(f.command(['--codex-report', '--session', helperSession], reportPayload).status, 0)
+  assert.notEqual(markerOf(f, helperSession), '')
+  assert.equal(sessionRecord(f, helperSession).origin, undefined)
+  assert.equal(sessionRecord(f, helperSession).isWeak, undefined)
+}))
+
+for (const delivery of ['direct', 'queued']) test(`an older ${delivery} event strengthens run evidence without changing newer lifecycle fields`, () => fixture(f => {
+  assert.equal(f.install('--apply').status, 0)
+  const cwd = join(f.home, 'demo')
+  const path = join(f.home, '.codex', 'sessions', '2026', '10', '27', `rollout-2026-10-27T12-00-00-${execSession}.jsonl`)
+  assert.equal(f.event('UserPromptSubmit', 'turn-newer', { session_id: execSession, cwd, transcript_path: path }).status, 0)
+  assert.equal(sessionRecord(f, execSession).isWeak, true)
+  assert.equal(f.event('Stop', 'turn-newer', { session_id: execSession }).status, 0)
+  const before = sessionRecord(f, execSession)
+  assert.equal(before.state, 'waiting')
+  assert.equal(before.turn, 'turn-newer')
+  assert.notEqual(markerOf(f, execSession), '')
+  const at = before.appliedAt - 1
+  const payload = { session_id: execSession, hook_event_name: 'UserPromptSubmit', turn_id: 'turn-older', cwd, transcript_path: path }
+  const pending = join(f.root, 'pending', '001.raw.json')
+  const deliver = () => delivery === 'direct'
+    ? f.command(['--codex-event', '--hook-started', String(at)], payload)
+    : (f.save(pending, JSON.stringify({ version: 1, kind: 'raw', at, argv: ['--codex-event', '--agent', 'codex', '--progress-file', f.progress], env: {}, payload })),
+      f.command(['--recover-hooks'], {}))
+  const unchanged = readFileSync(f.progress)
+  const weak = deliver()
+  assert.equal(weak.status, 0, weak.stderr)
+  assert.deepEqual(sessionRecord(f, execSession), before)
+  assert.deepEqual(readFileSync(f.progress), unchanged)
+  assert.equal(rollout(f, execSession, { source: 'exec', parent_thread_id: session }), path)
+  const proven = deliver()
+  assert.equal(proven.status, 0, proven.stderr)
+  assertNoBlock(f, execSession)
+  const { isWeak, ...lifecycle } = before
+  const expected = { ...lifecycle, origin: 'run', parent: session }
+  assert.deepEqual(sessionRecord(f, execSession), expected)
+  assert.deepEqual(pendingFiles(f), [])
+  const bytes = readFileSync(f.progress)
+  const strong = deliver()
+  assert.equal(strong.status, 0, strong.stderr)
+  assert.deepEqual(sessionRecord(f, execSession), expected)
+  assert.deepEqual(readFileSync(f.progress), bytes)
+  const report = f.command(['--codex-report', '--session', execSession], reportPayload)
+  assert.equal(report.status, 0, report.stderr)
+  assertNoBlock(f, execSession)
+}))
+
+for (const delivery of ['direct', 'queued']) test(`an older ${delivery} run proof does not undo a newer explicit person statement`, () => fixture(f => {
+  assert.equal(f.install('--apply').status, 0)
+  const cwd = join(f.home, 'demo')
+  const path = rollout(f, execSession, { originator: 'Codex Desktop', source: 'vscode', thread_source: 'user' })
+  assert.equal(f.event('UserPromptSubmit', 'turn-newer', { session_id: execSession, cwd, transcript_path: path }).status, 0)
+  const before = sessionRecord(f, execSession)
+  assert.equal(before.origin, 'person')
+  assert.equal(before.isWeak, undefined)
+  const bytes = readFileSync(f.progress)
+  assert.notEqual(markerOf(f, execSession), '')
+  // Contradictory, older evidence: the history now reads like a run.
+  rollout(f, execSession, { source: 'exec', parent_thread_id: session })
+  const at = before.appliedAt - 1
+  const payload = { session_id: execSession, hook_event_name: 'UserPromptSubmit', turn_id: 'turn-older', cwd, transcript_path: path }
+  const result = delivery === 'direct'
+    ? f.command(['--codex-event', '--hook-started', String(at)], payload)
+    : (f.save(join(f.root, 'pending', '001.raw.json'), JSON.stringify({ version: 1, kind: 'raw', at, argv: ['--codex-event', '--agent', 'codex', '--progress-file', f.progress], env: {}, payload })),
+      f.command(['--recover-hooks'], {}))
+  assert.equal(result.status, 0, result.stderr)
+  assert.deepEqual(sessionRecord(f, execSession), before)
+  assert.deepEqual(readFileSync(f.progress), bytes)
+  assert.notEqual(markerOf(f, execSession), '')
+  assert.deepEqual(pendingFiles(f), [])
+}))
+
+test('folder reporting rechecks an inferred session after a two-session backlog', () => fixture(f => {
+  assert.equal(f.install('--apply').status, 0)
+  const cwd = join(f.home, 'demo')
+  mkdirSync(cwd)
+  const person = rollout(f, session, { source: 'vscode', thread_source: 'user' })
+  assert.equal(f.event('UserPromptSubmit', 'turn-person-a', { cwd, transcript_path: person }).status, 0)
+  const before = readFileSync(f.progress)
+  const record = sessionRecord(f, session)
+  const second = rollout(f, secondSession, { source: 'vscode', thread_source: 'user' })
+  f.save(join(f.root, 'pending', '001.raw.json'), JSON.stringify({
+    version: 1, kind: 'raw', at: Date.now(), argv: ['--codex-event', '--agent', 'codex', '--progress-file', f.progress], env: {},
+    payload: { session_id: secondSession, hook_event_name: 'UserPromptSubmit', turn_id: 'turn-person-b', cwd, transcript_path: second },
+  }))
+  const result = folderReport(f, cwd)
+  assert.notEqual(result.status, 0)
+  assert.equal(result.stderr.trim(), 'This session cannot report steps yet; the board still shows it from its hooks.')
+  assert.equal(result.stdout, '')
+  assert.ok(readFileSync(f.progress).includes(before))
+  assert.deepEqual(sessionRecord(f, session), record)
+  assert.equal(sessionRecord(f, secondSession).folder, 'demo')
+  assert.deepEqual(pendingFiles(f), [])
+  const explicit = folderReport(f, cwd, reportPayload, ['--session', session])
+  assert.equal(explicit.status, 0, explicit.stderr)
+}))
+
+test('folder reporting refuses ambiguous, stale, ended, old and strong-run records without guessing', () => fixture(f => {
+  f.install('--apply')
+  const cwd = join(f.home, 'demo')
+  mkdirSync(cwd)
+  const saveRecord = (id, extra = {}) => f.save(join(f.root, 'sessions', createHash('sha256').update(`codex:${id}`).digest('hex') + '.json'), JSON.stringify({ session: id, agent: 'codex', folder: 'demo', state: 'waiting', updated: new Date().toISOString(), ...extra }))
+  const refused = () => {
+    const before = everyFile(f.root).map(file => [file, readFileSync(file, 'utf8')])
+    const result = folderReport(f, cwd)
+    assert.notEqual(result.status, 0)
+    assert.equal(result.stderr.trim(), 'This session cannot report steps yet; the board still shows it from its hooks.')
+    assert.equal(result.stdout, '')
+    assert.deepEqual(everyFile(f.root).map(file => [file, readFileSync(file, 'utf8')]), before)
+  }
+  refused()
+  saveRecord(session, { folder: undefined })
+  saveRecord(execSession, { origin: 'run' })
+  saveRecord(helperSession, { state: 'ended' })
+  saveRecord(secondSession, { updated: '2020-01-01T00:00:00Z' })
+  refused()
+  saveRecord('weak-run-codex-session-654', { origin: 'run', isWeak: true })
+  refused()
+  saveRecord(session)
+  const person = folderReport(f, cwd)
+  assert.equal(person.status, 0, person.stderr)
+  assert.equal(JSON.parse(person.stdout).session, session)
+  saveRecord(secondSession)
+  refused()
+  // Explicit bindings win even when folder inference has two candidates.
+  assert.equal(folderReport(f, cwd, reportPayload, ['--session', session]).status, 0)
+  assert.equal(f.report().status, 0)
+}))
+
+test('history lookup is bounded, validates ids and date folders, and keeps only the first record fields', async () => fixture(async f => {
+  const { findSessionFile, readSessionMeta } = await sourceModules()
+  const codexHome = join(f.home, '.codex')
+  const file = rollout(f, session, { source: { subagent: { secret: RUN_SECRET } }, originator: 'codex_exec', thread_source: 'subagent', parent_thread_id: execSession })
+  assert.equal(findSessionFile(codexHome, session), file)
+  assert.equal(findSessionFile(codexHome, '../bad-id'), null)
+  assert.equal(readSessionMeta(file, 'session-123'), null)
+  assert.deepEqual(readSessionMeta(file, session), { source: { subagent: true }, originator: 'codex_exec', thread_source: 'subagent', parent_thread_id: execSession })
+  assert.equal(readSessionMeta(join(dirname(file), 'notes.jsonl'), session), null)
+  for (let year = 2027; year < 2100; year++) mkdirSync(join(codexHome, 'sessions', String(year), '01', '01'), { recursive: true })
+  assert.equal(findSessionFile(codexHome, session), null)
+  const invalidHome = join(f.home, 'invalid-history')
+  for (const folder of [['year', '10', '27'], ['2026', '1', '27'], ['2026', '10', 'day']]) f.save(join(invalidHome, 'sessions', ...folder, file.split(/[\\/]/).at(-1)), readFileSync(file))
+  assert.equal(findSessionFile(invalidHome, session), null)
+}))
+
+test('a tidy checks at most fifty session histories and the next tidy archives the remainder', () => fixture(f => {
+  f.install('--apply')
+  const ids = Array.from({ length: 52 }, (_, index) => `synthetic-bounded-run-${String(index).padStart(2, '0')}`)
+  for (const id of ids) rollout(f, id, { source: 'exec' })
+  f.save(f.progress, '## demo\n' + ids.map(id => oldBlock(id, id).replace(/updated=\S+/, 'updated=2026-10-27T12:00:00Z')).join(''))
+  const first = f.command(['--tidy'])
+  assert.equal(first.status, 0, first.stderr)
+  const remaining = readFileSync(f.progress, 'utf8')
+  assert.equal(remaining.match(/<!-- auto /g)?.length, 2)
+  assert.match(remaining, /synthetic-bounded-run-00/)
+  assert.match(remaining, /synthetic-bounded-run-01/)
+  assert.equal(f.command(['--tidy']).status, 0)
+  assert.doesNotMatch(readFileSync(f.progress, 'utf8'), /<!-- auto /)
+}))
+
+test('tidy keeps an explicit person origin and uses the home history when CODEX_HOME is empty', () => fixture(f => {
+  f.install('--apply')
+  rollout(f, execSession, { source: 'exec' })
+  rollout(f, helperSession, { source: 'exec' })
+  const kept = oldBlock(helperSession, 'Explicit person origin', ' origin=person')
+  f.save(f.progress, '## demo\n' + oldBlock(execSession, 'Verified run') + kept)
+  const result = spawnSync(process.execPath, [f.script, '--tidy'], { env: { ...f.env, CODEX_HOME: '' }, encoding: 'utf8', windowsHide: true, timeout: 15000 })
+  assert.equal(result.status, 0, result.stderr)
+  const after = readFileSync(f.progress, 'utf8')
+  assert.doesNotMatch(after, /Verified run/)
+  assert.ok(after.includes(kept))
 }))
