@@ -212,6 +212,14 @@ The page listens on 127.0.0.1 only, and its address carries a random key: anythi
 
 Each agent's hooks write what its session is doing into its own block of one local `progress.md` (a fresh install uses `~/.agent-board/progress.md`). Task steps come only from the agent's own reports, and no private conversation is read. The board reads the file without calling a model; the optional Claude plugin can sum up turns with Claude's model, as [the guide says](docs/GUIDE.md#does-anything-leave-my-machine-what-does-it-cost). You can read and edit the file too: [the file format](docs/FORMAT.md). In English, 繁體中文 and 简体中文.
 
+### Three Core Pillars
+
+- **Single Markdown Ledger (`progress.md`)**: No opaque binary stores or vector databases; your entire multi-agent progress is a human-readable, Git-versioned Markdown document.
+- **Unified Multi-Agent Cockpit**: Monitor and orchestrate Claude Code, OpenAI Codex, Google Antigravity, Cursor, and OpenCode from a single heads-up display.
+- **Bi-directional Human Governance**: Direct attention to blocked decisions first, answer questions in one click, and resolve steps without context loss.
+
+For architectural positioning and coexistence with persistent memory tools, see the [Architecture Positioning Guide](docs/dev/architecture-positioning.md).
+
 ## Troubleshooting
 
 Start with the doctor. It checks what the installer wrote for one agent and changes nothing:

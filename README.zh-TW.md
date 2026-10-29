@@ -212,6 +212,14 @@ Hooks 只說對話在做事還是在等；步驟和什麼時候算完成，來�
 
 每個 agent 的 hooks 把它的對話正在做什麼，寫進本機同一個 `progress.md` 裡它自己的區塊（全新安裝用 `~/.agent-board/progress.md`）。任務步驟只來自 agent 自己的回報，不讀任何私人對話。看板讀這個檔不需要呼叫模型；選用的 Claude 外掛可以用 Claude 的模型總結每個回合，細節見[使用指南](docs/GUIDE.zh-TW.md#會把資料傳出去嗎要花多少錢)。這個檔你也可以自己看、自己改：[檔案格式](docs/FORMAT.md)（英文）。支援 English、繁體中文、简体中文。
 
+### 三大核心支柱
+
+- **單一 Markdown 進度帳本 (`progress.md`)**：無需繁重的二進制資料庫（不強制依賴 SQLite 或向量資料庫）；所有多 Agent 進度皆以清晰、可 Git 版控的純文字 Markdown 記錄。
+- **統一跨生態 Agent 戰情座艙**：從單一中控台即時監控與調度 Claude Code、OpenAI Codex、Google Antigravity、Cursor 與 OpenCode。
+- **雙向人機協同治理**：優先置頂等待決策的阻塞提問，一鍵完成審批與操作，避免跨視窗切換遺失注意力。
+
+關於戰情座艙與持久化記憶工具的分工與共存策略，請參閱[架構定位指南](docs/dev/architecture-positioning.md)（英文）。
+
 ## 疑難排解
 
 先跑 doctor。它檢查安裝器替某個 agent 寫了什麼，不會改任何東西：
