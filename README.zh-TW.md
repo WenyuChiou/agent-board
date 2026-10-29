@@ -216,9 +216,9 @@ Hooks 只說對話在做事還是在等；步驟和什麼時候算完成，來�
 
 - **單一 Markdown 進度帳本 (`progress.md`)**：無需繁重的二進制資料庫（不強制依賴 SQLite 或向量資料庫）；所有多 Agent 進度皆以清晰、可 Git 版控的純文字 Markdown 記錄。
 - **統一跨生態 Agent 戰情座艙**：從單一中控台即時監控與調度 Claude Code、OpenAI Codex、Google Antigravity、Cursor 與 OpenCode。
-- **雙向人機協同治理**：優先置頂等待決策的阻塞提問，一鍵完成審批與操作，避免跨視窗切換遺失注意力。
+- **雙向人機協同治理**：優先置頂等待決策的阻塞提問，直接在看板閱讀進度並回覆問題，避免跨視窗切換遺失注意力。
 
-關於戰情座艙與持久化記憶工具的分工與共存策略，請參閱[架構定位指南](docs/dev/architecture-positioning.md)（英文）。
+關於戰情座艙與記憶工具的分工與共存策略，請參閱[架構定位指南](docs/dev/architecture-positioning.md)（英文）。
 
 ## 疑難排解
 

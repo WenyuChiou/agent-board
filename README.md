@@ -216,9 +216,9 @@ Each agent's hooks write what its session is doing into its own block of one loc
 
 - **Single Markdown Ledger (`progress.md`)**: No opaque binary stores or vector databases; your entire multi-agent progress is a human-readable, Git-versioned Markdown document.
 - **Unified Multi-Agent Cockpit**: Monitor and orchestrate Claude Code, OpenAI Codex, Google Antigravity, Cursor, and OpenCode from a single heads-up display.
-- **Bi-directional Human Governance**: Direct attention to blocked decisions first, answer questions in one click, and resolve steps without context loss.
+- **Bi-directional Human Governance**: Direct attention to blocked decisions first, read agent steps and answer questions directly from the board without context loss.
 
-For architectural positioning and coexistence with persistent memory tools, see the [Architecture Positioning Guide](docs/dev/architecture-positioning.md).
+For architectural positioning and coexistence with memory tools, see the [Architecture Positioning Guide](docs/dev/architecture-positioning.md).
 
 ## Troubleshooting
 
