@@ -1,6 +1,6 @@
 # Architecture Positioning: Multi-Agent Cockpit vs Agent Memory
 
-This document clarifies Agent Board's role in the multi-agent software engineering stack and its relationship to persistent memory plugins (such as `claude-mem`).
+This document clarifies Agent Board's role in the multi-agent software engineering stack and its relationship to persistent memory plugins (such as `persistent-memory`).
 
 ---
 
@@ -10,7 +10,7 @@ Developers managing autonomous coding agents frequently encounter two distinct c
 1. **Agent Amnesia (Micro Context Loss):** An agent working in a CLI session forgets decisions, debug discoveries, or architectural conventions once the session ends.
 2. **Human Loss of Control (Macro Orchestration Blindness):** A developer running three or four agents in parallel (for example, Claude Code on design, Codex on migrations, Antigravity on testing) cannot see who is active, who is blocked on an approval, or where decisions conflict.
 
-Tools addressing problem 1 (such as `claude-mem`) and tools addressing problem 2 (`agent-board`) share low-level mechanics—both use lifecycle hooks (`SessionStart`, `PreToolUse`, `Stop`) and manage persistent state. However, their primary actor, data flow, and architectural layer are orthogonal.
+Tools addressing problem 1 (such as `persistent-memory`) and tools addressing problem 2 (`agent-board`) share low-level mechanics—both use lifecycle hooks (`SessionStart`, `PreToolUse`, `Stop`) and manage persistent state. However, their primary actor, data flow, and architectural layer are orthogonal.
 
 ---
 
@@ -35,7 +35,7 @@ Tools addressing problem 1 (such as `claude-mem`) and tools addressing problem 2
                                   | Verified facts (progress-journal.md)
                                   v
 +-------------------------------------------------------------------+
-|        Layer 2: Internal Cognitive Memory (e.g. claude-mem)       |
+|        Layer 2: Internal Cognitive Memory (Persistent Memory Tools)       |
 |   - Context compression and distillation                          |
 |   - Semantic indexing (SQLite FTS5 + Chroma vector store)         |
 |   - Automated historical context injection                        |
@@ -51,7 +51,7 @@ Tools addressing problem 1 (such as `claude-mem`) and tools addressing problem 2
 
 ### Contrast Matrix
 
-| Dimension | Persistent Memory (e.g. claude-mem) | Mission Control Cockpit (agent-board) |
+| Dimension | Persistent Memory Tools | Mission Control Cockpit (agent-board) |
 | :--- | :--- | :--- |
 | **Primary Consumer** | **AI Agent (Machine-to-Machine)** | **Human Developer (Human-to-Machine)** |
 | **Mental Model** | Associative memory bank / hippocampus | Airplane cockpit heads-up display (HUD) |
@@ -77,4 +77,4 @@ Rather than competing, memory systems and mission control cockpits form a comple
 
 A technical challenge in lifecycle hook integration is dispatch latency on Windows. Spawning interactive shell interpreters (`powershell.exe`) introduces cold-start latency (1.2s to 1.4s per invocation) due to CLR and profile loading.
 
-Compiled native dispatchers (used by tools like `claude-mem` via lightweight native launcher binaries communicating over loopback IPC) demonstrate that offloading heavy processing to a background worker reduces hook latency to 5–15ms. Agent Board's v2.0 roadmap adopts this pattern by replacing nested shell invocations with a lightweight, persistent IPC launcher.
+Compiled native dispatchers (used by tools like `persistent-memory` via lightweight native launcher binaries communicating over loopback IPC) demonstrate that offloading heavy processing to a background worker reduces hook latency to 5–15ms. Agent Board's v2.0 roadmap adopts this pattern by replacing nested shell invocations with a lightweight, persistent IPC launcher.
