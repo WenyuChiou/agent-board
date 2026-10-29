@@ -1,6 +1,6 @@
 # Architecture Positioning: Multi-Agent Cockpit vs Agent Memory
 
-This document clarifies Agent Board's role in the multi-agent software engineering stack and its relationship to persistent memory plugins (such as `persistent-memory`).
+This document clarifies Agent Board's role in the multi-agent software engineering stack and its relationship to memory tools.
 
 ---
 
@@ -10,7 +10,7 @@ Developers managing autonomous coding agents frequently encounter two distinct c
 1. **Agent Amnesia (Micro Context Loss):** An agent working in a CLI session forgets decisions, debug discoveries, or architectural conventions once the session ends.
 2. **Human Loss of Control (Macro Orchestration Blindness):** A developer running three or four agents in parallel (for example, Claude Code on design, Codex on migrations, Antigravity on testing) cannot see who is active, who is blocked on an approval, or where decisions conflict.
 
-Tools addressing problem 1 (such as `persistent-memory`) and tools addressing problem 2 (`agent-board`) share low-level mechanics—both use lifecycle hooks (`SessionStart`, `PreToolUse`, `Stop`) and manage persistent state. However, their primary actor, data flow, and architectural layer are orthogonal.
+Tools addressing problem 1 (memory tools) and tools addressing problem 2 (`agent-board`) share low-level mechanics—both use lifecycle hooks (`SessionStart`, `PreToolUse`, `Stop`) and manage persistent state. However, their primary actor, data flow, and architectural layer are orthogonal.
 
 ---
 
@@ -26,18 +26,20 @@ Tools addressing problem 1 (such as `persistent-memory`) and tools addressing pr
                                   v
 +-------------------------------------------------------------------+
 |            Layer 3: Mission Control Cockpit (Agent Board)         |
-|   - Multi-agent aggregation (Claude, Codex, Antigravity, Cursor)   |
-|   - Transparent single source of truth (progress.md / GFM ledger)  |
-|   - Strict state machine (working, waiting, blocked, done)        |
+|   - Multi-agent aggregation (Claude, Codex, Antigravity, Cursor)  |
+|   - Transparent single source of truth (progress.md / GFM ledger) |
+|   - Each session's state (working, waiting, done, ended), as      |
+|     docs/FORMAT.md defines it                                     |
 |   - Bi-directional Human-in-the-Loop decision queues              |
 +-------------------------------------------------------------------+
                                   |
                                   | Progress milestones (progress-journal-YYYY-MM.md)
                                   v
 +-------------------------------------------------------------------+
-|        Layer 2: Internal Cognitive Memory (Persistent Memory Tools)       |
+|               Layer 2: Internal Cognitive Memory                  |
+|                          (Memory Tools)                           |
 |   - Context compression and distillation                          |
-|   - Semantic indexing (SQLite FTS5 + Chroma vector store)         |
+|   - Semantic indexing (SQLite FTS5 + vector stores)               |
 |   - Automated historical context injection                        |
 +-------------------------------------------------------------------+
                                   ^
@@ -51,14 +53,14 @@ Tools addressing problem 1 (such as `persistent-memory`) and tools addressing pr
 
 ### Contrast Matrix
 
-| Dimension | Persistent Memory Tools | Mission Control Cockpit (agent-board) |
+| Dimension | Memory Tools | Mission Control Cockpit (agent-board) |
 | :--- | :--- | :--- |
 | **Primary Consumer** | **AI Agent (Machine-to-Machine)** | **Human Developer (Human-to-Machine)** |
-| **Mental Model** | Associative memory bank / hippocampus | Airplane cockpit heads-up display (HUD) |
-| **Storage Engine** | SQLite (WAL) + Chroma vector database | Single human-readable Markdown (`progress.md`) |
-| **Interaction** | Passive, automated injection | Active step ticking, Diff review, approval gates |
+| **Mental Model** | Associative memory bank for the agent | Mission control cockpit for the developer |
+| **Storage Engine** | SQLite (WAL) + vector database | One plain Markdown file (progress.md) |
+| **Interaction** | Passive, automated injection | You read each agent's steps and answer its questions from the board |
 | **Scope** | Session-level recall within an agent | Multi-agent concurrency across diverse vendors |
-| **Git Integration** | Binary database (gitignored) | Clean Markdown ledger (committed with code) |
+| **Git Integration** | Binary database (gitignored) | A plain Markdown file in the board's data folder, outside your repositories |
 
 ---
 
@@ -73,8 +75,6 @@ Rather than competing, memory systems and mission control cockpits form a comple
 
 ---
 
-## 4. Engineering Insights: Hook Dispatcher Latency
+## 4. Hook start-up time on Windows
 
-A technical challenge in lifecycle hook integration is dispatch latency on Windows. Spawning interactive shell interpreters (`powershell.exe`) introduces cold-start latency (1.2s to 1.4s per invocation) due to CLR and profile loading.
-
-Compiled native dispatchers (used by tools like `persistent-memory` via lightweight native launcher binaries communicating over loopback IPC) demonstrate that offloading heavy processing to a background worker reduces hook latency to 5–15ms. Agent Board's v2.0 roadmap adopts this pattern by replacing nested shell invocations with a lightweight, persistent IPC launcher.
+Hook start-up time on Windows is tracked in #241 and #533.
