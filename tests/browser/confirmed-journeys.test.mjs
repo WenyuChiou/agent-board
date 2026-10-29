@@ -227,7 +227,10 @@ ${block('a11ce023', 'gemini', 'done', 'Synthetic archive', 'Completed synthetic 
       ].join('\n'))
       const board = new BoardPage(page)
       await board.open(await startServer())
-      const record = () => JSON.parse(readFileSync(join(dirname(progress), 'progress-questions.json'), 'utf8')).records.find(one => one.words === words)
+      const ledger = join(dirname(progress), 'progress-questions.json')
+      const record = () => JSON.parse(readFileSync(ledger, 'utf8')).records.find(one => one.words === words)
+      const until = Date.now() + 10_000
+      while (Date.now() < until && (!existsSync(ledger) || !record())) await new Promise(done => setTimeout(done, 100))
       const before = record()
       assert.ok(before)
       await page.getByText('2 stopped', { exact: true }).click()
