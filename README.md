@@ -2,22 +2,9 @@
 
 <p align="center"><b>See what every AI coding agent is doing, and answer the one that needs you, from one board.</b></p>
 
-With Node.js 22+, in any terminal:
+<p align="center"><a href="LICENSE"><img alt="MIT license" src="https://img.shields.io/badge/license-MIT-green"></a> <a href="https://github.com/WenyuChiou/agent-board/actions/workflows/test.yml"><img alt="Tests" src="https://github.com/WenyuChiou/agent-board/actions/workflows/test.yml/badge.svg"></a> <a href="https://www.npmjs.com/package/@wenyuchiou/agent-board"><img alt="npm" src="https://img.shields.io/npm/v/@wenyuchiou/agent-board"></a></p>
 
-```sh
-npx @wenyuchiou/agent-board setup
-npx @wenyuchiou/agent-board setup --apply
-npx @wenyuchiou/agent-board --serve
-```
-
-Scan the QR code from `npx @wenyuchiou/agent-board --serve --lan` with a phone on the same Wi-Fi. Use it only on a network you trust: the link is not encrypted and anyone who has it can open the page. Details: [the board's page](#the-boards-page).
-
-- **I use Claude Code:** `/agent-board`
-- **I use Codex:** `$agent-board`
-- **I use Antigravity:** `/agent-board` (checked in a synthetic home, not run live yet)
-- **I use OpenCode:** `/board`
-
-Setup alone does not connect an agent: complete the agent-specific steps in [Quick start](#quick-start), start a new session, then use its entry above.
+<p align="center">English · <a href="README.zh-TW.md">繁體中文</a> · <a href="README.zh-CN.md">简体中文</a></p>
 
 <p align="center">
 <img alt="An animated board: agents report progress, questions and replies, and one setup command connects them. With messaging on and the Codex session connected, Send queues a reply. &quot;Accepted&quot; does not mean delivered; a confirmation from that session means it was received, not that the work is done. The LAN page has no messaging. Synthetic data." src="docs/images/cover-en-dark.svg" width="860">
@@ -38,10 +25,6 @@ Setup alone does not connect an agent: complete the agent-specific steps in [Qui
 
 <p align="center"><sub>dot and other web chats report by hand: you paste their block into <a href="#the-boards-page">the board's page</a>.</sub></p>
 
-<p align="center"><a href="LICENSE"><img alt="MIT license" src="https://img.shields.io/badge/license-MIT-green"></a></p>
-
-<p align="center">English · <a href="README.zh-TW.md">繁體中文</a> · <a href="README.zh-CN.md">简体中文</a></p>
-
 You have Claude Code on one project, Codex on another and Antigravity on a third, and when one of them stops to ask you something, you only find out when you happen to switch back. **Agent Board** puts that question in front of you the moment it's asked, with a button for each answer. It runs on your computer and keeps everything in one Markdown file.
 
 ## Quick start
@@ -56,6 +39,8 @@ npx @wenyuchiou/agent-board --serve
 
 The first command finds the agents on this computer and shows what setup would change, writing nothing. The second makes the change, and the third opens the board's page. To set up one agent only, add `--agent` and its name, such as `--agent codex`. More in the [setup guide](docs/SETUP.md#install-with-npm).
 
+Scan the QR code from `npx @wenyuchiou/agent-board --serve --lan` with a phone on the same Wi-Fi. Use it only on a network you trust: the link is not encrypted and anyone who has it can open the page. Details: [the board's page](#the-boards-page).
+
 Then:
 
 - Start a new session of each agent: a session that was already open is not connected.
@@ -63,6 +48,13 @@ Then:
 - **Codex:** trust its hooks in `/hooks` ([how](docs/CODEX.md)).
 - **OpenCode, OpenClaw:** reload their plugins.
 - **dot and other web chats:** paste [the last section of AGENTS.md](AGENTS.md#report-your-progress-to-the-progress-pane) into the agent's instructions, then paste the block it writes into [the board's page](#the-boards-page).
+
+In the new session, open the board with its entry:
+
+- **I use Claude Code:** `/agent-board`
+- **I use Codex:** `$agent-board`
+- **I use Antigravity:** `/agent-board` (checked in a synthetic home, not run live yet)
+- **I use OpenCode:** `/board`
 
 <details>
 <summary><b>Without npm: install from a checkout</b></summary>
