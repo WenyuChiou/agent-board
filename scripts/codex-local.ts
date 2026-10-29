@@ -10,6 +10,7 @@ import { agentHooks, BOARD_FOR, readConfig } from '../hooks/connect-pure'
 import type { Strings } from '../hooks/i18n'
 import { STRINGS } from '../hooks/strings'
 import { parseProgress, progressTail, STALE_MS } from '../hooks/parse'
+import { othersNote } from '../hooks/others'
 import { cleanSignal, codexSignal, isStrongRun, pickParent, withSignal } from '../hooks/runs'
 import type { RunSignal } from '../hooks/runs'
 import { antigravityCommand, antigravityHooks, cursorEvent, cursorEvents, hookCommandArgs, lifecycleCapability, localAgents, opencodePlugin, statusEvents } from '../hooks/local-agents'
@@ -42,6 +43,33 @@ const readBytes = (file: string): Buffer | null => {
   }
 }
 const readLocal = (file: string): string | null => readBytes(file)?.toString('utf8') ?? null
+
+// Names this folder's project may go by, as the Claude mod's `detectHere` has them: the folder
+// Codex files its block under and, for a git worktree, its main repository's folder. Read from
+// the `.git` file and `commondir`, without starting git inside the host's time limit.
+const hereNames = (cwd: unknown): string[] => {
+  const folder = folderProject(cwd)
+  if (typeof cwd !== 'string' || folder === '' || !isAbsolute(cwd)) return folder === '' ? [] : [folder]
+  const gitDir = /^gitdir:\s*(.+)$/im.exec(readLocal(join(cwd, '.git')) ?? '')?.[1]?.trim()
+  if (gitDir === undefined) return [folder]
+  const worktree = resolve(cwd, gitDir)
+  const common = readLocal(join(worktree, 'commondir'))?.trim()
+  const main = common === undefined ? '' : basename(dirname(resolve(worktree, common)))
+
+  return main === '' || main === folder ? [folder] : [folder, main]
+}
+
+// A Codex session a person starts gets, on its SessionStart, the note the Claude mod gives a
+// first turn (#502). A run another agent started gets none, by the signal #501 keeps (`run`);
+// a resumed, cleared or compacted session already had its chance.
+export const codexStartNote = (raw: Json, run: RunSignal | undefined, session: string, progress: string, s: Strings, now = Date.now()): string | null => {
+  if (raw.hook_event_name !== 'SessionStart' || raw.source !== undefined && raw.source !== 'startup') return null
+  if (run !== undefined && isStrongRun(run)) return null
+  const text = readLocal(progress)
+  if (text === null) return null
+
+  return othersNote(parseProgress(text), hereNames(raw.cwd), hash(`codex:${session}`).slice(0, 8), now, s, s.othersTailCodex)
+}
 const withoutBom = (text: string): string => text.startsWith('\uFEFF') ? text.slice(1) : text
 const object = (value: unknown): Json => {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('INVALID_JSON_OBJECT')
@@ -557,6 +585,11 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
       ])) : ''
       output(isStart ? { injectSteps: [{ systemMessage: { systemMessage: context } }] } : isFirst ? { injectSteps: [{ ephemeralMessage: context }] } : {})
     } else if (agent === 'gemini') output({})
+    else if (agent === 'codex' && mode === '--codex-event') {
+      const note = codexStartNote(raw, current.run, session, progress, s)
+      // Codex adds `additionalContext` to the conversation as developer context.
+      if (note !== null) output({ hookSpecificOutput: { hookEventName: 'SessionStart', additionalContext: note } })
+    }
     return true
   }
 

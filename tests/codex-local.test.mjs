@@ -5658,3 +5658,34 @@ test('tidy keeps an explicit person origin and uses the home history when CODEX_
   assert.doesNotMatch(after, /Verified run/)
   assert.ok(after.includes(kept))
 }))
+
+test('a Codex session a person starts gets the open work of other sessions in its folder at SessionStart, and a run or a resumed session gets none', () => fixture(f => {
+  f.install('--apply')
+  const cwd = join(f.home, 'demo')
+  mkdirSync(cwd, { recursive: true })
+  const at = new Date(Date.now() - 3600000).toISOString()
+  const block = (id, state, title, steps) => `<!-- auto session=${id} agent=claude state=${state} updated=${at} -->\n### ${title}\n${steps}\n<!-- /auto session=${id} -->\n`
+  f.save(f.progress, [
+    '## demo',
+    block('a1b2c3e1', 'working', 'Synthetic held work', '- [x] One\n- [~] Two'),
+    block('a1b2c3e2', 'ended', 'Synthetic ended work', '- [x] One\n- [ ] Synthetic next step'),
+    block('a1b2c3e3', 'done', 'Synthetic finished work', '- [x] One'),
+    '## elsewhere',
+    block('a1b2c3e4', 'working', 'Synthetic other project', '- [~] One'),
+  ].join('\n'))
+  const start = f.event('SessionStart', null, { session_id: 'synthetic-person-start', cwd, source: 'startup', transcript_path: null })
+  assert.equal(start.status, 0, start.stderr)
+  const context = JSON.parse(start.stdout).hookSpecificOutput
+  assert.equal(context.hookEventName, 'SessionStart')
+  assert.match(context.additionalContext, /Synthetic held work/)
+  assert.match(context.additionalContext, /Synthetic ended work.*Synthetic next step/)
+  assert.match(context.additionalContext, /```text/)
+  assert.doesNotMatch(context.additionalContext, /Synthetic finished work|Synthetic other project|TaskCreate/)
+  const resumed = f.event('SessionStart', null, { session_id: 'synthetic-person-start', cwd, source: 'resume', transcript_path: null })
+  assert.equal(resumed.status, 0, resumed.stderr)
+  assert.equal(resumed.stdout, '')
+  const id = 'synthetic-run-start'
+  const run = f.event('SessionStart', null, { session_id: id, cwd, source: 'startup', transcript_path: rollout(f, id, { originator: 'codex_exec' }) })
+  assert.equal(run.status, 0, run.stderr)
+  assert.equal(run.stdout, '')
+}))
