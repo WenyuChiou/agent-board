@@ -115,6 +115,17 @@ If you cannot run `claude` in your environment, say so in your report. Do not cl
 | `today` | Copies the report for today. Also `今天`. |
 | `notify`, `notify on`, `notify off` | Toggles or sets desktop notifications. Also `通知`, `notifications`, and `開`, `關`, `开`, `关` for on and off. |
 
+### Review guidelines
+
+For any reviewer of a pull request here, Codex review and Greptile included:
+
+- Mark a finding P0 or P1 only when it is wrong or broken behaviour, an error swallowed or reported as success, data lost from `progress.md`, its archive or a person's config, a leaked token, session id or home-folder path, an unmet requirement of the linked issue or a rule in [CONTRIBUTING.md](CONTRIBUTING.md#pull-requests), or a behaviour change with no test.
+- Everything else is a note: at most three lines, at the end of the review.
+- A user-visible string must be in all three tables: `hooks/i18n.ts`, `hooks/strings-en.ts` and `hooks/strings-zh-cn.ts`.
+- `hooks/board-script.ts`, `hooks/released.ts` and `tests/fixtures/released.ts` are generated: flag a hand edit, not their contents.
+- Tests, docs and pictures use synthetic data only.
+- Do not repeat a finding that is already resolved. If an answer does not resolve a P0 or P1 finding, say so in the same thread, so the maintainer sees it before approving.
+
 ### Conventions in the code
 
 - **Pure modules.** Every `hooks/*.ts` file is pure: it takes data and returns data, never reads the clock or touches a file, and takes `now` as a parameter (`isStale(auto, now)`, `buildView(…, now)`). Results are new objects (`{ ...mirror, tasks, updated: now }`), not mutations. Keep it that way: new logic goes in a pure module and is unit-tested.
