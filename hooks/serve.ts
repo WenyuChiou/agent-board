@@ -81,8 +81,9 @@ export const idleTimeout = (value: string | undefined): number => {
   return Number(value) * 60_000
 }
 
-// `line`, here and on the other texts below, is the text clipped to one line (hooks/clip.ts); it is
-// absent when the text already fits, and the page then shows the text itself.
+// `line`, here and on the other texts below, is the text folded to one line (hooks/clip.ts) and
+// capped; it is absent when that is the text itself. The browser cuts the line to its width with an
+// ellipsis.
 export type ServeStep = { text: string; note: string; status: string; isCurrent: boolean; line?: string }
 
 export type ServeAsk = {
@@ -97,7 +98,9 @@ export type ServeAsk = {
   // The words of a Done button that ticks this question, clipped.
   label?: string
   note: string
+  noteLine?: string
   context: string
+  contextLine?: string
   kind: AskKind
   chip: string
   answers: string[]
@@ -136,6 +139,7 @@ export type ServeRow = {
   project: string
   title: string
   context: string
+  contextLine?: string
   status: string
   tone: Tone
   when: string
@@ -174,7 +178,7 @@ export type ServeRow = {
 // A question marked answered, listed so it can be shown again.
 export type ServeHidden = { key: string; project: string; agent: string; isOwn?: true; task: string; text: string; questionId?: string }
 // key names the line in the action route; canHide is false for a retained source that is only for review.
-export type ServeRetained = { key: string; canHide: boolean; project: string; agent: string; isOwn?: true; task: string; text: string; note: string; context: string; when: string; questionId?: string }
+export type ServeRetained = { key: string; canHide: boolean; project: string; agent: string; isOwn?: true; task: string; text: string; note: string; context: string; contextLine?: string; when: string; questionId?: string }
 
 export type ServeTurn = { key: string; project: string; agent: string; text: string; isQuestion: boolean; info: string }
 
@@ -209,12 +213,25 @@ const infoOf = (mode: SendMode, agent: string, task: string, session: string, s:
   return ''
 }
 
-// The text clipped to `room` characters, or undefined when it already fits on one line.
-const clipped = (text: string, room: number): string | undefined => clipLine(text, room).line
+// The text folded to one line and capped at `room` characters, or undefined when that is the text itself.
+const clipped = (text: string, room: number): string | undefined => {
+  const { line } = clipLine(text, room)
+  return line === text ? undefined : line
+}
 const lined = (text: string): { line?: string } => {
   const line = clipped(text, LINE_ROOM)
 
   return line === undefined ? {} : { line }
+}
+const contextLined = (text: string): { contextLine?: string } => {
+  const line = clipped(text, LINE_ROOM)
+
+  return line === undefined ? {} : { contextLine: line }
+}
+const noteLined = (text: string): { noteLine?: string } => {
+  const line = clipped(text, LINE_ROOM)
+
+  return line === undefined ? {} : { noteLine: line }
 }
 
 // The keys are the terminal board's (`boardItems`), so a press names the line it was on.
@@ -232,6 +249,7 @@ const retainedOf = (item: WaitingItem): ServeRetained => ({
   text: item.text,
   note: item.note,
   context: item.context,
+  ...contextLined(item.context),
   when: item.when,
   ...(item.questionId === undefined ? {} : { questionId: item.questionId }),
 })
@@ -271,7 +289,9 @@ export const serveModel = (view: View, pending: readonly PendingTurn[], s: Strin
         text: ask.text,
         ...(label === undefined ? {} : { label }),
         note: ask.note,
+        ...noteLined(ask.note),
         context: ask.context,
+        ...contextLined(ask.context),
         kind: ask.kind,
         chip: s.chip(s.ask[ask.kind]),
         // A hand-kept question is the person's own: ticking it is the answer.
@@ -309,6 +329,7 @@ export const serveModel = (view: View, pending: readonly PendingTurn[], s: Strin
         project: row.project,
         title: row.title,
         context: row.context,
+        ...contextLined(row.context),
         status: row.status,
         tone: row.tone,
         when: row.when,
@@ -949,14 +970,14 @@ const PAGE_SCRIPT = String.raw`
     add(box, input, add(footer, go));
     return box;
   }
-  // A text longer than a line shows as one clipped line; pressing it, or Enter on it, opens the
-  // whole text in its place. An open one stays open across a redraw (opened[ref]).
+  // A text shows as one line, cut to the width it has with an ellipsis (the style does that);
+  // pressing it, or Enter on it, opens the whole text in its place. An open one stays open across
+  // a redraw (opened[ref]). The short text is the folded, capped copy when the model sent one.
   function clipped(short, whole, cls, ref) {
-    if (!short || short === whole) return el('span', cls, whole);
     var box = el('details', 'clip ' + cls);
     box.open = opened[ref] === true;
     box.addEventListener('toggle', function () { opened[ref] = box.open; });
-    add(box, add(el('summary'), el('span', 'short', short), el('span', 'whole', whole)));
+    add(box, add(el('summary'), el('span', 'short', short || whole), el('span', 'whole', whole)));
     return box;
   }
   function stepsList(steps, key) {
@@ -965,11 +986,7 @@ const PAGE_SCRIPT = String.raw`
       var item = el('li', step.isCurrent ? 'now' : '');
       var cls = 't' + (step.status === 'done' || step.status === 'cancelled' ? ' t-quiet' : '');
       add(item, el('span', 'mk s-' + step.status, GLYPH[step.status] || '•'));
-      if (step.line) add(item, clipped(step.line, step.note ? step.text + ' — ' + step.note : step.text, cls, 'step:' + key + ':' + index));
-      else {
-        add(item, el('span', cls, step.text));
-        if (step.note) add(item, el('span', 'sn s-' + step.status, step.note));
-      }
+      add(item, clipped(step.line, step.note ? step.text + ' — ' + step.note : step.text, cls, 'step:' + key + ':' + index));
       list.appendChild(item);
     });
     return list;
@@ -1004,8 +1021,8 @@ const PAGE_SCRIPT = String.raw`
     add(card, add(el('div', 'where'), agentMark(who(ask)), el('span', '', [ask.project, brand(who(ask))].filter(Boolean).join(' · ') + (ask.task ? ' › ' + ask.task : ''))));
     // The chip is a pill on the page, so the brackets the terminal needs are left off.
     add(card, add(el('div', 'q'), el('span', 'chip k-' + ask.kind, String(ask.chip).replace(/^\s*[\[〔]\s*|\s*[\]〕]\s*$/g, '')), el('b', '', ask.text)));
-    if (ask.note) add(card, el('div', '', ask.note));
-    else if (ask.context) add(card, el('div', 'quiet', ask.context));
+    if (ask.note) add(card, clipped(ask.noteLine, ask.note, 'note', 'note:' + ask.key));
+    else if (ask.context) add(card, clipped(ask.contextLine, ask.context, 'quiet context', 'context:' + ask.key));
     if (ask.command) add(card, el('code', '', '$ ' + ask.command));
     var answers = [];
     var actions = [];
@@ -1056,7 +1073,7 @@ const PAGE_SCRIPT = String.raw`
     card.appendChild(summary);
     var body = el('div', 'body');
     if (row.archiveNote) add(body, el('div', 'quiet small archive-note', row.archiveNote));
-    if (row.context) add(body, el('div', 'quiet', row.context));
+    if (row.context) add(body, clipped(row.contextLine, row.context, 'quiet context', 'context:' + row.key));
     if (row.pr) add(body, el('div', 'quiet', row.pr));
     if (row.steps.length) add(body, stepsList(row.steps, row.key));
     if (row.handoff) add(body, el('div', 'quiet small', row.handoff));
@@ -1303,7 +1320,7 @@ const PAGE_SCRIPT = String.raw`
       var shown = pair[0] === 'older' && !opened['older:all'] ? ${OLDER_SHOWN} : questions.length;
       function appendQuestion(one) {
         // A question that can be hidden has the same button as a live one; a retained source kept for review only says so.
-        var card = add(el('div'), add(el('div', 'where'), agentMark(who(one)), el('span', '', [one.project, brand(who(one)), one.task, one.when].filter(Boolean).join(' · '))), el('div', 'q', one.text), el('div', '', one.note), el('div', 'quiet', one.context), one.canHide ? add(el('div', 'actions'), button(w('answeredHide'), function () { act(one.key, 'hide'); })) : el('div', 'quiet', w('questionReviewOnly')));
+        var card = add(el('div'), add(el('div', 'where'), agentMark(who(one)), el('span', '', [one.project, brand(who(one)), one.task, one.when].filter(Boolean).join(' · '))), el('div', 'q', one.text), el('div', '', one.note), one.context ? clipped(one.contextLine, one.context, 'quiet context', 'context:' + one.key) : el('div', 'quiet', ''), one.canHide ? add(el('div', 'actions'), button(w('answeredHide'), function () { act(one.key, 'hide'); })) : el('div', 'quiet', w('questionReviewOnly')));
         resultSlot(card, one.key, one.text, one.task);
         add(retained, tracked(card, ['waiting'], one, '', true));
       }

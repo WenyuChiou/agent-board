@@ -5,6 +5,7 @@ import { parseProgress } from '../hooks/parse'
 import { buildView, relativeTime } from '../hooks/view'
 import type { View } from '../hooks/view'
 import type { PendingTurn } from '../hooks/board'
+import { boardItems, olderKey } from '../hooks/board'
 import { folderOf } from '../hooks/question-merge'
 import { serveModel } from '../hooks/serve'
 import { STRINGS } from '../hooks/strings'
@@ -16,10 +17,10 @@ const NOW = START + 3 * HOUR
 const QUESTION = 'Ship the synthetic plan, OK?'
 
 // A block of one agent's session that asks `question`; `updated` keeps it live at NOW.
-const block = (session: string, agent: string, project: string, question: string, updated = NOW): string =>
-  `## ${project}\n<!-- auto session=${session} agent=${agent} state=waiting updated=${new Date(updated).toISOString()} -->\n### Task ${session}\n- [?] ${question}\n<!-- /auto session=${session} -->\n`
+const block = (session: string, agent: string, project: string, question: string, updated = NOW, dir: string | null = project === 'demo' || project === 'other-folder' ? `/work/${project}` : project): string =>
+  `## ${project}\n<!-- auto session=${session} agent=${agent} state=waiting updated=${new Date(updated).toISOString()}${dir === null ? '' : ` dir=${encodeURIComponent(dir)}`} -->\n### Task ${session}\n- [?] ${question}\n<!-- /auto session=${session} -->\n`
 
-const capture = (id: string, agent: string, project: string, text: string, at: number): PendingTurn => ({ id, agent, project, text, fullText: text, isQuestion: true, at })
+const capture = (id: string, agent: string, project: string, text: string, at: number): PendingTurn => ({ id, agent, project, dir: `/work/${project}`, text, fullText: text, isQuestion: true, at })
 
 // The ledger as the question pass writes it: each file read at the time given, one pass after another.
 const ledgerOf = (passes: ReadonlyArray<{ text: string; at: number; pending?: PendingTurn[] }>): QuestionLedger =>
@@ -73,6 +74,38 @@ test('the same words from two different agents show as two cards', () => {
   expect(view.overview.waiting).toBe(3)
 })
 
+test('two blocks of one agent under one heading but in different folders show as two cards and Hide closes only the one', () => {
+  const text = block('aaaa1111', 'codex', 'demo', QUESTION, NOW, '/work/one') + block('bbbb2222', 'codex', 'demo', QUESTION, NOW, '/work/two')
+  const ledger = ledgerOf([{ text, at: START }])
+  const shown = viewOf(text, ledger)
+  expect(shown.waiting).toHaveLength(2)
+  const hidden = viewOf(text, ledger, [], [shown.waiting[1]!.hideKey])
+  expect(hidden.waiting.map(item => item.key)).toEqual([shown.waiting[0]!.key])
+  expect(hidden.overview.waiting).toBe(1)
+})
+
+test('a question whose block has no folder stays its own card next to the same question in another block', () => {
+  for (const dir of [null, '/work/demo']) {
+    const text = block('aaaa1111', 'codex', 'demo', QUESTION, NOW, null) + block('bbbb2222', 'codex', 'demo', QUESTION, NOW, dir)
+    const ledger = ledgerOf([{ text, at: START }])
+    const shown = viewOf(text, ledger)
+    expect(shown.waiting).toHaveLength(2)
+    for (const card of shown.waiting) {
+      expect(viewOf(text, ledger, [], [card.hideKey]).waiting.map(item => item.key)).toEqual(shown.waiting.filter(item => item !== card).map(item => item.key))
+    }
+  }
+})
+
+test('folders that differ only by a backslash or a trailing space in their name show as two cards', () => {
+  // On a POSIX computer both are part of a folder's name; only a Windows path reads either slash the same.
+  const backslash = String.fromCharCode(92)
+  for (const [one, two] of [[`/work/a${backslash}b`, '/work/a/b'], ['/work/name ', '/work/name']] as const) {
+    const text = block('aaaa1111', 'codex', 'demo', QUESTION, NOW, one) + block('bbbb2222', 'codex', 'demo', QUESTION, NOW, two)
+    expect(viewOf(text, ledgerOf([{ text, at: START }])).waiting).toHaveLength(2)
+  }
+  expect(folderOf(`C:${backslash}work${backslash}demo`)).toBe(folderOf('c:/work/demo/'))
+})
+
 test('hiding or answering the one card closes every copy of it', () => {
   const text = block('aaaa1111', 'codex', 'demo', QUESTION) + block('bbbb2222', 'codex', 'demo', QUESTION)
   const pending = [capture('cccc3333', 'codex', 'demo', QUESTION, START + 2 * HOUR)]
@@ -120,7 +153,7 @@ test('the count beside Waiting on you counts the question once', () => {
 
 // A session that has ended and still holds the question.
 const ended = (session: string, question: string, updated: number): string =>
-  `## demo\n<!-- auto session=${session} agent=codex state=ended updated=${new Date(updated).toISOString()} -->\n### Task ${session}\n- [?] ${question}\n<!-- /auto session=${session} -->\n`
+  `## demo\n<!-- auto session=${session} agent=codex state=ended updated=${new Date(updated).toISOString()} dir=%2Fwork%2Fdemo -->\n### Task ${session}\n- [?] ${question}\n<!-- /auto session=${session} -->\n`
 
 test('a stopped session\'s copy joins the live card instead of listing the question again', () => {
   const old = START - 10 * 24 * HOUR
@@ -162,6 +195,20 @@ test('two retained copies of one question show once under Older', () => {
   expect(serveModel(view, [], EN).older).toHaveLength(1)
 })
 
+test("hiding a question also hides a stopped session's copy that was recorded after it", () => {
+  const live = block('aaaa1111', 'codex', 'demo', QUESTION)
+  const text = live + ended('bbbb2222', QUESTION, START - 10 * 24 * HOUR)
+  const ledger = ledgerOf([{ text: live, at: START }, { text, at: START + HOUR }])
+  const shown = viewOf(text, ledger)
+  expect(shown.waiting.map(item => item.key)).toEqual([expect.stringContaining('Task aaaa1111')])
+  const hidden = viewOf(text, ledger, [], [shown.waiting[0]!.hideKey])
+  expect(hidden.waiting).toHaveLength(0)
+  expect(hidden.reminder ?? []).toHaveLength(0)
+  expect(hidden.older ?? []).toHaveLength(0)
+  expect(hidden.overview.waiting).toBe(0)
+  expect(hidden.stoppedAsking ?? 0).toBe(0)
+})
+
 test('a copy cut off in the middle of a write neither makes a card vanish nor changes its age', () => {
   const text = block('aaaa1111', 'codex', 'demo', QUESTION)
   const second = text + block('bbbb2222', 'codex', 'demo', QUESTION)
@@ -179,4 +226,70 @@ test('a copy cut off in the middle of a write neither makes a card vanish nor ch
   const whole = viewOf(second, ledgerOf([{ text, at: START }, { text: second, at: START + HOUR }]))
   expect(whole.waiting).toHaveLength(1)
   expect(whole.waiting[0]?.when).toBe(view.waiting[0]?.when)
+})
+
+test("a question stays on the board when another session's copy of it is renewed", () => {
+  const first = block('aaaa1111', 'codex', 'demo', QUESTION)
+  const owner = 'a'.repeat(64)
+  const asked = first + block('bbbb2222', 'codex', 'demo', `${QUESTION}
+<!-- question=${owner}:1 -->`)
+  const renewed = asked.replace(`question=${owner}:1`, `question=${owner}:2`)
+  const ledger = ledgerOf([{ text: first, at: START }, { text: asked, at: START + HOUR }, { text: renewed, at: START + 2 * HOUR }])
+  // The second session's first ask was replaced by its renewal; nobody answered or hid it.
+  expect(ledger.records.filter(record => record.isUnresolved === false)).toHaveLength(1)
+  const view = viewOf(renewed, ledger)
+  // The question is one card, and it still carries the age of the first session's copy, which is open.
+  expect(view.waiting).toHaveLength(1)
+  expect(view.waiting[0]?.when).toBe(relativeTime(START, NOW, EN))
+  // The first session's copy is not covered, so Hide on the card closes both sessions' copies.
+  const hidden = viewOf(renewed, ledger, [], [view.waiting[0]!.hideKey])
+  expect(hidden.waiting).toHaveLength(0)
+  expect(hidden.overview.waiting).toBe(0)
+})
+
+test('a question another session finished stays closed when that session goes on to ask something else', () => {
+  const first = block('aaaa1111', 'codex', 'demo', QUESTION)
+  const owner = 'b'.repeat(64)
+  const asked = first + block('bbbb2222', 'codex', 'demo', `${QUESTION}
+<!-- question=${owner}:1 -->`)
+  const next = 'Pick a name or a date?'
+  const moved = first + block('bbbb2222', 'codex', 'demo', `${next}
+<!-- question=${owner}:2 -->`)
+  const ledger = ledgerOf([{ text: first, at: START }, { text: asked, at: START + HOUR }, { text: moved, at: START + 2 * HOUR }])
+  // The second session asked the question after the first, then went on to another one: that is not
+  // a renewal, so the first session's older copy stays covered and only the new question shows.
+  expect(viewOf(moved, ledger).waiting.map(item => item.text)).toEqual([next])
+})
+
+test('a question asked again after a different one does not bring back a copy it covered', () => {
+  const first = block('aaaa1111', 'codex', 'demo', QUESTION)
+  const owner = 'b'.repeat(64)
+  const asked = first + block('bbbb2222', 'codex', 'demo', `${QUESTION}
+<!-- question=${owner}:1 -->`)
+  const next = 'Pick a name or a date?'
+  const moved = first + block('bbbb2222', 'codex', 'demo', `${next}
+<!-- question=${owner}:2 -->`)
+  const again = first + block('bbbb2222', 'codex', 'demo', `${QUESTION}
+<!-- question=${owner}:3 -->`)
+  const ledger = ledgerOf([{ text: first, at: START }, { text: asked, at: START + HOUR }, { text: moved, at: START + 2 * HOUR }, { text: again, at: START + 2.5 * HOUR }])
+  const view = viewOf(again, ledger)
+  // The first session's copy was covered before the second session asked again.
+  expect(view.waiting.map(item => item.key)).toEqual([expect.stringContaining('Task bbbb2222')])
+  expect(view.waiting[0]?.when).toBe(relativeTime(START + 2.5 * HOUR, NOW, EN))
+})
+
+test('a Hide pressed on an older question is refused once another copy of it has arrived', () => {
+  const long = START - 10 * 24 * HOUR
+  const live = block('aaaa1111', 'codex', 'demo', QUESTION)
+  const before = viewOf(live, ledgerOf([{ text: live, at: long }]))
+  expect(before.older).toHaveLength(1)
+  const drawn = olderKey(before.older![0]!)
+  const text = live + ended('bbbb2222', QUESTION, long)
+  const after = viewOf(text, ledgerOf([{ text: live, at: long }, { text, at: START }]))
+  // The card is still the live copy, but a Hide on it now closes the copy that arrived, which the
+  // person never saw: the press made on the earlier drawing finds no line.
+  expect(after.older).toHaveLength(1)
+  expect(after.older![0]!.key).toBe(before.older![0]!.key)
+  expect(boardItems(after, [], true, true).some(item => item.key === drawn)).toBe(false)
+  expect(boardItems(before, [], true, true).some(item => item.key === drawn)).toBe(true)
 })

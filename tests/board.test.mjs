@@ -680,7 +680,7 @@ test('the HTML board skips claimed inbox files while keeping the question in pro
 // One question asked in a block and in the inbox is one card (#463), like the terminal board and --serve.
 test('the HTML board shows a question that is in both an agent block and the inbox once, like the terminal board and --serve', () => {
   const page = htmlRun({
-    file: FILE.replace('Per-key limit — 100 or 300 a minute?', HTML_QUESTION),
+    file: FILE.replace('Per-key limit — 100 or 300 a minute?', HTML_QUESTION).replace('agent=codex ', 'agent=codex dir=%2Fwork%2Fapi-gateway '),
     inbox: { [HTML_TURN]: htmlTurn(HTML_QUESTION) },
   })
   const pending = page.match(/data-key="section:inbox"[\s\S]*?<\/details>/)?.[0] ?? ''
@@ -7375,7 +7375,7 @@ const sourceModel = async (text, now) => {
 
 const ONE_LINE_NOW = Date.parse('2026-10-28T12:00:00Z')
 const LONG_STEP = 'Write the report and then check every table twice. '.repeat(6).trim()
-const LONG_TITLE = `Wrote the whole work log into the heading: ${'checked one more thing, '.repeat(12)}done`
+const LONG_TITLE = `Wrote the whole work log into the heading: ${'checked one more thing, '.repeat(24)}done`
 const ONE_LINE_FILE = `## Home
 ### Weekly plan
 - [x] A short step
@@ -7394,17 +7394,18 @@ test('a step longer than one line shows one line on the card and its full text o
   const dom = await pageDom(await sourcePage('en'), await sourceModel(ONE_LINE_FILE, ONE_LINE_NOW))
   const steps = pressWalk(dom.node('board')).filter(node => node.tag === 'li')
   assert.equal(steps.length, 3)
-  // The short steps stay as they were; only the long one is a details element.
-  assert.ok(!steps.some(step => step.textContent.includes('A short step') && pressWalk(step).some(node => node.tag === 'details')))
-  const [clip] = steps.flatMap(step => pressWalk(step)).filter(node => node.tag === 'details')
+  // Every step has a keyboard-reachable expand, including text that happens to fit.
+  assert.ok(steps.every(step => pressWalk(step).some(node => node.tag === 'details')))
+  const clip = pressWalk(steps[1]).find(node => node.tag === 'details')
   assert.equal(clip.open, false)
   // Its toggle is a summary, which a keyboard reaches and opens with Enter or Space.
   const summary = clip.childNodes[0]
   assert.equal(summary.tag, 'summary')
   const shown = summary.childNodes.find(node => node.className === 'short').textContent
-  assert.ok(Array.from(shown).length <= 80 && shown.endsWith('…'), shown)
+  assert.equal(shown, LONG_STEP)
   assert.ok(!/\s{2}|[\r\n]/.test(shown), shown)
-  assert.ok(LONG_STEP.startsWith(shown.slice(0, -1)))
+  const html = await sourcePage('en')
+  assert.ok(html.includes('white-space:nowrap;overflow:hidden;text-overflow:ellipsis'))
   // Open, the whole step is there, word for word; nothing is cut from the record.
   assert.equal(summary.childNodes.find(node => node.className === 'whole').textContent, LONG_STEP)
   // The Done recently row of a heading that is a whole log reads the same way.
@@ -7464,4 +7465,71 @@ test('a clipped step keeps its open state across a refresh', async () => {
   await dom.redraw(drawn(10))
   assert.equal(stepClip().open, false)
   assert.equal(recentClip().open, true)
+})
+
+test("a card's notes show as one line with the full text on open", async () => {
+  const notes = ['First synthetic note '.repeat(20), 'Second synthetic note '.repeat(20), 'Third synthetic note '.repeat(20)].map(note => note.trim())
+  const context = 'Question context '.repeat(40).trim()
+  const stoppedContext = 'Stopped context '.repeat(40).trim()
+  const file = `## Home\n### Weekly plan\n${notes.map(note => `> ${note}`).join('\n')}\n- [ ] Review\n\n## demo\n<!-- auto session=aaaa1111 agent=codex state=waiting updated=2026-10-28T11:00:00Z -->\n### Choose\n> Context: ${context}\n- [?] Ship the plan, OK?\n<!-- /auto session=aaaa1111 -->\n<!-- auto session=bbbb2222 agent=codex state=ended updated=2026-10-27T11:00:00Z -->\n### Stopped\n> Context: ${stoppedContext}\n- [?] Keep the draft, OK?\n<!-- /auto session=bbbb2222 -->\n<!-- auto session=cccc3333 agent=codex state=ended updated=2026-10-27T10:00:00Z -->\n### Quiet\n- [?] Pick a name, OK?\n<!-- /auto session=cccc3333 -->\n`
+  const model = await sourceModel(file, ONE_LINE_NOW)
+  const row = model.groups.flatMap(group => group.rows).find(row => row.title === 'Weekly plan')
+  for (const note of notes) assert.ok(row.context.includes(note))
+  const dom = await pageDom(await sourcePage('en'), model)
+  const contexts = () => clipsOf(dom).filter(node => node.className.includes('context'))
+  for (const whole of [row.context, context, stoppedContext]) {
+    const matches = contexts().filter(node => node.childNodes[0].childNodes.find(node => node.className === 'whole').textContent === whole)
+    assert.ok(matches.length > 0)
+    for (const clip of matches) {
+      assert.equal(clip.open, false)
+      const summary = clip.childNodes[0]
+      assert.equal(summary.tag, 'summary')
+      const line = summary.childNodes.find(node => node.className === 'short').textContent
+      assert.ok(Array.from(line).length <= 400 && !/[\r\n]/.test(line))
+      assert.ok(line.endsWith('…'))
+      clip.open = true
+      clip.events.toggle()
+    }
+  }
+  await dom.redraw({ ...model, counts: { ...model.counts, active: 7 } })
+  assert.ok(contexts().every(clip => clip.open))
+  // A card with no note has no empty expand for a keyboard to land on.
+  assert.ok(clipsOf(dom).every(clip => clip.childNodes[0].childNodes.find(node => node.className === 'whole').textContent !== ''))
+})
+
+test("a waiting card's note shows as one line with the full text on open", async () => {
+  const question = `${'Can the reviewer check the complete plan '.repeat(14).trim()}?`
+  const note = 'A detailed synthetic note for the reviewer '.repeat(20).trim()
+  const context = 'Context that the note takes the place of'
+  const fallback = 'Context for a question without a note'
+  const file = `## demo\n<!-- auto session=aaaa1111 agent=codex state=waiting updated=2026-10-28T11:00:00Z -->\n### Choose\n> Context: ${context}\n- [?] ${question} — ${note}\n<!-- /auto session=aaaa1111 -->\n<!-- auto session=bbbb2222 agent=codex state=waiting updated=2026-10-28T11:00:00Z -->\n### Fallback\n> Context: ${fallback}\n- [?] Keep the draft, OK?\n<!-- /auto session=bbbb2222 -->\n`
+  const model = await sourceModel(file, ONE_LINE_NOW)
+  const ask = model.asks.find(item => item.task === 'Choose')
+  assert.equal(ask.text, question)
+  assert.equal(ask.note, note)
+  assert.equal(ask.context, context)
+  assert.ok(ask.noteLine.endsWith('…') && Array.from(ask.noteLine).length <= 400)
+  assert.ok(!/[\r\n]/.test(ask.noteLine))
+  const html = await sourcePage('en')
+  const dom = await pageDom(html, model)
+  const cards = () => pressWalk(dom.node('board')).filter(node => node.tag === 'article' && node.className === 'card ask')
+  const choose = () => cards().find(card => pressWalk(card).some(node => node.tag === 'b' && node.textContent === question))
+  const noteClip = () => pressWalk(choose()).find(node => node.tag === 'details' && node.className === 'clip note')
+  const clip = noteClip()
+  assert.equal(clip.open, false)
+  const summary = clip.childNodes[0]
+  assert.equal(summary.tag, 'summary')
+  assert.equal(summary.childNodes.find(node => node.className === 'short').textContent, ask.noteLine)
+  assert.equal(summary.childNodes.find(node => node.className === 'whole').textContent, note)
+  assert.ok(html.includes('white-space:nowrap;overflow:hidden;text-overflow:ellipsis'))
+  assert.ok(!pressWalk(choose()).some(node => node.className?.includes('context')))
+  assert.ok(cards().some(card => pressWalk(card).some(node => node.className === 'whole' && node.textContent === fallback)))
+  clip.open = true
+  clip.events.toggle()
+  await dom.redraw({ ...model, counts: { ...model.counts, active: 7 } })
+  assert.equal(noteClip().open, true)
+  noteClip().open = false
+  noteClip().events.toggle()
+  await dom.redraw({ ...model, counts: { ...model.counts, active: 8 } })
+  assert.equal(noteClip().open, false)
 })

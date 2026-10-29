@@ -23,6 +23,57 @@ const assertNoIdentifiers = async (page, root, sessions) => {
 }
 
 describe('confirmed browser journeys', { concurrency: 1 }, () => {
+  test('on a 375 px phone every step and note is one line and opens to the whole text', { concurrency: false, timeout: 120_000 }, async () => {
+    await browserFixture('phone-one-line', async ({ page, progress, startServer }) => {
+      await page.setViewportSize({ width: 375, height: 812 })
+      const chinese = '整'.repeat(60)
+      const english = 'Review every synthetic result and write the full report. '.repeat(5).trim()
+      const unbroken = 'SyntheticWord'.repeat(25)
+      const notes = ['First synthetic note '.repeat(12).trim(), 'Second synthetic note '.repeat(12).trim(), 'Third synthetic note '.repeat(12).trim()]
+      const review = 'Review the notes and preserve every detail. '.repeat(5).trim()
+      const stopped = 'Inspect the stopped synthetic task. '.repeat(6).trim()
+      writeProgress(progress, `## Synthetic phone\n### Read every step\n- [ ] ${chinese}\n- [ ] ${english}\n- [ ] ${unbroken}\n\n### Read card notes\n${notes.map(note => `> ${note}`).join('\n')}\n- [ ] ${review}\n\n${block('a61ce021', 'codex', 'ended', 'Synthetic phone', 'Stopped phone task', [`- [ ] ${stopped}`])}`)
+      const board = new BoardPage(page)
+      await board.open(await startServer())
+      const task = await board.openTask('Read every step')
+      const noted = await board.openTask('Read card notes')
+      await page.getByText('1 stopped', { exact: true }).click()
+      const stoppedRow = page.locator('details.row').filter({ hasText: 'Stopped phone task' })
+      await stoppedRow.locator(':scope > summary').click()
+      const stepClips = page.locator('.steps .clip')
+      assert.equal(await stepClips.count(), 5)
+      const all = [...await stepClips.all(), noted.locator('.context')]
+      for (const clip of all) {
+        const summary = clip.locator(':scope > summary')
+        const short = clip.locator('.short')
+        const metrics = await short.evaluate(node => {
+          const style = getComputedStyle(node)
+          return { height: node.parentElement.getBoundingClientRect().height, font: parseFloat(style.fontSize), width: node.clientWidth, scroll: node.scrollWidth, whiteSpace: style.whiteSpace, overflow: style.overflow, ellipsis: style.textOverflow }
+        })
+        assert.ok(metrics.width > 0 && metrics.scroll > metrics.width)
+        assert.ok(metrics.height <= metrics.font * 1.8, JSON.stringify(metrics))
+        assert.deepEqual([metrics.whiteSpace, metrics.overflow, metrics.ellipsis], ['nowrap', 'hidden', 'ellipsis'])
+        const whole = await clip.locator('.whole').textContent()
+        assert.ok(whole.length > 60 || whole === chinese)
+        await summary.focus()
+        await summary.press('Enter')
+        assert.equal(await clip.getAttribute('open'), '')
+        assert.equal(await clip.locator('.whole').innerText(), whole)
+        const height = await summary.evaluate(node => node.getBoundingClientRect().height)
+        assert.ok(height > metrics.font * 1.8)
+        assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth))
+        await summary.press('Space')
+      }
+      const noteWhole = await noted.locator('.context .whole').textContent()
+      for (const note of notes) assert.ok(noteWhole.includes(note))
+      assert.deepEqual(await task.locator('.steps .whole').allTextContents(), [chinese, english, unbroken])
+      await task.getByTitle(chinese, { exact: true }).click()
+      await task.getByText(/1\/3/).waitFor()
+      assert.ok(readFileSync(progress, 'utf8').includes(`- [x] ${chinese}`))
+      assert.ok(readFileSync(progress, 'utf8').includes(`- [ ] ${english}`))
+    })
+  })
+
   test('setup is idempotent and a pasted Muse question remains recoverable across reloads', { concurrency: false, timeout: 120_000 }, async () => {
     await browserFixture('paste-hide-restore', async ({ page, progress, root, startServer }) => {
       const board = new BoardPage(page)
@@ -181,9 +232,9 @@ ${block('a11ce023', 'gemini', 'done', 'Synthetic archive', 'Completed synthetic 
       assert.ok(before)
       await page.getByText('2 stopped', { exact: true }).click()
       // The question shows on its Stopped row and, once, in the closed Older shelf: look at the row.
-      await page.getByRole('listitem').getByText(words, { exact: false }).waitFor()
+      await page.getByRole('listitem').locator('.short', { hasText: words }).waitFor()
       await page.getByRole('button', { name: 'Archive', exact: true }).click()
-      await page.getByRole('listitem').getByText(words, { exact: false }).waitFor({ state: 'detached' })
+      await page.getByRole('listitem').locator('.short', { hasText: words }).waitFor({ state: 'detached' })
       await page.getByText('Older unanswered questions (1)', { exact: true }).click()
       await page.getByText(words, { exact: true }).waitFor()
       await page.getByText('Keep the active fixture visible', { exact: true }).waitFor()

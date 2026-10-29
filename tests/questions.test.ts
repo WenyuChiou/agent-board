@@ -17,7 +17,7 @@ import { reusableQuestionObservation } from '../scripts/question-observation'
 
 const NOW = Date.parse('2026-10-16T12:00:00Z')
 const file = (steps: string, project = 'demo', session = 'a1b2c3d4'): string =>
-  `## ${project}\n<!-- auto session=${session} agent=codex state=waiting updated=${new Date(NOW).toISOString()} -->\n### Ship\n${steps}\n<!-- /auto session=${session} -->\n`
+  `## ${project}\n<!-- auto session=${session} agent=codex state=waiting updated=${new Date(NOW).toISOString()} dir=${encodeURIComponent(`/work/${project}`)} -->\n### Ship\n${steps}\n<!-- /auto session=${session} -->\n`
 const observe = (ledger: QuestionLedger, text: string, answered: string[] = [], at = NOW, settled = true) =>
   observeQuestions(ledger, parseProgress(text), null, answered, at, settled)
 const view = (ledger: QuestionLedger, text: string, answered: string[] = []) =>

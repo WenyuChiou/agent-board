@@ -1,5 +1,5 @@
 import type { QuestionRecord } from '../types'
-import { questionWords } from './questions'
+import { questionWords, sourceSnapshot } from './questions'
 import type { WaitingItem } from './view'
 
 // One question asked in several places shows once (#463). Two copies are the same question when
@@ -7,28 +7,47 @@ import type { WaitingItem } from './view'
 // spaces collapsed; another agent, or another folder, is another question. Nothing is deleted:
 // the other copies stay in the question list, and only the board shows one card for all of them.
 
-// A Windows path reads the same with either slash, a trailing slash or a drive letter in either
-// case; a leading `//` (a network share) is kept, so it is not taken for a path on the root.
-export const folderOf = (project: string): string => {
-  const path = project.trim().replace(/\\/g, '/').replace(/(.)\/{2,}/g, '$1/').replace(/(.)\/+$/, '$1')
+// A Windows path (a drive letter, or a network share) reads the same with either slash, a trailing
+// slash or a drive letter in either case; a leading `//` (a network share) is kept, so it is not
+// taken for a path on the root. Any other path is a POSIX one: a backslash or a trailing space is
+// part of a folder's name there, so only repeated and trailing slashes are folded.
+const isWindowsPath = (path: string): boolean => /^(?:[A-Za-z]:(?:[\\/]|$)|\\\\)/.test(path.trim())
 
-  return /^[A-Za-z]:(\/|$)/.test(path) ? path.toLowerCase() : path
+export const folderOf = (project: string): string => {
+  const isWindows = isWindowsPath(project)
+  const path = (isWindows ? project.trim().replace(/\\/g, '/') : project).replace(/(.)\/{2,}/g, '$1/').replace(/(.)\/+$/, '$1')
+
+  return isWindows && /^[A-Za-z]:(\/|$)/.test(path) ? path.toLowerCase() : path
 }
 
-const copyKey = (agent: string, project: string, words: string): string => JSON.stringify([agent === '' ? 'claude' : agent.toLowerCase(), folderOf(project), words])
+const copyKey = (agent: string, dir: string | null | undefined, words: string): string | null =>
+  dir === null || dir === undefined || dir.trim() === '' ? null : JSON.stringify([agent === '' ? 'claude' : agent.toLowerCase(), folderOf(dir), words])
+
+export const recordFolder = (record: QuestionRecord | undefined): string | null => {
+  const source = record?.source
+  if (source === undefined) return null
+  if (source.kind === 'block') return sourceSnapshot(source.data)?.auto?.dir ?? null
+  if (source.kind !== 'inbox') return null
+  try {
+    const turn = JSON.parse(source.data) as { dir?: unknown } | null
+    return typeof turn?.dir === 'string' ? turn.dir : null
+  } catch {
+    return null
+  }
+}
 
 // Only another agent's question, or another Claude Code session's, merges, and only one the
 // ledger has a record of: a copy with no record has no age and no identity yet (a block cut off in
 // the middle of a write). This session's own question is answered in the pane, and a hand-kept one
 // is the person's own step to tick: each stays a card of its own.
 export const itemKey = (item: WaitingItem): string | null =>
-  item.where !== 'other' || item.questionId === undefined ? null : copyKey(item.agent, item.project, questionWords(item.note === '' ? item.text : `${item.text} — ${item.note}`))
+  item.where !== 'other' || item.questionId === undefined ? null : copyKey(item.agent, item.dir, questionWords(item.note === '' ? item.text : `${item.text} — ${item.note}`))
 
 const recordKey = (record: QuestionRecord): string | null => {
   try {
     const [project, agent] = JSON.parse(record.scope) as unknown[]
     // A hand-kept task's scope names `manual` as its agent.
-    return typeof project !== 'string' || typeof agent !== 'string' || agent === 'manual' ? null : copyKey(agent, project, record.words)
+    return typeof project !== 'string' || typeof agent !== 'string' || agent === 'manual' ? null : copyKey(agent, recordFolder(record), record.words)
   } catch {
     return null
   }
@@ -39,15 +58,27 @@ const recordKey = (record: QuestionRecord): string | null => {
 export type Seen = { at: number; rank: number }
 const isBefore = (a: Seen, b: Seen): boolean => a.at < b.at || (a.at === b.at && a.rank < b.rank)
 
-// For each question, and each session that asked it, the newest closed copy (answered, resolved or
-// marked answered). Closing the card that was shown closes every copy of the question asked before
-// it, in any other session; a copy asked after still shows. An answered copy is closed at the time
-// it was answered. Two copies of one session are the ledger's own identities (a renewal, or two
-// alike steps of one block), and the ledger already says which of them is closed.
+// A closed copy covers the copies of the same question asked before it, in other sessions, unless
+// the session's next record asks the same words: a renewal closes the earlier record (same owner
+// token and no answer time) while the session still asks, and that is not an answer. Hide always counts.
+const ownerOf = (record: QuestionRecord): string => (record.producer ?? '').split(':')[0] ?? ''
+const ownerKey = (record: QuestionRecord): string => JSON.stringify([record.scope, ownerOf(record)])
+
 export const closedCopies = (records: readonly QuestionRecord[], marked: ReadonlySet<string>): Map<string, Map<string, Seen>> => {
   const closed = new Map<string, Map<string, Seen>>()
+  const next = new Map<number, number>()
+  const last = new Map<string, number>()
+  records.forEach((record, rank) => {
+    if (ownerOf(record) === '') return
+    const owner = ownerKey(record)
+    const before = last.get(owner)
+    if (before !== undefined) next.set(before, rank)
+    last.set(owner, rank)
+  })
   records.forEach((record, rank) => {
     if (record.isUnresolved !== false && !marked.has(record.id)) return
+    const after = next.get(rank)
+    if (!marked.has(record.id) && record.resolvedAt === undefined && after !== undefined && records[after]?.words === record.words) return
     const key = recordKey(record)
     if (key === null) return
     const at: Seen = record.isUnresolved === false && record.resolvedAt !== undefined ? { at: record.resolvedAt, rank: -1 } : { at: record.firstObserved, rank }
@@ -97,7 +128,11 @@ export const mergeCopies = (copies: readonly Copy[], closed: ReadonlyMap<string,
     const [first = newest, ...rest] = known.length > 0 ? known : open
     const oldest = rest.reduce((best, copy) => (copy.at < best.at ? copy : best), first)
     for (const copy of open) if (copy !== newest) gone.add(copy.item)
-    if (oldest.item !== newest.item) carried.set(newest.item, { ...newest.item, when: oldest.item.when })
+    // Hide acknowledges the newest observed copy, including stopped copies recorded after the
+    // live reply target. That record's time and order cover this group, while later asks stay new.
+    const acknowledged = open.filter(copy => copy.item.canHide !== false)
+    const last = (acknowledged.length > 0 ? acknowledged : open).reduce((best, copy) => isBefore(best, copy) ? copy : best)
+    if (oldest.item !== newest.item || last.item !== newest.item) carried.set(newest.item, { ...newest.item, when: oldest.item.when, hideKey: last.item.hideKey })
   }
 
   return copies.filter(copy => !gone.has(copy.item)).map(copy => carried.get(copy.item) ?? copy.item)
