@@ -1,0 +1,2 @@
+- **A hand edit to progress.md made while the board writes its block is kept (#506).** The board reads the file again just before each write and makes its change over the new text, and a file that keeps changing is not written over; a tick, an archive or a quick add is reported as done only when it is on disk.
+  Tests: `a hand edit that lands between the board's read and its write is kept`, `another session's block written in that gap is kept`, `a file that keeps changing through every try is not written over`.

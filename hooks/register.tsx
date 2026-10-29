@@ -1446,6 +1446,7 @@ const enqueue = <T,>(job: () => Promise<T>): Promise<T> => {
 
 // What a change answers to have the file read again before it is made: a write caught half-way.
 const AGAIN = Symbol('again')
+const WRITE_RACE = Symbol('write race')
 // How many times `rewrite` makes a change; it tells the change which try is the last.
 const REWRITE_TRIES = 3
 
@@ -2067,7 +2068,7 @@ const takeAgentTurns = async ($: EngineInterface, turns: readonly AgentTurn[], a
     const path = await progressPath($)
     const isKept = (check: string): boolean =>
       extractAutoBlock(check, written.sessionId) === extractAutoBlock(upsertAutoBlock(check, written, s), written.sessionId)
-    await rewrite($, path, async before => {
+    const wrote = await rewrite($, path, async before => {
       const current = await $.store.get(owner) as ProgressMirror | undefined
       if (JSON.stringify(current ?? null) !== JSON.stringify(written) || JSON.stringify((await agentProjection($, last.id, current)).mirror ?? null) !== JSON.stringify(written)) {
         hasMoved = true
@@ -2077,7 +2078,10 @@ const takeAgentTurns = async ($: EngineInterface, turns: readonly AgentTurn[], a
     }, isKept)
     if (hasMoved) return
     // Another session's write can undo it three times over; only a block read back counts.
-    if (!isKept(await readText($, path))) throw new Error(NOT_KEPT)
+    if (!isKept(await readText($, path))) {
+      if (wrote === null) throw WRITE_RACE
+      throw new Error(NOT_KEPT)
+    }
     if (answeredLater !== undefined) {
       answeredLater.push(...answers)
       return
@@ -2792,11 +2796,35 @@ const drainInbox = async ($: EngineInterface): Promise<void> => {
           if (questions.length > 0) asking.push({ group, questions })
           settled.push(...group)
         } catch (error) {
-          const why = (error instanceof Error ? error.message : String(error)).replace(/\s+/g, ' ').slice(0, 200)
           // With a retake ahead the loop goes on, and the retake's newer turn lands first: this
           // older turn's retry then changes nothing, and its summary is lost, as for any turn older
           // than its block. Holding the retake back instead would use up its last try.
           const isRetakeAhead = runs.slice(index + 1).some(run => run[0]!.attempt > MAX_TRIES)
+          if (error === WRITE_RACE && group.every(one => one.attempt <= MAX_TRIES)) {
+            // The block did not survive a conflict. Keep question previews and return the inputs
+            // without replacing a file another reporter may have put at the original name.
+            const questions = peekInbox(group.flatMap(one => one.body === undefined ? [] : [{ name: one.name, body: one.body, at }]), () => '', text => redact(text, home, isWin)).filter(turn => turn.isQuestion)
+            if (questions.length > 0) await retainInboxQuestions($, questions).catch(() => undefined)
+            for (const one of group) {
+              try {
+                await enqueue(async () => {
+                  const notes = await readInboxRecord($, 'inboxFailed')
+                  if (notes[one.name] !== `${one.attempt}:${tryingAt}:TRYING`) return
+                  delete notes[one.name]
+                  await writeInboxRecord($, 'inboxFailed', notes)
+                })
+                const original = one.path.replace(/[^\\/]+$/, () => one.name)
+                if (!(await placeFile($, one.path, original, isWin))) throw new Error('INBOX_RETURN_FAILED')
+              } catch (returnError) {
+                const reason = inboxFailure(returnError)
+                failed[one.name] = `${one.attempt}:${at}:${reason}`
+                await inboxNotice($, one.path, reason)
+              }
+            }
+            if (!isRetakeAhead) break
+            continue
+          }
+          const why = (error === WRITE_RACE ? NOT_KEPT : error instanceof Error ? error.message : String(error)).replace(/\s+/g, ' ').slice(0, 200)
           for (const one of group) failed[one.name] = `${one.attempt}:${at}:${why}`
           // A file error is named now. The model's silence, or a block not yet read back, is
           // tried again quietly, as before; the last try sets the file aside, which is named.
