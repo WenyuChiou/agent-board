@@ -165,7 +165,7 @@ gh pr view <PR> -R WenyuChiou/agent-board --comments
 node scripts/pr-check.mjs --pr <PR>      # also prints the latest Review: verdict and whether it is for your head
 ```
 
-`Review: REQUEST CHANGES <sha>` lists findings. Fix each finding, merge `main` (step 9), run preflight again and update Checks, push, answer each finding in a comment that names the commit that fixed it, then comment `Ready for review <new full head sha>`. How many review rounds there are, and what happens after the second REQUEST CHANGES, are in [docs/dev/team-process.md, From claim to merge](dev/team-process.md#from-claim-to-merge). After `Review: APPROVE <sha>`, push nothing unless asked: any push needs a new verdict.
+`Review: REQUEST CHANGES <sha>` lists findings. Fix each finding, merge `main` (step 9), run preflight again and update Checks, push, answer each finding in a comment that names the commit that fixed it, then comment `Ready for review <new full head sha>`. How many review rounds there are, and what happens after the second REQUEST CHANGES, are in [docs/dev/team-process.md, From claim to merge](dev/team-process.md#from-claim-to-merge). After `Review: APPROVE <sha>`, push nothing unless asked. A later push needs a new verdict unless it only merges `main` without conflicts and with nothing else in the merge commit (CONTRIBUTING rules 4 and 9).
 
 A question goes on the issue, not on the pull request and not in a chat:
 
@@ -197,7 +197,7 @@ Fragments in `changelog.d/` do not conflict, since each pull request adds its ow
 
 ## 10. After the merge, or handing over
 
-You never merge. The maintainer (the owner, or the Claude Code session the owner named maintainer) reviews and merges, deletes the branch, and comments on each issue with the merge commit and the evidence; each `Fixes #N` line closes its issue, while a `Part of #N` line leaves its issue open for the next step. There is nothing left for you to do on this pull request, and its branch is not reused: the next step of a split issue is a new pull request ([CONTRIBUTING.md](../CONTRIBUTING.md#pull-requests) rule 2), from a new branch.
+Someone other than you approves ([CONTRIBUTING.md](../CONTRIBUTING.md#pull-requests) rule 8). Then a collaborator with write access, the maintainer or the owner merges as rule 9 says, and comments on each issue with the merge commit and the evidence; GitHub deletes eligible same-repository branches; a fork owner may need to delete their branch; each `Fixes #N` line closes its issue, while a `Part of #N` line leaves its issue open for the next step. There is nothing left for you to do on this pull request, and its branch is not reused: the next step of a split issue is a new pull request ([CONTRIBUTING.md](../CONTRIBUTING.md#pull-requests) rule 2), from a new branch.
 
 If you stop before the work is done, push your branch, then:
 
