@@ -1,6 +1,6 @@
 import { ZH_TW } from './i18n'
 import type { Strings } from './i18n'
-import { lastQuestion } from './digest'
+import { lastQuestionInProse, normalizeReply } from './digest'
 import { inboxOrder, isBoardTurn, isTranscriptPath, readTurn, transcriptTail } from './inbox'
 import { localDay, parseJournal, progressReport } from './journal'
 import { sha256 } from './sha256'
@@ -33,6 +33,7 @@ export const peekInbox = (
   files: ReadonlyArray<{ name: string; body: string; at: number }>,
   readLog: (path: string) => string = () => '',
   scrub: (text: string) => string = text => text,
+  s: Strings = ZH_TW,
 ): PendingTurn[] => {
   const latest = new Map<string, PendingTurn>()
   const questions = new Map<string, PendingTurn>()
@@ -44,9 +45,11 @@ export const peekInbox = (
     if (read.event === 'prompt') continue
     const turn = read.prompt === '' && isTranscriptPath(read.transcript) ? { ...read, prompt: transcriptTail(readLog(read.transcript)).prompt } : read
     if (isBoardTurn(turn)) continue
+    const normalized = normalizeReply(turn.answer)
     const answer = scrub(turn.answer)
-    const question = lastQuestion(answer, true)
-    const summary = question ?? closing(answer)
+    const prose = normalized === null ? null : scrub(normalized)
+    const question = prose === null ? null : lastQuestionInProse(prose, true)
+    const summary = prose === null ? s.turnUnreadable : question ?? closing(prose)
     const text = (summary ?? turn.prompt).trim()
     if (question !== null) {
       // Words deduplicate retries, not independent ledger identities. An end or later

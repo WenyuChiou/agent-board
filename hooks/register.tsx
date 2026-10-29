@@ -1165,7 +1165,8 @@ const pendingTurns = async ($: EngineInterface): Promise<PendingTurn[]> => {
       .slice(0, 30)
     // What the turns are made from: the listing (names, times, sizes) and which files are taken
     // already. The time of day is not part of it, so an inbox that did not change reads no file (#156).
-    const cacheKey = JSON.stringify([path, entries.map(entry => [entry.name, entry.mtimeMs, entry.size]), done])
+    const s = await wordsOf($)
+    const cacheKey = JSON.stringify([path, entries.map(entry => [entry.name, entry.mtimeMs, entry.size]), done, s.lang])
     if (pendingCache?.key === cacheKey) return pendingCache.turns
     const files: Array<{ name: string; body: string; at: number }> = []
     let isComplete = true
@@ -1178,7 +1179,7 @@ const pendingTurns = async ($: EngineInterface): Promise<PendingTurn[]> => {
     }
     const home = ((await $.env.get('USERPROFILE')) ?? (await $.env.get('HOME')) ?? '').replace(/[\\/]+$/, '')
     const isWin = await isWindows($, path)
-    const turns = peekInbox(files, () => '', text => redact(text, home, isWin))
+    const turns = peekInbox(files, () => '', text => redact(text, home, isWin), s)
     // A file that could not be read is tried again at the next look.
     if (isComplete) pendingCache = { key: cacheKey, turns }
     return turns
