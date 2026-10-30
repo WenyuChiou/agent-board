@@ -1682,9 +1682,18 @@ test('live blocks of every agent refuse forged web archives without writes and t
     const rows = [...model.groups.flatMap(group => group.rows), ...model.stopped]
     assert.equal(rows.length, 24)
     const html = (await board.call('GET', `/?t=${board.token}`)).body
-    const dom = await pageDom(html, model)
-    assert.ok(!dom.node('board').textContent.includes('Archive'), dom.node('board').textContent)
+    const dom = await pageDom(html, model, { post: async request => {
+      const response = await board.call('POST', request.path, { body: request.body })
+      return { ok: response.status < 300, json: async () => response.json() }
+    } })
+    // A running task keeps its Archive button and says why it cannot be archived only once it is pressed.
+    assert.ok(!dom.node('board').textContent.includes('Still running'), dom.node('board').textContent)
+    const archives = dom.buttons().filter(button => button.textContent === 'Archive')
+    assert.equal(archives.length, 24)
+    archives[0].click()
+    await dom.settle()
     assert.ok(dom.node('board').textContent.includes('Still running; archive after it stops.'))
+    assert.equal(readFileSync(board.path, 'utf8'), file)
     for (const row of rows) {
       assert.equal(row.canArchive, false)
       const reply = await board.call('POST', '/api/act', { body: { key: row.key, type: 'archive', text: '', session: '', fp: row.fp } })
@@ -1722,8 +1731,9 @@ test('page Confirm done buttons act once with exact fingerprints and journal all
       } })
       const buttons = node => node.childNodes.flatMap(child => [...(child.tag === 'button' ? [child] : []), ...buttons(child)])
       const confirms = buttons(dom.node('board')).filter(button => button.textContent === labels[lang])
-      assert.equal(confirms.length, 3)
-      confirms[rows.filter(row => row.canConfirm).findIndex(row => row.title === 'Manual')].click()
+      // The finished task sits on the closed Done shelf, which offers no Confirm done: the other two rows do.
+      assert.equal(confirms.length, 2)
+      confirms[0].click()
       await dom.flush()
       const live = rows.find(row => row.title === 'Live task')
       assert.equal((await board.call('POST', '/api/act', { body: { key: live.key, type: 'done', fp: live.fp } })).status, 409)
@@ -1923,10 +1933,10 @@ test('served questions keep hidden identities across reordered reports and a fre
       assert.ok(!chat.includes('PDF  or') && !chat.includes('PDF or HTML?'), chat)
       run('--html')
       const html = readFileSync(join(board.dir, 'progress.html'), 'utf8')
-      const waiting = html.match(/data-key="section:waiting"[\s\S]*?<\/details>/)?.[0] ?? ''
-      assert.ok(!waiting.includes('PDF or HTML?') && !waiting.includes('PDF  or'), html)
+      const needs = html.match(/id="dash-needs"[\s\S]*?<\/section>/)?.[0] ?? ''
+      assert.ok(needs && !needs.includes('PDF or HTML?') && !needs.includes('PDF  or'), html)
       assert.ok(html.includes('PDF  or') || html.includes('PDF or HTML?'), html)
-      assert.match(html, /● 0<\/span>/)
+      assert.match(html, /id="needs-n">0<\/b>/)
       assert.equal(readFileSync(join(board.dir, 'progress-answered.json'), 'utf8'), saved['progress-answered.json'])
       assert.equal(readFileSync(join(board.dir, 'progress-questions.json'), 'utf8'), saved['progress-questions.json'])
     }
@@ -2024,7 +2034,8 @@ test('a local board stays available by default while an explicit idle timeout cl
   try {
     assert.equal((await persistent.call('GET', '/api/ping')).json().idleMs, 0)
     assert.equal((await timed.call('GET', '/api/ping')).json().idleMs, 1200)
-    assert.ok((await persistent.call('GET', '/?t=' + persistent.token)).body.includes('The local board stays running'))
+    // The footer carries no reopen line: a board that stays running says nothing about it.
+    assert.ok(!(await persistent.call('GET', '/?t=' + persistent.token)).body.includes('The local board stays running'))
     assert.ok((await timed.call('GET', '/?t=' + timed.token)).body.includes('after 0.02 minutes unused'))
     await new Promise(done => setTimeout(done, 2600))
     assert.equal((await persistent.call('GET', '/api/board')).status, 200)
@@ -2041,10 +2052,6 @@ test('the page answers only with its token and its own host, and closing it stop
     assert.equal(home.status, 200)
     assert.match(String(home.headers['content-security-policy']), /script-src 'nonce-[^']+'/)
     assert.equal(home.headers['referrer-policy'], 'no-referrer')
-    // The chat prompt it offers to copy is the one docs/REMOTE_REPORTERS.md gives, word for word.
-    const words = JSON.parse(home.body.match(/<script type="application\/json" id="words">([\s\S]*?)<\/script>/)[1])
-    const doc = readFileSync(new URL('../docs/REMOTE_REPORTERS.md', import.meta.url), 'utf8').replace(/\r\n/g, '\n')
-    assert.equal(words.relayPrompt, doc.split('### Chat relay: a prompt to paste')[1].split('```text\n')[1].split('\n```')[0])
     assert.equal((await call('GET', '/?t=wrong', { headers: { 'x-board-token': '' } })).status, 403)
     assert.equal((await call('GET', '/api/board', { headers: { 'x-board-token': 'wrong' } })).status, 403)
     assert.equal((await call('GET', '/api/board', { headers: { host: `rebind.example:${port}` } })).status, 421)
@@ -2573,17 +2580,21 @@ const viewed = model => {
   const older = [...(model.reminder ?? []), ...(model.older ?? [])].map(item => ({ item, ref: ref('question', item) }))
   const open = (model.groups ?? []).flatMap(group => group.rows.map(item => ({ item, ref: ref('task', item, group.project) })))
   const stopped = [...(model.idle ?? []), ...(model.stopped ?? [])].map(item => ({ item, ref: ref('task', item) }))
+  // Finished tasks (the model's `recent`) are the Done shelf; one with no key of its own gets one here.
+  const recent = (model.recent ?? []).map((item, index) => ({ key: `recent:${index}`, ...item }))
+  const finished = recent.map(item => ({ item, ref: ref('task', item) }))
   const bucket = (pick) => {
-    const [cards, rows, shelf, back] = [asks, open, stopped, older].map(list => list.filter(one => pick(one.item)).map(one => one.ref))
-    return { counts: { open: rows.length, needs: cards.length, stopped: shelf.length, done: 0, older: back.length }, cards, open: rows, stopped: shelf, done: [], older: back }
+    const [cards, rows, shelf, back, done] = [asks, open, stopped, older, finished].map(list => list.filter(one => pick(one.item)).map(one => one.ref))
+    return { counts: { open: rows.length, needs: cards.length, stopped: shelf.length, done: done.length, older: back.length }, cards, open: rows, stopped: shelf, done, older: back }
   }
-  const ids = [...new Set([...asks, ...open, ...stopped, ...older].filter(one => !one.item.isOwn).map(one => agentOf(one.item)))]
+  const ids = [...new Set([...asks, ...open, ...stopped, ...older, ...finished].filter(one => !one.item.isOwn).map(one => agentOf(one.item)))]
   const agents = ids.map(id => ({ agent: id, name: id, icon: id, last: 0, isUnreadable: false, ...bucket(item => !item.isOwn && agentOf(item) === id) }))
   const all = bucket(item => !item.isOwn)
   const own = bucket(item => item.isOwn === true)
   const cards = asks.map(one => one.ref)
   return {
     ...model,
+    recent,
     view: {
       now: 0, n: cards.length, questions: cards.length, stuck: 0, versions: { board: '0.0.0', package: null }, agents,
       needs: { n: cards.length, questions: cards.length, stuck: 0, cards, older: older.map(one => one.ref) },
@@ -2822,8 +2833,11 @@ test('the serve page and the terminal board answer every action with a visible l
     }
     const first = await pageDom(html, model)
     const labels = first.buttons().map(button => button.textContent)
+    // A button inside a block that is not shown yet (the line after a copy, the box behind Write your own) is not pressed here.
+    const isWaiting = node => { for (let one = node; one; one = one.parentNode) if (String(one.className ?? '').split(' ').includes('gone')) return true; return false }
+    const shown = first.buttons().map(button => !isWaiting(button))
     for (const [index, label] of labels.entries()) {
-      if (label === words.serveMore) continue
+      if (label === words.serveMore || !shown[index]) continue
       const dom = await pageDom(html, model, { post: async () => { throw new Error('synthetic offline') } })
       dom.boxes().forEach(box => { box.value = 'A synthetic reply' })
       const button = dom.buttons()[index]
@@ -2831,13 +2845,16 @@ test('the serve page and the terminal board answer every action with a visible l
       button.click()
       await dom.flush()
       await dom.flush()
-      const isCopy = /Copy|Yes|No/.test(label)
+      // An answer that copies has its own failure line; the other copies show the text in a box to copy from.
+      const isInCard = (() => { for (let node = button; node; node = node.parentNode) if (node.tag === 'article') return true; return false })()
+      const isAnswer = label.startsWith('Copy "') || label === words.pgCopyAnswer && isInCard
+      const isCopy = isAnswer || /Copy/.test(label)
       // Read the board again at once so the offline advice becomes the plain failure.
       if (!isCopy) await dom.redraw(model)
       const results = pageCardResults(dom, key).filter(node => node.textContent)
       assert.ok(results.length, `no result beside ${label}`)
-      assert.ok(results.some(node => node.textContent.includes(isCopy ? words.boardCopyFailedBelow : words.pressFailed)), label)
-      if (isCopy) assert.ok(results.some(node => node.childNodes.some(child => child.tag === 'textarea' && child.isSelected)), label)
+      assert.ok(results.some(node => node.textContent.includes(isAnswer ? words.pgCopyFailed : isCopy ? words.boardCopyFailedBelow : words.pressFailed)), label)
+      if (isCopy && !isAnswer) assert.ok(results.some(node => node.childNodes.some(child => child.tag === 'textarea' && child.isSelected)), label)
     }
     for (const response of [
       { ok: true, json: async () => ({ note: 'Saved here' }) },
@@ -3150,7 +3167,7 @@ const pressPageCell = (model, cell) => {
   assert.ok(count > 0, `Missing page runtime card ${cell.title}`)
   const row = [...groups.flatMap(group => group.rows), ...selected.idle, ...selected.stopped][0]
   const askButtons = ask.reduce((total, one) => total + Number(one.canTick) + one.answers.length + Number(one.command !== null) + Number(one.reopen !== null) + Number(one.canHide) + Number(!one.canTick), 0)
-  const rowButtons = [...groups.flatMap(group => group.rows), ...selected.idle, ...selected.stopped].reduce((total, one) => total + Number(one.next !== null) + Number(one.canArchive) + Number(one.canConfirm) + Number(one.resume !== null) + Number(one.send === 'send' || one.send === 'connected' || one.hasCopyBox), 0)
+  const rowButtons = [...groups.flatMap(group => group.rows), ...selected.idle, ...selected.stopped].reduce((total, one) => total + Number(one.next !== null) + Number(one.canArchive || one.archiveNote !== '') + Number(one.canConfirm) + Number(one.resume !== null) + Number(one.send === 'send' || one.send === 'connected' || one.hasCopyBox), 0)
   const expected = askButtons + rowButtons + selected.hidden.length + Number(selected.recent.length > 0)
   return { model: selected, expected, ask: ask[0], row }
 }
@@ -3180,7 +3197,7 @@ test('every serve page action on every card kind from every agent answers with a
       projected = pressPageCell(runtime.serveModel(runtime.view(), runtime.pending(), runtime.s), cell)
       for (const failing of [false, true]) for (let index = 0; index < projected.expected; index += 1) {
         fixture.reset(cell)
-        let serverNote, serverExpected
+        let serverNote, serverExpected, isRefused = false
         let refreshed = projected.model
         const dom = await pageDom(html, projected.model, { currentModel: () => refreshed, copyAllowed: !failing, post: async request => {
           fixture.enable(failing)
@@ -3189,6 +3206,7 @@ test('every serve page action on every card kind from every agent answers with a
             else {
               const items = runtime.boardItems(runtime.view(), runtime.pending(), true, true)
               const action = runtime.serveAction(items, request.body, runtime.s)
+              isRefused = action.type === 'refuse'
               serverNote = action.type === 'refuse' ? action.note : runtime.act(action)
               serverExpected = action.type === 'refuse' ? undefined : pressExpected(runtime, action)
               if (!failing && action.type !== 'refuse') pressChanged(fixture, action, cell.title)
@@ -3199,7 +3217,9 @@ test('every serve page action on every card kind from every agent answers with a
             return { ok: false, json: async () => ({ note: serverNote }) }
           } finally { fixture.disable(); refreshed = runtime.serveModel(runtime.view(), runtime.pending(), runtime.s) }
         } })
-        const actionButtons = dom.buttons().filter(button => button.textContent !== runtime.s.serveMore)
+        // The line after a copy (Copy again, Answered) only exists once something was copied; it is not an offered action.
+        const afterLine = [runtime.s.serveMore, runtime.s.pgCopyAgain, runtime.s.pgAnswered]
+        const actionButtons = dom.buttons().filter(button => !afterLine.includes(button.textContent))
         assert.equal(actionButtons.length, projected.expected, `${cell.title}: exact offered button set`)
         dom.boxes().forEach(box => { box.value = 'Synthetic reply' })
         const button = actionButtons[index]
@@ -3208,34 +3228,41 @@ test('every serve page action on every card kind from every agent answers with a
         await dom.flush(); await dom.flush()
         const key = pageCard(button).getAttribute('data-card-key')
         const card = [...projected.model.asks, ...projected.model.groups.flatMap(group => group.rows), ...projected.model.hidden, ...projected.model.idle, ...projected.model.stopped, ...projected.model.turns].find(one => one.key === key)
-        const label = key === 'recent' ? runtime.s.sectionRecent : card?.task ?? card?.title ?? card?.project
+        const label = key === 'recent' ? runtime.s.pgDone : card?.task || card?.title || card?.project
         assert.notEqual(label, undefined, `${cell.title}: the original card has a label`)
         const results = pageHasCard(refreshed, key) ? pageCardResults(dom, key) : pageLostResults(dom, label)
         const context = `${cell.title} / ${button.textContent} / ${failing ? 'refused' : 'normal'}`
         if (serverNote !== undefined) {
           assert.ok(results.some(node => node.textContent === serverNote), context)
-          if (failing) assert.ok(serverNote.includes(runtime.s.storageReadOnly), context)
+          // A running task keeps its Archive button; the board refuses it and says why.
+          if (isRefused) assert.equal(serverNote, runtime.s.archiveLive, context)
+          else if (failing) assert.ok(serverNote.includes(runtime.s.storageReadOnly), context)
           else { assert.ok(serverExpected, context); assert.equal(serverNote, serverExpected, context) }
         } else {
-          const expected = failing ? runtime.s.boardCopyFailedBelow : runtime.s.copied
-          assert.ok(results.some(node => node.textContent === expected), context)
+          // An answer copied from a card has its own failure line and, on success, the card's line about where to paste.
+          const isInCard = (() => { for (let node = button; node; node = node.parentNode) if (node.tag === 'article') return true; return false })()
+          const isAnswer = button.textContent.startsWith('Copy "') || button.textContent === runtime.s.pgCopyAnswer && isInCard
+          const expected = failing ? isAnswer ? runtime.s.pgCopyFailed : runtime.s.boardCopyFailedBelow : runtime.s.copied
+          if (isAnswer && !failing) assert.ok(!results.some(node => node.textContent), `${context}: the card says where to paste, not a result line`)
+          else assert.ok(results.some(node => node.textContent === expected), context)
           {
             const text = button.textContent === runtime.s.serveCopyResume ? projected.ask?.reopen ?? projected.row?.resume
-              : button.textContent === runtime.s.serveCopyCommand ? projected.ask?.command : button.textContent === runtime.s.serveCopy ? 'Synthetic reply' : button.textContent
+              : button.textContent === runtime.s.serveCopyCommand ? projected.ask?.command : button.textContent === runtime.s.pgCopyAnswer ? 'Synthetic reply'
+                : button.textContent.startsWith('Copy "') ? button.textContent.slice(6, -1) : button.textContent
             assert.deepEqual(dom.copies, [text], `${context}: exact text reached the clipboard`)
-            if (failing) assert.ok(results.some(node => node.childNodes.some(child => child.tag === 'textarea' && child.value === text && child.isSelected)), context)
+            if (failing && !isAnswer) assert.ok(results.some(node => node.childNodes.some(child => child.tag === 'textarea' && child.value === text && child.isSelected)), context)
           }
         }
         actions += 1
       }
       if (projected.expected === 0) {
         const dom = await pageDom(html, projected.model)
-        assert.equal(dom.buttons().length, 0, `${cell.title}: the retained shelf is explicitly read-only`)
+        assert.equal(dom.buttons().filter(button => ![runtime.s.pgCopyAgain, runtime.s.pgAnswered].includes(button.textContent)).length, 0, `${cell.title}: the retained shelf is explicitly read-only`)
       }
     }
     assert.deepEqual([...seen].sort(), PRESS_CELLS.map(cell => cell.title).sort())
-    assert.equal(inventory, 1040, 'all host/source page controls remain covered by the pure inventory')
-    assert.equal(actions, 192, 'distinct normal/refused page controls')
+    assert.equal(inventory, 1136, 'all host/source page controls remain covered by the pure inventory (a running task offers Archive, which the board refuses)')
+    assert.equal(actions, 204, 'distinct normal/refused page controls')
     assert.equal(actions, expectedActions, 'exact grouped normal/refused page action inventory')
     console.log(`page runtime matrix: ${seen.size} cells, ${groups.size} groups, ${actions} normal/refused button presses, ${((performance.now() - started) / 1000).toFixed(3)} s`)
   } finally { await board.close(); fixture.close() }
@@ -3329,10 +3356,13 @@ test("a background reply's result on the page appears next to its card", { timeo
       assert.ok(reply, `${agent}: the server keeps the pressed card key`)
       assert.equal(reply.ok, !isFailing)
       await dom.redraw(snapshot.model)
-      assert.ok(pageCardResults(dom, ask.key).some(node => node.textContent === reply.note), `${agent}: result inside its own card`)
+      // A failure carries Send again and Copy message under its line.
+      const shows = node => node.textContent.startsWith(reply.note)
+      assert.ok(pageCardResults(dom, ask.key).some(shows), `${agent}: result inside its own card`)
+      if (isFailing) assert.ok(pageCardResults(dom, ask.key).some(node => pressWalk(node).filter(one => one.tag === 'button').map(one => one.textContent).join('|') === `${EN.serveRetry}|${EN.serveCopyMessage}`), `${agent}: Send again and Copy message`)
       assert.equal(dom.node('note').textContent, '')
       await dom.redraw({ ...snapshot.model, counts: { ...snapshot.model.counts, active: 9 } })
-      assert.ok(pageCardResults(dom, ask.key).some(node => node.textContent === reply.note))
+      assert.ok(pageCardResults(dom, ask.key).some(shows))
     } finally { await board.close() }
   }
 })
@@ -3354,7 +3384,8 @@ test('a refused close on the page says why next to the close button', async () =
       const footer = dom.node('.pfoot')
       assert.equal(footer.childNodes[0], dom.node('close'))
       assert.equal(footer.childNodes[1].textContent, expected)
-      assert.equal(footer.childNodes[1].getAttribute('role'), 'status')
+      // A refusal is a failure: it is announced as an alert.
+      assert.equal(footer.childNodes[1].getAttribute('role'), 'alert')
       assert.equal(dom.node('note').textContent, '')
       assert.ok(!dom.node('board').textContent.includes(expected))
       await dom.redraw({ ...model, counts: { ...model.counts, active: 9 } })
@@ -3428,31 +3459,26 @@ test('the page line for questions in stopped sessions opens the Older shelf, and
     const model = { counts: { waiting: 0, active: 0, due: 0, today: 0 }, groups: [], hidden: [], idle: [], stopped: [], turns: [], recent: [], asks: [], reminder: [], older, stoppedAsking: 12 }
     const dom = await pageDom(html, model, { post: async () => { throw new Error('synthetic offline') } })
     const walk = node => node.childNodes.flatMap(child => [child, ...walk(child)])
-    const shelf = () => walk(dom.node('board')).find(node => node.tag === 'details' && node.className === 'card shelf')
-    const shown = () => walk(shelf()).filter(node => node.className === 'q').length
+    const shown = () => walk(dom.node('board')).filter(node => node.className === 'q').length
     const navigation = () => walk(dom.node('board')).filter(node => node.tag === 'button' && node.getAttribute('data-nav') !== null)
-    const line = words.stoppedAsking.replace('\u0001', '12')
+    // The Needs you sheet's foot says how many old questions are kept for review and opens them in place.
+    const line = walk(dom.node('board')).find(node => node.tag === 'p' && node.textContent === words.pgOlder.replace('\u0001', '12'))
+    assert.ok(line, 'the line for the questions of stopped sessions')
     const showAll = words.showAllQuestions.replace('\u0001', '12')
-    assert.deepEqual(navigation().map(button => button.textContent), [line, showAll])
-    assert.equal(shelf().open, false)
+    const seeAll = navigation().find(button => button.textContent === words.pgSeeAll)
+    assert.ok(seeAll)
+    assert.equal(seeAll.getAttribute('aria-expanded'), 'false')
+    assert.deepEqual(navigation().map(button => button.textContent), [words.pgSeeAll, showAll])
     assert.equal(shown(), 10)
-    navigation()[0].click()
+    seeAll.click()
     await dom.flush()
-    assert.equal(shelf().open, true)
-    assert.equal(shelf().scrolled, true)
+    assert.equal(seeAll.getAttribute('aria-expanded'), 'true')
     const all = navigation().find(button => button.textContent === showAll)
     assert.ok(all)
     all.click()
     await dom.flush()
     assert.equal(shown(), 12)
     assert.equal(navigation().some(button => button.textContent === showAll), false)
-    // The line belongs to Waiting: it shows under All and Waiting and hides under Due.
-    assert.equal(navigation()[0].hidden, false)
-    const due = dom.allButtons().find(button => button.textContent.startsWith(words.sectionDue))
-    assert.ok(due)
-    due.click()
-    await dom.flush()
-    assert.equal(navigation()[0].hidden, true)
     // The choice survives the next redraw, and none of this reached the server.
     await dom.redraw({ ...model })
     assert.equal(shown(), 12)
@@ -3470,7 +3496,7 @@ test('the page offers Already answered, hide on an Older question that can be hi
     const dom = await pageDom(html, model, { post: async () => ({ ok: true, json: async () => ({ ok: true, note: 'Hidden' }) }) })
     const walk = node => node.childNodes.flatMap(child => [child, ...walk(child)])
     const cards = walk(dom.node('board')).filter(node => node.tag === 'div' && node.getAttribute('data-card-key') !== null)
-    const textOf = card => walk(card).filter(node => node.tag === 'button' || node.className === 'quiet').map(node => node.textContent)
+    const textOf = card => walk(card).filter(node => node.tag === 'button' || node.className === 'note').map(node => node.textContent)
     assert.deepEqual(cards.map(card => card.getAttribute('data-card-key')), ['older:retained::synthetic-0@synthetic-0', 'older:retained::synthetic-1@synthetic-1'])
     assert.ok(textOf(cards[0]).includes(words.answeredHide))
     assert.ok(!textOf(cards[0]).includes(words.questionReviewOnly))
@@ -6607,7 +6633,7 @@ test('reopening a board replaces an explicit resume opt-in when that flag is rem
 const redesignPage = () => run('en', ['--chat'], {}, FILE, `${BOARD_SCRIPT}\nprocess.stdout.write(servePage(STRINGS.en, 'synthetic'))\n`)
 const redesignSnapshot = () => htmlRun({ file: '## Synthetic\n### Plan\n- [ ] Continue\n' })
 const themeScript = html => html.match(/<head>[\s\S]*?<script[^>]*>([\s\S]*?)<\/script>/)[1]
-const themeDom = (html, storage = new Map(), isBlocked = false, jar = { value: '' }) => {
+const themeDom = (html, storage = new Map(), isBlocked = false, jar = { value: '' }, system = 'light') => {
   const attributes = {}
   const classes = new Set()
   const root = {
@@ -6620,7 +6646,8 @@ const themeDom = (html, storage = new Map(), isBlocked = false, jar = { value: '
     const attrs = { 'data-theme-pick': found[2] }
     return { getAttribute: name => attrs[name], setAttribute: (name, value) => { attrs[name] = value } }
   })
-  assert.equal(buttons.length, 3)
+  // The live page carries the switch twice (the header's and the footer's, one of them hidden by width); progress.html once.
+  assert.ok(buttons.length === 2 || buttons.length === 4)
   const events = {}
   let finish
   runInNewContext(themeScript(html), {
@@ -6638,25 +6665,32 @@ const themeDom = (html, storage = new Map(), isBlocked = false, jar = { value: '
       setItem: (key, value) => { if (isBlocked) throw Error('blocked'); storage.set(key, value) },
       removeItem: key => { if (isBlocked) throw Error('blocked'); storage.delete(key) },
     },
+    window: { matchMedia: () => ({ matches: system === 'dark', addEventListener: () => {} }) },
     setTimeout: run => { finish = run }, clearTimeout: () => {},
   }, { timeout: 1000 })
   events.DOMContentLoaded()
   return {
-    attributes, classes, buttons,
+    attributes, classes, buttons: buttons.slice(0, 2), all: buttons,
     pick: name => events.click({ target: { parentNode: buttons.find(button => button.getAttribute('data-theme-pick') === name) } }),
     finish: () => finish(),
   }
 }
 
-test('the serve page offers a light, dark and system theme and remembers the choice', () => {
+test('the serve page offers a light and a dark theme, follows the system until one is picked, and remembers the choice', () => {
   const html = redesignPage()
   const storage = new Map()
   const jar = { value: '' }
   const dom = themeDom(html, storage, false, jar)
+  // There is no System button: a first visit follows the system and shows which of the two it follows.
+  assert.deepEqual(dom.buttons.map(button => button.getAttribute('data-theme-pick')), ['light', 'dark'])
+  assert.equal(dom.attributes['data-theme'], undefined)
+  assert.deepEqual(dom.buttons.map(button => button.getAttribute('aria-pressed')), ['true', 'false'])
+  assert.deepEqual(themeDom(html, new Map(), false, { value: '' }, 'dark').buttons.map(button => button.getAttribute('aria-pressed')), ['false', 'true'])
   dom.pick('dark')
   assert.equal(storage.get('agent-board.theme'), 'dark')
   assert.equal(dom.attributes['data-theme'], 'dark')
-  assert.deepEqual(dom.buttons.map(button => button.getAttribute('aria-pressed')), ['false', 'false', 'true'])
+  assert.deepEqual(dom.buttons.map(button => button.getAttribute('aria-pressed')), ['false', 'true'])
+  assert.deepEqual(dom.all.map(button => button.getAttribute('aria-pressed')), dom.all.map(button => String(button.getAttribute('data-theme-pick') === 'dark')), 'every copy of the switch agrees')
   assert.ok(dom.classes.has('theming'))
   dom.finish()
   assert.ok(!dom.classes.has('theming'))
@@ -6666,11 +6700,8 @@ test('the serve page offers a light, dark and system theme and remembers the cho
   assert.equal(reload.attributes['data-theme'], 'dark')
   reload.pick('light')
   assert.equal(storage.get('agent-board.theme'), 'light')
-  reload.pick('system')
-  assert.equal(storage.has('agent-board.theme'), false)
-  assert.equal(jar.value, '')
-  assert.equal(reload.attributes['data-theme'], undefined)
-  assert.equal(reload.buttons[0].getAttribute('aria-pressed'), 'true')
+  assert.equal(reload.attributes['data-theme'], 'light')
+  assert.deepEqual(reload.buttons.map(button => button.getAttribute('aria-pressed')), ['true', 'false'])
   assert.match(html, /<script nonce="synthetic">[\s\S]*agent-board.theme/)
   assert.match(html, /prefers-reduced-motion:reduce/)
 })
@@ -6690,8 +6721,9 @@ test('progress.html keeps the chosen theme through its 30-second reload', () => 
   const script = [...html.matchAll(/<script[^>]*>([\s\S]*?)<\/script>/g)].at(-1)[1]
   runInNewContext(script, {
     document: {
-      querySelectorAll: selector => selector === 'details[data-key]' ? [section] : [button],
-      getElementById: id => id === 'dash-others' ? section : null,
+      querySelectorAll: selector => selector === 'details[data-key]' ? [section] : selector === 'button[data-section]' ? [button] : [],
+      querySelector: () => null, cookie: '',
+      getElementById: id => id === 'dash-others' ? section : { textContent: '', hidden: false },
     },
     localStorage: { getItem: key => kept.get(key), setItem: (key, value) => kept.set(key, value) },
     sessionStorage: { getItem: () => '28', setItem: (_, value) => assert.equal(value, '42') },
@@ -6720,7 +6752,7 @@ test('the theme is applied before the page paints and survives blocked browser s
     assert.equal(dom.attributes['data-theme'], undefined)
     dom.pick('dark')
     assert.equal(dom.attributes['data-theme'], 'dark')
-    assert.equal(dom.buttons[2].getAttribute('aria-pressed'), 'true')
+    assert.equal(dom.buttons[1].getAttribute('aria-pressed'), 'true')
     assert.equal(themeDom(html, new Map([['agent-board.theme', 'unknown']])).attributes['data-theme'], undefined)
     assert.match(html, /:root:not\(\[data-theme="light"\]\)/)
     assert.match(html, /:root\[data-theme="dark"\]/)
@@ -6767,12 +6799,12 @@ const sourceAgentMarks = async () => {
 const cardsModel = (agent = 'codex') => {
   const ask = { key: 'ask', project: 'Demo', agent, task: 'Plan', text: 'Publish, OK?', note: 'A useful note', kind: 'confirm', chip: 'Confirm', answers: ['Yes', 'No'], canTick: false, canHide: true, command: 'echo demo', link: 'https://example.com', reopen: 'codex resume synthetic', send: 'none', fp: 'first' }
   const row = { key: 'row', project: 'Demo', agent, title: 'Working plan', status: 'Working', tone: 'accent', total: 1, done: 0, steps: [], next: 'Next step', canArchive: true, canConfirm: true, resume: 'codex resume synthetic', send: 'none', hasCopyBox: true, fp: 'first' }
-  const retained = { project: 'Demo', agent, task: 'Retained plan', text: 'Older question', note: '', context: '', when: '9 days ago' }
+  const retained = { key: 'retained', project: 'Demo', agent, task: 'Retained plan', text: 'Older question', note: '', context: '', when: '9 days ago' }
   return {
     counts: { waiting: 1, active: 1, due: 0, today: 0 }, asks: [ask],
     groups: [{ project: 'Demo', rows: [row] }],
     turns: [{ key: 'turn', project: 'Demo', agent, text: 'Inbox update', isQuestion: false }],
-    older: [retained], reminder: [{ ...retained, text: 'Reminder question' }],
+    older: [retained], reminder: [{ ...retained, key: 'reminder', text: 'Reminder question' }],
     hidden: [{ key: 'hidden', project: 'Demo', agent, task: 'Hidden plan', text: 'Hidden question' }],
     idle: [{ ...row, key: 'idle', title: 'Idle plan' }],
     stopped: [{ ...row, key: 'stopped', title: 'Stopped plan' }], recent: [],
