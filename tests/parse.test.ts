@@ -1,6 +1,22 @@
 import { expect, test } from 'claude-code/testing'
 
+import { splitLines } from '../hooks/lines'
 import { currentStepIndex, isCutMarker, isHereProject, parseProgress, progressTail, readable } from '../hooks/parse'
+
+test('splitting progress.md into lines gives the same lines as the regular expression for every mix of CR and LF', () => {
+  const alphabet = ['a', '\r', '\n']
+  for (let length = 0; length <= 9; length += 1) {
+    for (let combination = 0; combination < alphabet.length ** length; combination += 1) {
+      let value = combination
+      let text = ''
+      for (let index = 0; index < length; index += 1) {
+        text += alphabet[value % alphabet.length]!
+        value = Math.floor(value / alphabet.length)
+      }
+      expect(splitLines(text)).toEqual(text.split(/\r?\n/))
+    }
+  }
+})
 
 test('a cut auto marker preserves earlier tasks and cannot swallow later complete blocks', () => {
   const blocks = Array.from({ length: 7 }, (_, i) => `<!-- auto session=${10000000 + i} agent=codex state=working -->\n### Task ${i}\n- [ ] Next\n${i === 3 ? '<!-- /auto se' : `<!-- /auto session=${10000000 + i} -->`}\n`).join('\n')

@@ -107,14 +107,14 @@ describe('L0 discover and install from the README', () => {
       assert.ok(cover >= 0, `${name}: the cover exists`)
       // The top is the project's name, one line on what it does, its badges, then the picture.
       const top = text.slice(0, cover).split('\n').filter(Boolean)
-      assert.equal(top[0], '<h1 align="center">Agent Board</h1>', `${name}: the title comes first`)
+      assert.equal(top[0], '<h1 align="center"><img alt="Agent Board" src="docs/images/brand/agent-board-logo.svg" width="360"></h1>', `${name}: the logo, which follows the reader's theme, is the title and comes first`)
       assert.equal(top[1], `<p align="center"><b>${taglines[lang]}</b></p>`, `${name}: the original tagline follows the title`)
       assert.match(top[2], /^<p align="center"><a href="LICENSE"><img [^>]*src="https:\/\/img\.shields\.io\//, `${name}: the badges follow the tagline`)
       assert.ok(!text.slice(0, cover).includes('npx @wenyuchiou/agent-board'), `${name}: no install command comes before the cover`)
       const first = section(text, SECTIONS[lang][0])
       assert.ok(first, `${name}: Quick start exists`)
       const node = first.indexOf('Node.js 22')
-      const install = /```(?:sh|bash)\n(npx @wenyuchiou\/agent-board setup\nnpx @wenyuchiou\/agent-board setup --apply\nnpx @wenyuchiou\/agent-board --serve)\n```/.exec(first)
+      const install = /```(?:sh|bash)\r?\n(npx @wenyuchiou\/agent-board setup\r?\nnpx @wenyuchiou\/agent-board setup --apply\r?\nagent-board)\r?\n```/.exec(first)
       assert.ok(node >= 0 && install && install.index > node, `${name}: Quick start gives Node 22, then all three ordered install commands`)
       const lanLines = first.split('\n').filter(line => line.includes('npx @wenyuchiou/agent-board --serve --lan'))
       assert.equal(lanLines.length, 1, `${name}: one phone route in Quick start`)
@@ -215,8 +215,8 @@ describe('L0 discover and install from the README', () => {
   test("L0 README: the README's first image is its dark cover SVG with a synthetic label", () => {
     for (const [name, lang, synthetic] of READMES) {
       const text = read(name)
-      // The first picture a reader meets: the first <img> that is not a badge.
-      const first = [...text.matchAll(/<img\b[^>]*>/g)].find(match => !/img\.shields\.io|\/badge\.svg"/.test(match[0]))
+      // The first picture a reader meets: the first <img> that is not a badge or the title's logo.
+      const first = [...text.matchAll(/<img\b[^>]*>/g)].find(match => !/img\.shields\.io|\/badge\.svg"|docs\/images\/brand\//.test(match[0]))
       assert.ok(first, `${name} has an image`)
       const src = /\bsrc="([^"]+)"/.exec(first[0])
       const alt = /\balt="([^"]*)"/.exec(first[0])
@@ -231,7 +231,7 @@ describe('L0 discover and install from the README', () => {
   test('L0 README: the cover loops through six captioned scenes in 20 to 30 seconds, moves with CSS alone and stands still on the setup scene for reduced motion', () => {
     for (const [name, lang] of READMES) {
       const text = read(name)
-      const first = [...text.matchAll(/<img\b[^>]*>/g)].find(match => !/img\.shields\.io|\/badge\.svg"/.test(match[0]))
+      const first = [...text.matchAll(/<img\b[^>]*>/g)].find(match => !/img\.shields\.io|\/badge\.svg"|docs\/images\/brand\//.test(match[0]))
       assert.ok(first, `${name}: the first non-badge image exists`)
       const src = /\bsrc="([^"]+)"/.exec(first[0])
       assert.equal(src?.[1], `docs/images/cover-${lang}-dark.svg`, `${name}: the first image is its animated cover`)

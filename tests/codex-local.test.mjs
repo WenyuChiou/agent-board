@@ -4526,7 +4526,7 @@ test('queued status events use their start time and reject invalid timestamps', 
 const legacyConnect = (f, progress, mode = 'connect', lang = 'en') => {
   const source = readFileSync(resolve('hooks/board-script.ts'), 'utf8')
   const runner = join(f.home, 'connect-runner.mjs')
-  if (!existsSync(runner)) f.save(runner, JSON.parse(source.slice(source.indexOf('export const BOARD_SCRIPT = ') + 'export const BOARD_SCRIPT = '.length)))
+  if (!existsSync(runner)) f.save(runner, JSON.parse(source.slice(source.indexOf('export const BOARD_SCRIPT = ') + 'export const BOARD_SCRIPT = '.length, source.lastIndexOf(']') + 1)).join('\n'))
   const request = { mode, home: f.home, progress, lang, node: process.version, codexExecutable: join(f.home, 'missing-control.exe') }
   const result = spawnSync(process.execPath, [runner, '--legacy-connect-request', JSON.stringify(request)], { env: f.env, encoding: 'utf8', windowsHide: true, timeout: 15000 })
   assert.equal(result.status, 0, result.stderr + result.stdout)

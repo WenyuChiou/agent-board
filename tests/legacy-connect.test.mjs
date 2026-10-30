@@ -9,10 +9,11 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { pathToFileURL } from 'node:url'
 import { RELEASE_0_20_5 } from './fixtures/released.ts'
+import { bundleCode } from '../scripts/bundle-text.mjs'
 import { generatedHookCommand } from './fixtures/generated-hook-command.mjs'
 
 const source = readFileSync(new URL('../hooks/board-script.ts', import.meta.url), 'utf8')
-const bundle = JSON.parse(source.slice(source.indexOf('export const BOARD_SCRIPT = ') + 'export const BOARD_SCRIPT = '.length))
+const bundle = JSON.parse(source.slice(source.indexOf('export const BOARD_SCRIPT = ') + 'export const BOARD_SCRIPT = '.length, source.lastIndexOf(']') + 1)).join('\n')
 const fixture = async fn => {
   const home = mkdtempSync(join(tmpdir(), 'legacy-connect-'))
   const script = join(home, 'worker.mjs')
@@ -575,8 +576,7 @@ const taggedBoard = (version, commit) => {
   const tag = `agent-board--v${version}`
   assert.equal(execFileSync('git', ['rev-parse', `${tag}^{}`], { cwd, encoding: 'utf8' }).trim(), commit)
   const source = execFileSync('git', ['show', `${tag}:hooks/board-script.ts`], { cwd, encoding: 'utf8', maxBuffer: 4 * 1024 * 1024 })
-  const marker = 'export const BOARD_SCRIPT = '
-  const code = JSON.parse(source.slice(source.indexOf(marker) + marker.length))
+  const code = bundleCode(source)
   taggedBoards.set(version, code)
   return code
 }

@@ -79,8 +79,8 @@ import { baseName, doneKey, isTaskComplete, parseProgress, progressTail, STALE_M
 import { othersNote } from './others'
 import type { ProgressProject } from '../types'
 import { dashboardHtml } from './dashboard'
-import { peekInbox, redact } from './board'
-import type { PendingTurn } from './board'
+import { peekInbox, redact, turnsFor } from './board'
+import type { PendingTurn, TurnCache } from './board'
 import { paletteFor } from './palette'
 import { drawPane, pressTarget, reviseKey } from './pane'
 import type { PaneActions, PaneModel, PaneUi, PressResult } from './pane'
@@ -1155,7 +1155,7 @@ const dashboardPath = (path: string): string => `${path.replace(/\.md$/i, '')}.h
 const pad2 = (n: number): string => String(n).padStart(2, '0')
 
 // Pending turns are optional: an unavailable inbox must not stop the board or its reminders.
-let pendingCache: { key: string; turns: PendingTurn[] } | null = null
+let pendingCache: TurnCache = null
 const pendingTurns = async ($: EngineInterface): Promise<PendingTurn[]> => {
   try {
     const path = await progressPath($)
@@ -1165,25 +1165,24 @@ const pendingTurns = async ($: EngineInterface): Promise<PendingTurn[]> => {
       .filter(entry => entry.kind === 'file' && isInboxFile(entry.name) && done[entry.name] === undefined)
       .sort((a, b) => b.mtimeMs - a.mtimeMs)
       .slice(0, 30)
-    // What the turns are made from: the listing (names, times, sizes) and which files are taken
-    // already. The time of day is not part of it, so an inbox that did not change reads no file (#156).
-    const cacheKey = JSON.stringify([path, entries.map(entry => [entry.name, entry.mtimeMs, entry.size]), done])
-    if (pendingCache?.key === cacheKey) return pendingCache.turns
-    const files: Array<{ name: string; body: string; at: number }> = []
-    let isComplete = true
-    for (const entry of entries) {
-      const body = await $.fs.read(`${dir}${sepOf(dir)}${entry.name}`).catch(() => {
-        isComplete = false
-        return ''
-      })
-      files.push({ name: entry.name, body, at: entry.mtimeMs })
-    }
-    const home = ((await $.env.get('USERPROFILE')) ?? (await $.env.get('HOME')) ?? '').replace(/[\\/]+$/, '')
-    const isWin = await isWindows($, path)
-    const turns = peekInbox(files, () => '', text => redact(text, home, isWin))
-    // A file that could not be read is tried again at the next look.
-    if (isComplete) pendingCache = { key: cacheKey, turns }
-    return turns
+    const s = await wordsOf($)
+    const listing = [path, entries.map(entry => [entry.name, entry.mtimeMs, entry.size]), done]
+    const result = await turnsFor(pendingCache, listing, s, async () => {
+      const files: Array<{ name: string; body: string; at: number }> = []
+      let isComplete = true
+      for (const entry of entries) {
+        const body = await $.fs.read(`${dir}${sepOf(dir)}${entry.name}`).catch(() => {
+          isComplete = false
+          return ''
+        })
+        files.push({ name: entry.name, body, at: entry.mtimeMs })
+      }
+      const home = ((await $.env.get('USERPROFILE')) ?? (await $.env.get('HOME')) ?? '').replace(/[\\/]+$/, '')
+      const isWin = await isWindows($, path)
+      return { files, scrub: (text: string) => redact(text, home, isWin), isComplete }
+    })
+    pendingCache = result.cache
+    return result.turns
   } catch {
     return []
   }
