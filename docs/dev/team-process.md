@@ -62,7 +62,7 @@ Each step is one comment on GitHub, so an agent on another computer can see whos
 
 When several pull requests are green, pull requests that change neither `hooks/board-script.ts` nor the string tables merge first, smallest first. Then pull requests that change either merge one at a time, the oldest Ready first. For each, the maintainer merges `main` into the branch and rebuilds the bundle with Bun 1.4.2. A new verdict is required unless the update only merges `main` without conflicts and with nothing else in the merge commit (CONTRIBUTING rules 4 and 9). Once the current head has passed the checks and has the approval rule 9 requires, a collaborator with write access, the maintainer or the owner may merge. Afterwards the maintainer comments "main moved, merge it" on the other open pull requests.
 
-Nobody waits idle on CI. After an approval, start a background wait that merges with `--match-head-commit <sha>` once every check passes, and take the next pull request in the queue. When main moves, the maintainer may update a branch that is behind (`gh pr update-branch`) and let that wait merge it.
+Nobody waits idle on CI. After an approval, start a background wait that merges with `--match-head-commit <sha>` once every check passes, and take the next pull request in the queue. When main moves, the maintainer may update a branch that is behind (`gh pr update-branch`). That gives the branch a new head, so the old wait cannot merge it: once the new head passes the checks, start a new wait pinned to it. The approval carries over only when the update merged `main` without conflicts (CONTRIBUTING rule 9).
 
 ## Flaky and slow tests
 

@@ -62,6 +62,7 @@ test('ci impact selects isolated runtime groups from known paths', () => {
     ['tests/preflight.test.mjs', ['tooling']],
     ['tests/changelog-fold.test.mjs', ['tooling']],
     ['tests/team-stats.test.mjs', ['tooling']],
+    ['tests/review-queue.test.mjs', ['tooling']],
   ]
   for (const [path, expected] of cases) assertOnly(makePlan([path], options()), expected)
 })
