@@ -17,6 +17,14 @@ ${steps.join('\n')}
 const museQuestion = block('a11ce001', 'muse', 'waiting', 'Synthetic journeys', 'Choose a launch tone', ['- [?] Bold or quiet?', '- [ ] Publish the synthetic note'])
 const antigravityQuestion = block('a11ce002', 'antigravity', 'waiting', 'Synthetic journeys', 'Choose a review window', ['- [?] 24 hours or 7 days?', '- [ ] Record the synthetic choice'])
 
+const waitFor = async (check, within = 15_000) => {
+  const until = Date.now() + within
+  while (!check()) {
+    if (Date.now() > until) throw new Error('the board file did not change in time')
+    await new Promise(done => setTimeout(done, 100))
+  }
+}
+
 const assertNoIdentifiers = async (page, root, sessions) => {
   const visible = (await page.getByRole('main').innerText()).toLowerCase()
   for (const value of [root, root.replaceAll('\\', '/'), ...sessions]) assert.ok(!visible.includes(value.toLowerCase()), `the default board exposed ${value}`)
@@ -37,12 +45,13 @@ describe('confirmed browser journeys', { concurrency: 1 }, () => {
       await board.open(await startServer())
       const task = await board.openTask('Read every step')
       const noted = await board.openTask('Read card notes')
-      await page.getByText('1 stopped', { exact: true }).click()
-      const stoppedRow = page.locator('details.row').filter({ hasText: 'Stopped phone task' })
-      await stoppedRow.locator(':scope > summary').click()
+      // A row shows its current step; the others sit in a fold, which has to be open to be measured.
+      await task.getByText('2 more steps', { exact: true }).click()
+      await page.locator('.shelf-head').filter({ hasText: 'Stopped' }).click()
+      await board.openTask('Stopped phone task')
       const stepClips = page.locator('.steps .clip')
       assert.equal(await stepClips.count(), 5)
-      const all = [...await stepClips.all(), noted.locator('.context')]
+      const all = [...await stepClips.all(), noted.locator('.clip.context')]
       for (const clip of all) {
         const summary = clip.locator(':scope > summary')
         const short = clip.locator('.short')
@@ -64,27 +73,29 @@ describe('confirmed browser journeys', { concurrency: 1 }, () => {
         assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth))
         await summary.press('Space')
       }
-      const noteWhole = await noted.locator('.context .whole').textContent()
+      const noteWhole = await noted.locator('.clip.context .whole').textContent()
       for (const note of notes) assert.ok(noteWhole.includes(note))
       assert.deepEqual(await task.locator('.steps .whole').allTextContents(), [chinese, english, unbroken])
-      await task.getByTitle(chinese, { exact: true }).click()
-      await task.getByText(/1\/3/).waitFor()
-      assert.ok(readFileSync(progress, 'utf8').includes(`- [x] ${chinese}`))
+      await task.getByRole('button', { name: `Done: ${chinese}`, exact: true }).first().click()
+      await waitFor(() => readFileSync(progress, 'utf8').includes(`- [x] ${chinese}`))
       assert.ok(readFileSync(progress, 'utf8').includes(`- [ ] ${english}`))
     })
   })
 
-  test('setup is idempotent and a pasted Muse question remains recoverable across reloads', { concurrency: false, timeout: 120_000 }, async () => {
-    await browserFixture('paste-hide-restore', async ({ page, progress, root, startServer }) => {
+  test('setup is idempotent and a reported Muse question remains recoverable across reloads', { concurrency: false, timeout: 120_000 }, async () => {
+    await browserFixture('report-hide-restore', async ({ page, progress, root, startServer }) => {
       const board = new BoardPage(page)
       await board.open(await startServer())
-      await page.getByText('Nothing needs you right now', { exact: false }).waitFor()
-      await board.pasteProgress(museQuestion)
+      await page.getByText('Your board is ready', { exact: true }).waitFor()
+      // There is no paste box any more: a web chat's report reaches the board as a progress block in the file.
+      assert.equal(await page.locator('textarea#paste').count(), 0)
+      writeProgress(progress, museQuestion)
 
       const question = board.question('Bold or quiet?')
       await question.waitFor()
-      await question.getByRole('button', { name: 'Copy', exact: true }).waitFor()
+      await question.getByRole('button', { name: 'Copy "Bold"', exact: true }).waitFor()
       assert.equal(await question.getByRole('button', { name: /^Send/ }).count(), 0)
+      await question.getByRole('button', { name: 'More', exact: true }).click()
       await question.getByRole('button', { name: 'Already answered, hide', exact: true }).click()
 
       const hidden = page.getByText('1 answered, hidden', { exact: true })
@@ -112,8 +123,14 @@ describe('confirmed browser journeys', { concurrency: 1 }, () => {
 
       await board.selectAgent('antigravity')
       await page.getByText('Antigravity fixture card', { exact: true }).waitFor()
-      assert.equal(await page.getByText('Codex fixture card', { exact: true }).isVisible(), false)
-      assert.equal(await page.getByText('Gemini fixture card', { exact: true }).isVisible(), false)
+      // The other agents' rows slide shut and stop taking focus (their block is `gone` and inert), so wait for that.
+      const folded = title => page.waitForFunction(text => {
+        const row = [...document.querySelectorAll('li.row')].find(one => one.textContent.includes(text))
+        return !!row && row.firstElementChild.classList.contains('gone') && row.firstElementChild.inert === true
+      }, title)
+      await folded('Codex fixture card')
+      await folded('Gemini fixture card')
+      assert.equal(await board.task('Antigravity fixture card').locator('xpath=./div[contains(@class,"gone")]').count(), 0)
 
       await board.chooseTheme('Dark')
       assert.equal(await page.locator('html').getAttribute('data-theme'), 'dark')
@@ -139,14 +156,17 @@ ${block('a11ce023', 'gemini', 'done', 'Synthetic archive', 'Completed synthetic 
       await board.open(await startServer())
 
       const hiddenCard = board.question('24 hours or 7 days?')
+      await hiddenCard.getByRole('button', { name: 'More', exact: true }).click()
       await hiddenCard.getByRole('button', { name: 'Already answered, hide', exact: true }).click()
       await page.getByText('1 answered, hidden', { exact: true }).waitFor()
 
       const task = await board.openTask('Check the installation checklist')
-      await task.getByRole('button', { name: 'Done: Preview installation', exact: true }).click()
-      await task.getByText(/1\/2/).waitFor()
-      await task.getByRole('button', { name: 'Done: Verify existing settings survive', exact: true }).click()
-      await page.getByRole('heading', { name: /Done recently/ }).waitFor()
+      await task.getByRole('button', { name: 'Done: Preview installation', exact: true }).first().click()
+      await waitFor(() => readFileSync(progress, 'utf8').includes('- [x] Preview installation'))
+      await task.getByRole('button', { name: 'Done: Verify existing settings survive', exact: true }).first().click()
+      // A finished task moves to the closed Done shelf, which holds Archive now.
+      const done = page.getByRole('button', { name: /^Done/ }).filter({ has: page.locator('.count') })
+      await done.click()
       await page.getByText('Check the installation checklist', { exact: true }).waitFor()
 
       await page.getByRole('button', { name: 'Archive now', exact: true }).click()
@@ -185,7 +205,8 @@ ${block('a11ce023', 'gemini', 'done', 'Synthetic archive', 'Completed synthetic 
       const board = new BoardPage(page)
       await board.open(await startServer())
       const card = board.task(before.title)
-      await card.getByText(/Antigravity is working/).waitFor()
+      await card.waitFor()
+      assert.equal(await board.main.locator('li.row').count(), 1)
 
       const marker = join(root, 'synthetic-progress-lock')
       const injection = join(root, 'synthetic-progress-lock.cjs')
@@ -207,8 +228,12 @@ ${block('a11ce023', 'gemini', 'done', 'Synthetic archive', 'Completed synthetic 
       assert.equal(after.state, 'waiting')
       assert.ok(queued.some(entry => entry.at === after.appliedAt))
       assert.deepEqual(readdirSync(join(data, 'pending')).filter(name => name.endsWith('.json')), [])
-      await card.getByText(/Antigravity is working/).waitFor({ state: 'detached' })
-      await card.getByText(/next: Waiting for the next instruction/).waitFor()
+      // The page has no separate "is working" label any more (a task in Working now is working); after the queued Stop
+      // is applied it still shows the one task, once, with the lifecycle step the record now holds.
+      await page.reload()
+      await card.waitFor()
+      assert.equal(await board.main.locator('li.row').count(), 1)
+      assert.match(await card.innerText(), /Waiting for the next instruction/)
       assert.equal(existsSync(marker), false)
       writeFileSync(join(evidence, 'stop-recovery.json'), JSON.stringify({ releasedAt, observedAt: Date.now(), sourceAt: after.appliedAt, state: after.state, pendingAfter: 0, noNextHookOrManualRecovery: true }, null, 2))
       await assertNoIdentifiers(page, root, [session])
@@ -233,16 +258,18 @@ ${block('a11ce023', 'gemini', 'done', 'Synthetic archive', 'Completed synthetic 
       while (Date.now() < until && (!existsSync(ledger) || !record())) await new Promise(done => setTimeout(done, 100))
       const before = record()
       assert.ok(before)
-      await page.getByText('2 stopped', { exact: true }).click()
-      // The question shows on its Stopped row and, once, in the closed Older shelf: look at the row.
-      await page.getByRole('listitem').locator('.short', { hasText: words }).waitFor()
-      await page.getByRole('button', { name: 'Archive', exact: true }).click()
-      await page.getByRole('listitem').locator('.short', { hasText: words }).waitFor({ state: 'detached' })
-      await page.getByText('Older unanswered questions (1)', { exact: true }).click()
+      await page.locator('.shelf-head').filter({ hasText: 'Stopped' }).click()
+      // The question shows on its Stopped row (the step it stopped at) and in the Older line on the Needs you sheet.
+      const stoppedRow = await board.openTask(title)
+      await stoppedRow.locator('.r-meta').getByText(words).waitFor()
+      await stoppedRow.getByRole('button', { name: 'Archive', exact: true }).click()
+      await board.task(title).waitFor({ state: 'detached' })
+      await page.getByText('1 older question still unanswered (its chat has stopped)', { exact: true }).waitFor()
+      await page.getByRole('button', { name: 'See all', exact: true }).click()
       await page.getByText(words, { exact: true }).waitFor()
-      await page.getByText('Keep the active fixture visible', { exact: true }).waitFor()
+      await board.task('Keep the active fixture visible').waitFor()
       await page.reload()
-      await page.getByText('Older unanswered questions (1)', { exact: true }).click()
+      await page.getByRole('button', { name: 'See all', exact: true }).click()
       await page.getByText(words, { exact: true }).waitFor()
       const after = record()
       assert.equal(after.id, before.id)
