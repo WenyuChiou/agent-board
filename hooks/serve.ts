@@ -4,7 +4,7 @@ import type { BoardItem, PendingTurn } from './board'
 import { clipLine, LABEL_ROOM, LINE_ROOM } from './clip'
 import { groupBoard } from './grouping'
 import type { Bucket, Card, GroupedQuestion, GroupedTask, RepoOf } from './grouping'
-import { AGENT_ALIASES, agentMarkCss, agentRowCss, boardMark, faviconLink, filterStore, htmlLang, motionCss, pageBaseCss, pageTokens, sheetCss, themeHead, themeSwitch } from './page-look'
+import { AGENT_ALIASES, agentFade, agentMarkCss, agentRowCss, boardMark, faviconLink, filterStore, htmlLang, motionCss, pageBaseCss, pageTokens, sheetCss, themeHead, themeSwitch } from './page-look'
 import { ZH_TW } from './i18n'
 import type { Strings } from './i18n'
 import { agentLabel } from './strings'
@@ -134,6 +134,9 @@ export type ServeAsk = {
   // The command that reopens that session once it is closed, in its folder; never to a phone.
   reopen: string | null
   isSending: boolean
+  // That session has ended, as its progress record says: the page shows its agent as offline when no other
+  // session of it is open.
+  isClosed?: true
 }
 
 export type ServeRow = {
@@ -181,6 +184,7 @@ export type ServeRow = {
   isSending: boolean
   // On the local network, where a reply that would be sent here is written and copied instead.
   hasCopyBox: boolean
+  isClosed?: true
 }
 
 // A question marked answered, listed so it can be shown again.
@@ -362,6 +366,7 @@ export const serveModel = (view: View, pending: readonly PendingTurn[], s: Strin
         sessionId: ask.where === 'other' ? ask.sessionId : null,
         reopen: hint.reopen,
         isSending: isSending(ask.target) || connection !== undefined && (messaging?.messages.some(one => one.target === connection.id && ['queued', 'uncertain', 'accepted'].includes(one.status)) ?? false),
+        ...(ask.target?.isClosed === true ? { isClosed: true as const } : {}),
       })
       continue
     }
@@ -420,6 +425,7 @@ export const serveModel = (view: View, pending: readonly PendingTurn[], s: Strin
         info: connection ? '' : lanInfo(baseMode, row.agent) ?? (send === 'open' ? infoOf(send, row.agent, row.title, '', s) : ''),
         isSending: isSending(row.target) || connection !== undefined && (messaging?.messages.some(one => one.target === connection.id && ['queued', 'uncertain', 'accepted'].includes(one.status)) ?? false),
         hasCopyBox: lanInfo(baseMode, row.agent) !== null || (messaging !== undefined || !allowResume) && row.auto !== null && connection === undefined,
+        ...(row.target?.isClosed === true ? { isClosed: true as const } : {}),
       })
       continue
     }
@@ -661,7 +667,7 @@ const PAGE_WORDS = [
   'pgOlder', 'pgOlderOne', 'pgSeeAll', 'pgMore', 'pgOwnTodo', 'pgWriteOwn', 'pgCopyAnswer', 'pgStuck', 'pgTodo', 'pgLast', 'pgStoppedAt',
   'pgDoneSteps', 'pgDoneStepsOne', 'pgMoreSteps', 'pgMoreStepsOne', 'pgVersion', 'pgVersions', 'pgUnreadable', 'pgHowFix', 'pgFixAdvice',
   'pgReady', 'pgUnreadableReply', 'pgUnknownAge', 'pgCopyReply', 'pgPasteIn', 'pgSentTo', 'pgAnswered', 'pgCopyAgain', 'pgCancel',
-  'showAllQuestions', 'pgSendReply', 'pgCopyFailed', 'pgOffline', 'pgPasteLater', 'serveRetry', 'serveCopyMessage', 'serveSendBusy', 'pgNoQuestions', 'pgOthers', 'pgStopped', 'pgDoneWeek', 'pgChipEmpty', 'pgStartIn', 'pgConnected', 'pgTipNeeds', 'pgTipWorking', 'pgTipCantRead',
+  'showAllQuestions', 'pgSendReply', 'pgCopyFailed', 'pgOffline', 'pgNotSeen', 'pgWorkingHint', 'pgPasteLater', 'serveRetry', 'serveCopyMessage', 'serveSendBusy', 'pgNoQuestions', 'pgOthers', 'pgStopped', 'pgDoneWeek', 'pgChipEmpty', 'pgStartIn', 'pgConnected', 'pgTipNeeds', 'pgTipNeedsOne', 'pgTipWorking', 'pgTipCantRead',
 ] as const satisfies ReadonlyArray<keyof Strings>
 
 // The chat prompt goes as it is in every language: the chat reads it, not the person.
@@ -888,6 +894,8 @@ const PAGE_SCRIPT = String.raw`
   var latest = null;
   var connections = [];
   ${filterStore}
+  ${agentFade}
+  var fadeChips = agentFade(document.getElementById('chips'));
   function w(key, a, b) {
     var template = String(W[key]);
     return template.split('\u0001').join(a === undefined ? '' : String(a)).split('\u0002').join(b === undefined ? '' : String(b));
@@ -1251,7 +1259,7 @@ const PAGE_SCRIPT = String.raw`
     var isAfter = state.mode === 'copied' || state.mode === 'sent';
     reveal(parts.after, isAfter);
     if (!isAfter) return;
-    parts.msg.textContent = state.mode === 'sent' ? w('pgSentTo', agentName(parts.agent), state.text) : parts.canHide ? w(parts.offline ? 'pgPasteLater' : 'pgPasteIn', state.text, agentName(parts.agent)) : w('copied');
+    parts.msg.textContent = state.mode === 'sent' ? w('pgSentTo', agentName(parts.agent), state.text) : parts.canHide ? w(parts.late ? 'pgPasteLater' : 'pgPasteIn', state.text, agentName(parts.agent)) : w('copied');
     parts.answered.hidden = state.mode !== 'copied' || !parts.canHide;
     parts.again.hidden = state.mode !== 'copied';
   }
@@ -1332,7 +1340,7 @@ const PAGE_SCRIPT = String.raw`
       if (ask.reopen) others.push(button(w('serveCopyResume'), function () { copy(ask.reopen, key); }, '', true));
       if (ask.canHide) others.push(button(w('answeredHide'), function () { act(key, 'hide'); }));
     }
-    var parts = { agent: agent, canHide: ask.canHide === true, offline: agentPresence[id] === 'offline' };
+    var parts = { agent: agent, canHide: ask.canHide === true, late: lateWord(agentPresence[id]) !== '' };
     cardParts[key] = parts;
     var askBlock = el('div');
     add(askBlock, answers);
@@ -1459,29 +1467,36 @@ const PAGE_SCRIPT = String.raw`
   }
   function setText(node, text) { if (node && node.textContent !== String(text)) node.textContent = String(text); }
   // The pieces of the agent row: one icon button per agent on the board and one for the person's own to-dos.
-  // Whether an agent can be reached from here: connected (a session of it has a delivery connection), open (a
-  // session is open in its own window, or it worked in the last 30 minutes) or offline (neither).
+  // Whether an agent can be reached from here, from what the model already holds. connected: a session of it has a
+  // delivery connection. open: a session is open in its own window or in the pane, or it worked in the last 30
+  // minutes. offline: the board can tell its sessions are closed (a line whose session ended) and none is open.
+  // notseen: the board cannot tell (it has no line of that agent that says either).
   function presenceMap(view) {
     var map = {};
     pg.ids.forEach(function (id) {
-      var state = 'offline';
-      var hasSession = Object.keys(pg.sources).some(function (key) {
+      var isOpen = view.working.some(function (ref) { return agentOf(ref) === id; });
+      var isGone = false;
+      Object.keys(pg.sources).forEach(function (key) {
         var one = pg.sources[key];
-        return one && String(one.agent || 'claude').toLowerCase() === id && (one.send === 'open' || one.send === 'claude');
+        if (!one || one.isOwn || String(one.agent || 'claude').toLowerCase() !== id) return;
+        if (one.isClosed === true) isGone = true;
+        else if (one.send === 'open' || one.send === 'claude' || one.send === 'connected') isOpen = true;
       });
-      if (connections.some(function (one) { return String(one.agent || '').toLowerCase() === id; })) state = 'connected';
-      else if (hasSession || view.working.some(function (ref) { return agentOf(ref) === id; })) state = 'open';
-      map[id] = state;
+      var isConnected = connections.some(function (one) { return String(one.agent || '').toLowerCase() === id; });
+      map[id] = isConnected ? 'connected' : isOpen ? 'open' : isGone ? 'offline' : 'notseen';
     });
     return map;
   }
+  // The word that follows the name when the board cannot reach the agent: offline or not seen.
+  function lateWord(state) { return state === 'offline' ? w('pgOffline') : state === 'notseen' ? w('pgNotSeen') : ''; }
   function chipLabel(entry) {
     var parts = [];
-    if (entry.presence === 'offline') parts.push(w('pgOffline'));
-    if (entry.needs > 0) parts.push(w('pgTipNeeds', entry.needs));
-    if (entry.working > 0) parts.push(w('pgTipWorking', entry.working));
+    if (entry.needs === 1) parts.push(w('pgTipNeedsOne'));
+    else if (entry.needs > 1) parts.push(w('pgTipNeeds', entry.needs));
+    if (entry.working > 0) parts.push(w('pgTipWorking'));
     if (entry.unreadable) parts.push(w('pgTipCantRead'));
-    return entry.name + ': ' + (parts.length ? parts.join(', ') : w('pgChipEmpty'));
+    var late = lateWord(entry.presence);
+    return entry.name + (late ? ' · ' + late : '') + ': ' + (parts.length ? parts.join(', ') : w('pgChipEmpty'));
   }
   function drawChips(view) {
     var nav = document.getElementById('agents');
@@ -1514,8 +1529,9 @@ const PAGE_SCRIPT = String.raw`
       var label = chipLabel(entry);
       chip.node.setAttribute('aria-label', label);
       chip.node.setAttribute('title', label);
-      chip.node.className = 'chip' + (entry.working > 0 ? ' working' : '') + (entry.presence === 'offline' ? ' offline' : '');
-      setText(chip.name, entry.presence === 'offline' ? entry.name + ' · ' + w('pgOffline') : entry.name);
+      chip.node.className = 'chip' + (entry.working > 0 ? ' working' : '');
+      if (entry.presence) chip.node.setAttribute('data-presence', entry.presence);
+      setText(chip.name, lateWord(entry.presence) ? entry.name + ' · ' + lateWord(entry.presence) : entry.name);
       var text = entry.unreadable ? '!' : entry.needs > 0 ? String(entry.needs) : '';
       if (text && !chip.badge) { chip.badge = el('span', 'badge'); chip.node.appendChild(chip.badge); }
       if (!text && chip.badge) { chip.node.removeChild(chip.badge); chip.badge = null; }
@@ -1525,9 +1541,20 @@ const PAGE_SCRIPT = String.raw`
     });
     paintFilter();
     drawNote(entries);
+    fadeChips();
   }
   function paintFilter() {
     Object.keys(pg.chips).forEach(function (id) { pg.chips[id].node.setAttribute('aria-pressed', String(pg.filter === id)); });
+  }
+  // A pressed icon widens to show its name; once it has, the row brings it into view and the edge fade is worked out again.
+  function peekChip() {
+    var chip = pg.filter && pg.chips[pg.filter];
+    var settle = function () {
+      if (chip && chip.node.scrollIntoView) chip.node.scrollIntoView({ inline: 'nearest', block: 'nearest', behavior: moving() ? 'smooth' : 'auto' });
+      fadeChips();
+    };
+    if (moving()) setTimeout(settle, 280);
+    else settle();
   }
   // The line under the row for an agent the board cannot read: while that agent is pressed, or for all of them when nothing is.
   function drawNote(entries) {
@@ -1549,6 +1576,7 @@ const PAGE_SCRIPT = String.raw`
     paintFilter();
     if (latest && latest.view) drawNote(chipEntries(latest.view));
     layout();
+    peekChip();
   }
   function chipEntries(view) {
     var entries = [];
@@ -1613,7 +1641,9 @@ const PAGE_SCRIPT = String.raw`
   function sectionHead(title, name) {
     var count = el('span', 'count');
     pg.nodes.counts[name] = count;
-    return add(el('div', 'sec-head'), el('h2', '', title), count);
+    var heading = el('h2', '', title);
+    if (name === 'working') heading.setAttribute('title', w('pgWorkingHint'));
+    return add(el('div', 'sec-head'), heading, count);
   }
   function needsSection(view) {
     var wrap = el('section', 'needs-wrap');

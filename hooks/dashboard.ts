@@ -3,7 +3,7 @@ import type { PendingTurn } from './board'
 import { clip } from './mirror'
 import { askRole, stepRole, toneRole } from './palette'
 import type { Palette } from './palette'
-import { agentMark, agentMarkCss, agentRowCss, boardMark, faviconLink, filterStore, htmlLang, pageBaseCss, pageTokens, sheetCss, themeHead, themeSwitch } from './page-look'
+import { agentFade, agentMark, agentMarkCss, agentRowCss, boardMark, faviconLink, filterStore, htmlLang, pageBaseCss, pageTokens, sheetCss, themeHead, themeSwitch } from './page-look'
 import { serveModel } from './serve'
 import { agentLabel } from './strings'
 import type { Strings } from './i18n'
@@ -106,7 +106,7 @@ const chipRow = (chips: readonly Chip[], s: Strings): string =>
     ? ''
     : `<nav class="agents" id="agents" aria-label="${esc(s.pgAgents)}"><div class="col agents-in">${chips
         .map(chip => {
-          const parts = [chip.needs > 0 ? s.pgTipNeeds(chip.needs) : '', chip.working > 0 ? s.pgTipWorking(chip.working) : '', chip.isUnreadable ? s.pgTipCantRead : ''].filter(part => part !== '')
+          const parts = [chip.needs === 1 ? s.pgTipNeedsOne : chip.needs > 1 ? s.pgTipNeeds(chip.needs) : '', chip.working > 0 ? s.pgTipWorking : '', chip.isUnreadable ? s.pgTipCantRead : ''].filter(part => part !== '')
           const label = `${chip.name}: ${parts.length > 0 ? parts.join(', ') : s.pgChipEmpty}`
           const badge = chip.isUnreadable ? '<span class="badge bad">!</span>' : chip.needs > 0 ? `<span class="badge">${chip.needs}</span>` : ''
           return `<button type="button" class="chip${chip.working > 0 ? ' working' : ''}" data-agent="${esc(chip.id)}" aria-pressed="false" aria-label="${esc(label)}" title="${esc(label)}">${agentMark(chip.id === 'own' ? '' : chip.id, chip.id === 'own')}<span class="c-name">${esc(chip.name)}</span>${badge}</button>`
@@ -288,6 +288,8 @@ const DASH_SCRIPT = String.raw`
     });
   });
   ${filterStore}
+  ${agentFade}
+  var fade = agentFade(document.querySelector('.agents-in'));
   var filter = savedFilter();
   var chips = Array.prototype.slice.call(document.querySelectorAll('.chip[data-agent]'));
   if (filter && !chips.some(function (chip) { return chip.getAttribute('data-agent') === filter; })) filter = '';
@@ -312,9 +314,12 @@ const DASH_SCRIPT = String.raw`
       filter = filter === id ? '' : id;
       saveFilter(filter);
       paint();
+      if (filter && chip.scrollIntoView) chip.scrollIntoView({ inline: 'nearest', block: 'nearest' });
+      fade();
     });
   });
   paint();
+  fade();
   if (typeof ResizeObserver === 'function') {
     var head = document.getElementById('head');
     new ResizeObserver(function () { document.documentElement.style.setProperty('--head-h', head.offsetHeight + 'px'); }).observe(head);

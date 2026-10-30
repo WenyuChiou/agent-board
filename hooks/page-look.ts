@@ -172,6 +172,23 @@ export const filterStore = String.raw`
   }
 `
 
+// The row of agent icons never wraps: when it is full it scrolls sideways, and the edge that has more fades.
+// Returns the function that works that out again (after a redraw or a press); for the page's own script.
+export const agentFade = String.raw`
+  function agentFade(row) {
+    if (!row) return function () {};
+    function sync() {
+      var tail = row.scrollWidth - row.clientWidth - row.scrollLeft > 2;
+      var head = row.scrollLeft > 2;
+      var next = String(row.className || '').replace(/\s*\bmore-(?:left|right)\b/g, '') + (head ? ' more-left' : '') + (tail ? ' more-right' : '');
+      if (next !== row.className) row.className = next;
+    }
+    if (typeof row.addEventListener === 'function') row.addEventListener('scroll', sync);
+    if (typeof window.addEventListener === 'function') window.addEventListener('resize', sync);
+    return sync;
+  }
+`
+
 export const pageBaseCss = `
 @font-face{font-family:'Atkinson Hyperlegible Next';src:url(data:font/woff2;base64,${FONT_REGULAR}) format('woff2');font-weight:400;font-display:swap;/* ${FONT_LICENSE} */}
 @font-face{font-family:'Atkinson Hyperlegible Next';src:url(data:font/woff2;base64,${FONT_SEMIBOLD}) format('woff2');font-weight:600;font-display:swap}
@@ -205,10 +222,14 @@ export const agentRowCss = `
 .agents{position:sticky;top:var(--head-h,56px);z-index:4;background:var(--ground);border-bottom:1px solid var(--line)}
 .agents-in{display:flex;gap:var(--s2);overflow-x:auto;scrollbar-width:none;scroll-snap-type:x proximity;padding-top:var(--s2);padding-bottom:var(--s2)}
 .agents-in::-webkit-scrollbar{display:none}
+/* When the icons do not fit the row scrolls sideways and the edge that has more fades, so the last icon shows partly; it never wraps. */
+.agents-in.more-right{-webkit-mask-image:linear-gradient(to right,#000 calc(100% - 28px),transparent);mask-image:linear-gradient(to right,#000 calc(100% - 28px),transparent)}
+.agents-in.more-left{-webkit-mask-image:linear-gradient(to left,#000 calc(100% - 28px),transparent);mask-image:linear-gradient(to left,#000 calc(100% - 28px),transparent)}
+.agents-in.more-left.more-right{-webkit-mask-image:linear-gradient(to right,transparent,#000 28px,#000 calc(100% - 28px),transparent);mask-image:linear-gradient(to right,transparent,#000 28px,#000 calc(100% - 28px),transparent)}
 .chip{position:relative;flex:none;scroll-snap-align:start;display:inline-flex;align-items:center;gap:var(--s2);min-width:44px;height:44px;padding:0 7px;border:1px solid transparent;border-radius:var(--radius-m);background:transparent;cursor:pointer;transition:background-color var(--dur-fast) var(--ease-out),border-color var(--dur-fast) var(--ease-out)}
 .chip .ag{width:28px;height:28px}
 /* A presence dot at the icon's bottom-right; a ring around the icon would read as selected. */
-.chip.offline .ag{background-color:var(--muted)}
+.chip[data-presence="offline"] .ag,.chip[data-presence="notseen"] .ag{background-color:var(--muted)}
 .chip.working::after{content:'';position:absolute;left:25px;top:25px;width:14px;height:14px;border:2px solid var(--ground);border-radius:var(--radius-round);background:var(--running);pointer-events:none}
 .chip .c-name{max-width:0;overflow:hidden;white-space:nowrap;font-weight:600;line-height:1.5;transition:max-width var(--dur-layout) var(--ease-out)}
 .chip[aria-pressed="true"]{border-color:var(--ink);background:var(--current);padding-right:var(--s3)}
