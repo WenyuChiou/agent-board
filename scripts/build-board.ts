@@ -7,6 +7,7 @@ import { join } from 'node:path'
 import { execFileSync, spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { RELEASED } from '../hooks/released'
+import { bundleCode } from './bundle-text.mjs'
 
 const root = join(import.meta.dir, '..')
 const version: string = JSON.parse(readFileSync(join(root, '.claude-plugin', 'plugin.json'), 'utf8')).version
@@ -21,14 +22,7 @@ const taggedFingerprint = (): string | undefined => {
   if (probe.status === 1) return undefined
   if (probe.error || probe.status !== 0) throw new Error('Could not inspect the current release tag')
   const source = execFileSync('git', ['show', `${ref}:hooks/board-script.ts`], { cwd: root, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 })
-  const marker = 'export const BOARD_SCRIPT = '
-  const start = source.indexOf(marker)
-  if (start === -1) throw new Error('Tagged board has an unsupported format')
-  const encoded = source.slice(start + marker.length)
-  const value: unknown = encoded.startsWith('[\n') ? JSON.parse(encoded.slice(0, encoded.lastIndexOf(']') + 1)) : JSON.parse(encoded)
-  const code: unknown = Array.isArray(value) && value.every(line => typeof line === 'string') ? value.join('\n') : value
-  if (typeof code !== 'string') throw new Error('Tagged board has an unsupported format')
-  const hash = fingerprint(code)
+  const hash = fingerprint(bundleCode(source))
   if (!RELEASED.some(release => release.version === version && release.board.includes(hash))) throw new Error('Tagged board is missing from the release table; regenerate it first')
   return hash
 }

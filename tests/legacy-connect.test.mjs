@@ -9,6 +9,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { pathToFileURL } from 'node:url'
 import { RELEASE_0_20_5 } from './fixtures/released.ts'
+import { bundleCode } from '../scripts/bundle-text.mjs'
 import { generatedHookCommand } from './fixtures/generated-hook-command.mjs'
 
 const source = readFileSync(new URL('../hooks/board-script.ts', import.meta.url), 'utf8')
@@ -575,10 +576,7 @@ const taggedBoard = (version, commit) => {
   const tag = `agent-board--v${version}`
   assert.equal(execFileSync('git', ['rev-parse', `${tag}^{}`], { cwd, encoding: 'utf8' }).trim(), commit)
   const source = execFileSync('git', ['show', `${tag}:hooks/board-script.ts`], { cwd, encoding: 'utf8', maxBuffer: 4 * 1024 * 1024 })
-  const marker = 'export const BOARD_SCRIPT = '
-  const encoded = source.slice(source.indexOf(marker) + marker.length)
-  // Tags up to 0.24.0 hold the bundle on one line; later ones hold one bundle line per line.
-  const code = encoded.startsWith('[') ? JSON.parse(encoded.slice(0, encoded.lastIndexOf(']') + 1)).join('\n') : JSON.parse(encoded)
+  const code = bundleCode(source)
   taggedBoards.set(version, code)
   return code
 }
