@@ -10,17 +10,17 @@ and single hyphens between words. Pull requests for the same issue use different
 slugs. For example, `changelog.d/42-synthetic-summary.md` could contain:
 
 ```markdown
-- **A synthetic summary explains the result (#42).** The example summary names its outcome.
-  Tests: `a synthetic summary explains the result`.
+- **Page / Needs you first** · The page opens on what needs you, with every agent in one row (#42).
+  Tests: `a synthetic page opens on what needs you`.
 ```
 
-Use exact test titles in backticks after `Tests:`. Documentation-only changes can
-use `Tests: none (documentation only).` Existing fragments stay untouched until
-release.
+The bold part is `area / topic`. The area names what the person uses, for example Page, Terminal board, Pane, Setup, Codex, Claude Code, Antigravity, Cursor, Questions, Messaging, Storage, Docs, Tests or CI. After ` · ` come one to three plain sentences about what changed for the person, not how it was built, ending with the issue number `(#N)`.
+
+The `Tests:` line names the covering tests by their exact titles in backticks, separated by commas, for reviewers and `scripts/pr-check.mjs`. Documentation-only changes write `Tests: none (documentation only).` Existing fragments stay untouched until release.
 
 The release pull request runs `node scripts/changelog-fold.mjs <version>` to
 preview the new section, then adds `--write` to update CHANGELOG.md and remove
 the folded fragments. Use `--date YYYY-MM-DD` to set the date; it defaults to
 today in UTC. Fragments appear by issue number descending, then by filename,
 above any remaining Unreleased entries. This README is never checked or folded
-as a fragment.
+as a fragment. The fold leaves each entry's `Tests:` line out of CHANGELOG.md.
