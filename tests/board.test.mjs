@@ -5181,6 +5181,35 @@ const timer = setInterval(() => {
   }
 }
 
+test('an answer key on the terminal board sends to a connected session through the open page and says what it sent; with the page closed it only copies', { timeout: 60_000 }, async () => {
+  const messages = mkdtempSync(join(tmpdir(), 'board-keys-'))
+  const board = await page(`
+## Demo
+<!-- auto session=e5f6a7b8 agent=codex state=waiting updated=RECENT -->
+### Ship the docs
+- [?] Publish them, OK?
+<!-- /auto session=e5f6a7b8 -->
+`, {}, ['--messages-dir', messages])
+  const env = { ...process.env, CLAUDE_PROGRESS_FILE: '', NO_COLOR: '1', XDG_RUNTIME_DIR: join(board.dir, 'run') }
+  const play = keys => spawnSync(process.execPath, [join(board.dir, 'agent-board.mjs'), '--keys', keys], { env, encoding: 'utf8', timeout: 30_000 }).stdout
+  try {
+    const registered = (await board.call('POST', '/api/messages/register', { body: { agent: 'codex', session: 'e5f6a7b8', surface: 'Synthetic terminal', turn: 'turn1' } })).json()
+    const sent = play('y')
+    assert.ok(sent.includes('You answered “Yes, go ahead”.'), sent)
+    const polled = (await board.call('POST', '/api/messages/poll', { body: { connection: registered.id, secret: registered.secret, turn: 'turn1', receive: true } })).json()
+    assert.deepEqual(polled.messages.map(message => message.text), ['Yes, go ahead'])
+    // With the page gone the key has nowhere to send: it copies, and never says it sent.
+    await board.call('POST', '/api/close', { body: {} })
+    await board.exited
+    const closed = play('y')
+    assert.ok(closed.includes('copies the answer'), closed)
+    assert.ok(!closed.includes('You answered'), closed)
+  } finally {
+    await board.close()
+    rmSync(messages, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })
+  }
+})
+
 test('a newer --serve does not start a second page while the page it would replace is sending a reply, shows that page with a note, and replaces it once the reply is in', { timeout: 60_000 }, async t => {
   const held = await holdingPage(t.signal)
   const { board } = held
