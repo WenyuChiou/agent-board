@@ -821,6 +821,14 @@ div.row-btn .r-chev{visibility:hidden}
 .lost .where{font-weight:600}
 .notices{display:grid;gap:var(--s2)}.notices p{margin:0}
 ${CLIP_CSS}
+/* A wide screen: Needs you stands in a column of its own beside the work, and both scroll with the page. */
+@media (min-width:1000px){
+  .col{max-width:1280px}
+  #board{display:grid;grid-template-columns:minmax(380px,5fr) minmax(0,7fr);column-gap:var(--s6);row-gap:0;grid-template-rows:repeat(12,auto) 1fr;align-items:start}
+  #board>*{grid-column:2;margin-bottom:var(--s6)}
+  #board>#needs{grid-column:1;grid-row:1 / -1;margin-bottom:0}
+  #board>.fresh{grid-column:1 / -1}
+}
 @media (max-width:640px){
   .col{padding-left:max(var(--s3),env(safe-area-inset-left,0px));padding-right:max(var(--s3),env(safe-area-inset-right,0px))}
   .head{position:static}
@@ -1040,7 +1048,14 @@ const PAGE_SCRIPT = String.raw`
   // the alert colour says so; a copy that carries no card (a command) shows its text to select instead.
   function copy(text, key, onCopied) {
     say(w('pressPending'), '', key);
-    function landed() { if (onCopied) { delete results[key]; onCopied(); } else say(w('copied'), 'done', key); }
+    function landed() {
+      if (!onCopied) { say(w('copied'), 'done', key); return; }
+      // The card's own line says where to paste, so the line that said the press was under way goes.
+      delete results[key];
+      var slot = resultSlots[key];
+      if (slot) { slot.node.textContent = ''; slot.node.className = 'press-result'; }
+      onCopied();
+    }
     function failed() { if (onCopied) say(w('pgCopyFailed'), 'alert', key); else say(w('boardCopyFailedBelow'), 'alert', key, text); }
     function fallback() {
       var area = el('textarea');
@@ -1292,7 +1307,8 @@ const PAGE_SCRIPT = String.raw`
   }
   function sends(mode) { return mode === 'send' || mode === 'connected'; }
   // One question or stuck task on the Needs you sheet, answerable where it is.
-  function buildCard(ref) {
+  // isOlder: a question kept for review (its chat has stopped): nothing to answer here, only to hide once answered.
+  function buildCard(ref, isOlder) {
     var ask = source(ref);
     var isStuck = ref.kind === 'stuck';
     var key = ask.key || ref.key;
@@ -1311,13 +1327,16 @@ const PAGE_SCRIPT = String.raw`
     if (isStuck) add(body, el('p', 'note', clean(ask.stuck && ask.stuck.reason)));
     else if (ask.note) add(body, clipped(clean(ask.noteLine || ask.note), ask.note, 'note', 'note:' + key));
     else if (ask.context) add(body, clipped(clean(ask.contextLine || ask.context), ask.context, 'context', 'context:' + key));
-    if (!isStuck && ask.command) add(body, el('code', '', '$ ' + ask.command));
+    if (!isStuck && !isOlder && ask.command) add(body, el('code', '', '$ ' + ask.command));
     var mode = ask.send;
     var answers = el('div', 'answers');
     var others = [];
     var canWrite = false;
     if (isStuck) {
       if (ask.resume) add(answers, button(w('serveCopyResume'), function () { copy(ask.resume, key); }, '', true));
+    } else if (isOlder) {
+      if (ask.canHide) add(answers, button(w('answeredHide'), function () { act(key, 'hide'); }));
+      else add(body, el('p', 'note', w('questionReviewOnly')));
     } else if (ask.isOwn) {
       if (ask.canTick) add(answers, button(w('pgDone'), function () { act(key, 'tick', '', '', '', '', ask.fp); }, 'primary'));
     } else {
@@ -1428,7 +1447,8 @@ const PAGE_SCRIPT = String.raw`
       else if (row.hasCopyBox) add(inner, replyBox(row.key, w('serveReplyPlaceholder'), 'copy', row.agent, '', false, row.session, row.question));
       if (row.isOwn && section !== 'done' && row.next) add(acts, button(w('serveTickNext', clean(row.nextLabel || row.next)), function () { act(key, 'tick', row.next, '', '', '', row.fp); }, 'primary'));
       if (row.resume && !row.isOwn) add(acts, button(w('serveCopyResume'), function () { copy(row.resume, key); }, '', true));
-      if (row.canArchive) add(acts, button(w('serveArchive'), function () { act(key, 'archive', '', '', '', '', row.fp); }));
+      // A task still running keeps its Archive button; the board refuses and the line says why only after it is pressed.
+      if (row.canArchive || row.archiveNote) add(acts, button(w('serveArchive'), function () { act(key, 'archive', '', '', '', '', row.fp); }));
       if (row.canConfirm && section !== 'done') add(acts, button(w('confirmDone'), function () { act(key, 'done', '', '', '', '', row.fp); }));
       if (acts.firstChild) add(inner, acts);
       if (row.receipt) add(inner, receiptLine(row.receipt, key));
@@ -1682,7 +1702,7 @@ const PAGE_SCRIPT = String.raw`
       var drawOlder = function (ref) {
         var li = el('li');
         var block = el('div', 'fx');
-        add(block, add(el('div', 'fx-in'), buildCard(ref)));
+        add(block, add(el('div', 'fx-in'), buildCard(ref, true)));
         add(li, block);
         add(olderList, li);
         entry(li, block, ref, 'older');

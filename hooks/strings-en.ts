@@ -540,7 +540,6 @@ export const EN: Strings = {
   serveOffline: "Can't reach the board. Run the board with --serve again; it opens a new page, and you can close this one.",
   serveOfflineLan: "Can't reach the board. On the computer, run the board with --serve --lan again and open the new address.",
   themeLabel: 'Theme',
-  themeSystem: 'System',
   themeLight: 'Light',
   themeDark: 'Dark',
   serveLive: 'Live',

@@ -536,7 +536,6 @@ export const ZH_CN: Strings = {
   serveOffline: '连不上看板。请用 --serve 重新启动看板；新页面会自动打开，这个标签页可以关闭。',
   serveOfflineLan: '连不上看板。请在电脑上用 --serve --lan 重新启动看板，再打开新地址。',
   themeLabel: '外观',
-  themeSystem: '跟随系统',
   themeLight: '亮色',
   themeDark: '暗色',
   serveLive: '实时',

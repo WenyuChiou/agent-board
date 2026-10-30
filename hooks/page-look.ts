@@ -39,7 +39,8 @@ export const pageTokens = (headHeight = '54px'): string => {
 export const themeHead = String.raw`
 (() => {
   var root = document.documentElement;
-  var choice = 'system';
+  // No saved pick: the page follows the system, and shows which of the two it is following.
+  var choice = '';
   var timer;
   var saved = '';
   // The live page starts on a new port each time, so its storage starts empty there; a cookie
@@ -52,27 +53,27 @@ export const themeHead = String.raw`
     try { saved = localStorage.getItem('agent-board.theme'); } catch (e) {}
   }
   if (saved === 'light' || saved === 'dark') choice = saved;
+  var scheme = typeof window !== 'undefined' && typeof window.matchMedia === 'function' ? window.matchMedia('(prefers-color-scheme: dark)') : null;
   function apply() {
-    if (choice === 'system') root.removeAttribute('data-theme');
-    else root.setAttribute('data-theme', choice);
+    if (choice) root.setAttribute('data-theme', choice);
+    else root.removeAttribute('data-theme');
+    var shown = choice || (scheme && scheme.matches ? 'dark' : 'light');
     document.querySelectorAll('[data-theme-pick]').forEach(function (button) {
-      button.setAttribute('aria-pressed', String(button.getAttribute('data-theme-pick') === choice));
+      button.setAttribute('aria-pressed', String(button.getAttribute('data-theme-pick') === shown));
     });
   }
   apply();
+  try { if (scheme && scheme.addEventListener) scheme.addEventListener('change', apply); } catch (e) {}
   document.addEventListener('DOMContentLoaded', apply);
   document.addEventListener('click', function (event) {
     var node = event.target;
     while (node && node !== document) {
       var picked = node.getAttribute && node.getAttribute('data-theme-pick');
-      if (picked === 'system' || picked === 'light' || picked === 'dark') {
+      if (picked === 'light' || picked === 'dark') {
         choice = picked;
-        try {
-          if (choice === 'system') localStorage.removeItem('agent-board.theme');
-          else localStorage.setItem('agent-board.theme', choice);
         // Blocked storage only means the pick is not kept: this page still shows it.
-        } catch (e) {}
-        try { document.cookie = 'agent-board.theme=' + choice + '; Path=/; SameSite=Strict; Max-Age=' + (choice === 'system' ? 0 : 365 * 24 * 3600); } catch (e) {}
+        try { localStorage.setItem('agent-board.theme', choice); } catch (e) {}
+        try { document.cookie = 'agent-board.theme=' + choice + '; Path=/; SameSite=Strict; Max-Age=' + 365 * 24 * 3600; } catch (e) {}
         root.classList.add('theming');
         clearTimeout(timer);
         apply();
@@ -88,15 +89,14 @@ export const themeHead = String.raw`
 const esc = (text: string): string => text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/"/g, '&quot;')
 
 const THEME_ICONS = [
-  '<rect x="2" y="2.5" width="12" height="8.5" rx="1.5"/><path d="M5.5 14h5M8 11v3"/>',
   '<circle cx="8" cy="8" r="3"/><path d="M8 1.5V3M8 13v1.5M1.5 8H3M13 8h1.5M3.4 3.4l1.1 1.1M11.5 11.5l1.1 1.1M3.4 12.6l1.1-1.1M11.5 4.5l1.1-1.1"/>',
   '<path d="M13.5 9.6A5.6 5.6 0 0 1 6.4 2.5a5.6 5.6 0 1 0 7.1 7.1z"/>',
 ] as const
 
 export const themeSwitch = (s: Strings): string =>
-  `<div class="seg" role="group" aria-label="${esc(s.themeLabel)}">${(['system', 'light', 'dark'] as const).map((pick, index) => {
-    const label = [s.themeSystem, s.themeLight, s.themeDark][index] ?? ''
-    return `<button type="button" data-local data-theme-pick="${pick}" aria-pressed="${pick === 'system'}" aria-label="${esc(label)}"><svg class="i" viewBox="0 0 16 16" aria-hidden="true">${THEME_ICONS[index]}</svg><span class="tl">${esc(label)}</span></button>`
+  `<div class="seg" role="group" aria-label="${esc(s.themeLabel)}">${(['light', 'dark'] as const).map((pick, index) => {
+    const label = [s.themeLight, s.themeDark][index] ?? ''
+    return `<button type="button" data-local data-theme-pick="${pick}" aria-pressed="false" aria-label="${esc(label)}"><svg class="i" viewBox="0 0 16 16" aria-hidden="true">${THEME_ICONS[index]}</svg><span class="tl">${esc(label)}</span></button>`
   }).join('')}</div>`
 
 // Bubble a, the board's mark: a lowercase a whose foot turns out into a speech-bubble tail, an agent

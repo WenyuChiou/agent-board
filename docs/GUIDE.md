@@ -57,7 +57,7 @@ Chat shows questions first, then unprocessed progress reports with their source 
 
 ### The board's page
 
-Questions appear first. Expand a task for its steps. You can tick manual steps, archive, paste a valid progress block, copy a reply or resume command, mark a question read and show it again. Mark read only changes the local hidden list; it sends nothing. A substantively new question appears again. There is no general task-editing form.
+Questions appear first. Expand a task for its steps. You can tick manual steps, archive, copy a reply or resume command, mark a question read and show it again. Mark read only changes the local hidden list; it sends nothing. A substantively new question appears again. There is no general task-editing form.
 
 An unchanged hidden question stays hidden when unrelated steps move or its whitespace changes. Questions with identical words have separate identities. Changing their number is ambiguous, so they reappear rather than inherit another question's hide. A question observed as resolved or absent gets a fresh identity if asked again; a new ask with identical words and no observed transition cannot be inferred from a report alone. **Show again** remains available. Hiding never answers, approves, completes or delivers anything.
 
@@ -87,7 +87,7 @@ The page on your network comes with these limits:
 
 - It opens only when you add `--lan`, only at a private address of the computer (one starting with 192.168, 10, or 172.16 to 172.31, never a public one), and it answers only requests sent to that address.
 - Its address carries a key of its own, not the key of the computer's page. Anyone who has that address, or photographs the QR code, can use the page until it closes, so use it on a network you trust, such as your home Wi-Fi, not a café's.
-- On the network the page uses plain HTTP, which is not encrypted, so another device on the same Wi-Fi could read what passes, agents' answers included. That is why a phone can tick, archive, mark a question answered (and show it again), copy, paste a block and close the board, but not answer an agent: a reply runs a program on the computer, so the phone shows the answer for you to copy, and you send it from the computer's page.
+- On the network the page uses plain HTTP, which is not encrypted, so another device on the same Wi-Fi could read what passes, agents' answers included. That is why a phone can tick, archive, mark a question answered (and show it again), copy and close the board, but not answer an agent: a reply runs a program on the computer, so the phone shows the answer for you to copy, and you send it from the computer's page.
 - It closes after 10 minutes in which no phone looks at it, and whenever the computer's page closes. A second `--serve --lan` while it is open gives the same address.
 
 See [Security](../SECURITY.md) before sharing access.
@@ -139,6 +139,19 @@ Clean up on the pane or page archives the finished hand-kept tasks whose three d
 After 12 hours without a report, a card can look stopped; that is record staleness, not a native process check. A real new hook/report refreshes it. Work idle more than seven days folds away without changing its block; `--all` or the idle toggle shows it. Near-due work stays visible. Ended or stale sessions move to a separate Stopped shelf and leave the In progress count. Their unanswered questions leave Waiting on you and stay with the task, even when due or idle. Done sessions keep questions in their Done recently entry, then under Stopped when that entry leaves Done recently. Resolve on the pane closes one question; `--all` or `i` shows both idle and stopped tasks.
 
 The pane's saved records (the plugin's store file, in Claude's config folder under `plugins/store`) are kept to a fixed size too. An ended agent's record goes three days after its last write, and a session's saved task list after seven days, or thirty while it has open steps; none goes while its block is still on the board. Each record carries a short tag of the path of the board it was saved for, so a board uses the short times only for its own records: the records of another board on the same computer go only after thirty days (a record saved before 0.24 has no tag and also goes only after thirty days), and a board's own record dated more than a day ahead, written while the clock was wrong, goes unless its block is on the board. Inbox files the pane set aside as `.failed` are kept seven days from when it set them aside, whatever the file's own date. A temporary `.tmp` file a reporter left in the inbox, cut off before it was whole, is removed once it is a day old; it is a partial write, not a turn, so it is not counted as cleared. If the store still passes 1.5 MB after that, the oldest records of ended sessions that are not on the board go until it is under; hand-kept tasks and steps waiting on you are never removed by a size rule. The inbox of other agents' turns holds at most 1,000 files or 1.5 MB: the writers drop the oldest and note how many in `progress-inbox/dropped.log`. The pane and `progress.html` say in one line what was cleared in the last 7 days, for example "Cleared 12 old agent records and 340 unread inbox turns in the last 7 days", and only when something was cleared. They also warn when the store passes 1.2 MB (saying that only records of sessions whose block has left the board are cleared) or `progress.md` passes 512 KB.
+
+### How the board tidies up, at a glance
+
+- A session with no report for 12 hours counts as stopped and moves to the Stopped shelf.
+- An unanswered question stays on Needs you for 3 days, joins one grouped reminder until day 7, and after 7 days waits under Older unanswered questions.
+- A block that still asks is archived automatically only after 3 days (ended or done) or 7 days with no report (working or waiting). Its complete question is saved first and stays on the Older list; an explicit Archive saves it first too.
+- A hand-kept task with every step done or canceled counts toward the archive after 3 days. Archive now and Clean up move finished work at once. Other cleanup periods are as described above.
+
+### Marks and tags
+
+Step marks: ✓ done · ▸ doing · • to do · ● waiting on you · ◐ running · ! stuck · – canceled · ⚑ due within two weeks.
+
+Question tags: [Confirm] yes or no · [Choose] pick an option · [Input] type a reply · [Do] press "Did it" when finished · [Review] reply once you have looked · [Waiting] press once it arrives. A tag shows in the language of the board and is never written into the file; see [FORMAT.md](FORMAT.md).
 
 ## Update and uninstall
 

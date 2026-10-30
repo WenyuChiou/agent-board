@@ -580,7 +580,6 @@ export const ZH_TW = {
   serveOffline: '連不上看板。請用 --serve 重新啟動看板；新的頁面會自動開啟，這個分頁可以關閉。',
   serveOfflineLan: '連不上看板。請在電腦上用 --serve --lan 重新啟動看板，再開啟新的網址。',
   themeLabel: '外觀',
-  themeSystem: '跟隨系統',
   themeLight: '亮色',
   themeDark: '暗色',
   serveLive: '即時',

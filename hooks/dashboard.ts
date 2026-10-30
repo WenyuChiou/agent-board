@@ -25,8 +25,6 @@ const GLYPH: Record<ProgressStepStatus, string> = {
   cancelled: '–',
 }
 
-const LEGEND: readonly ProgressStepStatus[] = ['done', 'doing', 'todo', 'waiting', 'running', 'blocked', 'cancelled']
-
 const esc = (text: string): string =>
   text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;')
 
@@ -169,7 +167,6 @@ details.row>summary{padding:var(--s3) var(--s2);align-items:center}
 .sec-title .count{font-size:var(--text-xs);color:var(--muted);font-weight:400;font-variant-numeric:tabular-nums}
 .rows{border-top:1px solid var(--line-strong)}
 footer{color:var(--muted);display:grid;gap:var(--s1);border-top:1px solid var(--line);padding-top:var(--s4)}
-.legend{display:flex;flex-wrap:wrap;gap:var(--s1) var(--s4)}
 @media (max-width:640px){
   .col{padding-left:max(var(--s3),env(safe-area-inset-left,0px));padding-right:max(var(--s3),env(safe-area-inset-right,0px))}
   .head{position:static}
@@ -211,7 +208,7 @@ export const dashboardHtml = (view: View, s: Strings, path: string, stamp: strin
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>${esc(s.paneTitle)} · Agent Board</title>
+<title>Agent Board</title>
 ${faviconLink}
 <script>${themeHead}</script>
 <style>
@@ -222,7 +219,7 @@ ${DASH_CSS}
 </style>
 </head>
 <body>
-<header class="head" id="head"><div class="col topbar"><div class="brand">${boardMark}<h1>${esc(s.paneTitle)}</h1><span class="meta">${esc(stamp)}</span></div>${themeSwitch(s)}</div></header>
+<header class="head" id="head"><div class="col topbar"><div class="brand">${boardMark}<h1>Agent Board</h1><span class="meta">${esc(stamp)}</span></div>${themeSwitch(s)}</div></header>
 ${chipRow(chips, s).replace('<div class="col agent-note" id="agent-note"></div>', `<div class="col agent-note" id="agent-note">${noteRows}</div>`)}
 <main class="col">
 ${view.warning ? `<p role="status" class="t-alert">${esc(view.warning)}</p>` : ''}
@@ -252,8 +249,7 @@ ${view.idle.length === 0 ? '' : `<details class="section" data-key="section:idle
 ${view.stopped.length === 0 ? '' : `<details class="section" data-key="section:stopped"><summary><span class="quiet">${esc(s.stoppedCount(view.stopped.length))}</span></summary>${view.stopped.map(it => row(it, s, true)).join('')}</details>`}
 ${view.background === undefined ? '' : `<p class="quiet">${esc(view.background)}</p>`}
 ${section('recent', s.pgDone, view.recent.length, 'done', '', doneRows, false)}
-<footer><div class="legend">${LEGEND.map((status, index) => `<span><span style="color:var(--${roleOf(status)})">${GLYPH[status]}</span> ${esc(s.legendWords[index] ?? status)}</span>`).join('')}<span>${esc(s.legendDue)}</span></div>
-<div>${esc(s.legendCleanup)}</div><div>${esc(s.progressFileShown)}</div></footer>
+<footer><div>${esc(s.progressFileShown)}</div></footer>
 ${(view.health?.length ?? 0) === 0 ? '' : `<details class="section sec" data-key="section:health"><summary><span class="title quiet">${esc(s.sectionHealth)}</span><span class="count" style="color:var(--muted)">${view.health!.length}</span></summary>${view.health!.map(line => `<p class="quiet">${esc(line)}</p>`).join('')}</details>`}
 </main>
 <script>${script}</script>
