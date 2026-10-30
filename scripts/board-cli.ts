@@ -27,7 +27,7 @@ import { boardKey, boardScreen, boardText, CHAT_MAX, chatText, doneToday, emptyB
 import type { BoardAction, BoardState } from '../hooks/board'
 import { LOG_TAIL, isInboxFile } from '../hooks/inbox'
 import { dashboardHtml } from '../hooks/dashboard'
-import { appendJournal, archivePath, countDay, hasArchiveEntry, journalLine, journalPath, localDay, parseJournal } from '../hooks/journal'
+import { appendJournal, archivePath, countDay, journalLine, journalPath, localDay, missingEntries, parseJournal, unwrittenEntries } from '../hooks/journal'
 import { currentPart, monthParts, sizeWarnings, storageDetails } from '../hooks/retention'
 import { parseProgress, progressTail } from '../hooks/parse'
 import { qrModules, qrText } from '../hooks/qr'
@@ -633,13 +633,15 @@ const openHtml = (done: (note: string, isOpen: boolean) => void): void => {
 // leaves the work in both, never in neither. An entry already archived by an earlier try
 // (another session wrote meanwhile) is not archived twice. How many entries went, or null
 // when a file could not be written.
+// Entries are counted with their number: two done blocks with the same title and steps make
+// the same entry text, and both leave (#231).
 const archiveOut = (take: (text: string, isLast: boolean) => { text: string; entries: string[] } | null | typeof AGAIN, now: number): number | null => {
-  const archived = new Set<string>()
+  const archived = new Map<string, number>()
   const wrote = rewrite(path, (text, isLast) => {
     const taken = take(text, isLast)
     if (taken === AGAIN) return AGAIN
     if (taken === null) return text
-    const fresh = taken.entries.filter(entry => !archived.has(entry))
+    const fresh = unwrittenEntries(taken.entries, archived)
     if (fresh.length > 0) {
       const part = partOf(archivePath(path, now))
       // A previous try may have saved to the part before, the one that then reached 1 MB.
@@ -647,16 +649,16 @@ const archiveOut = (take: (text: string, isLast: boolean) => { text: string; ent
       const before = earlier === undefined ? '' : read(earlier)
       const kept = rewrite(part, past => {
         // A previous process may have saved the archive but failed to remove the task.
-        const missing = fresh.filter(entry => !hasArchiveEntry(past, entry) && !hasArchiveEntry(before, entry))
+        const missing = missingEntries([past, before], fresh, archived)
         return missing.length === 0 ? past : `${past.trim() === '' ? `${s.archiveTitle}\n\n` : past.replace(/\s*$/, '\n\n')}${missing.join('\n\n')}\n`
       })
       if (kept === null) return null
-      for (const entry of fresh) archived.add(entry)
+      for (const entry of fresh) archived.set(entry, (archived.get(entry) ?? 0) + 1)
     }
     return taken.text
   })
 
-  return wrote === null ? null : archived.size
+  return wrote === null ? null : [...archived.values()].reduce((sum, one) => sum + one, 0)
 }
 
 // How long ago the hidden list was written; 0 when that cannot be told, so a list that is not

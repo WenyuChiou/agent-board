@@ -46,6 +46,7 @@ import {
   parseJournal,
   previousMonth,
   progressReport,
+  unwrittenEntries,
 } from './journal'
 import type { JournalEntry } from './journal'
 import {
@@ -2950,9 +2951,11 @@ const archiveOld = async ($: EngineInterface, isNow = false, isCleanUp = false):
   // A person's Clean up goes by the record on disk alone: one that stopped reading since the press
   // began moves no hand-kept task, rather than falling back to the times the pane kept in memory.
   const observed = isCleanUp ? (parseSeen(await readText($, seenPath(path))) ?? {}) : await read($, firstSeen)
-  const archived = new Set<string>()
+  // Counted with their number: two done blocks with the same title and steps make one entry text,
+  // and both leave (#231).
+  const archived = new Map<string, number>()
   // A copy may precede a rejected write; only actual removals count as moves.
-  const removed = new Set<string>()
+  const removed = new Map<string, number>()
   const keys = new Set<string>()
   let pendingEntries: string[] = []
   let pendingKeys: string[] = []
@@ -2994,11 +2997,16 @@ const archiveOld = async ($: EngineInterface, isNow = false, isCleanUp = false):
     return manual.text
   }, undefined, async (path, text) => {
     // Made again after another session's write, the same blocks are not archived twice.
-    await appendArchive($, archivePath(path, at), pendingEntries.filter(entry => !archived.has(entry)), s)
-    for (const entry of pendingEntries) archived.add(entry)
+    const fresh = unwrittenEntries(pendingEntries, archived)
+    await appendArchive($, archivePath(path, at), fresh, s)
+    for (const entry of fresh) archived.set(entry, (archived.get(entry) ?? 0) + 1)
     for (const entry of pendingMoved) moved.set(entry.session, entry.text)
     await $.fs.write(path, text)
-    for (const entry of pendingEntries) removed.add(entry)
+    // Another session's stale write can put the blocks back and the next try remove them again:
+    // an entry counts the most copies one write removed, not the sum over the tries.
+    const going = new Map<string, number>()
+    for (const entry of pendingEntries) going.set(entry, (going.get(entry) ?? 0) + 1)
+    for (const [entry, count] of going) removed.set(entry, Math.max(removed.get(entry) ?? 0, count))
     for (const key of pendingKeys) keys.add(key)
   })
   if (wrote === null) {
@@ -3015,7 +3023,7 @@ const archiveOld = async ($: EngineInterface, isNow = false, isCleanUp = false):
   }
   await poll($)
 
-  return removed.size
+  return [...removed.values()].reduce((sum, one) => sum + one, 0)
 }
 
 // What the explicit archive checks before it takes a block that asks (#174): the ledger settled

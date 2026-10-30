@@ -31,13 +31,39 @@ export const journalPath = (progressPath: string, now: number): string =>
 
 // A retry may find the whole entry already saved, but a shorter task must never match
 // the beginning of an older, longer one. Fenced/commented headings are part of the body.
-export const hasArchiveEntry = (past: string, entry: string): boolean => {
+export const hasArchiveEntry = (past: string, entry: string): boolean => archiveEntryCount(past, entry) > 0
+
+// How many copies of an entry an archive holds: two done blocks with the same title and steps
+// make the same entry text, so a yes/no match counts them as one (#231).
+export const archiveEntryCount = (past: string, entry: string): number => {
   const lines = past.replace(/\r\n/g, '\n').split('\n')
   const starts = readable(lines).flatMap((line, index) => line !== null && /^##\s/.test(line) ? [index] : [])
   const wanted = entry.replace(/\r\n/g, '\n').replace(/\n+$/, '')
-  return starts.some((start, index) =>
+  return starts.filter((start, index) =>
     lines.slice(start, starts[index + 1] ?? lines.length).join('\n').replace(/\n+$/, '') === wanted,
-  )
+  ).length
+}
+
+// The entries an earlier try of this run has not archived yet (`written` counts what it did),
+// counted with their number, so the second of two same-text entries is still new.
+export const unwrittenEntries = (entries: readonly string[], written: ReadonlyMap<string, number>): string[] => {
+  const seen = new Map<string, number>()
+  return entries.filter(entry => {
+    const nth = (seen.get(entry) ?? 0) + 1
+    seen.set(entry, nth)
+    return nth > (written.get(entry) ?? 0)
+  })
+}
+
+// The entries the archive files (`pasts`) do not hold yet. A process that saved the archive but
+// did not remove the tasks saved all of them in one write, so when the files hold at least as
+// many copies of an entry as are going, besides the ones this run wrote (`written`), they are
+// that save. When they hold fewer, those copies are older tasks and every new one is added.
+export const missingEntries = (pasts: readonly string[], entries: readonly string[], written: ReadonlyMap<string, number> = new Map()): string[] => {
+  const going = new Map<string, number>()
+  for (const entry of entries) going.set(entry, (going.get(entry) ?? 0) + 1)
+  const isHeld = new Map([...going].map(([entry, count]) => [entry, pasts.reduce((sum, past) => sum + archiveEntryCount(past, entry), 0) - (written.get(entry) ?? 0) >= count]))
+  return entries.filter(entry => isHeld.get(entry) !== true)
 }
 
 // The month before, so a week that spans two months reads both files.
