@@ -13,13 +13,14 @@ This repository follows the multi-agent workflow standard that its maintainer ke
 - **Caps:** at most five lanes plus the maintainer, and at most two Codex runs at once on one computer. Pull requests: [One thing at a time](#one-thing-at-a-time).
 - **Releases:** the maintainer prepares, reviews and merges the release pull request under the owner's authorization; only the owner publishes to npm ([CONTRIBUTING.md, Releases](../../CONTRIBUTING.md#releases), [RELEASING.md](../RELEASING.md)).
 - **Agents on other computers** take issues labelled `for-agent` and `ready`; `for-dot` is for dot or Muse (CONTRIBUTING rule 3). No label names a computer.
-- **Hold list:** there is none in this repository. A finding that is not an issue goes in a comment on one of the issues you are working on (CONTRIBUTING rule 2), and the maintainer files the ones that qualify ([When a finding becomes an issue](#when-a-finding-becomes-an-issue)).
+- **Hold list:** there is none in this repository. A finding goes in an issue of its own, or in a comment on the issue that already has it ([When a finding becomes an issue](#when-a-finding-becomes-an-issue)).
 - **Where Part B differs here, and why.** CONTRIBUTING.md is the rule here, so where Part B asks for something else, do this:
   - Which issue (B1 step 1, B7): one labelled `ready` and `for-agent` (`for-dot` for dot or Muse), not `blocked`, and not `claimed` unless the claim has run out (rule 3). No issue is assigned or labelled by computer.
   - Claim, Ready, review and Handover (B1 steps 1, 7 and 8, B6): [From claim to merge](#from-claim-to-merge) and rules 3, 7 and 14 ask for more: the claim's end time and the `claimed` label; `gh pr ready` and the preflight output with Ready; an answer to each finding in a comment and a merge of `main` before the new Ready; a push before a Handover, the checks run in it, and removing `claimed`.
+  - Findings (B2): anyone may open an issue for a finding, including audit or test findings, with no limit, and there is no hold list ([When a finding becomes an issue](#when-a-finding-becomes-an-issue)); a finding outside the issues on the pull request stays out, even when it concerns the same files (CONTRIBUTING rules 2 and 9).
+  - Merge (B1 step 9): the instruction "you never do" does not apply here. A collaborator with write access, the maintainer or the owner may review and merge as CONTRIBUTING rules 8, 9 and 12 permit; the maintainer handles release tags and the GitHub release.
   - Files (B1 step 3, B4): lanes own no files, and the string tables have no lane sections, so a new key goes in the same place in all three tables (AGENTS.md, Conventions in the code).
   - Tests (B1 step 4): only the test files your change touches, one run at a time; no full suite runs on your own computer, except `claude plugin test .` (AGENTS.md, Checks).
-  - Findings (B2): nothing outside the issues on your pull request goes into it, not even a fix in the same files (rules 2 and 9); put it in a comment on one of your issues.
   - Stacked pull requests (B5): none. Branch from current `main` (rule 4) and claim the next issue only after your pull request merges ([One thing at a time](#one-thing-at-a-time)).
   - Blocked (B6): ask in a comment starting `Question:` and add the `question` label; while you wait, keep working on what the question does not touch, or hand over (CONTRIBUTING.md, Questions; rule 14). You need not end your session. Wenyu, named in B6, is the owner.
   - The `Agent:` trailer (B1 step 6, B7) is not required yet. Until CONTRIBUTING.md asks for it, the `Author:` line (rule 10) is what tells agents apart.
@@ -32,13 +33,7 @@ This repository follows the multi-agent workflow standard that its maintainer ke
 
 ## When a finding becomes an issue
 
-A finding becomes a new issue only if it:
-
-- loses the person's work or data,
-- tells the person something untrue, or
-- blocks an open pull request.
-
-Anything else you find goes in a comment on one of your own issues (CONTRIBUTING rule 2), and the maintainer files it if it qualifies. The same problem on another surface is a comment on the issue that already has it. An audit or a test run that finds many problems hands in one list in a comment, not a batch of issues. Until fewer than 60 issues are open, at most three new issues a day. An issue that CONTRIBUTING.md requires (a merge without an approving review, rule 9; undoing a merged pull request, rule 11) is always allowed and does not count toward that limit. These limits are for the team's own findings: bug reports and ideas from anyone else are welcome through the issue forms.
+Anyone may open an issue through the issue forms: a bug, something the board says that is untrue, or an idea. Search the open issues first: the same problem on another surface is a comment on the issue that already has it. Keep to one problem per issue, including findings from an audit or a test run. There is no limit on how many issues are open or opened in a day. A finding outside the pull request you are working on goes in an issue of its own or a comment on the issue that already has it, never into that pull request (CONTRIBUTING rule 2).
 
 ## Closing more than we open
 
@@ -53,13 +48,14 @@ Each step is one comment on GitHub, so an agent on another computer can see whos
 | Claim | author | `Claim: <agent>, <branch>, until <YYYY-MM-DD HH:MM> UTC` on each issue the pull request names, and the `claimed` label (CONTRIBUTING rule 3) |
 | Draft | author | the pull request, opened as a draft |
 | Ready | author | once the PR check and CI pass: `gh pr ready`, then a comment that starts `Ready for review <full head sha>`, with the preflight output under Checks |
+| Take a review | anyone who may review except the author (CONTRIBUTING rule 8) | a comment `Reviewing: <GitHub login or agent>` on a pull request marked Ready (rule 9) |
 | Review | reviewer | `Review: APPROVE <full head sha>` or `Review: REQUEST CHANGES <full head sha>`, naming the reviewer (`by <GitHub login or agent>`), with all findings at once (CONTRIBUTING rule 9); the reviewer is not the author (rule 8) |
 | Changes | author | an answer to each finding in a comment, the fixes, a merge of `main`, then a comment that starts `Ready for review <new head sha>` |
 | Merge | a collaborator with write access, the maintainer or the owner | a squash merge of the current head once the approval and checks required by CONTRIBUTING rule 9 hold, then the evidence on each issue; a pull request that changes `.github/workflows/` merges as CONTRIBUTING rule 12 says |
 
-- The maintainer gives a verdict within four hours of Ready during the maintainer's day, and by the next morning at the latest. There is no review without the preflight output.
+- Any collaborator with write access, the maintainer or the owner may take a Ready pull request it did not write; the maintainer and collaborators named in CONTRIBUTING [Roles](../../CONTRIBUTING.md#roles) may also have their own pull requests approved by a code-review subagent they run, under rule 8's conditions. The maintainer makes sure each one gets a verdict within four hours of Ready during the maintainer's day, and by the next morning at the latest, and reviews it itself when nobody else has. There is no review without the preflight output.
 - A review asks for what the issue, [brief-rules.md](brief-rules.md), CONTRIBUTING.md and AGENTS.md require, and for anything in the diff that breaks behaviour. Anything else becomes a note for later, not another review round.
-- After a second REQUEST CHANGES, the maintainer's next comment gives each change by file and line. The third round is the last: after it, the maintainer takes the branch over and finishes it, as in a handover (CONTRIBUTING rule 14). From then on the maintainer has written part of the pull request, so its verdict comes from a code-review subagent or the owner (CONTRIBUTING rule 8).
+- After a second REQUEST CHANGES, the reviewer's next comment gives each change by file and line. The third round is the last: after it, the reviewer or the maintainer takes the branch over and finishes it, as in a handover (CONTRIBUTING rule 14). From then on whoever took it over has written part of the pull request, so the verdict comes from someone else (CONTRIBUTING rule 8).
 
 ## Merge order
 
@@ -67,9 +63,9 @@ When several pull requests are green, pull requests that change neither `hooks/b
 
 ## Pull requests from forks
 
-Checks on a pull request from a fork wait for a maintainer's approval, for every outside contributor and every push (the repository's Actions setting).
+Checks on a pull request from a fork wait for approval from a collaborator with write access, the maintainer or the owner, for every outside contributor and every push (the repository's Actions setting).
 
-- **Approving a run.** The maintainer looks for held runs at least once a day. Before approving, read the whole diff under Files changed, `.github/`, `scripts/` and `tests/` first: a pull request's own workflow files decide what its run does, and CI runs its own test files. Approve the run for the newest head only.
+- **Approving a run.** A collaborator with write access, the maintainer or the owner may approve a held run; the maintainer looks for held runs at least once a day. Before approving, read the whole diff under Files changed, `.github/`, `scripts/` and `tests/` first: a pull request's own workflow files decide what its run does, and CI runs its own test files. Approve the run for the newest head only.
 - **If many arrive at once.** The owner can limit issues, comments and pull requests to people who have contributed before, for one week: `gh api -X PUT repos/WenyuChiou/agent-board/interaction-limits -f limit=contributors_only -f expiry=one_week`. `gh api -X DELETE repos/WenyuChiou/agent-board/interaction-limits` lifts it. It is a brake for a flood, not a standing rule.
 - **A pull request that skips the rules** gets one comment pointing to [CONTRIBUTOR-PATH.md](../CONTRIBUTOR-PATH.md) and what is missing. It is closed only if nothing changes in a week.
 

@@ -1,6 +1,6 @@
 # Releasing Agent Board
 
-The maintainer session prepares, reviews and merges a release and creates its GitHub release. Only the owner publishes to npm, because publishing needs the npm account's one-time code. Agents never run `npm login` or `npm publish`. The short version of these steps is in [CONTRIBUTING.md, Releases](../CONTRIBUTING.md#releases).
+The maintainer session prepares and merges a release and creates its GitHub release. The release pull request needs the approval required by [CONTRIBUTING.md, Pull requests](../CONTRIBUTING.md#pull-requests) rule 8, including its exception for a code-review subagent on a pull request the maintainer wrote. Only the owner publishes to npm, because publishing needs the npm account's one-time code. Agents never run `npm login` or `npm publish`. The short version of these steps is in [CONTRIBUTING.md, Releases](../CONTRIBUTING.md#releases).
 
 ## Stable and pre-release
 
@@ -32,13 +32,15 @@ npm dist-tag add @wenyuchiou/agent-board@X.Y.Z latest --otp <code>
 2. **CHANGELOG.** Run `node scripts/changelog-fold.mjs X.Y.Z` to preview, then add `--write`. It folds every `changelog.d/` fragment, and any entry left under `## Unreleased`, into `## X.Y.Z — YYYY-MM-DD`.
 3. **Generated files.** Rebuild as in [CONTRIBUTING.md, Releases](../CONTRIBUTING.md#releases) step 3: the board bundle and the released-files table, and both `--check` commands pass.
 4. **Checks.** Run everything in [CONTRIBUTING.md, Run the checks](../CONTRIBUTING.md#run-the-checks). The npm test also checks that `npm pack` would publish only the files `package.json` lists.
-5. **Pull request.** Title it `chore(release): Agent Board X.Y.Z`, review it, then squash-merge the exact tested head.
+5. **Pull request.** Title it `chore(release): Agent Board X.Y.Z`. Obtain the approval required by CONTRIBUTING rule 8 and, under the owner's authorization, squash-merge with `--match-head-commit` only once every CI job and all other checks required by rule 9 have succeeded on that exact head.
 6. **Tag.** On the merged commit, run `claude plugin tag . --dry-run`, then `claude plugin tag .`. Push only the new tag.
 7. **Gate.** Check the release gate above, and decide stable or pre-release.
-8. **GitHub release.** Write it from the version's CHANGELOG section. A pre-release's notes open with: "Pre-release: this version did not pass the release gate (docs/RELEASING.md)."
+8. **GitHub release.** Write it from the version's CHANGELOG section, then a link comparing the previous tag with the new one. A pre-release's notes open with: "Pre-release: this version did not pass the release gate (docs/RELEASING.md)."
 
    ```bash
    awk '/^## X\.Y\.Z /{f=1;next} /^## /{f=0} f' CHANGELOG.md > notes.md
+   # PREV is the previous release, for example 0.24.0
+   printf '\n**Full changes:** https://github.com/WenyuChiou/agent-board/compare/agent-board--vPREV...agent-board--vX.Y.Z\n' >> notes.md
    # stable
    gh release create agent-board--vX.Y.Z --verify-tag --title "Agent Board X.Y.Z" --notes-file notes.md --latest
    # pre-release
