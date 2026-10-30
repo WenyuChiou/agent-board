@@ -185,14 +185,15 @@ const porcelain = [
 const laneNow = '2026-10-30T12:00:00Z'
 const secondsAgo = hours => String(Math.floor((Date.parse(laneNow) - hours * 3600000) / 1000))
 
-test('worktree listing keeps only branch worktrees', () => {
-  assert.deepEqual(parseWorktrees(porcelain).map(lane => lane.branch), ['main', 'lane/old', 'lane/fresh', 'lane/has-pr', 'lane/empty'])
+test('worktree listing keeps detached worktrees and marks them', () => {
+  assert.deepEqual(parseWorktrees(porcelain).map(lane => lane.branch), ['main', 'lane/old', 'lane/fresh', 'lane/has-pr', 'lane/empty', null])
+  assert.equal(parseWorktrees(porcelain).at(-1).isDetached, true)
 })
 
 test('a lane older than 2 hours with no open pull request is listed with its age', () => {
   const run = (cmd, args) => {
     if (cmd === 'git' && args[0] === 'worktree') return porcelain
-    if (cmd === 'git') return { 'main..lane/old': secondsAgo(5), 'main..lane/fresh': secondsAgo(1), 'main..lane/has-pr': secondsAgo(9), 'main..lane/empty': '' }[args.at(-1)] + '\n'
+    if (cmd === 'git') return { 'main..lane/old': secondsAgo(5), 'main..lane/fresh': secondsAgo(1), 'main..lane/has-pr': secondsAgo(9), 'main..lane/empty': '', 'main..fff': secondsAgo(1) }[args.at(-1)] + '\n'
     return JSON.stringify(args[args.indexOf('--head') + 1] === 'lane/has-pr' ? [{ number: 7 }] : [])
   }
   const result = findStaleLanes({ repo: 'a/b' }, { run, now: () => laneNow, birth: () => Date.parse(laneNow) - 3 * 3600000 })
@@ -207,7 +208,7 @@ test('a failed pull request lookup still lists the lane and adds a note', () => 
     throw new Error('ghp_abc123')
   }
   const result = findStaleLanes({ repo: 'a/b' }, { run, now: () => laneNow })
-  assert.equal(result.stale.length, 4)
+  assert.equal(result.stale.length, 5)
   assert.match(formatLanes(result), /lane\/old {2}4\.0 h {2}no PR \(unchecked\)/)
   assert.match(formatLanes(result), /Note: lane\/old: pull request lookup failed/)
   assert.ok(!formatLanes(result).includes('ghp_abc123'))
@@ -219,4 +220,32 @@ test('a failed worktree listing prints a note and the queue still prints', () =>
   const output = []
   main([], { fetch: () => ({ prs: [], commentsByNumber: {} }), lanes: () => { throw new Error('x') }, now: () => now, log: text => output.push(text) })
   assert.match(output[0], /Drafts: 0\nNote: lane check skipped: lookup failed$/)
+})
+
+const fakeRun = listing => (cmd, args) => {
+  if (cmd === 'git' && args[0] === 'worktree') return listing
+  if (cmd === 'git') return secondsAgo(6) + '\n'
+  return '[]'
+}
+
+test('a detached lane older than 2 hours is listed without a branch', () => {
+  const result = findStaleLanes({ repo: 'a/b' }, { run: fakeRun(porcelain), now: () => laneNow })
+  assert.ok(formatLanes(result).split('\n').some(line => line === 'detached (detached)  6.0 h  detached, no branch'))
+})
+
+test('a main checkout on a detached HEAD does not hide the first lane', () => {
+  const listing = ['worktree C:/repo\nHEAD aaa\ndetached', 'worktree C:/wt/first\nHEAD bbb\nbranch refs/heads/lane/first'].join('\n\n') + '\n'
+  const result = findStaleLanes({ repo: 'a/b' }, { run: fakeRun(listing), now: () => laneNow })
+  assert.deepEqual(result.stale.map(lane => lane.branch), ['lane/first'])
+})
+
+test('a folder time of 0 prints a note instead of a huge age', () => {
+  const run = (cmd, args) => {
+    if (cmd === 'git' && args[0] === 'worktree') return porcelain
+    if (cmd === 'git') return ''
+    return '[]'
+  }
+  const result = findStaleLanes({ repo: 'a/b' }, { run, now: () => laneNow, birth: () => 0 })
+  assert.deepEqual(result.stale, [])
+  assert.match(formatLanes(result), /Note: lane.old: age unknown/)
 })

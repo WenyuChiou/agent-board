@@ -91,54 +91,64 @@ export const fetchQueue = ({ repo }, { run = execFileSync } = {}) => {
 
 // Lanes older than the team's 2 h report limit with no open pull request (draft or not).
 export const parseWorktrees = text => text.split(/\r?\n\r?\n/).map(block => {
-  const lane = {}
+  const lane = { branch: null, head: null, isDetached: false, isBare: false }
   for (const line of block.split(/\r?\n/)) {
     if (line.startsWith('worktree ')) lane.path = line.slice(9)
+    else if (line.startsWith('HEAD ')) lane.head = line.slice(5)
     else if (line.startsWith('branch refs/heads/')) lane.branch = line.slice(18)
+    else if (line === 'detached') lane.isDetached = true
+    else if (line === 'bare') lane.isBare = true
   }
   return lane
-}).filter(lane => lane.path && lane.branch)
+}).filter(lane => lane.path)
 
 export const findStaleLanes = ({ repo }, { run = execFileSync, now = () => new Date(), birth = path => statSync(path).birthtimeMs } = {}) => {
-  const options = { encoding: 'utf8', maxBuffer, stdio: ['ignore', 'pipe', 'pipe'] }
+  const options = { encoding: 'utf8', maxBuffer, timeout: 30000, stdio: ['ignore', 'pipe', 'pipe'] }
   const nowMs = new Date(now()).getTime()
   const notes = []
   let lanes
   try { lanes = parseWorktrees(run('git', ['worktree', 'list', '--porcelain'], options)) } catch {
     return { stale: [], notes: ['lane check skipped: git worktree list failed'] }
   }
-  const main = lanes[0]?.branch
   const stale = []
+  // The first entry is the main checkout, whatever its HEAD is; a detached lane is still a lane.
   for (const lane of lanes.slice(1)) {
-    if (lane.branch === main || ['main', 'master'].includes(lane.branch)) continue
+    if (lane.isBare || ['main', 'master'].includes(lane.branch)) continue
+    const name = lane.branch ?? `${lane.path.split(/[\/]/).filter(Boolean).at(-1)} (detached)`
+    const ref = lane.branch ?? lane.head
     let start = null
     try {
-      const first = run('git', ['log', '--reverse', '--format=%ct', `main..${lane.branch}`], options).split(/\r?\n/).find(line => line.trim())
+      const first = ref ? run('git', ['log', '--reverse', '--format=%ct', `main..${ref}`], options).split(/\r?\n/).find(line => line.trim()) : null
       if (first) start = Number(first) * 1000
     } catch { /* fall back to the folder below */ }
     if (start === null) {
-      try { start = birth(lane.path) } catch {
-        notes.push(`${lane.branch}: age unknown, folder time unreadable`)
+      try { start = birth(lane.path) } catch { start = 0 }
+      if (!(start > 0)) {
+        notes.push(`${name}: age unknown, folder time unreadable`)
         continue
       }
     }
     const hours = Math.max(0, nowMs - start) / hour
     if (hours <= laneLimitHours) continue
+    if (!lane.branch) {
+      stale.push({ branch: name, hours, isDetached: true })
+      continue
+    }
     try {
       const open = JSON.parse(run('gh', ['pr', 'list', '--head', lane.branch, '--state', 'open', '--json', 'number', '--repo', repo], options))
       if (open.length) continue
-      stale.push({ branch: lane.branch, hours })
+      stale.push({ branch: name, hours })
     } catch {
       // A failed lookup must not hide the lane.
-      stale.push({ branch: lane.branch, hours, unchecked: true })
-      notes.push(`${lane.branch}: pull request lookup failed`)
+      stale.push({ branch: name, hours, unchecked: true })
+      notes.push(`${name}: pull request lookup failed`)
     }
   }
   return { stale, notes }
 }
 
 export const formatLanes = ({ stale, notes }) => {
-  const lines = stale.map(lane => `${lane.branch}  ${lane.hours.toFixed(1)} h  ${lane.unchecked ? 'no PR (unchecked)' : 'no PR'}`)
+  const lines = stale.map(lane => `${lane.branch}  ${lane.hours.toFixed(1)} h  ${lane.isDetached ? 'detached, no branch' : lane.unchecked ? 'no PR (unchecked)' : 'no PR'}`)
   if (lines.length) lines.unshift(`Lanes over ${laneLimitHours} h without a pull request (${lines.length})`)
   return [...lines, ...notes.map(note => `Note: ${note}`)].map(safeLine).join('\n')
 }
