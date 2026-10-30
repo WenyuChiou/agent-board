@@ -28,7 +28,8 @@ try {
 const [{ pageTokens, boardMark }, { servePage, pagePolicy }, { dashboardHtml }, { parseProgress }, { buildView }, { STRINGS }, { AGENT_ICONS }, { FONT_LICENSE }] = source
 const SANS = '"Atkinson Hyperlegible Next",system-ui,-apple-system,"Segoe UI",Roboto,"Noto Sans","Noto Sans TC","Noto Sans SC","Hiragino Sans","PingFang TC","PingFang SC","Microsoft JhengHei","Microsoft YaHei",sans-serif'
 const MONO = 'ui-monospace,"SF Mono","Cascadia Mono","Segoe UI Mono",Menlo,Consolas,"Liberation Mono",monospace'
-const SHAPES = '<rect class="lg-ink" x="8" y="8" width="36" height="8"/><path class="lg-flag" d="M8 24H56L48 32L56 40H8Z"/><rect class="lg-ink" x="8" y="48" width="28" height="8"/>'
+const MARK_PATH = 'M 51 14.5 V 36 C 51 46 52 54 57.5 59 C 50.6 59 43.71 56.77 40.01 51.67 Q 34.7 55 28 55 Q 18.47 55 11.74 48.26 Q 5 41.53 5 32 Q 5 22.47 11.74 15.74 Q 18.47 9 28 9 Q 34.9 9 40.34 12.54 Q 40.74 11.48 41.61 10.61 Q 43.22 9 45.5 9 Q 47.78 9 49.39 10.61 Q 51 12.22 51 14.5 Z M 40 32 Q 40 27.03 36.49 23.51 Q 32.97 20 28 20 Q 23.03 20 19.51 23.51 Q 16 27.03 16 32 Q 16 36.97 19.51 40.49 Q 23.03 44 28 44 Q 32.97 44 36.49 40.49 Q 40 36.97 40 32 Z'
+const SHAPES = `<path class="lg-mark" d="${MARK_PATH}"/>`
 const PRIVACY = /\b[\da-f]{8}\b|\b[\da-f]{40}\b|\b[\da-f]{64}\b|(?<![A-Za-z])[A-Za-z]:[\\/]|\/home\/|\/Users\//i
 const NOW = 1_700_000_000_000
 const FIXTURE = `## Synthetic
@@ -226,12 +227,14 @@ const contrast = (foreground, background) => {
 
 test('every text colour passes 4.5:1 and every mark colour 3:1 on its surface in light and dark', t => {
   const text = ['ink', 'muted', 'accent', 'done', 'running', 'soon', 'alert', 'project', 'waiting-text']
-  const marks = ['waiting', 'accent', 'done', 'running', 'soon', 'alert', 'ink']
+  const marks = ['waiting', 'brand', 'accent', 'done', 'running', 'soon', 'alert', 'ink']
   const pairs = []
   assert.equal(light.waiting.toLowerCase(), '#9a7200', 'the light waiting flag uses the page mark colour')
   assert.equal(dark.waiting.toLowerCase(), '#f8b500', 'the dark waiting flag keeps its page mark colour')
   assert.equal(light['waiting-text'].toLowerCase(), '#715c1f', 'light waiting text has its separate readable colour')
   assert.equal(dark['waiting-text'].toLowerCase(), '#f8b500', 'dark waiting text has its readable colour')
+  assert.equal(light.brand.toLowerCase(), '#b36a00', 'the light logo uses its deepened amber')
+  assert.equal(dark.brand.toLowerCase(), '#f8b500', 'the dark logo is the waiting amber')
   for (const [mode, palette] of Object.entries({ light, dark })) {
     const automatic = valuesOf(tokenRules.find(rule => rule.selector.includes(':not(')))
     for (const name of [...text, ...marks, 'ground', 'surface', 'inset', 'on-accent']) assert.equal(automatic[name], dark[name], `system dark and explicit dark agree for ${name}`)
@@ -246,7 +249,7 @@ test('every text colour passes 4.5:1 and every mark colour 3:1 on its surface in
   t.diagnostic('Contrast minima (WCAG 2.x):\nmode | rule | minimum | token | required\n' + minima.map(pair => `${pair.mode} | ${pair.rule} | ${pair.ratio.toFixed(3)}:1 | ${pair.token} | ${pair.threshold}:1`).join('\n'))
   for (const pair of pairs) assert.ok(pair.ratio >= pair.threshold, `${pair.mode}: --${pair.token} on --${pair.surface} is ${pair.ratio.toFixed(3)}:1, requires ${pair.threshold}:1`)
   // Frame, line and line-strong draw decorative rules and the empty part of a bar, not information.
-  const markOnly = new Set(['waiting', 'frame', 'line', 'line-strong'])
+  const markOnly = new Set(['waiting', 'brand', 'frame', 'line', 'line-strong'])
   for (const { name, html } of renders()) {
     for (const rule of styleRules(html).filter(rule => !isTokenRule(rule))) {
       for (const { property, value } of rule.declarations.filter(item => item.property === 'color')) {
@@ -318,13 +321,13 @@ test('the page embeds its fonts, makes no font request and allows only font-src 
 const attribute = (tag, name) => new RegExp(`\\b${name}=("|')([\\s\\S]*?)\\1`, 'i').exec(tag)?.[2]
 const logoSvg = html => /<svg\b(?=[^>]*\bclass="mark")[^>]*>[\s\S]*?<\/svg>/.exec(html)?.[0]
 const assertShapes = (svg, where) => {
-  assert.match(svg, /\bviewBox="0 0 64 64"/, `${where}: the Signal Row uses its 64 grid`)
+  assert.match(svg, /\bviewBox="0 0 64 64"/, `${where}: the Bubble a mark uses its 64 grid`)
   const shapes = (svg.match(/<(?:rect|path)\b[^>]*\/>/g) ?? []).join('')
-  assert.equal(shapes, SHAPES, `${where}: the Signal Row has its two ink bars and flag`)
-  assert.doesNotMatch(svg, /class="m[1-4]"/, `${where}: the old four-square mark is gone`)
+  assert.equal(shapes, SHAPES, `${where}: the Bubble a mark is its one path`)
+  assert.doesNotMatch(svg, /class="m[1-4]"|lg-ink|lg-flag/, `${where}: the four-square and Signal Row marks are gone`)
 }
 
-test('the header and favicon show the Signal Row logo in light and dark', () => {
+test('the header and favicon show the Bubble a logo in light and dark', () => {
   assertShapes(boardMark, 'the shared board mark')
   for (const lang of ['en', 'zh-TW', 'zh-CN']) {
     for (const { name, html } of renders(lang)) {
@@ -340,7 +343,7 @@ test('the header and favicon show the Signal Row logo in light and dark', () => 
       assert.match(html, /<title>[^<]*Agent Board<\/title>/, `${where}: the browser title names Agent Board`)
       assert.doesNotMatch(html, /class="m[1-4]"|\.m[1-4]\s*\{/, `${where}: no old mark shapes or rules`)
       const rules = styleRules(html)
-      for (const [selector, value] of [['.lg-ink', 'var(--ink)'], ['.lg-flag', 'var(--waiting)']]) assert.ok(rules.some(rule => rule.selector === selector && rule.declarations.some(item => item.property === 'fill' && item.value === value)), `${where}: ${selector} follows the theme token`)
+      for (const [selector, value] of [['.lg-mark', 'var(--brand)']]) assert.ok(rules.some(rule => rule.selector === selector && rule.declarations.some(item => item.property === 'fill' && item.value === value)), `${where}: ${selector} follows the theme token`)
       if (name === 'grouped') {
         const fresh = /<div\b(?=[^>]*\bid="fresh-mark")[^>]*>([\s\S]*?)<\/div>/.exec(html)?.[1]
         assert.ok(fresh, `${where}: the fresh page keeps its logo`)
@@ -358,8 +361,8 @@ test('the header and favicon show the Signal Row logo in light and dark', () => 
       assert.ok(faviconStyle, `${where}: the favicon includes its theme colours`)
       assert.match(faviconStyle, /@media\s*\(prefers-color-scheme:dark\)/, `${where}: the tab logo follows dark mode`)
       const faviconRules = cssRules(faviconStyle)
-      for (const [mode, palette, tab, ink] of [['light', light, '#dee1e6', 'rgb(31,35,36)'], ['dark', dark, '#202124', 'rgb(230,228,220)']]) {
-        for (const [selector, token, expected] of [['.lg-ink', 'ink', ink], ['.lg-flag', 'waiting', `rgb(${channels(palette.waiting).join(',')})`]]) {
+      for (const [mode, palette, tab] of [['light', light, '#dee1e6'], ['dark', dark, '#202124']]) {
+        for (const [selector, token, expected] of [['.lg-mark', 'brand', `rgb(${channels(palette.brand).join(',')})`]]) {
           const rule = faviconRules.find(item => item.selector === selector && (mode === 'dark') === item.ancestors.some(ancestor => ancestor.includes('prefers-color-scheme:dark')))
           const fill = rule?.declarations.find(item => item.property === 'fill')?.value
           assert.equal(fill, expected, `${where}: ${mode} favicon ${token} matches its colour token`)
@@ -369,4 +372,38 @@ test('the header and favicon show the Signal Row logo in light and dark', () => 
       assert.doesNotMatch(html, PRIVACY, `${where}: the full output satisfies the privacy contract`)
     }
   }
+})
+
+// docs/images/brand/ is drawn by docs/preview/render.ts; these are the files it wrote.
+test('the brand lockups and the mark are paths only, on a transparent background, in light and dark', () => {
+  const brand = name => readFileSync(new URL(`../docs/images/brand/${name}`, import.meta.url), 'utf8')
+  const grounds = { light: '#ffffff', dark: '#0d1117' }
+  for (const [mode, palette] of Object.entries({ light, dark })) {
+    const svg = brand(`agent-board-lockup-${mode}.svg`)
+    const where = `the ${mode} lockup`
+    assert.match(svg, /^<svg xmlns="http:\/\/www\.w3\.org\/2000\/svg"[^>]*\brole="img"[^>]*\baria-label="agent-board"/, `${where}: one labelled picture`)
+    assert.ok(svg.includes(`d="${MARK_PATH}"`), `${where}: carries the page's mark`)
+    const elements = [...svg.matchAll(/<([a-z]+)\b/gi)].map(match => match[1])
+    assert.deepEqual([...new Set(elements)].sort(), ['g', 'path', 'svg', 'title'], `${where}: paths only, no text, font, image or background`)
+    const fills = new Set([...svg.matchAll(/\bfill="([^"]+)"/g)].map(match => match[1].toLowerCase()))
+    assert.deepEqual([...fills].sort(), [palette.brand, palette.ink].map(colour => colour.toLowerCase()).sort(), `${where}: the mark and hyphen in brand, the word in ink`)
+    assert.doesNotMatch(svg, /stroke|font|<rect|<image|background/i, `${where}: no stroke, font or background`)
+    for (const colour of fills) assert.ok(contrast(colour, grounds[mode]) >= 3, `${where}: ${colour} on GitHub's ${mode} ground is ${contrast(colour, grounds[mode]).toFixed(3)}:1, requires 3:1`)
+    assert.doesNotMatch(svg, PRIVACY, `${where}: satisfies the privacy contract`)
+  }
+  const mark = brand('agent-board-mark.svg')
+  assert.match(mark, /\bviewBox="0 0 64 64"/, 'the mark file uses the 64 grid')
+  assert.deepEqual([...mark.matchAll(/<path\b[^>]*\bd="([^"]+)"/g)].map(match => match[1]), [MARK_PATH], 'the mark file is the one mark path')
+  assert.doesNotMatch(mark, /<(?:text|rect|image)\b|font|stroke/i, 'the mark file has no text, background or stroke')
+  const style = /<style>([\s\S]*?)<\/style>/.exec(mark)?.[1] ?? ''
+  assert.match(style, /^path\{fill:#B36A00\}@media \(prefers-color-scheme:dark\)\{path\{fill:#F8B500\}\}$/, 'the mark file follows the reader\'s theme')
+  // The README's title: the same lockup, coloured by its own style so it follows the reader's theme.
+  const logo = brand('agent-board-logo.svg')
+  assert.ok(logo.includes(`d="${MARK_PATH}"`), 'the theme-following lockup carries the page\'s mark')
+  assert.deepEqual([...new Set([...logo.matchAll(/<([a-z]+)\b/gi)].map(match => match[1]))].sort(), ['g', 'path', 'style', 'svg', 'title'], 'the theme-following lockup is paths and its style only')
+  const paths = [...logo.matchAll(/<path\b[^>]*>/g)].map(match => /\bclass="([^"]+)"/.exec(match[0])?.[1])
+  assert.deepEqual(paths, ['brand', 'ink', 'brand'], 'the theme-following lockup: the mark and the hyphen in brand, the word in ink')
+  assert.doesNotMatch(logo, /\bfill="|stroke|font|<rect|<image|background/i, 'the theme-following lockup takes its colours from its style alone')
+  assert.equal(/<style>([\s\S]*?)<\/style>/.exec(logo)?.[1], `.ink{fill:${light.ink}}.brand{fill:${light.brand}}@media (prefers-color-scheme:dark){.ink{fill:${dark.ink}}.brand{fill:${dark.brand}}}`, 'the theme-following lockup uses the lockups\' colours')
+  assert.doesNotMatch(logo, PRIVACY, 'the theme-following lockup satisfies the privacy contract')
 })
