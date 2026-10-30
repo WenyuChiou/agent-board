@@ -205,3 +205,29 @@ If you stop before the work is done, push your branch, then:
 gh issue comment <N> -R WenyuChiou/agent-board --body "Handover: <branch>, done: …, left: …, checks run: …"
 gh issue edit <N> -R WenyuChiou/agent-board --remove-label claimed
 ```
+
+## 11. Review and merge someone else's pull request
+
+With write access to this repository you may also review and merge pull requests you did not write ([CONTRIBUTING.md](../CONTRIBUTING.md#pull-requests) rules 8 and 9). If the owner names you in [Roles](../CONTRIBUTING.md#roles), a code-review subagent you run may also approve your own pull request, under the conditions in rule 8. In this step `<PR>` is the pull request you are reviewing, and `<N>` is each linked issue. Take one marked `Ready for review <sha>` that nobody is reviewing, and say so first:
+
+```sh
+gh pr list -R WenyuChiou/agent-board --state open
+gh pr view <PR> -R WenyuChiou/agent-board --json headRefOid,body,isDraft
+gh api repos/WenyuChiou/agent-board/issues/<PR>/comments --paginate
+gh pr comment <PR> -R WenyuChiou/agent-board --body "Reviewing: <GitHub login or agent>"
+gh pr diff <PR> -R WenyuChiou/agent-board
+gh api repos/WenyuChiou/agent-board/pulls/<PR>/reviews --paginate
+gh api repos/WenyuChiou/agent-board/pulls/<PR>/comments --paginate
+gh pr checks <PR> -R WenyuChiou/agent-board
+```
+
+Read the diff against the issues on the body's first lines, and each P0 or P1 finding from Greptile or Codex. If either bot did not review this head (a fork, a failed or stuck run), run a code review of the head yourself, such as a local Codex run or your agent's code-review subagent, and post its result on the pull request. Then post one verdict with all findings at once: `Review: APPROVE <full head sha> by <login>` with what you verified, or `Review: REQUEST CHANGES <full head sha> by <login>` with each finding by file and line. Your own agent, lane or subagent cannot approve your own pull request, except under rule 8's conditions for the maintainer and for collaborators named in [Roles](../CONTRIBUTING.md#roles); for that exception, both bots must have reviewed the current head or a head it moved from only by a merge of `main` without conflicts and with nothing else in the merge commit; a substitute review cannot replace either bot.
+
+Merge only when the latest verdict is an approval satisfying rule 8 for the current head (or for a head the branch has since moved from only by a clean merge of `main`, without conflicts or anything else in the merge commit), and impact planning, CI validation, every selected CI job, every other applicable workflow in `.github/workflows/`, and the `Greptile Review` check have succeeded on the current head; when Greptile did not review that head, your own code review posted for it stands in for that check (rule 9). Skipped, neutral, cancelled or missing selected checks are not passes; only groups explicitly omitted as unaffected by the plan may be skipped (rule 9):
+
+```sh
+gh pr merge <PR> -R WenyuChiou/agent-board --squash --match-head-commit <head sha>
+gh issue comment <N> -R WenyuChiou/agent-board --body "Fixed by #<PR>, merged as <merge sha>. <evidence>"
+```
+
+GitHub deletes a merged branch from this repository. A governance pull request also needs the owner's approval quoted in its body (rule 12), and a release pull request stays with the maintainer ([Releases](../CONTRIBUTING.md#releases)).
