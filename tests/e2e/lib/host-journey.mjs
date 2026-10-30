@@ -132,7 +132,7 @@ export const setup = async (f, args = [], source = repoRoot) => {
 
 export const preview = async (f, ids, source = repoRoot) => {
   const before = snapshot(f.home)
-  const plan = await setup(f, [], source)
+  const plan = await setup(f, ['--json'], source)
   assert.deepEqual(plan.targets, ids)
   assert.equal(plan.applied, false)
   assert.ok(plan.plans.every(target => target.changes.length > 0))
@@ -141,7 +141,7 @@ export const preview = async (f, ids, source = repoRoot) => {
 }
 
 export const apply = async (f, ids, source = repoRoot) => {
-  const plan = await setup(f, ['--apply'], source)
+  const plan = await setup(f, ['--apply', '--json'], source)
   assert.deepEqual(plan.targets, ids)
   assert.equal(plan.applied, true)
   for (const target of plan.plans) for (const change of target.changes) assert.ok(existsSync(change.file), `${target.agent}: ${change.file} exists`)
@@ -187,7 +187,7 @@ export const assertBlocks = (f, ids) => {
 
 export const repeatApply = async f => {
   const before = snapshot(f.home)
-  const plan = await setup(f, ['--apply'])
+  const plan = await setup(f, ['--apply', '--json'])
   const after = snapshot(f.home)
   return { plan, before, after }
 }
