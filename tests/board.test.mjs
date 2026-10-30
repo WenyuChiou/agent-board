@@ -1350,7 +1350,8 @@ test('CLI ticks rotate a full journal, chat reads the last part, and archive ret
   // Padding precedes the saved entry so its task still ends at the end of the file.
   const earlier = `${'x'.repeat(1048576 - Buffer.byteLength(entry) - 1)}\n${entry}`
   assert.equal(Buffer.byteLength(earlier), 1048576)
-  const retried = chatRun(['--keys', 'a'], { file: () => file, beside: { [archive]: earlier }, change, inspect })
+  const savedEntry = entry.split('\n\n').find(part => part.includes('### Synthetic work'))
+  const retried = chatRun(['--keys', 'a'], { file: () => file, beside: { [archive]: earlier, 'progress-archive.pending': JSON.stringify({ entries: [savedEntry] }) + '\n' }, change, inspect })
   assert.equal(retried.status, 0, retried.stdout + retried.stderr)
   assert.equal(retried.files[archive], earlier)
   assert.ok(!retried.files['progress.md'].includes('### Synthetic work'))

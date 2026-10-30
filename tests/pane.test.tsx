@@ -4837,7 +4837,7 @@ test('/progress tidy twice on the same day with one same-title same-steps done b
 test('the pane archive twice on the same day with one same-title same-steps done block each time: the archive ends with two entries', async ($, on) => {
   const block = (session: string): string => `<!-- auto session=${session} agent=codex state=done updated=2026-10-16T08:00:00Z -->\n### Synthetic twin\n- [x] Finished\n<!-- /auto session=${session} -->\n`
   const world: World = { files: new Map([[FILE, `# Progress\n\n## Synthetic\n${block('a1b2c395')}`]]), mtime: 1, hasTasks: true, store: { lang: 'en', autoConnectOff: true } }
-  engineBeneath(on, world)
+  const clock = engineBeneath(on, world)
   await $.session.start({ cwd: '/work/synthetic', surface: 'desktop', isInteractive: true })
   const ui1 = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
   try {
@@ -4848,6 +4848,7 @@ test('the pane archive twice on the same day with one same-title same-steps done
   expect(world.files.get(ARCHIVE)?.split('### Synthetic twin').length).toBe(2)
   world.files.set(FILE, `# Progress\n\n## Synthetic\n${block('a1b2c396')}`)
   world.mtime += 1
+  await clock.advance(5000)
   const ui2 = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
   try {
     await ui2.press({ key: 'section::recent' })
