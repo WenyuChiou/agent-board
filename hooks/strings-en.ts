@@ -484,7 +484,7 @@ export const EN: Strings = {
   boardKeyOptionsSend: (n: number): string => `1–${n} send answer`,
   boardKeyArchiveDone: 't archive now',
   boardAnswerCopies: (keys: string): string => `${keys} copies the answer.`,
-  boardAnswerCopiesTo: (keys: string, agent: string): string => `${keys} copies the answer — paste it in ${agent}, then h.`,
+  boardAnswerCopiesTo: (keys: string, agent: string): string => `${keys} copies the answer — paste it in ${agent}, then press h to clear it here.`,
   boardAnswerSends: (keys: string, agent: string): string => `${keys} sends the answer to ${agent}.`,
   boardAnswerIn: (agent: string): string => `Answer in ${agent} for a longer reply.`,
   boardAnswerInCopy: (agent: string, command: string): string => `Answer in ${agent} — c copies: ${command}`,
