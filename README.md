@@ -1,4 +1,4 @@
-<h1 align="center">Agent Board</h1>
+<h1 align="center"><img alt="Agent Board" src="docs/images/brand/agent-board-logo.svg" width="360"></h1>
 
 <p align="center"><b>See what every AI coding agent is doing, and answer the one that needs you, from one board.</b></p>
 
@@ -34,10 +34,10 @@ With Node.js 22+, in any terminal:
 ```sh
 npx @wenyuchiou/agent-board setup
 npx @wenyuchiou/agent-board setup --apply
-npx @wenyuchiou/agent-board --serve
+npx @wenyuchiou/agent-board
 ```
 
-The first command finds the agents on this computer and shows what setup would change, writing nothing. The second makes the change, and the third opens the board's page. To set up one agent only, add `--agent` and its name, such as `--agent codex`. More in the [setup guide](docs/SETUP.md#install-with-npm).
+The first command finds the agents on this computer and shows what setup would change, writing nothing. The second makes the change, and the third opens the board where you are: in its own window on a desktop, the live terminal board over SSH, or text for agents. In an agent's chat, `/agent-board` opens the same board. To stop the board's page, run `npx @wenyuchiou/agent-board stop`. For the shorter `agent-board` command, install it once with `npm install -g @wenyuchiou/agent-board`. To set up one agent only, add `--agent` and its name, such as `--agent codex`. More in the [setup guide](docs/SETUP.md#install-with-npm).
 
 Scan the QR code from `npx @wenyuchiou/agent-board --serve --lan` with a phone on the same Wi-Fi. Use it only on a network you trust: the link is not encrypted and anyone who has it can open the page. Details: [the board's page](#the-boards-page).
 
@@ -212,6 +212,14 @@ The page listens on 127.0.0.1 only, and its address carries a random key: anythi
 
 Each agent's hooks write what its session is doing into its own block of one local `progress.md` (a fresh install uses `~/.agent-board/progress.md`). Task steps come only from the agent's own reports, and no private conversation is read. The board reads the file without calling a model; the optional Claude plugin can sum up turns with Claude's model, as [the guide says](docs/GUIDE.md#does-anything-leave-my-machine-what-does-it-cost). You can read and edit the file too: [the file format](docs/FORMAT.md). In English, 繁體中文 and 简体中文.
 
+### Three Core Pillars
+
+- **One Markdown file**: every agent's progress goes into one plain progress.md that you can read and edit; no database.
+- **Every agent on one board**: Claude Code, Codex, Antigravity, Cursor, OpenCode and the other connected agents, side by side.
+- **Questions first**: the questions your agents are waiting on come first, and you answer them from the board; a connected session receives the answer.
+
+For architectural positioning and coexistence with memory tools, see the [Architecture Positioning Guide](docs/dev/architecture-positioning.md).
+
 ## Troubleshooting
 
 Start with the doctor. It checks what the installer wrote for one agent and changes nothing:
@@ -225,7 +233,7 @@ Use the agent's own name after `--agent` (the doctor keeps its old name for ever
 | You see | Try |
 |---|---|
 | An agent is not on the board | Start a new session of it; one that was already open is not connected. Codex also needs its hooks trusted in `/hooks`. |
-| Nothing changed after installing | Run `npx @wenyuchiou/agent-board setup` again without `--apply` (from a checkout: `node scripts/setup-agent.mjs`) and read its conflicts and `adapter-pending` lines; edited files are left alone and listed there. |
+| Nothing changed after installing | Run `npx @wenyuchiou/agent-board setup --json` again without `--apply` (from a checkout: `node scripts/setup-agent.mjs --json`) and read its conflicts and `adapter-pending` lines; edited files are left alone and listed there. |
 | An old version is still running | A running session keeps the version it loaded: start a new one. To update, see [the guide](docs/GUIDE.md#update-and-uninstall). |
 | An agent shows up twice | It may be connected both ways: by the Claude plugin's `/progress connect` and by setup. `/progress connect status` lists what the plugin connected; remove one with `/progress connect remove` or `--codex-remove --agent <name>`. |
 | A question will not go away | Answer it in its own chat, then press **Already answered, hide** (`h`). After 3 days it moves into **Earlier unanswered questions**, and after 7 days into **Older unanswered questions**. |

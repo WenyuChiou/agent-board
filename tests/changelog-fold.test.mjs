@@ -5,10 +5,11 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, 
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { foldText, fragmentIssue, orderFragments, parseArgs, parseFragment, runFold } from '../scripts/changelog-fold.mjs'
+import { ambitionQuestions, foldText, fragmentIssue, orderFragments, parseArgs, parseFragment, runFold, stripTests } from '../scripts/changelog-fold.mjs'
 
 const script = fileURLToPath(new URL('../scripts/changelog-fold.mjs', import.meta.url))
-const entry = issue => `- **Synthetic entry (#${issue}).** A synthetic result.\n  Tests: \`a synthetic result has coverage\`.\n`
+const summary = issue => `- **Synthetic entry (#${issue}).** A synthetic result.`
+const entry = issue => `${summary(issue)}\n  Tests: \`a synthetic result has coverage\`.\n`
 const fragment = (issue, slug = 'synthetic') => ({ path: `changelog.d/${issue}-${slug}.md`, text: entry(issue) })
 const history = '## 1.0.0 — 2026-01-01\n\nHistorical bytes.  \n\n### A subsection\n\nNo final newline'
 const text = '# Changelog\n\n## Unreleased\n\n' + entry(10) + '\n' + history
@@ -28,9 +29,49 @@ test('the fold puts fragments newest issue first above the Unreleased entries', 
   const result = fold({ fragments })
   assert.deepEqual(result.fragments, ['changelog.d/42-alpha.md', 'changelog.d/42-zeta.md', 'changelog.d/2-synthetic.md'])
   assert.equal(result.unreleasedCount, 1)
-  assert.equal(result.text, '# Changelog\n\n## 1.1.0 — 2026-02-01\n\n' + entry(42).trim() + '\n\n' + entry(42).trim() + '\n\n' + entry(2).trim() + '\n\n' + entry(10).trim() + '\n\n' + history)
+  assert.equal(result.text, '# Changelog\n\n## 1.1.0 — 2026-02-01\n\n' + summary(42) + '\n\n' + summary(42) + '\n\n' + summary(2) + '\n\n' + summary(10) + '\n\n' + history)
   assert.deepEqual(fragments.map(item => item.path), ['changelog.d/2-synthetic.md', 'changelog.d/42-zeta.md', 'changelog.d/42-alpha.md'])
   assert.ok(!result.text.includes('## Unreleased'))
+})
+
+test('a folded section keeps each entry and leaves out its Tests line and trailing Tests sentence', () => {
+  const fragments = [
+    { path: 'changelog.d/42-separate.md', text: '- Separate result (#42).\n  Tests: `separate coverage`.\n' },
+    { path: 'changelog.d/43-trailing.md', text: '- Trailing result (#43). Tests: `trailing coverage`.\n' },
+  ]
+  const input = '# Changelog\r\n\r\n## Unreleased\r\n\r\n- Kept result (#10)! Test: `kept coverage`.\r\n  Tests: `legacy coverage`.\r\n\r\n' + history.replaceAll('\n', '\r\n')
+  const result = fold({ text: input, fragments }).text
+  assert.equal(result, '# Changelog\r\n\r\n## 1.1.0 — 2026-02-01\r\n\r\n- Trailing result (#43).\r\n\r\n- Separate result (#42).\r\n\r\n- Kept result (#10)!\r\n\r\n' + history.replaceAll('\n', '\r\n'))
+  assert.doesNotMatch(result, /Tests?:/)
+  assert.doesNotMatch(result, /(?<!\r)\n/)
+})
+
+test('a wrapped Tests list is left out whole, and one that more of the entry follows is kept as written', () => {
+  const cases = [
+    ['- Wrapped (#44).\n  Tests: `a title that\n  wraps`, `a second\n  title`.\n\n- Next (#45).\n', '- Wrapped (#44).\n\n- Next (#45).\n'],
+    ['- Inline (#46). Tests: "one" and\n  "two".\n## 1.0.0\n', '- Inline (#46).\n## 1.0.0\n'],
+    ['- Each ends (#48)! Test: `a`.\n- Question (#49)? Tests: `b`.\n- Paren (#50) Tests: `c`.\n', '- Each ends (#48)!\n- Question (#49)?\n- Paren (#50)\n'],
+    ['- Mid (#47). Tests: "a" and "b". This is part\n  of #47.\n', '- Mid (#47). Tests: "a" and "b". This is part\n  of #47.\n'],
+    ['- Quote (#51).\n  Tests: `shows an unmatched " in output`.\n- Next (#52).\n  Tests: `another title`.\n', '- Quote (#51).\n- Next (#52).\n'],
+    ['- Same line (#53).\n  Tests: `one title`. This sentence is part of the entry.\n', '- Same line (#53).\n  Tests: `one title`. This sentence is part of the entry.\n'],
+    ['- Code after (#54).\n  Tests: `one title`.\n  `progress.md` remains unchanged.\n', '- Code after (#54).\n  Tests: `one title`.\n  `progress.md` remains unchanged.\n'],
+    ['- Reason (#55). Tests: `a` and `b` (the CI exposed this race).\n', '- Reason (#55). Tests: `a` and `b` (the CI exposed this race).\n'],
+    ['- Docs (#56).\n  Tests: none (documentation only).\n', '- Docs (#56).\n'],
+    ['- Tick (#57).\n  Tests: "shows a ` in output"\n  "This sentence is part of the entry."\n- Next (#58).\n', '- Tick (#57).\n  Tests: "shows a ` in output"\n  "This sentence is part of the entry."\n- Next (#58).\n'],
+    ['- Soft break (#59).\n  Tests: `a first title`\n  `a second title`.\n', '- Soft break (#59).\n  Tests: `a first title`\n  `a second title`.\n'],
+    ['Ordinary text mentions tests within a sentence.\nTest-only change.\nA colon Test: remains.\n', 'Ordinary text mentions tests within a sentence.\nTest-only change.\nA colon Test: remains.\n'],
+    ['Keep.\n  Tests: `final title`', 'Keep.\n'],
+    ['Keep.\n  Tests: final line', 'Keep.\n  Tests: final line'],
+  ]
+  for (const eol of ['\n', '\r\n']) {
+    for (const [input, kept] of cases) assert.equal(stripTests(input.replaceAll('\n', eol)), kept.replaceAll('\n', eol))
+  }
+})
+
+test('a fragment without a Tests line is still refused', () => {
+  const missing = { path: 'changelog.d/42-missing.md', text: '- Missing coverage (#42).\n' }
+  assert.throws(() => parseFragment(missing), /no Tests: line/)
+  assert.throws(() => fold({ fragments: [missing] }), /no Tests: line/)
 })
 
 test('the fold keeps everything below the new version byte for byte', () => {
@@ -73,7 +114,7 @@ test('the fold leaves one blank line between sections with mixed line endings', 
     assert.ok(result.text.endsWith('\r\n\r\n' + history.replaceAll('\n', '\r\n')))
   }
   const result = fold({ text: '# Changelog\n\n## Unreleased\n\n' + entry(10) + '\n\n' })
-  assert.ok(result.text.endsWith(entry(10)))
+  assert.ok(result.text.endsWith(summary(10) + '\n'))
   assert.equal(result.text.endsWith('\n\n'), false)
 })
 
@@ -138,4 +179,16 @@ test('the fold validates arguments before changing files', t => {
   const hugeIssue = '9'.repeat(400)
   assert.equal(fold({ fragments: [fragment(42), fragment(hugeIssue)] }).fragments[0], `changelog.d/${hugeIssue}-synthetic.md`)
   assert.deepEqual(orderFragments([parseFragment(fragment(2)), parseFragment(fragment(100))]).map(item => item.issue), ['100', '2'])
+})
+
+test('the fold with --write ends with the three next-version questions and a dry run prints none', t => {
+  const cwd = fixture(t)
+  const dry = []
+  runFold({ cwd, argv: ['1.1.0', '--date', '2026-02-01'], log: line => dry.push(line) })
+  assert.ok(!dry.join('\n').includes('Before planning'))
+  const lines = []
+  runFold({ cwd, argv: ['1.1.0', '--date', '2026-02-01', '--write'], log: line => lines.push(line) })
+  assert.equal(ambitionQuestions.length, 3)
+  assert.deepEqual(lines.slice(-4), ['\nBefore planning the next version, answer in its plan:', ...ambitionQuestions.map((question, index) => `${index + 1}. ${question}`)])
+  assert.match(lines.join('\n'), /goal sits above[^]*hard number[^]*other field/)
 })

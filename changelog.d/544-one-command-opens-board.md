@@ -1,0 +1,2 @@
+- **One command opens the board where you are (#544).** `agent-board` opens the page in its own window on a desktop, the live board in the terminal over SSH, and prints text for agents and scripts; `agent-board stop` stops the page.
+  Tests: `the board command picks text, the terminal board or the page from where it runs`, `a second agent-board reuses the running page and says it was already running`, `agent-board stop stops this file's page and says so, and says when none is running`, `an agent or a pipe running agent-board gets today's text and no window`.
