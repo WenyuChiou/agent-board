@@ -23,6 +23,9 @@ export const HOOK_TIMEOUTS: Record<string, { timeout: number; events?: Record<st
   opencode: { timeout: 3000 },
   openclaw: { timeout: 3000 },
   deepseek: { timeout: 3000 },
+  dot: { timeout: 5000 },
+  duet: { timeout: 5000 },
+  bot: { timeout: 5000 },
 }
 export const hookTimeout = (agent: string, event = ''): number => {
   const policy = HOOK_TIMEOUTS[agent]

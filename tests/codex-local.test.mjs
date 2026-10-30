@@ -5721,3 +5721,23 @@ test('Antigravity subagent report with origin run and parent writes run block an
   assert.match(content, /parent=parent-session-12345678/)
   assert.match(content, /Child Subagent Task/)
 }))
+
+test('dot, duet, and bot agents report status and write independent blocks to progress.md', () => fixture(f => {
+  f.install('--agent', 'codex', '--apply')
+  for (const agent of ['dot', 'duet', 'bot']) {
+    const session = `${agent}-session-12345678`
+    const report = f.command(['--codex-report', '--agent', agent, '--session', session], {
+      title: `${agent.toUpperCase()} Integration Task`,
+      state: 'working',
+      steps: [`- [x] Initialized ${agent}`, '- [?] Confirm parameters?'],
+    })
+    assert.equal(report.status, 0, report.stderr)
+  }
+  const content = readFileSync(f.progress, 'utf8')
+  assert.match(content, /agent=dot/)
+  assert.match(content, /agent=duet/)
+  assert.match(content, /agent=bot/)
+  assert.match(content, /DOT Integration Task/)
+  assert.match(content, /DUET Integration Task/)
+  assert.match(content, /BOT Integration Task/)
+}))

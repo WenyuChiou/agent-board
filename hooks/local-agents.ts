@@ -36,8 +36,8 @@ export const encodedCommandText = (encoded: string): string => {
   return text
 }
 
-export type LocalAgent = 'codex' | 'cursor' | 'opencode' | 'gemini' | 'grok' | 'muse' | 'hermes' | 'openclaw' | 'antigravity' | 'deepseek'
-export const localAgents: LocalAgent[] = ['codex', 'cursor', 'opencode', 'gemini', 'grok', 'muse', 'hermes', 'openclaw', 'antigravity', 'deepseek']
+export type LocalAgent = 'codex' | 'cursor' | 'opencode' | 'gemini' | 'grok' | 'muse' | 'hermes' | 'openclaw' | 'antigravity' | 'deepseek' | 'dot' | 'duet' | 'bot'
+export const localAgents: LocalAgent[] = ['codex', 'cursor', 'opencode', 'gemini', 'grok', 'muse', 'hermes', 'openclaw', 'antigravity', 'deepseek', 'dot', 'duet', 'bot']
 export const statusEvents: Partial<Record<LocalAgent, Record<string, string>>> = {
   gemini: { SessionStart: 'waiting', BeforeAgent: 'working', AfterAgent: 'waiting', SessionEnd: 'ended' },
   grok: { SessionStart: 'waiting', UserPromptSubmit: 'working', Stop: 'waiting', SessionEnd: 'ended' },
