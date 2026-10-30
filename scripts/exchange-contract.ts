@@ -1,7 +1,9 @@
 // This optional contract carries only text a person or agent explicitly submits.
 // It is separate from turn reporting, which may contain a whole conversation.
 import type { Strings } from '../hooks/i18n'
-export type Binding = { version: 1; agent: 'codex' | 'dot'; session: string; id: string }
+export const EXCHANGE_AGENTS = ['claude', 'codex', 'cursor', 'opencode', 'gemini', 'grok', 'muse', 'hermes', 'openclaw', 'antigravity', 'deepseek', 'dot', 'duet', 'bot'] as const
+export type ExchangeAgent = typeof EXCHANGE_AGENTS[number]
+export type Binding = { version: 1; agent: ExchangeAgent; session: string; id: string }
 export type Command = { version: 1; id: string; binding: string; agent: string; session: string; text: string; turn: string }
 export type Receipt = { version: 1; id: string; binding: string; status: 'uncertain' | 'delivered' | 'rejected' }
 
@@ -26,7 +28,7 @@ const token = (value: unknown): string =>
 export const bindingOf = (value: unknown): Binding => {
   const one = record(value)
   keys(one, ['version', 'agent', 'session', 'id'])
-  if (one.version !== 1 || (one.agent !== 'codex' && one.agent !== 'dot')) fail('UNSUPPORTED_BINDING')
+  if (one.version !== 1 || typeof one.agent !== 'string' || !EXCHANGE_AGENTS.includes(one.agent as ExchangeAgent)) fail('UNSUPPORTED_BINDING')
   return { version: 1, agent: one.agent as Binding['agent'], session: token(one.session), id: token(one.id) }
 }
 

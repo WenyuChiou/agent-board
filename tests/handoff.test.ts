@@ -79,7 +79,7 @@ test('turn digests retain an explicit handoff as a cancelled pointer without tre
 })
 
 for (const s of Object.values(STRINGS)) test(`handoff pointers preserve the recipient and count work only at its active owner in ${s.lang}`, () => {
-  for (const agent of ['claude', 'codex', 'antigravity', 'grok', 'opencode', 'openclaw', 'deepseek', 'cursor', 'gemini', 'muse', 'hermes', 'dot', 'custom-agent']) {
+  for (const agent of ['claude', 'codex', 'antigravity', 'grok', 'opencode', 'openclaw', 'deepseek', 'cursor', 'gemini', 'muse', 'hermes', 'dot', 'duet', 'bot', 'custom-agent']) {
     const base = { ...emptyMirror('source-a', 'demo', NOW, '', agent), title: 'Source work' }
     const handed = applyTaskUpdate(applyTaskCreate(base, { subject: 'Finish export' }, '1', NOW), { taskId: '1', metadata: { handoffTo: 'Export session' } }, NOW)
     const source = { ...handed, state: stateOf(handed, false) }
