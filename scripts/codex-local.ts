@@ -357,7 +357,7 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
       const history = agent === 'codex' && mode === '--codex-report' && original === null ? findSessionFile(dirname(configs.codex!), session) : null
       const meta = history === null ? null : readSessionMeta(history, session)
       const origin = withSignal(original, cleanSignal(run) ?? (meta === null ? undefined : codexSignal(true, history, meta)))
-      const isRun = isStrongRun(origin) && mode !== '--codex-report' && agent === 'codex'
+      const isRun = isStrongRun(origin) && agent === 'codex'
       const bytes = isRun ? Buffer.alloc(0) : readBytes(progress) ?? Buffer.alloc(0)
       const text = bytes.toString('utf8')
       const previous = original === null || mode === '--codex-report' || isRun ? original : boardConfirmedReport(text, original, owner)
