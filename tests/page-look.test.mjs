@@ -270,7 +270,7 @@ test('the page embeds its fonts, makes no font request and allows only font-src 
   assert.equal(light['font-sans'], SANS, 'the sans token starts with Atkinson and keeps the system stack')
   assert.equal(light['font-mono'], MONO, 'the mono token is the exact system stack')
   assert.match(FONT_LICENSE, /^Copyright 2020-2024 The Atkinson Hyperlegible Next Project Authors/)
-  assert.equal(FONT_LICENSE, readFileSync(new URL('../hooks/fonts/OFL.txt', import.meta.url), 'utf8'), 'the bundled license matches the license shipped beside the source')
+  assert.equal(FONT_LICENSE, readFileSync(new URL('../hooks/fonts/OFL.txt', import.meta.url), 'utf8').replace(/\r\n/g, '\n'), 'the bundled license matches the license shipped beside the source')
   const hashes = {
     400: '378aea0f5c1d179f4e0b5382c06bfc87571b98cfcc4fd1352bc979e2e2259c54',
     600: '4ab00275cc496a478fce7baafe89ed44af875acf57655dfd1183ff22bd23829a',
