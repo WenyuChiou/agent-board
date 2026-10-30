@@ -151,7 +151,7 @@ const readLog = (file: string): string => {
 // `scrub` hides what must not be sent on, in a reply, before its question is picked and cut.
 const pending = (scrub?: (text: string) => string, isFresh = !isViewQuestionRead) => {
   const files = inboxFiles.read(isFresh)
-  return peekInbox(files, readLog, scrub)
+  return peekInbox(files, readLog, scrub, s)
 }
 
 // The record last read, kept when the next read catches it half-written, and progress.md's

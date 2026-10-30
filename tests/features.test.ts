@@ -3,14 +3,14 @@ import { expect, test } from 'claude-code/testing'
 
 import type { ProgressMirror, ProgressPr } from '../types'
 import { askOf } from '../hooks/ask'
-import { boardItems, boardKey, boardScreen, boardText, CHAT_MAX, chatText, doneToday, emptyBoardState, fingerprint, fit, peekInbox, pinned, redact } from '../hooks/board'
+import { boardItems, boardKey, boardScreen, boardText, CHAT_MAX, chatText, doneToday, emptyBoardState, fingerprint, fit, peekInbox, pinned, redact, turnsFor } from '../hooks/board'
 import { addManualTask, countManualDone, HAND_KEPT_DONE_MS, isArchivable, isHandKeptMoveOn, manualTaskCount, mergeBlock, renderAutoBlock, scanBlocks, setManualStep, takeArchivable, takeManualDone, takeTask, upsertAutoBlock } from '../hooks/blocks'
 import { agentHooks, boardCommands, boardScript, COLLISION, DELETE, generatedFile, isNodeSupported, isReleased, isReleasedBoard, isSetupState, isWindowsHost, NODE_MIN, nodeVersionOf, openclawPlugin, openclawPrinted, openclawSavedBy, openclawTooOld, PROBLEM_ARGS, readConfig, RELEASE_PATHS, reportCommand, reporterPs1, reporterSh, setupAgents, setupLines, withFlatHook, withGroupedHook, withHermesHooks, withoutHermesHooks, withoutOurHooks, withoutSection } from '../hooks/connect'
 import { connectDataRoots, connectRecordPath, recoveryUnreadableCode } from '../hooks/connect-pure'
 import { boardRun } from '../hooks/board-commands'
 import { dashboardHtml } from '../hooks/dashboard'
 import { codexReport, putCodexBlock } from '../hooks/codex'
-import { answerKey, blockId, CLAIM_MS, claimAction, isBoardAnswer, isBoardTurn, isInboxFile, isTakenFile, isTextLog, isTranscriptPath, keepInboxDone, keepInboxFailed, MAX_TRIES, promptKey, readClaim, readTurn, takenName, transcriptTail, turnsToDigest } from '../hooks/inbox'
+import { answerKey, blockId, CLAIM_MS, claimAction, isBoardAnswer, isBoardTurn, isInboxFile, isQuestionStale, isTakenFile, isTextLog, isTranscriptPath, keepInboxDone, keepInboxFailed, MAX_TRIES, promptKey, readClaim, readTurn, takenName, transcriptTail, turnsToDigest } from '../hooks/inbox'
 import { applyDigest, clearAsked, clearBackgroundJobs, finishBackgroundJob, isAskingYou, isPersonsAnswer, isWork, lastQuestion, markAsked, parseDigest, replyData, requestData, startBackgroundJob, turnTools } from '../hooks/digest'
 import { ciFinished, prFromGh, prWords } from '../hooks/github'
 import { appendJournal, archiveEntryCount, countDay, journalLine, missingEntries, parseJournal, progressReport, unwrittenEntries } from '../hooks/journal'
@@ -1278,6 +1278,151 @@ test('the question a reply ends on: its last paragraph only, without code or mar
   // An underscore inside a word belongs to it (a name, a token); at the edge of one it is markdown.
   expect(lastQuestion('Should I rename `snake_case` to ghp_16C7e42F in CI?')).toBe('Should I rename snake_case to ghp_16C7e42F in CI?')
   expect(lastQuestion('Use _this_ or __that__, not my__name?')).toBe('Use this or that, not my__name?')
+})
+
+test('a reply that is JSON is not cut at its question mark and shown as a question', () => {
+  const answer = '{"text":"Done.","ask":"Ship it?"}'
+  const file = { name: 'codex-turn-1-1.json', body: JSON.stringify({ session_id: 's', cwd: '/w/app', last_assistant_message: answer }), at: 1 }
+  const pending = peekInbox([file], undefined, undefined, STRINGS.en)
+  expect(pending[0]?.text).toBe('Ship it?')
+  expect(pending[0]?.isQuestion).toBe(true)
+  expect(pending[0]?.text).not.toContain('"')
+  // Redaction of an unrelated JSON value must not make valid JSON into prose.
+  const withSecret = { ...file, body: JSON.stringify({ session_id: 's', cwd: '/w/app', last_assistant_message: '{"question":"Ship it?","token":"hunter2"}' }) }
+  const redacted = peekInbox([withSecret], undefined, text => redact(text, '/h'), STRINGS.en)[0]
+  expect(redacted?.text).toBe('Ship it?')
+  expect(redacted?.fullText).not.toContain('hunter2')
+  const ledger = observeQuestions(emptyQuestions(), [], null, [], NOW, true, 'fixture:json', undefined, redacted ? [redacted] : []).ledger
+  expect(JSON.stringify(ledger)).not.toContain('hunter2')
+  const escaped = { ...file, body: JSON.stringify({ session_id: 'escaped', cwd: '/w/app', last_assistant_message: '{"question":"Ship it\\u003f","\\u0074oken":"synthetic-secret"}' }) }
+  const safe = peekInbox([escaped], undefined, text => redact(text, '/h'), STRINGS.en)[0]
+  expect(safe?.text).toBe('Ship it?')
+  expect(safe?.fullText).toBe('Ship it?')
+  expect(safe?.fullText).not.toContain('synthetic-secret')
+  const captured = observeQuestions(emptyQuestions(), [], null, [], NOW, true, 'fixture:escaped-json', undefined, safe ? [safe] : []).ledger
+  expect(captured.records.length).toBe(1)
+  expect(JSON.stringify(captured)).not.toContain('synthetic-secret')
+  const selected = { ...file, body: JSON.stringify({ session_id: 'selected', cwd: '/w/app', last_assistant_message: '{"question":"Is token=synthetic-secret ready?"}' }) }
+  expect(peekInbox([selected], undefined, text => redact(text, '/h'), STRINGS.en)[0]?.fullText).not.toContain('synthetic-secret')
+})
+
+test("a JSON reply with a question field gives that field's question", () => {
+  expect(lastQuestion('\uFEFF  {\r\n  "question": " Which one, A or B? ",\r\n  "options": ["A", "B"]\r\n}  ')).toBe('Which one, A or B?')
+  expect(lastQuestion('{"question":" ","ask":4,"text":" Ship it? ","message":"Wrong?"}')).toBe('Ship it?')
+  expect(lastQuestion('{"question":{"text":"Nested?"},"ask":"Next?","text":"Wrong?"}')).toBe('Next?')
+  const keys = ['question', 'ask', 'text', 'message', 'reply', 'answer']
+  for (const key of keys) expect(lastQuestion(JSON.stringify({ [key]: 'Selected?' }))).toBe('Selected?')
+  expect(lastQuestion('{"question":"Done.","ask":"Wrong?"}')).toBeNull()
+})
+
+test('a JSON reply with no string field gives no question and the could-not-read line', () => {
+  const answers = ['{}', '{"question":null,"ask":3,"text":"  ","message":{"text":"Nested?"}}', '[{"question":"Nested?"}]']
+  for (const [i, answer] of answers.entries()) {
+    expect(lastQuestion(answer)).toBeNull()
+    const file = { name: `codex-turn-${i + 1}-1.json`, body: JSON.stringify({ session_id: `s${i}`, cwd: '/w/app', last_assistant_message: answer }), at: i + 1 }
+    for (const lang of LANGS) {
+      const pending = peekInbox([file], undefined, undefined, STRINGS[lang])
+      expect(pending[0]?.text).toBe(STRINGS[lang].turnUnreadable)
+      expect(pending[0]?.isQuestion).toBe(false)
+      expect(pending[0]?.hasSummary).toBe(true)
+      const view = buildView([], [], null, NOW, 0, {}, STRINGS[lang])
+      expect(boardText(view, pending, STRINGS[lang], { width: 120, isColor: false })).toContain(STRINGS[lang].turnUnreadable)
+    }
+  }
+  expect(STRINGS.en.turnUnreadable).toBe('Could not read this turn')
+})
+
+test('JSON scalars remain prose as written while objects and arrays without text are unreadable', () => {
+  const answers = ['42', 'true', 'false', 'null', '"Keep the quotes."', '"Ship it?"']
+  for (const [i, answer] of answers.entries()) {
+    const file = { name: `codex-turn-${i + 10}-1.json`, body: JSON.stringify({ session_id: `scalar${i}`, cwd: '/w/app', last_assistant_message: answer }), at: i + 10 }
+    const pending = peekInbox([file], undefined, undefined, STRINGS.en)[0]
+    if (!answer.includes('?')) expect(pending?.text).toBe(answer)
+    expect(pending?.fullText).toBe(answer)
+    expect(pending?.text).not.toBe(STRINGS.en.turnUnreadable)
+  }
+  expect(lastQuestion('"Ship it?"')).toBe('"Ship it?')
+  expect(parseDigest('TITLE: work\nASK: "Ship it?"')?.ask).toBe('"Ship it?"')
+  for (const answer of ['{}', '[]']) {
+    const file = { name: 'codex-turn-30-1.json', body: JSON.stringify({ session_id: 'structured', cwd: '/w/app', last_assistant_message: answer }), at: 30 }
+    const unreadable = peekInbox([file], undefined, undefined, STRINGS.en)[0]
+    expect(unreadable?.text).toBe(STRINGS.en.turnUnreadable)
+    expect(unreadable?.fullText).toBe(undefined)
+  }
+})
+
+test('an ASK line that holds JSON never becomes a question step', () => {
+  const noText = parseDigest('TITLE: work\nASK: {"options":["A?"]}')
+  expect(noText?.ask).toBe('')
+  expect(applyDigest(emptyMirror('a1b2c3d4', 'app', NOW), noText!, NOW).tasks.filter(one => one.waiting === 'you')).toEqual([])
+  const selected = parseDigest('TITLE: work\nASK: {"question":"Ship it?","ask":"Wrong?"}')
+  expect(selected?.ask).toBe('Ship it?')
+  expect(selected?.ask).not.toContain('{')
+  expect(applyDigest(emptyMirror('a1b2c3d4', 'app', NOW), selected!, NOW).tasks.find(one => one.waiting === 'you')?.subject).toBe('Ship it?')
+  expect(parseDigest('TITLE: work\nASK: {"question":"Use \\\"A\\\"?"}')?.ask).toBe('Use \"A\"?')
+  expect(parseDigest('TITLE: work\nASK: []')?.ask).toBe('')
+})
+
+test('a JSON object ASK uses the ordinary question rules for its selected text', () => {
+  for (const answer of ['{"text":"Done."}', '["Ship it?"]']) {
+    const digest = parseDigest(`TITLE: work\nASK: ${answer}`)!
+    expect(digest.ask).toBe('')
+    expect(applyDigest(emptyMirror('a1b2c3d4', 'app', NOW), digest, NOW).tasks.filter(one => one.waiting === 'you')).toEqual([])
+  }
+  const question = parseDigest('TITLE: work\nASK: {"text":"Checked. Ship it?"}')!
+  expect(question.ask).toBe('Ship it?')
+  expect(applyDigest(emptyMirror('a1b2c3d4', 'app', NOW), question, NOW).tasks.find(one => one.waiting === 'you')?.subject).toBe('Ship it?')
+  expect(parseDigest('TITLE: work\nASK: {"text":"Ready? It is done."}')?.ask).toBe(lastQuestion('Ready? It is done.'))
+  expect(parseDigest('TITLE: work\nASK: Confirm the plan')?.ask).toBe('Confirm the plan')
+  expect(parseDigest('TITLE: work\nASK: "Done."')?.ask).toBe('"Done."')
+})
+
+test('an unchanged inbox uses the current language and remains cached within one language', async () => {
+  const file = { name: 'codex-turn-1760600000-1.json', body: JSON.stringify({ session_id: 'synthetic-lang', cwd: '/work/demo', last_assistant_message: '{}' }), at: 1 }
+  const listing = ['/work/demo/progress.md', [[file.name, 1, file.body.length]], {}]
+  let reads = 0
+  const fresh = async () => { reads++; return { files: [file], scrub: (text: string) => text, isComplete: true } }
+  const en = await turnsFor(null, listing, STRINGS.en, fresh)
+  expect(en.turns[0]?.text).toBe(STRINGS.en.turnUnreadable)
+  expect(reads).toBe(1)
+  const tw = await turnsFor(en.cache, listing, STRINGS['zh-TW'], fresh)
+  expect(tw.turns[0]?.text).toBe(STRINGS['zh-TW'].turnUnreadable)
+  expect(reads).toBe(2)
+  const cn = await turnsFor(tw.cache, listing, STRINGS['zh-CN'], fresh)
+  expect(cn.turns[0]?.text).toBe(STRINGS['zh-CN'].turnUnreadable)
+  expect(reads).toBe(3)
+  const hit = await turnsFor(cn.cache, listing, STRINGS['zh-CN'], fresh)
+  expect(hit.turns).toBe(cn.turns)
+  expect(reads).toBe(3)
+  const partial = await turnsFor(cn.cache, [...listing, 'changed'], STRINGS['zh-CN'], async () => ({ files: [file], scrub: (text: string) => text, isComplete: false }))
+  expect(partial.cache).toBe(cn.cache)
+  const retried = await turnsFor(partial.cache, [...listing, 'changed'], STRINGS['zh-CN'], fresh)
+  expect(retried.turns[0]?.text).toBe(STRINGS['zh-CN'].turnUnreadable)
+  expect(reads).toBe(4)
+})
+
+test('a plain reply that ends in a question is read as before', () => {
+  expect(lastQuestion('Done.\r\n\r\n**Ship it?**')).toBe('Ship it?')
+  expect(lastQuestion('Done.\n```json\n{"question":"Ignore?"}\n```')).toBeNull()
+  const make = (session: string, answer: string) => JSON.stringify({ session_id: session, cwd: '/w/app', last_assistant_message: answer })
+  const pending = peekInbox([
+    { name: 'codex-turn-1-1.json', body: make('s', 'Ship it?'), at: 1 },
+    { name: 'codex-end-2-1.json', body: JSON.stringify({ session_id: 's' }), at: 2 },
+  ])
+  expect(pending[0]?.text).toBe('Ship it?')
+  expect(pending[0]?.isClosed).toBe(true)
+  // An already-stored half-JSON question remains untouched, even on an ended/stale record.
+  const old = '## app\n<!-- auto session=a1b2c3d4 agent=codex state=ended updated=2026-01-01T00:00:00Z -->\n### Work\n- [?] {"question":"Old?\n<!-- /auto session=a1b2c3d4 -->\n'
+  expect(isQuestionStale('codex-turn-1767225600000-1.json', NOW)).toBe(true)
+  expect(parseProgress(old)[0]?.tasks[0]?.steps[0]?.text).toBe('{"question":"Old?')
+  for (const stored of [old, old.replace('state=ended', 'state=working')]) {
+    const projects = parseProgress(stored)
+    const ledger = observeQuestions(emptyQuestions(), projects, null, [], NOW, true, 'fixture:stored').ledger
+    expect(ledger.records[0]?.source?.text).toBe('{"question":"Old?')
+    const view = buildView(projects, [], null, NOW, 0, {}, STRINGS.en, [], {}, ledger)
+    expect(view.stopped[0]?.questions?.[0]?.text).toBe('{"question":"Old?')
+    expect(boardText(view, [], STRINGS.en, { width: 120, isColor: false, isIdleOpen: true })).toContain('{"question":"Old?')
+  }
 })
 
 test('the model’s summary of a turn: five keyed lines, - for nothing, the question split from its label', () => {
