@@ -187,7 +187,7 @@ test('a board script whose bytes differ under the same version is a different bu
 
 test('agent-board setup from the packed files previews, writes no file, and never names the package folder', t => fixture(f => {
   const pkg = packed(f)
-  const result = f.run(pkg, ['setup', '--agent', 'codex', '--home', f.home])
+  const result = f.run(pkg, ['setup', '--agent', 'codex', '--home', f.home, '--json'])
   success(result)
   assert.equal(JSON.parse(result.stdout).applied, false)
   assert.equal(result.stderr, '')
@@ -198,7 +198,7 @@ test('agent-board setup from the packed files previews, writes no file, and neve
 
 test('after setup --apply from the packed files, agent-board runs the installed board script', () => fixture(f => {
   const pkg = packed(f)
-  const setup = f.run(pkg, ['setup', '--agent', 'codex', '--home', f.home, '--apply'])
+  const setup = f.run(pkg, ['setup', '--agent', 'codex', '--home', f.home, '--apply', '--json'])
   success(setup)
   assert.equal(JSON.parse(setup.stdout).applied, true)
   assert.equal(setup.stderr, '')
