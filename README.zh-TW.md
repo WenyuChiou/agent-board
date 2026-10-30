@@ -34,10 +34,10 @@
 ```sh
 npx @wenyuchiou/agent-board setup
 npx @wenyuchiou/agent-board setup --apply
-agent-board
+npx @wenyuchiou/agent-board
 ```
 
-第一行會找出這台電腦上裝了哪些 agent，列出設定會改什麼，不會寫入任何東西。第二行才真的寫入，第三行在所在位置打開看板：在桌面開視窗、SSH 開終端機即時看板、agent 印純文字。在 agent 對話中，輸入 `/agent-board` 打開同一個看板。若要停止看板服務，執行 `agent-board stop`。只想設定其中一個 agent，就加上 `--agent` 和它的名字，例如 `--agent codex`。更多細節見[安裝指南](docs/SETUP.md#install-with-npm)（英文）。
+第一行會找出這台電腦上裝了哪些 agent，列出設定會改什麼，不會寫入任何東西。第二行才真的寫入，第三行在所在位置打開看板：在桌面開視窗、SSH 開終端機即時看板、agent 印純文字。在 agent 對話中，輸入 `/agent-board` 打開同一個看板。若要停止看板服務，執行 `npx @wenyuchiou/agent-board stop`。想用較短的 `agent-board` 指令，先執行一次 `npm install -g @wenyuchiou/agent-board`。只想設定其中一個 agent，就加上 `--agent` 和它的名字，例如 `--agent codex`。更多細節見[安裝指南](docs/SETUP.md#install-with-npm)（英文）。
 
 用同一個 Wi-Fi 的手機，掃 `npx @wenyuchiou/agent-board --serve --lan` 印出的 QR 碼。只在信得過的網路上用：這個連結沒有加密，拿到的人都能打開網頁。細節見[看板的網頁](#看板的網頁)。
 
