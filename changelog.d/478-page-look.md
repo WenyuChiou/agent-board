@@ -1,0 +1,2 @@
+- **A new look and the board's own logo (#478).** The page and dashboard use one set of colours and four type sizes, an easy-to-read font carried inside the page, and the Signal Row logo in the header and the browser tab.
+  Tests: `the page and the dashboard use only colour, size, radius, shadow and duration tokens from page-look`, `every text colour passes 4.5:1 and every mark colour 3:1 on its surface in light and dark`, `the page embeds its fonts, makes no font request and allows only font-src data:`, `the header and favicon show the Signal Row logo in light and dark`.
