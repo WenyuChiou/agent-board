@@ -167,10 +167,12 @@ ${block('a11ce023', 'gemini', 'done', 'Synthetic archive', 'Completed synthetic 
       // A finished task moves to the closed Done shelf, which holds Archive now.
       const done = page.getByRole('button', { name: /^Done/ }).filter({ has: page.locator('.count') })
       await done.click()
-      await page.getByText('Check the installation checklist', { exact: true }).waitFor()
+      // The row, not the line that keeps the last press's result, which names the task too.
+      const finished = page.locator('li.row').filter({ has: page.getByText('Check the installation checklist', { exact: true }) })
+      await finished.waitFor()
 
       await page.getByRole('button', { name: 'Archive now', exact: true }).click()
-      await page.getByText('Check the installation checklist', { exact: true }).waitFor({ state: 'detached' })
+      await finished.waitFor({ state: 'detached' })
       await board.question('Bold or quiet?').waitFor()
       await page.getByText('1 answered, hidden', { exact: true }).waitFor()
 
