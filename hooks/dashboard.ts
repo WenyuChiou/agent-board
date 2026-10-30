@@ -3,7 +3,7 @@ import type { PendingTurn } from './board'
 import { clip } from './mirror'
 import { askRole, stepRole, toneRole } from './palette'
 import type { Palette } from './palette'
-import { agentMark, agentMarkCss, boardMark, pageBaseCss, pageTokens, themeHead, themeSwitch } from './page-look'
+import { agentMark, agentMarkCss, boardMark, faviconLink, pageBaseCss, pageTokens, themeHead, themeSwitch } from './page-look'
 import type { Strings } from './i18n'
 import type { Focus, TaskRow, View, ViewStep, WaitingItem } from './view'
 import { OLDER_SHOWN } from './view'
@@ -48,9 +48,10 @@ const steps = (list: readonly ViewStep[]): string =>
     )
     .join('')}</ol>`
 
-const roleOf = stepRole
-const toneVar = toneRole
-const askVar = askRole
+const textRole = (role: string): string => role === 'waiting' ? 'waiting-text' : role
+const roleOf = (status: ProgressStepStatus): string => textRole(stepRole(status))
+const toneVar = (tone: Parameters<typeof toneRole>[0]): string => textRole(toneRole(tone))
+const askVar = (kind: Parameters<typeof askRole>[0]): string => textRole(askRole(kind))
 
 const bar = (done: number, total: number): string => {
   const percent = total === 0 ? 0 : Math.round((done / total) * 100)
@@ -98,7 +99,7 @@ const section = (id: string, title: string, count: number, tone: string, hint: s
   count === 0
     ? ''
     : `<details class="section" data-key="section:${id}"${isOpen ? ' open' : ''}><summary><span class="title">${esc(title)}</span>` +
-      `<span class="count" style="color:var(--${tone})">${count}</span>${hint === '' ? '' : `<span class="quiet">${esc(hint)}</span>`}</summary>${body}</details>`
+      `<span class="count" style="color:var(--${textRole(tone)})">${count}</span>${hint === '' ? '' : `<span class="quiet">${esc(hint)}</span>`}</summary>${body}</details>`
 
 export const dashboardHtml = (view: View, s: Strings, path: string, stamp: string, pending: readonly PendingTurn[] = []): string => {
   pending = view.hasPendingQuestions ? pending.filter(turn => !turn.isQuestion) : pending
@@ -130,22 +131,23 @@ export const dashboardHtml = (view: View, s: Strings, path: string, stamp: strin
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>${esc(s.paneTitle)} · Agent Board</title>
+${faviconLink}
 <script>${themeHead}</script>
 <style>
-${pageTokens()}
+${pageTokens('70px')}
 *{box-sizing:border-box}
-body{margin:0;background:var(--ground);color:var(--ink);font:15px/1.6 "Hiragino Sans","Noto Sans TC","Noto Sans SC","Microsoft JhengHei","Microsoft YaHei",system-ui,sans-serif}
+body{margin:0;background:var(--ground);color:var(--ink);font:var(--text-md)/1.6 var(--font-sans)}
 main{max-width:760px;margin:0 auto;padding:20px max(16px,env(safe-area-inset-left)) 40px max(16px,env(safe-area-inset-right));display:grid;gap:14px}
 header{display:flex;flex-wrap:wrap;align-items:baseline;gap:4px 12px}
-h1{font-size:1.4rem;margin:0;letter-spacing:.04em}
+h1{font-size:var(--text-lg);margin:0;letter-spacing:.04em}
 .meta,.quiet{color:var(--muted)}
 .counts{display:flex;flex-wrap:wrap;gap:6px 18px;font-variant-numeric:tabular-nums}
-.focus{border:1px solid var(--line);border-radius:10px;padding:12px 14px;display:grid;gap:4px}
+.focus{border:1px solid var(--line);border-radius:var(--radius-m);padding:12px 14px;display:grid;gap:4px}
 .focus.calm{color:var(--done)}
-.label{color:var(--muted);font-size:.85rem;letter-spacing:.06em}
+.label{color:var(--muted);font-size:var(--text-sm);letter-spacing:.06em}
 .chip{margin-right:6px}
 .where{color:var(--project)}
-code{display:block;overflow-x:auto;font:13px/1.5 ui-monospace,"JetBrains Mono",Consolas,monospace;padding:6px 8px;border:1px solid var(--line);border-radius:6px;color:var(--accent)}
+code{display:block;overflow-x:auto;font:var(--text-sm)/1.5 var(--font-mono);padding:6px 8px;border:1px solid var(--line);border-radius:var(--radius-s);color:var(--accent)}
 a{color:var(--accent)}
 details.section{border-top:1px solid var(--line);padding-top:8px}
 summary{cursor:pointer;display:flex;flex-wrap:wrap;align-items:baseline;gap:4px 10px;list-style:none}
@@ -154,12 +156,12 @@ details[open]>summary::before{content:"▾"}
 summary:focus-visible{outline:1px dotted var(--accent);outline-offset:3px}
 .section>summary .title{font-weight:700}
 .group{margin:10px 0 0 4px}
-.group h3{margin:0;font-size:.95rem;color:var(--project);display:flex;flex-wrap:wrap;gap:4px 10px}
+.group h3{margin:0;font-size:var(--text-md);color:var(--project);display:flex;flex-wrap:wrap;gap:4px 10px}
 .group h3 span{font-weight:400;color:var(--muted)}
 details.row{margin:6px 0 0 8px}
 .row .title{flex:1 1 12em;min-width:0}
 .row .meta{flex-basis:100%;padding-left:1.2em;display:flex;align-items:center;gap:8px;min-width:0}
-.bar{display:inline-block;width:52px;height:4px;border-radius:2px;background:var(--frame);overflow:hidden;flex:none}
+.bar{display:inline-block;width:52px;height:4px;border-radius:var(--radius-round);background:var(--frame);overflow:hidden;flex:none}
 .bar span{display:block;height:100%}
 .steps{list-style:none;margin:6px 0;padding:0 0 0 1.2em;display:grid;gap:2px}
 .steps li{display:grid;grid-template-columns:2ch 1.4em 1fr;column-gap:4px}
@@ -167,26 +169,26 @@ details.row{margin:6px 0 0 8px}
 .steps .now .t{font-weight:700}
 .steps .note{grid-column:3}
 .ask{display:grid;gap:2px;margin:8px 0 0 4px}
-footer{color:var(--muted);font-size:.85rem;display:grid;gap:4px;border-top:1px solid var(--line);padding-top:10px}
+footer{color:var(--muted);font-size:var(--text-sm);display:grid;gap:4px;border-top:1px solid var(--line);padding-top:10px}
 .legend{display:flex;flex-wrap:wrap;gap:2px 14px}
 @media (prefers-reduced-motion:reduce){*{scroll-behavior:auto}}
 ${pageBaseCss}
 ${agentMarkCss()}
-:root{--shadow:0 1px 2px rgba(0,0,0,.05),0 2px 8px -4px rgba(0,0,0,.08)}
 .dashboard-shell{display:grid;grid-template-columns:200px minmax(0,780px);column-gap:36px;align-items:start}
 main{max-width:780px;min-width:0;margin:0;padding:18px 0 40px;gap:18px}
 .dash-nav{position:sticky;top:var(--head-h,70px);display:grid;gap:4px;padding:20px 0;max-height:calc(100dvh - var(--head-h,70px));overflow:auto}
-.dash-nav h2{font-size:11.5px;text-transform:uppercase;letter-spacing:.07em;color:var(--muted);margin:0 0 6px;padding:0 10px}
-.dash-nav button{display:flex;align-items:center;justify-content:space-between;gap:10px;min-height:36px;padding:6px 10px;border:1px solid transparent;border-radius:9px;text-align:left;background:transparent;font-size:14px;cursor:pointer}
-.dash-nav button:hover{background:var(--surface);border-color:var(--line)}.dash-nav .ct{color:var(--muted);font-size:12px;font-variant-numeric:tabular-nums}
-.where .ag{margin-right:6px}.head .meta{font-size:12px}.head .brand{flex-wrap:wrap}.head .brand .meta{margin-left:auto}
-.counts{display:grid;grid-template-columns:repeat(4,1fr);gap:0;border:1px solid var(--line);border-radius:14px;background:var(--surface);overflow:hidden}.counts>span{padding:12px;border-left:1px solid var(--line)}.counts>span:first-child{border-left:0}
-.focus{border:1px solid var(--line);border-radius:14px;background:var(--surface);padding:16px;box-shadow:var(--shadow)}
-details.section{border:1px solid var(--line);padding:0;border-radius:14px;background:var(--surface);box-shadow:var(--shadow);overflow:clip;scroll-margin-top:calc(var(--head-h,70px) + 12px)}
+.dash-nav h2{font-size:var(--text-xs);text-transform:uppercase;letter-spacing:.07em;color:var(--muted);margin:0 0 6px;padding:0 10px}
+.dash-nav button{display:flex;align-items:center;justify-content:space-between;gap:10px;min-height:36px;padding:6px 10px;border:1px solid transparent;border-radius:var(--radius-m);text-align:left;background:transparent;font-size:var(--text-sm);cursor:pointer}
+.dash-nav button:hover{background:var(--ground);border-color:var(--line)}.dash-nav .ct{color:var(--muted);font-size:var(--text-xs);font-variant-numeric:tabular-nums}
+.where .ag{margin-right:6px}.head .meta{font-size:var(--text-xs)}.head .brand{flex-wrap:wrap}.head .brand .meta{margin-left:auto}
+.counts{display:grid;grid-template-columns:repeat(4,1fr);gap:0;border:1px solid var(--line);border-radius:var(--radius-m);overflow:hidden}.counts>span{padding:12px;border-left:1px solid var(--line)}.counts>span:first-child{border-left:0}
+.focus{border:1px solid var(--line);border-radius:var(--radius-m);padding:16px}
+details.section{border:1px solid var(--line);padding:0;border-radius:var(--radius-m);overflow:clip;scroll-margin-top:calc(var(--head-h,70px) + 12px)}
+details.section[data-key='section:waiting']{background:var(--surface)}
 .section>summary{padding:12px 16px}.section>.ask,.section>.quiet,.section>.steps,.section>p{margin:12px 16px}.section>.group{margin:0;padding:12px 16px}.group h3{font-weight:650}
 details.row{margin:0;border-top:1px solid var(--line);padding:0}.row>summary{padding:11px 16px}.row>p,.row>.steps{margin:10px 16px 16px}.row .title{font-weight:600}.row .meta{flex-wrap:wrap;gap:6px}
-.ask{gap:8px;padding:8px 0}.chip{border:1px solid currentColor;border-radius:999px;padding:3px 8px;font-size:12px}.steps li{gap:4px 8px;padding:5px 8px;border-radius:8px}.steps .g{width:22px;height:22px;display:grid;place-items:center;font-size:inherit;cursor:default;user-select:none}.steps li{grid-template-columns:2ch 22px minmax(0,1fr)}.steps .now{background:var(--inset)}
-footer{font-size:12.5px;overflow-wrap:anywhere}code{background:var(--inset);border:1px solid var(--line);border-radius:8px}
+.ask{gap:8px;padding:8px 0}.chip{border:1px solid currentColor;border-radius:var(--radius-round);padding:3px 8px;font-size:var(--text-xs)}.steps li{gap:4px 8px;padding:5px 8px;border-radius:var(--radius-m)}.steps .g{width:22px;height:22px;display:grid;place-items:center;font-size:inherit;cursor:default;user-select:none}.steps li{grid-template-columns:2ch 22px minmax(0,1fr)}.steps .now{background:var(--inset)}
+footer{font-size:var(--text-xs);overflow-wrap:anywhere}code{background:var(--inset);border:1px solid var(--line);border-radius:var(--radius-m)}
 @media (max-width:760px){.dashboard-shell{grid-template-columns:minmax(0,1fr)}.dash-nav{position:static;display:flex;flex-wrap:wrap;gap:6px;padding:16px 0 0;max-height:none}.dash-nav h2{flex-basis:100%}.dash-nav button{background:var(--surface);border-color:var(--line)}main{padding-top:16px}}
 @media (max-width:600px){.counts{grid-template-columns:repeat(2,1fr)}.counts>span:nth-child(3){border-left:0}.counts>span:nth-child(n+3){border-top:1px solid var(--line)}.head .brand .meta{margin-left:0;flex-basis:100%}.head .brand{column-gap:8px}}
 </style>
@@ -199,7 +201,7 @@ ${view.warning ? `<p role="status" style="color:var(--alert)">${esc(view.warning
 ${view.details ? `<p class="quiet">${esc(view.details)}</p>` : ''}
 ${view.pruned ? `<p role="status" class="quiet">${esc(view.pruned)}</p>` : ''}
 <section class="counts">${counts
-    .map(([glyph, n, word, role]) => `<span><span style="color:var(--${n > 0 ? role : 'muted'})">${glyph} ${n}</span> ${esc(word)}</span>`)
+    .map(([glyph, n, word, role]) => `<span><span style="color:var(--${n > 0 ? textRole(role) : 'muted'})">${glyph} ${n}</span> ${esc(word)}</span>`)
     .join('')}</section>
 ${view.focus === null && pending.some(turn => turn.isQuestion) ? '' : focus(view.focus, s)}
 ${section(
@@ -210,7 +212,7 @@ ${section(
   '',
   `<p class="quiet">${esc(s.dashInboxHint)}</p>` + pending.map(turn =>
     `<div class="ask"><div class="where">${agentMark(turn.agent)}${esc([turn.project, turn.agent].filter(part => part !== '').join(' · '))}</div>` +
-    `<div><span style="color:var(--${turn.isQuestion ? 'waiting' : 'accent'})">${turn.isQuestion ? '●' : '◐'}</span> ${turn.isQuestion ? esc(clip(turn.text, 200)) : ''}</div></div>`,
+    `<div><span style="color:var(--${turn.isQuestion ? 'waiting-text' : 'accent'})">${turn.isQuestion ? '●' : '◐'}</span> ${turn.isQuestion ? esc(clip(turn.text, 200)) : ''}</div></div>`,
   ).join(''),
   true,
 )}
