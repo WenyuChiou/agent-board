@@ -526,7 +526,7 @@ const run = (lang, args = [], beside = {}, source = FILE, code = BOARD_SCRIPT) =
     const env = { ...process.env, CLAUDE_PROGRESS_FILE: '', NO_COLOR: '1' }
     return execFileSync(process.execPath, [script, ...args], { env, encoding: 'utf8' })
   } finally {
-    rmSync(dir, { recursive: true, force: true })
+    rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 })
   }
 }
 
@@ -1577,7 +1577,7 @@ const windowsAcl = (file, env) => {
 // so page tests that need a waiting question add this one.
 const LIVE_QUESTION = `\n## billing\n<!-- auto session=d4e5f6a7 agent=grok state=waiting updated=RECENT -->\n### Pick invoice format\n- [x] Read\n- [?] PDF or HTML?\n<!-- /auto session=d4e5f6a7 -->\n`
 
-const page = async (more = '', env = {}, serveArgs = [], now, source = BOARD_SCRIPT) => {
+const page = async (more = '', env = {}, serveArgs = [], now, source = BOARD_SCRIPT, setup) => {
   const dir = mkdtempSync(join(tmpdir(), 'board-serve-'))
   const work = join(dir, 'api-gateway')
   mkdirSync(work)
@@ -1613,6 +1613,7 @@ setTimeout(() => process.stdout.write('Redis it is; wiring it up now.\\n'), 1000
 `)
   const script = join(dir, 'agent-board.mjs')
   writeFileSync(script, `globalThis.AGENT_BOARD = ${JSON.stringify({ path, lang: 'en' })}\n${now === undefined ? '' : `Date.now = () => ${now}\n`}${source}`)
+  setup?.(dir, path)
   const child = spawn(process.execPath, [script, '--serve-child', ...serveArgs], {
     env: { ...process.env, CLAUDE_PROGRESS_FILE: '', NO_COLOR: '1', AGENT_BOARD_GROK: stand, AGENT_BOARD_CODEX: stand, XDG_RUNTIME_DIR: run, ...env },
     stdio: ['ignore', 'pipe', 'pipe'],
@@ -6254,17 +6255,20 @@ test('terminal and HTML size warnings keep translated numbers in the details lin
 })
 
 test("the page's server runs the hourly sweep and writes nothing when the seen file cannot be read", { timeout: 15_000 }, async () => {
-  const board = await page('', { AGENT_BOARD_SWEEP_MS: '100' }, [], TIDY_NOW)
-  try {
-    const source = '## Synthetic\n### Finished manual\n- [x] Last step\n'
-    const block = `<!-- auto session=464c0003 agent=codex state=done updated=${new Date(TIDY_NOW - 13 * 3600000).toISOString()} -->\n### Old agent block\n- [x] Last step\n<!-- /auto session=464c0003 -->\n`
-    const record = join(board.dir, 'progress-seen.json')
-    const archive = join(board.dir, 'progress-archive-2026-10.md')
-    writeFileSync(board.path, source + block)
+  const source = '## Synthetic\n### Finished manual\n- [x] Last step\n'
+  const block = `<!-- auto session=464c0003 agent=codex state=done updated=${new Date(TIDY_NOW - 13 * 3600000).toISOString()} -->\n### Old agent block\n- [x] Last step\n<!-- /auto session=464c0003 -->\n`
+  const board = await page('', { AGENT_BOARD_SWEEP_MS: '100' }, [], TIDY_NOW, BOARD_SCRIPT, (dir, path) => {
+    const record = join(dir, 'progress-seen.json')
+    const archive = join(dir, 'progress-archive-2026-10.md')
+    writeFileSync(path, source + block)
     writeFileSync(archive, '# Progress archive\n\nEarlier synthetic work\n')
     writeFileSync(record, '{"seen":')
     // The fixed test clock must see this as a young interrupted write, not stale damage.
     utimesSync(record, TIDY_NOW / 1000, TIDY_NOW / 1000)
+  })
+  try {
+    const record = join(board.dir, 'progress-seen.json')
+    const archive = join(board.dir, 'progress-archive-2026-10.md')
     const snapshot = () => Object.fromEntries(readdirSync(board.dir).filter(name => name === 'progress.md' || name === 'progress-seen.json' || name.startsWith('progress-archive-')).map(name => [name, readFileSync(join(board.dir, name))]))
     const before = snapshot()
     await delay(1500)
