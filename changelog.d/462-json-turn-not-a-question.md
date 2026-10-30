@@ -1,0 +1,2 @@
+- **A turn that comes back as JSON no longer becomes a question (#462).** The board reads the question from the JSON's own text field, or says it could not read the turn, instead of cutting the JSON at a question mark.
+  Tests: `a reply that is JSON is not cut at its question mark and shown as a question`, `a JSON reply with a question field gives that field's question`, `a JSON reply with no string field gives no question and the could-not-read line`, `an ASK line that holds JSON never becomes a question step`, `a plain reply that ends in a question is read as before`.

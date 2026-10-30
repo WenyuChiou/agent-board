@@ -32,7 +32,8 @@ export const parseDigest = (answer: string): Digest | null => {
   const context = field(lines, 'CONTEXT')
   const done = field(lines, 'DONE')
   const next = field(lines, 'NEXT')
-  const ask = field(lines, 'ASK')
+  const normalized = normalizeReplyValue(field(lines, 'ASK'))
+  const ask = normalized.text === null ? '' : normalized.isStructured ? lastQuestionInProse(normalized.text, true) ?? '' : normalized.text
   const handoffTo = field(lines, 'HANDOFF').replace(/\s+/g, ' ').trim()
   if ([title, context, done, next, ask].every(value => value === '')) return null
   const split = ask.search(/\s[—–-]{1,2}\s/)
@@ -70,10 +71,37 @@ const withoutEmphasis = (line: string): string =>
     .replace(/[*#>]+/g, '')
     .replace(/_+/g, (run, at: number, whole: string) => (/[A-Za-z0-9]/.test(whole[at - 1] ?? '') && /[A-Za-z0-9]/.test(whole[at + run.length] ?? '') ? run : ''))
 
+// JSON objects and arrays are data, not prose. Only a top-level, nonempty string can
+// say what an object means; arrays have no usable field. Scalars stay as written.
+const normalizeReplyValue = (answer: string): { text: string | null; isStructured: boolean } => {
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(answer.trim().replace(/^\uFEFF/, '').trim()) as unknown
+  } catch {
+    return { text: answer, isStructured: false }
+  }
+  if (parsed === null || typeof parsed !== 'object') return { text: answer, isStructured: false }
+  if (Array.isArray(parsed)) return { text: null, isStructured: true }
+  const fields = parsed as Record<string, unknown>
+  for (const key of ['question', 'ask', 'text', 'message', 'reply', 'answer']) {
+    const value = Object.prototype.hasOwnProperty.call(fields, key) ? fields[key] : undefined
+    if (typeof value === 'string' && value.trim() !== '') return { text: value.trim(), isStructured: true }
+  }
+  return { text: null, isStructured: true }
+}
+
+export const normalizeReply = (answer: string): string | null => normalizeReplyValue(answer).text
+
 // The question a reply ends on, if its last paragraph asks one: the last sentence there
 // with a question mark, without code or markdown. A reply that ends on a statement asks
 // nothing, even if it asked something earlier.
 export const lastQuestion = (answer: string, isFull = false): string | null => {
+  const prose = normalizeReply(answer)
+  return prose === null ? null : lastQuestionInProse(prose, isFull)
+}
+
+// For callers that already normalized the reply: do not parse it a second time.
+export const lastQuestionInProse = (answer: string, isFull = false): string | null => {
   const prose = answer.replace(/```[\s\S]*?```/g, '\n\n').replace(/`([^`]*)`/g, '$1')
   const paragraphs = prose.split(/\n\s*\n/).map(one => one.trim()).filter(one => one !== '')
   const last = paragraphs.at(-1)
