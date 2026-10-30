@@ -11,7 +11,7 @@ import { boardRun, geminiBoardCommand } from '../hooks/board-commands.ts'
 import { codexApproval } from '../scripts/codex-approval.ts'
 
 const source = readFileSync(new URL('../hooks/board-script.ts', import.meta.url), 'utf8')
-const bundle = JSON.parse(source.slice(source.indexOf('export const BOARD_SCRIPT = ') + 'export const BOARD_SCRIPT = '.length))
+const bundle = JSON.parse(source.slice(source.indexOf('export const BOARD_SCRIPT = ') + 'export const BOARD_SCRIPT = '.length, source.lastIndexOf(']') + 1)).join('\n')
 const approvedConnect = f => {
   f.run('connect')
   writeFileSync(f.options, JSON.stringify({ trust: 'trusted' }))

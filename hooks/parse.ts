@@ -9,6 +9,7 @@ import type {
   ProgressTail,
 } from '../types'
 import { sha256 } from './sha256.ts'
+import { splitLines } from './lines.ts'
 
 // `## project` / `### task` / `> note` / `- [x] step`, plus the auto markers a session's
 // mod writes around its own block. Everything else is ignored, so free text never breaks
@@ -220,7 +221,7 @@ export const parseProgress = (markdown: string): ProgressProject[] => {
     return task
   }
 
-  const raws = markdown.split(/\r?\n/)
+  const raws = splitLines(markdown)
   readable(raws).forEach((line, lineIndex) => {
     if (line === null) return
     const raw = raws[lineIndex] ?? ''

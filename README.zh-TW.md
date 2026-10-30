@@ -1,4 +1,4 @@
-<h1 align="center">Agent Board</h1>
+<h1 align="center"><img alt="Agent Board" src="docs/images/brand/agent-board-logo.svg" width="360"></h1>
 
 <p align="center"><b>每個 AI coding agent 在做什麼，一個看板看完；哪個在等你，就在那裡回它。</b></p>
 
@@ -34,10 +34,10 @@
 ```sh
 npx @wenyuchiou/agent-board setup
 npx @wenyuchiou/agent-board setup --apply
-npx @wenyuchiou/agent-board --serve
+npx @wenyuchiou/agent-board
 ```
 
-第一行會找出這台電腦上裝了哪些 agent，列出設定會改什麼，不會寫入任何東西。第二行才真的寫入，第三行打開看板網頁。只想設定其中一個 agent，就加上 `--agent` 和它的名字，例如 `--agent codex`。更多細節見[安裝指南](docs/SETUP.md#install-with-npm)（英文）。
+第一行會找出這台電腦上裝了哪些 agent，列出設定會改什麼，不會寫入任何東西。第二行才真的寫入，第三行在所在位置打開看板：在桌面開視窗、SSH 開終端機即時看板、agent 印純文字。在 agent 對話中，輸入 `/agent-board` 打開同一個看板。若要停止看板服務，執行 `npx @wenyuchiou/agent-board stop`。想用較短的 `agent-board` 指令，先執行一次 `npm install -g @wenyuchiou/agent-board`。只想設定其中一個 agent，就加上 `--agent` 和它的名字，例如 `--agent codex`。更多細節見[安裝指南](docs/SETUP.md#install-with-npm)（英文）。
 
 用同一個 Wi-Fi 的手機，掃 `npx @wenyuchiou/agent-board --serve --lan` 印出的 QR 碼。只在信得過的網路上用：這個連結沒有加密，拿到的人都能打開網頁。細節見[看板的網頁](#看板的網頁)。
 
@@ -212,6 +212,14 @@ Hooks 只說對話在做事還是在等；步驟和什麼時候算完成，來�
 
 每個 agent 的 hooks 把它的對話正在做什麼，寫進本機同一個 `progress.md` 裡它自己的區塊（全新安裝用 `~/.agent-board/progress.md`）。任務步驟只來自 agent 自己的回報，不讀任何私人對話。看板讀這個檔不需要呼叫模型；選用的 Claude 外掛可以用 Claude 的模型總結每個回合，細節見[使用指南](docs/GUIDE.zh-TW.md#會把資料傳出去嗎要花多少錢)。這個檔你也可以自己看、自己改：[檔案格式](docs/FORMAT.md)（英文）。支援 English、繁體中文、简体中文。
 
+### 三大核心支柱
+
+- **一個 Markdown 檔**：每個 agent 的進度都寫進同一個純文字 progress.md，你可以直接讀、直接改；不用資料庫。
+- **所有 agent 在同一個看板**：Claude Code、Codex、Antigravity、Cursor、OpenCode 和其他接上的 agent，並排顯示。
+- **問題優先**：agent 在等你回答的問題排在最前面，你在看板上回答；已連線的對話會收到你的回答。
+
+關於戰情座艙與記憶工具的分工與共存策略，請參閱[架構定位指南](docs/dev/architecture-positioning.md)（英文）。
+
 ## 疑難排解
 
 先跑 doctor。它檢查安裝器替某個 agent 寫了什麼，不會改任何東西：
@@ -225,7 +233,7 @@ node ~/.agent-board/agent-board.mjs --codex-doctor --agent codex
 | 你看到 | 試試 |
 |---|---|
 | 某個 agent 沒出現在看板上 | 開一個它的新對話；原本就開著的不會接上。Codex 還要先在 `/hooks` 信任它的 hooks。 |
-| 裝完之後什麼都沒變 | 不加 `--apply` 再跑一次 `npx @wenyuchiou/agent-board setup`（用 git clone 的話是 `node scripts/setup-agent.mjs`），看它列出的衝突和 `adapter-pending`；你改過的檔案不會被覆蓋，會列在那裡。 |
+| 裝完之後什麼都沒變 | 不加 `--apply` 再跑一次 `npx @wenyuchiou/agent-board setup --json`（用 git clone 的話是 `node scripts/setup-agent.mjs --json`），看它列出的衝突和 `adapter-pending`；你改過的檔案不會被覆蓋，會列在那裡。 |
 | 還在跑舊版 | 跑著的對話會一直用它載入時的版本：開一個新的。更新方式見[使用指南](docs/GUIDE.zh-TW.md#更新與移除)。 |
 | 同一個 agent 出現兩次 | 可能兩種方式都接上了：Claude 外掛的 `/progress connect` 和安裝程式（setup）。`/progress connect status` 會列出外掛接了哪些；用 `/progress connect remove` 或 `--codex-remove --agent <name>` 拿掉其中一個。 |
 | 有個問題一直不消失 | 在它自己的對話裡回答，再按**已回覆，先隱藏**（`h`）。3 天後它會移到**較早的未答問題**，7 天後移到**更早、尚未回答的問題**。 |
