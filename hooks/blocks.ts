@@ -317,14 +317,25 @@ export const upsertAutoBlock = (text: string, mirror: ProgressMirror, s: Strings
   const fullId = mirror.resume ?? (mirror.sessionId.length > 8 ? mirror.sessionId : null)
   const agent = (mirror.agent || 'claude').toLowerCase()
   const spans = scanBlocks(lines)
-  const matching = spans.filter(span => {
-    if (span.agent !== undefined && span.agent !== agent) return false
-    if (fullId !== null) {
-      return span.resume !== null && span.resume !== undefined && span.resume === fullId
+  const sameAgent = spans.filter(span => span.agent === undefined || span.agent === agent)
+  let existing: BlockSpan | undefined
+  if (fullId !== null) {
+    const byResume = sameAgent.filter(span => span.resume !== null && span.resume !== undefined && span.resume === fullId)
+    if (byResume.length === 1) {
+      existing = byResume[0]
+    } else if (byResume.length === 0) {
+      const sameShort = sameAgent.filter(span => span.session === id)
+      const legacy = sameShort.filter(span => span.resume === null || span.resume === undefined)
+      if (legacy.length === 1 && sameShort.length === 1 && mirror.isRun !== true) {
+        existing = legacy[0]
+      }
     }
-    return span.session === id && (span.resume === null || span.resume === undefined)
-  })
-  const existing = matching.length === 1 ? matching[0] : undefined
+  } else {
+    const matching = sameAgent.filter(span => span.session === id && (span.resume === null || span.resume === undefined))
+    if (matching.length === 1) {
+      existing = matching[0]
+    }
+  }
   // A run keeps the parent its block already names; until one is named, it takes the person's
   // session working in the same project right now when exactly one is (#399), else none, and
   // counts as a background run.
