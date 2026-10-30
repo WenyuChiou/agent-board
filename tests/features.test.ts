@@ -290,6 +290,60 @@ test('Confirm done distinguishes manual twins across repeated project headings a
   expect(confirmTask(unrelated, first.row.confirm, now, STRINGS.en)?.text).toContain('### Keep this\n- [ ] Different work')
 })
 
+test('Confirm done on a marker with no space before --> keeps its end and reads back as done', () => {
+  const now = Date.parse('2026-10-19T12:00:00Z')
+  // FORMAT.md also accepts `<!--auto` with no space after `<!--`; its start stays as written.
+  const markers = [
+    ['<!-- auto session=a1b2c3d4 agent=codex updated=2026-10-19T11:00:00Z state=ended-->', '<!-- auto session=a1b2c3d4 agent=codex updated=2026-10-19T12:00:00.000Z state=done -->'],
+    ['<!-- auto session=a1b2c3d4 agent=codex state=ended updated=2026-10-19T11:00:00Z-->', '<!-- auto session=a1b2c3d4 agent=codex state=done updated=2026-10-19T12:00:00.000Z -->'],
+    ['<!--auto session=a1b2c3d4 agent=codex state=ended updated=2026-10-19T11:00:00Z-->', '<!--auto session=a1b2c3d4 agent=codex state=done updated=2026-10-19T12:00:00.000Z -->'],
+  ]
+  for (const [marker, expected] of markers) {
+    const file = `## demo\n${marker}\n### Ship\n- [ ] finish\n<!-- /auto session=a1b2c3d4 -->\n`
+    const row = boardItems(buildView(parseProgress(file), [], null, now, 0, {}, STRINGS.en), []).find(item => item.type === 'row' && item.row.title === 'Ship')
+    if (row?.type !== 'row' || row.row.confirm == null) throw new Error('Missing synthetic row')
+    const result = confirmTask(file, row.row.confirm, now, STRINGS.en)
+    expect(result?.text.split('\n')[1]).toBe(expected)
+    expect(parseProgress(result?.text ?? '')[0]?.tasks[0]?.auto?.state).toBe('done')
+  }
+})
+
+test('Confirm done adds state=done to a stale marker with spaces after -->', () => {
+  const now = Date.parse('2026-10-19T12:00:00Z')
+  const updated = new Date(now - 26 * 60 * 60 * 1000).toISOString()
+  const file = `## demo\n<!-- auto session=a1b2c3d4 agent=codex updated=${updated} -->   \n### Ship\n- [ ] finish\n<!-- /auto session=a1b2c3d4 -->\n`
+  const row = boardItems(buildView(parseProgress(file), [], null, now, 0, {}, STRINGS.en), []).find(item => item.type === 'row' && item.row.title === 'Ship')
+  if (row?.type !== 'row' || row.row.confirm == null) throw new Error('Missing synthetic row')
+  const result = confirmTask(file, row.row.confirm, now, STRINGS.en)
+  const auto = parseProgress(result?.text ?? '')[0]?.tasks[0]?.auto
+  expect(auto?.state).toBe('done')
+  expect(auto?.updated).toBe(now)
+})
+
+test('Confirm done edits state= and updated= themselves, not an attribute whose name ends in them', () => {
+  const now = Date.parse('2026-10-19T12:00:00Z')
+  const marker = '<!-- auto session=a1b2c3d4 agent=codex backup-state=working old-updated=2026-10-18T11:00:00Z state=ended updated=2026-10-19T11:00:00Z-->'
+  const file = `## demo\n${marker}\n### Ship\n- [ ] finish\n<!-- /auto session=a1b2c3d4 -->\n`
+  const row = boardItems(buildView(parseProgress(file), [], null, now, 0, {}, STRINGS.en), []).find(item => item.type === 'row' && item.row.title === 'Ship')
+  if (row?.type !== 'row' || row.row.confirm == null) throw new Error('Missing synthetic row')
+  const result = confirmTask(file, row.row.confirm, now, STRINGS.en)
+  expect(result?.text.split('\n')[1]).toBe('<!-- auto session=a1b2c3d4 agent=codex backup-state=working old-updated=2026-10-18T11:00:00Z state=done updated=2026-10-19T12:00:00.000Z -->')
+  expect(parseProgress(result?.text ?? '')[0]?.tasks[0]?.auto?.state).toBe('done')
+})
+
+test('a hand-kept task with no open step is not offered Confirm done on any surface', () => {
+  const now = Date.parse('2026-10-19T12:00:00Z')
+  const file = '## demo\n### Ship\n\n## demo\n### Open\n- [ ] finish\n'
+  const items = boardItems(buildView(parseProgress(file), [], null, now, 0, {}, STRINGS.en), [])
+  const rowOf = (title: string) => items.find(item => item.type === 'row' && item.row.title === title)
+  const empty = rowOf('Ship')
+  const open = rowOf('Open')
+  if (empty?.type !== 'row' || open?.type !== 'row') throw new Error('Missing synthetic rows')
+  // The pane, the terminal's d key and the page all offer Confirm done from row.confirm.
+  expect(empty.row.confirm ?? null).toBe(null)
+  expect(open.row.confirm).not.toBe(null)
+})
+
 test('Confirm done changes only visible checkbox marks through comments and preserves CRLF', () => {
   const now = Date.parse('2026-10-19T12:00:00Z')
   const file = ['## Demo', '### Commented steps', '<!-- [ ] Hidden -->- [ ] Visible', '<!-- Multiline', '[ ] Hidden multiline', '-->- [~] Closing', '- <!-- Keep this note -->[>] Inline', '- [-] Canceled', ''].join('\r\n')
