@@ -503,9 +503,8 @@ export const takeArchivable = (text: string, now: number, keep?: string, s: Stri
   const entries = spans.map(span => {
     const body = lines.slice(span.start + 1, span.end)
     const day = localDay(span.updated || now)
-    const marker = span.session ? ` <!-- auto session=${span.session} -->` : ''
 
-    return [`## ${span.project || s.uncategorized} · ${day}${marker}`, ...body].join('\n')
+    return [`## ${span.project || s.uncategorized} · ${day}`, ...body].join('\n')
   })
 
   return { text: removeSpans(text, spans), entries }
@@ -617,8 +616,7 @@ export const takeTask = (text: string, ref: TaskRef, now: number, s: Strings = Z
       if (auto === null || !isTwin && !isStale(auto, now, observedTime(auto, now, observations).updated)) return null
     }
 
-    const marker = span.session ? ` <!-- auto session=${span.session} -->` : ''
-    return { text: removeSpans(text, [span]), entries: [[`${heading}${marker}`, ...lines.slice(span.start + 1, span.end)].join('\n')] }
+    return { text: removeSpans(text, [span]), entries: [[heading, ...lines.slice(span.start + 1, span.end)].join('\n')] }
   }
   const isHeading = (line: string | undefined): boolean => TASK.exec(line ?? '')?.[1] === ref.title
   let at = isHeading(seen[ref.line]) ? ref.line : -1

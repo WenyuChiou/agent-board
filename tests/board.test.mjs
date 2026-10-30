@@ -5360,6 +5360,10 @@ test('--tidy adds both of two same-title done blocks to an archive that already 
     // The two were saved to the archive but are back in the file, as after a process that stopped
     // before it removed them: they leave, and the archive keeps one copy of each.
     writeFileSync(f.path, two)
+    const archiveFile = readdirSync(f.dir).find(name => name.startsWith('progress-archive-'))
+    const archiveContent = readFileSync(join(f.dir, archiveFile), 'utf8')
+    const savedEntries = archiveContent.split('\n\n').filter(part => part.includes('### Local synthetic task')).slice(-2)
+    writeFileSync(join(f.dir, 'progress-archive.pending'), JSON.stringify({ entries: savedEntries }) + '\n')
     assert.equal(f.command(['--tidy', '--lang', 'en']).status, 0)
     assert.ok(!readFileSync(f.path, 'utf8').includes('Local synthetic task'))
     assert.equal(copies(), 3)
@@ -5385,14 +5389,20 @@ test('--tidy with archive saved and task not removed (simulated failure), then t
   tidyFixture(f => {
     const copies = () => readdirSync(f.dir).filter(name => name.startsWith('progress-archive-')).map(name => readFileSync(join(f.dir, name), 'utf8')).join('').split('### Local synthetic task').length - 1
     const one = `## Synthetic\n${f.block('a1b2c318', 'Local synthetic task', 'done', 13)}`
+    const pending = join(f.dir, 'progress-archive.pending')
     writeFileSync(f.path, one)
     assert.equal(f.command(['--tidy', '--lang', 'en']).stdout, 'Archived 1 task.\n')
     assert.equal(copies(), 1)
     writeFileSync(f.path, one)
+    const archiveFile = readdirSync(f.dir).find(name => name.startsWith('progress-archive-'))
+    const archiveContent = readFileSync(join(f.dir, archiveFile), 'utf8')
+    const savedEntry = archiveContent.split('\n\n').find(part => part.includes('### Local synthetic task'))
+    writeFileSync(pending, JSON.stringify({ entries: [savedEntry] }) + '\n')
     const result = f.command(['--tidy', '--lang', 'en'])
     assert.equal(result.status, 0, result.stderr)
     assert.ok(!readFileSync(f.path, 'utf8').includes('Local synthetic task'))
     assert.equal(copies(), 1)
+    assert.ok(!existsSync(pending))
   })
 })
 

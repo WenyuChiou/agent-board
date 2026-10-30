@@ -47,6 +47,8 @@ import {
   previousMonth,
   progressReport,
   missingEntries,
+  parsePendingArchive,
+  pendingArchivePath,
   unwrittenEntries,
 } from './journal'
 import type { JournalEntry } from './journal'
@@ -2999,10 +3001,12 @@ const archiveOld = async ($: EngineInterface, isNow = false, isCleanUp = false):
   }, undefined, async (path, text) => {
     // Made again after another session's write, the same blocks are not archived twice.
     const fresh = unwrittenEntries(pendingEntries, archived)
-    await appendArchive($, archivePath(path, at), fresh, s, archived)
+    await appendArchive($, path, archivePath(path, at), fresh, s, archived)
     for (const entry of fresh) archived.set(entry, (archived.get(entry) ?? 0) + 1)
     for (const entry of pendingMoved) moved.set(entry.session, entry.text)
     await $.fs.write(path, text)
+    const isWin = await isWindows($, path)
+    await removeFiles($, [pendingArchivePath(path)], isWin)
     // Another session's stale write can put the blocks back and the next try remove them again:
     // an entry counts the most copies one write removed, not the sum over the tries.
     const going = new Map<string, number>()
@@ -3043,12 +3047,17 @@ const keepAskedQuestions = async ($: EngineInterface, path: string, projects: re
 }
 
 // Entries added at the end of a month's archive file, after what it holds.
-const appendArchive = async ($: EngineInterface, month: string, entries: readonly string[], s: Strings, written: ReadonlyMap<string, number> = new Map()): Promise<void> => {
+const appendArchive = async ($: EngineInterface, progressFile: string, month: string, entries: readonly string[], s: Strings, written: ReadonlyMap<string, number> = new Map()): Promise<void> => {
   if (entries.length === 0) return
+  const pendingFile = pendingArchivePath(progressFile)
+  let pendingText = ''
+  try { pendingText = await readText($, pendingFile) } catch {}
+  const pending = parsePendingArchive(pendingText)
   const archive = await partFor($, month)
   const past = await readText($, archive)
-  const missing = missingEntries([past], entries, written)
+  const missing = missingEntries([past], entries, written, pending)
   if (missing.length === 0) return
+  await $.fs.write(pendingFile, JSON.stringify({ entries }) + '\n').catch(() => undefined)
   const head = past.trim() === '' ? `${s.archiveTitle}\n\n` : past.replace(/\s*$/, '\n\n')
   await $.fs.write(archive, head + missing.join('\n\n') + '\n')
 }
@@ -3075,9 +3084,12 @@ const archiveOne = async ($: EngineInterface, ref: TaskRef): Promise<boolean> =>
     pendingEntries = taken.entries
     return taken.text
   }, undefined, async (path, text) => {
-    await appendArchive($, archivePath(path, at), pendingEntries.filter(entry => !archived.has(entry)), s)
+    const fresh = pendingEntries.filter(entry => !archived.has(entry))
+    await appendArchive($, path, archivePath(path, at), fresh, s)
     for (const entry of pendingEntries) archived.add(entry)
     await $.fs.write(path, text)
+    const isWin = await isWindows($, path)
+    await removeFiles($, [pendingArchivePath(path)], isWin)
   })
   if (wrote === null) return false
   if (ref.session === null) {
