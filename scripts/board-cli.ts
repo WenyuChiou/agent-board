@@ -1478,8 +1478,12 @@ const stopBoard = async (): Promise<void> => {
     process.stdout.write(`${s.serveNoneRunning}\n`)
     return
   }
-  await letGo(found.page, serveFile())
-  process.stdout.write(`${s.serveStopped}\n`)
+  if (await letGo(found.page, serveFile())) {
+    process.stdout.write(`${s.serveStopped}\n`)
+  } else {
+    process.stdout.write(`${s.serveNotStopped}\n`)
+    process.exitCode = 1
+  }
 }
 
 const sshHost = (): string => {
@@ -1528,7 +1532,7 @@ const runWatchTerminal = async (): Promise<void> => {
   if (process.env.SSH_CONNECTION || process.env.SSH_TTY) {
     const server = await ensureServer()
     if (server) {
-      sshHint = `\n${mutedLine(s.serveSshHint(server.port, sshHost()), options())}\n`
+      sshHint = `\n${mutedLine(s.serveSshHint(server.port, sshHost(), server.url), options())}\n`
     }
   }
   let state: BoardState = { ...emptyBoardState, seen: {}, isIdleOpen: args.includes('--all') }

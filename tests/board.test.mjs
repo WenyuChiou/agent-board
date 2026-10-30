@@ -4,7 +4,7 @@ import { execFile, execFileSync, spawn, spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { EventEmitter } from 'node:events'
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs'
-import { request } from 'node:http'
+import { createServer, request } from 'node:http'
 import { createServer as createNetServer } from 'node:net'
 import { tmpdir } from 'node:os'
 import { registerHooks } from 'node:module'
@@ -4437,6 +4437,57 @@ test('agent-board stop stops this file\'s page and says so, and says when none i
   } finally {
     await board.end([])
   }
+})
+
+test('stop says the board page did not stop and exits 1 when the page refuses to close', { timeout: 40_000 }, async () => {
+  const board = serveIn()
+  const requests = []
+  const built = String(statSync(board.script).mtimeMs)
+  const fake = createServer((req, res) => {
+    requests.push([req.method, req.url, req.headers['x-board-token']])
+    if (req.url === '/api/ping') {
+      res.writeHead(200, { 'content-type': 'application/json' })
+      res.end(JSON.stringify({ path: board.path, built, allowResume: false }))
+    } else if (req.url === '/api/close') {
+      res.writeHead(409)
+      res.end()
+    } else {
+      res.writeHead(404)
+      res.end()
+    }
+  })
+  try {
+    await new Promise(done => fake.listen(0, '127.0.0.1', done))
+    const { port } = fake.address()
+    const url = `http://127.0.0.1:${port}/?t=synthetic-busy`
+    const address = JSON.stringify({ pid: process.pid, port, url, path: board.path, built })
+    addressFixture(board.served, address)
+    const result = await new Promise(done => {
+      execFile(process.execPath, [board.script, 'stop'], { env: board.env, encoding: 'utf8', timeout: 20_000 }, (error, stdout, stderr) => {
+        done({ code: error?.code ?? 0, stdout, stderr })
+      })
+    })
+    assert.deepEqual(requests, [['GET', '/api/ping', 'synthetic-busy'], ['POST', '/api/close', 'synthetic-busy']])
+    assert.equal(result.code, 1, result.stderr)
+    assert.equal(result.stdout.trim(), 'The board page did not stop; it may be sending a reply. Run stop again in a moment.')
+    assert.ok(!result.stdout.includes('Stopped the board page.'))
+    assert.equal(readFileSync(board.served, 'utf8'), address)
+  } finally {
+    if (fake.listening) await new Promise(done => fake.close(done))
+    await fs.promises.rm(board.dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })
+  }
+})
+
+test('the SSH hint links to the page with its token', () => {
+  const port = 43210
+  const host = 'board.example'
+  const url = `http://127.0.0.1:${port}/?t=synthetic-ssh-token`
+  for (const words of [EN, ZH_TW, ZH_CN]) {
+    const hint = words.serveSshHint(port, host, url)
+    assert.ok(hint.includes(`ssh -L ${port}:127.0.0.1:${port} ${host}`), hint)
+    assert.ok(hint.includes(url), hint)
+  }
+  assert.ok(BOARD_SCRIPT.includes('s.serveSshHint(server.port, sshHost(), server.url)'))
 })
 
 test('an agent or a pipe running agent-board gets today\'s text and no window', async () => {
