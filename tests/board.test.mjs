@@ -17,6 +17,7 @@ import childProcess from 'node:child_process'
 import { syncBuiltinESMExports } from 'node:module'
 import { runInNewContext } from 'node:vm'
 import assert from 'node:assert/strict'
+import { pickSurface, AGENT_ENV_VARS } from '../hooks/surface.ts'
 import { BOARD_SCRIPT } from '../hooks/board-script.ts'
 import { boardRun, geminiBoardCommand, normalizeCommandPath, opencodeBoardCommand } from '../hooks/board-commands.ts'
 import { RELEASED } from '../hooks/released.ts'
@@ -4318,6 +4319,113 @@ const serveIn = () => {
   }
   return { dir, path, script, env, serve, urlOf, served, end }
 }
+
+test('the board command picks text, the terminal board or the page from where it runs', () => {
+  assert.equal(pickSurface({ isTty: false }), 'text')
+  assert.equal(pickSurface({ isTty: false, platform: 'win32', env: {} }), 'text')
+  assert.equal(pickSurface({ isTty: false, platform: 'darwin', env: {} }), 'text')
+  assert.equal(pickSurface({ isTty: false, platform: 'linux', env: { DISPLAY: ':0' } }), 'text')
+
+  assert.equal(pickSurface({ isTty: true, platform: 'win32', env: { CI: 'true' } }), 'text')
+  assert.equal(pickSurface({ isTty: true, platform: 'darwin', env: { CI: '1' } }), 'text')
+  assert.equal(pickSurface({ isTty: true, platform: 'linux', env: { CI: 'true', DISPLAY: ':0' } }), 'text')
+
+  for (const name of AGENT_ENV_VARS) {
+    assert.equal(pickSurface({ isTty: true, platform: 'win32', env: { [name]: '1' } }), 'text', `${name} should pick text`)
+    assert.equal(pickSurface({ isTty: true, platform: 'darwin', env: { [name]: '1' } }), 'text', `${name} should pick text`)
+    assert.equal(pickSurface({ isTty: true, platform: 'linux', env: { [name]: '1', DISPLAY: ':0' } }), 'text', `${name} should pick text`)
+  }
+
+  for (const platform of ['win32', 'darwin', 'linux']) {
+    assert.equal(pickSurface({ isTty: true, platform, env: { SSH_CONNECTION: '192.168.1.1 1234 192.168.1.2 22' } }), 'terminal')
+    assert.equal(pickSurface({ isTty: true, platform, env: { SSH_TTY: '/dev/pts/1' } }), 'terminal')
+  }
+
+  assert.equal(pickSurface({ isTty: true, platform: 'linux', env: {} }), 'terminal')
+  assert.equal(pickSurface({ isTty: true, platform: 'linux', env: { DISPLAY: '', WAYLAND_DISPLAY: '' } }), 'terminal')
+
+  assert.equal(pickSurface({ isTty: true, platform: 'win32', env: {} }), 'page')
+  assert.equal(pickSurface({ isTty: true, platform: 'darwin', env: {} }), 'page')
+  assert.equal(pickSurface({ isTty: true, platform: 'linux', env: { DISPLAY: ':0' } }), 'page')
+  assert.equal(pickSurface({ isTty: true, platform: 'linux', env: { WAYLAND_DISPLAY: 'wayland-0' } }), 'page')
+})
+
+test('a second agent-board reuses the running page and says it was already running', { timeout: 40_000 }, async () => {
+  const board = serveIn()
+  const urls = []
+  try {
+    const ttyShim = join(board.dir, 'tty-shim.cjs')
+    writeFileSync(ttyShim, 'process.stdout.isTTY = true; process.stdin.isTTY = true;\n')
+    const runBoard = (args = []) => new Promise((done, fail) => {
+      execFile(process.execPath, ['--require', ttyShim, board.script, '--no-open', ...args], { env: board.env, encoding: 'utf8', timeout: 20_000 }, (error, out) => (error ? fail(error) : done(out)))
+    })
+
+    const first = await runBoard()
+    const url1 = board.urlOf(first)
+    assert.ok(url1, 'first run should output address')
+    urls.push(url1)
+    const firstLines = first.trim().split('\n').filter(Boolean)
+    assert.ok(firstLines.length <= 3, `first run should be at most 3 lines, got ${firstLines.length}`)
+    assert.ok(!first.includes('already running'), 'first run should not say already running')
+
+    const second = await runBoard()
+    const url2 = board.urlOf(second)
+    assert.ok(url2, 'second run should output address')
+    urls.push(url2)
+    assert.equal(url1, url2, 'second run must reuse the same server and URL')
+    assert.ok(second.includes(EN.serveAlreadyRunning), 'second run must say it was already running')
+    const secondLines = second.trim().split('\n').filter(Boolean)
+    assert.ok(secondLines.length <= 3, `second run should be at most 3 lines, got ${secondLines.length}`)
+  } finally {
+    await board.end(urls)
+  }
+})
+
+test('agent-board stop stops this file\'s page and says so, and says when none is running', { timeout: 40_000 }, async () => {
+  const board = serveIn()
+  try {
+    const stopCmd = () => new Promise((done, fail) => {
+      execFile(process.execPath, [board.script, 'stop'], { env: board.env, encoding: 'utf8', timeout: 20_000 }, (error, out) => (error ? fail(error) : done(out)))
+    })
+    const none = await stopCmd()
+    assert.equal(none.trim(), EN.serveNoneRunning)
+
+    const started = await board.serve()
+    const url = board.urlOf(started)
+    assert.ok(url, 'server must be running')
+
+    const stopped = await stopCmd()
+    assert.equal(stopped.trim(), EN.serveStopped)
+
+    const noneAgain = await stopCmd()
+    assert.equal(noneAgain.trim(), EN.serveNoneRunning)
+  } finally {
+    await board.end([])
+  }
+})
+
+test('an agent or a pipe running agent-board gets today\'s text and no window', async () => {
+  const board = serveIn()
+  try {
+    const piped = await new Promise((done, fail) => {
+      execFile(process.execPath, [board.script], { env: board.env, encoding: 'utf8', timeout: 20_000 }, (error, out) => (error ? fail(error) : done(out)))
+    })
+    assert.ok(piped.startsWith('Progress'), 'piped run must output text board')
+    assert.ok(!existsSync(board.served), 'piped run must start no server')
+
+    const ttyShim = join(board.dir, 'tty-shim-agent.cjs')
+    writeFileSync(ttyShim, 'process.stdout.isTTY = true; process.stdin.isTTY = true;\n')
+    for (const envVar of ['CLAUDECODE', 'CODEX_THREAD_ID', 'CURSOR_AGENT']) {
+      const agentRun = await new Promise((done, fail) => {
+        execFile(process.execPath, ['--require', ttyShim, board.script], { env: { ...board.env, [envVar]: '1' }, encoding: 'utf8', timeout: 20_000 }, (error, out) => (error ? fail(error) : done(out)))
+      })
+      assert.ok(agentRun.startsWith('Progress'), `${envVar} must output text board`)
+      assert.ok(!existsSync(board.served), `${envVar} must start no server`)
+    }
+  } finally {
+    await board.end([])
+  }
+})
 
 test('Windows page address tokens stay in a current-account-only runtime folder', { skip: process.platform !== 'win32' && 'Windows ACLs only', timeout: 40_000 }, async () => {
   const board = serveIn()
