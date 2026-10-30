@@ -46,6 +46,7 @@ import {
   parseJournal,
   previousMonth,
   progressReport,
+  missingEntries,
   unwrittenEntries,
 } from './journal'
 import type { JournalEntry } from './journal'
@@ -2998,7 +2999,7 @@ const archiveOld = async ($: EngineInterface, isNow = false, isCleanUp = false):
   }, undefined, async (path, text) => {
     // Made again after another session's write, the same blocks are not archived twice.
     const fresh = unwrittenEntries(pendingEntries, archived)
-    await appendArchive($, archivePath(path, at), fresh, s)
+    await appendArchive($, archivePath(path, at), fresh, s, archived)
     for (const entry of fresh) archived.set(entry, (archived.get(entry) ?? 0) + 1)
     for (const entry of pendingMoved) moved.set(entry.session, entry.text)
     await $.fs.write(path, text)
@@ -3042,12 +3043,14 @@ const keepAskedQuestions = async ($: EngineInterface, path: string, projects: re
 }
 
 // Entries added at the end of a month's archive file, after what it holds.
-const appendArchive = async ($: EngineInterface, month: string, entries: readonly string[], s: Strings): Promise<void> => {
+const appendArchive = async ($: EngineInterface, month: string, entries: readonly string[], s: Strings, written: ReadonlyMap<string, number> = new Map()): Promise<void> => {
   if (entries.length === 0) return
   const archive = await partFor($, month)
   const past = await readText($, archive)
+  const missing = missingEntries([past], entries, written)
+  if (missing.length === 0) return
   const head = past.trim() === '' ? `${s.archiveTitle}\n\n` : past.replace(/\s*$/, '\n\n')
-  await $.fs.write(archive, head + entries.join('\n\n') + '\n')
+  await $.fs.write(archive, head + missing.join('\n\n') + '\n')
 }
 
 // One task to the archive at the person's word, written the way archiveOld writes. False when

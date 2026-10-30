@@ -4505,3 +4505,13 @@ test('archive entries are counted with their number: a new twin of an archived e
   expect(missingEntries([archive(3)], [entry], new Map([[entry, 2]]))).toEqual([])
   expect(missingEntries([archive(2)], [entry], new Map([[entry, 2]]))).toEqual([entry])
 })
+
+test('archive entries with session markers distinguish same-day twins from crash-recovery retries', () => {
+  const entryA = '## Synthetic · 2026-10-16 <!-- auto session=a1b2c311 -->\n### Synthetic twin\n- [x] Finished'
+  const entryB = '## Synthetic · 2026-10-16 <!-- auto session=a1b2c312 -->\n### Synthetic twin\n- [x] Finished'
+  const archiveA = `# Archive\n\n${entryA}\n`
+  expect(archiveEntryCount(archiveA, entryA)).toBe(1)
+  expect(archiveEntryCount(archiveA, entryB)).toBe(0)
+  expect(missingEntries([archiveA], [entryB])).toEqual([entryB])
+  expect(missingEntries([archiveA], [entryA])).toEqual([])
+})

@@ -4820,6 +4820,80 @@ test('/progress tidy still says two archived tasks when a stale write puts the t
   expect(world.files.get(ARCHIVE)?.split('### Synthetic twin').length).toBe(3)
 })
 
+test('/progress tidy twice on the same day with one same-title same-steps done block each time: the archive ends with two entries', async ($, on) => {
+  const block = (session: string): string => `<!-- auto session=${session} agent=codex state=done updated=2026-10-16T08:00:00Z -->\n### Synthetic twin\n- [x] Finished\n<!-- /auto session=${session} -->\n`
+  const world: World = { files: new Map([[FILE, `# Progress\n\n## Synthetic\n${block('a1b2c395')}`]]), mtime: 1, hasTasks: true, store: { lang: 'en', autoConnectOff: true } }
+  engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/synthetic', surface: 'desktop', isInteractive: true })
+  expect((await $.command.run(TIDY)).text).toBe(STRINGS.en.tidyMoved(1))
+  expect(world.files.get(ARCHIVE)?.split('### Synthetic twin').length).toBe(2)
+  world.files.set(FILE, `# Progress\n\n## Synthetic\n${block('a1b2c396')}`)
+  expect((await $.command.run(TIDY)).text).toBe(STRINGS.en.tidyMoved(1))
+  expect(world.files.get(FILE)).not.toContain('Synthetic twin')
+  expect(world.files.get(ARCHIVE)?.split('### Synthetic twin').length).toBe(3)
+})
+
+test('the pane archive twice on the same day with one same-title same-steps done block each time: the archive ends with two entries', async ($, on) => {
+  const block = (session: string): string => `<!-- auto session=${session} agent=codex state=done updated=2026-10-16T08:00:00Z -->\n### Synthetic twin\n- [x] Finished\n<!-- /auto session=${session} -->\n`
+  const world: World = { files: new Map([[FILE, `# Progress\n\n## Synthetic\n${block('a1b2c395')}`]]), mtime: 1, hasTasks: true, store: { lang: 'en', autoConnectOff: true } }
+  engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/synthetic', surface: 'desktop', isInteractive: true })
+  const ui1 = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
+  try {
+    await ui1.press({ key: 'section::recent' })
+    await ui1.press({ key: 'archive' })
+    expect(await ui1.find({ type: 'Text', text: STRINGS.en.tidyMoved(1) })).toBeDefined()
+  } finally { await ui1.unmount() }
+  expect(world.files.get(ARCHIVE)?.split('### Synthetic twin').length).toBe(2)
+  world.files.set(FILE, `# Progress\n\n## Synthetic\n${block('a1b2c396')}`)
+  const ui2 = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
+  try {
+    await ui2.press({ key: 'section::recent' })
+    await ui2.press({ key: 'archive' })
+    expect(await ui2.find({ type: 'Text', text: STRINGS.en.tidyMoved(1) })).toBeDefined()
+  } finally { await ui2.unmount() }
+  expect(world.files.get(FILE)).not.toContain('Synthetic twin')
+  expect(world.files.get(ARCHIVE)?.split('### Synthetic twin').length).toBe(3)
+})
+
+test('/progress tidy with archive saved and task not removed (simulated failure), then tidy again: one entry, not two', async ($, on) => {
+  const block = (session: string): string => `<!-- auto session=${session} agent=codex state=done updated=2026-10-16T08:00:00Z -->\n### Synthetic twin\n- [x] Finished\n<!-- /auto session=${session} -->\n`
+  const file = `# Progress\n\n## Synthetic\n${block('a1b2c397')}`
+  const world: World = { files: new Map([[FILE, file]]), mtime: 1, hasTasks: true, store: { lang: 'en', autoConnectOff: true } }
+  engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/synthetic', surface: 'desktop', isInteractive: true })
+  expect((await $.command.run(TIDY)).text).toBe(STRINGS.en.tidyMoved(1))
+  expect(world.files.get(ARCHIVE)?.split('### Synthetic twin').length).toBe(2)
+  world.files.set(FILE, file)
+  expect((await $.command.run(TIDY)).text).toBe(STRINGS.en.tidyNothing)
+  expect(world.files.get(FILE)).not.toContain('Synthetic twin')
+  expect(world.files.get(ARCHIVE)?.split('### Synthetic twin').length).toBe(2)
+})
+
+test('the pane archive with archive saved and task not removed (simulated failure), then tidy again: one entry, not two', async ($, on) => {
+  const block = (session: string): string => `<!-- auto session=${session} agent=codex state=done updated=2026-10-16T08:00:00Z -->\n### Synthetic twin\n- [x] Finished\n<!-- /auto session=${session} -->\n`
+  const file = `# Progress\n\n## Synthetic\n${block('a1b2c397')}`
+  const world: World = { files: new Map([[FILE, file]]), mtime: 1, hasTasks: true, store: { lang: 'en', autoConnectOff: true } }
+  engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/synthetic', surface: 'desktop', isInteractive: true })
+  const ui1 = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
+  try {
+    await ui1.press({ key: 'section::recent' })
+    await ui1.press({ key: 'archive' })
+    expect(await ui1.find({ type: 'Text', text: STRINGS.en.tidyMoved(1) })).toBeDefined()
+  } finally { await ui1.unmount() }
+  expect(world.files.get(ARCHIVE)?.split('### Synthetic twin').length).toBe(2)
+  world.files.set(FILE, file)
+  const ui2 = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
+  try {
+    await ui2.press({ key: 'section::recent' })
+    await ui2.press({ key: 'archive' })
+    expect(await ui2.find({ type: 'Text', text: STRINGS.en.tidyNothing })).toBeDefined()
+  } finally { await ui2.unmount() }
+  expect(world.files.get(FILE)).not.toContain('Synthetic twin')
+  expect(world.files.get(ARCHIVE)?.split('### Synthetic twin').length).toBe(2)
+})
+
 test('on a light terminal no text falls back to the terminal dim', async ($, on) => {
   const world: World = { files: new Map([[FILE, JOBS]]), mtime: 1, hasTasks: true, store: { opened: ['others', 'waiting', 'recent', 'steps'] } }
   engineBeneath(on, world)
