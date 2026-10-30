@@ -35,7 +35,7 @@ An old progress card is not proof that a process is running. Equally, an open ap
 
 ## The board in every agent
 
-Use the installed command `agent-board` in any terminal:
+After `npm install -g @wenyuchiou/agent-board`, the `agent-board` command works in any terminal; without it, write `npx @wenyuchiou/agent-board` in its place:
 
 ```sh
 agent-board
