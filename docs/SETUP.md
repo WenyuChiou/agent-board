@@ -15,7 +15,28 @@ does not identify Gemini CLI: Antigravity uses that parent too. If the current h
 not created its configuration yet, select its known target with `--agent <name>`.
 `--agent all` previews all supported targets; it does not install the AI applications.
 
-If auto detection finds only Claude Code, setup prints the two `claude plugin` commands that connect it and exits 0 (with `--json` it prints the usual preview shape with empty `targets` and `plans` and `applied` false). Every setup error is one sentence with one next step. Add `--json` to get a failure as one JSON line on stderr, `{"error":{"code":"...","message":"..."}}`, with these codes: `INVALID_TARGETS`, `MISSING_ARGUMENT`, `SETUP_FAILED` (with the failing `agent` and its `cause`) and `UNKNOWN` (a conflict keeps its JSON preview on stdout and prints no stderr line). A leading UTF-8 byte-order mark in a JSON host config is read; setup writes that file back without it, and refuses malformed JSON whether or not it starts with one.
+Setup prints a short summary in the board's language (`--lang en`, `zh-TW` or `zh-CN`):
+one line per agent, followed by numbered next steps. The lines say what would change,
+what changed, what is already set up, or which conflicting files caused an agent to be
+skipped. With `--apply`, agents without conflicts are still set up; a skipped agent's
+line gives the `--agent <name>` command to retry after fixing its files. Setup exits
+nonzero when every selected agent has a conflict. A second run with nothing to change
+says each agent is already set up and writes nothing.
+
+Whenever Claude Code's config folder exists (`CLAUDE_CONFIG_DIR`, else `~/.claude`),
+the next steps include both `claude plugin` commands to connect it, even alongside other
+agents. If only Claude Code is found, setup prints its plugin guidance and exits 0.
+
+Add `--json` for the existing machine-readable output, with the same `targets`, `plans`
+and `applied` fields. An apply run that skips an agent for a conflict but sets up another
+still reports `applied: true`, so scripts should check `plans[].conflicts`. Claude-only
+detection keeps empty `targets` and `plans` and
+`applied` false. Other setup errors give one sentence with a next step; `--json` prints
+them as one JSON line on stderr, `{"error":{"code":"...","message":"..."}}`, with
+codes `INVALID_TARGETS`, `MISSING_ARGUMENT`, `SETUP_FAILED` (with the failing `agent`
+and its `cause`) or `UNKNOWN`. Conflicts stay in `plans` on stdout with no JSON stderr
+line. A leading UTF-8 byte-order mark in a JSON host config is read; setup writes that
+file back without it, and refuses malformed JSON whether or not it starts with one.
 
 Preview lists persistent files, hook definitions, conflicts and remaining capabilities.
 Apply the reviewed scope under the user's authorization. Preserve unrelated settings and

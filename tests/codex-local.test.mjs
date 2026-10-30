@@ -62,6 +62,7 @@ const session = 'test-codex-session-123'
 // write into another test or the account's actual native configuration.
 const isolatedEnv = home => ({
   ...process.env, HOME: home, USERPROFILE: home,
+  LANG: 'en', AGENT_BOARD_SETUP_COMMAND: '',
   LOCALAPPDATA: join(home, 'AppData', 'Local'), APPDATA: join(home, 'AppData', 'Roaming'),
   CLAUDE_PROGRESS_FILE: '', CLAUDE_CONFIG_DIR: join(home, '.claude'),
   CODEX_HOME: join(home, '.codex'), GROK_HOME: join(home, '.grok'), HERMES_HOME: join(home, '.hermes'),
@@ -385,13 +386,140 @@ test('setup preserves malformed BOM-prefixed Codex hooks when it refuses install
 
 const setupAgent = (f, ...args) => spawnSync(process.execPath, [resolve('scripts/setup-agent.mjs'), '--home', f.home, '--codex-dir', join(f.home, '.codex'), '--grok-dir', join(f.home, '.grok'), '--hermes-dir', join(f.home, '.hermes'), ...args], { env: f.env, encoding: 'utf8', windowsHide: true, timeout: 30000 })
 
+test('setup prints a plain summary with each agent and the next steps, and --json keeps today\'s JSON', () => fixture(f => {
+  const installer = readFileSync(resolve('scripts/setup-agent.mjs'), 'utf8')
+  const start = installer.indexOf('const summaries = ') + 'const summaries = '.length
+  const end = installer.indexOf('\nconst summary = ', start)
+  assert.ok(start >= 'const summaries = '.length && end > start)
+  const bootstrap = JSON.parse(installer.slice(start, end))
+  const tables = ['hooks/strings-en.ts', 'hooks/i18n.ts', 'hooks/strings-zh-cn.ts'].map(file => {
+    const match = readFileSync(resolve(file), 'utf8').match(/  setupSummary: (\{[\s\S]*?\n  \}),/)
+    assert.ok(match, file)
+    return JSON.parse(match[1])
+  })
+  assert.deepEqual(bootstrap, tables)
+
+  const summaries = []
+  for (const lang of ['en', 'zh-TW', 'zh-CN']) {
+    const result = setupAgent(f, '--lang', lang, '--agent', 'codex,hermes')
+    assert.equal(result.status, 0, result.stderr)
+    assert.equal(result.stderr, '')
+    assert.notEqual(result.stdout.trimStart()[0], '{')
+    assert.match(result.stdout, /Codex/)
+    assert.match(result.stdout, /Hermes Agent/)
+    assert.match(result.stdout, /\/hooks/)
+    assert.match(result.stdout, /--apply/)
+    assert.match(result.stdout, /agent-board/)
+    assert.match(result.stdout, /--serve/)
+    assert.match(result.stdout, /^1\. /m)
+    summaries.push(result.stdout)
+  }
+  assert.equal(new Set(summaries).size, 3)
+
+  assert.match(summaries[0], /Hermes Agent.*automatic reporting is unavailable/i)
+  const childPlans = ['codex', 'hermes'].map(agent => JSON.parse(f.install('--lang', 'zh-CN', '--agent', agent).stdout))
+  const json = setupAgent(f, '--lang', 'zh-CN', '--agent', 'codex,hermes', '--json')
+  assert.equal(json.status, 0, json.stderr)
+  assert.equal(json.stderr, '')
+  assert.deepEqual(JSON.parse(json.stdout), { targets: ['codex', 'hermes'], plans: childPlans, applied: false })
+  assert.equal(existsSync(f.root), false)
+}))
+
+test('setup names the Claude Code plugin whenever Claude Code is installed', async () => {
+  for (const kind of ['home', 'override', 'with-codex']) await fixture(f => {
+    const claude = kind === 'override' ? join(f.home, 'native-claude') : join(f.home, '.claude')
+    f.env.CLAUDE_CONFIG_DIR = claude
+    mkdirSync(claude)
+    if (kind === 'with-codex') mkdirSync(join(f.home, '.codex'))
+    const guidance = setupAgent(f, '--lang', 'en')
+    assert.equal(guidance.status, 0, guidance.stderr)
+    assert.equal(guidance.stderr, '')
+    for (const text of ['Claude Code', 'claude plugin marketplace add WenyuChiou/agent-board', 'claude plugin install agent-board@agent-board']) assert.ok(guidance.stdout.includes(text), guidance.stdout)
+    if (kind === 'with-codex') assert.match(guidance.stdout, /Codex/)
+    assert.doesNotMatch(guidance.stdout, /    at |INVALID_TARGETS/)
+    const json = setupAgent(f, '--lang', 'en', '--json')
+    assert.equal(json.status, 0, json.stderr)
+    assert.equal(json.stderr, '')
+    assert.deepEqual(JSON.parse(json.stdout).targets, kind === 'with-codex' ? ['codex'] : [])
+    assert.equal(existsSync(f.root), false)
+  })
+})
+
+test('a conflict in one agent leaves the others set up and names the skipped agent', async () => {
+  for (const agents of ['codex,cursor', 'cursor,codex']) await fixture(f => {
+    const cursor = join(f.home, '.cursor', 'hooks.json')
+    const malformed = Buffer.from('{"hooks":')
+    f.save(cursor, malformed)
+    const preview = setupAgent(f, '--lang', 'en', '--agent', agents)
+    assert.equal(preview.status, 0, preview.stderr)
+    assert.equal(preview.stderr, '')
+    for (const text of ['Codex', 'Cursor', 'skipped', '--agent cursor']) assert.ok(preview.stdout.includes(text), preview.stdout)
+    assert.deepEqual(readFileSync(cursor), malformed)
+    assert.equal(existsSync(f.root), false)
+
+    const args = ['--lang', 'en', '--agent', agents, '--apply']
+    const applied = setupAgent(f, ...args, ...(agents.startsWith('codex') ? ['--json'] : []))
+    assert.equal(applied.status, 0, applied.stderr)
+    assert.equal(applied.stderr, '')
+    assert.ok(existsSync(f.hooks))
+    assert.deepEqual(readFileSync(cursor), malformed)
+    assert.equal(existsSync(join(f.root, 'install-cursor.json')), false)
+    if (agents.startsWith('codex')) {
+      const result = JSON.parse(applied.stdout)
+      assert.equal(result.applied, true)
+      assert.deepEqual(result.targets, ['codex', 'cursor'])
+      assert.ok(result.plans.find(plan => plan.agent === 'codex').changes.length > 0)
+      assert.deepEqual(result.plans.find(plan => plan.agent === 'cursor').conflicts, [cursor])
+    } else {
+      for (const text of ['Codex', 'Cursor', 'skipped', '--agent cursor']) assert.ok(applied.stdout.includes(text), applied.stdout)
+    }
+  })
+
+  await fixture(f => {
+    const cursor = join(f.home, '.cursor', 'hooks.json')
+    f.save(f.hooks, '{"hooks":')
+    f.save(cursor, '{"hooks":')
+    for (const args of [[], ['--apply']]) {
+      const result = setupAgent(f, '--lang', 'en', '--agent', 'codex,cursor', ...args)
+      assert.equal(result.status, 1)
+      assert.equal(result.stderr, '')
+      for (const text of ['Codex', 'Cursor', 'skipped', '--agent codex', '--agent cursor']) assert.ok(result.stdout.includes(text), result.stdout)
+      assert.equal(existsSync(f.root), false)
+    }
+    const json = setupAgent(f, '--lang', 'en', '--agent', 'codex,cursor', '--apply', '--json')
+    assert.equal(json.status, 1)
+    assert.equal(json.stderr, '')
+    const result = JSON.parse(json.stdout)
+    assert.equal(result.applied, false)
+    assert.ok(result.plans.every(plan => plan.conflicts.length > 0))
+    assert.equal(existsSync(f.root), false)
+  })
+})
+
+test('a second setup says everything is already set up and writes nothing', () => fixture(f => {
+  const first = setupAgent(f, '--lang', 'en', '--agent', 'codex,cursor', '--apply')
+  assert.equal(first.status, 0, first.stderr)
+  const snapshot = directory => Object.fromEntries(readdirSync(directory, { recursive: true, withFileTypes: true })
+    .filter(entry => entry.isFile())
+    .map(entry => {
+      const file = join(entry.parentPath, entry.name)
+      return [file.slice(directory.length), { bytes: readFileSync(file), mtimeMs: statSync(file).mtimeMs }]
+    }))
+  const before = snapshot(f.home)
+  const second = setupAgent(f, '--lang', 'en', '--agent', 'codex,cursor', '--apply')
+  assert.equal(second.status, 0, second.stderr)
+  assert.equal(second.stderr, '')
+  assert.equal(second.stdout.match(/already set up/g)?.length, 2, second.stdout)
+  assert.deepEqual(snapshot(f.home), before)
+}))
+
 test('setup on a computer with only Claude Code prints guidance and exits 0 without a stack trace', () => fixture(f => {
   mkdirSync(join(f.home, '.claude'))
   const english = { ...f, env: { ...f.env, LANG: '' } }
   const guidance = setupAgent(english)
   assert.equal(guidance.status, 0, guidance.stderr)
   assert.equal(guidance.stderr, '')
-  assert.equal(guidance.stdout.trim().split('\n').length, 1)
+  assert.ok(guidance.stdout.trim().split('\n').length >= 3)
   for (const text of ['Claude Code', 'claude plugin marketplace add WenyuChiou/agent-board', 'claude plugin install agent-board@agent-board']) assert.ok(guidance.stdout.includes(text))
   assert.doesNotMatch(guidance.stdout, /    at |INVALID_TARGETS/)
   for (const args of [['--json'], ['--apply'], ['--apply', '--json']]) {
@@ -404,7 +532,7 @@ test('setup on a computer with only Claude Code prints guidance and exits 0 with
   const traditional = setupAgent(english, '--lang', 'zh-TW')
   assert.equal(traditional.status, 0, traditional.stderr)
   assert.equal(traditional.stderr, '')
-  assert.ok(traditional.stdout.includes('這台電腦只找到 Claude Code'))
+  assert.ok(traditional.stdout.includes('claude plugin install agent-board@agent-board'))
   assert.deepEqual(readdirSync(f.home), ['.claude'])
 }))
 
@@ -412,7 +540,7 @@ test('setup on a computer with Claude Code and Codex previews Codex only', async
   await fixture(f => {
     mkdirSync(join(f.home, '.claude'))
     mkdirSync(join(f.home, '.codex'))
-    const result = setupAgent(f)
+    const result = setupAgent(f, '--json')
     assert.equal(result.status, 0, result.stderr)
     assert.equal(result.stderr, '')
     assert.deepEqual(JSON.parse(result.stdout).targets, ['codex'])
@@ -474,10 +602,10 @@ test('every setup error is one sentence with one next step', async () => {
     assert.equal(result.status, 1, result.stderr)
     if (expected.isEmpty) assert.equal(result.stdout, '')
     if (expected.conflict) {
-      const plan = JSON.parse(result.stdout)
-      assert.equal(plan.applied, false)
-      assert.ok(plan.plans[0].conflicts.includes(expected.conflict))
-      assert.match(result.stderr, /without changing anything.*Codex/)
+      assert.equal(result.stderr, '')
+      assert.match(result.stdout, /Codex.*skipped/s)
+      assert.match(result.stdout, /--agent codex/)
+      return
     }
     const text = result.stderr.trimEnd()
     if (expected.message) assert.equal(text, expected.message)
@@ -582,7 +710,7 @@ test('setup accepts a UTF-8 BOM in the existing hook config of each JSON host wi
 })
 
 test('setup still refuses a malformed host config that starts with a BOM', async () => {
-  for (const [host, relative, name] of jsonHosts) await fixture(f => {
+  for (const [host, relative] of jsonHosts) await fixture(f => {
     const config = join(f.home, relative)
     const original = Buffer.from('\uFEFF{"hooks":\r\n')
     f.save(config, original)
@@ -594,10 +722,9 @@ test('setup still refuses a malformed host config that starts with a BOM', async
     assert.notEqual(applied.status, 0)
     assert.deepEqual(readFileSync(config), original)
     assert.equal(existsSync(f.root), false)
-    const common = setupAgent(f, '--lang', 'en', '--agent', host)
+    const common = setupAgent(f, '--lang', 'en', '--agent', host, '--json')
     assert.equal(common.status, 1)
-    assert.equal(common.stderr.trimEnd().split('\n').length, 1)
-    assert.ok(common.stderr.includes(name), common.stderr)
+    assert.equal(common.stderr, '')
     assert.equal(JSON.parse(common.stdout).applied, false)
     assert.deepEqual(readFileSync(config), original)
     assert.equal(existsSync(f.root), false)
@@ -609,8 +736,8 @@ test('setup names the host with an unreadable config and still previews the othe
     const cursor = join(f.home, '.cursor', 'hooks.json')
     f.save(cursor, '\uFEFF{"hooks":\r\n')
     f.save(f.hooks, '{}')
-    const result = setupAgent(f, '--lang', 'en', '--agent', 'codex,cursor')
-    assert.equal(result.status, 1)
+    const result = setupAgent(f, '--lang', 'en', '--agent', 'codex,cursor', '--json')
+    assert.equal(result.status, 0, result.stderr)
     const preview = JSON.parse(result.stdout)
     assert.deepEqual(preview.targets, ['codex', 'cursor'])
     assert.equal(preview.applied, false)
@@ -618,20 +745,18 @@ test('setup names the host with an unreadable config and still previews the othe
     assert.ok(preview.plans[1].conflicts.includes(cursor))
     assert.deepEqual(preview.plans[0].conflicts, [])
     assert.ok(preview.plans[0].changes.some(change => ['create', 'update'].includes(change.action)))
-    assert.equal(result.stderr.trimEnd().split('\n').length, 1)
-    assert.match(result.stderr, /Cursor/)
-    assert.doesNotMatch(result.stderr, /Codex/)
+    assert.equal(result.stderr, '')
     assert.equal(existsSync(f.root), false)
   })
-  for (const [agent, relative, original, name] of [
-    ['cursor', '.cursor/hooks.json', '{"hooks":[]}', 'Cursor'],
-    ['cursor', '.cursor/hooks.json', '{"hooks":{"stop":"x"}}', 'Cursor'],
-    ['openclaw', '.openclaw/openclaw.json', '{"plugins":{"load":{"paths":"x"}}}', 'OpenClaw'],
+  for (const [agent, relative, original] of [
+    ['cursor', '.cursor/hooks.json', '{"hooks":[]}'],
+    ['cursor', '.cursor/hooks.json', '{"hooks":{"stop":"x"}}'],
+    ['openclaw', '.openclaw/openclaw.json', '{"plugins":{"load":{"paths":"x"}}}'],
   ]) await fixture(f => {
     const config = join(f.home, relative)
     f.save(config, original)
-    const result = setupAgent(f, '--lang', 'en', '--agent', `codex,${agent}`)
-    assert.equal(result.status, 1)
+    const result = setupAgent(f, '--lang', 'en', '--agent', `codex,${agent}`, '--json')
+    assert.equal(result.status, 0, result.stderr)
     const preview = JSON.parse(result.stdout)
     assert.deepEqual(preview.targets, ['codex', agent])
     assert.equal(preview.applied, false)
@@ -639,9 +764,7 @@ test('setup names the host with an unreadable config and still previews the othe
     assert.deepEqual(preview.plans[1].conflicts, [config])
     assert.deepEqual(preview.plans[0].conflicts, [])
     assert.ok(preview.plans[0].changes.some(change => ['create', 'update'].includes(change.action)))
-    assert.equal(result.stderr.trimEnd().split('\n').length, 1)
-    assert.ok(result.stderr.includes(name), result.stderr)
-    assert.doesNotMatch(result.stderr, /Codex/)
+    assert.equal(result.stderr, '')
     assert.equal(existsSync(f.root), false)
     assert.equal(readFileSync(config, 'utf8'), original)
   })
@@ -2772,7 +2895,7 @@ test('auto setup detects overridden host directories without scanning sessions',
   f.env.OPENCLAW_STATE_DIR = join(f.home, 'openclaw-dir')
   f.env.DSH_HOME = join(f.home, 'deepseek-dir')
   for (const file of [f.env.OPENCODE_CONFIG_DIR, f.env.OPENCLAW_STATE_DIR, f.env.DSH_HOME]) mkdirSync(file)
-  const preview = spawnSync(process.execPath, [resolve('scripts/setup-agent.mjs'), '--home', f.home, '--codex-dir', join(f.home, '.codex'), '--grok-dir', join(f.home, '.grok'), '--hermes-dir', join(f.home, '.hermes')], {env:f.env, encoding:'utf8', windowsHide:true})
+  const preview = spawnSync(process.execPath, [resolve('scripts/setup-agent.mjs'), '--home', f.home, '--codex-dir', join(f.home, '.codex'), '--grok-dir', join(f.home, '.grok'), '--hermes-dir', join(f.home, '.hermes'), '--json'], {env:f.env, encoding:'utf8', windowsHide:true})
   assert.equal(preview.status, 0, preview.stderr)
   assert.deepEqual(JSON.parse(preview.stdout).targets, ['opencode', 'openclaw', 'deepseek'])
   assert.ok(!existsSync(f.root))
@@ -2911,7 +3034,7 @@ test('Grok prompt hooks return a waiting session to working through the native s
 
 test('auto setup does not mistake an Antigravity profile or the shared gemini directory for Gemini CLI', () => fixture(f => {
   mkdirSync(join(f.home, '.gemini', 'antigravity-cli'), { recursive: true })
-  const args = [resolve('scripts/setup-agent.mjs'), '--home', f.home, '--codex-dir', join(f.home, '.codex')]
+  const args = [resolve('scripts/setup-agent.mjs'), '--home', f.home, '--codex-dir', join(f.home, '.codex'), '--json']
   const run = () => spawnSync(process.execPath, args, { env: f.env, encoding: 'utf8', windowsHide: true })
   const result = run()
   assert.equal(result.status, 0, result.stderr)
@@ -2923,7 +3046,7 @@ test('auto setup does not mistake an Antigravity profile or the shared gemini di
 
 test('all targets initialize one shared board and explicitly name unfinished native adapters', () => fixture(f => {
   const installer = resolve('scripts/setup-agent.mjs')
-  const result = spawnSync(process.execPath, [installer, '--agent', 'all', '--home', f.home, '--codex-dir', join(f.home, '.codex'), '--grok-dir', join(f.home, '.grok'), '--hermes-dir', join(f.home, '.hermes'), '--apply'], { env: f.env, encoding: 'utf8', windowsHide: true, timeout: 30000 })
+  const result = spawnSync(process.execPath, [installer, '--agent', 'all', '--home', f.home, '--codex-dir', join(f.home, '.codex'), '--grok-dir', join(f.home, '.grok'), '--hermes-dir', join(f.home, '.hermes'), '--apply', '--json'], { env: f.env, encoding: 'utf8', windowsHide: true, timeout: 30000 })
   assert.equal(result.status, 0, `${JSON.stringify({ error: result.error?.code, signal: result.signal })}\n${result.stderr}`)
   const plans = JSON.parse(result.stdout).plans
   assert.equal(plans.length, 10)
