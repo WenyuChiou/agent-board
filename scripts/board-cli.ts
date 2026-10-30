@@ -24,7 +24,7 @@ import { serverMemoryArgs } from './server-runtime'
 import { migratePrivateRuntimeFile, privateRuntimeFolder, readPrivateRuntimeFile, RuntimeFolderError, writePrivateRuntimeFile } from './runtime-folder'
 import { idleTimeout } from '../hooks/serve'
 import { pickSurface } from '../hooks/surface'
-import { boardAgents, boardKey, boardScreen, boardText, CHAT_MAX, chatText, doneToday, emptyBoardState, frame, isEmptyBoard, mutedLine, peekInbox, pinned, redact, routesOf, SCREEN_ENTER, SCREEN_LEAVE, screenItems, terminalLook } from '../hooks/board'
+import { boardAgents, boardKey, boardScreen, boardText, CHAT_MAX, chatText, doneToday, emptyBoardState, frame, isEmptyBoard, mutedLine, peekInbox, pinned, redact, boardItems, routesOf, SCREEN_ENTER, SCREEN_LEAVE, terminalLook } from '../hooks/board'
 import type { AnswerRoute, BoardAction, BoardState } from '../hooks/board'
 import { LOG_TAIL, isInboxFile } from '../hooks/inbox'
 import { dashboardHtml } from '../hooks/dashboard'
@@ -1024,7 +1024,7 @@ type Send = Extract<BoardAction, { type: 'send' }>
 
 const press = (state: BoardState, key: string): { state: BoardState; isQuit: boolean; isHtml: boolean; isWrite: boolean; send?: Send } => {
   const shown = freshView()
-  const items = screenItems(shown, pending(), state.isIdleOpen ?? false, state.isOlderOpen ?? false)
+  const items = boardItems(shown, pending(), state.isIdleOpen ?? false, state.isOlderOpen ?? false)
   const { state: next, action } = boardKey(state, key, items, s, routes)
   if (action === null) return { state: next, isQuit: false, isHtml: false, isWrite: false }
   if (action.type === 'quit') return { state: next, isQuit: true, isHtml: false, isWrite: false }
@@ -1069,7 +1069,7 @@ const screen = (state: BoardState): string => {
 }
 
 // What the screen shows is what the next key acts on.
-const pin = (state: BoardState): BoardState => pinned(state, screenItems(view(), pending(), state.isIdleOpen ?? false, state.isOlderOpen ?? false))
+const pin = (state: BoardState): BoardState => pinned(state, boardItems(view(), pending(), state.isIdleOpen ?? false, state.isOlderOpen ?? false))
 
 // The running page, found without making its folder: the terminal board only looks for one.
 const runningAddress = (): Running | null => {
@@ -1543,7 +1543,7 @@ const runWatchTerminal = async (): Promise<void> => {
     try {
       const shown = freshView()
       const turns = pending()
-      state = pinned(state, screenItems(shown, turns, state.isIdleOpen ?? false, state.isOlderOpen ?? false))
+      state = pinned(state, boardItems(shown, turns, state.isIdleOpen ?? false, state.isOlderOpen ?? false))
       paintScreen(`${boardScreen(shown, turns, state, s, { ...options(), agents: agentsHere(shown, turns) })}${sshHint}`)
     } catch (error) {
       paintScreen(`${failureNote(error)}\n`)
