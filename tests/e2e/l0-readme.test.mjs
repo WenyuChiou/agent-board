@@ -114,7 +114,7 @@ describe('L0 discover and install from the README', () => {
       const first = section(text, SECTIONS[lang][0])
       assert.ok(first, `${name}: Quick start exists`)
       const node = first.indexOf('Node.js 22')
-      const install = /```(?:sh|bash)\r?\n(npx @wenyuchiou\/agent-board setup\r?\nnpx @wenyuchiou\/agent-board setup --apply\r?\nagent-board)\r?\n```/.exec(first)
+      const install = /```(?:sh|bash)\r?\n(npx @wenyuchiou\/agent-board setup\r?\nnpx @wenyuchiou\/agent-board setup --apply\r?\nnpx @wenyuchiou\/agent-board)\r?\n```/.exec(first)
       assert.ok(node >= 0 && install && install.index > node, `${name}: Quick start gives Node 22, then all three ordered install commands`)
       const lanLines = first.split('\n').filter(line => line.includes('npx @wenyuchiou/agent-board --serve --lan'))
       assert.equal(lanLines.length, 1, `${name}: one phone route in Quick start`)
@@ -137,6 +137,29 @@ describe('L0 discover and install from the README', () => {
         at = first.indexOf(line)
       }
       assert.ok(starts[2].includes(WORDS[lang].notLive), `${name}: Antigravity is marked not run live`)
+    }
+  })
+
+  test('the quick start runs as written without a global install', () => {
+    for (const [name, lang] of READMES) {
+      const quick = section(read(name), SECTIONS[lang][0])
+      assert.ok(quick, `${name}: Quick start exists`)
+      const commands = /```(?:sh|bash)\n([\s\S]*?)\n```/.exec(quick)?.[1]
+      assert.ok(commands, `${name}: Quick start has a command block`)
+      assert.ok(!commands.split('\n').some(line => /^\s*agent-board(?:\s|$)/.test(line)), `${name}: Quick start cannot require the global command`)
+      assert.ok(commands.split('\n').includes('npx @wenyuchiou/agent-board'), `${name}: Quick start opens the board with npx`)
+    }
+
+    for (const name of [...READMES.map(([readme]) => readme), 'docs/GUIDE.md', 'docs/GUIDE.zh-TW.md', 'docs/GUIDE.zh-CN.md']) {
+      const text = read(name)
+      const installedAt = text.indexOf('npm install -g @wenyuchiou/agent-board')
+      assert.ok(installedAt >= 0, `${name}: explains the global install`)
+      for (const match of text.matchAll(/(?:^|\n)[ \t]*agent-board(?:[ \t]+[^\n]*)?|`(agent-board(?:[ \t]+[^`]*)?)`/g)) {
+        if (match.index >= installedAt) continue
+        // A sentence may name the shorter command while explaining how to install it.
+        const restOfSentence = text.slice(match.index + match[0].length, installedAt)
+        assert.ok(match[1] === 'agent-board' && /^[^.!?。！？\n]*$/.test(restOfSentence), `${name}: ${match[0]} precedes the global install`)
+      }
     }
   })
 

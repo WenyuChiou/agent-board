@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 const source = readFileSync(new URL('../hooks/board-script.ts', import.meta.url), 'utf8')
-const code = JSON.parse(source.slice(source.indexOf('export const BOARD_SCRIPT = ') + 'export const BOARD_SCRIPT = '.length))
+const code = JSON.parse(source.slice(source.indexOf('export const BOARD_SCRIPT = ') + 'export const BOARD_SCRIPT = '.length, source.lastIndexOf(']') + 1)).join('\n')
 const dir = mkdtempSync(join(tmpdir(), 'agent-board-setup-'))
 try {
   const script = join(dir, 'agent-board.mjs')
