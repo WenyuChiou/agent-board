@@ -19,6 +19,46 @@ export const orderFragments = fragments => [...fragments].sort((a, b) => {
   return left === right ? (a.path < b.path ? -1 : a.path > b.path ? 1 : 0) : left > right ? -1 : 1
 })
 
+const testList = /^Tests?:\s*(?:none \([^)]*\)|(?:`[^`]*`|"[^"]*")(?:\s*(?:,|;|,?\s+and)?\s*(?:`[^`]*`|"[^"]*"))*)\.?\s*$/
+// A title opens with a backtick or a double quote and closes with the same
+// mark; the other mark inside it is just a character.
+const isOpen = text => {
+  let mark = ''
+  for (const char of text) {
+    if (mark) mark = char === mark ? '' : mark
+    else if (char === '`' || char === '"') mark = char
+  }
+  return mark !== '' || /(?:,|;|\band)\s*$/.test(text)
+}
+const isBoundary = body => body === undefined || body.trim() === '' || /^(?:- |#)/.test(body)
+
+// A Tests line, or a Tests sentence at the end of a line, goes when it holds
+// only test titles and the entry ends after it or another Tests line follows. A
+// list that wraps goes on while a title is open or the line ends with a comma,
+// a semicolon or "and". Anything else, such as a list with more of the entry
+// after it, is kept as written.
+export const stripTests = text => {
+  const lines = text.split(/(?<=\n)/)
+  const bodies = lines.map(line => line.replace(/\r?\n$/, ''))
+  const kept = []
+  for (let i = 0; i < lines.length; i++) {
+    const inline = bodies[i].match(/^(.*[.!?)])[ \t]+(Tests?:.*)$/)
+    const whole = bodies[i].match(/^[^\S\r\n]*(Tests?:.*)$/)
+    if (!inline && !whole) {
+      kept.push(lines[i])
+      continue
+    }
+    let list = whole ? whole[1] : inline[2]
+    let last = i
+    while (isOpen(list) && !isBoundary(bodies[last + 1]) && /^\s/.test(bodies[last + 1])) list += ' ' + bodies[++last].trim()
+    if (testList.test(list) && (isBoundary(bodies[last + 1]) || /^\s*Tests?:/.test(bodies[last + 1]))) {
+      if (inline) kept.push(inline[1] + lines[last].slice(bodies[last].length))
+    } else kept.push(...lines.slice(i, last + 1))
+    i = last
+  }
+  return kept.join('')
+}
+
 export const foldText = ({ text, fragments = [], version, date }) => {
   if (!/^\d+\.\d+\.\d+$/.test(version)) throw new Error('version must be digits.digits.digits')
   if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || !Number.isFinite(Date.parse(date)) || new Date(date).toISOString().slice(0, 10) !== date) throw new Error('date must be a valid YYYY-MM-DD')
@@ -27,12 +67,12 @@ export const foldText = ({ text, fragments = [], version, date }) => {
   const start = headings.findIndex(match => /^Unreleased\s*$/.test(match[1]))
   const heading = headings[start]
   const end = heading ? headings[start + 1]?.index ?? text.length : headings[0]?.index ?? text.length
-  const unreleased = heading ? text.slice(heading.index + heading[0].length, end).trim() : ''
+  const unreleased = heading ? stripTests(text.slice(heading.index + heading[0].length, end)).trim() : ''
   const ordered = orderFragments(fragments.filter(item => item.path !== 'changelog.d/README.md').map(parseFragment))
   if (!ordered.length && !unreleased) throw new Error('nothing to release')
   const eol = text.includes('\r\n') ? '\r\n' : '\n'
   const title = `## ${version} — ${date}`
-  const entries = [...ordered.map(item => item.text.trim().replace(/\r?\n/g, eol)), ...(unreleased ? [unreleased] : [])]
+  const entries = [...ordered.map(item => stripTests(item.text).trim().replace(/\r?\n/g, eol)), ...(unreleased ? [unreleased] : [])]
   const prefix = text.slice(0, heading?.index ?? end)
   const prefixEol = prefix.match(/\r?\n(?=[^\n]*$)/)?.[0] ?? eol
   const separator = prefix && !/(?:\r?\n){2}$/.test(prefix) ? (prefix.endsWith('\n') ? prefixEol : prefixEol + prefixEol) : ''

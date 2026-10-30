@@ -5332,6 +5332,40 @@ test('--tidy archives done blocks older than 12 hours and stopped ones older tha
   })
 })
 
+test('--tidy counts two done blocks that share a title and steps as two archived tasks', () => {
+  tidyFixture(f => {
+    writeFileSync(f.path, `## Synthetic\n${f.block('a1b2c311', 'Local synthetic task', 'done', 13)}\n${f.block('a1b2c312', 'Local synthetic task', 'done', 13)}`)
+    const result = f.command(['--tidy', '--lang', 'en'])
+    assert.equal(result.status, 0, result.stderr)
+    assert.equal(result.stdout, 'Archived 2 tasks.\n')
+    assert.ok(!readFileSync(f.path, 'utf8').includes('Local synthetic task'))
+    const archive = readdirSync(f.dir).filter(name => name.startsWith('progress-archive-'))
+    const history = readFileSync(join(f.dir, archive[0]), 'utf8')
+    assert.equal(history.split('### Local synthetic task').length - 1, 2, history)
+  })
+})
+
+test('--tidy adds both of two same-title done blocks to an archive that already holds one like them, and a retry after a save that removed nothing adds none', () => {
+  tidyFixture(f => {
+    const copies = () => readdirSync(f.dir).filter(name => name.startsWith('progress-archive-')).map(name => readFileSync(join(f.dir, name), 'utf8')).join('').split('### Local synthetic task').length - 1
+    writeFileSync(f.path, `## Synthetic\n${f.block('a1b2c313', 'Local synthetic task', 'done', 13)}`)
+    assert.equal(f.command(['--tidy', '--lang', 'en']).stdout, 'Archived 1 task.\n')
+    const two = `## Synthetic\n${f.block('a1b2c314', 'Local synthetic task', 'done', 13)}\n${f.block('a1b2c315', 'Local synthetic task', 'done', 13)}`
+    writeFileSync(f.path, two)
+    const result = f.command(['--tidy', '--lang', 'en'])
+    assert.equal(result.status, 0, result.stderr)
+    assert.equal(result.stdout, 'Archived 2 tasks.\n')
+    assert.ok(!readFileSync(f.path, 'utf8').includes('Local synthetic task'))
+    assert.equal(copies(), 3)
+    // The two were saved to the archive but are back in the file, as after a process that stopped
+    // before it removed them: they leave, and the archive keeps one copy of each.
+    writeFileSync(f.path, two)
+    assert.equal(f.command(['--tidy', '--lang', 'en']).status, 0)
+    assert.ok(!readFileSync(f.path, 'utf8').includes('Local synthetic task'))
+    assert.equal(copies(), 3)
+  })
+})
+
 // The scheduled sweep records no question of its own: a board that is open has seen the file first
 // (`--keys ''` does the same), and the sweep then runs beside the files that left.
 const askingBoard = () => {

@@ -67,7 +67,7 @@ const journeyOf = name => {
       const before = snapshot(f.home)
       const guidance = [await setup(f), await setup(f, ['--apply']), await setup(f, ['--apply'])]
       for (const text of guidance) {
-        assert.equal(text.trim().split(/\r?\n/).length, 1)
+        assert.ok(text.trim().split(/\r?\n/).length >= 3)
         assert.ok(text.includes('claude plugin marketplace add WenyuChiou/agent-board'))
         assert.ok(text.includes('claude plugin install agent-board@agent-board'))
         assert.equal(text, guidance[0])

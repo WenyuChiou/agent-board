@@ -1,6 +1,6 @@
 import { ZH_TW } from './i18n'
 import type { Strings } from './i18n'
-import { lastQuestion } from './digest'
+import { lastQuestionInProse, normalizeReply } from './digest'
 import { inboxOrder, isBoardTurn, isTranscriptPath, readTurn, transcriptTail } from './inbox'
 import { localDay, parseJournal, progressReport } from './journal'
 import { sha256 } from './sha256'
@@ -33,6 +33,7 @@ export const peekInbox = (
   files: ReadonlyArray<{ name: string; body: string; at: number }>,
   readLog: (path: string) => string = () => '',
   scrub: (text: string) => string = text => text,
+  s: Strings = ZH_TW,
 ): PendingTurn[] => {
   const latest = new Map<string, PendingTurn>()
   const questions = new Map<string, PendingTurn>()
@@ -44,19 +45,20 @@ export const peekInbox = (
     if (read.event === 'prompt') continue
     const turn = read.prompt === '' && isTranscriptPath(read.transcript) ? { ...read, prompt: transcriptTail(readLog(read.transcript)).prompt } : read
     if (isBoardTurn(turn)) continue
-    const answer = scrub(turn.answer)
-    const question = lastQuestion(answer, true)
-    const summary = question ?? closing(answer)
+    const normalized = normalizeReply(turn.answer)
+    const prose = normalized === null ? null : scrub(normalized)
+    const question = prose === null ? null : lastQuestionInProse(prose, true)
+    const summary = prose === null ? s.turnUnreadable : question ?? closing(prose)
     const text = (summary ?? turn.prompt).trim()
     if (question !== null) {
       // Words deduplicate retries, not independent ledger identities. An end or later
       // statement cannot prove a previous question answered before anyone captured it.
       const key = JSON.stringify([turn.id, turn.project, question.replace(/\s+/g, ' ').trim()])
       const previous = questions.get(key)
-      questions.set(key, { id: turn.id, fullText: answer, sources: [...new Set([...(previous?.sources ?? []), file.name])], sourceRevisions: [...new Set([...(previous?.sourceRevisions ?? []), sha256(JSON.stringify([file.name, file.body]))])], agent: turn.agent, project: turn.project, dir: turn.cwd, text, isQuestion: true, at: previous?.at ?? file.at, sourceAt: turn.at ?? file.at, hasSummary: true, ...(turn.event === 'end' ? { isClosed: true } : {}) })
+      questions.set(key, { id: turn.id, fullText: prose!, sources: [...new Set([...(previous?.sources ?? []), file.name])], sourceRevisions: [...new Set([...(previous?.sourceRevisions ?? []), sha256(JSON.stringify([file.name, file.body]))])], agent: turn.agent, project: turn.project, dir: turn.cwd, text, isQuestion: true, at: previous?.at ?? file.at, sourceAt: turn.at ?? file.at, hasSummary: true, ...(turn.event === 'end' ? { isClosed: true } : {}) })
       latest.delete(turn.id)
     } else if (turn.event !== 'end' && text !== '') {
-      latest.set(turn.id, { id: turn.id, fullText: answer, agent: turn.agent, project: turn.project, dir: turn.cwd, text, isQuestion: false, at: file.at, sourceAt: turn.at ?? file.at, hasSummary: summary !== undefined && summary !== null })
+      latest.set(turn.id, { id: turn.id, ...(prose === null ? {} : { fullText: prose }), agent: turn.agent, project: turn.project, dir: turn.cwd, text, isQuestion: false, at: file.at, sourceAt: turn.at ?? file.at, hasSummary: summary !== undefined && summary !== null })
     }
     if (turn.event === 'end') {
       latest.delete(turn.id)
@@ -65,6 +67,21 @@ export const peekInbox = (
   }
 
   return [...questions.values(), ...latest.values()].sort((a, b) => Number(b.isQuestion) - Number(a.isQuestion) || b.at - a.at)
+}
+
+// A cache hit returns the same turns without asking the caller to read the inbox again.
+export type TurnCache = { key: string; turns: PendingTurn[] } | null
+export const turnsFor = async (
+  cache: TurnCache,
+  listing: unknown,
+  s: Strings,
+  fresh: () => Promise<{ files: Array<{ name: string; body: string; at: number }>; scrub: (text: string) => string; isComplete: boolean }>,
+): Promise<{ turns: PendingTurn[]; cache: TurnCache }> => {
+  const key = JSON.stringify([listing, s.lang])
+  if (cache?.key === key) return { turns: cache.turns, cache }
+  const { files, scrub, isComplete } = await fresh()
+  const turns = peekInbox(files, () => '', scrub, s)
+  return { turns, cache: isComplete ? { key, turns } : cache }
 }
 
 export type BoardOptions = { width: number; isColor: boolean; isIdleOpen?: boolean }

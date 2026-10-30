@@ -179,7 +179,7 @@ To share one board between two computers, set `CLAUDE_PROGRESS_FILE` on both to 
 
 ### An agent doesn't show up.
 
-1. Run `node scripts/setup-agent.mjs` to preview the current host and read any conflict or `adapter-pending` result.
+1. Run `node scripts/setup-agent.mjs --json` to preview the current host and read any conflict or `adapter-pending` result.
 2. Reload the host as required, complete only its scoped native hook trust/enablement, and read that state back.
 3. Have that session report its own proven native id; check its exact block and timestamp. Never invent a task for another session.
 4. Observe a new native lifecycle event separately from the explicit report. A progress record does not imply direct messaging; see [connection checks](MESSAGING.md#connecting-a-session-that-was-already-open).
