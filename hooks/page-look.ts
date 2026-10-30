@@ -84,13 +84,16 @@ export const themeSwitch = (s: Strings): string =>
     return `<button type="button" data-local data-theme-pick="${pick}" aria-pressed="${pick === 'system'}" aria-label="${esc(label)}"><svg class="i" viewBox="0 0 16 16" aria-hidden="true">${THEME_ICONS[index]}</svg><span class="tl">${esc(label)}</span></button>`
   }).join('')}</div>`
 
-const SIGNAL_ROW = '<rect class="lg-ink" x="8" y="8" width="36" height="8"/><path class="lg-flag" d="M8 24H56L48 32L56 40H8Z"/><rect class="lg-ink" x="8" y="48" width="28" height="8"/>'
+// Bubble a, the board's mark: a lowercase a whose foot turns out into a speech-bubble tail, an agent
+// talking to you. One path on a 64 grid, in the brand colour.
+export const MARK_PATH = 'M 51 14.5 V 36 C 51 46 52 54 57.5 59 C 50.6 59 43.71 56.77 40.01 51.67 Q 34.7 55 28 55 Q 18.47 55 11.74 48.26 Q 5 41.53 5 32 Q 5 22.47 11.74 15.74 Q 18.47 9 28 9 Q 34.9 9 40.34 12.54 Q 40.74 11.48 41.61 10.61 Q 43.22 9 45.5 9 Q 47.78 9 49.39 10.61 Q 51 12.22 51 14.5 Z M 40 32 Q 40 27.03 36.49 23.51 Q 32.97 20 28 20 Q 23.03 20 19.51 23.51 Q 16 27.03 16 32 Q 16 36.97 19.51 40.49 Q 23.03 44 28 44 Q 32.97 44 36.49 40.49 Q 40 36.97 40 32 Z'
+const MARK = `<path class="lg-mark" d="${MARK_PATH}"/>`
 
-export const boardMark = `<svg class="mark" viewBox="0 0 64 64" aria-hidden="true">${SIGNAL_ROW}</svg>`
+export const boardMark = `<svg class="mark" viewBox="0 0 64 64" aria-hidden="true">${MARK}</svg>`
 
 // RGB notation keeps encoded hex colours from resembling private session ids.
 const rgb = (hex: string): string => `rgb(${(hex.slice(1).match(/../g) ?? []).map(channel => parseInt(channel, 16)).join(',')})`
-const FAVICON = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><style>.lg-ink{fill:${rgb(PAGE_LIGHT.ink)}}.lg-flag{fill:${rgb(PAGE_LIGHT.waiting)}}@media (prefers-color-scheme:dark){.lg-ink{fill:${rgb(PAGE_DARK.ink)}}.lg-flag{fill:${rgb(PAGE_DARK.waiting)}}}</style>${SIGNAL_ROW}</svg>`
+const FAVICON = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><style>.lg-mark{fill:${rgb(PAGE_LIGHT.brand)}}@media (prefers-color-scheme:dark){.lg-mark{fill:${rgb(PAGE_DARK.brand)}}}</style>${MARK}</svg>`
 
 export const faviconLink = `<link rel="icon" type="image/svg+xml" href="data:image/svg+xml,${encodeURIComponent(FAVICON)}">`
 
@@ -138,7 +141,7 @@ svg.i{width:16px;height:16px;flex:none;fill:none;stroke:currentColor;stroke-widt
 .topbar{display:flex;align-items:center;flex-wrap:wrap;gap:10px 12px;padding-block:10px}.topbar>.seg{margin-left:auto}
 .brand{display:flex;align-items:center;gap:10px;min-width:0;flex:1 1 auto}
 .brand h1{margin:0;font-size:var(--text-md);line-height:1.2;font-weight:650}
-.mark{width:30px;height:30px;flex:none}.lg-ink{fill:var(--ink)}.lg-flag{fill:var(--waiting)}
+.mark{width:30px;height:30px;flex:none}.lg-mark{fill:var(--brand)}
 .seg{display:inline-flex;padding:2px;gap:2px;border:1px solid var(--line);border-radius:var(--radius-m);background:var(--surface)}
 .seg button{border:1px solid transparent;background:transparent;color:var(--muted);min-height:28px;padding:0 8px;border-radius:var(--radius-m);display:inline-flex;align-items:center;gap:6px;font-size:var(--text-xs);cursor:pointer}
 .seg button:hover{color:var(--ink);background:var(--inset)}
