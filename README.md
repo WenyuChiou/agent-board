@@ -34,10 +34,10 @@ With Node.js 22+, in any terminal:
 ```sh
 npx @wenyuchiou/agent-board setup
 npx @wenyuchiou/agent-board setup --apply
-npx @wenyuchiou/agent-board --serve
+agent-board
 ```
 
-The first command finds the agents on this computer and shows what setup would change, writing nothing. The second makes the change, and the third opens the board's page. To set up one agent only, add `--agent` and its name, such as `--agent codex`. More in the [setup guide](docs/SETUP.md#install-with-npm).
+The first command finds the agents on this computer and shows what setup would change, writing nothing. The second makes the change, and the third opens the board where you are: in its own window on a desktop, the live terminal board over SSH, or text for agents. In an agent's chat, `/agent-board` opens the same board. To stop the board's page, run `agent-board stop`. To set up one agent only, add `--agent` and its name, such as `--agent codex`. More in the [setup guide](docs/SETUP.md#install-with-npm).
 
 Scan the QR code from `npx @wenyuchiou/agent-board --serve --lan` with a phone on the same Wi-Fi. Use it only on a network you trust: the link is not encrypted and anyone who has it can open the page. Details: [the board's page](#the-boards-page).
 

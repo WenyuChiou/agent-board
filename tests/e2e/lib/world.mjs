@@ -112,10 +112,10 @@ cp.spawnSync = (file, args, options) => {
 syncBuiltinESMExports()
 `)
     env.NODE_OPTIONS = `--import=${pathToFileURL(preload).href} --import=${pathToFileURL(clipboard).href}`
-    // Both HTML and serve launch paths must stay inside the test process.
+    // HTML, serve, and desktop surface launch paths must stay inside the test process.
     const browserCalls = [...BOARD_SCRIPT.matchAll(/openInBrowser\(([^,]+),/g)]
-    assert.equal(browserCalls.length, 2, 'Review every browser launch when the bundle changes')
-    assert.deepEqual(browserCalls.map(match => match[1]).sort(), ['html', 'url'])
+    assert.equal(browserCalls.length, 3, 'Review every browser launch when the bundle changes')
+    assert.deepEqual(browserCalls.map(match => match[1]).sort(), ['address', 'html', 'url'])
     // The bytes stay identical across worlds; only the isolated environment
     // supplies this instance's baked configuration.
     world.write('agent-board.mjs', `globalThis.AGENT_BOARD = { path: process.env.E2E_BOARD_PATH, lang: process.env.E2E_BOARD_LANG }\n${BOARD_SCRIPT.replace(/openInBrowser\(([^,]+),/g, '((target, done) => done(false))($1,')}`)
