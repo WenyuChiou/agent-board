@@ -4357,7 +4357,7 @@ test('a second agent-board reuses the running page and says it was already runni
     const ttyShim = join(board.dir, 'tty-shim.cjs')
     writeFileSync(ttyShim, 'process.stdout.isTTY = true; process.stdin.isTTY = true;\n')
     const runBoard = (args = []) => new Promise((done, fail) => {
-      execFile(process.execPath, ['--require', ttyShim, board.script, '--no-open', ...args], { env: board.env, encoding: 'utf8', timeout: 20_000 }, (error, out) => (error ? fail(error) : done(out)))
+      execFile(process.execPath, ['--require', ttyShim, board.script, '--no-open', ...args], { env: { ...board.env, DISPLAY: ':0' }, encoding: 'utf8', timeout: 20_000 }, (error, out) => (error ? fail(error) : done(out)))
     })
 
     const first = await runBoard()

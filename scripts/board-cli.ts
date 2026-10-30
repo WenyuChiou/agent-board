@@ -600,24 +600,24 @@ const copy = (text: string): boolean => {
 
 // A file or a page's address in the browser. The page's address holds only letters, digits,
 // `:/?=._-`, so cmd's `start` reads it as one word.
-const openInBrowser = (target: string, done: (isOpen: boolean) => void): void => {
+const openInBrowser = (target: string, done: (isOpen: boolean) => void, asApp = false): void => {
   if (process.env.SSH_CONNECTION || process.env.SSH_TTY) return done(false)
-  const opener = process.platform === 'win32' ? [system32('cmd.exe'), ['/c', 'start', '', target]] : process.platform === 'darwin' ? ['open', [target]] : ['xdg-open', [target]]
-  // Not waited on: with no desktop, xdg-open can run a text browser that never returns, and the
-  // agent's command would wait with it.
-  try {
-    const child = spawn(opener[0] as string, opener[1] as string[], { cwd: dirname(path), detached: true, stdio: 'ignore', windowsHide: true })
-    child.once('error', () => done(false))
-    child.once('spawn', () => done(true))
-    child.unref()
-  } catch {
-    done(false)
+  const fallback = () => {
+    const opener = process.platform === 'win32' ? [system32('cmd.exe'), ['/c', 'start', '', target]] : process.platform === 'darwin' ? ['open', [target]] : ['xdg-open', [target]]
+    // Not waited on: with no desktop, xdg-open can run a text browser that never returns, and the
+    // agent's command would wait with it.
+    try {
+      const child = spawn(opener[0] as string, opener[1] as string[], { cwd: dirname(path), detached: true, stdio: 'ignore', windowsHide: true })
+      child.once('error', () => done(false))
+      child.once('spawn', () => done(true))
+      child.unref()
+    } catch {
+      done(false)
+    }
   }
-}
 
-// Opens the board in its own app window (Chrome / Edge --app=); falls back to the default browser.
-const openAppWindow = (url: string, done: (isOpen: boolean) => void): void => {
-  if (process.env.SSH_CONNECTION || process.env.SSH_TTY) return done(false)
+  if (!asApp) return fallback()
+
   const candidates: string[] = []
   if (process.platform === 'win32') {
     const progX86 = process.env['ProgramFiles(x86)'] || process.env.ProgramFiles
@@ -649,15 +649,13 @@ const openAppWindow = (url: string, done: (isOpen: boolean) => void): void => {
   }
 
   const tryCandidate = (index: number): void => {
-    if (index >= candidates.length) {
-      return openInBrowser(url, done)
-    }
+    if (index >= candidates.length) return fallback()
     const bin = candidates[index]!
     try {
       if (bin.includes('/') || bin.includes('\\')) {
         if (!existsSync(bin)) return tryCandidate(index + 1)
       }
-      const child = spawn(bin, [`--app=${url}`], { cwd: dirname(path), detached: true, stdio: 'ignore', windowsHide: false })
+      const child = spawn(bin, [`--app=${target}`], { cwd: dirname(path), detached: true, stdio: 'ignore', windowsHide: false })
       let settled = false
       const onSpawn = () => {
         if (settled) return
@@ -1378,13 +1376,14 @@ const openPageSurface = async (): Promise<void> => {
   const whatNeedsYou = waiting > 0 ? (urgent > 0 ? `${s.statusWaiting(waiting)} · ${s.statusDue(urgent)}` : s.statusWaiting(waiting)) : (urgent > 0 ? s.statusDue(urgent) : s.pgNothing)
   const howManyWorking = s.groupWorking(v.overview.active)
 
-  if (!args.includes('--no-open') && /^http:\/\/127\.0\.0\.1:\d+\/\?t=[\w-]+$/.test(server.url)) {
-    await new Promise<void>(done => openAppWindow(server.url, isOpen => {
+  const address = server.url
+  if (!args.includes('--no-open') && /^http:\/\/127\.0\.0\.1:\d+\/\?t=[\w-]+$/.test(address)) {
+    await new Promise<void>(done => openInBrowser(address, isOpen => {
       if (!isOpen && !process.env.SSH_CONNECTION && !process.env.SSH_TTY) {
-        process.stdout.write(`${s.serveBrowserNone(server.url)}\n`)
+        process.stdout.write(`${s.serveBrowserNone(address)}\n`)
       }
       done()
-    }))
+    }, true))
   }
 
   if (server.isNew) {
@@ -1465,10 +1464,10 @@ const runWatchTerminal = async (): Promise<void> => {
     }
   }
   const quit = (): void => {
-    process.stdin.setRawMode(false)
+    if (typeof process.stdin.setRawMode === 'function') process.stdin.setRawMode(false)
     process.exit(process.exitCode ?? 0)
   }
-  process.stdin.setRawMode(true)
+  if (typeof process.stdin.setRawMode === 'function') process.stdin.setRawMode(true)
   process.stdin.setEncoding('utf8')
   process.stdout.write('\u001b[?25l')
   process.on('exit', () => process.stdout.write('\u001b[?25h\n'))
@@ -1556,7 +1555,7 @@ const run = async (): Promise<void> => {
     const surface = pickSurface({ env: process.env, isTty: Boolean(process.stdout.isTTY && process.stdin.isTTY), platform: process.platform })
     if (surface === 'page') {
       await openPageSurface()
-    } else if (surface === 'terminal' && process.stdin.isTTY) {
+    } else if (surface === 'terminal' && process.stdin.isTTY && typeof process.stdin.setRawMode === 'function') {
       await runWatchTerminal()
     } else {
       process.stdout.write(boardText(view(), pending(), s, options()))
