@@ -4851,7 +4851,9 @@ test('the pane archive twice on the same day with one same-title same-steps done
   await clock.advance(5000)
   const ui2 = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
   try {
-    await ui2.press({ key: 'section::recent' })
+    if (await ui2.find({ type: 'Button', key: 'archive' }) === undefined) {
+      await ui2.press({ key: 'section::recent' })
+    }
     await ui2.press({ key: 'archive' })
     expect(await ui2.find({ type: 'Text', text: STRINGS.en.tidyMoved(1) })).toBeDefined()
   } finally { await ui2.unmount() }
