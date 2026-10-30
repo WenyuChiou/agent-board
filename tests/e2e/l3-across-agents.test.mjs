@@ -59,10 +59,10 @@ describe('L3 across agents and sessions', () => {
     const world = makeWorld()
     try {
       block(world)
-      // Observe both browser requests at the world's existing launch seam; never open a real tab.
+      // Observe browser requests at the world's existing launch seam; never open a real tab.
       const before = world.read('agent-board.mjs')
       const seam = '((target, done) => done(false))('
-      assert.equal(before.split(seam).length - 1, 2)
+      assert.equal(before.split(seam).length - 1, 3)
       world.write('agent-board.mjs', before.split(seam).join('((target, done) => { process.stdout.write("E2E_BROWSER_REQUEST\\n"); done(true) })('))
       const server = await serve.start(world)
       const outputs = []
