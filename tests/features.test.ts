@@ -3,7 +3,7 @@ import { expect, test } from 'claude-code/testing'
 
 import type { ProgressMirror, ProgressPr } from '../types'
 import { askOf } from '../hooks/ask'
-import { boardItems, boardKey, boardScreen, boardText, CHAT_MAX, chatText, doneToday, emptyBoardState, fingerprint, fit, peekInbox, pinned, redact } from '../hooks/board'
+import { boardItems, boardKey, boardScreen, boardText, CHAT_MAX, chatText, doneToday, emptyBoardState, fingerprint, fit, peekInbox, pinned, redact, turnsFor } from '../hooks/board'
 import { addManualTask, countManualDone, HAND_KEPT_DONE_MS, isArchivable, isHandKeptMoveOn, manualTaskCount, mergeBlock, renderAutoBlock, scanBlocks, setManualStep, takeArchivable, takeManualDone, takeTask, upsertAutoBlock } from '../hooks/blocks'
 import { agentHooks, boardCommands, boardScript, COLLISION, DELETE, generatedFile, isNodeSupported, isReleased, isReleasedBoard, isSetupState, isWindowsHost, NODE_MIN, nodeVersionOf, openclawPlugin, openclawPrinted, openclawSavedBy, openclawTooOld, PROBLEM_ARGS, readConfig, RELEASE_PATHS, reportCommand, reporterPs1, reporterSh, setupAgents, setupLines, withFlatHook, withGroupedHook, withHermesHooks, withoutHermesHooks, withoutOurHooks, withoutSection } from '../hooks/connect'
 import { connectDataRoots, connectRecordPath, recoveryUnreadableCode } from '../hooks/connect-pure'
@@ -31,7 +31,6 @@ import { sha256 } from '../hooks/sha256'
 import { RELEASE_0_18_1, RELEASE_0_20_5 } from './fixtures/released'
 import { agentName, buildView, contextOf, handoffOf, manualDoneSeen, mirrorMatchesTask, OLDER_SHOWN, relativeTime, replyHint, resumeCommand, resumeVia, statusLine, taskFingerprint, wayBackText, withSeen, IDLE_MS } from '../hooks/view'
 import { localDay } from '../hooks/journal'
-import { engineBeneath, FILE, INBOX, makeWorld, PANE, PROPS } from './fixtures/pane-world'
 
 const ARCHIVE_AGENTS = ['claude', 'codex', 'gemini', 'cursor', 'grok', 'muse', 'hermes', 'openclaw', 'opencode', 'antigravity', 'deepseek', 'custom-agent']
 
@@ -1241,6 +1240,16 @@ test('a reply that is JSON is not cut at its question mark and shown as a questi
   expect(redacted?.fullText).not.toContain('hunter2')
   const ledger = observeQuestions(emptyQuestions(), [], null, [], NOW, true, 'fixture:json', undefined, redacted ? [redacted] : []).ledger
   expect(JSON.stringify(ledger)).not.toContain('hunter2')
+  const escaped = { ...file, body: JSON.stringify({ session_id: 'escaped', cwd: '/w/app', last_assistant_message: '{"question":"Ship it\\u003f","\\u0074oken":"synthetic-secret"}' }) }
+  const safe = peekInbox([escaped], undefined, text => redact(text, '/h'), STRINGS.en)[0]
+  expect(safe?.text).toBe('Ship it?')
+  expect(safe?.fullText).toBe('Ship it?')
+  expect(safe?.fullText).not.toContain('synthetic-secret')
+  const captured = observeQuestions(emptyQuestions(), [], null, [], NOW, true, 'fixture:escaped-json', undefined, safe ? [safe] : []).ledger
+  expect(captured.records.length).toBe(1)
+  expect(JSON.stringify(captured)).not.toContain('synthetic-secret')
+  const selected = { ...file, body: JSON.stringify({ session_id: 'selected', cwd: '/w/app', last_assistant_message: '{"question":"Is token=synthetic-secret ready?"}' }) }
+  expect(peekInbox([selected], undefined, text => redact(text, '/h'), STRINGS.en)[0]?.fullText).not.toContain('synthetic-secret')
 })
 
 test("a JSON reply with a question field gives that field's question", () => {
@@ -1282,7 +1291,9 @@ test('JSON scalars remain prose as written while objects and arrays without text
   expect(parseDigest('TITLE: work\nASK: "Ship it?"')?.ask).toBe('"Ship it?"')
   for (const answer of ['{}', '[]']) {
     const file = { name: 'codex-turn-30-1.json', body: JSON.stringify({ session_id: 'structured', cwd: '/w/app', last_assistant_message: answer }), at: 30 }
-    expect(peekInbox([file], undefined, undefined, STRINGS.en)[0]?.text).toBe(STRINGS.en.turnUnreadable)
+    const unreadable = peekInbox([file], undefined, undefined, STRINGS.en)[0]
+    expect(unreadable?.text).toBe(STRINGS.en.turnUnreadable)
+    expect(unreadable?.fullText).toBe(undefined)
   }
 })
 
@@ -1312,35 +1323,28 @@ test('a JSON object ASK uses the ordinary question rules for its selected text',
   expect(parseDigest('TITLE: work\nASK: "Done."')?.ask).toBe('"Done."')
 })
 
-test('an unchanged inbox uses the current language and remains cached within one language', async ($, on) => {
-  const world = makeWorld([[FILE, '# Progress\n']])
-  world.env = { HOME: '/home/me', LANG: 'en_US.UTF-8' }
-  world.isInboxClockOnly = true
-  world.inboxLookMs = 60 * 60 * 1000
-  world.reads = []
-  const clock = engineBeneath(on, world)
-  const path = `${INBOX}/codex-turn-1760600000-1.json`
-  world.files.set(path, JSON.stringify({ session_id: 'synthetic-lang', cwd: '/work/demo', last_assistant_message: '{}' }))
-  await $.session.start({ cwd: '/work/demo', surface: 'desktop', isInteractive: true })
-  await clock.advance(2000)
-  const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
-  try {
-    await ui.drawn()
-    expect(world.reads).toContain(path)
-    for (const lang of ['zh-TW', 'zh-CN'] as const) {
-      const pending = peekInbox([{ name: 'codex-turn-1760600000-1.json', body: world.files.get(path)!, at: 1 }], undefined, undefined, STRINGS[lang])
-      expect(pending[0]?.text).toBe(STRINGS[lang].turnUnreadable)
-      world.reads = []
-      await $.command.run({ command: 'progress', args: `lang ${lang}`, origin: { kind: 'composer' } })
-      await ui.drawn()
-      expect(world.reads).toContain(path)
-      world.reads = []
-      await ui.drawn()
-      expect(world.reads).not.toContain(path)
-    }
-  } finally {
-    await ui.unmount()
-  }
+test('an unchanged inbox uses the current language and remains cached within one language', async () => {
+  const file = { name: 'codex-turn-1760600000-1.json', body: JSON.stringify({ session_id: 'synthetic-lang', cwd: '/work/demo', last_assistant_message: '{}' }), at: 1 }
+  const listing = ['/work/demo/progress.md', [[file.name, 1, file.body.length]], {}]
+  let reads = 0
+  const fresh = async () => { reads++; return { files: [file], scrub: (text: string) => text, isComplete: true } }
+  const en = await turnsFor(null, listing, STRINGS.en, fresh)
+  expect(en.turns[0]?.text).toBe(STRINGS.en.turnUnreadable)
+  expect(reads).toBe(1)
+  const tw = await turnsFor(en.cache, listing, STRINGS['zh-TW'], fresh)
+  expect(tw.turns[0]?.text).toBe(STRINGS['zh-TW'].turnUnreadable)
+  expect(reads).toBe(2)
+  const cn = await turnsFor(tw.cache, listing, STRINGS['zh-CN'], fresh)
+  expect(cn.turns[0]?.text).toBe(STRINGS['zh-CN'].turnUnreadable)
+  expect(reads).toBe(3)
+  const hit = await turnsFor(cn.cache, listing, STRINGS['zh-CN'], fresh)
+  expect(hit.turns).toBe(cn.turns)
+  expect(reads).toBe(3)
+  const partial = await turnsFor(cn.cache, [...listing, 'changed'], STRINGS['zh-CN'], async () => ({ files: [file], scrub: (text: string) => text, isComplete: false }))
+  expect(partial.cache).toBe(cn.cache)
+  const retried = await turnsFor(partial.cache, [...listing, 'changed'], STRINGS['zh-CN'], fresh)
+  expect(retried.turns[0]?.text).toBe(STRINGS['zh-CN'].turnUnreadable)
+  expect(reads).toBe(4)
 })
 
 test('a plain reply that ends in a question is read as before', () => {

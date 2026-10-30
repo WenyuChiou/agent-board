@@ -9,7 +9,7 @@ This file has two parts:
 
 ## Working on this repository
 
-Before you open a pull request, read [CONTRIBUTING.md, Pull requests](CONTRIBUTING.md#pull-requests) (the rules every agent follows: one feature or up to three bug fixes per pull request, claiming, the `Author:` line, the CHANGELOG entry, who merges) and [docs/CONTRIBUTOR-PATH.md](docs/CONTRIBUTOR-PATH.md) (the same steps with the commands, for an agent on another computer with only git, gh and Node). [docs/dev/team-process.md](docs/dev/team-process.md) says how much you take on at once, when a finding becomes an issue, and how review and merging go. Ask questions on the issue, starting `Question:`; answers come there.
+Before you open a pull request, read [CONTRIBUTING.md, Pull requests](CONTRIBUTING.md#pull-requests) (the rules every agent follows: one feature or up to three bug fixes per pull request, claiming, the `Author:` line, the CHANGELOG entry, who merges) and [docs/CONTRIBUTOR-PATH.md](docs/CONTRIBUTOR-PATH.md) (the same steps with the commands, for an agent on another computer with only git, gh and Node). [docs/dev/team-process.md](docs/dev/team-process.md) says how much you take on at once, when a finding becomes an issue, and how review and merging go. With write access you may also review and merge pull requests you did not write: [docs/CONTRIBUTOR-PATH.md, step 11](docs/CONTRIBUTOR-PATH.md#11-review-and-merge-someone-elses-pull-request). Ask questions on the issue, starting `Question:`; answers come there.
 
 ### Checks
 
@@ -124,7 +124,7 @@ For any reviewer of a pull request here, Codex review and Greptile included:
 - A user-visible string must be in all three tables: `hooks/i18n.ts`, `hooks/strings-en.ts` and `hooks/strings-zh-cn.ts`.
 - `hooks/board-script.ts`, `hooks/released.ts` and `tests/fixtures/released.ts` are generated: flag a hand edit, not their contents.
 - Tests, docs and pictures use synthetic data only.
-- Do not repeat a finding that is already resolved. If an answer does not resolve a P0 or P1 finding, say so in the same thread, so the maintainer sees it before approving.
+- Do not repeat a finding that is already resolved. If an answer does not resolve a P0 or P1 finding, say so in the same thread, so the reviewer sees it before approving.
 
 ### Conventions in the code
 
