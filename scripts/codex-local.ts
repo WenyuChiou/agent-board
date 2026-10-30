@@ -44,19 +44,33 @@ const readBytes = (file: string): Buffer | null => {
 }
 const readLocal = (file: string): string | null => readBytes(file)?.toString('utf8') ?? null
 
+// The repository name in a remote's address: `demo` from `https://host/x/demo.git` or `git@host:x/demo.git`.
+const remoteName = (config: string): string => {
+  const url = /^\s*url\s*=\s*(.+?)\s*$/m.exec(config.split(/^\s*\[remote\s/m)[1] ?? '')?.[1] ?? ''
+
+  return (url.split(/[\\/:]/).filter(Boolean).pop() ?? '').replace(/\.git$/, '')
+}
+
 // Names this folder's project may go by, as the Claude mod's `detectHere` has them: the folder
-// Codex files its block under and, for a git worktree, its main repository's folder. Read from
-// the `.git` file and `commondir`, without starting git inside the host's time limit.
+// Codex files its block under, the main repository's folder for a git worktree, and the
+// repository's name in its first remote. Read from `.git`, `commondir` and `config`, without
+// starting git inside the host's time limit; anything unreadable leaves the folder alone.
 const hereNames = (cwd: unknown): string[] => {
   const folder = folderProject(cwd)
-  if (typeof cwd !== 'string' || folder === '' || !isAbsolute(cwd)) return folder === '' ? [] : [folder]
-  const gitDir = /^gitdir:\s*(.+)$/im.exec(readLocal(join(cwd, '.git')) ?? '')?.[1]?.trim()
-  if (gitDir === undefined) return [folder]
-  const worktree = resolve(cwd, gitDir)
-  const common = readLocal(join(worktree, 'commondir'))?.trim()
-  const main = common === undefined ? '' : basename(dirname(resolve(worktree, common)))
+  const names = new Set(folder === '' ? [] : [folder])
+  if (typeof cwd !== 'string' || folder === '' || !isAbsolute(cwd)) return [...names]
+  try {
+    const dotGit = join(cwd, '.git')
+    if (!existsSync(dotGit)) return [...names]
+    // A checkout has a `.git` folder; a worktree has a `.git` file that names its own folder.
+    const gitDir = statSync(dotGit).isDirectory() ? dotGit : resolve(cwd, /^gitdir:\s*(.+)$/im.exec(readLocal(dotGit) ?? '')?.[1]?.trim() ?? '.git')
+    const common = readLocal(join(gitDir, 'commondir'))?.trim()
+    const commonDir = common === undefined ? gitDir : resolve(gitDir, common)
+    if (commonDir !== dotGit) names.add(basename(dirname(commonDir)))
+    names.add(remoteName(readLocal(join(commonDir, 'config')) ?? ''))
+  } catch {}
 
-  return main === '' || main === folder ? [folder] : [folder, main]
+  return [...names].filter(name => name !== '')
 }
 
 // A Codex session a person starts gets, on its SessionStart, the note the Claude mod gives a

@@ -5814,3 +5814,42 @@ test('a Codex session a person starts gets the open work of other sessions in it
   assert.equal(run.status, 0, run.stderr)
   assert.equal(run.stdout, '')
 }))
+
+test('a Codex start note finds the project by a checkout folder, a worktree main folder, its remote name and a folder name with spaces', () => fixture(f => {
+  f.install('--apply')
+  const at = new Date(Date.now() - 3600000).toISOString()
+  const block = (id, title) => `<!-- auto session=${id} agent=claude state=working updated=${at} -->\n### ${title}\n- [~] One\n<!-- /auto session=${id} -->\n`
+  f.save(f.progress, [
+    '## demo', block('b1b2c3e1', 'Synthetic remote work'),
+    '## repo-copy', block('b1b2c3e2', 'Synthetic main folder work'),
+    '## my project', block('b1b2c3e3', 'Synthetic spaced work'),
+    '## my', block('b1b2c3e4', 'Synthetic first word work'),
+  ].join('\n'))
+  const start = cwd => {
+    const result = f.event('SessionStart', null, { session_id: 'synthetic-person-start', cwd, source: 'startup', transcript_path: null })
+    assert.equal(result.status, 0, result.stderr)
+    return result.stdout === '' ? '' : JSON.parse(result.stdout).hookSpecificOutput.additionalContext
+  }
+  // An ordinary checkout: `.git` is a folder, and its remote names the project.
+  const checkout = join(f.home, 'checkout')
+  mkdirSync(join(checkout, '.git'), { recursive: true })
+  writeFileSync(join(checkout, '.git', 'config'), '[core]\n\tbare = false\n[remote "origin"]\n\turl = git@example.invalid:someone/demo.git\n')
+  assert.match(start(checkout), /Synthetic remote work/)
+  // A worktree: `.git` is a file naming a folder inside the main checkout `repo-copy`.
+  const main = join(f.home, 'repo-copy')
+  mkdirSync(join(main, '.git', 'worktrees', 'feature'), { recursive: true })
+  writeFileSync(join(main, '.git', 'worktrees', 'feature', 'commondir'), '../..\n')
+  writeFileSync(join(main, '.git', 'config'), '[remote "origin"]\n\turl = https://example.invalid/someone/demo.git\n')
+  const worktree = join(f.home, 'feature')
+  mkdirSync(worktree, { recursive: true })
+  writeFileSync(join(worktree, '.git'), `gitdir: ${join(main, '.git', 'worktrees', 'feature')}\n`)
+  const both = start(worktree)
+  assert.match(both, /Synthetic main folder work/)
+  assert.match(both, /Synthetic remote work/)
+  // A folder with a space: the whole heading, not only its first word.
+  const spaced = join(f.home, 'my project')
+  mkdirSync(spaced, { recursive: true })
+  const spacedNote = start(spaced)
+  assert.match(spacedNote, /Synthetic spaced work/)
+  assert.doesNotMatch(spacedNote, /Synthetic first word work/)
+}))
