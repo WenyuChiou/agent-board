@@ -102,11 +102,15 @@ iso claude plugin test .
 
 If you do not run them, write `not run:` and why in the pull request.
 
-A test that fails once and passes on its own rerun is reported as both, never as a pass. Known traps, all found on Windows in earlier pull requests:
+A test that fails once and passes on its own rerun is reported as both, never as a pass.
+
+In CI, such a test is flaky. Before you rerun it, comment on your pull request with the run link and the test's title, then rerun only the failed job, once. The same day, open a `bug` issue for it, or add your run to the issue already open for that title, with the job, the system, how long it ran and its timeout. A flaky or slow test is fixed at its cause: what it waits for, what it races with, what it reads before it is written. Raising a timeout, checking less, skipping it or marking it todo is not a fix. A test that takes more than half its timeout in CI counts as slow and gets the same issue.
+
+Known traps, all found on Windows in earlier pull requests:
 
 - In PowerShell, move files with `Move-Item -LiteralPath … -ErrorAction Stop`; `[System.IO.File]::Move` is refused in Constrained Language Mode (#179).
 - Destroying a child process's stdio and calling `unref()` does not free its handles on Windows; a test that gives up on a child must end the run itself (#184).
-- Tests that start a board page or a host process can time out on a busy machine; rerun the one that failed on its own and report both runs.
+- Tests that start a board page or a host process can time out on a busy machine. Locally, rerun the one that failed on its own and report both runs; in CI, a timeout is a flaky test, as above.
 
 ## 5. Write the CHANGELOG fragment
 
@@ -210,7 +214,10 @@ gh issue edit <N> -R WenyuChiou/agent-board --remove-label claimed
 
 With write access to this repository you may also review and merge pull requests you did not write ([CONTRIBUTING.md](../CONTRIBUTING.md#pull-requests) rules 8 and 9). If the owner names you in [Roles](../CONTRIBUTING.md#roles), a code-review subagent you run may also approve your own pull request, under the conditions in rule 8. In this step `<PR>` is the pull request you are reviewing, and `<N>` is each linked issue. Take one marked `Ready for review <sha>` that nobody is reviewing, and say so first:
 
+Start from the queue. `node scripts/review-queue.mjs` lists the pull requests waiting on a reviewer, smallest first, with how long each has waited since its `Ready for review <sha>`; then those that need `main` merged (a conflicted one gets no CI until it is), the approved ones, and those waiting on their author. Take the small ones first.
+
 ```sh
+node scripts/review-queue.mjs
 gh pr list -R WenyuChiou/agent-board --state open
 gh pr view <PR> -R WenyuChiou/agent-board --json headRefOid,body,isDraft
 gh api repos/WenyuChiou/agent-board/issues/<PR>/comments --paginate
@@ -229,5 +236,9 @@ Merge only when the latest verdict is an approval satisfying rule 8 for the curr
 gh pr merge <PR> -R WenyuChiou/agent-board --squash --match-head-commit <head sha>
 gh issue comment <N> -R WenyuChiou/agent-board --body "Fixed by #<PR>, merged as <merge sha>. <evidence>"
 ```
+
+Don't sit and watch CI. Once you approve, start the wait in the background (`gh pr checks <PR> -R WenyuChiou/agent-board --watch`, then the merge above when every check passes) and take the next pull request in the queue.
+
+A pull request that changes the board page's messages, the setup output or the one-line row summaries also needs `Acceptance: PASS <full head sha>` from a collaborator who did not write it, after walking the steps in #572 on their own machine.
 
 GitHub deletes a merged branch from this repository. A governance pull request also needs the owner's approval quoted in its body (rule 12), and a release pull request stays with the maintainer ([Releases](../CONTRIBUTING.md#releases)).
