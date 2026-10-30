@@ -5824,6 +5824,8 @@ test('a Codex start note finds the project by a checkout folder, a worktree main
     '## repo-copy', block('b1b2c3e2', 'Synthetic main folder work'),
     '## my project', block('b1b2c3e3', 'Synthetic spaced work'),
     '## my', block('b1b2c3e4', 'Synthetic first word work'),
+    '## other', block('b1b2c3e5', 'Synthetic upstream work'),
+    '## modules', block('b1b2c3e6', 'Synthetic submodule folder work'),
   ].join('\n'))
   const start = cwd => {
     const result = f.event('SessionStart', null, { session_id: 'synthetic-person-start', cwd, source: 'startup', transcript_path: null })
@@ -5833,8 +5835,21 @@ test('a Codex start note finds the project by a checkout folder, a worktree main
   // An ordinary checkout: `.git` is a folder, and its remote names the project.
   const checkout = join(f.home, 'checkout')
   mkdirSync(join(checkout, '.git'), { recursive: true })
-  writeFileSync(join(checkout, '.git', 'config'), '[core]\n\tbare = false\n[remote "origin"]\n\turl = git@example.invalid:someone/demo.git\n')
-  assert.match(start(checkout), /Synthetic remote work/)
+  writeFileSync(join(checkout, '.git', 'config'), '[core]\n\tbare = false\n[remote "upstream"]\n\turl = https://example.invalid/someone/other.git\n[remote "origin"]\n\turl = git@example.invalid:someone/demo.git\n')
+  // `origin` wins over a remote listed first.
+  const checkoutNote = start(checkout)
+  assert.match(checkoutNote, /Synthetic remote work/)
+  assert.doesNotMatch(checkoutNote, /Synthetic upstream work/)
+  // With no `source`, as an older Codex sends it, the note still comes.
+  const noSource = f.event('SessionStart', null, { session_id: 'synthetic-person-start', cwd: checkout, transcript_path: null })
+  assert.equal(noSource.status, 0, noSource.stderr)
+  assert.match(JSON.parse(noSource.stdout).hookSpecificOutput.additionalContext, /Synthetic remote work/)
+  // A submodule: its `.git` file names a folder under `.git/modules`, which is no project's name.
+  mkdirSync(join(checkout, '.git', 'modules', 'lib'), { recursive: true })
+  const submodule = join(checkout, 'lib')
+  mkdirSync(submodule, { recursive: true })
+  writeFileSync(join(submodule, '.git'), 'gitdir: ../.git/modules/lib\n')
+  assert.doesNotMatch(start(submodule), /Synthetic submodule folder work/)
   // A worktree: `.git` is a file naming a folder inside the main checkout `repo-copy`.
   const main = join(f.home, 'repo-copy')
   mkdirSync(join(main, '.git', 'worktrees', 'feature'), { recursive: true })
