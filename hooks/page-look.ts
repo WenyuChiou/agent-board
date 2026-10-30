@@ -25,6 +25,10 @@ export const pageTokens = (headHeight = '54px'): string => {
     'ease-out': 'cubic-bezier(.2,0,0,1)', 'ease-in': 'cubic-bezier(.4,0,1,1)',
     // Hover, the open row and a press are the ink at 5%, 8% and 12% over whatever is underneath.
     'hover': 'color-mix(in srgb,var(--ink) 5%,transparent)', 'current': 'color-mix(in srgb,var(--ink) 8%,transparent)', 'press': 'color-mix(in srgb,var(--ink) 12%,transparent)',
+    // Colour roles. Everything you press is ink, so the only colours on the page carry news: amber needs you, green is alive, red is wrong.
+    'act': 'var(--ink)', 'on-act': 'var(--surface)', 'alive': 'var(--done)',
+    'btn-line': 'color-mix(in srgb,var(--ink) 55%,var(--surface))',
+    'ring': '0 0 0 3px color-mix(in srgb,var(--ink) 18%,transparent)',
     'head-h': headHeight,
     ...Object.fromEntries(AGENT_ICONS.map(icon => [`ag-${icon.file}`, icon.tile])),
   }
@@ -58,8 +62,12 @@ export const themeHead = String.raw`
     if (choice) root.setAttribute('data-theme', choice);
     else root.removeAttribute('data-theme');
     var shown = choice || (scheme && scheme.matches ? 'dark' : 'light');
-    document.querySelectorAll('[data-theme-pick]').forEach(function (button) {
-      button.setAttribute('aria-pressed', String(button.getAttribute('data-theme-pick') === shown));
+    // The button shows the theme it switches to: a moon while the page is light, a sun while it is dark.
+    document.querySelectorAll('[data-theme-toggle]').forEach(function (button) {
+      var label = button.getAttribute(shown === 'dark' ? 'data-to-light' : 'data-to-dark') || '';
+      button.setAttribute('data-now', shown);
+      button.setAttribute('aria-label', label);
+      button.setAttribute('title', label);
     });
   }
   apply();
@@ -68,9 +76,8 @@ export const themeHead = String.raw`
   document.addEventListener('click', function (event) {
     var node = event.target;
     while (node && node !== document) {
-      var picked = node.getAttribute && node.getAttribute('data-theme-pick');
-      if (picked === 'light' || picked === 'dark') {
-        choice = picked;
+      if (node.getAttribute && node.getAttribute('data-theme-toggle') !== null) {
+        choice = (choice || (scheme && scheme.matches ? 'dark' : 'light')) === 'dark' ? 'light' : 'dark';
         // Blocked storage only means the pick is not kept: this page still shows it.
         try { localStorage.setItem('agent-board.theme', choice); } catch (e) {}
         try { document.cookie = 'agent-board.theme=' + choice + '; Path=/; SameSite=Strict; Max-Age=' + 365 * 24 * 3600; } catch (e) {}
@@ -88,16 +95,14 @@ export const themeHead = String.raw`
 
 const esc = (text: string): string => text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/"/g, '&quot;')
 
-const THEME_ICONS = [
-  '<circle cx="8" cy="8" r="3"/><path d="M8 1.5V3M8 13v1.5M1.5 8H3M13 8h1.5M3.4 3.4l1.1 1.1M11.5 11.5l1.1 1.1M3.4 12.6l1.1-1.1M11.5 4.5l1.1-1.1"/>',
-  '<path d="M13.5 9.6A5.6 5.6 0 0 1 6.4 2.5a5.6 5.6 0 1 0 7.1 7.1z"/>',
-] as const
+const THEME_ICONS = {
+  moon: '<path d="M13.5 9.6A5.6 5.6 0 0 1 6.4 2.5a5.6 5.6 0 1 0 7.1 7.1z"/>',
+  sun: '<circle cx="8" cy="8" r="3"/><path d="M8 1.5V3M8 13v1.5M1.5 8H3M13 8h1.5M3.4 3.4l1.1 1.1M11.5 11.5l1.1 1.1M3.4 12.6l1.1-1.1M11.5 4.5l1.1-1.1"/>',
+} as const
 
-export const themeSwitch = (s: Strings): string =>
-  `<div class="seg" role="group" aria-label="${esc(s.themeLabel)}">${(['light', 'dark'] as const).map((pick, index) => {
-    const label = [s.themeLight, s.themeDark][index] ?? ''
-    return `<button type="button" data-local data-theme-pick="${pick}" aria-pressed="false" aria-label="${esc(label)}"><svg class="i" viewBox="0 0 16 16" aria-hidden="true">${THEME_ICONS[index]}</svg><span class="tl">${esc(label)}</span></button>`
-  }).join('')}</div>`
+// One icon button for the theme: it shows the theme it switches to (a moon on a light page, a sun on a dark one).
+export const themeToggle = (s: Strings): string =>
+  `<button type="button" class="icon-btn" data-local data-theme-toggle data-now="light" data-to-dark="${esc(s.themeToDark)}" data-to-light="${esc(s.themeToLight)}" aria-label="${esc(s.themeToDark)}" title="${esc(s.themeToDark)}"><svg class="i i-moon" viewBox="0 0 16 16" aria-hidden="true">${THEME_ICONS.moon}</svg><svg class="i i-sun" viewBox="0 0 16 16" aria-hidden="true">${THEME_ICONS.sun}</svg></button>`
 
 // Bubble a, the board's mark: a lowercase a whose foot turns out into a speech-bubble tail, an agent
 // talking to you. One path on a 64 grid, in the brand colour.
@@ -154,6 +159,9 @@ export const motionCss = `
 .open>.fold,.open>.fx>.fx-in>.fold{grid-template-rows:1fr}
 @keyframes glow{from{background:var(--current)}to{background:transparent}}
 @keyframes dot{0%,100%{opacity:.25}50%{opacity:1}}
+/* switching a view: the new content rises 6px and fades in; nothing else moves */
+@keyframes enter{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}
+.enter{animation:enter var(--dur-layout) var(--ease-out)}
 @media (prefers-reduced-motion:reduce){*,*::before,*::after{transition:none!important;animation:none!important;scroll-behavior:auto!important}.dots i{opacity:.7}}
 `
 
@@ -198,22 +206,23 @@ body{margin:0;background:var(--ground);color:var(--ink);font:var(--text-sm)/1.5 
 [hidden]{display:none!important}
 button{font:inherit;color:inherit}
 svg.i{width:16px;height:16px;flex:none;fill:none;stroke:currentColor;stroke-width:1.6;stroke-linecap:round;stroke-linejoin:round}
-:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+:focus-visible{outline:2px solid var(--ink);outline-offset:2px}
 .wide{max-width:1180px;margin:0 auto;padding-left:max(16px,env(safe-area-inset-left,0px));padding-right:max(16px,env(safe-area-inset-right,0px))}
 .head{display:block;position:sticky;top:0;z-index:6;background:var(--ground);border-bottom:1px solid var(--line)}
 .topbar{display:flex;align-items:center;flex-wrap:wrap;gap:10px 12px;padding-block:10px}.topbar>.seg{margin-left:auto}
 .brand{display:flex;align-items:center;gap:10px;min-width:0;flex:1 1 auto}
 .brand h1{margin:0;font-size:var(--text-md);line-height:1.4;font-weight:650}
 .mark{width:30px;height:30px;flex:none}.lg-mark{fill:var(--brand)}
-.seg{display:inline-flex;padding:2px;gap:2px;border:1px solid var(--line);border-radius:var(--radius-m);background:var(--surface)}
-.seg button{border:1px solid transparent;background:transparent;color:var(--muted);min-height:28px;padding:0 8px;border-radius:var(--radius-m);display:inline-flex;align-items:center;gap:6px;font-size:var(--text-xs);cursor:pointer}
-.seg button:hover{color:var(--ink);background:var(--inset)}
-.seg button[aria-pressed="true"]{background:var(--ground);color:var(--ink);border-color:var(--muted)}
-@media (pointer:coarse){.seg button{min-height:44px}}
+.icon-btn{display:inline-grid;place-items:center;width:32px;height:32px;padding:0;border:0;border-radius:var(--radius-m);background:transparent;color:var(--muted);cursor:pointer;transition:background-color var(--dur-fast) var(--ease-out),color var(--dur-fast) var(--ease-out)}
+.icon-btn:hover{background:var(--hover);color:var(--ink)}
+.icon-btn:active{background:var(--press)}
+[data-theme-toggle] .i-sun,[data-theme-toggle][data-now="dark"] .i-moon{display:none}
+[data-theme-toggle][data-now="dark"] .i-sun{display:block}
+@media (pointer:coarse){.icon-btn{width:44px;height:44px}}
 .quiet,.meta{color:var(--muted)}
-button:hover,.btn:hover,summary:hover{background-color:var(--inset)}
+button:hover,.btn:hover,summary:hover{background-color:var(--hover)}
 @media (prefers-reduced-motion:no-preference){.theming,.theming *,.theming *::before,.theming *::after{transition:background-color var(--dur-theme) ease,border-color var(--dur-theme) ease,color var(--dur-theme) ease,fill var(--dur-theme) ease,box-shadow var(--dur-theme) ease!important}}
-@media (max-width:600px){.seg .tl{display:none}.seg button{padding:0 7px}.brand h1{font-size:var(--text-md)}.mark{width:28px;height:28px}}
+@media (max-width:600px){.brand h1{font-size:var(--text-md)}.mark{width:28px;height:28px}}
 @media (prefers-reduced-motion:reduce){*,*::before,*::after{transition:none!important;animation:none!important;scroll-behavior:auto!important}}
 `
 
@@ -223,14 +232,14 @@ export const agentRowCss = `
 .agents-in{display:flex;gap:var(--s2);overflow-x:auto;scrollbar-width:none;scroll-snap-type:x proximity;padding-top:var(--s2);padding-bottom:var(--s2)}
 .agents-in::-webkit-scrollbar{display:none}
 /* When the icons do not fit the row scrolls sideways and the edge that has more fades, so the last icon shows partly; it never wraps. */
-.agents-in.more-right{-webkit-mask-image:linear-gradient(to right,#000 calc(100% - 28px),transparent);mask-image:linear-gradient(to right,#000 calc(100% - 28px),transparent)}
-.agents-in.more-left{-webkit-mask-image:linear-gradient(to left,#000 calc(100% - 28px),transparent);mask-image:linear-gradient(to left,#000 calc(100% - 28px),transparent)}
-.agents-in.more-left.more-right{-webkit-mask-image:linear-gradient(to right,transparent,#000 28px,#000 calc(100% - 28px),transparent);mask-image:linear-gradient(to right,transparent,#000 28px,#000 calc(100% - 28px),transparent)}
+.agents-in.more-right{-webkit-mask-image:linear-gradient(to right,var(--ink) calc(100% - 28px),transparent);mask-image:linear-gradient(to right,var(--ink) calc(100% - 28px),transparent)}
+.agents-in.more-left{-webkit-mask-image:linear-gradient(to left,var(--ink) calc(100% - 28px),transparent);mask-image:linear-gradient(to left,var(--ink) calc(100% - 28px),transparent)}
+.agents-in.more-left.more-right{-webkit-mask-image:linear-gradient(to right,transparent,var(--ink) 28px,var(--ink) calc(100% - 28px),transparent);mask-image:linear-gradient(to right,transparent,var(--ink) 28px,var(--ink) calc(100% - 28px),transparent)}
 .chip{position:relative;flex:none;scroll-snap-align:start;display:inline-flex;align-items:center;gap:var(--s2);min-width:44px;height:44px;padding:0 7px;border:1px solid transparent;border-radius:var(--radius-m);background:transparent;cursor:pointer;transition:background-color var(--dur-fast) var(--ease-out),border-color var(--dur-fast) var(--ease-out)}
 .chip .ag{width:28px;height:28px}
 /* A presence dot at the icon's bottom-right; a ring around the icon would read as selected. */
 .chip[data-presence="offline"] .ag,.chip[data-presence="notseen"] .ag{background-color:var(--muted)}
-.chip.working::after{content:'';position:absolute;left:25px;top:25px;width:14px;height:14px;border:2px solid var(--ground);border-radius:var(--radius-round);background:var(--running);pointer-events:none}
+.chip.working::after{content:'';position:absolute;left:25px;top:25px;width:14px;height:14px;border:2px solid var(--ground);border-radius:var(--radius-round);background:var(--alive);pointer-events:none}
 .chip .c-name{max-width:0;overflow:hidden;white-space:nowrap;font-weight:600;line-height:1.5;transition:max-width var(--dur-layout) var(--ease-out)}
 .chip[aria-pressed="true"]{border-color:var(--ink);background:var(--current);padding-right:var(--s3)}
 .chip[aria-pressed="true"] .c-name{max-width:18em}

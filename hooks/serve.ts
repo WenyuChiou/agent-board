@@ -4,7 +4,7 @@ import type { BoardItem, PendingTurn } from './board'
 import { clipLine, LABEL_ROOM, LINE_ROOM } from './clip'
 import { groupBoard } from './grouping'
 import type { Bucket, Card, GroupedQuestion, GroupedTask, RepoOf } from './grouping'
-import { AGENT_ALIASES, agentFade, agentMarkCss, agentRowCss, boardMark, faviconLink, filterStore, htmlLang, motionCss, pageBaseCss, pageTokens, sheetCss, themeHead, themeSwitch } from './page-look'
+import { AGENT_ALIASES, agentFade, agentMarkCss, agentRowCss, boardMark, faviconLink, filterStore, htmlLang, motionCss, pageBaseCss, pageTokens, sheetCss, themeHead, themeToggle } from './page-look'
 import { ZH_TW } from './i18n'
 import type { Strings } from './i18n'
 import { agentLabel } from './strings'
@@ -667,7 +667,7 @@ const PAGE_WORDS = [
   'pgOlder', 'pgOlderOne', 'pgSeeAll', 'pgMore', 'pgOwnTodo', 'pgWriteOwn', 'pgCopyAnswer', 'pgStuck', 'pgTodo', 'pgLast', 'pgStoppedAt',
   'pgDoneSteps', 'pgDoneStepsOne', 'pgMoreSteps', 'pgMoreStepsOne', 'pgVersion', 'pgVersions', 'pgUnreadable', 'pgHowFix', 'pgFixAdvice',
   'pgReady', 'pgUnreadableReply', 'pgUnknownAge', 'pgCopyReply', 'pgPasteIn', 'pgSentTo', 'pgAnswered', 'pgCopyAgain', 'pgCancel',
-  'showAllQuestions', 'pgSendReply', 'pgCopyFailed', 'pgOffline', 'pgNotSeen', 'pgWorkingHint', 'pgPasteLater', 'serveRetry', 'serveCopyMessage', 'serveSendBusy', 'pgNoQuestions', 'pgOthers', 'pgStopped', 'pgDoneWeek', 'pgChipEmpty', 'pgStartIn', 'pgConnected', 'pgTipNeeds', 'pgTipNeedsOne', 'pgTipWorking', 'pgTipCantRead',
+  'showAllQuestions', 'pgSendReply', 'pgCopyFailed', 'pgOffline', 'pgNotSeen', 'pgWorkingHint', 'pgPasteLater', 'serveRetry', 'serveCopyMessage', 'serveSendBusy', 'pgNoQuestions', 'pgOthers', 'pgStopped', 'pgDoneWeek', 'pgChipEmpty', 'pgStartIn', 'pgConnected', 'pgTipNeeds', 'pgTipNeedsOne', 'pgTipWorking', 'pgTipCantRead', 'pgSideFold', 'pgSideOpen',
 ] as const satisfies ReadonlyArray<keyof Strings>
 
 // The chat prompt goes as it is in every language: the chat reads it, not the person.
@@ -713,7 +713,7 @@ button:hover,.btn:hover,summary:hover{background-color:var(--hover)}
 button:active,.btn:active{background-color:var(--press)}
 button:disabled,button[aria-disabled="true"]{color:var(--muted);border-color:var(--line);cursor:not-allowed}
 ${agentRowCss}
-.link{border:0;background:none;padding:0;min-height:var(--hit);color:var(--accent);font-weight:600;cursor:pointer;text-decoration:underline;text-underline-offset:3px}
+.link{border:0;background:none;padding:0;min-height:var(--hit);color:var(--ink);font-weight:600;cursor:pointer;text-decoration:underline;text-underline-offset:3px;text-decoration-thickness:1px}
 .link:hover{background:none}
 .page{flex:1;display:flex;flex-direction:column;gap:var(--s6);padding-top:var(--s5);padding-bottom:var(--s6)}
 #board{display:flex;flex-direction:column;gap:var(--s6);min-width:0}
@@ -733,23 +733,23 @@ ${sheetCss}
 .q{margin:0;font-size:var(--text-lg);line-height:1.4;font-weight:600;overflow-wrap:anywhere}
 .note,.context{margin:0;color:var(--muted)}
 .answers{display:flex;flex-wrap:wrap;gap:var(--s2);align-items:center;padding-top:var(--s1)}
-.btn,.answers button,.acts button,.state button,.composer button,.shelf-head,.pfoot button,.seg button{font:inherit;font-size:var(--text-sm);display:inline-flex;align-items:center;max-width:100%;min-height:var(--hit);padding:0 14px;border:1px solid var(--line-strong);border-radius:var(--radius-m);background:transparent;color:var(--ink);cursor:pointer;text-align:left;overflow-wrap:anywhere;text-decoration:none;transition:background-color var(--dur-fast) var(--ease-out),border-color var(--dur-fast) var(--ease-out)}
-.seg button{border-color:transparent;padding:0 8px;min-height:28px;font-size:var(--text-xs)}
-.seg button[aria-pressed="true"]{border-color:var(--muted)}
-button.primary{background:var(--accent);border-color:var(--accent);color:var(--on-accent)}
-button.primary:hover{background:var(--accent);border-color:var(--accent);filter:brightness(.94)}
-button.quiet{border-color:transparent;color:var(--accent)}
+.btn,.answers button,.acts button,.state button,.composer button,.shelf-head,.pfoot .btn,.pfoot #close{font:inherit;font-size:var(--text-sm);display:inline-flex;align-items:center;max-width:100%;min-height:var(--hit);padding:0 14px;border:1px solid var(--btn-line);border-radius:var(--radius-m);background:var(--surface);color:var(--ink);cursor:pointer;text-align:left;overflow-wrap:anywhere;text-decoration:none;transition:background-color var(--dur-fast) var(--ease-out),border-color var(--dur-fast) var(--ease-out)}
+button.primary{background:var(--act);border-color:var(--act);color:var(--on-act)}
+button.primary:hover{background:color-mix(in srgb,var(--ink) 84%,var(--surface));border-color:color-mix(in srgb,var(--ink) 84%,var(--surface))}
+button.quiet{border-color:transparent;background:transparent;color:var(--ink);text-decoration:underline;text-underline-offset:3px;text-decoration-thickness:1px}
+.btn:hover,.answers button:hover,.acts button:hover,.state button:hover,.composer button:hover,.pfoot #close:hover{background-color:color-mix(in srgb,var(--ink) 6%,var(--surface))}
+button.quiet:hover,.side .pfoot #close:hover{background-color:var(--hover)}
 .chev{display:inline-block;transition:transform var(--dur-base) var(--ease-out)}.chev::before{content:"▸"}
 .open>.shelf-head .chev{transform:rotate(90deg)}
 code{display:block;max-width:100%;overflow-x:auto;white-space:pre;font:var(--text-xs)/1.5 var(--font-mono);padding:6px var(--s2);border:1px solid var(--line);border-radius:var(--radius-s);background:var(--inset);color:var(--ink)}
 .state{display:flex;flex-wrap:wrap;align-items:center;gap:var(--s2) var(--s3)}
 .state .msg{display:inline-flex;align-items:center;gap:var(--s2);min-width:0;line-break:strict}
-.ok{color:var(--done)}.go{color:var(--accent)}
+.ok{color:var(--done)}.go{color:var(--ink)}
 .dots{display:inline-flex;gap:3px;margin-left:var(--s2)}.dots i{width:4px;height:4px;border-radius:var(--radius-round);background:currentColor;animation:dot var(--dur-dots) infinite ease-in-out}
 .dots i:nth-child(2){animation-delay:.2s}.dots i:nth-child(3){animation-delay:.4s}
 .composer{display:grid;gap:var(--s2)}
 textarea{display:block;width:100%;min-width:0;font:inherit;font-size:var(--text-sm);line-height:1.5;padding:10px var(--s3);border:1px solid var(--line-strong);border-radius:var(--radius-m);background:var(--surface);color:var(--ink);resize:vertical;min-height:76px;transition:border-color var(--dur-fast) var(--ease-out)}
-textarea:focus{outline:2px solid var(--accent);outline-offset:2px;border-color:var(--accent)}
+textarea:focus{outline:none;border-color:var(--ink);box-shadow:var(--ring)}
 .cf{display:flex;flex-wrap:wrap;gap:var(--s2);align-items:center;justify-content:flex-end}
 .cf .where{margin-right:auto;font-size:var(--text-xs);color:var(--muted)}
 .receipt,.said-line{margin:0;font-size:var(--text-sm);color:var(--muted)}
@@ -788,13 +788,13 @@ div.row-btn .r-chev{visibility:hidden}
 .steps .now .t{font-weight:600}
 .steps .mk{text-align:center}
 .t-quiet .short,.t-quiet .whole{color:var(--muted)}
-.row-open details>summary{cursor:pointer;color:var(--muted);list-style:none}
-.row-open details>summary::before{content:"▸ ";color:var(--muted)}.row-open details[open]>summary::before{content:"▾ "}
-.row-open details>summary::-webkit-details-marker{display:none}
+.row-open details:not(.clip)>summary{cursor:pointer;color:var(--muted);list-style:none}
+.row-open details:not(.clip)>summary::before{content:"▸ ";color:var(--muted)}.row-open details[open]:not(.clip)>summary::before{content:"▾ "}
+.row-open details:not(.clip)>summary::-webkit-details-marker{display:none}
 .acts{display:flex;flex-wrap:wrap;gap:var(--s2);align-items:center}
-.s-doing,.k-input,.k-reply,.n-active{color:var(--accent)}
+.s-doing,.k-input,.k-reply,.n-active{color:var(--ink)}
 .s-waiting,.k-confirm,.k-choose,.n-waiting{color:var(--waiting-text)}
-.s-blocked{color:var(--alert)}.s-done,.n-today{color:var(--done)}.s-running{color:var(--running)}.s-todo,.s-cancelled{color:var(--muted)}
+.s-blocked{color:var(--alert)}.n-today{color:var(--done)}.s-running{color:var(--alive)}.s-done,.s-todo,.s-cancelled{color:var(--muted)}
 .shelf{display:block}
 .shelf-head{display:flex;gap:var(--s2);width:100%;border-width:1px 0;border-radius:0;min-height:48px;padding:var(--s3) var(--s2);font-size:var(--text-md);line-height:1.4;font-weight:600}
 .shelf-head .count{font-size:var(--text-xs);font-weight:400;color:var(--muted);font-variant-numeric:tabular-nums}
@@ -814,20 +814,100 @@ div.row-btn .r-chev{visibility:hidden}
 .fresh .ok{color:var(--done)}
 .pfoot{display:flex;flex-wrap:wrap;gap:var(--s2) var(--s4);align-items:center;border-top:1px solid var(--line);padding-top:var(--s4);font-size:var(--text-xs);color:var(--muted)}
 .pfoot p{margin:0}.pfoot .press-result{flex-basis:100%}
-#footer-theme{display:none}
 #note{position:sticky;bottom:0;padding:var(--s3) 0;background:var(--ground);border-top:1px solid var(--line);overflow-wrap:anywhere}
 #note:empty{display:none}#note.done{color:var(--done)}#note.alert{color:var(--alert)}
 .lost{display:grid;gap:var(--s2);padding:var(--s3) var(--s4);border:1px solid var(--line-strong);border-radius:var(--radius-m)}
 .lost .where{font-weight:600}
 .notices{display:grid;gap:var(--s2)}.notices p{margin:0}
 ${CLIP_CSS}
-/* A wide screen: Needs you stands in a column of its own beside the work, and both scroll with the page. */
-@media (min-width:1000px){
-  .col{max-width:1280px}
-  #board{display:grid;grid-template-columns:minmax(380px,5fr) minmax(0,7fr);column-gap:var(--s6);row-gap:0;grid-template-rows:repeat(12,auto) 1fr;align-items:start}
-  #board>*{grid-column:2;margin-bottom:var(--s6)}
-  #board>#needs{grid-column:1;grid-row:1 / -1;margin-bottom:0}
-  #board>.fresh{grid-column:1 / -1}
+/* The sidebar, the rail and the work beside them. */
+.shell{display:block}
+.side{display:none}
+.stage{min-width:0}
+.s-brand{display:flex;align-items:center;gap:10px;min-height:40px;padding:0 var(--s2)}
+.s-brand .b-name{flex:1 1 auto;font-size:var(--text-md);font-weight:600;line-height:1.4;white-space:nowrap}
+.s-toggle{flex:none;width:32px;height:32px;display:inline-grid;place-items:center;padding:0;border:0;border-radius:var(--radius-m);background:transparent;color:var(--muted);cursor:pointer;transition:background-color var(--dur-fast) var(--ease-out),color var(--dur-fast) var(--ease-out)}
+.s-toggle:hover{background:var(--hover);color:var(--ink)}
+.s-toggle:active{background:var(--press)}
+.s-group{display:flex;flex-direction:column;gap:2px}
+.s-label{margin:0 0 var(--s1);padding:0 var(--s2);font-size:var(--text-xs);font-weight:600;color:var(--muted)}
+.s-item{position:relative;display:flex;align-items:center;gap:var(--s3);width:100%;max-width:none;min-height:36px;padding:4px var(--s2);border:0;border-radius:var(--radius-m);background:transparent;color:var(--ink);font-size:var(--text-sm);line-height:1.3;text-align:left;cursor:pointer;transition:background-color var(--dur-fast) var(--ease-out)}
+.s-item:hover{background:var(--hover)}
+.s-item:active{background:var(--press)}
+.s-item[aria-pressed="true"]{background:var(--current);font-weight:600}
+.s-agent[aria-pressed="true"].working .ag::after{border-color:var(--current)}
+.s-item>svg.i{width:18px;height:18px;margin-inline:3px}
+.s-item .ag{position:relative;width:24px;height:24px;border-radius:var(--radius-s);flex:none}
+.v-needs>svg.i{color:var(--waiting-text)}.v-working>svg.i{color:var(--alive)}.v-others>svg.i,.v-done>svg.i{color:var(--muted)}
+.s-project::before{content:"";flex:none;width:18px;height:18px;margin-inline:3px;background:var(--muted);-webkit-mask:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='black' stroke-width='1.6' stroke-linejoin='round'%3E%3Cpath d='M2 4.5h4l1.5 1.5H14v6.5H2z'/%3E%3C/svg%3E") center/contain no-repeat;mask:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='black' stroke-width='1.6' stroke-linejoin='round'%3E%3Cpath d='M2 4.5h4l1.5 1.5H14v6.5H2z'/%3E%3C/svg%3E") center/contain no-repeat}
+.s-txt{flex:1 1 auto;min-width:0;overflow-wrap:anywhere}
+.s-n{flex:none;font-size:var(--text-xs);color:var(--muted);font-variant-numeric:tabular-nums}
+.s-n:empty{display:none}
+.s-n.hot,.side .badge{position:static;flex:none;min-width:22px;height:22px;padding:0 6px;border:0;border-radius:var(--radius-round);background:var(--waiting-fill);color:var(--on-accent);font-size:var(--text-xs);font-weight:600;line-height:22px;text-align:center;font-variant-numeric:tabular-nums}
+.side .badge.bad{background:var(--alert)}
+.s-agent[data-presence="offline"] .ag,.s-agent[data-presence="notseen"] .ag{background-color:var(--muted)}
+.s-agent.working .ag::after{content:"";position:absolute;right:-5px;bottom:-5px;width:9px;height:9px;border:2px solid var(--ground);border-radius:var(--radius-round);background:var(--alive)}
+.shell[data-empty="1"] :is(.s-views,.s-projects){display:none}
+/* the settings at the foot of the sidebar: the language spot (reserved, in a row with the theme button), the project link, then Close the board */
+.s-foot{margin-top:auto;padding-top:var(--s3);border-top:1px solid var(--line)}
+.side .pfoot{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:var(--s1) var(--s2);border-top:0;padding:0 0 0 var(--s2)}
+.side .pfoot .set-row{order:-1;flex-basis:100%;margin-left:calc(var(--s2) * -1)}
+.side .pfoot .grow{display:none}
+.side .pfoot #close{min-height:32px;padding-inline:8px;border-color:transparent;background:transparent;text-decoration:underline;text-underline-offset:3px;text-decoration-thickness:1px}
+.side .pfoot p{order:3;flex-basis:100%}
+.ver-link{display:inline-flex;align-items:center;gap:4px;color:var(--muted);font-size:var(--text-xs);text-decoration:none;border-radius:var(--radius-s);white-space:nowrap}
+.ver-link:hover{color:var(--ink);text-decoration:underline;text-underline-offset:3px}
+.ver-link svg.i{width:14px;height:14px}
+.set-row{display:inline-flex;align-items:center;gap:var(--s1)}
+.pfoot .grow{flex:1 1 auto}
+
+@media (min-width:560px){
+  .shell{display:grid;grid-template-columns:232px minmax(0,1fr);align-items:start;transition:grid-template-columns var(--dur-layout) var(--ease-out)}
+  .shell[data-rail="1"]{grid-template-columns:64px minmax(0,1fr)}
+  .side{display:flex;flex-direction:column;gap:var(--s4);position:sticky;top:0;height:100dvh;overflow-x:hidden;overflow-y:auto;scrollbar-width:thin;padding:var(--s4) var(--s3);border-right:1px solid var(--line);background:var(--ground)}
+  .head,.agents-in{display:none}
+  .agents{position:static;border-bottom:0}
+  #offline:not(:empty){top:0;padding:var(--s3) var(--s5)}
+  /* the can't-read line and the work share one width, so their edges line up */
+  .col{max-width:1040px}
+  /* one view at a time; Overview shows them all */
+  .shell[data-view="needs"] #board>[data-sec]:not([data-sec="needs"]),
+  .shell[data-view="working"] #board>[data-sec]:not([data-sec="working"]),
+  .shell[data-view="others"] #board>[data-sec]:not([data-sec="others"]),
+  .shell[data-view="done"] #board>[data-sec]:not([data-sec="done"]){display:none}
+  /* the rail: the views and the agents as 44px icons with their badges; names in the tooltip; the project link, the theme and Close the board in the footer */
+  .shell[data-rail="1"] .side{padding:var(--s3) 10px;align-items:center}
+  .shell[data-rail="1"] :is(.s-label,.s-projects,.s-foot,.s-brand .b-name){display:none}
+  .shell[data-rail="1"] .s-brand{flex-direction:column;gap:var(--s2);padding:0}
+  .shell[data-rail="1"] .s-group{align-items:center;width:100%}
+  .shell[data-rail="1"] :is(.s-views,.s-views+.s-group){border-top:1px solid var(--line);padding-top:var(--s3)}
+  .shell[data-rail="1"] .s-item{width:44px;height:44px;min-height:44px;padding:0;justify-content:center}
+  .shell[data-rail="1"] .s-item>svg.i{margin:0}
+  .shell[data-rail="1"] .s-txt{position:absolute;width:1px;height:1px;overflow:hidden;clip-path:inset(50%);white-space:nowrap}
+  .shell[data-rail="1"] .s-n:not(.hot){display:none}
+  .shell[data-rail="1"] :is(.s-n.hot,.side .badge){position:absolute;top:-3px;right:-5px;border:2px solid var(--ground);line-height:18px}
+}
+@media (min-width:1280px){
+  .shell:is([data-view="all"],[data-view="needs"]) .col{max-width:1440px}
+  /* Overview in two columns: Needs you on the left, the rest stacked on the right; the last row takes the slack */
+  .shell[data-view="all"] #board{display:grid;grid-template-columns:minmax(460px,5fr) minmax(0,6fr);column-gap:var(--s6);row-gap:0;grid-template-rows:repeat(12,auto) 1fr;align-items:start}
+  .shell[data-view="all"] #board>*{grid-column:2;margin-bottom:var(--s6)}
+  .shell[data-view="all"] #board>#needs{grid-column:1;grid-row:1 / -1;margin-bottom:0}
+  .shell[data-view="all"] #board>.fresh{grid-column:1 / -1}
+  /* Needs you on its own: the questions sit side by side, each its own sheet */
+  .shell[data-view="needs"] .sheet{background:none;border:0}
+  .shell[data-view="needs"] .cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(440px,1fr));gap:var(--s4);align-items:start}
+  .shell[data-view="needs"] .cards>li{background:var(--surface);border:1px solid var(--line-strong);border-radius:var(--radius-m)}
+  .shell[data-view="needs"] .cards>li:first-child{border-top-left-radius:0}
+  .shell[data-view="needs"] .cards>li+li .card{border-top:0}
+}
+@media (min-width:1760px){
+  .shell[data-view="all"] .col{max-width:1840px}
+  .shell[data-view="all"] #board{grid-template-columns:repeat(3,minmax(0,1fr))}
+  .shell[data-view="all"] #board>*{grid-column:3}
+  .shell[data-view="all"] #board>#needs{grid-column:1}
+  .shell[data-view="all"] #board>[data-sec="working"]{grid-column:2;grid-row:1 / -1;margin-bottom:0}
+  .shell[data-view="all"] #board>.fresh{grid-column:1 / -1}
 }
 @media (max-width:640px){
   .col{padding-left:max(var(--s3),env(safe-area-inset-left,0px));padding-right:max(var(--s3),env(safe-area-inset-right,0px))}
@@ -835,19 +915,35 @@ ${CLIP_CSS}
   .agents{top:0}
   #offline:not(:empty){top:0}
   .live .lbl{display:none}.live{padding:var(--s1)}
-  #header-theme{display:none}#footer-theme{display:block}
   .page,#board{gap:var(--s5)}
   .page{padding-top:var(--s4)}
   .card{padding:var(--s3)}
+  .row-open{padding-left:var(--s2)}
+  .pfoot{gap:var(--s2)}
+}
+/* A finger, not the width, decides target size: a narrow window with a mouse keeps the desktop sizes. */
+@media (pointer:coarse){
+  .btn,.acts button,.state button,.composer button,.shelf-head,.row-btn,.pfoot #close,.s-item{min-height:44px}
+  .link{min-height:44px}
   .answers button,.answers .btn{flex:1 1 auto;min-height:48px;justify-content:flex-start}
   .answers button.quiet{flex:0 0 auto;min-height:44px}
-  .btn,.acts button,.state button,.composer button,.shelf-head,.pfoot button,.seg button{min-height:44px}
-  .link{min-height:44px}
+  .s-toggle{width:44px;height:44px}
   textarea{min-height:96px}
-  .row-open{padding-left:var(--s2)}
 }
 ${motionCss}
 `
+
+const VIEW_ICONS = {
+  all: '<rect x="2.5" y="2.5" width="4.5" height="4.5" rx="1"/><rect x="9" y="2.5" width="4.5" height="4.5" rx="1"/><rect x="2.5" y="9" width="4.5" height="4.5" rx="1"/><rect x="9" y="9" width="4.5" height="4.5" rx="1"/>',
+  needs: '<path d="M4 14V2.5M4 3h8l-2 2.75L12 8.5H4"/>',
+  working: '<path d="M5 3.5v9l7-4.5z" fill="currentColor" stroke="none"/>',
+  others: '<path d="M6 4.5h7.5M6 8h7.5M6 11.5h7.5M2.75 4.5h.01M2.75 8h.01M2.75 11.5h.01"/>',
+  done: '<path d="M3 8.5 6.5 12 13 4.5"/>',
+} as const
+
+// One view in the sidebar: pressing it shows that section alone (Overview shows all of them). It works without the server.
+const sideView = (id: keyof typeof VIEW_ICONS, label: string, hasCount: boolean): string =>
+  `<button type="button" class="s-item v-${id}" id="view-${id}" data-view="${id}" data-local data-nav title="${esc(label)}" aria-pressed="${id === 'all'}"><svg class="i" viewBox="0 0 16 16" aria-hidden="true">${VIEW_ICONS[id]}</svg><span class="s-txt">${esc(label)}</span>${hasCount ? `<span class="s-n${id === 'needs' ? ' hot' : ''}" id="count-${id}"></span>` : ''}</button>`
 
 // `isLan`: the page a phone opens on the local network, which closes sooner.
 export const servePage = (s: Strings, nonce: string, isLan = false, idleMs = 0): string => `<!doctype html>
@@ -867,14 +963,25 @@ ${PAGE_CSS}
 </style>
 </head>
 <body>
-<header class="head" id="head"><div class="col topbar"><div class="brand">${boardMark}<h1>Agent Board</h1><span class="live" title="${esc(s.serveLiveHint)}"><i></i><span class="lbl">${esc(s.serveLive)}</span></span></div><div id="header-theme">${themeSwitch(s)}</div></div></header>
+<div class="shell" id="shell" data-view="all">
+<aside class="side" id="side" aria-label="Agent Board">
+<div class="s-brand">${boardMark}<span class="b-name">Agent Board</span><span class="live" title="${esc(s.serveLiveHint)}"><i></i></span><button type="button" class="s-toggle" id="side-toggle" data-local aria-expanded="true" aria-label="${esc(s.pgSideFold)}" title="${esc(s.pgSideFold)}"><svg class="i" viewBox="0 0 16 16" aria-hidden="true"><rect x="2" y="2.5" width="12" height="11" rx="2"/><path d="M6.5 2.5v11"/></svg></button></div>
+<nav class="s-group s-views" id="side-views" aria-label="${esc(s.pgViews)}">${sideView('all', s.pgOverview, false)}${sideView('needs', s.pgNeeds, true)}${sideView('working', s.pgWorking, true)}${sideView('others', s.pgOthers, true)}${sideView('done', s.pgDone, true)}</nav>
+<div class="s-group s-agents" id="side-agent-group" role="group" aria-labelledby="side-agents-label" hidden><p class="s-label" id="side-agents-label">${esc(s.pgAgents)}</p><div class="s-group" id="side-agents"></div></div>
+<div class="s-group s-projects" id="side-project-group" role="group" aria-labelledby="side-projects-label" hidden><p class="s-label" id="side-projects-label">${esc(s.pgProjects)}</p><div class="s-group" id="side-projects"></div></div>
+<div class="s-foot" id="side-foot"></div>
+</aside>
+<div class="stage">
+<header class="head" id="head"><div class="col topbar"><div class="brand">${boardMark}<h1>Agent Board</h1><span class="live" title="${esc(s.serveLiveHint)}"><i></i><span class="lbl">${esc(s.serveLive)}</span></span></div></div></header>
 <div id="offline" role="status" aria-live="polite"></div>
 <nav class="agents" id="agents" aria-label="${esc(s.pgAgents)}" hidden><div class="col agents-in" id="chips"></div><div class="col agent-note" id="agent-note"></div></nav>
 <main class="col page">
 <div id="board"></div>
-<footer class="pfoot"><p id="versions"></p>${isLan ? `<p>${esc(s.serveLanIdle)}</p>` : idleMs > 0 ? `<p>${esc(s.serveIdleTimed(idleMs / 60_000))}</p>` : ''}<button type="button" id="close" data-static>${esc(s.serveClose)}</button><div id="footer-theme">${themeSwitch(s)}</div></footer>
+<footer class="pfoot" id="pfoot"><a class="ver-link" href="https://github.com/WenyuChiou/agent-board" target="_blank" rel="noopener" title="${esc(s.pgGithub)}"><span id="versions"></span><span aria-hidden="true">·</span>GitHub<svg class="i" viewBox="0 0 16 16" aria-hidden="true"><path d="M6.5 3.5H3.5v9h9v-3M9 3h4v4M13 3 7.5 8.5"/></svg></a><span class="grow"></span>${isLan ? `<p>${esc(s.serveLanIdle)}</p>` : idleMs > 0 ? `<p>${esc(s.serveIdleTimed(idleMs / 60_000))}</p>` : ''}<span class="set-row">${themeToggle(s)}</span><button type="button" id="close" data-static>${esc(s.serveClose)}</button></footer>
 <div id="note" role="status" aria-live="polite"></div>
 </main>
+</div>
+</div>
 <script type="application/json" id="words">${JSON.stringify(pageWords(isLan ? { ...s, serveOffline: s.serveOfflineLan } : s)).replace(/</g, '\\u003c')}</script>
 <script nonce="${nonce}">${PAGE_SCRIPT}</script>
 </body>
@@ -1215,7 +1322,7 @@ const PAGE_SCRIPT = String.raw`
     node.setAttribute('aria-hidden', 'true');
     return node;
   }
-  var pg = { filter: '', chips: {}, ids: [], model: null, sources: {}, order: {}, lis: [], groups: [], drafts: {}, shown: {}, nodes: {}, items: {}, hasOlder: false, mores: [], cardNodes: {}, cardList: null, rowKeys: {} };
+  var pg = { filter: '', project: '', view: 'all', chips: Object.create(null), sideChips: Object.create(null), projectNodes: Object.create(null), openShelf: {}, sentBy: Object.create(null), sentTotal: 0, ids: [], model: null, sources: {}, order: {}, lis: [], groups: [], drafts: {}, shown: {}, nodes: {}, items: {}, hasOlder: false, mores: [], cardNodes: {}, cardList: null, rowKeys: {} };
   var cardState = {};
   var cardParts = {};
   // The first screen describes work, so diagnostic identifiers and logs stay out of its labels.
@@ -1244,7 +1351,19 @@ const PAGE_SCRIPT = String.raw`
     return agentMark(id === 'own' ? '' : id === '?' ? '?' : ref.agent);
   }
   function nameOf(id) { return id === 'own' ? w('pgOwn') : agentName(id); }
-  function matches(id) { return !pg.filter || pg.filter === id; }
+  // The project a card or a row belongs to, as the page names it.
+  function projectOf(ref) { return clean(ref.repo || source(ref).project || ''); }
+  // The agent filter (icon row or sidebar) and the project filter (sidebar) both apply; either may be empty.
+  function matchesAgent(id) { return !pg.filter || pg.filter === id; }
+  function matches(id, project) { return matchesAgent(id) && (!pg.project || pg.project === project); }
+  // A sent answer is on its way: its card stays on the sheet with its line, but it no longer waits for the person.
+  // A message that timed out or was refused waits for the person again.
+  function isSent(ref) {
+    var one = source(ref);
+    var receipt = one.receipt;
+    var isFailed = !!receipt && (receipt.status === 'rejected' || receipt.status === 'uncertain' && /TIMEOUT/.test(receipt.error || ''));
+    return one.isSending === true && !isFailed;
+  }
   function byTime(a, b) { return (b.at || 0) - (a.at || 0); }
   function keepCopyFocus(redraw) {
     var active = document.activeElement;
@@ -1518,53 +1637,71 @@ const PAGE_SCRIPT = String.raw`
     var late = lateWord(entry.presence);
     return entry.name + (late ? ' · ' + late : '') + ': ' + (parts.length ? parts.join(', ') : w('pgChipEmpty'));
   }
+  // One button per agent, twice: in the icon row (phones) and in the sidebar (the rail and wider). Same label, count, dot and filter.
+  function newChip(entry, isSide) {
+    var node = navButton('', function () { setFilter(pg.filter === entry.id ? '' : entry.id); });
+    node.setAttribute('data-agent', entry.id);
+    var chip = { node: node, name: el('span', isSide ? 's-txt' : 'c-name'), badge: null, isSide: isSide };
+    add(node, agentMark(entry.agent), chip.name);
+    return chip;
+  }
+  function paintChip(chip, entry, label) {
+    chip.node.setAttribute('aria-label', label);
+    chip.node.setAttribute('title', label);
+    chip.node.className = (chip.isSide ? 's-item s-agent' : 'chip') + (entry.working > 0 ? ' working' : '');
+    if (entry.presence) chip.node.setAttribute('data-presence', entry.presence);
+    setText(chip.name, lateWord(entry.presence) ? entry.name + ' · ' + lateWord(entry.presence) : entry.name);
+    var text = entry.unreadable ? '!' : entry.needs > 0 ? String(entry.needs) : '';
+    if (text && !chip.badge) { chip.badge = el('span', 'badge'); chip.node.appendChild(chip.badge); }
+    if (!text && chip.badge) { chip.node.removeChild(chip.badge); chip.badge = null; }
+    if (chip.badge) { setText(chip.badge, text); chip.badge.className = 'badge' + (entry.unreadable ? ' bad' : ''); }
+    chip.unreadable = entry.unreadable;
+    chip.title = entry.name;
+  }
   function drawChips(view) {
     var nav = document.getElementById('agents');
     var row = document.getElementById('chips');
+    var sideList = document.getElementById('side-agents');
+    var sideGroup = document.getElementById('side-agent-group');
     var entries = [];
+    // A sent answer no longer waits for the person, so it leaves the count on its agent's badge.
+    var waiting = function (count, id) { return Math.max(0, count - (pg.sentBy[id] || 0)); };
     // Your to-dos come first, before every agent; the agents follow in their usual order.
-    if (Object.keys(view.own.counts).some(function (key) { return view.own.counts[key] > 0; })) entries.push({ id: 'own', name: w('pgOwn'), agent: '', needs: view.own.counts.needs, working: 0, unreadable: false });
+    if (Object.keys(view.own.counts).some(function (key) { return view.own.counts[key] > 0; })) entries.push({ id: 'own', name: w('pgOwn'), agent: '', needs: waiting(view.own.counts.needs, 'own'), working: 0, unreadable: false });
     pg.ids.forEach(function (id) {
       var group = view.agents.filter(function (one) { return one.agent === id; })[0];
       if (!group) return;
-      entries.push({ id: id, name: agentName(id), agent: id, needs: group.counts.needs, working: view.working.filter(function (ref) { return agentOf(ref) === id; }).length, unreadable: group.isUnreadable, presence: agentPresence[id] });
+      entries.push({ id: id, name: agentName(id), agent: id, needs: waiting(group.counts.needs, id), working: view.working.filter(function (ref) { return agentOf(ref) === id; }).length, unreadable: group.isUnreadable, presence: agentPresence[id] });
     });
     if (pg.filter && !entries.some(function (one) { return one.id === pg.filter; })) pg.filter = '';
     nav.hidden = entries.length === 0;
+    if (sideGroup) sideGroup.hidden = entries.length === 0;
     var ids = entries.map(function (one) { return one.id; });
-    Object.keys(pg.chips).forEach(function (id) {
-      if (ids.indexOf(id) === -1) { pg.chips[id].node.remove(); delete pg.chips[id]; }
+    [pg.chips, pg.sideChips].forEach(function (set) {
+      Object.keys(set).forEach(function (id) {
+        if (ids.indexOf(id) === -1) { set[id].node.remove(); delete set[id]; }
+      });
     });
     entries.forEach(function (entry) {
-      var chip = pg.chips[entry.id];
-      if (!chip) {
-        var node = navButton('', function () { setFilter(pg.filter === entry.id ? '' : entry.id); });
-        node.className = 'chip';
-        node.setAttribute('data-agent', entry.id);
-        chip = pg.chips[entry.id] = { node: node, name: el('span', 'c-name'), badge: null };
-        add(node, agentMark(entry.agent), chip.name);
-        if (entry.id === 'own' && row.firstChild) row.insertBefore(node, row.firstChild);
-        else add(row, node);
-      }
       var label = chipLabel(entry);
-      chip.node.setAttribute('aria-label', label);
-      chip.node.setAttribute('title', label);
-      chip.node.className = 'chip' + (entry.working > 0 ? ' working' : '');
-      if (entry.presence) chip.node.setAttribute('data-presence', entry.presence);
-      setText(chip.name, lateWord(entry.presence) ? entry.name + ' · ' + lateWord(entry.presence) : entry.name);
-      var text = entry.unreadable ? '!' : entry.needs > 0 ? String(entry.needs) : '';
-      if (text && !chip.badge) { chip.badge = el('span', 'badge'); chip.node.appendChild(chip.badge); }
-      if (!text && chip.badge) { chip.node.removeChild(chip.badge); chip.badge = null; }
-      if (chip.badge) { setText(chip.badge, text); chip.badge.className = 'badge' + (entry.unreadable ? ' bad' : ''); }
-      chip.unreadable = entry.unreadable;
-      chip.title = entry.name;
+      [[pg.chips, row, false], [pg.sideChips, sideList, true]].forEach(function (pair) {
+        var chip = pair[0][entry.id];
+        if (!chip) {
+          chip = pair[0][entry.id] = newChip(entry, pair[2]);
+          if (entry.id === 'own' && pair[1].firstChild) pair[1].insertBefore(chip.node, pair[1].firstChild);
+          else add(pair[1], chip.node);
+        }
+        paintChip(chip, entry, label);
+      });
     });
     paintFilter();
     drawNote(entries);
     fadeChips();
   }
   function paintFilter() {
-    Object.keys(pg.chips).forEach(function (id) { pg.chips[id].node.setAttribute('aria-pressed', String(pg.filter === id)); });
+    [pg.chips, pg.sideChips].forEach(function (set) {
+      Object.keys(set).forEach(function (id) { set[id].node.setAttribute('aria-pressed', String(pg.filter === id)); });
+    });
   }
   // A pressed icon widens to show its name; once it has, the row brings it into view and the edge fade is worked out again.
   function peekChip() {
@@ -1609,11 +1746,23 @@ const PAGE_SCRIPT = String.raw`
   // What the filter shows: rows, cards and shelves of that agent only; the rest closes up. Counts, empty
   // lines and headings follow what is left, so every number on the page agrees with what is shown.
   function layout() {
-    var count = { cards: 0, older: 0, working: 0, others: 0, stopped: 0, done: 0 };
+    var count = { cards: 0, shown: 0, older: 0, working: 0, others: 0, stopped: 0, done: 0 };
+    var projects = [];
+    var byProject = Object.create(null);
     pg.lis.forEach(function (one) {
-      one.show = matches(one.id);
-      if (one.show) count[one.list] += 1;
+      one.show = matches(one.id, one.project);
+      if (one.show) {
+        // cards: the number that waits for the person leaves out an answer already sent; shown counts every card on the sheet
+        if (one.list === 'cards') count.shown += 1;
+        if (!(one.list === 'cards' && one.sent)) count[one.list] += 1;
+      }
       reveal(one.block, one.show);
+      // the sidebar lists every project with something open, and counts it for the agent that is pressed
+      if (one.project && !one.sent && (one.list === 'cards' || one.list === 'working' || one.list === 'others')) {
+        var held = byProject['p:' + one.project];
+        if (!held) { held = byProject['p:' + one.project] = { name: one.project, n: 0 }; projects.push(held); }
+        if (matchesAgent(one.id)) held.n += 1;
+      }
     });
     pg.groups.forEach(function (group) {
       var any = group.entries.some(function (one) { return one.show; });
@@ -1624,14 +1773,95 @@ const PAGE_SCRIPT = String.raw`
     if (pg.nodes.needsCount) pg.nodes.needsFlag.setAttribute('data-needs-count', String(count.cards));
     setText(pg.nodes.needsText, pg.filter ? w('pgNoQuestions', nameOf(pg.filter)) : w('pgNothing'));
     setText(pg.nodes.needsSub, pg.filter ? '' : w('pgNothingHint'));
-    reveal(pg.nodes.needsEmpty, count.cards === 0);
-    reveal(pg.nodes.workingEmpty, count.working === 0 && !pg.filter);
-    // The line counts every older question the filter allows, drawn or not.
-    if (pg.olderRefs) count.older = pg.olderRefs.filter(function (ref) { return matches(agentOf(ref)); }).length;
+    reveal(pg.nodes.needsEmpty, count.shown === 0);
+    reveal(pg.nodes.workingEmpty, count.working === 0 && !pg.filter && !pg.project);
+    // The line counts every older question the filters allow, drawn or not.
+    if (pg.olderRefs) count.older = pg.olderRefs.filter(function (ref) { return matches(agentOf(ref), projectOf(ref)); }).length;
     if (pg.nodes.olderLine) setText(pg.nodes.olderLine, plural('pgOlder', count.older));
     reveal(pg.nodes.olderBlock, count.older > 0);
     Object.keys(pg.nodes.counts).forEach(function (name) { setText(pg.nodes.counts[name], name === 'done' ? w('pgDoneWeek', count.done) : count[name]); });
-    pg.sections.forEach(function (section) { reveal(section.block, count[section.list] > 0 || section.list === 'working' && !pg.filter); });
+    pg.sections.forEach(function (section) { reveal(section.block, count[section.list] > 0 || section.list === 'working' && !pg.filter && !pg.project); });
+    drawSide(count, projects);
+  }
+  // The sidebar's numbers come from the same counts as the headings, so every number on the page agrees.
+  function drawSide(count, projects) {
+    var shown = { needs: count.cards, working: count.working, others: count.others + count.stopped, done: count.done };
+    Object.keys(shown).forEach(function (name) {
+      var node = document.getElementById('count-' + name);
+      if (node) setText(node, shown[name] > 0 ? shown[name] : '');
+    });
+    var group = document.getElementById('side-project-group');
+    var list = document.getElementById('side-projects');
+    if (!list) return;
+    if (pg.project && !projects.some(function (one) { return one.name === pg.project; })) pg.project = '';
+    projects.sort(function (a, b) { return a.name < b.name ? -1 : a.name > b.name ? 1 : 0; });
+    var wanted = projects.map(function (one) {
+      var held = pg.projectNodes['p:' + one.name];
+      if (!held) {
+        var node = navButton('', function () { setProject(one.name); });
+        node.className = 's-item s-project';
+        node.setAttribute('data-project', one.name);
+        node.setAttribute('title', one.name);
+        held = pg.projectNodes['p:' + one.name] = { node: node, name: el('span', 's-txt', one.name), n: el('span', 's-n') };
+        add(node, held.name, held.n);
+      }
+      setText(held.n, one.n > 0 ? one.n : '');
+      held.node.setAttribute('aria-pressed', String(pg.project === one.name));
+      return held.node;
+    });
+    Object.keys(pg.projectNodes).forEach(function (key) {
+      if (wanted.indexOf(pg.projectNodes[key].node) === -1) { pg.projectNodes[key].node.remove(); delete pg.projectNodes[key]; }
+    });
+    wanted.forEach(function (node, index) { if (list.childNodes[index] !== node) list.insertBefore(node, list.childNodes[index] || null); });
+    if (group) group.hidden = wanted.length === 0;
+  }
+  function setProject(name) {
+    pg.project = pg.project === name ? '' : name;
+    layout();
+  }
+  // A view shows one section alone (the rail and the sidebar); Overview shows them all. Done opens its list.
+  var VIEWS = ['all', 'needs', 'working', 'others', 'done'];
+  function enter(node) {
+    if (!node || !moving()) return;
+    toggleClass(node, 'enter', false);
+    node.offsetWidth;
+    toggleClass(node, 'enter', true);
+    node.addEventListener('animationend', function () { toggleClass(node, 'enter', false); }, { once: true });
+  }
+  function setView(name) {
+    pg.view = name;
+    var shell = document.getElementById('shell');
+    shell.setAttribute('data-view', name);
+    VIEWS.forEach(function (one) { document.getElementById('view-' + one).setAttribute('aria-pressed', String(one === name)); });
+    if (name === 'done' && pg.openShelf.done) pg.openShelf.done(true);
+    enter(board);
+    if (typeof window.scrollTo === 'function') window.scrollTo(0, 0);
+  }
+  // The sidebar folds to a rail of icons at any width from 560px up; the pick is kept. Below 800px it starts folded.
+  // The footer (version link, theme, Close the board) lives at the foot of the full sidebar, and under the work otherwise.
+  function savedSide() {
+    var kept = '';
+    try { kept = localStorage.getItem('agent-board.side') || ''; } catch (e) {}
+    return kept === 'rail' || kept === 'full' ? kept : '';
+  }
+  var sidePick = savedSide();
+  function fitSide() {
+    var width = window.innerWidth;
+    var shell = document.getElementById('shell');
+    if (typeof width !== 'number' || !shell) return;
+    var hasSide = width >= 560;
+    var isRail = hasSide && (sidePick === 'rail' || (sidePick !== 'full' && width < 800));
+    shell.setAttribute('data-rail', isRail ? '1' : '');
+    var toggle = document.getElementById('side-toggle');
+    var label = w(isRail ? 'pgSideOpen' : 'pgSideFold');
+    toggle.setAttribute('aria-expanded', String(!isRail));
+    toggle.setAttribute('aria-label', label);
+    toggle.setAttribute('title', label);
+    var foot = document.getElementById('pfoot');
+    var home = hasSide && !isRail ? document.getElementById('side-foot') : document.querySelector('main');
+    if (!foot || !home || foot.parentNode === home) return;
+    if (hasSide && !isRail) home.appendChild(foot);
+    else home.insertBefore(foot, document.getElementById('note'));
   }
   // While a row is open the list it is in keeps its order, so what is being read does not move; anything new comes first.
   function settle(name, refs) {
@@ -1650,7 +1880,7 @@ const PAGE_SCRIPT = String.raw`
     return ordered;
   }
   function entry(li, block, ref, list) {
-    var one = { li: li, block: block, id: agentOf(ref), list: list, show: true, key: ref.key };
+    var one = { li: li, block: block, id: agentOf(ref), project: projectOf(ref), list: list, show: true, key: ref.key, sent: list === 'cards' && isSent(ref) };
     pg.lis.push(one);
     return one;
   }
@@ -1668,10 +1898,11 @@ const PAGE_SCRIPT = String.raw`
   function needsSection(view) {
     var wrap = el('section', 'needs-wrap');
     wrap.id = 'needs';
+    wrap.setAttribute('data-sec', 'needs');
     var flag = el('h2', 'flag', w('pgNeeds'));
-    var total = el('b', '', String(view.needs.n));
+    var total = el('b', '', String(Math.max(0, view.needs.n - pg.sentTotal)));
     add(flag, total);
-    flag.setAttribute('data-needs-count', String(view.needs.n));
+    flag.setAttribute('data-needs-count', String(Math.max(0, view.needs.n - pg.sentTotal)));
     pg.nodes.needsCount = total;
     pg.nodes.needsFlag = flag;
     var sheet = el('div', 'sheet');
@@ -1792,13 +2023,14 @@ const PAGE_SCRIPT = String.raw`
     pg.nodes.counts[name] = count;
     var fold = el('div', 'fold');
     fold.inert = opened['shelf:' + name] !== true;
-    var head = navButton('', function () {
-      var now = !hasClass(box, 'open');
+    var setOpen = function (now) {
       toggleClass(box, 'open', now);
       head.setAttribute('aria-expanded', String(now));
       fold.inert = !now;
       opened['shelf:' + name] = now;
-    });
+    };
+    var head = navButton('', function () { setOpen(!hasClass(box, 'open')); });
+    pg.openShelf[name] = setOpen;
     head.className = 'shelf-head';
     head.setAttribute('aria-expanded', String(opened['shelf:' + name] === true));
     add(head, el('span', 'chev'), el('span', '', title), count);
@@ -1826,6 +2058,7 @@ const PAGE_SCRIPT = String.raw`
     var items = model.hidden || [];
     if (!items.length) return null;
     var box = el('section', 'shelf' + (opened['shelf:hidden'] ? ' open' : ''));
+    box.setAttribute('data-sec', 'needs');
     var fold = el('div', 'fold');
     fold.inert = opened['shelf:hidden'] !== true;
     var head = navButton('', function () {
@@ -1880,6 +2113,7 @@ const PAGE_SCRIPT = String.raw`
   }
   function sectionBlock(section, list) {
     var block = fx(section);
+    block.setAttribute('data-sec', list === 'stopped' ? 'others' : list);
     pg.sections.push({ block: block, list: list });
     return block;
   }
@@ -1896,7 +2130,17 @@ const PAGE_SCRIPT = String.raw`
     pg.sources = {};
     [].concat(model.asks || [], model.reminder || [], model.older || [], model.idle || [], model.stopped || [], (model.groups || []).flatMap(function (group) { return group.rows; }), model.turns || [], model.recent || [], model.finished || []).forEach(function (item) { if (item.key) pg.sources[item.key] = Object.assign({}, pg.sources[item.key], item); });
     if (!hasDrawn) pg.filter = savedFilter();
-    document.title = view.needs.n ? w('pgTabTitle', view.needs.n) : 'Agent Board';
+    // An answer that was sent stops counting as waiting for the person (tab title, flag, agent badges) until it comes back.
+    pg.sentBy = Object.create(null);
+    pg.sentTotal = 0;
+    view.needs.cards.forEach(function (ref) {
+      if (!isSent(ref)) return;
+      var who = agentOf(ref);
+      pg.sentTotal += 1;
+      pg.sentBy[who] = (pg.sentBy[who] || 0) + 1;
+    });
+    var waitingNow = Math.max(0, view.needs.n - pg.sentTotal);
+    document.title = waitingNow ? w('pgTabTitle', waitingNow) : 'Agent Board';
     var version = view.versions;
     document.getElementById('versions').textContent = !version.package || version.package === version.board ? w('pgVersion', version.board) : w('pgVersions', version.board, version.package);
     var priorCards = pg.cardNodes;
@@ -1905,6 +2149,7 @@ const PAGE_SCRIPT = String.raw`
     pg.lis = [];
     pg.groups = [];
     pg.sections = [];
+    pg.openShelf = {};
     pg.mores = [];
     pg.nodes = { counts: {} };
     pg.cardNodes = {};
@@ -1917,6 +2162,7 @@ const PAGE_SCRIPT = String.raw`
     var parts = [];
     if (model.warning) parts.push(el('p', 't-alert', model.warning));
     var hasOwn = Object.keys(view.own.counts).some(function (key) { return view.own.counts[key] > 0; });
+    document.getElementById('shell').setAttribute('data-empty', !view.agents.length && !hasOwn ? '1' : '');
     if (!view.agents.length && !hasOwn) parts.push(freshPage(view));
     else {
       var workingKeys = {};
@@ -2060,6 +2306,14 @@ const PAGE_SCRIPT = String.raw`
     var head = document.getElementById('head');
     new ResizeObserver(function () { document.documentElement.style.setProperty('--head-h', head.offsetHeight + 'px'); }).observe(head);
   }
+  VIEWS.forEach(function (name) { document.getElementById('view-' + name).addEventListener('click', function () { setView(name); }); });
+  document.getElementById('side-toggle').addEventListener('click', function () {
+    sidePick = document.getElementById('shell').getAttribute('data-rail') === '1' ? 'full' : 'rail';
+    try { localStorage.setItem('agent-board.side', sidePick); } catch (e) {}
+    fitSide();
+  });
+  if (typeof window.addEventListener === 'function') window.addEventListener('resize', fitSide);
+  fitSide();
   document.getElementById('close').addEventListener('click', function () {
     if (isUnreachable) return;
     beginPress();
@@ -2070,6 +2324,7 @@ const PAGE_SCRIPT = String.raw`
       var main = document.querySelector('main');
       main.textContent = '';
       add(main, el('p', '', w('serveClosed')));
+      document.getElementById('side').hidden = true;
     };
     call('/api/close', {}).then(function (data) {
       if (data.ok) shut();

@@ -3,7 +3,7 @@ import type { PendingTurn } from './board'
 import { clip } from './mirror'
 import { askRole, stepRole, toneRole } from './palette'
 import type { Palette } from './palette'
-import { agentFade, agentMark, agentMarkCss, agentRowCss, boardMark, faviconLink, filterStore, htmlLang, pageBaseCss, pageTokens, sheetCss, themeHead, themeSwitch } from './page-look'
+import { agentFade, agentMark, agentMarkCss, agentRowCss, boardMark, faviconLink, filterStore, htmlLang, pageBaseCss, pageTokens, sheetCss, themeHead, themeToggle } from './page-look'
 import { serveModel } from './serve'
 import { agentLabel } from './strings'
 import type { Strings } from './i18n'
@@ -55,7 +55,7 @@ const askVar = (kind: Parameters<typeof askRole>[0]): string => textRole(askRole
 
 const bar = (done: number, total: number): string => {
   const percent = total === 0 ? 0 : Math.round((done / total) * 100)
-  return `<span class="bar"><span style="width:${percent}%;background:var(--${done === total && total > 0 ? 'done' : 'accent'})"></span></span>`
+  return `<span class="bar"><span style="width:${percent}%;background:var(--${done === total && total > 0 ? 'done' : 'ink'})"></span></span>`
 }
 
 // The id the agent row and the filter use for an agent: its lower-case name, Claude Code for none, own for a hand-kept task.
@@ -124,10 +124,10 @@ button{font:inherit}
 ${agentRowCss}
 ${sheetCss}
 main{display:flex;flex-direction:column;gap:var(--s6);padding-top:var(--s5);padding-bottom:var(--s6);min-width:0}
-a{color:var(--accent)}
+a{color:var(--ink);text-decoration:underline;text-underline-offset:3px;text-decoration-thickness:1px}
 .quiet{margin:0;color:var(--muted)}
 .t-alert{color:var(--alert)}
-.link{border:0;background:none;padding:0;min-height:var(--hit);color:var(--accent);font-weight:600;cursor:pointer;text-decoration:underline;text-underline-offset:3px}
+.link{border:0;background:none;padding:0;min-height:var(--hit);color:var(--ink);font-weight:600;cursor:pointer;text-decoration:underline;text-underline-offset:3px;text-decoration-thickness:1px}
 .sheet>.ask,.sheet>.quiet,.sheet>.empty{margin:0;padding:var(--s4)}
 .sheet>.ask+.ask{border-top:1px solid var(--line)}
 .sheet>details.section{border-width:1px 0 0;border-radius:0}
@@ -142,7 +142,7 @@ summary{cursor:pointer;display:flex;flex-wrap:wrap;align-items:baseline;gap:var(
 summary::-webkit-details-marker{display:none}
 summary::before{content:"▸";color:var(--muted)}
 details[open]>summary::before{content:"▾"}
-summary:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+summary:focus-visible{outline:2px solid var(--ink);outline-offset:2px}
 .section>summary .title{font-size:var(--text-lg);line-height:1.4;font-weight:600}
 .section>summary .count{font-size:var(--text-xs);font-variant-numeric:tabular-nums}
 .section>p,.section>.group{margin:0 0 var(--s3)}
@@ -219,7 +219,7 @@ ${DASH_CSS}
 </style>
 </head>
 <body>
-<header class="head" id="head"><div class="col topbar"><div class="brand">${boardMark}<h1>Agent Board</h1><span class="meta">${esc(stamp)}</span></div>${themeSwitch(s)}</div></header>
+<header class="head" id="head"><div class="col topbar"><div class="brand">${boardMark}<h1>Agent Board</h1><span class="meta">${esc(stamp)}</span></div>${themeToggle(s)}</div></header>
 ${chipRow(chips, s).replace('<div class="col agent-note" id="agent-note"></div>', `<div class="col agent-note" id="agent-note">${noteRows}</div>`)}
 <main class="col">
 ${view.warning ? `<p role="status" class="t-alert">${esc(view.warning)}</p>` : ''}
