@@ -62,12 +62,15 @@ test('L5 read-only file: a failed tick writes no journal line and shows a one-li
     })
     const card = page.cards().find(one => one.textContent.includes('First card'))
     assert.ok(card, page.text())
-    // The button names this long step by its first words (#463); the whole step is its title and is what a press sends.
-    const button = page.buttons(card).find(one => one.textContent.startsWith('Done: ') && one.title === step)
+    // The button names this long step by its first words (#463); the row lists the whole step and the press sends it.
+    const button = page.buttons(card).find(one => one.textContent.startsWith('Done: ') && one.textContent.endsWith('…'))
     assert.ok(button, card.textContent)
-    assert.ok(button.textContent.endsWith('…'), button.textContent)
+    assert.ok(card.textContent.includes(step), card.textContent)
+    // A person opens the row before pressing what is inside it.
+    assert.ok(page.reveal(button), 'The tick button must be reachable')
     button.click()
     await page.flush()
+    assert.equal(page.requests.at(-1).body.text, step)
     assert.equal(response.status, 409)
     const result = descendants(card).find(one => one.className?.split(' ').includes('press-result'))
     assert.equal(result?.textContent, unsaved)
@@ -215,7 +218,11 @@ test('L5 torn tail: the terminal, --chat, html view and page each warn once and 
         const label = `${shape.name} on ${surface}`
         // Once, and whole: a warning cut over two lines or shown twice does not count.
         assert.equal(occurrences(text, cutOff), 1, `${label}:\n${text}`)
-        for (const title of shape.complete) assert.ok(text.includes(title), `${label} lost ${title}:\n${text}`)
+        for (const title of shape.complete) {
+          // A waiting session is a card of its question on the page, which does not name the task.
+          const shown = surface === 'page' && title === 'Second complete card' ? 'Publish the synthetic docs, OK?' : title
+          assert.ok(text.includes(shown), `${label} lost ${title}:\n${text}`)
+        }
       }
       for (const surface of ['terminal', 'chat']) assert.equal(screens[surface].split('\n').filter(line => line.trim() === cutOff).length, 1, surface)
       assert.equal((await server.get('/api/board')).json().model.warning, cutOff)
@@ -424,23 +431,12 @@ test('L5 FORMAT.md writer: a block whose rename is refused while another program
   } finally { await world.close() }
 })
 
-// pageDom (lib/surfaces.mjs) answers /api/board itself and has no document.querySelectorAll, so it
-// cannot show a tab whose server has gone. This gives the shipped page script both, inside the
-// script only and after its 'use strict': polls go to the real server as a POST the test
-// forwards, and the missing selector is answered from the buttons the page drew.
+// pageDom (lib/surfaces.mjs) answers /api/board itself, so it cannot show a tab whose server has
+// gone. This gives the shipped page script a fetch of its own, inside the script only and after its
+// 'use strict': polls go to the real server as a POST the test forwards.
 const reachableTab = source => source.replace("'use strict';", () => `'use strict';
-  document.querySelectorAll = function (selector) {
-    var found = []
-    function walk(node) { if (node.tag === 'button') found.push(node); node.childNodes.forEach(walk) }
-    ['summary', 'counts', 'status', 'board', 'note', 'main'].forEach(function (id) { walk(document.getElementById(id)) })
-    return found.filter(function (node) {
-      if (selector.indexOf('data-local') >= 0) return node.getAttribute('data-local') === null
-      if (selector.indexOf('data-static') >= 0) return node.getAttribute('data-static') !== null
-      return true
-    })
-  }
   var send = fetch
-  fetch = function (target, options) { return target === '/api/board' ? send('/api/poll', { method: 'POST', body: '{}' }) : send(target, options) }`)
+  fetch = function (target, options) { return String(target).indexOf('/api/board') === 0 ? send('/api/poll', { method: 'POST', body: '{}' }) : send(target, options) }`)
 
 test('L5 restarted server: after a real restart an old page tab disables every button that needs the server and says how to reconnect', async () => {
   const world = makeWorld()
@@ -516,7 +512,9 @@ test('L5 OpenCode exit: a row whose end report missed the hook limit reads as st
       assert.ok(at >= 0, `${surface} lost the row:\n${text}`)
       const row = text.slice(at, at + 300)
       assert.doesNotMatch(row, /is working/, `${surface} still calls a silent agent working`)
-      assert.ok(row.includes(saysWhy), `${surface} never says "${saysWhy}": ${row}`)
+      // The page puts the row on its Stopped shelf: "Stopped at:" the step, and the age beside it.
+      if (surface === 'page') assert.ok(row.includes(EN.pgStoppedAt('Synthetic next step')) && row.includes(EN.hoursAgo(STALE_MS / 3600000)), `${surface} never says it stopped ${EN.hoursAgo(STALE_MS / 3600000)}: ${row}`)
+      else assert.ok(row.includes(saysWhy), `${surface} never says "${saysWhy}": ${row}`)
     }
   } finally { await world.close() }
 })
@@ -539,6 +537,9 @@ test('L5 crashed agent: a working row with no event for the stale time of its ho
     // The age is whole hours rounded down, so the extra minute past the stale time still reads as
     // the stale time itself (12 h).
     const saysWhy = EN.sessionStopped(EN.hoursAgo(STALE_MS / 3600000))
-    for (const [surface, row] of Object.entries(rows)) assert.ok(row.includes(saysWhy), `${surface} never says "${saysWhy}": ${row}`)
+    for (const [surface, row] of Object.entries(rows)) {
+      if (surface === 'page') assert.ok(row.includes(EN.pgStoppedAt('Check the synthetic routes')) && row.includes(EN.hoursAgo(STALE_MS / 3600000)), `${surface} never says it stopped ${EN.hoursAgo(STALE_MS / 3600000)}: ${row}`)
+      else assert.ok(row.includes(saysWhy), `${surface} never says "${saysWhy}": ${row}`)
+    }
   } finally { await world.close() }
 })

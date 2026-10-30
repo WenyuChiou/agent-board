@@ -12,6 +12,7 @@ import { pageDom, serve } from './surfaces.mjs'
 import { noMachineIds, noSilentPress, seenWithin } from './expect.mjs'
 import { knownFailure } from './known.mjs'
 import { PAGE_MS, RECEIPT_SLACK_MS } from './budget.mjs'
+import { EN } from '../../../hooks/strings-en.ts'
 
 const pause = ms => new Promise(done => setTimeout(done, ms))
 const ownedProxies = new Set()
@@ -221,8 +222,10 @@ export const withHub = async (specs, fn) => {
         const input = dom.inputs(card)[0]
         assert.ok(input, 'No message box on ' + card.textContent)
         input.value = text
-        const button = dom.buttons(card).find(one => /^(?:Send|Copy$)/.test(one.textContent))
+        const button = dom.buttons(card).find(one => one.getAttribute('data-nav') === null && (one.textContent.startsWith('Send') || one.textContent === EN.pgCopyAnswer))
         assert.ok(button, card.textContent)
+        // The message box sits in the open row (or the box a question opens): a person opens it first.
+        assert.ok(dom.reveal(button), 'The message box is not on screen: ' + card.textContent)
         return { card, button, before: card.textContent }
       },
       click: async draft => {
@@ -275,12 +278,12 @@ export const withHub = async (specs, fn) => {
       },
       fallback: async (actor, text) => {
         const draft = await hub.draft(actor, text)
-        assert.equal(draft.button.textContent, 'Copy', draft.card.textContent)
+        assert.equal(draft.button.textContent, EN.pgCopyAnswer, draft.card.textContent)
         assert.match(draft.card.textContent, /Copy/)
         const before = dom.text()
         await hub.click(draft)
         assert.equal(dom.copied.at(-1), text)
-        noSilentPress({ surface: 'serve', card: actor.title, button: 'Copy', before, after: dom.text() })
+        noSilentPress({ surface: 'serve', card: actor.title, button: EN.pgCopyAnswer, before, after: dom.text() })
         noMachineIds((await hub.card(actor)).textContent, world)
       },
     }
