@@ -1002,7 +1002,9 @@ export const buildView = (
         // Only an agent whose resume by id is known gets a command.
         resume: auto === 'ended' && task.auto?.resume ? resumeCommand(task.auto.resume, task.auto.dir, task.auto.agent) : null,
         handoff: handoffOf(task),
-        confirm: (isManual && task.line >= 0 || auto === 'ended')
+        // A hand-kept task with no open step has nothing to confirm: confirmTask refuses it,
+        // so the press could only say the line changed (#142).
+        confirm: (isManual && task.line >= 0 && task.steps.some(step => step.status !== 'done' && step.status !== 'cancelled') || auto === 'ended')
           ? { project: name, title: task.title, line: task.line, session: task.auto?.session ?? null, expected: confirmKey(name, task, twins.get(JSON.stringify([name, task.title])) ?? 0) }
           : null,
         archive:

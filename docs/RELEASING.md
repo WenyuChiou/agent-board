@@ -35,10 +35,12 @@ npm dist-tag add @wenyuchiou/agent-board@X.Y.Z latest --otp <code>
 5. **Pull request.** Title it `chore(release): Agent Board X.Y.Z`. Obtain the approval required by CONTRIBUTING rule 8 and, under the owner's authorization, squash-merge with `--match-head-commit` only once every CI job and all other checks required by rule 9 have succeeded on that exact head.
 6. **Tag.** On the merged commit, run `claude plugin tag . --dry-run`, then `claude plugin tag .`. Push only the new tag.
 7. **Gate.** Check the release gate above, and decide stable or pre-release.
-8. **GitHub release.** Write it from the version's CHANGELOG section. A pre-release's notes open with: "Pre-release: this version did not pass the release gate (docs/RELEASING.md)."
+8. **GitHub release.** Write it from the version's CHANGELOG section, then a link comparing the previous tag with the new one. A pre-release's notes open with: "Pre-release: this version did not pass the release gate (docs/RELEASING.md)."
 
    ```bash
    awk '/^## X\.Y\.Z /{f=1;next} /^## /{f=0} f' CHANGELOG.md > notes.md
+   # PREV is the previous release, for example 0.24.0
+   printf '\n**Full changes:** https://github.com/WenyuChiou/agent-board/compare/agent-board--vPREV...agent-board--vX.Y.Z\n' >> notes.md
    # stable
    gh release create agent-board--vX.Y.Z --verify-tag --title "Agent Board X.Y.Z" --notes-file notes.md --latest
    # pre-release

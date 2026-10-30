@@ -1,0 +1,2 @@
+- **Docs / CHANGELOG** · CHANGELOG entries now say what changed for you in a sentence or three, and the test titles stay in the pull request. Release notes end with a link to every change since the last release (#563).
+  Tests: `a folded section keeps each entry and leaves out its Tests line and trailing Tests sentence`, `a wrapped Tests list is left out whole, and one that more of the entry follows is kept as written`, `a fragment without a Tests line is still refused`.
