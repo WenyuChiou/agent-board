@@ -126,6 +126,8 @@ export const renderAutoBlock = (mirror: ProgressMirror, s: Strings = ZH_TW, pare
 
 export type BlockSpan = {
   session: string
+  agent?: string
+  resume?: string | null
   state: ProgressSessionState
   updated: number
   project: string
@@ -311,7 +313,13 @@ export const upsertAutoBlock = (text: string, mirror: ProgressMirror, s: Strings
   const eol = eolOf(text)
   const lines = linesOf(text)
   const id = shortId(mirror.sessionId)
-  const existing = scanBlocks(lines).find(span => span.session === id)
+  const fullId = mirror.resume ?? (mirror.sessionId.length > 8 ? mirror.sessionId : null)
+  const agent = (mirror.agent || 'claude').toLowerCase()
+  const existing = scanBlocks(lines).find(span =>
+    fullId !== null && span.resume !== null && span.resume !== undefined
+      ? span.resume === fullId && (span.agent === undefined || span.agent === agent)
+      : span.session === id && (fullId === null || span.resume === null || span.resume === undefined) && (span.agent === undefined || span.agent === agent),
+  )
   // A run keeps the parent its block already names; until one is named, it takes the person's
   // session working in the same project right now when exactly one is (#399), else none, and
   // counts as a background run.
@@ -363,14 +371,23 @@ const removeSpans = (text: string, spans: readonly BlockSpan[]): string => {
 
 export const removeAutoBlock = (text: string, sessionId: string): string => {
   const id = shortId(sessionId)
-  const spans = scanBlocks(linesOf(text)).filter(span => span.session === id)
+  const spans = scanBlocks(linesOf(text)).filter(span =>
+    sessionId.length > 8 && span.resume !== null && span.resume !== undefined
+      ? span.resume === sessionId
+      : span.session === id && (sessionId.length <= 8 || span.resume === null || span.resume === undefined),
+  )
 
   return spans.length === 0 ? text : removeSpans(text, spans)
 }
 
 export const extractAutoBlock = (text: string, sessionId: string): string | null => {
   const lines = linesOf(text)
-  const span = scanBlocks(lines).find(one => one.session === shortId(sessionId))
+  const id = shortId(sessionId)
+  const span = scanBlocks(lines).find(one =>
+    sessionId.length > 8 && one.resume !== null && one.resume !== undefined
+      ? one.resume === sessionId
+      : one.session === id && (sessionId.length <= 8 || one.resume === null || one.resume === undefined),
+  )
 
   return span === undefined ? null : lines.slice(span.start, span.end + 1).join('\n')
 }

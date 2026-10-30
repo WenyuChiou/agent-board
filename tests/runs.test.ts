@@ -389,3 +389,75 @@ test('a strong run is suppressed while a weak hint remains eligible for the lega
   expect(isStrongRun(withSignal(null, codexSignal(true, null, null)))).toBe(false)
   expect(isStrongRun(withSignal(null, codexSignal(true, 'history', { originator: 'Codex Desktop' })))).toBe(false)
 })
+
+test('concurrent subagents sharing the same 8-character session prefix are tracked independently and do not clobber each other', () => {
+  const sub1 = delegate(1, { session: 'bbbb0001', resume: 'bbbb0001-0000-4000-8000-00000000000a', parent: PERSON, title: 'Subagent A' })
+  const sub2 = delegate(2, { session: 'bbbb0001', resume: 'bbbb0001-0000-4000-8000-00000000000b', parent: PERSON, title: 'Subagent B' })
+  const text = file(person, sub1, sub2)
+  const view = viewOf(text)
+  const rows = rowsOf(view)
+  expect(rows).toHaveLength(1)
+  expect(rows[0]?.title).toBe('Ship the export feature')
+  expect(rows[0]?.runs).toBe('+2 runs by Codex, last 21 min ago')
+
+  const qBoard = file(person, sub1, sub2)
+    .replace('### Subagent A\n- [~] A step', '### Subagent A\n- [?] Question from Subagent A?')
+    .replace('### Subagent B\n- [~] A step', '### Subagent B\n- [?] Question from Subagent B?')
+  const projects = parseProgress(qBoard)
+  const ledger = observeQuestions(emptyQuestions(), projects, null, [], NOW, true, 'fixture:collision').ledger
+  const unresolved = ledger.records.filter(r => r.isUnresolved)
+  expect(unresolved).toHaveLength(2)
+  expect(unresolved.map(r => r.source?.session)).toEqual([
+    'bbbb0001-0000-4000-8000-00000000000a',
+    'bbbb0001-0000-4000-8000-00000000000b',
+  ])
+})
+
+test('Antigravity subagents fold into parent session row as runs without creating duplicate top-level rows', () => {
+  const antigravitySub: Spec = {
+    session: '8d21f0b4',
+    agent: 'antigravity',
+    resume: '8d21f0b4-1111-4000-8000-000000000001',
+    run: true,
+    parent: PERSON,
+    ageMinutes: 5,
+    title: 'Audit subagent task',
+  }
+  const view = viewOf(file(person, antigravitySub))
+  const rows = rowsOf(view)
+  expect(rows).toHaveLength(1)
+  expect(rows[0]?.title).toBe('Ship the export feature')
+  expect(rows[0]?.runs).toBe('+1 run by Antigravity, last 5 min ago')
+  expect(view.background).toBe(undefined)
+  expect(view.overview.active).toBe(1)
+})
+
+test('upsertAutoBlock preserves concurrent subagents with identical 8-character prefix', () => {
+  const mirrorA: ProgressMirror = {
+    ...emptyMirror('abcdef01-0000-4000-8000-000000000001', 'Demo', NOW, ''),
+    title: 'Subagent Alpha',
+    tasks: [{ subject: 'Alpha step', status: 'in_progress', blocked: null, waiting: null, why: null }],
+    isRun: true,
+  }
+  const mirrorB: ProgressMirror = {
+    ...emptyMirror('abcdef01-0000-4000-8000-000000000002', 'Demo', NOW, ''),
+    title: 'Subagent Beta',
+    tasks: [{ subject: 'Beta step', status: 'in_progress', blocked: null, waiting: null, why: null }],
+    isRun: true,
+  }
+  const withA = upsertAutoBlock(file(person), mirrorA, en)
+  expect(withA).toContain('Subagent Alpha')
+  const withBoth = upsertAutoBlock(withA, mirrorB, en)
+  expect(withBoth).toContain('Subagent Alpha')
+  expect(withBoth).toContain('Subagent Beta')
+
+  const updatedA: ProgressMirror = {
+    ...mirrorA,
+    tasks: [{ subject: 'Alpha finished', status: 'completed', blocked: null, waiting: null, why: null }],
+  }
+  const reUpserted = upsertAutoBlock(withBoth, updatedA, en)
+  expect(reUpserted).toContain('Subagent Alpha')
+  expect(reUpserted).toContain('Alpha finished')
+  expect(reUpserted).toContain('Subagent Beta')
+  expect(reUpserted).toContain('Beta step')
+})

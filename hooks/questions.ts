@@ -35,7 +35,7 @@ export const cutOffScopes = (projects: readonly ProgressProject[], cut: readonly
 
   return new Set([
     ...cut.map(one => questionScope(one.project, one.agent.toLowerCase(), one.session)),
-    ...projects.flatMap(project => project.tasks.flatMap(task => task.auto !== null && sessions.has(task.auto.session) ? [questionScope(project.name, task.auto.agent, task.auto.session)] : [])),
+    ...projects.flatMap(project => project.tasks.flatMap(task => task.auto !== null && (sessions.has(task.auto.session) || (task.auto.resume !== null && sessions.has(task.auto.resume))) ? [questionScope(project.name, task.auto.agent, task.auto.resume ?? task.auto.session)] : [])),
   ])
 }
 // A question's copy of its block or hand-kept task: the marker fields and each step's mark, which
@@ -83,7 +83,7 @@ const normalizeSource = (source: QuestionSource): QuestionSource => {
 }
 
 export const archiveQuestionsKept = (projects: readonly ProgressProject[], ref: TaskRef, ledger: QuestionLedger): boolean => {
-  const tasks = projects.filter(project => project.name === ref.project).flatMap(project => project.tasks).filter(task => ref.session === null ? task.title === ref.title : task.auto?.session === ref.session)
+  const tasks = projects.filter(project => project.name === ref.project).flatMap(project => project.tasks).filter(task => ref.session === null ? task.title === ref.title : (task.auto?.resume === ref.session || (task.auto?.resume === null && task.auto?.session === ref.session) || task.auto?.session === ref.session))
   if (tasks.length !== 1) return false
   const task = tasks[0]
   if (task === undefined) return false
@@ -91,7 +91,7 @@ export const archiveQuestionsKept = (projects: readonly ProgressProject[], ref: 
   // token has no live identity, and an old copy of it cannot justify archiving the block.
   const tokens = task.steps.map(step => step.questionToken ?? '').filter(token => token !== '')
   if (task.steps.some(step => step.status === 'waiting' && (step.questionToken ?? '') !== '' && tokens.filter(token => token === step.questionToken).length > 1)) return false
-  const scope = questionScope(ref.project, task.auto?.agent ?? 'manual', task.auto?.session ?? task.title)
+  const scope = questionScope(ref.project, task.auto?.agent ?? 'manual', (task.auto?.resume ?? task.auto?.session) ?? task.title)
   // The copy no longer holds the title, so the record is tied to this task by its title and
   // session; two hand-kept tasks that ask the same have the same marks.
   return task.steps.filter(step => step.status === 'waiting').every(step => ledger.records.some(record => record.isUnresolved
@@ -102,7 +102,7 @@ export const archiveQuestionsKept = (projects: readonly ProgressProject[], ref: 
 // session, so a block of another session with the same title is not taken for it. A hand-kept
 // task has no session, so only a hand-kept task's questions match it, not an agent block's (#174).
 export const isAskedBy = (record: QuestionRecord, ref: TaskRef): boolean =>
-  record.source?.project === ref.project && record.source.task === ref.title && (ref.session === null ? record.source.kind === 'manual' : record.source.session === ref.session)
+  record.source?.project === ref.project && record.source.task === ref.title && (ref.session === null ? record.source.kind === 'manual' : record.source.session === ref.session || (record.source.session.length > 8 && record.source.session.startsWith(ref.session)))
 export const questionProofPath = (path: string, kind: keyof QuestionProofs, hash: string): string => `${path.replace(/\.md$/i, '')}-questions-${kind}-${hash}.json`
 export const questionProofOf = (path: string, name: string): { kind: keyof QuestionProofs; hash: string } | null => {
   const prefix = `${path.replace(/\\/g, '/').split('/').at(-1)?.replace(/\.md$/i, '')}-questions-`
@@ -406,8 +406,8 @@ const observations = (projects: readonly ProgressProject[], mine: ProgressMirror
   const ambiguous = new Set<string>()
   for (const project of projects) {
     for (const task of project.tasks) {
-      if (mine !== null && task.auto?.session === own) continue
-      const scope = questionScope(project.name, task.auto?.agent ?? 'manual', task.auto?.session ?? task.title)
+      if (mine !== null && ((task.auto?.resume !== null && mine.sessionId ? task.auto?.resume === mine.sessionId : task.auto?.session === own))) continue
+      const scope = questionScope(project.name, task.auto?.agent ?? 'manual', (task.auto?.resume ?? task.auto?.session) ?? task.title)
       if (frozen.has(scope)) continue
       if (scopes.has(scope)) ambiguous.add(scope)
       scopes.add(scope)
@@ -415,7 +415,7 @@ const observations = (projects: readonly ProgressProject[], mine: ProgressMirror
       // are worked out once per task rather than once per step (#371).
       const context = task.notes.find(note => /^(?:背景|Context|Background)\s*[:：]/i.test(note))?.replace(/^(?:背景|Context|Background)\s*[:：]\s*/i, '') ?? (task.auto === null ? task.notes.join('\n') : '')
       const data = sourceData(task)
-      task.steps.forEach((step, index) => rows.push({ scope, session: task.auto?.session ?? '', index, text: step.text, isWaiting: step.status === 'waiting', producer: step.questionToken ?? '', source: { kind: task.auto === null ? 'manual' : 'block', project: project.name, task: task.title, context, text: step.text, agent: task.auto?.agent ?? '', session: task.auto?.session ?? '', data } }))
+      task.steps.forEach((step, index) => rows.push({ scope, session: (task.auto?.resume ?? task.auto?.session) ?? '', index, text: step.text, isWaiting: step.status === 'waiting', producer: step.questionToken ?? '', source: { kind: task.auto === null ? 'manual' : 'block', project: project.name, task: task.title, context, text: step.text, agent: task.auto?.agent ?? '', session: (task.auto?.resume ?? task.auto?.session) ?? '', data } }))
     }
   }
   if (mine !== null) rows.push(...ownObservations(mine))
@@ -447,7 +447,7 @@ const observations = (projects: readonly ProgressProject[], mine: ProgressMirror
 export const resolvedQuestionsToRetire = (ledger: QuestionLedger, projects: readonly ProgressProject[], mine: ProgressMirror | null, pending: readonly PendingTurn[], frozen: ReadonlySet<string> = new Set()): string[] => {
   const seen = observations(projects, mine, pending, frozen)
   const scopes = new Set([
-    ...projects.flatMap(project => project.tasks.map(task => questionScope(project.name, task.auto?.agent ?? 'manual', task.auto?.session ?? task.title))),
+    ...projects.flatMap(project => project.tasks.map(task => questionScope(project.name, task.auto?.agent ?? 'manual', (task.auto?.resume ?? task.auto?.session) ?? task.title))),
     ...(mine === null ? [] : [questionScope(mine.project, 'claude', shortId(mine.sessionId))]),
     ...seen.map(row => row.scope),
   ])

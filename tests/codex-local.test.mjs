@@ -5658,3 +5658,39 @@ test('tidy keeps an explicit person origin and uses the home history when CODEX_
   assert.doesNotMatch(after, /Verified run/)
   assert.ok(after.includes(kept))
 }))
+
+test('concurrent reports with identical 8-hex owner hash prefix do not trigger false block conflicts', () => fixture(f => {
+  f.install('--apply')
+  const sessionA = 'session-prefix-collision-0001'
+  const sessionB = 'session-prefix-collision-0002'
+  const reportA = f.command(['--codex-report', '--agent', 'antigravity', '--session', sessionA], {
+    title: 'Subagent Alpha task',
+    state: 'working',
+    steps: ['- [~] Alpha in progress'],
+  })
+  assert.equal(reportA.status, 0, reportA.stderr)
+
+  const reportB = f.command(['--codex-report', '--agent', 'antigravity', '--session', sessionB], {
+    title: 'Subagent Beta task',
+    state: 'working',
+    steps: ['- [~] Beta in progress'],
+  })
+  assert.equal(reportB.status, 0, reportB.stderr)
+
+  const content = readFileSync(f.progress, 'utf8')
+  assert.match(content, /Subagent Alpha task/)
+  assert.match(content, /Subagent Beta task/)
+
+  // Update session A without clobbering session B
+  const updateA = f.command(['--codex-report', '--agent', 'antigravity', '--session', sessionA], {
+    title: 'Subagent Alpha task',
+    state: 'done',
+    steps: ['- [x] Alpha complete'],
+  })
+  assert.equal(updateA.status, 0, updateA.stderr)
+
+  const updatedContent = readFileSync(f.progress, 'utf8')
+  assert.match(updatedContent, /Alpha complete/)
+  assert.match(updatedContent, /Subagent Beta task/)
+  assert.match(updatedContent, /Beta in progress/)
+}))

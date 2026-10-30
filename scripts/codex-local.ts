@@ -251,7 +251,11 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
       // last_assistant_message, or permission decisions from a hook payload. transcript_path is
       // opened, when it is this session's own history file, for its first record at a session's
       // start or prompt, which says whether a person started it (#399), and for nothing else.
-      const session = mode !== '--codex-report' ? agent === 'antigravity' ? payload.conversationId : payload.session_id ?? payload.sessionId ?? payload.sessionID ?? (agent === 'grok' ? env.GROK_SESSION_ID : undefined) : flag('--session') ?? (agent === 'codex' ? env.CODEX_THREAD_ID ?? reportSession() : env.AGENT_BOARD_AGENT === agent ? env.AGENT_BOARD_SESSION_ID : undefined)
+      const session = mode !== '--codex-report'
+        ? agent === 'antigravity'
+          ? (typeof payload.conversationId === 'string' ? payload.conversationId : payload.session_id ?? payload.sessionId ?? payload.sessionID)
+          : payload.session_id ?? payload.sessionId ?? payload.sessionID ?? (agent === 'grok' ? env.GROK_SESSION_ID : undefined)
+        : flag('--session') ?? (typeof payload.session === 'string' ? payload.session : typeof payload.conversationId === 'string' ? payload.conversationId : typeof payload.sessionId === 'string' ? payload.sessionId : (agent === 'codex' ? env.CODEX_THREAD_ID ?? reportSession() : env.AGENT_BOARD_AGENT === agent ? env.AGENT_BOARD_SESSION_ID : undefined))
       if (session === undefined && mode === '--codex-report' && agent === 'codex') throw new Error('UNBOUND_REPORT')
       if (typeof session !== 'string' || !/^[a-zA-Z0-9][a-zA-Z0-9_-]{5,127}$/.test(session)) throw new Error('INVALID_SESSION')
       const now = new Date(at).toISOString().replace(/\.\d{3}Z$/, 'Z')
@@ -267,9 +271,12 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
       const isPrompt = !isBoardPrompt && mode === '--agent-status' && status === 'working' && (payload.prompt_submitted === true || /^(?:UserPromptSubmit|user_prompt_submit|BeforeAgent)$/.test(String(payload.hook_event_name ?? payload.hookEventName)))
       // Only Codex says it, and only as a session opens or takes a prompt; the other local agents
       // give no signal, so their sessions stay rows as they were.
+      const explicitOrigin = raw.origin === 'run' || payload.origin === 'run' || raw.is_run === true || raw.isRun === true || payload.is_run === true || payload.isRun === true ? 'run' : raw.origin === 'person' || payload.origin === 'person' ? 'person' : undefined
+      const explicitParent = typeof raw.parent === 'string' && RESUME.test(raw.parent) ? raw.parent : typeof payload.parent === 'string' && RESUME.test(payload.parent) ? payload.parent : undefined
+      const explicitSignal: RunSignal | undefined = explicitOrigin !== undefined ? { origin: explicitOrigin, ...(explicitParent !== undefined ? { parent: explicitParent } : {}) } : undefined
       const opens = agent === 'codex' && mode === '--codex-event' && /^(?:SessionStart|UserPromptSubmit)$/.test(String(payload.hook_event_name))
       const path = payload.transcript_path
-      const run = opens ? codexSignal(Object.hasOwn(payload, 'transcript_path'), path, typeof path === 'string' && path !== '' ? readSessionMeta(path, session) : null) : undefined
+      const run = opens ? codexSignal(Object.hasOwn(payload, 'transcript_path'), path, typeof path === 'string' && path !== '' ? readSessionMeta(path, session) : null) : explicitSignal
       // A queued event keeps metadata only: the host's own fields stay out, as they do above.
       return {
         version: 1, progress, mode, agent, session, now, at, status: mode === '--agent-status' ? status : undefined, event, isBoardPrompt, isPrompt,
