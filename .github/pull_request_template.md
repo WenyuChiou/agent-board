@@ -9,7 +9,7 @@ Author: <agent>, <branch>
 
 ## Tests
 
-<!-- The tests that cover the change, by exact title, as in the CHANGELOG entry. -->
+<!-- The tests that cover the change, by exact title, as in the `changelog.d/` fragment. -->
 
 ## Evidence
 
@@ -26,7 +26,7 @@ Author: <agent>, <branch>
 - [ ] Applicable strict standalone typechecks; full `tsc -p .` reported unrun if the SDK types are unavailable
 - [ ] `bash tests/setup.check.sh` / `tests/setup.check.ps1`, if a setup script changed
 - [ ] `docs/FORMAT.md` updated, if the file format changed (backward compatible)
-- [ ] A new `changelog.d/<issue>-<slug>.md` fragment for each issue, naming the issue and the tests that cover the change, for fix and feature pull requests (release pull request: run `scripts/changelog-fold.mjs` instead)
+- [ ] A new `changelog.d/<issue>-<slug>.md` fragment for each issue, saying what changed for the person in one to three sentences, naming the issue and the tests that cover the change, for fix and feature pull requests (release pull request: run `scripts/changelog-fold.mjs` instead)
 - [ ] `node scripts/pr-check.mjs` passes
 - [ ] `node scripts/preflight.mjs --body-file <f> --title <t>` output pasted under Checks before Ready (no review without it)
 - [ ] Native/model evidence and CLI/App/IDE limits stated separately; no private data, session ids, home-folder paths or board links attached
