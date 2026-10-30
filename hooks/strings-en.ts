@@ -534,6 +534,7 @@ export const EN: Strings = {
   serveIdle: 'The local board stays running. Reopen with agent-board in a terminal or /agent-board in an agent\'s chat; Close the board stops the service.',
   serveIdleTimed: (minutes: number): string => `This board is configured to close after ${minutes} minutes unused. Reopen with --serve.`,
   serveLanIdle: 'On your network it closes itself after 10 minutes unused.',
+  invalidStaleMs: 'Stale inactivity timeout must be a positive number of milliseconds.',
   serveFailed: (why: string): string => `Couldn't open the board page: ${why}`,
   serveRuntimePrivate: "Couldn't protect the board page's address file for this account; no page was started.",
   serveLanAt: (url: string): string => `On a phone on the same network, open ${url} or scan this code:`,

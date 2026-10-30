@@ -574,6 +574,7 @@ export const ZH_TW = {
   serveIdle: '本機看板會持續執行；關掉分頁後可在終端機執行 agent-board 或在 agent 對話中輸入 /agent-board 再開啟，按「關閉看板」才停止服務。',
   serveIdleTimed: (minutes: number): string => `此看板已設定閒置 ${minutes} 分鐘後自動關閉；可用 --serve 再開啟。`,
   serveLanIdle: '在你的網路上，10 分鐘沒人用就會自己關掉。',
+  invalidStaleMs: '閒置判定時間必須為大於零的毫秒數。',
   serveFailed: (why: string): string => `開不了看板網頁：${why}`,
   serveRuntimePrivate: '無法將看板網頁的位址檔保護為僅此帳號可用；沒有啟動網頁。',
   serveLanAt: (url: string): string => `同一個網路上的手機，打開 ${url} 或掃這個 QR 碼：`,

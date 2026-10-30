@@ -1,4 +1,2 @@
-### Fixed
-
-- **Configurable session inactivity staleness prevents 12-hour zombie stall (#532).** Pure staleness helpers support custom timeouts with lower bound validation, allowing environments to detect crashed or terminated sessions without waiting half a day. The board CLI passes `--stale-ms` and `AGENT_BOARD_STALE_MS` while preserving the 12-hour default for existing workflows.
-  Tests: `parseStaleMs supports custom values, clamps to 1 minute, and falls back to default`, `isStale respects configurable staleness threshold`.
+- **Page / Stopped after a set time** · Configurable session inactivity staleness allows the board to mark quiet sessions stopped at a requested duration, enabling prompt completion and archive without waiting twelve hours (#532).
+  Tests: `configurable staleness allows completion and archive on quiet sessions and forbids them when active`, `--serve forwards --stale-ms to the background browser child`, `running page reuses server when timeout matches and restarts when requested stale timeout differs`, `--serve with a stale time that is not a positive number exits non-zero with INVALID_STALE_MS`.

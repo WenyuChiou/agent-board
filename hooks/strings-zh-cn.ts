@@ -530,6 +530,7 @@ export const ZH_CN: Strings = {
   serveIdle: '本地看板会持续运行；关掉标签页后可在终端运行 agent-board 或在 agent 对话中输入 /agent-board 再打开，按“关闭看板”才停止服务。',
   serveIdleTimed: (minutes: number): string => `此看板已设置闲置 ${minutes} 分钟后自动关闭；可用 --serve 再打开。`,
   serveLanIdle: '在你的网络上，10 分钟没人用就会自己关掉。',
+  invalidStaleMs: '闲置判定时间必须为大于零的毫秒数。',
   serveFailed: (why: string): string => `打不开看板网页：${why}`,
   serveRuntimePrivate: '无法将看板网页的地址文件保护为仅此账号可用；没有启动网页。',
   serveLanAt: (url: string): string => `同一网络上的手机，打开 ${url} 或扫这个二维码：`,

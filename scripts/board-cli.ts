@@ -1008,6 +1008,10 @@ const keysIn = (chunk: string): string[] => (chunk.replace(/\r\n/g, '\r').match(
 
 const failureNote = (error: unknown): string => {
   process.exitCode = 1
+  if (error instanceof Error && error.message === 'INVALID_STALE_MS') {
+    process.stderr.write(`INVALID_STALE_MS: ${s.invalidStaleMs}\n`)
+    return s.invalidStaleMs
+  }
   if (!(error instanceof BoardFileError)) {
     process.stderr.write(`${error instanceof Error ? error.stack : String(error)}\n`)
     return s.pressFailed
@@ -1170,7 +1174,7 @@ const serveChild = (): void => {
     reports: () => parseProgress(read(path)).flatMap(project => project.tasks.flatMap(task => task.auto === null ? [] : [{ agent: task.auto.agent, session: task.auto.resume ?? task.auto.session, updated: task.auto.updated }])),
     s,
     port: Number(flag('--port') ?? 0) || 0,
-    ping: { path, built, idleMs: idleMs(), allowResume: args.includes('--allow-resume'), messagesDirectory: flag('--messages-dir') ? resolve(flag('--messages-dir')!) : null },
+    ping: { path, built, idleMs: idleMs(), staleMs: staleTimeoutMs(), allowResume: args.includes('--allow-resume'), messagesDirectory: flag('--messages-dir') ? resolve(flag('--messages-dir')!) : null },
     // Every page request starts by reading the board.
     view: freshView,
     pending: (isFresh = true) => pending(undefined, isFresh),
@@ -1253,7 +1257,8 @@ const runningPage = async (isStarting = false): Promise<{ page: Running; isKept:
   const first = await ping(running)
   const answer = first !== null && first !== 'silent' ? first : isRunning(running.pid) ? await ping(running, 5000) : first
   // An idle preference must not close a page that may hold an unsent reply.
-  if (answer !== null && answer !== 'silent' && typeof answer.path === 'string' && board(answer.path) === board(path) && answer.built === built && answer.allowResume === args.includes('--allow-resume') && (flag('--messages-dir') === undefined || answer.messagesDirectory === resolve(flag('--messages-dir')!))) return { page: running, isKept: false, idleMs: typeof answer.idleMs === 'number' && Number.isFinite(answer.idleMs) && answer.idleMs >= 0 ? answer.idleMs : undefined }
+  const requestedStale = staleTimeoutMs()
+  if (answer !== null && answer !== 'silent' && typeof answer.path === 'string' && board(answer.path) === board(path) && answer.built === built && answer.allowResume === args.includes('--allow-resume') && (flag('--messages-dir') === undefined || answer.messagesDirectory === resolve(flag('--messages-dir')!)) && (answer.staleMs === undefined || answer.staleMs === requestedStale)) return { page: running, isKept: false, idleMs: typeof answer.idleMs === 'number' && Number.isFinite(answer.idleMs) && answer.idleMs >= 0 ? answer.idleMs : undefined }
   return (await stays(running, serveFile())) ? { page: running, isKept: true } : null
 }
 

@@ -25,11 +25,15 @@ test('plain Node loads future-clock parser helpers without a bundler', () => {
   assert.equal(auto.updated, stamp)
 })
 
-test('parseStaleMs supports custom values, clamps to 1 minute, and falls back to default', () => {
+test('parseStaleMs supports custom values, clamps to 1 minute, and throws INVALID_STALE_MS on invalid values', () => {
   assert.equal(parseStaleMs(undefined), DEFAULT_STALE_MS)
   assert.equal(parseStaleMs(null), DEFAULT_STALE_MS)
   assert.equal(parseStaleMs(''), DEFAULT_STALE_MS)
-  assert.equal(parseStaleMs('invalid'), DEFAULT_STALE_MS)
+  assert.throws(() => parseStaleMs('invalid'), /INVALID_STALE_MS/)
+  assert.throws(() => parseStaleMs('0'), /INVALID_STALE_MS/)
+  assert.throws(() => parseStaleMs('-1'), /INVALID_STALE_MS/)
+  assert.throws(() => parseStaleMs(0), /INVALID_STALE_MS/)
+  assert.throws(() => parseStaleMs(-100), /INVALID_STALE_MS/)
   assert.equal(parseStaleMs('300000'), 300000)
   assert.equal(parseStaleMs(600000), 600000)
   assert.equal(parseStaleMs('1000'), 60000)

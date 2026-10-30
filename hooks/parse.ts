@@ -331,14 +331,20 @@ export const STALE_MS = DEFAULT_STALE_MS
 // Parse a custom stale duration (milliseconds), enforcing a minimum 1 minute (60,000 ms) lower bound.
 export const parseStaleMs = (value: unknown, fallback: number = DEFAULT_STALE_MS): number => {
   if (value === undefined || value === null) return fallback
-  if (typeof value === 'number' && Number.isFinite(value) && value > 0) {
-    return Math.max(60 * 1000, value)
+  if (typeof value === 'string' && value.trim() === '') return fallback
+  if (typeof value === 'number') {
+    if (Number.isFinite(value) && value > 0) return Math.max(60 * 1000, value)
+    throw new Error('INVALID_STALE_MS')
   }
-  if (typeof value === 'string' && value.trim() !== '') {
-    const parsed = Number(value.trim())
-    if (Number.isFinite(parsed) && parsed > 0) return Math.max(60 * 1000, parsed)
+  if (typeof value === 'string') {
+    const trimmed = value.trim()
+    if (/^\d+$/.test(trimmed)) {
+      const parsed = Number(trimmed)
+      if (Number.isFinite(parsed) && parsed > 0) return Math.max(60 * 1000, parsed)
+    }
+    throw new Error('INVALID_STALE_MS')
   }
-  return fallback
+  throw new Error('INVALID_STALE_MS')
 }
 export const FUTURE_SKEW_MS = 5 * 60 * 1000
 
