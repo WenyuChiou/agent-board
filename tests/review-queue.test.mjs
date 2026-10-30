@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { classify, fetchQueue, formatQueue, main, parseArgs } from '../scripts/review-queue.mjs'
+import { classify, fetchQueue, findStaleLanes, formatLanes, formatQueue, main, parseArgs, parseWorktrees } from '../scripts/review-queue.mjs'
 
 const head = 'abcdef0123456789abcdef0123456789abcdef01'
 const oldHead = '1234567890123456789012345678901234567890'
@@ -131,11 +131,12 @@ test('JSON output cleans GitHub text and has the requested group keys', () => {
   const output = []
   const status = main(['--json'], {
     fetch: () => ({ prs: [pull(1, { title: 'hello\nworld ghp_abc123' })], commentsByNumber: { 1: [ready()] } }),
+    lanes: () => ({ stale: [], notes: [] }),
     now: () => now, log: text => output.push(text), error: text => assert.fail(text),
   })
   assert.equal(status, 0)
   const queue = JSON.parse(output[0])
-  assert.deepEqual(Object.keys(queue), ['needsReviewer', 'needsMain', 'approved', 'waitingForAuthor', 'drafts'])
+  assert.deepEqual(Object.keys(queue), ['needsReviewer', 'needsMain', 'approved', 'waitingForAuthor', 'drafts', 'staleLanes'])
   assert.equal(queue.needsReviewer[0].title, 'hello world <token>')
 })
 
@@ -171,4 +172,51 @@ test('a GitHub failure is reported without printing raw diagnostics', () => {
   assert.equal(status, 1)
   assert.equal(errors.length, 1)
   assert.ok(!errors[0].includes('ghp_abc123'))
+})
+
+const porcelain = [
+  'worktree C:/repo\nHEAD aaa\nbranch refs/heads/main',
+  'worktree C:/wt/old\nHEAD bbb\nbranch refs/heads/lane/old',
+  'worktree C:/wt/fresh\nHEAD ccc\nbranch refs/heads/lane/fresh',
+  'worktree C:/wt/pr\nHEAD ddd\nbranch refs/heads/lane/has-pr',
+  'worktree C:/wt/empty\nHEAD eee\nbranch refs/heads/lane/empty',
+  'worktree C:/wt/detached\nHEAD fff\ndetached',
+].join('\n\n') + '\n'
+const laneNow = '2026-10-30T12:00:00Z'
+const secondsAgo = hours => String(Math.floor((Date.parse(laneNow) - hours * 3600000) / 1000))
+
+test('worktree listing keeps only branch worktrees', () => {
+  assert.deepEqual(parseWorktrees(porcelain).map(lane => lane.branch), ['main', 'lane/old', 'lane/fresh', 'lane/has-pr', 'lane/empty'])
+})
+
+test('a lane older than 2 hours with no open pull request is listed with its age', () => {
+  const run = (cmd, args) => {
+    if (cmd === 'git' && args[0] === 'worktree') return porcelain
+    if (cmd === 'git') return { 'main..lane/old': secondsAgo(5), 'main..lane/fresh': secondsAgo(1), 'main..lane/has-pr': secondsAgo(9), 'main..lane/empty': '' }[args.at(-1)] + '\n'
+    return JSON.stringify(args[args.indexOf('--head') + 1] === 'lane/has-pr' ? [{ number: 7 }] : [])
+  }
+  const result = findStaleLanes({ repo: 'a/b' }, { run, now: () => laneNow, birth: () => Date.parse(laneNow) - 3 * 3600000 })
+  assert.deepEqual(result.stale.map(lane => [lane.branch, lane.hours]), [['lane/old', 5], ['lane/empty', 3]])
+  assert.equal(formatLanes(result), 'Lanes over 2 h without a pull request (2)\nlane/old  5.0 h  no PR\nlane/empty  3.0 h  no PR')
+})
+
+test('a failed pull request lookup still lists the lane and adds a note', () => {
+  const run = (cmd, args) => {
+    if (cmd === 'git' && args[0] === 'worktree') return porcelain
+    if (cmd === 'git') return secondsAgo(4) + '\n'
+    throw new Error('ghp_abc123')
+  }
+  const result = findStaleLanes({ repo: 'a/b' }, { run, now: () => laneNow })
+  assert.equal(result.stale.length, 4)
+  assert.match(formatLanes(result), /lane\/old {2}4\.0 h {2}no PR \(unchecked\)/)
+  assert.match(formatLanes(result), /Note: lane\/old: pull request lookup failed/)
+  assert.ok(!formatLanes(result).includes('ghp_abc123'))
+})
+
+test('a failed worktree listing prints a note and the queue still prints', () => {
+  const result = findStaleLanes({ repo: 'a/b' }, { run: () => { throw new Error('boom') }, now: () => laneNow })
+  assert.equal(formatLanes(result), 'Note: lane check skipped: git worktree list failed')
+  const output = []
+  main([], { fetch: () => ({ prs: [], commentsByNumber: {} }), lanes: () => { throw new Error('x') }, now: () => now, log: text => output.push(text) })
+  assert.match(output[0], /Drafts: 0\nNote: lane check skipped: lookup failed$/)
 })
