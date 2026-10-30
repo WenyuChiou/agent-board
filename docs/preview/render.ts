@@ -15,7 +15,8 @@ import type { BoardState } from '../../hooks/board'
 import { dashboardHtml } from '../../hooks/dashboard'
 import { countDay, journalLine } from '../../hooks/journal'
 import { applyTaskCreate, applyTaskUpdate, emptyMirror } from '../../hooks/mirror'
-import { DARK, LIGHT } from '../../hooks/palette'
+import { MARK_PATH } from '../../hooks/page-look'
+import { DARK, LIGHT, PAGE_DARK, PAGE_LIGHT } from '../../hooks/palette'
 import type { Palette } from '../../hooks/palette'
 import { parseProgress } from '../../hooks/parse'
 import { emptyQuestions } from '../../hooks/questions'
@@ -25,6 +26,7 @@ import { CLI_FILES, COVER, COVER_AGENTS, COVER_MARKS, COVER_MOMENTS, NOW, SAMPLE
 import type { CoverAgent, CoverSample } from './samples'
 import { AGENT_ICONS, TESTED_ICONS } from './icons'
 import type { AgentIcon } from './icons'
+import { LOCKUP, lockupBody } from './brand'
 import { CELL, LINE, gridSvg, keyBox, layout, rowOf, toNode, widthCells } from './terminal'
 import type { Theme } from './terminal'
 
@@ -220,12 +222,25 @@ const brandDefs = (w: number, h: number, glow: [number, number] = [0.78, 0.35]):
 const brandGround = (w: number, h: number): string =>
   `<rect width="${w}" height="${h}" fill="url(#sky)"/><rect width="${w}" height="${h}" fill="url(#glow)"/><rect width="${w}" height="${h}" fill="url(#dots)"/>`
 
-// The board mark and the name beside it.
+// The board mark, `size` square at x, y, and beside it the wordmark, both on the dark ground.
 const brandMark = (x: number, y: number, size = 34, hasName = true): string => {
-  const k = size / 34
-  const name = `<text x="${x + size + 12}" y="${y + size * 0.74}" font-size="${Math.round(size * 0.72)}" font-weight="700" fill="${BRAND.ink}">Agent Board</text>`
-  return `<g transform="translate(${x} ${y}) scale(${k})"><rect width="34" height="34" rx="9" fill="${BRAND.accent}"/><rect x="8" y="9" width="18" height="3.5" rx="1.75" fill="#0c1116"/><rect x="8" y="15.5" width="12" height="3.5" rx="1.75" fill="#0c1116"/><circle cx="23" cy="22" r="3.6" fill="${DARK.waiting}"/></g>${hasName ? name : ''}`
+  const k = size / LOCKUP.grid.size
+  if (!hasName) return `<path transform="translate(${x} ${y}) scale(${num(size / 64)})" fill="${PAGE_DARK.brand}" d="${MARK_PATH}"/>`
+  return `<g transform="translate(${num(x - LOCKUP.grid.x * k)} ${num(y - LOCKUP.grid.y * k)}) scale(${num(k)})">${lockupBody(BRAND.ink, PAGE_DARK.brand)}</g>`
 }
+
+// docs/images/brand/: the lockup for a light and for a dark ground; the lockup and the mark alone that
+// follow the reader's theme through their own style (the README's title is that lockup: GitHub gives
+// an SVG picture its page's theme). Paths only, on a transparent ground.
+const lockupOpen = `<svg xmlns="http://www.w3.org/2000/svg" width="${Math.ceil(LOCKUP.width)}" height="${Math.ceil(LOCKUP.height)}" viewBox="${LOCKUP.left} ${LOCKUP.top} ${LOCKUP.width} ${LOCKUP.height}" role="img" aria-label="agent-board"><title>agent-board</title>`
+const brandLockup = (mode: 'light' | 'dark'): string => {
+  const page = mode === 'light' ? PAGE_LIGHT : PAGE_DARK
+  return `${lockupOpen}${lockupBody(page.ink, page.brand)}</svg>\n`
+}
+const brandLogo = (): string =>
+  `${lockupOpen}<style>.ink{fill:${PAGE_LIGHT.ink}}.brand{fill:${PAGE_LIGHT.brand}}@media (prefers-color-scheme:dark){.ink{fill:${PAGE_DARK.ink}}.brand{fill:${PAGE_DARK.brand}}}</style>${lockupBody('.ink', '.brand')}</svg>\n`
+const brandMarkFile = (): string =>
+  `<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64" role="img" aria-label="agent-board"><title>agent-board</title><style>path{fill:${PAGE_LIGHT.brand}}@media (prefers-color-scheme:dark){path{fill:${PAGE_DARK.brand}}}</style><path d="${MARK_PATH}"/></svg>\n`
 
 // The logo takes seven tenths of its tile: smaller, a logo with thin lines (OpenAI's) or fine
 // detail (Nous Research's) blurs at the table's 24 px.
@@ -759,10 +774,13 @@ const promo = (lang: Lang): string => {
   const pal = DARK
   const { grid: whole, theme } = paneGrid(lang, 'dark', { opened: [], isAnswered: false })
   // The card has no room for the Already answered line under the reply box (nor the blank line
-  // above it): the notification under the pane would run off the card.
+  // above it), nor for the question's age and archive notes: the notification under the pane
+  // would run off the card.
   const hide = whole.findIndex(row => row.map(cell => cell.ch).join('').includes(STRINGS[lang].answeredHide))
   const isBlankAbove = hide > 0 && (whole[hide - 1] ?? []).every(cell => cell.ch === ' ')
-  const grid = isBlankAbove ? [...whole.slice(0, hide - 1), ...whole.slice(hide + 1)] : whole
+  const notes = [STRINGS[lang].questionAgeUnknown, STRINGS[lang].archiveLive]
+  const grid = (isBlankAbove ? [...whole.slice(0, hide - 1), ...whole.slice(hide + 1)] : whole)
+    .filter(row => !notes.some(note => row.map(cell => cell.ch).join('').includes(note)))
   // The pane whole, down to the line before its second box (the first is the reply box), so
   // no line is cut off.
   const boxes = grid.flatMap((row, i) => ((row[0]?.ch ?? '') === '╭' ? [i] : []))
@@ -1483,6 +1501,11 @@ mkdirSync(join(OUT, 'agents'), { recursive: true })
 for (const icon of AGENT_ICONS) write(join(OUT, 'agents', `${icon.file}.svg`), () => agentIcon(icon))
 for (const icon of AGENT_ICONS) write(join(OUT, 'agents', `chip-${icon.file}.svg`), () => chip(icon))
 for (const lang of LANGS) write(join(OUT, `promo-${lang}.svg`), () => promo(lang))
+
+mkdirSync(join(OUT, 'brand'), { recursive: true })
+for (const mode of ['light', 'dark'] as const) write(join(OUT, 'brand', `agent-board-lockup-${mode}.svg`), () => brandLockup(mode))
+write(join(OUT, 'brand', 'agent-board-logo.svg'), brandLogo)
+write(join(OUT, 'brand', 'agent-board-mark.svg'), brandMarkFile)
 
 mkdirSync(join(OUT, 'board'), { recursive: true })
 for (const lang of LANGS) {
