@@ -1564,7 +1564,12 @@ const PAGE_SCRIPT = String.raw`
       if (row.runs) add(inner, el('p', 'context', row.runs));
       if (sends(row.send)) add(inner, replyBox(row.key, w('serveMessagePlaceholder', agentName(row.agent)), row.send, row.agent, row.where, row.isSending, row.session, row.question, row.fp, row.delivery));
       else if (row.hasCopyBox) add(inner, replyBox(row.key, w('serveReplyPlaceholder'), 'copy', row.agent, '', false, row.session, row.question));
-      if (row.isOwn && section !== 'done' && row.next) add(acts, button(w('serveTickNext', clean(row.nextLabel || row.next)), function () { act(key, 'tick', row.next, '', '', '', row.fp); }, 'primary'));
+      if (row.isOwn && section !== 'done' && row.next) {
+        var tickNext = button(w('serveTickNext', clean(row.nextLabel || row.next)), function () { act(key, 'tick', row.next, '', '', '', row.fp); }, 'primary');
+        // A long step is named by its first words; the whole step is its title (#463).
+        if (row.nextLabel) tickNext.title = row.next;
+        add(acts, tickNext);
+      }
       if (row.resume && !row.isOwn) add(acts, button(w('serveCopyResume'), function () { copy(row.resume, key); }, '', true));
       // A task still running keeps its Archive button; the board refuses and the line says why only after it is pressed.
       if (row.canArchive || row.archiveNote) add(acts, button(w('serveArchive'), function () { act(key, 'archive', '', '', '', '', row.fp); }));
