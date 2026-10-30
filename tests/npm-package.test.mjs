@@ -77,7 +77,7 @@ const packed = f => {
 const bundle = pkg => {
   const source = readFileSync(join(pkg, 'hooks/board-script.ts'), 'utf8')
   const marker = 'export const BOARD_SCRIPT = '
-  return JSON.parse(source.slice(source.indexOf(marker) + marker.length))
+  return JSON.parse(source.slice(source.indexOf(marker) + marker.length, source.lastIndexOf(']') + 1)).join('\n')
 }
 const bodyHash = text => createHash('sha256').update(text.includes('\n') ? text.slice(text.indexOf('\n') + 1) : '').digest('hex')
 const boardPath = f => join(f.home, '.agent-board/agent-board.mjs')

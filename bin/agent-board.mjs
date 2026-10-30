@@ -149,7 +149,7 @@ if (!isChat) {
   try {
     const source = readFileSync(join(pkg, 'hooks/board-script.ts'), 'utf8')
     const marker = 'export const BOARD_SCRIPT = '
-    const bundled = JSON.parse(source.slice(source.indexOf(marker) + marker.length))
+    const bundled = JSON.parse(source.slice(source.indexOf(marker) + marker.length, source.lastIndexOf(']') + 1)).join('\n')
     const digest = hash(readFileSync(installed, 'utf8'))
     // Setup prepends account settings to the raw bundle; align that header here.
     if (digest !== hash(`\n${bundled}`)) {

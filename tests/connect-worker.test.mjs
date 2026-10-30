@@ -3,6 +3,7 @@ import { createHash } from 'node:crypto'
 import { existsSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import assert from 'node:assert/strict'
 import test from 'node:test'
+import { BOARD_SCRIPT } from '../hooks/board-script.ts'
 import { CONNECT_BOOTSTRAP, CONNECT_EXECUTE, workerRequest, workerStage } from '../hooks/connect-worker.ts'
 
 const run = (code, args, esm = false) => spawnSync(process.execPath, [...(esm ? ['--input-type=module'] : []), '-e', code, ...args], { encoding: 'utf8', windowsHide: true, timeout: 10000 })
@@ -66,9 +67,28 @@ test('a large verified module reports a bounded failure without embedding its da
   } finally { if (existsSync(value.directory)) rmSync(value.directory, { recursive: true, force: true }) }
 })
 
+test('the generated bundle is stored one line per line so pull requests that change different code merge cleanly', () => {
+  const source = readFileSync(new URL('../hooks/board-script.ts', import.meta.url), 'utf8')
+  const lines = source.split('\n')
+  assert.ok(lines.length > 1000)
+  assert.equal(lines[1], 'export const BOARD_SCRIPT = [')
+  assert.equal(lines.at(-2), "].join('\\n')")
+  const encoded = lines.slice(2, -2)
+  const decoded = encoded.map((line, index) => {
+    if (index < encoded.length - 1) assert.ok(line.endsWith(','))
+    const literal = index < encoded.length - 1 ? line.slice(0, -1) : line
+    const value = JSON.parse(literal)
+    assert.equal(typeof value, 'string')
+    assert.equal(JSON.stringify(value), literal)
+    assert.ok(!value.includes('\n'))
+    return value
+  })
+  assert.equal(decoded.join('\n'), BOARD_SCRIPT)
+})
+
 test('the full generated worker bundle runs through verified staging without recursive bundle growth', () => {
   const source = readFileSync(new URL('../hooks/board-script.ts', import.meta.url), 'utf8')
-  const code = JSON.parse(source.slice(source.indexOf('export const BOARD_SCRIPT = ') + 'export const BOARD_SCRIPT = '.length))
+  const code = JSON.parse(source.slice(source.indexOf('export const BOARD_SCRIPT = ') + 'export const BOARD_SCRIPT = '.length, source.lastIndexOf(']') + 1)).join('\n')
   assert.ok(code.includes('// hooks/connect-pure.ts'))
   assert.ok(code.includes('// scripts/legacy-connect.ts'))
   assert.ok(!code.includes('// hooks/board-script.ts'))
