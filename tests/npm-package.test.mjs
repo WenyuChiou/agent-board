@@ -125,6 +125,19 @@ test('the npm command and package.json keep LF line endings on every checkout', 
   for (const path of ['bin/agent-board.mjs', 'package.json']) assert.equal(readFileSync(join(repo, path), 'utf8').includes('\r'), false, path)
 }))
 
+test('the board bundle keeps LF on every checkout and stays under the Claude Code module limit', () => fixture(f => {
+  // The bundle has one line per line, so a Windows checkout with CRLF adds a byte per line and
+  // takes it past the 1 MiB that Claude Code reads from one module (#582).
+  // When the size check fails, split the bundle into parts (#582); do not trim features to fit.
+  const result = spawnSync('git', ['check-attr', 'eol', '--', 'hooks/board-script.ts'], { cwd: repo, env: f.env, encoding: 'utf8', windowsHide: true, timeout: 15000 })
+  assert.ifError(result.error)
+  assert.equal(result.status, 0, result.stderr)
+  assert.equal(result.stdout.replace(/\r/g, ''), 'hooks/board-script.ts: eol: lf\n')
+  const bundle = readFileSync(join(repo, 'hooks/board-script.ts'))
+  assert.equal(bundle.includes(13), false)
+  assert.ok(bundle.length < 1048576, `${bundle.length} bytes`)
+}))
+
 test('package.json, plugin.json and agent-board --version report one version', () => fixture(f => {
   assert.equal(manifest.version, plugin.version)
   const pkg = packed(f)
