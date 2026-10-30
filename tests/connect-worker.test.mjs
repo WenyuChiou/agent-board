@@ -69,7 +69,8 @@ test('a large verified module reports a bounded failure without embedding its da
 
 test('the generated bundle is stored one line per line so pull requests that change different code merge cleanly', () => {
   const source = readFileSync(new URL('../hooks/board-script.ts', import.meta.url), 'utf8')
-  const lines = source.split('\n')
+  // A Windows checkout may turn each line ending into CRLF; the array reads the same either way.
+  const lines = source.split(/\r?\n/)
   assert.ok(lines.length > 1000)
   assert.equal(lines[1], 'export const BOARD_SCRIPT = [')
   assert.equal(lines.at(-2), "].join('\\n')")
