@@ -1,0 +1,2 @@
+- **Terminal board / Stop and SSH access** · The stop command now says when a busy page could not close, and the SSH link opens the page. The quick start and command guide explain how to run the board without a global install (#580).
+  Tests: `stop says the board page did not stop and exits 1 when the page refuses to close`, `the SSH hint links to the page with its token`, `the quick start runs as written without a global install`.

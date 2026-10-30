@@ -35,7 +35,7 @@ OpenClaw、DeepSeek Harness 已有独立状态 plugin 与原生 skill；Grok 新
 
 ## 每个 agent 里都看得到看板
 
-在任何终端中使用安装好的命令 `agent-board`：
+运行过 `npm install -g @wenyuchiou/agent-board` 后，任何终端都能使用 `agent-board` 命令；没有安装时，改用 `npx @wenyuchiou/agent-board`：
 
 ```sh
 agent-board
