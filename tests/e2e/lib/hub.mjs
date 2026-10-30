@@ -187,7 +187,10 @@ export const receiptBudget = async hub => {
   return { pagePollMs, measuredMs: combined + RECEIPT_SLACK_MS }
 }
 
-export const withHub = async (specs, fn) => {
+// A hub that stays open until close(): a world, its server and page, and one actor per spec,
+// each native one attached. withHub closes it after fn; a suite that shares one hub across
+// its tests opens it in before() and closes it in after().
+export const openHub = async specs => {
   const world = makeWorld()
   // Messaging leases and latency use real clocks in both parent and server; with no jump,
   // world.now is the real time too.
@@ -291,8 +294,19 @@ export const withHub = async (specs, fn) => {
         world.cleanups.push(() => actor.connector.close())
       }
     }
+    hub.close = () => world.close()
+    return hub
+  } catch (error) {
+    await world.close()
+    throw error
+  }
+}
+
+export const withHub = async (specs, fn) => {
+  const hub = await openHub(specs)
+  try {
     await fn(hub)
   } finally {
-    await world.close()
+    await hub.close()
   }
 }
