@@ -621,25 +621,26 @@ const htmlTurn = answer => JSON.stringify({ session_id: 'demo-1', cwd: '/work/ap
 
 test('the HTML board shows pending questions with an empty progress file and cannot send replies', () => {
   for (const [lang, label, hint] of [
-    ['en', 'Waiting on you', 'codex'],
-    ['zh-TW', '等你處理', 'codex'],
-    ['zh-CN', '等你处理', 'codex'],
+    ['en', 'Needs you', 'codex'],
+    ['zh-TW', '需要你', 'codex'],
+    ['zh-CN', '需要你', 'codex'],
   ]) {
     const page = htmlRun({ inbox: { [HTML_TURN]: htmlTurn(HTML_QUESTION) }, lang })
     assert.ok(page.includes(label) && page.includes(hint), page)
     assert.ok(page.includes('api-gateway') && page.includes('codex'), page)
-    assert.equal(page.split(HTML_QUESTION).length - 1, 2)
-    assert.ok(page.includes('data-key="section:waiting" open'), page)
-    assert.ok(!/Nothing needs you right now|<form|<textarea|fetch\(/.test(page), page)
-    // Its only buttons pick the theme or open a section; none sends a reply.
-    assert.ok([...page.matchAll(/<button[ >][^>]*>/g)].every(([tag]) => /data-theme-pick=|data-section=/.test(tag)), page)
-    assert.ok(/● 1<\/span>/.test(page), page)
+    // One list: the question is on the Needs you sheet once.
+    assert.equal(page.split(HTML_QUESTION).length - 1, 1)
+    assert.ok(page.includes('id="dash-needs"'), page)
+    assert.ok(!/<form|<textarea|fetch\(/.test(page), page)
+    // Its only buttons pick the theme, filter by agent or open a section; none sends a reply.
+    assert.ok([...page.matchAll(/<button[ >][^>]*>/g)].every(([tag]) => /data-theme-pick=|data-section=|data-agent=/.test(tag)), page)
+    assert.ok(/<b id="needs-n">1<\/b>/.test(page), page)
   }
 })
 
 test('the HTML board keeps a stale inbox question visible until it is processed', () => {
   const page = htmlRun({ inbox: { [HTML_TURN]: htmlTurn(HTML_QUESTION) }, age: 7 * 24 * 60 * 60 * 1000 })
-  assert.ok(page.includes(HTML_QUESTION) && page.includes('Waiting on you'), page)
+  assert.ok(page.includes(HTML_QUESTION) && page.includes('Needs you'), page)
 })
 
 test('the HTML board shows only the newest thirty inbox files', () => {
@@ -675,7 +676,7 @@ test('the HTML board skips claimed inbox files while keeping the question in pro
     inbox: { [`${HTML_TURN}.deadbeef-abc-1.taking`]: htmlTurn(HTML_QUESTION) },
   })
   assert.ok(!page.includes('data-key="section:inbox"'), page)
-  const waiting = page.match(/data-key="section:waiting"[\s\S]*?<\/details>/)?.[0] ?? ''
+  const waiting = page.match(/id="dash-needs"[\s\S]*?<\/section>/)?.[0] ?? ''
   assert.equal(waiting.split(HTML_QUESTION).length - 1, 1, page)
 })
 
@@ -686,10 +687,10 @@ test('the HTML board shows a question that is in both an agent block and the inb
     inbox: { [HTML_TURN]: htmlTurn(HTML_QUESTION) },
   })
   const pending = page.match(/data-key="section:inbox"[\s\S]*?<\/details>/)?.[0] ?? ''
-  const waiting = page.match(/data-key="section:waiting"[\s\S]*?<\/details>/)?.[0] ?? ''
+  const waiting = page.match(/id="dash-needs"[\s\S]*?<\/section>/)?.[0] ?? ''
   assert.equal(pending.split(HTML_QUESTION).length - 1, 0, page)
   assert.equal(waiting.split(HTML_QUESTION).length - 1, 1, page)
-  assert.ok(/● 1<\/span>/.test(page), page)
+  assert.ok(/<b id="needs-n">1<\/b>/.test(page), page)
 })
 
 test('the HTML board redacts home paths and credentials before clipping pending questions', () => {
@@ -2560,6 +2561,37 @@ test('a second press on the page for the first of two hand-kept tasks with the s
   }
 })
 
+// The page draws from the model's `view` (what the server groups by agent). A model written by hand, with
+// asks, groups and the shelves only, gets the same view the server would give it: every non-own item
+// belongs to Claude Code unless it names an agent, nothing has worked in the last 30 minutes, and the
+// person's own items are their own.
+const viewed = model => {
+  if (!model || model.view) return model
+  const agentOf = item => String(item.agent || 'claude').toLowerCase()
+  const ref = (kind, item, project) => ({ key: item.key, kind, agent: item.isOwn ? '' : agentOf(item), project: project ?? item.project ?? '', repo: project ?? item.project ?? '', at: 0 })
+  const asks = (model.asks ?? []).map(item => ({ item, ref: ref('question', item) }))
+  const older = [...(model.reminder ?? []), ...(model.older ?? [])].map(item => ({ item, ref: ref('question', item) }))
+  const open = (model.groups ?? []).flatMap(group => group.rows.map(item => ({ item, ref: ref('task', item, group.project) })))
+  const stopped = [...(model.idle ?? []), ...(model.stopped ?? [])].map(item => ({ item, ref: ref('task', item) }))
+  const bucket = (pick) => {
+    const [cards, rows, shelf, back] = [asks, open, stopped, older].map(list => list.filter(one => pick(one.item)).map(one => one.ref))
+    return { counts: { open: rows.length, needs: cards.length, stopped: shelf.length, done: 0, older: back.length }, cards, open: rows, stopped: shelf, done: [], older: back }
+  }
+  const ids = [...new Set([...asks, ...open, ...stopped, ...older].filter(one => !one.item.isOwn).map(one => agentOf(one.item)))]
+  const agents = ids.map(id => ({ agent: id, name: id, icon: id, last: 0, isUnreadable: false, ...bucket(item => !item.isOwn && agentOf(item) === id) }))
+  const all = bucket(item => !item.isOwn)
+  const own = bucket(item => item.isOwn === true)
+  const cards = asks.map(one => one.ref)
+  return {
+    ...model,
+    view: {
+      now: 0, n: cards.length, questions: cards.length, stuck: 0, versions: { board: '0.0.0', package: null }, agents,
+      needs: { n: cards.length, questions: cards.length, stuck: 0, cards, older: older.map(one => one.ref) },
+      working: [], all: { ...all, isHidden: agents.length < 2 }, own, projects: [],
+    },
+  }
+}
+
 // The page's own script run against a minimal DOM, to see what it keeps across a redraw and what
 // it sends. `redraw` hands it the next board, as the page's next poll would get it.
 const pageDom = async (html, first, { post, confirm, messaging, copyAllowed = false, currentModel, currentBoard, getBoard, clipboard = false } = {}) => {
@@ -2649,13 +2681,7 @@ const pageDom = async (html, first, { post, confirm, messaging, copyAllowed = fa
   }
   get('words').textContent = html.match(/<script[^>]*id="words"[^>]*>([\s\S]*?)<\/script>/)[1]
   get('.pfoot').appendChild(get('close'))
-  if (html.includes('id="picker"')) {
-    get('picker').appendChild(get('searchbar'))
-    get('searchbar').appendChild(get('search'))
-    get('searchbar').appendChild(get('search-results'))
-    get('picker').appendChild(get('picks'))
-  }
-  for (const id of ['close', 'paste-go', 'relay']) get(id).tag = 'button'
+  for (const id of ['close']) get(id).tag = 'button'
   const matches = (node, selector) => {
     if (selector === 'button') return node.tag === 'button'
     if (selector === 'button:not([data-local])') return node.tag === 'button' && node.getAttribute('data-local') === null
@@ -2691,14 +2717,14 @@ const pageDom = async (html, first, { post, confirm, messaging, copyAllowed = fa
     body: new Element('body'),
     execCommand: () => { copies.push(document.body.childNodes.find(node => node.tag === 'textarea')?.value); return copyAllowed },
   }
-  let model = first
+  let model = viewed(first)
   let scheduled
   const requests = []
   const pending = new Set()
   const script = [...html.matchAll(/<script[^>]*>([\s\S]*?)<\/script>/g)].map(found => found[1]).find(code => code.includes('(function ()'))
   runInNewContext(script, {
     document,
-    location: { search: html.includes('"group":"agent"') ? '?t=x&group=agent' : '?t=x' },
+    location: { search: '?t=x' },
     URLSearchParams,
     navigator: clipboard ? { clipboard: { writeText: async text => { copied.push(text) } } } : {},
     window: { confirm, isSecureContext: !!clipboard },
@@ -2710,7 +2736,11 @@ const pageDom = async (html, first, { post, confirm, messaging, copyAllowed = fa
     clearTimeout: () => {},
     fetch: (target, options) => {
       const response = (async () => {
-        if (target.startsWith('/api/board')) return getBoard ? getBoard() : { ok: true, json: async () => ({ model: currentModel ? currentModel() : model, now: 1, messaging, ...currentBoard?.() }) }
+        if (target.startsWith('/api/board')) {
+          if (!getBoard) return { ok: true, json: async () => ({ model: viewed(currentModel ? currentModel() : model), now: 1, messaging, ...currentBoard?.() }) }
+          const answer = await getBoard()
+          return { ...answer, json: async () => { const data = await answer.json(); return data.model ? { ...data, model: viewed(data.model) } : data } }
+        }
         requests.push({ path: target, body: JSON.parse(options.body) })
         if (post) return post(requests.at(-1))
         return { ok: true, json: async () => ({ note: '' }) }
@@ -2749,7 +2779,7 @@ const pageDom = async (html, first, { post, confirm, messaging, copyAllowed = fa
     flush,
     settle,
     redraw: async next => {
-      model = next
+      model = viewed(next)
       scheduled()
       await flush()
     },
@@ -3476,7 +3506,7 @@ test('a refusal on the page stays visible after its card is removed by a redraw'
     assert.equal(pressWalk(dom.node('board')).filter(node => node.className?.includes('press-result') && node.textContent === 'That line changed').length, 1)
     await dom.redraw({ ...base, counts: { ...base.counts, active: 1 } })
     assert.ok(dom.node('board').firstChild.textContent.includes('That line changed'))
-    dom.node('relay').click()
+    dom.node('close').click()
     assert.ok(!dom.node('board').textContent.includes('That line changed'))
   } finally { await board.close() }
 })

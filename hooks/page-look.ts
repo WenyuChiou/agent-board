@@ -9,15 +9,30 @@ export const pageTokens = (headHeight = '54px'): string => {
   const shared = {
     'font-sans': '"Atkinson Hyperlegible Next",system-ui,-apple-system,"Segoe UI",Roboto,"Noto Sans","Noto Sans TC","Noto Sans SC","Hiragino Sans","PingFang TC","PingFang SC","Microsoft JhengHei","Microsoft YaHei",sans-serif',
     'font-mono': 'ui-monospace,"SF Mono","Cascadia Mono","Segoe UI Mono",Menlo,Consolas,"Liberation Mono",monospace',
-    'text-xs': '12px', 'text-sm': '14px', 'text-md': '16px', 'text-lg': '20px',
+    // Nothing on the page is smaller than 14px, and each size grows with the reader's own font size (max of the
+    // floor and a rem value). xs (14) is the floor: ages, counts, small labels. sm (16) is body, buttons, meta
+    // lines, steps and inputs. md (18) is row titles, shelf heads and the brand. lg (22; 20 on a phone, below)
+    // is the card question, section headings and the empty-page heading. Line height is 1.5 up to 16px and 1.4
+    // from 18px; headings differ from row titles by size and space, not by weight.
+    'text-xs': 'max(14px,.875rem)', 'text-sm': 'max(16px,1rem)', 'text-md': 'max(18px,1.125rem)', 'text-lg': 'max(22px,1.375rem)',
     'radius-s': '6px', 'radius-m': '10px', 'radius-round': '999px',
-    'dur-theme': '.28s', 'head-h': headHeight,
+    // Spacing on a 4px scale; a control is at least 36px tall (44px under a coarse pointer, in the page's CSS).
+    's1': '4px', 's2': '8px', 's3': '12px', 's4': '16px', 's5': '24px', 's6': '32px', 's7': '48px', 'hit': '36px',
+    // Motion: hover and press 120ms, small things appearing or leaving 200ms, expanding, collapsing and moving
+    // 260ms, a task that just arrived fades its highlight over 1.6s, the sending dots loop in 1.2s, a theme
+    // pick fades colours only. Entering eases out; leaving eases in and is quicker.
+    'dur-fast': '120ms', 'dur-base': '200ms', 'dur-layout': '260ms', 'dur-glow': '1.6s', 'dur-dots': '1.2s', 'dur-theme': '.28s',
+    'ease-out': 'cubic-bezier(.2,0,0,1)', 'ease-in': 'cubic-bezier(.4,0,1,1)',
+    // Hover, the open row and a press are the ink at 5%, 8% and 12% over whatever is underneath.
+    'hover': 'color-mix(in srgb,var(--ink) 5%,transparent)', 'current': 'color-mix(in srgb,var(--ink) 8%,transparent)', 'press': 'color-mix(in srgb,var(--ink) 12%,transparent)',
+    'head-h': headHeight,
     ...Object.fromEntries(AGENT_ICONS.map(icon => [`ag-${icon.file}`, icon.tile])),
   }
   const dark = `${cssVars(DARK)};${cssVars(PAGE_DARK)};color-scheme:dark`
   return `:root{${cssVars(LIGHT)};${cssVars(PAGE_LIGHT)};${cssVars(shared)};color-scheme:light}
 @media (prefers-color-scheme:dark){:root:not([data-theme="light"]){${dark}}}
-:root[data-theme="dark"]{${dark}}`
+:root[data-theme="dark"]{${dark}}
+@media (max-width:640px){:root{--text-lg:max(20px,1.25rem)}}`
 }
 
 // This runs before styles and delegates presses because the switch is parsed later.
@@ -123,12 +138,43 @@ export const agentMark = (agent: string, isOwn = false): string => {
   return `<span class="ag ag-${file ?? (first ? 'other' : 'own')}" aria-hidden="true">${file ? '' : esc((Array.from(first)[0] ?? '').toUpperCase())}</span>`
 }
 
+// The one motion primitive: a block opens and closes by its grid row track (1fr to 0fr) and opacity, so
+// the blocks beside it follow its height. `.fx` is a block that can leave (`.gone`); `.fold` is one
+// that opens on its parent's `.open`. With reduced motion every transition and animation is off, so
+// each change lands at once and every state sentence is still on the page.
+export const motionCss = `
+.fx{display:grid;grid-template-rows:1fr;opacity:1;transition:grid-template-rows var(--dur-layout) var(--ease-out),opacity var(--dur-base) var(--ease-out)}
+.fx>.fx-in{min-height:0;overflow:hidden}
+.fx.gone{grid-template-rows:0fr;opacity:0;transition-duration:var(--dur-base),var(--dur-fast);transition-timing-function:var(--ease-in)}
+.fold{display:grid;grid-template-rows:0fr;transition:grid-template-rows var(--dur-layout) var(--ease-out)}
+.fold>.fold-in{min-height:0;overflow:hidden}
+.open>.fold,.open>.fx>.fx-in>.fold{grid-template-rows:1fr}
+@keyframes glow{from{background:var(--current)}to{background:transparent}}
+@keyframes dot{0%,100%{opacity:.25}50%{opacity:1}}
+@media (prefers-reduced-motion:reduce){*,*::before,*::after{transition:none!important;animation:none!important;scroll-behavior:auto!important}.dots i{opacity:.7}}
+`
+
+// The agent filter is kept the way the theme is: in a cookie, which every port of the live page shares,
+// and in storage for a page that is a file. The reader and writer are text for the page's own script.
+export const filterStore = String.raw`
+  function savedFilter() {
+    var kept = '';
+    try { var found = /(?:^|;\s*)agent-board\.filter=([a-z0-9-]+)(?:;|$)/.exec(document.cookie || ''); if (found) kept = found[1]; } catch (e) {}
+    if (!kept) { try { kept = localStorage.getItem('agent-board.filter') || ''; } catch (e) {} }
+    return kept;
+  }
+  function saveFilter(agent) {
+    try { if (agent) localStorage.setItem('agent-board.filter', agent); else localStorage.removeItem('agent-board.filter'); } catch (e) {}
+    try { document.cookie = 'agent-board.filter=' + agent + '; Path=/; SameSite=Strict; Max-Age=' + (agent ? 365 * 24 * 3600 : 0); } catch (e) {}
+  }
+`
+
 export const pageBaseCss = `
 @font-face{font-family:'Atkinson Hyperlegible Next';src:url(data:font/woff2;base64,${FONT_REGULAR}) format('woff2');font-weight:400;font-display:swap;/* ${FONT_LICENSE} */}
 @font-face{font-family:'Atkinson Hyperlegible Next';src:url(data:font/woff2;base64,${FONT_SEMIBOLD}) format('woff2');font-weight:600;font-display:swap}
 *,*::before,*::after{box-sizing:border-box}
 html{background:var(--ground)}
-body{margin:0;background:var(--ground);color:var(--ink);font:var(--text-md)/1.55 var(--font-sans);-webkit-font-smoothing:antialiased}
+body{margin:0;background:var(--ground);color:var(--ink);font:var(--text-sm)/1.5 var(--font-sans);-webkit-font-smoothing:antialiased}
 [hidden]{display:none!important}
 button{font:inherit;color:inherit}
 svg.i{width:16px;height:16px;flex:none;fill:none;stroke:currentColor;stroke-width:1.6;stroke-linecap:round;stroke-linejoin:round}
@@ -137,7 +183,7 @@ svg.i{width:16px;height:16px;flex:none;fill:none;stroke:currentColor;stroke-widt
 .head{display:block;position:sticky;top:0;z-index:6;background:var(--ground);border-bottom:1px solid var(--line)}
 .topbar{display:flex;align-items:center;flex-wrap:wrap;gap:10px 12px;padding-block:10px}.topbar>.seg{margin-left:auto}
 .brand{display:flex;align-items:center;gap:10px;min-width:0;flex:1 1 auto}
-.brand h1{margin:0;font-size:var(--text-md);line-height:1.2;font-weight:650}
+.brand h1{margin:0;font-size:var(--text-md);line-height:1.4;font-weight:650}
 .mark{width:30px;height:30px;flex:none}.lg-ink{fill:var(--ink)}.lg-flag{fill:var(--waiting)}
 .seg{display:inline-flex;padding:2px;gap:2px;border:1px solid var(--line);border-radius:var(--radius-m);background:var(--surface)}
 .seg button{border:1px solid transparent;background:transparent;color:var(--muted);min-height:28px;padding:0 8px;border-radius:var(--radius-m);display:inline-flex;align-items:center;gap:6px;font-size:var(--text-xs);cursor:pointer}
@@ -150,3 +196,35 @@ button:hover,.btn:hover,summary:hover{background-color:var(--inset)}
 @media (max-width:600px){.seg .tl{display:none}.seg button{padding:0 7px}.brand h1{font-size:var(--text-md)}.mark{width:28px;height:28px}}
 @media (prefers-reduced-motion:reduce){*,*::before,*::after{transition:none!important;animation:none!important;scroll-behavior:auto!important}}
 `
+
+// The row of agent icons, shared by the live page and progress.html (the script that fills it differs).
+export const agentRowCss = `
+.agents{position:sticky;top:var(--head-h,56px);z-index:4;background:var(--ground);border-bottom:1px solid var(--line)}
+.agents-in{display:flex;gap:var(--s2);overflow-x:auto;scrollbar-width:none;scroll-snap-type:x proximity;padding-top:var(--s2);padding-bottom:var(--s2)}
+.agents-in::-webkit-scrollbar{display:none}
+.chip{position:relative;flex:none;scroll-snap-align:start;display:inline-flex;align-items:center;gap:var(--s2);min-width:44px;height:44px;padding:0 7px;border:1px solid transparent;border-radius:var(--radius-m);background:transparent;cursor:pointer;transition:background-color var(--dur-fast) var(--ease-out),border-color var(--dur-fast) var(--ease-out)}
+.chip .ag{width:28px;height:28px}
+/* A presence dot at the icon's bottom-right; a ring around the icon would read as selected. */
+.chip.offline .ag{background-color:var(--muted)}
+.chip.working::after{content:'';position:absolute;left:25px;top:25px;width:14px;height:14px;border:2px solid var(--ground);border-radius:var(--radius-round);background:var(--running);pointer-events:none}
+.chip .c-name{max-width:0;overflow:hidden;white-space:nowrap;font-weight:600;line-height:1.5;transition:max-width var(--dur-layout) var(--ease-out)}
+.chip[aria-pressed="true"]{border-color:var(--ink);background:var(--current);padding-right:var(--s3)}
+.chip[aria-pressed="true"] .c-name{max-width:18em}
+.badge{position:absolute;top:-2px;right:-2px;min-width:22px;height:22px;padding:0 6px;border:2px solid var(--ground);border-radius:var(--radius-round);background:var(--waiting-fill);color:var(--on-accent);font-size:var(--text-xs);font-weight:600;line-height:18px;text-align:center;font-variant-numeric:tabular-nums}
+.badge.bad{background:var(--alert)}
+.agent-note{display:grid;gap:var(--s1);padding-top:var(--s2);padding-bottom:var(--s2);color:var(--muted)}
+.agent-note:empty{display:none}
+.agent-note p{margin:0}.agent-note summary{cursor:pointer;display:inline}.agent-note summary::before{content:none}
+`
+
+// The Needs you sheet: a tab with a flag, then one raised sheet.
+export const sheetCss = `
+.needs-wrap{display:flex;flex-direction:column}
+.sheet-tab{align-self:flex-start}
+.sheet-tab h2{margin:0}
+.flag{display:inline-flex;align-items:center;justify-content:center;min-height:36px;padding:0 var(--s4) 0 var(--s3);background:var(--waiting-fill);color:var(--on-accent);font-size:var(--text-md);font-weight:600;line-height:1.4;font-variant-numeric:tabular-nums;clip-path:polygon(0 0,100% 0,calc(100% - 8px) 50%,100% 100%,0 100%);border-radius:var(--radius-s) 0 0 0}
+.flag b{font-weight:600;margin-left:var(--s2)}
+.sheet{background:var(--surface);border:1px solid var(--line-strong);border-radius:0 var(--radius-m) var(--radius-m) var(--radius-m)}
+`
+
+export const htmlLang = (s: Strings): string => (s.lang === 'en' ? 'en' : s.lang === 'zh-CN' ? 'zh-Hans' : 'zh-Hant')

@@ -101,7 +101,7 @@ export const stepColor = (palette: Palette, status: ProgressStepStatus): string 
 export const PAGE_LIGHT = {
   ground: '#f1f2ee', surface: '#ffffff', inset: '#fbfaf5', ink: '#1f2324',
   line: '#e3e4de', 'line-strong': '#cbcec6', 'on-accent': '#ffffff',
-  waiting: '#9A7200', 'waiting-text': '#715C1F', soon: '#B04E2E',
+  waiting: '#9A7200', 'waiting-text': '#715C1F', 'waiting-fill': '#8A6700', soon: '#B04E2E',
   scrim: 'rgba(10,12,13,.38)',
   shadow: '0 1px 2px rgba(0,0,0,.05),0 2px 8px -4px rgba(0,0,0,.08)',
 }
@@ -109,7 +109,7 @@ export const PAGE_LIGHT = {
 export const PAGE_DARK = {
   ground: '#141617', surface: '#1e2022', inset: '#25282b', ink: '#e6e4dc',
   line: '#2e3134', 'line-strong': '#43474b', 'on-accent': '#141617',
-  waiting: '#F8B500', 'waiting-text': '#F8B500', alert: '#EE5E75', project: '#6BA3A2',
+  waiting: '#F8B500', 'waiting-text': '#F8B500', 'waiting-fill': '#F8B500', alert: '#EE5E75', project: '#6BA3A2',
   scrim: 'rgba(10,12,13,.6)',
   shadow: '0 1px 2px rgba(0,0,0,.2),0 2px 8px -4px rgba(0,0,0,.4)',
 }

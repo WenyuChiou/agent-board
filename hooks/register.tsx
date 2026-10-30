@@ -1227,7 +1227,7 @@ const writeDashboard = async ($: EngineInterface, force = false): Promise<{ path
   await breathe($)
   const pending = await pendingTurns($)
   const date = new Date(at)
-  const html = dashboardHtml(view, s, snap.path, s.dashStamp(`${localDay(at)} ${pad2(date.getHours())}:${pad2(date.getMinutes())}`), pending)
+  const html = dashboardHtml(view, s, snap.path, s.dashStamp(`${localDay(at)} ${pad2(date.getHours())}:${pad2(date.getMinutes())}`), pending, at)
   if (!force && html === lastDashboard) {
     dashboardAt = at
     return { path }

@@ -3,13 +3,15 @@ import type { PendingTurn } from './board'
 import { clip } from './mirror'
 import { askRole, stepRole, toneRole } from './palette'
 import type { Palette } from './palette'
-import { agentMark, agentMarkCss, boardMark, faviconLink, pageBaseCss, pageTokens, themeHead, themeSwitch } from './page-look'
+import { agentMark, agentMarkCss, agentRowCss, boardMark, faviconLink, filterStore, htmlLang, pageBaseCss, pageTokens, sheetCss, themeHead, themeSwitch } from './page-look'
+import { serveModel } from './serve'
+import { agentLabel } from './strings'
 import type { Strings } from './i18n'
-import type { Focus, TaskRow, View, ViewStep, WaitingItem } from './view'
+import type { TaskRow, View, ViewStep, WaitingItem } from './view'
 import { OLDER_SHOWN } from './view'
 
-// progress.html: the same view as the pane, as a page any browser keeps open in a window of
-// its own, beside progress.md. Built from the file and pending inbox turns, without a session's
+// progress.html: the board page's order (the agent row, Needs you, Working now, the projects, a closed
+// Done shelf) as a page any browser keeps open in a window of its own, beside progress.md. Built from the file and pending inbox turns, without a session's
 // own card, so every agent's work is on it. It reloads itself every 30
 // seconds and keeps the sections the person opened and their chosen page theme.
 
@@ -34,7 +36,7 @@ export const vars = (palette: Palette): string =>
     .map(([key, value]) => `--${key}:${value}`)
     .join(';')
 
-export const htmlLang = (s: Strings): string => (s.lang === 'en' ? 'en' : s.lang === 'zh-CN' ? 'zh-Hans' : 'zh-Hant')
+export { htmlLang }
 
 const steps = (list: readonly ViewStep[]): string =>
   `<ol class="steps">${list
@@ -58,8 +60,11 @@ const bar = (done: number, total: number): string => {
   return `<span class="bar"><span style="width:${percent}%;background:var(--${done === total && total > 0 ? 'done' : 'accent'})"></span></span>`
 }
 
+// The id the agent row and the filter use for an agent: its lower-case name, Claude Code for none, own for a hand-kept task.
+const idOf = (agent: string, isOwn: boolean): string => (isOwn ? 'own' : agent.trim().toLowerCase() || 'claude')
+
 const waitingItem = (item: WaitingItem, s: Strings): string =>
-  `<div class="ask"><div><span class="chip" style="color:var(--${askVar(item.kind)})">${esc(s.ask[item.kind])}</span>` +
+  `<div class="ask" data-agent="${esc(idOf(item.agent, item.where === 'manual'))}"><div><span class="kind" style="color:var(--${askVar(item.kind)})">${esc(s.ask[item.kind])}</span>` +
   `<b>${esc(item.text)}</b></div>` +
   `<div class="where">${agentMark(item.agent, item.where === 'manual')}${esc(item.project)} › ${esc(item.task)}${item.agent === '' ? '' : ` · ${esc(item.agent)}`}</div>` +
   (item.note === '' ? (item.context === '' ? '' : `<div class="quiet">${esc(s.contextLine(item.context))}</div>`) : `<div>${esc(item.note)}</div>`) +
@@ -74,7 +79,7 @@ const row = (it: TaskRow, s: Strings, showProject: boolean): string => {
     part => part !== '',
   )
   return (
-    `<details class="row" data-key="${esc(it.key)}"><summary><span class="title">${esc(it.title)}</span>` +
+    `<details class="row" data-key="${esc(it.key)}" data-agent="${esc(idOf(it.agent, it.auto === null))}"><summary><span class="title">${esc(it.title)}</span>` +
     `<span class="tail" style="color:var(--${it.due === null ? 'muted' : toneVar(it.due.tone)})">${esc(it.due === null ? `${it.done}/${it.total}` : it.due.left)}</span>` +
     `<span class="meta" style="color:var(--${toneVar(it.tone)})">${agentMark(it.agent, it.auto === null)}${bar(it.done, it.total)} ${esc(meta.join(' · '))}</span></summary>` +
     (it.runs === undefined ? '' : `<p class="quiet">${esc(it.runs)}</p>`) +
@@ -84,46 +89,122 @@ const row = (it: TaskRow, s: Strings, showProject: boolean): string => {
   )
 }
 
-const focus = (it: Focus | null, s: Strings): string => {
-  if (it === null) return `<section class="focus calm">${esc(s.nothingForYou)}</section>`
-  const body =
-    it.type === 'ask'
-      ? waitingItem(it.item, s)
-      : `<div><b style="color:var(--alert)">${esc(it.type === 'due' ? `⚑ ${it.row.due?.left ?? ''}` : s.stuckLead)}</b> <b>${esc(it.row.title)}</b></div>` +
-        `<div class="where">${esc(it.row.project)}</div><div>${esc(it.row.status)}</div>`
-
-  return `<section class="focus"><div class="label">${esc(s.mostNeeded)}</div>${body}</section>`
-}
-
 const section = (id: string, title: string, count: number, tone: string, hint: string, body: string, isOpen: boolean): string =>
   count === 0
     ? ''
     : `<details class="section" data-key="section:${id}"${isOpen ? ' open' : ''}><summary><span class="title">${esc(title)}</span>` +
       `<span class="count" style="color:var(--${textRole(tone)})">${count}</span>${hint === '' ? '' : `<span class="quiet">${esc(hint)}</span>`}</summary>${body}</details>`
 
-export const dashboardHtml = (view: View, s: Strings, path: string, stamp: string, pending: readonly PendingTurn[] = []): string => {
-  pending = view.hasPendingQuestions ? pending.filter(turn => !turn.isQuestion) : pending
-  const { active, due, today } = view.overview
-  const waiting = view.overview.waiting + pending.filter(turn => turn.isQuestion).length
-  const nearest = view.due[0]
-  const counts = [
-    ['●', waiting, s.countWaiting, 'waiting'],
-    ['▸', active, s.countActive, 'accent'],
-    ['⚑', due, s.countDue, 'soon'],
-    ['✓', today, s.countToday, 'done'],
-  ] as const
 
-  const sections = [
-    ['inbox', s.boardInbox, pending.length],
-    ['waiting', s.sectionWaiting, view.waiting.length],
-    ['reminder', s.sectionQuestionReminders, view.reminder?.length ?? 0],
-    ['older', s.sectionOlderQuestions, view.older?.length ?? 0],
-    ['idle', s.idleCount(view.idle.length), view.idle.length],
-    ['stopped', s.viewStopped, view.stopped.length],
-    ['due', s.sectionDue, view.due.length],
-    ['others', s.sectionActive, view.active.length],
-    ['recent', s.sectionRecent, view.recent.length],
-  ] as const
+type Chip = { id: string; name: string; needs: number; working: number; isUnreadable: boolean }
+
+// The row of agent icons: one button per agent on the board and one for the person's own to-dos, each with
+// the number of questions waiting on the person and a dot when it worked in the last 30 minutes. Pressing
+// one filters the page to that agent (the script below); the name is the button's label.
+const chipRow = (chips: readonly Chip[], s: Strings): string =>
+  chips.length === 0
+    ? ''
+    : `<nav class="agents" id="agents" aria-label="${esc(s.pgAgents)}"><div class="col agents-in">${chips
+        .map(chip => {
+          const parts = [chip.needs > 0 ? s.pgTipNeeds(chip.needs) : '', chip.working > 0 ? s.pgTipWorking(chip.working) : '', chip.isUnreadable ? s.pgTipCantRead : ''].filter(part => part !== '')
+          const label = `${chip.name}: ${parts.length > 0 ? parts.join(', ') : s.pgChipEmpty}`
+          const badge = chip.isUnreadable ? '<span class="badge bad">!</span>' : chip.needs > 0 ? `<span class="badge">${chip.needs}</span>` : ''
+          return `<button type="button" class="chip${chip.working > 0 ? ' working' : ''}" data-agent="${esc(chip.id)}" aria-pressed="false" aria-label="${esc(label)}" title="${esc(label)}">${agentMark(chip.id === 'own' ? '' : chip.id, chip.id === 'own')}<span class="c-name">${esc(chip.name)}</span>${badge}</button>`
+        })
+        .join('')}</div><div class="col agent-note" id="agent-note"></div></nav>`
+
+// The page's own rules over the shared tokens, agent row and sheet. No text is below 14px; the row of
+// agent icons is the only thing that scrolls sideways.
+const DASH_CSS = `
+html{scrollbar-gutter:stable}
+body{overflow-wrap:anywhere}
+.col{width:100%;max-width:808px;margin:0 auto;padding-left:max(var(--s5),env(safe-area-inset-left,0px));padding-right:max(var(--s5),env(safe-area-inset-right,0px))}
+.head .topbar{flex-wrap:nowrap;min-height:56px;padding-block:0;gap:var(--s3)}
+.brand{flex-wrap:wrap;gap:0 var(--s3)}
+.brand .meta{font-size:var(--text-xs)}
+button{font:inherit}
+${agentRowCss}
+${sheetCss}
+main{display:flex;flex-direction:column;gap:var(--s6);padding-top:var(--s5);padding-bottom:var(--s6);min-width:0}
+a{color:var(--accent)}
+.quiet{margin:0;color:var(--muted)}
+.t-alert{color:var(--alert)}
+.link{border:0;background:none;padding:0;min-height:var(--hit);color:var(--accent);font-weight:600;cursor:pointer;text-decoration:underline;text-underline-offset:3px}
+.sheet>.ask,.sheet>.quiet,.sheet>.empty{margin:0;padding:var(--s4)}
+.sheet>.ask+.ask{border-top:1px solid var(--line)}
+.sheet>details.section{border-width:1px 0 0;border-radius:0}
+.empty{color:var(--muted)}
+.ask{display:grid;gap:var(--s1);min-width:0}
+.ask .where{color:var(--muted);display:flex;align-items:center;gap:var(--s2);flex-wrap:wrap}
+.kind{font-size:var(--text-xs);font-weight:600;margin-right:var(--s2)}
+code{display:block;max-width:100%;overflow-x:auto;white-space:pre;font:var(--text-xs)/1.5 var(--font-mono);padding:6px var(--s2);border:1px solid var(--line);border-radius:var(--radius-s);background:var(--inset);color:var(--ink)}
+details.section{border-top:1px solid var(--line-strong)}
+details.section>summary{padding:var(--s3) 0}
+summary{cursor:pointer;display:flex;flex-wrap:wrap;align-items:baseline;gap:var(--s1) var(--s3);list-style:none;min-height:var(--hit)}
+summary::-webkit-details-marker{display:none}
+summary::before{content:"▸";color:var(--muted)}
+details[open]>summary::before{content:"▾"}
+summary:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.section>summary .title{font-size:var(--text-lg);line-height:1.4;font-weight:600}
+.section>summary .count{font-size:var(--text-xs);font-variant-numeric:tabular-nums}
+.section>p,.section>.group{margin:0 0 var(--s3)}
+.group h3{margin:var(--s3) 0 var(--s2);font-size:var(--text-xs);font-weight:600;color:var(--muted);display:flex;flex-wrap:wrap;gap:var(--s1) var(--s3)}
+.group h3 span{font-weight:400}
+details.row{border-top:1px solid var(--line)}
+details.row>summary{padding:var(--s3) var(--s2);align-items:center}
+.row .title{flex:1 1 12em;min-width:0;font-size:var(--text-md);line-height:1.4;font-weight:600}
+.row .tail{font-size:var(--text-xs);font-variant-numeric:tabular-nums}
+.row .meta{flex-basis:100%;display:flex;flex-wrap:wrap;align-items:center;gap:var(--s2);min-width:0;padding-left:var(--s4)}
+.bar{display:inline-block;width:52px;height:4px;border-radius:var(--radius-round);background:var(--frame);overflow:hidden;flex:none}
+.bar span{display:block;height:100%}
+.row>p,.row>.steps{margin:0 var(--s2) var(--s3)}
+.steps{list-style:none;margin:0;padding:0;display:grid;gap:var(--s1)}
+.steps li{display:grid;grid-template-columns:2ch 22px minmax(0,1fr);column-gap:var(--s2);align-items:baseline}
+.steps .n{color:var(--muted);text-align:right;font-variant-numeric:tabular-nums}
+.steps .g{text-align:center}
+.steps .now .t{font-weight:600}
+.steps .note{grid-column:3}
+.working-empty{margin:0;color:var(--muted)}
+.sec-title{margin:0 0 var(--s2);font-size:var(--text-lg);line-height:1.4;font-weight:600;display:flex;gap:var(--s3);align-items:baseline}
+.sec-title .count{font-size:var(--text-xs);color:var(--muted);font-weight:400;font-variant-numeric:tabular-nums}
+.rows{border-top:1px solid var(--line-strong)}
+footer{color:var(--muted);display:grid;gap:var(--s1);border-top:1px solid var(--line);padding-top:var(--s4)}
+.legend{display:flex;flex-wrap:wrap;gap:var(--s1) var(--s4)}
+@media (max-width:640px){
+  .col{padding-left:max(var(--s3),env(safe-area-inset-left,0px));padding-right:max(var(--s3),env(safe-area-inset-right,0px))}
+  .head{position:static}
+  .agents{top:0}
+  main{gap:var(--s5);padding-top:var(--s4)}
+}
+`
+
+export const dashboardHtml = (view: View, s: Strings, path: string, stamp: string, pending: readonly PendingTurn[] = [], now: number = Date.now()): string => {
+  pending = view.hasPendingQuestions ? pending.filter(turn => !turn.isQuestion) : pending
+  const model = serveModel(view, pending, s, new Set(), false, undefined, false, { now, repoOf: () => null, versions: { board: '', package: null }, unreadable: view.unreadable ?? [] })
+  const grouped = model.view
+  const byKey = new Map<string, TaskRow>([...view.active, ...view.due].map(it => [it.key, it]))
+  const working = (grouped?.working ?? []).map(ref => byKey.get(ref.sourceKey ?? ref.key)).filter((it): it is TaskRow => it !== undefined)
+  const workingKeys = new Set(working.map(it => it.key))
+  const questions = pending.filter(turn => turn.isQuestion)
+  const nearest = view.due[0]
+  const chips: Chip[] = [
+    ...(Object.values(grouped?.own.counts ?? {}).some(count => count > 0) ? [{ id: 'own', name: s.pgOwn, needs: grouped?.own.counts.needs ?? 0, working: 0, isUnreadable: false }] : []),
+    ...(grouped?.agents ?? []).map(one => ({ id: one.agent, name: agentLabel(one.agent, s) || one.agent, needs: one.counts.needs, working: (grouped?.working ?? []).filter(ref => ref.agent === one.agent).length, isUnreadable: one.isUnreadable })),
+  ]
+  const names = Object.fromEntries(chips.map(chip => [chip.id, chip.name]))
+  const inbox = pending.length === 0 ? '' : `<p class="quiet">${esc(s.dashInboxHint)}</p>` + pending.map(turn =>
+    `<div class="ask" data-agent="${esc(idOf(turn.agent, false))}"><div class="where">${agentMark(turn.agent)}${esc([turn.project, turn.agent].filter(part => part !== '').join(' · '))}</div>` +
+    `<div><span style="color:var(--${turn.isQuestion ? 'waiting-text' : 'accent'})">${turn.isQuestion ? '●' : '◐'}</span> ${turn.isQuestion ? esc(clip(turn.text, 200)) : ''}</div></div>`,
+  ).join('')
+  const needsN = view.waiting.length + questions.length
+  const older = (view.older ?? []).slice(0, OLDER_SHOWN).map(item => waitingItem(item, s)).join('') + ((view.older?.length ?? 0) > OLDER_SHOWN ? `<details class="more" data-key="older:more"><summary>${esc(s.showAllQuestions(view.older!.length))}</summary>${view.older!.slice(OLDER_SHOWN).map(item => waitingItem(item, s)).join('')}</details>` : '')
+  const dueRows = view.due.filter(it => !workingKeys.has(it.key))
+  const groups = view.groups.map(group => ({ ...group, rows: group.rows.filter(it => !workingKeys.has(it.key)) })).filter(group => group.rows.length > 0)
+  const projects = groups.reduce((n, group) => n + group.rows.length, 0)
+  const noteRows = chips.filter(chip => chip.isUnreadable).map(chip => `<p data-agent="${esc(chip.id)}">${esc(s.pgUnreadable(chip.name))}</p>`).join('')
+  const doneRows = `<ul class="steps">${view.recent.map(item => `<li><span></span><span style="color:var(--done)">✓</span><span class="quiet">${esc([item.project, item.title, item.when].filter(part => part !== '').join(' · '))}${(item.questions ?? []).map(question => `<br>${esc([question.text, question.note].filter(Boolean).join(' — '))}`).join('')}</span></li>`).join('')}</ul>`
+  const literal = (value: unknown): string => JSON.stringify(value).replace(/</g, '\\u003c')
+  const script = DASH_SCRIPT.replace('__NAMES__', () => literal(names)).replace('__NONE__', () => literal(s.pgNoQuestions('\u0001'))).replace('__NOTHING__', () => literal(s.nothingForYou))
 
   return `<!doctype html>
 <html lang="${htmlLang(s)}">
@@ -134,125 +215,62 @@ export const dashboardHtml = (view: View, s: Strings, path: string, stamp: strin
 ${faviconLink}
 <script>${themeHead}</script>
 <style>
-${pageTokens('70px')}
-*{box-sizing:border-box}
-body{margin:0;background:var(--ground);color:var(--ink);font:var(--text-md)/1.6 var(--font-sans)}
-main{max-width:760px;margin:0 auto;padding:20px max(16px,env(safe-area-inset-left)) 40px max(16px,env(safe-area-inset-right));display:grid;gap:14px}
-header{display:flex;flex-wrap:wrap;align-items:baseline;gap:4px 12px}
-h1{font-size:var(--text-lg);margin:0;letter-spacing:.04em}
-.meta,.quiet{color:var(--muted)}
-.counts{display:flex;flex-wrap:wrap;gap:6px 18px;font-variant-numeric:tabular-nums}
-.focus{border:1px solid var(--line);border-radius:var(--radius-m);padding:12px 14px;display:grid;gap:4px}
-.focus.calm{color:var(--done)}
-.label{color:var(--muted);font-size:var(--text-sm);letter-spacing:.06em}
-.chip{margin-right:6px}
-.where{color:var(--project)}
-code{display:block;overflow-x:auto;font:var(--text-sm)/1.5 var(--font-mono);padding:6px 8px;border:1px solid var(--line);border-radius:var(--radius-s);color:var(--accent)}
-a{color:var(--accent)}
-details.section{border-top:1px solid var(--line);padding-top:8px}
-summary{cursor:pointer;display:flex;flex-wrap:wrap;align-items:baseline;gap:4px 10px;list-style:none}
-summary::before{content:"▸";color:var(--muted)}
-details[open]>summary::before{content:"▾"}
-summary:focus-visible{outline:1px dotted var(--accent);outline-offset:3px}
-.section>summary .title{font-weight:700}
-.group{margin:10px 0 0 4px}
-.group h3{margin:0;font-size:var(--text-md);color:var(--project);display:flex;flex-wrap:wrap;gap:4px 10px}
-.group h3 span{font-weight:400;color:var(--muted)}
-details.row{margin:6px 0 0 8px}
-.row .title{flex:1 1 12em;min-width:0}
-.row .meta{flex-basis:100%;padding-left:1.2em;display:flex;align-items:center;gap:8px;min-width:0}
-.bar{display:inline-block;width:52px;height:4px;border-radius:var(--radius-round);background:var(--frame);overflow:hidden;flex:none}
-.bar span{display:block;height:100%}
-.steps{list-style:none;margin:6px 0;padding:0 0 0 1.2em;display:grid;gap:2px}
-.steps li{display:grid;grid-template-columns:2ch 1.4em 1fr;column-gap:4px}
-.steps .n{color:var(--muted);text-align:right;font-variant-numeric:tabular-nums}
-.steps .now .t{font-weight:700}
-.steps .note{grid-column:3}
-.ask{display:grid;gap:2px;margin:8px 0 0 4px}
-footer{color:var(--muted);font-size:var(--text-sm);display:grid;gap:4px;border-top:1px solid var(--line);padding-top:10px}
-.legend{display:flex;flex-wrap:wrap;gap:2px 14px}
-@media (prefers-reduced-motion:reduce){*{scroll-behavior:auto}}
+${pageTokens('56px')}
 ${pageBaseCss}
 ${agentMarkCss()}
-.dashboard-shell{display:grid;grid-template-columns:200px minmax(0,780px);column-gap:36px;align-items:start}
-main{max-width:780px;min-width:0;margin:0;padding:18px 0 40px;gap:18px}
-.dash-nav{position:sticky;top:var(--head-h,70px);display:grid;gap:4px;padding:20px 0;max-height:calc(100dvh - var(--head-h,70px));overflow:auto}
-.dash-nav h2{font-size:var(--text-xs);text-transform:uppercase;letter-spacing:.07em;color:var(--muted);margin:0 0 6px;padding:0 10px}
-.dash-nav button{display:flex;align-items:center;justify-content:space-between;gap:10px;min-height:36px;padding:6px 10px;border:1px solid transparent;border-radius:var(--radius-m);text-align:left;background:transparent;font-size:var(--text-sm);cursor:pointer}
-.dash-nav button:hover{background:var(--ground);border-color:var(--line)}.dash-nav .ct{color:var(--muted);font-size:var(--text-xs);font-variant-numeric:tabular-nums}
-.where .ag{margin-right:6px}.head .meta{font-size:var(--text-xs)}.head .brand{flex-wrap:wrap}.head .brand .meta{margin-left:auto}
-.counts{display:grid;grid-template-columns:repeat(4,1fr);gap:0;border:1px solid var(--line);border-radius:var(--radius-m);overflow:hidden}.counts>span{padding:12px;border-left:1px solid var(--line)}.counts>span:first-child{border-left:0}
-.focus{border:1px solid var(--line);border-radius:var(--radius-m);padding:16px}
-details.section{border:1px solid var(--line);padding:0;border-radius:var(--radius-m);overflow:clip;scroll-margin-top:calc(var(--head-h,70px) + 12px)}
-details.section[data-key='section:waiting']{background:var(--surface)}
-.section>summary{padding:12px 16px}.section>.ask,.section>.quiet,.section>.steps,.section>p{margin:12px 16px}.section>.group{margin:0;padding:12px 16px}.group h3{font-weight:650}
-details.row{margin:0;border-top:1px solid var(--line);padding:0}.row>summary{padding:11px 16px}.row>p,.row>.steps{margin:10px 16px 16px}.row .title{font-weight:600}.row .meta{flex-wrap:wrap;gap:6px}
-.ask{gap:8px;padding:8px 0}.chip{border:1px solid currentColor;border-radius:var(--radius-round);padding:3px 8px;font-size:var(--text-xs)}.steps li{gap:4px 8px;padding:5px 8px;border-radius:var(--radius-m)}.steps .g{width:22px;height:22px;display:grid;place-items:center;font-size:inherit;cursor:default;user-select:none}.steps li{grid-template-columns:2ch 22px minmax(0,1fr)}.steps .now{background:var(--inset)}
-footer{font-size:var(--text-xs);overflow-wrap:anywhere}code{background:var(--inset);border:1px solid var(--line);border-radius:var(--radius-m)}
-@media (max-width:760px){.dashboard-shell{grid-template-columns:minmax(0,1fr)}.dash-nav{position:static;display:flex;flex-wrap:wrap;gap:6px;padding:16px 0 0;max-height:none}.dash-nav h2{flex-basis:100%}.dash-nav button{background:var(--surface);border-color:var(--line)}main{padding-top:16px}}
-@media (max-width:600px){.counts{grid-template-columns:repeat(2,1fr)}.counts>span:nth-child(3){border-left:0}.counts>span:nth-child(n+3){border-top:1px solid var(--line)}.head .brand .meta{margin-left:0;flex-basis:100%}.head .brand{column-gap:8px}}
+${DASH_CSS}
 </style>
 </head>
 <body>
-<header class="head" id="head"><div class="wide topbar"><div class="brand">${boardMark}<h1>${esc(s.paneTitle)}</h1><span class="meta">${esc(stamp)}</span></div>${themeSwitch(s)}</div></header>
-<div class="wide dashboard-shell"><nav class="dash-nav" aria-label="${esc(s.dashSections)}"><h2>${esc(s.dashSections)}</h2>${sections.filter(([, , count]) => count > 0).map(([id, title, count]) => `<button type="button" data-section="dash-${id}"><span>${esc(title)}</span>${id === 'idle' ? '' : `<span class="ct">${count}</span>`}</button>`).join('')}</nav>
-<main>
-${view.warning ? `<p role="status" style="color:var(--alert)">${esc(view.warning)}</p>` : ''}
+<header class="head" id="head"><div class="col topbar"><div class="brand">${boardMark}<h1>${esc(s.paneTitle)}</h1><span class="meta">${esc(stamp)}</span></div>${themeSwitch(s)}</div></header>
+${chipRow(chips, s).replace('<div class="col agent-note" id="agent-note"></div>', `<div class="col agent-note" id="agent-note">${noteRows}</div>`)}
+<main class="col">
+${view.warning ? `<p role="status" class="t-alert">${esc(view.warning)}</p>` : ''}
 ${view.details ? `<p class="quiet">${esc(view.details)}</p>` : ''}
 ${view.pruned ? `<p role="status" class="quiet">${esc(view.pruned)}</p>` : ''}
-<section class="counts">${counts
-    .map(([glyph, n, word, role]) => `<span><span style="color:var(--${n > 0 ? textRole(role) : 'muted'})">${glyph} ${n}</span> ${esc(word)}</span>`)
-    .join('')}</section>
-${view.focus === null && pending.some(turn => turn.isQuestion) ? '' : focus(view.focus, s)}
-${section(
-  'inbox',
-  s.boardInbox,
-  pending.length,
-  'accent',
-  '',
-  `<p class="quiet">${esc(s.dashInboxHint)}</p>` + pending.map(turn =>
-    `<div class="ask"><div class="where">${agentMark(turn.agent)}${esc([turn.project, turn.agent].filter(part => part !== '').join(' · '))}</div>` +
-    `<div><span style="color:var(--${turn.isQuestion ? 'waiting-text' : 'accent'})">${turn.isQuestion ? '●' : '◐'}</span> ${turn.isQuestion ? esc(clip(turn.text, 200)) : ''}</div></div>`,
-  ).join(''),
-  true,
-)}
-${section('waiting', s.sectionWaiting, view.waiting.length, 'waiting', '', view.waiting.map(item => waitingItem(item, s)).join(''), true)}
-${(view.stoppedAsking ?? 0) > 0 ? `<p class="quiet"><button type="button" data-section="dash-older">${esc(s.stoppedAsking(view.stoppedAsking!))}</button></p>` : ''}
+<section class="needs-wrap" id="dash-needs"><div class="sheet-tab"><h2 class="flag">${esc(s.pgNeeds)}<b id="needs-n">${needsN}</b></h2></div>
+<div class="sheet">
+<p class="empty" id="needs-empty"${needsN > 0 ? ' hidden' : ''}>${esc(s.nothingForYou)}</p>
+${inbox}${view.waiting.map(item => waitingItem(item, s)).join('')}
+${(view.stoppedAsking ?? 0) > 0 ? `<p class="quiet"><button type="button" class="link" data-section="dash-older">${esc(s.stoppedAsking(view.stoppedAsking!))}</button></p>` : ''}
 ${section('reminder', s.sectionQuestionReminders, view.reminder?.length ?? 0, 'muted', s.questionAgingHint, (view.reminder ?? []).map(item => waitingItem(item, s)).join(''), false)}
-${section('older', s.sectionOlderQuestions, view.older?.length ?? 0, 'muted', s.questionAgingHint, (view.older ?? []).slice(0, OLDER_SHOWN).map(item => waitingItem(item, s)).join('') + ((view.older?.length ?? 0) > OLDER_SHOWN ? `<details class="more" data-key="older:more"><summary>${esc(s.showAllQuestions(view.older!.length))}</summary>${view.older!.slice(OLDER_SHOWN).map(item => waitingItem(item, s)).join('')}</details>` : ''), false)}
+${section('older', s.sectionOlderQuestions, view.older?.length ?? 0, 'muted', s.questionAgingHint, older, false)}
+</div></section>
 ${view.hidden.length === 0 ? '' : `<p class="quiet">${esc(s.hiddenCount(view.hidden.length))}</p>`}
-${view.idle.length === 0 ? '' : `<details class="section" data-key="section:idle"><summary><span class="quiet">${esc(s.idleCount(view.idle.length))}</span></summary>${view.idle.map(it => row(it, s, true)).join('')}</details>`}
-${view.stopped.length === 0 ? '' : `<details class="section" data-key="section:stopped"><summary><span class="quiet">${esc(s.stoppedCount(view.stopped.length))}</span></summary>${view.stopped.map(it => row(it, s, true)).join('')}</details>`}
-${view.background === undefined ? '' : `<p class="quiet">${esc(view.background)}</p>`}
-${section('due', s.sectionDue, view.due.length, 'soon', nearest === undefined ? '' : s.nearestDue(nearest.title, nearest.due?.left ?? ''), view.due.map(it => row(it, s, true)).join(''), false)}
+<section class="sec" id="dash-working"><h2 class="sec-title">${esc(s.pgWorking)}<span class="count">${working.length}</span></h2>${working.length === 0 ? `<p class="working-empty">${esc(s.pgNoWorking)}</p>` : `<div class="rows">${working.map(it => row(it, s, true)).join('')}</div>`}</section>
+${section('due', s.sectionDue, dueRows.length, 'soon', nearest === undefined ? '' : s.nearestDue(nearest.title, nearest.due?.left ?? ''), dueRows.map(it => row(it, s, true)).join(''), false)}
 ${section(
   'others',
   s.sectionActive,
-  view.active.length,
+  projects,
   'accent',
-  view.groups.map(group => group.project).join(s.listSep),
-  view.groups
-    .map(group => `<div class="group"><h3>${esc(group.project)}<span>${esc(group.summary)}</span></h3>${group.rows.map(it => row(it, s, false)).join('')}</div>`)
-    .join(''),
+  groups.map(group => group.project).join(s.listSep),
+  groups.map(group => `<div class="group"><h3>${esc(group.project)}<span>${esc(group.summary)}</span></h3>${group.rows.map(it => row(it, s, false)).join('')}</div>`).join(''),
   true,
 )}
-${section(
-  'recent',
-  s.sectionRecent,
-  view.recent.length,
-  'done',
-  '',
-  `<ul class="steps">${view.recent.map(item => `<li><span></span><span style="color:var(--done)">✓</span><span class="quiet">${esc([item.project, item.title, item.when].filter(part => part !== '').join(' · '))}${(item.questions ?? []).map(question => `<br>${esc([question.text, question.note].filter(Boolean).join(' — '))}`).join('')}</span></li>`).join('')}</ul>`,
-  false,
-)}
+${view.idle.length === 0 ? '' : `<details class="section" data-key="section:idle"><summary><span class="quiet">${esc(s.idleCount(view.idle.length))}</span></summary>${view.idle.map(it => row(it, s, true)).join('')}</details>`}
+${view.stopped.length === 0 ? '' : `<details class="section" data-key="section:stopped"><summary><span class="quiet">${esc(s.stoppedCount(view.stopped.length))}</span></summary>${view.stopped.map(it => row(it, s, true)).join('')}</details>`}
+${view.background === undefined ? '' : `<p class="quiet">${esc(view.background)}</p>`}
+${section('recent', s.pgDone, view.recent.length, 'done', '', doneRows, false)}
 <footer><div class="legend">${LEGEND.map((status, index) => `<span><span style="color:var(--${roleOf(status)})">${GLYPH[status]}</span> ${esc(s.legendWords[index] ?? status)}</span>`).join('')}<span>${esc(s.legendDue)}</span></div>
 <div>${esc(s.legendCleanup)}</div><div>${esc(s.progressFileShown)}</div></footer>
 ${(view.health?.length ?? 0) === 0 ? '' : `<details class="section sec" data-key="section:health"><summary><span class="title quiet">${esc(s.sectionHealth)}</span><span class="count" style="color:var(--muted)">${view.health!.length}</span></summary>${view.health!.map(line => `<p class="quiet">${esc(line)}</p>`).join('')}</details>`}
-</main></div>
-<script>
+</main>
+<script>${script}</script>
+</body>
+</html>
+`
+}
+
+// Sections the person opened stay open, the agent filter is kept (as on the live page), and the page reloads
+// itself every 30 seconds. The three __WORDS__ are filled in by dashboardHtml.
+const DASH_SCRIPT = String.raw`
 (function () {
   var key = 'progress-open';
   var open = {};
+  var NAMES = __NAMES__;
+  var NONE = __NONE__;
+  var NOTHING = __NOTHING__;
   try { open = JSON.parse(localStorage.getItem(key) || '{}'); } catch (e) {}
   document.querySelectorAll('details[data-key]').forEach(function (el) {
     var id = el.getAttribute('data-key');
@@ -269,6 +287,34 @@ ${(view.health?.length ?? 0) === 0 ? '' : `<details class="section sec" data-key
       if (section) { section.open = true; section.scrollIntoView({ block: 'start' }); }
     });
   });
+  ${filterStore}
+  var filter = savedFilter();
+  var chips = Array.prototype.slice.call(document.querySelectorAll('.chip[data-agent]'));
+  if (filter && !chips.some(function (chip) { return chip.getAttribute('data-agent') === filter; })) filter = '';
+  function paint() {
+    chips.forEach(function (chip) { chip.setAttribute('aria-pressed', String(chip.getAttribute('data-agent') === filter)); });
+    document.querySelectorAll('main [data-agent], #agent-note [data-agent]').forEach(function (item) {
+      item.hidden = !!filter && item.getAttribute('data-agent') !== filter;
+    });
+    document.querySelectorAll('main details.section, main .group').forEach(function (box) {
+      var items = box.querySelectorAll('[data-agent]');
+      box.hidden = !!filter && items.length > 0 && !Array.prototype.some.call(items, function (item) { return !item.hidden; });
+    });
+    var asks = Array.prototype.filter.call(document.querySelectorAll('.sheet > .ask'), function (item) { return !item.hidden; });
+    document.getElementById('needs-n').textContent = String(asks.length);
+    var empty = document.getElementById('needs-empty');
+    empty.hidden = asks.length > 0;
+    empty.textContent = filter ? NONE.split('\u0001').join(NAMES[filter] || filter) : NOTHING;
+  }
+  chips.forEach(function (chip) {
+    chip.addEventListener('click', function () {
+      var id = chip.getAttribute('data-agent');
+      filter = filter === id ? '' : id;
+      saveFilter(filter);
+      paint();
+    });
+  });
+  paint();
   if (typeof ResizeObserver === 'function') {
     var head = document.getElementById('head');
     new ResizeObserver(function () { document.documentElement.style.setProperty('--head-h', head.offsetHeight + 'px'); }).observe(head);
@@ -279,8 +325,4 @@ ${(view.health?.length ?? 0) === 0 ? '' : `<details class="section sec" data-key
     location.reload();
   }, 30000);
 })();
-</script>
-</body>
-</html>
 `
-}

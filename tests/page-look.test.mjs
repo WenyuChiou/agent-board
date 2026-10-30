@@ -52,9 +52,8 @@ const renders = (lang = 'en') => {
   assert.ok(view.waiting.length >= 2, 'the fixture must render waiting question colours')
   assert.ok(view.groups.some(group => group.rows.length > 0), 'the fixture must render running plan colours')
   return [
-    { name: 'classic', lang, html: servePage(s, 'n') },
-    { name: 'grouped', lang, html: servePage(s, 'n', false, 0, true) },
-    { name: 'dashboard', lang, html: dashboardHtml(view, s, '/synthetic/progress.md', 'updated 12:00') },
+    { name: 'page', lang, html: servePage(s, 'n') },
+    { name: 'dashboard', lang, html: dashboardHtml(view, s, '/synthetic/progress.md', 'updated 12:00', [], NOW) },
   ]
 }
 
@@ -126,27 +125,29 @@ const bareValue = value => value.replace(/"[^"\\]*(?:\\.[^"\\]*)*"|'[^'\\]*(?:\\
 const textSize = /^var\(--text-(?:xs|sm|md|lg)\)$/
 const fontFamily = /^var\(--font-(?:sans|mono)\)$/
 const fontShorthand = /^(?:(?:normal|italic|oblique|small-caps|bold|bolder|lighter|\d{3})\s+)*var\(--text-(?:xs|sm|md|lg)\)(?:\s*\/\s*(?:normal|[\d.]+|var\(--[\w-]+\)))?\s+var\(--font-(?:sans|mono)\)$/
-const isMobile = rule => rule.ancestors.some(ancestor => /@media\s*\([^)]*max-width\s*:\s*(?:600|760)px\s*\)/.test(ancestor))
-const surfaceAllowed = (name, selector, rule) => {
-  if (/(?:^|\s)(?:#search|#search-results|textarea|input)(?=$|[:[\s])/.test(selector)) return true
-  if (/(?:^|\s)\.seg$/.test(selector)) return true
-  if (name === 'grouped') return /(?:^|\s)\.pg-sheet$/.test(selector) || (isMobile(rule) && /(?:#picks>button|button\.nav)(?=$|[:[])/.test(selector))
-  return selector === "details.section[data-key='section:waiting']" || (isMobile(rule) && /(?:^|\s)\.dash-nav button(?=$|[:[])/.test(selector))
-}
+const isMobile = rule => rule.ancestors.some(ancestor => /@media\s*\([^)]*max-width\s*:\s*(?:600|640|760)px\s*\)/.test(ancestor))
+// The sheet that holds Needs you is the one raised surface; a field or the theme switch may have its own.
+const surfaceAllowed = selector => /(?:^|\s)(?:textarea|input)(?=$|[:[\s])/.test(selector) || /(?:^|\s)\.seg$/.test(selector) || /(?:^|\s)\.sheet$/.test(selector)
 
-test('the page and the dashboard use only colour, size, radius, shadow and duration tokens from page-look', () => {
+test('the page and the dashboard use only colour, size, radius, spacing and motion tokens from page-look', () => {
   const expected = {
-    text: { 'text-xs': '12px', 'text-sm': '14px', 'text-md': '16px', 'text-lg': '20px' },
+    text: { 'text-xs': 'max(14px,.875rem)', 'text-sm': 'max(16px,1rem)', 'text-md': 'max(18px,1.125rem)', 'text-lg': 'max(22px,1.375rem)' },
     radius: { 'radius-s': '6px', 'radius-m': '10px', 'radius-round': '999px' },
-    dur: { 'dur-theme': '.28s' },
+    dur: { 'dur-fast': '120ms', 'dur-base': '200ms', 'dur-layout': '260ms', 'dur-glow': '1.6s', 'dur-dots': '1.2s', 'dur-theme': '.28s' },
+    ease: { 'ease-out': 'cubic-bezier(.2,0,0,1)', 'ease-in': 'cubic-bezier(.4,0,1,1)' },
   }
   for (const [prefix, values] of Object.entries(expected)) {
     assert.deepEqual([...definedTokens].filter(name => name.startsWith(`${prefix}-`)).sort(), Object.keys(values).sort(), `${prefix} has no additional theme-only tokens`)
     assert.deepEqual(Object.fromEntries(Object.entries(light).filter(([name]) => name.startsWith(`${prefix}-`))), values, `${prefix} has exactly the specified tokens`)
     for (const [name, value] of Object.entries(values)) assert.equal(dark[name], value, `${name} is unchanged by dark mode`)
   }
-  assert.ok(light.shadow && dark.shadow, 'the search panel has a shadow in each theme')
-  assert.ok(light.scrim && dark.scrim, 'the drawer dim layer is a theme token')
+  assert.deepEqual(Object.fromEntries(Object.entries(light).filter(([name]) => /^s\d$/.test(name))), { s1: '4px', s2: '8px', s3: '12px', s4: '16px', s5: '24px', s6: '32px', s7: '48px' }, 'spacing is the 4px scale')
+  assert.equal(light.hit, '36px', 'a control is at least 36px tall')
+  // Every text size is a floor that follows the reader's own font size, and nothing is below 14px.
+  for (const value of Object.values(expected.text)) assert.match(value, /^max\((\d+)px,[\d.]+rem\)$/, 'text sizes are max(px floor, rem)')
+  assert.ok(Object.values(expected.text).every(value => Number(/^max\((\d+)px/.exec(value)[1]) >= 14), 'no text size is below 14px')
+  const phone = tokenRules.find(rule => rule.ancestors.some(ancestor => /max-width\s*:\s*640px/.test(ancestor)))
+  assert.deepEqual(phone?.declarations, [{ property: '--text-lg', value: 'max(20px,1.25rem)' }], 'the question size is 20px on a phone')
   for (const icon of AGENT_ICONS) {
     assert.equal(light[`ag-${icon.file}`], icon.tile, `the ${icon.file} tile is a token`)
     assert.equal(tokenRules.flatMap(rule => rule.declarations).filter(item => item.property === `--ag-${icon.file}`).length, 1, `${icon.file} is declared once, outside theme overrides`)
@@ -160,8 +161,7 @@ test('the page and the dashboard use only colour, size, radius, shadow and durat
       assert.deepEqual(rule.ancestors, tokenRules[index].ancestors, `${name}: automatic dark tokens stay inside their media query`)
       assert.deepEqual(rule.declarations.filter(item => item.property !== '--head-h'), tokenRules[index].declarations.filter(item => item.property !== '--head-h'), `${name}: token definitions match pageTokens`)
     }
-    assert.equal(valuesOf(roots[0])['head-h'], { classic: '54px', grouped: '56px', dashboard: '70px' }[name], `${name}: the header fallback height remains defined`)
-    let shadowCount = 0
+    assert.equal(valuesOf(roots[0])['head-h'], '56px', `${name}: the header fallback height remains defined`)
     for (const rule of rules.filter(rule => !isTokenRule(rule))) {
       for (const { property, value } of rule.declarations) {
         const where = `${name}: ${rule.selector} { ${property}:${value} }`
@@ -173,33 +173,23 @@ test('the page and the dashboard use only colour, size, radius, shadow and durat
         if (property === 'font-size') assert.ok(value === 'inherit' || textSize.test(value), `${where}: use one of four text sizes`)
         if (property === 'font-family') assert.ok(value === 'inherit' || fontFamily.test(value), `${where}: use a system font token`)
         if (property === 'font') assert.ok(value === 'inherit' || fontShorthand.test(value), `${where}: use a text size and system font token`)
-        if (property === 'border-radius') assert.match(value, /^(?:0|var\(--radius-(?:s|m|round)\))$/, `${where}: use one of three radii`)
-        if (property === 'box-shadow') {
-          assert.match(value, /^(?:none|var\(--shadow\))$/, `${where}: use the single shadow token`)
-          if (value !== 'none') {
-            shadowCount++
-            assert.ok(rule.selector.split(',').every(selector => /(?:^|\s)#search-results$/.test(selector.trim())), `${where}: only the search results panel has a shadow`)
-          }
+        if (property === 'border-radius') assert.match(value, /^(?:0|var\(--radius-(?:s|m|round)\))(?:\s+(?:0|var\(--radius-(?:s|m|round)\))){0,3}$/, `${where}: use the three radii`)
+        if (property === 'box-shadow') assert.equal(value, 'none', `${where}: the page is flat; only the sheet is raised, by its border and surface`)
+        if (/^(?:transition|animation)(?:-(?:duration|timing-function|delay))?$/.test(property) && value !== 'none') {
+          if (property !== 'animation-delay') assert.doesNotMatch(value, /(?:^|[\s,])[\d.]+m?s\b/, `${where}: no literal duration`)
+          assert.doesNotMatch(value, /cubic-bezier|linear\(/, `${where}: easing comes from the ease tokens`)
         }
-        if (varsUsed(value).includes('shadow')) assert.equal(property, 'box-shadow', `${where}: --shadow is only a box shadow`)
-        if (/^(?:transition|animation)(?:-|$)/.test(property) && value !== 'none') {
-          assert.ok(rule.selector.split(',').every(selector => /(?:^|\s)\.theming(?=$|[\s.*:#[])/.test(selector.trim())), `${where}: only a theme change may animate`)
-          assert.ok(varsUsed(value).includes('dur-theme'), `${where}: use the single theme duration`)
-          assert.doesNotMatch(value, /(?:^|[\s,])[\d.]+m?s\b/, `${where}: no literal duration`)
-        }
-        if (name !== 'classic' && /^(?:background|background-color)$/.test(property) && varsUsed(value).includes('surface')) {
-          for (const selector of rule.selector.split(',')) assert.ok(surfaceAllowed(name, selector.trim(), rule), `${where}: surface is reserved for Needs you and allowed controls`)
+        if (/^(?:background|background-color)$/.test(property) && varsUsed(value).includes('surface')) {
+          for (const selector of rule.selector.split(',')) assert.ok(surfaceAllowed(selector.trim()), `${where}: surface is reserved for Needs you and fields`)
         }
       }
     }
-    if (name === 'grouped') assert.ok(shadowCount > 0, 'the search results panel retains its shadow')
-    const sheet = { classic: '.card', grouped: '.grouped .pg-sheet', dashboard: "details.section[data-key='section:waiting']" }[name]
-    assert.ok(rules.some(rule => rule.selector === sheet && rule.declarations.some(item => /^(?:background|background-color)$/.test(item.property) && item.value === 'var(--surface)')), `${name}: ${sheet} retains its surface background`)
+    assert.ok(rules.some(rule => rule.selector === '.sheet' && rule.declarations.some(item => /^(?:background|background-color)$/.test(item.property) && item.value === 'var(--surface)')), `${name}: .sheet retains its surface background`)
     const bodyFont = rules.filter(rule => rule.selector === 'body').flatMap(rule => rule.declarations.filter(item => item.property === 'font')).at(-1)
-    assert.equal(bodyFont?.value, 'var(--text-md)/1.55 var(--font-sans)', `${name}: body uses the shared readable text size and line height`)
-    assert.equal(rules.filter(rule => rule.declarations.some(item => item.property === 'transition' && item.value !== 'none')).length, 1, `${name}: theme changes keep the sole transition rule`)
+    assert.equal(bodyFont?.value, 'var(--text-sm)/1.5 var(--font-sans)', `${name}: body uses the 16px text size and line height`)
     assert.ok(rules.some(rule => rule.selector === ':focus-visible' && rule.declarations.some(item => item.property === 'outline')), `${name}: keyboard focus keeps its outline`)
-    assert.ok(rules.some(rule => rule.ancestors.some(ancestor => ancestor.includes('prefers-reduced-motion:reduce'))), `${name}: reduced motion remains supported`)
+    const reduced = rules.filter(rule => rule.ancestors.some(ancestor => ancestor.includes('prefers-reduced-motion:reduce')))
+    assert.ok(reduced.some(rule => rule.declarations.some(item => item.property === 'transition' && item.value === 'none') && rule.declarations.some(item => item.property === 'animation' && item.value === 'none')), `${name}: reduced motion turns every transition and animation off`)
     for (const icon of AGENT_ICONS) {
       const mark = rules.find(rule => rule.selector === `.ag-${icon.file}`)
       assert.ok(mark?.declarations.some(item => item.property === 'background' && item.value.startsWith(`var(--ag-${icon.file})`)), `${name}: ${icon.file} uses its tile token`)
@@ -226,7 +216,7 @@ const contrast = (foreground, background) => {
 
 test('every text colour passes 4.5:1 and every mark colour 3:1 on its surface in light and dark', t => {
   const text = ['ink', 'muted', 'accent', 'done', 'running', 'soon', 'alert', 'project', 'waiting-text']
-  const marks = ['waiting', 'accent', 'done', 'running', 'soon', 'alert', 'ink']
+  const marks = ['waiting', 'accent', 'done', 'running', 'soon', 'alert', 'ink', 'muted']
   const pairs = []
   assert.equal(light.waiting.toLowerCase(), '#9a7200', 'the light waiting flag uses the page mark colour')
   assert.equal(dark.waiting.toLowerCase(), '#f8b500', 'the dark waiting flag keeps its page mark colour')
@@ -234,19 +224,24 @@ test('every text colour passes 4.5:1 and every mark colour 3:1 on its surface in
   assert.equal(dark['waiting-text'].toLowerCase(), '#f8b500', 'dark waiting text has its readable colour')
   for (const [mode, palette] of Object.entries({ light, dark })) {
     const automatic = valuesOf(tokenRules.find(rule => rule.selector.includes(':not(')))
-    for (const name of [...text, ...marks, 'ground', 'surface', 'inset', 'on-accent']) assert.equal(automatic[name], dark[name], `system dark and explicit dark agree for ${name}`)
+    for (const name of [...text, ...marks, 'ground', 'surface', 'inset', 'on-accent', 'waiting-fill']) assert.equal(automatic[name], dark[name], `system dark and explicit dark agree for ${name}`)
     for (const [kind, tokens, threshold] of [['text', text, 4.5], ['mark', marks, 3]]) {
       for (const surface of ['ground', 'surface', 'inset']) {
         for (const token of tokens) pairs.push({ mode, rule: `${kind}/${surface}`, token, surface, threshold, ratio: contrast(palette[token], palette[surface]) })
       }
     }
-    for (const [token, surface] of [['on-accent', 'accent'], ['ground', 'ink']]) pairs.push({ mode, rule: `${token}/${surface}`, token, surface, threshold: 4.5, ratio: contrast(palette[token], palette[surface]) })
+    // The count on an agent's badge and on the Needs you flag (on-accent on the amber fill), the "!" badge (on-accent on
+    // the alert colour), the primary button, and the glyph on an offline agent's muted tile. The 14px semibold numerals
+    // are not "large text", so the badge pairs need the full 4.5:1.
+    for (const [token, surface, threshold] of [['on-accent', 'accent', 4.5], ['on-accent', 'waiting-fill', 4.5], ['on-accent', 'alert', 4.5], ['on-accent', 'muted', 3], ['ground', 'ink', 4.5]]) pairs.push({ mode, rule: `${token}/${surface}`, token, surface, threshold, ratio: contrast(palette[token], palette[surface]) })
+    // The working dot sits on the ground colour's ring, so the ring never has to carry meaning.
+    for (const surface of ['ground', 'surface']) pairs.push({ mode, rule: `dot/${surface}`, token: 'running', surface, threshold: 3, ratio: contrast(palette.running, palette[surface]) })
   }
   const minima = [...new Set(pairs.map(pair => `${pair.mode}|${pair.rule}`))].map(key => pairs.filter(pair => `${pair.mode}|${pair.rule}` === key).reduce((lowest, pair) => pair.ratio < lowest.ratio ? pair : lowest))
   t.diagnostic('Contrast minima (WCAG 2.x):\nmode | rule | minimum | token | required\n' + minima.map(pair => `${pair.mode} | ${pair.rule} | ${pair.ratio.toFixed(3)}:1 | ${pair.token} | ${pair.threshold}:1`).join('\n'))
   for (const pair of pairs) assert.ok(pair.ratio >= pair.threshold, `${pair.mode}: --${pair.token} on --${pair.surface} is ${pair.ratio.toFixed(3)}:1, requires ${pair.threshold}:1`)
   // Frame, line and line-strong draw decorative rules and the empty part of a bar, not information.
-  const markOnly = new Set(['waiting', 'frame', 'line', 'line-strong'])
+  const markOnly = new Set(['waiting', 'waiting-fill', 'frame', 'line', 'line-strong'])
   for (const { name, html } of renders()) {
     for (const rule of styleRules(html).filter(rule => !isTokenRule(rule))) {
       for (const { property, value } of rule.declarations.filter(item => item.property === 'color')) {
@@ -254,15 +249,19 @@ test('every text colour passes 4.5:1 and every mark colour 3:1 on its surface in
       }
     }
   }
-  // Selected states sit on other surfaces: the picked agent button is ink, so its flag text uses the ground colour
-  // (ground on ink is checked above); the pressed theme button is marked by a muted border, which keeps its
-  // contrast when the focus outline is also showing.
+  // The badge and the flag draw on the amber fill, the "!" badge on the alert colour, the offline tile on the muted colour.
   const declared = (rules, selector, property) => rules.find(rule => rule.selector === selector)?.declarations.find(item => item.property === property)?.value
   for (const { name, html } of renders()) {
     const rules = styleRules(html)
     assert.equal(declared(rules, '.seg button[aria-pressed="true"]', 'border-color'), 'var(--muted)', `${name}: the pressed theme button keeps a 3:1 border`)
     assert.ok(!rules.some(rule => rule.selector.includes('[aria-pressed="true"]') && rule.declarations.some(item => item.property === 'outline')), `${name}: the pressed state does not compete with the focus outline`)
-    if (name === 'grouped') assert.equal(declared(rules, '.grouped #picks>button[aria-current="true"] .pg-flag', 'color'), 'var(--ground)', 'the flag text on the picked agent button uses the ground colour')
+    assert.equal(declared(rules, '.badge', 'background'), 'var(--waiting-fill)', `${name}: the badge sits on the amber fill`)
+    assert.equal(declared(rules, '.badge', 'color'), 'var(--on-accent)', `${name}: the badge numerals are on-accent`)
+    assert.equal(declared(rules, '.badge.bad', 'background'), 'var(--alert)', `${name}: the "!" badge is the alert colour`)
+    assert.equal(declared(rules, '.badge', 'border'), '2px solid var(--ground)', `${name}: the badge has the 2px ground ring`)
+    assert.equal(declared(rules, '.chip.offline .ag', 'background-color'), 'var(--muted)', `${name}: an offline agent's mark is the muted colour at full opacity`)
+    assert.ok(!rules.some(rule => rule.selector.includes('.chip') && rule.declarations.some(item => item.property === 'opacity')), `${name}: no icon is dimmed with opacity`)
+    assert.equal(declared(rules, '.flag', 'background'), 'var(--waiting-fill)', `${name}: the flag sits on the amber fill`)
   }
 })
 
@@ -335,17 +334,12 @@ test('the header and favicon show the Signal Row logo in light and dark', () => 
       assert.ok(logo, `${where}: the header contains the board mark`)
       assertShapes(logo, `${where} header`)
       assert.match(logo, /\baria-hidden="true"/, `${where}: the decorative logo adds no wording`)
-      const heading = name === 'grouped' ? 'Agent Board' : STRINGS[lang].paneTitle
+      const heading = name === 'page' ? 'Agent Board' : STRINGS[lang].paneTitle
       assert.ok(header.includes(`${logo}<h1>${heading}</h1>`), `${where}: the logo sits beside the existing board heading`)
       assert.match(html, /<title>[^<]*Agent Board<\/title>/, `${where}: the browser title names Agent Board`)
       assert.doesNotMatch(html, /class="m[1-4]"|\.m[1-4]\s*\{/, `${where}: no old mark shapes or rules`)
       const rules = styleRules(html)
       for (const [selector, value] of [['.lg-ink', 'var(--ink)'], ['.lg-flag', 'var(--waiting)']]) assert.ok(rules.some(rule => rule.selector === selector && rule.declarations.some(item => item.property === 'fill' && item.value === value)), `${where}: ${selector} follows the theme token`)
-      if (name === 'grouped') {
-        const fresh = /<div\b(?=[^>]*\bid="fresh-mark")[^>]*>([\s\S]*?)<\/div>/.exec(html)?.[1]
-        assert.ok(fresh, `${where}: the fresh page keeps its logo`)
-        assertShapes(logoSvg(fresh), `${where} fresh mark`)
-      }
       const links = (html.match(/<link\b[^>]*>/gi) ?? []).filter(link => attribute(link, 'rel') === 'icon')
       assert.equal(links.length, 1, `${where}: there is one favicon`)
       assert.equal(attribute(links[0], 'type'), 'image/svg+xml', `${where}: the favicon is SVG`)
