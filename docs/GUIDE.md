@@ -35,17 +35,19 @@ An old progress card is not proof that a process is running. Equally, an open ap
 
 ## The board in every agent
 
-Use the installed skill, or the exact program path printed by setup:
+After `npm install -g @wenyuchiou/agent-board`, the `agent-board` command works in any terminal; without it, write `npx @wenyuchiou/agent-board` in its place:
 
 ```sh
-node ~/.agent-board/agent-board.mjs --serve
-node ~/.agent-board/agent-board.mjs --watch
-node ~/.agent-board/agent-board.mjs --chat
-node ~/.agent-board/agent-board.mjs --html
+agent-board
+agent-board stop
+agent-board --chat
+agent-board --help all
 ```
 
 | Mode | Result |
 | --- | --- |
+| `agent-board` | Open the board where you are: desktop window, live board over SSH, text for agents |
+| `agent-board stop` | Stop the board page server for this progress file |
 | `--serve` | Interactive local web board; reusable background service |
 | `--watch` | Terminal board; arrows/Enter to select, `x` tick, `d` confirm done, `a` archive, `h` hide, `u` restore, `i` idle tasks, `c` copy, `o` HTML, `q` quit |
 | `--chat` | Compact plain text; no page, link, browser or writes |

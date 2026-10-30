@@ -5,7 +5,7 @@ import { fileURLToPath } from 'node:url'
 
 export const GROUPS = ['board', 'messaging', 'tooling', 'npm', 'plugin', 'installers', 'remote', 'journeys', 'browser', 'generated']
 const systems = ['ubuntu-latest', 'windows-latest']
-const toolingTests = ['pr-check', 'preflight', 'changelog-fold', 'team-stats'].map(name => 'tests/' + name + '.test.mjs')
+const toolingTests = ['pr-check', 'preflight', 'changelog-fold', 'team-stats', 'review-queue'].map(name => 'tests/' + name + '.test.mjs')
 const messagingTests = ['tests/exchange.test.mjs', 'tests/messaging.test.mjs']
 const safePath = value => {
   if (typeof value !== 'string' || !value || /[\0\r\n\\:]/.test(value) || isAbsolute(value) || value.split('/').some(part => !part || part === '.' || part === '..')) throw new Error('invalid repository path')
@@ -68,7 +68,7 @@ export const makePlan = (files, options = {}) => {
       known = true
     }
     if (path === 'bin/agent-board.mjs') { select('npm', path); known = true }
-    if (/^scripts\/(?:pr-check|preflight|changelog-fold|team-stats)\.mjs$/.test(path)) { select('tooling', path); known = true }
+    if (/^scripts\/(?:pr-check|preflight|changelog-fold|team-stats|review-queue)\.mjs$/.test(path)) { select('tooling', path); known = true }
     if (/^(?:scripts\/setup|tests\/setup\.check)\.(?:sh|ps1)$/.test(path)) {
       select('installers', path)
       installers.add(path.endsWith('.ps1') ? 'windows-latest' : 'ubuntu-latest')

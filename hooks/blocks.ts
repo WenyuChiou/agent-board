@@ -3,6 +3,7 @@ import { prWords } from './github'
 import { ZH_TW } from './i18n'
 import type { Strings } from './i18n'
 import { localDay } from './journal'
+import { splitLines } from './lines'
 import { fallbackTitle, isAnswered, questionToken, retainedCancelledOf } from './mirror'
 import { AUTO_END, AUTO_START, autoOf, doneKey, isCutMarker, isTaskComplete, parseAttrs, parseProgress, projectHead, readable, RESUME, STALE_MS } from './parse'
 import type { QuickEntry } from './quick'
@@ -139,7 +140,7 @@ export type BlockSpan = {
 
 const eolOf = (text: string): string => (text.includes('\r\n') ? '\r\n' : '\n')
 
-const linesOf = (text: string): string[] => (text === '' ? [] : text.replace(/\r?\n$/, '').split(/\r?\n/))
+const linesOf = (text: string): string[] => (text === '' ? [] : splitLines(text.replace(/\r?\n$/, '')))
 
 // The lines as the parser reads them: what sits in a code fence or a comment is never taken
 // for a marker or a heading, so a block pasted there as an example is left alone.

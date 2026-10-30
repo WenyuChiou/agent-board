@@ -41,7 +41,13 @@ const fixture = fn => {
     cwd: box, env: { ...env, ...extraEnv }, encoding: 'utf8', windowsHide: true, timeout: 30000,
   })
   try { return fn({ box, home, tmp, env, run }) }
-  finally { rmSync(box, { recursive: true, force: true, maxRetries: 8, retryDelay: 50 }) }
+  finally {
+    try {
+      rmSync(box, { recursive: true, force: true, maxRetries: 25, retryDelay: 100 })
+    } catch {
+      // Windows transient file lock
+    }
+  }
 }
 const success = result => {
   assert.ifError(result.error)
@@ -77,7 +83,7 @@ const packed = f => {
 const bundle = pkg => {
   const source = readFileSync(join(pkg, 'hooks/board-script.ts'), 'utf8')
   const marker = 'export const BOARD_SCRIPT = '
-  return JSON.parse(source.slice(source.indexOf(marker) + marker.length))
+  return JSON.parse(source.slice(source.indexOf(marker) + marker.length, source.lastIndexOf(']') + 1)).join('\n')
 }
 const bodyHash = text => createHash('sha256').update(text.includes('\n') ? text.slice(text.indexOf('\n') + 1) : '').digest('hex')
 const boardPath = f => join(f.home, '.agent-board/agent-board.mjs')
