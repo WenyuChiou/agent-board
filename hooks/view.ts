@@ -58,7 +58,7 @@ export type StepRef = { project: string; title: string; step: string; line: numb
 // heading line, checked against the title so a task that moved is still found once.
 // `isDuplicate` marks the older block of two for one session (#399): its archive is allowed
 // while it still looks live, once the file shows a newer block for the same agent and id.
-export type TaskRef = { project: string; title: string; line: number; session: string | null; isDuplicate?: true }
+export type TaskRef = { project: string; title: string; line: number; session: string | null; resume?: string | null; isDuplicate?: true }
 
 // Another agent's session, as its block names it: its block id, the session id its hook gave
 // (`resume=`), the folder it ran in (`dir=`), and whether it has closed (`state=ended`). The
@@ -1003,13 +1003,13 @@ export const buildView = (
         resume: auto === 'ended' && task.auto?.resume ? resumeCommand(task.auto.resume, task.auto.dir, task.auto.agent) : null,
         handoff: handoffOf(task),
         confirm: (isManual && task.line >= 0 || auto === 'ended')
-          ? { project: name, title: task.title, line: task.line, session: task.auto?.session ?? null, expected: confirmKey(name, task, twins.get(JSON.stringify([name, task.title])) ?? 0) }
+          ? { project: name, title: task.title, line: task.line, session: task.auto?.session ?? null, resume: task.auto?.resume ?? null, expected: confirmKey(name, task, twins.get(JSON.stringify([name, task.title])) ?? 0) }
           : null,
         archive:
           isManual && task.line >= 0
-            ? { project: name, title: task.title, line: task.line, session: null }
+            ? { project: name, title: task.title, line: task.line, session: null, resume: null }
             : auto === 'ended' && task.auto !== null
-              ? { project: name, title: task.title, line: task.line, session: task.auto.session }
+              ? { project: name, title: task.title, line: task.line, session: task.auto.session, resume: task.auto.resume ?? null }
               : null,
         target: targetOf(task.auto),
         ...(task.auto === null ? {} : { nativeSession: task.auto.resume ?? task.auto.session }),
@@ -1061,7 +1061,7 @@ export const buildView = (
         project: name, title, context: '', done, total, status: s.duplicateSession, tone: 'quiet',
         when: relativeTime(updated, now, s), isHere: false, auto: 'ended', steps: [], left: [], next: null, due: null, pr: '',
         agent: auto.agent === 'claude' ? '' : auto.agent, resume: null, question: null, handoff: '',
-        archive: { project: name, title: task.title, line: task.line, session: auto.session, isDuplicate: true }, target: null,
+        archive: { project: name, title: task.title, line: task.line, session: auto.session, resume: auto.resume ?? null, isDuplicate: true }, target: null,
       },
     })
   }

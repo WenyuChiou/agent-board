@@ -83,7 +83,7 @@ const normalizeSource = (source: QuestionSource): QuestionSource => {
 }
 
 export const archiveQuestionsKept = (projects: readonly ProgressProject[], ref: TaskRef, ledger: QuestionLedger): boolean => {
-  const tasks = projects.filter(project => project.name === ref.project).flatMap(project => project.tasks).filter(task => ref.session === null ? task.title === ref.title : (task.auto?.resume === ref.session || (task.auto?.resume === null && task.auto?.session === ref.session) || task.auto?.session === ref.session))
+  const tasks = projects.filter(project => project.name === ref.project).flatMap(project => project.tasks).filter(task => ref.session === null ? task.title === ref.title : ((ref.resume !== undefined && ref.resume !== null && task.auto?.resume === ref.resume) || task.auto?.resume === ref.session || (task.auto?.resume === null && task.auto?.session === ref.session) || task.auto?.session === ref.session))
   if (tasks.length !== 1) return false
   const task = tasks[0]
   if (task === undefined) return false
@@ -102,7 +102,7 @@ export const archiveQuestionsKept = (projects: readonly ProgressProject[], ref: 
 // session, so a block of another session with the same title is not taken for it. A hand-kept
 // task has no session, so only a hand-kept task's questions match it, not an agent block's (#174).
 export const isAskedBy = (record: QuestionRecord, ref: TaskRef): boolean =>
-  record.source?.project === ref.project && record.source.task === ref.title && (ref.session === null ? record.source.kind === 'manual' : record.source.session === ref.session || (record.source.session.length > 8 && record.source.session.startsWith(ref.session)))
+  record.source?.project === ref.project && record.source.task === ref.title && (ref.session === null ? record.source.kind === 'manual' : (ref.resume !== undefined && ref.resume !== null && record.source.session === ref.resume) || record.source.session === ref.session || (record.source.session.length > 8 && record.source.session.startsWith(ref.session)))
 export const questionProofPath = (path: string, kind: keyof QuestionProofs, hash: string): string => `${path.replace(/\.md$/i, '')}-questions-${kind}-${hash}.json`
 export const questionProofOf = (path: string, name: string): { kind: keyof QuestionProofs; hash: string } | null => {
   const prefix = `${path.replace(/\\/g, '/').split('/').at(-1)?.replace(/\.md$/i, '')}-questions-`
@@ -388,7 +388,7 @@ type Observation = { scope: string; session: string; index: number | string; tex
 
 const ownObservations = (mine: ProgressMirror): Observation[] => {
   if (mine.isRun === true) return []
-  const own = shortId(mine.sessionId)
+  const own = mine.sessionId ?? shortId(mine.sessionId)
   const scope = questionScope(mine.project, 'claude', own)
   return mine.tasks.map((task, index) => ({ scope, session: own, index, text: stepWords(task).trim(), isWaiting: waitsOnYou(mine, task) && task.blocked === null, producer: questionToken(task), source: { kind: 'own', project: mine.project, task: mine.title, context: mine.context, text: stepWords(task).trim(), agent: 'claude', session: own, data: JSON.stringify({ task, title: mine.title, context: mine.context }) } }))
 }
@@ -397,10 +397,10 @@ const ownObservations = (mine: ProgressMirror): Observation[] => {
 // Its times, turn state and background jobs change with every hook of a running session and
 // are left out, so they do not make an idle poll pass again (#416).
 export const ownQuestionsKey = (mine: ProgressMirror | null): string =>
-  JSON.stringify(mine === null ? null : [shortId(mine.sessionId), mine.project, ownObservations(mine)])
+  JSON.stringify(mine === null ? null : [mine.sessionId ?? shortId(mine.sessionId), mine.project, ownObservations(mine)])
 
 const observations = (projects: readonly ProgressProject[], mine: ProgressMirror | null, pending: readonly PendingTurn[], frozen: ReadonlySet<string> = new Set()): Observation[] => {
-  const own = mine === null ? '' : shortId(mine.sessionId)
+  const own = mine === null ? '' : (mine.sessionId ?? shortId(mine.sessionId))
   const rows: Observation[] = []
   const scopes = new Set<string>()
   const ambiguous = new Set<string>()

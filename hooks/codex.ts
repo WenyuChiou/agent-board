@@ -134,9 +134,13 @@ export const putCodexBlock = (text: string, report: CodexReport, owner: string, 
   const spans = scanBlocks(lines)
   const ownMatches = spans.filter(span => {
     const attrs = parseAttrs(lines[span.start] ?? '')
-    return (attrs.owner !== undefined ? attrs.owner === owner : span.session === id) && attrs.agent === agent
+    return attrs.owner === owner && attrs.agent === agent
   })
-  if (ownMatches.length > 1) throw new Error('BLOCK_CONFLICT')
+  const foreignConflict = spans.some(span => {
+    const attrs = parseAttrs(lines[span.start] ?? '')
+    return span.session === id && attrs.owner !== owner
+  })
+  if (foreignConflict || ownMatches.length > 1) throw new Error('BLOCK_CONFLICT')
   const existing = ownMatches[0]
   // Append a section rather than reformat another writer's bytes.
   const append = (text: string): string => `${text}${text && !text.endsWith('\n') ? eol : ''}${eol}## ${report.project}${eol}${block}${eol}`
@@ -170,7 +174,7 @@ export const dropCodexBlock = (text: string, owner: string): string => {
   const lines = text.split('\n')
   const spans = scanBlocks(lines).filter(span => {
     const attrs = parseAttrs(lines[span.start] ?? '')
-    return (attrs.owner !== undefined ? attrs.owner === owner : span.session === owner.slice(0, 8)) && attrs.agent === 'codex'
+    return attrs.owner === owner && attrs.agent === 'codex'
   })
   const span = spans[0]
   if (spans.length !== 1 || span === undefined) return text

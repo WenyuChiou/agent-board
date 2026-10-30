@@ -5660,7 +5660,7 @@ test('tidy keeps an explicit person origin and uses the home history when CODEX_
 }))
 
 test('concurrent reports with identical 8-hex owner hash prefix do not trigger false block conflicts', () => fixture(f => {
-  f.install('--apply')
+  f.install('--agent', 'codex', '--apply')
   const sessionA = 'session-prefix-collision-0001'
   const sessionB = 'session-prefix-collision-0002'
   const reportA = f.command(['--codex-report', '--agent', 'antigravity', '--session', sessionA], {
@@ -5693,4 +5693,31 @@ test('concurrent reports with identical 8-hex owner hash prefix do not trigger f
   assert.match(updatedContent, /Alpha complete/)
   assert.match(updatedContent, /Subagent Beta task/)
   assert.match(updatedContent, /Beta in progress/)
+}))
+
+test('Antigravity subagent report with origin run and parent writes run block and folds into parent', () => fixture(f => {
+  f.install('--agent', 'codex', '--apply')
+  const parentSession = 'parent-session-12345678'
+  const subagentSession = 'subagent-session-87654321'
+
+  const parentReport = f.command(['--codex-report', '--agent', 'antigravity', '--session', parentSession], {
+    title: 'Parent Task',
+    state: 'working',
+    steps: ['- [~] Parent in progress'],
+  })
+  assert.equal(parentReport.status, 0, parentReport.stderr)
+
+  const subReport = f.command(['--codex-report', '--agent', 'antigravity', '--session', subagentSession], {
+    title: 'Child Subagent Task',
+    state: 'working',
+    origin: 'run',
+    parent: parentSession,
+    steps: ['- [x] Child step complete'],
+  })
+  assert.equal(subReport.status, 0, subReport.stderr)
+
+  const content = readFileSync(f.progress, 'utf8')
+  assert.match(content, /origin=run/)
+  assert.match(content, /parent=parent-session-12345678/)
+  assert.match(content, /Child Subagent Task/)
 }))
