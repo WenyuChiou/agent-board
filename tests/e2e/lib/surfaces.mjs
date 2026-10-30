@@ -52,7 +52,7 @@ export const terminal = {
   screen: async (world, args = []) => successful(await run(world, args)),
   keys: async (world, keys, args = []) => successful(await run(world, ['--keys', keys, ...args])),
   watch: world => {
-    const preload = world.write('tty.mjs', `Object.defineProperty(process.stdin, 'isTTY', { value: true })\nprocess.stdin.setRawMode = () => {}\n`)
+    const preload = world.write('tty.mjs', `Object.defineProperty(process.stdin, 'isTTY', { value: true })\nObject.defineProperty(process.stdout, 'isTTY', { value: true })\nprocess.stdin.setRawMode = () => {}\n`)
     const child = spawnIsolated(process.execPath, ['--import', pathToFileURL(preload).href, world.script, '--watch'], { env: world.env, cwd: world.root, stdio: ['pipe', 'pipe', 'pipe'] })
     ownedChildren.add(child)
     let output = '', errors = '', failure
@@ -61,8 +61,8 @@ export const terminal = {
     child.on('error', error => { failure = error })
     child.stdout.setEncoding('utf8').on('data', chunk => {
       output += chunk
-      if (!output.includes('\x1b[2J\x1b[H')) return
-      const current = output.split('\x1b[2J\x1b[H').at(-1)
+      if (!output.includes('\x1b[H')) return
+      const current = output.split('\x1b[H').at(-1)
       const heading = world.lang === 'zh-TW' ? '進度' : world.lang === 'zh-CN' ? '进度' : 'Progress'
       if (!current.includes(heading)) return
       frames.push({ sequence: ++sequence, text: plain(current), at: performance.now() })
