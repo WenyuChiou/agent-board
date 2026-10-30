@@ -1,0 +1,2 @@
+- **Setup speaks to the person (#553).** It prints what it set up for each agent and what to do next, always covers Claude Code, and one agent's conflict no longer stops the others.
+  Tests: `setup prints a plain summary with each agent and the next steps, and --json keeps today's JSON`, `setup names the Claude Code plugin whenever Claude Code is installed`, `a conflict in one agent leaves the others set up and names the skipped agent`, `a second setup says everything is already set up and writes nothing`.

@@ -2,22 +2,9 @@
 
 <p align="center"><b>每个 AI coding agent 在做什么，一个看板看完；哪个在等你，就在那里回它。</b></p>
 
-需要 Node.js 22 以上，在任何终端运行：
+<p align="center"><a href="LICENSE"><img alt="MIT 许可证" src="https://img.shields.io/badge/license-MIT-green"></a> <a href="https://github.com/WenyuChiou/agent-board/actions/workflows/test.yml"><img alt="测试" src="https://github.com/WenyuChiou/agent-board/actions/workflows/test.yml/badge.svg"></a> <a href="https://www.npmjs.com/package/@wenyuchiou/agent-board"><img alt="npm" src="https://img.shields.io/npm/v/@wenyuchiou/agent-board"></a></p>
 
-```sh
-npx @wenyuchiou/agent-board setup
-npx @wenyuchiou/agent-board setup --apply
-npx @wenyuchiou/agent-board --serve
-```
-
-用同一个 Wi-Fi 的手机，扫 `npx @wenyuchiou/agent-board --serve --lan` 印出的二维码。只在信得过的网络上用：这个链接没有加密，拿到的人都能打开网页。详情见[看板的网页](#看板的网页)。
-
-- **我用 Claude Code：** `/agent-board`
-- **我用 Codex：** `$agent-board`
-- **我用 Antigravity：** `/agent-board`（在测试环境检查过，还没实机运行）
-- **我用 OpenCode：** `/board`
-
-只运行设置并不会接上 agent：请先完成[快速开始](#快速开始)中各 agent 的额外步骤，开一个新对话，再用上面对应的入口。
+<p align="center"><a href="README.md">English</a> · <a href="README.zh-TW.md">繁體中文</a> · 简体中文</p>
 
 <p align="center">
 <img alt="会动的看板：各个 agent 汇报进度、提问和回复，一行设置命令就能接上。开启消息功能、Codex 的对话也连上时，按发送会把回复排进队列。“已接受”不代表送到；那个对话回的确认才代表收到，不代表事情做完。LAN 网页没有消息功能。合成数据。" src="docs/images/cover-zh-CN-dark.svg" width="860">
@@ -38,10 +25,6 @@ npx @wenyuchiou/agent-board --serve
 
 <p align="center"><sub>dot 和其他网页聊天要自己汇报：把它们的区块贴进<a href="#看板的网页">看板的网页</a>。</sub></p>
 
-<p align="center"><a href="LICENSE"><img alt="MIT 许可证" src="https://img.shields.io/badge/license-MIT-green"></a></p>
-
-<p align="center"><a href="README.md">English</a> · <a href="README.zh-TW.md">繁體中文</a> · 简体中文</p>
-
 你在一个项目开 Claude Code，另一个开 Codex，第三个开 Antigravity，其中一个停下来问你事情，你要等到刚好切回去才会发现。**Agent Board** 在它一开口就把问题放到你眼前，每个答案一个按钮。它在你自己的电脑上运行，所有东西都放在一个 Markdown 文件里。
 
 ## 快速开始
@@ -56,6 +39,8 @@ npx @wenyuchiou/agent-board --serve
 
 第一行会找出这台电脑上装了哪些 agent，列出设置会改什么，不写入任何东西；第二行才真正写入；第三行打开看板网页。只设置一个 agent 的话，加上 `--agent` 和它的名字，例如 `--agent codex`。详见[安装指南](docs/SETUP.md#install-with-npm)（英文）。
 
+用同一个 Wi-Fi 的手机，扫 `npx @wenyuchiou/agent-board --serve --lan` 印出的二维码。只在信得过的网络上用：这个链接没有加密，拿到的人都能打开网页。详情见[看板的网页](#看板的网页)。
+
 然后：
 
 - 给每个 agent 开一个新对话：原来就开着的对话不会接入。
@@ -63,6 +48,13 @@ npx @wenyuchiou/agent-board --serve
 - **Codex：** 到 `/hooks` 信任它的 hooks（[做法](docs/CODEX.md)）。
 - **OpenCode、OpenClaw：** 重新加载它们的插件。
 - **dot 和其他网页聊天：** 把 [AGENTS.md 最后一段](AGENTS.md#report-your-progress-to-the-progress-pane)贴进那个 agent 的指令，再把它写出的区块贴进[看板的网页](#看板的网页)。
+
+在新对话里，用对应的入口打开看板：
+
+- **我用 Claude Code：** `/agent-board`
+- **我用 Codex：** `$agent-board`
+- **我用 Antigravity：** `/agent-board`（在测试环境检查过，还没实机运行）
+- **我用 OpenCode：** `/board`
 
 <details>
 <summary><b>不用 npm：用 git clone 安装</b></summary>
@@ -233,7 +225,7 @@ node ~/.agent-board/agent-board.mjs --codex-doctor --agent codex
 | 你看到 | 试试 |
 |---|---|
 | 某个 agent 没出现在看板上 | 开一个它的新对话；原来就开着的不会接入。Codex 还要先在 `/hooks` 信任它的 hooks。 |
-| 装完之后什么都没变 | 不加 `--apply` 再运行一次 `npx @wenyuchiou/agent-board setup`（用 git clone 的话是 `node scripts/setup-agent.mjs`），看它列出的冲突和 `adapter-pending`；你改过的文件不会被覆盖，会列在那里。 |
+| 装完之后什么都没变 | 不加 `--apply` 再运行一次 `npx @wenyuchiou/agent-board setup --json`（用 git clone 的话是 `node scripts/setup-agent.mjs --json`），看它列出的冲突和 `adapter-pending`；你改过的文件不会被覆盖，会列在那里。 |
 | 还在运行旧版 | 运行中的对话会一直用它加载时的版本：开一个新的。更新方式见[使用指南](docs/GUIDE.zh-CN.md#更新和卸载)。 |
 | 同一个 agent 出现两次 | 可能两种方式都接入了：Claude 插件的 `/progress connect` 和安装程序（setup）。`/progress connect status` 会列出插件接了哪些；用 `/progress connect remove` 或 `--codex-remove --agent <name>` 去掉其中一个。 |
 | 有个问题一直不消失 | 在它自己的对话里回答，再点**已回复，先隐藏**（`h`）。3 天后它会移到**较早的未答问题**，7 天后移到**更早、尚未回答的问题**。 |
