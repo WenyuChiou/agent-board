@@ -94,10 +94,10 @@ CLI、桌面 App、IDE 的實際 hook 事件分開驗收；安裝了檔案、傳
 
 | | Agent | 看板指令 |
 |:-:|---|---|
-| <img src="docs/images/agents/claude-code.svg" width="20" alt="Claude Code"> | Claude Code | `/agent-board` |
+| <img src="docs/images/agents/claude-code.svg" width="20" alt="Claude Code"> | Claude Code | `/progress` |
 | <img src="docs/images/agents/codex.svg" width="20" alt="Codex"> | Codex CLI 與 App | `$agent-board` |
 | <img src="docs/images/agents/antigravity.svg" width="20" alt="Antigravity"> | Antigravity | `/agent-board`（在測試環境檢查過，還沒實機執行） |
-| <img src="docs/images/agents/opencode.svg" width="20" alt="OpenCode"> | OpenCode | `/agent-board` |
+| <img src="docs/images/agents/opencode.svg" width="20" alt="OpenCode"> | OpenCode | `/board` |
 | <img src="docs/images/agents/cursor.svg" width="20" alt="Cursor"> | Cursor | `/agent-board`（在測試環境檢查過，還沒實機執行） |
 | <img src="docs/images/agents/grok-build.svg" width="20" alt="Grok Build"> | Grok Build | `/agent-board`（在測試環境檢查過，還沒實機執行） |
 | <img src="docs/images/agents/muse-code.svg" width="20" alt="Muse Code"> | Muse Code | `/agent-board`（在測試環境檢查過，還沒實機執行） |
@@ -111,10 +111,10 @@ CLI、桌面 App、IDE 的實際 hook 事件分開驗收；安裝了檔案、傳
 
 | 在哪裡 | 指令 |
 |---|---|
-| 任何終端機 | `agent-board`（桌面開視窗、SSH 開終端機看板、agent 印純文字） |
-| 停止看板網頁 | `agent-board stop` |
-| 聊天軟體（透過 Hermes Agent 或 OpenClaw） | `agent-board --chat` |
-| 檢查某個 agent 的設定 | `npx @wenyuchiou/agent-board setup` |
+| 任何終端機 | `node ~/.agent-board/agent-board.mjs --watch`（`--html` 在瀏覽器開） |
+| 瀏覽器 | `node ~/.agent-board/agent-board.mjs --serve` |
+| 聊天軟體（透過 Hermes Agent 或 OpenClaw） | `node ~/.agent-board/agent-board.mjs --chat` |
+| 檢查某個 agent 的設定 | `node ~/.agent-board/agent-board.mjs --codex-doctor --agent codex` |
 
 **在聊天軟體裡，** `--chat` 把看板印成純文字，縮到一則訊息放得下，沒有網頁也沒有連結。它會把你的家目錄顯示成 `~`，並遮掉它認得的憑證形式，例如 `token=...`；其他形式的機密它辨識不出來，所以別把機密寫進看板。
 
@@ -197,7 +197,7 @@ Hooks 只說對話在做事還是在等；步驟和什麼時候算完成，來�
 
 ### 看板的網頁
 
-上面的看板指令會在瀏覽器打開看板網頁（在聊天軟體裡則只印出純文字，沒有連結）。在任何終端機跑 `agent-board` 也一樣；再跑一次會把視窗叫到最上層，執行 `agent-board stop` 則會停止服務。在網頁上可以：
+上面的看板指令會在瀏覽器打開看板網頁（在聊天軟體裡則只印出純文字，沒有連結）。在任何終端機跑 `node ~/.agent-board/agent-board.mjs --serve` 也一樣，再跑一次就會重新打開網頁。在網頁上可以：
 
 - **回覆**問題：開了訊息功能、對話也連上時就**傳送**，否則**複製**回覆。LAN 網頁沒有訊息功能。
 - **勾掉**下一步、**封存**一件工作，或按**現在封存**收走所有做完的。

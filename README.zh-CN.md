@@ -94,10 +94,10 @@ CLI、桌面 App、IDE 的实际 hook 事件分开验收；装好了文件、传
 
 | | Agent | 看板命令 |
 |:-:|---|---|
-| <img src="docs/images/agents/claude-code.svg" width="20" alt="Claude Code"> | Claude Code | `/agent-board` |
+| <img src="docs/images/agents/claude-code.svg" width="20" alt="Claude Code"> | Claude Code | `/progress` |
 | <img src="docs/images/agents/codex.svg" width="20" alt="Codex"> | Codex CLI 和 App | `$agent-board` |
 | <img src="docs/images/agents/antigravity.svg" width="20" alt="Antigravity"> | Antigravity | `/agent-board`（在测试环境检查过，还没实机运行） |
-| <img src="docs/images/agents/opencode.svg" width="20" alt="OpenCode"> | OpenCode | `/agent-board` |
+| <img src="docs/images/agents/opencode.svg" width="20" alt="OpenCode"> | OpenCode | `/board` |
 | <img src="docs/images/agents/cursor.svg" width="20" alt="Cursor"> | Cursor | `/agent-board`（在测试环境检查过，还没实机运行） |
 | <img src="docs/images/agents/grok-build.svg" width="20" alt="Grok Build"> | Grok Build | `/agent-board`（在测试环境检查过，还没实机运行） |
 | <img src="docs/images/agents/muse-code.svg" width="20" alt="Muse Code"> | Muse Code | `/agent-board`（在测试环境检查过，还没实机运行） |
@@ -111,10 +111,10 @@ CLI、桌面 App、IDE 的实际 hook 事件分开验收；装好了文件、传
 
 | 在哪里 | 命令 |
 |---|---|
-| 任何终端 | `agent-board`（桌面开窗口、SSH 开终端看板、agent 印纯文本） |
-| 停止看板网页 | `agent-board stop` |
-| 聊天软件（通过 Hermes Agent 或 OpenClaw） | `agent-board --chat` |
-| 检查某个 agent 的设置 | `npx @wenyuchiou/agent-board setup` |
+| 任何终端 | `node ~/.agent-board/agent-board.mjs --watch`（`--html` 在浏览器打开） |
+| 浏览器 | `node ~/.agent-board/agent-board.mjs --serve` |
+| 聊天软件（通过 Hermes Agent 或 OpenClaw） | `node ~/.agent-board/agent-board.mjs --chat` |
+| 检查某个 agent 的设置 | `node ~/.agent-board/agent-board.mjs --codex-doctor --agent codex` |
 
 **在聊天软件里，** `--chat` 把看板打印成纯文本，缩到一条消息放得下，没有网页也没有链接。它会把你的主目录显示成 `~`，并遮掉它认得的凭证形式，例如 `token=...`；其他形式的机密它识别不出来，所以别把机密写进看板。
 
@@ -197,7 +197,7 @@ Hooks 只说对话在做事还是在等；步骤和什么时候算完成，来�
 
 ### 看板的网页
 
-上面的看板命令会在浏览器打开看板网页（在聊天软件里则只打印纯文本，没有链接）。在任何终端运行 `agent-board` 也一样；再运行一次会把窗口唤到最上层，运行 `agent-board stop` 则会停止服务。在网页上可以：
+上面的看板命令会在浏览器打开看板网页（在聊天软件里则只打印纯文本，没有链接）。在任何终端运行 `node ~/.agent-board/agent-board.mjs --serve` 也一样，再运行一次就会重新打开网页。在网页上可以：
 
 - **回复**问题：开启消息功能、对话也连上时就**发送**，否则**复制**回复。LAN 网页没有消息功能。
 - **勾掉**下一步、**归档**一件工作，或点**现在归档**收走所有做完的。

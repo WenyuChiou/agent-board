@@ -114,7 +114,7 @@ describe('L0 discover and install from the README', () => {
       const first = section(text, SECTIONS[lang][0])
       assert.ok(first, `${name}: Quick start exists`)
       const node = first.indexOf('Node.js 22')
-      const install = /```(?:sh|bash)\n(npx @wenyuchiou\/agent-board setup\nnpx @wenyuchiou\/agent-board setup --apply\nnpx @wenyuchiou\/agent-board --serve)\n```/.exec(first)
+      const install = /```(?:sh|bash)\r?\n(npx @wenyuchiou\/agent-board setup\r?\nnpx @wenyuchiou\/agent-board setup --apply\r?\nagent-board)\r?\n```/.exec(first)
       assert.ok(node >= 0 && install && install.index > node, `${name}: Quick start gives Node 22, then all three ordered install commands`)
       const lanLines = first.split('\n').filter(line => line.includes('npx @wenyuchiou/agent-board --serve --lan'))
       assert.equal(lanLines.length, 1, `${name}: one phone route in Quick start`)

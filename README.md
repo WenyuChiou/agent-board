@@ -94,10 +94,10 @@ Tell me which existing sessions need reload and which adapters remain unsupporte
 
 | | Agent | Board command |
 |:-:|---|---|
-| <img src="docs/images/agents/claude-code.svg" width="20" alt="Claude Code"> | Claude Code | `/agent-board` |
+| <img src="docs/images/agents/claude-code.svg" width="20" alt="Claude Code"> | Claude Code | `/progress` |
 | <img src="docs/images/agents/codex.svg" width="20" alt="Codex"> | Codex CLI and App | `$agent-board` |
 | <img src="docs/images/agents/antigravity.svg" width="20" alt="Antigravity"> | Antigravity | `/agent-board` (checked in a synthetic home, not run live yet) |
-| <img src="docs/images/agents/opencode.svg" width="20" alt="OpenCode"> | OpenCode | `/agent-board` |
+| <img src="docs/images/agents/opencode.svg" width="20" alt="OpenCode"> | OpenCode | `/board` |
 | <img src="docs/images/agents/cursor.svg" width="20" alt="Cursor"> | Cursor | `/agent-board` (checked in a synthetic home, not run live yet) |
 | <img src="docs/images/agents/grok-build.svg" width="20" alt="Grok Build"> | Grok Build | `/agent-board` (checked in a synthetic home, not run live yet) |
 | <img src="docs/images/agents/muse-code.svg" width="20" alt="Muse Code"> | Muse Code | `/agent-board` (checked in a synthetic home, not run live yet) |
@@ -111,10 +111,10 @@ Tell me which existing sessions need reload and which adapters remain unsupporte
 
 | Where | Command |
 |---|---|
-| Any terminal | `agent-board` (window on desktop, live board over SSH, text for agents) |
-| Stop the board's page | `agent-board stop` |
-| A chat app, through an agent (Hermes Agent, OpenClaw) | `agent-board --chat` |
-| Check one agent's setup | `npx @wenyuchiou/agent-board setup` |
+| Any terminal | `node ~/.agent-board/agent-board.mjs --watch` (`--html` opens it in the browser) |
+| A browser | `node ~/.agent-board/agent-board.mjs --serve` |
+| A chat app, through an agent (Hermes Agent, OpenClaw) | `node ~/.agent-board/agent-board.mjs --chat` |
+| Check one agent's setup | `node ~/.agent-board/agent-board.mjs --codex-doctor --agent codex` |
 
 **In a chat app,** `--chat` prints the board as plain text cut to fit one message, with no page or link. It shows your home folder as `~` and hides the credential forms it knows, such as `token=...`; a secret in another shape is not recognised, so keep secrets out of the board.
 
@@ -197,7 +197,7 @@ Both pictures are drawn by the board's own code from synthetic data. Native hook
 
 ### The board's page
 
-The board commands above open the board as a page in your browser (in a chat app they print plain text instead, with no link). From any terminal, `agent-board` does the same; run it again to bring the window up, or run `agent-board stop` to stop the service. On the page you can:
+The board commands above open the board as a page in your browser (in a chat app they print plain text instead, with no link). From any terminal, `node ~/.agent-board/agent-board.mjs --serve` does the same; run it again to reopen the page. On the page you can:
 
 - **Answer** a question: **Send** it when messaging is on and the session is connected, or **Copy** the reply. The LAN page has no messaging.
 - **Tick** your next step, **archive** a task, or **Archive now** to clear everything finished.
