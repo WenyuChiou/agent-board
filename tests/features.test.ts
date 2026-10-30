@@ -3442,7 +3442,7 @@ test("the page runs only its own script, and the chat prompt in it cannot close 
 
 // A word the page script asks for but is not given would show as the text "undefined".
 test('every word the page script asks for is one the page is given', () => {
-  // One script serves both pages; the words of the agent-first page (?group=agent) go only to that page.
+  // One script serves both pages; the words of the state-first live page go only to that page.
   const words = pageWords(STRINGS.en, true)
   const named = [...servePage(STRINGS.en, 'n').matchAll(/\bw\(([^)]*)\)/g)].flatMap(found => [...found[1].matchAll(/(?<!=== )'([A-Za-z]+)'/g)].map(key => key[1]))
   expect(named.length).toBeGreaterThan(20)
@@ -4457,10 +4457,10 @@ test("the redesigned pages speak the page's language in every new word", () => {
     const live = servePage(s, 'synthetic')
     const snapshot = dashboardHtml(view, s, 'synthetic', 'synthetic')
     for (const page of [live, snapshot]) {
-      for (const label of [s.themeLabel, s.themeSystem, s.themeLight, s.themeDark]) expect(page).toContain(label)
-      expect(page).toContain('data-theme-pick="system"')
-      expect(page).toContain('data-theme-pick="light"')
-      expect(page).toContain('data-theme-pick="dark"')
+      // One icon button switches between light and dark; it names the theme it switches to, in the page's language.
+      for (const label of [s.themeToDark, s.themeToLight]) expect(page).toContain(label)
+      expect(page).toContain('data-theme-toggle')
+      expect(page).not.toContain('data-theme-pick')
     }
     expect(live).toContain(s.sideTitle)
     expect(live).toContain(s.serveLive)

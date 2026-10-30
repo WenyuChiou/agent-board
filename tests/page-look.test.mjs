@@ -127,8 +127,10 @@ const textSize = /^var\(--text-(?:xs|sm|md|lg)\)$/
 const fontFamily = /^var\(--font-(?:sans|mono)\)$/
 const fontShorthand = /^(?:(?:normal|italic|oblique|small-caps|bold|bolder|lighter|\d{3})\s+)*var\(--text-(?:xs|sm|md|lg)\)(?:\s*\/\s*(?:normal|[\d.]+|var\(--[\w-]+\)))?\s+var\(--font-(?:sans|mono)\)$/
 const isMobile = rule => rule.ancestors.some(ancestor => /@media\s*\([^)]*max-width\s*:\s*(?:600|640|760)px\s*\)/.test(ancestor))
-// The sheet that holds Needs you is the one raised surface; a field or the theme switch may have its own.
-const surfaceAllowed = selector => /(?:^|\s)(?:textarea|input)(?=$|[:[\s])/.test(selector) || /(?:^|\s)\.seg$/.test(selector) || /(?:^|\s)\.sheet$/.test(selector)
+// The sheet that holds Needs you is the one raised surface. A field, an outlined button (filled with the surface so it reads on the
+// ground and on the sheet alike) and a card of the Needs you view, which is its own sheet, may use it too.
+const surfaceAllowed = selector => /(?:^|\s)(?:textarea|input)(?=$|[:[\s])/.test(selector) || /(?:^|\s)\.sheet$/.test(selector) ||
+  /(?:^|\s)(?:\.btn|\.shelf-head|button[\w.:-]*|#close)(?=$|[:\s])/.test(selector) || /\.cards>li$/.test(selector)
 
 test('the page and the dashboard use only colour, size, radius, spacing and motion tokens from page-look', () => {
   const expected = {
@@ -175,13 +177,14 @@ test('the page and the dashboard use only colour, size, radius, spacing and moti
         if (property === 'font-family') assert.ok(value === 'inherit' || fontFamily.test(value), `${where}: use a system font token`)
         if (property === 'font') assert.ok(value === 'inherit' || fontShorthand.test(value), `${where}: use a text size and system font token`)
         if (property === 'border-radius') assert.match(value, /^(?:0|var\(--radius-(?:s|m|round)\))(?:\s+(?:0|var\(--radius-(?:s|m|round)\))){0,3}$/, `${where}: use the three radii`)
-        if (property === 'box-shadow') assert.equal(value, 'none', `${where}: the page is flat; only the sheet is raised, by its border and surface`)
+        // The only shadow is the focus ring around a field; everything else is flat.
+        if (property === 'box-shadow') assert.ok(value === 'none' || value === 'var(--ring)' && /:focus/.test(rule.selector), `${where}: the page is flat; only the sheet is raised, by its border and surface`)
         if (/^(?:transition|animation)(?:-(?:duration|timing-function|delay))?$/.test(property) && value !== 'none') {
           if (property !== 'animation-delay') assert.doesNotMatch(value, /(?:^|[\s,])[\d.]+m?s\b/, `${where}: no literal duration`)
           assert.doesNotMatch(value, /cubic-bezier|linear\(/, `${where}: easing comes from the ease tokens`)
         }
         if (/^(?:background|background-color)$/.test(property) && varsUsed(value).includes('surface')) {
-          for (const selector of rule.selector.split(',')) assert.ok(surfaceAllowed(selector.trim()), `${where}: surface is reserved for Needs you and fields`)
+          for (const selector of rule.selector.split(',')) assert.ok(surfaceAllowed(selector.trim()), `${where}: surface is reserved for Needs you, fields and buttons`)
         }
       }
     }
@@ -209,6 +212,7 @@ const luminance = colour => channels(colour).map(channel => {
   const srgb = channel / 255
   return srgb <= .04045 ? srgb / 12.92 : ((srgb + .055) / 1.055) ** 2.4
 }).reduce((sum, channel, index) => sum + channel * [.2126, .7152, .0722][index], 0)
+const mix = (a, b, share) => channels(a).map((channel, index) => Math.round(channel * share + channels(b)[index] * (1 - share)))
 const contrast = (foreground, background) => {
   const a = luminance(foreground)
   const b = luminance(background)
@@ -223,6 +227,13 @@ test('every text colour passes 4.5:1 and every mark colour 3:1 on its surface in
   assert.equal(dark.waiting.toLowerCase(), '#f8b500', 'the dark waiting flag keeps its page mark colour')
   assert.equal(light['waiting-text'].toLowerCase(), '#715c1f', 'light waiting text has its separate readable colour')
   assert.equal(dark['waiting-text'].toLowerCase(), '#f8b500', 'dark waiting text has its readable colour')
+  // The roles: ink acts (the primary button is ink on the surface colour), green is alive, amber is only what needs you.
+  for (const palette of [light, dark]) {
+    assert.equal(palette.act, 'var(--ink)', 'an action is ink')
+    assert.equal(palette['on-act'], 'var(--surface)', 'the text on an action is the surface colour')
+    assert.equal(palette.alive, 'var(--done)', 'alive is the green')
+    assert.equal(palette['btn-line'], 'color-mix(in srgb,var(--ink) 55%,var(--surface))', 'a button outline is ink over the surface')
+  }
   assert.equal(light.brand.toLowerCase(), '#b36a00', 'the light logo uses its deepened amber')
   assert.equal(dark.brand.toLowerCase(), '#f8b500', 'the dark logo is the waiting amber')
   for (const [mode, palette] of Object.entries({ light, dark })) {
@@ -236,7 +247,11 @@ test('every text colour passes 4.5:1 and every mark colour 3:1 on its surface in
     // The count on an agent's badge and on the Needs you flag (on-accent on the amber fill), the "!" badge (on-accent on
     // the alert colour), the primary button, and the glyph on an offline agent's muted tile. The 14px semibold numerals
     // are not "large text", so the badge pairs need the full 4.5:1.
-    for (const [token, surface, threshold] of [['on-accent', 'accent', 4.5], ['on-accent', 'waiting-fill', 4.5], ['on-accent', 'alert', 4.5], ['on-accent', 'muted', 3], ['ground', 'ink', 4.5]]) pairs.push({ mode, rule: `${token}/${surface}`, token, surface, threshold, ratio: contrast(palette[token], palette[surface]) })
+    // 'surface' on 'ink' is a primary button: its text (--on-act) on its fill (--act), both of which are the ink pair.
+    for (const [token, surface, threshold] of [['on-accent', 'accent', 4.5], ['on-accent', 'waiting-fill', 4.5], ['on-accent', 'alert', 4.5], ['on-accent', 'muted', 3], ['ground', 'ink', 4.5], ['surface', 'ink', 4.5]]) pairs.push({ mode, rule: `${token}/${surface}`, token, surface, threshold, ratio: contrast(palette[token], palette[surface]) })
+    // An outlined button's border (ink 55% over the surface) is a 3:1 boundary on the ground and on the sheet.
+    const outline = `rgb(${mix(palette.ink, palette.surface, .55).join(',')})`
+    for (const background of ['ground', 'surface']) pairs.push({ mode, rule: `btn-line/${background}`, token: 'btn-line', surface: background, threshold: 3, ratio: contrast(outline, palette[background]) })
     // The working dot sits on the ground colour's ring, so the ring never has to carry meaning.
     for (const surface of ['ground', 'surface']) pairs.push({ mode, rule: `dot/${surface}`, token: 'running', surface, threshold: 3, ratio: contrast(palette.running, palette[surface]) })
   }
@@ -256,13 +271,21 @@ test('every text colour passes 4.5:1 and every mark colour 3:1 on its surface in
   const declared = (rules, selector, property) => rules.find(rule => rule.selector === selector)?.declarations.find(item => item.property === property)?.value
   for (const { name, html } of renders()) {
     const rules = styleRules(html)
-    assert.equal(declared(rules, '.seg button[aria-pressed="true"]', 'border-color'), 'var(--muted)', `${name}: the pressed theme button keeps a 3:1 border`)
+    assert.ok(rules.some(rule => rule.selector === '.icon-btn'), `${name}: the theme switch is one icon button`)
+    assert.ok(!rules.some(rule => /(?:^|\s)\.seg\b/.test(rule.selector)), `${name}: the Light/Dark pair is gone`)
     assert.ok(!rules.some(rule => rule.selector.includes('[aria-pressed="true"]') && rule.declarations.some(item => item.property === 'outline')), `${name}: the pressed state does not compete with the focus outline`)
+    if (name === 'page') {
+      assert.equal(declared(rules, 'button.primary', 'background'), 'var(--act)', `${name}: a primary button is the ink fill`)
+      assert.equal(declared(rules, 'button.primary', 'color'), 'var(--on-act)', `${name}: its text is the surface colour`)
+      assert.ok(declared(rules, '.btn,.answers button,.acts button,.state button,.composer button,.shelf-head,.pfoot .btn,.pfoot #close', 'border')?.includes('var(--btn-line)'), `${name}: an outlined button has its 3:1 border`)
+      assert.equal(declared(rules, '.s-running', 'color'), 'var(--alive)', `${name}: a running step is the alive green`)
+      assert.equal(declared(rules, '.s-blocked', 'color'), 'var(--alert)', `${name}: a blocked step is the alert red`)
+    }
     assert.equal(declared(rules, '.badge', 'background'), 'var(--waiting-fill)', `${name}: the badge sits on the amber fill`)
     assert.equal(declared(rules, '.badge', 'color'), 'var(--on-accent)', `${name}: the badge numerals are on-accent`)
     assert.equal(declared(rules, '.badge.bad', 'background'), 'var(--alert)', `${name}: the "!" badge is the alert colour`)
     assert.equal(declared(rules, '.badge', 'border'), '2px solid var(--ground)', `${name}: the badge has the 2px ground ring`)
-    assert.equal(declared(rules, '.chip.offline .ag', 'background-color'), 'var(--muted)', `${name}: an offline agent's mark is the muted colour at full opacity`)
+    assert.equal(declared(rules, '.chip[data-presence="offline"] .ag,.chip[data-presence="notseen"] .ag', 'background-color'), 'var(--muted)', `${name}: an offline agent's mark is the muted colour at full opacity`)
     assert.ok(!rules.some(rule => rule.selector.includes('.chip') && rule.declarations.some(item => item.property === 'opacity')), `${name}: no icon is dimmed with opacity`)
     assert.equal(declared(rules, '.flag', 'background'), 'var(--waiting-fill)', `${name}: the flag sits on the amber fill`)
   }
@@ -307,7 +330,10 @@ test('the page embeds its fonts, makes no font request and allows only font-src 
       assert.doesNotMatch(cleanCss, /@import\b/i, `${where}: no imported stylesheet`)
       for (const src of cleanCss.matchAll(/(?:^|[;{])\s*src\s*:\s*([^}]+)/gi)) assert.doesNotMatch(svgUrlsRemoved(src[1]), /https?:|\/\//i, `${where}: no remote CSS source`)
       const markup = svgUrlsRemoved(html.replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, '').replace(/\/\*[\s\S]*?\*\//g, ''))
-      assert.doesNotMatch(markup, /(?:https?:)?\/\/[a-z\d]/i, `${where}: no remote or protocol-relative URL`)
+      // The footer's link to the project is the one remote address: something the person opens, never something the page loads.
+      const projectLink = /<a class="ver-link" href="https:\/\/github\.com\/WenyuChiou\/agent-board" target="_blank" rel="noopener"[^>]*>/
+      assert.equal(projectLink.test(markup), name === 'page', `${where}: only the live page links to the project`)
+      assert.doesNotMatch(markup.replace(projectLink, ''), /(?:https?:)?\/\/[a-z\d]/i, `${where}: no remote or protocol-relative URL`)
       for (const link of html.match(/<link\b[^>]*>/gi) ?? []) assert.doesNotMatch(link, /\brel\s*=\s*["'](?:stylesheet|preload)["']/i, `${where}: no stylesheet or preload link`)
       for (const match of cleanCss.matchAll(/url\(\s*(?:"([^"]*)"|'([^']*)'|([^)]*))\s*\)/gi)) assert.match(match[1] ?? match[2] ?? match[3], /^(?:data:image\/svg\+xml,|data:font\/woff2;base64,)/, `${where}: CSS URLs are inline SVG images or WOFF2 fonts`)
       const sans = valuesOf(styleRules(html).find(rule => rule.selector === ':root'))['font-sans']
@@ -337,7 +363,7 @@ test('the header and favicon show the Bubble a logo in light and dark', () => {
       assert.ok(logo, `${where}: the header contains the board mark`)
       assertShapes(logo, `${where} header`)
       assert.match(logo, /\baria-hidden="true"/, `${where}: the decorative logo adds no wording`)
-      const heading = name === 'page' ? 'Agent Board' : STRINGS[lang].paneTitle
+      const heading = 'Agent Board'
       assert.ok(header.includes(`${logo}<h1>${heading}</h1>`), `${where}: the logo sits beside the existing board heading`)
       assert.match(html, /<title>[^<]*Agent Board<\/title>/, `${where}: the browser title names Agent Board`)
       assert.doesNotMatch(html, /class="m[1-4]"|\.m[1-4]\s*\{/, `${where}: no old mark shapes or rules`)
