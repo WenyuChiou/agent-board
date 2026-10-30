@@ -214,9 +214,9 @@ Each agent's hooks write what its session is doing into its own block of one loc
 
 ### Three Core Pillars
 
-- **Single Markdown Ledger (`progress.md`)**: No opaque binary stores or vector databases; your entire multi-agent progress is a human-readable, Git-versioned Markdown document.
-- **Unified Multi-Agent Cockpit**: Monitor and orchestrate Claude Code, OpenAI Codex, Google Antigravity, Cursor, and OpenCode from a single heads-up display.
-- **Bi-directional Human Governance**: Direct attention to blocked decisions first, read agent steps and answer questions directly from the board without context loss.
+- **One Markdown file**: every agent's progress goes into one plain progress.md that you can read and edit; no database.
+- **Every agent on one board**: Claude Code, Codex, Antigravity, Cursor, OpenCode and the other connected agents, side by side.
+- **Questions first**: the questions your agents are waiting on come first, and you answer them from the board; a connected session receives the answer.
 
 For architectural positioning and coexistence with memory tools, see the [Architecture Positioning Guide](docs/dev/architecture-positioning.md).
 

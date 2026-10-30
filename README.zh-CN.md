@@ -214,9 +214,9 @@ Hooks 只说对话在做事还是在等；步骤和什么时候算完成，来�
 
 ### 三大核心支柱
 
-- **单一 Markdown 进度账本 (`progress.md`)**：无需繁重的二进制数据库（不强制依赖 SQLite 或向量数据库）；所有多 Agent 进度皆以清晰、可 Git 版本控制的纯文本 Markdown 记录。
-- **统一跨生态 Agent 战情座舱**：从单一控制台实时监控与调度 Claude Code、OpenAI Codex、Google Antigravity、Cursor 和 OpenCode。
-- **双向人机协同治理**：优先置顶等待决策的阻塞提问，直接在看板阅读进度并回复问题，避免跨窗口切换丢失注意力。
+- **一个 Markdown 文件**：每个 agent 的进度都写进同一个纯文本 progress.md，你可以直接读、直接改；不用数据库。
+- **所有 agent 在同一个看板**：Claude Code、Codex、Antigravity、Cursor、OpenCode 和其他接上的 agent，并排显示。
+- **问题优先**：agent 在等你回答的问题排在最前面，你在看板上回答；已连接的会话会收到你的回答。
 
 关于战情座舱与记忆工具的分工与共存策略，请参阅[架构定位指南](docs/dev/architecture-positioning.md)（英文）。
 
