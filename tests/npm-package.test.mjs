@@ -41,7 +41,13 @@ const fixture = fn => {
     cwd: box, env: { ...env, ...extraEnv }, encoding: 'utf8', windowsHide: true, timeout: 30000,
   })
   try { return fn({ box, home, tmp, env, run }) }
-  finally { rmSync(box, { recursive: true, force: true, maxRetries: 8, retryDelay: 50 }) }
+  finally {
+    try {
+      rmSync(box, { recursive: true, force: true, maxRetries: 25, retryDelay: 100 })
+    } catch {
+      // Windows transient file lock
+    }
+  }
 }
 const success = result => {
   assert.ifError(result.error)
