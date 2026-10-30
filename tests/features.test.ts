@@ -13,7 +13,7 @@ import { codexReport, putCodexBlock } from '../hooks/codex'
 import { answerKey, blockId, CLAIM_MS, claimAction, isBoardAnswer, isBoardTurn, isInboxFile, isTakenFile, isTextLog, isTranscriptPath, keepInboxDone, keepInboxFailed, MAX_TRIES, promptKey, readClaim, readTurn, takenName, transcriptTail, turnsToDigest } from '../hooks/inbox'
 import { applyDigest, clearAsked, clearBackgroundJobs, finishBackgroundJob, isAskingYou, isPersonsAnswer, isWork, lastQuestion, markAsked, parseDigest, replyData, requestData, startBackgroundJob, turnTools } from '../hooks/digest'
 import { ciFinished, prFromGh, prWords } from '../hooks/github'
-import { appendJournal, countDay, journalLine, parseJournal, progressReport } from '../hooks/journal'
+import { appendJournal, archiveEntryCount, countDay, journalLine, missingEntries, parseJournal, progressReport, unwrittenEntries } from '../hooks/journal'
 import { applyTaskCreate, applyTaskUpdate, asData, cleanContext, cleanTitle, clip, completedSince, dataBlock, emptyMirror, fromTaskList, markAnswered, noticesOf, resumeNote, stateOf, waitsOnYou } from '../hooks/mirror'
 import { DARK, LIGHT, paletteFor } from '../hooks/palette'
 import { autoOf, doneKey, parseProgress } from '../hooks/parse'
@@ -4347,4 +4347,16 @@ test('the redesigned pages carry no run of digits or letters that reads as a mac
       expect(context).toBe(null)
     }
   }
+})
+
+test('archive entries are counted with their number: a new twin of an archived entry is added, a saved pair is not added again', () => {
+  const entry = '## Synthetic · 2026-10-16\n### Synthetic twin\n- [x] Finished'
+  const archive = (n: number): string => `# Archive\n\n${Array.from({ length: n }, () => entry).join('\n\n')}\n`
+  expect(archiveEntryCount(archive(2), entry)).toBe(2)
+  expect(unwrittenEntries([entry, entry], new Map([[entry, 1]]))).toEqual([entry])
+  expect(missingEntries([archive(1)], [entry, entry])).toEqual([entry, entry])
+  expect(missingEntries([archive(2)], [entry, entry])).toEqual([])
+  expect(missingEntries(['', archive(3)], [entry, entry])).toEqual([])
+  expect(missingEntries([archive(3)], [entry], new Map([[entry, 2]]))).toEqual([])
+  expect(missingEntries([archive(2)], [entry], new Map([[entry, 2]]))).toEqual([entry])
 })
