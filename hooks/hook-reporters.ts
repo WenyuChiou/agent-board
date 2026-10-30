@@ -343,8 +343,8 @@ $clock = [Diagnostics.Stopwatch]::StartNew()
 try {
   if ($Payload -eq '' -and [Console]::IsInputRedirected) {
     $inputStream = [Console]::OpenStandardInput()
-    $memory = New-Object IO.MemoryStream
-    $buffer = New-Object byte[] 65536
+    $memory = [IO.MemoryStream]::new()
+    $buffer = [byte[]]::new(65536)
     while ($true) {
       $remaining = ${HOOK_INPUT_TIMEOUT} - [int]$clock.ElapsedMilliseconds
       if ($remaining -le 0) { throw 'INPUT_TIMEOUT' }
