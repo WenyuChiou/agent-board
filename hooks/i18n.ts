@@ -526,6 +526,7 @@ export const ZH_TW = {
   boardAnswerCopies: (keys: string): string => `${keys} 會複製答案。`,
   boardAnswerCopiesTo: (keys: string, agent: string): string => `${keys} 會複製答案——貼到 ${agent}，再按 h 從這裡清掉。`,
   boardAnswerSends: (keys: string, agent: string): string => `${keys} 會把答案送給 ${agent}。`,
+  boardAnswered: (text: string, note: string): string => `你回答了「${text}」。${note}`,
   boardAnswerIn: (agent: string): string => `要多說幾句，到 ${agent} 回答。`,
   boardAnswerInCopy: (agent: string, command: string): string => `到 ${agent} 回答——c 複製：${command}`,
   boardAgentsHere: (names: string): string => `回報到這個看板的 agent：${names}。`,

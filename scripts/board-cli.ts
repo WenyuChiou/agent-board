@@ -1113,7 +1113,8 @@ const sendAnswer = async (action: Send): Promise<{ note: string; tone: 'done' | 
     const res = await fetch(`http://127.0.0.1:${running.port}/api/act`, { method: 'POST', headers: { 'x-board-token': tokenOf(running.url), 'content-type': 'application/json' }, body: JSON.stringify(body), signal: AbortSignal.timeout(route.mode === 'send' ? 300_000 : 5000) })
     const data = (await res.json().catch(() => null)) as { note?: unknown } | null
     const note = typeof data?.note === 'string' && data.note !== '' ? data.note : res.ok ? s.messagesQueued : s.messagesFailed
-    return { note, tone: res.ok ? 'done' : 'alert' }
+    // What was sent leads the note, so a key pressed by mistake shows at once.
+    return res.ok ? { note: s.boardAnswered(action.text, note), tone: 'done' } : { note, tone: 'alert' }
   } catch {
     return { note: s.messagesFailed, tone: 'alert' }
   }

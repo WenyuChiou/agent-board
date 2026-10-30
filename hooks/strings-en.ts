@@ -486,6 +486,7 @@ export const EN: Strings = {
   boardAnswerCopies: (keys: string): string => `${keys} copies the answer.`,
   boardAnswerCopiesTo: (keys: string, agent: string): string => `${keys} copies the answer — paste it in ${agent}, then press h to clear it here.`,
   boardAnswerSends: (keys: string, agent: string): string => `${keys} sends the answer to ${agent}.`,
+  boardAnswered: (text: string, note: string): string => `You answered “${text}”. ${note}`,
   boardAnswerIn: (agent: string): string => `Answer in ${agent} for a longer reply.`,
   boardAnswerInCopy: (agent: string, command: string): string => `Answer in ${agent} — c copies: ${command}`,
   boardAgentsHere: (names: string): string => `Agents on this board: ${names}.`,

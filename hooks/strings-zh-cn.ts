@@ -482,6 +482,7 @@ export const ZH_CN: Strings = {
   boardAnswerCopies: (keys: string): string => `${keys} 会复制答案。`,
   boardAnswerCopiesTo: (keys: string, agent: string): string => `${keys} 会复制答案——粘贴到 ${agent}，再按 h 从这里清掉。`,
   boardAnswerSends: (keys: string, agent: string): string => `${keys} 会把答案发给 ${agent}。`,
+  boardAnswered: (text: string, note: string): string => `你回答了“${text}”。${note}`,
   boardAnswerIn: (agent: string): string => `要多说几句，到 ${agent} 回答。`,
   boardAnswerInCopy: (agent: string, command: string): string => `到 ${agent} 回答——c 复制：${command}`,
   boardAgentsHere: (names: string): string => `向这个看板汇报的 agent：${names}。`,
