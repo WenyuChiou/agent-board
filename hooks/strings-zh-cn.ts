@@ -41,7 +41,7 @@ export const ZH_CN: Strings = {
     "claude": "通过插件接上看板",
     "next": "接下来：",
     "apply": "应用这些更改：{command}",
-    "codex": "Codex：通过 /hooks 信任 hooks，再开始新的会话。",
+    "codex": "Codex：为 Codex 应用程序和 CLI 批准看板的 hooks：先运行 {command} --codex-trust --codex-bin <codex 的完整路径> 预览，再加上 --apply 重新运行同一命令（在 Codex CLI 中也可以使用 /hooks）。然后开始新的会话。",
     "reload": "{host}：启用报告 hooks 或插件，再开始新的会话。",
     "skill": "{host}：使用 agent-board 技能打开看板；暂无自动报告功能。",
     "plugin": "Claude Code：运行 claude plugin marketplace add WenyuChiou/agent-board，再运行 claude plugin install agent-board@agent-board。",

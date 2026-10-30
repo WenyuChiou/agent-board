@@ -41,7 +41,7 @@ export const EN: Strings = {
     "claude": "connects through its plugin",
     "next": "Next steps:",
     "apply": "Apply these changes: {command}",
-    "codex": "Codex: trust the hooks with /hooks, then start a new session.",
+    "codex": "Codex: approve the board's hooks for the Codex app and CLI: preview with {command} --codex-trust --codex-bin <full path to codex>, then run it again with --apply (in the Codex CLI, /hooks also works). Then start a new session.",
     "reload": "{host}: enable its reporting hooks or plugin, then start a new session.",
     "skill": "{host}: open the board with its agent-board skill; automatic reporting is unavailable.",
     "plugin": "Claude Code: run claude plugin marketplace add WenyuChiou/agent-board, then claude plugin install agent-board@agent-board.",

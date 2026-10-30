@@ -79,7 +79,7 @@ export const ZH_TW = {
     "claude": "透過外掛接上看板",
     "next": "接下來：",
     "apply": "套用這些變更：{command}",
-    "codex": "Codex：透過 /hooks 信任 hooks，再開始新的工作階段。",
+    "codex": "Codex：為 Codex 應用程式和 CLI 核准看板的 hooks：先執行 {command} --codex-trust --codex-bin <codex 的完整路徑> 預覽，再加上 --apply 重新執行同一命令（在 Codex CLI 中也可以使用 /hooks）。然後開始新的工作階段。",
     "reload": "{host}：啟用回報 hooks 或外掛，再開始新的工作階段。",
     "skill": "{host}：使用 agent-board 技能開啟看板；尚無自動回報功能。",
     "plugin": "Claude Code：執行 claude plugin marketplace add WenyuChiou/agent-board，再執行 claude plugin install agent-board@agent-board。",
