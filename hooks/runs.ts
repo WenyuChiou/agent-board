@@ -25,7 +25,8 @@ type Entry = { project: ProgressProject; task: ProgressTask; auto: ProgressAuto;
 
 const MAX_HOPS = 8
 
-const sessionKey = (auto: ProgressAuto): string => `${auto.agent}\u0000${auto.resume ?? auto.session}`
+const sessionKey = (auto: ProgressAuto): string | null =>
+  auto.resume !== null ? `${auto.agent}\u0000${auto.resume}` : null
 
 // The key two blocks of one session share (agent and full id), for a reader that holds a block's
 // saved copy instead of the block.

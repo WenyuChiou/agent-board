@@ -5786,8 +5786,8 @@ test('tidy keeps an explicit person origin and uses the home history when CODEX_
 
 test('concurrent reports with identical 8-hex owner hash prefix do not trigger false block conflicts', () => fixture(f => {
   f.install('--agent', 'codex', '--apply')
-  const sessionA = 'session-prefix-collision-0001'
-  const sessionB = 'session-prefix-collision-0002'
+  const sessionA = 'collision-32464'
+  const sessionB = 'collision-89260'
   const reportA = f.command(['--codex-report', '--agent', 'antigravity', '--session', sessionA], {
     title: 'Subagent Alpha task',
     state: 'working',
@@ -5805,6 +5805,7 @@ test('concurrent reports with identical 8-hex owner hash prefix do not trigger f
   const content = readFileSync(f.progress, 'utf8')
   assert.match(content, /Subagent Alpha task/)
   assert.match(content, /Subagent Beta task/)
+  assert.equal((content.match(/session=ee3212c5/g) || []).length, 4)
 
   // Update session A without clobbering session B
   const updateA = f.command(['--codex-report', '--agent', 'antigravity', '--session', sessionA], {

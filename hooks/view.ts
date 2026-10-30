@@ -519,15 +519,16 @@ const rowSteps = (task: ProgressTask, s: Strings): ViewStep[] => {
 const ownWaiting = (mine: ProgressMirror, stable?: Readonly<Record<string, string>>): WaitingItem[] => {
   const title = mine.title || fallbackTitle(mine)
   const context = contextFor(mine)
+  const ownId = mine.sessionId ?? shortId(mine.sessionId)
   // Keyed on the steps this session's block marks [?]: a blocked one is written [!], which no
   // other reader lists as a question, so it cannot be marked answered.
   const keys = askKeys(
-    shortId(mine.sessionId),
+    ownId,
     mine.tasks.map(task => (waitsOnYou(mine, task) && task.blocked === null ? stepWords(task).trim() : null)),
   )
 
   return mine.tasks
-    .map((task, index) => ({ task, hideKey: stable?.[questionSlot(questionScope(mine.project, 'claude', shortId(mine.sessionId)), index)] ?? keys[index] ?? '' }))
+    .map((task, index) => ({ task, hideKey: stable?.[questionSlot(questionScope(mine.project, 'claude', ownId), index)] ?? keys[index] ?? '' }))
     .filter(({ task }) => waitsOnYou(mine, task))
     .map(({ task, hideKey }) => ({
       key: `mine::${task.id}`,
@@ -781,7 +782,7 @@ export const buildView = (
   const observed = questions === undefined ? null : observe(questions, folded.projects, mine, answered, now, false, 'preview', proofs ?? { retired: [], consumed: [] }, pending, [], frozen)
   const marked = new Set(proofs === null ? [] : observed?.marked ?? answered)
   const recordsById = new Map((observed?.ledger.records ?? []).map(record => [record.id, record]))
-  const ownId = mine === null ? '' : shortId(mine.sessionId)
+  const ownId = mine === null ? '' : (mine.sessionId ?? shortId(mine.sessionId))
   const waiting: WaitingItem[] = []
   const inactiveHidden: WaitingItem[] = []
   const due: Array<TaskRow & { days: number }> = []

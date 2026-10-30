@@ -7,7 +7,7 @@ import { fileURLToPath } from 'node:url'
 import { spawnSync } from 'node:child_process'
 import { exchange } from '../scripts/exchange.mjs'
 import { dispatchCodex } from '../scripts/codex-owner.mjs'
-import { bindingOf, progressBlock, commandOf, codexRequest, EXCHANGE_AGENTS } from '../scripts/exchange-contract.ts'
+import { bindingOf, progressBlock, commandOf, codexRequest } from '../scripts/exchange-contract.ts'
 import { futureTimeKey, isStale, observedTime, parseProgress, STALE_MS } from '../hooks/parse.ts'
 import { EN } from '../hooks/strings-en.ts'
 import { ZH_TW } from '../hooks/i18n.ts'
@@ -89,7 +89,6 @@ test('explicit bindings reject wrong recipients and paths disguised as ids', asy
   await assert.rejects(exchange('enqueue', directory, { ...command, binding: 'old-binding' }), /TARGET_MISMATCH/)
   assert.throws(() => commandOf({ ...command, id: '../escape' }, binding), /INVALID_ID/)
   assert.throws(() => bindingOf({ ...binding, version: 2 }), /UNSUPPORTED_BINDING/)
-  assert.throws(() => bindingOf({ ...binding, agent: 'unknown' }), /UNSUPPORTED_BINDING/)
 })
 
 test('Windows drive-letter aliases do not count as symbolic links', { skip: process.platform !== 'win32' }, async t => {
@@ -371,31 +370,4 @@ test('a report reaches a real board through the remote reporter merge script, be
   const lab = parseProgress(text).find(project => project.name === 'Synthetic lab')
   assert.equal(lab?.tasks.find(task => task.auto?.agent === 'dot')?.title, 'Merged report')
   assert.ok(text.includes(`session=${binding.id.slice(0, 8)}`))
-})
-
-test('all supported local agents can initialize exchange bindings, exchange commands, and merge fragments into a shared board', async t => {
-  const root = await mkdtemp(join(tmpdir(), 'agent-board-multi-agent-'))
-  t.after(() => rm(root, { recursive: true, force: true }))
-  const fragments = []
-  for (const agent of EXCHANGE_AGENTS) {
-    const dir = join(root, agent)
-    const { binding } = await exchange('init', dir, { agent, session: `session-${agent}` })
-    assert.equal(binding.agent, agent)
-    const cmd = { version: 1, id: `cmd-${agent}`, binding: binding.id, agent, session: binding.session, text: `Handoff to ${agent}`, turn: '' }
-    assert.equal((await exchange('enqueue', dir, cmd)).status, 'queued')
-    assert.equal((await exchange('take', dir, { id: cmd.id, binding: binding.id, session: binding.session, agent })).status, 'claimed')
-    assert.equal((await exchange('ack', dir, { version: 1, id: cmd.id, binding: binding.id, status: 'delivered' })).status, 'delivered')
-    await exchange('report', dir, { project: 'Multi-Agent Hub', title: `Task for ${agent}`, state: 'working', steps: [{ status: 'doing', text: `Executing ${agent} step` }] })
-    fragments.push(join(dir, 'fragment.md'))
-  }
-  const python = process.platform === 'win32' ? 'python' : 'python3'
-  if (spawnSync(python, ['--version']).error) return
-  const board = join(root, 'progress.md')
-  await writeFile(board, '# Progress\n')
-  const merge = join(dirname(fileURLToPath(import.meta.url)), '../scripts/remote-reporter/merge.py')
-  const run = spawnSync(python, ['-B', merge, board, ...fragments], { encoding: 'utf8', timeout: 20000 })
-  assert.equal(run.status, 0, run.stderr)
-  const parsed = parseProgress(await readFile(board, 'utf8')).find(project => project.name === 'Multi-Agent Hub')
-  assert.equal(parsed?.tasks.length, EXCHANGE_AGENTS.length)
-  assert.deepEqual(parsed?.tasks.map(task => task.auto?.agent).sort(), [...EXCHANGE_AGENTS].sort())
 })

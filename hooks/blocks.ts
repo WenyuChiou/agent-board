@@ -316,11 +316,15 @@ export const upsertAutoBlock = (text: string, mirror: ProgressMirror, s: Strings
   const id = shortId(mirror.sessionId)
   const fullId = mirror.resume ?? (mirror.sessionId.length > 8 ? mirror.sessionId : null)
   const agent = (mirror.agent || 'claude').toLowerCase()
-  const existing = scanBlocks(lines).find(span =>
-    fullId !== null && span.resume !== null && span.resume !== undefined
-      ? span.resume === fullId && (span.agent === undefined || span.agent === agent)
-      : span.session === id && (fullId === null || span.resume === null || span.resume === undefined) && (span.agent === undefined || span.agent === agent),
-  )
+  const spans = scanBlocks(lines)
+  const matching = spans.filter(span => {
+    if (span.agent !== undefined && span.agent !== agent) return false
+    if (fullId !== null) {
+      return span.resume !== null && span.resume !== undefined && span.resume === fullId
+    }
+    return span.session === id && (span.resume === null || span.resume === undefined)
+  })
+  const existing = matching.length === 1 ? matching[0] : undefined
   // A run keeps the parent its block already names; until one is named, it takes the person's
   // session working in the same project right now when exactly one is (#399), else none, and
   // counts as a background run.
@@ -370,25 +374,29 @@ const removeSpans = (text: string, spans: readonly BlockSpan[]): string => {
   return lines.length === 0 ? '' : lines.join(eol) + eol
 }
 
-export const removeAutoBlock = (text: string, sessionId: string): string => {
+export const removeAutoBlock = (text: string, sessionId: string, agent?: string): string => {
   const id = shortId(sessionId)
-  const spans = scanBlocks(linesOf(text)).filter(span =>
-    sessionId.length > 8 && span.resume !== null && span.resume !== undefined
+  const normAgent = agent?.toLowerCase()
+  const spans = scanBlocks(linesOf(text)).filter(span => {
+    if (normAgent !== undefined && (span.agent ?? 'claude') !== normAgent) return false
+    return sessionId.length > 8 && span.resume !== null && span.resume !== undefined
       ? span.resume === sessionId
-      : span.session === id && (sessionId.length <= 8 || span.resume === null || span.resume === undefined),
-  )
+      : span.session === id && (sessionId.length <= 8 || span.resume === null || span.resume === undefined)
+  })
 
   return spans.length === 0 ? text : removeSpans(text, spans)
 }
 
-export const extractAutoBlock = (text: string, sessionId: string): string | null => {
+export const extractAutoBlock = (text: string, sessionId: string, agent?: string): string | null => {
   const lines = linesOf(text)
   const id = shortId(sessionId)
-  const span = scanBlocks(lines).find(one =>
-    sessionId.length > 8 && one.resume !== null && one.resume !== undefined
+  const normAgent = agent?.toLowerCase()
+  const span = scanBlocks(lines).find(one => {
+    if (normAgent !== undefined && (one.agent ?? 'claude') !== normAgent) return false
+    return sessionId.length > 8 && one.resume !== null && one.resume !== undefined
       ? one.resume === sessionId
-      : one.session === id && (sessionId.length <= 8 || one.resume === null || one.resume === undefined),
-  )
+      : one.session === id && (sessionId.length <= 8 || one.resume === null || one.resume === undefined)
+  })
 
   return span === undefined ? null : lines.slice(span.start, span.end + 1).join('\n')
 }

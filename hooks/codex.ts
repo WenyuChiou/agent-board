@@ -138,7 +138,7 @@ export const putCodexBlock = (text: string, report: CodexReport, owner: string, 
   })
   const foreignConflict = spans.some(span => {
     const attrs = parseAttrs(lines[span.start] ?? '')
-    return span.session === id && attrs.owner !== owner
+    return attrs.owner === owner && attrs.agent !== agent
   })
   if (foreignConflict || ownMatches.length > 1) throw new Error('BLOCK_CONFLICT')
   const existing = ownMatches[0]

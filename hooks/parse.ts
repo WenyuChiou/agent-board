@@ -95,7 +95,7 @@ export const autoOf = (raw: string): ProgressAuto | null => {
     agent: (attrs.agent ?? 'claude').toLowerCase(),
     state,
     updated: Number.isNaN(updated) ? 0 : updated,
-    resume: attrs.resume !== undefined && RESUME.test(attrs.resume) ? attrs.resume : session.length > 8 && RESUME.test(session) ? session : null,
+    resume: attrs.resume !== undefined && RESUME.test(attrs.resume) ? attrs.resume : null,
     dir: folderOf(attrs.dir),
     pr: Number.isInteger(pr) && pr > 0 ? pr : null,
     ci: CI_STATES.find(one => one === attrs.ci) ?? null,

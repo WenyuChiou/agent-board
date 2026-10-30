@@ -751,7 +751,7 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
     const skills = [...Object.keys(files).filter(file => file.endsWith('SKILL.md') && (file !== skill || BOARD_FOR.skills!.includes(agent))), ...connected.filter(one => one.label === '' && BOARD_FOR[one.agent]?.includes(agent)).map(one => one.file)]
     const reportHook = installed ? 'installer' : hasConnectHook ? 'connect' : 'none'
     const isSkillOnly = reportHook === 'none' && skills.some(file => readLocal(file) !== null)
-    output({ ...plan, installed, ready: installed && lifecycleCapability(agent) !== 'adapter-pending', connected: 'unverified', hooksTrusted: host ? host.hooks.every(hook => hook.trust === 'trusted') : 'unknown', reportHook, ...(isSkillOnly ? { problem: s.setupAgent(s.agentNames[agent] ?? agent, [s.setupSkillOnly]) } : {}), notice: s.codexDoctor })
+    output({ ...plan, installed, ready: installed && !['adapter-pending', 'report-only'].includes(lifecycleCapability(agent)), connected: 'unverified', hooksTrusted: host ? host.hooks.every(hook => hook.trust === 'trusted') : 'unknown', reportHook, ...(isSkillOnly ? { problem: s.setupAgent(s.agentNames[agent] ?? agent, [s.setupSkillOnly]) } : {}), notice: s.codexDoctor })
     return true
   }
   if (!args.includes('--apply')) { output(plan); return true }

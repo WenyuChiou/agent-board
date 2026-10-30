@@ -83,7 +83,13 @@ const normalizeSource = (source: QuestionSource): QuestionSource => {
 }
 
 export const archiveQuestionsKept = (projects: readonly ProgressProject[], ref: TaskRef, ledger: QuestionLedger): boolean => {
-  const tasks = projects.filter(project => project.name === ref.project).flatMap(project => project.tasks).filter(task => ref.session === null ? task.title === ref.title : ((ref.resume !== undefined && ref.resume !== null && task.auto?.resume === ref.resume) || task.auto?.resume === ref.session || (task.auto?.resume === null && task.auto?.session === ref.session) || task.auto?.session === ref.session))
+  const tasks = projects.filter(project => project.name === ref.project).flatMap(project => project.tasks).filter(task => {
+    if (ref.session === null) return task.title === ref.title
+    if (ref.resume !== undefined && ref.resume !== null) {
+      return task.auto?.resume === ref.resume || (task.auto?.resume === null && task.auto?.session === ref.resume)
+    }
+    return task.auto?.session === ref.session
+  })
   if (tasks.length !== 1) return false
   const task = tasks[0]
   if (task === undefined) return false
@@ -448,7 +454,7 @@ export const resolvedQuestionsToRetire = (ledger: QuestionLedger, projects: read
   const seen = observations(projects, mine, pending, frozen)
   const scopes = new Set([
     ...projects.flatMap(project => project.tasks.map(task => questionScope(project.name, task.auto?.agent ?? 'manual', (task.auto?.resume ?? task.auto?.session) ?? task.title))),
-    ...(mine === null ? [] : [questionScope(mine.project, 'claude', shortId(mine.sessionId))]),
+    ...(mine === null ? [] : [questionScope(mine.project, 'claude', mine.sessionId ?? shortId(mine.sessionId))]),
     ...seen.map(row => row.scope),
   ])
   return ledger.records.filter(record => record.resolvedAt !== undefined && scopes.has(record.scope) && !frozen.has(record.scope) && !seen.some(row => row.scope === record.scope && row.isWaiting && questionWords(row.text) === record.words)).map(record => record.id)
@@ -471,6 +477,32 @@ export const observeQuestions = (
   frozen: ReadonlySet<string> = new Set(),
 ): { ledger: QuestionLedger; keys: Record<string, string>; marked: string[] } => {
   const records = ledger.records.map(row => ({ ...row }))
+  const scopeMigrations = new Map<string, string>()
+  if (mine !== null && mine.sessionId) {
+    const short = shortId(mine.sessionId)
+    if (short !== mine.sessionId) {
+      scopeMigrations.set(questionScope(mine.project, 'claude', short), questionScope(mine.project, 'claude', mine.sessionId))
+    }
+  }
+  for (const project of projects) {
+    for (const task of project.tasks) {
+      if (task.auto !== null && task.auto.resume !== null && task.auto.resume !== task.auto.session) {
+        scopeMigrations.set(questionScope(project.name, task.auto.agent, task.auto.session), questionScope(project.name, task.auto.agent, task.auto.resume))
+      }
+    }
+  }
+  for (const record of records) {
+    const migrated = scopeMigrations.get(record.scope)
+    if (migrated !== undefined) {
+      record.scope = migrated
+      if (record.source !== undefined && record.source.session) {
+        const full = mine !== null && mine.sessionId && record.source.session === shortId(mine.sessionId)
+          ? mine.sessionId
+          : projects.flatMap(p => p.tasks).find(t => t.auto?.session === record.source?.session)?.auto?.resume
+        if (full) record.source.session = full
+      }
+    }
+  }
   for (const record of records) {
     if (record.source?.kind !== 'inbox' || !record.isUnresolved) continue
     let source: PendingTurn
@@ -608,10 +640,10 @@ export const observeQuestions = (
     const match = /^(\S+) (\d+) ([\s\S]*)$/.exec(key)
     if (match === null) continue
     const [, session, , text = ''] = match
-    const candidates = rows.filter(row => row.session === session && row.isWaiting && questionWords(row.text) === questionWords(text))
+    const candidates = rows.filter(row => (row.session === session || (row.session.length > 8 && row.session.startsWith(session))) && row.isWaiting && questionWords(row.text) === questionWords(text))
     const picked = candidates.length === 1 ? candidates[0] : undefined
     if (picked !== undefined) legacy[key] = keys[questionSlot(picked.scope, picked.index)] ?? ''
-    else if (isSettled && rows.some(row => row.session === session)) legacy[key] = ''
+    else if (isSettled && rows.some(row => row.session === session || (row.session.length > 8 && row.session.startsWith(session)))) legacy[key] = ''
   }
   return {
     ledger: { version: 1, next, records, legacy: isSettled ? legacy : ledger.legacy },
