@@ -46,6 +46,7 @@ import {
   parseJournal,
   previousMonth,
   progressReport,
+  unwrittenEntries,
 } from './journal'
 import type { JournalEntry } from './journal'
 import {
@@ -77,8 +78,8 @@ import type { ListedTask } from './mirror'
 import { baseName, countSteps, doneKey, isHereProject, isTaskComplete, parseProgress, progressTail, STALE_MS } from './parse'
 import type { ProgressProject } from '../types'
 import { dashboardHtml } from './dashboard'
-import { peekInbox, redact } from './board'
-import type { PendingTurn } from './board'
+import { peekInbox, redact, turnsFor } from './board'
+import type { PendingTurn, TurnCache } from './board'
 import { paletteFor } from './palette'
 import { drawPane, pressTarget, reviseKey } from './pane'
 import type { PaneActions, PaneModel, PaneUi, PressResult } from './pane'
@@ -1153,7 +1154,7 @@ const dashboardPath = (path: string): string => `${path.replace(/\.md$/i, '')}.h
 const pad2 = (n: number): string => String(n).padStart(2, '0')
 
 // Pending turns are optional: an unavailable inbox must not stop the board or its reminders.
-let pendingCache: { key: string; turns: PendingTurn[] } | null = null
+let pendingCache: TurnCache = null
 const pendingTurns = async ($: EngineInterface): Promise<PendingTurn[]> => {
   try {
     const path = await progressPath($)
@@ -1163,25 +1164,24 @@ const pendingTurns = async ($: EngineInterface): Promise<PendingTurn[]> => {
       .filter(entry => entry.kind === 'file' && isInboxFile(entry.name) && done[entry.name] === undefined)
       .sort((a, b) => b.mtimeMs - a.mtimeMs)
       .slice(0, 30)
-    // What the turns are made from: the listing (names, times, sizes) and which files are taken
-    // already. The time of day is not part of it, so an inbox that did not change reads no file (#156).
-    const cacheKey = JSON.stringify([path, entries.map(entry => [entry.name, entry.mtimeMs, entry.size]), done])
-    if (pendingCache?.key === cacheKey) return pendingCache.turns
-    const files: Array<{ name: string; body: string; at: number }> = []
-    let isComplete = true
-    for (const entry of entries) {
-      const body = await $.fs.read(`${dir}${sepOf(dir)}${entry.name}`).catch(() => {
-        isComplete = false
-        return ''
-      })
-      files.push({ name: entry.name, body, at: entry.mtimeMs })
-    }
-    const home = ((await $.env.get('USERPROFILE')) ?? (await $.env.get('HOME')) ?? '').replace(/[\\/]+$/, '')
-    const isWin = await isWindows($, path)
-    const turns = peekInbox(files, () => '', text => redact(text, home, isWin))
-    // A file that could not be read is tried again at the next look.
-    if (isComplete) pendingCache = { key: cacheKey, turns }
-    return turns
+    const s = await wordsOf($)
+    const listing = [path, entries.map(entry => [entry.name, entry.mtimeMs, entry.size]), done]
+    const result = await turnsFor(pendingCache, listing, s, async () => {
+      const files: Array<{ name: string; body: string; at: number }> = []
+      let isComplete = true
+      for (const entry of entries) {
+        const body = await $.fs.read(`${dir}${sepOf(dir)}${entry.name}`).catch(() => {
+          isComplete = false
+          return ''
+        })
+        files.push({ name: entry.name, body, at: entry.mtimeMs })
+      }
+      const home = ((await $.env.get('USERPROFILE')) ?? (await $.env.get('HOME')) ?? '').replace(/[\\/]+$/, '')
+      const isWin = await isWindows($, path)
+      return { files, scrub: (text: string) => redact(text, home, isWin), isComplete }
+    })
+    pendingCache = result.cache
+    return result.turns
   } catch {
     return []
   }
@@ -2951,9 +2951,11 @@ const archiveOld = async ($: EngineInterface, isNow = false, isCleanUp = false):
   // A person's Clean up goes by the record on disk alone: one that stopped reading since the press
   // began moves no hand-kept task, rather than falling back to the times the pane kept in memory.
   const observed = isCleanUp ? (parseSeen(await readText($, seenPath(path))) ?? {}) : await read($, firstSeen)
-  const archived = new Set<string>()
+  // Counted with their number: two done blocks with the same title and steps make one entry text,
+  // and both leave (#231).
+  const archived = new Map<string, number>()
   // A copy may precede a rejected write; only actual removals count as moves.
-  const removed = new Set<string>()
+  const removed = new Map<string, number>()
   const keys = new Set<string>()
   let pendingEntries: string[] = []
   let pendingKeys: string[] = []
@@ -2995,11 +2997,16 @@ const archiveOld = async ($: EngineInterface, isNow = false, isCleanUp = false):
     return manual.text
   }, undefined, async (path, text) => {
     // Made again after another session's write, the same blocks are not archived twice.
-    await appendArchive($, archivePath(path, at), pendingEntries.filter(entry => !archived.has(entry)), s)
-    for (const entry of pendingEntries) archived.add(entry)
+    const fresh = unwrittenEntries(pendingEntries, archived)
+    await appendArchive($, archivePath(path, at), fresh, s)
+    for (const entry of fresh) archived.set(entry, (archived.get(entry) ?? 0) + 1)
     for (const entry of pendingMoved) moved.set(entry.session, entry.text)
     await $.fs.write(path, text)
-    for (const entry of pendingEntries) removed.add(entry)
+    // Another session's stale write can put the blocks back and the next try remove them again:
+    // an entry counts the most copies one write removed, not the sum over the tries.
+    const going = new Map<string, number>()
+    for (const entry of pendingEntries) going.set(entry, (going.get(entry) ?? 0) + 1)
+    for (const [entry, count] of going) removed.set(entry, Math.max(removed.get(entry) ?? 0, count))
     for (const key of pendingKeys) keys.add(key)
   })
   if (wrote === null) {
@@ -3016,7 +3023,7 @@ const archiveOld = async ($: EngineInterface, isNow = false, isCleanUp = false):
   }
   await poll($)
 
-  return removed.size
+  return [...removed.values()].reduce((sum, one) => sum + one, 0)
 }
 
 // What the explicit archive checks before it takes a block that asks (#174): the ledger settled
