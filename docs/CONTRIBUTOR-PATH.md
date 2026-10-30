@@ -188,7 +188,7 @@ git fetch origin
 git merge origin/main       # never rebase or force-push
 ```
 
-The usual conflict is the generated bundle `hooks/board-script.ts`. Take the copy from the `main` you are merging, rebuild it from the merged sources and finish the merge:
+The generated bundle `hooks/board-script.ts` is stored one line per line, so it conflicts only when two pull requests change the same code. If it conflicts, take the copy from the `main` you are merging, rebuild it from the merged sources and finish the merge:
 
 ```sh
 git restore --source=MERGE_HEAD --staged --worktree hooks/board-script.ts
