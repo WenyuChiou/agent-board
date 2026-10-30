@@ -240,7 +240,7 @@ export const browserFixture = async (name, run) => {
   const foreignAuth = '{"synthetic":"preserve-this-byte-for-byte"}\n'
   writeFileSync(hooks, `${JSON.stringify(foreignHooks, null, 2)}\n`)
   writeFileSync(auth, foreignAuth)
-  const setupArgs = ['--home', home, '--agent', 'codex', '--codex-dir', directories.codex, '--progress-file', progress, '--lang', 'en']
+  const setupArgs = ['--home', home, '--agent', 'codex', '--codex-dir', directories.codex, '--progress-file', progress, '--lang', 'en', '--json']
   let browser
   let context
   let page
@@ -320,7 +320,7 @@ export const hiddenQuestion = (progress, words) => {
 }
 
 export const installAntigravity = async ({ root, env, home, progress, evidence }) => {
-  const args = ['--home', home, '--agent', 'antigravity', '--progress-file', progress, '--lang', 'en']
+  const args = ['--home', home, '--agent', 'antigravity', '--progress-file', progress, '--lang', 'en', '--json']
   const preview = await nodeJson(evidence, 'antigravity-setup-preview', setup, args, env)
   assertOwnedPreview(preview, root)
   await nodeJson(evidence, 'antigravity-setup-apply', setup, [...args, '--apply'], env)

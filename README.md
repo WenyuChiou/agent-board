@@ -225,7 +225,7 @@ Use the agent's own name after `--agent` (the doctor keeps its old name for ever
 | You see | Try |
 |---|---|
 | An agent is not on the board | Start a new session of it; one that was already open is not connected. Codex also needs its hooks trusted in `/hooks`. |
-| Nothing changed after installing | Run `npx @wenyuchiou/agent-board setup` again without `--apply` (from a checkout: `node scripts/setup-agent.mjs`) and read its conflicts and `adapter-pending` lines; edited files are left alone and listed there. |
+| Nothing changed after installing | Run `npx @wenyuchiou/agent-board setup --json` again without `--apply` (from a checkout: `node scripts/setup-agent.mjs --json`) and read its conflicts and `adapter-pending` lines; edited files are left alone and listed there. |
 | An old version is still running | A running session keeps the version it loaded: start a new one. To update, see [the guide](docs/GUIDE.md#update-and-uninstall). |
 | An agent shows up twice | It may be connected both ways: by the Claude plugin's `/progress connect` and by setup. `/progress connect status` lists what the plugin connected; remove one with `/progress connect remove` or `--codex-remove --agent <name>`. |
 | A question will not go away | Answer it in its own chat, then press **Already answered, hide** (`h`). After 3 days it moves into **Earlier unanswered questions**, and after 7 days into **Older unanswered questions**. |

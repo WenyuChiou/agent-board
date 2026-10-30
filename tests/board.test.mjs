@@ -526,7 +526,7 @@ const run = (lang, args = [], beside = {}, source = FILE, code = BOARD_SCRIPT) =
     const env = { ...process.env, CLAUDE_PROGRESS_FILE: '', NO_COLOR: '1' }
     return execFileSync(process.execPath, [script, ...args], { env, encoding: 'utf8' })
   } finally {
-    rmSync(dir, { recursive: true, force: true })
+    rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 })
   }
 }
 
@@ -1577,7 +1577,7 @@ const windowsAcl = (file, env) => {
 // so page tests that need a waiting question add this one.
 const LIVE_QUESTION = `\n## billing\n<!-- auto session=d4e5f6a7 agent=grok state=waiting updated=RECENT -->\n### Pick invoice format\n- [x] Read\n- [?] PDF or HTML?\n<!-- /auto session=d4e5f6a7 -->\n`
 
-const page = async (more = '', env = {}, serveArgs = [], now, source = BOARD_SCRIPT) => {
+const page = async (more = '', env = {}, serveArgs = [], now, source = BOARD_SCRIPT, setup) => {
   const dir = mkdtempSync(join(tmpdir(), 'board-serve-'))
   const work = join(dir, 'api-gateway')
   mkdirSync(work)
@@ -1613,6 +1613,7 @@ setTimeout(() => process.stdout.write('Redis it is; wiring it up now.\\n'), 1000
 `)
   const script = join(dir, 'agent-board.mjs')
   writeFileSync(script, `globalThis.AGENT_BOARD = ${JSON.stringify({ path, lang: 'en' })}\n${now === undefined ? '' : `Date.now = () => ${now}\n`}${source}`)
+  setup?.(dir, path)
   const child = spawn(process.execPath, [script, '--serve-child', ...serveArgs], {
     env: { ...process.env, CLAUDE_PROGRESS_FILE: '', NO_COLOR: '1', AGENT_BOARD_GROK: stand, AGENT_BOARD_CODEX: stand, XDG_RUNTIME_DIR: run, ...env },
     stdio: ['ignore', 'pipe', 'pipe'],
@@ -5223,6 +5224,40 @@ test('--tidy archives done blocks older than 12 hours and stopped ones older tha
   })
 })
 
+test('--tidy counts two done blocks that share a title and steps as two archived tasks', () => {
+  tidyFixture(f => {
+    writeFileSync(f.path, `## Synthetic\n${f.block('a1b2c311', 'Local synthetic task', 'done', 13)}\n${f.block('a1b2c312', 'Local synthetic task', 'done', 13)}`)
+    const result = f.command(['--tidy', '--lang', 'en'])
+    assert.equal(result.status, 0, result.stderr)
+    assert.equal(result.stdout, 'Archived 2 tasks.\n')
+    assert.ok(!readFileSync(f.path, 'utf8').includes('Local synthetic task'))
+    const archive = readdirSync(f.dir).filter(name => name.startsWith('progress-archive-'))
+    const history = readFileSync(join(f.dir, archive[0]), 'utf8')
+    assert.equal(history.split('### Local synthetic task').length - 1, 2, history)
+  })
+})
+
+test('--tidy adds both of two same-title done blocks to an archive that already holds one like them, and a retry after a save that removed nothing adds none', () => {
+  tidyFixture(f => {
+    const copies = () => readdirSync(f.dir).filter(name => name.startsWith('progress-archive-')).map(name => readFileSync(join(f.dir, name), 'utf8')).join('').split('### Local synthetic task').length - 1
+    writeFileSync(f.path, `## Synthetic\n${f.block('a1b2c313', 'Local synthetic task', 'done', 13)}`)
+    assert.equal(f.command(['--tidy', '--lang', 'en']).stdout, 'Archived 1 task.\n')
+    const two = `## Synthetic\n${f.block('a1b2c314', 'Local synthetic task', 'done', 13)}\n${f.block('a1b2c315', 'Local synthetic task', 'done', 13)}`
+    writeFileSync(f.path, two)
+    const result = f.command(['--tidy', '--lang', 'en'])
+    assert.equal(result.status, 0, result.stderr)
+    assert.equal(result.stdout, 'Archived 2 tasks.\n')
+    assert.ok(!readFileSync(f.path, 'utf8').includes('Local synthetic task'))
+    assert.equal(copies(), 3)
+    // The two were saved to the archive but are back in the file, as after a process that stopped
+    // before it removed them: they leave, and the archive keeps one copy of each.
+    writeFileSync(f.path, two)
+    assert.equal(f.command(['--tidy', '--lang', 'en']).status, 0)
+    assert.ok(!readFileSync(f.path, 'utf8').includes('Local synthetic task'))
+    assert.equal(copies(), 3)
+  })
+})
+
 // The scheduled sweep records no question of its own: a board that is open has seen the file first
 // (`--keys ''` does the same), and the sweep then runs beside the files that left.
 const askingBoard = () => {
@@ -6220,17 +6255,20 @@ test('terminal and HTML size warnings keep translated numbers in the details lin
 })
 
 test("the page's server runs the hourly sweep and writes nothing when the seen file cannot be read", { timeout: 15_000 }, async () => {
-  const board = await page('', { AGENT_BOARD_SWEEP_MS: '100' }, [], TIDY_NOW)
-  try {
-    const source = '## Synthetic\n### Finished manual\n- [x] Last step\n'
-    const block = `<!-- auto session=464c0003 agent=codex state=done updated=${new Date(TIDY_NOW - 13 * 3600000).toISOString()} -->\n### Old agent block\n- [x] Last step\n<!-- /auto session=464c0003 -->\n`
-    const record = join(board.dir, 'progress-seen.json')
-    const archive = join(board.dir, 'progress-archive-2026-10.md')
-    writeFileSync(board.path, source + block)
+  const source = '## Synthetic\n### Finished manual\n- [x] Last step\n'
+  const block = `<!-- auto session=464c0003 agent=codex state=done updated=${new Date(TIDY_NOW - 13 * 3600000).toISOString()} -->\n### Old agent block\n- [x] Last step\n<!-- /auto session=464c0003 -->\n`
+  const board = await page('', { AGENT_BOARD_SWEEP_MS: '100' }, [], TIDY_NOW, BOARD_SCRIPT, (dir, path) => {
+    const record = join(dir, 'progress-seen.json')
+    const archive = join(dir, 'progress-archive-2026-10.md')
+    writeFileSync(path, source + block)
     writeFileSync(archive, '# Progress archive\n\nEarlier synthetic work\n')
     writeFileSync(record, '{"seen":')
     // The fixed test clock must see this as a young interrupted write, not stale damage.
     utimesSync(record, TIDY_NOW / 1000, TIDY_NOW / 1000)
+  })
+  try {
+    const record = join(board.dir, 'progress-seen.json')
+    const archive = join(board.dir, 'progress-archive-2026-10.md')
     const snapshot = () => Object.fromEntries(readdirSync(board.dir).filter(name => name === 'progress.md' || name === 'progress-seen.json' || name.startsWith('progress-archive-')).map(name => [name, readFileSync(join(board.dir, name))]))
     const before = snapshot()
     await delay(1500)
