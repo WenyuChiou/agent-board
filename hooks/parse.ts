@@ -325,7 +325,27 @@ export const currentStepIndex = (task: ProgressTask): number => {
 
 // A block whose session stopped writing to it (the terminal closed without the session
 // ending, a crash) still says working or waiting; after half a day it is treated as ended.
-export const STALE_MS = 12 * 60 * 60 * 1000
+export const DEFAULT_STALE_MS = 12 * 60 * 60 * 1000
+export const STALE_MS = DEFAULT_STALE_MS
+
+// Parse a custom stale duration (milliseconds), enforcing a minimum 1 minute (60,000 ms) lower bound.
+export const parseStaleMs = (value: unknown, fallback: number = DEFAULT_STALE_MS): number => {
+  if (value === undefined || value === null) return fallback
+  if (typeof value === 'string' && value.trim() === '') return fallback
+  if (typeof value === 'number') {
+    if (Number.isFinite(value) && value > 0) return Math.max(60 * 1000, value)
+    throw new Error('INVALID_STALE_MS')
+  }
+  if (typeof value === 'string') {
+    const trimmed = value.trim()
+    if (/^\d+$/.test(trimmed)) {
+      const parsed = Number(trimmed)
+      if (Number.isFinite(parsed) && parsed > 0) return Math.max(60 * 1000, parsed)
+    }
+    throw new Error('INVALID_STALE_MS')
+  }
+  throw new Error('INVALID_STALE_MS')
+}
 export const FUTURE_SKEW_MS = 5 * 60 * 1000
 
 export const futureTimeKey = (auto: ProgressAuto): string =>
@@ -342,8 +362,8 @@ export const observedTime = (auto: ProgressAuto | null, now: number, seen: Reado
   return { updated: isObserved ? first : updated, isFuture }
 }
 
-export const isStale = (auto: ProgressAuto | null, now: number, updated = auto?.updated ?? 0): boolean =>
-  auto !== null && (auto.state === 'working' || auto.state === 'waiting') && updated > 0 && now - updated > STALE_MS
+export const isStale = (auto: ProgressAuto | null, now: number, updated = auto?.updated ?? 0, staleMs: number = STALE_MS): boolean =>
+  auto !== null && (auto.state === 'working' || auto.state === 'waiting') && updated > 0 && now - updated > staleMs
 
 // The key a finished hand-kept task is remembered by, to archive it a day later.
 export const doneKey = (project: string, title: string): string => `done:${project}::${title}`
