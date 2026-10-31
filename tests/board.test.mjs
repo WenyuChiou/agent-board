@@ -7411,7 +7411,8 @@ test("the agent row shows each agent's counts and filters the page to that agent
     assert.deepEqual(dom.node('chips').querySelectorAll('[data-agent]').map(node => node.getAttribute('data-agent')), ['own', 'codex', 'gemini', 'cursor'])
     // Each icon names its agent, how many questions wait and whether it is working; the badge carries the number.
     assert.equal(rowAgent(dom, 'codex').getAttribute('aria-label'), `${EN.agentNames.codex}: ${EN.pgTipNeedsOne}, ${EN.pgTipWorking}`)
-    assert.equal(rowAgent(dom, 'gemini').getAttribute('aria-label'), `${EN.agentNames.gemini} · ${EN.pgNotSeen}: ${EN.pgTipNeedsOne}`)
+    // Gemini wrote its waiting block 3 minutes ago, so it is open and no word follows its name (not seen: the reply test).
+    assert.equal(rowAgent(dom, 'gemini').getAttribute('aria-label'), `${EN.agentNames.gemini}: ${EN.pgTipNeedsOne}`)
     assert.equal(badgeOf(rowAgent(dom, 'codex')).textContent, '1')
     assert.equal(dom.node('count-needs').textContent, String(model.view.needs.n))
     // Pressing Codex leaves its cards and rows and takes the other agents' away; the sidebar copy agrees.
@@ -7457,9 +7458,12 @@ test('progress.html follows the page\'s order', () => {
 })
 
 test('a reply button on an unconnected question says it copies and the card then says where to paste it', async () => {
-  const { board, model, html } = await groupedPage()
+  // Gemini last wrote 45 minutes ago, past the half hour that counts as open, and nothing says its session ended.
+  const geminiBlock = minutes => groupedBlock('47700002', 'gemini', 'waiting', 'docs-repo', 'Choose the short guide', ['- [?] Short or detailed?', '- [ ] Edit'], minutes)
+  const { board, model, html } = await groupedPage(groupedSource().replace(geminiBlock(3), geminiBlock(45)))
   try {
     const dom = await pageDom(html, model, { copyAllowed: true })
+    assert.equal(rowAgent(dom, 'gemini').getAttribute('aria-label'), `${EN.agentNames.gemini} · ${EN.pgNotSeen}: ${EN.pgTipNeedsOne}`)
     const card = key => dom.node('needs').querySelectorAll('[data-ref-key]').find(one => shownWords(one).includes(key))
     // No message button on a question the board cannot send to: every answer is a Copy button.
     const labels = dom.buttons().map(button => button.textContent)
