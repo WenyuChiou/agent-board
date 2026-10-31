@@ -5,7 +5,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, 
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { foldText, fragmentIssue, orderFragments, parseArgs, parseFragment, runFold, stripTests } from '../scripts/changelog-fold.mjs'
+import { ambitionQuestions, foldText, fragmentIssue, orderFragments, parseArgs, parseFragment, runFold, stripTests } from '../scripts/changelog-fold.mjs'
 
 const script = fileURLToPath(new URL('../scripts/changelog-fold.mjs', import.meta.url))
 const summary = issue => `- **Synthetic entry (#${issue}).** A synthetic result.`
@@ -179,4 +179,16 @@ test('the fold validates arguments before changing files', t => {
   const hugeIssue = '9'.repeat(400)
   assert.equal(fold({ fragments: [fragment(42), fragment(hugeIssue)] }).fragments[0], `changelog.d/${hugeIssue}-synthetic.md`)
   assert.deepEqual(orderFragments([parseFragment(fragment(2)), parseFragment(fragment(100))]).map(item => item.issue), ['100', '2'])
+})
+
+test('the fold with --write ends with the three next-version questions and a dry run prints none', t => {
+  const cwd = fixture(t)
+  const dry = []
+  runFold({ cwd, argv: ['1.1.0', '--date', '2026-02-01'], log: line => dry.push(line) })
+  assert.ok(!dry.join('\n').includes('Before planning'))
+  const lines = []
+  runFold({ cwd, argv: ['1.1.0', '--date', '2026-02-01', '--write'], log: line => lines.push(line) })
+  assert.equal(ambitionQuestions.length, 3)
+  assert.deepEqual(lines.slice(-4), ['\nBefore planning the next version, answer in its plan:', ...ambitionQuestions.map((question, index) => `${index + 1}. ${question}`)])
+  assert.match(lines.join('\n'), /goal sits above[^]*hard number[^]*other field/)
 })

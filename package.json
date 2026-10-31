@@ -10,7 +10,10 @@
     "bin/agent-board.mjs",
     "scripts/setup-agent.mjs",
     "scripts/setup-codex.mjs",
+    "scripts/bundle-text.mjs",
     "hooks/board-script.ts",
+    "hooks/board-script-1.ts",
+    "hooks/board-script-2.ts",
     "hooks/released.ts"
   ],
   "engines": {
