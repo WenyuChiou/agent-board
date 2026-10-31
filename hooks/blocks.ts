@@ -388,28 +388,36 @@ const removeSpans = (text: string, spans: readonly BlockSpan[]): string => {
 export const removeAutoBlock = (text: string, sessionId: string, agent?: string): string => {
   const id = shortId(sessionId)
   const normAgent = agent?.toLowerCase()
-  const spans = scanBlocks(linesOf(text)).filter(span => {
+  const matching = scanBlocks(linesOf(text)).filter(span => {
     if (normAgent !== undefined && (span.agent ?? 'claude') !== normAgent) return false
-    return sessionId.length > 8 && span.resume !== null && span.resume !== undefined
-      ? span.resume === sessionId
-      : span.session === id && (sessionId.length <= 8 || span.resume === null || span.resume === undefined)
+    return span.session === id
   })
+  if (matching.length <= 1) {
+    return matching.length === 0 ? text : removeSpans(text, matching)
+  }
+  const byResume = matching.filter(span => span.resume === sessionId)
+  const spans = byResume.length === 1 ? byResume : matching
 
-  return spans.length === 0 ? text : removeSpans(text, spans)
+  return removeSpans(text, spans)
 }
 
 export const extractAutoBlock = (text: string, sessionId: string, agent?: string): string | null => {
   const lines = linesOf(text)
   const id = shortId(sessionId)
   const normAgent = agent?.toLowerCase()
-  const span = scanBlocks(lines).find(one => {
+  const matching = scanBlocks(lines).filter(one => {
     if (normAgent !== undefined && (one.agent ?? 'claude') !== normAgent) return false
-    return sessionId.length > 8 && one.resume !== null && one.resume !== undefined
-      ? one.resume === sessionId
-      : one.session === id && (sessionId.length <= 8 || one.resume === null || one.resume === undefined)
+    return one.session === id
   })
+  if (matching.length === 0) return null
+  if (matching.length === 1) {
+    const span = matching[0]!
+    return lines.slice(span.start, span.end + 1).join('\n')
+  }
+  const byResume = matching.filter(one => one.resume === sessionId)
+  const span = byResume.length === 1 ? byResume[0]! : matching[0]!
 
-  return span === undefined ? null : lines.slice(span.start, span.end + 1).join('\n')
+  return lines.slice(span.start, span.end + 1).join('\n')
 }
 
 // Done blocks leave after half a day; anything else (ended, or a session that stopped
