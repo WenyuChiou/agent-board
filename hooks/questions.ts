@@ -392,12 +392,12 @@ export const questionFilesKey = (
 
 type Observation = { scope: string; session: string; index: number | string; text: string; isWaiting: boolean; producer: string; producerRevisions?: string[]; producerSources?: string[]; source: QuestionSource }
 
-const isUniqueUnresumedTask = (task: ProgressTask, projects: readonly ProgressProject[], ownId: string): boolean => {
+const isUniqueUnresumedTask = (task: ProgressTask, projects: readonly ProgressProject[], ownId: string, ownAgent = 'claude'): boolean => {
   let count = 0
   let unresumed = 0
   for (const p of projects) {
     for (const t of p.tasks) {
-      if (t.auto !== null && (t.auto.agent === undefined || t.auto.agent === 'claude') && t.auto.session === ownId) {
+      if (t.auto !== null && (t.auto.agent ?? 'claude') === ownAgent && t.auto.session === ownId) {
         count += 1
         if (t.auto.resume === null || t.auto.resume === undefined) unresumed += 1
       }
@@ -421,18 +421,31 @@ export const ownQuestionsKey = (mine: ProgressMirror | null): string =>
 
 const observations = (projects: readonly ProgressProject[], mine: ProgressMirror | null, pending: readonly PendingTurn[], frozen: ReadonlySet<string> = new Set()): Observation[] => {
   const own = mine === null ? '' : shortId(mine.sessionId)
+  const ownAgent = (mine?.agent || 'claude').toLowerCase()
   const rows: Observation[] = []
   const scopes = new Set<string>()
   const ambiguous = new Set<string>()
+  const shortCounts = new Map<string, number>()
+  for (const project of projects) {
+    for (const task of project.tasks) {
+      if (task.auto?.session) {
+        const key = questionScope(project.name, task.auto.agent ?? 'manual', task.auto.session)
+        shortCounts.set(key, (shortCounts.get(key) ?? 0) + 1)
+      }
+    }
+  }
   for (const project of projects) {
     for (const task of project.tasks) {
       const isMine = mine !== null && (
         task.auto?.resume !== null && mine.sessionId
-          ? task.auto?.resume === mine.sessionId
-          : (Boolean(mine.sessionId) && task.auto?.session === own && (task.auto?.agent === undefined || task.auto?.agent === 'claude') && mine.isRun !== true && isUniqueUnresumedTask(task, projects, own))
+          ? task.auto?.resume === mine.sessionId && (task.auto?.agent ?? 'claude') === ownAgent
+          : (Boolean(mine.sessionId) && task.auto?.session === own && (task.auto?.agent ?? 'claude') === ownAgent && mine.isRun !== true && isUniqueUnresumedTask(task, projects, own, ownAgent))
       )
       if (isMine) continue
-      const scope = questionScope(project.name, task.auto?.agent ?? 'manual', task.auto?.session ?? task.title)
+      const shortKey = task.auto?.session ? questionScope(project.name, task.auto.agent ?? 'manual', task.auto.session) : ''
+      const hasShortCollision = shortKey !== '' && (shortCounts.get(shortKey) ?? 0) > 1 && Boolean(task.auto?.resume)
+      const sessionKey = hasShortCollision ? (task.auto?.resume ?? task.auto?.session ?? '') : (task.auto?.session ?? '')
+      const scope = questionScope(project.name, task.auto?.agent ?? 'manual', sessionKey || task.title)
       if (frozen.has(scope)) continue
       if (scopes.has(scope)) ambiguous.add(scope)
       scopes.add(scope)
@@ -440,7 +453,7 @@ const observations = (projects: readonly ProgressProject[], mine: ProgressMirror
       // are worked out once per task rather than once per step (#371).
       const context = task.notes.find(note => /^(?:背景|Context|Background)\s*[:：]/i.test(note))?.replace(/^(?:背景|Context|Background)\s*[:：]\s*/i, '') ?? (task.auto === null ? task.notes.join('\n') : '')
       const data = sourceData(task)
-      task.steps.forEach((step, index) => rows.push({ scope, session: task.auto?.session ?? '', index, text: step.text, isWaiting: step.status === 'waiting', producer: step.questionToken ?? '', source: { kind: task.auto === null ? 'manual' : 'block', project: project.name, task: task.title, context, text: step.text, agent: task.auto?.agent ?? '', session: task.auto?.session ?? '', data } }))
+      task.steps.forEach((step, index) => rows.push({ scope, session: sessionKey, index, text: step.text, isWaiting: step.status === 'waiting', producer: step.questionToken ?? '', source: { kind: task.auto === null ? 'manual' : 'block', project: project.name, task: task.title, context, text: step.text, agent: task.auto?.agent ?? '', session: sessionKey, data } }))
     }
   }
   if (mine !== null) rows.push(...ownObservations(mine))

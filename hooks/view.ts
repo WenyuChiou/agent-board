@@ -756,12 +756,12 @@ const whereRank = (item: WaitingItem): number => (item.where === 'here' ? 0 : 1)
 const runAgents = (group: RunGroup, s: Strings): string => group.agents.map(agent => s.agentNames[agent] ?? agentName(agent)).join(' / ')
 const runsText = (group: RunGroup, now: number, s: Strings): string => s.runsLine(group.count, runAgents(group, s), relativeTime(group.last, now, s))
 
-const isUniqueUnresumedTask = (task: ProgressTask, projects: readonly ProgressProject[], ownId: string): boolean => {
+const isUniqueUnresumedTask = (task: ProgressTask, projects: readonly ProgressProject[], ownId: string, ownAgent = 'claude'): boolean => {
   let count = 0
   let unresumed = 0
   for (const p of projects) {
     for (const t of p.tasks) {
-      if (t.auto !== null && (t.auto.agent === undefined || t.auto.agent === 'claude') && t.auto.session === ownId) {
+      if (t.auto !== null && (t.auto.agent ?? 'claude') === ownAgent && t.auto.session === ownId) {
         count += 1
         if (t.auto.resume === null || t.auto.resume === undefined) unresumed += 1
       }
@@ -838,11 +838,12 @@ export const buildView = (
   for (const project of folded.projects) {
     const name = project.name || s.uncategorized
     const isHere = isHereProject(name, here)
+    const ownAgent = (mine?.agent || 'claude').toLowerCase()
     for (const task of project.tasks) {
       const isMine = task.auto !== null && (
         task.auto.resume !== null && mine !== null && mine.sessionId
-          ? task.auto.resume === mine.sessionId
-          : (mine !== null && mine.sessionId && task.auto.session === ownId && (task.auto.agent === undefined || task.auto.agent === 'claude') && mine.isRun !== true && isUniqueUnresumedTask(task, folded.projects, ownId))
+          ? task.auto.resume === mine.sessionId && (task.auto.agent ?? 'claude') === ownAgent
+          : (mine !== null && mine.sessionId && task.auto.session === ownId && (task.auto.agent ?? 'claude') === ownAgent && mine.isRun !== true && isUniqueUnresumedTask(task, folded.projects, ownId, ownAgent))
       )
       if (isMine) {
         const own = folded.runs.get(task)

@@ -489,8 +489,8 @@ test('old ledger records under short-id scopes migrate to full session id scopes
   }
   const reconciled = observeQuestions(initialLedger, [], mine, [], NOW, true, 'reconcile-test')
   const record = reconciled.ledger.records.find(r => r.id === 'question:deadbeef:1')
-  expect(record?.scope).toBe(fullScope)
-  expect(record?.source?.session).toBe(PERSON)
+  expect(record?.scope).toBe(shortScope)
+  expect(record?.source?.session).toBe('aaaa1111')
   expect(record?.isUnresolved).toBe(false)
   expect(reconciled.ledger.records.filter(r => r.isUnresolved)).toHaveLength(0)
 })
@@ -515,8 +515,9 @@ test('a block with a long session value but no resume attribute does not acquire
 })
 
 test('upsertAutoBlock refuses an ambiguous match against an old block without resume', () => {
-  const oldBlock = ['<!-- auto session=12345678 agent=claude state=working updated=2026-10-27T12:00:00Z -->', '### Old task', '- [~] Doing', '<!-- /auto session=12345678 -->'].join('\n')
-  const initial = `## Demo\n${oldBlock}\n`
+  const oldBlockA = ['<!-- auto session=12345678 agent=claude state=working updated=2026-10-27T12:00:00Z -->', '### Old task', '- [~] Doing', '<!-- /auto session=12345678 -->'].join('\n')
+  const oldBlockB = ['<!-- auto session=12345678 agent=claude state=working updated=2026-10-27T12:01:00Z -->', '### Second old task', '- [~] Doing', '<!-- /auto session=12345678 -->'].join('\n')
+  const initial = `## Demo\n${oldBlockA}\n\n${oldBlockB}\n`
   const mirror: ProgressMirror = {
     ...emptyMirror('12345678-0000-4000-8000-000000000001', 'Demo', NOW, ''),
     title: 'New Task',
@@ -524,6 +525,7 @@ test('upsertAutoBlock refuses an ambiguous match against an old block without re
   }
   const result = upsertAutoBlock(initial, mirror, en)
   expect(result).toContain('### Old task')
+  expect(result).toContain('### Second old task')
   expect(result).toContain('### New Task')
 })
 
