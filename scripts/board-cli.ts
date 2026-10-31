@@ -21,7 +21,7 @@ import { immutableQuestionFiles } from './question-files'
 import { reusableQuestionObservation } from './question-observation'
 import { recentInboxFiles } from './inbox-files'
 import { serverMemoryArgs } from './server-runtime'
-import { migratePrivateRuntimeFile, privateRuntimeFolder, readPrivateRuntimeFile, RuntimeFolderError, writePrivateRuntimeFile } from './runtime-folder'
+import { migratePrivateRuntimeFile, privateRuntimeFolder, readPrivateRuntimeFile, RUNTIME_FOLDER_ENV, RuntimeFolderError, runtimeFolderHandoff, writePrivateRuntimeFile } from './runtime-folder'
 import { idleTimeout } from '../hooks/serve'
 import { pickSurface } from '../hooks/surface'
 import { boardAgents, boardKey, boardLayout, boardScreen, boardText, CHAT_MAX, chatText, doneToday, emptyBoardState, frame, isEmptyBoard, mutedLine, peekInbox, pinned, redact, boardItems, routesOf, SCREEN_ENTER, SCREEN_LEAVE, terminalLook } from '../hooks/board'
@@ -1159,9 +1159,10 @@ const isOwnFolder = (dir: string): boolean => {
 
 // Windows temp folders can grant sandbox accounts access. Protect only our dedicated child,
 // never the caller's whole runtime directory, before a token can be written.
-const runFolder = (): string => {
+// `name` is the address file: it is read in the same check as the folder when it is already there.
+const runFolder = (name: string): string => {
   const runtime = process.env.XDG_RUNTIME_DIR
-  if (process.platform === 'win32') return privateRuntimeFolder(runtime ? join(runtime, 'agent-board') : join(homedir(), '.cache', 'agent-board'))
+  if (process.platform === 'win32') return privateRuntimeFolder(runtime ? join(runtime, 'agent-board') : join(homedir(), '.cache', 'agent-board'), [name])
   if (runtime && isOwnFolder(runtime)) return runtime
   const own = join(homedir(), '.cache', 'agent-board')
   try {
@@ -1179,7 +1180,11 @@ const runFolder = (): string => {
 let served: string | undefined
 // The same progress.md named two ways (C:/x and C:\x) is one board, with one page.
 const board = (file: string): string => resolve(file)
-const serveFile = (): string => (served ??= join(runFolder(), `agent-board-${createHash('sha256').update(board(path)).digest('hex').slice(0, 16)}.json`))
+const serveFile = (): string => {
+  if (served !== undefined) return served
+  const name = `agent-board-${createHash('sha256').update(board(path)).digest('hex').slice(0, 16)}.json`
+  return (served = join(runFolder(name), name))
+}
 // Where 0.19.0 left it, beside progress.md.
 const oldServeFile = `${path.replace(/\.md$/i, '')}-serve.json`
 const script = process.argv[1] ?? ''
@@ -1394,7 +1399,9 @@ const ensureServer = async (): Promise<RunningServer | null> => {
   })
   if (args.includes('--allow-resume')) rest.push('--allow-resume')
   // In the board's own folder, not the agent's, so the server holds no project folder open.
-  const child = spawn(process.execPath, [...serverMemoryArgs(process.execArgv, process.env.NODE_OPTIONS), script, '--serve-child', ...rest], { cwd: dirname(path), detached: true, stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true })
+  // On Windows the server child is told which folder was just checked, so it does not check it again.
+  const handoff = runtimeFolderHandoff()
+  const child = spawn(process.execPath, [...serverMemoryArgs(process.execArgv, process.env.NODE_OPTIONS), script, '--serve-child', ...rest], { cwd: dirname(path), detached: true, stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true, env: handoff === undefined ? process.env : { ...process.env, [RUNTIME_FOLDER_ENV]: handoff } })
   const readyBy = performance.now() + 10_000
   // The child prints its address once it listens; it exits at once when it cannot.
   const url = await new Promise<string | null>(done => {
