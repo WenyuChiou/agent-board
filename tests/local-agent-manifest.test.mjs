@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
+import { RELEASE_0_20_5 } from './fixtures/released.ts'
 
 const setup = resolve('scripts/setup-codex.mjs')
 const session = 'test-codex-session-123'
@@ -34,6 +35,16 @@ const fixture = async fn => {
     return await fn({ home, root, script, progress, env, install, command })
   } finally {
     rmSync(home, { recursive: true, force: true, maxRetries: 8, retryDelay: 50 })
+  }
+}
+
+const recordOlderBoard = f => {
+  const olderHash = createHash('sha256').update('an earlier installed board').digest('hex')
+  for (const name of ['install-codex.json', 'install-antigravity.json']) {
+    const manifestPath = join(f.root, name)
+    const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'))
+    manifest.files[f.script] = olderHash
+    writeFileSync(manifestPath, JSON.stringify(manifest, null, 2) + '\n')
   }
 }
 
@@ -68,6 +79,18 @@ test('resumed Antigravity conversations receive bound --codex-report context and
   )
   assert.equal(report.status, 0, report.stderr)
   assert.equal(JSON.parse(report.stdout).session, resumedSession)
+
+  for (const [lang, sentence] of [
+    ['en', "the command finds that agent's one active session in this folder, and if there is none or more than one, say it is disconnected."],
+    ['zh-CN', '命令会找出该 agent 在此文件夹中唯一进行中的 session；找不到或不止一个就明示未接通。不扫描对话或猜 session，也不指定其他 session。'],
+    ['zh-TW', '指令會找出該 agent 在此資料夾中唯一進行中的 session；找不到或不只一個就明示未接通。不掃描對話或猜 session，也不指定其他 session。'],
+  ]) {
+    const installed = f.install('--agent', 'antigravity', '--apply', '--lang', lang)
+    assert.equal(installed.status, 0, installed.stderr)
+    const skill = readFileSync(join(f.home, '.gemini', 'config', 'skills', 'agent-board', 'SKILL.md'), 'utf8')
+    assert.ok(skill.includes('--codex-report --agent <agent>'), lang)
+    assert.ok(skill.includes(sentence), lang)
+  }
 }))
 
 test('updating shared runtime files for one agent synchronizes sibling install manifests without INSTALL_CONFLICT', () => fixture(f => {
@@ -89,10 +112,68 @@ test('updating shared runtime files for one agent synchronizes sibling install m
   // Updating codex refreshes the shared worker and synchronizes install-antigravity.json
   const updateCodex = f.install('--agent', 'codex', '--apply')
   assert.equal(updateCodex.status, 0, updateCodex.stderr)
+  const sibling = JSON.parse(readFileSync(join(f.root, 'install-antigravity.json'), 'utf8'))
+  assert.equal(sibling.files[workerPath], createHash('sha256').update(readFileSync(workerPath)).digest('hex'))
+  const doctor = f.command(['--codex-doctor', '--agent', 'antigravity'])
+  assert.equal(doctor.status, 0, doctor.stderr)
+  assert.equal(JSON.parse(doctor.stdout).installed, true)
 
   // Now updating or removing antigravity succeeds cleanly with zero INSTALL_CONFLICT
   const updateAg = f.install('--agent', 'antigravity', '--apply')
   assert.equal(updateAg.status, 0, updateAg.stderr)
   const removeAg = f.install('--agent', 'antigravity', '--remove', '--apply')
   assert.equal(removeAg.status, 0, removeAg.stderr)
+}))
+
+test('recognized released boards upgrade while edited released boards conflict', () => fixture(f => {
+  assert.equal(f.install('--agent', 'codex', '--apply').status, 0)
+  assert.equal(f.install('--agent', 'antigravity', '--apply').status, 0)
+  recordOlderBoard(f)
+  const released = `globalThis.AGENT_BOARD = ${JSON.stringify({ path: f.progress, lang: 'en' })}\n${RELEASE_0_20_5.board}`
+  writeFileSync(f.script, released)
+  const update = f.install('--agent', 'codex', '--apply')
+  assert.equal(update.status, 0, update.stderr + update.stdout)
+  const doctor = f.command(['--codex-doctor', '--agent', 'antigravity'])
+  assert.equal(doctor.status, 0, doctor.stderr)
+  assert.equal(JSON.parse(doctor.stdout).installed, true)
+  writeFileSync(f.script, `${released}// mine\n`)
+  const edited = f.install('--agent', 'codex', '--apply', '--json')
+  assert.notEqual(edited.status, 0)
+  assert.equal(JSON.parse(edited.stderr).error.code, 'INSTALL_CONFLICT')
+}))
+
+test('updating a released board repairs stale sibling manifests without adding unlisted files', () => fixture(f => {
+  assert.equal(f.install('--agent', 'codex', '--apply').status, 0)
+  assert.equal(f.install('--agent', 'antigravity', '--apply').status, 0)
+  recordOlderBoard(f)
+  const unrelatedPath = join(f.root, 'install-gemini.json')
+  const unrelated = JSON.stringify({ files: {}, groups: {}, progress: f.progress }) + '\n'
+  writeFileSync(unrelatedPath, unrelated)
+  const released = `globalThis.AGENT_BOARD = ${JSON.stringify({ path: f.progress, lang: 'en' })}\n${RELEASE_0_20_5.board}`
+  const releaseHash = createHash('sha256').update(released).digest('hex')
+  const owner = { files: { [f.script]: releaseHash }, groups: {}, progress: f.progress }
+  writeFileSync(join(f.root, 'install-opencode.json'), JSON.stringify(owner) + '\n')
+  writeFileSync(f.script, released)
+  const update = f.install('--agent', 'codex', '--apply')
+  assert.equal(update.status, 0, update.stderr + update.stdout)
+  assert.equal(readFileSync(unrelatedPath, 'utf8'), unrelated)
+  const doctor = f.command(['--codex-doctor', '--agent', 'antigravity'])
+  assert.equal(doctor.status, 0, doctor.stderr)
+  assert.equal(JSON.parse(doctor.stdout).installed, true)
+  const sibling = JSON.parse(readFileSync(join(f.root, 'install-antigravity.json'), 'utf8'))
+  assert.equal(sibling.files[f.script], createHash('sha256').update(readFileSync(f.script)).digest('hex'))
+}))
+
+test('Codex reports use the bound thread instead of session fields in report bodies', () => fixture(f => {
+  const installed = f.install('--agent', 'codex', '--apply')
+  assert.equal(installed.status, 0, installed.stderr)
+  const body = { session: 'short', title: 'Bound report', state: 'working', steps: ['- [~] Working'] }
+  const report = f.command(['--codex-report'], body)
+  assert.equal(report.status, 0, report.stderr)
+  const out = JSON.parse(report.stdout)
+  assert.equal(out.session, session)
+  assert.match(readFileSync(f.progress, 'utf8'), new RegExp(`<!-- auto session=${out.block} agent=codex`))
+  const unbound = f.command(['--codex-report', '--lang', 'en'], { ...body, session: 'untrusted-session-123' }, { CODEX_THREAD_ID: undefined })
+  assert.notEqual(unbound.status, 0)
+  assert.match(unbound.stderr, /This session cannot report steps yet/)
 }))

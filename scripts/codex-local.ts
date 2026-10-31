@@ -368,7 +368,7 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
         ? agent === 'antigravity'
           ? (typeof payload.conversationId === 'string' ? payload.conversationId : payload.session_id ?? payload.sessionId ?? payload.sessionID)
           : payload.session_id ?? payload.sessionId ?? payload.sessionID ?? (agent === 'grok' ? env.GROK_SESSION_ID : undefined)
-        : flag('--session') ?? (typeof payload.session === 'string' ? payload.session : typeof payload.conversationId === 'string' ? payload.conversationId : typeof payload.sessionId === 'string' ? payload.sessionId : (agent === 'codex' ? env.CODEX_THREAD_ID ?? reportSession() : (env.AGENT_BOARD_AGENT === agent ? env.AGENT_BOARD_SESSION_ID : undefined) ?? reportSession()))
+        : flag('--session') ?? (agent === 'codex' ? env.CODEX_THREAD_ID ?? reportSession() : (env.AGENT_BOARD_AGENT === agent ? env.AGENT_BOARD_SESSION_ID : undefined) ?? reportSession())
       if (session === undefined && mode === '--codex-report' && agent === 'codex') throw new Error('UNBOUND_REPORT')
       if (typeof session !== 'string' || !/^[a-zA-Z0-9][a-zA-Z0-9_-]{5,127}$/.test(session)) throw new Error('INVALID_SESSION')
       const now = new Date(at).toISOString().replace(/\.\d{3}Z$/, 'Z')
@@ -401,7 +401,7 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
       }
     }
     const current = isRecovery ? undefined : buildEntry(mode, agent, raw, flag, process.env, progress, started)
-    const isInferredReport = mode === '--codex-report' && flag('--session') === undefined && typeof raw.session !== 'string' && typeof raw.conversationId !== 'string' && typeof raw.sessionId !== 'string' && (agent === 'codex' ? process.env.CODEX_THREAD_ID === undefined : !(process.env.AGENT_BOARD_AGENT === agent && process.env.AGENT_BOARD_SESSION_ID !== undefined))
+    const isInferredReport = mode === '--codex-report' && flag('--session') === undefined && (agent === 'codex' ? process.env.CODEX_THREAD_ID === undefined : !(process.env.AGENT_BOARD_AGENT === agent && process.env.AGENT_BOARD_SESSION_ID !== undefined))
     const rawEntry = (raw: Json): Pending => {
       if (raw.version !== 1 || raw.kind !== 'raw' || !Number.isSafeInteger(raw.at) || Number(raw.at) < 0 || Number(raw.at) > Date.now() + 60000) throw new Error('INVALID_RAW_ENTRY')
       if (!Array.isArray(raw.argv) || !raw.argv.every(value => typeof value === 'string')) throw new Error('INVALID_RAW_ARGV')
@@ -916,9 +916,8 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
         const siblingFiles = { ...object(sibling.files) } as Record<string, string>
         let updatedSibling = false
         for (const sharedFile of [script, worker, skill]) {
-          const prior = before.get(sharedFile)
           const nextText = files[sharedFile]
-          if (prior !== null && prior !== undefined && nextText !== undefined && prior !== nextText && siblingFiles[sharedFile] === hash(prior)) {
+          if (Object.hasOwn(siblingFiles, sharedFile) && nextText !== undefined && changes.some(change => change.file === sharedFile) && siblingFiles[sharedFile] !== hash(nextText)) {
             siblingFiles[sharedFile] = hash(nextText)
             updatedSibling = true
           }
