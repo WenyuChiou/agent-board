@@ -5,6 +5,7 @@ import { dirname, join, relative, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { addedLines, testTitles, titleKnown } from './pr-check.mjs'
 import { fragmentIssue, isFragmentPath } from './changelog-fold.mjs'
+import { isBundleFile } from './bundle-text.mjs'
 
 const tables = [['hooks/i18n.ts', 'ZH_TW'], ['hooks/strings-en.ts', 'EN'], ['hooks/strings-zh-cn.ts', 'ZH_CN']]
 const homeNames = ['HOME', 'USERPROFILE', 'APPDATA', 'LOCALAPPDATA', 'XDG_CONFIG_HOME', 'CLAUDE_CONFIG_DIR', 'CLAUDE_PROGRESS_FILE']
@@ -129,7 +130,7 @@ export const engineProblems = text => {
 export const bundleSources = cwd => {
   const sources = new Set(['scripts/build-board.ts'])
   const visit = path => {
-    if (path === 'hooks/board-script.ts') return
+    if (isBundleFile(path)) return
     if (sources.has(path)) return
     sources.add(path)
     if (!existsSync(join(cwd, path))) return
@@ -306,7 +307,7 @@ export const runPreflight = async ({ cwd = process.cwd(), base = 'origin/main', 
 
   await check('board bundle scan', () => {
     const hasSource = [...bundleSources(cwd)].some(path => changed.has(path))
-    const hasBundle = changed.has('hooks/board-script.ts')
+    const hasBundle = [...changed].some(isBundleFile)
     if (hasBundle && !hasSource) add('FAIL', 'never edit the bundle by hand')
     else if (hasSource && !hasBundle) add('WARN', "the board bundle is out of date: rebuild with `npx --yes bun@1.4.2 scripts/build-board.ts`, or write 'maintainer rebuilds at merge' under Checks")
     else add('PASS', 'board bundle and its sources changed together or are unchanged.')

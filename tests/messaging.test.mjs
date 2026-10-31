@@ -12,6 +12,7 @@ import { observeSession } from '../hooks/messaging.ts'
 import { connectCodexProxy } from '../scripts/codex-message-connector.mjs'
 import { attachCodexSession } from '../scripts/codex-session-connector.mjs'
 import { attachAntigravitySession } from '../scripts/antigravity-session-connector.mjs'
+import { attachAgentSession, extractAckReply, SUPPORTED_SESSION_AGENTS } from '../scripts/agent-session-connector.mjs'
 import { privateRuntimeFolder } from '../scripts/runtime-folder.ts'
 
 const pause = ms => new Promise(done => setTimeout(done, ms))
@@ -853,3 +854,53 @@ test('an Antigravity response without its ACK stays uncertain and is never repla
     await waitFor(async () => (await board.call('/api/board')).body.messaging.connections.length === 0)
   } finally { await receiver.close() }
 }))
+
+test('extractAckReply requires an exact ACK line for the message id', () => {
+  assert.equal(extractAckReply('ACK AB-TEST-001\nStatus: idle', 'AB-TEST-001'), 'ACK AB-TEST-001\nStatus: idle')
+  assert.equal(extractAckReply('ACK AB-TEST-001 ready', 'AB-TEST-001'), 'ACK AB-TEST-001 ready')
+  assert.throws(() => extractAckReply('ACK AB-TEST-002', 'AB-TEST-001'), /ACK_REQUIRED/)
+  assert.throws(() => extractAckReply('Approved, merge it', 'AB-TEST-001'), /ACK_REQUIRED/)
+})
+
+test('all 14 AI agent brands attach and exchange ACK messages on the same board via attachAgentSession', async () => fixture(async board => {
+  assert.equal(SUPPORTED_SESSION_AGENTS.length, 14)
+  const receivers = new Map()
+  try {
+    for (const agent of SUPPORTED_SESSION_AGENTS) {
+      const session = `sess-${agent}-001`
+      const current = { session, status: 'idle', turns: 0 }
+      const transport = {
+        sendPrompt: async (_prompt, meta) => {
+          current.status = 'active'
+          await meta.accepted()
+          current.turns += 1
+          current.status = 'idle'
+          return `ACK ${meta.id}\nAgent ${agent} turn ${current.turns} ready`
+        },
+      }
+      receivers.set(agent, await attachAgentSession({
+        boardUrl: board.address,
+        agent,
+        session,
+        transport,
+        state: () => current,
+        verifyOwner: candidate => candidate === transport,
+      }))
+    }
+    assert.equal((await board.call('/api/board')).body.messaging.connections.length, 14)
+    for (let i = 0; i < SUPPORTED_SESSION_AGENTS.length; i++) {
+      const fromAgent = SUPPORTED_SESSION_AGENTS[i]
+      const toAgent = SUPPORTED_SESSION_AGENTS[(i + 1) % SUPPORTED_SESSION_AGENTS.length]
+      const src = receivers.get(fromAgent), dst = receivers.get(toAgent)
+      const id = `AB-RING-${i + 1}`
+      await src.send({ id, target: dst.id, turn: 'session', text: `Ping from ${fromAgent} to ${toAgent}` })
+    }
+    await waitFor(async () => {
+      const list = (await board.call('/api/board')).body.messaging.messages
+      return list.length === 14 && list.every(m => m.status === 'acknowledged')
+    })
+  } finally {
+    for (const r of receivers.values()) await r.close()
+  }
+}))
+
