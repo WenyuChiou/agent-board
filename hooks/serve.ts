@@ -667,7 +667,7 @@ const PAGE_WORDS = [
   'pgOlder', 'pgOlderOne', 'pgSeeAll', 'pgMore', 'pgOwnTodo', 'pgWriteOwn', 'pgCopyAnswer', 'pgStuck', 'pgTodo', 'pgLast', 'pgStoppedAt',
   'pgDoneSteps', 'pgDoneStepsOne', 'pgMoreSteps', 'pgMoreStepsOne', 'pgVersion', 'pgVersions', 'pgUnreadable', 'pgHowFix', 'pgFixAdvice',
   'pgReady', 'pgUnreadableReply', 'pgUnknownAge', 'pgCopyReply', 'pgPasteIn', 'pgSentTo', 'pgAnswered', 'pgCopyAgain', 'pgCancel',
-  'showAllQuestions', 'pgSendReply', 'pgCopyFailed', 'pgOffline', 'pgNotSeen', 'pgWorkingHint', 'pgPasteLater', 'serveRetry', 'serveCopyMessage', 'serveSendBusy', 'pgNoQuestions', 'pgOthers', 'pgStopped', 'pgDoneWeek', 'pgChipEmpty', 'pgStartIn', 'pgConnected', 'pgTipNeeds', 'pgTipNeedsOne', 'pgTipWorking', 'pgTipCantRead', 'pgSideFold', 'pgSideOpen',
+  'showAllQuestions', 'pgSendReply', 'pgCopyFailed', 'pgOffline', 'pgNotSeen', 'pgWorkingHint', 'pgPasteLater', 'serveRetry', 'serveCopyMessage', 'serveSendBusy', 'pgNoQuestions', 'pgOthers', 'pgStopped', 'pgDoneWeek', 'pgChipEmpty', 'pgStartIn', 'pgStartAny', 'pgConnected', 'pgTipNeeds', 'pgTipNeedsOne', 'pgTipWorking', 'pgTipCantRead', 'pgSideFold', 'pgSideOpen',
 ] as const satisfies ReadonlyArray<keyof Strings>
 
 // The chat prompt goes as it is in every language: the chat reads it, not the person.
@@ -2110,12 +2110,13 @@ const PAGE_SCRIPT = String.raw`
     var push = function (id) { id = String(id || '').toLowerCase(); if (id && ids.indexOf(id) === -1) ids.push(id); };
     view.agents.forEach(function (one) { push(one.agent); });
     connections.forEach(function (one) { push(one.agent); });
-    if (!ids.length) { push('claude'); push('codex'); }
     return ids;
   }
   // The empty board: the agents that can report here, and how their work shows up.
+  // With nothing connected it names no agent, so none is marked connected (#546).
   function freshPage(view) {
     var ids = connectedIds(view);
+    if (!ids.length) return add(el('section', 'fresh'), el('h2', '', w('pgReady')), el('p', '', w('pgStartAny')));
     var list = el('ul');
     ids.forEach(function (id) {
       add(list, add(el('li'), agentMark(id), add(el('span'), el('b', '', agentName(id)), el('span', 'ok', ' ✓ ' + w('pgConnected')))));

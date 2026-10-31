@@ -9,7 +9,7 @@ import { knownFailure } from './lib/known.mjs'
 import { PANE_MS, PAGE_MS } from './lib/budget.mjs'
 
 // The page's empty board: the agents that report here and what to do next, in place of the sections.
-const EMPTY_PAGE = /Your board is ready[\s\S]*Start a new Claude Code \/ Codex session; its work shows here/
+const EMPTY_PAGE = /Your board is ready[\s\S]*Start a new session in an agent you set up; its work shows here/
 
 describe('L1 first run', () => {
   test('L1 first run: an empty board says how to connect the first agent', async () => {

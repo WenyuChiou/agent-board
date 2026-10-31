@@ -7489,19 +7489,23 @@ test('the empty page lists the connected agents and how their work appears', asy
   for (const words of [EN, ZH_TW, ZH_CN]) {
     const empty = runtime.serveModel(runtime.buildView([], [], null, groupedNow, 0, {}, words), [], words, new Set(), false, undefined, false, options)
     const html = runtime.servePage(words, 'synthetic', false)
-    // Nothing reported yet: the page names the agents that can report here, each marked connected.
+    // Nothing reported and nothing connected: the page names no agent and marks none connected.
     const fresh = await pageDom(html, empty)
     const drawn = fresh.node('board').textContent
     assert.ok(drawn.includes(words.pgReady), drawn)
-    assert.deepEqual(markNames(fresh.node('board')), ['ag ag-claude-code', 'ag ag-codex'])
-    assert.equal(drawn.split(words.pgConnected).length - 1, 2, drawn)
+    assert.deepEqual(markNames(fresh.node('board')), [])
+    assert.ok(!drawn.includes(words.pgConnected), drawn)
+    assert.ok(!drawn.includes(words.agentNames.claude) && !drawn.includes(words.agentNames.codex), drawn)
     // And how to start, in one line.
-    assert.ok(drawn.includes(words.pgStartIn(`${words.agentNames.claude} / ${words.agentNames.codex}`)), drawn)
+    assert.ok(drawn.includes(words.pgStartAny), drawn)
     assert.equal(fresh.node('chips').childNodes.length, 0)
-    // An agent that has a delivery connection joins the list.
+    // An agent that has a delivery connection joins the list, marked connected.
     const joined = await pageDom(html, empty, { messaging: { connections: [{ agent: 'gemini', id: 'gemini-1', session: 'synthetic' }], messages: [] } })
     await joined.settle()
-    assert.ok(joined.node('board').textContent.includes(words.agentNames.gemini), joined.node('board').textContent)
+    const listed = joined.node('board').textContent
+    assert.equal(listed.split(words.pgConnected).length - 1, 1, listed)
+    assert.ok(listed.includes(words.pgStartIn(words.agentNames.gemini)), listed)
+    assert.ok(!listed.includes(words.pgStartAny), listed)
   }
 })
 
@@ -8321,8 +8325,8 @@ test('the page of a grouped board draws each question once, copies an answer and
       const fresh = await pageDom(runtime.servePage(words, 'synthetic', false), empty)
       assert.equal(fresh.node('chips').childNodes.length, 0)
       assert.ok(fresh.node('board').textContent.includes(words.pgReady))
-      // The empty board names the agents that can report here and tells how to start.
-      assert.ok(fresh.node('board').textContent.includes(words.pgStartIn(`${words.agentNames.claude} / ${words.agentNames.codex}`)))
+      // With nothing connected the empty board names no agent and tells how to start.
+      assert.ok(fresh.node('board').textContent.includes(words.pgStartAny))
       // (The version label and the project's name on GitHub are the same in every language.)
       const labels = Object.entries(runtime.pageWords(words, true)).filter(([key]) => key.startsWith('pg') && key !== 'pgVersion').map(([, value]) => value).join(' ')
       if (words === EN) assert.doesNotMatch(labels, /\p{Script=Han}/u)

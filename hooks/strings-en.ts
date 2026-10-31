@@ -675,6 +675,7 @@ export const EN: Strings = {
   pgDoneWeek: (n: number): string => `${n} this week`,
   pgChipEmpty: 'No work yet',
   pgStartIn: (agent: string): string => `Start a new ${agent} session; its work shows here.`,
+  pgStartAny: 'Start a new session in an agent you set up; its work shows here.',
   pgConnected: 'connected',
   pgTipNeeds: (n: number): string => `${n} need you`,
   pgTipNeedsOne: '1 needs you',

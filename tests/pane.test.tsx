@@ -4889,6 +4889,8 @@ test('/progress lang switches the language and remembers it; auto goes back to t
 
 // progress.html lists what needs you in its Needs you sheet, before Working now (#546).
 const inNeeds = (page: string, text: string): boolean => { const at = page.indexOf(text); return at > page.indexOf('id="dash-needs"') && at < page.indexOf('id="dash-working"') }
+// An unprocessed inbox turn's copy; a Needs you item also uses class="ask", but starts with its kind.
+const INBOX_ASK = /<div class="ask" data-agent="[^"]*"><div class="where">/
 
 test('progress.html is written beside progress.md, and /progress open opens it in the browser', async ($, on) => {
   const ran: string[][] = []
@@ -4933,6 +4935,10 @@ test('progress.html shows unprocessed inbox questions before a digest and drops 
   const digested = world.files.get('/home/me/.claude/progress.html') ?? ''
   expect(world.files.get(FILE)).toContain(question)
   expect(inNeeds(digested, question)).toBe(true)
+  // The digest recorded the question, so the pending copy is gone: no inbox hint, no unprocessed ask.
+  expect(digested).not.toContain(ZH_TW.dashInboxHint)
+  expect(digested).not.toContain('this page cannot send replies.')
+  expect(digested).not.toMatch(INBOX_ASK)
 })
 
 test('progress.html escapes inbox text and skips turns already recorded as processed', async ($, on) => {
@@ -5015,6 +5021,8 @@ test('progress.html shows only the agent and project for a pending turn without 
   await $.session.start({ cwd: '/work/persona_framework', surface: 'terminal', isInteractive: true })
   const page = world.files.get('/home/me/.claude/progress.html') ?? ''
   expect(inNeeds(page, 'api-gateway · codex')).toBe(true)
+  expect(page).toMatch(INBOX_ASK)
+  expect(page).toContain(ZH_TW.dashInboxHint)
   expect(page).not.toContain('Private prompt contents')
 })
 

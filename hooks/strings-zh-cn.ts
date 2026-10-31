@@ -671,6 +671,7 @@ export const ZH_CN: Strings = {
   pgDoneWeek: (n: number): string => `本周 ${n} 个`,
   pgChipEmpty: '没有工作',
   pgStartIn: (agent: string): string => `开一个新的 ${agent} 任务，它的进度就会出现在这里。`,
+  pgStartAny: '在你设置好的代理里开一个新任务，它的进度就会出现在这里。',
   pgConnected: '已连接',
   pgTipNeeds: (n: number): string => `${n} 件需要你`,
   pgTipNeedsOne: '1 件需要你',
