@@ -120,6 +120,7 @@ export const ZH_TW = {
   doingStep: (text: string): string => `正在做：${text}`,
   nextStep: (text: string): string => `下一步：${text}`,
   noSteps: '還沒列步驟',
+  stepIsRecord: '一筆記錄，沒有文字說明',
   suffixCancelled: '（取消）',
   suffixWaiting: '（等你）',
   suffixRunning: '（在跑）',

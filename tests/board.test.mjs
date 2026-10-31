@@ -8438,7 +8438,7 @@ test('the terminal board keeps group headings, --all question shelves and the du
   }
 })
 
-// One grouped fixture test keeps its checker and known product TODO together.
+// One grouped fixture test keeps its checker and the first-screen check together.
 test('the synthetic big board has the shape of a heavy user\'s board', async t => {
   const { bigBoard, bigBoardNow, bigBoardFirstObserved } = await import('./fixtures/big-board.mjs')
   const { neverShown } = await import('./fixtures/never-shown.mjs')
@@ -8538,17 +8538,58 @@ test('the synthetic big board has the shape of a heavy user\'s board', async t =
     assert.equal(long[0].kind, 'long-line')
     assert.deepEqual(neverShown('é🧪 abcdef0')[0], { kind: 'commit-id', line: 1, column: 4, value: 'abcdef0' })
   })
-  await it('the terminal board\'s first screen of the big board shows nothing from the never-shown list', context => {
+  await it('the terminal board\'s first screen of the big board shows nothing from the never-shown list', () => {
     // An 80-column, 24-row terminal at its default collapsed shelves. This does
     // not cover the browser, interactive navigation or installed host sessions.
     const screen = boardText(view, [], EN, { width: 80, isColor: false }).split('\n').slice(0, 24).join('\n')
     assert.equal(screen.split('\n').length, 24, 'the heavy fixture fills the first screen')
     assert.match(screen, /fixture-repo-/, 'real fixture project rows are drawn')
-    const findings = neverShown(screen)
-    context.diagnostic(JSON.stringify({ columns: 80, rows: 24, findings }))
-    if (findings.length > 0) context.todo(`#460 known first-screen findings: ${findings.map(one => `${one.kind} at ${one.line}:${one.column}`).join(', ')}`)
-    assert.deepEqual(findings, [])
+    assert.deepEqual(neverShown(screen), [])
   })
+})
+
+test('a step an agent wrote as a JSON record shows its text field or a plain line on every board surface', async () => {
+  const { boardText, boardScreen, emptyBoardState, chatText, serveModel, buildView, parseProgress } = await sourceBoard()
+  const now = Date.parse('2026-10-25T12:00:00Z')
+  const id = 'c13dc1a4-90bd-4000-8000-228bee76aaaa'
+  const record = `{"event":"synthetic-turn","session":"${id}","path":"C:\\synthetic\\repo","result":{"ok":true}}`
+  const source = `## synthetic-repo
+<!-- auto session=59800001 agent=codex state=waiting updated=${new Date(now - 60_000).toISOString()} -->
+### Synthetic task
+- [ ] ${record}
+- [ ] {"event":"synthetic-turn","session":"${id.slice(0, 20)}
+- [ ] {"text":"Choose the blue release","session":"${id}"}
+- [ ] [{"event":"synthetic-turn"}]
+- [ ] {choose one}
+- [ ] [WIP] fix
+<!-- /auto session=59800001 -->
+`
+  for (const s of [EN, ZH_TW, ZH_CN]) {
+    const view = buildView(parseProgress(source), [], null, now, 0, {}, s)
+    const row = view.groups[0].rows[0]
+    assert.deepEqual(row.steps.map(step => step.text), [s.stepIsRecord, s.stepIsRecord, 'Choose the blue release', s.stepIsRecord, '{choose one}', '[WIP] fix'], s.lang)
+    assert.equal(row.status, s.nextStep(s.stepIsRecord), 'the status line says the plain words too')
+    const drawn = [
+      boardText(view, [], s, { width: 80, isColor: false }),
+      boardScreen(view, [], emptyBoardState, s, { width: 80, isColor: false }),
+      chatText(view, [], [], s, '/home/synthetic', false),
+      JSON.stringify(serveModel(view, [], s)),
+    ]
+    for (const text of drawn) {
+      assert.doesNotMatch(text, /synthetic-turn|c13dc1a4/, `${s.lang}: no record is drawn`)
+      assert.ok(text.includes(s.stepIsRecord), s.lang)
+    }
+    // The page's model is JSON by nature, so only the three plain-text surfaces go through the checker.
+    for (const text of drawn.slice(0, 3)) assert.deepEqual(neverShown(text), [], s.lang)
+  }
+})
+
+test('a hand-kept task\'s step that starts with a brace stays as the person wrote it', async () => {
+  const { buildView, parseProgress } = await sourceBoard()
+  const view = buildView(parseProgress('## mine\n### Typed task\n- [ ] {"note": "typed by me"}\n'), [], null, Date.parse('2026-10-25T12:00:00Z'), 0, {}, EN)
+  const row = view.groups[0].rows[0]
+  assert.deepEqual(row.steps.map(step => step.text), ['{"note": "typed by me"}'])
+  assert.equal(row.next?.step, '{"note": "typed by me"}', 'a press on the step still matches the line in the file')
 })
 
 const groupedNow = Date.parse('2026-10-25T12:00:00Z')

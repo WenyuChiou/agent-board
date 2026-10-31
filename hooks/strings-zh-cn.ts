@@ -82,6 +82,7 @@ export const ZH_CN: Strings = {
   doingStep: (text: string): string => `正在做：${text}`,
   nextStep: (text: string): string => `下一步：${text}`,
   noSteps: '还没列步骤',
+  stepIsRecord: '一条记录，没有文字说明',
   suffixCancelled: '（取消）',
   suffixWaiting: '（等你）',
   suffixRunning: '（在跑）',

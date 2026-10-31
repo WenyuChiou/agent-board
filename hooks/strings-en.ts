@@ -82,6 +82,7 @@ export const EN: Strings = {
   doingStep: (text: string): string => `doing: ${text}`,
   nextStep: (text: string): string => `next: ${text}`,
   noSteps: 'no steps yet',
+  stepIsRecord: 'a log entry with no words to show',
   suffixCancelled: ' (canceled)',
   suffixWaiting: ' (waiting on you)',
   suffixRunning: ' (running)',

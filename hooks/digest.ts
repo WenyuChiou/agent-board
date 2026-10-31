@@ -1,6 +1,6 @@
 import type { ProgressMirror, ProgressMirrorTask } from '../types'
 import { cleanContext, cleanTitle, clip, renewQuestion, waitsOnYou, withoutMarks } from './mirror'
-import { answeredStep } from './step-words'
+import { answeredStep, oneLine } from './step-words'
 import { ZH_TW } from './i18n'
 import type { Strings } from './i18n'
 
@@ -91,6 +91,20 @@ const normalizeReplyValue = (answer: string): { text: string | null; isStructure
 }
 
 export const normalizeReply = (answer: string): string | null => normalizeReplyValue(answer).text
+
+// An agent can write a whole JSON record into a step (a hook's payload, a turn log). It starts
+// with a brace and a quoted key, or a bracket and an object or string, so `{choose one}` and
+// `[WIP] fix` stay as written. Such a step has no words of its own: the record's own text field
+// stands in when it has one, else a line that says so, and the braces, ids and paths inside are
+// never drawn. A record cut off before its closing brace reads the same way. Null for any other
+// step. The same text fields are read as in a reply.
+const RECORD_STEP = /^\s*(?:\{\s*"|\[\s*[{"])/
+export const recordStepWords = (text: string, s: Strings): string | null => {
+  if (!RECORD_STEP.test(text)) return null
+  const { text: words, isStructured } = normalizeReplyValue(text)
+
+  return oneLine(isStructured && words !== null ? words : s.stepIsRecord) || s.stepIsRecord
+}
 
 // The question a reply ends on, if its last paragraph asks one: the last sentence there
 // with a question mark, without code or markdown. A reply that ends on a statement asks
