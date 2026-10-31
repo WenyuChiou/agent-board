@@ -28,9 +28,9 @@ fail planning; they never become an empty passing plan.
 On a pull request the test jobs check out GitHub's merge of the pull request into
 main (`github.sha`), not its head, so a pull request that is behind main is tested
 with main's newer changes. GitHub makes that merge when the pull request is
-opened, pushed or reopened; when main moves on later, merge main or push again
-before merging. A pull request with a merge conflict gets no run until main is
-merged. The planner and pr-check still read the pull request's own base and head.
+opened, pushed or reopened. A pull request that is only behind main merges as
+it is once its checks pass. A pull request with a merge conflict gets no run
+until main is merged. The planner and pr-check still read the pull request's own base and head.
 A test file the planner selects from the head must also exist in the merge, so a
 pull request whose selected test main deleted or renamed fails until it merges
 main.
@@ -53,9 +53,12 @@ Branch protection must require affected checks, CI validation and pr-check from
 GitHub Actions. Requiring old expanded matrix row names would leave unaffected
 PRs waiting for contexts that a skipped matrix never creates. The approved
 migration runs the rollout in full first and preserves all other protections.
-Existing PRs then merge main before using the new gate.
-Branch protection also requires a pull request to be up to date with main before
-it merges, so the merge CI tested is the one that lands.
+That migration is done; a pull request now merges main only when GitHub reports
+a conflict, or when the maintainer rebuilds the bundle that the merged result needs.
+Branch protection does not require a pull request to be up to date with main
+(the owner turned that off on 2026-10-31; the required checks are unchanged), so
+the merge CI tested may be older than main when it lands. The run on the push to
+main checks what landed.
 
 A weekly full run and workflow_dispatch with full=true exercise the complete
 catalog. Releases, manifest/governance/planner changes and unknown paths also

@@ -6,7 +6,7 @@ Below, `<agent>` is your name in lower case: your agent's name (`codex`, `dot`, 
 
 ## How a pull request moves
 
-[docs/dev/team-process.md](dev/team-process.md) gives the rules for each step from claim to merge: the comment each step leaves on GitHub, how many pull requests you may have waiting, when the review verdict comes, how many review rounds there are, the order pull requests merge in, and which issues dot takes. This page gives the commands you run at each step.
+[docs/dev/team-process.md](dev/team-process.md) gives the rules for each step from claim to merge: the comment each step leaves on GitHub, how many pull requests a contributor from outside the team may have open, when the review verdict comes, how many review rounds there are, the order pull requests merge in, and which issues dot takes. This page gives the commands you run at each step.
 
 ## 1. Find work
 
@@ -19,12 +19,14 @@ Take one from the first list (the second is kept for the owner's cloud agents, d
 
 ## 2. Claim it
 
+This step is for a contributor from outside the team (not the owner, a member or a collaborator). The team needs no claim and has no limit on open pull requests ([CONTRIBUTING.md](../CONTRIBUTING.md#pull-requests) rules 3 and 10).
+
 ```sh
 gh pr list -R WenyuChiou/agent-board --state open
 gh issue view <N> -R WenyuChiou/agent-board --comments
 ```
 
-Go on only if nobody has an open pull request for the issue or a `Claim:` whose time has not passed, you have no issue in progress outside this pull request (claim the next only after your last pull request merges), the issue is in the next milestone (later milestones are parked; an issue labelled `for-agent` is open to you whatever its milestone), and you have a free slot ([docs/dev/team-process.md, One thing at a time](dev/team-process.md#one-thing-at-a-time)). A slot is rule 10: at most two open pull requests per author and eight in all. Drafts count; release pull requests, governance pull requests and those labelled `cap-exempt` do not. Keep open pull requests at six or fewer; eight is the hard cap. One pull request covers one feature (even when it spans several issues) or two or three bug fixes, never more than three; claim every issue it will name, with the same branch ([CONTRIBUTING.md](../CONTRIBUTING.md#pull-requests) rules 2 and 3). Then claim each one, at most two days ahead:
+Go on only if nobody has an open pull request for the issue or a `Claim:` whose time has not passed, you have no issue in progress outside this pull request (claim the next only after your last pull request merges), the issue is in the next milestone (later milestones are parked; an issue labelled `for-agent` is open to you whatever its milestone), and you have a free slot ([docs/dev/team-process.md, How much is open at once](dev/team-process.md#how-much-is-open-at-once)). A slot is rule 10: at most two open pull requests per GitHub login and four from outside the team in all. Drafts count, and no pull request is exempt. One pull request covers one feature (even when it spans several issues) or two or three bug fixes, never more than three; claim every issue it will name, with the same branch ([CONTRIBUTING.md](../CONTRIBUTING.md#pull-requests) rules 2 and 3). Then claim each one, at most two days ahead:
 
 ```sh
 until=$(date -u -d '+1 day' '+%Y-%m-%d %H:%M' 2>/dev/null || date -u -v+1d '+%Y-%m-%d %H:%M')
@@ -131,7 +133,7 @@ Commit as `<type>: <summary>` or `<type>(<scope>): <summary>`, with a body that 
 cp .github/pull_request_template.md ../pr-body.md
 ```
 
-The body opens with one `Fixes #N` line for each issue (`Part of #N` for one step of a split issue), one right after the other, then `Author: <agent>, <branch>`. The PR check reads the run of those lines at the top, fails a `fix` title that lists more than three, and looks for your claim on each issue. Never put a bug fix in a feature pull request. Under Evidence, name the full head sha your results are for. Under Checks, add each result after a dash; for a check you did not run, `not run:` and why; for one that does not apply, `n/a:` and why. Screenshots are drawn from made-up data, with alt text starting "Synthetic". Check the body, push and open the draft:
+The body opens with one `Fixes #N` line for each issue (`Part of #N` for one step of a split issue), one right after the other, then `Author: <agent>, <branch>`. The PR check reads the run of those lines at the top, fails a `fix` title that lists more than three, and, for a contributor from outside the team, looks for your claim on each issue. Never put a bug fix in a feature pull request. Under Evidence, name the full head sha your results are for. Under Checks, add each result after a dash; for a check you did not run, `not run:` and why; for one that does not apply, `n/a:` and why. Screenshots are drawn from made-up data, with alt text starting "Synthetic". Check the body, push and open the draft:
 
 ```sh
 node scripts/pr-check.mjs --body-file ../pr-body.md --title "fix(cli): <summary>"
@@ -142,7 +144,7 @@ node scripts/pr-check.mjs --pr <PR>
 
 From a fork, `gh pr create` also needs `--head <your GitHub login>:<branch>`, and GitHub holds the PR check and CI until a maintainer approves the run. Each push, body edit, label change or `gh pr ready` starts a run that waits again; the maintainer looks for held runs at least once a day. So push when a piece of work is done, not after every small edit, and keep the pull request a draft until the approved runs pass (rule 7). The PR check prints what is still missing and how to fix it. After you edit the body, update the pull request with `gh pr edit <PR> -R WenyuChiou/agent-board --body-file ../pr-body.md`; the check runs again.
 
-If the PR check says you are over the open pull request limit, close the newest of yours (`gh pr close <PR> -R WenyuChiou/agent-board`) and, once a slot is free, open a new pull request from the same branch. Do not reopen the closed one: it would keep its first place in the queue.
+If the PR check says you are over the open pull request limit for contributors from outside the team, close the newest of yours (`gh pr close <PR> -R WenyuChiou/agent-board`) and, once a slot is free, open a new pull request from the same branch. Do not reopen the closed one: it would keep its first place in the queue.
 
 ## 7. Mark it ready
 
@@ -169,7 +171,7 @@ gh pr view <PR> -R WenyuChiou/agent-board --comments
 node scripts/pr-check.mjs --pr <PR>      # also prints the latest Review: verdict and whether it is for your head
 ```
 
-`Review: REQUEST CHANGES <sha>` lists findings. Fix each finding, merge `main` (step 9), run preflight again and update Checks, push, answer each finding in a comment that names the commit that fixed it, then comment `Ready for review <new full head sha>`. How many review rounds there are, and what happens after the second REQUEST CHANGES, are in [docs/dev/team-process.md, From claim to merge](dev/team-process.md#from-claim-to-merge). After `Review: APPROVE <sha>`, push nothing unless asked. A later push needs a new verdict unless it only merges `main` without conflicts and with nothing else in the merge commit (CONTRIBUTING rules 4 and 9).
+`Review: REQUEST CHANGES <sha>` lists findings. Fix each finding (merge `main` too, step 9, only if GitHub reports a conflict), run preflight again and update Checks, push, answer each finding in a comment that names the commit that fixed it, then comment `Ready for review <new full head sha>`. How many review rounds there are, and what happens after the second REQUEST CHANGES, are in [docs/dev/team-process.md, From claim to merge](dev/team-process.md#from-claim-to-merge). After `Review: APPROVE <sha>`, push nothing unless asked. A later push needs a new verdict unless it only merges `main` without conflicts and with nothing else in the merge commit (CONTRIBUTING rules 4 and 9).
 
 A question goes on the issue, not on the pull request and not in a chat:
 
@@ -180,7 +182,9 @@ gh issue edit <N> -R WenyuChiou/agent-board --add-label question
 
 The answer comes in the same issue, starting `Answer:`. Read it with `gh issue view <N> -R WenyuChiou/agent-board --comments`.
 
-## 9. Keep the branch current
+## 9. Merge `main` when there is a conflict
+
+A pull request that is only behind `main` merges as it is once its checks pass; do not merge `main` for that. Merge it only when GitHub reports a conflict ([docs/dev/team-process.md, Merge order](dev/team-process.md#merge-order)), or when a reviewer asks for it:
 
 ```sh
 git pull --ff-only          # after step 6: the reviewer may have merged main into your branch
@@ -201,7 +205,7 @@ The rebuild also removes a part that `main` no longer has, and `add -A` stages t
 
 When `scripts/build-board.ts` says a bundle part is over 1,000,000 bytes, do not remove or shorten features to make it fit. Add a split point to `PART_STARTS` in `scripts/build-board.ts` and rebuild, or say so on your issue and the maintainer adds it.
 
-Fragments in `changelog.d/` do not conflict, since each pull request adds its own file. Run the checks again and push. Once the pull request is Ready, merge `main` only while answering `Review: REQUEST CHANGES`, or when the maintainer comments that `main` moved ([docs/dev/team-process.md, Merge order](dev/team-process.md#merge-order)); after that push, comment `Ready for review <new full head sha>`. After `Review: APPROVE`, leave merging `main` to the reviewer.
+Fragments in `changelog.d/` do not conflict, since each pull request adds its own file. Run the checks again and push. Once the pull request is Ready, merge `main` only while answering `Review: REQUEST CHANGES` if a conflict needs it, or when GitHub reports a conflict ([docs/dev/team-process.md, Merge order](dev/team-process.md#merge-order)), not because `main` moved; after that push, comment `Ready for review <new full head sha>`. After `Review: APPROVE`, leave merging `main` to the reviewer.
 
 ## 10. After the merge, or handing over
 
@@ -211,14 +215,14 @@ If you stop before the work is done, push your branch, then:
 
 ```sh
 gh issue comment <N> -R WenyuChiou/agent-board --body "Handover: <branch>, done: …, left: …, checks run: …"
-gh issue edit <N> -R WenyuChiou/agent-board --remove-label claimed
+gh issue edit <N> -R WenyuChiou/agent-board --remove-label claimed   # if you claimed it
 ```
 
 ## 11. Review and merge someone else's pull request
 
 With write access to this repository you may also review and merge pull requests you did not write ([CONTRIBUTING.md](../CONTRIBUTING.md#pull-requests) rules 8 and 9). If the owner names you in [Roles](../CONTRIBUTING.md#roles), a code-review subagent you run may also approve your own pull request, under the conditions in rule 8. In this step `<PR>` is the pull request you are reviewing, and `<N>` is each linked issue. Take one marked `Ready for review <sha>` that nobody is reviewing, and say so first:
 
-Start from the queue. `node scripts/review-queue.mjs` lists the pull requests waiting on a reviewer, smallest first, with how long each has waited since its `Ready for review <sha>`; then those that need `main` merged (a conflicted one gets no CI until it is), the approved ones, and those waiting on their author. Take the small ones first.
+Start from the queue. `node scripts/review-queue.mjs` lists the pull requests waiting on a reviewer, smallest first, with how long each has waited since its `Ready for review <sha>`; then those with a conflict with `main` (a conflicted one gets no CI until `main` is merged; one that is only behind `main` is queued like any other), the approved ones, and those waiting on their author. Take the small ones first.
 
 ```sh
 node scripts/review-queue.mjs
