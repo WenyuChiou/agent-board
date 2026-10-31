@@ -1,0 +1,2 @@
+- **Page / Windows start** · On Windows the first page start no longer spends seconds in four PowerShell starts that read access lists: the server reuses the folder check of the command that started it and reads the new address file's access list with icacls, so one PowerShell start is left (#591).
+  Tests: `a cold Windows page start runs one PowerShell for the command and the server it starts together`, `a Windows server child reuses the folder its command checked and checks any other folder in full`.
